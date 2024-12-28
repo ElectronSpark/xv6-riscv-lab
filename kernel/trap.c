@@ -37,6 +37,8 @@ void
 usertrap(void)
 {
   int which_dev = 0;
+  uint64 fault_no, va;
+  pagetable_t pagetable;
 
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
@@ -50,7 +52,10 @@ usertrap(void)
   // save user program counter.
   p->trapframe->epc = r_sepc();
   
-  if(r_scause() == 8){
+  fault_no = r_scause();
+  switch (fault_no)
+  {
+  case 8:
     // system call
 
     if(killed(p))
@@ -65,12 +70,26 @@ usertrap(void)
     intr_on();
 
     syscall();
-  } else if((which_dev = devintr()) != 0){
-    // ok
-  } else {
-    printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
-    setkilled(p);
+    break;
+  case 15:
+    va = r_stval();
+    pagetable = p->pagetable;
+    if (uvmvalidate_w(pagetable, va) != 0) {
+      printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+      printf("            pgtbl=0x%lx\n", (uint64)pagetable);
+      setkilled(p);
+    }
+    break;
+  default:
+    if((which_dev = devintr()) != 0){
+      // ok
+    } else {
+      printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+      setkilled(p);
+    }
+    break;
   }
 
   if(killed(p))

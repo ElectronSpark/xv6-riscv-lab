@@ -13,6 +13,7 @@ void freerange(void *pa_start, void *pa_end);
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
+static uint16 __page_refcnt[TOTALPAGES] = { 0 };
 
 struct run {
   struct run *next;
@@ -35,8 +36,10 @@ freerange(void *pa_start, void *pa_end)
 {
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE)
+  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE) {
+    __page_refcnt[((uint64)p - KERNBASE) >> 12]++;
     kfree(p);
+  }
 }
 
 // Free the page of physical memory pointed at by pa,
@@ -47,9 +50,22 @@ void
 kfree(void *pa)
 {
   struct run *r;
+  uint64 page_idx;
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
+
+  page_idx = ((uint64)pa - KERNBASE) >> 12;
+  acquire(&kmem.lock);
+  if (__page_refcnt[page_idx] == 0) {
+    panic("kfree(): trying to free a freed page");
+  }
+  if (__page_refcnt[page_idx] > 1) {
+    __page_refcnt[page_idx]--;
+    release(&kmem.lock);
+    return;
+  }
+  release(&kmem.lock);
 
   // Fill with junk to catch dangling refs.
   memset(pa, 1, PGSIZE);
@@ -79,4 +95,18 @@ kalloc(void)
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
   return (void*)r;
+}
+
+// increase the reference count of a page by 1
+// return 0 if successful. return -1 if failed. 
+int
+page_refinc(void *physical)
+{
+  if ((uint64)physical < KERNBASE || (uint64)physical >= PHYSTOP) {
+    return -1;
+  }
+  acquire(&kmem.lock);
+  __page_refcnt[((uint64)physical - KERNBASE) >> 12]++;
+  release(&kmem.lock);
+  return 0;
 }

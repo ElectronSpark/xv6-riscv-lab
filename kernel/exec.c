@@ -15,7 +15,7 @@ int flags2perm(int flags)
     if(flags & 0x1)
       perm = PTE_X;
     if(flags & 0x2)
-      perm |= PTE_W;
+      perm |= PTE_W | PTE_RSW_w;
     return perm;
 }
 
@@ -80,7 +80,7 @@ exec(char *path, char **argv)
   // Use the rest as the user stack.
   sz = PGROUNDUP(sz);
   uint64 sz1;
-  if((sz1 = uvmalloc(pagetable, sz, sz + (USERSTACK+1)*PGSIZE, PTE_W)) == 0)
+  if((sz1 = uvmalloc(pagetable, sz, sz + (USERSTACK+1)*PGSIZE, PTE_W | PTE_RSW_w)) == 0)
     goto bad;
   sz = sz1;
   uvmclear(pagetable, sz-(USERSTACK+1)*PGSIZE);
