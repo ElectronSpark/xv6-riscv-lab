@@ -63,6 +63,7 @@ void            ramdiskrw(struct buf*);
 void*           kalloc(void);
 void            kfree(void *);
 int             page_refinc(void *);
+int             page_refcnt(void *);
 void            kinit(void);
 
 // log.c

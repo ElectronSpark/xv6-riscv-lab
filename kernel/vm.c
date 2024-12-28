@@ -357,14 +357,12 @@ uvmclear(pagetable_t pagetable, uint64 va)
   *pte &= ~PTE_U;
 }
 
-// validate write operation to a user page
-// return 0 if validated
-// return -1 if failed to validate
 int
 uvmvalidate_w(pagetable_t pagetable, uint64 va)
 {
   pte_t *pte;
   uint64 pa, flags;
+  int refcnt;
   void *mem;
   va = PGROUNDDOWN(va);
   if(va >= MAXVA)
@@ -376,13 +374,20 @@ uvmvalidate_w(pagetable_t pagetable, uint64 va)
   if (*pte & PTE_W) {
     return 0;
   }
-  flags = PTE_FLAGS(*pte) | PTE_W;
   pa = PTE2PA(*pte);
+  refcnt = page_refcnt((void *)pa);
+  if (refcnt < 1) {
+    return -1;
+  } else if (refcnt == 1) {
+    *pte |= PTE_W;
+    return 0;
+  }
   if ((mem= kalloc()) == 0) {
     return -1;
   }
   memmove(mem, (char*)pa, PGSIZE);
-  *pte = PA2PTE(mem) | flags | PTE_V;
+  flags = PTE_FLAGS(*pte) | PTE_W;
+  *pte = PA2PTE(mem) | flags;
   kfree((void *)pa);
   return 0;
 }
