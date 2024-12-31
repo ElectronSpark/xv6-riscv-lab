@@ -14,6 +14,12 @@ plicinit(void)
   // set desired IRQ priorities non-zero (otherwise disabled).
   *(uint32*)(PLIC + UART0_IRQ*4) = 1;
   *(uint32*)(PLIC + VIRTIO0_IRQ*4) = 1;
+
+  // PCIE IRQs are 32 to 35
+  for(int irq = 1; irq < 0x35; irq++){
+    // TODO
+    *(uint32*)(PLIC + irq*4) = 1;
+  }
 }
 
 void
@@ -27,6 +33,9 @@ plicinithart(void)
 
   // set this hart's S-mode priority threshold to 0.
   *(uint32*)PLIC_SPRIORITY(hart) = 0;
+
+  // hack to get at next 32 IRQs for e1000
+  *(uint32*)(PLIC_SENABLE(hart)+4) = 0xffffffff;
 }
 
 // ask the PLIC what interrupt we should serve.

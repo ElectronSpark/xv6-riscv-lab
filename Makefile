@@ -31,7 +31,11 @@ OBJS = \
   $K/kernelvec.o \
   $K/plic.o \
   $K/virtio_disk.o	\
-  $K/backtrace.o
+  $K/backtrace.o	\
+  $K/e1000.o	\
+  $K/net.o	\
+  $K/pci.o	\
+  $K/sysnet.o
 
 OBJS_KCSAN = \
   $K/start.o \
