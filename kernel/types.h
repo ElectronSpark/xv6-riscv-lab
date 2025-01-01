@@ -13,6 +13,7 @@ typedef unsigned long uint64;
 typedef uint64 pde_t;
 
 typedef typeof(sizeof(0)) size_t;
+typedef enum { false, true } bool;
 
 #ifndef NULL
 #define NULL ((void*)0)
