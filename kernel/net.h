@@ -1,6 +1,8 @@
 //
 // packet buffer management
 //
+#ifndef __KERNEL_NET_H
+#define __KERNEL_NET_H
 
 #define MBUF_SIZE              2048
 #define MBUF_DEFAULT_HEADROOM  128
@@ -171,3 +173,5 @@ struct dns_data {
   uint32 ttl;
   uint16 len;
 } __attribute__((packed));
+
+#endif        /* __KERNEL_NET_H */

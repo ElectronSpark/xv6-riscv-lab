@@ -2,6 +2,8 @@
 // E1000 hardware definitions: registers and DMA ring format.
 // from the Intel 82540EP/EM &c manual.
 //
+#ifndef __KERNEL_E1000_DEV_H
+#define __KERNEL_E1000_DEV_H
 
 /* Registers */
 #define E1000_CTL      (0x00000/4)  /* Device Control Register - RW */
@@ -125,3 +127,4 @@ struct rx_desc
   uint16 special;
 };
 
+#endif          /* __KERNEL_E1000_DEV_H */

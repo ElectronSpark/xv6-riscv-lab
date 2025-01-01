@@ -1,3 +1,6 @@
+#ifndef __XV6_USER_DEFINES_H
+#define __XV6_USER_DEFINES_H
+
 struct stat;
 
 // system calls
@@ -41,3 +44,5 @@ void *memcpy(void *, const void *, uint);
 // umalloc.c
 void* malloc(uint);
 void free(void*);
+
+#endif              /* __XV6_USER_DEFINES_H */

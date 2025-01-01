@@ -1,3 +1,6 @@
+#ifndef __KERNEL_PARAM_H
+#define __KERNEL_PARAM_H
+
 #ifdef LAB_FS
 #define NPROC        10  // maximum number of processes
 #else
@@ -30,4 +33,4 @@
 #define USERSTACK    1     // user stack pages
 #endif
 
-
+#endif              /* __KERNEL_PARAM_H */
