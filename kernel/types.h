@@ -12,4 +12,10 @@ typedef unsigned long uint64;
 
 typedef uint64 pde_t;
 
+typedef typeof(sizeof(0)) size_t;
+
+#ifndef NULL
+#define NULL ((void*)0)
+#endif      /* NULL */
+
 #endif      /* __KERNEL_TYPES_H */
