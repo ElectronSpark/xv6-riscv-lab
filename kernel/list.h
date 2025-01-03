@@ -2,6 +2,7 @@
 #define __BI_DIRECTIONAL_H
 
 #include "types.h"
+#include "list_type.h"
 
 #ifndef NULL
 #define NULL ((void *)0)
@@ -20,33 +21,6 @@
     const typeof(((type *)NULL)->member) *__mptr = (ptr);   \
     (type *)((void *)__mptr - offsetof(type, member)); })
 #endif          /* container_of */
-
-
-// definition of a bi-directional list node entry
-// a list entry can be the head or a node of a list.
-//
-// when it's the head of a list:
-//   - prev:
-//       points to the last node entry of the list
-//       points to itself when in an empty list
-//   - next:
-//       points to the first node entry of the list
-//       points to itself when in an empty list
-//
-// when it's the node of a list:
-//   - prev:
-//       points to the next node entry of the list, or to the head entry of 
-//       the list if it's the last node.
-//       points to itself when not in a list
-//   - next:
-//       points to the previous node entry of the list, or to the head entry of
-//       the list if it's the first node.
-//       points to itself when not in a list
-typedef struct list_node {
-    struct list_node *prev;
-    struct list_node *next;
-} list_node_t;
-
 
 // initialize a new node entry, making it an empty head or detached node
 static inline void list_entry_init(list_node_t *entry) {
