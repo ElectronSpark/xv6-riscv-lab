@@ -19,4 +19,18 @@ typedef enum { false, true } bool;
 #define NULL ((void*)0)
 #endif      /* NULL */
 
+// get the offset of an entry in bytes from its parent type
+#ifndef offsetof
+#define offsetof(type, member) ({       \
+    const type *__pptr = NULL;          \
+    (void *)&(__pptr->member) - NULL; })
+#endif          /* offsetof */
+
+// given the address of an entry, get the address of its parent type
+#ifndef container_of
+#define container_of(ptr, type, member) ({                  \
+    const typeof(((type *)NULL)->member) *__mptr = (ptr);   \
+    (type *)((void *)__mptr - offsetof(type, member)); })
+#endif          /* container_of */
+
 #endif      /* __KERNEL_TYPES_H */

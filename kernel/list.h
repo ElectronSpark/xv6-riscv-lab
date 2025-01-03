@@ -4,30 +4,11 @@
 #include "types.h"
 #include "list_type.h"
 
-#ifndef NULL
-#define NULL ((void *)0)
-#endif          /* NULL */
-
-// get the offset of an entry in bytes from its parent type
-#ifndef offsetof
-#define offsetof(type, member) ({       \
-    const type *__pptr = NULL;          \
-    (void *)&(__pptr->member) - NULL; })
-#endif          /* offsetof */
-
-// given the address of an entry, get the address of its parent type
-#ifndef container_of
-#define container_of(ptr, type, member) ({                  \
-    const typeof(((type *)NULL)->member) *__mptr = (ptr);   \
-    (type *)((void *)__mptr - offsetof(type, member)); })
-#endif          /* container_of */
-
 // initialize a new node entry, making it an empty head or detached node
 static inline void list_entry_init(list_node_t *entry) {
     entry->next = entry;
     entry->prev = entry;
 }
-
 
 /* <--- macros manipulating entries ---> */
 #define LIST_NEXT_ENTRY(entry) ((entry)->next)
