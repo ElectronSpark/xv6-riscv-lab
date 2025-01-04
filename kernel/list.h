@@ -345,20 +345,6 @@ static inline list_node_t *list_entry_pop(list_node_t *head)
             !LIST_ENTRY_IS_HEAD((head), (pos));                             \
             (pos) = (tmp), (tmp) = LIST_NEXT_ENTRY(tmp))
 
-#if 0
-#define list_foreach_node_safe(head, pos, tmp, member)                      \
-    for (   (pos) = container_of(LIST_FIRST_ENTRY(head), type, member),     \
-                (tmp) = LIST_NEXT_ENTRY((&((pos)->member)));                \
-            !LIST_ENTRY_IS_HEAD((head), (&((pos)->member)));                \
-            (pos) = container_of((tmp), typeof(*pos), member),              \
-                (tmp) = LIST_NEXT_ENTRY(tmp))
-
-#define list_foreach_node_continue_safe(head, pos, tmp, member)             \
-    for (   (tmp) = LIST_NEXT_ENTRY((&((pos)->member)));                    \
-            !LIST_ENTRY_IS_HEAD((head), (&((pos)->member)));                \
-            (pos) = container_of((tmp), typeof(*pos), member),              \
-                (tmp) = LIST_NEXT_ENTRY(tmp))
-#else
 #define list_foreach_node_safe(head, pos, tmp, member)                      \
     for (   (pos) = LIST_FIRST_NODE(head, typeof(*pos), member),            \
                 (tmp) = LIST_NEXT_NODE(head, pos, member);                  \
@@ -369,9 +355,6 @@ static inline list_node_t *list_entry_pop(list_node_t *head)
     for (   (tmp) = LIST_NEXT_NODE(head, pos, member);                      \
             pos != NULL;                                                    \
             (pos) = (tmp), (tmp) = LIST_NEXT_NODE(head, pos, member))
-#endif
-
-
 
 #define list_foreach_entry_inv(head, pos)                                   \
     for (   (pos) = LIST_LAST_ENTRY(head);                                  \
@@ -393,62 +376,6 @@ static inline list_node_t *list_entry_pop(list_node_t *head)
             !LIST_ENTRY_IS_HEAD((head), (pos));                             \
             (pos) = (tmp), (tmp) = LIST_PREV_ENTRY(tmp))
 
-#if 0
-#define list_foreach_node_inv_safe(head, pos, tmp, member)                  \
-    for (   (pos) = container_of(LIST_LAST_ENTRY(head), type, member),      \
-                (tmp) = LIST_PREV_ENTRY((&((pos)->member)));                \
-            !LIST_ENTRY_IS_HEAD((head), (&((pos)->member)));                \
-            (pos) = container_of((tmp), typeof(*pos), member),              \
-                (tmp) = LIST_PREV_ENTRY(tmp))
-
-#define list_foreach_node_inv_continue_safe(head, pos, tmp, member)         \
-    for (   (tmp) = LIST_PREV_ENTRY((&((pos)->member)));                    \
-            !LIST_ENTRY_IS_HEAD((head), (&((pos)->member)));                \
-            (pos) = container_of((tmp), typeof(*pos), member),              \
-                (tmp) = LIST_PREV_ENTRY(tmp))
-
-
-#define list_find_next(head, last, member, __match_cond) ({                 \
-    list_node_t *__list_tmp_ptr = NULL;                                     \
-    list_node_t *__next_list_entry = LIST_NEXT_ENTRY(&((last)->member))     \
-    typeof(*last) *pos =                                                    \
-        container_of(__next_list_entry, typeof(*last), member);             \
-    list_foreach_node_continue_safe(head, pos, __list_tmp_ptr, member) {    \
-        if (__match_cond)                                                   \
-            break;                                                          \
-    }                                                                       \
-    LIST_ENTRY_IS_HEAD((head), (&((pos)->member))) ? NULL : pos; })
-
-#define list_find_first(head, type, member, __match_cond) ({                \
-    list_node_t *__list_tmp_ptr = NULL;                                     \
-    type *pos = NULL;                                                       \
-    list_foreach_node_safe(head, pos, __list_tmp_ptr, member) {             \
-        if (__match_cond)                                                   \
-            break;                                                          \
-    }                                                                       \
-    LIST_ENTRY_IS_HEAD((head), (&((pos)->member))) ? NULL : pos; })
-
-#define list_find_prev(head, last, member, __match_cond) ({                 \
-    list_node_t *__list_tmp_ptr = NULL;                                     \
-    list_node_t *__next_list_entry = LIST_PREV_ENTRY(&((last)->member))     \
-    typeof(*last) *pos =                                                    \
-        container_of(__next_list_entry, typeof(*last), member);             \
-    list_foreach_node_inv_continue_safe(head,                               \
-            pos, __list_tmp_ptr, member) {                                  \
-        if (__match_cond)                                                   \
-            break;                                                          \
-    }                                                                       \
-    LIST_ENTRY_IS_HEAD((head), (&((pos)->member))) ? NULL : pos; })
-
-#define list_find_last(head, type, member, __match_cond) ({                 \
-    list_node_t *__list_tmp_ptr = NULL;                                     \
-    type *pos = NULL;                                                       \
-    list_foreach_node_inv_safe(head, pos, __list_tmp_ptr, member) {         \
-        if (__match_cond)                                                   \
-            break;                                                          \
-    }                                                                       \
-    LIST_ENTRY_IS_HEAD((head), (&((pos)->member))) ? NULL : pos; })
-#else
 #define list_foreach_node_inv_safe(head, pos, tmp, member)                  \
     for (   (pos) = LIST_LAST_NODE(head, typeof(*pos), member),             \
                 (tmp) = LIST_PREV_NODE(head, pos, member);                  \
@@ -460,52 +387,36 @@ static inline list_node_t *list_entry_pop(list_node_t *head)
             pos != NULL;                                                    \
             (pos) = (tmp), (tmp) = LIST_PREV_NODE(head, pos, member))
 
-#define list_find_next(head, last, member, __match_cond) ({                 \
+/* <- find node in a list  -> */
+
+#define list_find_next(head, last, member, ret, __match_cond) ({            \
     typeof(*(last)) *__list_tmp_ptr = NULL;                                 \
-    typeof(*(last)) *pos = LIST_NEXT_NODE(head, (last), member);            \
-    if ((pos) == NULL) {                                                    \
-        pos = LIST_FIRST_NODE(head, typeof(*(last)), member);               \
+    ret = LIST_NEXT_NODE(head, (last), member);                             \
+    if ((ret) == NULL) {                                                    \
+        ret = LIST_FIRST_NODE(head, typeof(*(last)), member);               \
     }                                                                       \
-    list_foreach_node_continue_safe(head, pos, __list_tmp_ptr, member) {    \
+    list_foreach_node_continue_safe(head, ret, __list_tmp_ptr, member) {    \
         if (__match_cond)                                                   \
             break;                                                          \
     }                                                                       \
-    pos; })
+    ret; })
 
-#define list_find_first(head, type, member, __match_cond)                   \
-    list_find_next(head, (type *)NULL, member, __match_cond)
+#define list_find_first(head, type, member, ret, __match_cond)              \
+    list_find_next(head, (type *)NULL, member, ret, __match_cond)
 
-// #define list_find_first(head, type, member, __match_cond) ({                \
-//     type *__list_tmp_ptr = NULL;                                            \
-//     type *pos = NULL;                                                       \
-//     list_foreach_node_safe(head, pos, __list_tmp_ptr, member) {             \
-//         if (__match_cond)                                                   \
-//             break;                                                          \
-//     }                                                                       \
-//     pos; })
-
-#define list_find_prev(head, last, member, __match_cond) ({                 \
+#define list_find_prev(head, last, member, ret, __match_cond) ({            \
     typeof(*(last)) *__list_tmp_ptr = NULL;                                 \
-    typeof(*(last)) *pos = LIST_PREV_NODE(head, (last), member);            \
-    if ((pos) == NULL) {                                                    \
-        pos = LIST_LAST_NODE(head, typeof(*(last)), member);                \
+    ret = LIST_PREV_NODE(head, (last), member);                             \
+    if ((ret) == NULL) {                                                    \
+        ret = LIST_LAST_NODE(head, typeof(*(last)), member);                \
     }                                                                       \
-    list_foreach_node_inv_continue_safe(head, pos, __list_tmp_ptr, member) {\
+    list_foreach_node_inv_continue_safe(head, ret, __list_tmp_ptr, member) {\
         if (__match_cond)                                                   \
             break;                                                          \
     }                                                                       \
-    pos; })
+    ret; })
 
-#define list_find_last(head, type, member, __match_cond)                    \
-    list_find_prev(head, (type *)NULL, member, __match_cond)
-// #define list_find_last(head, type, member, __match_cond) ({                 \
-//     type *__list_tmp_ptr = NULL;                                            \
-//     type *pos = NULL;                                                       \
-//     list_foreach_node_inv_safe(head, pos, __list_tmp_ptr, member) {         \
-//         if (__match_cond)                                                   \
-//             break;                                                          \
-//     }                                                                       \
-//     pos; })
-#endif
+#define list_find_last(head, type, member, ret, __match_cond)               \
+    list_find_prev(head, (type *)NULL, member, ret, __match_cond)
 
 #endif          /* __BI_DIRECTIONAL_H */

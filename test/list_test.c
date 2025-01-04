@@ -281,7 +281,7 @@ void test_find_first_detach(list_node_t *head, int argc, int argv[]) {
     }
     
     for (int i = 0; i < argc; i++) {
-        node = list_find_first(head, test_node_t, entry, pos->val == argv[i]);
+        node = list_find_first(head, test_node_t, entry, node, node->val == argv[i]);
         if (node != NULL) {
             list_node_detach(node, entry);
             destroy_node(node);
@@ -325,7 +325,7 @@ void test_find_last_detach(list_node_t *head, int argc, int argv[]) {
     }
     
     for (int i = 0; i < argc; i++) {
-        node = list_find_last(head, test_node_t, entry, pos->val == argv[i]);
+        node = list_find_last(head, test_node_t, entry, node, node->val == argv[i]);
         if (node != NULL) {
             list_node_detach(node, entry);
             destroy_node(node);
@@ -368,11 +368,11 @@ void test_find_next_detach(list_node_t *head, int argc, int argv[]) {
         return;
     }
 
-    node = list_find_first(head, test_node_t, entry, pos->val == argv[0]);
+    node = list_find_first(head, test_node_t, entry, node, node->val == argv[0]);
     if (node == NULL) {
         return;
     }
-    node = list_find_next(head, node, entry, pos->val == argv[1]);
+    node = list_find_next(head, node, entry, node, node->val == argv[1]);
     if (node != NULL) {
         list_node_detach(node, entry);
         destroy_node(node);
@@ -430,11 +430,11 @@ void test_find_prev_detach(list_node_t *head, int argc, int argv[]) {
         return;
     }
 
-    node = list_find_last(head, test_node_t, entry, pos->val == argv[1]);
+    node = list_find_last(head, test_node_t, entry, node, node->val == argv[1]);
     if (node == NULL) {
         return;
     }
-    node = list_find_prev(head, node, entry, pos->val == argv[0]);
+    node = list_find_prev(head, node, entry, node, node->val == argv[0]);
     if (node != NULL) {
         list_node_detach(node, entry);
         destroy_node(node);
