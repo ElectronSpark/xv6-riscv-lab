@@ -126,7 +126,7 @@ fileread(struct file *f, uint64 addr, int n)
     iunlock(f->ip);
   } else if(f->type == FD_SOCK){
     r = sockread(f->sock, addr, n);
-  } {
+  } else {
     panic("fileread");
   }
 
