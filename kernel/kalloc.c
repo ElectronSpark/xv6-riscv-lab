@@ -8,6 +8,7 @@
 #include "spinlock.h"
 #include "riscv.h"
 #include "defs.h"
+#include "page.h"
 
 void freerange(void *pa_start, void *pa_end);
 
@@ -29,6 +30,7 @@ kinit()
 {
   initlock(&kmem.lock, "kmem");
   freerange(end, (void*)PHYSTOP);
+  page_buddy_init(PGROUNDUP((uint64)end), PHYSTOP);
 }
 
 // return the pointer pointing to the reference count

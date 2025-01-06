@@ -35,7 +35,8 @@ OBJS = \
   $K/e1000.o	\
   $K/net.o	\
   $K/pci.o	\
-  $K/sysnet.o
+  $K/sysnet.o	\
+  $K/page.o
 
 OBJS_KCSAN = \
   $K/start.o \
@@ -90,7 +91,7 @@ LD = $(TOOLPREFIX)ld
 OBJCOPY = $(TOOLPREFIX)objcopy
 OBJDUMP = $(TOOLPREFIX)objdump
 
-CFLAGS = -Wall -Werror -O -fno-omit-frame-pointer -ggdb -gdwarf-2
+CFLAGS = -Wall -Werror -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
 
 ifdef LAB
 LABUPPER = $(shell echo $(LAB) | tr a-z A-Z)
