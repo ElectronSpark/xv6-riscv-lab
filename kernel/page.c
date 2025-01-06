@@ -606,6 +606,14 @@ page_t *__pa_to_page(uint64 physical) {
     return NULL;
 }
 
+// Get the physical address of a page
+uint64 __page_to_pa(page_t *page) {
+    if (page == NULL) {
+        return 0;
+    }
+    return page->physical_address;
+}
+
 uint64 managed_page_base() {
     return __managed_start;
 }
