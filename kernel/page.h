@@ -13,6 +13,7 @@ page_t *page_alloc(uint64 order, uint64 flags);
 void page_free(page_t *page, uint64 order);
 int page_ref_inc(page_t *page);
 int page_ref_dec(page_t *page);
+int page_ref_count(page_t *page);
 
 void print_buddy_system_stat(void);
 

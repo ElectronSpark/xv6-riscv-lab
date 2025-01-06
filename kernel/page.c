@@ -232,6 +232,13 @@ static inline void __page_as_buddy_group(page_t *buddy_head, uint64 order) {
 // count value of the buddy pool by one.
 // will not do validity check here
 static inline void __push_page_buddy(buddy_pool_t *pool, page_t *page) {
+    if (LIST_IS_EMPTY(&pool->lru_head)) {
+        if (pool->count != 0) {
+            panic("__push_page_buddy");
+        }
+    } else if (pool->count == 0) {
+        panic("__push_page_buddy");
+    }
     list_node_push_back(&pool->lru_head, page, buddy.lru_entry);
     pool->count++;
 }
@@ -242,6 +249,9 @@ static inline void __push_page_buddy(buddy_pool_t *pool, page_t *page) {
 static inline page_t *__pop_page_buddy(buddy_pool_t *pool) {
     page_t *ret = list_node_pop_back(&pool->lru_head, page_t, buddy.lru_entry);
     if (ret == NULL) {
+        if (pool->count > 0) {
+            panic("__pop_page_buddy");
+        }
         return NULL;
     }
     pool->count--;
@@ -282,6 +292,11 @@ static inline page_t *__get_buddy_page(page_t *page) {
         // page size reach PAGE_BUDDY_MAX_ORDER doesn't have buddy
         return NULL;
     }
+    if (LIST_ENTRY_IS_DETACHED(&page->buddy.lru_entry)) {
+        // The buddy header page is not in the buddy pool, which means it's
+        // holding by someone else right now.
+        return NULL;
+    }
     buddy_base = __get_buddy_addr(page->physical_address, page->buddy.order);
     buddy_head = __pa_to_page(buddy_base);
     if (buddy_head == NULL || !PAGE_IS_BUDDY_GROUP_HEAD(buddy_head)
@@ -318,7 +333,7 @@ static inline page_t *__split_buddy(page_t *page) {
     order_after = page->buddy.order - 1;
     buddy = page + (1UL << order_after);
     __page_as_buddy(page, page, order_after);
-    __page_as_buddy(buddy, page, order_after);
+    __page_as_buddy(buddy, buddy, order_after);
     return buddy;
 }
 
@@ -328,18 +343,21 @@ static inline page_t *__split_buddy(page_t *page) {
 // splitting.
 // Return NULL if failed to merge
 static inline page_t *__merge_buddies(page_t *page1, page_t *page2) {
-    page_t *header;
+    page_t *header, *tail;
     uint64 order_after;
     if (!PAGES_ARE_BUDDIES(page1, page2)) {
         return NULL;
     }
     if (page1->physical_address < page2->physical_address) {
         header = page1;
+        tail = page2;
     } else {
         header = page2;
+        tail = page1;
     }
     order_after = page1->buddy.order + 1;
     __page_as_buddy(header, header, order_after);
+    __page_as_buddy(tail, header, order_after);
     return header;
 }
 
@@ -370,8 +388,10 @@ static page_t *__buddy_get(uint64 order, uint64 flags) {
     }
 
     // if don't find, try to get a bigger buddy page and split it.
-    for (tmp_order = order; tmp_order <= PAGE_BUDDY_MAX_ORDER; tmp_order++) {
-        pool = &__buddy_pools[order];
+    for (tmp_order = order + 1; tmp_order <= PAGE_BUDDY_MAX_ORDER; tmp_order++) {
+        pool = &__buddy_pools[tmp_order];
+        // pages managed by buddy system are hold by buddy system, so only need to
+        // acquire the lock of buddy pool to hold these pages.
         __buddy_pool_lock(pool);
         {
             page = __pop_page_buddy(pool);
@@ -595,7 +615,7 @@ int page_ref_dec(page_t *page) {
             panic("page_ref_dec");
         }
     }
-    return -1;
+    return 0;
 }
 
 // Get a page struct from its physical base address
@@ -612,6 +632,14 @@ uint64 __page_to_pa(page_t *page) {
         return 0;
     }
     return page->physical_address;
+}
+
+// Get the reference count of a page
+int page_ref_count(page_t *page) {
+    if (page == NULL) {
+        return -1;
+    }
+    return page->ref_count;
 }
 
 uint64 managed_page_base() {
