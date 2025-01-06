@@ -292,16 +292,16 @@ static inline page_t *__get_buddy_page(page_t *page) {
         // page size reach PAGE_BUDDY_MAX_ORDER doesn't have buddy
         return NULL;
     }
-    if (LIST_ENTRY_IS_DETACHED(&page->buddy.lru_entry)) {
-        // The buddy header page is not in the buddy pool, which means it's
-        // holding by someone else right now.
-        return NULL;
-    }
     buddy_base = __get_buddy_addr(page->physical_address, page->buddy.order);
     buddy_head = __pa_to_page(buddy_base);
     if (buddy_head == NULL || !PAGE_IS_BUDDY_GROUP_HEAD(buddy_head)
         || buddy_head->buddy.order != page->buddy.order) {
         // didn't find a complete buddy page.
+        return NULL;
+    }
+    if (LIST_ENTRY_IS_DETACHED(&buddy_head->buddy.lru_entry)) {
+        // The buddy header page is not in the buddy pool, which means it's
+        // holding by someone else right now.
         return NULL;
     }
     return buddy_head;
