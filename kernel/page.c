@@ -73,22 +73,22 @@ static inline bool __page_base_validity(uint64 physical);
 static inline bool __page_init_flags_validity(uint64 flags);
 static inline bool __page_flags_validity(uint64 flags);
 static inline bool __page_is_freeable(page_t *page);
-static inline void __init_page_t(page_t *page, uint64 physical, int ref_count,
+static inline void __page_init(page_t *page, uint64 physical, int ref_count,
                                  uint64 flags);
-static inline void __init_buddy_pool();
+static inline void __buddy_pool_init();
 static inline int __init_range_flags( uint64 pa_start, uint64 pa_end, 
                                       uint64 flags);
 static inline void __page_as_buddy( page_t *page, page_t *buddy_head,
                                     uint64 order);
 static inline void __page_as_buddy_group(page_t *buddy_head, uint64 order);
 static inline void __page_order_change_commit(page_t *page);
-static inline void __push_page_buddy(buddy_pool_t *pool, page_t *page);
-static inline page_t *__pop_page_buddy(buddy_pool_t *pool);
-static inline void __detach_page_buddy(buddy_pool_t *pool, page_t *page);
+static inline void __buddy_push_page(buddy_pool_t *pool, page_t *page);
+static inline page_t *__buddy_pop_page(buddy_pool_t *pool);
+static inline void __buddy_detach_page(buddy_pool_t *pool, page_t *page);
 static inline uint64 __get_buddy_addr(uint64 physical, uint32 order);
 static inline page_t *__get_buddy_page(page_t *page);
-static inline page_t *__split_buddy(page_t *page);
-static inline page_t *__merge_buddies(page_t *page1, page_t *page2);
+static inline page_t *__buddy_split(page_t *page);
+static inline page_t *__buddy_merge(page_t *page1, page_t *page2);
 static page_t *__buddy_get(uint64 order, uint64 flags);
 static int __buddy_put(page_t *page);
 
@@ -161,8 +161,8 @@ static inline bool __page_is_freeable(page_t *page) {
 
 // initialize a page descriptor
 // No validity check here
-static inline void __init_page_t(page_t *page, uint64 physical, int ref_count,
-                                 uint64 flags) {
+static inline void __page_init( page_t *page, uint64 physical, int ref_count,
+                                uint64 flags) {
     memset(page, 0, sizeof(page_t));
     page->physical_address = physical;
     page->flags = flags;
@@ -172,7 +172,7 @@ static inline void __init_page_t(page_t *page, uint64 physical, int ref_count,
 
 // initialize a buddy pool
 // no validity check here
-static inline void __init_buddy_pool() {
+static inline void __buddy_pool_init() {
     // __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
     for (int i = 0; i < PAGE_BUDDY_MAX_ORDER + 1; i++) {
         initlock(&(__buddy_pools[i].lock), "buddy_system_pool");
@@ -204,7 +204,7 @@ static inline int __init_range_flags( uint64 pa_start, uint64 pa_end,
         if (page == NULL) {
             return -1;
         }
-        __init_page_t(page, base, 0, flags);
+        __page_init(page, base, 0, flags);
     }
 
     return 0;
@@ -213,7 +213,7 @@ static inline int __init_range_flags( uint64 pa_start, uint64 pa_end,
 // initialize a page descriptor as a buddy page
 static inline void __page_as_buddy( page_t *page, page_t *buddy_head,
                                     uint64 order) {
-    __init_page_t(page, page->physical_address, 0, PAGE_FLAG_BUDDY);
+    __page_init(page, page->physical_address, 0, PAGE_FLAG_BUDDY);
     page->buddy.buddy_head = buddy_head;
     page->buddy.order = order;
     list_entry_init(&page->buddy.lru_entry);
@@ -231,13 +231,13 @@ static inline void __page_as_buddy_group(page_t *buddy_head, uint64 order) {
 // Attach a buddy head page into the corresponding buddy pool and increse the
 // count value of the buddy pool by one.
 // will not do validity check here
-static inline void __push_page_buddy(buddy_pool_t *pool, page_t *page) {
+static inline void __buddy_push_page(buddy_pool_t *pool, page_t *page) {
     if (LIST_IS_EMPTY(&pool->lru_head)) {
         if (pool->count != 0) {
-            panic("__push_page_buddy");
+            panic("__buddy_push_page");
         }
     } else if (pool->count == 0) {
-        panic("__push_page_buddy");
+        panic("__buddy_push_page");
     }
     list_node_push_back(&pool->lru_head, page, buddy.lru_entry);
     pool->count++;
@@ -246,11 +246,11 @@ static inline void __push_page_buddy(buddy_pool_t *pool, page_t *page) {
 // Pop a buddy page from a pool and return the page descriptor of the buddy
 // header. Return NULL if the given pool is empty
 // will not do validity check here
-static inline page_t *__pop_page_buddy(buddy_pool_t *pool) {
+static inline page_t *__buddy_pop_page(buddy_pool_t *pool) {
     page_t *ret = list_node_pop_back(&pool->lru_head, page_t, buddy.lru_entry);
     if (ret == NULL) {
         if (pool->count > 0) {
-            panic("__pop_page_buddy");
+            panic("__buddy_pop_page");
         }
         return NULL;
     }
@@ -261,9 +261,9 @@ static inline page_t *__pop_page_buddy(buddy_pool_t *pool) {
 // detach a buddy head page from a buddy pool and decrease the count value by
 // one.
 // will not do validity check here
-static inline void __detach_page_buddy(buddy_pool_t *pool, page_t *page) {
+static inline void __buddy_detach_page(buddy_pool_t *pool, page_t *page) {
     if (LIST_IS_EMPTY(&pool->lru_head)) {
-        panic("__detach_page_buddy");
+        panic("__buddy_detach_page");
     }
     pool->count--;
     list_node_detach(page, buddy.lru_entry);
@@ -320,7 +320,7 @@ static inline void __page_order_change_commit(page_t *page) {
 // immediately to avoid useless updates. Have to call __page_order_change_commit
 // after page splitting.
 // Return NULL if falied to split
-static inline page_t *__split_buddy(page_t *page) {
+static inline page_t *__buddy_split(page_t *page) {
     int order_after;
     page_t *buddy;
     if (!PAGE_IS_BUDDY_GROUP_HEAD(page)) {
@@ -342,7 +342,7 @@ static inline page_t *__split_buddy(page_t *page) {
 // to avoid useless updates. Have to call __page_order_change_commit after page
 // splitting.
 // Return NULL if failed to merge
-static inline page_t *__merge_buddies(page_t *page1, page_t *page2) {
+static inline page_t *__buddy_merge(page_t *page1, page_t *page2) {
     page_t *header, *tail;
     uint64 order_after;
     if (!PAGES_ARE_BUDDIES(page1, page2)) {
@@ -378,7 +378,7 @@ static page_t *__buddy_get(uint64 order, uint64 flags) {
     // acquire the lock of buddy pool to hold these pages.
     __buddy_pool_lock(pool);
     {
-        page = __pop_page_buddy(pool);
+        page = __buddy_pop_page(pool);
     }
     __buddy_pool_unlock(pool);
 
@@ -394,7 +394,7 @@ static page_t *__buddy_get(uint64 order, uint64 flags) {
         // acquire the lock of buddy pool to hold these pages.
         __buddy_pool_lock(pool);
         {
-            page = __pop_page_buddy(pool);
+            page = __buddy_pop_page(pool);
         }
         __buddy_pool_unlock(pool);
         // break the for loop when finding a free buddy page
@@ -412,7 +412,7 @@ static page_t *__buddy_get(uint64 order, uint64 flags) {
     // if found one, split it and return the header page from one of the 
     // splitted groups.
     do {
-        buddy = __split_buddy(page);
+        buddy = __buddy_split(page);
         if (buddy == NULL) {
             // There's no way the splitting operation here would fail. If it 
             // happens, then something wrong happened.
@@ -425,7 +425,7 @@ static page_t *__buddy_get(uint64 order, uint64 flags) {
         __page_order_change_commit(buddy);
         __buddy_pool_lock(pool);
         {
-            __push_page_buddy(pool, buddy);
+            __buddy_push_page(pool, buddy);
         }
         __buddy_pool_unlock(pool);
     } while (tmp_order > order);
@@ -434,7 +434,7 @@ found:
     page_count = 1UL << order;
     for (int i = 0; i < page_count; i++) {
         page->flags &= ~PAGE_FLAG_BUDDY;
-        __init_page_t(&page[i], page[i].physical_address, 1, flags);
+        __page_init(&page[i], page[i].physical_address, 1, flags);
     }
     return page;
 }
@@ -463,7 +463,7 @@ static int __buddy_put(page_t *page) {
             buddy = __get_buddy_page(page);
             if (buddy != NULL) {
                 // if buddy was found, pop the buddy for merge
-                __detach_page_buddy(pool, buddy);
+                __buddy_detach_page(pool, buddy);
             } 
         }
         __buddy_pool_unlock(pool);
@@ -472,14 +472,14 @@ static int __buddy_put(page_t *page) {
             __page_order_change_commit(page);
             __buddy_pool_lock(pool);
             {
-                __push_page_buddy(pool, page);
+                __buddy_push_page(pool, page);
             }
             __buddy_pool_unlock(pool);
             break;
         } else {
             // otherwise, merge them, then continue the for loop to find the next
             // buddy page group
-            page = __merge_buddies(page, buddy);
+            page = __buddy_merge(page, buddy);
             if (page == NULL) {
                 panic("__buddy_put(): Get NULL after merging pages");
             }
@@ -503,7 +503,7 @@ int page_buddy_init(uint64 pa_start, uint64 pa_end) {
         panic("page_buddy_init(): free range");
     }
 
-    __init_buddy_pool();
+    __buddy_pool_init();
     
     for (uint64 base = pa_start; base < pa_end; base += PAGE_SIZE) {
         page_t *page = __pa_to_page(base);
