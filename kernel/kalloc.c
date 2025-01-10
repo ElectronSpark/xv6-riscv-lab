@@ -25,7 +25,7 @@ int
 page_refinc(void *physical)
 {
   page_t *page = __pa_to_page((uint64)physical);
-  if (page_ref_inc(page) < 0) {
+  if (__page_ref_inc(page) < 0) {
     return -1;
   }
   return 0;
@@ -40,16 +40,6 @@ page_refcnt(void *physical)
   return page_ref_count(page);
 }
 
-void
-freerange(void *pa_start, void *pa_end)
-{
-  char *p;
-  p = (char*)PGROUNDUP((uint64)pa_start);
-  for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE) {
-    kfree(p);
-  }
-}
-
 // Free the page of physical memory pointed at by pa,
 // which normally should have been returned by a
 // call to kalloc().  (The exception is when
@@ -59,7 +49,7 @@ kfree(void *pa)
 {
   page_t *page = __pa_to_page((uint64)pa);
 
-  if (page_ref_dec(page) == -1) {
+  if (__page_ref_dec(page) == -1) {
     panic("kfree");
   }
 }
@@ -71,22 +61,12 @@ void *
 kalloc(void)
 {
   void *pa;
-  page_t *page = page_alloc(0, PAGE_FLAG_ANON);
+  page_t *page = __page_alloc(0, PAGE_FLAG_ANON);
   if (page == NULL) {
     return NULL;
   }
 
   pa = (void *)__page_to_pa(page);
-  // acquire(&kmem.lock);
-  // r = kmem.freelist;
-  // if(r)
-  //   kmem.freelist = r->next;
-  // refcnt = __refcnt_addr(r);
-  // if (refcnt == 0 || *refcnt > 0) {
-  //   panic("kalloc");
-  // }
-  // (*refcnt)++;
-  // release(&kmem.lock);
 
   if(pa)
     memset((char*)pa, 5, PGSIZE); // fill with junk

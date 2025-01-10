@@ -33,6 +33,9 @@
 #define PAGE_BUDDY_MAX_ORDER        10
 
 
+// for pointers to slab pools
+typedef struct slab_struct slab_t;
+
 typedef struct page_struct {
     uint64          physical_address;
     uint64          flags;
@@ -77,15 +80,15 @@ typedef struct page_struct {
         /* Buddy pages
             Pages managed by buddy system are free pages*/
         struct {
-            list_node_t             lru_entry;
-            struct page_struct      *buddy_head;
-            uint32                  order;
+            list_node_t            lru_entry;
+            struct page_struct     *buddy_head;
+            uint32                 order;
         } buddy;
         /* Slab pages
             Objects occupied less than one page are managed by slab system.
             One slab  */
         struct {
-            //
+            slab_t              *cache;     // pointing its slab descriptor
         } slab;
     };
 } page_t;

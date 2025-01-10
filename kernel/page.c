@@ -543,7 +543,7 @@ static inline int __page_ref_dec_unlocked(page_t *page) {
     return 0;
 }
 
-page_t *page_alloc(uint64 order, uint64 flags) {
+page_t *__page_alloc(uint64 order, uint64 flags) {
     if (!__page_flags_validity(flags)) {
         return NULL;
     }
@@ -555,7 +555,7 @@ page_t *page_alloc(uint64 order, uint64 flags) {
 
 // the base address of the page should be aligned to order
 // otherwise panic
-void page_free(page_t *page, uint64 order) {
+void __page_free(page_t *page, uint64 order) {
     uint64 count = 1UL << order;
     if (page == NULL) {
         return;
@@ -573,6 +573,31 @@ void page_free(page_t *page, uint64 order) {
     }
 }
 
+// helper function for __page_alloc. Convert the page struct to the base
+// address of the page
+void *page_alloc(uint64 order, uint64 flags) {
+    void *pa;
+    page_t *page = __page_alloc(0, flags);
+    if (page == NULL) {
+        return NULL;
+    }
+
+    pa = (void *)__page_to_pa(page);
+
+    if(pa)
+        memset((char*)pa, 5, PGSIZE); // fill with junk
+    else
+        panic("kalloc");
+    return (void*)pa;
+}
+
+// helper function for __page_free. Convert the base address of the page to be
+// free to page struct
+void page_free(void *ptr, uint64 order) {
+    page_t *page = __pa_to_page((uint64)ptr);
+    __page_free(page, order);
+}
+
 void page_lock_aqcuire(page_t *page) {
     if (page == NULL) {
         return;
@@ -587,7 +612,7 @@ void page_lock_release(page_t *page) {
     release(&page->lock);
 }
 
-int page_ref_inc(page_t *page) {
+int __page_ref_inc(page_t *page) {
     int ret = 0;
     if (page == NULL) {
         return -1;
@@ -600,7 +625,7 @@ int page_ref_inc(page_t *page) {
     return ret;
 }
 
-int page_ref_dec(page_t *page) {
+int __page_ref_dec(page_t *page) {
     int ret = 0;
     if (page == NULL) {
         return -1;
@@ -616,6 +641,18 @@ int page_ref_dec(page_t *page) {
         }
     }
     return 0;
+}
+
+// helper function to __page_ref_inc
+int page_ref_inc(void *ptr) {
+    page_t *page = __pa_to_page((uint64)ptr);
+    return __page_ref_inc(page);
+}
+
+// helper function to __page_ref_dec
+int page_ref_dec(void *ptr) {
+    page_t *page = __pa_to_page((uint64)ptr);
+    return __page_ref_inc(page);
 }
 
 // Get a page struct from its physical base address
