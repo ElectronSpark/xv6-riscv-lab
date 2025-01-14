@@ -105,3 +105,11 @@ strlen(const char *s)
   return n;
 }
 
+char *
+strcat(char *dest, const char *src)
+{
+  int n = strlen(dest);
+  int m = strlen(src);
+  strncpy(dest + n, src, m);
+  return dest;
+}

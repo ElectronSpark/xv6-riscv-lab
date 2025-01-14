@@ -585,9 +585,9 @@ void *page_alloc(uint64 order, uint64 flags) {
     pa = (void *)__page_to_pa(page);
 
     if(pa)
-        memset((char*)pa, 5, PGSIZE); // fill with junk
+        memset((char*)pa, 5, PGSIZE << order); // fill with junk
     else
-        panic("kalloc");
+        panic("page_alloc");
     return (void*)pa;
 }
 
@@ -641,6 +641,13 @@ int __page_ref_dec(page_t *page) {
         }
     }
     return 0;
+}
+
+// return the reference count of a page
+// return -1 if failed
+int page_refcnt(void *physical) {
+  page_t *page = __pa_to_page((uint64)physical);
+  return page_ref_count(page);
 }
 
 // helper function to __page_ref_inc

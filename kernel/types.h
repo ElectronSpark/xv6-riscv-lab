@@ -12,8 +12,12 @@ typedef unsigned long uint64;
 
 typedef uint64 pde_t;
 
+#ifndef size_t
 typedef typeof(sizeof(0)) size_t;
+#endif              /* size_t */
+#ifndef bool
 typedef enum { false, true } bool;
+#endif              /* bool */
 
 #ifndef NULL
 #define NULL ((void*)0)

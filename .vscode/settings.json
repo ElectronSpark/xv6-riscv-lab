@@ -1,0 +1,24 @@
+{
+    "files.associations": {
+        "cstdlib": "cpp",
+        "array": "cpp",
+        "compare": "cpp",
+        "functional": "cpp",
+        "ratio": "cpp",
+        "tuple": "cpp",
+        "type_traits": "cpp",
+        "utility": "cpp",
+        "cstddef": "cpp",
+        "list.h": "c",
+        "typeinfo": "c",
+        "system_error": "c",
+        "types.h": "c",
+        "memlayout.h": "c",
+        "page.h": "c",
+        "defs.h": "c",
+        "param.h": "c",
+        "riscv.h": "c",
+        "page_type.h": "c",
+        "spinlock.h": "c"
+    }
+}

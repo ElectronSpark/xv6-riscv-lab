@@ -1,6 +1,10 @@
 #ifndef __KERNEL_DEFS_H
 #define __KERNEL_DEFS_H
 
+#ifndef size_t
+typedef typeof(sizeof(0)) size_t;
+#endif              /* size_t */
+
 struct buf;
 struct context;
 struct file;
@@ -67,9 +71,9 @@ void            ramdiskrw(struct buf*);
 // kalloc.c
 void*           kalloc(void);
 void            kfree(void *);
-int             page_refinc(void *);
-int             page_refcnt(void *);
 void            kinit(void);
+void*           kmm_alloc(size_t);
+void            kmm_free(void *);
 
 // log.c
 void            initlog(int, struct superblock*);
@@ -139,6 +143,7 @@ char*           safestrcpy(char*, const char*, int);
 int             strlen(const char*);
 int             strncmp(const char*, const char*, uint);
 char*           strncpy(char*, const char*, int);
+char *          strcat(char *dest, const char *src);
 
 // syscall.c
 void            argint(int, int*);

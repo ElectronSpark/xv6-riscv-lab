@@ -18,4 +18,4 @@ user/usys.S
 .gdbinit
 compile_commands.json
 .cache
-kernel/lwip*/*
+kernel/lwip

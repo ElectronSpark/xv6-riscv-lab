@@ -36,7 +36,8 @@ OBJS = \
   $K/net.o	\
   $K/pci.o	\
   $K/sysnet.o	\
-  $K/page.o
+  $K/page.o	\
+  $K/slab.o
 
 OBJS_KCSAN = \
   $K/start.o \
