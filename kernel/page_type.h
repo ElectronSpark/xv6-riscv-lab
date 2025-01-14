@@ -88,7 +88,7 @@ typedef struct page_struct {
             Objects occupied less than one page are managed by slab system.
             One slab  */
         struct {
-            slab_t              *cache;     // pointing its slab descriptor
+            slab_t              *slab;     // pointing its slab descriptor
         } slab;
     };
 } page_t;

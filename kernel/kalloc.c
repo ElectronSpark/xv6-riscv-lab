@@ -9,41 +9,73 @@
 #include "riscv.h"
 #include "defs.h"
 #include "page.h"
+#include "slab.h"
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
+static slab_cache_t __kmm_slab_cache[SLAB_CACHE_NUMS][1];
+static char __kmm_slab_names[SLAB_CACHE_NUMS][32] = { 0 };
+
+static inline void __init_kmm_slab_name(int idx, size_t bytes) {
+  char num[32] = { '\0' };
+  int num_idx = 29;
+  while (bytes != 0) {
+    num_idx--;
+    int rem = bytes % 10;
+    num[num_idx] = '0' + rem;
+    bytes /= 10;
+  }
+
+  strcat(__kmm_slab_names[idx], &num[num_idx]);
+}
+
 void
 kinit()
 {
+  size_t obj_size = SLAB_OBJ_MIN_SIZE;
   page_buddy_init(PGROUNDUP((uint64)end), PHYSTOP);
-}
-
-// increase the reference count of a page by 1
-// return 0 if successful. return -1 if failed. 
-int
-page_refinc(void *physical)
-{
-  page_t *page = __pa_to_page((uint64)physical);
-  if (__page_ref_inc(page) < 0) {
-    return -1;
+  for (int i = 0; i < SLAB_CACHE_NUMS; i++) {
+    __init_kmm_slab_name(i, obj_size);
+    if (slab_cache_init(__kmm_slab_cache[i], __kmm_slab_names[i], obj_size,
+        SLAB_FLAG_EMBEDDED | SLAB_FLAG_STATIC) != 0) {
+          printf("failed to initialize kmm slab: %s\n", __kmm_slab_names[i]);
+          panic("kinit");
+    }
+    obj_size *= 2;
   }
-  return 0;
 }
 
-// return the reference count of a page
-// return -1 if failed
-int
-page_refcnt(void *physical)
-{
-  page_t *page = __pa_to_page((uint64)physical);
-  return page_ref_count(page);
+// allocate memory of size bytes from the pre-defined SLABs
+// return the base address of the object if success
+// return NULL if failed
+void *kmm_alloc(size_t size) {
+    int slab_idx = 0;
+    size_t obj_size = SLAB_OBJ_MIN_SIZE;
+
+    while (slab_idx < SLAB_CACHE_NUMS) {
+      if (obj_size >= size) {
+        break;
+      }
+      obj_size <<= 1;
+      slab_idx++;
+    }
+    if (obj_size > SLAB_OBJ_MAX_SIZE || slab_idx >= SLAB_CACHE_NUMS) {
+      return NULL;
+    }
+    return slab_alloc(__kmm_slab_cache[slab_idx]);
+}
+
+// free the memory allocated from kmm_alloc
+void kmm_free(void *ptr) {
+    slab_free(ptr);
 }
 
 // Free the page of physical memory pointed at by pa,
 // which normally should have been returned by a
 // call to kalloc().  (The exception is when
 // initializing the allocator; see kinit above.)
+// TODO: deprecated
 void
 kfree(void *pa)
 {
@@ -57,6 +89,7 @@ kfree(void *pa)
 // Allocate one 4096-byte page of physical memory.
 // Returns a pointer that the kernel can use.
 // Returns 0 if the memory cannot be allocated.
+// TODO: deprecated
 void *
 kalloc(void)
 {

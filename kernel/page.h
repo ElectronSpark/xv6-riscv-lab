@@ -15,6 +15,7 @@ void *page_alloc(uint64 order, uint64 flags);
 void page_free(void *ptr, uint64 order);
 int __page_ref_inc(page_t *page);
 int __page_ref_dec(page_t *page);
+int page_refcnt(void *physical);
 int page_ref_inc(void *ptr);
 int page_ref_dec(void *ptr);
 int page_ref_count(page_t *page);

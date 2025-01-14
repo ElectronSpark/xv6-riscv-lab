@@ -5,6 +5,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "fs.h"
+#include "page.h"
 
 /*
  * the kernel's page table.
@@ -332,7 +333,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     pa = PTE2PA(*pte);
     mem = (void *)pa;
     flags = PTE_FLAGS(*pte);
-    if (page_refinc(mem) != 0) {
+    if (page_ref_inc(mem) <= 0) {
       goto err;
     }
     if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
