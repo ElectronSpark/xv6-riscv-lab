@@ -20,7 +20,7 @@
 
 bool hlist_node_in_list(hlist_t *hlist, void *node);
 
-int hlist_init(hlist_t *hlist, uint64 bucket_cnt, size_t id_length, hlist_func_t *func);
+int hlist_init(hlist_t *hlist, uint64 bucket_cnt, hlist_func_t *func);
 
 ht_hash_t hlist_get_node_hash(hlist_t *hlist, void *node);
 

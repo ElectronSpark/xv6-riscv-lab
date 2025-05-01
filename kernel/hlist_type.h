@@ -74,7 +74,6 @@ typedef struct hlist_func_struct {
 typedef struct hlist_struct {
     uint64 bucket_cnt;
     uint64 elem_cnt;
-    size_t id_length;
     hlist_func_t func;
     hlist_bucket_t buckets[0];
 } hlist_t;
