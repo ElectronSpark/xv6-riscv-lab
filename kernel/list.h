@@ -193,6 +193,17 @@ static inline void list_entry_insert(list_node_t *prev, list_node_t *entry) {
     next->prev = entry;
 }
 
+// replace a list entry with another entry, and initialize the old entry.
+static inline void list_entry_replace(list_node_t *old, list_node_t *new) {
+    if (old == NULL || new == NULL) {
+        return;
+    }
+    *new = *old;
+    old->prev->next = new;
+    old->next->prev = new;
+    list_entry_init(old);
+}
+
 // push a node into the start of a list
 static inline void list_entry_push_back(list_node_t *head, list_node_t *entry)
 {

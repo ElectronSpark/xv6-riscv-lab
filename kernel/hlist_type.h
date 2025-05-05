@@ -60,6 +60,8 @@ typedef void *(*hlist_get_node_func_t)(hlist_entry_t*);
 // Abstraction function to get the Hash list entry of a node
 //
 // Get the address of a hash list entry giving the node it's in.
+// This function needs to check if a node is invalid and return NULL if that's
+// the case.
 typedef hlist_entry_t *(*hlist_get_entry_func_t)(void*);
 
 // abstract methods of a hash list
@@ -73,7 +75,7 @@ typedef struct hlist_func_struct {
 // Hash List structure.
 typedef struct hlist_struct {
     uint64 bucket_cnt;
-    uint64 elem_cnt;
+    int64 elem_cnt;
     hlist_func_t func;
     hlist_bucket_t buckets[0];
 } hlist_t;

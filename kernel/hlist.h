@@ -11,11 +11,22 @@
 // The maximun number of buckets in a hash list
 #define HLIST_BUCKET_CNT_MAX 0xffffUL
 
-
+// To check if a hash bucket is empty
 #define HLIST_EMPTY(hlist)  ({  \
     (hlist) == NULL             \
     || (hlist)->elem_cnt == 0;  \
 })
+
+// To check is a hash list entry is in a bucket
+#define HLIST_ENTRY_ATTACHED(entry) (!!((entry)->bucket))
+
+// initialize hash list entry
+static inline void hlist_entry_init(hlist_entry_t *entry) {
+    if (entry) {
+        entry->bucket = NULL;
+        list_entry_init(&entry->list_entry);
+    }
+}
 
 
 bool hlist_node_in_list(hlist_t *hlist, void *node);
@@ -28,9 +39,7 @@ void *hlist_get(hlist_t *hlist, void *node);
 
 void *hlist_put(hlist_t *hlist, void *node);
 
-void hlist_remove(hlist_t *hlist, void *node);
-
-void *hlist_pop(hlist_t *hlist);
+void *hlist_pop(hlist_t *hlist, void *node);
 
 //
 #define hlist_foreach_bucket_continue(hlist, idx, bucket)           \
