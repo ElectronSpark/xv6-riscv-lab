@@ -1,7 +1,7 @@
 TOOLPREFIX :=
 EXTRAFLAGS :=		# add "-Wl,-verbose" to print linker script
-CFLAGS := -ggdb
-LDFLAGS :=
+CFLAGS := -ggdb -Wall
+LDFLAGS := -ggdb
 VALGRINDFLAGS :=
 CC := $(TOOLPREFIX)-gcc
 VALGRIND :=valgrind

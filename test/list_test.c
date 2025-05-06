@@ -92,7 +92,7 @@ list_node_t *make_list(const int arr[], int arr_length) {
 
 // compare a list and an array
 // if identical, return true. otherwise return false.
-bool compare_list_arr(list_node_t *head, const int const arr[], int arr_length) {
+bool compare_list_arr(list_node_t *head, const int arr[], int arr_length) {
     int idx = 0;
     test_node_t *pos, *tmp;
     list_foreach_node_safe(head, pos, tmp, entry) {
@@ -120,7 +120,7 @@ void print_list(list_node_t *head) {
     printf("]\n");
 }
 
-void print_array(const int const arr[], int arr_length) {
+void print_array(const int arr[], int arr_length) {
     int cnt = 0;
     printf("[");
     for (int i = 0; i < arr_length; i++) {
@@ -275,7 +275,6 @@ ADD_CASE_ARUMENTS(test_pop_back_3, {1, false});
 
 void test_find_first_detach(list_node_t *head, int argc, int argv[]) {
     test_node_t *node = NULL;
-    test_node_t *last = NULL;
     if (argc == 0) {
         return;
     }
@@ -319,7 +318,6 @@ ADD_CASE_ARUMENTS(test_find_first_detach_7, {5, 10});
 
 void test_find_last_detach(list_node_t *head, int argc, int argv[]) {
     test_node_t *node = NULL;
-    test_node_t *last = NULL;
     if (argc == 0) {
         return;
     }
@@ -363,7 +361,6 @@ ADD_CASE_ARUMENTS(test_find_last_detach_7, {5, 10});
 
 void test_find_next_detach(list_node_t *head, int argc, int argv[]) {
     test_node_t *node = NULL;
-    test_node_t *last = NULL;
     if (argc != 2) {
         return;
     }
@@ -425,7 +422,6 @@ ADD_CASE_ARUMENTS(test_find_next_detach_11, {4, 10});
 
 void test_find_prev_detach(list_node_t *head, int argc, int argv[]) {
     test_node_t *node = NULL;
-    test_node_t *last = NULL;
     if (argc != 2) {
         return;
     }
