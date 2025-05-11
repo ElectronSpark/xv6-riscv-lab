@@ -17,6 +17,9 @@ endif()
 set(KERNEL_BINARY kernel)
 set(KERNEL_DECOMPILED kernel.asm)
 set(KERNEL_SYMBOLS kernel.sym)
+set(KERNEL_INITCODE_BIN initcode)
+set(KERNEL_INITCODE_OBJ ${KERNEL_INITCODE_BIN}.out)
+set(KERNEL_INITCODE_DECOMPILED ${KERNEL_INITCODE_BIN}.asm)
 
 # Specify the C standard
 set(CMAKE_C_STANDARD 11)
@@ -118,6 +121,31 @@ add_custom_target(${KERNEL_SYMBOLS}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Extracting symbols from kernel binary to ${KERNEL_SYMBOLS}"
     DEPENDS ${KERNEL_BINARY}
+)
+
+# init code
+set(KERNEL_INITCODE_FILES ${USER_DIR}/initcode.S)
+FILE(GLOB KERNEL_INITCODE_SRC ${KERNEL_INITCODE_FILES})
+set_source_files_properties(${KERNEL_INITCODE_SRC} PROPERTIES LANGUAGE C)
+add_executable(${KERNEL_INITCODE_OBJ} ${KERNEL_INITCODE_SRC})
+target_compile_options(${KERNEL_INITCODE_OBJ} PRIVATE 
+    -march=rv64g -nostdinc -I${CMAKE_SOURCE_DIR} -I${KERNEL_DIR})
+set_target_properties(${KERNEL_INITCODE_OBJ} PROPERTIES LINK_FLAGS
+    "-N -e start -Ttext 0")
+
+add_custom_target(${KERNEL_INITCODE_BIN}
+    COMMAND ${CMAKE_OBJCOPY} -S -O binary ${KERNEL_INITCODE_OBJ} ${KERNEL_INITCODE_BIN}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Creating init code ${KERNEL_INITCODE_BIN}"
+    DEPENDS ${KERNEL_INITCODE_OBJ}
+)
+
+# decompile init code
+add_custom_target(${KERNEL_INITCODE_DECOMPILED}
+    COMMAND ${CMAKE_OBJDUMP} -S ${KERNEL_INITCODE_OBJ} > ${KERNEL_INITCODE_DECOMPILED}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Decompiling init code binary to ${KERNEL_INITCODE_DECOMPILED}"
+    DEPENDS ${KERNEL_INITCODE_OBJ}
 )
 
 # Add user programs
