@@ -19,3 +19,5 @@ user/usys.S
 compile_commands.json
 .cache
 kernel/lwip
+build
+*.dSYM
