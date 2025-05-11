@@ -1,2 +1,8 @@
 ## Test cases that can run on host machine.
 
+```bash
+mkdir build
+cd build
+cmake ..
+make test
+```
