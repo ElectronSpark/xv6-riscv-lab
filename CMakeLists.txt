@@ -16,6 +16,7 @@ endif()
 
 set(KERNEL_BINARY kernel)
 set(KERNEL_DECOMPILED kernel.asm)
+set(KERNEL_SYMBOLS kernel.sym)
 
 # Specify the C standard
 set(CMAKE_C_STANDARD 11)
@@ -108,6 +109,14 @@ add_custom_target(${KERNEL_DECOMPILED}
     COMMAND ${CMAKE_OBJDUMP} -S ${KERNEL_BINARY} > ${KERNEL_DECOMPILED}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Decompiling kernel binary to ${KERNEL_DECOMPILED}"
+    DEPENDS ${KERNEL_BINARY}
+)
+
+# extract symbols from the kernel binary
+add_custom_target(${KERNEL_SYMBOLS}
+    COMMAND ${CMAKE_OBJDUMP} -t ${KERNEL_BINARY} | sed '1,/SYMBOL TABLE/d\; s/ .* / /\; /^$$/d' > ${KERNEL_SYMBOLS}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Extracting symbols from kernel binary to ${KERNEL_SYMBOLS}"
     DEPENDS ${KERNEL_BINARY}
 )
 
