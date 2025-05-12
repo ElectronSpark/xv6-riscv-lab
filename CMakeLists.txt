@@ -48,11 +48,43 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${CFLAG_NO_STACK_PROTECTOR}")
 add_subdirectory(kernel)
 add_subdirectory(user)
 
-# Add a custom target for building the file system image
+# @TODO:
+# set(UEXTRA_FILES "")
+# if($ENV{LAB} AND $ENV{LAB} STREQUAL "util")
+#     set(UEXTRA_FILES 
+#         ${USER_DIR}/xargstest.sh
+#     )
+# endif()
+# FILE(UEXTRA ${UEXTRA_FILES})
+
+set(MKFS_SOURCE_FILES
+    ${CMAKE_SOURCE_DIR}/mkfs/mkfs.c 
+    ${KERNEL_DIR}/fs.h 
+    ${KERNEL_DIR}/param.h
+)
+
+#@TODO: add XCFLAGS
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mkfs
+    COMMAND gcc ${CMAKE_SOURCE_DIR}/mkfs/mkfs.c -Werror -Wall -I${CMAKE_SOURCE_DIR} -o ${CMAKE_CURRENT_BINARY_DIR}/mkfs
+    DEPENDS ${MKFS_SOURCE_FILES}
+    COMMENT "Building mkfs..."
+)
+
+# Update USER_PROGRAMS to include the correct path
+# list(TRANSFORM USER_PROGRAMS PREPEND "user/")
+
+# Update the custom command for fs.img to include the correct path for user executables
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fs.img
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/mkfs fs.img ${USER_PROGRAMS}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/user
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mkfs ${CMAKE_SOURCE_DIR}/README ${USER_PROGRAMS}
+    COMMENT "Creating file system image with user programs and README"
+)
+
 add_custom_target(fs.img ALL
-    COMMAND ${CMAKE_COMMAND} -E echo "Building file system image..."
-    COMMAND mkfs/mkfs fs.img README ${USER_PROGRAMS}
-    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/fs.img
     COMMENT "Creating file system image"
 )
 

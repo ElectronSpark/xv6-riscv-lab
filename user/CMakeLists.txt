@@ -179,16 +179,6 @@ set(USER_PROGRAMS_C_FILES
 #     )
 # endif()
 
-# @TODO:
-# set(UEXTRA_FILES "")
-# if($ENV{LAB} AND $ENV{LAB} STREQUAL "util")
-#     set(UEXTRA_FILES 
-#         ${USER_DIR}/xargstest.sh
-#     )
-# endif()
-# FILE(UEXTRA ${UEXTRA_FILES})
-
-set(GLOB USER_PROGRAMS "")
 # Modify user program output to match the .c file name without a suffix
 foreach(PROGRAM ${USER_PROGRAMS_C_FILES})
     get_filename_component(PROGRAM_NAME ${PROGRAM} NAME_WE)
@@ -197,9 +187,14 @@ foreach(PROGRAM ${USER_PROGRAMS_C_FILES})
     target_compile_options(_${PROGRAM_NAME} PRIVATE -nostdlib -ffreestanding)
     target_link_options(_${PROGRAM_NAME} PRIVATE -T ${USER_DIR}/user.ld -nostdlib -ffreestanding)
     target_link_libraries(_${PROGRAM_NAME} ${LIB_USERLIB})
-    set_target_properties(_${PROGRAM_NAME} PROPERTIES OUTPUT_NAME ${PROGRAM_NAME})
+    set_target_properties(_${PROGRAM_NAME} PROPERTIES OUTPUT_NAME _${PROGRAM_NAME})
 endforeach()
 
-add_custom_target(user_programs DEPENDS ${USER_PROGRAMS}
-    COMMENT "Building user programs"
+# Modify the user_programs target to include all executables
+add_custom_target(user_programs ALL
+    DEPENDS ${USER_PROGRAMS}
+    COMMENT "Building all user programs"
 )
+
+# Pass the populated USER_PROGRAMS variable to the parent scope
+set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
