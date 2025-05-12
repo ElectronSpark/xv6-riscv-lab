@@ -21,6 +21,8 @@
         "page_type.h": "c",
         "spinlock.h": "c",
         "cmath": "cpp",
-        "limits": "cpp"
+        "limits": "cpp",
+        "atomic": "c",
+        "ostream": "c"
     }
 }

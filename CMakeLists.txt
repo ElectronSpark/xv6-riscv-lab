@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.10)
 # Project name
 project(xv6-riscv LANGUAGES C ASM)
 
+find_package(Perl REQUIRED)
+
 # Set the RISC-V toolchain using a single base path environment variable
 if(DEFINED ENV{TOOLPREFIX})
     set(CMAKE_C_COMPILER $ENV{TOOLPREFIX}gcc)
