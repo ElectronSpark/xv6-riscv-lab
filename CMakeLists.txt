@@ -14,14 +14,6 @@ else()
     message(FATAL_ERROR "Environment variable TOOLPREFIX is not set")
 endif()
 
-set(KERNEL_BINARY kernel)
-set(KERNEL_DECOMPILED kernel.asm)
-set(KERNEL_SYMBOLS kernel.sym)
-set(KERNEL_INITCODE_BIN initcode)
-set(KERNEL_INITCODE_OBJ ${KERNEL_INITCODE_BIN}.out)
-set(KERNEL_INITCODE_DECOMPILED ${KERNEL_INITCODE_BIN}.asm)
-set(LIB_USERLIB userlib)
-
 # Specify the C standard
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -51,135 +43,8 @@ execute_process(
 )
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${CFLAG_NO_STACK_PROTECTOR}")
 
-# Separate .S and .c files for kernel source files
-set(KERNEL_C_FILES
-    ${KERNEL_DIR}/backtrace.c
-    ${KERNEL_DIR}/file.c
-    ${KERNEL_DIR}/net.c
-    ${KERNEL_DIR}/printf.c
-    ${KERNEL_DIR}/start.c
-    ${KERNEL_DIR}/sysproc.c
-    ${KERNEL_DIR}/bio.c        
-    ${KERNEL_DIR}/fs.c      
-    ${KERNEL_DIR}/page.c  
-    ${KERNEL_DIR}/proc.c       
-    ${KERNEL_DIR}/string.c   
-    ${KERNEL_DIR}/trap.c
-    ${KERNEL_DIR}/console.c    
-    ${KERNEL_DIR}/kalloc.c  
-    ${KERNEL_DIR}/pci.c   
-    ${KERNEL_DIR}/slab.c       
-    ${KERNEL_DIR}/syscall.c  
-    ${KERNEL_DIR}/uart.c
-    ${KERNEL_DIR}/e1000.c      
-    ${KERNEL_DIR}/log.c     
-    ${KERNEL_DIR}/pipe.c  
-    ${KERNEL_DIR}/sleeplock.c  
-    ${KERNEL_DIR}/sysfile.c  
-    ${KERNEL_DIR}/virtio_disk.c
-    ${KERNEL_DIR}/exec.c       
-    ${KERNEL_DIR}/main.c    
-    ${KERNEL_DIR}/plic.c  
-    ${KERNEL_DIR}/spinlock.c   
-    ${KERNEL_DIR}/sysnet.c   
-    ${KERNEL_DIR}/vm.c
-)
-
-set(KERNEL_S_FILES
-    ${KERNEL_DIR}/entry.S
-    ${KERNEL_DIR}/swtch.S
-    ${KERNEL_DIR}/trampoline.S
-    ${KERNEL_DIR}/kernelvec.S
-)
-
-# Define kernel object files
-FILE(GLOB KERNEL_OBJS
-    ${KERNEL_S_FILES}
-    ${KERNEL_C_FILES}
-)
-
-set_source_files_properties(${KERNEL_OBJS} PROPERTIES LANGUAGE C)
-
-# Add kernel executable
-add_executable(${KERNEL_BINARY} ${KERNEL_OBJS})
-
-# Set compiler and linker flags for the kernel
-target_compile_options(${KERNEL_BINARY} PRIVATE -nostdlib -ffreestanding -mcmodel=medany)
-set_target_properties(${KERNEL_BINARY} PROPERTIES LINK_FLAGS
-    "-T ${KERNEL_DIR}/kernel.ld -z max-page-size=4096")
-
-# decompile the kernel binary
-add_custom_target(${KERNEL_DECOMPILED}
-    COMMAND ${CMAKE_OBJDUMP} -S ${KERNEL_BINARY} > ${KERNEL_DECOMPILED}
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Decompiling kernel binary to ${KERNEL_DECOMPILED}"
-    DEPENDS ${KERNEL_BINARY}
-)
-
-# extract symbols from the kernel binary
-add_custom_target(${KERNEL_SYMBOLS}
-    COMMAND ${CMAKE_OBJDUMP} -t ${KERNEL_BINARY} | sed '1,/SYMBOL TABLE/d\; s/ .* / /\; /^$$/d' > ${KERNEL_SYMBOLS}
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Extracting symbols from kernel binary to ${KERNEL_SYMBOLS}"
-    DEPENDS ${KERNEL_BINARY}
-)
-
-# init code
-set(KERNEL_INITCODE_FILES ${USER_DIR}/initcode.S)
-FILE(GLOB KERNEL_INITCODE_SRC ${KERNEL_INITCODE_FILES})
-set_source_files_properties(${KERNEL_INITCODE_SRC} PROPERTIES LANGUAGE C)
-add_executable(${KERNEL_INITCODE_OBJ} ${KERNEL_INITCODE_SRC})
-target_compile_options(${KERNEL_INITCODE_OBJ} PRIVATE 
-    -march=rv64g -nostdinc -I${CMAKE_SOURCE_DIR} -I${KERNEL_DIR})
-set_target_properties(${KERNEL_INITCODE_OBJ} PROPERTIES LINK_FLAGS
-    "-N -e start -Ttext 0")
-
-add_custom_target(${KERNEL_INITCODE_BIN}
-    COMMAND ${CMAKE_OBJCOPY} -S -O binary ${KERNEL_INITCODE_OBJ} ${KERNEL_INITCODE_BIN}
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Creating init code ${KERNEL_INITCODE_BIN}"
-    DEPENDS ${KERNEL_INITCODE_OBJ}
-)
-
-# decompile init code
-add_custom_target(${KERNEL_INITCODE_DECOMPILED}
-    COMMAND ${CMAKE_OBJDUMP} -S ${KERNEL_INITCODE_OBJ} > ${KERNEL_INITCODE_DECOMPILED}
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Decompiling init code binary to ${KERNEL_INITCODE_DECOMPILED}"
-    DEPENDS ${KERNEL_INITCODE_OBJ}
-)
-
-
-# add user libraries
-set(USER_LIB_C_FILES
-    ${USER_DIR}/ulib.c
-    ${USER_DIR}/usys.c
-    ${USER_DIR}/printf.c
-    ${USER_DIR}/umalloc.c
-)
-if($ENV{LAB} AND $ENV{LAB} STREQUAL "lock")
-    set(USER_LIB_C_FILES 
-        ${USER_LIB_C_FILES}
-        ${USER_DIR}/statistics.c
-    )
-endif()
-file(GLOB USER_LIB_FILES ${USER_LIB_C_FILES})
-set_source_files_properties(USER_LIB_FILES PROPERTIES LANGUAGE C)
-add_library(${LIB_USERLIB} STATIC 
-    ${USER_LIB_FILES})
-target_link_options(${LIB_USERLIB} PRIVATE 
-    "-T ${USER_DIR}/user.ld")
-target_include_directories(${LIB_USERLIB} PRIVATE ${USER_DIR})
-
-# Add user programs
-file(GLOB USER_PROGRAMS ${USER_DIR}/*.c)
-# Modify user program output to match the .c file name without a suffix
-foreach(PROGRAM ${USER_PROGRAMS})
-    get_filename_component(PROGRAM_NAME ${PROGRAM} NAME_WE)
-    add_executable(${PROGRAM_NAME} ${PROGRAM})
-    target_compile_options(${PROGRAM_NAME} PRIVATE -nostdlib -ffreestanding)
-    target_link_options(${PROGRAM_NAME} PRIVATE -T ${USER_DIR}/user.ld -nostdlib -ffreestanding)
-endforeach()
+add_subdirectory(kernel)
+add_subdirectory(user)
 
 # Add a custom target for building the file system image
 add_custom_target(fs.img ALL
