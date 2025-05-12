@@ -20,6 +20,7 @@ set(KERNEL_SYMBOLS kernel.sym)
 set(KERNEL_INITCODE_BIN initcode)
 set(KERNEL_INITCODE_OBJ ${KERNEL_INITCODE_BIN}.out)
 set(KERNEL_INITCODE_DECOMPILED ${KERNEL_INITCODE_BIN}.asm)
+set(LIB_USERLIB userlib)
 
 # Specify the C standard
 set(CMAKE_C_STANDARD 11)
@@ -40,7 +41,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-strchr -fno-builtin-exit -fno-b
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-free")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-memcpy -Wno-main")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -I${KERNEL_DIR}")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -I${CMAKE_SOURCE_DIR}")
 
 # check whether it needs to turn off stack protector
 execute_process(
@@ -148,6 +149,28 @@ add_custom_target(${KERNEL_INITCODE_DECOMPILED}
     DEPENDS ${KERNEL_INITCODE_OBJ}
 )
 
+
+# add user libraries
+set(USER_LIB_C_FILES
+    ${USER_DIR}/ulib.c
+    ${USER_DIR}/usys.c
+    ${USER_DIR}/printf.c
+    ${USER_DIR}/umalloc.c
+)
+if($ENV{LAB} AND $ENV{LAB} STREQUAL "lock")
+    set(USER_LIB_C_FILES 
+        ${USER_LIB_C_FILES}
+        ${USER_DIR}/statistics.c
+    )
+endif()
+file(GLOB USER_LIB_FILES ${USER_LIB_C_FILES})
+set_source_files_properties(USER_LIB_FILES PROPERTIES LANGUAGE C)
+add_library(${LIB_USERLIB} STATIC 
+    ${USER_LIB_FILES})
+target_link_options(${LIB_USERLIB} PRIVATE 
+    "-T ${USER_DIR}/user.ld")
+target_include_directories(${LIB_USERLIB} PRIVATE ${USER_DIR})
+
 # Add user programs
 file(GLOB USER_PROGRAMS ${USER_DIR}/*.c)
 # Modify user program output to match the .c file name without a suffix
@@ -165,3 +188,6 @@ add_custom_target(fs.img ALL
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
     COMMENT "Creating file system image"
 )
+
+
+# @TODO: run etags on kernel and _init
