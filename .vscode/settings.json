@@ -23,6 +23,11 @@
         "cmath": "cpp",
         "limits": "cpp",
         "atomic": "c",
-        "ostream": "c"
+        "ostream": "c",
+        "variant": "c",
+        "string.h": "c",
+        "assert.h": "c",
+        "stdio.h": "c",
+        "stat.h": "c"
     }
 }

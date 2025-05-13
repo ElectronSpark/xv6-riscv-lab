@@ -1,11 +1,13 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <stdlib.h>
+#include <libgen.h>
 #include <string.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <assert.h>
 
-#define stat xv6_stat  // avoid clash with host struct stat
+#define ON_HOST_OS      // avoid clash with host struct stat
 #include "kernel/types.h"
 #include "kernel/fs.h"
 #include "kernel/stat.h"
@@ -114,7 +116,7 @@ main(int argc, char *argv[])
   memmove(buf, &sb, sizeof(sb));
   wsect(1, buf);
 
-  rootino = ialloc(T_DIR);
+  rootino = ialloc(XV6_T_DIR);
   assert(rootino == ROOTINO);
 
   bzero(&de, sizeof(de));
@@ -129,16 +131,16 @@ main(int argc, char *argv[])
 
   for(i = 2; i < argc; i++){
     // get rid of "user/"
-    char *shortname;
-    if(strncmp(argv[i], "user/", 5) == 0)
-      shortname = argv[i] + 5;
-    else
-      shortname = argv[i];
-    
-    assert(index(shortname, '/') == 0);
+    char *shortname = basename(argv[i]);
 
     if((fd = open(argv[i], 0)) < 0)
       die(argv[i]);
+
+    struct stat file_stat;
+    if (stat(argv[i], &file_stat) == -1) {
+      die(argv[i]);
+    }
+    assert(S_ISREG(file_stat.st_mode));
 
     // Skip leading _ in name when writing to file system.
     // The binaries are named _rm, _cat, etc. to keep the
@@ -149,7 +151,7 @@ main(int argc, char *argv[])
 
     assert(strlen(shortname) <= DIRSIZ);
     
-    inum = ialloc(T_FILE);
+    inum = ialloc(XV6_T_FILE);
 
     bzero(&de, sizeof(de));
     de.inum = xshort(inum);
