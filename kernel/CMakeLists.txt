@@ -44,7 +44,7 @@ set(KERNEL_S_FILES
 )
 
 set_source_files_properties(${KERNEL_C_FILES} PROPERTIES LANGUAGE C)
-set_source_files_properties(${KERNEL_S_FILES} PROPERTIES LANGUAGE ASM)
+set_source_files_properties(${KERNEL_S_FILES} PROPERTIES LANGUAGE C)
 
 # Add kernel executable
 add_executable(${KERNEL_BINARY} ${KERNEL_S_FILES} ${KERNEL_C_FILES})

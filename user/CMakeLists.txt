@@ -52,9 +52,9 @@ add_custom_command(
     COMMENT "Generating usys.S from usys.pl"
 )
 
-# Define a custom target to ensure usys.S is generated
+# Define a custom target to ensure usys.S is generated before anything else
 add_custom_target(
-    generate_usys
+    generate_usys ALL
     DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/usys.S
 )
 
@@ -74,7 +74,7 @@ add_dependencies(${LIB_USERLIB} generate_usys)
 
 # Ensure proper linking and include directories for userlib
 target_link_options(${LIB_USERLIB} PRIVATE
-    "-T ${USER_DIR}/user.ld")
+    "-z max-page-size=4096 -T ${USER_DIR}/user.ld")
 target_include_directories(${LIB_USERLIB} PRIVATE ${USER_DIR})
 
 # Add user programs
@@ -184,9 +184,11 @@ foreach(PROGRAM ${USER_PROGRAMS_C_FILES})
     get_filename_component(PROGRAM_NAME ${PROGRAM} NAME_WE)
     list(APPEND USER_PROGRAMS _${PROGRAM_NAME})
     add_executable(_${PROGRAM_NAME} ${PROGRAM})
-    target_compile_options(_${PROGRAM_NAME} PRIVATE -nostdlib -ffreestanding)
-    target_link_options(_${PROGRAM_NAME} PRIVATE -T ${USER_DIR}/user.ld -nostdlib -ffreestanding)
-    target_link_libraries(_${PROGRAM_NAME} ${LIB_USERLIB})
+    target_link_options(_${PROGRAM_NAME} PRIVATE -z max-page-size=4096 -T ${USER_DIR}/user.ld)
+    # Force linker to include all objects from userlib (including usys.S)
+    target_link_libraries(_${PROGRAM_NAME} PRIVATE
+        "--whole-archive" ${LIB_USERLIB} "--no-whole-archive"
+    )
     set_target_properties(_${PROGRAM_NAME} PROPERTIES OUTPUT_NAME _${PROGRAM_NAME})
 endforeach()
 
