@@ -21,3 +21,4 @@ compile_commands.json
 kernel/lwip
 build
 *.dSYM
+packets.pcap
