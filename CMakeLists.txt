@@ -7,18 +7,20 @@ find_package(Perl REQUIRED)
 
 # Set the RISC-V toolchain using a single base path environment variable
 if(DEFINED ENV{TOOLPREFIX})
-    set(CMAKE_C_COMPILER $ENV{TOOLPREFIX}gcc)
-    set(CMAKE_ASM_COMPILER $ENV{TOOLPREFIX}as)
-    set(CMAKE_LINKER $ENV{TOOLPREFIX}ld)
+    set(CMAKE_C_COMPILER $ENV{TOOLPREFIX}gcc CACHE STRING "C compiler" FORCE)
+    # set(CMAKE_ASM_COMPILER $ENV{TOOLPREFIX}as)
+    set(CMAKE_LINKER $ENV{TOOLPREFIX}ld CACHE FILEPATH "Linker" FORCE)
     set(CMAKE_OBJCOPY $ENV{TOOLPREFIX}objcopy)
     set(CMAKE_OBJDUMP $ENV{TOOLPREFIX}objdump)
+    # Use ld directly for linking executables
+    set(CMAKE_C_LINK_EXECUTABLE "$ENV{TOOLPREFIX}ld <LINK_FLAGS> -o <TARGET> <LINK_LIBRARIES> <OBJECTS>")
 else()
     message(FATAL_ERROR "Environment variable TOOLPREFIX is not set")
 endif()
 
 # Specify the C standard
-set(CMAKE_C_STANDARD 11)
-set(CMAKE_C_STANDARD_REQUIRED ON)
+# set(CMAKE_C_STANDARD 17)
+set(CMAKE_C_STANDARD_REQUIRED OFF)
 
 # Define kernel and user directories
 set(KERNEL_DIR ${CMAKE_SOURCE_DIR}/kernel)
@@ -26,7 +28,6 @@ set(USER_DIR ${CMAKE_SOURCE_DIR}/user)
 
 # Add global compiler options
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -MD")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcmodel=medany")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-common -nostdlib")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-strncpy -fno-builtin-strncmp -fno-builtin-strlen -fno-builtin-memset")
@@ -35,15 +36,31 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-strchr -fno-builtin-exit -fno-b
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-free")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-memcpy -Wno-main")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-pie -no-pie")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -I${CMAKE_SOURCE_DIR}")
 
 # check whether it needs to turn off stack protector
-execute_process(
-    COMMAND ${CMAKE_C_COMPILER} "-fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector"
-    OUTPUT_VARIABLE CFLAG_NO_STACK_PROTECTOR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-)
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${CFLAG_NO_STACK_PROTECTOR}")
+# @TODO:
+# execute_process(
+#     COMMAND "${CMAKE_C_COMPILER} -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector"
+#     OUTPUT_VARIABLE XCFLAGS
+#     OUTPUT_STRIP_TRAILING_WHITESPACE
+# )
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-stack-protector")
+
+#@TODO:
+set(LAB util)
+# if(${LAB})
+#     execute_process(
+#         COMMAND "echo ${LAB} | tr a-z A-Z"
+#         OUTPUT_VARIABLE LABUPPER
+#         OUTPUT_STRIP_TRAILING_WHITESPACE
+#     )
+#     set(XCFLAGS "${XCFLAGS} -DSOL_${LABUPPER} -DLAB_${LABUPPER}")
+# endif()
+set(LABUPPER "UTIL")
+set(XCFLAGS "-DSOL_${LABUPPER} -DLAB_${LABUPPER}")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${XCFLAGS}")
 
 add_subdirectory(kernel)
 add_subdirectory(user)
@@ -72,18 +89,18 @@ add_custom_command(
 )
 
 # Update USER_PROGRAMS to include the correct path
-# list(TRANSFORM USER_PROGRAMS PREPEND "user/")
+list(TRANSFORM USER_PROGRAMS PREPEND "${CMAKE_CURRENT_BINARY_DIR}/user/")
 
 # Update the custom command for fs.img to include the correct path for user executables
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fs.img
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/mkfs fs.img ${USER_PROGRAMS}
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/user
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mkfs ${CMAKE_SOURCE_DIR}/README ${USER_PROGRAMS}
     COMMENT "Creating file system image with user programs and README"
 )
 
-add_custom_target(fs.img ALL
+add_custom_target(fs_img ALL
     DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/fs.img
     COMMENT "Creating file system image"
 )
