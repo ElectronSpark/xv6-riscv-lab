@@ -40,27 +40,23 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-pie -no-pie")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -I${CMAKE_SOURCE_DIR}")
 
 # check whether it needs to turn off stack protector
-# @TODO:
-# execute_process(
-#     COMMAND "${CMAKE_C_COMPILER} -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector"
-#     OUTPUT_VARIABLE XCFLAGS
-#     OUTPUT_STRIP_TRAILING_WHITESPACE
-# )
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-stack-protector")
+execute_process(
+    COMMAND bash -c "${CMAKE_C_COMPILER} -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector"
+    OUTPUT_VARIABLE FNO_STACK_PROTECTOR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${FNO_STACK_PROTECTOR}")
 
-#@TODO:
-set(LAB util)
-# if(${LAB})
-#     execute_process(
-#         COMMAND "echo ${LAB} | tr a-z A-Z"
-#         OUTPUT_VARIABLE LABUPPER
-#         OUTPUT_STRIP_TRAILING_WHITESPACE
-#     )
-#     set(XCFLAGS "${XCFLAGS} -DSOL_${LABUPPER} -DLAB_${LABUPPER}")
-# endif()
-set(LABUPPER "UTIL")
-set(XCFLAGS "-DSOL_${LABUPPER} -DLAB_${LABUPPER}")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${XCFLAGS}")
+if(NOT $ENV{LAB} STREQUAL "")
+    execute_process(
+        COMMAND bash -c "echo $ENV{LAB} | tr a-z A-Z"
+        OUTPUT_VARIABLE LABUPPER
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    set(XCFLAGS "${XCFLAGS} -DSOL_${LABUPPER} -DLAB_${LABUPPER}")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${XCFLAGS}")
+    message("In lab: ${LABUPPER}")
+endif()
 
 add_subdirectory(kernel)
 add_subdirectory(user)
