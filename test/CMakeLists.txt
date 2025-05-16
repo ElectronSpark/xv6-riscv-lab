@@ -30,7 +30,7 @@ foreach(PROGRAM ${PROGRAMS})
     list(APPEND RUN_TEST_COMMANDS COMMAND ./${PROGRAM})
 endforeach()
 
-add_custom_target(test
+add_custom_target(test-list
     COMMENT "Running tests..."
     ${RUN_TEST_COMMANDS}
     DEPENDS ${PROGRAMS}
@@ -97,3 +97,9 @@ target_link_libraries(ut_mock PRIVATE cmocka-static)
 target_compile_options(ut_mock PRIVATE -ggdb -Wall)
 target_link_options(ut_mock PRIVATE ${MOCK_COMPILE_OPTIONS})
 target_include_directories(ut_mock PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+
+enable_testing()
+add_test(NAME ut_mock_test
+    COMMAND ut_mock
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
