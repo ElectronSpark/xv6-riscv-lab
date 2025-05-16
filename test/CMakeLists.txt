@@ -1,8 +1,9 @@
 # CMake configuration for the test directory
 
-# use gcc on the host system
-# set(CMAKE_C_COMPILER /usr/bin/gcc)
-# set(CMAKE_LINKER /usr/bin/ld)
+cmake_minimum_required(VERSION 3.10)
+
+# Project name
+project(xv6-riscv-unit-test LANGUAGES C ASM)
 
 ENABLE_LANGUAGE(C)
 
