@@ -9,6 +9,8 @@
 #include "cmocka.h"
 
 #include "types.h"
+#include "riscv.h"
 #include "page.h"
+#include "memlayout.h"
 
 #endif // __UT_MOCK_WRAPS_H__

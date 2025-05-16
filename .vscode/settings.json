@@ -30,6 +30,7 @@
         "stdio.h": "c",
         "stat.h": "c",
         "mutex": "c",
-        "ut_mock_wraps.h": "c"
+        "ut_mock_wraps.h": "c",
+        "stddef.h": "c"
     }
 }
