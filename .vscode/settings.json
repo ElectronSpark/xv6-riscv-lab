@@ -28,6 +28,8 @@
         "string.h": "c",
         "assert.h": "c",
         "stdio.h": "c",
-        "stat.h": "c"
+        "stat.h": "c",
+        "mutex": "c",
+        "ut_mock_wraps.h": "c"
     }
 }

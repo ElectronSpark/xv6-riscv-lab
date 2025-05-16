@@ -1,25 +1,24 @@
 # CMake configuration for the test directory
 
 # use gcc on the host system
-set(CMAKE_c_COMPILER /usr/bin/gcc)
+# set(CMAKE_C_COMPILER /usr/bin/gcc)
+# set(CMAKE_LINKER /usr/bin/ld)
 
 ENABLE_LANGUAGE(C)
 
 # Define the executable(s) to be built
 set(PROGRAMS list_test)
 
-# Define the source files
-set(SRC
-    common.h
-    ../kernel/list.h
-    ../kernel/types.h
+set(UNIT_TEST_INCLUDE_DIRS
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/../kernel
 )
-
 
 # Add an executable for each program
 foreach(PROGRAM ${PROGRAMS})
-    add_executable(${PROGRAM} ${PROGRAM}.c ${SRC})
+    add_executable(${PROGRAM} ${CMAKE_SOURCE_DIR}/src/${PROGRAM}.c)
     target_compile_options(${PROGRAM} PRIVATE -ggdb -Wall)
+    target_include_directories(${PROGRAM} PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
     target_link_options(${PROGRAM} PRIVATE -ggdb)
 endforeach()
 
@@ -59,3 +58,41 @@ add_custom_target(valgrind-full
     COMMENT "Running valgrind full..."
     ${RUN_VALGRIND_FULL_COMMANDS}
 )
+
+
+# Kernel source files to do unit tests
+set(MOCK_TEST_KERNEL_SRC
+    ${CMAKE_SOURCE_DIR}/../kernel/page.c
+)
+
+set(MOCK_TEST_WRAP_FUNCTIONS
+    page_lock_aqcuire
+    page_lock_release
+    __pa_to_page
+    panic
+    acquire
+    release
+    initlock
+)
+
+set(MOCK_TEST_SRC
+    ${CMAKE_SOURCE_DIR}/src/ut_mock_main.c
+    ${CMAKE_SOURCE_DIR}/src/ut_mock_wraps.c
+)
+
+set(MOCK_WRAP_OPTIONS "")
+foreach(EACH_WRAP ${MOCK_TEST_WRAP_FUNCTIONS})
+    set(MOCK_WRAP_OPTIONS "${MOCK_WRAP_OPTIONS},--wrap=${EACH_WRAP}")
+endforeach()
+
+set(MOCK_COMPILE_OPTIONS "-Wl${MOCK_WRAP_OPTIONS}")
+
+
+include(cmake/FetchCmocka.cmake)
+# find_library(cmocka-static)
+
+add_executable(ut_mock ${MOCK_TEST_SRC} ${MOCK_TEST_KERNEL_SRC})
+target_link_libraries(ut_mock PRIVATE cmocka-static)
+target_compile_options(ut_mock PRIVATE -ggdb -Wall)
+target_link_options(ut_mock PRIVATE ${MOCK_COMPILE_OPTIONS})
+target_include_directories(ut_mock PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
