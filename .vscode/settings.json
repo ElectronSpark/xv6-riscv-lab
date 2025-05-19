@@ -31,6 +31,8 @@
         "stat.h": "c",
         "mutex": "c",
         "ut_mock_wraps.h": "c",
-        "stddef.h": "c"
+        "stddef.h": "c",
+        "common.h": "c",
+        "span": "c"
     }
 }

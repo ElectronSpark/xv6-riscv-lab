@@ -98,8 +98,17 @@ target_compile_options(ut_mock PRIVATE -ggdb -Wall)
 target_link_options(ut_mock PRIVATE ${MOCK_COMPILE_OPTIONS})
 target_include_directories(ut_mock PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
+add_executable(ut_list ${CMAKE_SOURCE_DIR}/src/ut_list_main.c)
+target_link_libraries(ut_list PRIVATE cmocka-static)
+target_compile_options(ut_list PRIVATE -ggdb -Wall)
+target_include_directories(ut_list PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+
 enable_testing()
 add_test(NAME ut_mock_test
     COMMAND ut_mock
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+add_test(NAME ut_list
+    COMMAND ut_list
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
