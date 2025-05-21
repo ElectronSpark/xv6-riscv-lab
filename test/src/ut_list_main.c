@@ -1,97 +1,73 @@
 #include <ut_list.h>
 
 // Simple create tests
-static void test_simple_create_1(void **state) {
-    (void)state;
-    int input[] = {};
-    int expected[] = {};
-    list_node_t *head = make_list(input, 0);
-    assert_non_null(head);
-    assert_true(compare_list_arr(head, expected, 0));
-    destroy_list(head);
-}
+test_context_t test_simple_create_prestates[] = {
+    TEST_CASE_FULL(
+        (),
+        (),
+        ()
+    ),
+    TEST_CASE_FULL(
+        (1),
+        (),
+        (1)
+    ),
+    TEST_CASE_FULL(
+        (1, 2),
+        (),
+        (1, 2)
+    ),
+    TEST_CASE_FULL(
+        (1, 2, 3),
+        (),
+        (1, 2, 3)
+    ),
+};
 
-static void test_simple_create_2(void **state) {
-    (void)state;
-    int input[] = {1};
-    int expected[] = {1};
-    list_node_t *head = make_list(input, 1);
+static void test_simple_create(void **state) {
+    test_context_t *context = *(test_context_t **)state;
+    const int *expected = context->params.expected;
+    size_t expected_size = context->params.expected_size;
+    list_node_t *head = context->head;
     assert_non_null(head);
-    assert_true(compare_list_arr(head, expected, 1));
-    destroy_list(head);
-}
-
-static void test_simple_create_3(void **state) {
-    (void)state;
-    int input[] = {1, 2};
-    int expected[] = {1, 2};
-    list_node_t *head = make_list(input, 2);
-    assert_non_null(head);
-    assert_true(compare_list_arr(head, expected, 2));
-    destroy_list(head);
-}
-
-static void test_simple_create_4(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3};
-    int expected[] = {1, 2, 3};
-    list_node_t *head = make_list(input, 3);
-    assert_non_null(head);
-    assert_true(compare_list_arr(head, expected, 3));
-    destroy_list(head);
+    assert_true(compare_list_arr(head, expected, expected_size));
 }
 
 // Push tests
-static void test_push_empty_1(void **state) {
-    (void)state;
-    int input[] = {};
-    int args[] = {1};
-    int expected[] = {1};
-    list_node_t *head = make_list(input, 0);
-    assert_non_null(head);
-    
-    test_node_t *node = make_node(args[0]);
-    assert_non_null(node);
-    list_node_push(head, node, entry);
-    
-    assert_true(compare_list_arr(head, expected, 1));
-    destroy_list(head);
-}
+test_context_t test_push_empty_prestates[] = {
+    TEST_CASE_FULL(
+        (),
+        (1),
+        (1)
+    ),
+    TEST_CASE_FULL(
+        (),
+        (2, 1),
+        (2, 1)
+    ),
+    TEST_CASE_FULL(
+        (),
+        (3, 2, 1),
+        (3, 2, 1)
+    ),
+};
 
-static void test_push_empty_2(void **state) {
-    (void)state;
-    int input[] = {};
-    int args[] = {1, 2};
-    int expected[] = {1, 2};
-    list_node_t *head = make_list(input, 0);
+static void test_push_empty(void **state) {
+    test_context_t *context = *(test_context_t **)state;
+    const int *args = context->params.args;
+    size_t args_size = context->params.args_size;
+    const int *expected = context->params.expected;
+    size_t expected_size = context->params.expected_size;
+    list_node_t *head = context->head;
     assert_non_null(head);
     
-    for (int i = 0; i < 2; i++) {
+    for (int i = 0; i < args_size; i++) {
         test_node_t *node = make_node(args[i]);
         assert_non_null(node);
         list_node_push(head, node, entry);
     }
     
-    assert_true(compare_list_arr(head, expected, 2));
-    destroy_list(head);
-}
-
-static void test_push_empty_3(void **state) {
-    (void)state;
-    int input[] = {};
-    int args[] = {1, 2, 3};
-    int expected[] = {1, 2, 3};
-    list_node_t *head = make_list(input, 0);
-    assert_non_null(head);
-    
-    for (int i = 0; i < 3; i++) {
-        test_node_t *node = make_node(args[i]);
-        assert_non_null(node);
-        list_node_push(head, node, entry);
-    }
-    
-    assert_true(compare_list_arr(head, expected, 3));
-    destroy_list(head);
+    assert_true(compare_list_arr(head, expected, expected_size));
 }
 
 // Push back tests
@@ -129,22 +105,40 @@ static void test_push_back_empty_2(void **state) {
     destroy_list(head);
 }
 
-static void test_push_back_empty_3(void **state) {
-    (void)state;
-    int input[] = {};
-    int args[] = {3, 2, 1}; // Note: Push back order is different
-    int expected[] = {1, 2, 3};
-    list_node_t *head = make_list(input, 0);
+test_context_t test_push_back_empty_prestates[] = {
+    TEST_CASE_FULL(
+        (),
+        (1),
+        (1)
+    ),
+    TEST_CASE_FULL(
+        (),
+        (2, 1),
+        (1, 2)
+    ),
+    TEST_CASE_FULL(
+        (),
+        (3, 2, 1),
+        (1, 2, 3)
+    ),
+};
+
+static void test_push_back_empty(void **state) {
+    test_context_t *context = *(test_context_t **)state;
+    const int *args = context->params.args;
+    size_t args_size = context->params.args_size;
+    const int *expected = context->params.expected;
+    size_t expected_size = context->params.expected_size;
+    list_node_t *head = context->head;
     assert_non_null(head);
     
-    for (int i = 0; i < 3; i++) {
+    for (int i = 0; i < expected_size; i++) {
         test_node_t *node = make_node(args[i]);
         assert_non_null(node);
         list_node_push_back(head, node, entry);
     }
     
-    assert_true(compare_list_arr(head, expected, 3));
-    destroy_list(head);
+    assert_true(compare_list_arr(head, expected, expected_size));
 }
 
 // Pop tests
@@ -276,132 +270,50 @@ static void test_pop_back_3(void **state) {
 }
 
 // Find first and detach tests
-static void test_find_first_detach_1(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int args[] = {1};
-    int expected[] = {2, 3, 4, 5, 6, 7, 8};
-    list_node_t *head = make_list(input, 8);
-    assert_non_null(head);
-    
-    test_node_t *node = NULL;
-    node = list_find_first(head, test_node_t, entry, node, node->val == args[0]);
-    assert_non_null(node);
-    list_node_detach(node, entry);
-    destroy_node(node);
-    
-    assert_true(compare_list_arr(head, expected, 7));
-    destroy_list(head);
-}
+test_context_t test_find_first_detach_prestates[] = {
+    TEST_CASE_FULL(
+        (1, 2, 3, 4, 5, 6, 7, 8),
+        (1),
+        (2, 3, 4, 5, 6, 7, 8)
+    ),
+    TEST_CASE_FULL(
+        (1, 2, 3, 4, 5, 6, 7, 8),
+        (8),
+        (1, 2, 3, 4, 5, 6, 7)
+    ),
+    TEST_CASE_FULL(
+        (1, 2, 3, 4, 5, 6, 7, 8),
+        (1, 2),
+        (3, 4, 5, 6, 7, 8)
+    ),
+    TEST_CASE_FULL(
+        (1, 2, 3, 4, 5, 6, 7, 8),
+        (1, 5),
+        (2, 3, 4, 6, 7, 8)
+    ),
+    TEST_CASE_FULL(
+        (1, 2, 3, 4, 5, 6, 7, 8),
+        (7, 8),
+        (1, 2, 3, 4, 5, 6)
+    ),
+    TEST_CASE_FULL(
+        (1, 2, 3, 4, 5, 6, 7, 8),
+        (4, 8),
+        (1, 2, 3, 5, 6, 7)
+    ),
+    TEST_CASE_FULL(
+        (1, 2, 3, 4, 5, 6, 7, 8),
+        (5, 10),
+        (1, 2, 3, 4, 6, 7, 8)
+    ),
+};
 
-static void test_find_first_detach_2(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int args[] = {8};
-    int expected[] = {1, 2, 3, 4, 5, 6, 7};
-    list_node_t *head = make_list(input, 8);
-    assert_non_null(head);
-    
-    test_node_t *node = NULL;
-    node = list_find_first(head, test_node_t, entry, node, node->val == args[0]);
-    assert_non_null(node);
-    list_node_detach(node, entry);
-    destroy_node(node);
-    
-    assert_true(compare_list_arr(head, expected, 7));
-    destroy_list(head);
-}
-
-static void test_find_first_detach_3(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int args[] = {1, 2};
-    int expected[] = {3, 4, 5, 6, 7, 8};
-    list_node_t *head = make_list(input, 8);
-    assert_non_null(head);
-    
-    test_node_t *node = NULL;
-    for (int i = 0; i < 2; i++) {
-        node = list_find_first(head, test_node_t, entry, node, node->val == args[i]);
-        assert_non_null(node);
-        list_node_detach(node, entry);
-        destroy_node(node);
-        node = NULL;
-    }
-    
-    assert_true(compare_list_arr(head, expected, 6));
-    destroy_list(head);
-}
-
-static void test_find_first_detach_4(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int args[] = {1, 5};
-    int expected[] = {2, 3, 4, 6, 7, 8};
-    list_node_t *head = make_list(input, 8);
-    assert_non_null(head);
-    
-    test_node_t *node = NULL;
-    for (int i = 0; i < 2; i++) {
-        node = list_find_first(head, test_node_t, entry, node, node->val == args[i]);
-        assert_non_null(node);
-        list_node_detach(node, entry);
-        destroy_node(node);
-        node = NULL;
-    }
-    
-    assert_true(compare_list_arr(head, expected, 6));
-    destroy_list(head);
-}
-
-static void test_find_first_detach_5(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int args[] = {7, 8};
-    int expected[] = {1, 2, 3, 4, 5, 6};
-    list_node_t *head = make_list(input, 8);
-    assert_non_null(head);
-    
-    test_node_t *node = NULL;
-    for (int i = 0; i < 2; i++) {
-        node = list_find_first(head, test_node_t, entry, node, node->val == args[i]);
-        assert_non_null(node);
-        list_node_detach(node, entry);
-        destroy_node(node);
-        node = NULL;
-    }
-    
-    assert_true(compare_list_arr(head, expected, 6));
-    destroy_list(head);
-}
-
-static void test_find_first_detach_6(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int args[] = {4, 8};
-    int expected[] = {1, 2, 3, 5, 6, 7};
-    list_node_t *head = make_list(input, 8);
-    assert_non_null(head);
-    
-    test_node_t *node = NULL;
-    for (int i = 0; i < 2; i++) {
-        node = list_find_first(head, test_node_t, entry, node, node->val == args[i]);
-        assert_non_null(node);
-        list_node_detach(node, entry);
-        destroy_node(node);
-        node = NULL;
-    }
-    
-    assert_true(compare_list_arr(head, expected, 6));
-    destroy_list(head);
-}
-
-static void test_find_first_detach_7(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int args[] = {5, 10};
-    int expected[] = {1, 2, 3, 4, 6, 7, 8};
-    list_node_t *head = make_list(input, 8);
+static void test_find_first_detach(void **state) {
+    test_context_t *context = *(test_context_t **)state;
+    const int *args = context->params.args;
+    const int *expected = context->params.expected;
+    size_t expected_size = context->params.expected_size;
+    list_node_t *head = context->head;
     assert_non_null(head);
     
     test_node_t *node = NULL;
@@ -414,137 +326,54 @@ static void test_find_first_detach_7(void **state) {
         }
     }
     
-    assert_true(compare_list_arr(head, expected, 7));
-    destroy_list(head);
+    assert_true(compare_list_arr(head, expected, expected_size));
 }
 
 // Find last and detach tests
-static void test_find_last_detach_1(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int args[] = {1};
-    int expected[] = {2, 3, 4, 5, 6, 7, 8};
-    list_node_t *head = make_list(input, 8);
-    assert_non_null(head);
-    
-    test_node_t *node = NULL;
-    node = list_find_last(head, test_node_t, entry, node, node->val == args[0]);
-    assert_non_null(node);
-    list_node_detach(node, entry);
-    destroy_node(node);
-    
-    assert_true(compare_list_arr(head, expected, 7));
-    destroy_list(head);
-}
+test_context_t test_find_last_detach_prestates[] = {
+    TEST_CASE_FULL(
+        (1, 2, 3, 4, 5, 6, 7, 8),
+        (1),
+        (2, 3, 4, 5, 6, 7, 8)
+    ),
+    TEST_CASE_FULL(
+        (1, 2, 3, 4, 5, 6, 7, 8),
+        (8),
+        (1, 2, 3, 4, 5, 6, 7)
+    ),
+    TEST_CASE_FULL(
+        (1, 2, 3, 4, 5, 6, 7, 8),
+        (1, 2),
+        (3, 4, 5, 6, 7, 8)
+    ),
+    TEST_CASE_FULL(
+        (1, 2, 3, 4, 5, 6, 7, 8),
+        (1, 5),
+        (2, 3, 4, 6, 7, 8)
+    ),
+    TEST_CASE_FULL(
+        (1, 2, 3, 4, 5, 6, 7, 8),
+        (7, 8),
+        (1, 2, 3, 4, 5, 6)
+    ),
+    TEST_CASE_FULL(
+        (1, 2, 3, 4, 5, 6, 7, 8),
+        (4, 8),
+        (1, 2, 3, 5, 6, 7)
+    ),
+    TEST_CASE_FULL(
+        (1, 2, 3, 4, 5, 6, 7, 8),
+        (5, 10),
+        (1, 2, 3, 4, 6, 7, 8)
+    )
+};
 
-static void test_find_last_detach_2(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int args[] = {8};
-    int expected[] = {1, 2, 3, 4, 5, 6, 7};
-    list_node_t *head = make_list(input, 8);
-    assert_non_null(head);
-    
-    test_node_t *node = NULL;
-    node = list_find_last(head, test_node_t, entry, node, node->val == args[0]);
-    assert_non_null(node);
-    list_node_detach(node, entry);
-    destroy_node(node);
-    
-    assert_true(compare_list_arr(head, expected, 7));
-    destroy_list(head);
-}
-
-static void test_find_last_detach_3(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int args[] = {1, 2};
-    int expected[] = {3, 4, 5, 6, 7, 8};
-    list_node_t *head = make_list(input, 8);
-    assert_non_null(head);
-    
-    test_node_t *node = NULL;
-    for (int i = 0; i < 2; i++) {
-        node = list_find_last(head, test_node_t, entry, node, node->val == args[i]);
-        assert_non_null(node);
-        list_node_detach(node, entry);
-        destroy_node(node);
-        node = NULL;
-    }
-    
-    assert_true(compare_list_arr(head, expected, 6));
-    destroy_list(head);
-}
-
-static void test_find_last_detach_4(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int args[] = {1, 5};
-    int expected[] = {2, 3, 4, 6, 7, 8};
-    list_node_t *head = make_list(input, 8);
-    assert_non_null(head);
-    
-    test_node_t *node = NULL;
-    for (int i = 0; i < 2; i++) {
-        node = list_find_last(head, test_node_t, entry, node, node->val == args[i]);
-        assert_non_null(node);
-        list_node_detach(node, entry);
-        destroy_node(node);
-        node = NULL;
-    }
-    
-    assert_true(compare_list_arr(head, expected, 6));
-    destroy_list(head);
-}
-
-static void test_find_last_detach_5(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int args[] = {7, 8};
-    int expected[] = {1, 2, 3, 4, 5, 6};
-    list_node_t *head = make_list(input, 8);
-    assert_non_null(head);
-    
-    test_node_t *node = NULL;
-    for (int i = 0; i < 2; i++) {
-        node = list_find_last(head, test_node_t, entry, node, node->val == args[i]);
-        assert_non_null(node);
-        list_node_detach(node, entry);
-        destroy_node(node);
-        node = NULL;
-    }
-    
-    assert_true(compare_list_arr(head, expected, 6));
-    destroy_list(head);
-}
-
-static void test_find_last_detach_6(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int args[] = {4, 8};
-    int expected[] = {1, 2, 3, 5, 6, 7};
-    list_node_t *head = make_list(input, 8);
-    assert_non_null(head);
-    
-    test_node_t *node = NULL;
-    for (int i = 0; i < 2; i++) {
-        node = list_find_last(head, test_node_t, entry, node, node->val == args[i]);
-        assert_non_null(node);
-        list_node_detach(node, entry);
-        destroy_node(node);
-        node = NULL;
-    }
-    
-    assert_true(compare_list_arr(head, expected, 6));
-    destroy_list(head);
-}
-
-static void test_find_last_detach_7(void **state) {
-    (void)state;
-    int input[] = {1, 2, 3, 4, 5, 6, 7, 8};
-    int args[] = {5, 10};
-    int expected[] = {1, 2, 3, 4, 6, 7, 8};
-    list_node_t *head = make_list(input, 8);
+static void test_find_last_detach(void **state) {
+    test_context_t *context = *(test_context_t **)state;
+    const int *args = context->params.args;
+    const int *expected = context->params.expected;
+    size_t expected_size = context->params.expected_size;
+    list_node_t *head = context->head;
     assert_non_null(head);
     
     test_node_t *node = NULL;
@@ -557,8 +386,7 @@ static void test_find_last_detach_7(void **state) {
         }
     }
     
-    assert_true(compare_list_arr(head, expected, 7));
-    destroy_list(head);
+    assert_true(compare_list_arr(head, expected, expected_size));
 }
 
 // Find next and detach tests
@@ -758,20 +586,20 @@ static int list_test_teardown(void **state) {
 int main(void) {
     const struct CMUnitTest tests[] = {
         // Simple create tests
-        cmocka_unit_test(test_simple_create_1),
-        cmocka_unit_test(test_simple_create_2),
-        cmocka_unit_test(test_simple_create_3),
-        cmocka_unit_test(test_simple_create_4),
+        cmocka_unit_test_prestate_setup_teardown(test_simple_create, list_test_setup, list_test_teardown, &test_simple_create_prestates[0]),
+        cmocka_unit_test_prestate_setup_teardown(test_simple_create, list_test_setup, list_test_teardown, &test_simple_create_prestates[1]),
+        cmocka_unit_test_prestate_setup_teardown(test_simple_create, list_test_setup, list_test_teardown, &test_simple_create_prestates[2]),
+        cmocka_unit_test_prestate_setup_teardown(test_simple_create, list_test_setup, list_test_teardown, &test_simple_create_prestates[3]),
         
         // Push tests
-        cmocka_unit_test(test_push_empty_1),
-        cmocka_unit_test(test_push_empty_2),
-        cmocka_unit_test(test_push_empty_3),
+        cmocka_unit_test_prestate_setup_teardown(test_push_empty, list_test_setup, list_test_teardown, &test_push_empty_prestates[0]),
+        cmocka_unit_test_prestate_setup_teardown(test_push_empty, list_test_setup, list_test_teardown, &test_push_empty_prestates[1]),
+        cmocka_unit_test_prestate_setup_teardown(test_push_empty, list_test_setup, list_test_teardown, &test_push_empty_prestates[2]),
         
         // Push back tests
-        cmocka_unit_test(test_push_back_empty_1),
-        cmocka_unit_test(test_push_back_empty_2),
-        cmocka_unit_test(test_push_back_empty_3),
+        cmocka_unit_test_prestate_setup_teardown(test_push_back_empty, list_test_setup, list_test_teardown, &test_push_back_empty_prestates[0]),
+        cmocka_unit_test_prestate_setup_teardown(test_push_back_empty, list_test_setup, list_test_teardown, &test_push_back_empty_prestates[1]),
+        cmocka_unit_test_prestate_setup_teardown(test_push_back_empty, list_test_setup, list_test_teardown, &test_push_back_empty_prestates[2]),
         
         // Pop tests
         cmocka_unit_test(test_pop_empty),
@@ -786,22 +614,22 @@ int main(void) {
         cmocka_unit_test(test_pop_back_3),
         
         // Find first and detach tests
-        cmocka_unit_test(test_find_first_detach_1),
-        cmocka_unit_test(test_find_first_detach_2),
-        cmocka_unit_test(test_find_first_detach_3),
-        cmocka_unit_test(test_find_first_detach_4),
-        cmocka_unit_test(test_find_first_detach_5),
-        cmocka_unit_test(test_find_first_detach_6),
-        cmocka_unit_test(test_find_first_detach_7),
+        cmocka_unit_test_prestate_setup_teardown(test_find_first_detach, list_test_setup, list_test_teardown, &test_find_first_detach_prestates[0]),
+        cmocka_unit_test_prestate_setup_teardown(test_find_first_detach, list_test_setup, list_test_teardown, &test_find_first_detach_prestates[1]),
+        cmocka_unit_test_prestate_setup_teardown(test_find_first_detach, list_test_setup, list_test_teardown, &test_find_first_detach_prestates[2]),
+        cmocka_unit_test_prestate_setup_teardown(test_find_first_detach, list_test_setup, list_test_teardown, &test_find_first_detach_prestates[3]),
+        cmocka_unit_test_prestate_setup_teardown(test_find_first_detach, list_test_setup, list_test_teardown, &test_find_first_detach_prestates[4]),
+        cmocka_unit_test_prestate_setup_teardown(test_find_first_detach, list_test_setup, list_test_teardown, &test_find_first_detach_prestates[5]),
+        cmocka_unit_test_prestate_setup_teardown(test_find_first_detach, list_test_setup, list_test_teardown, &test_find_first_detach_prestates[6]),
         
         // Find last and detach tests
-        cmocka_unit_test(test_find_last_detach_1),
-        cmocka_unit_test(test_find_last_detach_2),
-        cmocka_unit_test(test_find_last_detach_3),
-        cmocka_unit_test(test_find_last_detach_4),
-        cmocka_unit_test(test_find_last_detach_5),
-        cmocka_unit_test(test_find_last_detach_6),
-        cmocka_unit_test(test_find_last_detach_7),
+        cmocka_unit_test_prestate_setup_teardown(test_find_last_detach, list_test_setup, list_test_teardown, &test_find_last_detach_prestates[0]),
+        cmocka_unit_test_prestate_setup_teardown(test_find_last_detach, list_test_setup, list_test_teardown, &test_find_last_detach_prestates[1]),
+        cmocka_unit_test_prestate_setup_teardown(test_find_last_detach, list_test_setup, list_test_teardown, &test_find_last_detach_prestates[2]),
+        cmocka_unit_test_prestate_setup_teardown(test_find_last_detach, list_test_setup, list_test_teardown, &test_find_last_detach_prestates[3]),
+        cmocka_unit_test_prestate_setup_teardown(test_find_last_detach, list_test_setup, list_test_teardown, &test_find_last_detach_prestates[4]),
+        cmocka_unit_test_prestate_setup_teardown(test_find_last_detach, list_test_setup, list_test_teardown, &test_find_last_detach_prestates[5]),
+        cmocka_unit_test_prestate_setup_teardown(test_find_last_detach, list_test_setup, list_test_teardown, &test_find_last_detach_prestates[6]),
         
         // Find next and detach tests
         cmocka_unit_test_prestate_setup_teardown(test_find_next_detach, list_test_setup, list_test_teardown, &test_find_next_detach_prestates[0]),
