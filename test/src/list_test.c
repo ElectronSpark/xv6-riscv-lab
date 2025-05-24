@@ -92,7 +92,7 @@ list_node_t *make_list(const int arr[], int arr_length) {
 
 // compare a list and an array
 // if identical, return true. otherwise return false.
-bool compare_list_arr(list_node_t *head, const int const arr[], int arr_length) {
+bool compare_list_arr(list_node_t *head, const int arr[], int arr_length) {
     int idx = 0;
     test_node_t *pos, *tmp;
     list_foreach_node_safe(head, pos, tmp, entry) {
@@ -120,7 +120,7 @@ void print_list(list_node_t *head) {
     printf("]\n");
 }
 
-void print_array(const int const arr[], int arr_length) {
+void print_array(const int arr[], int arr_length) {
     int cnt = 0;
     printf("[");
     for (int i = 0; i < arr_length; i++) {
@@ -275,7 +275,6 @@ ADD_CASE_ARUMENTS(test_pop_back_3, {1, false});
 
 void test_find_first_detach(list_node_t *head, int argc, int argv[]) {
     test_node_t *node = NULL;
-    test_node_t *last = NULL;
     if (argc == 0) {
         return;
     }
@@ -319,7 +318,6 @@ ADD_CASE_ARUMENTS(test_find_first_detach_7, {5, 10});
 
 void test_find_last_detach(list_node_t *head, int argc, int argv[]) {
     test_node_t *node = NULL;
-    test_node_t *last = NULL;
     if (argc == 0) {
         return;
     }
@@ -363,7 +361,6 @@ ADD_CASE_ARUMENTS(test_find_last_detach_7, {5, 10});
 
 void test_find_next_detach(list_node_t *head, int argc, int argv[]) {
     test_node_t *node = NULL;
-    test_node_t *last = NULL;
     if (argc != 2) {
         return;
     }
@@ -425,16 +422,15 @@ ADD_CASE_ARUMENTS(test_find_next_detach_11, {4, 10});
 
 void test_find_prev_detach(list_node_t *head, int argc, int argv[]) {
     test_node_t *node = NULL;
-    test_node_t *last = NULL;
     if (argc != 2) {
         return;
     }
 
-    node = list_find_last(head, test_node_t, entry, node, node->val == argv[1]);
+    node = list_find_last(head, test_node_t, entry, node, node->val == argv[0]);
     if (node == NULL) {
         return;
     }
-    node = list_find_prev(head, node, entry, node, node->val == argv[0]);
+    node = list_find_prev(head, node, entry, node, node->val == argv[1]);
     if (node != NULL) {
         list_node_detach(node, entry);
         destroy_node(node);
@@ -446,44 +442,48 @@ ADD_CASE_EXPECTED(test_find_prev_detach_1, {1, 2, 3, 4, 5, 6, 7, 8});
 ADD_CASE_ARUMENTS(test_find_prev_detach_1, {1, 1});
 
 ADD_CASE_INPUT(test_find_prev_detach_2, {1, 2, 3, 4, 5, 6, 7, 8});
-ADD_CASE_EXPECTED(test_find_prev_detach_2, {1, 3, 4, 5, 6, 7, 8});
-ADD_CASE_ARUMENTS(test_find_prev_detach_2, {1, 2});
+ADD_CASE_EXPECTED(test_find_prev_detach_2, {2, 3, 4, 5, 6, 7, 8});
+ADD_CASE_ARUMENTS(test_find_prev_detach_2, {2, 1});
 
 ADD_CASE_INPUT(test_find_prev_detach_3, {1, 2, 3, 4, 5, 6, 7, 8});
-ADD_CASE_EXPECTED(test_find_prev_detach_3, {1, 2, 3, 5, 6, 7, 8});
-ADD_CASE_ARUMENTS(test_find_prev_detach_3, {1, 4});
+ADD_CASE_EXPECTED(test_find_prev_detach_3, {2, 3, 4, 5, 6, 7, 8});
+ADD_CASE_ARUMENTS(test_find_prev_detach_3, {4, 1});
 
 ADD_CASE_INPUT(test_find_prev_detach_4, {1, 2, 3, 4, 5, 6, 7, 8});
-ADD_CASE_EXPECTED(test_find_prev_detach_4, {1, 2, 3, 4, 5, 6, 7});
-ADD_CASE_ARUMENTS(test_find_prev_detach_4, {1, 8});
+ADD_CASE_EXPECTED(test_find_prev_detach_4, {2, 3, 4, 5, 6, 7, 8});
+ADD_CASE_ARUMENTS(test_find_prev_detach_4, {8, 1});
 
 ADD_CASE_INPUT(test_find_prev_detach_5, {1, 2, 3, 4, 5, 6, 7, 8});
 ADD_CASE_EXPECTED(test_find_prev_detach_5, {1, 2, 3, 4, 5, 6, 7, 8});
-ADD_CASE_ARUMENTS(test_find_prev_detach_5, {1, 10});
+ADD_CASE_ARUMENTS(test_find_prev_detach_5, {10, 1});
 
 ADD_CASE_INPUT(test_find_prev_detach_6, {1, 2, 3, 4, 5, 6, 7, 8});
 ADD_CASE_EXPECTED(test_find_prev_detach_6, {1, 2, 3, 4, 5, 6, 7, 8});
-ADD_CASE_ARUMENTS(test_find_prev_detach_6, {0, 4});
+ADD_CASE_ARUMENTS(test_find_prev_detach_6, {4, 0});
 
 ADD_CASE_INPUT(test_find_prev_detach_7, {1, 2, 3, 4, 5, 6, 7, 8});
 ADD_CASE_EXPECTED(test_find_prev_detach_7, {1, 2, 3, 4, 5, 6, 7, 8});
 ADD_CASE_ARUMENTS(test_find_prev_detach_7, {4, 4});
 
 ADD_CASE_INPUT(test_find_prev_detach_8, {1, 2, 3, 4, 5, 6, 7, 8});
-ADD_CASE_EXPECTED(test_find_prev_detach_8, {1, 2, 3, 4, 6, 7, 8});
-ADD_CASE_ARUMENTS(test_find_prev_detach_8, {4, 5});
+ADD_CASE_EXPECTED(test_find_prev_detach_8, {1, 2, 3, 5, 6, 7, 8});
+ADD_CASE_ARUMENTS(test_find_prev_detach_8, {5, 4});
 
 ADD_CASE_INPUT(test_find_prev_detach_9, {1, 2, 3, 4, 5, 6, 7, 8});
-ADD_CASE_EXPECTED(test_find_prev_detach_9, {1, 2, 3, 4, 5, 6, 8});
-ADD_CASE_ARUMENTS(test_find_prev_detach_9, {4, 7});
+ADD_CASE_EXPECTED(test_find_prev_detach_9, {1, 2, 3, 5, 6, 7, 8});
+ADD_CASE_ARUMENTS(test_find_prev_detach_9, {7, 4});
 
 ADD_CASE_INPUT(test_find_prev_detach_10, {1, 2, 3, 4, 5, 6, 7, 8});
-ADD_CASE_EXPECTED(test_find_prev_detach_10, {1, 2, 3, 4, 5, 6, 7});
-ADD_CASE_ARUMENTS(test_find_prev_detach_10, {4, 8});
+ADD_CASE_EXPECTED(test_find_prev_detach_10, {1, 2, 3, 5, 6, 7, 8});
+ADD_CASE_ARUMENTS(test_find_prev_detach_10, {8, 4});
 
 ADD_CASE_INPUT(test_find_prev_detach_11, {1, 2, 3, 4, 5, 6, 7, 8});
 ADD_CASE_EXPECTED(test_find_prev_detach_11, {1, 2, 3, 4, 5, 6, 7, 8});
-ADD_CASE_ARUMENTS(test_find_prev_detach_11, {4, 10});
+ADD_CASE_ARUMENTS(test_find_prev_detach_11, {8, 8});
+
+ADD_CASE_INPUT(test_find_prev_detach_12, {1, 2, 3, 4, 5, 6, 7, 8});
+ADD_CASE_EXPECTED(test_find_prev_detach_12, {1, 2, 3, 4, 5, 6, 7, 8});
+ADD_CASE_ARUMENTS(test_find_prev_detach_12, {10, 4});
 
 static test_case_t test_cases[] = {
         CASE_T_INIT(simple_create_1, NULL),
@@ -529,17 +529,18 @@ static test_case_t test_cases[] = {
         CASE_T_INIT(test_find_next_detach_9, test_find_next_detach),
         CASE_T_INIT(test_find_next_detach_10, test_find_next_detach),
         CASE_T_INIT(test_find_next_detach_11, test_find_next_detach),
-        CASE_T_INIT(test_find_prev_detach_1, test_find_next_detach),
-        CASE_T_INIT(test_find_prev_detach_2, test_find_next_detach),
-        CASE_T_INIT(test_find_prev_detach_3, test_find_next_detach),
-        CASE_T_INIT(test_find_prev_detach_4, test_find_next_detach),
-        CASE_T_INIT(test_find_prev_detach_5, test_find_next_detach),
-        CASE_T_INIT(test_find_prev_detach_6, test_find_next_detach),
-        CASE_T_INIT(test_find_prev_detach_7, test_find_next_detach),
-        CASE_T_INIT(test_find_prev_detach_8, test_find_next_detach),
-        CASE_T_INIT(test_find_prev_detach_9, test_find_next_detach),
-        CASE_T_INIT(test_find_prev_detach_10, test_find_next_detach),
-        CASE_T_INIT(test_find_prev_detach_11, test_find_next_detach),
+        CASE_T_INIT(test_find_prev_detach_1, test_find_prev_detach),
+        CASE_T_INIT(test_find_prev_detach_2, test_find_prev_detach),
+        CASE_T_INIT(test_find_prev_detach_3, test_find_prev_detach),
+        CASE_T_INIT(test_find_prev_detach_4, test_find_prev_detach),
+        CASE_T_INIT(test_find_prev_detach_5, test_find_prev_detach),
+        CASE_T_INIT(test_find_prev_detach_6, test_find_prev_detach),
+        CASE_T_INIT(test_find_prev_detach_7, test_find_prev_detach),
+        CASE_T_INIT(test_find_prev_detach_8, test_find_prev_detach),
+        CASE_T_INIT(test_find_prev_detach_9, test_find_prev_detach),
+        CASE_T_INIT(test_find_prev_detach_10, test_find_prev_detach),
+        CASE_T_INIT(test_find_prev_detach_11, test_find_prev_detach),
+        CASE_T_INIT(test_find_prev_detach_12, test_find_prev_detach),
 };
 
 int main(void) {

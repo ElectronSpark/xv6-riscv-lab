@@ -1,2 +1,15 @@
-## Test cases that can run on host machine.
+## Test cases that run on host machine.
 
+Run the following commands to build test cases:
+
+```bash
+mkdir build
+cd build
+cmake ..
+make
+```
+
+and then run the following command to run the test:
+```bash
+ctest
+```

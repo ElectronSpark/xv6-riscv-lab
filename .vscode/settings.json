@@ -19,6 +19,20 @@
         "param.h": "c",
         "riscv.h": "c",
         "page_type.h": "c",
-        "spinlock.h": "c"
+        "spinlock.h": "c",
+        "cmath": "cpp",
+        "limits": "cpp",
+        "atomic": "c",
+        "ostream": "c",
+        "variant": "c",
+        "string.h": "c",
+        "assert.h": "c",
+        "stdio.h": "c",
+        "stat.h": "c",
+        "mutex": "c",
+        "ut_mock_wraps.h": "c",
+        "stddef.h": "c",
+        "common.h": "c",
+        "span": "c"
     }
 }

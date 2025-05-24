@@ -400,31 +400,37 @@ static inline list_node_t *list_entry_pop(list_node_t *head)
 
 /* <- find node in a list  -> */
 
-#define list_find_next(head, last, member, ret, __match_cond) ({            \
-    typeof(*(last)) *__list_tmp_ptr = NULL;                                 \
-    ret = LIST_NEXT_NODE(head, (last), member);                             \
-    if ((ret) == NULL) {                                                    \
-        ret = LIST_FIRST_NODE(head, typeof(*(last)), member);               \
-    }                                                                       \
-    list_foreach_node_continue_safe(head, ret, __list_tmp_ptr, member) {    \
-        if (__match_cond)                                                   \
-            break;                                                          \
-    }                                                                       \
+#define list_find_next(head, last, member, ret, __match_cond) ({                \
+    typeof(*(last)) *__list_tmp_ptr = NULL;                                     \
+    if ((last) == NULL) {                                                       \
+        ret = LIST_FIRST_NODE(head, typeof(*(last)), member);                   \
+    } else {                                                                    \
+        ret = LIST_NEXT_NODE(head, (last), member);                             \
+    }                                                                           \
+    if ((ret) != NULL) {                                                        \
+        list_foreach_node_continue_safe(head, ret, __list_tmp_ptr, member) {    \
+            if (__match_cond)                                                   \
+                break;                                                          \
+        }                                                                       \
+    }                                                                           \
     ret; })
 
 #define list_find_first(head, type, member, ret, __match_cond)              \
     list_find_next(head, (type *)NULL, member, ret, __match_cond)
 
-#define list_find_prev(head, last, member, ret, __match_cond) ({            \
-    typeof(*(last)) *__list_tmp_ptr = NULL;                                 \
-    ret = LIST_PREV_NODE(head, (last), member);                             \
-    if ((ret) == NULL) {                                                    \
-        ret = LIST_LAST_NODE(head, typeof(*(last)), member);                \
-    }                                                                       \
-    list_foreach_node_inv_continue_safe(head, ret, __list_tmp_ptr, member) {\
-        if (__match_cond)                                                   \
-            break;                                                          \
-    }                                                                       \
+#define list_find_prev(head, last, member, ret, __match_cond) ({                \
+    typeof(*(last)) *__list_tmp_ptr = NULL;                                     \
+    if ((last) == NULL) {                                                       \
+        ret = LIST_LAST_NODE(head, typeof(*(last)), member);                    \
+    } else {                                                                    \
+        ret = LIST_PREV_NODE(head, (last), member);                             \
+    }                                                                           \
+    if ((ret) != NULL) {                                                        \
+        list_foreach_node_inv_continue_safe(head, ret, __list_tmp_ptr, member) {\
+            if (__match_cond)                                                   \
+                break;                                                          \
+        }                                                                       \
+    }                                                                           \
     ret; })
 
 #define list_find_last(head, type, member, ret, __match_cond)               \

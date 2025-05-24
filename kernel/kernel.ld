@@ -10,6 +10,7 @@ SECTIONS
   . = 0x80000000;
 
   .text : {
+    // @TODO: needs to specify _entry at the first
     *(.text .text.*)
     . = ALIGN(0x1000);
     _trampoline = .;
