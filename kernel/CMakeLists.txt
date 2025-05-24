@@ -34,6 +34,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/printf.c
     ${KERNEL_DIR}/uart.c
     ${KERNEL_DIR}/spinlock.c
+    ${KERNEL_DIR}/hlist.c
 )
 
 set(KERNEL_S_FILES

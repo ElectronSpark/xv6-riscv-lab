@@ -91,17 +91,48 @@ void __hlist_replace_node_entry(hlist_entry_t *old, hlist_entry_t *new) {
 
 // Insert a hash node into a bucket and increase the item counter in `hlist`
 // The caller will guarantee the validity of the parameters
-void *__hlist_insert_node_entry(hlist_t *hlist, hlist_bucket_t *bucket, hlist_entry_t *entry) {
+void __hlist_insert_node_entry(hlist_t *hlist, hlist_bucket_t *bucket, hlist_entry_t *entry) {
     list_node_push_back(bucket, entry, list_entry);
     entry->bucket = bucket;
     hlist->elem_cnt += 1;
 }
 
-// remove a hash node into a bucket and decrease the item counter in `hlist`
+// remove a hash node from a bucket and decrease the item counter in `hlist`
 // The caller will guarantee the validity of the parameters
-void *__hlist_remove_node_entry(hlist_t *hlist, hlist_entry_t *entry) {
+void __hlist_remove_node_entry(hlist_t *hlist, hlist_entry_t *entry) {
     list_node_detach(entry, list_entry);
     hlist->elem_cnt -= 1;
+}
+
+// Get the list entry of a node in bucket with the same id as a node
+//
+// This function is to find the node by its key.
+// If the node with the same key is found, it will return the list entry of the node.
+// Otherwise, it will return NULL.
+//
+// The caller should make sure the validity of the parameters.
+static inline hlist_entry_t *__hlist_find_entry_in_bucket(hlist_t *hlist, hlist_bucket_t *bucket, void *node) {
+    hlist_entry_t *pos = NULL;
+    hlist_entry_t *tmp = NULL;
+    list_foreach_node_continue_safe(bucket, pos, tmp, list_entry) {
+        void *node1 = __hlist_get_node(hlist, pos);
+        if (__hlist_cmp_node(hlist, node1, node) == 0) {
+            // node was found, return its entry
+            return pos;
+        }
+    }
+
+    // node not found, return NULL
+    return NULL;
+}
+
+// To check if a node is inside of a hash list
+bool hlist_node_in_list(hlist_t *hlist, void *node) {
+    hlist_bucket_t *bucket = __hlist_get_node_bucket(hlist, node);
+    if (bucket == NULL || hlist == NULL) {
+        return false;
+    }
+    return __hlist_is_bucket_of(hlist, bucket);
 }
 
 // Get a hash list entry by the ID of its node
@@ -135,15 +166,6 @@ ret:
     if (ret_entry != NULL) {
         *ret_entry = entry;
     }
-}
-
-// To check if a node is inside of a hash list
-bool hlist_node_in_list(hlist_t *hlist, void *node) {
-    hlist_bucket_t *bucket = __hlist_get_node_bucket(hlist, node);
-    if (bucket == NULL || hlist == NULL) {
-        return false;
-    }
-    return __hlist_is_bucket_of(hlist, bucket);
 }
 
 // Initialize a hash list.
@@ -184,33 +206,10 @@ ht_hash_t hlist_get_node_hash(hlist_t *hlist, void *node) {
     return __hlist_hash(hlist, node);
 }
 
-// Get the list entry of a node in bucket with the same id as a node
-//
-// This function is to find the node by its key.
-// If the node with the same key is found, it will return the list entry of the node.
-// Otherwise, it will return NULL.
-//
-// The caller should make sure the validity of the parameters.
-static inline hlist_entry_t *__hlist_find_entry_in_bucket(hlist_t *hlist, hlist_bucket_t *bucket, void *node) {
-    hlist_entry_t *pos = NULL;
-    hlist_entry_t *tmp = NULL;
-    list_foreach_node_continue_safe(bucket, pos, tmp, list_entry) {
-        void *node1 = __hlist_get_node(hlist, pos);
-        if (__hlist_cmp_node(hlist, node1, node) == 0) {
-            // node was found, return its entry
-            return pos;
-        }
-    }
-
-    // node not found, return NULL
-    return NULL;
-}
-
 // Get a node by its ID
 //
 // A dummy node is needed to passing the id.
 void *hlist_get(hlist_t *hlist, void *node) {
-    void *node = NULL;
     hlist_entry_t *entry = NULL;
 
     if (node == NULL) {
@@ -236,7 +235,6 @@ void *hlist_get(hlist_t *hlist, void *node) {
 // the existing node and return the pointer to it.
 // It will return the node passing to it if something goes wrong.
 void *hlist_put(hlist_t *hlist, void *node) {
-    ht_hash_t hash_val = 0;
     hlist_bucket_t *bucket = NULL;
     hlist_entry_t *entry = NULL;
     void *old_node = NULL;
@@ -292,11 +290,49 @@ void *hlist_pop(hlist_t *hlist, void *node) {
         return NULL;
     }
 
-    // @TODO: If the hash list is empty, then it cannot pop out any node.
+    // If the hash list is empty, then it cannot pop out any node.
+    if (hlist->elem_cnt == 0) {
+        return NULL;
+    }
     
-    // @TODO: If the given node is NULL, then pop out the first node in the list
+    // If the given node is NULL, then pop out the first node in the list
+    if (node == NULL) {
+        // Get the first non-empty bucket
+        uint64 idx = 0;
+        hlist_bucket_t *bucket = NULL;
+        hlist_foreach_bucket(hlist, idx, bucket) {
+            if (!LIST_IS_EMPTY(bucket)) {
+                // Get the first entry in the bucket
+                list_node_t *first_entry = LIST_FIRST_ENTRY(bucket);
+                // Convert list node to hlist entry
+                hlist_entry_t *entry = container_of(first_entry, hlist_entry_t, list_entry);
+                // Get the node from the entry
+                void *ret_node = __hlist_get_node(hlist, entry);
+                // Remove the entry from the bucket
+                __hlist_remove_node_entry(hlist, entry);
+                // Return the node
+                return ret_node;
+            }
+        }
+        // No node found in any bucket
+        return NULL;
+    }
 
-    // @TODO: If the given node is not NULL, try to find the node in the same key
-        // @TODO: found
-        // @TODO: not found
+    // If the given node is not NULL, try to find the node with the same key
+    hlist_bucket_t *bucket = NULL;
+    hlist_entry_t *entry = NULL;
+    
+    __hlist_get(hlist, node, &bucket, &entry);
+    
+    if (entry != NULL) {
+        // found
+        void *ret_node = __hlist_get_node(hlist, entry);
+        if (ret_node != NULL) {
+            __hlist_remove_node_entry(hlist, entry);
+        }
+        return ret_node;
+    } else {
+        // not found
+        return NULL;
+    }
 }
