@@ -33,6 +33,8 @@
         "ut_mock_wraps.h": "c",
         "stddef.h": "c",
         "common.h": "c",
-        "span": "c"
+        "span": "c",
+        "hlist_type_mock.h": "c",
+        "stdint.h": "c"
     }
 }

@@ -8,7 +8,7 @@ project(xv6-riscv-unit-test LANGUAGES C ASM)
 ENABLE_LANGUAGE(C)
 
 # Define the executable(s) to be built
-set(PROGRAMS list_test)
+set(PROGRAMS list_test hlist_test)
 
 set(UNIT_TEST_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/include
@@ -17,7 +17,11 @@ set(UNIT_TEST_INCLUDE_DIRS
 
 # Add an executable for each program
 foreach(PROGRAM ${PROGRAMS})
-    add_executable(${PROGRAM} ${CMAKE_SOURCE_DIR}/src/${PROGRAM}.c)
+    if(${PROGRAM} STREQUAL "hlist_test")
+        add_executable(${PROGRAM} ${CMAKE_SOURCE_DIR}/src/${PROGRAM}.c ${CMAKE_SOURCE_DIR}/src/hlist_mock.c)
+    else()
+        add_executable(${PROGRAM} ${CMAKE_SOURCE_DIR}/src/${PROGRAM}.c)
+    endif()
     target_compile_options(${PROGRAM} PRIVATE -ggdb -Wall)
     target_include_directories(${PROGRAM} PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
     target_link_options(${PROGRAM} PRIVATE -ggdb)
@@ -103,6 +107,11 @@ target_link_libraries(ut_list PRIVATE cmocka-static)
 target_compile_options(ut_list PRIVATE -ggdb -Wall)
 target_include_directories(ut_list PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
+add_executable(ut_hlist ${CMAKE_SOURCE_DIR}/src/ut_hlist_main.c ${CMAKE_SOURCE_DIR}/src/hlist_mock.c)
+target_link_libraries(ut_hlist PRIVATE cmocka-static)
+target_compile_options(ut_hlist PRIVATE -ggdb -Wall)
+target_include_directories(ut_hlist PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+
 enable_testing()
 add_test(NAME ut_mock_test
     COMMAND ut_mock
@@ -110,5 +119,9 @@ add_test(NAME ut_mock_test
 )
 add_test(NAME ut_list
     COMMAND ut_list
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+add_test(NAME ut_hlist
+    COMMAND ut_hlist
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
