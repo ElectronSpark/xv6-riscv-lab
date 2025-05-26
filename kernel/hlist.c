@@ -25,9 +25,6 @@ static inline bool __hlist_validate(hlist_t *hlist) {
     if (hlist == NULL) {
         return false;
     }
-    if (hlist->elem_cnt == 0) {
-        return false;
-    }
     if (hlist->bucket_cnt == 0) {
         return false;
     }
@@ -114,7 +111,7 @@ void __hlist_remove_node_entry(hlist_t *hlist, hlist_entry_t *entry) {
 static inline hlist_entry_t *__hlist_find_entry_in_bucket(hlist_t *hlist, hlist_bucket_t *bucket, void *node) {
     hlist_entry_t *pos = NULL;
     hlist_entry_t *tmp = NULL;
-    list_foreach_node_continue_safe(bucket, pos, tmp, list_entry) {
+    list_foreach_node_safe(bucket, pos, tmp, list_entry) {
         void *node1 = __hlist_get_node(hlist, pos);
         if (__hlist_cmp_node(hlist, node1, node) == 0) {
             // node was found, return its entry
@@ -176,7 +173,7 @@ int hlist_init(hlist_t *hlist, uint64 bucket_cnt, hlist_func_t *func) {
         return -1;
     }
     if (func->get_entry == NULL || func->get_node == NULL 
-        || func->hash == NULL || func->cmp_node) {
+        || func->hash == NULL || func->cmp_node == NULL) {
             return -1;
         }
     if (bucket_cnt == 0 || bucket_cnt > HLIST_BUCKET_CNT_MAX) {

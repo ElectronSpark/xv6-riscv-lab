@@ -35,6 +35,7 @@
         "common.h": "c",
         "span": "c",
         "hlist_type_mock.h": "c",
-        "stdint.h": "c"
+        "stdint.h": "c",
+        "hlist_mock.h": "c"
     }
 }

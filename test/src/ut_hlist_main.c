@@ -4,7 +4,17 @@
 #include <string.h>
 #include <stdlib.h>
 #include <cmocka.h>
-#include "hlist_mock.h"
+#include "../kernel/hlist.h"
+
+// Helper function to create a hash list with dynamic memory allocation
+static inline hlist_t *mock_hlist_create(uint64 bucket_cnt) {
+    size_t size = sizeof(hlist_t) + bucket_cnt * sizeof(hlist_bucket_t);
+    hlist_t *hlist = (hlist_t *)malloc(size);
+    if (hlist) {
+        memset(hlist, 0, size);
+    }
+    return hlist;
+}
 
 // Define a test node structure to use in our hash list
 typedef struct test_node {
@@ -20,13 +30,13 @@ static ht_hash_t test_node_hash(void *node) {
 }
 
 // Get entry function for test_node
-static void *test_node_get_entry(void *node) {
+static hlist_entry_t *test_node_get_entry(void *node) {
     test_node_t *n = (test_node_t *)node;
     return &n->entry;
 }
 
 // Get node function for test_node
-static void *test_node_get_node(void *entry) {
+static void *test_node_get_node(hlist_entry_t *entry) {
     hlist_entry_t *e = (hlist_entry_t *)entry;
     return container_of(e, test_node_t, entry);
 }
