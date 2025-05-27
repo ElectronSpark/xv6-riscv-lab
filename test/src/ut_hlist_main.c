@@ -26,7 +26,7 @@ typedef struct test_node {
 // Hash function for test_node
 static ht_hash_t test_node_hash(void *node) {
     test_node_t *n = (test_node_t *)node;
-    return (ht_hash_t)n->key;
+    return hlist_hash_uint64(n->key);
 }
 
 // Get entry function for test_node
@@ -335,9 +335,10 @@ static void test_hlist_get_node_hash(void **state) {
     
     // Get hash value
     ht_hash_t hash = hlist_get_node_hash(fixture->hlist, node);
+    ht_hash_t expected_hash = test_node_hash(node);
     
     // Hash should be the key value (42) as per our hash function
-    assert_int_equal(hash, 42);
+    assert_int_equal(hash, expected_hash);
     
     // Test with NULL node
     hash = hlist_get_node_hash(fixture->hlist, NULL);

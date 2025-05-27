@@ -3,7 +3,7 @@
 
 /**
  * @file hlist.h
- * @brief Hash list implementation for xv6 kernel
+ * @brief Hash list implementation
  *
  * This file provides a hash list data structure implementation which supports
  * efficient key-based lookup, insertion, and removal operations.
@@ -19,6 +19,80 @@
  */
 #define GOLDEN_RATIO_PRIME_32 ((ht_hash_t)0x9e370001UL)
 #define GOLDEN_RATIO_PRIME_64 ((ht_hash_t)0x9e37fffffffc0001UL)
+
+/**
+ * @brief Default prime constant used for hashing
+ * Uses the 64-bit prime for better distribution on 64-bit systems
+ */
+#define GOLDEN_RATIO_PRIME GOLDEN_RATIO_PRIME_64
+
+/**
+ * @brief Generates a hash value from an integer
+ * 
+ * Uses a multiplication-based approach with a special constant to
+ * create a well-distributed hash value.
+ * 
+ * @param key The integer key to hash
+ * @return A non-zero hash value suitable for use in a hash table
+ */
+static inline ht_hash_t hlist_hash_int(int key) {
+    ht_hash_t ret = key * (0x100000001 - GOLDEN_RATIO_PRIME);
+    if (ret == 0) {
+        ret = GOLDEN_RATIO_PRIME; // Ensure non-zero hash
+    }
+    return ret;
+}
+
+/**
+ * @brief Generates a hash value from a 64-bit unsigned integer
+ * 
+ * Uses the golden ratio prime multiplier to create a well-distributed
+ * hash value from a 64-bit integer.
+ * 
+ * @param key The 64-bit unsigned integer to hash
+ * @return A non-zero hash value suitable for use in a hash table
+ */
+static inline ht_hash_t hlist_hash_uint64(uint64 key) {
+    ht_hash_t ret = key * GOLDEN_RATIO_PRIME;
+    if (ret == 0) {
+        ret = GOLDEN_RATIO_PRIME; // Ensure non-zero hash
+    }
+    return ret;
+}
+
+/**
+ * @brief Generates a hash value from a string
+ * 
+ * Implements a simple but effective string hashing algorithm that
+ * processes the string in chunks of ht_hash_t size for efficiency,
+ * with special handling for any remaining bytes.
+ * 
+ * The hash accounts for both string content and length to reduce collisions.
+ * 
+ * @param str Pointer to the string to hash
+ * @param len Length of the string in bytes
+ * @return A non-zero hash value suitable for use in a hash table
+ */
+static inline ht_hash_t hlist_hash_str(char *str, size_t len) {
+    ht_hash_t ret = GOLDEN_RATIO_PRIME * len;
+    int tail_size = len % sizeof(ht_hash_t);
+    ht_hash_t tail = 0;
+    for (size_t i = 0; i < len - tail_size; i += sizeof(ht_hash_t)) {
+        ht_hash_t *p = (ht_hash_t *)(str + i);
+        ret ^= (*p) * GOLDEN_RATIO_PRIME;
+    }
+    if (tail_size > 0) {
+        for (size_t i = len - tail_size; i < len; i++) {
+            tail <<= 8;
+            tail |= (unsigned char)str[i];
+        }
+        ret ^= tail * GOLDEN_RATIO_PRIME;
+    }
+    if (ret == 0) {
+        ret = GOLDEN_RATIO_PRIME; // Ensure non-zero hash
+    }
+    return ret;
+}
 
 /**
  * @brief Maximum number of buckets allowed in a hash list

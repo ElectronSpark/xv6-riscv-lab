@@ -36,6 +36,9 @@
         "span": "c",
         "hlist_type_mock.h": "c",
         "stdint.h": "c",
-        "hlist_mock.h": "c"
+        "hlist_mock.h": "c",
+        "hlist.h": "c",
+        "cstdint": "c",
+        "charconv": "c"
     }
 }
