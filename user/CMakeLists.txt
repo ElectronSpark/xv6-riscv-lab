@@ -79,69 +79,69 @@ target_include_directories(${LIB_USERLIB} PRIVATE ${USER_DIR})
 
 # Add user programs
 set(USER_PROGRAMS_C_FILES
-    ${USER_DIR}/cat.c
-	${USER_DIR}/echo.c
+    ${USER_DIR}/cat
+	${USER_DIR}/echo
     # @TODO:
-	# ${USER_DIR}/forktest.c
-	${USER_DIR}/grep.c
-	${USER_DIR}/init.c
-	${USER_DIR}/kill.c
-	${USER_DIR}/ln.c
-	${USER_DIR}/ls.c
-	${USER_DIR}/mkdir.c
-	${USER_DIR}/rm.c
-	${USER_DIR}/sh.c
-	${USER_DIR}/stressfs.c
-	${USER_DIR}/usertests.c
-	${USER_DIR}/grind.c
-	${USER_DIR}/wc.c
-	${USER_DIR}/zombie.c
-	${USER_DIR}/sleep.c
-	${USER_DIR}/pingpong.c
-	${USER_DIR}/primes.c
-	${USER_DIR}/find.c
-	${USER_DIR}/xargs.c
+	# ${USER_DIR}/forktest
+	${USER_DIR}/grep
+	${USER_DIR}/init
+	${USER_DIR}/kill
+	${USER_DIR}/ln
+	${USER_DIR}/ls
+	${USER_DIR}/mkdir
+	${USER_DIR}/rm
+	${USER_DIR}/sh
+	${USER_DIR}/stressfs
+	${USER_DIR}/usertests
+	${USER_DIR}/grind
+	${USER_DIR}/wc
+	${USER_DIR}/zombie
+	${USER_DIR}/sleep
+	${USER_DIR}/pingpong
+	${USER_DIR}/primes
+	${USER_DIR}/find
+	${USER_DIR}/xargs
 )
 
-# if($ENV{LAB} AND $ENV{LAB} STREQUAL "syscall")
-#     set(USER_PROGRAMS_C_FILES 
-#         ${USER_PROGRAMS_C_FILES}
-#         ${USER_DIR}/attack.c
-#         ${USER_DIR}/attacktest.c
-#         ${USER_DIR}/secret.c
-#     )
-# endif()
+if($ENV{LAB} AND $ENV{LAB} STREQUAL "syscall")
+    set(USER_PROGRAMS_C_FILES 
+        ${USER_PROGRAMS_C_FILES}
+        ${USER_DIR}/attack
+        ${USER_DIR}/attacktest
+        ${USER_DIR}/secret
+    )
+endif()
 
-# if($ENV{LAB} AND $ENV{LAB} STREQUAL "lock")
-#     set(USER_PROGRAMS_C_FILES 
-#         ${USER_PROGRAMS_C_FILES}
-#         ${USER_DIR}/stats.c
-#         ${USER_DIR}/kalloctest.c
-# 	    ${USER_DIR}/bcachetest.c
-#     )
-# endif()
+if($ENV{LAB} AND $ENV{LAB} STREQUAL "lock")
+    set(USER_PROGRAMS_C_FILES 
+        ${USER_PROGRAMS_C_FILES}
+        ${USER_DIR}/stats
+        ${USER_DIR}/kalloctest
+	    ${USER_DIR}/bcachetest
+    )
+endif()
 
-# if($ENV{LAB} AND $ENV{LAB} STREQUAL "traps")
-#     set(USER_PROGRAMS_C_FILES 
-#         ${USER_PROGRAMS_C_FILES}
-#         ${USER_DIR}/call.c
-#         ${USER_DIR}/bttest.c
-#     )
-# endif()
+if($ENV{LAB} AND $ENV{LAB} STREQUAL "traps")
+    set(USER_PROGRAMS_C_FILES 
+        ${USER_PROGRAMS_C_FILES}
+        ${USER_DIR}/call
+        ${USER_DIR}/bttest
+    )
+endif()
 
-# if($ENV{LAB} AND $ENV{LAB} STREQUAL "lazy")
-#     set(USER_PROGRAMS_C_FILES 
-#         ${USER_PROGRAMS_C_FILES}
-#         ${USER_DIR}/lazytests.c
-#     )
-# endif()
+if($ENV{LAB} AND $ENV{LAB} STREQUAL "lazy")
+    set(USER_PROGRAMS_C_FILES 
+        ${USER_PROGRAMS_C_FILES}
+        ${USER_DIR}/lazytests
+    )
+endif()
 
-# if($ENV{LAB} AND $ENV{LAB} STREQUAL "cow")
-#     set(USER_PROGRAMS_C_FILES 
-#         ${USER_PROGRAMS_C_FILES}
-#         ${USER_DIR}/cowtest.c
-#     )
-# endif()
+if($ENV{LAB} AND $ENV{LAB} STREQUAL "cow")
+    set(USER_PROGRAMS_C_FILES 
+        ${USER_PROGRAMS_C_FILES}
+        ${USER_DIR}/cowtest
+    )
+endif()
 
 # # @TODO:
 # if($ENV{LAB} AND $ENV{LAB} STREQUAL "thread")
@@ -158,32 +158,32 @@ set(USER_PROGRAMS_C_FILES
 #         "-N -e main -Ttext 0")
 # endif()
 
-# if($ENV{LAB} AND $ENV{LAB} STREQUAL "pgtbl")
-#     set(USER_PROGRAMS_C_FILES 
-#         ${USER_PROGRAMS_C_FILES}
-#         ${USER_DIR}/pgtbltest.c
-#     )
-# endif()
+if($ENV{LAB} AND $ENV{LAB} STREQUAL "pgtbl")
+    set(USER_PROGRAMS_C_FILES 
+        ${USER_PROGRAMS_C_FILES}
+        ${USER_DIR}/pgtbltest
+    )
+endif()
 
-# if($ENV{LAB} AND $ENV{LAB} STREQUAL "fs")
-#     set(USER_PROGRAMS_C_FILES 
-#         ${USER_PROGRAMS_C_FILES}
-#         ${USER_DIR}/bigfile.c
-#     )
-# endif()
+if($ENV{LAB} AND $ENV{LAB} STREQUAL "fs")
+    set(USER_PROGRAMS_C_FILES 
+        ${USER_PROGRAMS_C_FILES}
+        ${USER_DIR}/bigfile
+    )
+endif()
 
-# if($ENV{LAB} AND $ENV{LAB} STREQUAL "net")
-#     set(USER_PROGRAMS_C_FILES 
-#         ${USER_PROGRAMS_C_FILES}
-#         ${USER_DIR}/nettest.c
-#     )
-# endif()
+if($ENV{LAB} AND $ENV{LAB} STREQUAL "net")
+    set(USER_PROGRAMS_C_FILES 
+        ${USER_PROGRAMS_C_FILES}
+        ${USER_DIR}/nettest
+    )
+endif()
 
 # Modify user program output to match the .c file name without a suffix
 foreach(PROGRAM ${USER_PROGRAMS_C_FILES})
     get_filename_component(PROGRAM_NAME ${PROGRAM} NAME_WE)
     list(APPEND USER_PROGRAMS _${PROGRAM_NAME})
-    add_executable(_${PROGRAM_NAME} ${PROGRAM})
+    add_executable(_${PROGRAM_NAME} ${PROGRAM}.c)
     target_link_options(_${PROGRAM_NAME} PRIVATE -z max-page-size=4096 -T ${USER_DIR}/user.ld)
     # Force linker to include all objects from userlib (including usys.S)
     target_link_libraries(_${PROGRAM_NAME} PRIVATE
