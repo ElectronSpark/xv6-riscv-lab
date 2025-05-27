@@ -333,3 +333,10 @@ void *hlist_pop(hlist_t *hlist, void *node) {
         return NULL;
     }
 }
+
+size_t hlist_len(hlist_t *hlist) {
+    if (!__hlist_validate(hlist)) {
+        return 0;
+    }
+    return hlist->elem_cnt;
+}
