@@ -474,6 +474,24 @@ static void test_hlist_single_collision(void **state) {
     assert_int_equal(hlist_len(fixture->hlist), 0);
 }
 
+static void __display_hlist_distribution(hlist_t *hlist) {
+    uint64 i = 0;
+    hlist_bucket_t *bucket;
+    printf("Hash List Distribution:\n");
+    printf("Total Buckets: %lu\n", hlist->bucket_cnt);
+    printf("Total Elements: %ld\n", hlist->elem_cnt);
+    printf("[");
+    hlist_foreach_bucket(hlist, i, bucket) {
+        list_node_t *entry;
+        int count = 0;
+        list_foreach_entry(bucket, entry) {
+            count++;
+        }
+        printf("%d, ", count);
+    }
+    printf("]\n");
+}
+
 
 // Test scale insertion and retrieval of nodes
 static void test_hlist_scale_insertion(void **state) {
@@ -486,6 +504,8 @@ static void test_hlist_scale_insertion(void **state) {
         assert_null(result); // Should not replace any node
         assert_int_equal(hlist_len(fixture->hlist), i + 1); // Element count should increase
     }
+
+    __display_hlist_distribution(fixture->hlist);
 
     // pop first 200 nodes
     for (int i = 0; i < 200 ; i++) {
@@ -566,8 +586,9 @@ static void test_hlist_scale_insertion_string(void **state) {
     test_fixture_t *fixture = (test_fixture_t *)*state;
     ht_hash_t check_sum = 0; 
 
-    hlist_init(fixture->hlist, TEST_HASH_BUCKET_CNT, &test_hlist_string_func);
-    
+    assert_int_equal(hlist_init(fixture->hlist, TEST_HASH_BUCKET_CNT, &test_hlist_string_func), 0);
+    assert_ptr_equal(fixture->hlist->func.cmp_node, test_hlist_string_func.cmp_node); // Set the string hash function
+
     for (int i = 0; i < TEST_NUMBERS_COUNT; i++) {
         char value[64];
         snprintf(value, sizeof(value), "%lu", scale_test_numbers[i]);
@@ -576,6 +597,8 @@ static void test_hlist_scale_insertion_string(void **state) {
         assert_null(result); // Should not replace any node
         assert_int_equal(hlist_len(fixture->hlist), i + 1); // Element count should increase
     }
+
+    __display_hlist_distribution(fixture->hlist);
 
     // pop first 200 nodes
     for (int i = 0; i < 200 ; i++) {
