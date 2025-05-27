@@ -10,6 +10,39 @@
 
 #define TEST_HASH_BUCKET_CNT 31 // Number of buckets in the hash list
 
+static void __display_hlist_distribution(hlist_t *hlist) {
+    uint64 i = 0;
+    hlist_bucket_t *bucket;
+    printf("Hash List Distribution:\n");
+    printf("Total Buckets: %lu\n", hlist->bucket_cnt);
+    printf("Total Elements: %ld\n", hlist->elem_cnt);
+    printf("[");
+    hlist_foreach_bucket(hlist, i, bucket) {
+        list_node_t *entry;
+        int count = 0;
+        list_foreach_entry(bucket, entry) {
+            count++;
+        }
+        printf("%d, ", count);
+    }
+    printf("]\n");
+}
+
+static bool __hlist_consistency_check(hlist_t *hlist) {
+    uint64 i = 0;
+    hlist_bucket_t *bucket;
+    int count = 0;
+    
+    hlist_foreach_bucket(hlist, i, bucket) {
+        list_node_t *entry;
+        list_foreach_entry(bucket, entry) {
+            count++;
+        }
+    }
+    
+    return hlist_len(hlist) == count;
+}
+
 // Helper function to create a hash list with dynamic memory allocation
 static inline hlist_t *mock_hlist_create(uint64 bucket_cnt) {
     size_t size = sizeof(hlist_t) + bucket_cnt * sizeof(hlist_bucket_t);
@@ -114,16 +147,9 @@ static int setup(void **state) {
 static int teardown(void **state) {
     test_fixture_t *fixture = (test_fixture_t *)*state;
     if (fixture) {
-        // Free any allocated nodes
-        for (int i = 0; i < 5; i++) {
-            if (fixture->nodes[i]) {
-                free_test_node(fixture->nodes[i]);
-                fixture->nodes[i] = NULL;
-            }
-        }
-        
         // Free the hash list
         if (fixture->hlist) {
+            assert_true(__hlist_consistency_check(fixture->hlist));
             if (hlist_len(fixture->hlist) == 0) {
                 // Validate all buckets are empty before freeing
                 uint64 i = 0;
@@ -136,6 +162,14 @@ static int teardown(void **state) {
                 }
             }
             free(fixture->hlist);
+        }
+
+        // Free any allocated nodes
+        for (int i = 0; i < 5; i++) {
+            if (fixture->nodes[i]) {
+                free_test_node(fixture->nodes[i]);
+                fixture->nodes[i] = NULL;
+            }
         }
         
         free(fixture);
@@ -197,6 +231,8 @@ static void test_hlist_put_and_get(void **state) {
     assert_null(result2);
     assert_null(result3);
     
+    assert_true(__hlist_consistency_check(fixture->hlist));
+
     // Create dummy nodes for lookup
     test_node_t dummy1 = { .key = 1 };
     test_node_t dummy2 = { .key = 2 };
@@ -229,12 +265,16 @@ static void test_hlist_put_replace(void **state) {
     // Create and insert an initial node
     fixture->nodes[0] = create_test_node(1, "Node 1");
     hlist_put(fixture->hlist, fixture->nodes[0]);
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
     
     // Create a replacement node with the same key
     test_node_t *replacement = create_test_node(1, "Node 1 New");
     
     // Replace the existing node
     void *old_node = hlist_put(fixture->hlist, replacement);
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
     
     // Verify the old node was returned and the replacement is in the list
     assert_ptr_equal(old_node, fixture->nodes[0]);
@@ -274,10 +314,14 @@ static void test_hlist_pop_specific_key(void **state) {
     hlist_put(fixture->hlist, fixture->nodes[0]);
     hlist_put(fixture->hlist, fixture->nodes[1]);
     hlist_put(fixture->hlist, fixture->nodes[2]);
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
     
     // Pop the node with key 2
     test_node_t dummy = { .key = 2 };
     test_node_t *popped = hlist_pop(fixture->hlist, &dummy);
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
     
     // Verify the correct node was popped
     assert_ptr_equal(popped, fixture->nodes[1]);
@@ -285,6 +329,8 @@ static void test_hlist_pop_specific_key(void **state) {
     // Try to get the popped node - should return NULL
     test_node_t *get = hlist_get(fixture->hlist, &dummy);
     assert_null(get);
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
     
     // Free the popped node manually since it's no longer in the fixture
     free_test_node(popped);
@@ -301,6 +347,8 @@ static void test_hlist_pop_null_key(void **state) {
     
     hlist_put(fixture->hlist, fixture->nodes[0]);
     hlist_put(fixture->hlist, fixture->nodes[1]);
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
     
     // Pop with NULL key - should return arbitrary node
     test_node_t *popped = hlist_pop(fixture->hlist, NULL);
@@ -334,6 +382,8 @@ static void test_hlist_node_in_list(void **state) {
     
     // Insert one node
     hlist_put(fixture->hlist, fixture->nodes[0]);
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
     
     // Check that inserted node is in list but other is not
     assert_true(hlist_node_in_list(fixture->hlist, fixture->nodes[0]));
@@ -453,6 +503,8 @@ static void test_hlist_single_collision(void **state) {
         assert_null(result); // Should not replace any node
         assert_int_equal(hlist_len(fixture->hlist), i + 1); // Element count should increase
     }
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
     
     // Verify that all nodes are in the same bucket
     for (int i = 0; i < 5; i++) {
@@ -461,6 +513,7 @@ static void test_hlist_single_collision(void **state) {
         assert_non_null(get_node); // Should return a node
         assert_int_equal(get_node->key, i);
     }
+
     
     // Pop all nodes and verify they are returned correctly
     for (int i = 0; i < 5; i++) {
@@ -473,25 +526,6 @@ static void test_hlist_single_collision(void **state) {
     // Check that the list is empty now
     assert_int_equal(hlist_len(fixture->hlist), 0);
 }
-
-static void __display_hlist_distribution(hlist_t *hlist) {
-    uint64 i = 0;
-    hlist_bucket_t *bucket;
-    printf("Hash List Distribution:\n");
-    printf("Total Buckets: %lu\n", hlist->bucket_cnt);
-    printf("Total Elements: %ld\n", hlist->elem_cnt);
-    printf("[");
-    hlist_foreach_bucket(hlist, i, bucket) {
-        list_node_t *entry;
-        int count = 0;
-        list_foreach_entry(bucket, entry) {
-            count++;
-        }
-        printf("%d, ", count);
-    }
-    printf("]\n");
-}
-
 
 // Test scale insertion and retrieval of nodes
 static void test_hlist_scale_insertion(void **state) {
@@ -506,6 +540,7 @@ static void test_hlist_scale_insertion(void **state) {
     }
 
     __display_hlist_distribution(fixture->hlist);
+    assert_true(__hlist_consistency_check(fixture->hlist));
 
     // pop first 200 nodes
     for (int i = 0; i < 200 ; i++) {
@@ -515,6 +550,8 @@ static void test_hlist_scale_insertion(void **state) {
         assert_int_equal(popped->key, scale_test_numbers[i]); // Should match the key
         assert_int_equal(hlist_len(fixture->hlist), TEST_NUMBERS_COUNT - i - 1);
     }
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
 
     // pop first 200 nodes again
     for (int i = 0; i < 200; i++) {
@@ -532,6 +569,8 @@ static void test_hlist_scale_insertion(void **state) {
         assert_int_equal(popped->key, scale_test_numbers[i]); // Should match the key
         assert_int_equal(hlist_len(fixture->hlist), TEST_NUMBERS_COUNT - i - 1);
     }
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
 
     // pop the first 200 nodes again
     for (int i = 0; i < 200; i++) {
@@ -599,6 +638,7 @@ static void test_hlist_scale_insertion_string(void **state) {
     }
 
     __display_hlist_distribution(fixture->hlist);
+    assert_true(__hlist_consistency_check(fixture->hlist)); // Check consistency of the hash list
 
     // pop first 200 nodes
     for (int i = 0; i < 200 ; i++) {
@@ -611,6 +651,8 @@ static void test_hlist_scale_insertion_string(void **state) {
         assert_string_equal(popped->value, dummy.value); // Should match the key
         assert_int_equal(hlist_len(fixture->hlist), TEST_NUMBERS_COUNT - i - 1);
     }
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
 
     // pop first 200 nodes again
     for (int i = 0; i < 200; i++) {
@@ -633,6 +675,8 @@ static void test_hlist_scale_insertion_string(void **state) {
         assert_string_equal(popped->value, dummy.value); // Should match the key
         assert_int_equal(hlist_len(fixture->hlist), TEST_NUMBERS_COUNT - i - 1);
     }
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
 
     // pop the first 200 nodes again
     for (int i = 0; i < 200; i++) {
@@ -657,6 +701,8 @@ static void test_hlist_scale_insertion_string(void **state) {
         uint64 popped_value = strtoull(popped->value, NULL, 10); // Convert string to number
         check_sum ^= popped_value; // Update checksum
     }
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
 
     assert_int_equal(check_sum, 0); // Checksum should be zero if all nodes were popped correctly
 }

@@ -39,6 +39,8 @@
         "hlist_mock.h": "c",
         "hlist.h": "c",
         "cstdint": "c",
-        "charconv": "c"
+        "charconv": "c",
+        "algorithm": "c",
+        "format": "c"
     }
 }
