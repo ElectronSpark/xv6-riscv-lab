@@ -24,7 +24,7 @@ static inline hlist_t *mock_hlist_create(uint64 bucket_cnt) {
 typedef struct test_node {
     hlist_entry_t entry;  // Include a hash list entry
     uint64 key;              // Key for hashing/lookup
-    char value[32];       // Value associated with the key
+    char value[64];       // Value associated with the key
 } test_node_t;
 
 // Hash function for test_node
@@ -537,6 +537,107 @@ static void test_hlist_scale_insertion(void **state) {
     assert_int_equal(check_sum, 0); // Checksum should be zero if all nodes were popped correctly
 }
 
+// Hash function for test_node when the key is string
+static ht_hash_t test_node_hash_string(void *node) {
+    test_node_t *n = (test_node_t *)node;
+    return hlist_hash_str(n->value, n->key);
+}
+
+// Compare nodes function for test_node
+static int test_node_cmp_string(hlist_t *hlist, void *node1, void *node2) {
+    test_node_t *n1 = (test_node_t *)node1;
+    test_node_t *n2 = (test_node_t *)node2;
+    if (n1->key > n2->key) {
+        return n1->key - n2->key;
+    }
+    return strncmp(n1->value, n2->value, n2->key);
+}
+
+// Initialize a hash list functions structure
+static hlist_func_t test_hlist_string_func = {
+    .hash = test_node_hash_string,
+    .get_entry = test_node_get_entry,
+    .get_node = test_node_get_node,
+    .cmp_node = test_node_cmp_string
+};
+
+// Test scale insertion and retrieval of nodes
+static void test_hlist_scale_insertion_string(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+    ht_hash_t check_sum = 0; 
+
+    hlist_init(fixture->hlist, TEST_HASH_BUCKET_CNT, &test_hlist_string_func);
+    
+    for (int i = 0; i < TEST_NUMBERS_COUNT; i++) {
+        char value[64];
+        snprintf(value, sizeof(value), "%lu", scale_test_numbers[i]);
+        fixture->nodes[i] = create_test_node(strlen(value), value);
+        void *result = hlist_put(fixture->hlist, fixture->nodes[i]);
+        assert_null(result); // Should not replace any node
+        assert_int_equal(hlist_len(fixture->hlist), i + 1); // Element count should increase
+    }
+
+    // pop first 200 nodes
+    for (int i = 0; i < 200 ; i++) {
+        test_node_t dummy = { 0 };
+        snprintf(dummy.value, sizeof(dummy.value), "%lu", scale_test_numbers[i]);
+        dummy.key = strlen(dummy.value);
+        test_node_t *popped = hlist_pop(fixture->hlist, &dummy);
+        assert_non_null(popped); // Should return a node
+        assert_int_equal(popped->key, dummy.key); // Should match the length
+        assert_string_equal(popped->value, dummy.value); // Should match the key
+        assert_int_equal(hlist_len(fixture->hlist), TEST_NUMBERS_COUNT - i - 1);
+    }
+
+    // pop first 200 nodes again
+    for (int i = 0; i < 200; i++) {
+        test_node_t dummy = { 0 };
+        snprintf(dummy.value, sizeof(dummy.value), "%lu", scale_test_numbers[i]);
+        dummy.key = strlen(dummy.value);
+        test_node_t *popped = hlist_pop(fixture->hlist, &dummy);
+        assert_null(popped); // Should return NULL as nodes are already popped
+        assert_int_equal(hlist_len(fixture->hlist), TEST_NUMBERS_COUNT - 200);
+    }
+
+    // pop the next 700 nodes
+    for (int i = 200; i < 900; i++) {
+        test_node_t dummy = { 0 };
+        snprintf(dummy.value, sizeof(dummy.value), "%lu", scale_test_numbers[i]);
+        dummy.key = strlen(dummy.value);
+        test_node_t *popped = hlist_pop(fixture->hlist, &dummy);
+        assert_non_null(popped); // Should return a node
+        assert_int_equal(popped->key, dummy.key); // Should match the length
+        assert_string_equal(popped->value, dummy.value); // Should match the key
+        assert_int_equal(hlist_len(fixture->hlist), TEST_NUMBERS_COUNT - i - 1);
+    }
+
+    // pop the first 200 nodes again
+    for (int i = 0; i < 200; i++) {
+        test_node_t dummy = { 0 };
+        snprintf(dummy.value, sizeof(dummy.value), "%lu", scale_test_numbers[i]);
+        dummy.key = strlen(dummy.value);
+        test_node_t *popped = hlist_pop(fixture->hlist, &dummy);
+        assert_null(popped); // Should return NULL as nodes are already popped
+        assert_int_equal(hlist_len(fixture->hlist), TEST_NUMBERS_COUNT - 900);
+    }
+
+    // calculate the checksum of the remaining nodes
+    for (int i = 900; i < TEST_NUMBERS_COUNT; i++) {
+        check_sum ^= scale_test_numbers[i];
+    }
+
+    // null pop the remaining nodes
+    for (int i = 900; i < TEST_NUMBERS_COUNT; i++) {
+        test_node_t *popped = hlist_pop(fixture->hlist, NULL);
+        assert_non_null(popped); // Should return a node
+        assert_int_equal(hlist_len(fixture->hlist), TEST_NUMBERS_COUNT - i - 1);
+        uint64 popped_value = strtoull(popped->value, NULL, 10); // Convert string to number
+        check_sum ^= popped_value; // Update checksum
+    }
+
+    assert_int_equal(check_sum, 0); // Checksum should be zero if all nodes were popped correctly
+}
+
 /* Main function */
 int main(void) {
     const struct CMUnitTest tests[] = {
@@ -564,6 +665,9 @@ int main(void) {
 
         // single collision test
         cmocka_unit_test_setup_teardown(test_hlist_single_collision, single_collision_setup, single_collision_teardown),
+    
+        // scale string tests
+        cmocka_unit_test_setup_teardown(test_hlist_scale_insertion_string, setup, teardown),
     };
     
     return cmocka_run_group_tests(tests, NULL, NULL);
