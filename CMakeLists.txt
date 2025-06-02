@@ -103,3 +103,104 @@ add_custom_target(fs_img ALL
 
 
 # @TODO: run etags on kernel and _init
+# Find QEMU
+find_program(QEMU_EXECUTABLE NAMES qemu-system-riscv64 qemu-system-riscv32 qemu-system-riscv)
+if(NOT QEMU_EXECUTABLE)
+    message(FATAL_ERROR "QEMU executable not found. Please install QEMU or set the QEMU environment variable.")
+endif()
+set(QEMU ${QEMU_EXECUTABLE})
+
+# Generate a unique GDB port
+execute_process(
+    COMMAND bash -c "expr \$(id -u) % 5000 + 25000"
+    OUTPUT_VARIABLE GDBPORT
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+# Generate QEMU GDB stub options
+# Check if QEMU supports the '-gdb' option
+execute_process(
+    COMMAND ${QEMU} -help
+    OUTPUT_VARIABLE QEMU_HELP
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+if(QEMU_HELP MATCHES "-gdb")
+    set(QEMUGDB -gdb tcp::${GDBPORT})
+else()
+    set(QEMUGDB -s -p ${GDBPORT})
+endif()
+
+# Set default CPUS
+if(NOT DEFINED ENV{CPUS} OR "$ENV{CPUS}" STREQUAL "")
+    set(CPUS 3)
+else()
+    set(CPUS $ENV{CPUS})
+endif()
+
+# If LAB is fs, set CPUS to 1
+if(DEFINED ENV{LAB} AND "$ENV{LAB}" STREQUAL "fs")
+    set(CPUS 1)
+endif()
+
+# Generate unique FWDPORT1 and FWDPORT2 using CMake math and user id
+execute_process(
+    COMMAND id -u
+    OUTPUT_VARIABLE USER_ID
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+math(EXPR FWDPORT1 "${USER_ID} % 5000 + 25999")
+math(EXPR FWDPORT2 "${USER_ID} % 5000 + 30999")
+
+# Compose QEMU options
+set(QEMUOPTS
+    -machine virt
+    -bios none
+    -kernel ${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel
+    -m 128M
+    -smp ${CPUS}
+    -nographic
+    -global virtio-mmio.force-legacy=false
+    -drive file=fs.img,if=none,format=raw,id=x0
+    -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+    -netdev user,id=net0,hostfwd=udp::${FWDPORT1}-:2000,hostfwd=udp::${FWDPORT2}-:2001
+    -object filter-dump,id=net0,netdev=net0,file=packets.pcap
+    -device e1000,netdev=net0,bus=pcie.0
+)
+
+# Add custom target to run QEMU
+add_custom_target(qemu
+    COMMAND ${QEMU} ${QEMUOPTS}
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel ${CMAKE_CURRENT_BINARY_DIR}/fs.img
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running QEMU with kernel and fs.img"
+)
+
+# Generate .gdbinit from template
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit
+    COMMAND sed "s/:1234/:${GDBPORT}/" < ${CMAKE_SOURCE_DIR}/.gdbinit.tmpl-riscv > ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit
+    DEPENDS ${CMAKE_SOURCE_DIR}/.gdbinit.tmpl-riscv
+    COMMENT "Generating .gdbinit with unique GDB port"
+)
+
+add_custom_target(gdbinit ALL
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit
+)
+
+# Add custom target to run QEMU with GDB stub
+add_custom_target(qemu-gdb
+    COMMAND ${CMAKE_COMMAND} -E echo "*** Now run 'gdb' in another window."
+    COMMAND ${QEMU} ${QEMUOPTS} -S ${QEMUGDB}
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit ${CMAKE_CURRENT_BINARY_DIR}/fs.img
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    COMMENT "Running QEMU with GDB stub"
+)
+
+# If LAB is net, generate SERVERPORT
+if(DEFINED ENV{LAB} AND "$ENV{LAB}" STREQUAL "net")
+    execute_process(
+        COMMAND bash -c "expr \$(id -u) % 5000 + 25099"
+        OUTPUT_VARIABLE SERVERPORT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+endif()

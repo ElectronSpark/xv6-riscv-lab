@@ -82,9 +82,9 @@ set_source_files_properties(${KERNEL_SCAN_OBJS} PROPERTIES LANGUAGE C)
 set_source_files_properties(${KERNEL_S_FILES} PROPERTIES LANGUAGE C)
 
 set(KERNEL_OBJS
+    ${KERNEL_S_FILES}
     ${KERNEL_C_FILES}
     ${KERNEL_SCAN_OBJS}
-    ${KERNEL_S_FILES}
 )
 
 # Add kernel executable
