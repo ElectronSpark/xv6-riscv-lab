@@ -77,8 +77,8 @@ set(MOCK_TEST_WRAP_FUNCTIONS
 )
 
 set(MOCK_TEST_SRC
-    ${CMAKE_SOURCE_DIR}/src/ut_mock_main
-    ${CMAKE_SOURCE_DIR}/src/ut_mock_wraps
+    ${CMAKE_SOURCE_DIR}/src/ut_mock_main.c
+    ${CMAKE_SOURCE_DIR}/src/ut_mock_wraps.c
 )
 
 set(MOCK_WRAP_OPTIONS "")
@@ -92,7 +92,7 @@ set(MOCK_COMPILE_OPTIONS "-Wl${MOCK_WRAP_OPTIONS}")
 include(cmake/FetchCmocka.cmake)
 # find_library(cmocka-static)
 
-add_executable(ut_mock ${MOCK_TEST_SRC}.c ${MOCK_TEST_KERNEL_SRC})
+add_executable(ut_mock ${MOCK_TEST_SRC} ${MOCK_TEST_KERNEL_SRC})
 target_link_libraries(ut_mock PRIVATE cmocka-static)
 target_compile_options(ut_mock PRIVATE -ggdb -Wall)
 target_link_options(ut_mock PRIVATE ${MOCK_COMPILE_OPTIONS})
