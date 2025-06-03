@@ -19,8 +19,8 @@
             __FILE__, __LINE__, __FUNCTION__);                  \
 } while (0)
 
-static int __failure_count = 0;
-static int __success_count = 0;
+static int __attribute__((unused)) __failure_count = 0;
+static int __attribute__((unused)) __success_count = 0;
 
 #define FAILURE_COUNT() do { __failure_count++; } while (0)
 #define SUCCESS_COUNT() do { __success_count++; } while (0)

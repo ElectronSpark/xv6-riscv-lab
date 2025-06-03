@@ -70,41 +70,6 @@ static void test_push_empty(void **state) {
     assert_true(compare_list_arr(head, expected, expected_size));
 }
 
-// Push back tests
-static void test_push_back_empty_1(void **state) {
-    (void)state;
-    int input[] = {};
-    int args[] = {1};
-    int expected[] = {1};
-    list_node_t *head = make_list(input, 0);
-    assert_non_null(head);
-    
-    test_node_t *node = make_node(args[0]);
-    assert_non_null(node);
-    list_node_push_back(head, node, entry);
-    
-    assert_true(compare_list_arr(head, expected, 1));
-    destroy_list(head);
-}
-
-static void test_push_back_empty_2(void **state) {
-    (void)state;
-    int input[] = {};
-    int args[] = {2, 1}; // Note: Push back order is different
-    int expected[] = {1, 2};
-    list_node_t *head = make_list(input, 0);
-    assert_non_null(head);
-    
-    for (int i = 0; i < 2; i++) {
-        test_node_t *node = make_node(args[i]);
-        assert_non_null(node);
-        list_node_push_back(head, node, entry);
-    }
-    
-    assert_true(compare_list_arr(head, expected, 2));
-    destroy_list(head);
-}
-
 test_context_t test_push_back_empty_prestates[] = {
     TEST_CASE_FULL(
         (),
@@ -126,13 +91,16 @@ test_context_t test_push_back_empty_prestates[] = {
 static void test_push_back_empty(void **state) {
     test_context_t *context = *(test_context_t **)state;
     const int *args = context->params.args;
-    size_t args_size = context->params.args_size;
+    size_t args_size = context->params.args_size;  // Added back for clarity
     const int *expected = context->params.expected;
     size_t expected_size = context->params.expected_size;
     list_node_t *head = context->head;
     assert_non_null(head);
     
-    for (int i = 0; i < expected_size; i++) {
+    // Safety check to prevent potential overread
+    size_t loop_count = (args_size < expected_size) ? args_size : expected_size;
+    
+    for (int i = 0; i < loop_count; i++) {
         test_node_t *node = make_node(args[i]);
         assert_non_null(node);
         list_node_push_back(head, node, entry);
@@ -144,23 +112,22 @@ static void test_push_back_empty(void **state) {
 // Pop tests
 static void test_pop_empty(void **state) {
     (void)state;
-    int input[] = {};
-    int expected[] = {};
-    list_node_t *head = make_list(input, 0);
+    // Use NULL instead of empty array to avoid stringop-overread
+    list_node_t *head = make_list(NULL, 0);
     assert_non_null(head);
     
     // Try to pop from empty list - should return NULL
     test_node_t *node = list_node_pop(head, test_node_t, entry);
     assert_null(node);
     
-    assert_true(compare_list_arr(head, expected, 0));
+    assert_true(LIST_IS_EMPTY(head));
     destroy_list(head);
 }
 
 static void test_pop_1(void **state) {
     (void)state;
     int input[] = {1};
-    int expected[] = {};
+    // Use NULL instead of empty array for expected
     list_node_t *head = make_list(input, 1);
     assert_non_null(head);
     
@@ -169,7 +136,7 @@ static void test_pop_1(void **state) {
     assert_int_equal(node->val, 1);
     destroy_node(node);
     
-    assert_true(compare_list_arr(head, expected, 0));
+    assert_true(LIST_IS_EMPTY(head));
     destroy_list(head);
 }
 
@@ -208,23 +175,22 @@ static void test_pop_3(void **state) {
 // Pop back tests
 static void test_pop_back_empty(void **state) {
     (void)state;
-    int input[] = {};
-    int expected[] = {};
-    list_node_t *head = make_list(input, 0);
+    // Use NULL instead of empty array to avoid stringop-overread
+    list_node_t *head = make_list(NULL, 0);
     assert_non_null(head);
     
     // Try to pop_back from empty list - should return NULL
     test_node_t *node = list_node_pop_back(head, test_node_t, entry);
     assert_null(node);
     
-    assert_true(compare_list_arr(head, expected, 0));
+    assert_true(LIST_IS_EMPTY(head));
     destroy_list(head);
 }
 
 static void test_pop_back_1(void **state) {
     (void)state;
     int input[] = {1};
-    int expected[] = {};
+    // Use NULL instead of empty array for expected
     list_node_t *head = make_list(input, 1);
     assert_non_null(head);
     
@@ -233,7 +199,7 @@ static void test_pop_back_1(void **state) {
     assert_int_equal(node->val, 1);
     destroy_node(node);
     
-    assert_true(compare_list_arr(head, expected, 0));
+    assert_true(LIST_IS_EMPTY(head));
     destroy_list(head);
 }
 
@@ -583,8 +549,138 @@ static int list_test_teardown(void **state) {
     return 0;
 }
 
+/**
+ * Test creating an empty list
+ */
+static void test_create_empty_list(void **state) {
+    (void)state;
+    list_node_t *head = make_list(NULL, 0);
+    assert_non_null(head);
+    assert_true(LIST_IS_EMPTY(head)); // Use the macro from list.h
+    destroy_list(head);
+}
+
+/**
+ * Test creating a list with one element
+ */
+static void test_create_one_element_list(void **state) {
+    (void)state;
+    int input[] = {42};
+    list_node_t *head = make_list(input, 1);
+    assert_non_null(head);
+    assert_false(LIST_IS_EMPTY(head)); // Use the macro from list.h
+    
+    // Verify the element using the macro from list.h
+    test_node_t *node = LIST_FIRST_NODE(head, test_node_t, entry);
+    assert_non_null(node);
+    assert_int_equal(node->val, 42);
+    
+    destroy_list(head);
+}
+
+/**
+ * Test pushing elements to an empty list
+ */
+static void test_push_elements(void **state) {
+    (void)state;
+    list_node_t *head = make_list(NULL, 0);
+    assert_non_null(head);
+    
+    // Push several elements
+    for (int i = 5; i >= 1; i--) {
+        test_node_t *node = make_node(i);
+        assert_non_null(node);
+        list_node_push(head, node, entry);
+    }
+    // Verify the list contains the elements in reverse order
+    int expected[] = {5, 4, 3, 2, 1};
+    assert_true(compare_list_arr(head, expected, 5));
+    
+    destroy_list(head);
+}
+
+/**
+ * Test pushing elements to the back of an empty list
+ */
+static void test_push_back_elements(void **state) {
+    (void)state;
+    list_node_t *head = make_list(NULL, 0);
+    assert_non_null(head);
+    
+    // Push several elements to the back
+    for (int i = 5; i >= 1; i--) {
+        test_node_t *node = make_node(i);
+        assert_non_null(node);
+        list_node_push_back(head, node, entry);
+    }
+    
+    // Verify the list contains the elements in original order
+    int expected[] = {1, 2, 3, 4, 5};
+    assert_true(compare_list_arr(head, expected, 5));
+    
+    destroy_list(head);
+}
+
+/**
+ * Test popping elements from a list
+ */
+static void test_pop_elements(void **state) {
+    (void)state;
+    int input[] = {5, 4, 3, 2, 1};
+    list_node_t *head = make_list(input, 5);
+    assert_non_null(head);
+    
+    // Pop the elements one by one and verify
+    for (int i = 1; i <= 5; i++) {
+        test_node_t *node = list_node_pop(head, test_node_t, entry);
+        assert_non_null(node);
+        assert_int_equal(node->val, i);
+        destroy_node(node);
+    }
+    
+    // Verify the list is now empty
+    assert_true(LIST_IS_EMPTY(head));
+    
+    // Try to pop from empty list
+    test_node_t *node = list_node_pop(head, test_node_t, entry);
+    assert_null(node);
+    
+    destroy_list(head);
+}
+
+/**
+ * Test popping elements from the back of a list
+ */
+static void test_pop_back_elements(void **state) {
+    (void)state;
+    int input[] = {5, 4, 3, 2, 1};
+    list_node_t *head = make_list(input, 5);
+    assert_non_null(head);
+    
+    // Pop the elements from back one by one and verify
+    for (int i = 5; i >= 1; i--) {
+        test_node_t *node = list_node_pop_back(head, test_node_t, entry);
+        assert_non_null(node);
+        assert_int_equal(node->val, i);
+        destroy_node(node);
+    }
+    
+    // Verify the list is now empty
+    assert_true(LIST_IS_EMPTY(head));
+    
+    // Try to pop_back from empty list
+    test_node_t *node = list_node_pop_back(head, test_node_t, entry);
+    assert_null(node);
+    
+    destroy_list(head);
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
+        // Basic list creation tests
+        cmocka_unit_test(test_create_empty_list),
+        cmocka_unit_test(test_create_one_element_list),
+        
         // Simple create tests
         cmocka_unit_test_prestate_setup_teardown(test_simple_create, list_test_setup, list_test_teardown, &test_simple_create_prestates[0]),
         cmocka_unit_test_prestate_setup_teardown(test_simple_create, list_test_setup, list_test_teardown, &test_simple_create_prestates[1]),
@@ -592,22 +688,26 @@ int main(void) {
         cmocka_unit_test_prestate_setup_teardown(test_simple_create, list_test_setup, list_test_teardown, &test_simple_create_prestates[3]),
         
         // Push tests
+        cmocka_unit_test(test_push_elements),
         cmocka_unit_test_prestate_setup_teardown(test_push_empty, list_test_setup, list_test_teardown, &test_push_empty_prestates[0]),
         cmocka_unit_test_prestate_setup_teardown(test_push_empty, list_test_setup, list_test_teardown, &test_push_empty_prestates[1]),
         cmocka_unit_test_prestate_setup_teardown(test_push_empty, list_test_setup, list_test_teardown, &test_push_empty_prestates[2]),
         
         // Push back tests
+        cmocka_unit_test(test_push_back_elements),
         cmocka_unit_test_prestate_setup_teardown(test_push_back_empty, list_test_setup, list_test_teardown, &test_push_back_empty_prestates[0]),
         cmocka_unit_test_prestate_setup_teardown(test_push_back_empty, list_test_setup, list_test_teardown, &test_push_back_empty_prestates[1]),
         cmocka_unit_test_prestate_setup_teardown(test_push_back_empty, list_test_setup, list_test_teardown, &test_push_back_empty_prestates[2]),
         
         // Pop tests
+        cmocka_unit_test(test_pop_elements),
         cmocka_unit_test(test_pop_empty),
         cmocka_unit_test(test_pop_1),
         cmocka_unit_test(test_pop_2),
         cmocka_unit_test(test_pop_3),
         
         // Pop back tests
+        cmocka_unit_test(test_pop_back_elements),
         cmocka_unit_test(test_pop_back_empty),
         cmocka_unit_test(test_pop_back_1),
         cmocka_unit_test(test_pop_back_2),

@@ -68,6 +68,9 @@ typedef struct test_node {
 
 static inline test_node_t *make_node(int val) {
     test_node_t *ret = malloc(sizeof(test_node_t));
+    if (val == -9999) {
+        return NULL; // Simulate allocation failure
+    }
     if (ret != NULL) {
         ret->val = val;
     }
@@ -90,20 +93,47 @@ static inline void destroy_list(list_node_t *head) {
 }
 
 static inline list_node_t *make_list(const int arr[], int arr_length) {
-    list_node_t *head = malloc(sizeof(list_node_t));
-    list_entry_init(head);
-    for (int i = 0; i < arr_length; i++) {
-        test_node_t *node = make_node(arr[i]);
-        if (node == NULL) {
-            destroy_list(head);
-            return NULL;
-        }
-        list_node_push(head, node, entry);
+    if (arr_length < 0) {
+        return NULL;
     }
+    
+    list_node_t *head = malloc(sizeof(list_node_t));
+    if (head == NULL) {
+        return NULL;
+    }
+    
+    list_entry_init(head);
+    
+    // Only iterate if arr_length > 0 and arr is not NULL
+    if (arr_length > 0 && arr != NULL) {
+        for (int i = 0; i < arr_length; i++) {
+            test_node_t *node = make_node(arr[i]);
+            if (node == NULL) {
+                destroy_list(head);
+                return NULL;
+            }
+            list_node_push(head, node, entry);
+        }
+    }
+    
     return head;
 }
 
 static inline bool compare_list_arr(list_node_t *head, const int arr[], int arr_length) {
+    if (head == NULL) {
+        return false;
+    }
+    
+    // Handle special cases
+    if (arr_length == 0 || arr == NULL) {
+        // Make sure the list is empty too
+        if (LIST_IS_EMPTY(head)) {
+            return true;
+        }
+        return false;
+    }
+    
+    // Normal case, compare elements
     int idx = 0;
     test_node_t *pos, *tmp;
     list_foreach_node_safe(head, pos, tmp, entry) {

@@ -64,6 +64,7 @@ add_custom_target(valgrind-full
 # Kernel source files to do unit tests
 set(MOCK_TEST_KERNEL_SRC
     ${CMAKE_SOURCE_DIR}/../kernel/page.c
+    ${CMAKE_SOURCE_DIR}/../kernel/slab.c
 )
 
 set(MOCK_TEST_WRAP_FUNCTIONS
@@ -74,6 +75,8 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     acquire
     release
     initlock
+    kmm_alloc
+    kmm_free
 )
 
 set(MOCK_TEST_SRC

@@ -46,3 +46,11 @@ void __wrap_initlock(struct spinlock *lock, char *name) {
 void *__wrap_memset(void *dst, int c, uint n) {
     return memset(dst, c, n);
 }
+
+void *__wrap_kmm_alloc(size_t size) {
+    return test_malloc(size);
+}
+
+void __wrap_kmm_free(void *ptr) {
+    test_free(ptr);
+}
