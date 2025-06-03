@@ -11,9 +11,9 @@
 #include "net.h"
 #include "defs.h"
 
-static uint32 local_ip = MAKE_IP_ADDR(10, 0, 2, 15); // qemu's idea of the guest IP
-static uint8 local_mac[ETHADDR_LEN] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
-static uint8 broadcast_mac[ETHADDR_LEN] = { 0xFF, 0XFF, 0XFF, 0XFF, 0XFF, 0XFF };
+STATIC uint32 local_ip = MAKE_IP_ADDR(10, 0, 2, 15); // qemu's idea of the guest IP
+STATIC uint8 local_mac[ETHADDR_LEN] = { 0x52, 0x54, 0x00, 0x12, 0x34, 0x56 };
+STATIC uint8 broadcast_mac[ETHADDR_LEN] = { 0xFF, 0XFF, 0XFF, 0XFF, 0XFF, 0XFF };
 
 // Strips data from the start of the buffer and returns a pointer to it.
 // Returns 0 if less than the full requested length is available.
@@ -126,7 +126,7 @@ mbufq_init(struct mbufq *q)
 
 // This code is lifted from FreeBSD's ping.c, and is copyright by the Regents
 // of the University of California.
-static unsigned short
+STATIC unsigned short
 in_cksum(const unsigned char *addr, int len)
 {
   int nleft = len;
@@ -160,7 +160,7 @@ in_cksum(const unsigned char *addr, int len)
 }
 
 // sends an ethernet packet
-static void
+STATIC void
 net_tx_eth(struct mbuf *m, uint16 ethtype)
 {
   struct eth *ethhdr;
@@ -178,7 +178,7 @@ net_tx_eth(struct mbuf *m, uint16 ethtype)
 }
 
 // sends an IP packet
-static void
+STATIC void
 net_tx_ip(struct mbuf *m, uint8 proto, uint32 dip)
 {
   struct ip *iphdr;
@@ -217,7 +217,7 @@ net_tx_udp(struct mbuf *m, uint32 dip,
 }
 
 // sends an ARP packet
-static int
+STATIC int
 net_tx_arp(uint16 op, uint8 dmac[ETHADDR_LEN], uint32 dip)
 {
   struct mbuf *m;
@@ -247,7 +247,7 @@ net_tx_arp(uint16 op, uint8 dmac[ETHADDR_LEN], uint32 dip)
 }
 
 // receives an ARP packet
-static void
+STATIC void
 net_rx_arp(struct mbuf *m)
 {
   struct arp *arphdr;
@@ -282,7 +282,7 @@ done:
 }
 
 // receives a UDP packet
-static void
+STATIC void
 net_rx_udp(struct mbuf *m, uint16 len, struct ip *iphdr)
 {
   struct udp *udphdr;
@@ -317,7 +317,7 @@ fail:
 }
 
 // receives an IP packet
-static void
+STATIC void
 net_rx_ip(struct mbuf *m)
 {
   struct ip *iphdr;

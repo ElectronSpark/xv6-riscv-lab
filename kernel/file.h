@@ -1,5 +1,8 @@
 #ifndef __KERNEL_FILE_H
 #define __KERNEL_FILE_H
+
+#include "compiler.h"
+
 struct file {
   enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE, FD_SOCK} type;
   int ref; // reference count

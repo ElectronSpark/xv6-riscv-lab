@@ -48,8 +48,8 @@ struct log {
 };
 struct log log;
 
-static void recover_from_log(void);
-static void commit();
+STATIC void recover_from_log(void);
+STATIC void commit();
 
 void
 initlog(int dev, struct superblock *sb)
@@ -65,7 +65,7 @@ initlog(int dev, struct superblock *sb)
 }
 
 // Copy committed blocks from log to their home location
-static void
+STATIC void
 install_trans(int recovering)
 {
   int tail;
@@ -83,7 +83,7 @@ install_trans(int recovering)
 }
 
 // Read the log header from disk into the in-memory log header
-static void
+STATIC void
 read_head(void)
 {
   struct buf *buf = bread(log.dev, log.start);
@@ -99,7 +99,7 @@ read_head(void)
 // Write in-memory log header to disk.
 // This is the true point at which the
 // current transaction commits.
-static void
+STATIC void
 write_head(void)
 {
   struct buf *buf = bread(log.dev, log.start);
@@ -113,7 +113,7 @@ write_head(void)
   brelse(buf);
 }
 
-static void
+STATIC void
 recover_from_log(void)
 {
   read_head();
@@ -175,7 +175,7 @@ end_op(void)
 }
 
 // Copy modified blocks from cache to log.
-static void
+STATIC void
 write_log(void)
 {
   int tail;
@@ -190,7 +190,7 @@ write_log(void)
   }
 }
 
-static void
+STATIC void
 commit()
 {
   if (log.lh.n > 0) {

@@ -18,14 +18,14 @@
 volatile int panicked = 0;
 
 // lock to avoid interleaving concurrent printf's.
-static struct {
+STATIC struct {
   struct spinlock lock;
   int locking;
 } pr;
 
-static char digits[] = "0123456789abcdef";
+STATIC char digits[] = "0123456789abcdef";
 
-static void
+STATIC void
 printint(long long xx, int base, int sign)
 {
   char buf[16];
@@ -49,7 +49,7 @@ printint(long long xx, int base, int sign)
     consputc(buf[i]);
 }
 
-static void
+STATIC void
 printptr(uint64 x)
 {
   int i;

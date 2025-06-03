@@ -19,7 +19,7 @@
 // the address of virtio mmio register r.
 #define R(r) ((volatile uint32 *)(VIRTIO0 + (r)))
 
-static struct disk {
+STATIC struct disk {
   // a set (not a ring) of DMA descriptors, with which the
   // driver tells the device where to read and write individual
   // disk operations. there are NUM descriptors.
@@ -153,7 +153,7 @@ virtio_disk_init(void)
 }
 
 // find a free descriptor, mark it non-free, return its index.
-static int
+STATIC int
 alloc_desc()
 {
   for(int i = 0; i < NUM; i++){
@@ -166,7 +166,7 @@ alloc_desc()
 }
 
 // mark a descriptor as free.
-static void
+STATIC void
 free_desc(int i)
 {
   if(i >= NUM)
@@ -182,7 +182,7 @@ free_desc(int i)
 }
 
 // free a chain of descriptors.
-static void
+STATIC void
 free_chain(int i)
 {
   while(1){
@@ -198,7 +198,7 @@ free_chain(int i)
 
 // allocate three descriptors (they need not be contiguous).
 // disk transfers always use three descriptors.
-static int
+STATIC int
 alloc3_desc(int *idx)
 {
   for(int i = 0; i < 3; i++){

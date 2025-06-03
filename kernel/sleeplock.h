@@ -1,6 +1,8 @@
 #ifndef __KERNEL_SLEEPLOCK_H
 #define __KERNEL_SLEEPLOCK_H
 
+#include "compiler.h"
+
 // Long-term locks for processes
 struct sleeplock {
   uint locked;       // Is the lock held?

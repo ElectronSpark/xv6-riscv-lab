@@ -1,6 +1,7 @@
 #ifndef __KERNEL_PAGE_H
 #define __KERNEL_PAGE_H
 
+#include "compiler.h"
 #include "page_type.h"
 
 uint64 managed_page_base();

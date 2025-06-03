@@ -6,6 +6,7 @@
  * @brief Hash list implementation
  */
 
+#include "compiler.h"
 #include "hlist_type.h"
 #include "list.h"
 

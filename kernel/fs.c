@@ -27,7 +27,7 @@
 struct superblock sb; 
 
 // Read the super block.
-static void
+STATIC void
 readsb(int dev, struct superblock *sb)
 {
   struct buf *bp;
@@ -47,7 +47,7 @@ fsinit(int dev) {
 }
 
 // Zero a block.
-static void
+STATIC void
 bzero(int dev, int bno)
 {
   struct buf *bp;
@@ -62,7 +62,7 @@ bzero(int dev, int bno)
 
 // Allocate a zeroed disk block.
 // returns 0 if out of disk space.
-static uint
+STATIC uint
 balloc(uint dev)
 {
   int b, bi, m;
@@ -88,7 +88,7 @@ balloc(uint dev)
 }
 
 // Free a disk block.
-static void
+STATIC void
 bfree(int dev, uint b)
 {
   struct buf *bp;
@@ -189,7 +189,7 @@ iinit()
   }
 }
 
-static struct inode* iget(uint dev, uint inum);
+STATIC struct inode* iget(uint dev, uint inum);
 
 // Allocate an inode on device dev.
 // Mark it as allocated by  giving it type type.
@@ -243,7 +243,7 @@ iupdate(struct inode *ip)
 // Find the inode with number inum on device dev
 // and return the in-memory copy. Does not lock
 // the inode and does not read it from disk.
-static struct inode*
+STATIC struct inode*
 iget(uint dev, uint inum)
 {
   struct inode *ip, *empty;
@@ -379,7 +379,7 @@ iunlockput(struct inode *ip)
 // Return the disk block address of the nth block in inode ip.
 // If there is no such block, bmap allocates one.
 // returns 0 if out of disk space.
-static uint
+STATIC uint
 bmap(struct inode *ip, uint bn)
 {
   uint addr, *a;
@@ -619,7 +619,7 @@ dirlink(struct inode *dp, char *name, uint inum)
 //   skipelem("a", name) = "", setting name = "a"
 //   skipelem("", name) = skipelem("////", name) = 0
 //
-static char*
+STATIC char*
 skipelem(char *path, char *name)
 {
   char *s;
@@ -648,7 +648,7 @@ skipelem(char *path, char *name)
 // If parent != 0, return the inode for the parent and copy the final
 // path element into name, which must have room for DIRSIZ bytes.
 // Must be called inside a transaction since it calls iput().
-static struct inode*
+STATIC struct inode*
 namex(char *path, int nameiparent, char *name)
 {
   struct inode *ip, *next;

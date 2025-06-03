@@ -9,6 +9,8 @@
 #ifndef __KERNEL_VIRTIO_H
 #define __KERNEL_VIRTIO_H
 
+#include "compiler.h"
+
 // virtio mmio control registers, mapped starting at 0x10001000.
 // from qemu virtio_mmio.h
 #define VIRTIO_MMIO_MAGIC_VALUE		0x000 // 0x74726976

@@ -1,6 +1,7 @@
 #ifndef __KERNEL_SLAB_H
 #define __KERNEL_SLAB_H
 
+#include "compiler.h"
 #include "slab_type.h"
 
 #define SLAB_CACHE_NUMS             8

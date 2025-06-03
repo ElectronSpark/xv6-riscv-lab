@@ -1,6 +1,8 @@
 #ifndef __KERNEL_PROC_H
 #define __KERNEL_PROC_H
 
+#include "compiler.h"
+
 // Saved registers for kernel context switches.
 struct context {
   uint64 ra;

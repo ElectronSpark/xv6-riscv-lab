@@ -1,27 +1,27 @@
 #include "hlist.h"
 
 // call `hash` function
-static inline ht_hash_t __hlist_hash(hlist_t *hlist, void *node) {
+STATIC_INLINE ht_hash_t __hlist_hash(hlist_t *hlist, void *node) {
     return hlist->func.hash(node);
 }
 
 // call `get_node` function
-static inline void *__hlist_get_node(hlist_t *hlist, hlist_entry_t *entry) {
+STATIC_INLINE void *__hlist_get_node(hlist_t *hlist, hlist_entry_t *entry) {
     return hlist->func.get_node(entry);
 }
 
 // call `get_entry` function
-static inline void *__hlist_get_entry(hlist_t *hlist, void *node) {
+STATIC_INLINE void *__hlist_get_entry(hlist_t *hlist, void *node) {
     return hlist->func.get_entry(node);
 }
 
 // call `cmp_node` function 
-static inline int __hlist_cmp_node(hlist_t *hlist, void *node1, void *node2) {
+STATIC_INLINE int __hlist_cmp_node(hlist_t *hlist, void *node1, void *node2) {
     return hlist->func.cmp_node(hlist, node1, node2);
 }
 
 // to validate a hash list
-static inline bool __hlist_validate(hlist_t *hlist) {
+STATIC_INLINE bool __hlist_validate(hlist_t *hlist) {
     if (hlist == NULL) {
         return false;
     }
@@ -37,7 +37,7 @@ static inline bool __hlist_validate(hlist_t *hlist) {
 
 // To check if a bucket belongs to a Hash List.
 // The caller will guarantee the validity of the parameters 
-static inline bool __hlist_is_bucket_of(hlist_t *hlist, hlist_bucket_t *bucket) {
+STATIC_INLINE bool __hlist_is_bucket_of(hlist_t *hlist, hlist_bucket_t *bucket) {
     int offset = bucket - hlist->buckets;
     if (offset >= 0 || offset < hlist->bucket_cnt) {
         return true;
@@ -46,7 +46,7 @@ static inline bool __hlist_is_bucket_of(hlist_t *hlist, hlist_bucket_t *bucket) 
 }
 
 // To get the bucket where a node is in
-static inline hlist_bucket_t *__hlist_get_node_bucket(hlist_t *hlist, void *node) {
+STATIC_INLINE hlist_bucket_t *__hlist_get_node_bucket(hlist_t *hlist, void *node) {
     if (hlist == NULL || node == NULL) {
         return NULL;
     }
@@ -60,14 +60,14 @@ static inline hlist_bucket_t *__hlist_get_node_bucket(hlist_t *hlist, void *node
 // To calculate the bucket a node with a giving hash value should be in
 //
 // The caller should ensure the validity of the parameters
-static inline hlist_bucket_t *__hlist_calc_hash_bucket(hlist_t *hlist, ht_hash_t hash) {
+STATIC_INLINE hlist_bucket_t *__hlist_calc_hash_bucket(hlist_t *hlist, ht_hash_t hash) {
     return hlist->buckets + (hash % hlist->bucket_cnt);
 }
 
 // To calculate the bucket the node should be in
 // 
 // The caller should ensure the validity of the parameters
-static inline hlist_bucket_t *__hlist_calc_node_bucket(hlist_t *hlist, void *node) {
+STATIC_INLINE hlist_bucket_t *__hlist_calc_node_bucket(hlist_t *hlist, void *node) {
     ht_hash_t hash = __hlist_hash(hlist, node);
     return __hlist_calc_hash_bucket(hlist, hash);
 }
@@ -108,7 +108,7 @@ void __hlist_remove_node_entry(hlist_t *hlist, hlist_entry_t *entry) {
 // Otherwise, it will return NULL.
 //
 // The caller should make sure the validity of the parameters.
-static inline hlist_entry_t *__hlist_find_entry_in_bucket(hlist_t *hlist, hlist_bucket_t *bucket, void *node) {
+STATIC_INLINE hlist_entry_t *__hlist_find_entry_in_bucket(hlist_t *hlist, hlist_bucket_t *bucket, void *node) {
     hlist_entry_t *pos = NULL;
     hlist_entry_t *tmp = NULL;
     list_foreach_node_safe(bucket, pos, tmp, list_entry) {

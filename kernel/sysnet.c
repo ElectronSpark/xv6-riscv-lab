@@ -23,8 +23,8 @@ struct sock {
   struct mbufq rxq;  // a queue of packets waiting to be received
 };
 
-static struct spinlock lock;
-static struct sock *sockets;
+STATIC struct spinlock lock;
+STATIC struct sock *sockets;
 
 void
 sockinit(void)

@@ -4,6 +4,8 @@
 #ifndef __KERNEL_NET_H
 #define __KERNEL_NET_H
 
+#include "compiler.h"
+
 #define MBUF_SIZE              2048
 #define MBUF_DEFAULT_HEADROOM  128
 

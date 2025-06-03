@@ -2,6 +2,8 @@
 #define __KERNEL_RISCV_H
 #ifndef __ASSEMBLER__
 
+#include "compiler.h"
+
 // which hart (core) is this?
 static inline uint64
 r_mhartid()

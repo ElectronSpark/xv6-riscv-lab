@@ -1,6 +1,8 @@
 #ifndef __KERNEL_PARAM_H
 #define __KERNEL_PARAM_H
 
+#include "compiler.h"
+
 #ifdef LAB_FS
 #define NPROC        10  // maximum number of processes
 #else

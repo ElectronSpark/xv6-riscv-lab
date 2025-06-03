@@ -1,6 +1,8 @@
 #ifndef __KERNEL_SYSCALL_H
 #define __KERNEL_SYSCALL_H
 
+#include "compiler.h"
+
 // System call numbers
 #define SYS_fork    1
 #define SYS_exit    2

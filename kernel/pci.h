@@ -2,6 +2,8 @@
 #ifndef __KERNEL_PCI_H_
 #define __KERNEL_PCI_H_
 
+#include "compiler.h"
+
 // PCI-E Common Configuration Space Header Structure
 struct pci_common_confspace_header {
     uint16 vendor_id;

@@ -1,6 +1,8 @@
 #ifndef __KERNEL_BUF_H
 #define __KERNEL_BUF_H
 
+#include "compiler.h"
+
 struct buf {
   int valid;   // has data been read from disk?
   int disk;    // does disk "own" buf?

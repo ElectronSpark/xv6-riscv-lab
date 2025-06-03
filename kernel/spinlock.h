@@ -1,6 +1,7 @@
 #ifndef __KERNEL_SPINLOCK_H
 #define __KERNEL_SPINLOCK_H
 
+#include "compiler.h"
 #include "types.h"
 
 // Mutual exclusion lock.

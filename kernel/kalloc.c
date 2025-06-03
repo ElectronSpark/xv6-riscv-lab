@@ -14,10 +14,10 @@
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
-static slab_cache_t __kmm_slab_cache[SLAB_CACHE_NUMS][1];
-static char __kmm_slab_names[SLAB_CACHE_NUMS][32] = { 0 };
+STATIC slab_cache_t __kmm_slab_cache[SLAB_CACHE_NUMS][1];
+STATIC char __kmm_slab_names[SLAB_CACHE_NUMS][32] = { 0 };
 
-static inline void __init_kmm_slab_name(int idx, size_t bytes) {
+STATIC_INLINE void __init_kmm_slab_name(int idx, size_t bytes) {
   char num[32] = { '\0' };
   int num_idx = 29;
   while (bytes != 0) {
@@ -38,7 +38,7 @@ kinit()
   for (int i = 0; i < SLAB_CACHE_NUMS; i++) {
     __init_kmm_slab_name(i, obj_size);
     if (slab_cache_init(__kmm_slab_cache[i], __kmm_slab_names[i], obj_size,
-        SLAB_FLAG_EMBEDDED | SLAB_FLAG_STATIC) != 0) {
+        SLAB_FLAG_EMBEDDED | SLAB_FLAG_STATIC ) != 0) {
           printf("failed to initialize kmm slab: %s\n", __kmm_slab_names[i]);
           panic("kinit");
     }

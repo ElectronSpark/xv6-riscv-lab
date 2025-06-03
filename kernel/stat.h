@@ -1,6 +1,8 @@
 #ifndef __KERNEL_STAT_H
 #define __KERNEL_STAT_H
 
+#include "compiler.h"
+
 #define __XV6_STAT_T_DIR 1      // Directory
 #define __XV6_STAT_T_FILE 2     // File
 #define __XV6_STAT_T_DEVICE 3   // Device

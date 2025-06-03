@@ -63,55 +63,55 @@ typedef struct {
     spinlock_t      lock;
     uint64          count;
 } buddy_pool_t;
-static buddy_pool_t __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
+STATIC buddy_pool_t __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
 
 
-static inline void __buddy_pool_lock(buddy_pool_t *pool);
-static inline void __buddy_pool_unlock(buddy_pool_t *pool);
-static inline uint64 __total_pages();
-static inline bool __page_base_validity(uint64 physical);
-static inline bool __page_init_flags_validity(uint64 flags);
-static inline bool __page_flags_validity(uint64 flags);
-static inline bool __page_is_freeable(page_t *page);
-static inline void __page_init(page_t *page, uint64 physical, int ref_count,
+STATIC_INLINE void __buddy_pool_lock(buddy_pool_t *pool);
+STATIC_INLINE void __buddy_pool_unlock(buddy_pool_t *pool);
+STATIC_INLINE uint64 __total_pages();
+STATIC_INLINE bool __page_base_validity(uint64 physical);
+STATIC_INLINE bool __page_init_flags_validity(uint64 flags);
+STATIC_INLINE bool __page_flags_validity(uint64 flags);
+STATIC_INLINE bool __page_is_freeable(page_t *page);
+STATIC_INLINE void __page_init(page_t *page, uint64 physical, int ref_count,
                                  uint64 flags);
-static inline void __buddy_pool_init();
-static inline int __init_range_flags( uint64 pa_start, uint64 pa_end, 
+STATIC_INLINE void __buddy_pool_init();
+STATIC_INLINE int __init_range_flags( uint64 pa_start, uint64 pa_end, 
                                       uint64 flags);
-static inline void __page_as_buddy( page_t *page, page_t *buddy_head,
+STATIC_INLINE void __page_as_buddy( page_t *page, page_t *buddy_head,
                                     uint64 order);
-static inline void __page_as_buddy_group(page_t *buddy_head, uint64 order);
-static inline void __page_order_change_commit(page_t *page);
-static inline void __buddy_push_page(buddy_pool_t *pool, page_t *page);
-static inline page_t *__buddy_pop_page(buddy_pool_t *pool);
-static inline void __buddy_detach_page(buddy_pool_t *pool, page_t *page);
-static inline uint64 __get_buddy_addr(uint64 physical, uint32 order);
-static inline page_t *__get_buddy_page(page_t *page);
-static inline page_t *__buddy_split(page_t *page);
-static inline page_t *__buddy_merge(page_t *page1, page_t *page2);
-static page_t *__buddy_get(uint64 order, uint64 flags);
-static int __buddy_put(page_t *page);
+STATIC_INLINE void __page_as_buddy_group(page_t *buddy_head, uint64 order);
+STATIC_INLINE void __page_order_change_commit(page_t *page);
+STATIC_INLINE void __buddy_push_page(buddy_pool_t *pool, page_t *page);
+STATIC_INLINE page_t *__buddy_pop_page(buddy_pool_t *pool);
+STATIC_INLINE void __buddy_detach_page(buddy_pool_t *pool, page_t *page);
+STATIC_INLINE uint64 __get_buddy_addr(uint64 physical, uint32 order);
+STATIC_INLINE page_t *__get_buddy_page(page_t *page);
+STATIC_INLINE page_t *__buddy_split(page_t *page);
+STATIC_INLINE page_t *__buddy_merge(page_t *page1, page_t *page2);
+STATIC page_t *__buddy_get(uint64 order, uint64 flags);
+STATIC int __buddy_put(page_t *page);
 
 
 // Every physical pages 
 // TODO: The number of managed pages are fix right now.
-static page_t __pages[TOTALPAGES] = { 0 };
+STATIC page_t __pages[TOTALPAGES] = { 0 };
 // The start address and the end address of the managed memory
-static uint64 __managed_start = KERNBASE;
-static uint64 __managed_end = PHYSTOP;
+STATIC uint64 __managed_start = KERNBASE;
+STATIC uint64 __managed_end = PHYSTOP;
 
 // acquire the spinlock of a buddy pool
-static inline void __buddy_pool_lock(buddy_pool_t *pool) {
+STATIC_INLINE void __buddy_pool_lock(buddy_pool_t *pool) {
     acquire(&pool->lock);
 }
 
 // release the spinlock of a buddy pool
-static inline void __buddy_pool_unlock(buddy_pool_t *pool) {
+STATIC_INLINE void __buddy_pool_unlock(buddy_pool_t *pool) {
     release(&pool->lock);
 }
 
 // get the total number of pages managed
-static inline uint64 __total_pages() {
+STATIC_INLINE uint64 __total_pages() {
     return (__managed_end - __managed_start) >> PAGE_SHIFT;
 }
 
@@ -122,7 +122,7 @@ static inline uint64 __total_pages() {
 // Check if a base address of a page is valid.
 // A valid page base address should be aligned to the page size, and is in
 // the range of managed memory.
-static inline bool __page_base_validity(uint64 physical) {
+STATIC_INLINE bool __page_base_validity(uint64 physical) {
     if ((physical & PAGE_MASK) || !ADDR_IN_MANAGED(physical)) {
         return false;
     }
@@ -130,7 +130,7 @@ static inline bool __page_base_validity(uint64 physical) {
 }
 
 // check if a group of flags is valid in initialization process
-static inline bool __page_init_flags_validity(uint64 flags) {
+STATIC_INLINE bool __page_init_flags_validity(uint64 flags) {
     if (flags & (~(PAGE_FLAG_LOCKED))) {
         return false;
     }
@@ -138,7 +138,7 @@ static inline bool __page_init_flags_validity(uint64 flags) {
 }
 
 // check if a group of flags is valid in allocation process
-static inline bool __page_flags_validity(uint64 flags) {
+STATIC_INLINE bool __page_flags_validity(uint64 flags) {
     if (flags & (~(PAGE_FLAG_SLAB | PAGE_FLAG_ANON | PAGE_FLAG_PGTABLE))) {
         return false;
     }
@@ -147,7 +147,7 @@ static inline bool __page_flags_validity(uint64 flags) {
 
 // To check if a page can be put back to the buddy system as a free page to be
 // allocated again.
-static inline bool __page_is_freeable(page_t *page) {
+STATIC_INLINE bool __page_is_freeable(page_t *page) {
     if (page == NULL)
         return false;
     if (page->flags & PAGE_FLAG_LOCKED)
@@ -161,7 +161,7 @@ static inline bool __page_is_freeable(page_t *page) {
 
 // initialize a page descriptor
 // No validity check here
-static inline void __page_init( page_t *page, uint64 physical, int ref_count,
+STATIC_INLINE void __page_init( page_t *page, uint64 physical, int ref_count,
                                 uint64 flags) {
     memset(page, 0, sizeof(page_t));
     page->physical_address = physical;
@@ -172,7 +172,7 @@ static inline void __page_init( page_t *page, uint64 physical, int ref_count,
 
 // initialize a buddy pool
 // no validity check here
-static inline void __buddy_pool_init() {
+STATIC_INLINE void __buddy_pool_init() {
     // __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
     for (int i = 0; i < PAGE_BUDDY_MAX_ORDER + 1; i++) {
         initlock(&(__buddy_pools[i].lock), "buddy_system_pool");
@@ -182,7 +182,7 @@ static inline void __buddy_pool_init() {
 }
 
 // initialize a range of page descriptoe with specific flags
-static inline int __init_range_flags( uint64 pa_start, uint64 pa_end, 
+STATIC_INLINE int __init_range_flags( uint64 pa_start, uint64 pa_end, 
                                       uint64 flags) {
     page_t *page;
     if (pa_start >= pa_end) {
@@ -211,7 +211,7 @@ static inline int __init_range_flags( uint64 pa_start, uint64 pa_end,
 }
 
 // initialize a page descriptor as a buddy page
-static inline void __page_as_buddy( page_t *page, page_t *buddy_head,
+STATIC_INLINE void __page_as_buddy( page_t *page, page_t *buddy_head,
                                     uint64 order) {
     __page_init(page, page->physical_address, 0, PAGE_FLAG_BUDDY);
     page->buddy.buddy_head = buddy_head;
@@ -221,7 +221,7 @@ static inline void __page_as_buddy( page_t *page, page_t *buddy_head,
 
 // initialize a continuous range of pages as a buddy page in specific order
 // will not check validity here
-static inline void __page_as_buddy_group(page_t *buddy_head, uint64 order) {
+STATIC_INLINE void __page_as_buddy_group(page_t *buddy_head, uint64 order) {
     uint64 count = 1UL << order;
     for (int i = 0; i < count; i++) {
         __page_as_buddy(&buddy_head[i], buddy_head, order);
@@ -231,7 +231,7 @@ static inline void __page_as_buddy_group(page_t *buddy_head, uint64 order) {
 // Attach a buddy head page into the corresponding buddy pool and increse the
 // count value of the buddy pool by one.
 // will not do validity check here
-static inline void __buddy_push_page(buddy_pool_t *pool, page_t *page) {
+STATIC_INLINE void __buddy_push_page(buddy_pool_t *pool, page_t *page) {
     if (LIST_IS_EMPTY(&pool->lru_head)) {
         if (pool->count != 0) {
             panic("__buddy_push_page");
@@ -246,7 +246,7 @@ static inline void __buddy_push_page(buddy_pool_t *pool, page_t *page) {
 // Pop a buddy page from a pool and return the page descriptor of the buddy
 // header. Return NULL if the given pool is empty
 // will not do validity check here
-static inline page_t *__buddy_pop_page(buddy_pool_t *pool) {
+STATIC_INLINE page_t *__buddy_pop_page(buddy_pool_t *pool) {
     page_t *ret = list_node_pop_back(&pool->lru_head, page_t, buddy.lru_entry);
     if (ret == NULL) {
         if (pool->count > 0) {
@@ -261,7 +261,7 @@ static inline page_t *__buddy_pop_page(buddy_pool_t *pool) {
 // detach a buddy head page from a buddy pool and decrease the count value by
 // one.
 // will not do validity check here
-static inline void __buddy_detach_page(buddy_pool_t *pool, page_t *page) {
+STATIC_INLINE void __buddy_detach_page(buddy_pool_t *pool, page_t *page) {
     if (LIST_IS_EMPTY(&pool->lru_head)) {
         panic("__buddy_detach_page");
     }
@@ -271,7 +271,7 @@ static inline void __buddy_detach_page(buddy_pool_t *pool, page_t *page) {
 
 // Try to calculate the address of a page's buddy with the page's physical
 // address. Will not validate the value of order
-static inline uint64 __get_buddy_addr(uint64 physical, uint32 order) {
+STATIC_INLINE uint64 __get_buddy_addr(uint64 physical, uint32 order) {
     uint64 __buddy_base_address =
         PAGE_ADDR_GET_BUDDY_GROUP_ADDR(physical, order);
     __buddy_base_address ^= PAGE_BUDDY_BYTES(order);
@@ -281,7 +281,7 @@ static inline uint64 __get_buddy_addr(uint64 physical, uint32 order) {
 // try to find a page of a buddy
 // return the buddy page descriptor if found
 // return NULL if didn't find
-static inline page_t *__get_buddy_page(page_t *page) {
+STATIC_INLINE page_t *__get_buddy_page(page_t *page) {
     uint64 buddy_base;
     page_t *buddy_head;
     if (!PAGE_IS_BUDDY_GROUP_HEAD(page)) {
@@ -308,7 +308,7 @@ static inline page_t *__get_buddy_page(page_t *page) {
 }
 
 // Update tail pages after merging and splitting operations.
-static inline void __page_order_change_commit(page_t *page) {
+STATIC_INLINE void __page_order_change_commit(page_t *page) {
     if (!PAGE_IS_BUDDY_GROUP_HEAD(page)) {
         panic("__page_order_change_commit");
     }
@@ -320,7 +320,7 @@ static inline void __page_order_change_commit(page_t *page) {
 // immediately to avoid useless updates. Have to call __page_order_change_commit
 // after page splitting.
 // Return NULL if falied to split
-static inline page_t *__buddy_split(page_t *page) {
+STATIC_INLINE page_t *__buddy_split(page_t *page) {
     int order_after;
     page_t *buddy;
     if (!PAGE_IS_BUDDY_GROUP_HEAD(page)) {
@@ -342,7 +342,7 @@ static inline page_t *__buddy_split(page_t *page) {
 // to avoid useless updates. Have to call __page_order_change_commit after page
 // splitting.
 // Return NULL if failed to merge
-static inline page_t *__buddy_merge(page_t *page1, page_t *page2) {
+STATIC_INLINE page_t *__buddy_merge(page_t *page1, page_t *page2) {
     page_t *header, *tail;
     uint64 order_after;
     if (!PAGES_ARE_BUDDIES(page1, page2)) {
@@ -361,7 +361,7 @@ static inline page_t *__buddy_merge(page_t *page1, page_t *page2) {
     return header;
 }
 
-static page_t *__buddy_get(uint64 order, uint64 flags) {
+STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
     buddy_pool_t *pool = NULL;
     page_t *page = NULL;
     page_t *buddy = NULL;
@@ -441,7 +441,7 @@ found:
 
 // Put a page back to buddy system
 // Right now pages can only be put one by one
-static int __buddy_put(page_t *page) {
+STATIC int __buddy_put(page_t *page) {
     buddy_pool_t *pool = NULL;
     page_t *buddy = NULL;
     uint64 tmp_order = 0;
@@ -520,7 +520,7 @@ int page_buddy_init(uint64 pa_start, uint64 pa_end) {
     return 0;
 }
 
-static inline int __page_ref_inc_unlocked(page_t *page) {
+STATIC_INLINE int __page_ref_inc_unlocked(page_t *page) {
     if (page == NULL) {
         return -1;
     }
@@ -532,7 +532,7 @@ static inline int __page_ref_inc_unlocked(page_t *page) {
     return page->ref_count;
 }
 
-static inline int __page_ref_dec_unlocked(page_t *page) {
+STATIC_INLINE int __page_ref_dec_unlocked(page_t *page) {
     if (page == NULL) {
         return -1;
     }

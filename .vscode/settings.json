@@ -41,6 +41,8 @@
         "cstdint": "c",
         "charconv": "c",
         "algorithm": "c",
-        "format": "c"
+        "format": "c",
+        "cmocka.h": "c",
+        "hlist_type.h": "c"
     }
 }

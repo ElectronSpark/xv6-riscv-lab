@@ -44,7 +44,7 @@ static bool __hlist_consistency_check(hlist_t *hlist) {
 }
 
 // Helper function to create a hash list with dynamic memory allocation
-static inline hlist_t *mock_hlist_create(uint64 bucket_cnt) {
+STATIC_INLINE hlist_t *mock_hlist_create(uint64 bucket_cnt) {
     size_t size = sizeof(hlist_t) + bucket_cnt * sizeof(hlist_bucket_t);
     hlist_t *hlist = (hlist_t *)malloc(size);
     if (hlist) {

@@ -7,6 +7,12 @@ project(xv6-riscv-unit-test LANGUAGES C ASM)
 
 ENABLE_LANGUAGE(C)
 
+set(TEST_C_FLAGS
+    -ggdb
+    -Wall
+    -D HOST_TEST=1
+)
+
 # Define the executable(s) to be built
 set(PROGRAMS list_test)
 
@@ -18,7 +24,7 @@ set(UNIT_TEST_INCLUDE_DIRS
 # Add an executable for each program
 foreach(PROGRAM ${PROGRAMS})
     add_executable(${PROGRAM} ${CMAKE_SOURCE_DIR}/src/${PROGRAM}.c)
-    target_compile_options(${PROGRAM} PRIVATE -ggdb -Wall)
+    target_compile_options(${PROGRAM} PRIVATE ${TEST_C_FLAGS})
     target_include_directories(${PROGRAM} PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
     target_link_options(${PROGRAM} PRIVATE -ggdb)
 endforeach()
@@ -97,18 +103,18 @@ include(cmake/FetchCmocka.cmake)
 
 add_executable(ut_mock ${MOCK_TEST_SRC} ${MOCK_TEST_KERNEL_SRC})
 target_link_libraries(ut_mock PRIVATE cmocka-static)
-target_compile_options(ut_mock PRIVATE -ggdb -Wall)
+target_compile_options(ut_mock PRIVATE ${TEST_C_FLAGS})
 target_link_options(ut_mock PRIVATE ${MOCK_COMPILE_OPTIONS})
 target_include_directories(ut_mock PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 add_executable(ut_list ${CMAKE_SOURCE_DIR}/src/ut_list_main.c)
 target_link_libraries(ut_list PRIVATE cmocka-static)
-target_compile_options(ut_list PRIVATE -ggdb -Wall)
+target_compile_options(ut_list PRIVATE ${TEST_C_FLAGS})
 target_include_directories(ut_list PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 add_executable(ut_hlist ${CMAKE_SOURCE_DIR}/src/ut_hlist_main.c ${CMAKE_SOURCE_DIR}/../kernel/hlist.c)
 target_link_libraries(ut_hlist PRIVATE cmocka-static)
-target_compile_options(ut_hlist PRIVATE -ggdb -Wall -DHOST_TEST)
+target_compile_options(ut_hlist PRIVATE ${TEST_C_FLAGS})
 target_include_directories(ut_hlist PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 enable_testing()

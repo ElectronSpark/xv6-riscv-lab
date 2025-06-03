@@ -9,15 +9,15 @@
 #include "net.h"
 
 #define TX_RING_SIZE 16
-static struct tx_desc tx_ring[TX_RING_SIZE] __attribute__((aligned(16)));
-static struct mbuf *tx_mbufs[TX_RING_SIZE];
+STATIC struct tx_desc tx_ring[TX_RING_SIZE] __attribute__((aligned(16)));
+STATIC struct mbuf *tx_mbufs[TX_RING_SIZE];
 
 #define RX_RING_SIZE 16
-static struct rx_desc rx_ring[RX_RING_SIZE] __attribute__((aligned(16)));
-static struct mbuf *rx_mbufs[RX_RING_SIZE];
+STATIC struct rx_desc rx_ring[RX_RING_SIZE] __attribute__((aligned(16)));
+STATIC struct mbuf *rx_mbufs[RX_RING_SIZE];
 
 // remember where the e1000's registers live.
-static volatile uint32 *regs;
+STATIC volatile uint32 *regs;
 
 struct spinlock e1000_lock;
 
@@ -285,7 +285,7 @@ e1000_transmit(struct mbuf *m)
   return 0;
 }
 
-static void
+STATIC void
 e1000_recv(void)
 {
   //

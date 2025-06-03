@@ -1,6 +1,8 @@
 #ifndef __KERNEL_TYPES_H
 #define __KERNEL_TYPES_H
 
+#include "compiler.h"
+
 typedef unsigned int   uint;
 typedef unsigned short ushort;
 typedef unsigned char  uchar;

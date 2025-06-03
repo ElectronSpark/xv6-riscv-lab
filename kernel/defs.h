@@ -1,6 +1,8 @@
 #ifndef __KERNEL_DEFS_H
 #define __KERNEL_DEFS_H
 
+#include "compiler.h"
+
 #ifndef size_t
 typedef typeof(sizeof(0)) size_t;
 #endif              /* size_t */
@@ -136,7 +138,7 @@ int             holdingsleep(struct sleeplock*);
 void            initsleeplock(struct sleeplock*, char*);
 
 // string.c
-#ifndef __STDC_HOSTED__
+#ifndef HOST_TEST
 int             memcmp(const void*, const void*, uint);
 void*           memmove(void*, const void*, uint);
 void*           memset(void*, int, uint);
@@ -147,7 +149,7 @@ char*           strncpy(char*, const char*, int);
 char *          strcat(char *dest, const char *src);
 #else
 #include <string.h>
-#endif              /* __STDC_HOSTED__ */
+#endif              /* HOST_TEST */
 
 // syscall.c
 void            argint(int, int*);

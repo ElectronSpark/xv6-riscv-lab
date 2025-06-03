@@ -18,7 +18,7 @@
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
-static int
+STATIC int
 argfd(int n, int *pfd, struct file **pf)
 {
   int fd;
@@ -36,7 +36,7 @@ argfd(int n, int *pfd, struct file **pf)
 
 // Allocate a file descriptor for the given file.
 // Takes over file reference from caller on success.
-static int
+STATIC int
 fdalloc(struct file *f)
 {
   int fd;
@@ -170,7 +170,7 @@ bad:
 }
 
 // Is the directory dp empty except for "." and ".." ?
-static int
+STATIC int
 isdirempty(struct inode *dp)
 {
   int off;
@@ -242,7 +242,7 @@ bad:
   return -1;
 }
 
-static struct inode*
+STATIC struct inode*
 create(char *path, short type, short major, short minor)
 {
   struct inode *ip, *dp;

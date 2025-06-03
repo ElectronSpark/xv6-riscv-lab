@@ -43,32 +43,32 @@
 })
 
 
-static inline slab_t *__slab_make(uint64 flags, uint32 order, size_t offs, 
+STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs, 
                                   size_t obj_size, uint32 obj_num);
-static inline void __slab_destroy(slab_t *slab);
-static inline void __slab_attach(slab_cache_t *cache, slab_t *slab);
-static inline void __slab_detach(slab_cache_t *cache, slab_t *slab);
-static inline void __slab_dequeue(slab_cache_t *cache, slab_t *slab);
-static inline void __slab_enqueue(slab_cache_t *cache, slab_t *slab);
-static inline slab_t *__slab_pop_free(slab_cache_t *cache);
-static inline slab_t *__slab_pop_partial(slab_cache_t *cache);
-static inline void *__slab_obj_get(slab_t *slab);
-static inline void __slab_obj_put(slab_t *slab, void *ptr);
-static inline void *__slab_idx2obj(slab_t *slab, int idx);
-static inline int __slab_obj2idx(slab_t *slab, void *ptr);
-static inline slab_t *__find_obj_slab(void *ptr);
+STATIC_INLINE void __slab_destroy(slab_t *slab);
+STATIC_INLINE void __slab_attach(slab_cache_t *cache, slab_t *slab);
+STATIC_INLINE void __slab_detach(slab_cache_t *cache, slab_t *slab);
+STATIC_INLINE void __slab_dequeue(slab_cache_t *cache, slab_t *slab);
+STATIC_INLINE void __slab_enqueue(slab_cache_t *cache, slab_t *slab);
+STATIC_INLINE slab_t *__slab_pop_free(slab_cache_t *cache);
+STATIC_INLINE slab_t *__slab_pop_partial(slab_cache_t *cache);
+STATIC_INLINE void *__slab_obj_get(slab_t *slab);
+STATIC_INLINE void __slab_obj_put(slab_t *slab, void *ptr);
+STATIC_INLINE void *__slab_idx2obj(slab_t *slab, int idx);
+STATIC_INLINE int __slab_obj2idx(slab_t *slab, void *ptr);
+STATIC_INLINE slab_t *__find_obj_slab(void *ptr);
 
-static inline void __slab_cache_lock(slab_cache_t *cache);
-static inline void __slab_cache_unlock(slab_cache_t *cache);
-static inline void __slab_cache_init(slab_cache_t *cache, char *name, 
+STATIC_INLINE void __slab_cache_lock(slab_cache_t *cache);
+STATIC_INLINE void __slab_cache_unlock(slab_cache_t *cache);
+STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name, 
                                      size_t obj_size, uint64 flags);
-static inline int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums);
+STATIC_INLINE int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums);
 
 
 // create a detached SLAB and initialize its objects
 // return the SLAB created if success
 // return NULL if failed
-static inline slab_t *__slab_make(uint64 flags, uint32 order, size_t offs, 
+STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs, 
                                   size_t obj_size, uint32 obj_num) {
     page_t *page;
     int page_nums;
@@ -113,7 +113,7 @@ static inline slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
 }
 
 // Destroy an empty and detached SLAB
-static inline void __slab_destroy(slab_t *slab) {
+STATIC_INLINE void __slab_destroy(slab_t *slab) {
     page_t *page;
     uint16 order;
     uint64 page_base;
@@ -140,7 +140,7 @@ static inline void __slab_destroy(slab_t *slab) {
 
 // Attach an empty SLAB to a SLAB cache
 // SLAB must be enqueued after attaching
-static inline void __slab_attach(slab_cache_t *cache, slab_t *slab) {
+STATIC_INLINE void __slab_attach(slab_cache_t *cache, slab_t *slab) {
     if (!LIST_NODE_IS_DETACHED(slab, list_entry)) {
         panic("__slab_attach(): SLAB cannot be attached when in a queue");
     }
@@ -160,7 +160,7 @@ static inline void __slab_attach(slab_cache_t *cache, slab_t *slab) {
 
 // Detach an empty SLAB from its SLAB cache
 // SLAB must be dequeued before detaching
-static inline void __slab_detach(slab_cache_t *cache, slab_t *slab) {
+STATIC_INLINE void __slab_detach(slab_cache_t *cache, slab_t *slab) {
     if (!LIST_NODE_IS_DETACHED(slab, list_entry)) {
         panic("__slab_detach(): SLAB cannot be detached when in a queue");
     }
@@ -180,7 +180,7 @@ static inline void __slab_detach(slab_cache_t *cache, slab_t *slab) {
 
 // Take a SLAB out from the free/partial/full list it's in
 // No validity check
-static inline void __slab_dequeue(slab_cache_t *cache, slab_t *slab) {
+STATIC_INLINE void __slab_dequeue(slab_cache_t *cache, slab_t *slab) {
     uint64 *cache_counter;
     list_node_t *list_entry;
     if (LIST_NODE_IS_DETACHED(slab, list_entry)) {
@@ -211,7 +211,7 @@ static inline void __slab_dequeue(slab_cache_t *cache, slab_t *slab) {
 
 // put a SLAB into the free/partial/full list accordingly
 // No validity check
-static inline void __slab_enqueue(slab_cache_t *cache, slab_t *slab) {
+STATIC_INLINE void __slab_enqueue(slab_cache_t *cache, slab_t *slab) {
     list_node_t *list_entry;
     if (!LIST_NODE_IS_DETACHED(slab, list_entry)) {
         panic("__slab_enqueue(): SLAB is already in a queue");
@@ -233,7 +233,7 @@ static inline void __slab_enqueue(slab_cache_t *cache, slab_t *slab) {
 }
 
 // Take out the first SLAB from the free list of a SLAB cache, and dequeue it
-static inline slab_t *__slab_pop_free(slab_cache_t *cache) {
+STATIC_INLINE slab_t *__slab_pop_free(slab_cache_t *cache) {
     slab_t *slab;
     if (cache == NULL || cache->slab_free == 0) {
         return NULL;
@@ -250,7 +250,7 @@ static inline slab_t *__slab_pop_free(slab_cache_t *cache) {
 }
 
 // Take out the first SLAB from the partial list of a SLAB cache, and dequeue it
-static inline slab_t *__slab_pop_partial(slab_cache_t *cache) {
+STATIC_INLINE slab_t *__slab_pop_partial(slab_cache_t *cache) {
     slab_t *slab;
     if (cache == NULL || cache->slab_partial == 0) {
         return NULL;
@@ -272,7 +272,7 @@ static inline slab_t *__slab_pop_partial(slab_cache_t *cache) {
 // Will not change the counter in its SLAB cache.
 // Return the ptr to the object if success
 // Return NULL if failed
-static inline void *__slab_obj_get(slab_t *slab) {
+STATIC_INLINE void *__slab_obj_get(slab_t *slab) {
     void *ret_ptr;
     ret_ptr = slab->next;
     if (ret_ptr != NULL) {
@@ -286,14 +286,14 @@ static inline void *__slab_obj_get(slab_t *slab) {
 // SLAB
 // No validity check
 // Will not change the counter in its SLAB cache.
-static inline void __slab_obj_put(slab_t *slab, void *ptr) {
+STATIC_INLINE void __slab_obj_put(slab_t *slab, void *ptr) {
     *(void**)ptr = slab->next;
     slab->next = ptr;
     slab->in_use--;
 }
 
 // Get the base address of an object giving its SLAB and its index
-static inline void *__slab_idx2obj(slab_t *slab, int idx) {
+STATIC_INLINE void *__slab_idx2obj(slab_t *slab, int idx) {
     void *ret_ptr;
     void *page_base;
     if (!__SLAB_ATTACHED(slab)) {
@@ -312,7 +312,7 @@ static inline void *__slab_idx2obj(slab_t *slab, int idx) {
 }
 
 // Get the index of an object.
-static inline int __slab_obj2idx(slab_t *slab, void *ptr) {
+STATIC_INLINE int __slab_obj2idx(slab_t *slab, void *ptr) {
     size_t base_offs;
     void *page_base;
     int idx;
@@ -343,7 +343,7 @@ static inline int __slab_obj2idx(slab_t *slab, void *ptr) {
 }
 
 // find the SLAB of a object giving its address
-static inline slab_t *__find_obj_slab(void *ptr) {
+STATIC_INLINE slab_t *__find_obj_slab(void *ptr) {
     uint64 page_base;
     page_t *page = NULL;
 
@@ -367,18 +367,18 @@ static inline slab_t *__find_obj_slab(void *ptr) {
 
 // aqcuire the lock of a SLAB cache
 // no checking here
-static inline void __slab_cache_lock(slab_cache_t *cache) {
+STATIC_INLINE void __slab_cache_lock(slab_cache_t *cache) {
     acquire(&cache->lock);
 }
 
 // release the lock of a SLAB cache
 // no checking here
-static inline void __slab_cache_unlock(slab_cache_t *cache) {
+STATIC_INLINE void __slab_cache_unlock(slab_cache_t *cache) {
     release(&cache->lock);
 }
 
 // Initialize a existing SLAB cache without checking
-static inline void __slab_cache_init(slab_cache_t *cache, char *name, 
+STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name, 
                                      size_t obj_size, uint64 flags) {
     size_t offset = 0;
     uint32 limits;
@@ -450,7 +450,7 @@ slab_cache_t *slab_cache_create(char *name, size_t obj_size, uint64 flags) {
 }
 
 // destroy a slab cache
-// only non-static, empty SLAB cache can be freed
+// only non-STATIC , empty SLAB cache can be freed
 // return 0 if success
 // return -1 if failed
 int slab_cache_destroy(slab_cache_t *cache) {
@@ -460,8 +460,8 @@ int slab_cache_destroy(slab_cache_t *cache) {
     }
     // This lock will not release if SLAB cache is successfully destroyed.
     __slab_cache_lock(cache);
-    if (cache->flags & SLAB_FLAG_STATIC) {
-        // cannot destroy a static SLAB
+    if (cache->flags & SLAB_FLAG_STATIC ) {
+        // cannot destroy a STATIC SLAB
         __slab_cache_unlock(cache);
         return -1;
     }
@@ -484,7 +484,7 @@ int slab_cache_destroy(slab_cache_t *cache) {
 // try to delete empty SLABs without locking the SLAB cache
 // return the actual number of SLABs deleted
 // return -1 if failed.
-static inline int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums) {
+STATIC_INLINE int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums) {
     int slab_free_after, tmp, counter;
     slab_t *slab = NULL;
     if (cache == NULL) {
