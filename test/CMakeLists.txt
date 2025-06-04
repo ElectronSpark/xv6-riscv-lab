@@ -69,7 +69,8 @@ add_custom_target(valgrind-full
 
 # Kernel source files to do unit tests
 set(MOCK_TEST_KERNEL_SRC
-    ${CMAKE_SOURCE_DIR}/../kernel/page.c
+    # We're providing mock implementations for page.c
+    # ${CMAKE_SOURCE_DIR}/../kernel/page.c
     ${CMAKE_SOURCE_DIR}/../kernel/slab.c
 )
 
@@ -77,17 +78,31 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     page_lock_aqcuire
     page_lock_release
     __pa_to_page
+    __page_to_pa
+    page_ref_inc
+    page_ref_dec
+    __page_ref_inc
+    __page_ref_dec
+    page_ref_count
+    page_refcnt
+    __page_alloc
+    __page_free
+    page_alloc
+    page_free
+    page_buddy_init
+    __get_buddy_addr
     panic
     acquire
     release
     initlock
     kmm_alloc
     kmm_free
+    memset
 )
 
 set(MOCK_TEST_SRC
-    ${CMAKE_SOURCE_DIR}/src/ut_mock_main.c
-    ${CMAKE_SOURCE_DIR}/src/ut_mock_wraps.c
+    ${CMAKE_SOURCE_DIR}/src/ut_page_main.c
+    ${CMAKE_SOURCE_DIR}/src/ut_page_wraps.c
 )
 
 set(MOCK_WRAP_OPTIONS "")
@@ -101,11 +116,11 @@ set(MOCK_COMPILE_OPTIONS "-Wl${MOCK_WRAP_OPTIONS}")
 include(cmake/FetchCmocka.cmake)
 # find_library(cmocka-static)
 
-add_executable(ut_mock ${MOCK_TEST_SRC} ${MOCK_TEST_KERNEL_SRC})
-target_link_libraries(ut_mock PRIVATE cmocka-static)
-target_compile_options(ut_mock PRIVATE ${TEST_C_FLAGS})
-target_link_options(ut_mock PRIVATE ${MOCK_COMPILE_OPTIONS})
-target_include_directories(ut_mock PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+add_executable(ut_page ${MOCK_TEST_SRC} ${MOCK_TEST_KERNEL_SRC})
+target_link_libraries(ut_page PRIVATE cmocka-static)
+target_compile_options(ut_page PRIVATE ${TEST_C_FLAGS})
+target_link_options(ut_page PRIVATE ${MOCK_COMPILE_OPTIONS})
+target_include_directories(ut_page PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 add_executable(ut_list ${CMAKE_SOURCE_DIR}/src/ut_list_main.c)
 target_link_libraries(ut_list PRIVATE cmocka-static)
@@ -119,7 +134,7 @@ target_include_directories(ut_hlist PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 enable_testing()
 add_test(NAME ut_mock_test
-    COMMAND ut_mock
+    COMMAND ut_page
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 add_test(NAME ut_list

@@ -659,7 +659,7 @@ int page_ref_inc(void *ptr) {
 // helper function to __page_ref_dec
 int page_ref_dec(void *ptr) {
     page_t *page = __pa_to_page((uint64)ptr);
-    return __page_ref_inc(page);
+    return __page_ref_dec(page);
 }
 
 // Get a page struct from its physical base address

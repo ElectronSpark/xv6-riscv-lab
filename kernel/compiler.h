@@ -10,4 +10,6 @@
 #define STATIC_INLINE static inline
 #endif
 
+#define WEAK __attribute__((weak))
+
 #endif // __KERNEL_COMPILER_H
