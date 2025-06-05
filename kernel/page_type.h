@@ -93,5 +93,12 @@ typedef struct page_struct {
     };
 } page_t;
 
+// pools storing each size of free buddy pages
+// __buddy_pools[ page_order ]
+typedef struct {
+    list_node_t     lru_head;
+    spinlock_t      lock;
+    uint64          count;
+} buddy_pool_t;
 
 #endif              /* __KERNEL_PAGE_TYPE_H */
