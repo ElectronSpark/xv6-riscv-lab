@@ -78,4 +78,11 @@ STATIC_INLINE page_t *__buddy_merge(page_t *page1, page_t *page2);
 STATIC page_t *__buddy_get(uint64 order, uint64 flags);
 STATIC int __buddy_put(page_t *page);
 
+#ifdef HOST_TEST
+extern buddy_pool_t __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
+extern page_t __pages[TOTALPAGES];
+extern uint64 __managed_start;
+extern uint64 __managed_end;
+#endif
+
 #endif  /* __KERNEL_PAGE_PRIVATE_H__ */

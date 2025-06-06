@@ -70,34 +70,26 @@ add_custom_target(valgrind-full
 # Kernel source files to do unit tests
 set(MOCK_TEST_KERNEL_SRC
     # We're providing mock implementations for page.c
-    # ${CMAKE_SOURCE_DIR}/../kernel/page.c
+    ${CMAKE_SOURCE_DIR}/../kernel/page.c
     ${CMAKE_SOURCE_DIR}/../kernel/slab.c
 )
 
 set(MOCK_TEST_WRAP_FUNCTIONS
     page_lock_aqcuire
     page_lock_release
-    __pa_to_page
-    __page_to_pa
     page_ref_inc
     page_ref_dec
-    __page_ref_inc
-    __page_ref_dec
     page_ref_count
     page_refcnt
-    __page_alloc
-    __page_free
     page_alloc
     page_free
-    page_buddy_init
-    __get_buddy_addr
+    # page_buddy_init
     panic
     acquire
     release
     initlock
     kmm_alloc
     kmm_free
-    memset
 )
 
 set(MOCK_TEST_SRC
@@ -119,6 +111,7 @@ include(cmake/FetchCmocka.cmake)
 add_executable(ut_page ${MOCK_TEST_SRC} ${MOCK_TEST_KERNEL_SRC})
 target_link_libraries(ut_page PRIVATE cmocka-static)
 target_compile_options(ut_page PRIVATE ${TEST_C_FLAGS})
+target_compile_definitions(ut_page PRIVATE MOCK_TEST=1)
 target_link_options(ut_page PRIVATE ${MOCK_COMPILE_OPTIONS})
 target_include_directories(ut_page PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 

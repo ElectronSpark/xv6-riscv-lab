@@ -1,40 +1,38 @@
 #include <setjmp.h>
 #include <stdarg.h>
 #include <stddef.h>
+#include <sys/mman.h>
 
 #include <cmocka.h>
-#include "types.h"
-#include "riscv.h"
-#include "page.h"
-#include "memlayout.h"
+
 #include "ut_page_wraps.h"
 #include "list.h"
 
 // Test initialization setup that runs before each test
 static int test_setup(void **state) {
     (void)state;
-    
+    memset(__buddy_pools, 0, sizeof(__buddy_pools));
+    memset(__pages, 0, sizeof(__pages));
     // Initialize mock pages with proper values
-    for (int i = 0; i < 8; i++) {
-        mock_pages[i].physical_address = KERNBASE + (i * PGSIZE);
-        mock_pages[i].ref_count = (i == 0) ? 1 : 0;  // First page starts with ref_count = 1
-        mock_pages[i].flags = 0;
-    }
-    
-    // Print debug info about the initialized pages
-    print_message("Initialized mock pages with the following properties:\n");
-    for (int i = 0; i < 8; i++) {
-        print_message("  Page %d: physical_address=0x%lx, ref_count=%d\n", 
-                     i, mock_pages[i].physical_address, mock_pages[i].ref_count);
-    }
+    page_buddy_init(KERNBASE, PHYSTOP);
     
     return 0;
+}
+
+static void test_print_buddy_system_stat(void **state) {
+    (void)state;
+    print_message("Testing buddy system statistics printing\n");
+    
+    // This is a mock test, we just want to ensure the function can be called
+    // and it doesn't crash. In a real test, you would check the output.
+    print_buddy_system_stat();
 }
 
 // Test page reference count increment
 static void test_page_ref_inc_dec(void **state) {
     (void)state;
-    page_t *page = &mock_pages[0];
+    page_t *page = page_alloc(0, PAGE_FLAG_ANON);
+    assert_non_null(page);
     
     print_message("Testing page reference count increment and decrement\n");
     
@@ -83,7 +81,7 @@ static void test_page_ref_inc_dec(void **state) {
 // Test page reference count via physical address
 static void test_page_ref_count(void **state) {
     (void)state;
-    page_t *page = &mock_pages[1];
+    page_t *page = &__pages[1];
     
     // Initialize page with ref_count = 3
     page->ref_count = 3;
@@ -204,7 +202,7 @@ static void test_page_address_conversion_edge(void **state) {
 // Test the page_refcnt helper function
 static void test_page_refcnt_helper(void **state) {
     (void)state;
-    page_t *page = &mock_pages[2];
+    page_t *page = &__pages[2];
     uint64 physical_addr = KERNBASE + (2 * PGSIZE);
     
     print_message("Testing page_refcnt helper function\n");
@@ -233,14 +231,14 @@ static void test_page_alloc_free(void **state) {
     
     // Initialize mock pages - ensure all are free
     for (int i = 0; i < 8; i++) {
-        mock_pages[i].ref_count = 0;
-        mock_pages[i].flags = 0;
+        __pages[i].ref_count = 0;
+        __pages[i].flags = 0;
     }
     
     print_message("Testing page allocation and freeing\n");
     
     // Test allocation
-    page_t *page = __wrap___page_alloc(order, flags);
+    page_t *page = __page_alloc(order, flags);
     assert_non_null(page);
     print_message("  Allocated page at physical address: 0x%lx\n", page->physical_address);
     
@@ -251,16 +249,16 @@ static void test_page_alloc_free(void **state) {
     assert_int_equal(page->flags, flags);
     
     // Test freeing
-    __wrap___page_free(page, order);
+    __page_free(page, order);
     print_message("  Freed page successfully\n");
     
     // Allocate again to verify the page can be reused
-    page_t *page2 = __wrap___page_alloc(order, flags);
+    page_t *page2 = __page_alloc(order, flags);
     assert_non_null(page2);
     print_message("  Reallocated page at physical address: 0x%lx\n", page2->physical_address);
     
     // Clean up
-    __wrap___page_free(page2, order);
+    __page_free(page2, order);
 }
 
 // Test buddy system allocation of multiple orders
@@ -272,8 +270,8 @@ static void test_buddy_multi_order_alloc(void **state) {
     
     // Initialize mock pages - ensure all are free
     for (int i = 0; i < 8; i++) {
-        mock_pages[i].ref_count = 0;
-        mock_pages[i].flags = 0;
+        __pages[i].ref_count = 0;
+        __pages[i].flags = 0;
     }
     
     // Test allocating orders 0-3, but only up to what our mock can handle
@@ -283,7 +281,7 @@ static void test_buddy_multi_order_alloc(void **state) {
         uint64 page_count = 1UL << order;
         
         // Allocate pages
-        page_t *page = __wrap___page_alloc(order, flags);
+        page_t *page = __page_alloc(order, flags);
         if (page == NULL) {
             print_message("  Allocation for order %lu failed - this may be expected with limited mock pages\n", order);
             continue;
@@ -302,7 +300,7 @@ static void test_buddy_multi_order_alloc(void **state) {
         }
         
         // Free the pages
-        __wrap___page_free(page, order);
+        __page_free(page, order);
         print_message("  Freed 2^%ld=%ld pages\n", order, page_count);
     }
 }
@@ -327,8 +325,8 @@ static void test_page_flags(void **state) {
     
     // Initialize mock pages - ensure all are free
     for (size_t i = 0; i < 8; i++) {
-        mock_pages[i].ref_count = 0;
-        mock_pages[i].flags = 0;
+        __pages[i].ref_count = 0;
+        __pages[i].flags = 0;
     }
     
     for (size_t i = 0; i < sizeof(flag_tests)/sizeof(flag_tests[0]); i++) {
@@ -336,28 +334,25 @@ static void test_page_flags(void **state) {
         print_message("  Testing flag combination: 0x%lx\n", flags);
         
         // Allocate page with flags
-        page_t *page = __wrap___page_alloc(order, flags);
+        page_t *page = __page_alloc(order, flags);
         assert_non_null(page);
         
         // Verify flags are set correctly
         assert_int_equal(page->flags, flags);
         
         // Clean up
-        __wrap___page_free(page, order);
+        __page_free(page, order);
     }
     
     // Test invalid flags
     print_message("  Testing invalid flags\n");
-    page_t *page = __wrap___page_alloc(order, ~(PAGE_FLAG_SLAB | PAGE_FLAG_ANON | PAGE_FLAG_PGTABLE));
+    page_t *page = __page_alloc(order, ~(PAGE_FLAG_SLAB | PAGE_FLAG_ANON | PAGE_FLAG_PGTABLE));
     assert_null(page);
 }
 
 // Test for __page_buddy_init and buddy pool functionality
 static void test_page_buddy_init_detailed(void **state) {
     (void)state;
-    extern buddy_pool_t __buddy_pools[];
-    extern uint64 __managed_start;
-    extern uint64 __managed_end;
     
     print_message("Testing buddy system initialization and pool management\n");
     
@@ -391,21 +386,20 @@ static void test_page_buddy_init_detailed(void **state) {
 // Test page buddy split and merge functionality
 static void test_buddy_split_merge(void **state) {
     (void)state;
-    extern buddy_pool_t __buddy_pools[];
     
     print_message("Testing buddy system split and merge operations\n");
     
     // Initialize mock pages - ensure all are free
     for (int i = 0; i < 8; i++) {
-        mock_pages[i].ref_count = 0;
-        mock_pages[i].flags = 0;
+        __pages[i].ref_count = 0;
+        __pages[i].flags = 0;
     }
     
     // Allocate a higher order page
     uint64 high_order = 2;  // 4 pages
     uint64 flags = 0;
     
-    page_t *large_page = __wrap___page_alloc(high_order, flags);
+    page_t *large_page = __page_alloc(high_order, flags);
     
     // In our simplified mock, we might not be able to allocate a high order page correctly
     // Check if the allocation succeeded, if not, skip the test
@@ -417,7 +411,7 @@ static void test_buddy_split_merge(void **state) {
     print_message("  Allocated order %lu page at 0x%lx\n", high_order, large_page->physical_address);
     
     // Free the large page
-    __wrap___page_free(large_page, high_order);
+    __page_free(large_page, high_order);
     print_message("  Freed order %lu page\n", high_order);
     
     // Now allocate multiple smaller pages from the same region
@@ -426,12 +420,12 @@ static void test_buddy_split_merge(void **state) {
     
     // Allocate 4 individual pages
     for (int i = 0; i < 4; i++) {
-        pages[i] = __wrap___page_alloc(low_order, flags);
+        pages[i] = __page_alloc(low_order, flags);
         if (!pages[i]) {
             print_message("  Failed to allocate page %d - breaking out of test\n", i+1);
             // Free previously allocated pages before returning
             for (int j = 0; j < i; j++) {
-                __wrap___page_free(pages[j], low_order);
+                __page_free(pages[j], low_order);
             }
             return;
         }
@@ -440,17 +434,17 @@ static void test_buddy_split_merge(void **state) {
     
     // Free the pages
     for (int i = 0; i < 4; i++) {
-        __wrap___page_free(pages[i], low_order);
+        __page_free(pages[i], low_order);
         print_message("  Freed order %lu page %d\n", low_order, i+1);
     }
     
     // Try to allocate a high order page again
-    page_t *merged_page = __wrap___page_alloc(high_order, flags);
+    page_t *merged_page = __page_alloc(high_order, flags);
     if (merged_page) {
         print_message("  Successfully allocated order %lu page after freeing at 0x%lx\n", 
                    high_order, merged_page->physical_address);
         // Clean up
-        __wrap___page_free(merged_page, high_order);
+        __page_free(merged_page, high_order);
     } else {
         print_message("  Could not reallocate high-order page (expected with mock implementation)\n");
     }
@@ -520,22 +514,22 @@ static void test_buddy_fragmentation(void **state) {
     
     // Initialize mock pages - ensure all are free
     for (int i = 0; i < 8; i++) {
-        mock_pages[i].ref_count = 0;
-        mock_pages[i].flags = 0;
+        __pages[i].ref_count = 0;
+        __pages[i].flags = 0;
         // Set physical addresses for each page to ensure they're properly aligned
-        mock_pages[i].physical_address = KERNBASE + (i * PGSIZE);
+        __pages[i].physical_address = KERNBASE + (i * PGSIZE);
     }
     
     // Try to allocate a mix of different order pages
     // Note: With only 8 pages total, we can only do simplified fragmentation tests
-    pages[0] = __wrap___page_alloc(0, flags);  // Single page
+    pages[0] = __page_alloc(0, flags);  // Single page
     if (!pages[0]) {
         print_message("  Failed basic allocation - skipping test\n");
         return;
     }
     
-    pages[1] = __wrap___page_alloc(0, flags);  // Single page
-    pages[2] = __wrap___page_alloc(0, flags);  // Single page
+    pages[1] = __page_alloc(0, flags);  // Single page
+    pages[2] = __page_alloc(0, flags);  // Single page
     
     print_message("  Created fragmentation with single-page allocations\n");
     
@@ -548,17 +542,17 @@ static void test_buddy_fragmentation(void **state) {
     
     // Try to allocate a larger order page
     print_message("  Trying to allocate higher order page with fragmentation present\n");
-    page_t *large_page = __wrap___page_alloc(2, flags);  // 4 pages
+    page_t *large_page = __page_alloc(2, flags);  // 4 pages
     if (large_page) {
         print_message("  Successfully allocated page of order 2 at 0x%lx\n", large_page->physical_address);
         
         // Verify this page meets the alignment requirements for order 2
-        uint64 page_idx = large_page - mock_pages;
+        uint64 page_idx = large_page - __pages;
         if ((page_idx & ((1UL << 2) - 1)) != 0) {
             print_message("  WARNING: Order 2 page at index %lu is not properly aligned\n", page_idx);
         }
         
-        __wrap___page_free(large_page, 2);
+        __page_free(large_page, 2);
     } else {
         print_message("  Could not allocate page of order 2 (expected due to fragmentation)\n");
     }
@@ -567,20 +561,20 @@ static void test_buddy_fragmentation(void **state) {
     for (int i = 0; i < 3; i++) {
         if (pages[i]) {
             print_message("  Freeing page %d\n", i);
-            uint64 page_idx = pages[i] - mock_pages;
+            uint64 page_idx = pages[i] - __pages;
             if ((page_idx & ((1UL << 0) - 1)) != 0) {
                 print_message("  WARNING: Order 0 page at index %lu is not properly aligned\n", page_idx);
             }
-            __wrap___page_free(pages[i], 0);
+            __page_free(pages[i], 0);
         }
     }
     
     // After freeing, try to allocate a larger order page again
     print_message("  After freeing pages, trying to allocate higher order page\n");
-    large_page = __wrap___page_alloc(2, flags); // Try order 2 (4 pages)
+    large_page = __page_alloc(2, flags); // Try order 2 (4 pages)
     if (large_page) {
         print_message("  Successfully allocated page of order 2 at 0x%lx\n", large_page->physical_address);
-        __wrap___page_free(large_page, 2);
+        __page_free(large_page, 2);
     } else {
         print_message("  Still could not allocate page of order 2 (limited by mock implementation)\n");
     }
@@ -598,15 +592,15 @@ static void test_page_alloc_stress(void **state) {
     
     // Initialize mock pages - ensure all are free
     for (int i = 0; i < 8; i++) {
-        mock_pages[i].ref_count = 0;
-        mock_pages[i].flags = 0;
+        __pages[i].ref_count = 0;
+        __pages[i].flags = 0;
     }
     
     // Perform a series of allocations of different orders
     // Limit to order 0 (single page) allocations to ensure test runs successfully
     for (int i = 0; i < NUM_ALLOCS; i++) {
         orders[i] = 0;  // Stick to single-page allocations
-        pages[i] = __wrap___page_alloc(orders[i], flags);
+        pages[i] = __page_alloc(orders[i], flags);
         
         if (pages[i] == NULL) {
             print_message("  Allocation %d failed (order %lu) - mock system out of memory\n", i, orders[i]);
@@ -620,16 +614,16 @@ static void test_page_alloc_stress(void **state) {
     print_message("  Freeing all allocated pages\n");
     for (int i = 0; i < NUM_ALLOCS; i++) {
         if (pages[i] != NULL) {
-            __wrap___page_free(pages[i], orders[i]);
+            __page_free(pages[i], orders[i]);
         }
     }
     
     // Try one final allocation to verify system recovered
     uint64 order = 1;  // Try a 2-page allocation
-    page_t *page = __wrap___page_alloc(order, flags);
+    page_t *page = __page_alloc(order, flags);
     if (page != NULL) {
         print_message("  Successfully allocated order %lu page after stress test\n", order);
-        __wrap___page_free(page, order);
+        __page_free(page, order);
     } else {
         print_message("  Could not allocate order %lu page after stress test\n", order);
     }
@@ -645,12 +639,12 @@ static void test_mixed_allocation_methods(void **state) {
     
     // Initialize mock pages - ensure all are free
     for (int i = 0; i < 8; i++) {
-        mock_pages[i].ref_count = 0;
-        mock_pages[i].flags = 0;
+        __pages[i].ref_count = 0;
+        __pages[i].flags = 0;
     }
     
     // Use low-level allocation function
-    page_t *page = __wrap___page_alloc(order, flags);
+    page_t *page = __page_alloc(order, flags);
     assert_non_null(page);
     uint64 physical_addr = page->physical_address;
     print_message("  Low-level allocation: page at 0x%lx\n", physical_addr);
@@ -661,17 +655,17 @@ static void test_mixed_allocation_methods(void **state) {
     print_message("  Helper allocation: memory at %p\n", memory);
     
     // Convert between the two 
-    page_t *page_from_pa = __wrap___pa_to_page((uint64)memory);
+    page_t *page_from_pa = __pa_to_page((uint64)memory);
     assert_non_null(page_from_pa);
     
-    void *addr_from_page = (void *)__wrap___page_to_pa(page);
+    void *addr_from_page = (void *)__page_to_pa(page);
     assert_non_null(addr_from_page);
     
     print_message("  Conversion from page to address: %p\n", addr_from_page);
     print_message("  Conversion from address to page: %p\n", page_from_pa);
     
     // Free using both methods
-    __wrap___page_free(page, order);
+    __page_free(page, order);
     print_message("  Freed page with low-level function\n");
     
     __wrap_page_free(memory, order);
@@ -686,11 +680,11 @@ static void test_buddy_alignment(void **state) {
     print_message("Testing buddy system alignment requirements\n");
     
     // Initialize mock pages with physical addresses and ref counts
-    for (int i = 0; i < 8; i++) {
-        mock_pages[i].ref_count = 0;
-        mock_pages[i].flags = 0;
-        mock_pages[i].physical_address = KERNBASE + (i * PGSIZE);
-    }
+    // for (int i = 0; i < 8; i++) {
+    //     __pages[i].ref_count = 0;
+    //     __pages[i].flags = 0;
+    //     __pages[i].physical_address = KERNBASE + (i * PGSIZE);
+    // }
     
     // Test allocation of different orders and verify alignment
     for (uint64 order = 0; order <= 2; order++) {  // Test orders 0, 1, and 2
@@ -699,14 +693,14 @@ static void test_buddy_alignment(void **state) {
         print_message("  Testing order %lu (2^%lu = %lu pages)\n", order, order, page_count);
         
         // Allocate page of this order
-        page_t *page = __wrap___page_alloc(order, flags);
+        page_t *page = __page_alloc(order, flags);
         if (!page) {
             print_message("  Could not allocate page of order %lu - skipping\n", order);
             continue;
         }
         
         // Verify the returned page is properly aligned for this order
-        uint64 page_idx = page - mock_pages;
+        uint64 page_idx = page - __pages;
         uint64 alignment_mask = (1UL << order) - 1;
         
         print_message("  Allocated page at index %lu, order %lu\n", page_idx, order);
@@ -723,7 +717,7 @@ static void test_buddy_alignment(void **state) {
         
         // Free the allocated pages
         print_message("  Freeing allocated pages of order %lu\n", order);
-        __wrap___page_free(page, order);
+        __page_free(page, order);
         
         // Verify all pages were freed
         for (uint64 i = 0; i < page_count; i++) {
@@ -731,10 +725,28 @@ static void test_buddy_alignment(void **state) {
         }
     }
 }
+
+// prepare the test environment before all tests
+void set_up_test_suite() {
+    void *ret = mmap((void *)KERNBASE, PHYSTOP - KERNBASE, 
+                    PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+    assert_ptr_equal(ret, (void *)KERNBASE);
+
+    __managed_start = KERNBASE;
+    __managed_end = PHYSTOP;
+}
+
+// tear down test environment after all tests
+void tear_down_test_suite() {
+    assert_int_equal(munmap((void *)KERNBASE, PHYSTOP - KERNBASE), 0);
+}
+
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
     const struct CMUnitTest tests[] = {
+        cmocka_unit_test(test_print_buddy_system_stat),
+
         // Basic page operations
         cmocka_unit_test_setup(test_page_ref_inc_dec, test_setup),
         cmocka_unit_test_setup(test_page_ref_count, test_setup),
@@ -763,7 +775,9 @@ int main(int argc, char **argv) {
         cmocka_unit_test_setup(test_buddy_alignment, test_setup),
     };
 
+    set_up_test_suite();
     int result = cmocka_run_group_tests(tests, NULL, NULL);
+    tear_down_test_suite();
     return result;
 }
 

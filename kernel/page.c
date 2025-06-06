@@ -435,8 +435,9 @@ int page_buddy_init(uint64 pa_start, uint64 pa_end) {
             panic("page_buddy_init(): page put error");
         }
     }
-
+#ifndef HOST_TEST
     print_buddy_system_stat();
+#endif
 
     return 0;
 }
