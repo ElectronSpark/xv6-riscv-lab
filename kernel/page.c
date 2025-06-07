@@ -562,7 +562,7 @@ int __page_ref_dec(page_t *page) {
             panic("page_ref_dec");
         }
     }
-    return 0;
+    return ret;
 }
 
 // return the reference count of a page
