@@ -489,7 +489,7 @@ void __page_free(page_t *page, uint64 order) {
         panic("free pages not aligned to order");
     }
     for (int i = 0; i < count; i++) {
-        if (!__buddy_put(&page[i])) {
+        if (__buddy_put(&page[i]) != 0) {
             panic("failed to free page(s)");
         }
     }

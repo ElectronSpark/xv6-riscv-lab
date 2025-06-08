@@ -213,32 +213,26 @@ static void test_page_refcnt_helper(void **state) {
     print_message("Testing page_refcnt helper function\n");
     
     // Set reference count to a known value
-    page->ref_count = 5;
-    page->physical_address = physical_addr;  // Ensure the physical address is set correctly
+    __page_init(page, physical_addr, 5, PAGE_FLAG_ANON);
     print_message("  Setting page ref_count to: %d\n", page->ref_count);
     
     // Test the helper function
-    int refcnt = page_refcnt((void*)physical_addr);
+    int refcnt = __real_page_refcnt((void*)physical_addr);
     assert_int_equal(refcnt, 5);
     print_message("  Successfully retrieved ref_count: %d via helper function\n", refcnt);
     
     // Test with NULL
-    refcnt = page_refcnt(NULL);
+    refcnt = __real_page_refcnt(NULL);
     assert_int_equal(refcnt, -1);
     print_message("  Correctly handled NULL pointer to page_refcnt\n");
 }
 
 // Test page allocation and freeing
+// @TODO: improve
 static void test_page_alloc_free(void **state) {
     (void)state;
     uint64 flags = 0;
     uint64 order = 0;  // Single page allocation
-    
-    // Initialize mock pages - ensure all are free
-    for (int i = 0; i < 8; i++) {
-        __pages[i].ref_count = 0;
-        __pages[i].flags = 0;
-    }
     
     print_message("Testing page allocation and freeing\n");
     
@@ -267,6 +261,7 @@ static void test_page_alloc_free(void **state) {
 }
 
 // Test buddy system allocation of multiple orders
+// @TODO: improve
 static void test_buddy_multi_order_alloc(void **state) {
     (void)state;
     uint64 flags = 0;
@@ -311,6 +306,7 @@ static void test_buddy_multi_order_alloc(void **state) {
 }
 
 // Test buddy system page flags
+// @TODO: improve
 static void test_page_flags(void **state) {
     (void)state;
     uint64 order = 0;
@@ -356,6 +352,7 @@ static void test_page_flags(void **state) {
 }
 
 // Test for __page_buddy_init and buddy pool functionality
+// @TODO: improve
 static void test_page_buddy_init_detailed(void **state) {
     (void)state;
     
@@ -389,6 +386,7 @@ static void test_page_buddy_init_detailed(void **state) {
 }
 
 // Test page buddy split and merge functionality
+// @TODO: improve
 static void test_buddy_split_merge(void **state) {
     (void)state;
     
@@ -456,6 +454,7 @@ static void test_buddy_split_merge(void **state) {
 }
 
 // Test allocation failure cases
+// @TODO: improve
 static void test_page_alloc_failure(void **state) {
     (void)state;
     
@@ -475,6 +474,7 @@ static void test_page_alloc_failure(void **state) {
 }
 
 // Test for helper functions that calculate buddy addresses
+// @TODO: improve
 static void test_buddy_address_helpers(void **state) {
     (void)state;
     extern uint64 __get_buddy_addr(uint64 physical, uint32 order);
@@ -510,6 +510,7 @@ static void test_buddy_address_helpers(void **state) {
 }
 
 // Test buddy system with simulated fragmentation
+// @TODO: improve
 static void test_buddy_fragmentation(void **state) {
     (void)state;
     uint64 flags = 0;
@@ -586,6 +587,7 @@ static void test_buddy_fragmentation(void **state) {
 }
 
 // Test page allocation stress test
+// @TODO: improve
 static void test_page_alloc_stress(void **state) {
     (void)state;
     uint64 flags = 0;
@@ -635,6 +637,7 @@ static void test_page_alloc_stress(void **state) {
 }
 
 // Test mixed use of regular and helper allocation functions
+// @TODO: improve
 static void test_mixed_allocation_methods(void **state) {
     (void)state;
     uint64 flags = 0;
@@ -680,7 +683,7 @@ static void test_mixed_allocation_methods(void **state) {
 // Test buddy system alignment requirements explicitly
 static void test_buddy_alignment(void **state) {
     (void)state;
-    uint64 flags = 0;
+    uint64 flags = PAGE_FLAG_ANON;
     
     print_message("Testing buddy system alignment requirements\n");
     
@@ -705,15 +708,15 @@ static void test_buddy_alignment(void **state) {
         }
         
         // Verify the returned page is properly aligned for this order
-        uint64 page_idx = page - __pages;
-        uint64 alignment_mask = (1UL << order) - 1;
+        uint64 physical = page->physical_address;
+        uint64 alignment_mask = (1UL << (order + PAGE_SHIFT)) - 1;
         
-        print_message("  Allocated page at index %lu, order %lu\n", page_idx, order);
+        print_message("  Allocated page at index %p, order %lu\n", physical, order);
         print_message("  Alignment check: index %% 2^%lu == 0: %s\n", 
-                     order, (page_idx & alignment_mask) == 0 ? "yes" : "no");
+                     order, (physical & alignment_mask) == 0 ? "yes" : "no");
         
         // For orders > 0, the page index must be a multiple of 2^order
-        assert_int_equal(page_idx & alignment_mask, 0);
+        assert_int_equal(physical & alignment_mask, 0);
         
         // Check that all pages in the group have been marked as allocated
         for (uint64 i = 0; i < page_count; i++) {
@@ -758,13 +761,13 @@ int main(int argc, char **argv) {
         cmocka_unit_test_setup(test_page_ops_null, test_setup),
         cmocka_unit_test_setup(test_page_address_conversion, test_setup),
         cmocka_unit_test_setup(test_page_address_conversion_edge, test_setup),
-        // cmocka_unit_test_setup(test_page_refcnt_helper, test_setup),
+        cmocka_unit_test_setup(test_page_refcnt_helper, test_setup),
         
-        // // Buddy system tests
-        // cmocka_unit_test_setup(test_page_buddy_init_basic, test_setup),
-        // cmocka_unit_test_setup(test_page_buddy_init_detailed, test_setup),
-        // cmocka_unit_test_setup(test_buddy_address_helpers, test_setup),
-        // cmocka_unit_test_setup(test_buddy_alignment, test_setup),
+        // Buddy system tests
+        cmocka_unit_test_setup(test_page_buddy_init_basic, test_setup),
+        cmocka_unit_test_setup(test_page_buddy_init_detailed, test_setup),
+        cmocka_unit_test_setup(test_buddy_address_helpers, test_setup),
+        cmocka_unit_test_setup(test_buddy_alignment, test_setup),
         
         // // Allocation and freeing tests
         // cmocka_unit_test_setup(test_page_alloc_free, test_setup),
