@@ -268,12 +268,6 @@ static void test_buddy_multi_order_alloc(void **state) {
     
     print_message("Testing buddy system multi-order allocation\n");
     
-    // Initialize mock pages - ensure all are free
-    for (int i = 0; i < 8; i++) {
-        __pages[i].ref_count = 0;
-        __pages[i].flags = 0;
-    }
-    
     // Test allocating orders 0-3, but only up to what our mock can handle
     // With 8 pages, we can support up to order 3 (8 pages)
     for (uint64 order = 0; order <= 2; order++) {  // Only test up to order 2 (4 pages)
@@ -306,7 +300,7 @@ static void test_buddy_multi_order_alloc(void **state) {
 }
 
 // Test buddy system page flags
-// @TODO: improve
+// @TODO: Some flags need to be mutually exclusive
 static void test_page_flags(void **state) {
     (void)state;
     uint64 order = 0;
@@ -517,15 +511,7 @@ static void test_buddy_fragmentation(void **state) {
     page_t *pages[5];  // Store allocated pages, we can only have up to 8 pages total in our mock
     
     print_message("Testing buddy system under fragmentation\n");
-    
-    // Initialize mock pages - ensure all are free
-    for (int i = 0; i < 8; i++) {
-        __pages[i].ref_count = 0;
-        __pages[i].flags = 0;
-        // Set physical addresses for each page to ensure they're properly aligned
-        __pages[i].physical_address = KERNBASE + (i * PGSIZE);
-    }
-    
+
     // Try to allocate a mix of different order pages
     // Note: With only 8 pages total, we can only do simplified fragmentation tests
     pages[0] = __page_alloc(0, flags);  // Single page
@@ -597,12 +583,6 @@ static void test_page_alloc_stress(void **state) {
     
     print_message("Running page allocation stress test\n");
     
-    // Initialize mock pages - ensure all are free
-    for (int i = 0; i < 8; i++) {
-        __pages[i].ref_count = 0;
-        __pages[i].flags = 0;
-    }
-    
     // Perform a series of allocations of different orders
     // Limit to order 0 (single page) allocations to ensure test runs successfully
     for (int i = 0; i < NUM_ALLOCS; i++) {
@@ -640,16 +620,10 @@ static void test_page_alloc_stress(void **state) {
 // @TODO: improve
 static void test_mixed_allocation_methods(void **state) {
     (void)state;
-    uint64 flags = 0;
+    uint64 flags = PAGE_FLAG_ANON;
     uint64 order = 0;
     
     print_message("Testing mixed use of regular and helper allocation methods\n");
-    
-    // Initialize mock pages - ensure all are free
-    for (int i = 0; i < 8; i++) {
-        __pages[i].ref_count = 0;
-        __pages[i].flags = 0;
-    }
     
     // Use low-level allocation function
     page_t *page = __page_alloc(order, flags);
@@ -658,7 +632,7 @@ static void test_mixed_allocation_methods(void **state) {
     print_message("  Low-level allocation: page at 0x%lx\n", physical_addr);
     
     // Use helper allocation function
-    void *memory = __wrap_page_alloc(order, flags);
+    void *memory = __real_page_alloc(order, flags);
     assert_non_null(memory);
     print_message("  Helper allocation: memory at %p\n", memory);
     
@@ -676,7 +650,7 @@ static void test_mixed_allocation_methods(void **state) {
     __page_free(page, order);
     print_message("  Freed page with low-level function\n");
     
-    __wrap_page_free(memory, order);
+    __real_page_free(memory, order);
     print_message("  Freed memory with helper function\n");
 }
 
@@ -686,13 +660,6 @@ static void test_buddy_alignment(void **state) {
     uint64 flags = PAGE_FLAG_ANON;
     
     print_message("Testing buddy system alignment requirements\n");
-    
-    // Initialize mock pages with physical addresses and ref counts
-    // for (int i = 0; i < 8; i++) {
-    //     __pages[i].ref_count = 0;
-    //     __pages[i].flags = 0;
-    //     __pages[i].physical_address = KERNBASE + (i * PGSIZE);
-    // }
     
     // Test allocation of different orders and verify alignment
     for (uint64 order = 0; order <= 2; order++) {  // Test orders 0, 1, and 2
@@ -769,18 +736,17 @@ int main(int argc, char **argv) {
         cmocka_unit_test_setup(test_buddy_address_helpers, test_setup),
         cmocka_unit_test_setup(test_buddy_alignment, test_setup),
         
-        // // Allocation and freeing tests
-        // cmocka_unit_test_setup(test_page_alloc_free, test_setup),
-        // cmocka_unit_test_setup(test_buddy_multi_order_alloc, test_setup),
-        // cmocka_unit_test_setup(test_page_flags, test_setup),
-        // cmocka_unit_test_setup(test_buddy_split_merge, test_setup),
-        // cmocka_unit_test_setup(test_page_alloc_failure, test_setup),
+        // Allocation and freeing tests
+        cmocka_unit_test_setup(test_page_alloc_free, test_setup),
+        cmocka_unit_test_setup(test_buddy_multi_order_alloc, test_setup),
+        cmocka_unit_test_setup(test_page_flags, test_setup),
+        cmocka_unit_test_setup(test_buddy_split_merge, test_setup),
+        cmocka_unit_test_setup(test_page_alloc_failure, test_setup),
         
-        // // Advanced/stress tests
+        // Advanced/stress tests
         // cmocka_unit_test_setup(test_buddy_fragmentation, test_setup),
         // cmocka_unit_test_setup(test_page_alloc_stress, test_setup),
-        // cmocka_unit_test_setup(test_mixed_allocation_methods, test_setup),
-        // cmocka_unit_test_setup(test_buddy_alignment, test_setup),
+        cmocka_unit_test_setup(test_mixed_allocation_methods, test_setup),
     };
 
     set_up_test_suite();

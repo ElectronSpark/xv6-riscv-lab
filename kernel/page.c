@@ -467,6 +467,7 @@ STATIC_INLINE int __page_ref_dec_unlocked(page_t *page) {
 
 page_t *__page_alloc(uint64 order, uint64 flags) {
     if (!__page_flags_validity(flags)) {
+        // @TODO: Some flags need to be mutually exclusive
         return NULL;
     }
     if (order > PAGE_BUDDY_MAX_ORDER) {
@@ -510,7 +511,7 @@ void *page_alloc(uint64 order, uint64 flags) {
         memset((char*)pa, 5, PGSIZE << order); // fill with junk
     else
         panic("page_alloc");
-    return (void*)pa;
+    return pa;
 }
 
 // helper function for __page_free. Convert the base address of the page to be

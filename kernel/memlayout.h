@@ -44,7 +44,12 @@
 // the kernel expects there to be RAM
 // for use by the kernel and user pages
 // from physical address 0x80000000 to PHYSTOP.
+#ifdef HOST_TEST
+// Make sure the whole memory area is in the user space when testing
+#define KERNBASE 0x40000000L
+#else
 #define KERNBASE 0x80000000L
+#endif
 #define PHYSTOP (KERNBASE + 128*1024*1024)
 #define TOTALPAGES  ((PHYSTOP - KERNBASE) >> 12)
 
