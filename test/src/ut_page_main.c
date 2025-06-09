@@ -2,20 +2,86 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <sys/mman.h>
+#include <stdbool.h>
+#include <stdlib.h>
 
 #include <cmocka.h>
 
 #include "ut_page_wraps.h"
 #include "list.h"
 
+// Structure to store buddy system state
+typedef struct {
+    uint64 counts[PAGE_BUDDY_MAX_ORDER + 1];
+    bool empty[PAGE_BUDDY_MAX_ORDER + 1];
+    uint64 total_free_pages;
+    bool skip;
+} buddy_system_state_t;
+
 // Test initialization setup that runs before each test
 static int test_setup(void **state) {
-    (void)state;
+    // Allocate state to store buddy system statistics
+    buddy_system_state_t *buddy_state = malloc(sizeof(buddy_system_state_t));
+    assert_non_null(buddy_state);
+    
+    // Reset buddy pools and pages
     memset(__buddy_pools, 0, sizeof(__buddy_pools));
     memset(__pages, 0, sizeof(__pages));
+    
     // Initialize mock pages with proper values
     assert_int_equal(page_buddy_init(KERNBASE, PHYSTOP), 0);
     
+    // Record initial buddy system state
+    memset(buddy_state, 0, sizeof(buddy_system_state_t));
+    page_buddy_stat(buddy_state->counts, buddy_state->empty, PAGE_BUDDY_MAX_ORDER + 1);
+    
+    // Calculate total free pages
+    buddy_state->total_free_pages = 0;
+    for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+        buddy_state->total_free_pages += (1UL << i) * buddy_state->counts[i];
+    }
+    buddy_state->skip = true;
+    
+    // Pass the state to the test
+    *state = buddy_state;
+    
+    return 0;
+}
+
+// Test teardown function that runs after each test
+static int test_teardown(void **state) {
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    static buddy_system_state_t final_state = { 0 };
+
+    if (initial_state->skip) {
+        goto skip;
+    }
+    
+    // Get the current buddy system state
+    page_buddy_stat(final_state.counts, final_state.empty, PAGE_BUDDY_MAX_ORDER + 1);
+    
+    // Calculate total free pages
+    final_state.total_free_pages = 0;
+    for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+        final_state.total_free_pages += (1UL << i) * final_state.counts[i];
+    }
+    
+    for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+        uint64 initial_count = initial_state->counts[i];
+        uint64 final_count = final_state.counts[i];
+        bool initial_empty = initial_state->empty[i];
+        bool final_empty = final_state.empty[i];
+        assert_int_equal(final_count, initial_count);
+        assert_int_equal(final_empty, initial_empty);
+    }
+    
+    // Check if the buddy system state matches the initial state
+    assert_int_equal(final_state.total_free_pages, initial_state->total_free_pages);
+    
+    // Free the state
+skip:
+    free(initial_state);
+    *state = NULL;
     return 0;
 }
 
@@ -73,7 +139,8 @@ static void test_page_ref_inc_dec(void **state) {
 
 // Test page reference count via physical address
 static void test_page_ref_count(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     page_t *page = &__pages[1];
     
     // Initialize page with ref_count = 3
@@ -89,7 +156,8 @@ static void test_page_ref_count(void **state) {
 
 // Test page operations with null pointer
 static void test_page_ops_null(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     
     print_message("Testing NULL page reference operations\n");
     
@@ -103,7 +171,8 @@ static void test_page_ops_null(void **state) {
 
 // Test physical address conversions
 static void test_page_address_conversion(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     uint64 physical_addr = KERNBASE + 0x1000;  // Use a valid address in our mock range
     
     print_message("Testing physical address to page conversion\n");
@@ -122,7 +191,8 @@ static void test_page_address_conversion(void **state) {
 
 // Test page buddy initialization (basic checks)
 static void test_page_buddy_init_basic(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     
     print_message("Testing buddy system page initialization (basic check)\n");
     
@@ -148,7 +218,8 @@ static void test_page_buddy_init_basic(void **state) {
 
 // Test page address conversion edge cases
 static void test_page_address_conversion_edge(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     extern uint64 __managed_start;
     extern uint64 __managed_end;
     
@@ -206,7 +277,8 @@ static void test_page_address_conversion_edge(void **state) {
 
 // Test the page_refcnt helper function
 static void test_page_refcnt_helper(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     page_t *page = &__pages[2];
     uint64 physical_addr = KERNBASE + (2 * PGSIZE);
     
@@ -230,7 +302,8 @@ static void test_page_refcnt_helper(void **state) {
 // Test page allocation and freeing
 // @TODO: improve
 static void test_page_alloc_free(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     uint64 flags = 0;
     uint64 order = 0;  // Single page allocation
     
@@ -263,7 +336,8 @@ static void test_page_alloc_free(void **state) {
 // Test buddy system allocation of multiple orders
 // @TODO: improve
 static void test_buddy_multi_order_alloc(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     uint64 flags = 0;
     
     print_message("Testing buddy system multi-order allocation\n");
@@ -302,7 +376,8 @@ static void test_buddy_multi_order_alloc(void **state) {
 // Test buddy system page flags
 // @TODO: Some flags need to be mutually exclusive
 static void test_page_flags(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     uint64 order = 0;
     
     print_message("Testing page flags\n");
@@ -380,77 +455,38 @@ static void test_page_buddy_init_detailed(void **state) {
 }
 
 // Test page buddy split and merge functionality
-// @TODO: improve
 static void test_buddy_split_merge(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     
     print_message("Testing buddy system split and merge operations\n");
-    
-    // Initialize mock pages - ensure all are free
-    for (int i = 0; i < 8; i++) {
-        __pages[i].ref_count = 0;
-        __pages[i].flags = 0;
-    }
-    
-    // Allocate a higher order page
-    uint64 high_order = 2;  // 4 pages
-    uint64 flags = 0;
-    
-    page_t *large_page = __page_alloc(high_order, flags);
-    
-    // In our simplified mock, we might not be able to allocate a high order page correctly
-    // Check if the allocation succeeded, if not, skip the test
-    if (!large_page) {
-        print_message("  High-order allocation not supported in mock - skipping test\n");
-        return;
-    }
-    
-    print_message("  Allocated order %lu page at 0x%lx\n", high_order, large_page->physical_address);
-    
-    // Free the large page
-    __page_free(large_page, high_order);
-    print_message("  Freed order %lu page\n", high_order);
-    
-    // Now allocate multiple smaller pages from the same region
-    uint64 low_order = 0;  // single pages
-    page_t *pages[4];
-    
-    // Allocate 4 individual pages
-    for (int i = 0; i < 4; i++) {
-        pages[i] = __page_alloc(low_order, flags);
-        if (!pages[i]) {
-            print_message("  Failed to allocate page %d - breaking out of test\n", i+1);
-            // Free previously allocated pages before returning
-            for (int j = 0; j < i; j++) {
-                __page_free(pages[j], low_order);
-            }
-            return;
+
+    static page_t *pages[TOTALPAGES] = { 0 };
+
+    for (int order = 0; order <= PAGE_BUDDY_MAX_ORDER; order++) {
+        int alloc_count = TOTALPAGES >> order;  // Number of pages in this order
+
+        print_message("Allocating %d pages with order %d\n", alloc_count, order);
+
+        for (int i = 0; i < alloc_count; i++) {
+            pages[i] = __page_alloc(order, PAGE_FLAG_ANON);
+            assert_non_null(pages[i]);
         }
-        print_message("  Allocated order %lu page %d at 0x%lx\n", low_order, i+1, pages[i]->physical_address);
-    }
-    
-    // Free the pages
-    for (int i = 0; i < 4; i++) {
-        __page_free(pages[i], low_order);
-        print_message("  Freed order %lu page %d\n", low_order, i+1);
-    }
-    
-    // Try to allocate a high order page again
-    page_t *merged_page = __page_alloc(high_order, flags);
-    if (merged_page) {
-        print_message("  Successfully allocated order %lu page after freeing at 0x%lx\n", 
-                   high_order, merged_page->physical_address);
-        // Clean up
-        __page_free(merged_page, high_order);
-    } else {
-        print_message("  Could not reallocate high-order page (expected with mock implementation)\n");
+
+        assert_null(__page_alloc(order, PAGE_FLAG_ANON));
+
+        print_message("Freeing %d pages with order %d\n", alloc_count, order);
+        for (int i = 0; i < alloc_count; i++) {
+            __page_free(pages[i], order);
+        }
     }
 }
 
 // Test allocation failure cases
 // @TODO: improve
 static void test_page_alloc_failure(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     
     print_message("Testing page allocation failure cases\n");
     
@@ -506,9 +542,10 @@ static void test_buddy_address_helpers(void **state) {
 // Test buddy system with simulated fragmentation
 // @TODO: improve
 static void test_buddy_fragmentation(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     uint64 flags = 0;
-    page_t *pages[5];  // Store allocated pages, we can only have up to 8 pages total in our mock
+    static page_t *pages[TOTALPAGES];
     
     print_message("Testing buddy system under fragmentation\n");
 
@@ -575,7 +612,8 @@ static void test_buddy_fragmentation(void **state) {
 // Test page allocation stress test
 // @TODO: improve
 static void test_page_alloc_stress(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     uint64 flags = 0;
     const int NUM_ALLOCS = 8;  // Max number of allocations our mock supports
     page_t *pages[NUM_ALLOCS];  // Store allocated pages
@@ -619,7 +657,8 @@ static void test_page_alloc_stress(void **state) {
 // Test mixed use of regular and helper allocation functions
 // @TODO: improve
 static void test_mixed_allocation_methods(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     uint64 flags = PAGE_FLAG_ANON;
     uint64 order = 0;
     
@@ -656,7 +695,8 @@ static void test_mixed_allocation_methods(void **state) {
 
 // Test buddy system alignment requirements explicitly
 static void test_buddy_alignment(void **state) {
-    (void)state;
+    buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
+    initial_state->skip = false;  // Allow this test to run
     uint64 flags = PAGE_FLAG_ANON;
     
     print_message("Testing buddy system alignment requirements\n");
@@ -678,7 +718,7 @@ static void test_buddy_alignment(void **state) {
         uint64 physical = page->physical_address;
         uint64 alignment_mask = (1UL << (order + PAGE_SHIFT)) - 1;
         
-        print_message("  Allocated page at index %p, order %lu\n", physical, order);
+        print_message("  Allocated page at index %p, order %lu\n", (void *)physical, order);
         print_message("  Alignment check: index %% 2^%lu == 0: %s\n", 
                      order, (physical & alignment_mask) == 0 ? "yes" : "no");
         
@@ -702,56 +742,59 @@ static void test_buddy_alignment(void **state) {
 }
 
 // prepare the test environment before all tests
-void set_up_test_suite() {
+int set_up_test_suite() {
     void *ret = mmap((void *)KERNBASE, PHYSTOP - KERNBASE, 
                     PROT_READ | PROT_WRITE, MAP_ANONYMOUS | MAP_SHARED, -1, 0);
     assert_ptr_equal(ret, (void *)KERNBASE);
 
     __managed_start = KERNBASE;
     __managed_end = PHYSTOP;
+    return 0;
 }
 
 // tear down test environment after all tests
-void tear_down_test_suite() {
+int tear_down_test_suite() {
     assert_int_equal(munmap((void *)KERNBASE, PHYSTOP - KERNBASE), 0);
+    return 0;
 }
 
 int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
+    static buddy_system_state_t *prestate = NULL;
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_print_buddy_system_stat),
 
         // Basic page operations
-        cmocka_unit_test_setup(test_page_ref_inc_dec, test_setup),
-        cmocka_unit_test_setup(test_page_ref_count, test_setup),
-        cmocka_unit_test_setup(test_page_ops_null, test_setup),
-        cmocka_unit_test_setup(test_page_address_conversion, test_setup),
-        cmocka_unit_test_setup(test_page_address_conversion_edge, test_setup),
-        cmocka_unit_test_setup(test_page_refcnt_helper, test_setup),
+        cmocka_unit_test_prestate_setup_teardown(test_page_ref_inc_dec, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_page_ref_count, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_page_ops_null, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_page_address_conversion, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_page_address_conversion_edge, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_page_refcnt_helper, test_setup, test_teardown, &prestate),
         
         // Buddy system tests
-        cmocka_unit_test_setup(test_page_buddy_init_basic, test_setup),
-        cmocka_unit_test_setup(test_page_buddy_init_detailed, test_setup),
-        cmocka_unit_test_setup(test_buddy_address_helpers, test_setup),
-        cmocka_unit_test_setup(test_buddy_alignment, test_setup),
+        cmocka_unit_test_prestate_setup_teardown(test_page_buddy_init_basic, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_page_buddy_init_detailed, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_buddy_address_helpers, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_buddy_alignment, test_setup, test_teardown, &prestate),
         
         // Allocation and freeing tests
-        cmocka_unit_test_setup(test_page_alloc_free, test_setup),
-        cmocka_unit_test_setup(test_buddy_multi_order_alloc, test_setup),
-        cmocka_unit_test_setup(test_page_flags, test_setup),
-        cmocka_unit_test_setup(test_buddy_split_merge, test_setup),
-        cmocka_unit_test_setup(test_page_alloc_failure, test_setup),
+        cmocka_unit_test_prestate_setup_teardown(test_page_alloc_free, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_buddy_multi_order_alloc, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_page_flags, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_buddy_split_merge, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_page_alloc_failure, test_setup, test_teardown, &prestate),
         
         // Advanced/stress tests
-        // cmocka_unit_test_setup(test_buddy_fragmentation, test_setup),
-        // cmocka_unit_test_setup(test_page_alloc_stress, test_setup),
-        cmocka_unit_test_setup(test_mixed_allocation_methods, test_setup),
+        // cmocka_unit_test_prestate_setup_teardown(test_buddy_fragmentation, test_setup, test_teardown, &prestate),
+        // cmocka_unit_test_prestate_setup_teardown(test_page_alloc_stress, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_mixed_allocation_methods, test_setup, test_teardown, &prestate),
     };
 
-    set_up_test_suite();
-    int result = cmocka_run_group_tests(tests, NULL, NULL);
-    tear_down_test_suite();
+    // set_up_test_suite();
+    int result = cmocka_run_group_tests(tests, set_up_test_suite, tear_down_test_suite);
+    // tear_down_test_suite();
     return result;
 }
 

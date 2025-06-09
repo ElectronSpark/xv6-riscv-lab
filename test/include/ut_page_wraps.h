@@ -17,5 +17,16 @@
 // Mock function declarations to prevent implicit function declaration warnings
 void *__wrap_page_alloc(uint64 order, uint64 flags);
 void __wrap_page_free(void *ptr, uint64 order);
+int __wrap_page_ref_count(page_t *page);
+int __wrap_page_ref_inc(void *ptr);
+int __wrap_page_ref_dec(void *ptr);
+int __wrap_page_refcnt(void *physical);
+
+// Function declarations for real functions that are aliases to the wrappers
+void *__real_page_alloc(uint64 order, uint64 flags);
+void __real_page_free(void *ptr, uint64 order);
+int __real_page_ref_inc(void *ptr);
+int __real_page_ref_dec(void *ptr);
+int __real_page_refcnt(void *ptr);
 
 #endif // __UT_MOCK_WRAPS_H__

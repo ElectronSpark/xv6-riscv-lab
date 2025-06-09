@@ -613,16 +613,30 @@ uint64 managed_page_base() {
     return __managed_start;
 }
 
+// record the number of buddies in each order
+// will return an array of order 0 to size - 1
+void page_buddy_stat(uint64 *ret_arr, bool *empty_arr, size_t size) {
+    if (ret_arr == NULL || size < PAGE_BUDDY_MAX_ORDER + 1) {
+        return;
+    }
+    for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER && i < size; i++) {
+        __buddy_pool_lock(&__buddy_pools[i]);
+        ret_arr[i] = __buddy_pools[i].count;
+        if (empty_arr != NULL) {
+            empty_arr[i] = LIST_IS_EMPTY(&__buddy_pools[i].lru_head);
+        }
+        __buddy_pool_unlock(&__buddy_pools[i]);
+    }
+}
+
 void print_buddy_system_stat(void) {
     uint64 total_free_pages = 0;
-    uint64 tmp1, tmp2;
+    uint64 ret_arr[PAGE_BUDDY_MAX_ORDER + 1] = { 0 };
+    bool empty_arr[PAGE_BUDDY_MAX_ORDER + 1] = { false };
+    page_buddy_stat(ret_arr, empty_arr, PAGE_BUDDY_MAX_ORDER + 1);
     for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
-        __buddy_pool_lock(&__buddy_pools[i]);
-        tmp1 = __buddy_pools[i].count;
-        tmp2 = LIST_IS_EMPTY(&__buddy_pools[i].lru_head);
-        __buddy_pool_unlock(&__buddy_pools[i]);
-        printf("order(%d): %ld - %s\n", i, tmp1, tmp2 ? "empty" : "not empty");
-        total_free_pages += (1UL << i) * tmp1;
+        printf("order(%d): %ld - %s\n", i, ret_arr[i], empty_arr[i] ? "empty" : "not empty");
+        total_free_pages += (1UL << i) * ret_arr[i];
     }
     printf("total free pages: %ld\n", total_free_pages);
 }
