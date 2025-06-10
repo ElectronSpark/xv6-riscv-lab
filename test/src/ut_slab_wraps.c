@@ -1,5 +1,4 @@
-#include "ut_slab_wraps.h"
-#include "ut_page_wraps.h"
+#include "ut_slab.h"
 #include <sys/mman.h>
 #include <stdio.h>
 #include <stdlib.h>

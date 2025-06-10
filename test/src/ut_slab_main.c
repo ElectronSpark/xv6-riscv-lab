@@ -7,9 +7,7 @@
 
 #include <cmocka.h>
 
-#include "ut_slab_main.h"
-#include "ut_slab_wraps.h"
-#include "ut_page_wraps.h"
+#include "ut_slab.h"
 #include "list.h"
 
 // Test initialization setup that runs before each test

@@ -22,3 +22,4 @@ kernel/lwip
 build
 *.dSYM
 packets.pcap
+test/backup/*

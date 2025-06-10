@@ -7,16 +7,10 @@
 
 #include <cmocka.h>
 
-#include "ut_page_wraps.h"
+#include "ut_page.h"
 #include "list.h"
 
-// Structure to store buddy system state
-typedef struct {
-    uint64 counts[PAGE_BUDDY_MAX_ORDER + 1];
-    bool empty[PAGE_BUDDY_MAX_ORDER + 1];
-    uint64 total_free_pages;
-    bool skip;
-} buddy_system_state_t;
+// Using buddy_system_state_t from ut_page.h
 
 // Test initialization setup that runs before each test
 static int test_setup(void **state) {
