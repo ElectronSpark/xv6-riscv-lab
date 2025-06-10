@@ -83,6 +83,8 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     page_refcnt
     page_alloc
     page_free
+    __page_alloc
+    __page_free
     # page_buddy_init
     panic
     acquire
@@ -90,11 +92,25 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     initlock
     kmm_alloc
     kmm_free
+    slab_alloc
+    slab_free
+    slab_cache_init
+    slab_cache_create
+    slab_cache_destroy
+    slab_cache_shrink
 )
 
-set(MOCK_TEST_SRC
+# Page test source files
+set(PAGE_TEST_SRC
     ${CMAKE_SOURCE_DIR}/src/ut_page_main.c
     ${CMAKE_SOURCE_DIR}/src/ut_page_wraps.c
+)
+
+# Slab test source files 
+set(SLAB_TEST_SRC
+    ${CMAKE_SOURCE_DIR}/src/ut_slab_main.c
+    ${CMAKE_SOURCE_DIR}/src/ut_slab_wraps.c
+    ${CMAKE_SOURCE_DIR}/src/ut_page_wraps.c  # Need page wrappers for slab tests
 )
 
 set(MOCK_WRAP_OPTIONS "")
@@ -108,12 +124,25 @@ set(MOCK_COMPILE_OPTIONS "-Wl${MOCK_WRAP_OPTIONS}")
 include(cmake/FetchCmocka.cmake)
 # find_library(cmocka-static)
 
-add_executable(ut_page ${MOCK_TEST_SRC} ${MOCK_TEST_KERNEL_SRC})
+add_executable(ut_page 
+    ${PAGE_TEST_SRC}
+    ${MOCK_TEST_KERNEL_SRC}
+)
 target_link_libraries(ut_page PRIVATE cmocka-static)
 target_compile_options(ut_page PRIVATE ${TEST_C_FLAGS})
 target_compile_definitions(ut_page PRIVATE MOCK_TEST=1)
 target_link_options(ut_page PRIVATE ${MOCK_COMPILE_OPTIONS})
 target_include_directories(ut_page PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+
+add_executable(ut_slab 
+    ${SLAB_TEST_SRC}
+    ${MOCK_TEST_KERNEL_SRC}
+)
+target_link_libraries(ut_slab PRIVATE cmocka-static)
+target_compile_options(ut_slab PRIVATE ${TEST_C_FLAGS})
+target_compile_definitions(ut_slab PRIVATE MOCK_TEST=1)
+target_link_options(ut_slab PRIVATE ${MOCK_COMPILE_OPTIONS})
+target_include_directories(ut_slab PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 add_executable(ut_list ${CMAKE_SOURCE_DIR}/src/ut_list_main.c)
 target_link_libraries(ut_list PRIVATE cmocka-static)
@@ -126,8 +155,12 @@ target_compile_options(ut_hlist PRIVATE ${TEST_C_FLAGS})
 target_include_directories(ut_hlist PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 enable_testing()
-add_test(NAME ut_mock_test
+add_test(NAME ut_page
     COMMAND ut_page
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+add_test(NAME ut_slab
+    COMMAND ut_slab
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
 add_test(NAME ut_list
