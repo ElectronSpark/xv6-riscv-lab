@@ -749,6 +749,9 @@ int set_up_test_suite() {
 
     __managed_start = KERNBASE;
     __managed_end = PHYSTOP;
+
+    __wrap___page_free_passthrough = true;
+    __wrap___page_alloc_passthrough = true;
     return 0;
 }
 

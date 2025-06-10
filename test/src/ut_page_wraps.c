@@ -72,3 +72,68 @@ void __wrap_page_free(void *ptr, uint64 order) {
     page_t *page = __pa_to_page((uint64)ptr);
     __page_free(page, order);
 }
+
+typedef struct ut_mock_page_range {
+    union {
+        page_t *page; // Pointer to the mock page descriptor
+        void *mman_base;
+    };
+    void *mock_phy_start;
+    uint64 order;   // Order of the mock page
+    uint64 size;    // Size of the mock page: 1UL << (order + PAGE_SHIFT + 1)
+} ut_mock_page_range_t;
+
+page_t *ut_make_mock_page(uint64 order, uint64 flags) {
+    // page_t *page = malloc(sizeof(page_t));
+    size_t mock_size = (1UL << (order + PAGE_SHIFT + 1));
+    void *page_base = mmap(NULL, mock_size,
+                            PROT_READ | PROT_WRITE,
+                            MAP_ANONYMOUS | MAP_SHARED, -1, 0);
+    if (page_base == NULL) return NULL;
+    memset(page_base, 0, sizeof(page_t));
+
+    ut_mock_page_range_t *mock_range = 
+        page_base + (mock_size >> 1) - sizeof(ut_mock_page_range_t);
+    mock_range->page = (page_t *)page_base;
+    mock_range->order = order;
+    mock_range->size = mock_size;
+    mock_range->mock_phy_start = page_base + (mock_size >> 1);
+
+    __page_init(mock_range->page,
+                (uint64)mock_range->mock_phy_start, 
+                0, flags);
+
+    return page_base;
+}
+
+void ut_destroy_mock_page(void *physical) {
+    if (physical == NULL) return;
+    ut_mock_page_range_t *mock_range = (ut_mock_page_range_t *)((void *)physical - sizeof(ut_mock_page_range_t));
+
+    if (munmap(mock_range->mman_base, mock_range->size) != 0) {
+        print_message("Failed to unmap page memory\n");
+    }
+}
+
+void ut_destroy_mock_page_t(page_t *page) {
+    if (page == NULL) return;
+
+    ut_destroy_mock_page((void *)page->physical_address);
+}
+
+bool __wrap___page_alloc_passthrough = false;
+page_t *__wrap___page_alloc(uint64 order, uint64 flags) {
+    if (__wrap___page_alloc_passthrough) {
+        return __real___page_alloc(order, flags);
+    }
+    return mock_ptr_type(page_t *);
+}
+
+bool __wrap___page_free_passthrough = false;
+void __wrap___page_free(page_t *page, uint64 order) {
+    if (__wrap___page_free_passthrough) {
+        __real___page_free(page, order);
+    } else {
+        mock();
+    }
+}
