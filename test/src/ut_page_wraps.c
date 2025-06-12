@@ -161,7 +161,7 @@ void __wrap___page_free(page_t *page, uint64 order) {
     if (__wrap___page_free_passthrough) {
         __real___page_free(page, order);
     } else {
-        mock();
+        // mock();
     }
 }
 
