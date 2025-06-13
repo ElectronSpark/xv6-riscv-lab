@@ -123,6 +123,7 @@ def run_tests():
     (options, args) = parser.parse_args()
 
     # Start with a full build to catch build errors
+    # @TODO: incorporate cmake here
     make()
 
     # Clean the file system if there is one

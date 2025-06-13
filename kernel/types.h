@@ -23,7 +23,12 @@ typedef uint64 pde_t;
 typedef typeof(sizeof(0)) size_t;
 #endif              /* size_t */
 #ifndef bool
-typedef enum { false, true } bool;
+#if __STDC_VERSION__ < 202311L  // C23 or later
+typedef enum { 
+    false = 0,
+    true = 1
+} bool;
+#endif
 #endif              /* bool */
 
 #ifndef NULL

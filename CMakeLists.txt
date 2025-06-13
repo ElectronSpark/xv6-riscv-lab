@@ -3,7 +3,16 @@ cmake_minimum_required(VERSION 3.10)
 # Project name
 project(xv6-riscv LANGUAGES C ASM)
 
+# # Set the C standard to C19
+# set(CMAKE_C_STANDARD 17)  # CMake uses 17 for C18/C19
+
 find_package(Perl REQUIRED)
+
+# Set default value for LAB environment variable
+if(NOT DEFINED ENV{LAB} OR "$ENV{LAB}" STREQUAL "")
+    set(ENV{LAB} "util")
+    message(STATUS "Setting default LAB=util")
+endif()
 
 # Set the RISC-V toolchain using a single base path environment variable
 if(DEFINED ENV{TOOLPREFIX})
@@ -15,7 +24,25 @@ if(DEFINED ENV{TOOLPREFIX})
     # Use ld directly for linking executables
     set(CMAKE_C_LINK_EXECUTABLE "$ENV{TOOLPREFIX}ld <LINK_FLAGS> -o <TARGET> <LINK_LIBRARIES> <OBJECTS>")
 else()
-    message(FATAL_ERROR "Environment variable TOOLPREFIX is not set")
+    # Try to find riscv64-unknown-elf tools automatically
+    message(STATUS "TOOLPREFIX environment variable not set, searching for riscv64-unknown-elf tools...")
+    find_program(RISCV_GCC riscv64-unknown-elf-gcc PATHS /opt/riscv/bin PATH_SUFFIXES bin NO_DEFAULT_PATH)
+    if(NOT RISCV_GCC)
+        find_program(RISCV_GCC riscv64-unknown-elf-gcc)
+    endif()
+    
+    if(RISCV_GCC)
+        get_filename_component(TOOLPREFIX ${RISCV_GCC} DIRECTORY)
+        set(TOOLPREFIX "${TOOLPREFIX}/riscv64-unknown-elf-")
+        set(CMAKE_C_COMPILER ${TOOLPREFIX}gcc CACHE STRING "C compiler" FORCE)
+        set(CMAKE_LINKER ${TOOLPREFIX}ld CACHE FILEPATH "Linker" FORCE)
+        set(CMAKE_OBJCOPY ${TOOLPREFIX}objcopy)
+        set(CMAKE_OBJDUMP ${TOOLPREFIX}objdump)
+        set(CMAKE_C_LINK_EXECUTABLE "${TOOLPREFIX}ld <LINK_FLAGS> -o <TARGET> <LINK_LIBRARIES> <OBJECTS>")
+        message(STATUS "Found RISC-V toolchain: ${TOOLPREFIX}")
+    else()
+        message(FATAL_ERROR "TOOLPREFIX environment variable not set and riscv64-unknown-elf tools not found in PATH or /opt/riscv/bin")
+    endif()
 endif()
 
 # Specify the C standard
