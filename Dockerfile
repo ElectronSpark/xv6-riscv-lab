@@ -32,6 +32,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && \
     apt-get install -y \
     gdb-multiarch python3 git make cmake \
+    qemu-system-misc \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built RISC-V toolchain from the builder stage

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Check if the Docker image exists
-IMAGE_NAME="xv6-riscv-container"
+IMAGE_NAME="xv6-riscv-builder"
 if [[ "$(docker images -q $IMAGE_NAME 2> /dev/null)" == "" ]]; then
     echo "Building $IMAGE_NAME Docker image..."
     
