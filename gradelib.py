@@ -234,8 +234,14 @@ def post_make():
 
 def make(*target):
     pre_make()
-    if Popen(("make",) + target).wait():
+    if not os.path.exists("build"):
+        os.mkdir("build")
+    if Popen(("cmake", ".."), cwd="./build").wait():
         sys.exit(1)
+    if Popen(("make",) + target, cwd="./build").wait():
+        sys.exit(1)
+    shutil.copyfile("build/fs.img", "fs.img")
+    shutil.copyfile("build/kernel/kernel", "kernel/kernel")
     post_make()
 
 def show_command(cmd):
@@ -309,11 +315,12 @@ QEMU appears to already be running.  Please exit it if possible or use
             sys.exit(1)
 
         if options.verbose:
-            show_command(("make",) + make_args)
+            show_command(("make",) + make_args, cwd="./build")
         cmd = ("make", "-s", "--no-print-directory") + make_args
         self.proc = Popen(cmd, stdout=subprocess.PIPE,
                           stderr=subprocess.STDOUT,
-                          stdin=subprocess.PIPE)
+                          stdin=subprocess.PIPE, 
+                          cwd="./build")
         # Accumulated output as a string
         self.output = ""
         # Accumulated output as a bytearray
@@ -324,12 +331,14 @@ QEMU appears to already be running.  Please exit it if possible or use
     def get_gdb_port():
         if QEMU._GDBPORT is None:
             p = Popen(["make", "-s", "--no-print-directory", "print-gdbport"],
-                      stdout=subprocess.PIPE)
+                      stdout=subprocess.PIPE, 
+                      cwd="./build")
             (out, _) = p.communicate()
             if p.returncode:
                 raise RuntimeError(
                     "Failed to get gdbport: make exited with %d" %
                     p.returncode)
+            out = str(out, encoding="utf-8").split("[GDBPORT NUMBER]:")[1].splitlines()[0].strip()
             QEMU._GDBPORT = int(out)
         return QEMU._GDBPORT
 
@@ -555,6 +564,12 @@ def save(path):
     def save_on_finish(fail):
         f.flush()
         save_path = path + "." + get_current_test().__name__[5:]
+        # Extract directory from save_path
+        save_dir = os.path.dirname(save_path)
+        if save_dir and not os.path.exists(save_dir):
+            os.makedirs(save_dir)
+        # if not os.path.exists("test_output"):
+        #     os.mkdir("test_output")
         if fail:
             shutil.copyfile(path, save_path)
             print("    QEMU output saved to %s" % save_path)
@@ -571,7 +586,7 @@ def stop_breakpoint(addr):
 
     def setup_breakpoint(runner):
         if isinstance(addr, str):
-            addrs = [int(sym[:16], 16) for sym in open("kernel/kernel.sym")
+            addrs = [int(sym[:16], 16) for sym in open("build/kernel/kernel.sym")
                      if sym[17:].strip() == addr]
             assert len(addrs), "Symbol %s not found" % addr
             runner.gdb.breakpoint(addrs[0])

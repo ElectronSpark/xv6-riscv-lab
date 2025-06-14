@@ -108,3 +108,6 @@ add_custom_target(${KERNEL_SYMBOLS}
     COMMENT "Extracting symbols from kernel binary to ${KERNEL_SYMBOLS}"
     DEPENDS ${KERNEL_BINARY}
 )
+
+# Add these targets as dependencies to ALL so they're built by default
+add_custom_target(kernel_all ALL DEPENDS ${KERNEL_BINARY} ${KERNEL_DECOMPILED} ${KERNEL_SYMBOLS})

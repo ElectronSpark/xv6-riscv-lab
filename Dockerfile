@@ -57,6 +57,16 @@ echo "  make clean    - Clean the build"\n\
 ' > /usr/local/bin/xv6-help && \
 chmod +x /usr/local/bin/xv6-help
 
+# Create a non-root user
+RUN useradd -m -s /bin/bash xv6user && \
+    chown -R xv6user:xv6user /xv6
+
+# Make the help script accessible to the non-root user
+RUN chmod +x /usr/local/bin/xv6-help
+
+# Switch to the non-root user
+USER xv6user
+
 # Default command when container starts
 CMD ["/bin/bash", "-c", "echo 'xv6 RISC-V Development Environment. Type xv6-help for info.'; bash"]
 

@@ -3,7 +3,7 @@
 import re
 from gradelib import *
 
-r = Runner(save("xv6.out"))
+r = Runner(save("test_output/xv6.out"))
 
 @test(5, "sleep, no arguments")
 def test_sleep_no_args():

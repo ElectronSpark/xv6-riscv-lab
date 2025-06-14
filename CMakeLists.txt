@@ -231,4 +231,9 @@ else()
             OUTPUT_STRIP_TRAILING_WHITESPACE
         )
     endif()
+    
+    add_custom_target(print-gdbport
+        COMMAND ${CMAKE_COMMAND} -E echo "[GDBPORT NUMBER]: ${GDBPORT}"
+    )
+
 endif()
