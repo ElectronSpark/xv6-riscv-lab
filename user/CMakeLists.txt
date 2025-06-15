@@ -178,6 +178,13 @@ if($ENV{LAB} STREQUAL "fs")
     )
 endif()
 
+if($ENV{LAB} STREQUAL "mmap")
+    set(USER_PROGRAMS_C_FILES 
+        ${USER_PROGRAMS_C_FILES}
+        ${USER_DIR}/mmaptest.c
+    )
+endif()
+
 if($ENV{LAB} STREQUAL "net")
     set(USER_PROGRAMS_C_FILES 
         ${USER_PROGRAMS_C_FILES}

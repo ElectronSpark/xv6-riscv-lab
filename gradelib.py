@@ -18,6 +18,13 @@ PART_TOTAL = PART_POSSIBLE = 0
 CURRENT_TEST = None
 GRADES = {}
 
+LAB = os.environ["LAB"].lower()
+if LAB in ("mmap", "fs"):
+    QEMU_TARGET = "qemu-fs"
+else:
+    QEMU_TARGET = "qemu"
+
+
 def test(points, title=None, parent=None):
     """Decorator for declaring test functions.  If title is None, the
     title of the test will be derived from the function name by
@@ -449,7 +456,7 @@ class Runner():
         should be a list of additional arguments to pass to make.  The
         timeout argument bounds how long to run before returning."""
 
-        def run_qemu_kw(target_base="qemu", make_args=[], timeout=30):
+        def run_qemu_kw(target_base=QEMU_TARGET, make_args=[], timeout=30):
             return target_base, make_args, timeout
         target_base, make_args, timeout = run_qemu_kw(**kw)
 

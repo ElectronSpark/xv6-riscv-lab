@@ -237,7 +237,9 @@ else()
     )
 
     add_custom_target(grade
-        COMMAND ./grade-lab-util
+        COMMAND ${CMAKE_COMMAND} -E env 
+                LAB=$ENV{LAB}
+                python3 "grade-lab-util"
         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
         COMMAND_EXPAND_LISTS
         COMMENT "run grad-lab-util"
