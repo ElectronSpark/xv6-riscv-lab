@@ -123,7 +123,6 @@ def run_tests():
     (options, args) = parser.parse_args()
 
     # Start with a full build to catch build errors
-    # @TODO: incorporate cmake here
     make()
 
     # Clean the file system if there is one
@@ -240,8 +239,6 @@ def make(*target):
         sys.exit(1)
     if Popen(("make",) + target, cwd="./build").wait():
         sys.exit(1)
-    shutil.copyfile("build/fs.img", "fs.img")
-    shutil.copyfile("build/kernel/kernel", "kernel/kernel")
     post_make()
 
 def show_command(cmd):
@@ -564,12 +561,6 @@ def save(path):
     def save_on_finish(fail):
         f.flush()
         save_path = path + "." + get_current_test().__name__[5:]
-        # Extract directory from save_path
-        save_dir = os.path.dirname(save_path)
-        if save_dir and not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-        # if not os.path.exists("test_output"):
-        #     os.mkdir("test_output")
         if fail:
             shutil.copyfile(path, save_path)
             print("    QEMU output saved to %s" % save_path)
@@ -577,6 +568,10 @@ def save(path):
             os.unlink(save_path)
             print("    (Old %s failure log removed)" % save_path)
 
+    # Extract directory from save_path
+    save_dir = os.path.dirname(path)
+    if save_dir and not os.path.exists(save_dir):
+        os.makedirs(save_dir)
     f = open(path, "wb")
     return setup_save
 

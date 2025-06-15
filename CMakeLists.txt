@@ -236,4 +236,11 @@ else()
         COMMAND ${CMAKE_COMMAND} -E echo "[GDBPORT NUMBER]: ${GDBPORT}"
     )
 
+    add_custom_target(grade
+        COMMAND ./grade-lab-util
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        COMMAND_EXPAND_LISTS
+        COMMENT "run grad-lab-util"
+    )
+
 endif()

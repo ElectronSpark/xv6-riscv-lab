@@ -23,7 +23,7 @@ RUN git clone --recursive https://github.com/riscv/riscv-gnu-toolchain && \
     make -j$(nproc)
 
 # Final stage
-FROM ubuntu:22.04
+FROM ubuntu:24.04
 
 # Set noninteractive installation
 ENV DEBIAN_FRONTEND=noninteractive
@@ -66,7 +66,7 @@ RUN useradd -m -s /bin/bash xv6user && \
 RUN chmod +x /usr/local/bin/xv6-help
 
 # Switch to the non-root user
-USER xv6user
+USER ubuntu
 
 # Default command when container starts
 CMD ["/bin/bash", "-c", "echo 'xv6 RISC-V Development Environment. Type xv6-help for info.'; bash"]
