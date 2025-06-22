@@ -19,10 +19,11 @@ CURRENT_TEST = None
 GRADES = {}
 
 LAB = os.environ["LAB"].lower()
+QEMU_BASE_TARGET = "qemu"
 if LAB in ("mmap", "fs"):
-    QEMU_TARGET = "qemu-fs"
+    QEMU_TARGET = f"${QEMU_BASE_TARGET}-fs"
 else:
-    QEMU_TARGET = "qemu"
+    QEMU_TARGET = QEMU_BASE_TARGET
 
 
 def test(points, title=None, parent=None):
@@ -456,7 +457,7 @@ class Runner():
         should be a list of additional arguments to pass to make.  The
         timeout argument bounds how long to run before returning."""
 
-        def run_qemu_kw(target_base=QEMU_TARGET, make_args=[], timeout=30):
+        def run_qemu_kw(target_base=QEMU_BASE_TARGET, make_args=[], timeout=30):
             return target_base, make_args, timeout
         target_base, make_args, timeout = run_qemu_kw(**kw)
 

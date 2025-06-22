@@ -106,7 +106,7 @@ set(MKFS_SOURCE_FILES
 #@TODO: add XCFLAGS
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mkfs
-    COMMAND gcc ${CMAKE_SOURCE_DIR}/mkfs/mkfs.c -Werror -Wall -I${CMAKE_SOURCE_DIR} -o ${CMAKE_CURRENT_BINARY_DIR}/mkfs
+    COMMAND gcc ${CMAKE_SOURCE_DIR}/mkfs/mkfs.c -DSOL_${LABUPPER} -DLAB_${LABUPPER} -Werror -Wall -I${CMAKE_SOURCE_DIR} -o ${CMAKE_CURRENT_BINARY_DIR}/mkfs
     DEPENDS ${MKFS_SOURCE_FILES}
     COMMENT "Building mkfs..."
 )
