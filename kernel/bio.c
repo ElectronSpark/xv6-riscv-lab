@@ -22,6 +22,8 @@
 #include "defs.h"
 #include "fs.h"
 #include "buf.h"
+#include "list.h"
+#include "hlist.h"
 
 struct {
   struct spinlock lock;
@@ -30,8 +32,56 @@ struct {
   // Linked list of all buffers, through prev/next.
   // Sorted by how recently the buffer was used.
   // head.next is most recent, head.prev is least.
-  struct buf head;
+  list_node_t lru_entry; // For debugging, not used in the code.
+  hlist_t cached; // Hash list of buffers, sorted by (dev, blockno).
+  hlist_bucket_t buckets[BIO_HASH_BUCKETS]; // stores the hash buckets of the hash list
 } bcache;
+
+static ht_hash_t __bcache_hash_func(void *node)  {
+  struct buf *bnode = node;
+  return hlist_hash_uint64(bnode->blockno + (bnode->dev << 16));
+}
+
+static void *__bcache_hlist_get_node(hlist_entry_t *entry) {
+  return container_of(entry, struct buf, hlist_entry);
+}
+
+static hlist_entry_t *__bcache_hlist_get_entry(void *node) {
+  struct buf *bnode = node;
+  return &bnode->hlist_entry;
+}
+
+static int __bcache_hlist_cmp(hlist_t *hlist, void *node1, void *node2) {
+  struct buf *bnode1 = node1;
+  struct buf *bnode2 = node2;
+  int value1 = (int)(bnode1->blockno + (bnode1->dev << 16));
+  int value2 = (int)(bnode2->blockno + (bnode2->dev << 16));
+
+  return value1 - value2;
+}
+
+static inline struct buf*
+__bcache_hlist_pop(uint dev, uint blockno) {
+  // Create a dummy node to search for
+  struct buf dummy = { 0 };
+  dummy.dev = dev;
+  dummy.blockno = blockno;
+
+  struct buf *buf = hlist_pop(&bcache.cached, &dummy);
+  return buf;
+}
+
+static inline int
+__bcache_hlist_push(struct buf *buf) {
+  struct buf *entry = hlist_put(&bcache.cached, buf);
+  if (entry == NULL) {
+    return 0; // succeeded
+  } else if (entry != buf) {
+    return -1; // failed to insert
+  } else {
+    return -1; // the entry is already in the hash list
+  }
+}
 
 void
 binit(void)
@@ -41,14 +91,18 @@ binit(void)
   initlock(&bcache.lock, "bcache");
 
   // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
+  list_entry_init(&bcache.lru_entry);
+  hlist_func_t hlist_func = {
+    .hash = __bcache_hash_func,
+    .get_node = __bcache_hlist_get_node,
+    .get_entry = __bcache_hlist_get_entry,
+    .cmp_node = __bcache_hlist_cmp
+  };
+  hlist_init(&bcache.cached, BIO_HASH_BUCKETS, &hlist_func);
   for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
+    list_entry_init(&b->lru_entry);
     initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    list_entry_push(&bcache.lru_entry, &b->lru_entry);
   }
 }
 
@@ -58,28 +112,50 @@ binit(void)
 STATIC struct buf*
 bget(uint dev, uint blockno)
 {
-  struct buf *b;
+  struct buf *b, *b1, *tmp;
 
   acquire(&bcache.lock);
 
   // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
-    if(b->dev == dev && b->blockno == blockno){
-      b->refcnt++;
-      release(&bcache.lock);
-      acquiresleep(&b->lock);
-      return b;
+  b = __bcache_hlist_pop(dev, blockno);
+  if(b != NULL) {
+    // Found it.
+    b->refcnt++;
+    if (__bcache_hlist_push(b) != 0) {
+      panic("bget: failed to push buffer into hash list");
     }
+    release(&bcache.lock);
+    acquiresleep(&b->lock);
+    return b;
   }
 
   // Not cached.
   // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
+  list_foreach_node_safe(&bcache.lru_entry, b, tmp, lru_entry) {
     if(b->refcnt == 0) {
+      // Found an unused buffer.
+      b1 = __bcache_hlist_pop(b->dev, b->blockno);
+      if (b1 && b1 != b) {
+        if (b->blockno != 0 || b->dev != 0) {
+          // Only unused buffers could clash, otherwise it is a bug.
+          printf("bget: found a buffer with blockno %d, dev %d, but it is not the same as the one we are recycling\n", b1->blockno, b1->dev);
+          panic("bget: found a buffer that is not the same as the one we are recycling");
+        }
+        // the buffer b is unused, so we can put back b1 and safely use b
+        if (__bcache_hlist_push(b1) != 0) {
+          panic("bget: failed to push cached buffer into hash list");
+        }
+      }
+      list_node_detach(b, lru_entry);
+      list_node_push(&bcache.lru_entry, b, lru_entry);
       b->dev = dev;
       b->blockno = blockno;
       b->valid = 0;
       b->refcnt = 1;
+      if (__bcache_hlist_push(b) != 0) {
+        printf("dev: %d, blockno: %d\n", dev, blockno);
+        panic("bget: failed to push recycled buffer into hash list");
+      }
       release(&bcache.lock);
       acquiresleep(&b->lock);
       return b;
@@ -125,12 +201,8 @@ brelse(struct buf *b)
   b->refcnt--;
   if (b->refcnt == 0) {
     // no one is waiting for it.
-    b->next->prev = b->prev;
-    b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    list_entry_detach(&b->lru_entry);
+    list_entry_push_back(&bcache.lru_entry, &b->lru_entry);
   }
   
   release(&bcache.lock);

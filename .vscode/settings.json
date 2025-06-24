@@ -46,6 +46,11 @@
         "hlist_type.h": "c",
         "ut_page_wraps.h": "c",
         "page_private.h": "c",
-        "stdarg.h": "c"
+        "stdarg.h": "c",
+        "list_type.h": "c",
+        "compiler.h": "c",
+        "executor": "c",
+        "shared_mutex": "c",
+        "syncstream": "c"
     }
 }
