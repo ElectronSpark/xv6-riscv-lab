@@ -120,6 +120,9 @@ bget(uint dev, uint blockno)
   b = __bcache_hlist_pop(dev, blockno);
   if(b != NULL) {
     // Found it.
+    if (!LIST_NODE_IS_DETACHED(b, lru_entry)) {
+      list_node_detach(b, lru_entry);
+    }
     b->refcnt++;
     if (__bcache_hlist_push(b) != 0) {
       panic("bget: failed to push buffer into hash list");
@@ -147,7 +150,7 @@ bget(uint dev, uint blockno)
         }
       }
       list_node_detach(b, lru_entry);
-      list_node_push(&bcache.lru_entry, b, lru_entry);
+      // list_node_push(&bcache.lru_entry, b, lru_entry);
       b->dev = dev;
       b->blockno = blockno;
       b->valid = 0;
@@ -202,7 +205,7 @@ brelse(struct buf *b)
   if (b->refcnt == 0) {
     // no one is waiting for it.
     list_entry_detach(&b->lru_entry);
-    list_entry_push_back(&bcache.lru_entry, &b->lru_entry);
+    list_entry_push(&bcache.lru_entry, &b->lru_entry);
   }
   
   release(&bcache.lock);
