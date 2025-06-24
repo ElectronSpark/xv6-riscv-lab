@@ -98,6 +98,7 @@ void __hlist_insert_node_entry(hlist_t *hlist, hlist_bucket_t *bucket, hlist_ent
 // The caller will guarantee the validity of the parameters
 void __hlist_remove_node_entry(hlist_t *hlist, hlist_entry_t *entry) {
     list_node_detach(entry, list_entry);
+    entry->bucket = NULL;
     hlist->elem_cnt -= 1;
 }
 
@@ -267,6 +268,9 @@ void *hlist_put(hlist_t *hlist, void *node) {
         // the old entry is not valid!
         old_node = __hlist_get_node(hlist, entry);
         if (old_node == NULL) {
+            return node;
+        } else if (node == old_node) {
+            // The node is already in the hash list, no need to replace it.
             return node;
         }
         // replace the existing node and return the old node
