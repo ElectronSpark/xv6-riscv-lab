@@ -83,6 +83,8 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     page_refcnt
     page_alloc
     page_free
+    __page_alloc
+    __page_free
     # page_buddy_init
     panic
     acquire
