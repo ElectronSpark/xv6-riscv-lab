@@ -117,7 +117,7 @@ list(TRANSFORM USER_PROGRAMS PREPEND "${CMAKE_CURRENT_BINARY_DIR}/user/")
 # Update the custom command for fs.img to include the correct path for user executables
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fs.img
-    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/mkfs fs.img ${USER_PROGRAMS}
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/mkfs fs.img ${USER_PROGRAMS} ${CMAKE_SOURCE_DIR}/README
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mkfs ${CMAKE_SOURCE_DIR}/README ${USER_PROGRAMS}
     COMMENT "Creating file system image with user programs and README"

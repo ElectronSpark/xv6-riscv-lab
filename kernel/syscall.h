@@ -27,14 +27,16 @@
 #define SYS_close  21
 
 // In the original lab SYS_connect is 29
-#define SYS_connect   22
+#define SYS_connect     22
+// In the original lab SYS_symlink is 26
+// #define SYS_symlink     23
 
 // System calls for labs
 // #define SYS_trace     22
 // #define SYS_sysinfo   23
 // #define SYS_sigalarm  24
 // #define SYS_sigreturn 25
-// #define SYS_symlink   26
+#define SYS_symlink   26
 // #define SYS_mmap      27
 // #define SYS_munmap    28
 // #define SYS_connect   29

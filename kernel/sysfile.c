@@ -258,6 +258,8 @@ create(char *path, short type, short major, short minor)
     ilock(ip);
     if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
       return ip;
+    if (type == T_SYMLINK)
+      return ip;
     iunlockput(ip);
     return 0;
   }
@@ -304,10 +306,11 @@ create(char *path, short type, short major, short minor)
 uint64
 sys_open(void)
 {
-  char path[MAXPATH];
+  char path[MAXPATH + 1];
   int fd, omode;
   struct file *f;
   struct inode *ip;
+  int lookup_cnt = 0;
   int n;
 
   argint(1, &omode);
@@ -323,15 +326,45 @@ sys_open(void)
       return -1;
     }
   } else {
-    if((ip = namei(path)) == 0){
-      end_op();
-      return -1;
-    }
-    ilock(ip);
-    if(ip->type == T_DIR && omode != O_RDONLY){
+    do {
+      // printf("looking up %s, lookup count: %d\n", path, lookup_cnt);
+      if((ip = namei(path)) == 0){
+        end_op();
+        return -1;
+      }
+      ilock(ip);
+      if(ip->type == T_DIR && (omode & 3) != O_RDONLY){
+        iunlockput(ip);
+        end_op();
+        return -1;
+      }
+      if (ip->type != T_SYMLINK || omode & O_NOFOLLOW) {
+        // Not a symlink or O_NOFOLLOW is set
+        break;
+      }
+      // Handle symlink resolution
+      size_t len = 0;
+
+      if (readi(ip, 0, (uint64)&len, 0, sizeof(size_t)) != sizeof(size_t) || len >= MAXPATH) {
+        iunlockput(ip);
+        end_op();
+        return -1; // Invalid symlink length
+      }
+
+      if (readi(ip, 0, (uint64)path, sizeof(size_t), len) != len) {
+        iunlockput(ip);
+        end_op();
+        return -1; // Failed to read symlink target
+      }
+      path[len] = '\0'; // Null-terminate the path
+
       iunlockput(ip);
+      lookup_cnt++;
+    } while (lookup_cnt < SYSFILE_SYM_LOOKUP_MAX_COUNT);
+
+    if (lookup_cnt >= SYSFILE_SYM_LOOKUP_MAX_COUNT) {
       end_op();
-      return -1;
+      return -1; // Too many symlink lookups
     }
   }
 
@@ -525,4 +558,43 @@ sys_connect(void)
   }
 
   return fd;
+}
+
+int
+sys_symlink(void)
+{
+  char target[MAXPATH], linkpath[MAXPATH];
+  struct inode *ip = NULL;
+  size_t len = 0;
+
+  if (argstr(0, target, MAXPATH) < 0 || argstr(1, linkpath, MAXPATH) < 0) {
+    return -1;
+  }
+
+  len = strlen(target);
+  if (len >= MAXPATH || len == 0) {
+    return -1; // Invalid target length
+  }
+
+  begin_op();
+  if((ip = create(linkpath, T_SYMLINK, 0, 0)) == 0){
+    end_op();
+    return -1;
+  }
+
+  // @TODO: release inode if write fails
+  int ret = 0; 
+  if (writei(ip, 0, (uint64)&len, 0, sizeof(size_t)) != sizeof(size_t)) {
+    ret = -1; // Failed to write length
+  }
+  
+  if (writei(ip, 0, (uint64)target, sizeof(size_t), len) != len) {
+    ret = -1; // Failed to write target
+  }
+
+  iupdate(ip);
+  iunlockput(ip);
+  end_op();
+
+  return ret;
 }

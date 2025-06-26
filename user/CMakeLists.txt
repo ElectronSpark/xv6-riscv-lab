@@ -175,6 +175,7 @@ if($ENV{LAB} STREQUAL "fs")
     set(USER_PROGRAMS_C_FILES 
         ${USER_PROGRAMS_C_FILES}
         ${USER_DIR}/bigfile.c
+        ${USER_DIR}/symlinktest.c
     )
 endif()
 

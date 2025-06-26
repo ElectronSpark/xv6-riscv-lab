@@ -45,4 +45,6 @@ extern struct devsw devsw[];
 
 #define CONSOLE 1
 
+#define SYSFILE_SYM_LOOKUP_MAX_COUNT 10
+
 #endif        /* __KERNEL_FILE_H */
