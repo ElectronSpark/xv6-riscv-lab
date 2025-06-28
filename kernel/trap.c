@@ -151,7 +151,7 @@ usertrapret(void)
 // interrupts and exceptions from kernel code go here via kernelvec,
 // on whatever the current kernel stack is.
 void 
-kerneltrap()
+kerneltrap(uint64 sp)
 {
   int which_dev = 0;
   uint64 sepc = r_sepc();
@@ -165,7 +165,9 @@ kerneltrap()
 
   if((which_dev = devintr()) == 0){
     // interrupt or trap from an unknown source
+    // printf("0x%lx 0x%lx\n", sp, s0);
     printf("scause=0x%lx sepc=0x%lx stval=0x%lx\n", scause, r_sepc(), r_stval());
+    print_backtrace(sp);
     panic("kerneltrap");
   }
 
