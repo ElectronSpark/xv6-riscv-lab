@@ -11,7 +11,8 @@ SECTIONS
 
   .text : {
     /* @TODO: needs to specify _entry at the first */
-    *(.text .text.*)
+    *entry.*(.text .text.*)
+    *(.text .text.*);
     . = ALIGN(0x1000);
     _trampoline = .;
     *(trampsec)

@@ -71,8 +71,8 @@ if($ENV{LAB} STREQUAL "net")
 endif()
 
 set(KERNEL_S_FILES
-    ${KERNEL_DIR}/entry.S
     ${KERNEL_DIR}/swtch.S
+    ${KERNEL_DIR}/entry.S
     ${KERNEL_DIR}/trampoline.S
     ${KERNEL_DIR}/kernelvec.S
 )
