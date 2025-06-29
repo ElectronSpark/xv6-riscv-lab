@@ -2,6 +2,8 @@
 #define __KERNEL_FILE_H
 
 #include "compiler.h"
+#include "slab_type.h"
+#include "hlist_type.h"
 
 struct file {
   enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE, FD_SOCK} type;
@@ -25,6 +27,7 @@ struct inode {
   uint inum;          // Inode number
   int ref;            // Reference count
   struct sleeplock lock; // protects everything below here
+  hlist_entry_t hlist_entry; // for inode hash list
   int valid;          // inode has been read from disk?
 
   short type;         // copy of disk inode

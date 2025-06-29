@@ -20,6 +20,8 @@
 #include "fs.h"
 #include "buf.h"
 #include "file.h"
+#include "hlist.h"
+#include "slab.h"
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
 // there should be one superblock per disk device, but we run with
@@ -175,18 +177,105 @@ bfree(int dev, uint b)
 
 struct {
   struct spinlock lock;
-  struct inode inode[NINODE];
+  // struct inode inode[NINODE];
+  slab_cache_t inode_cache;
+  struct {
+    hlist_t inode_list;
+    hlist_bucket_t inode_buckets[ITABLE_INODE_HASH_BUCKETS];
+  };
 } itable;
+
+// Free an inode into the inode cache.
+static void
+__inode_cache_free(struct inode *ip)
+{
+  if(ip == 0)
+    return;
+
+  if (ip->ref > 0)
+    panic("__inode_free: inode still referenced");
+  slab_free(ip);
+  // iunlock(ip);
+}
+
+// Allocate an empty inode struct from the inode cache.
+static struct inode *
+__inode_cache_alloc(void)
+{
+  struct inode *ip;
+
+  ip = slab_alloc(&itable.inode_cache);
+  if(ip == 0)
+    panic("__inode_cache_alloc: slab_alloc failed");
+  memset(ip, 0, sizeof(*ip));
+  return ip;
+}
+
+static ht_hash_t __itable_hash_func(void *node)  {
+  struct inode *inode = node;
+
+  return hlist_hash_uint64(inode->dev + (inode->inum << 16));
+}
+
+static void *__itable_hlist_get_node(hlist_entry_t *entry) {
+  return container_of(entry, struct inode, hlist_entry);
+}
+
+static hlist_entry_t *__itable_hlist_get_entry(void *node) {
+  struct inode *inode = node;
+  return &inode->hlist_entry;
+}
+
+static int __itable_hlist_cmp(hlist_t *hlist, void *node1, void *node2) {
+  struct inode *inode1 = node1;
+  struct inode *inode2 = node2;
+  int value1 = (int)(inode1->inum + (inode1->dev << 16));
+  int value2 = (int)(inode2->inum + (inode2->dev << 16));
+
+  return value1 - value2;
+}
+
+static inline struct inode*
+__itable_hlist_pop(uint dev, uint inum) {
+  // Create a dummy node to search for
+  struct inode dummy = { 0 };
+  dummy.dev = dev;
+  dummy.inum = inum;
+
+  return hlist_pop(&itable.inode_list, &dummy);
+}
+
+static inline int
+__itable_hlist_push(struct inode *inode) {
+  struct inode *entry = hlist_put(&itable.inode_list, inode);
+  if (entry == NULL) {
+    return 0; // succeeded
+  } else if (entry != inode) {
+    return -1; // failed to insert
+  } else {
+    return -1; // the entry is already in the hash list
+  }
+}
 
 void
 iinit()
 {
-  int i = 0;
-  
-  initlock(&itable.lock, "itable");
-  for(i = 0; i < NINODE; i++) {
-    initsleeplock(&itable.inode[i].lock, "inode");
+  int ret = slab_cache_init(&itable.inode_cache, "inode", sizeof(struct inode), SLAB_FLAG_STATIC);
+  if (ret != 0) {
+    panic("iinit: slab_cache_init failed");
   }
+  hlist_func_t hlist_func = {
+    .hash = __itable_hash_func,
+    .get_node = __itable_hlist_get_node,
+    .get_entry = __itable_hlist_get_entry,
+    .cmp_node = __itable_hlist_cmp,
+  };
+  ret = hlist_init(&itable.inode_list, ITABLE_INODE_HASH_BUCKETS, &hlist_func);
+  if (ret != 0) {
+    panic("iinit: hlist_init failed");
+  }
+
+  initlock(&itable.lock, "itable");
 }
 
 STATIC struct inode* iget(uint dev, uint inum);
@@ -246,31 +335,45 @@ iupdate(struct inode *ip)
 STATIC struct inode*
 iget(uint dev, uint inum)
 {
-  struct inode *ip, *empty;
+  struct inode *ip;
 
   acquire(&itable.lock);
 
   // Is the inode already in the table?
-  empty = 0;
-  for(ip = &itable.inode[0]; ip < &itable.inode[NINODE]; ip++){
-    if(ip->ref > 0 && ip->dev == dev && ip->inum == inum){
+  ip = __itable_hlist_pop(dev, inum);
+  if (ip != NULL) {
+    // Found in the hash list.
+    if (ip->ref > 0) {
+      // Already in use, increment ref and return.
       ip->ref++;
+      if (__itable_hlist_push(ip) != 0) {
+        panic("iget: failed to push inode in use back into hash list");
+      }
       release(&itable.lock);
       return ip;
     }
-    if(empty == 0 && ip->ref == 0)    // Remember empty slot.
-      empty = ip;
+
+    // By now all inodes in the hash list should have ref > 0
+    if (__itable_hlist_push(ip) != 0) {
+      panic("iget: failed to push unused inode back into hash list");
+    }
+  } else {
+    // Not found in the hash list, search the inode table.
+    ip = __inode_cache_alloc();
+    if (ip == NULL) {
+      release(&itable.lock);
+      panic("iget: __inode_cache_alloc failed");
+    }
+    initsleeplock(&ip->lock, "inode");
   }
 
-  // Recycle an inode entry.
-  if(empty == 0)
-    panic("iget: no inodes");
-
-  ip = empty;
   ip->dev = dev;
   ip->inum = inum;
   ip->ref = 1;
   ip->valid = 0;
+  if (__itable_hlist_push(ip) != 0) {
+    panic("iget: failed to push a newly allocated inode to hash list");
+  }
   release(&itable.lock);
 
   return ip;
@@ -339,26 +442,28 @@ void
 iput(struct inode *ip)
 {
   acquire(&itable.lock);
-
-  if(ip->ref == 1 && ip->valid && ip->nlink == 0){
-    // inode has no links and no other references: truncate and free.
-
-    // ip->ref == 1 means no other process can have ip locked,
-    // so this acquiresleep() won't block (or deadlock).
+  if (ip->ref == 1) {
     acquiresleep(&ip->lock);
-
+    ip->ref = 0;
+    struct inode *popped = __itable_hlist_pop(ip->dev, ip->inum);
     release(&itable.lock);
-
-    itrunc(ip);
-    ip->type = 0;
-    iupdate(ip);
-    ip->valid = 0;
-
-    releasesleep(&ip->lock);
-
-    acquire(&itable.lock);
+    if (popped != ip) {
+      panic("iput: inode not found in hash list");
+    }
+    if(ip->valid && ip->nlink == 0){
+      // inode has no links and no other references: truncate and free.
+      
+      // ip->ref == 1 means no other process can have ip locked,
+      // so this acquiresleep() won't block (or deadlock).
+      
+      itrunc(ip);
+      ip->type = 0;
+      iupdate(ip);
+    }
+    __inode_cache_free(ip);
+    return;
   }
-
+  
   ip->ref--;
   release(&itable.lock);
 }

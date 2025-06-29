@@ -51,6 +51,8 @@
         "compiler.h": "c",
         "executor": "c",
         "shared_mutex": "c",
-        "syncstream": "c"
+        "syncstream": "c",
+        "slab.h": "c",
+        "slab_type.h": "c"
     }
 }
