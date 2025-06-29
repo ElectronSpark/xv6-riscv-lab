@@ -14,6 +14,8 @@
 #define SLAB_DEFAULT_ORDER          PAGE_BUDDY_MAX_ORDER
 #endif
 
+#define ITABLE_INODE_HASH_BUCKETS  31
+
 int slab_cache_init(slab_cache_t *cache, char *name, size_t obj_size, 
                     uint64 flags);
 slab_cache_t *slab_cache_create(char *name, size_t obj_size, uint64 flags);

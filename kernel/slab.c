@@ -37,7 +37,7 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
     }
     page_nums = 1 << order;
     for (int i = 0; i < page_nums; i++) {
-        page->slab.slab = slab;
+        page[i].slab.slab = slab;
     }
 
     slab->cache = NULL;
@@ -494,7 +494,9 @@ void *slab_alloc(slab_cache_t *cache) {
     } else if (cache->slab_free > 0) {
         // Try to get object from an empty SLAB
         slab = __slab_pop_free(cache);
-        panic("slab_alloc(): Failed to get an empty SLAB when the free list is not empty");
+        if (slab == NULL) {
+            panic("slab_alloc(): Failed to get an empty SLAB when the free list is not empty");
+        }
     } else {
         // Try to make an empty SLAB
         slab = __slab_make( cache->flags, cache->slab_order, cache->offset, 
@@ -504,6 +506,7 @@ void *slab_alloc(slab_cache_t *cache) {
             obj = NULL;
             goto done;
         }
+        __slab_attach(cache, slab);
     }
     // Find an empty or half-full SLAB
     obj = __slab_obj_get(slab);
@@ -512,7 +515,7 @@ void *slab_alloc(slab_cache_t *cache) {
     }
     __slab_enqueue(cache, slab);
 done:
-    __slab_cache_lock(cache);
+    __slab_cache_unlock(cache);
     return obj;
 }
 
