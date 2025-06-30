@@ -61,6 +61,16 @@ static int __bcache_hlist_cmp(hlist_t *hlist, void *node1, void *node2) {
 }
 
 static inline struct buf*
+__bcache_hlist_get(uint dev, uint blockno) {
+  // Create a dummy node to search for
+  struct buf dummy = { 0 };
+  dummy.dev = dev;
+  dummy.blockno = blockno;
+
+  return hlist_get(&bcache.cached, &dummy);
+}
+
+static inline struct buf*
 __bcache_hlist_pop(uint dev, uint blockno) {
   // Create a dummy node to search for
   struct buf dummy = { 0 };
@@ -117,16 +127,13 @@ bget(uint dev, uint blockno)
   acquire(&bcache.lock);
 
   // Is the block already cached?
-  b = __bcache_hlist_pop(dev, blockno);
+  b = __bcache_hlist_get(dev, blockno);
   if(b != NULL) {
     // Found it.
     if (!LIST_NODE_IS_DETACHED(b, lru_entry)) {
       list_node_detach(b, lru_entry);
     }
     b->refcnt++;
-    if (__bcache_hlist_push(b) != 0) {
-      panic("bget: failed to push buffer into hash list");
-    }
     release(&bcache.lock);
     acquiresleep(&b->lock);
     return b;

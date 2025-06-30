@@ -177,7 +177,6 @@ bfree(int dev, uint b)
 
 struct {
   struct spinlock lock;
-  // struct inode inode[NINODE];
   slab_cache_t inode_cache;
   struct {
     hlist_t inode_list;
@@ -233,6 +232,16 @@ static int __itable_hlist_cmp(hlist_t *hlist, void *node1, void *node2) {
   int value2 = (int)(inode2->inum + (inode2->dev << 16));
 
   return value1 - value2;
+}
+
+static inline struct inode*
+__itable_hlist_get(uint dev, uint inum) {
+  // Create a dummy node to search for
+  struct inode dummy = { 0 };
+  dummy.dev = dev;
+  dummy.inum = inum;
+
+  return hlist_get(&itable.inode_list, &dummy);
 }
 
 static inline struct inode*
@@ -340,23 +349,15 @@ iget(uint dev, uint inum)
   acquire(&itable.lock);
 
   // Is the inode already in the table?
-  ip = __itable_hlist_pop(dev, inum);
+  ip = __itable_hlist_get(dev, inum);
   if (ip != NULL) {
     // Found in the hash list.
-    if (ip->ref > 0) {
-      // Already in use, increment ref and return.
-      ip->ref++;
-      if (__itable_hlist_push(ip) != 0) {
-        panic("iget: failed to push inode in use back into hash list");
-      }
-      release(&itable.lock);
-      return ip;
+    if (ip->ref <= 0) {
+      panic("iget: found unused inode in itable");
     }
-
-    // By now all inodes in the hash list should have ref > 0
-    if (__itable_hlist_push(ip) != 0) {
-      panic("iget: failed to push unused inode back into hash list");
-    }
+    ip->ref++;
+    release(&itable.lock);
+    return ip;
   } else {
     // Not found in the hash list, search the inode table.
     ip = __inode_cache_alloc();
