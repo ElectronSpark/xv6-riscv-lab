@@ -56,6 +56,7 @@ int proc_queue_push(proc_queue_t *q, struct proc *p) {
     }
 
     if (q->flags & PROC_QUEUE_FLAG_LOCK) {
+        push_off();
         spin_acquire(&q->lock);
     }
 
@@ -65,6 +66,7 @@ int proc_queue_push(proc_queue_t *q, struct proc *p) {
 
     if (q->flags & PROC_QUEUE_FLAG_LOCK) {
         spin_release(&q->lock);
+        pop_off();
     }
     
     return 0; // Success
@@ -82,6 +84,7 @@ int proc_queue_pop(proc_queue_t *q, struct proc **ret_proc) {
     }
 
     if (q->flags & PROC_QUEUE_FLAG_LOCK) {
+        push_off();
         spin_acquire(&q->lock);
     }
 
@@ -102,6 +105,7 @@ int proc_queue_pop(proc_queue_t *q, struct proc **ret_proc) {
 ret:
     if (q->flags & PROC_QUEUE_FLAG_LOCK) {
         spin_release(&q->lock);
+        pop_off();
     }
 
     return ret_value;
@@ -123,6 +127,7 @@ int proc_queue_remove(proc_queue_t *q, struct proc *p) {
     }
 
     if (q->flags & PROC_QUEUE_FLAG_LOCK) {
+        push_off();
         spin_acquire(&q->lock);
     }
 
@@ -136,6 +141,7 @@ int proc_queue_remove(proc_queue_t *q, struct proc *p) {
 
     if (q->flags & PROC_QUEUE_FLAG_LOCK) {
         spin_release(&q->lock);
+        pop_off();
     }
 
     return ret_value;
