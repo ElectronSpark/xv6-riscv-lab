@@ -19,7 +19,7 @@ extern int devintr();
 void
 trapinit(void)
 {
-  initlock(&tickslock, "time");
+  spin_init(&tickslock, "time");
 }
 
 // set up to take exceptions and traps while in the kernel.
@@ -185,10 +185,10 @@ void
 clockintr()
 {
   if(cpuid() == 0){
-    acquire(&tickslock);
+    spin_acquire(&tickslock);
     ticks++;
     wakeup(&ticks);
-    release(&tickslock);
+    spin_release(&tickslock);
   }
 
   // ask for the next timer interrupt. this also clears

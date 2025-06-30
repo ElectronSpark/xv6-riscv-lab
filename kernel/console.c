@@ -84,13 +84,13 @@ consoleread(int user_dst, uint64 dst, int n)
   char cbuf;
 
   target = n;
-  acquire(&cons.lock);
+  spin_acquire(&cons.lock);
   while(n > 0){
     // wait until interrupt handler has put some
     // input into cons.buffer.
     while(cons.r == cons.w){
       if(killed(myproc())){
-        release(&cons.lock);
+        spin_release(&cons.lock);
         return -1;
       }
       sleep(&cons.r, &cons.lock);
@@ -121,7 +121,7 @@ consoleread(int user_dst, uint64 dst, int n)
       break;
     }
   }
-  release(&cons.lock);
+  spin_release(&cons.lock);
 
   return target - n;
 }
@@ -135,7 +135,7 @@ consoleread(int user_dst, uint64 dst, int n)
 void
 consoleintr(int c)
 {
-  acquire(&cons.lock);
+  spin_acquire(&cons.lock);
 
   switch(c){
   case C('P'):  // Print process list.
@@ -175,13 +175,13 @@ consoleintr(int c)
     break;
   }
   
-  release(&cons.lock);
+  spin_release(&cons.lock);
 }
 
 void
 consoleinit(void)
 {
-  initlock(&cons.lock, "cons");
+  spin_init(&cons.lock, "cons");
 
   uartinit();
 

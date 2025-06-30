@@ -124,10 +124,10 @@ void            procdump(void);
 void            swtch(struct context*, struct context*);
 
 // spinlock.c
-void            acquire(struct spinlock*);
-int             holding(struct spinlock*);
-void            initlock(struct spinlock*, char*);
-void            release(struct spinlock*);
+void            spin_acquire(struct spinlock*);
+int             spin_holding(struct spinlock*);
+void            spin_init(struct spinlock*, char*);
+void            spin_release(struct spinlock*);
 void            push_off(void);
 void            pop_off(void);
 

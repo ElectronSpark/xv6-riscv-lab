@@ -23,12 +23,12 @@ STATIC uint64 __managed_end = PHYSTOP;
 
 // acquire the spinlock of a buddy pool
 STATIC_INLINE void __buddy_pool_lock(buddy_pool_t *pool) {
-    acquire(&pool->lock);
+    spin_acquire(&pool->lock);
 }
 
 // release the spinlock of a buddy pool
 STATIC_INLINE void __buddy_pool_unlock(buddy_pool_t *pool) {
-    release(&pool->lock);
+    spin_release(&pool->lock);
 }
 
 // get the total number of pages managed
@@ -88,7 +88,7 @@ STATIC_INLINE void __page_init( page_t *page, uint64 physical, int ref_count,
     page->physical_address = physical;
     page->flags = flags;
     page->ref_count = ref_count;
-    initlock(&page->lock, "page_t");
+    spin_init(&page->lock, "page_t");
 }
 
 // initialize a buddy pool
@@ -96,7 +96,7 @@ STATIC_INLINE void __page_init( page_t *page, uint64 physical, int ref_count,
 STATIC_INLINE void __buddy_pool_init() {
     // __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
     for (int i = 0; i < PAGE_BUDDY_MAX_ORDER + 1; i++) {
-        initlock(&(__buddy_pools[i].lock), "buddy_system_pool");
+        spin_init(&(__buddy_pools[i].lock), "buddy_system_pool");
         __buddy_pools[i].count = 0;
         list_entry_init(&__buddy_pools[i].lru_head);
     }
@@ -525,14 +525,14 @@ void page_lock_aqcuire(page_t *page) {
     if (page == NULL) {
         return;
     }
-    acquire(&page->lock);
+    spin_acquire(&page->lock);
 }
 
 void page_lock_release(page_t *page) {
     if (page == NULL) {
         return;
     }
-    release(&page->lock);
+    spin_release(&page->lock);
 }
 
 int __page_ref_inc(page_t *page) {

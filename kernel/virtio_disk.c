@@ -63,7 +63,7 @@ virtio_disk_init(void)
 {
   uint32 status = 0;
 
-  initlock(&disk.vdisk_lock, "virtio_disk");
+  spin_init(&disk.vdisk_lock, "virtio_disk");
 
   if(*R(VIRTIO_MMIO_MAGIC_VALUE) != 0x74726976 ||
      *R(VIRTIO_MMIO_VERSION) != 2 ||
@@ -217,7 +217,7 @@ virtio_disk_rw(struct buf *b, int write)
 {
   uint64 sector = b->blockno * (BSIZE / 512);
 
-  acquire(&disk.vdisk_lock);
+  spin_acquire(&disk.vdisk_lock);
 
   // the spec's Section 5.2 says that legacy block operations use
   // three descriptors: one for type/reserved/sector, one for the
@@ -288,13 +288,13 @@ virtio_disk_rw(struct buf *b, int write)
   disk.info[idx[0]].b = 0;
   free_chain(idx[0]);
 
-  release(&disk.vdisk_lock);
+  spin_release(&disk.vdisk_lock);
 }
 
 void
 virtio_disk_intr()
 {
-  acquire(&disk.vdisk_lock);
+  spin_acquire(&disk.vdisk_lock);
 
   // the device won't raise another interrupt until we tell it
   // we've seen this interrupt, which the following line does.
@@ -323,5 +323,5 @@ virtio_disk_intr()
     disk.used_idx += 1;
   }
 
-  release(&disk.vdisk_lock);
+  spin_release(&disk.vdisk_lock);
 }

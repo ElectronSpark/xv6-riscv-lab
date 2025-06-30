@@ -313,13 +313,13 @@ STATIC_INLINE slab_t *__find_obj_slab(void *ptr) {
 // aqcuire the lock of a SLAB cache
 // no checking here
 STATIC_INLINE void __slab_cache_lock(slab_cache_t *cache) {
-    acquire(&cache->lock);
+    spin_acquire(&cache->lock);
 }
 
 // release the lock of a SLAB cache
 // no checking here
 STATIC_INLINE void __slab_cache_unlock(slab_cache_t *cache) {
-    release(&cache->lock);
+    spin_release(&cache->lock);
 }
 
 // Initialize a existing SLAB cache without checking
@@ -355,7 +355,7 @@ STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name,
     list_entry_init(&cache->free_list);
     list_entry_init(&cache->partial_list);
     list_entry_init(&cache->full_list);
-    initlock(&cache->lock, name);
+    spin_init(&cache->lock, name);
 }
 
 

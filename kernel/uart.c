@@ -74,7 +74,7 @@ uartinit(void)
   // enable transmit and receive interrupts.
   WriteReg(IER, IER_TX_ENABLE | IER_RX_ENABLE);
 
-  initlock(&uart_tx_lock, "uart");
+  spin_init(&uart_tx_lock, "uart");
 }
 
 // add a character to the output buffer and tell the
@@ -86,7 +86,7 @@ uartinit(void)
 void
 uartputc(int c)
 {
-  acquire(&uart_tx_lock);
+  spin_acquire(&uart_tx_lock);
 
   if(panicked){
     for(;;)
@@ -100,7 +100,7 @@ uartputc(int c)
   uart_tx_buf[uart_tx_w % UART_TX_BUF_SIZE] = c;
   uart_tx_w += 1;
   uartstart();
-  release(&uart_tx_lock);
+  spin_release(&uart_tx_lock);
 }
 
 
@@ -185,7 +185,7 @@ uartintr(void)
   }
 
   // send buffered characters.
-  acquire(&uart_tx_lock);
+  spin_acquire(&uart_tx_lock);
   uartstart();
-  release(&uart_tx_lock);
+  spin_release(&uart_tx_lock);
 }

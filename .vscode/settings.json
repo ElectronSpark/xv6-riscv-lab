@@ -53,6 +53,7 @@
         "shared_mutex": "c",
         "syncstream": "c",
         "slab.h": "c",
-        "slab_type.h": "c"
+        "slab_type.h": "c",
+        "sleeplock.h": "c"
     }
 }

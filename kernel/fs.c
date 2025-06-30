@@ -284,7 +284,7 @@ iinit()
     panic("iinit: hlist_init failed");
   }
 
-  initlock(&itable.lock, "itable");
+  spin_init(&itable.lock, "itable");
 }
 
 STATIC struct inode* iget(uint dev, uint inum);
@@ -346,7 +346,7 @@ iget(uint dev, uint inum)
 {
   struct inode *ip;
 
-  acquire(&itable.lock);
+  spin_acquire(&itable.lock);
 
   // Is the inode already in the table?
   ip = __itable_hlist_get(dev, inum);
@@ -356,13 +356,13 @@ iget(uint dev, uint inum)
       panic("iget: found unused inode in itable");
     }
     ip->ref++;
-    release(&itable.lock);
+    spin_release(&itable.lock);
     return ip;
   } else {
     // Not found in the hash list, search the inode table.
     ip = __inode_cache_alloc();
     if (ip == NULL) {
-      release(&itable.lock);
+      spin_release(&itable.lock);
       panic("iget: __inode_cache_alloc failed");
     }
     initsleeplock(&ip->lock, "inode");
@@ -375,7 +375,7 @@ iget(uint dev, uint inum)
   if (__itable_hlist_push(ip) != 0) {
     panic("iget: failed to push a newly allocated inode to hash list");
   }
-  release(&itable.lock);
+  spin_release(&itable.lock);
 
   return ip;
 }
@@ -385,9 +385,9 @@ iget(uint dev, uint inum)
 struct inode*
 idup(struct inode *ip)
 {
-  acquire(&itable.lock);
+  spin_acquire(&itable.lock);
   ip->ref++;
-  release(&itable.lock);
+  spin_release(&itable.lock);
   return ip;
 }
 
@@ -442,12 +442,12 @@ iunlock(struct inode *ip)
 void
 iput(struct inode *ip)
 {
-  acquire(&itable.lock);
+  spin_acquire(&itable.lock);
   if (ip->ref == 1) {
     acquiresleep(&ip->lock);
     ip->ref = 0;
     struct inode *popped = __itable_hlist_pop(ip->dev, ip->inum);
-    release(&itable.lock);
+    spin_release(&itable.lock);
     if (popped != ip) {
       panic("iput: inode not found in hash list");
     }
@@ -466,7 +466,7 @@ iput(struct inode *ip)
   }
   
   ip->ref--;
-  release(&itable.lock);
+  spin_release(&itable.lock);
 }
 
 // Common idiom: unlock, then put.

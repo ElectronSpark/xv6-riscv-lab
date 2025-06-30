@@ -34,7 +34,7 @@ pipealloc(struct file **f0, struct file **f1)
   pi->writeopen = 1;
   pi->nwrite = 0;
   pi->nread = 0;
-  initlock(&pi->lock, "pipe");
+  spin_init(&pi->lock, "pipe");
   (*f0)->type = FD_PIPE;
   (*f0)->readable = 1;
   (*f0)->writable = 0;
@@ -58,7 +58,7 @@ pipealloc(struct file **f0, struct file **f1)
 void
 pipeclose(struct pipe *pi, int writable)
 {
-  acquire(&pi->lock);
+  spin_acquire(&pi->lock);
   if(writable){
     pi->writeopen = 0;
     wakeup(&pi->nread);
@@ -67,10 +67,10 @@ pipeclose(struct pipe *pi, int writable)
     wakeup(&pi->nwrite);
   }
   if(pi->readopen == 0 && pi->writeopen == 0){
-    release(&pi->lock);
+    spin_release(&pi->lock);
     kfree((char*)pi);
   } else
-    release(&pi->lock);
+    spin_release(&pi->lock);
 }
 
 int
@@ -79,10 +79,10 @@ pipewrite(struct pipe *pi, uint64 addr, int n)
   int i = 0;
   struct proc *pr = myproc();
 
-  acquire(&pi->lock);
+  spin_acquire(&pi->lock);
   while(i < n){
     if(pi->readopen == 0 || killed(pr)){
-      release(&pi->lock);
+      spin_release(&pi->lock);
       return -1;
     }
     if(pi->nwrite == pi->nread + PIPESIZE){ //DOC: pipewrite-full
@@ -97,7 +97,7 @@ pipewrite(struct pipe *pi, uint64 addr, int n)
     }
   }
   wakeup(&pi->nread);
-  release(&pi->lock);
+  spin_release(&pi->lock);
 
   return i;
 }
@@ -109,10 +109,10 @@ piperead(struct pipe *pi, uint64 addr, int n)
   struct proc *pr = myproc();
   char ch;
 
-  acquire(&pi->lock);
+  spin_acquire(&pi->lock);
   while(pi->nread == pi->nwrite && pi->writeopen){  //DOC: pipe-empty
     if(killed(pr)){
-      release(&pi->lock);
+      spin_release(&pi->lock);
       return -1;
     }
     sleep(&pi->nread, &pi->lock); //DOC: piperead-sleep
@@ -125,6 +125,6 @@ piperead(struct pipe *pi, uint64 addr, int n)
       break;
   }
   wakeup(&pi->nwrite);  //DOC: piperead-wakeup
-  release(&pi->lock);
+  spin_release(&pi->lock);
   return i;
 }

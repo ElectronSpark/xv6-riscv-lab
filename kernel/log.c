@@ -57,7 +57,7 @@ initlog(int dev, struct superblock *sb)
   if (sizeof(struct logheader) >= BSIZE)
     panic("initlog: too big logheader");
 
-  initlock(&log.lock, "log");
+  spin_init(&log.lock, "log");
   log.start = sb->logstart;
   log.size = sb->nlog;
   log.dev = dev;
@@ -126,7 +126,7 @@ recover_from_log(void)
 void
 begin_op(void)
 {
-  acquire(&log.lock);
+  spin_acquire(&log.lock);
   while(1){
     if(log.committing){
       sleep(&log, &log.lock);
@@ -135,7 +135,7 @@ begin_op(void)
       sleep(&log, &log.lock);
     } else {
       log.outstanding += 1;
-      release(&log.lock);
+      spin_release(&log.lock);
       break;
     }
   }
@@ -148,7 +148,7 @@ end_op(void)
 {
   int do_commit = 0;
 
-  acquire(&log.lock);
+  spin_acquire(&log.lock);
   log.outstanding -= 1;
   if(log.committing)
     panic("log.committing");
@@ -161,16 +161,16 @@ end_op(void)
     // the amount of reserved space.
     wakeup(&log);
   }
-  release(&log.lock);
+  spin_release(&log.lock);
 
   if(do_commit){
     // call commit w/o holding locks, since not allowed
     // to sleep with locks.
     commit();
-    acquire(&log.lock);
+    spin_acquire(&log.lock);
     log.committing = 0;
     wakeup(&log);
-    release(&log.lock);
+    spin_release(&log.lock);
   }
 }
 
@@ -216,7 +216,7 @@ log_write(struct buf *b)
 {
   int i;
 
-  acquire(&log.lock);
+  spin_acquire(&log.lock);
   if (log.lh.n >= LOGSIZE || log.lh.n >= log.size - 1)
     panic("too big a transaction");
   if (log.outstanding < 1)
@@ -231,6 +231,6 @@ log_write(struct buf *b)
     bpin(b);
     log.lh.n++;
   }
-  release(&log.lock);
+  spin_release(&log.lock);
 }
 

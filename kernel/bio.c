@@ -98,7 +98,7 @@ binit(void)
 {
   struct buf *b;
 
-  initlock(&bcache.lock, "bcache");
+  spin_init(&bcache.lock, "bcache");
 
   // Create linked list of buffers
   list_entry_init(&bcache.lru_entry);
@@ -124,7 +124,7 @@ bget(uint dev, uint blockno)
 {
   struct buf *b, *b1, *tmp;
 
-  acquire(&bcache.lock);
+  spin_acquire(&bcache.lock);
 
   // Is the block already cached?
   b = __bcache_hlist_get(dev, blockno);
@@ -134,7 +134,7 @@ bget(uint dev, uint blockno)
       list_node_detach(b, lru_entry);
     }
     b->refcnt++;
-    release(&bcache.lock);
+    spin_release(&bcache.lock);
     acquiresleep(&b->lock);
     return b;
   }
@@ -166,7 +166,7 @@ bget(uint dev, uint blockno)
         printf("dev: %d, blockno: %d\n", dev, blockno);
         panic("bget: failed to push recycled buffer into hash list");
       }
-      release(&bcache.lock);
+      spin_release(&bcache.lock);
       acquiresleep(&b->lock);
       return b;
     }
@@ -197,7 +197,7 @@ bwrite(struct buf *b)
   virtio_disk_rw(b, 1);
 }
 
-// Release a locked buffer.
+// release a locked buffer.
 // Move to the head of the most-recently-used list.
 void
 brelse(struct buf *b)
@@ -207,28 +207,28 @@ brelse(struct buf *b)
 
   releasesleep(&b->lock);
 
-  acquire(&bcache.lock);
+  spin_acquire(&bcache.lock);
   b->refcnt--;
   if (b->refcnt == 0) {
     // no one is waiting for it.
     list_node_push(&bcache.lru_entry, b, lru_entry);
   }
   
-  release(&bcache.lock);
+  spin_release(&bcache.lock);
 }
 
 void
 bpin(struct buf *b) {
-  acquire(&bcache.lock);
+  spin_acquire(&bcache.lock);
   b->refcnt++;
-  release(&bcache.lock);
+  spin_release(&bcache.lock);
 }
 
 void
 bunpin(struct buf *b) {
-  acquire(&bcache.lock);
+  spin_acquire(&bcache.lock);
   b->refcnt--;
-  release(&bcache.lock);
+  spin_release(&bcache.lock);
 }
 
 

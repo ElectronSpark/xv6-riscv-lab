@@ -1031,7 +1031,7 @@ forkforkfork(char *s)
 // regression test. does reparent() violate the parent-then-child
 // locking order when giving away a child to init, so that exit()
 // deadlocks against init's wait()? also used to trigger a "panic:
-// release" due to exit() releasing a different p->parent->lock than
+// spin_release" due to exit() releasing a different p->parent->lock than
 // it acquired.
 void
 reparent2(char *s)

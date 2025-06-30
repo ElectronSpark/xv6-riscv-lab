@@ -9,7 +9,7 @@
 #include "defs.h"
 
 void
-initlock(struct spinlock *lk, char *name)
+spin_init(struct spinlock *lk, char *name)
 {
   lk->name = name;
   lk->locked = 0;
@@ -19,11 +19,11 @@ initlock(struct spinlock *lk, char *name)
 // Acquire the lock.
 // Loops (spins) until the lock is acquired.
 void
-acquire(struct spinlock *lk)
+spin_acquire(struct spinlock *lk)
 {
   push_off(); // disable interrupts to avoid deadlock.
-  if(holding(lk))
-    panic("acquire");
+  if(spin_holding(lk))
+    panic("spin_acquire");
 
   // On RISC-V, sync_lock_test_and_set turns into an atomic swap:
   //   a5 = 1
@@ -44,16 +44,16 @@ acquire(struct spinlock *lk)
   // On RISC-V, this emits a fence instruction.
   __sync_synchronize();
 
-  // Record info about lock acquisition for holding() and debugging.
+  // Record info about lock acquisition for spin_holding() and debugging.
   lk->cpu = mycpu();
 }
 
 // Release the lock.
 void
-release(struct spinlock *lk)
+spin_release(struct spinlock *lk)
 {
-  if(!holding(lk))
-    panic("release");
+  if(!spin_holding(lk))
+    panic("spin_release");
 
   lk->cpu = 0;
 
@@ -80,7 +80,7 @@ release(struct spinlock *lk)
 // Check whether this cpu is holding the lock.
 // Interrupts must be off.
 int
-holding(struct spinlock *lk)
+spin_holding(struct spinlock *lk)
 {
   int r;
   r = (lk->locked && lk->cpu == mycpu());

@@ -61,16 +61,16 @@ sys_sleep(void)
   argint(0, &n);
   if(n < 0)
     n = 0;
-  acquire(&tickslock);
+  spin_acquire(&tickslock);
   ticks0 = ticks;
   while(ticks - ticks0 < n){
     if(killed(myproc())){
-      release(&tickslock);
+      spin_release(&tickslock);
       return -1;
     }
     sleep(&ticks, &tickslock);
   }
-  release(&tickslock);
+  spin_release(&tickslock);
   return 0;
 }
 
@@ -90,8 +90,8 @@ sys_uptime(void)
 {
   uint xticks;
 
-  acquire(&tickslock);
+  spin_acquire(&tickslock);
   xticks = ticks;
-  release(&tickslock);
+  spin_release(&tickslock);
   return xticks;
 }

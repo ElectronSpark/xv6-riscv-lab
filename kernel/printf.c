@@ -69,7 +69,7 @@ printf(char *fmt, ...)
 
   locking = pr.locking;
   if(locking)
-    acquire(&pr.lock);
+    spin_acquire(&pr.lock);
 
   va_start(ap, fmt);
   for(i = 0; (cx = fmt[i] & 0xff) != 0; i++){
@@ -154,7 +154,7 @@ printf(char *fmt, ...)
   va_end(ap);
 
   if(locking)
-    release(&pr.lock);
+    spin_release(&pr.lock);
 
   return 0;
 }
@@ -173,6 +173,6 @@ panic(char *s)
 void
 printfinit(void)
 {
-  initlock(&pr.lock, "pr");
+  spin_init(&pr.lock, "pr");
   pr.locking = 1;
 }

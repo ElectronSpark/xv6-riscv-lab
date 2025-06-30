@@ -29,7 +29,7 @@ STATIC struct sock *sockets;
 void
 sockinit(void)
 {
-  initlock(&lock, "socktbl");
+  spin_init(&lock, "socktbl");
 }
 
 int
@@ -48,7 +48,7 @@ sockalloc(struct file **f, uint32 raddr, uint16 lport, uint16 rport)
   si->raddr = raddr;
   si->lport = lport;
   si->rport = rport;
-  initlock(&si->lock, "sock");
+  spin_init(&si->lock, "sock");
   mbufq_init(&si->rxq);
   (*f)->type = FD_SOCK;
   (*f)->readable = 1;
@@ -56,20 +56,20 @@ sockalloc(struct file **f, uint32 raddr, uint16 lport, uint16 rport)
   (*f)->sock = si;
 
   // add to list of sockets
-  acquire(&lock);
+  spin_acquire(&lock);
   pos = sockets;
   while (pos) {
     if (pos->raddr == raddr &&
         pos->lport == lport &&
 	pos->rport == rport) {
-      release(&lock);
+      spin_release(&lock);
       goto bad;
     }
     pos = pos->next;
   }
   si->next = sockets;
   sockets = si;
-  release(&lock);
+  spin_release(&lock);
   return 0;
 
 bad:
@@ -87,7 +87,7 @@ sockclose(struct sock *si)
   struct mbuf *m;
 
   // remove from list of sockets
-  acquire(&lock);
+  spin_acquire(&lock);
   pos = &sockets;
   while (*pos) {
     if (*pos == si){
@@ -96,7 +96,7 @@ sockclose(struct sock *si)
     }
     pos = &(*pos)->next;
   }
-  release(&lock);
+  spin_release(&lock);
 
   // free any pending mbufs
   while (!mbufq_empty(&si->rxq)) {
@@ -114,16 +114,16 @@ sockread(struct sock *si, uint64 addr, int n)
   struct mbuf *m;
   int len;
 
-  acquire(&si->lock);
+  spin_acquire(&si->lock);
   while (mbufq_empty(&si->rxq) && !pr->killed) {
     sleep(&si->rxq, &si->lock);
   }
   if (pr->killed) {
-    release(&si->lock);
+    spin_release(&si->lock);
     return -1;
   }
   m = mbufq_pophead(&si->rxq);
-  release(&si->lock);
+  spin_release(&si->lock);
 
   len = m->len;
   if (len > n)
@@ -165,21 +165,21 @@ sockrecvudp(struct mbuf *m, uint32 raddr, uint16 lport, uint16 rport)
   //
   struct sock *si;
 
-  acquire(&lock);
+  spin_acquire(&lock);
   si = sockets;
   while (si) {
     if (si->raddr == raddr && si->lport == lport && si->rport == rport)
       goto found;
     si = si->next;
   }
-  release(&lock);
+  spin_release(&lock);
   mbuffree(m);
   return;
 
 found:
-  acquire(&si->lock);
+  spin_acquire(&si->lock);
   mbufq_pushtail(&si->rxq, m);
   wakeup(&si->rxq);
-  release(&si->lock);
-  release(&lock);
+  spin_release(&si->lock);
+  spin_release(&lock);
 }

@@ -87,9 +87,9 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     __page_free
     # page_buddy_init
     panic
-    acquire
-    release
-    initlock
+    spin_acquire
+    spin_release
+    spin_init
     kmm_alloc
     kmm_free
 )
