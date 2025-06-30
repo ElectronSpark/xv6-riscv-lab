@@ -121,7 +121,7 @@ int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
 
 // swtch.S
-void            swtch(struct context*, struct context*);
+uint64          __swtch_context(struct context *current, struct context *target, uint64 pcb_arg);
 
 // spinlock.c
 void            spin_acquire(struct spinlock*);

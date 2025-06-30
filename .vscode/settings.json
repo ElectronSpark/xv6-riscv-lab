@@ -54,6 +54,7 @@
         "syncstream": "c",
         "slab.h": "c",
         "slab_type.h": "c",
-        "sleeplock.h": "c"
+        "sleeplock.h": "c",
+        "proc.h": "c"
     }
 }

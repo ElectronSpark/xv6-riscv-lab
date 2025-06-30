@@ -451,6 +451,28 @@ wait(uint64 addr)
   }
 }
 
+static struct proc*
+__switch_to(struct context *current, struct proc *p)
+{
+  if (current == NULL) {
+    panic("__switch_to: current context is null");
+  }
+
+  if (p == NULL) {
+    panic("__switch_to: target process is null");
+  }
+
+  if (p->state != RUNNING) {
+    panic("__switch_to: target process not running");
+  }
+
+  // Save the old process's context.
+  uint64 prev = __swtch_context(current, &p->context, 0);
+
+  // Return the old process.
+  return (struct proc *)prev;
+}
+
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
 // Scheduler never returns.  It loops, doing:
@@ -480,7 +502,7 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
-        swtch(&c->context, &p->context);
+        p = __switch_to(&c->context, p);
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
@@ -523,7 +545,7 @@ sched(void)
     panic("sched interruptible");
 
   intena = mycpu()->intena;
-  swtch(&p->context, &mycpu()->context);
+  __swtch_context(&p->context, &mycpu()->context, (uint64)p);
   mycpu()->intena = intena;
 }
 

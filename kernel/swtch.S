@@ -4,9 +4,12 @@
 # 
 # Save current registers in old. Load from new.	
 
-
-.globl swtch
-swtch:
+# uint64 __swtch_context(struct context *current, struct context *target, uint64 pcb_arg);
+# 
+# Save current registers in old. Load from new.
+# The pcb_arg passed in a2 is returned to the target context in a0.
+.globl __swtch_context
+__swtch_context:
         sd ra, 0(a0)
         sd sp, 8(a0)
         sd s0, 16(a0)
@@ -36,6 +39,8 @@ swtch:
         ld s9, 88(a1)
         ld s10, 96(a1)
         ld s11, 104(a1)
+
+        addi a0, a2, 0
         
         ret
 
