@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "list.h"
 #include "proc_queue.h"
 
 struct cpu cpus[NCPU];
@@ -12,6 +13,8 @@ struct cpu cpus[NCPU];
 struct proc proc[NPROC];
 
 struct proc *initproc;
+proc_queue_t ready_queue;
+proc_queue_t spleep_queue;
 
 int nextpid = 1;
 struct spinlock pid_lock;
@@ -44,19 +47,40 @@ proc_mapstacks(pagetable_t kpgtbl)
   }
 }
 
+// Initialize a proc structure and set it to UNUSED state.
+// Its spinlock and kstack will not be initialized here
+static void
+__pcb_init(struct proc *p)
+{
+  p->state = UNUSED;
+  p->chan = 0;
+  p->killed = 0;
+  p->xstate = 0;
+  p->pid = 0;
+  p->parent = 0;
+  p->sz = 0;
+  p->pagetable = 0;
+  p->trapframe = 0;
+  list_entry_init(&p->siblings);
+  list_entry_init(&p->children);
+  proc_queue_entry_init(&p->queue_entry);
+  memset(p->name, 0, sizeof(p->name));
+}
+
 // initialize the proc table.
 void
 procinit(void)
 {
   struct proc *p;
   
+  proc_queue_init(&ready_queue, 0, "ready_queue");
+  proc_queue_init(&spleep_queue, 0, "spleep_queue");
   spin_init(&pid_lock, "nextpid");
   spin_init(&wait_lock, "wait_lock");
   for(p = proc; p < &proc[NPROC]; p++) {
-      spin_init(&p->lock, "proc");
-      proc_queue_entry_init(&p->queue_entry);
-      p->state = UNUSED;
-      p->kstack = KSTACK((int) (p - proc));
+    __pcb_init(p);
+    spin_init(&p->lock, "proc");
+    p->kstack = KSTACK((int) (p - proc));
   }
 }
 
@@ -159,18 +183,9 @@ freeproc(struct proc *p)
 {
   if(p->trapframe)
     kfree((void*)p->trapframe);
-  p->trapframe = 0;
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
-  p->pagetable = 0;
-  p->sz = 0;
-  p->pid = 0;
-  p->parent = 0;
-  p->name[0] = 0;
-  p->chan = 0;
-  p->killed = 0;
-  p->xstate = 0;
-  p->state = UNUSED;
+  __pcb_init(p);
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -469,6 +484,9 @@ scheduler(void)
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
+        if (p->state == RUNNING) {
+          panic("scheduler: process still running");
+        }
         c->proc = 0;
         found = 1;
       }

@@ -100,7 +100,9 @@ struct proc {
   int pid;                     // Process ID
 
   // wait_lock must be held when using this:
-  struct proc *parent;         // Parent process
+  list_node_t siblings;       // List of sibling processes
+  list_node_t children;       // List of child processes
+  struct proc *parent;        // Parent process
 
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
