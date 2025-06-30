@@ -5,7 +5,6 @@
 #include "list_type.h"
 #include "spinlock.h"
 
-struct proc;
 typedef struct proc_queue proc_queue_t;
 
 typedef struct proc_queue_entry {
@@ -21,6 +20,7 @@ typedef struct proc_queue {
     uint64 flags;
 } proc_queue_t;
 
-#define PROC_QUEUE_FLAG_LOCK (1UL << 0) // will try to acquire spinlock before using the queue
+#define PROC_QUEUE_FLAG_VALID   (1UL << 0) // indicates that the queue is valid
+#define PROC_QUEUE_FLAG_LOCK    (1UL << 1) // will try to acquire spinlock before using the queue
 
 #endif // KERNEL_PROC_QUEUE_TYPE_H

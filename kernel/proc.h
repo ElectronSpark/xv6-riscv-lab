@@ -2,6 +2,7 @@
 #define __KERNEL_PROC_H
 
 #include "compiler.h"
+#include "proc_queue_type.h"
 
 // Saved registers for kernel context switches.
 struct context {
@@ -93,6 +94,7 @@ struct proc {
   // p->lock must be held when using these:
   enum procstate state;        // Process state
   void *chan;                  // If non-zero, sleeping on chan
+  proc_queue_entry_t queue_entry;     // Entry in a process queue
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID

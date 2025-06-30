@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "proc_queue.h"
 
 struct cpu cpus[NCPU];
 
@@ -53,6 +54,7 @@ procinit(void)
   spin_init(&wait_lock, "wait_lock");
   for(p = proc; p < &proc[NPROC]; p++) {
       spin_init(&p->lock, "proc");
+      proc_queue_entry_init(&p->queue_entry);
       p->state = UNUSED;
       p->kstack = KSTACK((int) (p - proc));
   }
