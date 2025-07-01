@@ -55,6 +55,8 @@
         "slab.h": "c",
         "slab_type.h": "c",
         "sleeplock.h": "c",
-        "proc.h": "c"
+        "proc.h": "c",
+        "random": "c",
+        "proc_queue.h": "c"
     }
 }

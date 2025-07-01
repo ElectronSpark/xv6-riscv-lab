@@ -60,7 +60,7 @@ int proc_queue_push(proc_queue_t *q, struct proc *p) {
         spin_acquire(&q->lock);
     }
 
-    list_node_push_back(&q->head, p, queue_entry.list_entry);
+    list_node_push(&q->head, p, queue_entry.list_entry);
     p->queue_entry.queue = q;
     q->counter++;
 
@@ -94,7 +94,7 @@ int proc_queue_pop(proc_queue_t *q, struct proc **ret_proc) {
     }
 
     struct proc *dequeued_proc = 
-        list_node_pop(&q->head, struct proc, queue_entry.list_entry);
+        list_node_pop_back(&q->head, struct proc, queue_entry.list_entry);
     if (dequeued_proc == NULL) {
         panic("proc_queue_pop: failed to pop from queue");
     }
@@ -145,4 +145,50 @@ int proc_queue_remove(proc_queue_t *q, struct proc *p) {
     }
 
     return ret_value;
+}
+
+// Move all process from one queue to another.
+// To avoid deadlocks, if both queues require locks, then there should be bulk moving 
+// in ONE SINGLE DIRECTION.
+int proc_queue_bulk_move(proc_queue_t *to, proc_queue_t *from) {
+    int ret_value = 0;
+
+    if (to == NULL || from == NULL) {
+        return -1; // Error: one of the queues is NULL
+    }
+
+    if (!(to->flags & PROC_QUEUE_FLAG_VALID) || !(from->flags & PROC_QUEUE_FLAG_VALID)) {
+        return -1; // Error: one of the queues is not valid
+    }
+
+    if (to->flags & PROC_QUEUE_FLAG_LOCK || from->flags & PROC_QUEUE_FLAG_LOCK) {
+        push_off();
+        if (to->flags & PROC_QUEUE_FLAG_LOCK) {
+            spin_acquire(&to->lock);
+        }
+        if (from->flags & PROC_QUEUE_FLAG_LOCK) {
+            spin_acquire(&from->lock);
+        }
+    }
+
+    if (from->counter <= 0) {
+        ret_value = -1; // Error: source queue is empty
+        goto ret;
+    }
+
+    to->counter += from->counter;
+    from->counter = 0;
+    list_entry_insert_bulk(LIST_LAST_ENTRY(&to->head), &from->head);
+
+ret:
+    if (to->flags & PROC_QUEUE_FLAG_LOCK || from->flags & PROC_QUEUE_FLAG_LOCK) {
+        if (from->flags & PROC_QUEUE_FLAG_LOCK) {
+            spin_release(&from->lock);
+        }
+        if (to->flags & PROC_QUEUE_FLAG_LOCK) {
+            spin_release(&to->lock);
+        }
+        pop_off();
+    }
+    return ret_value; // Success
 }

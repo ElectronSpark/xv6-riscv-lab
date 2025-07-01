@@ -216,6 +216,23 @@ static inline void list_entry_push(list_node_t *head, list_node_t *entry)
     list_entry_insert(LIST_PREV_ENTRY(head), entry);
 }
 
+// Insert all entries in a source list into after a previous entry.
+// The head of the source list will be initialized to an empty list.
+static inline void list_entry_insert_bulk(list_node_t *prev,
+                                          list_node_t *source_head)
+{
+    if (LIST_IS_EMPTY(source_head)) {
+        return; // nothing to do
+    }
+    list_node_t *source_first = LIST_FIRST_ENTRY(source_head);
+    list_node_t *source_last = LIST_LAST_ENTRY(source_head);
+    source_first->prev = prev;
+    source_last->next = prev->next;
+    prev->next->prev = source_last;
+    prev->next = source_first;
+    list_entry_init(source_head);
+}
+
 // take the fisrt node out from a list
 // return NULL if the list is empty
 static inline list_node_t *list_entry_pop_back(list_node_t *head)
