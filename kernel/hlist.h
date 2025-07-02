@@ -197,6 +197,7 @@ size_t hlist_len(hlist_t *hlist);
  */
 #define hlist_foreach_entry(hlist, idx, bucket, pos, tmp)           \
     hlist_foreach_bucket(hlist, idx, bucket)                        \
+    if (!LIST_IS_EMPTY(bucket))                                     \
     list_foreach_node_safe(bucket, pos, tmp, list_entry)
 
 /**

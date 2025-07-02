@@ -90,8 +90,25 @@ int             piperead(struct pipe*, uint64, int);
 int             pipewrite(struct pipe*, uint64, int);
 
 // printf.c
-int            printf(char*, ...) __attribute__ ((format (printf, 1, 2)));
-void            panic(char*) __attribute__((noreturn));
+int             printf(char*, ...) __attribute__ ((format (printf, 1, 2)));
+void            __panic_start(void);
+void            __panic_end(void) __attribute__((noreturn));
+#define __panic(type, fmt, ...) \
+    do { \
+        __panic_start(); \
+        printf( #type " %s:%d: In function '%s':\n", __FILE__, __LINE__, __FUNCTION__); \
+        printf(fmt, ##__VA_ARGS__); \
+        printf("\n"); \
+        __panic_end(); \
+    } while (0)
+#define panic(fmt, ...) \
+    __panic(PANIC, fmt, ##__VA_ARGS__)
+#define assert(expr, fmt, ...) \
+    do { \
+        if (!(expr)) { \
+            __panic(ASSERTION_FAILURE, fmt, ##__VA_ARGS__); \
+        } \
+    } while (0)
 void            printfinit(void);
 
 // proc.c

@@ -160,14 +160,16 @@ printf(char *fmt, ...)
 }
 
 void
-panic(char *s)
+__panic_start()
 {
   pr.locking = 0;
-  printf("panic: ");
-  printf("%s\n", s);
+}
+
+void
+__panic_end()
+{
   panicked = 1; // freeze uart output from other CPUs
-  for(;;)
-    ;
+  for(;;);
 }
 
 void

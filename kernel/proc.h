@@ -2,6 +2,8 @@
 #define __KERNEL_PROC_H
 
 #include "compiler.h"
+#include "list_type.h"
+#include "hlist_type.h"
 #include "proc_queue_type.h"
 
 // Saved registers for kernel context switches.
@@ -98,6 +100,7 @@ struct proc {
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
+  hlist_entry_t proctab_entry;  // Entry to link the process hash table
 
   // wait_lock must be held when using this:
   list_node_t siblings;       // List of sibling processes

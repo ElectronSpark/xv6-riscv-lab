@@ -6,20 +6,149 @@
 #include "proc.h"
 #include "defs.h"
 #include "list.h"
+#include "hlist.h"
 #include "proc_queue.h"
+
+#define NPROC_HASH_BUCKETS 31
 
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
+struct {
+  struct {
+    hlist_t procs;
+    hlist_bucket_t buckets[NPROC_HASH_BUCKETS];
+  };
+  struct proc *initproc;
+  int nextpid;
+  struct spinlock pid_lock;
+} proc_table;
 
-struct proc *initproc;
-proc_queue_t ready_queue;
-proc_queue_t spleep_queue;
+/* Hash table callback functions for proc table */
 
-int nextpid = 1;
-struct spinlock pid_lock;
+static ht_hash_t __proctab_hash(void *node)
+{
+  struct proc *p = (struct proc *)node;
+  return hlist_hash_int(p->pid);
+}
+
+static int __proctab_hash_cmp(hlist_t* ht, void *node1, void *node2)
+{
+  struct proc *p1 = (struct proc *)node1;
+  struct proc *p2 = (struct proc *)node2;
+  return p1->pid - p2->pid;
+}
+
+static hlist_entry_t *__proctab_hash_get_entry(void *node)
+{
+  struct proc *p = (struct proc *)node;
+  return &p->proctab_entry;
+}
+
+static void *__proctab_hash_get_node(hlist_entry_t *entry)
+{
+  return (void *)container_of(entry, struct proc, proctab_entry);
+}
+
+// initialize the proc table and pid_lock.
+static void __proctab_init(void)
+{
+  hlist_func_t funcs = {
+    .hash = __proctab_hash,
+    .get_node = __proctab_hash_get_node,
+    .get_entry = __proctab_hash_get_entry,
+    .cmp_node = __proctab_hash_cmp,
+  };
+  hlist_init(&proc_table.procs, NPROC_HASH_BUCKETS, &funcs);
+  spin_init(&proc_table.pid_lock, "pid_lock");
+  proc_table.initproc = NULL;
+  proc_table.nextpid = 1;
+}
+
+/* Lock and unlock proc table */
+
+static void 
+__proctab_lock(void)
+{
+  spin_acquire(&proc_table.pid_lock);
+}
+
+static void 
+__proctab_unlock(void)
+{
+  spin_release(&proc_table.pid_lock);
+}
+
+// panic if proc_table is not locked.
+static void 
+__proctab_assert_locked(void)
+{
+  assert(spin_holding(&proc_table.pid_lock), "proc_table not locked");
+}
+
+// panic if proc_table is locked.
+static void 
+__proctab_assert_unlocked(void)
+{
+  assert(!spin_holding(&proc_table.pid_lock), "proc_table locked");
+}
+
+
+/* The following will assert that the process table is locked */
+static void __proctab_set_initproc(struct proc *p)
+{
+  __proctab_assert_locked();
+
+  assert(p != NULL, "NULL initproc");
+  assert(proc_table.initproc == NULL, "initproc already set");
+  proc_table.initproc = p;
+}
+
+// get the init process.
+// This function won't check locking state
+static struct proc *__proctab_get_initproc(void)
+{
+  assert(proc_table.initproc != NULL, "initproc not set");
+  return proc_table.initproc;
+}
+
+// get a PCB by pid.
+static struct proc *__proctab_get_pid_proc(int pid)
+{
+  __proctab_assert_locked();
+
+  struct proc dummy = { .pid = pid };
+  struct proc *p = hlist_get(&proc_table.procs, &dummy);
+  return p;
+}
+
+// allocate a new pid.
+static int __alloc_pid(void)
+{
+  __proctab_assert_locked();
+
+  while (__proctab_get_pid_proc(proc_table.nextpid) != NULL) {
+    proc_table.nextpid++;
+  }
+  int pid = proc_table.nextpid;
+  proc_table.nextpid++;
+  return pid;
+}
+
+static int __proctab_add(struct proc *p)
+{
+  __proctab_assert_locked();
+  assert(p != NULL, "NULL proc passed to __proctab_add");
+
+  struct proc *existing = hlist_put(&proc_table.procs, p);
+
+  assert(existing != p, "Failed to add process with pid %d", p->pid);
+  assert(existing == NULL, "Process with pid %d already exists", p->pid);
+  return 0;
+}
 
 extern void forkret(void);
+STATIC void freeproc_locked(struct proc *p);
 STATIC void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
@@ -37,11 +166,10 @@ void
 proc_mapstacks(pagetable_t kpgtbl)
 {
   struct proc *p;
-  
+
   for(p = proc; p < &proc[NPROC]; p++) {
     char *pa = kalloc();
-    if(pa == 0)
-      panic("kalloc");
+    assert(pa != 0, "kalloc failed for proc stack");
     uint64 va = KSTACK((int) (p - proc));
     kvmmap(kpgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W | PTE_RSW_w);
   }
@@ -63,6 +191,7 @@ __pcb_init(struct proc *p)
   p->trapframe = 0;
   list_entry_init(&p->siblings);
   list_entry_init(&p->children);
+  hlist_entry_init(&p->proctab_entry);
   proc_queue_entry_init(&p->queue_entry);
   memset(p->name, 0, sizeof(p->name));
 }
@@ -73,9 +202,7 @@ procinit(void)
 {
   struct proc *p;
   
-  proc_queue_init(&ready_queue, 0, "ready_queue");
-  proc_queue_init(&spleep_queue, 0, "spleep_queue");
-  spin_init(&pid_lock, "nextpid");
+  __proctab_init();
   spin_init(&wait_lock, "wait_lock");
   for(p = proc; p < &proc[NPROC]; p++) {
     __pcb_init(p);
@@ -115,19 +242,6 @@ myproc(void)
   return p;
 }
 
-int
-allocpid()
-{
-  int pid;
-  
-  spin_acquire(&pid_lock);
-  pid = nextpid;
-  nextpid = nextpid + 1;
-  spin_release(&pid_lock);
-
-  return pid;
-}
-
 // Look in the process table for an UNUSED proc.
 // If found, initialize state required to run in the kernel,
 // and return with p->lock held.
@@ -136,34 +250,36 @@ STATIC struct proc*
 allocproc(void)
 {
   struct proc *p;
+  struct proc* ret_proc = NULL;
 
+  __proctab_lock();
   for(p = proc; p < &proc[NPROC]; p++) {
     spin_acquire(&p->lock);
     if(p->state == UNUSED) {
       goto found;
-    } else {
-      spin_release(&p->lock);
     }
+    spin_release(&p->lock);
   }
-  return 0;
+
+  goto ret;
 
 found:
-  p->pid = allocpid();
+  p->pid = __alloc_pid();
   p->state = USED;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
-    freeproc(p);
+    freeproc_locked(p);
     spin_release(&p->lock);
-    return 0;
+    goto ret;
   }
 
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
-    freeproc(p);
+    freeproc_locked(p);
     spin_release(&p->lock);
-    return 0;
+    goto ret;
   }
 
   // Set up new context to start executing at forkret,
@@ -171,21 +287,45 @@ found:
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
   p->context.sp = p->kstack + PGSIZE;
+  if (__proctab_add(p) == 0) {
+    ret_proc = p;
+    goto ret;
+  } else {
+    ret_proc = NULL;
+    freeproc_locked(p);
+    spin_release(&p->lock);
+    goto ret;
+  }
 
-  return p;
+ret:
+  __proctab_unlock();
+  return ret_proc;
 }
 
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
 STATIC void
-freeproc(struct proc *p)
+freeproc_locked(struct proc *p)
 {
+  assert(spin_holding(&p->lock), "freeproc called without p->lock held");
+  struct proc *existing = hlist_pop(&proc_table.procs, p);
+  assert(existing == NULL || existing == p, "freeproc called with a different proc");
   if(p->trapframe)
     kfree((void*)p->trapframe);
   if(p->pagetable)
     proc_freepagetable(p->pagetable, p->sz);
   __pcb_init(p);
+}
+
+STATIC void
+freeproc(struct proc *p)
+{
+  __proctab_assert_unlocked();
+  assert(p != NULL, "freeproc called with NULL proc");
+  __proctab_lock();
+  freeproc_locked(p);
+  __proctab_unlock();
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -252,7 +392,9 @@ userinit(void)
   struct proc *p;
 
   p = allocproc();
-  initproc = p;
+  __proctab_lock();
+  __proctab_set_initproc(p);
+  __proctab_unlock();
   
   // allocate one user page and copy initcode's instructions
   // and data into it.
@@ -307,6 +449,7 @@ fork(void)
 
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+    // @TODO: need to make sure no one would access np before freeing it.
     freeproc(np);
     spin_release(&np->lock);
     return -1;
@@ -344,17 +487,23 @@ fork(void)
 
 // Pass p's abandoned children to init.
 // Caller must hold wait_lock.
+// Caller must not hold p->lock.
 void
 reparent(struct proc *p)
 {
   struct proc *pp;
+  bool found = false;
 
+  __proctab_assert_unlocked();
+  __proctab_lock();
   for(pp = proc; pp < &proc[NPROC]; pp++){
-    if(pp->parent == p){
-      pp->parent = initproc;
-      wakeup(initproc);
-    }
+    if(pp->parent == p)
+      found = true;
   }
+  __proctab_unlock();
+
+  if (found)
+    wakeup(__proctab_get_initproc());
 }
 
 // Exit the current process.  Does not return.
@@ -365,8 +514,7 @@ exit(int status)
 {
   struct proc *p = myproc();
 
-  if(p == initproc)
-    panic("init exiting");
+  assert(p != proc_table.initproc, "init exiting");
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
@@ -535,14 +683,10 @@ sched(void)
   int intena;
   struct proc *p = myproc();
 
-  if(!spin_holding(&p->lock))
-    panic("sched p->lock");
-  if(mycpu()->noff != 1)
-    panic("sched locks");
-  if(p->state == RUNNING)
-    panic("sched running");
-  if(intr_get())
-    panic("sched interruptible");
+  assert(spin_holding(&p->lock), "sched called without p->lock held");
+  assert(mycpu()->noff == 1, "sched locks");
+  assert(p->state != RUNNING, "sched running");
+  assert(!intr_get(), "sched interruptible");
 
   intena = mycpu()->intena;
   __swtch_context(&p->context, &mycpu()->context, (uint64)p);
@@ -620,9 +764,18 @@ sleep(void *chan, struct spinlock *lk)
 void
 wakeup(void *chan)
 {
-  struct proc *p;
+  struct proc *p = NULL;
+  hlist_entry_t *pos, *tmp;
+  hlist_bucket_t *bucket;
+  int idx;
 
-  for(p = proc; p < &proc[NPROC]; p++) {
+  __proctab_assert_unlocked();
+  __proctab_lock();
+  hlist_foreach_bucket(&proc_table.procs, idx, bucket)                        \
+    if (!LIST_IS_EMPTY(bucket))                                     \
+    list_foreach_node_safe(bucket, pos, tmp, list_entry)
+  {
+    p = __proctab_hash_get_node(pos);
     if(p != myproc()){
       spin_acquire(&p->lock);
       if(p->state == SLEEPING && p->chan == chan) {
@@ -631,6 +784,7 @@ wakeup(void *chan)
       spin_release(&p->lock);
     }
   }
+  __proctab_unlock();
 }
 
 // Kill the process with the given pid.
@@ -640,21 +794,30 @@ int
 kill(int pid)
 {
   struct proc *p;
+  int ret_val = 0;
 
-  for(p = proc; p < &proc[NPROC]; p++){
-    spin_acquire(&p->lock);
-    if(p->pid == pid){
-      p->killed = 1;
-      if(p->state == SLEEPING){
-        // Wake process from sleep().
-        p->state = RUNNABLE;
-      }
-      spin_release(&p->lock);
-      return 0;
-    }
-    spin_release(&p->lock);
+  __proctab_assert_unlocked();
+  __proctab_lock();
+  p = __proctab_get_pid_proc(pid);
+  if (p == NULL) {
+    ret_val = -1;
+    goto ret;
   }
-  return -1;
+
+  spin_acquire(&p->lock);
+  assert(p->pid == pid, "kill: pid mismatch");
+  p->killed = 1;
+  if(p->state == SLEEPING){
+    // Wake process from sleep().
+    p->state = RUNNABLE;
+  }
+
+  spin_release(&p->lock);
+
+
+ret:
+  __proctab_unlock();
+  return ret_val;
 }
 
 void
