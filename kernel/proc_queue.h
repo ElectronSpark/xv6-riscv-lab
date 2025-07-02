@@ -8,7 +8,7 @@
 #define proc_queue_foreach_unlocked(q, pos, tmp)   \
     list_foreach_node_safe(&(q)->head, pos, tmp, queue_entry.list_entry)
 
-void proc_queue_init(proc_queue_t *q, uint64 flags, const char *name);
+void proc_queue_init(proc_queue_t *q, const char *name);
 void proc_queue_entry_init(proc_queue_entry_t *entry);
 
 int proc_queue_size(proc_queue_t *q);

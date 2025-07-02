@@ -57,6 +57,7 @@
         "sleeplock.h": "c",
         "proc.h": "c",
         "random": "c",
-        "proc_queue.h": "c"
+        "proc_queue.h": "c",
+        "proc_queue_type.h": "c"
     }
 }

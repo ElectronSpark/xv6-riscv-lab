@@ -14,7 +14,6 @@ typedef struct proc_queue_entry {
 
 typedef struct proc_queue {
     list_node_t head; // List of processes in the queue
-    struct spinlock lock;
     int counter; // Number of processes in the queue
     const char *name; // Name of the queue
     uint64 flags;
