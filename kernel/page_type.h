@@ -6,29 +6,6 @@
 #include "spinlock.h"
 #include "list_type.h"
 
-// The base(2) order of the size of a page in bytes
-#ifndef PAGE_SHIFT
-#ifdef PGSHIFT
-#define PAGE_SHIFT                  PGSHIFT
-#else
-#define PAGE_SHIFT                  12
-#endif          /* PGSHIFT */
-#endif          /* PAGE_SHIFT */
-
-// The size of a page in bytes
-#ifndef PAGE_SIZE
-#ifdef PGSIZE
-#define PAGE_SIZE                   PGSIZE
-#else
-#define PAGE_SIZE                   (1UL << PAGE_SHIFT)
-#endif          /* PGSIZE */
-#endif          /* PAGE_SIZE */
-
-// Mask to get the offset in bytes in a page
-#ifndef PAGE_MASK
-#define PAGE_MASK                   (PAGE_SIZE - 1)
-#endif          /* PAGE_MASK */
-
 // The maximum size of a buddy page is 2**PAGE_BUDDY_MAX_ORDER continuous pages
 #define PAGE_BUDDY_MAX_ORDER        10
 

@@ -87,6 +87,32 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
+
+struct ktrapframe {
+  /*   0 */ uint64 ra;
+  /*   8 */ uint64 sp;
+  /*  16 */ uint64 s0;
+  /*  24 */ uint64 tp;
+  /*  32 */ uint64 t0;
+  /*  40 */ uint64 t1;
+  /*  48 */ uint64 t2;
+  /*  64 */ uint64 padding1[2];
+  /*  72 */ uint64 a0;
+  /*  80 */ uint64 a1;
+  /*  88 */ uint64 a2;
+  /*  96 */ uint64 a3;
+  /* 104 */ uint64 a4;
+  /* 112 */ uint64 a5;
+  /* 120 */ uint64 a6;
+  /* 128 */ uint64 a7;
+  /* 208 */ uint64 padding2[10];
+  /* 216 */ uint64 t3;
+  /* 224 */ uint64 t4;
+  /* 232 */ uint64 t5;
+  /* 240 */ uint64 t6;
+  /* 248 */ uint64 gp;
+} __attribute__((aligned(8)));
+
 enum procstate { UNUSED, USED, PROC_INITIALIZED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 // Per-process state

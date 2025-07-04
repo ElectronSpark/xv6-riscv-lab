@@ -120,6 +120,9 @@ STATIC_INLINE int __init_range_flags( uint64 pa_start, uint64 pa_end,
         return -1;
     }
 
+    printf("init pages from 0x%lx to 0x%lx with flags 0x%lx\n",
+          pa_start, pa_end, flags);
+
     for (uint64 base = pa_start; base < pa_end; base += PAGE_SIZE) {
         page = __pa_to_page(base);
         if (page == NULL) {

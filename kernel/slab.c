@@ -51,9 +51,10 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
     for (int i = 0; i < obj_num; i++) {
         *tmp = prev;
         prev = tmp;
-        tmp += obj_size;
+        tmp = (void *)tmp + obj_size;
     }
-    slab->next = tmp;
+  
+    slab->next = prev;
     return slab;
 }
 
@@ -126,7 +127,7 @@ STATIC_INLINE void __slab_detach(slab_cache_t *cache, slab_t *slab) {
 // Take a SLAB out from the free/partial/full list it's in
 // No validity check
 STATIC_INLINE void __slab_dequeue(slab_cache_t *cache, slab_t *slab) {
-    uint64 *cache_counter;
+    int64 *cache_counter;
     list_node_t *list_entry;
     if (LIST_NODE_IS_DETACHED(slab, list_entry)) {
         panic("__slab_dequeue(): SLAB is not in a queue");
@@ -329,13 +330,13 @@ STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name,
     uint32 limits;
     uint16 slab_obj_num;
 
+    // The size of each object must aligned to 8 bytes
+    obj_size = ((obj_size + 7) >> 3) << 3;
     if (flags & SLAB_FLAG_EMBEDDED) {
         offset = __SLAB_OBJ_OFFSET(obj_size);
     }
-    slab_obj_num = (uint16)__SLAB_ORDER_OBJS(obj_size, offset, obj_size);
+    slab_obj_num = (uint16)__SLAB_ORDER_OBJS(SLAB_DEFAULT_ORDER, offset, obj_size);
     limits = slab_obj_num * 4;
-    // The size of each object must aligned to 8 bytes
-    obj_size = ((obj_size + 7) >> 3) << 3;
 
     // memset(cache, 0, sizeof(slab_cache_t));
     cache->name = name;
@@ -510,9 +511,8 @@ void *slab_alloc(slab_cache_t *cache) {
     }
     // Find an empty or half-full SLAB
     obj = __slab_obj_get(slab);
-    if (obj != NULL) {
-        cache->obj_active++;
-    }
+    assert(obj != NULL , "slab_alloc(): Failed to get an object from a SLAB");
+    cache->obj_active++;
     __slab_enqueue(cache, slab);
 done:
     __slab_cache_unlock(cache);

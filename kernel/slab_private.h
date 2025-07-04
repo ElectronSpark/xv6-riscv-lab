@@ -10,7 +10,7 @@
 #define __SLAB_OBJ_FREE(slab) ({                                            \
     int __ret = 0;                                                          \
     if (__SLAB_ATTACHED(slab)                                               \
-        && (slab)->in_use > (slab)->cache->slab_obj_num) {                  \
+        && (slab)->in_use < (slab)->cache->slab_obj_num) {                  \
         __ret = (slab)->cache->slab_obj_num - (slab)->in_use;               \
     }                                                                       \
     __ret;                                                                  \

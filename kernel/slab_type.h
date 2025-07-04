@@ -33,10 +33,10 @@ typedef struct slab_cache_struct {
     list_node_t             full_list;
 
     // Count the number of cache
-    uint64                  slab_free;
-    uint64                  slab_partial;
-    uint64                  slab_full;
-    uint64                  slab_total;
+    int64                  slab_free;
+    int64                  slab_partial;
+    int64                  slab_full;
+    int64                  slab_total;
 
     // count the objects
     uint64                  obj_active;

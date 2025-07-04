@@ -35,4 +35,32 @@
 #define USERSTACK    1     // user stack pages
 #endif
 
+// The base(2) order of the size of a page in bytes
+#ifndef PAGE_SHIFT
+#ifdef PGSHIFT
+#define PAGE_SHIFT                  PGSHIFT
+#else
+#define PAGE_SHIFT                  12
+#endif          /* PGSHIFT */
+#endif          /* PAGE_SHIFT */
+
+// The size of a page in bytes
+#ifndef PAGE_SIZE
+#ifdef PGSIZE
+#define PAGE_SIZE                   PGSIZE
+#else
+#define PAGE_SIZE                   (1UL << PAGE_SHIFT)
+#endif          /* PGSIZE */
+#endif          /* PAGE_SIZE */
+
+// Mask to get the offset in bytes in a page
+#ifndef PAGE_MASK
+#define PAGE_MASK                   (PAGE_SIZE - 1)
+#endif          /* PAGE_MASK */
+
+#define KERNEL_STACK_ORDER 1 // kernel stack size is 8KB
+#define KERNEL_STACK_SIZE (1UL << (PAGE_SHIFT + KERNEL_STACK_ORDER)) // kernel stack size in bytes
+#define TRAPFRAME_ORDER 0 // trapframe size is 4KB
+#define TRAPFRAME_SIZE (1UL << (PAGE_SHIFT + TRAPFRAME_ORDER)) // trapframe size in bytes
+
 #endif              /* __KERNEL_PARAM_H */
