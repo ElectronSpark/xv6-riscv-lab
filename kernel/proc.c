@@ -8,6 +8,7 @@
 #include "list.h"
 #include "hlist.h"
 #include "proc_queue.h"
+#include "sched.h"
 
 #define NPROC_HASH_BUCKETS 31
 
@@ -264,6 +265,7 @@ allocproc(void)
   goto ret;
 
 found:
+  __pcb_init(p);
   p->pid = __alloc_pid();
   p->state = USED;
 
@@ -408,9 +410,11 @@ userinit(void)
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
-  p->state = RUNNABLE;
+  p->state = PROC_INITIALIZED;
 
   spin_release(&p->lock);
+
+  scheduler_wakeup(p);
 }
 
 // Grow or shrink user memory by n bytes.
@@ -479,8 +483,10 @@ fork(void)
   spin_release(&wait_lock);
 
   spin_acquire(&np->lock);
-  np->state = RUNNABLE;
+  np->state = PROC_INITIALIZED;
   spin_release(&np->lock);
+
+  scheduler_wakeup(np);
 
   return pid;
 }
@@ -543,10 +549,12 @@ exit(int status)
   p->xstate = status;
   p->state = ZOMBIE;
 
+  spin_release(&p->lock);
+
   spin_release(&wait_lock);
 
   // Jump into the scheduler, never to return.
-  sched();
+  scheduler_yield(0);
   panic("zombie exit");
 }
 
@@ -599,109 +607,11 @@ wait(uint64 addr)
   }
 }
 
-static struct proc*
-__switch_to(struct context *current, struct proc *p)
-{
-  if (current == NULL) {
-    panic("__switch_to: current context is null");
-  }
-
-  if (p == NULL) {
-    panic("__switch_to: target process is null");
-  }
-
-  if (p->state != RUNNING) {
-    panic("__switch_to: target process not running");
-  }
-
-  // Save the old process's context.
-  uint64 prev = __swtch_context(current, &p->context, 0);
-
-  // Return the old process.
-  return (struct proc *)prev;
-}
-
-// Per-CPU process scheduler.
-// Each CPU calls scheduler() after setting itself up.
-// Scheduler never returns.  It loops, doing:
-//  - choose a process to run.
-//  - swtch to start running that process.
-//  - eventually that process transfers control
-//    via swtch back to the scheduler.
-void
-scheduler(void)
-{
-  struct proc *p;
-  struct cpu *c = mycpu();
-
-  c->proc = 0;
-  for(;;){
-    // The most recent process to run may have had interrupts
-    // turned off; enable them to avoid a deadlock if all
-    // processes are waiting.
-    intr_on();
-
-    int found = 0;
-    for(p = proc; p < &proc[NPROC]; p++) {
-      spin_acquire(&p->lock);
-      if(p->state == RUNNABLE) {
-        // Switch to chosen process.  It is the process's job
-        // to release its lock and then reacquire it
-        // before jumping back to us.
-        p->state = RUNNING;
-        c->proc = p;
-        p = __switch_to(&c->context, p);
-
-        // Process is done running for now.
-        // It should have changed its p->state before coming back.
-        if (p->state == RUNNING) {
-          panic("scheduler: process still running");
-        }
-        c->proc = 0;
-        found = 1;
-      }
-      spin_release(&p->lock);
-    }
-    if(found == 0) {
-      // nothing to run; stop running on this core until an interrupt.
-      intr_on();
-      asm volatile("wfi");
-    }
-  }
-}
-
-// Switch to scheduler.  Must hold only p->lock
-// and have changed proc->state. Saves and restores
-// intena because intena is a property of this
-// kernel thread, not this CPU. It should
-// be proc->intena and proc->noff, but that would
-// break in the few places where a lock is held but
-// there's no process.
-void
-sched(void)
-{
-  int intena;
-  struct proc *p = myproc();
-
-  assert(spin_holding(&p->lock), "sched called without p->lock held");
-  assert(mycpu()->noff == 1, "sched locks");
-  assert(p->state != RUNNING, "sched running");
-  assert(!intr_get(), "sched interruptible");
-
-  intena = mycpu()->intena;
-  __swtch_context(&p->context, &mycpu()->context, (uint64)p);
-  mycpu()->intena = intena;
-}
-
 // Give up the CPU for one scheduling round.
 void
 yield(void)
 {
-  struct proc *p = myproc();
-  spin_acquire(&p->lock);
-  p->state = RUNNABLE;
-  sched();
-  spin_release(&p->lock);
+  scheduler_yield(NULL);
 }
 
 // A fork child's very first scheduling by scheduler()
@@ -711,8 +621,15 @@ forkret(void)
 {
   STATIC int first = 1;
 
+  // The scheduler will disable interrupts to assure the atomicity of
+  // the scheduler operations. For processes that gave up CPU by calling yield(),
+  //   yield() would restore the previous interruption state when switched back. 
+  // But at here, we need to enable interrupts for the first time.
+  intr_on();
+
   // Still holding p->lock from scheduler.
   spin_release(&myproc()->lock);
+  sched_unlock(); // Release the scheduler lock.
 
   if (first) {
     // File system initialization must be run in the context of a
@@ -733,30 +650,7 @@ forkret(void)
 void
 sleep(void *chan, struct spinlock *lk)
 {
-  struct proc *p = myproc();
-  
-  // Must acquire p->lock in order to
-  // change p->state and then call sched.
-  // Once we hold p->lock, we can be
-  // guaranteed that we won't miss any wakeup
-  // (wakeup locks p->lock),
-  // so it's okay to spin_release lk.
-
-  spin_acquire(&p->lock);  //DOC: sleeplock1
-  spin_release(lk);
-
-  // Go to sleep.
-  p->chan = chan;
-  p->state = SLEEPING;
-
-  sched();
-
-  // Tidy up.
-  p->chan = 0;
-
-  // Reacquire original lock.
-  spin_release(&p->lock);
-  spin_acquire(lk);
+  scheduler_sleep_on_chan(chan, lk);
 }
 
 // Wake up all processes sleeping on chan.
@@ -764,27 +658,7 @@ sleep(void *chan, struct spinlock *lk)
 void
 wakeup(void *chan)
 {
-  struct proc *p = NULL;
-  hlist_entry_t *pos, *tmp;
-  hlist_bucket_t *bucket;
-  int idx;
-
-  __proctab_assert_unlocked();
-  __proctab_lock();
-  hlist_foreach_bucket(&proc_table.procs, idx, bucket)                        \
-    if (!LIST_IS_EMPTY(bucket))                                     \
-    list_foreach_node_safe(bucket, pos, tmp, list_entry)
-  {
-    p = __proctab_hash_get_node(pos);
-    if(p != myproc()){
-      spin_acquire(&p->lock);
-      if(p->state == SLEEPING && p->chan == chan) {
-        p->state = RUNNABLE;
-      }
-      spin_release(&p->lock);
-    }
-  }
-  __proctab_unlock();
+  scheduler_wakeup_on_chan(chan);
 }
 
 // Kill the process with the given pid.
@@ -807,13 +681,10 @@ kill(int pid)
   spin_acquire(&p->lock);
   assert(p->pid == pid, "kill: pid mismatch");
   p->killed = 1;
-  if(p->state == SLEEPING){
-    // Wake process from sleep().
-    p->state = RUNNABLE;
-  }
-
   spin_release(&p->lock);
 
+  // @TODO: if the process is sleeping on a queue
+  scheduler_wakeup_on_chan(p->chan);
 
 ret:
   __proctab_unlock();

@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sched.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -172,7 +173,8 @@ kerneltrap(uint64 sp)
   }
 
   // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2 && myproc() != 0)
+  // Also not to yield if it's scheduling
+  if(which_dev == 2 && myproc() != 0 && !sched_holding())
     yield();
 
   // the yield() may have caused some traps to occur,
@@ -187,7 +189,8 @@ clockintr()
   if(cpuid() == 0){
     spin_acquire(&tickslock);
     ticks++;
-    wakeup(&ticks);
+    if (!sched_holding())
+      wakeup(&ticks);
     spin_release(&tickslock);
   }
 

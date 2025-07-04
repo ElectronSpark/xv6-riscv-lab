@@ -49,6 +49,7 @@ int proc_queue_push(proc_queue_t *q, struct proc *p) {
     list_node_push(&q->head, p, queue_entry.list_entry);
     p->queue_entry.queue = q;
     q->counter++;
+    // printf("pushing process %d to queue %s\n", p->pid, q->name);
 
     return 0; // Success
 }
@@ -71,6 +72,7 @@ int proc_queue_pop(proc_queue_t *q, struct proc **ret_proc) {
     dequeued_proc->queue_entry.queue = NULL;
     q->counter--;
     *ret_proc = dequeued_proc; // Copy the process data
+    // printf("popping process %d from queue %s\n", dequeued_proc->pid, q->name);
 
     return 0; // Success
 }
@@ -91,6 +93,8 @@ int proc_queue_remove(proc_queue_t *q, struct proc *p) {
     list_node_detach(p, queue_entry.list_entry);
     p->queue_entry.queue = NULL;
     q->counter--;
+
+    // printf("removing process %d from queue %s\n", p->pid, q->name);
 
     return 0; // Success
 }

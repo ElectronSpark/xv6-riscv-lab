@@ -229,6 +229,7 @@ virtio_disk_rw(struct buf *b, int write)
     if(alloc3_desc(idx) == 0) {
       break;
     }
+    printf("virtio_disk_rw: no free descriptors, sleeping\n");
     sleep(&disk.free[0], &disk.vdisk_lock);
   }
 
@@ -278,12 +279,15 @@ virtio_disk_rw(struct buf *b, int write)
 
   __sync_synchronize();
 
+  push_off(); // Disable interrupts so that the device send interrupts only
+              // after the scheduler put the process to sleep queue.
   *R(VIRTIO_MMIO_QUEUE_NOTIFY) = 0; // value is queue number
 
   // Wait for virtio_disk_intr() to say request has finished.
   while(b->disk == 1) {
     sleep(b, &disk.vdisk_lock);
   }
+  pop_off();
 
   disk.info[idx[0]].b = 0;
   free_chain(idx[0]);

@@ -8,6 +8,12 @@
 #define proc_queue_foreach_unlocked(q, pos, tmp)   \
     list_foreach_node_safe(&(q)->head, pos, tmp, queue_entry.list_entry)
 
+#define proc_in_queue(__proc, __queue) \
+    (((__proc)->queue_entry.queue == (__queue) &&   \
+      (__queue) != NULL) ||                         \
+     ((__proc)->queue_entry.queue != NULL &&        \
+      (__queue) == NULL))
+
 void proc_queue_init(proc_queue_t *q, const char *name);
 void proc_queue_entry_init(proc_queue_entry_t *entry);
 

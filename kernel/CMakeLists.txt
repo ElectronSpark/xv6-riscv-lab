@@ -28,6 +28,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/sysfile.c
     ${KERNEL_DIR}/plic.c
     ${KERNEL_DIR}/proc_queue.c
+    ${KERNEL_DIR}/sched.c
     ${KERNEL_DIR}/virtio_disk.c
     ${KERNEL_DIR}/backtrace.c
     ${KERNEL_DIR}/e1000.c
