@@ -17,6 +17,37 @@ void kernelvec();
 
 extern int devintr();
 
+static const char *__scause_to_str(uint64 scause)
+{
+  if (scause & 0x8000000000000000) {
+    // Interrupts are negative, exceptions are positive.
+    switch (scause & 0x7FFFFFFFFFFFFFFF) {
+      case 0: return "User software interrupt";
+      case 1: return "Supervisor software interrupt";
+      case 4: return "User timer interrupt";
+      case 5: return "Supervisor timer interrupt";
+      case 8: return "User external interrupt";
+      case 9: return "Supervisor external interrupt";
+      default: return "Unknown interrupt";
+    }
+  }
+  switch (scause) {
+    case 0: return "Instruction address misaligned";
+    case 1: return "Instruction access fault";
+    case 2: return "Illegal instruction";
+    case 3: return "Breakpoint";
+    case 5: return "Load access fault";
+    case 6: return "Store/AMO address misaligned";
+    case 7: return "Store/AMO access fault";
+    case 8: return "Environment call from U-mode";
+    case 9: return "Environment call from S-mode";
+    case 12: return "Instruction page fault";
+    case 13: return "Load page fault";
+    case 15: return "Store/AMO page fault";
+    default: return "Unknown exception";
+  }
+}
+
 void
 trapinit(void)
 {
@@ -123,7 +154,11 @@ usertrapret(void)
   // set up trapframe values that uservec will need when
   // the process next traps into the kernel.
   p->trapframe->kernel_satp = r_satp();         // kernel page table
-  p->trapframe->kernel_sp = p->kstack + PGSIZE; // process's kernel stack
+  // p->trapframe->kernel_sp = p->kstack + PGSIZE; // process's kernel stack
+  uint64 ksp = p->kstack + KERNEL_STACK_SIZE;
+  ksp -= sizeof(struct trapframe) + 8;
+  ksp &= ~0x7UL; // align to 8 bytes
+  p->trapframe->kernel_sp = ksp;
   p->trapframe->kernel_trap = (uint64)usertrap;
   p->trapframe->kernel_hartid = r_tp();         // hartid for cpuid()
 
@@ -149,10 +184,27 @@ usertrapret(void)
   ((void (*)(uint64))trampoline_userret)(satp);
 }
 
+void
+kerneltrap_dump_regs(struct ktrapframe *sp)
+{
+  printf("kerneltrap_dump_regs:\n");
+  printf("ra: 0x%lx, sp: 0x%lx, s0: 0x%lx\n", 
+         sp->ra, sp->sp, sp->s0);
+  printf("tp: 0x%lx, t0: 0x%lx, t1: 0x%lx, t2: 0x%lx\n",
+         sp->tp, sp->t0, sp->t1, sp->t2);
+  printf("a0: 0x%lx, a1: 0x%lx, a2: 0x%lx, a3: 0x%lx\n",
+         sp->a0, sp->a1, sp->a2, sp->a3);
+  printf("a4: 0x%lx, a5: 0x%lx, a6: 0x%lx, a7: 0x%lx\n",
+         sp->a4, sp->a5, sp->a6, sp->a7);
+  printf("t3: 0x%lx, t4: 0x%lx, t5: 0x%lx, t6: 0x%lx\n",
+         sp->t3, sp->t4, sp->t5, sp->t6);
+  printf("gp: 0x%lx\n", sp->gp);
+}
+
 // interrupts and exceptions from kernel code go here via kernelvec,
 // on whatever the current kernel stack is.
 void 
-kerneltrap(uint64 sp)
+kerneltrap(struct ktrapframe *sp, uint64 s0)
 {
   int which_dev = 0;
   uint64 sepc = r_sepc();
@@ -167,8 +219,9 @@ kerneltrap(uint64 sp)
   if((which_dev = devintr()) == 0){
     // interrupt or trap from an unknown source
     // printf("0x%lx 0x%lx\n", sp, s0);
-    printf("scause=0x%lx sepc=0x%lx stval=0x%lx\n", scause, r_sepc(), r_stval());
-    print_backtrace(sp);
+    printf("scause=0x%lx(%s) sepc=0x%lx stval=0x%lx\n", scause, __scause_to_str(scause), r_sepc(), r_stval());
+    print_backtrace((uint64)sp);
+    kerneltrap_dump_regs(sp);
     panic("kerneltrap");
   }
 

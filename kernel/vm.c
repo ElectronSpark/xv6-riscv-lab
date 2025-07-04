@@ -49,8 +49,9 @@ kvmmake(void)
   // map the trampoline for trap entry/exit to
   // the highest virtual address in the kernel.
   kvmmap(kpgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+  printf("trampoline 0x%lx -> %p\n", TRAMPOLINE, trampoline);
 
-  // allocate and map a kernel stack for each process.
+  // // allocate and map a kernel stack for each process.
   proc_mapstacks(kpgtbl);
   
   return kpgtbl;
@@ -95,8 +96,11 @@ walk(pagetable_t pagetable, uint64 va, int alloc)
   if(va >= MAXVA)
     panic("walk");
 
+  assert(pagetable != NULL, "walk: pagetable is null");
+
   for(int level = 2; level > 0; level--) {
     pte_t *pte = &pagetable[PX(level, va)];
+    assert(pte != NULL, "walk: pte is null");
     if(*pte & PTE_V) {
       pagetable = (pagetable_t)PTE2PA(*pte);
     } else {

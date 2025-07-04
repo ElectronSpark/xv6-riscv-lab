@@ -9,12 +9,17 @@
 #include "hlist.h"
 #include "proc_queue.h"
 #include "sched.h"
+#include "slab.h"
+#include "page.h"
 
 #define NPROC_HASH_BUCKETS 31
 
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
+
+static slab_cache_t proc_cache;
+
 struct {
   struct {
     hlist_t procs;
@@ -149,7 +154,6 @@ static int __proctab_add(struct proc *p)
 }
 
 extern void forkret(void);
-STATIC void freeproc_locked(struct proc *p);
 STATIC void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
@@ -163,8 +167,9 @@ struct spinlock wait_lock;
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
 // guard page.
+// @TODO:
 void
-proc_mapstacks(pagetable_t kpgtbl)
+proc_mapkstack(pagetable_t kpgtbl, void *kstack)
 {
   struct proc *p;
 
@@ -175,6 +180,8 @@ proc_mapstacks(pagetable_t kpgtbl)
     kvmmap(kpgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W | PTE_RSW_w);
   }
 }
+
+// @TODO: proc_unmapkstack
 
 // Initialize a proc structure and set it to UNUSED state.
 // Its spinlock and kstack will not be initialized here
@@ -193,6 +200,7 @@ __pcb_init(struct proc *p)
   list_entry_init(&p->siblings);
   list_entry_init(&p->children);
   hlist_entry_init(&p->proctab_entry);
+  spin_init(&p->lock, "proc");
   proc_queue_entry_init(&p->queue_entry);
   memset(p->name, 0, sizeof(p->name));
 }
@@ -201,15 +209,16 @@ __pcb_init(struct proc *p)
 void
 procinit(void)
 {
-  struct proc *p;
+  // struct proc *p;
   
+  slab_cache_init(&proc_cache, "PCB Pool", sizeof(struct proc), SLAB_FLAG_STATIC);
   __proctab_init();
   spin_init(&wait_lock, "wait_lock");
-  for(p = proc; p < &proc[NPROC]; p++) {
-    __pcb_init(p);
-    spin_init(&p->lock, "proc");
-    p->kstack = KSTACK((int) (p - proc));
-  }
+  // for(p = proc; p < &proc[NPROC]; p++) {
+  //   __pcb_init(p);
+  //   spin_init(&p->lock, "proc");
+  //   p->kstack = KSTACK((int) (p - proc));
+  // }
 }
 
 // Must be called with interrupts disabled,
@@ -250,84 +259,87 @@ myproc(void)
 STATIC struct proc*
 allocproc(void)
 {
-  struct proc *p;
-  struct proc* ret_proc = NULL;
+  struct proc *p = NULL;
+  void *kstack = NULL;
 
-  __proctab_lock();
-  for(p = proc; p < &proc[NPROC]; p++) {
-    spin_acquire(&p->lock);
-    if(p->state == UNUSED) {
-      goto found;
-    }
-    spin_release(&p->lock);
+  p = slab_alloc(&proc_cache);
+  if (p == NULL) {
+    return NULL; // No free proc available in the slab cache
   }
 
-  goto ret;
-
-found:
   __pcb_init(p);
-  p->pid = __alloc_pid();
   p->state = USED;
 
   // Allocate a trapframe page.
-  if((p->trapframe = (struct trapframe *)kalloc()) == 0){
-    freeproc_locked(p);
-    spin_release(&p->lock);
-    goto ret;
+  struct trapframe *trapframe = 
+    (struct trapframe *)page_alloc(TRAPFRAME_ORDER, PAGE_FLAG_ANON);
+  if(trapframe == 0){
+    freeproc(p);
+    return NULL;
   }
+  p->trapframe = trapframe;
 
-  // An empty user page table.
+  // Allocate a kernel stack page.
+  kstack = page_alloc(KERNEL_STACK_ORDER, PAGE_FLAG_ANON);
+  if(kstack == NULL){
+    freeproc(p);
+    return NULL;
+  }
+  p->kstack = (uint64)kstack;
+
+  // Allocate pagetable for the process.
   p->pagetable = proc_pagetable(p);
   if(p->pagetable == 0){
-    freeproc_locked(p);
-    spin_release(&p->lock);
-    goto ret;
+    freeproc(p);
+    return NULL;
   }
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
-  p->context.sp = p->kstack + PGSIZE;
-  if (__proctab_add(p) == 0) {
-    ret_proc = p;
-    goto ret;
-  } else {
-    ret_proc = NULL;
-    freeproc_locked(p);
-    spin_release(&p->lock);
-    goto ret;
+  p->context.sp = p->kstack + KERNEL_STACK_SIZE;
+  p->context.sp -= sizeof(struct context) + 8;
+  p->context.sp &= ~0x7UL; // align to 8 bytes
+
+  __proctab_lock();
+  p->pid = __alloc_pid();
+  if (__proctab_add(p) != 0) {
+    freeproc(p);
+    __proctab_unlock();
+    return NULL;
   }
 
-ret:
   __proctab_unlock();
-  return ret_proc;
+  return p;
 }
 
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must be held.
 STATIC void
-freeproc_locked(struct proc *p)
-{
-  assert(spin_holding(&p->lock), "freeproc called without p->lock held");
-  struct proc *existing = hlist_pop(&proc_table.procs, p);
-  assert(existing == NULL || existing == p, "freeproc called with a different proc");
-  if(p->trapframe)
-    kfree((void*)p->trapframe);
-  if(p->pagetable)
-    proc_freepagetable(p->pagetable, p->sz);
-  __pcb_init(p);
-}
-
-STATIC void
 freeproc(struct proc *p)
 {
-  __proctab_assert_unlocked();
   assert(p != NULL, "freeproc called with NULL proc");
+  assert(spin_holding(&p->lock), "freeproc called without p->lock held");
+  assert(p->state != RUNNING, "freeproc called with a running proc");
+  assert(p->state != RUNNABLE, "freeproc called with a runnable proc");
+  assert(p->state != SLEEPING, "freeproc called with a sleeping proc");
+
   __proctab_lock();
-  freeproc_locked(p);
+  struct proc *existing = hlist_pop(&proc_table.procs, p);
   __proctab_unlock();
+
+  assert(existing == NULL || existing == p, "freeproc called with a different proc");
+
+  if(p->trapframe)
+    page_free((void*)p->trapframe, TRAPFRAME_ORDER);
+  if(p->kstack)
+    page_free((void*)p->kstack, KERNEL_STACK_ORDER);
+  if(p->pagetable)
+    proc_freepagetable(p->pagetable, p->sz);
+  
+  slab_free(p);
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -400,6 +412,7 @@ userinit(void)
   
   // allocate one user page and copy initcode's instructions
   // and data into it.
+  spin_acquire(&p->lock);
   uvmfirst(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
 
@@ -450,6 +463,8 @@ fork(void)
   if((np = allocproc()) == 0){
     return -1;
   }
+
+  spin_acquire(&np->lock);
 
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
