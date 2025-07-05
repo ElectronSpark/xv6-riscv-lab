@@ -53,6 +53,13 @@
 #define PHYSTOP (KERNBASE + 128*1024*1024)
 #define TOTALPAGES  ((PHYSTOP - KERNBASE) >> 12)
 
+// We keep the actual highest 1MB of physical memory to store symbols
+#define KERNEL_SYMBOLS_START    PHYSTOP
+#define KERNEL_SYMBOLS_SIZE     0x100000
+#define KERNEL_SYMBOLS_END      (KERNEL_SYMBOLS_START + KERNEL_SYMBOLS_SIZE)
+#define KERNEL_SYMBOLS_IDX_START (KERNEL_SYMBOLS_END + 0x1000)
+#define KERNEL_SYMBOLS_IDX_SIZE (KERNEL_SYMBOLS_SIZE - 0x1000)
+#define KERNEL_SYMBOLS_IDX_END (KERNEL_SYMBOLS_IDX_START + KERNEL_SYMBOLS_IDX_SIZE)
 // map the trampoline page to the highest address,
 // in both user and kernel space.
 #define TRAMPOLINE (MAXVA - PGSIZE)

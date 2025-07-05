@@ -183,7 +183,7 @@ else()
         -machine virt
         -bios none
         -kernel ${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel
-        -m 128M
+        -m 130M
         -smp ${CPUS}
         -nographic
         -global virtio-mmio.force-legacy=false
@@ -192,12 +192,15 @@ else()
         -netdev user,id=net0,hostfwd=udp::${FWDPORT1}-:2000,hostfwd=udp::${FWDPORT2}-:2001
         -object filter-dump,id=net0,netdev=net0,file=packets.pcap
         -device e1000,netdev=net0,bus=pcie.0
+        -device loader,addr=0x88000000,file=${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel.sym,force-raw=on
     )
 
     # Add custom target to run QEMU
     add_custom_target(qemu
         COMMAND ${QEMU} ${QEMUOPTS}
-        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel ${CMAKE_CURRENT_BINARY_DIR}/fs.img
+        DEPENDS kernel/kernel 
+                kernel/kernel.sym
+                fs.img
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         COMMENT "Running QEMU with kernel and fs.img"
     )
@@ -220,7 +223,10 @@ else()
     add_custom_target(qemu-gdb
         COMMAND ${CMAKE_COMMAND} -E echo "*** Now run 'gdb' in another window."
         COMMAND ${QEMU} ${QEMUOPTS} -S ${QEMUGDB}
-        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit ${CMAKE_CURRENT_BINARY_DIR}/fs.img
+        DEPENDS kernel/kernel 
+                kernel/kernel.sym
+                .gdbinit 
+                fs.img
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         COMMENT "Running QEMU with GDB stub"
     )
