@@ -222,6 +222,7 @@ void            virtio_disk_intr(void);
 
 // backtrace.c
 void            print_backtrace(uint64);
+void            ksymbols_init(void);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
