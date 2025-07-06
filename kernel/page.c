@@ -21,6 +21,38 @@ STATIC page_t __pages[TOTALPAGES] = { 0 };
 STATIC uint64 __managed_start = KERNBASE;
 STATIC uint64 __managed_end = PHYSTOP;
 
+
+
+#ifdef KERNEL_PAGE_SANITIZER
+STATIC_INLINE void __page_sanitizer_check(const char *op, page_t *page, uint64 order, uint64 flags) {
+    if (page == NULL) {
+        return;
+    }
+    assert (order <= PAGE_BUDDY_MAX_ORDER, "__page_sanitizer_check: invalid order");
+    assert (!flags || page->flags == flags, 
+            "__page_sanitizer_check: page flags mismatch, expected 0x%lx, got 0x%lx",
+            flags, page->flags);
+    assert (page - __pages <= TOTALPAGES, "__page_sanitizer_check: page out of bounds");
+    assert ((page->physical_address - __managed_start) >> PAGE_SHIFT == 
+            (page - __pages), "__page_sanitizer_check: page physical address mismatch, "
+            "expected 0x%lx, got 0x%lx", 
+            __managed_start + ((page - __pages) << PAGE_SHIFT), 
+            page->physical_address);
+    for (int i = 0; i < (1 << order); i++) {
+        assert (page[i].physical_address == page->physical_address + (i << PAGE_SHIFT),
+                "__page_sanitizer_check: page physical address mismatch, "
+                "expected 0x%lx, got 0x%lx", 
+                page->physical_address + (i << PAGE_SHIFT), 
+                page[i].physical_address);
+    }
+    printf("%s: order %ld, flags 0x%lx, page 0x%lx\n",
+           op, order, 0L, __page_to_pa(page));
+}
+#else
+#define __page_sanitizer_check(op, page, order, flags) do { } while (0)
+#endif
+
+
 // acquire the spinlock of a buddy pool
 STATIC_INLINE void __buddy_pool_lock(buddy_pool_t *pool) {
     spin_acquire(&pool->lock);
@@ -440,6 +472,9 @@ int page_buddy_init(uint64 pa_start, uint64 pa_end) {
     }
 #ifndef HOST_TEST
     print_buddy_system_stat();
+    printf("page_buddy_init(): buddy pages from 0x%lx to 0x%lx\n"
+           "    managed pages from 0x%lx to 0x%lx\n",
+           pa_start, pa_end, __managed_start, __managed_end);
 #endif
 
     return 0;
@@ -476,12 +511,15 @@ page_t *__page_alloc(uint64 order, uint64 flags) {
     if (order > PAGE_BUDDY_MAX_ORDER) {
         return NULL;
     }
-    return __buddy_get(order, flags);
+    page_t *ret = __buddy_get(order, flags);
+    __page_sanitizer_check("page_alloc", ret, order, flags);
+    return ret;
 }
 
 // the base address of the page should be aligned to order
 // otherwise panic
 void __page_free(page_t *page, uint64 order) {
+    __page_sanitizer_check("page_free", page, order, 0);
     uint64 count = 1UL << order;
     if (page == NULL) {
         return;

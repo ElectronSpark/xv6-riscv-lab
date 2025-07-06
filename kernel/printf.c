@@ -59,6 +59,14 @@ printptr(uint64 x)
     consputc(digits[x >> (sizeof(uint64) * 8 - 4)]);
 }
 
+STATIC void
+print_padding(int len)
+{
+  for (int i = 0; i < len; i++) {
+    consputc(' ');
+  }
+}
+
 // Print to the console.
 int
 printf(char *fmt, ...)
@@ -81,6 +89,13 @@ printf(char *fmt, ...)
     c0 = fmt[i+0] & 0xff;
     c1 = c2 = 0;
     if(c0) c1 = fmt[i+1] & 0xff;
+    if(c0 && c1 && c0 == '*' && c1 == 's'){
+      int len = va_arg(ap, int);
+      print_padding(len);
+      i++;
+      c0 = c1;
+      c1 = fmt[i+1] & 0xff;
+    }
     if(c1) c2 = fmt[i+2] & 0xff;
     if(c0 == 'd'){
       printint(va_arg(ap, int), 10, 1);
