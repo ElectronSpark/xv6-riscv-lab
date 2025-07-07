@@ -541,7 +541,7 @@ void __page_free(page_t *page, uint64 order) {
 // address of the page
 void *page_alloc(uint64 order, uint64 flags) {
     void *pa;
-    page_t *page = __page_alloc(0, flags);
+    page_t *page = __page_alloc(order, flags);
     if (page == NULL) {
         return NULL;
     }
@@ -591,6 +591,7 @@ int __page_ref_inc(page_t *page) {
 
 int __page_ref_dec(page_t *page) {
     int ret = 0;
+    __page_sanitizer_check("__page_ref_dec", page, 0, 0);
     if (page == NULL) {
         return -1;
     }
@@ -600,6 +601,7 @@ int __page_ref_dec(page_t *page) {
     }
     page_lock_release(page);
     if (ret == 0) {
+        __page_sanitizer_check("page_free", page, 0, 0);
         if (__buddy_put(page) != 0) {
             panic("page_ref_dec");
         }

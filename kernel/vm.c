@@ -140,8 +140,8 @@ dump_pagetable(pagetable_t pagetable, int level, int indent, uint64 va_base, uin
           const char *str_rsw = (chunk_flags & PTE_RSW_w) ? "C" : " ";
           
           if (chunk_count == 1) {
-            printf("%*sPTE[%d]: %lx(%s%s%s%s%s%s), (va, pa): (%p, %p)\n", 
-                    indent, "", chunk_start, chunk_flags & ~PTE_V,
+            printf("%*sPTE[%d](%p): %lx(%s%s%s%s%s%s), (va, pa): (%p, %p)\n", 
+                    indent, "", chunk_start, &pagetable[i], chunk_flags & ~PTE_V,
                     str_v, str_u, str_w, str_x, str_r, str_rsw,
                     (void *)chunk_va_start, (void *)chunk_pa_start);
           } else {
@@ -184,8 +184,8 @@ dump_pagetable(pagetable_t pagetable, int level, int indent, uint64 va_base, uin
         const char *str_x = (pte & PTE_X) ? "X" : " ";
         const char *str_r = (pte & PTE_R) ? "R" : " ";
         const char *str_rsw = (pte & PTE_RSW_w) ? "C" : " ";
-        printf("%*sPTE[%d]: %x(%s%s%s%s%s%s), (va, pa): (%p, %p)", 
-                indent, "", i, (uint32)PTE_FLAGS(pte),
+        printf("%*sPTE[%d](%p): %x(%s%s%s%s%s%s), (va, pa): (%p, %p)", 
+                indent, "", i, &pagetable[i], (uint32)PTE_FLAGS(pte),
                 str_v, str_u, str_w, str_x, str_r, str_rsw,
                 (void *)va, pa);
         if (level > 0 && PTE_FLAGS(pte) == PTE_V) {
