@@ -10,6 +10,16 @@
 #include "slab.h"
 #include "slab_private.h"
 
+#ifdef KERNEL_PAGE_SANITIZER
+STATIC_INLINE void __slab_sanitizer_check(const char *op ,slab_cache_t *cache, slab_t *slab, 
+                                          void *obj) {
+    printf("%s: cache \"%s\" (%p), obj 0x%lx, size: %ld\n", 
+           op, cache->name, cache, (uint64)obj, cache->obj_size);
+}
+#else
+#define __slab_sanitizer_check(op, page, order, flags) do { } while (0)
+#endif
+
 // create a detached SLAB and initialize its objects
 // return the SLAB created if success
 // return NULL if failed
@@ -516,6 +526,7 @@ void *slab_alloc(slab_cache_t *cache) {
     __slab_enqueue(cache, slab);
 done:
     __slab_cache_unlock(cache);
+    __slab_sanitizer_check("slab_alloc", cache, slab, obj);
     return obj;
 }
 
@@ -527,6 +538,7 @@ void slab_free(void *obj) {
     int tmp;
     slab = __find_obj_slab(obj);
     if (obj == NULL) {
+        printf("slab_free(): obj is NULL\n");
         return;
     }
     cache = slab->cache;
@@ -546,4 +558,5 @@ void slab_free(void *obj) {
         }
     }
     __slab_cache_unlock(cache);
+    __slab_sanitizer_check("slab_free", cache, slab, obj);
 }

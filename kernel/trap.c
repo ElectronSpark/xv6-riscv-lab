@@ -71,6 +71,8 @@ usertrap(void)
   int which_dev = 0;
   uint64 fault_no, va;
   pagetable_t pagetable;
+  // printf("usertrap: scause=0x%lx (%s), sepc=0x%lx, stval=0x%lx\n",
+  //        r_scause(), __scause_to_str(r_scause()), r_sepc(), r_stval());
 
   if((r_sstatus() & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
@@ -176,6 +178,10 @@ usertrapret(void)
 
   // tell trampoline.S the user page table to switch to.
   uint64 satp = MAKE_SATP(p->pagetable);
+
+  // printf("user pagetable before usertrapret:\n");
+  // dump_pagetable(p->pagetable, 2, 0, 0, 0, true);
+  // printf("\n");
 
   // jump to userret in trampoline.S at the top of memory, which 
   // switches to the user page table, restores user registers,

@@ -74,6 +74,12 @@ execute_process(
 )
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${FNO_STACK_PROTECTOR}")
 
+if(NOT $ENV{KMM_SANITIZE_CHECK} STREQUAL "")
+    message(STATUS "KMM_SANITIZE_CHECK is set to: $ENV{KMM_SANITIZE_CHECK}")
+    set(XCFLAGS "${XCFLAGS} -DKERNEL_PAGE_SANITIZER=1")
+endif()
+
+
 if(NOT $ENV{LAB} STREQUAL "")
     execute_process(
         COMMAND bash -c "echo $ENV{LAB} | tr a-z A-Z"
@@ -81,9 +87,12 @@ if(NOT $ENV{LAB} STREQUAL "")
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
     set(XCFLAGS "${XCFLAGS} -DSOL_${LABUPPER} -DLAB_${LABUPPER}")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${XCFLAGS}")
     message("In lab: ${LABUPPER}")
+else()
+    message(FATAL_ERROR "Environment variable LAB is not set")
 endif()
+
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${XCFLAGS}")
 
 add_subdirectory(kernel)
 add_subdirectory(user)

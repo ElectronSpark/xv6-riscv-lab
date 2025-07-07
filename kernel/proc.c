@@ -406,6 +406,13 @@ userinit(void)
   struct proc *p;
 
   p = allocproc();
+  assert(p != NULL, "userinit: allocproc failed");
+
+  // // printf user pagetable
+  // printf("\nuser pagetable after allocproc:\n");
+  // dump_pagetable(p->pagetable, 2, 0, 0, 0, false);
+  // printf("\n");
+
   __proctab_lock();
   __proctab_set_initproc(p);
   __proctab_unlock();
@@ -415,6 +422,10 @@ userinit(void)
   spin_acquire(&p->lock);
   uvmfirst(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+
+  // printf("\nuser pagetable after uvmfirst:\n");
+  // dump_pagetable(p->pagetable, 2, 0, 0, 0, false);
+  // printf("\n");
 
   // prepare for the very first "return" from kernel to user.
   p->trapframe->epc = 0;      // user program counter

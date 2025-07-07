@@ -68,6 +68,7 @@ void
 kvminit(void)
 {
   kernel_pagetable = kvmmake();
+  
 }
 
 // Switch h/w page table register to the kernel's page table,
@@ -84,6 +85,121 @@ kvminithart()
   sfence_vma();
 }
 
+void 
+dump_pagetable(pagetable_t pagetable, int level, int indent, uint64 va_base, uint64 va_end, bool omit_pa)
+{
+  if (level < 0 || level > 2) {
+    printf("Invalid level %d for pagetable dump\n", level);
+    return;
+  }
+
+  int idx_start = 0;
+  int idx_end = 512;
+  idx_start = PX(2, va_base);
+  if (level == 2 && va_end != 0){
+    idx_end = PX(2, va_end);
+  }
+
+  if (level == 0) {
+    // Leaf level - print in chunks
+    int chunk_start = -1;
+    uint64 chunk_va_start = 0;
+    uint64 chunk_pa_start = 0;
+    uint32 chunk_flags = 0;
+    int chunk_count = 0;
+
+    for (int i = idx_start; i <= idx_end; i++) {
+      pte_t pte = (i < idx_end) ? pagetable[i] : 0;
+      uint64 va = va_base | (((uint64)i) << 12);
+      uint64 pa = PTE2PA(pte);
+      uint32 flags = PTE_FLAGS(pte) | ((pte & PTE_RSW_w) ? PTE_V : 0);
+      
+      bool valid_entry = (i < idx_end) && (pte & (PTE_V | PTE_RSW_w)) && 
+                        !(omit_pa && va >= KERNBASE && va < PHYSTOP);
+      
+      if (valid_entry && chunk_start == -1) {
+        // Start new chunk
+        chunk_start = i;
+        chunk_va_start = va;
+        chunk_pa_start = pa;
+        chunk_flags = flags;
+        chunk_count = 1;
+      } else if (valid_entry && chunk_start != -1 && 
+                 pa == chunk_pa_start + (chunk_count * PGSIZE) &&
+                 flags == chunk_flags) {
+        // Continue chunk
+        chunk_count++;
+      } else {
+        // End current chunk and print it
+        if (chunk_start != -1) {
+          const char *str_v = (chunk_flags & PTE_V) ? "V" : " ";
+          const char *str_u = (chunk_flags & PTE_U) ? "U" : " ";
+          const char *str_w = (chunk_flags & PTE_W) ? "W" : " ";
+          const char *str_x = (chunk_flags & PTE_X) ? "X" : " ";
+          const char *str_r = (chunk_flags & PTE_R) ? "R" : " ";
+          const char *str_rsw = (chunk_flags & PTE_RSW_w) ? "C" : " ";
+          
+          if (chunk_count == 1) {
+            printf("%*sPTE[%d]: %lx(%s%s%s%s%s%s), (va, pa): (%p, %p)\n", 
+                    indent, "", chunk_start, chunk_flags & ~PTE_V,
+                    str_v, str_u, str_w, str_x, str_r, str_rsw,
+                    (void *)chunk_va_start, (void *)chunk_pa_start);
+          } else {
+            printf("%*sPTE[%d-%d]: %lx(%s%s%s%s%s%s), (va, pa): (%p-%p, %p-%p) [%d pages]\n", 
+                    indent, "", chunk_start, chunk_start + chunk_count - 1, 
+                    chunk_flags & ~PTE_V, str_v, str_u, str_w, str_x, str_r, str_rsw,
+                    (void *)chunk_va_start, 
+                    (void *)(chunk_va_start + (chunk_count - 1) * PGSIZE),
+                    (void *)chunk_pa_start, 
+                    (void *)(chunk_pa_start + (chunk_count - 1) * PGSIZE),
+                    chunk_count);
+          }
+        }
+        
+        // Start new chunk if current entry is valid
+        if (valid_entry) {
+          chunk_start = i;
+          chunk_va_start = va;
+          chunk_pa_start = pa;
+          chunk_flags = flags;
+          chunk_count = 1;
+        } else {
+          chunk_start = -1;
+        }
+      }
+    }
+  } else {
+    // Non-leaf level - recurse normally
+    for (int i = idx_start; i < idx_end; i++) {
+      pte_t pte = pagetable[i];
+      if (pte & (PTE_V | PTE_RSW_w)) {
+        uint64 va = va_base | (((uint64)i) << (12 + 9 * level));
+        if (omit_pa && va >= KERNBASE && va < PHYSTOP) {
+          continue;
+        }
+        void *pa = (void *)PTE2PA(pte);
+        const char *str_v = (pte & PTE_V) ? "V" : " ";
+        const char *str_u = (pte & PTE_U) ? "U" : " ";
+        const char *str_w = (pte & PTE_W) ? "W" : " ";
+        const char *str_x = (pte & PTE_X) ? "X" : " ";
+        const char *str_r = (pte & PTE_R) ? "R" : " ";
+        const char *str_rsw = (pte & PTE_RSW_w) ? "C" : " ";
+        printf("%*sPTE[%d]: %x(%s%s%s%s%s%s), (va, pa): (%p, %p)", 
+                indent, "", i, (uint32)PTE_FLAGS(pte),
+                str_v, str_u, str_w, str_x, str_r, str_rsw,
+                (void *)va, pa);
+        if (level > 0 && PTE_FLAGS(pte) == PTE_V) {
+          // This is a page table pointer.
+          printf(":\n");
+          dump_pagetable((pagetable_t)pa, level - 1, indent + 2, va, 0, omit_pa);
+        } else {
+          printf("\n");
+        }
+      }
+    }
+  }
+}
+
 // Return the address of the PTE in page table pagetable
 // that corresponds to virtual address va.  If alloc!=0,
 // create any required page-table pages.
@@ -98,10 +214,8 @@ kvminithart()
 //    0..11 -- 12 bits of byte offset within the page.
 pte_t *
 walk(pagetable_t pagetable, uint64 va, int alloc)
-{
-  if(va >= MAXVA)
-    panic("walk");
-
+{//TODO: print out page table
+  assert(va < MAXVA, "walk: va out of range");
   assert(pagetable != NULL, "walk: pagetable is null");
 
   for(int level = 2; level > 0; level--) {
