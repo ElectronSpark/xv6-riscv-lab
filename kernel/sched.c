@@ -117,6 +117,7 @@ void scheduler_run(void) {
         }
 
         spin_acquire(&p->lock);
+        // printf("Switching to process: %s (pid: %d)\n", p->name, p->pid);
         struct proc *prev = __switch_to(p);
         if (prev->state == RUNNING) {
             prev->state = RUNNABLE; // If we returned to a RUNNING process, set it to RUNNABLE
@@ -128,6 +129,7 @@ void scheduler_run(void) {
                 panic("Failed to push process back to sleep queue");
             }
         }
+        // printf("Scheduler returned to a %s process: %s (pid: %d)\n", procstate_to_str(prev->state), prev->name, prev->pid);
         spin_release(&p->lock);
         sched_unlock();
         intr_on();  // Enable interrupts after the scheduling operation
@@ -188,6 +190,7 @@ static void __scheduler_wakeup_locked(struct proc *p) {
     __sched_assert_locked();
     assert(p != NULL, "Cannot wake up a NULL process");
     assert(!spin_holding(&p->lock), "Process lock must not be held before waking up");
+    push_off(); // Disable interrupts to keep the atomicity of the scheduling operation
     spin_acquire(&p->lock);
     assert(p->state == SLEEPING || p->state == PROC_INITIALIZED, 
            "Process must be SLEEPING or PROC_INITIALIZED to wake up");
@@ -199,8 +202,9 @@ static void __scheduler_wakeup_locked(struct proc *p) {
     if (proc_queue_push(&ready_queue, p) != 0) {
         panic("Failed to push process to ready queue");
     }
-
+    
     spin_release(&p->lock);
+    pop_off(); // Re-enable interrupts
 }
 
 void scheduler_wakeup(struct proc *p) {
@@ -216,6 +220,7 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
     assert(!spin_holding(&proc->lock), "Cannot sleep with process lock held");
     assert(chan != NULL, "Cannot sleep on a NULL channel");
 
+    push_off(); // Disable interrupts to keep the atomicity of the scheduling operation
     spin_acquire(&proc->lock);
     int lk_holding = 0;
     if (lk != NULL) {
@@ -230,6 +235,7 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
     spin_release(&proc->lock);
 
     scheduler_yield(NULL); // Switch to the scheduler
+    pop_off(); // Re-enable interrupts
 
     if (lk != NULL && lk_holding) {
         spin_acquire(lk); // Acquire the lock if it was held

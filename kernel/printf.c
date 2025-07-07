@@ -17,6 +17,12 @@
 
 volatile int panicked = 0;
 
+int
+panic_state(void)
+{
+  return panicked;
+}
+
 // lock to avoid interleaving concurrent printf's.
 STATIC struct {
   struct spinlock lock;

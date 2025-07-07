@@ -115,6 +115,19 @@ struct ktrapframe {
 
 enum procstate { UNUSED, USED, PROC_INITIALIZED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+static inline const char *procstate_to_str(enum procstate state) {
+  switch (state) {
+    case UNUSED: return "UNUSED";
+    case USED: return "USED";
+    case PROC_INITIALIZED: return "PROC_INITIALIZED";
+    case SLEEPING: return "SLEEPING";
+    case RUNNABLE: return "RUNNABLE";
+    case RUNNING: return "RUNNING";
+    case ZOMBIE: return "ZOMBIE";
+    default: return "UNKNOWN";
+  }
+}
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -123,6 +136,7 @@ struct proc {
   enum procstate state;        // Process state
   void *chan;                  // If non-zero, sleeping on chan
   proc_queue_entry_t queue_entry;     // Entry in a process queue
+  list_node_t dmp_list_entry;  // Entry in the dump list
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
@@ -131,6 +145,7 @@ struct proc {
   // wait_lock must be held when using this:
   list_node_t siblings;       // List of sibling processes
   list_node_t children;       // List of child processes
+  int children_count;         // Number of children
   struct proc *parent;        // Parent process
 
   // these are private to the process, so p->lock need not be held.

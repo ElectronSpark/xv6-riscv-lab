@@ -93,6 +93,7 @@ int             pipewrite(struct pipe*, uint64, int);
 int             printf(char*, ...) __attribute__ ((format (printf, 1, 2)));
 void            __panic_start(void);
 void            __panic_end(void) __attribute__((noreturn));
+int             panic_state(void);
 #define __panic(type, fmt, ...) \
     do { \
         __panic_start(); \
@@ -222,7 +223,7 @@ void            virtio_disk_rw(struct buf *, int);
 void            virtio_disk_intr(void);
 
 // backtrace.c
-void            print_backtrace(uint64);
+void            print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end);
 void            ksymbols_init(void);
 
 // number of elements in fixed-size array

@@ -16,7 +16,13 @@
 
 struct cpu cpus[NCPU];
 
-struct proc proc[NPROC];
+// Lock order for proc:
+// 1. proc table lock
+// 2. parent pcb lock
+// 3. target pcb lock
+// 4. children pcb lock
+
+STATIC int __killed_locked(struct proc *p);
 
 static slab_cache_t proc_cache;
 
@@ -25,6 +31,7 @@ struct {
     hlist_t procs;
     hlist_bucket_t buckets[NPROC_HASH_BUCKETS];
   };
+  list_node_t procs_list; // List of all processes, for dumping
   struct proc *initproc;
   int nextpid;
   struct spinlock pid_lock;
@@ -145,6 +152,8 @@ static int __proctab_add(struct proc *p)
 {
   __proctab_assert_locked();
   assert(p != NULL, "NULL proc passed to __proctab_add");
+  assert(LIST_ENTRY_IS_DETACHED(&p->dmp_list_entry),
+         "Process %d is already in the dump list", p->pid);
 
   struct proc *existing = hlist_put(&proc_table.procs, p);
 
@@ -158,28 +167,22 @@ STATIC void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
-// helps ensure that wakeups of wait()ing
-// parents are not lost. helps obey the
-// memory model when using p->parent.
-// must be acquired before any p->lock.
-struct spinlock wait_lock;
-
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
 // guard page.
 // @TODO:
-void
-proc_mapkstack(pagetable_t kpgtbl, void *kstack)
-{
-  struct proc *p;
+// void
+// proc_mapkstack(pagetable_t kpgtbl, void *kstack)
+// {
+//   struct proc *p;
 
-  for(p = proc; p < &proc[NPROC]; p++) {
-    char *pa = kalloc();
-    assert(pa != 0, "kalloc failed for proc stack");
-    uint64 va = KSTACK((int) (p - proc));
-    kvmmap(kpgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W | PTE_RSW_w);
-  }
-}
+//   for(p = proc; p < &proc[NPROC]; p++) {
+//     char *pa = kalloc();
+//     assert(pa != 0, "kalloc failed for proc stack");
+//     uint64 va = KSTACK((int) (p - proc));
+//     kvmmap(kpgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W | PTE_RSW_w);
+//   }
+// }
 
 // @TODO: proc_unmapkstack
 
@@ -197,6 +200,8 @@ __pcb_init(struct proc *p)
   p->sz = 0;
   p->pagetable = 0;
   p->trapframe = 0;
+  list_entry_init(&p->dmp_list_entry);
+  p->children_count = 0;
   list_entry_init(&p->siblings);
   list_entry_init(&p->children);
   hlist_entry_init(&p->proctab_entry);
@@ -213,12 +218,6 @@ procinit(void)
   
   slab_cache_init(&proc_cache, "PCB Pool", sizeof(struct proc), SLAB_FLAG_STATIC);
   __proctab_init();
-  spin_init(&wait_lock, "wait_lock");
-  // for(p = proc; p < &proc[NPROC]; p++) {
-  //   __pcb_init(p);
-  //   spin_init(&p->lock, "proc");
-  //   p->kstack = KSTACK((int) (p - proc));
-  // }
 }
 
 // Must be called with interrupts disabled,
@@ -254,7 +253,7 @@ myproc(void)
 
 // Look in the process table for an UNUSED proc.
 // If found, initialize state required to run in the kernel,
-// and return with p->lock held.
+// and return without p->lock held.
 // If there are no free procs, or a memory allocation fails, return 0.
 STATIC struct proc*
 allocproc(void)
@@ -277,6 +276,7 @@ allocproc(void)
     freeproc(p);
     return NULL;
   }
+  memset(trapframe, 0, TRAPFRAME_SIZE);
   p->trapframe = trapframe;
 
   // Allocate a kernel stack page.
@@ -285,6 +285,7 @@ allocproc(void)
     freeproc(p);
     return NULL;
   }
+  memset(kstack, 0, KERNEL_STACK_SIZE);
   p->kstack = (uint64)kstack;
 
   // Allocate pagetable for the process.
@@ -328,6 +329,8 @@ freeproc(struct proc *p)
 
   __proctab_lock();
   struct proc *existing = hlist_pop(&proc_table.procs, p);
+  // Remove from the global list of processes for dumping.
+  list_entry_detach(&p->dmp_list_entry);
   __proctab_unlock();
 
   assert(existing == NULL || existing == p, "freeproc called with a different proc");
@@ -461,6 +464,47 @@ growproc(int n)
   return 0;
 }
 
+// attach a newly forked process to the current process as its child.
+// This function is called by fork() to set up the parent-child relationship.
+// caller must hold the lock of its process (the parent) and the lock of the new process (the child).
+void
+attach_child(struct proc *parent, struct proc *child)
+{
+  assert(parent != NULL, "attach_child: parent is NULL");
+  assert(child != NULL, "attach_child: child is NULL");
+  assert(child != __proctab_get_initproc(), "attach_child: child is init process");
+  assert(spin_holding(&parent->lock), "attach_child: parent lock not held");
+  assert(spin_holding(&child->lock), "attach_child: child lock not held");
+  assert(LIST_ENTRY_IS_DETACHED(&child->siblings), "attach_child: child is attached to a parent");
+  assert(child->parent == NULL, "attach_child: child has a parent");
+
+  // Attach the child to the parent.
+  child->parent = parent;
+  list_entry_push(&parent->children, &child->siblings);
+  parent->children_count++;
+}
+
+void
+detach_child(struct proc *parent, struct proc *child)
+{
+  assert(parent != NULL, "detach_child: parent is NULL");
+  assert(child != NULL, "detach_child: child is NULL");
+  assert(spin_holding(&parent->lock), "detach_child: parent lock not held");
+  assert(spin_holding(&child->lock), "detach_child: child lock not held");
+  assert(parent->children_count > 0, "detach_child: parent has no children");
+  assert(!LIST_IS_EMPTY(&child->siblings), "detach_child: child is not a sibling of parent");
+  assert(!LIST_ENTRY_IS_DETACHED(&child->siblings), "detach_child: child is already detached");
+  assert(child->parent == parent, "detach_child: child is not a child of parent");
+
+  // Detach the child from the parent.
+  list_entry_detach(&child->siblings);
+  parent->children_count--;
+  child->parent = NULL;
+
+  assert(parent-> children_count > 0 || LIST_IS_EMPTY(&parent->children),
+         "detach_child: parent has no children after detaching child");
+}
+
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
 int
@@ -504,13 +548,12 @@ fork(void)
 
   spin_release(&np->lock);
 
-  spin_acquire(&wait_lock);
-  np->parent = p;
-  spin_release(&wait_lock);
-
+  spin_acquire(&p->lock);
   spin_acquire(&np->lock);
+  attach_child(p, np);
   np->state = PROC_INITIALIZED;
   spin_release(&np->lock);
+  spin_release(&p->lock);
 
   scheduler_wakeup(np);
 
@@ -518,24 +561,44 @@ fork(void)
 }
 
 // Pass p's abandoned children to init.
-// Caller must hold wait_lock.
 // Caller must not hold p->lock.
 void
 reparent(struct proc *p)
 {
-  struct proc *pp;
+  struct proc *pp = NULL;
+  struct proc *child, *tmp;
   bool found = false;
 
-  __proctab_assert_unlocked();
-  __proctab_lock();
-  for(pp = proc; pp < &proc[NPROC]; pp++){
-    if(pp->parent == p)
-      found = true;
+  spin_acquire(&p->lock);
+  do {
+    pp = p->parent;
+    spin_release(&p->lock);
+    if (pp == NULL) {
+      // No parent, nothing to do.
+      assert(p == __proctab_get_initproc(), "reparent: no parent and not init");
+      return;
+    }
+    // parent must be held before acquiring p->lock.
+    spin_acquire(&pp->lock);
+    spin_acquire(&p->lock);
+  } while (p->parent != pp);  // in case p->parent changed while we were acquiring locks
+  
+  list_foreach_node_safe(&p->children, child, tmp, siblings) {
+    // make sure the child isn't still in exit() or swtch().
+    spin_acquire(&child->lock);
+    detach_child(p, child);
+    attach_child(pp, child);
+    spin_release(&child->lock);
   }
-  __proctab_unlock();
 
+  spin_release(&p->lock);
+  spin_release(&pp->lock);
+
+  assert(!spin_holding(&p->lock), "reparent: p->lock is still held");
+  assert(!spin_holding(&pp->lock), "reparent: pp->lock is still held");
+  
   if (found)
-    wakeup(__proctab_get_initproc());
+    wakeup(pp);
 }
 
 // Exit the current process.  Does not return.
@@ -545,7 +608,9 @@ void
 exit(int status)
 {
   struct proc *p = myproc();
+  struct inode *cwd = NULL;
 
+  spin_acquire(&p->lock);
   assert(p != proc_table.initproc, "init exiting");
 
   // Close all open files.
@@ -556,28 +621,26 @@ exit(int status)
       p->ofile[fd] = 0;
     }
   }
+  cwd = p->cwd;
+  p->cwd = 0;
+  spin_release(&p->lock);
 
   begin_op();
-  iput(p->cwd);
+  iput(cwd);
   end_op();
-  p->cwd = 0;
-
-  spin_acquire(&wait_lock);
 
   // Give any children to init.
   reparent(p);
 
   // Parent might be sleeping in wait().
   wakeup(p->parent);
-  
-  spin_acquire(&p->lock);
 
+  spin_acquire(&p->lock);
   p->xstate = status;
   p->state = ZOMBIE;
-
   spin_release(&p->lock);
 
-  spin_release(&wait_lock);
+  assert(!spin_holding(&p->lock), "exit: p->lock is still held");
 
   // Jump into the scheduler, never to return.
   scheduler_yield(0);
@@ -589,48 +652,49 @@ exit(int status)
 int
 wait(uint64 addr)
 {
-  struct proc *pp;
-  int havekids, pid;
+  int pid;
   struct proc *p = myproc();
+  struct proc *child, *tmp;
 
-  spin_acquire(&wait_lock);
-
+  spin_acquire(&p->lock);
   for(;;){
     // Scan through table looking for exited children.
-    havekids = 0;
-    for(pp = proc; pp < &proc[NPROC]; pp++){
-      if(pp->parent == p){
-        // make sure the child isn't still in exit() or swtch().
-        spin_acquire(&pp->lock);
-
-        havekids = 1;
-        if(pp->state == ZOMBIE){
-          // Found one.
-          pid = pp->pid;
-          if(addr != 0 && copyout(p->pagetable, addr, (char *)&pp->xstate,
-                                  sizeof(pp->xstate)) < 0) {
-            spin_release(&pp->lock);
-            spin_release(&wait_lock);
-            return -1;
-          }
-          freeproc(pp);
-          spin_release(&pp->lock);
-          spin_release(&wait_lock);
-          return pid;
+    list_foreach_node_safe(&p->children, child, tmp, siblings) {
+      // make sure the child isn't still in exit() or swtch().
+      spin_acquire(&child->lock);
+      if(child->state == ZOMBIE){
+        // Found one.
+        pid = child->pid;
+        if(addr != 0 && copyout(p->pagetable, addr, (char *)&child->xstate,
+                                    sizeof(child->xstate)) < 0) {
+          spin_release(&child->lock);
+          pid = -1;
+          goto ret;
         }
-        spin_release(&pp->lock);
+        detach_child(p, child);
+        freeproc(child);
+        // spin_release(&child->lock); // pcb has been freed
+        pid = child->pid;
+        goto ret;
       }
+      spin_release(&child->lock);
     }
 
     // No point waiting if we don't have any children.
-    if(!havekids || killed(p)){
-      spin_release(&wait_lock);
-      return -1;
+    if(p->children_count == 0 || __killed_locked(p)){
+      pid = -1;
+      goto ret;
     }
     
     // Wait for a child to exit.
-    sleep(p, &wait_lock);  //DOC: wait-sleep
+    spin_release(&p->lock);
+    sleep(p, NULL);  //DOC: wait-sleep
+    spin_acquire(&p->lock);
   }
+
+ret:
+  spin_release(&p->lock);
+  return pid;
 }
 
 // Give up the CPU for one scheduling round.
@@ -725,13 +789,22 @@ setkilled(struct proc *p)
   spin_release(&p->lock);
 }
 
+STATIC int
+__killed_locked(struct proc *p)
+{
+  // This function is used when we don't hold p->lock.
+  // It is not safe to call this function if p->lock is held.
+  assert(spin_holding(&p->lock), "killed_locked called without p->lock held");
+  return p->killed;
+}
+
 int
 killed(struct proc *p)
 {
   int k;
   
   spin_acquire(&p->lock);
-  k = p->killed;
+  k = __killed_locked(p);
   spin_release(&p->lock);
   return k;
 }
@@ -780,18 +853,36 @@ procdump(void)
   [RUNNING]   "run   ",
   [ZOMBIE]    "zombie"
   };
-  struct proc *p;
+  struct proc *p, *tmp;
   char *state;
+  int _panic_state = panic_state();
 
   printf("\n");
-  for(p = proc; p < &proc[NPROC]; p++){
-    if(p->state == UNUSED)
+  if (!_panic_state)
+  {
+    __proctab_lock();
+  }
+
+  list_foreach_node_safe(&proc_table.procs_list, p, tmp, dmp_list_entry) {
+    spin_acquire(&p->lock);
+    enum procstate pstate = p->state;
+    int pid = p->pid;
+    char name[sizeof(p->name)];
+    safestrcpy(name, p->name, sizeof(name));
+    spin_release(&p->lock);
+
+    if (pstate == UNUSED)
       continue;
-    if(p->state >= 0 && p->state < NELEM(states) && states[p->state])
-      state = states[p->state];
+    if (pstate >= 0 && pstate < NELEM(states) && states[pstate])
+      state = states[pstate];
     else
       state = "???";
-    printf("%d %s %s", p->pid, state, p->name);
+    printf("%d %s %s", pid, state, name);
     printf("\n");
+  }
+
+  if (!_panic_state)
+  {
+    __proctab_unlock();
   }
 }

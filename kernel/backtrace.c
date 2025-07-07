@@ -163,25 +163,39 @@ found:
     return (void *)addr - __ksymbols[found_idx].addr;
 }
 
-#define BT_FRAME_TOP(__fp)          (*(uint64 *)((uint64)(__fp) - 16))
-#define BT_RETURN_ADDRESS(__fp)     (*(uint64 *)((uint64)(__fp) - 8))
-#define BT_IS_TOP_FRAME(__fp)       ((uint64)(__fp) == PGROUNDDOWN((uint64)(__fp)))
+#define BT_FRAME_TOP(__fp)          ((__fp) ? *(uint64 *)((uint64)(__fp) - 16) : 0)
+#define BT_RETURN_ADDRESS(__fp)     ((__fp) ? *(uint64 *)((uint64)(__fp) - 8) : 0)
+#define BT_IS_TOP_FRAME(__fp)       (!(uint64)(__fp) && (uint64)(__fp) == PGROUNDDOWN((uint64)(__fp)))
 
 void
-print_backtrace(uint64 context)
+print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end)
 {
     printf("backtrace:\n");
-    for (uint64 fp = BT_FRAME_TOP(context);
-         !BT_IS_TOP_FRAME(fp); 
-         fp = BT_FRAME_TOP(fp)) {
+    uint64 last_fp = context;
+    for (uint64 fp = BT_FRAME_TOP(context), depth = 0;
+         !BT_IS_TOP_FRAME(fp) && depth < BACKTRACE_MAX_DEPTH;
+         last_fp = fp, fp = BT_FRAME_TOP(fp), depth++) {
+
+        if (fp < stack_start || fp >= stack_end) {
+            printf("* unknown frame: %p\n", (void *)fp);
+            break;
+        } else if (fp == 0) {
+            printf("top frame\n");
+            break;
+        }
 
         char buf[64] = { 0 };
         void *return_addr = NULL;
-        int offset = bt_search(BT_RETURN_ADDRESS(fp), buf, sizeof(buf), &return_addr);
+        uint64 return_addr_val = BT_RETURN_ADDRESS(last_fp);
+        if (return_addr_val == 0) {
+            printf("top frame\n");
+            break;
+        }
+        int offset = bt_search(return_addr_val, buf, sizeof(buf), &return_addr);
         if (offset < 0) {
-            printf("* unknown(%p)\n", (void *)BT_RETURN_ADDRESS(fp));
+            printf("* unknown(%p)\n", (void *)return_addr_val);
         } else {
-            printf("* %p %s(%p + %d)\n", (void *)BT_RETURN_ADDRESS(fp), buf, return_addr, offset);
+            printf("* %p %s(%p + %d)\n", (void *)return_addr_val, buf, return_addr, offset);
         }
     }
 }

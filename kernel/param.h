@@ -63,4 +63,6 @@
 #define TRAPFRAME_ORDER 0 // trapframe size is 4KB
 #define TRAPFRAME_SIZE (1UL << (PAGE_SHIFT + TRAPFRAME_ORDER)) // trapframe size in bytes
 
+#define BACKTRACE_MAX_DEPTH 32 // maximum depth of backtrace
+
 #endif              /* __KERNEL_PARAM_H */
