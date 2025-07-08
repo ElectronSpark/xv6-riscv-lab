@@ -118,7 +118,9 @@ void scheduler_run(void) {
 
         spin_acquire(&p->lock);
         // printf("Switching to process: %s (pid: %d)\n", p->name, p->pid);
+        assert(!intr_get(), "Interrupts must be disabled before switching to a process");
         struct proc *prev = __switch_to(p);
+        assert(!intr_get(), "Interrupts must be disabled after switching to a process");
         if (prev->state == RUNNING) {
             prev->state = RUNNABLE; // If we returned to a RUNNING process, set it to RUNNABLE
             if (proc_queue_push(&ready_queue, prev) != 0) {
@@ -146,16 +148,19 @@ int scheduler_yield(uint64 *ret_arg) {
     sched_lock();
     spin_acquire(&proc->lock);
 
+    int noff = mycpu()->noff; // Save the noff state
     int intena = mycpu()->intena; // Save interrupt state
     uint64 ret_val = __swtch_context(&proc->context, &mycpu()->context, (uint64)proc);
 
     __sched_assert_locked();
+    assert(!intr_get(), "Interrupts must be disabled after switching to a process");
     assert(myproc() == proc, "Yield returned to a different process");
     assert(spin_holding(&proc->lock), "Process lock must be held after yield");
     assert(proc->state == RUNNING, "Process state must be RUNNING after yield");
 
     mycpu()->intena = intena; // Restore interrupt state
-    
+    mycpu()->noff = noff; // Restore noff state
+
     spin_release(&proc->lock);
     sched_unlock();
     pop_off();

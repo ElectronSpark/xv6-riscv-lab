@@ -220,6 +220,7 @@ else()
         COMMAND sed "s/:1234/:${GDBPORT}/" < ${CMAKE_SOURCE_DIR}/.gdbinit.tmpl-riscv > ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit
         # COMMAND echo "b main" >> ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit
         COMMAND echo "b __panic_end" >> ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit
+        COMMAND echo "thread 1" >> ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit
         DEPENDS ${CMAKE_SOURCE_DIR}/.gdbinit.tmpl-riscv
         COMMENT "Generating .gdbinit with unique GDB port"
     )
