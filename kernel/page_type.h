@@ -74,7 +74,6 @@ typedef struct page_struct {
 // __buddy_pools[ page_order ]
 typedef struct {
     list_node_t     lru_head;
-    spinlock_t      lock;
     uint64          count;
 } buddy_pool_t;
 

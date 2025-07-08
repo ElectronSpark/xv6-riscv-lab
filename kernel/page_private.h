@@ -52,8 +52,8 @@
         == (page2)->physical_address) )
 
 
-STATIC_INLINE void __buddy_pool_lock(buddy_pool_t *pool);
-STATIC_INLINE void __buddy_pool_unlock(buddy_pool_t *pool);
+STATIC_INLINE void __buddy_pool_lock(void);
+STATIC_INLINE void __buddy_pool_unlock(void);
 STATIC_INLINE uint64 __total_pages();
 STATIC_INLINE bool __page_base_validity(uint64 physical);
 STATIC_INLINE bool __page_init_flags_validity(uint64 flags);

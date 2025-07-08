@@ -13,6 +13,7 @@
 
 
 STATIC buddy_pool_t __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
+STATIC struct spinlock __buddy_pool_spinlock;
 
 // Every physical pages 
 // TODO: The number of managed pages are fix right now.
@@ -21,6 +22,7 @@ STATIC page_t __pages[TOTALPAGES] = { 0 };
 STATIC uint64 __managed_start = KERNBASE;
 STATIC uint64 __managed_end = PHYSTOP;
 
+// buddy pool of lower order must be locked before the buddy pool of higher order
 
 
 #ifdef KERNEL_PAGE_SANITIZER
@@ -54,13 +56,13 @@ STATIC_INLINE void __page_sanitizer_check(const char *op, page_t *page, uint64 o
 
 
 // acquire the spinlock of a buddy pool
-STATIC_INLINE void __buddy_pool_lock(buddy_pool_t *pool) {
-    spin_acquire(&pool->lock);
+STATIC_INLINE void __buddy_pool_lock(void) {
+    spin_acquire(&__buddy_pool_spinlock);
 }
 
 // release the spinlock of a buddy pool
-STATIC_INLINE void __buddy_pool_unlock(buddy_pool_t *pool) {
-    spin_release(&pool->lock);
+STATIC_INLINE void __buddy_pool_unlock(void) {
+    spin_release(&__buddy_pool_spinlock);
 }
 
 // get the total number of pages managed
@@ -126,9 +128,8 @@ STATIC_INLINE void __page_init( page_t *page, uint64 physical, int ref_count,
 // initialize a buddy pool
 // no validity check here
 STATIC_INLINE void __buddy_pool_init() {
-    // __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
+    spin_init(&__buddy_pool_spinlock, "buddy_system_pool");
     for (int i = 0; i < PAGE_BUDDY_MAX_ORDER + 1; i++) {
-        spin_init(&(__buddy_pools[i].lock), "buddy_system_pool");
         __buddy_pools[i].count = 0;
         list_entry_init(&__buddy_pools[i].lru_head);
     }
@@ -330,14 +331,10 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
         return NULL;
     }
     pool = &__buddy_pools[order];
-    // pages managed by buddy system are hold by buddy system, so only need to
-    // acquire the lock of buddy pool to hold these pages.
-    __buddy_pool_lock(pool);
-    {
-        page = __buddy_pop_page(pool);
-    }
-    __buddy_pool_unlock(pool);
-
+    // to prevent the buddy page from being allocated before we locked
+    __buddy_pool_lock();
+    
+    page = __buddy_pop_page(pool);
     // found available buddy pages, 
     if (page != NULL) {
         goto found;
@@ -346,13 +343,7 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
     // if don't find, try to get a bigger buddy page and split it.
     for (tmp_order = order + 1; tmp_order <= PAGE_BUDDY_MAX_ORDER; tmp_order++) {
         pool = &__buddy_pools[tmp_order];
-        // pages managed by buddy system are hold by buddy system, so only need to
-        // acquire the lock of buddy pool to hold these pages.
-        __buddy_pool_lock(pool);
-        {
-            page = __buddy_pop_page(pool);
-        }
-        __buddy_pool_unlock(pool);
+        page = __buddy_pop_page(pool);
         // break the for loop when finding a free buddy page
         if (page != NULL) {
             break;
@@ -362,6 +353,7 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
     // if still not found available buddy pages after the for loop, then
     // there's no buddy page that meets the requirement.
     if (page == NULL) {
+        __buddy_pool_unlock();
         return NULL;
     }
 
@@ -379,11 +371,7 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
         tmp_order--;
         pool = &__buddy_pools[tmp_order];
         __page_order_change_commit(buddy);
-        __buddy_pool_lock(pool);
-        {
-            __buddy_push_page(pool, buddy);
-        }
-        __buddy_pool_unlock(pool);
+        __buddy_push_page(pool, buddy);
     } while (tmp_order > order);
 
 found:
@@ -392,6 +380,7 @@ found:
         page->flags &= ~PAGE_FLAG_BUDDY;
         __page_init(&page[i], page[i].physical_address, 1, flags);
     }
+    __buddy_pool_unlock();
     return page;
 }
 
@@ -407,30 +396,23 @@ STATIC int __buddy_put(page_t *page) {
         return -1;
     }
 
+    __buddy_pool_lock();
     __page_as_buddy(page, page, 0);
 
     for (tmp_order = 0; tmp_order <= PAGE_BUDDY_MAX_ORDER; tmp_order++) {
         // to prevent the buddy page from being allocated before we locked
         // the buddy pool.
         pool = &__buddy_pools[tmp_order];
-        __buddy_pool_lock(pool);
-        {
-            // try to find the buddy page
-            buddy = __get_buddy_page(page);
-            if (buddy != NULL) {
-                // if buddy was found, pop the buddy for merge
-                __buddy_detach_page(pool, buddy);
-            } 
-        }
-        __buddy_pool_unlock(pool);
+        // try to find the buddy page
+        buddy = __get_buddy_page(page);
+        if (buddy != NULL) {
+            // if buddy was found, pop the buddy for merge
+            __buddy_detach_page(pool, buddy);
+        } 
         if (buddy == NULL) {
             // if no buddy was found, put it back to the pool and break the loop
             __page_order_change_commit(page);
-            __buddy_pool_lock(pool);
-            {
-                __buddy_push_page(pool, page);
-            }
-            __buddy_pool_unlock(pool);
+            __buddy_push_page(pool, page);
             break;
         } else {
             // otherwise, merge them, then continue the for loop to find the next
@@ -441,6 +423,7 @@ STATIC int __buddy_put(page_t *page) {
             }
         }
     }
+    __buddy_pool_unlock();
 
     return 0;
 }
@@ -662,14 +645,14 @@ void page_buddy_stat(uint64 *ret_arr, bool *empty_arr, size_t size) {
     if (ret_arr == NULL || size < PAGE_BUDDY_MAX_ORDER + 1) {
         return;
     }
+    __buddy_pool_lock();
     for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER && i < size; i++) {
-        __buddy_pool_lock(&__buddy_pools[i]);
         ret_arr[i] = __buddy_pools[i].count;
         if (empty_arr != NULL) {
             empty_arr[i] = LIST_IS_EMPTY(&__buddy_pools[i].lru_head);
         }
-        __buddy_pool_unlock(&__buddy_pools[i]);
     }
+    __buddy_pool_unlock();
 }
 
 void print_buddy_system_stat(void) {
