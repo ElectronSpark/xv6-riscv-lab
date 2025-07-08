@@ -226,8 +226,15 @@ kerneltrap(struct ktrapframe *sp, uint64 s0)
     // interrupt or trap from an unknown source
     // printf("0x%lx 0x%lx\n", sp, s0);
     printf("scause=0x%lx(%s) sepc=0x%lx stval=0x%lx\n", scause, __scause_to_str(scause), r_sepc(), r_stval());
-    print_backtrace((uint64)sp, myproc()->kstack, myproc()->kstack + KERNEL_STACK_SIZE);
+    sp->ra = r_sepc();
+    // to enconvinient gdb back trace
+    *(uint64 *)((uint64)sp - 8) = r_sepc();
+    if (myproc() == NULL)
+      printf("kerneltrap: no current process\n");
+    else
+      print_backtrace((uint64)sp, myproc()->kstack, myproc()->kstack + KERNEL_STACK_SIZE);
     kerneltrap_dump_regs(sp);
+    panic_disable_bt();
     panic("kerneltrap");
   }
 

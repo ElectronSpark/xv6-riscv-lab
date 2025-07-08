@@ -180,10 +180,27 @@ printf(char *fmt, ...)
   return 0;
 }
 
+static int __bt_enabled = 1;
+
+void
+panic_disable_bt(void)
+{
+  __bt_enabled = 0;
+}
+
 void
 __panic_start()
 {
   pr.locking = 0;
+  uint64 fp = r_fp();
+  struct proc *p = myproc();
+  if (p == NULL || p->kstack == 0) {
+    printf("unknown back trace context\n");
+    return;
+  }
+  if (__bt_enabled) {
+    print_backtrace(fp, p->kstack, p->kstack + KERNEL_STACK_SIZE);
+  }
 }
 
 void

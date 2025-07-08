@@ -195,7 +195,7 @@ print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end)
         if (offset < 0) {
             printf("* unknown(%p)\n", (void *)return_addr_val);
         } else {
-            printf("* %p %s(%p + %d)\n", (void *)return_addr_val, buf, return_addr, offset);
+            printf("* %p - %p %s(%p + %d)\n", (void *)fp, (void *)return_addr_val, buf, return_addr, offset);
         }
     }
 }
