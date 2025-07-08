@@ -12,6 +12,7 @@
 #include "file.h"
 #include "stat.h"
 #include "proc.h"
+#include "memlayout.h"
 
 struct devsw devsw[NDEV];
 struct {
@@ -92,6 +93,10 @@ filestat(struct file *f, uint64 addr)
   struct proc *p = myproc();
   struct stat st;
   
+  assert(f != NULL, "filestat: addr is NULL");
+  assert((uint64)f >= KERNBASE && (uint64)f < PHYSTOP,
+         "filestat: invalid file pointer");
+
   if(f->type == FD_INODE || f->type == FD_DEVICE){
     ilock(f->ip);
     stati(f->ip, &st);

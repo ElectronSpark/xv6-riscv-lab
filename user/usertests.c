@@ -890,7 +890,7 @@ exitwait(char *s)
     if(pid){
       int xstate;
       if(wait(&xstate) != pid){
-        printf("%s: wait wrong pid\n", s);
+        printf("%s: wait wrong pid %d\n", s, pid);
         exit(1);
       }
       if(i != xstate) {

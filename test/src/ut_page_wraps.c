@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-void __wrap_page_lock_aqcuire(page_t *page) {
+void __wrap_page_lock_acquire(page_t *page) {
     (void)page;
 }
 

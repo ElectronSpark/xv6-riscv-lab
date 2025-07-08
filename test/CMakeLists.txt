@@ -75,7 +75,7 @@ set(MOCK_TEST_KERNEL_SRC
 )
 
 set(MOCK_TEST_WRAP_FUNCTIONS
-    page_lock_aqcuire
+    page_lock_acquire
     page_lock_release
     page_ref_inc
     page_ref_dec

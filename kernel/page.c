@@ -545,7 +545,7 @@ void page_free(void *ptr, uint64 order) {
     __page_free(page, order);
 }
 
-void page_lock_aqcuire(page_t *page) {
+void page_lock_acquire(page_t *page) {
     if (page == NULL) {
         return;
     }
@@ -564,7 +564,7 @@ int __page_ref_inc(page_t *page) {
     if (page == NULL) {
         return -1;
     }
-    page_lock_aqcuire(page);
+    page_lock_acquire(page);
     {
         ret = __page_ref_inc_unlocked(page);
     }
@@ -578,7 +578,7 @@ int __page_ref_dec(page_t *page) {
     if (page == NULL) {
         return -1;
     }
-    page_lock_aqcuire(page);
+    page_lock_acquire(page);
     {
         ret = __page_ref_dec_unlocked(page);
     }

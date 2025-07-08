@@ -261,6 +261,8 @@ allocproc(void)
   struct proc *p = NULL;
   void *kstack = NULL;
 
+  __proctab_assert_unlocked();
+
   p = slab_alloc(&proc_cache);
   if (p == NULL) {
     return NULL; // No free proc available in the slab cache
@@ -306,8 +308,8 @@ allocproc(void)
   __proctab_lock();
   p->pid = __alloc_pid();
   if (__proctab_add(p) != 0) {
-    freeproc(p);
     __proctab_unlock();
+    freeproc(p);
     return NULL;
   }
 
@@ -322,15 +324,16 @@ STATIC void
 freeproc(struct proc *p)
 {
   assert(p != NULL, "freeproc called with NULL proc");
-  assert(spin_holding(&p->lock), "freeproc called without p->lock held");
   assert(p->state != RUNNING, "freeproc called with a running proc");
   assert(p->state != RUNNABLE, "freeproc called with a runnable proc");
   assert(p->state != SLEEPING, "freeproc called with a sleeping proc");
 
   __proctab_lock();
+  spin_acquire(&p->lock);
   struct proc *existing = hlist_pop(&proc_table.procs, p);
   // Remove from the global list of processes for dumping.
   list_entry_detach(&p->dmp_list_entry);
+  spin_release(&p->lock);
   __proctab_unlock();
 
   assert(existing == NULL || existing == p, "freeproc called with a different proc");
@@ -524,8 +527,8 @@ fork(void)
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
     // @TODO: need to make sure no one would access np before freeing it.
-    freeproc(np);
     spin_release(&np->lock);
+    freeproc(np);
     return -1;
   }
   np->sz = p->sz;
@@ -565,40 +568,30 @@ fork(void)
 void
 reparent(struct proc *p)
 {
-  struct proc *pp = NULL;
+  struct proc *initproc = __proctab_get_initproc();
   struct proc *child, *tmp;
   bool found = false;
 
+  assert(initproc != NULL, "reparent: initproc is NULL");
+  assert(p != initproc, "reparent: p is init process");
+
+  spin_acquire(&initproc->lock);
   spin_acquire(&p->lock);
-  do {
-    pp = p->parent;
-    spin_release(&p->lock);
-    if (pp == NULL) {
-      // No parent, nothing to do.
-      assert(p == __proctab_get_initproc(), "reparent: no parent and not init");
-      return;
-    }
-    // parent must be held before acquiring p->lock.
-    spin_acquire(&pp->lock);
-    spin_acquire(&p->lock);
-  } while (p->parent != pp);  // in case p->parent changed while we were acquiring locks
   
   list_foreach_node_safe(&p->children, child, tmp, siblings) {
     // make sure the child isn't still in exit() or swtch().
     spin_acquire(&child->lock);
     detach_child(p, child);
-    attach_child(pp, child);
+    attach_child(initproc, child);
     spin_release(&child->lock);
+    found = true;
   }
 
   spin_release(&p->lock);
-  spin_release(&pp->lock);
+  spin_release(&initproc->lock);
 
-  assert(!spin_holding(&p->lock), "reparent: p->lock is still held");
-  assert(!spin_holding(&pp->lock), "reparent: pp->lock is still held");
-  
   if (found)
-    wakeup(pp);
+    wakeup(initproc);
 }
 
 // Exit the current process.  Does not return.
@@ -617,8 +610,12 @@ exit(int status)
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){
       struct file *f = p->ofile[fd];
-      fileclose(f);
       p->ofile[fd] = 0;
+      assert((uint64)f < PHYSTOP, "exit: file pointer out of bounds, pid: %d, fd: %d, f: %p", p->pid, fd, f);
+      // release p->lock before fileclose because fileclose may sleep
+      spin_release(&p->lock);
+      fileclose(f);
+      spin_acquire(&p->lock); // reacquire p->lock after fileclose
     }
   }
   cwd = p->cwd;
@@ -671,10 +668,10 @@ wait(uint64 addr)
           pid = -1;
           goto ret;
         }
-        detach_child(p, child);
-        freeproc(child);
-        // spin_release(&child->lock); // pcb has been freed
         pid = child->pid;
+        detach_child(p, child);
+        spin_release(&child->lock);
+        freeproc(child);
         goto ret;
       }
       spin_release(&child->lock);
@@ -715,11 +712,11 @@ forkret(void)
   // the scheduler operations. For processes that gave up CPU by calling yield(),
   //   yield() would restore the previous interruption state when switched back. 
   // But at here, we need to enable interrupts for the first time.
-  intr_on();
-
+  
   // Still holding p->lock from scheduler.
   spin_release(&myproc()->lock);
   sched_unlock(); // Release the scheduler lock.
+  intr_on();
 
   if (first) {
     // File system initialization must be run in the context of a

@@ -22,8 +22,7 @@ void
 spin_acquire(struct spinlock *lk)
 {
   push_off(); // disable interrupts to avoid deadlock.
-  if(spin_holding(lk))
-    panic("spin_acquire");
+  assert(lk && !spin_holding(lk), "spin_acquire");
 
   // On RISC-V, sync_lock_test_and_set turns into an atomic swap:
   //   a5 = 1
@@ -52,8 +51,7 @@ spin_acquire(struct spinlock *lk)
 void
 spin_release(struct spinlock *lk)
 {
-  if(!spin_holding(lk))
-    panic("spin_release");
+  assert(lk && spin_holding(lk), "spin_release");
 
   lk->cpu = 0;
 

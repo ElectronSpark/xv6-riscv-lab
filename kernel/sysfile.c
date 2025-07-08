@@ -15,6 +15,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "memlayout.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -27,6 +28,10 @@ argfd(int n, int *pfd, struct file **pf)
   argint(n, &fd);
   if(fd < 0 || fd >= NOFILE || (f=myproc()->ofile[fd]) == 0)
     return -1;
+
+  if((uint64)f < KERNBASE || (uint64)f >= PHYSTOP)
+    return -1;
+
   if(pfd)
     *pfd = fd;
   if(pf)

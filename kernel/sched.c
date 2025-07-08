@@ -243,6 +243,7 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
 }
 
 void scheduler_wakeup_on_chan(void *chan) {
+    push_off();
     sched_lock();
 
     struct proc *p, *tmp;
@@ -258,4 +259,5 @@ void scheduler_wakeup_on_chan(void *chan) {
     }
 
     sched_unlock();
+    pop_off();
 }

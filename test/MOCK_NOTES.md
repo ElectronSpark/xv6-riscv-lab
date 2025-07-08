@@ -20,7 +20,7 @@ The following functions should be properly mocked using the wrap mechanism:
 - `__pa_to_page`
 - `__page_to_pa`
 - `page_refcnt`
-- `page_lock_aqcuire`
+- `page_lock_acquire`
 - `page_lock_release`
 - `__page_alloc`
 - `__page_free`
