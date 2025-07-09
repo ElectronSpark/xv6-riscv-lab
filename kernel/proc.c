@@ -440,7 +440,7 @@ userinit(void)
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
-  p->state = PROC_INITIALIZED;
+  p->state = SLEEPING;
 
   spin_release(&p->lock);
 
@@ -552,7 +552,7 @@ fork(void)
   pid = np->pid;
 
   attach_child(p, np);
-  np->state = PROC_INITIALIZED;
+  np->state = SLEEPING;
   spin_release(&np->lock);
   spin_release(&p->lock);
 

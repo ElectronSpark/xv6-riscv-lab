@@ -216,8 +216,7 @@ void scheduler_wakeup(struct proc *p) {
     }
     __sched_assert_unholding();
     assert(p != NULL, "Cannot wake up a NULL process");
-    assert(p->state == SLEEPING || p->state == PROC_INITIALIZED, 
-           "Process must be SLEEPING or PROC_INITIALIZED to wake up");
+    assert(p->state == SLEEPING, "Process must be SLEEPING to wake up");
     assert(!proc_in_queue(p, NULL), "Process must not be in any queue before waking up");
     assert(p != myproc(), "Cannot wake up the current process");
 

@@ -113,13 +113,12 @@ struct ktrapframe {
   /* 248 */ uint64 gp;
 } __attribute__((aligned(8)));
 
-enum procstate { UNUSED, USED, PROC_INITIALIZED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 static inline const char *procstate_to_str(enum procstate state) {
   switch (state) {
     case UNUSED: return "UNUSED";
     case USED: return "USED";
-    case PROC_INITIALIZED: return "PROC_INITIALIZED";
     case SLEEPING: return "SLEEPING";
     case RUNNABLE: return "RUNNABLE";
     case RUNNING: return "RUNNING";
