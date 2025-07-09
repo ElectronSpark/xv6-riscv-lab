@@ -229,7 +229,7 @@ virtio_disk_rw(struct buf *b, int write)
     if(alloc3_desc(idx) == 0) {
       break;
     }
-    printf("virtio_disk_rw: no free descriptors, sleeping\n");
+    // printf("virtio_disk_rw: no free descriptors, sleeping\n");
     sleep(&disk.free[0], &disk.vdisk_lock);
   }
 

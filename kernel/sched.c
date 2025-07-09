@@ -209,8 +209,12 @@ void scheduler_sleep(proc_queue_t *queue, struct spinlock *lk) {
 }
 
 // Wake up a process from the sleep queue.
-static void __scheduler_wakeup_locked(struct proc *p) {
-    assert(spin_holding(&p->lock), "Process lock must be held before waking up");
+void scheduler_wakeup(struct proc *p) {
+    int holding = spin_holding(&p->lock);
+    if (!holding) {
+        spin_acquire(&p->lock);
+    }
+    __sched_assert_unholding();
     assert(p != NULL, "Cannot wake up a NULL process");
     assert(p->state == SLEEPING || p->state == PROC_INITIALIZED, 
            "Process must be SLEEPING or PROC_INITIALIZED to wake up");
@@ -225,19 +229,9 @@ static void __scheduler_wakeup_locked(struct proc *p) {
         panic("Failed to push process to ready queue");
     }
     sched_unlock();
-}
-
-void scheduler_wakeup(struct proc *p) {
-    push_off();
-    int holding = spin_holding(&p->lock);
-    if (!holding) {
-        spin_acquire(&p->lock);
-    }
-    __scheduler_wakeup_locked(p);
     if (!holding) {
         spin_release(&p->lock);
     }
-    pop_off();
 }
 
 void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
@@ -260,22 +254,25 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
 }
 
 void scheduler_wakeup_on_chan(void *chan) {
+    proc_queue_t tmp_queue = { 0 };
+    proc_queue_init(&tmp_queue, "tmp_queue");
     push_off();
     sched_lock();
-
     struct proc *p, *tmp;
     proc_queue_foreach_unlocked(&sleep_queue, p, tmp) {
         // process should not be accessible from any other place if it's inside of a proc queue
-        spin_acquire(&p->lock);
         if (p->chan == chan) {
             assert(proc_queue_remove(&sleep_queue, p) == 0, "Failed to remove process from sleep queue");
-            sched_unlock();
-            __scheduler_wakeup_locked(p);
-            sched_lock();
+            assert(proc_queue_push(&tmp_queue, p) == 0, "Failed to push process to be woken up to temporary queue");
         }
+    }
+    sched_unlock();
+
+    proc_queue_foreach_unlocked(&tmp_queue, p, tmp) {
+        spin_acquire(&p->lock);
+        assert(proc_queue_remove(&tmp_queue, p) == 0, "Failed to remove process from temporary queue");
+        scheduler_wakeup(p);
         spin_release(&p->lock);
     }
-
-    sched_unlock();
     pop_off();
 }
