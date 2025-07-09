@@ -198,6 +198,7 @@ STATIC_INLINE void __buddy_push_page(buddy_pool_t *pool, page_t *page) {
     }
     list_node_push_back(&pool->lru_head, page, buddy.lru_entry);
     pool->count++;
+    __sync_synchronize();
 }
 
 // Pop a buddy page from a pool and return the page descriptor of the buddy
@@ -212,6 +213,7 @@ STATIC_INLINE page_t *__buddy_pop_page(buddy_pool_t *pool) {
         return NULL;
     }
     pool->count--;
+    __sync_synchronize();
     return ret;
 }
 
@@ -665,4 +667,47 @@ void print_buddy_system_stat(void) {
         total_free_pages += (1UL << i) * ret_arr[i];
     }
     printf("total free pages: %ld\n", total_free_pages);
+}
+
+void __check_page_pointer_in_range(void *ptr) {
+    assert(ptr != NULL, "__check_page_pointer_in_range: NULL pointer");
+    assert(ptr > (void *)__pages && ptr < (void *)&__pages[TOTALPAGES], "__check_page_pointer_in_range: page pointer out of range");
+}
+
+// helper function to check the integrity of the buddy system
+void check_buddy_system_integrity(void) {
+    uint64 total_free_pages = 0;
+    // __buddy_pool_lock();
+    for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+        int count = __buddy_pools[i].count;
+        bool empty = LIST_IS_EMPTY(&__buddy_pools[i].lru_head);
+        page_t *pos = NULL;
+        page_t *tmp = NULL;
+        assert(count >= 0, "buddy pool count is negative");
+        assert(empty || count > 0, "buddy pool is not empty but count is zero");
+        assert(!empty || count == 0, "buddy pool is empty but count is not zero");
+        total_free_pages += (1UL << i) * count;
+        if (!empty) {
+            __check_page_pointer_in_range(__buddy_pools[i].lru_head.prev);
+            __check_page_pointer_in_range(__buddy_pools[i].lru_head.next);
+            printf("prev page: %p, next page: %p\n",
+                   (__buddy_pools[i].lru_head.prev),
+                   (__buddy_pools[i].lru_head.next));
+        }
+
+        list_foreach_node_safe(&__buddy_pools[i].lru_head, pos, tmp, buddy.lru_entry) {
+            // check if the page is a valid buddy page
+            assert(PAGE_IS_BUDDY_GROUP_HEAD(pos), "buddy page is not a group head");
+            assert(pos->buddy.order == i, "buddy page order mismatch");
+            assert(pos->buddy.buddy_head == pos, "buddy head mismatch");
+            __check_page_pointer_in_range(pos);
+            assert(__page_to_pa(pos) == pos->physical_address, 
+                   "buddy page physical address mismatch");
+            count--;
+            printf("count = %d, buddy page: %p, order: %d, physical: 0x%lx\n",
+                   count, pos, pos->buddy.order, pos->physical_address);
+        }
+        assert(count == 0, "buddy pool count mismatch, expected 0, got %d", count);
+    }
+    // __buddy_pool_unlock();
 }

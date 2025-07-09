@@ -8,6 +8,7 @@
 #include <cmocka.h>
 
 #include "ut_page_wraps.h"
+#include "param.h"
 #include "list.h"
 
 // Structure to store buddy system state
