@@ -522,12 +522,14 @@ fork(void)
     return -1;
   }
 
+  spin_acquire(&p->lock);
   spin_acquire(&np->lock);
 
   // Copy user memory from parent to child.
   if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
     // @TODO: need to make sure no one would access np before freeing it.
     spin_release(&np->lock);
+    spin_release(&p->lock);
     freeproc(np);
     return -1;
   }
@@ -549,10 +551,6 @@ fork(void)
 
   pid = np->pid;
 
-  spin_release(&np->lock);
-
-  spin_acquire(&p->lock);
-  spin_acquire(&np->lock);
   attach_child(p, np);
   np->state = PROC_INITIALIZED;
   spin_release(&np->lock);
@@ -611,7 +609,7 @@ exit(int status)
     if(p->ofile[fd]){
       struct file *f = p->ofile[fd];
       p->ofile[fd] = 0;
-      assert((uint64)f < PHYSTOP, "exit: file pointer out of bounds, pid: %d, fd: %d, f: %p", p->pid, fd, f);
+      assert((uint64)f < PHYSTOP, "exit: file pointer out of bounds, pid: %d, fd: %d(*%p), f: %p", p->pid, fd, f, &p->ofile[fd]);
       // release p->lock before fileclose because fileclose may sleep
       spin_release(&p->lock);
       fileclose(f);
@@ -637,10 +635,8 @@ exit(int status)
   p->state = ZOMBIE;
   spin_release(&p->lock);
 
-  assert(!spin_holding(&p->lock), "exit: p->lock is still held");
-
   // Jump into the scheduler, never to return.
-  scheduler_yield(0);
+  scheduler_yield(0, NULL);
   panic("zombie exit");
 }
 
@@ -698,7 +694,7 @@ ret:
 void
 yield(void)
 {
-  scheduler_yield(NULL);
+  scheduler_yield(NULL, NULL);
 }
 
 // A fork child's very first scheduling by scheduler()
@@ -714,8 +710,8 @@ forkret(void)
   // But at here, we need to enable interrupts for the first time.
   
   // Still holding p->lock from scheduler.
-  spin_release(&myproc()->lock);
   sched_unlock(); // Release the scheduler lock.
+  spin_release(&myproc()->lock);
   intr_on();
 
   if (first) {
@@ -726,8 +722,10 @@ forkret(void)
 
     first = 0;
     // ensure other cores see first=0.
-    __sync_synchronize();
   }
+  
+  // printf("forkret: process %d is running\n", myproc()->pid);
+  __sync_synchronize();
 
   usertrapret();
 }
