@@ -14,6 +14,9 @@
      ((__proc)->queue_entry.queue != NULL &&        \
       (__queue) == NULL))
 
+#define proc_queue_of(proc) \
+    ((__proc)->queue_entry.queue)
+
 void proc_queue_init(proc_queue_t *q, const char *name);
 void proc_queue_entry_init(proc_queue_entry_t *entry);
 
