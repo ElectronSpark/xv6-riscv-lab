@@ -131,17 +131,24 @@ static inline const char *procstate_to_str(enum procstate state) {
 struct proc {
   struct spinlock lock;
 
-  // p->lock must be held when using these:
+  // both p->lock and the corresponding proc queue lock must be held
+  // when using these. 
+  // If the process is trying to yield as RUNNABLE, it must hold __sched_lock
+  // after acquiring p->lock, and before switching to the scheduler.
   enum procstate state;        // Process state
   void *chan;                  // If non-zero, sleeping on chan
   proc_queue_entry_t queue_entry;     // Entry in a process queue
+  
+  // proc table lock must be held before holding p->lock to use this:
+  hlist_entry_t proctab_entry; // Entry to link the process hash table
+  
+  // p->lock must be held when using these:
   list_node_t dmp_list_entry;  // Entry in the dump list
   int killed;                  // If non-zero, have been killed
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
-  hlist_entry_t proctab_entry;  // Entry to link the process hash table
-
-  // wait_lock must be held when using this:
+  
+  // both p->lock and p->parent->lock must be held when using this:
   list_node_t siblings;       // List of sibling processes
   list_node_t children;       // List of child processes
   int children_count;         // Number of children
@@ -152,6 +159,8 @@ struct proc {
   uint64 sz;                   // Size of process memory (bytes)
   pagetable_t pagetable;       // User page table
   struct trapframe *trapframe; // data page for trampoline.S
+
+  // both p->lock and __sched_lock must be held 
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
