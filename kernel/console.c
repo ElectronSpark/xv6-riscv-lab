@@ -160,12 +160,19 @@ consoleintr(int c)
       c = (c == '\r') ? '\n' : c;
 
       // echo back to the user.
-      consputc(c);
+      if (c == '\x1b')
+        consputc('[');  // Escape sequence start
+      else if (c == '\t')
+        consputc(' ');  // Convert tab to space for simplicity
+      else if ((c < 32 || c > 126) && c != '\n')  // Non-printable characters
+        consputc('?');  // Replace with '?'
+      else
+        consputc(c);
 
       // store for consumption by consoleread().
       cons.buf[cons.e++ % INPUT_BUF_SIZE] = c;
 
-      if(c == '\n' || c == C('D') || cons.e-cons.r == INPUT_BUF_SIZE){
+      if(c == '\n' || c == '\t' || c == C('D') || cons.e-cons.r == INPUT_BUF_SIZE){
         // wake up consoleread() if a whole line (or end-of-file)
         // has arrived.
         cons.w = cons.e;

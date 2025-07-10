@@ -77,6 +77,12 @@ runcmd(struct cmd *cmd)
     if(ecmd->argv[0] == 0)
       exit(1);
     exec(ecmd->argv[0], ecmd->argv);
+    size_t len = strlen(ecmd->argv[0]);
+    for (int i = 0; i < len; i++) {
+      if (ecmd->argv[0][i] == '\x1b') {
+        ecmd->argv[0][i] = '[';
+      }
+    }
     fprintf(2, "exec %s failed\n", ecmd->argv[0]);
     break;
 
