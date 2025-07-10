@@ -107,12 +107,13 @@ static struct spinlock *__switch_to(struct proc *p) {
 }
 
 void scheduler_run(void) {
+    intr_off(); // Disable interrupts to keep the atomicity of the scheduling operation
     while (1) {
-        intr_off(); // Disable interrupts to keep the atomicity of the scheduling operation
         struct proc *p = __sched_pick_next();
         if (!p) {
             intr_on(); // allow interrupts to be handled
             __idle();
+            intr_off();
             continue;
         }
         // printf("CPU: %d -> %s (pid: %d)\n", cpuid(), p->name, p->pid);
@@ -131,7 +132,6 @@ void scheduler_run(void) {
         if (lk != NULL) {
             spin_release(lk); // Release the lock returned by __swtch_context
         }
-        intr_on();  // Enable interrupts after the scheduling operation
     }
 }
 
@@ -145,9 +145,10 @@ int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
         spin_acquire(&proc->lock);
     }
 
-    int noff = mycpu()->noff; // Save the noff state
+    assert(!intr_get(), "Interrupts must be disabled after switching to a process");
     int intena = mycpu()->intena; // Save interrupt state
-    
+    assert(mycpu()->noff == 1 || (mycpu()->noff == 2 && lk_holding), 
+           "Process must hold and only hold the proc lock when yielding. Current noff: %d", mycpu()->noff);
     sched_lock();
     uint64 ret_val = __swtch_context(&proc->context, &mycpu()->context, (uint64)lk);
     sched_unlock();
@@ -158,7 +159,6 @@ int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
     assert(proc->state == RUNNING, "Process state must be RUNNING after yield");
 
     mycpu()->intena = intena; // Restore interrupt state
-    mycpu()->noff = noff; // Restore noff state
 
     // Because the process lock is acquired after lk, we need to release it before acquiring lk.
     // The process lock will be held after acquiring lk, if the process lock was held 
@@ -182,12 +182,13 @@ int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
 
 // Put the current process to sleep on the specified queue.
 void scheduler_sleep(proc_queue_t *queue, struct spinlock *lk) {
-    push_off(); 
+    push_off(); // Increase noff counter to ensure interruptions are disabled
     struct proc *proc = myproc();
     assert(proc != NULL, "Cannot sleep with a NULL process");
     assert(queue != NULL, "Cannot sleep on a NULL queue");
 
     int holding = spin_holding(&proc->lock);
+    pop_off();  // Safe to decrease noff counter after acquiring the process lock
     if (!holding) {
         spin_acquire(&proc->lock);
     }
@@ -205,7 +206,6 @@ void scheduler_sleep(proc_queue_t *queue, struct spinlock *lk) {
     if (holding) {
         spin_acquire(&proc->lock);
     }
-    pop_off();
 }
 
 // Wake up a process from the sleep queue.
@@ -234,28 +234,27 @@ void scheduler_wakeup(struct proc *p) {
 }
 
 void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
-    push_off(); // Disable interrupts to keep the atomicity of the scheduling operation
+    push_off(); // Increase noff counter to ensure interruptions are disabled
     struct proc *proc = myproc();
     assert(proc != NULL, "Cannot sleep with a NULL process");
     assert(chan != NULL, "Cannot sleep on a NULL channel");
-
+    
     int holding = spin_holding(&proc->lock);
     if (!holding) {
         spin_acquire(&proc->lock);
     } 
+    pop_off();
     proc->chan = chan;
     scheduler_sleep(&sleep_queue, lk); // Put the process to sleep on the sleep queue
 
     if (!holding) {
         spin_release(&proc->lock);
     } 
-    pop_off(); // Re-enable interrupts
 }
 
 void scheduler_wakeup_on_chan(void *chan) {
     proc_queue_t tmp_queue = { 0 };
     proc_queue_init(&tmp_queue, "tmp_queue");
-    push_off();
     sched_lock();
     struct proc *p, *tmp;
     proc_queue_foreach_unlocked(&sleep_queue, p, tmp) {
@@ -273,5 +272,4 @@ void scheduler_wakeup_on_chan(void *chan) {
         scheduler_wakeup(p);
         spin_release(&p->lock);
     }
-    pop_off();
 }

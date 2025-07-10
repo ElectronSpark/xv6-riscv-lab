@@ -36,7 +36,6 @@ spin_acquire(struct spinlock *lk)
       }
     ;
   }
-
   // Tell the C compiler and the processor to not move loads or stores
   // past this point, to ensure that the critical section's memory
   // references happen strictly after the lock is acquired.
@@ -71,7 +70,6 @@ spin_release(struct spinlock *lk)
   //   s1 = &lk->locked
   //   amoswap.w zero, zero, (s1)
   __sync_lock_release(&lk->locked);
-
   pop_off();
 }
 
