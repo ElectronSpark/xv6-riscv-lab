@@ -533,8 +533,9 @@ void *page_alloc(uint64 order, uint64 flags) {
 
     pa = (void *)__page_to_pa(page);
 
-    if(pa)
+    if(pa) {
         memset((char*)pa, 5, PGSIZE << order); // fill with junk
+    }
     else
         panic("page_alloc");
     return pa;
@@ -575,6 +576,7 @@ int __page_ref_inc(page_t *page) {
 }
 
 int __page_ref_dec(page_t *page) {
+    int original_ref_count = -1;
     int ret = 0;
     __page_sanitizer_check("__page_ref_dec", page, 0, 0);
     if (page == NULL) {
@@ -582,9 +584,16 @@ int __page_ref_dec(page_t *page) {
     }
     page_lock_acquire(page);
     {
+        original_ref_count = page_ref_count(page);
+        if (original_ref_count < 1) {
+            page_lock_release(page);
+            return 0; // no need to free the page if the ref count is already 0
+        }
         ret = __page_ref_dec_unlocked(page);
     }
     page_lock_release(page);
+    assert(original_ref_count - ret == 1,
+           "__page_ref_dec: ref_count should be decreased by 1");
     if (ret == 0) {
         __page_sanitizer_check("page_free", page, 0, 0);
         if (__buddy_put(page) != 0) {

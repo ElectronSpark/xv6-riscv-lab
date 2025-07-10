@@ -494,35 +494,35 @@ uvmvalidate_w(pagetable_t pagetable, uint64 va)
   void *mem;
   va = PGROUNDDOWN(va);
   if(va >= MAXVA) {
-    panic("uvmvalidate_w");
     return -1;
   }
   pte = walk(pagetable, va, 0);
   if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
       (*pte & (PTE_W | PTE_RSW_w)) == 0) {
-        panic("uvmvalidate_w");
         return -1;
   }
   if (*pte & PTE_W) {
     return 0;
   }
   pa = PTE2PA(*pte);
+  push_off();
   page_t *page = __pa_to_page(pa);
   if (page == 0) {
-    panic("uvmvalidate_w");
+    pop_off();
     return -1;
   }
   refcnt = page_ref_count(page);
   if (refcnt < 1) {
-    panic("uvmvalidate_w");
+    pop_off();
     return -1;
   } else if (refcnt == 1) {
     *pte &= ~PTE_RSW_w; // clear COW flag
     *pte |= PTE_W;
+    pop_off();
     return 0;
   }
   if ((mem= kalloc()) == 0) {
-    panic("uvmvalidate_w");
+    pop_off();
     return -1;
   }
   memmove(mem, (char*)pa, PGSIZE);
@@ -531,9 +531,11 @@ uvmvalidate_w(pagetable_t pagetable, uint64 va)
   *pte = PA2PTE(mem) | flags;
   __sync_synchronize();
   if (__page_ref_dec(page) < 0) {
-    panic("uvmvalidate_w");
+    kfree(mem);
+    pop_off();
     return -1;
   }
+  pop_off();
   return 0;
 }
 
