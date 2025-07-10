@@ -485,7 +485,7 @@ STATIC_INLINE int __page_ref_dec_unlocked(page_t *page) {
         page->ref_count--;
         return page->ref_count;
     }
-    return 0;
+    return -1;
 }
 
 page_t *__page_alloc(uint64 order, uint64 flags) {

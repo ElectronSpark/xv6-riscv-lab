@@ -191,23 +191,14 @@ extern char trampoline[]; // trampoline.S
 static void
 __pcb_init(struct proc *p)
 {
+  memset(p, 0, sizeof(*p));
   p->state = UNUSED;
-  p->chan = 0;
-  p->killed = 0;
-  p->xstate = 0;
-  p->pid = 0;
-  p->parent = 0;
-  p->sz = 0;
-  p->pagetable = 0;
-  p->trapframe = 0;
   list_entry_init(&p->dmp_list_entry);
-  p->children_count = 0;
   list_entry_init(&p->siblings);
   list_entry_init(&p->children);
   hlist_entry_init(&p->proctab_entry);
   spin_init(&p->lock, "proc");
   proc_queue_entry_init(&p->queue_entry);
-  memset(p->name, 0, sizeof(p->name));
 }
 
 // initialize the proc table.

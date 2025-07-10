@@ -454,6 +454,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     *pte &= ~PTE_W; // Do copy when write(COW)
+    *pte |= PTE_RSW_w; // Set COW flag
     pa = PTE2PA(*pte);
     mem = (void *)pa;
     flags = PTE_FLAGS(*pte);
@@ -492,30 +493,47 @@ uvmvalidate_w(pagetable_t pagetable, uint64 va)
   int refcnt;
   void *mem;
   va = PGROUNDDOWN(va);
-  if(va >= MAXVA)
-      return -1;
+  if(va >= MAXVA) {
+    panic("uvmvalidate_w");
+    return -1;
+  }
   pte = walk(pagetable, va, 0);
   if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0 ||
-      (*pte & PTE_RSW_w) == 0)
-    return -1;
+      (*pte & (PTE_W | PTE_RSW_w)) == 0) {
+        panic("uvmvalidate_w");
+        return -1;
+  }
   if (*pte & PTE_W) {
     return 0;
   }
   pa = PTE2PA(*pte);
-  refcnt = page_refcnt((void *)pa);
+  page_t *page = __pa_to_page(pa);
+  if (page == 0) {
+    panic("uvmvalidate_w");
+    return -1;
+  }
+  refcnt = page_ref_count(page);
   if (refcnt < 1) {
+    panic("uvmvalidate_w");
     return -1;
   } else if (refcnt == 1) {
+    *pte &= ~PTE_RSW_w; // clear COW flag
     *pte |= PTE_W;
     return 0;
   }
   if ((mem= kalloc()) == 0) {
+    panic("uvmvalidate_w");
     return -1;
   }
   memmove(mem, (char*)pa, PGSIZE);
   flags = PTE_FLAGS(*pte) | PTE_W;
+  flags &= ~PTE_RSW_w; // clear COW flag
   *pte = PA2PTE(mem) | flags;
-  kfree((void *)pa);
+  __sync_synchronize();
+  if (__page_ref_dec(page) < 0) {
+    panic("uvmvalidate_w");
+    return -1;
+  }
   return 0;
 }
 
