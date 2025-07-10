@@ -74,6 +74,7 @@ static void __proctab_init(void)
   };
   hlist_init(&proc_table.procs, NPROC_HASH_BUCKETS, &funcs);
   spin_init(&proc_table.pid_lock, "pid_lock");
+  list_entry_init(&proc_table.procs_list);
   proc_table.initproc = NULL;
   proc_table.nextpid = 1;
 }
@@ -159,6 +160,8 @@ static int __proctab_add(struct proc *p)
 
   assert(existing != p, "Failed to add process with pid %d", p->pid);
   assert(existing == NULL, "Process with pid %d already exists", p->pid);
+  // Add to the global list of processes for dumping.
+  list_entry_push_back(&proc_table.procs_list, &p->dmp_list_entry);
   return 0;
 }
 
@@ -448,7 +451,7 @@ growproc(int n)
 
   sz = p->sz;
   if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W | PTE_RSW_w)) == 0) {
+    if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
       return -1;
     }
   } else if(n < 0){
@@ -839,9 +842,12 @@ procdump(void)
   [RUNNING]   "run   ",
   [ZOMBIE]    "zombie"
   };
-  struct proc *p, *tmp;
+  struct proc *p;
   char *state;
   int _panic_state = panic_state();
+  int idx;
+  hlist_bucket_t *bucket;
+  hlist_entry_t *pos_entry, *tmp;
 
   printf("\n");
   if (!_panic_state)
@@ -849,7 +855,9 @@ procdump(void)
     __proctab_lock();
   }
 
-  list_foreach_node_safe(&proc_table.procs_list, p, tmp, dmp_list_entry) {
+  // list_foreach_node_safe(&proc_table.procs_list, p, tmp, dmp_list_entry) {
+  hlist_foreach_entry(&proc_table.procs, idx, bucket, pos_entry, tmp) {
+    p = __proctab_hash_get_node(pos_entry);
     spin_acquire(&p->lock);
     enum procstate pstate = p->state;
     int pid = p->pid;
@@ -871,4 +879,12 @@ procdump(void)
   {
     __proctab_unlock();
   }
+}
+
+uint64 sys_dumpproc(void)
+{
+  // This function is called from the dumpproc user program.
+  // It dumps the process table to the console.
+  procdump();
+  return 0;
 }

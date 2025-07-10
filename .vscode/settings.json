@@ -60,6 +60,7 @@
         "proc_queue.h": "c",
         "proc_queue_type.h": "c",
         "sched.h": "c",
-        "cstring": "c"
+        "cstring": "c",
+        "user.h": "c"
     }
 }

@@ -198,6 +198,7 @@ __panic_start()
     printf("unknown back trace context\n");
     return;
   }
+  printf("In process %d (%s) at %p\n", p->pid, p->name, (void *)fp);
   if (__bt_enabled) {
     print_backtrace(fp, p->kstack, p->kstack + KERNEL_STACK_SIZE);
   }

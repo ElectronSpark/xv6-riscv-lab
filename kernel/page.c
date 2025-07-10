@@ -720,3 +720,8 @@ void check_buddy_system_integrity(void) {
     }
     // __buddy_pool_unlock();
 }
+
+uint64 sys_memstat(void) {
+    print_buddy_system_stat();
+    return 0;
+}

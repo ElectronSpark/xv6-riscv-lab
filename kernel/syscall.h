@@ -42,4 +42,7 @@
 // #define SYS_connect   29
 // #define SYS_pgaccess  30
 
+#define SYS_memstat 31
+#define SYS_dumpproc 32
+
 #endif          /* __KERNEL_SYSCALL_H */

@@ -107,6 +107,8 @@ set(USER_PROGRAMS_C_FILES
 	${USER_DIR}/primes.c
 	${USER_DIR}/find.c
 	${USER_DIR}/xargs.c
+    ${USER_DIR}/free.c
+    ${USER_DIR}/dumpproc.c
 )
 
 if($ENV{LAB} STREQUAL "syscall")
