@@ -137,6 +137,7 @@ void scheduler_run(void) {
 
 // Yield the CPU to allow other processes to run.
 int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
+    push_off();
     struct proc *proc = myproc();
     
     int lk_holding = (lk != NULL && spin_holding(lk));
@@ -144,6 +145,7 @@ int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
     if (!proc_holding) {
         spin_acquire(&proc->lock);
     }
+    pop_off();
 
     assert(!intr_get(), "Interrupts must be disabled after switching to a process");
     int intena = mycpu()->intena; // Save interrupt state
@@ -188,10 +190,10 @@ void scheduler_sleep(proc_queue_t *queue, struct spinlock *lk) {
     assert(queue != NULL, "Cannot sleep on a NULL queue");
 
     int holding = spin_holding(&proc->lock);
-    pop_off();  // Safe to decrease noff counter after acquiring the process lock
     if (!holding) {
         spin_acquire(&proc->lock);
     }
+    pop_off();  // Safe to decrease noff counter after acquiring the process lock
 
     sched_lock();
     proc->state = SLEEPING;
