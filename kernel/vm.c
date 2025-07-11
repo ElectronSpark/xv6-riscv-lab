@@ -464,7 +464,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     } else {
       mem = (void *)pa;
     }
-    if (page_ref_inc(mem) <= 0) {
+    if (page_ref_inc((void*)pa) <= 0) {
       goto err;
     }
     if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
@@ -527,12 +527,10 @@ uvmvalidate_w(pagetable_t pagetable, uint64 va)
   page_t *page = __pa_to_page(pa);
   if (page == 0) {
     pop_off();
-    // printf("uvmvalidate_w: page not found for pa %lx\n", pa);
     return -1;
   }
   refcnt = page_ref_count(page);
   if (refcnt < 1) {
-    // printf("uvmvalidate_w: invalid refcnt %d for page %p\n", refcnt, page);
     pop_off();
     return -1;
   } else if (refcnt == 1) {
@@ -547,16 +545,12 @@ uvmvalidate_w(pagetable_t pagetable, uint64 va)
     return -1;
   }
   memmove(mem, (char*)pa, PGSIZE);
+  refcnt = page_ref_dec((void*)pa);
+  assert(refcnt > 0, "uvmvalidate_w: refcnt should be greater than 0: %d", refcnt);
   flags = PTE_FLAGS(*pte) | PTE_W;
   flags &= ~PTE_RSW_w; // clear COW flag
   *pte = PA2PTE(mem) | flags;
   __sync_synchronize();
-  if (__page_ref_dec(page) < 0) {
-    kfree(mem);
-    pop_off();
-    // printf("uvmvalidate_w: failed to decrement refcnt for page %p\n", page);
-    return -1;
-  }
   pop_off();
   return 0;
 }
