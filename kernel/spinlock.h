@@ -11,11 +11,11 @@ typedef struct spinlock {
   // For debugging:
   char *name;        // Name of lock.
   struct cpu *cpu;   // The cpu holding the lock.
-} spinlock_t;
+} spinlock_t __attribute__ ((aligned(64)));
 
 #define SPINLOCK_INITIALIZED(lock_name) { \
   .locked = 0,                            \
-  .cpu    = NULL                          \
+  .cpu    = NULL,                         \
   .name   = lock_name,                    \
 }
 

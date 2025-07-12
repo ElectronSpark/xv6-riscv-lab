@@ -40,18 +40,21 @@ releasesleep(struct sleeplock *lk)
   proc_queue_init(&tmp_queue, "tmp_queue");
   spin_acquire(&lk->lk);
   proc_queue_bulk_move(&tmp_queue, &lk->wait_queue);
+  spin_release(&lk->lk);
   lk->locked = 0;
   lk->pid = 0;
-  spin_release(&lk->lk);
   struct proc *tmp = NULL;
   struct proc *pos = NULL;
+  sched_lock();
   proc_queue_foreach_unlocked(&tmp_queue, pos, tmp) {
+    spin_acquire(&pos->lock);
     proc_queue_remove(&tmp_queue, pos);
     assert(pos->state == SLEEPING, "Process must be SLEEPING to wake up");
-    spin_acquire(&pos->lock);
+    
     scheduler_wakeup(pos);
     spin_release(&pos->lock);
   }
+  sched_unlock();
 }
 
 int

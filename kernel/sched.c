@@ -212,11 +212,13 @@ void scheduler_sleep(proc_queue_t *queue, struct spinlock *lk) {
 
 // Wake up a process from the sleep queue.
 void scheduler_wakeup(struct proc *p) {
+    push_off(); // Increase noff counter to ensure interruptions are disabled
     int holding = spin_holding(&p->lock);
     if (!holding) {
         spin_acquire(&p->lock);
     }
-    __sched_assert_unholding();
+    pop_off(); // Safe to decrease noff counter after acquiring the process lock
+    // __sched_assert_unholding();
     assert(p != NULL, "Cannot wake up a NULL process");
     assert(p->state == SLEEPING, "Process must be SLEEPING to wake up");
     assert(!proc_in_queue(p, NULL), "Process must not be in any queue before waking up");
@@ -225,11 +227,16 @@ void scheduler_wakeup(struct proc *p) {
     p->state = RUNNABLE; // Change state to RUNNABLE
     p->chan = NULL; // Clear the channel
 
-    sched_lock();
+    int sched_locked = sched_holding();
+    if (!sched_locked) {
+        sched_lock();
+    }
     if (proc_queue_push(&ready_queue, p) != 0) {
         panic("Failed to push process to ready queue");
     }
-    sched_unlock();
+    if (!sched_locked) {
+        sched_unlock();
+    }
     if (!holding) {
         spin_release(&p->lock);
     }
