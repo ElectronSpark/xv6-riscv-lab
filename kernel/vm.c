@@ -26,10 +26,10 @@ kvmmake(void)
   memset(kpgtbl, 0, PGSIZE);
 
   // uart registers
-  kvmmap(kpgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W | PTE_RSW_w);
+  kvmmap(kpgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
 
   // virtio mmio disk interface
-  kvmmap(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W | PTE_RSW_w);
+  kvmmap(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
 
   // PCI-E ECAM (configuration space), for pci.c
   kvmmap(kpgtbl, PCIE_ECAM, PCIE_ECAM, 0x10000000, PTE_R | PTE_W);
@@ -38,13 +38,13 @@ kvmmake(void)
   kvmmap(kpgtbl, E1000_PCI_ADDR, E1000_PCI_ADDR, 0x20000, PTE_R | PTE_W);
 
   // PLIC
-  kvmmap(kpgtbl, PLIC, PLIC, 0x4000000, PTE_R | PTE_W | PTE_RSW_w);
+  kvmmap(kpgtbl, PLIC, PLIC, 0x4000000, PTE_R | PTE_W);
 
   // map kernel text executable and read-only.
   kvmmap(kpgtbl, KERNBASE, KERNBASE, (uint64)etext-KERNBASE, PTE_R | PTE_X);
 
   // map kernel data and the physical RAM we'll make use of.
-  kvmmap(kpgtbl, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W | PTE_RSW_w);
+  kvmmap(kpgtbl, (uint64)etext, (uint64)etext, PHYSTOP-(uint64)etext, PTE_R | PTE_W);
 
   // map the trampoline for trap entry/exit to
   // the highest virtual address in the kernel.
@@ -323,7 +323,7 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       panic("uvmunmap: not a leaf");
     if(do_free){
       uint64 pa = PTE2PA(*pte);
-      kfree((void*)pa);
+      page_ref_dec((void*)pa);
     }
     *pte = 0;
   }
@@ -354,7 +354,7 @@ uvmfirst(pagetable_t pagetable, uchar *src, uint sz)
     panic("uvmfirst: more than a page");
   mem = kalloc();
   memset(mem, 0, PGSIZE);
-  mappages(pagetable, 0, PGSIZE, (uint64)mem, PTE_W|PTE_RSW_w|PTE_R|PTE_X|PTE_U);
+  mappages(pagetable, 0, PGSIZE, (uint64)mem, PTE_W|PTE_R|PTE_X|PTE_U);
   memmove(mem, src, sz);
 }
 
@@ -378,7 +378,7 @@ uvmalloc(pagetable_t pagetable, uint64 oldsz, uint64 newsz, int xperm)
     }
     memset(mem, 0, PGSIZE);
     if(mappages(pagetable, a, PGSIZE, (uint64)mem, PTE_R|PTE_U|xperm) != 0){
-      kfree(mem);
+      page_ref_dec(mem);
       uvmdealloc(pagetable, a, oldsz);
       return 0;
     }
@@ -421,7 +421,7 @@ freewalk(pagetable_t pagetable)
       panic("freewalk: leaf");
     }
   }
-  kfree((void*)pagetable);
+  page_ref_dec((void*)pagetable);
 }
 
 // Free user memory pages,
@@ -446,7 +446,6 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   pte_t *pte;
   uint64 pa, i;
   uint flags;
-  char *mem;
 
   for(i = 0; i < sz; i += PGSIZE){
     if((pte = walk(old, i, 0)) == 0)
@@ -460,14 +459,11 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       flags &= ~PTE_W; // Do copy when write(COW)
       flags |= PTE_RSW_w; // Set COW flag
       *pte = PA2PTE(pa) | flags; // Restore PTE with COW flag
-      mem = (void *)pa;
-    } else {
-      mem = (void *)pa;
     }
     if (page_ref_inc((void*)pa) <= 0) {
       goto err;
     }
-    if(mappages(new, i, PGSIZE, (uint64)mem, flags) != 0){
+    if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
     }
   }
@@ -515,30 +511,18 @@ uvmvalidate_w(pagetable_t pagetable, uint64 va)
     // printf("uvmvalidate_w: pte not user accessible for va %lx\n", va);
     return -1;
   }
-  if ((*pte & (PTE_W | PTE_RSW_w)) == 0) {
+  if (*pte & PTE_W) {
+    // printf("uvmvalidate_w: pte already writable for va %lx\n", va);
+    return 0; // already writable
+  }
+  if ((*pte & PTE_RSW_w) == 0) {
     // printf("uvmvalidate_w: pte not writable %p for va %lx\n", pte, va);
     return -1;
   }
-  if (*pte & PTE_W) {
-    return 0;
-  }
   pa = PTE2PA(*pte);
+  mem = (void*)pa;
   push_off();
-  page_t *page = __pa_to_page(pa);
-  if (page == 0) {
-    pop_off();
-    return -1;
-  }
-  refcnt = page_ref_count(page);
-  if (refcnt < 1) {
-    pop_off();
-    return -1;
-  } else if (refcnt == 1) {
-    *pte &= ~PTE_RSW_w; // clear COW flag
-    *pte |= PTE_W;
-    pop_off();
-    return 0;
-  }
+  assert(page_refcnt((void*)pa) > 0, "uvmvalidate_w: page refcnt should be greater than 0: %p", (void*)pa);
   if ((mem= kalloc()) == 0) {
     pop_off();
     // printf("uvmvalidate_w: kalloc failed for page: %p, pa: %p, va: %p\n", page, (void*)pa, (void*)va);
@@ -546,11 +530,10 @@ uvmvalidate_w(pagetable_t pagetable, uint64 va)
   }
   memmove(mem, (char*)pa, PGSIZE);
   refcnt = page_ref_dec((void*)pa);
-  assert(refcnt > 0, "uvmvalidate_w: refcnt should be greater than 0: %d", refcnt);
+  assert(refcnt >= 0, "uvmvalidate_w: refcnt should be greater than or equal to 0: %d, %p", refcnt, (void*)pa);
   flags = PTE_FLAGS(*pte) | PTE_W;
   flags &= ~PTE_RSW_w; // clear COW flag
   *pte = PA2PTE(mem) | flags;
-  __sync_synchronize();
   pop_off();
   return 0;
 }
