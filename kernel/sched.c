@@ -33,8 +33,11 @@ static inline void __sched_assert_unholding(void) {
 // These functions are used to acquire and release the scheduler lock.
 // To avoid deadlocks, locks must be held in the following order:
 // - locks of each process -- proc.c
+// - locks related to the process queue -- proc_queue.c
 // - sched_lock -- sched.c
 // - proc table lock -- proc.c
+//
+// The locks of task queues and the scheduler lock should not be held simultaneously,
 void sched_lock(void) {
     spin_acquire(&__sched_lock);
 }
@@ -213,10 +216,7 @@ void scheduler_sleep(proc_queue_t *queue, struct spinlock *lk) {
 // Wake up a process from the sleep queue.
 void scheduler_wakeup(struct proc *p) {
     push_off(); // Increase noff counter to ensure interruptions are disabled
-    int holding = spin_holding(&p->lock);
-    if (!holding) {
-        spin_acquire(&p->lock);
-    }
+    __sched_assert_holding();
     pop_off(); // Safe to decrease noff counter after acquiring the process lock
     // __sched_assert_unholding();
     assert(p != NULL, "Cannot wake up a NULL process");
@@ -227,18 +227,8 @@ void scheduler_wakeup(struct proc *p) {
     p->state = RUNNABLE; // Change state to RUNNABLE
     p->chan = NULL; // Clear the channel
 
-    int sched_locked = sched_holding();
-    if (!sched_locked) {
-        sched_lock();
-    }
     if (proc_queue_push(&ready_queue, p) != 0) {
         panic("Failed to push process to ready queue");
-    }
-    if (!sched_locked) {
-        sched_unlock();
-    }
-    if (!holding) {
-        spin_release(&p->lock);
     }
 }
 
@@ -278,7 +268,9 @@ void scheduler_wakeup_on_chan(void *chan) {
     proc_queue_foreach_unlocked(&tmp_queue, p, tmp) {
         spin_acquire(&p->lock);
         assert(proc_queue_remove(&tmp_queue, p) == 0, "Failed to remove process from temporary queue");
+        sched_lock();
         scheduler_wakeup(p);
+        sched_unlock();
         spin_release(&p->lock);
     }
 }

@@ -438,7 +438,9 @@ userinit(void)
 
   spin_release(&p->lock);
 
+  sched_lock();
   scheduler_wakeup(p);
+  sched_unlock();
 }
 
 // Grow or shrink user memory by n bytes.
@@ -550,7 +552,9 @@ fork(void)
   spin_release(&np->lock);
   spin_release(&p->lock);
 
+  sched_lock();
   scheduler_wakeup(np);
+  sched_unlock();
 
   return pid;
 }

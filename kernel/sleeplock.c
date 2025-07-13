@@ -36,25 +36,33 @@ acquiresleep(struct sleeplock *lk)
 void
 releasesleep(struct sleeplock *lk)
 {
+  // First put all process from the wait queue to a temporary queue,
+  // so that we can detach them from the wait queue, and then wake them up.
+  // This is to avoid deadlocks, as we cannot hold the lock while waking up processes
+  // from the wait queue.
   proc_queue_t tmp_queue = { 0 };
   proc_queue_init(&tmp_queue, "tmp_queue");
   spin_acquire(&lk->lk);
   proc_queue_bulk_move(&tmp_queue, &lk->wait_queue);
-  spin_release(&lk->lk);
   lk->locked = 0;
   lk->pid = 0;
+  spin_release(&lk->lk);
+
+  // Now we can wake up all processes from the temporary queue.
+  // We can do this without holding the lock related to the temporary queue, 
+  // because the temporary queue is invisible to other processes.
   struct proc *tmp = NULL;
   struct proc *pos = NULL;
-  sched_lock();
   proc_queue_foreach_unlocked(&tmp_queue, pos, tmp) {
     spin_acquire(&pos->lock);
     proc_queue_remove(&tmp_queue, pos);
     assert(pos->state == SLEEPING, "Process must be SLEEPING to wake up");
     
+    sched_lock();
     scheduler_wakeup(pos);
+    sched_unlock();
     spin_release(&pos->lock);
   }
-  sched_unlock();
 }
 
 int

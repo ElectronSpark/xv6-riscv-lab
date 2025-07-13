@@ -133,8 +133,12 @@ struct proc {
 
   // both p->lock and the corresponding proc queue lock must be held
   // when using these. 
+  // 
   // If the process is trying to yield as RUNNABLE, it must hold __sched_lock
   // after acquiring p->lock, and before switching to the scheduler.
+  //
+  // When the process is in SLEEPING state, these fields are managed by the scheduler,
+  // and the process queue it's in.
   enum procstate state;        // Process state
   void *chan;                  // If non-zero, sleeping on chan
   proc_queue_entry_t queue_entry;     // Entry in a process queue
