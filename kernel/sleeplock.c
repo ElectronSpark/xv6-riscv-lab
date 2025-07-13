@@ -24,6 +24,7 @@ initsleeplock(struct sleeplock *lk, char *name)
 void
 acquiresleep(struct sleeplock *lk)
 {
+  spin_acquire(&myproc()->lock);
   spin_acquire(&lk->lk);
   while (lk->locked) {
     scheduler_sleep(&lk->wait_queue, &lk->lk);
@@ -31,6 +32,7 @@ acquiresleep(struct sleeplock *lk)
   lk->locked = 1;
   lk->pid = myproc()->pid;
   spin_release(&lk->lk);
+  spin_release(&myproc()->lock);
 }
 
 void
