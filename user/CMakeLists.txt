@@ -109,6 +109,7 @@ set(USER_PROGRAMS_C_FILES
 	${USER_DIR}/xargs.c
     ${USER_DIR}/free.c
     ${USER_DIR}/dumpproc.c
+    ${USER_DIR}/dumpchan.c
 )
 
 if($ENV{LAB} STREQUAL "syscall")

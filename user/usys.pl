@@ -41,3 +41,4 @@ entry("uptime");
 
 entry("memstat");
 entry("dumpproc");
+entry("dumpchan");

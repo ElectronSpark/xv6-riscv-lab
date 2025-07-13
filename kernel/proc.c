@@ -327,7 +327,6 @@ freeproc(struct proc *p)
   struct proc *existing = hlist_pop(&proc_table.procs, p);
   // Remove from the global list of processes for dumping.
   list_entry_detach(&p->dmp_list_entry);
-  spin_release(&p->lock);
   __proctab_unlock();
 
   assert(existing == NULL || existing == p, "freeproc called with a different proc");
@@ -340,6 +339,7 @@ freeproc(struct proc *p)
     proc_freepagetable(p->pagetable, p->sz);
   
   slab_free(p);
+  pop_off();  // PCB has been freed, so no need to keep noff counter increased
 }
 
 // Create a user page table for a given process, with no user memory,

@@ -29,6 +29,7 @@ int uptime(void);
 
 int memstat(void);
 int dumpproc(void);
+int dumpchan(void);
 
 // ulib.c
 int stat(const char*, struct stat*);

@@ -47,7 +47,7 @@ static void chan_queue_init(void) {
     int slab_ret = slab_cache_init(&chan_queue_slab, 
                                    "chan_queue_slab", 
                                    sizeof(struct chan_queue_node), 
-                                   0);
+                                   SLAB_FLAG_STATIC);
     assert(slab_ret == 0, "Failed to initialize chan queue slab cache");
 }
 
@@ -58,14 +58,10 @@ static struct chan_queue_node *chan_queue_alloc(uint64 chan) {
         rb_node_init(&node->rb_entry);
         proc_queue_init(&node->wait_queue, "chan_wait_queue");
     }
-    if (node != NULL) {
-        printf("+");
-    }
     return node;
 }
 
 static void chan_queue_free(struct chan_queue_node *node) {
-    printf("-");
     slab_free(node);
 }
 
@@ -356,4 +352,28 @@ void scheduler_wakeup_on_chan(void *chan) {
         sched_unlock();
         spin_release(&p->lock);
     }
+}
+
+void scheduler_dump_chan_queue(void) {
+    struct chan_queue_node *node = NULL;
+    struct chan_queue_node *tmp = NULL;
+
+    printf("Channel Queue Dump:\n");
+    sched_lock();
+    rb_foreach_entry_safe(&__chan_queue_root, node, tmp, rb_entry) {
+        printf("Channel: %lx, Queue Size: %d\n", node->chan, proc_queue_size(&node->wait_queue));
+        struct proc *p = NULL;
+        struct proc *tmp_p = NULL;
+        proc_queue_foreach_unlocked(&node->wait_queue, p, tmp_p) {
+            printf("  Process: %s (PID: %d, State: %s)\n", p->name, p->pid, procstate_to_str(p->state));
+        }
+    }
+    sched_unlock();
+}
+
+uint64 sys_dumpchan(void) {
+    // This function is called from the dumpchan user program.
+    // It dumps the channel queue to the console.
+    scheduler_dump_chan_queue();
+    return 0;
 }

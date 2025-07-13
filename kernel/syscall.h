@@ -44,5 +44,6 @@
 
 #define SYS_memstat 31
 #define SYS_dumpproc 32
+#define SYS_dumpchan 33
 
 #endif          /* __KERNEL_SYSCALL_H */
