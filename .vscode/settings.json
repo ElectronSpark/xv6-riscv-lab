@@ -61,6 +61,9 @@
         "proc_queue_type.h": "c",
         "sched.h": "c",
         "cstring": "c",
-        "user.h": "c"
+        "user.h": "c",
+        "rbtree.h": "c",
+        "bintree.h": "c",
+        "bintree_type.h": "c"
     }
 }
