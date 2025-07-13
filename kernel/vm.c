@@ -321,8 +321,8 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       panic("uvmunmap: not mapped, va=%p, pa=%p, flags: %lx", (void *)a, (void*)PTE2PA(*pte), PTE_FLAGS(*pte));
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
-    *pte = 0;
     uint64 pa = PTE2PA(*pte);
+    *pte = 0;
     if(do_free){
       page_ref_dec((void*)pa);
     }
