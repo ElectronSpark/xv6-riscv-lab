@@ -321,11 +321,11 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       panic("uvmunmap: not mapped, va=%p, pa=%p, flags: %lx", (void *)a, (void*)PTE2PA(*pte), PTE_FLAGS(*pte));
     if(PTE_FLAGS(*pte) == PTE_V)
       panic("uvmunmap: not a leaf");
+    *pte = 0;
+    uint64 pa = PTE2PA(*pte);
     if(do_free){
-      uint64 pa = PTE2PA(*pte);
       page_ref_dec((void*)pa);
     }
-    *pte = 0;
   }
 }
 
@@ -454,14 +454,14 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       panic("uvmcopy: page not present");
     flags = PTE_FLAGS(*pte);
     pa = PTE2PA(*pte);
+    if (page_ref_inc((void*)pa) <= 0) {
+      goto err;
+    }
     if (flags & (PTE_RSW_w | PTE_W)) {
       // If the page is writable or has COW flag
       flags &= ~PTE_W; // Do copy when write(COW)
       flags |= PTE_RSW_w; // Set COW flag
       *pte = PA2PTE(pa) | flags; // Restore PTE with COW flag
-    }
-    if (page_ref_inc((void*)pa) <= 0) {
-      goto err;
     }
     if(mappages(new, i, PGSIZE, pa, flags) != 0){
       goto err;
@@ -500,15 +500,15 @@ uvmvalidate_w(pagetable_t pagetable, uint64 va)
   }
   pte = walk(pagetable, va, 0);
   if(pte == 0) {
-    // printf("uvmvalidate_w: pte not found for va %lx\n", va);
+    printf("uvmvalidate_w: pte not found for va %lx\n", va);
     return -1;
   } 
   if ((*pte & PTE_V) == 0) {
-    // printf("uvmvalidate_w: pte not valid for va %lx\n", va);
+    printf("uvmvalidate_w: pte not valid for va %lx\n", va);
     return -1;
   }
   if ( (*pte & PTE_U) == 0) {
-    // printf("uvmvalidate_w: pte not user accessible for va %lx\n", va);
+    printf("uvmvalidate_w: pte not user accessible for va %lx, *pte: %lx\n", va, *pte);
     return -1;
   }
   if (*pte & PTE_W) {
@@ -516,7 +516,7 @@ uvmvalidate_w(pagetable_t pagetable, uint64 va)
     return 0; // already writable
   }
   if ((*pte & PTE_RSW_w) == 0) {
-    // printf("uvmvalidate_w: pte not writable %p for va %lx\n", pte, va);
+    printf("uvmvalidate_w: pte not writable %p for va %lx\n", pte, va);
     return -1;
   }
   pa = PTE2PA(*pte);
@@ -525,15 +525,15 @@ uvmvalidate_w(pagetable_t pagetable, uint64 va)
   assert(page_refcnt((void*)pa) > 0, "uvmvalidate_w: page refcnt should be greater than 0: %p", (void*)pa);
   if ((mem= kalloc()) == 0) {
     pop_off();
-    // printf("uvmvalidate_w: kalloc failed for page: %p, pa: %p, va: %p\n", page, (void*)pa, (void*)va);
+    printf("uvmvalidate_w: kalloc failed for pa: %p, va: %p\n", (void*)pa, (void*)va);
     return -1;
   }
   memmove(mem, (char*)pa, PGSIZE);
-  refcnt = page_ref_dec((void*)pa);
-  assert(refcnt >= 0, "uvmvalidate_w: refcnt should be greater than or equal to 0: %d, %p", refcnt, (void*)pa);
   flags = PTE_FLAGS(*pte) | PTE_W;
   flags &= ~PTE_RSW_w; // clear COW flag
   *pte = PA2PTE(mem) | flags;
+  refcnt = page_ref_dec((void*)pa);
+  assert(refcnt >= 0, "uvmvalidate_w: refcnt should be greater than or equal to 0: %d, %p", refcnt, (void*)pa);
   pop_off();
   return 0;
 }
