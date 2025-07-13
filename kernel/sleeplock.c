@@ -67,6 +67,28 @@ releasesleep(struct sleeplock *lk)
   }
 }
 
+void
+releasesleep_one(struct sleeplock *lk)
+{
+  if (!lk->locked) {
+    return; // Lock is not held, nothing to release
+  }
+  struct proc *poc = NULL;
+  spin_acquire(&lk->lk);
+  if (proc_queue_size(&lk->wait_queue) <= 0) {
+    spin_release(&lk->lk);
+    return;
+  }
+  assert(proc_queue_pop(&lk->wait_queue, &poc) == 0, "Failed to pop process from wait queue");
+  spin_release(&lk->lk);
+  assert(poc != NULL, "releasesleep_one: failed to pop from wait queue");
+  spin_acquire(&poc->lock);
+  sched_lock();
+  scheduler_wakeup(poc);
+  sched_unlock();
+  spin_release(&poc->lock);
+}
+
 int
 holdingsleep(struct sleeplock *lk)
 {
