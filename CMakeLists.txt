@@ -168,7 +168,7 @@ else()
 
     # Set default CPUS
     if(NOT DEFINED ENV{CPUS} OR "$ENV{CPUS}" STREQUAL "")
-        set(CPUS 3)
+        set(CPUS 6)
     else()
         set(CPUS $ENV{CPUS})
     endif()

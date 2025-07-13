@@ -438,7 +438,9 @@ userinit(void)
 
   spin_release(&p->lock);
 
+  sched_lock();
   scheduler_wakeup(p);
+  sched_unlock();
 }
 
 // Grow or shrink user memory by n bytes.
@@ -550,7 +552,9 @@ fork(void)
   spin_release(&np->lock);
   spin_release(&p->lock);
 
+  sched_lock();
   scheduler_wakeup(np);
+  sched_unlock();
 
   return pid;
 }
@@ -630,7 +634,7 @@ exit(int status)
   spin_release(&p->lock);
 
   // Jump into the scheduler, never to return.
-  scheduler_yield(0, NULL);
+  yield();
   panic("zombie exit");
 }
 
@@ -688,7 +692,11 @@ ret:
 void
 yield(void)
 {
+  spin_acquire(&myproc()->lock);
+  sched_lock();
   scheduler_yield(NULL, NULL);
+  sched_unlock();
+  spin_release(&myproc()->lock);
 }
 
 // A fork child's very first scheduling by scheduler()
@@ -729,7 +737,9 @@ forkret(void)
 void
 sleep(void *chan, struct spinlock *lk)
 {
+  spin_acquire(&myproc()->lock);
   scheduler_sleep_on_chan(chan, lk);
+  spin_release(&myproc()->lock);
 }
 
 // Wake up all processes sleeping on chan.

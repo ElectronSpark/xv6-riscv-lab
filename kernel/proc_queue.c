@@ -103,6 +103,8 @@ int proc_queue_remove(proc_queue_t *q, struct proc *p) {
 }
 
 // Move all process from one queue to another.
+// This is to enconvinience walking up all process in a queue.
+// This will not change the pointer of the processes to their queues.
 int proc_queue_bulk_move(proc_queue_t *to, proc_queue_t *from) {
     if (to == NULL || from == NULL) {
         return -1; // Error: one of the queues is NULL
@@ -115,7 +117,11 @@ int proc_queue_bulk_move(proc_queue_t *to, proc_queue_t *from) {
     to->counter += from->counter;
     from->counter = 0;
     list_entry_insert_bulk(LIST_LAST_ENTRY(&to->head), &from->head);
-    __sync_synchronize();
+    struct proc *proc = NULL;
+    struct proc *tmp = NULL;
+    list_foreach_node_safe(&to->head, proc, tmp, queue_entry.list_entry) {
+        proc->queue_entry.queue = to; // Update the queue pointer for each process
+    }
 
     return 0; // Success
 }
