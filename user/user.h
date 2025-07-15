@@ -3,6 +3,14 @@
 
 struct stat;
 
+typedef uint64 sigset_t;
+
+typedef struct sigaction {
+    void        (*handler)(int);
+    sigset_t    sa_mask;
+    int         sa_flags;
+} sigaction_t;
+
 // system calls
 int fork(void);
 int exit(int) __attribute__((noreturn));
@@ -11,7 +19,7 @@ int pipe(int*);
 int write(int, const void*, int);
 int read(int, void*, int);
 int close(int);
-int kill(int);
+int kill(int, int);
 int exec(const char*, char**);
 int open(const char*, int);
 int mknod(const char*, short, short);
@@ -26,6 +34,9 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+// int sigalarm(int ticks, void (*handler)());
+int sigaction(int signum, struct sigaction *act, struct sigaction *oldact);
+int sigreturn(void);
 
 int memstat(void);
 int dumpproc(void);

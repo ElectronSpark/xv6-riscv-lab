@@ -103,6 +103,9 @@ extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
 extern uint64 sys_connect(void);
 extern uint64 sys_symlink(void);
+extern uint64 sys_sigaction(void);
+extern uint64 sys_sigreturn(void);
+// extern uint64 sys_sigalarm(void);
 
 extern uint64 sys_memstat(void);
 extern uint64 sys_dumpproc(void);
@@ -134,6 +137,9 @@ STATIC uint64 (*syscalls[])(void) = {
 [SYS_close]   sys_close,
 [SYS_connect] sys_connect,
 [SYS_symlink] sys_symlink,
+// [SYS_sigalarm] sys_sigalarm,
+[SYS_sigaction] sys_sigaction,
+[SYS_sigreturn] sys_sigreturn,
 [SYS_memstat] sys_memstat,
 [SYS_dumpproc] sys_dumpproc,
 [SYS_dumpchan] sys_dumpchan,

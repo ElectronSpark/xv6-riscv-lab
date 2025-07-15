@@ -774,30 +774,9 @@ wakeup(void *chan)
 // The victim won't exit until it tries to return
 // to user space (see usertrap() in trap.c).
 int
-kill(int pid)
+kill(int pid, int signum)
 {
-  struct proc *p;
-  int ret_val = 0;
-
-  __proctab_assert_unlocked();
-  __proctab_lock();
-  p = __proctab_get_pid_proc(pid);
-  if (p == NULL) {
-    ret_val = -1;
-    goto ret;
-  }
-
-  spin_acquire(&p->lock);
-  assert(p->pid == pid, "kill: pid mismatch");
-  p->killed = 1;
-  spin_release(&p->lock);
-
-  // @TODO: if the process is sleeping on a queue
-  scheduler_wakeup_on_chan(p->chan);
-
-ret:
-  __proctab_unlock();
-  return ret_val;
+  return signal_send(pid, signum, NULL);
 }
 
 void

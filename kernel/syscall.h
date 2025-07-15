@@ -34,17 +34,17 @@
 // System calls for labs
 // #define SYS_trace     22
 // #define SYS_sysinfo   23
-#define SYS_sigalarm  24
-#define SYS_sigaction  25
-#define SYS_sigreturn 26
-#define SYS_symlink   27
-// #define SYS_mmap      28
-// #define SYS_munmap    29
-// #define SYS_connect   30
-// #define SYS_pgaccess  31
+// #define SYS_mmap      29
+// #define SYS_munmap    30
+// #define SYS_connect   31
+// #define SYS_pgaccess  32
+#define SYS_symlink   33
+#define SYS_sigalarm  34
+#define SYS_sigaction 35
+#define SYS_sigreturn 36
 
-#define SYS_memstat 32
-#define SYS_dumpproc 33
-#define SYS_dumpchan 34
+#define SYS_memstat 533
+#define SYS_dumpproc 534
+#define SYS_dumpchan 535
 
 #endif          /* __KERNEL_SYSCALL_H */

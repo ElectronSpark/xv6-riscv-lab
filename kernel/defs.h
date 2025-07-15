@@ -122,7 +122,7 @@ int             growproc(int);
 void            proc_mapstacks(pagetable_t);
 pagetable_t     proc_pagetable(struct proc *);
 void            proc_freepagetable(pagetable_t, uint64);
-int             kill(int);
+int             kill(int, int);
 int             killed(struct proc*);
 int             needs_resched(struct proc *p);
 void            set_needs_resched(struct proc *p);
@@ -186,6 +186,13 @@ void            trapinit(void);
 void            trapinithart(void);
 extern struct spinlock tickslock;
 void            usertrapret(void);
+int             push_sigtrapframe(struct proc *p, 
+                                  void *handler, 
+                                  uint64 arg0, 
+                                  uint64 arg1, 
+                                  uint64 arg2);
+int             restore_sigtrapframe(struct proc *p, 
+                                     uint64 *trapframe);
 
 // uart.c
 void            uartinit(void);
