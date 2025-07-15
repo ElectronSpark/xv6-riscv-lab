@@ -239,6 +239,7 @@ int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
     int intena = mycpu()->intena; // Save interrupt state
     assert(mycpu()->noff == 2 || (mycpu()->noff == 3 && lk_holding), 
            "Process must hold and only hold the proc lock and sched lock when yielding. Current noff: %d", mycpu()->noff);
+    proc->needs_resched = 0;
     uint64 ret_val = __swtch_context(&proc->context, &mycpu()->context, (uint64)lk);
 
     assert(!intr_get(), "Interrupts must be disabled after switching to a process");

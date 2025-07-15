@@ -11,6 +11,7 @@
 #include "sched.h"
 #include "slab.h"
 #include "page.h"
+#include "signal.h"
 
 #define NPROC_HASH_BUCKETS 31
 
@@ -165,6 +166,17 @@ static int __proctab_add(struct proc *p)
   return 0;
 }
 
+int proctab_get_pid_proc(int pid, struct proc **pp) {
+  if (!pp) {
+    return -1; // Invalid argument
+  }
+  __proctab_lock();
+  struct proc *p = __proctab_get_pid_proc(pid);
+  __proctab_unlock();
+  *pp = p;
+  return 0;
+}
+
 extern void forkret(void);
 STATIC void freeproc(struct proc *p);
 
@@ -249,6 +261,7 @@ myproc(void)
 // If found, initialize state required to run in the kernel,
 // and return without p->lock held.
 // If there are no free procs, or a memory allocation fails, return 0.
+// Signal actions will not be initialized here.
 STATIC struct proc*
 allocproc(void)
 {
@@ -330,7 +343,8 @@ freeproc(struct proc *p)
   __proctab_unlock();
 
   assert(existing == NULL || existing == p, "freeproc called with a different proc");
-
+  if(p->sigacts)
+    sigacts_free(p->sigacts);
   if(p->trapframe)
     page_free((void*)p->trapframe, TRAPFRAME_ORDER);
   if(p->kstack)
@@ -422,6 +436,10 @@ userinit(void)
   spin_acquire(&p->lock);
   uvmfirst(p->pagetable, initcode, sizeof(initcode));
   p->sz = PGSIZE;
+
+  // allocate signal actions for the process
+  p->sigacts = sigacts_init();
+  assert(p->sigacts != NULL, "userinit: sigacts_init failed");
 
   // printf("\nuser pagetable after uvmfirst:\n");
   // dump_pagetable(p->pagetable, 2, 0, 0, 0, false);
@@ -601,6 +619,8 @@ exit(int status)
 
   spin_acquire(&p->lock);
   assert(p != proc_table.initproc, "init exiting");
+  p->state = EXITING;
+  __sync_synchronize(); // Ensure all writes are visible before releasing the lock
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
@@ -806,6 +826,24 @@ killed(struct proc *p)
   k = __killed_locked(p);
   spin_release(&p->lock);
   return k;
+}
+
+int needs_resched(struct proc *p)
+{
+  int resched;
+
+  spin_acquire(&p->lock);
+  resched = p->needs_resched;
+  spin_release(&p->lock);
+  
+  return resched;
+}
+
+void set_needs_resched(struct proc *p)
+{
+  spin_acquire(&p->lock);
+  p->needs_resched = 1;
+  spin_release(&p->lock);
 }
 
 // Copy to either a user address, or kernel address,

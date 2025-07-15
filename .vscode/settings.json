@@ -64,6 +64,8 @@
         "user.h": "c",
         "rbtree.h": "c",
         "bintree.h": "c",
-        "bintree_type.h": "c"
+        "bintree_type.h": "c",
+        "signal_types.h": "c",
+        "signal.h": "c"
     }
 }

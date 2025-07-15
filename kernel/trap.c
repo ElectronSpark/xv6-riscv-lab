@@ -6,6 +6,7 @@
 #include "proc.h"
 #include "defs.h"
 #include "sched.h"
+#include "signal.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -127,14 +128,52 @@ usertrap(void)
     break;
   }
 
-  if(killed(p))
-    exit(-1);
-
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
-    yield();
-
+    set_needs_resched(p);
+  
   usertrapret();
+}
+
+extern void sig_trampoline(uint64 arg0, uint64 arg1, uint64 arg2, void *handler);
+
+int push_sigtrapframe(struct proc *p, void *handler, uint64 arg0, uint64 arg1, uint64 arg2)
+{
+  // @TODO: Need to take care of stack overflow.
+
+  uint64 new_sigtrap = p->trapframe->sp - sizeof(struct trapframe);
+  p->trapframe->prev = p->sigtrapframe;
+
+  // Copy the trap frame to the signal trap frame.
+  if (copyout(p->pagetable, new_sigtrap, (void *)p->trapframe, sizeof(struct trapframe)) != 0) {
+    return -1; // Copy failed
+  }
+
+  p->sigtrapframe = new_sigtrap;
+  p->trapframe->sp = new_sigtrap - 16;
+  p->trapframe->epc = (uint64)sig_trampoline; // Set the epc to the signal trampoline
+  p->trapframe->a0 = arg0; // Set the first argument
+  p->trapframe->a1 = arg1; // Set the second argument
+  p->trapframe->a2 = arg2; // Set the third argument
+  p->trapframe->t3 = (uint64)handler; // Set the handler address
+
+  return 0; // Success
+}
+
+int restore_sigtrapframe(struct proc *p, uint64 *trapframe)
+{
+  if (p->sigtrapframe == 0) {
+    return -1; // No signal trap frame to restore
+  }
+
+  // Copy the signal trap frame back to the user trap frame.
+  if (copyin(p->pagetable, (void *)trapframe, p->sigtrapframe, sizeof(struct trapframe)) != 0) {
+    return -1; // Copy failed
+  }
+
+  p->sigtrapframe = p->trapframe->prev; // Restore the previous signal trap frame
+
+  return 0; // Success
 }
 
 //
@@ -145,10 +184,26 @@ usertrapret(void)
 {
   struct proc *p = myproc();
 
+  spin_acquire(&p->lock);
+  int terminated = signal_terminated(p->sigacts);
+  spin_release(&p->lock);
+
+  if (terminated || killed(p)) {
+    // If the process is terminated, exit it.
+    setkilled(p);
+    exit(-1);
+  }
+
+  if (needs_resched(p)) {
+    yield();
+  }
+  
   // we're about to switch the destination of traps from
   // kerneltrap() to usertrap(), so turn off interrupts until
   // we're back in user space, where usertrap() is correct.
   intr_off();
+
+  
 
   // send syscalls, interrupts, and exceptions to uservec in trampoline.S
   uint64 trampoline_uservec = TRAMPOLINE + (uservec - trampoline);

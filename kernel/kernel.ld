@@ -18,6 +18,10 @@ SECTIONS
     *(trampsec)
     . = ALIGN(0x1000);
     ASSERT(. - _trampoline == 0x1000, "error: trampoline larger than one page");
+    _sigtrampoline = .;
+    *(sig_trampsec)
+    . = ALIGN(0x1000);
+    ASSERT(. - _sigtrampoline == 0x1000, "error: signal trampoline larger than one page");
     PROVIDE(etext = .);
   }
 

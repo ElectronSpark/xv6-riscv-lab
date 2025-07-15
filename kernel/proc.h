@@ -5,6 +5,7 @@
 #include "list_type.h"
 #include "hlist_type.h"
 #include "proc_queue_type.h"
+#include "signal_types.h"
 
 // Saved registers for kernel context switches.
 struct context {
@@ -85,6 +86,9 @@ struct trapframe {
   /* 264 */ uint64 t4;
   /* 272 */ uint64 t5;
   /* 280 */ uint64 t6;
+  // For signal trap frames, this points to the previous signal trap frame.
+  // When there's no previous signal trap frame, this is 0.
+  /* 288 */ uint64 prev;
 };
 
 
@@ -113,7 +117,7 @@ struct ktrapframe {
   /* 248 */ uint64 gp;
 } __attribute__((aligned(8)));
 
-enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, EXITING, ZOMBIE };
 
 static inline const char *procstate_to_str(enum procstate state) {
   switch (state) {
@@ -149,8 +153,15 @@ struct proc {
   // p->lock must be held when using these:
   list_node_t dmp_list_entry;  // Entry in the dump list
   int killed;                  // If non-zero, have been killed
+  int needs_resched;           // If non-zero, process needs to be rescheduled
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
+
+  // Signal related fields
+  sigacts_t *sigacts;          // Signal actions for this process
+  // signal trap frames would be put at the user stack.
+  // This is used to restore the user context when a signal is delivered.
+  uint64 sigtrapframe;         // Address of the signal trap frame
   
   // both p->lock and p->parent->lock must be held when using this:
   list_node_t siblings;       // List of sibling processes

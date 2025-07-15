@@ -37,6 +37,8 @@ entry("getpid");
 entry("sbrk");
 entry("sleep");
 entry("uptime");
+entry("sigaction");
+entry("sigreturn");
 
 
 entry("memstat");

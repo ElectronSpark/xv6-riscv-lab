@@ -114,6 +114,7 @@ void            panic_disable_bt(void);
 void            printfinit(void);
 
 // proc.c
+int             proctab_get_pid_proc(int pid, struct proc **pp);
 int             cpuid(void);
 void            exit(int);
 int             fork(void);
@@ -123,6 +124,8 @@ pagetable_t     proc_pagetable(struct proc *);
 void            proc_freepagetable(pagetable_t, uint64);
 int             kill(int);
 int             killed(struct proc*);
+int             needs_resched(struct proc *p);
+void            set_needs_resched(struct proc *p);
 void            setkilled(struct proc*);
 struct cpu*     mycpu(void);
 struct cpu*     getmycpu(void);

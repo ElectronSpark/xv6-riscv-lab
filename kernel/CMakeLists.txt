@@ -37,6 +37,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/sysnet.c
     ${KERNEL_DIR}/page.c
     ${KERNEL_DIR}/slab.c
+    ${KERNEL_DIR}/signal.c
     ${KERNEL_DIR}/hlist.c
     ${KERNEL_DIR}/bintree.c
     ${KERNEL_DIR}/rbtree.c
@@ -79,6 +80,7 @@ set(KERNEL_S_FILES
     ${KERNEL_DIR}/entry.S
     ${KERNEL_DIR}/trampoline.S
     ${KERNEL_DIR}/kernelvec.S
+    ${KERNEL_DIR}/sig_trampoline.S
 )
 
 set_source_files_properties(${KERNEL_C_FILES} PROPERTIES LANGUAGE C)

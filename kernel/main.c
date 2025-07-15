@@ -4,6 +4,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "sched.h"
+#include "signal.h"
 
 volatile STATIC int started = 0;
 
@@ -33,6 +34,7 @@ main()
     virtio_disk_init(); // emulated hard disk
     pci_init();
     sockinit();
+    signal_init();   // signal handling initialization  
     userinit();      // first user process
     __sync_synchronize();
     started = 1;
