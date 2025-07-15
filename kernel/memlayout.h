@@ -63,10 +63,13 @@
 // map the trampoline page to the highest address,
 // in both user and kernel space.
 #define TRAMPOLINE (MAXVA - PGSIZE)
+// Trampoline page for signal handling.
+// SIG_TRAMPOLINE would be mapped to the user space
+#define SIG_TRAMPOLINE (TRAMPOLINE - PGSIZE)
 
 // map kernel stacks beneath the trampoline,
 // each surrounded by invalid guard pages.
-#define KSTACK(p) (TRAMPOLINE - ((p)+1)* 2*PGSIZE)
+#define KSTACK(p) (TRAMPOLINE - (PGSIZE << 1) - ((p)+1)* 2*PGSIZE)
 
 // User memory layout.
 // Address zero first:
@@ -76,7 +79,8 @@
 //   expandable heap
 //   ...
 //   TRAPFRAME (p->trapframe, used by the trampoline)
+//   SIG_TRAMPOLINE (used by the signal handling code)
 //   TRAMPOLINE (the same page as in the kernel)
-#define TRAPFRAME (TRAMPOLINE - PGSIZE)
+#define TRAPFRAME (TRAMPOLINE - (PGSIZE << 1))
 
 #endif          /* __KERNEL_MEMORY_LAYOUT_H */

@@ -181,6 +181,7 @@ extern void forkret(void);
 STATIC void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
+extern char sig_trampoline[]; // sig_trampoline.S
 
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
@@ -378,7 +379,15 @@ proc_pagetable(struct proc *p)
     return 0;
   }
 
-  // map the trapframe page just below the trampoline page, for
+  // Map the signal trampoline page just below the trampoline page.
+  // The user epc will point to this page when a signal is delivered.
+  if(mappages(pagetable, SIG_TRAMPOLINE, PGSIZE,
+              (uint64)sig_trampoline, PTE_U | PTE_R | PTE_X) < 0){
+    uvmfree(pagetable, 0);
+    return 0;
+  }
+
+  // map the trapframe page just below the signal trampoline page, for
   // trampoline.S.
   if(mappages(pagetable, TRAPFRAME, PGSIZE,
               (uint64)(p->trapframe), PTE_R | PTE_W | PTE_RSW_w) < 0){
@@ -396,6 +405,7 @@ void
 proc_freepagetable(pagetable_t pagetable, uint64 sz)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+  uvmunmap(pagetable, SIG_TRAMPOLINE, 1, 0);
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
   uvmfree(pagetable, sz);
 }
@@ -554,6 +564,17 @@ fork(void)
 
   // Cause fork to return 0 in the child.
   np->trapframe->a0 = 0;
+
+  // copy the process's signal actions.
+  if (p->sigacts) {
+    np->sigacts = sigacts_dup(p->sigacts);
+    if (np->sigacts == NULL) {
+      spin_release(&np->lock);
+      spin_release(&p->lock);
+      freeproc(np);
+      return -1;
+    }
+  }
 
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)

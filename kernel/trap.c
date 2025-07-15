@@ -151,23 +151,25 @@ int push_sigtrapframe(struct proc *p, void *handler, uint64 arg0, uint64 arg1, u
 
   p->sigtrapframe = new_sigtrap;
   p->trapframe->sp = new_sigtrap - 16;
-  p->trapframe->epc = (uint64)sig_trampoline; // Set the epc to the signal trampoline
+  p->trapframe->epc = (uint64)SIG_TRAMPOLINE; // Set the epc to the signal trampoline
   p->trapframe->a0 = arg0; // Set the first argument
   p->trapframe->a1 = arg1; // Set the second argument
   p->trapframe->a2 = arg2; // Set the third argument
-  p->trapframe->t3 = (uint64)handler; // Set the handler address
+  p->trapframe->t0 = (uint64)handler; // Set the handler address
 
   return 0; // Success
 }
 
-int restore_sigtrapframe(struct proc *p, uint64 *trapframe)
+int restore_sigtrapframe(struct proc *p)
 {
   if (p->sigtrapframe == 0) {
     return -1; // No signal trap frame to restore
   }
 
+  uint64 sigtrapframe = p->sigtrapframe;
+
   // Copy the signal trap frame back to the user trap frame.
-  if (copyin(p->pagetable, (void *)trapframe, p->sigtrapframe, sizeof(struct trapframe)) != 0) {
+  if (copyin(p->pagetable, (void *)p->trapframe, sigtrapframe, sizeof(struct trapframe)) != 0) {
     return -1; // Copy failed
   }
 
@@ -203,7 +205,13 @@ usertrapret(void)
   // we're back in user space, where usertrap() is correct.
   intr_off();
 
-  
+  int signo;
+  sigaction_t *sa = signal_take(p->sigacts, &signo);
+  if(sa){
+    if (push_sigtrapframe(p, sa->handler, signo, 0, 0) != 0) {
+      exit(-1); // Failed to push the signal trap frame
+    }
+  }
 
   // send syscalls, interrupts, and exceptions to uservec in trampoline.S
   uint64 trampoline_uservec = TRAMPOLINE + (uservec - trampoline);

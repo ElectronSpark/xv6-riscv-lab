@@ -191,8 +191,7 @@ int             push_sigtrapframe(struct proc *p,
                                   uint64 arg0, 
                                   uint64 arg1, 
                                   uint64 arg2);
-int             restore_sigtrapframe(struct proc *p, 
-                                     uint64 *trapframe);
+int             restore_sigtrapframe(struct proc *p);
 
 // uart.c
 void            uartinit(void);

@@ -14,7 +14,7 @@ void sigacts_free(sigacts_t *sa);
 int __signal_send(struct proc *p, int signo, siginfo_t *info);
 int signal_send(int pid, int signo, siginfo_t *info);
 int signal_terminated(sigacts_t *sa);
-sigaction_t *signal_take(sigacts_t *sa);
+sigaction_t *signal_take(sigacts_t *sa, int *ret_signo);
 
 int sigaction(int signum, struct sigaction *act, struct sigaction *oldact);
 

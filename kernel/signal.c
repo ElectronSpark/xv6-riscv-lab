@@ -111,7 +111,7 @@ int signal_terminated(sigacts_t *sa) {
 
 // Claim the signal and set the signal actions to the corresponding state.
 // and return the sigaction for the signal.
-sigaction_t *signal_take(sigacts_t *sa) {
+sigaction_t *signal_take(sigacts_t *sa, int *ret_signo) {
     if (!sa) {
         return NULL; // No signal actions available
     }
@@ -135,6 +135,10 @@ sigaction_t *signal_take(sigacts_t *sa) {
     sa->sa_sigpending &= ~SIGNO_MASK(signo); // Clear the pending signal
     sa->sa_sigmask = __SIGNAL_MAKE_MASK(sa, signo); // Update the mask
 
+    if (ret_signo) {
+        *ret_signo = signo; // Return the signal number
+    }
+
     return &sa->sa[signo]; // Return the sigaction for the signal
 }
 
@@ -155,8 +159,6 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
 
     if (act) {
         sa->sa[signum] = *act;
-        // @TODO: 
-        sa->sa_sigmask = __SIGNAL_MAKE_MASK(sa, signum);
     }
     
     spin_release(&p->lock);
@@ -206,8 +208,7 @@ int sigreturn(void) {
         return -1; // No signal trap frame to restore
     }
 
-    uint64 trapframe;
-    if (restore_sigtrapframe(p, &trapframe) != 0) {
+    if (restore_sigtrapframe(p) != 0) {
         spin_release(&p->lock);
         // @TODO:
         exit(-1); // Restore failed, exit the process
