@@ -10,8 +10,51 @@
 
 static slab_cache_t __sigacts_pool;
 
+static const void *__DEFAULT_SIGACTION[] = {
+    [SIGABRT]   = SIG_CORE,
+    [SIGALRM]   = SIG_TERM,
+    [SIGBUS]    = SIG_CORE,
+    [SIGCHLD]   = SIG_IGN,
+    // [SIGCLD]    = SIG_IGN,
+    [SIGCONT]   = SIG_CONT,
+    // [SIGEMT]    = SIG_TERM,
+    [SIGFPE]    = SIG_CORE,
+    [SIGHUP]    = SIG_TERM,
+    [SIGILL]    = SIG_CORE,
+    // [SIGINFO]   = SIG_TERM,
+    [SIGINT]    = SIG_TERM,
+    [SIGIO]     = SIG_TERM,
+    [SIGIOT]    = SIG_CORE,
+    [SIGKILL]   = SIG_TERM,
+    // [SIGLOST]   = SIG_TERM,
+    [SIGPIPE]   = SIG_TERM,
+    [SIGPOLL]   = SIG_TERM,
+    [SIGPROF]   = SIG_TERM,
+    [SIGPWR]    = SIG_TERM,
+    [SIGQUIT]   = SIG_CORE,
+    [SIGSEGV]   = SIG_CORE,
+    [SIGSTKFLT] = SIG_TERM,
+    [SIGSTOP]   = SIG_STOP,
+    [SIGTSTP]   = SIG_STOP,
+    [SIGSYS]    = SIG_CORE,
+    [SIGTERM]   = SIG_TERM,
+    [SIGTRAP]   = SIG_CORE,
+    [SIGTTIN]   = SIG_STOP,
+    [SIGTTOU]   = SIG_STOP,
+    [SIGUNUSED] = SIG_CORE,
+    [SIGURG]    = SIG_IGN,
+    [SIGUSR1]   = SIG_TERM,
+    [SIGUSR2]   = SIG_TERM,
+    [SIGVTALRM] = SIG_TERM,
+    [SIGXCPU]   = SIG_CORE,
+    [SIGXFSZ]   = SIG_CORE,
+    [SIGWINCH]  = SIG_IGN,
+    [NSIG+1]    = SIG_IGN,
+    SIG_IGN, // Default for all other signals
+};
 
-#define SIG_MANDATORY_MASK (SIGNO_MASK(SIGKILL) | SIGNO_MASK(SIGTERM))
+
+#define SIG_MANDATORY_MASK (SIGNO_MASK(SIGKILL) | SIGNO_MASK(SIGSTOP))
 
 #define __SIGNAL_MAKE_MASK(__sigacts, __signo)  \
     ((sigset_t)((~SIG_MANDATORY_MASK) &         \
@@ -26,12 +69,12 @@ sigacts_t *sigacts_init(void) {
         return NULL;
     }
     memset(sa, 0, sizeof(sigacts_t));
-    for (int i = 0; i < NSIG; i++) {
-        sa->sa[i].handler = SIG_DFL;
+    for (int i = 0; i <= NSIG; i++) {
+        sa->sa[i].handler = __DEFAULT_SIGACTION[i];
         sa->sa[i].sa_flags = 0;
-        sa->sa[i].sa_mask = 0;
+        sa->sa[i].sa_mask = __SIGNAL_MAKE_MASK(sa, SIGNONE);
     }
-    sa->sa_sigmask = __SIGNAL_MAKE_MASK(sa, SIGNONE);
+    sa->sa_sigmask = sa->sa[0].sa_mask;
     sa->sa_sigpending = 0;
     return sa;
 }
@@ -145,6 +188,9 @@ sigaction_t *signal_take(sigacts_t *sa, int *ret_signo) {
 int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
     if (signum < 1 || signum > NSIG) {
         return -1; // Invalid signal number
+    }
+    if (signum == SIGKILL || signum == SIGSTOP) {
+        return -1; // SIGKILL and SIGSTOP cannot be caught or ignored
     }
 
     struct proc *p = myproc();

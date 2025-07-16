@@ -2,21 +2,63 @@
 #define __SIGNO_H
 
 #define SIGNONE 0  // No signal
-// Signal Numer starts from 1
-#define SIGALARM 1
-#define SIGKILL 9
-#define SIGTERM 15
-// #define SIGSTOP 17
-// #define SIGCONT 19
-// #define SIGCHLD 20
+
+/* The signal numbers and actions are defined according to the Linux MAN pages.
+   Here it follows the x86/ARM signal numbering scheme.
+
+   SIGKILL and SIGSTOP cannot be caught, blocked, or ignored.
+*/
+#define SIGHUP           1
+#define SIGINT           2
+#define SIGQUIT          3
+#define SIGILL           4
+#define SIGTRAP          5
+#define SIGABRT          6
+#define SIGIOT           6
+#define SIGBUS           7
+// #define SIGEMT           -
+#define SIGFPE           8
+#define SIGKILL          9
+#define SIGUSR1         10
+#define SIGSEGV         11
+#define SIGUSR2         12
+#define SIGPIPE         13
+#define SIGALRM         14
+#define SIGTERM         15
+#define SIGSTKFLT       16
+#define SIGCHLD         17
+// #define SIGCLD           -
+#define SIGCONT         18
+#define SIGSTOP         19
+#define SIGTSTP         20
+#define SIGTTIN         21
+#define SIGTTOU         22
+#define SIGURG          23
+#define SIGXCPU         24
+#define SIGXFSZ         25
+#define SIGVTALRM       26
+#define SIGPROF         27
+#define SIGWINCH        28
+#define SIGIO           29
+#define SIGPOLL         SIGIO
+#define SIGPWR          30
+// #define SIGINFO          -
+// #define SIGLOST          -
+#define SIGSYS          31
+#define SIGUNUSED       31
 
 // Maximum number of signals
 #define NSIG 64
 
 #define SIGNO_MASK(__SIG_NUMBER)    \
-    (((__SIG_NUMBER) <= 0 || (__SIG_NUMBER) > NSIG) ? 0 : ((1UL << (__SIG_NUMBER)) >> 1))
+(((__SIG_NUMBER) <= 0 || (__SIG_NUMBER) > NSIG) ? 0 : ((1UL << (__SIG_NUMBER)) >> 1))
 
-#define SIG_DFL ((void (*)(int))0)  // Default signal handler
-#define SIG_IGN ((void (*)(int))1)  // Ignore signal
+#define SIG_DFL     ((void *)0)  // Default signal handler
+#define SIG_IGN     ((void *)1)  // Ignore signal
+#define SIG_TERM    ((void *)2)  // Terminate process
+#define SIG_STOP    ((void *)3)  // Stop process
+#define SIG_CONT    ((void *)4)  // Continue process
+#define SIG_CORE    ((void *)5)  // Core dump signal
+
 
 #endif /* __SIGNO_H */
