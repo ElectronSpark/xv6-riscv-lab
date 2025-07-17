@@ -10,49 +10,54 @@
 
 static slab_cache_t __sigacts_pool;
 
-static const void *__DEFAULT_SIGACTION[] = {
-    [SIGABRT]   = SIG_CORE,
-    [SIGALRM]   = SIG_TERM,
-    [SIGBUS]    = SIG_CORE,
-    [SIGCHLD]   = SIG_IGN,
-    // [SIGCLD]    = SIG_IGN,
-    [SIGCONT]   = SIG_CONT,
-    // [SIGEMT]    = SIG_TERM,
-    [SIGFPE]    = SIG_CORE,
-    [SIGHUP]    = SIG_TERM,
-    [SIGILL]    = SIG_CORE,
-    // [SIGINFO]   = SIG_TERM,
-    [SIGINT]    = SIG_TERM,
-    [SIGIO]     = SIG_TERM,
-    [SIGIOT]    = SIG_CORE,
-    [SIGKILL]   = SIG_TERM,
-    // [SIGLOST]   = SIG_TERM,
-    [SIGPIPE]   = SIG_TERM,
-    [SIGPOLL]   = SIG_TERM,
-    [SIGPROF]   = SIG_TERM,
-    [SIGPWR]    = SIG_TERM,
-    [SIGQUIT]   = SIG_CORE,
-    [SIGSEGV]   = SIG_CORE,
-    [SIGSTKFLT] = SIG_TERM,
-    [SIGSTOP]   = SIG_STOP,
-    [SIGTSTP]   = SIG_STOP,
-    [SIGSYS]    = SIG_CORE,
-    [SIGTERM]   = SIG_TERM,
-    [SIGTRAP]   = SIG_CORE,
-    [SIGTTIN]   = SIG_STOP,
-    [SIGTTOU]   = SIG_STOP,
-    [SIGUNUSED] = SIG_CORE,
-    [SIGURG]    = SIG_IGN,
-    [SIGUSR1]   = SIG_TERM,
-    [SIGUSR2]   = SIG_TERM,
-    [SIGVTALRM] = SIG_TERM,
-    [SIGXCPU]   = SIG_CORE,
-    [SIGXFSZ]   = SIG_CORE,
-    [SIGWINCH]  = SIG_IGN,
-    [NSIG+1]    = SIG_IGN,
-    SIG_IGN, // Default for all other signals
-};
-
+sig_defact signo_default_action(int signo) {
+    switch (signo) {
+    case SIGCHLD:
+    case SIGURG:
+    case SIGWINCH:
+    // case SIGCLD:
+        return SIG_ACT_IGN;
+    // case SIGEMT:
+    case SIGHUP:
+    // case SIGINFO:
+    case SIGINT:
+    case SIGIO:
+    case SIGKILL:
+    // case SIGLOST:
+    case SIGPIPE:
+    // case SIGPOLL:
+    case SIGPROF:
+    case SIGPWR:
+    case SIGSTKFLT:
+    case SIGTERM:
+    case SIGUSR1:
+    case SIGUSR2:
+    case SIGVTALRM:
+        return SIG_ACT_TERM;
+    case SIGSTOP:
+    case SIGTSTP:
+    case SIGTTIN:
+    case SIGTTOU:
+        return SIG_ACT_STOP;
+    case SIGCONT:
+        return SIG_ACT_CONT;
+    case SIGABRT:
+    case SIGBUS:
+    case SIGILL:
+    // case SIGIOT:
+    case SIGQUIT:
+    case SIGSEGV:
+    case SIGSYS:
+    case SIGTRAP:
+    // case SIGUNUSED
+    case SIGXCPU:
+    case SIGXFSZ:
+    case SIGFPE:
+        return SIG_ACT_CORE;
+    default:
+        return SIG_ACT_INVALID; // Invalid signal number
+    }
+}
 
 #define SIG_MANDATORY_MASK (SIGNO_MASK(SIGKILL) | SIGNO_MASK(SIGSTOP))
 
@@ -69,11 +74,6 @@ sigacts_t *sigacts_init(void) {
         return NULL;
     }
     memset(sa, 0, sizeof(sigacts_t));
-    for (int i = 0; i <= NSIG; i++) {
-        sa->sa[i].handler = __DEFAULT_SIGACTION[i];
-        sa->sa[i].sa_flags = 0;
-        sa->sa[i].sa_mask = __SIGNAL_MAKE_MASK(sa, SIGNONE);
-    }
     sa->sa_sigmask = sa->sa[0].sa_mask;
     sa->sa_sigpending = 0;
     return sa;
@@ -104,7 +104,7 @@ int __signal_send(struct proc *p, int signo, siginfo_t *info) {
     if (!p && (p = myproc()) == NULL) {
         return -1; // No process available
     }
-    if (signo < 1 || signo > NSIG) {
+    if (SIGBAD(signo)) {
         return -1; // Invalid process or signal number
     }
     if (!spin_holding(&p->lock)) {
@@ -127,6 +127,9 @@ int __signal_send(struct proc *p, int signo, siginfo_t *info) {
 
 int signal_send(int pid, int signo, siginfo_t *info) {
     struct proc *p = NULL;
+    if (pid < 0 || SIGBAD(signo)) {
+        return -1; // Invalid PID or signal number
+    }
     if (proctab_get_pid_proc(pid, &p) != 0) {
         return -1; // No process found
     }
@@ -211,36 +214,51 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
     return 0; // Success
 }
 
-uint64 sys_sigaction(void) {
-    int signum;
-    uint64 act_addr, oldact_addr;
-    struct sigaction act, oldact;
-    struct sigaction *p_act = NULL;
-    struct sigaction *p_oldact = NULL;
-    argint(0, &signum);
-    argaddr(1, &act_addr);
-    argaddr(2, &oldact_addr);
-
-    if (act_addr != 0) {
-        p_act = &act;
-        if (either_copyin(p_act, 1, act_addr, sizeof(struct sigaction)) < 0) {
-            return -1; // Copy failed
-        }
+int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
+    if (!set && how != SIG_SETMASK) {
+        return -1; // Invalid set pointer for non-SIG_SETMASK operations
     }
-    if (oldact_addr != 0) {
-        p_oldact = &oldact;
+    if (how != SIG_BLOCK && how != SIG_UNBLOCK && how != SIG_SETMASK) {
+        return -1; // Invalid operation
     }
+    struct proc *p = myproc();
+    assert(p != NULL, "sigprocmask: myproc returned NULL");
+    spin_acquire(&p->lock);
 
-    if (sigaction(signum, p_act, p_oldact) < 0) {
-        return -1; // sigaction failed
+    sigacts_t *sa = p->sigacts;
+    assert(sa != NULL, "sigprocmask: sigacts is NULL");
+    if (oldset) {
+        *oldset = sa->sa_sigmask; // Save the old mask
     }
-
-    if (p_oldact != 0) {
-        if (either_copyout(1, oldact_addr, p_oldact, sizeof(struct sigaction)) < 0) {
-            return -1; // Copy failed
-        }
+    
+    if (how == SIG_SETMASK) {
+        sa->sa_sigmask = *set; // Set the new mask
+    } else if (how == SIG_BLOCK) {
+        sa->sa_sigmask |= *set; // Block the signals in the set
+    } else if (how == SIG_UNBLOCK) {
+        sa->sa_sigmask &= ~(*set); // Unblock the signals in the set
     }
 
+    // Ensure the mandatory signals are always unblocked
+    sa->sa_sigmask &= ~SIG_MANDATORY_MASK;
+
+    return 0; // Success
+}
+
+int sigpending(sigset_t *set) {
+    if (!set) {
+        return -1; // Invalid set pointer
+    }
+    struct proc *p = myproc();
+    assert(p != NULL, "sigpending: myproc returned NULL");
+    spin_acquire(&p->lock);
+
+    sigacts_t *sa = p->sigacts;
+    assert(sa != NULL, "sigpending: sigacts is NULL");
+    
+    *set = sa->sa_sigmask & sa->sa_sigpending; // Get the pending signals
+    spin_release(&p->lock);
+    
     return 0; // Success
 }
 
@@ -263,15 +281,4 @@ int sigreturn(void) {
     spin_release(&p->lock);
 
     return 0; // Success
-}
-
-uint64 sys_sigreturn(void) {
-    if (sigreturn() < 0) {
-        return -1; // sigreturn failed
-    }
-    
-    struct proc *p = myproc();
-    assert(p != NULL, "sys_sigreturn: myproc returned NULL");
-
-    return 0;
 }

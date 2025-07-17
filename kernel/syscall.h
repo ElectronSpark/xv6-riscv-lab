@@ -42,6 +42,8 @@
 #define SYS_sigalarm  34
 #define SYS_sigaction 35
 #define SYS_sigreturn 36
+#define SYS_sigpending 37
+#define SYS_sigprocmask 38
 
 #define SYS_memstat 533
 #define SYS_dumpproc 534

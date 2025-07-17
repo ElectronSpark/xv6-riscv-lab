@@ -67,6 +67,7 @@
         "bintree_type.h": "c",
         "signal_types.h": "c",
         "signal.h": "c",
-        "signo.h": "c"
+        "signo.h": "c",
+        "syscall.h": "c"
     }
 }

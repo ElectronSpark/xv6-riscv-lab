@@ -40,6 +40,8 @@ entry("uptime");
 entry("sigaction");
 entry("sigalarm");
 entry("sigreturn");
+entry("sigpending");
+entry("sigprocmask");
 
 
 entry("memstat");

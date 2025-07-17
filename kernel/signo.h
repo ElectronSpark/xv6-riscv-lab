@@ -45,20 +45,17 @@
 // #define SIGINFO          -
 // #define SIGLOST          -
 #define SIGSYS          31
-#define SIGUNUSED       31
+// #define SIGUNUSED       31
 
 // Maximum number of signals
-#define NSIG 64
+#define NSIG 32
 
 #define SIGNO_MASK(__SIG_NUMBER)    \
 (((__SIG_NUMBER) <= 0 || (__SIG_NUMBER) > NSIG) ? 0 : ((1UL << (__SIG_NUMBER)) >> 1))
 
-#define SIG_DFL     ((void *)0)  // Default signal handler
-#define SIG_IGN     ((void *)1)  // Ignore signal
-#define SIG_TERM    ((void *)2)  // Terminate process
-#define SIG_STOP    ((void *)3)  // Stop process
-#define SIG_CONT    ((void *)4)  // Continue process
-#define SIG_CORE    ((void *)5)  // Core dump signal
+#define SIG_ERR      ((void (*)(void))-1) // Error return from signal handler
+#define SIG_DFL      ((void (*)(void))0)  // Default signal handler
+#define SIG_IGN      ((void (*)(void))1)  // Ignore signal
 
 
 #endif /* __SIGNO_H */

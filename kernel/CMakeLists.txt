@@ -38,6 +38,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/page.c
     ${KERNEL_DIR}/slab.c
     ${KERNEL_DIR}/signal.c
+    ${KERNEL_DIR}/sys_signal.c
     ${KERNEL_DIR}/hlist.c
     ${KERNEL_DIR}/bintree.c
     ${KERNEL_DIR}/rbtree.c

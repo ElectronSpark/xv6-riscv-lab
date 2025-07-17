@@ -140,7 +140,7 @@ extern void sig_trampoline(uint64 arg0, uint64 arg1, uint64 arg2, void *handler)
 int push_sigtrapframe(struct proc *p, void *handler, uint64 arg0, uint64 arg1, uint64 arg2)
 {
   // @TODO: Need to take care of stack overflow.
-
+  // ucontext_t uc = {0};
   uint64 new_sigtrap = p->trapframe->sp - sizeof(struct trapframe);
   p->trapframe->prev = p->sigtrapframe;
 
