@@ -7,6 +7,7 @@
 #include "defs.h"
 #include "sched.h"
 #include "signal.h"
+#include "vm.h"
 
 struct spinlock tickslock;
 uint ticks;
@@ -71,7 +72,8 @@ usertrap(void)
 {
   int which_dev = 0;
   uint64 fault_no, va;
-  pagetable_t pagetable;
+  vm_t *vm = NULL;
+  vma_t *vma = NULL;
   // printf("usertrap: scause=0x%lx (%s), sepc=0x%lx, stval=0x%lx\n",
   //        r_scause(), __scause_to_str(r_scause()), r_sepc(), r_stval());
 
@@ -106,13 +108,25 @@ usertrap(void)
 
     syscall();
     break;
+  case 13:
+    va = r_stval();
+    vm = &p->vm;
+    vma = vm_find_area(vm, va);
+    if (vma == NULL || vma_validate(vma, va, PGSIZE, VM_FLAG_USERMAP | VM_FLAG_READ) != 0) {
+      printf("usertrap(): page fault on read 0x%lx pid=%d\n", r_scause(), p->pid);
+      printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+      printf("            pgtbl=0x%lx\n", (uint64)vm->pagetable);
+      setkilled(p);
+    }
+    break;
   case 15:
     va = r_stval();
-    pagetable = p->pagetable;
-    if (uvmvalidate_w(pagetable, va) != 0) {
+    vm = &p->vm;
+    vma = vm_find_area(vm, va);
+    if (vma == NULL || vma_validate(vma, va, PGSIZE, VM_FLAG_USERMAP | VM_FLAG_WRITE) != 0) {
       printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(), p->pid);
       printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
-      printf("            pgtbl=0x%lx\n", (uint64)pagetable);
+      printf("            pgtbl=0x%lx\n", (uint64)vm->pagetable);
       setkilled(p);
     }
     break;
@@ -145,7 +159,7 @@ int push_sigtrapframe(struct proc *p, void *handler, uint64 arg0, uint64 arg1, u
   p->trapframe->prev = p->sigtrapframe;
 
   // Copy the trap frame to the signal trap frame.
-  if (copyout(p->pagetable, new_sigtrap, (void *)p->trapframe, sizeof(struct trapframe)) != 0) {
+  if (vm_copyout(&p->vm, new_sigtrap, (void *)p->trapframe, sizeof(struct trapframe)) != 0) {
     return -1; // Copy failed
   }
 
@@ -169,7 +183,7 @@ int restore_sigtrapframe(struct proc *p)
   uint64 sigtrapframe = p->sigtrapframe;
 
   // Copy the signal trap frame back to the user trap frame.
-  if (copyin(p->pagetable, (void *)p->trapframe, sigtrapframe, sizeof(struct trapframe)) != 0) {
+  if (vm_copyin(&p->vm, (void *)p->trapframe, sigtrapframe, sizeof(struct trapframe)) != 0) {
     return -1; // Copy failed
   }
 
@@ -241,10 +255,10 @@ usertrapret(void)
   w_sepc(p->trapframe->epc);
 
   // tell trampoline.S the user page table to switch to.
-  uint64 satp = MAKE_SATP(p->pagetable);
+  uint64 satp = MAKE_SATP(p->vm.pagetable);
 
   // printf("user pagetable before usertrapret:\n");
-  // dump_pagetable(p->pagetable, 2, 0, 0, 0, true);
+  // dump_pagetable(p->vm.pagetable, 2, 0, 0, 0, false);
   // printf("\n");
 
   // jump to userret in trampoline.S at the top of memory, which 

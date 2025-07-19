@@ -12,6 +12,7 @@
 #include "slab.h"
 #include "page.h"
 #include "signal.h"
+#include "vm.h"
 
 #define NPROC_HASH_BUCKETS 31
 
@@ -299,8 +300,7 @@ allocproc(void)
   p->kstack = (uint64)kstack;
 
   // Allocate pagetable for the process.
-  p->pagetable = proc_pagetable(p);
-  if(p->pagetable == 0){
+  if(proc_pagetable(p) != 0){
     freeproc(p);
     return NULL;
   }
@@ -350,8 +350,9 @@ freeproc(struct proc *p)
     page_free((void*)p->trapframe, TRAPFRAME_ORDER);
   if(p->kstack)
     page_free((void*)p->kstack, KERNEL_STACK_ORDER);
-  if(p->pagetable)
-    proc_freepagetable(p->pagetable, p->sz);
+  if (p->vm.valid) {
+    proc_freepagetable(p);
+  }
   
   slab_free(p);
   pop_off();  // PCB has been freed, so no need to keep noff counter increased
@@ -359,55 +360,23 @@ freeproc(struct proc *p)
 
 // Create a user page table for a given process, with no user memory,
 // but with trampoline and trapframe pages.
-pagetable_t
+int
 proc_pagetable(struct proc *p)
 {
-  pagetable_t pagetable;
-
   // An empty page table.
-  pagetable = uvmcreate();
-  if(pagetable == 0)
-    return 0;
-
-  // map the trampoline code (for system call return)
-  // at the highest user virtual address.
-  // only the supervisor uses it, on the way
-  // to/from user space, so not PTE_U.
-  if(mappages(pagetable, TRAMPOLINE, PGSIZE,
-              (uint64)trampoline, PTE_R | PTE_X) < 0){
-    uvmfree(pagetable, 0);
-    return 0;
+  if (vm_init(&p->vm, p->trapframe) != 0) {
+    return -1; // Failed to initialize VM
   }
 
-  // Map the signal trampoline page just below the trampoline page.
-  // The user epc will point to this page when a signal is delivered.
-  if(mappages(pagetable, SIG_TRAMPOLINE, PGSIZE,
-              (uint64)sig_trampoline, PTE_U | PTE_R | PTE_X) < 0){
-    uvmfree(pagetable, 0);
-    return 0;
-  }
-
-  // map the trapframe page just below the signal trampoline page, for
-  // trampoline.S.
-  if(mappages(pagetable, TRAPFRAME, PGSIZE,
-              (uint64)(p->trapframe), PTE_R | PTE_W | PTE_RSW_w) < 0){
-    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-    uvmfree(pagetable, 0);
-    return 0;
-  }
-
-  return pagetable;
+  return 0;
 }
 
 // Free a process's page table, and free the
 // physical memory it refers to.
 void
-proc_freepagetable(pagetable_t pagetable, uint64 sz)
+proc_freepagetable(struct proc *p)
 {
-  uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-  uvmunmap(pagetable, SIG_TRAMPOLINE, 1, 0);
-  uvmunmap(pagetable, TRAPFRAME, 1, 0);
-  uvmfree(pagetable, sz);
+  vm_destroy(&p->vm, true);
 }
 
 // a user program that calls exec("/init")
@@ -419,7 +388,7 @@ uchar initcode[] = {
   0x93, 0x08, 0x70, 0x00, 0x73, 0x00, 0x00, 0x00,
   0x93, 0x08, 0x20, 0x00, 0x73, 0x00, 0x00, 0x00,
   0xef, 0xf0, 0x9f, 0xff, 0x2f, 0x69, 0x6e, 0x69,
-  0x74, 0x00, 0x00, 0x24, 0x00, 0x00, 0x00, 0x00,
+  0x74, 0x00, 0x00, 0x24, 0x10, 0x00, 0x00, 0x00,
   0x00, 0x00, 0x00, 0x00
 };
 
@@ -434,7 +403,7 @@ userinit(void)
 
   // // printf user pagetable
   // printf("\nuser pagetable after allocproc:\n");
-  // dump_pagetable(p->pagetable, 2, 0, 0, 0, false);
+  // dump_pagetable(p->vm.pagetable, 2, 0, 0, 0, false);
   // printf("\n");
 
   __proctab_lock();
@@ -443,21 +412,31 @@ userinit(void)
   
   // allocate one user page and copy initcode's instructions
   // and data into it.
+  uint64 ustack_top = USTACKTOP;
+  printf("user stack top at 0x%lx\n", ustack_top);
   spin_acquire(&p->lock);
-  uvmfirst(p->pagetable, initcode, sizeof(initcode));
-  p->sz = PGSIZE;
+  uint64 flags = VM_FLAG_EXEC | VM_FLAG_READ | VM_FLAG_USERMAP;
+  assert(sizeof(initcode) <= PGSIZE, "userinit: initcode too large");
+  void *initcode_page = page_alloc(0, PAGE_FLAG_ANON);
+  assert(initcode_page != NULL, "userinit: page_alloc failed for initcode");
+  memset(initcode_page, 0, PGSIZE);
+  memmove(initcode_page, initcode, sizeof(initcode));
+  assert(vma_mmap(&p->vm, UVMBOTTOM, PGSIZE, flags, NULL, 0, initcode_page) == 0,
+         "userinit: vma_mmap failed");
+  assert(vm_createstack(&p->vm, ustack_top, USERSTACK * PGSIZE) == 0,
+         "userinit: vm_createstack failed");
 
   // allocate signal actions for the process
   p->sigacts = sigacts_init();
   assert(p->sigacts != NULL, "userinit: sigacts_init failed");
 
   // printf("\nuser pagetable after uvmfirst:\n");
-  // dump_pagetable(p->pagetable, 2, 0, 0, 0, false);
+  // dump_pagetable(p->vm.pagetable, 2, 0, 0, 0, false);
   // printf("\n");
 
   // prepare for the very first "return" from kernel to user.
-  p->trapframe->epc = 0;      // user program counter
-  p->trapframe->sp = PGSIZE;  // user stack pointer
+  p->trapframe->epc = UVMBOTTOM;      // user program counter
+  p->trapframe->sp = USTACKTOP;  // user stack pointer
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
@@ -476,19 +455,9 @@ userinit(void)
 int
 growproc(int n)
 {
-  uint64 sz;
   struct proc *p = myproc();
 
-  sz = p->sz;
-  if(n > 0){
-    if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
-      return -1;
-    }
-  } else if(n < 0){
-    sz = uvmdealloc(p->pagetable, sz, sz + n);
-  }
-  p->sz = sz;
-  return 0;
+  return vm_growheap(&p->vm, n);
 }
 
 // attach a newly forked process to the current process as its child.
@@ -550,14 +519,13 @@ fork(void)
   spin_acquire(&np->lock);
 
   // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+  if(vm_dup(&np->vm, &p->vm) != 0){
     // @TODO: need to make sure no one would access np before freeing it.
     spin_release(&np->lock);
     spin_release(&p->lock);
     freeproc(np);
     return -1;
   }
-  np->sz = p->sz;
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -697,7 +665,7 @@ wait(uint64 addr)
       if(child->state == ZOMBIE){
         // Found one.
         pid = child->pid;
-        if(addr != 0 && copyout(p->pagetable, addr, (char *)&child->xstate,
+        if(addr != 0 && vm_copyout(&p->vm, addr, (char *)&child->xstate,
                                     sizeof(child->xstate)) < 0) {
           spin_release(&child->lock);
           pid = -1;
@@ -854,7 +822,7 @@ either_copyout(int user_dst, uint64 dst, void *src, uint64 len)
 {
   struct proc *p = myproc();
   if(user_dst){
-    return copyout(p->pagetable, dst, src, len);
+    return vm_copyout(&p->vm, dst, src, len);
   } else {
     memmove((char *)dst, src, len);
     return 0;
@@ -869,7 +837,7 @@ either_copyin(void *dst, int user_src, uint64 src, uint64 len)
 {
   struct proc *p = myproc();
   if(user_src){
-    return copyin(p->pagetable, dst, src, len);
+    return vm_copyin(&p->vm, dst, src, len);
   } else {
     memmove(dst, (char*)src, len);
     return 0;

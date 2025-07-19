@@ -71,6 +71,10 @@
 // each surrounded by invalid guard pages.
 #define KSTACK(p) (TRAMPOLINE - (PGSIZE << 1) - ((p)+1)* 2*PGSIZE)
 
+#define UVMBOTTOM 0x1000L
+#define UVMTOP (MAXVA - (1UL << 32))
+#define USTACKTOP UVMTOP
+
 // User memory layout.
 // Address zero first:
 //   text
@@ -78,6 +82,8 @@
 //   fixed-size stack
 //   expandable heap
 //   ...
+//   user stack
+//   128MB padding
 //   TRAPFRAME (p->trapframe, used by the trampoline)
 //   SIG_TRAMPOLINE (used by the signal handling code)
 //   TRAMPOLINE (the same page as in the kernel)

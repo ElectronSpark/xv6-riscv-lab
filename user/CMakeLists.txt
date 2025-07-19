@@ -15,9 +15,9 @@ FILE(GLOB KERNEL_INITCODE_SRC ${KERNEL_INITCODE_FILES})
 set_source_files_properties(${KERNEL_INITCODE_SRC} PROPERTIES LANGUAGE C)
 add_executable(${USER_INITCODE_OBJ} ${KERNEL_INITCODE_SRC})
 target_compile_options(${USER_INITCODE_OBJ} PRIVATE 
-    -march=rv64g -nostdinc -I${CMAKE_SOURCE_DIR} -I${KERNEL_DIR})
+-march=rv64g -nostdinc -I${CMAKE_SOURCE_DIR} -I${KERNEL_DIR})
 set_target_properties(${USER_INITCODE_OBJ} PROPERTIES LINK_FLAGS
-    "-N -e start -Ttext 0")
+"-N -e start -Ttext 0x1000")
 
 add_custom_target(${USER_INITCODE_BIN}
     COMMAND ${CMAKE_OBJCOPY} -S -O binary ${USER_INITCODE_OBJ} ${USER_INITCODE_BIN}

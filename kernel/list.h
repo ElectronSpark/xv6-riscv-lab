@@ -198,10 +198,12 @@ static inline void list_entry_replace(list_node_t *old, list_node_t *new) {
     if (old == NULL || new == NULL) {
         return;
     }
-    *new = *old;
-    old->prev->next = new;
-    old->next->prev = new;
-    list_entry_init(old);
+    list_entry_init(new);
+    if (!LIST_ENTRY_IS_DETACHED(old)) {
+        list_node_t *prev = LIST_PREV_ENTRY(old);
+        list_entry_detach(old);
+        list_entry_insert(prev, new);
+    }
 }
 
 // push a node into the start of a list

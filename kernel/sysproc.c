@@ -42,7 +42,9 @@ sys_sbrk(void)
   int n;
 
   argint(0, &n);
-  addr = myproc()->sz;
+  vma_t *vma = myproc()->vm.heap;
+  assert(vma != NULL, "sys_sbrk: heap vma is NULL");
+  addr = vma->end;
   if(growproc(n) < 0)
     return -1;
   return addr;

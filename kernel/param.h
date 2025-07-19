@@ -34,6 +34,7 @@
 #else
 #define USERSTACK    1     // user stack pages
 #endif
+#define MAXUSTACK    (1UL << 20)    // maximum number of pages in user stack
 
 // The base(2) order of the size of a page in bytes
 #ifndef PAGE_SHIFT

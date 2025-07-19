@@ -68,6 +68,14 @@
         "signal_types.h": "c",
         "signal.h": "c",
         "signo.h": "c",
-        "syscall.h": "c"
+        "syscall.h": "c",
+        "deque": "cpp",
+        "string": "cpp",
+        "unordered_map": "cpp",
+        "vector": "cpp",
+        "string_view": "cpp",
+        "initializer_list": "cpp",
+        "cstdarg": "c",
+        "numbers": "c"
     }
 }

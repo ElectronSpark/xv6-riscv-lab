@@ -180,6 +180,48 @@ struct rb_node **__rb_find_key_link(
     return link;
 }
 
+struct rb_node *rb_find_key_rup(struct rb_root *root, uint64 key)
+{
+    if (!rb_root_is_initialized(root)) {
+        return NULL;
+    }
+    struct rb_node *parent = NULL;
+    struct rb_node **link = __rb_find_key_link(root, &parent, key);
+    if (link == NULL) {
+        return NULL;
+    }
+    if (*link != NULL) {
+        return *link;
+    }
+    uint64 pkey = rb_get_node_key(root, parent);
+    if (rb_keys_cmp(root, pkey, key) >= 0) {
+        /// 如果parent的key大于等于当前key，则返回parent。
+        return parent;
+    }
+    return rb_next_node(parent);
+}
+
+struct rb_node *rb_find_key_rdown(struct rb_root *root, uint64 key)
+{
+    if (!rb_root_is_initialized(root)) {
+        return NULL;
+    }
+    struct rb_node *parent = NULL;
+    struct rb_node **link = __rb_find_key_link(root, &parent, key);
+    if (link == NULL) {
+        return NULL;
+    }
+    if (*link != NULL) {
+        return *link;
+    }
+    uint64 pkey = rb_get_node_key(root, parent);
+    if (rb_keys_cmp(root, pkey, key) <= 0) {
+        /// 如果parent的key小于等于当前key，则返回parent。
+        return parent;
+    }
+    return rb_prev_node(parent);
+}
+
 struct rb_node *rb_find_key(struct rb_root *root, unsigned long key)
 {
     if (!rb_root_is_initialized(root)) {

@@ -7,6 +7,7 @@
 #include "fs.h"
 #include "sleeplock.h"
 #include "file.h"
+#include "vm.h"
 
 #define PIPESIZE 512
 
@@ -90,7 +91,7 @@ pipewrite(struct pipe *pi, uint64 addr, int n)
       sleep(&pi->nwrite, &pi->lock);
     } else {
       char ch;
-      if(copyin(pr->pagetable, &ch, addr + i, 1) == -1)
+      if(vm_copyin(&pr->vm, &ch, addr + i, 1) == -1)
         break;
       pi->data[pi->nwrite++ % PIPESIZE] = ch;
       i++;
@@ -121,7 +122,7 @@ piperead(struct pipe *pi, uint64 addr, int n)
     if(pi->nread == pi->nwrite)
       break;
     ch = pi->data[pi->nread++ % PIPESIZE];
-    if(copyout(pr->pagetable, addr + i, &ch, 1) == -1)
+    if(vm_copyout(&pr->vm, addr + i, &ch, 1) == -1)
       break;
   }
   wakeup(&pi->nwrite);  //DOC: piperead-wakeup

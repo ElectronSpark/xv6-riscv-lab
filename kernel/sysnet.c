@@ -13,6 +13,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "net.h"
+#include "vm.h"
 
 struct sock {
   struct sock *next; // the next socket in the list
@@ -128,7 +129,7 @@ sockread(struct sock *si, uint64 addr, int n)
   len = m->len;
   if (len > n)
     len = n;
-  if (copyout(pr->pagetable, addr, m->head, len) == -1) {
+  if (vm_copyout(&pr->vm, addr, m->head, len) == -1) {
     mbuffree(m);
     return -1;
   }
@@ -146,7 +147,7 @@ sockwrite(struct sock *si, uint64 addr, int n)
   if (!m)
     return -1;
 
-  if (copyin(pr->pagetable, mbufput(m, n), addr, n) == -1) {
+  if (vm_copyin(&pr->vm, mbufput(m, n), addr, n) == -1) {
     mbuffree(m);
     return -1;
   }

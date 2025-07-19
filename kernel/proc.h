@@ -7,6 +7,7 @@
 #include "proc_queue_type.h"
 #include "trapframe.h"
 #include "signal_types.h"
+#include "vm_types.h"
 
 // Saved registers for kernel context switches.
 struct context {
@@ -92,8 +93,7 @@ struct proc {
 
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
-  uint64 sz;                   // Size of process memory (bytes)
-  pagetable_t pagetable;       // User page table
+  vm_t vm;                     // Virtual memory areas and page table
   struct trapframe *trapframe; // data page for trampoline.S
 
   // both p->lock and __sched_lock must be held 

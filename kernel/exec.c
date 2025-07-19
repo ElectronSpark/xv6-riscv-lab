@@ -6,8 +6,9 @@
 #include "proc.h"
 #include "defs.h"
 #include "elf.h"
+#include "vm.h"
 
-STATIC int loadseg(pde_t *, uint64, struct inode *, uint, uint);
+STATIC int loadseg(pagetable_t, uint64, struct inode*, uint, uint, uint64);
 
 int flags2perm(int flags)
 {
@@ -16,7 +17,44 @@ int flags2perm(int flags)
       perm = PTE_X;
     if(flags & 0x2)
       perm |= PTE_W;
+    if(flags & 0x4)
+      perm |= PTE_R;
     return perm;
+}
+
+int flags2vmperm(int flags)
+{
+    int perm = 0;
+    if(flags & 0x1)
+      perm = VM_FLAG_EXEC;
+    if(flags & 0x2)
+      perm |= VM_FLAG_WRITE;
+    if(flags & 0x4)
+      perm |= VM_FLAG_READ;
+    return perm;
+}
+
+int ustack_alloc(vm_t *vm, uint64 *sp)
+{
+  uint64 ret_sp = USTACKTOP;
+  uint64 stackbase = USTACKTOP - USERSTACK * PGSIZE;
+  if (va_alloc(vm, stackbase, USERSTACK * PGSIZE, VM_FLAG_USERMAP | VM_FLAG_WRITE | VM_FLAG_READ | VM_FLAG_GROWSDOWN) == NULL) {
+    return -1; // Allocation failed
+  }
+  for (uint64 i = stackbase; i < USTACKTOP; i += PGSIZE) {
+    pte_t *pte = walk(vm->pagetable, i, 1, NULL, NULL);
+    if (pte == NULL) {
+      return -1; // Walk failed
+    }
+    uint64 pa = (uint64)kalloc();
+    if (pa == 0) {
+      return -1; // kalloc failed
+    }
+    memset((void *)pa, 0, PGSIZE); // Initialize the page
+    *pte = PA2PTE(pa) | PTE_V | PTE_U | PTE_W | PTE_W; // Allocate and map the page
+  }
+  *sp = ret_sp; // Set the stack pointer
+  return 0; // Success
 }
 
 int
@@ -24,11 +62,12 @@ exec(char *path, char **argv)
 {
   char *s, *last;
   int i, off;
-  uint64 argc, sz = 0, sp, ustack[MAXARG], stackbase;
+  uint64 argc, heap_start = 0, sp, ustack[MAXARG];
+  uint64 stackbase = USTACKTOP - USERSTACK * PGSIZE;
   struct elfhdr elf;
   struct inode *ip;
   struct proghdr ph;
-  pagetable_t pagetable = 0, oldpagetable;
+  vm_t tmp_vm = { 0 };
   struct proc *p = myproc();
 
   begin_op();
@@ -46,8 +85,9 @@ exec(char *path, char **argv)
   if(elf.magic != ELF_MAGIC)
     goto bad;
 
-  if((pagetable = proc_pagetable(p)) == 0)
+  if (vm_init(&tmp_vm, p->trapframe) != 0) {
     goto bad;
+  }
 
   // Load program into memory.
   for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
@@ -61,11 +101,16 @@ exec(char *path, char **argv)
       goto bad;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
-    uint64 sz1;
-    if((sz1 = uvmalloc(pagetable, sz, ph.vaddr + ph.memsz, flags2perm(ph.flags))) == 0)
-      goto bad;
-    sz = sz1;
-    if(loadseg(pagetable, ph.vaddr, ip, ph.off, ph.filesz) < 0)
+    vma_t *vma = va_alloc(&tmp_vm, ph.vaddr, ph.memsz, flags2vmperm(ph.flags) | VM_FLAG_USERMAP);
+    if (vma == NULL) {
+      goto bad; // Allocation failed
+    }
+    // @TODO: to locate the start of heap
+    uint64 size1 = ph.vaddr + ph.memsz;
+    if (heap_start < size1) {
+      heap_start = size1; // Update heap start if this segment extends it
+    }
+    if(loadseg(tmp_vm.pagetable, ph.vaddr, ip, ph.off, ph.filesz, flags2perm(ph.flags)) < 0)
       goto bad;
   }
   iunlockput(ip);
@@ -73,19 +118,18 @@ exec(char *path, char **argv)
   ip = 0;
 
   p = myproc();
-  uint64 oldsz = p->sz;
 
   // Allocate some pages at the next page boundary.
   // Make the first inaccessible as a stack guard.
   // Use the rest as the user stack.
-  sz = PGROUNDUP(sz);
-  uint64 sz1;
-  if((sz1 = uvmalloc(pagetable, sz, sz + (USERSTACK+1)*PGSIZE, PTE_W)) == 0)
-    goto bad;
-  sz = sz1;
-  uvmclear(pagetable, sz-(USERSTACK+1)*PGSIZE);
-  sp = sz;
-  stackbase = sp - USERSTACK*PGSIZE;
+  // Create heap area and reserve one page for heap space.
+  if (vm_createheap(&tmp_vm, heap_start, USERSTACK * PGSIZE) != 0) {
+    goto bad; // Heap allocation failed
+  }
+  if (vm_createstack(&tmp_vm, USTACKTOP, USERSTACK * PGSIZE) != 0) {
+    goto bad; // Stack allocation failed
+  }
+  sp = USTACKTOP;
 
   // Push argument strings, prepare rest of stack in ustack.
   for(argc = 0; argv[argc]; argc++) {
@@ -95,7 +139,7 @@ exec(char *path, char **argv)
     sp -= sp % 16; // riscv sp must be 16-byte aligned
     if(sp < stackbase)
       goto bad;
-    if(copyout(pagetable, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
+    if(vm_copyout(&tmp_vm, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
       goto bad;
     ustack[argc] = sp;
   }
@@ -106,7 +150,7 @@ exec(char *path, char **argv)
   sp -= sp % 16;
   if(sp < stackbase)
     goto bad;
-  if(copyout(pagetable, sp, (char *)ustack, (argc+1)*sizeof(uint64)) < 0)
+  if(vm_copyout(&tmp_vm, sp, (char *)ustack, (argc+1)*sizeof(uint64)) < 0)
     goto bad;
 
   // arguments to user main(argc, argv)
@@ -121,18 +165,14 @@ exec(char *path, char **argv)
   safestrcpy(p->name, last, sizeof(p->name));
     
   // Commit to the user image.
-  oldpagetable = p->pagetable;
-  p->pagetable = pagetable;
-  p->sz = sz;
+  vm_destroy(&p->vm, true); // Destroy the old VM
+  assert(vm_move(&p->vm, &tmp_vm) == 0, "exec: vm_move failed");
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
-  proc_freepagetable(oldpagetable, oldsz);
-
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:
-  if(pagetable)
-    proc_freepagetable(pagetable, sz);
+  vm_destroy(&tmp_vm, true); // Clean up the temporary VM
   if(ip){
     iunlockput(ip);
     end_op();
@@ -145,21 +185,40 @@ exec(char *path, char **argv)
 // and the pages from va to va+sz must already be mapped.
 // Returns 0 on success, -1 on failure.
 STATIC int
-loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz)
+loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz, uint64 pteflags)
 {
   uint i, n;
   uint64 pa;
 
   for(i = 0; i < sz; i += PGSIZE){
-    pa = walkaddr(pagetable, va + i);
+    // pte_t *pte = walk(pagetable, va + i, 1, NULL, NULL);
+    // if (pte == 0)
+    //   return -1; // walk failed
+    // if(*pte & PTE_V)
+    //   panic("loadseg: remap");
+    pa = (uint64)kalloc();
     if(pa == 0)
-      panic("loadseg: address should exist");
+      return -1; // kalloc failed
+    
     if(sz - i < PGSIZE)
+    {
       n = sz - i;
+      memset((void *)(pa + n), 0, PGSIZE - n);
+    }
     else
+    {
       n = PGSIZE;
-    if(readi(ip, 0, (uint64)pa, offset+i, n) != n)
+    }
+    if(readi(ip, 0, pa, offset+i, n) != n)
+    {
+      kfree((void *)pa);
       return -1;
+    }
+    if(mappages(pagetable, va + i, PGSIZE, pa, pteflags | PTE_U | PTE_V) != 0)
+    {
+      kfree((void *)pa);
+      return -1; // mappages failed
+    }
   }
   
   return 0;

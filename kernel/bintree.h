@@ -350,6 +350,26 @@ extern struct rb_node **__rb_find_key_link(
 );
 
 /**
+ * @brief 查找最接近且大于等于一个值的节点。
+ * 
+ * @param root 进行寻找的红黑树根结构体。
+ * @param key 目标的key值。
+ * 
+ * @return struct rb_node* 如果找到key值对应的节点，返回指向该节点的指针，否则返回NULL。
+ */
+extern struct rb_node *rb_find_key_rup(struct rb_root *root, uint64 key);
+
+/**
+ * @brief 查找最接近且小于等于一个值的节点。
+ * 
+ * @param root 进行寻找的红黑树根结构体。
+ * @param key 目标的key值。
+ * 
+ * @return struct rb_node* 如果找到key值对应的节点，返回指向该节点的指针，否则返回NULL。
+ */
+extern struct rb_node *rb_find_key_rdown(struct rb_root *root, uint64 key);
+
+/**
  * @brief 查找一个值的节点。
  * 
  * @param root 进行寻找的红黑树根结构体。
