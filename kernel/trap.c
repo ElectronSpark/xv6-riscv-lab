@@ -119,6 +119,10 @@ usertrap(void)
     break;
   case 15:
     va = r_stval();
+    // if (vm_try_growstack(p->vm, va) == 0) {
+    //   // Stack growth successful, no need to set killed.
+    //   // break;
+    // }
     vma = vm_find_area(p->vm, va);
     if (vma == NULL || vma_validate(vma, va, 8, VM_FLAG_USERMAP | VM_FLAG_WRITE) != 0) {
       printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(), p->pid);

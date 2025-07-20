@@ -29,11 +29,7 @@
 #endif
 #define MAXPATH      128   // maximum file path name
 
-#ifdef LAB_UTIL
-#define USERSTACK    2     // user stack pages
-#else
-#define USERSTACK    1     // user stack pages
-#endif
+#define USERSTACK    32     // user stack pages
 #define MAXUSTACK    (1UL << 20)    // maximum number of pages in user stack
 
 // The base(2) order of the size of a page in bytes

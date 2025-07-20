@@ -192,3 +192,23 @@ filewrite(struct file *f, uint64 addr, int n)
   return ret;
 }
 
+uint64 sys_dumpfilehash(void)
+{
+  printf("File hash table:\n");
+  spin_acquire(&ftable.lock);
+  for (int i = 0; i < NFILE; i++) {
+    struct file *f = &ftable.file[i];
+    if (f->ref > 0) {
+      printf("File %d: ref=%d type=%d off=%u\n", i, f->ref, f->type, f->off);
+      if (f->type == FD_INODE) {
+        printf("  Inode: dev=%u inum=%u size=%u\n", f->ip->dev, f->ip->inum, f->ip->size);
+      } else if (f->type == FD_PIPE) {
+        printf("  Pipe: readable=%d writable=%d\n", f->readable, f->writable);
+      } else if (f->type == FD_SOCK) {
+        printf("  Socket\n");
+      }
+    }
+  }
+  spin_release(&ftable.lock);
+  return 0;
+}

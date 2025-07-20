@@ -43,10 +43,16 @@ sys_sbrk(void)
 
   argint(0, &n);
   vma_t *vma = myproc()->vm->heap;
-  assert(vma != NULL, "sys_sbrk: heap vma is NULL");
-  addr = vma->end;
-  if(growproc(n) < 0)
+  if (vma == NULL) {
+    return -1; // No heap VMA found
+  }
+  addr = myproc()->vm->heap->start + myproc()->vm->heap_size;
+  // printf("sbrk: addr %p n %d -> ", (void*)addr, n);
+  if(growproc(n) < 0) {
+    // printf("growproc failed\n");
     return -1;
+  }
+  // printf("new addr %p\n", (void*)(myproc()->vm->heap->start + myproc()->vm->heap_size));
   return addr;
 }
 

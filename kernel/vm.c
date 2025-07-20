@@ -1445,3 +1445,30 @@ void dump_vm(vm_t *vm)
            vma->start, vma->end, flags_buf, vma->file, vma->pgoff);
   }
 }
+
+int vm_try_growstack(vm_t *vm, uint64 va)
+{
+  if (vm == NULL || vm->pagetable == NULL) {
+    return -1; // Invalid VM
+  }
+  if (va < UVMBOTTOM || va > UVMTOP) {
+    return -1; // Invalid address
+  }
+
+  // Check if the stack can be grown
+  if (vm->stack == NULL) {
+    return -1; // No stack VMA found
+  }
+
+  if (vm->stack->start <= va) {
+    return 0; // Stack already covers the address, no need to grow
+  }
+
+  if (vm->stack->start - PGSIZE > va) {
+    // Too far below the stack to grow
+    return -1; // Cannot grow the stack to cover the address
+  }
+
+  // Grow the stack
+  return vm_growstack(vm, PGSIZE); // Grow the stack by one page
+}
