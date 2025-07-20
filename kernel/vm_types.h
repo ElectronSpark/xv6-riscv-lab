@@ -40,6 +40,7 @@ typedef struct vm {
     pagetable_t     pagetable;
     struct rb_root  vm_tree;
     bool            valid;
+    void            *trapframe; // Pointer to the trap frame for this VM
     vma_t           *stack;
     size_t          stack_size; // Size of the stack area
     vma_t           *heap;

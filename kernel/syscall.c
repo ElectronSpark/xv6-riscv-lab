@@ -15,7 +15,7 @@ fetchaddr(uint64 addr, uint64 *ip)
   struct proc *p = myproc();
   // if(addr >= p->sz || addr+sizeof(uint64) > p->sz) // both tests needed, in case of overflow
   //   return -1;
-  if(vm_copyin(&p->vm, (char *)ip, addr, sizeof(*ip)) != 0)
+  if(vm_copyin(p->vm, (char *)ip, addr, sizeof(*ip)) != 0)
     return -1;
   return 0;
 }
@@ -26,7 +26,7 @@ int
 fetchstr(uint64 addr, char *buf, int max)
 {
   struct proc *p = myproc();
-  if(vm_copyinstr(&p->vm, buf, addr, max) < 0)
+  if(vm_copyinstr(p->vm, buf, addr, max) < 0)
     return -1;
   return strlen(buf);
 }

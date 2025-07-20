@@ -67,7 +67,7 @@ exec(char *path, char **argv)
   struct elfhdr elf;
   struct inode *ip;
   struct proghdr ph;
-  vm_t tmp_vm = { 0 };
+  vm_t *tmp_vm = NULL;
   struct proc *p = myproc();
 
   begin_op();
@@ -85,7 +85,7 @@ exec(char *path, char **argv)
   if(elf.magic != ELF_MAGIC)
     goto bad;
 
-  if (vm_init(&tmp_vm, p->trapframe) != 0) {
+  if ((tmp_vm = vm_init(p->trapframe)) == NULL) {
     goto bad;
   }
 
@@ -101,7 +101,7 @@ exec(char *path, char **argv)
       goto bad;
     if(ph.vaddr % PGSIZE != 0)
       goto bad;
-    vma_t *vma = va_alloc(&tmp_vm, ph.vaddr, ph.memsz, flags2vmperm(ph.flags) | VM_FLAG_USERMAP);
+    vma_t *vma = va_alloc(tmp_vm, ph.vaddr, ph.memsz, flags2vmperm(ph.flags) | VM_FLAG_USERMAP);
     if (vma == NULL) {
       goto bad; // Allocation failed
     }
@@ -110,7 +110,7 @@ exec(char *path, char **argv)
     if (heap_start < size1) {
       heap_start = size1; // Update heap start if this segment extends it
     }
-    if(loadseg(tmp_vm.pagetable, ph.vaddr, ip, ph.off, ph.filesz, flags2perm(ph.flags)) < 0)
+    if(loadseg(tmp_vm->pagetable, ph.vaddr, ip, ph.off, ph.filesz, flags2perm(ph.flags)) < 0)
       goto bad;
   }
   iunlockput(ip);
@@ -123,10 +123,10 @@ exec(char *path, char **argv)
   // Make the first inaccessible as a stack guard.
   // Use the rest as the user stack.
   // Create heap area and reserve one page for heap space.
-  if (vm_createheap(&tmp_vm, heap_start, USERSTACK * PGSIZE) != 0) {
+  if (vm_createheap(tmp_vm, heap_start, USERSTACK * PGSIZE) != 0) {
     goto bad; // Heap allocation failed
   }
-  if (vm_createstack(&tmp_vm, USTACKTOP, USERSTACK * PGSIZE) != 0) {
+  if (vm_createstack(tmp_vm, USTACKTOP, USERSTACK * PGSIZE) != 0) {
     goto bad; // Stack allocation failed
   }
   sp = USTACKTOP;
@@ -139,7 +139,7 @@ exec(char *path, char **argv)
     sp -= sp % 16; // riscv sp must be 16-byte aligned
     if(sp < stackbase)
       goto bad;
-    if(vm_copyout(&tmp_vm, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
+    if(vm_copyout(tmp_vm, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
       goto bad;
     ustack[argc] = sp;
   }
@@ -150,7 +150,7 @@ exec(char *path, char **argv)
   sp -= sp % 16;
   if(sp < stackbase)
     goto bad;
-  if(vm_copyout(&tmp_vm, sp, (char *)ustack, (argc+1)*sizeof(uint64)) < 0)
+  if(vm_copyout(tmp_vm, sp, (char *)ustack, (argc+1)*sizeof(uint64)) < 0)
     goto bad;
 
   // arguments to user main(argc, argv)
@@ -165,14 +165,14 @@ exec(char *path, char **argv)
   safestrcpy(p->name, last, sizeof(p->name));
     
   // Commit to the user image.
-  vm_destroy(&p->vm, true); // Destroy the old VM
-  assert(vm_move(&p->vm, &tmp_vm) == 0, "exec: vm_move failed");
+  vm_destroy(p->vm); // Destroy the old VM
+  p->vm = tmp_vm; // Set the new VM
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp; // initial stack pointer
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:
-  vm_destroy(&tmp_vm, true); // Clean up the temporary VM
+  vm_destroy(tmp_vm); // Clean up the temporary VM
   if(ip){
     iunlockput(ip);
     end_op();

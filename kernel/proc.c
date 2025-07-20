@@ -299,12 +299,6 @@ allocproc(void)
   memset(kstack, 0, KERNEL_STACK_SIZE);
   p->kstack = (uint64)kstack;
 
-  // Allocate pagetable for the process.
-  if(proc_pagetable(p) != 0){
-    freeproc(p);
-    return NULL;
-  }
-
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -350,7 +344,7 @@ freeproc(struct proc *p)
     page_free((void*)p->trapframe, TRAPFRAME_ORDER);
   if(p->kstack)
     page_free((void*)p->kstack, KERNEL_STACK_ORDER);
-  if (p->vm.valid) {
+  if (p->vm != NULL) {
     proc_freepagetable(p);
   }
   
@@ -364,7 +358,8 @@ int
 proc_pagetable(struct proc *p)
 {
   // An empty page table.
-  if (vm_init(&p->vm, p->trapframe) != 0) {
+  p->vm = vm_init(p->trapframe);
+  if (p->vm == NULL) {
     return -1; // Failed to initialize VM
   }
 
@@ -376,7 +371,7 @@ proc_pagetable(struct proc *p)
 void
 proc_freepagetable(struct proc *p)
 {
-  vm_destroy(&p->vm, true);
+  vm_destroy(p->vm);
 }
 
 // a user program that calls exec("/init")
@@ -400,6 +395,8 @@ userinit(void)
 
   p = allocproc();
   assert(p != NULL, "userinit: allocproc failed");
+  // Allocate pagetable for the process.
+  assert(proc_pagetable(p) == 0, "userinit: proc_pagetable failed");
 
   // // printf user pagetable
   // printf("\nuser pagetable after allocproc:\n");
@@ -421,9 +418,9 @@ userinit(void)
   assert(initcode_page != NULL, "userinit: page_alloc failed for initcode");
   memset(initcode_page, 0, PGSIZE);
   memmove(initcode_page, initcode, sizeof(initcode));
-  assert(vma_mmap(&p->vm, UVMBOTTOM, PGSIZE, flags, NULL, 0, initcode_page) == 0,
+  assert(vma_mmap(p->vm, UVMBOTTOM, PGSIZE, flags, NULL, 0, initcode_page) == 0,
          "userinit: vma_mmap failed");
-  assert(vm_createstack(&p->vm, ustack_top, USERSTACK * PGSIZE) == 0,
+  assert(vm_createstack(p->vm, ustack_top, USERSTACK * PGSIZE) == 0,
          "userinit: vm_createstack failed");
 
   // allocate signal actions for the process
@@ -457,7 +454,7 @@ growproc(int n)
 {
   struct proc *p = myproc();
 
-  return vm_growheap(&p->vm, n);
+  return vm_growheap(p->vm, n);
 }
 
 // attach a newly forked process to the current process as its child.
@@ -519,7 +516,7 @@ fork(void)
   spin_acquire(&np->lock);
 
   // Copy user memory from parent to child.
-  if(vm_dup(&np->vm, &p->vm) != 0){
+  if((np->vm = vm_dup(p->vm, np->trapframe)) == NULL){
     // @TODO: need to make sure no one would access np before freeing it.
     spin_release(&np->lock);
     spin_release(&p->lock);
@@ -665,7 +662,7 @@ wait(uint64 addr)
       if(child->state == ZOMBIE){
         // Found one.
         pid = child->pid;
-        if(addr != 0 && vm_copyout(&p->vm, addr, (char *)&child->xstate,
+        if(addr != 0 && vm_copyout(p->vm, addr, (char *)&child->xstate,
                                     sizeof(child->xstate)) < 0) {
           spin_release(&child->lock);
           pid = -1;
@@ -822,7 +819,7 @@ either_copyout(int user_dst, uint64 dst, void *src, uint64 len)
 {
   struct proc *p = myproc();
   if(user_dst){
-    return vm_copyout(&p->vm, dst, src, len);
+    return vm_copyout(p->vm, dst, src, len);
   } else {
     memmove((char *)dst, src, len);
     return 0;
@@ -837,7 +834,7 @@ either_copyin(void *dst, int user_src, uint64 src, uint64 len)
 {
   struct proc *p = myproc();
   if(user_src){
-    return vm_copyin(&p->vm, dst, src, len);
+    return vm_copyin(p->vm, dst, src, len);
   } else {
     memmove(dst, (char*)src, len);
     return 0;

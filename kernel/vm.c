@@ -12,10 +12,16 @@
 #include "slab.h"
 
 static slab_cache_t __vma_pool = {0};
+static slab_cache_t __vm_pool = {0};
 
 static void __vma_pool_init(void)
 {
   slab_cache_init(&__vma_pool, "vm area", sizeof(vma_t), SLAB_FLAG_STATIC);
+}
+
+static void __vm_pool_init(void)
+{
+  slab_cache_init(&__vm_pool, "vm", sizeof(vm_t), SLAB_FLAG_STATIC);
 }
 
 static vma_t *__vma_alloc(vm_t *vm)
@@ -102,6 +108,7 @@ void
 kvminit(void)
 {
   __vma_pool_init(); // Initialize the VMA pool
+  __vm_pool_init(); // Initialize the VM pool
   kernel_pagetable = kvmmake();
   
 }
@@ -593,18 +600,17 @@ static int __vma_dup(vma_t *dst, vma_t *src)
   if (src->vm == NULL || dst->vm == NULL) {
     return -1; // Source or destination VM is NULL
   }
-  if (dst->flags != VM_FLAG_NONE) {
+  if (VMA_SIZE(src) != VMA_SIZE(dst)) {
+    return -1; // Source VMA is empty, cannot duplicate
+  }
+  // @TODO: ?
+  if ((src->flags & VM_FLAG_PROT_MASK) != (dst->flags & VM_FLAG_PROT_MASK)) {
     return -1; // Destination VMA is not free, cannot duplicate
   }
   
-  dst->start = src->start;
-  dst->end = src->end;
   dst->flags = src->flags;
   dst->file = src->file; // Shallow copy of file pointer
   dst->pgoff = src->pgoff;
-  rb_node_init(&dst->rb_entry);
-  list_entry_init(&dst->list_entry);
-  list_entry_init(&dst->free_list_entry);
   if (src->flags != VM_FLAG_NONE) {
     pagetable_t pgtb_src = src->vm->pagetable;
     pagetable_t pgtb_dst = dst->vm->pagetable;
@@ -663,7 +669,7 @@ static void __vm_unmap_trapframe(vm_t *vm)
   uvmunmap(vm->pagetable, TRAPFRAME, 1, 0);
 }
 
-void vm_destroy(vm_t *vm, bool user_vm)
+void vm_destroy(vm_t *vm)
 {
   if (vm == NULL) {
     return; // Nothing to destroy
@@ -677,43 +683,52 @@ void vm_destroy(vm_t *vm, bool user_vm)
   list_entry_init(&vm->vm_list);
   list_entry_init(&vm->vm_free_list);
   rb_root_init(&vm->vm_tree, &__vm_tree_opts);
-  if (user_vm) {
+  if (vm->trapframe != NULL) {
     __vm_unmap_trapframe(vm); // Unmap the trapframe and trampolines
   }
   if (vm->pagetable != NULL) {
     uvmfree(vm->pagetable, 0); // Free the pagetable
     vm->pagetable = NULL; // Clear the pagetable pointer
   }
+  slab_free((void*)vm); // Free the VM structure
 }
 
 // Duplicate the VM structure from src to dst.
+// The destination VM must be initialized as user vm, and empty.
 // Files have to be duplicated.
-int vm_dup(vm_t *dst, vm_t *src)
+vm_t *vm_dup(vm_t *src, void *trapframe)
 {
-  if (dst == NULL || src == NULL) {
-    return -1; // Invalid parameters
+  if (src == NULL) {
+    return NULL; // Invalid parameters
   }
-  pte_t *trap_pte = walk(src->pagetable, TRAPFRAME, 0, NULL, NULL);
-  void *trapframe = NULL;
-  bool user_vm = false;
-  if (trap_pte != NULL && (*trap_pte & PTE_V) != 0) {
-    trapframe = (void *)PTE2PA(*trap_pte);
-    user_vm = true; // This is a user VM, we need to map trampolines
+  if (src->trapframe != NULL && trapframe == NULL) {
+    return NULL; // Cannot duplicate if src has a trapframe but dst does not
   }
-  // vm_destroy(dst); // Clear the destination VM 
-  if (vm_init(dst, trapframe) != 0) {
-    return -1; // Initialization failed
-  }
+  vm_t *dst = vm_init(trapframe);
   vma_t *vma, *tmp;
   list_foreach_node_safe(&src->vm_list, vma, tmp, list_entry) {
-    vma_t *new_vma = __vma_alloc(dst);
-    if (__vma_dup(new_vma, vma) != 0) {
+    if (vma->flags == VM_FLAG_NONE) {
+      continue;
+    }
+    vma_t *new_vma = va_alloc(dst, vma->start, VMA_SIZE(vma), vma->flags);
+    if (new_vma == NULL) {
+      vm_destroy(dst);
+      return NULL; // Allocation failed
+    }
+    if (vma == src->stack) {
+      dst->stack = new_vma; // Set the stack for the new VM
+      dst->stack_size = src->stack_size; // Copy the stack size
+    } else if (vma == src->heap) {
+      dst->heap = new_vma; // Set the heap for the new VM
+      dst->heap_size = src->heap_size; // Copy the heap size
+    }
+    if (vma->flags != VM_FLAG_NONE && __vma_dup(new_vma, vma) != 0) {
       __vma_free(new_vma);
-      vm_destroy(dst, user_vm);
-      return -1; // Duplication failed
+      vm_destroy(dst);
+      return NULL; // Duplication failed
     }
   }
-  return 0;
+  return dst;
 }
 
 // map trapframe and trampolines for user processes.
@@ -748,31 +763,35 @@ static int __vm_map_trampoline(vm_t *vm, void *trapframe)
     uvmunmap(vm->pagetable, SIG_TRAMPOLINE, 1, 0);
     return -1;
   }
+  vm->trapframe = trapframe; // Store the trapframe pointer in the VM
   return 0;
 }
 
 // Initialize the vm struct of a process.
-int vm_init(vm_t *vm, void *trapframe) {
-  assert(vm != NULL, "vm_init: vm is null");
+vm_t *vm_init(void *trapframe) {
+  vm_t *vm = slab_alloc(&__vm_pool);
+  if (vm == NULL) {
+    return NULL; // Out of memory
+  }
   memset(vm, 0, sizeof(vm_t));
   rb_root_init(&vm->vm_tree, &__vm_tree_opts);
   list_entry_init(&vm->vm_list);
   list_entry_init(&vm->vm_free_list);
   vma_t *vma = __vma_alloc(vm);
   if (vma == NULL) {
-    return -1;
+    vm_destroy(vm);
+    return NULL;
   }
 
   vm->pagetable = uvmcreate();
   if (vm->pagetable == NULL) {
-    __vma_free(vma);
-    return -1;
+    vm_destroy(vm);
+    return NULL;
   }
   if (trapframe != NULL) {
     if (__vm_map_trampoline(vm, trapframe) != 0) {
-      __vma_free(vma);
-      vm_destroy(vm, false);
-      return -1; // Failed to map trampoline
+      vm_destroy(vm);
+      return NULL; // Failed to map trampoline
     }
   }
 
@@ -784,7 +803,7 @@ int vm_init(vm_t *vm, void *trapframe) {
   list_node_push(&vm->vm_list, vma, list_entry);
   vm->valid = true; // Mark the VM as valid
 
-  return 0;
+  return vm;
 }
 
 static inline vma_t *__get_vma_left(vma_t *vma)
@@ -1152,23 +1171,6 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
   return 0;
 }
 
-// move pagetable an VMAs from src to dst.
-// Everything in the destination VM will be discarded.
-int vm_move(vm_t *dst, vm_t *src)
-{
-  if (dst == NULL || src == NULL) {
-    return -1; // Invalid parameters
-  }
-  dst->pagetable = src->pagetable; // Move the pagetable
-  src->pagetable = NULL; // Clear the source pagetable
-  list_entry_replace(&src->vm_list, &dst->vm_list); // Move the VMAs list
-  list_entry_replace(&src->vm_free_list, &dst->vm_free_list); // Move the free VMAs list
-  dst->vm_tree = src->vm_tree; // Move the VMAs tree
-  src->vm_tree.node = NULL; // Clear the source VM's tree
-
-  return 0;
-}
-
 uint64 vm2pte_flags(uint64 flags)
 {
   uint64 pte_flags = 0;
@@ -1218,6 +1220,8 @@ int vm_createheap(vm_t *vm, uint64 va, uint64 size)
   if (vma == NULL) {
     return -1; // Allocation failed
   }
+  vm->heap = vma; // Set the heap VMA
+  vm->heap_size = size; // Set the heap size
   return 0; // Success
 }
 
@@ -1234,6 +1238,8 @@ int vm_createstack(vm_t *vm, uint64 stack_top, uint64 size)
   if (vma == NULL) {
     return -1; // Allocation failed
   }
+  vm->stack = vma; // Set the stack VMA
+  vm->stack_size = size; // Set the stack size
   return 0; // Success
 }
 
@@ -1389,6 +1395,39 @@ int vma_munmap(vm_t *vm, uint64 start, size_t size)
   return 0; // Success
 }
 
+int vm_dump_flags(uint64 flags, char *buf, size_t buf_size)
+{
+  if (buf == NULL) {
+    return -1; // Invalid buffer
+  }
+  if (buf_size < 5) {
+    return -1; // Buffer too small to hold any flags
+  }
+  size_t len = 0;
+  if (flags & VM_FLAG_READ) {
+    buf[len++] = 'R';
+  } else {
+    buf[len++] = ' '; // Use '-' for no read permission
+  }
+  if (flags & VM_FLAG_WRITE) {
+    buf[len++] = 'W';
+  } else {
+    buf[len++] = ' '; // Use '-' for no write permission
+  }
+  if (flags & VM_FLAG_EXEC) {
+    buf[len++] = 'X';
+  } else {
+    buf[len++] = ' '; // Use '-' for no execute permission
+  }
+  if (flags & VM_FLAG_USERMAP) {
+    buf[len++] = 'U';
+  } else {
+    buf[len++] = ' '; // Use '-' for no user map permission
+  }
+  buf[len] = '\0'; // Null-terminate the string
+  return len; // Return the length of the flags string
+}
+
 void dump_vm(vm_t *vm)
 {
   if (vm == NULL) {
@@ -1400,7 +1439,9 @@ void dump_vm(vm_t *vm)
   printf("VMAs:\n");
   vma_t *vma, *tmp;
   list_foreach_node_safe(&vm->vm_list, vma, tmp, list_entry) {
-    printf("VMA: start=%lx, end=%lx, flags=%lx, file=%p, pgoff=%lx\n",
-           vma->start, vma->end, vma->flags, vma->file, vma->pgoff);
+    char flags_buf[10] = { 0 };
+    vm_dump_flags(vma->flags, flags_buf, sizeof(flags_buf));
+    printf("VMA: start=%lx, end=%lx, flags=%s, file=%p, pgoff=%lx\n",
+           vma->start, vma->end, flags_buf, vma->file, vma->pgoff);
   }
 }

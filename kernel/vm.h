@@ -15,14 +15,15 @@
     ((__vma1)->end == (__vma2)->start || \
      (__vma2)->end == (__vma1)->start)
 
-int vm_init(vm_t *vm, void *trapframe);
-int vm_dup(vm_t *dst, vm_t *src);
-void vm_destroy(vm_t *vm, bool user_vm);
+vm_t *vm_init(void *trapframe);
+vm_t *vm_dup(vm_t *src, void *trapframe);
+void vm_destroy(vm_t *vm);
 vma_t *va_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags);
 int vm_growstack(vm_t *vm, int change_size);
 int vm_growheap(vm_t *vm, int change_size);
 int vm_createheap(vm_t *vm, uint64 va, uint64 size);
 int vm_createstack(vm_t *vm, uint64 stack_top, uint64 size);
+int vm_try_growstack(vm_t *vm, uint64 va);
 // int vm_initfirst(vm_t *vm);
 int va_free(vma_t *vma);
 vma_t *vm_find_area(vm_t *vm, uint64 va);
@@ -33,7 +34,6 @@ int vm_copyout(vm_t *vm, uint64 dstva, void *src, uint64 len);
 int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len);
 int vm_copyinstr(vm_t *vm, char *dst, uint64 srcva, uint64 max);
 
-int vm_move(vm_t *dst, vm_t *src);
 uint64 vm2pte_flags(uint64 flags);
 uint64 pte2vm_flags(uint64 pte_flags);
 

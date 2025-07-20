@@ -93,7 +93,7 @@ struct proc {
 
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
-  vm_t vm;                     // Virtual memory areas and page table
+  vm_t *vm;                     // Virtual memory areas and page table
   struct trapframe *trapframe; // data page for trampoline.S
 
   // both p->lock and __sched_lock must be held 
