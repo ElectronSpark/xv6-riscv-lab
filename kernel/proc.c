@@ -594,6 +594,26 @@ reparent(struct proc *p)
     wakeup(initproc);
 }
 
+
+// Yield the CPU after the process becomes zombie.
+// The caller need to hold p->lock, and not to hold the scheduler lock.
+// This is to ensure that its parent can be scheduled after it becomes zombie
+// and not to wake up before it becomes zombie.
+static void
+__exit_yield(int status)
+{
+  struct proc *p = myproc();
+  spin_acquire(&p->lock);
+  p->xstate = status;
+  p->state = ZOMBIE;
+  sched_lock();
+  scheduler_yield(NULL, NULL);
+  sched_unlock();
+  spin_release(&p->lock);
+  panic("exit: __exit_yield should not return");
+}
+
+
 // Exit the current process.  Does not return.
 // An exited process remains in the zombie state
 // until its parent calls wait().
@@ -605,8 +625,8 @@ exit(int status)
 
   spin_acquire(&p->lock);
   assert(p != proc_table.initproc, "init exiting");
-  p->state = EXITING;
-  __sync_synchronize(); // Ensure all writes are visible before releasing the lock
+  // p->state = EXITING;
+  // __sync_synchronize(); // Ensure all writes are visible before releasing the lock
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
@@ -631,13 +651,7 @@ exit(int status)
   // Give any children to init.
   reparent(p);
 
-  // Parent might be sleeping in wait().
-  wakeup(p->parent);
-
-  spin_acquire(&p->lock);
-  p->xstate = status;
-  p->state = ZOMBIE;
-  spin_release(&p->lock);
+  __exit_yield(status);
 
   // Jump into the scheduler, never to return.
   yield();

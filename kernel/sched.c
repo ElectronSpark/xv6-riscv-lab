@@ -210,7 +210,10 @@ void scheduler_run(void) {
         sched_lock();
         struct spinlock *lk = __switch_to(p);
         assert(!intr_get(), "Interrupts must be disabled after switching to a process");
-        if (p->state == RUNNING) {
+        int pstate = p->state;
+        struct proc *pparent = p->parent;
+
+        if (pstate == RUNNING) {
             p->state = RUNNABLE; // If we returned to a RUNNING process, set it to RUNNABLE
             if (proc_queue_push(&ready_queue, p) != 0) {
                 panic("Failed to push process back to ready queue");
@@ -221,6 +224,10 @@ void scheduler_run(void) {
         spin_release(&p->lock);
         if (lk != NULL) {
             spin_release(lk); // Release the lock returned by __swtch_context
+        }
+
+        if (pstate == ZOMBIE) {
+            wakeup(pparent);
         }
     }
 }
