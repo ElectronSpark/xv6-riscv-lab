@@ -315,14 +315,21 @@ virtio_disk_intr()
     __sync_synchronize();
     int id = disk.used->ring[disk.used_idx % NUM].id;
 
-    if(disk.info[id].status != 0)
-      panic("virtio_disk_intr status");
+    char status = disk.info[id].status;
+    
+    if(status != 0) {
+      struct buf *b = disk.info[id].b;
+      printf("ERROR: id=%d status=%d buf=%p blockno=0x%x\n",
+             id, status, b, b ? b->blockno : 0);
+      panic("virtio_disk_intr status: %d", status);
+    }
 
     struct buf *b = disk.info[id].b;
     b->disk = 0;   // disk is done with buf
     wakeup(b);
 
     disk.used_idx += 1;
+    __sync_synchronize();
   }
 
   spin_release(&disk.vdisk_lock);
