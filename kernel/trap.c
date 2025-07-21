@@ -110,7 +110,7 @@ usertrap(void)
   case 13:
     va = r_stval();
     vma = vm_find_area(p->vm, va);
-    if (vma == NULL || vma_validate(vma, va, 8, VM_FLAG_USERMAP | VM_FLAG_READ) != 0) {
+    if (vma == NULL || vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_READ) != 0) {
       printf("usertrap(): page fault on read 0x%lx pid=%d\n", r_scause(), p->pid);
       printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
       printf("            pgtbl=0x%lx\n", (uint64)p->vm->pagetable);
@@ -124,7 +124,7 @@ usertrap(void)
     //   // break;
     // }
     vma = vm_find_area(p->vm, va);
-    if (vma == NULL || vma_validate(vma, va, 8, VM_FLAG_USERMAP | VM_FLAG_WRITE) != 0) {
+    if (vma == NULL || vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_WRITE) != 0) {
       printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(), p->pid);
       printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
       printf("            pgtbl=0x%lx\n", (uint64)p->vm->pagetable);
