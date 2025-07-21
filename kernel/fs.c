@@ -564,7 +564,7 @@ bmap(struct inode *ip, uint bn)
 
   if (bn < NDINDIRECT) {
     // Load double indirect block, allocating if necessary.
-    addr = bmap_ind(&ip->addrs[NINDIRECT + 1], ip->dev, bn / NINDIRECT);
+    addr = bmap_ind(&ip->addrs[NDIRECT + 1], ip->dev, bn / NINDIRECT);
     if (addr == 0) {
       return 0; // Out of disk space.
     }
@@ -612,13 +612,21 @@ itrunc(struct inode *ip)
     }
   }
 
-  if(ip->addrs[NDIRECT]){
+  uint nindirect = ip->addrs[NDIRECT];
+  ip->addrs[NDIRECT + 1] = 0;
+  uint ndindirect = ip->addrs[NDIRECT + 1];
+  ip->addrs[NDIRECT + 1] = 0;
+
+  ip->size = 0;
+  iupdate(ip);
+
+  if(nindirect){
     __itrunc_ind(&ip->addrs[NDIRECT], ip->dev);
   }
 
-  if (ip->addrs[NINDIRECT + 1]) {
+  if (ndindirect) {
     // Free the double indirect block.
-    bp = bread(ip->dev, ip->addrs[NINDIRECT + 1]);
+    bp = bread(ip->dev, ndindirect);
     a = (uint*)bp->data;
     for(i = 0; i < NINDIRECT; i++) {
       if(a[i]) {
@@ -626,12 +634,8 @@ itrunc(struct inode *ip)
       }
     }
     brelse(bp);
-    bfree(ip->dev, ip->addrs[NINDIRECT + 1]);
-    ip->addrs[NINDIRECT + 1] = 0;
+    bfree(ip->dev, ndindirect);
   }
-
-  ip->size = 0;
-  iupdate(ip);
 }
 
 // Copy stat information from inode.
