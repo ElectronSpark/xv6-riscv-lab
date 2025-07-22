@@ -10,6 +10,8 @@ struct file {
   int ref; // reference count
   char readable;
   char writable;
+  int fd_no;
+  hlist_entry_t fd_entry;
   struct pipe *pipe; // FD_PIPE
   struct inode *ip;  // FD_INODE and FD_DEVICE
   struct sock *sock; // FD_SOCK

@@ -2,6 +2,8 @@
 #include "kernel/stat.h"
 #include "user/user.h"
 
+#define MAX_PRIMES 3000
+
 void primes(int pip) __attribute__((noreturn));
 
 void
@@ -17,7 +19,7 @@ primes(int pip)
         exit(1);
     }
 
-    if (cur_num >= 280) {
+    if (cur_num >= MAX_PRIMES) {
         close(pip);
         exit(0);
     }
@@ -44,7 +46,7 @@ primes(int pip)
 
     close(msg_pip[0]);
 
-    while (rcv < 280) {
+    while (rcv < MAX_PRIMES) {
         if (read(pip, &rcv, sizeof(int)) < sizeof(int)) {
             printf("read pip error\n");
             exit(1);
@@ -80,7 +82,7 @@ main(void)
         primes(msg_pip[0]);
     } else if (pid > 0) {
         close(msg_pip[0]);
-        for (int i = 2; i <= 280; i++) {
+        for (int i = 2; i <= MAX_PRIMES; i++) {
             write(msg_pip[1], &i, sizeof(i));
         }
         close(msg_pip[1]);

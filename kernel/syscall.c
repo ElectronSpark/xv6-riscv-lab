@@ -113,6 +113,7 @@ extern uint64 sys_sigreturn(void);
 extern uint64 sys_memstat(void);
 extern uint64 sys_dumpproc(void);
 extern uint64 sys_dumpchan(void);
+extern uint64 sys_dumpfd(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -148,6 +149,7 @@ STATIC uint64 (*syscalls[])(void) = {
 [SYS_memstat] sys_memstat,
 [SYS_dumpproc] sys_dumpproc,
 [SYS_dumpchan] sys_dumpchan,
+[SYS_dumpfd]  sys_dumpfd,
 };
 
 void

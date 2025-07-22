@@ -111,6 +111,7 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/dumpproc.c
     ${USER_DIR}/dumpchan.c
     ${USER_DIR}/testsig.c
+    ${USER_DIR}/dumpfd.c
 )
 
 if($ENV{LAB} STREQUAL "syscall")

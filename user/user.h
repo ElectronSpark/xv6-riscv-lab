@@ -43,6 +43,7 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
 int memstat(void);
 int dumpproc(void);
 int dumpchan(void);
+int dumpfd(void);
 
 // ulib.c
 int stat(const char*, struct stat*);

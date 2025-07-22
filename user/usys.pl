@@ -47,3 +47,4 @@ entry("sigprocmask");
 entry("memstat");
 entry("dumpproc");
 entry("dumpchan");
+entry("dumpfd");
