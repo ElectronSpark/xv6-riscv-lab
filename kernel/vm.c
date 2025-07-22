@@ -1234,7 +1234,7 @@ int vm_createstack(vm_t *vm, uint64 stack_top, uint64 size)
   if (stack_top < size || stack_top > UVMTOP) {
     return -1; // Invalid stack address
   }
-  vma_t *vma = va_alloc(vm, stack_top - size, size, VM_FLAG_READ | VM_FLAG_WRITE | VM_FLAG_USERMAP | VM_FLAG_GROWSUP);
+  vma_t *vma = va_alloc(vm, stack_top - size, size, VM_FLAG_READ | VM_FLAG_WRITE | VM_FLAG_USERMAP | VM_FLAG_GROWSDOWN);
   if (vma == NULL) {
     return -1; // Allocation failed
   }
@@ -1258,6 +1258,12 @@ int vm_growstack(vm_t *vm, int change_size)
     return 0; // No change in stack size
   }
   
+  if (change_size < 0 && (uint64)(-change_size) > vm->stack_size - PGSIZE) {
+    return -1; // Cannot shrink stack beyond current size
+  } else if ((uint64)change_size > (MAXUSTACK << PGSHIFT) - vm->stack_size) {
+    return -1; // Cannot grow stack beyond maximum size
+  }
+  
   uint64 new_size = vm->stack_size + change_size;
   if (new_size < PGSIZE || new_size > (MAXUSTACK << PGSHIFT)) {
     return -1; // Invalid new stack size
@@ -1265,26 +1271,40 @@ int vm_growstack(vm_t *vm, int change_size)
 
   int64 delta = PGROUNDUP(new_size) - PGROUNDUP(vm->stack_size);
   if (delta == 0) {
+    vm->stack_size = new_size; // Update the stack size
     return 0; // No change in stack size
   }
-
   vma_t *left = __get_vma_left(vm->stack);
-  if (left == NULL || left->flags != VM_FLAG_NONE) {
-    return -1; // No adjacent free VMA to grow the stack
-  }
-  if (VMA_SIZE(left) < delta) {
-    return -1; // Not enough space in the free VMA to grow the stack
-  }
   uint64 new_start = vm->stack->start - delta;
-  vma_t *grows = vma_split(left, new_start);
-  if (grows == NULL) {
-    return -1; // Failed to split the free VMA
+
+  if (delta < 0) {
+    // Shrinking the stack
+    vma_t *splitted = vm->stack;
+    vma_t *right = vma_split(vm->stack, new_start);
+    assert(right != NULL, "vm_growstack: vma_split failed in shrinking stack");
+    vm->stack = right; // Update the stack VMA
+    __vma_set_free(splitted); // Set the VMA as free
+    if (left != NULL && left->flags == VM_FLAG_NONE) {
+      assert(vma_merge(splitted, left) != NULL, 
+             "vm_growstack: vma_merge failed in shrinking stack");
+    }
+  } else {
+    if (left == NULL || left->flags != VM_FLAG_NONE) {
+      return -1; // No adjacent free VMA to grow the stack
+    }
+    if (VMA_SIZE(left) < delta) {
+      return -1; // Not enough space in the free VMA to grow the stack
+    }
+    vma_t *grows = vma_split(left, new_start);
+    if (grows == NULL) {
+      return -1; // Failed to split the free VMA
+    }
+    list_entry_detach(&grows->free_list_entry);
+    grows->flags = vm->stack->flags; // Set the flags for the new VMA
+    vma_t *new_stack = vma_merge(grows, vm->stack);
+    assert(new_stack == grows, "vm_growstack: vma_merge failed");
+    vm->stack = new_stack; // Update the stack VMA
   }
-  list_entry_detach(&grows->free_list_entry);
-  grows->flags = vm->stack->flags; // Set the flags for the new VMA
-  vma_t *new_stack = vma_merge(grows, vm->stack);
-  assert(new_stack == grows, "vm_growstack: vma_merge failed");
-  vm->stack = new_stack; // Update the stack VMA
   vm->stack_size = new_size; // Update the stack size
 
   return 0; // Success
@@ -1305,34 +1325,50 @@ int vm_growheap(vm_t *vm, int change_size)
     return 0; // No change in heap size
   }
 
-  uint64 new_size = vm->heap_size + change_size;
-  if (new_size < PGSIZE) {
-    return -1; // Invalid new heap size
+  if (change_size < 0) {
+    if ((uint64)(-change_size) > vm->heap_size - PGSIZE) {
+      return -1; // Cannot shrink heap beyond current size
+    }
+  } else if (change_size > UHEAP_MAX_TOP - vm->heap->end) {
+    return -1; // Cannot grow heap beyond maximum size
   }
 
+  uint64 new_size = vm->heap_size + change_size;
   int64 delta = PGROUNDUP(new_size) - VMA_SIZE(vm->heap);
   if (delta == 0) {
+    vm->heap_size = new_size; // Update the heap size
     return 0; // No change in heap size
   }
-
-  vma_t *right = __get_vma_right(vm->heap);
-  if (right == NULL || right->flags != VM_FLAG_NONE) {
-    return -1; // No adjacent free VMA to grow the heap
-  }
-  if (VMA_SIZE(right) < delta) {
-    return -1; // Not enough space in the free VMA to grow the heap
-  }
   uint64 new_end = vm->heap->end + delta;
-  if (vma_split(right, new_end) == NULL) {
-    return -1; // Failed to split the free VMA
-  }
-  list_entry_detach(&right->free_list_entry);
-  right->flags = vm->heap->flags; // Set the flags for the new VMA
-  vma_t *new_heap = vma_merge(right, vm->heap);
-  assert(new_heap == vm->heap, "vm_growheap: vma_merge failed");
-  vm->heap = new_heap; // Update the heap VMA
-  vm->heap_size = new_size; // Update the heap size
+  vma_t *right = __get_vma_right(vm->heap);
 
+  if (delta < 0) {
+    // Shrinking the heap
+    vma_t *splitted = vma_split(vm->heap, new_end);
+    assert(splitted != NULL, "vm_growheap: vma_split failed in shrinking heap");
+    __vma_set_free(splitted); // Set the VMA as free
+    if (right != NULL && right->flags == VM_FLAG_NONE) {
+      assert(vma_merge(splitted, right) != NULL, 
+             "vm_growheap: vma_merge failed in shrinking heap");
+    }
+  } else {
+    if (right == NULL || right->flags != VM_FLAG_NONE) {
+      return -1; // No adjacent free VMA to grow the heap
+    }
+    if (VMA_SIZE(right) < delta) {
+      return -1; // Not enough space in the free VMA to grow the heap
+    }
+    if (vma_split(right, new_end) == NULL) {
+      return -1; // Failed to split the free VMA
+    }
+    list_entry_detach(&right->free_list_entry);
+    right->flags = vm->heap->flags; // Set the flags for the new VMA
+    vma_t *new_heap = vma_merge(right, vm->heap);
+    assert(new_heap == vm->heap, "vm_growheap: vma_merge failed");
+    vm->heap = new_heap; // Update the heap VMA
+  }
+  
+  vm->heap_size = new_size; // Update the heap size
   return 0; // Success
 }
 
@@ -1451,8 +1487,9 @@ int vm_try_growstack(vm_t *vm, uint64 va)
   if (vm == NULL || vm->pagetable == NULL) {
     return -1; // Invalid VM
   }
-  if (va < UVMBOTTOM || va > UVMTOP) {
-    return -1; // Invalid address
+  if (va < USTACK_MAX_BOTTOM || va >= USTACKTOP) {
+    // Probably not a stack address, do regular validation
+    return 0;
   }
 
   // Check if the stack can be grown
@@ -1464,11 +1501,16 @@ int vm_try_growstack(vm_t *vm, uint64 va)
     return 0; // Stack already covers the address, no need to grow
   }
 
-  if (vm->stack->start - PGSIZE > va) {
+  // @TODO: potentially overflow
+  uint64 ustack_bottom_after = vm->stack->start - (USERSTACK_GROWTH << PAGE_SHIFT);
+  if (ustack_bottom_after < USTACK_MAX_BOTTOM) {
+    return -1; // Cannot grow the stack below the minimum stack size
+  }
+  if (ustack_bottom_after > va) {
     // Too far below the stack to grow
     return -1; // Cannot grow the stack to cover the address
   }
 
   // Grow the stack
-  return vm_growstack(vm, PGSIZE); // Grow the stack by one page
+  return vm_growstack(vm, USERSTACK_GROWTH << PAGE_SHIFT); // Grow the stack by one page
 }

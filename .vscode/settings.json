@@ -76,6 +76,8 @@
         "string_view": "cpp",
         "initializer_list": "cpp",
         "cstdarg": "c",
-        "numbers": "c"
+        "numbers": "c",
+        "vm.h": "c",
+        "vm_types.h": "c"
     }
 }

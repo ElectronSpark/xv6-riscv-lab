@@ -30,7 +30,9 @@
 #define MAXPATH      128   // maximum file path name
 
 #define USERSTACK    32     // user stack pages
+#define USERSTACK_GROWTH  8  // user stack growth pages
 #define MAXUSTACK    (1UL << 20)    // maximum number of pages in user stack
+#define MAXUHEAP     (1UL << 24)    // maximum number of pages in user heap
 
 // The base(2) order of the size of a page in bytes
 #ifndef PAGE_SHIFT

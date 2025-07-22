@@ -109,27 +109,29 @@ usertrap(void)
     break;
   case 13:
     va = r_stval();
-    vma = vm_find_area(p->vm, va);
-    if (vma == NULL || vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_READ) != 0) {
-      printf("usertrap(): page fault on read 0x%lx pid=%d\n", r_scause(), p->pid);
-      printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
-      printf("            pgtbl=0x%lx\n", (uint64)p->vm->pagetable);
-      setkilled(p);
+    if (vm_try_growstack(p->vm, va) == 0) {
+      vma = vm_find_area(p->vm, va);
+      if (vma != NULL && vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_READ) == 0) {
+        break;
+      }
     }
+    printf("usertrap(): page fault on read 0x%lx pid=%d\n", r_scause(), p->pid);
+    printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+    printf("            pgtbl=0x%lx\n", (uint64)p->vm->pagetable);
+    setkilled(p);
     break;
   case 15:
     va = r_stval();
-    // if (vm_try_growstack(p->vm, va) == 0) {
-    //   // Stack growth successful, no need to set killed.
-    //   // break;
-    // }
-    vma = vm_find_area(p->vm, va);
-    if (vma == NULL || vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_WRITE) != 0) {
-      printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(), p->pid);
-      printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
-      printf("            pgtbl=0x%lx\n", (uint64)p->vm->pagetable);
-      setkilled(p);
+    if (vm_try_growstack(p->vm, va) == 0) {
+      vma = vm_find_area(p->vm, va);
+      if (vma != NULL && vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_WRITE) == 0) {
+        break;
+      }
     }
+    printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(), p->pid);
+    printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+    printf("            pgtbl=0x%lx\n", (uint64)p->vm->pagetable);
+    setkilled(p);
     break;
   default:
     if((which_dev = devintr()) != 0){

@@ -74,6 +74,12 @@
 #define UVMBOTTOM 0x1000L
 #define UVMTOP (MAXVA - (1UL << 32))
 #define USTACKTOP UVMTOP
+#if UVMBOTTOM + (MAXUSTACK << PAGE_SHIFT) > USTACKTOP
+#error "User stack too large"
+#endif
+// The lowest address of the user stack.
+#define USTACK_MAX_BOTTOM   (USTACKTOP - (MAXUSTACK << PAGE_SHIFT))
+#define UHEAP_MAX_TOP       (UVMBOTTOM + (MAXUHEAP << PAGE_SHIFT))
 
 // User memory layout.
 // Address zero first:
