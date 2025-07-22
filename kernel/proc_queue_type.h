@@ -16,6 +16,7 @@ typedef struct proc_queue {
     list_node_t head; // List of processes in the queue
     int counter; // Number of processes in the queue
     const char *name; // Name of the queue
+    spinlock_t *lock; // Spinlock for the queue, it's optional
     uint64 flags;
 } proc_queue_t;
 

@@ -17,7 +17,8 @@
 #define proc_queue_of(proc) \
     ((__proc)->queue_entry.queue)
 
-void proc_queue_init(proc_queue_t *q, const char *name);
+void proc_queue_init(proc_queue_t *q, const char *name, spinlock_t *lock);
+void proc_queue_set_lock(proc_queue_t *q, spinlock_t *lock);
 void proc_queue_entry_init(proc_queue_entry_t *entry);
 
 int proc_queue_size(proc_queue_t *q);

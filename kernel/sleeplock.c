@@ -15,7 +15,7 @@ void
 initsleeplock(struct sleeplock *lk, char *name)
 {
   spin_init(&lk->lk, "sleep lock");
-  proc_queue_init(&lk->wait_queue, "sleep lock wait queue");
+  proc_queue_init(&lk->wait_queue, "sleep lock wait queue", &lk->lk);
   lk->name = name;
   lk->locked = 0;
   lk->pid = 0;
@@ -43,7 +43,7 @@ releasesleep(struct sleeplock *lk)
   // This is to avoid deadlocks, as we cannot hold the lock while waking up processes
   // from the wait queue.
   proc_queue_t tmp_queue = { 0 };
-  proc_queue_init(&tmp_queue, "tmp_queue");
+  proc_queue_init(&tmp_queue, "tmp_queue", NULL);
   spin_acquire(&lk->lk);
   proc_queue_bulk_move(&tmp_queue, &lk->wait_queue);
   lk->locked = 0;

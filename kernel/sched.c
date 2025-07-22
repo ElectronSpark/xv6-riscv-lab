@@ -56,7 +56,7 @@ static struct chan_queue_node *chan_queue_alloc(uint64 chan) {
     if (node) {
         node->chan = chan;
         rb_node_init(&node->rb_entry);
-        proc_queue_init(&node->wait_queue, "chan_wait_queue");
+        proc_queue_init(&node->wait_queue, "chan_wait_queue", NULL);
     }
     return node;
 }
@@ -135,8 +135,8 @@ void sched_unlock(void) {
 /* Scheduler functions */
 void scheduler_init(void) {
     spin_init(&__sched_lock, "sched_lock");
-    proc_queue_init(&ready_queue, "ready_queue");
-    proc_queue_init(&sleep_queue, "sleep_queue");
+    proc_queue_init(&ready_queue, "ready_queue", NULL);
+    proc_queue_init(&sleep_queue, "sleep_queue", NULL);
     chan_queue_init();
 }
 
@@ -342,7 +342,7 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
 
 void scheduler_wakeup_on_chan(void *chan) {
     proc_queue_t tmp_queue = { 0 };
-    proc_queue_init(&tmp_queue, "tmp_queue");
+    proc_queue_init(&tmp_queue, "tmp_queue", NULL);
     sched_lock();
     if (chan_queue_pop((uint64)chan, &tmp_queue) != 0) {
         sched_unlock();

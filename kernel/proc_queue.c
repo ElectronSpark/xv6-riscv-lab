@@ -8,13 +8,20 @@
 #include "proc_queue.h"
 #include "list.h"
 
-void proc_queue_init(proc_queue_t *q, const char *name) {
+void proc_queue_init(proc_queue_t *q, const char *name, spinlock_t *lock) {
     list_entry_init(&q->head);
     q->counter = 0;
     if (name == NULL) {
         q->name = "NULL"; // Default name if none provided
     } else {
         q->name = name;
+    }
+    q->lock = lock;
+}
+
+void proc_queue_set_lock(proc_queue_t *q, spinlock_t *lock) {
+    if (q != NULL) {
+        q->lock = lock;
     }
 }
 
