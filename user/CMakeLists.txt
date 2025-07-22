@@ -111,7 +111,22 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/dumpproc.c
     ${USER_DIR}/dumpchan.c
     ${USER_DIR}/testsig.c
+    ${USER_DIR}/cowtest.c
 )
+
+set(USER_PROGRAMS_C_FILES 
+    ${USER_PROGRAMS_C_FILES}
+    ${USER_DIR}/bigfile.c
+    ${USER_DIR}/symlinktest.c
+)
+
+
+if($ENV{LAB} STREQUAL "lazy")
+    set(USER_PROGRAMS_C_FILES 
+        ${USER_PROGRAMS_C_FILES}
+        ${USER_DIR}/lazytests.c
+    )
+endif()
 
 if($ENV{LAB} STREQUAL "syscall")
     set(USER_PROGRAMS_C_FILES 
@@ -139,20 +154,6 @@ if($ENV{LAB} STREQUAL "traps")
     )
 endif()
 
-if($ENV{LAB} STREQUAL "lazy")
-    set(USER_PROGRAMS_C_FILES 
-        ${USER_PROGRAMS_C_FILES}
-        ${USER_DIR}/lazytests.c
-    )
-endif()
-
-if($ENV{LAB} STREQUAL "cow")
-    set(USER_PROGRAMS_C_FILES 
-        ${USER_PROGRAMS_C_FILES}
-        ${USER_DIR}/cowtest.c
-    )
-endif()
-
 # # @TODO:
 # if($ENV{LAB} STREQUAL "thread")
 #     set(USER_PROGRAMS_C_FILES 
@@ -172,14 +173,6 @@ if($ENV{LAB} STREQUAL "pgtbl")
     set(USER_PROGRAMS_C_FILES 
         ${USER_PROGRAMS_C_FILES}
         ${USER_DIR}/pgtbltest.c
-    )
-endif()
-
-if($ENV{LAB} STREQUAL "fs")
-    set(USER_PROGRAMS_C_FILES 
-        ${USER_PROGRAMS_C_FILES}
-        ${USER_DIR}/bigfile.c
-        ${USER_DIR}/symlinktest.c
     )
 endif()
 
