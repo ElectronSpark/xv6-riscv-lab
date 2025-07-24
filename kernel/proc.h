@@ -84,7 +84,8 @@ struct proc {
   // signal trap frames would be put at the user stack.
   // This is used to restore the user context when a signal is delivered.
   uint64 sigframe;         // Address of the signal trap frame
-  
+  sigqueue_t sigqueue;    // Queue of pending signals
+
   // both p->lock and p->parent->lock must be held when using this:
   list_node_t siblings;       // List of sibling processes
   list_node_t children;       // List of child processes

@@ -9,6 +9,7 @@
 #include "sched.h"
 
 static slab_cache_t __sigacts_pool;
+static slab_cache_t __ksiginfo_pool;
 
 sig_defact signo_default_action(int signo) {
     switch (signo) {
@@ -67,6 +68,38 @@ sig_defact signo_default_action(int signo) {
      (__sigacts)->sa[__signo].sa_mask |         \
      SIGNO_MASK(__signo))))
 
+void sigqueue_init(sigqueue_t *sq) {
+    if (!sq) {
+        return; // Invalid pointer
+    }
+    list_init(&sq->queue);
+    sq->count = 0;
+}
+
+ksiginfo_t *ksiginfo_alloc(void) {
+    ksiginfo_t *ksi = slab_alloc(&__ksiginfo_pool);
+    if (!ksi) {
+        return NULL; // Allocation failed
+    }
+    memset(ksi, 0, sizeof(ksiginfo_t));
+    list_entry_init(&ksi->list_entry);
+    ksi->sender = NULL; // No sender initially
+    return ksi;
+}
+
+int sig_queue_push(struct proc *p, ksiginfo_t *ksi) {
+    if (!p || !ksi) {
+        return -1; // Invalid process or ksiginfo
+    }
+    assert(spin_holding(&p->lock), "sig_queue_push: p->lock must be held");
+    if (p->sigqueue.count < 0) {
+        return -1; // Invalid signal queue count
+    }
+    list_node_push(&p->sigqueue.queue, ksi, list_entry);
+    p->sigqueue.count++;
+    return 0;
+}
+
 // Initialize the first signal actions
 sigacts_t *sigacts_init(void) {
     sigacts_t *sa = slab_alloc(&__sigacts_pool);
@@ -98,6 +131,7 @@ void sigacts_free(sigacts_t *sa) {
 
 void signal_init(void) {
     slab_cache_init(&__sigacts_pool, "sigacts", sizeof(sigacts_t), SLAB_FLAG_STATIC);
+    slab_cache_init(&__ksiginfo_pool, "ksiginfo", sizeof(ksiginfo_t), SLAB_FLAG_STATIC);
 }
 
 int __signal_send(struct proc *p, int signo, siginfo_t *info) {

@@ -52,10 +52,13 @@ static inline int sigismember(const sigset_t *set, int signo) {
 }
 
 void signal_init(void);
-
 sigacts_t *sigacts_init(void);
 sigacts_t *sigacts_dup(sigacts_t *psa);
 void sigacts_free(sigacts_t *sa);
+
+void sigqueue_init(sigqueue_t *sq);
+ksiginfo_t *ksiginfo_alloc(void);
+int sig_queue_push(struct proc *p, ksiginfo_t *ksi);
 
 sig_defact signo_default_action(int signo);
 int __signal_send(struct proc *p, int signo, siginfo_t *info);

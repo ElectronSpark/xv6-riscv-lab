@@ -3,9 +3,12 @@
 
 #include "types.h"
 #include "signo.h"
+#include "spinlock.h"
+#include "list_type.h"
 #include "trapframe.h"
 
 typedef uint64 sigset_t;
+struct proc;
 
 typedef union sigval {
 	int sival_int;
@@ -22,6 +25,15 @@ typedef struct sigaction {
     sigset_t    sa_mask;
     int         sa_flags;
 } sigaction_t;
+
+#define SA_NOCLDSTOP 0x00000001 // Don't receive SIGCHLD when children stop.
+#define SA_NOCLDWAIT 0x00000002 // Don't create zombie processes on child exit.
+#define SA_SIGINFO   0x00000004 // Use sa_sigaction instead of sa_handler.
+// #define SA_ONSTACK   0x00000008 // Use alternate signal stack.
+// #define SA_RESTART   0x00000010 // Restart system calls if interrupted by handler
+#define SA_NODEFER   0x00000020 // Don't block the signal in the handler.
+#define SA_RESETHAND 0x00000040 // Reset the signal handler to SIG_DFL after the first delivery.
+
 
 typedef struct sigacts {
     struct sigaction sa[NSIG+1];
@@ -52,9 +64,9 @@ typedef struct siginfo {
 	int si_errno; /* if nonzero, errno value from errno.h */
 	int si_code; /* additional info (depends on signal) */
 	int si_pid; /* sending process ID */
-	int si_uid; /* sending process real user ID */
+	// int si_uid; /* sending process real user ID */
 	void *si_addr; /* address that caused the fault */
-	int si_status; /* exit value or signal number */
+	int si_status; /* exit value */
 	union sigval si_value; /* application-specific value */
 	/* possibly other fields also */
 } siginfo_t;
@@ -76,5 +88,18 @@ typedef struct ucontext {
 	mcontext_t uc_mcontext; /* machine-specific representation of */
 	/* saved context */
 } ucontext_t;
+
+typedef struct sigqueue {
+	list_node_t queue;
+	int count;
+} sigqueue_t;
+
+typedef struct ksiginfo {
+	list_node_t list_entry;
+	struct proc *receiver;
+	struct proc *sender;	// Process that sent the signal. May be NULL
+	int signo;          	// Signal number
+	siginfo_t info;    		// Signal information
+} ksiginfo_t;
 
 #endif /* __KERNEL_SIGNAL_TYPES_H */

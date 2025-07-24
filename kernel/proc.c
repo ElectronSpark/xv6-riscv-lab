@@ -210,6 +210,7 @@ __pcb_init(struct proc *p)
 {
   memset(p, 0, sizeof(*p));
   p->state = UNUSED;
+  sigqueue_init(&p->sigqueue);
   list_entry_init(&p->dmp_list_entry);
   list_entry_init(&p->siblings);
   list_entry_init(&p->children);
