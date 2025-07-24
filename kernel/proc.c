@@ -219,6 +219,27 @@ __pcb_init(struct proc *p)
   proc_queue_entry_init(&p->queue_entry);
 }
 
+void
+proc_lock(struct proc *p)
+{
+  assert(p != NULL, "proc_lock: proc is NULL");
+  spin_acquire(&p->lock);
+}
+
+void
+proc_unlock(struct proc *p)
+{
+  assert(p != NULL, "proc_unlock: proc is NULL");
+  spin_release(&p->lock);
+}
+
+void
+proc_assert_locked(struct proc *p)
+{
+  assert(p != NULL, "proc_assert_locked: proc is NULL");
+  assert(spin_holding(&p->lock), "proc_assert_locked: proc lock not held");
+}
+
 // initialize the proc table.
 void
 procinit(void)
@@ -322,7 +343,7 @@ allocproc(void)
 
 // free a proc structure and the data hanging from it,
 // including user pages.
-// p->lock must be held.
+// p->lock must not be held.
 STATIC void
 freeproc(struct proc *p)
 {
@@ -332,7 +353,7 @@ freeproc(struct proc *p)
   assert(p->state != SLEEPING, "freeproc called with a sleeping proc");
 
   __proctab_lock();
-  spin_acquire(&p->lock);
+  proc_lock(p);
   struct proc *existing = hlist_pop(&proc_table.procs, p);
   // Remove from the global list of processes for dumping.
   list_entry_detach(&p->dmp_list_entry);
@@ -412,7 +433,7 @@ userinit(void)
   // and data into it.
   uint64 ustack_top = USTACKTOP;
   printf("user stack top at 0x%lx\n", ustack_top);
-  spin_acquire(&p->lock);
+  proc_lock(p);
   uint64 flags = VM_FLAG_EXEC | VM_FLAG_READ | VM_FLAG_USERMAP;
   assert(sizeof(initcode) <= PGSIZE, "userinit: initcode too large");
   void *initcode_page = page_alloc(0, PAGE_FLAG_ANON);
@@ -441,7 +462,7 @@ userinit(void)
 
   p->state = SLEEPING;
 
-  spin_release(&p->lock);
+  proc_unlock(p);
 
   sched_lock();
   scheduler_wakeup(p);
@@ -467,8 +488,8 @@ attach_child(struct proc *parent, struct proc *child)
   assert(parent != NULL, "attach_child: parent is NULL");
   assert(child != NULL, "attach_child: child is NULL");
   assert(child != __proctab_get_initproc(), "attach_child: child is init process");
-  assert(spin_holding(&parent->lock), "attach_child: parent lock not held");
-  assert(spin_holding(&child->lock), "attach_child: child lock not held");
+  proc_assert_locked(parent);
+  proc_assert_locked(child);
   assert(LIST_ENTRY_IS_DETACHED(&child->siblings), "attach_child: child is attached to a parent");
   assert(child->parent == NULL, "attach_child: child has a parent");
 
@@ -483,8 +504,8 @@ detach_child(struct proc *parent, struct proc *child)
 {
   assert(parent != NULL, "detach_child: parent is NULL");
   assert(child != NULL, "detach_child: child is NULL");
-  assert(spin_holding(&parent->lock), "detach_child: parent lock not held");
-  assert(spin_holding(&child->lock), "detach_child: child lock not held");
+  proc_assert_locked(parent);
+  proc_assert_locked(child);
   assert(parent->children_count > 0, "detach_child: parent has no children");
   assert(!LIST_IS_EMPTY(&child->siblings), "detach_child: child is not a sibling of parent");
   assert(!LIST_ENTRY_IS_DETACHED(&child->siblings), "detach_child: child is already detached");
@@ -513,14 +534,14 @@ fork(void)
     return -1;
   }
 
-  spin_acquire(&p->lock);
-  spin_acquire(&np->lock);
+  proc_lock(p);
+  proc_lock(np);
 
   // Copy user memory from parent to child.
   if((np->vm = vm_dup(p->vm, np->trapframe)) == NULL){
     // @TODO: need to make sure no one would access np before freeing it.
-    spin_release(&np->lock);
-    spin_release(&p->lock);
+    proc_unlock(np);
+    proc_unlock(p);
     freeproc(np);
     return -1;
   }
@@ -535,8 +556,8 @@ fork(void)
   if (p->sigacts) {
     np->sigacts = sigacts_dup(p->sigacts);
     if (np->sigacts == NULL) {
-      spin_release(&np->lock);
-      spin_release(&p->lock);
+      proc_unlock(np);
+      proc_unlock(p);
       freeproc(np);
       return -1;
     }
@@ -554,8 +575,8 @@ fork(void)
 
   attach_child(p, np);
   np->state = SLEEPING;
-  spin_release(&np->lock);
-  spin_release(&p->lock);
+  proc_unlock(np);
+  proc_unlock(p);
 
   sched_lock();
   scheduler_wakeup(np);
@@ -576,20 +597,20 @@ reparent(struct proc *p)
   assert(initproc != NULL, "reparent: initproc is NULL");
   assert(p != initproc, "reparent: p is init process");
 
-  spin_acquire(&initproc->lock);
-  spin_acquire(&p->lock);
+  proc_lock(initproc);
+  proc_lock(p);
   
   list_foreach_node_safe(&p->children, child, tmp, siblings) {
     // make sure the child isn't still in exit() or swtch().
-    spin_acquire(&child->lock);
+    proc_lock(child);
     detach_child(p, child);
     attach_child(initproc, child);
-    spin_release(&child->lock);
+    proc_unlock(child);
     found = true;
   }
 
-  spin_release(&p->lock);
-  spin_release(&initproc->lock);
+  proc_unlock(p);
+  proc_unlock(initproc);
 
   if (found)
     wakeup(initproc);
@@ -604,13 +625,13 @@ static void
 __exit_yield(int status)
 {
   struct proc *p = myproc();
-  spin_acquire(&p->lock);
+  proc_lock(p);
   p->xstate = status;
   p->state = ZOMBIE;
   sched_lock();
   scheduler_yield(NULL, NULL);
   sched_unlock();
-  spin_release(&p->lock);
+  proc_unlock(p);
   panic("exit: __exit_yield should not return");
 }
 
@@ -624,7 +645,7 @@ exit(int status)
   struct proc *p = myproc();
   struct inode *cwd = NULL;
 
-  spin_acquire(&p->lock);
+  proc_lock(p);
   assert(p != proc_table.initproc, "init exiting");
   // p->state = EXITING;
   // __sync_synchronize(); // Ensure all writes are visible before releasing the lock
@@ -636,14 +657,14 @@ exit(int status)
       p->ofile[fd] = 0;
       assert((uint64)f < PHYSTOP, "exit: file pointer out of bounds, pid: %d, fd: %d(*%p), f: %p", p->pid, fd, f, &p->ofile[fd]);
       // release p->lock before fileclose because fileclose may sleep
-      spin_release(&p->lock);
+      proc_unlock(p);
       fileclose(f);
-      spin_acquire(&p->lock); // reacquire p->lock after fileclose
+      proc_lock(p); // reacquire p->lock after fileclose
     }
   }
   cwd = p->cwd;
   p->cwd = 0;
-  spin_release(&p->lock);
+  proc_unlock(p);
 
   begin_op();
   iput(cwd);
@@ -668,28 +689,28 @@ wait(uint64 addr)
   struct proc *p = myproc();
   struct proc *child, *tmp;
 
-  spin_acquire(&p->lock);
+  proc_lock(p);
   for(;;){
     // Scan through table looking for exited children.
     list_foreach_node_safe(&p->children, child, tmp, siblings) {
       // make sure the child isn't still in exit() or swtch().
-      spin_acquire(&child->lock);
+      proc_lock(child);
       if(child->state == ZOMBIE){
         // Found one.
         pid = child->pid;
         if(addr != 0 && vm_copyout(p->vm, addr, (char *)&child->xstate,
                                     sizeof(child->xstate)) < 0) {
-          spin_release(&child->lock);
+          proc_unlock(child);
           pid = -1;
           goto ret;
         }
         pid = child->pid;
         detach_child(p, child);
-        spin_release(&child->lock);
+        proc_unlock(child);
         freeproc(child);
         goto ret;
       }
-      spin_release(&child->lock);
+      proc_unlock(child);
     }
 
     // No point waiting if we don't have any children.
@@ -699,13 +720,13 @@ wait(uint64 addr)
     }
     
     // Wait for a child to exit.
-    spin_release(&p->lock);
+    proc_unlock(p);
     sleep(p, NULL);  //DOC: wait-sleep
-    spin_acquire(&p->lock);
+    proc_lock(p);
   }
 
 ret:
-  spin_release(&p->lock);
+  proc_unlock(p);
   return pid;
 }
 
@@ -713,11 +734,11 @@ ret:
 void
 yield(void)
 {
-  spin_acquire(&myproc()->lock);
+  proc_lock(myproc());
   sched_lock();
   scheduler_yield(NULL, NULL);
   sched_unlock();
-  spin_release(&myproc()->lock);
+  proc_unlock(myproc());
 }
 
 // A fork child's very first scheduling by scheduler()
@@ -734,7 +755,7 @@ forkret(void)
   
   // Still holding p->lock from scheduler.
   sched_unlock(); // Release the scheduler lock.
-  spin_release(&myproc()->lock);
+  proc_unlock(myproc());
   intr_on();
 
   if (first) {
@@ -758,9 +779,9 @@ forkret(void)
 void
 sleep(void *chan, struct spinlock *lk)
 {
-  spin_acquire(&myproc()->lock);
+  proc_lock(myproc());
   scheduler_sleep_on_chan(chan, lk);
-  spin_release(&myproc()->lock);
+  proc_unlock(myproc());
 }
 
 // Wake up all processes sleeping on chan.
@@ -783,9 +804,9 @@ kill(int pid, int signum)
 void
 setkilled(struct proc *p)
 {
-  spin_acquire(&p->lock);
+  proc_lock(p);
   p->killed = 1;
-  spin_release(&p->lock);
+  proc_unlock(p);
 }
 
 STATIC int
@@ -793,7 +814,7 @@ __killed_locked(struct proc *p)
 {
   // This function is used when we don't hold p->lock.
   // It is not safe to call this function if p->lock is held.
-  assert(spin_holding(&p->lock), "killed_locked called without p->lock held");
+  proc_assert_locked(p);
   return p->killed;
 }
 
@@ -802,9 +823,9 @@ killed(struct proc *p)
 {
   int k;
   
-  spin_acquire(&p->lock);
+  proc_lock(p);;
   k = __killed_locked(p);
-  spin_release(&p->lock);
+  proc_unlock(p);
   return k;
 }
 
@@ -812,18 +833,18 @@ int needs_resched(struct proc *p)
 {
   int resched;
 
-  spin_acquire(&p->lock);
+  proc_lock(p);
   resched = p->needs_resched;
-  spin_release(&p->lock);
-  
+  proc_unlock(p);
+
   return resched;
 }
 
 void set_needs_resched(struct proc *p)
 {
-  spin_acquire(&p->lock);
+  proc_lock(p);
   p->needs_resched = 1;
-  spin_release(&p->lock);
+  proc_unlock(p);
 }
 
 // Copy to either a user address, or kernel address,
@@ -886,12 +907,12 @@ procdump(void)
   // list_foreach_node_safe(&proc_table.procs_list, p, tmp, dmp_list_entry) {
   hlist_foreach_entry(&proc_table.procs, idx, bucket, pos_entry, tmp) {
     p = __proctab_hash_get_node(pos_entry);
-    spin_acquire(&p->lock);
+    proc_lock(p);
     enum procstate pstate = p->state;
     int pid = p->pid;
     char name[sizeof(p->name)];
     safestrcpy(name, p->name, sizeof(name));
-    spin_release(&p->lock);
+    proc_unlock(p);
 
     if (pstate == UNUSED)
       continue;

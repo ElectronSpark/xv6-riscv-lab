@@ -168,13 +168,13 @@ int signal_send(int pid, int signo, siginfo_t *info) {
         return -1; // No process found
     }
     assert(p != NULL, "signal_send: proc is NULL");
-    spin_acquire(&p->lock);
+    proc_lock(p);
     if (p->state == UNUSED || p->state == ZOMBIE || p->state == EXITING) {
-        spin_release(&p->lock);
+        proc_unlock(p);
         return -1; // Process is not usable
     }
     int ret = __signal_send(p, signo, info);
-    spin_release(&p->lock);
+    proc_unlock(p);
 
     scheduler_wakeup_on_chan(p->chan);
 
@@ -233,7 +233,7 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
     struct proc *p = myproc();
     assert(p != NULL, "sys_sigaction: myproc returned NULL");
 
-    spin_acquire(&p->lock);
+    proc_lock(p);
     sigacts_t *sa = p->sigacts;
 
     if (oldact) {
@@ -244,7 +244,7 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
         sa->sa[signum] = *act;
     }
     
-    spin_release(&p->lock);
+    proc_unlock(p);
     return 0; // Success
 }
 
@@ -257,7 +257,7 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     }
     struct proc *p = myproc();
     assert(p != NULL, "sigprocmask: myproc returned NULL");
-    spin_acquire(&p->lock);
+    proc_lock(p);
 
     sigacts_t *sa = p->sigacts;
     assert(sa != NULL, "sigprocmask: sigacts is NULL");
@@ -285,13 +285,13 @@ int sigpending(sigset_t *set) {
     }
     struct proc *p = myproc();
     assert(p != NULL, "sigpending: myproc returned NULL");
-    spin_acquire(&p->lock);
+    proc_lock(p);
 
     sigacts_t *sa = p->sigacts;
     assert(sa != NULL, "sigpending: sigacts is NULL");
     
     *set = sa->sa_sigmask & sa->sa_sigpending; // Get the pending signals
-    spin_release(&p->lock);
+    proc_unlock(p);
     
     return 0; // Success
 }
@@ -300,19 +300,19 @@ int sigreturn(void) {
     struct proc *p = myproc();
     assert(p != NULL, "sys_sigreturn: myproc returned NULL");
 
-    spin_acquire(&p->lock);
+    proc_lock(p);
     if (p->sigframe == 0) {
-        spin_release(&p->lock);
+        proc_unlock(p);
         return -1; // No signal trap frame to restore
     }
 
     if (restore_sigframe(p) != 0) {
-        spin_release(&p->lock);
+        proc_unlock(p);
         // @TODO:
         exit(-1); // Restore failed, exit the process
     }
 
-    spin_release(&p->lock);
+    proc_unlock(p);
 
     return 0; // Success
 }

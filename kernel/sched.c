@@ -150,7 +150,7 @@ static struct proc *__sched_pick_next(void) {
     sched_unlock();
     
     if (p) {
-        spin_acquire(&p->lock);
+        proc_lock(p);
         assert(p->state != RUNNING, "found and running process in ready queue");
         assert(p->state != SLEEPING, "try to schedule a sleeping process");
         assert(p->state != UNUSED, "try to schedule an uninitialized process");
@@ -181,14 +181,14 @@ static struct spinlock *__switch_to(struct proc *p) {
     assert(!intr_get(), "Interrupts must be disabled before switching to a process");
     assert(p != NULL, "Cannot switch to a NULL process");
     assert(p->state == RUNNABLE, "Cannot switch to a non-RUNNABLE process");
-    assert(spin_holding(&p->lock), "Process lock must be held before switch");
+    proc_assert_locked(p);
 
     // Switch to the process's context
     mycpu()->proc = p; // Set the current process for this CPU
     p->state = RUNNING; // Set the process state to RUNNING
 
     struct spinlock * lk = (struct spinlock *)__swtch_context(&mycpu()->context, &p->context, 0);
-    assert(spin_holding(&p->lock), "Process lock must be held after switch");
+    proc_assert_locked(p);
     assert(!intr_get(), "Interrupts must be disabled before switching to a process");
 
     mycpu()->proc = NULL; // Clear the current process for this CPU
@@ -221,7 +221,7 @@ void scheduler_run(void) {
         }
         sched_unlock();
         // printf("CPU: %d <- %s: %s (pid: %d)\n", cpuid(), p->name, procstate_to_str(p->state), p->pid);
-        spin_release(&p->lock);
+        proc_unlock(p);
         if (lk != NULL) {
             spin_release(lk); // Release the lock returned by __swtch_context
         }
@@ -237,7 +237,7 @@ void scheduler_run(void) {
 int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
     push_off();
     struct proc *proc = myproc();
-    assert(spin_holding(&proc->lock), "Process lock must be held before yielding");
+    proc_assert_locked(proc);
     __sched_assert_holding();
     int lk_holding = (lk != NULL && spin_holding(lk));
     pop_off();
@@ -251,7 +251,7 @@ int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
 
     assert(!intr_get(), "Interrupts must be disabled after switching to a process");
     assert(myproc() == proc, "Yield returned to a different process");
-    assert(spin_holding(&proc->lock), "Process lock must be held after yield");
+    proc_assert_locked(proc);
     assert(proc->state == RUNNING, "Process state must be RUNNING after yield");
 
     mycpu()->intena = intena; // Restore interrupt state
@@ -269,7 +269,7 @@ void scheduler_sleep(proc_queue_t *queue, struct spinlock *lk) {
     struct proc *proc = myproc();
     assert(proc != NULL, "PCB is NULL");
     assert(queue != NULL, "Cannot sleep on a NULL queue");
-    assert(spin_holding(&proc->lock), "Process lock must be held before sleeping");
+    proc_assert_locked(proc);
     int lk_holding = (lk != NULL && spin_holding(lk));
     pop_off();  // Safe to decrease noff counter after acquiring the process lock
 
@@ -284,11 +284,11 @@ void scheduler_sleep(proc_queue_t *queue, struct spinlock *lk) {
     // Because the process lock is acquired after lk, we need to release it before acquiring lk.
     // The process lock will be held after acquiring lk, if the process lock was held 
     // before the yield.
-    spin_release(&proc->lock);
+    proc_unlock(proc);
     if (lk_holding) {
         spin_acquire(lk);
     }
-    spin_acquire(&proc->lock); // Reacquire the process lock after yielding
+    proc_lock(proc); // Reacquire the process lock after yielding
 }
 
 // Wake up a process from the sleep queue.
@@ -315,7 +315,7 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
     struct proc *proc = myproc();
     assert(proc != NULL, "PCB is NULL");
     assert(chan != NULL, "Cannot sleep on a NULL channel");
-    assert(spin_holding(&proc->lock), "Process lock must be held before sleeping");
+    proc_assert_locked(proc);
     int lk_holding = (lk != NULL && spin_holding(lk));
     pop_off();  // Safe to decrease noff counter after acquiring the process lock
 
@@ -333,11 +333,11 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
     // Because the process lock is acquired after lk, we need to release it before acquiring lk.
     // The process lock will be held after acquiring lk, if the process lock was held 
     // before the yield.
-    spin_release(&proc->lock);
+    proc_unlock(proc);
     if (lk_holding) {
         spin_acquire(lk);
     }
-    spin_acquire(&proc->lock); // Reacquire the process lock after yielding
+    proc_lock(proc); // Reacquire the process lock after yielding
 }
 
 void scheduler_wakeup_on_chan(void *chan) {
@@ -353,12 +353,12 @@ void scheduler_wakeup_on_chan(void *chan) {
     struct proc *p = NULL;
     struct proc *tmp = NULL;
     proc_queue_foreach_unlocked(&tmp_queue, p, tmp) {
-        spin_acquire(&p->lock);
+        proc_lock(p);
         assert(proc_queue_remove(&tmp_queue, p) == 0, "Failed to remove process from temporary queue");
         sched_lock();
         scheduler_wakeup(p);
         sched_unlock();
-        spin_release(&p->lock);
+        proc_unlock(p);
     }
 }
 
