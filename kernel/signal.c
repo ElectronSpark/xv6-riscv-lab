@@ -267,12 +267,12 @@ int sigreturn(void) {
     assert(p != NULL, "sys_sigreturn: myproc returned NULL");
 
     spin_acquire(&p->lock);
-    if (p->sigtrapframe == 0) {
+    if (p->sigframe == 0) {
         spin_release(&p->lock);
         return -1; // No signal trap frame to restore
     }
 
-    if (restore_sigtrapframe(p) != 0) {
+    if (restore_sigframe(p) != 0) {
         spin_release(&p->lock);
         // @TODO:
         exit(-1); // Restore failed, exit the process

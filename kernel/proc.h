@@ -83,7 +83,7 @@ struct proc {
   sigacts_t *sigacts;          // Signal actions for this process
   // signal trap frames would be put at the user stack.
   // This is used to restore the user context when a signal is delivered.
-  uint64 sigtrapframe;         // Address of the signal trap frame
+  uint64 sigframe;         // Address of the signal trap frame
   
   // both p->lock and p->parent->lock must be held when using this:
   list_node_t siblings;       // List of sibling processes

@@ -186,12 +186,12 @@ void            trapinit(void);
 void            trapinithart(void);
 extern struct spinlock tickslock;
 void            usertrapret(void);
-int             push_sigtrapframe(struct proc *p, 
+int             push_sigframe(struct proc *p, 
                                   void *handler, 
                                   uint64 arg0, 
                                   uint64 arg1, 
                                   uint64 arg2);
-int             restore_sigtrapframe(struct proc *p);
+int             restore_sigframe(struct proc *p);
 
 // uart.c
 void            uartinit(void);

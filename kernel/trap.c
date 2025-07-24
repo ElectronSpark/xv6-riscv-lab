@@ -154,7 +154,7 @@ usertrap(void)
 
 extern void sig_trampoline(uint64 arg0, uint64 arg1, uint64 arg2, void *handler);
 
-int push_sigtrapframe(struct proc *p, void *handler, uint64 arg0, uint64 arg1, uint64 arg2)
+int push_sigframe(struct proc *p, void *handler, uint64 arg0, uint64 arg1, uint64 arg2)
 {
   uint64 new_sigtrap = p->trapframe->sp - sizeof(struct trapframe);
   if (new_sigtrap < USTACK_MAX_BOTTOM + 16) {
@@ -170,14 +170,14 @@ int push_sigtrapframe(struct proc *p, void *handler, uint64 arg0, uint64 arg1, u
 
   // ucontext_t uc = {0};
 
-  p->trapframe->prev = p->sigtrapframe;
+  p->trapframe->prev = p->sigframe;
 
   // Copy the trap frame to the signal trap frame.
   if (vm_copyout(p->vm, new_sigtrap, (void *)p->trapframe, sizeof(struct trapframe)) != 0) {
     return -1; // Copy failed
   }
 
-  p->sigtrapframe = new_sigtrap;
+  p->sigframe = new_sigtrap;
   p->trapframe->sp = new_stack_top;
   p->trapframe->epc = (uint64)SIG_TRAMPOLINE; // Set the epc to the signal trampoline
   p->trapframe->a0 = arg0; // Set the first argument
@@ -188,20 +188,20 @@ int push_sigtrapframe(struct proc *p, void *handler, uint64 arg0, uint64 arg1, u
   return 0; // Success
 }
 
-int restore_sigtrapframe(struct proc *p)
+int restore_sigframe(struct proc *p)
 {
-  if (p->sigtrapframe == 0) {
+  if (p->sigframe == 0) {
     return -1; // No signal trap frame to restore
   }
 
-  uint64 sigtrapframe = p->sigtrapframe;
+  uint64 sigframe = p->sigframe;
 
   // Copy the signal trap frame back to the user trap frame.
-  if (vm_copyin(p->vm, (void *)p->trapframe, sigtrapframe, sizeof(struct trapframe)) != 0) {
+  if (vm_copyin(p->vm, (void *)p->trapframe, sigframe, sizeof(struct trapframe)) != 0) {
     return -1; // Copy failed
   }
 
-  p->sigtrapframe = p->trapframe->prev; // Restore the previous signal trap frame
+  p->sigframe = p->trapframe->prev; // Restore the previous signal trap frame
 
   return 0; // Success
 }
@@ -236,7 +236,7 @@ usertrapret(void)
   int signo;
   sigaction_t *sa = signal_take(p->sigacts, &signo);
   if(sa){
-    if (push_sigtrapframe(p, sa->sa_handler, signo, 0, 0) != 0) {
+    if (push_sigframe(p, sa->sa_handler, signo, 0, 0) != 0) {
       exit(-1); // Failed to push the signal trap frame
     }
   }
