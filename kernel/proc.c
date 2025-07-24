@@ -211,6 +211,7 @@ __pcb_init(struct proc *p)
   memset(p, 0, sizeof(*p));
   p->state = UNUSED;
   sigqueue_init(&p->sigqueue);
+  sigstack_init(&p->sig_stack);
   list_entry_init(&p->dmp_list_entry);
   list_entry_init(&p->siblings);
   list_entry_init(&p->children);
@@ -234,10 +235,10 @@ proc_unlock(struct proc *p)
 }
 
 void
-proc_assert_locked(struct proc *p)
+proc_assert_holding(struct proc *p)
 {
-  assert(p != NULL, "proc_assert_locked: proc is NULL");
-  assert(spin_holding(&p->lock), "proc_assert_locked: proc lock not held");
+  assert(p != NULL, "proc_assert_holding: proc is NULL");
+  assert(spin_holding(&p->lock), "proc_assert_holding: proc lock not held");
 }
 
 // initialize the proc table.
@@ -488,8 +489,8 @@ attach_child(struct proc *parent, struct proc *child)
   assert(parent != NULL, "attach_child: parent is NULL");
   assert(child != NULL, "attach_child: child is NULL");
   assert(child != __proctab_get_initproc(), "attach_child: child is init process");
-  proc_assert_locked(parent);
-  proc_assert_locked(child);
+  proc_assert_holding(parent);
+  proc_assert_holding(child);
   assert(LIST_ENTRY_IS_DETACHED(&child->siblings), "attach_child: child is attached to a parent");
   assert(child->parent == NULL, "attach_child: child has a parent");
 
@@ -504,8 +505,8 @@ detach_child(struct proc *parent, struct proc *child)
 {
   assert(parent != NULL, "detach_child: parent is NULL");
   assert(child != NULL, "detach_child: child is NULL");
-  proc_assert_locked(parent);
-  proc_assert_locked(child);
+  proc_assert_holding(parent);
+  proc_assert_holding(child);
   assert(parent->children_count > 0, "detach_child: parent has no children");
   assert(!LIST_IS_EMPTY(&child->siblings), "detach_child: child is not a sibling of parent");
   assert(!LIST_ENTRY_IS_DETACHED(&child->siblings), "detach_child: child is already detached");
@@ -798,7 +799,18 @@ wakeup(void *chan)
 int
 kill(int pid, int signum)
 {
-  return signal_send(pid, signum, NULL);
+  ksiginfo_t *info = ksiginfo_alloc();
+  if (info == NULL) {
+    return -1; // Failed to allocate ksiginfo
+  }
+  info->signo = signum;
+  info->sender = myproc();
+
+  int ret = signal_send(pid, info);
+  if (ret != 0) {
+    ksiginfo_free(info);
+  }
+  return ret;
 }
 
 void
@@ -814,7 +826,7 @@ __killed_locked(struct proc *p)
 {
   // This function is used when we don't hold p->lock.
   // It is not safe to call this function if p->lock is held.
-  proc_assert_locked(p);
+  proc_assert_holding(p);
   return p->killed;
 }
 

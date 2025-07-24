@@ -83,7 +83,8 @@ struct proc {
   sigacts_t *sigacts;          // Signal actions for this process
   // signal trap frames would be put at the user stack.
   // This is used to restore the user context when a signal is delivered.
-  uint64 sigframe;         // Address of the signal trap frame
+  uint64 sig_ucontext;    // Address of the signal user context
+  stack_t sig_stack;      // Alternate signal stack
   sigqueue_t sigqueue;    // Queue of pending signals
 
   // both p->lock and p->parent->lock must be held when using this:

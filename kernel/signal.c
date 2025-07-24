@@ -7,6 +7,7 @@
 #include "proc.h"
 #include "slab.h"
 #include "sched.h"
+#include "list.h"
 
 static slab_cache_t __sigacts_pool;
 static slab_cache_t __ksiginfo_pool;
@@ -72,8 +73,17 @@ void sigqueue_init(sigqueue_t *sq) {
     if (!sq) {
         return; // Invalid pointer
     }
-    list_init(&sq->queue);
+    list_entry_init(&sq->queue);
     sq->count = 0;
+}
+
+void sigstack_init(stack_t *stack) {
+    if (!stack) {
+        return; // Invalid pointer
+    }
+    stack->ss_sp = NULL; // No stack allocated yet
+    stack->ss_flags = SS_DISABLE;
+    stack->ss_size = 0; // Size is zero initially
 }
 
 ksiginfo_t *ksiginfo_alloc(void) {
@@ -87,17 +97,89 @@ ksiginfo_t *ksiginfo_alloc(void) {
     return ksi;
 }
 
-int sig_queue_push(struct proc *p, ksiginfo_t *ksi) {
+void ksiginfo_free(ksiginfo_t *ksi) {
+    if (ksi) {
+        slab_free(ksi);
+    }
+}
+
+int sigqueue_push(struct proc *p, ksiginfo_t *ksi) {
     if (!p || !ksi) {
         return -1; // Invalid process or ksiginfo
     }
-    assert(spin_holding(&p->lock), "sig_queue_push: p->lock must be held");
+    proc_assert_holding(p);
     if (p->sigqueue.count < 0) {
         return -1; // Invalid signal queue count
     }
+    ksi->receiver = p; // Set the receiver to the process
     list_node_push(&p->sigqueue.queue, ksi, list_entry);
     p->sigqueue.count++;
     return 0;
+}
+
+int __sigqueue_remove(struct proc *p, ksiginfo_t *ksi) {
+    if (!p || !ksi) {
+        return -1; // Invalid process or ksiginfo
+    }
+    proc_assert_holding(p);
+    assert(ksi->receiver == p, "sig_queue_remove: receiver mismatch");
+    assert(p->sigqueue.count >= 0, "Negative signal queue count");
+    list_node_detach(ksi, list_entry);
+    p->sigqueue.count--;
+    return 0;
+}
+
+// Pop the first ksiginfo of the given signal number from the process's signal queue.
+// If the signo is 0, then the first ksiginfo in the queue is returned.
+// Returns NULL if no such signal is found.
+// The caller must hold the process lock.
+ksiginfo_t *sigqueue_pop(struct proc *p, int signo) {
+    if (!p || signo < 0 || signo > NSIG) {
+        return NULL; // Invalid process or signal number
+    }
+    proc_assert_holding(p);
+
+    ksiginfo_t *ksi = NULL;
+    ksiginfo_t *tmp = NULL;
+    if (signo == 0)
+
+    list_foreach_node_safe(&p->sigqueue.queue, ksi, tmp, list_entry) {
+        if (ksi->signo == signo) {
+            if (__sigqueue_remove(p, ksi) != 0) {
+                return NULL;
+            }
+            return ksi; // Found the signal, return it
+        }
+    }
+
+    return NULL; // No matching signal found
+}
+
+// Clean the signal queue of the given process for the specified signal number.
+// If signo is 0, all signals in the queue are cleaned.
+// Ksiginfo being cleaned will be freed.
+// The caller must hold the process lock.
+// Returns 0 on success, -1 on error.
+int sigqueue_clean(struct proc *p, int signo) {
+    if (!p || signo < 0 || signo > NSIG) {
+        return -1; // Invalid process or signal number
+    }
+    proc_assert_holding(p);
+
+    int ret = 0;
+    ksiginfo_t *ksi = NULL;
+    ksiginfo_t *tmp = NULL;
+    list_foreach_node_safe(&p->sigqueue.queue, ksi, tmp, list_entry) {
+        if (signo == 0 || ksi->signo == signo) {
+            if (__sigqueue_remove(p, ksi) != 0) {
+                ret = -1;
+            } else {
+                ksiginfo_free(ksi); // Free the ksiginfo after removing it
+            }
+        }
+    }
+
+    return ret;
 }
 
 // Initialize the first signal actions
@@ -134,51 +216,62 @@ void signal_init(void) {
     slab_cache_init(&__ksiginfo_pool, "ksiginfo", sizeof(ksiginfo_t), SLAB_FLAG_STATIC);
 }
 
-int __signal_send(struct proc *p, int signo, siginfo_t *info) {
-    if (!p && (p = myproc()) == NULL) {
+int __signal_send(struct proc *p, ksiginfo_t *info) {
+    if (p == NULL || info == NULL) {
         return -1; // No process available
     }
-    if (SIGBAD(signo)) {
+    if (SIGBAD(info->signo)) {
         return -1; // Invalid process or signal number
     }
-    if (!spin_holding(&p->lock)) {
-        return -1; // Lock must be held to send signal
-    }
 
-    sigacts_t *sa = p->sigacts;
-    if (!sa) {
-        return -1; // No signal actions available
-    }
-
-    // ignored signals are not sent
-    if (sa->sa_sigignore & SIGNO_MASK(signo)) {
-        return 0; // Signal is ignored
-    }
-
-    sa->sa_sigpending |= SIGNO_MASK(signo);
-    return 0; // Signal sent successfully
-}
-
-int signal_send(int pid, int signo, siginfo_t *info) {
-    struct proc *p = NULL;
-    if (pid < 0 || SIGBAD(signo)) {
-        return -1; // Invalid PID or signal number
-    }
-    if (proctab_get_pid_proc(pid, &p) != 0) {
-        return -1; // No process found
-    }
-    assert(p != NULL, "signal_send: proc is NULL");
     proc_lock(p);
     if (p->state == UNUSED || p->state == ZOMBIE || p->state == EXITING) {
         proc_unlock(p);
         return -1; // Process is not usable
     }
-    int ret = __signal_send(p, signo, info);
+
+    sigacts_t *sa = p->sigacts;
+    if (!sa) {
+        proc_unlock(p);
+        return -1; // No signal actions available
+    }
+
+    sigset_t signo_mask = SIGNO_MASK(info->signo);
+
+    // ignored signals are not sent
+    if (sa->sa_sigignore & signo_mask) {
+        proc_unlock(p);
+        return 0; // Signal is ignored
+    }
+
+    if (sigqueue_push(p, info) != 0) {
+        proc_unlock(p);
+        return -1; // Failed to push signal to queue
+    }
+    sa->sa_sigpending |= signo_mask;
+    bool need_wakeup = (~sa->sa_sigmask & signo_mask) == 0;
     proc_unlock(p);
 
-    scheduler_wakeup_on_chan(p->chan);
+    if (need_wakeup) {
+        scheduler_wakeup_on_chan(p->chan);
+    }
+    return 0; // Signal sent successfully
+}
 
-    return ret;
+int signal_send(int pid, ksiginfo_t *info) {
+    struct proc *p = NULL;
+    if (pid < 0 || info == NULL || SIGBAD(info->signo)) {
+        return -1; // Invalid PID or signal number
+    }
+    if (proctab_get_pid_proc(pid, &p) != 0) {
+        return -1; // No process found
+    }
+    if (p == NULL) {
+        return -1; // No process found
+    }
+    assert(p != NULL, "signal_send: proc is NULL");
+    
+    return __signal_send(p, info);
 }
 
 int signal_terminated(sigacts_t *sa) {
@@ -191,11 +284,13 @@ int signal_terminated(sigacts_t *sa) {
 
 // Claim the signal and set the signal actions to the corresponding state.
 // and return the sigaction for the signal.
-sigaction_t *signal_take(sigacts_t *sa, int *ret_signo) {
-    if (!sa) {
+sigaction_t *signal_pick(struct proc *p, ksiginfo_t **ret_info) {
+    if (p == NULL || ret_info == NULL || p->sigacts == NULL) {
         return NULL; // No signal actions available
     }
+    proc_assert_holding(p);
 
+    sigacts_t *sa = p->sigacts;
     sigset_t masked = sa->sa_sigpending & ~(sa->sa_sigmask | sa->sa_sigignore);
 
     if (masked == 0) {
@@ -212,14 +307,55 @@ sigaction_t *signal_take(sigacts_t *sa, int *ret_signo) {
         return NULL; // Invalid signal number
     }
 
-    sa->sa_sigpending &= ~SIGNO_MASK(signo); // Clear the pending signal
-    sa->sa_sigmask = __SIGNAL_MAKE_MASK(sa, signo); // Update the mask
+    ksiginfo_t *ksi = NULL;
+    ksiginfo_t *tmp = NULL;
 
-    if (ret_signo) {
-        *ret_signo = signo; // Return the signal number
+    list_foreach_node_safe(&p->sigqueue.queue, ksi, tmp, list_entry) {
+        if (ksi->signo == signo) {
+            if (__sigqueue_remove(p, ksi) != 0) {
+                return NULL;
+            }
+            *ret_info = ksi;
+            return &sa->sa[signo]; // Found the signal, return it
+        }
     }
 
-    return &sa->sa[signo]; // Return the sigaction for the signal
+    return NULL;
+}
+
+int signal_deliver(struct proc *p, ksiginfo_t *info, sigaction_t *sa) {
+    if (p == NULL || sa == NULL || info == NULL) {
+        return -1; // Invalid process, signal action, or info
+    }
+    proc_assert_holding(p);
+
+    // If the signal action is to ignore the signal, do nothing
+    if ((void*)sa->sa_handler == SIG_IGN) {
+        return 0; // Signal ignored
+    }
+
+    if ((p->sig_stack.ss_flags & SS_ONSTACK) && 
+        (sa->sa_flags & SA_ONSTACK)) {
+        // Use the alternate signal stack if it's set and the action requires it
+        p->sig_stack.ss_flags |= SS_ONSTACK;
+    }
+
+    p->sigacts->sa_sigmask |= sa->sa_mask; // Block the signal during delivery
+    // @TODO: signal pending
+    return 0;
+}
+
+int signal_restore(struct proc *p, ucontext_t *context) {
+    if (p == NULL || context == NULL) {
+        return -1; // Invalid process or context
+    }
+    proc_assert_holding(p);
+
+    p->sig_stack = context->uc_stack;
+    p->sigacts->sa_sigmask = context->uc_sigmask;
+    p->sig_ucontext = (uint64)context->uc_link;
+
+    return 0; // Success
 }
 
 int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
@@ -301,7 +437,7 @@ int sigreturn(void) {
     assert(p != NULL, "sys_sigreturn: myproc returned NULL");
 
     proc_lock(p);
-    if (p->sigframe == 0) {
+    if (p->sig_ucontext == 0) {
         proc_unlock(p);
         return -1; // No signal trap frame to restore
     }
@@ -311,6 +447,9 @@ int sigreturn(void) {
         // @TODO:
         exit(-1); // Restore failed, exit the process
     }
+
+    assert(signal_restore(p, (ucontext_t *)p->sig_ucontext) == 0,
+           "sigreturn: signal_restore failed");
 
     proc_unlock(p);
 

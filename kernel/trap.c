@@ -154,54 +154,94 @@ usertrap(void)
 
 extern void sig_trampoline(uint64 arg0, uint64 arg1, uint64 arg2, void *handler);
 
-int push_sigframe(struct proc *p, void *handler, uint64 arg0, uint64 arg1, uint64 arg2)
+// Will only modify the user space memory and p->sig_ucontext
+// Further modifications to the process struct need to be done if it succeeds.
+int push_sigframe(struct proc *p, 
+                  sigaction_t *sa,
+                  ksiginfo_t *info)
 {
-  uint64 new_sigtrap = p->trapframe->sp - sizeof(struct trapframe);
-  if (new_sigtrap < USTACK_MAX_BOTTOM + 16) {
-    return -1; // Stack overflow
-  }
-  uint64 new_stack_top = new_sigtrap - 16;
-  if (p == NULL || p->vm == NULL) {
-    exit(-1); // No stack area available
-  }
-  if (vm_try_growstack(p->vm, new_sigtrap) != 0) {
-    return -1; // Failed to grow the stack
+  if (info == NULL || sa == NULL || sa->sa_handler == NULL || p == NULL) {
+    return -1; // Invalid arguments
   }
 
-  // ucontext_t uc = {0};
+  uint64 new_sp = 0;
+  if ((sa->sa_flags & SA_ONSTACK) != 0 && \
+      (p->sig_stack.ss_flags & (SS_ONSTACK | SS_DISABLE)) == 0) {
+    // Use the alternate stack if SA_ONSTACK is set.
 
-  p->trapframe->prev = p->sigframe;
+    if (p->sig_stack.ss_size < MINSIGSTKSZ) {
+      return -1; // Stack too small
+    }
+    new_sp = (uint64)p->sig_stack.ss_sp + p->sig_stack.ss_size;
+  } else {
+    new_sp = p->trapframe->sp;
+  }
+
+  new_sp -= 0x10UL;
+  new_sp &= ~0xFUL; // align to 16 bytes
+  uint64 new_ucontext = new_sp - sizeof(ucontext_t);
+  new_ucontext &= ~0xFUL;
+  uint64 user_siginfo = 0;
+  if (sa->sa_flags & SA_SIGINFO) {
+    user_siginfo = new_ucontext - sizeof(siginfo_t);
+    user_siginfo &= ~0xFUL;
+    new_sp = user_siginfo;
+  } else {
+    new_sp = new_ucontext;
+  }
+
+  if ((sa->sa_flags & SA_ONSTACK) == 0) {
+    if (p == NULL || p->vm == NULL) {
+      exit(-1); // No stack area available
+    }
+    if (vm_try_growstack(p->vm, new_sp) != 0) {
+      exit(-1); // No stack area available
+    }
+  }
+
+  ucontext_t uc = {0};
+  uc.uc_link = (ucontext_t*)p->sig_ucontext;
+  uc.uc_sigmask = sa->sa_mask;
+  memmove(&uc.uc_mcontext, p->trapframe, sizeof(mcontext_t));
+  memmove(&uc.uc_stack, &p->sig_stack, sizeof(stack_t));
 
   // Copy the trap frame to the signal trap frame.
-  if (vm_copyout(p->vm, new_sigtrap, (void *)p->trapframe, sizeof(struct trapframe)) != 0) {
+  if (vm_copyout(p->vm, new_ucontext, (void *)new_ucontext, sizeof(ucontext_t)) != 0) {
     return -1; // Copy failed
   }
+  if (sa->sa_flags & SA_SIGINFO) {
+    if (vm_copyout(p->vm, user_siginfo, &info->info, sizeof(siginfo_t)) != 0) {
+      return -1; // Copy failed
+    }
+  }
 
-  p->sigframe = new_sigtrap;
-  p->trapframe->sp = new_stack_top;
+  p->trapframe->sp = new_sp;
   p->trapframe->epc = (uint64)SIG_TRAMPOLINE; // Set the epc to the signal trampoline
-  p->trapframe->a0 = arg0; // Set the first argument
-  p->trapframe->a1 = arg1; // Set the second argument
-  p->trapframe->a2 = arg2; // Set the third argument
-  p->trapframe->t0 = (uint64)handler; // Set the handler address
+  p->trapframe->a0 = info->signo; // Set the first argument
+  p->trapframe->a1 = user_siginfo; // Set the second argument
+  p->trapframe->a2 = new_ucontext; // Set the third argument
+  p->trapframe->t0 = (uint64)sa->sa_handler; // Set the handler address
+  p->sig_ucontext = new_ucontext;
 
   return 0; // Success
 }
 
 int restore_sigframe(struct proc *p)
 {
-  if (p->sigframe == 0) {
+  uint64 sig_ucontext = p->sig_ucontext;
+  
+  if (sig_ucontext == 0) {
     return -1; // No signal trap frame to restore
   }
-
-  uint64 sigframe = p->sigframe;
-
+  
   // Copy the signal trap frame back to the user trap frame.
-  if (vm_copyin(p->vm, (void *)p->trapframe, sigframe, sizeof(struct trapframe)) != 0) {
+  ucontext_t uc = {0};
+  if (vm_copyin(p->vm, (void *)&uc, sig_ucontext, sizeof(ucontext_t)) != 0) {
     return -1; // Copy failed
   }
 
-  p->sigframe = p->trapframe->prev; // Restore the previous signal trap frame
+  p->sig_ucontext = (uint64)uc.uc_link;
+  memmove(p->trapframe, &uc.uc_mcontext, sizeof(mcontext_t));
 
   return 0; // Success
 }
@@ -232,14 +272,21 @@ usertrapret(void)
   // kerneltrap() to usertrap(), so turn off interrupts until
   // we're back in user space, where usertrap() is correct.
   intr_off();
-
-  int signo;
-  sigaction_t *sa = signal_take(p->sigacts, &signo);
+  proc_lock(p);
+  ksiginfo_t *ksiginfo = NULL;
+  sigaction_t *sa = signal_pick(p, &ksiginfo);
   if(sa){
-    if (push_sigframe(p, sa->sa_handler, signo, 0, 0) != 0) {
+    assert(ksiginfo != NULL, "signal_pick returned NULL ksiginfo");
+    if (push_sigframe(p, sa, ksiginfo) != 0) {
+      ksiginfo_free(ksiginfo);
       exit(-1); // Failed to push the signal trap frame
     }
+    assert(signal_deliver(p, ksiginfo, sa) == 0, "signal_deliver failed");
+    ksiginfo_free(ksiginfo);
+  } else {
+    assert(ksiginfo == NULL, "signal_pick returned non-NULL ksiginfo without sa");
   }
+  proc_unlock(p);
 
   // send syscalls, interrupts, and exceptions to uservec in trampoline.S
   uint64 trampoline_uservec = TRAMPOLINE + (uservec - trampoline);

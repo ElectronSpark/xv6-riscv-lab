@@ -181,14 +181,14 @@ static struct spinlock *__switch_to(struct proc *p) {
     assert(!intr_get(), "Interrupts must be disabled before switching to a process");
     assert(p != NULL, "Cannot switch to a NULL process");
     assert(p->state == RUNNABLE, "Cannot switch to a non-RUNNABLE process");
-    proc_assert_locked(p);
+    proc_assert_holding(p);
 
     // Switch to the process's context
     mycpu()->proc = p; // Set the current process for this CPU
     p->state = RUNNING; // Set the process state to RUNNING
 
     struct spinlock * lk = (struct spinlock *)__swtch_context(&mycpu()->context, &p->context, 0);
-    proc_assert_locked(p);
+    proc_assert_holding(p);
     assert(!intr_get(), "Interrupts must be disabled before switching to a process");
 
     mycpu()->proc = NULL; // Clear the current process for this CPU
@@ -237,7 +237,7 @@ void scheduler_run(void) {
 int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
     push_off();
     struct proc *proc = myproc();
-    proc_assert_locked(proc);
+    proc_assert_holding(proc);
     __sched_assert_holding();
     int lk_holding = (lk != NULL && spin_holding(lk));
     pop_off();
@@ -251,7 +251,7 @@ int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
 
     assert(!intr_get(), "Interrupts must be disabled after switching to a process");
     assert(myproc() == proc, "Yield returned to a different process");
-    proc_assert_locked(proc);
+    proc_assert_holding(proc);
     assert(proc->state == RUNNING, "Process state must be RUNNING after yield");
 
     mycpu()->intena = intena; // Restore interrupt state
@@ -269,7 +269,7 @@ void scheduler_sleep(proc_queue_t *queue, struct spinlock *lk) {
     struct proc *proc = myproc();
     assert(proc != NULL, "PCB is NULL");
     assert(queue != NULL, "Cannot sleep on a NULL queue");
-    proc_assert_locked(proc);
+    proc_assert_holding(proc);
     int lk_holding = (lk != NULL && spin_holding(lk));
     pop_off();  // Safe to decrease noff counter after acquiring the process lock
 
@@ -315,7 +315,7 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
     struct proc *proc = myproc();
     assert(proc != NULL, "PCB is NULL");
     assert(chan != NULL, "Cannot sleep on a NULL channel");
-    proc_assert_locked(proc);
+    proc_assert_holding(proc);
     int lk_holding = (lk != NULL && spin_holding(lk));
     pop_off();  // Safe to decrease noff counter after acquiring the process lock
 

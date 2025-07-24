@@ -29,7 +29,7 @@ typedef struct sigaction {
 #define SA_NOCLDSTOP 0x00000001 // Don't receive SIGCHLD when children stop.
 #define SA_NOCLDWAIT 0x00000002 // Don't create zombie processes on child exit.
 #define SA_SIGINFO   0x00000004 // Use sa_sigaction instead of sa_handler.
-// #define SA_ONSTACK   0x00000008 // Use alternate signal stack.
+#define SA_ONSTACK   0x00000008 // Use alternate signal stack.
 // #define SA_RESTART   0x00000010 // Restart system calls if interrupted by handler
 #define SA_NODEFER   0x00000020 // Don't block the signal in the handler.
 #define SA_RESETHAND 0x00000040 // Reset the signal handler to SIG_DFL after the first delivery.
@@ -74,6 +74,9 @@ typedef struct siginfo {
 typedef struct stack {
 	void *ss_sp;    /* stack base pointer */
 	int ss_flags;   /* flags */
+#define SS_AUTOREARM 0x1 /* automatically rearm the signal stack */
+#define SS_ONSTACK   0x2 /* use the alternate stack */
+#define SS_DISABLE   0x4 /* disable the signal stack */
 	size_t ss_size; /* size */
 } stack_t;
 

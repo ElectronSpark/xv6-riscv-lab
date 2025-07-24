@@ -129,7 +129,7 @@ void            set_needs_resched(struct proc *p);
 void            setkilled(struct proc*);
 void            proc_lock(struct proc *p);
 void            proc_unlock(struct proc *p);
-void            proc_assert_locked(struct proc *p);
+void            proc_assert_holding(struct proc *p);
 struct cpu*     mycpu(void);
 struct cpu*     getmycpu(void);
 struct proc*    myproc();
@@ -189,11 +189,12 @@ void            trapinit(void);
 void            trapinithart(void);
 extern struct spinlock tickslock;
 void            usertrapret(void);
+typedef struct ksiginfo ksiginfo_t;
+typedef struct sigaction sigaction_t;
+typedef struct stack stack_t;
 int             push_sigframe(struct proc *p, 
-                                  void *handler, 
-                                  uint64 arg0, 
-                                  uint64 arg1, 
-                                  uint64 arg2);
+                              sigaction_t *sa,
+                              ksiginfo_t *info);
 int             restore_sigframe(struct proc *p);
 
 // uart.c
