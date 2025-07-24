@@ -156,9 +156,20 @@ extern void sig_trampoline(uint64 arg0, uint64 arg1, uint64 arg2, void *handler)
 
 int push_sigtrapframe(struct proc *p, void *handler, uint64 arg0, uint64 arg1, uint64 arg2)
 {
-  // @TODO: Need to take care of stack overflow.
-  // ucontext_t uc = {0};
   uint64 new_sigtrap = p->trapframe->sp - sizeof(struct trapframe);
+  if (new_sigtrap < USTACK_MAX_BOTTOM + 16) {
+    return -1; // Stack overflow
+  }
+  uint64 new_stack_top = new_sigtrap - 16;
+  if (p == NULL || p->vm == NULL) {
+    exit(-1); // No stack area available
+  }
+  if (vm_try_growstack(p->vm, new_sigtrap) != 0) {
+    return -1; // Failed to grow the stack
+  }
+
+  // ucontext_t uc = {0};
+
   p->trapframe->prev = p->sigtrapframe;
 
   // Copy the trap frame to the signal trap frame.
@@ -167,7 +178,7 @@ int push_sigtrapframe(struct proc *p, void *handler, uint64 arg0, uint64 arg1, u
   }
 
   p->sigtrapframe = new_sigtrap;
-  p->trapframe->sp = new_sigtrap - 16;
+  p->trapframe->sp = new_stack_top;
   p->trapframe->epc = (uint64)SIG_TRAMPOLINE; // Set the epc to the signal trampoline
   p->trapframe->a0 = arg0; // Set the first argument
   p->trapframe->a1 = arg1; // Set the second argument
@@ -225,7 +236,7 @@ usertrapret(void)
   int signo;
   sigaction_t *sa = signal_take(p->sigacts, &signo);
   if(sa){
-    if (push_sigtrapframe(p, sa->handler, signo, 0, 0) != 0) {
+    if (push_sigtrapframe(p, sa->sa_handler, signo, 0, 0) != 0) {
       exit(-1); // Failed to push the signal trap frame
     }
   }

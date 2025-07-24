@@ -15,7 +15,10 @@ typedef union sigval {
 typedef struct siginfo siginfo_t;
 
 typedef struct sigaction {
-    void        (*handler)(int);
+	union {
+		void (*sa_handler)(int);
+		void (*sa_sigaction)(int, siginfo_t *, void *);
+	};
     sigset_t    sa_mask;
     int         sa_flags;
 } sigaction_t;
