@@ -24,7 +24,7 @@ initsleeplock(struct sleeplock *lk, char *name)
 void
 acquiresleep(struct sleeplock *lk)
 {
-  spin_acquire(&myproc()->lock);
+  proc_lock(myproc());
   spin_acquire(&lk->lk);
   while (lk->locked) {
     scheduler_sleep(&lk->wait_queue, &lk->lk);
@@ -32,7 +32,7 @@ acquiresleep(struct sleeplock *lk)
   lk->locked = 1;
   lk->pid = myproc()->pid;
   spin_release(&lk->lk);
-  spin_release(&myproc()->lock);
+  proc_unlock(myproc());
 }
 
 void
@@ -56,14 +56,14 @@ releasesleep(struct sleeplock *lk)
   struct proc *tmp = NULL;
   struct proc *pos = NULL;
   proc_queue_foreach_unlocked(&tmp_queue, pos, tmp) {
-    spin_acquire(&pos->lock);
+    proc_lock(pos);
     proc_queue_remove(&tmp_queue, pos);
     assert(pos->state == SLEEPING, "Process must be SLEEPING to wake up");
     
     sched_lock();
     scheduler_wakeup(pos);
     sched_unlock();
-    spin_release(&pos->lock);
+    proc_unlock(pos);
   }
 }
 
@@ -82,11 +82,11 @@ releasesleep_one(struct sleeplock *lk)
   assert(proc_queue_pop(&lk->wait_queue, &poc) == 0, "Failed to pop process from wait queue");
   spin_release(&lk->lk);
   assert(poc != NULL, "releasesleep_one: failed to pop from wait queue");
-  spin_acquire(&poc->lock);
+  proc_lock(poc);
   sched_lock();
   scheduler_wakeup(poc);
   sched_unlock();
-  spin_release(&poc->lock);
+  proc_unlock(poc);
 }
 
 int

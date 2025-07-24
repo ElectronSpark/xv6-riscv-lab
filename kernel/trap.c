@@ -203,9 +203,9 @@ usertrapret(void)
 {
   struct proc *p = myproc();
 
-  spin_acquire(&p->lock);
+  proc_lock(p);
   int terminated = signal_terminated(p->sigacts);
-  spin_release(&p->lock);
+  proc_unlock(p);
 
   if (terminated || killed(p)) {
     // If the process is terminated, exit it.
