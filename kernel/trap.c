@@ -183,6 +183,7 @@ int push_sigframe(struct proc *p,
   new_ucontext &= ~0xFUL;
   uint64 user_siginfo = 0;
   if (sa->sa_flags & SA_SIGINFO) {
+    printf("push_sigframe: SA_SIGINFO set, user_siginfo=0x%lx\n", user_siginfo);
     user_siginfo = new_ucontext - sizeof(siginfo_t);
     user_siginfo &= ~0xFUL;
     new_sp = user_siginfo;
@@ -206,7 +207,7 @@ int push_sigframe(struct proc *p,
   memmove(&uc.uc_stack, &p->sig_stack, sizeof(stack_t));
 
   // Copy the trap frame to the signal trap frame.
-  if (vm_copyout(p->vm, new_ucontext, (void *)new_ucontext, sizeof(ucontext_t)) != 0) {
+  if (vm_copyout(p->vm, new_ucontext, (void *)&uc, sizeof(ucontext_t)) != 0) {
     return -1; // Copy failed
   }
   if (sa->sa_flags & SA_SIGINFO) {
@@ -226,22 +227,21 @@ int push_sigframe(struct proc *p,
   return 0; // Success
 }
 
-int restore_sigframe(struct proc *p)
+int restore_sigframe(struct proc *p, ucontext_t *ret_uc)
 {
   uint64 sig_ucontext = p->sig_ucontext;
   
-  if (sig_ucontext == 0) {
+  if (sig_ucontext == 0 || ret_uc == NULL) {
     return -1; // No signal trap frame to restore
   }
   
   // Copy the signal trap frame back to the user trap frame.
-  ucontext_t uc = {0};
-  if (vm_copyin(p->vm, (void *)&uc, sig_ucontext, sizeof(ucontext_t)) != 0) {
+  if (vm_copyin(p->vm, (void *)ret_uc, sig_ucontext, sizeof(ucontext_t)) != 0) {
     return -1; // Copy failed
   }
 
-  p->sig_ucontext = (uint64)uc.uc_link;
-  memmove(p->trapframe, &uc.uc_mcontext, sizeof(mcontext_t));
+  p->sig_ucontext = (uint64)ret_uc->uc_link;
+  memmove(p->trapframe, &ret_uc->uc_mcontext, sizeof(mcontext_t));
 
   return 0; // Success
 }

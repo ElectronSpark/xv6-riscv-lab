@@ -192,10 +192,12 @@ void            usertrapret(void);
 typedef struct ksiginfo ksiginfo_t;
 typedef struct sigaction sigaction_t;
 typedef struct stack stack_t;
+typedef struct ucontext ucontext_t;
 int             push_sigframe(struct proc *p, 
                               sigaction_t *sa,
                               ksiginfo_t *info);
-int             restore_sigframe(struct proc *p);
+int             restore_sigframe(struct proc *p,
+                                 ucontext_t *ret_uc);
 
 // uart.c
 void            uartinit(void);

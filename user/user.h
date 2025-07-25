@@ -5,11 +5,7 @@ struct stat;
 
 typedef uint64 sigset_t;
 
-typedef struct sigaction {
-    void        (*handler)(int);
-    sigset_t    sa_mask;
-    int         sa_flags;
-} sigaction_t;
+#include "../kernel/signal_types.h"
 
 // system calls
 int fork(void);

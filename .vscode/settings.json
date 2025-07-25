@@ -78,6 +78,7 @@
         "cstdarg": "c",
         "numbers": "c",
         "vm.h": "c",
-        "vm_types.h": "c"
+        "vm_types.h": "c",
+        "trapframe.h": "c"
     }
 }

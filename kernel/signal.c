@@ -442,13 +442,14 @@ int sigreturn(void) {
         return -1; // No signal trap frame to restore
     }
 
-    if (restore_sigframe(p) != 0) {
+    ucontext_t uc = {0};
+    if (restore_sigframe(p, &uc) != 0) {
         proc_unlock(p);
         // @TODO:
         exit(-1); // Restore failed, exit the process
     }
 
-    assert(signal_restore(p, (ucontext_t *)p->sig_ucontext) == 0,
+    assert(signal_restore(p, &uc) == 0,
            "sigreturn: signal_restore failed");
 
     proc_unlock(p);
