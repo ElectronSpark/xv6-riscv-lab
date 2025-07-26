@@ -57,7 +57,7 @@ sigacts_t *sigacts_init(void);
 sigacts_t *sigacts_dup(sigacts_t *psa);
 void sigacts_free(sigacts_t *sa);
 
-void sigqueue_init(sigqueue_t *sq);
+void sigqueue_init(sigpending_t *sq);
 ksiginfo_t *ksiginfo_alloc(void);
 void ksiginfo_free(ksiginfo_t *ksi);
 int sigqueue_push(struct proc *p, ksiginfo_t *ksi);

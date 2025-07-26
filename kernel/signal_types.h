@@ -83,10 +83,9 @@ typedef struct ucontext {
 	/* saved context */
 } ucontext_t;
 
-typedef struct sigqueue {
+typedef struct sigpending {
 	list_node_t queue;
-	int count;
-} sigqueue_t;
+} sigpending_t;
 
 typedef struct ksiginfo {
 	list_node_t list_entry;

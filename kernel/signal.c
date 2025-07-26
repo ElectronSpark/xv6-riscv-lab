@@ -69,12 +69,11 @@ sig_defact signo_default_action(int signo) {
      (__sigacts)->sa[__signo].sa_mask |         \
      SIGNO_MASK(__signo))))
 
-void sigqueue_init(sigqueue_t *sq) {
+void sigqueue_init(sigpending_t *sq) {
     if (!sq) {
         return; // Invalid pointer
     }
     list_entry_init(&sq->queue);
-    sq->count = 0;
 }
 
 void sigstack_init(stack_t *stack) {
@@ -108,12 +107,8 @@ int sigqueue_push(struct proc *p, ksiginfo_t *ksi) {
         return -1; // Invalid process or ksiginfo
     }
     proc_assert_holding(p);
-    if (p->sigqueue.count < 0) {
-        return -1; // Invalid signal queue count
-    }
     ksi->receiver = p; // Set the receiver to the process
     list_node_push(&p->sigqueue.queue, ksi, list_entry);
-    p->sigqueue.count++;
     return 0;
 }
 
@@ -123,9 +118,8 @@ int __sigqueue_remove(struct proc *p, ksiginfo_t *ksi) {
     }
     proc_assert_holding(p);
     assert(ksi->receiver == p, "sig_queue_remove: receiver mismatch");
-    assert(p->sigqueue.count >= 0, "Negative signal queue count");
+    assert(!LIST_IS_EMPTY(&p->sigqueue.queue), "sig_queue_remove: empty queue");
     list_node_detach(ksi, list_entry);
-    p->sigqueue.count--;
     return 0;
 }
 
