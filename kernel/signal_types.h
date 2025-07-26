@@ -29,10 +29,9 @@ typedef struct sigaction {
 typedef struct sigacts {
     struct sigaction sa[NSIG+1];
 	sigset_t sa_sigmask;  // signals currently blocked at the process level
-    sigset_t sa_sigpending;  // signals pending for this process
-	sigset_t sa_sigblock;   // signals blocked by this process
+	sigset_t sa_original_mask; // original signal mask before any changes
 	sigset_t sa_sigterm;    // signals that terminate the process
-	sigset_t sa_usercatch;  // user-defined signal handlers
+	// sigset_t sa_usercatch;  // user-defined signal handlers
 	// sigset_t sa_sigstop;    // signals that stop the process
 	// sigset_t sa_sigcont;    // signals that continue the process (not used)
 	// sigset_t sa_sigcore;    // signals that generate a core dump (not used)

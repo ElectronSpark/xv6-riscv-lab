@@ -157,10 +157,11 @@ extern void sig_trampoline(uint64 arg0, uint64 arg1, uint64 arg2, void *handler)
 // Will only modify the user space memory and p->sig_ucontext
 // Further modifications to the process struct need to be done if it succeeds.
 int push_sigframe(struct proc *p, 
+                  int signo,
                   sigaction_t *sa,
                   ksiginfo_t *info)
 {
-  if (info == NULL || sa == NULL || sa->sa_handler == NULL || p == NULL) {
+  if (sa == NULL || sa->sa_handler == NULL || p == NULL) {
     return -1; // Invalid arguments
   }
 
@@ -183,7 +184,7 @@ int push_sigframe(struct proc *p,
   new_ucontext &= ~0xFUL;
   uint64 user_siginfo = 0;
   if (sa->sa_flags & SA_SIGINFO) {
-    printf("push_sigframe: SA_SIGINFO set, user_siginfo=0x%lx\n", user_siginfo);
+    assert(info != NULL, "push_sigframe: info is NULL when SA_SIGINFO is set");
     user_siginfo = new_ucontext - sizeof(siginfo_t);
     user_siginfo &= ~0xFUL;
     new_sp = user_siginfo;
@@ -218,7 +219,7 @@ int push_sigframe(struct proc *p,
 
   p->trapframe->sp = new_sp;
   p->trapframe->epc = (uint64)SIG_TRAMPOLINE; // Set the epc to the signal trampoline
-  p->trapframe->a0 = info->signo; // Set the first argument
+  p->trapframe->a0 = signo; // Set the first argument
   p->trapframe->a1 = user_siginfo; // Set the second argument
   p->trapframe->a2 = new_ucontext; // Set the third argument
   p->trapframe->t0 = (uint64)sa->sa_handler; // Set the handler address
@@ -254,15 +255,11 @@ usertrapret(void)
 {
   struct proc *p = myproc();
 
-  proc_lock(p);
-  int terminated = signal_terminated(p->sigacts);
-  proc_unlock(p);
-
-  if (terminated || killed(p)) {
+  if (killed(p)) {
     // If the process is terminated, exit it.
-    setkilled(p);
     exit(-1);
   }
+  handle_signal();
 
   if (needs_resched(p)) {
     yield();
@@ -272,21 +269,6 @@ usertrapret(void)
   // kerneltrap() to usertrap(), so turn off interrupts until
   // we're back in user space, where usertrap() is correct.
   intr_off();
-  proc_lock(p);
-  ksiginfo_t *ksiginfo = NULL;
-  sigaction_t *sa = signal_pick(p, &ksiginfo);
-  if(sa){
-    assert(ksiginfo != NULL, "signal_pick returned NULL ksiginfo");
-    if (push_sigframe(p, sa, ksiginfo) != 0) {
-      ksiginfo_free(ksiginfo);
-      exit(-1); // Failed to push the signal trap frame
-    }
-    assert(signal_deliver(p, ksiginfo, sa) == 0, "signal_deliver failed");
-    ksiginfo_free(ksiginfo);
-  } else {
-    assert(ksiginfo == NULL, "signal_pick returned non-NULL ksiginfo without sa");
-  }
-  proc_unlock(p);
 
   // send syscalls, interrupts, and exceptions to uservec in trampoline.S
   uint64 trampoline_uservec = TRAMPOLINE + (uservec - trampoline);

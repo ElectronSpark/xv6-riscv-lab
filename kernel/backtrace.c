@@ -199,3 +199,9 @@ print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end)
         }
     }
 }
+
+// set breakpoint for GDB
+void db_break(void) {
+    return;
+}
+

@@ -73,7 +73,7 @@ uint64 sys_sigpending(void) {
     uint64 set_addr;
     sigset_t set;
     argaddr(0, &set_addr);
-    if (sigpending(&set) < 0) {
+    if (sigpending(myproc(), &set) < 0) {
         return -1; // sigpending failed
     }
     if (set_addr != 0) {

@@ -50,12 +50,9 @@
 // Maximum number of signals
 #define NSIG 32
 
-#define SIGNO_MASK(__SIG_NUMBER)    \
-(((__SIG_NUMBER) <= 0 || (__SIG_NUMBER) > NSIG) ? 0 : ((1UL << (__SIG_NUMBER)) >> 1))
-
-#define SIG_ERR      ((void (*)(void))-1) // Error return from signal handler
-#define SIG_DFL      ((void (*)(void))0)  // Default signal handler
-#define SIG_IGN      ((void (*)(void))1)  // Ignore signal
+#define SIG_ERR      ((void (*)(int))-1) // Error return from signal handler
+#define SIG_DFL      ((void (*)(int))0)  // Default signal handler
+#define SIG_IGN      ((void (*)(int))1)  // Ignore signal
 
 
 #define SA_NOCLDSTOP 0x00000001 // Don't receive SIGCHLD when children stop.

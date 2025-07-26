@@ -210,7 +210,7 @@ __pcb_init(struct proc *p)
 {
   memset(p, 0, sizeof(*p));
   p->state = UNUSED;
-  sigqueue_init(&p->sigqueue);
+  sigpending_init(p);
   sigstack_init(&p->sig_stack);
   list_entry_init(&p->dmp_list_entry);
   list_entry_init(&p->siblings);
@@ -370,6 +370,7 @@ freeproc(struct proc *p)
   if (p->vm != NULL) {
     proc_freepagetable(p);
   }
+  sigpending_destroy(p);
   
   slab_free(p);
   pop_off();  // PCB has been freed, so no need to keep noff counter increased
@@ -799,18 +800,12 @@ wakeup(void *chan)
 int
 kill(int pid, int signum)
 {
-  ksiginfo_t *info = ksiginfo_alloc();
-  if (info == NULL) {
-    return -1; // Failed to allocate ksiginfo
-  }
-  info->signo = signum;
-  info->sender = myproc();
+  ksiginfo_t info = { 0 };
+  info.signo = signum;
+  info.sender = myproc();
+  info.info.si_pid = myproc()->pid;
 
-  int ret = signal_send(pid, info);
-  if (ret != 0) {
-    ksiginfo_free(info);
-  }
-  return ret;
+  return signal_send(pid, &info);
 }
 
 void

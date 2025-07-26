@@ -194,6 +194,7 @@ typedef struct sigaction sigaction_t;
 typedef struct stack stack_t;
 typedef struct ucontext ucontext_t;
 int             push_sigframe(struct proc *p, 
+                              int signo,
                               sigaction_t *sa,
                               ksiginfo_t *info);
 int             restore_sigframe(struct proc *p,
@@ -234,6 +235,7 @@ void            virtio_disk_intr(void);
 // backtrace.c
 void            print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end);
 void            ksymbols_init(void);
+void            db_break(void);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
