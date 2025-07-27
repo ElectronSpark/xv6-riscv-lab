@@ -14,6 +14,7 @@
 #include "file.h"
 #include "net.h"
 #include "vm.h"
+#include "signal.h"
 
 struct sock {
   struct sock *next; // the next socket in the list
@@ -116,10 +117,10 @@ sockread(struct sock *si, uint64 addr, int n)
   int len;
 
   spin_acquire(&si->lock);
-  while (mbufq_empty(&si->rxq) && !pr->killed) {
+  while (mbufq_empty(&si->rxq) && !signal_terminated(pr)) {
     sleep(&si->rxq, &si->lock);
   }
-  if (pr->killed) {
+  if (signal_terminated(pr)) {
     spin_release(&si->lock);
     return -1;
   }

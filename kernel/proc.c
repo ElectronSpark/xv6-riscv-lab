@@ -24,8 +24,6 @@ struct cpu cpus[NCPU];
 // 3. target pcb lock
 // 4. children pcb lock
 
-STATIC int __killed_locked(struct proc *p);
-
 static slab_cache_t proc_cache;
 
 struct {
@@ -716,7 +714,7 @@ wait(uint64 addr)
     }
 
     // No point waiting if we don't have any children.
-    if(p->children_count == 0 || __killed_locked(p)){
+    if(p->children_count == 0 || signal_terminated(p)){
       pid = -1;
       goto ret;
     }
@@ -808,30 +806,13 @@ kill(int pid, int signum)
   return signal_send(pid, &info);
 }
 
-void
-setkilled(struct proc *p)
-{
-  proc_lock(p);
-  p->killed = 1;
-  proc_unlock(p);
-}
-
-STATIC int
-__killed_locked(struct proc *p)
-{
-  // This function is used when we don't hold p->lock.
-  // It is not safe to call this function if p->lock is held.
-  proc_assert_holding(p);
-  return p->killed;
-}
-
 int
 killed(struct proc *p)
 {
   int k;
   
-  proc_lock(p);;
-  k = __killed_locked(p);
+  proc_lock(p);
+  k = signal_terminated(p);
   proc_unlock(p);
   return k;
 }

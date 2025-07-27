@@ -74,7 +74,6 @@ struct proc {
   
   // p->lock must be held when using these:
   list_node_t dmp_list_entry;  // Entry in the dump list
-  int killed;                  // If non-zero, have been killed
   int needs_resched;           // If non-zero, process needs to be rescheduled
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID

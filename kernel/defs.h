@@ -126,7 +126,6 @@ int             kill(int, int);
 int             killed(struct proc*);
 int             needs_resched(struct proc *p);
 void            set_needs_resched(struct proc *p);
-void            setkilled(struct proc*);
 void            proc_lock(struct proc *p);
 void            proc_unlock(struct proc *p);
 void            proc_assert_holding(struct proc *p);

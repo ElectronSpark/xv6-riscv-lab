@@ -118,7 +118,7 @@ usertrap(void)
     printf("usertrap(): page fault on read 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
     printf("            pgtbl=0x%lx\n", (uint64)p->vm->pagetable);
-    setkilled(p);
+    kill(p->pid, SIGSEGV);
     break;
   case 15:
     va = r_stval();
@@ -131,7 +131,7 @@ usertrap(void)
     printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
     printf("            pgtbl=0x%lx\n", (uint64)p->vm->pagetable);
-    setkilled(p);
+    kill(p->pid, SIGSEGV);
     break;
   default:
     if((which_dev = devintr()) != 0){
@@ -140,7 +140,7 @@ usertrap(void)
       printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
       printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
       assert(p->pid != 1, "init exiting");
-      setkilled(p);
+      kill(p->pid, SIGSEGV);
     }
     break;
   }
