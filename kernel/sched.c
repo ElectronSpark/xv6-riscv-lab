@@ -151,11 +151,13 @@ static struct proc *__sched_pick_next(void) {
     
     if (p) {
         proc_lock(p);
-        assert(p->state != PSTATE_RUNNING, "found and running process in ready queue");
-        assert(p->state != PSTATE_SLEEPING, "try to schedule a sleeping process");
-        assert(p->state != PSTATE_UNUSED, "try to schedule an uninitialized process");
-        assert(p->state != PSTATE_ZOMBIE, "found and zombie process in ready queue");
-        assert(p->state == PSTATE_RUNNABLE, "try to schedule unknown process state");
+        enum procstate pstate = __proc_get_pstate(p);
+        assert(pstate != PSTATE_RUNNING, "found and running process in ready queue");
+        assert(pstate != PSTATE_INTERRUPTIBLE, "try to schedule an interruptible process");
+        assert(pstate != PSTATE_UNINTERRUPTIBLE, "try to schedule an uninterruptible process");
+        assert(pstate != PSTATE_UNUSED, "try to schedule an uninitialized process");
+        assert(pstate != PSTATE_ZOMBIE, "found and zombie process in ready queue");
+        assert(pstate == PSTATE_RUNNABLE, "try to schedule unknown process state");
         return p;
     }
 
@@ -180,12 +182,12 @@ static struct spinlock *__switch_to(struct proc *p) {
     __sched_assert_holding();
     assert(!intr_get(), "Interrupts must be disabled before switching to a process");
     assert(p != NULL, "Cannot switch to a NULL process");
-    assert(p->state == PSTATE_RUNNABLE, "Cannot switch to a non-RUNNABLE process");
+    assert(__proc_get_pstate(p) == PSTATE_RUNNABLE, "Cannot switch to a non-RUNNABLE process");
     proc_assert_holding(p);
 
     // Switch to the process's context
     mycpu()->proc = p; // Set the current process for this CPU
-    p->state = PSTATE_RUNNING; // Set the process state to RUNNING
+    __proc_set_pstate(p, PSTATE_RUNNING); // Set the process state to RUNNING
 
     struct spinlock * lk = (struct spinlock *)__swtch_context(&mycpu()->context, &p->context, 0);
     proc_assert_holding(p);
@@ -210,11 +212,11 @@ void scheduler_run(void) {
         sched_lock();
         struct spinlock *lk = __switch_to(p);
         assert(!intr_get(), "Interrupts must be disabled after switching to a process");
-        int pstate = p->state;
+        enum procstate pstate = __proc_get_pstate(p);
         struct proc *pparent = p->parent;
 
         if (pstate == PSTATE_RUNNING) {
-            p->state = PSTATE_RUNNABLE; // If we returned to a RUNNING process, set it to RUNNABLE
+            __proc_set_pstate(p, PSTATE_RUNNABLE); // If we returned to a RUNNING process, set it to RUNNABLE
             if (proc_queue_push(&ready_queue, p) != 0) {
                 panic("Failed to push process back to ready queue");
             }
@@ -252,7 +254,7 @@ int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
     assert(!intr_get(), "Interrupts must be disabled after switching to a process");
     assert(myproc() == proc, "Yield returned to a different process");
     proc_assert_holding(proc);
-    assert(proc->state == PSTATE_RUNNING, "Process state must be RUNNING after yield");
+    assert(__proc_get_pstate(proc) == PSTATE_RUNNING, "Process state must be RUNNING after yield");
 
     mycpu()->intena = intena; // Restore interrupt state
     
@@ -274,7 +276,7 @@ void scheduler_sleep(proc_queue_t *queue, struct spinlock *lk) {
     pop_off();  // Safe to decrease noff counter after acquiring the process lock
 
     sched_lock();
-    proc->state = PSTATE_SLEEPING;
+    __proc_set_pstate(proc, PSTATE_UNINTERRUPTIBLE);
     if (proc_queue_push(queue, proc) != 0) {
         panic("Failed to push process to sleep queue");
     }
@@ -298,11 +300,11 @@ void scheduler_wakeup(struct proc *p) {
     pop_off(); // Safe to decrease noff counter after acquiring the process lock
     // __sched_assert_unholding();
     assert(p != NULL, "Cannot wake up a NULL process");
-    assert(p->state == PSTATE_SLEEPING, "Process must be SLEEPING to wake up");
+    assert(PROC_SLEEPING(p), "Process must be SLEEPING to wake up");
     assert(!proc_in_queue(p, NULL), "Process must not be in any queue before waking up");
     assert(p != myproc(), "Cannot wake up the current process");
 
-    p->state = PSTATE_RUNNABLE; // Change state to RUNNABLE
+    __proc_set_pstate(p, PSTATE_RUNNABLE);
     p->chan = NULL; // Clear the channel
 
     if (proc_queue_push(&ready_queue, p) != 0) {
@@ -323,7 +325,7 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
     struct proc_queue *queue = chan_queue_get((uint64)chan, true);
     assert(queue != NULL, "Failed to get channel queue");
 
-    proc->state = PSTATE_SLEEPING;
+    __proc_set_pstate(proc, PSTATE_UNINTERRUPTIBLE);
     if (proc_queue_push(queue, proc) != 0) {
         panic("Failed to push process to sleep queue");
     }
@@ -377,7 +379,7 @@ void scheduler_dump_chan_queue(void) {
         struct proc *p = NULL;
         struct proc *tmp_p = NULL;
         proc_queue_foreach_unlocked(&node->wait_queue, p, tmp_p) {
-            printf("  Process: %s (PID: %d, State: %s)\n", p->name, p->pid, procstate_to_str(p->state));
+            printf("  Process: %s (PID: %d, State: %s)\n", p->name, p->pid, procstate_to_str(__proc_get_pstate(p)));
         }
     }
     sched_unlock();

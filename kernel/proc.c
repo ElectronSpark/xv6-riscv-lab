@@ -207,7 +207,7 @@ static void
 __pcb_init(struct proc *p)
 {
   memset(p, 0, sizeof(*p));
-  p->state = PSTATE_UNUSED;
+  __proc_set_pstate(p, PSTATE_UNUSED);
   sigpending_init(p);
   sigstack_init(&p->sig_stack);
   list_entry_init(&p->dmp_list_entry);
@@ -299,7 +299,6 @@ allocproc(void)
   }
 
   __pcb_init(p);
-  p->state = PSTATE_UNUSED;
 
   // Allocate a trapframe page.
   struct trapframe *trapframe = 
@@ -347,9 +346,8 @@ STATIC void
 freeproc(struct proc *p)
 {
   assert(p != NULL, "freeproc called with NULL proc");
-  assert(p->state != PSTATE_RUNNING, "freeproc called with a running proc");
-  assert(p->state != PSTATE_RUNNABLE, "freeproc called with a runnable proc");
-  assert(p->state != PSTATE_SLEEPING, "freeproc called with a sleeping proc");
+  assert(!PROC_AWOKEN(p), "freeproc called with a runnable proc");
+  assert(!PROC_SLEEPING(p), "freeproc called with a sleeping proc");
 
   __proctab_lock();
   proc_lock(p);
@@ -460,7 +458,7 @@ userinit(void)
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
-  p->state = PSTATE_SLEEPING;
+  __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
 
   proc_unlock(p);
 
@@ -574,7 +572,7 @@ fork(void)
   pid = np->pid;
 
   attach_child(p, np);
-  np->state = PSTATE_SLEEPING;
+  __proc_set_pstate(np, PSTATE_UNINTERRUPTIBLE);
   proc_unlock(np);
   proc_unlock(p);
 
@@ -627,7 +625,7 @@ __exit_yield(int status)
   struct proc *p = myproc();
   proc_lock(p);
   p->xstate = status;
-  p->state = PSTATE_ZOMBIE;
+  __proc_set_pstate(p, PSTATE_ZOMBIE);
   sched_lock();
   scheduler_yield(NULL, NULL);
   sched_unlock();
@@ -647,8 +645,6 @@ exit(int status)
 
   proc_lock(p);
   assert(p != proc_table.initproc, "init exiting");
-  // p->state = EXITING;
-  // __sync_synchronize(); // Ensure all writes are visible before releasing the lock
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
@@ -695,7 +691,7 @@ wait(uint64 addr)
     list_foreach_node_safe(&p->children, child, tmp, siblings) {
       // make sure the child isn't still in exit() or swtch().
       proc_lock(child);
-      if(child->state == PSTATE_ZOMBIE){
+      if(PROC_ZOMBIE(child)) {
         // Found one.
         pid = child->pid;
         if(addr != 0 && vm_copyout(p->vm, addr, (char *)&child->xstate,
@@ -870,13 +866,13 @@ procdump(void)
   hlist_foreach_entry(&proc_table.procs, idx, bucket, pos_entry, tmp) {
     p = __proctab_hash_get_node(pos_entry);
     proc_lock(p);
-    enum procstate pstate = p->state;
+    enum procstate pstate = __proc_get_pstate(p);
     int pid = p->pid;
     char name[sizeof(p->name)];
     safestrcpy(name, p->name, sizeof(name));
     proc_unlock(p);
 
-    if (pstate == PSTATE_UNUSED)
+    if (__proc_get_pstate(p) == PSTATE_UNUSED)
       continue;
 
     state = procstate_to_str(pstate);

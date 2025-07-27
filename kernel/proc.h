@@ -42,24 +42,13 @@ extern struct cpu cpus[NCPU];
 enum procstate {
   PSTATE_UNUSED,
   PSTATE_USED,
-  PSTATE_SLEEPING,
+  PSTATE_INTERRUPTIBLE,
+  PSTATE_UNINTERRUPTIBLE,
   PSTATE_RUNNABLE,
   PSTATE_RUNNING,
   PSTATE_EXITING,
   PSTATE_ZOMBIE
 };
-
-static inline const char *procstate_to_str(enum procstate state) {
-  switch (state) {
-    case PSTATE_UNUSED: return "unused";
-    case PSTATE_USED: return "used";
-    case PSTATE_SLEEPING: return "sleeping";
-    case PSTATE_RUNNABLE: return "runnable";
-    case PSTATE_RUNNING: return "running";
-    case PSTATE_ZOMBIE: return "zombie";
-    default: return "*unknown";
-  }
-}
 
 // Per-process state
 struct proc {
@@ -164,5 +153,51 @@ static inline void proc_clear_flags(struct proc *p, uint64 flags) {
   (!!(proc_flags(p) & PROC_FLAG_KILLED))
 #define PROC_ONCHAN(p) \
   (!!(proc_flags(p) & PROC_FLAG_ONCHAN))
+
+
+static inline const char *procstate_to_str(enum procstate state) {
+  switch (state) {
+    case PSTATE_UNUSED: return "unused";
+    case PSTATE_USED: return "used";
+    case PSTATE_INTERRUPTIBLE: return "interruptible";
+    case PSTATE_UNINTERRUPTIBLE: return "uninterruptible";
+    case PSTATE_RUNNABLE: return "runnable";
+    case PSTATE_RUNNING: return "running";
+    case PSTATE_EXITING: return "exiting";
+    case PSTATE_ZOMBIE: return "zombie";
+    default: return "*unknown";
+  }
+}
+
+static inline enum procstate __proc_get_pstate(struct proc *p) {
+  if (p == NULL) {
+    return PSTATE_UNUSED;
+  }
+  return __atomic_load_n(&p->state, __ATOMIC_SEQ_CST);
+}
+
+static inline void __proc_set_pstate(struct proc *p, enum procstate state) {
+  if (p == NULL) {
+    return;
+  }
+  __atomic_store_n(&p->state, state, __ATOMIC_SEQ_CST);
+}
+
+#define PROC_AWOKEN(p) ({                                     \
+  enum procstate __pstate = __proc_get_pstate(p);             \
+  __pstate == PSTATE_RUNNABLE || __pstate == PSTATE_RUNNING;  \
+})
+
+#define PROC_SLEEPING(p) ({                                   \
+  enum procstate __pstate = __proc_get_pstate(p);             \
+  __pstate == PSTATE_INTERRUPTIBLE ||                         \
+  __pstate == PSTATE_UNINTERRUPTIBLE;                         \
+})
+
+#define PROC_ZOMBIE(p) ({                                     \
+  enum procstate __pstate = __proc_get_pstate(p);             \
+  __pstate == PSTATE_ZOMBIE;                                  \
+})
+
 
 #endif        /* __KERNEL_PROC_H */

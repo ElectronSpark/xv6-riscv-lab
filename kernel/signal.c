@@ -254,7 +254,7 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
     sigaddset(&p->sig_pending_mask, info->signo);
     need_wakeup = !sigismember(&sa->sa_sigmask, info->signo);
     // @TODO: need to wake up the process if it is not sleeping on a channel
-    need_wakeup = need_wakeup && p->chan != NULL && p->state == PSTATE_SLEEPING;
+    need_wakeup = need_wakeup && p->chan != NULL && PROC_SLEEPING(p);
 
 done:
     // If the action is to terminate the process, set the killed flag
