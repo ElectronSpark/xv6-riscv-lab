@@ -219,7 +219,7 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
     }
 
     proc_lock(p);
-    if (p->state == UNUSED || p->state == ZOMBIE || PROC_KILLED(p)) {
+    if (p->state == PSTATE_UNUSED || p->state == PSTATE_ZOMBIE || PROC_KILLED(p)) {
         ret = -1; // Process is not usable
         goto done;
     }
@@ -254,7 +254,7 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
     sigaddset(&p->sig_pending_mask, info->signo);
     need_wakeup = !sigismember(&sa->sa_sigmask, info->signo);
     // @TODO: need to wake up the process if it is not sleeping on a channel
-    need_wakeup = need_wakeup && p->chan != NULL && p->state == SLEEPING;
+    need_wakeup = need_wakeup && p->chan != NULL && p->state == PSTATE_SLEEPING;
 
 done:
     // If the action is to terminate the process, set the killed flag

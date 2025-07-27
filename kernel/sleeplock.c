@@ -58,7 +58,7 @@ releasesleep(struct sleeplock *lk)
   proc_queue_foreach_unlocked(&tmp_queue, pos, tmp) {
     proc_lock(pos);
     proc_queue_remove(&tmp_queue, pos);
-    assert(pos->state == SLEEPING, "Process must be SLEEPING to wake up");
+    assert(pos->state == PSTATE_SLEEPING, "Process must be SLEEPING to wake up");
     
     sched_lock();
     scheduler_wakeup(pos);

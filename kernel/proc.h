@@ -39,17 +39,25 @@ struct cpu {
 
 extern struct cpu cpus[NCPU];
 
-enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, EXITING, ZOMBIE };
+enum procstate {
+  PSTATE_UNUSED,
+  PSTATE_USED,
+  PSTATE_SLEEPING,
+  PSTATE_RUNNABLE,
+  PSTATE_RUNNING,
+  PSTATE_EXITING,
+  PSTATE_ZOMBIE
+};
 
 static inline const char *procstate_to_str(enum procstate state) {
   switch (state) {
-    case UNUSED: return "UNUSED";
-    case USED: return "USED";
-    case SLEEPING: return "SLEEPING";
-    case RUNNABLE: return "RUNNABLE";
-    case RUNNING: return "RUNNING";
-    case ZOMBIE: return "ZOMBIE";
-    default: return "UNKNOWN";
+    case PSTATE_UNUSED: return "unused";
+    case PSTATE_USED: return "used";
+    case PSTATE_SLEEPING: return "sleeping";
+    case PSTATE_RUNNABLE: return "runnable";
+    case PSTATE_RUNNING: return "running";
+    case PSTATE_ZOMBIE: return "zombie";
+    default: return "*unknown";
   }
 }
 
@@ -70,7 +78,6 @@ struct proc {
   proc_queue_entry_t queue_entry;     // Entry in a process queue
   uint64 flags;
 #define PROC_FLAG_VALID             0x1
-#define PROC_FLAG_INTERRUPTIBLE     0x2   // Process can be interrupted by signals
 #define PROC_FLAG_NEEDS_RESCHED     0x4   // Process needs to be rescheduled
 #define PROC_FLAG_KILLED            0x8   // Process is exiting or exited
 #define PROC_FLAG_ONCHAN            0x10  // Process is sleeping on a channel
@@ -133,8 +140,6 @@ static inline void proc_clear_flags(struct proc *p, uint64 flags) {
 
 #define PROC_SET_VALID(p) \
   proc_set_flags(p, PROC_FLAG_VALID)
-#define PROC_SET_INTERRUPTIBLE(p) \
-  proc_set_flags(p, PROC_FLAG_INTERRUPTIBLE)
 #define PROC_SET_NEEDS_RESCHED(p) \
   proc_set_flags(p, PROC_FLAG_NEEDS_RESCHED)
 #define PROC_SET_KILLED(p) \
@@ -144,8 +149,6 @@ static inline void proc_clear_flags(struct proc *p, uint64 flags) {
 
 #define PROC_CLEAR_VALID(p) \
   proc_clear_flags(p, PROC_FLAG_VALID)
-#define PROC_CLEAR_INTERRUPTIBLE(p) \
-  proc_clear_flags(p, PROC_FLAG_INTERRUPTIBLE)
 #define PROC_CLEAR_NEEDS_RESCHED(p) \
   proc_clear_flags(p, PROC_FLAG_NEEDS_RESCHED)
 #define PROC_CLEAR_KILLED(p) \
@@ -155,8 +158,6 @@ static inline void proc_clear_flags(struct proc *p, uint64 flags) {
 
 #define PROC_VALID(p) \
   (!!(proc_flags(p) & PROC_FLAG_VALID))
-#define PROC_INTERRUPTIBLE(p) \
-  (!!(proc_flags(p) & PROC_FLAG_INTERRUPTIBLE))
 #define PROC_NEEDS_RESCHED(p) \
   (!!(proc_flags(p) & PROC_FLAG_NEEDS_RESCHED))
 #define PROC_KILLED(p) \

@@ -207,7 +207,7 @@ static void
 __pcb_init(struct proc *p)
 {
   memset(p, 0, sizeof(*p));
-  p->state = UNUSED;
+  p->state = PSTATE_UNUSED;
   sigpending_init(p);
   sigstack_init(&p->sig_stack);
   list_entry_init(&p->dmp_list_entry);
@@ -299,7 +299,7 @@ allocproc(void)
   }
 
   __pcb_init(p);
-  p->state = USED;
+  p->state = PSTATE_UNUSED;
 
   // Allocate a trapframe page.
   struct trapframe *trapframe = 
@@ -347,9 +347,9 @@ STATIC void
 freeproc(struct proc *p)
 {
   assert(p != NULL, "freeproc called with NULL proc");
-  assert(p->state != RUNNING, "freeproc called with a running proc");
-  assert(p->state != RUNNABLE, "freeproc called with a runnable proc");
-  assert(p->state != SLEEPING, "freeproc called with a sleeping proc");
+  assert(p->state != PSTATE_RUNNING, "freeproc called with a running proc");
+  assert(p->state != PSTATE_RUNNABLE, "freeproc called with a runnable proc");
+  assert(p->state != PSTATE_SLEEPING, "freeproc called with a sleeping proc");
 
   __proctab_lock();
   proc_lock(p);
@@ -460,7 +460,7 @@ userinit(void)
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
-  p->state = SLEEPING;
+  p->state = PSTATE_SLEEPING;
 
   proc_unlock(p);
 
@@ -574,7 +574,7 @@ fork(void)
   pid = np->pid;
 
   attach_child(p, np);
-  np->state = SLEEPING;
+  np->state = PSTATE_SLEEPING;
   proc_unlock(np);
   proc_unlock(p);
 
@@ -627,7 +627,7 @@ __exit_yield(int status)
   struct proc *p = myproc();
   proc_lock(p);
   p->xstate = status;
-  p->state = ZOMBIE;
+  p->state = PSTATE_ZOMBIE;
   sched_lock();
   scheduler_yield(NULL, NULL);
   sched_unlock();
@@ -695,7 +695,7 @@ wait(uint64 addr)
     list_foreach_node_safe(&p->children, child, tmp, siblings) {
       // make sure the child isn't still in exit() or swtch().
       proc_lock(child);
-      if(child->state == ZOMBIE){
+      if(child->state == PSTATE_ZOMBIE){
         // Found one.
         pid = child->pid;
         if(addr != 0 && vm_copyout(p->vm, addr, (char *)&child->xstate,
@@ -853,16 +853,8 @@ either_copyin(void *dst, int user_src, uint64 src, uint64 len)
 void
 procdump(void)
 {
-  STATIC char *states[] = {
-  [UNUSED]    "unused",
-  [USED]      "used",
-  [SLEEPING]  "sleep ",
-  [RUNNABLE]  "runble",
-  [RUNNING]   "run   ",
-  [ZOMBIE]    "zombie"
-  };
   struct proc *p;
-  char *state;
+  const char *state;
   int _panic_state = panic_state();
   int idx;
   hlist_bucket_t *bucket;
@@ -884,12 +876,10 @@ procdump(void)
     safestrcpy(name, p->name, sizeof(name));
     proc_unlock(p);
 
-    if (pstate == UNUSED)
+    if (pstate == PSTATE_UNUSED)
       continue;
-    if (pstate >= 0 && pstate < NELEM(states) && states[pstate])
-      state = states[pstate];
-    else
-      state = "???";
+
+    state = procstate_to_str(pstate);
     printf("%d %s %s", pid, state, name);
     printf("\n");
   }
