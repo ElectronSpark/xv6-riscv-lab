@@ -246,7 +246,7 @@ int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
     int intena = mycpu()->intena; // Save interrupt state
     assert(mycpu()->noff == 2 || (mycpu()->noff == 3 && lk_holding), 
            "Process must hold and only hold the proc lock and sched lock when yielding. Current noff: %d", mycpu()->noff);
-    proc->needs_resched = 0;
+    PROC_CLEAR_NEEDS_RESCHED(proc);
     uint64 ret_val = __swtch_context(&proc->context, &mycpu()->context, (uint64)lk);
 
     assert(!intr_get(), "Interrupts must be disabled after switching to a process");
@@ -327,6 +327,8 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
     if (proc_queue_push(queue, proc) != 0) {
         panic("Failed to push process to sleep queue");
     }
+    proc->chan = chan; // Set the channel for the process
+    PROC_SET_ONCHAN(proc); // Mark the process as sleeping on a channel
     scheduler_yield(NULL, lk); // Switch to the scheduler
     sched_unlock();
 
@@ -355,6 +357,8 @@ void scheduler_wakeup_on_chan(void *chan) {
     proc_queue_foreach_unlocked(&tmp_queue, p, tmp) {
         proc_lock(p);
         assert(proc_queue_remove(&tmp_queue, p) == 0, "Failed to remove process from temporary queue");
+        PROC_CLEAR_ONCHAN(p);
+        p->chan = NULL;
         sched_lock();
         scheduler_wakeup(p);
         sched_unlock();

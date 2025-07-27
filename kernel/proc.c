@@ -817,24 +817,6 @@ killed(struct proc *p)
   return k;
 }
 
-int needs_resched(struct proc *p)
-{
-  int resched;
-
-  proc_lock(p);
-  resched = p->needs_resched;
-  proc_unlock(p);
-
-  return resched;
-}
-
-void set_needs_resched(struct proc *p)
-{
-  proc_lock(p);
-  p->needs_resched = 1;
-  proc_unlock(p);
-}
-
 // Copy to either a user address, or kernel address,
 // depending on usr_dst.
 // Returns 0 on success, -1 on error.

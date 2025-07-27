@@ -68,13 +68,18 @@ struct proc {
   enum procstate state;        // Process state
   void *chan;                  // If non-zero, sleeping on chan
   proc_queue_entry_t queue_entry;     // Entry in a process queue
+  uint64 flags;
+#define PROC_FLAG_VALID             0x1
+#define PROC_FLAG_INTERRUPTIBLE     0x2   // Process can be interrupted by signals
+#define PROC_FLAG_NEEDS_RESCHED     0x4   // Process needs to be rescheduled
+#define PROC_FLAG_KILLED            0x8   // Process is exiting or exited
+#define PROC_FLAG_ONCHAN            0x10  // Process is sleeping on a channel
   
   // proc table lock must be held before holding p->lock to use this:
   hlist_entry_t proctab_entry; // Entry to link the process hash table
   
   // p->lock must be held when using these:
   list_node_t dmp_list_entry;  // Entry in the dump list
-  int needs_resched;           // If non-zero, process needs to be rescheduled
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
 
@@ -104,5 +109,59 @@ struct proc {
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
 };
+
+static inline uint64 proc_flags(struct proc *p) {
+  if (p == NULL) {
+    return 0;
+  }
+  return __sync_fetch_and_or(&p->flags, 0);
+}
+
+static inline void proc_set_flags(struct proc *p, uint64 flags) {
+  if (p == NULL) {
+    return;
+  }
+  __sync_fetch_and_or(&p->flags, flags);
+}
+
+static inline void proc_clear_flags(struct proc *p, uint64 flags) {
+  if (p == NULL) {
+    return;
+  }
+  __sync_fetch_and_and(&p->flags, ~flags);
+}
+
+#define PROC_SET_VALID(p) \
+  proc_set_flags(p, PROC_FLAG_VALID)
+#define PROC_SET_INTERRUPTIBLE(p) \
+  proc_set_flags(p, PROC_FLAG_INTERRUPTIBLE)
+#define PROC_SET_NEEDS_RESCHED(p) \
+  proc_set_flags(p, PROC_FLAG_NEEDS_RESCHED)
+#define PROC_SET_KILLED(p) \
+  proc_set_flags(p, PROC_FLAG_KILLED)
+#define PROC_SET_ONCHAN(p) \
+  proc_set_flags(p, PROC_FLAG_ONCHAN)
+
+#define PROC_CLEAR_VALID(p) \
+  proc_clear_flags(p, PROC_FLAG_VALID)
+#define PROC_CLEAR_INTERRUPTIBLE(p) \
+  proc_clear_flags(p, PROC_FLAG_INTERRUPTIBLE)
+#define PROC_CLEAR_NEEDS_RESCHED(p) \
+  proc_clear_flags(p, PROC_FLAG_NEEDS_RESCHED)
+#define PROC_CLEAR_KILLED(p) \
+  proc_clear_flags(p, PROC_FLAG_KILLED)
+#define PROC_CLEAR_ONCHAN(p) \
+  proc_clear_flags(p, PROC_FLAG_ONCHAN)
+
+#define PROC_VALID(p) \
+  (!!(proc_flags(p) & PROC_FLAG_VALID))
+#define PROC_INTERRUPTIBLE(p) \
+  (!!(proc_flags(p) & PROC_FLAG_INTERRUPTIBLE))
+#define PROC_NEEDS_RESCHED(p) \
+  (!!(proc_flags(p) & PROC_FLAG_NEEDS_RESCHED))
+#define PROC_KILLED(p) \
+  (!!(proc_flags(p) & PROC_FLAG_KILLED))
+#define PROC_ONCHAN(p) \
+  (!!(proc_flags(p) & PROC_FLAG_ONCHAN))
 
 #endif        /* __KERNEL_PROC_H */

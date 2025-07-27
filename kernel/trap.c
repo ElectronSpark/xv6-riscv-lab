@@ -147,7 +147,7 @@ usertrap(void)
 
   // give up the CPU if this is a timer interrupt.
   if(which_dev == 2)
-    set_needs_resched(p);
+    PROC_SET_NEEDS_RESCHED(p);
   
   usertrapret();
 }
@@ -260,8 +260,13 @@ usertrapret(void)
     exit(-1);
   }
   handle_signal();
+  if (PROC_KILLED(p)) {
+    // If the process is killed, exit it.
+    // @TODO: exit code
+    exit(-1);
+  }
 
-  if (needs_resched(p)) {
+  if (PROC_NEEDS_RESCHED(p)) {
     yield();
   }
   

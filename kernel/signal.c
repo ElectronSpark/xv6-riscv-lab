@@ -209,6 +209,8 @@ void signal_init(void) {
 }
 
 int __signal_send(struct proc *p, ksiginfo_t *info) {
+    int ret = -1; // Default to error
+    bool need_wakeup = false;
     if (p == NULL || info == NULL) {
         return -1; // No process available
     }
@@ -217,21 +219,21 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
     }
 
     proc_lock(p);
-    if (p->state == UNUSED || p->state == ZOMBIE || p->state == EXITING) {
-        proc_unlock(p);
-        return -1; // Process is not usable
+    if (p->state == UNUSED || p->state == ZOMBIE || PROC_KILLED(p)) {
+        ret = -1; // Process is not usable
+        goto done;
     }
 
     sigacts_t *sa = p->sigacts;
     if (!sa) {
-        proc_unlock(p);
-        return -1; // No signal actions available
+        ret = -1; // No signal actions available
+        goto done;
     }
 
     // ignored signals are not sent
     if (sigismember(&sa->sa_sigignore, info->signo)) {
-        proc_unlock(p);
-        return 0; // Signal is ignored
+        ret = 0; // Signal is ignored
+        goto done;
     }
     
     sigaction_t *act = &sa->sa[info->signo];
@@ -240,8 +242,8 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
                "signal_send: SA_SIGINFO set for SIGKILL or SIGSTOP");
         ksiginfo_t *ksi = ksiginfo_alloc();
         if (!ksi) {
-            proc_unlock(p);
-            return -1; // Allocation failed
+            ret = -1; // Allocation failed
+            goto done;
         }
         *ksi = *info; // Copy the signal info
         list_entry_init(&ksi->list_entry);
@@ -250,15 +252,21 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
     }
 
     sigaddset(&p->sig_pending_mask, info->signo);
-    bool need_wakeup = !sigismember(&sa->sa_sigmask, info->signo);
+    need_wakeup = !sigismember(&sa->sa_sigmask, info->signo);
     // @TODO: need to wake up the process if it is not sleeping on a channel
     need_wakeup = need_wakeup && p->chan != NULL && p->state == SLEEPING;
-    proc_unlock(p);
 
+done:
+    // If the action is to terminate the process, set the killed flag
+    if (sigismember(&sa->sa_sigterm, info->signo)) {
+        PROC_SET_KILLED(p);
+    }
+    proc_unlock(p);
+    // @TODO: more sophisticated way to wake up the process
     if (need_wakeup) {
         scheduler_wakeup_on_chan(p->chan);
     }
-    return 0; // Signal sent successfully
+    return ret; // Signal sent successfully
 }
 
 int signal_send(int pid, ksiginfo_t *info) {
@@ -559,9 +567,9 @@ void handle_signal(void) {
 
     proc_lock(p);
     if (signal_terminated(p)) {
+        PROC_SET_KILLED(p);
         proc_unlock(p);
-        printf("executing SIG_ACT_TERM for process %d\n", p->pid);
-        exit(-1); // Process is terminated, exit
+        return;
     }
 
     int signo = __pick_signal(p);
