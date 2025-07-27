@@ -29,7 +29,7 @@ spin_acquire(struct spinlock *lk)
   //   s1 = &lk->locked
   //   amoswap.w.aq a5, a5, (s1)
   int __debug_count = 0;
-  while(__sync_lock_test_and_set(&lk->locked, 1) != 0) {
+  while(__atomic_test_and_set(&lk->locked, __ATOMIC_ACQUIRE) != 0) {
       __debug_count += 1;
       if (__debug_count >= 10) {
         asm volatile ("nop");
@@ -40,7 +40,7 @@ spin_acquire(struct spinlock *lk)
   // past this point, to ensure that the critical section's memory
   // references happen strictly after the lock is acquired.
   // On RISC-V, this emits a fence instruction.
-  __sync_synchronize();
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
   // Record info about lock acquisition for spin_holding() and debugging.
   lk->cpu = mycpu();
@@ -60,7 +60,7 @@ spin_release(struct spinlock *lk)
   // and that loads in the critical section occur strictly before
   // the lock is released.
   // On RISC-V, this emits a fence instruction.
-  __sync_synchronize();
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
   // Release the lock, equivalent to lk->locked = 0.
   // This code doesn't use a C assignment, since the C standard
@@ -69,7 +69,7 @@ spin_release(struct spinlock *lk)
   // On RISC-V, sync_lock_release turns into an atomic swap:
   //   s1 = &lk->locked
   //   amoswap.w zero, zero, (s1)
-  __sync_lock_release(&lk->locked);
+  __atomic_clear(&lk->locked, __ATOMIC_RELEASE);
   pop_off();
 }
 
@@ -78,9 +78,13 @@ spin_release(struct spinlock *lk)
 int
 spin_holding(struct spinlock *lk)
 {
-  int r;
-  r = (lk->locked && lk->cpu == mycpu());
-  return r;
+  if (__atomic_load_n(&lk->locked, __ATOMIC_ACQUIRE) == 0) {
+    return 0; // Lock is not held
+  }
+  if (__atomic_load_n(&lk->cpu, __ATOMIC_ACQUIRE) != mycpu()) {
+    return 0;
+  }
+  return 1;
 }
 
 // push_off/pop_off are like intr_off()/intr_on() except that they are matched:

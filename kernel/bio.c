@@ -157,7 +157,7 @@ bget(uint dev, uint blockno)
         }
       }
       list_node_detach(b, lru_entry);
-      __sync_synchronize(); // Ensure the buffer is detached before using it
+      __atomic_thread_fence(__ATOMIC_SEQ_CST); // Ensure the buffer is detached before using it
       // list_node_push(&bcache.lru_entry, b, lru_entry);
       b->dev = dev;
       b->blockno = blockno;

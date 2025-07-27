@@ -198,7 +198,7 @@ STATIC_INLINE void __buddy_push_page(buddy_pool_t *pool, page_t *page) {
     }
     list_node_push_back(&pool->lru_head, page, buddy.lru_entry);
     pool->count++;
-    __sync_synchronize();
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
 
 // Pop a buddy page from a pool and return the page descriptor of the buddy
@@ -213,7 +213,7 @@ STATIC_INLINE page_t *__buddy_pop_page(buddy_pool_t *pool) {
         return NULL;
     }
     pool->count--;
-    __sync_synchronize();
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
     return ret;
 }
 

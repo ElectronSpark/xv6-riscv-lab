@@ -36,12 +36,12 @@ main()
     sockinit();
     signal_init();   // signal handling initialization  
     userinit();      // first user process
-    __sync_synchronize();
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
     started = 1;
   } else {
     while(started == 0)
       ;
-    __sync_synchronize();
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
     printf("hart %d starting\n", cpuid());
     kvminithart();    // turn on paging
     trapinithart();   // install kernel trap vector

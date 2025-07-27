@@ -45,7 +45,7 @@ pci_init()
       // bit 1 : memory access enable
       // bit 2 : enable mastering
       dsc->command = PCIE_CSCMD_IAE | PCIE_CSCMD_MAE | PCIE_CSCMD_BME;
-      __sync_synchronize();
+      __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
       for(int i = 0; i < 6; i++){
         uint32 old = dsc->header_type_0.base_addr[i];
@@ -53,7 +53,7 @@ pci_init()
         // writing all 1's to the BAR causes it to be
         // replaced with its size.
         dsc->header_type_0.base_addr[i] = 0xffffffff;
-        __sync_synchronize();
+        __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
         dsc->header_type_0.base_addr[i] = old;
       }

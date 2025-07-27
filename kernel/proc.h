@@ -110,21 +110,21 @@ static inline uint64 proc_flags(struct proc *p) {
   if (p == NULL) {
     return 0;
   }
-  return __sync_fetch_and_or(&p->flags, 0);
+  return __atomic_load_n(&p->flags, __ATOMIC_SEQ_CST);
 }
 
 static inline void proc_set_flags(struct proc *p, uint64 flags) {
   if (p == NULL) {
     return;
   }
-  __sync_fetch_and_or(&p->flags, flags);
+  __atomic_or_fetch(&p->flags, flags, __ATOMIC_SEQ_CST);
 }
 
 static inline void proc_clear_flags(struct proc *p, uint64 flags) {
   if (p == NULL) {
     return;
   }
-  __sync_fetch_and_and(&p->flags, ~flags);
+  __atomic_and_fetch(&p->flags, ~flags, __ATOMIC_SEQ_CST);
 }
 
 #define PROC_SET_VALID(p) \

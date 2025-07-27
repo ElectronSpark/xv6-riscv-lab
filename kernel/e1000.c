@@ -32,7 +32,7 @@ e1000_dev_reset(void)
   regs[E1000_IMS] = 0; // disable interrupts
   regs[E1000_CTL] |= E1000_CTL_RST;
   regs[E1000_IMS] = 0; // redisable interrupts
-  __sync_synchronize();
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
 
 // Set Receive MAC address
@@ -65,11 +65,11 @@ e1000_set_rcvaddr(const uint8 mac[], uint8 as, int valid, int index)
   if (valid) {
     h |= (1<<31);
   }
-  __sync_synchronize();
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
   regs[E1000_RA + 2*index] = l;
-  __sync_synchronize();
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
   regs[E1000_RA + 2*index + 1] = h;
-  __sync_synchronize();
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
   return 0;
 }
 
@@ -119,13 +119,13 @@ e1000_set_transmission_descriptor_base( \
 
   l = (physical_base << 32) >> 32;
   h = physical_base >> 32;
-  __sync_synchronize();
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
   regs[E1000_TDBAL] = l;
   regs[E1000_TDBAH] = h;
   regs[E1000_TDLEN] = size;
   regs[E1000_TDH] = 0;
   regs[E1000_TDT] = 0;
-  __sync_synchronize();
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
   return 0;
 }
 
@@ -176,13 +176,13 @@ e1000_set_receive_descriptor_base(  \
       return -1;
     virtual_base[i].addr = (uint64) mbufs_ptr_arr_base[i]->head;
   }
-  __sync_synchronize();
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
   regs[E1000_RDBAL] = l;
   regs[E1000_RDBAH] = h;
   regs[E1000_RDLEN] = size;
   regs[E1000_RDH] = 0;
   regs[E1000_RDT] = rd_arr_size - 1;
-  __sync_synchronize();
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
   return 0;
 
 }

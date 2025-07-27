@@ -765,7 +765,7 @@ forkret(void)
   }
   
   // printf("forkret: process %d is running\n", myproc()->pid);
-  __sync_synchronize();
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
   usertrapret();
 }
