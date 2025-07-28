@@ -460,11 +460,10 @@ userinit(void)
 
   __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
 
-  proc_unlock(p);
-
   sched_lock();
   scheduler_wakeup(p);
   sched_unlock();
+  proc_unlock(p);
 }
 
 // Grow or shrink user memory by n bytes.
@@ -573,12 +572,12 @@ fork(void)
 
   attach_child(p, np);
   __proc_set_pstate(np, PSTATE_UNINTERRUPTIBLE);
-  proc_unlock(np);
   proc_unlock(p);
-
+  
   sched_lock();
   scheduler_wakeup(np);
   sched_unlock();
+  proc_unlock(np);
 
   return pid;
 }

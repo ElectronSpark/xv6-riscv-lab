@@ -138,6 +138,18 @@ void scheduler_init(void) {
     chan_queue_init();
 }
 
+void __scheduler_add_ready(struct proc *p) {
+    assert(p != NULL, "Cannot add NULL process to ready queue");
+    __sched_assert_holding();
+    proc_assert_holding(p);
+    enum procstate pstate = __proc_get_pstate(p);
+    assert(pstate == PSTATE_RUNNABLE, "Process must be in RUNNABLE state to be added to ready queue");
+    
+    if (proc_queue_push(&ready_queue, p) != 0) {
+        panic("Failed to push process to ready queue");
+    }
+}
+
 // Pick the next process to run from the ready queue.
 // Returns a RUNABLE state process or NULL if no process is ready.
 // The process returned will be locked
@@ -215,9 +227,7 @@ void scheduler_run(void) {
 
         if (pstate == PSTATE_RUNNING) {
             __proc_set_pstate(p, PSTATE_RUNNABLE); // If we returned to a RUNNING process, set it to RUNNABLE
-            if (proc_queue_push(&ready_queue, p) != 0) {
-                panic("Failed to push process back to ready queue");
-            }
+            __scheduler_add_ready(p); // Add the process back to the ready queue
         }
         sched_unlock();
         // printf("CPU: %d <- %s: %s (pid: %d)\n", cpuid(), p->name, procstate_to_str(p->state), p->pid);
@@ -295,6 +305,7 @@ void scheduler_sleep(proc_queue_t *queue, struct spinlock *lk) {
 void scheduler_wakeup(struct proc *p) {
     push_off(); // Increase noff counter to ensure interruptions are disabled
     __sched_assert_holding();
+    proc_assert_holding(p);
     pop_off(); // Safe to decrease noff counter after acquiring the process lock
     // __sched_assert_unholding();
     assert(p != NULL, "Cannot wake up a NULL process");
@@ -305,9 +316,7 @@ void scheduler_wakeup(struct proc *p) {
     __proc_set_pstate(p, PSTATE_RUNNABLE);
     p->chan = NULL; // Clear the channel
 
-    if (proc_queue_push(&ready_queue, p) != 0) {
-        panic("Failed to push process to ready queue");
-    }
+    __scheduler_add_ready(p); // Add the process back to the ready queue
 }
 
 void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
