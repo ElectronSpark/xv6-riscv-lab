@@ -271,20 +271,15 @@ int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
 }
 
 // Put the current process to sleep on the specified queue.
-void scheduler_sleep(proc_queue_t *queue, struct spinlock *lk) {
+void scheduler_sleep(struct spinlock *lk) {
     push_off(); // Increase noff counter to ensure interruptions are disabled
     struct proc *proc = myproc();
     assert(proc != NULL, "PCB is NULL");
-    assert(queue != NULL, "Cannot sleep on a NULL queue");
     proc_assert_holding(proc);
     int lk_holding = (lk != NULL && spin_holding(lk));
     pop_off();  // Safe to decrease noff counter after acquiring the process lock
 
     sched_lock();
-    __proc_set_pstate(proc, PSTATE_UNINTERRUPTIBLE);
-    if (proc_queue_push(queue, proc) != 0) {
-        panic("Failed to push process to sleep queue");
-    }
     scheduler_yield(NULL, lk); // Switch to the scheduler
     sched_unlock();
 
@@ -309,9 +304,9 @@ void scheduler_wakeup(struct proc *p) {
     assert(PROC_SLEEPING(p), "Process must be SLEEPING to wake up");
     assert(!proc_in_queue(p, NULL), "Process must not be in any queue before waking up");
     assert(p != myproc(), "Cannot wake up the current process");
+    assert(p->chan == NULL, "Process must not be sleeping on a channel before waking up");
 
     __proc_set_pstate(p, PSTATE_RUNNABLE);
-    p->chan = NULL; // Clear the channel
 
     __scheduler_add_ready(p); // Add the process back to the ready queue
 }

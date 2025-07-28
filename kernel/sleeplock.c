@@ -27,7 +27,11 @@ acquiresleep(struct sleeplock *lk)
   proc_lock(myproc());
   spin_acquire(&lk->lk);
   while (lk->locked) {
-    scheduler_sleep(&lk->wait_queue, &lk->lk);
+    __proc_set_pstate(myproc(), PSTATE_UNINTERRUPTIBLE);
+    if (proc_queue_push(&lk->wait_queue, myproc()) != 0) {
+        panic("Failed to push process to sleep queue");
+    }
+    scheduler_sleep(&lk->lk);
   }
   lk->locked = 1;
   lk->pid = myproc()->pid;
