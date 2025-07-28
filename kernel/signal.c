@@ -210,7 +210,6 @@ void signal_init(void) {
 
 int __signal_send(struct proc *p, ksiginfo_t *info) {
     int ret = -1; // Default to error
-    bool need_wakeup = false;
     if (p == NULL || info == NULL) {
         return -1; // No process available
     }
@@ -232,8 +231,12 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
 
     // ignored signals are not sent
     if (sigismember(&sa->sa_sigignore, info->signo)) {
-        ret = 0; // Signal is ignored
-        goto done;
+        // If the signal is ignored, but not blocked, notify the process
+        if (!sigismember(&sa->sa_sigmask, info->signo)) {
+            signal_notify(p);
+        }
+        proc_unlock(p);
+        return 0; // Signal sent successfully
     }
     
     sigaction_t *act = &sa->sa[info->signo];
@@ -252,20 +255,17 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
     }
 
     sigaddset(&p->sig_pending_mask, info->signo);
-    need_wakeup = !sigismember(&sa->sa_sigmask, info->signo);
-    // @TODO: need to wake up the process if it is not sleeping on a channel
-    need_wakeup = need_wakeup && p->chan != NULL && PROC_SLEEPING(p);
+    ret = 0;
 
 done:
     // If the action is to terminate the process, set the killed flag
     if (sigismember(&sa->sa_sigterm, info->signo)) {
         PROC_SET_KILLED(p);
     }
-    proc_unlock(p);
-    // @TODO: more sophisticated way to wake up the process
-    if (need_wakeup) {
-        scheduler_wakeup_on_chan(p->chan);
+    if (ret == 0 && signal_pending(p)) {
+        signal_notify(p); // Notify the process if needed
     }
+    proc_unlock(p);
     return ret; // Signal sent successfully
 }
 
@@ -283,6 +283,35 @@ int signal_send(int pid, ksiginfo_t *info) {
     assert(p != NULL, "signal_send: proc is NULL");
     
     return __signal_send(p, info);
+}
+
+bool signal_pending(struct proc *p) {
+    if (!p) {
+        return false;
+    }
+    proc_assert_holding(p);
+    sigset_t masked = p->sig_pending_mask & ~p->sigacts->sa_sigmask;
+    return masked != 0;
+}
+
+int signal_notify(struct proc *p) {
+    if (!p) {
+        return -1;
+    }
+    proc_assert_holding(p);
+    if (PROC_AWOKEN(p)) {
+        return 0;
+    }
+    if (!PROC_SLEEPING(p)) {
+        return -1; // Process is not sleeping
+    }
+    if (__proc_get_pstate(p) == PSTATE_INTERRUPTIBLE) {
+        sched_lock();
+        scheduler_wakeup(p);
+        sched_unlock();
+        return 0; // Success
+    }
+    return -1; // No signals pending or process not in interruptible state
 }
 
 bool signal_terminated(struct proc *p) {

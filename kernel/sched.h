@@ -10,6 +10,7 @@ void sched_lock(void);
 void sched_unlock(void);
 void scheduler_run(void);
 void scheduler_yield(struct spinlock *lk);
+void scheduler_pause(struct spinlock *lk);
 void scheduler_sleep(struct spinlock *lk);
 void scheduler_wakeup(struct proc *p);
 void scheduler_sleep_on_chan(void *chan, struct spinlock *lk);

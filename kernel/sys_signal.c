@@ -5,6 +5,7 @@
 #include "proc.h"
 #include "signal.h"
 #include "syscall.h"
+#include "sched.h"
 
 uint64 sys_sigprocmask(void) {
     int how;
@@ -92,5 +93,12 @@ uint64 sys_sigreturn(void) {
     struct proc *p = myproc();
     assert(p != NULL, "sys_sigreturn: myproc returned NULL");
 
+    return 0;
+}
+
+uint64 sys_pause(void) {
+    proc_lock(myproc());
+    scheduler_pause(NULL); // Pause the current process
+    proc_unlock(myproc());
     return 0;
 }

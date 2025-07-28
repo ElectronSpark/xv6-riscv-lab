@@ -9,14 +9,7 @@ void handler2(int signo) {
 
 void handler1(int signo) {
   printf("Signal handler 1 called with signo: %d\n", signo);
-  sigaction_t sa2 = {0};
-  sa2.sa_handler = handler2;
-  if (sigaction(SIGUSR1, &sa2, NULL) != 0) {
-      fprintf(2, "Failed to set signal handler for SIGUSR1\n");
-      exit(-1);
-  }
   kill(getpid(), SIGUSR1); // Send SIGUSR1 to self to trigger handler
-  sleep(5); // Give time for the signal to be handled
   printf("Signal 2 returned\n");
 
   sigreturn();
@@ -29,36 +22,61 @@ void handler3(int signo, siginfo_t *info, void *context) {
         printf("Signal code: %d, pid: %d, addr: %p\n", info->si_code, info->si_pid, info->si_addr);
         printf("Signal status: %d\n", info->si_status);
         printf("Signal errno: %d\n", info->si_errno);
+    } else {
+        printf("No siginfo provided\n");
     }
 
-    sigaction_t sa2 = {0};
-    sa2.sa_handler = handler2;
-    if (sigaction(SIGUSR1, &sa2, NULL) != 0) {
-        fprintf(2, "Failed to set signal handler for SIGUSR1\n");
-        exit(-1);
-    }
     kill(getpid(), SIGUSR1); // Send SIGUSR1 to self to trigger handler
-    sleep(5); // Give time for the signal to be handled
     printf("Signal 2 returned\n");
 
     sigreturn();
 }
 
 int main(void) {
+    int pid = getpid();
+    printf("Test signal handling in process %d\n", pid);
+    int pid1 = fork();
+    if (pid1 < 0) {
+        fprintf(2, "Fork failed\n");
+        exit(-1);
+    } else if (pid1 == 0) {
+        // Child process
+        printf("Child process %d started\n", getpid());
+        sleep(5);
+        printf("Child process sending SIGALRM to parent\n");
+        kill(pid, SIGALRM); // Send SIGALRM to parent
+        sleep(5);
+        printf("Child process sending SIGALRM to parent\n");
+        kill(pid, SIGALRM); // Send SIGALRM to parent
+
+        printf("Child process paused\n");
+        pause();
+        sleep(5);
+        printf("Child process sending SIGALRM to parent\n");
+        kill(pid, SIGALRM); // Send SIGALRM to parent
+        sleep(5);
+        printf("Child process sending SIGALRM to parent\n");
+        kill(pid, SIGALRM); // Send SIGALRM to parent
+        printf("Child process exiting\n");
+        exit(0); // Child exits
+    }
+
+    printf("Parent process %d started\n", pid);
     sigaction_t sa1 = {0};
     sa1.sa_handler = handler1;
     if (sigaction(SIGALRM, &sa1, NULL) != 0) {
         fprintf(2, "Failed to set signal handler\n");
         exit(-1);
     }
-    kill(getpid(), SIGALRM);
-    sleep(10); // Give time for the signal to be handled
-
+    sigaction_t sa2 = {0};
+    sa2.sa_handler = handler2;
+    if (sigaction(SIGUSR1, &sa2, NULL) != 0) {
+        fprintf(2, "Failed to set signal handler for SIGUSR1\n");
+        exit(-1);
+    }
+    pause(); // Wait for the signal to be handled
     printf("signal returned for the first time\n");
-
-    kill(getpid(), SIGALRM);
-    sleep(10); // Give time for the signal to be handled
-
+    pause();
     printf("signal returned for the second time\n");
     
     printf("Test siginfo\n");
@@ -69,14 +87,10 @@ int main(void) {
         exit(-1);
     }
 
-    kill(getpid(), SIGALRM);
-    sleep(10); // Give time for the signal to be handled
-
+    kill(pid1, SIGALRM);
+    pause(); // Wait for the signal to be handled
     printf("signal returned for the first time\n");
-
-    kill(getpid(), SIGALRM);
-    sleep(10); // Give time for the signal to be handled
-
+    pause(); // Wait for the signal to be handled
     printf("signal returned for the second time\n");
 
     return 0;

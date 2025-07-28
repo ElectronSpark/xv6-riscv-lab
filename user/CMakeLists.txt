@@ -108,7 +108,7 @@ set(USER_PROGRAMS_C_FILES
 	${USER_DIR}/find.c
 	${USER_DIR}/xargs.c
     ${USER_DIR}/free.c
-    ${USER_DIR}/dumpproc.c
+    ${USER_DIR}/ps.c
     ${USER_DIR}/dumpchan.c
     ${USER_DIR}/testsig.c
     ${USER_DIR}/cowtest.c

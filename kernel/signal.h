@@ -69,6 +69,8 @@ int sigpending_empty(struct proc *p, int signo);
 sig_defact signo_default_action(int signo);
 int __signal_send(struct proc *p, ksiginfo_t *info);
 int signal_send(int pid, ksiginfo_t *info);
+bool signal_pending(struct proc *p);
+int signal_notify(struct proc *p);
 bool signal_terminated(struct proc *p);
 void handle_signal(void);
 

@@ -42,6 +42,7 @@ entry("sigalarm");
 entry("sigreturn");
 entry("sigpending");
 entry("sigprocmask");
+entry("pause");
 
 
 entry("memstat");

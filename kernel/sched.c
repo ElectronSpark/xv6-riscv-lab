@@ -11,6 +11,7 @@
 #include "sched.h"
 #include "slab.h"
 #include "rbtree.h"
+#include "signal.h"
 
 
 struct chan_queue_node {
@@ -265,6 +266,7 @@ void scheduler_sleep(struct spinlock *lk) {
     struct proc *proc = myproc();
     assert(proc != NULL, "PCB is NULL");
     proc_assert_holding(proc);
+    assert(PROC_SLEEPING(proc), "Process must be in either INTERRUPTIBLE or UNINTERRUPTIBLE state to sleep");
     int lk_holding = (lk != NULL && spin_holding(lk));
     pop_off();  // Safe to decrease noff counter after acquiring the process lock
 
@@ -280,6 +282,16 @@ void scheduler_sleep(struct spinlock *lk) {
         spin_acquire(lk);
     }
     proc_lock(proc); // Reacquire the process lock after yielding
+}
+
+// Put the current process to sleep in interruptible state,
+// so it would pause until receiving a signal.
+void scheduler_pause(struct spinlock *lk) {
+    struct proc *current = myproc();
+    assert(current != NULL, "Cannot pause a NULL process");
+    proc_assert_holding(current);
+    __proc_set_pstate(current, PSTATE_INTERRUPTIBLE);
+    scheduler_sleep(lk); // Sleep with the specified lock
 }
 
 // Wake up a process from the sleep queue.
@@ -321,6 +333,14 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
     proc->chan = chan; // Set the channel for the process
     PROC_SET_ONCHAN(proc); // Mark the process as sleeping on a channel
     scheduler_yield(lk); // Switch to the scheduler
+    if (signal_pending(proc)) {
+        // If the process is woken up by a signal, it should detach its waiter from the queue
+        // @TODO: ignore return value because it could be already removed by other process
+        proc_queue_remove(queue, &waiter);
+        PROC_CLEAR_ONCHAN(proc); // Clear the ONCHAN flag
+        proc->chan = NULL; // Clear the channel
+    }
+
     sched_unlock();
 
     // Because the process lock is acquired after lk, we need to release it before acquiring lk.

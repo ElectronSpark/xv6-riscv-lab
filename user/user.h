@@ -35,6 +35,7 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact);
 int sigreturn(void);
 int sigpending(sigset_t *set);
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+void pause(void);
 
 int memstat(void);
 int dumpproc(void);
