@@ -626,7 +626,7 @@ __exit_yield(int status)
   p->xstate = status;
   __proc_set_pstate(p, PSTATE_ZOMBIE);
   sched_lock();
-  scheduler_yield(NULL, NULL);
+  scheduler_yield(NULL);
   sched_unlock();
   proc_unlock(p);
   panic("exit: __exit_yield should not return");
@@ -731,7 +731,7 @@ yield(void)
 {
   proc_lock(myproc());
   sched_lock();
-  scheduler_yield(NULL, NULL);
+  scheduler_yield(NULL);
   sched_unlock();
   proc_unlock(myproc());
 }

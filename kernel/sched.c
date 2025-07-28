@@ -241,7 +241,7 @@ void scheduler_run(void) {
 
 // Yield the CPU to allow other processes to run.
 // lk will not be re-acquired after yielding.
-int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
+void scheduler_yield(struct spinlock *lk) {
     push_off();
     struct proc *proc = myproc();
     proc_assert_holding(proc);
@@ -254,7 +254,7 @@ int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
     assert(mycpu()->noff == 2 || (mycpu()->noff == 3 && lk_holding), 
            "Process must hold and only hold the proc lock and sched lock when yielding. Current noff: %d", mycpu()->noff);
     PROC_CLEAR_NEEDS_RESCHED(proc);
-    uint64 ret_val = __swtch_context(&proc->context, &mycpu()->context, (uint64)lk);
+    __swtch_context(&proc->context, &mycpu()->context, (uint64)lk);
 
     assert(!intr_get(), "Interrupts must be disabled after switching to a process");
     assert(myproc() == proc, "Yield returned to a different process");
@@ -262,12 +262,6 @@ int scheduler_yield(uint64 *ret_arg, struct spinlock *lk) {
     assert(__proc_get_pstate(proc) == PSTATE_RUNNING, "Process state must be RUNNING after yield");
 
     mycpu()->intena = intena; // Restore interrupt state
-    
-    if (ret_arg) {
-        *ret_arg = ret_val; // Return the value from the context switch
-    }
-
-    return 0;
 }
 
 // Put the current process to sleep on the specified queue.
@@ -280,7 +274,7 @@ void scheduler_sleep(struct spinlock *lk) {
     pop_off();  // Safe to decrease noff counter after acquiring the process lock
 
     sched_lock();
-    scheduler_yield(NULL, lk); // Switch to the scheduler
+    scheduler_yield(lk); // Switch to the scheduler
     sched_unlock();
 
     // Because the process lock is acquired after lk, we need to release it before acquiring lk.
@@ -330,7 +324,7 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
     }
     proc->chan = chan; // Set the channel for the process
     PROC_SET_ONCHAN(proc); // Mark the process as sleeping on a channel
-    scheduler_yield(NULL, lk); // Switch to the scheduler
+    scheduler_yield(lk); // Switch to the scheduler
     sched_unlock();
 
     // Because the process lock is acquired after lk, we need to release it before acquiring lk.

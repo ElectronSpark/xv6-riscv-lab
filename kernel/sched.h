@@ -9,7 +9,7 @@ int sched_holding(void);
 void sched_lock(void);
 void sched_unlock(void);
 void scheduler_run(void);
-int scheduler_yield(uint64 *ret_arg, struct spinlock *lk);
+void scheduler_yield(struct spinlock *lk);
 void scheduler_sleep(struct spinlock *lk);
 void scheduler_wakeup(struct proc *p);
 void scheduler_sleep_on_chan(void *chan, struct spinlock *lk);
