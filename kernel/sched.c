@@ -86,18 +86,13 @@ proc_queue_t *chan_queue_get(uint64 chan, bool create) {
     return &chan_node->wait_queue;
 }
 
-int chan_queue_pop(uint64 chan, proc_queue_t *ret_queue) {
+struct chan_queue_node *chan_queue_pop(uint64 chan) {
     struct rb_node *node = rb_delete_color(&__chan_queue_root, chan);
     if (node == NULL) {
-        return -1; // Not found
+        return NULL; // Not found
     }
 
-    struct chan_queue_node *chan_node = container_of(node, struct chan_queue_node, rb_entry);
-    proc_queue_bulk_move(ret_queue, &chan_node->wait_queue);
-
-    // Free the chan queue node
-    chan_queue_free(chan_node);
-    return 0; // Success
+    return container_of(node, struct chan_queue_node, rb_entry);
 }
 
 /* Scheduler lock functions */
@@ -296,7 +291,6 @@ void scheduler_wakeup(struct proc *p) {
     // __sched_assert_unholding();
     assert(p != NULL, "Cannot wake up a NULL process");
     assert(PROC_SLEEPING(p), "Process must be SLEEPING to wake up");
-    assert(!proc_in_queue(p, NULL), "Process must not be in any queue before waking up");
     assert(p != myproc(), "Cannot wake up the current process");
     assert(p->chan == NULL, "Process must not be sleeping on a channel before waking up");
 
@@ -318,8 +312,10 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
     struct proc_queue *queue = chan_queue_get((uint64)chan, true);
     assert(queue != NULL, "Failed to get channel queue");
 
+    proc_node_t waiter = { 0 };
+    proc_node_init(&waiter);
     __proc_set_pstate(proc, PSTATE_UNINTERRUPTIBLE);
-    if (proc_queue_push(queue, proc) != 0) {
+    if (proc_queue_push(queue, &waiter) != 0) {
         panic("Failed to push process to sleep queue");
     }
     proc->chan = chan; // Set the channel for the process
@@ -338,27 +334,33 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
 }
 
 void scheduler_wakeup_on_chan(void *chan) {
-    proc_queue_t tmp_queue = { 0 };
-    proc_queue_init(&tmp_queue, "tmp_queue", NULL);
     sched_lock();
-    if (chan_queue_pop((uint64)chan, &tmp_queue) != 0) {
+    struct chan_queue_node *chan_node = chan_queue_pop((uint64)chan);
+    if (chan_node == NULL) {
         sched_unlock();
         return; // No processes waiting on this channel
     }
-    sched_unlock();
+    proc_queue_t *tmp_queue = &chan_node->wait_queue;
 
-    struct proc *p = NULL;
-    struct proc *tmp = NULL;
-    proc_queue_foreach_unlocked(&tmp_queue, p, tmp) {
+    for (;;) {
+        proc_node_t *node = NULL;
+        assert(proc_queue_pop(tmp_queue, &node) == 0, "Failed to pop process from temporary queue");
+        if (node == NULL) {
+            break; // No more processes in the temporary queue
+        }
+        struct proc *p = proc_node_get_proc(node);
+        assert(p != NULL, "scheduler_wakeup_on_chan: process is NULL");
+        sched_unlock();
         proc_lock(p);
-        assert(proc_queue_remove(&tmp_queue, p) == 0, "Failed to remove process from temporary queue");
+        assert(PROC_ONCHAN(p), "Process must be sleeping on a channel to wake up");
         PROC_CLEAR_ONCHAN(p);
         p->chan = NULL;
         sched_lock();
         scheduler_wakeup(p);
-        sched_unlock();
         proc_unlock(p);
     }
+    chan_queue_free(chan_node); // Free the temporary queue
+    sched_unlock();
 }
 
 void scheduler_dump_chan_queue(void) {
@@ -366,21 +368,26 @@ void scheduler_dump_chan_queue(void) {
     struct chan_queue_node *tmp = NULL;
 
     printf("Channel Queue Dump:\n");
-    sched_lock();
     rb_foreach_entry_safe(&__chan_queue_root, node, tmp, rb_entry) {
         printf("Channel: %lx, Queue Size: %d\n", node->chan, proc_queue_size(&node->wait_queue));
-        struct proc *p = NULL;
-        struct proc *tmp_p = NULL;
+        proc_node_t *p = NULL;
+        proc_node_t *tmp_p = NULL;
         proc_queue_foreach_unlocked(&node->wait_queue, p, tmp_p) {
-            printf("  Process: %s (PID: %d, State: %s)\n", p->name, p->pid, procstate_to_str(__proc_get_pstate(p)));
+            struct proc *proc = proc_node_get_proc(p);
+            if (proc ==NULL) {
+                printf("  Process: NULL\n");
+                continue;
+            }
+            printf("  Process: %s (PID: %d, State: %s)\n", proc->name, proc->pid, procstate_to_str(__proc_get_pstate(proc)));
         }
     }
-    sched_unlock();
 }
 
 uint64 sys_dumpchan(void) {
     // This function is called from the dumpchan user program.
     // It dumps the channel queue to the console.
+    sched_lock();
     scheduler_dump_chan_queue();
+    sched_unlock();
     return 0;
 }

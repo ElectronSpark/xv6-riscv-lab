@@ -18,25 +18,47 @@ initsleeplock(struct sleeplock *lk, char *name)
   proc_queue_init(&lk->wait_queue, "sleep lock wait queue", &lk->lk);
   lk->name = name;
   lk->locked = 0;
-  lk->pid = 0;
+  lk->holder = NULL;
 }
 
-void
+int
 acquiresleep(struct sleeplock *lk)
 {
+  proc_node_t waiter = { 0 };
+  int ret = -1;
+  proc_node_init(&waiter);
   proc_lock(myproc());
   spin_acquire(&lk->lk);
-  while (lk->locked) {
-    __proc_set_pstate(myproc(), PSTATE_UNINTERRUPTIBLE);
-    if (proc_queue_push(&lk->wait_queue, myproc()) != 0) {
-        panic("Failed to push process to sleep queue");
-    }
-    scheduler_sleep(&lk->lk);
+
+  // If the lock is not held, acquire it and return success.
+  if (lk->locked == 0) {
+    lk->locked = 1;
+    lk->holder = myproc();
+    ret = 0;
+    goto done; // Success: lock acquired
   }
-  lk->locked = 1;
-  lk->pid = myproc()->pid;
+
+  // Slow path
+  // @TODO: handle signal
+  if (proc_queue_push(&lk->wait_queue, &waiter) != 0) {
+    ret = -1;
+    goto done; // Error: failed to push to wait queue
+  }
+  for (;;) {
+    __proc_set_pstate(myproc(), PSTATE_UNINTERRUPTIBLE);
+    scheduler_sleep(&lk->lk);
+    if (lk->holder == myproc()) {
+      assert(proc_queue_remove(&lk->wait_queue, &waiter) == 0,
+             "acquiresleep: failed to remove from wait queue");
+      ret = 0;
+      goto done; // Success: lock acquired
+    }
+  }
+  
+done:
   spin_release(&lk->lk);
   proc_unlock(myproc());
+  return ret;
 }
 
 void
@@ -46,50 +68,35 @@ releasesleep(struct sleeplock *lk)
   // so that we can detach them from the wait queue, and then wake them up.
   // This is to avoid deadlocks, as we cannot hold the lock while waking up processes
   // from the wait queue.
-  proc_queue_t tmp_queue = { 0 };
-  proc_queue_init(&tmp_queue, "tmp_queue", NULL);
   spin_acquire(&lk->lk);
-  proc_queue_bulk_move(&tmp_queue, &lk->wait_queue);
-  lk->locked = 0;
-  lk->pid = 0;
-  spin_release(&lk->lk);
-
-  // Now we can wake up all processes from the temporary queue.
-  // We can do this without holding the lock related to the temporary queue, 
-  // because the temporary queue is invisible to other processes.
-  struct proc *tmp = NULL;
-  struct proc *pos = NULL;
-  proc_queue_foreach_unlocked(&tmp_queue, pos, tmp) {
-    proc_lock(pos);
-    proc_queue_remove(&tmp_queue, pos);
-    assert(PROC_SLEEPING(pos), "Process must be SLEEPING to wake up");
-    sched_lock();
-    scheduler_wakeup(pos);
-    sched_unlock();
-    proc_unlock(pos);
-  }
-}
-
-void
-releasesleep_one(struct sleeplock *lk)
-{
-  if (!lk->locked) {
-    return; // Lock is not held, nothing to release
-  }
-  struct proc *poc = NULL;
-  spin_acquire(&lk->lk);
-  if (proc_queue_size(&lk->wait_queue) <= 0) {
+  if (LIST_IS_EMPTY(&lk->wait_queue.head)) {
+    lk->locked = 0; // Lock is released
+    lk->holder = NULL; // No process holds the lock
+    assert(proc_queue_size(&lk->wait_queue) == 0,
+           "releasesleep: wait queue is not empty");
     spin_release(&lk->lk);
-    return;
+    return; // Nothing to release
   }
-  assert(proc_queue_pop(&lk->wait_queue, &poc) == 0, "Failed to pop process from wait queue");
-  spin_release(&lk->lk);
-  assert(poc != NULL, "releasesleep_one: failed to pop from wait queue");
-  proc_lock(poc);
-  sched_lock();
-  scheduler_wakeup(poc);
-  sched_unlock();
-  proc_unlock(poc);
+  proc_node_t *first_waiter = NULL;
+  assert(proc_queue_first(&lk->wait_queue, &first_waiter) == 0,
+         "releasesleep: failed to get first process from wait queue");
+  if (first_waiter == NULL) {
+    lk->holder = NULL;
+    lk->locked = 0; // Lock is released
+    assert(proc_queue_size(&lk->wait_queue) == 0,
+           "releasesleep: wait queue is not empty");
+    spin_release(&lk->lk);
+  } else {
+    struct proc *next = proc_node_get_proc(first_waiter);
+    assert(next != NULL, "releasesleep: first waiter is NULL");
+    lk->holder = next;
+    spin_release(&lk->lk); 
+    proc_lock(next); // Lock the process that will hold the lock
+    sched_lock();
+    scheduler_wakeup(next); // Wake up the first process in the wait queue
+    sched_unlock();
+    proc_unlock(next); // Unlock the process that will hold the lock
+  }
 }
 
 int
@@ -98,7 +105,7 @@ holdingsleep(struct sleeplock *lk)
   int r;
   
   spin_acquire(&lk->lk);
-  r = lk->locked && (lk->pid == myproc()->pid);
+  r = lk->locked && (lk->holder == myproc());
   spin_release(&lk->lk);
   return r;
 }

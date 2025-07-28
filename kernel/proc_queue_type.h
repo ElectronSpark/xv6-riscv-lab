@@ -7,10 +7,11 @@
 
 typedef struct proc_queue proc_queue_t;
 
-typedef struct proc_queue_entry {
+typedef struct proc_node {
     list_node_t list_entry;
     proc_queue_t *queue; // Pointer to the queue this entry belongs to
-} proc_queue_entry_t;
+    struct proc *proc;   // Pointer to the process this node represents
+} proc_node_t;
 
 typedef struct proc_queue {
     list_node_t head; // List of processes in the queue

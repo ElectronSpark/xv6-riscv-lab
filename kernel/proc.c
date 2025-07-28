@@ -215,7 +215,6 @@ __pcb_init(struct proc *p)
   list_entry_init(&p->children);
   hlist_entry_init(&p->proctab_entry);
   spin_init(&p->lock, "proc");
-  proc_queue_entry_init(&p->queue_entry);
 }
 
 void

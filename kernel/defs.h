@@ -153,7 +153,7 @@ void            push_off(void);
 void            pop_off(void);
 
 // sleeplock.c
-void            acquiresleep(struct sleeplock*);
+int             acquiresleep(struct sleeplock*);
 void            releasesleep(struct sleeplock*);
 int             holdingsleep(struct sleeplock*);
 void            initsleeplock(struct sleeplock*, char*);

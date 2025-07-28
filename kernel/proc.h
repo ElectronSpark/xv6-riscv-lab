@@ -65,7 +65,6 @@ struct proc {
   enum procstate state;        // Process state
   void *chan;                  // If non-zero, sleeping on chan
   list_node_t sched_entry;     // entry for ready queue
-  proc_queue_entry_t queue_entry;     // Entry in a process queue
   uint64 flags;
 #define PROC_FLAG_VALID             0x1
 #define PROC_FLAG_NEEDS_RESCHED     0x4   // Process needs to be rescheduled

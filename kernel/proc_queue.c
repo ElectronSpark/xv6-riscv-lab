@@ -25,9 +25,10 @@ void proc_queue_set_lock(proc_queue_t *q, spinlock_t *lock) {
     }
 }
 
-void proc_queue_entry_init(proc_queue_entry_t *entry) {
-    list_entry_init(&entry->list_entry);
-    entry->queue = NULL; // Initialize the queue pointer to NULL
+void proc_node_init(proc_node_t *node) {
+    list_entry_init(&node->list_entry);
+    node->queue = NULL; // Initialize the queue pointer to NULL
+    node->proc = myproc();  // Initialize the process pointer to the current process
 }
 
 int proc_queue_size(proc_queue_t *q) {
@@ -37,24 +38,31 @@ int proc_queue_size(proc_queue_t *q) {
     return q->counter;
 }
 
-proc_queue_t *proc_queue_get_queue(struct proc *p) {
-    if (p == NULL) {
-        return NULL; // Error: process is NULL
+proc_queue_t *proc_node_get_queue(proc_node_t *node) {
+    if (node == NULL) {
+        return NULL; // Error: node is NULL
     }
-    return p->queue_entry.queue;
+    return node->queue;
 }
 
-int proc_queue_push(proc_queue_t *q, struct proc *p) {
-    if (q == NULL || p == NULL) {
+struct proc *proc_node_get_proc(proc_node_t *node) {
+    if (node == NULL) {
+        return NULL; // Error: node is NULL
+    }
+    return node->proc;
+}
+
+int proc_queue_push(proc_queue_t *q, proc_node_t *node) {
+    if (q == NULL || proc_node_get_proc(node) == NULL) {
         return -1; // Error: queue or process is NULL
     }
 
-    if (proc_queue_get_queue(p) != NULL) {
+    if (proc_node_get_queue(node) != NULL) {
         return -1; // Error: process is already in a queue
     }
 
-    list_node_push(&q->head, p, queue_entry.list_entry);
-    p->queue_entry.queue = q;
+    list_node_push(&q->head, node, list_entry);
+    node->queue = q;
     q->counter++;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     // printf("pushing process %d to queue %s\n", p->pid, q->name);
@@ -62,36 +70,35 @@ int proc_queue_push(proc_queue_t *q, struct proc *p) {
     return 0; // Success
 }
 
-int proc_queue_pop(proc_queue_t *q, struct proc **ret_proc) {
-    if (q == NULL || ret_proc == NULL) {
+int proc_queue_first(proc_queue_t *q, proc_node_t **ret_node) {
+    if (q == NULL || ret_node == NULL) {
         return -1; // Error: queue or process is NULL
     }
 
     if (q->counter <= 0) {
-        *ret_proc = NULL; // Set ret_proc to NULL if queue is empty
-        return 0;
+        *ret_node = NULL; // Set ret_node to NULL if queue is empty
+        if (q->counter == 0) {
+            return 0;
+        } else {
+            return -1;
+        }
     }
 
-    struct proc *dequeued_proc = 
-        list_node_pop_back(&q->head, struct proc, queue_entry.list_entry);
-    if (dequeued_proc == NULL) {
-        panic("proc_queue_pop: failed to pop from queue");
-    }
-    dequeued_proc->queue_entry.queue = NULL;
-    q->counter--;
-    *ret_proc = dequeued_proc; // Copy the process data
+    proc_node_t *first_node = LIST_FIRST_NODE(&q->head, proc_node_t, list_entry);
+    assert(first_node != NULL, "proc_queue_first: queue is not empty but failed to get the first node");
+    *ret_node = first_node; // Copy the process data
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    // printf("popping process %d from queue %s\n", dequeued_proc->pid, q->name);
+    // printf("popping process %d from queue %s\n", proc_node_get_proc(first_node)->pid, q->name);
 
     return 0; // Success
 }
 
-int proc_queue_remove(proc_queue_t *q, struct proc *p) {
-    if (q == NULL || p == NULL) {
+int proc_queue_remove(proc_queue_t *q, proc_node_t *node) {
+    if (q == NULL || proc_node_get_proc(node) == NULL) {
         return -1; // Error: queue or process is NULL
     }
 
-    if (proc_queue_get_queue(p) != q) {
+    if (proc_node_get_queue(node) != q) {
         return -1; // Error: process is not in the specified queue
     }
 
@@ -99,14 +106,37 @@ int proc_queue_remove(proc_queue_t *q, struct proc *p) {
         panic("proc_queue_remove: queue is empty");
     }
 
-    list_node_detach(p, queue_entry.list_entry);
-    p->queue_entry.queue = NULL;
+    list_node_detach(node, list_entry);
+    node->queue = NULL;
     q->counter--;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
-    // printf("removing process %d from queue %s\n", p->pid, q->name);
+    // printf("removing process %d from queue %s\n", proc_node_get_proc(node)->pid, q->name);
 
     return 0; // Success
+}
+
+int proc_queue_pop(proc_queue_t *q, proc_node_t **ret_node) {
+    if (q == NULL || ret_node == NULL) {
+        return -1; // Error: queue or ret_node is NULL
+    }
+    proc_node_t *dequeued_node = NULL;
+    int ret = proc_queue_first(q, &dequeued_node);
+    if (ret != 0) {
+        return ret;
+    }
+    if (dequeued_node == NULL) {
+        *ret_node = NULL; // Queue is empty
+        return 0; // Success, but no node to return
+    }
+
+    ret = proc_queue_remove(q, dequeued_node);
+    if (ret == 0) {
+        *ret_node = dequeued_node; // Return the dequeued node
+    } else {
+        *ret_node = NULL; // Error occurred, set ret_node to NULL
+    }
+    return ret;
 }
 
 // Move all process from one queue to another.
@@ -124,10 +154,10 @@ int proc_queue_bulk_move(proc_queue_t *to, proc_queue_t *from) {
     to->counter += from->counter;
     from->counter = 0;
     list_entry_insert_bulk(LIST_LAST_ENTRY(&to->head), &from->head);
-    struct proc *proc = NULL;
-    struct proc *tmp = NULL;
-    list_foreach_node_safe(&to->head, proc, tmp, queue_entry.list_entry) {
-        proc->queue_entry.queue = to; // Update the queue pointer for each process
+    proc_node_t *proc = NULL;
+    proc_node_t *tmp = NULL;
+    list_foreach_node_safe(&to->head, proc, tmp, list_entry) {
+        proc->queue = to; // Update the queue pointer for each process
     }
 
     return 0; // Success
