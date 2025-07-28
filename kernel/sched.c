@@ -22,7 +22,7 @@ struct chan_queue_node {
 slab_cache_t chan_queue_slab;
 static struct rb_root __chan_queue_root;
 
-static proc_queue_t ready_queue;
+list_node_t ready_queue;
 static spinlock_t __sched_lock;   // ready_queue and sleep_queue share this lock
 
 
@@ -134,7 +134,7 @@ void sched_unlock(void) {
 /* Scheduler functions */
 void scheduler_init(void) {
     spin_init(&__sched_lock, "sched_lock");
-    proc_queue_init(&ready_queue, "ready_queue", NULL);
+    list_entry_init(&ready_queue);
     chan_queue_init();
 }
 
@@ -144,19 +144,16 @@ void __scheduler_add_ready(struct proc *p) {
     proc_assert_holding(p);
     enum procstate pstate = __proc_get_pstate(p);
     assert(pstate == PSTATE_RUNNABLE, "Process must be in RUNNABLE state to be added to ready queue");
-    
-    if (proc_queue_push(&ready_queue, p) != 0) {
-        panic("Failed to push process to ready queue");
-    }
+
+    list_node_push(&ready_queue, p, sched_entry);
 }
 
 // Pick the next process to run from the ready queue.
 // Returns a RUNABLE state process or NULL if no process is ready.
 // The process returned will be locked
 static struct proc *__sched_pick_next(void) {
-    struct proc *p = NULL;
     sched_lock();
-    assert(proc_queue_pop(&ready_queue, &p) == 0, "Failed to pop process from ready queue");
+    struct proc *p = list_node_pop_back(&ready_queue, struct proc, sched_entry);
     sched_unlock();
     
     if (p) {
