@@ -23,7 +23,6 @@ slab_cache_t chan_queue_slab;
 static struct rb_root __chan_queue_root;
 
 static proc_queue_t ready_queue;
-static proc_queue_t sleep_queue;
 static spinlock_t __sched_lock;   // ready_queue and sleep_queue share this lock
 
 
@@ -136,7 +135,6 @@ void sched_unlock(void) {
 void scheduler_init(void) {
     spin_init(&__sched_lock, "sched_lock");
     proc_queue_init(&ready_queue, "ready_queue", NULL);
-    proc_queue_init(&sleep_queue, "sleep_queue", NULL);
     chan_queue_init();
 }
 
