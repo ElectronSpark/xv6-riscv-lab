@@ -50,7 +50,6 @@ int main(void) {
         kill(pid, SIGALRM); // Send SIGALRM to parent
 
         printf("Child process paused\n");
-        pause();
         sleep(5);
         printf("Child process sending SIGALRM to parent\n");
         kill(pid, SIGALRM); // Send SIGALRM to parent

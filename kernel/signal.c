@@ -231,12 +231,8 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
 
     // ignored signals are not sent
     if (sigismember(&sa->sa_sigignore, info->signo)) {
-        // If the signal is ignored, but not blocked, notify the process
-        if (!sigismember(&sa->sa_sigmask, info->signo)) {
-            signal_notify(p);
-        }
         proc_unlock(p);
-        return 0; // Signal sent successfully
+        return 0;
     }
     
     sigaction_t *act = &sa->sa[info->signo];
