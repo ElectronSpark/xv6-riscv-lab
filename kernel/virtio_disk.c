@@ -41,6 +41,8 @@ STATIC struct disk {
   // our own book-keeping.
   char free[NUM];  // is a descriptor free?
   uint16 used_idx; // we've looked this far in used[2..NUM].
+  uint16 free_list[NUM]; // The index of the free descriptors
+  uint16 free_idx; // The position in the free list
 
   // track info about in-flight operations,
   // for use when completion interrupt arrives.
@@ -142,8 +144,11 @@ virtio_disk_init(void)
   *R(VIRTIO_MMIO_QUEUE_READY) = 0x1;
 
   // all NUM descriptors start out unused.
-  for(int i = 0; i < NUM; i++)
+  for(int i = 0; i < NUM; i++) {
     disk.free[i] = 1;
+    disk.free_list[i] = i;
+    disk.free_idx++;
+  }
 
   // tell device we're completely ready.
   status |= VIRTIO_CONFIG_S_DRIVER_OK;
@@ -156,13 +161,13 @@ virtio_disk_init(void)
 STATIC int
 alloc_desc()
 {
-  for(int i = 0; i < NUM; i++){
-    if(disk.free[i]){
-      disk.free[i] = 0;
-      return i;
-    }
+  if (disk.free_idx <= 0) {
+    return -1;
   }
-  return -1;
+
+  disk.free_idx--;
+  disk.free[disk.free_idx] = 0; // Mark the descriptor as used
+  return disk.free_idx;
 }
 
 // mark a descriptor as free.
@@ -178,6 +183,9 @@ free_desc(int i)
   disk.desc[i].flags = 0;
   disk.desc[i].next = 0;
   disk.free[i] = 1;
+  disk.free_list[disk.free_idx] = i; // Add to free list
+  disk.free_idx++;
+  assert(disk.free_idx <= NUM, "free_idx out of bounds");
   wakeup(&disk.free[0]);
 }
 
