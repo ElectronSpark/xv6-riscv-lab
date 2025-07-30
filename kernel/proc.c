@@ -874,7 +874,7 @@ procdump(void)
       continue;
 
     state = procstate_to_str(pstate);
-    printf("%d %s %s", pid, state, name);
+    printf("%d %s%s %s", pid, state, PROC_STOPPED(p) ? " (stopped)" : "", name);
     printf("\n");
   }
 

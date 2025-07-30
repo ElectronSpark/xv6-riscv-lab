@@ -32,6 +32,11 @@ void handler3(int signo, siginfo_t *info, void *context) {
     sigreturn();
 }
 
+void sigcont_handler(int signo) {
+    printf("Signal continue handler called with signo: %d\n", signo);
+    sigreturn();
+}
+
 int main(void) {
     int pid = getpid();
     printf("Test signal handling in process %d\n", pid);
@@ -40,6 +45,26 @@ int main(void) {
         fprintf(2, "Fork failed\n");
         exit(-1);
     } else if (pid1 == 0) {
+        int pid2 = fork();
+        if (pid2 < 0) {
+            fprintf(2, "Fork failed\n");
+            exit(-1);
+        } else if (pid2 == 0) {
+            // Grandchild process
+            printf("Grandchild process %d started\n", getpid());
+            sigaction_t sa2 = {0};
+            sa2.sa_handler = sigcont_handler;
+            if (sigaction(SIGCONT, &sa2, NULL) != 0) {
+                fprintf(2, "Failed to set signal handler for SIGCONT\n");
+                exit(-1);
+            }
+
+            sleep(5);
+            printf("Grandchild process exiting\n");
+            exit(0); // Grandchild exits
+        }
+        sleep(3);
+        kill(pid2, SIGSTOP); // Stop grandchild process
         // Child process
         printf("Child process %d started\n", getpid());
         sleep(5);
@@ -61,6 +86,7 @@ int main(void) {
         printf("Child process %d exiting\n", getpid());
         sleep(5);
         printf("Child process exiting\n");
+        kill(pid2, SIGCONT); // Continue grandchild process
         exit(0); // Child exits
     }
 

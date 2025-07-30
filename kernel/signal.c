@@ -136,8 +136,12 @@ static void __sig_reset_act_mask(sigacts_t *sa, int signo) {
     sigdelset(&sa->sa_sigterm, signo);
     sigdelset(&sa->sa_sigignore, signo);
     // sigdelset(&sa->sa_usercatch, signo);
-    sigdelset(&sa->sa_sigstop, signo);
-    sigdelset(&sa->sa_sigcont, signo);
+    if (signo != SIGSTOP) {
+        sigdelset(&sa->sa_sigstop, signo);
+    }
+    if (signo != SIGCONT) {
+        sigdelset(&sa->sa_sigcont, signo);
+    }
     // sigdelset(&sa->sa_sigcore, signo);
 }
 
@@ -263,17 +267,17 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
     if (sigismember(&sa->sa_sigstop, info->signo) && !sigismember(&sa->sa_sigmask, info->signo)) {
         // Pause the process
         PROC_SET_STOPPED(p);
-    } else if (sigismember(&sa->sa_sigcont, info->signo)) {
-        // For now never set continue signals to pending state
-        p->sig_pending_mask &= ~sa->sa_sigstop;
-        // Resume the process if it was stopped
-        if (!sigismember(&sa->sa_sigmask, info->signo)) {
-            sched_lock();
-            scheduler_continue(p); // Continue the process if it was stopped
-            sched_unlock();
-        }
     } else {
         sigaddset(&p->sig_pending_mask, info->signo);
+        if (sigismember(&sa->sa_sigcont, info->signo) && !sigismember(&sa->sa_sigmask, info->signo)) {
+            p->sig_pending_mask &= ~sa->sa_sigstop;
+            if (PROC_STOPPED(p)) {
+                // If the process is stopped, we need to wake it up
+                sched_lock();
+                scheduler_continue(p);
+                sched_unlock();
+            }
+        }
     }
 
     ret = 0;
@@ -282,7 +286,14 @@ done:
     // If the action is to terminate the process, set the killed flag
     if (sigismember(&sa->sa_sigterm, info->signo)) {
         PROC_SET_KILLED(p);
-    } else if (ret == 0 && signal_pending(p)) {
+        if (PROC_STOPPED(p)) {
+            // If the process is stopped, we need to wake it up
+            sched_lock();
+            scheduler_continue(p);
+            sched_unlock();
+        }
+    }
+    if (ret == 0 && signal_pending(p)) {
         signal_notify(p); // Notify the process if needed
     }
     proc_unlock(p);
@@ -408,7 +419,7 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
         sa->sa[signum] = *act;
         sigdelset(&sa->sa[signum].sa_mask, SIGKILL); // Unblock the signal
         sigdelset(&sa->sa[signum].sa_mask, SIGSTOP); // Unblock the signal
-        // Ignore all the previous pennding signals
+        // Ignore all the previous pending signals
         if (sigpending_empty(p, signum) != 0) {
             proc_unlock(p);
             return -1; // Failed to clear pending signals
@@ -575,6 +586,15 @@ static int __deliver_signal(struct proc *p, int signo, ksiginfo_t *info, sigacti
     if (sa->sa_flags & SA_SIGINFO) {
         assert(info != NULL, 
                "__deliver_signal: SA_SIGINFO but info is NULL");
+    }
+
+    if (sigismember(&p->sigacts->sa_sigcont, signo)) {
+        p->sig_pending_mask &= ~p->sigacts->sa_sigstop;
+        if (sa->sa_handler == SIG_DFL) {
+            db_break();
+            PROC_SET_NEEDS_RESCHED(p);
+            return 0;
+        }
     }
 
     int ret = push_sigframe(p, signo, sa, info);
