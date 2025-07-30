@@ -220,7 +220,9 @@ void scheduler_run(void) {
 
         if (pstate == PSTATE_RUNNING) {
             __proc_set_pstate(p, PSTATE_RUNNABLE); // If we returned to a RUNNING process, set it to RUNNABLE
-            __scheduler_add_ready(p); // Add the process back to the ready queue
+            if (!PROC_STOPPED(p)) {
+                __scheduler_add_ready(p); // Add the process back to the ready queue
+            }
         }
         sched_unlock();
         // printf("CPU: %d <- %s: %s (pid: %d)\n", cpuid(), p->name, procstate_to_str(p->state), p->pid);
@@ -294,6 +296,34 @@ void scheduler_pause(struct spinlock *lk) {
     scheduler_sleep(lk); // Sleep with the specified lock
 }
 
+void scheduler_stop(struct proc *p) {
+    if (!p) {
+        return; // Invalid process
+    }
+    proc_assert_holding(p);
+    if (!PROC_STOPPED(p)) {
+        PROC_SET_STOPPED(p); // Set the process as stopped
+    }
+}
+
+void scheduler_continue(struct proc *p) {
+    push_off(); // Increase noff counter to ensure interruptions are disabled
+    proc_assert_holding(p);
+    if (!PROC_STOPPED(p)) {
+        return; // Process is not stopped, nothing to do
+    }
+    __sched_assert_holding();
+    pop_off(); // Safe to decrease noff counter after acquiring the process lock
+    // __sched_assert_unholding();
+    assert(p != NULL, "Cannot wake up a NULL process");
+    assert(p != myproc(), "Cannot wake up the current process");
+
+    PROC_CLEAR_STOPPED(p); // Clear the stopped flag
+    if (__proc_get_pstate(p) == PSTATE_RUNNABLE) {
+        __scheduler_add_ready(p); // Add the process back to the ready queue
+    }
+}
+
 // Wake up a process from the sleep queue.
 void scheduler_wakeup(struct proc *p) {
     push_off(); // Increase noff counter to ensure interruptions are disabled
@@ -302,13 +332,19 @@ void scheduler_wakeup(struct proc *p) {
     pop_off(); // Safe to decrease noff counter after acquiring the process lock
     // __sched_assert_unholding();
     assert(p != NULL, "Cannot wake up a NULL process");
-    assert(PROC_SLEEPING(p), "Process must be SLEEPING to wake up");
     assert(p != myproc(), "Cannot wake up the current process");
     assert(p->chan == NULL, "Process must not be sleeping on a channel before waking up");
+    if (!PROC_SLEEPING(p)) {
+        printf("warning: scheduler_wakeup called on a process that is not sleeping, pid: %d, state: %s\n", 
+               p->pid, procstate_to_str(__proc_get_pstate(p)));
+        return; // Process is not sleeping, nothing to do
+    }
 
     __proc_set_pstate(p, PSTATE_RUNNABLE);
 
-    __scheduler_add_ready(p); // Add the process back to the ready queue
+    if (!PROC_STOPPED(p)) {
+        __scheduler_add_ready(p); // Add the process back to the ready queue
+    }
 }
 
 void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {

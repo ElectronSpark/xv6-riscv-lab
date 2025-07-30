@@ -259,11 +259,19 @@ usertrapret(void)
     // If the process is terminated, exit it.
     exit(-1);
   }
+  if (PROC_STOPPED(p)) {
+    yield();
+  }
+
   handle_signal();
+  // The process may found it was stopped or killed while handling the signal.
   if (PROC_KILLED(p)) {
     // If the process is killed, exit it.
     // @TODO: exit code
     exit(-1);
+  }
+  if (PROC_STOPPED(p)) {
+    yield();
   }
 
   if (PROC_NEEDS_RESCHED(p)) {

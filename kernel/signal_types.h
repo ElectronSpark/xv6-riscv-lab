@@ -32,8 +32,8 @@ typedef struct sigacts {
 	sigset_t sa_original_mask; // original signal mask before any changes
 	sigset_t sa_sigterm;    // signals that terminate the process
 	// sigset_t sa_usercatch;  // user-defined signal handlers
-	// sigset_t sa_sigstop;    // signals that stop the process
-	// sigset_t sa_sigcont;    // signals that continue the process (not used)
+	sigset_t sa_sigstop;    // signals that stop the process
+	sigset_t sa_sigcont;    // signals that continue the process
 	// sigset_t sa_sigcore;    // signals that generate a core dump (not used)
     sigset_t sa_sigignore;  // signals ignored by this process
 } sigacts_t;

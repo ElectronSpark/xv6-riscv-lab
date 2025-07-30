@@ -57,6 +57,10 @@ int main(void) {
         printf("Child process sending SIGALRM to parent\n");
         kill(pid, SIGALRM); // Send SIGALRM to parent
         printf("Child process exiting\n");
+
+        printf("Child process %d exiting\n", getpid());
+        sleep(5);
+        printf("Child process exiting\n");
         exit(0); // Child exits
     }
 
@@ -91,6 +95,9 @@ int main(void) {
     printf("signal returned for the first time\n");
     pause(); // Wait for the signal to be handled
     printf("signal returned for the second time\n");
+
+    sleep(2);
+    kill(pid1, SIGSTOP); // Terminate child process
 
     return 0;
 }

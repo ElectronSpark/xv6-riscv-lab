@@ -70,6 +70,7 @@ struct proc {
 #define PROC_FLAG_NEEDS_RESCHED     0x4   // Process needs to be rescheduled
 #define PROC_FLAG_KILLED            0x8   // Process is exiting or exited
 #define PROC_FLAG_ONCHAN            0x10  // Process is sleeping on a channel
+#define PROC_FLAG_STOPPED           0x20  // Process is stopped
   
   // proc table lock must be held before holding p->lock to use this:
   hlist_entry_t proctab_entry; // Entry to link the process hash table
@@ -135,6 +136,8 @@ static inline void proc_clear_flags(struct proc *p, uint64 flags) {
   proc_set_flags(p, PROC_FLAG_KILLED)
 #define PROC_SET_ONCHAN(p) \
   proc_set_flags(p, PROC_FLAG_ONCHAN)
+#define PROC_SET_STOPPED(p) \
+  proc_set_flags(p, PROC_FLAG_STOPPED)
 
 #define PROC_CLEAR_VALID(p) \
   proc_clear_flags(p, PROC_FLAG_VALID)
@@ -144,6 +147,8 @@ static inline void proc_clear_flags(struct proc *p, uint64 flags) {
   proc_clear_flags(p, PROC_FLAG_KILLED)
 #define PROC_CLEAR_ONCHAN(p) \
   proc_clear_flags(p, PROC_FLAG_ONCHAN)
+#define PROC_CLEAR_STOPPED(p) \
+  proc_clear_flags(p, PROC_FLAG_STOPPED)
 
 #define PROC_VALID(p) \
   (!!(proc_flags(p) & PROC_FLAG_VALID))
@@ -153,7 +158,8 @@ static inline void proc_clear_flags(struct proc *p, uint64 flags) {
   (!!(proc_flags(p) & PROC_FLAG_KILLED))
 #define PROC_ONCHAN(p) \
   (!!(proc_flags(p) & PROC_FLAG_ONCHAN))
-
+#define PROC_STOPPED(p) \
+  (!!(proc_flags(p) & PROC_FLAG_STOPPED))
 
 static inline const char *procstate_to_str(enum procstate state) {
   switch (state) {

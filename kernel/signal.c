@@ -136,8 +136,8 @@ static void __sig_reset_act_mask(sigacts_t *sa, int signo) {
     sigdelset(&sa->sa_sigterm, signo);
     sigdelset(&sa->sa_sigignore, signo);
     // sigdelset(&sa->sa_usercatch, signo);
-    // sigdelset(&sa->sa_sigstop, signo);
-    // sigdelset(&sa->sa_sigcont, signo);
+    sigdelset(&sa->sa_sigstop, signo);
+    sigdelset(&sa->sa_sigcont, signo);
     // sigdelset(&sa->sa_sigcore, signo);
 }
 
@@ -153,10 +153,13 @@ static int __sig_setdefault(sigacts_t *sa, int signo) {
     __sig_reset_act_mask(sa, signo);
     switch (defact) {
     case SIG_ACT_IGN:
-    // @TODO: For now ignore continue and stop actions
-    case SIG_ACT_CONT:
-    case SIG_ACT_STOP:
         sigaddset(&sa->sa_sigignore, signo);
+        break;
+    case SIG_ACT_CONT:
+        sigaddset(&sa->sa_sigcont, signo);
+        break;
+    case SIG_ACT_STOP:
+        sigaddset(&sa->sa_sigstop, signo);
         break;
     case SIG_ACT_TERM:
     // @TODO: For now handle SIG_ACT_CORE and SIG_ACT_INVALID by terminating the process
@@ -181,6 +184,13 @@ sigacts_t *sigacts_init(void) {
         return NULL;
     }
     memset(sa, 0, sizeof(sigacts_t));
+    sigemptyset(&sa->sa_sigmask);
+    sigemptyset(&sa->sa_original_mask);
+    sigemptyset(&sa->sa_sigterm);
+    sigemptyset(&sa->sa_sigstop);
+    sigemptyset(&sa->sa_sigcont);
+    sigemptyset(&sa->sa_sigignore);
+    
     for (int i = 1; i <= NSIG; i++) {
         assert(__sig_setdefault(sa, i) == 0, "sigacts_init: failed to set default action for signal %d", i);
     }
@@ -250,15 +260,29 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
         list_node_push(&p->sig_pending[info->signo - 1].queue, ksi, list_entry);
     }
 
-    sigaddset(&p->sig_pending_mask, info->signo);
+    if (sigismember(&sa->sa_sigstop, info->signo) && !sigismember(&sa->sa_sigmask, info->signo)) {
+        // Pause the process
+        PROC_SET_STOPPED(p);
+    } else if (sigismember(&sa->sa_sigcont, info->signo)) {
+        // For now never set continue signals to pending state
+        p->sig_pending_mask &= ~sa->sa_sigstop;
+        // Resume the process if it was stopped
+        if (!sigismember(&sa->sa_sigmask, info->signo)) {
+            sched_lock();
+            scheduler_continue(p); // Continue the process if it was stopped
+            sched_unlock();
+        }
+    } else {
+        sigaddset(&p->sig_pending_mask, info->signo);
+    }
+
     ret = 0;
 
 done:
     // If the action is to terminate the process, set the killed flag
     if (sigismember(&sa->sa_sigterm, info->signo)) {
         PROC_SET_KILLED(p);
-    }
-    if (ret == 0 && signal_pending(p)) {
+    } else if (ret == 0 && signal_pending(p)) {
         signal_notify(p); // Notify the process if needed
     }
     proc_unlock(p);
@@ -319,27 +343,16 @@ bool signal_terminated(struct proc *p) {
     return (masked & p->sigacts->sa_sigterm) != 0;
 }
 
-// int signal_deliver(struct proc *p, ksiginfo_t *info, sigaction_t *sa) {
-//     if (p == NULL || sa == NULL || info == NULL) {
-//         return -1; // Invalid process, signal action, or info
-//     }
-//     proc_assert_holding(p);
-
-//     // If the signal action is to ignore the signal, do nothing
-//     if ((void*)sa->sa_handler == SIG_IGN) {
-//         return 0; // Signal ignored
-//     }
-
-//     if ((p->sig_stack.ss_flags & SS_ONSTACK) && 
-//         (sa->sa_flags & SA_ONSTACK)) {
-//         // Use the alternate signal stack if it's set and the action requires it
-//         p->sig_stack.ss_flags |= SS_ONSTACK;
-//     }
-
-//     p->sigacts->sa_sigmask |= sa->sa_mask; // Block the signal during delivery
-//     // @TODO: signal pending
-//     return 0;
-// }
+bool signal_test_clear_stopped(struct proc *p) {
+    if (!p) {
+        return 0;
+    }
+    proc_assert_holding(p);
+    sigset_t masked = p->sig_pending_mask & ~p->sigacts->sa_sigmask;
+    sigset_t pending_stopped = masked & p->sigacts->sa_sigstop;
+    p->sig_pending_mask &= ~pending_stopped; // Clear the stopped signals
+    return pending_stopped != 0;
+}
 
 int signal_restore(struct proc *p, ucontext_t *context) {
     if (p == NULL || context == NULL) {
@@ -593,6 +606,12 @@ void handle_signal(void) {
     proc_lock(p);
     if (signal_terminated(p)) {
         PROC_SET_KILLED(p);
+        proc_unlock(p);
+        return;
+    }
+
+    if (signal_test_clear_stopped(p)) {
+        PROC_SET_STOPPED(p);
         proc_unlock(p);
         return;
     }
