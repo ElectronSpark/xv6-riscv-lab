@@ -574,7 +574,11 @@ still_pending:
     return 0; // Success
 }
 
-static int __deliver_signal(struct proc *p, int signo, ksiginfo_t *info, sigaction_t *sa) {
+static int __deliver_signal(struct proc *p, int signo, ksiginfo_t *info, sigaction_t *sa, bool *repeat) {
+    if (repeat) {
+        *repeat = false; // Default to not repeat
+    }
+
     if (p == NULL || sa == NULL) {
         return -1;
     }
@@ -591,8 +595,9 @@ static int __deliver_signal(struct proc *p, int signo, ksiginfo_t *info, sigacti
     if (sigismember(&p->sigacts->sa_sigcont, signo)) {
         p->sig_pending_mask &= ~p->sigacts->sa_sigstop;
         if (sa->sa_handler == SIG_DFL) {
-            db_break();
-            PROC_SET_NEEDS_RESCHED(p);
+            if (repeat) {
+                *repeat = true; // Indicate that the signal should be repeated
+            }
             return 0;
         }
     }
@@ -623,38 +628,47 @@ void handle_signal(void) {
         return; // No signal actions defined
     }
 
-    proc_lock(p);
-    if (signal_terminated(p)) {
-        PROC_SET_KILLED(p);
+    for (;;) {
+        proc_lock(p);
+        if (signal_terminated(p)) {
+            PROC_SET_KILLED(p);
+            proc_unlock(p);
+            return;
+        }
+    
+        if (signal_test_clear_stopped(p)) {
+            PROC_SET_STOPPED(p);
+            proc_unlock(p);
+            return;
+        }
+    
+        int signo = __pick_signal(p);
+        assert(signo == 0 || !SIGBAD(signo), "handle_signal: __pick_signal failed");
+        if (signo == 0) {
+            proc_unlock(p);
+            return; // No pending signals to handle
+        }
+    
+        sigaction_t *sa = &p->sigacts->sa[signo];
+        ksiginfo_t *info = NULL;
+        bool repeat = false;
+    
+        assert(__dequeue_signal_update_pending(p, signo, &info) == 0,
+               "handle_signal: __dequeue_signal_update_pending failed");
+        assert(__deliver_signal(p, signo, info, sa, &repeat) == 0,
+               "handle_signal: __deliver_signal failed");
+               
         proc_unlock(p);
-        return;
-    }
+    
+        if (info) {
+            ksiginfo_free(info); // Free the ksiginfo after delivering the signal
+        }
 
-    if (signal_test_clear_stopped(p)) {
-        PROC_SET_STOPPED(p);
-        proc_unlock(p);
-        return;
-    }
-
-    int signo = __pick_signal(p);
-    assert(signo == 0 || !SIGBAD(signo), "handle_signal: __pick_signal failed");
-    if (signo == 0) {
-        proc_unlock(p);
-        return; // No pending signals to handle
-    }
-
-    sigaction_t *sa = &p->sigacts->sa[signo];
-    ksiginfo_t *info = NULL;
-
-    assert(__dequeue_signal_update_pending(p, signo, &info) == 0,
-           "handle_signal: __dequeue_signal_update_pending failed");
-    assert(__deliver_signal(p, signo, info, sa) == 0,
-           "handle_signal: __deliver_signal failed");
-           
-    proc_unlock(p);
-
-    if (info) {
-        ksiginfo_free(info); // Free the ksiginfo after delivering the signal
+        // continue signals with default action need to be skipped, so in that case
+        // we repeat the loop to check for more pending signals
+        if (!repeat) {
+            break;
+        }
     }
 }
 
