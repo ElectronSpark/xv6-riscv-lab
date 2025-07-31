@@ -328,12 +328,12 @@ iupdate(struct inode *ip)
 
   bp = bread(ip->dev, IBLOCK(ip->inum, sb));
   dip = (struct dinode*)bp->data + ip->inum%IPB;
-  dip->type = ip->type;
-  dip->major = ip->major;
-  dip->minor = ip->minor;
-  dip->nlink = ip->nlink;
-  dip->size = ip->size;
-  memmove(dip->addrs, ip->addrs, sizeof(ip->addrs));
+  dip->type = ip->dinode.type;
+  dip->major = ip->dinode.major;
+  dip->minor = ip->dinode.minor;
+  dip->nlink = ip->dinode.nlink;
+  dip->size = ip->dinode.size;
+  memmove(dip->addrs, ip->dinode.addrs, sizeof(ip->dinode.addrs));
   log_write(bp);
   brelse(bp);
 }
@@ -407,15 +407,15 @@ ilock(struct inode *ip)
   if(ip->valid == 0){
     bp = bread(ip->dev, IBLOCK(ip->inum, sb));
     dip = (struct dinode*)bp->data + ip->inum%IPB;
-    ip->type = dip->type;
-    ip->major = dip->major;
-    ip->minor = dip->minor;
-    ip->nlink = dip->nlink;
-    ip->size = dip->size;
-    memmove(ip->addrs, dip->addrs, sizeof(ip->addrs));
+    ip->dinode.type = dip->type;
+    ip->dinode.major = dip->major;
+    ip->dinode.minor = dip->minor;
+    ip->dinode.nlink = dip->nlink;
+    ip->dinode.size = dip->size;
+    memmove(ip->dinode.addrs, dip->addrs, sizeof(ip->dinode.addrs));
     brelse(bp);
     ip->valid = 1;
-    if(ip->type == 0)
+    if(ip->dinode.type == 0)
       panic("ilock: no type");
   }
 }
@@ -451,14 +451,14 @@ iput(struct inode *ip)
     if (popped != ip) {
       panic("iput: inode not found in hash list");
     }
-    if(ip->valid && ip->nlink == 0){
+    if(ip->valid && ip->dinode.nlink == 0){
       // inode has no links and no other references: truncate and free.
       
       // ip->ref == 1 means no other process can have ip locked,
       // so this acquiresleep() won't block (or deadlock).
       
       itrunc(ip);
-      ip->type = 0;
+      ip->dinode.type = 0;
       iupdate(ip);
     }
     __inode_cache_free(ip);
@@ -546,11 +546,11 @@ bmap(struct inode *ip, uint bn)
   struct buf *bp;
 
   if(bn < NDIRECT){
-    if((addr = ip->addrs[bn]) == 0){
+    if((addr = ip->dinode.addrs[bn]) == 0){
       addr = balloc(ip->dev);
       if(addr == 0)
         return 0;
-      ip->addrs[bn] = addr;
+      ip->dinode.addrs[bn] = addr;
     }
     return addr;
   }
@@ -558,13 +558,13 @@ bmap(struct inode *ip, uint bn)
 
   if(bn < NINDIRECT){
     // Load indirect block, allocating if necessary.
-    return bmap_ind(&ip->addrs[NDIRECT], ip->dev, bn);
+    return bmap_ind(&ip->dinode.addrs[NDIRECT], ip->dev, bn);
   }
   bn -= NINDIRECT;
 
   if (bn < NDINDIRECT) {
     // Load double indirect block, allocating if necessary.
-    addr = bmap_ind(&ip->addrs[NDIRECT + 1], ip->dev, bn / NINDIRECT);
+    addr = bmap_ind(&ip->dinode.addrs[NDIRECT + 1], ip->dev, bn / NINDIRECT);
     if (addr == 0) {
       return 0; // Out of disk space.
     }
@@ -606,22 +606,22 @@ itrunc(struct inode *ip)
   uint *a;
 
   for(i = 0; i < NDIRECT; i++){
-    if(ip->addrs[i]){
-      bfree(ip->dev, ip->addrs[i]);
-      ip->addrs[i] = 0;
+    if(ip->dinode.addrs[i]){
+      bfree(ip->dev, ip->dinode.addrs[i]);
+      ip->dinode.addrs[i] = 0;
     }
   }
 
-  uint nindirect = ip->addrs[NDIRECT];
-  ip->addrs[NDIRECT + 1] = 0;
-  uint ndindirect = ip->addrs[NDIRECT + 1];
-  ip->addrs[NDIRECT + 1] = 0;
+  uint nindirect = ip->dinode.addrs[NDIRECT];
+  ip->dinode.addrs[NDIRECT + 1] = 0;
+  uint ndindirect = ip->dinode.addrs[NDIRECT + 1];
+  ip->dinode.addrs[NDIRECT + 1] = 0;
 
-  ip->size = 0;
+  ip->dinode.size = 0;
   iupdate(ip);
 
   if(nindirect){
-    __itrunc_ind(&ip->addrs[NDIRECT], ip->dev);
+    __itrunc_ind(&ip->dinode.addrs[NDIRECT], ip->dev);
   }
 
   if (ndindirect) {
@@ -645,9 +645,9 @@ stati(struct inode *ip, struct stat *st)
 {
   st->dev = ip->dev;
   st->ino = ip->inum;
-  st->type = ip->type;
-  st->nlink = ip->nlink;
-  st->size = ip->size;
+  st->type = ip->dinode.type;
+  st->nlink = ip->dinode.nlink;
+  st->size = ip->dinode.size;
 }
 
 // Read data from inode.
@@ -660,10 +660,10 @@ readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
   uint tot, m;
   struct buf *bp;
 
-  if(off > ip->size || off + n < off)
+  if(off > ip->dinode.size || off + n < off)
     return 0;
-  if(off + n > ip->size)
-    n = ip->size - off;
+  if(off + n > ip->dinode.size)
+    n = ip->dinode.size - off;
 
   for(tot=0; tot<n; tot+=m, off+=m, dst+=m){
     uint addr = bmap(ip, off/BSIZE);
@@ -694,7 +694,7 @@ writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
   uint tot, m;
   struct buf *bp;
 
-  if(off > ip->size || off + n < off)
+  if(off > ip->dinode.size || off + n < off)
     return -1;
   if(off + n > MAXFILE*BSIZE)
     return -1;
@@ -713,8 +713,8 @@ writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
     brelse(bp);
   }
 
-  if(off > ip->size)
-    ip->size = off;
+  if(off > ip->dinode.size)
+    ip->dinode.size = off;
 
   // write the i-node back to disk even if the size didn't change
   // because the loop above might have called bmap() and added a new
@@ -740,10 +740,10 @@ dirlookup(struct inode *dp, char *name, uint *poff)
   uint off, inum;
   struct dirent de;
 
-  if(dp->type != T_DIR)
+  if(dp->dinode.type != T_DIR)
     panic("dirlookup not DIR");
 
-  for(off = 0; off < dp->size; off += sizeof(de)){
+  for(off = 0; off < dp->dinode.size; off += sizeof(de)){
     if(readi(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
       panic("dirlookup read");
     if(de.inum == 0)
@@ -776,7 +776,7 @@ dirlink(struct inode *dp, char *name, uint inum)
   }
 
   // Look for an empty dirent.
-  for(off = 0; off < dp->size; off += sizeof(de)){
+  for(off = 0; off < dp->dinode.size; off += sizeof(de)){
     if(readi(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
       panic("dirlink read");
     if(de.inum == 0)
@@ -846,7 +846,7 @@ namex(char *path, int nameiparent, char *name)
 
   while((path = skipelem(path, name)) != 0){
     ilock(ip);
-    if(ip->type != T_DIR){
+    if(ip->dinode.type != T_DIR){
       iunlockput(ip);
       return 0;
     }

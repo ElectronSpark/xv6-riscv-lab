@@ -4,15 +4,18 @@
 #include "compiler.h"
 #include "slab_type.h"
 #include "hlist_type.h"
+#include "fs.h"
 
 struct file {
   enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE, FD_SOCK} type;
   int ref; // reference count
-  char readable;
-  char writable;
-  struct pipe *pipe; // FD_PIPE
-  struct inode *ip;  // FD_INODE and FD_DEVICE
-  struct sock *sock; // FD_SOCK
+  char readable: 1;
+  char writable: 1;
+  union {
+    struct pipe *pipe; // FD_PIPE
+    struct inode *ip;  // FD_INODE and FD_DEVICE
+    struct sock *sock; // FD_SOCK
+  };
   uint off;          // FD_INODE
   short major;       // FD_DEVICE
 };
@@ -30,12 +33,8 @@ struct inode {
   hlist_entry_t hlist_entry; // for inode hash list
   int valid;          // inode has been read from disk?
 
-  short type;         // copy of disk inode
-  short major;
-  short minor;
-  short nlink;
-  uint size;
-  uint addrs[NDIRECT+2];
+  // cache of inode in disk
+  struct dinode dinode; // contents of disk inode
 };
 
 // map major device number to device functions.

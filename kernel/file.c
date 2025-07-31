@@ -201,7 +201,7 @@ uint64 sys_dumpfilehash(void)
     if (f->ref > 0) {
       printf("File %d: ref=%d type=%d off=%u\n", i, f->ref, f->type, f->off);
       if (f->type == FD_INODE) {
-        printf("  Inode: dev=%u inum=%u size=%u\n", f->ip->dev, f->ip->inum, f->ip->size);
+        printf("  Inode: dev=%u inum=%u size=%u\n", f->ip->dev, f->ip->inum, f->ip->dinode.size);
       } else if (f->type == FD_PIPE) {
         printf("  Pipe: readable=%d writable=%d\n", f->readable, f->writable);
       } else if (f->type == FD_SOCK) {

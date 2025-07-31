@@ -142,13 +142,13 @@ sys_link(void)
   }
 
   ilock(ip);
-  if(ip->type == T_DIR){
+  if(ip->dinode.type == T_DIR){
     iunlockput(ip);
     end_op();
     return -1;
   }
 
-  ip->nlink++;
+  ip->dinode.nlink++;
   iupdate(ip);
   iunlock(ip);
 
@@ -168,7 +168,7 @@ sys_link(void)
 
 bad:
   ilock(ip);
-  ip->nlink--;
+  ip->dinode.nlink--;
   iupdate(ip);
   iunlockput(ip);
   end_op();
@@ -182,7 +182,7 @@ isdirempty(struct inode *dp)
   int off;
   struct dirent de;
 
-  for(off=2*sizeof(de); off<dp->size; off+=sizeof(de)){
+  for(off=2*sizeof(de); off<dp->dinode.size; off+=sizeof(de)){
     if(readi(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
       panic("isdirempty: readi");
     if(de.inum != 0)
@@ -218,9 +218,9 @@ sys_unlink(void)
     goto bad;
   ilock(ip);
 
-  if(ip->nlink < 1)
+  if(ip->dinode.nlink < 1)
     panic("unlink: nlink < 1");
-  if(ip->type == T_DIR && !isdirempty(ip)){
+  if(ip->dinode.type == T_DIR && !isdirempty(ip)){
     iunlockput(ip);
     goto bad;
   }
@@ -228,13 +228,13 @@ sys_unlink(void)
   memset(&de, 0, sizeof(de));
   if(writei(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
     panic("unlink: writei");
-  if(ip->type == T_DIR){
-    dp->nlink--;
+  if(ip->dinode.type == T_DIR){
+    dp->dinode.nlink--;
     iupdate(dp);
   }
   iunlockput(dp);
 
-  ip->nlink--;
+  ip->dinode.nlink--;
   iupdate(ip);
   iunlockput(ip);
 
@@ -262,7 +262,7 @@ create(char *path, short type, short major, short minor)
   if((ip = dirlookup(dp, name, 0)) != 0){
     iunlockput(dp);
     ilock(ip);
-    if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
+    if(type == T_FILE && (ip->dinode.type == T_FILE || ip->dinode.type == T_DEVICE))
       return ip;
     if (type == T_SYMLINK)
       return ip;
@@ -276,13 +276,13 @@ create(char *path, short type, short major, short minor)
   }
 
   ilock(ip);
-  ip->major = major;
-  ip->minor = minor;
-  ip->nlink = 1;
+  ip->dinode.major = major;
+  ip->dinode.minor = minor;
+  ip->dinode.nlink = 1;
   iupdate(ip);
 
   if(type == T_DIR){  // Create . and .. entries.
-    // No ip->nlink++ for ".": avoid cyclic ref count.
+    // No ip->dinode.nlink++ for ".": avoid cyclic ref count.
     if(dirlink(ip, ".", ip->inum) < 0 || dirlink(ip, "..", dp->inum) < 0)
       goto fail;
   }
@@ -292,7 +292,7 @@ create(char *path, short type, short major, short minor)
 
   if(type == T_DIR){
     // now that success is guaranteed:
-    dp->nlink++;  // for ".."
+    dp->dinode.nlink++;  // for ".."
     iupdate(dp);
   }
 
@@ -302,7 +302,7 @@ create(char *path, short type, short major, short minor)
 
  fail:
   // something went wrong. de-allocate ip.
-  ip->nlink = 0;
+  ip->dinode.nlink = 0;
   iupdate(ip);
   iunlockput(ip);
   iunlockput(dp);
@@ -339,12 +339,12 @@ sys_open(void)
         return -1;
       }
       ilock(ip);
-      if(ip->type == T_DIR && (omode & 3) != O_RDONLY){
+      if(ip->dinode.type == T_DIR && (omode & 3) != O_RDONLY){
         iunlockput(ip);
         end_op();
         return -1;
       }
-      if (ip->type != T_SYMLINK || omode & O_NOFOLLOW) {
+      if (ip->dinode.type != T_SYMLINK || omode & O_NOFOLLOW) {
         // Not a symlink or O_NOFOLLOW is set
         break;
       }
@@ -374,7 +374,7 @@ sys_open(void)
     }
   }
 
-  if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
+  if(ip->dinode.type == T_DEVICE && (ip->dinode.major < 0 || ip->dinode.major >= NDEV)){
     iunlockput(ip);
     end_op();
     return -1;
@@ -388,9 +388,9 @@ sys_open(void)
     return -1;
   }
 
-  if(ip->type == T_DEVICE){
+  if(ip->dinode.type == T_DEVICE){
     f->type = FD_DEVICE;
-    f->major = ip->major;
+    f->major = ip->dinode.major;
   } else {
     f->type = FD_INODE;
     f->off = 0;
@@ -399,7 +399,7 @@ sys_open(void)
   f->readable = !(omode & O_WRONLY);
   f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
 
-  if((omode & O_TRUNC) && ip->type == T_FILE){
+  if((omode & O_TRUNC) && ip->dinode.type == T_FILE){
     itrunc(ip);
   }
 
@@ -458,7 +458,7 @@ sys_chdir(void)
     return -1;
   }
   ilock(ip);
-  if(ip->type != T_DIR){
+  if(ip->dinode.type != T_DIR){
     iunlockput(ip);
     end_op();
     return -1;
