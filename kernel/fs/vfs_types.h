@@ -11,6 +11,29 @@ struct vfs_inode;
 struct super_block;
 struct vfs_file;
 
+enum inode_type {
+    I_NONE = (int)0,
+    I_PIPE,             // Pipe inode
+    I_REG,              // Regular file inode
+    I_DEVICE,           // Device inode
+    I_SOCK,             // Socket inode
+    I_DIR,              // Directory inode
+    I_SYMLINK,          // Symbolic link inode
+};
+
+#ifndef __KERNEL_FILE_TYPES_H
+#define __KERNEL_FILE_TYPES_H
+enum file_type {
+    FD_NONE = I_NONE,
+    FD_PIPE = I_PIPE,
+    FD_INODE = I_REG,
+    FD_DEVICE = I_DEVICE,
+    FD_SOCK = I_SOCK,
+    FD_DIR = I_DIR,
+    FD_SYMLINK = I_SYMLINK,
+};
+#endif // __KERNEL_FILE_TYPES_H
+
 struct fs_type_ops {
     struct super_block *(*mount)(struct vfs_dentry *dentry, dev_t dev);
     void (*mount_root)(dev_t dev);
@@ -133,7 +156,7 @@ struct vfs_inode {
     list_node_t i_list_entry;       // List entry for inodes in superblock
     struct super_block *sb;         // Superblock this inode belongs to
     struct vfs_inode_ops *ops;      // Operations on the inode
-    int type;                       // Type of the inode (e.g., file, directory)
+    enum inode_type type;           // Type of the inode (e.g., file, directory)
     dev_t dev;                      // Device number
     uint64 inum;                    // Inode number
     int ref;                        // Reference count
