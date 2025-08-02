@@ -6,8 +6,19 @@
 #include "hlist_type.h"
 #include "fs.h"
 
+#ifndef __KERNEL_FILE_TYPES_H
+#define __KERNEL_FILE_TYPES_H
+ enum file_type {
+  FD_NONE = (int)0,
+  FD_PIPE,
+  FD_INODE,
+  FD_DEVICE,
+  FD_SOCK
+};
+#endif // __KERNEL_FILE_TYPES_H
+
 struct xv6_file {
-  enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE, FD_SOCK} type;
+  enum file_type type;
   int ref; // reference count
   char readable: 1;
   char writable: 1;
