@@ -22,11 +22,11 @@ struct file {
 
 #define major(dev)  ((dev) >> 16 & 0xFFFF)
 #define minor(dev)  ((dev) & 0xFFFF)
-#define	mkdev(m,n)  ((uint)((m)<<16| (n)))
+#define	mkdev(m,n)  ((dev_t)((m)<<16| (n)))
 
 // in-memory copy of an inode
 struct inode {
-  uint dev;           // Device number
+  dev_t dev;          // Device number
   uint inum;          // Inode number
   int ref;            // Reference count
   struct sleeplock lock; // protects everything below here

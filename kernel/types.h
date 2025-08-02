@@ -18,6 +18,11 @@ typedef int  int32;
 typedef long int64;
 
 typedef uint64 pde_t;
+typedef uint16 dev_t;
+
+typedef int off_t;
+typedef int64 loff_t;
+typedef int64 ssize_t;
 
 #ifndef size_t
 typedef typeof(sizeof(0)) size_t;
