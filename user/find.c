@@ -8,7 +8,7 @@ int find(char *path, char *name) {
     char buf[512], *p;
     int fd;
     int path_length; 
-    struct dirent de;
+    struct xv6_dirent de;
     struct stat st;
 
     if ((fd = open(path, O_RDONLY)) < 0) {

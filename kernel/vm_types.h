@@ -7,7 +7,7 @@
 #include "bintree_type.h"
 
 typedef struct vm vm_t;
-struct file;
+struct xv6_file;
 
 typedef struct vma {
     struct rb_node  rb_entry;   // Red-black tree node for managing VM areas
@@ -17,7 +17,7 @@ typedef struct vma {
     uint64          start;
     uint64          end;
     uint64          flags;  // Flags for the memory area (e.g., read, write, execute)
-    struct file     *file;  // File associated with this memory area, if any
+    struct xv6_file     *file;  // File associated with this memory area, if any
     uint64          pgoff;  // Offset in the file for this memory area
 } vma_t;
 

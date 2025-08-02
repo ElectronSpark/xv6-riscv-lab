@@ -639,7 +639,7 @@ void
 exit(int status)
 {
   struct proc *p = myproc();
-  struct inode *cwd = NULL;
+  struct xv6_inode *cwd = NULL;
 
   proc_lock(p);
   assert(p != proc_table.initproc, "init exiting");
@@ -647,7 +647,7 @@ exit(int status)
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){
-      struct file *f = p->ofile[fd];
+      struct xv6_file *f = p->ofile[fd];
       p->ofile[fd] = 0;
       assert((uint64)f < PHYSTOP, "exit: file pointer out of bounds, pid: %d, fd: %d(*%p), f: %p", p->pid, fd, f, &p->ofile[fd]);
       // release p->lock before fileclose because fileclose may sleep

@@ -35,7 +35,7 @@ sockinit(void)
 }
 
 int
-sockalloc(struct file **f, uint32 raddr, uint16 lport, uint16 rport)
+sockalloc(struct xv6_file **f, uint32 raddr, uint16 lport, uint16 rport)
 {
   struct sock *si, *pos;
 

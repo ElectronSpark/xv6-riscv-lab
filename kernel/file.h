@@ -6,14 +6,14 @@
 #include "hlist_type.h"
 #include "fs.h"
 
-struct file {
+struct xv6_file {
   enum { FD_NONE, FD_PIPE, FD_INODE, FD_DEVICE, FD_SOCK} type;
   int ref; // reference count
   char readable: 1;
   char writable: 1;
   union {
     struct pipe *pipe; // FD_PIPE
-    struct inode *ip;  // FD_INODE and FD_DEVICE
+    struct xv6_inode *ip;  // FD_INODE and FD_DEVICE
     struct sock *sock; // FD_SOCK
   };
   uint off;          // FD_INODE
@@ -25,7 +25,7 @@ struct file {
 #define	mkdev(m,n)  ((dev_t)((m)<<16| (n)))
 
 // in-memory copy of an inode
-struct inode {
+struct xv6_inode {
   dev_t dev;          // Device number
   uint inum;          // Inode number
   int ref;            // Reference count
@@ -34,7 +34,7 @@ struct inode {
   int valid;          // inode has been read from disk?
 
   // cache of inode in disk
-  struct dinode dinode; // contents of disk inode
+  struct xv6_dinode dinode; // contents of disk inode
 };
 
 // map major device number to device functions.

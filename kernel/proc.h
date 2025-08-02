@@ -102,8 +102,8 @@ struct proc {
 
   // both p->lock and __sched_lock must be held 
   struct context context;      // swtch() here to run process
-  struct file *ofile[NOFILE];  // Open files
-  struct inode *cwd;           // Current directory
+  struct xv6_file *ofile[NOFILE];  // Open files
+  struct xv6_inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
 };
 
