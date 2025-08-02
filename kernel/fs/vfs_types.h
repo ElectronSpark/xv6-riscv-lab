@@ -127,8 +127,8 @@ struct vfs_mount_point {
 // - idup: Increment reference count of the inode.
 // - iput: Decrement reference count of the inode, and destroy it if it reaches zero.
 // - isync: Sync inode to disk if dirty.
-// - ilock: Lock the inode for exclusive access.
-// - iunlock: Unlock the inode.
+// - ilock (Optional): Lock the inode for exclusive access.
+// - iunlock (Optional): Unlock the inode.
 // - idirity: Mark inode as dirty, indicating it has been modified.
 // - iread: Read data from the inode into a buffer.
 // - iwrite: Write data from a buffer to the inode.
@@ -225,10 +225,14 @@ struct vfs_dentry {
 };
 
 struct vfs_file {
+    hlist_entry_t hlist_entry;       // for file hash list
+    int fd;                          // Global file descriptor number
+    
     struct vfs_inode *inode;         // Inode associated with the file
     struct vfs_dentry *dentry;       // Dentry associated with the file
     loff_t offset;                   // Current file offset
     int flags;                       // File access flags (e.g., read, write)
+    int type;                        // Type of the file (corresponds to inode type)
     int ref_count;                   // Reference count for the file
 };
 
