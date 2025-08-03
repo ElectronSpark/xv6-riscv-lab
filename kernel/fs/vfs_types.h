@@ -10,6 +10,7 @@ struct vfs_dentry;
 struct vfs_inode;
 struct super_block;
 struct vfs_file;
+struct vfs_dirent;
 
 enum inode_type {
     I_NONE = (int)0,
@@ -64,6 +65,7 @@ struct statfs {
 };
 
 // Operations on the super block:
+// All functions other than lockfs and unlockfs should assume the super block is locked.
 // - ialloc: Allocate a free inode and return it. 
 //           Should return NULL if no free inodes are available.
 // - iget: Try to get an inode by number. 
@@ -124,6 +126,8 @@ struct vfs_mount_point {
 };
 
 // Operations on the inode:
+// All functions other than lockfs and unlockfs should assume the inode block is locked.
+// Need to acquire the lock of its super block if necessary.
 // - idup: Increment reference count of the inode.
 // - iput: Decrement reference count of the inode, and destroy it if it reaches zero.
 // - isync: Sync inode to disk if dirty.
@@ -134,6 +138,8 @@ struct vfs_mount_point {
 // - iwrite: Write data from a buffer to the inode.
 // - itruncate: Truncate the inode to a specified length.
 // - bmap: Get the block address for a given block number in the inode.
+// - open: Open the inode to a file descriptor.
+// - close: Close the inode as a file.
 // - d_symlink: Create a symbolic link in the inode.
 // - d_readlink: Read the target of a symbolic link from the inode.
 struct vfs_inode_ops {
@@ -147,6 +153,8 @@ struct vfs_inode_ops {
     ssize_t (*iwrite)(struct vfs_inode *inode, const void *buf, size_t size, loff_t offset);
     int (*itruncate)(struct vfs_inode *inode, loff_t length); // Truncate the inode
     int64 (*bmap)(struct vfs_inode *inode, uint64 block); // Get block address
+    int (*open)(struct vfs_inode *inode, struct vfs_file *file);
+    int (*close)(struct vfs_inode *inode, struct vfs_file *file);
     int (*d_symlink)(struct vfs_inode *inode, const char *target, size_t target_len);
     int (*d_readlink)(struct vfs_inode *inode, char *buf, size_t bufsize);
 };
@@ -175,13 +183,12 @@ struct vfs_inode {
 // - d_link: Link a dentry to an inode.
 // - d_unlink: Unlink a dentry from its parent directory.
 // - d_mknod: Create a new inode and link it to the dentry.
-// - d_create: Create a new dentry and link it to an inode.
 // - d_mkdir: Create a new directory dentry and link it to an inode.
 // - d_rmdir: Remove a directory dentry.
 // - d_rename: Rename a dentry to a new name.
 // - d_hash: Compute the hash value for a dentry based on its name.
 // - d_compare: Compare a dentry with a name to check for equality.
-// - d_sync: Sync dentry to disk.
+// - d_sync: Sync dentry and its direct children to disk.
 // - d_invalidate: Invalidate a dentry, marking it as no longer valid.
 struct vfs_dentry_ops {
     struct vfs_dentry *(*d_alloc)(struct vfs_dentry *parent, const char *name, size_t len);
@@ -189,8 +196,7 @@ struct vfs_dentry_ops {
     struct vfs_dentry *(*d_lookup)(struct vfs_dentry *dentry, const char *name, size_t len, bool create);
     int (*d_link)(struct vfs_dentry *dentry, struct vfs_inode *inode);
     int (*d_unlink)(struct vfs_dentry *dentry);
-    int (*d_mknod)(struct vfs_dentry *dentry, struct vfs_inode *inode, dev_t dev);
-    int (*d_create)(struct vfs_dentry *dentry, struct vfs_inode *inode, int type);
+    int (*d_mknod)(struct vfs_dentry *dentry, struct vfs_inode *inode, int type, dev_t dev);
     int (*d_mkdir)(struct vfs_dentry *dentry, struct vfs_inode *inode);
     int (*d_rmdir)(struct vfs_dentry *dentry);
     int (*d_rename)(struct vfs_dentry *old_dentry, struct vfs_dentry *new_dentry);
@@ -224,10 +230,16 @@ struct vfs_dentry {
     ht_hash_t hash;                 // Hash value of the name
 };
 
+struct vfs_file_ops {
+    int (*dopen)(struct vfs_file *file, struct vfs_dentry *dentry);
+    struct vfs_dentry *(*dnext)(struct vfs_file *file, struct vfs_dirent *dirent);
+};
+
 struct vfs_file {
     hlist_entry_t hlist_entry;       // for file hash list
     int fd;                          // Global file descriptor number
-    
+
+    struct vfs_file_ops *ops;        // Operations on the file
     struct vfs_inode *inode;         // Inode associated with the file
     struct vfs_dentry *dentry;       // Dentry associated with the file
     loff_t offset;                   // Current file offset
@@ -236,5 +248,11 @@ struct vfs_file {
     int ref_count;                   // Reference count for the file
 };
 
+// Used to traverse directory entries
+struct vfs_dirent {
+    struct vfs_dentry *dentry; // The current dentry position
+    struct vfs_file *file; // File associated with the dentry
+    loff_t next_off; // Offset for the next directory entry
+};
 
 #endif // __KERNEL_VFS_TYPES_H
