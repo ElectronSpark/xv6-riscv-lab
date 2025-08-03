@@ -13,8 +13,10 @@ struct fs_type *vfs_get_fs_type(uint64 f_type);
 int vfs_mount(struct vfs_dentry *dentry, dev_t dev);
 void vfs_mount_root(dev_t dev);
 int vfs_umount(struct super_block *sb);
+int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_dentry *dentry);
 
 int fcntl_flags_from_string(const char *flags);
+int vfs_namex();
 
 /***************************** General file operations *****************************/
 // The following functions partly refer to lwext4's file operations.
@@ -66,6 +68,10 @@ static inline void vfs_lockfs(struct super_block *sb) {
 static inline void vfs_unlockfs(struct super_block *sb) {
     if (sb->ops && sb->ops->unlockfs)
         sb->ops->unlockfs(sb);
+}
+
+static inline int vfs_holdingfs(struct super_block *sb) {
+    return sb->ops ? sb->ops->holdingfs(sb) : -1;
 }
 
 static inline int vfs_syncfs(struct super_block *sb) {
@@ -143,17 +149,25 @@ static inline int vfs_d_ireadlink(struct vfs_inode *inode, char *buf, size_t buf
 }
 
 // dentry operations wrappers
-static inline struct vfs_dentry *vfs_d_alloc(struct vfs_dentry *parent, const char *name, size_t len) {
-    return parent->ops ? parent->ops->d_alloc(parent, name, len) : 0;
+static inline void vfs_d_put(struct vfs_dentry *dentry) {
+    if (dentry->ops && dentry->ops->d_put)
+        dentry->ops->d_put(dentry);
 }
 
-static inline void vfs_d_free(struct vfs_dentry *dentry) {
-    if (dentry->ops && dentry->ops->d_free)
-        dentry->ops->d_free(dentry);
+static inline struct vfs_dentry *vfs_d_dup(struct vfs_dentry *dentry) {
+    return dentry->ops ? dentry->ops->d_dup(dentry) : 0;
 }
 
 static inline struct vfs_dentry *vfs_d_lookup(struct vfs_dentry *dentry, const char *name, size_t len, bool create) {
-    return dentry->ops ? dentry->ops->d_lookup(dentry, name, len, create) : 0;
+    if (dentry->mounted) {
+        if (vfs_mounted_root(dentry->mount, dentry) != 0) {
+            return NULL;
+        }
+        if (dentry == NULL) {
+            return NULL; // If dentry is NULL, we cannot look it up.
+        }
+    }
+    return dentry->ops ? dentry->ops->d_lookup(dentry, name, len, create) : NULL;
 }
 
 static inline int vfs_d_link(struct vfs_dentry *dentry, struct vfs_inode *inode) {

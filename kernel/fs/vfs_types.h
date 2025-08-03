@@ -75,6 +75,9 @@ struct statfs {
 //             after its reference count drops to zero.
 // - lockfs: Lock the filesystem for exclusive access.
 // - unlockfs: Unlock the filesystem.
+// - holdingfs: Check if the filesystem is hold by the current process.
+//              Returns 1 if locked, 0 if not.
+//              Returns -1 if error.
 // - syncfs: Sync the filesystem to disk if dirty.
 //           Returns 0 on success, -1 on failure.
 // - freezefs: Freeze the filesystem, preventing any further modifications
@@ -88,6 +91,7 @@ struct super_block_ops {
     void (*idestroy)(struct vfs_inode *inode);
     void (*lockfs)(struct super_block *sb);
     void (*unlockfs)(struct super_block *sb);
+    int (*holdingfs)(struct super_block *sb);
     int (*syncfs)(struct super_block *sb);
     int (*freezefs)(struct super_block *sb);
     int (*statfs)(struct super_block *sb, struct statfs *buf);
@@ -177,9 +181,9 @@ struct vfs_inode {
 };
 
 // Dentry operations:
-// - d_alloc: Allocate a new dentry with a given name under its parent directory.
-// - d_free: Free a dentry.
-// - d_lookup: Look up a dentry by name in the parent directory.
+// - d_lookup: Look up a dentry by name in the parent directory, and increment its reference count if found.
+// - d_put: Decrement reference count of the dentry, and free it if it reaches zero.
+// - d_dup: Increment reference count of the dentry, returning a incremented dentry.
 // - d_link: Link a dentry to an inode.
 // - d_unlink: Unlink a dentry from its parent directory.
 // - d_mknod: Create a new inode and link it to the dentry.
@@ -191,9 +195,9 @@ struct vfs_inode {
 // - d_sync: Sync dentry and its direct children to disk.
 // - d_invalidate: Invalidate a dentry, marking it as no longer valid.
 struct vfs_dentry_ops {
-    struct vfs_dentry *(*d_alloc)(struct vfs_dentry *parent, const char *name, size_t len);
-    void (*d_free)(struct vfs_dentry *dentry);
     struct vfs_dentry *(*d_lookup)(struct vfs_dentry *dentry, const char *name, size_t len, bool create);
+    void (*d_put)(struct vfs_dentry *dentry);
+    struct vfs_dentry *(*d_dup)(struct vfs_dentry *dentry);
     int (*d_link)(struct vfs_dentry *dentry, struct vfs_inode *inode);
     int (*d_unlink)(struct vfs_dentry *dentry);
     int (*d_mknod)(struct vfs_dentry *dentry, struct vfs_inode *inode, int type, dev_t dev);
@@ -216,18 +220,21 @@ struct vfs_dentry {
     union {
         struct vfs_mount_point  *mount;     // Mount point associated with this dentry
         struct vfs_inode        *inode;     // Inode associated with this dentry
+        uint64  inode_num;                  // Inode number. Need to load the inode from disk.
     };
     struct vfs_dentry_ops *ops;     // Operations on the dentry
     struct {
         uint64  valid: 1;
+        uint64  inode_valid: 1;     // Does it point to a inode in memory?
         uint64  dirty: 1;
         uint64  deleted: 1;         // Is this dentry deleted?
-        uint64  mounted: 1;         // Is this dentry a mount point?
+        uint64  mounted: 1;         // Is this dentry a mount point? Ignore inode_valid if mounted.
         uint64  root: 1;            // Is this dentry the root of the vfs?
     };
     size_t namelen;                 // Length of the name
     char name[NAME_MAX];            // Name of the dentry
     ht_hash_t hash;                 // Hash value of the name
+    int ref_count;                  // Reference count for the dentry
 };
 
 struct vfs_file_ops {

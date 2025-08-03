@@ -152,6 +152,25 @@ void vfs_mount_root(dev_t dev) {
     panic("vfs_mount_root: not implemented yet");
 }
 
+// Get the root dentry of the mounted filesystem
+// This function will be called when encountering a mount point
+int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_dentry *dentry) {
+    if (mp == NULL || dentry == NULL) {
+        return -1; // Invalid parameters
+    }
+    if (mp->sb == NULL) {
+        return -1;
+    }
+    if (!mp->sb->valid || mp->sb->frozen) {
+        return -1; // Superblock is not valid or frozen
+    }
+    if (mp->sb->root == NULL) {
+        return -1; // No root dentry for the mounted filesystem
+    }
+    *dentry = *mp->sb->root; // Copy the root dentry
+    return 0; // Success
+}
+
 // Parse flags string from fopen
 int fcntl_flags_from_string(const char *flags) {
     if (flags == NULL) {
