@@ -37,7 +37,7 @@ enum file_type {
 
 struct fs_type_ops {
     struct super_block *(*mount)(struct vfs_dentry *dentry, dev_t dev);
-    void (*mount_root)(dev_t dev);
+    struct super_block *(*mount_root)(dev_t dev);
     void (*umount)(struct super_block *sb);
 };
 
@@ -52,6 +52,7 @@ struct fs_type {
     int active_sbs;                 // Count of active superblocks for this fs_type
     struct {
         uint64 frozen: 1;           // unregistering
+        uint64 root_mounted: 1;     // mounted as root
     };
 };
 
@@ -119,7 +120,6 @@ struct super_block {
     };
     struct super_block_ops  *ops;           // Operations on the super block
     struct vfs_dentry       *root;          // mount point
-    struct sleeplock    lock;
     char                name[32];
 };
 
@@ -181,9 +181,11 @@ struct vfs_inode {
 };
 
 // Dentry operations:
-// - d_lookup: Look up a dentry by name in the parent directory, and increment its reference count if found.
-// - d_put: Decrement reference count of the dentry, and free it if it reaches zero.
-// - d_dup: Increment reference count of the dentry, returning a incremented dentry.
+// - d_lookup: Look up a dentry by name in the parent directory, 
+//             and increment its reference count if found.
+// - d_destroy: Pop the dentry from the children list of its parent, 
+//              and destroy the dentry and free its resources.
+//              Return 0 on success, -1 on failure.
 // - d_link: Link a dentry to an inode.
 // - d_unlink: Unlink a dentry from its parent directory.
 // - d_mknod: Create a new inode and link it to the dentry.
@@ -193,11 +195,18 @@ struct vfs_inode {
 // - d_hash: Compute the hash value for a dentry based on its name.
 // - d_compare: Compare a dentry with a name to check for equality.
 // - d_sync: Sync dentry and its direct children to disk.
+// - d_validate: Read the dentry from the disk.
+//               Return 0 when success. Return -1 when failed.
 // - d_invalidate: Invalidate a dentry, marking it as no longer valid.
+//                 This will be called in vfs_dentry_put when the reference count reaches zero.
+//                 VFS will try to invalidate if all the offspring dentry hit 0 ref count.
+//                 Dentry will not necessarily be marked as invalid by this function, since
+//                 the file system could be ramfs or tmpfs, which does not require
+//                 After if it is marked as invalid, it should not contain any cached children, 
+//                 and could be freed.
 struct vfs_dentry_ops {
     struct vfs_dentry *(*d_lookup)(struct vfs_dentry *dentry, const char *name, size_t len, bool create);
-    void (*d_put)(struct vfs_dentry *dentry);
-    struct vfs_dentry *(*d_dup)(struct vfs_dentry *dentry);
+    int (*d_destroy)(struct vfs_dentry *dentry); // Destroy dentry and free resources
     int (*d_link)(struct vfs_dentry *dentry, struct vfs_inode *inode);
     int (*d_unlink)(struct vfs_dentry *dentry);
     int (*d_mknod)(struct vfs_dentry *dentry, struct vfs_inode *inode, int type, dev_t dev);
@@ -207,6 +216,7 @@ struct vfs_dentry_ops {
     ht_hash_t (*d_hash)(struct vfs_dentry *dentry, const char *name, size_t len);
     int (*d_compare)(const struct vfs_dentry *dentry, const char *name, size_t len);
     void (*d_sync)(struct vfs_dentry *dentry); // Sync dentry to disk
+    int (*d_validate)(struct vfs_dentry *dentry);
     void (*d_invalidate)(struct vfs_dentry *dentry); // Invalidate dentry
 };
 
@@ -225,7 +235,6 @@ struct vfs_dentry {
     struct vfs_dentry_ops *ops;     // Operations on the dentry
     struct {
         uint64  valid: 1;
-        uint64  inode_valid: 1;     // Does it point to a inode in memory?
         uint64  dirty: 1;
         uint64  deleted: 1;         // Is this dentry deleted?
         uint64  mounted: 1;         // Is this dentry a mount point? Ignore inode_valid if mounted.

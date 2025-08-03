@@ -11,9 +11,9 @@
 #include "slab.h"
 
 spinlock_t vfs_lock;
-list_node_t vfs_fs_types;       // List of registered filesystem types
-struct dentry *vfs_root_dentry; // Root dentry for the virtual filesystem
-slab_cache_t vfs_fs_type_cache; // Cache for filesystem types
+list_node_t vfs_fs_types;               // List of registered filesystem types
+struct vfs_dentry *vfs_root_dentry;     // Root dentry for the virtual filesystem
+slab_cache_t vfs_fs_type_cache;         // Cache for filesystem types
 
 
 // Allocate a new filesystem type structure.
@@ -146,15 +146,22 @@ int vfs_umount(struct super_block *sb) {
     panic("vfs_umount: not implemented yet");
 }
 
-void vfs_mount_root(dev_t dev) {
+// Mount a device as root
+// VFS lock must be held
+void vfs_mount_root(dev_t dev, uint64 f_type) {
     __vfs_assert_holding();
-    // @TODO:
-    panic("vfs_mount_root: not implemented yet");
+    struct fs_type *type = vfs_get_fs_type(f_type);
+    assert(type != NULL, "Failed to get the FS type of the root FS!");
+    struct super_block *root_sb = type->ops->mount_root(dev);
+    assert(root_sb != NULL, "Failed to get the root FS superblock!");
+    assert(root_sb->valid, "Root FS superblock is not valid!");
+    assert(root_sb->root != NULL, "Root FS has a NULL root entry!");
+    vfs_root_dentry = root_sb->root;
 }
 
 // Get the root dentry of the mounted filesystem
 // This function will be called when encountering a mount point
-int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_dentry *dentry) {
+int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_dentry **dentry) {
     if (mp == NULL || dentry == NULL) {
         return -1; // Invalid parameters
     }
@@ -167,8 +174,94 @@ int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_dentry *dentry) {
     if (mp->sb->root == NULL) {
         return -1; // No root dentry for the mounted filesystem
     }
-    *dentry = *mp->sb->root; // Copy the root dentry
+    *dentry = mp->sb->root; // Copy the root dentry
     return 0; // Success
+}
+
+// Look up for a directory entry under a dentry of a directory.
+// It will first try to look up the cached children dentry list.
+// Will call dentry->ops->d_lookup in the following cases:
+// - Target dentry is not found in the cached children dentry list
+// - Target dentry is found, but its not valid
+// - Target dentry is found and create is true, but it's marked as deleted
+// Will return NULL in the following cases:
+// - Target dentry is not found in both the cached children dentry list
+//   and on the disk, and create is false
+// - Found a dentry marked as deleted, but create is false
+// - The dentry is linked to a symbolic link
+// - The dentry is a mount point
+// - dentry->ops->d_lookup returns NULL
+// It may return deleted, invalid, or mounted dentry.
+// The refcount of the returned dentry will increase by 1
+int vfs_dlookup(struct vfs_dentry *dentry, const char *name, 
+                size_t len, bool create, struct vfs_dentry **ret_dentry) {
+    if (dentry == NULL || name == NULL || len == 0 || ret_dentry == NULL) {
+        return -1;
+    }
+    if (!dentry->valid && vfs_d_validate(dentry) != 0) {
+        return -1;
+    }
+    if (!dentry->valid) {
+        return -1;
+    }
+    if (dentry->mounted) {
+        return -1;
+    }
+    struct vfs_dentry *pos = NULL;
+    struct vfs_dentry *tmp = NULL;
+    list_foreach_node_safe(&dentry->children, pos, tmp, sibling) {
+        if (vfs_d_compare(pos, name, len) == 0) {
+            break;
+        }
+    }
+    if (pos == NULL || pos->deleted) {
+        if (!create) {
+            return -1;
+        }
+        pos = vfs_d_lookup(dentry, name, len, create);
+        if (pos == NULL) {
+            return -1;
+        }
+    }
+    pos->ref_count++;
+    *ret_dentry = pos;
+    return 0;
+}
+
+// Decrease the reference count of a dentry and all its ancestors
+// until the root dentry of its file system.
+// Will try to free the resources is all the offspring dentry hit 0 ref count.
+// Return 0 when success, otherwise error.
+int vfs_dentry_put(struct vfs_dentry *dentry) {
+    if (dentry == NULL) {
+        return -1;
+    }
+    struct vfs_dentry *pos = dentry;
+    while (pos != NULL) {
+        struct vfs_dentry *parent = pos->parent;
+        pos->ref_count--;
+        assert(pos->ref_count >= 0, "vfs_dentry_put: ref_count is negative");
+        if (pos->ref_count == 0) {
+            vfs_d_invalidate(pos);
+        }
+        if (!pos->valid) {
+            assert(pos->ops->d_destroy(pos) == 0, "vfs_dentry_put: dentry destroy failed");
+        }
+        pos = parent;
+    }
+    return 0; // Success
+}
+
+// Get the super block of the file system of the dentry
+int vfs_dentry_sb(struct vfs_dentry *dentry, struct super_block **ret_sb) {
+    if (dentry == NULL || ret_sb == NULL) {
+        return -1;
+    }
+    if (dentry->sb) {
+        *ret_sb = dentry->sb;
+        return 0;
+    }
+    return -1;
 }
 
 // Parse flags string from fopen

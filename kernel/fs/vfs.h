@@ -11,9 +11,14 @@ void vfs_unregister_fs_type(struct fs_type *fs_type);
 struct fs_type *vfs_get_fs_type(uint64 f_type);
 
 int vfs_mount(struct vfs_dentry *dentry, dev_t dev);
-void vfs_mount_root(dev_t dev);
+void vfs_mount_root(dev_t dev, uint64 f_type);
 int vfs_umount(struct super_block *sb);
-int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_dentry *dentry);
+int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_dentry **dentry);
+
+int vfs_dlookup(struct vfs_dentry *dentry, const char *name, 
+                size_t len, bool create, struct vfs_dentry **ret_dentry);
+int vfs_dentry_put(struct vfs_dentry *dentry);
+int vfs_dentry_sb(struct vfs_dentry *dentry, struct super_block **ret_sb);
 
 int fcntl_flags_from_string(const char *flags);
 int vfs_namex();
@@ -149,24 +154,7 @@ static inline int vfs_d_ireadlink(struct vfs_inode *inode, char *buf, size_t buf
 }
 
 // dentry operations wrappers
-static inline void vfs_d_put(struct vfs_dentry *dentry) {
-    if (dentry->ops && dentry->ops->d_put)
-        dentry->ops->d_put(dentry);
-}
-
-static inline struct vfs_dentry *vfs_d_dup(struct vfs_dentry *dentry) {
-    return dentry->ops ? dentry->ops->d_dup(dentry) : 0;
-}
-
 static inline struct vfs_dentry *vfs_d_lookup(struct vfs_dentry *dentry, const char *name, size_t len, bool create) {
-    if (dentry->mounted) {
-        if (vfs_mounted_root(dentry->mount, dentry) != 0) {
-            return NULL;
-        }
-        if (dentry == NULL) {
-            return NULL; // If dentry is NULL, we cannot look it up.
-        }
-    }
     return dentry->ops ? dentry->ops->d_lookup(dentry, name, len, create) : NULL;
 }
 
@@ -205,6 +193,13 @@ static inline int vfs_d_compare(const struct vfs_dentry *dentry, const char *nam
 static inline void vfs_d_sync(struct vfs_dentry *dentry) {
     if (dentry->ops && dentry->ops->d_sync)
         dentry->ops->d_sync(dentry);
+}
+
+static inline int vfs_d_validate(struct vfs_dentry *dentry) {
+    if (dentry->ops && dentry->ops->d_invalidate) {
+        return dentry->ops->d_validate(dentry);
+    }
+    return -1;
 }
 
 static inline void vfs_d_invalidate(struct vfs_dentry *dentry) {
