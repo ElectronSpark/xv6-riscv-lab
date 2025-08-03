@@ -2,6 +2,7 @@
 #define __KERNEL_VFS_H
 
 #include "fs/vfs_types.h"
+#include "fcntl.h"
 
 void vfs_init(void);
 int vfs_register_fs_type(const char *name, uint64 f_type, struct fs_type_ops *ops);
@@ -12,6 +13,8 @@ struct fs_type *vfs_get_fs_type(uint64 f_type);
 int vfs_mount(struct vfs_dentry *dentry, dev_t dev);
 void vfs_mount_root(dev_t dev);
 int vfs_umount(struct super_block *sb);
+
+int fcntl_flags_from_string(const char *flags);
 
 /***************************** General file operations *****************************/
 // The following functions partly refer to lwext4's file operations.

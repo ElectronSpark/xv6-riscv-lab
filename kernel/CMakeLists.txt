@@ -43,6 +43,11 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/bintree.c
     ${KERNEL_DIR}/rbtree.c
 )
+
+set(KERNEL_C_FILES
+    ${KERNEL_C_FILES}
+    ${KERNEL_DIR}/fs/vfs.c
+)
     
 set(KERNEL_SCAN_OBJS
     ${KERNEL_DIR}/start.c
@@ -97,6 +102,9 @@ set(KERNEL_OBJS
 # Add kernel executable
 add_executable(${KERNEL_BINARY} ${KERNEL_OBJS})
 
+target_include_directories(${KERNEL_BINARY} PRIVATE
+    ${KERNEL_DIR}
+)
 # Use target_link_options to set linker flags so they appear in <LINK_FLAGS>
 target_link_options(${KERNEL_BINARY} PRIVATE -z max-page-size=4096 -T ${KERNEL_DIR}/kernel.ld)
 

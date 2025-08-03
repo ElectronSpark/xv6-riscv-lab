@@ -7,7 +7,6 @@
 #include "proc.h"
 #include "sleeplock.h"
 #include "fs/vfs.h"
-#include "buf.h"
 #include "hlist.h"
 #include "slab.h"
 
@@ -54,7 +53,7 @@ static void __vfs_unlock(void) {
 }
 
 static void __vfs_assert_holding(void) {
-    assert(spin_is_locked(&vfs_lock), "vfs_lock is not held");
+    assert(spin_holding(&vfs_lock), "vfs_lock is not held");
 }
 
 void vfs_init(void) {
@@ -151,4 +150,72 @@ void vfs_mount_root(dev_t dev) {
     __vfs_assert_holding();
     // @TODO:
     panic("vfs_mount_root: not implemented yet");
+}
+
+// Parse flags string from fopen
+int fcntl_flags_from_string(const char *flags) {
+    if (flags == NULL) {
+        return -1; // Invalid flags
+    }
+
+    bool a = false, r = false, w = false, plus = false;
+    for (int i = 0; i < 3 && flags[i] != '\0'; i++) {
+        switch (flags[i]) {
+            case 'r':
+                r = true;
+                break;
+            case 'w':
+                w = true;
+                break;
+            case 'a':
+                a = true;
+                break;
+            case '+':
+                plus = true;
+                break;
+            default:
+                return -1;
+        }
+    }
+    if (r && !w && !a) {
+        if (plus) {
+            return O_RDWR; // Read and write
+        } else {
+            return O_RDONLY; // Read only
+        }
+    } else if (w && !r && !a) {
+        if (plus) {
+            return O_RDWR | O_CREATE | O_TRUNC; // Read and write
+        } else {
+            return O_WRONLY | O_CREATE | O_TRUNC; // Write only
+        }
+    } else if (a && !r && !w) {
+        if (plus) {
+            return O_RDWR | O_CREATE | O_APPEND; // Read and write
+        } else {
+            return O_WRONLY | O_CREATE | O_APPEND; // Write only
+        }
+    }
+
+    return -1;
+}
+
+int vfs_fopen(struct vfs_file *file, const char *path, const char *flags) {
+    if (file == NULL || path == NULL || flags == NULL) {
+        return -1; // Invalid parameters
+    }
+    int flags_int = fcntl_flags_from_string(flags);
+    if (flags_int < 0) {
+        return -1; // Invalid flags
+    }
+    return vfs_fopen2(file, path, flags_int);
+}
+
+int vfs_fopen2(struct vfs_file *file, const char *path, int flags) {
+    if (file == NULL || path == NULL) {
+        return -1; // Invalid parameters
+    }
+
+
+    return -1; // @TODO: Implement vfs_fopen2
 }
