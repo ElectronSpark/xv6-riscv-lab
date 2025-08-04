@@ -13,15 +13,17 @@ struct fs_type *vfs_get_fs_type(uint64 f_type);
 int vfs_mount(struct vfs_dentry *dentry, dev_t dev);
 void vfs_mount_root(dev_t dev, uint64 f_type);
 int vfs_umount(struct super_block *sb);
-int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_dentry **dentry);
+int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_dentry **ret_d);
 
 int vfs_dlookup(struct vfs_dentry *dentry, const char *name, 
                 size_t len, bool create, struct vfs_dentry **ret_dentry);
-int vfs_dentry_put(struct vfs_dentry *dentry);
+int vfs_dentry_put(struct vfs_dentry *dentry, struct vfs_dentry *base, bool including_base);
 int vfs_dentry_sb(struct vfs_dentry *dentry, struct super_block **ret_sb);
 
 int fcntl_flags_from_string(const char *flags);
-int vfs_namex();
+int vfs_namex(const char *path, size_t len, struct vfs_dentry **retd, 
+              struct vfs_inode **reti, struct vfs_dentry *base, 
+              int max_follow);
 
 /***************************** General file operations *****************************/
 // The following functions partly refer to lwext4's file operations.
@@ -145,12 +147,12 @@ static inline int vfs_iclose(struct vfs_inode *inode, struct vfs_file *file) {
     return inode->ops ? inode->ops->close(inode, file) : -1;
 }
 
-static inline int vfs_d_isymlink(struct vfs_inode *inode, const char *target, size_t target_len) {
-    return inode->ops ? inode->ops->d_symlink(inode, target, target_len) : -1;
+static inline int vfs_isymlink(struct vfs_inode *inode, const char *target, size_t target_len) {
+    return inode->ops ? inode->ops->isymlink(inode, target, target_len) : -1;
 }
 
-static inline int vfs_d_ireadlink(struct vfs_inode *inode, char *buf, size_t bufsize) {
-    return inode->ops ? inode->ops->d_readlink(inode, buf, bufsize) : -1;
+static inline ssize_t vfs_ireadlink(struct vfs_inode *inode, char *buf, size_t bufsize) {
+    return inode->ops ? inode->ops->ireadlink(inode, buf, bufsize) : -1;
 }
 
 // dentry operations wrappers
@@ -199,12 +201,23 @@ static inline int vfs_d_validate(struct vfs_dentry *dentry) {
     if (dentry->ops && dentry->ops->d_invalidate) {
         return dentry->ops->d_validate(dentry);
     }
+    if (dentry->valid) {
+        return 0; // Already valid
+    }
     return -1;
 }
 
 static inline void vfs_d_invalidate(struct vfs_dentry *dentry) {
     if (dentry->ops && dentry->ops->d_invalidate)
         dentry->ops->d_invalidate(dentry);
+}
+
+static inline struct vfs_inode *vfs_d_inode(struct vfs_dentry *dentry) {
+    return dentry->ops ? dentry->ops->d_inode(dentry) : NULL;
+}
+
+static inline bool vfs_d_is_symlink(struct vfs_dentry *dentry) {
+    return dentry->ops ? dentry->ops->d_is_symlink(dentry) : false;
 }
 
 #endif // __KERNEL_VFS_H

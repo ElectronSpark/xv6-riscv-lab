@@ -160,10 +160,19 @@ void vfs_mount_root(dev_t dev, uint64 f_type) {
 }
 
 // Get the root dentry of the mounted filesystem
+// Default mount point is that of the root filesystem.
 // This function will be called when encountering a mount point
-int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_dentry **dentry) {
-    if (mp == NULL || dentry == NULL) {
+// The refcount of the returned dentry will increase by 1
+int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_dentry **ret_dentry) {
+    if (ret_dentry == NULL) {
         return -1; // Invalid parameters
+    }
+    if (mp == NULL) {
+        if (vfs_root_dentry != NULL) {
+            *ret_dentry = vfs_root_dentry; // Use the global root dentry
+            return 0; // Success
+        }
+        return -1; // No root dentry available
     }
     if (mp->sb == NULL) {
         return -1;
@@ -174,7 +183,8 @@ int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_dentry **dentry) {
     if (mp->sb->root == NULL) {
         return -1; // No root dentry for the mounted filesystem
     }
-    *dentry = mp->sb->root; // Copy the root dentry
+    *ret_dentry = mp->sb->root; // Copy the root dentry
+    (*ret_dentry)->ref_count++; // Increase the refcount
     return 0; // Success
 }
 
@@ -182,7 +192,6 @@ int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_dentry **dentry) {
 // It will first try to look up the cached children dentry list.
 // Will call dentry->ops->d_lookup in the following cases:
 // - Target dentry is not found in the cached children dentry list
-// - Target dentry is found, but its not valid
 // - Target dentry is found and create is true, but it's marked as deleted
 // Will return NULL in the following cases:
 // - Target dentry is not found in both the cached children dentry list
@@ -198,7 +207,7 @@ int vfs_dlookup(struct vfs_dentry *dentry, const char *name,
     if (dentry == NULL || name == NULL || len == 0 || ret_dentry == NULL) {
         return -1;
     }
-    if (!dentry->valid && vfs_d_validate(dentry) != 0) {
+    if (vfs_d_validate(dentry) != 0) {
         return -1;
     }
     if (!dentry->valid) {
@@ -228,16 +237,25 @@ int vfs_dlookup(struct vfs_dentry *dentry, const char *name,
     return 0;
 }
 
-// Decrease the reference count of a dentry and all its ancestors
+// Decrease the reference count of a dentry and all its ancestors until the given base dentry.
 // until the root dentry of its file system.
 // Will try to free the resources is all the offspring dentry hit 0 ref count.
 // Return 0 when success, otherwise error.
-int vfs_dentry_put(struct vfs_dentry *dentry) {
+int vfs_dentry_put(struct vfs_dentry *dentry, struct vfs_dentry *base, bool including_base) {
     if (dentry == NULL) {
         return -1;
     }
+    if (base == NULL) {
+        // Default base is the root dentry of the current file system
+        base = dentry->root;
+        assert(base != NULL, "vfs_dentry_put: root dentry is NULL");
+        if (base == dentry) {
+            // root dentry is not allowed to be put
+            return -1;
+        }
+    }
     struct vfs_dentry *pos = dentry;
-    while (pos != NULL) {
+    while (1) {
         struct vfs_dentry *parent = pos->parent;
         pos->ref_count--;
         assert(pos->ref_count >= 0, "vfs_dentry_put: ref_count is negative");
@@ -246,6 +264,13 @@ int vfs_dentry_put(struct vfs_dentry *dentry) {
         }
         if (!pos->valid) {
             assert(pos->ops->d_destroy(pos) == 0, "vfs_dentry_put: dentry destroy failed");
+        }
+        if (!including_base && parent == base) {
+            // If we are not including the base dentry, stop here
+            break;
+        } else if (pos == base) {
+            // If we reach the base dentry, stop here
+            break;
         }
         pos = parent;
     }
@@ -297,15 +322,15 @@ int fcntl_flags_from_string(const char *flags) {
         }
     } else if (w && !r && !a) {
         if (plus) {
-            return O_RDWR | O_CREATE | O_TRUNC; // Read and write
+            return O_RDWR | O_CREAT | O_TRUNC; // Read and write
         } else {
-            return O_WRONLY | O_CREATE | O_TRUNC; // Write only
+            return O_WRONLY | O_CREAT | O_TRUNC; // Write only
         }
     } else if (a && !r && !w) {
         if (plus) {
-            return O_RDWR | O_CREATE | O_APPEND; // Read and write
+            return O_RDWR | O_CREAT | O_APPEND; // Read and write
         } else {
-            return O_WRONLY | O_CREATE | O_APPEND; // Write only
+            return O_WRONLY | O_CREAT | O_APPEND; // Write only
         }
     }
 
@@ -328,6 +353,141 @@ int vfs_fopen2(struct vfs_file *file, const char *path, int flags) {
         return -1; // Invalid parameters
     }
 
+    struct vfs_inode *inode = NULL;
+    if (vfs_namex(path, strlen(path), NULL, &inode, NULL, 0) != 0) {
+        return -1; // Failed to resolve the path
+    }
+
+    assert(inode->sb != NULL, "vfs_fopen2: inode's superblock is NULL");
+
 
     return -1; // @TODO: Implement vfs_fopen2
+}
+
+// Find the position of the first '/' or the end of the string in the path.
+static int __pathname_get_toplayer(const char *path, size_t len) {
+    if (path == NULL || len == 0) {
+        return -1;
+    }
+    if (path[0] == '/') {
+        return 0; // Absolute path, top layer is the root
+    }
+    for (size_t i = 0; i < len; i++) {
+        if (path[i] == '/' || path[i] == '\0') {
+            return i; // Found the first '/' or end of string
+        }
+    }
+    return len; // No '/' found, the whole path is a single layer
+}
+
+int vfs_namex(const char *path, size_t len, struct vfs_dentry **retd, 
+              struct vfs_inode **reti, struct vfs_dentry *base, 
+              int max_follow)
+{
+    if (path == NULL || len == 0) {
+        return -1; // Invalid parameters
+    }
+    if (retd == NULL && reti == NULL) {
+        return -1; // Invalid parameters
+    }
+
+    const char *to_lookup = path;
+    ssize_t to_lookup_len = len;
+    struct vfs_dentry *original_base = base;
+    struct vfs_dentry *top_dentry = base;
+    if (to_lookup[0] == '/') {
+        // Omit base dentry if the path is absolute
+        if (vfs_mounted_root(NULL, &top_dentry) != 0) {
+            return -1; // Failed to get the root dentry
+        }
+        base = top_dentry; // Use the root dentry as base
+        // Omit the leading '/' from the lookup
+        to_lookup_len--;
+        to_lookup++;
+    } else {
+        if (base == NULL) {
+            top_dentry = myproc()->_cwd;
+            base = top_dentry; // Use current working directory as base
+        } else {
+            top_dentry = base;
+        }
+        if (vfs_d_validate(top_dentry) != 0) {
+            return -1; // Invalid top dentry
+        }
+        if (top_dentry->mounted) {
+            // To avoid invalidating a mount point here, we will not follow the mount point.
+            return -1;
+        }
+    }
+
+    while (to_lookup_len > 0) {
+        ssize_t top_len = __pathname_get_toplayer(path, len);
+        struct vfs_dentry *next_dentry = NULL;
+        if (top_len < 0) {
+            return -1; // Invalid path
+        } else if (top_len == 0) {
+            // skip extra '/'
+            to_lookup += 1;
+            to_lookup_len -= 1;
+            continue;
+        }
+        if (vfs_dlookup(top_dentry, to_lookup, top_len, false, &next_dentry) != 0) {
+            if (top_dentry->mounted) {
+                if (vfs_mounted_root(top_dentry->mount, &next_dentry) != 0) {
+                    vfs_dentry_put(top_dentry, base, original_base == NULL);
+                    return -1; // Failed to get the root dentry
+                } else {
+                    vfs_dentry_put(top_dentry, base, original_base == NULL);
+                    original_base = NULL;
+                    base = next_dentry; // Use the root dentry of the mounted filesystem
+                    top_dentry = next_dentry; // Update top dentry to the root of the mounted filesystem
+                    continue; // Continue with the next layer
+                }
+            } else if (vfs_d_is_symlink(top_dentry)) {
+                if (max_follow <= 0) {
+                    vfs_dentry_put(top_dentry, base, original_base == NULL);
+                    return -1; // Too many symlinks
+                }
+                struct vfs_inode *inode = vfs_d_inode(top_dentry);
+                if (inode == NULL) {
+                    vfs_dentry_put(top_dentry, base, original_base == NULL);
+                    return -1; // Failed to get the inode
+                }
+                assert(inode->type == I_SYMLINK, "vfs_namex: symlink dentry is not a symlink inode");
+                char *symlink_target = kmm_alloc(NAME_MAX + 1);
+                if (symlink_target == NULL) {
+                    vfs_dentry_put(top_dentry, base, original_base == NULL);
+                    return -1; // Memory allocation failed
+                }
+                int ret = vfs_ireadlink(inode, symlink_target, NAME_MAX + 1);
+                vfs_dentry_put(top_dentry, base, original_base == NULL);
+                if (ret != 0) {
+                    kmm_free(symlink_target);
+                    return -1; // Failed to read symlink
+                }
+                // Follow the symlink
+                to_lookup = symlink_target;
+                to_lookup_len = strlen(symlink_target);
+                ret = vfs_namex(to_lookup, to_lookup_len, retd, reti, NULL, max_follow - 1);
+                kmm_free(symlink_target);
+                return ret; // Return the result of following the symlink
+            }
+        }
+
+        top_dentry = next_dentry;
+        to_lookup += top_len + 1;
+        to_lookup_len -= top_len + 1;
+    }
+
+    if (reti != NULL) {
+        *reti = vfs_d_inode(top_dentry);
+    }
+    if (retd != NULL) {
+        *retd = top_dentry;
+    } else {
+        // If retd is NULL, we need to put the dentry to avoid memory leak
+        vfs_dentry_put(top_dentry, base, original_base == NULL);
+    }
+
+    return -1; // @TODO: Implement vfs_namex
 }

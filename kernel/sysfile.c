@@ -325,7 +325,7 @@ sys_open(void)
 
   begin_op();
 
-  if(omode & O_CREATE){
+  if(omode & O_CREAT){
     ip = create(path, T_FILE, 0, 0);
     if(ip == 0){
       end_op();

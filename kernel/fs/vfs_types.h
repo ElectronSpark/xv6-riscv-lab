@@ -144,8 +144,8 @@ struct vfs_mount_point {
 // - bmap: Get the block address for a given block number in the inode.
 // - open: Open the inode to a file descriptor.
 // - close: Close the inode as a file.
-// - d_symlink: Create a symbolic link in the inode.
-// - d_readlink: Read the target of a symbolic link from the inode.
+// - isymlink: Create a symbolic link in the inode.
+// - ireadlink: Read the target of a symbolic link from the inode.
 struct vfs_inode_ops {
     struct vfs_inode *(*idup)(struct vfs_inode *inode); // Increment reference count
     void (*iput)(struct vfs_inode *inode);  // Decrement reference count
@@ -159,8 +159,8 @@ struct vfs_inode_ops {
     int64 (*bmap)(struct vfs_inode *inode, uint64 block); // Get block address
     int (*open)(struct vfs_inode *inode, struct vfs_file *file);
     int (*close)(struct vfs_inode *inode, struct vfs_file *file);
-    int (*d_symlink)(struct vfs_inode *inode, const char *target, size_t target_len);
-    int (*d_readlink)(struct vfs_inode *inode, char *buf, size_t bufsize);
+    int (*isymlink)(struct vfs_inode *inode, const char *target, size_t target_len);
+    ssize_t (*ireadlink)(struct vfs_inode *inode, char *buf, size_t bufsize);
 };
 
 struct vfs_inode {
@@ -182,7 +182,10 @@ struct vfs_inode {
 
 // Dentry operations:
 // - d_lookup: Look up a dentry by name in the parent directory, 
-//             and increment its reference count if found.
+//             will increase the reference count by 1 if found a valid dentry.
+//             If create is true, it will attempt to create a new dentry if not found.
+//             The dentry is returned is not guaranteed to be valid,
+//             '..' and '.' needs to be treayed specially.
 // - d_destroy: Pop the dentry from the children list of its parent, 
 //              and destroy the dentry and free its resources.
 //              Return 0 on success, -1 on failure.
@@ -196,6 +199,7 @@ struct vfs_inode {
 // - d_compare: Compare a dentry with a name to check for equality.
 // - d_sync: Sync dentry and its direct children to disk.
 // - d_validate: Read the dentry from the disk.
+//               and it was previously invalid.
 //               Return 0 when success. Return -1 when failed.
 // - d_invalidate: Invalidate a dentry, marking it as no longer valid.
 //                 This will be called in vfs_dentry_put when the reference count reaches zero.
@@ -204,6 +208,14 @@ struct vfs_inode {
 //                 the file system could be ramfs or tmpfs, which does not require
 //                 After if it is marked as invalid, it should not contain any cached children, 
 //                 and could be freed.
+// - d_inode: Get the inode associated with the dentry.
+//            It will try tp validate the dentry and load the inode from disk if necessary.
+//            Return NULL if failed to validate the dentry or load the inode.
+//            Return NULL if the dentry is a mount point.
+// - d_is_symlink: Check if the dentry is a symbolic link.
+//                 Return true if it is a symlink, false otherwise.
+//                 It will try to validate the dentry and load the inode from disk if necessary.
+//                 Return false if the dentry is a mount point.
 struct vfs_dentry_ops {
     struct vfs_dentry *(*d_lookup)(struct vfs_dentry *dentry, const char *name, size_t len, bool create);
     int (*d_destroy)(struct vfs_dentry *dentry); // Destroy dentry and free resources
@@ -218,6 +230,8 @@ struct vfs_dentry_ops {
     void (*d_sync)(struct vfs_dentry *dentry); // Sync dentry to disk
     int (*d_validate)(struct vfs_dentry *dentry);
     void (*d_invalidate)(struct vfs_dentry *dentry); // Invalidate dentry
+    struct vfs_inode *(*d_inode)(struct vfs_dentry *dentry); // Get inode from dentry
+    bool (*d_is_symlink)(struct vfs_dentry *dentry); // Check if dentry is a symlink
 };
 
 #define NAME_MAX 255 // Maximum length of a filename
@@ -226,6 +240,7 @@ struct vfs_dentry {
     list_node_t sibling;            // List of all dentries in the same directory
     list_node_t children;           // List of child dentries
     struct vfs_dentry *parent;      // Parent dentry
+    struct vfs_dentry *root;        // Root dentry of the file system
     struct super_block *sb;         // Superblock this dentry belongs to
     union {
         struct vfs_mount_point  *mount;     // Mount point associated with this dentry
@@ -235,10 +250,10 @@ struct vfs_dentry {
     struct vfs_dentry_ops *ops;     // Operations on the dentry
     struct {
         uint64  valid: 1;
+        uint64  inode_cached: 1;    // Is the inode cached in memory?
         uint64  dirty: 1;
         uint64  deleted: 1;         // Is this dentry deleted?
         uint64  mounted: 1;         // Is this dentry a mount point? Ignore inode_valid if mounted.
-        uint64  root: 1;            // Is this dentry the root of the vfs?
     };
     size_t namelen;                 // Length of the name
     char name[NAME_MAX];            // Name of the dentry
@@ -257,7 +272,6 @@ struct vfs_file {
 
     struct vfs_file_ops *ops;        // Operations on the file
     struct vfs_inode *inode;         // Inode associated with the file
-    struct vfs_dentry *dentry;       // Dentry associated with the file
     loff_t offset;                   // Current file offset
     int flags;                       // File access flags (e.g., read, write)
     int type;                        // Type of the file (corresponds to inode type)
@@ -267,7 +281,7 @@ struct vfs_file {
 // Used to traverse directory entries
 struct vfs_dirent {
     struct vfs_dentry *dentry; // The current dentry position
-    struct vfs_file *file; // File associated with the dentry
+    struct vfs_file *file; // File of the parent dentry
     loff_t next_off; // Offset for the next directory entry
 };
 
