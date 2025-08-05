@@ -23,6 +23,7 @@ int vfs_namex(const char *path, size_t len, struct vfs_inode **reti,
 
 /***************************** General file operations *****************************/
 // The following functions partly refer to lwext4's file operations.
+int vfs_isopen(struct vfs_file *file);
 int vfs_fopen(struct vfs_file *file, const char *path, const char *flags);
 int vfs_fopen2(struct vfs_file *file, const char *path, int flags);
 int vfs_fclose(struct vfs_file *file);

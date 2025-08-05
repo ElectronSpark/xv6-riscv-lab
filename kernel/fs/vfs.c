@@ -275,6 +275,14 @@ int fcntl_flags_from_string(const char *flags) {
     return -1;
 }
 
+int vfs_isopen(struct vfs_file *file) {
+    if (file == NULL) {
+        return -1; // File is not open
+    }
+
+    return file->ref_count > 0;
+}
+
 int vfs_fopen(struct vfs_file *file, const char *path, const char *flags) {
     if (file == NULL || path == NULL || flags == NULL) {
         return -1; // Invalid parameters
@@ -297,10 +305,28 @@ int vfs_fopen2(struct vfs_file *file, const char *path, int flags) {
         return -1; // Failed to resolve the path
     }
 
-    assert(inode->sb != NULL, "vfs_fopen2: inode's superblock is NULL");
+    if (inode->type == I_DIR) {
+        if (flags != O_RDONLY) {
+            vfs_iput(inode);
+            vfs_iunlock(inode);
+            return -1; // Cannot open a directory with write or append flags
+        }
+    } else if (inode->type == I_SYMLINK) {
+        // @TODO: symlink support
+        vfs_iput(inode);
+        vfs_iunlock(inode);
+        return -1;
+    } else if (inode->type != I_PIPE && inode->type != I_DEVICE && 
+               inode->type != I_SOCK && inode->type != I_REG) {
+        vfs_iput(inode);
+        vfs_iunlock(inode);
+        return -1; // Unsupported inode type
+    }
 
+    // @TODO:
 
-    return -1; // @TODO: Implement vfs_fopen2
+    vfs_iunlock(inode);
+    return -1; // Success
 }
 
 // Find the position of the first '/' or the end of the string in the path.
