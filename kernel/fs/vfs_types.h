@@ -6,11 +6,13 @@
 #include "sleeplock.h"
 #include "hlist_type.h"
 
-struct vfs_dentry;
+#define NAME_MAX 255 // Maximum length of a filename
+
 struct vfs_inode;
 struct super_block;
 struct vfs_file;
 struct vfs_dirent;
+struct vfs_mount_point;
 
 enum inode_type {
     I_NONE = (int)0,
@@ -36,7 +38,7 @@ enum file_type {
 #endif // __KERNEL_FILE_TYPES_H
 
 struct fs_type_ops {
-    struct super_block *(*mount)(struct vfs_dentry *dentry, dev_t dev);
+    struct super_block *(*mount)(struct vfs_inode *inode, dev_t dev);
     struct super_block *(*mount_root)(dev_t dev);
     void (*umount)(struct super_block *sb);
 };
@@ -69,9 +71,8 @@ struct statfs {
 // All functions other than lockfs and unlockfs should assume the super block is locked.
 // - ialloc: Allocate a free inode and return it. 
 //           Should return NULL if no free inodes are available.
-// - iget: Try to get an inode by number. 
-//         The returned inode is not locked, also is not necessarily.
-//         Will not increase its reference count.
+// - iget: Try to get an inode by number.
+//         The returned inode is locked, and the ref count will increase by one.
 // - idestroy: Destroy the inode and releasing its resources
 //             after its reference count drops to zero.
 // - lockfs: Lock the filesystem for exclusive access.
@@ -100,8 +101,6 @@ struct super_block_ops {
 
 struct super_block {
     list_node_t s_list_entry;   // List entry for superblock list
-    list_node_t inode_list;     // List of active inodes in this superblock
-    list_node_t dentry_list;    // List of active dentries in this superblock
     list_node_t mount_list;     // List of mount points in this file system
     hlist_t inode_hash;         // Inode hash table for this superblock
     struct fs_type *fs_type;    // Filesystem type
@@ -113,20 +112,22 @@ struct super_block {
     uint64      free_inodes;    // Free inodes count
     uint64      max_bytes;      // Maximum file size in Bytes
     void        *private_data;  // Private data for filesystem
+    int64       ref;            // Reference count. Changes with iput and idup.
     struct {
         uint64  valid: 1;
         uint64  dirty: 1;
         uint64  frozen: 1;
     };
     struct super_block_ops  *ops;           // Operations on the super block
-    struct vfs_dentry       *root;          // mount point
-    char                name[32];
+    struct vfs_inode        *root;          // mount point
+    struct vfs_inode        *mount_point;   // Mount point for this superblock
+    char                    name[32];
 };
 
 struct vfs_mount_point {
-    list_node_t mount_list_entry; // List entry for mount points in superblock
-    struct vfs_dentry *dentry;    // Dentry for the mount point
-    struct super_block *sb;       // Superblock for the mounted filesystem
+    list_node_t mount_list_entry;       // List entry for mount points in superblock
+    struct vfs_inode *mount_point;      // Inode for the mount point
+    struct super_block *sb;             // Superblock for the mounted filesystem
 };
 
 // Operations on the inode:
@@ -134,10 +135,15 @@ struct vfs_mount_point {
 // Need to acquire the lock of its super block if necessary.
 // - idup: Increment reference count of the inode.
 // - iput: Decrement reference count of the inode, and destroy it if it reaches zero.
+//         iput will not sync the inode to disk.
+//         The inode needs to be locked before calling iput.
 // - isync: Sync inode to disk if dirty.
 // - ilock (Optional): Lock the inode for exclusive access.
 // - iunlock (Optional): Unlock the inode.
+// - iholding: Check if the inode is locked by the current process.
 // - idirity: Mark inode as dirty, indicating it has been modified.
+// - validate: Validate the inode, checking its type and other properties.
+//             Return 0 on success, -1 on failure.
 // - iread: Read data from the inode into a buffer.
 // - iwrite: Write data from a buffer to the inode.
 // - itruncate: Truncate the inode to a specified length.
@@ -146,13 +152,24 @@ struct vfs_mount_point {
 // - close: Close the inode as a file.
 // - isymlink: Create a symbolic link in the inode.
 // - ireadlink: Read the target of a symbolic link from the inode.
+// - d_lookup: Look up a inode by name in the parent directory.
+//             The ref count of the inode will be incremented, and the inode will be locked.
+// - d_link: Link a inode to an inode.
+// - d_unlink: Unlink a inode from its parent directory.
+// - d_mknod: Initlialize a new inode.
+// - d_mkdir: Create a new inode a new directory.
+// - d_rmdir: Cleanup an empty directory and make it ready for deletion.
+// - d_mount: Preparation before mounting a filesystem on this inode.
+// - d_umount: Cleanup after unmounting a filesystem from this inode.
 struct vfs_inode_ops {
     struct vfs_inode *(*idup)(struct vfs_inode *inode); // Increment reference count
     void (*iput)(struct vfs_inode *inode);  // Decrement reference count
     void (*isync)(struct vfs_inode *inode); // Sync inode to disk
     void (*ilock)(struct vfs_inode *inode); // Lock the inode
     void (*iunlock)(struct vfs_inode *inode); // Unlock the inode
+    bool (*iholding)(struct vfs_inode *inode); // Check if inode is locked
     void (*idirty)(struct vfs_inode *inode);    // Mark inode as dirty
+    int (*validate)(struct vfs_inode *inode); // validate the inode
     ssize_t (*iread)(struct vfs_inode *inode, void *buf, size_t size, loff_t offset);
     ssize_t (*iwrite)(struct vfs_inode *inode, const void *buf, size_t size, loff_t offset);
     int (*itruncate)(struct vfs_inode *inode, loff_t length); // Truncate the inode
@@ -161,6 +178,14 @@ struct vfs_inode_ops {
     int (*close)(struct vfs_inode *inode, struct vfs_file *file);
     int (*isymlink)(struct vfs_inode *inode, const char *target, size_t target_len);
     ssize_t (*ireadlink)(struct vfs_inode *inode, char *buf, size_t bufsize);
+    struct vfs_inode *(*d_lookup)(struct vfs_inode *inode, const char *name, size_t len);
+    int (*d_link)(struct vfs_inode *base, const char *name, size_t namelen, struct vfs_inode *inode);
+    int (*d_unlink)(struct vfs_inode *base, const char *name, size_t namelen);
+    int (*d_mknod)(struct vfs_inode *inode, int type, dev_t dev);
+    int (*d_mkdir)(struct vfs_inode *inode);
+    int (*d_rmdir)(struct vfs_inode *inode);
+    int (*d_mount)(struct vfs_inode *inode, struct super_block *sb);
+    int (*d_umount)(struct vfs_inode *inode);
 };
 
 struct vfs_inode {
@@ -178,92 +203,7 @@ struct vfs_inode {
         uint64 valid: 1;            // inode has been read from disk?
         uint64 dirty: 1;            // inode has been modified
     };
-};
-
-// Dentry operations:
-// - d_lookup: Look up a dentry by name in the parent directory, 
-//             will increase the reference count by 1 if found a valid dentry.
-//             If create is true, it will attempt to create a new dentry if not found.
-//             The dentry is returned is not guaranteed to be valid,
-//             '..' and '.' needs to be treayed specially.
-// - d_destroy: Pop the dentry from the children list of its parent, 
-//              and destroy the dentry and free its resources.
-//              Return 0 on success, -1 on failure.
-// - d_link: Link a dentry to an inode.
-// - d_unlink: Unlink a dentry from its parent directory.
-// - d_mknod: Create a new inode and link it to the dentry.
-// - d_mkdir: Create a new directory dentry and link it to an inode.
-// - d_rmdir: Remove a directory dentry.
-// - d_rename: Rename a dentry to a new name.
-// - d_hash: Compute the hash value for a dentry based on its name.
-// - d_compare: Compare a dentry with a name to check for equality.
-// - d_sync: Sync dentry and its direct children to disk.
-// - d_validate: Read the dentry from the disk.
-//               and it was previously invalid.
-//               Return 0 when success. Return -1 when failed.
-// - d_invalidate: Invalidate a dentry, marking it as no longer valid.
-//                 This will be called in vfs_dentry_put when the reference count reaches zero.
-//                 VFS will try to invalidate if all the offspring dentry hit 0 ref count.
-//                 Dentry will not necessarily be marked as invalid by this function, since
-//                 the file system could be ramfs or tmpfs, which does not require
-//                 After if it is marked as invalid, it should not contain any cached children, 
-//                 and could be freed.
-// - d_inode: Get the inode associated with the dentry.
-//            It will try tp validate the dentry and load the inode from disk if necessary.
-//            Return NULL if failed to validate the dentry or load the inode.
-//            Return NULL if the dentry is a mount point.
-// - d_is_symlink: Check if the dentry is a symbolic link.
-//                 Return true if it is a symlink, false otherwise.
-//                 It will try to validate the dentry and load the inode from disk if necessary.
-//                 Return false if the dentry is a mount point.
-struct vfs_dentry_ops {
-    struct vfs_dentry *(*d_lookup)(struct vfs_dentry *dentry, const char *name, size_t len, bool create);
-    int (*d_destroy)(struct vfs_dentry *dentry); // Destroy dentry and free resources
-    int (*d_link)(struct vfs_dentry *dentry, struct vfs_inode *inode);
-    int (*d_unlink)(struct vfs_dentry *dentry);
-    int (*d_mknod)(struct vfs_dentry *dentry, struct vfs_inode *inode, int type, dev_t dev);
-    int (*d_mkdir)(struct vfs_dentry *dentry, struct vfs_inode *inode);
-    int (*d_rmdir)(struct vfs_dentry *dentry);
-    int (*d_rename)(struct vfs_dentry *old_dentry, struct vfs_dentry *new_dentry);
-    ht_hash_t (*d_hash)(struct vfs_dentry *dentry, const char *name, size_t len);
-    int (*d_compare)(const struct vfs_dentry *dentry, const char *name, size_t len);
-    void (*d_sync)(struct vfs_dentry *dentry); // Sync dentry to disk
-    int (*d_validate)(struct vfs_dentry *dentry);
-    void (*d_invalidate)(struct vfs_dentry *dentry); // Invalidate dentry
-    struct vfs_inode *(*d_inode)(struct vfs_dentry *dentry); // Get inode from dentry
-    bool (*d_is_symlink)(struct vfs_dentry *dentry); // Check if dentry is a symlink
-};
-
-#define NAME_MAX 255 // Maximum length of a filename
-
-struct vfs_dentry {
-    list_node_t sibling;            // List of all dentries in the same directory
-    list_node_t children;           // List of child dentries
-    struct vfs_dentry *parent;      // Parent dentry
-    struct vfs_dentry *root;        // Root dentry of the file system
-    struct super_block *sb;         // Superblock this dentry belongs to
-    union {
-        struct vfs_mount_point  *mount;     // Mount point associated with this dentry
-        struct vfs_inode        *inode;     // Inode associated with this dentry
-        uint64  inode_num;                  // Inode number. Need to load the inode from disk.
-    };
-    struct vfs_dentry_ops *ops;     // Operations on the dentry
-    struct {
-        uint64  valid: 1;
-        uint64  inode_cached: 1;    // Is the inode cached in memory?
-        uint64  dirty: 1;
-        uint64  deleted: 1;         // Is this dentry deleted?
-        uint64  mounted: 1;         // Is this dentry a mount point? Ignore inode_valid if mounted.
-    };
-    size_t namelen;                 // Length of the name
-    char name[NAME_MAX];            // Name of the dentry
-    ht_hash_t hash;                 // Hash value of the name
-    int ref_count;                  // Reference count for the dentry
-};
-
-struct vfs_file_ops {
-    int (*dopen)(struct vfs_file *file, struct vfs_dentry *dentry);
-    struct vfs_dentry *(*dnext)(struct vfs_file *file, struct vfs_dirent *dirent);
+    struct vfs_mount_point *mp;     // Mount point for this inode, if any
 };
 
 struct vfs_file {
@@ -280,9 +220,11 @@ struct vfs_file {
 
 // Used to traverse directory entries
 struct vfs_dirent {
-    struct vfs_dentry *dentry; // The current dentry position
-    struct vfs_file *file; // File of the parent dentry
-    loff_t next_off; // Offset for the next directory entry
+    char name[NAME_MAX + 1]; // Name of the directory entry
+    uint64 inum; // Inode number of the entry
+    struct vfs_inode *inode; // The inode of the current directory
+    loff_t offset; // Offset in the directory for the current entry
+    ssize_t size; // Size of the current entry in bytes
 };
 
 #endif // __KERNEL_VFS_TYPES_H

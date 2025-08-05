@@ -12,9 +12,15 @@
 
 spinlock_t vfs_lock;
 list_node_t vfs_fs_types;               // List of registered filesystem types
-struct vfs_dentry *vfs_root_dentry;     // Root dentry for the virtual filesystem
+struct vfs_inode *vfs_root_inode;       // Root inode for the virtual filesystem
 slab_cache_t vfs_fs_type_cache;         // Cache for filesystem types
 
+// locking order:
+// 1. fd lock
+// 2. vfs_lock
+// 3. mount point inode lock
+// 4. superblock lock
+// 5. inode lock
 
 // Allocate a new filesystem type structure.
 static struct fs_type *__fs_type_alloc(void) {
@@ -60,7 +66,7 @@ void vfs_init(void) {
     spin_init(&vfs_lock, "vfs_lock");
     list_entry_init(&vfs_fs_types);
     slab_cache_init(&vfs_fs_type_cache, "fs_type_cache", sizeof(struct fs_type), SLAB_FLAG_STATIC);
-    vfs_root_dentry = NULL; // Initialize root dentry to NULL
+    vfs_root_inode = NULL; // Initialize root inode to NULL
 }
 
 int vfs_register_fs_type(const char *name, uint64 f_type, struct fs_type_ops *ops) {
@@ -132,12 +138,12 @@ struct fs_type *vfs_get_fs_type(uint64 f_type) {
     return NULL; // Not found
 }
 
-int vfs_mount(struct vfs_dentry *dentry, dev_t dev) {
+int vfs_mount(struct vfs_inode *inode, dev_t dev) {
     __vfs_assert_holding();
     panic("vfs_mount: not implemented yet");
-    // @TODO: check if dentry is a valid mount point(directories only)
-    // @TODO: check if dentry is not already mounted
-    // 
+    // @TODO: check if inode is a valid mount point(directories only)
+    // @TODO: check if inode is not already mounted
+    //
 }
 
 int vfs_umount(struct super_block *sb) {
@@ -156,137 +162,69 @@ void vfs_mount_root(dev_t dev, uint64 f_type) {
     assert(root_sb != NULL, "Failed to get the root FS superblock!");
     assert(root_sb->valid, "Root FS superblock is not valid!");
     assert(root_sb->root != NULL, "Root FS has a NULL root entry!");
-    vfs_root_dentry = root_sb->root;
+    vfs_root_inode = root_sb->root;
 }
 
-// Get the root dentry of the mounted filesystem
+int vfs_sb_refinc(struct super_block *sb) {
+    if (sb == NULL) {
+        return -1; // Nothing to increment
+    }
+    assert(vfs_holdingfs(sb) == 1, "vfs_sb_refinc: filesystem is not held");
+    sb->ref++;
+    return sb->ref;
+}
+
+int vfs_sb_refdec(struct super_block *sb) {
+    if (sb == NULL) {
+        return -1; // Nothing to decrement
+    }
+    assert(vfs_holdingfs(sb) == 1, "vfs_sb_refdec: filesystem is not held");
+    assert(sb->ref > 0, "vfs_sb_refdec: superblock reference count is already zero");
+    sb->ref--;
+    return sb->ref;
+}
+
+// Get the root inode of the mounted filesystem, and lock the root inode
 // Default mount point is that of the root filesystem.
 // This function will be called when encountering a mount point
-// The refcount of the returned dentry will increase by 1
-int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_dentry **ret_dentry) {
-    if (ret_dentry == NULL) {
+int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_inode **reti) {
+    if (reti == NULL) {
         return -1; // Invalid parameters
     }
     if (mp == NULL) {
-        if (vfs_root_dentry != NULL) {
-            *ret_dentry = vfs_root_dentry; // Use the global root dentry
+        if (vfs_root_inode != NULL) {
+            vfs_lockfs(vfs_root_inode->sb);
+            vfs_ilock(vfs_root_inode);
+            if ((*reti = vfs_idup(vfs_root_inode)) == NULL) {
+                vfs_iunlock(vfs_root_inode);
+                vfs_unlockfs(vfs_root_inode->sb);
+                return -1;
+            }
+            vfs_unlockfs(vfs_root_inode->sb);
             return 0; // Success
         }
-        return -1; // No root dentry available
+        return -1; // No root inode available
     }
     if (mp->sb == NULL) {
         return -1;
     }
+    vfs_lockfs(mp->sb);
     if (!mp->sb->valid || mp->sb->frozen) {
+        vfs_unlockfs(mp->sb);
         return -1; // Superblock is not valid or frozen
     }
     if (mp->sb->root == NULL) {
-        return -1; // No root dentry for the mounted filesystem
+        vfs_unlockfs(mp->sb);
+        return -1; // No root inode for the mounted filesystem
     }
-    *ret_dentry = mp->sb->root; // Copy the root dentry
-    (*ret_dentry)->ref_count++; // Increase the refcount
+    vfs_ilock(mp->sb->root);
+    if ((*reti = vfs_idup(mp->sb->root)) == NULL) {
+        vfs_iunlock(mp->sb->root);
+        vfs_unlockfs(mp->sb);
+        return -1;
+    }
+    vfs_unlockfs(mp->sb);
     return 0; // Success
-}
-
-// Look up for a directory entry under a dentry of a directory.
-// It will first try to look up the cached children dentry list.
-// Will call dentry->ops->d_lookup in the following cases:
-// - Target dentry is not found in the cached children dentry list
-// - Target dentry is found and create is true, but it's marked as deleted
-// Will return NULL in the following cases:
-// - Target dentry is not found in both the cached children dentry list
-//   and on the disk, and create is false
-// - Found a dentry marked as deleted, but create is false
-// - The dentry is linked to a symbolic link
-// - The dentry is a mount point
-// - dentry->ops->d_lookup returns NULL
-// It may return deleted, invalid, or mounted dentry.
-// The refcount of the returned dentry will increase by 1
-int vfs_dlookup(struct vfs_dentry *dentry, const char *name, 
-                size_t len, bool create, struct vfs_dentry **ret_dentry) {
-    if (dentry == NULL || name == NULL || len == 0 || ret_dentry == NULL) {
-        return -1;
-    }
-    if (vfs_d_validate(dentry) != 0) {
-        return -1;
-    }
-    if (!dentry->valid) {
-        return -1;
-    }
-    if (dentry->mounted) {
-        return -1;
-    }
-    struct vfs_dentry *pos = NULL;
-    struct vfs_dentry *tmp = NULL;
-    list_foreach_node_safe(&dentry->children, pos, tmp, sibling) {
-        if (vfs_d_compare(pos, name, len) == 0) {
-            break;
-        }
-    }
-    if (pos == NULL || pos->deleted) {
-        if (!create) {
-            return -1;
-        }
-        pos = vfs_d_lookup(dentry, name, len, create);
-        if (pos == NULL) {
-            return -1;
-        }
-    }
-    pos->ref_count++;
-    *ret_dentry = pos;
-    return 0;
-}
-
-// Decrease the reference count of a dentry and all its ancestors until the given base dentry.
-// until the root dentry of its file system.
-// Will try to free the resources is all the offspring dentry hit 0 ref count.
-// Return 0 when success, otherwise error.
-int vfs_dentry_put(struct vfs_dentry *dentry, struct vfs_dentry *base, bool including_base) {
-    if (dentry == NULL) {
-        return -1;
-    }
-    if (base == NULL) {
-        // Default base is the root dentry of the current file system
-        base = dentry->root;
-        assert(base != NULL, "vfs_dentry_put: root dentry is NULL");
-        if (base == dentry) {
-            // root dentry is not allowed to be put
-            return -1;
-        }
-    }
-    struct vfs_dentry *pos = dentry;
-    while (1) {
-        struct vfs_dentry *parent = pos->parent;
-        pos->ref_count--;
-        assert(pos->ref_count >= 0, "vfs_dentry_put: ref_count is negative");
-        if (pos->ref_count == 0) {
-            vfs_d_invalidate(pos);
-        }
-        if (!pos->valid) {
-            assert(pos->ops->d_destroy(pos) == 0, "vfs_dentry_put: dentry destroy failed");
-        }
-        if (!including_base && parent == base) {
-            // If we are not including the base dentry, stop here
-            break;
-        } else if (pos == base) {
-            // If we reach the base dentry, stop here
-            break;
-        }
-        pos = parent;
-    }
-    return 0; // Success
-}
-
-// Get the super block of the file system of the dentry
-int vfs_dentry_sb(struct vfs_dentry *dentry, struct super_block **ret_sb) {
-    if (dentry == NULL || ret_sb == NULL) {
-        return -1;
-    }
-    if (dentry->sb) {
-        *ret_sb = dentry->sb;
-        return 0;
-    }
-    return -1;
 }
 
 // Parse flags string from fopen
@@ -354,7 +292,8 @@ int vfs_fopen2(struct vfs_file *file, const char *path, int flags) {
     }
 
     struct vfs_inode *inode = NULL;
-    if (vfs_namex(path, strlen(path), NULL, &inode, NULL, 0) != 0) {
+    // @TODO: symlink support
+    if (vfs_namex(path, strlen(path), &inode, NULL, 0) != 0) {
         return -1; // Failed to resolve the path
     }
 
@@ -380,114 +319,140 @@ static int __pathname_get_toplayer(const char *path, size_t len) {
     return len; // No '/' found, the whole path is a single layer
 }
 
-int vfs_namex(const char *path, size_t len, struct vfs_dentry **retd, 
-              struct vfs_inode **reti, struct vfs_dentry *base, 
-              int max_follow)
+int vfs_namex(const char *path, size_t len, struct vfs_inode **reti, 
+              struct vfs_inode *base, int max_follow)
 {
     if (path == NULL || len == 0) {
         return -1; // Invalid parameters
     }
-    if (retd == NULL && reti == NULL) {
+    if (reti == NULL) {
         return -1; // Invalid parameters
     }
 
     const char *to_lookup = path;
     ssize_t to_lookup_len = len;
-    struct vfs_dentry *original_base = base;
-    struct vfs_dentry *top_dentry = base;
+    struct vfs_inode *top_inode = NULL;
     if (to_lookup[0] == '/') {
-        // Omit base dentry if the path is absolute
-        if (vfs_mounted_root(NULL, &top_dentry) != 0) {
-            return -1; // Failed to get the root dentry
+        // Omit base inode if the path is absolute
+        if (vfs_mounted_root(NULL, &top_inode) != 0) {
+            return -1; // Failed to get the root inode
         }
-        base = top_dentry; // Use the root dentry as base
+        base = top_inode; // Use the root inode as base
         // Omit the leading '/' from the lookup
         to_lookup_len--;
         to_lookup++;
     } else {
         if (base == NULL) {
-            top_dentry = myproc()->_cwd;
-            base = top_dentry; // Use current working directory as base
+            if (myproc()->_cwd == NULL) {
+                return -1;
+            }
+            vfs_ilock(myproc()->_cwd);
+            top_inode = vfs_idup(myproc()->_cwd);
+            if (top_inode == NULL) {
+                vfs_iunlock(myproc()->_cwd);
+                return -1; // Failed to get the current working directory inode
+            }
         } else {
-            top_dentry = base;
+            vfs_ilock(base);
+            top_inode = vfs_idup(base);
+            if (top_inode == NULL) {
+                vfs_iunlock(base);
+                return -1; // Failed to duplicate the base inode
+            }
         }
-        if (vfs_d_validate(top_dentry) != 0) {
-            return -1; // Invalid top dentry
+        if (vfs_validate_inode(top_inode) != 0) {
+            vfs_iput(top_inode);
+            vfs_iunlock(top_inode);
+            return -1; // Invalid top inode
         }
-        if (top_dentry->mounted) {
-            // To avoid invalidating a mount point here, we will not follow the mount point.
-            return -1;
+        if (top_inode->mp != NULL) {
+            struct vfs_inode *tmp = NULL;
+            int tmp_ret = vfs_mounted_root(top_inode->mp, &tmp);
+            vfs_iput(top_inode);
+            vfs_iunlock(top_inode);
+            if (tmp_ret != 0) {
+                return -1; // Failed to get the root inode
+            }
         }
     }
 
     while (to_lookup_len > 0) {
         ssize_t top_len = __pathname_get_toplayer(path, len);
-        struct vfs_dentry *next_dentry = NULL;
+        struct vfs_inode *next_inode = NULL;
         if (top_len < 0) {
             return -1; // Invalid path
         } else if (top_len == 0) {
+            if (to_lookup_len == 1) {
+                // If path ends with '/', it must be a directory
+                if (top_inode->type != I_DIR) {
+                    vfs_iput(top_inode);
+                    vfs_iunlock(top_inode);
+                    return -1; // Not a directory
+                }
+                *reti = top_inode; // Return the current inode
+                return 0; // Success
+            }
             // skip extra '/'
             to_lookup += 1;
             to_lookup_len -= 1;
             continue;
         }
-        if (vfs_dlookup(top_dentry, to_lookup, top_len, false, &next_dentry) != 0) {
-            if (top_dentry->mounted) {
-                if (vfs_mounted_root(top_dentry->mount, &next_dentry) != 0) {
-                    vfs_dentry_put(top_dentry, base, original_base == NULL);
-                    return -1; // Failed to get the root dentry
-                } else {
-                    vfs_dentry_put(top_dentry, base, original_base == NULL);
-                    original_base = NULL;
-                    base = next_dentry; // Use the root dentry of the mounted filesystem
-                    top_dentry = next_dentry; // Update top dentry to the root of the mounted filesystem
-                    continue; // Continue with the next layer
-                }
-            } else if (vfs_d_is_symlink(top_dentry)) {
-                if (max_follow <= 0) {
-                    vfs_dentry_put(top_dentry, base, original_base == NULL);
-                    return -1; // Too many symlinks
-                }
-                struct vfs_inode *inode = vfs_d_inode(top_dentry);
-                if (inode == NULL) {
-                    vfs_dentry_put(top_dentry, base, original_base == NULL);
-                    return -1; // Failed to get the inode
-                }
-                assert(inode->type == I_SYMLINK, "vfs_namex: symlink dentry is not a symlink inode");
-                char *symlink_target = kmm_alloc(NAME_MAX + 1);
-                if (symlink_target == NULL) {
-                    vfs_dentry_put(top_dentry, base, original_base == NULL);
-                    return -1; // Memory allocation failed
-                }
-                int ret = vfs_ireadlink(inode, symlink_target, NAME_MAX + 1);
-                vfs_dentry_put(top_dentry, base, original_base == NULL);
-                if (ret != 0) {
-                    kmm_free(symlink_target);
-                    return -1; // Failed to read symlink
-                }
-                // Follow the symlink
-                to_lookup = symlink_target;
-                to_lookup_len = strlen(symlink_target);
-                ret = vfs_namex(to_lookup, to_lookup_len, retd, reti, NULL, max_follow - 1);
-                kmm_free(symlink_target);
-                return ret; // Return the result of following the symlink
-            }
+
+        next_inode = vfs_dlookup(top_inode, to_lookup, top_len);
+        if (next_inode == NULL) {
+            vfs_iput(top_inode);
+            vfs_iunlock(top_inode);
+            return -1; // Failed to lookup the next inode
         }
 
-        top_dentry = next_dentry;
+        vfs_iput(top_inode);
+        vfs_iunlock(top_inode);
+        top_inode = next_inode;
+        if (top_inode->mp != NULL) {
+            int tmp_ret = vfs_mounted_root(top_inode->mp, &next_inode);
+            vfs_iput(top_inode);
+            vfs_iunlock(top_inode);
+            if (tmp_ret != 0) {
+                return -1; // Failed to get the root inode
+            }
+            top_inode = next_inode;
+            continue; // Continue with the next layer
+        } else if (top_inode->type == I_SYMLINK) {
+            if (max_follow <= 0) {
+                vfs_iput(top_inode);
+                vfs_iunlock(top_inode);
+                return -1; // Too many symlinks
+            }
+            char *symlink_target = kmm_alloc(NAME_MAX + 1);
+            if (symlink_target == NULL) {
+                vfs_iput(top_inode);
+                vfs_iunlock(top_inode);
+                return -1; // Memory allocation failed
+            }
+            int ret = vfs_ireadlink(top_inode, symlink_target, NAME_MAX + 1);
+            vfs_iput(top_inode);
+            vfs_iunlock(top_inode);
+            if (ret != 0) {
+                kmm_free(symlink_target);
+                return -1; // Failed to read symlink
+            }
+            // Follow the symlink
+            to_lookup = symlink_target;
+            to_lookup_len = strlen(symlink_target);
+            ret = vfs_namex(to_lookup, to_lookup_len, reti, NULL, max_follow - 1);
+            kmm_free(symlink_target);
+            return ret; // Return the result of following the symlink
+        }
+
         to_lookup += top_len + 1;
         to_lookup_len -= top_len + 1;
     }
 
     if (reti != NULL) {
-        *reti = vfs_d_inode(top_dentry);
-    }
-    if (retd != NULL) {
-        *retd = top_dentry;
-    } else {
-        // If retd is NULL, we need to put the dentry to avoid memory leak
-        vfs_dentry_put(top_dentry, base, original_base == NULL);
+        *reti = top_inode; // Return the found inode
+        return 0;
     }
 
     return -1; // @TODO: Implement vfs_namex
 }
+

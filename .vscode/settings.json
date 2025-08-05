@@ -83,6 +83,7 @@
         "pthread.h": "c",
         "vfs_types.h": "c",
         "fs.h": "c",
-        "text_encoding": "c"
+        "text_encoding": "c",
+        "fcntl.h": "c"
     }
 }

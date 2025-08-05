@@ -103,7 +103,7 @@ struct proc {
   // both p->lock and __sched_lock must be held 
   struct context context;      // swtch() here to run process
   struct vfs_file *_ofile[NOFILE]; // @TODO: Placeholder
-  struct vfs_dentry *_cwd;          // Current working directory
+  struct vfs_inode *_cwd;          // Current working directory
   struct xv6_file *ofile[NOFILE];  // Open files
   struct xv6_inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
