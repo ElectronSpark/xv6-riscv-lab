@@ -27,7 +27,6 @@ acquiresleep(struct sleeplock *lk)
   proc_node_t waiter = { 0 };
   int ret = -1;
   proc_node_init(&waiter);
-  proc_lock(myproc());
   spin_acquire(&lk->lk);
 
   // If the lock is not held, acquire it and return success.
@@ -39,9 +38,11 @@ acquiresleep(struct sleeplock *lk)
   }
 
   // Slow path
-  // @TODO: handle signal
+  proc_lock(myproc());
+  // @TODO: handle signals
   if (proc_queue_push(&lk->wait_queue, &waiter) != 0) {
     ret = -1;
+    proc_unlock(myproc());
     goto done; // Error: failed to push to wait queue
   }
   for (;;) {
@@ -51,13 +52,13 @@ acquiresleep(struct sleeplock *lk)
       assert(proc_queue_remove(&lk->wait_queue, &waiter) == 0,
              "acquiresleep: failed to remove from wait queue");
       ret = 0;
-      goto done; // Success: lock acquired
+      break; // Success: lock acquired
     }
   }
+  proc_unlock(myproc());
   
 done:
   spin_release(&lk->lk);
-  proc_unlock(myproc());
   return ret;
 }
 
@@ -85,18 +86,17 @@ releasesleep(struct sleeplock *lk)
     lk->locked = 0; // Lock is released
     assert(proc_queue_size(&lk->wait_queue) == 0,
            "releasesleep: wait queue is not empty");
-    spin_release(&lk->lk);
   } else {
     struct proc *next = proc_node_get_proc(first_waiter);
     assert(next != NULL, "releasesleep: first waiter is NULL");
     lk->holder = next;
-    spin_release(&lk->lk); 
     proc_lock(next); // Lock the process that will hold the lock
     sched_lock();
     scheduler_wakeup(next); // Wake up the first process in the wait queue
     sched_unlock();
     proc_unlock(next); // Unlock the process that will hold the lock
   }
+  spin_release(&lk->lk);
 }
 
 int
