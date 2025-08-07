@@ -24,8 +24,6 @@ struct cpu cpus[NCPU];
 // 3. target pcb lock
 // 4. children pcb lock
 
-static slab_cache_t proc_cache;
-
 struct {
   struct {
     hlist_t procs;
@@ -215,6 +213,7 @@ __pcb_init(struct proc *p)
   list_entry_init(&p->children);
   hlist_entry_init(&p->proctab_entry);
   spin_init(&p->lock, "proc");
+  p->kstack = (uint64)p; // Place PCB at the base of the kernel stack
 }
 
 void
@@ -242,9 +241,6 @@ proc_assert_holding(struct proc *p)
 void
 procinit(void)
 {
-  // struct proc *p;
-  
-  slab_cache_init(&proc_cache, "PCB Pool", sizeof(struct proc), SLAB_FLAG_STATIC);
   __proctab_init();
 }
 
@@ -293,29 +289,24 @@ allocproc(void *entry)
 
   __proctab_assert_unlocked();
 
-  p = slab_alloc(&proc_cache);
-  if (p == NULL) {
-    return NULL; // No free proc available in the slab cache
-  }
-
-  __pcb_init(p);
-
   // Allocate a kernel stack page.
   kstack = page_alloc(KERNEL_STACK_ORDER, PAGE_FLAG_ANON);
   if(kstack == NULL){
-    freeproc(p);
     return NULL;
   }
   memset(kstack, 0, KERNEL_STACK_SIZE);
-  p->kstack = (uint64)kstack;
+  p = kstack; // Place PCB at the base of the kernel stack
+  __pcb_init(p);
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)entry;
-  p->context.sp = p->kstack + KERNEL_STACK_SIZE;
-  p->context.sp -= sizeof(struct context) + 8;
-  p->context.sp &= ~0x7UL; // align to 8 bytes
+  p->ksp = (uint64)kstack + KERNEL_STACK_SIZE - sizeof(struct trapframe);
+  p->trapframe = (void *)p->ksp;
+  p->ksp -= 8;
+  p->ksp &= ~0x7UL; // align to 8 bytes
+  p->context.sp = p->ksp;
 
   __proctab_lock();
   p->pid = __alloc_pid();
@@ -349,16 +340,12 @@ freeproc(struct proc *p)
   assert(existing == NULL || existing == p, "freeproc called with a different proc");
   if(p->sigacts)
     sigacts_free(p->sigacts);
-  if(p->trapframe)
-    page_free((void*)p->trapframe, TRAPFRAME_ORDER);
-  if(p->kstack)
-    page_free((void*)p->kstack, KERNEL_STACK_ORDER);
   if (p->vm != NULL) {
     proc_freepagetable(p);
   }
   sigpending_destroy(p);
   
-  slab_free(p);
+  page_free((void *)p->kstack, KERNEL_STACK_ORDER);
   pop_off();  // PCB has been freed, so no need to keep noff counter increased
 }
 
@@ -367,12 +354,11 @@ freeproc(struct proc *p)
 int
 proc_pagetable(struct proc *p)
 {
-  // An empty page table.
-  p->vm = vm_init(p->trapframe);
+  // Create a new VM structure for the process.
+  p->vm = vm_init((uint64)p->trapframe);
   if (p->vm == NULL) {
     return -1; // Failed to initialize VM
   }
-
   return 0;
 }
 
@@ -405,12 +391,6 @@ userinit(void)
 
   p = allocproc(forkret);
   assert(p != NULL, "userinit: allocproc failed");
-  
-  // Allocate a trapframe page.
-  struct trapframe *trapframe = page_alloc(TRAPFRAME_ORDER, PAGE_FLAG_ANON);
-  assert(trapframe != NULL, "Failed to allocate trapframe page for process 1");
-  memset(trapframe, 0, TRAPFRAME_SIZE);
-  p->trapframe = trapframe;
 
   // Allocate pagetable for the process.
   assert(proc_pagetable(p) == 0, "userinit: proc_pagetable failed");
@@ -529,20 +509,11 @@ fork(void)
     return -1;
   }
 
-  // Allocate a trapframe page.
-  struct trapframe *trapframe = page_alloc(TRAPFRAME_ORDER, PAGE_FLAG_ANON);
-  if (trapframe == NULL) {
-    freeproc(np);
-    return -1;
-  }
-  memset(trapframe, 0, TRAPFRAME_SIZE);
-  np->trapframe = trapframe;
-
   proc_lock(p);
   proc_lock(np);
 
   // Copy user memory from parent to child.
-  if((np->vm = vm_dup(p->vm, np->trapframe)) == NULL){
+  if((np->vm = vm_dup(p->vm, (uint64)np->trapframe)) == NULL){
     // @TODO: need to make sure no one would access np before freeing it.
     proc_unlock(np);
     proc_unlock(p);

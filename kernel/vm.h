@@ -15,8 +15,8 @@
     ((__vma1)->end == (__vma2)->start || \
      (__vma2)->end == (__vma1)->start)
 
-vm_t *vm_init(void *trapframe);
-vm_t *vm_dup(vm_t *src, void *trapframe);
+vm_t *vm_init(uint64 trapframe);
+vm_t *vm_dup(vm_t *src, uint64 trapframe);
 void vm_destroy(vm_t *vm);
 vma_t *va_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags);
 int vm_growstack(vm_t *vm, int change_size);

@@ -683,7 +683,7 @@ void vm_destroy(vm_t *vm)
   list_entry_init(&vm->vm_list);
   list_entry_init(&vm->vm_free_list);
   rb_root_init(&vm->vm_tree, &__vm_tree_opts);
-  if (vm->trapframe != NULL) {
+  if (vm->trapframe != 0) {
     __vm_unmap_trapframe(vm); // Unmap the trapframe and trampolines
   }
   if (vm->pagetable != NULL) {
@@ -696,12 +696,12 @@ void vm_destroy(vm_t *vm)
 // Duplicate the VM structure from src to dst.
 // The destination VM must be initialized as user vm, and empty.
 // Files have to be duplicated.
-vm_t *vm_dup(vm_t *src, void *trapframe)
+vm_t *vm_dup(vm_t *src, uint64 trapframe)
 {
   if (src == NULL) {
     return NULL; // Invalid parameters
   }
-  if (src->trapframe != NULL && trapframe == NULL) {
+  if (src->trapframe != 0 && trapframe == 0) {
     return NULL; // Cannot duplicate if src has a trapframe but dst does not
   }
   vm_t *dst = vm_init(trapframe);
@@ -732,7 +732,7 @@ vm_t *vm_dup(vm_t *src, void *trapframe)
 }
 
 // map trapframe and trampolines for user processes.
-static int __vm_map_trampoline(vm_t *vm, void *trapframe)
+static int __vm_map_trampoline(vm_t *vm, uint64 trapframe)
 {
   extern char sig_trampoline[];
   if (vm == NULL || vm->pagetable == NULL) {
@@ -757,8 +757,9 @@ static int __vm_map_trampoline(vm_t *vm, void *trapframe)
 
   // map the trapframe page just below the signal trampoline page, for
   // trampoline.S.
+  trapframe = PGROUNDDOWN(trapframe); // Ensure trapframe is page-aligned
   if(mappages(vm->pagetable, TRAPFRAME, PGSIZE,
-              (uint64)(trapframe), PTE_R | PTE_W | PTE_RSW_w) < 0){
+              trapframe, PTE_R | PTE_W | PTE_RSW_w) < 0){
     uvmunmap(vm->pagetable, TRAMPOLINE, 1, 0);
     uvmunmap(vm->pagetable, SIG_TRAMPOLINE, 1, 0);
     return -1;
@@ -768,7 +769,7 @@ static int __vm_map_trampoline(vm_t *vm, void *trapframe)
 }
 
 // Initialize the vm struct of a process.
-vm_t *vm_init(void *trapframe) {
+vm_t *vm_init(uint64 trapframe) {
   vm_t *vm = slab_alloc(&__vm_pool);
   if (vm == NULL) {
     return NULL; // Out of memory
@@ -788,7 +789,7 @@ vm_t *vm_init(void *trapframe) {
     vm_destroy(vm);
     return NULL;
   }
-  if (trapframe != NULL) {
+  if (trapframe != 0) {
     if (__vm_map_trampoline(vm, trapframe) != 0) {
       vm_destroy(vm);
       return NULL; // Failed to map trampoline

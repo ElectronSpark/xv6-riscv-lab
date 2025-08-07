@@ -292,11 +292,7 @@ usertrapret(void)
   // set up trapframe values that uservec will need when
   // the process next traps into the kernel.
   p->trapframe->kernel_satp = r_satp();         // kernel page table
-  // p->trapframe->kernel_sp = p->kstack + PGSIZE; // process's kernel stack
-  uint64 ksp = p->kstack + KERNEL_STACK_SIZE;
-  ksp -= sizeof(struct trapframe) + 8;
-  ksp &= ~0x7UL; // align to 8 bytes
-  p->trapframe->kernel_sp = ksp;
+  p->trapframe->kernel_sp = p->ksp;
   p->trapframe->kernel_trap = (uint64)usertrap;
   p->trapframe->kernel_hartid = r_tp();         // hartid for cpuid()
 
@@ -323,7 +319,9 @@ usertrapret(void)
   // switches to the user page table, restores user registers,
   // and switches to user mode with sret.
   uint64 trampoline_userret = TRAMPOLINE + (userret - trampoline);
-  ((void (*)(uint64, uint64))trampoline_userret)(TRAPFRAME, satp);
+  uint64 trapframe_base = TRAPFRAME;
+  trapframe_base += (uint64)p->trapframe - PGROUNDDOWN((uint64)p->trapframe);
+  ((void (*)(uint64, uint64))trampoline_userret)(trapframe_base, satp);
 }
 
 void
