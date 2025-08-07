@@ -22,6 +22,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/fs.c
     ${KERNEL_DIR}/log.c
     ${KERNEL_DIR}/sleeplock.c
+    ${KERNEL_DIR}/rwlock.c
     ${KERNEL_DIR}/file.c
     ${KERNEL_DIR}/pipe.c
     ${KERNEL_DIR}/exec.c

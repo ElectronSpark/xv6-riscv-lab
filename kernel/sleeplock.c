@@ -36,6 +36,7 @@ acquiresleep(struct sleeplock *lk)
     ret = 0;
     goto done; // Success: lock acquired
   }
+  assert(lk->holder != myproc(), "acquiresleep: deadlock detected, process already holds the lock");
 
   // Slow path
   proc_lock(myproc());
@@ -62,6 +63,7 @@ done:
   return ret;
 }
 
+// @TODO: signal handling
 void
 releasesleep(struct sleeplock *lk)
 {

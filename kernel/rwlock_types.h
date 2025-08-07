@@ -1,0 +1,20 @@
+#ifndef __KERNEL_RWLOCK_TYPES_H
+#define __KERNEL_RWLOCK_TYPES_H
+
+#include "proc_queue_type.h"
+#include "spinlock.h"
+
+typedef struct rwlock {
+    struct spinlock lock; // Spinlock to protect the rwlock structure
+    int readers;          // Number of active readers
+    struct proc *holder; // Process holding write lock, if any
+    struct proc_queue read_queue;  // Queue for processes waiting to read
+    struct proc_queue write_queue; // Queue for processes waiting to write
+    const char *name; // Name of the rwlock
+    uint64 flags; // Additional flags for rwlock behavior
+} rwlock_t;
+
+#define RWLOCK_PRIO_READ 0x0 // Priority for readers (default)
+#define RWLOCK_PRIO_WRITE 0x1 // Priority for writers
+
+#endif // __KERNEL_RWLOCK_TYPES_H
