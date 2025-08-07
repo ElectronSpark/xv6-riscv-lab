@@ -109,6 +109,8 @@ struct proc {
   char name[16];               // Process name (debugging)
 };
 
+BUILD_BUG_ON((sizeof(struct proc) + sizeof(struct trapframe) + 16) >= PGSIZE);
+
 static inline uint64 proc_flags(struct proc *p) {
   if (p == NULL) {
     return 0;

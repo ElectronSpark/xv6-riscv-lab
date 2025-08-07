@@ -12,4 +12,9 @@
 
 #define WEAK __attribute__((weak))
 
+#define BUILD_BUG_ON(condition) static inline void  \
+__BUILD_BUG_ON_##__FILE__##__##__LINE__(void) {     \
+    ((void)sizeof(char[1 - 2*!!(condition)]));      \
+}
+
 #endif // __KERNEL_COMPILER_H
