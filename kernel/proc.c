@@ -279,13 +279,14 @@ myproc(void)
   return p;
 }
 
-// Look in the process table for an UNUSED proc.
-// If found, initialize state required to run in the kernel,
+// allocate and initialize a new proc structure.
+// The newly created process will be a kernel process, which means it will not have
+// user space environment set up.
 // and return without p->lock held.
-// If there are no free procs, or a memory allocation fails, return 0.
+// If there are no free procs, or a memory allocation fails, return NULL.
 // Signal actions will not be initialized here.
 STATIC struct proc*
-allocproc(void)
+allocproc(void *entry)
 {
   struct proc *p = NULL;
   void *kstack = NULL;
@@ -299,16 +300,6 @@ allocproc(void)
 
   __pcb_init(p);
 
-  // Allocate a trapframe page.
-  struct trapframe *trapframe = 
-    (struct trapframe *)page_alloc(TRAPFRAME_ORDER, PAGE_FLAG_ANON);
-  if(trapframe == 0){
-    freeproc(p);
-    return NULL;
-  }
-  memset(trapframe, 0, TRAPFRAME_SIZE);
-  p->trapframe = trapframe;
-
   // Allocate a kernel stack page.
   kstack = page_alloc(KERNEL_STACK_ORDER, PAGE_FLAG_ANON);
   if(kstack == NULL){
@@ -321,7 +312,7 @@ allocproc(void)
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
-  p->context.ra = (uint64)forkret;
+  p->context.ra = (uint64)entry;
   p->context.sp = p->kstack + KERNEL_STACK_SIZE;
   p->context.sp -= sizeof(struct context) + 8;
   p->context.sp &= ~0x7UL; // align to 8 bytes
@@ -412,8 +403,15 @@ userinit(void)
 {
   struct proc *p;
 
-  p = allocproc();
+  p = allocproc(forkret);
   assert(p != NULL, "userinit: allocproc failed");
+  
+  // Allocate a trapframe page.
+  struct trapframe *trapframe = page_alloc(TRAPFRAME_ORDER, PAGE_FLAG_ANON);
+  assert(trapframe != NULL, "Failed to allocate trapframe page for process 1");
+  memset(trapframe, 0, TRAPFRAME_SIZE);
+  p->trapframe = trapframe;
+
   // Allocate pagetable for the process.
   assert(proc_pagetable(p) == 0, "userinit: proc_pagetable failed");
 
@@ -457,6 +455,7 @@ userinit(void)
   safestrcpy(p->name, "initcode", sizeof(p->name));
   p->cwd = namei("/");
 
+  PROC_SET_USER_SPACE(p);
   __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
 
   sched_lock();
@@ -526,9 +525,18 @@ fork(void)
   struct proc *p = myproc();
 
   // Allocate process.
-  if((np = allocproc()) == 0){
+  if((np = allocproc(forkret)) == 0){
     return -1;
   }
+
+  // Allocate a trapframe page.
+  struct trapframe *trapframe = page_alloc(TRAPFRAME_ORDER, PAGE_FLAG_ANON);
+  if (trapframe == NULL) {
+    freeproc(np);
+    return -1;
+  }
+  memset(trapframe, 0, TRAPFRAME_SIZE);
+  np->trapframe = trapframe;
 
   proc_lock(p);
   proc_lock(np);
@@ -570,6 +578,7 @@ fork(void)
   pid = np->pid;
 
   attach_child(p, np);
+  PROC_SET_USER_SPACE(np);
   __proc_set_pstate(np, PSTATE_UNINTERRUPTIBLE);
   proc_unlock(p);
   
@@ -742,6 +751,7 @@ forkret(void)
 {
   STATIC int first = 1;
 
+  assert(PROC_USER_SPACE(myproc()), "kernel process %d tries to return to user space", myproc()->pid);
   // The scheduler will disable interrupts to assure the atomicity of
   // the scheduler operations. For processes that gave up CPU by calling yield(),
   //   yield() would restore the previous interruption state when switched back. 

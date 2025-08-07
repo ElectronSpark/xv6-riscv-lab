@@ -255,6 +255,8 @@ usertrapret(void)
 {
   struct proc *p = myproc();
 
+  assert(PROC_USER_SPACE(myproc()), "kernel process %d tries to return to user space", myproc()->pid);
+
   if (killed(p)) {
     // If the process is terminated, exit it.
     exit(-1);
