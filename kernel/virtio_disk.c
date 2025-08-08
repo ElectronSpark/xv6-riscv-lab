@@ -15,6 +15,7 @@
 #include "fs.h"
 #include "buf.h"
 #include "virtio.h"
+#include "sleeplock.h"
 
 // the address of virtio mmio register r.
 #define R(r) ((volatile uint32 *)(VIRTIO0 + (r)))
@@ -166,8 +167,9 @@ alloc_desc()
   }
 
   disk.free_idx--;
-  disk.free[disk.free_idx] = 0; // Mark the descriptor as used
-  return disk.free_idx;
+  int idx = disk.free_list[disk.free_idx];
+  disk.free[idx] = 0; // Mark the descriptor as used
+  return idx;
 }
 
 // mark a descriptor as free.
@@ -178,6 +180,7 @@ free_desc(int i)
     panic("free_desc 1");
   if(disk.free[i])
     panic("free_desc 2");
+  
   disk.desc[i].addr = 0;
   disk.desc[i].len = 0;
   disk.desc[i].flags = 0;
@@ -186,8 +189,10 @@ free_desc(int i)
   disk.free_list[disk.free_idx] = i; // Add to free list
   disk.free_idx++;
   assert(disk.free_idx <= NUM, "free_idx out of bounds");
-  __atomic_signal_fence(__ATOMIC_SEQ_CST);
-  wakeup(&disk.free[0]);
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
+  if (disk.free_idx >= 3) {
+    wakeup(&disk.free[0]);
+  }
 }
 
 // free a chain of descriptors.
