@@ -71,6 +71,7 @@ struct proc {
 #define PROC_FLAG_KILLED            0x8   // Process is exiting or exited
 #define PROC_FLAG_ONCHAN            0x10  // Process is sleeping on a channel
 #define PROC_FLAG_STOPPED           0x20  // Process is stopped
+#define PROC_FLAG_USER_SPACE        0x40  // Process has user space
   
   // proc table lock must be held before holding p->lock to use this:
   hlist_entry_t proctab_entry; // Entry to link the process hash table
@@ -97,15 +98,21 @@ struct proc {
 
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
+  int kstack_order;            // Kernel stack order, used for allocation
+  uint64 ksp;
   vm_t *vm;                     // Virtual memory areas and page table
   struct trapframe *trapframe; // data page for trampoline.S
 
   // both p->lock and __sched_lock must be held 
   struct context context;      // swtch() here to run process
+  uint64 kentry;               // Entry point for kernel process
+  uint64 arg[2];               // Argument for kernel process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
 };
+
+BUILD_BUG_ON((sizeof(struct proc) + sizeof(struct trapframe) + 16) >= PGSIZE);
 
 static inline uint64 proc_flags(struct proc *p) {
   if (p == NULL) {
@@ -128,6 +135,8 @@ static inline void proc_clear_flags(struct proc *p, uint64 flags) {
   __atomic_and_fetch(&p->flags, ~flags, __ATOMIC_SEQ_CST);
 }
 
+#define PROC_SET_USER_SPACE(p) \
+  proc_set_flags(p, PROC_FLAG_USER_SPACE)
 #define PROC_SET_VALID(p) \
   proc_set_flags(p, PROC_FLAG_VALID)
 #define PROC_SET_NEEDS_RESCHED(p) \
@@ -139,6 +148,8 @@ static inline void proc_clear_flags(struct proc *p, uint64 flags) {
 #define PROC_SET_STOPPED(p) \
   proc_set_flags(p, PROC_FLAG_STOPPED)
 
+#define PROC_CLEAR_USER_SPACE(p) \
+  proc_clear_flags(p, PROC_FLAG_USER_SPACE)
 #define PROC_CLEAR_VALID(p) \
   proc_clear_flags(p, PROC_FLAG_VALID)
 #define PROC_CLEAR_NEEDS_RESCHED(p) \
@@ -160,6 +171,8 @@ static inline void proc_clear_flags(struct proc *p, uint64 flags) {
   (!!(proc_flags(p) & PROC_FLAG_ONCHAN))
 #define PROC_STOPPED(p) \
   (!!(proc_flags(p) & PROC_FLAG_STOPPED))
+#define PROC_USER_SPACE(p) \
+  (!!(proc_flags(p) & PROC_FLAG_USER_SPACE))
 
 static inline const char *procstate_to_str(enum procstate state) {
   switch (state) {

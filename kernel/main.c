@@ -8,6 +8,12 @@
 
 volatile STATIC int started = 0;
 
+// just to test the kernel thread creation
+// will exit immediately after printing the args
+static inline void __idle(uint64 arg1, uint64 arg2) {
+    printf("kernel thread started with arg1: %lx, arg2: %lx\n", arg1, arg2);
+}
+
 // start() jumps here in supervisor mode on all CPUs.
 void
 main()
@@ -36,6 +42,8 @@ main()
     sockinit();
     signal_init();   // signal handling initialization  
     userinit();      // first user process
+    int kpid = kernel_proc_create(NULL, __idle, 128, 256, KERNEL_STACK_ORDER); // Create an idle kernel thread
+    printf("Idle kernel thread created with pid: %d\n", kpid);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     started = 1;
   } else {

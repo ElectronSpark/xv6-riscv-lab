@@ -23,7 +23,7 @@ main(int argc, char *argv[])
   printf("stressfs starting\n");
   memset(data, 'a', sizeof(data));
 
-  for(i = 0; i < 4; i++)
+  for(i = 0; i < 32; i++)
     if(fork() > 0)
       break;
 

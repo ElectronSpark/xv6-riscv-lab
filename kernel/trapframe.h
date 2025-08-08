@@ -52,9 +52,6 @@ struct trapframe {
   /* 264 */ uint64 t4;
   /* 272 */ uint64 t5;
   /* 280 */ uint64 t6;
-  // For signal trap frames, this points to the previous signal trap frame.
-  // When there's no previous signal trap frame, this is 0.
-  /* 288 */ uint64 prev;
 };
 
 

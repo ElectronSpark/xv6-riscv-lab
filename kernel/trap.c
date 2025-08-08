@@ -290,11 +290,7 @@ usertrapret(void)
   // set up trapframe values that uservec will need when
   // the process next traps into the kernel.
   p->trapframe->kernel_satp = r_satp();         // kernel page table
-  // p->trapframe->kernel_sp = p->kstack + PGSIZE; // process's kernel stack
-  uint64 ksp = p->kstack + KERNEL_STACK_SIZE;
-  ksp -= sizeof(struct trapframe) + 8;
-  ksp &= ~0x7UL; // align to 8 bytes
-  p->trapframe->kernel_sp = ksp;
+  p->trapframe->kernel_sp = p->ksp;
   p->trapframe->kernel_trap = (uint64)usertrap;
   p->trapframe->kernel_hartid = r_tp();         // hartid for cpuid()
 
@@ -321,7 +317,9 @@ usertrapret(void)
   // switches to the user page table, restores user registers,
   // and switches to user mode with sret.
   uint64 trampoline_userret = TRAMPOLINE + (userret - trampoline);
-  ((void (*)(uint64))trampoline_userret)(satp);
+  uint64 trapframe_base = TRAPFRAME;
+  trapframe_base += (uint64)p->trapframe - PGROUNDDOWN((uint64)p->trapframe);
+  ((void (*)(uint64, uint64))trampoline_userret)(trapframe_base, satp);
 }
 
 void
@@ -363,10 +361,12 @@ kerneltrap(struct ktrapframe *sp, uint64 s0)
     sp->ra = r_sepc();
     // to enconvinient gdb back trace
     *(uint64 *)((uint64)sp - 8) = r_sepc();
-    if (myproc() == NULL)
+    if (myproc() == NULL) {
       printf("kerneltrap: no current process\n");
-    else
-      print_backtrace((uint64)sp, myproc()->kstack, myproc()->kstack + KERNEL_STACK_SIZE);
+    } else {
+      size_t kstack_size = (1UL << (PAGE_SHIFT + myproc()->kstack_order));
+      print_backtrace((uint64)sp, myproc()->kstack, myproc()->kstack + kstack_size);
+    }
     kerneltrap_dump_regs(sp);
     panic_disable_bt();
     panic("kerneltrap");

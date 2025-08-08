@@ -118,6 +118,8 @@ int             proctab_get_pid_proc(int pid, struct proc **pp);
 int             cpuid(void);
 void            exit(int);
 int             fork(void);
+int             kernel_proc_create(struct proc **retp, void *entry, 
+                                   uint64 arg1, uint64 arg2, int stack_order);
 int             growproc(int);
 void            proc_mapstacks(pagetable_t);
 int             proc_pagetable(struct proc *);

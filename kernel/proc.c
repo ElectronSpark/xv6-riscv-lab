@@ -24,8 +24,6 @@ struct cpu cpus[NCPU];
 // 3. target pcb lock
 // 4. children pcb lock
 
-static slab_cache_t proc_cache;
-
 struct {
   struct {
     hlist_t procs;
@@ -242,9 +240,6 @@ proc_assert_holding(struct proc *p)
 void
 procinit(void)
 {
-  // struct proc *p;
-  
-  slab_cache_init(&proc_cache, "PCB Pool", sizeof(struct proc), SLAB_FLAG_STATIC);
   __proctab_init();
 }
 
@@ -277,202 +272,6 @@ myproc(void)
   struct proc *p = c->proc;
   pop_off();
   return p;
-}
-
-// Look in the process table for an UNUSED proc.
-// If found, initialize state required to run in the kernel,
-// and return without p->lock held.
-// If there are no free procs, or a memory allocation fails, return 0.
-// Signal actions will not be initialized here.
-STATIC struct proc*
-allocproc(void)
-{
-  struct proc *p = NULL;
-  void *kstack = NULL;
-
-  __proctab_assert_unlocked();
-
-  p = slab_alloc(&proc_cache);
-  if (p == NULL) {
-    return NULL; // No free proc available in the slab cache
-  }
-
-  __pcb_init(p);
-
-  // Allocate a trapframe page.
-  struct trapframe *trapframe = 
-    (struct trapframe *)page_alloc(TRAPFRAME_ORDER, PAGE_FLAG_ANON);
-  if(trapframe == 0){
-    freeproc(p);
-    return NULL;
-  }
-  memset(trapframe, 0, TRAPFRAME_SIZE);
-  p->trapframe = trapframe;
-
-  // Allocate a kernel stack page.
-  kstack = page_alloc(KERNEL_STACK_ORDER, PAGE_FLAG_ANON);
-  if(kstack == NULL){
-    freeproc(p);
-    return NULL;
-  }
-  memset(kstack, 0, KERNEL_STACK_SIZE);
-  p->kstack = (uint64)kstack;
-
-  // Set up new context to start executing at forkret,
-  // which returns to user space.
-  memset(&p->context, 0, sizeof(p->context));
-  p->context.ra = (uint64)forkret;
-  p->context.sp = p->kstack + KERNEL_STACK_SIZE;
-  p->context.sp -= sizeof(struct context) + 8;
-  p->context.sp &= ~0x7UL; // align to 8 bytes
-
-  __proctab_lock();
-  p->pid = __alloc_pid();
-  if (__proctab_add(p) != 0) {
-    __proctab_unlock();
-    freeproc(p);
-    return NULL;
-  }
-
-  __proctab_unlock();
-  return p;
-}
-
-// free a proc structure and the data hanging from it,
-// including user pages.
-// p->lock must not be held.
-STATIC void
-freeproc(struct proc *p)
-{
-  assert(p != NULL, "freeproc called with NULL proc");
-  assert(!PROC_AWOKEN(p), "freeproc called with a runnable proc");
-  assert(!PROC_SLEEPING(p), "freeproc called with a sleeping proc");
-
-  __proctab_lock();
-  proc_lock(p);
-  struct proc *existing = hlist_pop(&proc_table.procs, p);
-  // Remove from the global list of processes for dumping.
-  list_entry_detach(&p->dmp_list_entry);
-  __proctab_unlock();
-
-  assert(existing == NULL || existing == p, "freeproc called with a different proc");
-  if(p->sigacts)
-    sigacts_free(p->sigacts);
-  if(p->trapframe)
-    page_free((void*)p->trapframe, TRAPFRAME_ORDER);
-  if(p->kstack)
-    page_free((void*)p->kstack, KERNEL_STACK_ORDER);
-  if (p->vm != NULL) {
-    proc_freepagetable(p);
-  }
-  sigpending_destroy(p);
-  
-  slab_free(p);
-  pop_off();  // PCB has been freed, so no need to keep noff counter increased
-}
-
-// Create a user page table for a given process, with no user memory,
-// but with trampoline and trapframe pages.
-int
-proc_pagetable(struct proc *p)
-{
-  // An empty page table.
-  p->vm = vm_init(p->trapframe);
-  if (p->vm == NULL) {
-    return -1; // Failed to initialize VM
-  }
-
-  return 0;
-}
-
-// Free a process's page table, and free the
-// physical memory it refers to.
-void
-proc_freepagetable(struct proc *p)
-{
-  vm_destroy(p->vm);
-}
-
-// a user program that calls exec("/init")
-// assembled from ../user/initcode.S
-// od -t xC ../user/initcode
-uchar initcode[] = {
-  0x17, 0x05, 0x00, 0x00, 0x13, 0x05, 0x45, 0x02,
-  0x97, 0x05, 0x00, 0x00, 0x93, 0x85, 0x35, 0x02,
-  0x93, 0x08, 0x70, 0x00, 0x73, 0x00, 0x00, 0x00,
-  0x93, 0x08, 0x20, 0x00, 0x73, 0x00, 0x00, 0x00,
-  0xef, 0xf0, 0x9f, 0xff, 0x2f, 0x69, 0x6e, 0x69,
-  0x74, 0x00, 0x00, 0x24, 0x10, 0x00, 0x00, 0x00,
-  0x00, 0x00, 0x00, 0x00
-};
-
-// Set up first user process.
-void
-userinit(void)
-{
-  struct proc *p;
-
-  p = allocproc();
-  assert(p != NULL, "userinit: allocproc failed");
-  // Allocate pagetable for the process.
-  assert(proc_pagetable(p) == 0, "userinit: proc_pagetable failed");
-
-  // // printf user pagetable
-  // printf("\nuser pagetable after allocproc:\n");
-  // dump_pagetable(p->vm.pagetable, 2, 0, 0, 0, false);
-  // printf("\n");
-
-  __proctab_lock();
-  __proctab_set_initproc(p);
-  __proctab_unlock();
-  
-  // allocate one user page and copy initcode's instructions
-  // and data into it.
-  uint64 ustack_top = USTACKTOP;
-  printf("user stack top at 0x%lx\n", ustack_top);
-  proc_lock(p);
-  uint64 flags = VM_FLAG_EXEC | VM_FLAG_READ | VM_FLAG_USERMAP;
-  assert(sizeof(initcode) <= PGSIZE, "userinit: initcode too large");
-  void *initcode_page = page_alloc(0, PAGE_FLAG_ANON);
-  assert(initcode_page != NULL, "userinit: page_alloc failed for initcode");
-  memset(initcode_page, 0, PGSIZE);
-  memmove(initcode_page, initcode, sizeof(initcode));
-  assert(vma_mmap(p->vm, UVMBOTTOM, PGSIZE, flags, NULL, 0, initcode_page) == 0,
-         "userinit: vma_mmap failed");
-  assert(vm_createstack(p->vm, ustack_top, USERSTACK * PGSIZE) == 0,
-         "userinit: vm_createstack failed");
-
-  // allocate signal actions for the process
-  p->sigacts = sigacts_init();
-  assert(p->sigacts != NULL, "userinit: sigacts_init failed");
-
-  // printf("\nuser pagetable after uvmfirst:\n");
-  // dump_pagetable(p->vm.pagetable, 2, 0, 0, 0, false);
-  // printf("\n");
-
-  // prepare for the very first "return" from kernel to user.
-  p->trapframe->epc = UVMBOTTOM;      // user program counter
-  p->trapframe->sp = USTACKTOP;  // user stack pointer
-
-  safestrcpy(p->name, "initcode", sizeof(p->name));
-  p->cwd = namei("/");
-
-  __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
-
-  sched_lock();
-  scheduler_wakeup(p);
-  sched_unlock();
-  proc_unlock(p);
-}
-
-// Grow or shrink user memory by n bytes.
-// Return 0 on success, -1 on failure.
-int
-growproc(int n)
-{
-  struct proc *p = myproc();
-
-  return vm_growheap(p->vm, n);
 }
 
 // attach a newly forked process to the current process as its child.
@@ -516,6 +315,246 @@ detach_child(struct proc *parent, struct proc *child)
          "detach_child: parent has no children after detaching child");
 }
 
+// allocate and initialize a new proc structure.
+// The newly created process will be a kernel process, which means it will not have
+// user space environment set up.
+// and return without p->lock held.
+// If there are no free procs, or a memory allocation fails, return NULL.
+// Signal actions will not be initialized here.
+STATIC struct proc*
+allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order)
+{
+  struct proc *p = NULL;
+  void *kstack = NULL;
+
+  if (kstack_order < 0 || kstack_order > PAGE_BUDDY_MAX_ORDER) {
+    return NULL; // Invalid kernel stack order
+  }
+
+  __proctab_assert_unlocked();
+
+  // Allocate a kernel stack page.
+  kstack = page_alloc(kstack_order, PAGE_FLAG_ANON);
+  if(kstack == NULL){
+    return NULL;
+  }
+  size_t kstack_size = (1UL << (PAGE_SHIFT + kstack_order));
+  memset(kstack, 0, kstack_size);
+  // Place PCB at the top of the kernel stack
+  p = (struct proc *)(kstack  + kstack_size - sizeof(struct proc));
+  __pcb_init(p);
+
+  // Set up new context to start executing at forkret,
+  // which returns to user space.
+  p->kstack_order = kstack_order;
+  p->kstack = (uint64)kstack;
+  memset(&p->context, 0, sizeof(p->context));
+  p->context.ra = (uint64)entry;
+  p->ksp = ((uint64)p - sizeof(struct trapframe) - 16);
+  p->ksp &= ~0x7UL; // align to 8 bytes
+  p->trapframe = (void *)p->ksp;
+  p->ksp -= 16;
+  p->ksp &= ~0x7UL; // align to 8 bytes
+  p->context.sp = p->ksp;
+  p->kentry = (uint64)entry;
+  p->arg[0] = arg1;
+  p->arg[1] = arg2;
+
+  __proctab_lock();
+  p->pid = __alloc_pid();
+  if (__proctab_add(p) != 0) {
+    __proctab_unlock();
+    freeproc(p);
+    return NULL;
+  }
+
+  __proctab_unlock();
+  return p;
+}
+
+static void __kernel_proc_entry(void) {
+  // Still holding p->lock from scheduler.
+  sched_unlock(); // Release the scheduler lock.
+  proc_unlock(myproc());
+  intr_on();
+  // Set up the kernel stack and context for the new process.
+  int (*entry)(uint64, uint64) = (void*)myproc()->kentry;
+  int ret = entry(myproc()->arg[0], myproc()->arg[1]);
+  exit(ret);
+}
+
+// create a new kernel process, which runs the function entry.
+// Kernel thread will be attached to the init process as its child.
+int kernel_proc_create(struct proc **retp, void *entry, 
+                       uint64 arg1, uint64 arg2, int stack_order) {
+  struct proc *p = allocproc(entry, arg1, arg2, stack_order);
+  if (p == NULL) {
+    *retp = NULL;
+    return -1; // Allocation failed
+  }
+  struct proc *initproc = __proctab_get_initproc();
+  assert(initproc != NULL, "kernel_proc_create: initproc is NULL");
+  proc_lock(initproc);
+  proc_lock(p);
+  attach_child(initproc, p);
+  proc_unlock(initproc);
+
+  p->context.ra = (uint64)__kernel_proc_entry;
+  p->kentry = (uint64)entry;
+  p->arg[0] = arg1;
+  p->arg[1] = arg2;
+  // Newly allocated process is a kernel process
+  assert(!PROC_USER_SPACE(p), "kernel_proc_create: new proc is a user process");
+  safestrcpy(p->name, "kproc", sizeof(p->name));
+  __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
+  if (retp != NULL) {
+    *retp = p;
+  }
+
+  sched_lock();
+  scheduler_wakeup(p);
+  sched_unlock();
+  proc_unlock(p);
+  return p->pid;
+}
+
+// free a proc structure and the data hanging from it,
+// including user pages.
+// p->lock must not be held.
+STATIC void
+freeproc(struct proc *p)
+{
+  assert(p != NULL, "freeproc called with NULL proc");
+  assert(!PROC_AWOKEN(p), "freeproc called with a runnable proc");
+  assert(!PROC_SLEEPING(p), "freeproc called with a sleeping proc");
+
+  __proctab_lock();
+  proc_lock(p);
+  assert(p->kstack_order >= 0 && p->kstack_order <= PAGE_BUDDY_MAX_ORDER,
+         "freeproc: invalid kstack_order %d", p->kstack_order);
+  struct proc *existing = hlist_pop(&proc_table.procs, p);
+  // Remove from the global list of processes for dumping.
+  list_entry_detach(&p->dmp_list_entry);
+  __proctab_unlock();
+
+  assert(existing == NULL || existing == p, "freeproc called with a different proc");
+  if(p->sigacts)
+    sigacts_free(p->sigacts);
+  if (p->vm != NULL) {
+    proc_freepagetable(p);
+  }
+  sigpending_destroy(p);
+
+  page_free((void *)p->kstack, p->kstack_order);
+  pop_off();  // PCB has been freed, so no need to keep noff counter increased
+}
+
+// Create a user page table for a given process, with no user memory,
+// but with trampoline and trapframe pages.
+int
+proc_pagetable(struct proc *p)
+{
+  // Create a new VM structure for the process.
+  p->vm = vm_init((uint64)p->trapframe);
+  if (p->vm == NULL) {
+    return -1; // Failed to initialize VM
+  }
+  return 0;
+}
+
+// Free a process's page table, and free the
+// physical memory it refers to.
+void
+proc_freepagetable(struct proc *p)
+{
+  vm_destroy(p->vm);
+}
+
+// a user program that calls exec("/init")
+// assembled from ../user/initcode.S
+// od -t xC ../user/initcode
+uchar initcode[] = {
+  0x17, 0x05, 0x00, 0x00, 0x13, 0x05, 0x45, 0x02,
+  0x97, 0x05, 0x00, 0x00, 0x93, 0x85, 0x35, 0x02,
+  0x93, 0x08, 0x70, 0x00, 0x73, 0x00, 0x00, 0x00,
+  0x93, 0x08, 0x20, 0x00, 0x73, 0x00, 0x00, 0x00,
+  0xef, 0xf0, 0x9f, 0xff, 0x2f, 0x69, 0x6e, 0x69,
+  0x74, 0x00, 0x00, 0x24, 0x10, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00
+};
+
+// Set up first user process.
+void
+userinit(void)
+{
+  struct proc *p;
+
+  p = allocproc(forkret, 0, 0, KERNEL_STACK_ORDER);
+  assert(p != NULL, "userinit: allocproc failed");
+  printf("Init process kernel stack size order: %d\n", p->kstack_order);
+
+  // Allocate pagetable for the process.
+  assert(proc_pagetable(p) == 0, "userinit: proc_pagetable failed");
+
+  // // printf user pagetable
+  // printf("\nuser pagetable after allocproc:\n");
+  // dump_pagetable(p->vm.pagetable, 2, 0, 0, 0, false);
+  // printf("\n");
+
+  __proctab_lock();
+  __proctab_set_initproc(p);
+  __proctab_unlock();
+  
+  // allocate one user page and copy initcode's instructions
+  // and data into it.
+  uint64 ustack_top = USTACKTOP;
+  printf("user stack top at 0x%lx\n", ustack_top);
+  proc_lock(p);
+  uint64 flags = VM_FLAG_EXEC | VM_FLAG_READ | VM_FLAG_USERMAP;
+  assert(sizeof(initcode) <= PGSIZE, "userinit: initcode too large");
+  void *initcode_page = page_alloc(0, PAGE_FLAG_ANON);
+  assert(initcode_page != NULL, "userinit: page_alloc failed for initcode");
+  memset(initcode_page, 0, PGSIZE);
+  memmove(initcode_page, initcode, sizeof(initcode));
+  assert(vma_mmap(p->vm, UVMBOTTOM, PGSIZE, flags, NULL, 0, initcode_page) == 0,
+         "userinit: vma_mmap failed");
+  assert(vm_createstack(p->vm, ustack_top, USERSTACK * PGSIZE) == 0,
+         "userinit: vm_createstack failed");
+
+  // allocate signal actions for the process
+  p->sigacts = sigacts_init();
+  assert(p->sigacts != NULL, "userinit: sigacts_init failed");
+
+  // printf("\nuser pagetable after uvmfirst:\n");
+  // dump_pagetable(p->vm.pagetable, 2, 0, 0, 0, false);
+  // printf("\n");
+
+  // prepare for the very first "return" from kernel to user.
+  p->trapframe->epc = UVMBOTTOM;      // user program counter
+  p->trapframe->sp = USTACKTOP;  // user stack pointer
+
+  safestrcpy(p->name, "initcode", sizeof(p->name));
+  p->cwd = namei("/");
+
+  PROC_SET_USER_SPACE(p);
+  __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
+
+  sched_lock();
+  scheduler_wakeup(p);
+  sched_unlock();
+  proc_unlock(p);
+}
+
+// Grow or shrink user memory by n bytes.
+// Return 0 on success, -1 on failure.
+int
+growproc(int n)
+{
+  struct proc *p = myproc();
+
+  return vm_growheap(p->vm, n);
+}
+
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
 int
@@ -525,8 +564,12 @@ fork(void)
   struct proc *np;
   struct proc *p = myproc();
 
+  if (!PROC_USER_SPACE(p)) {
+    return -1;
+  }
+
   // Allocate process.
-  if((np = allocproc()) == 0){
+  if((np = allocproc(forkret, 0, 0, p->kstack_order)) == 0){
     return -1;
   }
 
@@ -534,7 +577,7 @@ fork(void)
   proc_lock(np);
 
   // Copy user memory from parent to child.
-  if((np->vm = vm_dup(p->vm, np->trapframe)) == NULL){
+  if((np->vm = vm_dup(p->vm, (uint64)np->trapframe)) == NULL){
     // @TODO: need to make sure no one would access np before freeing it.
     proc_unlock(np);
     proc_unlock(p);
@@ -570,6 +613,7 @@ fork(void)
   pid = np->pid;
 
   attach_child(p, np);
+  PROC_SET_USER_SPACE(np);
   __proc_set_pstate(np, PSTATE_UNINTERRUPTIBLE);
   proc_unlock(p);
   
@@ -660,9 +704,11 @@ exit(int status)
   p->cwd = 0;
   proc_unlock(p);
 
-  begin_op();
-  iput(cwd);
-  end_op();
+  if (cwd != NULL) {
+    begin_op();
+    iput(cwd);
+    end_op();
+  }
 
   // Give any children to init.
   reparent(p);
@@ -742,6 +788,7 @@ forkret(void)
 {
   STATIC int first = 1;
 
+  assert(PROC_USER_SPACE(myproc()), "kernel process %d tries to return to user space", myproc()->pid);
   // The scheduler will disable interrupts to assure the atomicity of
   // the scheduler operations. For processes that gave up CPU by calling yield(),
   //   yield() would restore the previous interruption state when switched back. 
@@ -854,7 +901,7 @@ procdump(void)
   hlist_bucket_t *bucket;
   hlist_entry_t *pos_entry, *tmp;
 
-  printf("\n");
+  printf("Process List:\n");
   if (!_panic_state)
   {
     __proctab_lock();
@@ -874,7 +921,9 @@ procdump(void)
       continue;
 
     state = procstate_to_str(pstate);
-    printf("%d %s%s %s", pid, state, PROC_STOPPED(p) ? " (stopped)" : "", name);
+    printf("%d %s%s [%s] %s", pid, state, 
+            PROC_STOPPED(p) ? " (stopped)" : "", 
+            PROC_USER_SPACE(p) ? "U":"K", name);
     printf("\n");
   }
 

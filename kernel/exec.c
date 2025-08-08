@@ -85,7 +85,7 @@ exec(char *path, char **argv)
   if(elf.magic != ELF_MAGIC)
     goto bad;
 
-  if ((tmp_vm = vm_init(p->trapframe)) == NULL) {
+  if ((tmp_vm = vm_init((uint64)p->trapframe)) == NULL) {
     goto bad;
   }
 
