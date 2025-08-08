@@ -281,7 +281,7 @@ myproc(void)
 // If there are no free procs, or a memory allocation fails, return NULL.
 // Signal actions will not be initialized here.
 STATIC struct proc*
-allocproc(void *entry, int kstack_order)
+allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order)
 {
   struct proc *p = NULL;
   void *kstack = NULL;
@@ -315,6 +315,9 @@ allocproc(void *entry, int kstack_order)
   p->ksp -= 16;
   p->ksp &= ~0x7UL; // align to 8 bytes
   p->context.sp = p->ksp;
+  p->kentry = (uint64)entry;
+  p->arg[0] = arg1;
+  p->arg[1] = arg2;
 
   __proctab_lock();
   p->pid = __alloc_pid();
@@ -328,7 +331,38 @@ allocproc(void *entry, int kstack_order)
   return p;
 }
 
-// void kproc_create
+static void __kernel_proc_entry(void) {
+  // Set up the kernel stack and context for the new process.
+  int (*entry)(uint64, uint64) = (void*)myproc()->kentry;
+  int ret = entry(myproc()->arg[0], myproc()->arg[1]);
+  exit(ret);
+}
+
+// create a new kernel process, which runs the function entry.
+int kernel_proc_create(struct proc **retp, void *entry, 
+                       uint64 arg1, uint64 arg2, int stack_order) {
+  struct proc *p = allocproc(entry, arg1, arg2, stack_order);
+  if (p == NULL) {
+    *retp = NULL;
+    return -1; // Allocation failed
+  }
+  p->context.ra = (uint64)__kernel_proc_entry;
+  p->kentry = (uint64)entry;
+  p->arg[0] = arg1;
+  p->arg[1] = arg2;
+  // Newly allocated process is a kernel process
+  assert(!PROC_USER_SPACE(p), "kernel_proc_create: new proc is a user process");
+  safestrcpy(p->name, "kproc", sizeof(p->name));
+  __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
+  if (retp != NULL) {
+    *retp = p;
+  }
+
+  sched_lock();
+  scheduler_wakeup(p);
+  sched_unlock();
+  return p->pid;
+}
 
 // free a proc structure and the data hanging from it,
 // including user pages.
@@ -401,7 +435,7 @@ userinit(void)
 {
   struct proc *p;
 
-  p = allocproc(forkret, KERNEL_STACK_ORDER);
+  p = allocproc(forkret, 0, 0, KERNEL_STACK_ORDER);
   assert(p != NULL, "userinit: allocproc failed");
   printf("Init process kernel stack size order: %d\n", p->kstack_order);
 
@@ -517,8 +551,12 @@ fork(void)
   struct proc *np;
   struct proc *p = myproc();
 
+  if (!PROC_USER_SPACE(p)) {
+    return -1;
+  }
+
   // Allocate process.
-  if((np = allocproc(forkret, p->kstack_order)) == 0){
+  if((np = allocproc(forkret, 0, 0, p->kstack_order)) == 0){
     return -1;
   }
 
