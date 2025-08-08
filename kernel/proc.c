@@ -213,7 +213,6 @@ __pcb_init(struct proc *p)
   list_entry_init(&p->children);
   hlist_entry_init(&p->proctab_entry);
   spin_init(&p->lock, "proc");
-  p->kstack = (uint64)p; // Place PCB at the base of the kernel stack
 }
 
 void
@@ -295,16 +294,19 @@ allocproc(void *entry)
     return NULL;
   }
   memset(kstack, 0, KERNEL_STACK_SIZE);
-  p = kstack; // Place PCB at the base of the kernel stack
+  // Place PCB at the top of the kernel stack
+  p = (struct proc *)(kstack  + KERNEL_STACK_SIZE - sizeof(struct proc));
   __pcb_init(p);
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
+  p->kstack = (uint64)kstack;
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)entry;
-  p->ksp = (uint64)kstack + KERNEL_STACK_SIZE - sizeof(struct trapframe);
+  p->ksp = ((uint64)p - sizeof(struct trapframe) - 16);
+  p->ksp &= ~0x7UL; // align to 8 bytes
   p->trapframe = (void *)p->ksp;
-  p->ksp -= 8;
+  p->ksp -= 16;
   p->ksp &= ~0x7UL; // align to 8 bytes
   p->context.sp = p->ksp;
 

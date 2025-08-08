@@ -186,6 +186,7 @@ free_desc(int i)
   disk.free_list[disk.free_idx] = i; // Add to free list
   disk.free_idx++;
   assert(disk.free_idx <= NUM, "free_idx out of bounds");
+  __atomic_signal_fence(__ATOMIC_SEQ_CST);
   wakeup(&disk.free[0]);
 }
 
@@ -209,6 +210,7 @@ free_chain(int i)
 STATIC int
 alloc3_desc(int *idx)
 {
+  __atomic_signal_fence(__ATOMIC_SEQ_CST);
   for(int i = 0; i < 3; i++){
     idx[i] = alloc_desc();
     if(idx[i] < 0){
