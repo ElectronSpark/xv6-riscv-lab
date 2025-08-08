@@ -98,6 +98,7 @@ struct proc {
 
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
+  int kstack_order;            // Kernel stack order, used for allocation
   uint64 ksp;
   vm_t *vm;                     // Virtual memory areas and page table
   struct trapframe *trapframe; // data page for trampoline.S

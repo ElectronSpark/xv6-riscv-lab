@@ -281,25 +281,31 @@ myproc(void)
 // If there are no free procs, or a memory allocation fails, return NULL.
 // Signal actions will not be initialized here.
 STATIC struct proc*
-allocproc(void *entry)
+allocproc(void *entry, int kstack_order)
 {
   struct proc *p = NULL;
   void *kstack = NULL;
 
+  if (kstack_order < 0 || kstack_order > PAGE_BUDDY_MAX_ORDER) {
+    return NULL; // Invalid kernel stack order
+  }
+
   __proctab_assert_unlocked();
 
   // Allocate a kernel stack page.
-  kstack = page_alloc(KERNEL_STACK_ORDER, PAGE_FLAG_ANON);
+  kstack = page_alloc(kstack_order, PAGE_FLAG_ANON);
   if(kstack == NULL){
     return NULL;
   }
-  memset(kstack, 0, KERNEL_STACK_SIZE);
+  size_t kstack_size = (1UL << (PAGE_SHIFT + kstack_order));
+  memset(kstack, 0, kstack_size);
   // Place PCB at the top of the kernel stack
-  p = (struct proc *)(kstack  + KERNEL_STACK_SIZE - sizeof(struct proc));
+  p = (struct proc *)(kstack  + kstack_size - sizeof(struct proc));
   __pcb_init(p);
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
+  p->kstack_order = kstack_order;
   p->kstack = (uint64)kstack;
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)entry;
@@ -322,6 +328,8 @@ allocproc(void *entry)
   return p;
 }
 
+// void kproc_create
+
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must not be held.
@@ -334,6 +342,8 @@ freeproc(struct proc *p)
 
   __proctab_lock();
   proc_lock(p);
+  assert(p->kstack_order >= 0 && p->kstack_order <= PAGE_BUDDY_MAX_ORDER,
+         "freeproc: invalid kstack_order %d", p->kstack_order);
   struct proc *existing = hlist_pop(&proc_table.procs, p);
   // Remove from the global list of processes for dumping.
   list_entry_detach(&p->dmp_list_entry);
@@ -346,8 +356,8 @@ freeproc(struct proc *p)
     proc_freepagetable(p);
   }
   sigpending_destroy(p);
-  
-  page_free((void *)p->kstack, KERNEL_STACK_ORDER);
+
+  page_free((void *)p->kstack, p->kstack_order);
   pop_off();  // PCB has been freed, so no need to keep noff counter increased
 }
 
@@ -391,8 +401,9 @@ userinit(void)
 {
   struct proc *p;
 
-  p = allocproc(forkret);
+  p = allocproc(forkret, KERNEL_STACK_ORDER);
   assert(p != NULL, "userinit: allocproc failed");
+  printf("Init process kernel stack size order: %d\n", p->kstack_order);
 
   // Allocate pagetable for the process.
   assert(proc_pagetable(p) == 0, "userinit: proc_pagetable failed");
@@ -507,7 +518,7 @@ fork(void)
   struct proc *p = myproc();
 
   // Allocate process.
-  if((np = allocproc(forkret)) == 0){
+  if((np = allocproc(forkret, p->kstack_order)) == 0){
     return -1;
   }
 
@@ -837,7 +848,7 @@ procdump(void)
   hlist_bucket_t *bucket;
   hlist_entry_t *pos_entry, *tmp;
 
-  printf("\n");
+  printf("Process List:\n");
   if (!_panic_state)
   {
     __proctab_lock();
@@ -857,7 +868,9 @@ procdump(void)
       continue;
 
     state = procstate_to_str(pstate);
-    printf("%d %s%s %s", pid, state, PROC_STOPPED(p) ? " (stopped)" : "", name);
+    printf("%d %s%s [%s] %s", pid, state, 
+            PROC_STOPPED(p) ? " (stopped)" : "", 
+            PROC_USER_SPACE(p) ? "U":"K", name);
     printf("\n");
   }
 

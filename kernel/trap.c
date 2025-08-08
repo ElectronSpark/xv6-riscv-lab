@@ -255,8 +255,6 @@ usertrapret(void)
 {
   struct proc *p = myproc();
 
-  assert(PROC_USER_SPACE(myproc()), "kernel process %d tries to return to user space", myproc()->pid);
-
   if (killed(p)) {
     // If the process is terminated, exit it.
     exit(-1);
@@ -363,10 +361,12 @@ kerneltrap(struct ktrapframe *sp, uint64 s0)
     sp->ra = r_sepc();
     // to enconvinient gdb back trace
     *(uint64 *)((uint64)sp - 8) = r_sepc();
-    if (myproc() == NULL)
+    if (myproc() == NULL) {
       printf("kerneltrap: no current process\n");
-    else
-      print_backtrace((uint64)sp, myproc()->kstack, myproc()->kstack + KERNEL_STACK_SIZE);
+    } else {
+      size_t kstack_size = (1UL << (PAGE_SHIFT + myproc()->kstack_order));
+      print_backtrace((uint64)sp, myproc()->kstack, myproc()->kstack + kstack_size);
+    }
     kerneltrap_dump_regs(sp);
     panic_disable_bt();
     panic("kerneltrap");
