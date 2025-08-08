@@ -274,6 +274,47 @@ myproc(void)
   return p;
 }
 
+// attach a newly forked process to the current process as its child.
+// This function is called by fork() to set up the parent-child relationship.
+// caller must hold the lock of its process (the parent) and the lock of the new process (the child).
+void
+attach_child(struct proc *parent, struct proc *child)
+{
+  assert(parent != NULL, "attach_child: parent is NULL");
+  assert(child != NULL, "attach_child: child is NULL");
+  assert(child != __proctab_get_initproc(), "attach_child: child is init process");
+  proc_assert_holding(parent);
+  proc_assert_holding(child);
+  assert(LIST_ENTRY_IS_DETACHED(&child->siblings), "attach_child: child is attached to a parent");
+  assert(child->parent == NULL, "attach_child: child has a parent");
+
+  // Attach the child to the parent.
+  child->parent = parent;
+  list_entry_push(&parent->children, &child->siblings);
+  parent->children_count++;
+}
+
+void
+detach_child(struct proc *parent, struct proc *child)
+{
+  assert(parent != NULL, "detach_child: parent is NULL");
+  assert(child != NULL, "detach_child: child is NULL");
+  proc_assert_holding(parent);
+  proc_assert_holding(child);
+  assert(parent->children_count > 0, "detach_child: parent has no children");
+  assert(!LIST_IS_EMPTY(&child->siblings), "detach_child: child is not a sibling of parent");
+  assert(!LIST_ENTRY_IS_DETACHED(&child->siblings), "detach_child: child is already detached");
+  assert(child->parent == parent, "detach_child: child is not a child of parent");
+
+  // Detach the child from the parent.
+  list_entry_detach(&child->siblings);
+  parent->children_count--;
+  child->parent = NULL;
+
+  assert(parent-> children_count > 0 || LIST_IS_EMPTY(&parent->children),
+         "detach_child: parent has no children after detaching child");
+}
+
 // allocate and initialize a new proc structure.
 // The newly created process will be a kernel process, which means it will not have
 // user space environment set up.
@@ -332,6 +373,10 @@ allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order)
 }
 
 static void __kernel_proc_entry(void) {
+  // Still holding p->lock from scheduler.
+  sched_unlock(); // Release the scheduler lock.
+  proc_unlock(myproc());
+  intr_on();
   // Set up the kernel stack and context for the new process.
   int (*entry)(uint64, uint64) = (void*)myproc()->kentry;
   int ret = entry(myproc()->arg[0], myproc()->arg[1]);
@@ -339,6 +384,7 @@ static void __kernel_proc_entry(void) {
 }
 
 // create a new kernel process, which runs the function entry.
+// Kernel thread will be attached to the init process as its child.
 int kernel_proc_create(struct proc **retp, void *entry, 
                        uint64 arg1, uint64 arg2, int stack_order) {
   struct proc *p = allocproc(entry, arg1, arg2, stack_order);
@@ -346,6 +392,13 @@ int kernel_proc_create(struct proc **retp, void *entry,
     *retp = NULL;
     return -1; // Allocation failed
   }
+  struct proc *initproc = __proctab_get_initproc();
+  assert(initproc != NULL, "kernel_proc_create: initproc is NULL");
+  proc_lock(initproc);
+  proc_lock(p);
+  attach_child(initproc, p);
+  proc_unlock(initproc);
+
   p->context.ra = (uint64)__kernel_proc_entry;
   p->kentry = (uint64)entry;
   p->arg[0] = arg1;
@@ -361,6 +414,7 @@ int kernel_proc_create(struct proc **retp, void *entry,
   sched_lock();
   scheduler_wakeup(p);
   sched_unlock();
+  proc_unlock(p);
   return p->pid;
 }
 
@@ -499,47 +553,6 @@ growproc(int n)
   struct proc *p = myproc();
 
   return vm_growheap(p->vm, n);
-}
-
-// attach a newly forked process to the current process as its child.
-// This function is called by fork() to set up the parent-child relationship.
-// caller must hold the lock of its process (the parent) and the lock of the new process (the child).
-void
-attach_child(struct proc *parent, struct proc *child)
-{
-  assert(parent != NULL, "attach_child: parent is NULL");
-  assert(child != NULL, "attach_child: child is NULL");
-  assert(child != __proctab_get_initproc(), "attach_child: child is init process");
-  proc_assert_holding(parent);
-  proc_assert_holding(child);
-  assert(LIST_ENTRY_IS_DETACHED(&child->siblings), "attach_child: child is attached to a parent");
-  assert(child->parent == NULL, "attach_child: child has a parent");
-
-  // Attach the child to the parent.
-  child->parent = parent;
-  list_entry_push(&parent->children, &child->siblings);
-  parent->children_count++;
-}
-
-void
-detach_child(struct proc *parent, struct proc *child)
-{
-  assert(parent != NULL, "detach_child: parent is NULL");
-  assert(child != NULL, "detach_child: child is NULL");
-  proc_assert_holding(parent);
-  proc_assert_holding(child);
-  assert(parent->children_count > 0, "detach_child: parent has no children");
-  assert(!LIST_IS_EMPTY(&child->siblings), "detach_child: child is not a sibling of parent");
-  assert(!LIST_ENTRY_IS_DETACHED(&child->siblings), "detach_child: child is already detached");
-  assert(child->parent == parent, "detach_child: child is not a child of parent");
-
-  // Detach the child from the parent.
-  list_entry_detach(&child->siblings);
-  parent->children_count--;
-  child->parent = NULL;
-
-  assert(parent-> children_count > 0 || LIST_IS_EMPTY(&parent->children),
-         "detach_child: parent has no children after detaching child");
 }
 
 // Create a new process, copying the parent.
@@ -691,9 +704,11 @@ exit(int status)
   p->cwd = 0;
   proc_unlock(p);
 
-  begin_op();
-  iput(cwd);
-  end_op();
+  if (cwd != NULL) {
+    begin_op();
+    iput(cwd);
+    end_op();
+  }
 
   // Give any children to init.
   reparent(p);
