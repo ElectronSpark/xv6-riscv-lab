@@ -8,9 +8,6 @@
 
 volatile STATIC int started = 0;
 
-// forward decl for rwlock tests
-void rwlock_launch_tests(void);
-
 // just to test the kernel thread creation
 // will exit immediately after printing the args
 static inline void __idle(uint64 arg1, uint64 arg2) {
@@ -47,8 +44,6 @@ main()
     userinit();      // first user process
     int kpid = kernel_proc_create(NULL, __idle, 128, 256, KERNEL_STACK_ORDER); // Create an idle kernel thread
     printf("Idle kernel thread created with pid: %d\n", kpid);
-    // launch rwlock tests
-    // rwlock_launch_tests();
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     started = 1;
   } else {

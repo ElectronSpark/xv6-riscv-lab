@@ -807,6 +807,13 @@ forkret(void)
 
     first = 0;
     // ensure other cores see first=0.
+
+#ifdef RWAD_WRITE_TEST
+    // forward decl for rwlock tests
+    void rwlock_launch_tests(void);
+    // launch rwlock tests
+    rwlock_launch_tests();
+#endif
   }
   
   // printf("forkret: process %d is running\n", myproc()->pid);

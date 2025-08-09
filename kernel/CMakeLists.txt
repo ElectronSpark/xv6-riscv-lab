@@ -45,6 +45,13 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/rbtree.c
     ${KERNEL_DIR}/rwlock_test.c
 )
+
+if(DEFINED ENV{RWLOCK_TEST})
+    set(KERNEL_C_FILES
+        ${KERNEL_C_FILES}
+        ${KERNEL_DIR}/rwlock_test.c
+    )
+endif()
     
 set(KERNEL_SCAN_OBJS
     ${KERNEL_DIR}/start.c
@@ -101,6 +108,12 @@ add_executable(${KERNEL_BINARY} ${KERNEL_OBJS})
 
 # Use target_link_options to set linker flags so they appear in <LINK_FLAGS>
 target_link_options(${KERNEL_BINARY} PRIVATE -z max-page-size=4096 -T ${KERNEL_DIR}/kernel.ld)
+
+if(DEFINED ENV{RWLOCK_TEST})
+    target_compile_definitions(${KERNEL_BINARY} PRIVATE
+        RWAD_WRITE_TEST=1
+    )
+endif()
 
 # decompile the kernel binary
 add_custom_target(${KERNEL_DECOMPILED}
