@@ -11,14 +11,24 @@
 #include "proc_queue.h"
 #include "sched.h"
 
+#define __sleep_lock_set_holder(lk, p) \
+    __atomic_store_n(&lk->holder, p, __ATOMIC_SEQ_CST)
+#define __sleep_lock_holder(lk) \
+    __atomic_load_n(&lk->holder, __ATOMIC_SEQ_CST)
+#define __sleep_lock_try_set_holder(lk, p) ({           \
+  struct proc *old = NULL;                              \
+  __atomic_compare_exchange_n(&lk->holder, &old, p, 1,  \
+                              __ATOMIC_SEQ_CST,         \
+                              __ATOMIC_SEQ_CST);        \
+})
+
 void
 initsleeplock(struct sleeplock *lk, char *name)
 {
   spin_init(&lk->lk, "sleep lock");
   proc_queue_init(&lk->wait_queue, "sleep lock wait queue", &lk->lk);
   lk->name = name;
-  lk->locked = 0;
-  lk->holder = NULL;
+  __sleep_lock_set_holder(lk, NULL);
 }
 
 int
@@ -26,19 +36,17 @@ acquiresleep(struct sleeplock *lk)
 {
   proc_node_t waiter = { 0 };
   int ret = -1;
-  proc_node_init(&waiter);
-  spin_acquire(&lk->lk);
 
   // If the lock is not held, acquire it and return success.
-  if (lk->locked == 0) {
-    lk->locked = 1;
-    lk->holder = myproc();
-    ret = 0;
-    goto done; // Success: lock acquired
+  if (__sleep_lock_try_set_holder(lk, myproc())) {
+    return 0;
   }
-  assert(lk->holder != myproc(), "acquiresleep: deadlock detected, process already holds the lock");
 
   // Slow path
+  spin_acquire(&lk->lk);
+  assert(__sleep_lock_holder(lk) != myproc(), 
+         "acquiresleep: deadlock detected, process already holds the lock");
+  proc_node_init(&waiter);
   proc_lock(myproc());
   // @TODO: handle signals
   if (proc_queue_push(&lk->wait_queue, &waiter) != 0) {
@@ -49,7 +57,7 @@ acquiresleep(struct sleeplock *lk)
   for (;;) {
     __proc_set_pstate(myproc(), PSTATE_UNINTERRUPTIBLE);
     scheduler_sleep(&lk->lk);
-    if (lk->holder == myproc()) {
+    if (__sleep_lock_holder(lk) == myproc()) {
       assert(proc_queue_remove(&lk->wait_queue, &waiter) == 0,
              "acquiresleep: failed to remove from wait queue");
       ret = 0;
@@ -73,8 +81,7 @@ releasesleep(struct sleeplock *lk)
   // from the wait queue.
   spin_acquire(&lk->lk);
   if (LIST_IS_EMPTY(&lk->wait_queue.head)) {
-    lk->locked = 0; // Lock is released
-    lk->holder = NULL; // No process holds the lock
+    __sleep_lock_set_holder(lk, NULL); // No process holds the lock
     assert(proc_queue_size(&lk->wait_queue) == 0,
            "releasesleep: wait queue is not empty");
     spin_release(&lk->lk);
@@ -84,14 +91,13 @@ releasesleep(struct sleeplock *lk)
   assert(proc_queue_first(&lk->wait_queue, &first_waiter) == 0,
          "releasesleep: failed to get first process from wait queue");
   if (first_waiter == NULL) {
-    lk->holder = NULL;
-    lk->locked = 0; // Lock is released
+    __sleep_lock_set_holder(lk, NULL); // No process holds the lock
     assert(proc_queue_size(&lk->wait_queue) == 0,
            "releasesleep: wait queue is not empty");
   } else {
     struct proc *next = proc_node_get_proc(first_waiter);
     assert(next != NULL, "releasesleep: first waiter is NULL");
-    lk->holder = next;
+    __sleep_lock_set_holder(lk, next);
     proc_lock(next); // Lock the process that will hold the lock
     sched_lock();
     scheduler_wakeup(next); // Wake up the first process in the wait queue
@@ -104,12 +110,13 @@ releasesleep(struct sleeplock *lk)
 int
 holdingsleep(struct sleeplock *lk)
 {
-  int r;
+  // int r;
   
-  spin_acquire(&lk->lk);
-  r = lk->locked && (lk->holder == myproc());
-  spin_release(&lk->lk);
-  return r;
+  // spin_acquire(&lk->lk);
+  // r = lk->locked && (lk->holder == myproc());
+  // spin_release(&lk->lk);
+  // return r;
+  return __atomic_load_n(&lk->holder, __ATOMIC_SEQ_CST) == myproc();
 }
 
 
