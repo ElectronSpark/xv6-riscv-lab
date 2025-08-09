@@ -29,7 +29,7 @@ int nmeta;    // Number of meta blocks (boot, sb, nlog, inode, bitmap)
 int nblocks;  // Number of data blocks
 
 int fsfd;
-struct superblock sb;
+struct xv6_superblock sb;
 char zeroes[BSIZE];
 uint freeinode = 1;
 uint freeblock;
@@ -37,8 +37,8 @@ uint freeblock;
 
 void balloc(int);
 void wsect(uint, void*);
-void winode(uint, struct dinode*);
-void rinode(uint inum, struct dinode *ip);
+void winode(uint, struct xv6_dinode*);
+void rinode(uint inum, struct xv6_dinode *ip);
 void rsect(uint sec, void *buf);
 uint ialloc(ushort type);
 void iappend(uint inum, void *p, int n);
@@ -72,9 +72,9 @@ main(int argc, char *argv[])
 {
   int i, cc, fd;
   uint rootino, inum, off;
-  struct dirent de;
+  struct xv6_dirent de;
   char buf[BSIZE];
-  struct dinode din;
+  struct xv6_dinode din;
 
 
   static_assert(sizeof(int) == 4, "Integers must be 4 bytes!");
@@ -84,8 +84,8 @@ main(int argc, char *argv[])
     exit(1);
   }
 
-  assert((BSIZE % sizeof(struct dinode)) == 0);
-  assert((BSIZE % sizeof(struct dirent)) == 0);
+  assert((BSIZE % sizeof(struct xv6_dinode)) == 0);
+  assert((BSIZE % sizeof(struct xv6_dirent)) == 0);
 
   fsfd = open(argv[1], O_RDWR|O_CREAT|O_TRUNC, 0666);
   if(fsfd < 0)
@@ -186,29 +186,29 @@ wsect(uint sec, void *buf)
 }
 
 void
-winode(uint inum, struct dinode *ip)
+winode(uint inum, struct xv6_dinode *ip)
 {
   char buf[BSIZE];
   uint bn;
-  struct dinode *dip;
+  struct xv6_dinode *dip;
 
   bn = IBLOCK(inum, sb);
   rsect(bn, buf);
-  dip = ((struct dinode*)buf) + (inum % IPB);
+  dip = ((struct xv6_dinode*)buf) + (inum % IPB);
   *dip = *ip;
   wsect(bn, buf);
 }
 
 void
-rinode(uint inum, struct dinode *ip)
+rinode(uint inum, struct xv6_dinode *ip)
 {
   char buf[BSIZE];
   uint bn;
-  struct dinode *dip;
+  struct xv6_dinode *dip;
 
   bn = IBLOCK(inum, sb);
   rsect(bn, buf);
-  dip = ((struct dinode*)buf) + (inum % IPB);
+  dip = ((struct xv6_dinode*)buf) + (inum % IPB);
   *ip = *dip;
 }
 
@@ -225,7 +225,7 @@ uint
 ialloc(ushort type)
 {
   uint inum = freeinode++;
-  struct dinode din;
+  struct xv6_dinode din;
 
   bzero(&din, sizeof(din));
   din.type = xshort(type);
@@ -258,7 +258,7 @@ iappend(uint inum, void *xp, int n)
 {
   char *p = (char*)xp;
   uint fbn, off, n1;
-  struct dinode din;
+  struct xv6_dinode din;
   char buf[BSIZE];
   uint indirect[NINDIRECT];
   uint x;

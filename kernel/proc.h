@@ -107,8 +107,10 @@ struct proc {
   struct context context;      // swtch() here to run process
   uint64 kentry;               // Entry point for kernel process
   uint64 arg[2];               // Argument for kernel process
-  struct file *ofile[NOFILE];  // Open files
-  struct inode *cwd;           // Current directory
+  struct vfs_file *_ofile[NOFILE]; // @TODO: Placeholder
+  struct vfs_inode *_cwd;          // Current working directory
+  struct xv6_file *ofile[NOFILE];  // Open files
+  struct xv6_inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
 };
 

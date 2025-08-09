@@ -26,11 +26,11 @@
 #define min(a, b) ((a) < (b) ? (a) : (b))
 // there should be one superblock per disk device, but we run with
 // only one device
-struct superblock sb; 
+struct xv6_superblock sb; 
 
 // Read the super block.
 STATIC void
-readsb(int dev, struct superblock *sb)
+readsb(int dev, struct xv6_superblock *sb)
 {
   struct buf *bp;
 
@@ -186,7 +186,7 @@ struct {
 
 // Free an inode into the inode cache.
 static void
-__inode_cache_free(struct inode *ip)
+__inode_cache_free(struct xv6_inode *ip)
 {
   if(ip == 0)
     return;
@@ -198,10 +198,10 @@ __inode_cache_free(struct inode *ip)
 }
 
 // Allocate an empty inode struct from the inode cache.
-static struct inode *
+static struct xv6_inode *
 __inode_cache_alloc(void)
 {
-  struct inode *ip;
+  struct xv6_inode *ip;
 
   ip = slab_alloc(&itable.inode_cache);
   if(ip == 0)
@@ -211,43 +211,43 @@ __inode_cache_alloc(void)
 }
 
 static ht_hash_t __itable_hash_func(void *node)  {
-  struct inode *inode = node;
+  struct xv6_inode *inode = node;
 
   return hlist_hash_uint64(inode->dev + (inode->inum << 16));
 }
 
 static void *__itable_hlist_get_node(hlist_entry_t *entry) {
-  return container_of(entry, struct inode, hlist_entry);
+  return container_of(entry, struct xv6_inode, hlist_entry);
 }
 
 static hlist_entry_t *__itable_hlist_get_entry(void *node) {
-  struct inode *inode = node;
+  struct xv6_inode *inode = node;
   return &inode->hlist_entry;
 }
 
 static int __itable_hlist_cmp(hlist_t *hlist, void *node1, void *node2) {
-  struct inode *inode1 = node1;
-  struct inode *inode2 = node2;
+  struct xv6_inode *inode1 = node1;
+  struct xv6_inode *inode2 = node2;
   int value1 = (int)(inode1->inum + (inode1->dev << 16));
   int value2 = (int)(inode2->inum + (inode2->dev << 16));
 
   return value1 - value2;
 }
 
-static inline struct inode*
+static inline struct xv6_inode*
 __itable_hlist_get(uint dev, uint inum) {
   // Create a dummy node to search for
-  struct inode dummy = { 0 };
+  struct xv6_inode dummy = { 0 };
   dummy.dev = dev;
   dummy.inum = inum;
 
   return hlist_get(&itable.inode_list, &dummy);
 }
 
-static inline struct inode*
+static inline struct xv6_inode*
 __itable_hlist_pop(uint dev, uint inum) {
   // Create a dummy node to search for
-  struct inode dummy = { 0 };
+  struct xv6_inode dummy = { 0 };
   dummy.dev = dev;
   dummy.inum = inum;
 
@@ -255,8 +255,8 @@ __itable_hlist_pop(uint dev, uint inum) {
 }
 
 static inline int
-__itable_hlist_push(struct inode *inode) {
-  struct inode *entry = hlist_put(&itable.inode_list, inode);
+__itable_hlist_push(struct xv6_inode *inode) {
+  struct xv6_inode *entry = hlist_put(&itable.inode_list, inode);
   if (entry == NULL) {
     return 0; // succeeded
   } else if (entry != inode) {
@@ -269,7 +269,7 @@ __itable_hlist_push(struct inode *inode) {
 void
 iinit()
 {
-  int ret = slab_cache_init(&itable.inode_cache, "inode", sizeof(struct inode), SLAB_FLAG_STATIC);
+  int ret = slab_cache_init(&itable.inode_cache, "inode", sizeof(struct xv6_inode), SLAB_FLAG_STATIC);
   if (ret != 0) {
     panic("iinit: slab_cache_init failed");
   }
@@ -287,22 +287,22 @@ iinit()
   spin_init(&itable.lock, "itable");
 }
 
-STATIC struct inode* iget(uint dev, uint inum);
+STATIC struct xv6_inode* iget(uint dev, uint inum);
 
 // Allocate an inode on device dev.
 // Mark it as allocated by  giving it type type.
 // Returns an unlocked but allocated and referenced inode,
 // or NULL if there is no free inode.
-struct inode*
+struct xv6_inode*
 ialloc(uint dev, short type)
 {
   int inum;
   struct buf *bp;
-  struct dinode *dip;
+  struct xv6_dinode *dip;
 
   for(inum = 1; inum < sb.ninodes; inum++){
     bp = bread(dev, IBLOCK(inum, sb));
-    dip = (struct dinode*)bp->data + inum%IPB;
+    dip = (struct xv6_dinode*)bp->data + inum%IPB;
     if(dip->type == 0){  // a free inode
       memset(dip, 0, sizeof(*dip));
       dip->type = type;
@@ -321,19 +321,19 @@ ialloc(uint dev, short type)
 // that lives on disk.
 // Caller must hold ip->lock.
 void
-iupdate(struct inode *ip)
+iupdate(struct xv6_inode *ip)
 {
   struct buf *bp;
-  struct dinode *dip;
+  struct xv6_dinode *dip;
 
   bp = bread(ip->dev, IBLOCK(ip->inum, sb));
-  dip = (struct dinode*)bp->data + ip->inum%IPB;
-  dip->type = ip->type;
-  dip->major = ip->major;
-  dip->minor = ip->minor;
-  dip->nlink = ip->nlink;
-  dip->size = ip->size;
-  memmove(dip->addrs, ip->addrs, sizeof(ip->addrs));
+  dip = (struct xv6_dinode*)bp->data + ip->inum%IPB;
+  dip->type = ip->dinode.type;
+  dip->major = ip->dinode.major;
+  dip->minor = ip->dinode.minor;
+  dip->nlink = ip->dinode.nlink;
+  dip->size = ip->dinode.size;
+  memmove(dip->addrs, ip->dinode.addrs, sizeof(ip->dinode.addrs));
   log_write(bp);
   brelse(bp);
 }
@@ -341,10 +341,10 @@ iupdate(struct inode *ip)
 // Find the inode with number inum on device dev
 // and return the in-memory copy. Does not lock
 // the inode and does not read it from disk.
-STATIC struct inode*
+STATIC struct xv6_inode*
 iget(uint dev, uint inum)
 {
-  struct inode *ip;
+  struct xv6_inode *ip;
 
   spin_acquire(&itable.lock);
 
@@ -382,8 +382,8 @@ iget(uint dev, uint inum)
 
 // Increment reference count for ip.
 // Returns ip to enable ip = idup(ip1) idiom.
-struct inode*
-idup(struct inode *ip)
+struct xv6_inode*
+idup(struct xv6_inode *ip)
 {
   spin_acquire(&itable.lock);
   ip->ref++;
@@ -394,10 +394,10 @@ idup(struct inode *ip)
 // Lock the given inode.
 // Reads the inode from disk if necessary.
 void
-ilock(struct inode *ip)
+ilock(struct xv6_inode *ip)
 {
   struct buf *bp;
-  struct dinode *dip;
+  struct xv6_dinode *dip;
 
   if(ip == 0 || ip->ref < 1)
     panic("ilock");
@@ -406,23 +406,23 @@ ilock(struct inode *ip)
 
   if(ip->valid == 0){
     bp = bread(ip->dev, IBLOCK(ip->inum, sb));
-    dip = (struct dinode*)bp->data + ip->inum%IPB;
-    ip->type = dip->type;
-    ip->major = dip->major;
-    ip->minor = dip->minor;
-    ip->nlink = dip->nlink;
-    ip->size = dip->size;
-    memmove(ip->addrs, dip->addrs, sizeof(ip->addrs));
+    dip = (struct xv6_dinode*)bp->data + ip->inum%IPB;
+    ip->dinode.type = dip->type;
+    ip->dinode.major = dip->major;
+    ip->dinode.minor = dip->minor;
+    ip->dinode.nlink = dip->nlink;
+    ip->dinode.size = dip->size;
+    memmove(ip->dinode.addrs, dip->addrs, sizeof(ip->dinode.addrs));
     brelse(bp);
     ip->valid = 1;
-    if(ip->type == 0)
+    if(ip->dinode.type == 0)
       panic("ilock: no type");
   }
 }
 
 // Unlock the given inode.
 void
-iunlock(struct inode *ip)
+iunlock(struct xv6_inode *ip)
 {
   if(ip == 0 || !holdingsleep(&ip->lock) || ip->ref < 1) {
     printf("iunlock: invalid inode %p ref %d holdingsleep %s\n", ip, ip ? ip->ref : -1, holdingsleep(&ip->lock) ? "true" : "false");
@@ -440,25 +440,25 @@ iunlock(struct inode *ip)
 // All calls to iput() must be inside a transaction in
 // case it has to free the inode.
 void
-iput(struct inode *ip)
+iput(struct xv6_inode *ip)
 {
   spin_acquire(&itable.lock);
   if (ip->ref == 1) {
     acquiresleep(&ip->lock);
     ip->ref = 0;
-    struct inode *popped = __itable_hlist_pop(ip->dev, ip->inum);
+    struct xv6_inode *popped = __itable_hlist_pop(ip->dev, ip->inum);
     spin_release(&itable.lock);
     if (popped != ip) {
       panic("iput: inode not found in hash list");
     }
-    if(ip->valid && ip->nlink == 0){
+    if(ip->valid && ip->dinode.nlink == 0){
       // inode has no links and no other references: truncate and free.
       
       // ip->ref == 1 means no other process can have ip locked,
       // so this acquiresleep() won't block (or deadlock).
       
       itrunc(ip);
-      ip->type = 0;
+      ip->dinode.type = 0;
       iupdate(ip);
     }
     __inode_cache_free(ip);
@@ -471,7 +471,7 @@ iput(struct inode *ip)
 
 // Common idiom: unlock, then put.
 void
-iunlockput(struct inode *ip)
+iunlockput(struct xv6_inode *ip)
 {
   iunlock(ip);
   iput(ip);
@@ -540,17 +540,17 @@ bmap_ind(uint *entry, uint dev, uint bn)
 // If there is no such block, bmap allocates one.
 // returns 0 if out of disk space.
 STATIC uint
-bmap(struct inode *ip, uint bn)
+bmap(struct xv6_inode *ip, uint bn)
 {
   uint addr, *a;
   struct buf *bp;
 
   if(bn < NDIRECT){
-    if((addr = ip->addrs[bn]) == 0){
+    if((addr = ip->dinode.addrs[bn]) == 0){
       addr = balloc(ip->dev);
       if(addr == 0)
         return 0;
-      ip->addrs[bn] = addr;
+      ip->dinode.addrs[bn] = addr;
     }
     return addr;
   }
@@ -558,13 +558,13 @@ bmap(struct inode *ip, uint bn)
 
   if(bn < NINDIRECT){
     // Load indirect block, allocating if necessary.
-    return bmap_ind(&ip->addrs[NDIRECT], ip->dev, bn);
+    return bmap_ind(&ip->dinode.addrs[NDIRECT], ip->dev, bn);
   }
   bn -= NINDIRECT;
 
   if (bn < NDINDIRECT) {
     // Load double indirect block, allocating if necessary.
-    addr = bmap_ind(&ip->addrs[NDIRECT + 1], ip->dev, bn / NINDIRECT);
+    addr = bmap_ind(&ip->dinode.addrs[NDIRECT + 1], ip->dev, bn / NINDIRECT);
     if (addr == 0) {
       return 0; // Out of disk space.
     }
@@ -599,29 +599,29 @@ __itrunc_ind(uint *entry, uint dev)
 // Truncate inode (discard contents).
 // Caller must hold ip->lock.
 void
-itrunc(struct inode *ip)
+itrunc(struct xv6_inode *ip)
 {
   int i;
   struct buf *bp;
   uint *a;
 
   for(i = 0; i < NDIRECT; i++){
-    if(ip->addrs[i]){
-      bfree(ip->dev, ip->addrs[i]);
-      ip->addrs[i] = 0;
+    if(ip->dinode.addrs[i]){
+      bfree(ip->dev, ip->dinode.addrs[i]);
+      ip->dinode.addrs[i] = 0;
     }
   }
 
-  uint nindirect = ip->addrs[NDIRECT];
-  ip->addrs[NDIRECT + 1] = 0;
-  uint ndindirect = ip->addrs[NDIRECT + 1];
-  ip->addrs[NDIRECT + 1] = 0;
+  uint nindirect = ip->dinode.addrs[NDIRECT];
+  ip->dinode.addrs[NDIRECT + 1] = 0;
+  uint ndindirect = ip->dinode.addrs[NDIRECT + 1];
+  ip->dinode.addrs[NDIRECT + 1] = 0;
 
-  ip->size = 0;
+  ip->dinode.size = 0;
   iupdate(ip);
 
   if(nindirect){
-    __itrunc_ind(&ip->addrs[NDIRECT], ip->dev);
+    __itrunc_ind(&ip->dinode.addrs[NDIRECT], ip->dev);
   }
 
   if (ndindirect) {
@@ -641,13 +641,13 @@ itrunc(struct inode *ip)
 // Copy stat information from inode.
 // Caller must hold ip->lock.
 void
-stati(struct inode *ip, struct stat *st)
+stati(struct xv6_inode *ip, struct stat *st)
 {
   st->dev = ip->dev;
   st->ino = ip->inum;
-  st->type = ip->type;
-  st->nlink = ip->nlink;
-  st->size = ip->size;
+  st->type = ip->dinode.type;
+  st->nlink = ip->dinode.nlink;
+  st->size = ip->dinode.size;
 }
 
 // Read data from inode.
@@ -655,15 +655,15 @@ stati(struct inode *ip, struct stat *st)
 // If user_dst==1, then dst is a user virtual address;
 // otherwise, dst is a kernel address.
 int
-readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
+readi(struct xv6_inode *ip, int user_dst, uint64 dst, uint off, uint n)
 {
   uint tot, m;
   struct buf *bp;
 
-  if(off > ip->size || off + n < off)
+  if(off > ip->dinode.size || off + n < off)
     return 0;
-  if(off + n > ip->size)
-    n = ip->size - off;
+  if(off + n > ip->dinode.size)
+    n = ip->dinode.size - off;
 
   for(tot=0; tot<n; tot+=m, off+=m, dst+=m){
     uint addr = bmap(ip, off/BSIZE);
@@ -689,12 +689,12 @@ readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
 // If the return value is less than the requested n,
 // there was an error of some kind.
 int
-writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
+writei(struct xv6_inode *ip, int user_src, uint64 src, uint off, uint n)
 {
   uint tot, m;
   struct buf *bp;
 
-  if(off > ip->size || off + n < off)
+  if(off > ip->dinode.size || off + n < off)
     return -1;
   if(off + n > MAXFILE*BSIZE)
     return -1;
@@ -713,8 +713,8 @@ writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
     brelse(bp);
   }
 
-  if(off > ip->size)
-    ip->size = off;
+  if(off > ip->dinode.size)
+    ip->dinode.size = off;
 
   // write the i-node back to disk even if the size didn't change
   // because the loop above might have called bmap() and added a new
@@ -734,16 +734,16 @@ namecmp(const char *s, const char *t)
 
 // Look for a directory entry in a directory.
 // If found, set *poff to byte offset of entry.
-struct inode*
-dirlookup(struct inode *dp, char *name, uint *poff)
+struct xv6_inode*
+dirlookup(struct xv6_inode *dp, char *name, uint *poff)
 {
   uint off, inum;
-  struct dirent de;
+  struct xv6_dirent de;
 
-  if(dp->type != T_DIR)
+  if(dp->dinode.type != T_DIR)
     panic("dirlookup not DIR");
 
-  for(off = 0; off < dp->size; off += sizeof(de)){
+  for(off = 0; off < dp->dinode.size; off += sizeof(de)){
     if(readi(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
       panic("dirlookup read");
     if(de.inum == 0)
@@ -763,11 +763,11 @@ dirlookup(struct inode *dp, char *name, uint *poff)
 // Write a new directory entry (name, inum) into the directory dp.
 // Returns 0 on success, -1 on failure (e.g. out of disk blocks).
 int
-dirlink(struct inode *dp, char *name, uint inum)
+dirlink(struct xv6_inode *dp, char *name, uint inum)
 {
   int off;
-  struct dirent de;
-  struct inode *ip;
+  struct xv6_dirent de;
+  struct xv6_inode *ip;
 
   // Check that name is not present.
   if((ip = dirlookup(dp, name, 0)) != 0){
@@ -776,7 +776,7 @@ dirlink(struct inode *dp, char *name, uint inum)
   }
 
   // Look for an empty dirent.
-  for(off = 0; off < dp->size; off += sizeof(de)){
+  for(off = 0; off < dp->dinode.size; off += sizeof(de)){
     if(readi(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
       panic("dirlink read");
     if(de.inum == 0)
@@ -834,10 +834,10 @@ skipelem(char *path, char *name)
 // If parent != 0, return the inode for the parent and copy the final
 // path element into name, which must have room for DIRSIZ bytes.
 // Must be called inside a transaction since it calls iput().
-STATIC struct inode*
+STATIC struct xv6_inode*
 namex(char *path, int nameiparent, char *name)
 {
-  struct inode *ip, *next;
+  struct xv6_inode *ip, *next;
 
   if(*path == '/')
     ip = iget(ROOTDEV, ROOTINO);
@@ -846,7 +846,7 @@ namex(char *path, int nameiparent, char *name)
 
   while((path = skipelem(path, name)) != 0){
     ilock(ip);
-    if(ip->type != T_DIR){
+    if(ip->dinode.type != T_DIR){
       iunlockput(ip);
       return 0;
     }
@@ -869,14 +869,14 @@ namex(char *path, int nameiparent, char *name)
   return ip;
 }
 
-struct inode*
+struct xv6_inode*
 namei(char *path)
 {
   char name[DIRSIZ];
   return namex(path, 0, name);
 }
 
-struct inode*
+struct xv6_inode*
 nameiparent(char *path, char *name)
 {
   return namex(path, 1, name);

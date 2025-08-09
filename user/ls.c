@@ -28,7 +28,7 @@ ls(char *path)
 {
   char buf[512], *p;
   int fd;
-  struct dirent de;
+  struct xv6_dirent de;
   struct stat st;
 
   if((fd = open(path, O_RDONLY | O_NOFOLLOW)) < 0){

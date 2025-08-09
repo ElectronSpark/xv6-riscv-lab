@@ -19,12 +19,12 @@
 #include "vm.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
-// and return both the descriptor and the corresponding struct file.
+// and return both the descriptor and the corresponding struct xv6_file.
 STATIC int
-argfd(int n, int *pfd, struct file **pf)
+argfd(int n, int *pfd, struct xv6_file **pf)
 {
   int fd;
-  struct file *f;
+  struct xv6_file *f;
 
   argint(n, &fd);
   if(fd < 0 || fd >= NOFILE || (f=myproc()->ofile[fd]) == 0)
@@ -43,7 +43,7 @@ argfd(int n, int *pfd, struct file **pf)
 // Allocate a file descriptor for the given file.
 // Takes over file reference from caller on success.
 STATIC int
-fdalloc(struct file *f)
+fdalloc(struct xv6_file *f)
 {
   int fd;
   struct proc *p = myproc();
@@ -60,7 +60,7 @@ fdalloc(struct file *f)
 uint64
 sys_dup(void)
 {
-  struct file *f;
+  struct xv6_file *f;
   int fd;
 
   if(argfd(0, 0, &f) < 0)
@@ -74,7 +74,7 @@ sys_dup(void)
 uint64
 sys_read(void)
 {
-  struct file *f;
+  struct xv6_file *f;
   int n;
   uint64 p;
 
@@ -88,7 +88,7 @@ sys_read(void)
 uint64
 sys_write(void)
 {
-  struct file *f;
+  struct xv6_file *f;
   int n;
   uint64 p;
   
@@ -104,7 +104,7 @@ uint64
 sys_close(void)
 {
   int fd;
-  struct file *f;
+  struct xv6_file *f;
 
   if(argfd(0, &fd, &f) < 0)
     return -1;
@@ -116,7 +116,7 @@ sys_close(void)
 uint64
 sys_fstat(void)
 {
-  struct file *f;
+  struct xv6_file *f;
   uint64 st; // user pointer to struct stat
 
   argaddr(1, &st);
@@ -130,7 +130,7 @@ uint64
 sys_link(void)
 {
   char name[DIRSIZ], new[MAXPATH], old[MAXPATH];
-  struct inode *dp, *ip;
+  struct xv6_inode *dp, *ip;
 
   if(argstr(0, old, MAXPATH) < 0 || argstr(1, new, MAXPATH) < 0)
     return -1;
@@ -142,13 +142,13 @@ sys_link(void)
   }
 
   ilock(ip);
-  if(ip->type == T_DIR){
+  if(ip->dinode.type == T_DIR){
     iunlockput(ip);
     end_op();
     return -1;
   }
 
-  ip->nlink++;
+  ip->dinode.nlink++;
   iupdate(ip);
   iunlock(ip);
 
@@ -168,7 +168,7 @@ sys_link(void)
 
 bad:
   ilock(ip);
-  ip->nlink--;
+  ip->dinode.nlink--;
   iupdate(ip);
   iunlockput(ip);
   end_op();
@@ -177,12 +177,12 @@ bad:
 
 // Is the directory dp empty except for "." and ".." ?
 STATIC int
-isdirempty(struct inode *dp)
+isdirempty(struct xv6_inode *dp)
 {
   int off;
-  struct dirent de;
+  struct xv6_dirent de;
 
-  for(off=2*sizeof(de); off<dp->size; off+=sizeof(de)){
+  for(off=2*sizeof(de); off<dp->dinode.size; off+=sizeof(de)){
     if(readi(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
       panic("isdirempty: readi");
     if(de.inum != 0)
@@ -194,8 +194,8 @@ isdirempty(struct inode *dp)
 uint64
 sys_unlink(void)
 {
-  struct inode *ip, *dp;
-  struct dirent de;
+  struct xv6_inode *ip, *dp;
+  struct xv6_dirent de;
   char name[DIRSIZ], path[MAXPATH];
   uint off;
 
@@ -218,9 +218,9 @@ sys_unlink(void)
     goto bad;
   ilock(ip);
 
-  if(ip->nlink < 1)
+  if(ip->dinode.nlink < 1)
     panic("unlink: nlink < 1");
-  if(ip->type == T_DIR && !isdirempty(ip)){
+  if(ip->dinode.type == T_DIR && !isdirempty(ip)){
     iunlockput(ip);
     goto bad;
   }
@@ -228,13 +228,13 @@ sys_unlink(void)
   memset(&de, 0, sizeof(de));
   if(writei(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
     panic("unlink: writei");
-  if(ip->type == T_DIR){
-    dp->nlink--;
+  if(ip->dinode.type == T_DIR){
+    dp->dinode.nlink--;
     iupdate(dp);
   }
   iunlockput(dp);
 
-  ip->nlink--;
+  ip->dinode.nlink--;
   iupdate(ip);
   iunlockput(ip);
 
@@ -248,10 +248,10 @@ bad:
   return -1;
 }
 
-STATIC struct inode*
+STATIC struct xv6_inode*
 create(char *path, short type, short major, short minor)
 {
-  struct inode *ip, *dp;
+  struct xv6_inode *ip, *dp;
   char name[DIRSIZ];
 
   if((dp = nameiparent(path, name)) == 0)
@@ -262,7 +262,7 @@ create(char *path, short type, short major, short minor)
   if((ip = dirlookup(dp, name, 0)) != 0){
     iunlockput(dp);
     ilock(ip);
-    if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
+    if(type == T_FILE && (ip->dinode.type == T_FILE || ip->dinode.type == T_DEVICE))
       return ip;
     if (type == T_SYMLINK)
       return ip;
@@ -276,13 +276,13 @@ create(char *path, short type, short major, short minor)
   }
 
   ilock(ip);
-  ip->major = major;
-  ip->minor = minor;
-  ip->nlink = 1;
+  ip->dinode.major = major;
+  ip->dinode.minor = minor;
+  ip->dinode.nlink = 1;
   iupdate(ip);
 
   if(type == T_DIR){  // Create . and .. entries.
-    // No ip->nlink++ for ".": avoid cyclic ref count.
+    // No ip->dinode.nlink++ for ".": avoid cyclic ref count.
     if(dirlink(ip, ".", ip->inum) < 0 || dirlink(ip, "..", dp->inum) < 0)
       goto fail;
   }
@@ -292,7 +292,7 @@ create(char *path, short type, short major, short minor)
 
   if(type == T_DIR){
     // now that success is guaranteed:
-    dp->nlink++;  // for ".."
+    dp->dinode.nlink++;  // for ".."
     iupdate(dp);
   }
 
@@ -302,7 +302,7 @@ create(char *path, short type, short major, short minor)
 
  fail:
   // something went wrong. de-allocate ip.
-  ip->nlink = 0;
+  ip->dinode.nlink = 0;
   iupdate(ip);
   iunlockput(ip);
   iunlockput(dp);
@@ -314,8 +314,8 @@ sys_open(void)
 {
   char path[MAXPATH + 1];
   int fd, omode;
-  struct file *f;
-  struct inode *ip;
+  struct xv6_file *f;
+  struct xv6_inode *ip;
   int lookup_cnt = 0;
   int n;
 
@@ -325,7 +325,7 @@ sys_open(void)
 
   begin_op();
 
-  if(omode & O_CREATE){
+  if(omode & O_CREAT){
     ip = create(path, T_FILE, 0, 0);
     if(ip == 0){
       end_op();
@@ -339,12 +339,12 @@ sys_open(void)
         return -1;
       }
       ilock(ip);
-      if(ip->type == T_DIR && (omode & 3) != O_RDONLY){
+      if(ip->dinode.type == T_DIR && (omode & 3) != O_RDONLY){
         iunlockput(ip);
         end_op();
         return -1;
       }
-      if (ip->type != T_SYMLINK || omode & O_NOFOLLOW) {
+      if (ip->dinode.type != T_SYMLINK || omode & O_NOFOLLOW) {
         // Not a symlink or O_NOFOLLOW is set
         break;
       }
@@ -374,7 +374,7 @@ sys_open(void)
     }
   }
 
-  if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
+  if(ip->dinode.type == T_DEVICE && (ip->dinode.major < 0 || ip->dinode.major >= NDEV)){
     iunlockput(ip);
     end_op();
     return -1;
@@ -388,9 +388,9 @@ sys_open(void)
     return -1;
   }
 
-  if(ip->type == T_DEVICE){
+  if(ip->dinode.type == T_DEVICE){
     f->type = FD_DEVICE;
-    f->major = ip->major;
+    f->major = ip->dinode.major;
   } else {
     f->type = FD_INODE;
     f->off = 0;
@@ -399,7 +399,7 @@ sys_open(void)
   f->readable = !(omode & O_WRONLY);
   f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
 
-  if((omode & O_TRUNC) && ip->type == T_FILE){
+  if((omode & O_TRUNC) && ip->dinode.type == T_FILE){
     itrunc(ip);
   }
 
@@ -413,7 +413,7 @@ uint64
 sys_mkdir(void)
 {
   char path[MAXPATH];
-  struct inode *ip;
+  struct xv6_inode *ip;
 
   begin_op();
   if(argstr(0, path, MAXPATH) < 0 || (ip = create(path, T_DIR, 0, 0)) == 0){
@@ -428,7 +428,7 @@ sys_mkdir(void)
 uint64
 sys_mknod(void)
 {
-  struct inode *ip;
+  struct xv6_inode *ip;
   char path[MAXPATH];
   int major, minor;
 
@@ -449,7 +449,7 @@ uint64
 sys_chdir(void)
 {
   char path[MAXPATH];
-  struct inode *ip;
+  struct xv6_inode *ip;
   struct proc *p = myproc();
   
   begin_op();
@@ -458,7 +458,7 @@ sys_chdir(void)
     return -1;
   }
   ilock(ip);
-  if(ip->type != T_DIR){
+  if(ip->dinode.type != T_DIR){
     iunlockput(ip);
     end_op();
     return -1;
@@ -517,7 +517,7 @@ uint64
 sys_pipe(void)
 {
   uint64 fdarray; // user pointer to array of two integers
-  struct file *rf, *wf;
+  struct xv6_file *rf, *wf;
   int fd0, fd1;
   struct proc *p = myproc();
 
@@ -546,7 +546,7 @@ sys_pipe(void)
 int
 sys_connect(void)
 {
-  struct file *f;
+  struct xv6_file *f;
   int fd;
   uint32 raddr;
   uint32 rport;
@@ -570,7 +570,7 @@ int
 sys_symlink(void)
 {
   char target[MAXPATH], linkpath[MAXPATH];
-  struct inode *ip = NULL;
+  struct xv6_inode *ip = NULL;
   size_t len = 0;
 
   if (argstr(0, target, MAXPATH) < 0 || argstr(1, linkpath, MAXPATH) < 0) {

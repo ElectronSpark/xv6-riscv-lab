@@ -18,7 +18,7 @@
 struct devsw devsw[NDEV];
 struct {
   struct spinlock lock;
-  struct file file[NFILE];
+  struct xv6_file file[NFILE];
 } ftable;
 
 void
@@ -28,10 +28,10 @@ fileinit(void)
 }
 
 // Allocate a file structure.
-struct file*
+struct xv6_file*
 filealloc(void)
 {
-  struct file *f;
+  struct xv6_file *f;
 
   spin_acquire(&ftable.lock);
   for(f = ftable.file; f < ftable.file + NFILE; f++){
@@ -46,8 +46,8 @@ filealloc(void)
 }
 
 // Increment ref count for file f.
-struct file*
-filedup(struct file *f)
+struct xv6_file*
+filedup(struct xv6_file *f)
 {
   spin_acquire(&ftable.lock);
   if(f->ref < 1)
@@ -59,9 +59,9 @@ filedup(struct file *f)
 
 // Close file f.  (Decrement ref count, close when reaches 0.)
 void
-fileclose(struct file *f)
+fileclose(struct xv6_file *f)
 {
-  struct file ff;
+  struct xv6_file ff;
 
   spin_acquire(&ftable.lock);
   if(f->ref < 1)
@@ -89,7 +89,7 @@ fileclose(struct file *f)
 // Get metadata about file f.
 // addr is a user virtual address, pointing to a struct stat.
 int
-filestat(struct file *f, uint64 addr)
+filestat(struct xv6_file *f, uint64 addr)
 {
   struct proc *p = myproc();
   struct stat st;
@@ -112,7 +112,7 @@ filestat(struct file *f, uint64 addr)
 // Read from file f.
 // addr is a user virtual address.
 int
-fileread(struct file *f, uint64 addr, int n)
+fileread(struct xv6_file *f, uint64 addr, int n)
 {
   int r = 0;
 
@@ -142,7 +142,7 @@ fileread(struct file *f, uint64 addr, int n)
 // Write to file f.
 // addr is a user virtual address.
 int
-filewrite(struct file *f, uint64 addr, int n)
+filewrite(struct xv6_file *f, uint64 addr, int n)
 {
   int r, ret = 0;
 
@@ -197,11 +197,11 @@ uint64 sys_dumpfilehash(void)
   printf("File hash table:\n");
   spin_acquire(&ftable.lock);
   for (int i = 0; i < NFILE; i++) {
-    struct file *f = &ftable.file[i];
+    struct xv6_file *f = &ftable.file[i];
     if (f->ref > 0) {
       printf("File %d: ref=%d type=%d off=%u\n", i, f->ref, f->type, f->off);
       if (f->type == FD_INODE) {
-        printf("  Inode: dev=%u inum=%u size=%u\n", f->ip->dev, f->ip->inum, f->ip->size);
+        printf("  Inode: dev=%u inum=%u size=%u\n", f->ip->dev, f->ip->inum, f->ip->dinode.size);
       } else if (f->type == FD_PIPE) {
         printf("  Pipe: readable=%d writable=%d\n", f->readable, f->writable);
       } else if (f->type == FD_SOCK) {

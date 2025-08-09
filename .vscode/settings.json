@@ -80,6 +80,11 @@
         "vm.h": "c",
         "vm_types.h": "c",
         "trapframe.h": "c",
-        "pthread.h": "c"
+        "pthread.h": "c",
+        "vfs_types.h": "c",
+        "fs.h": "c",
+        "text_encoding": "c",
+        "fcntl.h": "c",
+        "vfs.h": "c"
     }
 }

@@ -39,7 +39,7 @@ copyin(char *s)
   for(int ai = 0; ai < sizeof(addrs)/sizeof(addrs[0]); ai++){
     uint64 addr = addrs[ai];
     
-    int fd = open("copyin1", O_CREATE|O_WRONLY);
+    int fd = open("copyin1", O_CREAT|O_WRONLY);
     if(fd < 0){
       printf("open(copyin1) failed\n");
       exit(1);
@@ -126,7 +126,7 @@ copyinstr1(char *s)
   for(int ai = 0; ai < sizeof(addrs)/sizeof(addrs[0]); ai++){
     uint64 addr = addrs[ai];
 
-    int fd = open((char *)addr, O_CREATE|O_WRONLY);
+    int fd = open((char *)addr, O_CREAT|O_WRONLY);
     if(fd >= 0){
       printf("open(%p) returned %d, not -1\n", (void*)addr, fd);
       exit(1);
@@ -152,7 +152,7 @@ copyinstr2(char *s)
     exit(1);
   }
 
-  int fd = open(b, O_CREATE | O_WRONLY);
+  int fd = open(b, O_CREAT | O_WRONLY);
   if(fd != -1){
     printf("open(%s) returned %d, not -1\n", b, fd);
     exit(1);
@@ -222,7 +222,7 @@ copyinstr3(char *s)
     exit(1);
   }
 
-  int fd = open(b, O_CREATE | O_WRONLY);
+  int fd = open(b, O_CREAT | O_WRONLY);
   if(fd != -1){
     printf("open(%s) returned %d, not -1\n", b, fd);
     exit(1);
@@ -262,7 +262,7 @@ rwsbrk(char *s)
     exit(1);
   }
 
-  fd = open("rwsbrk", O_CREATE|O_WRONLY);
+  fd = open("rwsbrk", O_CREAT|O_WRONLY);
   if(fd < 0){
     printf("open(rwsbrk) failed\n");
     exit(1);
@@ -297,7 +297,7 @@ truncate1(char *s)
   char buf[32];
   
   unlink("truncfile");
-  int fd1 = open("truncfile", O_CREATE|O_WRONLY|O_TRUNC);
+  int fd1 = open("truncfile", O_CREAT|O_WRONLY|O_TRUNC);
   write(fd1, "abcd", 4);
   close(fd1);
 
@@ -355,7 +355,7 @@ truncate2(char *s)
 {
   unlink("truncfile");
 
-  int fd1 = open("truncfile", O_CREATE|O_TRUNC|O_WRONLY);
+  int fd1 = open("truncfile", O_CREAT|O_TRUNC|O_WRONLY);
   write(fd1, "abcd", 4);
 
   int fd2 = open("truncfile", O_TRUNC|O_WRONLY);
@@ -376,7 +376,7 @@ truncate3(char *s)
 {
   int pid, xstatus;
 
-  close(open("truncfile", O_CREATE|O_TRUNC|O_WRONLY));
+  close(open("truncfile", O_CREAT|O_TRUNC|O_WRONLY));
   
   pid = fork();
   if(pid < 0){
@@ -406,7 +406,7 @@ truncate3(char *s)
   }
 
   for(int i = 0; i < 150; i++){
-    int fd = open("truncfile", O_CREATE|O_WRONLY|O_TRUNC);
+    int fd = open("truncfile", O_CREAT|O_WRONLY|O_TRUNC);
     if(fd < 0){
       printf("%s: open failed\n", s);
       exit(1);
@@ -546,7 +546,7 @@ writetest(char *s)
   int i;
   enum { N=100, SZ=10 };
   
-  fd = open("small", O_CREATE|O_RDWR);
+  fd = open("small", O_CREAT|O_RDWR);
   if(fd < 0){
     printf("%s: error: creat small failed!\n", s);
     exit(1);
@@ -585,7 +585,7 @@ writebig(char *s)
 {
   int i, fd, n;
 
-  fd = open("big", O_CREATE|O_RDWR);
+  fd = open("big", O_CREAT|O_RDWR);
   if(fd < 0){
     printf("%s: error: creat big failed!\n", s);
     exit(1);
@@ -646,7 +646,7 @@ createtest(char *s)
   name[2] = '\0';
   for(i = 0; i < N; i++){
     name[1] = '0' + i;
-    fd = open(name, O_CREATE|O_RDWR);
+    fd = open(name, O_CREAT|O_RDWR);
     close(fd);
   }
   name[0] = 'a';
@@ -695,7 +695,7 @@ exectest(char *s)
   }
   if(pid == 0) {
     close(1);
-    fd = open("echo-ok", O_CREATE|O_WRONLY);
+    fd = open("echo-ok", O_CREAT|O_WRONLY);
     if(fd < 0) {
       printf("%s: create failed\n", s);
       exit(1);
@@ -1016,7 +1016,7 @@ forkforkfork(char *s)
         exit(0);
       }
       if(fork() < 0){
-        close(open("stopforking", O_CREATE|O_RDWR));
+        close(open("stopforking", O_CREAT|O_RDWR));
       }
     }
 
@@ -1024,7 +1024,7 @@ forkforkfork(char *s)
   }
 
   sleep(20); // two seconds
-  close(open("stopforking", O_CREATE|O_RDWR));
+  close(open("stopforking", O_CREAT|O_RDWR));
   wait(0);
   sleep(10); // one second
 }
@@ -1103,7 +1103,7 @@ sharedfd(char *s)
   char buf[SZ];
 
   unlink("sharedfd");
-  fd = open("sharedfd", O_CREATE|O_RDWR);
+  fd = open("sharedfd", O_CREAT|O_RDWR);
   if(fd < 0){
     printf("%s: cannot open sharedfd for writing", s);
     exit(1);
@@ -1171,7 +1171,7 @@ fourfiles(char *s)
     }
 
     if(pid == 0){
-      fd = open(fname, O_CREATE | O_RDWR);
+      fd = open(fname, O_CREAT | O_RDWR);
       if(fd < 0){
         printf("%s: create failed\n", s);
         exit(1);
@@ -1237,7 +1237,7 @@ createdelete(char *s)
       name[2] = '\0';
       for(i = 0; i < N; i++){
         name[1] = '0' + i;
-        fd = open(name, O_CREATE | O_RDWR);
+        fd = open(name, O_CREAT | O_RDWR);
         if(fd < 0){
           printf("%s: create failed\n", s);
           exit(1);
@@ -1296,7 +1296,7 @@ unlinkread(char *s)
   enum { SZ = 5 };
   int fd, fd1;
 
-  fd = open("unlinkread", O_CREATE | O_RDWR);
+  fd = open("unlinkread", O_CREAT | O_RDWR);
   if(fd < 0){
     printf("%s: create unlinkread failed\n", s);
     exit(1);
@@ -1314,7 +1314,7 @@ unlinkread(char *s)
     exit(1);
   }
 
-  fd1 = open("unlinkread", O_CREATE | O_RDWR);
+  fd1 = open("unlinkread", O_CREAT | O_RDWR);
   write(fd1, "yyy", 3);
   close(fd1);
 
@@ -1343,7 +1343,7 @@ linktest(char *s)
   unlink("lf1");
   unlink("lf2");
 
-  fd = open("lf1", O_CREATE|O_RDWR);
+  fd = open("lf1", O_CREAT|O_RDWR);
   if(fd < 0){
     printf("%s: create lf1 failed\n", s);
     exit(1);
@@ -1417,7 +1417,7 @@ concreate(char *s)
     } else if(pid == 0 && (i % 5) == 1){
       link("C0", file);
     } else {
-      fd = open(file, O_CREATE | O_RDWR);
+      fd = open(file, O_CREAT | O_RDWR);
       if(fd < 0){
         printf("concreate create %s failed\n", file);
         exit(1);
@@ -1509,7 +1509,7 @@ linkunlink(char *s)
   for(i = 0; i < 100; i++){
     x = x * 1103515245 + 12345;
     if((x % 3) == 0){
-      close(open("x", O_RDWR | O_CREATE));
+      close(open("x", O_RDWR | O_CREAT));
     } else if((x % 3) == 1){
       link("cat", "x");
     } else {
@@ -1535,7 +1535,7 @@ subdir(char *s)
     exit(1);
   }
 
-  fd = open("dd/ff", O_CREATE | O_RDWR);
+  fd = open("dd/ff", O_CREAT | O_RDWR);
   if(fd < 0){
     printf("%s: create dd/ff failed\n", s);
     exit(1);
@@ -1553,7 +1553,7 @@ subdir(char *s)
     exit(1);
   }
 
-  fd = open("dd/dd/ff", O_CREATE | O_RDWR);
+  fd = open("dd/dd/ff", O_CREAT | O_RDWR);
   if(fd < 0){
     printf("%s: create dd/dd/ff failed\n", s);
     exit(1);
@@ -1620,15 +1620,15 @@ subdir(char *s)
     exit(1);
   }
 
-  if(open("dd/ff/ff", O_CREATE|O_RDWR) >= 0){
+  if(open("dd/ff/ff", O_CREAT|O_RDWR) >= 0){
     printf("%s: create dd/ff/ff succeeded!\n", s);
     exit(1);
   }
-  if(open("dd/xx/ff", O_CREATE|O_RDWR) >= 0){
+  if(open("dd/xx/ff", O_CREAT|O_RDWR) >= 0){
     printf("%s: create dd/xx/ff succeeded!\n", s);
     exit(1);
   }
-  if(open("dd", O_CREATE) >= 0){
+  if(open("dd", O_CREAT) >= 0){
     printf("%s: create dd succeeded!\n", s);
     exit(1);
   }
@@ -1711,7 +1711,7 @@ bigwrite(char *s)
 
   unlink("bigwrite");
   for(sz = 499; sz < (MAXOPBLOCKS+2)*BSIZE; sz += 471){
-    fd = open("bigwrite", O_CREATE | O_RDWR);
+    fd = open("bigwrite", O_CREAT | O_RDWR);
     if(fd < 0){
       printf("%s: cannot create bigwrite\n", s);
       exit(1);
@@ -1737,7 +1737,7 @@ bigfile(char *s)
   int fd, i, total, cc;
 
   unlink("bigfile.dat");
-  fd = open("bigfile.dat", O_CREATE | O_RDWR);
+  fd = open("bigfile.dat", O_CREAT | O_RDWR);
   if(fd < 0){
     printf("%s: cannot create bigfile", s);
     exit(1);
@@ -1798,7 +1798,7 @@ fourteen(char *s)
     printf("%s: mkdir 12345678901234/123456789012345 failed\n", s);
     exit(1);
   }
-  fd = open("123456789012345/123456789012345/123456789012345", O_CREATE);
+  fd = open("123456789012345/123456789012345/123456789012345", O_CREAT);
   if(fd < 0){
     printf("%s: create 123456789012345/123456789012345/123456789012345 failed\n", s);
     exit(1);
@@ -1871,7 +1871,7 @@ dirfile(char *s)
 {
   int fd;
 
-  fd = open("dirfile", O_CREATE);
+  fd = open("dirfile", O_CREAT);
   if(fd < 0){
     printf("%s: create dirfile failed\n", s);
     exit(1);
@@ -1886,7 +1886,7 @@ dirfile(char *s)
     printf("%s: create dirfile/xx succeeded!\n", s);
     exit(1);
   }
-  fd = open("dirfile/xx", O_CREATE);
+  fd = open("dirfile/xx", O_CREAT);
   if(fd >= 0){
     printf("%s: create dirfile/xx succeeded!\n", s);
     exit(1);
@@ -1940,10 +1940,10 @@ iref(char *s)
 
     mkdir("");
     link("README", "");
-    fd = open("", O_CREATE);
+    fd = open("", O_CREAT);
     if(fd >= 0)
       close(fd);
-    fd = open("xx", O_CREATE);
+    fd = open("xx", O_CREAT);
     if(fd >= 0)
       close(fd);
     unlink("xx");
@@ -2248,7 +2248,7 @@ sbrkarg(char *s)
   int fd, n;
 
   a = sbrk(PGSIZE);
-  fd = open("sbrk", O_CREATE|O_WRONLY);
+  fd = open("sbrk", O_CREAT|O_WRONLY);
   unlink("sbrk");
   if(fd < 0)  {
     printf("%s: open sbrk failed\n", s);
@@ -2321,7 +2321,7 @@ bigargtest(char *s)
     // this exec() should fail (and return) because the
     // arguments are too large.
     exec("echo", args);
-    fd = open("bigarg-ok", O_CREATE);
+    fd = open("bigarg-ok", O_CREAT);
     close(fd);
     exit(0);
   } else if(pid < 0){
@@ -2359,7 +2359,7 @@ fsfull()
     name[4] = '0' + (nfiles % 10);
     name[5] = '\0';
     printf("writing %s\n", name);
-    int fd = open(name, O_CREATE|O_RDWR);
+    int fd = open(name, O_CREAT|O_RDWR);
     if(fd < 0){
       printf("open %s failed\n", name);
       break;
@@ -2550,7 +2550,7 @@ sbrklast(char *s)
   char *p = (char *) (top - 64);
   p[0] = 'x';
   p[1] = '\0';
-  int fd = open(p, O_RDWR|O_CREATE);
+  int fd = open(p, O_RDWR|O_CREAT);
   write(fd, p, 1);
   close(fd);
   fd = open(p, O_RDWR);
@@ -2670,7 +2670,7 @@ bigdir(char *s)
 
   unlink("bd");
 
-  fd = open("bd", O_CREATE);
+  fd = open("bd", O_CREAT);
   if(fd < 0){
     printf("%s: bigdir create failed\n", s);
     exit(1);
@@ -2725,7 +2725,7 @@ manywrites(char *s)
       
       for(int iters = 0; iters < howmany; iters++){
         for(int i = 0; i < ci+1; i++){
-          int fd = open(name, O_CREATE | O_RDWR);
+          int fd = open(name, O_CREAT | O_RDWR);
           if(fd < 0){
             printf("%s: cannot create %s\n", s, name);
             exit(1);
@@ -2767,7 +2767,7 @@ badwrite(char *s)
   
   unlink("junk");
   for(int i = 0; i < assumed_free; i++){
-    int fd = open("junk", O_CREATE|O_WRONLY);
+    int fd = open("junk", O_CREAT|O_WRONLY);
     if(fd < 0){
       printf("open junk failed\n");
       exit(1);
@@ -2777,7 +2777,7 @@ badwrite(char *s)
     unlink("junk");
   }
 
-  int fd = open("junk", O_CREATE|O_WRONLY);
+  int fd = open("junk", O_CREAT|O_WRONLY);
   if(fd < 0){
     printf("open junk failed\n");
     exit(1);
@@ -2846,7 +2846,7 @@ diskfull(char *s)
     name[3] = '0' + fi;
     name[4] = '\0';
     unlink(name);
-    int fd = open(name, O_CREATE|O_RDWR|O_TRUNC);
+    int fd = open(name, O_CREAT|O_RDWR|O_TRUNC);
     if(fd < 0){
       // oops, ran out of inodes before running out of blocks.
       printf("%s: could not create file %s\n", s, name);
@@ -2877,7 +2877,7 @@ diskfull(char *s)
     name[3] = '0' + (i % 32);
     name[4] = '\0';
     unlink(name);
-    int fd = open(name, O_CREATE|O_RDWR|O_TRUNC);
+    int fd = open(name, O_CREAT|O_RDWR|O_TRUNC);
     if(fd < 0)
       break;
     close(fd);
@@ -2922,7 +2922,7 @@ outofinodes(char *s)
     name[3] = '0' + (i % 32);
     name[4] = '\0';
     unlink(name);
-    int fd = open(name, O_CREATE|O_RDWR|O_TRUNC);
+    int fd = open(name, O_CREAT|O_RDWR|O_TRUNC);
     if(fd < 0){
       // failure is eventually expected.
       break;

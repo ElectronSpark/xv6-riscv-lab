@@ -43,7 +43,6 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/hlist.c
     ${KERNEL_DIR}/bintree.c
     ${KERNEL_DIR}/rbtree.c
-    ${KERNEL_DIR}/rwlock_test.c
 )
 
 if(DEFINED ENV{RWLOCK_TEST})
@@ -52,6 +51,10 @@ if(DEFINED ENV{RWLOCK_TEST})
         ${KERNEL_DIR}/rwlock_test.c
     )
 endif()
+set(KERNEL_C_FILES
+    ${KERNEL_C_FILES}
+    ${KERNEL_DIR}/vfs/vfs.c
+)
     
 set(KERNEL_SCAN_OBJS
     ${KERNEL_DIR}/start.c
@@ -106,6 +109,9 @@ set(KERNEL_OBJS
 # Add kernel executable
 add_executable(${KERNEL_BINARY} ${KERNEL_OBJS})
 
+target_include_directories(${KERNEL_BINARY} PRIVATE
+    ${KERNEL_DIR}
+)
 # Use target_link_options to set linker flags so they appear in <LINK_FLAGS>
 target_link_options(${KERNEL_BINARY} PRIVATE -z max-page-size=4096 -T ${KERNEL_DIR}/kernel.ld)
 

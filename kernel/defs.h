@@ -9,14 +9,14 @@ typedef typeof(sizeof(0)) size_t;
 
 struct buf;
 struct context;
-struct file;
-struct inode;
+struct xv6_file;
+struct xv6_inode;
 struct pipe;
 struct proc;
 struct spinlock;
 struct sleeplock;
 struct stat;
-struct superblock;
+struct xv6_superblock;
 struct mbuf;
 struct sock;
 
@@ -37,33 +37,33 @@ void            consputc(int);
 int             exec(char*, char**);
 
 // file.c
-struct file*    filealloc(void);
-void            fileclose(struct file*);
-struct file*    filedup(struct file*);
+struct xv6_file*    filealloc(void);
+void            fileclose(struct xv6_file*);
+struct xv6_file*    filedup(struct xv6_file*);
 void            fileinit(void);
-int             fileread(struct file*, uint64, int n);
-int             filestat(struct file*, uint64 addr);
-int             filewrite(struct file*, uint64, int n);
+int             fileread(struct xv6_file*, uint64, int n);
+int             filestat(struct xv6_file*, uint64 addr);
+int             filewrite(struct xv6_file*, uint64, int n);
 
 // fs.c
 void            fsinit(int);
-int             dirlink(struct inode*, char*, uint);
-struct inode*   dirlookup(struct inode*, char*, uint*);
-struct inode*   ialloc(uint, short);
-struct inode*   idup(struct inode*);
+int             dirlink(struct xv6_inode*, char*, uint);
+struct xv6_inode*   dirlookup(struct xv6_inode*, char*, uint*);
+struct xv6_inode*   ialloc(uint, short);
+struct xv6_inode*   idup(struct xv6_inode*);
 void            iinit();
-void            ilock(struct inode*);
-void            iput(struct inode*);
-void            iunlock(struct inode*);
-void            iunlockput(struct inode*);
-void            iupdate(struct inode*);
+void            ilock(struct xv6_inode*);
+void            iput(struct xv6_inode*);
+void            iunlock(struct xv6_inode*);
+void            iunlockput(struct xv6_inode*);
+void            iupdate(struct xv6_inode*);
 int             namecmp(const char*, const char*);
-struct inode*   namei(char*);
-struct inode*   nameiparent(char*, char*);
-int             readi(struct inode*, int, uint64, uint, uint);
-void            stati(struct inode*, struct stat*);
-int             writei(struct inode*, int, uint64, uint, uint);
-void            itrunc(struct inode*);
+struct xv6_inode*   namei(char*);
+struct xv6_inode*   nameiparent(char*, char*);
+int             readi(struct xv6_inode*, int, uint64, uint, uint);
+void            stati(struct xv6_inode*, struct stat*);
+int             writei(struct xv6_inode*, int, uint64, uint, uint);
+void            itrunc(struct xv6_inode*);
 
 // ramdisk.c
 void            ramdiskinit(void);
@@ -78,13 +78,13 @@ void*           kmm_alloc(size_t);
 void            kmm_free(void *);
 
 // log.c
-void            initlog(int, struct superblock*);
+void            initlog(int, struct xv6_superblock*);
 void            log_write(struct buf*);
 void            begin_op(void);
 void            end_op(void);
 
 // pipe.c
-int             pipealloc(struct file**, struct file**);
+int             pipealloc(struct xv6_file**, struct xv6_file**);
 void            pipeclose(struct pipe*, int);
 int             piperead(struct pipe*, uint64, int);
 int             pipewrite(struct pipe*, uint64, int);
@@ -253,7 +253,7 @@ void            net_tx_udp(struct mbuf*, uint32, uint16, uint16);
 
 // sysnet.c
 void            sockinit(void);
-int             sockalloc(struct file **, uint32, uint16, uint16);
+int             sockalloc(struct xv6_file **, uint32, uint16, uint16);
 void            sockclose(struct sock *);
 int             sockread(struct sock *, uint64, int);
 int             sockwrite(struct sock *, uint64, int);

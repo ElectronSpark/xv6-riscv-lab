@@ -73,7 +73,7 @@ testsymlink(void)
 
   mkdir("/testsymlink");
 
-  fd1 = open("/testsymlink/a", O_CREATE | O_RDWR);
+  fd1 = open("/testsymlink/a", O_CREAT | O_RDWR);
   if(fd1 < 0) fail("failed to open a");
 
   r = symlink("/testsymlink/a", "/testsymlink/b");
@@ -122,7 +122,7 @@ testsymlink(void)
   close(fd2);
   fd1 = fd2 = -1;
 
-  fd1 = open("/testsymlink/4", O_CREATE | O_RDWR);
+  fd1 = open("/testsymlink/4", O_CREAT | O_RDWR);
   if(fd1<0) fail("Failed to create 4\n");
   fd2 = open("/testsymlink/1", O_RDWR);
   if(fd2<0) fail("Failed to open 1\n");
@@ -197,7 +197,7 @@ concur(void)
 
   printf("Start: test concurrent symlinks\n");
     
-  fd = open("/testsymlink/z", O_CREATE | O_RDWR);
+  fd = open("/testsymlink/z", O_CREAT | O_RDWR);
   if(fd < 0) {
     printf("FAILED: open failed");
     exit(1);

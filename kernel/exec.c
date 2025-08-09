@@ -8,7 +8,7 @@
 #include "elf.h"
 #include "vm.h"
 
-STATIC int loadseg(pagetable_t, uint64, struct inode*, uint, uint, uint64);
+STATIC int loadseg(pagetable_t, uint64, struct xv6_inode*, uint, uint, uint64);
 
 int flags2perm(int flags)
 {
@@ -65,7 +65,7 @@ exec(char *path, char **argv)
   uint64 argc, heap_start = 0, sp, ustack[MAXARG];
   uint64 stackbase = USTACKTOP - USERSTACK * PGSIZE;
   struct elfhdr elf;
-  struct inode *ip;
+  struct xv6_inode *ip;
   struct proghdr ph;
   vm_t *tmp_vm = NULL;
   struct proc *p = myproc();
@@ -185,7 +185,7 @@ exec(char *path, char **argv)
 // and the pages from va to va+sz must already be mapped.
 // Returns 0 on success, -1 on failure.
 STATIC int
-loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz, uint64 pteflags)
+loadseg(pagetable_t pagetable, uint64 va, struct xv6_inode *ip, uint offset, uint sz, uint64 pteflags)
 {
   uint i, n;
   uint64 pa;
