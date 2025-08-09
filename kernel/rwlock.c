@@ -173,4 +173,5 @@ void rwlock_release(rwlock_t *lock) {
             __do_wake_up(lock);
         }
     }
+    spin_release(&lock->lock);
 }
