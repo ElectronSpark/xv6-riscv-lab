@@ -1,3 +1,50 @@
+/*
+ * (User Original Comment)
+ * ------------------------------------------------------------
+ * I let Github Copilot to check if my rwlock has any critical data-integrity issues.
+ * It says no. I will trust it this time.
+ * The original summary was:
+ * 
+ * RWLock Integrity Review Summary
+ * --------------------------------
+ * GitHub Copilot
+ *
+ * Result: No critical data-integrity flaw found.
+ *
+ * Correctness Observations:
+ * - Write exclusion: writers set holder != NULL only when readers == 0; readers enter when
+ *   (readers > 0) or holder == NULL, so no reader runs concurrently with an exclusive holder.
+ * - Reader wake logic (__wakeup_readers): increments 'readers' for each queued reader under
+ *   the spinlock before waking them. Each reader later removes its own queue node; a second
+ *   wake on the same entries cannot occur with current call sites.
+ * - Writer wake logic (__wakeup_writer): sets holder before wakeup ensuring the woken writer
+ *   owns the lock upon scheduling.
+ * - Waiter lifetime: stack-allocated waiter nodes persist while sleeping; removed before
+ *   the acquire function returns; safe.
+ * - Memory ordering: spin_acquire/spin_release provide full barriers; shared state is only
+ *   mutated while holding the spinlock.
+ * - Test4 data ordering: version written first, checksum last; readers never see partial
+ *   updates because writer exclusivity is enforced. (If lock semantics ever relax, consider
+ *   writing version last to make the structure self-validating.)
+ *
+ * Potential (Non-Fatal) Issues / Improvements:
+ * - Starvation: In read-priority mode a continuous stream of readers may starve writers.
+ *   Enable RWLOCK_PRIO_WRITE or implement handoff logic for fairness.
+ * - Accounting robustness: Could add asserts after a reader acquires
+ *   (assert(holder == NULL)) and before granting write (assert(readers == 0)).
+ * - Wake strategy: __wakeup_readers leaves nodes in the queue until each reader removes itself;
+ *   acceptable, but popping during wake could simplify future changes.
+ * - Upgrade/downgrade: Not supported (no read->write promotion or write->read downgrade).
+ * - Recursive write: Guarded by assert; production could return an error (e.g., -EDEADLK).
+ *
+ * Optional Hardening Ideas:
+ * - Write version last (after data + checksum) for self-consistency if unlocked readers appear.
+ * - Add a wake generation counter to aid debugging missed wakeups.
+ *
+ * Conclusion: Implementation preserves data integrity under current usage; main practical risk
+ * is writer starvation without write priority.
+ */
+
 #include "types.h"
 #include "riscv.h"
 #include "defs.h"
