@@ -3,10 +3,8 @@
 #ifndef __KERNEL_FILE_SYSTEM_H
 #define __KERNEL_FILE_SYSTEM_H
 
-#include "compiler.h"
-
-#define ROOTINO  1   // root i-number
-#define BSIZE 1024  // block size
+#include <compiler.h>
+#include <types.h>
 
 // Disk layout:
 // [ boot block | super block | log | inode blocks |

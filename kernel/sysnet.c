@@ -2,19 +2,18 @@
 // network system calls.
 //
 
-#include "types.h"
-#include "param.h"
-#include "memlayout.h"
-#include "riscv.h"
-#include "spinlock.h"
-#include "proc.h"
-#include "defs.h"
-#include "fs.h"
-#include "sleeplock.h"
-#include "file.h"
-#include "net.h"
-#include "vm.h"
-#include "signal.h"
+#include <types.h>
+#include <param.h>
+#include <memlayout.h>
+#include <riscv.h>
+#include <spinlock.h>
+#include <proc.h>
+#include <defs.h>
+#include <vfs/vfs.h>
+#include <sleeplock.h>
+#include <net.h>
+#include <vm.h>
+#include <signal.h>
 
 struct sock {
   struct sock *next; // the next socket in the list
@@ -35,13 +34,18 @@ sockinit(void)
 }
 
 int
-sockalloc(struct xv6_file **f, uint32 raddr, uint16 lport, uint16 rport)
+sockalloc(struct vfs_file **f, uint32 raddr, uint16 lport, uint16 rport)
 {
   struct sock *si, *pos;
 
   si = 0;
   *f = 0;
-  if ((*f = filealloc()) == 0)
+  // @TODO: 
+  struct vfs_inode *ip = NULL;
+  if (vfs_mounted_root(NULL, &ip) != 0) {
+    goto bad; // Failed to get root inode
+  }
+  if ((*f = ip->sb->ops->falloc(ip->sb)) == 0)
     goto bad;
   if ((si = (struct sock*)kalloc()) == 0)
     goto bad;
@@ -78,7 +82,7 @@ bad:
   if (si)
     kfree((char*)si);
   if (*f)
-    fileclose(*f);
+    vfs_fclose(*f);
   return -1;
 }
 

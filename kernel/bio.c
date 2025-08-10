@@ -20,7 +20,7 @@
 #include "sleeplock.h"
 #include "riscv.h"
 #include "defs.h"
-#include "fs.h"
+// #include "fs.h"
 #include "buf.h"
 #include "list.h"
 #include "hlist.h"

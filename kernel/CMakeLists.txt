@@ -19,14 +19,14 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/syscall.c
     ${KERNEL_DIR}/sysproc.c
     ${KERNEL_DIR}/bio.c
-    ${KERNEL_DIR}/fs.c
-    ${KERNEL_DIR}/log.c
+    # ${KERNEL_DIR}/fs.c
+    # ${KERNEL_DIR}/log.c
     ${KERNEL_DIR}/sleeplock.c
     ${KERNEL_DIR}/rwlock.c
-    ${KERNEL_DIR}/file.c
-    ${KERNEL_DIR}/pipe.c
+    # ${KERNEL_DIR}/file.c
+    # ${KERNEL_DIR}/pipe.c
     ${KERNEL_DIR}/exec.c
-    ${KERNEL_DIR}/sysfile.c
+    # ${KERNEL_DIR}/sysfile.c
     ${KERNEL_DIR}/plic.c
     ${KERNEL_DIR}/proc_queue.c
     ${KERNEL_DIR}/sched.c
@@ -53,7 +53,7 @@ if(DEFINED ENV{RWLOCK_TEST})
 endif()
 set(KERNEL_C_FILES
     ${KERNEL_C_FILES}
-    ${KERNEL_DIR}/vfs/vfs.c
+    # ${KERNEL_DIR}/vfs/vfs.c
 )
     
 set(KERNEL_SCAN_OBJS

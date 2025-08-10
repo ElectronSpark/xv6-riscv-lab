@@ -1,14 +1,15 @@
-#include "types.h"
-#include "param.h"
-#include "memlayout.h"
-#include "riscv.h"
-#include "spinlock.h"
-#include "proc.h"
-#include "defs.h"
-#include "elf.h"
-#include "vm.h"
+#include <types.h>
+#include <param.h>
+#include <memlayout.h>
+#include <riscv.h>
+#include <spinlock.h>
+#include <proc.h>
+#include <defs.h>
+#include <elf.h>
+#include <vm.h>
+#include <vfs/vfs.h>
 
-STATIC int loadseg(pagetable_t, uint64, struct xv6_inode*, uint, uint, uint64);
+STATIC int loadseg(pagetable_t, uint64, struct vfs_inode*, uint, uint, uint64);
 
 int flags2perm(int flags)
 {
@@ -65,21 +66,20 @@ exec(char *path, char **argv)
   uint64 argc, heap_start = 0, sp, ustack[MAXARG];
   uint64 stackbase = USTACKTOP - USERSTACK * PGSIZE;
   struct elfhdr elf;
-  struct xv6_inode *ip;
+  struct vfs_inode *ip;
   struct proghdr ph;
   vm_t *tmp_vm = NULL;
   struct proc *p = myproc();
 
-  begin_op();
-
-  if((ip = namei(path)) == 0){
-    end_op();
+  if((ip = vfs_namei(path, strlen(path))) == 0){
     return -1;
   }
-  ilock(ip);
+  struct super_block *sb = ip->sb;
+  vfs_begin_op(sb);
+  vfs_ilock(ip);
 
   // Check ELF header
-  if(readi(ip, 0, (uint64)&elf, 0, sizeof(elf)) != sizeof(elf))
+  if(vfs_readi(ip, &elf, 0, sizeof(elf)) != sizeof(elf))
     goto bad;
 
   if(elf.magic != ELF_MAGIC)
@@ -91,7 +91,7 @@ exec(char *path, char **argv)
 
   // Load program into memory.
   for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
-    if(readi(ip, 0, (uint64)&ph, off, sizeof(ph)) != sizeof(ph))
+    if(vfs_readi(ip, &ph, off, sizeof(ph)) != sizeof(ph))
       goto bad;
     if(ph.type != ELF_PROG_LOAD)
       continue;
@@ -113,8 +113,8 @@ exec(char *path, char **argv)
     if(loadseg(tmp_vm->pagetable, ph.vaddr, ip, ph.off, ph.filesz, flags2perm(ph.flags)) < 0)
       goto bad;
   }
-  iunlockput(ip);
-  end_op();
+  vfs_iunlockput(ip);
+  vfs_end_op(sb);
   ip = 0;
 
   p = myproc();
@@ -174,8 +174,8 @@ exec(char *path, char **argv)
  bad:
   vm_destroy(tmp_vm); // Clean up the temporary VM
   if(ip){
-    iunlockput(ip);
-    end_op();
+    vfs_iunlockput(ip);
+    vfs_end_op(sb);
   }
   return -1;
 }
@@ -185,7 +185,7 @@ exec(char *path, char **argv)
 // and the pages from va to va+sz must already be mapped.
 // Returns 0 on success, -1 on failure.
 STATIC int
-loadseg(pagetable_t pagetable, uint64 va, struct xv6_inode *ip, uint offset, uint sz, uint64 pteflags)
+loadseg(pagetable_t pagetable, uint64 va, struct vfs_inode *ip, uint offset, uint sz, uint64 pteflags)
 {
   uint i, n;
   uint64 pa;
@@ -209,7 +209,7 @@ loadseg(pagetable_t pagetable, uint64 va, struct xv6_inode *ip, uint offset, uin
     {
       n = PGSIZE;
     }
-    if(readi(ip, 0, pa, offset+i, n) != n)
+    if(vfs_readi(ip, (void*)pa, offset+i, n) != n)
     {
       kfree((void *)pa);
       return -1;

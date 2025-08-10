@@ -1,10 +1,11 @@
 #ifndef __KERNEL_FILE_H
 #define __KERNEL_FILE_H
 
-#include "compiler.h"
-#include "slab_type.h"
-#include "hlist_type.h"
-#include "fs.h"
+#include <compiler.h>
+#include <slab_type.h>
+#include <hlist_type.h>
+#include <sleeplock.h>
+#include <fs.h>
 
 #ifndef __KERNEL_FILE_TYPES_H
 #define __KERNEL_FILE_TYPES_H

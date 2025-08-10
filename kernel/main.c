@@ -1,10 +1,12 @@
-#include "types.h"
-#include "param.h"
-#include "memlayout.h"
-#include "riscv.h"
-#include "defs.h"
-#include "sched.h"
-#include "signal.h"
+#include <types.h>
+#include <param.h>
+#include <memlayout.h>
+#include <riscv.h>
+#include <defs.h>
+#include <sched.h>
+#include <signal.h>
+#include <vfs/vfs.h>
+#include <vfs/xv6fs/xv6fs.h>
 
 volatile STATIC int started = 0;
 
@@ -35,8 +37,10 @@ main()
     plicinit();      // set up interrupt controller
     plicinithart();  // ask PLIC for device interrupts
     binit();         // buffer cache
-    iinit();         // inode table
-    fileinit();      // file table
+    vfs_init();     // virtual file system
+    xv6fs_init();   // initialize xv6 file system
+    // iinit();         // inode table
+    // fileinit();      // file table
     virtio_disk_init(); // emulated hard disk
     pci_init();
     sockinit();

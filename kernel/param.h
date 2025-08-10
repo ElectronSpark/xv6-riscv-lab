@@ -57,4 +57,7 @@
 
 #define BACKTRACE_MAX_DEPTH 32 // maximum depth of backtrace
 
+#define ROOTINO  1   // root i-number
+#define BSIZE 1024  // block size
+
 #endif              /* __KERNEL_PARAM_H */

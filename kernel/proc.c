@@ -1,18 +1,20 @@
-#include "types.h"
-#include "param.h"
-#include "memlayout.h"
-#include "riscv.h"
-#include "spinlock.h"
-#include "proc.h"
-#include "defs.h"
-#include "list.h"
-#include "hlist.h"
-#include "proc_queue.h"
-#include "sched.h"
-#include "slab.h"
-#include "page.h"
-#include "signal.h"
-#include "vm.h"
+#include <types.h>
+#include <param.h>
+#include <memlayout.h>
+#include <riscv.h>
+#include <spinlock.h>
+#include <proc.h>
+#include <defs.h>
+#include <list.h>
+#include <hlist.h>
+#include <proc_queue.h>
+#include <sched.h>
+#include <slab.h>
+#include <page.h>
+#include <signal.h>
+#include <vm.h>
+#include <vfs/vfs.h>
+#include <vfs/xv6fs/xv6fs.h>
 
 #define NPROC_HASH_BUCKETS 31
 
@@ -534,7 +536,7 @@ userinit(void)
   p->trapframe->sp = USTACKTOP;  // user stack pointer
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
-  p->cwd = namei("/");
+  p->cwd = vfs_namei("/", 1);
 
   PROC_SET_USER_SPACE(p);
   __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
@@ -605,8 +607,8 @@ fork(void)
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
-      np->ofile[i] = filedup(p->ofile[i]);
-  np->cwd = idup(p->cwd);
+      np->ofile[i] = vfs_filedup(p->ofile[i]);
+  np->cwd = vfs_idup(p->cwd);
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
@@ -683,7 +685,7 @@ void
 exit(int status)
 {
   struct proc *p = myproc();
-  struct xv6_inode *cwd = NULL;
+  struct vfs_inode *cwd = NULL;
 
   proc_lock(p);
   assert(p != proc_table.initproc, "init exiting");
@@ -691,12 +693,12 @@ exit(int status)
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){
-      struct xv6_file *f = p->ofile[fd];
+      struct vfs_file *f = p->ofile[fd];
       p->ofile[fd] = 0;
       assert((uint64)f < PHYSTOP, "exit: file pointer out of bounds, pid: %d, fd: %d(*%p), f: %p", p->pid, fd, f, &p->ofile[fd]);
       // release p->lock before fileclose because fileclose may sleep
       proc_unlock(p);
-      fileclose(f);
+      vfs_fclose(f);
       proc_lock(p); // reacquire p->lock after fileclose
     }
   }
@@ -705,9 +707,9 @@ exit(int status)
   proc_unlock(p);
 
   if (cwd != NULL) {
-    begin_op();
-    iput(cwd);
-    end_op();
+    vfs_ibegin_op(cwd);
+    vfs_iput(cwd);
+    vfs_iend_op(cwd);
   }
 
   // Give any children to init.
@@ -803,7 +805,7 @@ forkret(void)
     // File system initialization must be run in the context of a
     // regular process (e.g., because it calls sleep), and thus cannot
     // be run from main().
-    fsinit(ROOTDEV);
+    vfs_mount_root(ROOTDEV, 0x10203040);
 
     first = 0;
     // ensure other cores see first=0.

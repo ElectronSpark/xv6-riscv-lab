@@ -13,6 +13,8 @@ struct super_block;
 struct vfs_file;
 struct vfs_dirent;
 struct vfs_mount_point;
+struct vfs_file_ops;
+struct stat;
 
 enum inode_type {
     I_NONE = (int)0,
@@ -69,17 +71,13 @@ struct statfs {
 
 // Operations on the super block:
 // All functions other than lockfs and unlockfs should assume the super block is locked.
+// - falloc: Allocate a free file structure and return it.
 // - ialloc: Allocate a free inode and return it. 
 //           Should return NULL if no free inodes are available.
 // - iget: Try to get an inode by number.
 //         The returned inode is locked, and the ref count will increase by one.
 // - idestroy: Destroy the inode and releasing its resources
 //             after its reference count drops to zero.
-// - lockfs: Lock the filesystem for exclusive access.
-// - unlockfs: Unlock the filesystem.
-// - holdingfs: Check if the filesystem is hold by the current process.
-//              Returns 1 if locked, 0 if not.
-//              Returns -1 if error.
 // - syncfs: Sync the filesystem to disk if dirty.
 //           Returns 0 on success, -1 on failure.
 // - freezefs: Freeze the filesystem, preventing any further modifications
@@ -88,14 +86,17 @@ struct statfs {
 // - statfs: Get filesystem statistics and fill the provided statfs structure.
 //           Returns 0 on success, -1 on failure.
 struct super_block_ops {
+    struct vfs_file *(*falloc)(struct super_block *sb);
     struct vfs_inode *(*ialloc)(struct super_block *sb);
     struct vfs_inode *(*iget)(struct super_block *sb, uint64 inum);
     void (*idestroy)(struct vfs_inode *inode);
+    void (*begin_op)(struct super_block *sb);
+    void (*end_op)(struct super_block *sb);
     // void (*lockfs)(struct super_block *sb);
     // void (*unlockfs)(struct super_block *sb);
     int (*holdingfs)(struct super_block *sb);
     int (*syncfs)(struct super_block *sb);
-    int (*freezefs)(struct super_block *sb);
+    // int (*freezefs)(struct super_block *sb);
     int (*statfs)(struct super_block *sb, struct statfs *buf);
 };
 
@@ -116,7 +117,7 @@ struct super_block {
     struct {
         uint64  valid: 1;
         uint64  dirty: 1;
-        uint64  frozen: 1;
+        // uint64  frozen: 1;
     };
     struct super_block_ops  *ops;           // Operations on the super block
     struct vfs_inode        *root;          // mount point
@@ -169,6 +170,7 @@ struct vfs_inode_ops {
     void (*iunlock)(struct vfs_inode *inode); // Unlock the inode
     bool (*iholding)(struct vfs_inode *inode); // Check if inode is locked
     void (*idirty)(struct vfs_inode *inode);    // Mark inode as dirty
+    void (*istat)(struct vfs_inode *inode);     // Get inode status
     int (*validate)(struct vfs_inode *inode); // validate the inode
     ssize_t (*iread)(struct vfs_inode *inode, void *buf, size_t size, loff_t offset);
     ssize_t (*iwrite)(struct vfs_inode *inode, const void *buf, size_t size, loff_t offset);
@@ -206,14 +208,38 @@ struct vfs_inode {
     struct vfs_mount_point *mp;     // Mount point for this inode, if any
 };
 
+struct vfs_file_ops {
+    int (*fopen)(struct vfs_file *file, struct vfs_inode *inode, int flags);
+    int (*fclose)(struct vfs_file *file);
+    ssize_t (*fread)(struct vfs_file *file, void *buf, size_t size);
+    ssize_t (*fwrite)(struct vfs_file *file, const void *buf, size_t size);
+    loff_t (*ftell)(struct vfs_file *file);
+    int (*fseek)(struct vfs_file *file, loff_t offset, int whence);
+    int (*fsize)(struct vfs_file *file);
+    int (*fstat)(struct vfs_file *file, struct stat *buf);
+    struct vfs_file *(*fdup)(struct vfs_file *file);
+};
+
+// @TODO: implement a seperate socket fs driver
+struct sock;
+
 struct vfs_file {
     hlist_entry_t hlist_entry;       // for file hash list
     int fd;                          // Global file descriptor number
 
     struct vfs_file_ops *ops;        // Operations on the file
-    struct vfs_inode *inode;         // Inode associated with the file
+    // @TODO: implement a seperate socket fs driver
+    union {
+        struct sock *sock;
+        struct vfs_inode *inode;      // Inode associated with the file
+    };
     loff_t offset;                   // Current file offset
-    int flags;                       // File access flags (e.g., read, write)
+    struct {
+        uint64 opened: 1;            // File is opened
+        uint64 readable: 1;          // File is opened for reading
+        uint64 writable: 1;          // File is opened for writing
+    };
+
     int type;                        // Type of the file (corresponds to inode type)
     int ref_count;                   // Reference count for the file
 };
@@ -221,7 +247,7 @@ struct vfs_file {
 // Used to traverse directory entries
 struct vfs_dirent {
     char name[NAME_MAX + 1]; // Name of the directory entry
-    uint64 inum; // Inode number of the entry
+    uint64 inum; // Inode number linked to the entry
     struct vfs_inode *inode; // The inode of the current directory
     loff_t offset; // Offset in the directory for the current entry
     ssize_t size; // Size of the current entry in bytes

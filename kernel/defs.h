@@ -9,14 +9,15 @@ typedef typeof(sizeof(0)) size_t;
 
 struct buf;
 struct context;
-struct xv6_file;
-struct xv6_inode;
+struct vfs_file;
+struct vfs_inode;
 struct pipe;
 struct proc;
 struct spinlock;
 struct sleeplock;
 struct stat;
-struct xv6_superblock;
+// struct xv6_superblock;
+struct vfs_superblock;
 struct mbuf;
 struct sock;
 
@@ -36,35 +37,6 @@ void            consputc(int);
 // exec.c
 int             exec(char*, char**);
 
-// file.c
-struct xv6_file*    filealloc(void);
-void            fileclose(struct xv6_file*);
-struct xv6_file*    filedup(struct xv6_file*);
-void            fileinit(void);
-int             fileread(struct xv6_file*, uint64, int n);
-int             filestat(struct xv6_file*, uint64 addr);
-int             filewrite(struct xv6_file*, uint64, int n);
-
-// fs.c
-void            fsinit(int);
-int             dirlink(struct xv6_inode*, char*, uint);
-struct xv6_inode*   dirlookup(struct xv6_inode*, char*, uint*);
-struct xv6_inode*   ialloc(uint, short);
-struct xv6_inode*   idup(struct xv6_inode*);
-void            iinit();
-void            ilock(struct xv6_inode*);
-void            iput(struct xv6_inode*);
-void            iunlock(struct xv6_inode*);
-void            iunlockput(struct xv6_inode*);
-void            iupdate(struct xv6_inode*);
-int             namecmp(const char*, const char*);
-struct xv6_inode*   namei(char*);
-struct xv6_inode*   nameiparent(char*, char*);
-int             readi(struct xv6_inode*, int, uint64, uint, uint);
-void            stati(struct xv6_inode*, struct stat*);
-int             writei(struct xv6_inode*, int, uint64, uint, uint);
-void            itrunc(struct xv6_inode*);
-
 // ramdisk.c
 void            ramdiskinit(void);
 void            ramdiskintr(void);
@@ -78,13 +50,13 @@ void*           kmm_alloc(size_t);
 void            kmm_free(void *);
 
 // log.c
-void            initlog(int, struct xv6_superblock*);
-void            log_write(struct buf*);
-void            begin_op(void);
-void            end_op(void);
+// void            initlog(int, struct xv6_superblock*);
+// void            log_write(struct buf*);
+// void            begin_op(void);
+// void            end_op(void);
 
 // pipe.c
-int             pipealloc(struct xv6_file**, struct xv6_file**);
+int             pipealloc(struct vfs_file**, struct vfs_file**);
 void            pipeclose(struct pipe*, int);
 int             piperead(struct pipe*, uint64, int);
 int             pipewrite(struct pipe*, uint64, int);
@@ -253,7 +225,7 @@ void            net_tx_udp(struct mbuf*, uint32, uint16, uint16);
 
 // sysnet.c
 void            sockinit(void);
-int             sockalloc(struct xv6_file **, uint32, uint16, uint16);
+int             sockalloc(struct vfs_file **, uint32, uint16, uint16);
 void            sockclose(struct sock *);
 int             sockread(struct sock *, uint64, int);
 int             sockwrite(struct sock *, uint64, int);

@@ -5,8 +5,7 @@
 #include "kernel/fcntl.h"
 #include "kernel/spinlock.h"
 #include "kernel/sleeplock.h"
-#include "kernel/fs.h"
-#include "kernel/file.h"
+#include "kernel/vfs/vfs.h"
 #include "user/user.h"
 
 #define fail(msg) do {printf("FAILURE: " msg "\n"); failed = 1; goto done;} while (0);

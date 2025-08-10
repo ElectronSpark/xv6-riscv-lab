@@ -104,13 +104,6 @@ ret:
     return ret_val;
 }
 
-// When trying to unregister a filesystem type, it will be frozen first.
-// And after all superblocks are unmounted, it can be safely removed.
-void vfs_freeze_fs_type(struct fs_type *fs_type) {
-    // @TODO: Implement vfs_freeze_fs_type
-    panic("vfs_freeze_fs_type: not implemented yet");
-}
-
 void vfs_unregister_fs_type(struct fs_type *fs_type) {
     if (fs_type == NULL) {
         return; // Nothing to unregister
@@ -200,7 +193,7 @@ int vfs_mounted_root(struct vfs_mount_point *mp, struct vfs_inode **reti) {
     if (mp->sb == NULL) {
         return -1;
     }
-    if (!mp->sb->valid || mp->sb->frozen) {
+    if (!mp->sb->valid) {
         return -1; // Superblock is not valid or frozen
     }
     if (mp->sb->root == NULL) {
@@ -330,142 +323,5 @@ static int __pathname_get_toplayer(const char *path, size_t len) {
         }
     }
     return len; // No '/' found, the whole path is a single layer
-}
-
-int vfs_namex(const char *path, size_t len, struct vfs_inode **reti, 
-              struct vfs_inode *base, int max_follow)
-{
-    if (path == NULL || len == 0) {
-        return -1; // Invalid parameters
-    }
-    if (reti == NULL) {
-        return -1; // Invalid parameters
-    }
-
-    const char *to_lookup = path;
-    ssize_t to_lookup_len = len;
-    struct vfs_inode *top_inode = NULL;
-    if (to_lookup[0] == '/') {
-        // Omit base inode if the path is absolute
-        if (vfs_mounted_root(NULL, &top_inode) != 0) {
-            return -1; // Failed to get the root inode
-        }
-        base = top_inode; // Use the root inode as base
-        // Omit the leading '/' from the lookup
-        to_lookup_len--;
-        to_lookup++;
-    } else {
-        if (base == NULL) {
-            if (myproc()->_cwd == NULL) {
-                return -1;
-            }
-            vfs_ilock(myproc()->_cwd);
-            top_inode = vfs_idup(myproc()->_cwd);
-            if (top_inode == NULL) {
-                vfs_iunlock(myproc()->_cwd);
-                return -1; // Failed to get the current working directory inode
-            }
-        } else {
-            vfs_ilock(base);
-            top_inode = vfs_idup(base);
-            if (top_inode == NULL) {
-                vfs_iunlock(base);
-                return -1; // Failed to duplicate the base inode
-            }
-        }
-        if (vfs_validate_inode(top_inode) != 0) {
-            vfs_iput(top_inode);
-            vfs_iunlock(top_inode);
-            return -1; // Invalid top inode
-        }
-        if (top_inode->mp != NULL) {
-            struct vfs_inode *tmp = NULL;
-            int tmp_ret = vfs_mounted_root(top_inode->mp, &tmp);
-            vfs_iput(top_inode);
-            vfs_iunlock(top_inode);
-            if (tmp_ret != 0) {
-                return -1; // Failed to get the root inode
-            }
-        }
-    }
-
-    while (to_lookup_len > 0) {
-        ssize_t top_len = __pathname_get_toplayer(path, len);
-        struct vfs_inode *next_inode = NULL;
-        if (top_len < 0) {
-            return -1; // Invalid path
-        } else if (top_len == 0) {
-            if (to_lookup_len == 1) {
-                // If path ends with '/', it must be a directory
-                if (top_inode->type != I_DIR) {
-                    vfs_iput(top_inode);
-                    vfs_iunlock(top_inode);
-                    return -1; // Not a directory
-                }
-                *reti = top_inode; // Return the current inode
-                return 0; // Success
-            }
-            // skip extra '/'
-            to_lookup += 1;
-            to_lookup_len -= 1;
-            continue;
-        }
-
-        next_inode = vfs_dlookup(top_inode, to_lookup, top_len);
-        if (next_inode == NULL) {
-            vfs_iput(top_inode);
-            vfs_iunlock(top_inode);
-            return -1; // Failed to lookup the next inode
-        }
-
-        vfs_iput(top_inode);
-        vfs_iunlock(top_inode);
-        top_inode = next_inode;
-        if (top_inode->mp != NULL) {
-            int tmp_ret = vfs_mounted_root(top_inode->mp, &next_inode);
-            vfs_iput(top_inode);
-            vfs_iunlock(top_inode);
-            if (tmp_ret != 0) {
-                return -1; // Failed to get the root inode
-            }
-            top_inode = next_inode;
-            continue; // Continue with the next layer
-        } else if (top_inode->type == I_SYMLINK) {
-            if (max_follow <= 0) {
-                vfs_iput(top_inode);
-                vfs_iunlock(top_inode);
-                return -1; // Too many symlinks
-            }
-            char *symlink_target = kmm_alloc(NAME_MAX + 1);
-            if (symlink_target == NULL) {
-                vfs_iput(top_inode);
-                vfs_iunlock(top_inode);
-                return -1; // Memory allocation failed
-            }
-            int ret = vfs_ireadlink(top_inode, symlink_target, NAME_MAX + 1);
-            vfs_iput(top_inode);
-            vfs_iunlock(top_inode);
-            if (ret != 0) {
-                kmm_free(symlink_target);
-                return -1; // Failed to read symlink
-            }
-            // Follow the symlink
-            to_lookup = symlink_target;
-            to_lookup_len = strlen(symlink_target);
-            ret = vfs_namex(to_lookup, to_lookup_len, reti, NULL, max_follow - 1);
-            kmm_free(symlink_target);
-            return ret; // Return the result of following the symlink
-        }
-
-        to_lookup += top_len + 1;
-        to_lookup_len -= top_len + 1;
-    }
-
-    if (reti != NULL) {
-        *reti = top_inode; // Return the found inode
-        return 0;
-    }
-
-    return -1; // @TODO: Implement vfs_namex
 }
 

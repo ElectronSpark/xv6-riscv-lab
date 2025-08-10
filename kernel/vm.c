@@ -1,15 +1,15 @@
-#include "param.h"
-#include "types.h"
-#include "memlayout.h"
-#include "elf.h"
-#include "riscv.h"
-#include "defs.h"
-#include "fs.h"
-#include "page.h"
-#include "rbtree.h"
-#include "list.h"
-#include "vm.h"
-#include "slab.h"
+#include <param.h>
+#include <types.h>
+#include <memlayout.h>
+#include <elf.h>
+#include <riscv.h>
+#include <defs.h>
+#include <vfs/vfs.h>
+#include <page.h>
+#include <rbtree.h>
+#include <list.h>
+#include <vm.h>
+#include <slab.h>
 
 static slab_cache_t __vma_pool = {0};
 static slab_cache_t __vm_pool = {0};
