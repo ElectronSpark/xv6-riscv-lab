@@ -418,7 +418,7 @@ int signal_notify(struct proc *p) {
     if (!PROC_SLEEPING(p)) {
         return -1; // Process is not sleeping
     }
-    if (__proc_get_pstate(p) == PSTATE_INTERRUPTIBLE || PROC_KILLED(p)) {
+    if (__proc_get_pstate(p) == PSTATE_INTERRUPTIBLE) {
         sched_lock();
         scheduler_wakeup(p);
         sched_unlock();
