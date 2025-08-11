@@ -233,14 +233,14 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
 
     proc_lock(p);
     if (p->state == PSTATE_UNUSED || p->state == PSTATE_ZOMBIE || PROC_KILLED(p)) {
-        ret = -1; // Process is not usable
-        goto done;
+        proc_unlock(p);
+        return -1; // Process is not valid or already killed
     }
 
     sigacts_t *sa = p->sigacts;
     if (!sa) {
-        ret = -1; // No signal actions available
-        goto done;
+        proc_unlock(p);
+        return -1; // No signal actions available
     }
 
     // ignored signals are not sent
@@ -336,7 +336,7 @@ int signal_notify(struct proc *p) {
     if (!PROC_SLEEPING(p)) {
         return -1; // Process is not sleeping
     }
-    if (__proc_get_pstate(p) == PSTATE_INTERRUPTIBLE) {
+    if (__proc_get_pstate(p) == PSTATE_INTERRUPTIBLE || PROC_KILLED(p)) {
         sched_lock();
         scheduler_wakeup(p);
         sched_unlock();
@@ -362,12 +362,13 @@ bool signal_test_clear_stopped(struct proc *p) {
     sigset_t masked = p->sig_pending_mask & ~p->sigacts->sa_sigmask;
     sigset_t pending_stopped = masked & p->sigacts->sa_sigstop;
     sigset_t pending_cont = masked & p->sigacts->sa_sigcont;
-    p->sig_pending_mask &= ~pending_stopped; // Clear the stopped signals
     if (pending_cont) {
         PROC_CLEAR_STOPPED(p); // Clear stopped state if continuing
         p->sig_pending_mask &= ~pending_cont;
+        p->sig_pending_mask &= ~p->sigacts->sa_sigstop;
         return 0; // continue signal overrides stop
     }
+    p->sig_pending_mask &= ~pending_stopped; // Clear the stopped signals
     return pending_stopped != 0 || PROC_STOPPED(p);
 }
 
@@ -404,6 +405,10 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
 
     struct proc *p = myproc();
     assert(p != NULL, "sys_sigaction: myproc returned NULL");
+
+    if (!PROC_USER_SPACE(p)) {
+        return -1; // sigaction can only be called in user space
+    }
     
     proc_lock(p);
     sigacts_t *sa = p->sigacts;
@@ -490,6 +495,10 @@ int sigpending(struct proc *p, sigset_t *set) {
 int sigreturn(void) {
     struct proc *p = myproc();
     assert(p != NULL, "sys_sigreturn: myproc returned NULL");
+
+    if (!PROC_USER_SPACE(p)) {
+        return -1; // sigreturn can only be called in user space
+    }
 
     proc_lock(p);
     if (p->sig_ucontext == 0) {
@@ -581,6 +590,7 @@ still_pending:
 }
 
 static int __deliver_signal(struct proc *p, int signo, ksiginfo_t *info, sigaction_t *sa, bool *repeat) {
+    proc_assert_holding(p);
     if (repeat) {
         *repeat = false; // Default to not repeat
     }
@@ -598,19 +608,22 @@ static int __deliver_signal(struct proc *p, int signo, ksiginfo_t *info, sigacti
                "__deliver_signal: SA_SIGINFO but info is NULL");
     }
 
-    if (sigismember(&p->sigacts->sa_sigcont, signo)) {
-        p->sig_pending_mask &= ~p->sigacts->sa_sigstop;
-        if (sa->sa_handler == SIG_DFL) {
-            if (repeat) {
-                *repeat = true; // Indicate that the signal should be repeated
-            }
-            return 0;
-        }
+    // Other than SIG_IGN and SIG_CONT, all signal handlers must be placed 
+    // beyond the first page of the address space.
+    if ((uint64)sa->sa_handler < PAGE_SIZE) {
+        printf("__deliver_signal: invalid signal handler address %p for signal %d\n", 
+               sa->sa_handler, signo);
+        PROC_SET_KILLED(p);
+        return 0;
     }
 
-    int ret = push_sigframe(p, signo, sa, info);
+    int ret = 0;
+    if (PROC_USER_SPACE(myproc())) {
+        // If the process has user space, push the signal to its user stack
+        ret = push_sigframe(p, signo, sa, info);
+    }
 
-    if ((sa->sa_flags &SA_NODEFER) == 0) {
+    if ((sa->sa_flags & SA_NODEFER) == 0) {
         sigaddset(&p->sigacts->sa_sigmask, signo);
     }
 
