@@ -97,8 +97,14 @@ uint64 sys_sigreturn(void) {
 }
 
 uint64 sys_pause(void) {
-    proc_lock(myproc());
+    struct proc *p = myproc();
+    proc_lock(p);
+    // If an unblocked pending signal already exists, return immediately
+    if (signal_pending(p)) {
+        proc_unlock(p);
+        return 0;
+    }
     scheduler_pause(NULL); // Pause the current process
-    proc_unlock(myproc());
+    proc_unlock(p);
     return 0;
 }

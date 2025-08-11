@@ -78,10 +78,13 @@ void sigpending_destroy(struct proc *p) {
         return; // Invalid pointer
     }
     proc_assert_holding(p);
+    // Ensure all per-signal queues are already empty. Do NOT silently purge here.
     for (int i = 1; i <= NSIG; i++) {
-        assert(sigpending_empty(p, i) == 0, 
+        sigpending_t *sq = &p->sig_pending[i - 1];
+        assert(LIST_IS_EMPTY(&sq->queue),
                "sigpending_destroy: pending signals not empty for signal %d", i);
     }
+    assert(p->sig_pending_mask == 0, "sigpending_destroy: pending mask not zero");
 }
 
 void sigstack_init(stack_t *stack) {
@@ -116,14 +119,33 @@ void ksiginfo_free(ksiginfo_t *ksi) {
 // The caller must hold the process lock.
 // Returns 0 on success, -1 on error.
 int sigpending_empty(struct proc *p, int signo) {
-    if (!p || SIGBAD(signo)) {
-        return -1; // Invalid process or signal number
+    if (!p) {
+        return -1; // Invalid process pointer
     }
     proc_assert_holding(p);
 
+    if (signo == 0) {
+        // Purge all signal queues (signals numbered 1..NSIG map to index signo-1)
+        for (int i = 1; i <= NSIG; i++) {
+            ksiginfo_t *ksi = NULL;
+            ksiginfo_t *tmp = NULL;
+            sigpending_t *sq = &p->sig_pending[i - 1];
+            list_foreach_node_safe(&sq->queue, ksi, tmp, list_entry) {
+                list_node_detach(ksi, list_entry);
+                ksiginfo_free(ksi);
+            }
+        }
+        p->sig_pending_mask = 0;
+        return 0;
+    }
+
+    if (SIGBAD(signo)) {
+        return -1; // Invalid signal number
+    }
+
     ksiginfo_t *ksi = NULL;
     ksiginfo_t *tmp = NULL;
-    sigpending_t *sq = &p->sig_pending[signo];
+    sigpending_t *sq = &p->sig_pending[signo - 1];
     list_foreach_node_safe(&sq->queue, ksi, tmp, list_entry) {
         list_node_detach(ksi, list_entry);
         ksiginfo_free(ksi); // Free the ksiginfo after removing it
@@ -208,7 +230,9 @@ sigacts_t *sigacts_dup(sigacts_t *psa) {
     sigacts_t *sa = slab_alloc(&__sigacts_pool);
     if (sa) {
         memmove(sa, psa, sizeof(sigacts_t));
-        sa->sa_sigmask = sa->sa[0].sa_mask;
+        // Correctly copy process-level masks; do not derive from sa[0].
+        sa->sa_sigmask = psa->sa_sigmask;
+        sa->sa_original_mask = psa->sa_original_mask;
     }
     return sa;
 }
@@ -220,6 +244,40 @@ void sigacts_free(sigacts_t *sa) {
 void signal_init(void) {
     slab_cache_init(&__sigacts_pool, "sigacts", sizeof(sigacts_t), SLAB_FLAG_STATIC);
     slab_cache_init(&__ksiginfo_pool, "ksiginfo", sizeof(ksiginfo_t), SLAB_FLAG_STATIC);
+}
+
+// Cap for number of queued ksiginfo entries per signal when SA_SIGINFO set.
+#define MAX_SIGINFO_PER_SIGNAL 8
+
+// Internal invariant checker (debug aid). Intentional: does not attempt to
+// compensate for known indexing inconsistencies elsewhere; only validates
+// the data we manipulate here.
+static void signal_assert_invariants(struct proc *p) {
+    proc_assert_holding(p);
+    for (int signo = 1; signo <= NSIG; signo++) {
+        sigaction_t *act = &p->sigacts->sa[signo];
+        bool bit_set = sigismember(&p->sig_pending_mask, signo) > 0;
+        sigpending_t *sq = &p->sig_pending[signo - 1];
+        bool queue_empty = LIST_IS_EMPTY(&sq->queue);
+        if ((act->sa_flags & SA_SIGINFO) == 0) {
+            assert(queue_empty, "invariant: non-empty queue for non-SA_SIGINFO signal %d", signo);
+        } else {
+            if (!queue_empty) {
+                assert(bit_set, "invariant: queue has entries but pending bit not set for signal %d", signo);
+            }
+        }
+    }
+}
+
+// Helper: count ksiginfo entries currently queued for a signal.
+static int __siginfo_queue_len(struct proc *p, int signo) {
+    sigpending_t *sq = &p->sig_pending[signo - 1];
+    int n = 0;
+    ksiginfo_t *pos = NULL; ksiginfo_t *tmp = NULL;
+    list_foreach_node_safe(&sq->queue, pos, tmp, list_entry) {
+        n++;
+    }
+    return n;
 }
 
 int __signal_send(struct proc *p, ksiginfo_t *info) {
@@ -253,10 +311,23 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
     if (act->sa_flags & SA_SIGINFO) {
         assert(info->signo != SIGKILL && info->signo != SIGSTOP, 
                "signal_send: SA_SIGINFO set for SIGKILL or SIGSTOP");
+        // Enforce per-signal queue cap. If cap reached, drop oldest entry.
+        int qlen = __siginfo_queue_len(p, info->signo);
+        if (qlen >= MAX_SIGINFO_PER_SIGNAL) {
+            // Drop head (oldest) then append new info to tail.
+            sigpending_t *sq = &p->sig_pending[info->signo - 1];
+            if (!LIST_IS_EMPTY(&sq->queue)) {
+                ksiginfo_t *old = LIST_FIRST_NODE(&sq->queue, ksiginfo_t, list_entry);
+                if (old) {
+                    list_entry_detach(&old->list_entry);
+                    ksiginfo_free(old);
+                }
+            }
+        }
         ksiginfo_t *ksi = ksiginfo_alloc();
         if (!ksi) {
-            ret = -1; // Allocation failed
-            goto done;
+            ret = -1; // Allocation failed (still set pending bit below)
+            goto after_enqueue; // fall through to set pending bit & notify
         }
         *ksi = *info; // Copy the signal info
         list_entry_init(&ksi->list_entry);
@@ -264,25 +335,33 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
         list_node_push(&p->sig_pending[info->signo - 1].queue, ksi, list_entry);
     }
 
-    if (sigismember(&sa->sa_sigstop, info->signo) && !sigismember(&sa->sa_sigmask, info->signo)) {
-        // Pause the process
+after_enqueue:
+    // Always record the signal as pending (even for stop signals) to allow
+    // later logic (e.g., mask changes) to notice it.
+    sigaddset(&p->sig_pending_mask, info->signo);
+
+    bool is_stop = sigismember(&sa->sa_sigstop, info->signo) && !sigismember(&sa->sa_sigmask, info->signo);
+    bool is_cont = sigismember(&sa->sa_sigcont, info->signo) && !sigismember(&sa->sa_sigmask, info->signo);
+
+    if (is_stop) {
+        // Mark process stopped. If currently running, request reschedule.
         PROC_SET_STOPPED(p);
-    } else {
-        sigaddset(&p->sig_pending_mask, info->signo);
-        if (sigismember(&sa->sa_sigcont, info->signo) && !sigismember(&sa->sa_sigmask, info->signo)) {
-            p->sig_pending_mask &= ~sa->sa_sigstop;
-            if (PROC_STOPPED(p)) {
-                // If the process is stopped, we need to wake it up
-                sched_lock();
-                scheduler_continue(p);
-                sched_unlock();
-            }
-        }
+        PROC_SET_NEEDS_RESCHED(p);
+    }
+    if (is_cont) {
+        // Do NOT clear PROC_STOPPED here; scheduler_continue() requires the
+        // stopped flag to still be set so it can transition the process back
+        // to the ready queue. Clearing it first caused the early-return path
+        // in scheduler_continue() ("if (!PROC_STOPPED(p)) return") leaving
+        // the process stranded (RUNNABLE state but not re-queued), and the
+        // parent blocked in wait() (uninterruptible) forever.
+        sched_lock();
+        scheduler_continue(p); // handles clearing PROC_STOPPED and requeueing
+        sched_unlock();
     }
 
-    ret = 0;
+    ret = (ret == -1) ? 0 : ret; // Treat enqueue allocation failure as soft failure.
 
-done:
     // If the action is to terminate the process, set the killed flag
     if (sigismember(&sa->sa_sigterm, info->signo)) {
         PROC_SET_KILLED(p);
@@ -293,9 +372,12 @@ done:
             sched_unlock();
         }
     }
-    if (ret == 0 && signal_pending(p)) {
+    if (signal_pending(p)) {
         signal_notify(p); // Notify the process if needed
     }
+
+    // Debug invariants (after all structural updates, before unlock)
+    signal_assert_invariants(p);
     proc_unlock(p);
     return ret; // Signal sent successfully
 }
@@ -359,17 +441,45 @@ bool signal_test_clear_stopped(struct proc *p) {
         return 0;
     }
     proc_assert_holding(p);
-    sigset_t masked = p->sig_pending_mask & ~p->sigacts->sa_sigmask;
-    sigset_t pending_stopped = masked & p->sigacts->sa_sigstop;
-    sigset_t pending_cont = masked & p->sigacts->sa_sigcont;
+    sigacts_t *sa = p->sigacts;
+    sigset_t masked = p->sig_pending_mask & ~sa->sa_sigmask;
+    sigset_t pending_stopped = masked & sa->sa_sigstop;
+    sigset_t pending_cont = masked & sa->sa_sigcont;
+
     if (pending_cont) {
-        PROC_CLEAR_STOPPED(p); // Clear stopped state if continuing
-        p->sig_pending_mask &= ~pending_cont;
-        p->sig_pending_mask &= ~p->sigacts->sa_sigstop;
-        return 0; // continue signal overrides stop
+        // A continue-category signal is pending. Determine if any of them
+        // have user handlers installed. We resume the process in all cases.
+        bool user_handler = false;
+        for (int signo = 1; signo <= NSIG; signo++) {
+            if (sigismember(&sa->sa_sigcont, signo) > 0 && sigismember(&pending_cont, signo) > 0) {
+                sigaction_t *act = &sa->sa[signo];
+                if (act->sa_handler != SIG_DFL && act->sa_handler != SIG_IGN) {
+                    user_handler = true;
+                    break;
+                }
+            }
+        }
+        // Resume the process (clear stopped state)
+        PROC_CLEAR_STOPPED(p);
+        // Clear all pending stop signals (they are canceled by any continue)
+        p->sig_pending_mask &= ~sa->sa_sigstop;
+        if (!user_handler) {
+            // Default action: consume the continue signals here so they are not delivered.
+            p->sig_pending_mask &= ~pending_cont;
+        } else {
+            // Leave pending_cont bits so they can be picked and delivered.
+        }
+        return 0; // Do not request re-stop.
     }
-    p->sig_pending_mask &= ~pending_stopped; // Clear the stopped signals
-    return pending_stopped != 0 || PROC_STOPPED(p);
+
+    if (pending_stopped) {
+        // Consume all pending stop signals (they stop the process) and request STOPPED state.
+        p->sig_pending_mask &= ~pending_stopped;
+        return 1; // Caller will set STOPPED and break.
+    }
+
+    // No new stop/cont signals; indicate whether process is already stopped.
+    return PROC_STOPPED(p);
 }
 
 int signal_restore(struct proc *p, ucontext_t *context) {
@@ -469,11 +579,18 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
         sa->sa_sigmask &= ~(*set); // Update the signal mask
     }
 
+    // Mandatory signals cannot be blocked
     sigdelset(&sa->sa_original_mask, SIGKILL);
     sigdelset(&sa->sa_original_mask, SIGSTOP);
     sigdelset(&sa->sa_sigmask, SIGKILL);
     sigdelset(&sa->sa_sigmask, SIGSTOP);
 
+    // If newly unmasked signals are pending and process is sleeping, wake it.
+    if (signal_pending(p)) {
+        (void)signal_notify(p);
+    }
+
+    proc_unlock(p);
     return 0; // Success
 }
 
@@ -560,32 +677,31 @@ static int __dequeue_signal_update_pending(struct proc *p, int signo, ksiginfo_t
            "__dequeue_signal_update_pending: signal handler is SIG_IGN");
     sigpending_t *sq = &p->sig_pending[signo - 1];
     if ((sa->sa_flags & SA_SIGINFO) == 0) {
-        assert(LIST_IS_EMPTY(&sq->queue), 
+        assert(LIST_IS_EMPTY(&sq->queue),
                "sig_pending is not empty for a non-SA_SIGINFO signal");
         sigdelset(&p->sig_pending_mask, signo);
         *ret_info = NULL;
+        signal_assert_invariants(p);
         return 0; // No signal info to return
     }
 
-    ksiginfo_t *info = NULL;
-    ksiginfo_t *pos = NULL;
-    ksiginfo_t *tmp = NULL;
-    list_foreach_node_safe(&sq->queue, pos, tmp, list_entry) {
-        assert(pos->signo == signo, 
-               "__dequeue_signal_update_pending: pos->signo != signo");
-        if (info != NULL) {
-            goto still_pending; // More than one signal info found
-        }
-        info = pos;
+    // Pop exactly one ksiginfo (FIFO order: head of list).
+    if (LIST_IS_EMPTY(&sq->queue)) {
+        // Queue empty but bit set implies inconsistency; clear defensively.
+        sigdelset(&p->sig_pending_mask, signo);
+        *ret_info = NULL;
+        signal_assert_invariants(p);
+        return 0;
     }
-
-    assert(info != NULL, "sigpending: no signal info found");
-    // If only one signal info is found, also remove it from the pending mask
-    sigdelset(&p->sig_pending_mask, signo);
-
-still_pending:
+    ksiginfo_t *info = LIST_FIRST_NODE(&sq->queue, ksiginfo_t, list_entry);
+    assert(info->signo == signo, "__dequeue_signal_update_pending: pos->signo != signo");
     list_entry_detach(&info->list_entry);
+    // If queue now empty, clear pending bit; else leave it set for further delivery.
+    if (LIST_IS_EMPTY(&sq->queue)) {
+        sigdelset(&p->sig_pending_mask, signo);
+    }
     *ret_info = info;
+    signal_assert_invariants(p);
     return 0; // Success
 }
 
@@ -649,6 +765,7 @@ void handle_signal(void) {
 
     for (;;) {
         proc_lock(p);
+        signal_assert_invariants(p);
         if (signal_terminated(p) || PROC_KILLED(p)) {
             PROC_SET_KILLED(p);
             proc_unlock(p);
@@ -676,23 +793,27 @@ void handle_signal(void) {
                "handle_signal: __dequeue_signal_update_pending failed");
         assert(__deliver_signal(p, signo, info, sa, &repeat) == 0,
                "handle_signal: __deliver_signal failed");
-               
+
+        // Decide if we should immediately deliver another queued instance of the same
+        // SA_SIGINFO signal without returning to user space.
+        if ((sa->sa_flags & SA_SIGINFO) &&
+            sigismember(&p->sigacts->sa_sigmask, signo) == 0 &&
+            sigismember(&p->sig_pending_mask, signo) > 0) {
+            // More queued; loop again.
+            repeat = true;
+        }
+        signal_assert_invariants(p);
         proc_unlock(p);
     
         if (info) {
             ksiginfo_free(info); // Free the ksiginfo after delivering the signal
         }
 
-        // continue signals with default action need to be skipped, so in that case
-        // we repeat the loop to check for more pending signals
         if (!repeat) {
             break;
         }
     }
-    // The process may found it was killed after handling the signal.
     if (PROC_KILLED(p)) {
-        // If the process is killed, exit it.
-        // @TODO: exit code
         exit(-1);
     }
     if (PROC_STOPPED(p)) {

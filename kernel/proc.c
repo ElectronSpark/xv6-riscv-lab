@@ -443,6 +443,8 @@ freeproc(struct proc *p)
   if (p->vm != NULL) {
     proc_freepagetable(p);
   }
+  // Purge any remaining pending signals (e.g., SIGKILL) before destroy assertions.
+  sigpending_empty(p, 0);
   sigpending_destroy(p);
 
   page_free((void *)p->kstack, p->kstack_order);

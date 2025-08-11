@@ -310,6 +310,7 @@ void scheduler_continue(struct proc *p) {
     push_off(); // Increase noff counter to ensure interruptions are disabled
     proc_assert_holding(p);
     if (!PROC_STOPPED(p)) {
+        pop_off(); // Balance push_off before early return
         return; // Process is not stopped, nothing to do
     }
     __sched_assert_holding();
