@@ -361,8 +361,14 @@ bool signal_test_clear_stopped(struct proc *p) {
     proc_assert_holding(p);
     sigset_t masked = p->sig_pending_mask & ~p->sigacts->sa_sigmask;
     sigset_t pending_stopped = masked & p->sigacts->sa_sigstop;
+    sigset_t pending_cont = masked & p->sigacts->sa_sigcont;
     p->sig_pending_mask &= ~pending_stopped; // Clear the stopped signals
-    return pending_stopped != 0;
+    if (pending_cont) {
+        PROC_CLEAR_STOPPED(p); // Clear stopped state if continuing
+        p->sig_pending_mask &= ~pending_cont;
+        return 0; // continue signal overrides stop
+    }
+    return pending_stopped != 0 || PROC_STOPPED(p);
 }
 
 int signal_restore(struct proc *p, ucontext_t *context) {
@@ -630,23 +636,23 @@ void handle_signal(void) {
 
     for (;;) {
         proc_lock(p);
-        if (signal_terminated(p)) {
+        if (signal_terminated(p) || PROC_KILLED(p)) {
             PROC_SET_KILLED(p);
             proc_unlock(p);
-            return;
+            break;
         }
     
         if (signal_test_clear_stopped(p)) {
             PROC_SET_STOPPED(p);
             proc_unlock(p);
-            return;
+            break;
         }
     
         int signo = __pick_signal(p);
         assert(signo == 0 || !SIGBAD(signo), "handle_signal: __pick_signal failed");
         if (signo == 0) {
             proc_unlock(p);
-            return; // No pending signals to handle
+            break; // No pending signals to handle
         }
     
         sigaction_t *sa = &p->sigacts->sa[signo];
@@ -669,6 +675,15 @@ void handle_signal(void) {
         if (!repeat) {
             break;
         }
+    }
+    // The process may found it was killed after handling the signal.
+    if (PROC_KILLED(p)) {
+        // If the process is killed, exit it.
+        // @TODO: exit code
+        exit(-1);
+    }
+    if (PROC_STOPPED(p)) {
+        PROC_SET_NEEDS_RESCHED(p);
     }
 }
 
