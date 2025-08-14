@@ -82,6 +82,7 @@
         "trapframe.h": "c",
         "pthread.h": "c",
         "semaphore.h": "c",
-        "timer_types.h": "c"
+        "timer_types.h": "c",
+        "dev_types.h": "c"
     }
 }
