@@ -8,6 +8,8 @@ void scheduler_init(void);
 int sched_holding(void);
 void sched_lock(void);
 void sched_unlock(void);
+void sleep_lock(void);
+void sleep_unlock(void);
 void scheduler_run(void);
 void scheduler_yield(struct spinlock *lk);
 void scheduler_pause(struct spinlock *lk);

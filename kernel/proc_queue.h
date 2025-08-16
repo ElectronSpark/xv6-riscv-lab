@@ -22,5 +22,9 @@ int proc_queue_pop(proc_queue_t *q, proc_node_t **ret_node);
 int proc_queue_remove(proc_queue_t *q, proc_node_t *node);
 int proc_queue_bulk_move(proc_queue_t *to, proc_queue_t *from);
 
+int proc_queue_wait(proc_queue_t *q, struct spinlock *lock);
+int proc_queue_wakeup(proc_queue_t *q, int errno);
+int proc_queue_wakeup_all(proc_queue_t *q, int errno);
+
 
 #endif // KERNEL_PROC_QUEUE_H

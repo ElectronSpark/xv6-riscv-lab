@@ -13,6 +13,10 @@
 #include "rbtree.h"
 #include "signal.h"
 
+// Locking order:
+// - sleep_lock
+// - proc_lock
+// - sched_lock
 
 struct chan_queue_node {
     struct rb_node rb_entry; // Red-black tree node
@@ -25,6 +29,7 @@ static struct rb_root __chan_queue_root;
 
 list_node_t ready_queue;
 static spinlock_t __sched_lock;   // ready_queue and sleep_queue share this lock
+static spinlock_t __sleep_lock; // Lock for sleep queues
 
 
 /* chan queue related functions */
@@ -43,12 +48,21 @@ static struct rb_root_opts __chan_queue_opts = {
 };
 
 static void chan_queue_init(void) {
+    spin_init(&__sleep_lock, "sleep_lock");
     rb_root_init(&__chan_queue_root, &__chan_queue_opts);
     int slab_ret = slab_cache_init(&chan_queue_slab, 
                                    "chan_queue_slab", 
                                    sizeof(struct chan_queue_node), 
                                    SLAB_FLAG_STATIC);
     assert(slab_ret == 0, "Failed to initialize chan queue slab cache");
+}
+
+void sleep_lock(void) {
+    spin_acquire(&__sleep_lock);
+}
+
+void sleep_unlock(void) {
+    spin_release(&__sleep_lock);
 }
 
 static struct chan_queue_node *chan_queue_alloc(uint64 chan) {
@@ -262,7 +276,8 @@ void scheduler_yield(struct spinlock *lk) {
     mycpu()->intena = intena; // Restore interrupt state
 }
 
-// Put the current process to sleep on the specified queue.
+// Change the process state to SLEEPING and yield CPU
+// This function will lock both the process and scheduler locks.
 void scheduler_sleep(struct spinlock *lk) {
     push_off(); // Increase noff counter to ensure interruptions are disabled
     struct proc *proc = myproc();
@@ -334,7 +349,10 @@ void scheduler_wakeup(struct proc *p) {
     // __sched_assert_unholding();
     assert(p != NULL, "Cannot wake up a NULL process");
     assert(p != myproc(), "Cannot wake up the current process");
-    assert(p->chan == NULL, "Process must not be sleeping on a channel before waking up");
+    if (p->chan != NULL) {
+        PROC_CLEAR_ONCHAN(p); // Clear the ONCHAN flag if the process is sleeping on a channel
+        p->chan = NULL; // Clear the channel
+    }
     if (!PROC_SLEEPING(p)) {
         printf("warning: scheduler_wakeup called on a process that is not sleeping, pid: %d, state: %s\n", 
                p->pid, procstate_to_str(__proc_get_pstate(p)));
@@ -349,75 +367,39 @@ void scheduler_wakeup(struct proc *p) {
 }
 
 void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
-    push_off(); // Increase noff counter to ensure interruptions are disabled
+    sleep_lock();
     struct proc *proc = myproc();
     assert(proc != NULL, "PCB is NULL");
     assert(chan != NULL, "Cannot sleep on a NULL channel");
-    proc_assert_holding(proc);
+    
     int lk_holding = (lk != NULL && spin_holding(lk));
-    pop_off();  // Safe to decrease noff counter after acquiring the process lock
-
-    sched_lock();
+    if (lk_holding) {
+        spin_release(lk); // Release lk before sleeping
+    }
     struct proc_queue *queue = chan_queue_get((uint64)chan, true);
     assert(queue != NULL, "Failed to get channel queue");
 
-    proc_node_t waiter = { 0 };
-    proc_node_init(&waiter);
-    __proc_set_pstate(proc, PSTATE_UNINTERRUPTIBLE);
-    if (proc_queue_push(queue, &waiter) != 0) {
-        panic("Failed to push process to sleep queue");
-    }
-    proc->chan = chan; // Set the channel for the process
-    PROC_SET_ONCHAN(proc); // Mark the process as sleeping on a channel
-    scheduler_yield(lk); // Switch to the scheduler
-    if (signal_pending(proc)) {
-        // If the process is woken up by a signal, it should detach its waiter from the queue
-        // @TODO: ignore return value because it could be already removed by other process
-        proc_queue_remove(queue, &waiter);
-        PROC_CLEAR_ONCHAN(proc); // Clear the ONCHAN flag
-        proc->chan = NULL; // Clear the channel
-    }
+    int ret = proc_queue_wait(queue, &__sleep_lock);
+    (void)ret;
+    // @TODO: handle the return value of proc_queue_wait
 
-    sched_unlock();
-
-    // Because the process lock is acquired after lk, we need to release it before acquiring lk.
-    // The process lock will be held after acquiring lk, if the process lock was held 
-    // before the yield.
-    proc_unlock(proc);
+    sleep_unlock();
     if (lk_holding) {
         spin_acquire(lk);
     }
-    proc_lock(proc); // Reacquire the process lock after yielding
 }
 
 void scheduler_wakeup_on_chan(void *chan) {
-    sched_lock();
+    sleep_lock();
     struct chan_queue_node *chan_node = chan_queue_pop((uint64)chan);
     if (chan_node == NULL) {
-        sched_unlock();
+        sleep_unlock();
         return; // No processes waiting on this channel
     }
     proc_queue_t *tmp_queue = &chan_node->wait_queue;
-
-    for (;;) {
-        proc_node_t *node = NULL;
-        assert(proc_queue_pop(tmp_queue, &node) == 0, "Failed to pop process from temporary queue");
-        if (node == NULL) {
-            break; // No more processes in the temporary queue
-        }
-        struct proc *p = proc_node_get_proc(node);
-        assert(p != NULL, "scheduler_wakeup_on_chan: process is NULL");
-        sched_unlock();
-        proc_lock(p);
-        assert(PROC_ONCHAN(p), "Process must be sleeping on a channel to wake up");
-        PROC_CLEAR_ONCHAN(p);
-        p->chan = NULL;
-        sched_lock();
-        scheduler_wakeup(p);
-        proc_unlock(p);
-    }
+    assert(proc_queue_wakeup_all(tmp_queue, 0) == 0, "Failed to wake up all processes on channel");
     chan_queue_free(chan_node); // Free the temporary queue
-    sched_unlock();
+    sleep_unlock();
 }
 
 void scheduler_dump_chan_queue(void) {
@@ -443,8 +425,8 @@ void scheduler_dump_chan_queue(void) {
 uint64 sys_dumpchan(void) {
     // This function is called from the dumpchan user program.
     // It dumps the channel queue to the console.
-    sched_lock();
+    sleep_lock();
     scheduler_dump_chan_queue();
-    sched_unlock();
+    sleep_unlock();
     return 0;
 }

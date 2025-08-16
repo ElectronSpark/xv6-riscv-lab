@@ -10,6 +10,7 @@ typedef struct proc_queue proc_queue_t;
 typedef struct proc_node {
     list_node_t list_entry;
     proc_queue_t *queue; // Pointer to the queue this entry belongs to
+    int errno;  // 0: Wake up by queue leader, -EINTR: Wake up by signal
     struct proc *proc;   // Pointer to the process this node represents
 } proc_node_t;
 

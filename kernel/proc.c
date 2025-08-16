@@ -829,9 +829,7 @@ forkret(void)
 void
 sleep(void *chan, struct spinlock *lk)
 {
-  proc_lock(myproc());
   scheduler_sleep_on_chan(chan, lk);
-  proc_unlock(myproc());
 }
 
 // Wake up all processes sleeping on chan.
