@@ -402,8 +402,7 @@ ilock(struct inode *ip)
   if(ip == 0 || ip->ref < 1)
     panic("ilock");
 
-  mutex_lock(&ip->lock);
-
+  assert(mutex_lock(&ip->lock) == 0, "ilock: failed to lock inode");
   if(ip->valid == 0){
     bp = bread(ip->dev, IBLOCK(ip->inum, sb));
     dip = (struct dinode*)bp->data + ip->inum%IPB;
@@ -444,7 +443,7 @@ iput(struct inode *ip)
 {
   spin_acquire(&itable.lock);
   if (ip->ref == 1) {
-    mutex_lock(&ip->lock);
+    assert(mutex_lock(&ip->lock) == 0, "ilock: failed to lock inode");
     ip->ref = 0;
     struct inode *popped = __itable_hlist_pop(ip->dev, ip->inum);
     spin_release(&itable.lock);

@@ -135,7 +135,7 @@ bget(uint dev, uint blockno)
     }
     b->refcnt++;
     spin_release(&bcache.lock);
-    mutex_lock(&b->lock);
+    assert(mutex_lock(&b->lock) == 0, "bget: failed to lock buffer");
     return b;
   }
 
@@ -168,7 +168,7 @@ bget(uint dev, uint blockno)
         panic("bget: failed to push recycled buffer into hash list");
       }
       spin_release(&bcache.lock);
-      mutex_lock(&b->lock);
+      assert(mutex_lock(&b->lock) == 0, "bget: failed to lock buffer");
       return b;
     }
   }
