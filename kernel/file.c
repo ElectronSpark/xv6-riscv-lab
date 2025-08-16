@@ -8,7 +8,7 @@
 #include "param.h"
 #include "fs.h"
 #include "spinlock.h"
-#include "sleeplock.h"
+#include "mutex_types.h"
 #include "file.h"
 #include "stat.h"
 #include "proc.h"

@@ -12,7 +12,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "fs.h"
-#include "sleeplock.h"
+#include "mutex_types.h"
 #include "file.h"
 #include "fcntl.h"
 #include "memlayout.h"

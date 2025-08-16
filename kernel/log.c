@@ -3,7 +3,7 @@
 #include "defs.h"
 #include "param.h"
 #include "spinlock.h"
-#include "sleeplock.h"
+#include "mutex_types.h"
 #include "fs.h"
 #include "buf.h"
 

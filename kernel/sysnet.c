@@ -10,7 +10,7 @@
 #include "proc.h"
 #include "defs.h"
 #include "fs.h"
-#include "sleeplock.h"
+#include "mutex_types.h"
 #include "file.h"
 #include "net.h"
 #include "vm.h"

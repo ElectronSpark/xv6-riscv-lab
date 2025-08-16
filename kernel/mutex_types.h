@@ -1,5 +1,5 @@
-#ifndef __KERNEL_SLEEPLOCK_H
-#define __KERNEL_SLEEPLOCK_H
+#ifndef __KERNEL_MUTEX_TYPES_H
+#define __KERNEL_MUTEX_TYPES_H
 
 #include "compiler.h"
 #include "proc_queue_type.h"
@@ -14,4 +14,4 @@ typedef struct mutex {
   struct proc *holder;    // Process holding lock
 } mutex_t;
 
-#endif        /* __KERNEL_SLEEPLOCK_H */
+#endif        /* __KERNEL_MUTEX_TYPES_H */

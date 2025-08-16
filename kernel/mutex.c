@@ -7,7 +7,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
-#include "sleeplock.h"
+#include "mutex_types.h"
 #include "proc_queue.h"
 #include "sched.h"
 

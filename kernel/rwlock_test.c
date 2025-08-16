@@ -8,7 +8,7 @@
 #include "rwlock.h"
 #include "proc_queue.h"
 #include "sched.h"
-#include "sleeplock.h"
+#include "mutex_types.h"
 
 /*
  * RWLock test suite (no artificial busy delays).
