@@ -8,6 +8,7 @@ void scheduler_init(void);
 int sched_holding(void);
 void sched_lock(void);
 void sched_unlock(void);
+int chan_holding(void);
 void sleep_lock(void);
 void sleep_unlock(void);
 void scheduler_run(void);

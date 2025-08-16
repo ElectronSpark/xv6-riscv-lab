@@ -57,6 +57,10 @@ static void chan_queue_init(void) {
     assert(slab_ret == 0, "Failed to initialize chan queue slab cache");
 }
 
+int chan_holding(void) {
+    return spin_holding(&__sleep_lock);
+}
+
 void sleep_lock(void) {
     spin_acquire(&__sleep_lock);
 }

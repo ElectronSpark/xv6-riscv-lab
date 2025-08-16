@@ -189,7 +189,7 @@ int proc_queue_wait(proc_queue_t *q, struct spinlock *lock) {
     return waiter.errno;
 }
 
-static void __do_wakeup(proc_node_t *woken, int errno) {
+static void __do_wakeup(proc_node_t *woken, int errno, struct proc **retp) {
     if (woken == NULL) {
         return; // Nothing to wake up
     }
@@ -199,6 +199,9 @@ static void __do_wakeup(proc_node_t *woken, int errno) {
     }
     woken->errno = errno; // Set the error number for the woken process
     struct proc *p = woken->proc;
+    if (retp != NULL) {
+        __atomic_store_n(retp, p, __ATOMIC_SEQ_CST);
+    }
     proc_lock(p);
     sched_lock();
     scheduler_wakeup(p);
@@ -206,7 +209,7 @@ static void __do_wakeup(proc_node_t *woken, int errno) {
     proc_unlock(p);
 }
 
-static int __proc_queue_wakeup_one(proc_queue_t *q, int errno) {
+static int __proc_queue_wakeup_one(proc_queue_t *q, int errno, struct proc **retp) {
     if (q == NULL) {
         return -EINVAL;
     }
@@ -215,17 +218,17 @@ static int __proc_queue_wakeup_one(proc_queue_t *q, int errno) {
     int ret = proc_queue_pop(q, &woken);
     if (ret != 0) {
         if (woken != NULL) {
-            __do_wakeup(woken, ret);
+            __do_wakeup(woken, ret, retp);
         }
         return ret; // Error: failed to pop process from queue
     }
 
-    __do_wakeup(woken, errno);
+    __do_wakeup(woken, errno, retp);
     return 0; // Success
 }
 
-int proc_queue_wakeup(proc_queue_t *q, int errno) {
-    return __proc_queue_wakeup_one(q, errno);
+int proc_queue_wakeup(proc_queue_t *q, int errno, struct proc **retp) {
+    return __proc_queue_wakeup_one(q, errno, retp);
 }
 
 int proc_queue_wakeup_all(proc_queue_t *q, int errno) {
@@ -234,7 +237,7 @@ int proc_queue_wakeup_all(proc_queue_t *q, int errno) {
     }
 
     for(;;) {
-        int ret = __proc_queue_wakeup_one(q, errno);
+        int ret = __proc_queue_wakeup_one(q, errno, NULL);
         if (ret != 0) {
             return ret;
         }
