@@ -22,18 +22,18 @@
                               __ATOMIC_SEQ_CST);        \
 })
 
-static int __do_wakeup(struct sleeplock *lk) {
+static int __do_wakeup(mutex_t *lk) {
   if (LIST_IS_EMPTY(&lk->wait_queue.head)) {
     __sleep_lock_set_holder(lk, NULL); // No process holds the lock
     assert(proc_queue_size(&lk->wait_queue) == 0,
-           "releasesleep: wait queue is not empty");
+           "mutex_unlock: wait queue is not empty");
     return 0; // Nothing to release
   }
   return proc_queue_wakeup(&lk->wait_queue, 0, &lk->holder);
 }
 
 void
-initsleeplock(struct sleeplock *lk, char *name)
+mutex_init(mutex_t *lk, char *name)
 {
   spin_init(&lk->lk, "sleep lock");
   proc_queue_init(&lk->wait_queue, "sleep lock wait queue", &lk->lk);
@@ -42,7 +42,7 @@ initsleeplock(struct sleeplock *lk, char *name)
 }
 
 int
-acquiresleep(struct sleeplock *lk)
+mutex_lock(mutex_t *lk)
 {
   // If the lock is not held, acquire it and return success.
   if (__sleep_lock_try_set_holder(lk, myproc())) {
@@ -52,7 +52,7 @@ acquiresleep(struct sleeplock *lk)
   // Slow path
   spin_acquire(&lk->lk);
   assert(__sleep_lock_holder(lk) != myproc(), 
-         "acquiresleep: deadlock detected, process already holds the lock");
+         "mutex_lock: deadlock detected, process already holds the lock");
   
   while (__sleep_lock_holder(lk) != myproc()) {
     int ret = proc_queue_wait(&lk->wait_queue, &lk->lk);
@@ -60,7 +60,7 @@ acquiresleep(struct sleeplock *lk)
       // If proc_queue_wait returns an error, we need to release the lock
       // and return the error code.
       if (proc_queue_size(&lk->wait_queue) > 0) {
-        assert(__do_wakeup(lk) == 0, "releasesleep: failed to wake up processes");
+        assert(__do_wakeup(lk) == 0, "mutex_unlock: failed to wake up processes");
       } else if (__sleep_lock_holder(lk) == myproc()) {
         __sleep_lock_set_holder(lk, NULL);
       }
@@ -76,7 +76,7 @@ acquiresleep(struct sleeplock *lk)
 
 // @TODO: signal handling
 void
-releasesleep(struct sleeplock *lk)
+mutex_unlock(mutex_t *lk)
 {
   // First put all process from the wait queue to a temporary queue,
   // so that we can detach them from the wait queue, and then wake them up.
@@ -84,12 +84,12 @@ releasesleep(struct sleeplock *lk)
   // from the wait queue.
   spin_acquire(&lk->lk);
   int ret = __do_wakeup(lk);
-  assert(ret == 0, "releasesleep: failed to wake up processes");
+  assert(ret == 0, "mutex_unlock: failed to wake up processes");
   spin_release(&lk->lk);
 }
 
 int
-holdingsleep(struct sleeplock *lk)
+holding_mutex(mutex_t *lk)
 {
   return __atomic_load_n(&lk->holder, __ATOMIC_SEQ_CST) == myproc();
 }

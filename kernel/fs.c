@@ -365,7 +365,7 @@ iget(uint dev, uint inum)
       spin_release(&itable.lock);
       panic("iget: __inode_cache_alloc failed");
     }
-    initsleeplock(&ip->lock, "inode");
+    mutex_init(&ip->lock, "inode");
   }
 
   ip->dev = dev;
@@ -402,7 +402,7 @@ ilock(struct inode *ip)
   if(ip == 0 || ip->ref < 1)
     panic("ilock");
 
-  acquiresleep(&ip->lock);
+  mutex_lock(&ip->lock);
 
   if(ip->valid == 0){
     bp = bread(ip->dev, IBLOCK(ip->inum, sb));
@@ -424,12 +424,12 @@ ilock(struct inode *ip)
 void
 iunlock(struct inode *ip)
 {
-  if(ip == 0 || !holdingsleep(&ip->lock) || ip->ref < 1) {
-    printf("iunlock: invalid inode %p ref %d holdingsleep %s\n", ip, ip ? ip->ref : -1, holdingsleep(&ip->lock) ? "true" : "false");
+  if(ip == 0 || !holding_mutex(&ip->lock) || ip->ref < 1) {
+    printf("iunlock: invalid inode %p ref %d holding_mutex %s\n", ip, ip ? ip->ref : -1, holding_mutex(&ip->lock) ? "true" : "false");
     panic("iunlock");
   }
 
-  releasesleep(&ip->lock);
+  mutex_unlock(&ip->lock);
 }
 
 // Drop a reference to an in-memory inode.
@@ -444,7 +444,7 @@ iput(struct inode *ip)
 {
   spin_acquire(&itable.lock);
   if (ip->ref == 1) {
-    acquiresleep(&ip->lock);
+    mutex_lock(&ip->lock);
     ip->ref = 0;
     struct inode *popped = __itable_hlist_pop(ip->dev, ip->inum);
     spin_release(&itable.lock);
@@ -455,7 +455,7 @@ iput(struct inode *ip)
       // inode has no links and no other references: truncate and free.
       
       // ip->ref == 1 means no other process can have ip locked,
-      // so this acquiresleep() won't block (or deadlock).
+      // so this mutex_lock() won't block (or deadlock).
       
       itrunc(ip);
       ip->type = 0;

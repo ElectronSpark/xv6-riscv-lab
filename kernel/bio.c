@@ -111,7 +111,7 @@ binit(void)
   hlist_init(&bcache.cached, BIO_HASH_BUCKETS, &hlist_func);
   for(b = bcache.buf; b < bcache.buf+NBUF; b++){
     list_entry_init(&b->lru_entry);
-    initsleeplock(&b->lock, "buffer");
+    mutex_init(&b->lock, "buffer");
     list_entry_push(&bcache.lru_entry, &b->lru_entry);
   }
 }
@@ -135,7 +135,7 @@ bget(uint dev, uint blockno)
     }
     b->refcnt++;
     spin_release(&bcache.lock);
-    acquiresleep(&b->lock);
+    mutex_lock(&b->lock);
     return b;
   }
 
@@ -168,7 +168,7 @@ bget(uint dev, uint blockno)
         panic("bget: failed to push recycled buffer into hash list");
       }
       spin_release(&bcache.lock);
-      acquiresleep(&b->lock);
+      mutex_lock(&b->lock);
       return b;
     }
   }
@@ -193,7 +193,7 @@ bread(uint dev, uint blockno)
 void
 bwrite(struct buf *b)
 {
-  if(!holdingsleep(&b->lock))
+  if(!holding_mutex(&b->lock))
     panic("bwrite");
   virtio_disk_rw(b, 1);
 }
@@ -203,10 +203,10 @@ bwrite(struct buf *b)
 void
 brelse(struct buf *b)
 {
-  if(!holdingsleep(&b->lock))
+  if(!holding_mutex(&b->lock))
     panic("brelse");
 
-  releasesleep(&b->lock);
+  mutex_unlock(&b->lock);
 
   spin_acquire(&bcache.lock);
   b->refcnt--;

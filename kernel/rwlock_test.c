@@ -56,7 +56,7 @@ static volatile int t4_writers_done = 0;
 static volatile int t4_reader_done = 0;
 static volatile int t4_start_barrier = 0;
 static volatile int t4_error_logs = 0;
-static struct sleeplock t4_start_lock;   // sleeplock barrier for Test4
+static mutex_t t4_start_lock;   // sleeplock barrier for Test4
 
 /* Reader for Test 1 */
 static void t1_reader(uint64 a1, uint64 a2) {
@@ -119,9 +119,9 @@ static void t3_writer(uint64 a1, uint64 a2) {
 
 /* Writer for Test 4 */
 static void t4_writer(uint64 a1, uint64 a2) {
-  // Wait on sleeplock barrier: master holds it initially; writers block in acquiresleep
-  if(acquiresleep(&t4_start_lock) != 0) return; // will hold barrier for first writer only
-  releasesleep(&t4_start_lock); // Immediately release so everyone can proceed after barrier opens
+  // Wait on sleeplock barrier: master holds it initially; writers block in mutex_lock
+  if(mutex_lock(&t4_start_lock) != 0) return; // will hold barrier for first writer only
+  mutex_unlock(&t4_start_lock); // Immediately release so everyone can proceed after barrier opens
   for(int iter=0; iter < T4_WRITER_ITERS; iter++) {
     if(rwlock_acquire_write(&test_lock) != 0) { error_flag = 1; return; }
     int new_version = t4_ds.version + 1;
@@ -142,8 +142,8 @@ static void t4_writer(uint64 a1, uint64 a2) {
 
 /* Reader for Test 4 */
 static void t4_reader(uint64 a1, uint64 a2) {
-  if(acquiresleep(&t4_start_lock) != 0) return; // barrier
-  releasesleep(&t4_start_lock);
+  if(mutex_lock(&t4_start_lock) != 0) return; // barrier
+  mutex_unlock(&t4_start_lock);
   for(;;) {
     if(rwlock_acquire_read(&test_lock) != 0) { error_flag = 1; return; }
     int version = t4_ds.version;
@@ -251,15 +251,15 @@ static void run_test4(void) {
   t4_reader_done = 0;
   t4_start_barrier = 0;
   t4_error_logs = 0;
-  initsleeplock(&t4_start_lock, "t4start");
+  mutex_init(&t4_start_lock, "t4start");
   // Acquire barrier sleeplock so spawned threads block when they try to acquire
-  if(acquiresleep(&t4_start_lock) != 0) error_flag = 1;
+  if(mutex_lock(&t4_start_lock) != 0) error_flag = 1;
   for(int i=0;i<T4_WRITER_THREADS;i++)
     if(kernel_proc_create(NULL, t4_writer, 0, 0, KERNEL_STACK_ORDER) < 0) error_flag = 1;
   for(int i=0;i<T4_READER_THREADS;i++)
     if(kernel_proc_create(NULL, t4_reader, 0, 0, KERNEL_STACK_ORDER) < 0) error_flag = 1;
   // Release barrier
-  releasesleep(&t4_start_lock);
+  mutex_unlock(&t4_start_lock);
   if(wait_for(&t4_writers_done, T4_WRITER_THREADS, 400000) != 0) error_flag = 1;
   if(wait_for(&t4_reader_done, T4_READER_THREADS, 400000) != 0) error_flag = 1;
   printf(error_flag?"FAIL\n":"OK\n");

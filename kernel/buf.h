@@ -10,7 +10,7 @@ struct buf {
   int disk;    // does disk "own" buf?
   uint dev;
   uint blockno;
-  struct sleeplock lock;
+  mutex_t lock;
   uint refcnt;
   hlist_entry_t hlist_entry; // hash list entry
   list_node_t lru_entry;

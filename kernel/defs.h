@@ -14,7 +14,7 @@ struct inode;
 struct pipe;
 struct proc;
 struct spinlock;
-struct sleeplock;
+typedef struct mutex mutex_t;
 struct stat;
 struct superblock;
 struct mbuf;
@@ -155,10 +155,10 @@ void            push_off(void);
 void            pop_off(void);
 
 // sleeplock.c
-int             acquiresleep(struct sleeplock*);
-void            releasesleep(struct sleeplock*);
-int             holdingsleep(struct sleeplock*);
-void            initsleeplock(struct sleeplock*, char*);
+int             mutex_lock(mutex_t*);
+void            mutex_unlock(mutex_t*);
+int             holding_mutex(mutex_t*);
+void            mutex_init(mutex_t*, char*);
 
 // string.c
 #ifndef HOST_TEST

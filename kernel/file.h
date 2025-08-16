@@ -26,7 +26,7 @@ struct inode {
   uint dev;           // Device number
   uint inum;          // Inode number
   int ref;            // Reference count
-  struct sleeplock lock; // protects everything below here
+  mutex_t lock; // protects everything below here
   hlist_entry_t hlist_entry; // for inode hash list
   int valid;          // inode has been read from disk?
 
