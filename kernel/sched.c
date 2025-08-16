@@ -245,6 +245,9 @@ void scheduler_run(void) {
         sched_unlock();
         // printf("CPU: %d <- %s: %s (pid: %d)\n", cpuid(), p->name, procstate_to_str(p->state), p->pid);
         proc_unlock(p);
+        if (chan_holding()) {
+            sleep_unlock();
+        }
         if (lk != NULL) {
             spin_release(lk); // Release the lock returned by __swtch_context
         }
@@ -267,7 +270,14 @@ void scheduler_yield(struct spinlock *lk) {
 
     assert(!intr_get(), "Interrupts must be disabled after switching to a process");
     int intena = mycpu()->intena; // Save interrupt state
-    assert(mycpu()->noff == 2 || (mycpu()->noff == 3 && lk_holding), 
+    int noff_expected = 2;
+    if (lk_holding) {
+        noff_expected++;
+    }
+    if (chan_holding()) {
+        noff_expected++;
+    }
+    assert(mycpu()->noff == noff_expected, 
            "Process must hold and only hold the proc lock and sched lock when yielding. Current noff: %d", mycpu()->noff);
     PROC_CLEAR_NEEDS_RESCHED(proc);
     __swtch_context(&proc->context, &mycpu()->context, (uint64)lk);
@@ -376,21 +386,12 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
     assert(proc != NULL, "PCB is NULL");
     assert(chan != NULL, "Cannot sleep on a NULL channel");
     
-    int lk_holding = (lk != NULL && spin_holding(lk));
-    if (lk_holding) {
-        spin_release(lk); // Release lk before sleeping
-    }
     struct proc_queue *queue = chan_queue_get((uint64)chan, true);
     assert(queue != NULL, "Failed to get channel queue");
 
-    int ret = proc_queue_wait(queue, &__sleep_lock);
+    int ret = proc_queue_wait(queue, lk);
     (void)ret;
     // @TODO: handle the return value of proc_queue_wait
-
-    sleep_unlock();
-    if (lk_holding) {
-        spin_acquire(lk);
-    }
 }
 
 void scheduler_wakeup_on_chan(void *chan) {
