@@ -1,0 +1,104 @@
+#include "types.h"
+#include "riscv.h"
+#include "defs.h"
+#include "param.h"
+#include "errno.h"
+#include "memlayout.h"
+#include "spinlock.h"
+#include "proc.h"
+#include "proc_queue.h"
+#include "sched.h"
+#include "semaphore.h"
+
+static int __sem_value_inc(sem_t *sem) {
+    return __atomic_add_fetch(&sem->value, 1, __ATOMIC_SEQ_CST);
+}
+
+static int __sem_value_dec(sem_t *sem) {
+    return __atomic_add_fetch(&sem->value, -1, __ATOMIC_SEQ_CST);
+}
+
+static int __sem_value_get(sem_t *sem) {
+    return __atomic_load_n(&sem->value, __ATOMIC_SEQ_CST);
+}
+
+int sem_init(sem_t *sem, const char *name, int value) {
+    if (sem == NULL) {
+        return -EINVAL;
+    }
+    if (value < 0) {
+        return -EINVAL; // Semaphore value cannot be negative
+    }
+    sem->name = name ? name : "unnamed";
+    sem->value = value;
+    proc_queue_init(&sem->wait_queue, "semaphore wait queue", &sem->lk);
+    return 0;
+}
+
+static int __sem_do_post(sem_t *sem) {
+    int val = __sem_value_inc(sem);
+    if (val <= 0) {
+        // If the semaphore value was or is negative, wake up one waiting process
+        return proc_queue_wakeup(&sem->wait_queue, 0, NULL);
+    }
+    return 0;
+}
+
+int sem_wait(sem_t *sem) {
+    if (sem == NULL) {
+        return -EINVAL;
+    }
+
+    spin_acquire(&sem->lk);
+    int val = __sem_value_dec(sem); // Decrement the semaphore value
+    if (val >= 0) {
+        spin_release(&sem->lk);
+        return 0; // Semaphore acquired successfully
+    }
+
+    int ret = proc_queue_wait(&sem->wait_queue, &sem->lk);
+    if (ret != 0) {
+        if (__sem_do_post(sem) != 0) {
+            printf("Failed to post semaphore '%s' when process was interrupted\n", sem->name);
+        }
+    }
+
+    spin_release(&sem->lk);
+    return ret;
+}
+
+int sem_trywait(sem_t *sem) {
+    if (sem == NULL) {
+        return -EINVAL;
+    }
+    spin_acquire(&sem->lk);
+    if (__sem_value_get(sem) > 0) {
+        __sem_value_dec(sem);
+        spin_release(&sem->lk);
+        return 0;
+    }
+    spin_release(&sem->lk);
+    return -EAGAIN;
+}
+
+int sem_post(sem_t *sem) {
+    if (sem == NULL) {
+        return -EINVAL;
+    }
+
+    spin_acquire(&sem->lk);
+    int ret = __sem_do_post(sem);
+    spin_release(&sem->lk);
+    return ret;
+}
+
+int sem_getvalue(sem_t *sem, int *value) {
+    if (sem == NULL || value == NULL) {
+        return -EINVAL;
+    }
+
+    spin_acquire(&sem->lk);
+    *value = __sem_value_get(sem);
+    spin_release(&sem->lk);
+    return 0;
+}

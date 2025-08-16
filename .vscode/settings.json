@@ -80,6 +80,7 @@
         "vm.h": "c",
         "vm_types.h": "c",
         "trapframe.h": "c",
-        "pthread.h": "c"
+        "pthread.h": "c",
+        "semaphore.h": "c"
     }
 }
