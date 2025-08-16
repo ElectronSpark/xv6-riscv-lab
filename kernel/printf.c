@@ -73,6 +73,16 @@ print_padding(int len)
   }
 }
 
+STATIC void
+print_timestamp(void)
+{
+  uint64 stime = r_time();
+  consputc('[');
+  printint(stime, 10, 0);
+  consputc(']');
+  consputc(' ');
+}
+
 // Print to the console.
 int
 printf(char *fmt, ...)
@@ -80,15 +90,23 @@ printf(char *fmt, ...)
   va_list ap;
   int i, cx, c0, c1, c2, locking;
   char *s;
+  static int nnewline = false;
 
   locking = pr.locking;
   if(locking)
     spin_acquire(&pr.lock);
 
+  if (!__atomic_test_and_set(&nnewline, __ATOMIC_ACQUIRE)) {
+    print_timestamp();
+  }
+
   va_start(ap, fmt);
   for(i = 0; (cx = fmt[i] & 0xff) != 0; i++){
     if(cx != '%'){
       consputc(cx);
+      if (cx == '\n') {
+        __atomic_clear(&nnewline, __ATOMIC_RELEASE);
+      }
       continue;
     }
     i++;
