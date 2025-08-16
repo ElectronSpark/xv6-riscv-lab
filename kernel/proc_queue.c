@@ -199,11 +199,11 @@ static void __do_wakeup(proc_node_t *woken, int errno, struct proc **retp) {
     }
     woken->errno = errno; // Set the error number for the woken process
     struct proc *p = woken->proc;
+    proc_lock(p);
+    sched_lock();
     if (retp != NULL) {
         __atomic_store_n(retp, p, __ATOMIC_SEQ_CST);
     }
-    proc_lock(p);
-    sched_lock();
     scheduler_wakeup(p);
     sched_unlock();
     proc_unlock(p);

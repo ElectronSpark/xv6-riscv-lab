@@ -51,6 +51,13 @@ mutex_lock(mutex_t *lk)
 
   // Slow path
   spin_acquire(&lk->lk);
+  if (__mutex_try_set_holder(lk, myproc())) {
+    // It's possible that someone releases the mutex just right before the current process
+    // tried to acquire the mutex without holding spinlock. In that case, we just need to
+    // claim the mutex and return.
+    spin_release(&lk->lk);
+    return 0;
+  }
   assert(__mutex_holder(lk) != myproc(), 
          "mutex_lock: deadlock detected, process already holds the lock");
   
