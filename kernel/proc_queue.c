@@ -154,6 +154,14 @@ struct proc *proc_node_get_proc(proc_node_t *node) {
     return node->proc;
 }
 
+int proc_node_get_errno(proc_node_t *node, int *errno) {
+    if (node == NULL || errno == NULL) {
+        return -EINVAL; // Error: node or errno pointer is NULL
+    }
+    *errno = node->errno;
+    return 0;
+}
+
 int proc_queue_push(proc_queue_t *q, proc_node_t *node) {
     if (q == NULL || proc_node_get_proc(node) == NULL) {
         return -EINVAL; // Error: queue or process is NULL

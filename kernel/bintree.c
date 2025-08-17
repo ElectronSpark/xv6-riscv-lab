@@ -32,10 +32,14 @@ struct rb_node *rb_brother(struct rb_node *node)
 
 struct rb_node **__rb_node_link(
     struct rb_root *root,
-    struct rb_node *node
+    struct rb_node *node,
+    struct rb_node **ret_parent
 )
 {
     struct rb_node *__parent = rb_parent(node);
+    if (ret_parent) {
+        *ret_parent = __parent;
+    }
     if (__parent == NULL) {
         return &root->node;
     }
@@ -330,7 +334,7 @@ struct rb_node *__rb_rotate_left(
     if (node == NULL) {
         return NULL;
     }
-    struct rb_node **link = __rb_node_link(root, node);
+    struct rb_node **link = __rb_node_link(root, node, NULL);
     struct rb_node *parent = rb_parent(node);
     struct rb_node *right = node->right;
     struct rb_node *right_left = NULL;
@@ -361,7 +365,7 @@ struct rb_node *__rb_rotate_right(
     if (node == NULL) {
         return NULL;
     }
-    struct rb_node **link = __rb_node_link(root, node);
+    struct rb_node **link = __rb_node_link(root, node, NULL);
     struct rb_node *parent = rb_parent(node);
     struct rb_node *left = node->left;
     struct rb_node *left_right = NULL;

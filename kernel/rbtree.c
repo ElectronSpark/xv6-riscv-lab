@@ -209,18 +209,15 @@ static inline void __rb_delete_color_fixup(
     rb_node_dye_black(node);
 }
 
-struct rb_node *rb_delete_color(struct rb_root *root, unsigned long key)
+static void __rb_do_delete_node_color(struct rb_root *root, 
+                                      struct rb_node *parent, 
+                                      struct rb_node **link)
 {
-    if (!rb_root_is_initialized(root)) {
-        return NULL;
-    }
     struct rb_node *target;
-    struct rb_node *parent;
-    struct rb_node **link = __rb_find_key_link(root, &parent, key);
     struct rb_node *delete_node = *link;
 
     if (delete_node == NULL) {
-        return NULL;
+        return;
     }
 
     target = delete_node;
@@ -257,7 +254,7 @@ struct rb_node *rb_delete_color(struct rb_root *root, unsigned long key)
             __rb_delete_color_fixup(root, target);
         }
         if (!rb_node_is_top(target)) {
-            struct rb_node **target_link = __rb_node_link(root, target);
+            struct rb_node **target_link = __rb_node_link(root, target, NULL);
             *target_link = NULL;
             rb_set_parent(target, target);
         }
@@ -265,8 +262,35 @@ struct rb_node *rb_delete_color(struct rb_root *root, unsigned long key)
 
     /// 用真正被删除的节点替代原有的节点。
     if (target != delete_node) {
-        __rb_replace_node(__rb_node_link(root, delete_node), target, delete_node);
+        __rb_replace_node(__rb_node_link(root, delete_node, NULL), target, delete_node);
     }
+}
 
-    return delete_node;
+struct rb_node *rb_delete_node_color(struct rb_root *root, struct rb_node *node)
+{
+    struct rb_node *parent;
+    struct rb_node **link = __rb_node_link(root, node, &parent);
+    struct rb_node *target;
+    if (link == NULL || *link == NULL) {
+        return NULL;
+    }
+    target = *link;
+    __rb_do_delete_node_color(root, parent, link);
+    return target;
+}
+
+struct rb_node *rb_delete_key_color(struct rb_root *root, unsigned long key)
+{
+    if (!rb_root_is_initialized(root)) {
+        return NULL;
+    }
+    struct rb_node *parent;
+    struct rb_node **link = __rb_find_key_link(root, &parent, key);
+    struct rb_node *target;
+    if (link == NULL || *link == NULL) {
+        return NULL;
+    }
+    target = *link;
+    __rb_do_delete_node_color(root, parent, link);
+    return target;
 }

@@ -183,13 +183,15 @@ extern struct rb_node *rb_brother(struct rb_node *node);
  * 
  * @param root 指向二叉树根结构体的指针。
  * @param node struct rb_node* 二叉树节点。
+ * @param ret_parent 用于返回目标节点父节点的指针。
  * 
  * @return struct rb_node** 二叉树节点有有父节点时返回该节点在其父节点上的链接指针，否则
  *                          返回NULL。
  */
 extern struct rb_node **__rb_node_link(
     struct rb_root *root,
-    struct rb_node *node
+    struct rb_node *node,
+    struct rb_node **ret_parent
 );
 
 /**

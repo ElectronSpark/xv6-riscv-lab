@@ -909,8 +909,8 @@ vma_t *vma_merge(vma_t *vma1, vma_t *vma2)
 
   // Now vma1 starts before or at the same point as vma2
   vma1->end = vma2->end; // Extend the end of vma1 to include vma2
-  assert(rb_delete_color(&vma2->vm->vm_tree, vma2->start) == &vma2->rb_entry, 
-         "vma_merge: rb_delete_color failed"); // Remove from tree
+  assert(rb_delete_node_color(&vma2->vm->vm_tree, &vma2->rb_entry) == &vma2->rb_entry,
+         "vma_merge: rb_delete_node_color failed"); // Remove from tree
   list_node_detach(vma2, list_entry);
   list_node_detach(vma2, free_list_entry);
   __vma_free(vma2); // Free the merged VMA

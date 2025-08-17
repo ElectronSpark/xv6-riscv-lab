@@ -19,6 +19,7 @@ int proc_tree_size(proc_tree_t *q);
 proc_queue_t *proc_node_get_queue(proc_node_t *node);
 proc_tree_t *proc_node_get_tree(proc_node_t *node);
 struct proc *proc_node_get_proc(proc_node_t *node);
+int proc_node_get_errno(proc_node_t *node, int *errno);
 
 int proc_queue_push(proc_queue_t *q, proc_node_t *node);
 int proc_queue_first(proc_queue_t *q, proc_node_t **ret_node);
@@ -26,9 +27,16 @@ int proc_queue_pop(proc_queue_t *q, proc_node_t **ret_node);
 int proc_queue_remove(proc_queue_t *q, proc_node_t *node);
 int proc_queue_bulk_move(proc_queue_t *to, proc_queue_t *from);
 
+int proc_tree_add(proc_tree_t *q, proc_node_t *node);
+int proc_tree_first(proc_tree_t *q, proc_node_t **ret_node);
+int proc_tree_key_min(proc_tree_t *q, uint64 *key);
+int proc_tree_remove(proc_tree_t *q, proc_node_t *node);
+
 int proc_queue_wait(proc_queue_t *q, struct spinlock *lock);
 int proc_queue_wakeup(proc_queue_t *q, int errno, struct proc **retp);
 int proc_queue_wakeup_all(proc_queue_t *q, int errno);
 
+int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock);
+int proc_tree_wakeup(proc_tree_t *q, uint64 key, int errno, struct proc **retp);
 
 #endif // KERNEL_PROC_QUEUE_H

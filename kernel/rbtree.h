@@ -37,6 +37,16 @@ extern struct rb_node *rb_insert_color(
 );
 
 /**
+ * @brief Delete a node from the red-black tree.
+ * 
+ * @param root 进行节点删除的红黑树根节点。
+ * @param node 被删除节点的指针。
+ *
+ * @return struct rb_node* 删除失败返回NULL，删除成功返回被删除的节点。
+ */
+extern struct rb_node *rb_delete_node_color(struct rb_root *root, struct rb_node *node);
+
+/**
  * @brief 通过key值从红黑树中删除一个节点。
  * 
  * 在二叉树删除操作的基础上，通过旋转和染色等操作保证红黑树的黑平衡。
@@ -46,6 +56,6 @@ extern struct rb_node *rb_insert_color(
  * 
  * @return struct rb_node* 删除失败返回NULL，删除成功返回被删除的节点。
  */
-extern struct rb_node *rb_delete_color(struct rb_root *root, unsigned long key);
+extern struct rb_node *rb_delete_key_color(struct rb_root *root, unsigned long key);
 
 #endif // __KERNEL_RB_TREE_H__

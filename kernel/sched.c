@@ -106,7 +106,7 @@ proc_queue_t *chan_queue_get(uint64 chan, bool create) {
 }
 
 struct chan_queue_node *chan_queue_pop(uint64 chan) {
-    struct rb_node *node = rb_delete_color(&__chan_queue_root, chan);
+    struct rb_node *node = rb_delete_key_color(&__chan_queue_root, chan);
     if (node == NULL) {
         return NULL; // Not found
     }
