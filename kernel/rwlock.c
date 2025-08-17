@@ -61,7 +61,7 @@
 static void __wakeup_readers(rwlock_t *lock) {
     proc_node_t *p = NULL;
     proc_node_t *tmp = NULL;
-    proc_queue_foreach_unlocked(&lock->read_queue, p, tmp) {
+    proc_list_foreach_unlocked(&lock->read_queue, p, tmp) {
         assert(p->proc != NULL, "first_waiter process is NULL");
         lock->readers++;
         proc_lock(p->proc); // Lock the process that will hold the lock

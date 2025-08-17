@@ -5,11 +5,13 @@
 #include "list.h"
 
 // Traverse the process queue without locking
-#define proc_queue_foreach_unlocked(q, pos, tmp)   \
-    list_foreach_node_safe(&(q)->head, pos, tmp, list_entry)
+#define proc_list_foreach_unlocked(q, pos, tmp)   \
+    list_foreach_node_safe(&(q)->head, pos, tmp, list.entry)
 
 void proc_queue_init(proc_queue_t *q, const char *name, spinlock_t *lock);
 void proc_queue_set_lock(proc_queue_t *q, spinlock_t *lock);
+void proc_tree_init(proc_tree_t *q, const char *name, spinlock_t *lock);
+void proc_tree_set_lock(proc_tree_t *q, spinlock_t *lock);
 void proc_node_init(proc_node_t *node);
 
 int proc_queue_size(proc_queue_t *q);

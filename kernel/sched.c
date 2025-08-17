@@ -386,7 +386,7 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
     assert(proc != NULL, "PCB is NULL");
     assert(chan != NULL, "Cannot sleep on a NULL channel");
     
-    struct proc_queue *queue = chan_queue_get((uint64)chan, true);
+    proc_queue_t *queue = chan_queue_get((uint64)chan, true);
     assert(queue != NULL, "Failed to get channel queue");
 
     int ret = proc_queue_wait(queue, lk);
@@ -416,7 +416,7 @@ void scheduler_dump_chan_queue(void) {
         printf("Channel: %lx, Queue Size: %d\n", node->chan, proc_queue_size(&node->wait_queue));
         proc_node_t *p = NULL;
         proc_node_t *tmp_p = NULL;
-        proc_queue_foreach_unlocked(&node->wait_queue, p, tmp_p) {
+        proc_list_foreach_unlocked(&node->wait_queue, p, tmp_p) {
             struct proc *proc = proc_node_get_proc(p);
             if (proc ==NULL) {
                 printf("  Process: NULL\n");

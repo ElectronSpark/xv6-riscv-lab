@@ -6,7 +6,7 @@
 
 // Long-term locks for processes
 typedef struct mutex {
-  struct proc_queue wait_queue; // Queue of processes waiting for the lock
+  proc_queue_t wait_queue; // Queue of processes waiting for the lock
   struct spinlock lk; // spinlock protecting this sleep lock
   
   // For debugging:
