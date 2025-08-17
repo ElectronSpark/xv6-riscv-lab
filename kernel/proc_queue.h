@@ -15,7 +15,9 @@ void proc_tree_set_lock(proc_tree_t *q, spinlock_t *lock);
 void proc_node_init(proc_node_t *node);
 
 int proc_queue_size(proc_queue_t *q);
+int proc_tree_size(proc_tree_t *q);
 proc_queue_t *proc_node_get_queue(proc_node_t *node);
+proc_tree_t *proc_node_get_tree(proc_node_t *node);
 struct proc *proc_node_get_proc(proc_node_t *node);
 
 int proc_queue_push(proc_queue_t *q, proc_node_t *node);

@@ -120,6 +120,13 @@ int proc_queue_size(proc_queue_t *q) {
     return q->counter;
 }
 
+int proc_tree_size(proc_tree_t *q) {
+    if (q == NULL) {
+        return -EINVAL; // Error: queue is NULL
+    }
+    return q->counter;
+}
+
 proc_queue_t *proc_node_get_queue(proc_node_t *node) {
     if (node == NULL) {
         return NULL; // Error: node is NULL
@@ -128,6 +135,16 @@ proc_queue_t *proc_node_get_queue(proc_node_t *node) {
         return NULL; // Error: node is not in a list
     }
     return node->list.queue;
+}
+
+proc_tree_t *proc_node_get_tree(proc_node_t *node) {
+    if (node == NULL) {
+        return NULL; // Error: node is NULL
+    }
+    if (node->type != PROC_QUEUE_TYPE_TREE) {
+        return NULL; // Error: node is not in a tree
+    }
+    return node->tree.queue;
 }
 
 struct proc *proc_node_get_proc(proc_node_t *node) {
