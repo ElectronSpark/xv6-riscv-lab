@@ -37,6 +37,8 @@ int proc_queue_wakeup(proc_queue_t *q, int errno, struct proc **retp);
 int proc_queue_wakeup_all(proc_queue_t *q, int errno);
 
 int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock);
-int proc_tree_wakeup(proc_tree_t *q, uint64 key, int errno, struct proc **retp);
+int proc_tree_wakeup_one(proc_tree_t *q, uint64 key, int errno, struct proc **retp);
+int proc_tree_wakeup_key(proc_tree_t *q, uint64 key, int errno);
+int proc_tree_wakeup_all(proc_tree_t *q, int errno);
 
 #endif // KERNEL_PROC_QUEUE_H
