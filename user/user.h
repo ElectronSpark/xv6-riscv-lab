@@ -5,7 +5,7 @@ struct stat;
 
 typedef uint64 sigset_t;
 
-#include "../kernel/signal_types.h"
+#include "kernel/inc/signal_types.h"
 
 // system calls
 int fork(void);

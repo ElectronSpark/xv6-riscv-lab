@@ -10,14 +10,11 @@ endif()
 
 # Separate .S and .c files for kernel source files
 set(KERNEL_C_FILES
-    ${KERNEL_DIR}/kalloc.c
+    ${KERNEL_C_FILES}
     ${KERNEL_DIR}/string.c
     ${KERNEL_DIR}/main.c
-    ${KERNEL_DIR}/vm.c
-    ${KERNEL_DIR}/proc.c
     ${KERNEL_DIR}/trap.c
     ${KERNEL_DIR}/syscall.c
-    ${KERNEL_DIR}/sysproc.c
     ${KERNEL_DIR}/bio.c
     ${KERNEL_DIR}/fs.c
     ${KERNEL_DIR}/log.c
@@ -29,22 +26,34 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/exec.c
     ${KERNEL_DIR}/sysfile.c
     ${KERNEL_DIR}/plic.c
-    ${KERNEL_DIR}/proc_queue.c
-    ${KERNEL_DIR}/sched.c
     ${KERNEL_DIR}/virtio_disk.c
     ${KERNEL_DIR}/backtrace.c
     ${KERNEL_DIR}/e1000.c
     ${KERNEL_DIR}/net.c
     ${KERNEL_DIR}/pci.c
     ${KERNEL_DIR}/sysnet.c
-    ${KERNEL_DIR}/page.c
-    ${KERNEL_DIR}/slab.c
-    ${KERNEL_DIR}/signal.c
-    ${KERNEL_DIR}/sys_signal.c
     ${KERNEL_DIR}/hlist.c
     ${KERNEL_DIR}/bintree.c
     ${KERNEL_DIR}/rbtree.c
     ${KERNEL_DIR}/rwlock_test.c
+)
+
+set(KERNEL_C_FILES
+    ${KERNEL_C_FILES}
+    ${KERNEL_DIR}/mm/kalloc.c
+    ${KERNEL_DIR}/mm/page.c
+    ${KERNEL_DIR}/mm/slab.c
+    ${KERNEL_DIR}/mm/vm.c
+)
+
+set(KERNEL_C_FILES
+    ${KERNEL_C_FILES}
+    ${KERNEL_DIR}/proc/proc.c
+    ${KERNEL_DIR}/proc/proc_queue.c
+    ${KERNEL_DIR}/proc/sched.c
+    ${KERNEL_DIR}/proc/signal.c
+    ${KERNEL_DIR}/proc/sys_signal.c
+    ${KERNEL_DIR}/proc/sysproc.c
 )
 
 if(DEFINED ENV{RWLOCK_TEST})
@@ -87,11 +96,11 @@ if($ENV{LAB} STREQUAL "net")
 endif()
 
 set(KERNEL_S_FILES
-    ${KERNEL_DIR}/swtch.S
     ${KERNEL_DIR}/entry.S
-    ${KERNEL_DIR}/trampoline.S
     ${KERNEL_DIR}/kernelvec.S
-    ${KERNEL_DIR}/sig_trampoline.S
+    ${KERNEL_DIR}/trampoline.S
+    ${KERNEL_DIR}/proc/swtch.S
+    ${KERNEL_DIR}/proc/sig_trampoline.S
 )
 
 set_source_files_properties(${KERNEL_C_FILES} PROPERTIES LANGUAGE C)

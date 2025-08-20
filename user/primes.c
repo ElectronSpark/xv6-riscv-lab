@@ -1,5 +1,5 @@
-#include "kernel/types.h"
-#include "kernel/stat.h"
+#include "kernel/inc/types.h"
+#include "kernel/inc/stat.h"
 #include "user/user.h"
 
 void primes(int pip) __attribute__((noreturn));

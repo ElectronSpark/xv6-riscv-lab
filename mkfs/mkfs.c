@@ -8,10 +8,10 @@
 #include <assert.h>
 
 #define ON_HOST_OS      // avoid clash with host struct stat
-#include "kernel/types.h"
-#include "kernel/fs.h"
-#include "kernel/stat.h"
-#include "kernel/param.h"
+#include "kernel/inc/types.h"
+#include "kernel/inc/fs.h"
+#include "kernel/inc/stat.h"
+#include "kernel/inc/param.h"
 
 #ifndef static_assert
 #define static_assert(a, b) do { switch (0) case 0: case (a): ; } while (0)

@@ -1,8 +1,8 @@
-#include "kernel/types.h"
-#include "kernel/stat.h"
+#include "kernel/inc/types.h"
+#include "kernel/inc/stat.h"
 #include "user/user.h"
-#include "kernel/fs.h"
-#include "kernel/fcntl.h"
+#include "kernel/inc/fs.h"
+#include "kernel/inc/fcntl.h"
 
 int find(char *path, char *name) {
     char buf[512], *p;

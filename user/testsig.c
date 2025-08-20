@@ -1,5 +1,5 @@
-#include "kernel/types.h"
-#include "kernel/signo.h"
+#include "kernel/inc/types.h"
+#include "kernel/inc/signo.h"
 // Removed inclusion of kernel/signal.h to avoid prototype conflicts
 #include "user/user.h"
 

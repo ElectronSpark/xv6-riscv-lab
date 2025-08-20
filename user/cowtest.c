@@ -2,8 +2,8 @@
 // tests for copy-on-write fork() assignment.
 //
 
-#include "kernel/types.h"
-#include "kernel/memlayout.h"
+#include "kernel/inc/types.h"
+#include "kernel/inc/memlayout.h"
 #include "user/user.h"
 
 // allocate more than half of physical memory,

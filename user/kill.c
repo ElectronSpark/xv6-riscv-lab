@@ -1,6 +1,6 @@
-#include "kernel/types.h"
-#include "kernel/stat.h"
-#include "kernel/signo.h"
+#include "kernel/inc/types.h"
+#include "kernel/inc/stat.h"
+#include "kernel/inc/signo.h"
 #include "user/user.h"
 
 int

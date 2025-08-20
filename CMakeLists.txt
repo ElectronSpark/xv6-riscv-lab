@@ -65,6 +65,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-memcpy -Wno-main")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-pie -no-pie")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -I${CMAKE_SOURCE_DIR}")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -I${KERNEL_DIR}/inc")
 
 # check whether it needs to turn off stack protector
 execute_process(
@@ -108,8 +109,8 @@ add_subdirectory(user)
 
 set(MKFS_SOURCE_FILES
     ${CMAKE_SOURCE_DIR}/mkfs/mkfs.c 
-    ${KERNEL_DIR}/fs.h 
-    ${KERNEL_DIR}/param.h
+    ${KERNEL_DIR}/inc/fs.h 
+    ${KERNEL_DIR}/inc/param.h
 )
 
 #@TODO: add XCFLAGS
