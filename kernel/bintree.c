@@ -197,6 +197,9 @@ struct rb_node *rb_find_key_rup(struct rb_root *root, uint64 key)
     if (*link != NULL) {
         return *link;
     }
+    if (parent == NULL) {
+        return NULL;
+    }
     uint64 pkey = rb_get_node_key(root, parent);
     if (rb_keys_cmp(root, pkey, key) >= 0) {
         /// 如果parent的key大于等于当前key，则返回parent。
@@ -217,6 +220,9 @@ struct rb_node *rb_find_key_rdown(struct rb_root *root, uint64 key)
     }
     if (*link != NULL) {
         return *link;
+    }
+    if (parent == NULL) {
+        return NULL;
     }
     uint64 pkey = rb_get_node_key(root, parent);
     if (rb_keys_cmp(root, pkey, key) <= 0) {
