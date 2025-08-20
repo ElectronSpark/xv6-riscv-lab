@@ -101,12 +101,14 @@ static struct proc *__sched_pick_next(void) {
     if (p) {
         proc_lock(p);
         enum procstate pstate = __proc_get_pstate(p);
-        assert(pstate != PSTATE_RUNNING, "found and running process in ready queue");
-        assert(pstate != PSTATE_INTERRUPTIBLE, "try to schedule an interruptible process");
-        assert(pstate != PSTATE_UNINTERRUPTIBLE, "try to schedule an uninterruptible process");
-        assert(pstate != PSTATE_UNUSED, "try to schedule an uninitialized process");
-        assert(pstate != PSTATE_ZOMBIE, "found and zombie process in ready queue");
-        assert(pstate == PSTATE_RUNNABLE, "try to schedule unknown process state");
+        if (pstate != PSTATE_RUNNABLE) {
+            assert(pstate != PSTATE_RUNNING, "found and running process in ready queue");
+            assert(pstate != PSTATE_INTERRUPTIBLE, "try to schedule an interruptible process");
+            assert(pstate != PSTATE_UNINTERRUPTIBLE, "try to schedule an uninterruptible process");
+            assert(pstate != PSTATE_UNUSED, "try to schedule an uninitialized process");
+            assert(pstate != PSTATE_ZOMBIE, "found and zombie process in ready queue");
+            panic("try to schedule unknown process state");
+        }
         return p;
     }
 
