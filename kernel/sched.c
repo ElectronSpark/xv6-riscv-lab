@@ -12,49 +12,22 @@
 #include "slab.h"
 #include "rbtree.h"
 #include "signal.h"
+#include "errno.h"
 
 // Locking order:
 // - sleep_lock
 // - proc_lock
 // - sched_lock
 
-struct chan_queue_node {
-    struct rb_node rb_entry; // Red-black tree node
-    uint64 chan; // Key for the red-black tree
-    proc_queue_t wait_queue; // Process queue of channel
-};
-
-slab_cache_t chan_queue_slab;
-static struct rb_root __chan_queue_root;
+static proc_tree_t __chan_queue_root;
 
 list_node_t ready_queue;
 static spinlock_t __sched_lock;   // ready_queue and sleep_queue share this lock
 static spinlock_t __sleep_lock; // Lock for sleep queues
 
-
-/* chan queue related functions */
-static int __chan_keys_cmp_fun(uint64 chan1, uint64 chan2) {
-    return chan1 - chan2;
-}
-
-static uint64 __chan_get_key_fun(struct rb_node *node) {
-    struct chan_queue_node *chan_node = container_of(node, struct chan_queue_node, rb_entry);
-    return chan_node->chan;
-}
-
-static struct rb_root_opts __chan_queue_opts = {
-    .keys_cmp_fun = __chan_keys_cmp_fun,
-    .get_key_fun = __chan_get_key_fun,
-};
-
 static void chan_queue_init(void) {
     spin_init(&__sleep_lock, "sleep_lock");
-    rb_root_init(&__chan_queue_root, &__chan_queue_opts);
-    int slab_ret = slab_cache_init(&chan_queue_slab, 
-                                   "chan_queue_slab", 
-                                   sizeof(struct chan_queue_node), 
-                                   SLAB_FLAG_STATIC);
-    assert(slab_ret == 0, "Failed to initialize chan queue slab cache");
+    proc_tree_init(&__chan_queue_root, "chan_queue_root", &__sleep_lock);
 }
 
 int chan_holding(void) {
@@ -67,51 +40,6 @@ void sleep_lock(void) {
 
 void sleep_unlock(void) {
     spin_release(&__sleep_lock);
-}
-
-static struct chan_queue_node *chan_queue_alloc(uint64 chan) {
-    struct chan_queue_node *node = slab_alloc(&chan_queue_slab);
-    if (node) {
-        node->chan = chan;
-        rb_node_init(&node->rb_entry);
-        proc_queue_init(&node->wait_queue, "chan_wait_queue", NULL);
-    }
-    return node;
-}
-
-static void chan_queue_free(struct chan_queue_node *node) {
-    slab_free(node);
-}
-
-proc_queue_t *chan_queue_get(uint64 chan, bool create) {
-    struct rb_node *node = rb_find_key(&__chan_queue_root, chan);
-    struct chan_queue_node *chan_node = NULL;
-    if (node == NULL) {
-        if (!create) {
-            return NULL; // Not found
-        }
-        chan_node = chan_queue_alloc(chan);
-        assert(chan_node != NULL, "Failed to allocate channel queue node");
-        struct rb_node *ret_node = rb_insert_color(&__chan_queue_root, &chan_node->rb_entry);
-        assert(ret_node == &chan_node->rb_entry, "Failed to insert channel queue node");
-        if (ret_node != &chan_node->rb_entry) {
-            // If the node was already in the tree, free the allocated node
-            chan_queue_free(chan_node);
-            return NULL; // Node already exists
-        }
-    } else {
-        chan_node = container_of(node, struct chan_queue_node, rb_entry);
-    }
-    return &chan_node->wait_queue;
-}
-
-struct chan_queue_node *chan_queue_pop(uint64 chan) {
-    struct rb_node *node = rb_delete_key_color(&__chan_queue_root, chan);
-    if (node == NULL) {
-        return NULL; // Not found
-    }
-
-    return container_of(node, struct chan_queue_node, rb_entry);
 }
 
 /* Scheduler lock functions */
@@ -382,48 +310,38 @@ void scheduler_wakeup(struct proc *p) {
 
 void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
     sleep_lock();
-    struct proc *proc = myproc();
-    assert(proc != NULL, "PCB is NULL");
+    assert(myproc() != NULL, "PCB is NULL");
     assert(chan != NULL, "Cannot sleep on a NULL channel");
-    
-    proc_queue_t *queue = chan_queue_get((uint64)chan, true);
-    assert(queue != NULL, "Failed to get channel queue");
 
-    int ret = proc_queue_wait(queue, lk);
+    myproc()->chan = chan;
+    PROC_SET_ONCHAN(myproc());
+    int ret = proc_tree_wait(&__chan_queue_root, (uint64)chan, lk);
+    myproc()->chan = NULL;
+    PROC_CLEAR_ONCHAN(myproc());
+    // @TODO: process return value
     (void)ret;
-    // @TODO: handle the return value of proc_queue_wait
 }
 
 void scheduler_wakeup_on_chan(void *chan) {
     sleep_lock();
-    struct chan_queue_node *chan_node = chan_queue_pop((uint64)chan);
-    if (chan_node == NULL) {
-        sleep_unlock();
-        return; // No processes waiting on this channel
-    }
-    proc_queue_t *tmp_queue = &chan_node->wait_queue;
-    assert(proc_queue_wakeup_all(tmp_queue, 0) == 0, "Failed to wake up all processes on channel");
-    chan_queue_free(chan_node); // Free the temporary queue
+    int ret = proc_tree_wakeup_key(&__chan_queue_root, (uint64)chan, 0);
+    // @TODO: process return value
+    (void)ret;
     sleep_unlock();
 }
 
 void scheduler_dump_chan_queue(void) {
-    struct chan_queue_node *node = NULL;
-    struct chan_queue_node *tmp = NULL;
+    struct proc_node *node = NULL;
+    struct proc_node *tmp = NULL;
 
     printf("Channel Queue Dump:\n");
-    rb_foreach_entry_safe(&__chan_queue_root, node, tmp, rb_entry) {
-        printf("Channel: %lx, Queue Size: %d\n", node->chan, proc_queue_size(&node->wait_queue));
-        proc_node_t *p = NULL;
-        proc_node_t *tmp_p = NULL;
-        proc_list_foreach_unlocked(&node->wait_queue, p, tmp_p) {
-            struct proc *proc = proc_node_get_proc(p);
-            if (proc ==NULL) {
-                printf("  Process: NULL\n");
-                continue;
-            }
-            printf("  Process: %s (PID: %d, State: %s)\n", proc->name, proc->pid, procstate_to_str(__proc_get_pstate(proc)));
+    rb_foreach_entry_safe(&__chan_queue_root.root, node, tmp, tree.entry) {
+        struct proc *proc = proc_node_get_proc(node);
+        if (proc == NULL) {
+            printf("  Process: NULL\n");
+            continue;
         }
+        printf("Chan: %p,  Proc: %s (PID: %d, State: %s)\n", proc->chan, proc->name, proc->pid, procstate_to_str(__proc_get_pstate(proc)));
     }
 }
 
