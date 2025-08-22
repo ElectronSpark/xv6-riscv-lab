@@ -18,9 +18,6 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/bio.c
     ${KERNEL_DIR}/fs.c
     ${KERNEL_DIR}/log.c
-    ${KERNEL_DIR}/mutex.c
-    ${KERNEL_DIR}/semaphore.c
-    ${KERNEL_DIR}/rwlock.c
     ${KERNEL_DIR}/file.c
     ${KERNEL_DIR}/pipe.c
     ${KERNEL_DIR}/exec.c
@@ -35,7 +32,15 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/hlist.c
     ${KERNEL_DIR}/bintree.c
     ${KERNEL_DIR}/rbtree.c
-    ${KERNEL_DIR}/rwlock_test.c
+)
+
+set(KERNEL_C_FILES
+    ${KERNEL_C_FILES}
+    ${KERNEL_DIR}/lock/mutex.c
+    ${KERNEL_DIR}/lock/semaphore.c
+    ${KERNEL_DIR}/lock/rwlock.c
+    ${KERNEL_DIR}/lock/rwlock_test.c
+    ${KERNEL_DIR}/lock/spinlock.c
 )
 
 set(KERNEL_C_FILES
@@ -68,7 +73,6 @@ set(KERNEL_SCAN_OBJS
     ${KERNEL_DIR}/console.c
     ${KERNEL_DIR}/printf.c
     ${KERNEL_DIR}/uart.c
-    ${KERNEL_DIR}/spinlock.c
 )
 
 if(DEFINED ENV{KSCAN})
