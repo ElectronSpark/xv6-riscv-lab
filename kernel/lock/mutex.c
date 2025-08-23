@@ -17,7 +17,7 @@
     __atomic_load_n(&lk->holder, __ATOMIC_SEQ_CST)
 #define __mutex_try_set_holder(lk, p) ({           \
   struct proc *old = NULL;                              \
-  __atomic_compare_exchange_n(&lk->holder, &old, p, 1,  \
+  __atomic_compare_exchange_n(&lk->holder, &old, p, 0,  \
                               __ATOMIC_SEQ_CST,         \
                               __ATOMIC_SEQ_CST);        \
 })
