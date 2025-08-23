@@ -75,7 +75,6 @@ mutex_lock(mutex_t *lk)
       return ret;
     }
   }
-  __mutex_set_holder(lk, myproc());
   spin_release(&lk->lk);
   
   return 0;
