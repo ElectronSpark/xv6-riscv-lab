@@ -41,6 +41,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/lock/rwlock.c
     ${KERNEL_DIR}/lock/rwlock_test.c
     ${KERNEL_DIR}/lock/spinlock.c
+    ${KERNEL_DIR}/lock/completion.c
 )
 
 set(KERNEL_C_FILES
