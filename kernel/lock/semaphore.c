@@ -39,7 +39,7 @@ static int __sem_do_post(sem_t *sem) {
     int val = __sem_value_inc(sem);
     if (val <= 0) {
         // If the semaphore value was or is negative, wake up one waiting process
-        return proc_queue_wakeup(&sem->wait_queue, 0, NULL);
+        return proc_queue_wakeup(&sem->wait_queue, 0, 0, NULL);
     }
     return 0;
 }
@@ -56,7 +56,7 @@ int sem_wait(sem_t *sem) {
         return 0; // Semaphore acquired successfully
     }
 
-    int ret = proc_queue_wait(&sem->wait_queue, &sem->lk);
+    int ret = proc_queue_wait(&sem->wait_queue, &sem->lk, NULL);
     if (ret != 0) {
         if (__sem_do_post(sem) != 0) {
             printf("Failed to post semaphore '%s' when process was interrupted\n", sem->name);

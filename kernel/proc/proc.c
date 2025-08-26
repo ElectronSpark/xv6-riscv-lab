@@ -208,6 +208,7 @@ __pcb_init(struct proc *p)
   __proc_set_pstate(p, PSTATE_UNUSED);
   sigpending_init(p);
   sigstack_init(&p->sig_stack);
+  list_entry_init(&p->sched_entry);
   list_entry_init(&p->dmp_list_entry);
   list_entry_init(&p->siblings);
   list_entry_init(&p->children);

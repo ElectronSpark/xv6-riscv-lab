@@ -29,7 +29,7 @@ static int __do_wakeup(mutex_t *lk) {
            "mutex_unlock: wait queue is not empty");
     return 0; // Nothing to release
   }
-  return proc_queue_wakeup(&lk->wait_queue, 0, &lk->holder);
+  return proc_queue_wakeup(&lk->wait_queue, 0, 0, &lk->holder);
 }
 
 void
@@ -62,7 +62,7 @@ mutex_lock(mutex_t *lk)
          "mutex_lock: deadlock detected, process already holds the lock");
   
   while (__mutex_holder(lk) != myproc()) {
-    int ret = proc_queue_wait(&lk->wait_queue, &lk->lk);
+    int ret = proc_queue_wait(&lk->wait_queue, &lk->lk, NULL);
     if (ret != 0) {
       // If proc_queue_wait returns an error, we need to release the lock
       // and return the error code.

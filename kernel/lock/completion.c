@@ -30,13 +30,13 @@ static bool __try_wait_for_completion(completion_t *c) {
 
 static void __completion_do_wake(completion_t *c) {
     if (proc_queue_size(&c->wait_queue) > 0) {
-        proc_queue_wakeup(&c->wait_queue, 0, NULL);
+        proc_queue_wakeup(&c->wait_queue, 0, 0, NULL);
     }
 }
 
 static void __completion_do_wake_all(completion_t *c) {
     if (proc_queue_size(&c->wait_queue) > 0) {
-        int ret = proc_queue_wakeup_all(&c->wait_queue, 0);
+        int ret = proc_queue_wakeup_all(&c->wait_queue, 0, 0);
         (void)ret; // @TODO: ignore interrupt by now
     }
 }
@@ -57,7 +57,7 @@ void wait_for_completion(completion_t *c) {
     }
     spin_acquire(&c->lock);
     while (!__try_wait_for_completion(c)) {
-        int ret = proc_queue_wait(&c->wait_queue, &c->lock);
+        int ret = proc_queue_wait(&c->wait_queue, &c->lock, NULL);
         (void)ret; // @TODO: ignore interrupt by now
     }
     if (c->done > 0) {

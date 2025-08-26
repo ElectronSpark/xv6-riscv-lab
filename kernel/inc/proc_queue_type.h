@@ -28,7 +28,8 @@ typedef struct proc_node {
             uint64 key;
         } tree;
     };
-    int errno;  // 0: Wake up by queue leader, -EINTR: Wake up by signal
+    int error_no;  // 0: Wake up by queue leader, -EINTR: Wake up by signal
+    uint64 data; // data passed to the process when wakening it up
     struct proc *proc;   // Pointer to the process this node represents
 } proc_node_t;
 

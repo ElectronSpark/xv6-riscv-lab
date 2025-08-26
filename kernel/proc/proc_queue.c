@@ -109,7 +109,7 @@ static void __proc_node_to_tree(proc_node_t *node) {
 void proc_node_init(proc_node_t *node) {
     memset(node, 0, sizeof(proc_node_t));
     __proc_node_to_none(node);
-    node->errno = 0; // Initialize errno to 0
+    node->error_no = 0; // Initialize error_no to 0
     node->proc = myproc();  // Initialize the process pointer to the current process
 }
 
@@ -154,11 +154,11 @@ struct proc *proc_node_get_proc(proc_node_t *node) {
     return node->proc;
 }
 
-int proc_node_get_errno(proc_node_t *node, int *errno) {
-    if (node == NULL || errno == NULL) {
+int proc_node_get_errno(proc_node_t *node, int *error_no) {
+    if (node == NULL || error_no == NULL) {
         return -EINVAL; // Error: node or errno pointer is NULL
     }
-    *errno = node->errno;
+    *error_no = node->error_no;
     return 0;
 }
 
@@ -273,7 +273,7 @@ int proc_queue_bulk_move(proc_queue_t *to, proc_queue_t *from) {
     return 0; // Success
 }
 
-int proc_queue_wait(proc_queue_t *q, struct spinlock *lock) {
+int proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata) {
     if (q == NULL) {
         return -EINVAL;
     }
@@ -281,7 +281,7 @@ int proc_queue_wait(proc_queue_t *q, struct spinlock *lock) {
     proc_node_t waiter = { 0 };
     proc_node_init(&waiter);
     // Will be cleared when waking up a process with proc queue APIs
-    waiter.errno = -EINTR;
+    waiter.error_no = -EINTR;
     proc_lock(myproc());
     if (proc_queue_push(q, &waiter) != 0) {
         panic("Failed to push process to sleep queue");
@@ -295,11 +295,14 @@ int proc_queue_wait(proc_queue_t *q, struct spinlock *lock) {
         assert(proc_queue_remove(q, &waiter) == 0, "Failed to remove interrupted waiter from queue");
     }
     proc_unlock(myproc());
-
-    return waiter.errno;
+    
+    if (rdata != NULL) {
+        *rdata = waiter.data;
+    }
+    return waiter.error_no;
 }
 
-static void __do_wakeup(proc_node_t *woken, int errno, struct proc **retp) {
+static void __do_wakeup(proc_node_t *woken, int error_no, uint64 rdata, struct proc **retp) {
     if (woken == NULL) {
         return; // Nothing to wake up
     }
@@ -307,7 +310,8 @@ static void __do_wakeup(proc_node_t *woken, int errno, struct proc **retp) {
         printf("woken process is NULL\n");
         return;
     }
-    woken->errno = errno; // Set the error number for the woken process
+    woken->error_no = error_no; // Set the error number for the woken process
+    woken->data = rdata; // Set the data for the woken process
     struct proc *p = woken->proc;
     proc_lock(p);
     sched_lock();
@@ -319,7 +323,7 @@ static void __do_wakeup(proc_node_t *woken, int errno, struct proc **retp) {
     proc_unlock(p);
 }
 
-static int __proc_queue_wakeup_one(proc_queue_t *q, int errno, struct proc **retp) {
+static int __proc_queue_wakeup_one(proc_queue_t *q, int error_no, uint64 rdata, struct proc **retp) {
     if (q == NULL) {
         return -EINVAL;
     }
@@ -328,26 +332,26 @@ static int __proc_queue_wakeup_one(proc_queue_t *q, int errno, struct proc **ret
     int ret = proc_queue_pop(q, &woken);
     if (ret != 0) {
         if (woken != NULL) {
-            __do_wakeup(woken, ret, retp);
+            __do_wakeup(woken, ret, rdata, retp);
         }
         return ret; // Error: failed to pop process from queue
     }
 
-    __do_wakeup(woken, errno, retp);
+    __do_wakeup(woken, error_no, rdata, retp);
     return 0; // Success
 }
 
-int proc_queue_wakeup(proc_queue_t *q, int errno, struct proc **retp) {
-    return __proc_queue_wakeup_one(q, errno, retp);
+int proc_queue_wakeup(proc_queue_t *q, int error_no, uint64 rdata, struct proc **retp) {
+    return __proc_queue_wakeup_one(q, error_no, rdata, retp);
 }
 
-int proc_queue_wakeup_all(proc_queue_t *q, int errno) {
+int proc_queue_wakeup_all(proc_queue_t *q, int error_no, uint64 rdata) {
     if (q == NULL) {
         return -EINVAL;
     }
 
     for(;;) {
-        int ret = __proc_queue_wakeup_one(q, errno, NULL);
+        int ret = __proc_queue_wakeup_one(q, error_no, rdata, NULL);
         if (ret != 0) {
             return ret;
         }
@@ -489,7 +493,7 @@ int proc_tree_remove(proc_tree_t *q, proc_node_t *node) {
     return __proc_tree_do_remove(q, node);
 }
 
-int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock) {
+int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata) {
     if (q == NULL) {
         return -EINVAL; // Error: queue is NULL
     }
@@ -497,7 +501,7 @@ int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock) {
     proc_node_t waiter = { 0 };
     proc_node_init(&waiter);
     // Will be cleared when waking up a process with proc queue APIs
-    waiter.errno = -EINTR;
+    waiter.error_no = -EINTR;
     waiter.tree.key = key;
 
     proc_lock(myproc());
@@ -514,10 +518,13 @@ int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock) {
     }
     proc_unlock(myproc());
 
-    return waiter.errno;
+    if (rdata != NULL) {
+        *rdata = waiter.data;
+    }
+    return waiter.error_no;
 }
 
-int proc_tree_wakeup_one(proc_tree_t *q, uint64 key, int errno, struct proc **retp) {
+int proc_tree_wakeup_one(proc_tree_t *q, uint64 key, int error_no, uint64 rdata, struct proc **retp) {
     if (q == NULL) {
         return -EINVAL; // Error: queue is NULL
     }
@@ -532,7 +539,7 @@ int proc_tree_wakeup_one(proc_tree_t *q, uint64 key, int errno, struct proc **re
     }
 
     struct proc *p = NULL;
-    __do_wakeup(target, errno, &p);
+    __do_wakeup(target, error_no, rdata, &p);
     if (p == NULL) {
         return -ENOENT; // Error: no process to wake up
     }
@@ -541,14 +548,14 @@ int proc_tree_wakeup_one(proc_tree_t *q, uint64 key, int errno, struct proc **re
 }
 
 // Wake up all nodes with a given key
-int proc_tree_wakeup_key(proc_tree_t *q, uint64 key, int errno) {
+int proc_tree_wakeup_key(proc_tree_t *q, uint64 key, int error_no, uint64 rdata) {
     if (q == NULL) {
         return -EINVAL; // Error: queue is NULL
     }
 
     int count = 0;
 
-    while (proc_tree_wakeup_one(q, key, errno, NULL) == 0) {
+    while (proc_tree_wakeup_one(q, key, error_no, rdata, NULL) == 0) {
         count++;
     }
 
@@ -558,7 +565,7 @@ int proc_tree_wakeup_key(proc_tree_t *q, uint64 key, int errno) {
     return 0;
 }
 
-int proc_tree_wakeup_all(proc_tree_t *q, int errno) {
+int proc_tree_wakeup_all(proc_tree_t *q, int error_no, uint64 rdata) {
     if (q == NULL) {
         return -EINVAL; // Error: queue is NULL
     }
@@ -574,7 +581,7 @@ int proc_tree_wakeup_all(proc_tree_t *q, int errno) {
         assert(__proc_node_in_tree(q, pos), "Process node is not in the tree");
         // The whole tree will be abandoned, so don't need to adjust its structure.
         __proc_node_to_none(pos);
-        __do_wakeup(pos, errno, NULL);
+        __do_wakeup(pos, error_no, rdata, NULL);
     }
 
     if (count == 0) {

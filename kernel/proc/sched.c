@@ -317,7 +317,7 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
 
     myproc()->chan = chan;
     PROC_SET_ONCHAN(myproc());
-    int ret = proc_tree_wait(&__chan_queue_root, (uint64)chan, lk);
+    int ret = proc_tree_wait(&__chan_queue_root, (uint64)chan, lk, NULL);
     myproc()->chan = NULL;
     PROC_CLEAR_ONCHAN(myproc());
     // @TODO: process return value
@@ -326,7 +326,7 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
 
 void scheduler_wakeup_on_chan(void *chan) {
     sleep_lock();
-    int ret = proc_tree_wakeup_key(&__chan_queue_root, (uint64)chan, 0);
+    int ret = proc_tree_wakeup_key(&__chan_queue_root, (uint64)chan, 0, 0);
     // @TODO: process return value
     (void)ret;
     sleep_unlock();
