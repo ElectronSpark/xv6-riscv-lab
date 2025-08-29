@@ -5,6 +5,7 @@
 #include "defs.h"
 #include "sched.h"
 #include "signal.h"
+#include "workqueue.h"
 
 volatile STATIC int started = 0;
 
@@ -42,6 +43,7 @@ main()
     sockinit();
     signal_init();   // signal handling initialization  
     userinit();      // first user process
+    workqueue_init(); // workqueue subsystem initialization
     struct proc *idle_proc = myproc();
     int kpid = kernel_proc_create(&idle_proc, __idle, 128, 256, KERNEL_STACK_ORDER); // Create an idle kernel thread
     wakeup_proc(idle_proc);

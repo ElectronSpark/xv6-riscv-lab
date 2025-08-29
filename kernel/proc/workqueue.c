@@ -208,6 +208,7 @@ void workqueue_init(void) {
                           sizeof(struct work_struct), 
                           SLAB_FLAG_EMBEDDED);
     assert(ret == 0, "Failed to initialize work_struct slab cache");
+    printf("workqueue subsystem initialized\n");
 }
 
 struct workqueue *workqueue_create(const char *name, int max_active) {
