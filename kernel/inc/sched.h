@@ -21,4 +21,8 @@ void scheduler_wakeup(struct proc *p);
 void scheduler_sleep_on_chan(void *chan, struct spinlock *lk);
 void scheduler_wakeup_on_chan(void *chan);
 
+// Wake up a sleeping process
+// This function will aquire the locks of the process and the sched lock
+void wakeup_proc(struct proc *p);
+
 #endif // SCHED_H

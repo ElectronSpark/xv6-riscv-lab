@@ -67,6 +67,7 @@ struct proc {
   enum procstate state;        // Process state
   void *chan;                  // If non-zero, sleeping on chan
   list_node_t sched_entry;     // entry for ready queue
+  struct workqueue *wq;        // work queue this process belongs to
   list_node_t wq_entry;        // link to work queue
   uint64 flags;
 #define PROC_FLAG_VALID             0x1

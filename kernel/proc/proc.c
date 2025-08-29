@@ -385,6 +385,7 @@ static void __kernel_proc_entry(void) {
 }
 
 // create a new kernel process, which runs the function entry.
+// The newly created functions are sleeping.
 // Kernel thread will be attached to the init process as its child.
 int kernel_proc_create(struct proc **retp, void *entry, 
                        uint64 arg1, uint64 arg2, int stack_order) {
@@ -412,9 +413,6 @@ int kernel_proc_create(struct proc **retp, void *entry,
     *retp = p;
   }
 
-  sched_lock();
-  scheduler_wakeup(p);
-  sched_unlock();
   proc_unlock(p);
   return p->pid;
 }
@@ -939,6 +937,18 @@ procdump(void)
   {
     __proctab_unlock();
   }
+}
+
+void wakeup_proc(struct proc *p)
+{
+  if (p == NULL) {
+    return;
+  }
+  proc_lock(p);
+  sched_lock();
+  scheduler_wakeup(p);
+  sched_unlock();
+  proc_unlock(p);
 }
 
 uint64 sys_dumpproc(void)

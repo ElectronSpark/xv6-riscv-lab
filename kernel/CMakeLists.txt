@@ -65,7 +65,7 @@ set(KERNEL_C_FILES
 if(DEFINED ENV{RWLOCK_TEST})
     set(KERNEL_C_FILES
         ${KERNEL_C_FILES}
-        ${KERNEL_DIR}/rwlock_test.c
+        ${KERNEL_DIR}/lock/rwlock_test.c
     )
 endif()
     
