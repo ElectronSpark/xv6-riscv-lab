@@ -1,0 +1,226 @@
+#include "types.h"
+#include "errno.h"
+#include "param.h"
+#include "memlayout.h"
+#include "riscv.h"
+#include "spinlock.h"
+#include "proc.h"
+#include "sched.h"
+#include "defs.h"
+#include "slab.h"
+#include "proc_queue.h"
+#include "workqueue.h"
+
+static slab_cache_t __workqueue_cache;
+
+// static void __free_workqueue(struct workqueue *wq) {
+//     if (wq == NULL) {
+//         return;
+//     }
+//     slab_cache_free(&__workqueue_cache, wq);
+// }
+
+static struct workqueue *__alloc_workqueue(void) {
+    struct workqueue *wq = slab_alloc(&__workqueue_cache);
+    if (!wq) {
+        return NULL;
+    }
+    memset(wq, 0, sizeof(struct workqueue));
+    return wq;
+}
+
+static void __workqueue_struct_init(struct workqueue *wq) {
+    if (wq == NULL) {
+        return;
+    }
+    memset(wq, 0, sizeof(struct workqueue));
+    list_entry_init(&wq->worker_list);
+    spin_init(&wq->lock, "workqueue_lock");
+    proc_queue_init(&wq->idle_queue, "workqueue_idle", &wq->lock);
+}
+
+static void __wq_lock(struct workqueue *wq) {
+    spin_acquire(&wq->lock);
+}
+
+static void __wq_unlock(struct workqueue *wq) {
+    spin_release(&wq->lock);
+}
+
+// Push a work onto a workqueue
+// No validation checks to the parameters
+// Caller should hold the lock of the wq
+static void __enqueue_work(struct workqueue *wq, struct work_struct *work) {
+    list_node_push(&wq->worker_list, work, entry);
+    wq->pending_works++;
+}
+
+// Try to pop a work from a workqueue
+// No validation checks to the parameters
+// Caller should hold the lock of the wq
+static struct work_struct *__dequeue_work(struct workqueue *wq) {
+    struct work_struct *work = list_node_pop(&wq->worker_list, 
+                                             struct work_struct, entry);
+    if (work != NULL) {
+        wq->pending_works--;
+    }
+    return work;
+}
+
+// exit routine for worker processes
+static void __exit_routine(uint64 exit_code) {
+    proc_lock(myproc());
+    struct workqueue *wq = myproc()->wq;
+    proc_unlock(myproc());
+    if (wq != NULL) {
+        __wq_lock(wq);
+        proc_lock(myproc());
+        if (LIST_NODE_IS_DETACHED(myproc(), wq_entry)) {
+            printf("Worker process found detached in cleanup\n");
+        } else {
+            list_node_detach(myproc(), wq_entry);
+        }
+        myproc()->wq = NULL;
+        proc_unlock(myproc());
+        wq->nr_workers--;
+        assert(wq->nr_workers > 0, "Worker process count is invalid\n");
+        __wq_unlock(wq);
+    } else {
+        proc_lock(myproc());
+        assert (LIST_NODE_IS_DETACHED(myproc(), wq_entry),
+                "Worker process not belong to a workqueue but attached\n");
+        proc_unlock(myproc());
+    }
+    exit((int)exit_code);
+}
+
+// Worker routine for worker processes
+// @TODO: exit after idling too long
+static void __worker_routine(void) {
+    proc_lock(myproc());
+    struct workqueue *wq = myproc()->wq;
+    if (wq == NULL) {
+        proc_unlock(myproc());
+        exit(-EINVAL);
+    }
+    proc_unlock(myproc());
+
+    __wq_lock(wq);
+    for (;;) {
+        struct work_struct *work = __dequeue_work(wq);
+        if (work == NULL) {
+            if (!wq->active) {
+                // If not more works to do, and the workqueue is inactive, just
+                // exit the worker process
+                __wq_unlock(wq);
+                __exit_routine(0);
+            }
+            // Otherwise wait for work to be assigned
+            int ret = proc_queue_wait(&wq->idle_queue, &wq->lock, (uint64*)&work);
+            if (ret != 0) {
+                __wq_unlock(wq);
+                __exit_routine((uint64)ret);
+            }
+            // If a work is assigned to the worker process, it will be 
+            // passed via `work` variable.
+            // If the worker process is waken up but no work is assigned,
+            // Then enter the next loop and try to get a work from the queue.
+            if (work == NULL) {
+                continue;
+            }
+        }
+        // Found a work to do
+        __wq_unlock(wq);
+        work->func(work->data);
+        __wq_lock(wq);
+    }
+    __wq_unlock(wq);
+
+    __exit_routine(0);
+}
+
+static int __create_worker(struct workqueue *wq) {
+    struct proc *worker = NULL;
+    if (kernel_proc_create(&worker, __worker_routine, (uint64)wq, 0, KERNEL_STACK_ORDER) <= 0) {
+        return -ENOMEM;
+    }
+    assert(worker != NULL, "Failed to create worker process");
+    proc_lock(worker);
+    worker->wq = wq;
+    wq->nr_workers++;
+    list_node_push(&wq->worker_list, worker, wq_entry);
+    proc_unlock(worker);
+    wakeup_proc(worker);
+    return 0;
+}
+
+void workqueue_init(void) {
+    int ret = slab_cache_init(&__workqueue_cache, "workqueue", 
+                              sizeof(struct workqueue), 
+                              SLAB_FLAG_EMBEDDED);
+    assert(ret == 0, "Failed to initialize workqueue slab cache");
+}
+
+struct workqueue *workqueue_create(const char *name, int max_active) {
+    if (max_active < 0) {
+        return NULL;
+    }
+    if (max_active == 0) {
+        max_active = WORKQUEUE_DEFAULT_MAX_ACTIVE;
+    } else if (max_active > MAX_WORKQUEUE_ACTIVE) {
+        max_active = MAX_WORKQUEUE_ACTIVE;
+    }
+    if (name == NULL) {
+        name = "unnamed";
+    }
+
+    struct workqueue *wq = __alloc_workqueue();
+    if (!wq) {
+        return NULL;
+    }
+    __workqueue_struct_init(wq);
+    strncpy(wq->name, name, sizeof(wq->name) - 1);
+    wq->max_active = max_active;
+    wq->min_active = max_active < WORKQUEUE_DEFAULT_MIN_ACTIVE ? WORKQUEUE_DEFAULT_MIN_ACTIVE : max_active;
+    wq->nr_workers = 0;
+    wq->active = 1;
+
+    for (int i = 0; i < wq->min_active; i++) {
+        int ret = __create_worker(wq);
+        if (ret != 0) {
+            // Failed to create enough worker processes
+            // Just return what we have
+            break;
+        }
+    }
+
+    return wq;
+}
+
+bool queue_work(struct workqueue *wq, struct work_struct *work) {
+    if (wq == NULL || work == NULL || work->func == NULL) {
+        return false;
+    }
+    __wq_lock(wq);
+    if (wq->active == 0) {
+        // Workqueue is inactive, reject new works
+        __wq_unlock(wq);
+        return false;
+    }
+    
+    __enqueue_work(wq, work);
+    if (wq->pending_works > wq->nr_workers && wq->nr_workers < wq->max_active) {
+        // Need to create a new worker process
+        int ret = __create_worker(wq);
+        if (ret != 0) {
+            // Failed to create a new worker process
+            // Just wake up an idle worker if any
+            proc_queue_wakeup(&wq->idle_queue, 0, 0, NULL);
+        }
+    } else {
+        // Wake up an idle worker if any
+        proc_queue_wakeup(&wq->idle_queue, 0, 0, NULL);
+    }
+    __wq_unlock(wq);
+    return true;
+}
