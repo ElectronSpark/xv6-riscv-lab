@@ -9,7 +9,7 @@
 
 struct work_struct {
     list_node_t entry;
-    void (*func)(void *data);
+    void (*func)(struct work_struct *);
     void *data;
 };
 

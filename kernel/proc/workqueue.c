@@ -12,6 +12,7 @@
 #include "workqueue.h"
 
 static slab_cache_t __workqueue_cache;
+static slab_cache_t __work_struct_cache;
 
 // static void __free_workqueue(struct workqueue *wq) {
 //     if (wq == NULL) {
@@ -45,6 +46,50 @@ static void __wq_lock(struct workqueue *wq) {
 
 static void __wq_unlock(struct workqueue *wq) {
     spin_release(&wq->lock);
+}
+
+static struct work_struct *__alloc_work_struct(void) {
+    struct work_struct *work = slab_alloc(&__work_struct_cache);
+    if (!work) {
+        return NULL;
+    }
+    memset(work, 0, sizeof(struct work_struct));
+    return work;
+}
+
+static void __free_work_struct(struct work_struct *work) {
+    if (!work) {
+        return;
+    }
+    slab_free(work);
+}
+
+// Initialize a work item
+void init_work_struct(struct work_struct *work, 
+                      void (*func)(struct work_struct *), 
+                      void *data) {
+    list_entry_init(&work->entry);
+    work->func = func;
+    work->data = data;
+}
+
+// Dynamically allocate a work struct and initialize it with the given function and data
+struct work_struct *create_work_struct(void (*func)(struct work_struct *), void *data) {
+    struct work_struct *work = __alloc_work_struct();
+    if (!work) {
+        return NULL;
+    }
+    init_work_struct(work, func, data);
+    return work;
+}
+
+// Free a work struct
+// This function can only be used to free work structs allocated by create_work_struct
+void free_work_struct(struct work_struct *work) {
+    if (!work) {
+        return;
+    }
+    __free_work_struct(work);
 }
 
 // Push a work onto a workqueue
@@ -159,6 +204,10 @@ void workqueue_init(void) {
                               sizeof(struct workqueue), 
                               SLAB_FLAG_EMBEDDED);
     assert(ret == 0, "Failed to initialize workqueue slab cache");
+    ret = slab_cache_init(&__work_struct_cache, "work_struct", 
+                          sizeof(struct work_struct), 
+                          SLAB_FLAG_EMBEDDED);
+    assert(ret == 0, "Failed to initialize work_struct slab cache");
 }
 
 struct workqueue *workqueue_create(const char *name, int max_active) {
