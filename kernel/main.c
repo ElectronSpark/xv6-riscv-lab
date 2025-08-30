@@ -30,6 +30,7 @@ main()
     kvminit();       // create kernel page table
     kvminithart();   // turn on paging
     procinit();      // process table
+    workqueue_init(); // workqueue subsystem initialization
     scheduler_init(); // initialize the scheduler
     trapinit();      // trap vectors
     trapinithart();  // install kernel trap vector
@@ -43,7 +44,6 @@ main()
     sockinit();
     signal_init();   // signal handling initialization  
     userinit();      // first user process
-    workqueue_init(); // workqueue subsystem initialization
     struct proc *idle_proc = myproc();
     int kpid = kernel_proc_create(&idle_proc, __idle, 128, 256, KERNEL_STACK_ORDER); // Create an idle kernel thread
     wakeup_proc(idle_proc);

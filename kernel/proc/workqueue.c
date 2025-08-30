@@ -66,7 +66,7 @@ static void __free_work_struct(struct work_struct *work) {
 
 // Initialize a work item
 void init_work_struct(struct work_struct *work, 
-                      void (*func)(struct work_struct *), 
+                      void (*func)(void *), 
                       void *data) {
     list_entry_init(&work->entry);
     work->func = func;
@@ -74,7 +74,7 @@ void init_work_struct(struct work_struct *work,
 }
 
 // Dynamically allocate a work struct and initialize it with the given function and data
-struct work_struct *create_work_struct(void (*func)(struct work_struct *), void *data) {
+struct work_struct *create_work_struct(void (*func)(void *), void *data) {
     struct work_struct *work = __alloc_work_struct();
     if (!work) {
         return NULL;

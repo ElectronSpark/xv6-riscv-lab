@@ -11,8 +11,8 @@ void workqueue_init(void);
 struct workqueue *workqueue_create(const char *name, int max_active);
 bool queue_work(struct workqueue *wq, struct work_struct *work);
 
-void init_work_struct(struct work_struct *work, void (*func)(struct work_struct *), void *data);
-struct work_struct *create_work_struct(void (*func)(struct work_struct *), void *data);
+void init_work_struct(struct work_struct *work, void (*func)(void *), void *data);
+struct work_struct *create_work_struct(void (*func)(void *), void *data);
 void free_work_struct(struct work_struct *work);
 
 #endif // __KERNEL_WORKQUEUE_H
