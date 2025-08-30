@@ -311,9 +311,10 @@ usertrapret(void)
 }
 
 void
-kerneltrap_dump_regs(struct ktrapframe *sp)
+kerneltrap_dump_regs(struct ktrapframe *sp, uint64 spc)
 {
   printf("kerneltrap_dump_regs:\n");
+  printf("pc: 0x%lx\n", spc);
   printf("ra: 0x%lx, sp: 0x%lx, s0: 0x%lx\n", 
          sp->ra, sp->sp, sp->s0);
   printf("tp: 0x%lx, t0: 0x%lx, t1: 0x%lx, t2: 0x%lx\n",
@@ -351,11 +352,10 @@ kerneltrap(struct ktrapframe *sp, uint64 s0)
     *(uint64 *)((uint64)sp - 8) = r_sepc();
     if (myproc() == NULL) {
       printf("kerneltrap: no current process\n");
-    } else {
-      size_t kstack_size = (1UL << (PAGE_SHIFT + myproc()->kstack_order));
-      print_backtrace((uint64)sp, myproc()->kstack, myproc()->kstack + kstack_size);
     }
-    kerneltrap_dump_regs(sp);
+    size_t kstack_size = (1UL << (PAGE_SHIFT + myproc()->kstack_order));
+    print_backtrace(sp->s0, myproc()->kstack, myproc()->kstack + kstack_size);
+    kerneltrap_dump_regs(sp, r_sepc());
     panic_disable_bt();
     panic("kerneltrap");
   }
