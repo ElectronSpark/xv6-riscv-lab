@@ -14,12 +14,12 @@
 static slab_cache_t __workqueue_cache;
 static slab_cache_t __work_struct_cache;
 
-// static void __free_workqueue(struct workqueue *wq) {
-//     if (wq == NULL) {
-//         return;
-//     }
-//     slab_cache_free(&__workqueue_cache, wq);
-// }
+static void __free_workqueue(struct workqueue *wq) {
+    if (wq == NULL) {
+        return;
+    }
+    slab_free(wq);
+}
 
 static struct workqueue *__alloc_workqueue(void) {
     struct workqueue *wq = slab_alloc(&__workqueue_cache);
@@ -120,16 +120,14 @@ static void __exit_routine(uint64 exit_code) {
     proc_unlock(myproc());
     if (wq != NULL) {
         __wq_lock(wq);
+        assert(wq->manager != myproc(), "Manager process try to exit using worker exit routine");
         proc_lock(myproc());
-        if (LIST_NODE_IS_DETACHED(myproc(), wq_entry)) {
-            printf("Worker process found detached in cleanup\n");
-        } else {
+        if (!LIST_NODE_IS_DETACHED(myproc(), wq_entry)) {
             list_node_detach(myproc(), wq_entry);
         }
-        myproc()->wq = NULL;
         proc_unlock(myproc());
         wq->nr_workers--;
-        assert(wq->nr_workers > 0, "Worker process count is invalid\n");
+        assert(wq->nr_workers >= 0, "Worker process count is invalid\n");
         __wq_unlock(wq);
     } else {
         proc_lock(myproc());
@@ -152,6 +150,10 @@ static void __worker_routine(void) {
     proc_unlock(myproc());
 
     __wq_lock(wq);
+    if (wq->manager == myproc()) {
+        __wq_unlock(wq);
+        exit(-EINVAL);
+    }
     for (;;) {
         struct work_struct *work = __dequeue_work(wq);
         if (work == NULL) {
@@ -185,22 +187,91 @@ static void __worker_routine(void) {
     __exit_routine(0);
 }
 
-// This function will lock the work queue
+// This function will only try to acquire the work process lock
 static int __create_worker(struct workqueue *wq) {
     struct proc *worker = NULL;
-    if (kernel_proc_create(&worker, __worker_routine, (uint64)wq, 0, KERNEL_STACK_ORDER) <= 0) {
-        return -ENOMEM;
+    int ret = kernel_proc_create(&worker, __worker_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
+    if (ret <= 0) {
+        return ret;
     }
     assert(worker != NULL, "Failed to create worker process");
-    __wq_lock(wq);
     proc_lock(worker);
     worker->wq = wq;
     wq->nr_workers++;
     list_node_push(&wq->worker_list, worker, wq_entry);
     proc_unlock(worker);
     wakeup_proc(worker);
-    __wq_unlock(wq);
     return 0;
+}
+
+// Manager routine for managing worker processes
+// Each workqueue has a manager process that is responsible for creating and destroying worker processes
+static void __manager_routine(void) {
+    proc_lock(myproc());
+    struct workqueue *wq = myproc()->wq;
+    if (wq == NULL) {
+        proc_unlock(myproc());
+        exit(-EINVAL);
+    }
+    proc_unlock(myproc());
+
+    __wq_lock(wq);
+    if (wq->manager != myproc()) {
+        __wq_unlock(wq);
+        exit(-EINVAL);
+    }
+    for (;;) {
+        assert(wq->nr_workers >= 0, "Worker process count is invalid\n");
+        while (wq->nr_workers < wq->min_active || 
+               (wq->pending_works > wq->nr_workers && 
+                wq->nr_workers < wq->max_active)) {
+            // Need to create more worker processes
+            if (__create_worker(wq) != 0) {
+                break;
+            }
+        }
+        while (proc_queue_size(&wq->idle_queue) && 
+               wq->nr_workers - proc_queue_size(&wq->idle_queue) < wq->pending_works) {
+            // Wake up an idle worker if any
+            proc_queue_wakeup(&wq->idle_queue, 0, 0, NULL);
+        }
+        proc_lock(myproc());
+        __proc_set_pstate(myproc(), PSTATE_INTERRUPTIBLE);
+        scheduler_sleep(&wq->lock);
+        proc_unlock(myproc());
+        // @TODO: handle signals
+    }
+    __wq_unlock(wq);
+}
+
+// Create a manager process for a work queue
+// Will be called at the creation process of a work queue,
+// during which the work queue lock is being hold.
+// Thus, it will only try to hold the manager process lock
+static int __create_manager(struct workqueue *wq) {
+    struct proc *manager = NULL;
+    int ret = kernel_proc_create(&manager, __manager_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
+    if (ret <= 0) {
+        return ret;
+    }
+    assert(manager != NULL, "Failed to create manager process");
+    proc_lock(manager);
+    manager->wq = wq;
+    proc_unlock(manager);
+    wq->manager = manager;
+    return 0;
+}
+
+// Try to wake up the manager process of a work queue
+// Will try to acquire manager process lock and scheduler lock
+static void __wakeup_manager(struct workqueue *wq) {
+    proc_lock(wq->manager);
+    if (PROC_SLEEPING(wq->manager)) {
+        sched_lock();
+        scheduler_wakeup(wq->manager);
+        sched_unlock();
+    }
+    proc_unlock(wq->manager);
 }
 
 void workqueue_init(void) {
@@ -239,14 +310,14 @@ struct workqueue *workqueue_create(const char *name, int max_active) {
     wq->nr_workers = 0;
     wq->active = 1;
 
-    for (int i = 0; i < wq->min_active; i++) {
-        int ret = __create_worker(wq);
-        if (ret != 0) {
-            // Failed to create enough worker processes
-            // Just return what we have
-            break;
-        }
+    __wq_lock(wq);
+    if (__create_manager(wq) != 0) {
+        __free_workqueue(wq);
+        // __wq_unlock(wq);
+        return NULL;
     }
+    __wakeup_manager(wq);
+    __wq_unlock(wq);
 
     return wq;
 }
@@ -263,18 +334,7 @@ bool queue_work(struct workqueue *wq, struct work_struct *work) {
     }
     
     __enqueue_work(wq, work);
-    if (wq->pending_works > wq->nr_workers && wq->nr_workers < wq->max_active) {
-        // Need to create a new worker process
-        int ret = __create_worker(wq);
-        if (ret != 0) {
-            // Failed to create a new worker process
-            // Just wake up an idle worker if any
-            proc_queue_wakeup(&wq->idle_queue, 0, 0, NULL);
-        }
-    } else {
-        // Wake up an idle worker if any
-        proc_queue_wakeup(&wq->idle_queue, 0, 0, NULL);
-    }
+    __wakeup_manager(wq);
     __wq_unlock(wq);
     return true;
 }

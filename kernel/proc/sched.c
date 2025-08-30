@@ -298,8 +298,6 @@ void scheduler_wakeup(struct proc *p) {
         p->chan = NULL; // Clear the channel
     }
     if (!PROC_SLEEPING(p)) {
-        printf("warning: scheduler_wakeup called on a process that is not sleeping, pid: %d, state: %s\n", 
-               p->pid, procstate_to_str(__proc_get_pstate(p)));
         return; // Process is not sleeping, nothing to do
     }
 

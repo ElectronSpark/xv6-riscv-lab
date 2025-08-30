@@ -7,6 +7,8 @@
 
 #define WORKQUEUE_NAME_MAX 31
 
+struct proc;
+
 struct work_struct {
     list_node_t entry;
     void (*func)(void *);
@@ -17,6 +19,7 @@ struct workqueue {
     struct spinlock lock;
     proc_queue_t idle_queue;
     list_node_t worker_list;
+    struct proc *manager;
     int pending_works;
     list_node_t work_list;
     char name[WORKQUEUE_NAME_MAX + 1];
