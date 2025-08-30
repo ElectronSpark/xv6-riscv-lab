@@ -18,6 +18,7 @@ struct workqueue {
     proc_queue_t idle_queue;
     list_node_t worker_list;
     int pending_works;
+    list_node_t work_list;
     char name[WORKQUEUE_NAME_MAX + 1];
     struct {
         uint64 active: 1;

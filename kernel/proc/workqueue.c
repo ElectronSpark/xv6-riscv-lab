@@ -36,6 +36,7 @@ static void __workqueue_struct_init(struct workqueue *wq) {
     }
     memset(wq, 0, sizeof(struct workqueue));
     list_entry_init(&wq->worker_list);
+    list_entry_init(&wq->work_list);
     spin_init(&wq->lock, "workqueue_lock");
     proc_queue_init(&wq->idle_queue, "workqueue_idle", &wq->lock);
 }
@@ -96,7 +97,7 @@ void free_work_struct(struct work_struct *work) {
 // No validation checks to the parameters
 // Caller should hold the lock of the wq
 static void __enqueue_work(struct workqueue *wq, struct work_struct *work) {
-    list_node_push(&wq->worker_list, work, entry);
+    list_node_push_back(&wq->work_list, work, entry);
     wq->pending_works++;
 }
 
@@ -104,7 +105,7 @@ static void __enqueue_work(struct workqueue *wq, struct work_struct *work) {
 // No validation checks to the parameters
 // Caller should hold the lock of the wq
 static struct work_struct *__dequeue_work(struct workqueue *wq) {
-    struct work_struct *work = list_node_pop(&wq->worker_list, 
+    struct work_struct *work = list_node_pop(&wq->work_list, 
                                              struct work_struct, entry);
     if (work != NULL) {
         wq->pending_works--;
@@ -184,18 +185,21 @@ static void __worker_routine(void) {
     __exit_routine(0);
 }
 
+// This function will lock the work queue
 static int __create_worker(struct workqueue *wq) {
     struct proc *worker = NULL;
     if (kernel_proc_create(&worker, __worker_routine, (uint64)wq, 0, KERNEL_STACK_ORDER) <= 0) {
         return -ENOMEM;
     }
     assert(worker != NULL, "Failed to create worker process");
+    __wq_lock(wq);
     proc_lock(worker);
     worker->wq = wq;
     wq->nr_workers++;
     list_node_push(&wq->worker_list, worker, wq_entry);
     proc_unlock(worker);
     wakeup_proc(worker);
+    __wq_unlock(wq);
     return 0;
 }
 
