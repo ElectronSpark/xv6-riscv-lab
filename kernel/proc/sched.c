@@ -13,6 +13,7 @@
 #include "rbtree.h"
 #include "signal.h"
 #include "errno.h"
+#include "timer.h"
 
 // Locking order:
 // - sleep_lock
@@ -20,6 +21,7 @@
 // - sched_lock
 
 static proc_tree_t __chan_queue_root;
+static struct timer_root __sched_timer;
 
 list_node_t ready_queue;
 static spinlock_t __sched_lock;   // ready_queue and sleep_queue share this lock
@@ -78,6 +80,7 @@ void scheduler_init(void) {
     spin_init(&__sched_lock, "sched_lock");
     list_entry_init(&ready_queue);
     chan_queue_init();
+    timer_init(&__sched_timer);
 }
 
 void __scheduler_add_ready(struct proc *p) {
