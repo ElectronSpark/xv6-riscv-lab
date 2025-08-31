@@ -184,3 +184,8 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
 
     spin_release(&timer->lock);
 }
+
+uint64 get_jiffs(void) {
+    extern uint64 ticks;
+    return __atomic_load_n(&ticks, __ATOMIC_SEQ_CST);
+}

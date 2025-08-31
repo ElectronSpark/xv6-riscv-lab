@@ -9,7 +9,7 @@ main(int argc, char *argv[])
         printf("sleep must receive the number of miniseconds as parameter\n");
         exit(1);
     }
-    int secs = atoi(argv[0]);
+    int secs = atoi(argv[1]);
     sleep(secs);
     exit(0);
 }

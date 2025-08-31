@@ -9,8 +9,7 @@
 #include "signal.h"
 #include "vm.h"
 
-struct spinlock tickslock;
-uint ticks;
+uint64 ticks;
 
 extern char trampoline[], uservec[], userret[];
 
@@ -53,7 +52,7 @@ static const char *__scause_to_str(uint64 scause)
 void
 trapinit(void)
 {
-  spin_init(&tickslock, "time");
+  ;
 }
 
 // set up to take exceptions and traps while in the kernel.
@@ -375,11 +374,10 @@ void
 clockintr()
 {
   if(cpuid() == 0){
-    spin_acquire(&tickslock);
-    ticks++;
-    if (!sched_holding())
+    __atomic_fetch_add(&ticks, 1, __ATOMIC_SEQ_CST);
+    if (!sched_holding()) {
       wakeup(&ticks);
-    spin_release(&tickslock);
+    }
   }
 
   // ask for the next timer interrupt. this also clears

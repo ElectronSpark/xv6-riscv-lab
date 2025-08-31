@@ -14,4 +14,6 @@ void timer_node_init(struct timer_node *node,
 int timer_add(struct timer_root *timer, struct timer_node *node);
 void timer_remove(struct timer_node *node);
 
+uint64 get_jiffs(void);
+
 #endif // __KERNEL_TIMER_H

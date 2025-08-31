@@ -5,6 +5,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "timer.h"
 
 uint64
 sys_exit(void)
@@ -61,6 +62,7 @@ sys_sleep(void)
 {
   int n;
   uint ticks0;
+  uint ticks1;
 
   // uint64 fp = r_sp();
 
@@ -69,16 +71,15 @@ sys_sleep(void)
   argint(0, &n);
   if(n < 0)
     n = 0;
-  spin_acquire(&tickslock);
-  ticks0 = ticks;
-  while(ticks - ticks0 < n){
+  ticks0 = get_jiffs();
+  ticks1 = ticks0;
+  while(ticks1 - ticks0 < n){
     if(killed(myproc())){
-      spin_release(&tickslock);
       return -1;
     }
-    sleep(&ticks, &tickslock);
+    sleep(&ticks, NULL);
+    ticks1 = get_jiffs();
   }
-  spin_release(&tickslock);
   return 0;
 }
 
@@ -99,10 +100,5 @@ sys_kill(void)
 uint64
 sys_uptime(void)
 {
-  uint xticks;
-
-  spin_acquire(&tickslock);
-  xticks = ticks;
-  spin_release(&tickslock);
-  return xticks;
+  return get_jiffs();
 }
