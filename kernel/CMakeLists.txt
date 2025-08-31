@@ -61,6 +61,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/proc/sys_signal.c
     ${KERNEL_DIR}/proc/sysproc.c
     ${KERNEL_DIR}/proc/workqueue.c
+    ${KERNEL_DIR}/proc/timer.c
 )
 
 if(DEFINED ENV{RWLOCK_TEST})
