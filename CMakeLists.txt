@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.10)
 # Project name
 project(xv6-riscv LANGUAGES C ASM)
 
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # # Set the C standard to C19
 # set(CMAKE_C_STANDARD 17)  # CMake uses 17 for C18/C19
 
