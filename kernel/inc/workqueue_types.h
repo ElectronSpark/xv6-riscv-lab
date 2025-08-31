@@ -11,8 +11,8 @@ struct proc;
 
 struct work_struct {
     list_node_t entry;
-    void (*func)(void *);
-    void *data;
+    void (*func)(struct work_struct*);
+    uint64 data;
 };
 
 struct workqueue {

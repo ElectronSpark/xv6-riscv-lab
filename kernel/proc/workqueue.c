@@ -67,15 +67,16 @@ static void __free_work_struct(struct work_struct *work) {
 
 // Initialize a work item
 void init_work_struct(struct work_struct *work, 
-                      void (*func)(void *), 
-                      void *data) {
+                      void (*func)(struct work_struct*), 
+                      uint64 data) {
     list_entry_init(&work->entry);
     work->func = func;
     work->data = data;
 }
 
 // Dynamically allocate a work struct and initialize it with the given function and data
-struct work_struct *create_work_struct(void (*func)(void *), void *data) {
+struct work_struct *create_work_struct(void (*func)(struct work_struct*), 
+                                       uint64 data) {
     struct work_struct *work = __alloc_work_struct();
     if (!work) {
         return NULL;
@@ -179,7 +180,7 @@ static void __worker_routine(void) {
         }
         // Found a work to do
         __wq_unlock(wq);
-        work->func(work->data);
+        work->func(work);
         __wq_lock(wq);
     }
     __wq_unlock(wq);
