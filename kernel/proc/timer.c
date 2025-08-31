@@ -163,6 +163,11 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
         return;
     }
     timer->current_tick = ticks;
+    if (timer->next_tick > ticks) {
+        // No timer expired
+        spin_release(&timer->lock);
+        return;
+    }
 
     struct timer_node *node, *next;
     list_foreach_node_safe(&timer->list_head, node, next, list_entry) {
