@@ -129,10 +129,10 @@ begin_op(void)
   spin_acquire(&log.lock);
   while(1){
     if(log.committing){
-      sleep(&log, &log.lock);
+      sleep_on_chan(&log, &log.lock);
     } else if(log.lh.n + (log.outstanding+1)*MAXOPBLOCKS > LOGSIZE){
       // this op might exhaust log space; wait for commit.
-      sleep(&log, &log.lock);
+      sleep_on_chan(&log, &log.lock);
     } else {
       log.outstanding += 1;
       spin_release(&log.lock);
@@ -159,7 +159,7 @@ end_op(void)
     // begin_op() may be waiting for log space,
     // and decrementing log.outstanding has decreased
     // the amount of reserved space.
-    wakeup(&log);
+    wakeup_on_chan(&log);
   }
   spin_release(&log.lock);
 
@@ -169,7 +169,7 @@ end_op(void)
     commit();
     spin_acquire(&log.lock);
     log.committing = 0;
-    wakeup(&log);
+    wakeup_on_chan(&log);
     spin_release(&log.lock);
   }
 }

@@ -654,7 +654,7 @@ reparent(struct proc *p)
   proc_unlock(initproc);
 
   if (found)
-    wakeup(initproc);
+    wakeup_on_chan(initproc);
 }
 
 
@@ -762,7 +762,7 @@ wait(uint64 addr)
     
     // Wait for a child to exit.
     proc_unlock(p);
-    sleep(p, NULL);  //DOC: wait-sleep
+    sleep_on_chan(p, NULL);  //DOC: wait-sleep
     proc_lock(p);
   }
 
@@ -826,7 +826,7 @@ forkret(void)
 // Atomically spin_release lock and sleep on chan.
 // Reacquires lock when awakened.
 void
-sleep(void *chan, struct spinlock *lk)
+sleep_on_chan(void *chan, struct spinlock *lk)
 {
   scheduler_sleep_on_chan(chan, lk);
 }
@@ -834,7 +834,7 @@ sleep(void *chan, struct spinlock *lk)
 // Wake up all processes sleeping on chan.
 // Must be called without any p->lock.
 void
-wakeup(void *chan)
+wakeup_on_chan(void *chan)
 {
   scheduler_wakeup_on_chan(chan);
 }

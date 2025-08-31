@@ -77,7 +77,7 @@ sys_sleep(void)
     if(killed(myproc())){
       return -1;
     }
-    sleep(&ticks, NULL);
+    sleep_on_chan(&ticks, NULL);
     ticks1 = get_jiffs();
   }
   return 0;

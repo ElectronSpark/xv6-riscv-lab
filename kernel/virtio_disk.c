@@ -191,7 +191,7 @@ free_desc(int i)
   assert(disk.free_idx <= NUM, "free_idx out of bounds");
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
   if (disk.free_idx >= 3) {
-    wakeup(&disk.free[0]);
+    wakeup_on_chan(&disk.free[0]);
   }
 }
 
@@ -245,7 +245,7 @@ virtio_disk_rw(struct buf *b, int write)
       break;
     }
     // printf("virtio_disk_rw: no free descriptors, sleeping\n");
-    sleep(&disk.free[0], &disk.vdisk_lock);
+    sleep_on_chan(&disk.free[0], &disk.vdisk_lock);
   }
 
   // format the three descriptors.
@@ -299,7 +299,7 @@ virtio_disk_rw(struct buf *b, int write)
 
   // Wait for virtio_disk_intr() to say request has finished.
   while(b->disk == 1) {
-    sleep(b, &disk.vdisk_lock);
+    sleep_on_chan(b, &disk.vdisk_lock);
   }
 
   disk.info[idx[0]].b = 0;
@@ -341,7 +341,7 @@ virtio_disk_intr()
 
     struct buf *b = disk.info[id].b;
     b->disk = 0;   // disk is done with buf
-    wakeup(b);
+    wakeup_on_chan(b);
 
     disk.used_idx += 1;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);

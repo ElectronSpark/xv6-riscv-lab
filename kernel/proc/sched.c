@@ -186,7 +186,7 @@ void scheduler_run(void) {
         }
 
         if (pstate == PSTATE_ZOMBIE) {
-            wakeup(pparent);
+            wakeup_on_chan(pparent);
         }
     }
 }

@@ -118,7 +118,7 @@ sockread(struct sock *si, uint64 addr, int n)
 
   spin_acquire(&si->lock);
   while (mbufq_empty(&si->rxq) && !signal_terminated(pr)) {
-    sleep(&si->rxq, &si->lock);
+    sleep_on_chan(&si->rxq, &si->lock);
   }
   if (signal_terminated(pr)) {
     spin_release(&si->lock);
@@ -181,7 +181,7 @@ sockrecvudp(struct mbuf *m, uint32 raddr, uint16 lport, uint16 rport)
 found:
   spin_acquire(&si->lock);
   mbufq_pushtail(&si->rxq, m);
-  wakeup(&si->rxq);
+  wakeup_on_chan(&si->rxq);
   spin_release(&si->lock);
   spin_release(&lock);
 }

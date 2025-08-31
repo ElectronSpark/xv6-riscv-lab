@@ -376,7 +376,7 @@ clockintr()
   if(cpuid() == 0){
     __atomic_fetch_add(&ticks, 1, __ATOMIC_SEQ_CST);
     if (!sched_holding()) {
-      wakeup(&ticks);
+      wakeup_on_chan(&ticks);
     }
   }
 

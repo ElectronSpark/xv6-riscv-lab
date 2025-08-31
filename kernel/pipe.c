@@ -62,10 +62,10 @@ pipeclose(struct pipe *pi, int writable)
   spin_acquire(&pi->lock);
   if(writable){
     pi->writeopen = 0;
-    wakeup(&pi->nread);
+    wakeup_on_chan(&pi->nread);
   } else {
     pi->readopen = 0;
-    wakeup(&pi->nwrite);
+    wakeup_on_chan(&pi->nwrite);
   }
   if(pi->readopen == 0 && pi->writeopen == 0){
     spin_release(&pi->lock);
@@ -87,8 +87,8 @@ pipewrite(struct pipe *pi, uint64 addr, int n)
       return -1;
     }
     if(pi->nwrite == pi->nread + PIPESIZE){ //DOC: pipewrite-full
-      wakeup(&pi->nread);
-      sleep(&pi->nwrite, &pi->lock);
+      wakeup_on_chan(&pi->nread);
+      sleep_on_chan(&pi->nwrite, &pi->lock);
     } else {
       char ch;
       if(vm_copyin(pr->vm, &ch, addr + i, 1) == -1)
@@ -97,7 +97,7 @@ pipewrite(struct pipe *pi, uint64 addr, int n)
       i++;
     }
   }
-  wakeup(&pi->nread);
+  wakeup_on_chan(&pi->nread);
   spin_release(&pi->lock);
 
   return i;
@@ -116,7 +116,7 @@ piperead(struct pipe *pi, uint64 addr, int n)
       spin_release(&pi->lock);
       return -1;
     }
-    sleep(&pi->nread, &pi->lock); //DOC: piperead-sleep
+    sleep_on_chan(&pi->nread, &pi->lock); //DOC: piperead-sleep
   }
   for(i = 0; i < n; i++){  //DOC: piperead-copy
     if(pi->nread == pi->nwrite)
@@ -125,7 +125,7 @@ piperead(struct pipe *pi, uint64 addr, int n)
     if(vm_copyout(pr->vm, addr + i, &ch, 1) == -1)
       break;
   }
-  wakeup(&pi->nwrite);  //DOC: piperead-wakeup
+  wakeup_on_chan(&pi->nwrite);  //DOC: piperead-wakeup
   spin_release(&pi->lock);
   return i;
 }

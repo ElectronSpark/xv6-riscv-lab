@@ -93,7 +93,7 @@ consoleread(int user_dst, uint64 dst, int n)
         spin_release(&cons.lock);
         return -1;
       }
-      sleep(&cons.r, &cons.lock);
+      sleep_on_chan(&cons.r, &cons.lock);
     }
 
     c = cons.buf[cons.r++ % INPUT_BUF_SIZE];
@@ -176,7 +176,7 @@ consoleintr(int c)
         // wake up consoleread() if a whole line (or end-of-file)
         // has arrived.
         cons.w = cons.e;
-        wakeup(&cons.r);
+        wakeup_on_chan(&cons.r);
       }
     }
     break;
