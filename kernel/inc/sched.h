@@ -30,5 +30,6 @@ void sleep_ms(uint64 ms);
 // Wake up a sleeping process
 // This function will aquire the locks of the process and the sched lock
 void wakeup_proc(struct proc *p);
+void wakeup_interruptible(struct proc *p);
 
 #endif // SCHED_H

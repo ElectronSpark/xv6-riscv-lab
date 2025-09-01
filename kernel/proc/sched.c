@@ -250,8 +250,8 @@ void scheduler_run(void) {
             spin_release(lk); // Release the lock returned by __swtch_context
         }
 
-        if (pstate == PSTATE_ZOMBIE && __proc_get_pstate(pparent) == PSTATE_INTERRUPTIBLE) {
-            wakeup_proc(pparent);
+        if (pstate == PSTATE_ZOMBIE) {
+            wakeup_interruptible(pparent);
         }
     }
 }
@@ -411,6 +411,38 @@ void scheduler_dump_chan_queue(void) {
         }
         printf("Chan: %p,  Proc: %s (PID: %d, State: %s)\n", proc->chan, proc->name, proc->pid, procstate_to_str(__proc_get_pstate(proc)));
     }
+}
+
+
+static void __do_wakeup_proc(struct proc *p)
+{
+  proc_lock(p);
+  sched_lock();
+  scheduler_wakeup(p);
+  sched_unlock();
+  proc_unlock(p);
+}
+
+// Unconditionally wake up process
+void wakeup_proc(struct proc *p)
+{
+  if (p == NULL) {
+    return;
+  }
+  if (PROC_SLEEPING(p)) {
+    __do_wakeup_proc(p);
+  }
+}
+
+// Wake up a process sleeping in interruptible state
+void wakeup_interruptible(struct proc *p)
+{
+  if (p == NULL) {
+    return;
+  }
+  if (__proc_get_pstate(p) == PSTATE_INTERRUPTIBLE) {
+    __do_wakeup_proc(p);
+  }
 }
 
 uint64 sys_dumpchan(void) {

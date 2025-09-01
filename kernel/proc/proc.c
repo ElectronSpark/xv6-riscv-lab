@@ -653,8 +653,8 @@ reparent(struct proc *p)
   proc_unlock(p);
   proc_unlock(initproc);
 
-  if (found && __proc_get_pstate(initproc) == PSTATE_INTERRUPTIBLE)
-    wakeup_proc(initproc);
+  if (found)
+    wakeup_interruptible(initproc);
 }
 
 
@@ -920,18 +920,6 @@ procdump(void)
   {
     __proctab_unlock();
   }
-}
-
-void wakeup_proc(struct proc *p)
-{
-  if (p == NULL) {
-    return;
-  }
-  proc_lock(p);
-  sched_lock();
-  scheduler_wakeup(p);
-  sched_unlock();
-  proc_unlock(p);
 }
 
 uint64 sys_dumpproc(void)
