@@ -191,7 +191,7 @@ static void __worker_routine(void) {
 // This function will only try to acquire the work process lock
 static int __create_worker(struct workqueue *wq) {
     struct proc *worker = NULL;
-    int ret = kernel_proc_create(&worker, __worker_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
+    int ret = kernel_proc_create("worker_process", &worker, __worker_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
     if (ret <= 0) {
         return ret;
     }
@@ -251,7 +251,7 @@ static void __manager_routine(void) {
 // Thus, it will only try to hold the manager process lock
 static int __create_manager(struct workqueue *wq) {
     struct proc *manager = NULL;
-    int ret = kernel_proc_create(&manager, __manager_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
+    int ret = kernel_proc_create("manager_process", &manager, __manager_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
     if (ret <= 0) {
         return ret;
     }

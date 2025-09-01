@@ -387,7 +387,7 @@ static void __kernel_proc_entry(void) {
 // create a new kernel process, which runs the function entry.
 // The newly created functions are sleeping.
 // Kernel thread will be attached to the init process as its child.
-int kernel_proc_create(struct proc **retp, void *entry, 
+int kernel_proc_create(const char *name, struct proc **retp, void *entry, 
                        uint64 arg1, uint64 arg2, int stack_order) {
   struct proc *p = allocproc(entry, arg1, arg2, stack_order);
   if (p == NULL) {
@@ -407,7 +407,7 @@ int kernel_proc_create(struct proc **retp, void *entry,
   p->arg[1] = arg2;
   // Newly allocated process is a kernel process
   assert(!PROC_USER_SPACE(p), "kernel_proc_create: new proc is a user process");
-  safestrcpy(p->name, "kproc", sizeof(p->name));
+  safestrcpy(p->name, name ? name : "kproc", sizeof(p->name));
   __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
   if (retp != NULL) {
     *retp = p;

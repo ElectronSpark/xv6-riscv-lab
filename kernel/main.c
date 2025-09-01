@@ -45,7 +45,7 @@ main()
     signal_init();   // signal handling initialization  
     userinit();      // first user process
     struct proc *idle_proc = myproc();
-    int kpid = kernel_proc_create(&idle_proc, __idle, 128, 256, KERNEL_STACK_ORDER); // Create an idle kernel thread
+    int kpid = kernel_proc_create("idle_process", &idle_proc, __idle, 128, 256, KERNEL_STACK_ORDER); // Create an idle kernel thread
     wakeup_proc(idle_proc);
     printf("Idle kernel thread created with pid: %d\n", kpid);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
