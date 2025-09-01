@@ -311,7 +311,7 @@ void scheduler_wakeup(struct proc *p) {
     }
 }
 
-void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
+void sleep_on_chan(void *chan, struct spinlock *lk) {
     sleep_lock();
     assert(myproc() != NULL, "PCB is NULL");
     assert(chan != NULL, "Cannot sleep on a NULL channel");
@@ -325,7 +325,7 @@ void scheduler_sleep_on_chan(void *chan, struct spinlock *lk) {
     (void)ret;
 }
 
-void scheduler_wakeup_on_chan(void *chan) {
+void wakeup_on_chan(void *chan) {
     sleep_lock();
     int ret = proc_tree_wakeup_key(&__chan_queue_root, (uint64)chan, 0, 0);
     // @TODO: process return value

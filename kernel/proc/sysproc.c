@@ -6,6 +6,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "timer.h"
+#include "sched.h"
 
 uint64
 sys_exit(void)

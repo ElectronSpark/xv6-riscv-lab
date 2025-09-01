@@ -8,6 +8,7 @@
 #include "mutex_types.h"
 #include "file.h"
 #include "vm.h"
+#include "sched.h"
 
 #define PIPESIZE 512
 

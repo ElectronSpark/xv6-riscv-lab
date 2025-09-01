@@ -6,6 +6,7 @@
 #include "mutex_types.h"
 #include "fs.h"
 #include "buf.h"
+#include "sched.h"
 
 // Simple logging that allows concurrent FS system calls.
 //

@@ -823,22 +823,6 @@ forkret(void)
   usertrapret();
 }
 
-// Atomically spin_release lock and sleep on chan.
-// Reacquires lock when awakened.
-void
-sleep_on_chan(void *chan, struct spinlock *lk)
-{
-  scheduler_sleep_on_chan(chan, lk);
-}
-
-// Wake up all processes sleeping on chan.
-// Must be called without any p->lock.
-void
-wakeup_on_chan(void *chan)
-{
-  scheduler_wakeup_on_chan(chan);
-}
-
 // Kill the process with the given pid.
 // The victim won't exit until it tries to return
 // to user space (see usertrap() in trap.c).

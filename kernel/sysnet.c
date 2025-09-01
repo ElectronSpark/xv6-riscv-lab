@@ -15,6 +15,7 @@
 #include "net.h"
 #include "vm.h"
 #include "signal.h"
+#include "sched.h"
 
 struct sock {
   struct sock *next; // the next socket in the list
