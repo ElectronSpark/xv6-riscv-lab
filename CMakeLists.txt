@@ -191,8 +191,7 @@ else()
     math(EXPR FWDPORT2 "${USER_ID} % 5000 + 30999")
 
     # Compose QEMU options
-    set(QEMUOPTS
-        -machine virt
+    set(QEMUOPTS_PARAM
         -bios none
         -kernel ${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel
         -m 130M
@@ -205,6 +204,26 @@ else()
         -object filter-dump,id=net0,netdev=net0,file=packets.pcap
         -device e1000,netdev=net0,bus=pcie.0
         -device loader,addr=0x88000000,file=${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel.sym,force-raw=on
+    )
+
+    set(QEMUOPTS
+        -machine virt
+        ${QEMUOPTS_PARAM}
+    )
+
+    set(QEMUOPTS_DTB
+        -machine virt,dumpdtb=${CMAKE_CURRENT_BINARY_DIR}/virt.dtb
+        ${QEMUOPTS_PARAM}
+    )
+
+    add_custom_target(qemu-dts
+        COMMAND ${QEMU} ${QEMUOPTS_DTB}
+        COMMAND dtc -o virt.dts -O dts -I dtb ${CMAKE_CURRENT_BINARY_DIR}/virt.dtb
+        DEPENDS kernel/kernel 
+                kernel/kernel.sym
+                fs.img
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+        COMMENT "Generate the device tree file"
     )
 
     # Add custom target to run QEMU

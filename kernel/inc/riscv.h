@@ -406,7 +406,7 @@ typedef uint64 *pagetable_t; // 512 PTEs
 
 #define TIMEBASE_FREQUENCY 10000000UL
 #define HZ 1000UL
-#define TICK_FREQUENCY (TIMEBASE_FREQUENCY / HZ)
+#define JIFF_TICKS (TIMEBASE_FREQUENCY / HZ)
 #define TICK_MS 1UL
 #define TICK_S (TICK_MS * 1000)
 
