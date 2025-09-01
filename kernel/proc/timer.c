@@ -66,7 +66,7 @@ void timer_init(struct timer_root *timer) {
 
 void timer_node_init(struct timer_node *node,
                      uint64 expires,
-                     void (*callback)(void *),
+                     void (*callback)(struct timer_node*),
                      void *data) {
     if (node == NULL) {
         return;
@@ -124,6 +124,13 @@ int timer_add(struct timer_root *timer, struct timer_node *node) {
     return 0;
 }
 
+static void __timer_remove_unlocked(struct timer_root *timer, struct timer_node *node) {
+    rb_delete_node_color(&timer->root, &node->rb);
+    list_node_detach(node, list_entry);
+    node->timer = NULL;
+    __timer_update_next_tick(timer);
+}
+
 void timer_remove(struct timer_node *node) {
     // Remove timer from the timer_root
     struct timer_root *timer = node->timer;
@@ -131,10 +138,7 @@ void timer_remove(struct timer_node *node) {
         return;
     }
     spin_acquire(&timer->lock);
-    rb_delete_node_color(&timer->root, &node->rb);
-    list_node_detach(node, list_entry);
-    node->timer = NULL;
-    __timer_update_next_tick(timer);
+    __timer_remove_unlocked(timer, node);
     spin_release(&timer->lock);
 }
 
@@ -146,6 +150,7 @@ void timer_remove(struct timer_node *node) {
 // This function may call the callback functions of the expired timers
 // for at most TIMER_DEFAULT_RETRY_LIMIT times if the timer nodes are still
 // in the timer list the next time the timer_tick function is called.
+// The callback function will be called with the timer lock locked
 void timer_tick(struct timer_root *timer, uint64 ticks) {
     if (timer == NULL || ticks == 0) {
         return;
@@ -177,14 +182,14 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
         if (node->callback == NULL) {
             // If no callback is set, just remove the timer
             printf("Warning: Timer expired without callback\n");
-            timer_remove(node);
+            __timer_remove_unlocked(node->timer, node);
             continue;
         }
         node->retry++;
         if (node->retry >= TIMER_DEFAULT_RETRY_LIMIT) {
-            timer_remove(node);
+            __timer_remove_unlocked(node->timer, node);
         }
-        node->callback(node->data);
+        node->callback(node);
     }
 
     spin_release(&timer->lock);

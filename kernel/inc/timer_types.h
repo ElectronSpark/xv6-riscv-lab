@@ -23,7 +23,7 @@ struct timer_node {
     uint64 expires;
     int retry;
     struct timer_root *timer;
-    void (*callback)(void *);
+    void (*callback)(struct timer_node*);
     void *data;
 };
 
