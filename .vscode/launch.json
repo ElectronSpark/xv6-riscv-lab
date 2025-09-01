@@ -8,12 +8,15 @@
             "name": "kernel-debug",
             "type": "cppdbg",
             "request": "launch",
-            // "miDebuggerServerAddress": "127.0.0.1:26000",
-            "miDebuggerArgs": "-ex 'target extended-remote localhost:26000'",
+            "miDebuggerServerAddress": "127.0.0.1:26000",
+            // "miDebuggerArgs": "-ex 'target extended-remote localhost:26000'",
             "miDebuggerPath": "/usr/bin/gdb-multiarch",
-            "program": "${workspaceFolder}/kernel/kernel",
+            "program": "${workspaceFolder}/build/kernel/kernel",
             "stopAtEntry": true,
+            "externalConsole": false,
+            "useExtendedRemote": true,
             "cwd": "${workspaceFolder}",
+            "preLaunchTask": "compile xv6 and run in debug mode",
             "MIMode": "gdb",
             "setupCommands": [
                 {

@@ -2,44 +2,49 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "compile xv6 and make compiledb",
-            "command": "bash",
+            "label": "configure cmake",
+            "type": "shell",
+            "command": "/bin/bash",
             "args": [
                 "-c",
-                "source ./env.conf && compiledb make"
+                "rm -rf ${workspaceFolder}/build; mkdir -p ${workspaceFolder}/build; cd ${workspaceFolder}/build; cmake .."
             ],
-            "presentation": {
-                "echo": true,
-                "reveal": "always",
-                "focus": true,
-                "panel": "new",
-                "showReuseMessage": true,
-                "clear": true
-            },
-            "group": {
-                "kind": "build",
-                "isDefault": true
+            "problemMatcher": [],
+            "options": {
+                "env": {
+                    "LAB": "util",
+                },
+                "cwd": "${workspaceFolder}/"
             }
         },
         {
             "label": "compile xv6 and run in debug mode",
-            "command": "bash",
+            "type": "shell",
+            "command": "make",
+            "isBackground": true,
             "args": [
-                "-c",
-                "source ./env.conf && make qemu-gdb"
+                "-j16",
+                "qemu-gdb"
             ],
-            "presentation": {
-                "echo": true,
-                "reveal": "always",
-                "focus": true,
-                "panel": "new",
-                "showReuseMessage": true,
-                "clear": true
+            "problemMatcher": {
+                "owner": "custom",
+                "fileLocation": "relative",
+                "pattern": {
+                    "regexp": "^.*$",
+                },
+                // Minimal matcher (never matches) so the object is valid
+                "background": {
+                    "activeOnStart": true,
+                    "beginsPattern": ".*In lab: .*",
+                    "endsPattern": ".*Now run gdb in another window.*"
+                }
             },
-            "group": {
-                "kind": "build",
-                "isDefault": true
-            }
-        },
+            "options": {
+                "cwd": "${workspaceFolder}/build"
+            },
+            "dependsOn": [
+                "configure cmake"
+            ]
+        }
     ]
 }
