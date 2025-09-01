@@ -653,8 +653,8 @@ reparent(struct proc *p)
   proc_unlock(p);
   proc_unlock(initproc);
 
-  if (found)
-    wakeup_on_chan(initproc);
+  if (found && __proc_get_pstate(initproc) == PSTATE_INTERRUPTIBLE)
+    wakeup_proc(initproc);
 }
 
 
@@ -761,9 +761,8 @@ wait(uint64 addr)
     }
     
     // Wait for a child to exit.
-    proc_unlock(p);
-    sleep_on_chan(p, NULL);  //DOC: wait-sleep
-    proc_lock(p);
+    __proc_set_pstate(myproc(), PSTATE_INTERRUPTIBLE);
+    scheduler_sleep(NULL);  //DOC: wait-sleep
   }
 
 ret:

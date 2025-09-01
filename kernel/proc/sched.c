@@ -250,8 +250,8 @@ void scheduler_run(void) {
             spin_release(lk); // Release the lock returned by __swtch_context
         }
 
-        if (pstate == PSTATE_ZOMBIE) {
-            wakeup_on_chan(pparent);
+        if (pstate == PSTATE_ZOMBIE && __proc_get_pstate(pparent) == PSTATE_INTERRUPTIBLE) {
+            wakeup_proc(pparent);
         }
     }
 }
