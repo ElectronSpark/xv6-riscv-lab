@@ -64,6 +64,11 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/proc/timer.c
 )
 
+set(KERNEL_C_FILES
+    ${KERNEL_C_FILES}
+    ${KERNEL_DIR}/dev/dev.c
+)
+
 if(DEFINED ENV{RWLOCK_TEST})
     set(KERNEL_C_FILES
         ${KERNEL_C_FILES}
