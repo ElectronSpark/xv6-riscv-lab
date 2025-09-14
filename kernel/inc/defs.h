@@ -30,6 +30,7 @@ void            bunpin(struct buf*);
 
 // console.c
 void            consoleinit(void);
+void            consoledevinit(void);
 void            consoleintr(int);
 void            consputc(int);
 

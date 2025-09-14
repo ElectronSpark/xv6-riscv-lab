@@ -6,6 +6,7 @@
 #include "sched.h"
 #include "signal.h"
 #include "workqueue.h"
+#include "dev.h"
 
 volatile STATIC int started = 0;
 
@@ -29,6 +30,8 @@ main()
     kinit();         // physical page allocator
     kvminit();       // create kernel page table
     kvminithart();   // turn on paging
+    dev_table_init(); // Initialize the device table
+    consoledevinit(); // Initialize and register the console character device
     procinit();      // process table
     workqueue_init(); // workqueue subsystem initialization
     scheduler_init(); // initialize the scheduler

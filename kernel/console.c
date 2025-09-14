@@ -22,6 +22,7 @@
 #include "defs.h"
 #include "proc.h"
 #include "sched.h"
+#include "cdev.h"
 
 #define BACKSPACE 0x100
 #define C(x)  ((x)-'@')  // Control-x
@@ -57,9 +58,10 @@ struct {
 // user write()s to the console go here.
 //
 int
-consolewrite(int user_src, uint64 src, int n)
+consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n)
 {
   int i;
+  uint64 src = (uint64)buffer;
 
   for(i = 0; i < n; i++){
     char c;
@@ -78,11 +80,12 @@ consolewrite(int user_src, uint64 src, int n)
 // or kernel address.
 //
 int
-consoleread(int user_dst, uint64 dst, int n)
+consoleread(cdev_t *cdev, bool user_dst, void *buffer, size_t n)
 {
   uint target;
   int c;
   char cbuf;
+  uint64 dst = (uint64)buffer;
 
   target = n;
   spin_acquire(&cons.lock);
@@ -126,6 +129,30 @@ consoleread(int user_dst, uint64 dst, int n)
 
   return target - n;
 }
+
+static int consoleopen(cdev_t *cdev) {
+    return 0;
+}
+
+static int consoleclose(cdev_t *cdev) {
+    return 0;
+}
+
+static cdev_ops_t console_cdev_ops = {
+    .read = consoleread,
+    .write = consolewrite,
+    .open = consoleopen,
+    .release = consoleclose,
+};
+
+static cdev_t console_cdev = {
+    .dev = {
+        .major = CONSOLE_MAJOR,
+        .minor = CONSOLE_MINOR,
+    },
+    .readable = 1,
+    .writable = 1,
+};
 
 //
 // the console input interrupt handler.
@@ -192,9 +219,14 @@ consoleinit(void)
   spin_init(&cons.lock, "cons");
 
   uartinit();
+}
 
+void
+consoledevinit(void)
+{
   // connect read and write system calls
   // to consoleread and consolewrite.
-  devsw[CONSOLE].read = consoleread;
-  devsw[CONSOLE].write = consolewrite;
+  console_cdev.ops = console_cdev_ops;
+  int errno = cdev_register(&console_cdev);
+  assert(errno == 0, "consoleinit: cdev_register failed, error code: %d\n", errno);
 }

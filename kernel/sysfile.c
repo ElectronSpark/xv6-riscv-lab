@@ -17,6 +17,7 @@
 #include "fcntl.h"
 #include "memlayout.h"
 #include "vm.h"
+#include "cdev.h"
 
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
@@ -391,6 +392,15 @@ sys_open(void)
   if(ip->type == T_DEVICE){
     f->type = FD_DEVICE;
     f->major = ip->major;
+    cdev_t *cdev = NULL;
+    int ret = cdev_get(ip->major, ip->minor, &cdev);
+    if (ret != 0) {
+      fileclose(f);
+      iunlockput(ip);
+      end_op();
+      return -1;
+    }
+    f->cdev = cdev;
   } else {
     f->type = FD_INODE;
     f->off = 0;

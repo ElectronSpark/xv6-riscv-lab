@@ -14,8 +14,8 @@
 #include "proc.h"
 #include "memlayout.h"
 #include "vm.h"
+#include "cdev.h"
 
-struct devsw devsw[NDEV];
 struct {
   struct spinlock lock;
   struct file file[NFILE];
@@ -77,10 +77,12 @@ fileclose(struct file *f)
 
   if(ff.type == FD_PIPE){
     pipeclose(ff.pipe, ff.writable);
-  } else if(ff.type == FD_INODE || ff.type == FD_DEVICE){
+  } else if(ff.type == FD_INODE){
     begin_op();
     iput(ff.ip);
     end_op();
+  } else if(ff.type == FD_DEVICE){
+    cdev_put(ff.cdev);
   } else if(ff.type == FD_SOCK){
     sockclose(ff.sock);
   }
@@ -122,9 +124,7 @@ fileread(struct file *f, uint64 addr, int n)
   if(f->type == FD_PIPE){
     r = piperead(f->pipe, addr, n);
   } else if(f->type == FD_DEVICE){
-    if(f->major < 0 || f->major >= NDEV || !devsw[f->major].read)
-      return -1;
-    r = devsw[f->major].read(1, addr, n);
+    r = cdev_read(f->cdev, true, (void *)addr, n);
   } else if(f->type == FD_INODE){
     ilock(f->ip);
     if((r = readi(f->ip, 1, addr, f->off, n)) > 0)
@@ -152,9 +152,7 @@ filewrite(struct file *f, uint64 addr, int n)
   if(f->type == FD_PIPE){
     ret = pipewrite(f->pipe, addr, n);
   } else if(f->type == FD_DEVICE){
-    if(f->major < 0 || f->major >= NDEV || !devsw[f->major].write)
-      return -1;
-    ret = devsw[f->major].write(1, addr, n);
+    r = cdev_write(f->cdev, true, (void *)addr, n);
   } else if(f->type == FD_INODE){
     // write a few blocks at a time to avoid exceeding
     // the maximum log transaction size, including

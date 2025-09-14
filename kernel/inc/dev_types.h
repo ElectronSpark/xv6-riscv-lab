@@ -42,10 +42,10 @@ typedef struct device_instance {
 } device_t;
 
 typedef struct cdev_ops {
-    int (*read)(cdev_t *cdev, void *buf, size_t count);
-    int (*write)(cdev_t *cdev, const void *buf, size_t count);
+    int (*read)(cdev_t *cdev, bool user, void *buf, size_t count);
+    int (*write)(cdev_t *cdev, bool user, const void *buf, size_t count);
     int (*open)(cdev_t *cdev);
-    int (*close)(cdev_t *cdev);
+    int (*release)(cdev_t *cdev);
 } cdev_ops_t;
 
 typedef struct cdev {
@@ -54,7 +54,7 @@ typedef struct cdev {
         uint64 readable: 1; // Is the device readable
         uint64 writable: 1; // Is the device writable
     };
-    int ref_count;          // Reference count for the cdev instance
+    cdev_ops_t ops; // File operations for the character device
 } cdev_t;
 
 
