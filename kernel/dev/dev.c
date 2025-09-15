@@ -165,7 +165,7 @@ int device_get(int major, int minor, device_t **dev) {
         return ret;
     }
     device_t *device = *dev_slot;
-    if (device == NULL || !device->valid) {
+    if (device == NULL) {
         __dev_tab_unlock();
         return -ENODEV; // Device not found or not valid
     }
@@ -190,7 +190,7 @@ int device_dup(device_t *dev) {
         return -EINVAL; // Null pointer for device
     }
     __dev_tab_lock();
-    if (!dev->valid || dev->ref_count <= 0) {
+    if (dev->ref_count <= 0) {
         __dev_tab_unlock();
         return -EINVAL; // Device not valid
     }
@@ -228,9 +228,6 @@ int device_register(device_t *dev) {
     if (!__dev_opts_validate(&dev->ops)) {
         return -EINVAL; // Invalid device operations
     }
-    if (dev->valid) {
-        return -EINVAL; // Device already registered
-    }
     __dev_tab_lock();
     device_t **dev_slot = NULL;
     device_major_t **dmajor_slot = NULL;
@@ -248,7 +245,6 @@ int device_register(device_t *dev) {
     *dev_slot = dev;
     (*dmajor_slot)->num_minors++;
     dev->ref_count = 0;
-    dev->valid = 1;
     __dev_tab_unlock();
     return 0;
 }
@@ -261,9 +257,9 @@ int device_unregister(device_t *dev) {
         return -EINVAL; // Null pointer for device
     }
     __dev_tab_lock();
-    if (!dev->valid) {
+    if (dev->ref_count > 0) {
         __dev_tab_unlock();
-        return -EINVAL; // Device not registered
+        return -EBUSY; // Device is still in use
     }
     device_t **dev_slot = NULL;
     device_major_t **dmajor_slot = NULL;
@@ -276,7 +272,6 @@ int device_unregister(device_t *dev) {
         __dev_tab_unlock();
         return -EINVAL; // Device mismatch
     }
-    dev->valid = 0;
     *dev_slot = NULL;
     device_major_t *dmajor = *dmajor_slot;
     bool needs_free = false;

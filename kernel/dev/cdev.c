@@ -108,9 +108,6 @@ int cdev_read(cdev_t *cdev, bool user, void *buf, size_t count) {
     if (cdev->dev.type != DEV_TYPE_CHAR) {
         return -ENODEV; // Not a character device
     }
-    if (!cdev->dev.valid) {
-        return -ENODEV; // Device not valid
-    }
     if (!cdev->readable || cdev->ops.read == NULL) {
         return -ENOSYS; // Read operation not supported
     }
@@ -123,9 +120,6 @@ int cdev_write(cdev_t *cdev, bool user, const void *buf, size_t count) {
     }
     if (cdev->dev.type != DEV_TYPE_CHAR) {
         return -ENODEV; // Not a character device
-    }
-    if (!cdev->dev.valid) {
-        return -ENODEV; // Device not valid
     }
     if (!cdev->writable || cdev->ops.write == NULL) {
         return -ENOSYS; // Write operation not supported

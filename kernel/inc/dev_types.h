@@ -33,9 +33,6 @@ typedef enum {
 typedef struct device_instance {
     int major;              // Major device number
     int minor;              // Minor device number
-    struct {
-        uint64 valid: 1;
-    };
     dev_type_e type;       // Device type (block, char, etc.)
     int ref_count;          // Reference count for the device instance
     device_ops_t ops;
