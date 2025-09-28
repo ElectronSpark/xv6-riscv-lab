@@ -68,6 +68,8 @@ set(KERNEL_C_FILES
     ${KERNEL_C_FILES}
     ${KERNEL_DIR}/dev/dev.c
     ${KERNEL_DIR}/dev/cdev.c
+    ${KERNEL_DIR}/dev/blkdev.c
+    ${KERNEL_DIR}/dev/bio.c
 )
 
 if(DEFINED ENV{RWLOCK_TEST})
