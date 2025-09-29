@@ -14,6 +14,8 @@
 #include "fs.h"
 #include "buf.h"
 #include "virtio.h"
+#include "blkdev.h"
+#include "errno.h"
 #include "sched.h"
 
 // the address of virtio mmio register r.
@@ -59,6 +61,41 @@ STATIC struct disk {
   struct spinlock vdisk_lock;
   
 } disk;
+
+static int __virtio_disk_open(blkdev_t *blkdev) {
+  return 0;
+}
+
+static int __virtio_disk_release(blkdev_t *blkdev) {
+  return -EBUSY;
+}
+
+static int __virtio_disk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
+  return -1;
+
+}
+
+static blkdev_ops_t __virtio_disk_ops = {
+    .open = __virtio_disk_open,
+    .release = __virtio_disk_release,
+    .submit_bio = __virtio_disk_submit_bio
+};
+
+static blkdev_t virtio_disk_dev = {
+    .dev = {
+        .major = major(ROOTDEV),
+        .minor = minor(ROOTDEV),
+    },
+    .readable = 1,
+    .writable = 1,
+    .block_shift = 0, // 2^0 * 512 = 512 bytes per block
+};
+
+static void __virtio_blkdev_init(void) {
+  virtio_disk_dev.ops = __virtio_disk_ops;
+  int errno = blkdev_register(&virtio_disk_dev);
+  assert(errno == 0, "virtio_blkdev_init: blkdev_register failed: %d", errno);
+}
 
 void
 virtio_disk_init(void)
@@ -154,6 +191,7 @@ virtio_disk_init(void)
   status |= VIRTIO_CONFIG_S_DRIVER_OK;
   *R(VIRTIO_MMIO_STATUS) = status;
 
+  __virtio_blkdev_init();
   // plic.c and trap.c arrange for interrupts from VIRTIO0_IRQ.
 }
 
