@@ -37,7 +37,7 @@ int bio_alloc(
 }
 
 int bio_add_seg(struct bio *bio, page_t *page, int16 idx, uint16 len, uint16 offset) {
-    if (bio == NULL || page == NULL || len == 0 || (offset + len) > PGSIZE) {
+    if (bio == NULL || page == NULL || len == 0) {
         return -EINVAL; // Invalid arguments
     }
     if (bio->valid || bio->done) {
@@ -75,13 +75,16 @@ int bio_release(struct bio *bio) {
     }
     int ref_count = __atomic_sub_fetch(&bio->ref_count, 1, __ATOMIC_SEQ_CST);
     assert(ref_count >= 0, "bio_release: negative ref_count");
-    // Release pages
-    for (int i = 0; i < bio->vec_length; i++) {
-        if (bio->bvecs[i].bv_page) {
-            __page_ref_dec(bio->bvecs[i].bv_page);
-            bio->bvecs[i].bv_page = NULL;
-        }
+    if (ref_count > 0) {
+        return 0; // Still has references
     }
+    // Release pages
+    // for (int i = 0; i < bio->vec_length; i++) {
+    //     if (bio->bvecs[i].bv_page) {
+    //         __page_ref_dec(bio->bvecs[i].bv_page);
+    //         bio->bvecs[i].bv_page = NULL;
+    //     }
+    // }
     if (ref_count == 0) {
         kmm_free(bio);
     }

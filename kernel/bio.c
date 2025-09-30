@@ -22,6 +22,8 @@
 #include "defs.h"
 #include "fs.h"
 #include "buf.h"
+#include "page.h"
+#include "blkdev.h"
 #include "list.h"
 #include "hlist.h"
 
@@ -175,6 +177,29 @@ bget(uint dev, uint blockno)
   panic("bget: no buffers");
 }
 
+static struct bio *__buf_alloc_bio(struct buf *b, blkdev_t *blkdev, bool write) {
+  struct bio *bio = NULL;
+  int ret = bio_alloc(blkdev, 1, write, NULL, NULL, &bio);
+  if (bio == NULL) {
+    return NULL;
+  }
+  bio->blkno = b->blockno * (BSIZE / 512);
+  page_t *page = __pa_to_page((uint64)b->data & ~PAGE_MASK);
+  size_t page_offset = (uint64)b->data & PAGE_MASK;
+  ret = bio_add_seg(bio, page, 0, BSIZE, page_offset);
+  if (ret != 0) {
+    bio_release(bio);
+    return NULL;
+  }
+  return bio;
+}
+
+static void __buf_bio_cleanup(struct bio *bio) {
+  if (bio) {
+    bio_release(bio);
+  }
+}
+
 // Return a locked buf with the contents of the indicated block.
 struct buf*
 bread(uint dev, uint blockno)
@@ -183,8 +208,16 @@ bread(uint dev, uint blockno)
 
   b = bget(dev, blockno);
   if(!b->valid) {
-    virtio_disk_rw(b, 0);
+    blkdev_t *blkdev = NULL;
+    int ret = blkdev_get(major(b->dev), minor(b->dev), &blkdev);
+    assert(ret == 0, "bwrite: blkdev_get failed: %d", ret);
+    struct bio *bio = __buf_alloc_bio(b, blkdev, false);
+    assert(bio != NULL, "bread: bio_alloc failed");
+    blkdev_submit_bio(blkdev, bio);
     b->valid = 1;
+    __buf_bio_cleanup(bio);
+    ret = blkdev_put(blkdev);
+    assert(ret == 0, "bread: blkdev_put failed: %d", ret);
   }
   return b;
 }
@@ -195,7 +228,15 @@ bwrite(struct buf *b)
 {
   if(!holding_mutex(&b->lock))
     panic("bwrite");
-  virtio_disk_rw(b, 1);
+  blkdev_t *blkdev = NULL;
+  int ret = blkdev_get(major(b->dev), minor(b->dev), &blkdev);
+  assert(ret == 0, "bwrite: blkdev_get failed: %d", ret);
+  struct bio *bio = __buf_alloc_bio(b, blkdev, true);
+  assert(bio != NULL, "bwrite: bio_alloc failed");
+  blkdev_submit_bio(blkdev, bio);
+  __buf_bio_cleanup(bio);
+  ret = blkdev_put(blkdev);
+  assert(ret == 0, "bwrite: blkdev_put failed: %d", ret);
 }
 
 // release a locked buffer.

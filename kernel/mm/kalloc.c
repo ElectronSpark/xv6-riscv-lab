@@ -63,12 +63,17 @@ void *kmm_alloc(size_t size) {
     if (obj_size > SLAB_OBJ_MAX_SIZE || slab_idx >= SLAB_CACHE_NUMS) {
       return NULL;
     }
-    return slab_alloc(__kmm_slab_cache[slab_idx]);
+    push_off();
+    void *ret = slab_alloc(__kmm_slab_cache[slab_idx]);
+    pop_off();
+    return ret;
 }
 
 // free the memory allocated from kmm_alloc
 void kmm_free(void *ptr) {
+  push_off();
     slab_free(ptr);
+    pop_off();
 }
 
 // Free the page of physical memory pointed at by pa,

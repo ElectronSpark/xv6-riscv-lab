@@ -17,8 +17,8 @@ struct buf {
   list_node_t lru_entry;
   // struct buf *prev; // LRU cache list
   // struct buf *next;
-  uchar data[BSIZE];
-};
+  uchar data[BSIZE] __attribute__((aligned(1024)));
+} __attribute__((aligned(4096)));
 
 #define BIO_HASH_BUCKETS 63
 

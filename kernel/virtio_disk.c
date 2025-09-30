@@ -15,11 +15,15 @@
 #include "buf.h"
 #include "virtio.h"
 #include "blkdev.h"
+#include "page.h"
 #include "errno.h"
 #include "sched.h"
 
 // the address of virtio mmio register r.
 #define R(r) ((volatile uint32 *)(VIRTIO0 + (r)))
+
+static void
+virtio_disk_rw(struct bio *bio, uint64 sector, void *buf, size_t size, int write);
 
 STATIC struct disk {
   // a set (not a ring) of DMA descriptors, with which the
@@ -50,7 +54,7 @@ STATIC struct disk {
   // for use when completion interrupt arrives.
   // indexed by first descriptor index of chain.
   struct {
-    struct buf *b;
+    struct bio *bio;
     char status;
   } info[NUM];
 
@@ -67,12 +71,27 @@ static int __virtio_disk_open(blkdev_t *blkdev) {
 }
 
 static int __virtio_disk_release(blkdev_t *blkdev) {
-  return -EBUSY;
+  return 0;
 }
 
 static int __virtio_disk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
-  return -1;
+  struct bio_vec bvec;
+  struct bio_iter iter;
 
+  bio_start_io_acct(bio);
+  bio_for_each_segment(&bvec, bio, &iter) {
+    uint64 sector = iter.blkno;
+    page_t *page = bvec.bv_page;
+    assert(page != NULL, "virtio_disk_submit_bio: page is NULL");
+    void *pa = (void *)__page_to_pa(page);
+    assert(pa != NULL, "virtio_disk_submit_bio: page has no physical address");
+    virtio_disk_rw(bio, sector, pa + bvec.offset, bvec.len, bio_dir_write(bio));
+    iter.size_done += bvec.len;
+  }
+
+  bio_end_io_acct(bio);
+  bio_endio(bio);
+  return 0;
 }
 
 static blkdev_ops_t __virtio_disk_ops = {
@@ -264,10 +283,12 @@ alloc3_desc(int *idx)
   return 0;
 }
 
-void
-virtio_disk_rw(struct buf *b, int write)
+static void
+virtio_disk_rw(struct bio *bio, uint64 sector, void *buf, size_t size, int write)
 {
-  uint64 sector = b->blockno * (BSIZE / 512);
+  assert(size == BSIZE, "virtio_disk_rw: size must be BSIZE");
+  assert(buf != NULL, "virtio_disk_rw: buf is NULL");
+  // assert((uint64)buf % PGSIZE == 0, "virtio_disk_rw: buf must be page-aligned");
 
   spin_acquire(&disk.vdisk_lock);
 
@@ -302,8 +323,8 @@ virtio_disk_rw(struct buf *b, int write)
   disk.desc[idx[0]].flags = VRING_DESC_F_NEXT;
   disk.desc[idx[0]].next = idx[1];
 
-  disk.desc[idx[1]].addr = (uint64) b->data;
-  disk.desc[idx[1]].len = BSIZE;
+  disk.desc[idx[1]].addr = (uint64) buf;
+  disk.desc[idx[1]].len = size;
   if(write)
     disk.desc[idx[1]].flags = 0; // device reads b->data
   else
@@ -318,8 +339,8 @@ virtio_disk_rw(struct buf *b, int write)
   disk.desc[idx[2]].next = 0;
 
   // record struct buf for virtio_disk_intr().
-  b->disk = 1;
-  disk.info[idx[0]].b = b;
+  bio->private_data = NULL;
+  disk.info[idx[0]].bio = bio;
 
   // tell the device the first index in our chain of descriptors.
   disk.avail->ring[disk.avail->idx % NUM] = idx[0];
@@ -335,11 +356,11 @@ virtio_disk_rw(struct buf *b, int write)
   *R(VIRTIO_MMIO_QUEUE_NOTIFY) = 0; // value is queue number
 
   // Wait for virtio_disk_intr() to say request has finished.
-  while(b->disk == 1) {
-    sleep_on_chan(b, &disk.vdisk_lock);
+  while(bio->private_data == NULL) {
+    sleep_on_chan(bio, &disk.vdisk_lock);
   }
 
-  disk.info[idx[0]].b = 0;
+  disk.info[idx[0]].bio = NULL;
   free_chain(idx[0]);
 
   spin_release(&disk.vdisk_lock);
@@ -370,15 +391,15 @@ virtio_disk_intr()
     char status = disk.info[id].status;
     
     if(status != 0) {
-      struct buf *b = disk.info[id].b;
-      printf("ERROR: id=%d status=%d buf=%p blockno=0x%x\n",
-             id, status, b, b ? b->blockno : 0);
+      struct bio *bio = disk.info[id].bio;
+      printf("ERROR: id=%d status=%d buf=%p blockno=0x%lx\n",
+             id, status, bio, bio ? bio->blkno : 0);
       panic("virtio_disk_intr status: %d", status);
     }
 
-    struct buf *b = disk.info[id].b;
-    b->disk = 0;   // disk is done with buf
-    wakeup_on_chan(b);
+    struct bio *bio = disk.info[id].bio;
+    bio->private_data = bio;   // disk is done with buf
+    wakeup_on_chan(bio);
 
     disk.used_idx += 1;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);

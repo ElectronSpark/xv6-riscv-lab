@@ -85,6 +85,8 @@
         "timer_types.h": "c",
         "dev_types.h": "c",
         "file_ops.h": "c",
-        "cstdio": "c"
+        "cstdio": "c",
+        "errno.h": "c",
+        "bio_types.h": "c"
     }
 }

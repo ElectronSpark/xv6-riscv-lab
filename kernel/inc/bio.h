@@ -66,12 +66,14 @@ static inline void bio_start_io_acct(struct bio *bio)
     bio->done = 0;
     bio->done_size = 0;
     bio->error = 0;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
 
 // End I/O accounting for a bio
 static inline void bio_end_io_acct(struct bio *bio)
 {
     bio->done = 1;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
 
 // bio_endio - end I/O for a bio, call the completion callback if any
