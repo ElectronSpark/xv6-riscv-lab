@@ -95,6 +95,24 @@ __bcache_hlist_push(struct buf *buf) {
   }
 }
 
+// preallocate memory for buffer cache
+static void
+__buf_cache_prealloc(void) {
+  int page_blocks = PGSIZE / BSIZE;
+  int pages_needed = (NBUF + page_blocks - 1) / page_blocks;
+  for (int i = 0; i < pages_needed; i++) {
+    void *pa = page_alloc(0, PAGE_FLAG_ANON);
+    assert(pa != NULL, "__buf_cache_prealloc: page_alloc failed");
+    for (int j = 0; j < page_blocks; j++) {
+      int buf_idx = i * page_blocks + j;
+      if (buf_idx >= NBUF) {
+        break;
+      }
+      bcache.buf[buf_idx].data = (uchar*)pa + j * BSIZE;
+    }
+  }
+}
+
 void
 binit(void)
 {
@@ -116,6 +134,7 @@ binit(void)
     mutex_init(&b->lock, "buffer");
     list_entry_push(&bcache.lru_entry, &b->lru_entry);
   }
+  __buf_cache_prealloc();
 }
 
 // Look through buffer cache for block on device dev.

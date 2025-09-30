@@ -15,10 +15,8 @@ struct buf {
   uint refcnt;
   hlist_entry_t hlist_entry; // hash list entry
   list_node_t lru_entry;
-  // struct buf *prev; // LRU cache list
-  // struct buf *next;
-  uchar data[BSIZE] __attribute__((aligned(1024)));
-} __attribute__((aligned(4096)));
+  uchar *data;
+} __attribute__((aligned(64)));
 
 #define BIO_HASH_BUCKETS 63
 
