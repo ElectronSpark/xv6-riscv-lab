@@ -4,6 +4,7 @@
 #include <completion_types.h>
 
 void completion_init(completion_t *c);
+void completion_reinit(completion_t *c);
 void wait_for_completion(completion_t *c);
 bool try_wait_for_completion(completion_t *c);
 void complete(completion_t *c);

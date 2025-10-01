@@ -18,6 +18,7 @@
 #include "page.h"
 #include "errno.h"
 #include "sched.h"
+#include "completion.h"
 
 // the address of virtio mmio register r.
 #define R(r) ((volatile uint32 *)(VIRTIO0 + (r)))
@@ -55,6 +56,8 @@ STATIC struct disk {
   // indexed by first descriptor index of chain.
   struct {
     struct bio *bio;
+    completion_t *comp;
+    bool done;
     char status;
   } info[NUM];
 
@@ -289,6 +292,8 @@ virtio_disk_rw(struct bio *bio, uint64 sector, void *buf, size_t size, int write
   assert(size == BSIZE, "virtio_disk_rw: size must be BSIZE");
   assert(buf != NULL, "virtio_disk_rw: buf is NULL");
   // assert((uint64)buf % PGSIZE == 0, "virtio_disk_rw: buf must be page-aligned");
+  completion_t comp;
+  completion_init(&comp);
 
   spin_acquire(&disk.vdisk_lock);
 
@@ -356,10 +361,16 @@ virtio_disk_rw(struct bio *bio, uint64 sector, void *buf, size_t size, int write
   *R(VIRTIO_MMIO_QUEUE_NOTIFY) = 0; // value is queue number
 
   // Wait for virtio_disk_intr() to say request has finished.
-  while(bio->private_data == NULL) {
-    sleep_on_chan(bio, &disk.vdisk_lock);
-  }
+  // @TODO: not allow interrupt here
+  disk.info[idx[0]].done = false;
+  disk.info[idx[0]].comp = &comp;
+  spin_release(&disk.vdisk_lock);
 
+  wait_for_completion(&comp);
+
+  spin_acquire(&disk.vdisk_lock);
+  assert(disk.info[idx[0]].done == true, "virtio_disk_rw: not done");
+  disk.info[idx[0]].comp = NULL;
   disk.info[idx[0]].bio = NULL;
   free_chain(idx[0]);
 
@@ -397,9 +408,13 @@ virtio_disk_intr()
       panic("virtio_disk_intr status: %d", status);
     }
 
-    struct bio *bio = disk.info[id].bio;
-    bio->private_data = bio;   // disk is done with buf
-    wakeup_on_chan(bio);
+    completion_t *comp = disk.info[id].comp;
+    assert(comp != NULL, "virtio_disk_intr: comp is NULL");
+    assert(disk.info[id].done == false, "virtio_disk_intr: already done");
+    // Mark the bio as done
+    disk.info[id].done = true;
+    // Wake up the waiting thread
+    complete_all(disk.info[id].comp);
 
     disk.used_idx += 1;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);

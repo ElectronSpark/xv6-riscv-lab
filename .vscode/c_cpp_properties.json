@@ -3,14 +3,16 @@
         {
             "name": "Linux",
             "includePath": [
-                "${workspaceFolder}/**"
+                "${workspaceFolder}/**",
+                "${workspaceFolder}/kernel/inc",
+                "${workspaceFolder}/user"
             ],
             "defines": [],
             "compilerPath": "${workspaceFolder}/../toolchain/build/bin/riscv64-unknown-elf-gcc",
             "cStandard": "c17",
             "cppStandard": "gnu++17",
             "intelliSenseMode": "linux-gcc-x64",
-            "configurationProvider": "ms-vscode.makefile-tools"
+            "configurationProvider": "ms-vscode.cmake-tools"
         }
     ],
     "version": 4

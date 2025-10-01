@@ -18,6 +18,10 @@ void completion_init(completion_t *c) {
     proc_queue_init(&c->wait_queue, "completion_queue", &c->lock);
 }
 
+void completion_reinit(completion_t *c) {
+    c->done = 0;
+}
+
 static bool __try_wait_for_completion(completion_t *c) {
     if (c->done <= 0) {
         return false;
