@@ -6,6 +6,7 @@
 #include "sched.h"
 #include "signal.h"
 #include "workqueue.h"
+#include "kobject.h"
 #include "dev.h"
 
 volatile STATIC int started = 0;
@@ -21,6 +22,7 @@ void
 main()
 {
   if(cpuid() == 0){
+    kobject_global_init();
     consoleinit();
     printfinit();
     printf("\n");
