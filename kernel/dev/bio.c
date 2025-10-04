@@ -7,6 +7,20 @@
 #include <page.h>
 #include <errno.h>
 
+static void __bio_relase_kobj_cb(struct kobject *obj) {
+    struct bio *bio = container_of(obj, struct bio, kobj);
+    // if (bio) {
+    //     // Release pages
+    //     for (int i = 0; i < bio->vec_length; i++) {
+    //         if (bio->bvecs[i].bv_page) {
+    //             __page_ref_dec(bio->bvecs[i].bv_page);
+    //             bio->bvecs[i].bv_page = NULL;
+    //         }
+    //     }
+    // }
+    kmm_free(bio);
+}
+
 int bio_alloc(
     blkdev_t *bdev, 
     int16 vec_length, 
@@ -31,8 +45,10 @@ int bio_alloc(
     bio->rw = rw;
     bio->end_io = end_io;
     bio->private_data = private_data;
-    bio->ref_count = 1; // Initial reference count
     *ret_bio = bio;
+    bio->kobj.name = "bio";
+    bio->kobj.ops.release = __bio_relase_kobj_cb;
+    kobject_init(&bio->kobj);
     return 0;
 }
 
@@ -65,29 +81,15 @@ int bio_dup(struct bio *bio) {
     if (bio == NULL) {
         return -EINVAL; // Invalid argument
     }
-    __atomic_add_fetch(&bio->ref_count, 1, __ATOMIC_SEQ_CST);
-    return 0;     
+    kobject_get(&bio->kobj);
+    return 0;
 }
 
 int bio_release(struct bio *bio) {
     if (bio == NULL) {
         return -EINVAL; // Invalid argument
     }
-    int ref_count = __atomic_sub_fetch(&bio->ref_count, 1, __ATOMIC_SEQ_CST);
-    assert(ref_count >= 0, "bio_release: negative ref_count");
-    if (ref_count > 0) {
-        return 0; // Still has references
-    }
-    // Release pages
-    // for (int i = 0; i < bio->vec_length; i++) {
-    //     if (bio->bvecs[i].bv_page) {
-    //         __page_ref_dec(bio->bvecs[i].bv_page);
-    //         bio->bvecs[i].bv_page = NULL;
-    //     }
-    // }
-    if (ref_count == 0) {
-        kmm_free(bio);
-    }
+    kobject_put(&bio->kobj);
     return 0;
 }
 
@@ -107,7 +109,7 @@ int bio_validate(struct bio *bio, blkdev_t *blkdev) {
     if (bio->size > BIO_MAX_SIZE) {
         return -EINVAL;
     }
-    if (bio->ref_count <= 0) {
+    if (kobject_refcount(&bio->kobj) <= 0) {
         return -EINVAL;
     }
     if (bio->error != 0) {

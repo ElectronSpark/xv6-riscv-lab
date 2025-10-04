@@ -88,6 +88,8 @@
         "cstdio": "c",
         "errno.h": "c",
         "bio_types.h": "c",
-        "fs.h": "c"
+        "fs.h": "c",
+        "file.h": "c",
+        "netfwd": "c"
     }
 }

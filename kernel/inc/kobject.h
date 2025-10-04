@@ -25,9 +25,11 @@ struct kobject {
 };
 
 void kobject_global_init(void);
+// When initializing a kobject, its refcount field must be zero.
 void kobject_init(struct kobject *obj);
 void kobject_get(struct kobject *obj);
 void kobject_put(struct kobject *obj);
+int64 kobject_refcount(struct kobject *obj);
 int64 kobject_count(void);
 
 #endif // KERNEL_OBJECT_H

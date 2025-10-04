@@ -5,6 +5,7 @@
 #include <param.h>
 #include <types.h>
 #include <list_type.h>
+#include <kobject.h>
 
 typedef struct blkdev blkdev_t;
 typedef struct page_struct page_t;
@@ -23,6 +24,7 @@ struct bio_vec {
 
 // A series of bio_vec to transfer data to/from a continuous area in blkdev
 struct bio {
+    struct kobject kobj;    // kobject for reference counting and lifecycle management
     list_node_t list_entry; // Link a series of bio in a single request
     blkdev_t *bdev;         // Block device to do I/O
     uint16 block_shift; // Copy from blkdev, block size shift relative to 512 bytes, typically 1(512) or 3(4096)
@@ -37,7 +39,6 @@ struct bio {
     };
     void (*end_io)(struct bio *bio); // Completion callback when I/O is done
     void *private_data;  // Private data for the bio, used by the completion callback
-    int ref_count;       // Reference count for this bio
     int error;           // Error code if any error happens during I/O
     struct bio_vec bvecs[0];
 };
