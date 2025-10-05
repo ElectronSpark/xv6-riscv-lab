@@ -5,7 +5,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <cmocka.h>
-#include "../kernel/hlist.h"
+#include "hlist.h"
 #include "test_numbers.h"
 
 #define TEST_HASH_BUCKET_CNT 31 // Number of buckets in the hash list

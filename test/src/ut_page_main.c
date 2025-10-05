@@ -542,7 +542,7 @@ static void test_buddy_address_helpers(void **state) {
 
 // Test buddy system with simulated fragmentation
 // @TODO: improve
-static void test_buddy_fragmentation(void **state) {
+static void __attribute__((unused)) test_buddy_fragmentation(void **state) {
     buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
     initial_state->skip = false;  // Allow this test to run
     uint64 flags = 0;
@@ -612,7 +612,7 @@ static void test_buddy_fragmentation(void **state) {
 
 // Test page allocation stress test
 // @TODO: improve
-static void test_page_alloc_stress(void **state) {
+static void __attribute__((unused)) test_page_alloc_stress(void **state) {
     buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
     initial_state->skip = false;  // Allow this test to run
     uint64 flags = 0;
@@ -791,8 +791,8 @@ int main(int argc, char **argv) {
         cmocka_unit_test_prestate_setup_teardown(test_page_alloc_failure, test_setup, test_teardown, &prestate),
         
         // Advanced/stress tests
-        // cmocka_unit_test_prestate_setup_teardown(test_buddy_fragmentation, test_setup, test_teardown, &prestate),
-        // cmocka_unit_test_prestate_setup_teardown(test_page_alloc_stress, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_buddy_fragmentation, test_setup, test_teardown, &prestate),
+        cmocka_unit_test_prestate_setup_teardown(test_page_alloc_stress, test_setup, test_teardown, &prestate),
         cmocka_unit_test_prestate_setup_teardown(test_mixed_allocation_methods, test_setup, test_teardown, &prestate),
     };
 

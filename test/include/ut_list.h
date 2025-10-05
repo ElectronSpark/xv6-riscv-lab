@@ -3,7 +3,7 @@
 #include <setjmp.h>
 #include <cmocka.h>
 #include "common.h"
-#include "../kernel/list.h"
+#include "list.h"
 #include <stdlib.h>
 
 /* --- MACROS FOR AUTOMATIC ARRAY LENGTH CALCULATION --- */

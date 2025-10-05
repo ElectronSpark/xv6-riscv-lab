@@ -18,7 +18,7 @@ set(PROGRAMS list_test)
 
 set(UNIT_TEST_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/include
-    ${CMAKE_SOURCE_DIR}/../kernel
+    ${CMAKE_SOURCE_DIR}/../kernel/inc
 )
 
 # Add an executable for each program
@@ -70,8 +70,8 @@ add_custom_target(valgrind-full
 # Kernel source files to do unit tests
 set(MOCK_TEST_KERNEL_SRC
     # We're providing mock implementations for page.c
-    ${CMAKE_SOURCE_DIR}/../kernel/page.c
-    ${CMAKE_SOURCE_DIR}/../kernel/slab.c
+    ${CMAKE_SOURCE_DIR}/../kernel/mm/page.c
+    ${CMAKE_SOURCE_DIR}/../kernel/mm/slab.c
 )
 
 set(MOCK_TEST_WRAP_FUNCTIONS
@@ -97,6 +97,7 @@ set(MOCK_TEST_WRAP_FUNCTIONS
 set(MOCK_TEST_SRC
     ${CMAKE_SOURCE_DIR}/src/ut_page_main.c
     ${CMAKE_SOURCE_DIR}/src/ut_page_wraps.c
+    ${CMAKE_SOURCE_DIR}/src/panic_stubs.c
 )
 
 set(MOCK_WRAP_OPTIONS "")

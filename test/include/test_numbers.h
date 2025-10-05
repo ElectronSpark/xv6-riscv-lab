@@ -1,5 +1,5 @@
 // I randomly generated a list of 1024 unique random numbers ranging from 0 to 2^64-1 with python.
-#include "../kernel/types.h"
+#include "types.h"
 
 #ifndef __TEST_NUMBERS_H__
 #define __TEST_NUMBERS_H__
