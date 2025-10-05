@@ -128,6 +128,15 @@ target_link_libraries(ut_hlist PRIVATE cmocka-static)
 target_compile_options(ut_hlist PRIVATE ${TEST_C_FLAGS})
 target_include_directories(ut_hlist PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
+add_executable(ut_rbtree
+    ${CMAKE_SOURCE_DIR}/src/ut_rbtree_main.c
+    ${CMAKE_SOURCE_DIR}/../kernel/rbtree.c
+    ${CMAKE_SOURCE_DIR}/../kernel/bintree.c
+)
+target_link_libraries(ut_rbtree PRIVATE cmocka-static)
+target_compile_options(ut_rbtree PRIVATE ${TEST_C_FLAGS})
+target_include_directories(ut_rbtree PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+
 enable_testing()
 add_test(NAME ut_mock_test
     COMMAND ut_page
@@ -139,5 +148,9 @@ add_test(NAME ut_list
 )
 add_test(NAME ut_hlist
     COMMAND ut_hlist
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+add_test(NAME ut_rbtree
+    COMMAND ut_rbtree
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )

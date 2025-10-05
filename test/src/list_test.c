@@ -1,5 +1,5 @@
 #include "common.h"
-#include "../kernel/list.h"
+#include "list.h"
 #include <stdlib.h>
 
 typedef struct test_node {
