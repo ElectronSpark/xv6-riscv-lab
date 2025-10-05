@@ -5,6 +5,7 @@
 #include <param.h>
 #include <types.h>
 #include <file_ops.h>
+#include <kobject.h>
 
 #define MAX_MAJOR_DEVICES 256 // Maximum number of major devices
 #define MAX_MINOR_DEVICES 256 // Maximum number of minor devices per major device
@@ -35,10 +36,10 @@ typedef enum {
 } dev_type_e;
 
 typedef struct device_instance {
+    struct kobject kobj;
     int major;              // Major device number
     int minor;              // Minor device number
     dev_type_e type;       // Device type (block, char, etc.)
-    int ref_count;          // Reference count for the device instance
     device_ops_t ops;
 } device_t;
 

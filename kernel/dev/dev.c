@@ -151,6 +151,38 @@ static int __dev_call_release(device_t *dev) {
     return dev->ops.release(dev);
 }
 
+// Unregister a device
+// 
+static void __device_unregister(device_t *dev) {
+    __dev_tab_lock();
+    device_t **dev_slot = NULL;
+    device_major_t **dmajor_slot = NULL;
+    int ret = __dev_slot_get(dev->major, dev->minor, &dmajor_slot, NULL, &dev_slot, true);
+    assert(ret == 0, "Device slot must exist during unregister");
+    assert(*dev_slot == dev, "Device mismatch during unregister");
+    *dev_slot = NULL;
+    device_major_t *dmajor = *dmajor_slot;
+    bool needs_free = false;
+    dmajor->num_minors--;
+    if (dmajor->num_minors == 0) {
+        // No more minors, free the device type
+        needs_free = true;
+        *dmajor_slot = NULL;
+    }
+    __dev_tab_unlock();
+
+    if (needs_free) {
+        dev_type_free(dmajor);
+    }
+}
+
+// Release the underlying device
+static void __underlying_kobject_release(struct kobject *obj) {
+    device_t *dev = container_of(obj, device_t, kobj);
+    __device_unregister(dev);
+    __dev_call_release(dev);
+}
+
 // Get a device by its major and minor numbers
 // And increment its reference count
 int device_get(int major, int minor, device_t **dev) {
@@ -169,16 +201,7 @@ int device_get(int major, int minor, device_t **dev) {
         __dev_tab_unlock();
         return -ENODEV; // Device not found or not valid
     }
-    bool needs_init = device->ref_count == 0;
-    device->ref_count++;
-    if (needs_init) {
-        ret = __dev_call_open(device);
-        if (ret != 0) {
-            device->ref_count--; // Rollback reference count on failure
-            __dev_tab_unlock();
-            return ret;
-        }
-    }
+    kobject_get(&device->kobj);
     *dev = device;
     __dev_tab_unlock();
     return 0;
@@ -190,11 +213,7 @@ int device_dup(device_t *dev) {
         return -EINVAL; // Null pointer for device
     }
     __dev_tab_lock();
-    if (dev->ref_count <= 0) {
-        __dev_tab_unlock();
-        return -EINVAL; // Device not valid
-    }
-    dev->ref_count++;
+    kobject_get(&dev->kobj);
     __dev_tab_unlock();
     return 0;
 }
@@ -204,17 +223,7 @@ int device_put(device_t *device) {
     if (device == NULL) {
         return -EINVAL; // Null pointer for device
     }
-    __dev_tab_lock();
-    if (device->ref_count <= 0) {
-        __dev_tab_unlock();
-        return -EINVAL; // Invalid reference count
-    }
-    device->ref_count--;
-    if (device->ref_count == 0) {
-        __dev_tab_unlock();
-        return __dev_call_release(device);
-    }
-    __dev_tab_unlock();
+    kobject_put(&device->kobj);
     return 0;
 }
 
@@ -244,47 +253,10 @@ int device_register(device_t *dev) {
     }
     *dev_slot = dev;
     (*dmajor_slot)->num_minors++;
-    dev->ref_count = 0;
+    dev->kobj.name = "device";
+    dev->kobj.refcount = 0;
+    dev->kobj.ops.release = __underlying_kobject_release;
+    kobject_init(&dev->kobj);
     __dev_tab_unlock();
-    return 0;
-}
-
-// Unregister a device
-// Note: This does not free the device structure itself
-// Device driver is responsible for freeing it after unregistering
-int device_unregister(device_t *dev) {
-    if (dev == NULL) {
-        return -EINVAL; // Null pointer for device
-    }
-    __dev_tab_lock();
-    if (dev->ref_count > 0) {
-        __dev_tab_unlock();
-        return -EBUSY; // Device is still in use
-    }
-    device_t **dev_slot = NULL;
-    device_major_t **dmajor_slot = NULL;
-    int ret = __dev_slot_get(dev->major, dev->minor, &dmajor_slot, NULL, &dev_slot, true);
-    if (ret != 0) {
-        __dev_tab_unlock();
-        return ret;
-    }
-    if (*dev_slot != dev) {
-        __dev_tab_unlock();
-        return -EINVAL; // Device mismatch
-    }
-    *dev_slot = NULL;
-    device_major_t *dmajor = *dmajor_slot;
-    bool needs_free = false;
-    dmajor->num_minors--;
-    if (dmajor->num_minors == 0) {
-        // No more minors, free the device type
-        needs_free = true;
-        *dmajor_slot = NULL;
-    }
-    __dev_tab_unlock();
-
-    if (needs_free) {
-        dev_type_free(dmajor);
-    }
-    return 0;
+    return __dev_call_open(dev);
 }

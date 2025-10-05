@@ -8,7 +8,6 @@ int device_get(int major, int minor, device_t **dev);
 int device_dup(device_t *dev);
 int device_put(device_t *dev);
 int device_register(device_t *dev);
-int device_unregister(device_t *dev);
 
 
 #endif // __KERNEL_DEV_DEV_H

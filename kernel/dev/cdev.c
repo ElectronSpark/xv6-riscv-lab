@@ -93,14 +93,6 @@ int cdev_register(cdev_t *dev) {
     return device_register(device);
 }
 
-int cdev_unregister(cdev_t *dev) {
-    if (dev == NULL) {
-        return -EINVAL; // Null pointer for device
-    }
-    device_t *device = (device_t *)dev;
-    return device_unregister(device);
-}
-
 int cdev_read(cdev_t *cdev, bool user, void *buf, size_t count) {
     if (cdev == NULL || buf == NULL || count == 0) {
         return -EINVAL; // Invalid arguments

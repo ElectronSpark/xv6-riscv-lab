@@ -85,13 +85,6 @@ int blkdev_register(blkdev_t *dev) {
     return device_register(device);
 }
 
-int blkdev_unregister(blkdev_t *dev) {
-    if (dev == NULL) {
-        return -EINVAL;
-    }
-    return device_unregister((device_t *)dev);
-}
-
 int blkdev_submit_bio(blkdev_t *blkdev, struct bio *bio) {
     if (blkdev == NULL || bio == NULL) {
         return -EINVAL;
