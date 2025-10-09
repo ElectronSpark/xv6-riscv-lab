@@ -5,6 +5,7 @@
 #include "types.h"
 #include "spinlock.h"
 #include "list_type.h"
+#include "bintree.h"
 
 // The maximum size of a buddy page is 2**PAGE_BUDDY_MAX_ORDER continuous pages
 #define PAGE_BUDDY_MAX_ORDER        10
@@ -12,6 +13,8 @@
 
 // for pointers to slab pools
 typedef struct slab_struct slab_t;
+typedef struct completion_struct completion_t;
+struct pcache;
 
 typedef struct page_struct {
     uint64          physical_address;
@@ -25,7 +28,7 @@ typedef struct page_struct {
 // #define PAGE_FLAG_LRU               (1U << 5)
 // #define PAGE_FLAG_ACTIVE            (1U << 6)
 #define PAGE_FLAG_SLAB              (1U << 7)
-// #define PAGE_FLAG_WRITEBACK         (1U << 8)
+#define PAGE_FLAG_WRITEBACK         (1U << 8)
 // #define PAGE_FLAG_RECLAIM           (1U << 9)
 #define PAGE_FLAG_BUDDY             (1U << 10)
 // #define PAGE_FLAG_MMAP              (1U << 11)
@@ -44,6 +47,7 @@ typedef struct page_struct {
 // #define PAGE_FLAG_ZERO_PAGE         (1U << 24)
 // #define PAGE_FLAG_IDLE              (1U << 25)
 #define PAGE_FLAG_PGTABLE           (1U << 26)
+#define PAGE_FLAG_PCACHE            (1U << 27)
     int             ref_count;
     spinlock_t      lock;
     /* choose the section of the union according to the page type */
@@ -67,6 +71,15 @@ typedef struct page_struct {
         struct {
             slab_t              *slab;     // pointing its slab descriptor
         } slab;
+        /* Page cache page
+            To cache the content of block devices */
+        struct {
+            struct rb_node       node;      // node in the rb-tree
+            struct pcache        *pcache;   // pointer to the pcache
+            completion_t         *io_complete; // io completion
+            size_t               offset;    // cache in this page starts from this offset
+            size_t               size;      // size of the cached area in this page
+        } pcache;
     };
 } page_t;
 

@@ -4,7 +4,7 @@
 #include <types.h>
 #include <proc_queue_type.h>
 
-typedef struct {
+typedef struct completion_struct {
     int done;
     proc_queue_t wait_queue;
     struct spinlock lock;

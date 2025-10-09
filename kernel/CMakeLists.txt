@@ -51,6 +51,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/mm/page.c
     ${KERNEL_DIR}/mm/slab.c
     ${KERNEL_DIR}/mm/vm.c
+    ${KERNEL_DIR}/mm/pcache.c
 )
 
 set(KERNEL_C_FILES
