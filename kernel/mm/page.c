@@ -94,6 +94,7 @@ STATIC_INLINE bool __page_init_flags_validity(uint64 flags) {
 
 // check if a group of flags is valid in allocation process
 STATIC_INLINE bool __page_flags_validity(uint64 flags) {
+    // @TODO: Some flags need to be mutually exclusive
     if (flags & (~(PAGE_FLAG_SLAB | PAGE_FLAG_ANON | PAGE_FLAG_PGTABLE))) {
         return false;
     }
@@ -489,10 +490,6 @@ STATIC_INLINE int __page_ref_dec_unlocked(page_t *page) {
 }
 
 page_t *__page_alloc(uint64 order, uint64 flags) {
-    if (!__page_flags_validity(flags)) {
-        // @TODO: Some flags need to be mutually exclusive
-        return NULL;
-    }
     if (order > PAGE_BUDDY_MAX_ORDER) {
         return NULL;
     }
@@ -573,6 +570,24 @@ int __page_ref_inc(page_t *page) {
     }
     page_lock_release(page);
     return ret;
+}
+
+int page_ref_inc_unlocked(page_t *page) {
+    if (page == NULL) {
+        return -1;
+    }
+    return __page_ref_inc_unlocked(page);
+}
+
+int page_ref_dec_unlocked(page_t *page) {
+    if (page == NULL) {
+        return -1;
+    }
+    if (page->ref_count < 2) {
+        // unlocked decrement is only allowed when the ref count is 2 or more
+        return -1;
+    }
+    return __page_ref_dec_unlocked(page);
 }
 
 int __page_ref_dec(page_t *page) {

@@ -18,10 +18,14 @@ typedef int  int32;
 typedef long int64;
 
 typedef uint64 pde_t;
+typedef int32 dev_t;
 
 #ifndef size_t
 typedef typeof(sizeof(0)) size_t;
 #endif              /* size_t */
+#ifndef ssize_t
+typedef typeof(-sizeof(0)) ssize_t;
+#endif              /* ssize_t */
 #ifndef bool
 #if __STDC_VERSION__ < 202311L  // C23 or later
 typedef enum { 

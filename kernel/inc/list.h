@@ -24,6 +24,7 @@ static inline void list_entry_init(list_node_t *entry) {
 #define LIST_ENTRY_IS_DETACHED(entry) (LIST_NEXT_ENTRY(entry) == (entry))
 #define LIST_ENTRY_IS_FIRST(head, entry) (LIST_PREV_ENTRY(entry) == (head))
 #define LIST_ENTRY_IS_LAST(head, entry) (LIST_NEXT_ENTRY(entry) == (head))
+#define LIST_ENTRY_UNINITIALIZED(entry) ((entry)->next == NULL && (entry)->prev == NULL)
 
 
 /* <--- macros manipulating nodes ---> */

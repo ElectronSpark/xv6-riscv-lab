@@ -75,8 +75,10 @@ typedef struct page_struct {
             To cache the content of block devices */
         struct {
             struct rb_node       node;      // node in the rb-tree
+            list_node_t          lru_entry; // entry in the lru list
+            list_node_t          dirty_entry; // entry in the dirty list
             struct pcache        *pcache;   // pointer to the pcache
-            completion_t         *io_complete; // io completion
+            uint64               blkno;     // blockno on the device (512-byte block)
             size_t               offset;    // cache in this page starts from this offset
             size_t               size;      // size of the cached area in this page
         } pcache;
