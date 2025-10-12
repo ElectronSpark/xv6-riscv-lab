@@ -137,6 +137,22 @@ target_link_libraries(ut_rbtree PRIVATE cmocka-static)
 target_compile_options(ut_rbtree PRIVATE ${TEST_C_FLAGS})
 target_include_directories(ut_rbtree PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
+add_library(ut_threads STATIC ${CMAKE_SOURCE_DIR}/src/ut_thread.c)
+target_include_directories(ut_threads PRIVATE ${CMAKE_SOURCE_DIR}/include)
+target_link_libraries(ut_threads PUBLIC pthread)
+
+add_executable(ut_pcache
+    ${CMAKE_SOURCE_DIR}/src/ut_pcache_main.c
+    ${CMAKE_SOURCE_DIR}/src/ut_pcache_stubs.c
+    ${CMAKE_SOURCE_DIR}/src/panic_stubs.c
+    ${CMAKE_SOURCE_DIR}/../kernel/mm/pcache.c
+    ${CMAKE_SOURCE_DIR}/../kernel/rbtree.c
+    ${CMAKE_SOURCE_DIR}/../kernel/bintree.c
+)
+target_link_libraries(ut_pcache PRIVATE cmocka-static ut_threads)
+target_compile_options(ut_pcache PRIVATE ${TEST_C_FLAGS})
+target_include_directories(ut_pcache PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+
 enable_testing()
 add_test(NAME ut_mock_test
     COMMAND ut_page
@@ -154,3 +170,9 @@ add_test(NAME ut_rbtree
     COMMAND ut_rbtree
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
+add_test(NAME ut_pcache
+    COMMAND ut_pcache
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+
+set_tests_properties(ut_pcache PROPERTIES TIMEOUT 30)
