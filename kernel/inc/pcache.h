@@ -8,6 +8,7 @@
 #include "kobject.h"
 #include "completion_types.h"
 #include "dev_types.h"
+#include "workqueue_types.h"
 
 
 typedef struct page_struct page_t;
@@ -68,6 +69,8 @@ struct pcache {
     struct rb_root rb;
     uint64 gfp_flags;
     struct pcache_ops *ops;
+    struct work_struct flush_work;
+    int flush_error;
 };
 
 void pcache_global_init(void);

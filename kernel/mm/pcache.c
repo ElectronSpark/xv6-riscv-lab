@@ -9,7 +9,6 @@
 #include "completion.h"
 #include "rbtree.h"
 #include "workqueue.h"
-#include "timer.h"
 #include "kobject.h"
 #include "pcache.h"
 #include "errno.h"
@@ -34,6 +33,16 @@ static mutex_t __pcache_global_mutex = {0};
 static void __pcache_attach_global_dirty(struct pcache *pcache);
 static void __pcache_detach_global_dirty(struct pcache *pcache);
 static void __pcache_queue_flush(struct pcache *pcache);
+static void __pcache_flush_worker(struct work_struct *work);
+static int __pcache_wait_flush_complete(struct pcache *pcache);
+static void __pcache_notify_flush_complete(struct pcache *pcache);
+static int __pcache_write_begin(struct pcache *pcache);
+static int __pcache_write_end(struct pcache *pcache);
+static int __pcache_write_page(struct pcache *pcache, page_t *page);
+static void __pcache_abort_io(struct pcache *pcache, page_t *page);
+static void __pcache_lru_push_page(struct pcache *pcache, page_t *page);
+void __pcache_global_lock(void);
+void __pcache_global_unlock(void);
 
 /******************************************************************************
  * Helper functions to call optional pcache operations
@@ -278,34 +287,163 @@ void __pcache_global_unlock(void) {
     mutex_unlock(&__pcache_global_mutex);
 }
 
-// Manipulate dirty list
-void __pcache_attach_global_dirty(struct pcache *pcache);
-void __pcache_detach_global_dirty(struct pcache *pcache);
+/******************************************************************************
+ * Manipulate dirty list
+ *****************************************************************************/
+static void __pcache_attach_global_dirty(struct pcache *pcache) {
+    if (pcache == NULL) {
+        return;
+    }
+    assert(LIST_ENTRY_IS_DETACHED(&pcache->flush_list),
+           "__pcache_attach_global_dirty: pcache already on dirty list");
+    list_node_push_back(&__global_dirty_list, pcache, flush_list);
+    __global_dirty_list_count++;
+}
 
-// Wait for flush to complete
-int __pcache_wait_flush_complete(struct pcache *pcache);
-
-// Notify flush complete
-void __pcache_notify_flush_complete(struct pcache *pcache);
-
-// Add a flush request to the workqueue
-// will set flush_requested flag and remove pcache from the global dirty list
-// The callback function will flush the data and clear flush_requested flag
-void __pcache_queue_flush(struct pcache *pcache);
+static void __pcache_detach_global_dirty(struct pcache *pcache) {
+    if (pcache == NULL) {
+        return;
+    }
+    if (!LIST_ENTRY_IS_DETACHED(&pcache->flush_list)) {
+        list_node_detach(pcache, flush_list);
+        if (__global_dirty_list_count > 0) {
+            __global_dirty_list_count--;
+        }
+    }
+}
 
 /******************************************************************************
- * Call back functions for workqueue and timer
+ * Flush coordination helpers
  *****************************************************************************/
-// Worker function to flush dirty pcache
+static void __pcache_notify_flush_complete(struct pcache *pcache) {
+    complete_all(&pcache->flush_completion);
+}
+
+static int __pcache_wait_flush_complete(struct pcache *pcache) {
+    if (pcache == NULL) {
+        return -EINVAL;
+    }
+    wait_for_completion(&pcache->flush_completion);
+    return pcache->flush_error;
+}
+
+static bool __pcache_queue_work(struct pcache *pcache) {
+    init_work_struct(&pcache->flush_work, __pcache_flush_worker, (uint64)pcache);
+    return queue_work(__global_pcache_flush_wq, &pcache->flush_work);
+}
+
+static void __pcache_queue_flush(struct pcache *pcache) {
+    if (pcache == NULL) {
+        return;
+    }
+    if (__global_pcache_flush_wq == NULL) {
+        return;
+    }
+    if (pcache->flush_requested) {
+        return;
+    }
+
+    pcache->flush_requested = 1;
+    pcache->flush_error = 0;
+    completion_reinit(&pcache->flush_completion);
+
+    if (!__pcache_queue_work(pcache)) {
+        pcache->flush_requested = 0;
+        pcache->flush_error = -EAGAIN;
+        __pcache_notify_flush_complete(pcache);
+    }
+}
+
+/******************************************************************************
+ * Call back functions for workqueue
+ *****************************************************************************/
 static void __pcache_flush_worker(struct work_struct *work) {
-}
+    if (work == NULL) {
+        return;
+    }
 
-// worker function to read page from disk
-static void __pcache_read_page_worker(struct work_struct *work) {
-}
+    struct pcache *pcache = (struct pcache *)work->data;
+    if (pcache == NULL) {
+        return;
+    }
 
-// timer callback to periodically flush dirty pages
-static void __pcache_flush_timer_callback(struct timer_node *node) {
+    mutex_lock(&pcache->lock);
+    if (!pcache->flush_requested) {
+        mutex_unlock(&pcache->lock);
+        return;
+    }
+
+    pcache->flush_error = __pcache_write_begin(pcache);
+    if (pcache->flush_error != 0) {
+        goto out_complete;
+    }
+
+    page_t *page = NULL;
+    page_t *tmp = NULL;
+
+    list_foreach_node_safe(&pcache->dirty_list, page, tmp, pcache.dirty_entry) {
+        page_lock_acquire(page);
+
+        if (!(page->flags & PAGE_FLAG_DIRTY)) {
+            list_node_detach(page, pcache.dirty_entry);
+            if (pcache->dirty_count > 0) {
+                pcache->dirty_count--;
+            }
+            if (page_ref_count(page) == 1) {
+                __pcache_lru_push_page(pcache, page);
+            }
+            page_lock_release(page);
+            continue;
+        }
+
+        page->flags |= PAGE_FLAG_WRITEBACK;
+        int ret = __pcache_write_page(pcache, page);
+        if (ret != 0) {
+            page->flags &= ~PAGE_FLAG_WRITEBACK;
+            pcache->flush_error = ret;
+            __pcache_abort_io(pcache, page);
+            page_lock_release(page);
+            break;
+        }
+
+        page->flags &= ~PAGE_FLAG_WRITEBACK;
+        page->flags &= ~PAGE_FLAG_DIRTY;
+        page->flags |= PAGE_FLAG_UPTODATE;
+
+        list_node_detach(page, pcache.dirty_entry);
+        if (pcache->dirty_count > 0) {
+            pcache->dirty_count--;
+        }
+
+        if (page_ref_count(page) == 1) {
+            __pcache_lru_push_page(pcache, page);
+        }
+
+        page_lock_release(page);
+    }
+
+    {
+        int ret = __pcache_write_end(pcache);
+        if (pcache->flush_error == 0 && ret != 0) {
+            pcache->flush_error = ret;
+        }
+    }
+
+out_complete:
+    bool need_detach = (pcache->dirty_count == 0 && !LIST_ENTRY_IS_DETACHED(&pcache->flush_list));
+    pcache->flush_requested = 0;
+    __pcache_notify_flush_complete(pcache);
+    mutex_unlock(&pcache->lock);
+
+    if (need_detach) {
+        __pcache_global_lock();
+        mutex_lock(&pcache->lock);
+        if (pcache->dirty_count == 0) {
+            __pcache_detach_global_dirty(pcache);
+        }
+        mutex_unlock(&pcache->lock);
+        __pcache_global_unlock();
+    }
 }
 
 /******************************************************************************
@@ -364,8 +502,10 @@ int pcache_init(struct pcache *pcache) {
     }
     mutex_init(&pcache->lock, "pcache_mutex");
     completion_init(&pcache->flush_completion);
+    complete_all(&pcache->flush_completion);
     pcache->private_data = NULL;
-    pcache->active = 0;
+    pcache->flush_error = 0;
+    pcache->active = 1;
     pcache->flush_requested = 0;
     if (pcache->max_pages == 0) {
         pcache->max_pages = PCACHE_DEFAULT_MAX_PAGES;
@@ -498,7 +638,10 @@ int pcache_mark_page_dirty(struct pcache *pcache, page_t *page) {
 ret:
     page_lock_release(page);
     if (need_flush_check) {
-        int dirty_rate = pcache->dirty_count * 100 / pcache->page_count;
+        int dirty_rate = 100;
+        if (pcache->page_count != 0) {
+            dirty_rate = (int)(pcache->dirty_count * 100 / pcache->page_count);
+        }
         if (pcache->dirty_count && LIST_ENTRY_IS_DETACHED(&pcache->flush_list)) {
             // attach to global dirty list
             mutex_unlock(&pcache->lock);

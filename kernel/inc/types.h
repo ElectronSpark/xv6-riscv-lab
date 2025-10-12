@@ -3,6 +3,33 @@
 
 #include "compiler.h"
 
+#ifdef HOST_TEST
+#include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
+#include <sys/types.h>
+
+typedef unsigned int   uint;
+typedef unsigned short ushort;
+typedef unsigned char  uchar;
+
+typedef uint8_t  uint8;
+typedef uint16_t uint16;
+typedef uint32_t uint32;
+typedef uint64_t uint64;
+
+typedef int8_t  int8;
+typedef int16_t int16;
+typedef int32_t int32;
+typedef int64_t int64;
+
+typedef uint64_t pde_t;
+#ifndef __dev_t_defined
+typedef int32_t dev_t;
+#endif
+
+#else
+
 typedef unsigned int   uint;
 typedef unsigned short ushort;
 typedef unsigned char  uchar;
@@ -34,6 +61,8 @@ typedef enum {
 } bool;
 #endif
 #endif              /* bool */
+
+#endif /* HOST_TEST */
 
 #ifndef NULL
 #define NULL ((void*)0)

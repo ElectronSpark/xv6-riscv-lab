@@ -2,10 +2,7 @@
 #define __KERNEL_DEFS_H
 
 #include "compiler.h"
-
-#ifndef size_t
-typedef typeof(sizeof(0)) size_t;
-#endif              /* size_t */
+#include "types.h"
 
 #define major(dev)  ((dev) >> 16 & 0xFFFF)
 #define minor(dev)  ((dev) & 0xFFFF)
