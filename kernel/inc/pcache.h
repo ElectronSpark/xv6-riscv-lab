@@ -6,6 +6,7 @@
 #include "bintree_type.h"
 #include "mutex_types.h"
 #include "kobject.h"
+#include "completion_types.h"
 #include "dev_types.h"
 
 
@@ -55,6 +56,7 @@ struct pcache {
     uint64 max_pages;       // Maximum number of pages allowed in the pcache
     uint64 blk_count;       // Total number of blocks (512-byte) managed by the pcache
     mutex_t lock;
+    completion_t flush_completion; // Completion for flush operation
     void *private_data; // For filesystem specific data
     union {
         uint64 flags;
@@ -75,8 +77,8 @@ void pcache_put_page(struct pcache *pcache, page_t *page);
 int pcache_mark_page_dirty(struct pcache *pcache, page_t *page);
 int pcache_invalidate_page(struct pcache *pcache, page_t *page);
 int pcache_flush(struct pcache *pcache);
-void pcache_destroy(struct pcache *pcache);
-int pcache_evict_pages(struct pcache *pcache, size_t target_size);
+// void pcache_destroy(struct pcache *pcache);
+// int pcache_evict_pages(struct pcache *pcache, size_t target_size);
 // @TODO: do eviction in OOM
 int pcache_read_page(struct pcache *pcache, page_t *page);
 
