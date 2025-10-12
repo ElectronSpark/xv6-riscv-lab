@@ -95,7 +95,7 @@ STATIC_INLINE bool __page_init_flags_validity(uint64 flags) {
 // check if a group of flags is valid in allocation process
 STATIC_INLINE bool __page_flags_validity(uint64 flags) {
     // @TODO: Some flags need to be mutually exclusive
-    if (flags & (~(PAGE_FLAG_SLAB | PAGE_FLAG_ANON | PAGE_FLAG_PGTABLE))) {
+    if (flags & (~(PAGE_FLAG_SLAB | PAGE_FLAG_ANON | PAGE_FLAG_PGTABLE | PAGE_FLAG_PCACHE))) {
         return false;
     }
     return true;

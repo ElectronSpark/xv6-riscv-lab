@@ -2,9 +2,9 @@
 #define __KERNEL_BUF_H
 
 #include "compiler.h"
-#include "list_type.h"
-#include "hlist_type.h"
 #include "mutex_types.h"
+
+struct page_struct;
 
 struct buf {
   int valid;   // has data been read from disk?
@@ -13,11 +13,8 @@ struct buf {
   uint blockno;
   mutex_t lock;
   uint refcnt;
-  hlist_entry_t hlist_entry; // hash list entry
-  list_node_t lru_entry;
   uchar *data;
+  struct page_struct *page;
 } __attribute__((aligned(64)));
-
-#define BIO_HASH_BUCKETS 63
 
 #endif      /* __KERNEL_BUF_H */

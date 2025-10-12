@@ -44,13 +44,22 @@ typedef short int16;
 typedef int  int32;
 typedef long int64;
 
+#ifndef __pde_t_defined
+#define __pde_t_defined
 typedef uint64 pde_t;
-typedef int32 dev_t;
+#endif
 
-#ifndef size_t
+#ifndef __dev_t_defined
+#define __dev_t_defined
+typedef int32 dev_t;
+#endif
+
+#ifndef __size_t_defined
+#define __size_t_defined
 typedef typeof(sizeof(0)) size_t;
 #endif              /* size_t */
-#ifndef ssize_t
+#ifndef __ssize_t_defined
+#define __ssize_t_defined
 typedef typeof(-sizeof(0)) ssize_t;
 #endif              /* ssize_t */
 #ifndef bool

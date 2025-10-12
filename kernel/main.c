@@ -41,11 +41,11 @@ main()
     trapinit();      // trap vectors
     trapinithart();  // install kernel trap vector
     plicinit();      // set up interrupt controller
-    plicinithart();  // ask PLIC for device interrupts
-    binit();         // buffer cache
-    iinit();         // inode table
-    fileinit();      // file table
-    virtio_disk_init(); // emulated hard disk
+  plicinithart();  // ask PLIC for device interrupts
+  virtio_disk_init(); // emulated hard disk
+  binit();         // buffer cache
+  iinit();         // inode table
+  fileinit();      // file table
     pci_init();
     sockinit();
     signal_init();   // signal handling initialization  

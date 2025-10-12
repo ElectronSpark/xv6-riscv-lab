@@ -397,7 +397,11 @@ static void __pcache_flush_worker(struct work_struct *work) {
         }
 
         page->flags |= PAGE_FLAG_WRITEBACK;
+        page_lock_release(page);
+
         int ret = __pcache_write_page(pcache, page);
+
+        page_lock_acquire(page);
         if (ret != 0) {
             page->flags &= ~PAGE_FLAG_WRITEBACK;
             pcache->flush_error = ret;
@@ -727,22 +731,22 @@ int pcache_read_page(struct pcache *pcache, page_t *page) {
     {
         if (__pcache_page_validate(pcache, page) != 0) {
             retval = -EINVAL;
-            goto ret;
-        }
-        if (page->flags & PAGE_FLAG_UPTODATE) {
-            // already up-to-date
+        } else if (page->flags & PAGE_FLAG_UPTODATE) {
             retval = 0;
-            goto ret;
-        }
-        // start reading
-        retval = __pcache_read_page(pcache, page);
-        if (retval == 0) {
-            retval = 0;
-            page->flags |= PAGE_FLAG_UPTODATE;
-            goto ret;
+        } else {
+            page_lock_release(page);
+            retval = __pcache_read_page(pcache, page);
+            page_lock_acquire(page);
+
+            if (retval == 0) {
+                if (__pcache_page_validate(pcache, page) != 0) {
+                    retval = -EINVAL;
+                } else {
+                    page->flags |= PAGE_FLAG_UPTODATE;
+                }
+            }
         }
     }
-ret:
     page_lock_release(page);
     mutex_unlock(&pcache->lock);
     return retval;

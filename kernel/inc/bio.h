@@ -7,6 +7,7 @@
 #define BLK_SIZE (1UL << BLK_SIZE_SHIFT) // Block size in bytes, 512 bytes
 #define BIO_MAX_VECS 128 // Maximum number of bio_vec in a bio
 #define BIO_MAX_SIZE (1U << 15) // Maximum size of a bio in bytes (32KB)
+#define BIO_BLKS_PER_PAGE (PAGE_SIZE / BLK_SIZE) // Number of blocks per page
 
 static inline void bio_iter_start(struct bio *bio, struct bio_iter *it)
 {
