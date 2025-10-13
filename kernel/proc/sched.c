@@ -79,7 +79,6 @@ void scheduler_init(void) {
     spin_init(&__sched_lock, "sched_lock");
     list_entry_init(&ready_queue);
     chan_queue_init();
-    __sched_timer_init();
 }
 
 void __scheduler_add_ready(struct proc *p) {

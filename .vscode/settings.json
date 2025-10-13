@@ -91,6 +91,7 @@
         "fs.h": "c",
         "file.h": "c",
         "netfwd": "c",
-        "sched_timer_private.h": "c"
+        "sched_timer_private.h": "c",
+        "workqueue.h": "c"
     }
 }
