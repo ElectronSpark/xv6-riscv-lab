@@ -19,6 +19,9 @@ void scheduler_stop(struct proc *p);
 void scheduler_continue(struct proc *p);
 void scheduler_sleep(struct spinlock *lk, enum procstate sleep_state);
 void scheduler_wakeup(struct proc *p);
+void scheduler_wakeup_timeout(struct proc *p);
+void scheduler_wakeup_killable(struct proc *p);
+void scheduler_wakeup_interruptible(struct proc *p);
 void sleep_on_chan(void *chan, struct spinlock *lk);
 void wakeup_on_chan(void *chan);
 // Timer related
@@ -33,6 +36,8 @@ int sched_timer_add(void (*callback)(void *), void *data, uint64 ticks);
 // Wake up a sleeping process
 // This function will aquire the locks of the process and the sched lock
 void wakeup_proc(struct proc *p);
+void wakeup_timeout(struct proc *p);
+void wakeup_killable(struct proc *p);
 void wakeup_interruptible(struct proc *p);
 
 #endif // SCHED_H

@@ -326,6 +326,7 @@ static void __do_wakeup(proc_node_t *woken, int error_no, uint64 rdata, struct p
     if (retp != NULL) {
         __atomic_store_n(retp, p, __ATOMIC_SEQ_CST);
     }
+    // @TODO: only wake up if the process receives sigchld
     scheduler_wakeup(p);
     sched_unlock();
     proc_unlock(p);

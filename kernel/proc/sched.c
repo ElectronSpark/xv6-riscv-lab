@@ -288,24 +288,53 @@ void scheduler_continue(struct proc *p) {
     }
 }
 
-// Wake up a process from the sleep queue.
-void scheduler_wakeup(struct proc *p) {
-    push_off(); // Increase noff counter to ensure interruptions are disabled
-    __sched_assert_holding();
-    proc_assert_holding(p);
-    pop_off(); // Safe to decrease noff counter after acquiring the process lock
-    // __sched_assert_unholding();
+static void __scheduler_wakeup_assertion(struct proc *p) {
     assert(p != NULL, "Cannot wake up a NULL process");
     assert(p != myproc(), "Cannot wake up the current process");
-    if (!PROC_SLEEPING(p)) {
-        return; // Process is not sleeping, nothing to do
-    }
+    proc_assert_holding(p);
+    __sched_assert_holding();
+}
 
+// Internal function to wake up a sleeping process.
+static void __do_scheduler_wakeup(struct proc *p) {
     __proc_set_pstate(p, PSTATE_RUNNABLE);
-
     if (!PROC_STOPPED(p)) {
         __scheduler_add_ready(p); // Add the process back to the ready queue
     }
+}
+
+// unconditionally wake up a process from the sleep queue.
+void scheduler_wakeup(struct proc *p) {
+    __scheduler_wakeup_assertion(p);
+    if (!PROC_SLEEPING(p)) {
+        return; // Process is not sleeping, nothing to do
+    }
+    __do_scheduler_wakeup(p);
+}
+
+// Wake up a process sleeping in timer, timer_killable or interruptible state.
+void scheduler_wakeup_timeout(struct proc *p) {
+    __scheduler_wakeup_assertion(p);
+    if (!PROC_TIMER(p)) {
+        return; // Process is not in timer, timer_killable or interruptible state, nothing to do
+    }
+    __do_scheduler_wakeup(p);
+}
+
+void scheduler_wakeup_killable(struct proc *p) {
+    __scheduler_wakeup_assertion(p);
+    if (!PROC_KILLABLE(p)) {
+        return; // Process is not in killable state, nothing to do
+    }
+    __do_scheduler_wakeup(p);
+}
+
+void scheduler_wakeup_interruptible(struct proc *p) {
+    __scheduler_wakeup_assertion(p);
+    if (!PROC_INTERRUPTIBLE(p)) {
+        return; // Process is not in interruptible state, nothing to do
+    }
+    __do_scheduler_wakeup(p);
 }
 
 void sleep_on_chan(void *chan, struct spinlock *lk) {
@@ -352,11 +381,31 @@ void wakeup_proc(struct proc *p)
     return;
   }
   proc_lock(p);
-  if (PROC_SLEEPING(p)) {
-    sched_lock();
-    scheduler_wakeup(p);
-    sched_unlock();
+  sched_lock();
+  scheduler_wakeup(p);
+  sched_unlock();
+  proc_unlock(p);
+}
+
+void wakeup_timeout(struct proc *p) {
+  if (p == NULL) {
+    return;
   }
+  proc_lock(p);
+  sched_lock();
+  scheduler_wakeup_timeout(p);
+  sched_unlock();
+  proc_unlock(p);
+}
+
+void wakeup_killable(struct proc *p) {
+  if (p == NULL) {
+    return;
+  }
+  proc_lock(p);
+  sched_lock();
+  scheduler_wakeup_killable(p);
+  sched_unlock();
   proc_unlock(p);
 }
 
@@ -367,11 +416,9 @@ void wakeup_interruptible(struct proc *p)
     return;
   }
   proc_lock(p);
-  if (__proc_get_pstate(p) == PSTATE_INTERRUPTIBLE) {
-    sched_lock();
-    scheduler_wakeup(p);
-    sched_unlock();
-  }
+  sched_lock();
+  scheduler_wakeup_interruptible(p);
+  sched_unlock();
   proc_unlock(p);
 }
 
