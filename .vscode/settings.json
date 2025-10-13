@@ -92,6 +92,7 @@
         "file.h": "c",
         "netfwd": "c",
         "sched_timer_private.h": "c",
-        "workqueue.h": "c"
+        "workqueue.h": "c",
+        "semaphore_types.h": "c"
     }
 }
