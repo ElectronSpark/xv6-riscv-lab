@@ -5,6 +5,7 @@
 #include "list_type.h"
 #include "bintree_type.h"
 #include "mutex_types.h"
+#include "rwlock_types.h"
 #include "kobject.h"
 #include "completion_types.h"
 #include "dev_types.h"
@@ -67,6 +68,7 @@ struct pcache {
         };
     };
     struct rb_root rb;
+    rwlock_t rb_lock;
     uint64 gfp_flags;
     struct pcache_ops *ops;
     struct work_struct flush_work;

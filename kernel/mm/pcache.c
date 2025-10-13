@@ -6,7 +6,9 @@
 #include "defs.h"
 #include "page.h"
 #include "list.h"
+#include "sched.h"
 #include "completion.h"
+#include "rwlock.h"
 #include "rbtree.h"
 #include "workqueue.h"
 #include "kobject.h"
@@ -450,6 +452,63 @@ out_complete:
     }
 }
 
+static void __flusher_thread(uint64 a1, uint64 a2) {
+    printf("pcache flusher thread started\n");
+    while (1) {
+        bool queued_any = false;
+
+        __pcache_global_lock();
+        if (__global_dirty_list_count == 0) {
+            __pcache_global_unlock();
+            sleep_ms(500);
+            continue;
+        }
+
+        struct pcache *pcache = NULL;
+        struct pcache *tmp = NULL;
+        list_foreach_node_safe(&__global_dirty_list, pcache, tmp, flush_list) {
+            mutex_lock(&pcache->lock);
+
+            if (!pcache->active) {
+                if (!LIST_ENTRY_IS_DETACHED(&pcache->flush_list)) {
+                    __pcache_detach_global_dirty(pcache);
+                }
+                mutex_unlock(&pcache->lock);
+                continue;
+            }
+
+            if (pcache->dirty_count == 0) {
+                if (!LIST_ENTRY_IS_DETACHED(&pcache->flush_list)) {
+                    __pcache_detach_global_dirty(pcache);
+                }
+                mutex_unlock(&pcache->lock);
+                continue;
+            }
+
+            if (!pcache->flush_requested) {
+                __pcache_queue_flush(pcache);
+                queued_any = true;
+            }
+
+            mutex_unlock(&pcache->lock);
+        }
+        __pcache_global_unlock();
+
+        if (!queued_any) {
+            sleep_ms(200);
+        } else {
+            sleep_ms(50);
+        }
+    }
+}
+
+static void __create_flusher_thread(void) {
+    struct proc *np = NULL;
+    int ret = kernel_proc_create("pcache_flusher", &np, __flusher_thread, 0, 0, KERNEL_STACK_ORDER);
+    assert(ret > 0 && np != NULL, "Failed to create pcache flusher thread");
+    wakeup_proc(np);
+}
+
 /******************************************************************************
  * red-black tree callback functions
  *****************************************************************************/
@@ -486,6 +545,7 @@ void pcache_global_init(void) {
     __global_pcache_flush_wq = workqueue_create("pcache_flush_wq", WORKQUEUE_DEFAULT_MAX_ACTIVE);
     assert(__global_pcache_flush_wq != NULL, "Failed to create global pcache flush workqueue");
     printf("Page cache subsystem initialized\n");
+    __create_flusher_thread();
 }
 
 int pcache_init(struct pcache *pcache) {
@@ -505,6 +565,7 @@ int pcache_init(struct pcache *pcache) {
         pcache->gfp_flags = 0;
     }
     mutex_init(&pcache->lock, "pcache_mutex");
+    rwlock_init(&pcache->rb_lock, RWLOCK_PRIO_WRITE, "pcache_rb_lock");
     completion_init(&pcache->flush_completion);
     complete_all(&pcache->flush_completion);
     pcache->private_data = NULL;
