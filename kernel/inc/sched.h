@@ -22,9 +22,9 @@ void scheduler_wakeup(struct proc *p);
 void sleep_on_chan(void *chan, struct spinlock *lk);
 void wakeup_on_chan(void *chan);
 // Timer related
-void scheduler_timer_tick(void);
-int scheduler_timer_set(struct timer_node *tn, uint64 ticks);
-void scheduler_timer_done(struct timer_node *tn);
+void sched_timer_tick(void);
+int sched_timer_set(struct timer_node *tn, uint64 ticks);
+void sched_timer_done(struct timer_node *tn);
 void sleep_ms(uint64 ms);
 
 // Wake up a sleeping process

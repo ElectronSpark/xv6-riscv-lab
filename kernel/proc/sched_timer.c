@@ -13,7 +13,7 @@
 static struct timer_root __sched_timer;
 static bool __sched_tick_clear;
 
-void scheduler_timer_tick(void) {
+void sched_timer_tick(void) {
     __atomic_clear(&__sched_tick_clear, __ATOMIC_RELEASE);
 }
 
@@ -32,7 +32,7 @@ static void __sched_timer_callback(struct timer_node *tn) {
     }
 }
 
-int scheduler_timer_set(struct timer_node *tn, uint64 ticks) {
+int sched_timer_set(struct timer_node *tn, uint64 ticks) {
     if (tn == NULL) {
         return -EINVAL; // Invalid timer node
     }
@@ -42,7 +42,7 @@ int scheduler_timer_set(struct timer_node *tn, uint64 ticks) {
     return ret;
 }
 
-void scheduler_timer_done(struct timer_node *tn) {
+void sched_timer_done(struct timer_node *tn) {
     if (tn == NULL) {
         return;
     }
@@ -58,7 +58,7 @@ void sleep_ms(uint64 ms) {
 
     struct timer_node tn = {0};
 
-    int ret = scheduler_timer_set(&tn, ms);
+    int ret = sched_timer_set(&tn, ms);
     if (ret != 0) {
         printf("Failed to set timer\n");
         return;
@@ -70,7 +70,7 @@ void sleep_ms(uint64 ms) {
     proc_unlock(p);
 
     // After waking up, cancel the timer to avoid unnecessary callback
-    scheduler_timer_done(&tn);
+    sched_timer_done(&tn);
 }
 
 void __sched_timer_init(void) {
