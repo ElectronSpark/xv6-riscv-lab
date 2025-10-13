@@ -226,11 +226,12 @@ void scheduler_yield(struct spinlock *lk) {
 
 // Change the process state to SLEEPING and yield CPU
 // This function will lock both the process and scheduler locks.
-void scheduler_sleep(struct spinlock *lk) {
+void scheduler_sleep(struct spinlock *lk, enum procstate sleep_state) {
     push_off(); // Increase noff counter to ensure interruptions are disabled
     struct proc *proc = myproc();
     assert(proc != NULL, "PCB is NULL");
     proc_assert_holding(proc);
+    __proc_set_pstate(myproc(), sleep_state);
     assert(PROC_SLEEPING(proc), "Process must be in either INTERRUPTIBLE or UNINTERRUPTIBLE state to sleep");
     int lk_holding = (lk != NULL && spin_holding(lk));
     pop_off();  // Safe to decrease noff counter after acquiring the process lock
@@ -255,8 +256,7 @@ void scheduler_pause(struct spinlock *lk) {
     struct proc *current = myproc();
     assert(current != NULL, "Cannot pause a NULL process");
     proc_assert_holding(current);
-    __proc_set_pstate(current, PSTATE_INTERRUPTIBLE);
-    scheduler_sleep(lk); // Sleep with the specified lock
+    scheduler_sleep(lk, PSTATE_INTERRUPTIBLE); // Sleep with the specified lock
 }
 
 void scheduler_stop(struct proc *p) {
@@ -297,10 +297,6 @@ void scheduler_wakeup(struct proc *p) {
     // __sched_assert_unholding();
     assert(p != NULL, "Cannot wake up a NULL process");
     assert(p != myproc(), "Cannot wake up the current process");
-    if (p->chan != NULL) {
-        PROC_CLEAR_ONCHAN(p); // Clear the ONCHAN flag if the process is sleeping on a channel
-        p->chan = NULL; // Clear the channel
-    }
     if (!PROC_SLEEPING(p)) {
         return; // Process is not sleeping, nothing to do
     }
@@ -320,8 +316,8 @@ void sleep_on_chan(void *chan, struct spinlock *lk) {
     myproc()->chan = chan;
     PROC_SET_ONCHAN(myproc());
     int ret = proc_tree_wait(&__chan_queue_root, (uint64)chan, lk, NULL);
-    myproc()->chan = NULL;
     PROC_CLEAR_ONCHAN(myproc());
+    myproc()->chan = NULL;
     // @TODO: process return value
     (void)ret;
 }
@@ -349,25 +345,19 @@ void scheduler_dump_chan_queue(void) {
     }
 }
 
-
-static void __do_wakeup_proc(struct proc *p)
-{
-  proc_lock(p);
-  sched_lock();
-  scheduler_wakeup(p);
-  sched_unlock();
-  proc_unlock(p);
-}
-
 // Unconditionally wake up process
 void wakeup_proc(struct proc *p)
 {
   if (p == NULL) {
     return;
   }
+  proc_lock(p);
   if (PROC_SLEEPING(p)) {
-    __do_wakeup_proc(p);
+    sched_lock();
+    scheduler_wakeup(p);
+    sched_unlock();
   }
+  proc_unlock(p);
 }
 
 // Wake up a process sleeping in interruptible state
@@ -376,9 +366,13 @@ void wakeup_interruptible(struct proc *p)
   if (p == NULL) {
     return;
   }
+  proc_lock(p);
   if (__proc_get_pstate(p) == PSTATE_INTERRUPTIBLE) {
-    __do_wakeup_proc(p);
+    sched_lock();
+    scheduler_wakeup(p);
+    sched_unlock();
   }
+  proc_unlock(p);
 }
 
 uint64 sys_dumpchan(void) {

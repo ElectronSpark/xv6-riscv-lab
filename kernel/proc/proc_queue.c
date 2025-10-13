@@ -273,9 +273,14 @@ int proc_queue_bulk_move(proc_queue_t *to, proc_queue_t *from) {
     return 0; // Success
 }
 
-int proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata) {
+int proc_queue_wait_in_state(proc_queue_t *q, struct spinlock *lock, 
+                             uint64 *rdata, enum procstate state) {
     if (q == NULL) {
         return -EINVAL;
+    }
+
+    if (!PSTATE_IS_SLEEPING(state)) {
+        return -EINVAL; // Invalid state for sleeping
     }
 
     proc_node_t waiter = { 0 };
@@ -287,8 +292,7 @@ int proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata) {
         panic("Failed to push process to sleep queue");
     }
 
-    __proc_set_pstate(myproc(), PSTATE_UNINTERRUPTIBLE);
-    scheduler_sleep(lock);
+    scheduler_sleep(lock, state);
     if (proc_queue_enqueued(&waiter)) {
         // When the process is waken up by the queue leader, the waiter is already detached from the queue.
         // If it's waken up asynchronously(e.g by signals), we need to remove it from the queue.
@@ -300,6 +304,10 @@ int proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata) {
         *rdata = waiter.data;
     }
     return waiter.error_no;
+}
+
+int proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata) {
+    return proc_queue_wait_in_state(q, lock, rdata, PSTATE_UNINTERRUPTIBLE);
 }
 
 static void __do_wakeup(proc_node_t *woken, int error_no, uint64 rdata, struct proc **retp) {
@@ -493,9 +501,14 @@ int proc_tree_remove(proc_tree_t *q, proc_node_t *node) {
     return __proc_tree_do_remove(q, node);
 }
 
-int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata) {
+int proc_tree_wait_in_state(proc_tree_t *q, uint64 key, struct spinlock *lock, 
+                            uint64 *rdata, enum procstate state) {
     if (q == NULL) {
         return -EINVAL; // Error: queue is NULL
+    }
+
+    if (!PSTATE_IS_SLEEPING(state)) {
+        return -EINVAL; // Invalid state for sleeping
     }
 
     proc_node_t waiter = { 0 };
@@ -509,8 +522,7 @@ int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock, uint64 *rd
         panic("Failed to push process to sleep tree");
     }
 
-    __proc_set_pstate(myproc(), PSTATE_UNINTERRUPTIBLE);
-    scheduler_sleep(lock);
+    scheduler_sleep(lock, state);
     if (proc_queue_enqueued(&waiter)) {
         // When the process is waken up by the queue leader, the waiter is already detached from the queue.
         // If it's waken up asynchronously(e.g by signals), we need to remove it from the queue.
@@ -522,6 +534,10 @@ int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock, uint64 *rd
         *rdata = waiter.data;
     }
     return waiter.error_no;
+}
+
+int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata) {
+    return proc_tree_wait_in_state(q, key, lock, rdata, PSTATE_UNINTERRUPTIBLE);
 }
 
 int proc_tree_wakeup_one(proc_tree_t *q, uint64 key, int error_no, uint64 rdata, struct proc **retp) {

@@ -32,10 +32,14 @@ int proc_tree_first(proc_tree_t *q, proc_node_t **ret_node);
 int proc_tree_key_min(proc_tree_t *q, uint64 *key);
 int proc_tree_remove(proc_tree_t *q, proc_node_t *node);
 
+int proc_queue_wait_in_state(proc_queue_t *q, struct spinlock *lock, 
+                             uint64 *rdata, enum procstate state);
 int proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata);
 int proc_queue_wakeup(proc_queue_t *q, int error_no, uint64 rdata, struct proc **retp);
 int proc_queue_wakeup_all(proc_queue_t *q, int error_no, uint64 rdata);
 
+int proc_tree_wait_in_state(proc_tree_t *q, uint64 key, struct spinlock *lock, 
+                            uint64 *rdata, enum procstate state);
 int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata);
 int proc_tree_wakeup_one(proc_tree_t *q, uint64 key, int error_no, uint64 rdata, struct proc **retp);
 int proc_tree_wakeup_key(proc_tree_t *q, uint64 key, int error_no, uint64 rdata);

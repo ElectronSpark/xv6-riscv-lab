@@ -98,8 +98,7 @@ static int __reader_wait_on(rwlock_t *lock) {
         proc_node_init(&waiter);
         assert(proc_queue_push(&lock->read_queue, &waiter) == 0,
                 "failed to push to read queue");
-        __proc_set_pstate(myproc(), PSTATE_UNINTERRUPTIBLE);
-        scheduler_sleep(&lock->lock);
+        scheduler_sleep(&lock->lock, PSTATE_INTERRUPTIBLE);
         if (lock->readers > 0) {
             assert(lock->holder == NULL, "lock is held by a writer");
             assert(proc_queue_remove(&lock->read_queue, &waiter) == 0,
@@ -139,8 +138,7 @@ static int __writer_wait_on(rwlock_t *lock) {
         proc_node_init(&waiter);
         assert(proc_queue_push(&lock->write_queue, &waiter) == 0,
                 "rwlock_acquire_write: failed to push to write queue");
-        __proc_set_pstate(myproc(), PSTATE_UNINTERRUPTIBLE);
-        scheduler_sleep(&lock->lock);
+        scheduler_sleep(&lock->lock, PSTATE_INTERRUPTIBLE);
     }
     proc_unlock(myproc());
     return 0;

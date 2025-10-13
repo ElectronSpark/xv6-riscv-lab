@@ -237,8 +237,7 @@ static void __manager_routine(void) {
             proc_queue_wakeup(&wq->idle_queue, 0, 0, NULL);
         }
         proc_lock(myproc());
-        __proc_set_pstate(myproc(), PSTATE_INTERRUPTIBLE);
-        scheduler_sleep(&wq->lock);
+        scheduler_sleep(&wq->lock, PSTATE_INTERRUPTIBLE);
         proc_unlock(myproc());
         // @TODO: handle signals
     }
