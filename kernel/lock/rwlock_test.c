@@ -58,9 +58,58 @@ static volatile int t4_start_barrier = 0;
 static volatile int t4_error_logs = 0;
 static mutex_t t4_start_lock;   // sleeplock barrier for Test4
 
+static volatile int integrity_log_count = 0;
+
+static void record_integrity_failure(const char *label, const char *reason, long v1, long v2) {
+  if (__sync_add_and_fetch(&integrity_log_count, 1) <= 8) {
+    printf("[rwlock][integrity][%s] %s (v1=%ld v2=%ld)\n", label, reason, v1, v2);
+  }
+  error_flag = 1;
+}
+
+static void check_rwlock_integrity(const char *label) {
+  int read_waiters = proc_queue_size(&test_lock.read_queue);
+  int write_waiters = proc_queue_size(&test_lock.write_queue);
+  if (read_waiters < 0 || write_waiters < 0) {
+    record_integrity_failure(label, "negative waiter count", read_waiters, write_waiters);
+    return;
+  }
+
+  if (test_lock.readers < 0) {
+    record_integrity_failure(label, "negative readers", test_lock.readers, 0);
+  }
+
+  if (test_lock.readers > 0 && test_lock.holder != NULL) {
+    record_integrity_failure(label, "reader-writer overlap", test_lock.readers,
+                             (long)(uint64)test_lock.holder);
+  }
+
+  if (test_lock.holder == NULL && write_waiters < 0) {
+    record_integrity_failure(label, "invalid write waiters", write_waiters, 0);
+  }
+
+  if (test_lock.holder != NULL && test_lock.readers != 0) {
+    record_integrity_failure(label, "writer with readers", test_lock.readers,
+                             (long)(uint64)test_lock.holder);
+  }
+
+  if (test_lock.read_queue.lock != &test_lock.lock) {
+    record_integrity_failure(label, "read queue lock mismatch",
+                             (long)(uint64)test_lock.read_queue.lock,
+                             (long)(uint64)&test_lock.lock);
+  }
+
+  if (test_lock.write_queue.lock != &test_lock.lock) {
+    record_integrity_failure(label, "write queue lock mismatch",
+                             (long)(uint64)test_lock.write_queue.lock,
+                             (long)(uint64)&test_lock.lock);
+  }
+}
+
 /* Reader for Test 1 */
 static void t1_reader(uint64 a1, uint64 a2) {
   if(rwlock_acquire_read(&test_lock) != 0) { error_flag = 1; return; }
+  check_rwlock_integrity("T1 reader acquired");
   int ar = __sync_add_and_fetch(&active_readers, 1);
   // atomic max update
   int prev;
@@ -75,23 +124,27 @@ static void t1_reader(uint64 a1, uint64 a2) {
   }
   __sync_add_and_fetch(&active_readers, -1);
   rwlock_release(&test_lock);
+  check_rwlock_integrity("T1 reader released");
   __sync_add_and_fetch(&t1_done_readers, 1);
 }
 
 /* Reader for Test 2 */
 static void t2_reader(uint64 a1, uint64 a2) {
   if(rwlock_acquire_read(&test_lock) != 0) { error_flag = 1; return; }
+  check_rwlock_integrity("T2 reader acquired");
   __sync_add_and_fetch(&active_readers, 1);
   // Simulate work by yielding a few times while holding read lock
   for(int i=0;i<5;i++) yield();
   __sync_add_and_fetch(&active_readers, -1);
   rwlock_release(&test_lock);
+  check_rwlock_integrity("T2 reader released");
   __sync_add_and_fetch(&t2_done_readers, 1);
 }
 
 /* Writer for Test 2 */
 static void t2_writer(uint64 a1, uint64 a2) {
   if(rwlock_acquire_write(&test_lock) != 0) { error_flag = 1; return; }
+  check_rwlock_integrity("T2 writer acquired");
   if(active_readers != 0) {
     printf("[rwlock][T2] writer saw active_readers=%d (expected 0)\n", active_readers);
     error_flag = 1;
@@ -101,11 +154,13 @@ static void t2_writer(uint64 a1, uint64 a2) {
   for(int i=0;i<5;i++) yield();
   active_writers = 0;
   rwlock_release(&test_lock);
+  check_rwlock_integrity("T2 writer released");
 }
 
 /* Writer for Test 3 */
 static void t3_writer(uint64 a1, uint64 a2) {
   if(rwlock_acquire_write(&test_lock) != 0) { error_flag = 1; return; }
+  check_rwlock_integrity("T3 writer acquired");
   if(active_writers != 0) {
     printf("[rwlock][T3] mutual exclusion violated (active_writers=%d)\n", active_writers);
     error_flag = 1;
@@ -114,6 +169,7 @@ static void t3_writer(uint64 a1, uint64 a2) {
   yield(); yield(); yield();
   active_writers = 0;
   rwlock_release(&test_lock);
+  check_rwlock_integrity("T3 writer released");
   __sync_add_and_fetch(&t3_done_writers, 1);
 }
 
@@ -124,6 +180,7 @@ static void t4_writer(uint64 a1, uint64 a2) {
   mutex_unlock(&t4_start_lock); // Immediately release so everyone can proceed after barrier opens
   for(int iter=0; iter < T4_WRITER_ITERS; iter++) {
     if(rwlock_acquire_write(&test_lock) != 0) { error_flag = 1; return; }
+    check_rwlock_integrity("T4 writer acquired");
     int new_version = t4_ds.version + 1;
     t4_ds.version = new_version;
     t4_ds.len = T4_DATA_LEN;
@@ -135,6 +192,7 @@ static void t4_writer(uint64 a1, uint64 a2) {
     }
     t4_ds.checksum = sum;
     rwlock_release(&test_lock);
+    check_rwlock_integrity("T4 writer released");
     yield(); // allow readers to interleave
   }
   __sync_add_and_fetch(&t4_writers_done, 1);
@@ -146,6 +204,7 @@ static void t4_reader(uint64 a1, uint64 a2) {
   mutex_unlock(&t4_start_lock);
   for(;;) {
     if(rwlock_acquire_read(&test_lock) != 0) { error_flag = 1; return; }
+    check_rwlock_integrity("T4 reader acquired");
     int version = t4_ds.version;
     int len = t4_ds.len;
     int checksum = t4_ds.checksum;
@@ -173,6 +232,7 @@ static void t4_reader(uint64 a1, uint64 a2) {
       }
     }
     rwlock_release(&test_lock);
+    check_rwlock_integrity("T4 reader released");
     if(t4_writers_done >= T4_WRITER_THREADS) break;
     yield();
   }
@@ -211,6 +271,7 @@ static void run_test1(void) {
     printf("(observed max=%d started=%d expected=%d) ", max_active_readers, t1_started_readers, t1_target_readers);
     error_flag = 1;
   }
+  check_rwlock_integrity("T1 final");
   printf(error_flag?"FAIL\n":"OK\n");
 }
 
@@ -237,6 +298,7 @@ static void run_test2(void) {
   if(wait_for(&t2_writer_acquired, 1, 40000) != 0)
     error_flag = 1;
   if(active_readers != 0) error_flag = 1;
+  check_rwlock_integrity("T2 final");
   printf(error_flag?"FAIL\n":"OK\n");
 }
 
@@ -253,6 +315,7 @@ static void run_test3(void) {
   else
     wakeup_proc(np);
   if(wait_for(&t3_done_writers, 2, 80000) != 0) error_flag = 1;
+  check_rwlock_integrity("T3 final");
   printf(error_flag?"FAIL\n":"OK\n");
 }
 
@@ -285,6 +348,7 @@ static void run_test4(void) {
   mutex_unlock(&t4_start_lock);
   if(wait_for(&t4_writers_done, T4_WRITER_THREADS, 400000) != 0) error_flag = 1;
   if(wait_for(&t4_reader_done, T4_READER_THREADS, 400000) != 0) error_flag = 1;
+  check_rwlock_integrity("T4 final");
   printf(error_flag?"FAIL\n":"OK\n");
 }
 
@@ -297,6 +361,7 @@ static void rwlock_test_master(uint64 a1, uint64 a2) {
     printf("[rwlock] init failed\n");
     return;
   }
+  check_rwlock_integrity("init");
   run_test1();
   run_test2();
   run_test3();

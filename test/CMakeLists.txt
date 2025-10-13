@@ -149,6 +149,18 @@ target_include_directories(ut_semaphore PRIVATE
     ${UNIT_TEST_INCLUDE_DIRS}
 )
 
+add_executable(ut_rwlock
+    ${CMAKE_SOURCE_DIR}/src/ut_rwlock_main.c
+    ${CMAKE_SOURCE_DIR}/../kernel/lock/rwlock.c
+    ${CMAKE_SOURCE_DIR}/src/panic_stubs.c
+)
+target_link_libraries(ut_rwlock PRIVATE cmocka-static)
+target_compile_options(ut_rwlock PRIVATE ${TEST_C_FLAGS})
+target_include_directories(ut_rwlock PRIVATE
+    ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
+    ${UNIT_TEST_INCLUDE_DIRS}
+)
+
 enable_testing()
 add_test(NAME ut_mock_test
     COMMAND ut_page
@@ -168,5 +180,9 @@ add_test(NAME ut_rbtree
 )
 add_test(NAME ut_semaphore
     COMMAND ut_semaphore
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+add_test(NAME ut_rwlock
+    COMMAND ut_rwlock
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
