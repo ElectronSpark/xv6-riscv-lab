@@ -24,7 +24,7 @@ void wakeup_on_chan(void *chan);
 // Timer related
 void scheduler_timer_tick(void);
 int scheduler_timer_set(struct timer_node *tn, uint64 ticks);
-void scheduler_timer_cancel(struct timer_node *tn);
+void scheduler_timer_done(struct timer_node *tn);
 void sleep_ms(uint64 ms);
 
 // Wake up a sleeping process

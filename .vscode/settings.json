@@ -90,6 +90,7 @@
         "bio_types.h": "c",
         "fs.h": "c",
         "file.h": "c",
-        "netfwd": "c"
+        "netfwd": "c",
+        "sched_timer_private.h": "c"
     }
 }
