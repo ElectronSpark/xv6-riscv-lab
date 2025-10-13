@@ -10,6 +10,7 @@
 #include "mutex_types.h"
 #include "proc_queue.h"
 #include "sched.h"
+#include "errno.h"
 
 #define __mutex_set_holder(lk, p) \
     __atomic_store_n(&lk->holder, p, __ATOMIC_SEQ_CST)
@@ -90,7 +91,7 @@ mutex_unlock(mutex_t *lk)
   // from the wait queue.
   spin_acquire(&lk->lk);
   int ret = __do_wakeup(lk);
-  assert(ret == 0, "mutex_unlock: failed to wake up processes");
+  assert(ret == 0 || ret == -ENOENT, "mutex_unlock: failed to wake up processes");
   spin_release(&lk->lk);
 }
 

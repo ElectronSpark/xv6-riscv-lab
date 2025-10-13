@@ -34,7 +34,8 @@ static bool __try_wait_for_completion(completion_t *c) {
 
 static void __completion_do_wake(completion_t *c) {
     if (proc_queue_size(&c->wait_queue) > 0) {
-        proc_queue_wakeup(&c->wait_queue, 0, 0, NULL);
+        int ret = proc_queue_wakeup(&c->wait_queue, 0, 0, NULL);
+        (void)ret; // @TODO: ignore interrupt by now
     }
 }
 

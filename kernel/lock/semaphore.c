@@ -58,7 +58,8 @@ int sem_wait(sem_t *sem) {
 
     int ret = proc_queue_wait(&sem->wait_queue, &sem->lk, NULL);
     if (ret != 0) {
-        if (__sem_do_post(sem) != 0) {
+        int wake_ret = __sem_do_post(sem);
+        if (wake_ret != 0 && wake_ret != -ENOENT) {
             printf("Failed to post semaphore '%s' when process was interrupted\n", sem->name);
         }
     }
@@ -89,6 +90,10 @@ int sem_post(sem_t *sem) {
     spin_acquire(&sem->lk);
     int ret = __sem_do_post(sem);
     spin_release(&sem->lk);
+    if (ret == -ENOENT) {
+        // No process to wake up, not an error
+        return 0;
+    }
     return ret;
 }
 
