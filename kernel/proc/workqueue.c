@@ -234,11 +234,13 @@ static void __manager_routine(void) {
         while (proc_queue_size(&wq->idle_queue) && 
                wq->nr_workers - proc_queue_size(&wq->idle_queue) < wq->pending_works) {
             // Wake up an idle worker if any
-            proc_queue_wakeup(&wq->idle_queue, 0, 0, NULL);
+            int wake_ret = proc_queue_wakeup(&wq->idle_queue, 0, 0, NULL);
+            if (wake_ret != 0) {
+                printf("warning: Failed to wake up idle worker\n");
+            }
         }
         proc_lock(myproc());
-        __proc_set_pstate(myproc(), PSTATE_INTERRUPTIBLE);
-        scheduler_sleep(&wq->lock);
+        scheduler_sleep(&wq->lock, PSTATE_INTERRUPTIBLE);
         proc_unlock(myproc());
         // @TODO: handle signals
     }

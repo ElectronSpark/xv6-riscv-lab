@@ -10,6 +10,7 @@
 #include "mutex_types.h"
 #include "proc_queue.h"
 #include "sched.h"
+#include "errno.h"
 
 #define __mutex_set_holder(lk, p) \
     __atomic_store_n(&lk->holder, p, __ATOMIC_SEQ_CST)
@@ -64,12 +65,15 @@ mutex_lock(mutex_t *lk)
   while (__mutex_holder(lk) != myproc()) {
     int ret = proc_queue_wait(&lk->wait_queue, &lk->lk, NULL);
     if (ret != 0) {
-      // If proc_queue_wait returns an error, we need to release the lock
-      // and return the error code.
-      if (proc_queue_size(&lk->wait_queue) > 0) {
-        assert(__do_wakeup(lk) == 0, "mutex_unlock: failed to wake up processes");
-      } else if (__mutex_holder(lk) == myproc()) {
-        __mutex_set_holder(lk, NULL);
+      // If proc_queue_wait returns an error, and the process has already gotten the lock,
+      // we need to release the lock and return the error code.
+      if (__mutex_holder(lk) == myproc()) {
+        if (proc_queue_size(&lk->wait_queue) > 0) {
+          // When wait queue is not empty, __do_wakeup will not return -ENOENT
+          assert(__do_wakeup(lk) == 0, "mutex_unlock: failed to wake up processes");
+        } else if (__mutex_holder(lk) == myproc()) {
+          __mutex_set_holder(lk, NULL);
+        }
       }
       spin_release(&lk->lk);
       return ret;
@@ -89,8 +93,9 @@ mutex_unlock(mutex_t *lk)
   // This is to avoid deadlocks, as we cannot hold the lock while waking up processes
   // from the wait queue.
   spin_acquire(&lk->lk);
+  assert(__mutex_holder(lk) == myproc(), "mutex_unlock: process does not hold the lock");
   int ret = __do_wakeup(lk);
-  assert(ret == 0, "mutex_unlock: failed to wake up processes");
+  assert(ret == 0 || ret == -ENOENT, "mutex_unlock: failed to wake up processes");
   spin_release(&lk->lk);
 }
 

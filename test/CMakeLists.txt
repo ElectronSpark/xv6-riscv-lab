@@ -111,68 +111,76 @@ set(MOCK_COMPILE_OPTIONS "-Wl${MOCK_WRAP_OPTIONS}")
 include(cmake/FetchCmocka.cmake)
 # find_library(cmocka-static)
 
-add_executable(ut_page ${MOCK_TEST_SRC} ${MOCK_TEST_KERNEL_SRC})
-target_link_libraries(ut_page PRIVATE cmocka-static)
-target_compile_options(ut_page PRIVATE ${TEST_C_FLAGS})
+function(add_cmocka_executable target)
+    cmake_parse_arguments(CMOCKA "" "" "SOURCES;EXTRA_INCLUDES;EXTRA_LIBS" ${ARGN})
+    add_executable(${target} ${CMOCKA_SOURCES})
+    target_link_libraries(${target} PRIVATE cmocka-static ${CMOCKA_EXTRA_LIBS})
+    target_compile_options(${target} PRIVATE ${TEST_C_FLAGS})
+    target_include_directories(${target} PRIVATE ${CMOCKA_EXTRA_INCLUDES} ${UNIT_TEST_INCLUDE_DIRS})
+endfunction()
+
+add_cmocka_executable(ut_page
+    SOURCES ${MOCK_TEST_SRC} ${MOCK_TEST_KERNEL_SRC}
+)
 target_compile_definitions(ut_page PRIVATE MOCK_TEST=1)
 target_link_options(ut_page PRIVATE ${MOCK_COMPILE_OPTIONS})
-target_include_directories(ut_page PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
-add_executable(ut_list ${CMAKE_SOURCE_DIR}/src/ut_list_main.c)
-target_link_libraries(ut_list PRIVATE cmocka-static)
-target_compile_options(ut_list PRIVATE ${TEST_C_FLAGS})
-target_include_directories(ut_list PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
-
-add_executable(ut_hlist ${CMAKE_SOURCE_DIR}/src/ut_hlist_main.c ${CMAKE_SOURCE_DIR}/../kernel/hlist.c)
-target_link_libraries(ut_hlist PRIVATE cmocka-static)
-target_compile_options(ut_hlist PRIVATE ${TEST_C_FLAGS})
-target_include_directories(ut_hlist PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
-
-add_executable(ut_rbtree
-    ${CMAKE_SOURCE_DIR}/src/ut_rbtree_main.c
-    ${CMAKE_SOURCE_DIR}/../kernel/rbtree.c
-    ${CMAKE_SOURCE_DIR}/../kernel/bintree.c
+add_cmocka_executable(ut_list
+    SOURCES ${CMAKE_SOURCE_DIR}/src/ut_list_main.c
 )
-target_link_libraries(ut_rbtree PRIVATE cmocka-static)
-target_compile_options(ut_rbtree PRIVATE ${TEST_C_FLAGS})
-target_include_directories(ut_rbtree PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+
+add_cmocka_executable(ut_hlist
+    SOURCES ${CMAKE_SOURCE_DIR}/src/ut_hlist_main.c ${CMAKE_SOURCE_DIR}/../kernel/hlist.c
+)
+
+add_cmocka_executable(ut_rbtree
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/ut_rbtree_main.c
+        ${CMAKE_SOURCE_DIR}/../kernel/rbtree.c
+        ${CMAKE_SOURCE_DIR}/../kernel/bintree.c
+)
 
 add_library(ut_threads STATIC ${CMAKE_SOURCE_DIR}/src/ut_thread.c)
 target_include_directories(ut_threads PRIVATE ${CMAKE_SOURCE_DIR}/include)
 target_link_libraries(ut_threads PUBLIC pthread)
 
-add_executable(ut_pcache
-    ${CMAKE_SOURCE_DIR}/src/ut_pcache_main.c
-    ${CMAKE_SOURCE_DIR}/src/ut_pcache_stubs.c
-    ${CMAKE_SOURCE_DIR}/src/panic_stubs.c
-    ${CMAKE_SOURCE_DIR}/../kernel/mm/pcache.c
-    ${CMAKE_SOURCE_DIR}/../kernel/rbtree.c
-    ${CMAKE_SOURCE_DIR}/../kernel/bintree.c
+add_cmocka_executable(ut_pcache
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/ut_pcache_main.c
+        ${CMAKE_SOURCE_DIR}/src/ut_pcache_stubs.c
+        ${CMAKE_SOURCE_DIR}/src/panic_stubs.c
+        ${CMAKE_SOURCE_DIR}/../kernel/mm/pcache.c
+        ${CMAKE_SOURCE_DIR}/../kernel/rbtree.c
+        ${CMAKE_SOURCE_DIR}/../kernel/bintree.c
+    EXTRA_LIBS ut_threads
 )
-target_link_libraries(ut_pcache PRIVATE cmocka-static ut_threads)
-target_compile_options(ut_pcache PRIVATE ${TEST_C_FLAGS})
-target_include_directories(ut_pcache PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+
+add_cmocka_executable(ut_semaphore
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/ut_semaphore_main.c
+        ${CMAKE_SOURCE_DIR}/../kernel/lock/semaphore.c
+        ${CMAKE_SOURCE_DIR}/src/semaphore_runtime_stubs.c
+    EXTRA_INCLUDES ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
+)
+
+add_cmocka_executable(ut_rwlock
+    SOURCES
+        ${CMAKE_SOURCE_DIR}/src/ut_rwlock_main.c
+        ${CMAKE_SOURCE_DIR}/../kernel/lock/rwlock.c
+        ${CMAKE_SOURCE_DIR}/src/panic_stubs.c
+    EXTRA_INCLUDES ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
+)
 
 enable_testing()
 add_test(NAME ut_mock_test
     COMMAND ut_page
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
-add_test(NAME ut_list
-    COMMAND ut_list
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
-add_test(NAME ut_hlist
-    COMMAND ut_hlist
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
-add_test(NAME ut_rbtree
-    COMMAND ut_rbtree
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
-add_test(NAME ut_pcache
-    COMMAND ut_pcache
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-)
+foreach(CMOCKA_TARGET IN ITEMS ut_list ut_hlist ut_rbtree ut_pcache ut_semaphore ut_rwlock)
+    add_test(NAME ${CMOCKA_TARGET}
+        COMMAND ${CMOCKA_TARGET}
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    )
+endforeach()
 
 set_tests_properties(ut_pcache PROPERTIES TIMEOUT 30)

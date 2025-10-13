@@ -22,6 +22,7 @@ struct timer_node {
     list_node_t list_entry;
     uint64 expires;
     int retry;
+    int retry_limit;
     struct timer_root *timer;
     void (*callback)(struct timer_node*);
     void *data;

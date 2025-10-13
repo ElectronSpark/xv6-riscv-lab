@@ -91,9 +91,11 @@
         "fs.h": "c",
         "file.h": "c",
         "netfwd": "c",
+        "sched_timer_private.h": "c",
         "workqueue.h": "c",
         "workqueue_types.h": "c",
         "kobject.h": "c",
-        "completion.h": "c"
+        "completion.h": "c",
+        "semaphore_types.h": "c"
     }
 }

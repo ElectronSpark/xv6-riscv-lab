@@ -761,8 +761,7 @@ wait(uint64 addr)
     }
     
     // Wait for a child to exit.
-    __proc_set_pstate(myproc(), PSTATE_INTERRUPTIBLE);
-    scheduler_sleep(NULL);  //DOC: wait-sleep
+    scheduler_sleep(NULL, PSTATE_INTERRUPTIBLE);  //DOC: wait-sleep
   }
 
 ret:
@@ -813,6 +812,10 @@ forkret(void)
     void rwlock_launch_tests(void);
     // launch rwlock tests
     rwlock_launch_tests();
+#endif
+#ifdef SEMAPHORE_RUNTIME_TEST
+  void semaphore_launch_tests(void);
+  semaphore_launch_tests();
 #endif
   }
   
@@ -906,7 +909,7 @@ procdump(void)
     safestrcpy(name, p->name, sizeof(name));
     proc_unlock(p);
 
-    if (__proc_get_pstate(p) == PSTATE_UNUSED)
+    if (pstate == PSTATE_UNUSED)
       continue;
 
     state = procstate_to_str(pstate);

@@ -39,6 +39,7 @@ set(KERNEL_C_FILES
     ${KERNEL_C_FILES}
     ${KERNEL_DIR}/lock/mutex.c
     ${KERNEL_DIR}/lock/semaphore.c
+    ${KERNEL_DIR}/lock/semaphore_test.c
     ${KERNEL_DIR}/lock/rwlock.c
     ${KERNEL_DIR}/lock/rwlock_test.c
     ${KERNEL_DIR}/lock/spinlock.c
@@ -64,6 +65,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/proc/sysproc.c
     ${KERNEL_DIR}/proc/workqueue.c
     ${KERNEL_DIR}/proc/timer.c
+    ${KERNEL_DIR}/proc/sched_timer.c
 )
 
 set(KERNEL_C_FILES
@@ -80,7 +82,14 @@ if(DEFINED ENV{RWLOCK_TEST})
         ${KERNEL_DIR}/lock/rwlock_test.c
     )
 endif()
-    
+
+if(DEFINED ENV{SEMAPHORE_TEST})
+    set(KERNEL_C_FILES
+        ${KERNEL_C_FILES}
+        ${KERNEL_DIR}/lock/semaphore_test.c
+    )
+endif()
+
 set(KERNEL_SCAN_OBJS
     ${KERNEL_DIR}/start.c
     ${KERNEL_DIR}/console.c
@@ -139,6 +148,12 @@ target_link_options(${KERNEL_BINARY} PRIVATE -z max-page-size=4096 -T ${KERNEL_D
 if(DEFINED ENV{RWLOCK_TEST})
     target_compile_definitions(${KERNEL_BINARY} PRIVATE
         RWAD_WRITE_TEST=1
+    )
+endif()
+
+if(DEFINED ENV{SEMAPHORE_TEST})
+    target_compile_definitions(${KERNEL_BINARY} PRIVATE
+        SEMAPHORE_RUNTIME_TEST=1
     )
 endif()
 

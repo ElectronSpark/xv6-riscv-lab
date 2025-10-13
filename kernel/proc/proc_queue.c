@@ -236,7 +236,7 @@ int proc_queue_pop(proc_queue_t *q, proc_node_t **ret_node) {
     }
     if (dequeued_node == NULL) {
         *ret_node = NULL; // Queue is empty
-        return 0; // Success, but no node to return
+        return -ENOENT; // No process to dequeue
     }
     assert(proc_node_get_queue(dequeued_node) == q, "Dequeued node is not in the expected queue");
     ret = proc_queue_remove(q, dequeued_node);
@@ -251,13 +251,21 @@ int proc_queue_pop(proc_queue_t *q, proc_node_t **ret_node) {
 // Move all process from one queue to another.
 // This is to enconvinience walking up all process in a queue.
 // This will not change the pointer of the processes to their queues.
+// 'to' and 'from' must be different queues.
 int proc_queue_bulk_move(proc_queue_t *to, proc_queue_t *from) {
     if (to == NULL || from == NULL) {
         return -EINVAL; // Error: one of the queues is NULL
     }
-
-    if (from->counter <= 0) {
+    if (to == from) {
+        return -EINVAL; // Error: cannot move to the same queue
+    }
+    if (to->counter > 0) {
+        return -ENOTEMPTY; // Error: destination queue is not empty
+    }
+    if (from->counter == 0) {
         return 0;
+    } else if (from->counter < 0) {
+        return -EINVAL; // Error: source queue has invalid counter
     }
 
     to->counter += from->counter;
@@ -266,16 +274,21 @@ int proc_queue_bulk_move(proc_queue_t *to, proc_queue_t *from) {
     proc_node_t *proc = NULL;
     proc_node_t *tmp = NULL;
     list_foreach_node_safe(&to->head, proc, tmp, list.entry) {
-        assert(proc_node_get_queue(proc) == to, "Process is not in the expected queue");
+        assert(proc_node_get_queue(proc) == from, "Process is not in the expected queue");
         proc->list.queue = to; // Update the queue pointer for each process
     }
 
     return 0; // Success
 }
 
-int proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata) {
+int proc_queue_wait_in_state(proc_queue_t *q, struct spinlock *lock, 
+                             uint64 *rdata, enum procstate state) {
     if (q == NULL) {
         return -EINVAL;
+    }
+
+    if (!PSTATE_IS_SLEEPING(state)) {
+        return -EINVAL; // Invalid state for sleeping
     }
 
     proc_node_t waiter = { 0 };
@@ -287,8 +300,7 @@ int proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata) {
         panic("Failed to push process to sleep queue");
     }
 
-    __proc_set_pstate(myproc(), PSTATE_UNINTERRUPTIBLE);
-    scheduler_sleep(lock);
+    scheduler_sleep(lock, state);
     if (proc_queue_enqueued(&waiter)) {
         // When the process is waken up by the queue leader, the waiter is already detached from the queue.
         // If it's waken up asynchronously(e.g by signals), we need to remove it from the queue.
@@ -300,6 +312,10 @@ int proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata) {
         *rdata = waiter.data;
     }
     return waiter.error_no;
+}
+
+int proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata) {
+    return proc_queue_wait_in_state(q, lock, rdata, PSTATE_UNINTERRUPTIBLE);
 }
 
 static void __do_wakeup(proc_node_t *woken, int error_no, uint64 rdata, struct proc **retp) {
@@ -316,8 +332,9 @@ static void __do_wakeup(proc_node_t *woken, int error_no, uint64 rdata, struct p
     proc_lock(p);
     sched_lock();
     if (retp != NULL) {
-        __atomic_store_n(retp, p, __ATOMIC_SEQ_CST);
+        *retp = p;
     }
+    // @TODO: only wake up if the process receives sigchld
     scheduler_wakeup(p);
     sched_unlock();
     proc_unlock(p);
@@ -329,15 +346,22 @@ static int __proc_queue_wakeup_one(proc_queue_t *q, int error_no, uint64 rdata, 
     }
 
     proc_node_t *woken = NULL;
+    struct proc *p = NULL;
     int ret = proc_queue_pop(q, &woken);
     if (ret != 0) {
         if (woken != NULL) {
-            __do_wakeup(woken, ret, rdata, retp);
+            __do_wakeup(woken, ret, rdata, &p);
+        }
+        if (retp != NULL) {
+            __atomic_store_n(retp, p, __ATOMIC_SEQ_CST);
         }
         return ret; // Error: failed to pop process from queue
     }
 
-    __do_wakeup(woken, error_no, rdata, retp);
+    __do_wakeup(woken, error_no, rdata, &p);
+    if (retp != NULL) {
+        __atomic_store_n(retp, p, __ATOMIC_SEQ_CST);
+    }
     return 0; // Success
 }
 
@@ -352,11 +376,12 @@ int proc_queue_wakeup_all(proc_queue_t *q, int error_no, uint64 rdata) {
 
     for(;;) {
         int ret = __proc_queue_wakeup_one(q, error_no, rdata, NULL);
+        if (ret == -ENOENT) {
+            assert(q->counter == 0, "Queue counter is not zero when queue is empty");
+            break; // Queue is empty
+        }
         if (ret != 0) {
             return ret;
-        }
-        if (q->counter == 0) {
-            break;
         }
     }
 
@@ -364,6 +389,10 @@ int proc_queue_wakeup_all(proc_queue_t *q, int error_no, uint64 rdata) {
 }
 
 // RB Tree based proc queue
+// Because there may be more than one process with the same key,
+// we need to round down the key to find the minimum key node.
+// Since key2 is the node to compare with, and we want to find the first node
+// with key >= key1, we can just return 1 when key1 == key2
 static int __q_root_keys_cmp_rdown(uint64 key1, uint64 key2) {
     proc_node_t *node1 = (proc_node_t *)key1;
     proc_node_t *node2 = (proc_node_t *)key2;
@@ -493,9 +522,14 @@ int proc_tree_remove(proc_tree_t *q, proc_node_t *node) {
     return __proc_tree_do_remove(q, node);
 }
 
-int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata) {
+int proc_tree_wait_in_state(proc_tree_t *q, uint64 key, struct spinlock *lock, 
+                            uint64 *rdata, enum procstate state) {
     if (q == NULL) {
         return -EINVAL; // Error: queue is NULL
+    }
+
+    if (!PSTATE_IS_SLEEPING(state)) {
+        return -EINVAL; // Invalid state for sleeping
     }
 
     proc_node_t waiter = { 0 };
@@ -509,8 +543,7 @@ int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock, uint64 *rd
         panic("Failed to push process to sleep tree");
     }
 
-    __proc_set_pstate(myproc(), PSTATE_UNINTERRUPTIBLE);
-    scheduler_sleep(lock);
+    scheduler_sleep(lock, state);
     if (proc_queue_enqueued(&waiter)) {
         // When the process is waken up by the queue leader, the waiter is already detached from the queue.
         // If it's waken up asynchronously(e.g by signals), we need to remove it from the queue.
@@ -524,6 +557,12 @@ int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock, uint64 *rd
     return waiter.error_no;
 }
 
+int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata) {
+    return proc_tree_wait_in_state(q, key, lock, rdata, PSTATE_UNINTERRUPTIBLE);
+}
+
+// Wake up one node with a given key
+// Process Tree will always expect the waiter to detach itself from the tree when woken up.
 int proc_tree_wakeup_one(proc_tree_t *q, uint64 key, int error_no, uint64 rdata, struct proc **retp) {
     if (q == NULL) {
         return -EINVAL; // Error: queue is NULL
@@ -540,6 +579,9 @@ int proc_tree_wakeup_one(proc_tree_t *q, uint64 key, int error_no, uint64 rdata,
 
     struct proc *p = NULL;
     __do_wakeup(target, error_no, rdata, &p);
+    if (retp != NULL) {
+        __atomic_store_n(retp, p, __ATOMIC_SEQ_CST);
+    }
     if (p == NULL) {
         return -ENOENT; // Error: no process to wake up
     }
@@ -579,9 +621,12 @@ int proc_tree_wakeup_all(proc_tree_t *q, int error_no, uint64 rdata) {
 
     rb_foreach_entry_safe(&q->root, pos, n, tree.entry) {
         assert(__proc_node_in_tree(q, pos), "Process node is not in the tree");
-        // The whole tree will be abandoned, so don't need to adjust its structure.
-        __proc_node_to_none(pos);
+        // @TODO: The whole tree will be abandoned, so don't need to adjust its structure.
+        if (__proc_tree_do_remove(q, pos) != 0) {
+            printf("warning: Failed to remove node from tree during wakeup all\n");
+        }
         __do_wakeup(pos, error_no, rdata, NULL);
+        count++;
     }
 
     if (count == 0) {

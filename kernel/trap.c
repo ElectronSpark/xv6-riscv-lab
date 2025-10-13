@@ -375,7 +375,7 @@ clockintr()
 {
   if(cpuid() == 0){
     __atomic_fetch_add(&ticks, 1, __ATOMIC_SEQ_CST);
-    scheduler_timer_tick();
+    sched_timer_tick();
   }
 
   // ask for the next timer interrupt. this also clears

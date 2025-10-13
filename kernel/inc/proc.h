@@ -43,12 +43,48 @@ enum procstate {
   PSTATE_UNUSED,
   PSTATE_USED,
   PSTATE_INTERRUPTIBLE,
+  STATE_KILLABLE,
+  STATE_TIMER,
+  STATE_KILLABLE_TIMER,
   PSTATE_UNINTERRUPTIBLE,
   PSTATE_RUNNABLE,
   PSTATE_RUNNING,
   PSTATE_EXITING,
   PSTATE_ZOMBIE
 };
+
+#define PSTATE_IS_SLEEPING(state) ({    \
+  (state) == PSTATE_INTERRUPTIBLE ||    \
+  (state) == PSTATE_UNINTERRUPTIBLE ||  \
+  (state) == STATE_KILLABLE ||          \
+  (state) == STATE_TIMER ||             \
+  (state) == STATE_KILLABLE_TIMER;      \
+})
+
+#define PSTATE_IS_KILLABLE(state) ({    \
+  (state) == STATE_KILLABLE ||          \
+  (state) == STATE_KILLABLE_TIMER ||    \
+  (state) == PSTATE_INTERRUPTIBLE;      \
+})
+
+#define PSTATE_IS_TIMER(state) ({       \
+  (state) == STATE_TIMER ||             \
+  (state) == STATE_KILLABLE_TIMER ||    \
+  (state) == PSTATE_INTERRUPTIBLE;      \
+})
+
+#define PSTATE_IS_INTERRUPTIBLE(state) ({ \
+  (state) == PSTATE_INTERRUPTIBLE;        \
+})
+
+#define PSTATE_IS_AWOKEN(state) ({    \
+  (state) == PSTATE_RUNNABLE ||       \
+  (state) == PSTATE_RUNNING;          \
+})
+
+#define PSTATE_IS_ZOMBIE(state) ({    \
+  (state) == PSTATE_ZOMBIE;           \
+})
 
 struct workqueue;
 
@@ -206,21 +242,12 @@ static inline void __proc_set_pstate(struct proc *p, enum procstate state) {
   __atomic_store_n(&p->state, state, __ATOMIC_SEQ_CST);
 }
 
-#define PROC_AWOKEN(p) ({                                     \
-  enum procstate __pstate = __proc_get_pstate(p);             \
-  __pstate == PSTATE_RUNNABLE || __pstate == PSTATE_RUNNING;  \
-})
-
-#define PROC_SLEEPING(p) ({                                   \
-  enum procstate __pstate = __proc_get_pstate(p);             \
-  __pstate == PSTATE_INTERRUPTIBLE ||                         \
-  __pstate == PSTATE_UNINTERRUPTIBLE;                         \
-})
-
-#define PROC_ZOMBIE(p) ({                                     \
-  enum procstate __pstate = __proc_get_pstate(p);             \
-  __pstate == PSTATE_ZOMBIE;                                  \
-})
+#define PROC_AWOKEN(p) PSTATE_IS_AWOKEN(__proc_get_pstate(p))
+#define PROC_SLEEPING(p) PSTATE_IS_SLEEPING(__proc_get_pstate(p))
+#define PROC_ZOMBIE(p) PSTATE_IS_ZOMBIE(__proc_get_pstate(p))
+#define PROC_KILLABLE(p) PSTATE_IS_KILLABLE(__proc_get_pstate(p))
+#define PROC_TIMER(p) PSTATE_IS_TIMER(__proc_get_pstate(p))
+#define PROC_INTERRUPTIBLE(p) PSTATE_IS_INTERRUPTIBLE(__proc_get_pstate(p))
 
 
 #endif        /* __KERNEL_PROC_H */

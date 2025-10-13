@@ -67,7 +67,8 @@ void timer_init(struct timer_root *timer) {
 void timer_node_init(struct timer_node *node,
                      uint64 expires,
                      void (*callback)(struct timer_node*),
-                     void *data) {
+                     void *data,
+                     int retry_limit) {
     if (node == NULL) {
         return;
     }
@@ -186,7 +187,11 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
             continue;
         }
         node->retry++;
-        if (node->retry >= TIMER_DEFAULT_RETRY_LIMIT) {
+        if (node->retry >= node->retry_limit) {
+            // Because many callback functions is to wake up a process,
+            // and the process will remove the timer node from the timer_root,
+            // we will try to call the callback function multiple times until
+            // retry limit is reached or the timer node is removed by the process.
             __timer_remove_unlocked(node->timer, node);
         }
         node->callback(node);

@@ -31,6 +31,7 @@ int sem_init(sem_t *sem, const char *name, int value) {
     }
     sem->name = name ? name : "unnamed";
     sem->value = value;
+    spin_init(&sem->lk, "semaphore spinlock");
     proc_queue_init(&sem->wait_queue, "semaphore wait queue", &sem->lk);
     return 0;
 }
@@ -51,6 +52,12 @@ int sem_wait(sem_t *sem) {
 
     spin_acquire(&sem->lk);
     int val = __sem_value_dec(sem); // Decrement the semaphore value
+    if (val < -SEM_VALUE_MAX) {
+        // Prevent semaphore value from going below -SEM_VALUE_MAX
+        __sem_value_inc(sem); // Revert the decrement
+        spin_release(&sem->lk);
+        return -EOVERFLOW;
+    }
     if (val >= 0) {
         spin_release(&sem->lk);
         return 0; // Semaphore acquired successfully
@@ -58,7 +65,8 @@ int sem_wait(sem_t *sem) {
 
     int ret = proc_queue_wait(&sem->wait_queue, &sem->lk, NULL);
     if (ret != 0) {
-        if (__sem_do_post(sem) != 0) {
+        int wake_ret = __sem_do_post(sem);
+        if (wake_ret != 0 && wake_ret != -ENOENT) {
             printf("Failed to post semaphore '%s' when process was interrupted\n", sem->name);
         }
     }
@@ -87,8 +95,16 @@ int sem_post(sem_t *sem) {
     }
 
     spin_acquire(&sem->lk);
+    if (__sem_value_get(sem) == SEM_VALUE_MAX) {
+        spin_release(&sem->lk);
+        return -EOVERFLOW; // Prevent semaphore value from exceeding SEM_VALUE_MAX
+    }
     int ret = __sem_do_post(sem);
     spin_release(&sem->lk);
+    if (ret == -ENOENT) {
+        // No process to wake up, not an error
+        return 0;
+    }
     return ret;
 }
 
