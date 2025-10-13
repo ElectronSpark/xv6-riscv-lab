@@ -813,6 +813,10 @@ forkret(void)
     // launch rwlock tests
     rwlock_launch_tests();
 #endif
+#ifdef SEMAPHORE_RUNTIME_TEST
+  void semaphore_launch_tests(void);
+  semaphore_launch_tests();
+#endif
   }
   
   // printf("forkret: process %d is running\n", myproc()->pid);
