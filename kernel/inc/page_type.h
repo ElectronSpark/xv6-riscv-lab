@@ -5,6 +5,7 @@
 #include "types.h"
 #include "spinlock.h"
 #include "list_type.h"
+#include "bintree.h"
 
 // The maximum size of a buddy page is 2**PAGE_BUDDY_MAX_ORDER continuous pages
 #define PAGE_BUDDY_MAX_ORDER        10
@@ -12,6 +13,7 @@
 
 // for pointers to slab pools
 typedef struct slab_struct slab_t;
+struct pcache;
 
 typedef struct page_struct {
     uint64          physical_address;
@@ -25,7 +27,7 @@ typedef struct page_struct {
 // #define PAGE_FLAG_LRU               (1U << 5)
 // #define PAGE_FLAG_ACTIVE            (1U << 6)
 #define PAGE_FLAG_SLAB              (1U << 7)
-// #define PAGE_FLAG_WRITEBACK         (1U << 8)
+#define PAGE_FLAG_WRITEBACK         (1U << 8)
 // #define PAGE_FLAG_RECLAIM           (1U << 9)
 #define PAGE_FLAG_BUDDY             (1U << 10)
 // #define PAGE_FLAG_MMAP              (1U << 11)
@@ -44,6 +46,8 @@ typedef struct page_struct {
 // #define PAGE_FLAG_ZERO_PAGE         (1U << 24)
 // #define PAGE_FLAG_IDLE              (1U << 25)
 #define PAGE_FLAG_PGTABLE           (1U << 26)
+#define PAGE_FLAG_PCACHE            (1U << 27)
+#define PAGE_FLAG_IO_PROGRESSING    (1U << 28)
     int             ref_count;
     spinlock_t      lock;
     /* choose the section of the union according to the page type */
@@ -67,6 +71,16 @@ typedef struct page_struct {
         struct {
             slab_t              *slab;     // pointing its slab descriptor
         } slab;
+        /* Page cache pages
+            Pages used by pcache system to cache disk blocks */
+        struct {
+            struct pcache      *pcache;    // pointing its pcache
+            struct rb_node     node;       // node in the rb-tree of pcache
+            list_node_t        lru_entry;  // entry in the local dirty or lru list of pcache
+            uint64             blkno;      // starting block number (512-byte) of the page
+            size_t             offset;     // offset of valid data in the page
+            size_t             size;       // size of valid data in the page
+        } pcache;
     };
 } page_t;
 
