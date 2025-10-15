@@ -94,6 +94,7 @@
         "sched_timer_private.h": "c",
         "workqueue.h": "c",
         "semaphore_types.h": "c",
-        "bits.h": "c"
+        "bits.h": "c",
+        "pcache.h": "c"
     }
 }
