@@ -68,7 +68,7 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-printf -fno-builtin-fprintf -fn
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-pie -no-pie")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -I${CMAKE_SOURCE_DIR}")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -I${KERNEL_DIR}/inc")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_SOFTWARE_FFS=1")
+# set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_SOFTWARE_FFS=1")
 
 # check whether it needs to turn off stack protector
 execute_process(

@@ -243,7 +243,37 @@ static inline int64 __bits_ctz_ptr(const void *ptr, size_t limit, bool inv) {
         return -1;
     }
     const uint8 *byte_ptr = (const uint8 *)ptr;
-    for (int64 index = 0; index < (int64)limit; index++) {
+    const uint8 *aligned_start = (const uint8 *)(((size_t)byte_ptr + 7) & ~0x7UL);
+    // First process trailing bytes to align to 8-byte boundary
+    size_t trailing_bytes = aligned_start - byte_ptr;
+    if (trailing_bytes) {
+        for (int i = 0; i < trailing_bytes; i++) {
+            uint8 byte = byte_ptr[i];
+            if (inv) {
+                byte = ~byte;
+            }
+            if (byte) {
+                return (i << 3) | bits_ctz8(byte);
+            }
+        }
+    }
+
+    // Process 8-byte chunks
+    int64 index = 0;
+    const uint8 *aligned_end = (const uint8 *)(((size_t)(ptr + limit) + 7) & ~0x7UL);
+    size_t chunk_end_index = aligned_end - byte_ptr;
+    for (index = trailing_bytes; index < (int64)chunk_end_index; index += 8) {
+        uint64 chunk = *((const uint64 *)(byte_ptr + index));
+        if (inv) {
+            chunk = ~chunk;
+        }
+        if (chunk) {
+            return (index << 3) | bits_ctz64(chunk);
+        }
+    }
+
+    // Process remaining bytes
+    for (; index < (int64)limit; index++) {
         uint8 byte = byte_ptr[index];
         if (inv) {
             byte = ~byte;

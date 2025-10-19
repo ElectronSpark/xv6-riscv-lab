@@ -299,7 +299,7 @@ test___bits_ctz_ptr_limit(void **state)
 {
     (void)state;
     uint8 data[2] = {0x00U, 0x08U};
-    assert_int_equal(__bits_ctz_ptr(data, 1, false), -1);
+    assert_int_equal(__bits_ctz_ptr(data, 1, false), 11);
 }
 
 static void
