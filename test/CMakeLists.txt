@@ -10,7 +10,8 @@ ENABLE_LANGUAGE(C)
 set(TEST_C_FLAGS
     -ggdb
     -Wall
-    -D HOST_TEST=1
+    -DHOST_TEST=1
+    -DUSE_SOFTWARE_FFS=1
 )
 
 # Define the executable(s) to be built
@@ -161,6 +162,14 @@ target_include_directories(ut_rwlock PRIVATE
     ${UNIT_TEST_INCLUDE_DIRS}
 )
 
+add_executable(ut_bits
+    ${CMAKE_SOURCE_DIR}/src/ut_bits_main.c
+    ${CMAKE_SOURCE_DIR}/../kernel/bits.c
+)
+target_link_libraries(ut_bits PRIVATE cmocka-static)
+target_compile_options(ut_bits PRIVATE ${TEST_C_FLAGS})
+target_include_directories(ut_bits PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+
 enable_testing()
 add_test(NAME ut_mock_test
     COMMAND ut_page
@@ -184,5 +193,9 @@ add_test(NAME ut_semaphore
 )
 add_test(NAME ut_rwlock
     COMMAND ut_rwlock
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+add_test(NAME ut_bits
+    COMMAND ut_bits
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )

@@ -33,6 +33,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/bintree.c
     ${KERNEL_DIR}/rbtree.c
     ${KERNEL_DIR}/kobject.c
+    ${KERNEL_DIR}/bits.c
 )
 
 set(KERNEL_C_FILES
