@@ -232,7 +232,10 @@
     #define bits_popcountg(x) bits_popcount_x((uint64)(x), 8 * sizeof(x))
 #endif
 
-static inline int64 bits_ctz_ptr(const void *ptr, size_t limit, bool inv) {
+// Pointer-based count trailing zeros
+// Returns the index of the least significant set bit (LSB) in the given memory region.
+// Following little endian byte order.
+static inline int64 __bits_ctz_ptr(const void *ptr, size_t limit, bool inv) {
     // if (limit >= (1ULL << (sizeof(size_t)*8 - 16))) {
     //     return -1;
     // }
@@ -249,6 +252,10 @@ static inline int64 bits_ctz_ptr(const void *ptr, size_t limit, bool inv) {
             return (index << 3) | bits_ctz8(byte);
         }
     }
+    return -1;
 }
+
+#define bits_ctz_ptr(ptr, limit)   __bits_ctz_ptr((ptr), (limit), !!0)
+#define bits_ctz_ptr_inv(ptr, limit)   __bits_ctz_ptr((ptr), (limit), !!1)
 
 #endif // KERNEL_INC_BITS_H

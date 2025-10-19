@@ -11,7 +11,7 @@ set(TEST_C_FLAGS
     -ggdb
     -Wall
     -DHOST_TEST=1
-    # -DUSE_SOFTWARE_FFS=1
+    -DUSE_SOFTWARE_FFS=1
 )
 
 # Define the executable(s) to be built

@@ -261,6 +261,65 @@ test_bits_ffsg_matches_naive(void **state)
     }
 }
 
+static void
+test___bits_ctz_ptr_null(void **state)
+{
+    (void)state;
+    assert_int_equal(bits_ctz_ptr(NULL, 4), -1);
+}
+
+static void
+test___bits_ctz_ptr_no_match(void **state)
+{
+    (void)state;
+    uint8 data[3] = {0x00U, 0x00U, 0x00U};
+    assert_int_equal(bits_ctz_ptr(data, sizeof(data)), -1);
+}
+
+static void
+test___bits_ctz_ptr_basic(void **state)
+{
+    (void)state;
+    uint8 data[3] = {0x00U, 0x04U, 0x00U};
+    int64 expected = (1LL << 3) | 2LL;
+    assert_int_equal(bits_ctz_ptr(data, sizeof(data)), expected);
+}
+
+static void
+test___bits_ctz_ptr_inverted(void **state)
+{
+    (void)state;
+    uint8 data[2] = {0xFFU, 0xF0U};
+    int64 expected = (1LL << 3);
+    assert_int_equal(bits_ctz_ptr_inv(data, sizeof(data)), expected);
+}
+
+static void
+test___bits_ctz_ptr_limit(void **state)
+{
+    (void)state;
+    uint8 data[2] = {0x00U, 0x08U};
+    assert_int_equal(__bits_ctz_ptr(data, 1, false), -1);
+}
+
+static void
+test___bits_ctz_ptr_long_buffer(void **state)
+{
+    (void)state;
+    uint8 data[32] = {0};
+    data[17] = 0x20U;
+    int64 expected = (17LL << 3) | 5LL;
+    assert_int_equal(bits_ctz_ptr(data, sizeof(data)), expected);
+
+    uint8 inverted[32];
+    for (size_t i = 0; i < sizeof(inverted); i++) {
+        inverted[i] = 0xFFU;
+    }
+    inverted[24] = 0x7FU;
+    int64 expected_inv = (24LL << 3) | 7LL;
+    assert_int_equal(bits_ctz_ptr_inv(inverted, sizeof(inverted)), expected_inv);
+}
+
 int
 main(void)
 {
@@ -272,6 +331,12 @@ main(void)
         cmocka_unit_test(test_bits_ctzg_multiwidth),
         cmocka_unit_test(test_bits_popcountg_multiwidth),
         cmocka_unit_test(test_bits_ffsg_matches_naive),
+        cmocka_unit_test(test___bits_ctz_ptr_null),
+        cmocka_unit_test(test___bits_ctz_ptr_no_match),
+        cmocka_unit_test(test___bits_ctz_ptr_basic),
+        cmocka_unit_test(test___bits_ctz_ptr_inverted),
+        cmocka_unit_test(test___bits_ctz_ptr_limit),
+        cmocka_unit_test(test___bits_ctz_ptr_long_buffer),
     };
 
     return cmocka_run_group_tests_name("bits", tests, NULL, NULL);
