@@ -17,9 +17,10 @@ struct pcache;
 struct pcache_node;
 
 enum page_type {
-    PAGE_TYPE_ANON = 0U,      // Anonymous page
+    PAGE_TYPE_ANON = 0UL,      // Anonymous page
     PAGE_TYPE_BUDDY,         // Buddy page
     PAGE_TYPE_SLAB,          // Slab page
+    PAGE_TYPE_PGTABLE,       // Page table page
     PAGE_TYPE_PCACHE,        // Page cache page
     __PAGE_TYPE_MAX
 };
@@ -35,7 +36,8 @@ enum page_type {
     } while (0)
 #define PAGE_FLAG_IS_TYPE(flags, type)   \
     (PAGE_FLAG_GET_TYPE(flags) == (type))
-
+#define PAGE_IS_TYPE(page, type)   \
+    ((page) && PAGE_FLAG_IS_TYPE((page)->flags, (type)))
 
 #if __PAGE_TYPE_MAX > PAGE_FLAG_TYPE_MASK
     #error "Not enough bits to store page type in page flags"
@@ -48,19 +50,11 @@ typedef struct page_struct {
         uint64          flags;
     };
 // this part is a reference to the linux kernel
-#define PAGE_FLAG_LOCKED            (1U << 0)
-// #define PAGE_FLAG_ERROR             (1U << 1)
-// #define PAGE_FLAG_REFERENCED        (1U << 2)
-#define PAGE_FLAG_UPTODATE          (1U << 3)
-#define PAGE_FLAG_DIRTY             (1U << 4)
-// #define PAGE_FLAG_LRU               (1U << 5)
-// #define PAGE_FLAG_ACTIVE            (1U << 6)
-#define PAGE_FLAG_SLAB              (1U << 7)
-#define PAGE_FLAG_WRITEBACK         (1U << 8)
+#define PAGE_FLAG_UPTODATE          (1U << 8)
+#define PAGE_FLAG_DIRTY             (1U << 9)
+#define PAGE_FLAG_WRITEBACK         (1U << 10)
 // #define PAGE_FLAG_RECLAIM           (1U << 9)
-#define PAGE_FLAG_BUDDY             (1U << 10)
 // #define PAGE_FLAG_MMAP              (1U << 11)
-#define PAGE_FLAG_ANON              (1U << 12)
 // #define PAGE_FLAG_SWAPCACHE         (1U << 13)
 // #define PAGE_FLAG_SWAPBACKED        (1U << 14)
 // #define PAGE_FLAG_COMPOUND_HEAD     (1U << 15)
@@ -74,8 +68,7 @@ typedef struct page_struct {
 // #define PAGE_FLAG_OFFLINE           (1U << 23)
 // #define PAGE_FLAG_ZERO_PAGE         (1U << 24)
 // #define PAGE_FLAG_IDLE              (1U << 25)
-#define PAGE_FLAG_PGTABLE           (1U << 26)
-#define PAGE_FLAG_PCACHE            (1U << 27)
+#define PAGE_FLAG_LOCKED            (1U << 26)
 #define PAGE_FLAG_IO_PROGRESSING    (1U << 28)
     int             ref_count;
     spinlock_t      lock;

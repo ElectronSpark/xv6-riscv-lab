@@ -99,7 +99,7 @@ static void test_print_buddy_system_stat(void **state) {
 static void test_page_ref_inc_dec(void **state) {
     (void)state;
     page_t *page = &__pages[0];
-    __page_init(page, page->physical_address, 1, PAGE_FLAG_ANON);
+    __page_init(page, page->physical_address, 1, PAGE_TYPE_ANON);
     
     print_message("Testing page reference count increment and decrement\n");
     
@@ -286,7 +286,7 @@ static void test_page_refcnt_helper(void **state) {
     print_message("Testing page_refcnt helper function\n");
     
     // Set reference count to a known value
-    __page_init(page, physical_addr, 5, PAGE_FLAG_ANON);
+    __page_init(page, physical_addr, 5, PAGE_TYPE_ANON);
     print_message("  Setting page ref_count to: %d\n", page->ref_count);
     
     // Test the helper function
@@ -386,12 +386,12 @@ static void test_page_flags(void **state) {
     // Test different flag combinations
     uint64 flag_tests[] = {
         PAGE_FLAG_SLAB,
-        PAGE_FLAG_ANON,
+        PAGE_TYPE_ANON,
         PAGE_FLAG_PGTABLE,
-        PAGE_FLAG_SLAB | PAGE_FLAG_ANON,
+        PAGE_FLAG_SLAB | PAGE_TYPE_ANON,
         PAGE_FLAG_SLAB | PAGE_FLAG_PGTABLE,
-        PAGE_FLAG_ANON | PAGE_FLAG_PGTABLE,
-        PAGE_FLAG_SLAB | PAGE_FLAG_ANON | PAGE_FLAG_PGTABLE
+        PAGE_TYPE_ANON | PAGE_FLAG_PGTABLE,
+        PAGE_FLAG_SLAB | PAGE_TYPE_ANON | PAGE_FLAG_PGTABLE
     };
     
     // Initialize mock pages - ensure all are free
@@ -417,7 +417,7 @@ static void test_page_flags(void **state) {
     
     // Test invalid flags
     print_message("  Testing invalid flags\n");
-    page_t *page = __page_alloc(order, ~(PAGE_FLAG_SLAB | PAGE_FLAG_ANON | PAGE_FLAG_PGTABLE));
+    page_t *page = __page_alloc(order, ~(PAGE_FLAG_SLAB | PAGE_TYPE_ANON | PAGE_FLAG_PGTABLE));
     assert_null(page);
 }
 
@@ -470,11 +470,11 @@ static void test_buddy_split_merge(void **state) {
         print_message("Allocating %d pages with order %d\n", alloc_count, order);
 
         for (int i = 0; i < alloc_count; i++) {
-            pages[i] = __page_alloc(order, PAGE_FLAG_ANON);
+            pages[i] = __page_alloc(order, PAGE_TYPE_ANON);
             assert_non_null(pages[i]);
         }
 
-        assert_null(__page_alloc(order, PAGE_FLAG_ANON));
+        assert_null(__page_alloc(order, PAGE_TYPE_ANON));
 
         print_message("Freeing %d pages with order %d\n", alloc_count, order);
         for (int i = 0; i < alloc_count; i++) {
@@ -660,7 +660,7 @@ static void __attribute__((unused)) test_page_alloc_stress(void **state) {
 static void test_mixed_allocation_methods(void **state) {
     buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
     initial_state->skip = false;  // Allow this test to run
-    uint64 flags = PAGE_FLAG_ANON;
+    uint64 flags = PAGE_TYPE_ANON;
     uint64 order = 0;
     
     print_message("Testing mixed use of regular and helper allocation methods\n");
@@ -698,7 +698,7 @@ static void test_mixed_allocation_methods(void **state) {
 static void test_buddy_alignment(void **state) {
     buddy_system_state_t *initial_state = (buddy_system_state_t *)*state;
     initial_state->skip = false;  // Allow this test to run
-    uint64 flags = PAGE_FLAG_ANON;
+    uint64 flags = PAGE_TYPE_ANON;
     
     print_message("Testing buddy system alignment requirements\n");
     

@@ -335,7 +335,7 @@ allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order)
   __proctab_assert_unlocked();
 
   // Allocate a kernel stack page.
-  kstack = page_alloc(kstack_order, PAGE_FLAG_ANON);
+  kstack = page_alloc(kstack_order, PAGE_TYPE_ANON);
   if(kstack == NULL){
     return NULL;
   }
@@ -513,7 +513,7 @@ userinit(void)
   proc_lock(p);
   uint64 flags = VM_FLAG_EXEC | VM_FLAG_READ | VM_FLAG_USERMAP;
   assert(sizeof(initcode) <= PGSIZE, "userinit: initcode too large");
-  void *initcode_page = page_alloc(0, PAGE_FLAG_ANON);
+  void *initcode_page = page_alloc(0, PAGE_TYPE_ANON);
   assert(initcode_page != NULL, "userinit: page_alloc failed for initcode");
   memset(initcode_page, 0, PGSIZE);
   memmove(initcode_page, initcode, sizeof(initcode));

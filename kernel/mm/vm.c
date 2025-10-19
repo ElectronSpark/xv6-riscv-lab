@@ -55,13 +55,36 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
 
+static void *__pgtab_alloc(void)
+{
+  void *pa = page_alloc(0, PAGE_TYPE_PGTABLE);
+  if (pa) {
+    memset(pa, 0, PGSIZE);
+  }
+  return pa;
+}
+
+static void __pgtab_free(void *pa)
+{
+  page_t *page = __pa_to_page((uint64)pa);
+  if (page == NULL) {
+    panic("__pgtab_free: invalid page table address");
+  }
+  page_lock_acquire(page);
+  if (!PAGE_IS_TYPE(page, PAGE_TYPE_PGTABLE)) {
+    panic("__pgtab_free: trying to free a non-pagetable page");
+  }
+  page_lock_release(page);
+  page_free(pa, 0);
+}
+
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)
 {
   pagetable_t kpgtbl;
 
-  kpgtbl = (pagetable_t) kalloc();
+  kpgtbl = (pagetable_t) __pgtab_alloc();
   memset(kpgtbl, 0, PGSIZE);
 
   // uart registers
@@ -269,7 +292,7 @@ walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2, pte_t **retl1)
     if(*pte & PTE_V) {
       pagetable = (pagetable_t)PTE2PA(*pte);
     } else {
-      if(!alloc || (pagetable = (pde_t*)kalloc()) == 0)
+      if(!alloc || (pagetable = (pde_t*)__pgtab_alloc()) == 0)
         return NULL;
       memset(pagetable, 0, PGSIZE);
       *pte = PA2PTE(pagetable) | PTE_V;
@@ -375,7 +398,7 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
     uint64 pa = PTE2PA(*pte);
     *pte = 0;
     if(do_free){
-      page_ref_dec((void*)pa);
+      __pgtab_free((void*)pa);
     }
   }
 }
@@ -386,7 +409,7 @@ pagetable_t
 uvmcreate()
 {
   pagetable_t pagetable;
-  pagetable = (pagetable_t) kalloc();
+  pagetable = (pagetable_t) __pgtab_alloc();
   if(pagetable == 0)
     return 0;
   memset(pagetable, 0, PGSIZE);
@@ -410,7 +433,7 @@ freewalk(pagetable_t pagetable)
       panic("freewalk: leaf");
     }
   }
-  page_ref_dec((void*)pagetable);
+  __pgtab_free((void*)pagetable);
 }
 
 // // Given a parent process's page table, copy
@@ -1034,7 +1057,7 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte)
   void *pa = NULL;
   if (pte_val == 0) {
     // if the pte is not mapped, just map a new page
-    pa = page_alloc(0, PAGE_FLAG_ANON);
+    pa = page_alloc(0, PAGE_TYPE_ANON);
     if (pa == NULL) {
       return -1; // Page allocation failed
     }
@@ -1042,7 +1065,7 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte)
   } else if (pte_val & PTE_V) {
     if (pte_val & PTE_RSW_w) {
       // if the page is marked as COW, we need to handle it
-      pa = page_alloc(0, PAGE_FLAG_ANON);
+      pa = page_alloc(0, PAGE_TYPE_ANON);
       if (pa == NULL) {
         return -1; // Page allocation failed
       }
@@ -1079,7 +1102,7 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte)
   pte_t flags = PTE_FLAGS(pte_val);
   
   if (pte_val == 0) {
-    pa = page_alloc(0, PAGE_FLAG_ANON);
+    pa = page_alloc(0, PAGE_TYPE_ANON);
     if (pa == NULL) {
       return -1; // Page allocation failed
     }

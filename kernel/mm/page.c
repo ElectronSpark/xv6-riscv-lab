@@ -95,7 +95,7 @@ STATIC_INLINE bool __page_init_flags_validity(uint64 flags) {
 // check if a group of flags is valid in allocation process
 STATIC_INLINE bool __page_flags_validity(uint64 flags) {
     // @TODO: Some flags need to be mutually exclusive
-    if (flags & (~(PAGE_FLAG_SLAB | PAGE_FLAG_ANON | PAGE_FLAG_PGTABLE | PAGE_FLAG_PCACHE))) {
+    if (PAGE_FLAG_GET_TYPE(flags) >= __PAGE_TYPE_MAX) {
         return false;
     }
     return true;
@@ -171,7 +171,7 @@ STATIC_INLINE int __init_range_flags( uint64 pa_start, uint64 pa_end,
 // initialize a page descriptor as a buddy page
 STATIC_INLINE void __page_as_buddy( page_t *page, page_t *buddy_head,
                                     uint64 order) {
-    __page_init(page, page->physical_address, 0, PAGE_FLAG_BUDDY);
+    __page_init(page, page->physical_address, 0, PAGE_TYPE_BUDDY);
     page->buddy.buddy_head = buddy_head;
     page->buddy.order = order;
     list_entry_init(&page->buddy.lru_entry);
@@ -380,7 +380,6 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
 found:
     page_count = 1UL << order;
     for (int i = 0; i < page_count; i++) {
-        page->flags &= ~PAGE_FLAG_BUDDY;
         __page_init(&page[i], page[i].physical_address, 1, flags);
     }
     __buddy_pool_unlock();
@@ -570,7 +569,7 @@ void page_lock_assert_unholding(page_t *page) {
     if (page == NULL) {
         return;
     }
-    assert(spin_unholding(&page->lock), "page_lock_assert_unholding failed");
+    assert(!spin_holding(&page->lock), "page_lock_assert_unholding failed");
 }
 
 int __page_ref_inc(page_t *page) {

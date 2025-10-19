@@ -30,7 +30,7 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
     void *page_base, **prev, **tmp;
     slab_t *slab;
     
-    page = __page_alloc(order, PAGE_FLAG_SLAB);
+    page = __page_alloc(order, PAGE_TYPE_SLAB);
     if (page == NULL) {
         return NULL;
     }
@@ -312,7 +312,7 @@ STATIC_INLINE slab_t *__find_obj_slab(void *ptr) {
     if (page == NULL) {
         return NULL;
     }
-    if (!(page->flags & PAGE_FLAG_SLAB)) {
+    if (!PAGE_IS_TYPE(page, PAGE_TYPE_SLAB)) {
         return NULL;
     }
     if (page->slab.slab == NULL) {

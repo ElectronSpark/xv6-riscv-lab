@@ -5,8 +5,7 @@
 #include "page_type.h"
 
 // The page struct belongs to a buddy page
-#define PAGE_IS_BUDDY(page)                                                 \
-    ((page) != NULL && ((page)->flags & PAGE_FLAG_BUDDY))
+#define PAGE_IS_BUDDY(page) PAGE_IS_TYPE(page, PAGE_TYPE_BUDDY)
 
 // The page struct is the head of a buddy page
 #define PAGE_IS_BUDDY_GROUP_HEAD(page)                                      \
