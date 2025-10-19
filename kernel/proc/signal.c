@@ -8,6 +8,7 @@
 #include "slab.h"
 #include "sched.h"
 #include "list.h"
+#include "bits.h"
 
 static slab_cache_t __sigacts_pool;
 static slab_cache_t __ksiginfo_pool;
@@ -655,10 +656,9 @@ static int __pick_signal(struct proc *p) {
         exit(-1);
     }
 
-    for (int signo = 1; signo <= NSIG; signo++) {
-        if (sigismember(&pending, signo) > 0) {
-            return signo; // Return the first pending signal
-        }
+    int signo = bits_ffsg(pending);
+    if (signo >= 1 && signo <= NSIG) { 
+        return signo; // Return the first pending signal
     }
 
     return -1; // No valid signal found, should not happen
