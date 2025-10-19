@@ -126,34 +126,78 @@
     #define bits_ctz64(x)     bits_ctz_x((uint64)(x), 64)
     #define bits_popcount64(x) bits_popcount_x((uint64)(x), 64)
 #else
-// brute force counting
+// fallback implementations using iterative binary search
 // @TODO: untested
-    static inline int bits_ffs_x(uint64 x, int width) {
-        int pos = 0;
-        while ((x & 1) == 0 && pos < width) {
-            x >>= 1;
-            pos++;
+    static const int __bits_binary_steps[] = {32, 16, 8, 4, 2, 1};
+
+    static inline int bits_ctz_x(uint64 x, int width) {
+        if (width <= 0) {
+            return -1;
         }
-        return pos;
+        int bits = (width < 64) ? width : 64;
+        if (bits < 64) {
+            uint64 mask = (1ULL << bits) - 1ULL;
+            x &= mask;
+        }
+        if (x == 0) {
+            return -1;
+        }
+        int result = 0;
+        int remaining = bits;
+        for (size_t i = 0; i < sizeof(__bits_binary_steps) / sizeof(__bits_binary_steps[0]); i++) {
+            int shift = __bits_binary_steps[i];
+            if (shift > remaining) {
+                continue;
+            }
+            uint64 mask = (shift == 64) ? ~0ULL : ((1ULL << shift) - 1ULL);
+            if ((x & mask) == 0ULL) {
+                x >>= shift;
+                result += shift;
+                remaining -= shift;
+                if (x == 0) {
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+
+    static inline int bits_ffs_x(uint64 x, int width) {
+        int idx = bits_ctz_x(x, width);
+        return (idx < 0) ? 0 : (idx + 1);
     }
 
     static inline int bits_clz_x(uint64 x, int width) {
-        if (x == 0) return -1;
-        int pos = 0;
-        while ((x & 1) == 0 && pos < width) {
-            x >>= 1;
-            pos++;
+        if (width <= 0) {
+            return -1;
         }
-        return pos;
-    }
-
-    static inline int bits_ctz_x(uint64 x, int width) {
-        if (x == 0) return -1;
-        int pos = width - 1;
-        while (!(x >> pos) && pos >= 0) {
-            pos--;
+        int bits = (width < 64) ? width : 64;
+        if (bits < 64) {
+            uint64 mask = (1ULL << bits) - 1ULL;
+            x &= mask;
         }
-        return pos;
+        if (x == 0) {
+            return -1;
+        }
+        int padding = (bits < 64) ? (64 - bits) : 0;
+        if (padding > 0) {
+            x <<= padding;
+        }
+        int result = 0;
+        int remaining = bits;
+        for (size_t i = 0; i < sizeof(__bits_binary_steps) / sizeof(__bits_binary_steps[0]); i++) {
+            int shift = __bits_binary_steps[i];
+            if (shift > remaining - 1) {
+                continue;
+            }
+            uint64 mask = ~0ULL << (64 - shift);
+            if ((x & mask) == 0ULL) {
+                result += shift;
+                x <<= shift;
+                remaining -= shift;
+            }
+        }
+        return result;
     }
 
     static inline int bits_popcount_x(uint64 x, int width) {
@@ -182,8 +226,29 @@
     #define bits_clz64(x)      bits_clz_x((uint64)(x), 64)
     #define bits_ctz64(x)      bits_ctz_x((uint64)(x), 64)
     #define bits_popcount64(x) bits_popcount_x((uint64)(x), 64)
+    #define bits_ffsg(x)      bits_ffs_x((uint64)(x), 8 * sizeof(x))
+    #define bits_clzg(x)      bits_clz_x((uint64)(x), 8 * sizeof(x))
+    #define bits_ctzg(x)      bits_ctz_x((uint64)(x), 8 * sizeof(x))
+    #define bits_popcountg(x) bits_popcount_x((uint64)(x), 8 * sizeof(x))
 #endif
 
-
+static inline int64 bits_ctz_ptr(const void *ptr, size_t limit, bool inv) {
+    // if (limit >= (1ULL << (sizeof(size_t)*8 - 16))) {
+    //     return -1;
+    // }
+    if (ptr == NULL) {
+        return -1;
+    }
+    const uint8 *byte_ptr = (const uint8 *)ptr;
+    for (int64 index = 0; index < (int64)limit; index++) {
+        uint8 byte = byte_ptr[index];
+        if (inv) {
+            byte = ~byte;
+        }
+        if (byte) {
+            return (index << 3) | bits_ctz8(byte);
+        }
+    }
+}
 
 #endif // KERNEL_INC_BITS_H
