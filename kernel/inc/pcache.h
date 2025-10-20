@@ -67,21 +67,31 @@ struct pcache {
             uint64 flush_requested: 1;
         };
     };
-    struct rb_root rb;
+    struct rb_root page_map;
     struct spinlock spinlock;   // Spinlock to protect the pcache structure
-    rwlock_t rb_lock;           // RW lock to protect the red-black tree structure
+    struct spinlock tree_lock;           // protect the red-black tree structure
     uint64 gfp_flags;
     struct pcache_ops *ops;
     struct work_struct flush_work; // Work structure for flush operation
     int flush_error;
 };
 
+// Extension of page structure for page cache use
+// Protected by page structures' spinlock
+// Need to acquire both pcache spinlock and page spinlock when 
+// attaching or detaching pcache_node
 struct pcache_node {
-    struct rb_node     node;       // node in the rb-tree of pcache
+    struct rb_node     tree_entry; // node in the rb-tree of pcache
     list_node_t        lru_entry;  // entry in the local dirty or lru list of pcache
+    struct pcache      *pcache;    // pointer to the parent pcache
+    page_t             *page;      // pointer to the page
+    void               *data;      // pointer to the data area in the page
+    struct {
+        uint64 dirty: 1;   // whether the page is dirty
+    };
     uint64             blkno;      // starting block number (512-byte) of the page
-    size_t             offset;     // offset of valid data in the page
-    size_t             size;       // size of valid data in the page
+    size_t             size;       // size of valid data area in the page
+    completion_t       io_completion; // Completion for IO operation
 };
 
 void pcache_global_init(void);

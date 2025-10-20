@@ -14,12 +14,13 @@
 #include "kobject.h"
 #include "pcache.h"
 #include "errno.h"
+#include "slab.h"
 
 // Locking order:
-// 1. pcache rw lock
+// 1. __pcache_global_spinlock
 // 2. pcache spinlock
 // 3. page lock
-// 4. global flusher spinlock
+// 4. pcache tree_lock
 
 /******************************************************************************
  * Global variables
@@ -29,6 +30,7 @@ static list_node_t __global_pcache_list = {0};
 static int __global_pcache_count = 0;
 static struct workqueue *__global_pcache_flush_wq = NULL;
 static spinlock_t __pcache_global_spinlock = {0};
+static slab_cache_t __pcache_node_slab = {0};
 
 /******************************************************************************
  * Predefine functions
@@ -74,16 +76,13 @@ static int __pcache_write_end(struct pcache *pcache);
 static int __pcache_write_page(struct pcache *pcache, page_t *page);
 static int __pcache_read_page(struct pcache *pcache, page_t *page);
 
-static int __pcache_read_lock(struct pcache *pcache);
-static int __pcache_write_lock(struct pcache *pcache);
-static void __pcache_rw_unlock(struct pcache *pcache);
+static int __pcache_tree_lock(struct pcache *pcache);
+static void __pcache_tree_unlock(struct pcache *pcache);
 static void __pcache_spin_lock(struct pcache *pcache);
 static void __pcache_spin_unlock(struct pcache *pcache);
-static void __pcache_spin_lock_assert_holding(struct pcache *pcache);
-static void __pcache_spin_lock_assert_unholding(struct pcache *pcache);
 
-static void __pcache_global_flusher_lock(void);
-static void __pcache_global_flusher_unlock(void);
+static void __pcache_global_lock(void);
+static void __pcache_global_unlock(void);
 
 /******************************************************************************
  * Helper functions to call optional pcache operations
@@ -126,10 +125,7 @@ static int __pcache_is_active(struct pcache *pcache) {
 }
 
 static int __pcache_page_validate(struct pcache *pcache, page_t *page) {
-    if (page == NULL) {
-        return -EINVAL;
-    }
-    if (!(page->flags & PAGE_FLAG_PCACHE)) {
+    if (!PAGE_IS_TYPE(page, PAGE_TYPE_PCACHE)) {
         return -EINVAL;
     }
     if (page->pcache.pcache != pcache) {
@@ -163,7 +159,7 @@ static int __pcache_init_validate(struct pcache *pcache) {
         pcache->flags != 0) {
         return -EINVAL;
     }
-    if (!rb_root_is_empty(&pcache->rb) ||
+    if (!rb_root_is_empty(&pcache->page_map) ||
         !LIST_ENTRY_UNINITIALIZED(&pcache->lru) ||
         !LIST_ENTRY_UNINITIALIZED(&pcache->dirty_list) ||
         !LIST_ENTRY_UNINITIALIZED(&pcache->list_entry)) {
@@ -453,11 +449,11 @@ static void __pcache_spin_lock_assert_unholding(struct pcache *pcache) {
             "__pcache_spin_lock_assert_unholding: pcache spinlock held by current cpu");
 }
 
-static void __pcache_global_flusher_lock(void) {
+static void __pcache_global_lock(void) {
     acquire(&__pcache_global_spinlock);
 }
 
-static void __pcache_global_flusher_unlock(void) {
+static void __pcache_global_unlock(void) {
     release(&__pcache_global_spinlock);
 }
 
@@ -472,11 +468,11 @@ static void __pcache_register(struct pcache *pcache) {
         return;
     }
     __pcache_spin_lock(pcache);
-    __pcache_global_flusher_lock();
+    __pcache_global_lock();
     assert(LIST_ENTRY_IS_DETACHED(&pcache->list_entry), "__pcache_register: pcache already registered");
     list_node_push_back(&__global_pcache_list, pcache, list_entry);
     __global_pcache_count++;
-    __pcache_global_flusher_unlock();
+    __pcache_global_unlock();
     __pcache_spin_unlock(pcache);
 }
 
@@ -485,11 +481,11 @@ static void __pcache_register(struct pcache *pcache) {
 //         return;
 //     }
 //     __pcache_spin_lock(pcache);
-//     __pcache_global_flusher_lock();
+//     __pcache_global_lock();
 //     assert(!LIST_ENTRY_IS_DETACHED(&pcache->list_entry), "__pcache_unregister: pcache not registered");
 //     list_node_detach(pcache, list_entry);
 //     __global_pcache_count--;
-//     __pcache_global_flusher_unlock();
+//     __pcache_global_unlock();
 //     __pcache_spin_unlock(pcache);
 // }
 
@@ -590,8 +586,8 @@ static int __pcache_rb_compare(uint64 key1, uint64 key2) {
 
 // Get key function for red-black tree
 static uint64 __pcache_rb_get_key(struct rb_node *node) {
-    page_t *page = container_of(node, page_t, pcache.node);
-    return page->pcache.blkno;
+    struct pcache_node *pcnode = container_of(node, struct pcache_node, tree_entry);
+    return pcnode->blkno;
 }
 
 static struct rb_root_opts __pcache_rb_opts = {
@@ -606,6 +602,11 @@ static struct rb_root_opts __pcache_rb_opts = {
 void pcache_global_init(void) {
     list_entry_init(&__global_pcache_list);
     spinlock_init(&__pcache_global_spinlock, "global_pcache_spinlock");
+    int ret = slab_cache_init(  &__pcache_node_slab, 
+                                "pcache_node", 
+                                sizeof(struct pcache_node), 
+                                SLAB_FLAG_EMBEDDED);
+    assert(ret == 0, "Failed to initialize pcache node slab");
     __global_pcache_count = 0;
     __global_pcache_flush_wq = workqueue_create("pcache_flush_wq", WORKQUEUE_DEFAULT_MAX_ACTIVE);
     assert(__global_pcache_flush_wq != NULL, "Failed to create global pcache flush workqueue");
@@ -626,12 +627,12 @@ int pcache_init(struct pcache *pcache) {
     pcache->lru_count = 0;
     pcache->page_count = 0;
     pcache->flags = 0;
-    rb_root_init(&pcache->rb, &__pcache_rb_opts);
+    rb_root_init(&pcache->page_map, &__pcache_rb_opts);
     if (pcache->gfp_flags == 0) {
         pcache->gfp_flags = 0;
     }
     spin_init(&pcache->spinlock, "pcache_lock");
-    rwlock_init(&pcache->rb_lock, RWLOCK_PRIO_WRITE, "pcache_rb_lock");
+    spin_init(&pcache->tree_lock, "pcache_tree_lock");
     completion_init(&pcache->flush_completion);
     complete_all(&pcache->flush_completion);
     pcache->private_data = NULL;

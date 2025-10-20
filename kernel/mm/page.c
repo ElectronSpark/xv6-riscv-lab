@@ -34,7 +34,7 @@ STATIC_INLINE void __page_sanitizer_check(const char *op, page_t *page, uint64 o
     assert (!flags || page->flags == flags, 
             "__page_sanitizer_check: page flags mismatch, expected 0x%lx, got 0x%lx",
             flags, page->flags);
-    assert (page - __pages <= TOTALPAGES, "__page_sanitizer_check: page out of bounds");
+    assert (page - __pages < TOTALPAGES, "__page_sanitizer_check: page out of bounds");
     assert ((page->physical_address - __managed_start) >> PAGE_SHIFT == 
             (page - __pages), "__page_sanitizer_check: page physical address mismatch, "
             "expected 0x%lx, got 0x%lx", 
