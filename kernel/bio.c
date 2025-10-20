@@ -101,7 +101,7 @@ __buf_cache_prealloc(void) {
   int page_blocks = PGSIZE / BSIZE;
   int pages_needed = (NBUF + page_blocks - 1) / page_blocks;
   for (int i = 0; i < pages_needed; i++) {
-    void *pa = page_alloc(0, PAGE_FLAG_ANON);
+    void *pa = page_alloc(0, PAGE_TYPE_ANON);
     assert(pa != NULL, "__buf_cache_prealloc: page_alloc failed");
     for (int j = 0; j < page_blocks; j++) {
       int buf_idx = i * page_blocks + j;

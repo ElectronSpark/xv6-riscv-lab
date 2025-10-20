@@ -52,7 +52,7 @@ static device_major_t *dev_type_alloc(void) {
     if (dev_type == NULL) {
         return NULL;
     }
-    void *minors = page_alloc(0, PAGE_FLAG_ANON);
+    void *minors = page_alloc(0, PAGE_TYPE_ANON);
     if (minors == NULL) {
         slab_free(dev_type);
         return NULL;

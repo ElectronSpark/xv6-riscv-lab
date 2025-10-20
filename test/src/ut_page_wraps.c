@@ -43,11 +43,24 @@ void __wrap_panic(char *str) {
 }
 
 void __wrap_spin_acquire(struct spinlock *lock) {
-    (void)lock;
+    if (lock == NULL) {
+        return;
+    }
+    lock->locked = 1;
 }
 
 void __wrap_spin_release(struct spinlock *lock) {
-    (void)lock;
+    if (lock == NULL) {
+        return;
+    }
+    lock->locked = 0;
+}
+
+int __wrap_spin_holding(struct spinlock *lock) {
+    if (lock == NULL) {
+        return 0;
+    }
+    return lock->locked != 0;
 }
 
 void __wrap_spin_init(struct spinlock *lock, char *name) {

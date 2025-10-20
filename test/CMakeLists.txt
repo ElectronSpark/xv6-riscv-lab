@@ -91,6 +91,7 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     spin_acquire
     spin_release
     spin_init
+    spin_holding
     kmm_alloc
     kmm_free
 )

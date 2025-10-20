@@ -85,7 +85,6 @@ void
 kfree(void *pa)
 {
   page_t *page = __pa_to_page((uint64)pa);
-
   if (__page_ref_dec(page) == -1) {
     panic("kfree");
   }
@@ -99,7 +98,7 @@ void *
 kalloc(void)
 {
   void *pa;
-  page_t *page = __page_alloc(0, PAGE_FLAG_ANON);
+  page_t *page = __page_alloc(0, PAGE_TYPE_ANON);
   if (page == NULL) {
     return NULL;
   }

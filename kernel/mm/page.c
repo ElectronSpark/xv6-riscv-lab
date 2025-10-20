@@ -34,7 +34,7 @@ STATIC_INLINE void __page_sanitizer_check(const char *op, page_t *page, uint64 o
     assert (!flags || page->flags == flags, 
             "__page_sanitizer_check: page flags mismatch, expected 0x%lx, got 0x%lx",
             flags, page->flags);
-    assert (page - __pages <= TOTALPAGES, "__page_sanitizer_check: page out of bounds");
+    assert (page - __pages < TOTALPAGES, "__page_sanitizer_check: page out of bounds");
     assert ((page->physical_address - __managed_start) >> PAGE_SHIFT == 
             (page - __pages), "__page_sanitizer_check: page physical address mismatch, "
             "expected 0x%lx, got 0x%lx", 
@@ -94,7 +94,11 @@ STATIC_INLINE bool __page_init_flags_validity(uint64 flags) {
 
 // check if a group of flags is valid in allocation process
 STATIC_INLINE bool __page_flags_validity(uint64 flags) {
-    if (flags & (~(PAGE_FLAG_SLAB | PAGE_FLAG_ANON | PAGE_FLAG_PGTABLE))) {
+    // @TODO: Some flags need to be mutually exclusive
+    if (PAGE_FLAG_GET_TYPE(flags) >= __PAGE_TYPE_MAX) {
+        return false;
+    }
+    if (flags & PAGE_FLAG_MASK) {
         return false;
     }
     return true;
@@ -170,7 +174,7 @@ STATIC_INLINE int __init_range_flags( uint64 pa_start, uint64 pa_end,
 // initialize a page descriptor as a buddy page
 STATIC_INLINE void __page_as_buddy( page_t *page, page_t *buddy_head,
                                     uint64 order) {
-    __page_init(page, page->physical_address, 0, PAGE_FLAG_BUDDY);
+    __page_init(page, page->physical_address, 0, PAGE_TYPE_BUDDY);
     page->buddy.buddy_head = buddy_head;
     page->buddy.order = order;
     list_entry_init(&page->buddy.lru_entry);
@@ -379,7 +383,7 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
 found:
     page_count = 1UL << order;
     for (int i = 0; i < page_count; i++) {
-        page->flags &= ~PAGE_FLAG_BUDDY;
+        page->flags = 0;
         __page_init(&page[i], page[i].physical_address, 1, flags);
     }
     __buddy_pool_unlock();
@@ -562,6 +566,20 @@ void page_lock_release(page_t *page) {
     spin_release(&page->lock);
 }
 
+void page_lock_assert_holding(page_t *page) {
+    if (page == NULL) {
+        return;
+    }
+    assert(spin_holding(&page->lock), "page_lock_assert_holding failed");
+}
+
+void page_lock_assert_unholding(page_t *page) {
+    if (page == NULL) {
+        return;
+    }
+    assert(!spin_holding(&page->lock), "page_lock_assert_unholding failed");
+}
+
 int __page_ref_inc(page_t *page) {
     int ret = 0;
     if (page == NULL) {
@@ -573,6 +591,24 @@ int __page_ref_inc(page_t *page) {
     }
     page_lock_release(page);
     return ret;
+}
+
+int page_ref_inc_unlocked(page_t *page) {
+    if (page == NULL) {
+        return -1;
+    }
+    return __page_ref_inc_unlocked(page);
+}
+
+int page_ref_dec_unlocked(page_t *page) {
+    if (page == NULL) {
+        return -1;
+    }
+    if (page->ref_count < 2) {
+        // unlocked decrement is only allowed when the ref count is 2 or more
+        return -1;
+    }
+    return __page_ref_dec_unlocked(page);
 }
 
 int __page_ref_dec(page_t *page) {
