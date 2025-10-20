@@ -385,13 +385,10 @@ static void test_page_flags(void **state) {
     
     // Test different flag combinations
     uint64 flag_tests[] = {
-        PAGE_FLAG_SLAB,
+        PAGE_TYPE_SLAB,
         PAGE_TYPE_ANON,
-        PAGE_FLAG_PGTABLE,
-        PAGE_FLAG_SLAB | PAGE_TYPE_ANON,
-        PAGE_FLAG_SLAB | PAGE_FLAG_PGTABLE,
-        PAGE_TYPE_ANON | PAGE_FLAG_PGTABLE,
-        PAGE_FLAG_SLAB | PAGE_TYPE_ANON | PAGE_FLAG_PGTABLE
+        PAGE_TYPE_PGTABLE,
+        PAGE_TYPE_PCACHE,
     };
     
     // Initialize mock pages - ensure all are free
@@ -417,7 +414,11 @@ static void test_page_flags(void **state) {
     
     // Test invalid flags
     print_message("  Testing invalid flags\n");
-    page_t *page = __page_alloc(order, ~(PAGE_FLAG_SLAB | PAGE_TYPE_ANON | PAGE_FLAG_PGTABLE));
+    for (uint64 flags_i = __PAGE_TYPE_MAX; flags_i <= PAGE_FLAG_TYPE_MASK; flags_i++) {
+        page_t *page = __page_alloc(order, flags_i);
+        assert_null(page);
+    }
+    page_t *page = __page_alloc(order, PAGE_FLAG_MASK);
     assert_null(page);
 }
 

@@ -98,6 +98,9 @@ STATIC_INLINE bool __page_flags_validity(uint64 flags) {
     if (PAGE_FLAG_GET_TYPE(flags) >= __PAGE_TYPE_MAX) {
         return false;
     }
+    if (flags & PAGE_FLAG_MASK) {
+        return false;
+    }
     return true;
 }
 
@@ -380,6 +383,7 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
 found:
     page_count = 1UL << order;
     for (int i = 0; i < page_count; i++) {
+        page->flags = 0;
         __page_init(&page[i], page[i].physical_address, 1, flags);
     }
     __buddy_pool_unlock();
