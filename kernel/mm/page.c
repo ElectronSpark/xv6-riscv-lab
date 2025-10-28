@@ -9,7 +9,7 @@
 #include "list.h"
 #include "page.h"
 #include "page_private.h"
-
+#include "slab.h"
 
 
 STATIC buddy_pool_t __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
@@ -627,6 +627,11 @@ int __page_ref_dec(page_t *page) {
     assert(original_ref_count - ret == 1,
            "__page_ref_dec: ref_count should be decreased by 1");
     if (ret == 0) {
+        if (PAGE_IS_TYPE(page, PAGE_TYPE_PCACHE) && page->pcache.pcache_node) {
+            // Free the page cache node
+            slab_free(page->pcache.pcache_node);
+            page->pcache.pcache_node = NULL;
+        }
         __page_sanitizer_check("page_free", page, 0, 0);
         if (__buddy_put(page) != 0) {
             panic("page_ref_dec");

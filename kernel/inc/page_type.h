@@ -50,9 +50,9 @@ typedef struct page_struct {
         uint64          flags;
     };
 // this part is a reference to the linux kernel
-#define PAGE_FLAG_UPTODATE          (1U << 8)
-#define PAGE_FLAG_DIRTY             (1U << 9)
-#define PAGE_FLAG_WRITEBACK         (1U << 10)
+// #define PAGE_FLAG_UPTODATE          (1U << 8)
+// #define PAGE_FLAG_DIRTY             (1U << 9)
+// #define PAGE_FLAG_WRITEBACK         (1U << 10)
 // #define PAGE_FLAG_RECLAIM           (1U << 9)
 // #define PAGE_FLAG_MMAP              (1U << 11)
 // #define PAGE_FLAG_SWAPCACHE         (1U << 13)
