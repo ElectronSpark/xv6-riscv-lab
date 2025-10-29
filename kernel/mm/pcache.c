@@ -15,6 +15,7 @@
 #include "pcache.h"
 #include "errno.h"
 #include "slab.h"
+#include "bio.h"
 
 // Locking order:
 // 1. __pcache_global_spinlock
@@ -38,23 +39,23 @@ static slab_cache_t __pcache_node_slab = {0};
 static void __pcache_register(struct pcache *pcache);
 // static void __pcache_unregister(struct pcache *pcache);
 
-static bool __pcache_page_in_lru(page_t *page);
-static bool __pcache_page_in_dlist(page_t *page);
-static void __pcache_lru_push_page(struct pcache *pcache, page_t *page);
-static void __pcache_lru_remove_page(struct pcache *pcache, page_t *page);
+static struct pcache_node *__pcache_find_key_page(
+    struct pcache *pcache,
+    uint64 blkno
+);
+static page_t *__pcache_get_page(
+    struct pcache *pcache,
+    uint64 blkno,
+    size_t size,
+    page_t *default_page
+);
+static void __pcache_remove_node(struct pcache *pcache, page_t *page);
 
-static void __pcache_push_local_dirty(struct pcache *pcache, page_t *page);
-static void __pcache_detach_local_dirty(struct pcache *pcache, page_t *page);
-static void __pcache_page_set_dirty(struct pcache *pcache, page_t *page);
-static void __pcache_page_clear_dirty(struct pcache *pcache, page_t *page);
-
-static page_t* __pcache_find_page(struct pcache *pcache, uint64 blkno);
-static void __pcache_page_init(page_t *page, struct pcache *pcache, uint64 blkno, size_t offset, size_t size);
-static page_t* __pcache_alloc_page(struct pcache *pcache, uint64 blkno, size_t offset, size_t size);
-static int __pcache_evict_page(struct pcache *pcache, page_t *page);
-static page_t *__pcache_get_evicted_page(struct pcache *pcache, uint64 blkno, size_t offset, size_t size);
-static void __pcache_add_page(struct pcache *pcache, page_t *page);
-static page_t *__pcache_get_page(struct pcache *pcache, uint64 blkno);
+static void __pcache_push_lru(struct pcache *pcache, page_t *page);
+static page_t *__pcache_pop_lru(struct pcache *pcache);
+static void __pcache_remove_lru(struct pcache *pcache, page_t *page);
+static void __pcache_push_dirty(struct pcache *pcache, page_t *page);
+static page_t *__pcache_evict_lru(struct pcache *pcache);
 
 static void __pcache_queue_flush(struct pcache *pcache);
 static void __pcache_flush_worker(struct work_struct *work);
@@ -66,20 +67,34 @@ static void __pcache_flusher_start(void);
 static int __pcache_wait_flusher(void);
 static void __pcache_flusher_done(void);
 
-static void __pcache_page_io_begin(page_t *page);
-static void __pcache_page_io_end(page_t *page);
-static int __pcache_page_io_wait(page_t *page);
-static bool __pcache_page_io_in_progress(page_t *page);
+static int __pcache_node_io_begin(struct pcache *pcache, page_t *page);
+static int __pcache_node_io_end(struct pcache *pcache, page_t *page);
+static int __pcache_node_io_wait(struct pcache *pcache, page_t *page);
 
-static int __pcache_write_begin(struct pcache *pcache);
-static int __pcache_write_end(struct pcache *pcache);
+static int __pcache_write_begin(struct pcache *pcache, page_t *page);
+static int __pcache_write_end(struct pcache *pcache, page_t *page);
 static int __pcache_write_page(struct pcache *pcache, page_t *page);
 static int __pcache_read_page(struct pcache *pcache, page_t *page);
+static void __pcache_mark_dirty(struct pcache *pcache, page_t *page);
 
-static int __pcache_tree_lock(struct pcache *pcache);
+static void __pcache_tree_lock(struct pcache *pcache);
 static void __pcache_tree_unlock(struct pcache *pcache);
 static void __pcache_spin_lock(struct pcache *pcache);
 static void __pcache_spin_unlock(struct pcache *pcache);
+static void __pcache_spin_assert_holding(struct pcache *pcache);
+
+static void __pcache_node_init(struct pcache_node *node);
+static page_t *__pcache_page_alloc(void);
+static page_t *__pcache_page_dup(page_t *page);
+static void __pcache_page_put(page_t *page);
+static void __pcache_node_attach_page(
+    struct pcache *pcache, 
+    page_t *page
+);
+static void __pcache_node_detach_page(
+    struct pcache *pcache,
+    page_t *page
+);
 
 static void __pcache_global_lock(void);
 static void __pcache_global_unlock(void);
@@ -97,16 +112,16 @@ static int __pcache_write_page(struct pcache *pcache, page_t *page) {
     return pcache->ops->write_page(pcache, page);
 }
 
-static int __pcache_write_begin(struct pcache *pcache) {
+static int __pcache_write_begin(struct pcache *pcache, page_t *page) {
     if (pcache->ops && pcache->ops->write_begin) {
-        return pcache->ops->write_begin(pcache);
+        return pcache->ops->write_begin(pcache, page);
     }
     return 0;
 }
 
-static int __pcache_write_end(struct pcache *pcache) {
+static int __pcache_write_end(struct pcache *pcache, page_t *page) {
     if (pcache->ops && pcache->ops->write_end) {
-        return pcache->ops->write_end(pcache);
+        return pcache->ops->write_end(pcache, page);
     }
     return 0;
 }
@@ -122,20 +137,6 @@ static void __pcache_mark_dirty(struct pcache *pcache, page_t *page) {
  *****************************************************************************/
 static int __pcache_is_active(struct pcache *pcache) {
     return pcache->active;
-}
-
-static int __pcache_page_validate(struct pcache *pcache, page_t *page) {
-    if (!PAGE_IS_TYPE(page, PAGE_TYPE_PCACHE)) {
-        return -EINVAL;
-    }
-    if (page->pcache.pcache != pcache) {
-        return -EINVAL;
-    }
-    if (page_ref_count(page) <= 1) {
-        // When the ref count is 1, the page should be referenced only by the pcache
-        return -EINVAL;
-    }
-    return 0;
 }
 
 static int __pcache_init_validate(struct pcache *pcache) {
@@ -190,273 +191,6 @@ static int __pcache_page_init_validate(struct pcache *pcache, uint64 blkno, size
     return 0;
 }
 
-// Check if a page is in lru list
-static bool __pcache_page_in_lru(page_t *page) {
-    return !(page->flags & (PAGE_FLAG_DIRTY | PAGE_FLAG_IO_PROGRESSING)) &&
-            !LIST_NODE_IS_DETACHED(page, pcache.lru_entry);
-}
-
-// Check if a page is in dirty list
-static bool __pcache_page_in_dlist(page_t *page) {
-    return (page->flags & (PAGE_FLAG_DIRTY | PAGE_FLAG_IO_PROGRESSING)) == PAGE_FLAG_DIRTY &&
-            !LIST_NODE_IS_DETACHED(page, pcache.lru_entry);
-}
-
-// Remove a page from lru list
-static void __pcache_lru_remove_page(struct pcache *pcache, page_t *page) {
-    __pcache_spin_lock_assert_holding(pcache);
-    page_lock_assert_holding(page);
-    assert(page->flags & (PAGE_FLAG_DIRTY | PAGE_FLAG_IO_PROGRESSING) == 0, 
-            "__pcache_lru_remove_page: page is dirty or IO in progress");
-    assert(LIST_NODE_IS_DETACHED(page, pcache.lru_entry), 
-            "__pcache_lru_remove_page: page is not in lru list");
-    list_node_detach(page, pcache.lru_entry);
-    pcache->lru_count--;
-    assert(pcache->lru_count >= 0, "__pcache_lru_remove_page: pcache lru count underflow");
-}
-
-// Push a page into the tail of lru list
-static void __pcache_lru_push_page(struct pcache *pcache, page_t *page) {
-    __pcache_spin_lock_assert_holding(pcache);
-    page_lock_assert_holding(page);
-    assert(page->flags & (PAGE_FLAG_DIRTY | PAGE_FLAG_IO_PROGRESSING) == 0, 
-            "__pcache_lru_remove_page: page is dirty or IO in progress");
-    if (LIST_NODE_IS_DETACHED(page, pcache.lru_entry)) {
-        pcache->lru_count++;
-    } else {
-        list_node_detach(page, pcache.lru_entry);
-    }
-    list_node_push(&pcache->lru, page, pcache.lru_entry);
-}
-
-// Page dirty and clean lifecycle:
-// page clean --> ( mark dirty ) --> (attach to dirty list) --> page dirty
-//                                                                |
-// +--------------------------------------------------------------+
-// |
-// +--> (detach from dirty list) --> ( mark io progressing ) --> page io progressing
-//                                                                |
-// +--------------------------------------------------------------+
-// |
-// +--> ( io end ) --> ( clear dirty and io progressing ) --> page clean
-
-// Put a dirty page into the tail of local dirty list and increase dirty count
-// if the page was clean before
-static void __pcache_push_local_dirty(struct pcache *pcache, page_t *page) {
-    __pcache_spin_lock_assert_holding(pcache);
-    page_lock_assert_holding(page);
-    assert((page->flags & (PAGE_FLAG_DIRTY | PAGE_FLAG_IO_PROGRESSING)) == PAGE_FLAG_DIRTY, 
-            "__pcache_push_local_dirty: page is not dirty or IO in progress");
-    if (LIST_NODE_IS_DETACHED(page, pcache.lru_entry)) {
-        pcache->dirty_count++;
-        list_node_push(&pcache->dirty_list, page, pcache.lru_entry);
-    }
-}
-
-// Remove a dirty page from local dirty list and reduce dirty count
-static void __pcache_detach_local_dirty(struct pcache *pcache, page_t *page) {
-    __pcache_spin_lock_assert_holding(pcache);
-    page_lock_assert_holding(page);
-    assert(page->flags & PAGE_FLAG_DIRTY, 
-            "__pcache_detach_local_dirty: page is not dirty");
-    assert(!LIST_NODE_IS_DETACHED(page, pcache.lru_entry), 
-            "__pcache_detach_local_dirty: page is not in dirty list");
-    list_node_detach(page, pcache.lru_entry);
-    pcache->dirty_count--;
-    assert(pcache->dirty_count >= 0, "__pcache_detach_local_dirty: pcache dirty count underflow");
-}
-
-// Set a page dirty
-// page in IO progressing cannot be set dirty
-static void __pcache_page_set_dirty(struct pcache *pcache, page_t *page) {
-    page_lock_assert_holding(page);
-    assert(!(page->flags & PAGE_FLAG_IO_PROGRESSING), 
-            "__pcache_attach_local_dirty: page is in IO progressing");
-    page->flags |= PAGE_FLAG_DIRTY;
-}
-
-// Clear dirty status of a page
-// page in IO progressing cannot be cleared dirty
-static void __pcache_page_clear_dirty(struct pcache *pcache, page_t *page) {
-    page_lock_assert_holding(page);
-    assert(!(page->flags & PAGE_FLAG_IO_PROGRESSING), 
-            "__pcache_attach_local_dirty: page is in IO progressing");
-    page->flags &= ~PAGE_FLAG_DIRTY;
-}
-
-// Manage IO status of a page
-static void __pcache_page_io_begin(page_t *page) {
-    page_lock_assert_holding(page);
-    assert(!(page->flags & PAGE_FLAG_IO_PROGRESSING), 
-            "__pcache_page_io_begin: page IO is already in progress");
-    page->flags |= PAGE_FLAG_IO_PROGRESSING;
-}
-
-static void __pcache_page_io_end(page_t *page) {
-    page_lock_assert_holding(page);
-    assert(page->flags & PAGE_FLAG_IO_PROGRESSING, 
-            "__pcache_page_io_end: page IO is not in progress");
-    page->flags &= ~PAGE_FLAG_IO_PROGRESSING;
-    wakeup_on_chan(&page->pcache);
-}
-
-static int __pcache_page_io_wait(page_t *page) {
-    page_lock_assert_holding(page);
-    while (__pcache_page_io_in_progress(page)) {
-        sleep_on_chan(&page->pcache, &page->lock);
-    }
-    return 0;
-}
-
-static bool __pcache_page_io_in_progress(page_t *page) {
-    return (page->flags & PAGE_FLAG_IO_PROGRESSING) != 0;
-}
-
-// Find a page in pcache by block number
-// Will return NULL if not found
-// Will not increase page ref count
-// Will remove the page from lru list if in
-static page_t* __pcache_find_page(struct pcache *pcache, uint64 blkno) {
-
-}
-
-// Initialize a newly allocated page or a evicted page for pcache use
-static void __pcache_page_init(page_t *page, struct pcache *pcache, uint64 blkno, size_t offset, size_t size) {
-    page->pcache.pcache = pcache;
-    page->pcache.blkno = blkno;
-    rb_node_init(&page->pcache.node);
-    list_entry_init(&page->pcache.lru_entry);
-    page->pcache.offset = offset;
-    page->pcache.size = size;
-}
-
-// alloc and free page for pcache
-// Just allocate page and initialize it. No insertion to pcache is done here.
-// The caller will hold the spinlock of the new page.
-static page_t* __pcache_alloc_page(struct pcache *pcache, uint64 blkno, size_t offset, size_t size) {
-    if (__pcache_page_init_validate(pcache, blkno, offset, size) != 0) {
-        return NULL;
-    }
-    __pcache_spin_lock_assert_holding(pcache);
-    // Find a free page
-    uint64 gfp_flags = pcache->gfp_flags | PAGE_FLAG_PCACHE;
-    gfp_flags &= ~(PAGE_FLAG_UPTODATE | PAGE_FLAG_DIRTY);
-    page_t *page = __page_alloc(0, gfp_flags);
-    if (page == NULL) {
-        return NULL;
-    }
-    __pcache_page_init(page, pcache, blkno, offset, size);
-    page_lock_acquire(page);
-    return page;
-}
-
-// evict a specific page from pcache.
-// Page being evicted could be redirect to other blocks or be freed.
-// Return 0 on success, -ERRNO on failure
-static int __pcache_evict_page(struct pcache *pcache, page_t *page) {
-    __pcache_spin_lock_assert_holding(pcache);
-    page_lock_assert_holding(page);
-    if (page->pcache.pcache != pcache) {
-        printf("warning: evicting a page not belonging to this pcache\n");
-        return -EINVAL;
-    }
-    if (page->flags & (PAGE_FLAG_DIRTY | PAGE_FLAG_IO_PROGRESSING)) {
-        printf("warning: evicting a dirty page\n");
-        return -EBUSY;
-    }
-    if (page_ref_count(page) > 1) {
-        // page is referenced by entities other than pcache
-        printf("warning: evicting a referenced page\n");
-        return -EBUSY;
-    }
-    // remove from rb-tree
-    struct rb_node *deleted = rb_delete_node_color(&pcache->rb, &page->pcache.node);
-    assert(deleted == &page->pcache.node, "__pcache_evict_page: rb_delete_node_color failed");
-    // remove from lru list
-    __pcache_lru_remove_page(pcache, page);
-    pcache->page_count--;
-}
-
-// get a evicted page from lru list and reclaim it for new use
-// The caller will hold the spinlock of the new page.
-// Return 0 on success, -ERRNO on failure
-static page_t *__pcache_get_evicted_page(struct pcache *pcache, uint64 blkno, size_t offset, size_t size) {
-    if (__pcache_page_init_validate(pcache, blkno, offset, size) != 0) {
-        return NULL;
-    }
-    __pcache_spin_lock_assert_holding(pcache);
-    page_t *page = LIST_FIRST_NODE(&pcache->lru, page_t, pcache.lru_entry);
-    if (page == NULL) {
-        return NULL;
-    }
-    page_lock_acquire(page);
-    int retval = __pcache_evict_page(pcache, page);
-    if (retval != 0) {
-        // cannot evict the page
-        return NULL;
-    }
-    // re-initialize the page for new use
-    __pcache_page_init(page, pcache, blkno, offset, size);
-    return page;
-}
-
-// Add a page into pcache
-// The page should be newly allocated or evicted from pcache
-static void __pcache_add_page(struct pcache *pcache, page_t *page) {
-    // Insert into rb-tree
-    struct rb_node *inserted = rb_insert_color(&pcache->rb, &page->pcache.node);
-    assert(inserted == &page->pcache.node, "__pcache_add_page: rb_insert_color failed");
-    pcache->page_count++;
-}
-
-// Get a page in pcache by block number
-// Return NULL if not found
-static page_t *__pcache_get_page(struct pcache *pcache, uint64 blkno) {
-    struct rb_node *node = rb_find_key(&pcache->rb, blkno);
-    if (node == NULL) {
-        return NULL;
-    }
-    return container_of(node, page_t, pcache.node);
-}
-
-// Manipulate global lock
-static int __pcache_read_lock(struct pcache *pcache) {
-    return rwlock_acquire_read(&pcache->rb_lock);
-}
-
-static int __pcache_write_lock(struct pcache *pcache) {
-    return rwlock_acquire_write(&pcache->rb_lock);
-}
-
-static void __pcache_rw_unlock(struct pcache *pcache) {
-    rwlock_release(&pcache->rb_lock);
-}
-
-static void __pcache_spin_lock(struct pcache *pcache) {
-    acquire(&pcache->spinlock);
-}
-
-static void __pcache_spin_unlock(struct pcache *pcache) {
-    release(&pcache->spinlock);
-}
-
-static void __pcache_spin_lock_assert_holding(struct pcache *pcache) {
-    assert(spin_holding(&pcache->spinlock), 
-            "__pcache_spin_lock_assert_holding: pcache spinlock not held by current cpu");
-}
-static void __pcache_spin_lock_assert_unholding(struct pcache *pcache) {
-    assert(!spin_holding(&pcache->spinlock), 
-            "__pcache_spin_lock_assert_unholding: pcache spinlock held by current cpu");
-}
-
-static void __pcache_global_lock(void) {
-    acquire(&__pcache_global_spinlock);
-}
-
-static void __pcache_global_unlock(void) {
-    release(&__pcache_global_spinlock);
-}
-
 /******************************************************************************
  * Register and unregister pcache 
  * 
@@ -464,16 +198,16 @@ static void __pcache_global_unlock(void) {
  * done here.
  *****************************************************************************/
 static void __pcache_register(struct pcache *pcache) {
-    if (pcache == NULL) {
-        return;
-    }
-    __pcache_spin_lock(pcache);
-    __pcache_global_lock();
-    assert(LIST_ENTRY_IS_DETACHED(&pcache->list_entry), "__pcache_register: pcache already registered");
-    list_node_push_back(&__global_pcache_list, pcache, list_entry);
-    __global_pcache_count++;
-    __pcache_global_unlock();
-    __pcache_spin_unlock(pcache);
+    // if (pcache == NULL) {
+    //     return;
+    // }
+    // __pcache_spin_lock(pcache);
+    // __pcache_global_lock();
+    // assert(LIST_ENTRY_IS_DETACHED(&pcache->list_entry), "__pcache_register: pcache already registered");
+    // list_node_push_back(&__global_pcache_list, pcache, list_entry);
+    // __global_pcache_count++;
+    // __pcache_global_unlock();
+    // __pcache_spin_unlock(pcache);
 }
 
 // static void __pcache_unregister(struct pcache *pcache) {
@@ -571,6 +305,18 @@ static void __create_flusher_thread(void) {
 }
 
 /******************************************************************************
+ * Global Locking Helpers
+ *****************************************************************************/
+
+static void __pcache_global_lock(void) {
+    spin_acquire(&__pcache_global_spinlock);
+}
+
+static void __pcache_global_unlock(void) {
+    spin_release(&__pcache_global_spinlock);
+}
+
+/******************************************************************************
  * red-black tree callback functions
  *****************************************************************************/
 // Compare function for red-black tree
@@ -594,6 +340,305 @@ static struct rb_root_opts __pcache_rb_opts = {
     .keys_cmp_fun = __pcache_rb_compare,
     .get_key_fun = __pcache_rb_get_key,
 };
+
+/******************************************************************************
+ * pcache tree helpers
+ *****************************************************************************/
+static struct pcache_node *__pcache_find_key_node(
+    struct pcache *pcache,
+    uint64 blkno
+) {
+    struct rb_node *node = rb_find_key(&pcache->page_map, blkno);
+    if (node == NULL) {
+        return NULL;
+    }
+    return container_of(node, struct pcache_node, tree_entry);
+}
+
+static struct pcache_node *__pcache_insert_node(
+    struct pcache *pcache,
+    struct pcache_node *pcnode
+) {
+    struct rb_node *node = rb_insert_color(&pcache->page_map, &pcnode->tree_entry);
+    if (node == NULL) {
+        return NULL;
+    }
+    return container_of(node, struct pcache_node, tree_entry);
+}
+
+static void __pcache_tree_lock(struct pcache *pcache) {
+    spin_acquire(&pcache->tree_lock);
+}
+
+static void __pcache_tree_unlock(struct pcache *pcache) {
+    spin_release(&pcache->tree_lock);
+}
+
+static void __pcache_spin_lock(struct pcache *pcache) {
+    spin_acquire(&pcache->spinlock);
+}
+
+static void __pcache_spin_unlock(struct pcache *pcache) {
+    spin_release(&pcache->spinlock);
+}
+
+static void __pcache_spin_assert_holding(struct pcache *pcache) {
+    assert(spin_holding(&pcache->spinlock), "__pcache_spin_assert_holding: pcache spinlock not held");
+}
+
+// Get or insert a pcache_node for the given block number
+static page_t *__pcache_get_page(
+    struct pcache *pcache,
+    uint64 blkno,
+    size_t size,
+    page_t *default_page
+) {
+    if (blkno >= pcache->blk_count) {
+        // Block number out of range
+        return NULL;
+    }
+    if (blkno + (1 << (PAGE_SHIFT - BLK_SIZE_SHIFT)) >= pcache->blk_count) {
+        // Block number out of range
+        return NULL;
+    }
+
+    if (default_page) {
+        // If want to insert into existing page, ensure the page lock is held
+        page_lock_assert_holding(default_page);
+        if (!PAGE_IS_TYPE(default_page, PAGE_TYPE_PCACHE) ||
+            default_page->pcache.pcache ||
+            !default_page->pcache.pcache_node ||
+            default_page->pcache.pcache_node->page != default_page) {
+            // The given default page is not from the given pcache
+            printf("__pcache_get_page: default_page is not from the given pcache\n");
+            return NULL;
+        }
+    }
+
+    struct pcache_node *found_node = NULL;
+    __pcache_tree_lock(pcache);
+    if (default_page) {
+        found_node = __pcache_insert_node(&pcache->page_map, default_page->pcache.pcache_node);
+        if (found_node != default_page->pcache.pcache_node) {
+            // While inserting, another thread has already inserted a node with the same key
+            __pcache_tree_unlock(pcache);
+            return found_node->page;
+        }
+    } else {
+        found_node = __pcache_find_key_node(&pcache->page_map, blkno);
+        if (!found_node) {
+            __pcache_tree_unlock(pcache);
+            return NULL;
+        }
+    }
+    // If not found, unlock and create new node if needed
+    __pcache_tree_unlock(pcache);
+    return found_node->page;
+}
+
+// Remove a pcache_node from rb tree
+static void __pcache_remove_node(struct pcache *pcache, page_t *page) {
+    page_lock_assert_holding(page);
+
+    __pcache_tree_lock(pcache);
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+    assert(pcnode != NULL, "__pcache_remove_node: page has no pcache_node");
+    assert(pcnode->page == page, "__pcache_remove_node: pcache_node does not point to the given page");
+    assert(LIST_NODE_IS_DETACHED(pcnode, lru_entry), "__pcache_remove_node: pcache node must be detached from lru or dirty list before removal");
+    // Remove from rb-tree
+    struct rb_node *removed = rb_delete_node_color(&pcache->page_map, &pcnode->tree_entry);
+    assert(removed == &pcnode->tree_entry, "__pcache_remove_node: removed rb-node does not match the pcache node");
+
+    __pcache_tree_unlock(pcache);
+}
+
+/******************************************************************************
+ * pcache_node helpers
+ *****************************************************************************/
+static void __pcache_node_init(struct pcache_node *node) {
+    memset(node, 0, sizeof(struct pcache_node));
+    rb_node_init(&node->tree_entry);
+    list_entry_init(&node->lru_entry);
+    completion_init(&node->io_completion);
+    node->blkno = -1;
+    node->page_count = 0;
+}
+
+static page_t *__pcache_page_alloc(void) {
+    struct pcache_node *pcnode = slab_alloc(&__pcache_node_slab);
+    if (pcnode == NULL) {
+        return NULL;
+    }
+    page_t *page = page_alloc(0, PAGE_TYPE_PCACHE);
+    if (page == NULL) {
+        slab_free(pcnode);
+        return NULL;
+    }
+    __pcache_node_init(pcnode);
+    pcnode->page = page;
+    pcnode->page_count = 1;
+    pcnode->size = PGSIZE;
+    pcnode->data = page_to_virt(page);
+    page->pcache.pcache_node = pcnode;
+    return pcnode;
+}
+
+// Attach a page to a pcache through a pcache_node
+// Will not touch pcache tree
+// Both pcache and page must be locked before calling this function
+static void __pcache_node_attach_page(
+    struct pcache *pcache, 
+    page_t *page
+) {
+    page_lock_assert_holding(page);
+    __pcache_spin_assert_holding(pcache);
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+    assert(pcnode != NULL, "__pcache_node_attach_page: page has no pcache_node");
+    assert(pcnode->page == page, "__pcache_node_attach_page: pcache_node does not point to the given page");
+    assert(pcnode->pcache == NULL, "__pcache_node_attach_page: pcache_node's pcache must be NULL before attaching");
+    pcnode->page_count = 1; // @TODO: currently only support one page per pcache_node
+    pcnode->pcache = pcache;
+    page->pcache.pcache = pcache;
+    page->pcache.pcache_node = pcnode;
+    pcache->page_count += pcnode->page_count;
+}
+
+// Detach a page to a pcache through a pcache_node
+// Will not touch pcache tree
+// Both pcache and page must be locked before calling this function
+static void __pcache_node_detach_page(
+    struct pcache *pcache,
+    page_t *page
+) {
+    page_lock_assert_holding(page);
+    __pcache_spin_assert_holding(pcache);
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+    assert(pcnode != NULL, "__pcache_node_detach_page: page has no pcache_node");
+    assert(pcnode->page == page, "__pcache_node_detach_page: pcache_node does not point to the given page");
+    assert(pcnode->pcache == pcache, "__pcache_node_detach_page: pcache_node's pcache does not match the given pcache");
+    assert(LIST_NODE_IS_DETACHED(pcnode, lru_entry), "__pcache_node_detach_page: pcache_node must be detached from lru or dirty list before detaching");
+    page->pcache.pcache = NULL;
+    pcnode->pcache = NULL;
+    pcache->page_count -= pcnode->page_count;
+    assert(pcache->page_count >= 0, "__pcache_node_detach_page: pcache page count negative");
+}
+
+/******************************************************************************
+ * Pcache_node IO synchronization helpers
+ *****************************************************************************/
+
+static int __pcache_node_io_begin(struct pcache *pcache, page_t *page) {
+    __pcache_tree_lock(pcache);
+    struct pcache_node *node = page->pcache.pcache_node;
+    if (node->io_in_progress) {
+        return -EALREADY;
+    }
+    node->io_in_progress = 1;
+    completion_reinit(&node->io_completion);
+    __pcache_tree_unlock(pcache);
+    return 0;
+}
+
+static int __pcache_node_io_end(struct pcache *pcache, page_t *page) {
+    __pcache_tree_lock(pcache);
+    struct pcache_node *node = page->pcache.pcache_node;
+    if (!node->io_in_progress) {
+        __pcache_tree_unlock(pcache);
+        return -EALREADY;
+    }
+    node->io_in_progress = 0;
+    __pcache_tree_unlock(pcache);
+    complete_all(&node->io_completion);
+    return 0;
+}
+
+static int __pcache_node_io_wait(struct pcache *pcache, page_t *page) {
+    __pcache_tree_lock(pcache);
+    struct pcache_node *node = page->pcache.pcache_node;
+    if (!node->io_in_progress) {
+        __pcache_tree_unlock(pcache);
+        return 0;
+    }
+    node->io_in_progress = 0;
+    wait_for_completion(&node->io_completion);
+    __pcache_tree_unlock(pcache);
+    return 0;
+}
+
+/******************************************************************************
+ * LRU list helpers
+ *****************************************************************************/
+
+static void __pcache_push_lru(struct pcache *pcache, page_t *page) {
+    __pcache_spin_assert_holding(pcache);
+    page_lock_assert_holding(page);
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+    assert(pcnode != NULL, "__pcache_push_lru: page has no pcache_node");
+    assert(!pcnode->dirty, "__pcache_push_lru: pcache_node is dirty");
+    assert(pcnode->pcache == pcache, "__pcache_push_lru: pcache_node's pcache does not match the given pcache");
+    assert(pcnode->page == page, "__pcache_push_lru: pcache_node does not point to the given page");
+    assert(LIST_NODE_IS_DETACHED(pcnode, lru_entry), "__pcache_push_lru: pcache node already in lru or dirty list");
+    list_node_push_back(&pcache->lru, pcnode, lru_entry);
+    pcache->lru_count++;
+}
+
+// Will not acquire the lock of the returned page
+static page_t *__pcache_pop_lru(struct pcache *pcache) {
+    __pcache_spin_assert_holding(pcache);
+    if (LIST_IS_EMPTY(&pcache->lru)) {
+        return NULL;
+    }
+    struct pcache_node *pcnode = list_node_pop(&pcache->lru, struct pcache_node, lru_entry);
+    if (pcnode == NULL) {
+        return NULL;
+    }
+    assert(pcnode->page != NULL, "__pcache_pop_lru: pcache_node has no page");
+    assert(pcnode->pcache == pcache, "__pcache_pop_lru: pcache_node's pcache does not match the given pcache");
+    page_t *page = pcnode->page;
+    pcache->lru_count--;
+    assert(pcache->lru_count >= 0, "__pcache_pop_lru: pcache lru count underflow");
+    return page;
+}
+
+static void __pcache_remove_lru(struct pcache *pcache, page_t *page) {
+    __pcache_spin_assert_holding(pcache);
+    page_lock_assert_holding(page);
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+    assert(pcnode != NULL, "__pcache_remove_lru: page has no pcache_node");
+    assert(pcnode->page == page, "__pcache_remove_lru: pcache_node does not point to the given page");
+    assert(pcnode->pcache == pcache, "__pcache_remove_lru: pcache_node's pcache does not match the given pcache");
+    assert(!LIST_NODE_IS_DETACHED(pcnode, lru_entry), "__pcache_remove_lru: pcache node not in lru list");
+    list_node_detach(pcnode, lru_entry);
+    if (pcnode->dirty) {
+        pcache->dirty_count--;
+        assert(pcache->dirty_count >= 0, "__pcache_remove_lru: pcache dirty count underflow");
+    } else {
+        pcache->lru_count--;
+        assert(pcache->lru_count >= 0, "__pcache_remove_lru: pcache lru count underflow");
+    }
+}
+
+static void __pcache_push_dirty(struct pcache *pcache, page_t *page) {
+    __pcache_spin_assert_holding(pcache);
+    page_lock_assert_holding(page);
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+    assert(pcnode != NULL, "__pcache_push_dirty: page has no pcache_node");
+    assert(pcnode->dirty, "__pcache_push_dirty: pcache_node is not dirty");
+    assert(pcnode->pcache == pcache, "__pcache_push_dirty: pcache_node's pcache does not match the given pcache");
+    assert(pcnode->page == page, "__pcache_push_dirty: pcache_node does not point to the given page");
+    assert(LIST_NODE_IS_DETACHED(pcnode, lru_entry), "__pcache_push_dirty: pcache node already in lru or dirty list");
+    list_node_push_back(&pcache->dirty_list, pcnode, lru_entry);
+    pcache->dirty_count++;
+}
+
+static page_t *__pcache_evict_lru(struct pcache *pcache) {
+    page_t *page = __pcache_pop_lru(pcache);
+    page_lock_acquire(page);
+    __pcache_remove_node(pcache, page);
+    __pcache_node_detach_page(pcache, page);
+    page_lock_release(page);
+    return page;
+}
 
 /******************************************************************************
  * Public API functions
@@ -656,240 +701,26 @@ int pcache_init(struct pcache *pcache) {
 // 
 // The page returned could be either dirty or clean and could be in IO progressing state
 page_t *pcache_get_page(struct pcache *pcache, uint64 blkno) {
-    if (pcache == NULL) {
-        return NULL;
-    }
-    if (__pcache_read_lock(pcache) != 0) {
-        // Failed to get read lock
-        return NULL;
-    }
-    blkno = blkno & ~(PGSIZE / 512 - 1); // Align block number to 4KB
-    if (!__pcache_page_init_validate(pcache, blkno, 0, 512)) {
-        // Invalid block number
-        __pcache_rw_unlock(pcache);
-        return NULL;
-    }
-    int blocks = pcache->blk_count - blkno;
-    page_t *page = NULL;
-    if (!__pcache_is_active(pcache)) {
-        // pcache is not active
-        page = NULL;
-    }
-    
-    // Try to find the page with read lock
-    page = __pcache_find_page(pcache, blkno);
-    if (page) {
-        goto ret;
-    }
-    __pcache_rw_unlock(pcache);
 
-    // Page not found, try to get write lock and search again
-    __pcache_write_lock(pcache);
-    // Because we have released the read lock, the page could be added by other threads
-    // So we need to search again
-    if (!__pcache_is_active(pcache)) {
-        page = NULL;
-        goto ret;
-    }
-    page = __pcache_find_page(pcache, blkno);
-    if (page) {
-        goto ret;
-    }
-
-    // Still not found
-    // Check if we can allocate a new page
-    if (pcache->page_count < pcache->max_pages) {
-        // Allocate a new page
-        page = __pcache_alloc_page(pcache, blkno, 0, blocks * 512);
-    } else {
-        // Need to evict a page from lru list
-        page = __pcache_get_evicted_page(pcache, blkno, 0, blocks * 512);
-    }
-
-    // @TODO: Try flush dirty pages if no page can be allocated or evicted
-ret:
-    if (page) {
-        page_ref_inc(page);
-    }
-    __pcache_rw_unlock(pcache);
-    return page;
 }
 
 void pcache_put_page(struct pcache *pcache, page_t *page) {
-    if (pcache == NULL || page == NULL) {
-        return;
-    }
-    __pcache_spin_lock(pcache);
-    page_lock_acquire(page);
-    if (__pcache_page_validate(pcache, page)) {
-        // Decrease page ref count
-        int ref_count = page_ref_dec(page);
-        // Refcount has already been checked in __pcache_page_validate, so it must be >= 1
-        assert(ref_count >= 1, "pcache_put_page: page ref count underflow");
-        if (ref_count == 1) {
-            // Someone other than pcache must be holding the reference of a page when doing
-            // IO operation on it. So the ref count cannot reach 1 when IO is in progress
-            assert(!(page->flags & PAGE_FLAG_IO_PROGRESSING), 
-                    "pcache_put_page: page in IO progressing cannot be put back to lru or dirty list");
-            // put back to lru list or dirty list when ref count reaches 1
-            if (!(page->flags & PAGE_FLAG_DIRTY)) {
-                __pcache_lru_list_add(pcache, page);
-            }
-        }
-    } else {
-        printf("warning: pcache_put_page: Invalid page\n");
-    }
-    page_lock_release(page);
-    __pcache_spin_unlock(pcache);
 }
 
 int pcache_mark_page_dirty(struct pcache *pcache, page_t *page) {
-    if (pcache == NULL || page == NULL) {
-        return -EINVAL;
-    }
-    __pcache_spin_lock(pcache);
-    page_lock_acquire(page);
-    if (__pcache_page_validate(pcache, page)) {
-        if (page->flags & PAGE_FLAG_IO_PROGRESSING) {
-            // Page in IO progressing cannot be marked dirty
-            page_lock_release(page);
-            __pcache_spin_unlock(pcache);
-            return -EBUSY;
-        }
-        
-        page->flags |= PAGE_FLAG_DIRTY;
-
-    } else {
-        printf("warning: pcache_mark_page_dirty: Invalid page\n");
-    }
-    page_lock_release(page);
-    __pcache_spin_unlock(pcache);
-    return 0;
 }
 
 int pcache_invalidate_page(struct pcache *pcache, page_t *page) {
-    if (pcache == NULL || page == NULL) {
-        return -EINVAL;
-    }
-    __pcache_spin_lock(pcache);
-    page_lock_acquire(page);
-    
-    if (!__pcache_page_validate(pcache, page)) {
-        printf("warning: pcache_invalidate_page: Invalid page\n");
-        page_lock_release(page);
-        __pcache_spin_unlock(pcache);
-        return -EINVAL;
-    }
-
-    if (page->flags & PAGE_FLAG_IO_PROGRESSING) {
-        // Page in IO progressing cannot be invalidated
-        page_lock_release(page);
-        __pcache_spin_unlock(pcache);
-        return -EBUSY;
-    }
-    if (page_ref_count(page) > 2) {
-        // Page referenced by entities other than pcache and caller cannot be invalidated
-        // @TODO: 
-        page_lock_release(page);
-        __pcache_spin_unlock(pcache);
-        return -EBUSY;
-    }
-    page->flags &= ~(PAGE_FLAG_DIRTY | PAGE_FLAG_UPTODATE);
-    page_lock_release(page);
-    __pcache_spin_unlock(pcache);
-    return 0;
 }
 
 // Flush all dirty pages in pcache and wait for completion
 // User needs to check the status of the pcache after the call
 // Return 0 on success, -ERRNO on failure
 int pcache_flush(struct pcache *pcache) {
-    if (pcache == NULL) {
-        return -EINVAL;
-    }
-    __pcache_read_lock(pcache);
-    __pcache_spin_lock(pcache);
-    if (pcache->flush_requested) {
-        __pcache_spin_unlock(pcache);
-        __pcache_rw_unlock(pcache);
-        return __pcache_wait_flush_complete(pcache);
-    }
-    if (pcache->dirty_count == 0) {
-        // No dirty pages, nothing to do
-        __pcache_spin_unlock(pcache);
-        __pcache_rw_unlock(pcache);
-        return 0;
-    }
-    if (!pcache->active) {
-        // Although flusher accepts inactive pcache, it happens when pcache is being deactivated.
-        // So when pcache is not flushing and inactive, just return.
-        __pcache_spin_unlock(pcache);
-        __pcache_rw_unlock(pcache);
-        return 0;
-    }
-    // Flush dirty pages
-    __pcache_queue_flush(pcache);
-    __pcache_spin_unlock(pcache);
-    __pcache_rw_unlock(pcache);
-    return __pcache_wait_flush_complete(pcache);
 }
 
 int pcache_sync(void) {
-    __pcache_flusher_start();
-    return __pcache_wait_flusher();
 }
 
 int pcache_read_page(struct pcache *pcache, page_t *page) {
-    if (pcache == NULL || page == NULL) {
-        return -EINVAL;
-    }
-    if (__pcache_read_lock(pcache) != 0) {
-        return -EAGAIN;
-    }
-    __pcache_spin_lock(pcache);
-    page_lock_acquire(page);
-    if (__pcache_page_validate(pcache, page)) {
-        // Page is valid
-        if (page->flags & PAGE_FLAG_UPTODATE) {
-            // Page is already up-to-date
-            page_lock_release(page);
-            __pcache_spin_unlock(pcache);
-            __pcache_rw_unlock(pcache);
-            return 0;
-        }
-        if (page_ref_count(page) < 2) {
-            // Page is not referenced by anyone other than pcache
-            // This should not happen as the caller should hold a reference to the page
-            printf("warning: pcache_read_page: page ref count < 2\n");
-            page_lock_release(page);
-            __pcache_spin_unlock(pcache);
-            __pcache_rw_unlock(pcache);
-            return -EINVAL;
-        }
-        if (page->flags & PAGE_FLAG_IO_PROGRESSING) {
-            // IO is in progress, wait for it to complete
-            __pcache_spin_unlock(pcache);
-            __pcache_rw_unlock(pcache);
-            return __pcache_page_io_wait(page);
-        }
-        // Start IO
-        page->
-        __pcache_page_io_begin(page);
-        __pcache_spin_unlock(pcache);
-        __pcache_rw_unlock(pcache);
-        int ret = __pcache_read_page(pcache, page);
-        page_lock_acquire(page);
-        if (ret == 0) {
-            page->flags |= PAGE_FLAG_UPTODATE;
-        }
-        __pcache_page_io_end(page);
-        page_lock_release(page);
-        return ret;
-    } else {
-        printf("warning: pcache_read_page: Invalid page\n");
-        page_lock_release(page);
-        __pcache_spin_unlock(pcache);
-        __pcache_rw_unlock(pcache);
-        return -EINVAL;
-    }
 }

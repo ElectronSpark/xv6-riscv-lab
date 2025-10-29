@@ -21,8 +21,8 @@ struct pcache_ops;
 struct pcache_ops {
     int (*read_page)(struct pcache *pcache, page_t *page);
     int (*write_page)(struct pcache *pcache, page_t *page);
-    int (*write_begin)(struct pcache *pcache);
-    int (*write_end)(struct pcache *pcache);
+    int (*write_begin)(struct pcache *pcache, page_t *page);
+    int (*write_end)(struct pcache *pcache, page_t *page);
     void (*mark_dirty)(struct pcache *pcache, page_t *page);
 };
 
@@ -39,6 +39,7 @@ struct pcache_ops {
 //      the operations for the pcache
 //  - block_count:
 //      the total number of blocks (512-byte) managed by the pcache
+//      Should not change after initialization
 //  The following members are optional for users to specify before initialization:
 //  - gfp_flags: 
 //      the flags for page allocation, default to 0
@@ -86,8 +87,11 @@ struct pcache_node {
     struct pcache      *pcache;    // pointer to the parent pcache
     page_t             *page;      // pointer to the page
     void               *data;      // pointer to the data area in the page
+    int64              page_count; // number of pages in this node
     struct {
         uint64 dirty: 1;   // whether the page is dirty
+        uint64 uptodate: 1; // whether the page data is up-to-date
+        uint64 io_in_progress: 1; // whether the page is in IO progressing state
     };
     uint64             blkno;      // starting block number (512-byte) of the page
     size_t             size;       // size of valid data area in the page
@@ -98,7 +102,6 @@ void pcache_global_init(void);
 int pcache_init(struct pcache *pcache);
 page_t *pcache_get_page(struct pcache *pcache, uint64 blkno);
 void pcache_put_page(struct pcache *pcache, page_t *page);
-int pcache_mark_page_dirty(struct pcache *pcache, page_t *page);
 int pcache_invalidate_page(struct pcache *pcache, page_t *page);
 int pcache_flush(struct pcache *pcache);
 int pcache_sync(void);
@@ -106,6 +109,9 @@ int pcache_sync(void);
 // int pcache_evict_pages(struct pcache *pcache, size_t target_size);
 // @TODO: do eviction in OOM
 int pcache_read_page(struct pcache *pcache, page_t *page);
+int pcache_write_begin(struct pcache *pcache, page_t *page);
+int pcache_mark_page_dirty(struct pcache *pcache, page_t *page);
+int pcache_write_end(struct pcache *pcache, page_t *page);
 
 // ssize_t bread(dev_t dev, uint64 blockno, void *data, size_t size, bool user);
 // ssize_t bwrite(dev_t dev, uint64 blockno, const void *data, size_t size, bool user);
