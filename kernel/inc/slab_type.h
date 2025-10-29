@@ -2,12 +2,19 @@
 #define __KERNEL_SLAB_TYPE_H
 
 #include "types.h"
+#include "param.h"
 #include "list_type.h"
 #include "spinlock.h"
 
 
 typedef struct page_struct page_t;
 typedef struct slab_struct slab_t;
+
+typedef struct slab_cpu_state_struct {
+    spinlock_t              lock;
+    list_node_t             partial_list;
+    int64                   slab_partial;
+} slab_cpu_state_t;
 
 typedef struct slab_cache_struct {
     const char              *name;
@@ -27,14 +34,14 @@ typedef struct slab_cache_struct {
     // free half of its SLABs.
     uint32                  limits;
 
-    // list head linking slab_t
+    // list head linking slab_t (partial lists are per-CPU)
     list_node_t             free_list;
-    list_node_t             partial_list;
+    slab_cpu_state_t        cpu_state[NCPU];
     list_node_t             full_list;
 
     // Count the number of cache
     int64                  slab_free;
-    int64                  slab_partial;
+    int64                  slab_partial_total;
     int64                  slab_full;
     int64                  slab_total;
 
@@ -42,11 +49,12 @@ typedef struct slab_cache_struct {
     uint64                  obj_active;
     uint64                  obj_total;
 
-    // for locking slab cache
-    spinlock_t              lock;
+    // locks protecting global resources
+    spinlock_t              global_lock;
 } slab_cache_t;
 
 typedef struct slab_struct {
+    spinlock_t              lock;
     list_node_t             list_entry;
     // pointing its slab descriptor
     slab_cache_t            *cache;
@@ -58,6 +66,8 @@ typedef struct slab_struct {
     uint64                  in_use;
     // the next free objects
     void                    *next;
+    // owner cpu for per-cpu partial list; -1 if not assigned
+    int                     owner_cpu;
 } slab_t;
 
 #endif          /* __KERNEL_SLAB_TYPE_H */

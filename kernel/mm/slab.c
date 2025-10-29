@@ -50,11 +50,13 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
         page[i].slab.slab = slab;
     }
 
+    spin_init(&slab->lock, (char *)"slab");
     slab->cache = NULL;
     slab->slab_order = order;
     slab->in_use = 0;
     slab->page = page;
     list_entry_init(&slab->list_entry);
+    slab->owner_cpu = -1;
 
     prev = NULL;
     tmp = page_base + offs;
@@ -110,6 +112,7 @@ STATIC_INLINE void __slab_attach(slab_cache_t *cache, slab_t *slab) {
         panic("__slab_attach(): attach a non-empty SLAB");
     }
     slab->cache = cache;
+    slab->owner_cpu = -1;
     cache->slab_total++;
     cache->obj_total += cache->slab_obj_num;
 }
@@ -132,13 +135,14 @@ STATIC_INLINE void __slab_detach(slab_cache_t *cache, slab_t *slab) {
     cache->obj_total -= cache->slab_obj_num;
     cache->slab_total--;
     slab->cache = NULL;
+    slab->owner_cpu = -1;
 }
 
 // Take a SLAB out from the free/partial/full list it's in
 // No validity check
 STATIC_INLINE void __slab_dequeue(slab_cache_t *cache, slab_t *slab) {
-    int64 *cache_counter;
     list_node_t *list_entry;
+    int cpu_id = -1;
     if (LIST_NODE_IS_DETACHED(slab, list_entry)) {
         panic("__slab_dequeue(): SLAB is not in a queue");
     }
@@ -146,44 +150,75 @@ STATIC_INLINE void __slab_dequeue(slab_cache_t *cache, slab_t *slab) {
         panic("__slab_dequeue(): wrong SLAB cache");
     }
     if (__SLAB_EMPTY(slab)) {
-        cache_counter = &cache->slab_free;
+        if (cache->slab_free == 0) {
+            panic("__slab_dequeue(): free list counter error");
+        }
+        cache->slab_free--;
         list_entry = &cache->free_list;
     } else if (__SLAB_FULL(slab)) {
-        cache_counter = &cache->slab_full;
+        if (cache->slab_full == 0) {
+            panic("__slab_dequeue(): full list counter error");
+        }
+        cache->slab_full--;
         list_entry = &cache->full_list;
     } else {
-        cache_counter = &cache->slab_partial;
-        list_entry = &cache->partial_list;
-    }
-    if (*cache_counter == 0) {
-        panic("__slab_dequeue(): list counter error");
+        cpu_id = slab->owner_cpu;
+        if (cpu_id < 0 || cpu_id >= NCPU) {
+            panic("__slab_dequeue(): invalid owner cpu");
+        }
+        if (cache->cpu_state[cpu_id].slab_partial == 0) {
+            panic("__slab_dequeue(): partial list counter error");
+        }
+        cache->cpu_state[cpu_id].slab_partial--;
+        __atomic_fetch_sub(&cache->slab_partial_total, 1, __ATOMIC_RELAXED);
+        list_entry = &cache->cpu_state[cpu_id].partial_list;
     }
     if (LIST_IS_EMPTY(list_entry)) {
         panic("__slab_dequeue(): list head error");
     }
     list_node_detach(slab, list_entry);
-    *cache_counter -= 1;
+    if (cpu_id >= 0) {
+        slab->owner_cpu = -1;
+    }
 }
 
 // put a SLAB into the free/partial/full list accordingly
 // No validity check
-STATIC_INLINE void __slab_enqueue(slab_cache_t *cache, slab_t *slab) {
+STATIC_INLINE void __slab_enqueue(slab_cache_t *cache, slab_t *slab, int cpu_id) {
     list_node_t *list_entry;
     if (!LIST_NODE_IS_DETACHED(slab, list_entry)) {
-        panic("__slab_enqueue(): SLAB is already in a queue");
+        panic("__slab_enqueue(): SLAB is already in a queue slab=%p owner_cpu=%d target_cpu=%d in_use=%lu next=%p prev=%p",
+              slab, slab->owner_cpu, cpu_id, slab->in_use,
+              slab->list_entry.next, slab->list_entry.prev);
     }
     if (slab->cache != cache) {
-        panic("__slab_enqueue(): wrong SLAB cache");
+        const char *slab_cache_name = slab->cache ? slab->cache->name : "<detached>";
+        const char *target_cache_name = cache ? cache->name : "<null>";
+        printf("__slab_enqueue(): mismatch slab=%p slab_cache=%p(%s) expected=%p(%s) owner_cpu=%d in_use=%lu empty=%d full=%d next=%p prev=%p\n",
+               slab, slab->cache, slab_cache_name,
+               cache, target_cache_name,
+               slab->owner_cpu, slab->in_use,
+               __SLAB_EMPTY(slab), __SLAB_FULL(slab),
+               slab->list_entry.next, slab->list_entry.prev);
+        panic("__slab_enqueue(): wrong SLAB cache slab=%p slab_cache=%p expected=%p",
+              slab, slab->cache, cache);
     }
     if (__SLAB_EMPTY(slab)) {
         list_entry = &cache->free_list;
         cache->slab_free++;
+        slab->owner_cpu = -1;
     } else if (__SLAB_FULL(slab)) {
         list_entry = &cache->full_list;
         cache->slab_full++;
+        slab->owner_cpu = -1;
     } else {
-        list_entry = &cache->partial_list;
-        cache->slab_partial++;
+        if (cpu_id < 0 || cpu_id >= NCPU) {
+            panic("__slab_enqueue(): invalid cpu for partial list");
+        }
+        list_entry = &cache->cpu_state[cpu_id].partial_list;
+        cache->cpu_state[cpu_id].slab_partial++;
+        __atomic_fetch_add(&cache->slab_partial_total, 1, __ATOMIC_RELAXED);
+        slab->owner_cpu = cpu_id;
     }
     list_node_push_back(list_entry, slab, list_entry);
 }
@@ -202,23 +237,28 @@ STATIC_INLINE slab_t *__slab_pop_free(slab_cache_t *cache) {
     if (!__SLAB_EMPTY(slab)) {
         panic("__slab_pop_free(): get a non-empty SLAB when trying to get an empty one");
     }
+    slab->owner_cpu = -1;
     return slab;
 }
 
 // Take out the first SLAB from the partial list of a SLAB cache, and dequeue it
-STATIC_INLINE slab_t *__slab_pop_partial(slab_cache_t *cache) {
+STATIC_INLINE slab_t *__slab_pop_partial(slab_cache_t *cache, int cpu_id) {
     slab_t *slab;
-    if (cache == NULL || cache->slab_partial == 0) {
+    if (cache == NULL || cpu_id < 0 || cpu_id >= NCPU) {
         return NULL;
     }
-    cache->slab_partial--;
-    slab = list_node_pop_back(&cache->partial_list, slab_t, list_entry);
+    if (cache->cpu_state[cpu_id].slab_partial == 0) {
+        return NULL;
+    }
+    cache->cpu_state[cpu_id].slab_partial--;
+    __atomic_fetch_sub(&cache->slab_partial_total, 1, __ATOMIC_RELAXED);
+    slab = list_node_pop_back(&cache->cpu_state[cpu_id].partial_list, slab_t, list_entry);
     if (slab == NULL) {
-        panic("__slab_pop_free(): failed to pop half-full SLAB");
+        panic("__slab_pop_partial(): failed to pop half-full SLAB");
     }
-    if (__SLAB_EMPTY(slab) || __SLAB_FULL(slab)) {
-        panic("__slab_pop_free(): get an empty or full SLAB when trying to get an half-full one");
-    }
+    // The slab might have transitioned to empty/full before we grabbed it; the caller
+    // will reconcile its state under the appropriate lock.
+    slab->owner_cpu = -1;
     return slab;
 }
 
@@ -324,13 +364,27 @@ STATIC_INLINE slab_t *__find_obj_slab(void *ptr) {
 // aqcuire the lock of a SLAB cache
 // no checking here
 STATIC_INLINE void __slab_cache_lock(slab_cache_t *cache) {
-    spin_acquire(&cache->lock);
+    spin_acquire(&cache->global_lock);
 }
 
 // release the lock of a SLAB cache
 // no checking here
 STATIC_INLINE void __slab_cache_unlock(slab_cache_t *cache) {
-    spin_release(&cache->lock);
+    spin_release(&cache->global_lock);
+}
+
+STATIC_INLINE void __slab_cpu_lock(slab_cache_t *cache, int cpu_id) {
+    if (cpu_id < 0 || cpu_id >= NCPU) {
+        panic("__slab_cpu_lock(): invalid cpu id");
+    }
+    spin_acquire(&cache->cpu_state[cpu_id].lock);
+}
+
+STATIC_INLINE void __slab_cpu_unlock(slab_cache_t *cache, int cpu_id) {
+    if (cpu_id < 0 || cpu_id >= NCPU) {
+        panic("__slab_cpu_unlock(): invalid cpu id");
+    }
+    spin_release(&cache->cpu_state[cpu_id].lock);
 }
 
 // Initialize a existing SLAB cache without checking
@@ -357,16 +411,20 @@ STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name,
     cache->slab_obj_num = slab_obj_num;
     cache->limits = limits;
     cache->slab_free = 0;
-    cache->slab_partial = 0;
+    cache->slab_partial_total = 0;
     cache->slab_full = 0;
     cache->slab_total = 0;
     cache->obj_active = 0;
     cache->obj_total = 0;
 
     list_entry_init(&cache->free_list);
-    list_entry_init(&cache->partial_list);
+    for (int i = 0; i < NCPU; i++) {
+        cache->cpu_state[i].slab_partial = 0;
+        list_entry_init(&cache->cpu_state[i].partial_list);
+        spin_init(&cache->cpu_state[i].lock, (char *)"slab-partial");
+    }
     list_entry_init(&cache->full_list);
-    spin_init(&cache->lock, name);
+    spin_init(&cache->global_lock, name);
 }
 
 
@@ -421,7 +479,7 @@ int slab_cache_destroy(slab_cache_t *cache) {
         __slab_cache_unlock(cache);
         return -1;
     }
-    if (cache->slab_partial != 0 || cache->slab_full != 0) {
+    if (__atomic_load_n(&cache->slab_partial_total, __ATOMIC_RELAXED) != 0 || cache->slab_full != 0) {
         // will not allow to destroy a SLAB cache with allocated objects
         __slab_cache_unlock(cache);
         return -1;
@@ -491,41 +549,63 @@ int slab_cache_shrink(slab_cache_t *cache, int nums) {
 // return NULL if failed
 void *slab_alloc(slab_cache_t *cache) {
     void *obj = NULL;
-    slab_t *slab;
+    slab_t *slab = NULL;
+    int cpu_id;
     if (cache == NULL) {
         return NULL;
     }
-    __slab_cache_lock(cache);
-    if (cache->slab_partial > 0) {
-        // Try to get object from a half-full SLAB
-        slab = __slab_pop_partial(cache);
-        if (slab == NULL) {
-            panic("slab_alloc(): Failed to get a half-full SLAB when the partial list is not empty");
-        }
-    } else if (cache->slab_free > 0) {
-        // Try to get object from an empty SLAB
+    cpu_id = cpuid();
+
+retry:
+    // Try the local partial list first under the per-CPU lock.
+    __slab_cpu_lock(cache, cpu_id);
+    slab = __slab_pop_partial(cache, cpu_id);
+    __slab_cpu_unlock(cache, cpu_id);
+
+    if (slab == NULL) {
+        __slab_cache_lock(cache);
         slab = __slab_pop_free(cache);
+        __slab_cache_unlock(cache);
+
         if (slab == NULL) {
-            panic("slab_alloc(): Failed to get an empty SLAB when the free list is not empty");
+            slab = __slab_make(cache->flags, cache->slab_order, cache->offset,
+                               cache->obj_size, cache->slab_obj_num);
+            if (slab == NULL) {
+                goto done;
+            }
+            __slab_cache_lock(cache);
+            __slab_attach(cache, slab);
+            __slab_cache_unlock(cache);
         }
-    } else {
-        // Try to make an empty SLAB
-        slab = __slab_make( cache->flags, cache->slab_order, cache->offset, 
-                            cache->obj_size, cache->slab_obj_num);
-        if (slab == NULL) {
-            // failed to create new SLAB, just return NULL
-            obj = NULL;
-            goto done;
-        }
-        __slab_attach(cache, slab);
     }
-    // Find an empty or half-full SLAB
+
+    spin_acquire(&slab->lock);
+
+    if (__SLAB_FULL(slab)) {
+        spin_release(&slab->lock);
+        __slab_cache_lock(cache);
+        __slab_enqueue(cache, slab, -1);
+        __slab_cache_unlock(cache);
+        slab = NULL;
+        goto retry;
+    }
+
     obj = __slab_obj_get(slab);
     assert(obj != NULL , "slab_alloc(): Failed to get an object from a SLAB");
-    cache->obj_active++;
-    __slab_enqueue(cache, slab);
+
+    __atomic_add_fetch(&cache->obj_active, 1, __ATOMIC_RELAXED);
+    if (__SLAB_FULL(slab)) {
+        __slab_cache_lock(cache);
+        __slab_enqueue(cache, slab, -1);
+        __slab_cache_unlock(cache);
+    } else {
+        __slab_cpu_lock(cache, cpu_id);
+        __slab_enqueue(cache, slab, cpu_id);
+        __slab_cpu_unlock(cache, cpu_id);
+    }
+
+    spin_release(&slab->lock);
 done:
-    __slab_cache_unlock(cache);
     __slab_sanitizer_check("slab_alloc", cache, slab, obj);
     return obj;
 }
@@ -535,28 +615,92 @@ done:
 void slab_free(void *obj) {
     slab_t *slab;
     slab_cache_t *cache;
-    int tmp;
+    int cpu_id;
+    int owner_cpu = -1;
     slab = __find_obj_slab(obj);
     if (obj == NULL) {
         printf("slab_free(): obj is NULL\n");
+        return;
+    }
+    if (slab == NULL) {
+        printf("slab_free(): cannot locate SLAB for obj 0x%lx\n", (uint64)obj);
         return;
     }
     cache = slab->cache;
     if (cache == NULL) {
         panic("slab_free");
     }
-    __slab_cache_lock(cache);
-    __slab_dequeue(cache, slab);
-    __slab_obj_put(slab, obj);
-    cache->obj_active--;
-    __slab_enqueue(cache, slab);
-    tmp = cache->obj_total - cache->obj_active;
-    if(tmp >= cache->limits) {
-        tmp = tmp / (cache->slab_obj_num * 2);
-        if (__slab_cache_shrink_unlocked(cache, tmp) < 0) {
-            panic("slab_free(): shrink");
+    cpu_id = cpuid();
+    spin_acquire(&slab->lock);
+
+    int slab_was_queued = 0;
+    while (!LIST_NODE_IS_DETACHED(slab, list_entry)) {
+        owner_cpu = slab->owner_cpu;
+        if (owner_cpu >= 0) {
+            __slab_cpu_lock(cache, owner_cpu);
+            if (slab->owner_cpu != owner_cpu || LIST_NODE_IS_DETACHED(slab, list_entry)) {
+                __slab_cpu_unlock(cache, owner_cpu);
+                continue;
+            }
+            __slab_dequeue(cache, slab);
+            __slab_cpu_unlock(cache, owner_cpu);
+            slab_was_queued = 1;
+            break;
+        } else {
+            __slab_cache_lock(cache);
+            if (slab->owner_cpu >= 0) {
+                __slab_cache_unlock(cache);
+                continue;
+            }
+            if (LIST_NODE_IS_DETACHED(slab, list_entry)) {
+                __slab_cache_unlock(cache);
+                break;
+            }
+            __slab_dequeue(cache, slab);
+            __slab_cache_unlock(cache);
+            slab_was_queued = 1;
+            break;
         }
     }
-    __slab_cache_unlock(cache);
+
+    __slab_obj_put(slab, obj);
+    __atomic_sub_fetch(&cache->obj_active, 1, __ATOMIC_RELAXED);
+
+    if (!slab_was_queued) {
+        // Another allocator currently owns the slab; it will requeue after finishing.
+        spin_release(&slab->lock);
+        __slab_sanitizer_check("slab_free", cache, slab, obj);
+        return;
+    }
+
+    if (__SLAB_EMPTY(slab)) {
+        __slab_cache_lock(cache);
+        __slab_enqueue(cache, slab, -1);
+        uint64 free_objs = (uint64)cache->slab_free * cache->slab_obj_num;
+        if (free_objs >= cache->limits) {
+            __slab_dequeue(cache, slab); // keep the just-freed slab out of shrink candidates
+            uint64 free_objs_after = (uint64)cache->slab_free * cache->slab_obj_num;
+            uint64 shrink = 0;
+            if (cache->slab_free > 0) {
+                shrink = free_objs_after / (cache->slab_obj_num * 2);
+                if (shrink == 0) {
+                    shrink = 1;
+                }
+                if (shrink > (uint64)cache->slab_free) {
+                    shrink = cache->slab_free;
+                }
+            }
+            if (shrink > 0 && __slab_cache_shrink_unlocked(cache, (int)shrink) < 0) {
+                panic("slab_free(): shrink");
+            }
+            __slab_enqueue(cache, slab, -1);
+        }
+        __slab_cache_unlock(cache);
+    } else {
+        __slab_cpu_lock(cache, cpu_id);
+        __slab_enqueue(cache, slab, cpu_id);
+        __slab_cpu_unlock(cache, cpu_id);
+    }
+    spin_release(&slab->lock);
     __slab_sanitizer_check("slab_free", cache, slab, obj);
 }
