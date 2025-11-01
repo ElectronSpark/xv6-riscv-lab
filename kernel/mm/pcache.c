@@ -387,7 +387,99 @@ err_continue:
 
 static void __flusher_thread(uint64 a1, uint64 a2) {
     printf("pcache flusher thread started\n");
-    
+
+    for (;;) {
+        uint64 round_start = get_jiffs();
+        bool force_round = !completion_done(&__global_flusher_completion);
+        bool pending_flush = false;
+
+        __pcache_global_lock();
+        struct pcache *pcache = NULL;
+        struct pcache *tmp = NULL;
+        list_foreach_node_safe(&__global_pcache_list, pcache, tmp, list_entry) {
+            __pcache_spin_lock(pcache);
+
+            if (!__pcache_is_active(pcache)) {
+                __pcache_spin_unlock(pcache);
+                continue;
+            }
+
+            bool should_flush = false;
+            if (pcache->dirty_count > 0) {
+                if (force_round) {
+                    should_flush = true;
+                } else {
+                    uint64 dirty_threshold = 0;
+                    if (pcache->page_count > 0 && pcache->dirty_rate > 0) {
+                        dirty_threshold = (pcache->page_count * pcache->dirty_rate) / 100;
+                    }
+                    if (dirty_threshold == 0 && pcache->dirty_count > 0) {
+                        dirty_threshold = 1;
+                    }
+
+                    if (dirty_threshold > 0 && pcache->dirty_count >= dirty_threshold) {
+                        should_flush = true;
+                    } else {
+                        if (round_start >= pcache->last_flushed &&
+                            round_start - pcache->last_flushed >= PCACHE_FLUSH_INTERVAL_JIFFS) {
+                            should_flush = true;
+                        } else if (round_start >= pcache->last_request &&
+                                   round_start - pcache->last_request >= PCACHE_FLUSH_INTERVAL_JIFFS) {
+                            should_flush = true;
+                        }
+                    }
+                }
+            }
+
+            if (should_flush) {
+                if (!__pcache_queue_work(pcache)) {
+                    if (pcache->flush_requested == 0) {
+                        printf("warning: flusher failed to queue work for pcache %p\n", pcache);
+                    }
+                }
+            }
+
+            if (pcache->flush_requested) {
+                pending_flush = true;
+            }
+
+            __pcache_spin_unlock(pcache);
+        }
+        __pcache_global_unlock();
+
+        if (pending_flush) {
+            for (;;) {
+                bool still_pending = false;
+
+                __pcache_global_lock();
+                list_foreach_node_safe(&__global_pcache_list, pcache, tmp, list_entry) {
+                    __pcache_spin_lock(pcache);
+                    if (pcache->flush_requested) {
+                        still_pending = true;
+                        __pcache_spin_unlock(pcache);
+                        break;
+                    }
+                    __pcache_spin_unlock(pcache);
+                }
+                __pcache_global_unlock();
+
+                if (!still_pending) {
+                    break;
+                }
+
+                sleep_ms(10);
+            }
+        }
+
+        __pcache_flusher_done();
+
+        uint64 sleep_ticks = PCACHE_FLUSH_INTERVAL_JIFFS;
+        uint64 sleep_ms_val = (sleep_ticks * 1000) / HZ;
+        if (sleep_ms_val == 0) {
+            sleep_ms_val = 1;
+        }
+        sleep_ms(sleep_ms_val);
+    }
 }
 
 static void __create_flusher_thread(void) {
