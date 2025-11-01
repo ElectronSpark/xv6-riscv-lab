@@ -10,6 +10,7 @@
 #include "defs.h"
 #include "page.h"
 #include "slab.h"
+#include "bits.h"
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
@@ -51,6 +52,13 @@ kinit()
 // return NULL if failed
 void *kmm_alloc(size_t size) {
     int slab_idx = 0;
+    if (size > SLAB_OBJ_MAX_SIZE) {
+        return NULL;
+    }
+    if (size < SLAB_OBJ_MIN_SIZE) {
+        size = SLAB_OBJ_MIN_SIZE;
+    }
+    size_t obj_shift = sizeof(size_t) * 8 - bits_clzg(size - 1);
     size_t obj_size = SLAB_OBJ_MIN_SIZE;
 
     while (slab_idx < SLAB_CACHE_NUMS) {
@@ -60,7 +68,9 @@ void *kmm_alloc(size_t size) {
       obj_size <<= 1;
       slab_idx++;
     }
-    if (obj_size > SLAB_OBJ_MAX_SIZE || slab_idx >= SLAB_CACHE_NUMS) {
+    assert(slab_idx >= 0 && slab_idx < SLAB_CACHE_NUMS, "kmm_alloc: invalid slab index");
+    assert((1UL << obj_shift) >= size, "kmm_alloc: invalid object size calculation");
+    if (obj_shift > SLAB_OBJ_MAX_SHIFT || slab_idx >= SLAB_CACHE_NUMS) {
       return NULL;
     }
     push_off();

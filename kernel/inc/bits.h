@@ -76,22 +76,35 @@
         res;                                        \
     })
 
-    #define bits_clz_x(x, width)    ({              \
-        int res = -1;                               \
-        if (x) {                                    \
-            int shift = width * 8 - 8;              \
-            while(shift >= 0) {                     \
-                uint8 shifted = ((x) >> shift)      \
-                shifted &= 0xFF;                    \
-                if (shifted) {                      \
-                    ret = bits_clz8(shifted);       \
-                    break;                          \
-                }                                   \
-                shift -= 8;                         \
-            }                                       \
-            ret += width - 8 - shift;               \
-        }                                           \
-        res;                                        \
+    #define bits_clz_x(x, width)    ({                              \
+        int __res = -1;                                             \
+        int __width = (width);                                      \
+        if (__width > 0) {                                          \
+            typeof(x) __orig = (x);                                 \
+            uint64 __val = (uint64)__orig;                          \
+            if (__width < 64) {                                     \
+                uint64 __mask = (1ULL << __width) - 1ULL;           \
+                __val &= __mask;                                    \
+            }                                                       \
+            if (__val) {                                            \
+                int __highest = -1;                                 \
+                int __bit_index = 0;                                \
+                while (__val && __bit_index < __width) {            \
+                    uint8 __byte = (uint8)(__val & 0xFFU);          \
+                    if (__byte) {                                   \
+                        int __byte_msb = 7 - bits_clz8(__byte);     \
+                        __highest = __bit_index + __byte_msb;       \
+                    }                                               \
+                    __val >>= 8;                                    \
+                    __bit_index += 8;                               \
+                }                                                   \
+                if (__highest >= __width) {                         \
+                    __highest = __width - 1;                        \
+                }                                                   \
+                __res = (__width - 1) - __highest;                  \
+            }                                                       \
+        }                                                           \
+        __res;                                                      \
     })
 
     #define bits_ffs_x(x, width)    (bits_ctz_x((x), (width)) + 1)

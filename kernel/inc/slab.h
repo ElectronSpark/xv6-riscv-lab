@@ -5,8 +5,10 @@
 #include "slab_type.h"
 
 #define SLAB_CACHE_NUMS             8
+#define SLAB_OBJ_MAX_SHIFT          PAGE_SHIFT
 #define SLAB_OBJ_MAX_SIZE           PAGE_SIZE
-#define SLAB_OBJ_MIN_SIZE           32
+#define SLAB_OBJ_MIN_SHIFT          5
+#define SLAB_OBJ_MIN_SIZE           (1UL << SLAB_OBJ_MIN_SHIFT)
 // Try to set the default SLAB size as 2MB, which is the size of a huge page.
 #if PAGE_BUDDY_MAX_ORDER > 8
 #define SLAB_DEFAULT_ORDER          8

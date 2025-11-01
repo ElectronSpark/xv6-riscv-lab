@@ -78,6 +78,31 @@ naive_ctz_u64(uint64 value)
 }
 
 static int
+naive_clz_width(uint64 value, unsigned width)
+{
+    if (width == 0U) {
+        return -1;
+    }
+    if (width > 64U) {
+        width = 64U;
+    }
+    if (width < 64U) {
+        uint64 mask = (1ULL << width) - 1ULL;
+        value &= mask;
+    }
+    if (value == 0ULL) {
+        return -1;
+    }
+    uint64 msb_mask = (width == 64U) ? (1ULL << 63) : (1ULL << (width - 1U));
+    int count = 0;
+    while ((value & msb_mask) == 0ULL) {
+        count++;
+        msb_mask >>= 1U;
+    }
+    return count;
+}
+
+static int
 naive_popcount_u64(uint64 value)
 {
     int total = 0;
@@ -186,6 +211,79 @@ test_bits_ctzg_multiwidth(void **state)
             assert_int_equal(bits_ctzg(shifted_right), naive_ctz_u64(shifted_right));
         }
     }
+}
+
+static void
+test_bits_clzg_multiwidth(void **state)
+{
+    (void)state;
+
+    const uint16 samples16[] = {
+        0x0001U,
+        0x0002U,
+        0x0010U,
+        0x0100U,
+        0x0F00U,
+        0x7FFFU,
+        0x8000U
+    };
+    for (size_t i = 0; i < sizeof(samples16) / sizeof(samples16[0]); i++) {
+        uint16 value = samples16[i];
+        assert_int_equal(bits_clzg(value), naive_clz_width(value, 16));
+        for (unsigned shift = 1; shift < 8; shift++) {
+            uint16 shifted_left = (uint16)(value << shift);
+            assert_int_equal(bits_clzg(shifted_left), naive_clz_width(shifted_left, 16));
+            uint16 shifted_right = (uint16)(value >> shift);
+            assert_int_equal(bits_clzg(shifted_right), naive_clz_width(shifted_right, 16));
+        }
+    }
+
+    const uint32 samples32[] = {
+        0x00000001U,
+        0x00000010U,
+        0x00000F00U,
+        0x000F0000U,
+        0x00F00000U,
+        0x7FFFFFFFU,
+        0x80000000U
+    };
+    const size_t expected[] = {31, 27, 20, 12, 8, 1, 0};
+    for (size_t i = 0; i < sizeof(samples32) / sizeof(samples32[0]); i++) {
+        uint32 value = samples32[i];
+        assert_int_equal(bits_clzg(value), expected[i]);
+        for (unsigned shift = 0; shift < 16; shift++) {
+            uint32 shifted_left = (uint32)(value << shift);
+            assert_int_equal(bits_clzg(shifted_left), naive_clz_width(shifted_left, 32));
+            uint32 shifted_right = (uint32)(value >> shift);
+            assert_int_equal(bits_clzg(shifted_right), naive_clz_width(shifted_right, 32));
+        }
+    }
+
+    const uint64 samples64[] = {
+        0x0000000000000001ULL,
+        0x0000000000000010ULL,
+        0x0000000000100000ULL,
+        0x0000000010000000ULL,
+        0x0000000F00000000ULL,
+        0x0F00000000000000ULL,
+        0x7FFFFFFFFFFFFFFFULL,
+        0x8000000000000000ULL
+    };
+    for (size_t i = 0; i < sizeof(samples64) / sizeof(samples64[0]); i++) {
+        uint64 value = samples64[i];
+        assert_int_equal(bits_clzg(value), naive_clz_width(value, 64));
+        printf("Testing value: 0x%016llx, expected: %d, got: %d\n", (unsigned long long)value, naive_clz_width(value, 64), bits_clzg(value));
+        for (unsigned shift = 1; shift < 16; shift++) {
+            uint64 shifted_left = value << shift;
+            assert_int_equal(bits_clzg(shifted_left), naive_clz_width(shifted_left, 64));
+            uint64 shifted_right = value >> shift;
+            assert_int_equal(bits_clzg(shifted_right), naive_clz_width(shifted_right, 64));
+        }
+    }
+
+    assert_int_equal(bits_clzg((uint16)0), -1);
+    assert_int_equal(bits_clzg((uint32)0), -1);
+    assert_int_equal(bits_clzg((uint64)0), -1);
 }
 
 static void
@@ -329,6 +427,7 @@ main(void)
         cmocka_unit_test(test_bits_clz8_matches_naive),
         cmocka_unit_test(test_bits_popcount8_matches_naive),
         cmocka_unit_test(test_bits_ctzg_multiwidth),
+        cmocka_unit_test(test_bits_clzg_multiwidth),
         cmocka_unit_test(test_bits_popcountg_multiwidth),
         cmocka_unit_test(test_bits_ffsg_matches_naive),
         cmocka_unit_test(test___bits_ctz_ptr_null),
