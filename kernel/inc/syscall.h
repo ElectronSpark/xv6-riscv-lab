@@ -50,4 +50,6 @@
 #define SYS_dumpproc 534
 #define SYS_dumpchan 535
 
+#define SYS_sync 900
+
 #endif          /* __KERNEL_SYSCALL_H */

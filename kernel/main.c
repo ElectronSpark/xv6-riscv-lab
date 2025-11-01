@@ -8,6 +8,7 @@
 #include "workqueue.h"
 #include "kobject.h"
 #include "dev.h"
+#include "pcache.h"
 
 volatile STATIC int started = 0;
 
@@ -50,6 +51,7 @@ main()
     signal_init();   // signal handling initialization  
     userinit();      // first user process
     sched_timer_init();
+    pcache_global_init(); // page cache subsystem initialization
     struct proc *idle_proc = myproc();
     int kpid = kernel_proc_create("idle_process", &idle_proc, __idle, 128, 256, KERNEL_STACK_ORDER); // Create an idle kernel thread
     wakeup_proc(idle_proc);

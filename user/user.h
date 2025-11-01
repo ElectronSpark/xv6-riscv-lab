@@ -41,6 +41,8 @@ int memstat(void);
 int dumpproc(void);
 int dumpchan(void);
 
+void sync(void);
+
 // ulib.c
 int stat(const char*, struct stat*);
 char* strcpy(char*, const char*);

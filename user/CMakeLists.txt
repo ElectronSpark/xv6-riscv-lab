@@ -103,6 +103,7 @@ set(USER_PROGRAMS_C_FILES
 	${USER_DIR}/wc.c
 	${USER_DIR}/zombie.c
 	${USER_DIR}/sleep.c
+    ${USER_DIR}/sync.c
 	${USER_DIR}/pingpong.c
 	${USER_DIR}/primes.c
 	${USER_DIR}/find.c

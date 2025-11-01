@@ -29,7 +29,7 @@ struct pcache_ops {
 #define PCACHE_DEFAULT_DIRTY_RATE 15  // in percentage
 #define PCACHE_DEFAULT_MAX_PAGES 4096
 
-#define PCACHE_FLUSH_INTERVAL_JIFFS (5 * HZ) // 5 seconds
+#define PCACHE_FLUSH_INTERVAL_JIFFS (30 * HZ) // 30 seconds
 
 // Page cache structure
 //
