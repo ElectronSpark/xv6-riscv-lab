@@ -16,6 +16,7 @@
 #include "errno.h"
 #include "slab.h"
 #include "bio.h"
+#include "timer.h"
 
 // Locking order:
 // 1. __pcache_global_spinlock
@@ -32,6 +33,7 @@ static int __global_pcache_count = 0;
 static struct workqueue *__global_pcache_flush_wq = NULL;
 static spinlock_t __pcache_global_spinlock = {0};
 static slab_cache_t __pcache_node_slab = {0};
+completion_t __global_flusher_completion = {0};
 
 #define PCACHE_BLKS_PER_PAGE (PGSIZE >> BLK_SIZE_SHIFT)
 #define PCACHE_BLK_MASK ((uint64)PCACHE_BLKS_PER_PAGE - 1)
@@ -59,6 +61,7 @@ static void __pcache_push_lru(struct pcache *pcache, page_t *page);
 static page_t *__pcache_pop_lru(struct pcache *pcache);
 static void __pcache_remove_lru(struct pcache *pcache, page_t *page);
 static void __pcache_push_dirty(struct pcache *pcache, page_t *page);
+static page_t *__pcache_pop_dirty(struct pcache *pcache, uint64 latest_flush_jiffs);
 static page_t *__pcache_evict_lru(struct pcache *pcache);
 
 static void __pcache_flush_worker(struct work_struct *work);
@@ -274,6 +277,7 @@ static bool __pcache_queue_work(struct pcache *pcache) {
     queued = queue_work(__global_pcache_flush_wq, &pcache->flush_work);
     if (queued) {
         pcache->flush_requested = 1;
+        pcache->last_request = get_jiffs();
         pcache->flush_error = 0;
         completion_reinit(&pcache->flush_completion);
     }
@@ -282,30 +286,103 @@ static bool __pcache_queue_work(struct pcache *pcache) {
 }
 
 static void __pcache_flush_done(struct pcache *pcache) {
+    __pcache_spin_assert_holding(pcache);
     pcache->flush_requested = 0;
+    pcache->last_flushed = get_jiffs();
     __pcache_notify_flush_complete(pcache);
 }
 
 // Wake up the flusher thread to flush all dirty pcaches
 static void __pcache_flusher_start(void) {
-
+    completion_reinit(&__global_flusher_completion);
 }
 
 // Wait for flusher thread to complete its current round of flushing
 static int __pcache_wait_flusher(void) {
-
+    wait_for_completion(&__global_flusher_completion);
+    return 0;
 }
 
 // Notify the end of current round of flushing
 static void __pcache_flusher_done(void) {
-
+    complete_all(&__global_flusher_completion);
 }
 
 /******************************************************************************
  * Call back functions for workqueue
  *****************************************************************************/
 static void __pcache_flush_worker(struct work_struct *work) {
-    
+    struct pcache *pcache = (struct pcache *)work->data;
+    int ret = 0;
+    uint64 start_jiffs = get_jiffs();
+
+    // @TODO: need to come up with a more robust way to handle all pcache flush errors
+
+    if (pcache == NULL) {
+        printf("__pcache_flush_worker: pcache is NULL\n");
+        return;
+    }
+
+    __pcache_spin_lock(pcache);
+    while (1) {
+        page_t *page = __pcache_pop_dirty(pcache, start_jiffs);
+        if (page == NULL) {
+            break;  // No more dirty pages to flush
+        }
+        ret = page_ref_inc_unlocked(page);
+        assert(ret > 1, "__pcache_flush_worker: failed to increment page ref count");
+        ret = __pcache_node_io_begin(pcache, page);
+        assert(ret == 0, "__pcache_flush_worker: failed to begin IO on page");
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+
+        // Real write operation outside the pcache lock
+        ret = __pcache_write_begin(pcache, page);
+        if (ret != 0) {
+            __pcache_spin_lock(pcache);
+            pcache->flush_error = ret;
+            goto err_continue;
+        }
+        ret = __pcache_write_page(pcache, page);
+        if (ret != 0) {
+            ret = __pcache_write_end(pcache, page);
+            __pcache_spin_lock(pcache);
+            pcache->flush_error = ret;
+            goto err_continue;
+        }
+        ret = __pcache_write_end(pcache, page);
+
+        __pcache_spin_lock(pcache);
+        page_lock_acquire(page);
+        if (ret != 0) {
+            pcache->flush_error = ret;
+        }
+        struct pcache_node *pcnode = page->pcache.pcache_node;
+        assert(pcnode != NULL, "__pcache_flush_worker: page missing pcache node");
+        pcnode->dirty = 0;
+        pcnode->uptodate = 1;
+        ret = __pcache_node_io_end(pcache, page);
+        assert(ret == 0, "__pcache_flush_worker: failed to end IO on page");
+        ret = page_ref_dec_unlocked(page);
+        assert(ret >= 1, "__pcache_flush_worker: page refcount underflow after flush");
+        if (ret == 1 && LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
+            __pcache_push_lru(pcache, page);
+        }
+        page_lock_release(page);
+        continue;
+
+err_continue:
+        __pcache_spin_assert_holding(pcache);
+        page_lock_acquire(page);
+        ret = __pcache_node_io_end(pcache, page);
+        assert(ret == 0, "__pcache_flush_worker: failed to end IO on page");
+        __pcache_push_dirty(pcache, page);
+        ret = page_ref_dec_unlocked(page);
+        assert(ret > 0, "__pcache_flush_worker: failed to decrement page ref count");
+        page_lock_release(page);
+    }
+    __pcache_flush_done(pcache);
+    __pcache_spin_unlock(pcache);
 }
 
 static void __flusher_thread(uint64 a1, uint64 a2) {
@@ -557,6 +634,7 @@ static int __pcache_node_io_begin(struct pcache *pcache, page_t *page) {
         return -EALREADY;
     }
     node->io_in_progress = 1;
+    node->last_request = get_jiffs();
     completion_reinit(&node->io_completion);
     __pcache_tree_unlock(pcache);
     return 0;
@@ -570,6 +648,7 @@ static int __pcache_node_io_end(struct pcache *pcache, page_t *page) {
         return -EALREADY;
     }
     node->io_in_progress = 0;
+    node->last_flushed = get_jiffs();
     __pcache_tree_unlock(pcache);
     complete_all(&node->io_completion);
     return 0;
@@ -582,9 +661,8 @@ static int __pcache_node_io_wait(struct pcache *pcache, page_t *page) {
         __pcache_tree_unlock(pcache);
         return 0;
     }
-    node->io_in_progress = 0;
-    wait_for_completion(&node->io_completion);
     __pcache_tree_unlock(pcache);
+    wait_for_completion(&node->io_completion);
     return 0;
 }
 
@@ -600,26 +678,37 @@ static void __pcache_push_lru(struct pcache *pcache, page_t *page) {
     assert(!pcnode->dirty, "__pcache_push_lru: pcache_node is dirty");
     assert(pcnode->pcache == pcache, "__pcache_push_lru: pcache_node's pcache does not match the given pcache");
     assert(pcnode->page == page, "__pcache_push_lru: pcache_node does not point to the given page");
+    assert(page->ref_count == 1, "__pcache_push_lru: page ref_count is not 1");
     assert(LIST_NODE_IS_DETACHED(pcnode, lru_entry), "__pcache_push_lru: pcache node already in lru or dirty list");
     list_node_push_back(&pcache->lru, pcnode, lru_entry);
     pcache->lru_count++;
 }
 
-// Will not acquire the lock of the returned page
+// Will return a page with its lock held
 static page_t *__pcache_pop_lru(struct pcache *pcache) {
     __pcache_spin_assert_holding(pcache);
     if (LIST_IS_EMPTY(&pcache->lru)) {
         return NULL;
     }
-    struct pcache_node *pcnode = list_node_pop(&pcache->lru, struct pcache_node, lru_entry);
+retry:
+    struct pcache_node *pcnode = LIST_LAST_NODE(&pcache->lru, struct pcache_node, lru_entry);
     if (pcnode == NULL) {
         return NULL;
     }
-    assert(pcnode->page != NULL, "__pcache_pop_lru: pcache_node has no page");
-    assert(pcnode->pcache == pcache, "__pcache_pop_lru: pcache_node's pcache does not match the given pcache");
+
     page_t *page = pcnode->page;
+    assert(page != NULL, "__pcache_pop_lru: pcache_node has no page");
+    page_lock_acquire(page);
+
+    if (LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
+        page_lock_release(page);
+        goto retry;
+    }
+
+    assert(pcnode->pcache == pcache, "__pcache_pop_lru: pcache_node's pcache does not match the given pcache");
     pcache->lru_count--;
     assert(pcache->lru_count >= 0, "__pcache_pop_lru: pcache lru count underflow");
+    list_node_detach(pcnode, lru_entry);
     return page;
 }
 
@@ -649,14 +738,54 @@ static void __pcache_push_dirty(struct pcache *pcache, page_t *page) {
     assert(pcnode->dirty, "__pcache_push_dirty: pcache_node is not dirty");
     assert(pcnode->pcache == pcache, "__pcache_push_dirty: pcache_node's pcache does not match the given pcache");
     assert(pcnode->page == page, "__pcache_push_dirty: pcache_node does not point to the given page");
-    assert(LIST_NODE_IS_DETACHED(pcnode, lru_entry), "__pcache_push_dirty: pcache node already in lru or dirty list");
+    if (LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
+        pcache->dirty_count++;
+    } else {
+        list_node_detach(pcnode, lru_entry);
+    }
     list_node_push_back(&pcache->dirty_list, pcnode, lru_entry);
-    pcache->dirty_count++;
+}
+
+// Pop a dirty page from pcache dirty list
+// When latest_flush_jiffs is non-zero, only pop pages that were last flushed before that jiffs value
+// Will return a page with its lock held
+static page_t *__pcache_pop_dirty(struct pcache *pcache, uint64 latest_flush_jiffs) {
+    __pcache_spin_assert_holding(pcache);
+    if (LIST_IS_EMPTY(&pcache->dirty_list)) {
+        return NULL;
+    }
+retry:
+    struct pcache_node *pcnode = LIST_LAST_NODE(&pcache->dirty_list, struct pcache_node, lru_entry);
+    if (pcnode == NULL) {
+        return NULL;
+    }
+    page_t *page = pcnode->page;
+    assert(page != NULL, "__pcache_pop_dirty: pcache_node has no page");
+    page_lock_acquire(page);
+    if (pcnode->last_flushed > latest_flush_jiffs && latest_flush_jiffs != 0) {
+        // This page was flushed too recently, skip it
+        page_lock_release(page);
+        return NULL;
+    }
+    if (LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
+        // Another thread has already removed this node, retry
+        page_lock_release(page);
+        goto retry;
+    }
+    assert(pcnode->pcache == pcache, "__pcache_pop_dirty: pcache_node's pcache does not match the given pcache");
+    assert(pcnode->dirty, "__pcache_pop_dirty: pcache_node is not dirty");
+    assert(!pcnode->io_in_progress, "__pcache_pop_dirty: pcache_node IO in progress");
+    pcache->dirty_count--;
+    assert(pcache->dirty_count >= 0, "__pcache_pop_dirty: pcache dirty count underflow");
+    list_node_detach(pcnode, lru_entry);
+    return page;
 }
 
 static page_t *__pcache_evict_lru(struct pcache *pcache) {
     page_t *page = __pcache_pop_lru(pcache);
-    page_lock_acquire(page);
+    if (page == NULL) {
+        return NULL;
+    }
     __pcache_remove_node(pcache, page);
     __pcache_node_detach_page(pcache, page);
     page_lock_release(page);
@@ -679,6 +808,8 @@ void pcache_global_init(void) {
     __global_pcache_flush_wq = workqueue_create("pcache_flush_wq", WORKQUEUE_DEFAULT_MAX_ACTIVE);
     assert(__global_pcache_flush_wq != NULL, "Failed to create global pcache flush workqueue");
     printf("Page cache subsystem initialized\n");
+    completion_init(&__global_flusher_completion);
+    complete_all(&__global_flusher_completion);
     __create_flusher_thread();
 }
 
@@ -713,6 +844,9 @@ int pcache_init(struct pcache *pcache) {
     if (pcache->dirty_rate == 0 || pcache->dirty_rate > 100) {
         pcache->dirty_rate = PCACHE_DEFAULT_DIRTY_RATE;
     }
+    uint64 now = get_jiffs();
+    pcache->last_flushed = now;
+    pcache->last_request = now;
     __pcache_register(pcache);
     return 0;
 }

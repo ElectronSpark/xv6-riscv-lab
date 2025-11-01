@@ -29,6 +29,8 @@ struct pcache_ops {
 #define PCACHE_DEFAULT_DIRTY_RATE 15  // in percentage
 #define PCACHE_DEFAULT_MAX_PAGES 4096
 
+#define PCACHE_FLUSH_INTERVAL_JIFFS (5 * HZ) // 5 seconds
+
 // Page cache structure
 //
 // Needs to reside on other objects.
@@ -59,6 +61,8 @@ struct pcache {
     int64 page_count;       // Total number of pages
     uint64 max_pages;       // Maximum number of pages allowed in the pcache
     uint64 blk_count;       // Total number of blocks (512-byte) managed by the pcache
+    uint64 last_request;    // Last IO request timestamp in jiffies
+    uint64 last_flushed;    // Last flushed timestamp in jiffies
     completion_t flush_completion; // Completion for flush operation
     void *private_data; // For filesystem specific data
     union {
@@ -88,6 +92,8 @@ struct pcache_node {
     page_t             *page;      // pointer to the page
     void               *data;      // pointer to the data area in the page
     int64              page_count; // number of pages in this node
+    uint64             last_request;    // Last IO request timestamp in jiffies
+    uint64             last_flushed;    // Last flushed timestamp in jiffies
     struct {
         uint64 dirty: 1;   // whether the page is dirty
         uint64 uptodate: 1; // whether the page data is up-to-date
@@ -109,9 +115,7 @@ int pcache_sync(void);
 // int pcache_evict_pages(struct pcache *pcache, size_t target_size);
 // @TODO: do eviction in OOM
 int pcache_read_page(struct pcache *pcache, page_t *page);
-int pcache_write_begin(struct pcache *pcache, page_t *page);
 int pcache_mark_page_dirty(struct pcache *pcache, page_t *page);
-int pcache_write_end(struct pcache *pcache, page_t *page);
 
 // ssize_t bread(dev_t dev, uint64 blockno, void *data, size_t size, bool user);
 // ssize_t bwrite(dev_t dev, uint64 blockno, const void *data, size_t size, bool user);
