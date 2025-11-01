@@ -45,10 +45,6 @@ completion_t __global_flusher_completion = {0};
 static void __pcache_register(struct pcache *pcache);
 // static void __pcache_unregister(struct pcache *pcache);
 
-static struct pcache_node *__pcache_find_key_page(
-    struct pcache *pcache,
-    uint64 blkno
-);
 static page_t *__pcache_get_page(
     struct pcache *pcache,
     uint64 blkno,
@@ -166,31 +162,9 @@ static int __pcache_init_validate(struct pcache *pcache) {
         return -EINVAL;
     }
     if (!rb_root_is_empty(&pcache->page_map) ||
-        !LIST_ENTRY_UNINITIALIZED(&pcache->lru) ||
-        !LIST_ENTRY_UNINITIALIZED(&pcache->dirty_list) ||
-        !LIST_ENTRY_UNINITIALIZED(&pcache->list_entry)) {
-        return -EINVAL;
-    }
-    return 0;
-}
-
-static int __pcache_page_init_validate(struct pcache *pcache, uint64 blkno, size_t offset, size_t size) {
-    if (pcache == NULL) {
-        return -EINVAL;
-    }
-    if (blkno >= pcache->blk_count) {
-        return -EINVAL;
-    }
-    if (size == 0 || size > PGSIZE || (size & (511))) {
-        // size should be non-zero, not exceed one page and aligned to 512 bytes
-        return -EINVAL;
-    }
-    if (offset & (511)) {
-        // offset should be aligned to 512 bytes
-        return -EINVAL;
-    }
-    if (offset + size > PGSIZE) {
-        // cached area should not exceed one page
+        pcache->lru.next != NULL || pcache->lru.prev != NULL ||
+        pcache->dirty_list.next != NULL || pcache->dirty_list.prev != NULL ||
+        pcache->list_entry.next != NULL || pcache->list_entry.prev != NULL) {
         return -EINVAL;
     }
     return 0;
