@@ -1216,6 +1216,10 @@ int pcache_mark_page_dirty(struct pcache *pcache, page_t *page) {
     __pcache_push_dirty(pcache, page);
 
 out:
+    if (ret == 0 && pcnode != NULL) {
+        assert((pcnode->dirty && !LIST_NODE_IS_DETACHED(pcnode, lru_entry)) || pcnode->io_in_progress,
+               "pcache_mark_page_dirty: dirty page not in dirty list or in IO");
+    }
     page_lock_release(page);
     __pcache_spin_unlock(pcache);
     return ret;

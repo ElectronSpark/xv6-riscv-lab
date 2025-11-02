@@ -305,6 +305,76 @@ static void test_pcache_mark_page_dirty_busy(void **state) {
     assert_int_equal(fixture->mark_dirty_calls, 0);
 }
 
+static void test_pcache_mark_page_dirty_detaches_lru(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    uint64 blkno = 50;
+    page_t *page = create_cached_page(cache, blkno);
+    struct pcache_node *node = page->pcache.pcache_node;
+
+    pcache_put_page(cache, page);
+    assert_int_equal(cache->lru_count, 1);
+    assert_int_equal(cache->dirty_count, 0);
+
+    spin_acquire(&cache->spinlock);
+    page_lock_acquire(page);
+    page->ref_count = 2;
+    page_lock_release(page);
+    spin_release(&cache->spinlock);
+
+    int rc = pcache_mark_page_dirty(cache, page);
+    assert_int_equal(rc, 0);
+    assert_int_equal(cache->dirty_count, 1);
+    assert_int_equal(cache->lru_count, 0);
+    assert_true(node->dirty);
+    assert_false(LIST_NODE_IS_DETACHED(node, lru_entry));
+    assert_int_equal(fixture->mark_dirty_calls, 1);
+    assert_ptr_equal(fixture->last_mark_dirty_page, page);
+
+    assert_int_equal(pcache_invalidate_page(cache, page), 0);
+    pcache_put_page(cache, page);
+}
+
+static void test_pcache_mark_page_dirty_idempotent(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    uint64 blkno = 52;
+    page_t *page = create_cached_page(cache, blkno);
+    struct pcache_node *node = page->pcache.pcache_node;
+
+    int rc = pcache_mark_page_dirty(cache, page);
+    assert_int_equal(rc, 0);
+    assert_int_equal(cache->dirty_count, 1);
+    assert_true(node->dirty);
+    assert_int_equal(fixture->mark_dirty_calls, 1);
+
+    rc = pcache_mark_page_dirty(cache, page);
+    assert_int_equal(rc, 0);
+    assert_int_equal(cache->dirty_count, 1);
+    assert_true(node->dirty);
+    assert_int_equal(fixture->mark_dirty_calls, 1);
+    assert_false(LIST_NODE_IS_DETACHED(node, lru_entry));
+
+    assert_int_equal(pcache_invalidate_page(cache, page), 0);
+    pcache_put_page(cache, page);
+}
+
+static void test_pcache_mark_page_dirty_rejects_invalid_page(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    page_t page;
+    init_mock_page(&page, 0x6000);
+    page.ref_count = 2;
+
+    int rc = pcache_mark_page_dirty(cache, &page);
+    assert_int_equal(rc, -EINVAL);
+    assert_int_equal(cache->dirty_count, 0);
+    assert_int_equal(fixture->mark_dirty_calls, 0);
+}
+
 static void test_pcache_invalidate_dirty_page(void **state) {
     struct pcache_test_fixture *fixture = *state;
     struct pcache *cache = &fixture->cache;
@@ -726,6 +796,9 @@ int main(void) {
         cmocka_unit_test_setup_teardown(test_pcache_get_page_from_lru, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_mark_page_dirty_tracks_state, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_mark_page_dirty_busy, pcache_test_setup, pcache_test_teardown),
+    cmocka_unit_test_setup_teardown(test_pcache_mark_page_dirty_detaches_lru, pcache_test_setup, pcache_test_teardown),
+    cmocka_unit_test_setup_teardown(test_pcache_mark_page_dirty_idempotent, pcache_test_setup, pcache_test_teardown),
+    cmocka_unit_test_setup_teardown(test_pcache_mark_page_dirty_rejects_invalid_page, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_invalidate_dirty_page, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_get_page_from_dirty_refcount_one, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_get_page_from_dirty_refcount_many, pcache_test_setup, pcache_test_teardown),
