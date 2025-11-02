@@ -72,14 +72,20 @@ install_trans(int recovering)
   int tail;
 
   for (tail = 0; tail < log.lh.n; tail++) {
-    struct buf *lbuf = bread(log.dev, log.start+tail+1); // read log block
-    struct buf *dbuf = bread(log.dev, log.lh.block[tail]); // read dst
-    memmove(dbuf->data, lbuf->data, BSIZE);  // copy block to dst
-    bwrite(dbuf);  // write dst to disk
+    void *log_data = NULL;
+    page_t *log_page = bread(log.dev, log.start + tail + 1, &log_data); // log block
+    void *dst_data = NULL;
+    page_t *dst_page = bread(log.dev, log.lh.block[tail], &dst_data); // destination block
+
+    memmove(dst_data, log_data, BSIZE);  // copy block to dst
+    int ret = bwrite(log.dev, log.lh.block[tail], dst_page);  // write dst to disk
+    assert(ret == 0, "install_trans: bwrite failed: %d", ret);
+
     if(recovering == 0)
-      bunpin(dbuf);
-    brelse(lbuf);
-    brelse(dbuf);
+      bunpin(dst_page);
+
+    brelse(log_page);
+    brelse(dst_page);
   }
 }
 
@@ -87,14 +93,15 @@ install_trans(int recovering)
 STATIC void
 read_head(void)
 {
-  struct buf *buf = bread(log.dev, log.start);
-  struct logheader *lh = (struct logheader *) (buf->data);
+  void *data = NULL;
+  page_t *page = bread(log.dev, log.start, &data);
+  struct logheader *lh = (struct logheader *)data;
   int i;
   log.lh.n = lh->n;
   for (i = 0; i < log.lh.n; i++) {
     log.lh.block[i] = lh->block[i];
   }
-  brelse(buf);
+  brelse(page);
 }
 
 // Write in-memory log header to disk.
@@ -103,15 +110,17 @@ read_head(void)
 STATIC void
 write_head(void)
 {
-  struct buf *buf = bread(log.dev, log.start);
-  struct logheader *hb = (struct logheader *) (buf->data);
+  void *data = NULL;
+  page_t *page = bread(log.dev, log.start, &data);
+  struct logheader *hb = (struct logheader *)data;
   int i;
   hb->n = log.lh.n;
   for (i = 0; i < log.lh.n; i++) {
     hb->block[i] = log.lh.block[i];
   }
-  bwrite(buf);
-  brelse(buf);
+  int ret = bwrite(log.dev, log.start, page);
+  assert(ret == 0, "write_head: bwrite failed: %d", ret);
+  brelse(page);
 }
 
 STATIC void
@@ -182,12 +191,17 @@ write_log(void)
   int tail;
 
   for (tail = 0; tail < log.lh.n; tail++) {
-    struct buf *to = bread(log.dev, log.start+tail+1); // log block
-    struct buf *from = bread(log.dev, log.lh.block[tail]); // cache block
-    memmove(to->data, from->data, BSIZE);
-    bwrite(to);  // write the log
-    brelse(from);
-    brelse(to);
+    void *to_data = NULL;
+    page_t *to_page = bread(log.dev, log.start + tail + 1, &to_data); // log block
+    void *from_data = NULL;
+    page_t *from_page = bread(log.dev, log.lh.block[tail], &from_data); // cached data block
+
+    memmove(to_data, from_data, BSIZE);
+    int ret = bwrite(log.dev, log.start + tail + 1, to_page);  // write the log entry
+    assert(ret == 0, "write_log: bwrite failed: %d", ret);
+
+    brelse(from_page);
+    brelse(to_page);
   }
 }
 
@@ -213,9 +227,12 @@ commit()
 //   log_write(bp)
 //   brelse(bp)
 void
-log_write(struct buf *b)
+log_write(uint dev, uint blockno, page_t *page)
 {
   int i;
+
+  if (dev != log.dev)
+    panic("log_write: unexpected dev");
 
   spin_acquire(&log.lock);
   if (log.lh.n >= LOGSIZE || log.lh.n >= log.size - 1)
@@ -224,14 +241,15 @@ log_write(struct buf *b)
     panic("log_write outside of trans");
 
   for (i = 0; i < log.lh.n; i++) {
-    if (log.lh.block[i] == b->blockno)   // log absorption
+    if (log.lh.block[i] == blockno)   // log absorption
       break;
   }
-  log.lh.block[i] = b->blockno;
+  log.lh.block[i] = blockno;
   if (i == log.lh.n) {  // Add new block to log?
-    bpin(b);
+    bpin(page);
     log.lh.n++;
   }
+  bmark_dirty(page);
   spin_release(&log.lock);
 }
 

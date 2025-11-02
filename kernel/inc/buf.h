@@ -2,22 +2,20 @@
 #define __KERNEL_BUF_H
 
 #include "compiler.h"
-#include "list_type.h"
-#include "hlist_type.h"
-#include "mutex_types.h"
+#include "pcache.h"
 
-struct buf {
-  int valid;   // has data been read from disk?
-  int disk;    // does disk "own" buf?
-  uint dev;
-  uint blockno;
-  mutex_t lock;
-  uint refcnt;
-  hlist_entry_t hlist_entry; // hash list entry
-  list_node_t lru_entry;
-  uchar *data;
-} __attribute__((aligned(64)));
+/*
+ * New buffer-cache facade built on top of the page cache.  Callers interact
+ * with physical pages directly; helper routines below translate block numbers
+ * into in-memory addresses inside the cached page.
+ */
 
-#define BIO_HASH_BUCKETS 63
+page_t *bread(uint dev, uint blockno, void **data_out);
+int bwrite(uint dev, uint blockno, page_t *page);
+void brelse(page_t *page);
+void bpin(page_t *page);
+void bunpin(page_t *page);
+void bmark_dirty(page_t *page);
+void *block_data(page_t *page, uint blockno);
 
 #endif      /* __KERNEL_BUF_H */

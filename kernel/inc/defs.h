@@ -23,14 +23,17 @@ struct stat;
 struct superblock;
 struct mbuf;
 struct sock;
+struct page_struct;
+typedef struct page_struct page_t;
 
 // bio.c
 void            binit(void);
-struct buf*     bread(uint, uint);
-void            brelse(struct buf*);
-void            bwrite(struct buf*);
-void            bpin(struct buf*);
-void            bunpin(struct buf*);
+page_t*         bread(uint, uint, void **);
+void            brelse(page_t*);
+int             bwrite(uint, uint, page_t*);
+void            bpin(page_t*);
+void            bunpin(page_t*);
+void            bmark_dirty(page_t*);
 
 // console.c
 void            consoleinit(void);
@@ -84,7 +87,7 @@ void            kmm_free(void *);
 
 // log.c
 void            initlog(int, struct superblock*);
-void            log_write(struct buf*);
+void            log_write(uint, uint, page_t*);
 void            begin_op(void);
 void            end_op(void);
 

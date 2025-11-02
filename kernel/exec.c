@@ -79,8 +79,11 @@ exec(char *path, char **argv)
   ilock(ip);
 
   // Check ELF header
-  if(readi(ip, 0, (uint64)&elf, 0, sizeof(elf)) != sizeof(elf))
+  int nread = readi(ip, 0, (uint64)&elf, 0, sizeof(elf));
+  if(nread != sizeof(elf)){
+    printf("exec: failed to read ELF header, got %d bytes\n", nread);
     goto bad;
+  }
 
   if(elf.magic != ELF_MAGIC)
     goto bad;
@@ -91,8 +94,11 @@ exec(char *path, char **argv)
 
   // Load program into memory.
   for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
-    if(readi(ip, 0, (uint64)&ph, off, sizeof(ph)) != sizeof(ph))
+    int phread = readi(ip, 0, (uint64)&ph, off, sizeof(ph));
+    if(phread != sizeof(ph)){
+      printf("exec: failed to read program header %d/%d (read %d bytes)\n", i, elf.phnum, phread);
       goto bad;
+    }
     if(ph.type != ELF_PROG_LOAD)
       continue;
     if(ph.memsz < ph.filesz)
@@ -209,8 +215,10 @@ loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz
     {
       n = PGSIZE;
     }
-    if(readi(ip, 0, pa, offset+i, n) != n)
+    int nseg = readi(ip, 0, pa, offset+i, n);
+    if(nseg != n)
     {
+      printf("exec: failed to read segment data (offset %d len %d read %d)\n", offset+i, n, nseg);
       kfree((void *)pa);
       return -1;
     }

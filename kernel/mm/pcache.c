@@ -379,6 +379,7 @@ static void __pcache_flush_worker(struct work_struct *work) {
         assert(ret >= 1, "__pcache_flush_worker: page refcount underflow after flush");
         if (ret == 1 && LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
             __pcache_push_lru(pcache, page);
+            wakeup_on_chan(pcache);
         }
         page_lock_release(page);
         continue;
@@ -704,17 +705,22 @@ static page_t *__pcache_page_alloc(void) {
     if (pcnode == NULL) {
         return NULL;
     }
-    page_t *page = page_alloc(0, PAGE_TYPE_PCACHE);
+
+    page_t *page = __page_alloc(0, PAGE_TYPE_PCACHE);
     if (page == NULL) {
         slab_free(pcnode);
         return NULL;
     }
+
     __pcache_node_init(pcnode);
     pcnode->page = page;
     pcnode->page_count = 1;
     pcnode->size = PGSIZE;
     pcnode->data = (void *)__page_to_pa(page);
+
     page->pcache.pcache_node = pcnode;
+    page->pcache.pcache = NULL;
+
     return page;
 }
 
@@ -1082,14 +1088,27 @@ retry_lookup:
     if (pcache->max_pages > 0) {
         while (pcache->page_count >= pcache->max_pages) {
             page_t *victim = __pcache_evict_lru(pcache);
-            if (victim == NULL) {
+            if (victim != NULL) {
+                // Balance residency before inserting the new node.
+                __pcache_page_put(victim);
+                continue;
+            }
+
+            // No page is currently reclaimable; wait for one to become available.
+            if (pcache->dirty_count > 0) {
+                // Kick the flusher so writers eventually free clean LRU entries.
+                __pcache_queue_work(pcache);
+            }
+            page_lock_release(new_page);
+            sleep_on_chan(pcache, &pcache->spinlock);
+            page_lock_acquire(new_page);
+
+            if (!__pcache_is_active(pcache)) {
                 page_lock_release(new_page);
                 __pcache_spin_unlock(pcache);
                 __pcache_page_put(new_page);
                 return NULL;
             }
-            // Balance residency before inserting the new node.
-            __pcache_page_put(victim);
         }
     }
 
@@ -1154,6 +1173,7 @@ void pcache_put_page(struct pcache *pcache, page_t *page) {
                 // The cache is the lone owner of a stale page; drop it entirely.
                 __pcache_remove_node(pcache, page);
                 __pcache_node_detach_page(pcache, page);
+                wakeup_on_chan(pcache);
                 page_lock_release(page);
                 __pcache_spin_unlock(pcache);
                 __pcache_page_put(page);
@@ -1161,6 +1181,7 @@ void pcache_put_page(struct pcache *pcache, page_t *page) {
             }
             // Only clean, single-owner, up-to-date pages can be staged on the LRU for reuse.
             __pcache_push_lru(pcache, page);
+            wakeup_on_chan(pcache);
         } else {
             if (pcnode->dirty) {
                 assert(!LIST_NODE_IS_DETACHED(pcnode, lru_entry), "pcache_put_page(): dirty page lost from dirty list");
@@ -1359,7 +1380,7 @@ retry_locked:
         page_lock_release(page);
         __pcache_spin_unlock(pcache);
 
-        if (dirty && uptodate) {
+        if (uptodate) {
             return 0;
         }
 
@@ -1391,16 +1412,22 @@ retry_locked:
 
     // Drive device IO while we are dropped out of the bookkeeping locks. The
     // helper is scripted in host tests, so keep the call centralized.
+    bool wait_for_completion = false;
     ret = __pcache_read_page(pcache, page);
-    if (ret != 0) {
+    if (ret == -EINPROGRESS) {
+        wait_for_completion = true;
+        ret = 0;
+    } else if (ret != 0) {
         __pcache_node_io_end(pcache, page);
         return ret;
     }
 
-    ret = __pcache_node_io_wait(pcache, page);
-    if (ret != 0) {
-        __pcache_node_io_end(pcache, page);
-        return ret;
+    if (wait_for_completion) {
+        ret = __pcache_node_io_wait(pcache, page);
+        if (ret != 0) {
+            __pcache_node_io_end(pcache, page);
+            return ret;
+        }
     }
 
     // Re-check state now that IO has completed.

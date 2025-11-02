@@ -33,11 +33,10 @@ struct superblock sb;
 STATIC void
 readsb(int dev, struct superblock *sb)
 {
-  struct buf *bp;
-
-  bp = bread(dev, 1);
-  memmove(sb, bp->data, sizeof(*sb));
-  brelse(bp);
+  void *data = NULL;
+  page_t *page = bread(dev, 1, &data);
+  memmove(sb, data, sizeof(*sb));
+  brelse(page);
 }
 
 // Init fs
@@ -53,12 +52,11 @@ fsinit(int dev) {
 STATIC void
 bzero(int dev, int bno)
 {
-  struct buf *bp;
-
-  bp = bread(dev, bno);
-  memset(bp->data, 0, BSIZE);
-  log_write(bp);
-  brelse(bp);
+  void *data = NULL;
+  page_t *page = bread(dev, bno, &data);
+  memset(data, 0, BSIZE);
+  log_write(dev, bno, page);
+  brelse(page);
 }
 
 // Blocks.
@@ -69,20 +67,21 @@ STATIC uint
 balloc(uint dev)
 {
   int b, bi;
-  struct buf *bp;
+  void *data = NULL;
+  page_t *page = NULL;
 
-  bp = 0;
   for(b = 0; b < sb.size; b += BPB){
-    bp = bread(dev, BBLOCK(b, sb));
-    bi = bits_ctz_ptr_inv(bp->data, BPB / 8);
+    page = bread(dev, BBLOCK(b, sb), &data);
+    uchar *bitmap = (uchar *)data;
+    bi = bits_ctz_ptr_inv(bitmap, BPB / 8);
     if (bi >= 0) {
-      bp->data[bi/8] |= (1 << (bi % 8));  // Mark block in use.
-      log_write(bp);
-      brelse(bp);
+      bitmap[bi/8] |= (1 << (bi % 8));  // Mark block in use.
+      log_write(dev, BBLOCK(b, sb), page);
+      brelse(page);
       bzero(dev, b + bi);
       return b + bi;
     }
-    brelse(bp);
+    brelse(page);
   }
   printf("balloc: out of blocks\n");
   return 0;
@@ -92,17 +91,19 @@ balloc(uint dev)
 STATIC void
 bfree(int dev, uint b)
 {
-  struct buf *bp;
+  void *data = NULL;
+  page_t *page = NULL;
   int bi, m;
 
-  bp = bread(dev, BBLOCK(b, sb));
+  page = bread(dev, BBLOCK(b, sb), &data);
+  uchar *bitmap = (uchar *)data;
   bi = b % BPB;
   m = 1 << (bi % 8);
-  if((bp->data[bi/8] & m) == 0)
+  if((bitmap[bi/8] & m) == 0)
     panic("freeing free block");
-  bp->data[bi/8] &= ~m;
-  log_write(bp);
-  brelse(bp);
+  bitmap[bi/8] &= ~m;
+  log_write(dev, BBLOCK(b, sb), page);
+  brelse(page);
 }
 
 // Inodes.
@@ -296,20 +297,22 @@ struct inode*
 ialloc(uint dev, short type)
 {
   int inum;
-  struct buf *bp;
+  page_t *page;
   struct dinode *dip;
 
   for(inum = 1; inum < sb.ninodes; inum++){
-    bp = bread(dev, IBLOCK(inum, sb));
-    dip = (struct dinode*)bp->data + inum%IPB;
+    void *data = NULL;
+    int iblock = IBLOCK(inum, sb);
+    page = bread(dev, iblock, &data);
+    dip = (struct dinode*)data + inum%IPB;
     if(dip->type == 0){  // a free inode
       memset(dip, 0, sizeof(*dip));
       dip->type = type;
-      log_write(bp);   // mark it allocated on the disk
-      brelse(bp);
+      log_write(dev, iblock, page);   // mark it allocated on the disk
+      brelse(page);
       return iget(dev, inum);
     }
-    brelse(bp);
+    brelse(page);
   }
   printf("ialloc: no inodes\n");
   return 0;
@@ -322,19 +325,21 @@ ialloc(uint dev, short type)
 void
 iupdate(struct inode *ip)
 {
-  struct buf *bp;
+  page_t *page;
   struct dinode *dip;
 
-  bp = bread(ip->dev, IBLOCK(ip->inum, sb));
-  dip = (struct dinode*)bp->data + ip->inum%IPB;
+  void *data = NULL;
+  int iblock = IBLOCK(ip->inum, sb);
+  page = bread(ip->dev, iblock, &data);
+  dip = (struct dinode*)data + ip->inum%IPB;
   dip->type = ip->type;
   dip->major = ip->major;
   dip->minor = ip->minor;
   dip->nlink = ip->nlink;
   dip->size = ip->size;
   memmove(dip->addrs, ip->addrs, sizeof(ip->addrs));
-  log_write(bp);
-  brelse(bp);
+  log_write(ip->dev, iblock, page);
+  brelse(page);
 }
 
 // Find the inode with number inum on device dev
@@ -395,7 +400,6 @@ idup(struct inode *ip)
 void
 ilock(struct inode *ip)
 {
-  struct buf *bp;
   struct dinode *dip;
 
   if(ip == 0 || ip->ref < 1)
@@ -403,15 +407,17 @@ ilock(struct inode *ip)
 
   assert(mutex_lock(&ip->lock) == 0, "ilock: failed to lock inode");
   if(ip->valid == 0){
-    bp = bread(ip->dev, IBLOCK(ip->inum, sb));
-    dip = (struct dinode*)bp->data + ip->inum%IPB;
+    void *data = NULL;
+    int iblock = IBLOCK(ip->inum, sb);
+    page_t *page = bread(ip->dev, iblock, &data);
+    dip = (struct dinode*)data + ip->inum%IPB;
     ip->type = dip->type;
     ip->major = dip->major;
     ip->minor = dip->minor;
     ip->nlink = dip->nlink;
     ip->size = dip->size;
     memmove(ip->addrs, dip->addrs, sizeof(ip->addrs));
-    brelse(bp);
+    brelse(page);
     ip->valid = 1;
     if(ip->type == 0)
       panic("ilock: no type");
@@ -482,55 +488,53 @@ iunlockput(struct inode *ip)
 // are listed in ip->addrs[].  The next NINDIRECT blocks are
 // listed in block ip->addrs[NDIRECT].
 
-// get the address of the nth block in the indirect block
-// If the block does not exist, it is allocated.
-// Args:
-//   entry: The block address entry of the indirect block
-//   bn: the block number in the indirect block
-//   log: if true, write the indirect block to the log
-// Return: 
-//   0 if out of disk space.
-//   Address of the nth block in the indirect block.
+STATIC uint ensure_block(uint dev, uint *entry, page_t *entry_page, uint entry_blockno);
+STATIC uint alloc_from_indirect(uint dev, uint blockno, uint idx);
+
+// Ensure that *entry references an allocated block. If the entry resides in a
+// cached page (entry_page != NULL), log the update immediately so the pointer
+// persists across crashes.
 STATIC uint
-bmap_ind(uint *entry, uint dev, uint bn)
+ensure_block(uint dev, uint *entry, page_t *entry_page, uint entry_blockno)
 {
-  uint addr, *a;
-  struct buf *bp;
-  if (entry == NULL) {
-    return 0; // No entry, no block.
+  uint addr = *entry;
+  if (addr != 0) {
+    return addr;
   }
-  // printf("bmap_ind: bn=%d, entry=%d", bn, *entry);
-  if((addr = *entry) == 0){
+
+  addr = balloc(dev);
+  if (addr == 0) {
+    return 0;
+  }
+
+  *entry = addr;
+  if (entry_page != NULL) {
+    log_write(dev, entry_blockno, entry_page);
+  }
+  return addr;
+}
+
+// Load the indirect block at blockno, allocate the idx-th entry if required,
+// and return its block number.
+STATIC uint
+alloc_from_indirect(uint dev, uint blockno, uint idx)
+{
+  void *data = NULL;
+  page_t *page = bread(dev, blockno, &data);
+  uint *table = (uint *)data;
+
+  uint addr = table[idx];
+  if (addr == 0) {
     addr = balloc(dev);
-    if(addr == 0)
+    if (addr == 0) {
+      brelse(page);
       return 0;
-    *entry = addr;
-  }
-  bp = bread(dev, addr);
-  a = (uint*)bp->data;
-  if((addr = a[bn]) == 0){
-    addr = balloc(dev);
-    if(addr){
-      a[bn] = addr;
-      log_write(bp);
-      // int tmp = 0;
-      // if (bn < 2) {
-      //   tmp = 0;
-      // } else if (bn >= NINDIRECT - 2) {
-      //   tmp = NINDIRECT - 5;
-      // } else {
-      //   tmp = bn - 2;
-      // }
-      // a = &a[tmp];
-      // printf(" -- from: %d [%d %d %d %d %d] OK\n", 
-      //        tmp, a[0], a[1], a[2], a[3], a[4]);
-    } else {
-      // printf(" -- FAILED\n");
     }
-  } else {
-    // printf(" -- OK\n");
+    table[idx] = addr;
+    log_write(dev, blockno, page);
   }
-  brelse(bp);
+
+  brelse(page);
   return addr;
 }
 
@@ -540,13 +544,13 @@ bmap_ind(uint *entry, uint dev, uint bn)
 STATIC uint
 bmap(struct inode *ip, uint bn)
 {
-  uint addr, *a;
-  struct buf *bp;
+  uint addr;
 
-  if(bn < NDIRECT){
-    if((addr = ip->addrs[bn]) == 0){
+  if (bn < NDIRECT) {
+    addr = ip->addrs[bn];
+    if (addr == 0) {
       addr = balloc(ip->dev);
-      if(addr == 0)
+      if (addr == 0)
         return 0;
       ip->addrs[bn] = addr;
     }
@@ -554,42 +558,55 @@ bmap(struct inode *ip, uint bn)
   }
   bn -= NDIRECT;
 
-  if(bn < NINDIRECT){
-    // Load indirect block, allocating if necessary.
-    return bmap_ind(&ip->addrs[NDIRECT], ip->dev, bn);
+  if (bn < NINDIRECT) {
+    addr = ensure_block(ip->dev, &ip->addrs[NDIRECT], NULL, 0);
+    if (addr == 0)
+      return 0;
+    return alloc_from_indirect(ip->dev, addr, bn);
   }
   bn -= NINDIRECT;
 
   if (bn < NDINDIRECT) {
-    // Load double indirect block, allocating if necessary.
-    addr = bmap_ind(&ip->addrs[NDIRECT + 1], ip->dev, bn / NINDIRECT);
-    if (addr == 0) {
-      return 0; // Out of disk space.
+    uint daddr = ensure_block(ip->dev, &ip->addrs[NDIRECT + 1], NULL, 0);
+    if (daddr == 0)
+      return 0;
+
+    void *ddata = NULL;
+    page_t *dpage = bread(ip->dev, daddr, &ddata);
+    uint *dentries = (uint *)ddata;
+
+    uint first_index = bn / NINDIRECT;
+    uint second_index = bn % NINDIRECT;
+
+    uint sind_addr = ensure_block(ip->dev, &dentries[first_index], dpage, daddr);
+    if (sind_addr == 0) {
+      brelse(dpage);
+      return 0;
     }
-    bp = bread(ip->dev, addr);
-    a = (uint*)bp->data;
-    addr = bmap_ind(&a[bn / NINDIRECT], ip->dev, bn % NINDIRECT);
-    brelse(bp); // No need to log_write(bp) here, as we already did it within the previous bmap_ind.
-    return addr;
+
+    uint result = alloc_from_indirect(ip->dev, sind_addr, second_index);
+    brelse(dpage);
+    return result;
   }
 
   panic("bmap: out of range");
 }
-
 // Free the indirect block and all blocks it points to.
 STATIC void
 __itrunc_ind(uint *entry, uint dev)
 {
   int j;
-  struct buf *bp;
-  uint *a;
-  bp = bread(dev, *entry);
-  a = (uint*)bp->data;
-  for(j = 0; j < NINDIRECT; j++){
-    if(a[j])
+  if (entry == NULL || *entry == 0)
+    return;
+
+  void *data = NULL;
+  page_t *page = bread(dev, *entry, &data);
+  uint *a = (uint *)data;
+  for (j = 0; j < NINDIRECT; j++) {
+    if (a[j])
       bfree(dev, a[j]);
   }
-  brelse(bp);
+  brelse(page);
   bfree(dev, *entry);
   *entry = 0;
 }
@@ -600,8 +617,6 @@ void
 itrunc(struct inode *ip)
 {
   int i;
-  struct buf *bp;
-  uint *a;
 
   for(i = 0; i < NDIRECT; i++){
     if(ip->addrs[i]){
@@ -611,9 +626,7 @@ itrunc(struct inode *ip)
   }
 
   uint nindirect = ip->addrs[NDIRECT];
-  ip->addrs[NDIRECT + 1] = 0;
   uint ndindirect = ip->addrs[NDIRECT + 1];
-  ip->addrs[NDIRECT + 1] = 0;
 
   ip->size = 0;
   iupdate(ip);
@@ -624,16 +637,19 @@ itrunc(struct inode *ip)
 
   if (ndindirect) {
     // Free the double indirect block.
-    bp = bread(ip->dev, ndindirect);
-    a = (uint*)bp->data;
+    void *data = NULL;
+    page_t *page = bread(ip->dev, ndindirect, &data);
+    uint *a = (uint *)data;
     for(i = 0; i < NINDIRECT; i++) {
-      if(a[i]) {
+      if(a[i])
         __itrunc_ind(&a[i], ip->dev);
-      }
     }
-    brelse(bp);
+    brelse(page);
     bfree(ip->dev, ndindirect);
   }
+
+  ip->addrs[NDIRECT] = 0;
+  ip->addrs[NDIRECT + 1] = 0;
 }
 
 // Copy stat information from inode.
@@ -656,7 +672,6 @@ int
 readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
 {
   uint tot, m;
-  struct buf *bp;
 
   if(off > ip->size || off + n < off)
     return 0;
@@ -667,14 +682,16 @@ readi(struct inode *ip, int user_dst, uint64 dst, uint off, uint n)
     uint addr = bmap(ip, off/BSIZE);
     if(addr == 0)
       break;
-    bp = bread(ip->dev, addr);
+    void *data = NULL;
+    page_t *page = bread(ip->dev, addr, &data);
     m = min(n - tot, BSIZE - off%BSIZE);
-    if(either_copyout(user_dst, dst, bp->data + (off % BSIZE), m) == -1) {
-      brelse(bp);
+    char *src = (char *)data + (off % BSIZE);
+    if(either_copyout(user_dst, dst, src, m) == -1) {
+      brelse(page);
       tot = -1;
       break;
     }
-    brelse(bp);
+    brelse(page);
   }
   return tot;
 }
@@ -690,7 +707,6 @@ int
 writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
 {
   uint tot, m;
-  struct buf *bp;
 
   if(off > ip->size || off + n < off)
     return -1;
@@ -701,14 +717,16 @@ writei(struct inode *ip, int user_src, uint64 src, uint off, uint n)
     uint addr = bmap(ip, off/BSIZE);
     if(addr == 0)
       break;
-    bp = bread(ip->dev, addr);
+    void *data = NULL;
+    page_t *page = bread(ip->dev, addr, &data);
     m = min(n - tot, BSIZE - off%BSIZE);
-    if(either_copyin(bp->data + (off % BSIZE), user_src, src, m) == -1) {
-      brelse(bp);
+    char *dst = (char *)data + (off % BSIZE);
+    if(either_copyin(dst, user_src, src, m) == -1) {
+      brelse(page);
       break;
     }
-    log_write(bp);
-    brelse(bp);
+    log_write(ip->dev, addr, page);
+    brelse(page);
   }
 
   if(off > ip->size)
