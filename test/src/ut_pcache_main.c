@@ -525,6 +525,47 @@ static void test_pcache_get_page_invalid_block(void **state) {
     assert_null(result);
 }
 
+static void test_pcache_put_page_requeues_dirty_detached(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    uint64 blkno = 44;
+    page_t *page = create_cached_page(cache, blkno);
+    struct pcache_node *node = page->pcache.pcache_node;
+
+    assert_int_equal(pcache_mark_page_dirty(cache, page), 0);
+    assert_int_equal(cache->dirty_count, 1);
+
+    spin_acquire(&cache->spinlock);
+    page_lock_acquire(page);
+    list_node_detach(node, lru_entry);
+    cache->dirty_count--;
+    page->ref_count = 2;
+    page_lock_release(page);
+    spin_release(&cache->spinlock);
+
+    assert_true(LIST_NODE_IS_DETACHED(node, lru_entry));
+    assert_int_equal(cache->dirty_count, 0);
+
+    pcache_put_page(cache, page);
+
+    assert_int_equal(cache->dirty_count, 1);
+    spin_acquire(&cache->spinlock);
+    page_lock_acquire(page);
+    assert_true(node->dirty);
+    assert_false(LIST_NODE_IS_DETACHED(node, lru_entry));
+    assert_int_equal(page->ref_count, 1);
+    node->dirty = 0;
+    list_node_detach(node, lru_entry);
+    cache->dirty_count--;
+    node->uptodate = 1;
+    page->ref_count = 2;
+    page_lock_release(page);
+    spin_release(&cache->spinlock);
+
+    pcache_put_page(cache, page);
+}
+
 static void test_pcache_flush_worker_cleans_dirty_page(void **state) {
     struct pcache_test_fixture *fixture = *state;
     struct pcache *cache = &fixture->cache;
@@ -694,6 +735,7 @@ int main(void) {
         cmocka_unit_test_setup_teardown(test_pcache_get_page_eviction_failure, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_get_page_retry_after_invalid_first_lookup, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_get_page_invalid_block, pcache_test_setup, pcache_test_teardown),
+    cmocka_unit_test_setup_teardown(test_pcache_put_page_requeues_dirty_detached, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_flush_worker_cleans_dirty_page, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_flush_worker_write_begin_failure, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_flush_worker_write_page_failure, pcache_test_setup, pcache_test_teardown),

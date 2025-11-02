@@ -1145,18 +1145,33 @@ void pcache_put_page(struct pcache *pcache, page_t *page) {
     new_refcount = page_ref_dec_unlocked(page);
     assert(new_refcount >= 1, "pcache_put_page(): refcount underflow");
 
-    if (new_refcount == 1 && !pcnode->dirty && LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
-        if (!pcnode->uptodate) {
-            // The cache is the lone owner of a stale page; drop it entirely.
-            __pcache_remove_node(pcache, page);
-            __pcache_node_detach_page(pcache, page);
-            page_lock_release(page);
-            __pcache_spin_unlock(pcache);
-            __pcache_page_put(page);
-            return;
+    if (new_refcount == 1) {
+        if (pcnode->dirty && LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
+            // Preserve dirty tracking even if a caller briefly held the last ref.
+            __pcache_push_dirty(pcache, page);
+        } else if (!pcnode->dirty && LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
+            if (!pcnode->uptodate) {
+                // The cache is the lone owner of a stale page; drop it entirely.
+                __pcache_remove_node(pcache, page);
+                __pcache_node_detach_page(pcache, page);
+                page_lock_release(page);
+                __pcache_spin_unlock(pcache);
+                __pcache_page_put(page);
+                return;
+            }
+            // Only clean, single-owner, up-to-date pages can be staged on the LRU for reuse.
+            __pcache_push_lru(pcache, page);
+        } else {
+            if (pcnode->dirty) {
+                assert(!LIST_NODE_IS_DETACHED(pcnode, lru_entry), "pcache_put_page(): dirty page lost from dirty list");
+            } else if (!pcnode->uptodate) {
+                if (!LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
+                    __pcache_remove_lru(pcache, page);
+                }
+                // Newly inserted or invalidated pages can legitimately be clean and stale.
+                // Leave them detached so the next reader will perform IO to populate them.
+            }
         }
-        // Only clean, single-owner, up-to-date pages can be staged on the LRU for reuse.
-        __pcache_push_lru(pcache, page);
     }
 
 unlock:
