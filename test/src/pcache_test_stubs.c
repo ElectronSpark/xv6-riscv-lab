@@ -18,6 +18,22 @@
 #include "timer.h"
 #include "bio.h"
 
+struct queued_work_entry {
+    struct workqueue *wq;
+    struct work_struct *work;
+};
+
+static struct queued_work_entry g_pending_work = {0};
+
+static void run_pending_work(void) {
+    if (g_pending_work.work == NULL) {
+        return;
+    }
+    struct work_struct *work = g_pending_work.work;
+    g_pending_work.work = NULL;
+    work->func(work);
+}
+
 // -----------------------------------------------------------------------------
 // Panic helpers
 // -----------------------------------------------------------------------------
@@ -261,7 +277,9 @@ bool queue_work(struct workqueue *wq, struct work_struct *work) {
     if (wq == NULL || work == NULL || work->func == NULL) {
         return false;
     }
-    work->func(work);
+    run_pending_work();
+    g_pending_work.wq = wq;
+    g_pending_work.work = work;
     return true;
 }
 
@@ -308,6 +326,7 @@ bool try_wait_for_completion(completion_t *c) {
     if (c == NULL) {
         return false;
     }
+    run_pending_work();
     if (c->done > 0) {
         c->done--;
         return true;
@@ -319,6 +338,7 @@ void wait_for_completion(completion_t *c) {
     if (c == NULL) {
         return;
     }
+    run_pending_work();
     if (c->done == 0) {
         c->done = 1;
     }
