@@ -24,6 +24,11 @@ struct queued_work_entry {
 };
 
 static struct queued_work_entry g_pending_work = {0};
+static bool g_fail_next_queue_work = false;
+
+void pcache_test_fail_next_queue_work(void) {
+    g_fail_next_queue_work = true;
+}
 
 static void run_pending_work(void) {
     if (g_pending_work.work == NULL) {
@@ -275,6 +280,10 @@ struct workqueue *workqueue_create(const char *name, int max_active) {
 
 bool queue_work(struct workqueue *wq, struct work_struct *work) {
     if (wq == NULL || work == NULL || work->func == NULL) {
+        return false;
+    }
+    if (g_fail_next_queue_work) {
+        g_fail_next_queue_work = false;
         return false;
     }
     run_pending_work();

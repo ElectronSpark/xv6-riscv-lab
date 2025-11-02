@@ -1289,14 +1289,12 @@ int pcache_flush(struct pcache *pcache) {
 
     queued = __pcache_queue_work(pcache);
     if (!queued) {
-        int err;
+        // Surface a fresh retry hint when the workqueue rejects the job so callers
+        // do not observe stale errors left behind by earlier flush attempts.
         pcache->flush_requested = 0;
-        if (pcache->flush_error == 0) {
-            pcache->flush_error = -EAGAIN;
-        }
-        err = pcache->flush_error;
+        pcache->flush_error = -EAGAIN;
         __pcache_spin_unlock(pcache);
-        return err;
+        return -EAGAIN;
     }
 
     __pcache_spin_unlock(pcache);
@@ -1370,6 +1368,8 @@ retry_locked:
             goto retry_locked;
         }
 
+        // TODO: plumb a richer status so callers can distinguish transient IO races
+        // from hard device failures once we add tracing.
         printf("pcache_read_page(): io in progress with unexpected state (dirty=%d uptodate=%d)\n",
                dirty,
                uptodate);
@@ -1389,6 +1389,8 @@ retry_locked:
     page_lock_release(page);
     __pcache_spin_unlock(pcache);
 
+    // Drive device IO while we are dropped out of the bookkeeping locks. The
+    // helper is scripted in host tests, so keep the call centralized.
     ret = __pcache_read_page(pcache, page);
     if (ret != 0) {
         __pcache_node_io_end(pcache, page);
@@ -1411,7 +1413,12 @@ retry_locked:
     }
 
     pcnode = page->pcache.pcache_node;
-    ret = pcnode->uptodate ? 0 : -EIO;
+    if (!LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
+        __pcache_remove_lru(pcache, page);
+    }
+    pcnode->dirty = 0;
+    pcnode->uptodate = 1;
+    ret = 0;
 
 out_unlock_post_io:
     page_lock_release(page);
