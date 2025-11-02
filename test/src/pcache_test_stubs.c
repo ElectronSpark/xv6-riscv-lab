@@ -377,6 +377,7 @@ uint64 get_jiffs(void) {
 
 void sleep_ms(uint64 ms) {
     (void)ms;
+    run_pending_work();
 }
 
 // -----------------------------------------------------------------------------

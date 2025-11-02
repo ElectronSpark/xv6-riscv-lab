@@ -20,6 +20,9 @@
 #include "spinlock.h"
 #include "riscv.h"
 #include "completion.h"
+#include "timer.h"
+
+extern void pcache_test_run_flusher_round(uint64 round_start, bool force_round);
 
 extern void spin_init(struct spinlock *lock, char *name);
 
@@ -154,6 +157,7 @@ static int pcache_test_setup(void **state) {
 
 static int pcache_test_teardown(void **state) {
     struct pcache_test_fixture *fixture = *state;
+    pcache_test_unregister(&fixture->cache);
     free(fixture);
     g_active_fixture = NULL;
     return 0;
@@ -372,6 +376,77 @@ static void test_pcache_flush_worker_write_end_error_propagates(void **state) {
     assert_int_equal(fixture->write_end_calls, 1);
 }
 
+static void test_pcache_flusher_force_round_flushes_dirty_page(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    page_t page;
+    struct pcache_node node;
+    make_dirty_page(cache, &node, &page, 12);
+
+    uint64 round_start = get_jiffs();
+    pcache_test_run_flusher_round(round_start, true);
+
+    assert_int_equal(cache->dirty_count, 0);
+    assert_false(node.dirty);
+    assert_int_equal(cache->lru_count, 1);
+    assert_false(LIST_NODE_IS_DETACHED(&node, lru_entry));
+    assert_int_equal(fixture->write_begin_calls, 1);
+    assert_int_equal(fixture->write_page_calls, 1);
+    assert_int_equal(fixture->write_end_calls, 1);
+}
+
+static void test_pcache_flusher_respects_dirty_threshold(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    page_t page;
+    struct pcache_node node;
+    make_dirty_page(cache, &node, &page, 14);
+
+    cache->page_count = 100;
+    cache->dirty_rate = 80;
+    cache->last_flushed = 1000;
+    cache->last_request = 1000;
+    uint64 round_start = cache->last_flushed + 1;
+
+    pcache_test_run_flusher_round(round_start, false);
+
+    assert_int_equal(cache->dirty_count, 1);
+    assert_true(node.dirty);
+    assert_int_equal(cache->lru_count, 0);
+    assert_false(LIST_NODE_IS_DETACHED(&node, lru_entry));
+    assert_int_equal(cache->flush_requested, 0);
+    assert_int_equal(fixture->write_begin_calls, 0);
+    assert_int_equal(fixture->write_page_calls, 0);
+    assert_int_equal(fixture->write_end_calls, 0);
+}
+
+static void test_pcache_flusher_time_based_flush(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    page_t page;
+    struct pcache_node node;
+    make_dirty_page(cache, &node, &page, 16);
+
+    cache->page_count = 100;
+    cache->dirty_rate = 80;
+    cache->last_flushed = 5;
+    cache->last_request = 5;
+    uint64 round_start = cache->last_flushed + PCACHE_FLUSH_INTERVAL_JIFFS + 5;
+
+    pcache_test_run_flusher_round(round_start, false);
+
+    assert_int_equal(cache->dirty_count, 0);
+    assert_false(node.dirty);
+    assert_int_equal(cache->lru_count, 1);
+    assert_false(LIST_NODE_IS_DETACHED(&node, lru_entry));
+    assert_int_equal(fixture->write_begin_calls, 1);
+    assert_int_equal(fixture->write_page_calls, 1);
+    assert_int_equal(fixture->write_end_calls, 1);
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test_setup_teardown(test_pcache_init_defaults, pcache_test_setup, pcache_test_teardown),
@@ -383,6 +458,9 @@ int main(void) {
         cmocka_unit_test_setup_teardown(test_pcache_flush_worker_write_begin_failure, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_flush_worker_write_page_failure, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_flush_worker_write_end_error_propagates, pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_flusher_force_round_flushes_dirty_page, pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_flusher_respects_dirty_threshold, pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_flusher_time_based_flush, pcache_test_setup, pcache_test_teardown),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);
