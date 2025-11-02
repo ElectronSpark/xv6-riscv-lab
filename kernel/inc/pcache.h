@@ -120,6 +120,7 @@ int pcache_mark_page_dirty(struct pcache *pcache, page_t *page);
 #ifdef HOST_TEST
 void pcache_test_run_flusher_round(uint64 round_start, bool force_round);
 void pcache_test_unregister(struct pcache *pcache);
+void pcache_test_set_retry_hook(void (*hook)(struct pcache *, uint64));
 #endif
 
 // ssize_t bread(dev_t dev, uint64 blockno, void *data, size_t size, bool user);

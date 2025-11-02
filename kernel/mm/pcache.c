@@ -76,6 +76,7 @@ static void __pcache_wait_for_pending_flushes(void);
 #ifdef HOST_TEST
 void pcache_test_run_flusher_round(uint64 round_start, bool force_round);
 void pcache_test_unregister(struct pcache *pcache);
+void pcache_test_set_retry_hook(void (*hook)(struct pcache *, uint64));
 #endif
 
 static int __pcache_node_io_begin(struct pcache *pcache, page_t *page);
@@ -229,6 +230,14 @@ void pcache_test_unregister(struct pcache *pcache) {
     }
     __pcache_spin_unlock(pcache);
     __pcache_global_unlock();
+}
+#endif
+
+#ifdef HOST_TEST
+static void (*__pcache_test_retry_hook)(struct pcache *, uint64) = NULL;
+
+void pcache_test_set_retry_hook(void (*hook)(struct pcache *, uint64)) {
+    __pcache_test_retry_hook = hook;
 }
 #endif
 
@@ -623,7 +632,7 @@ static page_t *__pcache_get_page(
         // Block number out of range
         return NULL;
     }
-    if (blkno + (1 << (PAGE_SHIFT - BLK_SIZE_SHIFT)) >= pcache->blk_count) {
+    if (blkno + (1 << (PAGE_SHIFT - BLK_SIZE_SHIFT)) > pcache->blk_count) {
         // Block number out of range
         return NULL;
     }
@@ -1012,6 +1021,11 @@ page_t *pcache_get_page(struct pcache *pcache, uint64 blkno) {
     }
 
 retry_lookup:
+#ifdef HOST_TEST
+    if (__pcache_test_retry_hook != NULL) {
+        __pcache_test_retry_hook(pcache, base_blkno);
+    }
+#endif
     page = __pcache_get_page(pcache, base_blkno, PGSIZE, NULL);
     if (page != NULL) {
         __pcache_spin_lock(pcache);
@@ -1031,8 +1045,8 @@ retry_lookup:
             goto retry_lookup;
         }
 
-        if (!LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
-            // The lookup reuses an LRU page; pull it out so the caller owns it.
+        if (!pcnode->dirty && !LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
+            // The lookup reuses a clean LRU page; pull it out so the caller owns it.
             __pcache_remove_lru(pcache, page);
         }
 

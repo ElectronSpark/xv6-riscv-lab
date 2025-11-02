@@ -23,6 +23,7 @@
 #include "timer.h"
 
 extern void pcache_test_run_flusher_round(uint64 round_start, bool force_round);
+extern void pcache_test_set_retry_hook(void (*hook)(struct pcache *, uint64));
 
 extern void spin_init(struct spinlock *lock, char *name);
 
@@ -49,6 +50,10 @@ struct pcache_test_fixture {
 };
 
 static struct pcache_test_fixture *g_active_fixture;
+static page_t *g_retry_page;
+static struct pcache_node *g_retry_node;
+static bool g_retry_hook_used;
+static bool g_retry_hook_armed;
 
 static void scripted_reset(struct scripted_op *op, int default_value) {
     if (op == NULL) {
@@ -158,6 +163,11 @@ static int pcache_test_setup(void **state) {
 static int pcache_test_teardown(void **state) {
     struct pcache_test_fixture *fixture = *state;
     pcache_test_unregister(&fixture->cache);
+    pcache_test_set_retry_hook(NULL);
+    g_retry_page = NULL;
+    g_retry_node = NULL;
+    g_retry_hook_used = false;
+    g_retry_hook_armed = false;
     free(fixture);
     g_active_fixture = NULL;
     return 0;
@@ -194,6 +204,52 @@ static void make_dirty_page(struct pcache *cache, struct pcache_node *node, page
     assert_int_equal(cache->dirty_count, 1);
 }
 
+static uint64 align_blkno(uint64 blkno) {
+    uint64 blks_per_page = (uint64)PGSIZE >> BLK_SIZE_SHIFT;
+    uint64 mask = blks_per_page - 1;
+    return blkno & ~mask;
+}
+
+static page_t *create_cached_page(struct pcache *cache, uint64 blkno) {
+    page_t *page = pcache_get_page(cache, blkno);
+    assert_non_null(page);
+    struct pcache_node *node = page->pcache.pcache_node;
+    assert_non_null(node);
+    assert_int_equal(node->blkno, align_blkno(blkno));
+    page_lock_acquire(page);
+    node->uptodate = 1;
+    node->dirty = 0;
+    page_lock_release(page);
+    return page;
+}
+
+static void retry_restore_hook(struct pcache *cache, uint64 blkno) {
+    (void)cache;
+    (void)blkno;
+    if (!g_retry_hook_armed || g_retry_page == NULL || g_retry_node == NULL) {
+        return;
+    }
+    page_lock_acquire(g_retry_page);
+    g_retry_page->pcache.pcache_node = g_retry_node;
+    page_lock_release(g_retry_page);
+    g_retry_hook_used = true;
+    g_retry_hook_armed = false;
+}
+
+static void normalize_page_state(page_t *page) {
+    if (page == NULL) {
+        return;
+    }
+    page_lock_acquire(page);
+    page->ref_count = 1;
+    if (page->pcache.pcache_node != NULL) {
+        page->pcache.pcache_node->dirty = 0;
+        page->pcache.pcache_node->uptodate = 1;
+        page->pcache.pcache_node->io_in_progress = 0;
+    }
+    page_lock_release(page);
+}
+
 static void test_pcache_init_defaults(void **state) {
     struct pcache_test_fixture *fixture = *state;
     struct pcache *cache = &fixture->cache;
@@ -208,28 +264,6 @@ static void test_pcache_init_defaults(void **state) {
     assert_int_equal(cache->dirty_count, 0);
     assert_int_equal(cache->flush_error, 0);
     assert_false(cache->flush_requested);
-}
-
-static void test_pcache_get_page_from_lru(void **state) {
-    struct pcache_test_fixture *fixture = *state;
-    struct pcache *cache = &fixture->cache;
-
-    page_t page;
-    init_mock_page(&page, 0x1000);
-    struct pcache_node node;
-    uint64 blkno = (PGSIZE >> BLK_SIZE_SHIFT) * 2;
-    init_mock_node(&node, cache, &page, blkno);
-
-    rb_insert_color(&cache->page_map, &node.tree_entry);
-    list_node_push_back(&cache->lru, &node, lru_entry);
-    cache->lru_count = 1;
-    cache->page_count = 1;
-
-    page_t *result = pcache_get_page(cache, blkno);
-    assert_ptr_equal(result, &page);
-    assert_int_equal(page.ref_count, 2);
-    assert_true(LIST_NODE_IS_DETACHED(&node, lru_entry));
-    assert_int_equal(cache->lru_count, 0);
 }
 
 static void test_pcache_mark_page_dirty_tracks_state(void **state) {
@@ -291,6 +325,204 @@ static void test_pcache_invalidate_dirty_page(void **state) {
     assert_int_equal(node.uptodate, 0);
     assert_true(LIST_NODE_IS_DETACHED(&node, lru_entry));
     assert_int_equal(cache->dirty_count, 0);
+}
+
+static void test_pcache_get_page_from_lru(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    uint64 blkno = 20;
+    page_t *page = create_cached_page(cache, blkno);
+    assert_int_equal(page->ref_count, 2);
+
+    pcache_put_page(cache, page);
+    assert_int_equal(cache->lru_count, 1);
+
+    page_t *result = pcache_get_page(cache, blkno);
+    assert_ptr_equal(result, page);
+    assert_int_equal(result->ref_count, 2);
+    assert_int_equal(cache->lru_count, 0);
+
+    pcache_put_page(cache, result);
+}
+
+static void test_pcache_get_page_from_dirty_refcount_one(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    uint64 blkno = 22;
+    page_t *page = create_cached_page(cache, blkno);
+    struct pcache_node *node = page->pcache.pcache_node;
+
+    assert_int_equal(pcache_mark_page_dirty(cache, page), 0);
+    assert_int_equal(cache->dirty_count, 1);
+
+    page_lock_acquire(page);
+    page->ref_count = 1;
+    page_lock_release(page);
+
+    page_t *result = pcache_get_page(cache, blkno);
+    assert_ptr_equal(result, page);
+    assert_int_equal(result->ref_count, 2);
+    assert_int_equal(cache->dirty_count, 1);
+    assert_false(LIST_NODE_IS_DETACHED(node, lru_entry));
+    normalize_page_state(result);
+}
+
+static void test_pcache_get_page_from_dirty_refcount_many(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    uint64 blkno = 24;
+    page_t *page = create_cached_page(cache, blkno);
+    struct pcache_node *node = page->pcache.pcache_node;
+
+    assert_int_equal(pcache_mark_page_dirty(cache, page), 0);
+    assert_int_equal(cache->dirty_count, 1);
+
+    page_lock_acquire(page);
+    page->ref_count = 3;
+    page_lock_release(page);
+
+    page_t *result = pcache_get_page(cache, blkno);
+    assert_ptr_equal(result, page);
+    assert_int_equal(result->ref_count, 4);
+    assert_int_equal(cache->dirty_count, 1);
+    assert_false(LIST_NODE_IS_DETACHED(node, lru_entry));
+
+    normalize_page_state(result);
+}
+
+static void test_pcache_get_page_up_to_date(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    uint64 blkno = 26;
+    page_t *page = create_cached_page(cache, blkno);
+    struct pcache_node *node = page->pcache.pcache_node;
+    node->uptodate = 1;
+
+    pcache_put_page(cache, page);
+    page_t *result = pcache_get_page(cache, blkno);
+
+    assert_ptr_equal(result, page);
+    assert_true(node->uptodate);
+
+    pcache_put_page(cache, result);
+}
+
+static void test_pcache_get_page_not_up_to_date(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    uint64 blkno = 28;
+    page_t *page = create_cached_page(cache, blkno);
+    struct pcache_node *node = page->pcache.pcache_node;
+    page_lock_acquire(page);
+    node->uptodate = 0;
+    page_lock_release(page);
+
+    pcache_put_page(cache, page);
+    page_t *result = pcache_get_page(cache, blkno);
+
+    assert_ptr_not_equal(result, page);
+
+    normalize_page_state(result);
+}
+
+static void test_pcache_get_page_eviction_success(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    cache->max_pages = 1;
+
+    uint64 victim_blk = 30;
+    page_t *victim = create_cached_page(cache, victim_blk);
+    pcache_put_page(cache, victim);
+    assert_int_equal(cache->lru_count, 1);
+
+    uint64 new_blk = 32;
+    page_t *new_page = pcache_get_page(cache, new_blk);
+    assert_non_null(new_page);
+    assert_int_equal(cache->page_count, 1);
+    assert_int_equal(cache->lru_count, 0);
+    assert_int_not_equal(new_page, victim);
+
+    pcache_put_page(cache, new_page);
+}
+
+static void test_pcache_get_page_eviction_failure(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    cache->max_pages = 1;
+
+    uint64 resident_blk = 34;
+    page_t *resident = create_cached_page(cache, resident_blk);
+    assert_non_null(resident);
+    assert_int_equal(cache->page_count, 1);
+
+    assert_int_equal(pcache_mark_page_dirty(cache, resident), 0);
+    page_lock_acquire(resident);
+    resident->ref_count = 2;
+    page_lock_release(resident);
+
+    uint64 request_blk = resident_blk + ((uint64)PGSIZE >> BLK_SIZE_SHIFT);
+    page_t *result = pcache_get_page(cache, request_blk);
+    assert_null(result);
+    assert_int_equal(cache->page_count, 1);
+
+    page_lock_acquire(resident);
+    resident->ref_count = 1;
+    page_lock_release(resident);
+    normalize_page_state(resident);
+    page_lock_acquire(resident);
+    resident->ref_count = 2;
+    page_lock_release(resident);
+    pcache_put_page(cache, resident);
+}
+
+static void test_pcache_get_page_retry_after_invalid_first_lookup(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    uint64 blkno = 38;
+    page_t *page = create_cached_page(cache, blkno);
+    struct pcache_node *node = page->pcache.pcache_node;
+
+    pcache_put_page(cache, page);
+
+    page_lock_acquire(page);
+    page->pcache.pcache_node = NULL;
+    page_lock_release(page);
+
+    g_retry_page = page;
+    g_retry_node = node;
+    g_retry_hook_used = false;
+    g_retry_hook_armed = true;
+    pcache_test_set_retry_hook(retry_restore_hook);
+
+    page_t *result = pcache_get_page(cache, blkno);
+    assert_ptr_equal(result, page);
+    assert_true(g_retry_hook_used);
+
+    pcache_test_set_retry_hook(NULL);
+    g_retry_page = NULL;
+    g_retry_node = NULL;
+    normalize_page_state(result);
+    page_lock_acquire(result);
+    result->ref_count = 2;
+    page_lock_release(result);
+    pcache_put_page(cache, result);
+}
+
+static void test_pcache_get_page_invalid_block(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    uint64 invalid_blk = cache->blk_count + 10;
+    page_t *result = pcache_get_page(cache, invalid_blk);
+    assert_null(result);
 }
 
 static void test_pcache_flush_worker_cleans_dirty_page(void **state) {
@@ -454,6 +686,14 @@ int main(void) {
         cmocka_unit_test_setup_teardown(test_pcache_mark_page_dirty_tracks_state, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_mark_page_dirty_busy, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_invalidate_dirty_page, pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_get_page_from_dirty_refcount_one, pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_get_page_from_dirty_refcount_many, pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_get_page_up_to_date, pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_get_page_not_up_to_date, pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_get_page_eviction_success, pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_get_page_eviction_failure, pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_get_page_retry_after_invalid_first_lookup, pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_get_page_invalid_block, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_flush_worker_cleans_dirty_page, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_flush_worker_write_begin_failure, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_flush_worker_write_page_failure, pcache_test_setup, pcache_test_teardown),
