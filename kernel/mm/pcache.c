@@ -721,6 +721,7 @@ static int __pcache_node_io_begin(struct pcache *pcache, page_t *page) {
     __pcache_tree_lock(pcache);
     struct pcache_node *node = page->pcache.pcache_node;
     if (node->io_in_progress) {
+        __pcache_tree_unlock(pcache);
         return -EALREADY;
     }
     node->io_in_progress = 1;
@@ -1132,7 +1133,7 @@ int pcache_mark_page_dirty(struct pcache *pcache, page_t *page) {
         goto out;
     }
 
-    if (!LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
+    if (!LIST_NODE_IS_DETACHED(pcnode, lru_entry) && !pcnode->dirty) {
         // A writer is claiming the page; pull it from the clean LRU pool.
         __pcache_remove_lru(pcache, page);
     }
@@ -1339,6 +1340,7 @@ retry_locked:
 out_unlock_post_io:
     page_lock_release(page);
     __pcache_spin_unlock(pcache);
+    __pcache_node_io_end(pcache, page);
     return ret;
 
 out_unlock_locked:
