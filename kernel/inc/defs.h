@@ -140,6 +140,7 @@ struct proc*    myproc();
 void            procinit(void);
 void            sched(void);
 void            userinit(void);
+void            install_user_root(void);
 int             wait(uint64);
 void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);

@@ -50,6 +50,7 @@ main()
     sockinit();
     signal_init();   // signal handling initialization  
     userinit();      // first user process
+    install_user_root(); // set up the root directory for init process
     sched_timer_init();
     pcache_global_init(); // page cache subsystem initialization
     struct proc *idle_proc = myproc();

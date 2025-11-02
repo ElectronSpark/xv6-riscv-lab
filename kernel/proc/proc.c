@@ -535,6 +535,14 @@ userinit(void)
   p->trapframe->sp = USTACKTOP;  // user stack pointer
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
+  
+  proc_unlock(p);
+}
+
+void
+install_user_root(void) {
+  struct proc *p = __proctab_get_initproc();
+  proc_lock(p);
   p->cwd = namei("/");
 
   PROC_SET_USER_SPACE(p);
