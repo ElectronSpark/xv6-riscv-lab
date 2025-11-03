@@ -24,3 +24,4 @@ build
 packets.pcap
 .gdbinit.tmpl-riscv
 test_output
+xv6fuse
