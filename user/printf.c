@@ -6,10 +6,23 @@
 
 static char digits[] = "0123456789ABCDEF";
 
+// static void
+// putc(int fd, char c)
+// {
+//   write(fd, &c, 1);
+// }
+
 static void
-putc(int fd, char c)
+puts_n(int fd, const char *s, size_t n)
 {
-  write(fd, &c, 1);
+  int idx = 0;
+  while (idx < n) {
+    int ret = write(fd, &s[idx], n - idx);
+    if (ret <= 0) {
+      break;
+    }
+    idx += ret;
+  }
 }
 
 static void
@@ -34,17 +47,28 @@ printint(int fd, int xx, int base, int sgn)
   if(neg)
     buf[i++] = '-';
 
-  while(--i >= 0)
-    putc(fd, buf[i]);
+  int left = 0;
+  int right = i - 1;
+  while (left < right) {
+    buf[left] ^= buf[right];
+    buf[right] ^= buf[left];
+    buf[left] ^= buf[right];
+    left++;
+    right--;
+  }
+  puts_n(fd, buf, i);
 }
 
 static void
 printptr(int fd, uint64 x) {
   int i;
-  putc(fd, '0');
-  putc(fd, 'x');
+  char buf[3 + sizeof(uint64) * 2] = { 0 };
+  int idx = 0;
+  buf[idx++] = '0';
+  buf[idx++] = 'x';
   for (i = 0; i < (sizeof(uint64) * 2); i++, x <<= 4)
-    putc(fd, digits[x >> (sizeof(uint64) * 8 - 4)]);
+    buf[idx++] = digits[x >> (sizeof(uint64) * 8 - 4)];
+  puts_n(fd, buf, idx);
 }
 
 // Print to the given fd. Only understands %d, %x, %p, %s.
@@ -53,15 +77,21 @@ vprintf(int fd, const char *fmt, va_list ap)
 {
   char *s;
   int c0, c1, c2, i, state;
+  char buf[128] = { 0 };
+  int idx = 0;
 
   state = 0;
   for(i = 0; fmt[i]; i++){
+    if (idx >= 120) {
+      puts_n(fd, buf, idx);
+      idx = 0;
+    }
     c0 = fmt[i] & 0xff;
     if(state == 0){
       if(c0 == '%'){
         state = '%';
       } else {
-        putc(fd, c0);
+        buf[idx++] = c0;
       }
     } else if(state == '%'){
       c1 = c2 = 0;
@@ -94,16 +124,22 @@ vprintf(int fd, const char *fmt, va_list ap)
       } else if(c0 == 'p'){
         printptr(fd, va_arg(ap, uint64));
       } else if(c0 == 's'){
-        if((s = va_arg(ap, char*)) == 0)
-          s = "(null)";
-        for(; *s; s++)
-          putc(fd, *s);
+        if((s = va_arg(ap, char*)) == 0) {
+          if (idx) {
+            puts_n(fd, buf, idx);
+            idx = 0;
+          }
+          puts_n(fd, "(null)", 6);
+        } else {
+          size_t len = strlen(s);
+          puts_n(fd, s, len);
+        }
       } else if(c0 == '%'){
-        putc(fd, '%');
+        buf[idx++] = '%';
       } else {
         // Unknown % sequence.  Print it to draw attention.
-        putc(fd, '%');
-        putc(fd, c0);
+        buf[idx++] = '%';
+        buf[idx++] = c0;
       }
 
 #if 0
@@ -120,21 +156,25 @@ vprintf(int fd, const char *fmt, va_list ap)
         if(s == 0)
           s = "(null)";
         while(*s != 0){
-          putc(fd, *s);
+          buf[idx++] = *s;
           s++;
         }
       } else if(c == 'c'){
-        putc(fd, va_arg(ap, uint));
+        buf[idx++] = va_arg(ap, uint);
       } else if(c == '%'){
-        putc(fd, c);
+        buf[idx++] = c;
       } else {
         // Unknown % sequence.  Print it to draw attention.
-        putc(fd, '%');
-        putc(fd, c);
+        buf[idx++] = '%';
+        buf[idx++] = c;
       }
 #endif
       state = 0;
     }
+  }
+  if (idx) {
+    puts_n(fd, buf, idx);
+    idx = 0;
   }
 }
 
