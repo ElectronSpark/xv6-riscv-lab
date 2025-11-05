@@ -40,6 +40,7 @@ void pause(void);
 int memstat(void);
 int dumpproc(void);
 int dumpchan(void);
+int dumppcache(void);
 
 void sync(void);
 

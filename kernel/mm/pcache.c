@@ -426,14 +426,10 @@ static bool __pcache_schedule_flushes_locked(uint64 round_start, bool force_roun
 
                 if (dirty_threshold > 0 && pcache->dirty_count >= dirty_threshold) {
                     should_flush = true;
-                } else {
-                    if (round_start >= pcache->last_flushed &&
-                        round_start - pcache->last_flushed >= PCACHE_FLUSH_INTERVAL_JIFFS) {
-                        should_flush = true;
-                    } else if (round_start >= pcache->last_request &&
-                               round_start - pcache->last_request >= PCACHE_FLUSH_INTERVAL_JIFFS) {
-                        should_flush = true;
-                    }
+                } else if (round_start >= pcache->last_flushed &&
+                        round_start - pcache->last_flushed >= PCACHE_FLUSH_INTERVAL_JIFFS
+                ) {
+                    should_flush = true;
                 }
             }
         }
@@ -456,26 +452,42 @@ static bool __pcache_schedule_flushes_locked(uint64 round_start, bool force_roun
     return pending_flush;
 }
 
-static void __pcache_wait_for_pending_flushes(void) {
-    for (;;) {
-        bool still_pending = false;
+static int __pcache_pick_pending_before(uint64 jiffs, struct pcache **out_pcache) {
+    struct pcache *pcache = NULL;
+    struct pcache *tmp = NULL;
 
+    __pcache_global_lock_assert_holding();
+
+    list_foreach_node_safe(&__global_pcache_list, pcache, tmp, list_entry) {
+        __pcache_spin_lock(pcache);
+        if (pcache->flush_requested) {
+            uint64 last_request = pcache->last_request;
+            __pcache_spin_unlock(pcache);
+            if (last_request <= jiffs) {
+                *out_pcache = pcache;
+                return 0;
+            }
+        }
+        __pcache_spin_unlock(pcache);
+    }
+
+    return -ENOENT;
+
+}
+
+static void __pcache_wait_for_pending_flushes(void) {
+    uint64 start_jiffs = get_jiffs();
+    for (;;) {
         __pcache_global_lock();
         struct pcache *pcache = NULL;
-        struct pcache *tmp = NULL;
-        list_foreach_node_safe(&__global_pcache_list, pcache, tmp, list_entry) {
-            __pcache_spin_lock(pcache);
-            if (pcache->flush_requested) {
-                still_pending = true;
-                __pcache_spin_unlock(pcache);
-                break;
-            }
-            __pcache_spin_unlock(pcache);
-        }
+        int ret = __pcache_pick_pending_before(start_jiffs, &pcache);
         __pcache_global_unlock();
-
-        if (!still_pending) {
-            break;
+        if (ret == -ENOENT) {
+            break;  // No more pending flushes
+        }
+        ret = __pcache_wait_flush_complete(pcache);
+        if (ret != 0) {
+            printf("warning: __pcache_wait_for_pending_flushes: pcache %p flush error %d\n", pcache, ret);
         }
 
         sleep_ms(10);
@@ -1459,6 +1471,35 @@ out_unlock_locked:
     return ret;
 }
 
+void dump_pcache_stats(struct pcache *pcache) {
+    if (pcache == NULL) {
+        return;
+    }
+    __pcache_spin_lock(pcache);
+    printf("Pcache %p stats:\n", pcache);
+    printf("  Active: %d\n", __pcache_is_active(pcache));
+    printf("  Block count: %llu\n", (unsigned long long)pcache->blk_count);
+    printf("  Dirty count: %ld\n", pcache->dirty_count);
+    printf("  LRU count: %ld\n", pcache->lru_count);
+    printf("  Page count / Max pages: %ld/%ld\n", pcache->page_count, pcache->max_pages);
+    printf("  Dirty rate: %d%%\n", pcache->dirty_rate);
+    printf("  Flush requested: %d\n", pcache->flush_requested);
+    printf("  Flush error: %d\n", pcache->flush_error);
+    __pcache_spin_unlock(pcache);
+}
+
+void dump_all_pcache_stats(void) {
+    struct pcache *pcache = NULL;
+    struct pcache *tmp = NULL;
+    __pcache_global_lock();
+    printf("Dumping all pcache stats:\n");
+    printf("Total pcaches: %d\n", __global_pcache_count);
+    list_foreach_node_safe(&__global_pcache_list, pcache, tmp, list_entry) {
+        dump_pcache_stats(pcache);
+    }
+    __pcache_global_unlock();
+}
+
 /******************************************************************************
  * System Call Handlers
  *****************************************************************************/
@@ -1467,5 +1508,10 @@ uint64 sys_sync(void) {
     if (ret != 0) {
         printf("sys_sync: pcache_sync failed with error %d\n", ret);
     }
+    return 0;
+}
+
+uint64 sys_dumppcache(void) {
+    dump_all_pcache_stats();
     return 0;
 }

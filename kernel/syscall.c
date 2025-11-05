@@ -114,6 +114,7 @@ extern uint64 sys_pause(void);
 extern uint64 sys_memstat(void);
 extern uint64 sys_dumpproc(void);
 extern uint64 sys_dumpchan(void);
+extern uint64 sys_dumppcache(void);
 
 //900
 extern uint64 sys_sync(void);
@@ -153,6 +154,7 @@ STATIC uint64 (*syscalls[])(void) = {
 [SYS_memstat] sys_memstat,
 [SYS_dumpproc] sys_dumpproc,
 [SYS_dumpchan] sys_dumpchan,
+[SYS_dumppcache] sys_dumppcache,
 [SYS_sync]    sys_sync,
 };
 
