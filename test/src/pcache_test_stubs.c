@@ -18,6 +18,8 @@
 #include "timer.h"
 #include "bio.h"
 
+#define KERNEL_STACK_ORDER 2
+
 struct queued_work_entry {
     struct workqueue *wq;
     struct work_struct *work;
@@ -25,6 +27,13 @@ struct queued_work_entry {
 
 static struct queued_work_entry g_pending_work = {0};
 static bool g_fail_next_queue_work = false;
+
+// Global flag to simulate allocation failure in tests
+static bool g_test_fail_page_alloc = false;
+static bool g_test_fail_slab_alloc = false;
+static bool g_test_break_on_sleep = false;
+static int g_test_sleep_call_count = 0;
+static int g_test_max_sleep_calls = 1;
 
 void pcache_test_fail_next_queue_work(void) {
     g_fail_next_queue_work = true;
@@ -200,6 +209,29 @@ void page_free(void *ptr, uint64 order) {
     free(ptr);
 }
 
+// Page allocation for tests
+page_t *ut_make_mock_page(uint64 order, uint64 flags) {
+    (void)order;
+    page_t *page = calloc(1, sizeof(page_t));
+    if (page == NULL) {
+        return NULL;
+    }
+    page->ref_count = 1;
+    page->physical_address = (uint64)(uintptr_t)page;
+    page->flags = 0;
+    PAGE_FLAG_SET_TYPE(page->flags, flags);
+    spin_init(&page->lock, "page_lock");
+    return page;
+}
+
+page_t *__page_alloc(uint64 order, uint64 flags) {
+    if (g_test_fail_page_alloc) {
+        g_test_fail_page_alloc = false;
+        return NULL;
+    }
+    return ut_make_mock_page(order, flags);
+}
+
 // -----------------------------------------------------------------------------
 // Slab helpers
 // -----------------------------------------------------------------------------
@@ -243,6 +275,10 @@ int slab_cache_shrink(slab_cache_t *cache, int nums) {
 
 void *slab_alloc(slab_cache_t *cache) {
     if (cache == NULL || cache->obj_size == 0) {
+        return NULL;
+    }
+    if (g_test_fail_slab_alloc) {
+        g_test_fail_slab_alloc = false;
         return NULL;
     }
     return calloc(1, cache->obj_size);
@@ -409,6 +445,45 @@ int kernel_proc_create(const char *name, struct proc **retp, void *entry,
 
 void wakeup_proc(struct proc *p) {
     (void)p;
+}
+
+struct proc *myproc(void) {
+    return (struct proc *)0x2;
+}
+
+void wakeup_on_chan(void *chan) {
+    (void)chan;
+}
+
+void pcache_test_set_break_on_sleep(bool enable) {
+    g_test_break_on_sleep = enable;
+    g_test_sleep_call_count = 0;
+}
+
+void pcache_test_set_max_sleep_calls(int max_calls) {
+    g_test_max_sleep_calls = max_calls;
+}
+
+void pcache_test_fail_next_page_alloc(void) {
+    g_test_fail_page_alloc = true;
+}
+
+void pcache_test_fail_next_slab_alloc(void) {
+    g_test_fail_slab_alloc = true;
+}
+
+void sleep_on_chan(void *chan, struct spinlock *lk) {
+    (void)chan;
+    (void)lk;
+    
+    if (g_test_break_on_sleep) {
+        g_test_sleep_call_count++;
+        if (g_test_sleep_call_count >= g_test_max_sleep_calls) {
+            // Set flag to make next allocation fail and exit the function
+            g_test_fail_page_alloc = true;
+            return;
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------

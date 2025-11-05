@@ -25,6 +25,9 @@
 extern void pcache_test_run_flusher_round(uint64 round_start, bool force_round);
 extern void pcache_test_set_retry_hook(void (*hook)(struct pcache *, uint64));
 extern void pcache_test_fail_next_queue_work(void);
+extern void pcache_test_set_break_on_sleep(bool enable);
+extern void pcache_test_fail_next_page_alloc(void);
+extern void pcache_test_fail_next_slab_alloc(void);
 
 extern void spin_init(struct spinlock *lock, char *name);
 
@@ -616,6 +619,9 @@ static void test_pcache_get_page_eviction_failure(void **state) {
     page_lock_acquire(resident);
     resident->ref_count = 2;
     page_lock_release(resident);
+
+    // Make slab allocation fail so __pcache_page_alloc returns NULL
+    pcache_test_fail_next_slab_alloc();
 
     uint64 request_blk = resident_blk + ((uint64)PGSIZE >> BLK_SIZE_SHIFT);
     page_t *result = pcache_get_page(cache, request_blk);
