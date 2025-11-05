@@ -35,6 +35,7 @@ static spinlock_t __pcache_global_spinlock = {0};
 static slab_cache_t __pcache_node_slab = {0};
 static completion_t __global_flusher_completion = {0};
 static struct proc *__flusher_thread_pcb = NULL;
+static bool __global_flusher_running = false;
 
 #define PCACHE_BLKS_PER_PAGE (PGSIZE >> BLK_SIZE_SHIFT)
 #define PCACHE_BLK_MASK ((uint64)PCACHE_BLKS_PER_PAGE - 1)
@@ -293,31 +294,35 @@ static void __pcache_flush_done(struct pcache *pcache) {
 
 // Wake up the flusher thread to flush all dirty pcaches
 static void __pcache_flusher_start(void) {
-    __pcache_global_lock();
+    __pcache_global_lock_assert_holding();
     if (__pcache_flusher_in_progress()) {
-        __pcache_global_unlock();
         return;
     }
+    __global_flusher_running = true;
     completion_reinit(&__global_flusher_completion);
-    wakeup_proc(__flusher_thread_pcb);
-    __pcache_global_unlock();
+    if (myproc() != __flusher_thread_pcb) {
+        wakeup_proc(__flusher_thread_pcb);
+    }
 }
 
 // Wait for flusher thread to complete its current round of flushing
 static int __pcache_wait_flusher(void) {
-    wait_for_completion(&__global_flusher_completion);
+    if (__global_flusher_running) {
+        wait_for_completion(&__global_flusher_completion);
+    }
     return 0;
 }
 
 // Notify the end of current round of flushing
 static void __pcache_flusher_done(void) {
     __pcache_global_lock_assert_holding();
+    __global_flusher_running = false;
     complete_all(&__global_flusher_completion);
 }
 
 static bool __pcache_flusher_in_progress(void) {
     __pcache_global_lock_assert_holding();
-    return !completion_done(&__global_flusher_completion);
+    return __global_flusher_running;
 }
 
 /******************************************************************************
@@ -499,6 +504,7 @@ void pcache_test_run_flusher_round(uint64 round_start, bool force_round) {
     bool pending_flush;
 
     __pcache_global_lock();
+    __pcache_flusher_start();
     pending_flush = __pcache_schedule_flushes_locked(round_start, force_round);
     __pcache_global_unlock();
 
@@ -519,7 +525,8 @@ static void __flusher_thread(uint64 a1, uint64 a2) {
         uint64 round_start = get_jiffs();
 
         __pcache_global_lock();
-        bool force_round = !completion_done(&__global_flusher_completion);
+        bool force_round = __global_flusher_running;
+        __pcache_flusher_start();
         bool pending_flush = __pcache_schedule_flushes_locked(round_start, force_round);
         __pcache_global_unlock();
 
@@ -1338,7 +1345,9 @@ int pcache_flush(struct pcache *pcache) {
 
 // Flush all pcaches and wait for completion
 int pcache_sync(void) {
+    __pcache_global_lock();
     __pcache_flusher_start();
+    __pcache_global_unlock();
     return __pcache_wait_flusher();
 }
 
