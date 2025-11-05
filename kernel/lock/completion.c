@@ -98,7 +98,7 @@ bool completion_done(completion_t *c) {
         return false;
     }
     spin_acquire(&c->lock);
-    bool done = (c->done == 0);
+    bool done = proc_queue_size(&c->wait_queue) == 0;
     spin_release(&c->lock);
     return done;
 }
