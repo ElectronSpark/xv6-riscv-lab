@@ -104,7 +104,8 @@ block_cache_init_entry(struct block_cache_entry *entry, uint dev)
 
 	cache->pcache.ops = &block_cache_ops;
 	cache->pcache.blk_count = (uint64)FSSIZE * BLKS_PER_BSIZE;
-	cache->pcache.max_pages = NBUF; // keep residency comparable to legacy buffer cache
+	// cache->pcache.max_pages = NBUF; // keep residency comparable to legacy buffer cache
+  cache->pcache.max_pages = 0; // Use default max pages
 	cache->pcache.private_data = entry;
 
 	blkdev_t *blkdev = NULL;
@@ -267,8 +268,10 @@ bpin(page_t *page)
 	if (page == NULL) {
 		return;
 	}
+  page_lock_acquire(page);
 	int ret = page_ref_inc_unlocked(page);
 	assert(ret >= 0, "bpin: failed to increment refcount");
+  page_lock_release(page);
 }
 
 void
@@ -277,8 +280,10 @@ bunpin(page_t *page)
 	if (page == NULL) {
 		return;
 	}
+  page_lock_acquire(page);
 	int ret = page_ref_dec_unlocked(page);
 	assert(ret >= 1, "bunpin: refcount underflow");
+  page_lock_release(page);
 }
 
 void
