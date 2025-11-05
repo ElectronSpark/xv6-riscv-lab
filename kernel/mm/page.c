@@ -470,9 +470,8 @@ int page_buddy_init(uint64 pa_start, uint64 pa_end) {
 }
 
 STATIC_INLINE int __page_ref_inc_unlocked(page_t *page) {
-    if (page == NULL) {
-        return -1;
-    }
+    assert(spin_holding(&page->lock),
+           "__page_ref_inc_unlocked: page lock not held");
     if (page->ref_count == 0) {
         // page with 0 reference should be put back to the buddy system
         return -1;
@@ -482,9 +481,8 @@ STATIC_INLINE int __page_ref_inc_unlocked(page_t *page) {
 }
 
 STATIC_INLINE int __page_ref_dec_unlocked(page_t *page) {
-    if (page == NULL) {
-        return -1;
-    }
+    assert(spin_holding(&page->lock),
+           "__page_ref_dec_unlocked: page lock not held");
     if (page->ref_count > 0) {
         page->ref_count--;
         return page->ref_count;
