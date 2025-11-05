@@ -111,6 +111,7 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/free.c
     ${USER_DIR}/ps.c
     ${USER_DIR}/dumpchan.c
+    ${USER_DIR}/dumppcache.c
     ${USER_DIR}/testsig.c
     ${USER_DIR}/cowtest.c
 )
