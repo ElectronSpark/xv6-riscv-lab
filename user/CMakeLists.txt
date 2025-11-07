@@ -36,10 +36,14 @@ add_custom_target(${USER_INITCODE_DECOMPILED}
 
 
 # add user libraries
+set(LIBC_DIR ${USER_DIR}/libc)
+
 set(USER_LIB_C_SRC
     ${USER_DIR}/ulib.c
     ${USER_DIR}/printf.c
     ${USER_DIR}/umalloc.c
+    ${LIBC_DIR}/src/musl_port_stubs.c
+    ${LIBC_DIR}/src/errno/errno.c
 )
 if($ENV{LAB} STREQUAL "lock")
     set(USER_LIB_C_SRC 
@@ -81,7 +85,51 @@ add_dependencies(${LIB_USERLIB} generate_usys)
 # Ensure proper linking and include directories for userlib
 target_link_options(${LIB_USERLIB} PRIVATE
     "-z max-page-size=4096 -T ${USER_DIR}/user.ld")
-target_include_directories(${LIB_USERLIB} PRIVATE ${USER_DIR})
+target_include_directories(${LIB_USERLIB} PUBLIC ${USER_DIR} ${LIBC_DIR}/include)
+
+include(ExternalProject)
+
+set(MUSL_VERSION 1.2.4)
+set(MUSL_URL https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz)
+set(MUSL_PREFIX ${CMAKE_BINARY_DIR}/musl)
+set(MUSL_SOURCE_DIR ${MUSL_PREFIX}/src/musl-${MUSL_VERSION})
+set(MUSL_BUILD_DIR ${MUSL_PREFIX}/build)
+set(MUSL_INSTALL_DIR ${MUSL_PREFIX}/install)
+set(MUSL_PATCH_FILE ${CMAKE_SOURCE_DIR}/user/libc/patches/musl-xv6-port.patch)
+set(MUSL_LIBC_PATH ${MUSL_INSTALL_DIR}/lib/libc.a)
+
+ExternalProject_Add(musl_external
+    PREFIX            ${MUSL_PREFIX}
+    URL               ${MUSL_URL}
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+    UPDATE_COMMAND    ""
+    SOURCE_DIR        ${MUSL_SOURCE_DIR}
+    BINARY_DIR        ${MUSL_BUILD_DIR}
+    BUILD_IN_SOURCE   OFF
+    PATCH_COMMAND     patch -d ${MUSL_SOURCE_DIR} -p0 --forward -i ${MUSL_PATCH_FILE}
+    CONFIGURE_COMMAND CC=${CMAKE_C_COMPILER} AR=${CMAKE_AR} RANLIB=${CMAKE_RANLIB} ${MUSL_SOURCE_DIR}/configure --prefix=${MUSL_INSTALL_DIR} --host=riscv64 --target=riscv64 --disable-shared --enable-static
+    BUILD_COMMAND     ${CMAKE_MAKE_PROGRAM}
+    INSTALL_COMMAND   ${CMAKE_MAKE_PROGRAM} install
+    BUILD_BYPRODUCTS  ${MUSL_LIBC_PATH}
+)
+
+add_library(musl_libc STATIC IMPORTED GLOBAL)
+set_target_properties(musl_libc PROPERTIES IMPORTED_LOCATION ${MUSL_LIBC_PATH})
+add_dependencies(musl_libc musl_external)
+add_dependencies(${LIB_USERLIB} musl_external)
+
+target_include_directories(${LIB_USERLIB} PUBLIC ${MUSL_INSTALL_DIR}/include)
+target_compile_definitions(${LIB_USERLIB} PRIVATE XV6_MUSL_PORT=1)
+
+execute_process(
+    COMMAND ${CMAKE_C_COMPILER} -print-libgcc-file-name
+    OUTPUT_VARIABLE RISCV_LIBGCC
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+if(NOT RISCV_LIBGCC)
+    message(FATAL_ERROR "Failed to locate libgcc for the RISC-V toolchain")
+endif()
 
 # Add user programs
 set(USER_PROGRAMS_C_FILES
@@ -190,15 +238,21 @@ if($ENV{LAB} STREQUAL "net")
     )
 endif()
 
+set(USER_PROGRAMS_C_FILES
+    ${USER_PROGRAMS_C_FILES}
+    ${USER_DIR}/hello_musl.c
+)
+
 # Modify user program output to match the .c file name without a suffix
 foreach(PROGRAM ${USER_PROGRAMS_C_FILES})
     get_filename_component(PROGRAM_NAME ${PROGRAM} NAME_WE)
     list(APPEND USER_PROGRAMS _${PROGRAM_NAME})
     add_executable(_${PROGRAM_NAME} ${PROGRAM})
     target_link_options(_${PROGRAM_NAME} PRIVATE -z max-page-size=4096 -T ${USER_DIR}/user.ld)
-    # Force linker to include all objects from userlib (including usys.S)
     target_link_libraries(_${PROGRAM_NAME} PRIVATE
         "--whole-archive" ${LIB_USERLIB} "--no-whole-archive"
+        musl_libc
+        ${RISCV_LIBGCC}
     )
     set_target_properties(_${PROGRAM_NAME} PROPERTIES OUTPUT_NAME _${PROGRAM_NAME})
 endforeach()
@@ -208,6 +262,7 @@ add_custom_target(user_programs ALL
     DEPENDS ${USER_PROGRAMS}
     COMMENT "Building all user programs"
 )
+add_dependencies(user_programs musl_external)
 
 # Pass the populated USER_PROGRAMS variable to the parent scope
 set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)

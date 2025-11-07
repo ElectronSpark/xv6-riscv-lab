@@ -1,197 +1,93 @@
-#include "kernel/inc/types.h"
-#include "kernel/inc/stat.h"
-#include "user/user.h"
+#include "stdio.h"
+#include "stdlib.h"
+#include "unistd.h"
+#include "errno.h"
 
 #include <stdarg.h>
 
-static char digits[] = "0123456789ABCDEF";
+#define LOCAL_STACK_BUF 128
 
-// static void
-// putc(int fd, char c)
-// {
-//   write(fd, &c, 1);
-// }
-
-static void
-puts_n(int fd, const char *s, size_t n)
+static int
+write_all(int fd, const char *buf, size_t len)
 {
-  int idx = 0;
-  while (idx < n) {
-    int ret = write(fd, &s[idx], n - idx);
-    if (ret <= 0) {
-      break;
-    }
-    idx += ret;
-  }
+	size_t written = 0;
+	while (written < len) {
+		ssize_t rc = write(fd, buf + written, len - written);
+		if (rc < 0)
+			return -1;
+		if (rc == 0) {
+			errno = EIO;
+			return -1;
+		}
+		written += (size_t)rc;
+	}
+	return 0;
 }
 
-static void
-printint(int fd, int xx, int base, int sgn)
+static int
+vdprintf_fd(int fd, const char *fmt, va_list ap)
 {
-  char buf[16];
-  int i, neg;
-  uint x;
+	char stack_buf[LOCAL_STACK_BUF];
+	va_list ap_copy;
+	va_copy(ap_copy, ap);
+	int needed = vsnprintf(stack_buf, sizeof(stack_buf), fmt, ap_copy);
+	va_end(ap_copy);
+	if (needed < 0)
+		return -1;
 
-  neg = 0;
-  if(sgn && xx < 0){
-    neg = 1;
-    x = -xx;
-  } else {
-    x = xx;
-  }
+	if ((size_t)needed < sizeof(stack_buf)) {
+		if (write_all(fd, stack_buf, (size_t)needed) < 0)
+			return -1;
+		return needed;
+	}
 
-  i = 0;
-  do{
-    buf[i++] = digits[x % base];
-  }while((x /= base) != 0);
-  if(neg)
-    buf[i++] = '-';
+	size_t buf_size = (size_t)needed + 1;
+	char *heap_buf = (char *)malloc(buf_size);
+	if (!heap_buf) {
+		errno = ENOMEM;
+		return -1;
+	}
 
-  int left = 0;
-  int right = i - 1;
-  while (left < right) {
-    buf[left] ^= buf[right];
-    buf[right] ^= buf[left];
-    buf[left] ^= buf[right];
-    left++;
-    right--;
-  }
-  puts_n(fd, buf, i);
+	va_list ap_copy2;
+	va_copy(ap_copy2, ap);
+	int formatted = vsnprintf(heap_buf, buf_size, fmt, ap_copy2);
+	va_end(ap_copy2);
+	if (formatted < 0) {
+		free(heap_buf);
+		return -1;
+	}
+
+	if (write_all(fd, heap_buf, (size_t)formatted) < 0) {
+		free(heap_buf);
+		return -1;
+	}
+
+	free(heap_buf);
+	return formatted;
 }
 
-static void
-printptr(int fd, uint64 x) {
-  int i;
-  char buf[3 + sizeof(uint64) * 2] = { 0 };
-  int idx = 0;
-  buf[idx++] = '0';
-  buf[idx++] = 'x';
-  for (i = 0; i < (sizeof(uint64) * 2); i++, x <<= 4)
-    buf[idx++] = digits[x >> (sizeof(uint64) * 8 - 4)];
-  puts_n(fd, buf, idx);
-}
-
-// Print to the given fd. Only understands %d, %x, %p, %s.
-void
+int
 vprintf(int fd, const char *fmt, va_list ap)
 {
-  char *s;
-  int c0, c1, c2, i, state;
-  char buf[128] = { 0 };
-  int idx = 0;
-
-  state = 0;
-  for(i = 0; fmt[i]; i++){
-    if (idx >= 120) {
-      puts_n(fd, buf, idx);
-      idx = 0;
-    }
-    c0 = fmt[i] & 0xff;
-    if(state == 0){
-      if(c0 == '%'){
-        state = '%';
-      } else {
-        buf[idx++] = c0;
-      }
-    } else if(state == '%'){
-      c1 = c2 = 0;
-      if(c0) c1 = fmt[i+1] & 0xff;
-      if(c1) c2 = fmt[i+2] & 0xff;
-      if(c0 == 'd'){
-        printint(fd, va_arg(ap, int), 10, 1);
-      } else if(c0 == 'l' && c1 == 'd'){
-        printint(fd, va_arg(ap, uint64), 10, 1);
-        i += 1;
-      } else if(c0 == 'l' && c1 == 'l' && c2 == 'd'){
-        printint(fd, va_arg(ap, uint64), 10, 1);
-        i += 2;
-      } else if(c0 == 'u'){
-        printint(fd, va_arg(ap, int), 10, 0);
-      } else if(c0 == 'l' && c1 == 'u'){
-        printint(fd, va_arg(ap, uint64), 10, 0);
-        i += 1;
-      } else if(c0 == 'l' && c1 == 'l' && c2 == 'u'){
-        printint(fd, va_arg(ap, uint64), 10, 0);
-        i += 2;
-      } else if(c0 == 'x'){
-        printint(fd, va_arg(ap, int), 16, 0);
-      } else if(c0 == 'l' && c1 == 'x'){
-        printint(fd, va_arg(ap, uint64), 16, 0);
-        i += 1;
-      } else if(c0 == 'l' && c1 == 'l' && c2 == 'x'){
-        printint(fd, va_arg(ap, uint64), 16, 0);
-        i += 2;
-      } else if(c0 == 'p'){
-        printptr(fd, va_arg(ap, uint64));
-      } else if(c0 == 's'){
-        if((s = va_arg(ap, char*)) == 0) {
-          if (idx) {
-            puts_n(fd, buf, idx);
-            idx = 0;
-          }
-          puts_n(fd, "(null)", 6);
-        } else {
-          size_t len = strlen(s);
-          puts_n(fd, s, len);
-        }
-      } else if(c0 == '%'){
-        buf[idx++] = '%';
-      } else {
-        // Unknown % sequence.  Print it to draw attention.
-        buf[idx++] = '%';
-        buf[idx++] = c0;
-      }
-
-#if 0
-      if(c == 'd'){
-        printint(fd, va_arg(ap, int), 10, 1);
-      } else if(c == 'l') {
-        printint(fd, va_arg(ap, uint64), 10, 0);
-      } else if(c == 'x') {
-        printint(fd, va_arg(ap, int), 16, 0);
-      } else if(c == 'p') {
-        printptr(fd, va_arg(ap, uint64));
-      } else if(c == 's'){
-        s = va_arg(ap, char*);
-        if(s == 0)
-          s = "(null)";
-        while(*s != 0){
-          buf[idx++] = *s;
-          s++;
-        }
-      } else if(c == 'c'){
-        buf[idx++] = va_arg(ap, uint);
-      } else if(c == '%'){
-        buf[idx++] = c;
-      } else {
-        // Unknown % sequence.  Print it to draw attention.
-        buf[idx++] = '%';
-        buf[idx++] = c;
-      }
-#endif
-      state = 0;
-    }
-  }
-  if (idx) {
-    puts_n(fd, buf, idx);
-    idx = 0;
-  }
+	return vdprintf_fd(fd, fmt, ap);
 }
 
-void
+int
 fprintf(int fd, const char *fmt, ...)
 {
-  va_list ap;
-
-  va_start(ap, fmt);
-  vprintf(fd, fmt, ap);
+	va_list ap;
+	va_start(ap, fmt);
+	int rc = vdprintf_fd(fd, fmt, ap);
+	va_end(ap);
+	return rc;
 }
 
-void
+int
 printf(const char *fmt, ...)
 {
-  va_list ap;
-
-  va_start(ap, fmt);
-  vprintf(1, fmt, ap);
+	va_list ap;
+	va_start(ap, fmt);
+	int rc = vdprintf_fd(1, fmt, ap);
+	va_end(ap);
+	return rc;
 }

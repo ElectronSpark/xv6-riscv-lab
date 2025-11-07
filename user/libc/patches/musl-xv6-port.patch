@@ -1,0 +1,13 @@
+--- include/features.h
++++ include/features.h
+@@ -1,6 +1,8 @@
+ #ifndef _FEATURES_H
+ #define _FEATURES_H
+
++#define __MUSL_XV6_PORT 1
++
+ #if defined(_ALL_SOURCE) && !defined(_GNU_SOURCE)
+ #define _GNU_SOURCE 1
+ #endif
+
+ #if defined(_DEFAULT_SOURCE) && !defined(_BSD_SOURCE)

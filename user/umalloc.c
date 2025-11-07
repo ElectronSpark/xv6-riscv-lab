@@ -1,6 +1,9 @@
-#include "kernel/inc/types.h"
-#include "kernel/inc/stat.h"
-#include "user/user.h"
+#include "stddef.h"
+#include "stdint.h"
+#include "stdlib.h"
+#include "string.h"
+#include "unistd.h"
+#include "errno.h"
 #include "kernel/inc/param.h"
 
 // Memory allocator by Kernighan and Ritchie,
@@ -11,7 +14,7 @@ typedef long Align;
 union header {
   struct {
     union header *ptr;
-    uint size;
+    size_t size;
   } s;
   Align x;
 };
@@ -44,15 +47,15 @@ free(void *ap)
 }
 
 static Header*
-morecore(uint nu)
+morecore(size_t nu)
 {
-  char *p;
+  void *p;
   Header *hp;
 
   if(nu < 4096)
     nu = 4096;
-  p = sbrk(nu * sizeof(Header));
-  if(p == (char*)-1)
+  p = sbrk((intptr_t)(nu * sizeof(Header)));
+  if(p == (void*)-1)
     return 0;
   hp = (Header*)p;
   hp->s.size = nu;
@@ -61,10 +64,10 @@ morecore(uint nu)
 }
 
 void*
-malloc(uint nbytes)
+malloc(size_t nbytes)
 {
   Header *p, *prevp;
-  uint nunits;
+  size_t nunits;
 
   nunits = (nbytes + sizeof(Header) - 1)/sizeof(Header) + 1;
   if((prevp = freep) == 0){
@@ -87,4 +90,43 @@ malloc(uint nbytes)
       if((p = morecore(nunits)) == 0)
         return 0;
   }
+}
+
+void *
+calloc(size_t nmemb, size_t size)
+{
+  if (nmemb != 0 && size > (size_t)-1 / nmemb) {
+    errno = ENOMEM;
+    return 0;
+  }
+  size_t total = nmemb * size;
+  void *ptr = malloc(total);
+  if (!ptr)
+    return 0;
+  memset(ptr, 0, total);
+  return ptr;
+}
+
+void *
+realloc(void *ptr, size_t size)
+{
+  if (ptr == 0)
+    return malloc(size);
+  if (size == 0) {
+    free(ptr);
+    return 0;
+  }
+
+  Header *bp = (Header *)ptr - 1;
+  size_t current = (bp->s.size - 1) * sizeof(Header);
+  if (current >= size)
+    return ptr;
+
+  void *newptr = malloc(size);
+  if (!newptr)
+    return 0;
+  size_t copy = current < size ? current : size;
+  memcpy(newptr, ptr, copy);
+  free(ptr);
+  return newptr;
 }
