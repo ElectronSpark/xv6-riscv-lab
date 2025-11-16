@@ -38,6 +38,11 @@ set(KERNEL_C_FILES
 
 set(KERNEL_C_FILES
     ${KERNEL_C_FILES}
+    ${KERNEL_DIR}/vfs/superblock.c
+)
+
+set(KERNEL_C_FILES
+    ${KERNEL_C_FILES}
     ${KERNEL_DIR}/lock/mutex.c
     ${KERNEL_DIR}/lock/semaphore.c
     ${KERNEL_DIR}/lock/semaphore_test.c

@@ -95,6 +95,9 @@
         "workqueue.h": "c",
         "semaphore_types.h": "c",
         "bits.h": "c",
-        "pcache.h": "c"
+        "pcache.h": "c",
+        "kobject.h": "c",
+        "workqueue_types.h": "c",
+        "mutex_types.h": "c"
     }
 }
