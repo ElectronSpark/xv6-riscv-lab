@@ -23,9 +23,18 @@ typedef uint64 pde_t;
 typedef typeof(sizeof(0)) size_t;
 #endif              /* size_t */
 
-#if !defined(loff_t) && !defined(ON_HOST_OS)
-typedef long long loff_t;
-#endif              /* loff_t */
+#if !defined(mode_t)
+typedef uint32 mode_t;
+#endif             /* mode_t */
+
+#if !defined(ON_HOST_OS)
+    #if !defined(ssize_t)
+    typedef typeof(-sizeof(int)) ssize_t;
+    #endif              /* ssize_t */
+    #if !defined(loff_t)
+    typedef long long loff_t;
+    #endif              /* loff_t */
+#endif // ON_HOST_OS
 
 #ifndef bool
 #if __STDC_VERSION__ < 202311L  // C23 or later

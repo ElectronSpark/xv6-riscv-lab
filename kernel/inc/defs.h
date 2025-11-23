@@ -11,6 +11,8 @@ typedef typeof(sizeof(0)) size_t;
 #define minor(dev)  ((dev) & 0xFFFF)
 #define	mkdev(m,n)  ((uint)((m)<<16| (n)))
 
+#define min(a, b) ((a) < (b) ? (a) : (b))
+
 struct buf;
 struct context;
 struct file;

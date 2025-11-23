@@ -1,0 +1,67 @@
+#ifndef __KERNEL_VIRTUAL_FILE_SYSTEM_FS_H
+#define __KERNEL_VIRTUAL_FILE_SYSTEM_FS_H
+
+#include "vfs/vfs_types.h"
+
+void __vfs_rooti_init(void);
+void vfs_init(void);
+
+// Filesystem type registration
+int vfs_register_fs_type(struct vfs_fs_type *fs_type);
+int vfs_unregister_fs_type(const char *name);
+void vfs_fs_type_lock(void);
+void vfs_fs_type_unlock(void);
+
+// Mount and unmount filesystems
+int vfs_mount(const char *type, struct vfs_inode *mountpoint,
+              struct vfs_inode *device, int flags, const char *data);
+int vfs_unmount(struct vfs_inode *mountpoint);
+
+// superblock operations
+int vfs_get_superblock(struct vfs_inode *mountpoint, struct vfs_superblock **ret_sb);
+int vfs_get_mountpoint(struct vfs_superblock *sb, struct vfs_inode **ret_mountpoint);
+
+void vfs_superblock_rlock(struct vfs_superblock *sb);
+void vfs_superblock_wlock(struct vfs_superblock *sb);
+void vfs_superblock_unlock(struct vfs_superblock *sb);
+
+int vfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode);
+int vfs_get_inode(struct vfs_superblock *sb, uint64 ino,
+                  struct vfs_inode **ret_inode);
+int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
+int vfs_load_superblock(struct vfs_inode *device,
+                            struct vfs_superblock **ret_sb);
+void vfs_free_superblock(struct vfs_superblock *sb);
+void vfs_unmount_begin(struct vfs_superblock *sb);
+
+// inode operations
+int vfs_ilock(struct vfs_inode *inode);
+int vfs_iunlock(struct vfs_inode *inode);
+int vfs_idup(struct vfs_inode *inode);       // Increase ref count
+int vfs_iput(struct vfs_inode *inode);       // Decrease ref count and
+void vfs_destroy_inode(struct vfs_inode *inode); // Release on-disk inode resources
+void vfs_free_inode(struct vfs_inode *inode);    // Release in-memory inode structure
+void vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty
+int vfs_sync_inode(struct vfs_inode *inode);     // Write inode to disk
+
+int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry);
+int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user);
+int vfs_create(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode);
+int vfs_mknod(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode, uint32 dev);
+int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, struct vfs_dentry *new);
+int vfs_unlink(struct vfs_inode *dir, struct vfs_dentry *dentry);
+int vfs_mkdir(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode);
+int vfs_rmdir(struct vfs_inode *dir, struct vfs_dentry *dentry);
+int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
+             struct vfs_inode *new_dir, struct vfs_dentry *new_dentry);
+int vfs_symlink(struct vfs_inode *dir, struct vfs_dentry *dentry,
+                const char *target);
+int vfs_truncate(struct vfs_inode *inode, uint64 new_size);
+
+// Public APIs not tied to specific callbacks
+int vfs_namei(struct vfs_inode *dir, struct vfs_inode **res_inode,
+              const char *path, size_t path_len);
+int vfs_chroot(struct vfs_inode *new_root);
+int vfs_chdir(struct vfs_inode *new_cwd);
+
+#endif // __KERNEL_VIRTUAL_FILE_SYSTEM_FS_H

@@ -98,6 +98,11 @@
         "pcache.h": "c",
         "kobject.h": "c",
         "workqueue_types.h": "c",
-        "mutex_types.h": "c"
+        "mutex_types.h": "c",
+        "vfs_types.h": "c",
+        "buf.h": "c",
+        "blkdev.h": "c",
+        "dev.h": "c",
+        "complex": "c"
     }
 }
