@@ -9,6 +9,7 @@ typedef enum {
     VFS_I_TYPE_PIPE,
     VFS_I_TYPE_DIR,
     VFS_I_TYPE_MNT,
+    VFS_I_TYPE_ROOT,
     VFS_I_TYPE_FILE,
     VFS_I_TYPE_SYMLINK,
     VFS_I_TYPE_CDEV,
@@ -37,6 +38,7 @@ static inline mode_t vfs_inode_type_to_mode(vfs_inode_type_t type) {
     switch(type) {
         case VFS_I_TYPE_DIR:
         case VFS_I_TYPE_MNT:
+        case VFS_I_TYPE_ROOT:
             return S_IFDIR;
         case VFS_I_TYPE_CDEV:
             return S_IFCHR;

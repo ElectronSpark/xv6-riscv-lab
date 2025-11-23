@@ -103,6 +103,7 @@
         "buf.h": "c",
         "blkdev.h": "c",
         "dev.h": "c",
-        "complex": "c"
+        "complex": "c",
+        "rwlock.h": "c"
     }
 }

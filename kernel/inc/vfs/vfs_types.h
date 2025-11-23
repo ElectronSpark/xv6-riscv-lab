@@ -39,16 +39,39 @@ struct vfs_fs_type {
     struct vfs_fs_type_ops *ops;
 };
 
+#define VFS_SUPERBLOCK_HASH_BUCKETS 61
+
+// Filesystem type operations
+// mounnt_begin:
+//    Prepare for mounting a filesystem. Allocate and initialize the superblock structure,
+//    then attach it to its fs_type.
+// mount:
+//    Mount the filesystem at the given mountpoint using the device inode.
+//    The superblock is already allocated and initialized by mount_begin.
+//    Mount will hold write lock on the superblock during the operation.
+// unmount:
+//    Unmount the filesystem at the given mountpoint and release its superblock.
+//    Maybe called when failed to mount.
 struct vfs_fs_type_ops {
+    int (*mount_begin)(struct vfs_inode *mountpoint, struct vfs_inode *device,
+                      int flags, const char *data, struct vfs_superblock **ret_sb);
     int (*mount)(struct vfs_inode *mountpoint, struct vfs_inode *device,
                  int flags, const char *data);
-    void (*unmount)(struct vfs_inode *mountpoint);
+    void (*unmount)(struct vfs_superblock *sb);
 };
 
 struct vfs_superblock {
     list_node_t siblings; // entry in vfs_fs_type.superblocks
     struct vfs_fs_type *fs_type;
-    hlist_t inodes; // hash list of inodes
+    struct {
+        hlist_t inodes; // hash list of inodes
+        hlist_bucket_t inodes_buckets[VFS_SUPERBLOCK_HASH_BUCKETS];
+    };
+    struct {
+        uint64 valid: 1;
+        uint64 dirty: 1;
+    };
+    struct vfs_superblock *parent_sb; // parent superblock if mounted on another fs
     struct vfs_inode *mountpoint; // inode where this sb is mounted
     struct vfs_inode *device;     // device inode (NULL for non-dev fs)
     struct vfs_inode *root_inode; // root inode of this superblock
@@ -63,9 +86,6 @@ struct vfs_superblock_ops {
     int (*get_inode)(struct vfs_superblock *sb, uint64 ino,
                      struct vfs_inode **ret_inode);
     int (*sync_fs)(struct vfs_superblock *sb, int wait);
-    int (*load_superblock)(struct vfs_inode *device,
-                             struct vfs_superblock **ret_sb);
-    void (*free_superblock)(struct vfs_superblock *sb);         // Release superblock in memory resources
     void (*unmount_begin)(struct vfs_superblock *sb);
 };
 
@@ -97,7 +117,7 @@ struct vfs_inode {
     union {
         cdev_t *cdev; // for character device inode
         blkdev_t *bdev; // for block device inode
-        struct vfs_inode *mnt_root; // the root inode of the mounted superblock
+        struct vfs_superblock *mnt_sb; // the mounted superblock
     };
 
     struct mutex lock; // protects the inode

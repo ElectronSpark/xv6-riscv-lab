@@ -142,3 +142,14 @@ void rwlock_release(rwlock_t *lock) {
     }
     spin_release(&lock->lock);
 }
+
+bool rwlock_is_write_holding(rwlock_t *lock) {
+    if (!lock) {
+        return false; // Invalid lock
+    }
+
+    spin_acquire(&lock->lock);
+    bool is_locked = (lock->holder == myproc());
+    spin_release(&lock->lock);
+    return is_locked;
+}
