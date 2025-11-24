@@ -30,6 +30,7 @@ int vfs_get_rooti_mnt(struct vfs_inode **ret_rooti, struct vfs_inode **ret_mount
 
 void vfs_superblock_rlock(struct vfs_superblock *sb);
 void vfs_superblock_wlock(struct vfs_superblock *sb);
+bool vfs_superblock_wholding(struct vfs_superblock *sb);
 void vfs_superblock_unlock(struct vfs_superblock *sb);
 
 int vfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode);
@@ -41,8 +42,8 @@ void vfs_unmount_begin(struct vfs_superblock *sb);
 // inode operations
 int vfs_ilock(struct vfs_inode *inode);
 int vfs_iunlock(struct vfs_inode *inode);
-int vfs_idup(struct vfs_inode *inode);       // Increase ref count
-int vfs_iput(struct vfs_inode *inode);       // Decrease ref count and
+int vfs_idup(struct vfs_inode *inode);       // Increase ref count, must hold inode lock
+void vfs_iput(struct vfs_inode *inode);       // Decrease ref count and, must hold inode lock
 void vfs_destroy_inode(struct vfs_inode *inode); // Release on-disk inode resources
 void vfs_free_inode(struct vfs_inode *inode);    // Release in-memory inode structure
 void vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty

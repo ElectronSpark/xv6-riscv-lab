@@ -43,22 +43,18 @@ struct vfs_fs_type {
 #define VFS_SUPERBLOCK_HASH_BUCKETS 61
 
 // Filesystem type operations
-// mounnt_begin:
-//    Prepare for mounting a filesystem. Allocate and initialize the superblock structure,
-//    then attach it to its fs_type.
 // mount:
-//    Mount the filesystem at the given mountpoint using the device inode.
-//    The superblock is already allocated and initialized by mount_begin.
-//    Mount will hold write lock on the superblock during the operation.
-// unmount:
-//    Unmount the filesystem at the given mountpoint and release its superblock.
-//    Maybe called when failed to mount.
+//    Create and fully initialize a superblock for the filesystem, returning it in
+//    `ret_sb`. Implementations should allocate the superblock, fill in its fields,
+//    and leave it in an unmounted state (mountpoint/parent unset) so that the VFS
+//    core can attach it to the mount tree.
+// free:
+//    Tear down a superblock instance that has not been mounted, or that must be
+//    discarded after a failed mount attempt.
 struct vfs_fs_type_ops {
-    int (*mount_begin)(struct vfs_inode *mountpoint, struct vfs_inode *device,
-                      int flags, const char *data, struct vfs_superblock **ret_sb);
     int (*mount)(struct vfs_inode *mountpoint, struct vfs_inode *device,
-                 int flags, const char *data);
-    void (*unmount)(struct vfs_superblock *sb);
+                 int flags, const char *data, struct vfs_superblock **ret_sb);
+    void (*free)(struct vfs_superblock *sb);
 };
 
 struct vfs_superblock {
@@ -146,8 +142,6 @@ struct vfs_inode_ops {
     void (*free_inode)(struct vfs_inode *inode);    // Release in-memory inode structure 
     void (*dirty_inode)(struct vfs_inode *inode);   // Mark inode as dirty
     int (*sync_inode)(struct vfs_inode *inode);     // Write inode to disk
-    int (*ilock)(struct vfs_inode *inode);
-    int (*iunlock)(struct vfs_inode *inode);
 };
 
 struct vfs_dentry {

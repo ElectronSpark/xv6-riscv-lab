@@ -38,7 +38,7 @@ set(KERNEL_C_FILES
 
 set(KERNEL_C_FILES
     ${KERNEL_C_FILES}
-    ${KERNEL_DIR}/vfs/superblock.c
+    ${KERNEL_DIR}/vfs/fs.c
 )
 
 set(KERNEL_C_FILES
