@@ -39,7 +39,6 @@ void kobject_init(struct kobject *obj) {
   list_entry_init(&obj->list_entry);
   int64 expected = __atomic_fetch_add(&obj->refcount, 1, __ATOMIC_SEQ_CST);
   assert(expected == 0, "kobject_init: obj->refcount is not zero");
-  obj->ops.release = NULL;
   __kobject_attach(obj);
 }
 
