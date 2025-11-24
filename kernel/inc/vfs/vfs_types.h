@@ -31,6 +31,7 @@ struct vfs_file_ops;
 struct vfs_fs_type {
     list_node_t list_entry;
     list_node_t superblocks; // list of struct vfs_superblock
+    struct kobject kobj; // for sysfs representation
     struct {
         uint64 registered: 1;
     };
@@ -150,7 +151,7 @@ struct vfs_inode_ops {
 };
 
 struct vfs_dentry {
-    struct vfs_inode *inode; // NULL if not yet resolved
+    uint64 ino; // inode number
     char *name;
     uint16 name_len;
 };

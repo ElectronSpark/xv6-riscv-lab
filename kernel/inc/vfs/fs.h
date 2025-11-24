@@ -7,10 +7,13 @@ void __vfs_rooti_init(void);
 void vfs_init(void);
 
 // Filesystem type registration
+struct vfs_fs_type *vfs_fs_type_allocate(void);
 int vfs_register_fs_type(struct vfs_fs_type *fs_type);
 int vfs_unregister_fs_type(const char *name);
 void vfs_fs_type_lock(void);
 void vfs_fs_type_unlock(void);
+struct vfs_fs_type *vfs_get_fs_type(const char *name);
+void vfs_put_fs_type(struct vfs_fs_type *fs_type);
 
 // Mount and unmount filesystems
 int vfs_mount(const char *type, struct vfs_inode *mountpoint,

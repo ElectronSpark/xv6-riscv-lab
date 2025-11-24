@@ -26,9 +26,9 @@
 // When cross filesystem, need to release inode lock before acquiring another filesystem's inode lock.
 // Acquiring inode lock must be done after acquiring any superblock lock, including mounted superblock lock.
 
+static slab_cache_t vfs_fs_type_cache = { 0 };
 static slab_cache_t vfs_superblock_cache = { 0 };
 static struct spinlock __fs_type_spinlock = { 0 };
-mutex_t vfs_mount_lock = { 0 };
 static list_node_t vfs_fs_types = { 0 };
 static uint16 vfs_fs_type_count = 0;
 
@@ -52,7 +52,7 @@ static void __vfs_unregister_fs_type_locked(struct vfs_fs_type *fs_type) {
     assert(vfs_fs_type_count <= MAX_FS_TYPES, "Filesystem types count underflow");
 }
 
-static struct vfs_fs_type* __vfs_get_name_fstype_locked(const char *name) {
+static struct vfs_fs_type* __vfs_get_fs_type_locked(const char *name) {
     struct vfs_fs_type *pos, *tmp;
     list_foreach_node_safe(&vfs_fs_types, pos, tmp, list_entry) {
         if (strcmp(pos->name, name) == 0) {
@@ -61,6 +61,12 @@ static struct vfs_fs_type* __vfs_get_name_fstype_locked(const char *name) {
         }
     }
     return NULL; // Not found
+}
+
+// File System Type Kobject callbacks
+static void __vfs_fs_type_kobj_release(struct kobject *kobj) {
+    struct vfs_fs_type *fs_type = container_of(kobj, struct vfs_fs_type, kobj);
+    slab_free(fs_type);
 }
 
 // Superblock hash callback functions
@@ -195,12 +201,24 @@ static void __vfs_clear_mountpoint(struct vfs_superblock *sb) {
 void vfs_init(void) {
     list_entry_init(&vfs_fs_types);
     spin_init(&__fs_type_spinlock, "vfs_fs_types_lock");
-    mutex_init(&vfs_mount_lock, "vfs_mount_lock");
     int ret = slab_cache_init(&vfs_superblock_cache, "vfs_superblock_cache",
                               sizeof(struct vfs_superblock), 0);
     assert(ret == 0, "Failed to initialize vfs_superblock_cache slab cache, errno=%d", ret);
+    ret = slab_cache_init(&vfs_fs_type_cache, "vfs_fs_type_cache",
+                          sizeof(struct vfs_fs_type), 0);
+    assert(ret == 0, "Failed to initialize vfs_fs_type_cache slab cache, errno=%d", ret);
     vfs_fs_type_count = 0;
     __vfs_rooti_init(); // Initialize root inode
+}
+
+struct vfs_fs_type *vfs_fs_type_allocate(void) {
+    struct vfs_fs_type *fs_type = slab_alloc(&vfs_fs_type_cache);
+    if (fs_type == NULL) {
+        return NULL;
+    }
+    memset(fs_type, 0, sizeof(*fs_type));
+    list_entry_init(&fs_type->list_entry);
+    return fs_type;
 }
 
 int vfs_register_fs_type(struct vfs_fs_type *fs_type) {
@@ -218,13 +236,15 @@ int vfs_register_fs_type(struct vfs_fs_type *fs_type) {
     if (fs_type->registered) {
         return -EALREADY; // Filesystem type already registered
     }
-    list_entry_init(&fs_type->list_entry);
+    fs_type->kobj.ops.release = __vfs_fs_type_kobj_release;
+    fs_type->kobj.name = "fs_type";
+    kobject_init(&fs_type->kobj);
     vfs_fs_type_lock();
     if (vfs_fs_type_count >= MAX_FS_TYPES) {
         vfs_fs_type_unlock();
         return -ENOSPC; // No space for more filesystem types
     }
-    struct vfs_fs_type *existing = __vfs_get_name_fstype_locked(fs_type->name);
+    struct vfs_fs_type *existing = __vfs_get_fs_type_locked(fs_type->name);
     if (existing != NULL) {
         vfs_fs_type_unlock();
         return -EEXIST; // Filesystem type with the same name already exists
@@ -239,7 +259,7 @@ int vfs_unregister_fs_type(const char *name) {
         return -EINVAL; // Invalid argument
     }
     vfs_fs_type_lock();
-    struct vfs_fs_type *pos = __vfs_get_name_fstype_locked(name);
+    struct vfs_fs_type *pos = __vfs_get_fs_type_locked(name);
     if (pos != NULL) {
         if (pos->sb_count > 0) {
             vfs_fs_type_unlock();
@@ -394,3 +414,25 @@ void vfs_superblock_unlock(struct vfs_superblock *sb) {
 
 int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
 void vfs_unmount_begin(struct vfs_superblock *sb);
+
+struct vfs_fs_type *vfs_get_fs_type(const char *name) {
+    if (name == NULL) {
+        return NULL;
+    }
+    vfs_fs_type_lock();
+    struct vfs_fs_type *fs_type = __vfs_get_fs_type_locked(name);
+    if (fs_type != NULL) {
+        kobject_get(&fs_type->kobj);    // Increase ref count
+    }
+    vfs_fs_type_unlock();
+    return fs_type;
+}
+
+void vfs_put_fs_type(struct vfs_fs_type *fs_type) {
+    if (fs_type == NULL) {
+        return;
+    }
+    vfs_fs_type_lock();
+    kobject_put(&fs_type->kobj);    // Decrease ref count
+    vfs_fs_type_unlock();
+}
