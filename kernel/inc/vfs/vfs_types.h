@@ -48,9 +48,12 @@ struct vfs_fs_type {
 //    `ret_sb`. Implementations should allocate the superblock, fill in its fields,
 //    and leave it in an unmounted state (mountpoint/parent unset) so that the VFS
 //    core can attach it to the mount tree.
+//    The returned superblock should have its root_inode preloaded and its ref count set to 1.
 // free:
 //    Tear down a superblock instance that has not been mounted, or that must be
 //    discarded after a failed mount attempt.
+//    It should release all inodes and resources associated with the superblock,
+//    including its root inode if present.
 struct vfs_fs_type_ops {
     int (*mount)(struct vfs_inode *mountpoint, struct vfs_inode *device,
                  int flags, const char *data, struct vfs_superblock **ret_sb);
@@ -78,6 +81,34 @@ struct vfs_superblock {
     int mount_count; // Number of superblocks directly mounted under this superblock
 };
 
+// Superblock operations
+// alloc_inode:
+//   Allocate a new inode in the superblock. The returned inode should have its
+//   ref count set to 1.
+//   Return -ENOSPC if there is no space to allocate a new inode.
+//
+// get_inode:
+//   Get a inode with the given inode number from the superblock.
+//   If the inode is found, it should increment its ref count before returning it.
+//   If the inode is not found, or the inode of the given number is not allocated, 
+//   it should return -ENOENT.
+//
+// sync_fs:
+//   Synchronize the superblock's state with the underlying storage.
+//   This callback function will be called by vfs_sync_superblock(), which will
+//   hold the superblock write lock during the operation. Thus, implementations do not
+//   need to acquire additional locks on the superblock structure, and if wait is false,
+//   write lock should be acquired in other threads.
+//   The `wait` parameter indicates whether the operation should be synchronous.
+//   Return 0 on success or a negative error code on failure.
+//
+// unmount_begin:
+//   Prepare the superblock for unmounting. This function should ensure that:
+//   - The superblock is clean (no dirty data).
+//   - There are no active inodes associated with the superblock.
+//   - No other superblocks are mounted under this superblock.
+//   After this function returns, the VFS core will proceed with unmounting the
+//   superblock and freeing its resources.
 struct vfs_superblock_ops {
     int (*alloc_inode)(struct vfs_superblock *sb, struct vfs_inode **ret_inode);
     int (*get_inode)(struct vfs_superblock *sb, uint64 ino,

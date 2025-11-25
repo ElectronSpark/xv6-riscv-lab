@@ -21,12 +21,11 @@ int vfs_mount(const char *type, struct vfs_inode *mountpoint,
 int vfs_unmount(struct vfs_inode *mountpoint);
 
 // superblock operations
-int vfs_mnt_sb_lookup(struct vfs_inode *mountpoint, struct vfs_superblock **ret_sb);
-int vfs_mnt_rooti_lookup(struct vfs_inode *mountpoint, struct vfs_inode **ret_rooti);
+int vfs_get_mnt_rooti(struct vfs_inode *mountpoint, struct vfs_inode **ret_rooti);
+int vfs_get_inode_sb(struct vfs_inode *inode, struct vfs_superblock **ret_sb);
 int vfs_get_sb_mnt(struct vfs_superblock *sb, struct vfs_inode **ret_mountpoint);
 int vfs_get_sb_rooti(struct vfs_superblock *sb, struct vfs_inode **ret_rooti);
-int vfs_get_rooti_sb(struct vfs_inode **ret_rooti, struct vfs_superblock **ret_sb);
-int vfs_get_rooti_mnt(struct vfs_inode **ret_rooti, struct vfs_inode **ret_mountpoint);
+int vfs_get_rooti_mnt(struct vfs_inode *rooti, struct vfs_inode **ret_mountpoint);
 
 void vfs_superblock_rlock(struct vfs_superblock *sb);
 void vfs_superblock_wlock(struct vfs_superblock *sb);
@@ -37,7 +36,6 @@ int vfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode);
 int vfs_get_inode(struct vfs_superblock *sb, uint64 ino,
                   struct vfs_inode **ret_inode);
 int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
-void vfs_unmount_begin(struct vfs_superblock *sb);
 
 // inode operations
 int vfs_ilock(struct vfs_inode *inode);

@@ -17,7 +17,7 @@ typedef enum {
     VFS_I_TYPE_SOCK
 } vfs_inode_type_t;
 
-struct stat {
+struct vfs_stat {
   int32 dev;        // File system's disk device
   uint64 ino;       // Inode number
   mode_t mode;      // Permission and type bits
