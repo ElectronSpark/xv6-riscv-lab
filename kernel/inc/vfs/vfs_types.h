@@ -69,7 +69,7 @@ struct vfs_superblock {
     };
     struct {
         uint64 valid: 1;
-        uint64 dirty: 1;
+        uint64 dirty: 1;    // Only indicates whether the metadata of the superblock is dirty
     };
     struct vfs_superblock *parent_sb; // parent superblock if mounted on another fs
     struct vfs_inode *mountpoint; // inode where this sb is mounted
@@ -85,13 +85,17 @@ struct vfs_superblock {
 // alloc_inode:
 //   Allocate a new inode in the superblock. The returned inode should have its
 //   ref count set to 1.
+//   write lock on the superblock will be held during this operation.
 //   Return -ENOSPC if there is no space to allocate a new inode.
 //
 // get_inode:
-//   Get a inode with the given inode number from the superblock.
+//   Get a inode with the given inode number from the file system on disk.
+//   write lock on the superblock will be held during this operation.
 //   If the inode is found, it should increment its ref count before returning it.
-//   If the inode is not found, or the inode of the given number is not allocated, 
-//   it should return -ENOENT.
+//   If the inode is not found, or the inode of the given number is not allocated.
+//   Return -ENOENT if the inode is not found.
+//   Note: This function will be called only when inode is not found in memory,
+//         thus write lock of the superblock is held to protect the inode hash list.
 //
 // sync_fs:
 //   Synchronize the superblock's state with the underlying storage.
@@ -132,6 +136,7 @@ struct vfs_inode {
     uint64 mtime; // modification time
     uint64 ctime; // change time
 
+    struct spinlock spinlock; // protects kobj field
     struct {
         uint64 valid: 1;
         uint64 dirty: 1;
@@ -167,8 +172,10 @@ struct vfs_inode_ops {
     int (*symlink)(struct vfs_inode *dir, struct vfs_dentry *dentry,
                    const char *target);
     int (*truncate)(struct vfs_inode *inode, uint64 new_size);
-    int (*idup)(struct vfs_inode *inode);       // Increase ref count
-    int (*iput)(struct vfs_inode *inode);       // Decrease ref count and free if needed
+    int (*idup)(struct vfs_inode *inode);           // Increase ref count
+    int (*iput)(struct vfs_inode *inode);           // Decrease ref count and free if needed
+    int (*ilock)(struct vfs_inode *inode);          // Acquire inode lock
+    void (*iunlock)(struct vfs_inode *inode);       // Release inode lock
     void (*destroy_inode)(struct vfs_inode *inode); // Release on-disk inode resources
     void (*free_inode)(struct vfs_inode *inode);    // Release in-memory inode structure 
     void (*dirty_inode)(struct vfs_inode *inode);   // Mark inode as dirty

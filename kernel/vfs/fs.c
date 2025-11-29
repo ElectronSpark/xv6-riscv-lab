@@ -28,7 +28,7 @@
 
 static slab_cache_t vfs_fs_type_cache = { 0 };
 static slab_cache_t vfs_superblock_cache = { 0 };
-static struct spinlock __fs_type_spinlock = { 0 };
+static struct mutex __fs_type_mutex = { 0 };
 static list_node_t vfs_fs_types = { 0 };
 static uint16 vfs_fs_type_count = 0;
 
@@ -215,7 +215,7 @@ static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint) {
 // Initialize VFS subsystem
 void vfs_init(void) {
     list_entry_init(&vfs_fs_types);
-    spin_init(&__fs_type_spinlock, "vfs_fs_types_lock");
+    mutex_init(&__fs_type_mutex, "vfs_fs_type_mutex");
     int ret = slab_cache_init(&vfs_superblock_cache, "vfs_superblock_cache",
                               sizeof(struct vfs_superblock), 0);
     assert(ret == 0, "Failed to initialize vfs_superblock_cache slab cache, errno=%d", ret);
@@ -287,11 +287,11 @@ int vfs_unregister_fs_type(const char *name) {
 }
 
 void vfs_fs_type_lock(void) {
-    spin_acquire(&__fs_type_spinlock);
+    mutex_lock(&__fs_type_mutex);
 }
 
 void vfs_fs_type_unlock(void) {
-    spin_release(&__fs_type_spinlock);
+    mutex_unlock(&__fs_type_mutex);
 }
 
  /******************************************************************************
@@ -488,9 +488,7 @@ int vfs_get_mnt_rooti(struct vfs_inode *mountpoint, struct vfs_inode **ret_rooti
         vfs_superblock_unlock(sb);
         return -EINVAL; // Superblock has no root inode
     }
-    vfs_ilock(sb->root_inode);
     ret = vfs_idup(sb->root_inode); // Increase ref count
-    vfs_iunlock(sb->root_inode);
     vfs_superblock_unlock(sb);
     if (ret != 0) {
         *ret_rooti = NULL;
@@ -529,9 +527,7 @@ int vfs_get_sb_mnt(struct vfs_superblock *sb, struct vfs_inode **ret_mountpoint)
     if (sb->mountpoint == NULL) {
         return -ENODEV; // Superblock is not mounted
     }
-    vfs_ilock(sb->mountpoint);
     int ret = vfs_idup(sb->mountpoint); // Increase ref count
-    vfs_iunlock(sb->mountpoint);
     if (ret != 0) {
         *ret_mountpoint = NULL;
     } else {
@@ -554,9 +550,7 @@ int vfs_get_sb_rooti(struct vfs_superblock *sb, struct vfs_inode **ret_rooti) {
     if (sb->root_inode == NULL) {
         return -EINVAL; // Superblock has no root inode
     }
-    vfs_ilock(sb->root_inode);
     int ret = vfs_idup(sb->root_inode); // Increase ref count
-    vfs_iunlock(sb->root_inode);
     if (ret != 0) {
         *ret_rooti = NULL;
     } else {
@@ -585,9 +579,7 @@ int vfs_get_rooti_mnt(struct vfs_inode *rooti, struct vfs_inode **ret_mountpoint
         *ret_mountpoint = NULL;
         return -ENODEV; // Superblock is not mounted
     }
-    vfs_ilock(sb->mountpoint);
     ret = vfs_idup(sb->mountpoint); // Increase ref count
-    vfs_iunlock(sb->mountpoint);
     vfs_superblock_unlock(sb);
     if (ret != 0) {
         *ret_mountpoint = NULL;
@@ -608,9 +600,7 @@ int vfs_get_mountpoint(struct vfs_superblock *sb, struct vfs_inode **ret_mountpo
     if (sb->mountpoint == NULL) {
         return -ENODEV; // Superblock is not mounted
     }
-    vfs_ilock(sb->mountpoint);
     int ret = vfs_idup(sb->mountpoint); // Increase ref count
-    vfs_iunlock(sb->mountpoint);
     if (ret != 0) {
         *ret_mountpoint = NULL;
     }
