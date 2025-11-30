@@ -15,6 +15,7 @@
 struct pcache;
 typedef struct cdev cdev_t;
 typedef struct blkdev blkdev_t;
+struct proc;
 
 struct vfs_fs_type;
 struct vfs_fs_type_ops;
@@ -136,11 +137,38 @@ struct vfs_inode {
     uint64 mtime; // modification time
     uint64 ctime; // change time
 
-    struct spinlock spinlock; // protects kobj field
+    struct spinlock spinlock;
+    /**
+     * All inodes must be valid to perform operations involving callbacks.
+     * only the following operations are excluded:
+     * - vfs_idup: to increase ref count
+     * - vfs_iput: to decrease ref count and free if needed
+     * - vfs_iunlock: to release inode lock
+     * 
+     * When an inode is being created, it will be locked (locked=1) to prevent
+     * other operations on it until it is fully initialized and attached to the
+     * superblock's inode hash list, after which it can be safely made
+     * marked valid (valid=1).
+     * 
+     * When an inode is being deleted, it will be marked invalid (valid=0) to
+     * prevent new operations from starting on it. Existing operations should
+     * complete before the inode is fully deleted and freed.
+     * 
+     * An inode marked invalid should be removed from the superblock's inode
+     * hash list.
+     * 
+     * Typically, an inode is locked during deletion process, and the last 
+     * reference release will free the inode if it is marked invalid.
+     * 
+     * dirty indicates whether the inode's on disk metadata has been modified 
+     * and needs to be synced to disk.
+     */
     struct {
         uint64 valid: 1;
         uint64 dirty: 1;
+        uint64 locked: 1;
     };
+    struct proc *owner; // process that holds the lock
     struct vfs_superblock *sb;
     struct pcache *i_mapping; // page cache for its backend inode data
     struct pcache i_data; // page cache for its data blocks
@@ -152,8 +180,7 @@ struct vfs_inode {
         blkdev_t *bdev; // for block device inode
         struct vfs_superblock *mnt_sb; // the mounted superblock
     };
-
-    struct mutex lock; // protects the inode
+    completion_t completion;
 };
 
 // Inode operations focuses mainly on metadata operations
@@ -177,12 +204,15 @@ struct vfs_inode_ops {
     int (*ilock)(struct vfs_inode *inode);          // Acquire inode lock
     void (*iunlock)(struct vfs_inode *inode);       // Release inode lock
     void (*destroy_inode)(struct vfs_inode *inode); // Release on-disk inode resources
-    void (*free_inode)(struct vfs_inode *inode);    // Release in-memory inode structure 
+    void (*free_inode)(struct vfs_inode *inode);    // Release in-memory inode structure
     void (*dirty_inode)(struct vfs_inode *inode);   // Mark inode as dirty
     int (*sync_inode)(struct vfs_inode *inode);     // Write inode to disk
 };
 
+// No dentry cache right now
 struct vfs_dentry {
+    struct vfs_superblock *sb;
+    uint64 parent_ino; // parent inode number where this dentry resides
     uint64 ino; // inode number
     char *name;
     uint16 name_len;

@@ -104,6 +104,8 @@
         "blkdev.h": "c",
         "dev.h": "c",
         "complex": "c",
-        "rwlock.h": "c"
+        "rwlock.h": "c",
+        "completion.h": "c",
+        "completion_types.h": "c"
     }
 }

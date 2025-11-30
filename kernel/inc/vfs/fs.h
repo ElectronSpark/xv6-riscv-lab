@@ -38,12 +38,15 @@ int vfs_get_inode(struct vfs_superblock *sb, uint64 ino,
 int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
 
 // inode operations
+// dup operation needs to be performed before any operation,
+// and do not try to access or perform operations on inodes after vfs_iput
+// to avoid early free of the inode while still in use.
+
 int vfs_ilock(struct vfs_inode *inode);
-int vfs_iunlock(struct vfs_inode *inode);
-int vfs_idup(struct vfs_inode *inode);       // Increase ref count, must hold inode lock
-void vfs_iput(struct vfs_inode *inode);       // Decrease ref count and, must hold inode lock
+void vfs_iunlock(struct vfs_inode *inode);
+int vfs_idup(struct vfs_inode *inode);       // Increase ref count, will acquire inode spinlock
+void vfs_iput(struct vfs_inode *inode);       // Decrease ref count and, will acquire inode spinlock
 void vfs_destroy_inode(struct vfs_inode *inode); // Release on-disk inode resources
-void vfs_free_inode(struct vfs_inode *inode);    // Release in-memory inode structure
 void vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty
 int vfs_sync_inode(struct vfs_inode *inode);     // Write inode to disk
 
@@ -66,5 +69,6 @@ int vfs_namei(struct vfs_inode *dir, struct vfs_inode **res_inode,
               const char *path, size_t path_len);
 int vfs_chroot(struct vfs_inode *new_root);
 int vfs_chdir(struct vfs_inode *new_cwd);
+int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode);
 
 #endif // __KERNEL_VIRTUAL_FILE_SYSTEM_FS_H

@@ -10,6 +10,7 @@ ENABLE_LANGUAGE(C)
 set(TEST_C_FLAGS
     -ggdb
     -Wall
+    -DON_HOST_OS=1
     -DHOST_TEST=1
     # -DUSE_SOFTWARE_FFS=1
 )
