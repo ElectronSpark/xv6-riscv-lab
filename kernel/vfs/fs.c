@@ -153,8 +153,10 @@ static bool __vfs_init_superblock_valid(struct vfs_superblock *sb) {
     if (sb == NULL) {
         return false;
     }
-    if (sb->ops)
-    if (sb->dirty != 0 || sb->valid != 0) {
+    if (__vfs_sb_valid(sb) || sb->dirty != 0) {
+        return false;
+    }
+    if (!__vfs_superblock_ops_valid(sb)) {
         return false;
     }
     if (sb->device != NULL) {
@@ -164,7 +166,7 @@ static bool __vfs_init_superblock_valid(struct vfs_superblock *sb) {
         // At this point, the superblock has not been mounted yet
         return false;
     }
-    return __vfs_superblock_ops_valid(sb);
+    return true;
 }
 
 static void __vfs_attach_superblock_to_fstype(struct vfs_superblock *sb) {
@@ -434,9 +436,9 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
     sb->ops->unmount_begin(sb);
 
     // After unmount_begin, superblock should be clean and have no active inodes
-    if (sb->valid || sb->dirty) {
+    if (__vfs_sb_valid(sb) || sb->dirty) {
         vfs_superblock_unlock(sb);
-        printf("vfs_unmount: sb valid=%u dirty=%u\n", sb->valid, sb->dirty);
+        printf("vfs_unmount: sb valid=%u dirty=%u\n", __vfs_sb_valid(sb), sb->dirty);
         return -EBUSY; // Superblock is still valid or dirty
     }
 
@@ -498,7 +500,7 @@ int vfs_get_mnt_rooti(struct vfs_inode *mountpoint, struct vfs_inode **ret_rooti
         return -EINVAL; // Mountpoint has no superblock
     }
     vfs_superblock_rlock(sb);
-    if (!sb->valid) {
+    if (!__vfs_sb_valid(sb)) {
         vfs_superblock_unlock(sb);
         return -EINVAL; // Superblock is not valid
     }
@@ -565,7 +567,7 @@ int vfs_get_sb_rooti(struct vfs_superblock *sb, struct vfs_inode **ret_rooti) {
     if (sb == NULL || ret_rooti == NULL) {
         return -EINVAL; // Invalid arguments
     }
-    if (!sb->valid) {
+    if (!__vfs_sb_valid(sb)) {
         return -EINVAL; // Superblock is not valid
     }
     if (sb->root_inode == NULL) {
@@ -663,7 +665,7 @@ int vfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode) {
         return -EINVAL; // Invalid arguments
     }
     vfs_superblock_wlock(sb);
-    if (!sb->valid) {
+    if (!__vfs_sb_valid(sb)) {
         vfs_superblock_unlock(sb);
         return -EINVAL; // Superblock is not valid
     }
@@ -678,7 +680,7 @@ int vfs_get_inode(struct vfs_superblock *sb, uint64 ino,
         return -EINVAL; // Invalid arguments
     }
     vfs_superblock_rlock(sb);
-    if (!sb->valid) {
+    if (!__vfs_sb_valid(sb)) {
         vfs_superblock_unlock(sb);
         return -EINVAL; // Superblock is not valid
     }
@@ -692,7 +694,7 @@ int vfs_sync_superblock(struct vfs_superblock *sb, int wait) {
         return -EINVAL; // Invalid argument
     }
     vfs_superblock_wlock(sb);
-    if (!sb->valid) {
+    if (!__vfs_sb_valid(sb)) {
         vfs_superblock_unlock(sb);
         return -EINVAL; // Superblock is not valid
     }
@@ -742,7 +744,7 @@ int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode
 
     // First try to get the inode from inode cache
     vfs_superblock_rlock(dentry->sb);
-    if (!dentry->sb->valid) {
+    if (!__vfs_sb_valid(dentry->sb)) {
         vfs_superblock_unlock(dentry->sb);
         return -EINVAL; // Superblock is not valid
     }
@@ -760,7 +762,7 @@ int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode
     // Not found in cache, ask filesystem to load it
     vfs_superblock_wlock(dentry->sb);
     // Double check cache again after acquiring write lock
-    if (!dentry->sb->valid) {
+    if (!__vfs_sb_valid(dentry->sb)) {
         vfs_superblock_unlock(dentry->sb);
         return -EINVAL; // Superblock is not valid
     }
@@ -821,7 +823,7 @@ int vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino,
     if (sb == NULL || ret_inode == NULL) {
         return -EINVAL; // Invalid arguments
     }
-    if (!sb->valid) {
+    if (!__vfs_sb_valid(sb)) {
         return -EINVAL; // Superblock is not valid
     }
     struct vfs_inode *inode = __vfs_inode_hash_get(sb, ino);
@@ -876,7 +878,7 @@ int vfs_add_inode(struct vfs_superblock *sb,
         return -EINVAL; // Invalid arguments
     }
     VFS_SUPERBLOCK_ASSERT_WHOLDING(sb, "Superblock lock must be write held to add inode");
-    if (!sb->valid) {
+    if (!__vfs_sb_valid(sb)) {
         return -EINVAL; // Superblock is not valid
     }
     if (inode->valid) {
@@ -903,7 +905,7 @@ int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode) {
     }
     VFS_SUPERBLOCK_ASSERT_WHOLDING(sb, "Superblock lock must be write held to remove inode");
     VFS_INODE_ASSERT_HOLDING(inode, "Inode lock must be held to remove inode");
-    if (!sb->valid) {
+    if (!__vfs_sb_valid(sb)) {
         return -EINVAL; // Superblock is not valid
     }
     struct vfs_inode *existing = __vfs_inode_hash_get(sb, inode->ino);

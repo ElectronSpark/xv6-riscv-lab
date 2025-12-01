@@ -161,7 +161,10 @@ struct vfs_inode {
      * reference release will free the inode if it is marked invalid.
      * 
      * dirty indicates whether the inode's on disk metadata has been modified 
-     * and needs to be synced to disk.
+     * and needs to be synced to disk. Caller need to hold the following locks
+     * when modifying the inode metadata:
+     * - inode spinlock: to avoid accidental overwrite of other flag fields.
+     * - inode lock (ilock): to protect valid field.
      */
     struct {
         uint64 valid: 1;
@@ -205,7 +208,7 @@ struct vfs_inode_ops {
     void (*iunlock)(struct vfs_inode *inode);       // Release inode lock
     void (*destroy_inode)(struct vfs_inode *inode); // Release on-disk inode resources
     void (*free_inode)(struct vfs_inode *inode);    // Release in-memory inode structure
-    void (*dirty_inode)(struct vfs_inode *inode);   // Mark inode as dirty
+    int (*dirty_inode)(struct vfs_inode *inode);   // Mark inode as dirty
     int (*sync_inode)(struct vfs_inode *inode);     // Write inode to disk
 };
 

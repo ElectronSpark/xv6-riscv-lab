@@ -47,7 +47,7 @@ void vfs_iunlock(struct vfs_inode *inode);
 int vfs_idup(struct vfs_inode *inode);       // Increase ref count, will acquire inode spinlock
 void vfs_iput(struct vfs_inode *inode);       // Decrease ref count and, will acquire inode spinlock
 void vfs_destroy_inode(struct vfs_inode *inode); // Release on-disk inode resources
-void vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty
+int vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty
 int vfs_sync_inode(struct vfs_inode *inode);     // Write inode to disk
 
 int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry);
@@ -70,5 +70,6 @@ int vfs_namei(struct vfs_inode *dir, struct vfs_inode **res_inode,
 int vfs_chroot(struct vfs_inode *new_root);
 int vfs_chdir(struct vfs_inode *new_cwd);
 int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode);
+int vfs_superblock_set_dirty(struct vfs_superblock *sb);
 
 #endif // __KERNEL_VIRTUAL_FILE_SYSTEM_FS_H

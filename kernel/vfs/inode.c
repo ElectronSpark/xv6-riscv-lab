@@ -138,6 +138,70 @@ retry:
     __vfs_i_spin_unlock(inode);
 }
 
-void vfs_destroy_inode(struct vfs_inode *inode); // Release on-disk inode resources
-void vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty
-int vfs_sync_inode(struct vfs_inode *inode);     // Write inode to disk
+// Mark inode as dirty
+// Caller needs to hold the ilock of the inode
+// Caller should not hold the spinlock of the inode
+int vfs_dirty_inode(struct vfs_inode *inode) {
+    if (inode == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    if (!VFS_INODE_HOLDING(inode)) {
+        return -EPERM; // Caller does not hold the inode lock
+    }
+    int ret = 0;
+    bool prev_dirty = 0;
+    __vfs_i_spin_lock(inode);
+    if (!__vfs_sb_valid(inode->sb)) {
+        __vfs_i_spin_unlock(inode);
+        return -EINVAL; // Superblock is not valid
+    }
+    // Since caller holds the ilock, the valid flag should be set
+    assert(inode->valid, "vfs_dirty_inode: inode is not valid");
+    prev_dirty = inode->dirty;
+    inode->dirty = 1;
+    __vfs_i_spin_unlock(inode);
+
+    if (prev_dirty == 0 && inode->ops->dirty_inode != NULL) {
+        ret = inode->ops->dirty_inode(inode);
+    }
+    if (ret != 0) {
+        // On failure, revert dirty flag
+        __vfs_i_spin_lock(inode);
+        inode->dirty = prev_dirty;
+        __vfs_i_spin_unlock(inode);
+    }
+    return ret;
+}
+
+// Sync inode to disk
+// Caller should hold the ilock of the inode
+// Caller should not hold the spinlock of the inode
+int vfs_sync_inode(struct vfs_inode *inode) {
+    if (inode == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    if (!VFS_INODE_HOLDING(inode)) {
+        return -EPERM; // Caller does not hold the inode lock
+    }
+    int ret = 0;
+    bool was_dirty = 0;
+    __vfs_i_spin_lock(inode);
+    // Synching a inode on an invalid superblock is allowed, as the `valid` flag
+    // of the superblock only prevents new operations from starting.
+    
+    // Since caller holds the ilock, the valid flag should be set
+    assert(inode->valid, "vfs_dirty_inode: inode is not valid");
+    was_dirty = inode->dirty;
+    __vfs_i_spin_unlock(inode);
+
+    if (was_dirty && inode->ops->sync_inode != NULL) {
+        ret = inode->ops->sync_inode(inode);
+    }
+    if (ret == 0) {
+        // On success, clear dirty flag
+        __vfs_i_spin_lock(inode);
+        inode->dirty = 0;
+        __vfs_i_spin_unlock(inode);
+    }
+    return ret;
+}

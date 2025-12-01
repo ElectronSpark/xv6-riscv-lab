@@ -17,10 +17,12 @@ int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode);
     assert(spin_holding(&(__inode)->spinlock), __fmt, ##__VA_ARGS__);       \
 } while (0)
 
+#define VFS_INODE_HOLDING(__inode)      \
+    ((__inode) && myproc() == (__inode)->owner)
+
 // Assert holding ilock of the inode
 #define VFS_INODE_ASSERT_HOLDING(__inode, __fmt, ...) do {                  \
-    assert((__inode) != NULL, "VFS_INODE_ASSERT_HOLDING: inode is NULL");   \
-    assert(&(__inode)->owner == myproc(), __fmt, ##__VA_ARGS__);       \
+    assert(VFS_INODE_HOLDING(__inode), __fmt, ##__VA_ARGS__);               \
 } while (0)
 
 #define VFS_SUPERBLOCK_ASSERT_WHOLDING(__sb, __fmt, ...) do {                  \
@@ -55,6 +57,29 @@ static inline int __vfs_idup_no_lock(struct vfs_inode *inode) {
     }
     kobject_get(&inode->kobj);
     return 0;
+}
+
+// Many operations will check valid field of the superblock before proceeding.
+// But they should not assume the superblock remains valid during the operation,
+// thus invalidate a superblock will only prevent new operations from starting.
+// Existing operations should complete before the superblock is fully unmounted.
+static inline bool __vfs_sb_valid(struct vfs_superblock *sb) {
+    __sync_synchronize();
+    return sb && sb->valid;
+}
+
+static inline void __vfs_sb_mark_valid(struct vfs_superblock *sb) {
+    if (sb) {
+        sb->valid = 1;
+        __sync_synchronize();
+    }
+}
+
+static inline void __vfs_sb_mark_invalid(struct vfs_superblock *sb) {
+    if (sb) {
+        sb->valid = 0;
+        __sync_synchronize();
+    }
 }
 
 
