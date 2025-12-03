@@ -2,6 +2,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "param.h"
+#include "errno.h"
 #include "bits.h"
 #include "stat.h"
 #include "spinlock.h"
@@ -14,7 +15,6 @@
 #include "list.h"
 #include "hlist.h"
 #include "slab.h"
-#include "errno.h"
 
 // Locking order
 // 1. vfs_fs_types_lock
@@ -36,6 +36,19 @@ static uint16 vfs_fs_type_count = 0;
 
 
 #define MAX_FS_TYPES 256
+
+/******************************************************************************
+ * Pre declareed functions
+ *****************************************************************************/
+static struct vfs_inode *__vfs_inode_hash_add(struct vfs_superblock *sb, struct vfs_inode *inode);
+static void __vfs_init_superblock_structure(struct vfs_superblock *sb, struct vfs_fs_type *fs_type);
+static bool __vfs_superblock_ops_valid(struct vfs_superblock *sb);
+static bool __vfs_init_superblock_valid(struct vfs_superblock *sb);
+static void __vfs_attach_superblock_to_fstype(struct vfs_superblock *sb);
+static void __vfs_detach_superblock_from_fstype(struct vfs_superblock *sb);
+static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint);
+static void __vfs_set_mountpoint(struct vfs_superblock *sb, struct vfs_inode *mountpoint);
+static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint);
 
 /******************************************************************************
  * Private functions
@@ -186,7 +199,7 @@ static void __vfs_detach_superblock_from_fstype(struct vfs_superblock *sb) {
 // On success the inode type is flipped to MNT and its refcount is incremented.
 static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint) {
     VFS_SUPERBLOCK_ASSERT_WHOLDING(mountpoint->sb, "Mountpoint inode's superblock lock must be write held to turn into mountpoint");
-    VFS_INODE_ASSERT_SPIN_HOLDING(mountpoint, "Mountpoint inode lock must be held to turn into mountpoint");
+    VFS_INODE_ASSERT_HOLDING(mountpoint, "Mountpoint inode lock must be held to turn into mountpoint");
     if (mountpoint->type != VFS_I_TYPE_DIR) {
         return -ENOTDIR; // Mountpoint must be a directory
     }
@@ -205,7 +218,7 @@ static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint) {
 static void __vfs_set_mountpoint(struct vfs_superblock *sb, struct vfs_inode *mountpoint) {
     VFS_SUPERBLOCK_ASSERT_WHOLDING(mountpoint->sb, "Mountpoint inode's superblock lock must be write held to set mountpoint");
     VFS_SUPERBLOCK_ASSERT_WHOLDING(sb, "Superblock lock must be write held to set mountpoint");
-    VFS_INODE_ASSERT_SPIN_HOLDING(mountpoint, "Mountpoint inode lock must be held to set mountpoint");
+    VFS_INODE_ASSERT_HOLDING(mountpoint, "Mountpoint inode lock must be held to set mountpoint");
     assert(mountpoint->type == VFS_I_TYPE_MNT, "Mountpoint inode type is not MNT");
     assert(sb->mountpoint == NULL, "Superblock mountpoint is already set");
     sb->mountpoint = mountpoint;
@@ -218,13 +231,12 @@ static void __vfs_set_mountpoint(struct vfs_superblock *sb, struct vfs_inode *mo
 // this helper drops the reference taken in __vfs_turn_mountpoint().
 static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint) {
     VFS_SUPERBLOCK_ASSERT_WHOLDING(mountpoint->sb, "Mountpoint inode's superblock lock must be write held to clear mountpoint");
-    VFS_INODE_ASSERT_SPIN_HOLDING(mountpoint, "Mountpoint inode lock must be held to clear mountpoint");
+    VFS_INODE_ASSERT_HOLDING(mountpoint, "Mountpoint inode lock must be held to clear mountpoint");
     assert(mountpoint->type == VFS_I_TYPE_MNT, "Mountpoint inode type is not MNT");
     mountpoint->sb->mount_count--;
     assert(mountpoint->sb->mount_count >= 0, "Mountpoint superblock mount count underflow");
     mountpoint->mnt_sb = NULL;
     mountpoint->type = VFS_I_TYPE_DIR;
-    vfs_iput(mountpoint);
 }
 
  /******************************************************************************
@@ -330,14 +342,18 @@ void vfs_fs_type_unlock(void) {
     }
 
     vfs_superblock_wlock(mountpoint->sb);
-    __vfs_i_spin_lock(mountpoint);
+    ret_val = vfs_ilock(mountpoint);
+    if (ret_val != 0) {
+        vfs_superblock_unlock(mountpoint->sb);
+        return ret_val; // Failed to lock mountpoint inode
+    }
     ret_val = __vfs_turn_mountpoint(mountpoint);
     if (ret_val != 0) {
-        __vfs_i_spin_unlock(mountpoint);
+        vfs_iunlock(mountpoint);
         vfs_superblock_unlock(mountpoint->sb);
         return ret_val; // Failed to turn mountpoint
     }
-    __vfs_i_spin_unlock(mountpoint);
+    vfs_iunlock(mountpoint);
     vfs_superblock_unlock(mountpoint->sb);
     
     fs_type = vfs_get_fs_type(type);
@@ -390,9 +406,10 @@ void vfs_fs_type_unlock(void) {
     __vfs_attach_superblock_to_fstype(sb);
     vfs_fs_type_unlock();
     sb->device = device;
-    __vfs_i_spin_lock(mountpoint);
+    ret_val = vfs_ilock(mountpoint);
+    assert(ret_val == 0, "vfs_ilock failed on mountpoint inode, errno=%d", ret_val);
     __vfs_set_mountpoint(sb, mountpoint);
-    __vfs_i_spin_unlock(mountpoint);
+    vfs_iunlock(mountpoint);
     vfs_superblock_unlock(sb);
     vfs_superblock_unlock(mountpoint->sb);
     ret_val = 0; // Successfully mounted
@@ -400,9 +417,10 @@ ret:
     if (ret_val != 0) {
         // On failure, need to revert mountpoint inode type
         vfs_superblock_wlock(mountpoint->sb);
-        __vfs_i_spin_lock(mountpoint);
+        ret_val = vfs_ilock(mountpoint);
+        assert(ret_val == 0, "vfs_ilock failed on mountpoint inode, errno=%d", ret_val);
         __vfs_clear_mountpoint(mountpoint);
-        __vfs_i_spin_unlock(mountpoint);
+        vfs_iunlock(mountpoint);
         vfs_superblock_unlock(mountpoint->sb);
     }
     vfs_put_fs_type(fs_type);
@@ -411,20 +429,25 @@ ret:
 
 int vfs_unmount(struct vfs_inode *mountpoint) {
     struct vfs_superblock *sb = NULL;
+    int ret_val = 0;
 
     if (mountpoint == NULL) {
         return -EINVAL; // Invalid argument
     }
 
     vfs_superblock_wlock(mountpoint->sb);
-    __vfs_i_spin_lock(mountpoint);
+    ret_val = vfs_ilock(mountpoint);
+    if (ret_val != 0) {
+        vfs_superblock_unlock(mountpoint->sb);
+        return ret_val; // Failed to lock mountpoint inode
+    }
     if (mountpoint->type != VFS_I_TYPE_MNT) {
-        __vfs_i_spin_unlock(mountpoint);
+        vfs_iunlock(mountpoint);
         vfs_superblock_unlock(mountpoint->sb);
         return -EINVAL; // Inode is not a mountpoint
     }
     sb = mountpoint->mnt_sb;
-    __vfs_i_spin_unlock(mountpoint);
+    vfs_iunlock(mountpoint);
     vfs_superblock_unlock(mountpoint->sb);
 
     if (sb == NULL) {
@@ -465,9 +488,10 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
     __vfs_detach_superblock_from_fstype(sb);
     vfs_fs_type_unlock();
 
-    __vfs_i_spin_lock(mountpoint);
+    ret_val = vfs_ilock(mountpoint);
+    assert(ret_val == 0, "vfs_ilock failed on mountpoint inode, errno=%d", ret_val);
     __vfs_clear_mountpoint(mountpoint);
-    __vfs_i_spin_unlock(mountpoint);
+    vfs_iunlock(mountpoint);
 
     vfs_superblock_unlock(sb);
     vfs_superblock_unlock(mountpoint->sb);
@@ -489,13 +513,16 @@ int vfs_get_mnt_rooti(struct vfs_inode *mountpoint, struct vfs_inode **ret_rooti
     if (mountpoint == NULL || ret_rooti == NULL) {
         return -EINVAL; // Invalid arguments
     }
-    __vfs_i_spin_lock(mountpoint);
+    ret = vfs_ilock(mountpoint);
+    if (ret != 0) {
+        return ret; // Failed to lock mountpoint inode
+    }
     if (mountpoint->type != VFS_I_TYPE_MNT) {
-        __vfs_i_spin_unlock(mountpoint);
+        vfs_iunlock(mountpoint);
         return -EINVAL; // Inode is not a mountpoint
     }
     struct vfs_superblock *sb = mountpoint->mnt_sb;
-    __vfs_i_spin_unlock(mountpoint);
+    vfs_iunlock(mountpoint);
     if (sb == NULL) {
         return -EINVAL; // Mountpoint has no superblock
     }
@@ -525,9 +552,12 @@ int vfs_get_inode_sb(struct vfs_inode *inode, struct vfs_superblock **ret_sb) {
     if (inode == NULL || ret_sb == NULL) {
         return -EINVAL; // Invalid arguments
     }
-    __vfs_i_spin_lock(inode);
+    int ret_val = vfs_ilock(inode);
+    if (ret_val != 0) {
+        return ret_val; // Failed to lock inode
+    }
     struct vfs_superblock *sb = inode->sb;
-    __vfs_i_spin_unlock(inode);
+    vfs_iunlock(inode);
     if (sb == NULL) {
         return -EINVAL; // Inode has no superblock
     }
@@ -786,6 +816,8 @@ int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode
         return ret; // Failed to load inode
     }
     assert(inode != NULL, "Filesystem get_inode returned success but inode is NULL");
+    // Must initialize the loaded inode structure before any use.
+    __vfs_inode_init(inode, dentry->sb);
 
     // Successfully loaded inode, now add it to cache
     // Inode will become valid after being added to cache
@@ -831,13 +863,13 @@ int vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino,
         *ret_inode = NULL;
         return -ENOENT; // Inode not found
     }
-    __vfs_i_spin_lock(inode);
-    if (!inode->valid) {
+    int ret_val = vfs_ilock(inode);
+    if (ret_val != 0 || !inode->valid) {
         // Inode should be valid when first gotten from the cache,
         // but it may have been invalidated during the windows between
         // getting from cache and acquiring the inode lock.
         // In this case, the inode should have been removed from the cache already.
-        __vfs_i_spin_unlock(inode);
+        vfs_iunlock(inode);
         *ret_inode = NULL;
         return -ENOENT; // Inode is not valid
     }
@@ -847,7 +879,7 @@ int vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino,
     } else {
         *ret_inode = NULL;
     }
-    __vfs_i_spin_unlock(inode);
+    vfs_iunlock(inode);
     return ret;
 }
 
@@ -881,6 +913,9 @@ int vfs_add_inode(struct vfs_superblock *sb,
     if (!__vfs_sb_valid(sb)) {
         return -EINVAL; // Superblock is not valid
     }
+    if (inode->sb != sb) {
+        return -EINVAL; // Inode's superblock does not match
+    }
     if (inode->valid) {
         return -EINVAL; // Inode to add must not be valid yet
     }
@@ -889,7 +924,7 @@ int vfs_add_inode(struct vfs_superblock *sb,
         *ret_inode = existing;
         return -EEXIST; // Inode with the same number already exists
     }
-    struct vfs_inode *popped = __vfs_inode_hash_add(sb, inode->ino);
+    struct vfs_inode *popped = __vfs_inode_hash_add(sb, inode);
     if (popped != NULL) {
         // At this point, something is wrong in the hash list implementation
         panic("vfs_add_inode: inode hash add returned existing inode unexpectedly");

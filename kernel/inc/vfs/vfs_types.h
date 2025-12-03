@@ -92,11 +92,31 @@ struct vfs_superblock {
 // get_inode:
 //   Get a inode with the given inode number from the file system on disk.
 //   write lock on the superblock will be held during this operation.
+//   Filesystem drivers must fill in the following fields:
+//     - ino
+//     - type
+//     - size
+//     - mode
+//     - ops
+//     - one of: cdev, bdev
+//   Filesystem drivers may fill in the following fields if applicable:
+//     - n_links - number of hard links
+//     - n_blocks - number of blocks allocated
+//     - uid - owner user id
+//     - gid - owner group id
+//     - atime - access time
+//     - mtime - modification time
+//     - ctime - change time
+//     - fs_data - filesystem-specific data
 //   If the inode is found, it should increment its ref count before returning it.
 //   If the inode is not found, or the inode of the given number is not allocated.
 //   Return -ENOENT if the inode is not found.
 //   Note: This function will be called only when inode is not found in memory,
 //         thus write lock of the superblock is held to protect the inode hash list.
+//   Note: Filsystem drivers should zero initialize and fill in the necessary fields
+//         of the returned inode, but should not mark it valid. The VFS core will
+//         mark the inode valid after it is fully initialized and added to the
+//         superblock's inode hash list.
 //
 // sync_fs:
 //   Synchronize the superblock's state with the underlying storage.
@@ -137,7 +157,7 @@ struct vfs_inode {
     uint64 mtime; // modification time
     uint64 ctime; // change time
 
-    struct spinlock spinlock;
+    mutex_t mutex; // mutex to protect inode structure
     /**
      * All inodes must be valid to perform operations involving callbacks.
      * only the following operations are excluded:
@@ -145,10 +165,10 @@ struct vfs_inode {
      * - vfs_iput: to decrease ref count and free if needed
      * - vfs_iunlock: to release inode lock
      * 
-     * When an inode is being created, it will be locked (locked=1) to prevent
-     * other operations on it until it is fully initialized and attached to the
-     * superblock's inode hash list, after which it can be safely made
-     * marked valid (valid=1).
+     * When an inode is being created, its inode mutex (via vfs_ilock) is held
+     * to prevent other operations from touching it until it is fully initialized
+     * and attached to the superblock's inode hash list. Only after that point
+     * may the inode be marked valid (valid=1).
      * 
      * When an inode is being deleted, it will be marked invalid (valid=0) to
      * prevent new operations from starting on it. Existing operations should
@@ -157,22 +177,21 @@ struct vfs_inode {
      * An inode marked invalid should be removed from the superblock's inode
      * hash list.
      * 
-     * Typically, an inode is locked during deletion process, and the last 
-     * reference release will free the inode if it is marked invalid.
+     * Typically, the inode mutex remains held throughout the deletion process,
+     * and the last reference release will free the inode if it is marked invalid.
      * 
      * dirty indicates whether the inode's on disk metadata has been modified 
-     * and needs to be synced to disk. Caller need to hold the following locks
-     * when modifying the inode metadata:
-     * - inode spinlock: to avoid accidental overwrite of other flag fields.
-     * - inode lock (ilock): to protect valid field.
+     * and needs to be synced to disk. Callers must hold the inode mutex when
+     * modifying inode metadata so updates to the valid/dirty flags remain ordered.
      */
     struct {
         uint64 valid: 1;
         uint64 dirty: 1;
-        uint64 locked: 1;
     };
     struct proc *owner; // process that holds the lock
     struct vfs_superblock *sb;
+    // The two pcaches below are managed by the drivers/filesystems
+    // Initialize them as needed
     struct pcache *i_mapping; // page cache for its backend inode data
     struct pcache i_data; // page cache for its data blocks
     struct vfs_inode_ops *ops;
@@ -188,6 +207,14 @@ struct vfs_inode {
 
 // Inode operations focuses mainly on metadata operations
 // Data read/write operations are handled by file operations
+// Operations that require write lock on the superblock:
+// - create
+// - mkdir
+// - rmdir
+// - unlink
+// - mknod
+// - move
+// - destroy_inode
 struct vfs_inode_ops {
     int (*lookup)(struct vfs_inode *dir, struct vfs_dentry *dentry);
     int (*readlink)(struct vfs_inode *inode, char *buf, size_t buflen, bool user);
@@ -200,12 +227,10 @@ struct vfs_inode_ops {
     int (*move)(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
                 struct vfs_inode *new_dir, struct vfs_dentry *new_dentry);  // Move (rename) a file or directory whithin the same filesystem
     int (*symlink)(struct vfs_inode *dir, struct vfs_dentry *dentry,
-                   const char *target);
+                   const char *target, bool user);
     int (*truncate)(struct vfs_inode *inode, uint64 new_size);
     int (*idup)(struct vfs_inode *inode);           // Increase ref count
     int (*iput)(struct vfs_inode *inode);           // Decrease ref count and free if needed
-    int (*ilock)(struct vfs_inode *inode);          // Acquire inode lock
-    void (*iunlock)(struct vfs_inode *inode);       // Release inode lock
     void (*destroy_inode)(struct vfs_inode *inode); // Release on-disk inode resources
     void (*free_inode)(struct vfs_inode *inode);    // Release in-memory inode structure
     int (*dirty_inode)(struct vfs_inode *inode);   // Mark inode as dirty
@@ -215,8 +240,11 @@ struct vfs_inode_ops {
 // No dentry cache right now
 struct vfs_dentry {
     struct vfs_superblock *sb;
+    uint64 dnum; // dir entry number within the parent inode. Used by some filesystems
+                  // to identify the dentry within its parent directory
     uint64 parent_ino; // parent inode number where this dentry resides
     uint64 ino; // inode number
+    // The `name` field is managed by slab allocator
     char *name;
     uint16 name_len;
 };

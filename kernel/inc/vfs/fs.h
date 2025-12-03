@@ -43,12 +43,12 @@ int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
 // to avoid early free of the inode while still in use.
 
 int vfs_ilock(struct vfs_inode *inode);
+int vfs_ilockdup(struct vfs_inode *inode);      // Acquire lock and increase ref count
 void vfs_iunlock(struct vfs_inode *inode);
-int vfs_idup(struct vfs_inode *inode);       // Increase ref count, will acquire inode spinlock
-void vfs_iput(struct vfs_inode *inode);       // Decrease ref count and, will acquire inode spinlock
-void vfs_destroy_inode(struct vfs_inode *inode); // Release on-disk inode resources
+int vfs_idup(struct vfs_inode *inode);          // Increase ref count, will acquire inode spinlock
+void vfs_iputunlock(struct vfs_inode *inode);   // Decrease ref count and release lock
 int vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty
-int vfs_sync_inode(struct vfs_inode *inode);     // Write inode to disk
+int vfs_sync_inode(struct vfs_inode *inode);    // Write inode to disk
 
 int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry);
 int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user);
@@ -61,8 +61,11 @@ int vfs_rmdir(struct vfs_inode *dir, struct vfs_dentry *dentry);
 int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
              struct vfs_inode *new_dir, struct vfs_dentry *new_dentry);
 int vfs_symlink(struct vfs_inode *dir, struct vfs_dentry *dentry,
-                const char *target);
+                const char *target, bool user);
 int vfs_truncate(struct vfs_inode *inode, uint64 new_size);
+
+// Dentry operations
+void vfs_dentry_put(struct vfs_dentry *dentry);
 
 // Public APIs not tied to specific callbacks
 int vfs_namei(struct vfs_inode *dir, struct vfs_inode **res_inode,

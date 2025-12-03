@@ -39,6 +39,7 @@ set(KERNEL_C_FILES
 set(KERNEL_C_FILES
     ${KERNEL_C_FILES}
     ${KERNEL_DIR}/vfs/fs.c
+    ${KERNEL_DIR}/vfs/inode.c
 )
 
 set(KERNEL_C_FILES

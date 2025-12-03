@@ -10,15 +10,13 @@ int vfs_add_inode(struct vfs_superblock *sb,
                   struct vfs_inode *inode,
                   struct vfs_inode **ret_inode);
 int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode);
+void __vfs_inode_init(struct vfs_inode *inode, struct vfs_superblock *sb);
 
 // Assert holding the spinlock of the inode
-#define VFS_INODE_ASSERT_SPIN_HOLDING(__inode, __fmt, ...) do {                  \
-    assert((__inode) != NULL, "VFS_INODE_ASSERT_SPIN_HOLDING: inode is NULL");   \
-    assert(spin_holding(&(__inode)->spinlock), __fmt, ##__VA_ARGS__);       \
+#define VFS_INODE_ASSERT_HOLDING(__inode, __fmt, ...) do {                  \
+    assert((__inode) != NULL, "VFS_INODE_ASSERT_HOLDING: inode is NULL");   \
+    assert(holding_mutex(&(__inode)->mutex), __fmt, ##__VA_ARGS__);       \
 } while (0)
-
-#define VFS_INODE_HOLDING(__inode)      \
-    ((__inode) && myproc() == (__inode)->owner)
 
 // Assert holding ilock of the inode
 #define VFS_INODE_ASSERT_HOLDING(__inode, __fmt, ...) do {                  \
@@ -29,15 +27,6 @@ int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode);
     assert((__sb) != NULL, "VFS_SUPERBLOCK_ASSERT_HOLDING: sb is NULL");   \
     assert(rwlock_is_write_holding(&(__sb)->lock), __fmt, ##__VA_ARGS__);  \
 } while (0) 
-
-
-static inline void __vfs_i_spin_lock(struct vfs_inode *inode) {
-    spin_acquire(&inode->spinlock);
-}
-
-static inline void __vfs_i_spin_unlock(struct vfs_inode *inode) {
-    spin_release(&inode->spinlock);
-}
 
 static inline void __vfs_i_wait_completion(struct vfs_inode *inode) {
     wait_for_completion(&inode->completion);
@@ -80,6 +69,21 @@ static inline void __vfs_sb_mark_invalid(struct vfs_superblock *sb) {
         sb->valid = 0;
         __sync_synchronize();
     }
+}
+
+// Validate that the inode is valid and caller holds the ilock
+static inline int __vfs_inode_valid_holding(struct vfs_inode *inode) {
+    if (!VFS_INODE_HOLDING(inode)) {
+        return -EPERM; // Caller does not hold the inode lock
+    }
+    if (!inode->valid) {
+        return -EINVAL; // Inode is not valid
+    }
+    if (!inode->sb || !__vfs_sb_valid(inode->sb)) {
+        printf("vfs_inode_valid_holding: inode's superblock is not valid\n");
+        return -EINVAL; // Inode's superblock is not valid
+    }
+    return 0;
 }
 
 

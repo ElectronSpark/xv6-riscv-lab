@@ -2,122 +2,120 @@
 #include "riscv.h"
 #include "defs.h"
 #include "param.h"
+#include "errno.h"
 #include "bits.h"
 #include "stat.h"
 #include "spinlock.h"
 #include "proc.h"
 #include "mutex_types.h"
 #include "rwlock.h"
+#include "completion.h"
 #include "vfs/fs.h"
 #include "vfs_private.h"
 #include "list.h"
 #include "hlist.h"
 #include "slab.h"
-#include "errno.h"
+
+// When need to acquire multiple inode locks, always acquire in inode number order
+// to prevent deadlock.
+
+/******************************************************************************
+ * Inode Private APIs
+ *****************************************************************************/
+
+// Inode kobject release callback
+static void __vfs_inode_kobj_release(struct kobject *kobj) {
+    // Inodes are freed via vfs_iput, so we need a placeholder kobject callback
+    // here to avoid kobject from freeing the inode memory directly.
+    (void)kobj;
+}
+
+// Initilize VFS managed inode fields
+// Will be used to initialize a newly allocated inode(returned from get_inode callback)
+// before adding it  to the inode hash list
+// Caller should ensure the inode pointer is valid
+void __vfs_inode_init(struct vfs_inode *inode, struct vfs_superblock *sb) {
+    mutex_init(&inode->mutex, "vfs_inode_mutex");
+    completion_init(&inode->completion);
+    hlist_entry_init(&inode->hash_entry);
+    inode->kobj.ops.release = __vfs_inode_kobj_release;
+    inode->kobj.name = "vfs_inode";
+    kobject_init(&inode->kobj);
+    inode->sb = sb;
+}
+
+ /******************************************************************************
+ * Inode Public APIs
+ *****************************************************************************/
 
 int vfs_ilock(struct vfs_inode *inode) {
     if (inode == NULL) {
         return -EINVAL; // Invalid argument
     }
-    assert(myproc() != NULL, "vfs_ilock: current process is NULL");
-retry:
-    __vfs_i_spin_lock(inode);
-    int ret = 0;
-    if (!inode->valid) {
-        __vfs_i_spin_unlock(inode);
-        return -EINVAL; // Inode is not valid
-    }
-    if (inode->locked) {
-        __vfs_i_spin_unlock(inode);
-        // Already locked, wait and retry
-        __vfs_i_wait_completion(inode);
-        goto retry;
-    }
-    assert(inode->owner == NULL, "vfs_ilock: inode lock owner is not NULL when locked");
-    
-    // Temporarily claim the lock to prevent others from acquiring it.
-    // May release if filesystem specific ilock callback exists but fails.
-    inode->locked = 1;
-    inode->owner = myproc();
-    if (inode->ops->ilock != NULL) {
-        __vfs_i_spin_unlock(inode);
-        ret = inode->ops->ilock(inode);
-        __vfs_i_spin_lock(inode);
-        if (ret == 0) {
-            __vfs_i_reinit_completion(inode);
-        } else {
-            // Failed to acquire filesystem specific lock, release the lock
-            inode->locked = 0;
-            inode->owner = NULL;
-            __vfs_i_complete(inode);
-        }
-    }
-    __vfs_i_spin_unlock(inode);
-    return ret;
+    return mutex_lock(&inode->mutex);
 }
 
 void vfs_iunlock(struct vfs_inode *inode) {
     if (inode == NULL) {
         return; // Invalid argument
     }
-    assert(myproc() != NULL, "vfs_iunlock: current process is NULL");
-    __vfs_i_spin_lock(inode);
-    int ret = 0;
-    if (inode->owner != myproc()) {
-        __vfs_i_spin_unlock(inode);
-        printf("warning: vfs_iunlock: current process does not own the inode lock");
-        return;
-    }
-
-    // Knowing the current process owns the lock, it's safe to unlock the inode
-    // and call filesystem specific unlock callback
-    __vfs_i_spin_unlock(inode);
-    if (inode->ops->iunlock != NULL) {
-        inode->ops->iunlock(inode);
-    }
-
-    // reset lock owner and mark as unlocked at the end
-    __vfs_i_spin_lock(inode);
-    inode->locked = 0;
-    inode->owner = NULL;
-    __vfs_i_complete(inode);
-    __vfs_i_spin_unlock(inode);
+    mutex_unlock(&inode->mutex);
 }
 
 int vfs_idup(struct vfs_inode *inode) {
-    if (inode == NULL) {
-        return -EINVAL; // Invalid argument
+    int ret = __vfs_inode_valid_holding(inode);
+    if (ret != 0) {
+        return ret; // Inode is not valid or caller does not hold the ilock
     }
-    __vfs_i_spin_lock(inode);
     kobject_get(&inode->kobj);
-    __vfs_i_spin_unlock(inode);
     return 0;
 }
 
-void vfs_iput(struct vfs_inode *inode) {
+int vfs_ilockdup(struct vfs_inode *inode) {
+    if (inode == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    int ret = vfs_ilock(inode);
+    if (ret != 0) {
+        return ret; // Failed to lock inode
+    }
+    ret = vfs_idup(inode);
+    if (ret != 0) {
+        vfs_iunlock(inode);
+    }
+    return ret;
+}
+
+// Decrease inode ref count and release inode lock
+// Will assume the caller holds readlock of the superblock, which cannot be tested
+void vfs_iputunlock(struct vfs_inode *inode) {
+    int ret = 0;
     if (inode == NULL) {
         return;
     }
+    if (!holding_mutex(&inode->mutex)) {
+        return -EPERM; // Caller does not hold the inode lock
+    }
 retry:
-    __vfs_i_spin_lock(inode);
     int64 refcount = kobject_refcount(&inode->kobj);
     assert(refcount > 0, "vfs_iput: inode refcount underflow");
     if (refcount == 1) {
         // Last reference, need to sync the inode, detach it from superblock, and free it
-        __vfs_i_spin_unlock(inode);
-        superblock_wlock(inode->sb);
-        __vfs_i_spin_lock(inode);
+        vfs_iunlock(inode);
+        vfs_superblock_wlock(inode->sb);
+        ret = vfs_ilock(inode);
+        assert(ret == 0, "vfs_iput: failed to lock inode");
         // Double check refcount after acquiring superblock lock
         if (kobject_refcount(&inode->kobj) > 1) {
             // If other references acquired meanwhile, just release locks and return
-            superblock_unlock(inode->sb);
+            vfs_superblock_unlock(inode->sb);
             kobject_put(&inode->kobj);
-            __vfs_i_spin_unlock(inode);
+            vfs_iunlock(inode);
             return;
         }
         if (inode->dirty && inode->valid) {
-            __vfs_i_spin_unlock(inode);
-            superblock_unlock(inode->sb);
+            vfs_iunlock(inode);
+            vfs_superblock_unlock(inode->sb);
             int sync_ret = vfs_sync_inode(inode);
             if (sync_ret != 0) {
                 printf("warning: vfs_iput: failed to sync inode %lu before deletion: %d\n",
@@ -128,47 +126,33 @@ retry:
 
         int remove_ret = vfs_remove_inode(inode->sb, inode);
         assert(remove_ret == 0, "vfs_iput: failed to remove inode from superblock inode cache");
-        __vfs_i_spin_unlock(inode);
-        superblock_unlock(inode->sb);
+        vfs_iunlock(inode);
+        vfs_superblock_unlock(inode->sb);
         inode->ops->free_inode(inode);
         return;
     }
     // Decrease ref count
     kobject_put(&inode->kobj);
-    __vfs_i_spin_unlock(inode);
+    vfs_iunlock(inode);
 }
 
 // Mark inode as dirty
 // Caller needs to hold the ilock of the inode
 // Caller should not hold the spinlock of the inode
 int vfs_dirty_inode(struct vfs_inode *inode) {
-    if (inode == NULL) {
-        return -EINVAL; // Invalid argument
+    int ret = __vfs_inode_valid_holding(inode);
+    if (ret != 0) {
+        return ret; // Inode is not valid or caller does not hold the ilock
     }
-    if (!VFS_INODE_HOLDING(inode)) {
-        return -EPERM; // Caller does not hold the inode lock
+    if (inode->dirty) {
+        return 0; // Already dirty
     }
-    int ret = 0;
-    bool prev_dirty = 0;
-    __vfs_i_spin_lock(inode);
-    if (!__vfs_sb_valid(inode->sb)) {
-        __vfs_i_spin_unlock(inode);
-        return -EINVAL; // Superblock is not valid
-    }
-    // Since caller holds the ilock, the valid flag should be set
-    assert(inode->valid, "vfs_dirty_inode: inode is not valid");
-    prev_dirty = inode->dirty;
-    inode->dirty = 1;
-    __vfs_i_spin_unlock(inode);
 
-    if (prev_dirty == 0 && inode->ops->dirty_inode != NULL) {
+    if (inode->ops->dirty_inode != NULL) {
         ret = inode->ops->dirty_inode(inode);
     }
-    if (ret != 0) {
-        // On failure, revert dirty flag
-        __vfs_i_spin_lock(inode);
-        inode->dirty = prev_dirty;
-        __vfs_i_spin_unlock(inode);
+    if (ret == 0) {
+        inode->dirty = 1;
     }
     return ret;
 }
@@ -177,31 +161,241 @@ int vfs_dirty_inode(struct vfs_inode *inode) {
 // Caller should hold the ilock of the inode
 // Caller should not hold the spinlock of the inode
 int vfs_sync_inode(struct vfs_inode *inode) {
-    if (inode == NULL) {
-        return -EINVAL; // Invalid argument
+    int ret = __vfs_inode_valid_holding(inode);
+    if (ret != 0) {
+        return ret; // Inode is not valid or caller does not hold the ilock
     }
-    if (!VFS_INODE_HOLDING(inode)) {
-        return -EPERM; // Caller does not hold the inode lock
+    if (!inode->dirty) {
+        return 0; // Inode is already clean
     }
-    int ret = 0;
-    bool was_dirty = 0;
-    __vfs_i_spin_lock(inode);
-    // Synching a inode on an invalid superblock is allowed, as the `valid` flag
-    // of the superblock only prevents new operations from starting.
-    
-    // Since caller holds the ilock, the valid flag should be set
-    assert(inode->valid, "vfs_dirty_inode: inode is not valid");
-    was_dirty = inode->dirty;
-    __vfs_i_spin_unlock(inode);
 
-    if (was_dirty && inode->ops->sync_inode != NULL) {
+    if (inode->ops->sync_inode != NULL) {
         ret = inode->ops->sync_inode(inode);
     }
     if (ret == 0) {
         // On success, clear dirty flag
-        __vfs_i_spin_lock(inode);
         inode->dirty = 0;
-        __vfs_i_spin_unlock(inode);
     }
     return ret;
+}
+
+// Lookup a dentry in a directory inode
+int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry) {
+    if (dentry == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    int ret = __vfs_inode_valid_holding(dir);
+    if (ret != 0) {
+        return ret;
+    }
+    if (dir->type != VFS_I_TYPE_DIR) {
+        return -ENOTDIR; // Inode is not a directory
+    }
+    if (dir->ops->lookup == NULL) {
+        return -ENOSYS; // Lookup operation not supported
+    }
+    return dir->ops->lookup(dir, dentry);
+}
+
+int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user) {
+    if (buf == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    int ret = __vfs_inode_valid_holding(inode);
+    if (ret != 0) {
+        return ret; // Inode is not valid or caller does not hold the ilock
+    }
+    if (inode->type != VFS_I_TYPE_SYMLINK) {
+        return -EINVAL; // Inode is not a symlink
+    }
+    if (inode->ops->readlink == NULL) {
+        return -ENOSYS; // Readlink operation not supported
+    }
+    return inode->ops->readlink(inode, buf, buflen, user);
+}
+
+int vfs_create(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode) {
+    if (dentry == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    int ret = __vfs_inode_valid_holding(dir);
+    if (ret != 0) {
+        return ret;
+    }
+    if (!vfs_superblock_wholding(dir->sb)) {
+        return -EPERM; // Caller must hold write lock of the superblock
+    }
+    if (dir->type != VFS_I_TYPE_DIR) {
+        return -ENOTDIR; // Inode is not a directory
+    }
+    if (dir->ops->create == NULL) {
+        return -ENOSYS; // Create operation not supported
+    }
+    return dir->ops->create(dir, dentry, mode);
+}
+
+int vfs_mknod(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode, uint32 dev) {
+    if (dentry == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    int ret = __vfs_inode_valid_holding(dir);
+    if (ret != 0) {
+        return ret;
+    }
+    if (!vfs_superblock_wholding(dir->sb)) {
+        return -EPERM; // Caller must hold write lock of the superblock
+    }
+    if (dir->type != VFS_I_TYPE_DIR) {
+        return -ENOTDIR; // Inode is not a directory
+    }
+    if (dir->ops->mknod == NULL) {
+        return -ENOSYS; // Mknod operation not supported
+    }
+    return dir->ops->mknod(dir, dentry, mode, dev);
+}
+
+int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, struct vfs_dentry *new) {
+    if (old == NULL || new == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    int ret = __vfs_inode_valid_holding(dir);
+    if (ret != 0) {
+        return ret;
+    }
+    if (!vfs_superblock_wholding(dir->sb)) {
+        return -EPERM; // Caller must hold write lock of the superblock
+    }
+    if (dir->type != VFS_I_TYPE_DIR) {
+        __vfs_i_spin_unlock(dir);
+        return -ENOTDIR; // Inode is not a directory
+    }
+    if (dir->ops->link == NULL) {
+        __vfs_i_spin_unlock(dir);
+        return -ENOSYS; // Link operation not supported
+    }
+    __vfs_i_spin_unlock(dir);
+    return dir->ops->link(old, dir, new);
+}
+
+int vfs_unlink(struct vfs_inode *dir, struct vfs_dentry *dentry) {
+    if (dentry == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    int ret = __vfs_inode_valid_holding(dir);
+    if (ret != 0) {
+        return ret;
+    }
+    if (!vfs_superblock_wholding(dir->sb)) {
+        return -EPERM; // Caller must hold write lock of the superblock
+    }
+    if (dir->type != VFS_I_TYPE_DIR) {
+        return -ENOTDIR; // Inode is not a directory
+    }
+    if (dir->ops->unlink == NULL) {
+        return -ENOSYS; // Unlink operation not supported
+    }
+    return dir->ops->unlink(dir, dentry);
+}
+
+int vfs_mkdir(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode) {
+    if (dentry == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    int ret = __vfs_inode_valid_holding(dir);
+    if (ret != 0) {
+        return ret;
+    }
+    if (!vfs_superblock_wholding(dir->sb)) {
+        return -EPERM; // Caller must hold write lock of the superblock
+    }
+    if (dir->type != VFS_I_TYPE_DIR) {
+        return -ENOTDIR; // Inode is not a directory
+    }
+    if (dir->ops->mkdir == NULL) {
+        return -ENOSYS; // Mkdir operation not supported
+    }
+    return dir->ops->mkdir(dir, dentry, mode);
+}
+
+int vfs_rmdir(struct vfs_inode *dir, struct vfs_dentry *dentry) {
+    if (dentry == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    int ret = __vfs_inode_valid_holding(dir);
+    if (ret != 0) {
+        return ret;
+    }
+    if (!vfs_superblock_wholding(dir->sb)) {
+        return -EPERM; // Caller must hold write lock of the superblock
+    }
+    if (dir->type != VFS_I_TYPE_DIR) {
+        return -ENOTDIR; // Inode is not a directory
+    }
+    if (dir->ops->rmdir == NULL) {
+        return -ENOSYS; // Rmdir operation not supported
+    }
+    return dir->ops->rmdir(dir, dentry);
+}
+
+int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
+             struct vfs_inode *new_dir, struct vfs_dentry *new_dentry) {
+    if (old_dentry == NULL || new_dentry == NULL) {
+        return -EINVAL; // Invalid arguments
+    }
+    int ret = __vfs_inode_valid_holding(old_dir);
+    if (ret != 0) {
+        return ret;
+    }
+    ret = __vfs_inode_valid_holding(new_dir);
+    if (ret != 0) {
+        return ret;
+    }
+    if (old_dir->sb != new_dir->sb) {
+        return -EXDEV; // Cross-device move not supported
+    }
+    if (!vfs_superblock_wholding(old_dir->sb)) {
+        return -EPERM; // Caller must hold write lock of the superblock
+    }
+    if (old_dir->type != VFS_I_TYPE_DIR || new_dir->type != VFS_I_TYPE_DIR) {
+        return -ENOTDIR; // Inode is not a directory
+    }
+    if (old_dir->ops->move == NULL || old_dir->ops->move != new_dir->ops->move) {
+        return -ENOSYS; // Move operation not supported
+    }
+    return old_dir->ops->move(old_dir, old_dentry, new_dir, new_dentry);
+}
+
+int vfs_symlink(struct vfs_inode *dir, struct vfs_dentry *dentry,
+                const char *target, bool user) {
+    if (dentry == NULL || dentry == NULL || target == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    int ret = __vfs_inode_valid_holding(dir);
+    if (ret != 0) {
+        return ret;
+    }
+    if (!vfs_superblock_wholding(dir->sb)) {
+        return -EPERM; // Caller must hold write lock of the superblock
+    }
+    if (dir->type != VFS_I_TYPE_DIR) {
+        return -ENOTDIR; // Inode is not a directory
+    }
+    if (dir->ops->symlink == NULL) {
+        return -ENOSYS; // Symlink operation not supported
+    }
+    return dir->ops->symlink(dir, dentry, target, user);
+}
+
+int vfs_truncate(struct vfs_inode *inode, uint64 new_size) {
+    int ret = __vfs_inode_valid_holding(inode);
+    if (ret != 0) {
+        return ret; // Inode is not valid or caller does not hold the ilock
+    }
+    if (!vfs_superblock_wholding(inode->sb)) {
+        return -EPERM; // Caller must hold write lock of the superblock
+    }
+    if (inode->ops->truncate == NULL) {
+        return -ENOSYS; // Truncate operation not supported
+    }
+    return inode->ops->truncate(inode, new_size);
 }

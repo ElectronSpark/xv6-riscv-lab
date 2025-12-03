@@ -106,6 +106,7 @@
         "complex": "c",
         "rwlock.h": "c",
         "completion.h": "c",
-        "completion_types.h": "c"
+        "completion_types.h": "c",
+        "future": "c"
     }
 }
