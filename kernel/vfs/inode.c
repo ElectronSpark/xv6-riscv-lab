@@ -138,7 +138,7 @@ retry:
 
 // Mark inode as dirty
 // Caller needs to hold the ilock of the inode
-// Caller should not hold the spinlock of the inode
+// Caller should not hold additional locks beyond the inode mutex
 int vfs_dirty_inode(struct vfs_inode *inode) {
     int ret = __vfs_inode_valid_holding(inode);
     if (ret != 0) {
@@ -159,7 +159,7 @@ int vfs_dirty_inode(struct vfs_inode *inode) {
 
 // Sync inode to disk
 // Caller should hold the ilock of the inode
-// Caller should not hold the spinlock of the inode
+// Caller should not hold additional locks beyond the inode mutex
 int vfs_sync_inode(struct vfs_inode *inode) {
     int ret = __vfs_inode_valid_holding(inode);
     if (ret != 0) {

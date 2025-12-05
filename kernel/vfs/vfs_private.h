@@ -48,29 +48,6 @@ static inline int __vfs_idup_no_lock(struct vfs_inode *inode) {
     return 0;
 }
 
-// Many operations will check valid field of the superblock before proceeding.
-// But they should not assume the superblock remains valid during the operation,
-// thus invalidate a superblock will only prevent new operations from starting.
-// Existing operations should complete before the superblock is fully unmounted.
-static inline bool __vfs_sb_valid(struct vfs_superblock *sb) {
-    __sync_synchronize();
-    return sb && sb->valid;
-}
-
-static inline void __vfs_sb_mark_valid(struct vfs_superblock *sb) {
-    if (sb) {
-        sb->valid = 1;
-        __sync_synchronize();
-    }
-}
-
-static inline void __vfs_sb_mark_invalid(struct vfs_superblock *sb) {
-    if (sb) {
-        sb->valid = 0;
-        __sync_synchronize();
-    }
-}
-
 // Validate that the inode is valid and caller holds the ilock
 static inline int __vfs_inode_valid_holding(struct vfs_inode *inode) {
     if (!VFS_INODE_HOLDING(inode)) {

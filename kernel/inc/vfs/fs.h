@@ -10,8 +10,8 @@ void vfs_init(void);
 struct vfs_fs_type *vfs_fs_type_allocate(void);
 int vfs_register_fs_type(struct vfs_fs_type *fs_type);
 int vfs_unregister_fs_type(const char *name);
-void vfs_fs_type_lock(void);
-void vfs_fs_type_unlock(void);
+void vfs_mount_lock(void);
+void vfs_mount_unlock(void);
 struct vfs_fs_type *vfs_get_fs_type(const char *name);
 void vfs_put_fs_type(struct vfs_fs_type *fs_type);
 
@@ -22,9 +22,6 @@ int vfs_unmount(struct vfs_inode *mountpoint);
 
 // superblock operations
 int vfs_get_mnt_rooti(struct vfs_inode *mountpoint, struct vfs_inode **ret_rooti);
-int vfs_get_inode_sb(struct vfs_inode *inode, struct vfs_superblock **ret_sb);
-int vfs_get_sb_mnt(struct vfs_superblock *sb, struct vfs_inode **ret_mountpoint);
-int vfs_get_sb_rooti(struct vfs_superblock *sb, struct vfs_inode **ret_rooti);
 int vfs_get_rooti_mnt(struct vfs_inode *rooti, struct vfs_inode **ret_mountpoint);
 
 void vfs_superblock_rlock(struct vfs_superblock *sb);
@@ -45,7 +42,7 @@ int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
 int vfs_ilock(struct vfs_inode *inode);
 int vfs_ilockdup(struct vfs_inode *inode);      // Acquire lock and increase ref count
 void vfs_iunlock(struct vfs_inode *inode);
-int vfs_idup(struct vfs_inode *inode);          // Increase ref count, will acquire inode spinlock
+int vfs_idup(struct vfs_inode *inode);          // Increase ref count, requires inode mutex to be held
 void vfs_iputunlock(struct vfs_inode *inode);   // Decrease ref count and release lock
 int vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty
 int vfs_sync_inode(struct vfs_inode *inode);    // Write inode to disk
