@@ -93,9 +93,7 @@ void vfs_iputunlock(struct vfs_inode *inode) {
     if (inode == NULL) {
         return;
     }
-    if (!holding_mutex(&inode->mutex)) {
-        return -EPERM; // Caller does not hold the inode lock
-    }
+    assert(holding_mutex(&inode->mutex), "vfs_iput: must hold inode lock");
 retry:
     int64 refcount = kobject_refcount(&inode->kobj);
     assert(refcount > 0, "vfs_iput: inode refcount underflow");
@@ -266,14 +264,11 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, struct vfs_dentry *n
         return -EPERM; // Caller must hold write lock of the superblock
     }
     if (dir->type != VFS_I_TYPE_DIR) {
-        __vfs_i_spin_unlock(dir);
         return -ENOTDIR; // Inode is not a directory
     }
     if (dir->ops->link == NULL) {
-        __vfs_i_spin_unlock(dir);
         return -ENOSYS; // Link operation not supported
     }
-    __vfs_i_spin_unlock(dir);
     return dir->ops->link(old, dir, new);
 }
 

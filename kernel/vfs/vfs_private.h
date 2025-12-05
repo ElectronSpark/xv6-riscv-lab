@@ -18,11 +18,6 @@ void __vfs_inode_init(struct vfs_inode *inode, struct vfs_superblock *sb);
     assert(holding_mutex(&(__inode)->mutex), __fmt, ##__VA_ARGS__);       \
 } while (0)
 
-// Assert holding ilock of the inode
-#define VFS_INODE_ASSERT_HOLDING(__inode, __fmt, ...) do {                  \
-    assert(VFS_INODE_HOLDING(__inode), __fmt, ##__VA_ARGS__);               \
-} while (0)
-
 #define VFS_SUPERBLOCK_ASSERT_WHOLDING(__sb, __fmt, ...) do {                  \
     assert((__sb) != NULL, "VFS_SUPERBLOCK_ASSERT_HOLDING: sb is NULL");   \
     assert(rwlock_is_write_holding(&(__sb)->lock), __fmt, ##__VA_ARGS__);  \
@@ -50,13 +45,16 @@ static inline int __vfs_idup_no_lock(struct vfs_inode *inode) {
 
 // Validate that the inode is valid and caller holds the ilock
 static inline int __vfs_inode_valid_holding(struct vfs_inode *inode) {
-    if (!VFS_INODE_HOLDING(inode)) {
+    if (inode == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    if (!holding_mutex(&inode->mutex)) {
         return -EPERM; // Caller does not hold the inode lock
     }
     if (!inode->valid) {
         return -EINVAL; // Inode is not valid
     }
-    if (!inode->sb || !__vfs_sb_valid(inode->sb)) {
+    if (!inode->sb || !inode->sb->valid) {
         printf("vfs_inode_valid_holding: inode's superblock is not valid\n");
         return -EINVAL; // Inode's superblock is not valid
     }
