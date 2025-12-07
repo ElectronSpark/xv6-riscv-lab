@@ -13,6 +13,7 @@
 #include "page.h"
 #include "signal.h"
 #include "vm.h"
+#include "vfs/fs.h"
 
 #define NPROC_HASH_BUCKETS 31
 
@@ -811,6 +812,7 @@ forkret(void)
     // regular process (e.g., because it calls sleep), and thus cannot
     // be run from main().
     fsinit(ROOTDEV);
+    vfs_init();
 
     first = 0;
     // ensure other cores see first=0.

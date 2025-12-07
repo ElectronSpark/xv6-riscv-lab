@@ -21,9 +21,6 @@ int vfs_mount(const char *type, struct vfs_inode *mountpoint,
 int vfs_unmount(struct vfs_inode *mountpoint);
 
 // superblock operations
-int vfs_get_mnt_rooti(struct vfs_inode *mountpoint, struct vfs_inode **ret_rooti);
-int vfs_get_rooti_mnt(struct vfs_inode *rooti, struct vfs_inode **ret_mountpoint);
-
 void vfs_superblock_rlock(struct vfs_superblock *sb);
 void vfs_superblock_wlock(struct vfs_superblock *sb);
 bool vfs_superblock_wholding(struct vfs_superblock *sb);

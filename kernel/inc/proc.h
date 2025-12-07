@@ -9,6 +9,8 @@
 #include "signal_types.h"
 #include "vm_types.h"
 
+struct vfs_inode;
+
 // Saved registers for kernel context switches.
 struct context {
   uint64 ra;
@@ -149,6 +151,11 @@ struct proc {
   uint64 arg[2];               // Argument for kernel process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
+  // @TODO: replace the original XV6 fs subsystem with VFS
+  struct {
+    struct vfs_inode *rooti; // Root inode
+    struct vfs_inode *cwd;   // Current working directory inode
+  } fs;
   char name[16];               // Process name (debugging)
 };
 

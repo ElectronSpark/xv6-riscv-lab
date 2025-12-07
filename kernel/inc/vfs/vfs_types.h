@@ -200,7 +200,10 @@ struct vfs_inode {
     union {
         cdev_t *cdev; // for character device inode
         blkdev_t *bdev; // for block device inode
-        struct vfs_superblock *mnt_sb; // the mounted superblock
+        struct {
+            struct vfs_superblock *mnt_sb; // the mounted superblock
+            struct vfs_inode *mnt_rooti; // root inode of the mounted superblock
+        };
     };
     completion_t completion;
 };
