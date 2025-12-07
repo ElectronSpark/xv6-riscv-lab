@@ -71,6 +71,7 @@ struct vfs_superblock {
     struct {
         uint64 valid: 1;
         uint64 dirty: 1;    // Only indicates whether the metadata of the superblock is dirty
+        uint64 initialized: 1; // Indicates whether the superblock has been initialized
     };
     struct vfs_superblock *parent_sb; // parent superblock if mounted on another fs
     struct vfs_inode *mountpoint; // inode where this sb is mounted

@@ -3,11 +3,11 @@
 
 #include "vfs/vfs_types.h"
 
-void __vfs_rooti_init(void);
 void vfs_init(void);
 
 // Filesystem type registration
 struct vfs_fs_type *vfs_fs_type_allocate(void);
+void vfs_fs_type_free(struct vfs_fs_type *fs_type);
 int vfs_register_fs_type(struct vfs_fs_type *fs_type);
 int vfs_unregister_fs_type(const char *name);
 void vfs_mount_lock(void);

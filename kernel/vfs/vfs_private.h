@@ -3,6 +3,8 @@
 
 #include "vfs/vfs_types.h"
 
+extern struct vfs_inode vfs_root_inode;
+
 
 int vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino,
                          struct vfs_inode **ret_inode);
@@ -11,7 +13,7 @@ int vfs_add_inode(struct vfs_superblock *sb,
                   struct vfs_inode **ret_inode);
 int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode);
 void __vfs_inode_init(struct vfs_inode *inode, struct vfs_superblock *sb);
-void __vfs_rooti_init(void);
+void tmpfs_init_fs_type(void);
 
 // Assert holding the spinlock of the inode
 #define VFS_INODE_ASSERT_HOLDING(__inode, __fmt, ...) do {                  \
@@ -77,9 +79,8 @@ static inline int __vfs_dir_inode_valid_holding(struct vfs_inode *inode) {
     if (!(inode->type == VFS_I_TYPE_MNT) && !(inode->type == VFS_I_TYPE_DIR)) {
         return -EINVAL; // Inode is not a mountpoint
     }
-    if (inode->type == VFS_I_TYPE_DIR) {
+    if (inode->type == VFS_I_TYPE_DIR && inode != &vfs_root_inode) {
         if (inode->sb == NULL || !inode->sb->valid) {
-            printf("vfs_dir_inode_valid_holding: dir inode's superblock is not valid\n");
             return -EINVAL; // Inode's superblock is not valid
         }
     }

@@ -38,7 +38,7 @@ static uint16 vfs_fs_type_count = 0;
 // It is a special inode that serves as the root of the entire filesystem tree
 // It does not belong to any superblock or filesystem
 // It does not have any data or operations associated with it
-static struct vfs_inode __vfs_root_inode = { 0 };
+struct vfs_inode vfs_root_inode = { 0 };
 
 
 #define MAX_FS_TYPES 256
@@ -54,11 +54,19 @@ static void __vfs_attach_superblock_to_fstype(struct vfs_superblock *sb);
 static void __vfs_detach_superblock_from_fstype(struct vfs_superblock *sb);
 static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint);
 static void __vfs_set_mountpoint(struct vfs_superblock *sb, struct vfs_inode *mountpoint);
-static void __vfs_clear_unlock_mountpoint(struct vfs_inode *mountpoint);
+static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint);
 
 /******************************************************************************
  * Private functions
  *****************************************************************************/
+// initialize rooti
+static void __vfs_rooti_init(void) {
+    memset(&vfs_root_inode, 0, sizeof(vfs_root_inode));
+    vfs_root_inode.ino = 0;
+    vfs_root_inode.type = VFS_I_TYPE_DIR;
+    vfs_root_inode.valid = 1;
+}
+
 static void __vfs_register_fs_type_locked(struct vfs_fs_type *fs_type) {
     list_node_push(&vfs_fs_types, fs_type, list_entry);
     fs_type->registered = 1;
@@ -155,6 +163,13 @@ static void __vfs_init_superblock_structure(struct vfs_superblock *sb, struct vf
     rwlock_init(&sb->lock, RWLOCK_PRIO_READ, "vfs_superblock_lock");
 }
 
+static int __vfs_init_sb_rooti(struct vfs_superblock *sb) {
+    __vfs_inode_init(sb->root_inode, sb);
+    struct vfs_inode *ret_inode = NULL;
+    int ret = vfs_add_inode(sb, sb->root_inode, &ret_inode);
+    return ret;
+}
+
 static bool __vfs_superblock_ops_valid(struct vfs_superblock *sb) {
     if (sb->ops == NULL) {
         return false;
@@ -172,13 +187,10 @@ static bool __vfs_init_superblock_valid(struct vfs_superblock *sb) {
     if (sb == NULL) {
         return false;
     }
-    if (!sb->valid || sb->dirty != 0) {
+    if (sb->valid || sb->dirty) {
         return false;
     }
     if (!__vfs_superblock_ops_valid(sb)) {
-        return false;
-    }
-    if (sb->device != NULL) {
         return false;
     }
     if (sb->mountpoint != NULL || sb->parent_sb != NULL) {
@@ -204,7 +216,7 @@ static void __vfs_detach_superblock_from_fstype(struct vfs_superblock *sb) {
 // Caller must hold the parent superblock write lock and the inode lock.
 // On success the inode type is flipped to MNT and its refcount is incremented.
 static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint) {
-    if (mountpoint != &__vfs_root_inode) {
+    if (mountpoint != &vfs_root_inode) {
         VFS_SUPERBLOCK_ASSERT_WHOLDING(mountpoint->sb, 
             "Mountpoint inode's superblock lock must be write held to turn into mountpoint");
     }
@@ -218,7 +230,7 @@ static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint) {
     mountpoint->type = VFS_I_TYPE_MNT;
     mountpoint->mnt_rooti = NULL;
     mountpoint->mnt_sb = NULL;
-    if (mountpoint != &__vfs_root_inode) {
+    if (mountpoint != &vfs_root_inode) {
         mountpoint->sb->mount_count++;
         assert(mountpoint->sb->mount_count > 0, "Mountpoint superblock mount count overflow");
     }
@@ -229,7 +241,7 @@ static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint) {
 // Caller must hold the parent superblock write lock and the mountpoint inode lock;
 // this helper assumes the refcount was raised by __vfs_turn_mountpoint().
 static void __vfs_set_mountpoint(struct vfs_superblock *sb, struct vfs_inode *mountpoint) {
-    if (mountpoint != &__vfs_root_inode) {
+    if (mountpoint != &vfs_root_inode) {
         VFS_SUPERBLOCK_ASSERT_WHOLDING(mountpoint->sb, "Mountpoint inode's superblock lock must be write held to set mountpoint");
     }
     VFS_SUPERBLOCK_ASSERT_WHOLDING(sb, "Superblock lock must be write held to set mountpoint");
@@ -245,13 +257,13 @@ static void __vfs_set_mountpoint(struct vfs_superblock *sb, struct vfs_inode *mo
 // Clear the mountpoint inode of a superblock, undoing __vfs_set_mountpoint().
 // Caller must hold the parent superblock write lock and the mountpoint inode lock;
 // this helper drops the reference taken in __vfs_turn_mountpoint().
-static void __vfs_clear_unlock_mountpoint(struct vfs_inode *mountpoint) {
-    if (mountpoint != &__vfs_root_inode) {
+static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint) {
+    if (mountpoint != &vfs_root_inode) {
         VFS_SUPERBLOCK_ASSERT_WHOLDING(mountpoint->sb, "Mountpoint inode's superblock lock must be write held to clear mountpoint");
     }
     VFS_INODE_ASSERT_HOLDING(mountpoint, "Mountpoint inode lock must be held to clear mountpoint");
     assert(mountpoint->type == VFS_I_TYPE_MNT, "Mountpoint inode type is not MNT");
-    if (mountpoint != &__vfs_root_inode) {
+    if (mountpoint != &vfs_root_inode) {
         mountpoint->sb->mount_count--;
         assert(mountpoint->sb->mount_count >= 0, "Mountpoint superblock mount count underflow");
     }
@@ -270,6 +282,7 @@ static void __vfs_clear_unlock_mountpoint(struct vfs_inode *mountpoint) {
  *   - None.
  */
 void vfs_init(void) {
+    __vfs_rooti_init();
     list_entry_init(&vfs_fs_types);
     mutex_init(&__mount_mutex, "vfs_mount_mutex");
     int ret = slab_cache_init(&vfs_superblock_cache, "vfs_superblock_cache",
@@ -281,10 +294,12 @@ void vfs_init(void) {
     vfs_fs_type_count = 0;
     struct proc *proc = myproc();
     assert(proc != NULL, "vfs_init must be called from a process context");
+    __vfs_inode_init(&vfs_root_inode, NULL);
     proc_lock(proc);
-    proc->fs.rooti = &__vfs_root_inode;
-    proc->fs.cwd = &__vfs_root_inode;
+    proc->fs.rooti = &vfs_root_inode;
+    proc->fs.cwd = &vfs_root_inode;
     proc_unlock(proc);
+    tmpfs_init_fs_type();
 }
 
 /*
@@ -305,6 +320,10 @@ struct vfs_fs_type *vfs_fs_type_allocate(void) {
     list_entry_init(&fs_type->list_entry);
     list_entry_init(&fs_type->superblocks);
     return fs_type;
+}
+
+void vfs_fs_type_free(struct vfs_fs_type *fs_type) {
+    slab_free(fs_type);
 }
 
 /*
@@ -414,40 +433,49 @@ void vfs_mount_unlock(void) {
     int ret_val = 0;
 
     if (type == NULL || mountpoint == NULL) {
+        printf("vfs_mount: invalid arguments\n");
         return -EINVAL; // Invalid arguments
     }
 
     if (!holding_mutex(&__mount_mutex)) {
+        printf("vfs_mount: mount mutex not held\n");
         return -EPERM; // Must hold mount mutex to register fs_type
     }
 
     ret_val = __vfs_dir_inode_valid_holding(mountpoint);
     if (ret_val != 0) {
+        printf("vfs_mount: mountpoint inode not valid, errno=%d\n", ret_val);
         return ret_val;
     }
-    if (mountpoint == &__vfs_root_inode) {
+    if (mountpoint != &vfs_root_inode) {
         if (!vfs_superblock_wholding(mountpoint->sb)) {
+            printf("vfs_mount: mountpoint superblock write lock not held\n");
             return -EPERM; // Caller must hold write lock of the superblock
         }
         if (!mountpoint->sb->valid) {
+            printf("vfs_mount: mountpoint superblock is not valid\n");
             return -EINVAL; // Mountpoint's superblock is not valid
         }
         if (mountpoint->type != VFS_I_TYPE_DIR) {
+            printf("vfs_mount: mountpoint is not a directory\n");
             return -EINVAL; // Mountpoint must be a directory
         }
     }
 
     ret_val = __vfs_turn_mountpoint(mountpoint);
     if (ret_val != 0) {
+        printf("vfs_mount: failed to turn mountpoint, errno=%d\n", ret_val);
         return ret_val; // Failed to turn mountpoint
     }
     
     fs_type = vfs_get_fs_type(type);
     if (fs_type == NULL) {
+        printf("vfs_mount: filesystem type '%s' not found\n", type);
         ret_val = -ENOENT; // Filesystem type not found
         goto ret;
     }
     if (!fs_type->registered) {
+        printf("vfs_mount: filesystem type '%s' not registered\n", type);
         ret_val = -ENOENT; // Filesystem type not registered
         goto ret;
     }
@@ -455,35 +483,42 @@ void vfs_mount_unlock(void) {
     // The superblock is private to the filesystem until we attach it, so no locking is needed yet
     ret_val = fs_type->ops->mount(mountpoint, device, flags, data, &sb);
     if (ret_val != 0) {
+        printf("vfs_mount: filesystem type '%s' mount failed, errno=%d\n", type, ret_val);
         goto ret; // mount failed
     }
     // Validate the returned superblock
     if (!__vfs_init_superblock_valid(sb)) {
+        printf("vfs_mount: invalid superblock returned by mount\n");
         fs_type->ops->free(sb);
         ret_val = -EINVAL; // Invalid superblock returned by mount
         goto ret;
     }
     if (sb->root_inode == NULL) {
+        printf("vfs_mount: superblock has no root inode\n");
         fs_type->ops->free(sb);
         ret_val = -EINVAL; // Superblock has no root inode
         goto ret;
     }
-    if (sb->root_inode->sb != sb) {
+    if (sb->root_inode->sb != NULL) {
+        printf("vfs_mount: root inode already associated with a superblock\n");
         fs_type->ops->free(sb);
         ret_val = -EINVAL; // Root inode is not associated with the superblock
         goto ret;
     }
-    if (!sb->root_inode->valid) {
+    if (sb->root_inode->valid) {
+        printf("vfs_mount: root inode already marked valid\n");
         fs_type->ops->free(sb);
         ret_val = -EINVAL; // Root inode is not ready
         goto ret;
     }
-    if (kobject_refcount(&sb->root_inode->kobj) != 1) {
+    __vfs_init_superblock_structure(sb, fs_type);
+    vfs_superblock_wlock(sb);   // Must hold superblock lock to init root inode
+    ret_val = __vfs_init_sb_rooti(sb);
+    if (ret_val != 0) {
+        printf("vfs_mount: failed to initialize superblock root inode, errno=%d\n", ret_val);
         fs_type->ops->free(sb);
-        ret_val = -EINVAL; // Root inode refcount is unexpected
         goto ret;
     }
-    __vfs_init_superblock_structure(sb, fs_type);
 
     // Attach superblock to filesystem type
     __vfs_attach_superblock_to_fstype(sb);
@@ -492,8 +527,18 @@ void vfs_mount_unlock(void) {
     ret_val = 0; // Successfully mounted
 ret:
     if (ret_val != 0) {
+        if (sb) {
+            if (sb->root_inode) {
+                sb->root_inode->ops->free_inode(sb->root_inode);
+            }
+            fs_type->ops->free(sb);
+        }
         // On failure, need to revert mountpoint inode type
-        __vfs_clear_unlock_mountpoint(mountpoint);
+        __vfs_clear_mountpoint(mountpoint);
+    } else if (vfs_superblock_wholding(sb)) {
+        sb->initialized = 1;
+        sb->valid = 1;
+        vfs_superblock_unlock(sb);
     }
     vfs_put_fs_type(fs_type);
     return ret_val;
@@ -580,7 +625,7 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
 
     // Detach superblock from filesystem type
     __vfs_detach_superblock_from_fstype(sb);
-    __vfs_clear_unlock_mountpoint(mountpoint);
+    __vfs_clear_mountpoint(mountpoint);
 
     // Free the superblock
     sb->fs_type->ops->free(sb);
@@ -955,7 +1000,7 @@ int vfs_add_inode(struct vfs_superblock *sb,
         return -EINVAL; // Invalid arguments
     }
     VFS_SUPERBLOCK_ASSERT_WHOLDING(sb, "Superblock lock must be write held to add inode");
-    if (!sb->valid) {
+    if (!sb->valid && sb->initialized) {
         return -EINVAL; // Superblock is not valid
     }
     if (inode->sb != sb) {
