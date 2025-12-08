@@ -41,6 +41,7 @@ int vfs_ilockdup(struct vfs_inode *inode);      // Acquire lock and increase ref
 void vfs_iunlock(struct vfs_inode *inode);
 int vfs_idup(struct vfs_inode *inode);          // Increase ref count, requires inode mutex to be held
 void vfs_iputunlock(struct vfs_inode *inode);   // Decrease ref count and release lock
+int vfs_invalidate(struct vfs_inode *inode);    // Decrease ref count and invalidate inode
 int vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty
 int vfs_sync_inode(struct vfs_inode *inode);    // Write inode to disk
 
@@ -57,9 +58,6 @@ int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
 int vfs_symlink(struct vfs_inode *dir, struct vfs_dentry *dentry,
                 const char *target, bool user);
 int vfs_truncate(struct vfs_inode *inode, uint64 new_size);
-
-// Dentry operations
-void vfs_dentry_put(struct vfs_dentry *dentry);
 
 // Public APIs not tied to specific callbacks
 int vfs_namei(struct vfs_inode *dir, struct vfs_inode **res_inode,

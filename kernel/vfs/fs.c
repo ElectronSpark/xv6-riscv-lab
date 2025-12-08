@@ -193,6 +193,12 @@ static bool __vfs_init_superblock_valid(struct vfs_superblock *sb) {
     if (!__vfs_superblock_ops_valid(sb)) {
         return false;
     }
+    if (sb->backendless && (sb->device != NULL)) {
+        return false;
+    }
+    if (!sb->backendless && (sb->device == NULL)) {
+        return false;
+    }
     if (sb->mountpoint != NULL || sb->parent_sb != NULL) {
         // At this point, the superblock has not been mounted yet
         return false;
@@ -209,6 +215,7 @@ static void __vfs_attach_superblock_to_fstype(struct vfs_superblock *sb) {
 static void __vfs_detach_superblock_from_fstype(struct vfs_superblock *sb) {
     list_node_detach(sb, siblings);
     sb->fs_type->sb_count--;
+    sb->valid = 0;
     assert(sb->fs_type->sb_count >= 0, "Filesystem type superblock count underflow");
 }
 
@@ -489,25 +496,26 @@ void vfs_mount_unlock(void) {
     // Validate the returned superblock
     if (!__vfs_init_superblock_valid(sb)) {
         printf("vfs_mount: invalid superblock returned by mount\n");
-        fs_type->ops->free(sb);
         ret_val = -EINVAL; // Invalid superblock returned by mount
+        goto ret;
+    }
+    if (sb->total_blocks && (sb->used_blocks > sb->total_blocks)) {
+        printf("vfs_mount: superblock used_blocks exceeds total_blocks\n");
+        ret_val = -EINVAL; // Invalid superblock block usage
         goto ret;
     }
     if (sb->root_inode == NULL) {
         printf("vfs_mount: superblock has no root inode\n");
-        fs_type->ops->free(sb);
         ret_val = -EINVAL; // Superblock has no root inode
         goto ret;
     }
     if (sb->root_inode->sb != NULL) {
         printf("vfs_mount: root inode already associated with a superblock\n");
-        fs_type->ops->free(sb);
         ret_val = -EINVAL; // Root inode is not associated with the superblock
         goto ret;
     }
     if (sb->root_inode->valid) {
         printf("vfs_mount: root inode already marked valid\n");
-        fs_type->ops->free(sb);
         ret_val = -EINVAL; // Root inode is not ready
         goto ret;
     }
@@ -516,7 +524,6 @@ void vfs_mount_unlock(void) {
     ret_val = __vfs_init_sb_rooti(sb);
     if (ret_val != 0) {
         printf("vfs_mount: failed to initialize superblock root inode, errno=%d\n", ret_val);
-        fs_type->ops->free(sb);
         goto ret;
     }
 
@@ -600,21 +607,19 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
     if (!sb->valid) {
         return -EINVAL; // Mountpoint's superblock is not valid
     }
-
-    // Begin unmounting
-    sb->ops->unmount_begin(sb);
-
-    // After unmount_begin, superblock should be clean and have no active inodes
-    if (!sb->valid || sb->dirty) {
-        printf("vfs_unmount: sb valid=%u dirty=%u\n", sb->valid, sb->dirty);
-        return -EBUSY; // Superblock is still valid or dirty
-    }
-
     // Superblock should have no mounted superblocks under it
     if (sb->mount_count > 0) {
         printf("vfs_unmount: mount_count=%d\n", sb->mount_count);
         return -EBUSY; // There are still mounted superblocks under this superblock
     }
+    // After unmount_begin, superblock should be clean and have no active inodes
+    if (sb->dirty) {
+        printf("vfs_unmount: sb valid=%u dirty=%u\n", sb->valid, sb->dirty);
+        return -EBUSY; // Superblock is still valid or dirty
+    }
+
+    // Begin unmounting
+    sb->ops->unmount_begin(sb);
 
     // Superblock also should have no active inodes before unmounting
     size_t remaining_inodes = hlist_len(&sb->inodes);

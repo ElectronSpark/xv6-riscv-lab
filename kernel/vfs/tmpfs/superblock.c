@@ -47,7 +47,14 @@ int tmpfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode) {
     return 0;
 }
 
+// Free a tmpfs inode and its associated data
+// VFS should guarantee the sieze of inodes are truncated to zero if they are regular files
+// or be empty if they are directories before calling this function
 void tmpfs_free_inode(struct vfs_inode *inode) {
+    struct tmpfs_inode *tmpfs_inode = container_of(inode, struct tmpfs_inode, vfs_inode);
+    if (inode->type == VFS_I_TYPE_SYMLINK) {
+        tmpfs_free_symlink_target(tmpfs_inode);
+    }
     slab_free(inode);
 }
 
@@ -57,6 +64,7 @@ struct vfs_superblock *tmpfs_alloc_superblock(void) {
         return NULL;
     }
     memset(sb, 0, sizeof(*sb));
+    sb->backendless = 1; // tmpfs is a backendless filesystem
     return sb;
 }
 
@@ -70,11 +78,17 @@ void tmpfs_free(struct vfs_superblock *sb) {
 
 int tmpfs_get_inode(struct vfs_superblock *sb, uint64 ino,
                     struct vfs_inode **ret_inode) {
-    return -ENOSYS;
+    if (sb == NULL || ret_inode == NULL) {
+        return -EINVAL; // Invalid arguments
+    }
+    // tmpfs does not persist inodes, so cannot load inode by number
+    *ret_inode = NULL;
+    return -ENOENT;
 }
 
 int tmpfs_sync_fs(struct vfs_superblock *sb, int wait) {
     // tmpfs is an in-memory filesystem, nothing to sync
+    sb->dirty = 0;
     return 0;
 }
 
@@ -147,4 +161,10 @@ void tmpfs_init_fs_type(void) {
     assert(ret == 0, "tmpfs_init_fs_type: vfs_mount failed, errno=%d", ret);
     vfs_iunlock(&vfs_root_inode);
     vfs_mount_unlock();
+
+    printf("sizeof(tmpfs_inode)=%lu, TMPFS_SYMLINK_EMBEDDED_TARGET_LEN=%lu\n",
+           sizeof(struct tmpfs_inode), TMPFS_SYMLINK_EMBEDDED_TARGET_LEN);
+    printf("tmpfs max file size=%lu bytes\n", TMPFS_MAX_FILE_SIZE);
+    printf("TMPFS_INODE_DBLOCKS=%lu, TMPFS_INODE_INDRECT_ITEMS=%lu\n",
+           TMPFS_INODE_DBLOCKS, TMPFS_INODE_INDRECT_ITEMS);
 }
