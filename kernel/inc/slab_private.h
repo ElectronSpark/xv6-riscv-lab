@@ -56,6 +56,7 @@ STATIC_INLINE void __slab_cache_lock(slab_cache_t *cache);
 STATIC_INLINE void __slab_cache_unlock(slab_cache_t *cache);
 STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name, 
                                      size_t obj_size, uint64 flags);
-STATIC_INLINE int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums);
+STATIC_INLINE int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums, list_node_t *tmp_list);
+STATIC_INLINE void __slab_cache_free_tmp_list(list_node_t *tmp_list, int expected);
 
 #endif // __KERNEL_SLAB_PRIVATE_H__

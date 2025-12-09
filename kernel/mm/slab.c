@@ -54,6 +54,7 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
     slab->slab_order = order;
     slab->in_use = 0;
     slab->page = page;
+    slab->state = SLAB_STATE_DEQUEUED;
     list_entry_init(&slab->list_entry);
 
     prev = NULL;
@@ -134,58 +135,90 @@ STATIC_INLINE void __slab_detach(slab_cache_t *cache, slab_t *slab) {
     slab->cache = NULL;
 }
 
+// Dequeue from each individual SLAB lists
+// Will not check validity since they are called by __slab_dequeue
+STATIC_INLINE void __slab_dequeue_full(slab_cache_t *cache, slab_t *slab) {
+    assert(cache->slab_full > 0, "__slab_dequeue(): slab_full counter error");
+    assert(!LIST_IS_EMPTY(&cache->full_list), "__slab_dequeue(): list head error");
+    list_node_detach(slab, list_entry);
+    cache->slab_full -= 1;
+    slab->state = SLAB_STATE_DEQUEUED;
+}
+
+STATIC_INLINE void __slab_dequeue_free(slab_cache_t *cache, slab_t *slab) {
+    assert(cache->slab_free > 0, "__slab_dequeue(): slab_free counter error");
+    assert(!LIST_IS_EMPTY(&cache->free_list), "__slab_dequeue(): list head error");
+    list_node_detach(slab, list_entry);
+    cache->slab_free -= 1;
+    slab->state = SLAB_STATE_DEQUEUED;
+}
+
+STATIC_INLINE void __slab_dequeue_partial(slab_cache_t *cache, slab_t *slab) {
+    assert(cache->slab_partial > 0, "__slab_dequeue(): slab_partial counter error");
+    assert(!LIST_IS_EMPTY(&cache->partial_list), "__slab_dequeue(): list head error");
+    list_node_detach(slab, list_entry);
+    cache->slab_partial -= 1;
+    slab->state = SLAB_STATE_DEQUEUED;
+}
+
 // Take a SLAB out from the free/partial/full list it's in
 // No validity check
 STATIC_INLINE void __slab_dequeue(slab_cache_t *cache, slab_t *slab) {
-    int64 *cache_counter;
-    list_node_t *list_entry;
-    if (LIST_NODE_IS_DETACHED(slab, list_entry)) {
-        panic("__slab_dequeue(): SLAB is not in a queue");
+    assert(slab->cache == cache, "__slab_dequeue(): wrong SLAB cache");
+    assert(!LIST_NODE_IS_DETACHED(slab, list_entry),
+        "__slab_dequeue(): SLAB is not in a queue");
+    assert(slab->state != SLAB_STATE_DEQUEUED,
+        "__slab_enqueue(): SLAB must be enqueued before dequeueing");
+    switch (slab->state) {
+        case SLAB_STATE_FREE:
+            __slab_dequeue_free(cache, slab);
+            break;
+        case SLAB_STATE_FULL:
+            __slab_dequeue_full(cache, slab);
+            break;
+        case SLAB_STATE_PARTIAL:
+            __slab_dequeue_partial(cache, slab);
+            break;
+        default:
+            panic("__slab_dequeue(): invalid SLAB state");
     }
-    if (slab->cache != cache) {
-        panic("__slab_dequeue(): wrong SLAB cache");
-    }
-    if (__SLAB_EMPTY(slab)) {
-        cache_counter = &cache->slab_free;
-        list_entry = &cache->free_list;
-    } else if (__SLAB_FULL(slab)) {
-        cache_counter = &cache->slab_full;
-        list_entry = &cache->full_list;
-    } else {
-        cache_counter = &cache->slab_partial;
-        list_entry = &cache->partial_list;
-    }
-    if (*cache_counter == 0) {
-        panic("__slab_dequeue(): list counter error");
-    }
-    if (LIST_IS_EMPTY(list_entry)) {
-        panic("__slab_dequeue(): list head error");
-    }
-    list_node_detach(slab, list_entry);
-    *cache_counter -= 1;
+}
+
+// Enqueue to each individual SLAB lists
+// Will not check validity since they are called by __slab_enqueue
+STATIC_INLINE void __slab_enqueue_full(slab_cache_t *cache, slab_t *slab) {
+    list_node_push_back(&cache->full_list, slab, list_entry);
+    cache->slab_full++;
+    slab->state = SLAB_STATE_FULL;
+}
+
+STATIC_INLINE void __slab_enqueue_free(slab_cache_t *cache, slab_t *slab) {
+    list_node_push_back(&cache->free_list, slab, list_entry);
+    cache->slab_free++;
+    slab->state = SLAB_STATE_FREE;
+}
+
+STATIC_INLINE void __slab_enqueue_partial(slab_cache_t *cache, slab_t *slab) {
+    list_node_push_back(&cache->partial_list, slab, list_entry);
+    cache->slab_partial++;
+    slab->state = SLAB_STATE_PARTIAL;
 }
 
 // put a SLAB into the free/partial/full list accordingly
 // No validity check
 STATIC_INLINE void __slab_enqueue(slab_cache_t *cache, slab_t *slab) {
-    list_node_t *list_entry;
-    if (!LIST_NODE_IS_DETACHED(slab, list_entry)) {
-        panic("__slab_enqueue(): SLAB is already in a queue");
-    }
-    if (slab->cache != cache) {
-        panic("__slab_enqueue(): wrong SLAB cache");
-    }
+    assert(slab->cache == cache, "__slab_enqueue(): wrong SLAB cache");
+    assert(LIST_NODE_IS_DETACHED(slab, list_entry),
+        "__slab_enqueue(): SLAB is already in a queue");
+    assert(slab->state == SLAB_STATE_DEQUEUED,
+        "__slab_enqueue(): SLAB must be dequeued before enqueueing");
     if (__SLAB_EMPTY(slab)) {
-        list_entry = &cache->free_list;
-        cache->slab_free++;
+        __slab_enqueue_free(cache, slab);
     } else if (__SLAB_FULL(slab)) {
-        list_entry = &cache->full_list;
-        cache->slab_full++;
+        __slab_enqueue_full(cache, slab);
     } else {
-        list_entry = &cache->partial_list;
-        cache->slab_partial++;
+        __slab_enqueue_partial(cache, slab);
     }
-    list_node_push_back(list_entry, slab, list_entry);
 }
 
 // Take out the first SLAB from the free list of a SLAB cache, and dequeue it
@@ -202,6 +235,7 @@ STATIC_INLINE slab_t *__slab_pop_free(slab_cache_t *cache) {
     if (!__SLAB_EMPTY(slab)) {
         panic("__slab_pop_free(): get a non-empty SLAB when trying to get an empty one");
     }
+    slab->state = SLAB_STATE_DEQUEUED;
     return slab;
 }
 
@@ -219,6 +253,7 @@ STATIC_INLINE slab_t *__slab_pop_partial(slab_cache_t *cache) {
     if (__SLAB_EMPTY(slab) || __SLAB_FULL(slab)) {
         panic("__slab_pop_free(): get an empty or full SLAB when trying to get an half-full one");
     }
+    slab->state = SLAB_STATE_DEQUEUED;
     return slab;
 }
 
@@ -427,23 +462,30 @@ int slab_cache_destroy(slab_cache_t *cache) {
         return -1;
     }
     tmp = cache->slab_free;
-    if (__slab_cache_shrink_unlocked(cache, tmp) != tmp) {
+    list_node_t tmp_list;
+    list_entry_init(&tmp_list);
+    int shrink_ret = __slab_cache_shrink_unlocked(cache, tmp, &tmp_list);
+    if (shrink_ret != tmp) {
         // failed to destroy all the SLABs
         __slab_cache_unlock(cache);
+        __slab_cache_free_tmp_list(&tmp_list, shrink_ret);
         return -1;
     }
+    __slab_cache_free_tmp_list(&tmp_list, shrink_ret);
     kmm_free(cache);
     // no releasing lock here, because the SLAB has been destroyed
     return 0;
 }
 
-// try to delete empty SLABs without locking the SLAB cache
-// return the actual number of SLABs deleted
+// try to detach empty SLABs without locking the SLAB cache
+// SLABs detached here will not be freed immediately,
+// but put into a temporary list for later freeing outside the slab_cache lock.
+// return the actual number of SLABs detached
 // return -1 if failed.
-STATIC_INLINE int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums) {
+STATIC_INLINE int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums, list_node_t *tmp_list) {
     int slab_free_after, tmp, counter;
     slab_t *slab = NULL;
-    if (cache == NULL) {
+    if (cache == NULL || tmp_list == NULL) {
         return -1;
     }
     if (nums == 0 || nums >= cache->slab_free) {
@@ -466,10 +508,27 @@ STATIC_INLINE int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums) {
         if (tmp == cache->slab_total) {
             panic("__slab_cache_shrink_unlocked: tmp == cache->slab_total");
         }
-        __slab_destroy(slab);
+        list_node_push_back( tmp_list, slab, list_entry);
         counter++;
     }
     return counter;
+}
+
+// Free SLABs in the temporary list
+// This function is called outside the SLAB cache lock
+STATIC_INLINE void __slab_cache_free_tmp_list(list_node_t *tmp_list, int expected) {
+    if (expected <= 0) {
+        assert(LIST_IS_EMPTY(tmp_list), "__slab_cache_free_tmp_list: list not empty");
+        return;
+    }
+    int counter = 0;
+    slab_t *slab;
+    slab_t *tmp;
+    list_foreach_node_safe(tmp_list, slab, tmp, list_entry) {
+        counter++;
+        __slab_destroy(slab);
+    }
+    assert(counter == expected, "__slab_cache_free_tmp_list: counter mismatch");
 }
 
 // try to delete empty SLABs
@@ -477,12 +536,15 @@ STATIC_INLINE int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums) {
 // return -1 if failed.
 int slab_cache_shrink(slab_cache_t *cache, int nums) {
     int ret;
+    list_node_t tmp_list;
     if (cache == NULL) {
         return -1;
     }
+    list_entry_init(&tmp_list);
     __slab_cache_lock(cache);
-    ret = __slab_cache_shrink_unlocked(cache, nums);
+    ret = __slab_cache_shrink_unlocked(cache, nums, &tmp_list);
     __slab_cache_unlock(cache);
+    __slab_cache_free_tmp_list(&tmp_list, ret);
     return ret;
 }
 
@@ -496,20 +558,23 @@ void *slab_alloc(slab_cache_t *cache) {
         return NULL;
     }
     __slab_cache_lock(cache);
+retry:
     if (cache->slab_partial > 0) {
         // Try to get object from a half-full SLAB
-        slab = __slab_pop_partial(cache);
+        slab = LIST_FIRST_NODE(&cache->partial_list, slab_t, list_entry);
         if (slab == NULL) {
             panic("slab_alloc(): Failed to get a half-full SLAB when the partial list is not empty");
         }
     } else if (cache->slab_free > 0) {
         // Try to get object from an empty SLAB
-        slab = __slab_pop_free(cache);
+        slab = LIST_FIRST_NODE(&cache->free_list, slab_t, list_entry);
         if (slab == NULL) {
             panic("slab_alloc(): Failed to get an empty SLAB when the free list is not empty");
         }
     } else {
         // Try to make an empty SLAB
+        // Unlock the SLAB cache during SLAB creation to reduce lock contention
+        __slab_cache_unlock(cache);
         slab = __slab_make( cache->flags, cache->slab_order, cache->offset, 
                             cache->obj_size, cache->slab_obj_num);
         if (slab == NULL) {
@@ -517,13 +582,23 @@ void *slab_alloc(slab_cache_t *cache) {
             obj = NULL;
             goto done;
         }
+        // Re-acquire the SLAB cache lock and attach the newly created SLAB
+        __slab_cache_lock(cache);
         __slab_attach(cache, slab);
+        __slab_enqueue(cache, slab);
+        // after enqueueing, restart allocation, as other threads may have
+        // freed some objects
+        goto retry;
     }
     // Find an empty or half-full SLAB
     obj = __slab_obj_get(slab);
     assert(obj != NULL , "slab_alloc(): Failed to get an object from a SLAB");
     cache->obj_active++;
-    __slab_enqueue(cache, slab);
+    if (__SLAB_FULL(slab) || slab->in_use == 1) {
+        // SLAB is now full, move it to the full list
+        __slab_dequeue(cache, slab);
+        __slab_enqueue(cache, slab);
+    }
 done:
     __slab_cache_unlock(cache);
     __slab_sanitizer_check("slab_alloc", cache, slab, obj);
@@ -546,17 +621,24 @@ void slab_free(void *obj) {
         panic("slab_free");
     }
     __slab_cache_lock(cache);
-    __slab_dequeue(cache, slab);
     __slab_obj_put(slab, obj);
     cache->obj_active--;
-    __slab_enqueue(cache, slab);
+    if (__SLAB_EMPTY(slab)) {
+        __slab_dequeue(cache, slab);
+        __slab_enqueue(cache, slab);
+    }
     tmp = cache->obj_total - cache->obj_active;
     if(tmp >= cache->limits) {
+        list_node_t tmp_list;
+        list_entry_init(&tmp_list);
         tmp = tmp / (cache->slab_obj_num * 2);
-        if (__slab_cache_shrink_unlocked(cache, tmp) < 0) {
-            panic("slab_free(): shrink");
-        }
+        int shrink_ret = __slab_cache_shrink_unlocked(cache, tmp, &tmp_list);
+        assert(shrink_ret >= 0, "slab_free(): shrink returned negative");
+        __slab_cache_unlock(cache);
+        __slab_cache_free_tmp_list(&tmp_list, shrink_ret);
+        __slab_sanitizer_check("slab_free", cache, slab, obj);
+    } else {
+        __slab_cache_unlock(cache);
+        __slab_sanitizer_check("slab_free", cache, slab, obj);
     }
-    __slab_cache_unlock(cache);
-    __slab_sanitizer_check("slab_free", cache, slab, obj);
 }

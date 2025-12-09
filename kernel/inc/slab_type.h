@@ -46,6 +46,13 @@ typedef struct slab_cache_struct {
     spinlock_t              lock;
 } slab_cache_t;
 
+typedef enum {
+    SLAB_STATE_DEQUEUED = 0,
+    SLAB_STATE_FREE,
+    SLAB_STATE_PARTIAL,
+    SLAB_STATE_FULL
+} slab_state_t;
+
 typedef struct slab_struct {
     list_node_t             list_entry;
     // pointing its slab descriptor
@@ -58,6 +65,9 @@ typedef struct slab_struct {
     uint64                  in_use;
     // the next free objects
     void                    *next;
+    // current state of the SLAB
+    // indicates which list the SLAB is in
+    slab_state_t            state;
 } slab_t;
 
 #endif          /* __KERNEL_SLAB_TYPE_H */
