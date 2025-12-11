@@ -45,7 +45,8 @@ int vfs_invalidate(struct vfs_inode *inode);    // Decrease ref count and invali
 int vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty
 int vfs_sync_inode(struct vfs_inode *inode);    // Write inode to disk
 
-int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry);
+int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry, 
+                const char *name, size_t name_len);
 int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user);
 int vfs_create(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode);
 int vfs_mknod(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode, uint32 dev);
@@ -65,6 +66,7 @@ int vfs_namei(struct vfs_inode *dir, struct vfs_inode **res_inode,
 int vfs_chroot(struct vfs_inode *new_root);
 int vfs_chdir(struct vfs_inode *new_cwd);
 int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode);
+void vfs_release_dentry(struct vfs_dentry *dentry);
 int vfs_superblock_set_dirty(struct vfs_superblock *sb);
 
 #endif // __KERNEL_VIRTUAL_FILE_SYSTEM_FS_H

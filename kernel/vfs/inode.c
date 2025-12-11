@@ -149,9 +149,6 @@ int vfs_dirty_inode(struct vfs_inode *inode) {
     if (inode->ops->dirty_inode != NULL) {
         ret = inode->ops->dirty_inode(inode);
     }
-    if (ret == 0) {
-        inode->dirty = 1;
-    }
     return ret;
 }
 
@@ -170,16 +167,13 @@ int vfs_sync_inode(struct vfs_inode *inode) {
     if (inode->ops->sync_inode != NULL) {
         ret = inode->ops->sync_inode(inode);
     }
-    if (ret == 0) {
-        // On success, clear dirty flag
-        inode->dirty = 0;
-    }
     return ret;
 }
 
 // Lookup a dentry in a directory inode
-int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry) {
-    if (dentry == NULL) {
+int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry, 
+                const char *name, size_t name_len) {
+    if (dentry == NULL || name == NULL || name_len == 0) {
         return -EINVAL; // Invalid argument
     }
     int ret = __vfs_inode_valid_holding(dir);
@@ -192,7 +186,7 @@ int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry) {
     if (dir->ops->lookup == NULL) {
         return -ENOSYS; // Lookup operation not supported
     }
-    return dir->ops->lookup(dir, dentry);
+    return dir->ops->lookup(dir, dentry, name, name_len);
 }
 
 int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user) {

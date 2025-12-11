@@ -237,7 +237,8 @@ struct vfs_inode {
  * - destroy_inode
  */
 struct vfs_inode_ops {
-    int (*lookup)(struct vfs_inode *dir, struct vfs_dentry *dentry);
+    int (*lookup)(struct vfs_inode *dir, struct vfs_dentry *dentry, 
+                  const char *name, size_t name_len);
     int (*dir_iter)(struct vfs_inode *dir, struct vfs_dir_iter *iter);
     int (*readlink)(struct vfs_inode *inode, char *buf, size_t buflen, bool user);
     int (*create)(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode);               // Create a regular file
@@ -251,8 +252,6 @@ struct vfs_inode_ops {
     int (*symlink)(struct vfs_inode *dir, struct vfs_dentry *dentry,
                    const char *target, bool user);
     int (*truncate)(struct vfs_inode *inode, uint64 new_size);
-    int (*idup)(struct vfs_inode *inode);           // Increase ref count
-    int (*iput)(struct vfs_inode *inode);           // Decrease ref count and free if needed
     void (*destroy_inode)(struct vfs_inode *inode); // Release on-disk inode resources
     void (*free_inode)(struct vfs_inode *inode);    // Release in-memory inode structure
     int (*dirty_inode)(struct vfs_inode *inode);   // Mark inode as dirty
@@ -262,17 +261,17 @@ struct vfs_inode_ops {
 /* No dentry cache right now */
 struct vfs_dentry {
     struct vfs_superblock *sb;
-    uint64 parent_ino; // parent inode number where this dentry resides
     uint64 ino; // inode number
     // The `name` field is managed by slab allocator
     char *name;
     uint16 name_len;
+    int64 cookies;      // dir entry number within the parent inode. Used by some filesystems
+                        // to identify the dentry within its parent directory
 };
 
 struct vfs_dir_iter {
     struct vfs_dentry current;
-    int64 cookies;      // dir entry number within the parent inode. Used by some filesystems
-                        // to identify the dentry within its parent directory
+    
 };
 
 struct vfs_file {

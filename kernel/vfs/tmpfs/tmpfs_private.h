@@ -18,33 +18,29 @@ struct tmpfs_inode {
     char *name;
     size_t name_len;
     hlist_entry_t hash_entry;
+    bool embedded;
     union {
         struct {
+            struct tmpfs_inode *parent;
             hlist_t children; // hash list of child inodes (for directories)
             hlist_bucket_t children_buckets[TMPFS_HASH_BUCKETS];
         } dir;
-        struct {
-            size_t target_len;
-            union {
-                // The target path is stored in the data[] field if the length
-                // is shorter than TMPFS_SYMLINK_EMBEDDED_TARGET_LEN. Otherwise,
-                // it is allocated separately and pointed to by symlink_target.
-                char *symlink_target; // target path (for symlinks)
-                char data[0];        // file data (for regular files)
-            };
+        union {
+            // The target path is stored in the data[] field if the length
+            // is shorter than TMPFS_SYMLINK_EMBEDDED_TARGET_LEN. Otherwise,
+            // it is allocated separately and pointed to by symlink_target.
+            char *symlink_target; // target path (for symlinks)
+            char data[0];        // file data (for regular files)
         } sym;
-        struct {
+        union {
             // data blocks or other file-specific data (for regular files)
-            size_t data_size;
-            union {
-                struct {
-                    void *direct[TMPFS_INODE_DBLOCKS];
-                    void **indirect;
-                    void ***double_indirect;
-                    void ****triple_indirect;
-                };
-                uint8 data[0];
+            struct {
+                void *direct[TMPFS_INODE_DBLOCKS];
+                void **indirect;
+                void ***double_indirect;
+                void ****triple_indirect;
             };
+            uint8 data[0];
         } file;
     };
 };
