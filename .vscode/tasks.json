@@ -12,7 +12,7 @@
             "problemMatcher": [],
             "options": {
                 "env": {
-                    "LAB": "util",
+                    "LAB": "fs",
                 },
                 "cwd": "${workspaceFolder}/"
             }
