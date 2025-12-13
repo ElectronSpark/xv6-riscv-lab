@@ -232,7 +232,7 @@ void *hlist_get(hlist_t *hlist, void *node) {
 // no node with the same id as the node passing to it. Otherwise, it will replace
 // the existing node and return the pointer to it.
 // It will return the node passing to it if something goes wrong.
-void *hlist_put(hlist_t *hlist, void *node) {
+void *hlist_put(hlist_t *hlist, void *node, bool replace) {
     hlist_bucket_t *bucket = NULL;
     hlist_entry_t *entry = NULL;
     void *old_node = NULL;
@@ -274,7 +274,9 @@ void *hlist_put(hlist_t *hlist, void *node) {
             return node;
         }
         // replace the existing node and return the old node
-        __hlist_replace_node_entry(entry, new_entry);
+        if (replace) {
+            __hlist_replace_node_entry(entry, new_entry);
+        }
         return old_node;
     }
 }

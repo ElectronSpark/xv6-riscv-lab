@@ -254,7 +254,7 @@ __itable_hlist_pop(uint dev, uint inum) {
 
 static inline int
 __itable_hlist_push(struct inode *inode) {
-  struct inode *entry = hlist_put(&itable.inode_list, inode);
+  struct inode *entry = hlist_put(&itable.inode_list, inode, false);
   if (entry == NULL) {
     return 0; // succeeded
   } else if (entry != inode) {
