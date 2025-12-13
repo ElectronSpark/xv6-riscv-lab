@@ -1,6 +1,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <setjmp.h>
+#include <stdbool.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
@@ -222,9 +223,9 @@ static void test_hlist_put_and_get(void **state) {
     fixture->nodes[2] = create_test_node(3, "Node 3");
     
     // Insert nodes into hash list
-    void *result1 = hlist_put(fixture->hlist, fixture->nodes[0]);
-    void *result2 = hlist_put(fixture->hlist, fixture->nodes[1]);
-    void *result3 = hlist_put(fixture->hlist, fixture->nodes[2]);
+    void *result1 = hlist_put(fixture->hlist, fixture->nodes[0], false);
+    void *result2 = hlist_put(fixture->hlist, fixture->nodes[1], false);
+    void *result3 = hlist_put(fixture->hlist, fixture->nodes[2], false);
     
     // Check that new nodes were inserted correctly (returns NULL)
     assert_null(result1);
@@ -258,13 +259,40 @@ static void test_hlist_put_and_get(void **state) {
     assert_null(get4);
 }
 
+// Test inserting duplicate key with replace disabled
+static void test_hlist_put_no_replace_existing(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+
+    fixture->nodes[0] = create_test_node(1, "Node 1");
+    fixture->nodes[1] = create_test_node(1, "Node 1 Shadow");
+
+    void *first_insert = hlist_put(fixture->hlist, fixture->nodes[0], false);
+    assert_null(first_insert);
+    assert_int_equal(hlist_len(fixture->hlist), 1);
+
+    // Duplicate key should not replace when replace flag is false
+    void *second_insert = hlist_put(fixture->hlist, fixture->nodes[1], false);
+    assert_ptr_equal(second_insert, fixture->nodes[0]);
+    assert_int_equal(hlist_len(fixture->hlist), 1);
+
+    test_node_t dummy = { .key = 1 };
+    test_node_t *lookup = hlist_get(fixture->hlist, &dummy);
+    assert_ptr_equal(lookup, fixture->nodes[0]);
+    assert_string_equal(lookup->value, "Node 1");
+    assert_false(hlist_node_in_list(fixture->hlist, fixture->nodes[1]));
+
+    free_test_node(fixture->nodes[1]);
+    fixture->nodes[1] = NULL;
+}
+
 // Test replacing an existing node with hlist_put
 static void test_hlist_put_replace(void **state) {
     test_fixture_t *fixture = (test_fixture_t *)*state;
     
     // Create and insert an initial node
     fixture->nodes[0] = create_test_node(1, "Node 1");
-    hlist_put(fixture->hlist, fixture->nodes[0]);
+    hlist_put(fixture->hlist, fixture->nodes[0], false);
+    assert_int_equal(hlist_len(fixture->hlist), 1);
 
     assert_true(__hlist_consistency_check(fixture->hlist));
     
@@ -272,7 +300,7 @@ static void test_hlist_put_replace(void **state) {
     test_node_t *replacement = create_test_node(1, "Node 1 New");
     
     // Replace the existing node
-    void *old_node = hlist_put(fixture->hlist, replacement);
+    void *old_node = hlist_put(fixture->hlist, replacement, true);
 
     assert_true(__hlist_consistency_check(fixture->hlist));
     
@@ -285,6 +313,7 @@ static void test_hlist_put_replace(void **state) {
     
     assert_ptr_equal(get_node, replacement);
     assert_string_equal(get_node->value, "Node 1 New");
+    assert_int_equal(hlist_len(fixture->hlist), 1);
     
     // Free the old node
     free_test_node(old_node);
@@ -311,9 +340,9 @@ static void test_hlist_pop_specific_key(void **state) {
     fixture->nodes[1] = create_test_node(2, "Node 2");
     fixture->nodes[2] = create_test_node(3, "Node 3");
     
-    hlist_put(fixture->hlist, fixture->nodes[0]);
-    hlist_put(fixture->hlist, fixture->nodes[1]);
-    hlist_put(fixture->hlist, fixture->nodes[2]);
+    hlist_put(fixture->hlist, fixture->nodes[0], false);
+    hlist_put(fixture->hlist, fixture->nodes[1], false);
+    hlist_put(fixture->hlist, fixture->nodes[2], false);
 
     assert_true(__hlist_consistency_check(fixture->hlist));
     
@@ -345,8 +374,8 @@ static void test_hlist_pop_null_key(void **state) {
     fixture->nodes[0] = create_test_node(1, "Node 1");
     fixture->nodes[1] = create_test_node(2, "Node 2");
     
-    hlist_put(fixture->hlist, fixture->nodes[0]);
-    hlist_put(fixture->hlist, fixture->nodes[1]);
+    hlist_put(fixture->hlist, fixture->nodes[0], false);
+    hlist_put(fixture->hlist, fixture->nodes[1], false);
 
     assert_true(__hlist_consistency_check(fixture->hlist));
     
@@ -381,7 +410,7 @@ static void test_hlist_node_in_list(void **state) {
     assert_false(hlist_node_in_list(fixture->hlist, fixture->nodes[1]));
     
     // Insert one node
-    hlist_put(fixture->hlist, fixture->nodes[0]);
+    hlist_put(fixture->hlist, fixture->nodes[0], false);
 
     assert_true(__hlist_consistency_check(fixture->hlist));
     
@@ -499,7 +528,7 @@ static void test_hlist_single_collision(void **state) {
     // Create and insert test nodes
     for (int i = 0; i < 5; i++) {
         fixture->nodes[i] = create_test_node(i, "Node");
-        void *result = hlist_put(fixture->hlist, fixture->nodes[i]);
+        void *result = hlist_put(fixture->hlist, fixture->nodes[i], false);
         assert_null(result); // Should not replace any node
         assert_int_equal(hlist_len(fixture->hlist), i + 1); // Element count should increase
     }
@@ -534,7 +563,7 @@ static void test_hlist_scale_insertion(void **state) {
     
     for (int i = 0; i < TEST_NUMBERS_COUNT; i++) {
         fixture->nodes[i] = create_test_node(scale_test_numbers[i], "Node");
-        void *result = hlist_put(fixture->hlist, fixture->nodes[i]);
+        void *result = hlist_put(fixture->hlist, fixture->nodes[i], false);
         assert_null(result); // Should not replace any node
         assert_int_equal(hlist_len(fixture->hlist), i + 1); // Element count should increase
     }
@@ -632,7 +661,7 @@ static void test_hlist_scale_insertion_string(void **state) {
         char value[64];
         snprintf(value, sizeof(value), "%lu", scale_test_numbers[i]);
         fixture->nodes[i] = create_test_node(strlen(value), value);
-        void *result = hlist_put(fixture->hlist, fixture->nodes[i]);
+        void *result = hlist_put(fixture->hlist, fixture->nodes[i], false);
         assert_null(result); // Should not replace any node
         assert_int_equal(hlist_len(fixture->hlist), i + 1); // Element count should increase
     }
@@ -718,6 +747,7 @@ int main(void) {
         
         // Put and Get tests
         cmocka_unit_test_setup_teardown(test_hlist_put_and_get, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_hlist_put_no_replace_existing, setup, teardown),
         cmocka_unit_test_setup_teardown(test_hlist_put_replace, setup, teardown),
         
         // Pop tests

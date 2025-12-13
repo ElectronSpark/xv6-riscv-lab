@@ -144,9 +144,13 @@ void *hlist_get(hlist_t *hlist, void *node);
  * @brief Insert a node into a hash list
  * @param hlist The hash list to insert into
  * @param node The node to insert
- * @return The replaced node if one existed, NULL otherwise
+ * @param replace Whether to replace an existing node with the same key
+ * @return 
+ *   - NULL if the node was inserted successfully
+ *   - The original node if insertion failed
+ *   - The preexisting node
  */
-void *hlist_put(hlist_t *hlist, void *node);
+void *hlist_put(hlist_t *hlist, void *node, bool replace);
 
 /**
  * @brief Remove a node from a hash list

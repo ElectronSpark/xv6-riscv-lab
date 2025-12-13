@@ -154,7 +154,7 @@ static int __proctab_add(struct proc *p)
   assert(LIST_ENTRY_IS_DETACHED(&p->dmp_list_entry),
          "Process %d is already in the dump list", p->pid);
 
-  struct proc *existing = hlist_put(&proc_table.procs, p);
+  struct proc *existing = hlist_put(&proc_table.procs, p, false);
 
   assert(existing != p, "Failed to add process with pid %d", p->pid);
   assert(existing == NULL, "Process with pid %d already exists", p->pid);

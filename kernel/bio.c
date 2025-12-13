@@ -85,7 +85,7 @@ __bcache_hlist_pop(uint dev, uint blockno) {
 
 static inline int
 __bcache_hlist_push(struct buf *buf) {
-  struct buf *entry = hlist_put(&bcache.cached, buf);
+  struct buf *entry = hlist_put(&bcache.cached, buf, false);
   if (entry == NULL) {
     return 0; // succeeded
   } else if (entry != buf) {
