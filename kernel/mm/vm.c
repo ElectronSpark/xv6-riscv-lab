@@ -484,7 +484,7 @@ uvmfree(pagetable_t pagetable, uint64 sz)
   freewalk(pagetable);
 }
 
-int vm_copyout(vm_t *vm, uint64 dstva, void *src, uint64 len)
+int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
 {
   uint64 n, va0, pa0;
   pte_t *pte;

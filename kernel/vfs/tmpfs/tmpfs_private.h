@@ -12,6 +12,11 @@
     + (TMPFS_INODE_INDRECT_ITEMS * TMPFS_INODE_INDRECT_ITEMS)                               \
     + TMPFS_INODE_INDRECT_ITEMS + TMPFS_INODE_DBLOCKS) * PAGE_SIZE)
 
+#define TMPFS_DENTRY_COOKIE_SELF 1
+#define TMPFS_DENTRY_COOKIE_PARENT 2
+
+extern struct vfs_inode_ops tmpfs_inode_ops;
+
 struct tmpfs_sb_private {
     // tmpfs specific superblock data can be added here
     uint64 next_ino; // next inode number to allocate
@@ -25,9 +30,6 @@ struct tmpfs_superblock {
 struct tmpfs_inode {
     struct vfs_inode vfs_inode;
     // tmpfs specific inode data can be added here
-    char *name;
-    size_t name_len;
-    hlist_entry_t hash_entry;
     bool embedded;
     union {
         struct {
@@ -53,6 +55,16 @@ struct tmpfs_inode {
             uint8 data[0];
         } file;
     };
+};
+
+struct tmpfs_dentry {
+    hlist_entry_t hash_entry; // entry in tmpfs_inode.dir.children
+    struct tmpfs_inode *parent;
+    struct vfs_superblock *sb;
+    struct tmpfs_inode *inode;
+    size_t name_len;
+    char *name;
+    char __name_start[0];
 };
 
 #define TMPFS_SYMLINK_EMBEDDED_TARGET_LEN   \

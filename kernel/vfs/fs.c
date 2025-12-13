@@ -151,7 +151,7 @@ static struct vfs_inode *__vfs_inode_hash_get(struct vfs_superblock *sb, uint64 
 }
 
 static struct vfs_inode *__vfs_inode_hash_add(struct vfs_superblock *sb, struct vfs_inode *inode) {
-    return hlist_put(&sb->inodes, inode);
+    return hlist_put(&sb->inodes, inode, false);
 }
 
 // Superblock structure helpers
@@ -769,7 +769,17 @@ int vfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode) {
     if (!sb->valid) {
         return -EINVAL; // Superblock is not valid
     }
-    int ret = sb->ops->alloc_inode(sb, ret_inode);
+    struct vfs_inode *inode = NULL;
+    int ret = sb->ops->alloc_inode(sb, &inode);
+    if (ret == 0) {
+        *ret_inode = inode;
+        __vfs_inode_init(inode, sb);
+        ret = vfs_add_inode(sb, inode, NULL);
+        if (ret != 0) {
+            inode->ops->free_inode(inode);
+            *ret_inode = NULL;
+        }
+    }
     return ret;
 }
 
@@ -793,6 +803,14 @@ int vfs_get_inode(struct vfs_superblock *sb, uint64 ino,
         return -EINVAL; // Superblock is not valid
     }
     int ret = sb->ops->get_inode(sb, ino, ret_inode);
+    if (ret_inode != NULL) {
+        __vfs_inode_init(*ret_inode, sb);
+        ret = vfs_add_inode(sb, *ret_inode, NULL);
+        if (ret != 0) {
+            (*ret_inode)->ops->free_inode(*ret_inode);
+            *ret_inode = NULL;
+        }
+    }
     return ret;
 }
 
@@ -945,6 +963,7 @@ int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode
  *****************************************************************************/
 /*
  * vfs_get_inode_cached - Lookup an inode in a superblock's in-memory cache.
+ * Will increase the inode refcount if found.
  *
  * Locking:
  *   - Caller holds the superblock read or write lock for the entire call.
@@ -967,7 +986,7 @@ int vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino,
         *ret_inode = NULL;
         return -ENOENT; // Inode not found
     }
-    int ret_val = vfs_ilock(inode);
+    int ret_val = vfs_ilockdup(inode);
     if (ret_val != 0 || !inode->valid) {
         // Inode should be valid when first gotten from the cache,
         // but it may have been invalidated during the windows between

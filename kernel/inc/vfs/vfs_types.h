@@ -227,6 +227,7 @@ struct vfs_inode {
 /*
  * Inode operations focus mainly on metadata operations
  * Data read/write operations are handled by file operations
+ * All implementations must acquire the inode mutex before performing any operations
  * Operations that require write lock on the superblock:
  * - create
  * - mkdir
@@ -235,26 +236,32 @@ struct vfs_inode {
  * - mknod
  * - move
  * - destroy_inode
+ * The following operations must increase the refcount of the returned inode:
+ * - create
+ * - mkdir
+ * - mknod
+ * - symlink
  */
 struct vfs_inode_ops {
     int (*lookup)(struct vfs_inode *dir, struct vfs_dentry *dentry, 
                   const char *name, size_t name_len, bool user);
     int (*dir_iter)(struct vfs_inode *dir, struct vfs_dir_iter *iter);
     int (*readlink)(struct vfs_inode *inode, char *buf, size_t buflen, bool user);
-    int (*create)(struct vfs_inode *dir, uint32 mode,
-                  const char *name, size_t name_len, bool user);                                // Create a regular file
+    int (*create)(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode,
+                  const char *name, size_t name_len, bool user);        // Create a regular file
     int (*link)(struct vfs_dentry *old, struct vfs_inode *dir,
                 const char *name, size_t name_len, bool user);         // Create a hard link
-    int (*unlink)(struct vfs_inode *dir, struct vfs_dentry *dentry);
-    int (*mkdir)(struct vfs_inode *dir, uint32 mode,
+    int (*unlink)(struct vfs_inode *dir, const char *name, size_t name_len, bool user);
+    int (*mkdir)(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_dir,
                  const char *name, size_t name_len, bool user);
-    int (*rmdir)(struct vfs_inode *dir, struct vfs_dentry *dentry);
-    int (*mknod)(struct vfs_inode *dir, uint32 mode, uint32 dev,
-                 const char *name, size_t name_len, bool user);    // Create a file of special types
+    int (*rmdir)(struct vfs_inode *dir, const char *name, size_t name_len, bool user);
+    int (*mknod)(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode, 
+                 uint32 dev, const char *name, size_t name_len, bool user);    // Create a file of special types
     int (*move)(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
                 struct vfs_inode *new_dir, const char *name, 
                 size_t name_len, bool user);  // Move (rename) a file or directory whithin the same filesystem
-    int (*symlink)(struct vfs_inode *dir, struct vfs_dentry *dentry,
+    int (*symlink)(struct vfs_inode *dir, struct vfs_inode **new_inode,
+                   uint32 mode, const char *name, size_t name_len,
                    const char *target, size_t target_len, bool user);
     int (*truncate)(struct vfs_inode *inode, uint64 new_size);
     void (*destroy_inode)(struct vfs_inode *inode); // Release on-disk inode resources
