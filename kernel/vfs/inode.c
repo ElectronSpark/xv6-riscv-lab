@@ -172,7 +172,7 @@ int vfs_sync_inode(struct vfs_inode *inode) {
 
 // Lookup a dentry in a directory inode
 int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry, 
-                const char *name, size_t name_len) {
+                const char *name, size_t name_len, bool user) {
     if (dentry == NULL || name == NULL || name_len == 0) {
         return -EINVAL; // Invalid argument
     }
@@ -186,7 +186,7 @@ int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     if (dir->ops->lookup == NULL) {
         return -ENOSYS; // Lookup operation not supported
     }
-    return dir->ops->lookup(dir, dentry, name, name_len);
+    return dir->ops->lookup(dir, dentry, name, name_len, user);
 }
 
 int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user) {
@@ -206,8 +206,9 @@ int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user) {
     return inode->ops->readlink(inode, buf, buflen, user);
 }
 
-int vfs_create(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode) {
-    if (dentry == NULL) {
+int vfs_create(struct vfs_inode *dir, uint32 mode,
+               const char *name, size_t name_len, bool user) {
+    if (name == NULL || name_len == 0) {
         return -EINVAL; // Invalid argument
     }
     int ret = __vfs_inode_valid_holding(dir);
@@ -223,11 +224,12 @@ int vfs_create(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode) {
     if (dir->ops->create == NULL) {
         return -ENOSYS; // Create operation not supported
     }
-    return dir->ops->create(dir, dentry, mode);
+    return dir->ops->create(dir, mode, name, name_len, user);
 }
 
-int vfs_mknod(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode, uint32 dev) {
-    if (dentry == NULL) {
+int vfs_mknod(struct vfs_inode *dir, uint32 mode, uint32 dev,
+              const char *name, size_t name_len, bool user) {
+    if (name == NULL || name_len == 0) {
         return -EINVAL; // Invalid argument
     }
     int ret = __vfs_inode_valid_holding(dir);
@@ -243,11 +245,12 @@ int vfs_mknod(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode, uin
     if (dir->ops->mknod == NULL) {
         return -ENOSYS; // Mknod operation not supported
     }
-    return dir->ops->mknod(dir, dentry, mode, dev);
+    return dir->ops->mknod(dir, mode, dev, name, name_len, user);
 }
 
-int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, struct vfs_dentry *new) {
-    if (old == NULL || new == NULL) {
+int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, 
+             const char *name, size_t name_len, bool user) {
+    if (old == NULL || name == NULL || name_len == 0) {
         return -EINVAL; // Invalid argument
     }
     int ret = __vfs_inode_valid_holding(dir);
@@ -263,7 +266,7 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, struct vfs_dentry *n
     if (dir->ops->link == NULL) {
         return -ENOSYS; // Link operation not supported
     }
-    return dir->ops->link(old, dir, new);
+    return dir->ops->link(old, dir, name, name_len, user);
 }
 
 int vfs_unlink(struct vfs_inode *dir, struct vfs_dentry *dentry) {
@@ -286,8 +289,9 @@ int vfs_unlink(struct vfs_inode *dir, struct vfs_dentry *dentry) {
     return dir->ops->unlink(dir, dentry);
 }
 
-int vfs_mkdir(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode) {
-    if (dentry == NULL) {
+int vfs_mkdir(struct vfs_inode *dir, uint32 mode,
+              const char *name, size_t name_len, bool user) {
+    if (name == NULL || name_len == 0) {
         return -EINVAL; // Invalid argument
     }
     int ret = __vfs_inode_valid_holding(dir);
@@ -303,7 +307,7 @@ int vfs_mkdir(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode) {
     if (dir->ops->mkdir == NULL) {
         return -ENOSYS; // Mkdir operation not supported
     }
-    return dir->ops->mkdir(dir, dentry, mode);
+    return dir->ops->mkdir(dir, name, name_len, mode, user);
 }
 
 int vfs_rmdir(struct vfs_inode *dir, struct vfs_dentry *dentry) {
@@ -327,8 +331,9 @@ int vfs_rmdir(struct vfs_inode *dir, struct vfs_dentry *dentry) {
 }
 
 int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
-             struct vfs_inode *new_dir, struct vfs_dentry *new_dentry) {
-    if (old_dentry == NULL || new_dentry == NULL) {
+             struct vfs_inode *new_dir, const char *name, size_t name_len, 
+             bool user) {
+    if (old_dentry == NULL || name == NULL || name_len == 0) {
         return -EINVAL; // Invalid arguments
     }
     int ret = __vfs_inode_valid_holding(old_dir);
@@ -351,13 +356,16 @@ int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
     if (old_dir->ops->move == NULL || old_dir->ops->move != new_dir->ops->move) {
         return -ENOSYS; // Move operation not supported
     }
-    return old_dir->ops->move(old_dir, old_dentry, new_dir, new_dentry);
+    return old_dir->ops->move(old_dir, old_dentry, new_dir, name, name_len, user);
 }
 
 int vfs_symlink(struct vfs_inode *dir, struct vfs_dentry *dentry,
-                const char *target, bool user) {
+                const char *target, size_t target_len, bool user) {
     if (dentry == NULL || dentry == NULL || target == NULL) {
         return -EINVAL; // Invalid argument
+    }
+    if (target_len == 0 || target_len > VFS_PATH_MAX) {
+        return -EINVAL; // Invalid symlink target length
     }
     int ret = __vfs_inode_valid_holding(dir);
     if (ret != 0) {
@@ -372,7 +380,7 @@ int vfs_symlink(struct vfs_inode *dir, struct vfs_dentry *dentry,
     if (dir->ops->symlink == NULL) {
         return -ENOSYS; // Symlink operation not supported
     }
-    return dir->ops->symlink(dir, dentry, target, user);
+    return dir->ops->symlink(dir, dentry, target, target_len, user);
 }
 
 int vfs_truncate(struct vfs_inode *inode, uint64 new_size) {

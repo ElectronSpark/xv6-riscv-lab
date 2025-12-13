@@ -12,6 +12,16 @@
     + (TMPFS_INODE_INDRECT_ITEMS * TMPFS_INODE_INDRECT_ITEMS)                               \
     + TMPFS_INODE_INDRECT_ITEMS + TMPFS_INODE_DBLOCKS) * PAGE_SIZE)
 
+struct tmpfs_sb_private {
+    // tmpfs specific superblock data can be added here
+    uint64 next_ino; // next inode number to allocate
+};
+
+struct tmpfs_superblock {
+    struct vfs_superblock vfs_sb;
+    struct tmpfs_sb_private private_data;
+};
+
 struct tmpfs_inode {
     struct vfs_inode vfs_inode;
     // tmpfs specific inode data can be added here

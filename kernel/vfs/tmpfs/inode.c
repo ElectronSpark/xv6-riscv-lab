@@ -7,6 +7,7 @@
 #include "stat.h"
 #include "spinlock.h"
 #include "proc.h"
+#include "vm.h"
 #include "mutex_types.h"
 #include "rwlock.h"
 #include "completion.h"
@@ -122,6 +123,19 @@ static struct tmpfs_inode *__tmpfs_dir_lookup_by_name(struct vfs_inode *inode,
     return hlist_get(&tmpfs_inode->dir.children, &tmp);
 }
 
+// Link a target inode into a tmpfs directory with the given name
+// Assume the name is allocated from kmm_alloc, and assume the name
+// field in the target inode is NULL.
+// This function will take the ownership of the name memory.
+static int __tmpfs_do_link(struct tmpfs_inode *dir, struct tmpfs_inode *target,
+                           const char *name, size_t name_len, bool user) {
+    target->name = (char *)name;
+    target->name_len = name_len;
+    struct tmpfs_inode *ret = hlist_put(&dir->dir.children, target);
+                        
+    return 0;
+}
+
 void tmpfs_free_symlink_target(struct tmpfs_inode *tmpfs_inode) {
     if (tmpfs_inode->vfs_inode.size >= TMPFS_SYMLINK_EMBEDDED_TARGET_LEN &&
         tmpfs_inode->sym.symlink_target != NULL) {
@@ -136,8 +150,24 @@ void tmpfs_free_symlink_target(struct tmpfs_inode *tmpfs_inode) {
 
 
 int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry, 
-                  const char *name, size_t name_len) {
-    struct tmpfs_inode *tmpfs_dir = (struct tmpfs_inode *)dir;
+                   const char *name, size_t name_len, bool user) {
+    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
+    char *name_buf = NULL;
+    int ret = 0;
+    if (user) {
+        name_buf = kmm_alloc(name_len + 1);
+        if (name_buf == NULL) {
+            ret = -ENOMEM; // Memory allocation failed
+            goto done;
+        }
+        ret = vm_copyin(myproc()->vm, (uint64)name, name_buf, name_len);
+        if (ret != 0) {
+            ret = -EFAULT; // Failed to copy from user space
+            goto done;
+        }
+        name_buf[name_len] = '\0'; // Null-terminate the string
+        name = name_buf;
+    }
     if (name_len == 1 && strncmp(name, ".", 1) == 0) {
         dentry->ino = dir->ino;
         dentry->sb = dir->sb;
@@ -145,7 +175,7 @@ int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         memcpy(dentry->name, ".", 2);
         dentry->name_len = 1;
         dentry->cookies = (uint64)tmpfs_dir;
-        return 0;
+        goto done;
     }
 
     if (name_len == 2 && strncmp(name, "..", 2) == 0) {
@@ -160,12 +190,13 @@ int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
             dentry->ino = tmpfs_dir->dir.parent->vfs_inode.ino;
             dentry->cookies = (uint64)tmpfs_dir->dir.parent;
         }
-        return 0;
+        goto done;
     }
     
     struct tmpfs_inode *child = __tmpfs_dir_lookup_by_name(dir, name, name_len);
     if (child == NULL) {
-        return -ENOENT; // Not found
+        ret = -ENOENT; // Not found
+        goto done;
     }
     dentry->ino = child->vfs_inode.ino;
     dentry->sb = dir->sb;
@@ -174,27 +205,103 @@ int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     dentry->name[name_len] = '\0';
     dentry->name_len = name_len;
     dentry->cookies = (uint64)child;
-    return 0;
+
+ done:
+    if (user && name_buf != NULL) {
+        kmm_free(name_buf);
+    }
+    return ret;
 }
 
-int __tmpfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter);
-int __tmpfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user);
-int __tmpfs_create(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode);
-int __tmpfs_link(struct vfs_dentry *old, struct vfs_inode *dir, struct vfs_dentry *new);
+int __tmpfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter) {
+
+}
+
+int __tmpfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user) {
+    struct tmpfs_inode *tmpfs_inode = (struct tmpfs_inode *)inode;
+    int ret = 0;
+    size_t link_len = inode->size;
+    if (link_len + 1 > buflen) {
+        return -ENAMETOOLONG; // Buffer too small
+    }
+    if (user) {
+        // For user space, we need to copy the data to user space
+        proc_lock(myproc());
+        if (link_len < TMPFS_SYMLINK_EMBEDDED_TARGET_LEN) {
+            ret = vm_copyout(myproc()->vm, (uint64)buf, tmpfs_inode->sym.data, link_len);
+            if (ret != 0) {
+                proc_unlock(myproc());
+                return -EFAULT; // Failed to copy to user space
+            }
+        } else {
+            ret = vm_copyout(myproc()->vm, (uint64)buf, tmpfs_inode->sym.symlink_target, link_len);
+            if (ret != 0) {
+                proc_unlock(myproc());
+                return -EFAULT; // Failed to copy to user space
+            }
+        }
+        ret = vm_copyout(myproc()->vm, (uint64)buf + link_len, "\0", 1);
+        if (ret != 0) {
+            proc_unlock(myproc());
+            return -EFAULT; // Failed to copy to user space
+        }
+        proc_unlock(myproc());
+        return (int)link_len;
+    }
+    if (link_len < TMPFS_SYMLINK_EMBEDDED_TARGET_LEN) {
+        memcpy(buf, tmpfs_inode->sym.data, link_len);
+    } else {
+        memcpy(buf, tmpfs_inode->sym.symlink_target, link_len);
+    }
+    buf[link_len] = '\0'; // Null-terminate the string
+    return (int)link_len;
+}
+
+int __tmpfs_create(struct vfs_inode *dir, uint32 mode,
+                   const char *name, size_t name_len, bool user) {
+    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
+    char *name_buf = NULL;
+    int ret = 0;
+    if (user) {
+        name_buf = kmm_alloc(name_len + 1);
+        if (name_buf == NULL) {
+            ret = -ENOMEM; // Memory allocation failed
+            goto done;
+        }
+        ret = vm_copyin(myproc()->vm, (uint64)name, name_buf, name_len);
+        if (ret != 0) {
+            goto done;
+        }
+        name = name_buf;
+    }
+    // Check if the name already exists
+    struct tmpfs_inode *existing = __tmpfs_dir_lookup_by_name(dir, name, name_len);
+    if (existing != NULL) {
+        ret = -EEXIST; // File already exists
+        goto done;
+    }
+    // @TODO: Allocate a new tmpfs inode
+
+done:
+    if (user && name_buf != NULL) {
+        kmm_free(name_buf);
+    }
+    return ret;
+}
+
 int __tmpfs_unlink(struct vfs_inode *dir, struct vfs_dentry *dentry);
-int __tmpfs_mkdir(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode);
+int __tmpfs_mkdir(struct vfs_inode *dir, uint32 mode,
+                  const char *name, size_t name_len, bool user);
 int __tmpfs_rmdir(struct vfs_inode *dir, struct vfs_dentry *dentry);
-int __tmpfs_mknod(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode, uint32 dev);
+int __tmpfs_mknod(struct vfs_inode *dir, uint32 mode, uint32 dev,
+                  const char *name, size_t name_len, bool user);
 int __tmpfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
-            struct vfs_inode *new_dir, struct vfs_dentry *new_dentry);
+                 struct vfs_inode *new_dir, const char *name, 
+                 size_t name_len, bool user);
 int __tmpfs_symlink(struct vfs_inode *dir, struct vfs_dentry *dentry,
-                const char *target, bool user);
+                   const char *target, size_t target_len, bool user) {
+    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
+
+}
 int __tmpfs_truncate(struct vfs_inode *inode, uint64 new_size);
 void __tmpfs_destroy_inode(struct vfs_inode *inode);
-void __tmpfs_free_inode(struct vfs_inode *inode);
-int __tmpfs_dirty_inode(struct vfs_inode *inode);
-
-int __tmpfs_sync_inode(struct vfs_inode *inode) {
-    // tmpfs is an in-memory filesystem, so syncing is a no-op
-    return 0;
-}

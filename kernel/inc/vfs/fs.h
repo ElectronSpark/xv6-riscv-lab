@@ -3,6 +3,8 @@
 
 #include "vfs/vfs_types.h"
 
+#define VFS_PATH_MAX 65535
+
 void vfs_init(void);
 
 // Filesystem type registration
@@ -46,18 +48,23 @@ int vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty
 int vfs_sync_inode(struct vfs_inode *inode);    // Write inode to disk
 
 int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry, 
-                const char *name, size_t name_len);
+                const char *name, size_t name_len, bool user);
 int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user);
-int vfs_create(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode);
-int vfs_mknod(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode, uint32 dev);
-int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, struct vfs_dentry *new);
+int vfs_create(struct vfs_inode *dir, uint32 mode,
+               const char *name, size_t name_len, bool user);
+int vfs_mknod(struct vfs_inode *dir, uint32 mode, uint32 dev,
+              const char *name, size_t name_len, bool user);
+int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
+             const char *name, size_t name_len, bool user);
 int vfs_unlink(struct vfs_inode *dir, struct vfs_dentry *dentry);
-int vfs_mkdir(struct vfs_inode *dir, struct vfs_dentry *dentry, uint32 mode);
+int vfs_mkdir(struct vfs_inode *dir, uint32 mode,
+              const char *name, size_t name_len, bool user);
 int vfs_rmdir(struct vfs_inode *dir, struct vfs_dentry *dentry);
 int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
-             struct vfs_inode *new_dir, struct vfs_dentry *new_dentry);
+             struct vfs_inode *new_dir, const char *name, size_t name_len, 
+             bool user);
 int vfs_symlink(struct vfs_inode *dir, struct vfs_dentry *dentry,
-                const char *target, bool user);
+                const char *target, size_t target_len, bool user);
 int vfs_truncate(struct vfs_inode *inode, uint64 new_size);
 
 // Public APIs not tied to specific callbacks

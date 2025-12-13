@@ -27,23 +27,23 @@ static slab_cache_t __tmpfs_inode_cache = { 0 };
 
 static int __tmpfs_init_cache(void) {
     int ret = slab_cache_init(&__tmpfs_inode_cache, "tmpfs_inode_cache",
-                              sizeof(struct vfs_inode), 
+                              sizeof(struct tmpfs_inode), 
                               SLAB_FLAG_EMBEDDED);
     if (ret != 0) {
         return ret; // Failed to initialize tmpfs inode cache
     }
     return slab_cache_init(&__tmpfs_sb_cache, "tmpfs_superblock_cache",
-                           sizeof(struct vfs_superblock), 
+                           sizeof(struct tmpfs_superblock), 
                            SLAB_FLAG_EMBEDDED);
 }
 
 int tmpfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode) {
-    struct vfs_inode *inode = slab_alloc(&__tmpfs_inode_cache);
+    struct tmpfs_inode *inode = slab_alloc(&__tmpfs_inode_cache);
     if (inode == NULL) {
         return -ENOMEM;
     }
     memset(inode, 0, sizeof(*inode));
-    *ret_inode = inode;
+    *ret_inode = &inode->vfs_inode;
     return 0;
 }
 
@@ -59,13 +59,14 @@ void tmpfs_free_inode(struct vfs_inode *inode) {
 }
 
 struct vfs_superblock *tmpfs_alloc_superblock(void) {
-    struct vfs_superblock *sb = slab_alloc(&__tmpfs_sb_cache);
+    struct tmpfs_superblock *sb = slab_alloc(&__tmpfs_sb_cache);
     if (sb == NULL) {
         return NULL;
     }
     memset(sb, 0, sizeof(*sb));
-    sb->backendless = 1; // tmpfs is a backendless filesystem
-    return sb;
+    sb->vfs_sb.backendless = 1; // tmpfs is a backendless filesystem
+    sb->vfs_sb.fs_data = &sb->private_data;
+    return &sb->vfs_sb;
 }
 
 void tmpfs_free(struct vfs_superblock *sb) {
