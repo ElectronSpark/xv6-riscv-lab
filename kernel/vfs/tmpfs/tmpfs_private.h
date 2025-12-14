@@ -82,6 +82,7 @@ void tmpfs_free_inode(struct vfs_inode *inode);
 // Do nothing if the target is embedded
 // Will assume tmpfs_inode is symlink type and not NULL
 void tmpfs_free_symlink_target(struct tmpfs_inode *tmpfs_inode);
+void tmpfs_make_directory(struct tmpfs_inode *tmpfs_inode, struct tmpfs_inode *parent);
 
 
 #endif // KERNEL_VIRTUAL_FILE_SYSTEM_TMPFS_PRIVATE_H

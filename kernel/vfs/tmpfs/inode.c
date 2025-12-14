@@ -86,6 +86,12 @@ static int __tmpfs_alloc_name_copy(const char *name, size_t name_len, bool user,
     return 0;
 }
 
+static void __tmpfs_free_dentry(struct tmpfs_dentry *dentry) {
+    if (dentry != NULL) {
+        kmm_free(dentry);
+    }
+}
+
 // Allocate and copy a tmpfs directory entry name from user or kernel space
 static int __tmpfs_dentry_name_copy(const char *name, size_t name_len, bool user,
                                     struct tmpfs_dentry **ret) {
@@ -96,19 +102,16 @@ static int __tmpfs_dentry_name_copy(const char *name, size_t name_len, bool user
     if (user) {
         int retval = vm_copyin(myproc()->vm, dentry->name, (uint64)name, name_len);
         if (retval != 0) {
+            __tmpfs_free_dentry(dentry);
+            *ret = NULL;
             return -EFAULT;
         }
     } else {
         memmove(dentry->name, name, name_len);
     }
     dentry->name[name_len] = '\0';
+    *ret = dentry;
     return 0;
-}
-
-static void __tmpfs_free_dentry(struct tmpfs_dentry *dentry) {
-    if (dentry != NULL) {
-        kmm_free(dentry);
-    }
 }
 /******************************************************************************
  * Tmpfs directory hash list functions
@@ -161,8 +164,7 @@ static struct hlist_func_struct __tmpfs_dir_hlist_funcs = {
 };
 
 // Initialize a tmpfs inode as a directory
-static void __tmpfs_make_directory(struct tmpfs_inode *tmpfs_inode, 
-                                   struct tmpfs_inode *parent) {
+void tmpfs_make_directory(struct tmpfs_inode *tmpfs_inode, struct tmpfs_inode *parent) {
     tmpfs_inode->vfs_inode.size = 0;
     tmpfs_inode->vfs_inode.type = VFS_I_TYPE_DIR;
     int ret = hlist_init(&tmpfs_inode->dir.children,
@@ -185,7 +187,11 @@ static struct tmpfs_dentry *__tmpfs_dir_lookup_by_name(struct tmpfs_inode *inode
 // Allocate a dentry and link a target inode into a tmpfs directory with the given name
 // WIll increase the link count of the target inode
 static int __tmpfs_do_link(struct tmpfs_inode *dir, struct tmpfs_dentry *dentry) {
-    struct tmpfs_inode *ret = hlist_put(&dir->dir.children, dentry, false);
+    struct tmpfs_dentry *ret = hlist_put(&dir->dir.children, dentry, false);
+    if (ret == dentry) {
+        dentry->inode->vfs_inode.n_links++;
+        return 0;
+    }
     if (ret != NULL) {
         return -EEXIST; // Entry already exists
     }
@@ -463,7 +469,7 @@ int __tmpfs_mkdir(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_dir
         *new_dir = NULL;
         return ret;
     }
-    __tmpfs_make_directory(tmpfs_inode, tmpfs_dir);
+    tmpfs_make_directory(tmpfs_inode, tmpfs_dir);
     vfs_iunlock(&tmpfs_inode->vfs_inode);
     *new_dir = &tmpfs_inode->vfs_inode;
     return 0;
@@ -584,4 +590,5 @@ struct vfs_inode_ops tmpfs_inode_ops = {
     .symlink = __tmpfs_symlink,
     .truncate = __tmpfs_truncate,
     .destroy_inode = __tmpfs_destroy_inode,
+    .free_inode = tmpfs_free_inode,
 };

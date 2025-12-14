@@ -63,9 +63,12 @@ void vfs_iunlock(struct vfs_inode *inode) {
 }
 
 int vfs_idup(struct vfs_inode *inode) {
-    int ret = __vfs_inode_valid_holding(inode);
+    int ret = __vfs_inode_valid(inode);
     if (ret != 0) {
         return ret; // Inode is not valid or caller does not hold the ilock
+    }
+    if (!holding_mutex(&inode->mutex)) {
+        return -EPERM; // Caller does not hold the inode lock
     }
     kobject_get(&inode->kobj);
     return 0;
@@ -152,7 +155,7 @@ retry:
 // Caller needs to hold the ilock of the inode
 // Caller should not hold additional locks beyond the inode mutex
 int vfs_dirty_inode(struct vfs_inode *inode) {
-    int ret = __vfs_inode_valid_holding(inode);
+    int ret = __vfs_inode_valid(inode);
     if (ret != 0) {
         return ret; // Inode is not valid or caller does not hold the ilock
     }
@@ -170,7 +173,7 @@ int vfs_dirty_inode(struct vfs_inode *inode) {
 // Caller should hold the ilock of the inode
 // Caller should not hold additional locks beyond the inode mutex
 int vfs_sync_inode(struct vfs_inode *inode) {
-    int ret = __vfs_inode_valid_holding(inode);
+    int ret = __vfs_inode_valid(inode);
     if (ret != 0) {
         return ret; // Inode is not valid or caller does not hold the ilock
     }
@@ -190,11 +193,11 @@ int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     if (dentry == NULL || name == NULL || name_len == 0) {
         return -EINVAL; // Invalid argument
     }
-    int ret = __vfs_inode_valid_holding(dir);
+    int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
         return ret;
     }
-    if (dir->type != VFS_I_TYPE_DIR) {
+    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
         return -ENOTDIR; // Inode is not a directory
     }
     if (dir->ops->lookup == NULL) {
@@ -207,7 +210,7 @@ int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user) {
     if (buf == NULL) {
         return -EINVAL; // Invalid argument
     }
-    int ret = __vfs_inode_valid_holding(inode);
+    int ret = __vfs_inode_valid(inode);
     if (ret != 0) {
         return ret; // Inode is not valid or caller does not hold the ilock
     }
@@ -225,14 +228,14 @@ int vfs_create(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode,
     if (name == NULL || name_len == 0 || new_inode == NULL) {
         return -EINVAL; // Invalid argument
     }
-    int ret = __vfs_inode_valid_holding(dir);
+    int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
         return ret;
     }
     if (!vfs_superblock_wholding(dir->sb)) {
         return -EPERM; // Caller must hold write lock of the superblock
     }
-    if (dir->type != VFS_I_TYPE_DIR) {
+    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
         return -ENOTDIR; // Inode is not a directory
     }
     if (dir->ops->create == NULL) {
@@ -246,14 +249,14 @@ int vfs_mknod(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode,
     if (name == NULL || name_len == 0 || new_inode == NULL) {
         return -EINVAL; // Invalid argument
     }
-    int ret = __vfs_inode_valid_holding(dir);
+    int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
         return ret;
     }
     if (!vfs_superblock_wholding(dir->sb)) {
         return -EPERM; // Caller must hold write lock of the superblock
     }
-    if (dir->type != VFS_I_TYPE_DIR) {
+    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
         return -ENOTDIR; // Inode is not a directory
     }
     if (dir->ops->mknod == NULL) {
@@ -267,16 +270,14 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
     if (old == NULL || name == NULL || name_len == 0) {
         return -EINVAL; // Invalid argument
     }
-    int ret = __vfs_inode_valid_holding(dir);
+    int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
         return ret;
     }
     if (!vfs_superblock_wholding(dir->sb)) {
         return -EPERM; // Caller must hold write lock of the superblock
     }
-    if (dir->type != VFS_I_TYPE_DIR 
-        && dir->type != VFS_I_TYPE_ROOT 
-        && dir->type != VFS_I_TYPE_MNT) {
+    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
         return -ENOTDIR; // Inode is not a directory
     }
     if (dir->ops->link == NULL) {
@@ -289,16 +290,14 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len, bool us
     if (name == NULL || name_len == 0) {
         return -EINVAL; // Invalid argument
     }
-    int ret = __vfs_inode_valid_holding(dir);
+    int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
         return ret;
     }
     if (!vfs_superblock_wholding(dir->sb)) {
         return -EPERM; // Caller must hold write lock of the superblock
     }
-    if (dir->type != VFS_I_TYPE_DIR 
-        && dir->type != VFS_I_TYPE_ROOT 
-        && dir->type != VFS_I_TYPE_MNT) {
+    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
         return -ENOTDIR; // Inode is not a directory
     }
     if (dir->ops->unlink == NULL) {
@@ -312,14 +311,14 @@ int vfs_mkdir(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_dir,
     if (name == NULL || name_len == 0 || new_dir == NULL) {
         return -EINVAL; // Invalid argument
     }
-    int ret = __vfs_inode_valid_holding(dir);
+    int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
         return ret;
     }
     if (!vfs_superblock_wholding(dir->sb)) {
         return -EPERM; // Caller must hold write lock of the superblock
     }
-    if (dir->type != VFS_I_TYPE_DIR) {
+    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
         return -ENOTDIR; // Inode is not a directory
     }
     if (dir->ops->mkdir == NULL) {
@@ -332,14 +331,14 @@ int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len, bool use
     if (name == NULL || name_len == 0) {
         return -EINVAL; // Invalid argument
     }
-    int ret = __vfs_inode_valid_holding(dir);
+    int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
         return ret;
     }
     if (!vfs_superblock_wholding(dir->sb)) {
         return -EPERM; // Caller must hold write lock of the superblock
     }
-    if (dir->type != VFS_I_TYPE_DIR) {
+    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
         return -ENOTDIR; // Inode is not a directory
     }
     if (dir->ops->rmdir == NULL) {
@@ -354,11 +353,11 @@ int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
     if (old_dentry == NULL || name == NULL || name_len == 0) {
         return -EINVAL; // Invalid arguments
     }
-    int ret = __vfs_inode_valid_holding(old_dir);
+    int ret = __vfs_inode_valid(old_dir);
     if (ret != 0 && ret != -EPERM) {
         return ret;
     }
-    ret = __vfs_inode_valid_holding(new_dir);
+    ret = __vfs_inode_valid(new_dir);
     if (ret != 0 && ret != -EPERM) {
         return ret;
     }
@@ -368,7 +367,10 @@ int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
     if (!vfs_superblock_wholding(old_dir->sb)) {
         return -EPERM; // Caller must hold write lock of the superblock
     }
-    if (old_dir->type != VFS_I_TYPE_DIR || new_dir->type != VFS_I_TYPE_DIR) {
+    if (old_dir->type != VFS_I_TYPE_DIR && old_dir->type != VFS_I_TYPE_ROOT) {
+        return -ENOTDIR; // Inode is not a directory
+    }
+    if (new_dir->type != VFS_I_TYPE_DIR && new_dir->type != VFS_I_TYPE_ROOT) {
         return -ENOTDIR; // Inode is not a directory
     }
     if (old_dir->ops->move == NULL || old_dir->ops->move != new_dir->ops->move) {
@@ -389,14 +391,14 @@ int vfs_symlink(struct vfs_inode *dir, struct vfs_inode **new_inode,
     if (target_len == 0 || target_len > VFS_PATH_MAX) {
         return -EINVAL; // Invalid symlink target length
     }
-    int ret = __vfs_inode_valid_holding(dir);
+    int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
         return ret;
     }
     if (!vfs_superblock_wholding(dir->sb)) {
         return -EPERM; // Caller must hold write lock of the superblock
     }
-    if (dir->type != VFS_I_TYPE_DIR) {
+    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
         return -ENOTDIR; // Inode is not a directory
     }
     if (dir->ops->symlink == NULL) {
@@ -406,7 +408,7 @@ int vfs_symlink(struct vfs_inode *dir, struct vfs_inode **new_inode,
 }
 
 int vfs_truncate(struct vfs_inode *inode, uint64 new_size) {
-    int ret = __vfs_inode_valid_holding(inode);
+    int ret = __vfs_inode_valid(inode);
     if (ret != 0) {
         return ret; // Inode is not valid or caller does not hold the ilock
     }

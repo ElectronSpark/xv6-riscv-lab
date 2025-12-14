@@ -574,8 +574,10 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
     if (!holding_mutex(&__mount_mutex)) {
         return -EPERM; // Must hold mount mutex to register fs_type
     }
-
-    ret_val = __vfs_inode_valid_holding(mountpoint);
+    if (!holding_mutex(&mountpoint->mutex)) {
+        return -EPERM; // Caller does not hold the mountpoint inode lock
+    }
+    ret_val = __vfs_inode_valid(mountpoint);
     if (ret_val != 0) {
         return ret_val;
     }
@@ -597,7 +599,10 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
     if (mounted_inode == NULL) {
         return -EINVAL; // Mounted superblock has no root inode
     }
-    ret_val = __vfs_inode_valid_holding(mounted_inode);
+    if (!holding_mutex(&mounted_inode->mutex)) {
+        return -EPERM; // Caller does not hold the inode lock
+    }
+    ret_val = __vfs_inode_valid(mounted_inode);
     if (ret_val != 0) {
         return ret_val;
     }
@@ -1020,7 +1025,7 @@ int vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino,
 int vfs_add_inode(struct vfs_superblock *sb,
                   struct vfs_inode *inode,
                   struct vfs_inode **ret_inode) {
-    if (sb == NULL || inode == NULL || ret_inode == NULL) {
+    if (sb == NULL || inode == NULL) {
         return -EINVAL; // Invalid arguments
     }
     VFS_SUPERBLOCK_ASSERT_WHOLDING(sb, "Superblock lock must be write held to add inode");
@@ -1035,7 +1040,9 @@ int vfs_add_inode(struct vfs_superblock *sb,
     }
     struct vfs_inode *existing = __vfs_inode_hash_get(sb, inode->ino);
     if (existing != NULL) {
-        *ret_inode = existing;
+        if (ret_inode != NULL) {
+            *ret_inode = existing;
+        }
         return -EEXIST; // Inode with the same number already exists
     }
     struct vfs_inode *popped = __vfs_inode_hash_add(sb, inode);
@@ -1044,7 +1051,9 @@ int vfs_add_inode(struct vfs_superblock *sb,
         panic("vfs_add_inode: inode hash add returned existing inode unexpectedly");
     }
     inode->valid = 1; // Mark inode as valid
-    *ret_inode = inode;
+    if (ret_inode != NULL) {
+        *ret_inode = inode;
+    }
     return 0;
 }
 

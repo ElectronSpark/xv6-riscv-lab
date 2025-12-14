@@ -47,12 +47,9 @@ static inline int __vfs_idup_no_lock(struct vfs_inode *inode) {
 }
 
 // Validate that the inode is valid and caller holds the ilock
-static inline int __vfs_inode_valid_holding(struct vfs_inode *inode) {
+static inline int __vfs_inode_valid(struct vfs_inode *inode) {
     if (inode == NULL) {
         return -EINVAL; // Invalid argument
-    }
-    if (!holding_mutex(&inode->mutex)) {
-        return -EPERM; // Caller does not hold the inode lock
     }
     if (!inode->valid) {
         return -EINVAL; // Inode is not valid
@@ -76,7 +73,9 @@ static inline int __vfs_dir_inode_valid_holding(struct vfs_inode *inode) {
     if (!inode->valid) {
         return -EINVAL; // Inode is not valid
     }
-    if (!(inode->type == VFS_I_TYPE_MNT) && !(inode->type == VFS_I_TYPE_DIR)) {
+    if (!(inode->type == VFS_I_TYPE_MNT) 
+        && !(inode->type == VFS_I_TYPE_DIR) 
+        && !(inode->type == VFS_I_TYPE_ROOT)) {
         return -EINVAL; // Inode is not a mountpoint
     }
     if (inode->type == VFS_I_TYPE_DIR && inode != &vfs_root_inode) {
