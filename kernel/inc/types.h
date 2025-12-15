@@ -34,6 +34,9 @@ typedef uint32 mode_t;
     #if !defined(loff_t)
     typedef long long loff_t;
     #endif              /* loff_t */
+    #if !defined(dev_t)
+    typedef uint32 dev_t;
+    #endif              /* dev_t */
 #endif // ON_HOST_OS
 
 #ifndef bool

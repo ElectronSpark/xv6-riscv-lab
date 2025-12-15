@@ -214,8 +214,8 @@ struct vfs_inode {
     struct kobject kobj; // for sysfs representation
     void *fs_data; // filesystem-specific data
     union {
-        cdev_t *cdev; // for character device inode
-        blkdev_t *bdev; // for block device inode
+        uint32 cdev; // for character device inode
+        uint32 bdev; // for block device inode
         struct {
             struct vfs_superblock *mnt_sb; // the mounted superblock
             struct vfs_inode *mnt_rooti; // root inode of the mounted superblock

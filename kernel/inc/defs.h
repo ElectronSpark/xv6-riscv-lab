@@ -7,9 +7,9 @@
 typedef typeof(sizeof(0)) size_t;
 #endif              /* size_t */
 
-#define major(dev)  ((dev) >> 16 & 0xFFFF)
-#define minor(dev)  ((dev) & 0xFFFF)
-#define	mkdev(m,n)  ((uint)((m)<<16| (n)))
+#define major(dev)  ((dev) >> 20 & 0xFFF)
+#define minor(dev)  ((dev) & 0xFFFFF)
+#define	mkdev(m,n)  ((uint)((m)<<20| (n)))
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
 
