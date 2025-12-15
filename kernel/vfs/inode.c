@@ -238,9 +238,12 @@ int vfs_create(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode,
 }
 
 int vfs_mknod(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode, 
-              uint32 dev, const char *name, size_t name_len, bool user) {
+              dev_t dev, const char *name, size_t name_len, bool user) {
     if (name == NULL || name_len == 0 || new_inode == NULL) {
         return -EINVAL; // Invalid argument
+    }
+    if (S_ISDIR(mode) || S_ISREG(mode) || S_ISLNK(mode)) {
+        return -EINVAL; // Mknod cannot be used to create regular files, directories, or symlinks
     }
     int ret = __vfs_inode_valid(dir);
     if (ret != 0) {

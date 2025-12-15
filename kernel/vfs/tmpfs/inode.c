@@ -173,6 +173,18 @@ void tmpfs_make_directory(struct tmpfs_inode *tmpfs_inode, struct tmpfs_inode *p
     assert(ret == 0, "Failed to initialize tmpfs directory children hash list, errno=%d", ret);
 }
 
+void tmpfs_make_cdev(struct tmpfs_inode *tmpfs_inode, dev_t cdev) {
+    tmpfs_inode->vfs_inode.type = VFS_I_TYPE_CDEV;
+    tmpfs_inode->vfs_inode.size = 0;
+    tmpfs_inode->vfs_inode.cdev = cdev;
+}
+
+void tmpfs_make_bdev(struct tmpfs_inode *tmpfs_inode, dev_t bdev) {
+    tmpfs_inode->vfs_inode.type = VFS_I_TYPE_BDEV;
+    tmpfs_inode->vfs_inode.size = 0;
+    tmpfs_inode->vfs_inode.bdev = bdev;
+}
+
 // Lookup a child inode by name in a tmpfs directory inode
 static struct tmpfs_dentry *__tmpfs_dir_lookup_by_name(struct tmpfs_inode *inode, 
                                                       const char *name, 
@@ -402,6 +414,11 @@ int __tmpfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len, boo
     }
     target = &tmpfs_dentry->inode->vfs_inode;
     vfs_ilock(target);
+    if (target->type == VFS_I_TYPE_DIR) {
+        vfs_iunlock(target);
+        ret = -EISDIR; // Target is a directory
+        goto done;
+    }
     if (kobject_refcount(&target->kobj) > 1) {
         vfs_iunlock(target);
         ret = -EBUSY; // Target inode is busy
@@ -479,12 +496,68 @@ int __tmpfs_mkdir(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_dir
 }
 
 int __tmpfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len, bool user) {
-    return -ENOSYS; // Not implemented
+    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
+    struct tmpfs_dentry *tmpfs_dentry = NULL;
+    struct vfs_inode *target = NULL;
+    struct tmpfs_inode *tmpfs_target = NULL;
+    int ret = 0;
+    vfs_ilock(dir);
+    tmpfs_dentry = __tmpfs_dir_lookup_by_name(tmpfs_dir, name, name_len);
+    if (tmpfs_dentry == NULL) {
+        ret = -ENOENT; // Entry not found
+        goto done;
+    }
+    target = &tmpfs_dentry->inode->vfs_inode;
+    tmpfs_target = container_of(target, struct tmpfs_inode, vfs_inode);
+    vfs_ilock(target);
+    if (target->type != VFS_I_TYPE_DIR) {
+        vfs_iunlock(target);
+        ret = -ENOTDIR; // Target is not a directory
+        goto done;
+    }
+    if (hlist_len(&tmpfs_target->dir.children) != 0) {
+        vfs_iunlock(target);
+        ret = -ENOTEMPTY; // Directory not empty
+        goto done;
+    }
+    if (kobject_refcount(&target->kobj) > 1) {
+        vfs_iunlock(target);
+        ret = -EBUSY; // Target inode is busy
+        goto done;
+    }
+    assert(target->n_links == 1, "Tmpfs rmdir: directory link count is not 1");
+    target->n_links--;
+    __tmpfs_do_unlink(tmpfs_dentry);
+    vfs_iputunlock(target);
+done:
+    vfs_iunlock(dir);
+    return ret;
 }
 
 int __tmpfs_mknod(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode, 
-                  uint32 dev, const char *name, size_t name_len, bool user) {
-    return -ENOSYS; // Not implemented
+                  dev_t dev, const char *name, size_t name_len, bool user) {
+    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
+    struct tmpfs_inode *tmpfs_inode = NULL;
+    vfs_inode_type_t type = vfs_mode_to_inode_type(mode);
+    if (type != VFS_I_TYPE_CDEV && type != VFS_I_TYPE_BDEV) {
+        // @TODO: Support FIFO, socket, and other special files
+        return -EINVAL; // Mknod can only create character or block device files
+    }
+    vfs_ilock(dir);
+    int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &tmpfs_inode, NULL, name, name_len, user);
+    vfs_iunlock(dir);
+    if (ret != 0) {
+        *new_inode = NULL;
+        return ret;
+    }
+    if (S_ISBLK(mode)) {
+        tmpfs_make_bdev(tmpfs_inode, dev);
+    } else if (S_ISCHR(mode)) {
+        tmpfs_make_cdev(tmpfs_inode, dev);
+    }
+    vfs_iunlock(&tmpfs_inode->vfs_inode);
+    *new_inode = &tmpfs_inode->vfs_inode;
+    return 0;
 }
 
 
@@ -539,7 +612,9 @@ done:
     vfs_ilock(target);
     target->n_links--;
     vfs_iputunlock(target);
-    __tmpfs_free_dentry(new_entry);
+    if (ret != 0 && new_entry != NULL) {
+        __tmpfs_free_dentry(new_entry);
+    }
     return ret;
 }
             

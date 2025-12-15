@@ -57,6 +57,27 @@ static inline mode_t vfs_inode_type_to_mode(vfs_inode_type_t type) {
     }
 }
 
+static inline vfs_inode_type_t vfs_mode_to_inode_type(mode_t mode) {
+    switch(mode & S_IFMT) {
+        case S_IFDIR:
+            return VFS_I_TYPE_DIR;
+        case S_IFCHR:
+            return VFS_I_TYPE_CDEV;
+        case S_IFBLK:
+            return VFS_I_TYPE_BDEV;
+        case S_IFREG:
+            return VFS_I_TYPE_FILE;
+        case S_IFLNK:
+            return VFS_I_TYPE_SYMLINK;
+        case S_IFSOCK:
+            return VFS_I_TYPE_SOCK;
+        case S_IFIFO:
+            return VFS_I_TYPE_PIPE;
+        default:
+            return VFS_I_TYPE_NONE;
+    }
+}
+
 #define	S_ISBLK(m)	(((m)&S_IFMT) == S_IFBLK)
 #define	S_ISCHR(m)	(((m)&S_IFMT) == S_IFCHR)
 #define	S_ISDIR(m)	(((m)&S_IFMT) == S_IFDIR)

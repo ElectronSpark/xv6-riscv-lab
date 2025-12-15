@@ -329,20 +329,24 @@ out_put_subdir:
         printf("tmpfs_run_inode_smoketest: unlink %s failed, errno=%d\n", file_a_name, ret);
     }
     if (nested != NULL) {
+        // Drop our ref before rmdir so the busy check can pass
+        vfs_ilock(nested);
+        vfs_iputunlock(nested);
+        nested = NULL;
         ret = vfs_rmdir(subdir, nested_name, nested_len, false);
         if (ret != 0) {
             printf("tmpfs_run_inode_smoketest: rmdir /%s/%s failed, errno=%d\n", subdir_name, nested_name, ret);
         }
-        vfs_ilock(nested);
-        vfs_iputunlock(nested);
     }
     if (subdir != NULL) {
+        // Drop our ref before rmdir so the busy check can pass
+        vfs_ilock(subdir);
+        vfs_iputunlock(subdir);
+        subdir = NULL;
         ret = vfs_rmdir(root, subdir_name, subdir_len, false);
         if (ret != 0) {
             printf("tmpfs_run_inode_smoketest: rmdir /%s failed, errno=%d\n", subdir_name, ret);
         }
-        vfs_ilock(subdir);
-        vfs_iputunlock(subdir);
     }
 out_put_root:
     if (root_pinned) {

@@ -256,7 +256,7 @@ struct vfs_inode_ops {
                  const char *name, size_t name_len, bool user);
     int (*rmdir)(struct vfs_inode *dir, const char *name, size_t name_len, bool user);
     int (*mknod)(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode, 
-                 uint32 dev, const char *name, size_t name_len, bool user);    // Create a file of special types
+                 dev_t dev, const char *name, size_t name_len, bool user);    // Create a file of special types
     int (*move)(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
                 struct vfs_inode *new_dir, const char *name, 
                 size_t name_len, bool user);  // Move (rename) a file or directory whithin the same filesystem

@@ -54,7 +54,7 @@ int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user);
 int vfs_create(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode,
                const char *name, size_t name_len, bool user);
 int vfs_mknod(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode, 
-              uint32 dev, const char *name, size_t name_len, bool user);
+              dev_t dev, const char *name, size_t name_len, bool user);
 int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
              const char *name, size_t name_len, bool user);
 int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len, bool user);
