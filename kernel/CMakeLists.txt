@@ -46,6 +46,7 @@ set(KERNEL_C_FILES
     ${KERNEL_C_FILES}
     ${KERNEL_DIR}/vfs/tmpfs/superblock.c
     ${KERNEL_DIR}/vfs/tmpfs/inode.c
+    ${KERNEL_DIR}/vfs/tmpfs/tmpfs_smoketest.c
 )
 
 set(KERNEL_C_FILES

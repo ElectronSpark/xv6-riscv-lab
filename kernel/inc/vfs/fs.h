@@ -38,7 +38,7 @@ int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
 // and do not try to access or perform operations on inodes after vfs_iput
 // to avoid early free of the inode while still in use.
 
-int vfs_ilock(struct vfs_inode *inode);
+void vfs_ilock(struct vfs_inode *inode);
 int vfs_ilockdup(struct vfs_inode *inode);      // Acquire lock and increase ref count
 void vfs_iunlock(struct vfs_inode *inode);
 int vfs_idup(struct vfs_inode *inode);          // Increase ref count, requires inode mutex to be held

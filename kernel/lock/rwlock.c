@@ -21,7 +21,7 @@ static inline int __reader_should_wait(rwlock_t *lock) {
 }
 
 static inline int __writer_should_wait(rwlock_t *lock, struct proc *self) {
-    if (lock->holder != NULL && lock->holder != self) {
+    if (lock->holder != NULL) {
         return 1;
     }
     if (lock->readers > 0) {
@@ -107,6 +107,7 @@ int rwlock_acquire_write(rwlock_t *lock) {
     int ret = 0;
     spin_acquire(&lock->lock);
     struct proc *self = myproc();
+    assert(lock->holder != self, "rwlock_acquire_write: deadlock detected, process already holds the write lock");
     // @TODO: signal handling (wait is still uninterruptible for now)
     while (__writer_should_wait(lock, self)) {
         assert(lock->holder != self, "rwlock_acquire_write: deadlock detected, process already holds the write lock");

@@ -16,6 +16,7 @@
 #include "hlist.h"
 #include "slab.h"
 #include "tmpfs_private.h"
+#include "tmpfs_smoketest.h"
 
 
 static slab_cache_t __tmpfs_sb_cache = { 0 };
@@ -157,7 +158,6 @@ int tmpfs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
     if (sb == NULL) {
         return -ENOMEM; // Failed to allocate superblock
     }
-    // @TODO: Now it's only a dummy inode
     struct tmpfs_inode *root_inode = __tmpfs_alloc_inode_structure(NULL);
     if (root_inode == NULL) {
         tmpfs_free(&sb->vfs_sb);
@@ -181,6 +181,9 @@ struct vfs_fs_type_ops tmpfs_fs_type_ops = {
     .mount = tmpfs_mount,
     .free = tmpfs_free,
 };
+
+// Declared in tmpfs_smoketest.c
+void tmpfs_run_inode_smoketest(void);
 
 void tmpfs_init_fs_type(void) {
     // Initialize tmpfs inode and superblock caches
@@ -210,4 +213,5 @@ void tmpfs_init_fs_type(void) {
     printf("tmpfs max file size=%lu bytes\n", TMPFS_MAX_FILE_SIZE);
     printf("TMPFS_INODE_DBLOCKS=%lu, TMPFS_INODE_INDRECT_ITEMS=%lu\n",
            TMPFS_INODE_DBLOCKS, TMPFS_INODE_INDRECT_ITEMS);
+    tmpfs_run_inode_smoketest();
 }

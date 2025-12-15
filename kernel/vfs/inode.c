@@ -48,11 +48,9 @@ void __vfs_inode_init(struct vfs_inode *inode, struct vfs_superblock *sb) {
  * Inode Public APIs
  *****************************************************************************/
 
-int vfs_ilock(struct vfs_inode *inode) {
-    if (inode == NULL) {
-        return -EINVAL; // Invalid argument
-    }
-    return mutex_lock(&inode->mutex);
+void vfs_ilock(struct vfs_inode *inode) {
+    assert(inode != NULL, "vfs_ilock: inode is NULL");
+    assert(mutex_lock(&inode->mutex) == 0, "vfs_ilock: failed to lock inode mutex");
 }
 
 void vfs_iunlock(struct vfs_inode *inode) {
@@ -78,10 +76,8 @@ int vfs_ilockdup(struct vfs_inode *inode) {
     if (inode == NULL) {
         return -EINVAL; // Invalid argument
     }
-    int ret = vfs_ilock(inode);
-    if (ret != 0) {
-        return ret; // Failed to lock inode
-    }
+    int ret = 0;
+    vfs_ilock(inode);
     ret = vfs_idup(inode);
     if (ret != 0) {
         vfs_iunlock(inode);
@@ -106,10 +102,7 @@ void vfs_iput (struct vfs_inode *inode) {
 // Decrease inode ref count and release inode lock
 // Will assume the caller holds readlock of the superblock, which cannot be tested
 void vfs_iputunlock(struct vfs_inode *inode) {
-    int ret = 0;
-    if (inode == NULL) {
-        return;
-    }
+    assert(inode != NULL, "vfs_iput: inode is NULL");
     assert(holding_mutex(&inode->mutex), "vfs_iput: must hold inode lock");
 retry:
     int64 refcount = kobject_refcount(&inode->kobj);
@@ -117,20 +110,21 @@ retry:
     if (refcount == 1) {
         // Last reference, need to sync the inode, detach it from superblock, and free it
         vfs_iunlock(inode);
-        vfs_superblock_wlock(inode->sb);
-        ret = vfs_ilock(inode);
-        assert(ret == 0, "vfs_iput: failed to lock inode");
+        if (!vfs_superblock_wholding(inode->sb)) {
+            // Upgrade to write lock
+            vfs_superblock_unlock(inode->sb);
+            vfs_superblock_wlock(inode->sb);
+        }
+        vfs_ilock(inode);
         // Double check refcount after acquiring superblock lock
         if (kobject_refcount(&inode->kobj) > 1) {
             // If other references acquired meanwhile, just release locks and return
-            vfs_superblock_unlock(inode->sb);
             kobject_put(&inode->kobj);
             vfs_iunlock(inode);
             return;
         }
         if (inode->dirty && inode->valid) {
             vfs_iunlock(inode);
-            vfs_superblock_unlock(inode->sb);
             int sync_ret = vfs_sync_inode(inode);
             if (sync_ret != 0) {
                 printf("warning: vfs_iput: failed to sync inode %lu before deletion: %d\n",
@@ -142,7 +136,6 @@ retry:
         int remove_ret = vfs_remove_inode(inode->sb, inode);
         assert(remove_ret == 0, "vfs_iput: failed to remove inode from superblock inode cache");
         vfs_iunlock(inode);
-        vfs_superblock_unlock(inode->sb);
         inode->ops->free_inode(inode);
         return;
     }

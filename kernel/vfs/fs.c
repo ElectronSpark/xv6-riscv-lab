@@ -666,12 +666,10 @@ int vfs_get_mnt_rooti(struct vfs_inode *mountpoint, struct vfs_inode **ret_rooti
     if (mountpoint == NULL || ret_rooti == NULL) {
         return -EINVAL; // Invalid arguments
     }
-    int ret_val = vfs_ilock(mountpoint);
+    int ret_val = 0;
     struct vfs_superblock *sb = NULL;
     struct vfs_inode *rooti = NULL;
-    if (ret_val != 0) {
-        return ret_val; // Failed to lock mountpoint inode
-    }
+    vfs_ilock(mountpoint);
     ret_val = __vfs_dir_inode_valid_holding(mountpoint);
     if (ret_val != 0) {
         vfs_iunlock(mountpoint);
@@ -693,17 +691,12 @@ int vfs_get_mnt_rooti(struct vfs_inode *mountpoint, struct vfs_inode **ret_rooti
 
     // Avoid acquiring multiple superblock locks and inode locks at once
     // So we first increase the refcount of the root inode to keep it alive
-    ret_val = vfs_ilock(rooti);
-    if (ret_val != 0) {
-        return ret_val; // Failed to lock root inode
-    }
-    ret_val = vfs_idup(rooti); // Increase ref count
-    vfs_iunlock(rooti);
+    ret_val = vfs_ilockdup(rooti);
     if (ret_val != 0) {
         *ret_rooti = NULL;
-    } else {
-        *ret_rooti = rooti;
+        return ret_val; // Failed to lock root inode
     }
+    *ret_rooti = rooti;
     return ret_val;
 }
 
@@ -919,10 +912,12 @@ int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode
         *ret_inode = inode;
         return ret;
     }
-    // Suppose readlock is holding here
-    vfs_superblock_unlock(dentry->sb);
-    // Not found in cache, ask filesystem to load it
-    vfs_superblock_wlock(dentry->sb);
+    if (!vfs_superblock_wholding(dentry->sb)) {
+        // Suppose readlock is holding here
+        // Upgrade to write lock
+        vfs_superblock_unlock(dentry->sb);
+        vfs_superblock_wlock(dentry->sb);
+    }
     // Double check cache again after acquiring write lock
     if (!dentry->sb->valid) {
         return -EINVAL; // Superblock is not valid
@@ -1001,14 +996,9 @@ int vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino,
         *ret_inode = NULL;
         return -ENOENT; // Inode is not valid
     }
-    int ret = vfs_idup(inode); // Increase ref count
-    if (ret == 0) {
-        *ret_inode = inode;
-    } else {
-        *ret_inode = NULL;
-    }
+    *ret_inode = inode;
     vfs_iunlock(inode);
-    return ret;
+    return 0;
 }
 
 /*
