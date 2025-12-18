@@ -158,7 +158,6 @@ struct vfs_superblock_ops {
     void (*unmount_begin)(struct vfs_superblock *sb);
 };
 
-// @TODO: Who protects inode?
 struct vfs_inode {
     hlist_entry_t hash_entry; // entry in vfs_superblock.inodes
     vfs_inode_type_t type;
@@ -211,7 +210,7 @@ struct vfs_inode {
     struct pcache *i_mapping; // page cache for its backend inode data
     struct pcache i_data; // page cache for its data blocks
     struct vfs_inode_ops *ops;
-    struct kobject kobj; // for sysfs representation
+    int ref_count; // reference count
     void *fs_data; // filesystem-specific data
     union {
         uint32 cdev; // for character device inode
@@ -220,6 +219,7 @@ struct vfs_inode {
             struct vfs_superblock *mnt_sb; // the mounted superblock
             struct vfs_inode *mnt_rooti; // root inode of the mounted superblock
         };
+        struct vfs_inode *parent; // parent inode for directories
     };
     completion_t completion;
 };
@@ -228,7 +228,7 @@ struct vfs_inode {
  * Inode operations focus mainly on metadata operations
  * Data read/write operations are handled by file operations
  * All implementations must acquire the inode mutex before performing any operations
- * Operations that require write lock on the superblock:
+ * Operations will require write lock on the superblock:
  * - create
  * - mkdir
  * - rmdir

@@ -67,15 +67,9 @@ void tmpfs_run_inode_smoketest(void) {
     uint64 file_b_ino = 0;
     bool root_pinned = false;
 
-    vfs_superblock_wlock(sb);
 
-    ret = vfs_ilockdup(root);
-    if (ret != 0) {
-        printf("tmpfs_run_inode_smoketest: failed to pin root inode, errno=%d\n", ret);
-        goto out_unlock_sb;
-    }
+    vfs_idup(root); // Pin root inode
     root_pinned = true;
-    vfs_iunlock(root);
 
     ret = vfs_mkdir(root, 0755, &subdir, subdir_name, subdir_len, false);
     if (ret != 0) {
@@ -86,6 +80,7 @@ void tmpfs_run_inode_smoketest(void) {
     vfs_ilock(subdir);
     printf("tmpfs_run_inode_smoketest: /%s nlink=%u\n", subdir_name, subdir->n_links);
     vfs_iunlock(subdir);
+    vfs_iput(subdir);
 
     ret = vfs_mkdir(subdir, 0755, &nested, nested_name, nested_len, false);
     if (ret != 0) {
@@ -96,6 +91,7 @@ void tmpfs_run_inode_smoketest(void) {
     vfs_ilock(nested);
     printf("tmpfs_run_inode_smoketest: /%s/%s nlink=%u\n", subdir_name, nested_name, nested->n_links);
     vfs_iunlock(nested);
+    vfs_iput(nested);
 
     ret = vfs_create(subdir, 0644, &file_a, file_a_name, file_a_len, false);
     if (ret != 0) {
@@ -106,7 +102,8 @@ void tmpfs_run_inode_smoketest(void) {
         file_a_ino = file_a->ino;
         vfs_ilock(file_a);
         printf("tmpfs_run_inode_smoketest: /%s/%s nlink=%u\n", subdir_name, file_a_name, file_a->n_links);
-        vfs_iputunlock(file_a);
+        vfs_iunlock(file_a);
+        vfs_iput(file_a);
         file_a = NULL;
 
         // Create a hard link to file_a inside the same directory
@@ -127,7 +124,8 @@ void tmpfs_run_inode_smoketest(void) {
                 vfs_ilock(tmp);
                 printf("tmpfs_run_inode_smoketest: linked /%s/%s -> /%s/%s nlink=%u\n",
                        subdir_name, file_a_link_name, subdir_name, file_a_name, tmp->n_links);
-                vfs_iputunlock(tmp);
+                vfs_iunlock(tmp);
+                vfs_iput(tmp);
             }
         }
 
@@ -142,7 +140,8 @@ void tmpfs_run_inode_smoketest(void) {
                 vfs_ilock(tmp);
                 printf("tmpfs_run_inode_smoketest: unlinked /%s/%s nlink=%u\n",
                        subdir_name, file_a_link_name, tmp->n_links);
-                vfs_iputunlock(tmp);
+                vfs_iunlock(tmp);
+                vfs_iput(tmp);
             }
         }
     }
@@ -156,7 +155,8 @@ void tmpfs_run_inode_smoketest(void) {
         file_b_ino = file_b->ino;
         vfs_ilock(file_b);
         printf("tmpfs_run_inode_smoketest: /%s/%s/%s nlink=%u\n", subdir_name, nested_name, file_b_name, file_b->n_links);
-        vfs_iputunlock(file_b);
+        vfs_iunlock(file_b);
+        vfs_iput(file_b);
         file_b = NULL;
     }
 
@@ -169,7 +169,8 @@ void tmpfs_run_inode_smoketest(void) {
                subdir_name, symlink_a_name, symlink_a_target, sym_a->ino);
         vfs_ilock(sym_a);
         printf("tmpfs_run_inode_smoketest: /%s/%s nlink=%u\n", subdir_name, symlink_a_name, sym_a->n_links);
-        vfs_iputunlock(sym_a);
+        vfs_iunlock(sym_a);
+        vfs_iput(sym_a);
         sym_a = NULL;
     }
 
@@ -182,7 +183,8 @@ void tmpfs_run_inode_smoketest(void) {
                subdir_name, nested_name, symlink_b_name, symlink_b_target, sym_b->ino);
         vfs_ilock(sym_b);
         printf("tmpfs_run_inode_smoketest: /%s/%s/%s nlink=%u\n", subdir_name, nested_name, symlink_b_name, sym_b->n_links);
-        vfs_iputunlock(sym_b);
+        vfs_iunlock(sym_b);
+        vfs_iput(sym_b);
         sym_b = NULL;
     }
 
@@ -222,7 +224,8 @@ void tmpfs_run_inode_smoketest(void) {
         if (ret == 0) {
             vfs_ilock(tmp);
             printf("tmpfs_run_inode_smoketest: /%s/%s nlink=%u\n", subdir_name, file_a_name, tmp->n_links);
-            vfs_iputunlock(tmp);
+            vfs_iunlock(tmp);
+            vfs_iput(tmp);
         }
     }
 
@@ -237,7 +240,8 @@ void tmpfs_run_inode_smoketest(void) {
         if (ret == 0) {
             vfs_ilock(tmp);
             printf("tmpfs_run_inode_smoketest: /%s/%s/%s nlink=%u\n", subdir_name, nested_name, file_b_name, tmp->n_links);
-            vfs_iputunlock(tmp);
+            vfs_iunlock(tmp);
+            vfs_iput(tmp);
         }
     }
 
@@ -261,7 +265,8 @@ void tmpfs_run_inode_smoketest(void) {
             vfs_ilock(tmp);
             printf("tmpfs_run_inode_smoketest: post-move /%s/%s nlink=%u\n",
                    subdir_name, file_b_new_name, tmp->n_links);
-            vfs_iputunlock(tmp);
+            vfs_iunlock(tmp);
+            vfs_iput(tmp);
         }
         struct vfs_dentry moved_lookup = {0};
         ret = vfs_ilookup(subdir, &moved_lookup, file_b_new_name, file_b_new_len, false);
@@ -287,8 +292,9 @@ void tmpfs_run_inode_smoketest(void) {
                    subdir_name, symlink_a_name, linkbuf, ret);
             vfs_ilock(tmp_sym);
             printf("tmpfs_run_inode_smoketest: /%s/%s nlink=%u\n", subdir_name, symlink_a_name, tmp_sym->n_links);
-            vfs_iputunlock(tmp_sym);
+            vfs_iunlock(tmp_sym);
         }
+        vfs_iput(tmp_sym);
     }
     memset(linkbuf, 0, sizeof(linkbuf));
     tmp_sym = NULL;
@@ -302,8 +308,9 @@ void tmpfs_run_inode_smoketest(void) {
                    subdir_name, nested_name, symlink_b_name, linkbuf, ret);
             vfs_ilock(tmp_sym);
             printf("tmpfs_run_inode_smoketest: /%s/%s/%s nlink=%u\n", subdir_name, nested_name, symlink_b_name, tmp_sym->n_links);
-            vfs_iputunlock(tmp_sym);
+            vfs_iunlock(tmp_sym);
         }
+        vfs_iput(tmp_sym);
     }
 
 out_put_subdir:
@@ -329,20 +336,12 @@ out_put_subdir:
         printf("tmpfs_run_inode_smoketest: unlink %s failed, errno=%d\n", file_a_name, ret);
     }
     if (nested != NULL) {
-        // Drop our ref before rmdir so the busy check can pass
-        vfs_ilock(nested);
-        vfs_iputunlock(nested);
-        nested = NULL;
         ret = vfs_rmdir(subdir, nested_name, nested_len, false);
         if (ret != 0) {
             printf("tmpfs_run_inode_smoketest: rmdir /%s/%s failed, errno=%d\n", subdir_name, nested_name, ret);
         }
     }
     if (subdir != NULL) {
-        // Drop our ref before rmdir so the busy check can pass
-        vfs_ilock(subdir);
-        vfs_iputunlock(subdir);
-        subdir = NULL;
         ret = vfs_rmdir(root, subdir_name, subdir_len, false);
         if (ret != 0) {
             printf("tmpfs_run_inode_smoketest: rmdir /%s failed, errno=%d\n", subdir_name, ret);
@@ -350,9 +349,6 @@ out_put_subdir:
     }
 out_put_root:
     if (root_pinned) {
-        vfs_ilock(root);
-        vfs_iputunlock(root);
+        vfs_iput(root);
     }
-out_unlock_sb:
-    vfs_superblock_unlock(sb);
 }

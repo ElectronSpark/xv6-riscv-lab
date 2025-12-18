@@ -2,8 +2,10 @@
 #define __KERNEL_VIRTUAL_FILE_SYSTEM_FS_H
 
 #include "vfs/vfs_types.h"
+#include "atomic.h"
 
 #define VFS_PATH_MAX 65535
+#define VFS_INODE_MAX_REFCOUNT 0x7FFF0000
 
 void vfs_init(void);
 
@@ -39,11 +41,9 @@ int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
 // to avoid early free of the inode while still in use.
 
 void vfs_ilock(struct vfs_inode *inode);
-int vfs_ilockdup(struct vfs_inode *inode);      // Acquire lock and increase ref count
 void vfs_iunlock(struct vfs_inode *inode);
-int vfs_idup(struct vfs_inode *inode);          // Increase ref count, requires inode mutex to be held
-void vfs_iput(struct vfs_inode *inode);        // Decrease ref count
-void vfs_iputunlock(struct vfs_inode *inode);   // Decrease ref count and release lock
+void vfs_idup(struct vfs_inode *inode);         // Increase ref count
+void vfs_iput(struct vfs_inode *inode);         // Decrease ref count. Cannot hold inode lock when calling
 int vfs_invalidate(struct vfs_inode *inode);    // Decrease ref count and invalidate inode
 int vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty
 int vfs_sync_inode(struct vfs_inode *inode);    // Write inode to disk
@@ -69,6 +69,10 @@ int vfs_symlink(struct vfs_inode *dir, struct vfs_inode **new_inode,
                 const char *target, size_t target_len, bool user);
 int vfs_truncate(struct vfs_inode *inode, uint64 new_size);
 
+// Special inode locking operations for deadlock avoidance
+int vfs_ilock_two(struct vfs_inode *inode1, struct vfs_inode *inode2);
+void vfs_iunlock_two(struct vfs_inode *inode1, struct vfs_inode *inode2);
+
 // Public APIs not tied to specific callbacks
 int vfs_namei(struct vfs_inode *dir, struct vfs_inode **res_inode,
               const char *path, size_t path_len);
@@ -77,5 +81,15 @@ int vfs_chdir(struct vfs_inode *new_cwd);
 int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode);
 void vfs_release_dentry(struct vfs_dentry *dentry);
 int vfs_superblock_set_dirty(struct vfs_superblock *sb);
+
+
+// Get the reference count of an inode
+static inline int vfs_inode_refcount(struct vfs_inode *inode) {
+    if (inode == NULL) {
+        return -1; // Invalid argument
+    }
+    return __atomic_load_n(&inode->ref_count, __ATOMIC_SEQ_CST);
+}
+
 
 #endif // __KERNEL_VIRTUAL_FILE_SYSTEM_FS_H

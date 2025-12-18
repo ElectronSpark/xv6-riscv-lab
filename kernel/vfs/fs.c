@@ -228,7 +228,7 @@ static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint) {
             "Mountpoint inode's superblock lock must be write held to turn into mountpoint");
     }
     VFS_INODE_ASSERT_HOLDING(mountpoint, "Mountpoint inode lock must be held to turn into mountpoint");
-    if (kobject_refcount(&mountpoint->kobj) != 1) {
+    if (vfs_inode_refcount(mountpoint) != 1) {
         return -EBUSY; // Mountpoint inode is in use
     }
     if (mountpoint->type != VFS_I_TYPE_DIR) {
@@ -691,11 +691,8 @@ int vfs_get_mnt_rooti(struct vfs_inode *mountpoint, struct vfs_inode **ret_rooti
 
     // Avoid acquiring multiple superblock locks and inode locks at once
     // So we first increase the refcount of the root inode to keep it alive
-    ret_val = vfs_ilockdup(rooti);
-    if (ret_val != 0) {
-        *ret_rooti = NULL;
-        return ret_val; // Failed to lock root inode
-    }
+    vfs_idup(rooti);
+    vfs_ilock(rooti);
     *ret_rooti = rooti;
     return ret_val;
 }
@@ -986,8 +983,8 @@ int vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino,
         *ret_inode = NULL;
         return -ENOENT; // Inode not found
     }
-    int ret_val = vfs_ilockdup(inode);
-    if (ret_val != 0 || !inode->valid) {
+    vfs_ilock(inode);
+    if (!inode->valid) {
         // Inode should be valid when first gotten from the cache,
         // but it may have been invalidated during the windows between
         // getting from cache and acquiring the inode lock.
@@ -997,6 +994,7 @@ int vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino,
         return -ENOENT; // Inode is not valid
     }
     *ret_inode = inode;
+    vfs_idup(inode);
     vfs_iunlock(inode);
     return 0;
 }
@@ -1078,5 +1076,6 @@ int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode) {
         panic("vfs_remove_inode: inode hash pop returned unexpected inode");
     }
     inode->valid = 0; // Mark inode as invalid
+    inode->sb = NULL; // Disassociate inode from superblock
     return 0;
 }

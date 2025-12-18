@@ -245,8 +245,7 @@ static int __tmpfs_alloc_link_inode(struct tmpfs_inode *dir, uint32 mode, struct
     dentry->inode = tmpfs_inode;
     vfs_inode->mode = mode;
     vfs_inode->n_links = 1;
-    ret = vfs_ilockdup(&tmpfs_inode->vfs_inode); // Increase ref count for the caller
-    assert(ret == 0, "Tmpfs alloc link inode: failed to lock and dup inode, errno=%d", ret);
+    vfs_ilock(&tmpfs_inode->vfs_inode);
     tmpfs_inode->vfs_inode.n_links = 1;
     *new_inode = tmpfs_inode;
 done:
@@ -279,7 +278,6 @@ int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     char *name_buf = NULL;
     int ret = 0;
-    vfs_ilock(dir);
     if (user) {
         ret = __tmpfs_alloc_name_copy(name, name_len, user, &name_buf);
         if (ret != 0) {
@@ -325,7 +323,6 @@ int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     dentry->cookies = (uint64)child_dentry;
 
  done:
-    vfs_iunlock(dir);
     if (user && name_buf != NULL) {
         kmm_free(name_buf);
     }
@@ -346,39 +343,32 @@ int __tmpfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool use
     if (user) {
         // For user space, we need to copy the data to user space
         proc_lock(myproc());
-        vfs_ilock(inode);
         if (link_len < TMPFS_SYMLINK_EMBEDDED_TARGET_LEN) {
             ret = vm_copyout(myproc()->vm, (uint64)buf, tmpfs_inode->sym.data, link_len);
             if (ret != 0) {
-                vfs_iunlock(inode);
                 proc_unlock(myproc());
                 return -EFAULT; // Failed to copy to user space
             }
         } else {
             ret = vm_copyout(myproc()->vm, (uint64)buf, tmpfs_inode->sym.symlink_target, link_len);
             if (ret != 0) {
-                vfs_iunlock(inode);
                 proc_unlock(myproc());
                 return -EFAULT; // Failed to copy to user space
             }
         }
         ret = vm_copyout(myproc()->vm, (uint64)buf + link_len, "\0", 1);
         if (ret != 0) {
-            vfs_iunlock(inode);
             proc_unlock(myproc());
             return -EFAULT; // Failed to copy to user space
         }
-        vfs_iunlock(inode);
         proc_unlock(myproc());
         return (int)link_len;
     }
-    vfs_ilock(inode);
     if (link_len < TMPFS_SYMLINK_EMBEDDED_TARGET_LEN) {
         memmove(buf, tmpfs_inode->sym.data, link_len);
     } else {
         memmove(buf, tmpfs_inode->sym.symlink_target, link_len);
     }
-    vfs_iunlock(inode);
     buf[link_len] = '\0'; // Null-terminate the string
     return (int)link_len;
 }
@@ -387,16 +377,14 @@ int __tmpfs_create(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_in
                    const char *name, size_t name_len, bool user) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *tmpfs_inode = NULL;
-    vfs_ilock(dir);
     int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &tmpfs_inode, NULL, name, name_len, user);
     if (ret != 0) {
-        vfs_iunlock(dir);
         *new_inode = NULL;
         return ret;
     }
+    vfs_idup(&tmpfs_inode->vfs_inode); // Increase ref count for the caller
     __tmpfs_make_regfile(tmpfs_inode);
     vfs_iunlock(&tmpfs_inode->vfs_inode);
-    vfs_iunlock(dir);
     *new_inode = &tmpfs_inode->vfs_inode;
     return 0;
 }
@@ -406,7 +394,6 @@ int __tmpfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len, boo
     struct tmpfs_dentry *tmpfs_dentry = NULL;
     struct vfs_inode *target = NULL;
     int ret = 0;
-    vfs_ilock(dir);
     tmpfs_dentry = __tmpfs_dir_lookup_by_name(tmpfs_dir, name, name_len);
     if (tmpfs_dentry == NULL) {
         ret = -ENOENT; // Entry not found
@@ -414,12 +401,12 @@ int __tmpfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len, boo
     }
     target = &tmpfs_dentry->inode->vfs_inode;
     vfs_ilock(target);
-    if (target->type == VFS_I_TYPE_DIR) {
+    if (target->type == VFS_I_TYPE_DIR || target->type == VFS_I_TYPE_MNT) {
         vfs_iunlock(target);
         ret = -EISDIR; // Target is a directory
         goto done;
     }
-    if (kobject_refcount(&target->kobj) > 1) {
+    if (vfs_inode_refcount(target) > 1) {
         vfs_iunlock(target);
         ret = -EBUSY; // Target inode is busy
         goto done;
@@ -430,13 +417,12 @@ int __tmpfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len, boo
         vfs_iunlock(target);
         ret = 0;
     } else if (target->n_links == 0) {
-        vfs_iputunlock(target);
-        ret = 0;
+        ret = vfs_remove_inode(target->sb, target);
+        assert(ret == 0, "Tmpfs unlink: failed to remove inode, errno=%d", ret);
     } else {
         panic("Tmpfs unlink: negative link count");
     }
 done:
-    vfs_iunlock(dir);
     return ret;
 }
 
@@ -460,20 +446,20 @@ int __tmpfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
     if (ret != 0) {
         vfs_ilock(target);
         target->n_links--;
-        vfs_iputunlock(target);
+        vfs_iunlock(target);
+        vfs_iput(target);   // @TODO:
         return ret;
     }
 
     new_entry->inode = tmpfs_target;
-    vfs_ilock(dir);
-    ret = __tmpfs_do_link(tmpfs_dir, new_entry);
-    vfs_iunlock(dir);
     vfs_ilock(target);
+    ret = __tmpfs_do_link(tmpfs_dir, new_entry);
     if (ret != 0) {
         target->n_links--;
         __tmpfs_free_dentry(new_entry);
     }
-    vfs_iputunlock(target);
+    vfs_iunlock(target);
+    vfs_iput(target);   // @TODO:
     
     return ret;
 }
@@ -482,14 +468,13 @@ int __tmpfs_mkdir(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_dir
                   const char *name, size_t name_len, bool user) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *tmpfs_inode = NULL;
-    vfs_ilock(dir);
     int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &tmpfs_inode, NULL, name, name_len, user);
-    vfs_iunlock(dir);
     if (ret != 0) {
         *new_dir = NULL;
         return ret;
     }
     tmpfs_make_directory(tmpfs_inode, tmpfs_dir);
+    vfs_idup(&tmpfs_inode->vfs_inode); // Increase ref count for the caller
     vfs_iunlock(&tmpfs_inode->vfs_inode);
     *new_dir = &tmpfs_inode->vfs_inode;
     return 0;
@@ -501,7 +486,6 @@ int __tmpfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len, bool
     struct vfs_inode *target = NULL;
     struct tmpfs_inode *tmpfs_target = NULL;
     int ret = 0;
-    vfs_ilock(dir);
     tmpfs_dentry = __tmpfs_dir_lookup_by_name(tmpfs_dir, name, name_len);
     if (tmpfs_dentry == NULL) {
         ret = -ENOENT; // Entry not found
@@ -520,7 +504,7 @@ int __tmpfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len, bool
         ret = -ENOTEMPTY; // Directory not empty
         goto done;
     }
-    if (kobject_refcount(&target->kobj) > 1) {
+    if (vfs_inode_refcount(target) > 1) {
         vfs_iunlock(target);
         ret = -EBUSY; // Target inode is busy
         goto done;
@@ -528,9 +512,9 @@ int __tmpfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len, bool
     assert(target->n_links == 1, "Tmpfs rmdir: directory link count is not 1");
     target->n_links--;
     __tmpfs_do_unlink(tmpfs_dentry);
-    vfs_iputunlock(target);
+    ret = vfs_remove_inode(target->sb, target);
+    assert(ret == 0, "Tmpfs rmdir: failed to remove inode, errno=%d", ret);
 done:
-    vfs_iunlock(dir);
     return ret;
 }
 
@@ -543,9 +527,7 @@ int __tmpfs_mknod(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_ino
         // @TODO: Support FIFO, socket, and other special files
         return -EINVAL; // Mknod can only create character or block device files
     }
-    vfs_ilock(dir);
     int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &tmpfs_inode, NULL, name, name_len, user);
-    vfs_iunlock(dir);
     if (ret != 0) {
         *new_inode = NULL;
         return ret;
@@ -555,6 +537,7 @@ int __tmpfs_mknod(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_ino
     } else if (S_ISCHR(mode)) {
         tmpfs_make_cdev(tmpfs_inode, dev);
     }
+    vfs_idup(&tmpfs_inode->vfs_inode); // Increase ref count for the caller
     vfs_iunlock(&tmpfs_inode->vfs_inode);
     *new_inode = &tmpfs_inode->vfs_inode;
     return 0;
@@ -580,12 +563,8 @@ int __tmpfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
 
     // Increase the link count and refcount of the old inode
     target = &tmpfs_old_dentry->inode->vfs_inode;
-    ret = vfs_ilockdup(target);
-    if (ret != 0) {
-        return ret;
-    }
-    if ((ret = kobject_refcount(&target->kobj)) > 2) {
-        vfs_iputunlock(target);
+    vfs_ilock(target);
+    if ((ret = vfs_inode_refcount(target)) > 2) {
         printf("Tmpfs move: target inode is busy, %d\n", ret);
         return -EBUSY; // Target inode is busy
     }
@@ -598,22 +577,20 @@ int __tmpfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
         goto done;
     }
     new_entry->inode = tmpfs_old_dentry->inode;
-    vfs_ilock(new_dir);
     ret = __tmpfs_do_link(tmpfs_new_dir, new_entry);
-    vfs_iunlock(new_dir);
     if (ret != 0) {
         goto done;
     }
-    vfs_ilock(old_dir);
     __tmpfs_do_unlink(tmpfs_old_dentry);
-    vfs_iunlock(old_dir);
     
 done:
     vfs_ilock(target);
     target->n_links--;
-    vfs_iputunlock(target);
+    vfs_iunlock(target);
     if (ret != 0 && new_entry != NULL) {
         __tmpfs_free_dentry(new_entry);
+    } else {
+        __tmpfs_free_dentry(tmpfs_old_dentry);
     }
     return ret;
 }
@@ -624,10 +601,8 @@ int __tmpfs_symlink(struct vfs_inode *dir, struct vfs_inode **ret_inode,
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *new_inode = NULL;
     struct tmpfs_dentry *dentry = NULL;
-    vfs_ilock(dir);
     int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &new_inode, &dentry, name, name_len, user);
     if (ret != 0) {
-        vfs_iunlock(dir);
         *ret_inode = NULL;
         return ret;
     }
@@ -637,14 +612,14 @@ int __tmpfs_symlink(struct vfs_inode *dir, struct vfs_inode **ret_inode,
         ret = __tmpfs_make_symlink_target(new_inode, target, target_len);
         if (ret != 0) {
             __tmpfs_do_unlink(dentry);
-            vfs_iput(&new_inode->vfs_inode);
-            vfs_iputunlock(&new_inode->vfs_inode);
-            vfs_iunlock(dir);
+            ret = vfs_remove_inode(dir->sb, &new_inode->vfs_inode);
+            assert(ret == 0, "Tmpfs symlink: failed to remove inode after symlink target allocation failure, errno=%d", ret);
+            __tmpfs_free_dentry(dentry);
             *ret_inode = NULL;
             return ret;
         }
     }
-    vfs_iunlock(dir);
+    vfs_idup(&new_inode->vfs_inode); // Increase ref count for the caller
     vfs_iunlock(&new_inode->vfs_inode);
     *ret_inode = &new_inode->vfs_inode;
     return 0;
