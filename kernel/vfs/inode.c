@@ -427,7 +427,6 @@ out:
     return ret;
 }
 
-// @TODO:
 int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
              struct vfs_inode *new_dir, const char *name, size_t name_len, 
              bool user) {
@@ -458,11 +457,14 @@ int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
         ret = -ENOTDIR; // Inode is not a directory
         goto out;
     }
+    ret = vfs_ilock_two_directories(old_dir, new_dir);
     if (old_dir->ops->move == NULL || old_dir->ops->move != new_dir->ops->move) {
         ret = -ENOSYS; // Move operation not supported
-        goto out;
+        goto out_iunlock;
     }
     ret = old_dir->ops->move(old_dir, old_dentry, new_dir, name, name_len, user);
+out_iunlock:
+    vfs_iunlock_two(old_dir, new_dir);
 out:
     vfs_superblock_unlock(old_dir->sb);
     return ret;
@@ -522,4 +524,81 @@ int vfs_truncate(struct vfs_inode *inode, uint64 new_size) {
 out:
     vfs_iunlock(inode);
     return ret;
+}
+
+// Lock two non-directory inodes to prevent deadlock
+void vfs_ilock_two_nondirectories(struct vfs_inode *inode1, struct vfs_inode *inode2) {
+    assert(inode1 != NULL && inode2 != NULL, "vfs_ilock_two_nondirectories: inode is NULL");
+    if (inode1 < inode2) {
+        vfs_ilock(inode1);
+        vfs_ilock(inode2);
+    } else if (inode1 > inode2) {
+        vfs_ilock(inode2);
+        vfs_ilock(inode1);
+    } else {
+        // same inode
+        vfs_ilock(inode1);
+    }
+}
+
+// Lock two directory inodes to prevent deadlock
+// Return 0 on success, negative error code on failure
+// Caller should hold the superblock read lock of the superblock
+// Caller should ensure both inodes are directories
+int vfs_ilock_two_directories(struct vfs_inode *inode1, struct vfs_inode *inode2) {
+    if (inode1 == inode2) {
+        vfs_ilock(inode1);
+        return 0;
+    }
+    if (inode1->sb != inode2->sb) {
+        return -EXDEV; // Cross-filesystem locking not supported
+    }
+    // Borrowed from Linux kernel's lockdep strategy
+    struct vfs_inode *p = inode1;
+    struct vfs_inode *q = inode2;
+    struct vfs_inode *r;
+    while ((r = p->parent) != inode2 && r != p) {
+        // keep going up until we reach the root or find inode2
+        p = r;
+    }
+    if (r == inode2) {
+        // inode2 is the ancestor of inode1
+        vfs_ilock(inode2);
+        vfs_ilock(inode1);
+        return 0;
+    }
+    while ((r = q->parent) != inode1 && r != q && r != p) {
+        // keep going up until we reach the root or find inode1
+        q = r;
+    }
+    if (r == inode1) {
+        // inode1 is the ancestor of inode2
+        vfs_ilock(inode1);
+        vfs_ilock(inode2);
+        return 0;
+    } else if (r == p) {
+        // inode1 and inode2 are in different branches
+        if (inode1 < inode2) {
+            vfs_ilock(inode1);
+            vfs_ilock(inode2);
+        } else {
+            vfs_ilock(inode2);
+            vfs_ilock(inode1);
+        }
+        return 0;
+    }
+    
+    // Since we are sure both inodes belong to the same filesystem,
+    // thry must have a common ancestor(FS root)
+    panic("vfs_ilock_two_directories: unexpected condition");
+    return -EINVAL;
+}
+
+void vfs_iunlock_two(struct vfs_inode *inode1, struct vfs_inode *inode2) {
+    if (inode1 != NULL) {
+        vfs_iunlock(inode1);
+    }
+    if (inode2 != NULL && inode2 != inode1) {
+        vfs_iunlock(inode2);
+    }
 }

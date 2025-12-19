@@ -72,7 +72,8 @@ int vfs_symlink(struct vfs_inode *dir, struct vfs_inode **new_inode,
 int vfs_truncate(struct vfs_inode *inode, uint64 new_size);
 
 // Special inode locking operations for deadlock avoidance
-int vfs_ilock_two(struct vfs_inode *inode1, struct vfs_inode *inode2);
+void vfs_ilock_two_nondirectories(struct vfs_inode *inode1, struct vfs_inode *inode2);
+int vfs_ilock_two_directories(struct vfs_inode *inode1, struct vfs_inode *inode2);
 void vfs_iunlock_two(struct vfs_inode *inode1, struct vfs_inode *inode2);
 
 // Public APIs not tied to specific callbacks
@@ -91,6 +92,19 @@ static inline int vfs_inode_refcount(struct vfs_inode *inode) {
         return -1; // Invalid argument
     }
     return __atomic_load_n(&inode->ref_count, __ATOMIC_SEQ_CST);
+}
+
+// Check whether an inode is the local root
+static inline bool vfs_inode_is_local_root(struct vfs_inode *inode) {
+    if (inode == NULL || inode->sb == NULL) {
+        return false;
+    }
+
+    if (inode == inode->sb->root_inode) {
+        assert(inode->parent == inode, "vfs_inode_is_local_root: root inode's parent is not itself");
+        return true;
+    }
+    return false;
 }
 
 

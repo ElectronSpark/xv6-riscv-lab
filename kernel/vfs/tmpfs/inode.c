@@ -532,22 +532,18 @@ int __tmpfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
     struct tmpfs_dentry *new_entry = NULL;
 
     // Lookup the old dentry in the old directory
-    vfs_ilock(old_dir);
     tmpfs_old_dentry = __tmpfs_dir_lookup_by_name(tmpfs_old_dir, old_dentry->name, old_dentry->name_len);
-    vfs_iunlock(old_dir);
     if (tmpfs_old_dentry == NULL) {
         return -ENOENT; // Old entry not found
     }
 
     // Increase the link count and refcount of the old inode
     target = &tmpfs_old_dentry->inode->vfs_inode;
-    vfs_ilock(target);
     if ((ret = vfs_inode_refcount(target)) > 2) {
         printf("Tmpfs move: target inode is busy, %d\n", ret);
         return -EBUSY; // Target inode is busy
     }
     target->n_links++;
-    vfs_iunlock(target);
 
     // Create a new dentry in the new directory
     ret = __tmpfs_dentry_name_copy(name, name_len, user, &new_entry);
@@ -562,9 +558,7 @@ int __tmpfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
     __tmpfs_do_unlink(tmpfs_old_dentry);
     
 done:
-    vfs_ilock(target);
     target->n_links--;
-    vfs_iunlock(target);
     if (ret != 0 && new_entry != NULL) {
         __tmpfs_free_dentry(new_entry);
     } else {

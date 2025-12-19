@@ -237,7 +237,7 @@ static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint) {
     if (!S_ISDIR(mountpoint->mode)) {
         return -ENOTDIR; // Mountpoint must be a directory
     }
-    if (mountpoint->parent == mountpoint) {
+    if (vfs_inode_is_local_root(mountpoint)) {
         return -EBUSY; // Cannot mount on root inode
     }
     if (mountpoint->mount) {
