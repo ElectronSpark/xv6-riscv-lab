@@ -87,7 +87,7 @@ int tmpfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode) {
 // or be empty if they are directories before calling this function
 void tmpfs_free_inode(struct vfs_inode *inode) {
     struct tmpfs_inode *tmpfs_inode = container_of(inode, struct tmpfs_inode, vfs_inode);
-    if (inode->type == VFS_I_TYPE_SYMLINK) {
+    if (S_ISLNK(inode->mode)) {
         tmpfs_free_symlink_target(tmpfs_inode);
     }
     slab_free(inode);
@@ -163,7 +163,6 @@ int tmpfs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
         return -ENOMEM; // Failed to allocate root inode
     }
     tmpfs_make_directory(root_inode, root_inode); // Root's parent is itself
-    root_inode->vfs_inode.type = VFS_I_TYPE_ROOT;
     root_inode->vfs_inode.ino = 1; // Root inode number is 1
     root_inode->vfs_inode.n_links = 1;
     // Initialize superblock fields

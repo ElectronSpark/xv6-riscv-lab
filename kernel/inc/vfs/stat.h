@@ -4,19 +4,6 @@
 #include "compiler.h"
 #include "types.h"
 
-typedef enum {
-    VFS_I_TYPE_NONE = 0,
-    VFS_I_TYPE_PIPE,
-    VFS_I_TYPE_DIR,
-    VFS_I_TYPE_MNT,
-    VFS_I_TYPE_ROOT,
-    VFS_I_TYPE_FILE,
-    VFS_I_TYPE_SYMLINK,
-    VFS_I_TYPE_CDEV,
-    VFS_I_TYPE_BDEV,
-    VFS_I_TYPE_SOCK
-} vfs_inode_type_t;
-
 struct vfs_stat {
   int32 dev;        // File system's disk device
   uint64 ino;       // Inode number
@@ -33,50 +20,6 @@ struct vfs_stat {
 #define S_IFLNK	    0120000	/* symbolic link */
 #define S_IFSOCK    0140000	/* socket */
 #define S_IFIFO	    0010000	/* fifo */
-
-static inline mode_t vfs_inode_type_to_mode(vfs_inode_type_t type) {
-    switch(type) {
-        case VFS_I_TYPE_DIR:
-        case VFS_I_TYPE_MNT:
-        case VFS_I_TYPE_ROOT:
-            return S_IFDIR;
-        case VFS_I_TYPE_CDEV:
-            return S_IFCHR;
-        case VFS_I_TYPE_BDEV:
-            return S_IFBLK;
-        case VFS_I_TYPE_FILE:
-            return S_IFREG;
-        case VFS_I_TYPE_SYMLINK:
-            return S_IFLNK;
-        case VFS_I_TYPE_SOCK:
-            return S_IFSOCK;
-        case VFS_I_TYPE_PIPE:
-            return S_IFIFO;
-        default:
-            return 0;
-    }
-}
-
-static inline vfs_inode_type_t vfs_mode_to_inode_type(mode_t mode) {
-    switch(mode & S_IFMT) {
-        case S_IFDIR:
-            return VFS_I_TYPE_DIR;
-        case S_IFCHR:
-            return VFS_I_TYPE_CDEV;
-        case S_IFBLK:
-            return VFS_I_TYPE_BDEV;
-        case S_IFREG:
-            return VFS_I_TYPE_FILE;
-        case S_IFLNK:
-            return VFS_I_TYPE_SYMLINK;
-        case S_IFSOCK:
-            return VFS_I_TYPE_SOCK;
-        case S_IFIFO:
-            return VFS_I_TYPE_PIPE;
-        default:
-            return VFS_I_TYPE_NONE;
-    }
-}
 
 #define	S_ISBLK(m)	(((m)&S_IFMT) == S_IFBLK)
 #define	S_ISCHR(m)	(((m)&S_IFMT) == S_IFCHR)

@@ -89,8 +89,7 @@ retry:
     vfs_superblock_wlock(sb);
     vfs_ilock(inode);
 
-    assert(inode->type != VFS_I_TYPE_MNT,
-           "vfs_iput: refount of mountpoint inode reached zero");
+    assert(inode->mount, "vfs_iput: refount of mountpoint inode reached zero");
 
     // Retry decreasing refcount again, as it may have changed meanwhile
     if (atomic_dec_unless(&inode->ref_count, 1)) {
@@ -109,7 +108,7 @@ retry:
         goto retry;
     }
 
-    if (inode->type == VFS_I_TYPE_DIR) {
+    if (S_ISDIR(inode->mode)) {
         parent = inode->parent;
     }
 
@@ -181,7 +180,7 @@ int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     if (ret != 0) {
         goto out;
     }
-    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
+    if (!S_ISDIR(dir->mode)) {
         ret = -ENOTDIR; // Inode is not a directory
         goto out;
     }
@@ -208,7 +207,7 @@ int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user) {
     if (ret != 0) {
         goto out;
     }
-    if (inode->type != VFS_I_TYPE_SYMLINK) {
+    if (!S_ISLNK(inode->mode)) {
         ret = -EINVAL; // Inode is not a symlink
         goto out;
     }
@@ -236,7 +235,7 @@ int vfs_create(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode,
     if (ret != 0) {
         goto out;
     }
-    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
+    if (!S_ISDIR(dir->mode)) {
         ret = -ENOTDIR; // Inode is not a directory
         goto out;
     }
@@ -265,7 +264,7 @@ int vfs_mknod(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode,
     if (ret != 0) {
         goto out;
     }
-    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
+    if (!S_ISDIR(dir->mode)) {
         ret = -ENOTDIR; // Inode is not a directory
         goto out;
     }
@@ -306,12 +305,11 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
     if (ret != 0) {
         goto out;
     }
-    if (target->type == VFS_I_TYPE_DIR || target->type == VFS_I_TYPE_ROOT
-        || target->type == VFS_I_TYPE_MNT) {
+    if (S_ISDIR(target->mode)) {
         ret = -EPERM; // Cannot create hard link to a directory
         goto out;
     }
-    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
+    if (!S_ISDIR(dir->mode)) {
         ret = -ENOTDIR; // Inode is not a directory
         goto out;
     }
@@ -341,7 +339,7 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len, bool us
     if (ret != 0) {
         goto out;
     }
-    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
+    if (!S_ISDIR(dir->mode)) {
         ret = -EISDIR; // Inode is a directory
         goto out;
     }
@@ -370,7 +368,7 @@ int vfs_mkdir(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_dir,
     if (ret != 0) {
         goto out;
     }
-    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
+    if (!S_ISDIR(dir->mode)) {
         ret = -ENOTDIR; // Inode is not a directory
         goto out;
     }
@@ -398,7 +396,7 @@ int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len, bool use
     if (ret != 0) {
         goto out;
     }
-    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
+    if (!S_ISDIR(dir->mode)) {
         ret = -ENOTDIR; // Inode is not a directory
         goto out;
     }
@@ -436,11 +434,11 @@ int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
         return -EXDEV; // Cross-device move not supported
     }
     vfs_superblock_wlock(old_dir->sb);
-    if (old_dir->type != VFS_I_TYPE_DIR && old_dir->type != VFS_I_TYPE_ROOT) {
+    if (!S_ISDIR(old_dir->mode)) {
         ret = -ENOTDIR; // Inode is not a directory
         goto out;
     }
-    if (new_dir->type != VFS_I_TYPE_DIR && new_dir->type != VFS_I_TYPE_ROOT) {
+    if (!S_ISDIR(new_dir->mode)) {
         ret = -ENOTDIR; // Inode is not a directory
         goto out;
     }
@@ -472,7 +470,7 @@ int vfs_symlink(struct vfs_inode *dir, struct vfs_inode **new_inode,
     if (ret != 0) {
         goto out;
     }
-    if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
+    if (!S_ISDIR(dir->mode)) {
         ret = -ENOTDIR; // Inode is not a directory
         goto out;
     }
@@ -496,7 +494,7 @@ int vfs_truncate(struct vfs_inode *inode, uint64 new_size) {
     if (ret != 0) {
         goto out; // Inode is not valid or caller does not hold the ilock
     }
-    if (inode->type != VFS_I_TYPE_FILE) {
+    if (!S_ISREG(inode->mode)) {
         ret = -EINVAL; // Inode is not a regular file
         goto out;
     }

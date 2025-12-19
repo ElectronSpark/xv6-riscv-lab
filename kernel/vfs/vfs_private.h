@@ -62,12 +62,10 @@ static inline int __vfs_dir_inode_valid_holding(struct vfs_inode *inode) {
     if (!inode->valid) {
         return -EINVAL; // Inode is not valid
     }
-    if (!(inode->type == VFS_I_TYPE_MNT) 
-        && !(inode->type == VFS_I_TYPE_DIR) 
-        && !(inode->type == VFS_I_TYPE_ROOT)) {
+    if (!S_ISDIR(inode->mode)) {
         return -EINVAL; // Inode is not a mountpoint
     }
-    if (inode->type == VFS_I_TYPE_DIR && inode != &vfs_root_inode) {
+    if (inode != &vfs_root_inode) {
         if (inode->sb == NULL || !inode->sb->valid) {
             return -EINVAL; // Inode's superblock is not valid
         }

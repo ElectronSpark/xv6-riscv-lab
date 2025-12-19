@@ -63,7 +63,7 @@ static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint);
 static void __vfs_rooti_init(void) {
     memset(&vfs_root_inode, 0, sizeof(vfs_root_inode));
     vfs_root_inode.ino = 0;
-    vfs_root_inode.type = VFS_I_TYPE_DIR;
+    vfs_root_inode.mode = S_IFDIR | 0755;
     vfs_root_inode.valid = 1;
 }
 
@@ -227,13 +227,18 @@ static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint) {
             "Mountpoint inode's superblock lock must be write held to turn into mountpoint");
     }
     VFS_INODE_ASSERT_HOLDING(mountpoint, "Mountpoint inode lock must be held to turn into mountpoint");
+    // @TODO: refcount needs change
+    // @TODO: needs to avoid mount on root
     if (vfs_inode_refcount(mountpoint) != 1) {
         return -EBUSY; // Mountpoint inode is in use
     }
-    if (mountpoint->type != VFS_I_TYPE_DIR) {
+    if (!S_ISDIR(mountpoint->mode)) {
         return -ENOTDIR; // Mountpoint must be a directory
     }
-    mountpoint->type = VFS_I_TYPE_MNT;
+    if (mountpoint->mount) {
+        return -EBUSY; // Already a mountpoint
+    }
+    mountpoint->mount = 1;
     mountpoint->mnt_rooti = NULL;
     mountpoint->mnt_sb = NULL;
     if (mountpoint != &vfs_root_inode) {
@@ -252,7 +257,7 @@ static void __vfs_set_mountpoint(struct vfs_superblock *sb, struct vfs_inode *mo
     }
     VFS_SUPERBLOCK_ASSERT_WHOLDING(sb, "Superblock lock must be write held to set mountpoint");
     VFS_INODE_ASSERT_HOLDING(mountpoint, "Mountpoint inode lock must be held to set mountpoint");
-    assert(mountpoint->type == VFS_I_TYPE_MNT, "Mountpoint inode type is not MNT");
+    assert(mountpoint->mount, "Mountpoint inode is not marked as a mountpoint");
     assert(sb->mountpoint == NULL, "Superblock mountpoint is already set");
     sb->mountpoint = mountpoint;
     sb->parent_sb = mountpoint->sb;
@@ -268,14 +273,14 @@ static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint) {
         VFS_SUPERBLOCK_ASSERT_WHOLDING(mountpoint->sb, "Mountpoint inode's superblock lock must be write held to clear mountpoint");
     }
     VFS_INODE_ASSERT_HOLDING(mountpoint, "Mountpoint inode lock must be held to clear mountpoint");
-    assert(mountpoint->type == VFS_I_TYPE_MNT, "Mountpoint inode type is not MNT");
+    assert(mountpoint->mount, "Mountpoint inode type is not MNT");
     if (mountpoint != &vfs_root_inode) {
         mountpoint->sb->mount_count--;
         assert(mountpoint->sb->mount_count >= 0, "Mountpoint superblock mount count underflow");
     }
     mountpoint->mnt_sb = NULL;
     mountpoint->mnt_rooti = NULL;
-    mountpoint->type = VFS_I_TYPE_DIR;
+    mountpoint->mount = 0;
 }
 
  /******************************************************************************
@@ -462,7 +467,7 @@ void vfs_mount_unlock(void) {
             printf("vfs_mount: mountpoint superblock is not valid\n");
             return -EINVAL; // Mountpoint's superblock is not valid
         }
-        if (mountpoint->type != VFS_I_TYPE_DIR) {
+        if (!S_ISDIR(mountpoint->mode)) {
             printf("vfs_mount: mountpoint is not a directory\n");
             return -EINVAL; // Mountpoint must be a directory
         }
@@ -583,7 +588,7 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
         return -EINVAL; // Mountpoint's superblock is not valid
     }
 
-    if (mountpoint->type != VFS_I_TYPE_MNT) {
+    if (!S_ISDIR(mountpoint->mode) || !mountpoint->mount) {
         return -EINVAL; // Inode is not a mountpoint
     }
     sb = mountpoint->mnt_sb;
@@ -670,7 +675,7 @@ int vfs_get_mnt_rooti(struct vfs_inode *mountpoint, struct vfs_inode **ret_rooti
         vfs_iunlock(mountpoint);
         return ret_val; // Mountpoint inode is not valid
     }
-    if (mountpoint->type != VFS_I_TYPE_MNT) {
+    if (!S_ISDIR(mountpoint->mode) || !mountpoint->mount) {
         vfs_iunlock(mountpoint);
         return -EINVAL; // Inode is not a mountpoint
     }
