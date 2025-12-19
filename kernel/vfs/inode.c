@@ -32,12 +32,11 @@
 // Will be used to initialize a newly allocated inode(returned from get_inode callback)
 // before adding it  to the inode hash list
 // Caller should ensure the inode pointer is valid
-void __vfs_inode_init(struct vfs_inode *inode, struct vfs_superblock *sb) {
+void __vfs_inode_init(struct vfs_inode *inode) {
     mutex_init(&inode->mutex, "vfs_inode_mutex");
     completion_init(&inode->completion);
     hlist_entry_init(&inode->hash_entry);
     inode->ref_count = 1;
-    inode->sb = sb;
 }
 
  /******************************************************************************
@@ -65,9 +64,7 @@ void vfs_idup(struct vfs_inode *inode) {
 // Will assume the caller not holding the lock of the inode and its ancestors or the superblock lock
 void vfs_iput(struct vfs_inode *inode) {
     assert(inode != NULL, "vfs_iput: inode is NULL");
-    assert(inode->sb != NULL, "vfs_iput: inode's superblock is NULL");
-    // @TODO:
-    // assert(!rwlock_is_write_holding(&inode->sb->lock),
+    // assert(inode->sb == NULL || !vfs_superblock_wholding(inode->sb),
     //        "vfs_iput: cannot hold superblock read lock when calling");
     // assert(!holding_mutex(&inode->mutex), "vfs_iput: cannot hold inode lock when calling");
 
@@ -83,9 +80,10 @@ retry:
         return;
     }
 
-    assert(!rwlock_is_write_holding(&inode->sb->lock),
-           "vfs_iput: cannot hold superblock read lock when calling");
-    assert(!holding_mutex(&inode->mutex), "vfs_iput: cannot hold inode lock when calling");
+    if (sb == NULL) {
+        // No superblock, just free the inode
+        goto out;
+    }
 
     // acquire related locks to delete the inode
     vfs_superblock_wlock(sb);
@@ -123,6 +121,7 @@ out_locked:
     vfs_superblock_unlock(sb);
     assert(completion_done(&inode->completion),
            "vfs_iput: someone is waiting on inode completion without reference");
+out:
     inode->ops->free_inode(inode);
 
     // If this is a directory inode, decrease the refcount of its parent
@@ -290,9 +289,26 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
         return -EINVAL; // Invalid argument
     }
     vfs_superblock_wlock(dir->sb);
-    vfs_ilock(dir);
-    int ret = __vfs_inode_valid(dir);
+    struct vfs_inode *target = NULL;
+    int ret = vfs_get_dentry_inode(old, &target);
     if (ret != 0) {
+        vfs_superblock_unlock(dir->sb);
+        return ret;
+    }
+    assert(target != NULL, "vfs_link: old dentry inode is NULL");
+    vfs_ilock(dir);
+    vfs_ilock(target);
+    ret = __vfs_inode_valid(dir);
+    if (ret != 0) {
+        goto out;
+    }
+    ret = __vfs_inode_valid(target);
+    if (ret != 0) {
+        goto out;
+    }
+    if (target->type == VFS_I_TYPE_DIR || target->type == VFS_I_TYPE_ROOT
+        || target->type == VFS_I_TYPE_MNT) {
+        ret = -EPERM; // Cannot create hard link to a directory
         goto out;
     }
     if (dir->type != VFS_I_TYPE_DIR && dir->type != VFS_I_TYPE_ROOT) {
@@ -303,10 +319,12 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
         ret = -ENOSYS; // Link operation not supported
         goto out;
     }
-    ret = dir->ops->link(old, dir, name, name_len, user);
+    ret = dir->ops->link(target, dir, name, name_len, user);
 out:
+    vfs_iunlock(target);
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
+    vfs_iput(target);
     return ret;
 }
 

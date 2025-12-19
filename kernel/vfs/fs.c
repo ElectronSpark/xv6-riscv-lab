@@ -164,9 +164,8 @@ static void __vfs_init_superblock_structure(struct vfs_superblock *sb, struct vf
 }
 
 static int __vfs_init_sb_rooti(struct vfs_superblock *sb) {
-    __vfs_inode_init(sb->root_inode, sb);
-    struct vfs_inode *ret_inode = NULL;
-    int ret = vfs_add_inode(sb, sb->root_inode, &ret_inode);
+    __vfs_inode_init(sb->root_inode);
+    int ret = vfs_add_inode(sb, sb->root_inode, NULL);
     return ret;
 }
 
@@ -301,7 +300,7 @@ void vfs_init(void) {
     vfs_fs_type_count = 0;
     struct proc *proc = myproc();
     assert(proc != NULL, "vfs_init must be called from a process context");
-    __vfs_inode_init(&vfs_root_inode, NULL);
+    __vfs_inode_init(&vfs_root_inode);
     proc_lock(proc);
     proc->fs.rooti = &vfs_root_inode;
     proc->fs.cwd = &vfs_root_inode;
@@ -509,11 +508,6 @@ void vfs_mount_unlock(void) {
         ret_val = -EINVAL; // Superblock has no root inode
         goto ret;
     }
-    if (sb->root_inode->sb != NULL) {
-        printf("vfs_mount: root inode already associated with a superblock\n");
-        ret_val = -EINVAL; // Root inode is not associated with the superblock
-        goto ret;
-    }
     if (sb->root_inode->valid) {
         printf("vfs_mount: root inode already marked valid\n");
         ret_val = -EINVAL; // Root inode is not ready
@@ -531,6 +525,7 @@ void vfs_mount_unlock(void) {
     __vfs_attach_superblock_to_fstype(sb);
     sb->device = device;
     __vfs_set_mountpoint(sb, mountpoint);
+    sb->root_inode->sb = sb; // Associate root inode with superblock
     ret_val = 0; // Successfully mounted
 ret:
     if (ret_val != 0) {
@@ -768,11 +763,10 @@ int vfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode) {
     int ret = sb->ops->alloc_inode(sb, &inode);
     if (ret == 0) {
         *ret_inode = inode;
-        __vfs_inode_init(inode, sb);
-        ret = vfs_add_inode(sb, inode, NULL);
+        __vfs_inode_init(inode);
+        ret = vfs_add_inode(sb, inode, ret_inode);
         if (ret != 0) {
             inode->ops->free_inode(inode);
-            *ret_inode = NULL;
         }
     }
     return ret;
@@ -799,7 +793,7 @@ int vfs_get_inode(struct vfs_superblock *sb, uint64 ino,
     }
     int ret = sb->ops->get_inode(sb, ino, ret_inode);
     if (ret_inode != NULL) {
-        __vfs_inode_init(*ret_inode, sb);
+        __vfs_inode_init(*ret_inode);
         ret = vfs_add_inode(sb, *ret_inode, NULL);
         if (ret != 0) {
             (*ret_inode)->ops->free_inode(*ret_inode);
@@ -927,31 +921,12 @@ int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode
         *ret_inode = inode;
         return ret;
     }
-    if (dentry->sb->ops->get_inode == NULL) {
-        return -ENOSYS; // Superblock has no get_inode operation
-    }
-    ret = dentry->sb->ops->get_inode(dentry->sb, dentry->ino, &inode);
+    ret = vfs_get_inode(dentry->sb, dentry->ino, &inode);
     if (ret != 0) {
         *ret_inode = NULL;
         return ret; // Failed to load inode
     }
-    assert(inode != NULL, "Filesystem get_inode returned success but inode is NULL");
-    // Must initialize the loaded inode structure before any use.
-    __vfs_inode_init(inode, dentry->sb);
-
-    // Successfully loaded inode, now add it to cache
-    // Inode will become valid after being added to cache
-    struct vfs_inode *cached_inode = NULL;
-    ret = vfs_add_inode(dentry->sb, inode, &cached_inode);
-    if (ret != 0) {
-        assert(ret != -EEXIST, "vfs_add_inode: someone added the inode to cache when this process is holding the superblock write lock");
-        // Failed to add to cache, free the loaded inode
-        assert(inode->ops->free_inode != NULL, "Loaded inode has no free_inode operation");
-        inode->ops->free_inode(inode); // Free loaded inode
-        *ret_inode = NULL;
-        return ret; // Failed to add inode to cache
-    }
-    *ret_inode = cached_inode; // Return the cached inode
+    *ret_inode = inode; // Return the loaded inode
     return 0;
 }
 
@@ -1020,7 +995,7 @@ int vfs_add_inode(struct vfs_superblock *sb,
     if (!sb->valid && sb->initialized) {
         return -EINVAL; // Superblock is not valid
     }
-    if (inode->sb != sb) {
+    if (inode->sb != NULL) {
         return -EINVAL; // Inode's superblock does not match
     }
     if (inode->valid) {
@@ -1029,6 +1004,7 @@ int vfs_add_inode(struct vfs_superblock *sb,
     struct vfs_inode *existing = __vfs_inode_hash_get(sb, inode->ino);
     if (existing != NULL) {
         if (ret_inode != NULL) {
+            vfs_idup(existing);
             *ret_inode = existing;
         }
         return -EEXIST; // Inode with the same number already exists
@@ -1039,7 +1015,9 @@ int vfs_add_inode(struct vfs_superblock *sb,
         panic("vfs_add_inode: inode hash add returned existing inode unexpectedly");
     }
     inode->valid = 1; // Mark inode as valid
+    inode->sb = sb; // Associate inode with superblock
     if (ret_inode != NULL) {
+        vfs_idup(inode);
         *ret_inode = inode;
     }
     return 0;

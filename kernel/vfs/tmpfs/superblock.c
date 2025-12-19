@@ -48,13 +48,12 @@ static uint64 __tmpfs_ino_alloc(struct tmpfs_sb_private *private_data) {
     return private_data->next_ino++;
 }
 
-static struct tmpfs_inode *__tmpfs_alloc_inode_structure(struct vfs_superblock *sb) {
+static struct tmpfs_inode *__tmpfs_alloc_inode_structure(void) {
     struct tmpfs_inode *tmpfs_inode = slab_alloc(&__tmpfs_inode_cache);
     if (tmpfs_inode == NULL) {
         return NULL;
     }
     memset(tmpfs_inode, 0, sizeof(*tmpfs_inode));
-    tmpfs_inode->vfs_inode.sb = sb;
     tmpfs_inode->vfs_inode.ops = &tmpfs_inode_ops;
     return tmpfs_inode;
 }
@@ -67,7 +66,7 @@ int tmpfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode) {
     if (private_data == NULL) {
         return -EINVAL; // Superblock private data is NULL
     }
-    struct tmpfs_inode *tmpfs_inode = __tmpfs_alloc_inode_structure(sb);
+    struct tmpfs_inode *tmpfs_inode = __tmpfs_alloc_inode_structure();
     if (tmpfs_inode == NULL) {
         return -ENOMEM; // Memory allocation failed
     }
@@ -158,7 +157,7 @@ int tmpfs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
     if (sb == NULL) {
         return -ENOMEM; // Failed to allocate superblock
     }
-    struct tmpfs_inode *root_inode = __tmpfs_alloc_inode_structure(NULL);
+    struct tmpfs_inode *root_inode = __tmpfs_alloc_inode_structure();
     if (root_inode == NULL) {
         tmpfs_free(&sb->vfs_sb);
         return -ENOMEM; // Failed to allocate root inode

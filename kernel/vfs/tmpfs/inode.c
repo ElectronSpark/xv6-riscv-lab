@@ -382,7 +382,6 @@ int __tmpfs_create(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_in
         *new_inode = NULL;
         return ret;
     }
-    vfs_idup(&tmpfs_inode->vfs_inode); // Increase ref count for the caller
     __tmpfs_make_regfile(tmpfs_inode);
     vfs_iunlock(&tmpfs_inode->vfs_inode);
     *new_inode = &tmpfs_inode->vfs_inode;
@@ -419,6 +418,9 @@ int __tmpfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len, boo
     } else if (target->n_links == 0) {
         ret = vfs_remove_inode(target->sb, target);
         assert(ret == 0, "Tmpfs unlink: failed to remove inode, errno=%d", ret);
+        // Because the target has been detached from its superblock,
+        // we can do iput with the superblock lock holding
+        vfs_iput(target);
     } else {
         panic("Tmpfs unlink: negative link count");
     }
@@ -426,40 +428,26 @@ done:
     return ret;
 }
 
-int __tmpfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
+int __tmpfs_link(struct vfs_inode *target, struct vfs_inode *dir,
                  const char *name, size_t name_len, bool user) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
-    struct vfs_inode *target = NULL;
-    struct tmpfs_inode *tmpfs_target = NULL;
+    struct tmpfs_inode *tmpfs_target = container_of(target, struct tmpfs_inode, vfs_inode);;
     struct tmpfs_dentry *new_entry = NULL;
     int ret = 0;
-    ret = vfs_get_dentry_inode(old, &target);
-    if (ret != 0) {
-        return ret;
-    }
-    tmpfs_target = container_of(target, struct tmpfs_inode, vfs_inode);
-    vfs_ilock(target);
     target->n_links++;
-    vfs_iunlock(target);
 
     ret = __tmpfs_dentry_name_copy(name, name_len, user, &new_entry);
     if (ret != 0) {
-        vfs_ilock(target);
         target->n_links--;
-        vfs_iunlock(target);
-        vfs_iput(target);   // @TODO:
         return ret;
     }
 
     new_entry->inode = tmpfs_target;
-    vfs_ilock(target);
     ret = __tmpfs_do_link(tmpfs_dir, new_entry);
     if (ret != 0) {
         target->n_links--;
         __tmpfs_free_dentry(new_entry);
     }
-    vfs_iunlock(target);
-    vfs_iput(target);   // @TODO:
     
     return ret;
 }
@@ -474,7 +462,6 @@ int __tmpfs_mkdir(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_dir
         return ret;
     }
     tmpfs_make_directory(tmpfs_inode, tmpfs_dir);
-    vfs_idup(&tmpfs_inode->vfs_inode); // Increase ref count for the caller
     vfs_iunlock(&tmpfs_inode->vfs_inode);
     *new_dir = &tmpfs_inode->vfs_inode;
     return 0;
@@ -514,6 +501,9 @@ int __tmpfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len, bool
     __tmpfs_do_unlink(tmpfs_dentry);
     ret = vfs_remove_inode(target->sb, target);
     assert(ret == 0, "Tmpfs rmdir: failed to remove inode, errno=%d", ret);
+    // Because the target has been detached from its superblock,
+    // we can do iput with the superblock lock holding
+    vfs_iput(target);
 done:
     return ret;
 }
@@ -537,7 +527,6 @@ int __tmpfs_mknod(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_ino
     } else if (S_ISCHR(mode)) {
         tmpfs_make_cdev(tmpfs_inode, dev);
     }
-    vfs_idup(&tmpfs_inode->vfs_inode); // Increase ref count for the caller
     vfs_iunlock(&tmpfs_inode->vfs_inode);
     *new_inode = &tmpfs_inode->vfs_inode;
     return 0;
@@ -619,7 +608,6 @@ int __tmpfs_symlink(struct vfs_inode *dir, struct vfs_inode **ret_inode,
             return ret;
         }
     }
-    vfs_idup(&new_inode->vfs_inode); // Increase ref count for the caller
     vfs_iunlock(&new_inode->vfs_inode);
     *ret_inode = &new_inode->vfs_inode;
     return 0;

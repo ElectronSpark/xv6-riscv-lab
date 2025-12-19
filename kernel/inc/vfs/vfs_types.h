@@ -249,7 +249,7 @@ struct vfs_inode_ops {
     int (*readlink)(struct vfs_inode *inode, char *buf, size_t buflen, bool user);
     int (*create)(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode,
                   const char *name, size_t name_len, bool user);        // Create a regular file
-    int (*link)(struct vfs_dentry *old, struct vfs_inode *dir,
+    int (*link)(struct vfs_inode *old, struct vfs_inode *dir,
                 const char *name, size_t name_len, bool user);         // Create a hard link
     int (*unlink)(struct vfs_inode *dir, const char *name, size_t name_len, bool user);
     int (*mkdir)(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_dir,
