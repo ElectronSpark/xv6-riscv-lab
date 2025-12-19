@@ -36,14 +36,16 @@ int vfs_get_inode(struct vfs_superblock *sb, uint64 ino,
 int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
 
 // inode operations
-// dup operation needs to be performed before any operation,
-// and do not try to access or perform operations on inodes after vfs_iput
-// to avoid early free of the inode while still in use.
+// Inode lifetime is managed via a reference count.
+// - Any code that uses a struct vfs_inode must hold a reference to it.
+// - Functions that return an inode pointer return it with a reference held.
+// - Use vfs_idup() to take an additional reference; pair it with vfs_iput().
+// - Do not access an inode after calling vfs_iput() on it.
 
 void vfs_ilock(struct vfs_inode *inode);
 void vfs_iunlock(struct vfs_inode *inode);
 void vfs_idup(struct vfs_inode *inode);         // Increase ref count
-void vfs_iput(struct vfs_inode *inode);         // Decrease ref count. Cannot hold inode lock when calling
+void vfs_iput(struct vfs_inode *inode);         // Decrease ref count. Caller must not hold inode lock when calling
 int vfs_invalidate(struct vfs_inode *inode);    // Decrease ref count and invalidate inode
 int vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty
 int vfs_sync_inode(struct vfs_inode *inode);    // Write inode to disk
@@ -58,7 +60,7 @@ int vfs_mknod(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_inode,
 int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
              const char *name, size_t name_len, bool user);
 int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len, bool user);
-int vfs_mkdir(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_dir,
+int vfs_mkdir(struct vfs_inode *dir, mode_t mode, struct vfs_inode **ret_dir,
               const char *name, size_t name_len, bool user);
 int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len, bool user);
 int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,

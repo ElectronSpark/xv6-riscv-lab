@@ -60,8 +60,9 @@ void vfs_idup(struct vfs_inode *inode) {
     assert(success, "vfs_idup: inode refcount overflow");
 }
 
-// Decrease inode ref count and release inode lock
-// Will assume the caller not holding the lock of the inode and its ancestors or the superblock lock
+// Decrease inode ref count; free the inode when the last reference is dropped.
+// Caller must not hold the inode lock when calling (vfs_iput() will acquire locks internally
+// when it needs to remove/free an inode).
 void vfs_iput(struct vfs_inode *inode) {
     assert(inode != NULL, "vfs_iput: inode is NULL");
     // assert(inode->sb == NULL || !vfs_superblock_wholding(inode->sb),
@@ -108,7 +109,9 @@ retry:
         goto retry;
     }
 
-    if (S_ISDIR(inode->mode)) {
+    if (S_ISDIR(inode->mode) && inode->parent != inode) {
+        // For non-root directory inode, decrease parent dir refcount
+        // Root directory's parent is itself
         parent = inode->parent;
     }
 
@@ -354,7 +357,7 @@ out:
     return ret;
 }
 
-int vfs_mkdir(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_dir,
+int vfs_mkdir(struct vfs_inode *dir, uint32 mode, struct vfs_inode **ret_dir,
               const char *name, size_t name_len, bool user) {
     if (dir == NULL || dir->sb == NULL) {
         return -EINVAL; // Invalid argument
@@ -376,7 +379,16 @@ int vfs_mkdir(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_dir,
         ret = -ENOSYS; // Mkdir operation not supported
         goto out;
     }
-    ret = dir->ops->mkdir(dir, mode, new_dir, name, name_len, user);
+    struct vfs_inode *new_dir = NULL;
+    ret = dir->ops->mkdir(dir, mode, &new_dir, name, name_len, user);
+    if (ret == 0) {
+        assert(new_dir != NULL, "vfs_mkdir: new_dir is NULL on success");
+        *ret_dir = new_dir;
+        vfs_ilock(new_dir);
+        new_dir->parent = dir;
+        vfs_idup(dir); // increase parent dir refcount
+        vfs_iunlock(new_dir);
+    }
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
@@ -408,6 +420,10 @@ int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len, bool use
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
+    if (ret == 0) {
+        // Decrease parent dir refcount
+        vfs_iput(dir);
+    }
     return ret;
 }
 

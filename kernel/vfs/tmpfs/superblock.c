@@ -23,7 +23,7 @@ static slab_cache_t __tmpfs_sb_cache = { 0 };
 static slab_cache_t __tmpfs_inode_cache = { 0 };
 
 /******************************************************************************
- * tmpfs predeclareed functions
+ * tmpfs predeclared functions
  *****************************************************************************/
 int tmpfs_get_inode(struct vfs_superblock *sb, uint64 ino,
                     struct vfs_inode **ret_inode);
@@ -82,8 +82,8 @@ int tmpfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode) {
     return 0;
 }
 
-// Free a tmpfs inode and its associated data
-// VFS should guarantee the sieze of inodes are truncated to zero if they are regular files
+// Free a tmpfs inode and its associated data.
+// VFS should guarantee the size of inodes are truncated to zero if they are regular files
 // or be empty if they are directories before calling this function
 void tmpfs_free_inode(struct vfs_inode *inode) {
     struct tmpfs_inode *tmpfs_inode = container_of(inode, struct tmpfs_inode, vfs_inode);

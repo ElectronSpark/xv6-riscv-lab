@@ -166,6 +166,9 @@ static void __vfs_init_superblock_structure(struct vfs_superblock *sb, struct vf
 static int __vfs_init_sb_rooti(struct vfs_superblock *sb) {
     __vfs_inode_init(sb->root_inode);
     int ret = vfs_add_inode(sb, sb->root_inode, NULL);
+    if (ret == 0) {
+        sb->root_inode->parent = sb->root_inode;
+    }
     return ret;
 }
 
@@ -227,13 +230,15 @@ static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint) {
             "Mountpoint inode's superblock lock must be write held to turn into mountpoint");
     }
     VFS_INODE_ASSERT_HOLDING(mountpoint, "Mountpoint inode lock must be held to turn into mountpoint");
-    // @TODO: refcount needs change
     // @TODO: needs to avoid mount on root
-    if (vfs_inode_refcount(mountpoint) != 1) {
+    if (vfs_inode_refcount(mountpoint) > 2) {
         return -EBUSY; // Mountpoint inode is in use
     }
     if (!S_ISDIR(mountpoint->mode)) {
         return -ENOTDIR; // Mountpoint must be a directory
+    }
+    if (mountpoint->parent == mountpoint) {
+        return -EBUSY; // Cannot mount on root inode
     }
     if (mountpoint->mount) {
         return -EBUSY; // Already a mountpoint
@@ -931,6 +936,14 @@ int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode
         *ret_inode = NULL;
         return ret; // Failed to load inode
     }
+    vfs_ilock(inode);
+    if (S_ISDIR(inode->mode)) {
+        // Initialize directory-specific fields if needed
+        assert(dentry->parent != NULL, "Directory inode must have a parent dentry");
+        inode->parent = dentry->parent;
+        vfs_idup(dentry->parent);
+    }
+    vfs_iunlock(inode);
     *ret_inode = inode; // Return the loaded inode
     return 0;
 }

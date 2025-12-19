@@ -53,7 +53,8 @@ struct vfs_fs_type {
  *   `ret_sb`. Implementations should allocate the superblock, fill in its fields,
  *   and leave it in an unmounted state (mountpoint/parent unset) so that the VFS
  *   core can attach it to the mount tree.
- *   The returned superblock should have its root_inode preloaded and its ref count set to 1.
+ *   The returned superblock should have its root_inode preloaded and the root inode's
+ *   ref count set to 1.
  * free:
  *   Tear down a superblock instance that has not been mounted, or that must be
  *   discarded after a failed mount attempt.
@@ -177,6 +178,7 @@ struct vfs_inode {
      * only the following operations are excluded:
      * - vfs_idup: to increase ref count
      * - vfs_iput: to decrease ref count and free if needed
+        * - vfs_ilock: to acquire inode lock
      * - vfs_iunlock: to release inode lock
      * 
      * When an inode is being created, its inode mutex (via vfs_ilock) is held
@@ -227,7 +229,7 @@ struct vfs_inode {
 /*
  * Inode operations focus mainly on metadata operations
  * Data read/write operations are handled by file operations
- * All implementations must acquire the inode mutex before performing any operations
+ * The VFS core acquires the inode mutex before invoking inode operation callbacks.
  * Operations will require write lock on the superblock:
  * - create
  * - mkdir
@@ -259,9 +261,9 @@ struct vfs_inode_ops {
                  dev_t dev, const char *name, size_t name_len, bool user);    // Create a file of special types
     int (*move)(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
                 struct vfs_inode *new_dir, const char *name, 
-                size_t name_len, bool user);  // Move (rename) a file or directory whithin the same filesystem
+                     size_t name_len, bool user);  // Move (rename) a file or directory within the same filesystem
     int (*symlink)(struct vfs_inode *dir, struct vfs_inode **new_inode,
-                   uint32 mode, const char *name, size_t name_len,
+                         mode_t mode, const char *name, size_t name_len,
                    const char *target, size_t target_len, bool user);
     int (*truncate)(struct vfs_inode *inode, uint64 new_size);
     void (*destroy_inode)(struct vfs_inode *inode); // Release on-disk inode resources
@@ -273,6 +275,7 @@ struct vfs_inode_ops {
 /* No dentry cache right now */
 struct vfs_dentry {
     struct vfs_superblock *sb;
+    struct vfs_inode *parent; // parent inode
     uint64 ino; // inode number
     // The `name` field is managed by slab allocator
     char *name;

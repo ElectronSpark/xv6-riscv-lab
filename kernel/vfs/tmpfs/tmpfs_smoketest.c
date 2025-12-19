@@ -18,7 +18,7 @@
 #include "tmpfs_private.h"
 #include "tmpfs_smoketest.h"
 
-// Helper: lookup a child inode by name and bump refcount; caller must iputunlock()
+// Helper: lookup a child inode by name and bump refcount; caller must vfs_iput()
 static int tmpfs_fetch_inode(struct vfs_inode *dir, const char *name, size_t name_len,
                              bool user, struct vfs_inode **out) {
     struct vfs_dentry d = {0};
