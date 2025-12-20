@@ -27,6 +27,7 @@ static int tmpfs_fetch_inode(struct vfs_inode *dir, const char *name, size_t nam
         return ret;
     }
     ret = vfs_get_dentry_inode(&d, out);
+    vfs_release_dentry(&d);
     return ret;
 }
 
@@ -195,6 +196,7 @@ void tmpfs_run_inode_smoketest(void) {
         printf("tmpfs_run_inode_smoketest: ilookup /%s failed, errno=%d\n", subdir_name, ret);
     } else {
         printf("tmpfs_run_inode_smoketest: ilookup /%s -> ino=%lu\n", subdir_name, d1.ino);
+        vfs_release_dentry(&d1);
     }
 
     struct vfs_dentry d2 = {0};
@@ -203,6 +205,7 @@ void tmpfs_run_inode_smoketest(void) {
         printf("tmpfs_run_inode_smoketest: ilookup /%s/%s failed, errno=%d\n", subdir_name, nested_name, ret);
     } else {
         printf("tmpfs_run_inode_smoketest: ilookup /%s/%s -> ino=%lu\n", subdir_name, nested_name, d2.ino);
+        vfs_release_dentry(&d2);
     }
 
     struct vfs_dentry d3 = {0};
@@ -211,6 +214,7 @@ void tmpfs_run_inode_smoketest(void) {
         printf("tmpfs_run_inode_smoketest: ilookup symlink /%s/%s failed, errno=%d\n", subdir_name, symlink_a_name, ret);
     } else {
         printf("tmpfs_run_inode_smoketest: ilookup /%s/%s -> ino=%lu\n", subdir_name, symlink_a_name, d3.ino);
+        vfs_release_dentry(&d3);
     }
 
     struct vfs_dentry d_file_a = {0};
@@ -227,6 +231,7 @@ void tmpfs_run_inode_smoketest(void) {
             vfs_iunlock(tmp);
             vfs_iput(tmp);
         }
+        vfs_release_dentry(&d_file_a);
     }
 
     struct vfs_dentry d_file_b = {0};
@@ -243,6 +248,7 @@ void tmpfs_run_inode_smoketest(void) {
             vfs_iunlock(tmp);
             vfs_iput(tmp);
         }
+        vfs_release_dentry(&d_file_b);
     }
 
     // Move a regular file from nested dir up to subdir
@@ -276,6 +282,7 @@ void tmpfs_run_inode_smoketest(void) {
         } else {
             printf("tmpfs_run_inode_smoketest: ilookup /%s/%s -> ino=%lu\n",
                    subdir_name, file_b_new_name, moved_lookup.ino);
+            vfs_release_dentry(&moved_lookup);
         }
     }
 

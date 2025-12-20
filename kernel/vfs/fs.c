@@ -1075,3 +1075,14 @@ int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode) {
     inode->sb = NULL; // Disassociate inode from superblock
     return 0;
 }
+
+void vfs_release_dentry(struct vfs_dentry *dentry) {
+    if (dentry == NULL) {
+        return;
+    }
+    if (dentry->name) {
+        kmm_free(dentry->name);
+        dentry->name = NULL;
+        dentry->name_len = 0;
+    }
+}
