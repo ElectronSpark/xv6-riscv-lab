@@ -291,15 +291,15 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
         return -EINVAL; // Invalid argument
     }
     vfs_superblock_wlock(dir->sb);
+    vfs_ilock(dir);
     struct vfs_inode *target = NULL;
     int ret = vfs_get_dentry_inode(old, &target);
     if (ret != 0) {
         vfs_superblock_unlock(dir->sb);
+        vfs_iunlock(dir);
         return ret;
     }
     assert(target != NULL, "vfs_link: old dentry inode is NULL");
-    vfs_ilock(dir);
-    vfs_ilock(target);
     ret = __vfs_inode_valid(dir);
     if (ret != 0) {
         goto out;
@@ -325,7 +325,6 @@ out:
     vfs_iunlock(target);
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
-    vfs_iput(target);
     return ret;
 }
 

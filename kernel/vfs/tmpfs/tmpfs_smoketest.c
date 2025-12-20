@@ -27,6 +27,10 @@ static int tmpfs_fetch_inode(struct vfs_inode *dir, const char *name, size_t nam
         return ret;
     }
     ret = vfs_get_dentry_inode(&d, out);
+    if (ret == 0) {
+        vfs_idup(*out);
+        vfs_iunlock(*out);
+    }
     vfs_release_dentry(&d);
     return ret;
 }

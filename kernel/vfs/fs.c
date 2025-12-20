@@ -786,11 +786,11 @@ int vfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode) {
  * vfs_get_inode - Load an inode from the filesystem driver.
  *
  * Locking:
- *   - None required by the caller; this helper acquires/releases the
- *     superblock read lock internally.
+ *   - Caller must hold the superblock write lock.
+ *   - On success, the returned inode is locked and its refcount is set to 1.
  *
  * Returns:
- *   - 0 on success with *ret_inode set, or negative errno on failure.
+ *   - 0 on success with *ret_inode set (locked), or negative errno on failure.
  */
 int vfs_get_inode(struct vfs_superblock *sb, uint64 ino,
                   struct vfs_inode **ret_inode) {
@@ -943,7 +943,7 @@ int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode
         inode->parent = dentry->parent;
         vfs_idup(dentry->parent);
     }
-    vfs_iunlock(inode);
+    // vfs_iunlock(inode);
     *ret_inode = inode; // Return the loaded inode
     return 0;
 }
@@ -953,13 +953,14 @@ int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode
  *****************************************************************************/
 /*
  * vfs_get_inode_cached - Lookup an inode in a superblock's in-memory cache.
- * Will increase the inode refcount if found.
  *
  * Locking:
  *   - Caller holds the superblock read or write lock for the entire call.
+ *   - On success, the returned inode is locked; caller must call vfs_iunlock()
+ *     when done.
  *
  * Returns:
- *   - 0 on success with *ret_inode set (refcount incremented).
+ *   - 0 on success with *ret_inode set (locked).
  *   - -ENOENT if the inode is not cached.
  *   - -EINVAL or other negative errno on failure.
  */
@@ -987,8 +988,8 @@ int vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino,
         return -ENOENT; // Inode is not valid
     }
     *ret_inode = inode;
-    vfs_idup(inode);
-    vfs_iunlock(inode);
+    // vfs_idup(inode);
+    // vfs_iunlock(inode);
     return 0;
 }
 
@@ -996,11 +997,14 @@ int vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino,
  * vfs_add_inode - Insert a newly loaded inode into the cache.
  *
  * Locking:
- *   - Caller holds the superblock write lock and the inode mutex.
+ *   - Caller holds the superblock write lock.
+ *   - On success, if ret_inode is non-NULL, the inode is returned locked;
+ *     caller must call vfs_iunlock() when done.
  *
  * Returns:
- *   - 0 on success with *ret_inode referencing the canonical inode.
- *   - -EEXIST if another inode with the same number already exists.
+ *   - 0 on success with *ret_inode referencing the canonical inode (locked if ret_inode != NULL).
+ *   - -EEXIST if another inode with the same number already exists; *ret_inode
+ *     is set to the existing inode (locked) if ret_inode != NULL.
  *   - Other negative errno codes on failure.
  */
 int vfs_add_inode(struct vfs_superblock *sb,
@@ -1022,7 +1026,8 @@ int vfs_add_inode(struct vfs_superblock *sb,
     struct vfs_inode *existing = __vfs_inode_hash_get(sb, inode->ino);
     if (existing != NULL) {
         if (ret_inode != NULL) {
-            vfs_idup(existing);
+            vfs_ilock(existing);
+            // vfs_idup(existing);
             *ret_inode = existing;
         }
         return -EEXIST; // Inode with the same number already exists
@@ -1035,7 +1040,8 @@ int vfs_add_inode(struct vfs_superblock *sb,
     inode->valid = 1; // Mark inode as valid
     inode->sb = sb; // Associate inode with superblock
     if (ret_inode != NULL) {
-        vfs_idup(inode);
+        vfs_ilock(inode);
+        // vfs_idup(inode);
         *ret_inode = inode;
     }
     return 0;

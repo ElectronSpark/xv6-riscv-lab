@@ -107,7 +107,7 @@ struct vfs_superblock {
  *
  * get_inode:
  *   Get a inode with the given inode number from the file system on disk.
- *   write lock on the superblock will be held during this operation.
+ *   Write lock on the superblock will be held during this operation.
  *   Filesystem drivers must fill in the following fields:
  *     - ino
  *     - type
@@ -124,15 +124,14 @@ struct vfs_superblock {
  *     - mtime - modification time
  *     - ctime - change time
  *     - fs_data - filesystem-specific data
- *   If the inode is found, it should increment its ref count before returning it.
- *   If the inode is not found, or the inode of the given number is not allocated.
- *   Return -ENOENT if the inode is not found.
+ *   The returned inode should have its ref count set to 1.
+ *   Return -ENOENT if the inode is not found or not allocated.
  *   Note: This function will be called only when inode is not found in memory,
  *         thus write lock of the superblock is held to protect the inode hash list.
- *   Note: Filsystem drivers should zero initialize and fill in the necessary fields
- *         of the returned inode, but should not mark it valid. The VFS core will
- *         mark the inode valid after it is fully initialized and added to the
- *         superblock's inode hash list.
+ *   Note: Filesystem drivers should zero-initialize and fill in the necessary fields
+ *         of the returned inode, but should NOT lock or mark it valid. The VFS core
+ *         will lock and mark the inode valid after adding it to the superblock's
+ *         inode hash list.
  *
  * sync_fs:
  *   Synchronize the superblock's state with the underlying storage.

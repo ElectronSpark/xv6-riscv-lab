@@ -100,7 +100,9 @@ static int __tmpfs_dentry_name_copy(const char *name, size_t name_len, bool user
         return -ENOMEM; // Memory allocation failed
     }
     if (user) {
+        proc_lock(myproc());
         int retval = vm_copyin(myproc()->vm, dentry->name, (uint64)name, name_len);
+        proc_unlock(myproc());
         if (retval != 0) {
             __tmpfs_free_dentry(dentry);
             *ret = NULL;
@@ -239,13 +241,17 @@ static int __tmpfs_alloc_link_inode(struct tmpfs_inode *dir, mode_t mode, struct
     }
     ret = vfs_alloc_inode(dir->vfs_inode.sb, &vfs_inode);
     if (ret != 0) {
+        if (vfs_inode != NULL) {
+            vfs_iunlock(vfs_inode);
+        }
         goto done;
     }
     tmpfs_inode = container_of(vfs_inode, struct tmpfs_inode, vfs_inode);
     dentry->inode = tmpfs_inode;
     vfs_inode->mode = mode;
     vfs_inode->n_links = 1;
-    vfs_ilock(&tmpfs_inode->vfs_inode);
+    // vfs_ilock(&tmpfs_inode->vfs_inode);
+    vfs_idup(&tmpfs_inode->vfs_inode);
     tmpfs_inode->vfs_inode.n_links = 1;
     *new_inode = tmpfs_inode;
 done:

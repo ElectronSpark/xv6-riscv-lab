@@ -40,7 +40,7 @@ int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
 // - Any code that uses a struct vfs_inode must hold a reference to it.
 // - Functions that return an inode pointer return it with a reference held.
 // - Use vfs_idup() to take an additional reference; pair it with vfs_iput().
-// - Do not access an inode after calling vfs_iput() on it.
+// - Do not access an inode after calling the last vfs_iput() on it.
 
 void vfs_ilock(struct vfs_inode *inode);
 void vfs_iunlock(struct vfs_inode *inode);
