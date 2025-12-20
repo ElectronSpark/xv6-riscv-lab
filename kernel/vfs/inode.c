@@ -502,7 +502,7 @@ out:
     return ret;
 }
 
-int vfs_truncate(struct vfs_inode *inode, uint64 new_size) {
+int vfs_truncate(struct vfs_inode *inode, loff_t new_size) {
     if (inode == NULL || inode->sb == NULL) {
         return -EINVAL; // Invalid argument
     }

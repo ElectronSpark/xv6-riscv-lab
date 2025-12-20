@@ -5,12 +5,25 @@
 #include "vfs/vfs_types.h"
 
 #define TMPFS_HASH_BUCKETS 15
-#define TMPFS_INODE_DBLOCKS 32UL  // Number of direct blocks in a tmpfs inode
-#define TMPFS_INODE_INDRECT_ITEMS (PAGE_SIZE / sizeof(uint64))
-#define TMPFS_MAX_FILE_SIZE     \
-    (((TMPFS_INODE_INDRECT_ITEMS * TMPFS_INODE_INDRECT_ITEMS * TMPFS_INODE_INDRECT_ITEMS)   \
-    + (TMPFS_INODE_INDRECT_ITEMS * TMPFS_INODE_INDRECT_ITEMS)                               \
-    + TMPFS_INODE_INDRECT_ITEMS + TMPFS_INODE_DBLOCKS) * PAGE_SIZE)
+
+// Number of direct blocks in a tmpfs inode
+#define TMPFS_INODE_DBLOCKS 32UL
+
+// Index of first indirect block
+#define TMPFS_INODE_INDRECT_START TMPFS_INODE_DBLOCKS
+#define TMPFS_INODE_INDRECT_ITEMS (PAGE_SIZE / sizeof(void *))
+
+// Index of first double indirect block
+#define TMPFS_INODE_DINDRECT_START (TMPFS_INODE_INDRECT_START + TMPFS_INODE_INDRECT_ITEMS)
+#define TMPFS_INODE_DINDRECT_ITEMS (TMPFS_INODE_INDRECT_ITEMS * TMPFS_INODE_INDRECT_ITEMS)
+
+// Index of first triple indirect block
+#define TMPFS_INODE_TINDRECT_START (TMPFS_INODE_DINDRECT_START + TMPFS_INODE_DINDRECT_ITEMS)
+#define TMPFS_INODE_TINDRECT_ITEMS (TMPFS_INODE_DINDRECT_ITEMS * TMPFS_INODE_INDRECT_ITEMS)
+
+// Maximum file size supported by tmpfs
+#define TMPFS_MAX_FILE_SIZE                                 \
+    ((TMPFS_INODE_TINDRECT_START + TMPFS_INODE_TINDRECT_ITEMS) * PAGE_SIZE)
 
 #define TMPFS_DENTRY_COOKIE_SELF 1
 #define TMPFS_DENTRY_COOKIE_PARENT 2
@@ -39,7 +52,7 @@ struct tmpfs_inode {
         } dir;
         union {
             // The target path is stored in the data[] field if the length
-            // is shorter than TMPFS_SYMLINK_EMBEDDED_TARGET_LEN. Otherwise,
+            // is shorter than TMPFS_INODE_EMBEDDED_DATA_LEN. Otherwise,
             // it is allocated separately and pointed to by symlink_target.
             char *symlink_target; // target path (for symlinks)
             char data[0];        // file data (for regular files)
@@ -67,13 +80,18 @@ struct tmpfs_dentry {
     char __name_start[0];
 };
 
-#define TMPFS_SYMLINK_EMBEDDED_TARGET_LEN   \
+#define TMPFS_INODE_EMBEDDED_DATA_LEN   \
     (sizeof(struct tmpfs_inode) - offsetof(struct tmpfs_inode, sym.data))
+
+// Get the block index within the file for a given position
+#define TMPFS_IBLOCK(pos) ((pos) >> PAGE_SHIFT)
+// Get the offset within a block for a given position
+#define TMPFS_IBLOCK_OFFSET(pos) ((pos) & PAGE_MASK)
 
 int tmpfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode);
 // Set the symlink target for a tmpfs inode
 // Will free any existing target if present
-// WIll allocate memory if target_len >= TMPFS_SYMLINK_EMBEDDED_TARGET_LEN
+// WIll allocate memory if target_len >= TMPFS_INODE_EMBEDDED_DATA_LEN
 // Copies the target string from `target` to the inode
 void tmpfs_set_symlink_target(struct tmpfs_inode *tmpfs_inode,
                               const char *target, size_t target_len);
@@ -83,6 +101,6 @@ void tmpfs_free_inode(struct vfs_inode *inode);
 // Will assume tmpfs_inode is symlink type and not NULL
 void tmpfs_free_symlink_target(struct tmpfs_inode *tmpfs_inode);
 void tmpfs_make_directory(struct tmpfs_inode *tmpfs_inode, struct tmpfs_inode *parent);
-
+int __tmpfs_truncate(struct vfs_inode *inode, loff_t new_size);
 
 #endif // KERNEL_VIRTUAL_FILE_SYSTEM_TMPFS_PRIVATE_H

@@ -166,6 +166,7 @@ int tmpfs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
     root_inode->vfs_inode.ino = 1; // Root inode number is 1
     root_inode->vfs_inode.n_links = 1;
     // Initialize superblock fields
+    sb->vfs_sb.block_size = PAGE_SIZE;
     sb->vfs_sb.root_inode = &root_inode->vfs_inode;
     sb->private_data.next_ino = 2;
     sb->vfs_sb.ops = &tmpfs_superblock_ops;
@@ -206,8 +207,8 @@ void tmpfs_init_fs_type(void) {
     vfs_iunlock(&vfs_root_inode);
     vfs_mount_unlock();
 
-    printf("sizeof(tmpfs_inode)=%lu, TMPFS_SYMLINK_EMBEDDED_TARGET_LEN=%lu\n",
-           sizeof(struct tmpfs_inode), TMPFS_SYMLINK_EMBEDDED_TARGET_LEN);
+    printf("sizeof(tmpfs_inode)=%lu, TMPFS_INODE_EMBEDDED_DATA_LEN=%lu\n",
+           sizeof(struct tmpfs_inode), TMPFS_INODE_EMBEDDED_DATA_LEN);
     printf("tmpfs max file size=%lu bytes\n", TMPFS_MAX_FILE_SIZE);
     printf("TMPFS_INODE_DBLOCKS=%lu, TMPFS_INODE_INDRECT_ITEMS=%lu\n",
            TMPFS_INODE_DBLOCKS, TMPFS_INODE_INDRECT_ITEMS);

@@ -264,7 +264,7 @@ struct vfs_inode_ops {
     int (*symlink)(struct vfs_inode *dir, struct vfs_inode **new_inode,
                          mode_t mode, const char *name, size_t name_len,
                    const char *target, size_t target_len, bool user);
-    int (*truncate)(struct vfs_inode *inode, uint64 new_size);
+    int (*truncate)(struct vfs_inode *inode, loff_t new_size);
     void (*destroy_inode)(struct vfs_inode *inode); // Release on-disk inode resources
     void (*free_inode)(struct vfs_inode *inode);    // Release in-memory inode structure
     int (*dirty_inode)(struct vfs_inode *inode);   // Mark inode as dirty

@@ -22,8 +22,8 @@
 static void __tmpfs_make_symlink_target_embedded(struct tmpfs_inode *tmpfs_inode, 
                                                  const char *target, size_t len) {
     memmove(tmpfs_inode->sym.data, target, len);
-    if (len < TMPFS_SYMLINK_EMBEDDED_TARGET_LEN)
-        memset(tmpfs_inode->sym.data + len, 0, TMPFS_SYMLINK_EMBEDDED_TARGET_LEN - len);
+    if (len < TMPFS_INODE_EMBEDDED_DATA_LEN)
+        memset(tmpfs_inode->sym.data + len, 0, TMPFS_INODE_EMBEDDED_DATA_LEN - len);
     tmpfs_inode->vfs_inode.size = len;
     tmpfs_inode->vfs_inode.mode = S_IFLNK | 0777;
 }
@@ -268,7 +268,7 @@ done:
 }
 
 void tmpfs_free_symlink_target(struct tmpfs_inode *tmpfs_inode) {
-    if (tmpfs_inode->vfs_inode.size >= TMPFS_SYMLINK_EMBEDDED_TARGET_LEN &&
+    if (tmpfs_inode->vfs_inode.size >= TMPFS_INODE_EMBEDDED_DATA_LEN &&
         tmpfs_inode->sym.symlink_target != NULL) {
         kmm_free(tmpfs_inode->sym.symlink_target);
         tmpfs_inode->sym.symlink_target = NULL;
@@ -350,7 +350,7 @@ int __tmpfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool use
     if (user) {
         // For user space, we need to copy the data to user space
         proc_lock(myproc());
-        if (link_len < TMPFS_SYMLINK_EMBEDDED_TARGET_LEN) {
+        if (link_len < TMPFS_INODE_EMBEDDED_DATA_LEN) {
             ret = vm_copyout(myproc()->vm, (uint64)buf, tmpfs_inode->sym.data, link_len);
             if (ret != 0) {
                 proc_unlock(myproc());
@@ -371,7 +371,7 @@ int __tmpfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool use
         proc_unlock(myproc());
         return (int)link_len;
     }
-    if (link_len < TMPFS_SYMLINK_EMBEDDED_TARGET_LEN) {
+    if (link_len < TMPFS_INODE_EMBEDDED_DATA_LEN) {
         memmove(buf, tmpfs_inode->sym.data, link_len);
     } else {
         memmove(buf, tmpfs_inode->sym.symlink_target, link_len);
@@ -587,7 +587,7 @@ int __tmpfs_symlink(struct vfs_inode *dir, struct vfs_inode **ret_inode,
         *ret_inode = NULL;
         return ret;
     }
-    if (target_len < TMPFS_SYMLINK_EMBEDDED_TARGET_LEN) {
+    if (target_len < TMPFS_INODE_EMBEDDED_DATA_LEN) {
         __tmpfs_make_symlink_target_embedded(new_inode, target, target_len);
     } else {
         ret = __tmpfs_make_symlink_target(new_inode, target, target_len);
@@ -606,10 +606,6 @@ int __tmpfs_symlink(struct vfs_inode *dir, struct vfs_inode **ret_inode,
     vfs_iunlock(&new_inode->vfs_inode);
     *ret_inode = &new_inode->vfs_inode;
     return 0;
-}
-
-int __tmpfs_truncate(struct vfs_inode *inode, uint64 new_size) {
-    return -ENOSYS; // Not implemented
 }
 
 void __tmpfs_destroy_inode(struct vfs_inode *inode) {

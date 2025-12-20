@@ -183,6 +183,16 @@ target_link_libraries(ut_pcache PRIVATE cmocka-static)
 target_compile_options(ut_pcache PRIVATE ${TEST_C_FLAGS})
 target_include_directories(ut_pcache PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
+# Tmpfs truncate test (linked version)
+# This test links directly to kernel/vfs/tmpfs/truncate.c using header guards
+# to block kernel headers and provide minimal test stubs.
+add_executable(ut_tmpfs_truncate
+    ${CMAKE_SOURCE_DIR}/src/ut_tmpfs_truncate_linked.c
+)
+target_link_libraries(ut_tmpfs_truncate PRIVATE cmocka-static)
+target_compile_options(ut_tmpfs_truncate PRIVATE ${TEST_C_FLAGS})
+target_include_directories(ut_tmpfs_truncate PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+
 enable_testing()
 add_test(NAME ut_mock_test
     COMMAND ut_page
@@ -214,5 +224,9 @@ add_test(NAME ut_bits
 )
 add_test(NAME ut_pcache
     COMMAND ut_pcache
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+add_test(NAME ut_tmpfs_truncate
+    COMMAND ut_tmpfs_truncate
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )

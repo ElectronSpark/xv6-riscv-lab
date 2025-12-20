@@ -1,0 +1,1250 @@
+/*
+ * Unit tests for tmpfs truncate.c
+ * 
+ * This file tests the truncate functionality by copying the logic from
+ * truncate.c with minimal stubs for kernel dependencies.
+ */
+#include <setjmp.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <cmocka.h>
+
+// ============================================================================
+// Basic type definitions (matching kernel types)
+// ============================================================================
+#include <sys/types.h>  // For loff_t
+typedef unsigned char uint8;
+typedef unsigned long uint64;
+
+#ifndef PAGE_SHIFT
+#define PAGE_SHIFT 12
+#endif
+#ifndef PAGE_SIZE
+#define PAGE_SIZE (1UL << PAGE_SHIFT)
+#endif
+#ifndef PAGE_MASK
+#define PAGE_MASK (PAGE_SIZE - 1)
+#endif
+
+// ============================================================================
+// TMPFS constants (from tmpfs_private.h)
+// ============================================================================
+#define TMPFS_INODE_DBLOCKS 32UL
+#define TMPFS_INODE_INDRECT_START TMPFS_INODE_DBLOCKS
+#define TMPFS_INODE_INDRECT_ITEMS (PAGE_SIZE / sizeof(void *))
+#define TMPFS_INODE_DINDRECT_START (TMPFS_INODE_INDRECT_START + TMPFS_INODE_INDRECT_ITEMS)
+#define TMPFS_INODE_DINDRECT_ITEMS (TMPFS_INODE_INDRECT_ITEMS * TMPFS_INODE_INDRECT_ITEMS)
+#define TMPFS_INODE_TINDRECT_START (TMPFS_INODE_DINDRECT_START + TMPFS_INODE_DINDRECT_ITEMS)
+#define TMPFS_INODE_TINDRECT_ITEMS (TMPFS_INODE_DINDRECT_ITEMS * TMPFS_INODE_INDRECT_ITEMS)
+#define TMPFS_MAX_FILE_SIZE ((TMPFS_INODE_TINDRECT_START + TMPFS_INODE_TINDRECT_ITEMS) * PAGE_SIZE)
+#define TMPFS_IBLOCK(pos) ((pos) >> PAGE_SHIFT)
+#define TMPFS_IBLOCK_OFFSET(pos) ((pos) & PAGE_MASK)
+
+// Error codes
+#define ENOMEM 12
+#define EFBIG 27
+
+// ============================================================================
+// Minimal structures for testing
+// ============================================================================
+struct vfs_inode {
+    loff_t size;
+    int n_blocks;
+};
+
+struct tmpfs_inode {
+    struct vfs_inode vfs_inode;
+    bool embedded;
+    union {
+        union {
+            struct {
+                void *direct[TMPFS_INODE_DBLOCKS];
+                void **indirect;
+                void ***double_indirect;
+                void ****triple_indirect;
+            };
+            uint8 data[0];
+        } file;
+    };
+};
+
+#define TMPFS_INODE_EMBEDDED_DATA_LEN   \
+    (sizeof(struct tmpfs_inode) - offsetof(struct tmpfs_inode, file.data))
+
+// container_of macro
+#define container_of(ptr, type, member) \
+    ((type *)((char *)(ptr) - offsetof(type, member)))
+
+// ============================================================================
+// Mock state tracking
+// ============================================================================
+static int kalloc_call_count = 0;
+static int kfree_call_count = 0;
+static int kalloc_fail_after = -1;  // -1 means never fail
+static void **allocated_blocks = NULL;
+static int allocated_blocks_count = 0;
+static int allocated_blocks_capacity = 0;
+
+static void track_allocation(void *ptr) {
+    if (allocated_blocks_count >= allocated_blocks_capacity) {
+        int new_capacity = allocated_blocks_capacity == 0 ? 256 : allocated_blocks_capacity * 2;
+        allocated_blocks = realloc(allocated_blocks, new_capacity * sizeof(void *));
+        allocated_blocks_capacity = new_capacity;
+    }
+    allocated_blocks[allocated_blocks_count++] = ptr;
+}
+
+static bool is_tracked_allocation(void *ptr) {
+    for (int i = 0; i < allocated_blocks_count; i++) {
+        if (allocated_blocks[i] == ptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void untrack_allocation(void *ptr) {
+    for (int i = 0; i < allocated_blocks_count; i++) {
+        if (allocated_blocks[i] == ptr) {
+            allocated_blocks[i] = allocated_blocks[--allocated_blocks_count];
+            return;
+        }
+    }
+}
+
+static void reset_mock_state(void) {
+    kalloc_call_count = 0;
+    kfree_call_count = 0;
+    kalloc_fail_after = -1;
+    // Free any remaining tracked allocations
+    for (int i = 0; i < allocated_blocks_count; i++) {
+        if (allocated_blocks[i] != NULL) {
+            free(allocated_blocks[i]);
+        }
+    }
+    allocated_blocks_count = 0;
+}
+
+// ============================================================================
+// Stub functions used by truncate.c
+// ============================================================================
+static void *kalloc(void) {
+    kalloc_call_count++;
+    if (kalloc_fail_after >= 0 && kalloc_call_count > kalloc_fail_after) {
+        return NULL;
+    }
+    void *ptr = malloc(PAGE_SIZE);
+    if (ptr != NULL) {
+        memset(ptr, 0, PAGE_SIZE);
+        track_allocation(ptr);
+    }
+    return ptr;
+}
+
+static void kfree(void *ptr) {
+    kfree_call_count++;
+    if (ptr != NULL) {
+        assert_true(is_tracked_allocation(ptr));
+        untrack_allocation(ptr);
+        free(ptr);
+    }
+}
+
+// Panic handling for assertions in truncate.c
+#define ASSERTION_FAILURE "Assertion failure"
+#define PANIC "Panic"
+
+static void __panic_start(void) {
+    // Do nothing
+}
+
+__attribute__((noreturn))
+static void __panic_end(void) {
+    fail_msg("kernel panic reached in host test");
+    abort();
+}
+
+#define __panic(type, fmt, ...) do { \
+    __panic_start(); \
+    print_message("%s: " fmt "\n", type, ##__VA_ARGS__); \
+    __panic_end(); \
+} while (0)
+
+#define panic(fmt, ...) __panic(PANIC, fmt, ##__VA_ARGS__)
+#define assert(expr, fmt, ...) \
+    do { \
+        if (!(expr)) { \
+            __panic(ASSERTION_FAILURE, fmt, ##__VA_ARGS__); \
+        } \
+    } while (0)
+
+// ============================================================================
+// Level item blocks constant (from truncate.c)
+// ============================================================================
+static const int __TMPFS_LEVEL_ITEM_BLOCKS[3] = {
+    1,
+    TMPFS_INODE_INDRECT_ITEMS,
+    TMPFS_INODE_INDRECT_ITEMS * TMPFS_INODE_INDRECT_ITEMS
+};
+
+// ============================================================================
+// Functions from truncate.c (copied here for testing)
+// ============================================================================
+
+void __tmpfs_truncate_free_blocks(void *blocks, int start_block, int end_block, int level) {
+    assert (blocks != NULL, "__tmpfs_truncate_free_blocks: blocks is NULL");
+    assert (start_block >= 0 && end_block >= start_block,
+            "__tmpfs_truncate_free_blocks: invalid block range");
+    assert (level >= 0 && level <= 2,
+            "__tmpfs_truncate_free_blocks: invalid level");
+    if (level == 0) {
+        void **block_array = (void **)blocks;
+        for (int i = start_block; i < end_block; i++) {
+            if (block_array[i] != NULL) {
+                kfree(block_array[i]);
+                block_array[i] = NULL;
+            }
+        }
+        return;
+    }
+
+    int item_blocks = __TMPFS_LEVEL_ITEM_BLOCKS[level];
+    int item_blocks_mask = item_blocks - 1;
+    int item_index = 0;
+    int local_end = 0;
+
+    // Free partially occupied first item if start_block is not aligned
+    if (start_block & item_blocks_mask) {
+        item_index = start_block / item_blocks;
+        local_end = (start_block + item_blocks) & ~item_blocks_mask;
+        if (local_end > end_block) {
+            local_end = end_block;
+        }
+        void **item_ptr = &((void **)blocks)[item_index];
+        if (*item_ptr != NULL) {
+            __tmpfs_truncate_free_blocks(*item_ptr,
+                                          start_block & item_blocks_mask,
+                                          local_end - item_index * item_blocks,
+                                          level - 1);
+        } else {
+            return;
+        }
+        start_block = local_end;
+    }
+    while (start_block < end_block) {
+        item_index = start_block / item_blocks;
+        local_end = start_block + item_blocks;
+        if (local_end > end_block) {
+            local_end = end_block;
+        }
+        void **item_ptr = &((void **)blocks)[item_index];
+        if (*item_ptr != NULL) {
+            __tmpfs_truncate_free_blocks(*item_ptr,
+                                          0,
+                                          local_end - start_block,
+                                          level - 1);
+            kfree(*item_ptr);
+            *item_ptr = NULL;
+        } else {
+            return;
+        }
+        start_block = local_end;
+    }
+}
+
+void __tmpfs_do_shrink_blocks(struct tmpfs_inode *tmpfs_inode, int block_cnt, int new_block_cnt) {
+    int start = 0;
+    int end = 0;
+    if (new_block_cnt == block_cnt) {
+        return;
+    }
+
+    if (TMPFS_INODE_TINDRECT_START < block_cnt) {
+        if (new_block_cnt > TMPFS_INODE_TINDRECT_START) {
+            start = new_block_cnt - TMPFS_INODE_TINDRECT_START;
+            end = block_cnt - TMPFS_INODE_TINDRECT_START;
+        } else {
+            start = 0;
+            end = block_cnt - TMPFS_INODE_TINDRECT_START;
+        }
+        __tmpfs_truncate_free_blocks(tmpfs_inode->file.triple_indirect, start, end, 2);
+        // Free the triple indirect block itself if no longer needed
+        if (new_block_cnt <= (int)TMPFS_INODE_TINDRECT_START && tmpfs_inode->file.triple_indirect != NULL) {
+            kfree(tmpfs_inode->file.triple_indirect);
+            tmpfs_inode->file.triple_indirect = NULL;
+        }
+        block_cnt = TMPFS_INODE_TINDRECT_START;
+        if (new_block_cnt == block_cnt) {
+            return;
+        }
+    }
+
+    if (TMPFS_INODE_DINDRECT_START < block_cnt) {
+        if (new_block_cnt > TMPFS_INODE_DINDRECT_START) {
+            start = new_block_cnt - TMPFS_INODE_DINDRECT_START;
+            end = block_cnt - TMPFS_INODE_DINDRECT_START;
+        } else {
+            start = 0;
+            end = block_cnt - TMPFS_INODE_DINDRECT_START;
+        }
+        __tmpfs_truncate_free_blocks(tmpfs_inode->file.double_indirect, start, end, 1);
+        // Free the double indirect block itself if no longer needed
+        if (new_block_cnt <= (int)TMPFS_INODE_DINDRECT_START && tmpfs_inode->file.double_indirect != NULL) {
+            kfree(tmpfs_inode->file.double_indirect);
+            tmpfs_inode->file.double_indirect = NULL;
+        }
+        block_cnt = TMPFS_INODE_DINDRECT_START;
+        if (new_block_cnt == block_cnt) {
+            return;
+        }
+    }
+
+    if (TMPFS_INODE_INDRECT_START < block_cnt) {
+        if (new_block_cnt > TMPFS_INODE_INDRECT_START) {
+            start = new_block_cnt - TMPFS_INODE_INDRECT_START;
+            end = block_cnt - TMPFS_INODE_INDRECT_START;
+        } else {
+            start = 0;
+            end = block_cnt - TMPFS_INODE_INDRECT_START;
+        }
+        __tmpfs_truncate_free_blocks(tmpfs_inode->file.indirect, start, end, 0);
+        // Free the indirect block itself if no longer needed
+        if (new_block_cnt <= (int)TMPFS_INODE_INDRECT_START && tmpfs_inode->file.indirect != NULL) {
+            kfree(tmpfs_inode->file.indirect);
+            tmpfs_inode->file.indirect = NULL;
+        }
+        block_cnt = TMPFS_INODE_INDRECT_START;
+        if (new_block_cnt == block_cnt) {
+            return;
+        }
+    }
+
+    if (new_block_cnt < block_cnt) {
+        __tmpfs_truncate_free_blocks(&tmpfs_inode->file.direct, new_block_cnt, block_cnt, 0);
+    }
+}
+
+int __tmpfs_truncate_shrink(struct vfs_inode *inode, loff_t new_size) {
+    struct tmpfs_inode *tmpfs_inode = container_of(inode, struct tmpfs_inode, vfs_inode);
+    if (tmpfs_inode->embedded) {
+        return 0;
+    }
+    int new_block_cnt = TMPFS_IBLOCK(new_size + PAGE_SIZE - 1);
+    int block_cnt = inode->n_blocks;
+    __tmpfs_do_shrink_blocks(tmpfs_inode, block_cnt, new_block_cnt);
+    inode->n_blocks = new_block_cnt;
+    return 0;
+}
+
+int __tmpfs_truncate_allocate_blocks(void *blocks, int start_block, int end_block, int level) {
+    assert (blocks != NULL, "__tmpfs_truncate_allocate_blocks: blocks is NULL");
+    assert (start_block >= 0 && end_block >= start_block,
+            "__tmpfs_truncate_allocate_blocks: invalid block range");
+    assert (level >= 0 && level <= 2,
+            "__tmpfs_truncate_allocate_blocks: invalid level");
+    void **block_array = (void **)blocks;
+    if (level == 0) {
+        for (int i = start_block; i < end_block; i++) {
+            assert (block_array[i] == NULL,
+                    "__tmpfs_truncate_allocate_blocks: block already allocated");
+            void *new_block = kalloc();
+            if (new_block == NULL) {
+                // Free previously allocated blocks in this call
+                for (int j = start_block; j < i; j++) {
+                    kfree(block_array[j]);
+                    block_array[j] = NULL;
+                }
+                return -ENOMEM;
+            }
+            memset(new_block, 0, PAGE_SIZE);
+            block_array[i] = new_block;
+        }
+        return 0;
+    }
+    
+    int item_blocks = __TMPFS_LEVEL_ITEM_BLOCKS[level];
+    int item_blocks_mask = item_blocks - 1;
+    int item_index = 0;
+    int local_end = 0;
+    int ret = 0;
+
+    if (start_block & item_blocks_mask) {
+        item_index = start_block / item_blocks;
+        local_end = (start_block + item_blocks) & ~item_blocks_mask;
+        if (local_end > end_block) {
+            local_end = end_block;
+        }
+        void **item_ptr = &((void **)blocks)[item_index];
+        if (*item_ptr == NULL) {
+            void *new_item = kalloc();
+            if (new_item == NULL) {
+                return -ENOMEM;
+            }
+            memset(new_item, 0, PAGE_SIZE);
+            *item_ptr = new_item;
+        }
+        ret = __tmpfs_truncate_allocate_blocks(*item_ptr,
+                                                start_block & item_blocks_mask,
+                                                local_end - item_index * item_blocks,
+                                                level - 1);
+        if (ret != 0) {
+            return ret;
+        }
+        start_block = local_end;
+    }
+    while (start_block < end_block) {
+        item_index = start_block / item_blocks;
+        local_end = start_block + item_blocks;
+        if (local_end > end_block) {
+            local_end = end_block;
+        }
+        void **item_ptr = &((void **)blocks)[item_index];
+        assert (*item_ptr == NULL, 
+                "__tmpfs_truncate_allocate_blocks: item already allocated");
+        void *new_item = kalloc();
+        if (new_item == NULL) {
+            return -ENOMEM;
+        }
+        memset(new_item, 0, PAGE_SIZE);
+        *item_ptr = new_item;
+        ret = __tmpfs_truncate_allocate_blocks(*item_ptr,
+                                                0,
+                                                local_end - start_block,
+                                                level - 1);
+        if (ret != 0) {
+            return ret;
+        }
+        start_block = local_end;
+    }
+
+    return 0;
+}
+
+int __tmpfs_migrate_to_allocated_blocks(struct tmpfs_inode *tmpfs_inode) {
+    void *first_block = kalloc();
+    if (first_block == NULL) {
+        return -ENOMEM;
+    }
+    loff_t size = tmpfs_inode->vfs_inode.size;
+    memcpy(first_block, tmpfs_inode->file.data, size);
+    memset(first_block + size, 0, PAGE_SIZE - size);
+    tmpfs_inode->file.direct[0] = first_block;
+    tmpfs_inode->embedded = false;
+    tmpfs_inode->vfs_inode.n_blocks = 1;
+    return 0;
+}
+
+void __tmpfs_zero_tail(struct vfs_inode *inode, loff_t new_size) {
+    (void)inode;
+    (void)new_size;
+    // Simplified for testing - in real code this zeros the tail of the last block
+}
+
+int __tmpfs_truncate_grow(struct vfs_inode *inode, loff_t new_size) {
+    struct tmpfs_inode *tmpfs_inode = container_of(inode, struct tmpfs_inode, vfs_inode);
+    int ret = 0;
+    bool was_embedded = tmpfs_inode->embedded;
+    if (tmpfs_inode->embedded) {
+        if (new_size <= (loff_t)TMPFS_INODE_EMBEDDED_DATA_LEN) {
+            memset(&tmpfs_inode->file.data[inode->size], 0, new_size - inode->size);
+            return 0;
+        }
+        ret = __tmpfs_migrate_to_allocated_blocks(tmpfs_inode);
+        if (ret != 0) {
+            return ret;
+        }
+    }
+    int old_block_cnt = inode->n_blocks;
+    int new_block_cnt = TMPFS_IBLOCK(new_size + PAGE_SIZE - 1);
+    if (new_block_cnt == old_block_cnt) {
+        if (!was_embedded) {
+            __tmpfs_zero_tail(inode, new_size);
+        }
+        return 0;
+    }
+
+    int this_start_block = old_block_cnt;
+    int this_end_block = 0;
+    
+    if (this_start_block < (int)TMPFS_INODE_INDRECT_START) {
+        this_end_block = TMPFS_INODE_INDRECT_START;
+        if (new_block_cnt < this_end_block) {
+            this_end_block = new_block_cnt;
+        }
+        ret = __tmpfs_truncate_allocate_blocks(tmpfs_inode->file.direct, this_start_block, this_end_block, 0);
+        if (ret != 0) {
+            goto fail;
+        }
+        inode->n_blocks = this_end_block;  // Update n_blocks after successful allocation
+        this_start_block = this_end_block;
+        if (new_block_cnt == this_start_block) {
+            return 0;
+        }
+    }
+    if (new_block_cnt > (int)TMPFS_INODE_INDRECT_START) {
+        this_end_block = TMPFS_INODE_DINDRECT_START;
+        if (new_block_cnt < this_end_block) {
+            this_end_block = new_block_cnt;
+        }
+        if (tmpfs_inode->file.indirect == NULL) {
+            tmpfs_inode->file.indirect = kalloc();
+            if (tmpfs_inode->file.indirect == NULL) {
+                ret = -ENOMEM;
+                goto fail;
+            }
+        }
+        ret = __tmpfs_truncate_allocate_blocks(tmpfs_inode->file.indirect, 
+                                                this_start_block - TMPFS_INODE_INDRECT_START, 
+                                                this_end_block - TMPFS_INODE_INDRECT_START, 0);
+        if (ret != 0) {
+            goto fail;
+        }
+        inode->n_blocks = this_end_block;  // Update n_blocks after successful allocation
+        this_start_block = this_end_block;
+        if (new_block_cnt == this_start_block) {
+            return 0;
+        }
+    }
+    if (new_block_cnt > (int)TMPFS_INODE_DINDRECT_START) {
+        this_end_block = TMPFS_INODE_TINDRECT_START;
+        if (new_block_cnt < this_end_block) {
+            this_end_block = new_block_cnt;
+        }
+        if (tmpfs_inode->file.double_indirect == NULL) {
+            tmpfs_inode->file.double_indirect = kalloc();
+            if (tmpfs_inode->file.double_indirect == NULL) {
+                ret = -ENOMEM;
+                goto fail;
+            }
+        }
+        ret = __tmpfs_truncate_allocate_blocks(tmpfs_inode->file.double_indirect, 
+                                                this_start_block - TMPFS_INODE_DINDRECT_START, 
+                                                this_end_block - TMPFS_INODE_DINDRECT_START, 1);
+        if (ret != 0) {
+            goto fail;
+        }
+        inode->n_blocks = this_end_block;  // Update n_blocks after successful allocation
+        this_start_block = this_end_block;
+        if (new_block_cnt == this_start_block) {
+            return 0;
+        }
+    }
+    if (new_block_cnt > (int)TMPFS_INODE_TINDRECT_START) {
+        if (tmpfs_inode->file.triple_indirect == NULL) {
+            tmpfs_inode->file.triple_indirect = kalloc();
+            if (tmpfs_inode->file.triple_indirect == NULL) {
+                ret = -ENOMEM;
+                goto fail;
+            }
+        }
+        ret = __tmpfs_truncate_allocate_blocks(tmpfs_inode->file.triple_indirect, 
+                                                this_start_block - TMPFS_INODE_TINDRECT_START, 
+                                                new_block_cnt - TMPFS_INODE_TINDRECT_START, 2);
+        if (ret != 0) {
+            goto fail;
+        }
+    }
+    inode->n_blocks = new_block_cnt;
+    return 0;
+fail:
+    __tmpfs_do_shrink_blocks(tmpfs_inode, inode->n_blocks, old_block_cnt);
+    // If we migrated from embedded and failed, we need to undo the migration
+    if (was_embedded && old_block_cnt == 1 && inode->n_blocks == 1) {
+        // Copy data back from block to embedded area before freeing
+        void *block = tmpfs_inode->file.direct[0];
+        loff_t size = inode->size;
+        tmpfs_inode->embedded = true;
+        memcpy(tmpfs_inode->file.data, block, size);
+        kfree(block);
+        inode->n_blocks = 0;
+    }
+    return ret;
+}
+
+int __tmpfs_truncate(struct vfs_inode *inode, loff_t new_size) {
+    if (new_size > (loff_t)TMPFS_MAX_FILE_SIZE) {
+        return -EFBIG;
+    }
+    int ret = 0;
+    if (inode->size < new_size) {
+        ret = __tmpfs_truncate_grow(inode, new_size);
+    } else if (inode->size > new_size) {
+        ret = __tmpfs_truncate_shrink(inode, new_size);
+    }
+    if (ret == 0) {
+        inode->size = new_size;
+    }
+    return ret;
+}
+
+// ============================================================================
+// Test fixtures
+// ============================================================================
+static struct tmpfs_inode *create_test_inode(void) {
+    struct tmpfs_inode *inode = calloc(1, sizeof(struct tmpfs_inode));
+    inode->vfs_inode.size = 0;
+    inode->vfs_inode.n_blocks = 0;
+    inode->embedded = true;
+    return inode;
+}
+
+static void destroy_test_inode(struct tmpfs_inode *inode) {
+    free(inode);
+}
+
+static int test_setup(void **state) {
+    (void)state;
+    reset_mock_state();
+    return 0;
+}
+
+static int test_teardown(void **state) {
+    (void)state;
+    // Verify no memory leaks
+    if (allocated_blocks_count != 0) {
+        print_message("Memory leak detected: %d blocks still allocated\n", allocated_blocks_count);
+    }
+    assert_int_equal(allocated_blocks_count, 0);
+    reset_mock_state();
+    return 0;
+}
+
+// ============================================================================
+// Positive tests for __tmpfs_truncate
+// ============================================================================
+
+// Test truncate with same size (no-op)
+static void test_truncate_same_size(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 100;
+    inode->embedded = true;
+
+    int ret = __tmpfs_truncate(&inode->vfs_inode, 100);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.size, 100);
+
+    destroy_test_inode(inode);
+}
+
+// Test truncate grow within embedded data
+static void test_truncate_grow_embedded(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 10;
+    inode->embedded = true;
+
+    int ret = __tmpfs_truncate(&inode->vfs_inode, 50);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.size, 50);
+    assert_true(inode->embedded);
+
+    destroy_test_inode(inode);
+}
+
+// Test truncate shrink within embedded data
+static void test_truncate_shrink_embedded(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 100;
+    inode->embedded = true;
+
+    int ret = __tmpfs_truncate(&inode->vfs_inode, 50);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.size, 50);
+    assert_true(inode->embedded);
+
+    destroy_test_inode(inode);
+}
+
+// Test truncate shrink to zero from embedded
+static void test_truncate_shrink_to_zero_embedded(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 100;
+    inode->embedded = true;
+
+    int ret = __tmpfs_truncate(&inode->vfs_inode, 0);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.size, 0);
+
+    destroy_test_inode(inode);
+}
+
+// Test truncate grow from embedded to one block
+static void test_truncate_grow_embedded_to_one_block(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 10;
+    inode->embedded = true;
+
+    loff_t new_size = TMPFS_INODE_EMBEDDED_DATA_LEN + 100;
+    int ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.size, new_size);
+    assert_false(inode->embedded);
+    assert_int_equal(inode->vfs_inode.n_blocks, 1);
+
+    // Cleanup: shrink back to free the block
+    ret = __tmpfs_truncate(&inode->vfs_inode, 0);
+    assert_int_equal(ret, 0);
+
+    destroy_test_inode(inode);
+}
+
+// Test truncate grow to multiple direct blocks
+static void test_truncate_grow_direct_blocks(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 10;
+    inode->embedded = true;
+
+    loff_t new_size = PAGE_SIZE * 5;
+    int ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.size, new_size);
+    assert_false(inode->embedded);
+    assert_int_equal(inode->vfs_inode.n_blocks, 5);
+
+    // Verify direct blocks are allocated
+    for (int i = 0; i < 5; i++) {
+        assert_non_null(inode->file.direct[i]);
+    }
+
+    // Cleanup
+    ret = __tmpfs_truncate(&inode->vfs_inode, 0);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, 0);
+
+    destroy_test_inode(inode);
+}
+
+// Test truncate shrink from multiple direct blocks
+static void test_truncate_shrink_direct_blocks(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 0;
+    inode->embedded = true;
+
+    // First grow to 10 blocks
+    loff_t new_size = PAGE_SIZE * 10;
+    int ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, 10);
+
+    // Now shrink to 3 blocks
+    new_size = PAGE_SIZE * 3;
+    ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.size, new_size);
+    assert_int_equal(inode->vfs_inode.n_blocks, 3);
+
+    // Verify only first 3 blocks remain
+    for (int i = 0; i < 3; i++) {
+        assert_non_null(inode->file.direct[i]);
+    }
+    for (int i = 3; i < 10; i++) {
+        assert_null(inode->file.direct[i]);
+    }
+
+    // Cleanup
+    ret = __tmpfs_truncate(&inode->vfs_inode, 0);
+    assert_int_equal(ret, 0);
+
+    destroy_test_inode(inode);
+}
+
+// Test truncate shrink to zero from direct blocks
+static void test_truncate_shrink_to_zero_direct(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 0;
+    inode->embedded = true;
+
+    // First grow to 5 blocks
+    loff_t new_size = PAGE_SIZE * 5;
+    int ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
+    assert_int_equal(ret, 0);
+
+    int kfree_before = kfree_call_count;
+
+    // Now shrink to 0
+    ret = __tmpfs_truncate(&inode->vfs_inode, 0);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.size, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, 0);
+
+    // Verify all blocks were freed (5 data blocks)
+    assert_int_equal(kfree_call_count - kfree_before, 5);
+
+    destroy_test_inode(inode);
+}
+
+// ============================================================================
+// Negative tests for __tmpfs_truncate
+// ============================================================================
+
+// Test truncate to size exceeding maximum
+static void test_truncate_exceed_max_size(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 0;
+    inode->embedded = true;
+
+    int ret = __tmpfs_truncate(&inode->vfs_inode, TMPFS_MAX_FILE_SIZE + 1);
+    assert_int_equal(ret, -EFBIG);
+    assert_int_equal(inode->vfs_inode.size, 0);
+
+    destroy_test_inode(inode);
+}
+
+// Test truncate with allocation failure during grow
+static void test_truncate_grow_alloc_failure(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 0;
+    inode->embedded = true;
+
+    // Make kalloc fail after the first allocation (migration block)
+    kalloc_fail_after = 1;
+
+    loff_t new_size = PAGE_SIZE * 5;
+    int ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
+    assert_int_equal(ret, -ENOMEM);
+    // Size should not have changed on failure
+    assert_int_equal(inode->vfs_inode.size, 0);
+
+    destroy_test_inode(inode);
+}
+
+// Test truncate grow with allocation failure after some blocks allocated
+static void test_truncate_grow_partial_alloc_failure(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 0;
+    inode->embedded = true;
+
+    // First successful grow to establish non-embedded state
+    int ret = __tmpfs_truncate(&inode->vfs_inode, PAGE_SIZE * 2);
+    assert_int_equal(ret, 0);
+
+    int blocks_before = inode->vfs_inode.n_blocks;
+
+    // Now fail after 2 more allocations
+    kalloc_fail_after = kalloc_call_count + 2;
+
+    ret = __tmpfs_truncate(&inode->vfs_inode, PAGE_SIZE * 10);
+    assert_int_equal(ret, -ENOMEM);
+    // Size should not have changed
+    assert_int_equal(inode->vfs_inode.size, PAGE_SIZE * 2);
+    assert_int_equal(inode->vfs_inode.n_blocks, blocks_before);
+
+    // Cleanup
+    kalloc_fail_after = -1;
+    ret = __tmpfs_truncate(&inode->vfs_inode, 0);
+    assert_int_equal(ret, 0);
+
+    destroy_test_inode(inode);
+}
+
+// ============================================================================
+// Tests for __tmpfs_truncate_free_blocks
+// ============================================================================
+
+// Test freeing a simple range of blocks at level 0
+static void test_free_blocks_level0_simple(void **state) {
+    (void)state;
+    void *blocks[8];
+    
+    // Allocate blocks
+    for (int i = 0; i < 8; i++) {
+        blocks[i] = kalloc();
+        assert_non_null(blocks[i]);
+    }
+
+    int kfree_before = kfree_call_count;
+    __tmpfs_truncate_free_blocks(blocks, 2, 6, 0);
+
+    // Verify blocks 2-5 were freed
+    assert_int_equal(kfree_call_count - kfree_before, 4);
+    for (int i = 0; i < 2; i++) {
+        assert_non_null(blocks[i]);
+    }
+    for (int i = 2; i < 6; i++) {
+        assert_null(blocks[i]);
+    }
+    for (int i = 6; i < 8; i++) {
+        assert_non_null(blocks[i]);
+    }
+
+    // Cleanup remaining blocks
+    for (int i = 0; i < 8; i++) {
+        if (blocks[i] != NULL) {
+            kfree(blocks[i]);
+        }
+    }
+}
+
+// Test freeing all blocks at level 0
+static void test_free_blocks_level0_all(void **state) {
+    (void)state;
+    void *blocks[8];
+    
+    // Allocate blocks
+    for (int i = 0; i < 8; i++) {
+        blocks[i] = kalloc();
+        assert_non_null(blocks[i]);
+    }
+
+    int kfree_before = kfree_call_count;
+    __tmpfs_truncate_free_blocks(blocks, 0, 8, 0);
+
+    assert_int_equal(kfree_call_count - kfree_before, 8);
+    for (int i = 0; i < 8; i++) {
+        assert_null(blocks[i]);
+    }
+}
+
+// Test freeing with NULL blocks at level 0
+static void test_free_blocks_level0_with_nulls(void **state) {
+    (void)state;
+    void *blocks[8] = {0};
+    
+    // Only allocate some blocks
+    blocks[0] = kalloc();
+    blocks[2] = kalloc();
+    blocks[4] = kalloc();
+
+    int kfree_before = kfree_call_count;
+    __tmpfs_truncate_free_blocks(blocks, 0, 5, 0);
+
+    // Only the non-NULL blocks should be freed
+    assert_int_equal(kfree_call_count - kfree_before, 3);
+    for (int i = 0; i < 5; i++) {
+        assert_null(blocks[i]);
+    }
+}
+
+// Test freeing empty range at level 0
+static void test_free_blocks_level0_empty_range(void **state) {
+    (void)state;
+    void *blocks[4];
+    
+    for (int i = 0; i < 4; i++) {
+        blocks[i] = kalloc();
+    }
+
+    int kfree_before = kfree_call_count;
+    __tmpfs_truncate_free_blocks(blocks, 2, 2, 0);
+
+    // No blocks should be freed
+    assert_int_equal(kfree_call_count - kfree_before, 0);
+    for (int i = 0; i < 4; i++) {
+        assert_non_null(blocks[i]);
+    }
+
+    // Cleanup
+    for (int i = 0; i < 4; i++) {
+        kfree(blocks[i]);
+    }
+}
+
+// ============================================================================
+// Tests for __tmpfs_do_shrink_blocks
+// ============================================================================
+
+// Test shrink with no blocks to free
+static void test_shrink_blocks_no_change(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->embedded = false;
+    inode->vfs_inode.n_blocks = 5;
+
+    int kfree_before = kfree_call_count;
+    __tmpfs_do_shrink_blocks(inode, 5, 5);
+
+    assert_int_equal(kfree_call_count - kfree_before, 0);
+
+    destroy_test_inode(inode);
+}
+
+// ============================================================================
+// Edge case tests
+// ============================================================================
+
+// Test truncate at exact block boundary
+static void test_truncate_exact_block_boundary(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 0;
+    inode->embedded = true;
+
+    // Grow to exactly 2 pages
+    loff_t new_size = PAGE_SIZE * 2;
+    int ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, 2);
+
+    // Shrink to exactly 1 page
+    new_size = PAGE_SIZE;
+    ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, 1);
+
+    // Cleanup
+    ret = __tmpfs_truncate(&inode->vfs_inode, 0);
+    assert_int_equal(ret, 0);
+
+    destroy_test_inode(inode);
+}
+
+// Test truncate at one byte before block boundary
+static void test_truncate_one_byte_before_boundary(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 0;
+    inode->embedded = true;
+
+    // Grow to 2 pages
+    int ret = __tmpfs_truncate(&inode->vfs_inode, PAGE_SIZE * 2);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, 2);
+
+    // Shrink to one byte before page boundary (needs 1 block)
+    loff_t new_size = PAGE_SIZE - 1;
+    ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, 1);
+
+    // Cleanup
+    ret = __tmpfs_truncate(&inode->vfs_inode, 0);
+    assert_int_equal(ret, 0);
+
+    destroy_test_inode(inode);
+}
+
+// Test truncate at one byte after block boundary
+static void test_truncate_one_byte_after_boundary(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 0;
+    inode->embedded = true;
+
+    // Grow to just past one page boundary (needs 2 blocks)
+    loff_t new_size = PAGE_SIZE + 1;
+    int ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, 2);
+
+    // Cleanup
+    ret = __tmpfs_truncate(&inode->vfs_inode, 0);
+    assert_int_equal(ret, 0);
+
+    destroy_test_inode(inode);
+}
+
+// Test multiple grow/shrink cycles
+static void test_truncate_multiple_cycles(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 0;
+    inode->embedded = true;
+
+    int ret;
+    
+    // Cycle 1: grow then shrink
+    ret = __tmpfs_truncate(&inode->vfs_inode, PAGE_SIZE * 5);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, 5);
+
+    ret = __tmpfs_truncate(&inode->vfs_inode, PAGE_SIZE * 2);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, 2);
+
+    // Cycle 2: grow again
+    ret = __tmpfs_truncate(&inode->vfs_inode, PAGE_SIZE * 8);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, 8);
+
+    // Cycle 3: shrink to 0
+    ret = __tmpfs_truncate(&inode->vfs_inode, 0);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, 0);
+
+    destroy_test_inode(inode);
+}
+
+// Test growing to all direct blocks
+static void test_truncate_all_direct_blocks(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 0;
+    inode->embedded = true;
+
+    // Grow to use all direct blocks
+    loff_t new_size = PAGE_SIZE * TMPFS_INODE_DBLOCKS;
+    int ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, (int)TMPFS_INODE_DBLOCKS);
+
+    // Verify all direct blocks are allocated
+    for (int i = 0; i < (int)TMPFS_INODE_DBLOCKS; i++) {
+        assert_non_null(inode->file.direct[i]);
+    }
+
+    // Cleanup
+    ret = __tmpfs_truncate(&inode->vfs_inode, 0);
+    assert_int_equal(ret, 0);
+
+    destroy_test_inode(inode);
+}
+
+// Test growing to indirect blocks
+static void test_truncate_indirect_blocks(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 0;
+    inode->embedded = true;
+
+    // Grow beyond direct blocks to use indirect blocks
+    loff_t new_size = PAGE_SIZE * (TMPFS_INODE_DBLOCKS + 10);
+    int ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, (int)(TMPFS_INODE_DBLOCKS + 10));
+
+    // Verify indirect block is allocated
+    assert_non_null(inode->file.indirect);
+
+    // Cleanup
+    ret = __tmpfs_truncate(&inode->vfs_inode, 0);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, 0);
+
+    destroy_test_inode(inode);
+}
+
+// Test shrinking from indirect to direct
+static void test_truncate_shrink_indirect_to_direct(void **state) {
+    (void)state;
+    struct tmpfs_inode *inode = create_test_inode();
+    inode->vfs_inode.size = 0;
+    inode->embedded = true;
+
+    // Grow to indirect blocks
+    loff_t new_size = PAGE_SIZE * (TMPFS_INODE_DBLOCKS + 10);
+    int ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
+    assert_int_equal(ret, 0);
+    assert_non_null(inode->file.indirect);
+
+    // Shrink back to direct only
+    new_size = PAGE_SIZE * 5;
+    ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
+    assert_int_equal(ret, 0);
+    assert_int_equal(inode->vfs_inode.n_blocks, 5);
+
+    // Cleanup
+    ret = __tmpfs_truncate(&inode->vfs_inode, 0);
+    assert_int_equal(ret, 0);
+
+    destroy_test_inode(inode);
+}
+
+// Test allocate blocks returns ENOMEM on first allocation
+static void test_allocate_blocks_first_alloc_fails(void **state) {
+    (void)state;
+    void *blocks[4] = {0};
+    
+    kalloc_fail_after = 0;  // Fail immediately
+    
+    int ret = __tmpfs_truncate_allocate_blocks(blocks, 0, 4, 0);
+    assert_int_equal(ret, -ENOMEM);
+    
+    // No blocks should have been allocated
+    for (int i = 0; i < 4; i++) {
+        assert_null(blocks[i]);
+    }
+}
+
+// Test level 1 free blocks (indirect)
+static void test_free_blocks_level1(void **state) {
+    (void)state;
+    
+    // Create an indirect block array
+    void **indirect = calloc(TMPFS_INODE_INDRECT_ITEMS, sizeof(void *));
+    assert_non_null(indirect);
+    
+    // Allocate a few data blocks via the indirect table
+    for (int i = 0; i < 5; i++) {
+        indirect[i] = kalloc();
+        assert_non_null(indirect[i]);
+    }
+    
+    int kfree_before = kfree_call_count;
+    
+    // Free blocks 1-4 (indices 1, 2, 3 - 3 blocks)
+    __tmpfs_truncate_free_blocks(indirect, 1, 4, 0);
+    
+    assert_int_equal(kfree_call_count - kfree_before, 3);
+    assert_non_null(indirect[0]);  // Should remain
+    assert_null(indirect[1]);
+    assert_null(indirect[2]);
+    assert_null(indirect[3]);
+    assert_non_null(indirect[4]);  // Should remain
+    
+    // Cleanup
+    kfree(indirect[0]);
+    kfree(indirect[4]);
+    free(indirect);
+}
+
+// ============================================================================
+// Main
+// ============================================================================
+int main(void) {
+    const struct CMUnitTest tests[] = {
+        // Positive tests
+        cmocka_unit_test_setup_teardown(test_truncate_same_size, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_grow_embedded, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_shrink_embedded, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_shrink_to_zero_embedded, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_grow_embedded_to_one_block, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_grow_direct_blocks, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_shrink_direct_blocks, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_shrink_to_zero_direct, test_setup, test_teardown),
+        
+        // Negative tests
+        cmocka_unit_test_setup_teardown(test_truncate_exceed_max_size, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_grow_alloc_failure, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_grow_partial_alloc_failure, test_setup, test_teardown),
+        
+        // Free blocks tests
+        cmocka_unit_test_setup_teardown(test_free_blocks_level0_simple, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_free_blocks_level0_all, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_free_blocks_level0_with_nulls, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_free_blocks_level0_empty_range, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_free_blocks_level1, test_setup, test_teardown),
+        
+        // Shrink blocks tests
+        cmocka_unit_test_setup_teardown(test_shrink_blocks_no_change, test_setup, test_teardown),
+        
+        // Edge case tests
+        cmocka_unit_test_setup_teardown(test_truncate_exact_block_boundary, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_one_byte_before_boundary, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_one_byte_after_boundary, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_multiple_cycles, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_all_direct_blocks, test_setup, test_teardown),
+        
+        // Indirect block tests
+        cmocka_unit_test_setup_teardown(test_truncate_indirect_blocks, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_shrink_indirect_to_direct, test_setup, test_teardown),
+        
+        // Allocation failure tests
+        cmocka_unit_test_setup_teardown(test_allocate_blocks_first_alloc_fails, test_setup, test_teardown),
+    };
+
+    return cmocka_run_group_tests(tests, NULL, NULL);
+}

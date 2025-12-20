@@ -69,7 +69,7 @@ int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
 int vfs_symlink(struct vfs_inode *dir, struct vfs_inode **new_inode,
                 mode_t mode, const char *name, size_t name_len,
                 const char *target, size_t target_len, bool user);
-int vfs_truncate(struct vfs_inode *inode, uint64 new_size);
+int vfs_truncate(struct vfs_inode *inode, loff_t new_size);
 
 // Special inode locking operations for deadlock avoidance
 void vfs_ilock_two_nondirectories(struct vfs_inode *inode1, struct vfs_inode *inode2);
