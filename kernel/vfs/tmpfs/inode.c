@@ -244,6 +244,7 @@ static int __tmpfs_alloc_link_inode(struct tmpfs_inode *dir, mode_t mode, struct
         if (vfs_inode != NULL) {
             vfs_iunlock(vfs_inode);
         }
+        __tmpfs_do_unlink(dentry);
         goto done;
     }
     tmpfs_inode = container_of(vfs_inode, struct tmpfs_inode, vfs_inode);
@@ -413,6 +414,7 @@ int __tmpfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len, boo
     }
     target->n_links--;
     __tmpfs_do_unlink(tmpfs_dentry);
+    __tmpfs_free_dentry(tmpfs_dentry);
     if (target->n_links > 0) {
         vfs_iunlock(target);
         ret = 0;
@@ -495,6 +497,7 @@ int __tmpfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len, bool
     assert(target->n_links == 1, "Tmpfs rmdir: directory link count is not 1");
     target->n_links--;
     __tmpfs_do_unlink(tmpfs_dentry);
+    __tmpfs_free_dentry(tmpfs_dentry);
     ret = vfs_remove_inode(target->sb, target);
     assert(ret == 0, "Tmpfs rmdir: failed to remove inode, errno=%d", ret);
     // Because the target has been detached from its superblock,
@@ -590,9 +593,12 @@ int __tmpfs_symlink(struct vfs_inode *dir, struct vfs_inode **ret_inode,
         ret = __tmpfs_make_symlink_target(new_inode, target, target_len);
         if (ret != 0) {
             __tmpfs_do_unlink(dentry);
-            ret = vfs_remove_inode(dir->sb, &new_inode->vfs_inode);
-            assert(ret == 0, "Tmpfs symlink: failed to remove inode after symlink target allocation failure, errno=%d", ret);
+            int rm_ret = vfs_remove_inode(dir->sb, &new_inode->vfs_inode);
+            assert(rm_ret == 0, "Tmpfs symlink: failed to remove inode after symlink target allocation failure, errno=%d", rm_ret);
             __tmpfs_free_dentry(dentry);
+            // Inode is locked and detached from superblock; directly free it
+            vfs_iunlock(&new_inode->vfs_inode);
+            tmpfs_free_inode(&new_inode->vfs_inode);
             *ret_inode = NULL;
             return ret;
         }

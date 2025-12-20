@@ -90,7 +90,7 @@ retry:
     vfs_superblock_wlock(sb);
     vfs_ilock(inode);
 
-    assert(inode->mount, "vfs_iput: refount of mountpoint inode reached zero");
+    assert(!inode->mount, "vfs_iput: refcount of mountpoint inode reached zero");
 
     // Retry decreasing refcount again, as it may have changed meanwhile
     if (atomic_dec_unless(&inode->ref_count, 1)) {
