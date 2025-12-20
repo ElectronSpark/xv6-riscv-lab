@@ -86,6 +86,25 @@ void kmm_free(void *ptr) {
     pop_off();
 }
 
+// Shrink all kmm slab caches, releasing unused slabs back to buddy system
+void kmm_shrink_all(void) {
+  for (int i = 0; i < SLAB_CACHE_NUMS; i++) {
+    slab_cache_shrink(__kmm_slab_cache[i], 0x7fffffff);
+  }
+}
+
+// Get total free pages from buddy system
+uint64 get_total_free_pages(void) {
+  uint64 total = 0;
+  uint64 ret_arr[PAGE_BUDDY_MAX_ORDER + 1] = { 0 };
+  bool empty_arr[PAGE_BUDDY_MAX_ORDER + 1] = { false };
+  page_buddy_stat(ret_arr, empty_arr, PAGE_BUDDY_MAX_ORDER + 1);
+  for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+    total += (1UL << i) * ret_arr[i];
+  }
+  return total;
+}
+
 // Free the page of physical memory pointed at by pa,
 // which normally should have been returned by a
 // call to kalloc().  (The exception is when

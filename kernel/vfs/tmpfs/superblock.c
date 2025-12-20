@@ -15,6 +15,7 @@
 #include "list.h"
 #include "hlist.h"
 #include "slab.h"
+#include "page.h"
 #include "tmpfs_private.h"
 #include "tmpfs_smoketest.h"
 
@@ -42,6 +43,12 @@ static int __tmpfs_init_cache(void) {
     return slab_cache_init(&__tmpfs_sb_cache, "tmpfs_superblock_cache",
                            sizeof(struct tmpfs_superblock), 
                            SLAB_FLAG_EMBEDDED);
+}
+
+// Shrink all tmpfs slab caches to release unused memory
+void tmpfs_shrink_caches(void) {
+    slab_cache_shrink(&__tmpfs_inode_cache, 0x7fffffff);
+    slab_cache_shrink(&__tmpfs_sb_cache, 0x7fffffff);
 }
 
 static uint64 __tmpfs_ino_alloc(struct tmpfs_sb_private *private_data) {
@@ -181,9 +188,6 @@ struct vfs_fs_type_ops tmpfs_fs_type_ops = {
     .free = tmpfs_free,
 };
 
-// Declared in tmpfs_smoketest.c
-void tmpfs_run_inode_smoketest(void);
-
 void tmpfs_init_fs_type(void) {
     // Initialize tmpfs inode and superblock caches
     int ret = __tmpfs_init_cache();
@@ -212,5 +216,34 @@ void tmpfs_init_fs_type(void) {
     printf("tmpfs max file size=%lu bytes\n", TMPFS_MAX_FILE_SIZE);
     printf("TMPFS_INODE_DBLOCKS=%lu, TMPFS_INODE_INDRECT_ITEMS=%lu\n",
            TMPFS_INODE_DBLOCKS, TMPFS_INODE_INDRECT_ITEMS);
+
+    // Shrink all caches before baseline to get a clean state
+    tmpfs_shrink_caches();
+    kmm_shrink_all();
+
+    // Memory leak check for inode smoketest
+    uint64 before_pages = get_total_free_pages();
     tmpfs_run_inode_smoketest();
+    tmpfs_shrink_caches();
+    kmm_shrink_all();
+    uint64 after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: inode_smoketest leaked %ld pages\n", 
+               (long)(before_pages - after_pages));
+    } else {
+        printf("inode_smoketest: no memory leak detected\n");
+    }
+
+    // Memory leak check for truncate smoketest
+    before_pages = get_total_free_pages();
+    tmpfs_run_truncate_smoketest();
+    tmpfs_shrink_caches();
+    kmm_shrink_all();
+    after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: truncate_smoketest leaked %ld pages\n",
+               (long)(before_pages - after_pages));
+    } else {
+        printf("truncate_smoketest: no memory leak detected\n");
+    }
 }

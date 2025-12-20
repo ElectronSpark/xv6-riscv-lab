@@ -83,6 +83,8 @@ void            kfree(void *);
 void            kinit(void);
 void*           kmm_alloc(size_t);
 void            kmm_free(void *);
+void            kmm_shrink_all(void);
+uint64          get_total_free_pages(void);
 
 // log.c
 void            initlog(int, struct superblock*);
