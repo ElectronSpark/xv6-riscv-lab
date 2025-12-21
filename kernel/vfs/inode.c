@@ -702,6 +702,17 @@ int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode) {
         kmm_free(pathbuf);
         return ret;
     }
+    if (rooti->mount) {
+        if (rooti->mnt_rooti == NULL) {
+            vfs_iput(rooti);
+            kmm_free(pathbuf);
+            return -EINVAL; // Mounted root inode has no mounted root
+        }
+        struct vfs_inode *mnt_root = rooti->mnt_rooti;
+        vfs_idup(mnt_root);
+        vfs_iput(rooti);
+        rooti = mnt_root;
+    }
 
     if (path[0] == '/') {
         // Absolute path, start from root
@@ -749,7 +760,7 @@ int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode) {
 
             // If at mounted root, go to mountpoint first, then lookup ".."
             if (pos->sb != NULL && pos->sb->mountpoint != NULL && 
-                pos == pos->sb->root_inode) {
+                vfs_inode_is_local_root(pos)) {
                 struct vfs_inode *mountpoint = pos->sb->mountpoint;
                 vfs_idup(mountpoint);
                 vfs_iput(pos);
