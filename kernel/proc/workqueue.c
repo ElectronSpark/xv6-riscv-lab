@@ -1,4 +1,5 @@
 #include "types.h"
+#include "string.h"
 #include "errno.h"
 #include "param.h"
 #include "memlayout.h"

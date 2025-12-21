@@ -168,21 +168,6 @@ void            mutex_unlock(mutex_t*);
 int             holding_mutex(mutex_t*);
 void            mutex_init(mutex_t*, char*);
 
-// string.c
-#ifndef HOST_TEST
-int             memcmp(const void*, const void*, uint);
-void*           memmove(void*, const void*, uint);
-void*           memcpy(void*, const void*, uint);
-void*           memset(void*, int, uint);
-char*           safestrcpy(char*, const char*, int);
-int             strlen(const char*);
-int             strncmp(const char*, const char*, uint);
-char*           strncpy(char*, const char*, int);
-char *          strcat(char *dest, const char *src);
-#else
-#include <string.h>
-#endif              /* HOST_TEST */
-
 // syscall.c
 void            argint(int, int*);
 int             argstr(int, char*, int);

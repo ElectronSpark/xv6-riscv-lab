@@ -1,5 +1,6 @@
 #include "param.h"
 #include "types.h"
+#include "string.h"
 #include "memlayout.h"
 #include "elf.h"
 #include "riscv.h"

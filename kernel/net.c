@@ -3,6 +3,7 @@
 //
 
 #include "types.h"
+#include "string.h"
 #include "param.h"
 #include "memlayout.h"
 #include "riscv.h"

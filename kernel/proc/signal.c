@@ -1,4 +1,5 @@
 #include "types.h"
+#include "string.h"
 #include "param.h"
 #include "riscv.h"
 #include "defs.h"

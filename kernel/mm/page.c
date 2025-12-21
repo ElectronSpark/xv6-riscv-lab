@@ -1,6 +1,7 @@
 // Page allocator, managing free pages.
 // Free pages are managed by buddy system.
 #include "types.h"
+#include "string.h"
 #include "param.h"
 #include "memlayout.h"
 #include "spinlock.h"

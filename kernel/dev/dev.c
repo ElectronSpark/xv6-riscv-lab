@@ -1,5 +1,6 @@
 #include <param.h>
 #include <types.h>
+#include "string.h"
 #include <riscv.h>
 #include <dev.h>
 #include <defs.h>

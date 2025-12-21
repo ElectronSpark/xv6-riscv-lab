@@ -1,115 +1,111 @@
 #include "types.h"
 
-void*
-memset(void *dst, int c, uint n)
+void *memset(void *dst, int c, size_t n)
 {
-  char *cdst = (char *) dst;
-  int i;
-  for(i = 0; i < n; i++){
-    cdst[i] = c;
-  }
-  return dst;
-}
-
-int
-memcmp(const void *v1, const void *v2, uint n)
-{
-  const uchar *s1, *s2;
-
-  s1 = v1;
-  s2 = v2;
-  while(n-- > 0){
-    if(*s1 != *s2)
-      return *s1 - *s2;
-    s1++, s2++;
-  }
-
-  return 0;
-}
-
-void*
-memmove(void *dst, const void *src, uint n)
-{
-  const char *s;
-  char *d;
-
-  if(n == 0)
+    char *cdst = (char *) dst;
+    for(size_t i = 0; i < n; i++) {
+        cdst[i] = c;
+    }
     return dst;
-  
-  s = src;
-  d = dst;
-  if(s < d && s + n > d){
-    s += n;
-    d += n;
-    while(n-- > 0)
-      *--d = *--s;
-  } else
-    while(n-- > 0)
-      *d++ = *s++;
-
-  return dst;
 }
+
+
+int memcmp(const void *v1, const void *v2, size_t n)
+{
+    const char *s1 = v1;
+    const char *s2 = v2;
+
+    while(n-- > 0){
+        if(*s1 != *s2) {
+            return *s1 - *s2;
+        }
+        s1++, s2++;
+    }
+    return 0;
+}
+
+void *memmove(void *dst, const void *src, size_t n)
+{
+    if(n == 0) {
+        return dst;
+    }
+    const char *s = src;
+    char *d = dst;
+
+    if(s < d && s + n > d){
+        s += n;
+        d += n;
+        while(n-- > 0)
+        *--d = *--s;
+    } else
+        while(n-- > 0)
+        *d++ = *s++;
+
+    return dst;
+}
+
 
 // memcpy exists to placate GCC.  Use memmove.
-void*
-memcpy(void *dst, const void *src, uint n)
+void *memcpy(void *dst, const void *src, size_t n)
 {
   return memmove(dst, src, n);
 }
 
-int
-strncmp(const char *p, const char *q, uint n)
+
+int strncmp(const char *p, const char *q, size_t n)
 {
-  while(n > 0 && *p && *p == *q)
-    n--, p++, q++;
-  if(n == 0)
-    return 0;
-  return (uchar)*p - (uchar)*q;
+    while(n > 0 && *p && *p == *q) {
+        n--, p++, q++;
+    }
+    if(n == 0) {
+        return 0;
+    }
+    return *p - *q;
 }
 
-char*
-strncpy(char *s, const char *t, int n)
+char* strncpy(char *s, const char *t, size_t n)
 {
-  char *os;
-
-  os = s;
-  while(n-- > 0 && (*s++ = *t++) != 0)
-    ;
-  while(n-- > 0)
-    *s++ = 0;
-  return os;
+    char *os = s;
+    while(n > 0 && (*s++ = *t++) != 0) {
+        n--;
+    }
+    while(n-- > 0) {
+        *s++ = 0;
+    }
+    return os;
 }
 
 // Like strncpy but guaranteed to NUL-terminate.
-char*
-safestrcpy(char *s, const char *t, int n)
+char* safestrcpy(char *s, const char *t, size_t n)
 {
-  char *os;
-
-  os = s;
-  if(n <= 0)
+    char *os = s;
+    if(n == 0) {
+        return os;
+    }
+    while(--n > 0 && (*s++ = *t++) != 0);
+    *s = 0;
     return os;
-  while(--n > 0 && (*s++ = *t++) != 0)
-    ;
-  *s = 0;
-  return os;
 }
 
-int
-strlen(const char *s)
+size_t strlen(const char *s)
 {
-  int n;
-
-  for(n = 0; s[n]; n++)
-    ;
-  return n;
+    size_t n;
+    for(n = 0; s[n]; n++);
+    return n;
 }
 
-char *
-strcat(char *dest, const char *src)
+size_t strnlen(const char *s, size_t maxlen)
 {
-  int n = strlen(dest);
-  int m = strlen(src);
-  strncpy(dest + n, src, m);
-  return dest;
+    size_t n;
+    for(n = 0; n < maxlen && s[n]; n++);
+    return n;
+}
+
+char *strcat(char *dest, const char *src)
+{
+    size_t n = strlen(dest);
+    size_t m = strlen(src);
+    strncpy(dest + n, src, m);
+    dest[n + m] = '\0';
+    return dest;
 }

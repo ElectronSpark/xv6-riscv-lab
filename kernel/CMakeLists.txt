@@ -154,6 +154,8 @@ set(KERNEL_OBJS
     ${KERNEL_SCAN_OBJS}
 )
 
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding ")
+
 # Add kernel executable
 add_executable(${KERNEL_BINARY} ${KERNEL_OBJS})
 

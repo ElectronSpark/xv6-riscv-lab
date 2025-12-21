@@ -6,6 +6,7 @@
 //
 
 #include "types.h"
+#include "string.h"
 #include "riscv.h"
 #include "defs.h"
 #include "param.h"

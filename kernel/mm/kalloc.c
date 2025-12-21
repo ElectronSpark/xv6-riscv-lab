@@ -3,6 +3,7 @@
 // and pipe buffers. Allocates whole 4096-byte pages.
 
 #include "types.h"
+#include "string.h"
 #include "param.h"
 #include "memlayout.h"
 #include "spinlock.h"
