@@ -601,3 +601,138 @@ void vfs_iunlock_two(struct vfs_inode *inode1, struct vfs_inode *inode2) {
         vfs_iunlock(inode2);
     }
 }
+
+int vfs_chdir(struct vfs_inode *new_cwd) {
+    if (new_cwd == NULL || new_cwd->sb == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    vfs_superblock_rlock(new_cwd->sb);
+    vfs_ilock(new_cwd);
+    int ret = __vfs_inode_valid(new_cwd);
+    if (ret != 0) {
+        goto out;
+    }
+    if (!S_ISDIR(new_cwd->mode)) {
+        ret = -ENOTDIR; // Inode is not a directory
+        goto out;
+    }
+    vfs_idup(new_cwd);
+    proc_lock(myproc());
+    struct vfs_inode *old_cwd = myproc()->fs.cwd;
+    myproc()->fs.cwd = new_cwd;
+    proc_unlock(myproc());
+    vfs_iunlock(new_cwd);
+    vfs_superblock_unlock(new_cwd->sb);
+    vfs_iput(old_cwd);
+    ret = 0;
+out:
+    return ret;
+}
+
+int vfs_chroot(struct vfs_inode *new_root)  {
+    int ret = vfs_chdir(new_root);
+    if (ret != 0) {
+        return ret;
+    }
+    vfs_idup(new_root);
+    proc_lock(myproc());
+    struct vfs_inode *old_root = myproc()->fs.rooti;
+    myproc()->fs.rooti = new_root;
+    proc_unlock(myproc());
+    vfs_iput(old_root);
+    return 0;
+}
+
+// Get current working directory inode of the current process
+// Caller needs to call vfs_iput on the returned inode when done
+int vfs_curdir(struct vfs_inode **res_inode) {
+    if (res_inode == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    // Since only the current process can change its cwd,
+    // we don't need to lock the inode here
+    struct vfs_inode *cwd = myproc()->fs.cwd;
+    vfs_idup(cwd);
+    *res_inode = cwd;
+    return 0;
+}
+
+// Get current root directory inode of the current process
+// Caller needs to call vfs_iput on the returned inode when done
+int vfs_curroot(struct vfs_inode **res_inode) {
+    if (res_inode == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    // Since only the current process can change its root,
+    // we don't need to lock the inode here
+    struct vfs_inode *rooti = myproc()->fs.rooti;
+    vfs_idup(rooti);
+    *res_inode = rooti;
+    return 0;
+}
+
+// int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode) {
+//     if (path == NULL || path_len == 0 || res_inode == NULL) {
+//         return -EINVAL; // Invalid argument
+//     }
+//     if (path_len > VFS_PATH_MAX) {
+//         return -ENAMETOOLONG; // Path too long
+//     }
+//     struct vfs_inode *pos = NULL;
+//     int ret = 0;
+//     if (path[0] == '/') {
+//         // Absolute path, start from root
+//         ret = vfs_curroot(&pos);
+//         if (ret != 0) {
+//             return ret;
+//         }
+//         path++; // skip leading '/'
+//         path_len--;
+//     } else {
+//         // Relative path, start from cwd
+//         ret = vfs_curdir(&pos);
+//         if (ret != 0) {
+//             return ret;
+//         }
+//     }
+
+//     while (path_len > 0) {
+//         // Extract next component
+//         size_t i = 0;
+//         while (i < path_len && path[i] != '/') {
+//             i++;
+//         }
+//         size_t comp_len = i;
+//         if (comp_len == 0) {
+//             // Skip redundant '/'
+//             path++;
+//             path_len--;
+//             continue;
+//         }
+
+//         struct vfs_dentry dentry;
+//         ret = vfs_ilookup(pos, &dentry, path, comp_len, true);
+//         if (ret != 0) {
+//             vfs_iput(pos);
+//             return ret;
+//         }
+
+//         struct vfs_inode *next_inode = NULL;
+//         ret = vfs_get_dentry_inode(&dentry, &next_inode);
+//         if (ret != 0) {
+//             vfs_iput(start_inode);
+//             return ret;
+//         }
+
+//         vfs_iput(start_inode);
+//         start_inode = next_inode;
+
+//         // Move to next component
+//         path += comp_len;
+//         path_len -= comp_len;
+//         if (path_len > 0 && *path == '/') {
+//             path++;
+//             path_len--;
+//         }
+//     }
+// }

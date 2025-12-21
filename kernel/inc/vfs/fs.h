@@ -77,8 +77,9 @@ int vfs_ilock_two_directories(struct vfs_inode *inode1, struct vfs_inode *inode2
 void vfs_iunlock_two(struct vfs_inode *inode1, struct vfs_inode *inode2);
 
 // Public APIs not tied to specific callbacks
-int vfs_namei(struct vfs_inode *dir, struct vfs_inode **res_inode,
-              const char *path, size_t path_len);
+int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode);
+int vfs_curdir(struct vfs_inode **res_inode);
+int vfs_curroot(struct vfs_inode **res_inode);
 int vfs_chroot(struct vfs_inode *new_root);
 int vfs_chdir(struct vfs_inode *new_cwd);
 int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode);
