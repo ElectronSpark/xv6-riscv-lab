@@ -109,3 +109,61 @@ char *strcat(char *dest, const char *src)
     dest[n + m] = '\0';
     return dest;
 }
+
+char *strtok_r(char *str, const char *delim, char **saveptr)
+{
+    char *token;
+
+    // If str is NULL, continue from saved position
+    if (str == 0)
+        str = *saveptr;
+
+    // Skip leading delimiters
+    while (*str != '\0') {
+        const char *d = delim;
+        int is_delim = 0;
+        while (*d != '\0') {
+            if (*str == *d) {
+                is_delim = 1;
+                break;
+            }
+            d++;
+        }
+        if (!is_delim)
+            break;
+        str++;
+    }
+
+    // If we reached end of string, no more tokens
+    if (*str == '\0') {
+        *saveptr = str;
+        return 0;
+    }
+
+    // Mark the start of the token
+    token = str;
+
+    // Find the end of the token
+    while (*str != '\0') {
+        const char *d = delim;
+        while (*d != '\0') {
+            if (*str == *d) {
+                *str = '\0';
+                *saveptr = str + 1;
+                return token;
+            }
+            d++;
+        }
+        str++;
+    }
+
+    // Reached end of string, save position for next call
+    *saveptr = str;
+    return token;
+}
+
+char *strtok(char *str, const char *delim)
+{
+    static char *saveptr;
+    return strtok_r(str, delim, &saveptr);
+}

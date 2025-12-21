@@ -13,5 +13,7 @@ char* safestrcpy(char *s, const char *t, size_t n);
 size_t strlen(const char *s);
 size_t strnlen(const char *s, size_t maxlen);
 char *strcat(char *dest, const char *src);
+char *strtok_r(char *str, const char *delim, char **saveptr);
+char *strtok(char *str, const char *delim);
 
 #endif /* __KERNEL_STRING_H */

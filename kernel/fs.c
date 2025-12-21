@@ -791,65 +791,43 @@ dirlink(struct inode *dp, char *name, uint inum)
 
 // Paths
 
-// Copy the next path element from path into name.
-// Return a pointer to the element following the copied one.
-// The returned path has no leading slashes,
-// so the caller can check *path=='\0' to see if the name is the last one.
-// If no name to remove, return 0.
-//
-// Examples:
-//   skipelem("a/bb/c", name) = "bb/c", setting name = "a"
-//   skipelem("///a//bb", name) = "bb", setting name = "a"
-//   skipelem("a", name) = "", setting name = "a"
-//   skipelem("", name) = skipelem("////", name) = 0
-//
-STATIC char*
-skipelem(char *path, char *name)
-{
-  char *s;
-  int len;
-
-  while(*path == '/')
-    path++;
-  if(*path == 0)
-    return 0;
-  s = path;
-  while(*path != '/' && *path != 0)
-    path++;
-  len = path - s;
-  if(len >= DIRSIZ)
-    memmove(name, s, DIRSIZ);
-  else {
-    memmove(name, s, len);
-    name[len] = 0;
-  }
-  while(*path == '/')
-    path++;
-  return path;
-}
-
 // Look up and return the inode for a path name.
-// If parent != 0, return the inode for the parent and copy the final
+// If nameiparent != 0, return the inode for the parent and copy the final
 // path element into name, which must have room for DIRSIZ bytes.
 // Must be called inside a transaction since it calls iput().
 STATIC struct inode*
 namex(char *path, int nameiparent, char *name)
 {
   struct inode *ip, *next;
+  char *token, *saveptr;
+  char pathbuf[MAXPATH];
+
+  if(*path == '\0')
+    return 0;
+
+  // Make a copy of path since strtok_r modifies the string
+  safestrcpy(pathbuf, path, MAXPATH);
 
   if(*path == '/')
     ip = iget(ROOTDEV, ROOTINO);
   else
     ip = idup(myproc()->cwd);
 
-  while((path = skipelem(path, name)) != 0){
+  token = strtok_r(pathbuf, "/", &saveptr);
+  while(token != 0){
+    // Copy current token to name (for nameiparent case)
+    safestrcpy(name, token, DIRSIZ);
+
+    // Peek ahead to see if this is the last token
+    char *next_token = strtok_r(0, "/", &saveptr);
+
     ilock(ip);
     if(ip->type != T_DIR){
       iunlockput(ip);
       return 0;
     }
-    if(nameiparent && *path == '\0'){
-      // Stop one level early.
+    if(nameiparent && next_token == 0){
+      // Stop one level early - name already contains final element
       iunlock(ip);
       return ip;
     }
@@ -859,6 +837,7 @@ namex(char *path, int nameiparent, char *name)
     }
     iunlockput(ip);
     ip = next;
+    token = next_token;
   }
   if(nameiparent){
     iput(ip);
