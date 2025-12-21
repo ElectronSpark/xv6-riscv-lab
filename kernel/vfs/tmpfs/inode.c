@@ -167,7 +167,7 @@ static struct hlist_func_struct __tmpfs_dir_hlist_funcs = {
 };
 
 // Initialize a tmpfs inode as a directory
-void tmpfs_make_directory(struct tmpfs_inode *tmpfs_inode, struct tmpfs_inode *parent) {
+void tmpfs_make_directory(struct tmpfs_inode *tmpfs_inode) {
     tmpfs_inode->vfs_inode.size = 0;
     tmpfs_inode->vfs_inode.mode = S_IFDIR | 0755;
     int ret = hlist_init(&tmpfs_inode->dir.children,
@@ -277,9 +277,9 @@ void tmpfs_free_symlink_target(struct tmpfs_inode *tmpfs_inode) {
     }
 }
 
-
-
-
+/******************************************************************************
+ * tmpfs inode callbacks
+ *****************************************************************************/
 
 int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry, 
                    const char *name, size_t name_len, bool user) {
@@ -299,12 +299,12 @@ int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         dentry->name = kmm_alloc(3);
         memmove(dentry->name, "..", 3);
         dentry->name_len = 2;
-        if (tmpfs_dir->dir.parent == NULL) {
+        if (vfs_inode_is_local_root(&tmpfs_dir->vfs_inode)) {
             dentry->ino = dir->ino;
         } else {
-            dentry->ino = tmpfs_dir->dir.parent->vfs_inode.ino;
+            dentry->ino = tmpfs_dir->vfs_inode.parent->ino;
         }
-        dentry->cookies = TMPFS_DENTRY_COOKIE_PARENT;
+        dentry->cookies = VFS_DENTRY_COOKIE_PARENT;
         goto done;
     }
     
@@ -328,8 +328,62 @@ int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     return ret;
 }
 
+// VFS will handle "." entries and ".." entries when it's local root
 int __tmpfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter) {
-    return -ENOSYS; // Not implemented
+    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
+    struct vfs_dentry *dentry = &iter->current;
+    struct tmpfs_dentry *current = NULL;
+    // First release previous name if any
+    vfs_release_dentry(dentry);
+
+    if (iter->current.cookies == VFS_DENTRY_COOKIE_SELF) {
+        // Next is ".."
+        if (dir->parent == NULL) {
+            return -ENOENT; // No parent
+        }
+        dentry->cookies = VFS_DENTRY_COOKIE_PARENT;
+        dentry->ino = dir->parent->ino;
+        dentry->sb = dir->sb;
+        dentry->name = kmm_alloc(3);
+        if (dentry->name == NULL) {
+            dentry->cookies = VFS_DENTRY_COOKIE_END;
+            return -ENOMEM;
+        }
+        memmove(dentry->name, "..", 3);
+        dentry->name_len = 2;
+        return 0;
+    }
+
+    if (iter->current.cookies == VFS_DENTRY_COOKIE_END ||
+        iter->current.cookies == VFS_DENTRY_COOKIE_PARENT) {
+        current = HLIST_FIRST_NODE(&tmpfs_dir->dir.children, struct tmpfs_dentry, hash_entry);
+    } else {
+        current = (struct tmpfs_dentry *)iter->current.cookies;
+        current = HLIST_NEXT_NODE(&tmpfs_dir->dir.children, current, hash_entry);
+    }
+
+    if (current == NULL) {
+        // End of directory
+        dentry->ino = 0;
+        dentry->sb = dir->sb;
+        dentry->name = NULL;
+        dentry->name_len = 0;
+        dentry->cookies = VFS_DENTRY_COOKIE_END;
+        return 0;
+    }
+
+    dentry->ino = current->inode->vfs_inode.ino;
+    dentry->sb = dir->sb;
+    dentry->name_len = current->name_len;
+    dentry->name = kmm_alloc(dentry->name_len + 1);
+    if (dentry->name == NULL) {
+        dentry->cookies = VFS_DENTRY_COOKIE_END;
+        return -ENOMEM;
+    }
+    memmove(dentry->name, current->name, dentry->name_len);
+    dentry->name[dentry->name_len] = '\0';
+    dentry->cookies = (uint64)current;
+    return 0;
 }
 
 int __tmpfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user) {
@@ -457,7 +511,7 @@ int __tmpfs_mkdir(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_dir
         *new_dir = NULL;
         return ret;
     }
-    tmpfs_make_directory(tmpfs_inode, tmpfs_dir);
+    tmpfs_make_directory(tmpfs_inode);
     vfs_iunlock(&tmpfs_inode->vfs_inode);
     *new_dir = &tmpfs_inode->vfs_inode;
     return 0;
@@ -603,6 +657,7 @@ int __tmpfs_symlink(struct vfs_inode *dir, struct vfs_inode **ret_inode,
 
 void __tmpfs_destroy_inode(struct vfs_inode *inode) {
     // return -ENOSYS; // Not implemented
+    // @TODO: introduce orphan inode handling later
 }
 
 struct vfs_inode_ops tmpfs_inode_ops = {

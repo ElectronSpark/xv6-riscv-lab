@@ -25,9 +25,6 @@
 #define TMPFS_MAX_FILE_SIZE                                 \
     ((TMPFS_INODE_TINDRECT_START + TMPFS_INODE_TINDRECT_ITEMS) * PAGE_SIZE)
 
-#define TMPFS_DENTRY_COOKIE_SELF 1
-#define TMPFS_DENTRY_COOKIE_PARENT 2
-
 extern struct vfs_inode_ops tmpfs_inode_ops;
 
 struct tmpfs_sb_private {
@@ -46,7 +43,6 @@ struct tmpfs_inode {
     bool embedded;
     union {
         struct {
-            struct tmpfs_inode *parent;
             hlist_t children; // hash list of child inodes (for directories)
             hlist_bucket_t children_buckets[TMPFS_HASH_BUCKETS];
         } dir;
@@ -100,7 +96,7 @@ void tmpfs_free_inode(struct vfs_inode *inode);
 // Do nothing if the target is embedded
 // Will assume tmpfs_inode is symlink type and not NULL
 void tmpfs_free_symlink_target(struct tmpfs_inode *tmpfs_inode);
-void tmpfs_make_directory(struct tmpfs_inode *tmpfs_inode, struct tmpfs_inode *parent);
+void tmpfs_make_directory(struct tmpfs_inode *tmpfs_inode);
 int __tmpfs_truncate(struct vfs_inode *inode, loff_t new_size);
 
 #endif // KERNEL_VIRTUAL_FILE_SYSTEM_TMPFS_PRIVATE_H

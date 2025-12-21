@@ -28,10 +28,6 @@ static int tmpfs_fetch_inode(struct vfs_inode *dir, const char *name, size_t nam
         return ret;
     }
     ret = vfs_get_dentry_inode(&d, out);
-    if (ret == 0) {
-        vfs_idup(*out);
-        vfs_iunlock(*out);
-    }
     vfs_release_dentry(&d);
     return ret;
 }
@@ -698,6 +694,169 @@ cleanup_subdir:
         printf("namei_smoketest: cleanup rmdir %s failed, errno=%d\n", subdir_name, ret);
     } else {
         printf("namei_smoketest: cleanup rmdir %s success\n", subdir_name);
+    }
+out:
+    if (root_pinned) {
+        vfs_iput(root);
+    }
+}
+
+// Iterate a directory, fetch each dentry's inode, and log sb/ino correctness
+static void tmpfs_iter_and_fetch(const char *tag, struct vfs_inode *dir, struct vfs_dir_iter *iter) {
+    int lret = 0;
+    iter->current.cookies = VFS_DENTRY_COOKIE_END;
+    printf("dir_iter_mount: BEGIN %s\n", tag);
+    int guard = 0;
+    for (;;) {
+        if (guard++ > 256) {
+            printf("dir_iter_mount: ABORT %s guard hit\n", tag);
+            break;
+        }
+        printf("dir_iter_mount: ITER %s step=%d before dir_iter\n", tag, guard);
+        lret = vfs_dir_iter(dir, iter);
+        printf("dir_iter_mount: ITER %s step=%d after dir_iter ret=%d cookies=%ld\n",
+               tag, guard, lret, iter->current.cookies);
+        if (lret != 0) {
+            printf("dir_iter_mount: FAIL dir_iter %s errno=%d\n", tag, lret);
+            break;
+        }
+        if (iter->current.cookies == VFS_DENTRY_COOKIE_END) {
+            printf("dir_iter_mount: END %s\n", tag);
+            break;
+        }
+
+        // Attach parent so vfs_get_dentry_inode can resolve properly
+        iter->current.parent = dir;
+        struct vfs_inode *ent = NULL;
+        lret = vfs_get_dentry_inode(&iter->current, &ent);
+        if (lret != 0 || ent == NULL) {
+            printf("dir_iter_mount: FAIL get_inode %s name=%s errno=%d\n",
+                   tag, iter->current.name ? iter->current.name : "(null)", lret);
+        } else {
+            bool locked = holding_mutex(&ent->mutex);
+            printf("dir_iter_mount: entry %s name=%s ino=%lu fetched_ino=%lu sb_match=%s locked=%s\n",
+                   tag,
+                   iter->current.name ? iter->current.name : "(null)",
+                   iter->current.ino,
+                   ent->ino,
+                   ent->sb == iter->current.sb ? "yes" : "no",
+                   locked ? "yes" : "no");
+            if (locked) {
+                vfs_iunlock(ent);
+            }
+            vfs_iput(ent);
+        }
+    }
+    vfs_release_dentry(&iter->current);
+}
+
+// Mount a second tmpfs on a subdirectory, populate it, and iterate with vfs_dir_iter
+void tmpfs_run_dir_iter_mount_smoketest(void) {
+    const char *mp_name = "iter_mount_dir";
+    const size_t mp_len = sizeof("iter_mount_dir") - 1;
+    const char *file_name = "iter_file";
+    const size_t file_len = sizeof("iter_file") - 1;
+    const char *subdir_name = "iter_subdir";
+    const size_t subdir_len = sizeof("iter_subdir") - 1;
+
+    int ret = 0;
+    struct vfs_inode *root = vfs_root_inode.mnt_rooti;
+    struct vfs_inode *mp = NULL;
+    struct vfs_inode *mnt_root = NULL;
+    struct vfs_inode *tmp = NULL;
+    struct vfs_inode *mnt_subdir = NULL;
+    struct vfs_dir_iter iter = {0};
+    bool root_pinned = false;
+
+
+    vfs_idup(root);
+    root_pinned = true;
+
+    ret = vfs_mkdir(root, 0755, &mp, mp_name, mp_len, false);
+    if (ret != 0) {
+        printf("dir_iter_mount: FAIL setup mkdir %s errno=%d\n", mp_name, ret);
+        goto out;
+    }
+
+    // Mount a new tmpfs on the freshly created directory
+    vfs_mount_lock();
+    vfs_superblock_wlock(root->sb);
+    vfs_ilock(mp);
+    ret = vfs_mount("tmpfs", mp, NULL, 0, NULL);
+    vfs_iunlock(mp);
+    vfs_superblock_unlock(root->sb);
+    vfs_mount_unlock();
+    if (ret != 0) {
+        printf("dir_iter_mount: FAIL vfs_mount on %s errno=%d\n", mp_name, ret);
+        goto cleanup_mp_dir;
+    }
+
+    mnt_root = mp->mnt_sb ? mp->mnt_sb->root_inode : NULL;
+    if (mnt_root == NULL) {
+        printf("dir_iter_mount: FAIL mounted root NULL\n");
+        goto cleanup_mount;
+    }
+    vfs_idup(mnt_root);
+
+    // Populate mounted tmpfs: create a file and a subdir
+    ret = vfs_create(mnt_root, 0644, &tmp, file_name, file_len, false);
+    if (ret != 0) {
+        printf("dir_iter_mount: FAIL create %s errno=%d\n", file_name, ret);
+        goto cleanup_mount;
+    }
+    vfs_iput(tmp);
+    tmp = NULL;
+
+    ret = vfs_mkdir(mnt_root, 0755, &mnt_subdir, subdir_name, subdir_len, false);
+    if (ret != 0) {
+        printf("dir_iter_mount: FAIL mkdir %s errno=%d\n", subdir_name, ret);
+        goto cleanup_mount;
+    }
+
+    // Iterate mounted root
+    tmpfs_iter_and_fetch("mnt_root", mnt_root, &iter);
+    // Iterate ordinary subdir inside mounted tmpfs
+    tmpfs_iter_and_fetch("mnt_subdir", mnt_subdir, &iter);
+    // Iterate process root (vfs_root_inode.mnt_rooti)
+    tmpfs_iter_and_fetch("process_root", root, &iter);
+
+cleanup_mount:
+    if (mnt_subdir != NULL) {
+        vfs_iput(mnt_subdir);
+        mnt_subdir = NULL;
+    }
+    if (mnt_root != NULL) {
+        vfs_iput(mnt_root);
+        mnt_root = NULL;
+    }
+
+    // Unmount the tmpfs we mounted above
+    if (mp != NULL && mp->mnt_sb != NULL) {
+        struct vfs_superblock *child_sb = mp->mnt_sb;
+        struct vfs_inode *child_root = child_sb->root_inode;
+        vfs_mount_lock();
+        vfs_superblock_wlock(mp->sb);
+        vfs_superblock_wlock(child_sb);
+        vfs_ilock(mp);
+        vfs_ilock(child_root);
+        ret = vfs_unmount(mp);
+        vfs_iunlock(child_root);
+        vfs_superblock_unlock(child_sb);
+        vfs_iunlock(mp);
+        vfs_superblock_unlock(mp->sb);
+        vfs_mount_unlock();
+        if (ret != 0) {
+            printf("dir_iter_mount: WARN vfs_unmount errno=%d\n", ret);
+        }
+    }
+
+cleanup_mp_dir:
+    if (mp != NULL) {
+        int rmdir_ret = vfs_rmdir(root, mp_name, mp_len, false);
+        if (rmdir_ret != 0) {
+            printf("dir_iter_mount: WARN cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
+        }
+        vfs_iput(mp);
     }
 out:
     if (root_pinned) {

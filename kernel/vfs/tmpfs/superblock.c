@@ -170,7 +170,7 @@ int tmpfs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
         tmpfs_free(&sb->vfs_sb);
         return -ENOMEM; // Failed to allocate root inode
     }
-    tmpfs_make_directory(root_inode, root_inode); // Root's parent is itself
+    tmpfs_make_directory(root_inode);
     root_inode->vfs_inode.ino = 1; // Root inode number is 1
     root_inode->vfs_inode.n_links = 1;
     // Initialize superblock fields
@@ -244,6 +244,7 @@ void tmpfs_init_fs_type(void) {
     tmpfs_run_truncate_smoketest();
     tmpfs_shrink_caches();
     tmpfs_run_namei_smoketest();
+    tmpfs_run_dir_iter_mount_smoketest();
     kmm_shrink_all();
     after_pages = get_total_free_pages();
     if (before_pages != after_pages) {

@@ -7,6 +7,11 @@
 #define VFS_PATH_MAX 65535
 #define VFS_INODE_MAX_REFCOUNT 0x7FFF0000
 
+// Special dentry cookie values
+#define VFS_DENTRY_COOKIE_END 0
+#define VFS_DENTRY_COOKIE_SELF 1
+#define VFS_DENTRY_COOKIE_PARENT 2
+
 void vfs_init(void);
 
 // Filesystem type registration
@@ -70,6 +75,7 @@ int vfs_symlink(struct vfs_inode *dir, struct vfs_inode **new_inode,
                 mode_t mode, const char *name, size_t name_len,
                 const char *target, size_t target_len, bool user);
 int vfs_truncate(struct vfs_inode *inode, loff_t new_size);
+int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter);
 
 // Special inode locking operations for deadlock avoidance
 void vfs_ilock_two_nondirectories(struct vfs_inode *inode1, struct vfs_inode *inode2);
@@ -82,6 +88,7 @@ int vfs_curdir(struct vfs_inode **res_inode);
 int vfs_curroot(struct vfs_inode **res_inode);
 int vfs_chroot(struct vfs_inode *new_root);
 int vfs_chdir(struct vfs_inode *new_cwd);
+int vfs_get_dentry_inode_locked(struct vfs_dentry *dentry, struct vfs_inode **ret_inode);
 int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode);
 void vfs_release_dentry(struct vfs_dentry *dentry);
 int vfs_superblock_set_dirty(struct vfs_superblock *sb);

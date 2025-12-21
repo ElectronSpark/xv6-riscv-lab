@@ -205,6 +205,55 @@ out:
     return ret;
 }
 
+int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter) {
+    if (dir == NULL || dir->sb == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    if (iter == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    vfs_superblock_rlock(dir->sb);
+    vfs_ilock(dir);
+    int ret = __vfs_inode_valid(dir);
+    if (ret != 0) {
+        goto out;
+    }
+    if (!S_ISDIR(dir->mode)) {
+        ret = -ENOTDIR; // Inode is not a directory
+        goto out;
+    }
+    if (dir->ops->dir_iter == NULL) {
+        ret = -ENOSYS; // dir_iter operation not supported
+        goto out;
+    }
+    if (iter->current.cookies == VFS_DENTRY_COOKIE_END) {
+        iter->current.cookies = VFS_DENTRY_COOKIE_SELF;
+        iter->current.ino = dir->ino;
+        iter->current.sb = dir->sb;
+        iter->current.name = kmm_alloc(2);
+        memmove(iter->current.name, ".", 2);
+        iter->current.name_len = 1;
+        ret = 0;
+        goto out;
+    }
+    if (iter->current.cookies == VFS_DENTRY_COOKIE_SELF && vfs_inode_is_local_root(dir)) {
+        // If it's local root, ".." should indicate the mountpoint's parent
+        iter->current.cookies = VFS_DENTRY_COOKIE_PARENT;
+        iter->current.ino = dir->parent->ino;
+        iter->current.sb = dir->sb;
+        iter->current.name = kmm_alloc(3);
+        memmove(iter->current.name, "..", 3);
+        iter->current.name_len = 2;
+        ret = 0;
+        goto out;
+    }
+    ret = dir->ops->dir_iter(dir, iter);
+out:
+    vfs_iunlock(dir);
+    vfs_superblock_unlock(dir->sb);
+    return ret;
+}
+
 int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user) {
     if (inode == NULL || inode->sb == NULL) {
         return -EINVAL; // Invalid argument
@@ -297,16 +346,22 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
     if (name == NULL || name_len == 0 || old == NULL) {
         return -EINVAL; // Invalid argument
     }
-    vfs_superblock_wlock(dir->sb);
-    vfs_ilock(dir);
     struct vfs_inode *target = NULL;
     int ret = vfs_get_dentry_inode(old, &target);
     if (ret != 0) {
-        vfs_superblock_unlock(dir->sb);
-        vfs_iunlock(dir);
         return ret;
     }
     assert(target != NULL, "vfs_link: old dentry inode is NULL");
+    vfs_superblock_wlock(dir->sb);
+    if (S_ISDIR(target->mode)) {
+        ret = -EPERM; // Cannot create hard link to a directory
+        goto out_unlock_sb;
+    }
+    if (!S_ISDIR(dir->mode)) {
+        ret = -ENOTDIR; // Inode is not a directory
+        goto out_unlock_sb;
+    }
+    vfs_ilock_two_nondirectories(dir, target);
     ret = __vfs_inode_valid(dir);
     if (ret != 0) {
         goto out;
@@ -315,22 +370,15 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
     if (ret != 0) {
         goto out;
     }
-    if (S_ISDIR(target->mode)) {
-        ret = -EPERM; // Cannot create hard link to a directory
-        goto out;
-    }
-    if (!S_ISDIR(dir->mode)) {
-        ret = -ENOTDIR; // Inode is not a directory
-        goto out;
-    }
+    
     if (dir->ops->link == NULL) {
         ret = -ENOSYS; // Link operation not supported
         goto out;
     }
     ret = dir->ops->link(target, dir, name, name_len, user);
 out:
-    vfs_iunlock(target);
-    vfs_iunlock(dir);
+    vfs_iunlock_two(target, dir);
+out_unlock_sb:
     vfs_superblock_unlock(dir->sb);
     return ret;
 }
@@ -774,10 +822,8 @@ int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode) {
         ret = vfs_ilookup(pos, &dentry, token, token_len, false);
         if (ret != 0) {
             vfs_iput(pos);
-            vfs_iput(rooti);
-            kmm_free(pathbuf);
-            *res_inode = NULL;
-            return ret;
+            pos = NULL;
+            goto out;
         }
 
         // Get the inode from dentry
@@ -785,14 +831,9 @@ int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode) {
         vfs_release_dentry(&dentry);
         if (ret != 0) {
             vfs_iput(pos);
-            vfs_iput(rooti);
-            kmm_free(pathbuf);
-            *res_inode = NULL;
-            return ret;
+            pos = NULL;
+            goto out;
         }
-        // vfs_get_dentry_inode returns a locked inode, unlock it
-        vfs_idup(next); // increase refcount for next position
-        vfs_iunlock(next);
 
         // Release old position, move to next
         vfs_iput(pos);
@@ -808,9 +849,10 @@ int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode) {
 
         token = strtok_r(0, "/", &saveptr);
     }
-
+    ret = 0;
+out:
     vfs_iput(rooti);
     kmm_free(pathbuf);
     *res_inode = pos;
-    return 0;
+    return ret;
 }
