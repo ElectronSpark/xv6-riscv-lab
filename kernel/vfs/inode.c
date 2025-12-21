@@ -1,4 +1,5 @@
 #include "types.h"
+#include "string.h"
 #include "riscv.h"
 #include "defs.h"
 #include "atomic.h"
@@ -20,8 +21,8 @@
 // When need to acquire multiple inode locks:
 // - First acquire directory inode lock
 // - When both are non-directory inodes, acquire the one at the lower memory address first
-// - @TODO: because we do not have dcache, we don't consider hierarchy of inodes here
-// - When both inodes are directories, acquire the one at the lower memory address first
+// - When both inodes are directories and one is ancestor of the other, acquire ancestor first
+// - Otherwise, acquire the one at the lower memory address first
 // - Do not acquire inodes cross filesystem at the same time
 // to prevent deadlock.
 
@@ -68,6 +69,11 @@ void vfs_iput(struct vfs_inode *inode) {
     // assert(inode->sb == NULL || !vfs_superblock_wholding(inode->sb),
     //        "vfs_iput: cannot hold superblock read lock when calling");
     // assert(!holding_mutex(&inode->mutex), "vfs_iput: cannot hold inode lock when calling");
+
+    if (inode == &vfs_root_inode) {
+        // The root inode should never be freed
+        return;
+    }
 
     // tried to cleanup the inode but failed
     bool failed_clean = false;
@@ -169,6 +175,7 @@ int vfs_sync_inode(struct vfs_inode *inode) {
 }
 
 // Lookup a dentry in a directory inode
+// Will assume the VFS handled "."
 int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry, 
                 const char *name, size_t name_len, bool user) {
     if (dir == NULL || dir->sb == NULL) {
@@ -671,68 +678,128 @@ int vfs_curroot(struct vfs_inode **res_inode) {
     return 0;
 }
 
-// int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode) {
-//     if (path == NULL || path_len == 0 || res_inode == NULL) {
-//         return -EINVAL; // Invalid argument
-//     }
-//     if (path_len > VFS_PATH_MAX) {
-//         return -ENAMETOOLONG; // Path too long
-//     }
-//     struct vfs_inode *pos = NULL;
-//     int ret = 0;
-//     if (path[0] == '/') {
-//         // Absolute path, start from root
-//         ret = vfs_curroot(&pos);
-//         if (ret != 0) {
-//             return ret;
-//         }
-//         path++; // skip leading '/'
-//         path_len--;
-//     } else {
-//         // Relative path, start from cwd
-//         ret = vfs_curdir(&pos);
-//         if (ret != 0) {
-//             return ret;
-//         }
-//     }
+int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode) {
+    if (path == NULL || path_len == 0 || res_inode == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    if (path_len > VFS_PATH_MAX) {
+        return -ENAMETOOLONG; // Path too long
+    }
+    struct vfs_inode *pos = NULL;
+    struct vfs_inode *rooti = NULL;
+    char *pathbuf = NULL;
+    int ret = 0;
 
-//     while (path_len > 0) {
-//         // Extract next component
-//         size_t i = 0;
-//         while (i < path_len && path[i] != '/') {
-//             i++;
-//         }
-//         size_t comp_len = i;
-//         if (comp_len == 0) {
-//             // Skip redundant '/'
-//             path++;
-//             path_len--;
-//             continue;
-//         }
+    // Allocate buffer for path copy since strtok_r modifies the string
+    pathbuf = kmm_alloc(path_len + 1);
+    if (pathbuf == NULL) {
+        return -ENOMEM;
+    }
 
-//         struct vfs_dentry dentry;
-//         ret = vfs_ilookup(pos, &dentry, path, comp_len, true);
-//         if (ret != 0) {
-//             vfs_iput(pos);
-//             return ret;
-//         }
+    // Get current root for ".." at root handling
+    ret = vfs_curroot(&rooti);
+    if (ret != 0) {
+        kmm_free(pathbuf);
+        return ret;
+    }
 
-//         struct vfs_inode *next_inode = NULL;
-//         ret = vfs_get_dentry_inode(&dentry, &next_inode);
-//         if (ret != 0) {
-//             vfs_iput(start_inode);
-//             return ret;
-//         }
+    if (path[0] == '/') {
+        // Absolute path, start from root
+        pos = rooti;
+        vfs_idup(pos);
+        path++; // skip leading '/'
+        path_len--;
+    } else {
+        // Relative path, start from cwd
+        ret = vfs_curdir(&pos);
+        if (ret != 0) {
+            vfs_iput(rooti);
+            kmm_free(pathbuf);
+            return ret;
+        }
+    }
 
-//         vfs_iput(start_inode);
-//         start_inode = next_inode;
+    // Make a copy of path since strtok_r modifies the string
+    if (path_len > 0) {
+        memmove(pathbuf, path, path_len);
+    }
+    pathbuf[path_len] = '\0';
 
-//         // Move to next component
-//         path += comp_len;
-//         path_len -= comp_len;
-//         if (path_len > 0 && *path == '/') {
-//             path++;
-//             path_len--;
-//         }
-//     }
-// }
+    char *token, *saveptr;
+    struct vfs_dentry dentry = {0};
+    struct vfs_inode *next = NULL;
+
+    token = strtok_r(pathbuf, "/", &saveptr);
+    while (token != 0) {
+        size_t token_len = strlen(token);
+
+        // Handle "." - stay at current position
+        if (token_len == 1 && token[0] == '.') {
+            token = strtok_r(0, "/", &saveptr);
+            continue;
+        }
+
+        // Handle ".."
+        if (token_len == 2 && token[0] == '.' && token[1] == '.') {
+            // If at process root, don't move
+            if (pos == rooti) {
+                token = strtok_r(0, "/", &saveptr);
+                continue;
+            }
+
+            // If at mounted root, go to mountpoint first, then lookup ".."
+            if (pos->sb != NULL && pos->sb->mountpoint != NULL && 
+                pos == pos->sb->root_inode) {
+                struct vfs_inode *mountpoint = pos->sb->mountpoint;
+                vfs_idup(mountpoint);
+                vfs_iput(pos);
+                pos = mountpoint;
+                // Now lookup ".." at the mountpoint
+            }
+        }
+
+        // Lookup the token in the current directory
+        memset(&dentry, 0, sizeof(dentry));
+        ret = vfs_ilookup(pos, &dentry, token, token_len, false);
+        if (ret != 0) {
+            vfs_iput(pos);
+            vfs_iput(rooti);
+            kmm_free(pathbuf);
+            *res_inode = NULL;
+            return ret;
+        }
+
+        // Get the inode from dentry
+        ret = vfs_get_dentry_inode(&dentry, &next);
+        vfs_release_dentry(&dentry);
+        if (ret != 0) {
+            vfs_iput(pos);
+            vfs_iput(rooti);
+            kmm_free(pathbuf);
+            *res_inode = NULL;
+            return ret;
+        }
+        // vfs_get_dentry_inode returns a locked inode, unlock it
+        vfs_idup(next); // increase refcount for next position
+        vfs_iunlock(next);
+
+        // Release old position, move to next
+        vfs_iput(pos);
+        pos = next;
+
+        // If the new position is a mountpoint, switch to mounted root
+        while (pos->mount && pos->mnt_rooti != NULL) {
+            struct vfs_inode *mnt_root = pos->mnt_rooti;
+            vfs_idup(mnt_root);
+            vfs_iput(pos);
+            pos = mnt_root;
+        }
+
+        token = strtok_r(0, "/", &saveptr);
+    }
+
+    vfs_iput(rooti);
+    kmm_free(pathbuf);
+    *res_inode = pos;
+    return 0;
+}

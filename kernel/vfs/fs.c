@@ -231,7 +231,6 @@ static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint) {
             "Mountpoint inode's superblock lock must be write held to turn into mountpoint");
     }
     VFS_INODE_ASSERT_HOLDING(mountpoint, "Mountpoint inode lock must be held to turn into mountpoint");
-    // @TODO: needs to avoid mount on root
     if (vfs_inode_refcount(mountpoint) > 2) {
         return -EBUSY; // Mountpoint inode is in use
     }

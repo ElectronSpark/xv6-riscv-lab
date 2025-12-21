@@ -293,16 +293,7 @@ int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         }
         name = name_buf;
     }
-    if (name_len == 1 && strncmp(name, ".", 1) == 0) {
-        dentry->ino = dir->ino;
-        dentry->sb = dir->sb;
-        dentry->name = kmm_alloc(2);
-        memmove(dentry->name, ".", 2);
-        dentry->name_len = 1;
-        dentry->cookies = TMPFS_DENTRY_COOKIE_SELF;
-        goto done;
-    }
-
+    // Assume the VFS handled "."
     if (name_len == 2 && strncmp(name, "..", 2) == 0) {
         dentry->sb = dir->sb;
         dentry->name = kmm_alloc(3);
@@ -422,6 +413,7 @@ int __tmpfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len, boo
     } else if (target->n_links == 0) {
         ret = vfs_remove_inode(target->sb, target);
         assert(ret == 0, "Tmpfs unlink: failed to remove inode, errno=%d", ret);
+        // @TODO: need more handle here
         // Because the target has been detached from its superblock,
         // we can do iput with the superblock lock holding
         vfs_iput(target);

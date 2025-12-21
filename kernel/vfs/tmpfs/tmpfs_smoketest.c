@@ -516,3 +516,191 @@ out:
         vfs_iput(root);
     }
 }
+
+// Test vfs_namei path resolution with various cases
+void tmpfs_run_namei_smoketest(void) {
+    int ret = 0;
+    struct vfs_inode *root = vfs_root_inode.mnt_rooti;
+    struct vfs_inode *result = NULL;
+    struct vfs_inode *subdir = NULL;
+    struct vfs_inode *nested = NULL;
+    struct vfs_inode *file = NULL;
+    bool root_pinned = false;
+
+    const char *subdir_name = "namei_test_dir";
+    const size_t subdir_len = sizeof("namei_test_dir") - 1;
+    const char *nested_name = "nested";
+    const size_t nested_len = sizeof("nested") - 1;
+    const char *file_name = "testfile";
+    const size_t file_len = sizeof("testfile") - 1;
+
+    ret = vfs_curroot(&root);
+    if (ret != 0) {
+        printf("namei_smoketest: FAIL vfs_curroot, errno=%d\n", ret);
+        return;
+    }
+    root_pinned = true;
+
+    // Setup: create /namei_test_dir/nested/testfile
+    ret = vfs_mkdir(root, 0755, &subdir, subdir_name, subdir_len, false);
+    if (ret != 0) {
+        printf("namei_smoketest: FAIL setup mkdir %s, errno=%d\n", subdir_name, ret);
+        goto out;
+    }
+    
+
+    ret = vfs_mkdir(subdir, 0755, &nested, nested_name, nested_len, false);
+    if (ret != 0) {
+        printf("namei_smoketest: FAIL setup mkdir %s, errno=%d\n", nested_name, ret);
+        vfs_iput(subdir);
+        goto cleanup_subdir;
+    }
+    vfs_iput(subdir);
+
+    ret = vfs_create(nested, 0644, &file, file_name, file_len, false);
+    if (ret != 0) {
+        printf("namei_smoketest: FAIL setup create %s, errno=%d\n", file_name, ret);
+        vfs_iput(nested);
+        goto cleanup_nested;
+    }
+    uint64 file_ino = file->ino;
+    vfs_iput(nested);
+    vfs_iput(file);
+    file = NULL;
+
+    printf("namei_smoketest: setup complete\n");
+
+    // Test 1: Absolute path to root
+    ret = vfs_namei("/", 1, &result);
+    if (ret != 0) {
+        printf("namei_smoketest: FAIL namei(\"/\"), errno=%d\n", ret);
+    } else if (result != root) {
+        printf("namei_smoketest: FAIL namei(\"/\") returned wrong inode\n");
+        vfs_iput(result);
+    } else {
+        printf("namei_smoketest: PASS namei(\"/\") -> root\n");
+        vfs_iput(result);
+    }
+    result = NULL;
+
+    // Test 2: Absolute path to subdir
+    const char *path2 = "/namei_test_dir";
+    ret = vfs_namei(path2, strlen(path2), &result);
+    if (ret != 0) {
+        printf("namei_smoketest: FAIL namei(\"%s\"), errno=%d\n", path2, ret);
+    } else {
+        printf("namei_smoketest: PASS namei(\"%s\") -> ino=%lu\n", path2, result->ino);
+        vfs_iput(result);
+    }
+    result = NULL;
+
+    // Test 3: Absolute path with multiple components
+    const char *path3 = "/namei_test_dir/nested/testfile";
+    ret = vfs_namei(path3, strlen(path3), &result);
+    if (ret != 0) {
+        printf("namei_smoketest: FAIL namei(\"%s\"), errno=%d\n", path3, ret);
+    } else if (result->ino != file_ino) {
+        printf("namei_smoketest: FAIL namei(\"%s\") wrong ino=%lu expected=%lu\n", 
+               path3, result->ino, file_ino);
+        vfs_iput(result);
+    } else {
+        printf("namei_smoketest: PASS namei(\"%s\") -> ino=%lu\n", path3, result->ino);
+        vfs_iput(result);
+    }
+    result = NULL;
+
+    // Test 4: Path with "." components
+    const char *path4 = "/namei_test_dir/./nested/./testfile";
+    ret = vfs_namei(path4, strlen(path4), &result);
+    if (ret != 0) {
+        printf("namei_smoketest: FAIL namei(\"%s\"), errno=%d\n", path4, ret);
+    } else if (result->ino != file_ino) {
+        printf("namei_smoketest: FAIL namei(\"%s\") wrong ino\n", path4);
+        vfs_iput(result);
+    } else {
+        printf("namei_smoketest: PASS namei(\"%s\") -> ino=%lu\n", path4, result->ino);
+        vfs_iput(result);
+    }
+    result = NULL;
+
+    // Test 5: Path with ".." components
+    const char *path5 = "/namei_test_dir/nested/../nested/testfile";
+    ret = vfs_namei(path5, strlen(path5), &result);
+    if (ret != 0) {
+        printf("namei_smoketest: FAIL namei(\"%s\"), errno=%d\n", path5, ret);
+    } else if (result->ino != file_ino) {
+        printf("namei_smoketest: FAIL namei(\"%s\") wrong ino\n", path5);
+        vfs_iput(result);
+    } else {
+        printf("namei_smoketest: PASS namei(\"%s\") -> ino=%lu\n", path5, result->ino);
+        vfs_iput(result);
+    }
+    result = NULL;
+
+    // Test 6: ".." at root should stay at root
+    const char *path6 = "/..";
+    ret = vfs_namei(path6, strlen(path6), &result);
+    if (ret != 0) {
+        printf("namei_smoketest: FAIL namei(\"%s\"), errno=%d\n", path6, ret);
+    } else if (result != root) {
+        printf("namei_smoketest: FAIL namei(\"%s\") did not return root\n", path6);
+        vfs_iput(result);
+    } else {
+        printf("namei_smoketest: PASS namei(\"%s\") -> root\n", path6);
+        vfs_iput(result);
+    }
+    result = NULL;
+
+    // Test 7: Multiple consecutive slashes
+    const char *path7 = "///namei_test_dir///nested///testfile";
+    ret = vfs_namei(path7, strlen(path7), &result);
+    if (ret != 0) {
+        printf("namei_smoketest: FAIL namei(\"%s\"), errno=%d\n", path7, ret);
+    } else if (result->ino != file_ino) {
+        printf("namei_smoketest: FAIL namei(\"%s\") wrong ino\n", path7);
+        vfs_iput(result);
+    } else {
+        printf("namei_smoketest: PASS namei(\"%s\") -> ino=%lu\n", path7, result->ino);
+        vfs_iput(result);
+    }
+    result = NULL;
+
+    // Test 8: Non-existent path
+    const char *path8 = "/namei_test_dir/nonexistent";
+    ret = vfs_namei(path8, strlen(path8), &result);
+    if (ret == -ENOENT) {
+        printf("namei_smoketest: PASS namei(\"%s\") -> ENOENT as expected\n", path8);
+    } else if (ret == 0) {
+        printf("namei_smoketest: FAIL namei(\"%s\") should have failed\n", path8);
+        vfs_iput(result);
+    } else {
+        printf("namei_smoketest: FAIL namei(\"%s\") unexpected errno=%d\n", path8, ret);
+    }
+    result = NULL;
+
+    printf("namei_smoketest: all tests completed\n");
+
+    // Cleanup
+cleanup_nested:
+    ret = vfs_unlink(nested, file_name, file_len, false);
+    if (ret != 0) {
+        printf("namei_smoketest: cleanup unlink %s failed, errno=%d\n", file_name, ret);
+    }
+    ret = vfs_rmdir(subdir, nested_name, nested_len, false);
+    if (ret != 0) {
+        printf("namei_smoketest: cleanup rmdir %s failed, errno=%d\n", nested_name, ret);
+    } else {
+        printf("namei_smoketest: cleanup rmdir %s success\n", nested_name);
+    }
+cleanup_subdir:
+    ret = vfs_rmdir(root, subdir_name, subdir_len, false);
+    if (ret != 0) {
+        printf("namei_smoketest: cleanup rmdir %s failed, errno=%d\n", subdir_name, ret);
+    } else {
+        printf("namei_smoketest: cleanup rmdir %s success\n", subdir_name);
+    }
+out:
+    if (root_pinned) {
+        vfs_iput(root);
+    }
+}

@@ -211,12 +211,15 @@ void tmpfs_init_fs_type(void) {
     assert(ret == 0, "tmpfs_init_fs_type: vfs_mount failed, errno=%d", ret);
     vfs_iunlock(&vfs_root_inode);
     vfs_mount_unlock();
-
+    
     printf("sizeof(tmpfs_inode)=%lu, TMPFS_INODE_EMBEDDED_DATA_LEN=%lu\n",
            sizeof(struct tmpfs_inode), TMPFS_INODE_EMBEDDED_DATA_LEN);
     printf("tmpfs max file size=%lu bytes\n", TMPFS_MAX_FILE_SIZE);
     printf("TMPFS_INODE_DBLOCKS=%lu, TMPFS_INODE_INDRECT_ITEMS=%lu\n",
            TMPFS_INODE_DBLOCKS, TMPFS_INODE_INDRECT_ITEMS);
+
+    ret = vfs_chroot(vfs_root_inode.mnt_rooti);
+    assert(ret == 0, "tmpfs_init_fs_type: vfs_chroot failed, errno=%d", ret);
 
     // Shrink all caches before baseline to get a clean state
     tmpfs_shrink_caches();
@@ -239,6 +242,7 @@ void tmpfs_init_fs_type(void) {
     before_pages = get_total_free_pages();
     tmpfs_run_truncate_smoketest();
     tmpfs_shrink_caches();
+    tmpfs_run_namei_smoketest();
     kmm_shrink_all();
     after_pages = get_total_free_pages();
     if (before_pages != after_pages) {
