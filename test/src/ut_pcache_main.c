@@ -29,6 +29,10 @@ extern void pcache_test_set_break_on_sleep(bool enable);
 extern void pcache_test_fail_next_page_alloc(void);
 extern void pcache_test_fail_next_slab_alloc(void);
 
+/* Stub function declarations */
+extern void spin_acquire(struct spinlock *lock);
+extern void spin_release(struct spinlock *lock);
+
 extern void spin_init(struct spinlock *lock, char *name);
 
 #define SCRIPTED_OP_MAX 8

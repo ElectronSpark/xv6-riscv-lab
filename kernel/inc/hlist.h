@@ -168,6 +168,174 @@ void *hlist_pop(hlist_t *hlist, void *node);
 size_t hlist_len(hlist_t *hlist);
 
 /**
+ * @brief Get the next bucket in a hash list
+ * @param hlist The hash list containing the buckets
+ * @param bucket The current bucket
+ * @return Pointer to the next bucket, or NULL if at the last bucket or invalid input
+ * 
+ * Iterates forward through the bucket array. Returns NULL when the end
+ * of the bucket array is reached.
+ */
+static inline hlist_bucket_t *hlist_next_bucket(hlist_t *hlist, hlist_bucket_t *bucket) {
+    if (hlist == NULL || bucket == NULL) {
+        return NULL;
+    }
+    int offset = bucket - hlist->buckets;
+    if (offset < 0 || offset >= hlist->bucket_cnt) {
+        return NULL; // bucket is not part of this hlist
+    }
+    offset++;
+    if (offset < hlist->bucket_cnt) {
+        return hlist->buckets + offset;
+    }
+    return NULL;
+}
+
+/**
+ * @brief Get the previous bucket in a hash list
+ * @param hlist The hash list containing the buckets
+ * @param bucket The current bucket
+ * @return Pointer to the previous bucket, or NULL if at the first bucket or invalid input
+ * 
+ * Iterates backward through the bucket array. Returns NULL when the beginning
+ * of the bucket array is reached.
+ */
+static inline hlist_bucket_t *hlist_prev_bucket(hlist_t *hlist, hlist_bucket_t *bucket) {
+    if (hlist == NULL || bucket == NULL) {
+        return NULL;
+    }
+    int offset = bucket - hlist->buckets;
+    if (offset < 0 || offset >= hlist->bucket_cnt) {
+        return NULL; // bucket is not part of this hlist
+    }
+    offset--;
+    if (offset >= 0) {
+        return hlist->buckets + offset;
+    }
+    return NULL;
+}
+
+/**
+ * @brief Get the first entry in a bucket
+ * @param bucket The bucket to get the first entry from
+ * @return Pointer to the first entry, or NULL if the bucket is empty or NULL
+ * 
+ * Returns the first entry in the bucket's linked list.
+ */
+static inline hlist_entry_t *hlist_bucket_first_entry(hlist_bucket_t *bucket) {
+    if (bucket == NULL) {
+        return NULL;
+    }
+    return LIST_FIRST_NODE(bucket, hlist_entry_t, list_entry);
+}
+
+/**
+ * @brief Get the last entry in a bucket
+ * @param bucket The bucket to get the last entry from
+ * @return Pointer to the last entry, or NULL if the bucket is empty or NULL
+ * 
+ * Returns the last entry in the bucket's linked list.
+ */
+static inline hlist_entry_t *hlist_bucket_last_entry(hlist_bucket_t *bucket) {
+    if (bucket == NULL) {
+        return NULL;
+    }
+    return LIST_LAST_NODE(bucket, hlist_entry_t, list_entry);
+}
+
+/**
+ * @brief Get the next entry in a hash list
+ * @param hlist The hash list to iterate
+ * @param entry The current entry
+ * @return Pointer to the next entry, or NULL if at the end of the hash list
+ * 
+ * Iterates forward through the hash list. If the current bucket is exhausted,
+ * continues to the next non-empty bucket. Returns NULL when all entries
+ * have been visited.
+ */
+static inline hlist_entry_t *hlist_next_entry(hlist_t *hlist, hlist_entry_t *entry) {
+    if (hlist == NULL || entry == NULL || entry->bucket == NULL) {
+        return NULL;
+    }
+    hlist_bucket_t *bucket = entry->bucket;
+    hlist_entry_t *next = LIST_NEXT_NODE(bucket, entry, list_entry);
+    while (next == NULL) {
+        bucket = hlist_next_bucket(hlist, bucket);
+        if (bucket == NULL) {
+            return NULL;
+        }
+        next = LIST_FIRST_NODE(bucket, hlist_entry_t, list_entry);
+    }
+    return next;
+}
+
+/**
+ * @brief Get the previous entry in a hash list
+ * @param hlist The hash list to iterate
+ * @param entry The current entry
+ * @return Pointer to the previous entry, or NULL if at the beginning of the hash list
+ * 
+ * Iterates backward through the hash list. If the current bucket is exhausted,
+ * continues to the previous non-empty bucket. Returns NULL when all entries
+ * have been visited in reverse.
+ */
+static inline hlist_entry_t *hlist_prev_entry(hlist_t *hlist, hlist_entry_t *entry) {
+    if (hlist == NULL || entry == NULL || entry->bucket == NULL) {
+        return NULL;
+    }
+    hlist_bucket_t *bucket = entry->bucket;
+    hlist_entry_t *prev = LIST_PREV_NODE(bucket, entry, list_entry);
+    while (prev == NULL) {
+        bucket = hlist_prev_bucket(hlist, bucket);
+        if (bucket == NULL) {
+            return NULL;
+        }
+        prev = LIST_LAST_NODE(bucket, hlist_entry_t, list_entry);
+    }
+    return prev;
+}
+
+/**
+ * @brief Get the first entry in a hash list
+ * @param hlist The hash list to search
+ * @return Pointer to the first entry, or NULL if the hash list is empty
+ * 
+ * Finds the first non-empty bucket and returns its first entry.
+ */
+static inline hlist_entry_t *hlist_first_entry(hlist_t *hlist) {
+    if (hlist == NULL) {
+        return NULL;
+    }
+    for (int i = 0; i < hlist->bucket_cnt; i++) {
+        hlist_entry_t *entry = LIST_FIRST_NODE(&hlist->buckets[i], hlist_entry_t, list_entry);
+        if (entry != NULL) {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+/**
+ * @brief Get the last entry in a hash list
+ * @param hlist The hash list to search
+ * @return Pointer to the last entry, or NULL if the hash list is empty
+ * 
+ * Finds the last non-empty bucket and returns its last entry.
+ */
+static inline hlist_entry_t *hlist_last_entry(hlist_t *hlist) {
+    if (hlist == NULL) {
+        return NULL;
+    }
+    for (int i = hlist->bucket_cnt - 1; i >= 0; i--) {
+        hlist_entry_t *entry = LIST_LAST_NODE(&hlist->buckets[i], hlist_entry_t, list_entry);
+        if (entry != NULL) {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+/**
  * @brief Continue iterating through hash list buckets
  * @param hlist The hash list to iterate
  * @param idx The current bucket index
@@ -215,5 +383,151 @@ size_t hlist_len(hlist_t *hlist);
 #define hlist_foreach_entry_continue(hlist, idx, bucket, pos, tmp)  \
     hlist_foreach_bucket_continue(hlist, idx, bucket)               \
     list_foreach_node_continue_safe(bucket, pos, tmp, list_entry)
+
+/**
+ * @brief Get the first node in a hash list
+ * @param hlist The hash list to search
+ * @param type The type of the container struct
+ * @param member The name of the hlist_entry_t member within the container
+ * @return Pointer to the first node, or NULL if the hash list is empty
+ */
+#define HLIST_FIRST_NODE(hlist, type, member) ({                                \
+    hlist_entry_t *__e = hlist_first_entry(hlist);                              \
+    __e ? container_of(__e, type, member) : NULL;                               \
+})
+
+/**
+ * @brief Get the last node in a hash list
+ * @param hlist The hash list to search
+ * @param type The type of the container struct
+ * @param member The name of the hlist_entry_t member within the container
+ * @return Pointer to the last node, or NULL if the hash list is empty
+ */
+#define HLIST_LAST_NODE(hlist, type, member) ({                                 \
+    hlist_entry_t *__e = hlist_last_entry(hlist);                               \
+    __e ? container_of(__e, type, member) : NULL;                               \
+})
+
+/**
+ * @brief Get the next node in a hash list
+ * @param hlist The hash list to iterate
+ * @param node The current node (container type pointer)
+ * @param member The name of the hlist_entry_t member within the container
+ * @return Pointer to the next node, or NULL if at the end
+ */
+#define HLIST_NEXT_NODE(hlist, node, member) ({                                 \
+    hlist_entry_t *__e = hlist_next_entry(hlist, &(node)->member);              \
+    __e ? container_of(__e, typeof(*(node)), member) : NULL;                    \
+})
+
+/**
+ * @brief Get the previous node in a hash list
+ * @param hlist The hash list to iterate
+ * @param node The current node (container type pointer)
+ * @param member The name of the hlist_entry_t member within the container
+ * @return Pointer to the previous node, or NULL if at the beginning
+ */
+#define HLIST_PREV_NODE(hlist, node, member) ({                                 \
+    hlist_entry_t *__e = hlist_prev_entry(hlist, &(node)->member);              \
+    __e ? container_of(__e, typeof(*(node)), member) : NULL;                    \
+})
+
+/**
+ * @brief Get the first node in a bucket
+ * @param bucket The bucket to get the first node from
+ * @param type The type of the container struct
+ * @param member The name of the hlist_entry_t member within the container
+ * @return Pointer to the first node, or NULL if the bucket is empty
+ */
+#define HLIST_BUCKET_FIRST_NODE(bucket, type, member) ({                        \
+    hlist_entry_t *__e = hlist_bucket_first_entry(bucket);                      \
+    __e ? container_of(__e, type, member) : NULL;                               \
+})
+
+/**
+ * @brief Get the last node in a bucket
+ * @param bucket The bucket to get the last node from
+ * @param type The type of the container struct
+ * @param member The name of the hlist_entry_t member within the container
+ * @return Pointer to the last node, or NULL if the bucket is empty
+ */
+#define HLIST_BUCKET_LAST_NODE(bucket, type, member) ({                         \
+    hlist_entry_t *__e = hlist_bucket_last_entry(bucket);                       \
+    __e ? container_of(__e, type, member) : NULL;                               \
+})
+
+/**
+ * @brief Iterate over hash list nodes using container_of
+ * @param hlist The hash list to iterate
+ * @param pos Variable for the loop cursor (container type pointer)
+ * @param member The name of the hlist_entry_t member within the container
+ *
+ * Example:
+ *   my_node_t *node;
+ *   hlist_foreach_node(hlist, node, entry) {
+ *       // use node
+ *   }
+ */
+#define hlist_foreach_node(hlist, pos, member)                                  \
+    for (hlist_entry_t *__entry = hlist_first_entry(hlist);                     \
+         __entry && (pos = container_of(__entry, typeof(*(pos)), member), 1);  \
+         __entry = hlist_next_entry(hlist, __entry))
+
+/**
+ * @brief Iterate over hash list nodes in reverse using container_of
+ * @param hlist The hash list to iterate
+ * @param pos Variable for the loop cursor (container type pointer)
+ * @param member The name of the hlist_entry_t member within the container
+ *
+ * Example:
+ *   my_node_t *node;
+ *   hlist_foreach_node_reverse(hlist, node, entry) {
+ *       // use node in reverse order
+ *   }
+ */
+#define hlist_foreach_node_reverse(hlist, pos, member)                          \
+    for (hlist_entry_t *__entry = hlist_last_entry(hlist);                      \
+         __entry && (pos = container_of(__entry, typeof(*(pos)), member), 1);  \
+         __entry = hlist_prev_entry(hlist, __entry))
+
+/**
+ * @brief Safely iterate over hash list nodes, allowing removal during iteration
+ * @param hlist The hash list to iterate
+ * @param pos Variable for the loop cursor (container type pointer)
+ * @param tmp Temporary variable for safe iteration (same container type pointer)
+ * @param member The name of the hlist_entry_t member within the container
+ *
+ * Example:
+ *   my_node_t *node, *tmp;
+ *   hlist_foreach_node_safe(hlist, node, tmp, entry) {
+ *       hlist_pop(hlist, node);  // safe to remove
+ *   }
+ */
+#define hlist_foreach_node_safe(hlist, pos, tmp, member)                        \
+    for ((pos) = HLIST_FIRST_NODE(hlist, typeof(*(pos)), member),               \
+         (tmp) = (pos) ? HLIST_NEXT_NODE(hlist, pos, member) : NULL;            \
+         (pos) != NULL;                                                         \
+         (pos) = (tmp),                                                         \
+         (tmp) = (pos) ? HLIST_NEXT_NODE(hlist, pos, member) : NULL)
+
+/**
+ * @brief Safely iterate over hash list nodes in reverse, allowing removal
+ * @param hlist The hash list to iterate
+ * @param pos Variable for the loop cursor (container type pointer)
+ * @param tmp Temporary variable for safe iteration (same container type pointer)
+ * @param member The name of the hlist_entry_t member within the container
+ *
+ * Example:
+ *   my_node_t *node, *tmp;
+ *   hlist_foreach_node_reverse_safe(hlist, node, tmp, entry) {
+ *       hlist_pop(hlist, node);  // safe to remove
+ *   }
+ */
+#define hlist_foreach_node_reverse_safe(hlist, pos, tmp, member)                \
+    for ((pos) = HLIST_LAST_NODE(hlist, typeof(*(pos)), member),                \
+         (tmp) = (pos) ? HLIST_PREV_NODE(hlist, pos, member) : NULL;            \
+         (pos) != NULL;                                                         \
+         (pos) = (tmp),                                                         \
+         (tmp) = (pos) ? HLIST_PREV_NODE(hlist, pos, member) : NULL)
 
 #endif      /* __HASH_LIST_H__ */

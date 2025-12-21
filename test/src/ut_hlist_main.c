@@ -736,6 +736,666 @@ static void test_hlist_scale_insertion_string(void **state) {
     assert_int_equal(check_sum, 0); // Checksum should be zero if all nodes were popped correctly
 }
 
+/* Test hlist_next_bucket and hlist_prev_bucket */
+static void test_hlist_bucket_navigation(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+    hlist_t *hlist = fixture->hlist;
+
+    // Test forward navigation
+    hlist_bucket_t *bucket = &hlist->buckets[0];
+    for (int i = 1; i < TEST_HASH_BUCKET_CNT; i++) {
+        hlist_bucket_t *next = hlist_next_bucket(hlist, bucket);
+        assert_non_null(next);
+        assert_ptr_equal(next, &hlist->buckets[i]);
+        bucket = next;
+    }
+    // At last bucket, next should be NULL
+    assert_null(hlist_next_bucket(hlist, bucket));
+
+    // Test backward navigation
+    bucket = &hlist->buckets[TEST_HASH_BUCKET_CNT - 1];
+    for (int i = TEST_HASH_BUCKET_CNT - 2; i >= 0; i--) {
+        hlist_bucket_t *prev = hlist_prev_bucket(hlist, bucket);
+        assert_non_null(prev);
+        assert_ptr_equal(prev, &hlist->buckets[i]);
+        bucket = prev;
+    }
+    // At first bucket, prev should be NULL
+    assert_null(hlist_prev_bucket(hlist, bucket));
+
+    // Test NULL inputs
+    assert_null(hlist_next_bucket(NULL, &hlist->buckets[0]));
+    assert_null(hlist_next_bucket(hlist, NULL));
+    assert_null(hlist_prev_bucket(NULL, &hlist->buckets[0]));
+    assert_null(hlist_prev_bucket(hlist, NULL));
+}
+
+/* Test hlist_bucket_first_entry and hlist_bucket_last_entry */
+static void test_hlist_bucket_first_last_entry(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+
+    // Create nodes that will hash to the same bucket for easier testing
+    // Insert multiple nodes
+    fixture->nodes[0] = create_test_node(1, "First");
+    fixture->nodes[1] = create_test_node(2, "Second");
+    fixture->nodes[2] = create_test_node(3, "Third");
+
+    hlist_put(fixture->hlist, fixture->nodes[0], false);
+    hlist_put(fixture->hlist, fixture->nodes[1], false);
+    hlist_put(fixture->hlist, fixture->nodes[2], false);
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
+
+    // Find which bucket each node is in and test first/last
+    for (int i = 0; i < 3; i++) {
+        hlist_bucket_t *bucket = fixture->nodes[i]->entry.bucket;
+        assert_non_null(bucket);
+
+        hlist_entry_t *first = hlist_bucket_first_entry(bucket);
+        hlist_entry_t *last = hlist_bucket_last_entry(bucket);
+        assert_non_null(first);
+        assert_non_null(last);
+    }
+
+    // Test NULL bucket
+    assert_null(hlist_bucket_first_entry(NULL));
+    assert_null(hlist_bucket_last_entry(NULL));
+}
+
+/* Test hlist_first_entry and hlist_last_entry */
+static void test_hlist_first_last_entry(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+
+    // Empty list should return NULL
+    assert_null(hlist_first_entry(fixture->hlist));
+    assert_null(hlist_last_entry(fixture->hlist));
+
+    // Add one node
+    fixture->nodes[0] = create_test_node(42, "Single");
+    hlist_put(fixture->hlist, fixture->nodes[0], false);
+
+    hlist_entry_t *first = hlist_first_entry(fixture->hlist);
+    hlist_entry_t *last = hlist_last_entry(fixture->hlist);
+    assert_non_null(first);
+    assert_non_null(last);
+    // With single element, first and last should be the same
+    assert_ptr_equal(first, last);
+    assert_ptr_equal(first, &fixture->nodes[0]->entry);
+
+    // Add more nodes
+    fixture->nodes[1] = create_test_node(100, "Another");
+    fixture->nodes[2] = create_test_node(200, "Third");
+    hlist_put(fixture->hlist, fixture->nodes[1], false);
+    hlist_put(fixture->hlist, fixture->nodes[2], false);
+
+    first = hlist_first_entry(fixture->hlist);
+    last = hlist_last_entry(fixture->hlist);
+    assert_non_null(first);
+    assert_non_null(last);
+
+    // Test NULL input
+    assert_null(hlist_first_entry(NULL));
+    assert_null(hlist_last_entry(NULL));
+
+    assert_true(__hlist_consistency_check(fixture->hlist));
+}
+
+/* Test hlist_next_entry and hlist_prev_entry */
+static void test_hlist_entry_navigation(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+
+    // Insert several nodes
+    const int num_nodes = 5;
+    for (int i = 0; i < num_nodes; i++) {
+        fixture->nodes[i] = create_test_node(i * 10, "Node");
+        hlist_put(fixture->hlist, fixture->nodes[i], false);
+    }
+
+    assert_int_equal(hlist_len(fixture->hlist), num_nodes);
+    assert_true(__hlist_consistency_check(fixture->hlist));
+
+    // Forward iteration: count all entries from first to last
+    int forward_count = 0;
+    hlist_entry_t *entry = hlist_first_entry(fixture->hlist);
+    while (entry != NULL) {
+        forward_count++;
+        entry = hlist_next_entry(fixture->hlist, entry);
+    }
+    assert_int_equal(forward_count, num_nodes);
+
+    // Backward iteration: count all entries from last to first
+    int backward_count = 0;
+    entry = hlist_last_entry(fixture->hlist);
+    while (entry != NULL) {
+        backward_count++;
+        entry = hlist_prev_entry(fixture->hlist, entry);
+    }
+    assert_int_equal(backward_count, num_nodes);
+
+    // Test NULL inputs
+    assert_null(hlist_next_entry(NULL, hlist_first_entry(fixture->hlist)));
+    assert_null(hlist_next_entry(fixture->hlist, NULL));
+    assert_null(hlist_prev_entry(NULL, hlist_last_entry(fixture->hlist)));
+    assert_null(hlist_prev_entry(fixture->hlist, NULL));
+}
+
+/* Test forward and backward iteration consistency */
+static void test_hlist_iteration_consistency(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+
+    // Insert many nodes
+    const int num_nodes = 50;
+    test_node_t *nodes[50];
+    for (int i = 0; i < num_nodes; i++) {
+        nodes[i] = create_test_node(i, "Node");
+        hlist_put(fixture->hlist, nodes[i], false);
+    }
+
+    assert_int_equal(hlist_len(fixture->hlist), num_nodes);
+    assert_true(__hlist_consistency_check(fixture->hlist));
+
+    // Collect all entries in forward order
+    hlist_entry_t *forward_entries[50];
+    int idx = 0;
+    hlist_entry_t *entry = hlist_first_entry(fixture->hlist);
+    while (entry != NULL && idx < num_nodes) {
+        forward_entries[idx++] = entry;
+        entry = hlist_next_entry(fixture->hlist, entry);
+    }
+    assert_int_equal(idx, num_nodes);
+
+    // Collect all entries in backward order
+    hlist_entry_t *backward_entries[50];
+    idx = num_nodes - 1;
+    entry = hlist_last_entry(fixture->hlist);
+    while (entry != NULL && idx >= 0) {
+        backward_entries[idx--] = entry;
+        entry = hlist_prev_entry(fixture->hlist, entry);
+    }
+    assert_int_equal(idx, -1);
+
+    // Verify forward and backward collections are the same
+    for (int i = 0; i < num_nodes; i++) {
+        assert_ptr_equal(forward_entries[i], backward_entries[i]);
+    }
+
+    // Cleanup nodes (they are not in fixture->nodes)
+    for (int i = 0; i < num_nodes; i++) {
+        hlist_pop(fixture->hlist, nodes[i]);
+        free_test_node(nodes[i]);
+    }
+}
+
+/* Test HLIST_FIRST_NODE, HLIST_LAST_NODE, HLIST_NEXT_NODE, HLIST_PREV_NODE macros */
+static void test_hlist_node_macros(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+
+    // Empty list should return NULL
+    assert_null(HLIST_FIRST_NODE(fixture->hlist, test_node_t, entry));
+    assert_null(HLIST_LAST_NODE(fixture->hlist, test_node_t, entry));
+
+    // Add nodes
+    fixture->nodes[0] = create_test_node(10, "First");
+    fixture->nodes[1] = create_test_node(20, "Second");
+    fixture->nodes[2] = create_test_node(30, "Third");
+    hlist_put(fixture->hlist, fixture->nodes[0], false);
+    hlist_put(fixture->hlist, fixture->nodes[1], false);
+    hlist_put(fixture->hlist, fixture->nodes[2], false);
+
+    // Test HLIST_FIRST_NODE and HLIST_LAST_NODE
+    test_node_t *first = HLIST_FIRST_NODE(fixture->hlist, test_node_t, entry);
+    test_node_t *last = HLIST_LAST_NODE(fixture->hlist, test_node_t, entry);
+    assert_non_null(first);
+    assert_non_null(last);
+
+    // Forward iteration using HLIST_NEXT_NODE
+    int forward_count = 0;
+    for (test_node_t *node = first; node != NULL; 
+        node = HLIST_NEXT_NODE(fixture->hlist, node, entry)) {
+        forward_count++;
+    }
+    assert_int_equal(forward_count, 3);
+
+    // Backward iteration using HLIST_PREV_NODE
+    int backward_count = 0;
+    for (test_node_t *node = last; node != NULL; 
+        node = HLIST_PREV_NODE(fixture->hlist, node, entry)) {
+        backward_count++;
+    }
+    assert_int_equal(backward_count, 3);
+
+    // Test NULL hlist
+    assert_null(HLIST_FIRST_NODE(NULL, test_node_t, entry));
+    assert_null(HLIST_LAST_NODE(NULL, test_node_t, entry));
+}
+
+/* Test HLIST_BUCKET_FIRST_NODE and HLIST_BUCKET_LAST_NODE macros */
+static void test_hlist_bucket_node_macros(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+
+    // Add nodes
+    fixture->nodes[0] = create_test_node(1, "A");
+    fixture->nodes[1] = create_test_node(2, "B");
+    fixture->nodes[2] = create_test_node(3, "C");
+    hlist_put(fixture->hlist, fixture->nodes[0], false);
+    hlist_put(fixture->hlist, fixture->nodes[1], false);
+    hlist_put(fixture->hlist, fixture->nodes[2], false);
+
+    // Test each node's bucket
+    for (int i = 0; i < 3; i++) {
+        hlist_bucket_t *bucket = fixture->nodes[i]->entry.bucket;
+        assert_non_null(bucket);
+
+        test_node_t *bucket_first = HLIST_BUCKET_FIRST_NODE(bucket, test_node_t, entry);
+        test_node_t *bucket_last = HLIST_BUCKET_LAST_NODE(bucket, test_node_t, entry);
+        assert_non_null(bucket_first);
+        assert_non_null(bucket_last);
+    }
+
+    // Test NULL bucket
+    assert_null(HLIST_BUCKET_FIRST_NODE(NULL, test_node_t, entry));
+    assert_null(HLIST_BUCKET_LAST_NODE(NULL, test_node_t, entry));
+}
+
+/* Test hlist_foreach_node macro */
+static void test_hlist_foreach_node(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+
+    // Add nodes
+    const int num_nodes = 10;
+    for (int i = 0; i < num_nodes; i++) {
+        fixture->nodes[i] = create_test_node(i * 100, "Node");
+        hlist_put(fixture->hlist, fixture->nodes[i], false);
+    }
+
+    // Count using hlist_foreach_node
+    int count = 0;
+    test_node_t *node;
+    hlist_foreach_node(fixture->hlist, node, entry) {
+        count++;
+        assert_non_null(node);
+    }
+    assert_int_equal(count, num_nodes);
+}
+
+/* Test hlist_foreach_node_reverse macro */
+static void test_hlist_foreach_node_reverse(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+
+    // Add nodes
+    const int num_nodes = 10;
+    for (int i = 0; i < num_nodes; i++) {
+        fixture->nodes[i] = create_test_node(i * 100, "Node");
+        hlist_put(fixture->hlist, fixture->nodes[i], false);
+    }
+
+    // Count using hlist_foreach_node_reverse
+    int count = 0;
+    test_node_t *node;
+    hlist_foreach_node_reverse(fixture->hlist, node, entry) {
+        count++;
+        assert_non_null(node);
+    }
+    assert_int_equal(count, num_nodes);
+}
+
+/* Test hlist_foreach_node_safe macro - allows removal during iteration */
+static void test_hlist_foreach_node_safe(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+
+    // Add nodes
+    const int num_nodes = 20;
+    test_node_t *nodes[20];
+    for (int i = 0; i < num_nodes; i++) {
+        nodes[i] = create_test_node(i, "Node");
+        hlist_put(fixture->hlist, nodes[i], false);
+    }
+    assert_int_equal(hlist_len(fixture->hlist), num_nodes);
+
+    // Remove all even-keyed nodes during iteration
+    test_node_t *node, *tmp;
+    int removed = 0;
+    hlist_foreach_node_safe(fixture->hlist, node, tmp, entry) {
+        if (node->key % 2 == 0) {
+            hlist_pop(fixture->hlist, node);
+            free_test_node(node);
+            removed++;
+        }
+    }
+    assert_int_equal(removed, num_nodes / 2);
+    assert_int_equal(hlist_len(fixture->hlist), num_nodes / 2);
+
+    // Verify only odd-keyed nodes remain
+    hlist_foreach_node(fixture->hlist, node, entry) {
+        assert_true(node->key % 2 == 1);
+    }
+
+    // Cleanup remaining nodes
+    hlist_foreach_node_safe(fixture->hlist, node, tmp, entry) {
+        hlist_pop(fixture->hlist, node);
+        free_test_node(node);
+    }
+    assert_int_equal(hlist_len(fixture->hlist), 0);
+}
+
+/* Test hlist_foreach_node_reverse_safe macro */
+static void test_hlist_foreach_node_reverse_safe(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+
+    // Add nodes
+    const int num_nodes = 20;
+    test_node_t *nodes[20];
+    for (int i = 0; i < num_nodes; i++) {
+        nodes[i] = create_test_node(i, "Node");
+        hlist_put(fixture->hlist, nodes[i], false);
+    }
+    assert_int_equal(hlist_len(fixture->hlist), num_nodes);
+
+    // Remove all nodes with key >= 10 during reverse iteration
+    test_node_t *node, *tmp;
+    int removed = 0;
+    hlist_foreach_node_reverse_safe(fixture->hlist, node, tmp, entry) {
+        if (node->key >= 10) {
+            hlist_pop(fixture->hlist, node);
+            free_test_node(node);
+            removed++;
+        }
+    }
+    assert_int_equal(removed, 10);
+    assert_int_equal(hlist_len(fixture->hlist), 10);
+
+    // Verify only nodes with key < 10 remain
+    hlist_foreach_node(fixture->hlist, node, entry) {
+        assert_true(node->key < 10);
+    }
+
+    // Cleanup remaining nodes
+    hlist_foreach_node_safe(fixture->hlist, node, tmp, entry) {
+        hlist_pop(fixture->hlist, node);
+        free_test_node(node);
+    }
+    assert_int_equal(hlist_len(fixture->hlist), 0);
+}
+
+/* Test consistency between node macros and entry functions */
+static void test_hlist_node_entry_consistency(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+
+    // Add nodes
+    const int num_nodes = 30;
+    test_node_t *nodes[30];
+    for (int i = 0; i < num_nodes; i++) {
+        nodes[i] = create_test_node(i * 7, "Node");
+        hlist_put(fixture->hlist, nodes[i], false);
+    }
+
+    // Collect nodes using macros
+    test_node_t *macro_nodes[30];
+    int idx = 0;
+    test_node_t *node;
+    hlist_foreach_node(fixture->hlist, node, entry) {
+        macro_nodes[idx++] = node;
+    }
+    assert_int_equal(idx, num_nodes);
+
+    // Collect nodes using entry functions
+    test_node_t *entry_nodes[30];
+    idx = 0;
+    hlist_entry_t *entry = hlist_first_entry(fixture->hlist);
+    while (entry != NULL && idx < num_nodes) {
+        entry_nodes[idx++] = container_of(entry, test_node_t, entry);
+        entry = hlist_next_entry(fixture->hlist, entry);
+    }
+    assert_int_equal(idx, num_nodes);
+
+    // Verify both methods yield the same result
+    for (int i = 0; i < num_nodes; i++) {
+        assert_ptr_equal(macro_nodes[i], entry_nodes[i]);
+    }
+
+    // Cleanup
+    for (int i = 0; i < num_nodes; i++) {
+        hlist_pop(fixture->hlist, nodes[i]);
+        free_test_node(nodes[i]);
+    }
+}
+
+/* Scale test for iteration: verify iteration visits all nodes at scale */
+static void test_hlist_scale_iteration(void **state) {
+    test_fixture_t *fixture = (test_fixture_t *)*state;
+    const int num_nodes = 1000;
+    test_node_t **nodes = malloc(sizeof(test_node_t *) * num_nodes);
+    assert_non_null(nodes);
+
+    // Insert many nodes
+    for (int i = 0; i < num_nodes; i++) {
+        nodes[i] = create_test_node(i, "ScaleNode");
+        hlist_put(fixture->hlist, nodes[i], false);
+    }
+
+    assert_int_equal(hlist_len(fixture->hlist), num_nodes);
+    assert_true(__hlist_consistency_check(fixture->hlist));
+
+    // Forward iteration count
+    int forward_count = 0;
+    hlist_entry_t *entry = hlist_first_entry(fixture->hlist);
+    while (entry != NULL) {
+        forward_count++;
+        entry = hlist_next_entry(fixture->hlist, entry);
+    }
+    assert_int_equal(forward_count, num_nodes);
+
+    // Backward iteration count
+    int backward_count = 0;
+    entry = hlist_last_entry(fixture->hlist);
+    while (entry != NULL) {
+        backward_count++;
+        entry = hlist_prev_entry(fixture->hlist, entry);
+    }
+    assert_int_equal(backward_count, num_nodes);
+
+    // Cleanup
+    for (int i = 0; i < num_nodes; i++) {
+        hlist_pop(fixture->hlist, nodes[i]);
+        free_test_node(nodes[i]);
+    }
+    free(nodes);
+}
+
+/* Scale test: iterate while deleting from a separate list */
+static void test_hlist_scale_iterate_while_modify(void **state) {
+    (void)state;
+
+    // Create two separate hash lists (need to allocate space for buckets array)
+    size_t hlist_size = sizeof(hlist_t) + sizeof(hlist_bucket_t) * TEST_HASH_BUCKET_CNT;
+    hlist_t *iter_list = malloc(hlist_size);
+    hlist_t *modify_list = malloc(hlist_size);
+    assert_non_null(iter_list);
+    assert_non_null(modify_list);
+
+    hlist_init(iter_list, TEST_HASH_BUCKET_CNT, &test_hlist_func);
+    hlist_init(modify_list, TEST_HASH_BUCKET_CNT, &test_hlist_func);
+
+    const int num_nodes = 500;
+    test_node_t **iter_nodes = malloc(sizeof(test_node_t *) * num_nodes);
+    test_node_t **modify_nodes = malloc(sizeof(test_node_t *) * num_nodes);
+    assert_non_null(iter_nodes);
+    assert_non_null(modify_nodes);
+
+    // Populate both lists
+    for (int i = 0; i < num_nodes; i++) {
+        iter_nodes[i] = create_test_node(i, "IterNode");
+        modify_nodes[i] = create_test_node(i + num_nodes, "ModifyNode");
+        hlist_put(iter_list, iter_nodes[i], false);
+        hlist_put(modify_list, modify_nodes[i], false);
+    }
+
+    assert_int_equal(hlist_len(iter_list), num_nodes);
+    assert_int_equal(hlist_len(modify_list), num_nodes);
+
+    // Iterate over iter_list while deleting from modify_list
+    int iter_count = 0;
+    int delete_idx = 0;
+    hlist_entry_t *entry = hlist_first_entry(iter_list);
+    while (entry != NULL) {
+        iter_count++;
+
+        // Delete from modify_list during iteration
+        if (delete_idx < num_nodes) {
+            hlist_pop(modify_list, modify_nodes[delete_idx]);
+            free_test_node(modify_nodes[delete_idx]);
+            delete_idx++;
+        }
+
+        entry = hlist_next_entry(iter_list, entry);
+    }
+
+    assert_int_equal(iter_count, num_nodes);
+    assert_int_equal(hlist_len(modify_list), 0);
+    assert_true(__hlist_consistency_check(iter_list));
+    assert_true(__hlist_consistency_check(modify_list));
+
+    // Cleanup iter_list
+    for (int i = 0; i < num_nodes; i++) {
+        hlist_pop(iter_list, iter_nodes[i]);
+        free_test_node(iter_nodes[i]);
+    }
+
+    free(iter_list);
+    free(modify_list);
+    free(iter_nodes);
+    free(modify_nodes);
+}
+
+/* Scale test: insert into one list while iterating another */
+static void test_hlist_scale_iterate_while_insert(void **state) {
+    (void)state;
+
+    // Create two separate hash lists (need to allocate space for buckets array)
+    size_t hlist_size = sizeof(hlist_t) + sizeof(hlist_bucket_t) * TEST_HASH_BUCKET_CNT;
+    hlist_t *iter_list = malloc(hlist_size);
+    hlist_t *insert_list = malloc(hlist_size);
+    assert_non_null(iter_list);
+    assert_non_null(insert_list);
+
+    hlist_init(iter_list, TEST_HASH_BUCKET_CNT, &test_hlist_func);
+    hlist_init(insert_list, TEST_HASH_BUCKET_CNT, &test_hlist_func);
+
+    const int num_nodes = 500;
+    test_node_t **iter_nodes = malloc(sizeof(test_node_t *) * num_nodes);
+    test_node_t **insert_nodes = malloc(sizeof(test_node_t *) * num_nodes);
+    assert_non_null(iter_nodes);
+    assert_non_null(insert_nodes);
+
+    // Populate iter_list, prepare insert_nodes
+    for (int i = 0; i < num_nodes; i++) {
+        iter_nodes[i] = create_test_node(i, "IterNode");
+        insert_nodes[i] = create_test_node(i + num_nodes, "InsertNode");
+        hlist_put(iter_list, iter_nodes[i], false);
+    }
+
+    assert_int_equal(hlist_len(iter_list), num_nodes);
+    assert_int_equal(hlist_len(insert_list), 0);
+
+    // Iterate over iter_list while inserting into insert_list
+    int iter_count = 0;
+    int insert_idx = 0;
+    hlist_entry_t *entry = hlist_first_entry(iter_list);
+    while (entry != NULL) {
+        iter_count++;
+
+        // Insert into insert_list during iteration
+        if (insert_idx < num_nodes) {
+            hlist_put(insert_list, insert_nodes[insert_idx], false);
+            insert_idx++;
+        }
+
+        entry = hlist_next_entry(iter_list, entry);
+    }
+
+    assert_int_equal(iter_count, num_nodes);
+    assert_int_equal(hlist_len(insert_list), num_nodes);
+    assert_true(__hlist_consistency_check(iter_list));
+    assert_true(__hlist_consistency_check(insert_list));
+
+    // Cleanup
+    for (int i = 0; i < num_nodes; i++) {
+        hlist_pop(iter_list, iter_nodes[i]);
+        free_test_node(iter_nodes[i]);
+        hlist_pop(insert_list, insert_nodes[i]);
+        free_test_node(insert_nodes[i]);
+    }
+
+    free(iter_list);
+    free(insert_list);
+    free(iter_nodes);
+    free(insert_nodes);
+}
+
+/* Scale test: backward iteration while modifying separate list */
+static void test_hlist_scale_backward_iterate_while_modify(void **state) {
+    (void)state;
+
+    // Create two separate hash lists (need to allocate space for buckets array)
+    size_t hlist_size = sizeof(hlist_t) + sizeof(hlist_bucket_t) * TEST_HASH_BUCKET_CNT;
+    hlist_t *iter_list = malloc(hlist_size);
+    hlist_t *modify_list = malloc(hlist_size);
+    assert_non_null(iter_list);
+    assert_non_null(modify_list);
+
+    hlist_init(iter_list, TEST_HASH_BUCKET_CNT, &test_hlist_func);
+    hlist_init(modify_list, TEST_HASH_BUCKET_CNT, &test_hlist_func);
+
+    const int num_nodes = 500;
+    test_node_t **iter_nodes = malloc(sizeof(test_node_t *) * num_nodes);
+    test_node_t **modify_nodes = malloc(sizeof(test_node_t *) * num_nodes);
+    assert_non_null(iter_nodes);
+    assert_non_null(modify_nodes);
+
+    // Populate both lists
+    for (int i = 0; i < num_nodes; i++) {
+        iter_nodes[i] = create_test_node(i, "IterNode");
+        modify_nodes[i] = create_test_node(i + num_nodes, "ModifyNode");
+        hlist_put(iter_list, iter_nodes[i], false);
+        hlist_put(modify_list, modify_nodes[i], false);
+    }
+
+    // Backward iterate over iter_list while deleting and inserting in modify_list
+    int iter_count = 0;
+    int op_idx = 0;
+    hlist_entry_t *entry = hlist_last_entry(iter_list);
+    while (entry != NULL) {
+        iter_count++;
+
+        // Alternate between delete and insert on modify_list
+        if (op_idx < num_nodes) {
+            // Delete
+            hlist_pop(modify_list, modify_nodes[op_idx]);
+            free_test_node(modify_nodes[op_idx]);
+            modify_nodes[op_idx] = NULL;
+            op_idx++;
+        }
+
+        entry = hlist_prev_entry(iter_list, entry);
+    }
+
+    assert_int_equal(iter_count, num_nodes);
+    assert_int_equal(hlist_len(modify_list), 0);
+    assert_true(__hlist_consistency_check(iter_list));
+    assert_true(__hlist_consistency_check(modify_list));
+
+    // Cleanup iter_list
+    for (int i = 0; i < num_nodes; i++) {
+        hlist_pop(iter_list, iter_nodes[i]);
+        free_test_node(iter_nodes[i]);
+    }
+
+    free(iter_list);
+    free(modify_list);
+    free(iter_nodes);
+    free(modify_nodes);
+}
+
 /* Main function */
 int main(void) {
     const struct CMUnitTest tests[] = {
@@ -758,6 +1418,28 @@ int main(void) {
         // Other tests
         cmocka_unit_test_setup_teardown(test_hlist_node_in_list, setup, teardown),
         cmocka_unit_test_setup_teardown(test_hlist_get_node_hash, setup, teardown),
+
+        // Bucket and entry navigation tests
+        cmocka_unit_test_setup_teardown(test_hlist_bucket_navigation, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_hlist_bucket_first_last_entry, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_hlist_first_last_entry, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_hlist_entry_navigation, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_hlist_iteration_consistency, setup, teardown),
+
+        // Node macro tests (container_of based iteration)
+        cmocka_unit_test_setup_teardown(test_hlist_node_macros, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_hlist_bucket_node_macros, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_hlist_foreach_node, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_hlist_foreach_node_reverse, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_hlist_foreach_node_safe, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_hlist_foreach_node_reverse_safe, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_hlist_node_entry_consistency, setup, teardown),
+
+        // Scale tests for iteration
+        cmocka_unit_test_setup_teardown(test_hlist_scale_iteration, setup, teardown),
+        cmocka_unit_test(test_hlist_scale_iterate_while_modify),
+        cmocka_unit_test(test_hlist_scale_iterate_while_insert),
+        cmocka_unit_test(test_hlist_scale_backward_iterate_while_modify),
 
         // scale tests
         cmocka_unit_test_setup_teardown(test_hlist_scale_insertion, setup, teardown),
