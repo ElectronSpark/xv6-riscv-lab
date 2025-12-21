@@ -66,52 +66,20 @@ static struct tmpfs_dentry *__tmpfs_alloc_dentry(size_t name_len) {
     return dentry;
 }
 
-// Allocate and copy a name string from user or kernel space using kmm_alloc
-static int __tmpfs_alloc_name_copy(const char *name, size_t name_len, bool user, char **ret) {
-    char *name_copy = (char *)kmm_alloc(name_len + 1);
-    if (name_copy == NULL) {
-        return -ENOMEM; // Memory allocation failed
-    }
-    if (user) {
-        int retval = vm_copyin(myproc()->vm, name_copy, (uint64)name, name_len);
-        if (retval != 0) {
-            kmm_free(name_copy);
-            *ret = NULL;
-            return -EFAULT;
-        }
-    } else {
-        memmove(name_copy, name, name_len);
-    }
-    name_copy[name_len] = '\0';
-    *ret = name_copy;
-    return 0;
-}
-
 static void __tmpfs_free_dentry(struct tmpfs_dentry *dentry) {
     if (dentry != NULL) {
         kmm_free(dentry);
     }
 }
 
-// Allocate and copy a tmpfs directory entry name from user or kernel space
-static int __tmpfs_dentry_name_copy(const char *name, size_t name_len, bool user,
+// Allocate and copy a tmpfs directory entry name
+static int __tmpfs_dentry_name_copy(const char *name, size_t name_len,
                                     struct tmpfs_dentry **ret) {
     struct tmpfs_dentry *dentry = __tmpfs_alloc_dentry(name_len);
     if (dentry == NULL) {
         return -ENOMEM; // Memory allocation failed
     }
-    if (user) {
-        proc_lock(myproc());
-        int retval = vm_copyin(myproc()->vm, dentry->name, (uint64)name, name_len);
-        proc_unlock(myproc());
-        if (retval != 0) {
-            __tmpfs_free_dentry(dentry);
-            *ret = NULL;
-            return -EFAULT;
-        }
-    } else {
-        memmove(dentry->name, name, name_len);
-    }
+    memmove(dentry->name, name, name_len);
     dentry->name[name_len] = '\0';
     *ret = dentry;
     return 0;
@@ -226,13 +194,12 @@ static void __tmpfs_do_unlink(struct tmpfs_dentry *dentry) {
 // Caller should hold the dir inode lock
 // Will not release the lock of the new inode, caller should do it
 static int __tmpfs_alloc_link_inode(struct tmpfs_inode *dir, mode_t mode, struct tmpfs_inode **new_inode,    
-                                    struct tmpfs_dentry **ret_dentry, const char *name, size_t name_len, 
-                                    bool user) {
+                                    struct tmpfs_dentry **ret_dentry, const char *name, size_t name_len) {
     struct tmpfs_inode *tmpfs_inode = NULL;
     struct vfs_inode *vfs_inode = NULL;
     struct tmpfs_dentry *dentry = NULL;
     int ret = 0;
-    ret = __tmpfs_dentry_name_copy(name, name_len, user, &dentry);
+    ret = __tmpfs_dentry_name_copy(name, name_len, &dentry);
     if (ret != 0) {
         goto done;
     }
@@ -282,17 +249,9 @@ void tmpfs_free_symlink_target(struct tmpfs_inode *tmpfs_inode) {
  *****************************************************************************/
 
 int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry, 
-                   const char *name, size_t name_len, bool user) {
+                   const char *name, size_t name_len) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
-    char *name_buf = NULL;
     int ret = 0;
-    if (user) {
-        ret = __tmpfs_alloc_name_copy(name, name_len, user, &name_buf);
-        if (ret != 0) {
-            goto done;
-        }
-        name = name_buf;
-    }
     // Assume the VFS handled "."
     if (name_len == 2 && strncmp(name, "..", 2) == 0) {
         dentry->sb = dir->sb;
@@ -322,9 +281,6 @@ int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     dentry->cookies = (uint64)child_dentry;
 
  done:
-    if (user && name_buf != NULL) {
-        kmm_free(name_buf);
-    }
     return ret;
 }
 
@@ -386,36 +342,11 @@ int __tmpfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter) {
     return 0;
 }
 
-int __tmpfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user) {
+ssize_t __tmpfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen) {
     struct tmpfs_inode *tmpfs_inode = (struct tmpfs_inode *)inode;
-    int ret = 0;
     size_t link_len = inode->size;
     if (link_len + 1 > buflen) {
         return -ENAMETOOLONG; // Buffer too small
-    }
-    if (user) {
-        // For user space, we need to copy the data to user space
-        proc_lock(myproc());
-        if (link_len < TMPFS_INODE_EMBEDDED_DATA_LEN) {
-            ret = vm_copyout(myproc()->vm, (uint64)buf, tmpfs_inode->sym.data, link_len);
-            if (ret != 0) {
-                proc_unlock(myproc());
-                return -EFAULT; // Failed to copy to user space
-            }
-        } else {
-            ret = vm_copyout(myproc()->vm, (uint64)buf, tmpfs_inode->sym.symlink_target, link_len);
-            if (ret != 0) {
-                proc_unlock(myproc());
-                return -EFAULT; // Failed to copy to user space
-            }
-        }
-        ret = vm_copyout(myproc()->vm, (uint64)buf + link_len, "\0", 1);
-        if (ret != 0) {
-            proc_unlock(myproc());
-            return -EFAULT; // Failed to copy to user space
-        }
-        proc_unlock(myproc());
-        return (int)link_len;
     }
     if (link_len < TMPFS_INODE_EMBEDDED_DATA_LEN) {
         memmove(buf, tmpfs_inode->sym.data, link_len);
@@ -427,10 +358,10 @@ int __tmpfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool use
 }
 
 int __tmpfs_create(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_inode,
-                   const char *name, size_t name_len, bool user) {
+                   const char *name, size_t name_len) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *tmpfs_inode = NULL;
-    int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &tmpfs_inode, NULL, name, name_len, user);
+    int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &tmpfs_inode, NULL, name, name_len);
     if (ret != 0) {
         *new_inode = NULL;
         return ret;
@@ -441,7 +372,7 @@ int __tmpfs_create(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_in
     return 0;
 }
 
-int __tmpfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len, bool user) {
+int __tmpfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_dentry *tmpfs_dentry = NULL;
     struct vfs_inode *target = NULL;
@@ -479,14 +410,14 @@ done:
 }
 
 int __tmpfs_link(struct vfs_inode *target, struct vfs_inode *dir,
-                 const char *name, size_t name_len, bool user) {
+                 const char *name, size_t name_len) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *tmpfs_target = container_of(target, struct tmpfs_inode, vfs_inode);;
     struct tmpfs_dentry *new_entry = NULL;
     int ret = 0;
     target->n_links++;
 
-    ret = __tmpfs_dentry_name_copy(name, name_len, user, &new_entry);
+    ret = __tmpfs_dentry_name_copy(name, name_len, &new_entry);
     if (ret != 0) {
         target->n_links--;
         return ret;
@@ -503,10 +434,10 @@ int __tmpfs_link(struct vfs_inode *target, struct vfs_inode *dir,
 }
 
 int __tmpfs_mkdir(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_dir,
-                  const char *name, size_t name_len, bool user) {
+                  const char *name, size_t name_len) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *tmpfs_inode = NULL;
-    int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &tmpfs_inode, NULL, name, name_len, user);
+    int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &tmpfs_inode, NULL, name, name_len);
     if (ret != 0) {
         *new_dir = NULL;
         return ret;
@@ -517,7 +448,7 @@ int __tmpfs_mkdir(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_dir
     return 0;
 }
 
-int __tmpfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len, bool user) {
+int __tmpfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_dentry *tmpfs_dentry = NULL;
     struct vfs_inode *target = NULL;
@@ -555,14 +486,14 @@ done:
 }
 
 int __tmpfs_mknod(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_inode, 
-                  dev_t dev, const char *name, size_t name_len, bool user) {
+                  dev_t dev, const char *name, size_t name_len) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *tmpfs_inode = NULL;
     if (!S_ISBLK(mode) && !S_ISCHR(mode)) {
         // @TODO: Support FIFO, socket, and other special files
         return -EINVAL; // Mknod can only create character or block device files
     }
-    int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &tmpfs_inode, NULL, name, name_len, user);
+    int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &tmpfs_inode, NULL, name, name_len);
     if (ret != 0) {
         *new_inode = NULL;
         return ret;
@@ -579,7 +510,7 @@ int __tmpfs_mknod(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_ino
 
 
 int __tmpfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
-                 struct vfs_inode *new_dir, const char *name, size_t name_len, bool user) {
+                 struct vfs_inode *new_dir, const char *name, size_t name_len) {
     struct tmpfs_inode *tmpfs_old_dir = container_of(old_dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *tmpfs_new_dir = container_of(new_dir, struct tmpfs_inode, vfs_inode);
     struct vfs_inode *target = NULL;
@@ -602,7 +533,7 @@ int __tmpfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
     target->n_links++;
 
     // Create a new dentry in the new directory
-    ret = __tmpfs_dentry_name_copy(name, name_len, user, &new_entry);
+    ret = __tmpfs_dentry_name_copy(name, name_len, &new_entry);
     if (ret != 0) {
         goto done;
     }
@@ -625,11 +556,11 @@ done:
             
 int __tmpfs_symlink(struct vfs_inode *dir, struct vfs_inode **ret_inode,
                     mode_t mode, const char *name, size_t name_len,
-                    const char *target, size_t target_len, bool user) {
+                    const char *target, size_t target_len) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *new_inode = NULL;
     struct tmpfs_dentry *dentry = NULL;
-    int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &new_inode, &dentry, name, name_len, user);
+    int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &new_inode, &dentry, name, name_len);
     if (ret != 0) {
         *ret_inode = NULL;
         return ret;

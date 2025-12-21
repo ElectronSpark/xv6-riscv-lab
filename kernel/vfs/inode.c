@@ -177,12 +177,51 @@ int vfs_sync_inode(struct vfs_inode *inode) {
 // Lookup a dentry in a directory inode
 // Will assume the VFS handled "."
 int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry, 
-                const char *name, size_t name_len, bool user) {
+                const char *name, size_t name_len) {
     if (dir == NULL || dir->sb == NULL) {
         return -EINVAL; // Invalid argument
     }
     if (dentry == NULL || name == NULL || name_len == 0) {
         return -EINVAL; // Invalid argument
+    }
+    if (name_len == 1 && name[0] == '.') {
+        dentry->sb = dir->sb;
+        dentry->ino = dir->ino;
+        dentry->parent = dir;
+        dentry->name = kmm_alloc(2);
+        if (dentry->name == NULL) {
+            return -ENOMEM;
+        }
+        dentry->name[0] = '.';
+        dentry->name[1] = '\0';
+        dentry->name_len = 1;
+        dentry->cookies = VFS_DENTRY_COOKIE_SELF;
+        return 0;
+    }
+
+    if (name_len == 2 && name[0] == '.' && name[1] == '.') {
+        if (dir == myproc()->fs.rooti || vfs_inode_is_local_root(dir)) {
+            struct vfs_inode *target = dir;
+            if (dir != myproc()->fs.rooti && dir->sb->mountpoint != NULL) {
+                target = dir->sb->mountpoint;
+            } else if (dir->parent != NULL) {
+                target = dir->parent;
+            }
+
+            dentry->sb = target->sb;
+            dentry->ino = target->ino;
+            dentry->parent = target;
+            dentry->name = kmm_alloc(3);
+            if (dentry->name == NULL) {
+                return -ENOMEM;
+            }
+            dentry->name[0] = '.';
+            dentry->name[1] = '.';
+            dentry->name[2] = '\0';
+            dentry->name_len = 2;
+            dentry->cookies = VFS_DENTRY_COOKIE_PARENT;
+            return 0;
+        }
     }
     vfs_superblock_rlock(dir->sb);
     vfs_ilock(dir);
@@ -198,7 +237,7 @@ int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         ret = -ENOSYS; // Lookup operation not supported
         goto out;
     }
-    ret = dir->ops->lookup(dir, dentry, name, name_len, user);
+    ret = dir->ops->lookup(dir, dentry, name, name_len);
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
@@ -254,7 +293,7 @@ out:
     return ret;
 }
 
-int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user) {
+ssize_t vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen) {
     if (inode == NULL || inode->sb == NULL) {
         return -EINVAL; // Invalid argument
     }
@@ -262,7 +301,7 @@ int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user) {
         return -EINVAL; // Invalid argument
     }
     vfs_ilock(inode);
-    int ret = __vfs_inode_valid(inode);
+    ssize_t ret = __vfs_inode_valid(inode);
     if (ret != 0) {
         goto out;
     }
@@ -274,14 +313,18 @@ int vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen, bool user) {
         ret = -ENOSYS; // Readlink operation not supported
         goto out;
     }
-    ret = inode->ops->readlink(inode, buf, buflen, user);
+    ret = inode->ops->readlink(inode, buf, buflen);
+    if (ret >= 0 && (size_t)ret >= buflen) {
+        ret = -ENAMETOOLONG;
+        goto out;
+    }
 out:
     vfs_iunlock(inode);
     return ret;
 }
 
 int vfs_create(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode,
-               const char *name, size_t name_len, bool user) {
+               const char *name, size_t name_len) {
     if (dir == NULL || dir->sb == NULL) {
         return -EINVAL; // Invalid argument
     }
@@ -302,7 +345,7 @@ int vfs_create(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode,
         ret = -ENOSYS; // Create operation not supported
         goto out;
     }
-    ret = dir->ops->create(dir, mode, new_inode, name, name_len, user);
+    ret = dir->ops->create(dir, mode, new_inode, name, name_len);
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
@@ -310,7 +353,7 @@ out:
 }
 
 int vfs_mknod(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode, 
-              dev_t dev, const char *name, size_t name_len, bool user) {
+              dev_t dev, const char *name, size_t name_len) {
     if (dir == NULL || dir->sb == NULL) {
         return -EINVAL; // Invalid argument
     }
@@ -331,7 +374,7 @@ int vfs_mknod(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode,
         ret = -ENOSYS; // mknod operation not supported
         goto out;
     }
-    ret = dir->ops->mknod(dir, mode, new_inode, dev, name, name_len, user);
+    ret = dir->ops->mknod(dir, mode, new_inode, dev, name, name_len);
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
@@ -339,7 +382,7 @@ out:
 }
 
 int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, 
-             const char *name, size_t name_len, bool user) {
+             const char *name, size_t name_len) {
     if (dir == NULL || dir->sb == NULL) {
         return -EINVAL; // Invalid argument
     }
@@ -375,15 +418,16 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
         ret = -ENOSYS; // Link operation not supported
         goto out;
     }
-    ret = dir->ops->link(target, dir, name, name_len, user);
+    ret = dir->ops->link(target, dir, name, name_len);
 out:
     vfs_iunlock_two(target, dir);
 out_unlock_sb:
     vfs_superblock_unlock(dir->sb);
+    vfs_iput(target);
     return ret;
 }
 
-int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len, bool user) {
+int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
     if (dir == NULL || dir->sb == NULL) {
         return -EINVAL; // Invalid argument
     }
@@ -404,7 +448,7 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len, bool us
         ret = -ENOSYS; // Unlink operation not supported
         goto out;
     }
-    ret = dir->ops->unlink(dir, name, name_len, user);
+    ret = dir->ops->unlink(dir, name, name_len);
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
@@ -412,7 +456,7 @@ out:
 }
 
 int vfs_mkdir(struct vfs_inode *dir, uint32 mode, struct vfs_inode **ret_dir,
-              const char *name, size_t name_len, bool user) {
+              const char *name, size_t name_len) {
     if (dir == NULL || dir->sb == NULL) {
         return -EINVAL; // Invalid argument
     }
@@ -434,7 +478,7 @@ int vfs_mkdir(struct vfs_inode *dir, uint32 mode, struct vfs_inode **ret_dir,
         goto out;
     }
     struct vfs_inode *new_dir = NULL;
-    ret = dir->ops->mkdir(dir, mode, &new_dir, name, name_len, user);
+    ret = dir->ops->mkdir(dir, mode, &new_dir, name, name_len);
     if (ret == 0) {
         assert(new_dir != NULL, "vfs_mkdir: new_dir is NULL on success");
         *ret_dir = new_dir;
@@ -449,7 +493,7 @@ out:
     return ret;
 }
 
-int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len, bool user) {
+int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len) {
     if (dir == NULL || dir->sb == NULL) {
         return -EINVAL; // Invalid argument
     }
@@ -470,7 +514,7 @@ int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len, bool use
         ret = -ENOSYS; // Rmdir operation not supported
         goto out;
     }
-    ret = dir->ops->rmdir(dir, name, name_len, user);
+    ret = dir->ops->rmdir(dir, name, name_len);
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
@@ -482,8 +526,7 @@ out:
 }
 
 int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
-             struct vfs_inode *new_dir, const char *name, size_t name_len, 
-             bool user) {
+             struct vfs_inode *new_dir, const char *name, size_t name_len) {
     if (old_dir == NULL || old_dir->sb == NULL ||
         new_dir == NULL || new_dir->sb == NULL) {
         return -EINVAL; // Invalid argument
@@ -516,7 +559,7 @@ int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
         ret = -ENOSYS; // Move operation not supported
         goto out_iunlock;
     }
-    ret = old_dir->ops->move(old_dir, old_dentry, new_dir, name, name_len, user);
+    ret = old_dir->ops->move(old_dir, old_dentry, new_dir, name, name_len);
 out_iunlock:
     vfs_iunlock_two(old_dir, new_dir);
 out:
@@ -526,7 +569,7 @@ out:
 
 int vfs_symlink(struct vfs_inode *dir, struct vfs_inode **new_inode,
                 uint32 mode, const char *name, size_t name_len,
-                const char *target, size_t target_len, bool user) {
+                const char *target, size_t target_len) {
     if (dir == NULL || dir->sb == NULL || new_inode == NULL) {
         return -EINVAL; // Invalid argument
     }
@@ -550,7 +593,7 @@ int vfs_symlink(struct vfs_inode *dir, struct vfs_inode **new_inode,
         ret = -ENOSYS; // Symlink operation not supported
         goto out;
     }
-    ret = dir->ops->symlink(dir, new_inode, mode, name, name_len, target, target_len, user);
+    ret = dir->ops->symlink(dir, new_inode, mode, name, name_len, target, target_len);
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
@@ -792,34 +835,9 @@ int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode) {
     while (token != 0) {
         size_t token_len = strlen(token);
 
-        // Handle "." - stay at current position
-        if (token_len == 1 && token[0] == '.') {
-            token = strtok_r(0, "/", &saveptr);
-            continue;
-        }
-
-        // Handle ".."
-        if (token_len == 2 && token[0] == '.' && token[1] == '.') {
-            // If at process root, don't move
-            if (pos == rooti) {
-                token = strtok_r(0, "/", &saveptr);
-                continue;
-            }
-
-            // If at mounted root, go to mountpoint first, then lookup ".."
-            if (pos->sb != NULL && pos->sb->mountpoint != NULL && 
-                vfs_inode_is_local_root(pos)) {
-                struct vfs_inode *mountpoint = pos->sb->mountpoint;
-                vfs_idup(mountpoint);
-                vfs_iput(pos);
-                pos = mountpoint;
-                // Now lookup ".." at the mountpoint
-            }
-        }
-
         // Lookup the token in the current directory
         memset(&dentry, 0, sizeof(dentry));
-        ret = vfs_ilookup(pos, &dentry, token, token_len, false);
+        ret = vfs_ilookup(pos, &dentry, token, token_len);
         if (ret != 0) {
             vfs_iput(pos);
             pos = NULL;

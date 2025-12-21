@@ -954,7 +954,7 @@ int vfs_get_dentry_inode_locked(struct vfs_dentry *dentry, struct vfs_inode **re
         *ret_inode = NULL;
         return ret; // Failed to load inode
     }
-    if (S_ISDIR(inode->mode)) {
+    if (S_ISDIR(inode->mode) && !vfs_inode_is_local_root(inode)) {
         // Initialize directory-specific fields if needed
         assert(dentry->parent != NULL, "Directory inode must have a parent dentry");
         inode->parent = dentry->parent;

@@ -245,25 +245,25 @@ struct vfs_inode {
  */
 struct vfs_inode_ops {
     int (*lookup)(struct vfs_inode *dir, struct vfs_dentry *dentry, 
-                  const char *name, size_t name_len, bool user);
+            const char *name, size_t name_len);
     int (*dir_iter)(struct vfs_inode *dir, struct vfs_dir_iter *iter);
-    int (*readlink)(struct vfs_inode *inode, char *buf, size_t buflen, bool user);
+    ssize_t (*readlink)(struct vfs_inode *inode, char *buf, size_t buflen);
     int (*create)(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_inode,
-                  const char *name, size_t name_len, bool user);        // Create a regular file
+            const char *name, size_t name_len);        // Create a regular file
     int (*link)(struct vfs_inode *old, struct vfs_inode *dir,
-                const char *name, size_t name_len, bool user);         // Create a hard link
-    int (*unlink)(struct vfs_inode *dir, const char *name, size_t name_len, bool user);
+            const char *name, size_t name_len);         // Create a hard link
+    int (*unlink)(struct vfs_inode *dir, const char *name, size_t name_len);
     int (*mkdir)(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_dir,
-                 const char *name, size_t name_len, bool user);
-    int (*rmdir)(struct vfs_inode *dir, const char *name, size_t name_len, bool user);
+                const char *name, size_t name_len);
+    int (*rmdir)(struct vfs_inode *dir, const char *name, size_t name_len);
     int (*mknod)(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_inode, 
-                 dev_t dev, const char *name, size_t name_len, bool user);    // Create a file of special types
+                dev_t dev, const char *name, size_t name_len);    // Create a file of special types
     int (*move)(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
-                struct vfs_inode *new_dir, const char *name, 
-                     size_t name_len, bool user);  // Move (rename) a file or directory within the same filesystem
+            struct vfs_inode *new_dir, const char *name, 
+                size_t name_len);  // Move (rename) a file or directory within the same filesystem
     int (*symlink)(struct vfs_inode *dir, struct vfs_inode **new_inode,
-                         mode_t mode, const char *name, size_t name_len,
-                   const char *target, size_t target_len, bool user);
+                    mode_t mode, const char *name, size_t name_len,
+                const char *target, size_t target_len);
     int (*truncate)(struct vfs_inode *inode, loff_t new_size);
     void (*destroy_inode)(struct vfs_inode *inode); // Release on-disk inode resources
     void (*free_inode)(struct vfs_inode *inode);    // Release in-memory inode structure
