@@ -177,6 +177,7 @@ int tmpfs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
     sb->vfs_sb.block_size = PAGE_SIZE;
     sb->vfs_sb.root_inode = &root_inode->vfs_inode;
     sb->private_data.next_ino = 2;
+    sb->vfs_sb.backendless = 1;
     sb->vfs_sb.ops = &tmpfs_superblock_ops;
     
     *ret_sb = &sb->vfs_sb;
