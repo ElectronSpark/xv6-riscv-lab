@@ -22,22 +22,19 @@ static void __bio_relase_kobj_cb(struct kobject *obj) {
     kmm_free(bio);
 }
 
-int bio_alloc(
-    blkdev_t *bdev, 
-    int16 vec_length, 
-    bool rw, 
-    void (*end_io)(struct bio *bio), 
-    void *private_data, 
-    struct bio **ret_bio
-) {
+struct bio *bio_alloc(blkdev_t *bdev, 
+                      int16 vec_length, 
+                      bool rw, 
+                      void (*end_io)(struct bio *bio), 
+                      void *private_data) {
     struct bio *bio = NULL;
-    if (bdev == NULL || vec_length <= 0 || vec_length > BIO_MAX_VECS || ret_bio == NULL) {
-        return -EINVAL; // Invalid arguments
+    if (bdev == NULL || vec_length <= 0 || vec_length > BIO_MAX_VECS) {
+        return ERR_PTR(-EINVAL); // Invalid arguments
     }
     size_t bio_size = sizeof(struct bio) + vec_length * sizeof(struct bio_vec);
     bio = (struct bio *)kmm_alloc(bio_size);
     if (bio == NULL) {
-        return -ENOMEM; // Memory allocation failed
+        return ERR_PTR(-ENOMEM); // Memory allocation failed
     }
     memset(bio, 0, bio_size);
     bio->bdev = bdev;
@@ -46,11 +43,10 @@ int bio_alloc(
     bio->rw = rw;
     bio->end_io = end_io;
     bio->private_data = private_data;
-    *ret_bio = bio;
     bio->kobj.name = "bio";
     bio->kobj.ops.release = __bio_relase_kobj_cb;
     kobject_init(&bio->kobj);
-    return 0;
+    return bio;
 }
 
 int bio_add_seg(struct bio *bio, page_t *page, int16 idx, uint16 len, uint16 offset) {

@@ -84,12 +84,12 @@ static inline void bio_endio(struct bio *bio)
     }
 }
 
-int bio_alloc(  blkdev_t *bdev, 
-                int16 vec_length, 
-                bool rw, 
-                void (*end_io)(struct bio *bio), 
-                void *private_data, 
-                struct bio **ret_bio);
+// Return a newly allocated bio when successful, or ERR_PTR on error
+struct bio *bio_alloc(blkdev_t *bdev, 
+                      int16 vec_length, 
+                      bool rw, 
+                      void (*end_io)(struct bio *bio), 
+                      void *private_data);
 int bio_add_seg(struct bio *bio, page_t *page, int16 idx, uint16 len, uint16 offset);
 int bio_dup(struct bio *bio);       // Increment the reference count of a bio
 int bio_release(struct bio *bio);   // Decrement the reference count of a bio, free it if the count reaches zero

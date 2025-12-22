@@ -198,15 +198,14 @@ bget(uint dev, uint blockno)
 }
 
 static struct bio *__buf_alloc_bio(struct buf *b, blkdev_t *blkdev, bool write) {
-  struct bio *bio = NULL;
-  int ret = bio_alloc(blkdev, 1, write, NULL, NULL, &bio);
-  if (bio == NULL) {
+  struct bio *bio = bio_alloc(blkdev, 1, write, NULL, NULL);
+  if (IS_ERR_OR_NULL(bio)) {
     return NULL;
   }
   bio->blkno = b->blockno * (BSIZE / 512);
   page_t *page = __pa_to_page((uint64)b->data & ~PAGE_MASK);
   size_t page_offset = (uint64)b->data & PAGE_MASK;
-  ret = bio_add_seg(bio, page, 0, BSIZE, page_offset);
+  int ret = bio_add_seg(bio, page, 0, BSIZE, page_offset);
   if (ret != 0) {
     bio_release(bio);
     return NULL;
@@ -231,7 +230,7 @@ bread(uint dev, uint blockno)
     blkdev_t *blkdev = blkdev_get(major(b->dev), minor(b->dev));
     assert(!IS_ERR(blkdev), "bwrite: blkdev_get failed");
     struct bio *bio = __buf_alloc_bio(b, blkdev, false);
-    assert(bio != NULL, "bread: bio_alloc failed");
+    assert(!IS_ERR_OR_NULL(bio), "bread: bio_alloc failed");
     blkdev_submit_bio(blkdev, bio);
     b->valid = 1;
     __buf_bio_cleanup(bio);
@@ -250,7 +249,7 @@ bwrite(struct buf *b)
   blkdev_t *blkdev = blkdev_get(major(b->dev), minor(b->dev));
   assert(!IS_ERR(blkdev), "bwrite: blkdev_get failed");
   struct bio *bio = __buf_alloc_bio(b, blkdev, true);
-  assert(bio != NULL, "bwrite: bio_alloc failed");
+  assert(!IS_ERR_OR_NULL(bio), "bwrite: bio_alloc failed");
   blkdev_submit_bio(blkdev, bio);
   __buf_bio_cleanup(bio);
   int ret = blkdev_put(blkdev);

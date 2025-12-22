@@ -3,6 +3,7 @@
 
 #include <dev_types.h>
 
+// Return cdev on success, or ERR_PTR on error
 cdev_t *cdev_get(int major, int minor);
 int cdev_dup(cdev_t *dev);
 int cdev_put(cdev_t *dev);

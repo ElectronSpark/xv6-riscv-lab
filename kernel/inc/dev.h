@@ -4,6 +4,9 @@
 #include <dev_types.h>
 
 void dev_table_init(void);
+// Get a device by its major and minor numbers
+// And increment its reference count
+// Return device on success, or ERR_PTR on error
 device_t *device_get(int major, int minor);
 int device_dup(device_t *dev);
 int device_put(device_t *dev);
