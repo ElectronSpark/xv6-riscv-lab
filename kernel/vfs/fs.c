@@ -755,31 +755,30 @@ void vfs_superblock_unlock(struct vfs_superblock *sb) {
  * vfs_alloc_inode - Ask the filesystem to allocate a new inode object.
  *
  * Locking:
- *   - None required by the caller; this helper acquires/releases the
- *     superblock write lock internally.
+ *   - Caller must hold the superblock write lock.
  *
  * Returns:
- *   - 0 on success with *ret_inode set, or negative errno on failure.
+ *   - inode* (locked) on success with refcount=1, or ERR_PTR(errno).
  */
-int vfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode) {
-    if (sb == NULL || ret_inode == NULL) {
-        return -EINVAL; // Invalid arguments
+struct vfs_inode *vfs_alloc_inode(struct vfs_superblock *sb) {
+    if (sb == NULL) {
+        return ERR_PTR(-EINVAL); // Invalid arguments
     }
     VFS_SUPERBLOCK_ASSERT_WHOLDING(sb, "vfs_alloc_inode: must hold superblock write lock");
     if (!sb->valid) {
-        return -EINVAL; // Superblock is not valid
+        return ERR_PTR(-EINVAL); // Superblock is not valid
     }
-    struct vfs_inode *inode = NULL;
-    int ret = sb->ops->alloc_inode(sb, &inode);
-    if (ret == 0) {
-        *ret_inode = inode;
-        __vfs_inode_init(inode);
-        ret = vfs_add_inode(sb, inode, ret_inode);
-        if (ret != 0) {
-            inode->ops->free_inode(inode);
-        }
+    struct vfs_inode *inode = sb->ops->alloc_inode(sb);
+    if (IS_ERR(inode)) {
+        return inode;
     }
-    return ret;
+    __vfs_inode_init(inode);
+    int ret = vfs_add_inode(sb, inode, &inode);
+    if (ret != 0) {
+        inode->ops->free_inode(inode);
+        return ERR_PTR(ret);
+    }
+    return inode; // locked
 }
 
 /*
@@ -790,27 +789,27 @@ int vfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode) {
  *   - On success, the returned inode is locked and its refcount is set to 1.
  *
  * Returns:
- *   - 0 on success with *ret_inode set (locked), or negative errno on failure.
+ *   - inode* (locked) on success or ERR_PTR(errno) on failure.
  */
-int vfs_get_inode(struct vfs_superblock *sb, uint64 ino,
-                  struct vfs_inode **ret_inode) {
-    if (sb == NULL || ret_inode == NULL) {
-        return -EINVAL; // Invalid arguments
+struct vfs_inode *vfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
+    if (sb == NULL) {
+        return ERR_PTR(-EINVAL); // Invalid arguments
     }
     VFS_SUPERBLOCK_ASSERT_WHOLDING(sb, "vfs_get_inode: must hold superblock write lock");
     if (!sb->valid) {
-        return -EINVAL; // Superblock is not valid
+        return ERR_PTR(-EINVAL); // Superblock is not valid
     }
-    int ret = sb->ops->get_inode(sb, ino, ret_inode);
-    if (ret_inode != NULL) {
-        __vfs_inode_init(*ret_inode);
-        ret = vfs_add_inode(sb, *ret_inode, NULL);
-        if (ret != 0) {
-            (*ret_inode)->ops->free_inode(*ret_inode);
-            *ret_inode = NULL;
-        }
+    struct vfs_inode *inode = sb->ops->get_inode(sb, ino);
+    if (IS_ERR(inode)) {
+        return inode;
     }
-    return ret;
+    __vfs_inode_init(inode);
+    int ret = vfs_add_inode(sb, inode, NULL);
+    if (ret != 0) {
+        inode->ops->free_inode(inode);
+        return ERR_PTR(ret);
+    }
+    return inode; // locked
 }
 
 /*
@@ -893,118 +892,102 @@ void vfs_put_fs_type(struct vfs_fs_type *fs_type) {
  *   - Callers must avoid holding inode locks that could deadlock with these
  *     lock transitions and must release the inode via vfs_iput().
  */
-int vfs_get_dentry_inode_locked(struct vfs_dentry *dentry, struct vfs_inode **ret_inode) {
+struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
     int ret = 0;
     struct vfs_inode *inode = NULL;
-    if (dentry == NULL || ret_inode == NULL) {
-        return -EINVAL; // Invalid arguments
+    if (dentry == NULL) {
+        return ERR_PTR(-EINVAL);
     }
     if (dentry->sb == NULL) {
-        return -EINVAL; // Dentry has no associated superblock
+        return ERR_PTR(-EINVAL);
     }
-    
-    // First try to get the inode from inode cache
+
     if (!dentry->sb->valid) {
-        return -EINVAL; // Superblock is not valid
+        return ERR_PTR(-EINVAL);
     }
 
     if (dentry->parent && dentry->parent->sb == dentry->sb && dentry->ino == dentry->parent->ino) {
-        // Return parent inode
         vfs_idup(dentry->parent);
-        *ret_inode = dentry->parent;
-        return 0;
+        return dentry->parent;
     }
 
     ret = vfs_get_inode_cached(dentry->sb, dentry->ino, &inode);
     if (ret != -ENOENT) {
-        // Inode is found or error occurred
-        // When successful, inode ref count is already increased
-        // When failed, vfs_get_inode_cached set inode to NULL
-        if (inode != NULL) {
-            vfs_idup(inode);
-            vfs_iunlock(inode);
+        if (ret != 0) {
+            return ERR_PTR(ret);
         }
-        *ret_inode = inode;
-        return ret;
+        vfs_idup(inode);
+        vfs_iunlock(inode);
+        return inode;
     }
+
     if (!vfs_superblock_wholding(dentry->sb)) {
-        // Suppose readlock is holding here
-        // Upgrade to write lock
         vfs_superblock_unlock(dentry->sb);
         vfs_superblock_wlock(dentry->sb);
     }
-    // Double check cache again after acquiring write lock
+
     if (!dentry->sb->valid) {
-        return -EINVAL; // Superblock is not valid
+        return ERR_PTR(-EINVAL);
     }
+
     ret = vfs_get_inode_cached(dentry->sb, dentry->ino, &inode);
     if (ret != -ENOENT) {
-        // Inode is found or error occurred
-        // When successful, inode ref count is already increased
-        // When failed, vfs_get_inode_cached set inode to NULL
-        if (inode != NULL) {
-            vfs_idup(inode);
-            vfs_iunlock(inode);
+        if (ret != 0) {
+            return ERR_PTR(ret);
         }
-        *ret_inode = inode;
-        return ret;
+        vfs_idup(inode);
+        vfs_iunlock(inode);
+        return inode;
     }
-    ret = vfs_get_inode(dentry->sb, dentry->ino, &inode);
-    if (ret != 0) {
-        *ret_inode = NULL;
-        return ret; // Failed to load inode
+
+    inode = vfs_get_inode(dentry->sb, dentry->ino);
+    if (IS_ERR(inode)) {
+        return inode;
     }
+
     if (S_ISDIR(inode->mode) && !vfs_inode_is_local_root(inode)) {
-        // Initialize directory-specific fields if needed
         assert(dentry->parent != NULL, "Directory inode must have a parent dentry");
         inode->parent = dentry->parent;
         vfs_idup(dentry->parent);
     }
+
     vfs_idup(inode);
     vfs_iunlock(inode);
-    *ret_inode = inode; // Return the loaded inode unlocked
-    return 0;
+    return inode;
 }
 
-int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode) {
-    if (dentry == NULL || ret_inode == NULL) {
-        return -EINVAL; // Invalid arguments
+struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry) {
+    if (dentry == NULL) {
+        return ERR_PTR(-EINVAL);
     }
     if (dentry->sb == NULL) {
-        return -EINVAL; // Dentry has no associated superblock
+        return ERR_PTR(-EINVAL);
     }
-    // May be used to lookup the parent inode of a local root dentry
+
     struct vfs_dentry mntd = { 0 };
     struct vfs_inode *mnti = NULL;
     struct vfs_inode *original_parent = dentry->parent;
+    struct vfs_inode *inode = NULL;
 retry:
     vfs_superblock_rlock(dentry->sb);
     if (dentry->parent && dentry->ino == dentry->parent->ino) {
         if (dentry->name[0] == '.' && dentry->name[1] == '.' && dentry->name_len == 2) {
             if (dentry->parent == myproc()->fs.rooti) {
-                // Special case, ".." of root inode in process fs, just return itself
                 vfs_superblock_unlock(dentry->sb);
                 goto return_parent;
             }
             if (vfs_inode_is_local_root(dentry->parent)) {
-                // Special case
-                // For root inode, both ".." and "." point to itself
-                // So we need to check its name and redirect ".." to the parent inode of the mountpoint
                 mnti = dentry->sb->mountpoint;
                 if (mnti == NULL) {
                     vfs_superblock_unlock(dentry->sb);
-                    // No mountpoint, so just return the parent inode
                     goto return_parent;
                 }
                 if (mnti == myproc()->fs.rooti) {
-                    // Special case, mountpoint is process root inode
                     vfs_superblock_unlock(dentry->sb);
                     goto return_parent;
                 }
-                // if the mountpoint is another mountpoint, we need to resolve it first
                 if (vfs_inode_is_local_root(mnti)) {
                     vfs_superblock_unlock(dentry->sb);
-                    // Need to resolve the mountpoint first
                     mntd.sb = mnti->sb;
                     mntd.ino = mnti->ino;
                     mntd.parent = mnti;
@@ -1014,27 +997,24 @@ retry:
                     goto retry;
                 }
                 if (mnti->parent == NULL) {
-                    // @TODO: This part may change after introducing dcache
                     vfs_superblock_unlock(dentry->sb);
-                    // No parent, so just return the mountpoint inode
                     goto return_parent;
                 }
                 vfs_idup(mnti->parent);
-                *ret_inode = mnti->parent;
                 vfs_superblock_unlock(dentry->sb);
-                // Avoid blocking on cross-fs lock here; callers may lock if needed.
-                return 0;
+                return mnti->parent;
             }
         }
     }
-    int ret = vfs_get_dentry_inode_locked(dentry, ret_inode);
+    inode = vfs_get_dentry_inode_locked(dentry);
     vfs_superblock_unlock(dentry->sb);
-    return ret;
+    return inode;
 return_parent:
+    if (original_parent == NULL) {
+        return ERR_PTR(-EINVAL);
+    }
     vfs_idup(original_parent);
-    *ret_inode = original_parent;
-    // vfs_ilock(*ret_inode);
-    return 0;
+    return original_parent;
 }
 
  /******************************************************************************

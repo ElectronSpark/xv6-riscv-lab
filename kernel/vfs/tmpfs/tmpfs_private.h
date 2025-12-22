@@ -84,7 +84,7 @@ struct tmpfs_dentry {
 // Get the offset within a block for a given position
 #define TMPFS_IBLOCK_OFFSET(pos) ((pos) & PAGE_MASK)
 
-int tmpfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode);
+struct vfs_inode *tmpfs_alloc_inode(struct vfs_superblock *sb);
 // Set the symlink target for a tmpfs inode
 // Will free any existing target if present
 // WIll allocate memory if target_len >= TMPFS_INODE_EMBEDDED_DATA_LEN

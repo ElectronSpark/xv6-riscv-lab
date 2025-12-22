@@ -103,7 +103,7 @@ struct vfs_superblock {
  *   Allocate a new inode in the superblock. The returned inode should have its
  *   ref count set to 1.
  *   write lock on the superblock will be held during this operation.
- *   Return -ENOSPC if there is no space to allocate a new inode.
+ *   Return ERR_PTR(-ENOSPC) if there is no space to allocate a new inode.
  *
  * get_inode:
  *   Get a inode with the given inode number from the file system on disk.
@@ -125,7 +125,7 @@ struct vfs_superblock {
  *     - ctime - change time
  *     - fs_data - filesystem-specific data
  *   The returned inode should have its ref count set to 1.
- *   Return -ENOENT if the inode is not found or not allocated.
+ *   Return ERR_PTR(-ENOENT) if the inode is not found or not allocated.
  *   Note: This function will be called only when inode is not found in memory,
  *         thus write lock of the superblock is held to protect the inode hash list.
  *   Note: Filesystem drivers should zero-initialize and fill in the necessary fields
@@ -151,9 +151,8 @@ struct vfs_superblock {
  *   superblock and freeing its resources.
  */
 struct vfs_superblock_ops {
-    int (*alloc_inode)(struct vfs_superblock *sb, struct vfs_inode **ret_inode);
-    int (*get_inode)(struct vfs_superblock *sb, uint64 ino,
-                     struct vfs_inode **ret_inode);
+    struct vfs_inode *(*alloc_inode)(struct vfs_superblock *sb);
+    struct vfs_inode *(*get_inode)(struct vfs_superblock *sb, uint64 ino);
     int (*sync_fs)(struct vfs_superblock *sb, int wait);
     void (*unmount_begin)(struct vfs_superblock *sb);
 };
@@ -247,23 +246,23 @@ struct vfs_inode_ops {
     int (*lookup)(struct vfs_inode *dir, struct vfs_dentry *dentry, 
             const char *name, size_t name_len);
     int (*dir_iter)(struct vfs_inode *dir, struct vfs_dir_iter *iter);
-    ssize_t (*readlink)(struct vfs_inode *inode, char *buf, size_t buflen);
-    int (*create)(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_inode,
+        ssize_t (*readlink)(struct vfs_inode *inode, char *buf, size_t buflen);
+        struct vfs_inode *(*create)(struct vfs_inode *dir, mode_t mode,
             const char *name, size_t name_len);        // Create a regular file
     int (*link)(struct vfs_inode *old, struct vfs_inode *dir,
             const char *name, size_t name_len);         // Create a hard link
     int (*unlink)(struct vfs_inode *dir, const char *name, size_t name_len);
-    int (*mkdir)(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_dir,
-                const char *name, size_t name_len);
+        struct vfs_inode *(*mkdir)(struct vfs_inode *dir, mode_t mode,
+            const char *name, size_t name_len);
     int (*rmdir)(struct vfs_inode *dir, const char *name, size_t name_len);
-    int (*mknod)(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_inode, 
-                dev_t dev, const char *name, size_t name_len);    // Create a file of special types
+        struct vfs_inode *(*mknod)(struct vfs_inode *dir, mode_t mode,
+            dev_t dev, const char *name, size_t name_len);    // Create a file of special types
     int (*move)(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
             struct vfs_inode *new_dir, const char *name, 
                 size_t name_len);  // Move (rename) a file or directory within the same filesystem
-    int (*symlink)(struct vfs_inode *dir, struct vfs_inode **new_inode,
-                    mode_t mode, const char *name, size_t name_len,
-                const char *target, size_t target_len);
+    struct vfs_inode *(*symlink)(struct vfs_inode *dir, mode_t mode, 
+                                 const char *name, size_t name_len,
+                                 const char *target, size_t target_len);
     int (*truncate)(struct vfs_inode *inode, loff_t new_size);
     void (*destroy_inode)(struct vfs_inode *inode); // Release on-disk inode resources
     void (*free_inode)(struct vfs_inode *inode);    // Release in-memory inode structure

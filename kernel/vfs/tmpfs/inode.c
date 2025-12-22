@@ -193,27 +193,28 @@ static void __tmpfs_do_unlink(struct tmpfs_dentry *dentry) {
 // Allocate and link a new inode in the given tmpfs directory
 // Caller should hold the dir inode lock
 // Will not release the lock of the new inode, caller should do it
-static int __tmpfs_alloc_link_inode(struct tmpfs_inode *dir, mode_t mode, struct tmpfs_inode **new_inode,    
-                                    struct tmpfs_dentry **ret_dentry, const char *name, size_t name_len) {
-    struct tmpfs_inode *tmpfs_inode = NULL;
+static struct tmpfs_inode *__tmpfs_alloc_link_inode(struct tmpfs_inode *dir, mode_t mode,
+                                                    struct tmpfs_dentry **ret_dentry,
+                                                    const char *name, size_t name_len) {
     struct vfs_inode *vfs_inode = NULL;
+    struct tmpfs_inode *tmpfs_inode = NULL;
     struct tmpfs_dentry *dentry = NULL;
-    int ret = 0;
-    ret = __tmpfs_dentry_name_copy(name, name_len, &dentry);
+    int ret = __tmpfs_dentry_name_copy(name, name_len, &dentry);
     if (ret != 0) {
-        goto done;
+        return ERR_PTR(ret);
     }
     ret = __tmpfs_do_link(dir, dentry);
     if (ret != 0) {
-        goto done;
+        __tmpfs_free_dentry(dentry);
+        return ERR_PTR(ret);
     }
-    ret = vfs_alloc_inode(dir->vfs_inode.sb, &vfs_inode);
-    if (ret != 0) {
-        if (vfs_inode != NULL) {
-            vfs_iunlock(vfs_inode);
-        }
+    vfs_inode = vfs_alloc_inode(dir->vfs_inode.sb);
+    if (IS_ERR(vfs_inode)) {
+        ret = PTR_ERR(vfs_inode);
+        vfs_inode = NULL;
         __tmpfs_do_unlink(dentry);
-        goto done;
+        __tmpfs_free_dentry(dentry);
+        return ERR_PTR(ret);
     }
     tmpfs_inode = container_of(vfs_inode, struct tmpfs_inode, vfs_inode);
     dentry->inode = tmpfs_inode;
@@ -222,17 +223,10 @@ static int __tmpfs_alloc_link_inode(struct tmpfs_inode *dir, mode_t mode, struct
     // vfs_ilock(&tmpfs_inode->vfs_inode);
     vfs_idup(&tmpfs_inode->vfs_inode);
     tmpfs_inode->vfs_inode.n_links = 1;
-    *new_inode = tmpfs_inode;
-done:
-    if (ret != 0) {
-        if (dentry != NULL) {
-            __tmpfs_free_dentry(dentry);
-        }
-        *new_inode = NULL;
-    } else if (ret_dentry != NULL) {
+    if (ret_dentry != NULL) {
         *ret_dentry = dentry;
     }
-    return ret;
+    return tmpfs_inode;
 }
 
 void tmpfs_free_symlink_target(struct tmpfs_inode *tmpfs_inode) {
@@ -357,19 +351,16 @@ ssize_t __tmpfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen) {
     return (int)link_len;
 }
 
-int __tmpfs_create(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_inode,
+struct vfs_inode *__tmpfs_create(struct vfs_inode *dir, mode_t mode,
                    const char *name, size_t name_len) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
-    struct tmpfs_inode *tmpfs_inode = NULL;
-    int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &tmpfs_inode, NULL, name, name_len);
-    if (ret != 0) {
-        *new_inode = NULL;
-        return ret;
+    struct tmpfs_inode *tmpfs_inode = __tmpfs_alloc_link_inode(tmpfs_dir, mode, NULL, name, name_len);
+    if (IS_ERR(tmpfs_inode)) {
+        return ERR_PTR(PTR_ERR(tmpfs_inode));
     }
     __tmpfs_make_regfile(tmpfs_inode);
     vfs_iunlock(&tmpfs_inode->vfs_inode);
-    *new_inode = &tmpfs_inode->vfs_inode;
-    return 0;
+    return &tmpfs_inode->vfs_inode;
 }
 
 int __tmpfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
@@ -433,19 +424,16 @@ int __tmpfs_link(struct vfs_inode *target, struct vfs_inode *dir,
     return ret;
 }
 
-int __tmpfs_mkdir(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_dir,
+struct vfs_inode *__tmpfs_mkdir(struct vfs_inode *dir, mode_t mode,
                   const char *name, size_t name_len) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
-    struct tmpfs_inode *tmpfs_inode = NULL;
-    int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &tmpfs_inode, NULL, name, name_len);
-    if (ret != 0) {
-        *new_dir = NULL;
-        return ret;
+    struct tmpfs_inode *tmpfs_inode = __tmpfs_alloc_link_inode(tmpfs_dir, mode, NULL, name, name_len);
+    if (IS_ERR(tmpfs_inode)) {
+        return ERR_PTR(PTR_ERR(tmpfs_inode));
     }
     tmpfs_make_directory(tmpfs_inode);
     vfs_iunlock(&tmpfs_inode->vfs_inode);
-    *new_dir = &tmpfs_inode->vfs_inode;
-    return 0;
+    return &tmpfs_inode->vfs_inode;
 }
 
 int __tmpfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len) {
@@ -485,18 +473,17 @@ done:
     return ret;
 }
 
-int __tmpfs_mknod(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_inode, 
+struct vfs_inode *__tmpfs_mknod(struct vfs_inode *dir, mode_t mode,
                   dev_t dev, const char *name, size_t name_len) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *tmpfs_inode = NULL;
     if (!S_ISBLK(mode) && !S_ISCHR(mode)) {
         // @TODO: Support FIFO, socket, and other special files
-        return -EINVAL; // Mknod can only create character or block device files
+        return ERR_PTR(-EINVAL); // Mknod can only create character or block device files
     }
-    int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &tmpfs_inode, NULL, name, name_len);
-    if (ret != 0) {
-        *new_inode = NULL;
-        return ret;
+    tmpfs_inode = __tmpfs_alloc_link_inode(tmpfs_dir, mode, NULL, name, name_len);
+    if (IS_ERR(tmpfs_inode)) {
+        return ERR_PTR(PTR_ERR(tmpfs_inode));
     }
     if (S_ISBLK(mode)) {
         tmpfs_make_bdev(tmpfs_inode, dev);
@@ -504,8 +491,7 @@ int __tmpfs_mknod(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_ino
         tmpfs_make_cdev(tmpfs_inode, dev);
     }
     vfs_iunlock(&tmpfs_inode->vfs_inode);
-    *new_inode = &tmpfs_inode->vfs_inode;
-    return 0;
+    return &tmpfs_inode->vfs_inode;
 }
 
 
@@ -554,21 +540,20 @@ done:
     return ret;
 }
             
-int __tmpfs_symlink(struct vfs_inode *dir, struct vfs_inode **ret_inode,
-                    mode_t mode, const char *name, size_t name_len,
-                    const char *target, size_t target_len) {
+struct vfs_inode *__tmpfs_symlink(struct vfs_inode *dir, mode_t mode, 
+                                  const char *name, size_t name_len,
+                                  const char *target, size_t target_len) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *new_inode = NULL;
     struct tmpfs_dentry *dentry = NULL;
-    int ret = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &new_inode, &dentry, name, name_len);
-    if (ret != 0) {
-        *ret_inode = NULL;
-        return ret;
+    new_inode = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &dentry, name, name_len);
+    if (IS_ERR(new_inode)) {
+        return ERR_PTR(PTR_ERR(new_inode));
     }
     if (target_len < TMPFS_INODE_EMBEDDED_DATA_LEN) {
         __tmpfs_make_symlink_target_embedded(new_inode, target, target_len);
     } else {
-        ret = __tmpfs_make_symlink_target(new_inode, target, target_len);
+        int ret = __tmpfs_make_symlink_target(new_inode, target, target_len);
         if (ret != 0) {
             __tmpfs_do_unlink(dentry);
             int rm_ret = vfs_remove_inode(dir->sb, &new_inode->vfs_inode);
@@ -577,13 +562,11 @@ int __tmpfs_symlink(struct vfs_inode *dir, struct vfs_inode **ret_inode,
             // Inode is locked and detached from superblock; directly free it
             vfs_iunlock(&new_inode->vfs_inode);
             tmpfs_free_inode(&new_inode->vfs_inode);
-            *ret_inode = NULL;
-            return ret;
+            return ERR_PTR(ret);
         }
     }
     vfs_iunlock(&new_inode->vfs_inode);
-    *ret_inode = &new_inode->vfs_inode;
-    return 0;
+    return &new_inode->vfs_inode;
 }
 
 void __tmpfs_destroy_inode(struct vfs_inode *inode) {

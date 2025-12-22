@@ -27,8 +27,7 @@ static slab_cache_t __tmpfs_inode_cache = { 0 };
 /******************************************************************************
  * tmpfs predeclared functions
  *****************************************************************************/
-int tmpfs_get_inode(struct vfs_superblock *sb, uint64 ino,
-                    struct vfs_inode **ret_inode);
+struct vfs_inode *tmpfs_get_inode(struct vfs_superblock *sb, uint64 ino);
 
 /******************************************************************************
  * tmpfs Cache operations
@@ -66,28 +65,27 @@ static struct tmpfs_inode *__tmpfs_alloc_inode_structure(void) {
     return tmpfs_inode;
 }
 
-int tmpfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode) {
-    if (sb == NULL || ret_inode == NULL) {
-        return -EINVAL; // Invalid arguments
+struct vfs_inode *tmpfs_alloc_inode(struct vfs_superblock *sb) {
+    if (sb == NULL) {
+        return ERR_PTR(-EINVAL); // Invalid arguments
     }
     struct tmpfs_sb_private *private_data = (struct tmpfs_sb_private *)sb->fs_data;
     if (private_data == NULL) {
-        return -EINVAL; // Superblock private data is NULL
+        return ERR_PTR(-EINVAL); // Superblock private data is NULL
     }
     struct tmpfs_inode *tmpfs_inode = __tmpfs_alloc_inode_structure();
     if (tmpfs_inode == NULL) {
-        return -ENOMEM; // Memory allocation failed
+        return ERR_PTR(-ENOMEM); // Memory allocation failed
     }
     // Allocate a new inode number
     uint64 ino = __tmpfs_ino_alloc(private_data);
     tmpfs_inode->vfs_inode.ino = ino;
     if (ino == 0) {
         slab_free(tmpfs_inode);
-        return -ENOENT; // Inode number allocation failed
+        return ERR_PTR(-ENOENT); // Inode number allocation failed
     }
     // Add the inode to the superblock's inode hash list
-    *ret_inode = &tmpfs_inode->vfs_inode;
-    return 0;
+    return &tmpfs_inode->vfs_inode;
 }
 
 // Free a tmpfs inode and its associated data.
@@ -120,14 +118,12 @@ void tmpfs_free(struct vfs_superblock *sb) {
  * Superblock Inode operations
  ******************************************************************************/
 
-int tmpfs_get_inode(struct vfs_superblock *sb, uint64 ino,
-                    struct vfs_inode **ret_inode) {
-    if (sb == NULL || ret_inode == NULL) {
-        return -EINVAL; // Invalid arguments
+struct vfs_inode *tmpfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
+    if (sb == NULL) {
+        return ERR_PTR(-EINVAL); // Invalid arguments
     }
     // tmpfs does not persist inodes, so cannot load inode by number
-    *ret_inode = NULL;
-    return -ENOENT;
+    return ERR_PTR(-ENOENT);
 }
 
 int tmpfs_sync_fs(struct vfs_superblock *sb, int wait) {

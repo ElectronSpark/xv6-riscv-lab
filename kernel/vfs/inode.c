@@ -323,62 +323,66 @@ out:
     return ret;
 }
 
-int vfs_create(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode,
+struct vfs_inode *vfs_create(struct vfs_inode *dir, uint32 mode,
                const char *name, size_t name_len) {
     if (dir == NULL || dir->sb == NULL) {
-        return -EINVAL; // Invalid argument
+        return ERR_PTR(-EINVAL); // Invalid argument
     }
-    if (name == NULL || name_len == 0 || new_inode == NULL) {
-        return -EINVAL; // Invalid argument
+    if (name == NULL || name_len == 0) {
+        return ERR_PTR(-EINVAL); // Invalid argument
     }
+    struct vfs_inode *ret_ptr = NULL;
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
+        ret_ptr = ERR_PTR(ret);
         goto out;
     }
     if (!S_ISDIR(dir->mode)) {
-        ret = -ENOTDIR; // Inode is not a directory
+        ret_ptr = ERR_PTR(-ENOTDIR); // Inode is not a directory
         goto out;
     }
     if (dir->ops->create == NULL) {
-        ret = -ENOSYS; // Create operation not supported
+        ret_ptr = ERR_PTR(-ENOSYS); // Create operation not supported
         goto out;
     }
-    ret = dir->ops->create(dir, mode, new_inode, name, name_len);
+    ret_ptr = dir->ops->create(dir, mode, name, name_len);
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
-    return ret;
+    return ret_ptr;
 }
 
-int vfs_mknod(struct vfs_inode *dir, uint32 mode, struct vfs_inode **new_inode, 
+struct vfs_inode *vfs_mknod(struct vfs_inode *dir, uint32 mode,
               dev_t dev, const char *name, size_t name_len) {
     if (dir == NULL || dir->sb == NULL) {
-        return -EINVAL; // Invalid argument
+        return ERR_PTR(-EINVAL); // Invalid argument
     }
-    if (name == NULL || name_len == 0 || new_inode == NULL) {
-        return -EINVAL; // Invalid argument
+    if (name == NULL || name_len == 0) {
+        return ERR_PTR(-EINVAL); // Invalid argument
     }
+    struct vfs_inode *ret_ptr = NULL;
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
+        ret_ptr = ERR_PTR(ret);
         goto out;
     }
     if (!S_ISDIR(dir->mode)) {
-        ret = -ENOTDIR; // Inode is not a directory
+        ret_ptr = ERR_PTR(-ENOTDIR); // Inode is not a directory
         goto out;
     }
     if (dir->ops->mknod == NULL) {
-        ret = -ENOSYS; // mknod operation not supported
+        ret_ptr = ERR_PTR(-ENOSYS); // mknod operation not supported
         goto out;
     }
-    ret = dir->ops->mknod(dir, mode, new_inode, dev, name, name_len);
+    ret_ptr = dir->ops->mknod(dir, mode, dev, name, name_len);
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
-    return ret;
+    return ret_ptr;
 }
 
 int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, 
@@ -389,12 +393,16 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
     if (name == NULL || name_len == 0 || old == NULL) {
         return -EINVAL; // Invalid argument
     }
-    struct vfs_inode *target = NULL;
-    int ret = vfs_get_dentry_inode(old, &target);
-    if (ret != 0) {
-        return ret;
+    int ret = 0;
+    struct vfs_inode *target = vfs_get_dentry_inode(old);
+    if (IS_ERR(target)) {
+        return PTR_ERR(target);
     }
     assert(target != NULL, "vfs_link: old dentry inode is NULL");
+    if (target->sb != dir->sb) {
+        vfs_iput(target);
+        return -EXDEV; // Cross-device hard link not supported
+    }
     vfs_superblock_wlock(dir->sb);
     if (S_ISDIR(target->mode)) {
         ret = -EPERM; // Cannot create hard link to a directory
@@ -455,42 +463,41 @@ out:
     return ret;
 }
 
-int vfs_mkdir(struct vfs_inode *dir, uint32 mode, struct vfs_inode **ret_dir,
-              const char *name, size_t name_len) {
+struct vfs_inode *vfs_mkdir(struct vfs_inode *dir, uint32 mode,
+                            const char *name, size_t name_len) {
     if (dir == NULL || dir->sb == NULL) {
-        return -EINVAL; // Invalid argument
+        return ERR_PTR(-EINVAL); // Invalid argument
     }
     if (name == NULL || name_len == 0) {
-        return -EINVAL; // Invalid argument
+        return ERR_PTR(-EINVAL); // Invalid argument
     }
+    struct vfs_inode *ret_ptr = NULL;
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
+        ret_ptr = ERR_PTR(ret);
         goto out;
     }
     if (!S_ISDIR(dir->mode)) {
-        ret = -ENOTDIR; // Inode is not a directory
+        ret_ptr = ERR_PTR(-ENOTDIR); // Inode is not a directory
         goto out;
     }
     if (dir->ops->mkdir == NULL) {
-        ret = -ENOSYS; // Mkdir operation not supported
+        ret_ptr = ERR_PTR(-ENOSYS); // Mkdir operation not supported
         goto out;
     }
-    struct vfs_inode *new_dir = NULL;
-    ret = dir->ops->mkdir(dir, mode, &new_dir, name, name_len);
-    if (ret == 0) {
-        assert(new_dir != NULL, "vfs_mkdir: new_dir is NULL on success");
-        *ret_dir = new_dir;
-        vfs_ilock(new_dir);
-        new_dir->parent = dir;
+    ret_ptr = dir->ops->mkdir(dir, mode, name, name_len);
+    if (!IS_ERR(ret_ptr)) {
+        vfs_ilock(ret_ptr);
+        ret_ptr->parent = dir;
         vfs_idup(dir); // increase parent dir refcount
-        vfs_iunlock(new_dir);
+        vfs_iunlock(ret_ptr);
     }
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
-    return ret;
+    return ret_ptr;
 }
 
 int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len) {
@@ -567,37 +574,39 @@ out:
     return ret;
 }
 
-int vfs_symlink(struct vfs_inode *dir, struct vfs_inode **new_inode,
-                uint32 mode, const char *name, size_t name_len,
-                const char *target, size_t target_len) {
-    if (dir == NULL || dir->sb == NULL || new_inode == NULL) {
-        return -EINVAL; // Invalid argument
+struct vfs_inode *vfs_symlink(struct vfs_inode *dir, uint32 mode, 
+                              const char *name, size_t name_len,
+                              const char *target, size_t target_len) {
+    if (dir == NULL || dir->sb == NULL) {
+        return ERR_PTR(-EINVAL); // Invalid argument
     }
     if (target == NULL || target_len == 0 || target_len > VFS_PATH_MAX) {
-        return -EINVAL; // Invalid argument
+        return ERR_PTR(-EINVAL); // Invalid argument
     }
     if (name == NULL || name_len == 0) {
-        return -EINVAL; // Invalid symlink name
+        return ERR_PTR(-EINVAL); // Invalid symlink name
     }
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
-    int ret = __vfs_inode_valid(dir);
+    long ret = __vfs_inode_valid(dir);
+    struct vfs_inode *ret_ptr = NULL;
     if (ret != 0) {
+        ret_ptr = ERR_PTR(ret);
         goto out;
     }
     if (!S_ISDIR(dir->mode)) {
-        ret = -ENOTDIR; // Inode is not a directory
+        ret_ptr = ERR_PTR(-ENOTDIR); // Inode is not a directory
         goto out;
     }
     if (dir->ops->symlink == NULL) {
-        ret = -ENOSYS; // Symlink operation not supported
+        ret_ptr = ERR_PTR(-ENOSYS); // Symlink operation not supported
         goto out;
     }
-    ret = dir->ops->symlink(dir, new_inode, mode, name, name_len, target, target_len);
+    ret_ptr = dir->ops->symlink(dir, mode, name, name_len, target, target_len);
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
-    return ret;
+    return ret_ptr;
 }
 
 int vfs_truncate(struct vfs_inode *inode, loff_t new_size) {
@@ -743,61 +752,57 @@ int vfs_chroot(struct vfs_inode *new_root)  {
 
 // Get current working directory inode of the current process
 // Caller needs to call vfs_iput on the returned inode when done
-int vfs_curdir(struct vfs_inode **res_inode) {
-    if (res_inode == NULL) {
-        return -EINVAL; // Invalid argument
-    }
+struct vfs_inode *vfs_curdir(void) {
     // Since only the current process can change its cwd,
     // we don't need to lock the inode here
     struct vfs_inode *cwd = myproc()->fs.cwd;
     vfs_idup(cwd);
-    *res_inode = cwd;
-    return 0;
+    return cwd;
 }
 
 // Get current root directory inode of the current process
 // Caller needs to call vfs_iput on the returned inode when done
-int vfs_curroot(struct vfs_inode **res_inode) {
-    if (res_inode == NULL) {
-        return -EINVAL; // Invalid argument
-    }
+struct vfs_inode *vfs_curroot(void) {
     // Since only the current process can change its root,
     // we don't need to lock the inode here
     struct vfs_inode *rooti = myproc()->fs.rooti;
     vfs_idup(rooti);
-    *res_inode = rooti;
-    return 0;
+    return rooti;
 }
 
-int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode) {
-    if (path == NULL || path_len == 0 || res_inode == NULL) {
-        return -EINVAL; // Invalid argument
+struct vfs_inode *vfs_namei(const char *path, size_t path_len) {
+    if (path == NULL || path_len == 0) {
+        return ERR_PTR(-EINVAL); // Invalid argument
     }
     if (path_len > VFS_PATH_MAX) {
-        return -ENAMETOOLONG; // Path too long
+        return ERR_PTR(-ENAMETOOLONG); // Path too long
     }
+
     struct vfs_inode *pos = NULL;
     struct vfs_inode *rooti = NULL;
     char *pathbuf = NULL;
     int ret = 0;
+    struct vfs_inode *ret_inode = NULL;
 
-    // Allocate buffer for path copy since strtok_r modifies the string
     pathbuf = kmm_alloc(path_len + 1);
     if (pathbuf == NULL) {
-        return -ENOMEM;
+        return ERR_PTR(-ENOMEM);
     }
 
     // Get current root for ".." at root handling
-    ret = vfs_curroot(&rooti);
-    if (ret != 0) {
+    rooti = vfs_curroot();
+    if (IS_ERR_OR_NULL(rooti)) {
         kmm_free(pathbuf);
-        return ret;
+        if (rooti == NULL) {
+            return ERR_PTR(-EINVAL);
+        }
+        return rooti;
     }
     if (rooti->mount) {
         if (rooti->mnt_rooti == NULL) {
             vfs_iput(rooti);
             kmm_free(pathbuf);
-            return -EINVAL; // Mounted root inode has no mounted root
+            return ERR_PTR(-EINVAL); // Mounted root inode has no mounted root
         }
         struct vfs_inode *mnt_root = rooti->mnt_rooti;
         vfs_idup(mnt_root);
@@ -813,11 +818,14 @@ int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode) {
         path_len--;
     } else {
         // Relative path, start from cwd
-        ret = vfs_curdir(&pos);
-        if (ret != 0) {
+        pos = vfs_curdir();
+        if (IS_ERR(pos)) {
             vfs_iput(rooti);
             kmm_free(pathbuf);
-            return ret;
+            if (pos == NULL) {
+                return ERR_PTR(-EINVAL);
+            }
+            return pos;
         }
     }
 
@@ -835,29 +843,27 @@ int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode) {
     while (token != 0) {
         size_t token_len = strlen(token);
 
-        // Lookup the token in the current directory
         memset(&dentry, 0, sizeof(dentry));
         ret = vfs_ilookup(pos, &dentry, token, token_len);
         if (ret != 0) {
             vfs_iput(pos);
             pos = NULL;
+            ret_inode = ERR_PTR(ret);
             goto out;
         }
 
-        // Get the inode from dentry
-        ret = vfs_get_dentry_inode(&dentry, &next);
+        next = vfs_get_dentry_inode(&dentry);
         vfs_release_dentry(&dentry);
-        if (ret != 0) {
+        if (IS_ERR(next)) {
             vfs_iput(pos);
             pos = NULL;
+            ret_inode = next;
             goto out;
         }
 
-        // Release old position, move to next
         vfs_iput(pos);
         pos = next;
 
-        // If the new position is a mountpoint, switch to mounted root
         while (pos->mount && pos->mnt_rooti != NULL) {
             struct vfs_inode *mnt_root = pos->mnt_rooti;
             vfs_idup(mnt_root);
@@ -867,10 +873,13 @@ int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode) {
 
         token = strtok_r(0, "/", &saveptr);
     }
-    ret = 0;
+
+    ret_inode = pos;
 out:
     vfs_iput(rooti);
     kmm_free(pathbuf);
-    *res_inode = pos;
-    return ret;
+    if (pos == NULL && !IS_ERR(ret_inode)) {
+        return ERR_PTR(-ENOENT);
+    }
+    return ret_inode;
 }

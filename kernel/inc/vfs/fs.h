@@ -35,9 +35,8 @@ void vfs_superblock_wlock(struct vfs_superblock *sb);
 bool vfs_superblock_wholding(struct vfs_superblock *sb);
 void vfs_superblock_unlock(struct vfs_superblock *sb);
 
-int vfs_alloc_inode(struct vfs_superblock *sb, struct vfs_inode **ret_inode);
-int vfs_get_inode(struct vfs_superblock *sb, uint64 ino,
-                  struct vfs_inode **ret_inode);
+struct vfs_inode *vfs_alloc_inode(struct vfs_superblock *sb);
+struct vfs_inode *vfs_get_inode(struct vfs_superblock *sb, uint64 ino);
 int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
 
 // inode operations
@@ -58,21 +57,21 @@ int vfs_sync_inode(struct vfs_inode *inode);    // Write inode to disk
 int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry, 
                 const char *name, size_t name_len);
 ssize_t vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen);
-int vfs_create(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_inode,
-               const char *name, size_t name_len);
-int vfs_mknod(struct vfs_inode *dir, mode_t mode, struct vfs_inode **new_inode, 
-              dev_t dev, const char *name, size_t name_len);
+struct vfs_inode *vfs_create(struct vfs_inode *dir, mode_t mode,
+                            const char *name, size_t name_len);
+struct vfs_inode *vfs_mknod(struct vfs_inode *dir, mode_t mode, 
+                           dev_t dev, const char *name, size_t name_len);
 int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
              const char *name, size_t name_len);
 int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len);
-int vfs_mkdir(struct vfs_inode *dir, mode_t mode, struct vfs_inode **ret_dir,
-              const char *name, size_t name_len);
+struct vfs_inode *vfs_mkdir(struct vfs_inode *dir, mode_t mode,
+                           const char *name, size_t name_len);
 int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len);
 int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
              struct vfs_inode *new_dir, const char *name, size_t name_len);
-int vfs_symlink(struct vfs_inode *dir, struct vfs_inode **new_inode,
-                mode_t mode, const char *name, size_t name_len,
-                const char *target, size_t target_len);
+struct vfs_inode *vfs_symlink(struct vfs_inode *dir, mode_t mode,
+                              const char *name, size_t name_len,
+                              const char *target, size_t target_len);
 int vfs_truncate(struct vfs_inode *inode, loff_t new_size);
 int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter);
 
@@ -82,13 +81,13 @@ int vfs_ilock_two_directories(struct vfs_inode *inode1, struct vfs_inode *inode2
 void vfs_iunlock_two(struct vfs_inode *inode1, struct vfs_inode *inode2);
 
 // Public APIs not tied to specific callbacks
-int vfs_namei(const char *path, size_t path_len, struct vfs_inode **res_inode);
-int vfs_curdir(struct vfs_inode **res_inode);
-int vfs_curroot(struct vfs_inode **res_inode);
+struct vfs_inode *vfs_namei(const char *path, size_t path_len);
+struct vfs_inode *vfs_curdir(void);
+struct vfs_inode *vfs_curroot(void);
 int vfs_chroot(struct vfs_inode *new_root);
 int vfs_chdir(struct vfs_inode *new_cwd);
-int vfs_get_dentry_inode_locked(struct vfs_dentry *dentry, struct vfs_inode **ret_inode);
-int vfs_get_dentry_inode(struct vfs_dentry *dentry, struct vfs_inode **ret_inode);
+struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry);
+struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry);
 void vfs_release_dentry(struct vfs_dentry *dentry);
 int vfs_superblock_set_dirty(struct vfs_superblock *sb);
 

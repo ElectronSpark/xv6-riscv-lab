@@ -137,4 +137,10 @@
 #define ERFKILL         132
 #define EHWPOISON       133
 
+#define MAX_ERRNO 4095L
+#define ERR_PTR(err) ((void *)(long)(err))
+#define PTR_ERR(ptr) ((long)(void *)(ptr))
+#define IS_ERR(ptr) ((PTR_ERR(ptr) >= -(MAX_ERRNO)) && (PTR_ERR(ptr) < 0))
+#define IS_ERR_OR_NULL(ptr) ((PTR_ERR(ptr) >= -(MAX_ERRNO)) && (PTR_ERR(ptr) <= 0))
+
 #endif // __ERRNO_H_
