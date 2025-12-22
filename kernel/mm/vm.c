@@ -606,6 +606,8 @@ static void __vma_set_free(vma_t *vma)
       *pte = 0;
       page_ref_dec((void*)pa);
     }
+    // Drop any stale TLB entries covering the unmapped range.
+    sfence_vma();
   }
 
   vma->flags = VM_FLAG_NONE; // Set the VMA as free
@@ -656,6 +658,8 @@ static int __vma_dup(vma_t *dst, vma_t *src)
       uint64 pa = PTE2PA(*src_pte);
       assert(page_ref_inc((void*)pa) > 0, "__vma_dup: page refcnt should be greater than 0");
     }
+    // Flush TLB so downgraded parent PTEs lose stale writable entries (COW safety).
+    sfence_vma();
   }
   return 0;
 }
@@ -1124,6 +1128,9 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte)
     flags |= PTE_U; // Set the user permission if VM_FLAG_USERMAP is set
   }
   *pte = PA2PTE(pa) | flags; // Update the PTE with the new address and flags
+
+  // Flush TLB so faulting hart sees the new private writable mapping (COW fix).
+  sfence_vma();
 
   return 0;
 }
