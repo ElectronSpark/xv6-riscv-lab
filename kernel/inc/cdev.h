@@ -3,7 +3,7 @@
 
 #include <dev_types.h>
 
-int cdev_get(int major, int minor, cdev_t **dev);
+cdev_t *cdev_get(int major, int minor);
 int cdev_dup(cdev_t *dev);
 int cdev_put(cdev_t *dev);
 int cdev_register(cdev_t *dev);

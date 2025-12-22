@@ -186,26 +186,22 @@ static void __underlying_kobject_release(struct kobject *obj) {
 
 // Get a device by its major and minor numbers
 // And increment its reference count
-int device_get(int major, int minor, device_t **dev) {
-    if (dev == NULL) {
-        return -EINVAL; // Null pointer for device output
-    }
+device_t *device_get(int major, int minor) {
     __dev_tab_lock();
     device_t **dev_slot = NULL;
     int ret = __dev_slot_get(major, minor, NULL, NULL, &dev_slot, false);
     if (ret != 0) {
         __dev_tab_unlock();
-        return ret;
+        return ERR_PTR(ret);
     }
     device_t *device = *dev_slot;
     if (device == NULL) {
         __dev_tab_unlock();
-        return -ENODEV; // Device not found or not valid
+        return ERR_PTR(-ENODEV); // Device not found or not valid
     }
     kobject_get(&device->kobj);
-    *dev = device;
     __dev_tab_unlock();
-    return 0;
+    return device;
 }
 
 // Increment the reference count of a device

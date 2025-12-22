@@ -16,6 +16,7 @@
 
 #include "types.h"
 #include "param.h"
+#include "errno.h"
 #include "spinlock.h"
 #include "mutex_types.h"
 #include "riscv.h"
@@ -227,15 +228,14 @@ bread(uint dev, uint blockno)
 
   b = bget(dev, blockno);
   if(!b->valid) {
-    blkdev_t *blkdev = NULL;
-    int ret = blkdev_get(major(b->dev), minor(b->dev), &blkdev);
-    assert(ret == 0, "bwrite: blkdev_get failed: %d", ret);
+    blkdev_t *blkdev = blkdev_get(major(b->dev), minor(b->dev));
+    assert(!IS_ERR(blkdev), "bwrite: blkdev_get failed");
     struct bio *bio = __buf_alloc_bio(b, blkdev, false);
     assert(bio != NULL, "bread: bio_alloc failed");
     blkdev_submit_bio(blkdev, bio);
     b->valid = 1;
     __buf_bio_cleanup(bio);
-    ret = blkdev_put(blkdev);
+    int ret = blkdev_put(blkdev);
     assert(ret == 0, "bread: blkdev_put failed: %d", ret);
   }
   return b;
@@ -247,14 +247,13 @@ bwrite(struct buf *b)
 {
   if(!holding_mutex(&b->lock))
     panic("bwrite");
-  blkdev_t *blkdev = NULL;
-  int ret = blkdev_get(major(b->dev), minor(b->dev), &blkdev);
-  assert(ret == 0, "bwrite: blkdev_get failed: %d", ret);
+  blkdev_t *blkdev = blkdev_get(major(b->dev), minor(b->dev));
+  assert(!IS_ERR(blkdev), "bwrite: blkdev_get failed");
   struct bio *bio = __buf_alloc_bio(b, blkdev, true);
   assert(bio != NULL, "bwrite: bio_alloc failed");
   blkdev_submit_bio(blkdev, bio);
   __buf_bio_cleanup(bio);
-  ret = blkdev_put(blkdev);
+  int ret = blkdev_put(blkdev);
   assert(ret == 0, "bwrite: blkdev_put failed: %d", ret);
 }
 

@@ -4,7 +4,7 @@
 #include <dev_types.h>
 
 void dev_table_init(void);
-int device_get(int major, int minor, device_t **dev);
+device_t *device_get(int major, int minor);
 int device_dup(device_t *dev);
 int device_put(device_t *dev);
 int device_register(device_t *dev);

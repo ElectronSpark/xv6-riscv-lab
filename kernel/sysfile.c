@@ -5,6 +5,7 @@
 //
 
 #include "types.h"
+#include "errno.h"
 #include "string.h"
 #include "riscv.h"
 #include "defs.h"
@@ -393,9 +394,8 @@ sys_open(void)
   if(ip->type == T_DEVICE){
     f->type = FD_DEVICE;
     f->major = ip->major;
-    cdev_t *cdev = NULL;
-    int ret = cdev_get(ip->major, ip->minor, &cdev);
-    if (ret != 0) {
+    cdev_t *cdev = cdev_get(ip->major, ip->minor);
+    if (IS_ERR(cdev)) {
       fileclose(f);
       iunlockput(ip);
       end_op();

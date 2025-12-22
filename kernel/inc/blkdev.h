@@ -6,7 +6,7 @@
 
 #define blkdev_blk_size(dev) ((size_t)BLK_SIZE << (dev)->block_shift)
 
-int blkdev_get(int major, int minor, blkdev_t **dev);
+blkdev_t *blkdev_get(int major, int minor);
 int blkdev_dup(blkdev_t *dev);
 int blkdev_put(blkdev_t *dev);
 int blkdev_register(blkdev_t *dev);

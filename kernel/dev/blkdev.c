@@ -41,21 +41,16 @@ static bool __blkdev_ops_validate(blkdev_ops_t *ops) {
     return true;
 }
 
-int blkdev_get(int major, int minor, blkdev_t **dev) {
-    if (dev == NULL) {
-        return -EINVAL;
-    }
-    device_t *device = NULL;
-    int ret = device_get(major, minor, &device);
-    if (ret != 0) {
-        return ret;
+blkdev_t *blkdev_get(int major, int minor) {
+    device_t *device = device_get(major, minor);
+    if (IS_ERR(device)) {
+        return (blkdev_t *)device;
     }
     if (device->type != DEV_TYPE_BLOCK) {
         device_put(device);
-        return -ENODEV;
+        return ERR_PTR(-ENODEV);
     }
-    *dev = (blkdev_t *)device;
-    return 0;
+    return (blkdev_t *)device;
 }
 
 int blkdev_dup(blkdev_t *dev) {

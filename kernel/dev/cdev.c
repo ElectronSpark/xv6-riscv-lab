@@ -42,21 +42,16 @@ static bool __cdev_opts_validate(cdev_ops_t *ops) {
     return true;
 }
 
-int cdev_get(int major, int minor, cdev_t **dev) {
-    if (dev == NULL) {
-        return -EINVAL; // Null pointer for device
-    }
-    device_t *device = NULL;
-    int ret = device_get(major, minor, &device);
-    if (ret != 0) {
-        return ret; // Propagate error from device_get
+cdev_t *cdev_get(int major, int minor) {
+    device_t *device = device_get(major, minor);
+    if (IS_ERR(device)) {
+        return (cdev_t *)device; // Propagate error from device_get
     }
     if (device->type != DEV_TYPE_CHAR) {
         device_put(device); // Release the device reference
-        return -ENODEV; // Not a character device
+        return ERR_PTR(-ENODEV); // Not a character device
     }
-    *dev = (cdev_t *)device;
-    return 0;
+    return (cdev_t *)device;
 }
 
 int cdev_dup(cdev_t *dev) {
