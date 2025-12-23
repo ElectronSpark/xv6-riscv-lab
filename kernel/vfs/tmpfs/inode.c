@@ -278,7 +278,7 @@ int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     return ret;
 }
 
-// VFS will handle "." entries and ".." entries when it's local root
+// VFS synthesizes "."; tmpfs adds ".." for non-root and then walks children
 int __tmpfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     struct vfs_dentry *dentry = &iter->current;
@@ -286,29 +286,32 @@ int __tmpfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter) {
     // First release previous name if any
     vfs_release_dentry(dentry);
 
-    if (iter->current.cookies == VFS_DENTRY_COOKIE_SELF) {
-        // Next is ".."
-        if (dir->parent == NULL) {
-            return -ENOENT; // No parent
+    if (iter->index == 1) {
+        // VFS synthesizes ".." for mount/process roots; handle only ordinary dirs here
+        if (!vfs_inode_is_local_root(dir)) {
+            if (dir->parent == NULL) {
+                return -ENOENT; // No parent
+            }
+            dentry->cookies = VFS_DENTRY_COOKIE_PARENT;
+            dentry->ino = dir->parent->ino;
+            dentry->sb = dir->parent->sb;
+            dentry->name = kmm_alloc(3);
+            if (dentry->name == NULL) {
+                dentry->cookies = VFS_DENTRY_COOKIE_END;
+                return -ENOMEM;
+            }
+            memmove(dentry->name, "..", 3);
+            dentry->name_len = 2;
+            return 0;
         }
-        dentry->cookies = VFS_DENTRY_COOKIE_PARENT;
-        dentry->ino = dir->parent->ino;
-        dentry->sb = dir->sb;
-        dentry->name = kmm_alloc(3);
-        if (dentry->name == NULL) {
-            dentry->cookies = VFS_DENTRY_COOKIE_END;
-            return -ENOMEM;
-        }
-        memmove(dentry->name, "..", 3);
-        dentry->name_len = 2;
-        return 0;
+        // For roots handled by VFS, fall through to children enumeration
     }
 
-    if (iter->current.cookies == VFS_DENTRY_COOKIE_END ||
-        iter->current.cookies == VFS_DENTRY_COOKIE_PARENT) {
+    if (dentry->cookies == VFS_DENTRY_COOKIE_END ||
+        dentry->cookies == VFS_DENTRY_COOKIE_PARENT) {
         current = HLIST_FIRST_NODE(&tmpfs_dir->dir.children, struct tmpfs_dentry, hash_entry);
     } else {
-        current = (struct tmpfs_dentry *)iter->current.cookies;
+        current = (struct tmpfs_dentry *)dentry->cookies;
         current = HLIST_NEXT_NODE(&tmpfs_dir->dir.children, current, hash_entry);
     }
 

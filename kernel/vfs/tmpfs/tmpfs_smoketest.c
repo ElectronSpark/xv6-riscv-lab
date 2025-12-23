@@ -12,12 +12,18 @@
 #include "rwlock.h"
 #include "completion.h"
 #include "vfs/fs.h"
-#include "../vfs_private.h"
+#include "../vfs_private.h" // for vfs_root_inode
 #include "list.h"
 #include "hlist.h"
 #include "slab.h"
 #include "tmpfs_private.h"
 #include "tmpfs_smoketest.h"
+
+struct iter_expect {
+    const char *name;
+    bool required;
+    bool seen;
+};
 
 // Helper: lookup a child inode by name and bump refcount; caller must vfs_iput()
 static struct vfs_inode *tmpfs_fetch_inode(struct vfs_inode *dir, const char *name, size_t name_len) {
@@ -76,32 +82,32 @@ void tmpfs_run_inode_smoketest(void) {
     subdir = vfs_mkdir(root, 0755, subdir_name, subdir_len);
     if (IS_ERR(subdir)) {
         ret = PTR_ERR(subdir);
-        printf("inode_smoketest: FAIL vfs_mkdir %s, errno=%d\n", subdir_name, ret);
+        printf("inode_smoketest: [FAIL] vfs_mkdir %s, errno=%d\n", subdir_name, ret);
         goto out_put_root;
     }
     vfs_ilock(subdir);
-    printf("inode_smoketest: PASS created /%s nlink=%u\n", subdir_name, subdir->n_links);
+    printf("inode_smoketest: [PASS] created /%s nlink=%u\n", subdir_name, subdir->n_links);
     vfs_iunlock(subdir);
 
     nested = vfs_mkdir(subdir, 0755, nested_name, nested_len);
     if (IS_ERR(nested)) {
         ret = PTR_ERR(nested);
-        printf("inode_smoketest: FAIL vfs_mkdir %s, errno=%d\n", nested_name, ret);
+        printf("inode_smoketest: [FAIL] vfs_mkdir %s, errno=%d\n", nested_name, ret);
         goto out_cleanup;
     }
     vfs_ilock(nested);
-    printf("inode_smoketest: PASS created /%s/%s nlink=%u\n", subdir_name, nested_name, nested->n_links);
+    printf("inode_smoketest: [PASS] created /%s/%s nlink=%u\n", subdir_name, nested_name, nested->n_links);
     vfs_iunlock(nested);
 
     file_a = vfs_create(subdir, 0644, file_a_name, file_a_len);
     if (IS_ERR(file_a)) {
         ret = PTR_ERR(file_a);
-        printf("inode_smoketest: FAIL vfs_create %s, errno=%d\n", file_a_name, ret);
+        printf("inode_smoketest: [FAIL] vfs_create %s, errno=%d\n", file_a_name, ret);
         goto out_cleanup;
     }
     file_a_ino = file_a->ino;
     vfs_ilock(file_a);
-    printf("inode_smoketest: PASS created /%s/%s ino=%lu nlink=%u\n",
+    printf("inode_smoketest: [PASS] created /%s/%s ino=%lu nlink=%u\n",
            subdir_name, file_a_name, file_a->ino, file_a->n_links);
     vfs_iunlock(file_a);
     vfs_iput(file_a);
@@ -116,12 +122,12 @@ void tmpfs_run_inode_smoketest(void) {
     };
     ret = vfs_link(&link_old, subdir, file_a_link_name, file_a_link_len);
     if (ret != 0) {
-        printf("inode_smoketest: FAIL vfs_link %s, errno=%d\n", file_a_link_name, ret);
+        printf("inode_smoketest: [FAIL] vfs_link %s, errno=%d\n", file_a_link_name, ret);
     } else {
         struct vfs_inode *tmp = tmpfs_fetch_inode(subdir, file_a_name, file_a_len);
         if (!IS_ERR(tmp)) {
             vfs_ilock(tmp);
-            printf("inode_smoketest: PASS linked /%s/%s -> /%s/%s nlink=%u\n",
+            printf("inode_smoketest: [PASS] linked /%s/%s -> /%s/%s nlink=%u\n",
                    subdir_name, file_a_link_name, subdir_name, file_a_name, tmp->n_links);
             vfs_iunlock(tmp);
             vfs_iput(tmp);
@@ -133,12 +139,12 @@ void tmpfs_run_inode_smoketest(void) {
     file_b = vfs_create(nested, 0644, file_b_name, file_b_len);
     if (IS_ERR(file_b)) {
         ret = PTR_ERR(file_b);
-        printf("inode_smoketest: FAIL vfs_create %s, errno=%d\n", file_b_name, ret);
+        printf("inode_smoketest: [FAIL] vfs_create %s, errno=%d\n", file_b_name, ret);
         goto out_cleanup;
     }
     file_b_ino = file_b->ino;
     vfs_ilock(file_b);
-    printf("inode_smoketest: PASS created /%s/%s/%s ino=%lu nlink=%u\n",
+    printf("inode_smoketest: [PASS] created /%s/%s/%s ino=%lu nlink=%u\n",
            subdir_name, nested_name, file_b_name, file_b->ino, file_b->n_links);
     vfs_iunlock(file_b);
     vfs_iput(file_b);
@@ -146,12 +152,12 @@ void tmpfs_run_inode_smoketest(void) {
 
     ret = vfs_unlink(subdir, file_a_link_name, file_a_link_len);
     if (ret != 0) {
-        printf("inode_smoketest: FAIL vfs_unlink %s, errno=%d\n", file_a_link_name, ret);
+        printf("inode_smoketest: [FAIL] vfs_unlink %s, errno=%d\n", file_a_link_name, ret);
     } else {
         struct vfs_inode *tmp = tmpfs_fetch_inode(subdir, file_a_name, file_a_len);
         if (!IS_ERR(tmp)) {
             vfs_ilock(tmp);
-            printf("inode_smoketest: PASS unlinked /%s/%s nlink=%u\n",
+            printf("inode_smoketest: [PASS] unlinked /%s/%s nlink=%u\n",
                    subdir_name, file_a_link_name, tmp->n_links);
             vfs_iunlock(tmp);
             vfs_iput(tmp);
@@ -163,11 +169,11 @@ void tmpfs_run_inode_smoketest(void) {
     sym_a = vfs_symlink(subdir, 0777, symlink_a_name, symlink_a_len,
                         symlink_a_target, symlink_a_target_len);
     if (IS_ERR(sym_a)) {
-        printf("inode_smoketest: FAIL vfs_symlink %s, errno=%ld\n", symlink_a_name, PTR_ERR(sym_a));
+        printf("inode_smoketest: [FAIL] vfs_symlink %s, errno=%ld\n", symlink_a_name, PTR_ERR(sym_a));
         sym_a = NULL;
     } else {
         vfs_ilock(sym_a);
-        printf("inode_smoketest: PASS symlink /%s/%s -> %s ino=%lu nlink=%u\n",
+        printf("inode_smoketest: [PASS] symlink /%s/%s -> %s ino=%lu nlink=%u\n",
                subdir_name, symlink_a_name, symlink_a_target, sym_a->ino, sym_a->n_links);
         vfs_iunlock(sym_a);
         vfs_iput(sym_a);
@@ -177,11 +183,11 @@ void tmpfs_run_inode_smoketest(void) {
     sym_b = vfs_symlink(nested, 0777, symlink_b_name, symlink_b_len,
                         symlink_b_target, symlink_b_target_len);
     if (IS_ERR(sym_b)) {
-        printf("inode_smoketest: FAIL vfs_symlink %s, errno=%ld\n", symlink_b_name, PTR_ERR(sym_b));
+        printf("inode_smoketest: [FAIL] vfs_symlink %s, errno=%ld\n", symlink_b_name, PTR_ERR(sym_b));
         sym_b = NULL;
     } else {
         vfs_ilock(sym_b);
-        printf("inode_smoketest: PASS symlink /%s/%s/%s -> %s ino=%lu nlink=%u\n",
+        printf("inode_smoketest: [PASS] symlink /%s/%s/%s -> %s ino=%lu nlink=%u\n",
                subdir_name, nested_name, symlink_b_name, symlink_b_target, sym_b->ino, sym_b->n_links);
         vfs_iunlock(sym_b);
         vfs_iput(sym_b);
@@ -191,14 +197,14 @@ void tmpfs_run_inode_smoketest(void) {
     struct vfs_dentry d1 = {0};
     ret = vfs_ilookup(root, &d1, subdir_name, subdir_len);
     if (ret == 0) {
-        printf("inode_smoketest: PASS ilookup /%s -> ino=%lu\n", subdir_name, d1.ino);
+        printf("inode_smoketest: [PASS] ilookup /%s -> ino=%lu\n", subdir_name, d1.ino);
         vfs_release_dentry(&d1);
     }
 
     struct vfs_dentry d2 = {0};
     ret = vfs_ilookup(subdir, &d2, nested_name, nested_len);
     if (ret == 0) {
-        printf("inode_smoketest: PASS ilookup /%s/%s -> ino=%lu\n", subdir_name, nested_name, d2.ino);
+        printf("inode_smoketest: [PASS] ilookup /%s/%s -> ino=%lu\n", subdir_name, nested_name, d2.ino);
         vfs_release_dentry(&d2);
     }
 
@@ -208,7 +214,7 @@ void tmpfs_run_inode_smoketest(void) {
         struct vfs_inode *tmp = tmpfs_fetch_inode(subdir, file_a_name, file_a_len);
         if (!IS_ERR(tmp)) {
             vfs_ilock(tmp);
-            printf("inode_smoketest: PASS ilookup /%s/%s -> ino=%lu nlink=%u\n",
+            printf("inode_smoketest: [PASS] ilookup /%s/%s -> ino=%lu nlink=%u\n",
                    subdir_name, file_a_name, d_file_a.ino, tmp->n_links);
             vfs_iunlock(tmp);
             vfs_iput(tmp);
@@ -224,7 +230,7 @@ void tmpfs_run_inode_smoketest(void) {
         struct vfs_inode *tmp = tmpfs_fetch_inode(nested, file_b_name, file_b_len);
         if (!IS_ERR(tmp)) {
             vfs_ilock(tmp);
-            printf("inode_smoketest: PASS ilookup /%s/%s/%s -> ino=%lu nlink=%u\n",
+            printf("inode_smoketest: [PASS] ilookup /%s/%s/%s -> ino=%lu nlink=%u\n",
                    subdir_name, nested_name, file_b_name, d_file_b.ino, tmp->n_links);
             vfs_iunlock(tmp);
             vfs_iput(tmp);
@@ -243,7 +249,7 @@ void tmpfs_run_inode_smoketest(void) {
     };
     ret = vfs_move(nested, &old_dentry, subdir, file_b_new_name, file_b_new_len);
     if (ret != 0) {
-        printf("inode_smoketest: FAIL move %s -> %s, errno=%d\n", file_b_name, file_b_new_name, ret);
+        printf("inode_smoketest: [FAIL] move %s -> %s, errno=%d\n", file_b_name, file_b_new_name, ret);
     }
 
     char linkbuf[64] = {0};
@@ -253,7 +259,7 @@ void tmpfs_run_inode_smoketest(void) {
         ret = vfs_readlink(tmp_sym, linkbuf, sizeof(linkbuf));
         if (ret >= 0) {
             vfs_ilock(tmp_sym);
-            printf("inode_smoketest: PASS readlink /%s/%s -> %s len=%d nlink=%u\n",
+            printf("inode_smoketest: [PASS] readlink /%s/%s -> %s len=%d nlink=%u\n",
                    subdir_name, symlink_a_name, linkbuf, ret, tmp_sym->n_links);
             vfs_iunlock(tmp_sym);
         }
@@ -268,7 +274,7 @@ void tmpfs_run_inode_smoketest(void) {
         ret = vfs_readlink(tmp_sym, linkbuf, sizeof(linkbuf));
         if (ret >= 0) {
             vfs_ilock(tmp_sym);
-            printf("inode_smoketest: PASS readlink /%s/%s/%s -> %s len=%d nlink=%u\n",
+            printf("inode_smoketest: [PASS] readlink /%s/%s/%s -> %s len=%d nlink=%u\n",
                    subdir_name, nested_name, symlink_b_name, linkbuf, ret, tmp_sym->n_links);
             vfs_iunlock(tmp_sym);
         }
@@ -288,13 +294,13 @@ out_cleanup:
     if (!IS_ERR(subdir) && nested != NULL && !IS_ERR(nested)) {
         ret = vfs_unlink(nested, symlink_b_name, symlink_b_len);
         if (ret != 0) {
-            printf("inode_smoketest: FAIL cleanup unlink %s, errno=%d\n", symlink_b_name, ret);
+            printf("inode_smoketest: [FAIL] cleanup unlink %s, errno=%d\n", symlink_b_name, ret);
         }
     }
     if (!IS_ERR(subdir)) {
         ret = vfs_unlink(subdir, symlink_a_name, symlink_a_len);
         if (ret != 0) {
-            printf("inode_smoketest: FAIL cleanup unlink %s, errno=%d\n", symlink_a_name, ret);
+            printf("inode_smoketest: [FAIL] cleanup unlink %s, errno=%d\n", symlink_a_name, ret);
         }
         ret = vfs_unlink(subdir, file_b_new_name, file_b_new_len);
         if (ret != 0) {
@@ -302,7 +308,7 @@ out_cleanup:
         }
         ret = vfs_unlink(subdir, file_a_name, file_a_len);
         if (ret != 0) {
-            printf("inode_smoketest: FAIL cleanup unlink %s, errno=%d\n", file_a_name, ret);
+            printf("inode_smoketest: [FAIL] cleanup unlink %s, errno=%d\n", file_a_name, ret);
         }
     }
 
@@ -313,7 +319,7 @@ out_cleanup:
     if (subdir != NULL && !IS_ERR(subdir)) {
         ret = vfs_rmdir(subdir, nested_name, nested_len);
         if (ret != 0) {
-            printf("inode_smoketest: FAIL cleanup rmdir /%s/%s, errno=%d\n", subdir_name, nested_name, ret);
+            printf("inode_smoketest: [FAIL] cleanup rmdir /%s/%s, errno=%d\n", subdir_name, nested_name, ret);
         }
         vfs_iput(subdir);
         subdir = NULL;
@@ -321,7 +327,7 @@ out_cleanup:
 
     ret = vfs_rmdir(root, subdir_name, subdir_len);
     if (ret != 0) {
-        printf("inode_smoketest: FAIL cleanup rmdir /%s, errno=%d\n", subdir_name, ret);
+        printf("inode_smoketest: [FAIL] cleanup rmdir /%s, errno=%d\n", subdir_name, ret);
     }
     printf("inode_smoketest: cleanup complete\n");
 
@@ -359,9 +365,9 @@ void tmpfs_run_truncate_smoketest(void) {
     ret = __tmpfs_truncate(test_file, 100);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: FAIL grow embedded, errno=%d\n", ret);
+        printf("truncate_smoketest: [FAIL] grow embedded, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: PASS grow embedded 0->100 bytes, size=%llu\n", (unsigned long long)test_file->size);
+        printf("truncate_smoketest: [PASS] grow embedded 0->100 bytes, size=%llu\n", (unsigned long long)test_file->size);
     }
 
     // Test 2: Grow embedded to direct blocks (100 -> 5*PAGE_SIZE)
@@ -369,9 +375,9 @@ void tmpfs_run_truncate_smoketest(void) {
     ret = __tmpfs_truncate(test_file, 5 * PAGE_SIZE);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: FAIL grow to direct blocks, errno=%d\n", ret);
+        printf("truncate_smoketest: [FAIL] grow to direct blocks, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: PASS grow to direct 5 blocks, size=%llu n_blocks=%lu\n",
+        printf("truncate_smoketest: [PASS] grow to direct 5 blocks, size=%llu n_blocks=%lu\n",
                (unsigned long long)test_file->size, test_file->n_blocks);
     }
 
@@ -380,9 +386,9 @@ void tmpfs_run_truncate_smoketest(void) {
     ret = __tmpfs_truncate(test_file, 50);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: FAIL shrink to embedded, errno=%d\n", ret);
+        printf("truncate_smoketest: [FAIL] shrink to embedded, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: PASS shrink to embedded 50 bytes, size=%llu n_blocks=%lu\n",
+        printf("truncate_smoketest: [PASS] shrink to embedded 50 bytes, size=%llu n_blocks=%lu\n",
                (unsigned long long)test_file->size, test_file->n_blocks);
     }
 
@@ -391,9 +397,9 @@ void tmpfs_run_truncate_smoketest(void) {
     ret = __tmpfs_truncate(test_file, TMPFS_INODE_DBLOCKS * PAGE_SIZE);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: FAIL grow to full direct, errno=%d\n", ret);
+        printf("truncate_smoketest: [FAIL] grow to full direct, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: PASS grow to full direct %lu blocks, size=%llu n_blocks=%lu\n",
+        printf("truncate_smoketest: [PASS] grow to full direct %lu blocks, size=%llu n_blocks=%lu\n",
                TMPFS_INODE_DBLOCKS, (unsigned long long)test_file->size, test_file->n_blocks);
     }
 
@@ -402,9 +408,9 @@ void tmpfs_run_truncate_smoketest(void) {
     ret = __tmpfs_truncate(test_file, 100 * PAGE_SIZE);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: FAIL grow to indirect, errno=%d\n", ret);
+        printf("truncate_smoketest: [FAIL] grow to indirect, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: PASS grow to indirect 100 blocks, size=%llu n_blocks=%lu indirect=%s\n",
+        printf("truncate_smoketest: [PASS] grow to indirect 100 blocks, size=%llu n_blocks=%lu indirect=%s\n",
                (unsigned long long)test_file->size, test_file->n_blocks,
                ti->file.indirect ? "set" : "null");
     }
@@ -414,9 +420,9 @@ void tmpfs_run_truncate_smoketest(void) {
     ret = __tmpfs_truncate(test_file, 20 * PAGE_SIZE);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: FAIL shrink indirect to direct, errno=%d\n", ret);
+        printf("truncate_smoketest: [FAIL] shrink indirect to direct, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: PASS shrink to direct 20 blocks, size=%llu n_blocks=%lu indirect=%s\n",
+        printf("truncate_smoketest: [PASS] shrink to direct 20 blocks, size=%llu n_blocks=%lu indirect=%s\n",
                (unsigned long long)test_file->size, test_file->n_blocks,
                ti->file.indirect ? "set" : "null");
     }
@@ -427,9 +433,9 @@ void tmpfs_run_truncate_smoketest(void) {
     ret = __tmpfs_truncate(test_file, 600 * PAGE_SIZE);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: FAIL grow to double indirect, errno=%d\n", ret);
+        printf("truncate_smoketest: [FAIL] grow to double indirect, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: PASS grow to double indirect 600 blocks, size=%llu n_blocks=%lu dindirect=%s\n",
+        printf("truncate_smoketest: [PASS] grow to double indirect 600 blocks, size=%llu n_blocks=%lu dindirect=%s\n",
                (unsigned long long)test_file->size, test_file->n_blocks,
                ti->file.double_indirect ? "set" : "null");
     }
@@ -439,9 +445,9 @@ void tmpfs_run_truncate_smoketest(void) {
     ret = __tmpfs_truncate(test_file, 40 * PAGE_SIZE);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: FAIL shrink double to indirect, errno=%d\n", ret);
+        printf("truncate_smoketest: [FAIL] shrink double to indirect, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: PASS shrink to indirect 40 blocks, size=%llu n_blocks=%lu dindirect=%s\n",
+        printf("truncate_smoketest: [PASS] shrink to indirect 40 blocks, size=%llu n_blocks=%lu dindirect=%s\n",
                (unsigned long long)test_file->size, test_file->n_blocks,
                ti->file.double_indirect ? "set" : "null");
     }
@@ -451,9 +457,9 @@ void tmpfs_run_truncate_smoketest(void) {
     ret = __tmpfs_truncate(test_file, 0);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: FAIL shrink to zero, errno=%d\n", ret);
+        printf("truncate_smoketest: [FAIL] shrink to zero, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: PASS shrink to zero, size=%llu n_blocks=%lu\n",
+        printf("truncate_smoketest: [PASS] shrink to zero, size=%llu n_blocks=%lu\n",
                (unsigned long long)test_file->size, test_file->n_blocks);
     }
 
@@ -462,9 +468,9 @@ void tmpfs_run_truncate_smoketest(void) {
     ret = __tmpfs_truncate(test_file, 1000 * PAGE_SIZE);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: FAIL grow zero to double indirect, errno=%d\n", ret);
+        printf("truncate_smoketest: [FAIL] grow zero to double indirect, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: PASS grow zero to double indirect 1000 blocks, size=%llu n_blocks=%lu\n",
+        printf("truncate_smoketest: [PASS] grow zero to double indirect 1000 blocks, size=%llu n_blocks=%lu\n",
                (unsigned long long)test_file->size, test_file->n_blocks);
     }
 
@@ -511,7 +517,7 @@ void tmpfs_run_namei_smoketest(void) {
 
     root = vfs_curroot();
     if (root == NULL) {
-        printf("namei_smoketest: FAIL vfs_curroot returned NULL\n");
+        printf("namei_smoketest: [FAIL] vfs_curroot returned NULL\n");
         return;
     }
     root_pinned = true;
@@ -520,14 +526,14 @@ void tmpfs_run_namei_smoketest(void) {
     subdir = vfs_mkdir(root, 0755, subdir_name, subdir_len);
     if (IS_ERR(subdir)) {
         ret = PTR_ERR(subdir);
-        printf("namei_smoketest: FAIL setup mkdir %s, errno=%d\n", subdir_name, ret);
+        printf("namei_smoketest: [FAIL] setup mkdir %s, errno=%d\n", subdir_name, ret);
         goto out;
     }
 
     nested = vfs_mkdir(subdir, 0755, nested_name, nested_len);
     if (IS_ERR(nested)) {
         ret = PTR_ERR(nested);
-        printf("namei_smoketest: FAIL setup mkdir %s, errno=%d\n", nested_name, ret);
+        printf("namei_smoketest: [FAIL] setup mkdir %s, errno=%d\n", nested_name, ret);
         vfs_iput(subdir);
         goto cleanup_subdir;
     }
@@ -536,7 +542,7 @@ void tmpfs_run_namei_smoketest(void) {
     file = vfs_create(nested, 0644, file_name, file_len);
     if (IS_ERR(file)) {
         ret = PTR_ERR(file);
-        printf("namei_smoketest: FAIL setup create %s, errno=%d\n", file_name, ret);
+        printf("namei_smoketest: [FAIL] setup create %s, errno=%d\n", file_name, ret);
         vfs_iput(nested);
         goto cleanup_nested;
     }
@@ -550,12 +556,12 @@ void tmpfs_run_namei_smoketest(void) {
     // Test 1: Absolute path to root
     result = vfs_namei("/", 1);
     if (IS_ERR(result)) {
-        printf("namei_smoketest: FAIL namei(\"/\"), errno=%ld\n", PTR_ERR(result));
+        printf("namei_smoketest: [FAIL] namei(\"/\"), errno=%ld\n", PTR_ERR(result));
     } else if (result != root) {
-        printf("namei_smoketest: FAIL namei(\"/\") returned wrong inode\n");
+        printf("namei_smoketest: [FAIL] namei(\"/\") returned wrong inode\n");
         vfs_iput(result);
     } else {
-        printf("namei_smoketest: PASS namei(\"/\") -> root\n");
+        printf("namei_smoketest: [PASS] namei(\"/\") -> root\n");
         vfs_iput(result);
     }
     result = NULL;
@@ -564,9 +570,9 @@ void tmpfs_run_namei_smoketest(void) {
     const char *path2 = "/namei_test_dir";
     result = vfs_namei(path2, strlen(path2));
     if (IS_ERR(result)) {
-        printf("namei_smoketest: FAIL namei(\"%s\"), errno=%ld\n", path2, PTR_ERR(result));
+        printf("namei_smoketest: [FAIL] namei(\"%s\"), errno=%ld\n", path2, PTR_ERR(result));
     } else {
-        printf("namei_smoketest: PASS namei(\"%s\") -> ino=%lu\n", path2, result->ino);
+        printf("namei_smoketest: [PASS] namei(\"%s\") -> ino=%lu\n", path2, result->ino);
         vfs_iput(result);
     }
     result = NULL;
@@ -575,13 +581,13 @@ void tmpfs_run_namei_smoketest(void) {
     const char *path3 = "/namei_test_dir/nested/testfile";
     result = vfs_namei(path3, strlen(path3));
     if (IS_ERR(result)) {
-        printf("namei_smoketest: FAIL namei(\"%s\"), errno=%ld\n", path3, PTR_ERR(result));
+        printf("namei_smoketest: [FAIL] namei(\"%s\"), errno=%ld\n", path3, PTR_ERR(result));
     } else if (result->ino != file_ino) {
-        printf("namei_smoketest: FAIL namei(\"%s\") wrong ino=%lu expected=%lu\n", 
+        printf("namei_smoketest: [FAIL] namei(\"%s\") wrong ino=%lu expected=%lu\n", 
                path3, result->ino, file_ino);
         vfs_iput(result);
     } else {
-        printf("namei_smoketest: PASS namei(\"%s\") -> ino=%lu\n", path3, result->ino);
+        printf("namei_smoketest: [PASS] namei(\"%s\") -> ino=%lu\n", path3, result->ino);
         vfs_iput(result);
     }
     result = NULL;
@@ -590,12 +596,12 @@ void tmpfs_run_namei_smoketest(void) {
     const char *path4 = "/namei_test_dir/./nested/./testfile";
     result = vfs_namei(path4, strlen(path4));
     if (IS_ERR(result)) {
-        printf("namei_smoketest: FAIL namei(\"%s\"), errno=%ld\n", path4, PTR_ERR(result));
+        printf("namei_smoketest: [FAIL] namei(\"%s\"), errno=%ld\n", path4, PTR_ERR(result));
     } else if (result->ino != file_ino) {
-        printf("namei_smoketest: FAIL namei(\"%s\") wrong ino\n", path4);
+        printf("namei_smoketest: [FAIL] namei(\"%s\") wrong ino\n", path4);
         vfs_iput(result);
     } else {
-        printf("namei_smoketest: PASS namei(\"%s\") -> ino=%lu\n", path4, result->ino);
+        printf("namei_smoketest: [PASS] namei(\"%s\") -> ino=%lu\n", path4, result->ino);
         vfs_iput(result);
     }
     result = NULL;
@@ -604,12 +610,12 @@ void tmpfs_run_namei_smoketest(void) {
     const char *path5 = "/namei_test_dir/nested/../nested/testfile";
     result = vfs_namei(path5, strlen(path5));
     if (IS_ERR(result)) {
-        printf("namei_smoketest: FAIL namei(\"%s\"), errno=%ld\n", path5, PTR_ERR(result));
+        printf("namei_smoketest: [FAIL] namei(\"%s\"), errno=%ld\n", path5, PTR_ERR(result));
     } else if (result->ino != file_ino) {
-        printf("namei_smoketest: FAIL namei(\"%s\") wrong ino\n", path5);
+        printf("namei_smoketest: [FAIL] namei(\"%s\") wrong ino\n", path5);
         vfs_iput(result);
     } else {
-        printf("namei_smoketest: PASS namei(\"%s\") -> ino=%lu\n", path5, result->ino);
+        printf("namei_smoketest: [PASS] namei(\"%s\") -> ino=%lu\n", path5, result->ino);
         vfs_iput(result);
     }
     result = NULL;
@@ -618,12 +624,12 @@ void tmpfs_run_namei_smoketest(void) {
     const char *path6 = "/..";
     result = vfs_namei(path6, strlen(path6));
     if (IS_ERR(result)) {
-        printf("namei_smoketest: FAIL namei(\"%s\"), errno=%ld\n", path6, PTR_ERR(result));
+        printf("namei_smoketest: [FAIL] namei(\"%s\"), errno=%ld\n", path6, PTR_ERR(result));
     } else if (result != root) {
-        printf("namei_smoketest: FAIL namei(\"%s\") did not return root\n", path6);
+        printf("namei_smoketest: [FAIL] namei(\"%s\") did not return root\n", path6);
         vfs_iput(result);
     } else {
-        printf("namei_smoketest: PASS namei(\"%s\") -> root\n", path6);
+        printf("namei_smoketest: [PASS] namei(\"%s\") -> root\n", path6);
         vfs_iput(result);
     }
     result = NULL;
@@ -632,12 +638,12 @@ void tmpfs_run_namei_smoketest(void) {
     const char *path7 = "///namei_test_dir///nested///testfile";
     result = vfs_namei(path7, strlen(path7));
     if (IS_ERR(result)) {
-        printf("namei_smoketest: FAIL namei(\"%s\"), errno=%ld\n", path7, PTR_ERR(result));
+        printf("namei_smoketest: [FAIL] namei(\"%s\"), errno=%ld\n", path7, PTR_ERR(result));
     } else if (result->ino != file_ino) {
-        printf("namei_smoketest: FAIL namei(\"%s\") wrong ino\n", path7);
+        printf("namei_smoketest: [FAIL] namei(\"%s\") wrong ino\n", path7);
         vfs_iput(result);
     } else {
-        printf("namei_smoketest: PASS namei(\"%s\") -> ino=%lu\n", path7, result->ino);
+        printf("namei_smoketest: [PASS] namei(\"%s\") -> ino=%lu\n", path7, result->ino);
         vfs_iput(result);
     }
     result = NULL;
@@ -646,11 +652,11 @@ void tmpfs_run_namei_smoketest(void) {
     const char *path8 = "/namei_test_dir/nonexistent";
     result = vfs_namei(path8, strlen(path8));
     if (result == ERR_PTR(-ENOENT)) {
-        printf("namei_smoketest: PASS namei(\"%s\") -> ENOENT as expected\n", path8);
+        printf("namei_smoketest: [PASS] namei(\"%s\") -> ENOENT as expected\n", path8);
     } else if (IS_ERR(result)) {
-        printf("namei_smoketest: FAIL namei(\"%s\") unexpected errno=%ld\n", path8, PTR_ERR(result));
+        printf("namei_smoketest: [FAIL] namei(\"%s\") unexpected errno=%ld\n", path8, PTR_ERR(result));
     } else {
-        printf("namei_smoketest: FAIL namei(\"%s\") should have failed\n", path8);
+        printf("namei_smoketest: [FAIL] namei(\"%s\") should have failed\n", path8);
         vfs_iput(result);
     }
     result = NULL;
@@ -682,15 +688,63 @@ out:
     }
 }
 
-// Iterate a directory, fetch each dentry's inode, and log sb/ino correctness
+// Order-insensitive expected-entry tracker for dir iteration
+static bool iter_mark_seen(const char *name, struct iter_expect *tbl, int tbl_cnt, const char *tag, bool *dup_out) {
+    for (int i = 0; i < tbl_cnt; i++) {
+        size_t nlen = strlen(tbl[i].name) + 1;
+        if (strncmp(name, tbl[i].name, nlen) == 0) {
+            if (tbl[i].seen) {
+                printf("dir_iter_mount: [FAIL] %s duplicate entry %s\n", tag, name);
+                if (dup_out != NULL) {
+                    *dup_out = true;
+                }
+            }
+            tbl[i].seen = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Iterate a directory, fetch each dentry's inode, and validate expected entries
 static void tmpfs_iter_and_fetch(const char *tag, struct vfs_inode *dir, struct vfs_dir_iter *iter) {
+    // Expected entry bookkeeping (order-independent)
+    struct iter_expect exp[4];
+    int exp_count = 0;
+    bool allow_extra = false;
+
+    // Reset iterator state fully (avoid carrying index/cookies between calls)
+    vfs_release_dentry(&iter->current);
+    memset(iter, 0, sizeof(*iter));
+
+    if (strncmp(tag, "mnt_root", 8) == 0) {
+        exp[0] = (struct iter_expect){".", true, false};
+        exp[1] = (struct iter_expect){"..", true, false};
+        exp[2] = (struct iter_expect){"iter_subdir", true, false};
+        exp[3] = (struct iter_expect){"iter_file", true, false};
+        exp_count = 4;
+    } else if (strncmp(tag, "mnt_subdir", 9) == 0) {
+        exp[0] = (struct iter_expect){".", true, false};
+        exp[1] = (struct iter_expect){"..", true, false};
+        exp_count = 2;
+    } else if (strncmp(tag, "process_root", 12) == 0) {
+        exp[0] = (struct iter_expect){"iter_mount_dir", true, false};
+        exp[1] = (struct iter_expect){".", false, false};
+        exp[2] = (struct iter_expect){"..", false, false};
+        exp_count = 3;
+        allow_extra = false; // flag any unexpected entries
+    }
+
     int lret = 0;
-    iter->current.cookies = VFS_DENTRY_COOKIE_END;
+    int unexpected = 0;
+    bool ok = true;
+    iter->current.cookies = 0;
     printf("dir_iter_mount: BEGIN %s\n", tag);
     int guard = 0;
     for (;;) {
         if (guard++ > 256) {
             printf("dir_iter_mount: ABORT %s guard hit\n", tag);
+            ok = false;
             break;
         }
         printf("dir_iter_mount: ITER %s step=%d before dir_iter\n", tag, guard);
@@ -698,36 +752,68 @@ static void tmpfs_iter_and_fetch(const char *tag, struct vfs_inode *dir, struct 
         printf("dir_iter_mount: ITER %s step=%d after dir_iter ret=%d cookies=%ld\n",
                tag, guard, lret, iter->current.cookies);
         if (lret != 0) {
-            printf("dir_iter_mount: FAIL dir_iter %s errno=%d\n", tag, lret);
+            printf("dir_iter_mount: [FAIL] dir_iter %s errno=%d\n", tag, lret);
+            ok = false;
             break;
         }
-        if (iter->current.cookies == VFS_DENTRY_COOKIE_END) {
+        if (iter->current.name == NULL) {
             printf("dir_iter_mount: END %s\n", tag);
             break;
         }
 
-        // Attach parent so vfs_get_dentry_inode can resolve properly
-        iter->current.parent = dir;
-        struct vfs_inode *ent = vfs_get_dentry_inode(&iter->current);
-        if (IS_ERR(ent) || ent == NULL) {
-            lret = IS_ERR(ent) ? PTR_ERR(ent) : -EINVAL;
-            printf("dir_iter_mount: FAIL get_inode %s name=%s errno=%d\n",
+        struct vfs_dentry *dent = vfs_dir_iter_get_dentry(dir, iter);
+        if (IS_ERR(dent) || dent == NULL) {
+            lret = IS_ERR(dent) ? PTR_ERR(dent) : -EINVAL;
+            printf("dir_iter_mount: [FAIL] get_inode %s name=%s errno=%d\n",
                    tag, iter->current.name ? iter->current.name : "(null)", lret);
+            ok = false;
         } else {
-            bool locked = holding_mutex(&ent->mutex);
-            printf("dir_iter_mount: entry %s name=%s ino=%lu fetched_ino=%lu sb_match=%s locked=%s\n",
-                   tag,
-                   iter->current.name ? iter->current.name : "(null)",
-                   iter->current.ino,
-                   ent->ino,
-                   ent->sb == iter->current.sb ? "yes" : "no",
-                   locked ? "yes" : "no");
-            if (locked) {
-                vfs_iunlock(ent);
+            struct vfs_inode *ent = vfs_get_dentry_inode(dent);
+            if (IS_ERR(ent) || ent == NULL) {
+                lret = IS_ERR(ent) ? PTR_ERR(ent) : -EINVAL;
+                printf("dir_iter_mount: [FAIL] get_inode %s name=%s errno=%d\n",
+                       tag, iter->current.name ? iter->current.name : "(null)", lret);
+                ok = false;
+            } else {
+                bool locked = holding_mutex(&ent->mutex);
+                printf("dir_iter_mount: entry %s name=%s ino=%lu fetched_ino=%lu sb_match=%s locked=%s\n",
+                       tag,
+                       iter->current.name ? iter->current.name : "(null)",
+                       iter->current.ino,
+                       ent->ino,
+                       ent->sb == iter->current.sb ? "yes" : "no",
+                       locked ? "yes" : "no");
+
+                bool duplicate = false;
+                if (!iter_mark_seen(iter->current.name, exp, exp_count, tag, &duplicate)) {
+                    unexpected++;
+                    if (!allow_extra) {
+                        printf("dir_iter_mount: [FAIL] %s unexpected entry %s\n", tag, iter->current.name);
+                        ok = false;
+                    }
+                } else if (duplicate) {
+                    ok = false;
+                }
+
+                if (locked) {
+                    vfs_iunlock(ent);
+                }
+                vfs_iput(ent);
             }
-            vfs_iput(ent);
         }
     }
+
+    for (int i = 0; i < exp_count; i++) {
+        if (exp[i].required && !exp[i].seen) {
+            printf("dir_iter_mount: [FAIL] %s missing entry %s\n", tag, exp[i].name);
+            ok = false;
+        }
+    }
+    if (unexpected > 0 && allow_extra) {
+        printf("dir_iter_mount: [WARN] %s saw %d unexpected entries\n", tag, unexpected);
+    }
+
+    printf("dir_iter_mount: %s %s\n", ok ? "[PASS]" : "[FAIL]", tag);
     vfs_release_dentry(&iter->current);
 }
 
@@ -757,7 +843,7 @@ void tmpfs_run_dir_iter_mount_smoketest(void) {
     if (IS_ERR(mp)) {
         ret = PTR_ERR(mp);
         mp = NULL;
-        printf("dir_iter_mount: FAIL setup mkdir %s errno=%d\n", mp_name, ret);
+        printf("dir_iter_mount: [FAIL] setup mkdir %s errno=%d\n", mp_name, ret);
         goto out;
     }
 
@@ -770,13 +856,13 @@ void tmpfs_run_dir_iter_mount_smoketest(void) {
     vfs_superblock_unlock(root->sb);
     vfs_mount_unlock();
     if (ret != 0) {
-        printf("dir_iter_mount: FAIL vfs_mount on %s errno=%d\n", mp_name, ret);
+        printf("dir_iter_mount: [FAIL] vfs_mount on %s errno=%d\n", mp_name, ret);
         goto cleanup_mp_dir;
     }
 
     mnt_root = mp->mnt_sb ? mp->mnt_sb->root_inode : NULL;
     if (mnt_root == NULL) {
-        printf("dir_iter_mount: FAIL mounted root NULL\n");
+        printf("dir_iter_mount: [FAIL] mounted root NULL\n");
         goto cleanup_mount;
     }
     vfs_idup(mnt_root);
@@ -786,7 +872,7 @@ void tmpfs_run_dir_iter_mount_smoketest(void) {
     if (IS_ERR(tmp)) {
         ret = PTR_ERR(tmp);
         tmp = NULL;
-        printf("dir_iter_mount: FAIL create %s errno=%d\n", file_name, ret);
+        printf("dir_iter_mount: [FAIL] create %s errno=%d\n", file_name, ret);
         goto cleanup_mount;
     }
     vfs_iput(tmp);
@@ -796,7 +882,7 @@ void tmpfs_run_dir_iter_mount_smoketest(void) {
     if (IS_ERR(mnt_subdir)) {
         ret = PTR_ERR(mnt_subdir);
         mnt_subdir = NULL;
-        printf("dir_iter_mount: FAIL mkdir %s errno=%d\n", subdir_name, ret);
+        printf("dir_iter_mount: [FAIL] mkdir %s errno=%d\n", subdir_name, ret);
         goto cleanup_mount;
     }
 
@@ -814,11 +900,11 @@ void tmpfs_run_dir_iter_mount_smoketest(void) {
     }
     ret = vfs_unlink(mnt_root, file_name, file_len);
     if (ret != 0) {
-        printf("dir_iter_mount: WARN cleanup unlink %s errno=%d\n", file_name, ret);
+        printf("dir_iter_mount: [WARN] cleanup unlink %s errno=%d\n", file_name, ret);
     }
     ret = vfs_rmdir(mnt_root, subdir_name, subdir_len);
     if (ret != 0) {
-        printf("dir_iter_mount: WARN cleanup rmdir %s errno=%d\n", subdir_name, ret);
+        printf("dir_iter_mount: [WARN] cleanup rmdir %s errno=%d\n", subdir_name, ret);
     }
 
 cleanup_mount:
@@ -847,7 +933,7 @@ cleanup_mount:
         vfs_superblock_unlock(mp->sb);
         vfs_mount_unlock();
         if (ret != 0) {
-            printf("dir_iter_mount: WARN vfs_unmount errno=%d\n", ret);
+            printf("dir_iter_mount: [WARN] vfs_unmount errno=%d\n", ret);
         }
     }
 
@@ -855,7 +941,7 @@ cleanup_mp_dir:
     if (mp != NULL) {
         int rmdir_ret = vfs_rmdir(root, mp_name, mp_len);
         if (rmdir_ret != 0) {
-            printf("dir_iter_mount: WARN cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
+            printf("dir_iter_mount: [WARN] cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
         }
         vfs_iput(mp);
     }

@@ -191,7 +191,7 @@ int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         dentry->name[0] = '.';
         dentry->name[1] = '\0';
         dentry->name_len = 1;
-        dentry->cookies = VFS_DENTRY_COOKIE_SELF;
+        dentry->cookies = 0; // cookie values are filesystem-private; opaque to VFS
         return 0;
     }
 
@@ -215,7 +215,7 @@ int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
             dentry->name[1] = '.';
             dentry->name[2] = '\0';
             dentry->name_len = 2;
-            dentry->cookies = VFS_DENTRY_COOKIE_PARENT;
+            dentry->cookies = 0; // VFS keeps cookies opaque; filesystem will set its own
             return 0;
         }
     }
@@ -247,8 +247,10 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter) {
     if (iter == NULL) {
         return -EINVAL; // Invalid argument
     }
+
     vfs_superblock_rlock(dir->sb);
     vfs_ilock(dir);
+
     int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
         goto out;
@@ -261,29 +263,67 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter) {
         ret = -ENOSYS; // dir_iter operation not supported
         goto out;
     }
-    if (iter->current.cookies == VFS_DENTRY_COOKIE_END) {
-        iter->current.cookies = VFS_DENTRY_COOKIE_SELF;
+
+    // Synthesize "." on the first iteration to keep cookies opaque at the VFS layer
+    if (iter->index == 0) {
+        iter->current.cookies = 0; // opaque to callers; tmpfs keeps its own sentinels
         iter->current.ino = dir->ino;
         iter->current.sb = dir->sb;
+        iter->current.parent = dir;
         iter->current.name = kmm_alloc(2);
+        if (iter->current.name == NULL) {
+            ret = -ENOMEM;
+            goto out;
+        }
         memmove(iter->current.name, ".", 2);
         iter->current.name_len = 1;
         ret = 0;
         goto out;
     }
-    if (iter->current.cookies == VFS_DENTRY_COOKIE_SELF && vfs_inode_is_local_root(dir)) {
-        // If it's local root, ".." should indicate the mountpoint's parent
-        iter->current.cookies = VFS_DENTRY_COOKIE_PARENT;
-        iter->current.ino = dir->parent->ino;
-        iter->current.sb = dir->sb;
+
+    // For process root or a mounted root, synthesize ".." on the second iteration
+    if (iter->index == 1 && (vfs_inode_is_local_root(dir) || dir == vfs_inode_deref(&myproc()->fs.rooti))) {
+        struct vfs_inode *target = dir;
+        struct vfs_inode *proc_root = vfs_inode_deref(&myproc()->fs.rooti);
+
+        // If not the process root, prefer the mountpoint when present, otherwise parent
+        if (dir != proc_root) {
+            if (dir->sb->mountpoint != NULL) {
+                target = dir->sb->mountpoint;
+            } else if (dir->parent != NULL) {
+                target = dir->parent;
+            }
+        } else {
+            // When at process root, ".." resolves to itself
+            target = dir;
+        }
+
+        iter->current.cookies = 0;
+        iter->current.ino = target->ino;
+        iter->current.sb = target->sb;
+        iter->current.parent = target;
         iter->current.name = kmm_alloc(3);
+        if (iter->current.name == NULL) {
+            ret = -ENOMEM;
+            goto out;
+        }
         memmove(iter->current.name, "..", 3);
         iter->current.name_len = 2;
         ret = 0;
         goto out;
     }
+
+    // After synthetic entries, hand off to filesystem; cookies stay opaque to VFS
+    if (iter->index <= 1) {
+        iter->current.cookies = 0; // Start-of-filesystem iteration sentinel for tmpfs
+    }
     ret = dir->ops->dir_iter(dir, iter);
+
 out:
+    if (ret == 0 && iter->current.name != NULL) {
+        iter->index++;
+    }
+
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
     return ret;

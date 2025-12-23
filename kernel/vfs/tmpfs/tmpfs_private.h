@@ -4,6 +4,10 @@
 #include "hlist_type.h"
 #include "vfs/vfs_types.h"
 
+#define VFS_DENTRY_COOKIE_END ((int64)0)
+#define VFS_DENTRY_COOKIE_SELF ((int64)1)
+#define VFS_DENTRY_COOKIE_PARENT ((int64)2)
+
 #define TMPFS_HASH_BUCKETS 15
 
 // Number of direct blocks in a tmpfs inode

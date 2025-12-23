@@ -280,18 +280,20 @@ struct vfs_dentry {
     // The `name` field is managed by slab allocator
     char *name;
     uint16 name_len;
-    int64 cookies;      // dir entry number within the parent inode. Used by some filesystems
-                        // to identify the dentry within its parent directory
+    int64 cookies;      // Filesystem-private cookie; opaque to callers. The VFS uses internal
+                        // sentinel values during directory iteration, but external callers
+                        // must not rely on any specific value.
 };
 
 struct vfs_dir_iter {
     struct vfs_dentry current;
+    uint64 index;      // Number of entries successfully returned so far
     
 };
 
 struct vfs_file {
     struct kobject kobj; // for sysfs representation
-    struct vfs_inode *inode;
+    struct vfs_inode_ref inode;
     loff_t f_pos; // file position
     uint32 f_flags; // file flags
     struct vfs_file_ops *ops;

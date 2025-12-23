@@ -936,11 +936,6 @@ struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
         return ERR_PTR(-EINVAL);
     }
 
-    if (dentry->parent && dentry->parent->sb == dentry->sb && dentry->ino == dentry->parent->ino) {
-        vfs_idup(dentry->parent);
-        return dentry->parent;
-    }
-
     ret = vfs_get_inode_cached(dentry->sb, dentry->ino, &inode);
     if (ret != -ENOENT) {
         if (ret != 0) {
@@ -975,12 +970,6 @@ struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
         return inode;
     }
 
-    if (S_ISDIR(inode->mode) && !vfs_inode_is_local_root(inode)) {
-        assert(dentry->parent != NULL, "Directory inode must have a parent dentry");
-        inode->parent = dentry->parent;
-        vfs_idup(dentry->parent);
-    }
-
     vfs_idup(inode);
     vfs_iunlock(inode);
     return inode;
@@ -994,57 +983,61 @@ struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry) {
         return ERR_PTR(-EINVAL);
     }
 
-    struct vfs_dentry mntd = { 0 };
-    struct vfs_inode *mnti = NULL;
-    struct vfs_inode *original_parent = dentry->parent;
-    struct vfs_inode *inode = NULL;
-retry:
     vfs_superblock_rlock(dentry->sb);
-    if (dentry->parent && dentry->ino == dentry->parent->ino) {
-        if (dentry->name[0] == '.' && dentry->name[1] == '.' && dentry->name_len == 2) {
-            if (dentry->parent == vfs_inode_deref(&myproc()->fs.rooti)) {
-                vfs_superblock_unlock(dentry->sb);
-                goto return_parent;
-            }
-            if (vfs_inode_is_local_root(dentry->parent)) {
-                mnti = dentry->sb->mountpoint;
-                if (mnti == NULL) {
-                    vfs_superblock_unlock(dentry->sb);
-                    goto return_parent;
-                }
-                if (mnti == vfs_inode_deref(&myproc()->fs.rooti)) {
-                    vfs_superblock_unlock(dentry->sb);
-                    goto return_parent;
-                }
-                if (vfs_inode_is_local_root(mnti)) {
-                    vfs_superblock_unlock(dentry->sb);
-                    mntd.sb = mnti->sb;
-                    mntd.ino = mnti->ino;
-                    mntd.parent = mnti;
-                    mntd.name = dentry->name;
-                    mntd.name_len = dentry->name_len;
-                    dentry = &mntd;
-                    goto retry;
-                }
-                if (mnti->parent == NULL) {
-                    vfs_superblock_unlock(dentry->sb);
-                    goto return_parent;
-                }
-                vfs_idup(mnti->parent);
-                vfs_superblock_unlock(dentry->sb);
-                return mnti->parent;
-            }
-        }
-    }
-    inode = vfs_get_dentry_inode_locked(dentry);
+    struct vfs_inode *inode = vfs_get_dentry_inode_locked(dentry);
     vfs_superblock_unlock(dentry->sb);
     return inode;
-return_parent:
-    if (original_parent == NULL) {
+}
+
+struct vfs_dentry *vfs_dir_iter_get_dentry(struct vfs_inode *dir,
+                                           struct vfs_dir_iter *iter) {
+    if (dir == NULL || iter == NULL) {
         return ERR_PTR(-EINVAL);
     }
-    vfs_idup(original_parent);
-    return original_parent;
+
+    // Ensure callers see the correct parent for subsequent inode resolution
+    iter->current.parent = dir;
+
+    if (iter->current.name == NULL) {
+        return ERR_PTR(-ENOENT);
+    }
+
+    // Synthetic entries are normalized by name rather than cookie sentinels
+    if (iter->current.name_len == 1 && iter->current.name[0] == '.') {
+        iter->current.sb = dir->sb;
+        iter->current.ino = dir->ino;
+        iter->current.parent = dir;
+        return &iter->current;
+    }
+
+    if (iter->current.name_len == 2 && iter->current.name[0] == '.' && iter->current.name[1] == '.') {
+        struct vfs_inode *target = dir;
+
+        // Respect chroot: never walk above process root
+        struct vfs_inode *proc_root = vfs_inode_deref(&myproc()->fs.rooti);
+        if (dir == proc_root) {
+            iter->current.sb = dir->sb;
+            iter->current.ino = dir->ino;
+            iter->current.parent = dir;
+            return &iter->current;
+        }
+
+        if (vfs_inode_is_local_root(dir)) {
+            // At a mounted root; ".." should point to the mountpoint itself
+            if (dir->sb->mountpoint != NULL) {
+                target = dir->sb->mountpoint;
+            }
+        } else if (dir->parent != NULL) {
+            target = dir->parent;
+        }
+
+        iter->current.sb = target->sb;
+        iter->current.ino = target->ino;
+        iter->current.parent = target;
+        return &iter->current;
+    }
+
+    return &iter->current;
 }
 
  /******************************************************************************
