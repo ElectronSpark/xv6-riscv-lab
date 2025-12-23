@@ -34,6 +34,10 @@ void vfs_superblock_rlock(struct vfs_superblock *sb);
 void vfs_superblock_wlock(struct vfs_superblock *sb);
 bool vfs_superblock_wholding(struct vfs_superblock *sb);
 void vfs_superblock_unlock(struct vfs_superblock *sb);
+void vfs_superblock_mountcount_inc(struct vfs_superblock *sb);
+void vfs_superblock_mountcount_dec(struct vfs_superblock *sb);
+void vfs_superblock_dup(struct vfs_superblock *sb);
+void vfs_superblock_put(struct vfs_superblock *sb);
 
 struct vfs_inode *vfs_alloc_inode(struct vfs_superblock *sb);
 struct vfs_inode *vfs_get_inode(struct vfs_superblock *sb, uint64 ino);
@@ -91,6 +95,11 @@ struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry);
 void vfs_release_dentry(struct vfs_dentry *dentry);
 int vfs_superblock_set_dirty(struct vfs_superblock *sb);
 
+// Inode reference operations
+int vfs_inode_get_ref(struct vfs_inode *inode, struct vfs_inode_ref *ref);
+void vfs_inode_put_ref(struct vfs_inode_ref *ref);
+struct vfs_inode *vfs_inode_deref(struct vfs_inode_ref *ref);
+
 
 // Get the reference count of an inode
 static inline int vfs_inode_refcount(struct vfs_inode *inode) {
@@ -98,6 +107,22 @@ static inline int vfs_inode_refcount(struct vfs_inode *inode) {
         return -1; // Invalid argument
     }
     return __atomic_load_n(&inode->ref_count, __ATOMIC_SEQ_CST);
+}
+
+// Get the reference count of a superblock
+static inline int vfs_superblock_refcount(struct vfs_superblock *sb) {
+    if (sb == NULL) {
+        return -1; // Invalid argument
+    }
+    return __atomic_load_n(&sb->refcount, __ATOMIC_SEQ_CST);
+}
+
+// Get the mount count of a superblock
+static inline int vfs_superblock_mountcount(struct vfs_superblock *sb) {
+    if (sb == NULL) {
+        return -1; // Invalid argument
+    }
+    return __atomic_load_n(&sb->mount_count, __ATOMIC_SEQ_CST);
 }
 
 // Check whether an inode is the local root

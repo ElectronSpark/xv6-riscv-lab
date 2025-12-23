@@ -153,8 +153,8 @@ struct proc {
   struct inode *cwd;           // Current directory
   // @TODO: replace the original XV6 fs subsystem with VFS
   struct {
-    struct vfs_inode *rooti; // Root inode
-    struct vfs_inode *cwd;   // Current working directory inode
+    struct vfs_inode_ref rooti; // Root inode
+    struct vfs_inode_ref cwd;   // Current working directory inode
   } fs;
   char name[16];               // Process name (debugging)
 };

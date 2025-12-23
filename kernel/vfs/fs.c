@@ -161,6 +161,8 @@ static void __vfs_init_superblock_structure(struct vfs_superblock *sb, struct vf
     list_entry_init(&sb->siblings);
     hlist_init(&sb->inodes, VFS_SUPERBLOCK_HASH_BUCKETS, &__vfs_superblock_inode_hlist_funcs);
     sb->fs_type = fs_type;
+    __atomic_store_n(&sb->refcount, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&sb->mount_count, 0, __ATOMIC_SEQ_CST);
     rwlock_init(&sb->lock, RWLOCK_PRIO_READ, "vfs_superblock_lock");
 }
 
@@ -212,13 +214,14 @@ static bool __vfs_init_superblock_valid(struct vfs_superblock *sb) {
 static void __vfs_attach_superblock_to_fstype(struct vfs_superblock *sb) {
     list_node_push_back(&sb->fs_type->superblocks, sb, siblings);
     sb->fs_type->sb_count++;
+    sb->registered = 1;
     assert(sb->fs_type->sb_count > 0, "Filesystem type superblock count overflow");
 }
 
 static void __vfs_detach_superblock_from_fstype(struct vfs_superblock *sb) {
     list_node_detach(sb, siblings);
     sb->fs_type->sb_count--;
-    sb->valid = 0;
+    sb->registered = 0;
     assert(sb->fs_type->sb_count >= 0, "Filesystem type superblock count underflow");
 }
 
@@ -247,8 +250,7 @@ static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint) {
     mountpoint->mnt_rooti = NULL;
     mountpoint->mnt_sb = NULL;
     if (mountpoint != &vfs_root_inode) {
-        mountpoint->sb->mount_count++;
-        assert(mountpoint->sb->mount_count > 0, "Mountpoint superblock mount count overflow");
+        vfs_superblock_mountcount_inc(mountpoint->sb);
     }
     return 0;
 }
@@ -280,8 +282,7 @@ static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint) {
     VFS_INODE_ASSERT_HOLDING(mountpoint, "Mountpoint inode lock must be held to clear mountpoint");
     assert(mountpoint->mount, "Mountpoint inode type is not MNT");
     if (mountpoint != &vfs_root_inode) {
-        mountpoint->sb->mount_count--;
-        assert(mountpoint->sb->mount_count >= 0, "Mountpoint superblock mount count underflow");
+        vfs_superblock_mountcount_dec(mountpoint->sb);
     }
     mountpoint->mnt_sb = NULL;
     mountpoint->mnt_rooti = NULL;
@@ -312,8 +313,10 @@ void vfs_init(void) {
     assert(proc != NULL, "vfs_init must be called from a process context");
     __vfs_inode_init(&vfs_root_inode);
     proc_lock(proc);
-    proc->fs.rooti = &vfs_root_inode;
-    proc->fs.cwd = &vfs_root_inode;
+    proc->fs.rooti.inode = NULL;
+    proc->fs.rooti.sb = NULL;
+    proc->fs.cwd.inode = NULL;
+    proc->fs.cwd.sb = NULL;
     proc_unlock(proc);
     tmpfs_init_fs_type();
 }
@@ -618,10 +621,11 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
         return -EINVAL; // Mountpoint's superblock is not valid
     }
     // Superblock should have no mounted superblocks under it
-    if (sb->mount_count > 0) {
-        printf("vfs_unmount: mount_count=%d\n", sb->mount_count);
+    if ((ret_val = vfs_superblock_mountcount(sb)) > 0) {
+        printf("vfs_unmount: mount_count=%d\n", ret_val);
         return -EBUSY; // There are still mounted superblocks under this superblock
     }
+    ret_val = 0;
     // After unmount_begin, superblock should be clean and have no active inodes
     if (sb->dirty) {
         printf("vfs_unmount: sb valid=%u dirty=%u\n", sb->valid, sb->dirty);
@@ -749,6 +753,32 @@ void vfs_superblock_unlock(struct vfs_superblock *sb) {
     if (sb) {
         rwlock_release(&sb->lock);
     }
+}
+
+void vfs_superblock_mountcount_inc(struct vfs_superblock *sb) {
+    vfs_superblock_dup(sb);
+    int cnt = __atomic_add_fetch(&sb->mount_count, 1, __ATOMIC_SEQ_CST);
+    assert(cnt > 0, "Superblock mount count overflow");
+}
+
+void vfs_superblock_mountcount_dec(struct vfs_superblock *sb) {
+    assert(sb != NULL, "Superblock write lock must be held to decrement mount count");
+    int cnt = __atomic_sub_fetch(&sb->mount_count, 1, __ATOMIC_SEQ_CST);
+    assert(cnt >= 0, "Superblock mount count underflow");
+    vfs_superblock_put(sb);
+}
+
+void vfs_superblock_dup(struct vfs_superblock *sb) {
+    assert(sb != NULL, "Superblock cannot be NULL when duplicating");
+    int ret = __atomic_add_fetch(&sb->refcount, 1, __ATOMIC_SEQ_CST);
+    assert(ret > 0, "Superblock refcount overflow");
+}
+
+void vfs_superblock_put(struct vfs_superblock *sb) {
+    assert(sb != NULL, "Superblock cannot be NULL when putting");
+    assert(!vfs_superblock_wholding(sb), "Cannot put superblock while holding its lock");
+    assert(!holding_mutex(&__mount_mutex), "Cannot put superblock while holding mount mutex");
+    assert(atomic_dec_unless(&sb->refcount, 0), "Superblock refcount underflow");
 }
 
 /*
@@ -972,7 +1002,7 @@ retry:
     vfs_superblock_rlock(dentry->sb);
     if (dentry->parent && dentry->ino == dentry->parent->ino) {
         if (dentry->name[0] == '.' && dentry->name[1] == '.' && dentry->name_len == 2) {
-            if (dentry->parent == myproc()->fs.rooti) {
+            if (dentry->parent == vfs_inode_deref(&myproc()->fs.rooti)) {
                 vfs_superblock_unlock(dentry->sb);
                 goto return_parent;
             }
@@ -982,7 +1012,7 @@ retry:
                     vfs_superblock_unlock(dentry->sb);
                     goto return_parent;
                 }
-                if (mnti == myproc()->fs.rooti) {
+                if (mnti == vfs_inode_deref(&myproc()->fs.rooti)) {
                     vfs_superblock_unlock(dentry->sb);
                     goto return_parent;
                 }
@@ -1160,4 +1190,40 @@ void vfs_release_dentry(struct vfs_dentry *dentry) {
         dentry->name = NULL;
         dentry->name_len = 0;
     }
+}
+
+int vfs_inode_get_ref(struct vfs_inode *inode, struct vfs_inode_ref *ref) {
+    if (inode == NULL || ref == NULL) {
+        return -EINVAL;
+    }
+    struct vfs_superblock *sb = inode->sb;
+    if (!inode->valid || sb == NULL || !sb->valid) {
+        return -EINVAL; // Inode is not valid
+    }
+    vfs_superblock_dup(sb);
+    vfs_idup(inode);
+    ref->sb = sb;
+    ref->inode = inode;
+    return 0;
+}
+
+void vfs_inode_put_ref(struct vfs_inode_ref *ref) {
+    if (ref == NULL) {
+        return;
+    }
+    if (ref->inode) {
+        vfs_iput(ref->inode);
+        ref->inode = NULL;
+    }
+    if (ref->sb) {
+        vfs_superblock_put(ref->sb);
+        ref->sb = NULL;
+    }
+}
+
+struct vfs_inode *vfs_inode_deref(struct vfs_inode_ref *ref) {
+    if (ref == NULL) {
+        return NULL;
+    }
+    return ref->inode;
 }

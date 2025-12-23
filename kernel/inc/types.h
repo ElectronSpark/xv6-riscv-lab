@@ -3,6 +3,14 @@
 
 #include "compiler.h"
 
+// Reference to an inode and its associated superblock
+struct vfs_superblock;
+struct vfs_inode;
+struct vfs_inode_ref {
+    struct vfs_superblock *sb;
+    struct vfs_inode *inode;
+};
+
 typedef unsigned int   uint;
 typedef unsigned short ushort;
 typedef unsigned char  uchar;

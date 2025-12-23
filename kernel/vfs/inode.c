@@ -66,14 +66,10 @@ void vfs_idup(struct vfs_inode *inode) {
 // when it needs to remove/free an inode).
 void vfs_iput(struct vfs_inode *inode) {
     assert(inode != NULL, "vfs_iput: inode is NULL");
+    // @TODO:
     // assert(inode->sb == NULL || !vfs_superblock_wholding(inode->sb),
     //        "vfs_iput: cannot hold superblock read lock when calling");
     // assert(!holding_mutex(&inode->mutex), "vfs_iput: cannot hold inode lock when calling");
-
-    if (inode == &vfs_root_inode) {
-        // The root inode should never be freed
-        return;
-    }
 
     // tried to cleanup the inode but failed
     bool failed_clean = false;
@@ -200,9 +196,9 @@ int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     }
 
     if (name_len == 2 && name[0] == '.' && name[1] == '.') {
-        if (dir == myproc()->fs.rooti || vfs_inode_is_local_root(dir)) {
+        if (dir == vfs_inode_deref(&myproc()->fs.rooti) || vfs_inode_is_local_root(dir)) {
             struct vfs_inode *target = dir;
-            if (dir != myproc()->fs.rooti && dir->sb->mountpoint != NULL) {
+            if (dir != vfs_inode_deref(&myproc()->fs.rooti) && dir->sb->mountpoint != NULL) {
                 target = dir->sb->mountpoint;
             } else if (dir->parent != NULL) {
                 target = dir->parent;
@@ -713,6 +709,14 @@ int vfs_chdir(struct vfs_inode *new_cwd) {
     if (new_cwd == NULL || new_cwd->sb == NULL) {
         return -EINVAL; // Invalid argument
     }
+    if (new_cwd == &vfs_root_inode) {
+        // not allow to change to the dummy rooti
+        return -EINVAL;
+    }
+    if (new_cwd == vfs_inode_deref(&myproc()->fs.cwd)) {
+        // No change
+        return 0;
+    }
     vfs_superblock_rlock(new_cwd->sb);
     vfs_ilock(new_cwd);
     int ret = __vfs_inode_valid(new_cwd);
@@ -723,30 +727,46 @@ int vfs_chdir(struct vfs_inode *new_cwd) {
         ret = -ENOTDIR; // Inode is not a directory
         goto out;
     }
-    vfs_idup(new_cwd);
+    struct vfs_inode_ref ref ={ 0 };
+    struct vfs_inode_ref old = { 0 };
+    ret = vfs_inode_get_ref(new_cwd, &ref);
+    if (ret != 0) {
+        goto out;
+    }
     proc_lock(myproc());
-    struct vfs_inode *old_cwd = myproc()->fs.cwd;
-    myproc()->fs.cwd = new_cwd;
+    old = myproc()->fs.cwd;
+    myproc()->fs.cwd = ref;
     proc_unlock(myproc());
-    vfs_iunlock(new_cwd);
-    vfs_superblock_unlock(new_cwd->sb);
-    vfs_iput(old_cwd);
     ret = 0;
 out:
+    vfs_iunlock(new_cwd);
+    vfs_superblock_unlock(new_cwd->sb);
+    vfs_inode_put_ref(&old);
     return ret;
 }
 
 int vfs_chroot(struct vfs_inode *new_root)  {
     int ret = vfs_chdir(new_root);
+    if (new_root == &vfs_root_inode) {
+        // not allow to change to the dummy rooti
+        return -EINVAL;
+    }
+    if (new_root == vfs_inode_deref(&myproc()->fs.rooti)) {
+        // No change
+        return 0;
+    }
+    struct vfs_inode_ref ref ={ 0 };
+    struct vfs_inode_ref old = { 0 };
+    ret = vfs_inode_get_ref(new_root, &ref);
     if (ret != 0) {
         return ret;
     }
     vfs_idup(new_root);
     proc_lock(myproc());
-    struct vfs_inode *old_root = myproc()->fs.rooti;
-    myproc()->fs.rooti = new_root;
+    old = myproc()->fs.rooti;
+    myproc()->fs.rooti = ref;
     proc_unlock(myproc());
-    vfs_iput(old_root);
+    vfs_inode_put_ref(&old);
     return 0;
 }
 
@@ -755,7 +775,8 @@ int vfs_chroot(struct vfs_inode *new_root)  {
 struct vfs_inode *vfs_curdir(void) {
     // Since only the current process can change its cwd,
     // we don't need to lock the inode here
-    struct vfs_inode *cwd = myproc()->fs.cwd;
+    struct vfs_inode *cwd = vfs_inode_deref(&myproc()->fs.cwd);
+    assert(cwd != NULL, "vfs_curdir: current working directory inode is NULL");
     vfs_idup(cwd);
     return cwd;
 }
@@ -765,7 +786,8 @@ struct vfs_inode *vfs_curdir(void) {
 struct vfs_inode *vfs_curroot(void) {
     // Since only the current process can change its root,
     // we don't need to lock the inode here
-    struct vfs_inode *rooti = myproc()->fs.rooti;
+    struct vfs_inode *rooti = vfs_inode_deref(&myproc()->fs.rooti);
+    assert(rooti != NULL, "vfs_curroot: current root directory inode is NULL");
     vfs_idup(rooti);
     return rooti;
 }

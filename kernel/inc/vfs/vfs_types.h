@@ -79,6 +79,7 @@ struct vfs_superblock {
         uint64 dirty: 1;    // Only indicates whether the metadata of the superblock is dirty
         uint64 backendless: 1; // Indicates whether the filesystem is backendless (e.g., tmpfs)
         uint64 initialized: 1; // Indicates whether the superblock has been initialized
+        uint64 registered: 1;    // Indicates whether the superblock is attached to a filesystem type
     };
     struct vfs_superblock *parent_sb; // parent superblock if mounted on another fs
     struct vfs_inode *mountpoint; // inode where this sb is mounted
@@ -88,6 +89,7 @@ struct vfs_superblock {
     struct rwlock lock; // protects the superblock
     void *fs_data; // filesystem-specific data
     int mount_count; // Number of superblocks directly mounted under this superblock
+    int refcount; // Reference count for the superblock
 
     // Filesystem statistics
     size_t block_size; // Filesystem block size
