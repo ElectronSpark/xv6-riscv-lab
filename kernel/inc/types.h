@@ -39,6 +39,9 @@ typedef uint32 mode_t;
     #if !defined(ssize_t)
     typedef typeof(-sizeof(int)) ssize_t;
     #endif              /* ssize_t */
+    #if !defined(pid_t)
+    typedef int pid_t;
+    #endif              /* pid_t */
     #if !defined(loff_t)
     typedef long long loff_t;
     #endif              /* loff_t */

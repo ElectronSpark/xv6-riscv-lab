@@ -86,12 +86,14 @@ struct vfs_superblock {
     struct vfs_inode *device;     // device inode (NULL for non-dev fs)
     struct vfs_inode *root_inode; // root inode of this superblock
     struct vfs_superblock_ops *ops;
+    
     struct rwlock lock; // protects the superblock
     void *fs_data; // filesystem-specific data
     int mount_count; // Number of superblocks directly mounted under this superblock
     int refcount; // Reference count for the superblock
-
+    
     // Filesystem statistics
+    struct spinlock spinlock; // protects the counters below 
     size_t block_size; // Filesystem block size
     // May be 0 if the filesystem does not track total/used blocks
     // (e.g., tmpfs)
@@ -270,6 +272,7 @@ struct vfs_inode_ops {
     void (*free_inode)(struct vfs_inode *inode);    // Release in-memory inode structure
     int (*dirty_inode)(struct vfs_inode *inode);   // Mark inode as dirty
     int (*sync_inode)(struct vfs_inode *inode);     // Write inode to disk
+    int (*open)(struct vfs_inode *inode, struct vfs_file *file, int f_flags);
 };
 
 /* No dentry cache right now */
@@ -292,22 +295,24 @@ struct vfs_dir_iter {
 };
 
 struct vfs_file {
-    struct kobject kobj; // for sysfs representation
+    list_node_t list_entry; // entry in global open file table
     struct vfs_inode_ref inode;
-    loff_t f_pos; // file position
-    uint32 f_flags; // file flags
+    int fd; // file descriptor number
+    int f_flags; // file access mode
+    int ref_count; // reference count
     struct vfs_file_ops *ops;
     void *private_data; // filesystem-specific data
-    mutex_t lock; // protects the file structure
+    mutex_t lock; // protects f_pos
+    loff_t f_pos; // file position
 };
 
 struct vfs_file_ops {
-    int (*read)(struct vfs_file *file, char *buf, size_t count, size_t *bytes_read);
-    int (*write)(struct vfs_file *file, const char *buf, size_t count, size_t *bytes_written);
-    int (*llseek)(struct vfs_file *file, loff_t offset, int whence, loff_t *new_pos);
-    int (*open)(struct vfs_inode *inode, struct vfs_file *file, int flags);
+    ssize_t (*read)(struct vfs_file *file, char *buf, size_t count);
+    ssize_t (*write)(struct vfs_file *file, const char *buf, size_t count);
+    loff_t (*llseek)(struct vfs_file *file, loff_t offset, int whence);
     int (*release)(struct vfs_inode *inode, struct vfs_file *file);
-    int (*fsync)(struct vfs_file *file, int datasync);
+    int (*fsync)(struct vfs_file *file);
+    int (*stat)(struct vfs_file *file, struct stat *stat);
 };
 
 #endif // KERNEL_VIRTUAL_FILE_SYSTEM_TYPES_H

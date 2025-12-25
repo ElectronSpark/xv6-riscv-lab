@@ -13,6 +13,7 @@ int vfs_add_inode(struct vfs_superblock *sb,
                   struct vfs_inode **ret_inode);
 int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode);
 void __vfs_inode_init(struct vfs_inode *inode);
+void __vfs_file_init(void);
 void tmpfs_init_fs_type(void);
 
 // Assert holding the spinlock of the inode

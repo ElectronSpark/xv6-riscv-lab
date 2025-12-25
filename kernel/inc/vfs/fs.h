@@ -29,6 +29,8 @@ void vfs_superblock_rlock(struct vfs_superblock *sb);
 void vfs_superblock_wlock(struct vfs_superblock *sb);
 bool vfs_superblock_wholding(struct vfs_superblock *sb);
 void vfs_superblock_unlock(struct vfs_superblock *sb);
+void vfs_superblock_spin_lock(struct vfs_superblock *sb);
+void vfs_superblock_spin_unlock(struct vfs_superblock *sb);
 void vfs_superblock_mountcount_inc(struct vfs_superblock *sb);
 void vfs_superblock_mountcount_dec(struct vfs_superblock *sb);
 void vfs_superblock_dup(struct vfs_superblock *sb);

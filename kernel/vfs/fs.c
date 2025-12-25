@@ -164,6 +164,7 @@ static void __vfs_init_superblock_structure(struct vfs_superblock *sb, struct vf
     __atomic_store_n(&sb->refcount, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&sb->mount_count, 0, __ATOMIC_SEQ_CST);
     rwlock_init(&sb->lock, RWLOCK_PRIO_READ, "vfs_superblock_lock");
+    spin_init(&sb->spinlock, "vfs_superblock_spinlock");
 }
 
 static int __vfs_init_sb_rooti(struct vfs_superblock *sb) {
@@ -312,6 +313,7 @@ void vfs_init(void) {
     struct proc *proc = myproc();
     assert(proc != NULL, "vfs_init must be called from a process context");
     __vfs_inode_init(&vfs_root_inode);
+    __vfs_file_init();
     proc_lock(proc);
     proc->fs.rooti.inode = NULL;
     proc->fs.rooti.sb = NULL;
@@ -753,6 +755,17 @@ void vfs_superblock_unlock(struct vfs_superblock *sb) {
     if (sb) {
         rwlock_release(&sb->lock);
     }
+}
+
+// VFS superblock spinlock protects simple fields that need atomic access
+void vfs_superblock_spin_lock(struct vfs_superblock *sb) {
+    assert(sb != NULL, "Superblock cannot be NULL when acquiring spinlock");
+    spin_acquire(&sb->spinlock);
+}
+
+void vfs_superblock_spin_unlock(struct vfs_superblock *sb) {
+    assert(sb != NULL, "Superblock cannot be NULL when releasing spinlock");
+    spin_release(&sb->spinlock);
 }
 
 void vfs_superblock_mountcount_inc(struct vfs_superblock *sb) {
