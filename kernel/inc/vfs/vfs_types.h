@@ -255,10 +255,10 @@ struct vfs_inode_ops {
             const char *name, size_t name_len);        // Create a regular file
     int (*link)(struct vfs_inode *old, struct vfs_inode *dir,
             const char *name, size_t name_len);         // Create a hard link
-    int (*unlink)(struct vfs_inode *dir, const char *name, size_t name_len);
-        struct vfs_inode *(*mkdir)(struct vfs_inode *dir, mode_t mode,
-            const char *name, size_t name_len);
-    int (*rmdir)(struct vfs_inode *dir, const char *name, size_t name_len);
+    struct vfs_inode *(*unlink)(struct vfs_inode *dir, const char *name, size_t name_len);
+    struct vfs_inode *(*mkdir)(struct vfs_inode *dir, mode_t mode,
+                               const char *name, size_t name_len);
+    struct vfs_inode *(*rmdir)(struct vfs_inode *dir, const char *name, size_t name_len);
         struct vfs_inode *(*mknod)(struct vfs_inode *dir, mode_t mode,
             dev_t dev, const char *name, size_t name_len);    // Create a file of special types
     int (*move)(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,

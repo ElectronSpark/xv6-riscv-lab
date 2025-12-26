@@ -34,7 +34,7 @@ static struct vfs_inode *tmpfs_fetch_inode(struct vfs_inode *dir, const char *na
     }
     struct vfs_inode *inode = vfs_get_dentry_inode(&d);
     vfs_release_dentry(&d);
-    if (IS_ERR(inode)) {
+    if (IS_ERR_OR_NULL(inode)) {
         return inode;
     }
     return inode;
@@ -80,7 +80,7 @@ void tmpfs_run_inode_smoketest(void) {
     root_pinned = true;
 
     subdir = vfs_mkdir(root, 0755, subdir_name, subdir_len);
-    if (IS_ERR(subdir)) {
+    if (IS_ERR_OR_NULL(subdir)) {
         ret = PTR_ERR(subdir);
         printf("inode_smoketest: [FAIL] vfs_mkdir %s, errno=%d\n", subdir_name, ret);
         goto out_put_root;
@@ -90,7 +90,7 @@ void tmpfs_run_inode_smoketest(void) {
     vfs_iunlock(subdir);
 
     nested = vfs_mkdir(subdir, 0755, nested_name, nested_len);
-    if (IS_ERR(nested)) {
+    if (IS_ERR_OR_NULL(nested)) {
         ret = PTR_ERR(nested);
         printf("inode_smoketest: [FAIL] vfs_mkdir %s, errno=%d\n", nested_name, ret);
         goto out_cleanup;
@@ -100,7 +100,7 @@ void tmpfs_run_inode_smoketest(void) {
     vfs_iunlock(nested);
 
     file_a = vfs_create(subdir, 0644, file_a_name, file_a_len);
-    if (IS_ERR(file_a)) {
+    if (IS_ERR_OR_NULL(file_a)) {
         ret = PTR_ERR(file_a);
         printf("inode_smoketest: [FAIL] vfs_create %s, errno=%d\n", file_a_name, ret);
         goto out_cleanup;
@@ -125,7 +125,7 @@ void tmpfs_run_inode_smoketest(void) {
         printf("inode_smoketest: [FAIL] vfs_link %s, errno=%d\n", file_a_link_name, ret);
     } else {
         struct vfs_inode *tmp = tmpfs_fetch_inode(subdir, file_a_name, file_a_len);
-        if (!IS_ERR(tmp)) {
+        if (!IS_ERR_OR_NULL(tmp)) {
             vfs_ilock(tmp);
             printf("inode_smoketest: [PASS] linked /%s/%s -> /%s/%s nlink=%u\n",
                    subdir_name, file_a_link_name, subdir_name, file_a_name, tmp->n_links);
@@ -137,7 +137,7 @@ void tmpfs_run_inode_smoketest(void) {
     }
 
     file_b = vfs_create(nested, 0644, file_b_name, file_b_len);
-    if (IS_ERR(file_b)) {
+    if (IS_ERR_OR_NULL(file_b)) {
         ret = PTR_ERR(file_b);
         printf("inode_smoketest: [FAIL] vfs_create %s, errno=%d\n", file_b_name, ret);
         goto out_cleanup;
@@ -155,7 +155,7 @@ void tmpfs_run_inode_smoketest(void) {
         printf("inode_smoketest: [FAIL] vfs_unlink %s, errno=%d\n", file_a_link_name, ret);
     } else {
         struct vfs_inode *tmp = tmpfs_fetch_inode(subdir, file_a_name, file_a_len);
-        if (!IS_ERR(tmp)) {
+        if (!IS_ERR_OR_NULL(tmp)) {
             vfs_ilock(tmp);
             printf("inode_smoketest: [PASS] unlinked /%s/%s nlink=%u\n",
                    subdir_name, file_a_link_name, tmp->n_links);
@@ -168,7 +168,7 @@ void tmpfs_run_inode_smoketest(void) {
 
     sym_a = vfs_symlink(subdir, 0777, symlink_a_name, symlink_a_len,
                         symlink_a_target, symlink_a_target_len);
-    if (IS_ERR(sym_a)) {
+    if (IS_ERR_OR_NULL(sym_a)) {
         printf("inode_smoketest: [FAIL] vfs_symlink %s, errno=%ld\n", symlink_a_name, PTR_ERR(sym_a));
         sym_a = NULL;
     } else {
@@ -182,7 +182,7 @@ void tmpfs_run_inode_smoketest(void) {
 
     sym_b = vfs_symlink(nested, 0777, symlink_b_name, symlink_b_len,
                         symlink_b_target, symlink_b_target_len);
-    if (IS_ERR(sym_b)) {
+    if (IS_ERR_OR_NULL(sym_b)) {
         printf("inode_smoketest: [FAIL] vfs_symlink %s, errno=%ld\n", symlink_b_name, PTR_ERR(sym_b));
         sym_b = NULL;
     } else {
@@ -212,7 +212,7 @@ void tmpfs_run_inode_smoketest(void) {
     ret = vfs_ilookup(subdir, &d_file_a, file_a_name, file_a_len);
     if (ret == 0) {
         struct vfs_inode *tmp = tmpfs_fetch_inode(subdir, file_a_name, file_a_len);
-        if (!IS_ERR(tmp)) {
+        if (!IS_ERR_OR_NULL(tmp)) {
             vfs_ilock(tmp);
             printf("inode_smoketest: [PASS] ilookup /%s/%s -> ino=%lu nlink=%u\n",
                    subdir_name, file_a_name, d_file_a.ino, tmp->n_links);
@@ -228,7 +228,7 @@ void tmpfs_run_inode_smoketest(void) {
     ret = vfs_ilookup(nested, &d_file_b, file_b_name, file_b_len);
     if (ret == 0) {
         struct vfs_inode *tmp = tmpfs_fetch_inode(nested, file_b_name, file_b_len);
-        if (!IS_ERR(tmp)) {
+        if (!IS_ERR_OR_NULL(tmp)) {
             vfs_ilock(tmp);
             printf("inode_smoketest: [PASS] ilookup /%s/%s/%s -> ino=%lu nlink=%u\n",
                    subdir_name, nested_name, file_b_name, d_file_b.ino, tmp->n_links);
@@ -255,7 +255,7 @@ void tmpfs_run_inode_smoketest(void) {
     char linkbuf[64] = {0};
     struct vfs_inode *tmp_sym = NULL;
     tmp_sym = tmpfs_fetch_inode(subdir, symlink_a_name, symlink_a_len);
-    if (!IS_ERR(tmp_sym)) {
+    if (!IS_ERR_OR_NULL(tmp_sym)) {
         ret = vfs_readlink(tmp_sym, linkbuf, sizeof(linkbuf));
         if (ret >= 0) {
             vfs_ilock(tmp_sym);
@@ -270,7 +270,7 @@ void tmpfs_run_inode_smoketest(void) {
     memset(linkbuf, 0, sizeof(linkbuf));
     tmp_sym = NULL;
     tmp_sym = tmpfs_fetch_inode(nested, symlink_b_name, symlink_b_len);
-    if (!IS_ERR(tmp_sym)) {
+    if (!IS_ERR_OR_NULL(tmp_sym)) {
         ret = vfs_readlink(tmp_sym, linkbuf, sizeof(linkbuf));
         if (ret >= 0) {
             vfs_ilock(tmp_sym);
@@ -284,20 +284,20 @@ void tmpfs_run_inode_smoketest(void) {
     }
 
 out_cleanup:
-    if (sym_b != NULL && !IS_ERR(sym_b)) {
+    if (!IS_ERR_OR_NULL(sym_b)) {
         vfs_iput(sym_b);
     }
-    if (sym_a != NULL && !IS_ERR(sym_a)) {
+    if (!IS_ERR_OR_NULL(sym_a)) {
         vfs_iput(sym_a);
     }
 
-    if (!IS_ERR(subdir) && nested != NULL && !IS_ERR(nested)) {
+    if (!IS_ERR_OR_NULL(subdir) && !IS_ERR_OR_NULL(nested)) {
         ret = vfs_unlink(nested, symlink_b_name, symlink_b_len);
         if (ret != 0) {
             printf("inode_smoketest: [FAIL] cleanup unlink %s, errno=%d\n", symlink_b_name, ret);
         }
     }
-    if (!IS_ERR(subdir)) {
+    if (!IS_ERR_OR_NULL(subdir)) {
         ret = vfs_unlink(subdir, symlink_a_name, symlink_a_len);
         if (ret != 0) {
             printf("inode_smoketest: [FAIL] cleanup unlink %s, errno=%d\n", symlink_a_name, ret);
@@ -312,18 +312,18 @@ out_cleanup:
         }
     }
 
-    if (nested != NULL && !IS_ERR(nested)) {
+    if (!IS_ERR_OR_NULL(nested)) {
         vfs_iput(nested);
         nested = NULL;
     }
-    if (subdir != NULL && !IS_ERR(subdir)) {
+    if (!IS_ERR_OR_NULL(subdir)) {
         ret = vfs_rmdir(subdir, nested_name, nested_len);
         if (ret != 0) {
             printf("inode_smoketest: [FAIL] cleanup rmdir /%s/%s, errno=%d\n", subdir_name, nested_name, ret);
         }
-        vfs_iput(subdir);
-        subdir = NULL;
     }
+    vfs_iput(subdir);
+    subdir = NULL;
 
     ret = vfs_rmdir(root, subdir_name, subdir_len);
     if (ret != 0) {
@@ -351,7 +351,7 @@ void tmpfs_run_truncate_smoketest(void) {
     root_pinned = true;
 
     test_file = vfs_create(root, 0644, file_name, file_len);
-    if (IS_ERR(test_file)) {
+    if (IS_ERR_OR_NULL(test_file)) {
         ret = PTR_ERR(test_file);
         printf("truncate_smoketest: create %s failed, errno=%d\n", file_name, ret);
         goto out;
@@ -524,30 +524,26 @@ void tmpfs_run_namei_smoketest(void) {
 
     // Setup: create /namei_test_dir/nested/testfile
     subdir = vfs_mkdir(root, 0755, subdir_name, subdir_len);
-    if (IS_ERR(subdir)) {
-        ret = PTR_ERR(subdir);
+    if (IS_ERR_OR_NULL(subdir)) {
+        ret = IS_ERR(subdir) ? PTR_ERR(subdir) : -EINVAL;
         printf("namei_smoketest: [FAIL] setup mkdir %s, errno=%d\n", subdir_name, ret);
         goto out;
     }
 
     nested = vfs_mkdir(subdir, 0755, nested_name, nested_len);
-    if (IS_ERR(nested)) {
-        ret = PTR_ERR(nested);
+    if (IS_ERR_OR_NULL(nested)) {
+        ret = IS_ERR(nested) ? PTR_ERR(nested) : -EINVAL;
         printf("namei_smoketest: [FAIL] setup mkdir %s, errno=%d\n", nested_name, ret);
-        vfs_iput(subdir);
         goto cleanup_subdir;
     }
-    vfs_iput(subdir);
 
     file = vfs_create(nested, 0644, file_name, file_len);
-    if (IS_ERR(file)) {
-        ret = PTR_ERR(file);
+    if (IS_ERR_OR_NULL(file)) {
+        ret = IS_ERR(file) ? PTR_ERR(file) : -EINVAL;
         printf("namei_smoketest: [FAIL] setup create %s, errno=%d\n", file_name, ret);
-        vfs_iput(nested);
         goto cleanup_nested;
     }
     uint64 file_ino = file->ino;
-    vfs_iput(nested);
     vfs_iput(file);
     file = NULL;
 
@@ -555,7 +551,7 @@ void tmpfs_run_namei_smoketest(void) {
 
     // Test 1: Absolute path to root
     result = vfs_namei("/", 1);
-    if (IS_ERR(result)) {
+    if (IS_ERR_OR_NULL(result)) {
         printf("namei_smoketest: [FAIL] namei(\"/\"), errno=%ld\n", PTR_ERR(result));
     } else if (result != root) {
         printf("namei_smoketest: [FAIL] namei(\"/\") returned wrong inode\n");
@@ -569,7 +565,7 @@ void tmpfs_run_namei_smoketest(void) {
     // Test 2: Absolute path to subdir
     const char *path2 = "/namei_test_dir";
     result = vfs_namei(path2, strlen(path2));
-    if (IS_ERR(result)) {
+    if (IS_ERR_OR_NULL(result)) {
         printf("namei_smoketest: [FAIL] namei(\"%s\"), errno=%ld\n", path2, PTR_ERR(result));
     } else {
         printf("namei_smoketest: [PASS] namei(\"%s\") -> ino=%lu\n", path2, result->ino);
@@ -580,7 +576,7 @@ void tmpfs_run_namei_smoketest(void) {
     // Test 3: Absolute path with multiple components
     const char *path3 = "/namei_test_dir/nested/testfile";
     result = vfs_namei(path3, strlen(path3));
-    if (IS_ERR(result)) {
+    if (IS_ERR_OR_NULL(result)) {
         printf("namei_smoketest: [FAIL] namei(\"%s\"), errno=%ld\n", path3, PTR_ERR(result));
     } else if (result->ino != file_ino) {
         printf("namei_smoketest: [FAIL] namei(\"%s\") wrong ino=%lu expected=%lu\n", 
@@ -595,7 +591,7 @@ void tmpfs_run_namei_smoketest(void) {
     // Test 4: Path with "." components
     const char *path4 = "/namei_test_dir/./nested/./testfile";
     result = vfs_namei(path4, strlen(path4));
-    if (IS_ERR(result)) {
+    if (IS_ERR_OR_NULL(result)) {
         printf("namei_smoketest: [FAIL] namei(\"%s\"), errno=%ld\n", path4, PTR_ERR(result));
     } else if (result->ino != file_ino) {
         printf("namei_smoketest: [FAIL] namei(\"%s\") wrong ino\n", path4);
@@ -609,7 +605,7 @@ void tmpfs_run_namei_smoketest(void) {
     // Test 5: Path with ".." components
     const char *path5 = "/namei_test_dir/nested/../nested/testfile";
     result = vfs_namei(path5, strlen(path5));
-    if (IS_ERR(result)) {
+    if (IS_ERR_OR_NULL(result)) {
         printf("namei_smoketest: [FAIL] namei(\"%s\"), errno=%ld\n", path5, PTR_ERR(result));
     } else if (result->ino != file_ino) {
         printf("namei_smoketest: [FAIL] namei(\"%s\") wrong ino\n", path5);
@@ -623,7 +619,7 @@ void tmpfs_run_namei_smoketest(void) {
     // Test 6: ".." at root should stay at root
     const char *path6 = "/..";
     result = vfs_namei(path6, strlen(path6));
-    if (IS_ERR(result)) {
+    if (IS_ERR_OR_NULL(result)) {
         printf("namei_smoketest: [FAIL] namei(\"%s\"), errno=%ld\n", path6, PTR_ERR(result));
     } else if (result != root) {
         printf("namei_smoketest: [FAIL] namei(\"%s\") did not return root\n", path6);
@@ -637,7 +633,7 @@ void tmpfs_run_namei_smoketest(void) {
     // Test 7: Multiple consecutive slashes
     const char *path7 = "///namei_test_dir///nested///testfile";
     result = vfs_namei(path7, strlen(path7));
-    if (IS_ERR(result)) {
+    if (IS_ERR_OR_NULL(result)) {
         printf("namei_smoketest: [FAIL] namei(\"%s\"), errno=%ld\n", path7, PTR_ERR(result));
     } else if (result->ino != file_ino) {
         printf("namei_smoketest: [FAIL] namei(\"%s\") wrong ino\n", path7);
@@ -653,7 +649,7 @@ void tmpfs_run_namei_smoketest(void) {
     result = vfs_namei(path8, strlen(path8));
     if (result == ERR_PTR(-ENOENT)) {
         printf("namei_smoketest: [PASS] namei(\"%s\") -> ENOENT as expected\n", path8);
-    } else if (IS_ERR(result)) {
+    } else if (IS_ERR_OR_NULL(result)) {
         printf("namei_smoketest: [FAIL] namei(\"%s\") unexpected errno=%ld\n", path8, PTR_ERR(result));
     } else {
         printf("namei_smoketest: [FAIL] namei(\"%s\") should have failed\n", path8);
@@ -669,6 +665,8 @@ cleanup_nested:
     if (ret != 0) {
         printf("namei_smoketest: cleanup unlink %s failed, errno=%d\n", file_name, ret);
     }
+    vfs_iput(nested);
+    nested = NULL;
     ret = vfs_rmdir(subdir, nested_name, nested_len);
     if (ret != 0) {
         printf("namei_smoketest: cleanup rmdir %s failed, errno=%d\n", nested_name, ret);
@@ -676,6 +674,8 @@ cleanup_nested:
         printf("namei_smoketest: cleanup rmdir %s success\n", nested_name);
     }
 cleanup_subdir:
+    vfs_iput(subdir);
+    subdir = NULL;
     ret = vfs_rmdir(root, subdir_name, subdir_len);
     if (ret != 0) {
         printf("namei_smoketest: cleanup rmdir %s failed, errno=%d\n", subdir_name, ret);
@@ -762,14 +762,14 @@ static void tmpfs_iter_and_fetch(const char *tag, struct vfs_inode *dir, struct 
         }
 
         struct vfs_dentry *dent = vfs_dir_iter_get_dentry(dir, iter);
-        if (IS_ERR(dent) || dent == NULL) {
+        if (IS_ERR_OR_NULL(dent)) {
             lret = IS_ERR(dent) ? PTR_ERR(dent) : -EINVAL;
             printf("dir_iter_mount: [FAIL] get_inode %s name=%s errno=%d\n",
                    tag, iter->current.name ? iter->current.name : "(null)", lret);
             ok = false;
         } else {
             struct vfs_inode *ent = vfs_get_dentry_inode(dent);
-            if (IS_ERR(ent) || ent == NULL) {
+            if (IS_ERR_OR_NULL(ent)) {
                 lret = IS_ERR(ent) ? PTR_ERR(ent) : -EINVAL;
                 printf("dir_iter_mount: [FAIL] get_inode %s name=%s errno=%d\n",
                        tag, iter->current.name ? iter->current.name : "(null)", lret);
@@ -840,8 +840,8 @@ void tmpfs_run_dir_iter_mount_smoketest(void) {
     root_pinned = true;
 
     mp = vfs_mkdir(root, 0755, mp_name, mp_len);
-    if (IS_ERR(mp)) {
-        ret = PTR_ERR(mp);
+    if (IS_ERR_OR_NULL(mp)) {
+        ret = IS_ERR(mp) ? PTR_ERR(mp) : -EINVAL;
         mp = NULL;
         printf("dir_iter_mount: [FAIL] setup mkdir %s errno=%d\n", mp_name, ret);
         goto out;
@@ -879,8 +879,8 @@ void tmpfs_run_dir_iter_mount_smoketest(void) {
     tmp = NULL;
 
     mnt_subdir = vfs_mkdir(mnt_root, 0755, subdir_name, subdir_len);
-    if (IS_ERR(mnt_subdir)) {
-        ret = PTR_ERR(mnt_subdir);
+    if (IS_ERR_OR_NULL(mnt_subdir)) {
+        ret = IS_ERR(mnt_subdir) ? PTR_ERR(mnt_subdir) : -EINVAL;
         mnt_subdir = NULL;
         printf("dir_iter_mount: [FAIL] mkdir %s errno=%d\n", subdir_name, ret);
         goto cleanup_mount;

@@ -224,7 +224,7 @@ __panic_start()
   }
 }
 
-void
+void 
 __panic_end()
 {
   panicked = 1; // freeze uart output from other CPUs

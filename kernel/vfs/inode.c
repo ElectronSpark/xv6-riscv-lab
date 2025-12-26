@@ -67,10 +67,9 @@ void vfs_idup(struct vfs_inode *inode) {
 // when it needs to remove/free an inode).
 void vfs_iput(struct vfs_inode *inode) {
     assert(inode != NULL, "vfs_iput: inode is NULL");
-    // @TODO:
-    // assert(inode->sb == NULL || !vfs_superblock_wholding(inode->sb),
-    //        "vfs_iput: cannot hold superblock read lock when calling");
-    // assert(!holding_mutex(&inode->mutex), "vfs_iput: cannot hold inode lock when calling");
+    assert(inode->sb == NULL || !vfs_superblock_wholding(inode->sb),
+           "vfs_iput: cannot hold superblock read lock when calling");
+    assert(!holding_mutex(&inode->mutex), "vfs_iput: cannot hold inode lock when calling");
 
     // tried to cleanup the inode but failed
     bool failed_clean = false;
@@ -479,9 +478,11 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
     if (name == NULL || name_len == 0) {
         return -EINVAL; // Invalid argument
     }
+    int ret = 0;
+    struct vfs_inode *ret_ptr = NULL;
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
-    int ret = __vfs_inode_valid(dir);
+    ret = __vfs_inode_valid(dir);
     if (ret != 0) {
         goto out;
     }
@@ -493,11 +494,21 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
         ret = -ENOSYS; // Unlink operation not supported
         goto out;
     }
-    ret = dir->ops->unlink(dir, name, name_len);
+    ret_ptr = dir->ops->unlink(dir, name, name_len);
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
-    return ret;
+    if (ret != 0) {
+        return ret;
+    }
+    if (IS_ERR(ret_ptr)) {
+        return PTR_ERR(ret_ptr);
+    }
+    if (ret_ptr != NULL) {
+        // Decrease the unlinked inode refcount
+        vfs_iput(ret_ptr);
+    }
+    return 0;
 }
 
 struct vfs_inode *vfs_mkdir(struct vfs_inode *dir, uint32 mode,
@@ -544,9 +555,11 @@ int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len) {
     if (name == NULL || name_len == 0) {
         return -EINVAL; // Invalid argument
     }
+    int ret = 0;
+    struct vfs_inode *ret_ptr = NULL;
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
-    int ret = __vfs_inode_valid(dir);
+    ret = __vfs_inode_valid(dir);
     if (ret != 0) {
         goto out;
     }
@@ -558,15 +571,21 @@ int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len) {
         ret = -ENOSYS; // Rmdir operation not supported
         goto out;
     }
-    ret = dir->ops->rmdir(dir, name, name_len);
+    ret_ptr = dir->ops->rmdir(dir, name, name_len);
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
-    if (ret == 0) {
-        // Decrease parent dir refcount
-        vfs_iput(dir);
+    if (ret != 0) {
+        return ret;
     }
-    return ret;
+    if (IS_ERR(ret_ptr)) {
+        return PTR_ERR(ret_ptr);
+    }
+    if (ret_ptr != NULL) {
+        // Decrease the unlinked inode refcount
+        vfs_iput(ret_ptr);
+    }
+    return 0;
 }
 
 int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
