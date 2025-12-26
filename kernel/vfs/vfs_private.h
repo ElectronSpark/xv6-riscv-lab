@@ -8,11 +8,9 @@
 extern struct vfs_inode vfs_root_inode;
 
 
-int vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino,
-                         struct vfs_inode **ret_inode);
-int vfs_add_inode(struct vfs_superblock *sb,
-                  struct vfs_inode *inode,
-                  struct vfs_inode **ret_inode);
+struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino);
+struct vfs_inode *vfs_add_inode(struct vfs_superblock *sb,
+                                struct vfs_inode *inode);
 int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode);
 void __vfs_inode_init(struct vfs_inode *inode);
 void __vfs_file_init(void);
