@@ -47,6 +47,7 @@ static int __sem_do_post(sem_t *sem) {
 }
 
 int sem_wait(sem_t *sem) {
+    assert(myproc() != NULL, "sem_wait called from non-process context");
     if (sem == NULL) {
         return -EINVAL;
     }

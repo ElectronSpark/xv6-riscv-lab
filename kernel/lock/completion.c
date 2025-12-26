@@ -1,6 +1,7 @@
 #include "types.h"
 #include "riscv.h"
 #include "defs.h"
+#include "printf.h"
 #include "param.h"
 #include "errno.h"
 #include "memlayout.h"
@@ -57,6 +58,7 @@ bool try_wait_for_completion(completion_t *c) {
 }
 
 void wait_for_completion(completion_t *c) {
+    assert(myproc() != NULL, "wait_for_completion called from non-process context");
     if (c == NULL) {
         return;
     }
