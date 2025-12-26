@@ -80,18 +80,18 @@ static void check_rwlock_integrity(const char *label) {
     record_integrity_failure(label, "negative readers", test_lock.readers, 0);
   }
 
-  if (test_lock.readers > 0 && test_lock.holder != NULL) {
+  if (test_lock.readers > 0 && test_lock.holder_pid != 0) {
     record_integrity_failure(label, "reader-writer overlap", test_lock.readers,
-                             (long)(uint64)test_lock.holder);
+                             (long)test_lock.holder_pid);
   }
 
-  if (test_lock.holder == NULL && write_waiters < 0) {
+  if (test_lock.holder_pid == 0 && write_waiters < 0) {
     record_integrity_failure(label, "invalid write waiters", write_waiters, 0);
   }
 
-  if (test_lock.holder != NULL && test_lock.readers != 0) {
+  if (test_lock.holder_pid != 0 && test_lock.readers != 0) {
     record_integrity_failure(label, "writer with readers", test_lock.readers,
-                             (long)(uint64)test_lock.holder);
+                             (long)test_lock.holder_pid);
   }
 
   if (test_lock.read_queue.lock != &test_lock.lock) {

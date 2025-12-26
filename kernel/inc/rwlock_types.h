@@ -7,7 +7,7 @@
 typedef struct rwlock {
     struct spinlock lock; // Spinlock to protect the rwlock structure
     int readers;          // Number of active readers
-    struct proc *holder; // Process holding write lock, if any
+    pid_t holder_pid; // Process holding write lock, if any
     proc_queue_t read_queue;  // Queue for processes waiting to read
     proc_queue_t write_queue; // Queue for processes waiting to write
     const char *name; // Name of the rwlock
