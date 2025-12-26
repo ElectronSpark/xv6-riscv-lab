@@ -4,6 +4,7 @@
 #include <riscv.h>
 #include <dev.h>
 #include <defs.h>
+#include "printf.h"
 #include <spinlock.h>
 #include <mutex_types.h>
 #include <slab.h>

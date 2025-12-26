@@ -2,6 +2,7 @@
 #include "string.h"
 #include "errno.h"
 #include "param.h"
+#include "printf.h"
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"

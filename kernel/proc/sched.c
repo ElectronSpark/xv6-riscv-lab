@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "printf.h"
 #include "list.h"
 #include "hlist.h"
 #include "proc_queue.h"

@@ -6,6 +6,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "printf.h"
 
 extern char stack0[];
 

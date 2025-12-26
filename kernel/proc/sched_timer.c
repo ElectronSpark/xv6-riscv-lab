@@ -5,6 +5,7 @@
 #include "riscv.h"
 #include "proc.h"
 #include "defs.h"
+#include "printf.h"
 #include "sched.h"
 #include "slab.h"
 #include "errno.h"

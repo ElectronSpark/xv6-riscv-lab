@@ -6,6 +6,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "printf.h"
 #include "sched.h"
 #include "signal.h"
 #include "vm.h"

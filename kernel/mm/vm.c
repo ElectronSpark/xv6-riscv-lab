@@ -5,6 +5,7 @@
 #include "elf.h"
 #include "riscv.h"
 #include "defs.h"
+#include "printf.h"
 #include "fs.h"
 #include "page.h"
 #include "rbtree.h"

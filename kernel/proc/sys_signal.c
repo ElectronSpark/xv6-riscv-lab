@@ -2,6 +2,7 @@
 #include "param.h"
 #include "riscv.h"
 #include "defs.h"
+#include "printf.h"
 #include "proc.h"
 #include "signal.h"
 #include "syscall.h"

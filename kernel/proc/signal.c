@@ -3,6 +3,7 @@
 #include "param.h"
 #include "riscv.h"
 #include "defs.h"
+#include "printf.h"
 #include "signal.h"
 #include "spinlock.h"
 #include "proc.h"

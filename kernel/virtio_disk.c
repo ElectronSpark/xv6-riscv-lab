@@ -9,6 +9,7 @@
 #include "string.h"
 #include "riscv.h"
 #include "defs.h"
+#include "printf.h"
 #include "param.h"
 #include "memlayout.h"
 #include "spinlock.h"

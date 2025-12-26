@@ -7,6 +7,7 @@
 #include "proc.h"
 #include "syscall.h"
 #include "defs.h"
+#include "printf.h"
 #include "vm.h"
 
 // Fetch the uint64 at addr from the current process.

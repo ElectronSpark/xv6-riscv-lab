@@ -8,6 +8,7 @@
 #include "proc.h"
 #include "sched.h"
 #include "defs.h"
+#include "printf.h"
 #include "proc_queue.h"
 #include "list.h"
 #include "rbtree.h"

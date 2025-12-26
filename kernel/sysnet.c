@@ -9,6 +9,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "printf.h"
 #include "fs.h"
 #include "mutex_types.h"
 #include "file.h"

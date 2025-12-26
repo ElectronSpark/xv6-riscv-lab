@@ -5,6 +5,7 @@
 #include "riscv.h"
 #include "spinlock.h"
 #include "defs.h"
+#include "printf.h"
 #include "slab.h"
 #include "list.h"
 #include "kobject.h"

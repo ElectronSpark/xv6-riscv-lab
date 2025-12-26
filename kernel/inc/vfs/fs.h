@@ -2,6 +2,7 @@
 #define __KERNEL_VIRTUAL_FILE_SYSTEM_FS_H
 
 #include "vfs/vfs_types.h"
+#include "printf.h"
 #include "atomic.h"
 
 #define VFS_PATH_MAX 65535

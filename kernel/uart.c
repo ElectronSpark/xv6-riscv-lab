@@ -9,6 +9,7 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "printf.h"
 #include "sched.h"
 
 // the UART control registers are memory-mapped

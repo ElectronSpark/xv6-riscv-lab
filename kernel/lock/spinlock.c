@@ -7,6 +7,7 @@
 #include "riscv.h"
 #include "proc.h"
 #include "defs.h"
+#include "printf.h"
 
 void
 spin_init(struct spinlock *lk, char *name)

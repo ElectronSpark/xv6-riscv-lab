@@ -20,6 +20,7 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "defs.h"
+#include "printf.h"
 #include "proc.h"
 #include "sched.h"
 #include "cdev.h"

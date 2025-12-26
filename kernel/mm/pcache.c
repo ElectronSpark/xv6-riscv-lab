@@ -5,6 +5,7 @@
 #include "spinlock.h"
 #include "riscv.h"
 #include "defs.h"
+#include "printf.h"
 #include "page.h"
 #include "list.h"
 #include "sched.h"
