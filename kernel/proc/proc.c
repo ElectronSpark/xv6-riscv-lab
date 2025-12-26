@@ -487,13 +487,24 @@ uchar initcode[] = {
   0x00, 0x00, 0x00, 0x00
 };
 
+static void init_entry(void) {
+  // In post init, the proc lock is still held
+  // and will be released in forkret().
+  sched_unlock();
+  proc_unlock(myproc());
+  start_kernel_post_init();
+  proc_lock(myproc());
+  sched_lock();
+  forkret();
+}
+
 // Set up first user process.
 void
 userinit(void)
 {
   struct proc *p;
 
-  p = allocproc(forkret, 0, 0, KERNEL_STACK_ORDER);
+  p = allocproc(init_entry, 0, 0, KERNEL_STACK_ORDER);
   assert(p != NULL, "userinit: allocproc failed");
   printf("Init process kernel stack size order: %d\n", p->kstack_order);
 
@@ -539,22 +550,22 @@ userinit(void)
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
   
+  PROC_SET_USER_SPACE(p);
+
+  // Don't forget to wake up the process.
+  __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
+  sched_lock();
+  scheduler_wakeup(p);
+  sched_unlock();
   proc_unlock(p);
 }
 
 void
 install_user_root(void) {
-  struct proc *p = __proctab_get_initproc();
-  proc_lock(p);
-  p->cwd = namei("/");
-
-  PROC_SET_USER_SPACE(p);
-  __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
-
-  sched_lock();
-  scheduler_wakeup(p);
-  sched_unlock();
-  proc_unlock(p);
+  proc_lock(myproc());
+  PROC_SET_USER_SPACE(myproc());
+  myproc()->cwd = namei("/");
+  proc_unlock(myproc());
 }
 
 // Grow or shrink user memory by n bytes.
@@ -796,8 +807,6 @@ yield(void)
 void
 forkret(void)
 {
-  STATIC int first = 1;
-
   assert(PROC_USER_SPACE(myproc()), "kernel process %d tries to return to user space", myproc()->pid);
   // The scheduler will disable interrupts to assure the atomicity of
   // the scheduler operations. For processes that gave up CPU by calling yield(),
@@ -809,28 +818,6 @@ forkret(void)
   proc_unlock(myproc());
   intr_on();
 
-  if (first) {
-    // File system initialization must be run in the context of a
-    // regular process (e.g., because it calls sleep), and thus cannot
-    // be run from main().
-    fsinit(ROOTDEV);
-    vfs_init();
-
-    first = 0;
-    // ensure other cores see first=0.
-
-#ifdef RWAD_WRITE_TEST
-    // forward decl for rwlock tests
-    void rwlock_launch_tests(void);
-    // launch rwlock tests
-    rwlock_launch_tests();
-#endif
-#ifdef SEMAPHORE_RUNTIME_TEST
-  void semaphore_launch_tests(void);
-  semaphore_launch_tests();
-#endif
-  }
-  
   // printf("forkret: process %d is running\n", myproc()->pid);
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
