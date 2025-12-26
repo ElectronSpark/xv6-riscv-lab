@@ -54,13 +54,6 @@ struct flock {
 	pid_t l_pid;
 };
 
-int creat(const char *, mode_t);
-int fcntl(int, int, ...);
-int open(const char *, int, ...);
-int openat(int, const char *, int, ...);
-int posix_fadvise(int, loff_t, loff_t, int);
-int posix_fallocate(int, loff_t, loff_t);
-
 #define O_SEARCH  O_PATH
 #define O_EXEC    O_PATH
 

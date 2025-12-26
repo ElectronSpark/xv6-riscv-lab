@@ -2,6 +2,7 @@
 #define KERNEL_VIRTUAL_FILE_SYSTEM_PRIVATE_H
 
 #include "vfs/vfs_types.h"
+#include "completion.h"
 #include "printf.h"
 
 extern struct vfs_inode vfs_root_inode;

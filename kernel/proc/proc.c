@@ -16,6 +16,7 @@
 #include "signal.h"
 #include "vm.h"
 #include "vfs/fs.h"
+#include "vfs/file.h"
 
 #define NPROC_HASH_BUCKETS 31
 
@@ -217,6 +218,7 @@ __pcb_init(struct proc *p)
   list_entry_init(&p->children);
   hlist_entry_init(&p->proctab_entry);
   spin_init(&p->lock, "proc");
+  vfs_fdtable_init(&p->fs.fdtable);
 }
 
 void
@@ -586,6 +588,8 @@ fork(void)
   int i, pid;
   struct proc *np;
   struct proc *p = myproc();
+  struct vfs_inode *inode;
+  int ret;
 
   if (!PROC_USER_SPACE(p)) {
     return -1;
@@ -624,6 +628,32 @@ fork(void)
       return -1;
     }
   }
+
+  // Clone VFS cwd and root inode references
+  inode = vfs_inode_deref(&p->fs.cwd);
+  if (inode != NULL) {
+    ret = vfs_inode_get_ref(inode, &np->fs.cwd);
+    if (ret != 0) {
+      proc_unlock(np);
+      proc_unlock(p);
+      freeproc(np);
+      return -1;
+    }
+  }
+  inode = vfs_inode_deref(&p->fs.rooti);
+  if (inode != NULL) {
+    ret = vfs_inode_get_ref(inode, &np->fs.rooti);
+    if (ret != 0) {
+      proc_unlock(np);
+      proc_unlock(p);
+      vfs_inode_put_ref(&np->fs.cwd);
+      freeproc(np);
+      return -1;
+    }
+  }
+
+  // Clone VFS file descriptor table
+  vfs_fdtable_clone(&np->fs.fdtable, &p->fs.fdtable);
 
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
@@ -707,6 +737,10 @@ exit(int status)
 {
   struct proc *p = myproc();
   struct inode *cwd = NULL;
+  struct vfs_inode_ref rooti_ref;
+  struct vfs_inode_ref cwd_ref;
+
+  vfs_fdtable_destroy(&p->fs.fdtable, 0);
 
   proc_lock(p);
   assert(p != proc_table.initproc, "init exiting");
@@ -725,6 +759,10 @@ exit(int status)
   }
   cwd = p->cwd;
   p->cwd = 0;
+  rooti_ref = p->fs.rooti;
+  cwd_ref = p->fs.cwd;
+  p->fs.rooti = (struct vfs_inode_ref){ 0 };
+  p->fs.cwd = (struct vfs_inode_ref){ 0 };
   proc_unlock(p);
 
   if (cwd != NULL) {
@@ -732,6 +770,9 @@ exit(int status)
     iput(cwd);
     end_op();
   }
+
+  vfs_inode_put_ref(&rooti_ref);
+  vfs_inode_put_ref(&cwd_ref);
 
   // Give any children to init.
   reparent(p);

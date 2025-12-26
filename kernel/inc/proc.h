@@ -89,6 +89,15 @@ enum procstate {
 })
 
 struct workqueue;
+struct vfs_file;
+
+// Per-process file descriptor table
+// It is protected by proc lock when used within a process
+struct vfs_fdtable {
+    int fd_count;
+    int next_fd;
+    struct vfs_file *files[NOFILE];
+};
 
 // Per-process state
 struct proc {
@@ -155,6 +164,7 @@ struct proc {
   struct {
     struct vfs_inode_ref rooti; // Root inode
     struct vfs_inode_ref cwd;   // Current working directory inode
+    struct vfs_fdtable fdtable; // File descriptor table
   } fs;
   char name[16];               // Process name (debugging)
 };
