@@ -11,7 +11,7 @@ typedef struct mutex {
   
   // For debugging:
   char *name;        // Name of lock.
-  struct proc *holder;    // Process holding lock
+  pid_t holder;    // Process holding lock
 } mutex_t;
 
 #endif        /* __KERNEL_MUTEX_TYPES_H */
