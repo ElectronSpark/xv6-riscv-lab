@@ -220,7 +220,7 @@ static struct tmpfs_inode *__tmpfs_alloc_link_inode(struct tmpfs_inode *dir, mod
     vfs_inode->mode = mode;
     vfs_inode->n_links = 1;
     // vfs_ilock(&tmpfs_inode->vfs_inode);
-    vfs_idup(&tmpfs_inode->vfs_inode);
+    // Backendless inodes are kept alive by n_links > 0, so refcount of 1 suffices
     tmpfs_inode->vfs_inode.n_links = 1;
     if (ret_dentry != NULL) {
         *ret_dentry = dentry;

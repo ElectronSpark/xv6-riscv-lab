@@ -116,4 +116,7 @@ int __tmpfs_migrate_to_allocated_blocks(struct tmpfs_inode *tmpfs_inode);
 extern struct vfs_file_ops tmpfs_file_ops;
 int tmpfs_open(struct vfs_inode *inode, struct vfs_file *file, int f_flags);
 
+// Shrink all tmpfs slab caches to release unused memory
+void tmpfs_shrink_caches(void);
+
 #endif // KERNEL_VIRTUAL_FILE_SYSTEM_TMPFS_PRIVATE_H

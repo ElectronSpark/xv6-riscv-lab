@@ -1873,3 +1873,95 @@ out:
         vfs_iput(root);
     }
 }
+
+// Run all tmpfs smoketests with memory leak detection
+void tmpfs_run_all_smoketests(void) {
+    // Shrink all caches before baseline to get a clean state
+    tmpfs_shrink_caches();
+    __vfs_shrink_caches();
+    kmm_shrink_all();
+
+    // Memory leak check for inode smoketest
+    uint64 before_pages = get_total_free_pages();
+    tmpfs_run_inode_smoketest();
+    tmpfs_shrink_caches();
+    __vfs_shrink_caches();
+    kmm_shrink_all();
+    uint64 after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: inode_smoketest leaked %ld pages\n", 
+               (long)(before_pages - after_pages));
+    } else {
+        printf("inode_smoketest: no memory leak detected\n");
+    }
+
+    // Memory leak check for truncate smoketest
+    before_pages = get_total_free_pages();
+    tmpfs_run_truncate_smoketest();
+    tmpfs_shrink_caches();
+    __vfs_shrink_caches();
+    kmm_shrink_all();
+    after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: truncate_smoketest leaked %ld pages\n",
+               (long)(before_pages - after_pages));
+    } else {
+        printf("truncate_smoketest: no memory leak detected\n");
+    }
+
+    // Memory leak check for namei smoketest
+    before_pages = get_total_free_pages();
+    tmpfs_run_namei_smoketest();
+    tmpfs_shrink_caches();
+    __vfs_shrink_caches();
+    kmm_shrink_all();
+    after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: namei_smoketest leaked %ld pages\n",
+               (long)(before_pages - after_pages));
+    } else {
+        printf("namei_smoketest: no memory leak detected\n");
+    }
+
+    // Memory leak check for dir_iter_mount smoketest
+    before_pages = get_total_free_pages();
+    tmpfs_run_dir_iter_mount_smoketest();
+    tmpfs_shrink_caches();
+    __vfs_shrink_caches();
+    kmm_shrink_all();
+    after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: dir_iter_mount_smoketest leaked %ld pages\n",
+               (long)(before_pages - after_pages));
+    } else {
+        printf("dir_iter_mount_smoketest: no memory leak detected\n");
+    }
+
+    // Memory leak check for file_ops smoketest
+    before_pages = get_total_free_pages();
+    tmpfs_run_file_ops_smoketest();
+    tmpfs_shrink_caches();
+    __vfs_shrink_caches();
+    kmm_shrink_all();
+    after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: file_ops_smoketest leaked %ld pages\n",
+               (long)(before_pages - after_pages));
+    } else {
+        printf("file_ops_smoketest: no memory leak detected\n");
+    }
+
+    // Memory leak check for double_indirect smoketest
+    before_pages = get_total_free_pages();
+    tmpfs_run_double_indirect_smoketest();
+    tmpfs_shrink_caches();
+    __vfs_shrink_caches();
+    kmm_shrink_all();
+    after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: dindirect_smoketest leaked %ld pages\n",
+               (long)(before_pages - after_pages));
+    } else {
+        printf("dindirect_smoketest: no memory leak detected\n");
+    }
+}

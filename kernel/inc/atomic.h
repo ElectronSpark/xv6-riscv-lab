@@ -31,4 +31,12 @@ static inline bool atomic_inc_unless(int *value, int unless) {
     return false;
 }
 
+static inline void atomic_dec(int *value) {
+    __atomic_fetch_sub(value, 1, __ATOMIC_SEQ_CST);
+}
+
+static inline void atomic_inc(int *value) {
+    __atomic_fetch_add(value, 1, __ATOMIC_SEQ_CST);
+}
+
 #endif // KERNEL_INC_ATOMIC_H

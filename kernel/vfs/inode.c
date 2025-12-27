@@ -92,8 +92,6 @@ retry:
     vfs_superblock_wlock(sb);
     vfs_ilock(inode);
 
-    assert(!inode->mount, "vfs_iput: refcount of mountpoint inode reached zero");
-
     // Retry decreasing refcount again, as it may have changed meanwhile
     if (atomic_dec_unless(&inode->ref_count, 1)) {
         // Someone else grabbed a reference while we were acquiring locks,
@@ -102,6 +100,21 @@ retry:
         vfs_superblock_unlock(sb);
         return;
     }
+
+    // For backendless filesystems (e.g., tmpfs), keep inodes alive as long as
+    // they have positive link count. The inode will be freed when n_links drops
+    // to 0 via unlink/rmdir. Mountpoint inodes keep an extra reference from
+    // the mount, so they should follow this path as well.
+    if (sb->backendless && (inode->n_links > 0 || inode->mount)) {
+        // Decrement refcount to 0 but keep inode in cache
+        atomic_dec(&inode->ref_count);
+        assert(inode->ref_count >= 0, "vfs_iput: backendless inode refcount underflow");
+        vfs_iunlock(inode);
+        vfs_superblock_unlock(sb);
+        return;
+    }
+
+    assert(!inode->mount, "vfs_iput: refcount of mountpoint inode reached zero");
 
     // If no one increased its refcount meanwhile, we can delete it
     // First check if it is dirty and sync if needed
