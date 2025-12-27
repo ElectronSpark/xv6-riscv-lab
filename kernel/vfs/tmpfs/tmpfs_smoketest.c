@@ -12,6 +12,9 @@
 #include "rwlock.h"
 #include "completion.h"
 #include "vfs/fs.h"
+#include "vfs/file.h"
+#include "vfs/fcntl.h"
+#include "vfs/stat.h"
 #include "../vfs_private.h" // for vfs_root_inode
 #include "list.h"
 #include "hlist.h"
@@ -1113,6 +1116,205 @@ cleanup_mp_dir:
         }
         vfs_iput(mp);
     }
+out:
+    if (root_pinned) {
+        vfs_iput(root);
+    }
+}
+
+// Test file descriptor operations: open, read, write, lseek, stat, close
+void tmpfs_run_file_ops_smoketest(void) {
+    int ret = 0;
+    struct vfs_inode *root = vfs_root_inode.mnt_rooti;
+    struct vfs_inode *test_inode = NULL;
+    struct vfs_file *file = NULL;
+    bool root_pinned = false;
+
+    const char *file_name = "file_ops_test";
+    const size_t file_len = sizeof("file_ops_test") - 1;
+    
+    char write_buf[128];
+    char read_buf[128];
+    const char *test_data = "Hello, tmpfs file operations!";
+    size_t test_data_len = strlen(test_data);
+
+    vfs_idup(root);
+    root_pinned = true;
+
+    // Create a test file
+    test_inode = vfs_create(root, 0644, file_name, file_len);
+    if (IS_ERR(test_inode)) {
+        ret = PTR_ERR(test_inode);
+        printf("file_ops_smoketest: " FAIL " create %s, errno=%d\n", file_name, ret);
+        goto out;
+    }
+    printf("file_ops_smoketest: created /%s ino=%lu\n", file_name, test_inode->ino);
+
+    // Test 1: Open file for read/write
+    file = vfs_fileopen(test_inode, O_RDWR);
+    if (IS_ERR(file)) {
+        ret = PTR_ERR(file);
+        printf("file_ops_smoketest: " FAIL " open O_RDWR, errno=%d\n", ret);
+        goto cleanup;
+    }
+    printf("file_ops_smoketest: " PASS " open O_RDWR\n");
+
+    // Test 2: Write to empty file
+    ssize_t written = vfs_filewrite(file, test_data, test_data_len);
+    if (written < 0) {
+        printf("file_ops_smoketest: " FAIL " write to file failed, errno=%ld\n", (long)written);
+    } else if (written != (ssize_t)test_data_len) {
+        printf("file_ops_smoketest: " WARN " write %lu bytes, got %ld\n", (unsigned long)test_data_len, (long)written);
+    } else {
+        printf("file_ops_smoketest: " PASS " write %ld bytes\n", (long)written);
+    }
+
+    // Test 3: Seek to beginning
+    loff_t pos = vfs_filelseek(file, 0, SEEK_SET);
+    if (pos != 0) {
+        printf("file_ops_smoketest: " FAIL " lseek SEEK_SET 0, got %lld\n", (long long)pos);
+    } else {
+        printf("file_ops_smoketest: " PASS " lseek SEEK_SET 0\n");
+    }
+
+    // Test 4: Read back data
+    memset(read_buf, 0, sizeof(read_buf));
+    ssize_t bytes_read = vfs_fileread(file, read_buf, test_data_len);
+    if (bytes_read != (ssize_t)test_data_len) {
+        printf("file_ops_smoketest: " FAIL " read %lu bytes, got %ld\n", (unsigned long)test_data_len, (long)bytes_read);
+    } else if (memcmp(read_buf, test_data, test_data_len) != 0) {
+        printf("file_ops_smoketest: " FAIL " read data mismatch\n");
+    } else {
+        printf("file_ops_smoketest: " PASS " read %ld bytes, data matches\n", (long)bytes_read);
+    }
+
+    // Test 5: Seek with SEEK_CUR
+    pos = vfs_filelseek(file, -10, SEEK_CUR);
+    if (pos != (loff_t)(test_data_len - 10)) {
+        printf("file_ops_smoketest: " FAIL " lseek SEEK_CUR -10, expected %lu got %lld\n", 
+               (unsigned long)(test_data_len - 10), (long long)pos);
+    } else {
+        printf("file_ops_smoketest: " PASS " lseek SEEK_CUR -10, pos=%lld\n", (long long)pos);
+    }
+
+    // Test 6: Seek with SEEK_END
+    pos = vfs_filelseek(file, 0, SEEK_END);
+    if (pos != (loff_t)test_data_len) {
+        printf("file_ops_smoketest: " FAIL " lseek SEEK_END 0, expected %lu got %lld\n",
+               (unsigned long)test_data_len, (long long)pos);
+    } else {
+        printf("file_ops_smoketest: " PASS " lseek SEEK_END 0, pos=%lld\n", (long long)pos);
+    }
+
+    // Test 7: Read at EOF should return 0
+    bytes_read = vfs_fileread(file, read_buf, 10);
+    if (bytes_read != 0) {
+        printf("file_ops_smoketest: " FAIL " read at EOF, expected 0 got %ld\n", (long)bytes_read);
+    } else {
+        printf("file_ops_smoketest: " PASS " read at EOF returns 0\n");
+    }
+
+    // Test 8: stat
+    struct stat st;
+    ret = vfs_filestat(file, &st);
+    if (ret != 0) {
+        printf("file_ops_smoketest: " FAIL " stat, errno=%d\n", ret);
+    } else if ((size_t)st.size != test_data_len) {
+        printf("file_ops_smoketest: " FAIL " stat size=%llu expected %lu\n", 
+               (unsigned long long)st.size, (unsigned long)test_data_len);
+    } else {
+        printf("file_ops_smoketest: " PASS " stat size=%llu type=%d\n",
+               (unsigned long long)st.size, st.type);
+    }
+
+    // Test 9: Close and reopen to verify persistence
+    vfs_fileclose(file);
+    file = NULL;
+
+    file = vfs_fileopen(test_inode, O_RDONLY);
+    if (IS_ERR(file)) {
+        ret = PTR_ERR(file);
+        printf("file_ops_smoketest: " FAIL " reopen O_RDONLY, errno=%d\n", ret);
+        goto cleanup;
+    }
+
+    memset(read_buf, 0, sizeof(read_buf));
+    bytes_read = vfs_fileread(file, read_buf, test_data_len);
+    if (bytes_read != (ssize_t)test_data_len || memcmp(read_buf, test_data, test_data_len) != 0) {
+        printf("file_ops_smoketest: " FAIL " re-read after close mismatch\n");
+    } else {
+        printf("file_ops_smoketest: " PASS " re-read after close, data persisted\n");
+    }
+
+    vfs_fileclose(file);
+    file = NULL;
+
+    // Test 10: Test larger write spanning multiple blocks
+    vfs_ilock(test_inode);
+    __tmpfs_truncate(test_inode, 0);
+    vfs_iunlock(test_inode);
+
+    file = vfs_fileopen(test_inode, O_RDWR);
+    if (IS_ERR(file)) {
+        ret = PTR_ERR(file);
+        printf("file_ops_smoketest: " FAIL " open for multi-block test, errno=%d\n", ret);
+        goto cleanup;
+    }
+
+    // Write pattern to fill 3 pages
+    memset(write_buf, 'A', sizeof(write_buf));
+    size_t total_written = 0;
+    size_t target_size = PAGE_SIZE * 3;
+    while (total_written < target_size) {
+        size_t to_write = target_size - total_written;
+        if (to_write > sizeof(write_buf)) to_write = sizeof(write_buf);
+        written = vfs_filewrite(file, write_buf, to_write);
+        if (written <= 0) {
+            printf("file_ops_smoketest: " FAIL " multi-block write at %lu, errno=%ld\n", 
+                   (unsigned long)total_written, (long)written);
+            break;
+        }
+        total_written += written;
+    }
+    if (total_written == target_size) {
+        printf("file_ops_smoketest: " PASS " multi-block write %lu bytes\n", (unsigned long)total_written);
+    }
+
+    // Seek to middle of second page and read
+    pos = vfs_filelseek(file, PAGE_SIZE + 100, SEEK_SET);
+    memset(read_buf, 0, sizeof(read_buf));
+    bytes_read = vfs_fileread(file, read_buf, 50);
+    if (bytes_read == 50 && read_buf[0] == 'A') {
+        printf("file_ops_smoketest: " PASS " read from middle of second page\n");
+    } else {
+        printf("file_ops_smoketest: " FAIL " read from middle of second page (got %ld bytes, first char=%d)\n",
+               (long)bytes_read, (int)(unsigned char)read_buf[0]);
+    }
+
+    vfs_fileclose(file);
+    file = NULL;
+
+cleanup:
+    if (file != NULL && !IS_ERR(file)) {
+        vfs_fileclose(file);
+    }
+
+    if (test_inode != NULL && !IS_ERR(test_inode)) {
+        // Truncate to free blocks while we still hold reference
+        vfs_ilock(test_inode);
+        __tmpfs_truncate(test_inode, 0);
+        vfs_iunlock(test_inode);
+        // Drop our reference BEFORE unlink (refcount 2->1)
+        // The dentry still holds the other reference
+        vfs_iput(test_inode);
+        test_inode = NULL;  // Don't use after iput
+        // Now unlink - refcount should be 1, so it will succeed
+        ret = vfs_unlink(root, file_name, file_len);
+        if (ret != 0) {
+            printf("file_ops_smoketest: " WARN " cleanup unlink %s, errno=%d\n", file_name, ret);
+        }
+    }
+
 out:
     if (root_pinned) {
         vfs_iput(root);

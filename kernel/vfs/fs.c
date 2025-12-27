@@ -334,6 +334,18 @@ void vfs_init(void) {
 }
 
 /*
+ * __vfs_shrink_caches - Shrink VFS slab caches to release unused pages.
+ *
+ * This should be called when checking for memory leaks to ensure that
+ * empty slab pages are returned to the page allocator.
+ */
+void __vfs_shrink_caches(void) {
+    slab_cache_shrink(&vfs_superblock_cache, 0x7fffffff);
+    slab_cache_shrink(&vfs_fs_type_cache, 0x7fffffff);
+    __vfs_file_shrink_cache();
+}
+
+/*
  * vfs_fs_type_allocate - Allocate an empty filesystem type descriptor.
  *
  * Locking:
@@ -1226,6 +1238,11 @@ int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode) {
     if (!sb->valid) {
         return -EINVAL; // Superblock is not valid
     }
+    
+    // If inode was already destroyed (n_links == 0 and destroy_inode called),
+    // valid is already 0. Just remove from hash and clear sb.
+    bool already_destroyed = !inode->valid;
+    
     struct vfs_inode *existing = __vfs_inode_hash_get(sb, inode->ino);
     if (existing == NULL) {
         return -ENOENT; // Inode not found in cache
@@ -1238,7 +1255,13 @@ int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode) {
         // At this point, something is wrong in the hash list implementation
         panic("vfs_remove_inode: inode hash pop returned unexpected inode");
     }
-    inode->valid = 0; // Mark inode as invalid
+    
+    if (!already_destroyed) {
+        // Normal cache eviction - mark invalid but data may still be on disk
+        inode->valid = 0;
+    }
+    // For destroyed inodes, valid is already 0
+    
     inode->sb = NULL; // Disassociate inode from superblock
     return 0;
 }

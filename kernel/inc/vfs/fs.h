@@ -74,7 +74,7 @@ int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
 struct vfs_inode *vfs_symlink(struct vfs_inode *dir, mode_t mode,
                               const char *name, size_t name_len,
                               const char *target, size_t target_len);
-int vfs_truncate(struct vfs_inode *inode, loff_t new_size);
+int vfs_itruncate(struct vfs_inode *inode, loff_t new_size);
 int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter, 
                  struct vfs_dentry *ret_dentry);
 

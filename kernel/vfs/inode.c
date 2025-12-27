@@ -96,8 +96,11 @@ retry:
 
     // Retry decreasing refcount again, as it may have changed meanwhile
     if (atomic_dec_unless(&inode->ref_count, 1)) {
+        // Someone else grabbed a reference while we were acquiring locks,
+        // and we just decremented it. The inode is still in use, don't free.
         vfs_iunlock(inode);
-        goto out_locked;
+        vfs_superblock_unlock(sb);
+        return;
     }
 
     // If no one increased its refcount meanwhile, we can delete it
@@ -117,11 +120,18 @@ retry:
         parent = inode->parent;
     }
 
+    // If inode has no links left, destroy its data before freeing
+    if (inode->n_links == 0 && inode->ops->destroy_inode != NULL) {
+        inode->ops->destroy_inode(inode);
+        // After destroy, the inode's on-disk data is freed.
+        // Mark it invalid and not dirty so we don't try to sync it.
+        inode->valid = 0;
+        inode->dirty = 0;
+    }
+
     ret = vfs_remove_inode(inode->sb, inode);
     assert(ret == 0, "vfs_iput: failed to remove inode from superblock inode cache");
     vfs_iunlock(inode);
-    
-out_locked:
     vfs_superblock_unlock(sb);
     assert(completion_done(&inode->completion),
            "vfs_iput: someone is waiting on inode completion without reference");
@@ -780,7 +790,7 @@ out:
     return ret_ptr;
 }
 
-int vfs_truncate(struct vfs_inode *inode, loff_t new_size) {
+int vfs_itruncate(struct vfs_inode *inode, loff_t new_size) {
     if (inode == NULL || inode->sb == NULL) {
         return -EINVAL; // Invalid argument
     }

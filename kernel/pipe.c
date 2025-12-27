@@ -15,12 +15,12 @@
 
 struct pipe {
   struct spinlock lock;
-  char data[PIPESIZE];
   uint nread;     // number of bytes read
   uint nwrite;    // number of bytes written
   // @TODO: change these two to bitfields to save space
-  int readopen;   // read fd is still open
-  int writeopen;  // write fd is still open
+  int readopen: 1;   // read fd is still open
+  int writeopen: 1;  // write fd is still open
+  char data[PIPESIZE];
 };
 
 int

@@ -365,7 +365,8 @@ struct vfs_inode *__tmpfs_unlink(struct vfs_inode *dir, const char *name, size_t
     }
     target = &tmpfs_dentry->inode->vfs_inode;
     vfs_ilock(target);
-    if (vfs_inode_refcount(target) > 1) {
+    uint64 refcnt = vfs_inode_refcount(target);
+    if (refcnt > 1) {
         vfs_iunlock(target);
         return ERR_PTR(-EBUSY); // Target inode is busy
     }
@@ -544,9 +545,20 @@ struct vfs_inode *__tmpfs_symlink(struct vfs_inode *dir, mode_t mode,
     return &new_inode->vfs_inode;
 }
 
+// Destroy inode data when the last reference is dropped and n_links == 0
+// Called with inode locked and superblock write-locked
 void __tmpfs_destroy_inode(struct vfs_inode *inode) {
-    // return -ENOSYS; // Not implemented
-    // @TODO: introduce orphan inode handling later
+    struct tmpfs_inode *ti = container_of(inode, struct tmpfs_inode, vfs_inode);
+    
+    if (S_ISREG(inode->mode)) {
+        // For regular files, truncate to 0 to free all allocated blocks
+        __tmpfs_truncate(inode, 0);
+    } else if (S_ISLNK(inode->mode)) {
+        // For symlinks, free the target string if allocated externally
+        tmpfs_free_symlink_target(ti);
+    }
+    // For directories, they must be empty before rmdir, nothing to do
+    // For device nodes/pipes/sockets, no data to free
 }
 
 struct vfs_inode_ops tmpfs_inode_ops = {
@@ -564,4 +576,5 @@ struct vfs_inode_ops tmpfs_inode_ops = {
     .truncate = __tmpfs_truncate,
     .destroy_inode = __tmpfs_destroy_inode,
     .free_inode = tmpfs_free_inode,
+    .open = tmpfs_open,
 };
