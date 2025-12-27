@@ -32,11 +32,10 @@ static void __tmpfs_make_symlink_target_embedded(struct tmpfs_inode *tmpfs_inode
 // Initialize a tmpfs inode as a symlink with allocated target
 static int __tmpfs_make_symlink_target(struct tmpfs_inode *tmpfs_inode, 
                                        const char *target, size_t len) {
-    char *allocated = kmm_alloc(len);
+    char *allocated = strndup(target, len);
     if (allocated == NULL) {
         return -ENOMEM; // Memory allocation failed
     }
-    memmove(allocated, target, len);
     tmpfs_inode->sym.symlink_target = allocated;
     tmpfs_inode->vfs_inode.size = len;
     tmpfs_inode->vfs_inode.mode = S_IFLNK | 0777;
@@ -246,67 +245,61 @@ int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
                    const char *name, size_t name_len) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
     int ret = 0;
-    // Assume the VFS handled "."
+
+    // VFS handles "." and ".." for process root and local root.
+    // Driver only sees ".." for ordinary (non-root) directories.
     if (name_len == 2 && strncmp(name, "..", 2) == 0) {
         dentry->sb = dir->sb;
-        dentry->name = kmm_alloc(3);
-        memmove(dentry->name, "..", 3);
-        dentry->name_len = 2;
-        if (vfs_inode_is_local_root(&tmpfs_dir->vfs_inode)) {
-            dentry->ino = dir->ino;
-        } else {
-            dentry->ino = tmpfs_dir->vfs_inode.parent->ino;
+        dentry->name = strndup(name, name_len);
+        if (dentry->name == NULL) {
+            return -ENOMEM;
         }
+        dentry->name_len = 2;
+        dentry->ino = dir->parent->ino;
         dentry->cookies = VFS_DENTRY_COOKIE_PARENT;
-        goto done;
+        return 0;
     }
     
     struct tmpfs_dentry *child_dentry = __tmpfs_dir_lookup_by_name(tmpfs_dir, name, name_len);
     if (child_dentry == NULL) {
-        ret = -ENOENT; // Not found
-        goto done;
+        return -ENOENT; // Not found
     }
     dentry->ino = child_dentry->inode->vfs_inode.ino;
     dentry->sb = dir->sb;
-    dentry->name = kmm_alloc(name_len + 1);
-    memmove(dentry->name, name, name_len);
-    dentry->name[name_len] = '\0';
+    dentry->name = strndup(name, name_len);
+    if (dentry->name == NULL) {
+        return -ENOMEM;
+    }
     dentry->name_len = name_len;
     dentry->cookies = (uint64)child_dentry;
-
- done:
     return ret;
 }
 
-// VFS synthesizes "."; tmpfs adds ".." for non-root and then walks children
-int __tmpfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter) {
+// VFS synthesizes "." at index 0 and ".." for process/local roots at index 1.
+// Driver handles ".." for ordinary dirs (index 1) and all children (index > 2).
+int __tmpfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter, 
+                     struct vfs_dentry *dentry) {
     struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
-    struct vfs_dentry *dentry = &iter->current;
     struct tmpfs_dentry *current = NULL;
-    // First release previous name if any
-    vfs_release_dentry(dentry);
+    char *name = NULL;
 
     if (iter->index == 1) {
-        // VFS synthesizes ".." for mount/process roots; handle only ordinary dirs here
-        if (!vfs_inode_is_local_root(dir)) {
-            if (dir->parent == NULL) {
-                return -ENOENT; // No parent
-            }
-            dentry->cookies = VFS_DENTRY_COOKIE_PARENT;
-            dentry->ino = dir->parent->ino;
-            dentry->sb = dir->parent->sb;
-            dentry->name = kmm_alloc(3);
-            if (dentry->name == NULL) {
-                dentry->cookies = VFS_DENTRY_COOKIE_END;
-                return -ENOMEM;
-            }
-            memmove(dentry->name, "..", 3);
-            dentry->name_len = 2;
-            return 0;
+        // VFS passes ".." to driver only for non-root directories
+        if (dir->parent == NULL) {
+            return -ENOENT; // No parent (should not happen for non-root)
         }
-        // For roots handled by VFS, fall through to children enumeration
+        vfs_release_dentry(dentry); // Release any previous name
+        dentry->name = strndup("..", 2);
+        if (dentry->name == NULL) {
+            return -ENOMEM;
+        }
+        dentry->name_len = 2;
+        dentry->cookies = VFS_DENTRY_COOKIE_PARENT;
+        dentry->ino = dir->parent->ino;
+        return 0;
     }
 
+    // index > 2: iterate over directory children
     if (dentry->cookies == VFS_DENTRY_COOKIE_END ||
         dentry->cookies == VFS_DENTRY_COOKIE_PARENT) {
         current = HLIST_FIRST_NODE(&tmpfs_dir->dir.children, struct tmpfs_dentry, hash_entry);
@@ -317,24 +310,20 @@ int __tmpfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter) {
 
     if (current == NULL) {
         // End of directory
-        dentry->ino = 0;
-        dentry->sb = dir->sb;
+        vfs_release_dentry(dentry); // Release any previous name
         dentry->name = NULL;
-        dentry->name_len = 0;
         dentry->cookies = VFS_DENTRY_COOKIE_END;
         return 0;
     }
 
-    dentry->ino = current->inode->vfs_inode.ino;
-    dentry->sb = dir->sb;
-    dentry->name_len = current->name_len;
-    dentry->name = kmm_alloc(dentry->name_len + 1);
-    if (dentry->name == NULL) {
-        dentry->cookies = VFS_DENTRY_COOKIE_END;
+    name = strndup(current->name, current->name_len);
+    if (name == NULL) {
         return -ENOMEM;
     }
-    memmove(dentry->name, current->name, dentry->name_len);
-    dentry->name[dentry->name_len] = '\0';
+    vfs_release_dentry(dentry); // Release any previous name
+    dentry->name = name;
+    dentry->name_len = current->name_len;
+    dentry->ino = current->inode->vfs_inode.ino;
     dentry->cookies = (uint64)current;
     return 0;
 }

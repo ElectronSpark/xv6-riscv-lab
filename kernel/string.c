@@ -1,4 +1,7 @@
 #include "types.h"
+#include "riscv.h"
+#include "defs.h"
+#include "slab.h"
 
 void *memset(void *dst, int c, size_t n)
 {
@@ -166,4 +169,26 @@ char *strtok(char *str, const char *delim)
 {
     static char *saveptr;
     return strtok_r(str, delim, &saveptr);
+}
+
+char *strndup(const char *s, size_t n) {
+    size_t len = strnlen(s, n);
+    char *new_str = kmm_alloc(len + 1);
+    if (new_str == NULL) {
+        return NULL; // Memory allocation failed
+    }
+    strncpy(new_str, s, len);
+    new_str[len] = '\0'; // Null-terminate the new string
+    return new_str;
+}
+
+char *strdup(const char *s) {
+    size_t len = strlen(s);
+    char *new_str = kmm_alloc(len + 1);
+    if (new_str == NULL) {
+        return NULL; // Memory allocation failed
+    }
+    strncpy(new_str, s, len);
+    new_str[len] = '\0'; // Null-terminate the new string
+    return new_str;
 }

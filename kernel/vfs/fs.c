@@ -938,35 +938,50 @@ void vfs_put_fs_type(struct vfs_fs_type *fs_type) {
 }
 
 /*
- * vfs_get_dentry_inode_locked - Resolve a dentry to an inode within a superblock, populating cache as needed.
+ * __vfs_dentry_get_self_inode - Check if dentry->parent is the target inode and return it.
+ *
+ * For VFS-synthesized entries (e.g., "." or ".." across mount boundaries),
+ * dentry->parent may already reference the target inode. This helper checks
+ * that condition and returns the inode with an incremented refcount.
+ *
+ * Locking:
+ *   - None required; the parent inode is guaranteed to be alive as long as
+ *     the dentry is valid (VFS always caches ancestor directories).
+ *
+ * Returns:
+ *   - Inode pointer with refcount incremented if parent matches the target.
+ *   - NULL if parent is not set or does not match the target.
+ */
+static struct vfs_inode *__vfs_dentry_get_self_inode(struct vfs_dentry *dentry) {
+    if (dentry == NULL || dentry->parent == NULL) {
+        return NULL;
+    }
+    if (dentry->parent->sb == dentry->sb &&
+        dentry->parent->ino == dentry->ino) {
+        vfs_idup(dentry->parent);
+        return dentry->parent;
+    }
+    return NULL;
+}
+
+/*
+ * __vfs_get_dentry_inode_impl - Internal helper to resolve a dentry to an inode.
+ *
+ * This is the core implementation that performs cache lookup and, if necessary,
+ * upgrades to a write lock to load the inode from disk. It does NOT check for
+ * VFS-synthesized self-references (dentry->parent == target); callers must
+ * handle that case before calling this function.
  *
  * Locking:
  *   - Caller holds the dentry's superblock read lock on entry. This helper may
  *     drop the read lock and acquire the write lock internally.
- *   - Cross-filesystem transitions (e.g., mountpoint redirection) must be
- *     handled by vfs_get_dentry_inode() before calling into this helper.
  *
  * Returns:
- *   - 0 on success with *ret_inode referencing the inode (refcount incremented,
- *     inode unlocked).
- *   - Negative errno on failure.
- *
- * Notes:
- *   - Callers must avoid holding inode locks that could deadlock with these
- *     lock transitions and must release the inode via vfs_iput().
+ *   - Inode pointer on success with refcount incremented (inode unlocked).
+ *   - ERR_PTR(errno) on failure.
  */
-struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
+static struct vfs_inode *__vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) {
     struct vfs_inode *inode = NULL;
-    if (dentry == NULL) {
-        return ERR_PTR(-EINVAL);
-    }
-    if (dentry->sb == NULL) {
-        return ERR_PTR(-EINVAL);
-    }
-
-    if (!dentry->sb->valid) {
-        return ERR_PTR(-EINVAL);
-    }
 
     inode = vfs_get_inode_cached(dentry->sb, dentry->ino);
     if (!IS_ERR_OR_NULL(inode)) {
@@ -1010,7 +1025,26 @@ struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
     return inode;
 }
 
-struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry) {
+/*
+ * vfs_get_dentry_inode_locked - Resolve a dentry to an inode within a superblock, populating cache as needed.
+ *
+ * Locking:
+ *   - Caller holds the dentry's superblock read lock on entry. This helper may
+ *     drop the read lock and acquire the write lock internally.
+ *
+ * Returns:
+ *   - Inode pointer on success with refcount incremented (inode unlocked).
+ *   - ERR_PTR(errno) on failure.
+ *
+ * Notes:
+ *   - Callers must avoid holding inode locks that could deadlock with these
+ *     lock transitions and must release the inode via vfs_iput().
+ *   - For VFS-synthesized entries (e.g., "." or ".." across mount boundaries),
+ *     dentry->parent may already reference the target inode; this helper uses
+ *     that shortcut when available.
+ */
+struct vfs_inode *vfs_get_dentry_inode_locked(struct vfs_dentry *dentry) {
+    struct vfs_inode *inode = NULL;
     if (dentry == NULL) {
         return ERR_PTR(-EINVAL);
     }
@@ -1018,61 +1052,64 @@ struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry) {
         return ERR_PTR(-EINVAL);
     }
 
-    vfs_superblock_rlock(dentry->sb);
-    struct vfs_inode *inode = vfs_get_dentry_inode_locked(dentry);
-    vfs_superblock_unlock(dentry->sb);
-    return inode;
-}
-
-struct vfs_dentry *vfs_dir_iter_get_dentry(struct vfs_inode *dir,
-                                           struct vfs_dir_iter *iter) {
-    if (dir == NULL || iter == NULL) {
+    if (!dentry->sb->valid) {
         return ERR_PTR(-EINVAL);
     }
 
-    // Ensure callers see the correct parent for subsequent inode resolution
-    iter->current.parent = dir;
-
-    if (iter->current.name == NULL) {
-        return ERR_PTR(-ENOENT);
+    // Fast path: if dentry->parent is the target inode itself
+    // (e.g., "." or ".." synthesized by VFS for mount boundaries),
+    // just duplicate the reference instead of cache lookup
+    inode = __vfs_dentry_get_self_inode(dentry);
+    if (inode != NULL) {
+        return inode;
     }
 
-    // Synthetic entries are normalized by name rather than cookie sentinels
-    if (iter->current.name_len == 1 && iter->current.name[0] == '.') {
-        iter->current.sb = dir->sb;
-        iter->current.ino = dir->ino;
-        iter->current.parent = dir;
-        return &iter->current;
+    return __vfs_get_dentry_inode_impl(dentry);
+}
+
+/*
+ * vfs_get_dentry_inode - Resolve a dentry to an inode, handling cross-filesystem transitions.
+ *
+ * Locking:
+ *   - None required on entry; this helper acquires and releases the dentry's
+ *     superblock lock internally.
+ *
+ * Returns:
+ *   - Inode pointer on success with refcount incremented (inode unlocked).
+ *   - ERR_PTR(errno) on failure.
+ *
+ * Notes:
+ *   - Handles dentries from vfs_ilookup() and vfs_dir_iter(), including "." and
+ *     ".." entries that may cross filesystem boundaries (mount points).
+ *   - For cross-filesystem "..", dentry->sb points to the parent filesystem's
+ *     superblock, allowing correct resolution.
+ *   - Callers must release the inode via vfs_iput().
+ */
+struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry) {
+    struct vfs_inode *inode = NULL;
+    if (dentry == NULL) {
+        return ERR_PTR(-EINVAL);
+    }
+    if (dentry->sb == NULL) {
+        return ERR_PTR(-EINVAL);
     }
 
-    if (iter->current.name_len == 2 && iter->current.name[0] == '.' && iter->current.name[1] == '.') {
-        struct vfs_inode *target = dir;
-
-        // Respect chroot: never walk above process root
-        struct vfs_inode *proc_root = vfs_inode_deref(&myproc()->fs.rooti);
-        if (dir == proc_root) {
-            iter->current.sb = dir->sb;
-            iter->current.ino = dir->ino;
-            iter->current.parent = dir;
-            return &iter->current;
-        }
-
-        if (vfs_inode_is_local_root(dir)) {
-            // At a mounted root; ".." should point to the mountpoint itself
-            if (dir->sb->mountpoint != NULL) {
-                target = dir->sb->mountpoint;
-            }
-        } else if (dir->parent != NULL) {
-            target = dir->parent;
-        }
-
-        iter->current.sb = target->sb;
-        iter->current.ino = target->ino;
-        iter->current.parent = target;
-        return &iter->current;
+    // Fast path: if dentry->parent is the target inode itself
+    // (e.g., "." or ".." synthesized by VFS for mount boundaries),
+    // just duplicate the reference without acquiring locks
+    inode = __vfs_dentry_get_self_inode(dentry);
+    if (inode != NULL) {
+        return inode;
     }
 
-    return &iter->current;
+    vfs_superblock_rlock(dentry->sb);
+    if (!dentry->sb->valid) {
+        vfs_superblock_unlock(dentry->sb);
+        return ERR_PTR(-EINVAL);
+    }
+    inode = __vfs_get_dentry_inode_impl(dentry);
+    vfs_superblock_unlock(dentry->sb);
+    return inode;
 }
 
  /******************************************************************************

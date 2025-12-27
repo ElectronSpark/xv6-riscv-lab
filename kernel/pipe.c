@@ -18,6 +18,7 @@ struct pipe {
   char data[PIPESIZE];
   uint nread;     // number of bytes read
   uint nwrite;    // number of bytes written
+  // @TODO: change these two to bitfields to save space
   int readopen;   // read fd is still open
   int writeopen;  // write fd is still open
 };

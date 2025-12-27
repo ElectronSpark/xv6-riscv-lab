@@ -15,5 +15,7 @@ size_t strnlen(const char *s, size_t maxlen);
 char *strcat(char *dest, const char *src);
 char *strtok_r(char *str, const char *delim, char **saveptr);
 char *strtok(char *str, const char *delim);
+char *strndup(const char *s, size_t n);
+char *strdup(const char *s);
 
 #endif /* __KERNEL_STRING_H */

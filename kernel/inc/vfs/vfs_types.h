@@ -216,6 +216,7 @@ struct vfs_inode {
     struct vfs_inode_ops *ops;
     int ref_count; // reference count
     void *fs_data; // filesystem-specific data
+    struct vfs_inode *parent; // parent inode for directories (self for root inodes)
     union {
         uint32 cdev; // for character device inode
         uint32 bdev; // for block device inode
@@ -223,7 +224,6 @@ struct vfs_inode {
             struct vfs_superblock *mnt_sb; // the mounted superblock
             struct vfs_inode *mnt_rooti; // root inode of the mounted superblock
         };
-        struct vfs_inode *parent; // parent inode for directories
     };
     completion_t completion;
 };
@@ -248,22 +248,22 @@ struct vfs_inode {
  */
 struct vfs_inode_ops {
     int (*lookup)(struct vfs_inode *dir, struct vfs_dentry *dentry, 
-            const char *name, size_t name_len);
-    int (*dir_iter)(struct vfs_inode *dir, struct vfs_dir_iter *iter);
-        ssize_t (*readlink)(struct vfs_inode *inode, char *buf, size_t buflen);
-        struct vfs_inode *(*create)(struct vfs_inode *dir, mode_t mode,
-            const char *name, size_t name_len);        // Create a regular file
+                  const char *name, size_t name_len);
+    int (*dir_iter)(struct vfs_inode *dir, struct vfs_dir_iter *iter, 
+                    struct vfs_dentry *ret_dentry);
+    ssize_t (*readlink)(struct vfs_inode *inode, char *buf, size_t buflen);
+    struct vfs_inode *(*create)(struct vfs_inode *dir, mode_t mode,
+                       const char *name, size_t name_len);        // Create a regular file
     int (*link)(struct vfs_inode *old, struct vfs_inode *dir,
             const char *name, size_t name_len);         // Create a hard link
     struct vfs_inode *(*unlink)(struct vfs_inode *dir, const char *name, size_t name_len);
     struct vfs_inode *(*mkdir)(struct vfs_inode *dir, mode_t mode,
                                const char *name, size_t name_len);
     struct vfs_inode *(*rmdir)(struct vfs_inode *dir, const char *name, size_t name_len);
-        struct vfs_inode *(*mknod)(struct vfs_inode *dir, mode_t mode,
-            dev_t dev, const char *name, size_t name_len);    // Create a file of special types
+    struct vfs_inode *(*mknod)(struct vfs_inode *dir, mode_t mode,
+                               dev_t dev, const char *name, size_t name_len);    // Create a file of special types
     int (*move)(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
-            struct vfs_inode *new_dir, const char *name, 
-                size_t name_len);  // Move (rename) a file or directory within the same filesystem
+                struct vfs_inode *new_dir, const char *name, size_t name_len);  // Move (rename) a file or directory within the same filesystem
     struct vfs_inode *(*symlink)(struct vfs_inode *dir, mode_t mode, 
                                  const char *name, size_t name_len,
                                  const char *target, size_t target_len);
@@ -289,9 +289,8 @@ struct vfs_dentry {
 };
 
 struct vfs_dir_iter {
-    struct vfs_dentry current;
-    uint64 index;      // Number of entries successfully returned so far
-    
+    int64 cookies;      // Filesystem-private cookie; opaque to callers
+    int64 index;       // Number of entries successfully returned so far
 };
 
 struct vfs_file {
@@ -303,7 +302,14 @@ struct vfs_file {
     struct vfs_file_ops *ops;
     void *private_data; // filesystem-specific data
     mutex_t lock; // protects f_pos
-    loff_t f_pos; // file position
+    union {
+        loff_t f_pos; // file position(regular files)
+        struct vfs_dir_iter dir_iter; // directory iterator state (directories)
+        cdev_t cdev; // character device specific data (character device files)
+        blkdev_t blkdev; // block device specific data (block device files)
+        struct pipe *pipe; // FD_PIPE
+        struct sock *sock;  // FD_SOCKET
+    };
 };
 
 struct vfs_file_ops {

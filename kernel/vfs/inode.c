@@ -170,6 +170,70 @@ int vfs_sync_inode(struct vfs_inode *inode) {
     return ret;
 }
 
+// Get the outmost layer of mount point
+// Caller should hold the reference of rooti or its descendants
+// Because VFS will always cache the ancestors of cached directories,
+// no need to worry about the mountpoint inode being freed here
+static struct vfs_inode *__get_mnt_recursive(struct vfs_inode *rooti) {
+    struct vfs_inode *inode = rooti;
+    struct vfs_superblock *sb = rooti->sb;
+    struct vfs_inode *proc_rooti = vfs_inode_deref(&myproc()->fs.rooti);
+    while (true) {
+        if (inode == proc_rooti) {
+            // Reached process root
+            return inode;
+        }
+        assert(sb != NULL, "__get_mnt_recursive: inode's superblock mismatch");
+        if (inode != sb->root_inode) {
+            assert(sb->root_inode != NULL,
+                   "__get_mnt_recursive: superblock root inode is NULL");
+            return inode; // Reached the outmost mountpoint
+        }
+        // Otherwise, go up one level
+        inode = sb->mountpoint;
+        assert(inode != NULL, "__get_mnt_recursive: mountpoint inode is NULL");
+        sb = inode->sb;
+    }
+}
+
+// Get the parent inode of the mountpoint recursively
+// Caller should hold the reference of dir or its descendants
+// Because VFS will always cache the ancestors of cached directories,
+// no need to worry about the mountpoint inode being freed here
+static struct vfs_inode *__mountpoint_go_up(struct vfs_inode *dir) {
+    struct vfs_inode *inode = dir;
+    struct vfs_inode *proc_rooti = vfs_inode_deref(&myproc()->fs.rooti);
+    while (true) {
+        if (inode == proc_rooti) {
+            // Reached process root
+            return inode;
+        }
+        if (inode->parent != inode) {
+            assert(inode->parent != NULL,
+                   "__mountpoint_go_up: inode's parent is NULL");
+            return inode->parent; // Found the parent inode
+        }
+        // Otherwise, go up one level
+        inode = __get_mnt_recursive(inode);
+    }
+}
+
+// Resolve ".." for a directory inode.
+// Returns the target inode for ".." traversal:
+// - If dir is the process root, returns dir (can't go higher)
+// - If dir is a local filesystem root, returns the parent across mount boundary
+// - Otherwise returns NULL (caller should use driver lookup for normal "..")
+static struct vfs_inode *__vfs_dotdot_target(struct vfs_inode *dir) {
+    struct vfs_inode *proc_rooti = vfs_inode_deref(&myproc()->fs.rooti);
+    if (dir == proc_rooti) {
+        return dir;
+    }
+    if (vfs_inode_is_local_root(dir)) {
+        return __mountpoint_go_up(dir);
+    }
+    return NULL;
+}
+
 // Lookup a dentry in a directory inode
 // Will assume the VFS handled "."
 int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry, 
@@ -184,40 +248,30 @@ int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         dentry->sb = dir->sb;
         dentry->ino = dir->ino;
         dentry->parent = dir;
-        dentry->name = kmm_alloc(2);
+        dentry->name = strndup(".", 1);
         if (dentry->name == NULL) {
             return -ENOMEM;
         }
-        dentry->name[0] = '.';
-        dentry->name[1] = '\0';
         dentry->name_len = 1;
         dentry->cookies = 0; // cookie values are filesystem-private; opaque to VFS
         return 0;
     }
 
     if (name_len == 2 && name[0] == '.' && name[1] == '.') {
-        if (dir == vfs_inode_deref(&myproc()->fs.rooti) || vfs_inode_is_local_root(dir)) {
-            struct vfs_inode *target = dir;
-            if (dir != vfs_inode_deref(&myproc()->fs.rooti) && dir->sb->mountpoint != NULL) {
-                target = dir->sb->mountpoint;
-            } else if (dir->parent != NULL) {
-                target = dir->parent;
-            }
-
+        struct vfs_inode *target = __vfs_dotdot_target(dir);
+        if (target != NULL) {
             dentry->sb = target->sb;
             dentry->ino = target->ino;
-            dentry->parent = target;
-            dentry->name = kmm_alloc(3);
+            dentry->parent = (target == dir) ? NULL : target;
+            dentry->name = strndup("..", 2);
             if (dentry->name == NULL) {
                 return -ENOMEM;
             }
-            dentry->name[0] = '.';
-            dentry->name[1] = '.';
-            dentry->name[2] = '\0';
             dentry->name_len = 2;
-            dentry->cookies = 0; // VFS keeps cookies opaque; filesystem will set its own
+            dentry->cookies = 0;
             return 0;
         }
+        // Otherwise, fall through to driver lookup for normal ".."
     }
     vfs_superblock_rlock(dir->sb);
     vfs_ilock(dir);
@@ -240,11 +294,51 @@ out:
     return ret;
 }
 
-int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter) {
+static int __make_iter_present(struct vfs_dir_iter *iter,
+                               struct vfs_dentry *ret_dentry) {
+    ret_dentry->name = strndup(".", 1);
+    if (ret_dentry->name == NULL) {
+        return -ENOMEM;
+    }
+    ret_dentry->name_len = 1;
+    ret_dentry->cookies = 0;
+    iter->cookies = 0;
+    iter->index = 1;
+    return 0;
+}
+
+static int __make_iter_parent(struct vfs_dir_iter *iter,
+                              struct vfs_dentry *ret_dentry) {
+    vfs_release_dentry(ret_dentry); // release "."
+    ret_dentry->name = strndup("..", 2);
+    if (ret_dentry->name == NULL) {
+        return -ENOMEM;
+    }
+    ret_dentry->name_len = 2;
+    ret_dentry->cookies = 0;
+    iter->cookies = 0;
+    iter->index = 2;
+    return 0;
+}
+
+// Iterate over directory entries in a directory inode
+// Drivers should look at iter->cookies and update new cookies in ret_dentry->cookies
+// Drivers should release the content of ret_dentry before writing new content
+// Drivers only need to fill:
+// - ret_dentry->name
+// - ret_dentry->name_len
+// - ret_dentry->ino
+// - ret_dentry->cookies
+// VFS will fill ret_dentry->sb and ret_dentry->parent as needed
+// When Reaching end of directory, drivers should set ret_dentry->name to NULL
+// Drivers don't need to update iter, it will be updated by VFS after successful return
+// When drivers see iter->index == 2, they should not return the name
+int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
+                 struct vfs_dentry *ret_dentry) {
     if (dir == NULL || dir->sb == NULL) {
         return -EINVAL; // Invalid argument
     }
-    if (iter == NULL) {
+    if (iter == NULL || ret_dentry == NULL) {
         return -EINVAL; // Invalid argument
     }
 
@@ -252,6 +346,7 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter) {
     vfs_ilock(dir);
 
     int ret = __vfs_inode_valid(dir);
+    bool need_lookup = false; // Need to lookup across file system boundary
     if (ret != 0) {
         goto out;
     }
@@ -265,67 +360,87 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter) {
     }
 
     // Synthesize "." on the first iteration to keep cookies opaque at the VFS layer
-    if (iter->index == 0) {
-        iter->current.cookies = 0; // opaque to callers; tmpfs keeps its own sentinels
-        iter->current.ino = dir->ino;
-        iter->current.sb = dir->sb;
-        iter->current.parent = dir;
-        iter->current.name = kmm_alloc(2);
-        if (iter->current.name == NULL) {
-            ret = -ENOMEM;
+    if (iter->index < 1) {
+        ret = __make_iter_present(iter, ret_dentry);
+        if (ret != 0) {
             goto out;
         }
-        memmove(iter->current.name, ".", 2);
-        iter->current.name_len = 1;
+        ret_dentry->ino = dir->ino;
+        ret_dentry->sb = dir->sb;
+        ret_dentry->parent = NULL;
         ret = 0;
         goto out;
     }
 
     // For process root or a mounted root, synthesize ".." on the second iteration
-    if (iter->index == 1 && (vfs_inode_is_local_root(dir) || dir == vfs_inode_deref(&myproc()->fs.rooti))) {
-        struct vfs_inode *target = dir;
-        struct vfs_inode *proc_root = vfs_inode_deref(&myproc()->fs.rooti);
-
-        // If not the process root, prefer the mountpoint when present, otherwise parent
-        if (dir != proc_root) {
-            if (dir->sb->mountpoint != NULL) {
-                target = dir->sb->mountpoint;
-            } else if (dir->parent != NULL) {
-                target = dir->parent;
+    if (iter->index == 1) {
+        struct vfs_inode *proc_rooti = vfs_inode_deref(&myproc()->fs.rooti);
+        if (dir == proc_rooti) {
+            // Process root: ".." points to self
+            ret = __make_iter_parent(iter, ret_dentry);
+            if (ret != 0) {
+                goto out;
             }
-        } else {
-            // When at process root, ".." resolves to itself
-            target = dir;
-        }
-
-        iter->current.cookies = 0;
-        iter->current.ino = target->ino;
-        iter->current.sb = target->sb;
-        iter->current.parent = target;
-        iter->current.name = kmm_alloc(3);
-        if (iter->current.name == NULL) {
-            ret = -ENOMEM;
+            ret_dentry->ino = dir->ino;
+            ret_dentry->sb = dir->sb;
+            ret_dentry->parent = NULL;
+            ret = 0;
+            goto out;
+        } else if (vfs_inode_is_local_root(dir)) {
+            // Mounted root: ".." crosses mount boundary, fill in after unlock
+            ret = __make_iter_parent(iter, ret_dentry);
+            if (ret != 0) {
+                goto out;
+            }
+            ret_dentry->parent = NULL;
+            need_lookup = true;
+            ret = 0;
             goto out;
         }
-        memmove(iter->current.name, "..", 3);
-        iter->current.name_len = 2;
-        ret = 0;
-        goto out;
+        // Ordinary directory: let driver return ".." with correct parent ino
+        // Fall through to driver call without modifying iter->index
     }
-
-    // After synthetic entries, hand off to filesystem; cookies stay opaque to VFS
-    if (iter->index <= 1) {
-        iter->current.cookies = 0; // Start-of-filesystem iteration sentinel for tmpfs
+    
+    if (iter->index > 1) {
+        iter->index++;
+        ret_dentry->sb = dir->sb;
+        ret_dentry->parent = dir;
     }
-    ret = dir->ops->dir_iter(dir, iter);
+    ret = dir->ops->dir_iter(dir, iter, ret_dentry);
+    if (ret == 0 && iter->index == 1) {
+        // Driver returned ".." successfully, advance index
+        iter->index = 2;
+    }
 
 out:
-    if (ret == 0 && iter->current.name != NULL) {
-        iter->index++;
-    }
-
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
+
+    if (ret == 0) {
+        if (iter->index == 2 && need_lookup) {
+            // when synthesizing ".." for a mounted root, fill in the correct parent inode now
+            struct vfs_inode *target = __vfs_dotdot_target(dir);
+            ret_dentry->ino = target->ino;
+            ret_dentry->sb = target->sb;
+            ret_dentry->parent = target;
+        }
+        if (iter->index > 2) {
+            if (ret_dentry->name != NULL) {
+                // Normal entry returned
+                iter->cookies = ret_dentry->cookies;
+                return 0;
+            }
+            // Otherwise, reached end of directory; reset iterator
+            iter->index = -1;
+            iter->cookies = 0;
+            ret_dentry->parent = NULL;
+            ret_dentry->cookies = 0;
+            ret_dentry->ino = 0;
+            ret_dentry->sb = NULL;
+            return 0;
+        }
+    }
+
     return ret;
 }
 
