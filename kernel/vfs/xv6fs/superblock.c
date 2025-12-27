@@ -113,7 +113,7 @@ struct vfs_inode *xv6fs_alloc_inode(struct vfs_superblock *sb) {
             // Found a free inode
             memset(dip, 0, sizeof(*dip));
             // Mark as allocated but type will be set by caller
-            log_write(bp);
+            xv6fs_log_write(xv6_sb, bp);
             brelse(bp);
             
             // Allocate in-memory structure
@@ -124,7 +124,7 @@ struct vfs_inode *xv6fs_alloc_inode(struct vfs_superblock *sb) {
             
             xv6fs_inode->dev = dev;
             xv6fs_inode->vfs_inode.ino = inum;
-            xv6fs_inode->vfs_inode.sb = sb;
+            // Note: Do NOT set vfs_inode.sb here - VFS will set it in vfs_add_inode
             xv6fs_inode->vfs_inode.ref_count = 1;
             
             return &xv6fs_inode->vfs_inode;
@@ -238,9 +238,9 @@ int xv6fs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
         return -EINVAL;
     }
     
-    // Use ROOTDEV (mkdev(2, 1)) as the device number for the disk
-    // TODO: Parse device from `data` or `device` parameter
-    uint dev = ROOTDEV;
+    // Use the second disk (mkdev(2, 2)) for xv6fs VFS mount
+    // This avoids conflicts with the first disk used by the legacy fs subsystem
+    uint dev = mkdev(2, 2);
     
     // Allocate superblock
     struct xv6fs_superblock *xv6_sb = slab_alloc(&__xv6fs_sb_cache);

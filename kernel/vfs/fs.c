@@ -882,8 +882,10 @@ struct vfs_inode *vfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         return existing;
     }
     if (existing != inode) {
-        vfs_iunlock(inode);
-        return ERR_PTR(-EEXIST); // Inode already exists
+        // Found existing inode in hash - free the newly loaded one
+        // The existing inode is already locked by vfs_add_inode
+        inode->ops->free_inode(inode);
+        return existing; // Return the existing inode (locked)
     }
     return inode; // locked
 }

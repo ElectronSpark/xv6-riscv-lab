@@ -286,8 +286,8 @@ void xv6fs_run_file_ops_smoketest(void) {
     struct vfs_inode *testfile = NULL;
     struct vfs_file *file = NULL;
     
-    const char *filename = "xv6fs_file_test";
-    const size_t filename_len = sizeof("xv6fs_file_test") - 1;
+    const char *filename = "xv6_ftest";
+    const size_t filename_len = sizeof("xv6_ftest") - 1;
     const char *test_data = "Hello, xv6fs! This is a test message for file operations.";
     const size_t test_data_len = strlen(test_data);
     char read_buf[128] = {0};
