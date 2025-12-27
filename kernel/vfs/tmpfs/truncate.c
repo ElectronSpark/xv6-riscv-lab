@@ -288,6 +288,10 @@ int __tmpfs_migrate_to_allocated_blocks(struct tmpfs_inode *tmpfs_inode) {
     loff_t size = tmpfs_inode->vfs_inode.size;
     memcpy(first_block, tmpfs_inode->file.data, size);
     memset(first_block + size, 0, PAGE_SIZE - size);
+    // Clear the entire file union first since embedded data overlaps with
+    // the direct/indirect pointers (they share the same memory via union).
+    // Without this, embedded ASCII data would be misinterpreted as non-NULL pointers.
+    memset(&tmpfs_inode->file, 0, sizeof(tmpfs_inode->file));
     tmpfs_inode->file.direct[0] = first_block;
     tmpfs_inode->embedded = false;
     tmpfs_inode->vfs_inode.n_blocks = 1;
