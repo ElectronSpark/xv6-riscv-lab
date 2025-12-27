@@ -617,6 +617,10 @@ void slab_free(void *obj) {
         printf("slab_free(): obj is NULL\n");
         return;
     }
+    if (slab == NULL) {
+        printf("slab_free(): slab is NULL for obj=%p\n", obj);
+        return;
+    }
     cache = slab->cache;
     if (cache == NULL) {
         panic("slab_free");

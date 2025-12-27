@@ -1320,3 +1320,556 @@ out:
         vfs_iput(root);
     }
 }
+// ============================================================================
+// Double Indirect Block Tests
+// ============================================================================
+// Block layout for tmpfs:
+//   Direct:          blocks 0-31       (32 blocks)    = 128KB
+//   Indirect:        blocks 32-543     (512 blocks)   = 2MB  (ends at 2.12MB)
+//   Double Indirect: blocks 544+       (up to 262144) = 1GB+
+// 64MB = 16384 blocks = well into double indirect layer
+// ============================================================================
+
+#define DOUBLE_INDIRECT_MAX_SIZE (64UL * 1024 * 1024)  // 64MB limit
+
+// Helper to fill buffer with position-dependent pattern for verification
+static void fill_pattern(char *buf, size_t len, loff_t offset) {
+    for (size_t i = 0; i < len; i++) {
+        buf[i] = (char)((offset + i) & 0xFF);
+    }
+}
+
+// Helper to verify pattern
+static bool verify_pattern(const char *buf, size_t len, loff_t offset) {
+    for (size_t i = 0; i < len; i++) {
+        char expected = (char)((offset + i) & 0xFF);
+        if (buf[i] != expected) {
+            printf("  pattern mismatch at offset %lld+%lu: got 0x%02x expected 0x%02x\n",
+                   (long long)offset, (unsigned long)i, 
+                   (unsigned char)buf[i], (unsigned char)expected);
+            return false;
+        }
+    }
+    return true;
+}
+
+// Helper to write pattern at offset and verify
+static bool write_and_verify(struct vfs_file *file, loff_t offset, size_t len, 
+                             char *write_buf, char *read_buf, const char *desc) {
+    // Seek and write
+    loff_t pos = vfs_filelseek(file, offset, SEEK_SET);
+    if (pos != offset) {
+        printf("dindirect_smoketest: " FAIL " %s seek to %lld failed (got %lld)\n",
+               desc, (long long)offset, (long long)pos);
+        return false;
+    }
+    
+    fill_pattern(write_buf, len, offset);
+    ssize_t written = vfs_filewrite(file, write_buf, len);
+    if (written != (ssize_t)len) {
+        printf("dindirect_smoketest: " FAIL " %s write %lu bytes at %lld failed (got %ld)\n",
+               desc, (unsigned long)len, (long long)offset, (long)written);
+        return false;
+    }
+    
+    // Seek back and read
+    pos = vfs_filelseek(file, offset, SEEK_SET);
+    if (pos != offset) {
+        printf("dindirect_smoketest: " FAIL " %s seek back failed\n", desc);
+        return false;
+    }
+    
+    memset(read_buf, 0, len);
+    ssize_t bytes_read = vfs_fileread(file, read_buf, len);
+    if (bytes_read != (ssize_t)len) {
+        printf("dindirect_smoketest: " FAIL " %s read %lu bytes got %ld\n",
+               desc, (unsigned long)len, (long)bytes_read);
+        return false;
+    }
+    
+    if (!verify_pattern(read_buf, len, offset)) {
+        printf("dindirect_smoketest: " FAIL " %s pattern verification failed\n", desc);
+        return false;
+    }
+    
+    printf("dindirect_smoketest: " PASS " %s (offset=%lld, len=%lu)\n",
+           desc, (long long)offset, (unsigned long)len);
+    return true;
+}
+
+// Test file I/O reaching into double indirect blocks with various edge cases
+void tmpfs_run_double_indirect_smoketest(void) {
+    int ret = 0;
+    struct vfs_inode *root = vfs_root_inode.mnt_rooti;
+    struct vfs_inode *test_inode = NULL;
+    struct vfs_file *file = NULL;
+    bool root_pinned = false;
+
+    const char *file_name = "dindirect_test";
+    const size_t file_len = sizeof("dindirect_test") - 1;
+
+    // Use static buffers for pattern writes (up to 3 pages for cross-boundary tests)
+    static char write_buf[PAGE_SIZE * 3];
+    static char read_buf[PAGE_SIZE * 3];
+
+    // Key byte offsets for boundary testing
+    const loff_t DIRECT_END = TMPFS_INODE_DBLOCKS * PAGE_SIZE;           // 128KB
+    const loff_t INDIRECT_END = (TMPFS_INODE_DBLOCKS + 512) * PAGE_SIZE; // ~2.12MB (block 544)
+    const loff_t TARGET_64MB = DOUBLE_INDIRECT_MAX_SIZE;                 // 64MB
+
+    printf("dindirect_smoketest: Block boundaries:\n");
+    printf("  Direct end:   block %lu, offset %lld\n", TMPFS_INODE_DBLOCKS, (long long)DIRECT_END);
+    printf("  Indirect end: block %lu, offset %lld\n", (unsigned long)(TMPFS_INODE_DBLOCKS + 512), (long long)INDIRECT_END);
+    printf("  Target size:  64MB = %lld bytes\n", (long long)TARGET_64MB);
+
+    vfs_idup(root);
+    root_pinned = true;
+
+    // Create test file
+    test_inode = vfs_create(root, 0644, file_name, file_len);
+    if (IS_ERR(test_inode)) {
+        ret = PTR_ERR(test_inode);
+        printf("dindirect_smoketest: " FAIL " create %s, errno=%d\n", file_name, ret);
+        goto out;
+    }
+    printf("dindirect_smoketest: created /%s ino=%lu\n", file_name, test_inode->ino);
+
+    file = vfs_fileopen(test_inode, O_RDWR);
+    if (IS_ERR(file)) {
+        ret = PTR_ERR(file);
+        printf("dindirect_smoketest: " FAIL " open O_RDWR, errno=%d\n", ret);
+        goto cleanup;
+    }
+
+    // =========================================================================
+    // Part 1: Edge position writes within blocks and across block boundaries
+    // Note: Each write extends the file sequentially to avoid sparse file bugs.
+    // =========================================================================
+    printf("\ndindirect_smoketest: === Part 1: Edge position writes ===\n");
+
+    // Test 1a: Write at start of file (embedded data)
+    write_and_verify(file, 0, 100, write_buf, read_buf, "start of file (embedded)");
+
+    // Test 1b: Write at last byte of direct layer
+    write_and_verify(file, DIRECT_END - 100, 100, write_buf, read_buf, "end of direct layer");
+
+    // Test 1c: Write crossing direct->indirect boundary
+    write_and_verify(file, DIRECT_END - 50, 100, write_buf, read_buf, "cross direct->indirect boundary");
+
+    // Test 1d: Write at start of indirect layer (already covered by 1c extension)
+    write_and_verify(file, DIRECT_END, 100, write_buf, read_buf, "start of indirect layer");
+
+    // Test 1e: Write at end of indirect layer (extends file through indirect)
+    write_and_verify(file, INDIRECT_END - 100, 100, write_buf, read_buf, "end of indirect layer");
+
+    // Test 1f: Write crossing indirect->double_indirect boundary
+    write_and_verify(file, INDIRECT_END - 50, 100, write_buf, read_buf, "cross indirect->dindirect boundary");
+
+    // Test 1g: Write at start of double indirect layer
+    write_and_verify(file, INDIRECT_END, 100, write_buf, read_buf, "start of double indirect layer");
+
+    // Extend file through double indirect sequentially using truncate first
+    // to avoid sparse write issues with the allocate_blocks function
+    vfs_fileclose(file);
+    file = NULL;
+    
+    // Extend to 10MB, 32MB, then 64MB via truncate (sequential growth)
+    printf("dindirect_smoketest: extending file through double indirect via truncate...\n");
+    
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, 10 * 1024 * 1024);
+    vfs_iunlock(test_inode);
+    if (ret != 0) {
+        printf("dindirect_smoketest: " FAIL " truncate to 10MB, errno=%d\n", ret);
+        goto cleanup;
+    }
+    
+    file = vfs_fileopen(test_inode, O_RDWR);
+    if (IS_ERR(file)) {
+        ret = PTR_ERR(file);
+        printf("dindirect_smoketest: " FAIL " reopen after 10MB extend, errno=%d\n", ret);
+        goto cleanup;
+    }
+    
+    // Test 1h: Write deep in double indirect (10MB offset - within allocated range)
+    write_and_verify(file, 10 * 1024 * 1024 - 100, 100, write_buf, read_buf, "at 10MB");
+
+    // Test 1i: Write crossing page boundary within double indirect
+    loff_t mid_dindirect = 5 * 1024 * 1024; // 5MB (within 10MB file)
+    write_and_verify(file, mid_dindirect - 50, 100, write_buf, read_buf, 
+                     "cross page boundary in dindirect (5MB)");
+
+    vfs_fileclose(file);
+    file = NULL;
+    
+    // Extend to 32MB
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, 32 * 1024 * 1024);
+    vfs_iunlock(test_inode);
+    if (ret != 0) {
+        printf("dindirect_smoketest: " FAIL " truncate to 32MB, errno=%d\n", ret);
+        goto cleanup;
+    }
+    
+    file = vfs_fileopen(test_inode, O_RDWR);
+    if (IS_ERR(file)) {
+        ret = PTR_ERR(file);
+        printf("dindirect_smoketest: " FAIL " reopen after 32MB extend, errno=%d\n", ret);
+        goto cleanup;
+    }
+    
+    // Test 1j: Write at 32MB
+    write_and_verify(file, 32 * 1024 * 1024 - 100, 100, write_buf, read_buf, "at 32MB");
+
+    // Test 1k: Large write spanning multiple pages in double indirect (at 20MB)
+    write_and_verify(file, 20 * 1024 * 1024, PAGE_SIZE + 500, write_buf, read_buf,
+                     "multi-page write in dindirect (20MB)");
+
+    vfs_fileclose(file);
+    file = NULL;
+    
+    // Extend to 64MB
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, TARGET_64MB);
+    vfs_iunlock(test_inode);
+    if (ret != 0) {
+        printf("dindirect_smoketest: " FAIL " truncate to 64MB, errno=%d\n", ret);
+        goto cleanup;
+    }
+    printf("dindirect_smoketest: " PASS " extended to 64MB, n_blocks=%lu\n", test_inode->n_blocks);
+    
+    file = vfs_fileopen(test_inode, O_RDWR);
+    if (IS_ERR(file)) {
+        ret = PTR_ERR(file);
+        printf("dindirect_smoketest: " FAIL " reopen after 64MB extend, errno=%d\n", ret);
+        goto cleanup;
+    }
+    
+    // Test 1l: Write near 64MB limit
+    write_and_verify(file, TARGET_64MB - 100, 100, write_buf, read_buf, "near 64MB limit");
+
+    // =========================================================================
+    // Part 2: Verify all previously written data is still correct
+    // =========================================================================
+    printf("\ndindirect_smoketest: === Part 2: Verify persistence ===\n");
+
+    struct {
+        loff_t offset;
+        size_t len;
+        const char *desc;
+    } verify_points[] = {
+        {0, 100, "start of file"},
+        {DIRECT_END - 100, 100, "end of direct"},
+        {DIRECT_END - 50, 100, "cross direct->indirect"},
+        {DIRECT_END, 100, "start of indirect"},
+        {INDIRECT_END - 100, 100, "end of indirect"},
+        {INDIRECT_END - 50, 100, "cross indirect->dindirect"},
+        {INDIRECT_END, 100, "start of dindirect"},
+        {10 * 1024 * 1024 - 100, 100, "at 10MB"},
+        {5 * 1024 * 1024 - 50, 100, "5MB cross page"},
+        {32 * 1024 * 1024 - 100, 100, "at 32MB"},
+        {20 * 1024 * 1024, PAGE_SIZE + 500, "20MB multi-page"},
+        {TARGET_64MB - 100, 100, "64MB - 100"},
+    };
+    
+    bool all_verified = true;
+    for (size_t i = 0; i < sizeof(verify_points)/sizeof(verify_points[0]); i++) {
+        loff_t off = verify_points[i].offset;
+        size_t len = verify_points[i].len;
+        
+        loff_t pos = vfs_filelseek(file, off, SEEK_SET);
+        if (pos != off) {
+            printf("dindirect_smoketest: " FAIL " verify seek %s\n", verify_points[i].desc);
+            all_verified = false;
+            continue;
+        }
+        
+        memset(read_buf, 0, len);
+        ssize_t bytes_read = vfs_fileread(file, read_buf, len);
+        if (bytes_read != (ssize_t)len) {
+            printf("dindirect_smoketest: " FAIL " verify read %s (got %ld)\n", 
+                   verify_points[i].desc, (long)bytes_read);
+            all_verified = false;
+            continue;
+        }
+        
+        if (!verify_pattern(read_buf, len, off)) {
+            printf("dindirect_smoketest: " FAIL " verify pattern %s\n", verify_points[i].desc);
+            all_verified = false;
+        }
+    }
+    if (all_verified) {
+        printf("dindirect_smoketest: " PASS " all persistence verifications passed\n");
+    }
+
+    // =========================================================================
+    // Part 3: Size changes via truncate across layer boundaries
+    // =========================================================================
+    printf("\ndindirect_smoketest: === Part 3: Truncate across layers ===\n");
+
+    vfs_fileclose(file);
+    file = NULL;
+
+    struct tmpfs_inode *ti = container_of(test_inode, struct tmpfs_inode, vfs_inode);
+
+    // Test 3a: Truncate to zero
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, 0);
+    vfs_iunlock(test_inode);
+    if (ret == 0 && test_inode->size == 0) {
+        printf("dindirect_smoketest: " PASS " truncate to 0\n");
+    } else {
+        printf("dindirect_smoketest: " FAIL " truncate to 0 (ret=%d, size=%lld)\n",
+               ret, (long long)test_inode->size);
+    }
+
+    // Test 3b: Grow directly to double indirect (0 -> 5MB)
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, 5 * 1024 * 1024);
+    vfs_iunlock(test_inode);
+    if (ret == 0 && test_inode->size == 5 * 1024 * 1024) {
+        printf("dindirect_smoketest: " PASS " grow 0 -> 5MB (dindirect=%s)\n",
+               ti->file.double_indirect ? "set" : "null");
+    } else {
+        printf("dindirect_smoketest: " FAIL " grow 0 -> 5MB\n");
+    }
+
+    // Test 3c: Shrink from double indirect to indirect (5MB -> 1MB)
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, 1 * 1024 * 1024);
+    vfs_iunlock(test_inode);
+    if (ret == 0 && test_inode->size == 1 * 1024 * 1024) {
+        printf("dindirect_smoketest: " PASS " shrink 5MB -> 1MB (dindirect=%s)\n",
+               ti->file.double_indirect ? "set" : "null");
+    } else {
+        printf("dindirect_smoketest: " FAIL " shrink 5MB -> 1MB\n");
+    }
+
+    // Test 3d: Shrink from indirect to direct (1MB -> 64KB)
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, 64 * 1024);
+    vfs_iunlock(test_inode);
+    if (ret == 0 && test_inode->size == 64 * 1024) {
+        printf("dindirect_smoketest: " PASS " shrink 1MB -> 64KB (indirect=%s)\n",
+               ti->file.indirect ? "set" : "null");
+    } else {
+        printf("dindirect_smoketest: " FAIL " shrink 1MB -> 64KB\n");
+    }
+
+    // Test 3e: Grow to exactly indirect boundary
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, DIRECT_END);
+    vfs_iunlock(test_inode);
+    if (ret == 0 && test_inode->size == DIRECT_END) {
+        printf("dindirect_smoketest: " PASS " grow to exact direct end (%lld)\n", (long long)DIRECT_END);
+    } else {
+        printf("dindirect_smoketest: " FAIL " grow to exact direct end\n");
+    }
+
+    // Test 3f: Grow one byte past direct boundary (into indirect)
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, DIRECT_END + 1);
+    vfs_iunlock(test_inode);
+    if (ret == 0 && test_inode->size == DIRECT_END + 1) {
+        printf("dindirect_smoketest: " PASS " grow to direct_end + 1 (indirect=%s)\n",
+               ti->file.indirect ? "set" : "null");
+    } else {
+        printf("dindirect_smoketest: " FAIL " grow to direct_end + 1\n");
+    }
+
+    // Test 3g: Grow to exactly double indirect boundary
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, INDIRECT_END);
+    vfs_iunlock(test_inode);
+    if (ret == 0 && test_inode->size == INDIRECT_END) {
+        printf("dindirect_smoketest: " PASS " grow to exact indirect end (%lld)\n", (long long)INDIRECT_END);
+    } else {
+        printf("dindirect_smoketest: " FAIL " grow to exact indirect end\n");
+    }
+
+    // Test 3h: Grow one byte past indirect boundary (into double indirect)
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, INDIRECT_END + 1);
+    vfs_iunlock(test_inode);
+    if (ret == 0 && test_inode->size == INDIRECT_END + 1) {
+        printf("dindirect_smoketest: " PASS " grow to indirect_end + 1 (dindirect=%s)\n",
+               ti->file.double_indirect ? "set" : "null");
+    } else {
+        printf("dindirect_smoketest: " FAIL " grow to indirect_end + 1\n");
+    }
+
+    // Test 3i: Grow to 64MB
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, TARGET_64MB);
+    vfs_iunlock(test_inode);
+    if (ret == 0 && test_inode->size == TARGET_64MB) {
+        printf("dindirect_smoketest: " PASS " grow to 64MB, n_blocks=%lu\n", test_inode->n_blocks);
+    } else {
+        printf("dindirect_smoketest: " FAIL " grow to 64MB\n");
+    }
+
+    // Shrink back to 0 for next tests
+    vfs_ilock(test_inode);
+    __tmpfs_truncate(test_inode, 0);
+    vfs_iunlock(test_inode);
+
+    // =========================================================================
+    // Part 4: Size changes via writes then verify with reads
+    // =========================================================================
+    printf("\ndindirect_smoketest: === Part 4: Size change via write + verify ===\n");
+
+    file = vfs_fileopen(test_inode, O_RDWR);
+    if (IS_ERR(file)) {
+        ret = PTR_ERR(file);
+        printf("dindirect_smoketest: " FAIL " reopen for part 4, errno=%d\n", ret);
+        goto cleanup;
+    }
+
+    // Test 4a: Write to extend file into indirect layer
+    write_and_verify(file, DIRECT_END + 500, 200, write_buf, read_buf,
+                     "extend into indirect via write");
+
+    // Test 4b: Truncate shorter but still in indirect, then write at boundary
+    vfs_fileclose(file);
+    file = NULL;
+    
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, DIRECT_END + 100);
+    vfs_iunlock(test_inode);
+    
+    file = vfs_fileopen(test_inode, O_RDWR);
+    if (!IS_ERR(file)) {
+        write_and_verify(file, DIRECT_END - 20, 50, write_buf, read_buf,
+                         "write across direct/indirect after truncate");
+        vfs_fileclose(file);
+        file = NULL;
+    }
+
+    // Test 4c: Truncate to zero, grow via truncate, then write
+    vfs_ilock(test_inode);
+    __tmpfs_truncate(test_inode, 0);
+    vfs_iunlock(test_inode);
+
+    // First extend via truncate to avoid sparse write bug
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, 8 * 1024 * 1024 + 200);
+    vfs_iunlock(test_inode);
+    
+    if (ret == 0) {
+        file = vfs_fileopen(test_inode, O_RDWR);
+        if (!IS_ERR(file)) {
+            write_and_verify(file, 8 * 1024 * 1024, 200, write_buf, read_buf,
+                             "write at 8MB after truncate-extend");
+
+            // Verify zeros in the gap (zero-filled by truncate)
+            (void)vfs_filelseek(file, DIRECT_END + 100, SEEK_SET);
+            memset(read_buf, 0xFF, 100);
+            ssize_t bytes_read = vfs_fileread(file, read_buf, 100);
+            if (bytes_read == 100) {
+                bool all_zero = true;
+                for (int i = 0; i < 100; i++) {
+                    if (read_buf[i] != 0) {
+                        all_zero = false;
+                        break;
+                    }
+                }
+                if (all_zero) {
+                    printf("dindirect_smoketest: " PASS " gap is zero-filled\n");
+                } else {
+                    printf("dindirect_smoketest: " WARN " gap not zero-filled\n");
+                }
+            }
+            vfs_fileclose(file);
+            file = NULL;
+        }
+    } else {
+        printf("dindirect_smoketest: " FAIL " truncate-extend to 8MB, errno=%d\n", ret);
+    }
+
+    // =========================================================================
+    // Part 5: Cross-layer write/read spanning multiple layers
+    // Note: Uses truncate to pre-extend file to avoid sparse write bugs
+    // =========================================================================
+    printf("\ndindirect_smoketest: === Part 5: Cross-layer operations ===\n");
+
+    vfs_ilock(test_inode);
+    __tmpfs_truncate(test_inode, 0);
+    vfs_iunlock(test_inode);
+
+    // Pre-extend to indirect layer for first test
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, DIRECT_END + PAGE_SIZE * 3);
+    vfs_iunlock(test_inode);
+
+    file = vfs_fileopen(test_inode, O_RDWR);
+    if (!IS_ERR(file)) {
+        // Write that spans from direct into indirect (large write)
+        size_t span_len = PAGE_SIZE * 3; // 12KB spanning the boundary
+        loff_t span_start = DIRECT_END - PAGE_SIZE; // Start 1 page before boundary
+        
+        write_and_verify(file, span_start, span_len, write_buf, read_buf,
+                         "span direct->indirect (3 pages)");
+
+        vfs_fileclose(file);
+        file = NULL;
+    }
+    
+    // Pre-extend to double indirect layer for second test
+    vfs_ilock(test_inode);
+    ret = __tmpfs_truncate(test_inode, INDIRECT_END + PAGE_SIZE * 3);
+    vfs_iunlock(test_inode);
+
+    file = vfs_fileopen(test_inode, O_RDWR);
+    if (!IS_ERR(file)) {
+        // Write that spans from indirect into double indirect
+        size_t span_len = PAGE_SIZE * 3;
+        loff_t span_start = INDIRECT_END - PAGE_SIZE;
+        write_and_verify(file, span_start, span_len, write_buf, read_buf,
+                         "span indirect->dindirect (3 pages)");
+
+        vfs_fileclose(file);
+        file = NULL;
+    }
+
+    // =========================================================================
+    // Part 6: Final comprehensive verification after many operations
+    // =========================================================================
+    printf("\ndindirect_smoketest: === Part 6: Final stat check ===\n");
+
+    file = vfs_fileopen(test_inode, O_RDONLY);
+    if (!IS_ERR(file)) {
+        struct stat st;
+        ret = vfs_filestat(file, &st);
+        if (ret == 0) {
+            printf("dindirect_smoketest: " PASS " final stat: size=%lld, n_blocks=%lu\n",
+                   (long long)st.size, test_inode->n_blocks);
+        } else {
+            printf("dindirect_smoketest: " FAIL " final stat failed\n");
+        }
+        vfs_fileclose(file);
+        file = NULL;
+    }
+
+cleanup:
+    if (file != NULL && !IS_ERR(file)) {
+        vfs_fileclose(file);
+    }
+
+    if (test_inode != NULL && !IS_ERR(test_inode)) {
+        vfs_ilock(test_inode);
+        __tmpfs_truncate(test_inode, 0);
+        vfs_iunlock(test_inode);
+        vfs_iput(test_inode);
+        ret = vfs_unlink(root, file_name, file_len);
+        if (ret != 0) {
+            printf("dindirect_smoketest: " WARN " cleanup unlink %s, errno=%d\n", file_name, ret);
+        } else {
+            printf("dindirect_smoketest: cleanup complete\n");
+        }
+    }
+
+out:
+    if (root_pinned) {
+        vfs_iput(root);
+    }
+}

@@ -289,4 +289,18 @@ void tmpfs_init_fs_type(void) {
     } else {
         printf("file_ops_smoketest: no memory leak detected\n");
     }
+
+    // Memory leak check for double_indirect smoketest
+    before_pages = get_total_free_pages();
+    tmpfs_run_double_indirect_smoketest();
+    tmpfs_shrink_caches();
+    __vfs_shrink_caches();
+    kmm_shrink_all();
+    after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: dindirect_smoketest leaked %ld pages\n",
+               (long)(before_pages - after_pages));
+    } else {
+        printf("dindirect_smoketest: no memory leak detected\n");
+    }
 }

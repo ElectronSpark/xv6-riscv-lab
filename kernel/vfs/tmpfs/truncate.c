@@ -198,6 +198,7 @@ void __tmpfs_truncate_free_blocks(void *blocks, int start_block, int end_block, 
 }
 
 void __tmpfs_do_shrink_blocks(struct tmpfs_inode *tmpfs_inode, int block_cnt, int new_block_cnt) {
+
     int start = 0;
     int end = 0;
 
@@ -290,6 +291,7 @@ int __tmpfs_truncate_allocate_blocks(void *blocks, int start_block, int end_bloc
             "__tmpfs_truncate_allocate_blocks: invalid block range");
     assert (level >= 0 && level <= 2,
             "__tmpfs_truncate_allocate_blocks: invalid level");
+
     void **block_array = (void **)blocks;
     if (level == 0) {
         for (int i = start_block; i < end_block; i++) {
@@ -325,13 +327,28 @@ int __tmpfs_truncate_allocate_blocks(void *blocks, int start_block, int end_bloc
             local_end = end_block;
         }
         void **item_ptr = &((void **)blocks)[item_index];
-        assert (*item_ptr == NULL, 
-                "__tmpfs_truncate_allocate_blocks: item already allocated");
+        // The item may already exist if we're extending into an existing indirect layer
+        if (*item_ptr == NULL) {
+            // Need to allocate the item block
+            void *new_item = kalloc();
+            if (new_item == NULL) {
+                return -ENOMEM;
+            }
+            memset(new_item, 0, PAGE_SIZE);
+            *item_ptr = new_item;
+            first_new_item_index = item_index;
+        }
         ret = __tmpfs_truncate_allocate_blocks(*item_ptr,
                                                 start_block & item_blocks_mask,
                                                 local_end - item_index * item_blocks,
                                                 level - 1);
         if (ret != 0) {
+            // If we just allocated this item and it failed, free it
+            if (first_new_item_index == item_index) {
+                kfree(*item_ptr);
+                *item_ptr = NULL;
+                first_new_item_index = -1;
+            }
             return ret;
         }
         start_block = local_end;
@@ -344,8 +361,15 @@ int __tmpfs_truncate_allocate_blocks(void *blocks, int start_block, int end_bloc
             local_end = end_block;
         }
         void **item_ptr = &((void **)blocks)[item_index];
-        assert (*item_ptr == NULL, 
-                "__tmpfs_truncate_allocate_blocks: item already allocated");
+        // For aligned items after the first, they should not exist yet
+        // (if they did, we wouldn't be allocating this range)
+        if (*item_ptr != NULL) {
+            // This shouldn't happen for properly calculated ranges
+            printf("BUG: allocate_blocks level=%d start=%d end=%d item_idx=%d item_blocks=%d\n",
+                   level, start_block, end_block, item_index, item_blocks);
+            printf("  blocks=%p item_ptr=%p *item_ptr=%p\n", blocks, item_ptr, *item_ptr);
+            panic("__tmpfs_truncate_allocate_blocks: aligned item already allocated");
+        }
         void *new_item = kalloc();
         if (new_item == NULL) {
             // Free all items we allocated in this loop
