@@ -1,0 +1,170 @@
+#ifndef KERNEL_VIRTUAL_FILE_SYSTEM_XV6FS_PRIVATE_H
+#define KERNEL_VIRTUAL_FILE_SYSTEM_XV6FS_PRIVATE_H
+
+#include "types.h"
+#include "vfs/vfs_types.h"
+#include "spinlock.h"
+#include "fs.h"
+
+// Block size for xv6 filesystem
+#define XV6FS_BSIZE BSIZE
+
+// Inode index macros
+#define XV6FS_IBLOCK(ino, sb) (((ino) / IPB) + (sb)->inodestart)
+
+// Maximum block count
+#define XV6FS_NDIRECT NDIRECT
+#define XV6FS_NINDIRECT NINDIRECT
+#define XV6FS_NDINDIRECT NDINDIRECT
+#define XV6FS_MAXFILE MAXFILE
+
+// Log size
+#define XV6FS_LOGSIZE LOGSIZE
+
+// VFS dentry cookie definitions
+#define VFS_DENTRY_COOKIE_END ((int64)0)
+#define VFS_DENTRY_COOKIE_SELF ((int64)1)
+#define VFS_DENTRY_COOKIE_PARENT ((int64)2)
+
+// xv6 file types to VFS mode conversion
+#define XV6FS_T_DIR     1   // Directory
+#define XV6FS_T_FILE    2   // File
+#define XV6FS_T_DEVICE  3   // Device
+#define XV6FS_T_SYMLINK 4   // Symbolic link
+
+/*
+ * xv6fs log header structure
+ * Used both on-disk and in-memory to track logged blocks
+ */
+struct xv6fs_logheader {
+    int n;
+    int block[XV6FS_LOGSIZE];
+};
+
+/*
+ * xv6fs log structure
+ * Per-superblock logging for crash recovery
+ */
+struct xv6fs_log {
+    struct spinlock lock;
+    int start;          // Log start block
+    int size;           // Log size in blocks
+    int outstanding;    // How many FS ops are executing
+    int committing;     // In commit(), please wait
+    int dev;            // Device number
+    struct xv6fs_logheader lh;
+};
+
+/*
+ * xv6fs superblock structure
+ * Contains the VFS superblock and xv6-specific data
+ */
+struct xv6fs_superblock {
+    struct vfs_superblock vfs_sb;
+    struct superblock disk_sb;   // Copy of the on-disk superblock
+    uint dev;                     // Device number
+    int dirty;                    // Superblock metadata dirty flag
+    struct xv6fs_log log;         // Per-superblock logging
+};
+
+/*
+ * xv6fs inode structure
+ * Contains the VFS inode and xv6-specific data
+ */
+struct xv6fs_inode {
+    struct vfs_inode vfs_inode;
+    uint dev;                     // Device number (for lookup)
+    uint addrs[XV6FS_NDIRECT + 2]; // Block addresses (direct + indirect + double indirect)
+    short major;                  // Major device number (for device files)
+    short minor;                  // Minor device number (for device files)
+};
+
+// External declarations
+extern struct vfs_inode_ops xv6fs_inode_ops;
+extern struct vfs_file_ops xv6fs_file_ops;
+extern struct vfs_superblock_ops xv6fs_superblock_ops;
+extern struct vfs_fs_type_ops xv6fs_fs_type_ops;
+
+// Log operations
+void xv6fs_initlog(struct xv6fs_superblock *xv6_sb);
+void xv6fs_begin_op(struct xv6fs_superblock *xv6_sb);
+void xv6fs_end_op(struct xv6fs_superblock *xv6_sb);
+void xv6fs_log_write(struct xv6fs_superblock *xv6_sb, struct buf *b);
+
+// Superblock operations
+struct vfs_inode *xv6fs_alloc_inode(struct vfs_superblock *sb);
+struct vfs_inode *xv6fs_get_inode(struct vfs_superblock *sb, uint64 ino);
+int xv6fs_sync_fs(struct vfs_superblock *sb, int wait);
+void xv6fs_unmount_begin(struct vfs_superblock *sb);
+void xv6fs_free(struct vfs_superblock *sb);
+int xv6fs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
+                int flags, const char *data, struct vfs_superblock **ret_sb);
+
+// Inode operations
+int xv6fs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
+                 const char *name, size_t name_len);
+int xv6fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
+                   struct vfs_dentry *ret_dentry);
+ssize_t xv6fs_readlink(struct vfs_inode *inode, char *buf, size_t buflen);
+struct vfs_inode *xv6fs_create(struct vfs_inode *dir, mode_t mode,
+                                const char *name, size_t name_len);
+struct vfs_inode *xv6fs_mkdir(struct vfs_inode *dir, mode_t mode,
+                               const char *name, size_t name_len);
+struct vfs_inode *xv6fs_unlink(struct vfs_inode *dir, const char *name, size_t name_len);
+struct vfs_inode *xv6fs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len);
+struct vfs_inode *xv6fs_mknod(struct vfs_inode *dir, mode_t mode,
+                               dev_t dev, const char *name, size_t name_len);
+struct vfs_inode *xv6fs_symlink(struct vfs_inode *dir, mode_t mode,
+                                 const char *name, size_t name_len,
+                                 const char *target, size_t target_len);
+int xv6fs_link(struct vfs_inode *old, struct vfs_inode *dir,
+               const char *name, size_t name_len);
+int xv6fs_truncate(struct vfs_inode *inode, loff_t new_size);
+void xv6fs_destroy_inode(struct vfs_inode *inode);
+void xv6fs_free_inode(struct vfs_inode *inode);
+int xv6fs_dirty_inode(struct vfs_inode *inode);
+int xv6fs_sync_inode(struct vfs_inode *inode);
+int xv6fs_open(struct vfs_inode *inode, struct vfs_file *file, int f_flags);
+
+// File operations
+ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count);
+ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count);
+loff_t xv6fs_file_llseek(struct vfs_file *file, loff_t offset, int whence);
+int xv6fs_file_stat(struct vfs_file *file, struct stat *stat);
+
+// Helper functions
+void xv6fs_init_fs_type(void);
+uint xv6fs_bmap(struct xv6fs_inode *ip, uint bn);
+void xv6fs_itrunc(struct xv6fs_inode *ip);
+void xv6fs_iupdate(struct xv6fs_inode *ip);
+
+// Convert xv6 type to VFS mode
+static inline mode_t xv6fs_type_to_mode(short type) {
+    switch (type) {
+    case XV6FS_T_DIR:
+        return S_IFDIR | 0755;
+    case XV6FS_T_FILE:
+        return S_IFREG | 0644;
+    case XV6FS_T_DEVICE:
+        return S_IFCHR | 0666;
+    case XV6FS_T_SYMLINK:
+        return S_IFLNK | 0777;
+    default:
+        return 0;
+    }
+}
+
+// Convert VFS mode to xv6 type
+static inline short xv6fs_mode_to_type(mode_t mode) {
+    if (S_ISDIR(mode))
+        return XV6FS_T_DIR;
+    if (S_ISREG(mode))
+        return XV6FS_T_FILE;
+    if (S_ISCHR(mode) || S_ISBLK(mode))
+        return XV6FS_T_DEVICE;
+    if (S_ISLNK(mode))
+        return XV6FS_T_SYMLINK;
+    return 0;
+}
+
+#endif // KERNEL_VIRTUAL_FILE_SYSTEM_XV6FS_PRIVATE_H

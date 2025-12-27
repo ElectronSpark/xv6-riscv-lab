@@ -17,6 +17,7 @@ void __vfs_file_init(void);
 void __vfs_file_shrink_cache(void);
 void __vfs_shrink_caches(void);
 void tmpfs_init_fs_type(void);
+void xv6fs_init_fs_type(void);
 
 // Assert holding the spinlock of the inode
 #define VFS_INODE_ASSERT_HOLDING(__inode, __fmt, ...) do {                  \

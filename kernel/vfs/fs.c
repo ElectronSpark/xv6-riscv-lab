@@ -331,6 +331,7 @@ void vfs_init(void) {
     proc->fs.cwd.sb = NULL;
     proc_unlock(proc);
     tmpfs_init_fs_type();
+    xv6fs_init_fs_type();
 }
 
 /*
