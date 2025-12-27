@@ -136,9 +136,18 @@ add_custom_command(
     COMMENT "Creating file system image with user programs and README"
 )
 
+# Create a second empty xv6fs disk image for the second virtio device
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fs0.img
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/mkfs fs0.img
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mkfs
+    COMMENT "Creating empty xv6fs disk image fs0.img"
+)
+
 add_custom_target(fs_img ALL
-    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/fs.img
-    COMMENT "Creating file system image"
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/fs.img ${CMAKE_CURRENT_BINARY_DIR}/fs0.img
+    COMMENT "Creating file system images"
 )
 
 
@@ -201,6 +210,8 @@ else()
         -global virtio-mmio.force-legacy=false
         -drive file=fs.img,if=none,format=raw,id=x0
         -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
+        -drive file=fs0.img,if=none,format=raw,id=x1
+        -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
         -netdev user,id=net0,hostfwd=udp::${FWDPORT1}-:2000,hostfwd=udp::${FWDPORT2}-:2001
         -object filter-dump,id=net0,netdev=net0,file=packets.pcap
         -device e1000,netdev=net0,bus=pcie.0
@@ -223,6 +234,7 @@ else()
         DEPENDS kernel/kernel 
                 kernel/kernel.sym
                 fs.img
+                fs0.img
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         COMMENT "Generate the device tree file"
     )
@@ -233,6 +245,7 @@ else()
         DEPENDS kernel/kernel 
                 kernel/kernel.sym
                 fs.img
+                fs0.img
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         COMMENT "Running QEMU with kernel and fs.img"
     )
@@ -260,6 +273,7 @@ else()
                 kernel/kernel.sym
                 .gdbinit 
                 fs.img
+                fs0.img
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         COMMENT "Running QEMU with GDB stub"
     )

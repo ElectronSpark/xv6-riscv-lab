@@ -199,7 +199,7 @@ void            plic_complete(int);
 // virtio_disk.c
 void            virtio_disk_init(void);
 // void            virtio_disk_rw(struct buf *, int);
-void            virtio_disk_intr(void);
+void            virtio_disk_intr(int diskno);
 
 // backtrace.c
 void            print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end);
