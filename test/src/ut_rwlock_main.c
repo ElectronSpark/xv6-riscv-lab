@@ -4,6 +4,7 @@
 #include <string.h>
 #include <cmocka.h>
 
+#include "host_test_stubs.h"
 #include "types.h"
 #include "rwlock.h"
 #include "proc.h"
