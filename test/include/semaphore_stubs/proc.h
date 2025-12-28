@@ -10,6 +10,7 @@ struct cpu {
 };
 
 struct proc {
+    int pid;
     int dummy;
 };
 
