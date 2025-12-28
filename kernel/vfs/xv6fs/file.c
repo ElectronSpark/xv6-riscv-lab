@@ -50,7 +50,7 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count) {
             n = count - bytes_read;
         }
         
-        uint addr = xv6fs_bmap(ip, bn);
+        uint addr = xv6fs_bmap_read(ip, bn);
         if (addr == 0) {
             // Sparse file - return zeros
             memset(buf + bytes_read, 0, n);

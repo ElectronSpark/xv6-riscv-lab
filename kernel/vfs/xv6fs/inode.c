@@ -121,6 +121,61 @@ found_indirect:
     return addr;
 }
 
+// Read-only bmap - returns 0 if block doesn't exist (for sparse files)
+// Does not allocate any blocks
+uint xv6fs_bmap_read(struct xv6fs_inode *ip, uint bn) {
+    uint dev = ip->dev;
+    uint addr;
+    struct buf *bp;
+    
+    // Direct blocks
+    if (bn < XV6FS_NDIRECT) {
+        return ip->addrs[bn];  // May be 0 for sparse files
+    }
+    bn -= XV6FS_NDIRECT;
+    
+    // Single indirect block
+    if (bn < XV6FS_NINDIRECT) {
+        if (ip->addrs[XV6FS_NDIRECT] == 0) {
+            return 0;
+        }
+        bp = bread(dev, ip->addrs[XV6FS_NDIRECT]);
+        if (bp == NULL) return 0;
+        addr = ((uint*)bp->data)[bn];
+        brelse(bp);
+        return addr;
+    }
+    bn -= XV6FS_NINDIRECT;
+    
+    // Double indirect block
+    if (bn < XV6FS_NDINDIRECT) {
+        if (ip->addrs[XV6FS_NDIRECT + 1] == 0) {
+            return 0;
+        }
+        bp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
+        if (bp == NULL) return 0;
+        
+        uint l1_idx = bn / XV6FS_NINDIRECT;
+        uint l2_idx = bn % XV6FS_NINDIRECT;
+        uint *a = (uint*)bp->data;
+        
+        if (a[l1_idx] == 0) {
+            brelse(bp);
+            return 0;
+        }
+        uint l1_addr = a[l1_idx];
+        brelse(bp);
+        
+        bp = bread(dev, l1_addr);
+        if (bp == NULL) return 0;
+        addr = ((uint*)bp->data)[l2_idx];
+        brelse(bp);
+        return addr;
+    }
+    
+    return 0;  // Block number out of range
+}
+
 uint xv6fs_bmap(struct xv6fs_inode *ip, uint bn) {
     struct xv6fs_superblock *xv6_sb = container_of(ip->vfs_inode.sb, 
                                                     struct xv6fs_superblock, vfs_sb);
@@ -325,39 +380,133 @@ static void __xv6fs_itrunc_ind(struct xv6fs_superblock *xv6_sb, uint *entry, uin
     __xv6fs_itrunc_ind_partial(xv6_sb, entry, dev, 0);
 }
 
+// Maximum blocks to free per transaction to stay within log limits
+// Each bfree modifies the bitmap (1 write) so we can free ~MAXOPBLOCKS/2 blocks per tx
+#define ITRUNC_BATCH_SIZE ((MAXOPBLOCKS - 5) / 2)
+
+// Truncate inode in batches to handle large files
+// IMPORTANT: Caller must have called xv6fs_begin_op before calling this.
+// This function may call xv6fs_end_op and xv6fs_begin_op internally to commit batches.
+// When this function returns, a transaction is still active (caller should call xv6fs_end_op).
 void xv6fs_itrunc(struct xv6fs_inode *ip) {
     struct xv6fs_superblock *xv6_sb = container_of(ip->vfs_inode.sb,
                                                     struct xv6fs_superblock, vfs_sb);
     uint dev = ip->dev;
+    int freed_this_batch = 0;
     
     // Free direct blocks
     for (int i = 0; i < XV6FS_NDIRECT; i++) {
         if (ip->addrs[i]) {
             __xv6fs_bfree(xv6_sb, dev, ip->addrs[i]);
             ip->addrs[i] = 0;
+            freed_this_batch++;
+            
+            if (freed_this_batch >= ITRUNC_BATCH_SIZE) {
+                // Commit current batch and start new transaction
+                xv6fs_iupdate(ip);
+                xv6fs_end_op(xv6_sb);
+                xv6fs_begin_op(xv6_sb);
+                freed_this_batch = 0;
+            }
         }
     }
     
     // Free indirect blocks
-    __xv6fs_itrunc_ind(xv6_sb, &ip->addrs[XV6FS_NDIRECT], dev);
+    if (ip->addrs[XV6FS_NDIRECT]) {
+        struct buf *bp = bread(dev, ip->addrs[XV6FS_NDIRECT]);
+        uint *a = (uint*)bp->data;
+        
+        for (uint j = 0; j < XV6FS_NINDIRECT; j++) {
+            if (a[j]) {
+                __xv6fs_bfree(xv6_sb, dev, a[j]);
+                a[j] = 0;
+                freed_this_batch++;
+                
+                if (freed_this_batch >= ITRUNC_BATCH_SIZE) {
+                    xv6fs_log_write(xv6_sb, bp);
+                    brelse(bp);
+                    xv6fs_iupdate(ip);
+                    xv6fs_end_op(xv6_sb);
+                    xv6fs_begin_op(xv6_sb);
+                    freed_this_batch = 0;
+                    bp = bread(dev, ip->addrs[XV6FS_NDIRECT]);
+                    a = (uint*)bp->data;
+                }
+            }
+        }
+        xv6fs_log_write(xv6_sb, bp);
+        brelse(bp);
+        __xv6fs_bfree(xv6_sb, dev, ip->addrs[XV6FS_NDIRECT]);
+        ip->addrs[XV6FS_NDIRECT] = 0;
+        freed_this_batch++;
+        
+        if (freed_this_batch >= ITRUNC_BATCH_SIZE) {
+            xv6fs_iupdate(ip);
+            xv6fs_end_op(xv6_sb);
+            xv6fs_begin_op(xv6_sb);
+            freed_this_batch = 0;
+        }
+    }
     
     // Free double indirect blocks
     if (ip->addrs[XV6FS_NDIRECT + 1]) {
-        struct buf *bp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
-        uint *a = (uint*)bp->data;
+        struct buf *dbp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
+        uint *da = (uint*)dbp->data;
         
         for (int j = 0; j < XV6FS_NINDIRECT; j++) {
-            if (a[j]) {
-                __xv6fs_itrunc_ind(xv6_sb, &a[j], dev);
+            if (da[j]) {
+                struct buf *bp = bread(dev, da[j]);
+                uint *a = (uint*)bp->data;
+                
+                for (uint k = 0; k < XV6FS_NINDIRECT; k++) {
+                    if (a[k]) {
+                        __xv6fs_bfree(xv6_sb, dev, a[k]);
+                        a[k] = 0;
+                        freed_this_batch++;
+                        
+                        if (freed_this_batch >= ITRUNC_BATCH_SIZE) {
+                            xv6fs_log_write(xv6_sb, bp);
+                            brelse(bp);
+                            xv6fs_log_write(xv6_sb, dbp);
+                            brelse(dbp);
+                            xv6fs_iupdate(ip);
+                            xv6fs_end_op(xv6_sb);
+                            xv6fs_begin_op(xv6_sb);
+                            freed_this_batch = 0;
+                            dbp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
+                            da = (uint*)dbp->data;
+                            bp = bread(dev, da[j]);
+                            a = (uint*)bp->data;
+                        }
+                    }
+                }
+                xv6fs_log_write(xv6_sb, bp);
+                brelse(bp);
+                __xv6fs_bfree(xv6_sb, dev, da[j]);
+                da[j] = 0;
+                freed_this_batch++;
+                
+                if (freed_this_batch >= ITRUNC_BATCH_SIZE) {
+                    xv6fs_log_write(xv6_sb, dbp);
+                    brelse(dbp);
+                    xv6fs_iupdate(ip);
+                    xv6fs_end_op(xv6_sb);
+                    xv6fs_begin_op(xv6_sb);
+                    freed_this_batch = 0;
+                    dbp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
+                    da = (uint*)dbp->data;
+                }
             }
         }
-        brelse(bp);
+        xv6fs_log_write(xv6_sb, dbp);
+        brelse(dbp);
         __xv6fs_bfree(xv6_sb, dev, ip->addrs[XV6FS_NDIRECT + 1]);
         ip->addrs[XV6FS_NDIRECT + 1] = 0;
     }
     
     ip->vfs_inode.size = 0;
     xv6fs_iupdate(ip);
+    // Note: Transaction is still active - caller must call xv6fs_end_op
 }
 
 // Partial truncate: free blocks from 'first_block' to end of file
@@ -457,6 +606,11 @@ static int __xv6fs_truncate_partial(struct xv6fs_inode *ip, uint first_block) {
 int xv6fs_truncate(struct vfs_inode *inode, loff_t new_size) {
     if (inode == NULL) return -EINVAL;
     if (new_size < 0) return -EINVAL;
+    
+    // Check max file size (MAXFILE blocks)
+    if (new_size > (loff_t)XV6FS_MAXFILE * BSIZE) {
+        return -EFBIG;
+    }
     
     struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
     struct xv6fs_superblock *xv6_sb = container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
@@ -709,6 +863,33 @@ struct vfs_inode *xv6fs_create(struct vfs_inode *dir, mode_t mode,
     struct xv6fs_inode *dp = container_of(dir, struct xv6fs_inode, vfs_inode);
     struct xv6fs_superblock *xv6_sb = container_of(dir->sb, struct xv6fs_superblock, vfs_sb);
     
+    // Check if file already exists
+    char name_buf[DIRSIZ];
+    memset(name_buf, 0, DIRSIZ);
+    strncpy(name_buf, name, name_len);
+    
+    uint existing_ino = 0;
+    struct dirent de;
+    for (uint off = 0; off < dir->size; off += sizeof(de)) {
+        uint bn = off / BSIZE;
+        uint block_off = off % BSIZE;
+        uint addr = xv6fs_bmap_read(dp, bn);
+        if (addr == 0) continue;
+        
+        struct buf *bp = bread(dp->dev, addr);
+        memmove(&de, bp->data + block_off, sizeof(de));
+        brelse(bp);
+        
+        if (de.inum != 0 && strncmp(de.name, name_buf, DIRSIZ) == 0) {
+            existing_ino = de.inum;
+            break;
+        }
+    }
+    
+    if (existing_ino != 0) {
+        return ERR_PTR(-EEXIST);
+    }
+    
     xv6fs_begin_op(xv6_sb);
     
     // Allocate new inode through VFS layer
@@ -726,11 +907,7 @@ struct vfs_inode *xv6fs_create(struct vfs_inode *dir, mode_t mode,
     new_inode->size = 0;
     xv6fs_iupdate(ip);
     
-    // Add directory entry
-    char name_buf[DIRSIZ];
-    memset(name_buf, 0, DIRSIZ);
-    strncpy(name_buf, name, name_len);
-    
+    // Add directory entry (name_buf already prepared above)
     int ret = __xv6fs_dirlink(xv6_sb, dp, name_buf, new_inode->ino);
     if (ret != 0) {
         // TODO: Free inode on failure

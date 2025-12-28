@@ -136,6 +136,7 @@ int xv6fs_file_stat(struct vfs_file *file, struct stat *stat);
 // Helper functions
 void xv6fs_init_fs_type(void);
 uint xv6fs_bmap(struct xv6fs_inode *ip, uint bn);
+uint xv6fs_bmap_read(struct xv6fs_inode *ip, uint bn);
 void xv6fs_itrunc(struct xv6fs_inode *ip);
 void xv6fs_iupdate(struct xv6fs_inode *ip);
 void xv6fs_shrink_caches(void);
