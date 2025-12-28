@@ -9,7 +9,9 @@
 #define SLAB_OBJ_MAX_SIZE           PAGE_SIZE
 #define SLAB_OBJ_MIN_SHIFT          5
 #define SLAB_OBJ_MIN_SIZE           (1UL << SLAB_OBJ_MIN_SHIFT)
-// Try to set the default SLAB size as 2MB, which is the size of a huge page.
+// DEPRECATED: SLAB_DEFAULT_ORDER is no longer used.
+// Slab order is now determined adaptively based on object size in slab_cache_init().
+// This macro is kept for compatibility but has no effect.
 #if PAGE_BUDDY_MAX_ORDER > 8
 #define SLAB_DEFAULT_ORDER          8
 #else

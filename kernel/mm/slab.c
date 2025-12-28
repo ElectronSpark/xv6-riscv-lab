@@ -13,6 +13,7 @@
 // KEY FEATURES:
 //   - Per-CPU slab lists for scalable concurrent access
 //   - Global free list shared across all CPUs
+//   - Adaptive slab sizing: slab order chosen based on object size
 //   - Try-lock optimization to reduce lock contention
 //   - Embedded or separate slab descriptors based on object size
 //   - Free list per slab for fast object allocation
@@ -64,6 +65,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
+#include "string.h"
 #include "page.h"
 #include "list.h"
 #include "slab.h"
@@ -95,6 +97,11 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
 
     page = __page_alloc(order, PAGE_TYPE_SLAB);
     if (page == NULL) {
+        printf("__slab_make: __page_alloc FAILED for order %d (need %d pages = %dKB)\n",
+               order, 1 << order, (1 << order) * 4);
+        printf("  This allocation was for obj_size=%ld, will hold %d objects\n",
+               obj_size, obj_num);
+        printf("  OUT OF MEMORY - cannot allocate slab!\n");
         return NULL;
     }
     page_base = (void *)__page_to_pa(page);
@@ -456,18 +463,60 @@ STATIC_INLINE void __global_free_unlock(slab_cache_t *cache) {
 // ============================================================================
 
 // Initialize a existing SLAB cache without checking
-STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name, 
+STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name,
                                      size_t obj_size, uint64 flags) {
     size_t offset = 0;
     uint32 limits;
     uint16 slab_obj_num;
+    uint32 slab_order;
 
     // The size of each object must aligned to 8 bytes
     obj_size = ((obj_size + 7) >> 3) << 3;
     if (flags & SLAB_FLAG_EMBEDDED) {
         offset = __SLAB_OBJ_OFFSET(obj_size);
     }
-    slab_obj_num = (uint16)__SLAB_ORDER_OBJS(SLAB_DEFAULT_ORDER, offset, obj_size);
+
+    // Adaptive slab sizing: choose slab order based on object size to balance
+    // memory efficiency and object capacity.
+    //
+    // Goals:
+    //   1. Each slab should hold at least 8 objects (amortize metadata overhead)
+    //   2. Avoid excessive memory waste (e.g., 1MB slabs for 840-byte objects)
+    //   3. Prevent memory exhaustion in systems with limited RAM (e.g., 130MB)
+    //
+    // Strategy:
+    //   - Small objects (≤128 bytes):  order 0 (4KB)   → 32-128 objects/slab
+    //   - Small objects (≤512 bytes):  order 1 (8KB)   → 16-64 objects/slab
+    //   - Medium objects (≤1024 bytes): order 2 (16KB) → 16-32 objects/slab
+    //   - Large objects (≤2048 bytes):  order 3 (32KB) → 16-32 objects/slab
+    //   - Very large objects (>2KB):    order 4 (64KB) → up to 32 objects/slab
+    //
+    // Example: For 840-byte sigacts objects:
+    //   - Old fixed approach: order 8 (1MB) → 1248 objects, wastes 96% of memory
+    //   - New adaptive approach: order 2 (16KB) → 19 objects, 64x reduction
+    //
+    if (obj_size <= 128) {
+        slab_order = 0;  // 1 page = 4KB
+    } else if (obj_size <= 512) {
+        slab_order = 1;  // 2 pages = 8KB
+    } else if (obj_size <= 1024) {
+        slab_order = 2;  // 4 pages = 16KB
+    } else if (obj_size <= 2048) {
+        slab_order = 3;  // 8 pages = 32KB
+    } else {
+        slab_order = 4;  // 16 pages = 64KB
+    }
+
+    // Calculate number of objects that fit in this slab
+    slab_obj_num = (uint16)__SLAB_ORDER_OBJS(slab_order, offset, obj_size);
+
+    // If we got too few objects, try a larger slab (but cap at order 5 = 128KB)
+    // This ensures we meet the minimum 8 objects/slab target
+    while (slab_obj_num < 8 && slab_order < 5) {
+        slab_order++;
+        slab_obj_num = (uint16)__SLAB_ORDER_OBJS(slab_order, offset, obj_size);
+    }
+
     limits = slab_obj_num * 4;
 
     // Calculate bitmap size if bitmap tracking is enabled
@@ -482,7 +531,7 @@ STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name,
     cache->flags = flags;
     cache->obj_size = obj_size;
     cache->offset = offset;
-    cache->slab_order = SLAB_DEFAULT_ORDER;
+    cache->slab_order = slab_order;
     cache->slab_obj_num = slab_obj_num;
     cache->bitmap_size = bitmap_size;
     cache->limits = limits;
@@ -506,6 +555,7 @@ STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name,
     __atomic_store_n(&cache->slab_total, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&cache->obj_active, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&cache->obj_total, 0, __ATOMIC_RELEASE);
+
 }
 
 
@@ -764,6 +814,8 @@ void *slab_alloc(slab_cache_t *cache) {
     slab = __slab_make(cache->flags, cache->slab_order, cache->offset,
                        cache->obj_size, cache->slab_obj_num, cache->bitmap_size);
     if (slab == NULL) {
+        printf("slab_alloc: failed to create new slab for cache '%s' (order=%d, obj_size=%ld)\n",
+               cache->name, cache->slab_order, cache->obj_size);
         return NULL;
     }
 
@@ -816,6 +868,9 @@ void slab_free(void *obj) {
 
     cache = slab->cache;
     if (cache == NULL) {
+        printf("slab_free: ERROR - slab=%p not attached to cache, obj=%p\n", slab, obj);
+        printf("  slab->page=%p, slab->in_use=%ld, slab->state=%d, slab->cpu_id=%d\n",
+               slab->page, slab->in_use, slab->state, __atomic_load_n(&slab->cpu_id, __ATOMIC_ACQUIRE));
         panic("slab_free: slab not attached to cache");
     }
 
@@ -824,6 +879,12 @@ void slab_free(void *obj) {
 
     if (slab_cpu_id < 0) {
         // Slab is in global free list - this shouldn't happen
+        printf("slab_free: ERROR - object from free slab\n");
+        printf("  obj=%p, slab=%p, cache='%s'\n", obj, slab, cache->name);
+        printf("  slab->in_use=%ld, slab->state=%d, slab->cpu_id=%d\n",
+               slab->in_use, slab->state, slab_cpu_id);
+        printf("  cache->global_free_count=%ld\n",
+               __atomic_load_n(&cache->global_free_count, __ATOMIC_ACQUIRE));
         panic("slab_free: object from free slab");
     }
 
@@ -899,7 +960,6 @@ void slab_free(void *obj) {
             slab_t *free_slab = list_node_pop_back(&cache->global_free_list, slab_t, list_entry);
             if (free_slab != NULL) {
                 __atomic_fetch_sub(&cache->global_free_count, 1, __ATOMIC_RELEASE);
-                // Detach the slab from cache (updates counters atomically)
                 __slab_detach(cache, free_slab);
                 list_node_push_back(&tmp_list, free_slab, list_entry);
             }
