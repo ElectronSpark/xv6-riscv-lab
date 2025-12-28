@@ -14,6 +14,7 @@ typedef struct slab_cache_struct {
     uint64                  flags;
 #define SLAB_FLAG_STATIC            1UL
 #define SLAB_FLAG_EMBEDDED          2UL
+#define SLAB_FLAG_DEBUG_BITMAP      4UL  // Enable bitmap tracking for debugging
     // The size of each object in this SLAB cache
     size_t                  obj_size;
     // If SLAB descriptor is embedded in the page storing objects, then objects
@@ -23,6 +24,8 @@ typedef struct slab_cache_struct {
     uint32                  slab_order;
     // The number of objects in each slab
     uint32                  slab_obj_num;
+    // Size of the bitmap in uint64 words (0 if bitmap disabled)
+    uint32                  bitmap_size;
     // When the number of free objects reachs limits, the slab will try to
     // free half of its SLABs.
     uint32                  limits;
@@ -68,6 +71,8 @@ typedef struct slab_struct {
     // current state of the SLAB
     // indicates which list the SLAB is in
     slab_state_t            state;
+    // optional bitmap for tracking allocation/deallocation (NULL if disabled)
+    uint64                  *bitmap;
 } slab_t;
 
 #endif          /* __KERNEL_SLAB_TYPE_H */

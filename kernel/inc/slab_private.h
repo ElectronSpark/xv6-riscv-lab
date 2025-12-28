@@ -37,8 +37,8 @@
 })
 
 
-STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs, 
-                                  size_t obj_size, uint32 obj_num);
+STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
+                                  size_t obj_size, uint32 obj_num, uint32 bitmap_size);
 STATIC_INLINE void __slab_destroy(slab_t *slab);
 STATIC_INLINE void __slab_attach(slab_cache_t *cache, slab_t *slab);
 STATIC_INLINE void __slab_detach(slab_cache_t *cache, slab_t *slab);

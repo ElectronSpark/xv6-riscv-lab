@@ -269,7 +269,10 @@ __itable_hlist_push(struct inode *inode) {
 void
 iinit()
 {
-  int ret = slab_cache_init(&itable.inode_cache, "inode", sizeof(struct inode), SLAB_FLAG_STATIC);
+  int ret = slab_cache_init(&itable.inode_cache, 
+                            "inode", 
+                            sizeof(struct inode), 
+                            SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
   if (ret != 0) {
     panic("iinit: slab_cache_init failed");
   }

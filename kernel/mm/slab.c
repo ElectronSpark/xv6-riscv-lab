@@ -1,4 +1,60 @@
-// SLAB allocator manages kernel objects smaller than a single page
+// SLAB allocator for kernel objects smaller than a single page.
+//
+// The SLAB allocator manages small kernel objects efficiently by grouping them
+// into slabs (groups of contiguous pages). This reduces internal fragmentation
+// and provides fast allocation/deallocation for frequently used objects.
+//
+// ARCHITECTURE:
+//   - SLAB Cache: Collection of slabs for objects of the same size
+//   - SLAB: Group of one or more pages containing objects of uniform size
+//   - Objects: Fixed-size allocations managed within slabs
+//
+// KEY FEATURES:
+//   - Per-cache fine-grained locking for concurrent access
+//   - Three-tier slab management: FREE, PARTIAL, FULL lists
+//   - Embedded or separate slab descriptors based on object size
+//   - Free list per slab for fast object allocation
+//   - Optional bitmap tracking for debugging (SLAB_FLAG_DEBUG_BITMAP)
+//   - Automatic slab shrinking when free objects exceed limits
+//
+// SLAB STATES:
+//   - FREE: All objects available (slab in free_list)
+//   - PARTIAL: Some objects allocated (slab in partial_list)
+//   - FULL: All objects allocated (slab in full_list)
+//   - DEQUEUED: Temporarily removed from lists during operations
+//
+// BITMAP TRACKING (optional):
+//   When SLAB_FLAG_DEBUG_BITMAP is set, each slab maintains a bitmap where
+//   each bit tracks whether an object is allocated (1) or free (0). This
+//   provides runtime detection of:
+//   - Double allocation: Panic if allocating an already-allocated object
+//   - Double free: Panic if freeing an already-free object
+//   - Memory overhead: 1 bit per object (minimal impact)
+//
+// ALLOCATION FLOW:
+//   1. Lock SLAB cache
+//   2. Try partial_list (slabs with free objects)
+//   3. Try free_list (empty slabs)
+//   4. Create new slab if needed
+//   5. Get object from slab's free list
+//   6. Update bitmap if enabled
+//   7. Move slab between lists if state changed
+//   8. Unlock and return object
+//
+// DEALLOCATION FLOW:
+//   1. Find slab from object address via page descriptor
+//   2. Lock SLAB cache
+//   3. Verify bitmap and clear bit if enabled
+//   4. Return object to slab's free list
+//   5. Move slab between lists if state changed
+//   6. Shrink cache if too many free objects
+//   7. Unlock
+//
+// LOCKING:
+//   - Each SLAB cache has a spinlock protecting its state
+//   - Lock held during allocation, deallocation, and cache management
+//   - Lock released during page allocation to reduce contention
+//
 #include "types.h"
 #include "param.h"
 #include "memlayout.h"
@@ -12,25 +68,29 @@
 #include "slab_private.h"
 
 #ifdef KERNEL_PAGE_SANITIZER
-STATIC_INLINE void __slab_sanitizer_check(const char *op ,slab_cache_t *cache, slab_t *slab, 
+STATIC_INLINE void __slab_sanitizer_check(const char *op ,slab_cache_t *cache, slab_t *slab,
                                           void *obj) {
-    printf("%s: cache \"%s\" (%p), obj 0x%lx, size: %ld\n", 
+    printf("%s: cache \"%s\" (%p), obj 0x%lx, size: %ld\n",
            op, cache->name, cache, (uint64)obj, cache->obj_size);
 }
 #else
 #define __slab_sanitizer_check(op, page, order, flags) do { } while (0)
 #endif
 
+// ============================================================================
+// SLAB Lifecycle Management
+// ============================================================================
+
 // create a detached SLAB and initialize its objects
 // return the SLAB created if success
 // return NULL if failed
-STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs, 
-                                  size_t obj_size, uint32 obj_num) {
+STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
+                                  size_t obj_size, uint32 obj_num, uint32 bitmap_size) {
     page_t *page;
     int page_nums;
     void *page_base, **prev, **tmp;
     slab_t *slab;
-    
+
     page = __page_alloc(order, PAGE_TYPE_SLAB);
     if (page == NULL) {
         return NULL;
@@ -56,7 +116,25 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
     slab->in_use = 0;
     slab->page = page;
     slab->state = SLAB_STATE_DEQUEUED;
+    slab->bitmap = NULL;
     list_entry_init(&slab->list_entry);
+
+    // Allocate bitmap if bitmap tracking is enabled
+    if (bitmap_size > 0) {
+        slab->bitmap = kmm_alloc(bitmap_size * sizeof(uint64));
+        if (slab->bitmap == NULL) {
+            // Failed to allocate bitmap, cleanup and return
+            if ((uint64)slab != (uint64)page_base) {
+                kmm_free(slab);
+            }
+            __page_free(page, order);
+            return NULL;
+        }
+        // Initialize bitmap to all zeros (all objects free)
+        for (uint32 i = 0; i < bitmap_size; i++) {
+            slab->bitmap[i] = 0;
+        }
+    }
 
     prev = NULL;
     tmp = page_base + offs;
@@ -65,7 +143,7 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
         prev = tmp;
         tmp = (void *)tmp + obj_size;
     }
-  
+
     slab->next = prev;
     return slab;
 }
@@ -90,11 +168,20 @@ STATIC_INLINE void __slab_destroy(slab_t *slab) {
     if (page_base == 0) {
         panic("__slab_destroy");
     }
+    // Free bitmap if it was allocated
+    if (slab->bitmap != NULL) {
+        kmm_free(slab->bitmap);
+        slab->bitmap = NULL;
+    }
     if ((uint64)slab != page_base) {
         kmm_free(slab);
     }
     __page_free(page, order);
 }
+
+// ============================================================================
+// SLAB Attachment/Detachment
+// ============================================================================
 
 // Attach an empty SLAB to a SLAB cache
 // SLAB must be enqueued after attaching
@@ -135,6 +222,10 @@ STATIC_INLINE void __slab_detach(slab_cache_t *cache, slab_t *slab) {
     cache->slab_total--;
     slab->cache = NULL;
 }
+
+// ============================================================================
+// SLAB Queue Management (Enqueue/Dequeue)
+// ============================================================================
 
 // Dequeue from each individual SLAB lists
 // Will not check validity since they are called by __slab_dequeue
@@ -258,6 +349,60 @@ STATIC_INLINE slab_t *__slab_pop_partial(slab_cache_t *cache) {
     return slab;
 }
 
+// ============================================================================
+// Bitmap Tracking (Optional Debug Feature)
+// ============================================================================
+
+// Test-and-set: Returns previous value (0 or 1) and sets the bit
+// Returns -1 if bitmap is NULL or index out of range
+STATIC_INLINE int __slab_bitmap_test_and_set(slab_t *slab, int idx) {
+    if (slab->bitmap == NULL) {
+        return -1;
+    }
+    if (idx < 0 || (slab->cache && idx >= slab->cache->slab_obj_num)) {
+        return -1;
+    }
+
+    int word_idx = idx / 64;
+    int bit_idx = idx % 64;
+    uint64 mask = 1UL << bit_idx;
+
+    // Get old value
+    int old_val = !!(slab->bitmap[word_idx] & mask);
+
+    // Set the bit
+    slab->bitmap[word_idx] |= mask;
+
+    return old_val;
+}
+
+// Test-and-clear: Returns previous value (0 or 1) and clears the bit
+// Returns -1 if bitmap is NULL or index out of range
+STATIC_INLINE int __slab_bitmap_test_and_clear(slab_t *slab, int idx) {
+    if (slab->bitmap == NULL) {
+        return -1;
+    }
+    if (idx < 0 || (slab->cache && idx >= slab->cache->slab_obj_num)) {
+        return -1;
+    }
+
+    int word_idx = idx / 64;
+    int bit_idx = idx % 64;
+    uint64 mask = 1UL << bit_idx;
+
+    // Get old value
+    int old_val = !!(slab->bitmap[word_idx] & mask);
+
+    // Clear the bit
+    slab->bitmap[word_idx] &= ~mask;
+
+    return old_val;
+}
+
+// ============================================================================
+// SLAB Object Management
+// ============================================================================
+
 // Take a SLAB object out of its SLAB and increase the in_use counter of the
 // SLAB
 // No validity check
@@ -270,6 +415,15 @@ STATIC_INLINE void *__slab_obj_get(slab_t *slab) {
     if (ret_ptr != NULL) {
         slab->next = *(void **)ret_ptr;
         slab->in_use++;
+        // Update bitmap if tracking is enabled
+        if (slab->bitmap != NULL) {
+            int idx = __slab_obj2idx(slab, ret_ptr);
+            if (idx >= 0) {
+                // Use test-and-set: should return 0 (was free), now set to 1 (allocated)
+                int old_val = __slab_bitmap_test_and_set(slab, idx);
+                assert(old_val == 0, "__slab_obj_get(): double allocation detected");
+            }
+        }
     }
     return ret_ptr;
 }
@@ -279,6 +433,15 @@ STATIC_INLINE void *__slab_obj_get(slab_t *slab) {
 // No validity check
 // Will not change the counter in its SLAB cache.
 STATIC_INLINE void __slab_obj_put(slab_t *slab, void *ptr) {
+    // Update bitmap if tracking is enabled
+    if (slab->bitmap != NULL) {
+        int idx = __slab_obj2idx(slab, ptr);
+        if (idx >= 0) {
+            // Use test-and-clear: should return 1 (was allocated), now cleared to 0 (free)
+            int old_val = __slab_bitmap_test_and_clear(slab, idx);
+            assert(old_val == 1, "__slab_obj_put(): double free detected");
+        }
+    }
     *(void**)ptr = slab->next;
     slab->next = ptr;
     slab->in_use--;
@@ -357,6 +520,10 @@ STATIC_INLINE slab_t *__find_obj_slab(void *ptr) {
     return page->slab.slab;
 }
 
+// ============================================================================
+// SLAB Cache Locking
+// ============================================================================
+
 // aqcuire the lock of a SLAB cache
 // no checking here
 STATIC_INLINE void __slab_cache_lock(slab_cache_t *cache) {
@@ -368,6 +535,10 @@ STATIC_INLINE void __slab_cache_lock(slab_cache_t *cache) {
 STATIC_INLINE void __slab_cache_unlock(slab_cache_t *cache) {
     spin_release(&cache->lock);
 }
+
+// ============================================================================
+// SLAB Cache Initialization and Management
+// ============================================================================
 
 // Initialize a existing SLAB cache without checking
 STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name, 
@@ -384,6 +555,13 @@ STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name,
     slab_obj_num = (uint16)__SLAB_ORDER_OBJS(SLAB_DEFAULT_ORDER, offset, obj_size);
     limits = slab_obj_num * 4;
 
+    // Calculate bitmap size if bitmap tracking is enabled
+    uint32 bitmap_size = 0;
+    if (flags & SLAB_FLAG_DEBUG_BITMAP) {
+        // Calculate number of uint64 words needed to track all objects
+        bitmap_size = (slab_obj_num + 63) / 64;
+    }
+
     // memset(cache, 0, sizeof(slab_cache_t));
     cache->name = name;
     cache->flags = flags;
@@ -391,6 +569,7 @@ STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name,
     cache->offset = offset;
     cache->slab_order = SLAB_DEFAULT_ORDER;
     cache->slab_obj_num = slab_obj_num;
+    cache->bitmap_size = bitmap_size;
     cache->limits = limits;
     cache->slab_free = 0;
     cache->slab_partial = 0;
@@ -412,7 +591,7 @@ int slab_cache_init(slab_cache_t *cache, char *name, size_t obj_size,
     if (cache == NULL) {
         return -1;
     }
-    if (flags & (~(SLAB_FLAG_STATIC | SLAB_FLAG_EMBEDDED))) {
+    if (flags & (~(SLAB_FLAG_STATIC | SLAB_FLAG_EMBEDDED | SLAB_FLAG_DEBUG_BITMAP))) {
         // invalid flags
         return -1;
     }
@@ -440,6 +619,10 @@ slab_cache_t *slab_cache_create(char *name, size_t obj_size, uint64 flags) {
     }
     return slab_cache;
 }
+
+// ============================================================================
+// SLAB Cache Destruction and Shrinking
+// ============================================================================
 
 // destroy a slab cache
 // only non-STATIC , empty SLAB cache can be freed
@@ -549,6 +732,10 @@ int slab_cache_shrink(slab_cache_t *cache, int nums) {
     return ret;
 }
 
+// ============================================================================
+// Public API: Object Allocation and Deallocation
+// ============================================================================
+
 // allocate an object from a SLAB cache
 // return the base address of the object if success
 // return NULL if failed
@@ -576,8 +763,8 @@ retry:
         // Try to make an empty SLAB
         // Unlock the SLAB cache during SLAB creation to reduce lock contention
         __slab_cache_unlock(cache);
-        slab = __slab_make( cache->flags, cache->slab_order, cache->offset, 
-                            cache->obj_size, cache->slab_obj_num);
+        slab = __slab_make( cache->flags, cache->slab_order, cache->offset,
+                            cache->obj_size, cache->slab_obj_num, cache->bitmap_size);
         if (slab == NULL) {
             // failed to create new SLAB, just return NULL
             obj = NULL;

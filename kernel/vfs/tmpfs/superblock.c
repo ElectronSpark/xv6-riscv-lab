@@ -34,15 +34,17 @@ struct vfs_inode *tmpfs_get_inode(struct vfs_superblock *sb, uint64 ino);
  *****************************************************************************/
 
 static int __tmpfs_init_cache(void) {
-    int ret = slab_cache_init(&__tmpfs_inode_cache, "tmpfs_inode_cache",
+    int ret = slab_cache_init(&__tmpfs_inode_cache, 
+                              "tmpfs_inode_cache",
                               sizeof(struct tmpfs_inode), 
-                              SLAB_FLAG_STATIC);
+                              SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
     if (ret != 0) {
         return ret; // Failed to initialize tmpfs inode cache
     }
-    ret = slab_cache_init(&__tmpfs_sb_cache, "tmpfs_superblock_cache",
+    ret = slab_cache_init(&__tmpfs_sb_cache, 
+                           "tmpfs_superblock_cache",
                            sizeof(struct tmpfs_superblock), 
-                           SLAB_FLAG_STATIC);
+                           SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
     return ret;
 }
 
