@@ -4,10 +4,16 @@
 #include "compiler.h"
 #include "types.h"
 
-struct vfs_stat {
+/*
+ * POSIX-style stat structure
+ * 
+ * This is the stat structure returned by fstat()/stat() syscalls.
+ * Use S_ISDIR(), S_ISREG(), S_ISLNK(), etc. macros to check file type.
+ */
+struct stat {
   int32 dev;        // File system's disk device
   uint64 ino;       // Inode number
-  mode_t mode;      // Permission and type bits
+  mode_t mode;      // Permission and type bits (use S_IS* macros)
   uint32 nlink;     // Number of links to file
   uint64 size;      // Size of file in bytes
 };

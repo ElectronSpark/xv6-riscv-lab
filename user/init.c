@@ -1,13 +1,19 @@
 // init: The initial user-level program
 
 #include "kernel/inc/types.h"
-#include "kernel/inc/stat.h"
+#include "kernel/inc/vfs/stat.h"
 #include "kernel/inc/spinlock.h"
 #include "kernel/inc/mutex_types.h"
-#include "kernel/inc/fs.h"
-#include "kernel/inc/file.h"
+#include "kernel/inc/vfs/xv6fs/ondisk.h"
 #include "user/user.h"
-#include "kernel/inc/fcntl.h"
+#include "kernel/inc/vfs/fcntl.h"
+
+#ifndef CONSOLE_MAJOR
+#define CONSOLE_MAJOR  1
+#endif
+#ifndef CONSOLE_MINOR
+#define CONSOLE_MINOR  1
+#endif
 
 char *argv[] = { "sh", 0 };
 

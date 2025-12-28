@@ -4,7 +4,7 @@
 #include "types.h"
 #include "vfs/vfs_types.h"
 #include "spinlock.h"
-#include "fs.h"
+#include "vfs/xv6fs/ondisk.h"  // xv6 on-disk format definitions
 #include "slab.h"
 
 // Block size for xv6 filesystem

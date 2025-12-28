@@ -12,7 +12,7 @@
 #include "param.h"
 #include "errno.h"
 #include "bits.h"
-#include "stat.h"
+#include "vfs/stat.h"
 #include "spinlock.h"
 #include "proc.h"
 #include "mutex_types.h"
@@ -185,15 +185,7 @@ static int __tmpfs_file_stat(struct vfs_file *file, struct stat *stat) {
     memset(stat, 0, sizeof(*stat));
     stat->dev = inode->sb ? (int)(uint64)inode->sb : 0;
     stat->ino = inode->ino;
-    if (S_ISDIR(inode->mode)) {
-        stat->type = T_DIR;
-    } else if (S_ISLNK(inode->mode)) {
-        stat->type = T_SYMLINK;
-    } else if (S_ISCHR(inode->mode) || S_ISBLK(inode->mode)) {
-        stat->type = T_DEVICE;
-    } else {
-        stat->type = T_FILE;
-    }
+    stat->mode = inode->mode;
     stat->nlink = inode->n_links;
     stat->size = inode->size;
     

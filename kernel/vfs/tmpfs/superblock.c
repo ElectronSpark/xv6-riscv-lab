@@ -5,7 +5,7 @@
 #include "param.h"
 #include "errno.h"
 #include "bits.h"
-#include "stat.h"
+#include "vfs/stat.h"
 #include "spinlock.h"
 #include "proc.h"
 #include "mutex_types.h"

@@ -42,8 +42,7 @@ int munmap(void *addr, size_t length);
 #define ON_HOST_OS
 #define dirent xv6_dirent
 #include "../kernel/inc/types.h"
-#include "../kernel/inc/fs.h"
-#include "../kernel/inc/stat.h"
+#include "../kernel/inc/vfs/xv6fs/ondisk.h"
 #undef dirent
 
 struct xv6fs_context {

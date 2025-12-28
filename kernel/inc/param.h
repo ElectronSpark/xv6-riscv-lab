@@ -3,6 +3,10 @@
 
 #include "compiler.h"
 
+// Console device major and minor numbers
+#define CONSOLE_MAJOR  1
+#define CONSOLE_MINOR  1
+
 #ifdef LAB_FS
 #define NPROC        10  // maximum number of processes
 #else

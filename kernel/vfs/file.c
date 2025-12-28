@@ -6,7 +6,7 @@
 #include "param.h"
 #include "errno.h"
 #include "bits.h"
-#include "stat.h"
+#include "vfs/stat.h"
 #include "spinlock.h"
 #include "proc.h"
 #include "mutex_types.h"
@@ -364,7 +364,7 @@ int vfs_filestat(struct vfs_file *file, struct stat *stat) {
             memset(stat, 0, sizeof(*stat));
             stat->dev = inode->sb ? (int)(uint64)inode->sb : 0;
             stat->ino = inode->ino;
-            stat->type = T_DEVICE;
+            stat->mode = inode->mode;
             stat->nlink = inode->n_links;
             stat->size = inode->size;
             return 0;

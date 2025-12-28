@@ -8,8 +8,6 @@
 #include "param.h"
 #include "spinlock.h"
 #include "mutex_types.h"
-#include "fs.h"
-#include "file.h"
 #include "memlayout.h"
 #include "riscv.h"
 #include "defs.h"

@@ -1,8 +1,8 @@
 #include "kernel/inc/types.h"
-#include "kernel/inc/stat.h"
+#include "kernel/inc/vfs/stat.h"
 #include "user/user.h"
-#include "kernel/inc/fs.h"
-#include "kernel/inc/fcntl.h"
+#include "kernel/inc/vfs/xv6fs/ondisk.h"
+#include "kernel/inc/vfs/fcntl.h"
 
 int find(char *path, char *name) {
     char buf[512], *p;
@@ -22,7 +22,7 @@ int find(char *path, char *name) {
         return -1;
     }
 
-    if (st.type != T_DIR) {
+    if (!S_ISDIR(st.mode)) {
         fprintf(2, "find: %s is not a directory\n", path);
         close(fd);
         return -1;
@@ -46,7 +46,7 @@ int find(char *path, char *name) {
         if (strcmp(p, name) == 0) {
             printf("%s\n", buf);
         }
-        if (st.type == T_DIR && strcmp(p, ".") && strcmp(p, "..")) {
+        if (S_ISDIR(st.mode) && strcmp(p, ".") && strcmp(p, "..")) {
             find(buf, name);
         }
     }

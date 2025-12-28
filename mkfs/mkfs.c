@@ -9,8 +9,7 @@
 
 #define ON_HOST_OS      // avoid clash with host struct stat
 #include "kernel/inc/types.h"
-#include "kernel/inc/fs.h"
-#include "kernel/inc/stat.h"
+#include "kernel/inc/vfs/xv6fs/ondisk.h"
 #include "kernel/inc/param.h"
 
 #ifndef static_assert

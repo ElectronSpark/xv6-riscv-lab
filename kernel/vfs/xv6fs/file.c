@@ -10,13 +10,13 @@
 #include "defs.h"
 #include "param.h"
 #include "errno.h"
-#include "stat.h"
 #include "spinlock.h"
 #include "proc.h"
 #include "vm.h"
 #include "mutex_types.h"
 #include "buf.h"
 #include "vfs/fs.h"
+#include "vfs/stat.h"
 #include "vfs/fcntl.h"
 #include "../vfs_private.h"
 #include "xv6fs_private.h"
@@ -201,26 +201,9 @@ int xv6fs_file_stat(struct vfs_file *file, struct stat *stat) {
     memset(stat, 0, sizeof(*stat));
     stat->dev = ip->dev;
     stat->ino = inode->ino;
+    stat->mode = inode->mode;
     stat->nlink = inode->n_links;
     stat->size = inode->size;
-    
-    // Convert mode to xv6 type
-    if (S_ISDIR(inode->mode)) {
-        stat->type = T_DIR;
-    } else if (S_ISREG(inode->mode)) {
-        stat->type = T_FILE;
-    } else if (S_ISCHR(inode->mode) || S_ISBLK(inode->mode)) {
-        stat->type = T_DEVICE;
-    } else if (S_ISLNK(inode->mode)) {
-        /*
-         * FIX: Return T_SYMLINK for symlinks so user programs can identify them.
-         * Without this, fstat() on a symlink opened with O_NOFOLLOW would return
-         * type=0, causing symlinktest's stat_slink() to fail validation.
-         */
-        stat->type = T_SYMLINK;
-    } else {
-        stat->type = 0;
-    }
     
     return 0;
 }

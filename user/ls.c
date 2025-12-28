@@ -1,7 +1,7 @@
 #include "kernel/inc/types.h"
-#include "kernel/inc/stat.h"
+#include "kernel/inc/vfs/stat.h"
 #include "user/user.h"
-#include "kernel/inc/fs.h"
+#include "kernel/inc/vfs/xv6fs/ondisk.h"
 #include "kernel/inc/vfs/fcntl.h"
 
 // Linux-compatible dirent structure for getdents
@@ -58,16 +58,13 @@ ls(char *path)
     return;
   }
 
-  switch(st.type){
-  case T_DEVICE:
-  case T_FILE:
-    printf("%s %d %d %d\n", fmtname(path), st.type, st.ino, (int) st.size);
-    break;
-
-  case T_DIR:
+  if(S_ISREG(st.mode) || S_ISCHR(st.mode) || S_ISBLK(st.mode)) {
+    printf("%s %o %ld %ld\n", fmtname(path), st.mode, st.ino, st.size);
+  } else if(S_ISDIR(st.mode)) {
     if(strlen(path) + 1 + NAME_MAX + 1 > sizeof buf){
       printf("ls: path too long\n");
-      break;
+      close(fd);
+      return;
     }
     strcpy(buf, path);
     p = buf+strlen(buf);
@@ -88,11 +85,10 @@ ls(char *path)
           pos += de->d_reclen;
           continue;
         }
-        printf("%s %d %d %d\n", fmtname(buf), st.type, st.ino, (int) st.size);
+        printf("%s %o %ld %ld\n", fmtname(buf), st.mode, st.ino, st.size);
         pos += de->d_reclen;
       }
     }
-    break;
   }
   close(fd);
 }

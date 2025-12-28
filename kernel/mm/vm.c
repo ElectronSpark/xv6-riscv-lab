@@ -6,7 +6,6 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
-#include "fs.h"
 #include "page.h"
 #include "rbtree.h"
 #include "list.h"
@@ -1416,7 +1415,7 @@ int vm_growheap(vm_t *vm, int change_size)
   return 0; // Success
 }
 
-int vma_mmap(vm_t *vm, uint64 start, size_t size, uint64 flags, struct file *file, uint64 pgoff, void *pa)
+int vma_mmap(vm_t *vm, uint64 start, size_t size, uint64 flags, void *file, uint64 pgoff, void *pa)
 {
   if (vm == NULL || vm->pagetable == NULL) {
     return -1; // Invalid VM

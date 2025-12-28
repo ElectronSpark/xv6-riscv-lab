@@ -1,12 +1,11 @@
 #include "kernel/inc/param.h"
 #include "kernel/inc/types.h"
-#include "kernel/inc/stat.h"
+#include "kernel/inc/vfs/stat.h"
 #include "kernel/inc/riscv.h"
 #include "kernel/inc/vfs/fcntl.h"
 #include "kernel/inc/spinlock.h"
 #include "kernel/inc/mutex_types.h"
-#include "kernel/inc/fs.h"
-#include "kernel/inc/file.h"
+#include "kernel/inc/vfs/xv6fs/ondisk.h"
 #include "user/user.h"
 
 #define fail(msg) do {printf("FAILURE: " msg "\n"); failed = 1; goto done;} while (0);
@@ -89,7 +88,7 @@ testsymlink(void)
 
   if (stat_slink("/testsymlink/b", &st) != 0)
     fail("failed to stat b");
-  if(st.type != T_SYMLINK)
+  if(!S_ISLNK(st.mode))
     fail("b isn't a symlink");
 
   fd2 = open("/testsymlink/b", O_RDWR);
@@ -224,8 +223,8 @@ concur(void)
           symlink("/testsymlink/z", "/testsymlink/y");
           if (stat_slink("/testsymlink/y", &st) == 0) {
             m++;
-            if(st.type != T_SYMLINK) {
-              printf("FAILED: type %d not a symbolic link\n", st.type);
+            if(!S_ISLNK(st.mode)) {
+              printf("FAILED: mode %d not a symbolic link\n", st.mode);
               exit(1);
             }
           }

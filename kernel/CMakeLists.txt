@@ -17,12 +17,8 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/trap.c
     ${KERNEL_DIR}/syscall.c
     ${KERNEL_DIR}/bio.c
-    ${KERNEL_DIR}/fs.c
-    ${KERNEL_DIR}/log.c
-    ${KERNEL_DIR}/file.c
     ${KERNEL_DIR}/pipe.c
     ${KERNEL_DIR}/exec.c
-    ${KERNEL_DIR}/sysfile.c
     ${KERNEL_DIR}/plic.c
     ${KERNEL_DIR}/virtio_disk.c
     ${KERNEL_DIR}/backtrace.c

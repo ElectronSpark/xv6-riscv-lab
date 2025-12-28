@@ -1,6 +1,9 @@
-//
-// network system calls.
-//
+/*
+ * sysnet.c - Network system calls
+ *
+ * Socket management and UDP packet handling.
+ * Legacy sockalloc removed - VFS uses vfs_sockalloc in kernel/vfs/file.c instead.
+ */
 
 #include "types.h"
 #include "param.h"
@@ -10,9 +13,7 @@
 #include "proc.h"
 #include "defs.h"
 #include "printf.h"
-#include "fs.h"
 #include "mutex_types.h"
-#include "file.h"
 #include "net.h"
 #include "vm.h"
 #include "signal.h"
@@ -36,53 +37,7 @@ sockinit(void)
   spin_init(&sock_lock, "socktbl");
 }
 
-int
-sockalloc(struct file **f, uint32 raddr, uint16 lport, uint16 rport)
-{
-  struct sock *si, *pos;
-
-  si = 0;
-  *f = 0;
-  if ((*f = filealloc()) == 0)
-    goto bad;
-  if ((si = (struct sock*)kalloc()) == 0)
-    goto bad;
-
-  // initialize objects
-  si->raddr = raddr;
-  si->lport = lport;
-  si->rport = rport;
-  spin_init(&si->lock, "sock");
-  mbufq_init(&si->rxq);
-  (*f)->type = FD_SOCK;
-  (*f)->readable = 1;
-  (*f)->writable = 1;
-  (*f)->sock = si;
-
-  // add to list of sockets
-  spin_acquire(&sock_lock);
-  pos = sockets;
-  while (pos) {
-    if (pos->raddr == raddr &&
-        pos->lport == lport &&
-	pos->rport == rport) {
-      spin_release(&sock_lock);
-      goto bad;
-    }
-    pos = pos->next;
-  }
-  si->next = sockets;
-  sockets = si;
-  spin_release(&sock_lock);
-  return 0;
-
-bad:
-  if (si)
-    kfree((char*)si);
-  if (*f)
-    fileclose(*f);
-  return -1;
-}
+// Legacy sockalloc removed - VFS uses vfs_sockalloc in vfs/file.c
 
 void
 sockclose(struct sock *si)

@@ -11,7 +11,6 @@
 #include "defs.h"
 #include "param.h"
 #include "errno.h"
-#include "stat.h"
 #include "spinlock.h"
 #include "proc.h"
 #include "vm.h"

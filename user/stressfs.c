@@ -8,10 +8,10 @@
 //      asm volatile("");
 
 #include "kernel/inc/types.h"
-#include "kernel/inc/stat.h"
+#include "kernel/inc/vfs/stat.h"
 #include "user/user.h"
-#include "kernel/inc/fs.h"
-#include "kernel/inc/fcntl.h"
+#include "kernel/inc/vfs/xv6fs/ondisk.h"
+#include "kernel/inc/vfs/fcntl.h"
 
 int
 main(int argc, char *argv[])
@@ -30,7 +30,7 @@ main(int argc, char *argv[])
   printf("write %d\n", i);
 
   path[8] += i;
-  fd = open(path, O_CREATE | O_RDWR);
+  fd = open(path, O_CREAT | O_RDWR);
   for(i = 0; i < 20; i++)
 //    printf(fd, "%d\n", i);
     write(fd, data, sizeof(data));

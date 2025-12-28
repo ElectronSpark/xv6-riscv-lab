@@ -4,7 +4,6 @@
 #include <compiler.h>
 #include <param.h>
 #include <types.h>
-#include <file_ops.h>
 #include <kobject.h>
 
 #define MAX_MAJOR_DEVICES 256 // Maximum number of major devices

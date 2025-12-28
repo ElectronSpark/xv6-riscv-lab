@@ -1,5 +1,5 @@
 #include "kernel/inc/types.h"
-#include "kernel/inc/stat.h"
+#include "kernel/inc/vfs/stat.h"
 #include "user/user.h"
 
 #include <stdarg.h>
@@ -94,6 +94,11 @@ vprintf(int fd, const char *fmt, va_list ap)
         buf[idx++] = c0;
       }
     } else if(state == '%'){
+      // Flush buffer before printing formatted value
+      if (idx > 0) {
+        puts_n(fd, buf, idx);
+        idx = 0;
+      }
       c1 = c2 = 0;
       if(c0) c1 = fmt[i+1] & 0xff;
       if(c1) c2 = fmt[i+2] & 0xff;
@@ -104,6 +109,14 @@ vprintf(int fd, const char *fmt, va_list ap)
         i += 1;
       } else if(c0 == 'l' && c1 == 'l' && c2 == 'd'){
         printint(fd, va_arg(ap, uint64), 10, 1);
+        i += 2;
+      } else if(c0 == 'o') {
+        printint(fd, va_arg(ap, int), 8, 0);
+      } else if(c0 == 'l' && c1 == 'o'){
+        printint(fd, va_arg(ap, uint64), 8, 0);
+        i += 1;
+      } else if(c0 == 'l' && c1 == 'l' && c2 == 'o'){
+        printint(fd, va_arg(ap, uint64), 8, 0);
         i += 2;
       } else if(c0 == 'u'){
         printint(fd, va_arg(ap, int), 10, 0);

@@ -37,7 +37,7 @@ uint64 vm2pte_flags(uint64 flags);
 uint64 pte2vm_flags(uint64 pte_flags);
 
 // int vma_mprotect(vm_t *vma, uint64 flags);
-int vma_mmap(vm_t *vm, uint64 start, size_t size, uint64 flags, struct file *file, uint64 pgoff, void *pa);
+int vma_mmap(vm_t *vm, uint64 start, size_t size, uint64 flags, void *file, uint64 pgoff, void *pa);
 int vma_munmap(vm_t *vm, uint64 start, size_t size);
 // int vma_mremap(vm_t *vm, uint64 old_start, uint64 old_end, uint64 new_start, uint64 new_end);
 // int vma_msync(vm_t *vm, uint64 start, uint64 end);

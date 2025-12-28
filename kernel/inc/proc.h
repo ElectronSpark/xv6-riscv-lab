@@ -158,8 +158,8 @@ struct proc {
   struct context context;      // swtch() here to run process
   uint64 kentry;               // Entry point for kernel process
   uint64 arg[2];               // Argument for kernel process
-  struct file *ofile[NOFILE];  // Open files
-  struct inode *cwd;           // Current directory
+  // struct file *ofile[NOFILE];  // Open files
+  // struct inode *cwd;           // Current directory
   // @TODO: replace the original XV6 fs subsystem with VFS
   struct {
     struct vfs_inode_ref rooti; // Root inode

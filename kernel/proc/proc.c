@@ -562,12 +562,38 @@ userinit(void)
   proc_unlock(p);
 }
 
+/*
+ * install_user_root - Initialize process filesystem state
+ *
+ * Sets up the initial current working directory for the init process.
+ * Uses VFS interfaces instead of legacy namei/idup:
+ *   - vfs_namei() to look up "/" path
+ *   - vfs_inode_get_ref() to set p->fs.cwd
+ *   - vfs_iput() to release lookup reference
+ *
+ * The process struct now uses p->fs.cwd (vfs_inode_ref) instead of
+ * the legacy p->cwd (struct inode*).
+ */
 void
 install_user_root(void) {
-  proc_lock(myproc());
-  PROC_SET_USER_SPACE(myproc());
-  myproc()->cwd = namei("/");
-  proc_unlock(myproc());
+  struct proc *p = myproc();
+  
+  // Use VFS to look up the root directory
+  struct vfs_inode *root_inode = vfs_namei("/", 1);
+  if (root_inode == NULL) {
+    panic("install_user_root: cannot find root directory");
+  }
+  
+  proc_lock(p);
+  PROC_SET_USER_SPACE(p);
+  
+  // Set the VFS cwd to root
+  vfs_inode_get_ref(root_inode, &p->fs.cwd);
+  
+  proc_unlock(p);
+  
+  // Release the lookup reference (cwd now holds its own ref)
+  vfs_iput(root_inode);
 }
 
 // Grow or shrink user memory by n bytes.
@@ -585,7 +611,7 @@ growproc(int n)
 int
 fork(void)
 {
-  int i, pid;
+  int pid;
   struct proc *np;
   struct proc *p = myproc();
   struct vfs_inode *inode;
@@ -652,11 +678,7 @@ fork(void)
     }
   }
 
-  // increment reference counts on open file descriptors.
-  for(i = 0; i < NOFILE; i++)
-    if(p->ofile[i])
-      np->ofile[i] = filedup(p->ofile[i]);
-  np->cwd = idup(p->cwd);
+  // VFS cwd and rooti already cloned above
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
@@ -737,41 +759,23 @@ void
 exit(int status)
 {
   struct proc *p = myproc();
-  struct inode *cwd = NULL;
   struct vfs_inode_ref rooti_ref;
   struct vfs_inode_ref cwd_ref;
 
+  // VFS file descriptor table cleanup (closes all VFS files)
   vfs_fdtable_destroy(&p->fs.fdtable, 0);
 
   proc_lock(p);
   assert(p != proc_table.initproc, "init exiting");
 
-  // Close all open files.
-  for(int fd = 0; fd < NOFILE; fd++){
-    if(p->ofile[fd]){
-      struct file *f = p->ofile[fd];
-      p->ofile[fd] = 0;
-      assert((uint64)f < PHYSTOP, "exit: file pointer out of bounds, pid: %d, fd: %d(*%p), f: %p", p->pid, fd, f, &p->ofile[fd]);
-      // release p->lock before fileclose because fileclose may sleep
-      proc_unlock(p);
-      fileclose(f);
-      proc_lock(p); // reacquire p->lock after fileclose
-    }
-  }
-  cwd = p->cwd;
-  p->cwd = 0;
+  // Save and clear VFS inode refs
   rooti_ref = p->fs.rooti;
   cwd_ref = p->fs.cwd;
   p->fs.rooti = (struct vfs_inode_ref){ 0 };
   p->fs.cwd = (struct vfs_inode_ref){ 0 };
   proc_unlock(p);
 
-  if (cwd != NULL) {
-    begin_op();
-    iput(cwd);
-    end_op();
-  }
-
+  // Release VFS inode references
   vfs_inode_put_ref(&rooti_ref);
   vfs_inode_put_ref(&cwd_ref);
 

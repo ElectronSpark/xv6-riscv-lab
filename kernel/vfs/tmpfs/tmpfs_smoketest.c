@@ -5,7 +5,7 @@
 #include "param.h"
 #include "errno.h"
 #include "bits.h"
-#include "stat.h"
+#include "vfs/stat.h"
 #include "spinlock.h"
 #include "proc.h"
 #include "mutex_types.h"
@@ -14,7 +14,6 @@
 #include "vfs/fs.h"
 #include "vfs/file.h"
 #include "vfs/fcntl.h"
-#include "vfs/stat.h"
 #include "../vfs_private.h" // for vfs_root_inode
 #include "list.h"
 #include "hlist.h"
@@ -1556,8 +1555,8 @@ void tmpfs_run_file_ops_smoketest(void) {
         printf("file_ops_smoketest: " FAIL " stat size=%llu expected %lu\n", 
                (unsigned long long)st.size, (unsigned long)test_data_len);
     } else {
-        printf("file_ops_smoketest: " PASS " stat size=%llu type=%d\n",
-               (unsigned long long)st.size, st.type);
+        printf("file_ops_smoketest: " PASS " stat size=%llu mode=%o\n",
+               (unsigned long long)st.size, st.mode);
     }
 
     // Test 9: Close and reopen to verify persistence

@@ -12,7 +12,6 @@
 #include "defs.h"
 #include "param.h"
 #include "errno.h"
-#include "stat.h"
 #include "spinlock.h"
 #include "proc.h"
 #include "mutex_types.h"
@@ -20,7 +19,7 @@
 #include "vfs/file.h"
 #include "vfs/fcntl.h"
 #include "vfs/stat.h"
-#include "fs.h"
+#include "vfs/xv6fs/ondisk.h"  // for DIRSIZ
 #include "vm.h"
 #include "printf.h"
 #include "cdev.h"

@@ -15,8 +15,6 @@
 #include "param.h"
 #include "spinlock.h"
 #include "mutex_types.h"
-#include "fs.h"
-#include "file.h"
 #include "memlayout.h"
 #include "riscv.h"
 #include "defs.h"
@@ -24,6 +22,13 @@
 #include "proc.h"
 #include "sched.h"
 #include "cdev.h"
+
+#ifndef CONSOLE_MAJOR
+#define CONSOLE_MAJOR  1
+#endif
+#ifndef CONSOLE_MINOR
+#define CONSOLE_MINOR  1
+#endif
 
 #define BACKSPACE 0x100
 #define C(x)  ((x)-'@')  // Control-x

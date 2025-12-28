@@ -1,3 +1,10 @@
+/*
+ * exec.c - Program execution
+ *
+ * Loads and executes ELF binaries using VFS file operations.
+ * This replaces the legacy xv6 fs-based implementation with VFS interfaces.
+ */
+
 #include "types.h"
 #include "string.h"
 #include "param.h"
@@ -5,15 +12,18 @@
 #include "riscv.h"
 #include "spinlock.h"
 #include "mutex_types.h"
-#include "fs.h"
 #include "proc.h"
 #include "defs.h"
 #include "printf.h"
 #include "elf.h"
 #include "vm.h"
-#include "file.h"
+#include "errno.h"
+#include "vfs/fs.h"
+#include "vfs/file.h"
+#include "vfs/fcntl.h"
 
-STATIC int loadseg(pagetable_t, uint64, struct inode*, uint, uint, uint64);
+STATIC int loadseg(pagetable_t pagetable, uint64 va, struct vfs_file *file, 
+                   uint offset, uint sz, uint64 pteflags);
 
 int flags2perm(int flags)
 {
@@ -56,7 +66,7 @@ int ustack_alloc(vm_t *vm, uint64 *sp)
       return -1; // kalloc failed
     }
     memset((void *)pa, 0, PGSIZE); // Initialize the page
-    *pte = PA2PTE(pa) | PTE_V | PTE_U | PTE_W | PTE_W; // Allocate and map the page
+    *pte = PA2PTE(pa) | PTE_V | PTE_U | PTE_W | PTE_R; // Allocate and map the page
   }
   *sp = ret_sp; // Set the stack pointer
   return 0; // Success
@@ -70,24 +80,38 @@ exec(char *path, char **argv)
   uint64 argc, heap_start = 0, sp, ustack[MAXARG];
   uint64 stackbase = USTACKTOP - USERSTACK * PGSIZE;
   struct elfhdr elf;
-  struct inode *ip;
+  struct vfs_file *file = NULL;
   struct proghdr ph;
   vm_t *tmp_vm = NULL;
   struct proc *p = myproc();
 
-  begin_op();
-
-  if((ip = namei(path)) == 0){
-    end_op();
+  // Look up the file using VFS
+  struct vfs_inode *inode = vfs_namei(path, strlen(path));
+  if (IS_ERR(inode)) {
     return -1;
   }
-  ilock(ip);
+  if (inode == NULL) {
+    return -1;
+  }
 
-  // Check ELF header
-  if(readi(ip, 0, (uint64)&elf, 0, sizeof(elf)) != sizeof(elf))
+  // Open the file for reading
+  file = vfs_fileopen(inode, O_RDONLY);
+  vfs_iput(inode);  // vfs_fileopen takes its own reference
+  inode = NULL;
+  
+  if (IS_ERR(file)) {
+    return -1;
+  }
+  if (file == NULL) {
+    return -1;
+  }
+
+  // Read ELF header
+  ssize_t n = vfs_fileread(file, &elf, sizeof(elf));
+  if (n != sizeof(elf))
     goto bad;
 
-  if(elf.magic != ELF_MAGIC)
+  if (elf.magic != ELF_MAGIC)
     goto bad;
 
   if ((tmp_vm = vm_init((uint64)p->trapframe)) == NULL) {
@@ -95,32 +119,42 @@ exec(char *path, char **argv)
   }
 
   // Load program into memory.
-  for(i=0, off=elf.phoff; i<elf.phnum; i++, off+=sizeof(ph)){
-    if(readi(ip, 0, (uint64)&ph, off, sizeof(ph)) != sizeof(ph))
+  for (i = 0, off = elf.phoff; i < elf.phnum; i++, off += sizeof(ph)) {
+    // Seek to program header
+    if (vfs_filelseek(file, off, SEEK_SET) != off)
       goto bad;
-    if(ph.type != ELF_PROG_LOAD)
+    
+    // Read program header
+    if (vfs_fileread(file, &ph, sizeof(ph)) != sizeof(ph))
+      goto bad;
+    
+    if (ph.type != ELF_PROG_LOAD)
       continue;
-    if(ph.memsz < ph.filesz)
+    if (ph.memsz < ph.filesz)
       goto bad;
-    if(ph.vaddr + ph.memsz < ph.vaddr)
+    if (ph.vaddr + ph.memsz < ph.vaddr)
       goto bad;
-    if(ph.vaddr % PGSIZE != 0)
+    if (ph.vaddr % PGSIZE != 0)
       goto bad;
+    
     vma_t *vma = va_alloc(tmp_vm, ph.vaddr, ph.memsz, flags2vmperm(ph.flags) | VM_FLAG_USERMAP);
     if (vma == NULL) {
       goto bad; // Allocation failed
     }
-    // @TODO: to locate the start of heap
+    
+    // Track the end of loaded segments for heap start
     uint64 size1 = ph.vaddr + ph.memsz;
     if (heap_start < size1) {
-      heap_start = size1; // Update heap start if this segment extends it
+      heap_start = size1;
     }
-    if(loadseg(tmp_vm->pagetable, ph.vaddr, ip, ph.off, ph.filesz, flags2perm(ph.flags)) < 0)
+    
+    if (loadseg(tmp_vm->pagetable, ph.vaddr, file, ph.off, ph.filesz, flags2perm(ph.flags)) < 0)
       goto bad;
   }
-  iunlockput(ip);
-  end_op();
-  ip = 0;
+  
+  // Done with the file
+  vfs_fileclose(file);
+  file = NULL;
 
   p = myproc();
 
@@ -137,25 +171,25 @@ exec(char *path, char **argv)
   sp = USTACKTOP;
 
   // Push argument strings, prepare rest of stack in ustack.
-  for(argc = 0; argv[argc]; argc++) {
-    if(argc >= MAXARG)
+  for (argc = 0; argv[argc]; argc++) {
+    if (argc >= MAXARG)
       goto bad;
     sp -= strlen(argv[argc]) + 1;
     sp -= sp % 16; // riscv sp must be 16-byte aligned
-    if(sp < stackbase)
+    if (sp < stackbase)
       goto bad;
-    if(vm_copyout(tmp_vm, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
+    if (vm_copyout(tmp_vm, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
       goto bad;
     ustack[argc] = sp;
   }
   ustack[argc] = 0;
 
   // push the array of argv[] pointers.
-  sp -= (argc+1) * sizeof(uint64);
+  sp -= (argc + 1) * sizeof(uint64);
   sp -= sp % 16;
-  if(sp < stackbase)
+  if (sp < stackbase)
     goto bad;
-  if(vm_copyout(tmp_vm, sp, (char *)ustack, (argc+1)*sizeof(uint64)) < 0)
+  if (vm_copyout(tmp_vm, sp, (char *)ustack, (argc + 1) * sizeof(uint64)) < 0)
     goto bad;
 
   // arguments to user main(argc, argv)
@@ -164,9 +198,9 @@ exec(char *path, char **argv)
   p->trapframe->a1 = sp;
 
   // Save program name for debugging.
-  for(last=s=path; *s; s++)
-    if(*s == '/')
-      last = s+1;
+  for (last = s = path; *s; s++)
+    if (*s == '/')
+      last = s + 1;
   safestrcpy(p->name, last, sizeof(p->name));
     
   // Commit to the user image.
@@ -178,53 +212,105 @@ exec(char *path, char **argv)
 
  bad:
   vm_destroy(tmp_vm); // Clean up the temporary VM
-  if(ip){
-    iunlockput(ip);
-    end_op();
+  if (file) {
+    vfs_fileclose(file);
   }
   return -1;
 }
 
-// Load a program segment into pagetable at virtual address va.
-// va must be page-aligned
-// and the pages from va to va+sz must already be mapped.
-// Returns 0 on success, -1 on failure.
+/*
+ * Load a program segment into pagetable at virtual address va.
+ * va must be page-aligned and the pages from va to va+sz must already be mapped.
+ * Uses VFS file operations instead of legacy inode readi().
+ * Returns 0 on success, -1 on failure.
+ */
 STATIC int
-loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz, uint64 pteflags)
+loadseg(pagetable_t pagetable, uint64 va, struct vfs_file *file, 
+        uint offset, uint sz, uint64 pteflags)
 {
   uint i, n;
   uint64 pa;
 
-  for(i = 0; i < sz; i += PGSIZE){
-    // pte_t *pte = walk(pagetable, va + i, 1, NULL, NULL);
-    // if (pte == 0)
-    //   return -1; // walk failed
-    // if(*pte & PTE_V)
-    //   panic("loadseg: remap");
+  for (i = 0; i < sz; i += PGSIZE) {
+    // Allocate a physical page
     pa = (uint64)kalloc();
-    if(pa == 0)
+    if (pa == 0)
       return -1; // kalloc failed
     
-    if(sz - i < PGSIZE)
-    {
+    // Calculate how many bytes to read for this page
+    if (sz - i < PGSIZE) {
       n = sz - i;
-      memset((void *)(pa + n), 0, PGSIZE - n);
-    }
-    else
-    {
+      memset((void *)(pa + n), 0, PGSIZE - n); // Zero the rest of the page
+    } else {
       n = PGSIZE;
     }
-    if(readi(ip, 0, pa, offset+i, n) != n)
-    {
+    
+    // Seek to the file offset for this segment portion
+    if (vfs_filelseek(file, offset + i, SEEK_SET) != (loff_t)(offset + i)) {
       kfree((void *)pa);
       return -1;
     }
-    if(mappages(pagetable, va + i, PGSIZE, pa, pteflags | PTE_U | PTE_V) != 0)
-    {
+    
+    // Read directly into the physical page (kernel address)
+    ssize_t bytes_read = vfs_fileread(file, (void *)pa, n);
+    if (bytes_read != (ssize_t)n) {
+      kfree((void *)pa);
+      return -1;
+    }
+    
+    // Map the page into the process's page table
+    if (mappages(pagetable, va + i, PGSIZE, pa, pteflags | PTE_U | PTE_V) != 0) {
       kfree((void *)pa);
       return -1; // mappages failed
     }
   }
   
   return 0;
+}
+
+/*
+ * System call handler for exec.
+ * Parses user arguments and calls exec().
+ */
+uint64
+sys_exec(void)
+{
+  char path[MAXPATH], *argv[MAXARG];
+  int i;
+  uint64 uargv, uarg;
+
+  argaddr(1, &uargv);
+  if(argstr(0, path, MAXPATH) < 0) {
+    return -1;
+  }
+  memset(argv, 0, sizeof(argv));
+  for(i=0;; i++){
+    if(i >= NELEM(argv)){
+      goto bad;
+    }
+    if(fetchaddr(uargv+sizeof(uint64)*i, (uint64*)&uarg) < 0){
+      goto bad;
+    }
+    if(uarg == 0){
+      argv[i] = 0;
+      break;
+    }
+    argv[i] = kalloc();
+    if(argv[i] == 0)
+      goto bad;
+    if(fetchstr(uarg, argv[i], PGSIZE) < 0)
+      goto bad;
+  }
+
+  int ret = exec(path, argv);
+
+  for(i = 0; i < NELEM(argv) && argv[i] != 0; i++)
+    kfree(argv[i]);
+
+  return ret;
+
+ bad:
+  for(i = 0; i < NELEM(argv) && argv[i] != 0; i++)
+    kfree(argv[i]);
+  return -1;
 }

@@ -42,8 +42,7 @@ static void __start_kernel_main_hart(void) {
     pci_init();
     signal_init();   // signal handling initialization  
     binit();         // buffer cache
-    iinit();         // inode table
-    fileinit();      // file table
+    // Legacy iinit() and fileinit() removed - VFS handles these
     userinit();      // first user process
     sched_timer_init();
     struct proc *idle_proc = NULL;
@@ -78,14 +77,16 @@ void start_kernel_post_init(void) {
     consoledevinit(); // Initialize and register the console character device
     virtio_disk_init(); // emulated hard disk
     sockinit();
-    install_user_root(); // set up the root directory for init process
     pcache_global_init(); // page cache subsystem initialization
 
     // File system initialization must be run in the context of a
     // regular process (e.g., because it calls sleep), and thus cannot
     // be run from main().
-    fsinit(ROOTDEV);
+    // VFS initialization - mounts xv6fs and sets up root filesystem
     vfs_init();
+    
+    // Set up root directory for init process (must be after vfs_init)
+    install_user_root();
 
 #ifdef RWAD_WRITE_TEST
     // forward decl for rwlock tests

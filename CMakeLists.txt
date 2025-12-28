@@ -112,7 +112,7 @@ add_subdirectory(user)
 
 set(MKFS_SOURCE_FILES
     ${CMAKE_SOURCE_DIR}/mkfs/mkfs.c 
-    ${KERNEL_DIR}/inc/fs.h 
+    ${KERNEL_DIR}/inc/vfs/xv6fs/ondisk.h 
     ${KERNEL_DIR}/inc/param.h
 )
 

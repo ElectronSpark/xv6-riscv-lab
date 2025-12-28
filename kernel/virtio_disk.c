@@ -13,7 +13,7 @@
 #include "param.h"
 #include "memlayout.h"
 #include "spinlock.h"
-#include "fs.h"
+#include "vfs/xv6fs/ondisk.h"  // for BSIZE
 #include "buf.h"
 #include "virtio.h"
 #include "blkdev.h"

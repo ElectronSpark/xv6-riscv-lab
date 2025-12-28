@@ -22,7 +22,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
-#include "fs.h"
+#include "vfs/xv6fs/ondisk.h"  // for BSIZE
 #include "buf.h"
 #include "page.h"
 #include "blkdev.h"

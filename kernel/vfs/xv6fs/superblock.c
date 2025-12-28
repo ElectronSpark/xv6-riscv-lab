@@ -10,7 +10,6 @@
 #include "defs.h"
 #include "param.h"
 #include "errno.h"
-#include "stat.h"
 #include "spinlock.h"
 #include "proc.h"
 #include "vm.h"
@@ -244,9 +243,12 @@ int xv6fs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
         return -EINVAL;
     }
     
-    // Use the second disk (mkdev(2, 2)) for xv6fs VFS mount
-    // This avoids conflicts with the first disk used by the legacy fs subsystem
-    uint dev = mkdev(2, 2);
+    /*
+     * Use disk1 (mkdev(2, 1) = ROOTDEV) as the root filesystem.
+     * Previously used disk0 for legacy fs and disk1 for VFS to avoid conflicts.
+     * Now that legacy fs is removed, VFS takes over disk1 as the root device.
+     */
+    uint dev = ROOTDEV;
     
     // Allocate superblock
     struct xv6fs_superblock *xv6_sb = slab_alloc(&__xv6fs_sb_cache);
