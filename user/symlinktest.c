@@ -2,7 +2,7 @@
 #include "kernel/inc/types.h"
 #include "kernel/inc/stat.h"
 #include "kernel/inc/riscv.h"
-#include "kernel/inc/fcntl.h"
+#include "kernel/inc/vfs/fcntl.h"
 #include "kernel/inc/spinlock.h"
 #include "kernel/inc/mutex_types.h"
 #include "kernel/inc/fs.h"
@@ -21,7 +21,8 @@ main(int argc, char *argv[])
 {
   cleanup();
   testsymlink();
-  concur();
+  concur();  // Re-enable - need to debug differently
+  
   exit(failed);
 }
 
@@ -56,8 +57,11 @@ stat_slink(char *pn, struct stat *st)
   int fd = open(pn, O_RDONLY | O_NOFOLLOW);
   if(fd < 0)
     return -1;
-  if(fstat(fd, st) != 0)
+  if(fstat(fd, st) != 0) {
+    close(fd);
     return -1;
+  }
+  close(fd);
   return 0;
 }
 
@@ -73,7 +77,7 @@ testsymlink(void)
 
   mkdir("/testsymlink");
 
-  fd1 = open("/testsymlink/a", O_CREATE | O_RDWR);
+  fd1 = open("/testsymlink/a", O_CREAT | O_RDWR);
   if(fd1 < 0) fail("failed to open a");
 
   r = symlink("/testsymlink/a", "/testsymlink/b");
@@ -122,7 +126,7 @@ testsymlink(void)
   close(fd2);
   fd1 = fd2 = -1;
 
-  fd1 = open("/testsymlink/4", O_CREATE | O_RDWR);
+  fd1 = open("/testsymlink/4", O_CREAT | O_RDWR);
   if(fd1<0) fail("Failed to create 4\n");
   fd2 = open("/testsymlink/1", O_RDWR);
   if(fd2<0) fail("Failed to open 1\n");
@@ -173,11 +177,12 @@ testsymlink(void)
   }
 
   unlink("/testsymlink/a");
-  if(symlink("/README", "/testsymlink/a") != 0)
-    fail("could not link to /README");
+  // Link to /testsymlink/4 which was created earlier in this test
+  if(symlink("/testsymlink/4", "/testsymlink/a") != 0)
+    fail("could not link to /testsymlink/4");
   fd1 = open("/testsymlink/a", O_RDONLY);
   if(fd1 < 0)
-    fail("could not open symlink pointing to /README");
+    fail("could not open symlink pointing to /testsymlink/4");
   close(fd1);
   fd1 = -1;
 
@@ -197,7 +202,7 @@ concur(void)
 
   printf("Start: test concurrent symlinks\n");
     
-  fd = open("/testsymlink/z", O_CREATE | O_RDWR);
+  fd = open("/testsymlink/z", O_CREAT | O_RDWR);
   if(fd < 0) {
     printf("FAILED: open failed");
     exit(1);

@@ -2,7 +2,7 @@
 #include "kernel/inc/stat.h"
 #include "user/user.h"
 #include "kernel/inc/fs.h"
-#include "kernel/inc/fcntl.h"
+#include "kernel/inc/vfs/fcntl.h"
 
 // Linux-compatible dirent structure for getdents
 struct linux_dirent64 {

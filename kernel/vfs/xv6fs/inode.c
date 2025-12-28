@@ -808,6 +808,35 @@ int xv6fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
  * Create/Unlink operations
  ******************************************************************************/
 
+/*
+ * FIX: Check if a name already exists in a directory before creating entries.
+ * This prevents duplicate directory entries which caused issues like:
+ * - Multiple entries with same name in ls output
+ * - Filesystem corruption from overlapping entries
+ * 
+ * Returns the inode number if found, 0 if not found.
+ * Used by xv6fs_mkdir, xv6fs_link, and xv6fs_symlink to return -EEXIST
+ * when attempting to create an entry with an existing name.
+ */
+static uint __xv6fs_dir_name_exists(struct xv6fs_inode *dp, const char *name) {
+    struct dirent de;
+    for (uint off = 0; off < dp->vfs_inode.size; off += sizeof(de)) {
+        uint bn = off / BSIZE;
+        uint block_off = off % BSIZE;
+        uint addr = xv6fs_bmap_read(dp, bn);
+        if (addr == 0) continue;
+        
+        struct buf *bp = bread(dp->dev, addr);
+        memmove(&de, bp->data + block_off, sizeof(de));
+        brelse(bp);
+        
+        if (de.inum != 0 && strncmp(de.name, name, DIRSIZ) == 0) {
+            return de.inum;
+        }
+    }
+    return 0;
+}
+
 // Add a directory entry
 static int __xv6fs_dirlink(struct xv6fs_superblock *xv6_sb, struct xv6fs_inode *dp, const char *name, uint inum) {
     struct dirent de;
@@ -932,6 +961,15 @@ struct vfs_inode *xv6fs_mkdir(struct vfs_inode *dir, mode_t mode,
     struct xv6fs_inode *dp = container_of(dir, struct xv6fs_inode, vfs_inode);
     struct xv6fs_superblock *xv6_sb = container_of(dir->sb, struct xv6fs_superblock, vfs_sb);
     
+    // Check if name already exists
+    char name_buf[DIRSIZ];
+    memset(name_buf, 0, DIRSIZ);
+    strncpy(name_buf, name, name_len);
+    
+    if (__xv6fs_dir_name_exists(dp, name_buf) != 0) {
+        return ERR_PTR(-EEXIST);
+    }
+    
     xv6fs_begin_op(xv6_sb);
     
     // Allocate new inode through VFS layer (handles mutex init and hash add)
@@ -959,11 +997,7 @@ struct vfs_inode *xv6fs_mkdir(struct vfs_inode *dir, mode_t mode,
     
     xv6fs_iupdate(ip);
     
-    // Add directory entry in parent
-    char name_buf[DIRSIZ];
-    memset(name_buf, 0, DIRSIZ);
-    strncpy(name_buf, name, name_len);
-    
+    // Add directory entry in parent (name_buf already set earlier)
     if (__xv6fs_dirlink(xv6_sb, dp, name_buf, new_inode->ino) < 0) {
         vfs_iunlock(new_inode);
         xv6fs_end_op(xv6_sb);
@@ -1073,15 +1107,21 @@ int xv6fs_link(struct vfs_inode *old, struct vfs_inode *dir,
     struct xv6fs_inode *ip = container_of(old, struct xv6fs_inode, vfs_inode);
     struct xv6fs_superblock *xv6_sb = container_of(dir->sb, struct xv6fs_superblock, vfs_sb);
     
+    // Check if name already exists
+    char name_buf[DIRSIZ];
+    memset(name_buf, 0, DIRSIZ);
+    strncpy(name_buf, name, name_len);
+    
+    if (__xv6fs_dir_name_exists(dp, name_buf) != 0) {
+        return -EEXIST;
+    }
+    
     xv6fs_begin_op(xv6_sb);
     
     old->n_links++;
     xv6fs_iupdate(ip);
     
-    char name_buf[DIRSIZ];
-    memset(name_buf, 0, DIRSIZ);
-    strncpy(name_buf, name, name_len);
-    
+    // name_buf already set earlier for EEXIST check
     int ret = __xv6fs_dirlink(xv6_sb, dp, name_buf, old->ino);
     if (ret != 0) {
         old->n_links--;
@@ -1154,6 +1194,15 @@ struct vfs_inode *xv6fs_symlink(struct vfs_inode *dir, mode_t mode,
     struct xv6fs_inode *dp = container_of(dir, struct xv6fs_inode, vfs_inode);
     struct xv6fs_superblock *xv6_sb = container_of(dir->sb, struct xv6fs_superblock, vfs_sb);
     
+    // Check if name already exists
+    char name_buf[DIRSIZ];
+    memset(name_buf, 0, DIRSIZ);
+    strncpy(name_buf, name, name_len);
+    
+    if (__xv6fs_dir_name_exists(dp, name_buf) != 0) {
+        return ERR_PTR(-EEXIST);
+    }
+    
     xv6fs_begin_op(xv6_sb);
     
     // Allocate new inode through VFS layer
@@ -1206,11 +1255,7 @@ struct vfs_inode *xv6fs_symlink(struct vfs_inode *dir, mode_t mode,
     new_inode->size = target_len;
     xv6fs_iupdate(ip);
     
-    // Add directory entry
-    char name_buf[DIRSIZ];
-    memset(name_buf, 0, DIRSIZ);
-    strncpy(name_buf, name, name_len);
-    
+    // Add directory entry (name_buf already set earlier)
     int ret = __xv6fs_dirlink(xv6_sb, dp, name_buf, new_inode->ino);
     if (ret != 0) {
         xv6fs_itrunc(ip);
@@ -1339,8 +1384,15 @@ int xv6fs_open(struct vfs_inode *inode, struct vfs_file *file, int f_flags) {
     }
     
     if (S_ISLNK(inode->mode)) {
-        // Symlinks are typically not opened directly
-        return -ELOOP;
+        /*
+         * FIX: Allow opening symlinks with O_NOFOLLOW flag.
+         * Previously this returned -ELOOP unconditionally, but POSIX requires
+         * that symlinks can be opened with O_NOFOLLOW to allow fstat() on the
+         * symlink itself (not its target). This is needed by programs like ls
+         * that want to display symlink information.
+         */
+        file->ops = &xv6fs_file_ops;
+        return 0;
     }
     
     // Character/block devices are handled by VFS core

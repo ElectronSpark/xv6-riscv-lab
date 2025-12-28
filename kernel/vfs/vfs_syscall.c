@@ -183,6 +183,15 @@ uint64 sys_vfs_fstat(void) {
  * File System Namespace Syscalls
  ******************************************************************************/
 
+/*
+ * FIX: Maximum symlink depth during path resolution.
+ * POSIX systems typically limit symlink following to prevent infinite loops
+ * from circular symlinks (e.g., a -> b -> a). Without this limit, such
+ * loops would cause the kernel to hang or stack overflow.
+ * Linux uses SYMLOOP_MAX=40, we use 8 for simplicity.
+ */
+#define VFS_SYMLOOP_MAX 8
+
 uint64 sys_vfs_open(void) {
     char path[MAXPATH];
     char name[DIRSIZ];
@@ -222,8 +231,39 @@ uint64 sys_vfs_open(void) {
             }
         }
     } else {
-        // Open existing file
-        inode = vfs_namei(path, n);
+        // Open existing file - follow symlinks unless O_NOFOLLOW
+        int symloop_count = 0;
+        
+        do {
+            inode = vfs_namei(path, strlen(path));
+            if (IS_ERR(inode)) {
+                return PTR_ERR(inode);
+            }
+            if (inode == NULL) {
+                return -ENOENT;
+            }
+            
+            // Check if it's a symlink and we should follow it
+            if (!S_ISLNK(inode->mode) || (omode & O_NOFOLLOW)) {
+                break;  // Not a symlink or O_NOFOLLOW set
+            }
+            
+            // Read the symlink target
+            ssize_t link_len = vfs_readlink(inode, path, MAXPATH - 1);
+            vfs_iput(inode);
+            inode = NULL;
+            
+            if (link_len < 0) {
+                return link_len;  // Error reading symlink
+            }
+            path[link_len] = '\0';
+            
+            symloop_count++;
+        } while (symloop_count < VFS_SYMLOOP_MAX);
+        
+        if (symloop_count >= VFS_SYMLOOP_MAX) {
+            return -ELOOP;  // Too many symlink levels
+        }
     }
     
     if (IS_ERR(inode)) {

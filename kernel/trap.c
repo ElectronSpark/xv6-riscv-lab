@@ -109,12 +109,14 @@ usertrap(void)
     syscall();
     break;
   case 13:
+    // Load page fault - handle demand paging for read access
     va = r_stval();
-    if (vm_try_growstack(p->vm, va) == 0) {
-      vma = vm_find_area(p->vm, va);
-      if (vma != NULL && vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_READ) == 0) {
-        break;
-      }
+    // First try to grow stack if the address is in stack region
+    vm_try_growstack(p->vm, va);
+    // Now find the VMA (may be stack that just grew, or existing VMA needing demand paging)
+    vma = vm_find_area(p->vm, va);
+    if (vma != NULL && vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_READ) == 0) {
+      break;
     }
     printf("usertrap(): page fault on read 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
@@ -122,12 +124,14 @@ usertrap(void)
     kill(p->pid, SIGSEGV);
     break;
   case 15:
+    // Store page fault - handle demand paging for write access
     va = r_stval();
-    if (vm_try_growstack(p->vm, va) == 0) {
-      vma = vm_find_area(p->vm, va);
-      if (vma != NULL && vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_WRITE) == 0) {
-        break;
-      }
+    // First try to grow stack if the address is in stack region
+    vm_try_growstack(p->vm, va);
+    // Now find the VMA (may be stack that just grew, or existing VMA needing demand paging)
+    vma = vm_find_area(p->vm, va);
+    if (vma != NULL && vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_WRITE) == 0) {
+      break;
     }
     printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());

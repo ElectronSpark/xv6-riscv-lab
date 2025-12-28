@@ -211,6 +211,13 @@ int xv6fs_file_stat(struct vfs_file *file, struct stat *stat) {
         stat->type = T_FILE;
     } else if (S_ISCHR(inode->mode) || S_ISBLK(inode->mode)) {
         stat->type = T_DEVICE;
+    } else if (S_ISLNK(inode->mode)) {
+        /*
+         * FIX: Return T_SYMLINK for symlinks so user programs can identify them.
+         * Without this, fstat() on a symlink opened with O_NOFOLLOW would return
+         * type=0, causing symlinktest's stat_slink() to fail validation.
+         */
+        stat->type = T_SYMLINK;
     } else {
         stat->type = 0;
     }

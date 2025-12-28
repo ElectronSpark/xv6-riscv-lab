@@ -961,9 +961,8 @@ vma_t *va_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags)
   }
   if ((flags & VM_FLAG_PROT_MASK) == 0) {
     return NULL; // Invalid protection flags
-  } else {
-    flags &= VM_FLAG_PROT_MASK; // Default to read/write if no flags are set
   }
+  // Don't strip non-protection flags like VM_FLAG_USERMAP
 
   vma_t *free_area = NULL;
   if (va == 0) {
@@ -1130,6 +1129,17 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte)
   if (vma->flags & VM_FLAG_USERMAP) {
     flags |= PTE_U; // Set the user permission if VM_FLAG_USERMAP is set
   }
+  /*
+   * FIX: Must set PTE_V (valid bit) when allocating new pages for demand paging.
+   * Without this, the hardware considers the PTE invalid even though we allocated
+   * a physical page and set other permission bits. This caused repeated page faults
+   * on BSS section access (e.g., static variables) because the MMU would not
+   * recognize the mapping as valid.
+   * 
+   * Note: __vma_validate_pte_rxw already sets PTE_V via "flags |= PTE_V | PTE_W",
+   * but this function was missing it for read-only/execute pages.
+   */
+  flags |= PTE_V; // Set the valid bit
   *pte = PA2PTE(pa) | flags; // Update the PTE with the new address and flags
 
   // Flush TLB so faulting hart sees the new private writable mapping (COW fix).
