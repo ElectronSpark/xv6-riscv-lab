@@ -2,12 +2,22 @@
 #define __KERNEL_SLAB_TYPE_H
 
 #include "types.h"
+#include "param.h"
 #include "list_type.h"
 #include "spinlock.h"
 
 
 typedef struct page_struct page_t;
 typedef struct slab_struct slab_t;
+
+// Per-CPU slab cache structure
+typedef struct {
+    list_node_t     partial_list;       // Per-CPU partial slabs
+    list_node_t     full_list;          // Per-CPU full slabs
+    _Atomic uint32  partial_count;      // Number of partial slabs (atomic)
+    _Atomic uint32  full_count;         // Number of full slabs (atomic)
+    spinlock_t      lock;               // Protects this CPU's lists
+} percpu_slab_cache_t;
 
 typedef struct slab_cache_struct {
     const char              *name;
@@ -30,23 +40,18 @@ typedef struct slab_cache_struct {
     // free half of its SLABs.
     uint32                  limits;
 
-    // list head linking slab_t
-    list_node_t             free_list;
-    list_node_t             partial_list;
-    list_node_t             full_list;
+    // Per-CPU caches (one per CPU)
+    percpu_slab_cache_t     percpu_caches[NCPU];
 
-    // Count the number of cache
-    int64                  slab_free;
-    int64                  slab_partial;
-    int64                  slab_full;
-    int64                  slab_total;
+    // Global free list (shared across all CPUs)
+    list_node_t             global_free_list;
+    spinlock_t              global_free_lock;
+    _Atomic int64           global_free_count;
 
-    // count the objects
-    uint64                  obj_active;
-    uint64                  obj_total;
-
-    // for locking slab cache
-    spinlock_t              lock;
+    // Global counters (atomic for lock-free reads)
+    _Atomic int64           slab_total;
+    _Atomic uint64          obj_active;
+    _Atomic uint64          obj_total;
 } slab_cache_t;
 
 typedef enum {
@@ -73,6 +78,8 @@ typedef struct slab_struct {
     slab_state_t            state;
     // optional bitmap for tracking allocation/deallocation (NULL if disabled)
     uint64                  *bitmap;
+    // CPU ID that owns this slab (-1 for global free list, 0-7 for CPU ID)
+    _Atomic int             cpu_id;
 } slab_t;
 
 #endif          /* __KERNEL_SLAB_TYPE_H */
