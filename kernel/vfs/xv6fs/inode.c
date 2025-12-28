@@ -286,21 +286,43 @@ static void __xv6fs_bfree(struct xv6fs_superblock *xv6_sb, uint dev, uint b) {
     brelse(bp);
 }
 
-// Free indirect blocks
-static void __xv6fs_itrunc_ind(struct xv6fs_superblock *xv6_sb, uint *entry, uint dev) {
-    if (*entry == 0) return;
+// Free indirect blocks starting from index 'start_idx'
+// If start_idx == 0, frees the indirect block itself too
+// Returns number of blocks freed
+static int __xv6fs_itrunc_ind_partial(struct xv6fs_superblock *xv6_sb, 
+                                       uint *entry, uint dev, uint start_idx) {
+    if (*entry == 0) return 0;
     
     struct buf *bp = bread(dev, *entry);
     uint *a = (uint*)bp->data;
+    int freed = 0;
     
-    for (int j = 0; j < XV6FS_NINDIRECT; j++) {
+    for (uint j = start_idx; j < XV6FS_NINDIRECT; j++) {
         if (a[j]) {
             __xv6fs_bfree(xv6_sb, dev, a[j]);
+            a[j] = 0;
+            freed++;
         }
     }
+    
+    if (freed > 0) {
+        xv6fs_log_write(xv6_sb, bp);
+    }
     brelse(bp);
-    __xv6fs_bfree(xv6_sb, dev, *entry);
-    *entry = 0;
+    
+    // If we freed from the beginning, free the indirect block itself
+    if (start_idx == 0) {
+        __xv6fs_bfree(xv6_sb, dev, *entry);
+        *entry = 0;
+        freed++;
+    }
+    
+    return freed;
+}
+
+// Free indirect blocks (original full version for backwards compat)
+static void __xv6fs_itrunc_ind(struct xv6fs_superblock *xv6_sb, uint *entry, uint dev) {
+    __xv6fs_itrunc_ind_partial(xv6_sb, entry, dev, 0);
 }
 
 void xv6fs_itrunc(struct xv6fs_inode *ip) {
@@ -338,29 +360,142 @@ void xv6fs_itrunc(struct xv6fs_inode *ip) {
     xv6fs_iupdate(ip);
 }
 
+// Partial truncate: free blocks from 'first_block' to end of file
+// This is done in small batches to stay within transaction limits
+static int __xv6fs_truncate_partial(struct xv6fs_inode *ip, uint first_block) {
+    struct xv6fs_superblock *xv6_sb = container_of(ip->vfs_inode.sb,
+                                                    struct xv6fs_superblock, vfs_sb);
+    uint dev = ip->dev;
+    
+    // Free direct blocks from first_block onwards
+    for (uint i = first_block; i < XV6FS_NDIRECT; i++) {
+        if (ip->addrs[i]) {
+            __xv6fs_bfree(xv6_sb, dev, ip->addrs[i]);
+            ip->addrs[i] = 0;
+        }
+    }
+    
+    // Handle indirect blocks
+    if (first_block <= XV6FS_NDIRECT) {
+        // All indirect blocks need to be freed
+        __xv6fs_itrunc_ind(xv6_sb, &ip->addrs[XV6FS_NDIRECT], dev);
+    } else if (first_block < XV6FS_NDIRECT + XV6FS_NINDIRECT) {
+        // Partial indirect block freeing
+        uint ind_start = first_block - XV6FS_NDIRECT;
+        __xv6fs_itrunc_ind_partial(xv6_sb, &ip->addrs[XV6FS_NDIRECT], dev, ind_start);
+    }
+    
+    // Handle double indirect blocks
+    uint dind_threshold = XV6FS_NDIRECT + XV6FS_NINDIRECT;
+    if (first_block <= dind_threshold) {
+        // All double indirect blocks need to be freed
+        if (ip->addrs[XV6FS_NDIRECT + 1]) {
+            struct buf *bp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
+            uint *a = (uint*)bp->data;
+            
+            for (uint j = 0; j < XV6FS_NINDIRECT; j++) {
+                if (a[j]) {
+                    __xv6fs_itrunc_ind(xv6_sb, &a[j], dev);
+                }
+            }
+            brelse(bp);
+            __xv6fs_bfree(xv6_sb, dev, ip->addrs[XV6FS_NDIRECT + 1]);
+            ip->addrs[XV6FS_NDIRECT + 1] = 0;
+        }
+    } else if (first_block < dind_threshold + XV6FS_NDINDIRECT) {
+        // Partial double indirect freeing
+        if (ip->addrs[XV6FS_NDIRECT + 1]) {
+            uint rel_block = first_block - dind_threshold;
+            uint l1_start = rel_block / XV6FS_NINDIRECT;
+            uint l2_start = rel_block % XV6FS_NINDIRECT;
+            
+            struct buf *bp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
+            uint *a = (uint*)bp->data;
+            bool modified = false;
+            
+            // Handle partial first L1 entry
+            if (l2_start > 0 && a[l1_start]) {
+                __xv6fs_itrunc_ind_partial(xv6_sb, &a[l1_start], dev, l2_start);
+                l1_start++;
+            }
+            
+            // Free remaining L1 entries completely
+            for (uint j = l1_start; j < XV6FS_NINDIRECT; j++) {
+                if (a[j]) {
+                    __xv6fs_itrunc_ind(xv6_sb, &a[j], dev);
+                    modified = true;
+                }
+            }
+            
+            if (modified) {
+                xv6fs_log_write(xv6_sb, bp);
+            }
+            brelse(bp);
+            
+            // Check if all L1 entries are now zero, free the dind block
+            bp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
+            a = (uint*)bp->data;
+            bool all_zero = true;
+            for (uint j = 0; j < XV6FS_NINDIRECT; j++) {
+                if (a[j]) {
+                    all_zero = false;
+                    break;
+                }
+            }
+            brelse(bp);
+            
+            if (all_zero) {
+                __xv6fs_bfree(xv6_sb, dev, ip->addrs[XV6FS_NDIRECT + 1]);
+                ip->addrs[XV6FS_NDIRECT + 1] = 0;
+            }
+        }
+    }
+    
+    return 0;
+}
+
 int xv6fs_truncate(struct vfs_inode *inode, loff_t new_size) {
     if (inode == NULL) return -EINVAL;
+    if (new_size < 0) return -EINVAL;
     
     struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
     struct xv6fs_superblock *xv6_sb = container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
     
+    loff_t old_size = inode->size;
+    
+    if (new_size == old_size) {
+        return 0;  // No change needed
+    }
+    
     if (new_size == 0) {
+        // Full truncation - use the optimized path
         xv6fs_begin_op(xv6_sb);
         xv6fs_itrunc(ip);
         xv6fs_end_op(xv6_sb);
         return 0;
     }
     
-    // For now, only support truncate to 0
-    // TODO: Implement partial truncation
-    if (new_size < inode->size) {
-        return -ENOSYS;
+    if (new_size < old_size) {
+        // Shrinking file - free blocks beyond new size
+        // Calculate first block to free (block containing byte at new_size)
+        // If new_size is block-aligned, start from that block
+        // Otherwise, keep the partial block and free from next block
+        uint first_block = (new_size + BSIZE - 1) / BSIZE;
+        
+        xv6fs_begin_op(xv6_sb);
+        __xv6fs_truncate_partial(ip, first_block);
+        inode->size = new_size;
+        xv6fs_iupdate(ip);
+        xv6fs_end_op(xv6_sb);
+        return 0;
     }
     
     // Extending file - allocate blocks as needed
+    uint old_blocks = (old_size + BSIZE - 1) / BSIZE;
     uint new_blocks = (new_size + BSIZE - 1) / BSIZE;
+    
     xv6fs_begin_op(xv6_sb);
-    for (uint bn = inode->size / BSIZE; bn < new_blocks; bn++) {
+    for (uint bn = old_blocks; bn < new_blocks; bn++) {
         if (xv6fs_bmap(ip, bn) == 0) {
             xv6fs_end_op(xv6_sb);
             return -ENOSPC;

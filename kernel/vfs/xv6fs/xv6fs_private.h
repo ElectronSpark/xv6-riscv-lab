@@ -5,6 +5,7 @@
 #include "vfs/vfs_types.h"
 #include "spinlock.h"
 #include "fs.h"
+#include "slab.h"
 
 // Block size for xv6 filesystem
 #define XV6FS_BSIZE BSIZE
@@ -137,6 +138,10 @@ void xv6fs_init_fs_type(void);
 uint xv6fs_bmap(struct xv6fs_inode *ip, uint bn);
 void xv6fs_itrunc(struct xv6fs_inode *ip);
 void xv6fs_iupdate(struct xv6fs_inode *ip);
+void xv6fs_shrink_caches(void);
+
+// Slab caches (extern)
+extern slab_cache_t __xv6fs_inode_cache;
 
 // Convert xv6 type to VFS mode
 static inline mode_t xv6fs_type_to_mode(short type) {

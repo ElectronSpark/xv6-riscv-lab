@@ -431,7 +431,7 @@ void xv6fs_run_truncate_smoketest(void) {
         printf("xv6fs_truncate: " PASS " grow to 512 bytes, size=%lld\n", testfile->size);
     }
     
-    // Test 2: Grow to 3 blocks (stay within transaction limit)
+    // Test 2: Grow to 3 blocks
     ret = vfs_itruncate(testfile, 3 * BSIZE);
     if (ret != 0) {
         printf("xv6fs_truncate: " FAIL " grow to 3 blocks, errno=%d\n", ret);
@@ -439,7 +439,23 @@ void xv6fs_run_truncate_smoketest(void) {
         printf("xv6fs_truncate: " PASS " grow to 3 blocks, size=%lld\n", testfile->size);
     }
     
-    // Test 3: Truncate to zero (the only shrink xv6fs supports)
+    // Test 3: Partial shrink to 2 blocks
+    ret = vfs_itruncate(testfile, 2 * BSIZE);
+    if (ret != 0) {
+        printf("xv6fs_truncate: " FAIL " partial shrink to 2 blocks, errno=%d\n", ret);
+    } else {
+        printf("xv6fs_truncate: " PASS " partial shrink to 2 blocks, size=%lld\n", testfile->size);
+    }
+    
+    // Test 4: Partial shrink to 500 bytes (within 1 block)
+    ret = vfs_itruncate(testfile, 500);
+    if (ret != 0) {
+        printf("xv6fs_truncate: " FAIL " partial shrink to 500 bytes, errno=%d\n", ret);
+    } else {
+        printf("xv6fs_truncate: " PASS " partial shrink to 500 bytes, size=%lld\n", testfile->size);
+    }
+    
+    // Test 5: Truncate to zero
     ret = vfs_itruncate(testfile, 0);
     if (ret != 0) {
         printf("xv6fs_truncate: " FAIL " shrink to zero, errno=%d\n", ret);
@@ -447,7 +463,7 @@ void xv6fs_run_truncate_smoketest(void) {
         printf("xv6fs_truncate: " PASS " shrink to zero, size=%lld\n", testfile->size);
     }
     
-    // Test 4: Grow again after truncating to 0
+    // Test 6: Grow again after truncating to 0
     ret = vfs_itruncate(testfile, 2 * BSIZE);
     if (ret != 0) {
         printf("xv6fs_truncate: " FAIL " grow after shrink, errno=%d\n", ret);
@@ -455,14 +471,12 @@ void xv6fs_run_truncate_smoketest(void) {
         printf("xv6fs_truncate: " PASS " grow after shrink, size=%lld\n", testfile->size);
     }
     
-    // Test 5: Verify partial shrink returns ENOSYS
-    ret = vfs_itruncate(testfile, BSIZE);
-    if (ret == -ENOSYS) {
-        printf("xv6fs_truncate: " PASS " partial shrink correctly returns ENOSYS\n");
-    } else if (ret == 0) {
-        printf("xv6fs_truncate: " WARN " partial shrink succeeded (unexpected but ok)\n");
+    // Test 7: Same size (no-op)
+    ret = vfs_itruncate(testfile, 2 * BSIZE);
+    if (ret != 0) {
+        printf("xv6fs_truncate: " FAIL " same size no-op, errno=%d\n", ret);
     } else {
-        printf("xv6fs_truncate: " FAIL " partial shrink returned unexpected errno=%d\n", ret);
+        printf("xv6fs_truncate: " PASS " same size no-op, size=%lld\n", testfile->size);
     }
     
     // Final truncate to 0 for cleanup
@@ -1055,17 +1069,94 @@ out:
  * Run all smoke tests
  ******************************************************************************/
 
+// Helper to shrink all caches and check for leaks
+static void xv6fs_shrink_all_caches(void) {
+    xv6fs_shrink_caches();
+    __vfs_shrink_caches();
+    kmm_shrink_all();
+}
+
 void xv6fs_run_all_smoketests(void) {
     printf("\n========================================\n");
     printf("        xv6fs Smoke Tests\n");
     printf("========================================\n");
     
+    // Shrink all caches before baseline to get a clean state
+    xv6fs_shrink_all_caches();
+    
+    uint64 before_pages, after_pages;
+    
+    // Memory leak check for inode smoketest
+    before_pages = get_total_free_pages();
     xv6fs_run_inode_smoketest();
+    xv6fs_shrink_all_caches();
+    after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: xv6fs_inode_smoketest leaked %ld pages\n",
+               (long)(before_pages - after_pages));
+    } else {
+        printf("xv6fs_inode_smoketest: no memory leak detected\n");
+    }
+    
+    // Memory leak check for file_ops smoketest
+    before_pages = get_total_free_pages();
     xv6fs_run_file_ops_smoketest();
+    xv6fs_shrink_all_caches();
+    after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: xv6fs_file_ops_smoketest leaked %ld pages\n",
+               (long)(before_pages - after_pages));
+    } else {
+        printf("xv6fs_file_ops_smoketest: no memory leak detected\n");
+    }
+    
+    // Memory leak check for truncate smoketest
+    before_pages = get_total_free_pages();
     xv6fs_run_truncate_smoketest();
+    xv6fs_shrink_all_caches();
+    after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: xv6fs_truncate_smoketest leaked %ld pages\n",
+               (long)(before_pages - after_pages));
+    } else {
+        printf("xv6fs_truncate_smoketest: no memory leak detected\n");
+    }
+    
+    // Memory leak check for namei smoketest
+    before_pages = get_total_free_pages();
     xv6fs_run_namei_smoketest();
+    xv6fs_shrink_all_caches();
+    after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: xv6fs_namei_smoketest leaked %ld pages\n",
+               (long)(before_pages - after_pages));
+    } else {
+        printf("xv6fs_namei_smoketest: no memory leak detected\n");
+    }
+    
+    // Memory leak check for dir_iter smoketest
+    before_pages = get_total_free_pages();
     xv6fs_run_dir_iter_smoketest();
+    xv6fs_shrink_all_caches();
+    after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: xv6fs_dir_iter_smoketest leaked %ld pages\n",
+               (long)(before_pages - after_pages));
+    } else {
+        printf("xv6fs_dir_iter_smoketest: no memory leak detected\n");
+    }
+    
+    // Memory leak check for large_file smoketest
+    before_pages = get_total_free_pages();
     xv6fs_run_large_file_smoketest();
+    xv6fs_shrink_all_caches();
+    after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: xv6fs_large_file_smoketest leaked %ld pages\n",
+               (long)(before_pages - after_pages));
+    } else {
+        printf("xv6fs_large_file_smoketest: no memory leak detected\n");
+    }
     
     printf("\n========================================\n");
     printf("        xv6fs Smoke Tests Complete\n");

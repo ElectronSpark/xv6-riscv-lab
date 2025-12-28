@@ -45,6 +45,12 @@ static int __xv6fs_init_cache(void) {
     return 0;
 }
 
+// Shrink xv6fs slab caches to release unused pages
+void xv6fs_shrink_caches(void) {
+    slab_cache_shrink(&__xv6fs_inode_cache, 0x7fffffff);
+    slab_cache_shrink(&__xv6fs_sb_cache, 0x7fffffff);
+}
+
 /******************************************************************************
  * Superblock read/write helpers
  ******************************************************************************/
