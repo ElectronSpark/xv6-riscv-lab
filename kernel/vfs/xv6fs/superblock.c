@@ -31,13 +31,17 @@ static slab_cache_t __xv6fs_sb_cache;
 
 static int __xv6fs_init_cache(void) {
     int ret = 0;
-    ret = slab_cache_init(&__xv6fs_inode_cache, "xv6fs_inode",
-                          sizeof(struct xv6fs_inode), 0);
+    ret = slab_cache_init(&__xv6fs_inode_cache, 
+                          "xv6fs_inode",
+                          sizeof(struct xv6fs_inode), 
+                          SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
     if (ret != 0) {
         return ret;
     }
-    ret = slab_cache_init(&__xv6fs_sb_cache, "xv6fs_sb",
-                          sizeof(struct xv6fs_superblock), 0);
+    ret = slab_cache_init(&__xv6fs_sb_cache, 
+                          "xv6fs_sb",
+                          sizeof(struct xv6fs_superblock), 
+                          SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
     if (ret != 0) {
         return ret;
     }

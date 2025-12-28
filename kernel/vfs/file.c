@@ -89,8 +89,10 @@ static void __vfs_file_free(struct vfs_file *file) {
 }
 
 void __vfs_file_init(void) {
-    int ret = slab_cache_init(&__vfs_file_slab, "vfs_file_cache",
-                              sizeof(struct vfs_file), 0);
+    int ret = slab_cache_init(&__vfs_file_slab, 
+                              "vfs_file_cache",
+                              sizeof(struct vfs_file),  
+                              SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
     assert(ret == 0, "Failed to initialize vfs_file_cache slab cache, errno=%d", ret);
     spin_init(&__vfs_ftable_lock, "vfs_file_table_lock");
     list_entry_init(&__vfs_ftable);

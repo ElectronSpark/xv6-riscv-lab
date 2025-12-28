@@ -93,6 +93,11 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     spin_release
     spin_init
     spin_holding
+    spin_lock
+    spin_unlock
+    cpuid
+    push_off
+    pop_off
     kmm_alloc
     kmm_free
 )
@@ -144,6 +149,7 @@ add_executable(ut_semaphore
     ${CMAKE_SOURCE_DIR}/src/ut_semaphore_main.c
     ${CMAKE_SOURCE_DIR}/../kernel/lock/semaphore.c
     ${CMAKE_SOURCE_DIR}/src/semaphore_runtime_stubs.c
+    ${CMAKE_SOURCE_DIR}/src/panic_stubs.c
 )
 target_link_libraries(ut_semaphore PRIVATE cmocka-static)
 target_compile_options(ut_semaphore PRIVATE ${TEST_C_FLAGS})

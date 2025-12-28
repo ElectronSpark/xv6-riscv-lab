@@ -157,10 +157,10 @@ static void expect_integrity(const rwlock_t *lock, const char *label) {
     if (lock->readers < 0) {
         fail_msg("%s: readers negative (%d)", label, lock->readers);
     }
-    if (lock->readers > 0 && lock->holder != NULL) {
+    if (lock->readers > 0 && lock->holder_pid != 0) {
         fail_msg("%s: reader/writer overlap (readers=%d)", label, lock->readers);
     }
-    if (lock->holder != NULL && lock->readers != 0) {
+    if (lock->holder_pid != 0 && lock->readers != 0) {
         fail_msg("%s: holder present with readers=%d", label, lock->readers);
     }
     if (lock->read_queue.lock != &lock->lock) {
@@ -178,6 +178,8 @@ static int test_setup(void **state) {
     memset(&g_runtime, 0, sizeof(g_runtime));
     memset(&g_self_proc, 0, sizeof(g_self_proc));
     memset(&g_wait_proc, 0, sizeof(g_wait_proc));
+    g_self_proc.pid = 1;  // Set distinct PIDs for test procs
+    g_wait_proc.pid = 2;
     g_runtime.wait_return = 0;
     g_runtime.wakeup_return = 0;
     g_runtime.wakeup_all_return = 0;
@@ -191,7 +193,7 @@ static void test_rwlock_init_integrity(void **state) {
     assert_int_equal(rwlock_init(&lock, 0, "ut"), 0);
     expect_integrity(&lock, "after init");
     assert_int_equal(lock.readers, 0);
-    assert_null(lock.holder);
+    assert_int_equal(lock.holder_pid, 0);
 }
 
 static void test_rwlock_read_acquire_release_integrity(void **state) {
@@ -200,7 +202,7 @@ static void test_rwlock_read_acquire_release_integrity(void **state) {
     assert_int_equal(rwlock_init(&lock, 0, "ut"), 0);
     assert_int_equal(rwlock_acquire_read(&lock), 0);
     assert_int_equal(lock.readers, 1);
-    assert_null(lock.holder);
+    assert_int_equal(lock.holder_pid, 0);
     expect_integrity(&lock, "after read acquire");
     rwlock_release(&lock);
     assert_int_equal(lock.readers, 0);
@@ -212,10 +214,10 @@ static void test_rwlock_write_acquire_release_integrity(void **state) {
     rwlock_t lock;
     assert_int_equal(rwlock_init(&lock, 0, "ut"), 0);
     assert_int_equal(rwlock_acquire_write(&lock), 0);
-    assert_ptr_equal(lock.holder, &g_self_proc);
+    assert_int_equal(lock.holder_pid, g_self_proc.pid);
     expect_integrity(&lock, "after write acquire");
     rwlock_release(&lock);
-    assert_true(lock.holder == NULL || lock.holder == &g_wait_proc);
+    assert_true(lock.holder_pid == 0 || lock.holder_pid == g_wait_proc.pid);
     expect_integrity(&lock, "after write release");
 }
 
@@ -228,7 +230,7 @@ static void test_rwlock_release_wakes_writer_integrity(void **state) {
     g_runtime.next_wakeup_proc = &g_wait_proc;
     rwlock_release(&lock);
     assert_int_equal(proc_queue_size(&lock.write_queue), 0);
-    assert_ptr_equal(lock.holder, &g_wait_proc);
+    assert_int_equal(lock.holder_pid, g_wait_proc.pid);
     expect_integrity(&lock, "writer wake");
     assert_int_equal(g_runtime.wake_writer_calls, 1);
 }

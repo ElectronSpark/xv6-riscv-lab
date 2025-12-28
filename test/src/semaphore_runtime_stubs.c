@@ -21,7 +21,8 @@ struct cpu *mycpu(void) {
 }
 
 struct proc *myproc(void) {
-    return NULL;
+    static struct proc proc_stub = {.pid = 1};
+    return &proc_stub;
 }
 
 void sched_lock(void) {}

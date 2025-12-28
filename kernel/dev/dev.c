@@ -35,7 +35,7 @@ static void __dev_tab_slab_init(void) {
     int ret = slab_cache_init(&__dev_type_cache, 
                               "dev_type_cache", 
                               sizeof(device_major_t), 
-                              SLAB_FLAG_EMBEDDED);
+                              SLAB_FLAG_EMBEDDED | SLAB_FLAG_DEBUG_BITMAP);
     assert(ret == 0, "Failed to initialize device type slab cache");
 }
 

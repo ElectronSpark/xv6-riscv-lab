@@ -10,6 +10,11 @@
 // The maximum size of a buddy page is 2**PAGE_BUDDY_MAX_ORDER continuous pages
 #define PAGE_BUDDY_MAX_ORDER        10
 
+// Buddy page states
+#define BUDDY_STATE_FREE            0  // Free and available for allocation in buddy pool
+#define BUDDY_STATE_MERGING         1  // Currently being merged with its buddy
+#define BUDDY_STATE_CACHED          2  // Cached in per-CPU cache
+
 
 // for pointers to slab pools
 typedef struct slab_struct slab_t;
@@ -86,6 +91,7 @@ typedef struct page_struct {
             list_node_t            lru_entry;
             struct page_struct     *buddy_head;
             uint32                 order;
+            uint32                 state;  // buddy state: FREE, MERGING, etc.
         } buddy;
         /* Slab pages
             Objects occupied less than one page are managed by slab system.
@@ -107,6 +113,7 @@ typedef struct page_struct {
 typedef struct {
     list_node_t     lru_head;
     uint64          count;
+    spinlock_t      lock;  // per-order lock for fine-grained concurrency
 } buddy_pool_t;
 
 #endif              /* __KERNEL_PAGE_TYPE_H */

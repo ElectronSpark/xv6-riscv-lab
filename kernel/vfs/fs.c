@@ -326,11 +326,15 @@ void vfs_init(void) {
     __vfs_rooti_init();
     list_entry_init(&vfs_fs_types);
     mutex_init(&__mount_mutex, "vfs_mount_mutex");
-    int ret = slab_cache_init(&vfs_superblock_cache, "vfs_superblock_cache",
-                              sizeof(struct vfs_superblock), 0);
+    int ret = slab_cache_init(&vfs_superblock_cache, 
+                              "vfs_superblock_cache",
+                              sizeof(struct vfs_superblock), 
+                              SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
     assert(ret == 0, "Failed to initialize vfs_superblock_cache slab cache, errno=%d", ret);
-    ret = slab_cache_init(&vfs_fs_type_cache, "vfs_fs_type_cache",
-                          sizeof(struct vfs_fs_type), 0);
+    ret = slab_cache_init(&vfs_fs_type_cache, 
+                          "vfs_fs_type_cache",
+                          sizeof(struct vfs_fs_type), 
+                          SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
     assert(ret == 0, "Failed to initialize vfs_fs_type_cache slab cache, errno=%d", ret);
     vfs_fs_type_count = 0;
     struct proc *proc = myproc();

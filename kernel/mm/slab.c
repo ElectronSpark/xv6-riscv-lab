@@ -1,4 +1,63 @@
-// SLAB allocator manages kernel objects smaller than a single page
+// SLAB allocator for kernel objects smaller than a single page.
+//
+// The SLAB allocator manages small kernel objects efficiently by grouping them
+// into slabs (groups of contiguous pages). This reduces internal fragmentation
+// and provides fast allocation/deallocation for frequently used objects.
+//
+// ARCHITECTURE:
+//   - SLAB Cache: Collection of slabs for objects of the same size
+//   - SLAB: Group of one or more pages containing objects of uniform size
+//   - Objects: Fixed-size allocations managed within slabs
+//   - Per-CPU Caches: Each CPU maintains its own partial and full lists
+//
+// KEY FEATURES:
+//   - Per-CPU slab lists for scalable concurrent access
+//   - Global free list shared across all CPUs
+//   - Adaptive slab sizing: slab order chosen based on object size
+//   - Try-lock optimization to reduce lock contention
+//   - Embedded or separate slab descriptors based on object size
+//   - Free list per slab for fast object allocation
+//   - Optional bitmap tracking for debugging (SLAB_FLAG_DEBUG_BITMAP)
+//   - Automatic slab shrinking when free objects exceed limits
+//
+// SLAB STATES:
+//   - FREE: All objects available (in global_free_list)
+//   - PARTIAL: Some objects allocated (in per-CPU partial_list)
+//   - FULL: All objects allocated (in per-CPU full_list)
+//   - DEQUEUED: Temporarily removed from lists during operations
+//
+// BITMAP TRACKING (optional):
+//   When SLAB_FLAG_DEBUG_BITMAP is set, each slab maintains a bitmap where
+//   each bit tracks whether an object is allocated (1) or free (0). This
+//   provides runtime detection of:
+//   - Double allocation: Panic if allocating an already-allocated object
+//   - Double free: Panic if freeing an already-free object
+//   - Memory overhead: 1 bit per object (minimal impact)
+//
+// ALLOCATION FLOW:
+//   1. Try local CPU partial_list (fast path, per-CPU lock)
+//   2. If empty, take from global_free_list (global lock)
+//   3. If empty, create new slab (no lock)
+//   4. Get object from slab's free list
+//   5. Update bitmap if enabled
+//   6. Move slab between lists if state changed
+//
+// DEALLOCATION FLOW:
+//   1. Find slab from object address via page descriptor
+//   2. Determine owner CPU from slab->cpu_id
+//   3. Acquire owner CPU's lock
+//   4. Verify bitmap and clear bit if enabled
+//   5. Return object to slab's free list
+//   6. Move slab to appropriate list based on state
+//   7. Special case: cross-CPU free from full→partial stays in owner's partial list
+//
+// LOCKING:
+//   - Per-CPU locks: Protect each CPU's partial and full lists
+//   - Global free lock: Protects shared free list
+//   - Lock hierarchy: Per-CPU locks → Global free lock
+//   - Try-lock optimization: Check state without lock, then lock and double-check
+//   - Cross-CPU frees: Acquire target CPU's lock (by CPU ID to prevent deadlock)
+//
 #include "types.h"
 #include "param.h"
 #include "memlayout.h"
@@ -6,33 +65,43 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
+#include "string.h"
 #include "page.h"
 #include "list.h"
 #include "slab.h"
 #include "slab_private.h"
 
 #ifdef KERNEL_PAGE_SANITIZER
-STATIC_INLINE void __slab_sanitizer_check(const char *op ,slab_cache_t *cache, slab_t *slab, 
+STATIC_INLINE void __slab_sanitizer_check(const char *op ,slab_cache_t *cache, slab_t *slab,
                                           void *obj) {
-    printf("%s: cache \"%s\" (%p), obj 0x%lx, size: %ld\n", 
+    printf("%s: cache \"%s\" (%p), obj 0x%lx, size: %ld\n",
            op, cache->name, cache, (uint64)obj, cache->obj_size);
 }
 #else
 #define __slab_sanitizer_check(op, page, order, flags) do { } while (0)
 #endif
 
+// ============================================================================
+// SLAB Lifecycle Management
+// ============================================================================
+
 // create a detached SLAB and initialize its objects
 // return the SLAB created if success
 // return NULL if failed
-STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs, 
-                                  size_t obj_size, uint32 obj_num) {
+STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
+                                  size_t obj_size, uint32 obj_num, uint32 bitmap_size) {
     page_t *page;
     int page_nums;
     void *page_base, **prev, **tmp;
     slab_t *slab;
-    
+
     page = __page_alloc(order, PAGE_TYPE_SLAB);
     if (page == NULL) {
+        printf("__slab_make: __page_alloc FAILED for order %d (need %d pages = %dKB)\n",
+               order, 1 << order, (1 << order) * 4);
+        printf("  This allocation was for obj_size=%ld, will hold %d objects\n",
+               obj_size, obj_num);
+        printf("  OUT OF MEMORY - cannot allocate slab!\n");
         return NULL;
     }
     page_base = (void *)__page_to_pa(page);
@@ -56,7 +125,26 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
     slab->in_use = 0;
     slab->page = page;
     slab->state = SLAB_STATE_DEQUEUED;
+    slab->bitmap = NULL;
+    __atomic_store_n(&slab->cpu_id, -1, __ATOMIC_RELEASE);  // Initially unowned
     list_entry_init(&slab->list_entry);
+
+    // Allocate bitmap if bitmap tracking is enabled
+    if (bitmap_size > 0) {
+        slab->bitmap = kmm_alloc(bitmap_size * sizeof(uint64));
+        if (slab->bitmap == NULL) {
+            // Failed to allocate bitmap, cleanup and return
+            if ((uint64)slab != (uint64)page_base) {
+                kmm_free(slab);
+            }
+            __page_free(page, order);
+            return NULL;
+        }
+        // Initialize bitmap to all zeros (all objects free)
+        for (uint32 i = 0; i < bitmap_size; i++) {
+            slab->bitmap[i] = 0;
+        }
+    }
 
     prev = NULL;
     tmp = page_base + offs;
@@ -65,7 +153,7 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
         prev = tmp;
         tmp = (void *)tmp + obj_size;
     }
-  
+
     slab->next = prev;
     return slab;
 }
@@ -90,11 +178,20 @@ STATIC_INLINE void __slab_destroy(slab_t *slab) {
     if (page_base == 0) {
         panic("__slab_destroy");
     }
+    // Free bitmap if it was allocated
+    if (slab->bitmap != NULL) {
+        kmm_free(slab->bitmap);
+        slab->bitmap = NULL;
+    }
     if ((uint64)slab != page_base) {
         kmm_free(slab);
     }
     __page_free(page, order);
 }
+
+// ============================================================================
+// SLAB Attachment/Detachment
+// ============================================================================
 
 // Attach an empty SLAB to a SLAB cache
 // SLAB must be enqueued after attaching
@@ -112,13 +209,16 @@ STATIC_INLINE void __slab_attach(slab_cache_t *cache, slab_t *slab) {
         panic("__slab_attach(): attach a non-empty SLAB");
     }
     slab->cache = cache;
-    cache->slab_total++;
-    cache->obj_total += cache->slab_obj_num;
+    __atomic_fetch_add(&cache->slab_total, 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&cache->obj_total, cache->slab_obj_num, __ATOMIC_RELEASE);
 }
 
 // Detach an empty SLAB from its SLAB cache
 // SLAB must be dequeued before detaching
 STATIC_INLINE void __slab_detach(slab_cache_t *cache, slab_t *slab) {
+    int64 slab_total_val;
+    uint64 obj_total_val;
+
     if (!LIST_NODE_IS_DETACHED(slab, list_entry)) {
         panic("__slab_detach(): SLAB cannot be detached when in a queue");
     }
@@ -128,135 +228,80 @@ STATIC_INLINE void __slab_detach(slab_cache_t *cache, slab_t *slab) {
     if (!__SLAB_EMPTY(slab)) {
         panic("__slab_detach(): detach non-empty SLAB");
     }
-    if (cache->slab_total == 0 || cache->obj_total < cache->slab_obj_num) {
+
+    // Read atomic counters for validation
+    slab_total_val = __atomic_load_n(&cache->slab_total, __ATOMIC_ACQUIRE);
+    obj_total_val = __atomic_load_n(&cache->obj_total, __ATOMIC_ACQUIRE);
+
+    if (slab_total_val == 0 || obj_total_val < cache->slab_obj_num) {
         panic("__slab_detach(): counter error");
     }
-    cache->obj_total -= cache->slab_obj_num;
-    cache->slab_total--;
+
+    __atomic_fetch_sub(&cache->obj_total, cache->slab_obj_num, __ATOMIC_RELEASE);
+    __atomic_fetch_sub(&cache->slab_total, 1, __ATOMIC_RELEASE);
     slab->cache = NULL;
 }
 
-// Dequeue from each individual SLAB lists
-// Will not check validity since they are called by __slab_dequeue
-STATIC_INLINE void __slab_dequeue_full(slab_cache_t *cache, slab_t *slab) {
-    assert(cache->slab_full > 0, "__slab_dequeue(): slab_full counter error");
-    assert(!LIST_IS_EMPTY(&cache->full_list), "__slab_dequeue(): list head error");
-    list_node_detach(slab, list_entry);
-    cache->slab_full -= 1;
-    slab->state = SLAB_STATE_DEQUEUED;
-}
+// ============================================================================
+// SLAB Queue Management (Per-CPU Architecture)
+// ============================================================================
+// NOTE: In the per-CPU architecture, queue management is handled directly
+// in slab_alloc() and slab_free() using list operations and atomic counters.
+// No separate enqueue/dequeue functions are needed.
 
-STATIC_INLINE void __slab_dequeue_free(slab_cache_t *cache, slab_t *slab) {
-    assert(cache->slab_free > 0, "__slab_dequeue(): slab_free counter error");
-    assert(!LIST_IS_EMPTY(&cache->free_list), "__slab_dequeue(): list head error");
-    list_node_detach(slab, list_entry);
-    cache->slab_free -= 1;
-    slab->state = SLAB_STATE_DEQUEUED;
-}
+// ============================================================================
+// Bitmap Tracking (Optional Debug Feature)
+// ============================================================================
 
-STATIC_INLINE void __slab_dequeue_partial(slab_cache_t *cache, slab_t *slab) {
-    assert(cache->slab_partial > 0, "__slab_dequeue(): slab_partial counter error");
-    assert(!LIST_IS_EMPTY(&cache->partial_list), "__slab_dequeue(): list head error");
-    list_node_detach(slab, list_entry);
-    cache->slab_partial -= 1;
-    slab->state = SLAB_STATE_DEQUEUED;
-}
-
-// Take a SLAB out from the free/partial/full list it's in
-// No validity check
-STATIC_INLINE void __slab_dequeue(slab_cache_t *cache, slab_t *slab) {
-    assert(slab->cache == cache, "__slab_dequeue(): wrong SLAB cache");
-    assert(!LIST_NODE_IS_DETACHED(slab, list_entry),
-        "__slab_dequeue(): SLAB is not in a queue");
-    assert(slab->state != SLAB_STATE_DEQUEUED,
-        "__slab_enqueue(): SLAB must be enqueued before dequeueing");
-    switch (slab->state) {
-        case SLAB_STATE_FREE:
-            __slab_dequeue_free(cache, slab);
-            break;
-        case SLAB_STATE_FULL:
-            __slab_dequeue_full(cache, slab);
-            break;
-        case SLAB_STATE_PARTIAL:
-            __slab_dequeue_partial(cache, slab);
-            break;
-        default:
-            panic("__slab_dequeue(): invalid SLAB state");
+// Test-and-set: Returns previous value (0 or 1) and sets the bit
+// Returns -1 if bitmap is NULL or index out of range
+STATIC_INLINE int __slab_bitmap_test_and_set(slab_t *slab, int idx) {
+    if (slab->bitmap == NULL) {
+        return -1;
     }
+    if (idx < 0 || (slab->cache && idx >= slab->cache->slab_obj_num)) {
+        return -1;
+    }
+
+    int word_idx = idx / 64;
+    int bit_idx = idx % 64;
+    uint64 mask = 1UL << bit_idx;
+
+    // Get old value
+    int old_val = !!(slab->bitmap[word_idx] & mask);
+
+    // Set the bit
+    slab->bitmap[word_idx] |= mask;
+
+    return old_val;
 }
 
-// Enqueue to each individual SLAB lists
-// Will not check validity since they are called by __slab_enqueue
-STATIC_INLINE void __slab_enqueue_full(slab_cache_t *cache, slab_t *slab) {
-    list_node_push_back(&cache->full_list, slab, list_entry);
-    cache->slab_full++;
-    slab->state = SLAB_STATE_FULL;
+// Test-and-clear: Returns previous value (0 or 1) and clears the bit
+// Returns -1 if bitmap is NULL or index out of range
+STATIC_INLINE int __slab_bitmap_test_and_clear(slab_t *slab, int idx) {
+    if (slab->bitmap == NULL) {
+        return -1;
+    }
+    if (idx < 0 || (slab->cache && idx >= slab->cache->slab_obj_num)) {
+        return -1;
+    }
+
+    int word_idx = idx / 64;
+    int bit_idx = idx % 64;
+    uint64 mask = 1UL << bit_idx;
+
+    // Get old value
+    int old_val = !!(slab->bitmap[word_idx] & mask);
+
+    // Clear the bit
+    slab->bitmap[word_idx] &= ~mask;
+
+    return old_val;
 }
 
-STATIC_INLINE void __slab_enqueue_free(slab_cache_t *cache, slab_t *slab) {
-    list_node_push_back(&cache->free_list, slab, list_entry);
-    cache->slab_free++;
-    slab->state = SLAB_STATE_FREE;
-}
-
-STATIC_INLINE void __slab_enqueue_partial(slab_cache_t *cache, slab_t *slab) {
-    list_node_push_back(&cache->partial_list, slab, list_entry);
-    cache->slab_partial++;
-    slab->state = SLAB_STATE_PARTIAL;
-}
-
-// put a SLAB into the free/partial/full list accordingly
-// No validity check
-STATIC_INLINE void __slab_enqueue(slab_cache_t *cache, slab_t *slab) {
-    assert(slab->cache == cache, "__slab_enqueue(): wrong SLAB cache");
-    assert(LIST_NODE_IS_DETACHED(slab, list_entry),
-        "__slab_enqueue(): SLAB is already in a queue");
-    assert(slab->state == SLAB_STATE_DEQUEUED,
-        "__slab_enqueue(): SLAB must be dequeued before enqueueing");
-    if (__SLAB_EMPTY(slab)) {
-        __slab_enqueue_free(cache, slab);
-    } else if (__SLAB_FULL(slab)) {
-        __slab_enqueue_full(cache, slab);
-    } else {
-        __slab_enqueue_partial(cache, slab);
-    }
-}
-
-// Take out the first SLAB from the free list of a SLAB cache, and dequeue it
-STATIC_INLINE slab_t *__slab_pop_free(slab_cache_t *cache) {
-    slab_t *slab;
-    if (cache == NULL || cache->slab_free == 0) {
-        return NULL;
-    }
-    cache->slab_free--;
-    slab = list_node_pop_back(&cache->free_list, slab_t, list_entry);
-    if (slab == NULL) {
-        panic("__slab_pop_free(): failed to pop empty SLAB");
-    }
-    if (!__SLAB_EMPTY(slab)) {
-        panic("__slab_pop_free(): get a non-empty SLAB when trying to get an empty one");
-    }
-    slab->state = SLAB_STATE_DEQUEUED;
-    return slab;
-}
-
-// Take out the first SLAB from the partial list of a SLAB cache, and dequeue it
-STATIC_INLINE slab_t *__slab_pop_partial(slab_cache_t *cache) {
-    slab_t *slab;
-    if (cache == NULL || cache->slab_partial == 0) {
-        return NULL;
-    }
-    cache->slab_partial--;
-    slab = list_node_pop_back(&cache->partial_list, slab_t, list_entry);
-    if (slab == NULL) {
-        panic("__slab_pop_free(): failed to pop half-full SLAB");
-    }
-    if (__SLAB_EMPTY(slab) || __SLAB_FULL(slab)) {
-        panic("__slab_pop_free(): get an empty or full SLAB when trying to get an half-full one");
-    }
-    slab->state = SLAB_STATE_DEQUEUED;
-    return slab;
-}
+// ============================================================================
+// SLAB Object Management
+// ============================================================================
 
 // Take a SLAB object out of its SLAB and increase the in_use counter of the
 // SLAB
@@ -270,6 +315,15 @@ STATIC_INLINE void *__slab_obj_get(slab_t *slab) {
     if (ret_ptr != NULL) {
         slab->next = *(void **)ret_ptr;
         slab->in_use++;
+        // Update bitmap if tracking is enabled
+        if (slab->bitmap != NULL) {
+            int idx = __slab_obj2idx(slab, ret_ptr);
+            if (idx >= 0) {
+                // Use test-and-set: should return 0 (was free), now set to 1 (allocated)
+                int old_val = __slab_bitmap_test_and_set(slab, idx);
+                assert(old_val == 0, "__slab_obj_get(): double allocation detected");
+            }
+        }
     }
     return ret_ptr;
 }
@@ -279,6 +333,15 @@ STATIC_INLINE void *__slab_obj_get(slab_t *slab) {
 // No validity check
 // Will not change the counter in its SLAB cache.
 STATIC_INLINE void __slab_obj_put(slab_t *slab, void *ptr) {
+    // Update bitmap if tracking is enabled
+    if (slab->bitmap != NULL) {
+        int idx = __slab_obj2idx(slab, ptr);
+        if (idx >= 0) {
+            // Use test-and-clear: should return 1 (was allocated), now cleared to 0 (free)
+            int old_val = __slab_bitmap_test_and_clear(slab, idx);
+            assert(old_val == 1, "__slab_obj_put(): double free detected");
+        }
+    }
     *(void**)ptr = slab->next;
     slab->next = ptr;
     slab->in_use--;
@@ -357,52 +420,142 @@ STATIC_INLINE slab_t *__find_obj_slab(void *ptr) {
     return page->slab.slab;
 }
 
-// aqcuire the lock of a SLAB cache
-// no checking here
-STATIC_INLINE void __slab_cache_lock(slab_cache_t *cache) {
-    spin_acquire(&cache->lock);
+// ============================================================================
+// SLAB Cache Locking
+// ============================================================================
+
+// Acquire lock for current CPU's cache
+STATIC_INLINE void __percpu_cache_lock(slab_cache_t *cache) {
+    int cpu_id = cpuid();
+    spin_acquire(&cache->percpu_caches[cpu_id].lock);
 }
 
-// release the lock of a SLAB cache
-// no checking here
-STATIC_INLINE void __slab_cache_unlock(slab_cache_t *cache) {
-    spin_release(&cache->lock);
+// Release lock for current CPU's cache
+STATIC_INLINE void __percpu_cache_unlock(slab_cache_t *cache) {
+    int cpu_id = cpuid();
+    spin_release(&cache->percpu_caches[cpu_id].lock);
 }
+
+// Acquire lock for a specific CPU's cache
+STATIC_INLINE void __percpu_cache_lock_cpu(slab_cache_t *cache, int cpu_id) {
+    assert(cpu_id >= 0 && cpu_id < NCPU, "invalid cpu_id");
+    spin_acquire(&cache->percpu_caches[cpu_id].lock);
+}
+
+// Release lock for a specific CPU's cache
+STATIC_INLINE void __percpu_cache_unlock_cpu(slab_cache_t *cache, int cpu_id) {
+    assert(cpu_id >= 0 && cpu_id < NCPU, "invalid cpu_id");
+    spin_release(&cache->percpu_caches[cpu_id].lock);
+}
+
+// Acquire global free list lock
+STATIC_INLINE void __global_free_lock(slab_cache_t *cache) {
+    spin_acquire(&cache->global_free_lock);
+}
+
+// Release global free list lock
+STATIC_INLINE void __global_free_unlock(slab_cache_t *cache) {
+    spin_release(&cache->global_free_lock);
+}
+
+// ============================================================================
+// SLAB Cache Initialization and Management
+// ============================================================================
 
 // Initialize a existing SLAB cache without checking
-STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name, 
+STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name,
                                      size_t obj_size, uint64 flags) {
     size_t offset = 0;
     uint32 limits;
     uint16 slab_obj_num;
+    uint32 slab_order;
 
     // The size of each object must aligned to 8 bytes
     obj_size = ((obj_size + 7) >> 3) << 3;
     if (flags & SLAB_FLAG_EMBEDDED) {
         offset = __SLAB_OBJ_OFFSET(obj_size);
     }
-    slab_obj_num = (uint16)__SLAB_ORDER_OBJS(SLAB_DEFAULT_ORDER, offset, obj_size);
+
+    // Adaptive slab sizing: choose slab order based on object size to balance
+    // memory efficiency and object capacity.
+    //
+    // Goals:
+    //   1. Each slab should hold at least 8 objects (amortize metadata overhead)
+    //   2. Avoid excessive memory waste (e.g., 1MB slabs for 840-byte objects)
+    //   3. Prevent memory exhaustion in systems with limited RAM (e.g., 130MB)
+    //
+    // Strategy:
+    //   - Small objects (≤128 bytes):  order 0 (4KB)   → 32-128 objects/slab
+    //   - Small objects (≤512 bytes):  order 1 (8KB)   → 16-64 objects/slab
+    //   - Medium objects (≤1024 bytes): order 2 (16KB) → 16-32 objects/slab
+    //   - Large objects (≤2048 bytes):  order 3 (32KB) → 16-32 objects/slab
+    //   - Very large objects (>2KB):    order 4 (64KB) → up to 32 objects/slab
+    //
+    // Example: For 840-byte sigacts objects:
+    //   - Old fixed approach: order 8 (1MB) → 1248 objects, wastes 96% of memory
+    //   - New adaptive approach: order 2 (16KB) → 19 objects, 64x reduction
+    //
+    if (obj_size <= 128) {
+        slab_order = 0;  // 1 page = 4KB
+    } else if (obj_size <= 512) {
+        slab_order = 1;  // 2 pages = 8KB
+    } else if (obj_size <= 1024) {
+        slab_order = 2;  // 4 pages = 16KB
+    } else if (obj_size <= 2048) {
+        slab_order = 3;  // 8 pages = 32KB
+    } else {
+        slab_order = 4;  // 16 pages = 64KB
+    }
+
+    // Calculate number of objects that fit in this slab
+    slab_obj_num = (uint16)__SLAB_ORDER_OBJS(slab_order, offset, obj_size);
+
+    // If we got too few objects, try a larger slab (but cap at order 5 = 128KB)
+    // This ensures we meet the minimum 8 objects/slab target
+    while (slab_obj_num < 8 && slab_order < 5) {
+        slab_order++;
+        slab_obj_num = (uint16)__SLAB_ORDER_OBJS(slab_order, offset, obj_size);
+    }
+
     limits = slab_obj_num * 4;
+
+    // Calculate bitmap size if bitmap tracking is enabled
+    uint32 bitmap_size = 0;
+    if (flags & SLAB_FLAG_DEBUG_BITMAP) {
+        // Calculate number of uint64 words needed to track all objects
+        bitmap_size = (slab_obj_num + 63) / 64;
+    }
 
     // memset(cache, 0, sizeof(slab_cache_t));
     cache->name = name;
     cache->flags = flags;
     cache->obj_size = obj_size;
     cache->offset = offset;
-    cache->slab_order = SLAB_DEFAULT_ORDER;
+    cache->slab_order = slab_order;
     cache->slab_obj_num = slab_obj_num;
+    cache->bitmap_size = bitmap_size;
     cache->limits = limits;
-    cache->slab_free = 0;
-    cache->slab_partial = 0;
-    cache->slab_full = 0;
-    cache->slab_total = 0;
-    cache->obj_active = 0;
-    cache->obj_total = 0;
 
-    list_entry_init(&cache->free_list);
-    list_entry_init(&cache->partial_list);
-    list_entry_init(&cache->full_list);
-    spin_init(&cache->lock, name);
+    // Initialize per-CPU caches
+    for (int i = 0; i < NCPU; i++) {
+        list_entry_init(&cache->percpu_caches[i].partial_list);
+        list_entry_init(&cache->percpu_caches[i].full_list);
+        __atomic_store_n(&cache->percpu_caches[i].partial_count, 0, __ATOMIC_RELEASE);
+        __atomic_store_n(&cache->percpu_caches[i].full_count, 0, __ATOMIC_RELEASE);
+        // Use cache name for lock (can't format per-CPU names without snprintf)
+        spin_init(&cache->percpu_caches[i].lock, name);
+    }
+
+    // Initialize global free list
+    list_entry_init(&cache->global_free_list);
+    spin_init(&cache->global_free_lock, "global_free");
+    __atomic_store_n(&cache->global_free_count, 0, __ATOMIC_RELEASE);
+
+    // Initialize atomic counters
+    __atomic_store_n(&cache->slab_total, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&cache->obj_active, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&cache->obj_total, 0, __ATOMIC_RELEASE);
+
 }
 
 
@@ -412,7 +565,7 @@ int slab_cache_init(slab_cache_t *cache, char *name, size_t obj_size,
     if (cache == NULL) {
         return -1;
     }
-    if (flags & (~(SLAB_FLAG_STATIC | SLAB_FLAG_EMBEDDED))) {
+    if (flags & (~(SLAB_FLAG_STATIC | SLAB_FLAG_EMBEDDED | SLAB_FLAG_DEBUG_BITMAP))) {
         // invalid flags
         return -1;
     }
@@ -441,77 +594,104 @@ slab_cache_t *slab_cache_create(char *name, size_t obj_size, uint64 flags) {
     return slab_cache;
 }
 
+// ============================================================================
+// SLAB Cache Destruction and Shrinking
+// ============================================================================
+
 // destroy a slab cache
 // only non-STATIC , empty SLAB cache can be freed
 // return 0 if success
 // return -1 if failed
 int slab_cache_destroy(slab_cache_t *cache) {
-    int tmp;
+    list_node_t tmp_list;
+    int64 global_free_count;
+    int shrink_ret;
+
     if (cache == NULL) {
         return -1;
     }
-    // This lock will not release if SLAB cache is successfully destroyed.
-    __slab_cache_lock(cache);
-    if (cache->flags & SLAB_FLAG_STATIC ) {
+
+    if (cache->flags & SLAB_FLAG_STATIC) {
         // cannot destroy a STATIC SLAB
-        __slab_cache_unlock(cache);
         return -1;
     }
-    if (cache->slab_partial != 0 || cache->slab_full != 0) {
-        // will not allow to destroy a SLAB cache with allocated objects
-        __slab_cache_unlock(cache);
-        return -1;
+
+    // Check if any CPU has partial or full slabs
+    for (int i = 0; i < NCPU; i++) {
+        uint32 partial_count = __atomic_load_n(&cache->percpu_caches[i].partial_count, __ATOMIC_ACQUIRE);
+        uint32 full_count = __atomic_load_n(&cache->percpu_caches[i].full_count, __ATOMIC_ACQUIRE);
+
+        if (partial_count != 0 || full_count != 0) {
+            // will not allow to destroy a SLAB cache with allocated objects
+            return -1;
+        }
     }
-    tmp = cache->slab_free;
-    list_node_t tmp_list;
+
+    // Get global free count
+    global_free_count = __atomic_load_n(&cache->global_free_count, __ATOMIC_ACQUIRE);
+
     list_entry_init(&tmp_list);
-    int shrink_ret = __slab_cache_shrink_unlocked(cache, tmp, &tmp_list);
-    if (shrink_ret != tmp) {
+    shrink_ret = __slab_cache_shrink_unlocked(cache, global_free_count, &tmp_list);
+    if (shrink_ret != global_free_count) {
         // failed to destroy all the SLABs
-        __slab_cache_unlock(cache);
         __slab_cache_free_tmp_list(&tmp_list, shrink_ret);
         return -1;
     }
     __slab_cache_free_tmp_list(&tmp_list, shrink_ret);
     kmm_free(cache);
-    // no releasing lock here, because the SLAB has been destroyed
     return 0;
 }
 
-// try to detach empty SLABs without locking the SLAB cache
+// try to detach empty SLABs from global free list
 // SLABs detached here will not be freed immediately,
-// but put into a temporary list for later freeing outside the slab_cache lock.
+// but put into a temporary list for later freeing outside the global_free_lock.
 // return the actual number of SLABs detached
 // return -1 if failed.
 STATIC_INLINE int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums, list_node_t *tmp_list) {
-    int slab_free_after, tmp, counter;
+    int64 global_free_count, slab_free_after;
+    int64 slab_total_before;
+    int counter;
     slab_t *slab = NULL;
+
     if (cache == NULL || tmp_list == NULL) {
         return -1;
     }
-    if (nums == 0 || nums >= cache->slab_free) {
+
+    __global_free_lock(cache);
+
+    global_free_count = __atomic_load_n(&cache->global_free_count, __ATOMIC_ACQUIRE);
+
+    if (nums == 0 || nums > global_free_count) {
         slab_free_after = 0;
     } else {
-        slab_free_after = cache->slab_free - nums;
+        slab_free_after = global_free_count - nums;
     }
+
     counter = 0;
-    while (cache->slab_free > slab_free_after) {
-        tmp = cache->slab_free;
-        slab = __slab_pop_free(cache);
+    while (__atomic_load_n(&cache->global_free_count, __ATOMIC_ACQUIRE) > slab_free_after) {
+        if (LIST_IS_EMPTY(&cache->global_free_list)) {
+            panic("__slab_cache_shrink_unlocked: list empty but count > 0");
+        }
+
+        slab = list_node_pop_back(&cache->global_free_list, slab_t, list_entry);
         if (slab == NULL) {
             panic("__slab_cache_shrink_unlocked: slab == NULL");
         }
-        if (tmp == cache->slab_free) {
-            panic("__slab_cache_shrink_unlocked: tmp == cache->slab_free");
-        }
-        tmp = cache->slab_total;
+
+        __atomic_fetch_sub(&cache->global_free_count, 1, __ATOMIC_RELEASE);
+
+        slab_total_before = __atomic_load_n(&cache->slab_total, __ATOMIC_ACQUIRE);
         __slab_detach(cache, slab);
-        if (tmp == cache->slab_total) {
-            panic("__slab_cache_shrink_unlocked: tmp == cache->slab_total");
+
+        if (__atomic_load_n(&cache->slab_total, __ATOMIC_ACQUIRE) >= slab_total_before) {
+            panic("__slab_cache_shrink_unlocked: slab_total did not decrease");
         }
-        list_node_push_back( tmp_list, slab, list_entry);
+
+        list_node_push_back(tmp_list, slab, list_entry);
         counter++;
     }
+
+    __global_free_unlock(cache);
     return counter;
 }
 
@@ -532,119 +712,265 @@ STATIC_INLINE void __slab_cache_free_tmp_list(list_node_t *tmp_list, int expecte
     assert(counter == expected, "__slab_cache_free_tmp_list: counter mismatch");
 }
 
-// try to delete empty SLABs
+// try to delete empty SLABs from global free list
 // return the actual number of SLABs deleted
 // return -1 if failed.
 int slab_cache_shrink(slab_cache_t *cache, int nums) {
     int ret;
     list_node_t tmp_list;
+
     if (cache == NULL) {
         return -1;
     }
+
     list_entry_init(&tmp_list);
-    __slab_cache_lock(cache);
     ret = __slab_cache_shrink_unlocked(cache, nums, &tmp_list);
-    __slab_cache_unlock(cache);
     __slab_cache_free_tmp_list(&tmp_list, ret);
     return ret;
 }
+
+// ============================================================================
+// Public API: Object Allocation and Deallocation
+// ============================================================================
 
 // allocate an object from a SLAB cache
 // return the base address of the object if success
 // return NULL if failed
 void *slab_alloc(slab_cache_t *cache) {
     void *obj = NULL;
-    slab_t *slab;
+    slab_t *slab = NULL;
+    int cpu_id;
+    percpu_slab_cache_t *pcpu_cache;
+
     if (cache == NULL) {
         return NULL;
     }
-    __slab_cache_lock(cache);
-retry:
-    if (cache->slab_partial > 0) {
-        // Try to get object from a half-full SLAB
-        slab = LIST_FIRST_NODE(&cache->partial_list, slab_t, list_entry);
-        if (slab == NULL) {
-            panic("slab_alloc(): Failed to get a half-full SLAB when the partial list is not empty");
+
+    cpu_id = cpuid();
+    pcpu_cache = &cache->percpu_caches[cpu_id];
+
+    // PHASE 1: Try local CPU partial list (FAST PATH)
+    __percpu_cache_lock_cpu(cache, cpu_id);
+
+    if (!LIST_IS_EMPTY(&pcpu_cache->partial_list)) {
+        slab = LIST_FIRST_NODE(&pcpu_cache->partial_list, slab_t, list_entry);
+        assert(slab != NULL && !__SLAB_FULL(slab), "partial list invariant");
+
+        obj = __slab_obj_get(slab);
+
+        if (__SLAB_FULL(slab)) {
+            // Move from partial to full list
+            list_node_detach(slab, list_entry);
+            __atomic_fetch_sub(&pcpu_cache->partial_count, 1, __ATOMIC_RELEASE);
+            list_node_push_back(&pcpu_cache->full_list, slab, list_entry);
+            __atomic_fetch_add(&pcpu_cache->full_count, 1, __ATOMIC_RELEASE);
+            slab->state = SLAB_STATE_FULL;
         }
-    } else if (cache->slab_free > 0) {
-        // Try to get object from an empty SLAB
-        slab = LIST_FIRST_NODE(&cache->free_list, slab_t, list_entry);
-        if (slab == NULL) {
-            panic("slab_alloc(): Failed to get an empty SLAB when the free list is not empty");
-        }
-    } else {
-        // Try to make an empty SLAB
-        // Unlock the SLAB cache during SLAB creation to reduce lock contention
-        __slab_cache_unlock(cache);
-        slab = __slab_make( cache->flags, cache->slab_order, cache->offset, 
-                            cache->obj_size, cache->slab_obj_num);
-        if (slab == NULL) {
-            // failed to create new SLAB, just return NULL
-            obj = NULL;
-            goto done;
-        }
-        // Re-acquire the SLAB cache lock and attach the newly created SLAB
-        __slab_cache_lock(cache);
-        __slab_attach(cache, slab);
-        __slab_enqueue(cache, slab);
-        // after enqueueing, restart allocation, as other threads may have
-        // freed some objects
-        goto retry;
+
+        __atomic_fetch_add(&cache->obj_active, 1, __ATOMIC_RELEASE);
+        __percpu_cache_unlock_cpu(cache, cpu_id);
+        __slab_sanitizer_check("slab_alloc", cache, slab, obj);
+        return obj;
     }
-    // Find an empty or half-full SLAB
+
+    __percpu_cache_unlock_cpu(cache, cpu_id);
+
+    // PHASE 2: Try to get slab from global free list
+    __global_free_lock(cache);
+
+    if (!LIST_IS_EMPTY(&cache->global_free_list)) {
+        slab = list_node_pop_back(&cache->global_free_list, slab_t, list_entry);
+        __atomic_fetch_sub(&cache->global_free_count, 1, __ATOMIC_RELEASE);
+        __global_free_unlock(cache);
+
+        // Take ownership of this slab
+        __atomic_store_n(&slab->cpu_id, cpu_id, __ATOMIC_RELEASE);
+        slab->state = SLAB_STATE_DEQUEUED;
+
+        // Get object
+        obj = __slab_obj_get(slab);
+
+        // Add to local partial or full list
+        __percpu_cache_lock_cpu(cache, cpu_id);
+        if (__SLAB_FULL(slab)) {
+            list_node_push_back(&pcpu_cache->full_list, slab, list_entry);
+            __atomic_fetch_add(&pcpu_cache->full_count, 1, __ATOMIC_RELEASE);
+            slab->state = SLAB_STATE_FULL;
+        } else {
+            list_node_push_back(&pcpu_cache->partial_list, slab, list_entry);
+            __atomic_fetch_add(&pcpu_cache->partial_count, 1, __ATOMIC_RELEASE);
+            slab->state = SLAB_STATE_PARTIAL;
+        }
+        __atomic_fetch_add(&cache->obj_active, 1, __ATOMIC_RELEASE);
+        __percpu_cache_unlock_cpu(cache, cpu_id);
+
+        __slab_sanitizer_check("slab_alloc", cache, slab, obj);
+        return obj;
+    }
+
+    __global_free_unlock(cache);
+
+    // PHASE 3: Create new slab (no locks held)
+    slab = __slab_make(cache->flags, cache->slab_order, cache->offset,
+                       cache->obj_size, cache->slab_obj_num, cache->bitmap_size);
+    if (slab == NULL) {
+        printf("slab_alloc: failed to create new slab for cache '%s' (order=%d, obj_size=%ld)\n",
+               cache->name, cache->slab_order, cache->obj_size);
+        return NULL;
+    }
+
+    // Attach and take ownership
+    slab->cache = cache;
+    __atomic_store_n(&slab->cpu_id, cpu_id, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&cache->slab_total, 1, __ATOMIC_RELEASE);
+    __atomic_fetch_add(&cache->obj_total, cache->slab_obj_num, __ATOMIC_RELEASE);
+
+    // Get object
     obj = __slab_obj_get(slab);
-    assert(obj != NULL , "slab_alloc(): Failed to get an object from a SLAB");
-    cache->obj_active++;
-    if (__SLAB_FULL(slab) || slab->in_use == 1) {
-        // SLAB is now full, move it to the full list
-        __slab_dequeue(cache, slab);
-        __slab_enqueue(cache, slab);
+
+    // Add to appropriate list
+    __percpu_cache_lock_cpu(cache, cpu_id);
+    if (__SLAB_FULL(slab)) {
+        list_node_push_back(&pcpu_cache->full_list, slab, list_entry);
+        __atomic_fetch_add(&pcpu_cache->full_count, 1, __ATOMIC_RELEASE);
+        slab->state = SLAB_STATE_FULL;
+    } else {
+        list_node_push_back(&pcpu_cache->partial_list, slab, list_entry);
+        __atomic_fetch_add(&pcpu_cache->partial_count, 1, __ATOMIC_RELEASE);
+        slab->state = SLAB_STATE_PARTIAL;
     }
-done:
-    __slab_cache_unlock(cache);
+    __atomic_fetch_add(&cache->obj_active, 1, __ATOMIC_RELEASE);
+    __percpu_cache_unlock_cpu(cache, cpu_id);
+
     __slab_sanitizer_check("slab_alloc", cache, slab, obj);
     return obj;
 }
 
 // try to free an object
-// the function will find the slab of the object from the page descriptor 
+// the function will find the slab of the object from the page descriptor
 void slab_free(void *obj) {
     slab_t *slab;
     slab_cache_t *cache;
-    int tmp;
-    slab = __find_obj_slab(obj);
+    int slab_cpu_id;
+    percpu_slab_cache_t *pcpu_cache;
+
     if (obj == NULL) {
         printf("slab_free(): obj is NULL\n");
         return;
     }
+
+    // PHASE 1: Find slab (no lock needed - page descriptor is immutable)
+    slab = __find_obj_slab(obj);
     if (slab == NULL) {
         printf("slab_free(): slab is NULL for obj=%p\n", obj);
         return;
     }
+
     cache = slab->cache;
     if (cache == NULL) {
-        panic("slab_free");
+        printf("slab_free: ERROR - slab=%p not attached to cache, obj=%p\n", slab, obj);
+        printf("  slab->page=%p, slab->in_use=%ld, slab->state=%d, slab->cpu_id=%d\n",
+               slab->page, slab->in_use, slab->state, __atomic_load_n(&slab->cpu_id, __ATOMIC_ACQUIRE));
+        panic("slab_free: slab not attached to cache");
     }
-    __slab_cache_lock(cache);
+
+    // PHASE 2: Determine ownership (atomic load - no lock needed)
+    slab_cpu_id = __atomic_load_n(&slab->cpu_id, __ATOMIC_ACQUIRE);
+
+    if (slab_cpu_id < 0) {
+        // Slab is in global free list - this shouldn't happen
+        printf("slab_free: ERROR - object from free slab\n");
+        printf("  obj=%p, slab=%p, cache='%s'\n", obj, slab, cache->name);
+        printf("  slab->in_use=%ld, slab->state=%d, slab->cpu_id=%d\n",
+               slab->in_use, slab->state, slab_cpu_id);
+        printf("  cache->global_free_count=%ld\n",
+               __atomic_load_n(&cache->global_free_count, __ATOMIC_ACQUIRE));
+        panic("slab_free: object from free slab");
+    }
+
+    pcpu_cache = &cache->percpu_caches[slab_cpu_id];
+
+    // PHASE 3: Acquire appropriate lock
+    __percpu_cache_lock_cpu(cache, slab_cpu_id);
+
+    // Double-check cpu_id hasn't changed
+    if (__atomic_load_n(&slab->cpu_id, __ATOMIC_ACQUIRE) != slab_cpu_id) {
+        __percpu_cache_unlock_cpu(cache, slab_cpu_id);
+        panic("slab_free: slab cpu_id changed during free");
+    }
+
+    // PHASE 4: Return object to slab
+    slab_state_t old_state = slab->state;
+    int was_full = __SLAB_FULL(slab);
+
     __slab_obj_put(slab, obj);
-    cache->obj_active--;
+    __atomic_fetch_sub(&cache->obj_active, 1, __ATOMIC_RELEASE);
+
+    // PHASE 5: Move slab between lists if state changed
     if (__SLAB_EMPTY(slab)) {
-        __slab_dequeue(cache, slab);
-        __slab_enqueue(cache, slab);
+        // Transition to empty - move to global free list
+        if (old_state == SLAB_STATE_PARTIAL) {
+            list_node_detach(slab, list_entry);
+            __atomic_fetch_sub(&pcpu_cache->partial_count, 1, __ATOMIC_RELEASE);
+        } else if (old_state == SLAB_STATE_FULL) {
+            list_node_detach(slab, list_entry);
+            __atomic_fetch_sub(&pcpu_cache->full_count, 1, __ATOMIC_RELEASE);
+        }
+
+        __atomic_store_n(&slab->cpu_id, -1, __ATOMIC_RELEASE);
+        slab->state = SLAB_STATE_FREE;
+
+        __percpu_cache_unlock_cpu(cache, slab_cpu_id);
+
+        // Add to global free list
+        __global_free_lock(cache);
+        list_node_push_back(&cache->global_free_list, slab, list_entry);
+        __atomic_fetch_add(&cache->global_free_count, 1, __ATOMIC_RELEASE);
+        __global_free_unlock(cache);
+
+    } else if (was_full && !__SLAB_FULL(slab)) {
+        // Transition from full to partial
+        list_node_detach(slab, list_entry);
+        __atomic_fetch_sub(&pcpu_cache->full_count, 1, __ATOMIC_RELEASE);
+
+        // Move to owner CPU's partial list (implements the special case requirement)
+        list_node_push_back(&pcpu_cache->partial_list, slab, list_entry);
+        __atomic_fetch_add(&pcpu_cache->partial_count, 1, __ATOMIC_RELEASE);
+        slab->state = SLAB_STATE_PARTIAL;
+
+        __percpu_cache_unlock_cpu(cache, slab_cpu_id);
+
+    } else {
+        // No state change, just unlock
+        __percpu_cache_unlock_cpu(cache, slab_cpu_id);
     }
-    tmp = cache->obj_total - cache->obj_active;
-    if(tmp >= cache->limits) {
+
+    __slab_sanitizer_check("slab_free", cache, slab, obj);
+
+    // PHASE 6: Check if we need to shrink (simplified - check global free list)
+    int64 free_count = __atomic_load_n(&cache->global_free_count, __ATOMIC_ACQUIRE);
+    if (free_count * cache->slab_obj_num >= cache->limits) {
+        // Try to shrink from global free list
+        __global_free_lock(cache);
+        int target_shrink = free_count / 2;
         list_node_t tmp_list;
         list_entry_init(&tmp_list);
-        tmp = tmp / (cache->slab_obj_num * 2);
-        int shrink_ret = __slab_cache_shrink_unlocked(cache, tmp, &tmp_list);
-        assert(shrink_ret >= 0, "slab_free(): shrink returned negative");
-        __slab_cache_unlock(cache);
-        __slab_cache_free_tmp_list(&tmp_list, shrink_ret);
-        __slab_sanitizer_check("slab_free", cache, slab, obj);
-    } else {
-        __slab_cache_unlock(cache);
-        __slab_sanitizer_check("slab_free", cache, slab, obj);
+
+        for (int i = 0; i < target_shrink && !LIST_IS_EMPTY(&cache->global_free_list); i++) {
+            slab_t *free_slab = list_node_pop_back(&cache->global_free_list, slab_t, list_entry);
+            if (free_slab != NULL) {
+                __atomic_fetch_sub(&cache->global_free_count, 1, __ATOMIC_RELEASE);
+                __slab_detach(cache, free_slab);
+                list_node_push_back(&tmp_list, free_slab, list_entry);
+            }
+        }
+        __global_free_unlock(cache);
+
+        // Free slabs outside lock
+        slab_t *s, *tmp;
+        list_foreach_node_safe(&tmp_list, s, tmp, list_entry) {
+            __slab_destroy(s);
+        }
     }
 }
 

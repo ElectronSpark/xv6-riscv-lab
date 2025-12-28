@@ -37,24 +37,26 @@
 })
 
 
-STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs, 
-                                  size_t obj_size, uint32 obj_num);
+STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
+                                  size_t obj_size, uint32 obj_num, uint32 bitmap_size);
 STATIC_INLINE void __slab_destroy(slab_t *slab);
 STATIC_INLINE void __slab_attach(slab_cache_t *cache, slab_t *slab);
 STATIC_INLINE void __slab_detach(slab_cache_t *cache, slab_t *slab);
-STATIC_INLINE void __slab_dequeue(slab_cache_t *cache, slab_t *slab);
-STATIC_INLINE void __slab_enqueue(slab_cache_t *cache, slab_t *slab);
-STATIC_INLINE slab_t *__slab_pop_free(slab_cache_t *cache);
-STATIC_INLINE slab_t *__slab_pop_partial(slab_cache_t *cache);
 STATIC_INLINE void *__slab_obj_get(slab_t *slab);
 STATIC_INLINE void __slab_obj_put(slab_t *slab, void *ptr);
 STATIC_INLINE void *__slab_idx2obj(slab_t *slab, int idx);
 STATIC_INLINE int __slab_obj2idx(slab_t *slab, void *ptr);
 STATIC_INLINE slab_t *__find_obj_slab(void *ptr);
 
-STATIC_INLINE void __slab_cache_lock(slab_cache_t *cache);
-STATIC_INLINE void __slab_cache_unlock(slab_cache_t *cache);
-STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name, 
+// Per-CPU lock helpers
+STATIC_INLINE void __percpu_cache_lock(slab_cache_t *cache);
+STATIC_INLINE void __percpu_cache_unlock(slab_cache_t *cache);
+STATIC_INLINE void __percpu_cache_lock_cpu(slab_cache_t *cache, int cpu_id);
+STATIC_INLINE void __percpu_cache_unlock_cpu(slab_cache_t *cache, int cpu_id);
+STATIC_INLINE void __global_free_lock(slab_cache_t *cache);
+STATIC_INLINE void __global_free_unlock(slab_cache_t *cache);
+
+STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name,
                                      size_t obj_size, uint64 flags);
 STATIC_INLINE int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums, list_node_t *tmp_list);
 STATIC_INLINE void __slab_cache_free_tmp_list(list_node_t *tmp_list, int expected);
