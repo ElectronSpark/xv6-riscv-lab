@@ -1,6 +1,7 @@
 *~
 _*
 *.o
+*.a
 *.d
 *.asm
 *.sym
@@ -25,3 +26,6 @@ packets.pcap
 .gdbinit.tmpl-riscv
 test_output
 xv6fuse
+CMakeCache.txt
+cmake_install.cmake
+CMakeFiles/

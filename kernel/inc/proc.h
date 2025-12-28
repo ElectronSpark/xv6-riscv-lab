@@ -167,6 +167,12 @@ struct proc {
     struct vfs_fdtable fdtable; // File descriptor table
   } fs;
   char name[16];               // Process name (debugging)
+
+  // RCU read-side critical section nesting counter (per-process)
+  // This counter follows the process across CPU migrations, enabling preemptible RCU.
+  // It tracks how many times this process has called rcu_read_lock() without matching
+  // rcu_read_unlock(). The process can safely yield and migrate CPUs while this is > 0.
+  int rcu_read_lock_nesting;   // Number of nested rcu_read_lock() calls
 };
 
 BUILD_BUG_ON((sizeof(struct proc) + sizeof(struct trapframe) + 16) >= PGSIZE);

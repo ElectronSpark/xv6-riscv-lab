@@ -11,6 +11,7 @@
 #include "dev.h"
 #include "pcache.h"
 #include "vfs/fs.h"
+#include "rcu.h"
 
 volatile STATIC int started = 0;
 
@@ -33,6 +34,7 @@ static void __start_kernel_main_hart(void) {
     kvminithart();   // turn on paging
     dev_table_init(); // Initialize the device table
     procinit();      // process table
+    rcu_init();      // RCU subsystem initialization
     scheduler_init(); // initialize the scheduler
     workqueue_init(); // workqueue subsystem initialization
     trapinit();      // trap vectors
@@ -60,6 +62,7 @@ static void __start_kernel_secondary_hart(void) {
     kvminithart();    // turn on paging
     trapinithart();   // install kernel trap vector
     plicinithart();   // ask PLIC for device interrupts
+    rcu_cpu_init(cpuid()); // Initialize RCU for this CPU
 }
 
 void start_kernel(void) {
@@ -99,4 +102,6 @@ void start_kernel_post_init(void) {
     semaphore_launch_tests();
 #endif
     started = 1;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    rcu_run_tests();
 }

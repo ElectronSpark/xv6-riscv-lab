@@ -15,6 +15,7 @@
 #include "signal.h"
 #include "errno.h"
 #include "sched_timer_private.h"
+#include "rcu.h"
 
 // Locking order:
 // - sleep_lock
@@ -190,6 +191,10 @@ void scheduler_run(void) {
         if (pstate == PSTATE_ZOMBIE) {
             wakeup_interruptible(pparent);
         }
+
+        // Check RCU callbacks - context switch is a quiescent state
+        rcu_check_callbacks();
+        rcu_process_callbacks();
     }
 }
 
