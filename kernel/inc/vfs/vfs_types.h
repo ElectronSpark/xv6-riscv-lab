@@ -80,6 +80,9 @@ struct vfs_superblock {
         uint64 backendless: 1; // Indicates whether the filesystem is backendless (e.g., tmpfs)
         uint64 initialized: 1; // Indicates whether the superblock has been initialized
         uint64 registered: 1;    // Indicates whether the superblock is attached to a filesystem type
+        uint64 syncing: 1;       // Currently syncing to backend storage
+        uint64 unmounting: 1;    // Unmount initiated, blocking new operations
+        uint64 attached: 1;      // Attached to mount tree (set on mount, cleared on lazy unmount)
     };
     struct vfs_superblock *parent_sb; // parent superblock if mounted on another fs
     struct vfs_inode *mountpoint; // inode where this sb is mounted
@@ -91,6 +94,8 @@ struct vfs_superblock {
     void *fs_data; // filesystem-specific data
     int mount_count; // Number of superblocks directly mounted under this superblock
     int refcount; // Reference count for the superblock
+    int orphan_count; // Number of orphan inodes (n_links=0, ref>0)
+    list_node_t orphan_list; // List of orphan inodes
     
     // Filesystem statistics
     struct spinlock spinlock; // protects the counters below 
@@ -159,6 +164,10 @@ struct vfs_superblock_ops {
     struct vfs_inode *(*get_inode)(struct vfs_superblock *sb, uint64 ino);
     int (*sync_fs)(struct vfs_superblock *sb, int wait);
     void (*unmount_begin)(struct vfs_superblock *sb);
+    // Orphan management for crash recovery (optional, for backend filesystems)
+    int (*add_orphan)(struct vfs_superblock *sb, struct vfs_inode *inode);
+    int (*remove_orphan)(struct vfs_superblock *sb, struct vfs_inode *inode);
+    int (*recover_orphans)(struct vfs_superblock *sb);
 };
 
 struct vfs_inode {
@@ -206,7 +215,9 @@ struct vfs_inode {
         uint64 valid: 1;
         uint64 dirty: 1;
         uint64 mount: 1; // indicates whether this inode is a mountpoint
+        uint64 orphan: 1; // inode is orphaned (n_links=0, ref>0, on orphan_list)
     };
+    list_node_t orphan_entry; // entry in sb->orphan_list when orphaned
     struct proc *owner; // process that holds the lock
     struct vfs_superblock *sb;
     // The two pcaches below are managed by the drivers/filesystems

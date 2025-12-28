@@ -19,6 +19,31 @@ void __vfs_shrink_caches(void);
 void tmpfs_init_fs_type(void);
 void xv6fs_init_fs_type(void);
 
+// Orphan management
+int vfs_make_orphan(struct vfs_inode *inode);
+void __vfs_final_unmount_cleanup(struct vfs_superblock *sb);
+
+// Check if superblock is usable for new operations
+static inline int vfs_sb_check_usable(struct vfs_superblock *sb) {
+    if (sb == NULL) return -EINVAL;
+    if (!sb->valid) return -EINVAL;
+    if (sb->unmounting) return -ESHUTDOWN;
+    if (!sb->attached) return -ENOENT;
+    return 0;
+}
+
+static inline bool vfs_sb_is_attached(struct vfs_superblock *sb) {
+    return sb != NULL && sb->attached;
+}
+
+static inline bool vfs_sb_is_syncing(struct vfs_superblock *sb) {
+    return sb != NULL && sb->syncing;
+}
+
+static inline bool vfs_sb_is_unmounting(struct vfs_superblock *sb) {
+    return sb != NULL && sb->unmounting;
+}
+
 // Assert holding the spinlock of the inode
 #define VFS_INODE_ASSERT_HOLDING(__inode, __fmt, ...) do {                  \
     assert((__inode) != NULL, "VFS_INODE_ASSERT_HOLDING: inode is NULL");   \
@@ -47,7 +72,9 @@ static inline int __vfs_inode_valid(struct vfs_inode *inode) {
     if (!inode->valid) {
         return -EINVAL; // Inode is not valid
     }
-    if (!inode->sb->valid) {
+    // Allow orphan inodes on detached superblocks - they're still usable
+    // until their last reference is dropped
+    if (!inode->sb->valid && inode->sb->attached) {
         printf("__vfs_inode_valid: inode's superblock is not valid\n");
         return -EINVAL; // Inode's superblock is not valid
     }

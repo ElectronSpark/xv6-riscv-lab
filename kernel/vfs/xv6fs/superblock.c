@@ -285,6 +285,46 @@ int xv6fs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
 }
 
 /******************************************************************************
+ * Orphan inode operations
+ *
+ * These operations are used by the VFS layer to track orphan inodes (inodes
+ * with n_links=0 but ref_count>0) for crash recovery. When an inode becomes
+ * an orphan, add_orphan is called to record it persistently. When the last
+ * reference drops and the inode is destroyed, remove_orphan is called.
+ * On mount, recover_orphans is called to clean up orphans from a previous
+ * crash.
+ *
+ * TODO: Implement persistent orphan journal. For now, these are stubs that
+ * allow the VFS unmount path to work correctly. If the system crashes with
+ * orphan inodes, those inodes will leak until fsck is run.
+ ******************************************************************************/
+
+// Add an inode to the orphan list (called when n_links drops to 0)
+static int xv6fs_add_orphan(struct vfs_superblock *sb, struct vfs_inode *inode) {
+    // TODO: Implement persistent orphan journal
+    // For now, just return success - the VFS layer maintains an in-memory list
+    (void)sb;
+    (void)inode;
+    return 0;
+}
+
+// Remove an inode from the orphan list (called after destroy_inode)
+static int xv6fs_remove_orphan(struct vfs_superblock *sb, struct vfs_inode *inode) {
+    // TODO: Implement persistent orphan journal
+    (void)sb;
+    (void)inode;
+    return 0;
+}
+
+// Recover orphan inodes from a previous crash (called during mount)
+static int xv6fs_recover_orphans(struct vfs_superblock *sb) {
+    // TODO: Implement persistent orphan recovery
+    // Walk the orphan journal and destroy/free each orphan inode
+    (void)sb;
+    return 0;
+}
+
+/******************************************************************************
  * VFS operations structures
  ******************************************************************************/
 
@@ -293,6 +333,9 @@ struct vfs_superblock_ops xv6fs_superblock_ops = {
     .get_inode = xv6fs_get_inode,
     .sync_fs = xv6fs_sync_fs,
     .unmount_begin = xv6fs_unmount_begin,
+    .add_orphan = xv6fs_add_orphan,
+    .remove_orphan = xv6fs_remove_orphan,
+    .recover_orphans = xv6fs_recover_orphans,
 };
 
 struct vfs_fs_type_ops xv6fs_fs_type_ops = {

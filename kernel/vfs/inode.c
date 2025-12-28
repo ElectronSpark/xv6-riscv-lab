@@ -38,6 +38,8 @@ void __vfs_inode_init(struct vfs_inode *inode) {
     mutex_init(&inode->mutex, "vfs_inode_mutex");
     completion_init(&inode->completion);
     hlist_entry_init(&inode->hash_entry);
+    list_entry_init(&inode->orphan_entry);
+    inode->orphan = 0;
     inode->ref_count = 1;
 }
 
@@ -73,6 +75,7 @@ void vfs_iput(struct vfs_inode *inode) {
 
     // tried to cleanup the inode but failed
     bool failed_clean = false;
+    bool should_free_sb = false;
     struct vfs_inode *parent = NULL;
     struct vfs_superblock *sb = inode->sb;
     int ret = 0;
@@ -102,10 +105,10 @@ retry:
     }
 
     // For backendless filesystems (e.g., tmpfs), keep inodes alive as long as
-    // they have positive link count. The inode will be freed when n_links drops
-    // to 0 via unlink/rmdir. Mountpoint inodes keep an extra reference from
-    // the mount, so they should follow this path as well.
-    if (sb->backendless && (inode->n_links > 0 || inode->mount)) {
+    // they have positive link count AND the superblock is still attached.
+    // Mountpoint inodes keep an extra reference from the mount.
+    // When detached, we must clean up all inodes regardless of n_links.
+    if (sb->backendless && sb->attached && (inode->n_links > 0 || inode->mount)) {
         // Decrement refcount to 0 but keep inode in cache
         atomic_dec(&inode->ref_count);
         assert(inode->ref_count >= 0, "vfs_iput: backendless inode refcount underflow");
@@ -116,10 +119,26 @@ retry:
 
     assert(!inode->mount, "vfs_iput: refcount of mountpoint inode reached zero");
 
+    // Handle orphan cleanup: remove from orphan list
+    if (inode->orphan) {
+        list_node_detach(inode, orphan_entry);
+        sb->orphan_count--;
+        inode->orphan = 0;
+        
+        // For backend fs: remove from on-disk orphan journal
+        if (sb->ops->remove_orphan) {
+            ret = sb->ops->remove_orphan(sb, inode);
+            if (ret != 0) {
+                printf("vfs_iput: warning: failed to remove orphan inode %lu from journal\n", 
+                       inode->ino);
+            }
+        }
+    }
+
     // If no one increased its refcount meanwhile, we can delete it
     // First check if it is dirty and sync if needed
     // If sync failed, just delete it.
-    if (inode->dirty && inode->valid && !failed_clean) {
+    if (inode->dirty && inode->valid && !failed_clean && sb->attached) {
         vfs_iunlock(inode);
         vfs_superblock_unlock(inode->sb);
         failed_clean = vfs_sync_inode(inode) != 0;
@@ -127,14 +146,15 @@ retry:
         goto retry;
     }
 
-    if (S_ISDIR(inode->mode) && inode->parent != inode) {
+    if (S_ISDIR(inode->mode) && inode->parent != inode && sb->attached) {
         // For non-root directory inode, decrease parent dir refcount
         // Root directory's parent is itself
+        // Skip parent handling for detached fs (parent may already be freed)
         parent = inode->parent;
     }
 
-    // If inode has no links left, destroy its data before freeing
-    if (inode->n_links == 0 && inode->ops->destroy_inode != NULL) {
+    // If inode has no links left (or fs is detached), destroy its data before freeing
+    if ((inode->n_links == 0 || !sb->attached) && inode->ops->destroy_inode != NULL) {
         inode->ops->destroy_inode(inode);
         // After destroy, the inode's on-disk data is freed.
         // Mark it invalid and not dirty so we don't try to sync it.
@@ -144,6 +164,10 @@ retry:
 
     ret = vfs_remove_inode(inode->sb, inode);
     assert(ret == 0, "vfs_iput: failed to remove inode from superblock inode cache");
+    
+    // Check if this was the last orphan on a detached fs
+    should_free_sb = (!sb->attached && sb->orphan_count == 0);
+    
     vfs_iunlock(inode);
     vfs_superblock_unlock(sb);
     assert(completion_done(&inode->completion),
@@ -151,12 +175,18 @@ retry:
 out:
     inode->ops->free_inode(inode);
 
+    // Final superblock cleanup if all orphans are gone on detached fs
+    if (should_free_sb) {
+        __vfs_final_unmount_cleanup(sb);
+    }
+
     // If this is a directory inode, decrease the refcount of its parent
     if (parent != NULL) {
         // Due to the limited kernel space stack, we avoid recursive calls here
         inode = parent;
         parent = NULL;
         failed_clean = false;
+        should_free_sb = false;
         goto retry;
     }
 }
@@ -633,6 +663,15 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
         goto out;
     }
     ret_ptr = dir->ops->unlink(dir, name, name_len);
+    
+    // If unlink succeeded and the inode still has references beyond ours,
+    // mark it as orphan. This is checked while we still hold the locks.
+    if (!IS_ERR_OR_NULL(ret_ptr) && ret_ptr->n_links == 0 && 
+        ret_ptr->ref_count > 1 && !ret_ptr->orphan) {
+        vfs_ilock(ret_ptr);
+        vfs_make_orphan(ret_ptr);
+        vfs_iunlock(ret_ptr);
+    }
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
@@ -710,6 +749,15 @@ int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len) {
         goto out;
     }
     ret_ptr = dir->ops->rmdir(dir, name, name_len);
+    
+    // If rmdir succeeded and the inode still has references beyond ours,
+    // mark it as orphan. This is checked while we still hold the locks.
+    if (!IS_ERR_OR_NULL(ret_ptr) && ret_ptr->n_links == 0 && 
+        ret_ptr->ref_count > 1 && !ret_ptr->orphan) {
+        vfs_ilock(ret_ptr);
+        vfs_make_orphan(ret_ptr);
+        vfs_iunlock(ret_ptr);
+    }
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);

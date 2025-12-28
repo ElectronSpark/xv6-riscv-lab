@@ -36,13 +36,14 @@ struct vfs_inode *tmpfs_get_inode(struct vfs_superblock *sb, uint64 ino);
 static int __tmpfs_init_cache(void) {
     int ret = slab_cache_init(&__tmpfs_inode_cache, "tmpfs_inode_cache",
                               sizeof(struct tmpfs_inode), 
-                              SLAB_FLAG_EMBEDDED);
+                              SLAB_FLAG_STATIC);
     if (ret != 0) {
         return ret; // Failed to initialize tmpfs inode cache
     }
-    return slab_cache_init(&__tmpfs_sb_cache, "tmpfs_superblock_cache",
+    ret = slab_cache_init(&__tmpfs_sb_cache, "tmpfs_superblock_cache",
                            sizeof(struct tmpfs_superblock), 
-                           SLAB_FLAG_EMBEDDED);
+                           SLAB_FLAG_STATIC);
+    return ret;
 }
 
 // Shrink all tmpfs slab caches to release unused memory
@@ -108,7 +109,8 @@ struct tmpfs_superblock *tmpfs_alloc_superblock(void) {
 }
 
 void tmpfs_free(struct vfs_superblock *sb) {
-    slab_free(container_of(sb, struct tmpfs_superblock, vfs_sb));
+    struct tmpfs_superblock *tsb = container_of(sb, struct tmpfs_superblock, vfs_sb);
+    slab_free(tsb);
 }
 
 /******************************************************************************
@@ -129,8 +131,58 @@ int tmpfs_sync_fs(struct vfs_superblock *sb, int wait) {
     return 0;
 }
 
+/*
+ * tmpfs_unmount_begin - Prepare tmpfs for unmount by evicting unreferenced inodes.
+ *
+ * For strict unmount to succeed, we need to evict all cached inodes with
+ * ref_count == 0 from the hash list. Backendless filesystems keep inodes
+ * alive in the cache as long as they have positive n_links, so we need to
+ * explicitly clean them up before unmounting.
+ *
+ * Locking: Caller holds the superblock write lock.
+ */
 void tmpfs_unmount_begin(struct vfs_superblock *sb) {
-
+    if (sb == NULL) {
+        return;
+    }
+    
+    struct vfs_inode *rooti = sb->root_inode;
+    struct vfs_inode *inode, *tmp_inode;
+    
+    // Evict all unreferenced inodes from the cache
+    // We iterate safely because we may remove nodes during iteration
+    hlist_foreach_node_safe(&sb->inodes, inode, tmp_inode, hash_entry) {
+        // Skip root inode - it will be handled by vfs_unmount
+        if (inode == rooti) {
+            continue;
+        }
+        
+        // Only evict inodes with no references
+        if (inode->ref_count > 0) {
+            continue;
+        }
+        
+        vfs_ilock(inode);
+        
+        // Double-check ref_count under lock
+        if (inode->ref_count > 0) {
+            vfs_iunlock(inode);
+            continue;
+        }
+        
+        // Destroy the inode's data if it has any
+        if (inode->ops->destroy_inode) {
+            inode->ops->destroy_inode(inode);
+        }
+        
+        // Remove from hash and mark invalid
+        inode->valid = 0;
+        vfs_remove_inode(sb, inode);
+        vfs_iunlock(inode);
+        
+        // Free the inode structure
+        inode->ops->free_inode(inode);
+    }
 }
 
 struct vfs_superblock_ops tmpfs_superblock_ops = {

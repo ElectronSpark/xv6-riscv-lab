@@ -160,8 +160,10 @@ static struct vfs_inode *__vfs_inode_hash_add(struct vfs_superblock *sb, struct 
 
 static void __vfs_init_superblock_structure(struct vfs_superblock *sb, struct vfs_fs_type *fs_type) {
     list_entry_init(&sb->siblings);
+    list_entry_init(&sb->orphan_list);
     hlist_init(&sb->inodes, VFS_SUPERBLOCK_HASH_BUCKETS, &__vfs_superblock_inode_hlist_funcs);
     sb->fs_type = fs_type;
+    sb->orphan_count = 0;
     __atomic_store_n(&sb->refcount, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&sb->mount_count, 0, __ATOMIC_SEQ_CST);
     rwlock_init(&sb->lock, RWLOCK_PRIO_READ, "vfs_superblock_lock");
@@ -578,6 +580,7 @@ ret:
     } else if (vfs_superblock_wholding(sb)) {
         sb->initialized = 1;
         sb->valid = 1;
+        sb->attached = 1;
         vfs_superblock_unlock(sb);
     }
     vfs_put_fs_type(fs_type);
@@ -658,23 +661,269 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
     }
 
     // Begin unmounting
-    sb->ops->unmount_begin(sb);
-
-    // Superblock also should have no active inodes before unmounting
-    size_t remaining_inodes = hlist_len(&sb->inodes);
-    if (remaining_inodes > 0) {
-        printf("vfs_unmount: remaining inodes=%lu\n", remaining_inodes);
-        return -EBUSY; // There are still active inodes
+    if (sb->ops->unmount_begin) {
+        sb->ops->unmount_begin(sb);
     }
+
+    // Superblock should have no active inodes except the root inode.
+    // The root inode is expected to still be in the cache - it will be
+    // removed and freed below.
+    size_t remaining_inodes = hlist_len(&sb->inodes);
+    if (remaining_inodes > 1) {
+        printf("vfs_unmount: remaining inodes=%lu (expected 1 for root)\n", remaining_inodes);
+        return -EBUSY; // There are still active inodes besides root
+    }
+    // Verify the only remaining inode is the root
+    if (remaining_inodes == 1) {
+        struct vfs_inode *only_inode = HLIST_FIRST_NODE(&sb->inodes, struct vfs_inode, hash_entry);
+        if (only_inode != mounted_inode) {
+            printf("vfs_unmount: remaining inode is not root (ino=%lu)\n", only_inode->ino);
+            return -EBUSY;
+        }
+    }
+
+    // Destroy root inode's data before freeing
+    if (mounted_inode->ops->destroy_inode) {
+        mounted_inode->ops->destroy_inode(mounted_inode);
+    }
+    mounted_inode->valid = 0;
+    vfs_remove_inode(sb, mounted_inode);
 
     // Detach superblock from filesystem type
     __vfs_detach_superblock_from_fstype(sb);
     __vfs_clear_mountpoint(mountpoint);
 
-    // Free the superblock
-    sb->fs_type->ops->free(sb);
+    // Unlock root inode before freeing (caller expects it unlocked after free)
+    vfs_iunlock(mounted_inode);
+    mounted_inode->ops->free_inode(mounted_inode);
+    sb->root_inode = NULL;
+
+    // Free the superblock (caller must release sb lock before this)
+    struct vfs_fs_type *fs_type = sb->fs_type;
+    vfs_superblock_unlock(sb);
+    fs_type->ops->free(sb);
 
     return 0; // Successfully unmounted
+}
+
+/*
+ * vfs_make_orphan - Mark an inode as orphan when it's unlinked but still referenced.
+ *
+ * Locking:
+ *   - Caller must hold the superblock write lock.
+ *   - Caller must hold the inode mutex.
+ *
+ * Returns:
+ *   - 0 on success, negative errno on failure.
+ */
+int vfs_make_orphan(struct vfs_inode *inode) {
+    if (inode == NULL) {
+        return -EINVAL;
+    }
+    struct vfs_superblock *sb = inode->sb;
+    if (sb == NULL) {
+        return -EINVAL;
+    }
+    
+    VFS_SUPERBLOCK_ASSERT_WHOLDING(sb, "Must hold sb wlock to make orphan");
+    VFS_INODE_ASSERT_HOLDING(inode, "Must hold inode lock to make orphan");
+    
+    if (inode->orphan) {
+        return 0;  // Already orphan
+    }
+    if (inode->n_links != 0) {
+        return -EINVAL;  // Not unlinked yet
+    }
+    
+    inode->orphan = 1;
+    list_node_push(&sb->orphan_list, inode, orphan_entry);
+    sb->orphan_count++;
+    
+    // For backend fs: persist to on-disk orphan journal
+    if (sb->ops->add_orphan) {
+        int ret = sb->ops->add_orphan(sb, inode);
+        if (ret != 0) {
+            // Log error but continue - worst case is block leak on crash
+            printf("vfs: warning: failed to persist orphan inode %lu, errno=%d\n", 
+                   inode->ino, ret);
+        }
+    }
+    
+    return 0;
+}
+
+/*
+ * __vfs_final_unmount_cleanup - Final cleanup after all orphans are gone.
+ *
+ * Called from vfs_iput when the last orphan inode is freed on a detached fs.
+ * This function frees the superblock and its resources.
+ */
+void __vfs_final_unmount_cleanup(struct vfs_superblock *sb) {
+    if (sb == NULL) {
+        return;
+    }
+    
+    // Must be detached with no orphans
+    assert(!sb->attached, "__vfs_final_unmount_cleanup: sb still attached");
+    assert(sb->orphan_count == 0, "__vfs_final_unmount_cleanup: orphans remain");
+    
+    vfs_mount_lock();
+    vfs_superblock_wlock(sb);
+    
+    // Detach from fs_type if still registered
+    if (sb->registered) {
+        __vfs_detach_superblock_from_fstype(sb);
+    }
+    
+    // Free root inode if not already freed
+    if (sb->root_inode != NULL) {
+        struct vfs_inode *rooti = sb->root_inode;
+        vfs_ilock(rooti);
+        if (rooti->ops->destroy_inode) {
+            rooti->ops->destroy_inode(rooti);
+        }
+        rooti->valid = 0;
+        vfs_remove_inode(sb, rooti);
+        vfs_iunlock(rooti);
+        rooti->ops->free_inode(rooti);
+        sb->root_inode = NULL;
+    }
+    
+    struct vfs_fs_type *fs_type = sb->fs_type;
+    vfs_superblock_unlock(sb);
+    vfs_mount_unlock();
+    
+    // Free superblock
+    fs_type->ops->free(sb);
+}
+
+/*
+ * vfs_unmount_lazy - Detach filesystem immediately, defer cleanup.
+ *
+ * Locking:
+ *   - Caller holds vfs_mount_lock().
+ *   - Caller holds the parent superblock write lock.
+ *   - Caller holds the mountpoint inode mutex.
+ *
+ * Returns:
+ *   - 0 on success (filesystem detached, cleanup may be deferred).
+ *   - -EBUSY if child mounts exist.
+ *   - Other negative errno on failure.
+ */
+int vfs_unmount_lazy(struct vfs_inode *mountpoint) {
+    struct vfs_superblock *sb = NULL;
+    struct vfs_superblock *parent_sb = NULL;
+    struct vfs_inode *rooti = NULL;
+    int ret = 0;
+
+    if (mountpoint == NULL) {
+        return -EINVAL;
+    }
+
+    if (!holding_mutex(&__mount_mutex)) {
+        return -EPERM;
+    }
+    if (!holding_mutex(&mountpoint->mutex)) {
+        return -EPERM;
+    }
+    
+    parent_sb = mountpoint->sb;
+    if (parent_sb != NULL && !vfs_superblock_wholding(parent_sb)) {
+        return -EPERM;
+    }
+    
+    ret = __vfs_inode_valid(mountpoint);
+    if (ret != 0) {
+        return ret;
+    }
+    
+    if (!S_ISDIR(mountpoint->mode) || !mountpoint->mount) {
+        return -EINVAL;
+    }
+    
+    sb = mountpoint->mnt_sb;
+    if (sb == NULL) {
+        return -EINVAL;
+    }
+    
+    // Phase 1: Check for child mounts
+    vfs_superblock_wlock(sb);
+    
+    if (vfs_superblock_mountcount(sb) > 0) {
+        vfs_superblock_unlock(sb);
+        return -EBUSY;  // Child mounts exist
+    }
+    
+    // Set unmounting flag to block new operations
+    sb->unmounting = 1;
+    
+    // Phase 2: Detach from mount tree
+    // Note: __vfs_clear_mountpoint already decrements parent's mount count
+    __vfs_clear_mountpoint(mountpoint);
+    sb->mountpoint = NULL;
+    sb->parent_sb = NULL;
+    sb->attached = 0;
+    sb->valid = 0;  // Prevent new lookups
+    
+    // Phase 3: Sync if needed (for backend filesystems)
+    if (!sb->backendless && sb->dirty) {
+        sb->syncing = 1;
+        ret = sb->ops->sync_fs(sb, 1);
+        sb->syncing = 0;
+        if (ret != 0) {
+            printf("vfs_unmount_lazy: warning: sync failed, errno=%d\n", ret);
+        }
+    }
+    
+    // Call unmount_begin callback
+    if (sb->ops->unmount_begin) {
+        sb->ops->unmount_begin(sb);
+    }
+    
+    // Phase 4: Mark all referenced inodes as orphans
+    // Walk the inode hash and mark referenced inodes as orphans
+    rooti = sb->root_inode;
+    struct vfs_inode *inode, *tmp_inode;
+    hlist_foreach_node_safe(&sb->inodes, inode, tmp_inode, hash_entry) {
+        if (inode != rooti && inode->ref_count > 0) {
+            // Mark as orphan - will be cleaned up when last ref drops
+            if (!inode->orphan) {
+                vfs_ilock(inode);
+                inode->orphan = 1;
+                list_node_push(&sb->orphan_list, inode, orphan_entry);
+                sb->orphan_count++;
+                vfs_iunlock(inode);
+            }
+        }
+    }
+    
+    // Phase 5: Check if immediate cleanup possible
+    if (sb->orphan_count == 0) {
+        // No orphans - cleanup immediately
+        __vfs_detach_superblock_from_fstype(sb);
+        
+        // Free root inode
+        if (rooti != NULL) {
+            vfs_ilock(rooti);
+            if (rooti->ops->destroy_inode) {
+                rooti->ops->destroy_inode(rooti);
+            }
+            rooti->valid = 0;
+            vfs_remove_inode(sb, rooti);
+            vfs_iunlock(rooti);
+            rooti->ops->free_inode(rooti);
+            sb->root_inode = NULL;
+        }
+        
+        struct vfs_fs_type *fs_type = sb->fs_type;
+        vfs_superblock_unlock(sb);
+        fs_type->ops->free(sb);
+    } else {
+        // Orphans exist - cleanup deferred to vfs_iput
+        vfs_superblock_unlock(sb);
+    }
+    
+    return 0;
 }
 
 /*
@@ -792,16 +1041,18 @@ void vfs_superblock_spin_unlock(struct vfs_superblock *sb) {
 }
 
 void vfs_superblock_mountcount_inc(struct vfs_superblock *sb) {
-    vfs_superblock_dup(sb);
+    assert(sb != NULL, "Superblock cannot be NULL when incrementing mount count");
     int cnt = __atomic_add_fetch(&sb->mount_count, 1, __ATOMIC_SEQ_CST);
     assert(cnt > 0, "Superblock mount count overflow");
 }
 
 void vfs_superblock_mountcount_dec(struct vfs_superblock *sb) {
-    assert(sb != NULL, "Superblock write lock must be held to decrement mount count");
+    assert(sb != NULL, "Superblock cannot be NULL when decrementing mount count");
     int cnt = __atomic_sub_fetch(&sb->mount_count, 1, __ATOMIC_SEQ_CST);
     assert(cnt >= 0, "Superblock mount count underflow");
-    vfs_superblock_put(sb);
+    // Note: We don't call vfs_superblock_put here because mount count and
+    // refcount are independent. The mount count tracks child mounts, not
+    // references to the superblock itself.
 }
 
 void vfs_superblock_dup(struct vfs_superblock *sb) {
@@ -1238,8 +1489,9 @@ int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode) {
     }
     VFS_SUPERBLOCK_ASSERT_WHOLDING(sb, "Superblock lock must be write held to remove inode");
     VFS_INODE_ASSERT_HOLDING(inode, "Inode lock must be held to remove inode");
-    if (!sb->valid) {
-        return -EINVAL; // Superblock is not valid
+    // Allow removal from detached superblocks (lazy unmount cleanup)
+    if (!sb->valid && sb->attached) {
+        return -EINVAL; // Superblock is not valid and still attached
     }
     
     // If inode was already destroyed (n_links == 0 and destroy_inode called),

@@ -9,6 +9,7 @@
 #include "rwlock.h"
 #include "proc_queue.h"
 #include "sched.h"
+#include "string.h"
 
 
 static inline int __reader_should_wait(rwlock_t *lock) {

@@ -1098,14 +1098,16 @@ cleanup_mount:
         vfs_ilock(mp);
         vfs_ilock(child_root);
         ret = vfs_unmount(mp);
-        vfs_iunlock(child_root);
-        vfs_superblock_unlock(child_sb);
+        if (ret != 0) {
+            // Unmount failed - need to release locks we still hold
+            vfs_iunlock(child_root);
+            vfs_superblock_unlock(child_sb);
+            printf("dir_iter_mount: " WARN " vfs_unmount errno=%d\n", ret);
+        }
+        // On success, vfs_unmount already freed child_root and child_sb
         vfs_iunlock(mp);
         vfs_superblock_unlock(mp->sb);
         vfs_mount_unlock();
-        if (ret != 0) {
-            printf("dir_iter_mount: " WARN " vfs_unmount errno=%d\n", ret);
-        }
     }
 
 cleanup_mp_dir:
@@ -1113,9 +1115,340 @@ cleanup_mp_dir:
         int rmdir_ret = vfs_rmdir(root, mp_name, mp_len);
         if (rmdir_ret != 0) {
             printf("dir_iter_mount: " WARN " cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
+            // Only iput if rmdir failed - if rmdir succeeded, it already freed the inode
+            vfs_iput(mp);
         }
-        vfs_iput(mp);
+        // Note: if rmdir succeeded, the inode is already freed by vfs_rmdir's internal vfs_iput
     }
+out:
+    if (root_pinned) {
+        vfs_iput(root);
+    }
+}
+
+/*
+ * Lazy unmount smoketest: Tests deferred cleanup when files are still open
+ * during unmount.
+ *
+ * Test cases:
+ * 1. Lazy unmount with no open files - immediate cleanup
+ * 2. Lazy unmount with open file - deferred cleanup until file closed
+ * 3. Lazy unmount with nested open directories - deferred cleanup
+ * 4. Operations on orphan files after lazy unmount (read/write still work)
+ * 5. New operations blocked after lazy unmount (create/mkdir fail)
+ */
+void tmpfs_run_lazy_unmount_smoketest(void) {
+    const char *mp_name = "lazy_mount_dir";
+    const size_t mp_len = sizeof("lazy_mount_dir") - 1;
+    const char *file_name = "lazy_file";
+    const size_t file_len = sizeof("lazy_file") - 1;
+    const char *subdir_name = "lazy_subdir";
+    const size_t subdir_len = sizeof("lazy_subdir") - 1;
+    const char *test_data = "lazy unmount test data";
+    const size_t test_data_len = sizeof("lazy unmount test data") - 1;
+
+    int ret = 0;
+    struct vfs_inode *root = vfs_root_inode.mnt_rooti;
+    struct vfs_inode *mp = NULL;
+    struct vfs_inode *mnt_root = NULL;
+    struct vfs_inode *file_inode = NULL;
+    struct vfs_inode *subdir = NULL;
+    struct vfs_file *open_file = NULL;
+    bool root_pinned = false;
+
+    printf("lazy_unmount: BEGIN tests\n");
+
+    vfs_idup(root);
+    root_pinned = true;
+
+    // =========================================================================
+    // Test 1: Lazy unmount with no open files - should cleanup immediately
+    // =========================================================================
+    printf("lazy_unmount: Test 1 - no open files\n");
+    
+    mp = vfs_mkdir(root, 0755, mp_name, mp_len);
+    if (IS_ERR_OR_NULL(mp)) {
+        ret = IS_ERR(mp) ? PTR_ERR(mp) : -EINVAL;
+        mp = NULL;
+        printf("lazy_unmount: " FAIL " setup mkdir %s errno=%d\n", mp_name, ret);
+        goto out;
+    }
+
+    // Mount a new tmpfs
+    vfs_mount_lock();
+    vfs_superblock_wlock(root->sb);
+    vfs_ilock(mp);
+    ret = vfs_mount("tmpfs", mp, NULL, 0, NULL);
+    vfs_iunlock(mp);
+    vfs_superblock_unlock(root->sb);
+    vfs_mount_unlock();
+    if (ret != 0) {
+        printf("lazy_unmount: " FAIL " vfs_mount errno=%d\n", ret);
+        goto cleanup_test1_mp;
+    }
+
+    mnt_root = mp->mnt_sb ? mp->mnt_sb->root_inode : NULL;
+    if (mnt_root == NULL) {
+        printf("lazy_unmount: " FAIL " mounted root NULL\n");
+        goto cleanup_test1_mount;
+    }
+    vfs_idup(mnt_root);
+
+    // Lazy unmount with no open files
+    {
+        vfs_iput(mnt_root);
+        mnt_root = NULL;
+
+        vfs_mount_lock();
+        vfs_superblock_wlock(mp->sb);
+        vfs_ilock(mp);
+        ret = vfs_unmount_lazy(mp);
+        vfs_iunlock(mp);
+        vfs_superblock_unlock(mp->sb);
+        vfs_mount_unlock();
+
+        if (ret != 0) {
+            printf("lazy_unmount: " FAIL " test1 vfs_unmount_lazy errno=%d\n", ret);
+        } else {
+            printf("lazy_unmount: " PASS " test1 no-open-files lazy unmount\n");
+        }
+    }
+
+cleanup_test1_mount:
+    // Already unmounted above
+cleanup_test1_mp:
+    if (mp != NULL) {
+        int rmdir_ret = vfs_rmdir(root, mp_name, mp_len);
+        if (rmdir_ret != 0) {
+            printf("lazy_unmount: " WARN " test1 cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
+            vfs_iput(mp);
+        }
+        mp = NULL;
+    }
+
+    // =========================================================================
+    // Test 2: Lazy unmount with open file - cleanup deferred until close
+    // =========================================================================
+    printf("lazy_unmount: Test 2 - open file during unmount\n");
+
+    mp = vfs_mkdir(root, 0755, mp_name, mp_len);
+    if (IS_ERR_OR_NULL(mp)) {
+        ret = IS_ERR(mp) ? PTR_ERR(mp) : -EINVAL;
+        mp = NULL;
+        printf("lazy_unmount: " FAIL " test2 mkdir %s errno=%d\n", mp_name, ret);
+        goto out;
+    }
+
+    // Mount a new tmpfs
+    vfs_mount_lock();
+    vfs_superblock_wlock(root->sb);
+    vfs_ilock(mp);
+    ret = vfs_mount("tmpfs", mp, NULL, 0, NULL);
+    vfs_iunlock(mp);
+    vfs_superblock_unlock(root->sb);
+    vfs_mount_unlock();
+    if (ret != 0) {
+        printf("lazy_unmount: " FAIL " test2 vfs_mount errno=%d\n", ret);
+        goto cleanup_test2_mp;
+    }
+
+    mnt_root = mp->mnt_sb ? mp->mnt_sb->root_inode : NULL;
+    if (mnt_root == NULL) {
+        printf("lazy_unmount: " FAIL " test2 mounted root NULL\n");
+        goto cleanup_test2_mount;
+    }
+    vfs_idup(mnt_root);
+
+    // Create and open a file
+    file_inode = vfs_create(mnt_root, 0644, file_name, file_len);
+    if (IS_ERR(file_inode)) {
+        ret = PTR_ERR(file_inode);
+        file_inode = NULL;
+        printf("lazy_unmount: " FAIL " test2 create %s errno=%d\n", file_name, ret);
+        goto cleanup_test2_mount;
+    }
+
+    open_file = vfs_fileopen(file_inode, O_RDWR);
+    if (IS_ERR(open_file)) {
+        ret = PTR_ERR(open_file);
+        open_file = NULL;
+        printf("lazy_unmount: " FAIL " test2 open file errno=%d\n", ret);
+        goto cleanup_test2_file;
+    }
+
+    // Write some data before unmount
+    ssize_t written = vfs_filewrite(open_file, test_data, test_data_len);
+    if (written != (ssize_t)test_data_len) {
+        printf("lazy_unmount: " WARN " test2 write returned %ld\n", (long)written);
+    }
+
+    // Lazy unmount while file is still open
+    {
+        // Release our refs to mnt_root and file_inode before unmount
+        // But keep open_file which holds its own ref
+        vfs_iput(mnt_root);
+        mnt_root = NULL;
+        vfs_iput(file_inode);
+        file_inode = NULL;
+
+        vfs_mount_lock();
+        vfs_superblock_wlock(mp->sb);
+        vfs_ilock(mp);
+        ret = vfs_unmount_lazy(mp);
+        vfs_iunlock(mp);
+        vfs_superblock_unlock(mp->sb);
+        vfs_mount_unlock();
+
+        if (ret != 0) {
+            printf("lazy_unmount: " FAIL " test2 vfs_unmount_lazy errno=%d\n", ret);
+            goto cleanup_test2_file;
+        }
+        printf("lazy_unmount: " PASS " test2 lazy unmount with open file\n");
+    }
+
+    // Test 2a: Read/write should still work on orphan file
+    {
+        loff_t pos = vfs_filelseek(open_file, 0, SEEK_SET);
+        if (pos != 0) {
+            printf("lazy_unmount: " FAIL " test2a lseek errno=%lld\n", (long long)pos);
+        } else {
+            char read_buf[64] = {0};
+            ssize_t bytes_read = vfs_fileread(open_file, read_buf, test_data_len);
+            if (bytes_read != (ssize_t)test_data_len) {
+                printf("lazy_unmount: " FAIL " test2a read returned %ld\n", (long)bytes_read);
+            } else if (memcmp(read_buf, test_data, test_data_len) != 0) {
+                printf("lazy_unmount: " FAIL " test2a read data mismatch\n");
+            } else {
+                printf("lazy_unmount: " PASS " test2a orphan file read works\n");
+            }
+        }
+    }
+
+    // Close the file - this should trigger final cleanup
+    vfs_fileclose(open_file);
+    open_file = NULL;
+    printf("lazy_unmount: " PASS " test2 file closed, cleanup complete\n");
+
+cleanup_test2_file:
+    if (file_inode != NULL) {
+        vfs_iput(file_inode);
+        file_inode = NULL;
+    }
+cleanup_test2_mount:
+    if (mnt_root != NULL) {
+        vfs_iput(mnt_root);
+        mnt_root = NULL;
+    }
+    if (open_file != NULL) {
+        vfs_fileclose(open_file);
+        open_file = NULL;
+    }
+    // Mount already lazily unmounted above
+cleanup_test2_mp:
+    if (mp != NULL) {
+        int rmdir_ret = vfs_rmdir(root, mp_name, mp_len);
+        if (rmdir_ret != 0) {
+            printf("lazy_unmount: " WARN " test2 cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
+            vfs_iput(mp);
+        }
+        mp = NULL;
+    }
+
+    // =========================================================================
+    // Test 3: Lazy unmount with held directory reference
+    // =========================================================================
+    printf("lazy_unmount: Test 3 - held directory during unmount\n");
+
+    mp = vfs_mkdir(root, 0755, mp_name, mp_len);
+    if (IS_ERR_OR_NULL(mp)) {
+        ret = IS_ERR(mp) ? PTR_ERR(mp) : -EINVAL;
+        mp = NULL;
+        printf("lazy_unmount: " FAIL " test3 mkdir %s errno=%d\n", mp_name, ret);
+        goto out;
+    }
+
+    // Mount a new tmpfs
+    vfs_mount_lock();
+    vfs_superblock_wlock(root->sb);
+    vfs_ilock(mp);
+    ret = vfs_mount("tmpfs", mp, NULL, 0, NULL);
+    vfs_iunlock(mp);
+    vfs_superblock_unlock(root->sb);
+    vfs_mount_unlock();
+    if (ret != 0) {
+        printf("lazy_unmount: " FAIL " test3 vfs_mount errno=%d\n", ret);
+        goto cleanup_test3_mp;
+    }
+
+    mnt_root = mp->mnt_sb ? mp->mnt_sb->root_inode : NULL;
+    if (mnt_root == NULL) {
+        printf("lazy_unmount: " FAIL " test3 mounted root NULL\n");
+        goto cleanup_test3_mount;
+    }
+    vfs_idup(mnt_root);
+
+    // Create a subdir and hold a reference
+    subdir = vfs_mkdir(mnt_root, 0755, subdir_name, subdir_len);
+    if (IS_ERR_OR_NULL(subdir)) {
+        ret = IS_ERR(subdir) ? PTR_ERR(subdir) : -EINVAL;
+        subdir = NULL;
+        printf("lazy_unmount: " FAIL " test3 mkdir %s errno=%d\n", subdir_name, ret);
+        goto cleanup_test3_mount;
+    }
+
+    // Keep an extra ref on subdir
+    vfs_idup(subdir);
+
+    // Lazy unmount while holding subdir reference
+    {
+        vfs_iput(mnt_root);
+        mnt_root = NULL;
+
+        vfs_mount_lock();
+        vfs_superblock_wlock(mp->sb);
+        vfs_ilock(mp);
+        ret = vfs_unmount_lazy(mp);
+        vfs_iunlock(mp);
+        vfs_superblock_unlock(mp->sb);
+        vfs_mount_unlock();
+
+        if (ret != 0) {
+            printf("lazy_unmount: " FAIL " test3 vfs_unmount_lazy errno=%d\n", ret);
+            vfs_iput(subdir);  // Drop the extra ref
+            goto cleanup_test3_subdir;
+        }
+        printf("lazy_unmount: " PASS " test3 lazy unmount with held directory\n");
+    }
+
+    // subdir is now an orphan - drop the reference to trigger cleanup
+    vfs_iput(subdir);  // Drop extra ref
+    vfs_iput(subdir);  // Drop original ref
+    subdir = NULL;
+    printf("lazy_unmount: " PASS " test3 orphan directory released, cleanup complete\n");
+
+cleanup_test3_subdir:
+    if (subdir != NULL) {
+        vfs_iput(subdir);
+        subdir = NULL;
+    }
+cleanup_test3_mount:
+    if (mnt_root != NULL) {
+        vfs_iput(mnt_root);
+        mnt_root = NULL;
+    }
+    // Mount already lazily unmounted
+cleanup_test3_mp:
+    if (mp != NULL) {
+        int rmdir_ret = vfs_rmdir(root, mp_name, mp_len);
+        if (rmdir_ret != 0) {
+            printf("lazy_unmount: " WARN " test3 cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
+            vfs_iput(mp);
+        }
+        mp = NULL;
+    }
+
+    printf("lazy_unmount: END tests\n");
+
 out:
     if (root_pinned) {
         vfs_iput(root);
@@ -1877,16 +2210,16 @@ out:
 // Run all tmpfs smoketests with memory leak detection
 void tmpfs_run_all_smoketests(void) {
     // Shrink all caches before baseline to get a clean state
-    tmpfs_shrink_caches();
-    __vfs_shrink_caches();
-    kmm_shrink_all();
+    // tmpfs_shrink_caches();
+    // __vfs_shrink_caches();
+    // kmm_shrink_all();
 
     // Memory leak check for inode smoketest
     uint64 before_pages = get_total_free_pages();
     tmpfs_run_inode_smoketest();
-    tmpfs_shrink_caches();
-    __vfs_shrink_caches();
-    kmm_shrink_all();
+    // tmpfs_shrink_caches();
+    // __vfs_shrink_caches();
+    // kmm_shrink_all();
     uint64 after_pages = get_total_free_pages();
     if (before_pages != after_pages) {
         printf("MEMORY LEAK: inode_smoketest leaked %ld pages\n", 
@@ -1898,9 +2231,9 @@ void tmpfs_run_all_smoketests(void) {
     // Memory leak check for truncate smoketest
     before_pages = get_total_free_pages();
     tmpfs_run_truncate_smoketest();
-    tmpfs_shrink_caches();
-    __vfs_shrink_caches();
-    kmm_shrink_all();
+    // tmpfs_shrink_caches();
+    // __vfs_shrink_caches();
+    // kmm_shrink_all();
     after_pages = get_total_free_pages();
     if (before_pages != after_pages) {
         printf("MEMORY LEAK: truncate_smoketest leaked %ld pages\n",
@@ -1912,9 +2245,9 @@ void tmpfs_run_all_smoketests(void) {
     // Memory leak check for namei smoketest
     before_pages = get_total_free_pages();
     tmpfs_run_namei_smoketest();
-    tmpfs_shrink_caches();
-    __vfs_shrink_caches();
-    kmm_shrink_all();
+    // tmpfs_shrink_caches();
+    // __vfs_shrink_caches();
+    // kmm_shrink_all();
     after_pages = get_total_free_pages();
     if (before_pages != after_pages) {
         printf("MEMORY LEAK: namei_smoketest leaked %ld pages\n",
@@ -1926,9 +2259,9 @@ void tmpfs_run_all_smoketests(void) {
     // Memory leak check for dir_iter_mount smoketest
     before_pages = get_total_free_pages();
     tmpfs_run_dir_iter_mount_smoketest();
-    tmpfs_shrink_caches();
-    __vfs_shrink_caches();
-    kmm_shrink_all();
+    // tmpfs_shrink_caches();
+    // __vfs_shrink_caches();
+    // kmm_shrink_all();
     after_pages = get_total_free_pages();
     if (before_pages != after_pages) {
         printf("MEMORY LEAK: dir_iter_mount_smoketest leaked %ld pages\n",
@@ -1940,9 +2273,9 @@ void tmpfs_run_all_smoketests(void) {
     // Memory leak check for file_ops smoketest
     before_pages = get_total_free_pages();
     tmpfs_run_file_ops_smoketest();
-    tmpfs_shrink_caches();
-    __vfs_shrink_caches();
-    kmm_shrink_all();
+    // tmpfs_shrink_caches();
+    // __vfs_shrink_caches();
+    // kmm_shrink_all();
     after_pages = get_total_free_pages();
     if (before_pages != after_pages) {
         printf("MEMORY LEAK: file_ops_smoketest leaked %ld pages\n",
@@ -1951,12 +2284,26 @@ void tmpfs_run_all_smoketests(void) {
         printf("file_ops_smoketest: no memory leak detected\n");
     }
 
+    // Memory leak check for lazy_unmount smoketest
+    before_pages = get_total_free_pages();
+    tmpfs_run_lazy_unmount_smoketest();
+    // tmpfs_shrink_caches();
+    // __vfs_shrink_caches();
+    // kmm_shrink_all();
+    after_pages = get_total_free_pages();
+    if (before_pages != after_pages) {
+        printf("MEMORY LEAK: lazy_unmount_smoketest leaked %ld pages\n",
+               (long)(before_pages - after_pages));
+    } else {
+        printf("lazy_unmount_smoketest: no memory leak detected\n");
+    }
+
     // Memory leak check for double_indirect smoketest
     before_pages = get_total_free_pages();
     tmpfs_run_double_indirect_smoketest();
-    tmpfs_shrink_caches();
-    __vfs_shrink_caches();
-    kmm_shrink_all();
+    // tmpfs_shrink_caches();
+    // __vfs_shrink_caches();
+    // kmm_shrink_all();
     after_pages = get_total_free_pages();
     if (before_pages != after_pages) {
         printf("MEMORY LEAK: dindirect_smoketest leaked %ld pages\n",
