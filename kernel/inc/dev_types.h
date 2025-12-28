@@ -40,6 +40,7 @@ typedef struct device_instance {
     int major;              // Major device number
     int minor;              // Minor device number
     dev_type_e type;       // Device type (block, char, etc.)
+    int unregistering;     // Set to 1 when device is being unregistered
     device_ops_t ops;
 } device_t;
 

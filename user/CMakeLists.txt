@@ -114,6 +114,7 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/dumppcache.c
     ${USER_DIR}/testsig.c
     ${USER_DIR}/cowtest.c
+    ${USER_DIR}/devtest.c
 )
 
 set(USER_PROGRAMS_C_FILES 

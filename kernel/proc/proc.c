@@ -652,9 +652,6 @@ fork(void)
     }
   }
 
-  // Clone VFS file descriptor table
-  vfs_fdtable_clone(&np->fs.fdtable, &p->fs.fdtable);
-
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
     if(p->ofile[i])
@@ -669,6 +666,10 @@ fork(void)
   PROC_SET_USER_SPACE(np);
   __proc_set_pstate(np, PSTATE_UNINTERRUPTIBLE);
   proc_unlock(p);
+
+  // Clone VFS file descriptor table - must be done after releasing parent lock
+  // because vfs_filedup may call cdev_dup which needs a mutex
+  vfs_fdtable_clone(&np->fs.fdtable, &p->fs.fdtable);
   
   sched_lock();
   scheduler_wakeup(np);

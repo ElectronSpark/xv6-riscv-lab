@@ -28,6 +28,11 @@ void kobject_global_init(void);
 // When initializing a kobject, its refcount field must be zero.
 void kobject_init(struct kobject *obj);
 void kobject_get(struct kobject *obj);
+// Try to increment refcount only if it is not zero.
+// Returns true if refcount was incremented, false otherwise.
+// Use this when you have a pointer to a kobject but aren't sure
+// if it's still alive (refcount > 0).
+bool kobject_try_get(struct kobject *obj);
 void kobject_put(struct kobject *obj);
 int64 kobject_refcount(struct kobject *obj);
 int64 kobject_count(void);

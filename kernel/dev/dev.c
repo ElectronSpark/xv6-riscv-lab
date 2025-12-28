@@ -153,15 +153,24 @@ static int __dev_call_release(device_t *dev) {
     return dev->ops.release(dev);
 }
 
-// Unregister a device
+// Unregister a device from the device table
+// Called either by device_unregister() or when refcount reaches 0
 // 
 static void __device_unregister(device_t *dev) {
     __dev_tab_lock();
     device_t **dev_slot = NULL;
     device_major_t **dmajor_slot = NULL;
     int ret = __dev_slot_get(dev->major, dev->minor, &dmajor_slot, NULL, &dev_slot, true);
-    assert(ret == 0, "Device slot must exist during unregister");
-    assert(*dev_slot == dev, "Device mismatch during unregister");
+    if (ret != 0) {
+        // Device already removed from table
+        __dev_tab_unlock();
+        return;
+    }
+    if (*dev_slot != dev) {
+        // Device already removed or replaced
+        __dev_tab_unlock();
+        return;
+    }
     *dev_slot = NULL;
     device_major_t *dmajor = *dmajor_slot;
     bool needs_free = false;
@@ -200,19 +209,34 @@ device_t *device_get(int major, int minor) {
         __dev_tab_unlock();
         return ERR_PTR(-ENODEV); // Device not found or not valid
     }
-    kobject_get(&device->kobj);
+    // Check if device is being unregistered
+    if (__atomic_load_n(&device->unregistering, __ATOMIC_SEQ_CST)) {
+        __dev_tab_unlock();
+        return ERR_PTR(-ENODEV); // Device is being unregistered
+    }
+    // Use kobject_try_get to avoid racing with final put
+    if (!kobject_try_get(&device->kobj)) {
+        __dev_tab_unlock();
+        return ERR_PTR(-ENODEV); // Device refcount already reached 0
+    }
     __dev_tab_unlock();
     return device;
 }
 
 // Increment the reference count of a device
+// Returns -ENODEV if the device is being unregistered or refcount is 0
 int device_dup(device_t *dev) {
     if (dev == NULL) {
         return -EINVAL; // Null pointer for device
     }
-    __dev_tab_lock();
-    kobject_get(&dev->kobj);
-    __dev_tab_unlock();
+    // Check if device is being unregistered
+    if (__atomic_load_n(&dev->unregistering, __ATOMIC_SEQ_CST)) {
+        return -ENODEV; // Device is being unregistered
+    }
+    // Use try_get to avoid racing with final put
+    if (!kobject_try_get(&dev->kobj)) {
+        return -ENODEV; // Device refcount already reached 0
+    }
     return 0;
 }
 
@@ -253,8 +277,31 @@ int device_register(device_t *dev) {
     (*dmajor_slot)->num_minors++;
     dev->kobj.name = "device";
     dev->kobj.refcount = 0;
+    dev->unregistering = 0;
     dev->kobj.ops.release = __underlying_kobject_release;
     kobject_init(&dev->kobj);
     __dev_tab_unlock();
     return __dev_call_open(dev);
+}
+
+// Mark a device as unregistering.
+// After this call, device_get() and device_dup() will fail for this device.
+// The device is also removed from the lookup table immediately.
+// The actual release callback happens when the refcount reaches 0.
+int device_unregister(device_t *dev) {
+    if (dev == NULL) {
+        return -EINVAL;
+    }
+    // Mark device as unregistering atomically
+    int expected = 0;
+    if (!__atomic_compare_exchange_n(&dev->unregistering, &expected, 1,
+                                     false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+        return -EALREADY; // Already unregistering
+    }
+    // Remove from device table immediately so no new lookups find it
+    __device_unregister(dev);
+    // Drop the initial reference from registration
+    // When refcount reaches 0, __underlying_kobject_release will be called
+    kobject_put(&dev->kobj);
+    return 0;
 }

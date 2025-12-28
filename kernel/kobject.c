@@ -49,6 +49,19 @@ void kobject_get(struct kobject *obj) {
   assert(count > 0, "kobject_get: refcount underflow");
 }
 
+bool kobject_try_get(struct kobject *obj) {
+  assert(obj != NULL, "kobject_try_get: obj is NULL");
+  int64 old_count = __atomic_load_n(&obj->refcount, __ATOMIC_SEQ_CST);
+  do {
+    if (old_count == 0) {
+      return false; // Object is already dead or dying
+    }
+    // Try to atomically increment only if current value is still old_count
+  } while (!__atomic_compare_exchange_n(&obj->refcount, &old_count, old_count + 1,
+                                        false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+  return true;
+}
+
 void kobject_put(struct kobject *obj) {
   assert(obj != NULL, "kobject_put: obj is NULL");
   int64 count = __atomic_sub_fetch(&obj->refcount, 1, __ATOMIC_SEQ_CST);

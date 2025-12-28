@@ -11,6 +11,7 @@ blkdev_t *blkdev_get(int major, int minor);
 int blkdev_dup(blkdev_t *dev);
 int blkdev_put(blkdev_t *dev);
 int blkdev_register(blkdev_t *dev);
+int blkdev_unregister(blkdev_t *dev);
 int blkdev_submit_bio(blkdev_t *blkdev, struct bio *bio);
 
 #endif  // __KERNEL_BLOCK_DRIVER_H
