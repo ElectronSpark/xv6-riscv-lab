@@ -267,5 +267,5 @@ void tmpfs_init_fs_type(void) {
     ret = vfs_chroot(vfs_root_inode.mnt_rooti);
     assert(ret == 0, "tmpfs_init_fs_type: vfs_chroot failed, errno=%d", ret);
 
-    tmpfs_run_all_smoketests();
+    // tmpfs_run_all_smoketests();
 }

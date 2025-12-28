@@ -12,6 +12,12 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n);
 loff_t vfs_filelseek(struct vfs_file *file, loff_t offset, int whence);
 int truncate(struct vfs_file *file, loff_t length);
 
+// VFS Pipe allocation
+int vfs_pipealloc(struct vfs_file **rf, struct vfs_file **wf);
+
+// VFS Socket allocation
+int vfs_sockalloc(struct vfs_file **f, uint32 raddr, uint16 lport, uint16 rport);
+
 // File descriptor table operations
 // Caller should hold the proc lock when manipulating the fdtable
 // vfs_fdtable_init, vfs_fdtable_clone, and vfs_fdtable_destroy don't 

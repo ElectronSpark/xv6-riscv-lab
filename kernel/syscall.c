@@ -121,6 +121,26 @@ extern uint64 sys_dumppcache(void);
 //900
 extern uint64 sys_sync(void);
 
+// VFS syscalls
+extern uint64 sys_vfs_dup(void);
+extern uint64 sys_vfs_read(void);
+extern uint64 sys_vfs_write(void);
+extern uint64 sys_vfs_close(void);
+extern uint64 sys_vfs_fstat(void);
+extern uint64 sys_vfs_open(void);
+extern uint64 sys_vfs_mkdir(void);
+extern uint64 sys_vfs_mknod(void);
+extern uint64 sys_vfs_unlink(void);
+extern uint64 sys_vfs_link(void);
+extern uint64 sys_vfs_symlink(void);
+extern uint64 sys_vfs_chdir(void);
+extern uint64 sys_vfs_pipe(void);
+extern uint64 sys_vfs_connect(void);
+extern uint64 sys_getdents(void);
+extern uint64 sys_chroot(void);
+extern uint64 sys_mount(void);
+extern uint64 sys_umount(void);
+
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
 STATIC uint64 (*syscalls[])(void) = {
@@ -160,6 +180,31 @@ STATIC uint64 (*syscalls[])(void) = {
 [SYS_sync]    sys_sync,
 };
 
+// Handle VFS syscalls (1000+)
+static uint64 handle_vfs_syscall(int num) {
+  switch (num) {
+    case SYS_vfs_dup:     return sys_vfs_dup();
+    case SYS_vfs_read:    return sys_vfs_read();
+    case SYS_vfs_write:   return sys_vfs_write();
+    case SYS_vfs_close:   return sys_vfs_close();
+    case SYS_vfs_fstat:   return sys_vfs_fstat();
+    case SYS_vfs_open:    return sys_vfs_open();
+    case SYS_vfs_mkdir:   return sys_vfs_mkdir();
+    case SYS_vfs_mknod:   return sys_vfs_mknod();
+    case SYS_vfs_unlink:  return sys_vfs_unlink();
+    case SYS_vfs_link:    return sys_vfs_link();
+    case SYS_vfs_symlink: return sys_vfs_symlink();
+    case SYS_vfs_chdir:   return sys_vfs_chdir();
+    case SYS_vfs_pipe:    return sys_vfs_pipe();
+    case SYS_vfs_connect: return sys_vfs_connect();
+    case SYS_getdents:    return sys_getdents();
+    case SYS_chroot:      return sys_chroot();
+    case SYS_mount:       return sys_mount();
+    case SYS_umount:      return sys_umount();
+    default:              return (uint64)-1;
+  }
+}
+
 void
 syscall(void)
 {
@@ -167,6 +212,16 @@ syscall(void)
   struct proc *p = myproc();
 
   num = p->trapframe->a7;
+  
+  // Handle VFS syscalls (1000+)
+  if (num >= 1000) {
+    p->trapframe->a0 = handle_vfs_syscall(num);
+    if (p->trapframe->a0 == (uint64)-1) {
+      printf("%d %s: unknown vfs sys call %d\n", p->pid, p->name, num);
+    }
+    return;
+  }
+  
   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
     // Use num to lookup the system call function for num, call it,
     // and store its return value in p->trapframe->a0

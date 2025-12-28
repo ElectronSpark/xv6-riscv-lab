@@ -13,6 +13,7 @@
 #include "rwlock.h"
 #include "completion.h"
 #include "vfs/fs.h"
+#include "printf.h"
 #include "vfs/file.h"
 #include "vfs_private.h"
 #include "vfs/fcntl.h"
@@ -22,6 +23,8 @@
 #include "cdev.h"
 #include "blkdev.h"
 #include "vm.h"
+#include "net.h"
+#include "pipe.h"
 
 static slab_cache_t __vfs_file_slab = { 0 };
 static struct spinlock __vfs_ftable_lock = { 0 };
@@ -273,10 +276,25 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n) {
     if (file == NULL || buf == NULL || n == 0) {
         return -EINVAL; // Invalid arguments
     }
+    
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    
+    // Handle pipe read - pipes don't have inodes
     if (inode == NULL) {
-        return -EINVAL; // Invalid arguments
+        // No inode means this must be a pipe or socket
+        if (file->pipe == NULL) {
+            return -EINVAL; // Not a valid file
+        }
+        __vfs_file_lock(file);
+        if ((file->f_flags & O_ACCMODE) == O_WRONLY) {
+            __vfs_file_unlock(file);
+            return -EBADF; // File not opened for reading
+        }
+        ssize_t ret = piperead_kernel(file->pipe, buf, n);
+        __vfs_file_unlock(file);
+        return ret;
     }
+    
     __vfs_file_lock(file);
     if ((file->f_flags & O_ACCMODE) == O_WRONLY) {
         __vfs_file_unlock(file);
@@ -287,7 +305,7 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n) {
     
     // Handle character device read
     if (S_ISCHR(inode->mode)) {
-        ret = cdev_read(&file->cdev, true, buf, n);
+        ret = cdev_read(&file->cdev, false, buf, n);  // false = kernel buffer
         __vfs_file_unlock(file);
         return ret;
     }
@@ -296,17 +314,6 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n) {
     if (S_ISBLK(inode->mode)) {
         __vfs_file_unlock(file);
         return -ENOSYS; // Direct block device read not implemented
-    }
-    
-    // Handle pipe read
-    if (S_ISFIFO(inode->mode)) {
-        if (file->pipe == NULL) {
-            __vfs_file_unlock(file);
-            return -EINVAL;
-        }
-        ret = piperead(file->pipe, (uint64)buf, n);
-        __vfs_file_unlock(file);
-        return ret;
     }
     
     // Regular files
@@ -371,10 +378,25 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n) {
     if (file == NULL || buf == NULL || n == 0) {
         return -EINVAL; // Invalid arguments
     }
+    
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    
+    // Handle pipe write - pipes don't have inodes
     if (inode == NULL) {
-        return -EINVAL; // Invalid arguments
+        // No inode means this must be a pipe or socket
+        if (file->pipe == NULL) {
+            return -EINVAL; // Not a valid file
+        }
+        __vfs_file_lock(file);
+        if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
+            __vfs_file_unlock(file);
+            return -EBADF; // File not opened for writing
+        }
+        ssize_t ret = pipewrite_kernel(file->pipe, buf, n);
+        __vfs_file_unlock(file);
+        return ret;
     }
+    
     __vfs_file_lock(file);
     if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
         __vfs_file_unlock(file);
@@ -385,7 +407,7 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n) {
     
     // Handle character device write
     if (S_ISCHR(inode->mode)) {
-        ret = cdev_write(&file->cdev, true, buf, n);
+        ret = cdev_write(&file->cdev, false, buf, n);  // false = kernel buffer
         __vfs_file_unlock(file);
         return ret;
     }
@@ -394,17 +416,6 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n) {
     if (S_ISBLK(inode->mode)) {
         __vfs_file_unlock(file);
         return -ENOSYS; // Direct block device write not implemented
-    }
-    
-    // Handle pipe write
-    if (S_ISFIFO(inode->mode)) {
-        if (file->pipe == NULL) {
-            __vfs_file_unlock(file);
-            return -EINVAL;
-        }
-        ret = pipewrite(file->pipe, (uint64)buf, n);
-        __vfs_file_unlock(file);
-        return ret;
     }
     
     // Regular files
@@ -503,4 +514,130 @@ int truncate(struct vfs_file *file, loff_t length) {
     int ret = vfs_itruncate(inode, length);
     __vfs_file_unlock(file);
     return ret;
+}
+
+/******************************************************************************
+ * VFS Pipe Allocation
+ ******************************************************************************/
+
+int vfs_pipealloc(struct vfs_file **rf, struct vfs_file **wf) {
+    struct pipe *pi = NULL;
+    *rf = NULL;
+    *wf = NULL;
+    
+    // Allocate read file
+    *rf = __vfs_file_alloc();
+    if (*rf == NULL) {
+        return -ENOMEM;
+    }
+    
+    // Allocate write file
+    *wf = __vfs_file_alloc();
+    if (*wf == NULL) {
+        __vfs_file_free(*rf);
+        *rf = NULL;
+        return -ENOMEM;
+    }
+    
+    // Allocate pipe structure
+    pi = (struct pipe *)kalloc();
+    if (pi == NULL) {
+        __vfs_file_free(*rf);
+        __vfs_file_free(*wf);
+        *rf = NULL;
+        *wf = NULL;
+        return -ENOMEM;
+    }
+    
+    // Initialize pipe
+    pi->readopen = 1;
+    pi->writeopen = 1;
+    pi->nwrite = 0;
+    pi->nread = 0;
+    spin_init(&pi->lock, "vfs_pipe");
+    
+    // Initialize read file
+    (*rf)->f_flags = O_RDONLY;
+    (*rf)->pipe = pi;
+    (*rf)->ops = NULL; // Pipes use direct pipe I/O
+    __vfs_ftable_attatch(*rf);
+    
+    // Initialize write file
+    (*wf)->f_flags = O_WRONLY;
+    (*wf)->pipe = pi;
+    (*wf)->ops = NULL;
+    __vfs_ftable_attatch(*wf);
+    
+    return 0;
+}
+
+/******************************************************************************
+ * VFS Socket Allocation
+ ******************************************************************************/
+
+// Socket structure from sysnet.c
+struct sock {
+  struct sock *next; // the next socket in the list
+  uint32 raddr;      // the remote IPv4 address
+  uint16 lport;      // the local UDP port number
+  uint16 rport;      // the remote UDP port number
+  struct spinlock lock; // protects the rxq
+  struct mbufq rxq;  // a queue of packets waiting to be received
+};
+
+extern struct spinlock sock_lock;
+extern struct sock *sockets;
+
+int vfs_sockalloc(struct vfs_file **f, uint32 raddr, uint16 lport, uint16 rport) {
+    struct sock *si = NULL;
+    struct sock *pos;
+    *f = NULL;
+    
+    // Allocate file
+    *f = __vfs_file_alloc();
+    if (*f == NULL) {
+        return -ENOMEM;
+    }
+    
+    // Allocate socket
+    si = (struct sock *)kalloc();
+    if (si == NULL) {
+        __vfs_file_free(*f);
+        *f = NULL;
+        return -ENOMEM;
+    }
+    
+    // Initialize socket
+    si->raddr = raddr;
+    si->lport = lport;
+    si->rport = rport;
+    spin_init(&si->lock, "sock");
+    mbufq_init(&si->rxq);
+    
+    // Initialize file
+    (*f)->f_flags = O_RDWR;
+    (*f)->sock = si;
+    (*f)->ops = NULL; // Sockets use direct socket I/O
+    __vfs_ftable_attatch(*f);
+    
+    // Add to list of sockets (check for duplicates)
+    spin_acquire(&sock_lock);
+    pos = sockets;
+    while (pos) {
+        if (pos->raddr == raddr &&
+            pos->lport == lport &&
+            pos->rport == rport) {
+            spin_release(&sock_lock);
+            kfree((char *)si);
+            __vfs_file_free(*f);
+            *f = NULL;
+            return -EADDRINUSE;
+        }
+        pos = pos->next;
+    }
+    si->next = sockets;
+    sockets = si;
+    spin_release(&sock_lock);
+    
+    return 0;
 }

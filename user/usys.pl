@@ -14,25 +14,36 @@ sub entry {
     print " ecall\n";
     print " ret\n";
 }
+
+# Entry with custom syscall name (for aliasing old names to new syscalls)
+sub entry_aliased {
+    my ($name, $syscall) = @_;
+    print ".global $name\n";
+    print "${name}:\n";
+    print " li a7, SYS_${syscall}\n";
+    print " ecall\n";
+    print " ret\n";
+}
 	
 entry("fork");
 entry("exit");
 entry("wait");
-entry("pipe");
-entry("read");
-entry("write");
-entry("close");
+# Use VFS syscalls for file operations
+entry_aliased("pipe", "vfs_pipe");
+entry_aliased("read", "vfs_read");
+entry_aliased("write", "vfs_write");
+entry_aliased("close", "vfs_close");
 entry("kill");
 entry("exec");
-entry("open");
-entry("mknod");
-entry("unlink");
-entry("fstat");
-entry("link");
-entry("symlink");
-entry("mkdir");
-entry("chdir");
-entry("dup");
+entry_aliased("open", "vfs_open");
+entry_aliased("mknod", "vfs_mknod");
+entry_aliased("unlink", "vfs_unlink");
+entry_aliased("fstat", "vfs_fstat");
+entry_aliased("link", "vfs_link");
+entry_aliased("symlink", "vfs_symlink");
+entry_aliased("mkdir", "vfs_mkdir");
+entry_aliased("chdir", "vfs_chdir");
+entry_aliased("dup", "vfs_dup");
 entry("getpid");
 entry("sbrk");
 entry("sleep");
@@ -44,6 +55,11 @@ entry("sigpending");
 entry("sigprocmask");
 entry("pause");
 
+# New VFS-specific syscalls
+entry("getdents");
+entry("chroot");
+entry("mount");
+entry("umount");
 
 entry("memstat");
 entry("dumpproc");

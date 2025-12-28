@@ -8,20 +8,9 @@
 #include "fs.h"
 #include "mutex_types.h"
 #include "file.h"
+#include "pipe.h"
 #include "vm.h"
 #include "sched.h"
-
-#define PIPESIZE 512
-
-struct pipe {
-  struct spinlock lock;
-  uint nread;     // number of bytes read
-  uint nwrite;    // number of bytes written
-  // @TODO: change these two to bitfields to save space
-  int readopen: 1;   // read fd is still open
-  int writeopen: 1;  // write fd is still open
-  char data[PIPESIZE];
-};
 
 int
 pipealloc(struct file **f0, struct file **f1)
@@ -129,6 +118,57 @@ piperead(struct pipe *pi, uint64 addr, int n)
       break;
   }
   wakeup_on_chan(&pi->nwrite);  //DOC: piperead-wakeup
+  spin_release(&pi->lock);
+  return i;
+}
+
+// Kernel-mode pipe read (for VFS layer)
+int
+piperead_kernel(struct pipe *pi, char *buf, int n)
+{
+  int i;
+  struct proc *pr = myproc();
+
+  spin_acquire(&pi->lock);
+  while(pi->nread == pi->nwrite && pi->writeopen){
+    if(killed(pr)){
+      spin_release(&pi->lock);
+      return -1;
+    }
+    sleep_on_chan(&pi->nread, &pi->lock);
+  }
+  for(i = 0; i < n; i++){
+    if(pi->nread == pi->nwrite)
+      break;
+    buf[i] = pi->data[pi->nread++ % PIPESIZE];
+  }
+  wakeup_on_chan(&pi->nwrite);
+  spin_release(&pi->lock);
+  return i;
+}
+
+// Kernel-mode pipe write (for VFS layer)
+int
+pipewrite_kernel(struct pipe *pi, const char *buf, int n)
+{
+  int i = 0;
+  struct proc *pr = myproc();
+
+  spin_acquire(&pi->lock);
+  while(i < n){
+    if(pi->readopen == 0 || killed(pr)){
+      spin_release(&pi->lock);
+      return -1;
+    }
+    if(pi->nwrite == pi->nread + PIPESIZE){
+      wakeup_on_chan(&pi->nread);
+      sleep_on_chan(&pi->nwrite, &pi->lock);
+    } else {
+      pi->data[pi->nwrite++ % PIPESIZE] = buf[i];
+      i++;
+    }
+  }
+  wakeup_on_chan(&pi->nread);
   spin_release(&pi->lock);
   return i;
 }

@@ -53,4 +53,24 @@
 
 #define SYS_sync 900
 
+// VFS syscalls - these replace the original fs syscalls
+#define SYS_vfs_dup      1000
+#define SYS_vfs_read     1001
+#define SYS_vfs_write    1002
+#define SYS_vfs_close    1003
+#define SYS_vfs_fstat    1004
+#define SYS_vfs_open     1005
+#define SYS_vfs_mkdir    1006
+#define SYS_vfs_mknod    1007
+#define SYS_vfs_unlink   1008
+#define SYS_vfs_link     1009
+#define SYS_vfs_symlink  1010
+#define SYS_vfs_chdir    1011
+#define SYS_vfs_pipe     1012
+#define SYS_vfs_connect  1013
+#define SYS_getdents     1014
+#define SYS_chroot       1015
+#define SYS_mount        1016
+#define SYS_umount       1017
+
 #endif          /* __KERNEL_SYSCALL_H */

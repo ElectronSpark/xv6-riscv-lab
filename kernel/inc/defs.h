@@ -98,6 +98,8 @@ int             pipealloc(struct file**, struct file**);
 void            pipeclose(struct pipe*, int);
 int             piperead(struct pipe*, uint64, int);
 int             pipewrite(struct pipe*, uint64, int);
+int             piperead_kernel(struct pipe*, char*, int);
+int             pipewrite_kernel(struct pipe*, const char*, int);
 
 // proc.c
 int             proctab_get_pid_proc(int pid, struct proc **pp);

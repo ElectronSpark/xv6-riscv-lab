@@ -27,13 +27,13 @@ struct sock {
   struct mbufq rxq;  // a queue of packets waiting to be received
 };
 
-STATIC struct spinlock lock;
-STATIC struct sock *sockets;
+struct spinlock sock_lock;
+struct sock *sockets;
 
 void
 sockinit(void)
 {
-  spin_init(&lock, "socktbl");
+  spin_init(&sock_lock, "socktbl");
 }
 
 int
@@ -60,20 +60,20 @@ sockalloc(struct file **f, uint32 raddr, uint16 lport, uint16 rport)
   (*f)->sock = si;
 
   // add to list of sockets
-  spin_acquire(&lock);
+  spin_acquire(&sock_lock);
   pos = sockets;
   while (pos) {
     if (pos->raddr == raddr &&
         pos->lport == lport &&
 	pos->rport == rport) {
-      spin_release(&lock);
+      spin_release(&sock_lock);
       goto bad;
     }
     pos = pos->next;
   }
   si->next = sockets;
   sockets = si;
-  spin_release(&lock);
+  spin_release(&sock_lock);
   return 0;
 
 bad:
@@ -91,7 +91,7 @@ sockclose(struct sock *si)
   struct mbuf *m;
 
   // remove from list of sockets
-  spin_acquire(&lock);
+  spin_acquire(&sock_lock);
   pos = &sockets;
   while (*pos) {
     if (*pos == si){
@@ -100,7 +100,7 @@ sockclose(struct sock *si)
     }
     pos = &(*pos)->next;
   }
-  spin_release(&lock);
+  spin_release(&sock_lock);
 
   // free any pending mbufs
   while (!mbufq_empty(&si->rxq)) {
@@ -169,14 +169,14 @@ sockrecvudp(struct mbuf *m, uint32 raddr, uint16 lport, uint16 rport)
   //
   struct sock *si;
 
-  spin_acquire(&lock);
+  spin_acquire(&sock_lock);
   si = sockets;
   while (si) {
     if (si->raddr == raddr && si->lport == lport && si->rport == rport)
       goto found;
     si = si->next;
   }
-  spin_release(&lock);
+  spin_release(&sock_lock);
   mbuffree(m);
   return;
 
@@ -185,5 +185,5 @@ found:
   mbufq_pushtail(&si->rxq, m);
   wakeup_on_chan(&si->rxq);
   spin_release(&si->lock);
-  spin_release(&lock);
+  spin_release(&sock_lock);
 }

@@ -42,6 +42,12 @@ int dumpproc(void);
 int dumpchan(void);
 int dumppcache(void);
 
+// New VFS syscalls
+int getdents(int fd, void *dirp, int count);
+int chroot(const char *path);
+int mount(const char *source, const char *target, const char *fstype);
+int umount(const char *target);
+
 void sync(void);
 
 // ulib.c

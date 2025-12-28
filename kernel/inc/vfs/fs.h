@@ -86,6 +86,8 @@ void vfs_iunlock_two(struct vfs_inode *inode1, struct vfs_inode *inode2);
 
 // Public APIs not tied to specific callbacks
 struct vfs_inode *vfs_namei(const char *path, size_t path_len);
+struct vfs_inode *vfs_nameiparent(const char *path, size_t path_len,
+                                   char *name, size_t name_size);
 struct vfs_inode *vfs_curdir(void);
 struct vfs_inode *vfs_curroot(void);
 int vfs_chroot(struct vfs_inode *new_root);

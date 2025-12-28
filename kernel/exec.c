@@ -4,11 +4,14 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "mutex_types.h"
+#include "fs.h"
 #include "proc.h"
 #include "defs.h"
 #include "printf.h"
 #include "elf.h"
 #include "vm.h"
+#include "file.h"
 
 STATIC int loadseg(pagetable_t, uint64, struct inode*, uint, uint, uint64);
 

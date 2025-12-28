@@ -412,8 +412,16 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         goto out;
     }
 
+    // Check if iteration already completed (index == -1 means end of directory)
+    if (iter->index == -1) {
+        ret_dentry->name = NULL;
+        ret_dentry->name_len = 0;
+        ret = 0;
+        goto out;
+    }
+
     // Synthesize "." on the first iteration to keep cookies opaque at the VFS layer
-    if (iter->index < 1) {
+    if (iter->index == 0) {
         ret = __make_iter_present(iter, ret_dentry);
         if (ret != 0) {
             goto out;
@@ -1150,4 +1158,66 @@ out:
         return ERR_PTR(-ENOENT);
     }
     return ret_inode;
+}
+
+// vfs_nameiparent resolves the parent directory of a path and copies the final
+// name component into the provided buffer. Returns the parent directory inode
+// with a reference held on success, or ERR_PTR on failure.
+struct vfs_inode *vfs_nameiparent(const char *path, size_t path_len, 
+                                   char *name, size_t name_size) {
+    if (path == NULL || path_len == 0 || name == NULL || name_size == 0) {
+        return ERR_PTR(-EINVAL);
+    }
+    if (path_len > VFS_PATH_MAX) {
+        return ERR_PTR(-ENAMETOOLONG);
+    }
+
+    // Find the last path component
+    size_t end = path_len;
+    
+    // Skip trailing slashes
+    while (end > 0 && path[end - 1] == '/') {
+        end--;
+    }
+    
+    if (end == 0) {
+        // Path is just "/" or empty after trimming
+        return ERR_PTR(-EINVAL);
+    }
+    
+    // Find the start of the last component
+    size_t name_start = end;
+    while (name_start > 0 && path[name_start - 1] != '/') {
+        name_start--;
+    }
+    
+    // Extract the name component
+    size_t final_name_len = end - name_start;
+    if (final_name_len >= name_size) {
+        return ERR_PTR(-ENAMETOOLONG);
+    }
+    
+    memmove(name, path + name_start, final_name_len);
+    name[final_name_len] = '\0';
+    
+    // Now get the parent path
+    size_t parent_len = name_start;
+    
+    // Skip trailing slashes from parent path
+    while (parent_len > 0 && path[parent_len - 1] == '/') {
+        parent_len--;
+    }
+    
+    if (parent_len == 0) {
+        // Parent is root
+        if (path[0] == '/') {
+            return vfs_curroot();
+        } else {
+            // Relative path with just one component, parent is cwd
+            return vfs_curdir();
+        }
+    }
+    
+    // Resolve the parent path
+    return vfs_namei(path, parent_len);
 }

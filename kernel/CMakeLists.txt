@@ -43,6 +43,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/vfs/inode.c
     ${KERNEL_DIR}/vfs/file.c
     ${KERNEL_DIR}/vfs/fdtable.c
+    ${KERNEL_DIR}/vfs/vfs_syscall.c
 )
 
 set(KERNEL_C_FILES

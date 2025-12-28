@@ -4,10 +4,23 @@
 #include "kernel/inc/fs.h"
 #include "kernel/inc/fcntl.h"
 
+// Linux-compatible dirent structure for getdents
+struct linux_dirent64 {
+    uint64 d_ino;      // Inode number
+    int64 d_off;       // Offset to next structure
+    uint16 d_reclen;   // Size of this dirent
+    uint8 d_type;      // File type
+    char d_name[];     // Filename (null-terminated)
+};
+
+// Increase buffer size for longer filenames
+#define NAME_MAX 255
+#define FMT_WIDTH 14  // Display width for formatting
+
 char*
 fmtname(char *path)
 {
-  static char buf[DIRSIZ+1];
+  static char buf[FMT_WIDTH+1];
   char *p;
 
   // Find first character after last slash.
@@ -16,10 +29,12 @@ fmtname(char *path)
   p++;
 
   // Return blank-padded name.
-  if(strlen(p) >= DIRSIZ)
+  int len = strlen(p);
+  if(len >= FMT_WIDTH)
     return p;
-  memmove(buf, p, strlen(p));
-  memset(buf+strlen(p), ' ', DIRSIZ-strlen(p));
+  memmove(buf, p, len);
+  memset(buf+len, ' ', FMT_WIDTH - len);
+  buf[FMT_WIDTH] = 0;
   return buf;
 }
 
@@ -28,8 +43,9 @@ ls(char *path)
 {
   char buf[512], *p;
   int fd;
-  struct dirent de;
   struct stat st;
+  char dirent_buf[1024];  // Buffer for getdents
+  int nread;
 
   if((fd = open(path, O_RDONLY | O_NOFOLLOW)) < 0){
     fprintf(2, "ls: cannot open %s\n", path);
@@ -49,23 +65,32 @@ ls(char *path)
     break;
 
   case T_DIR:
-    if(strlen(path) + 1 + DIRSIZ + 1 > sizeof buf){
+    if(strlen(path) + 1 + NAME_MAX + 1 > sizeof buf){
       printf("ls: path too long\n");
       break;
     }
     strcpy(buf, path);
     p = buf+strlen(buf);
     *p++ = '/';
-    while(read(fd, &de, sizeof(de)) == sizeof(de)){
-      if(de.inum == 0)
-        continue;
-      memmove(p, de.name, DIRSIZ);
-      p[DIRSIZ] = 0;
-      if(stat(buf, &st) < 0){
-        printf("ls: cannot stat %s\n", buf);
-        continue;
+    
+    // Use getdents to read directory entries
+    while((nread = getdents(fd, dirent_buf, sizeof(dirent_buf))) > 0) {
+      int pos = 0;
+      while(pos < nread) {
+        struct linux_dirent64 *de = (struct linux_dirent64 *)(dirent_buf + pos);
+        if(de->d_ino == 0) {
+          pos += de->d_reclen;
+          continue;
+        }
+        strcpy(p, de->d_name);
+        if(stat(buf, &st) < 0){
+          printf("ls: cannot stat %s\n", buf);
+          pos += de->d_reclen;
+          continue;
+        }
+        printf("%s %d %d %d\n", fmtname(buf), st.type, st.ino, (int) st.size);
+        pos += de->d_reclen;
       }
-      printf("%s %d %d %d\n", fmtname(buf), st.type, st.ino, (int) st.size);
     }
     break;
   }
