@@ -11,6 +11,11 @@
  * IMPORTANT: File read/write operations acquire inode lock WITHOUT superblock
  * lock, since they don't modify filesystem metadata. This is safe as long as
  * operations that DO hold superblock lock don't block waiting for file I/O.
+ *
+ * BUG FIXES:
+ * - Anonymous pipe leak (Dec 2024): Pipes created via pipe() syscall have
+ *   pipe != NULL but inode == NULL. vfs_fileclose() must call pipeclose()
+ *   for these pipes BEFORE the inode NULL check, otherwise pipe buffers leak.
  */
 
 #include "types.h"

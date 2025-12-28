@@ -982,27 +982,92 @@ void slab_free(void *obj) {
 void slab_free_noshrink(void *obj) {
     slab_t *slab;
     slab_cache_t *cache;
-    slab = __find_obj_slab(obj);
+    int slab_cpu_id;
+    percpu_slab_cache_t *pcpu_cache;
+
     if (obj == NULL) {
         printf("slab_free_noshrink(): obj is NULL\n");
         return;
     }
+
+    // PHASE 1: Find slab (no lock needed - page descriptor is immutable)
+    slab = __find_obj_slab(obj);
     if (slab == NULL) {
         printf("slab_free_noshrink(): slab is NULL for obj=%p\n", obj);
         return;
     }
+
     cache = slab->cache;
     if (cache == NULL) {
-        panic("slab_free_noshrink");
+        panic("slab_free_noshrink: slab not attached to cache");
     }
-    __slab_cache_lock(cache);
+
+    // PHASE 2: Determine ownership (atomic load - no lock needed)
+    slab_cpu_id = __atomic_load_n(&slab->cpu_id, __ATOMIC_ACQUIRE);
+
+    if (slab_cpu_id < 0) {
+        // Slab is in global free list - this shouldn't happen
+        panic("slab_free_noshrink: object from free slab");
+    }
+
+    pcpu_cache = &cache->percpu_caches[slab_cpu_id];
+
+    // PHASE 3: Acquire appropriate lock
+    __percpu_cache_lock_cpu(cache, slab_cpu_id);
+
+    // Double-check cpu_id hasn't changed
+    if (__atomic_load_n(&slab->cpu_id, __ATOMIC_ACQUIRE) != slab_cpu_id) {
+        __percpu_cache_unlock_cpu(cache, slab_cpu_id);
+        panic("slab_free_noshrink: slab cpu_id changed during free");
+    }
+
+    // PHASE 4: Return object to slab
+    slab_state_t old_state = slab->state;
+    int was_full = __SLAB_FULL(slab);
+
     __slab_obj_put(slab, obj);
-    cache->obj_active--;
+    __atomic_fetch_sub(&cache->obj_active, 1, __ATOMIC_RELEASE);
+
+    // PHASE 5: Move slab between lists if state changed
     if (__SLAB_EMPTY(slab)) {
-        __slab_dequeue(cache, slab);
-        __slab_enqueue(cache, slab);
+        // Transition to empty - move to global free list
+        if (old_state == SLAB_STATE_PARTIAL) {
+            list_node_detach(slab, list_entry);
+            __atomic_fetch_sub(&pcpu_cache->partial_count, 1, __ATOMIC_RELEASE);
+        } else if (old_state == SLAB_STATE_FULL) {
+            list_node_detach(slab, list_entry);
+            __atomic_fetch_sub(&pcpu_cache->full_count, 1, __ATOMIC_RELEASE);
+        }
+
+        __atomic_store_n(&slab->cpu_id, -1, __ATOMIC_RELEASE);
+        slab->state = SLAB_STATE_FREE;
+
+        __percpu_cache_unlock_cpu(cache, slab_cpu_id);
+
+        // Add to global free list
+        __global_free_lock(cache);
+        list_node_push_back(&cache->global_free_list, slab, list_entry);
+        __atomic_fetch_add(&cache->global_free_count, 1, __ATOMIC_RELEASE);
+        __global_free_unlock(cache);
+
+    } else if (was_full && !__SLAB_FULL(slab)) {
+        // Transition from full to partial
+        list_node_detach(slab, list_entry);
+        __atomic_fetch_sub(&pcpu_cache->full_count, 1, __ATOMIC_RELEASE);
+
+        // Move to owner CPU's partial list
+        list_node_push_back(&pcpu_cache->partial_list, slab, list_entry);
+        __atomic_fetch_add(&pcpu_cache->partial_count, 1, __ATOMIC_RELEASE);
+        slab->state = SLAB_STATE_PARTIAL;
+
+        __percpu_cache_unlock_cpu(cache, slab_cpu_id);
+
+    } else {
+        // No state change, just unlock
+        __percpu_cache_unlock_cpu(cache, slab_cpu_id);
     }
-    // Skip shrinking - caller is responsible for calling slab_cache_shrink later if needed
-    __slab_cache_unlock(cache);
+
     __slab_sanitizer_check("slab_free_noshrink", cache, slab, obj);
+
+    // PHASE 6: Skip shrinking - that's the whole point of this function
 }

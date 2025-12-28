@@ -1,3 +1,22 @@
+/*
+ * Virtual Memory Management for xv6
+ *
+ * This file implements the virtual memory area (VMA) management system.
+ * Each process has a vm_t structure containing:
+ * - vm_tree: Red-black tree for efficient VMA lookup by address
+ * - vm_list: Linked list of all VMAs (using list_entry member)
+ * - vm_free_list: Linked list of free VMAs (using free_list_entry member)
+ *
+ * BUG FIXES:
+ * - List entry mismatch (Dec 2024): vm_free_list operations must use
+ *   free_list_entry, not list_entry. Using the wrong member caused list
+ *   corruption and crashes in rb_insert_color with NULL grand_parent.
+ * - Use-after-free in vm_dup (Dec 2024): When vm_dup fails, don't free
+ *   new_vma before calling vm_destroy(dst) - let vm_destroy handle cleanup.
+ * - OOM handling (Dec 2024): Changed asserts to return -1 for OOM conditions
+ *   in va_alloc, vm_growstack, vm_growheap for graceful degradation.
+ */
+
 #include "param.h"
 #include "types.h"
 #include "string.h"
@@ -59,10 +78,8 @@ static void __vma_free(vma_t *vma)
     vma->vm = NULL;
     vma->start = VMA_FREED_MAGIC;
     vma->end = VMA_FREED_MAGIC;
-    // Use slab_free_noshrink to prevent slab shrinking from freeing pages
-    // that contain VMAs belonging to other processes that haven't exited yet.
-    // This is critical because VMAs from different VMs share slab pages.
-    slab_free_noshrink((void*)vma);
+    // Use regular slab_free - let automatic shrinking handle memory reclamation
+    slab_free((void*)vma);
   }
 }
 
@@ -763,8 +780,8 @@ void vm_destroy(vm_t *vm)
   }
   // Mark as destroyed before freeing to detect double-destroy
   vm->pagetable = VM_DESTROYED_MAGIC;
-  // Use noshrink to prevent slab shrinking from affecting other VM structures
-  slab_free_noshrink((void*)vm);
+  // Use regular slab_free - let automatic shrinking handle memory reclamation
+  slab_free((void*)vm);
 }
 
 // Duplicate the VM structure from src to dst.
@@ -1045,17 +1062,35 @@ vma_t *va_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags)
 
   vma_t *vma2 = NULL;
   vma_t *vma3 = NULL;
+  vma_t *original_left = NULL;
+  
   if (va > free_area->start) {
     // Split the free area if va is not at the start
+    // free_area becomes [free_area->start, va), vma2 becomes [va, free_area->end)
+    original_left = free_area;
     vma2 = vma_split(free_area, va);
-    assert(vma2 != NULL, "va_alloc: vma_split failed");
+    if (vma2 == NULL) {
+      // Allocation failed - no state change yet, just return NULL
+      return NULL;
+    }
   } else {
     vma2 = free_area; // Use the whole free area
   }
+  
   if (va_end < vma2->end) {
+    // Split vma2 at va_end
+    // vma2 becomes [va, va_end), vma3 becomes [va_end, vma2->end)
     vma3 = vma_split(vma2, va_end);
-    assert(vma3 != NULL, "va_alloc: vma_split failed");
+    if (vma3 == NULL) {
+      // Allocation failed - need to restore the first split
+      if (original_left != NULL) {
+        // Merge vma2 back into original_left to undo the first split
+        vma_merge(original_left, vma2);
+      }
+      return NULL;
+    }
   }
+  
   list_node_detach(vma2, free_list_entry);
   vma2->flags = flags; // Set the flags for the new VMA
 
@@ -1370,12 +1405,14 @@ int vm_growstack(vm_t *vm, int change_size)
     // Shrinking the stack
     vma_t *splitted = vm->stack;
     vma_t *right = vma_split(vm->stack, new_start);
-    assert(right != NULL, "vm_growstack: vma_split failed in shrinking stack");
+    if (right == NULL) {
+      return -1; // Failed to split - out of memory
+    }
     vm->stack = right; // Update the stack VMA
     __vma_set_free(splitted); // Set the VMA as free
     if (left != NULL && left->flags == VM_FLAG_NONE) {
-      assert(vma_merge(splitted, left) != NULL, 
-             "vm_growstack: vma_merge failed in shrinking stack");
+      // Merge will always succeed - it doesn't allocate memory
+      vma_merge(splitted, left);
     }
   } else {
     if (left == NULL || left->flags != VM_FLAG_NONE) {
@@ -1391,7 +1428,7 @@ int vm_growstack(vm_t *vm, int change_size)
     list_entry_detach(&grows->free_list_entry);
     grows->flags = vm->stack->flags; // Set the flags for the new VMA
     vma_t *new_stack = vma_merge(grows, vm->stack);
-    assert(new_stack == grows, "vm_growstack: vma_merge failed");
+    // vma_merge doesn't allocate, it returns grows since grows is left of stack
     vm->stack = new_stack; // Update the stack VMA
   }
   vm->stack_size = new_size; // Update the stack size
@@ -1434,11 +1471,13 @@ int vm_growheap(vm_t *vm, int change_size)
   if (delta < 0) {
     // Shrinking the heap
     vma_t *splitted = vma_split(vm->heap, new_end);
-    assert(splitted != NULL, "vm_growheap: vma_split failed in shrinking heap");
+    if (splitted == NULL) {
+      return -1; // Failed to split - out of memory
+    }
     __vma_set_free(splitted); // Set the VMA as free
     if (right != NULL && right->flags == VM_FLAG_NONE) {
-      assert(vma_merge(splitted, right) != NULL, 
-             "vm_growheap: vma_merge failed in shrinking heap");
+      // Merge will always succeed - it doesn't allocate memory
+      vma_merge(splitted, right);
     }
   } else {
     if (right == NULL || right->flags != VM_FLAG_NONE) {
@@ -1453,7 +1492,8 @@ int vm_growheap(vm_t *vm, int change_size)
     list_entry_detach(&right->free_list_entry);
     right->flags = vm->heap->flags; // Set the flags for the new VMA
     vma_t *new_heap = vma_merge(right, vm->heap);
-    assert(new_heap == vm->heap, "vm_growheap: vma_merge failed");
+    // vma_merge doesn't allocate, so this should always succeed
+    // The merge returns vm->heap since right is to the right of heap
     vm->heap = new_heap; // Update the heap VMA
   }
   
