@@ -37,7 +37,7 @@ int sigpending(sigset_t *set);
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
 void pause(void);
 
-int memstat(void);
+int memstat(int detailed);
 int dumpproc(void);
 int dumpchan(void);
 int dumppcache(void);

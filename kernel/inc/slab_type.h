@@ -52,6 +52,9 @@ typedef struct slab_cache_struct {
     _Atomic int64           slab_total;
     _Atomic uint64          obj_active;
     _Atomic uint64          obj_total;
+
+    // Link to global list of all slab caches (for shrinking)
+    list_node_t             cache_list_entry;
 } slab_cache_t;
 
 typedef enum {

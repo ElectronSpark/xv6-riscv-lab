@@ -92,7 +92,7 @@ static void test_print_buddy_system_stat(void **state) {
     
     // This is a mock test, we just want to ensure the function can be called
     // and it doesn't crash. In a real test, you would check the output.
-    print_buddy_system_stat();
+    print_buddy_system_stat(1);
 }
 
 // Test page reference count increment

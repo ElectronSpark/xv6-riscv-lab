@@ -775,7 +775,7 @@ int page_buddy_init(uint64 pa_start, uint64 pa_end) {
         }
     }
 #ifndef HOST_TEST
-    print_buddy_system_stat();
+    print_buddy_system_stat(1);
     printf("page_buddy_init(): buddy pages from 0x%lx to 0x%lx\n"
            "    managed pages from 0x%lx to 0x%lx\n",
            pa_start, pa_end, __managed_start, __managed_end);
@@ -1091,7 +1091,7 @@ STATIC void __print_size(uint64 bytes) {
     }
 }
 
-void print_buddy_system_stat(void) {
+void print_buddy_system_stat(int detailed) {
     uint64 total_free_pages = 0;
     uint64 total_cached_pages = 0;
     uint64 ret_arr[PAGE_BUDDY_MAX_ORDER + 1] = { 0 };
@@ -1099,17 +1099,21 @@ void print_buddy_system_stat(void) {
 
     page_buddy_stat(ret_arr, empty_arr, PAGE_BUDDY_MAX_ORDER + 1);
 
-    printf("Buddy System Statistics:\n");
-    printf("========================\n");
+    if (detailed) {
+        printf("Buddy System Statistics:\n");
+        printf("========================\n");
+    }
 
     for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
         uint64 order_pages = (1UL << i) * ret_arr[i];
         uint64 order_bytes = order_pages * PAGE_SIZE;
         total_free_pages += order_pages;
 
-        printf("order(%d): %ld blocks (", i, ret_arr[i]);
-        __print_size(order_bytes);
-        printf(")");
+        if (detailed) {
+            printf("order(%d): %ld blocks (", i, ret_arr[i]);
+            __print_size(order_bytes);
+            printf(")");
+        }
 
         // Add per-CPU cache stats for cacheable orders
         if (i <= PCPU_CACHE_MAX_ORDER) {
@@ -1124,27 +1128,24 @@ void print_buddy_system_stat(void) {
                 uint64 cached_bytes = cached_pages * PAGE_SIZE;
                 total_cached_pages += cached_pages;
 
-                printf(" + %ld cached (", cache_total);
-                __print_size(cached_bytes);
-                printf(")");
+                if (detailed) {
+                    printf(" + %ld cached (", cache_total);
+                    __print_size(cached_bytes);
+                    printf(")");
+                }
             }
         }
 
-        printf("\n");
+        if (detailed) {
+            printf("\n");
+        }
     }
 
-    printf("------------------------\n");
-    printf("Total free:   %ld pages (", total_free_pages);
-    __print_size(total_free_pages * PAGE_SIZE);
-    printf(")\n");
-
-    if (total_cached_pages > 0) {
-        printf("Total cached: %ld pages (", total_cached_pages);
-        __print_size(total_cached_pages * PAGE_SIZE);
-        printf(")\n");
+    if (detailed) {
+        printf("------------------------\n");
     }
-
-    printf("Total avail:  %ld pages (", total_free_pages + total_cached_pages);
+    printf("Buddy: %ld free + %ld cached = %ld pages (", 
+           total_free_pages, total_cached_pages, total_free_pages + total_cached_pages);
     __print_size((total_free_pages + total_cached_pages) * PAGE_SIZE);
     printf(")\n");
 }
@@ -1194,6 +1195,9 @@ void check_buddy_system_integrity(void) {
 }
 
 uint64 sys_memstat(void) {
-    print_buddy_system_stat();
+    int detailed;
+    argint(0, &detailed);
+    print_buddy_system_stat(detailed);
+    slab_dump_all(detailed);
     return 0;
 }

@@ -7,6 +7,8 @@
 //
 // Interface:
 // * To get a buffer for a particular disk block, call bread.
+//   NOTE: bread() returns NULL on memory allocation failure (OOM).
+//   Callers must handle this gracefully (return -EIO or similar).
 // * After changing buffer data, call bwrite to write it to disk.
 // * When done with the buffer, call brelse.
 // * Do not use the buffer after calling brelse.
@@ -230,6 +232,7 @@ static void __buf_bio_cleanup(struct bio *bio) {
 }
 
 // Return a locked buf with the contents of the indicated block.
+// Returns NULL if memory allocation fails (e.g., during OOM conditions).
 struct buf*
 bread(uint dev, uint blockno)
 {
@@ -238,9 +241,16 @@ bread(uint dev, uint blockno)
   b = bget(dev, blockno);
   if(!b->valid) {
     blkdev_t *blkdev = blkdev_get(major(b->dev), minor(b->dev));
-    assert(!IS_ERR(blkdev), "bwrite: blkdev_get failed");
+    assert(!IS_ERR(blkdev), "bread: blkdev_get failed");
     struct bio *bio = __buf_alloc_bio(b, blkdev, false);
-    assert(!IS_ERR_OR_NULL(bio), "bread: bio_alloc failed");
+    if (IS_ERR_OR_NULL(bio)) {
+      // OOM during bio allocation - release buffer and return NULL
+      // Callers should handle this gracefully
+      int ret = blkdev_put(blkdev);
+      assert(ret == 0, "bread: blkdev_put failed: %d", ret);
+      brelse(b);
+      return NULL;
+    }
     blkdev_submit_bio(blkdev, bio);
     b->valid = 1;
     __buf_bio_cleanup(bio);

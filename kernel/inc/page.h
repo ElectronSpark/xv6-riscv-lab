@@ -26,7 +26,7 @@ int page_ref_dec(void *ptr);
 int page_ref_count(page_t *page);
 
 void page_buddy_stat(uint64 *ret_arr, bool *empty_arr, size_t size);
-void print_buddy_system_stat(void);
+void print_buddy_system_stat(int detailed);
 
 
 #endif              /* __KERNEL_PAGE_H */

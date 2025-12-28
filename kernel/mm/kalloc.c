@@ -88,7 +88,10 @@ void kmm_free(void *ptr) {
     pop_off();
 }
 
-// Shrink all kmm slab caches, releasing unused slabs back to buddy system
+// Shrink all kmm slab caches, releasing unused slabs back to buddy system.
+// Called as emergency memory reclaim when slab allocation fails due to OOM.
+// This allows the system to recover during stress tests (e.g., forkforkfork)
+// where many processes exit and their slabs are freed but not yet shrunk.
 void kmm_shrink_all(void) {
   for (int i = 0; i < SLAB_CACHE_NUMS; i++) {
     slab_cache_shrink(__kmm_slab_cache[i], 0x7fffffff);

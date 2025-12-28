@@ -19,6 +19,7 @@
 //   - Free list per slab for fast object allocation
 //   - Optional bitmap tracking for debugging (SLAB_FLAG_DEBUG_BITMAP)
 //   - Automatic slab shrinking when free objects exceed limits
+//   - Emergency memory reclaim: on OOM, all caches are shrunk before retry
 //
 // SLAB STATES:
 //   - FREE: All objects available (in global_free_list)
@@ -71,6 +72,81 @@
 #include "slab.h"
 #include "slab_private.h"
 
+// ============================================================================
+// Global Slab Cache Registry
+// ============================================================================
+// All slab caches are registered here so we can shrink them all on OOM.
+static list_node_t __all_slab_caches = LIST_ENTRY_INITIALIZED(&__all_slab_caches);
+static spinlock_t __all_slab_caches_lock = SPINLOCK_INITIALIZED("all_slab_caches");
+
+// Shrink all registered slab caches - called on OOM
+void slab_shrink_all(void) {
+    slab_cache_t *cache, *tmp;
+    
+    spin_acquire(&__all_slab_caches_lock);
+    list_foreach_node_safe(&__all_slab_caches, cache, tmp, cache_list_entry) {
+        // Shrink up to half the global free slabs
+        int64 free_count = __atomic_load_n(&cache->global_free_count, __ATOMIC_ACQUIRE);
+        if (free_count > 0) {
+            int to_shrink = (free_count + 1) / 2;
+            if (to_shrink > 0) {
+                spin_release(&__all_slab_caches_lock);
+                slab_cache_shrink(cache, to_shrink);
+                spin_acquire(&__all_slab_caches_lock);
+                // tmp may be invalid after releasing lock, restart from beginning
+                cache = LIST_FIRST_NODE(&__all_slab_caches, slab_cache_t, cache_list_entry);
+                if (cache == NULL) break;
+                tmp = LIST_NEXT_NODE(&__all_slab_caches, cache, cache_list_entry);
+            }
+        }
+    }
+    spin_release(&__all_slab_caches_lock);
+}
+
+// Dump statistics for all slab caches - useful for debugging memory leaks
+void slab_dump_all(int detailed) {
+    slab_cache_t *cache, *tmp;
+    uint64 total_pages = 0;
+    uint64 total_bytes;
+    
+    if (detailed) {
+        printf("\n=== SLAB CACHE STATISTICS ===\n");
+        printf("NAME             OBJSZ    TOTAL   ACTIVE     FREE    PAGES\n");
+    }
+    
+    spin_acquire(&__all_slab_caches_lock);
+    list_foreach_node_safe(&__all_slab_caches, cache, tmp, cache_list_entry) {
+        int64 slab_total = __atomic_load_n(&cache->slab_total, __ATOMIC_ACQUIRE);
+        uint64 obj_active = __atomic_load_n(&cache->obj_active, __ATOMIC_ACQUIRE);
+        int64 global_free = __atomic_load_n(&cache->global_free_count, __ATOMIC_ACQUIRE);
+        uint64 pages = slab_total * (1UL << cache->slab_order);
+        total_pages += pages;
+        
+        if (detailed) {
+            printf("%s: objsz=%ld total=%ld active=%lu free=%ld pages=%lu\n",
+                   cache->name, cache->obj_size, slab_total, obj_active, global_free, pages);
+        }
+    }
+    spin_release(&__all_slab_caches_lock);
+    
+    if (detailed) {
+        printf("-----------------------------\n");
+    }
+    total_bytes = total_pages * PAGE_SIZE;
+    printf("Slab:  %lu pages (", total_pages);
+    if (total_bytes >= 1024 * 1024) {
+        uint64 mb = total_bytes / (1024 * 1024);
+        uint64 kb_remainder = (total_bytes % (1024 * 1024)) / 1024;
+        printf("%lu.%luMB", mb, kb_remainder * 10 / 1024);
+    } else {
+        printf("%luKB", total_bytes / 1024);
+    }
+    printf(")\n");
+    if (detailed) {
+        printf("=============================\n");
+    }
+}
+
 #ifdef KERNEL_PAGE_SANITIZER
 STATIC_INLINE void __slab_sanitizer_check(const char *op ,slab_cache_t *cache, slab_t *slab,
                                           void *obj) {
@@ -97,11 +173,16 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
 
     page = __page_alloc(order, PAGE_TYPE_SLAB);
     if (page == NULL) {
-        printf("__slab_make: __page_alloc FAILED for order %d (need %d pages = %dKB)\n",
-               order, 1 << order, (1 << order) * 4);
-        printf("  This allocation was for obj_size=%ld, will hold %d objects\n",
-               obj_size, obj_num);
-        printf("  OUT OF MEMORY - cannot allocate slab!\n");
+        // Emergency reclaim: try shrinking ALL slab caches to free pages
+        // This handles OOM during stress tests (e.g., forkforkfork) where
+        // many processes exit and their slabs are freed but not yet shrunk.
+        // Note: slab_shrink_all() covers all registered caches including
+        // specialized ones like __vm_pool, __vma_pool, etc., not just kmm caches.
+        slab_shrink_all();
+        page = __page_alloc(order, PAGE_TYPE_SLAB);
+    }
+    if (page == NULL) {
+        // Still failed after emergency shrink - truly out of memory
         return NULL;
     }
     page_base = (void *)__page_to_pa(page);
@@ -556,6 +637,13 @@ STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name,
     __atomic_store_n(&cache->obj_active, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&cache->obj_total, 0, __ATOMIC_RELEASE);
 
+    // Register in global cache list for OOM shrinking
+    list_entry_init(&cache->cache_list_entry);
+    spin_acquire(&__all_slab_caches_lock);
+    // Insert at end of list (after the last entry, which is prev of head)
+    list_entry_insert(LIST_LAST_ENTRY(&__all_slab_caches), &cache->cache_list_entry);
+    spin_release(&__all_slab_caches_lock);
+
 }
 
 
@@ -811,11 +899,11 @@ void *slab_alloc(slab_cache_t *cache) {
     __global_free_unlock(cache);
 
     // PHASE 3: Create new slab (no locks held)
+    // __slab_make will try emergency shrinking if initial allocation fails
     slab = __slab_make(cache->flags, cache->slab_order, cache->offset,
                        cache->obj_size, cache->slab_obj_num, cache->bitmap_size);
     if (slab == NULL) {
-        printf("slab_alloc: failed to create new slab for cache '%s' (order=%d, obj_size=%ld)\n",
-               cache->name, cache->slab_order, cache->obj_size);
+        // Still failed after emergency shrink - truly out of memory
         return NULL;
     }
 
