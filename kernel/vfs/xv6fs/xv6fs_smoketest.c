@@ -390,6 +390,668 @@ out:
 }
 
 /******************************************************************************
+ * Truncate smoke test
+ ******************************************************************************/
+
+// Test truncate operations within xv6fs transaction limits.
+// xv6fs has MAXOPBLOCKS=10 per transaction, and each block allocation
+// writes ~2 blocks (bitmap + data), so we can only grow by a few blocks
+// at a time. Also, xv6fs only supports shrink to 0 (partial shrink = ENOSYS).
+void xv6fs_run_truncate_smoketest(void) {
+    printf("\n=== xv6fs truncate smoke test ===\n");
+    
+    int ret = 0;
+    struct vfs_inode *root = xv6fs_get_disk_root();
+    struct vfs_inode *testfile = NULL;
+    struct vfs_file *file = NULL;
+    (void)file; // suppress unused warning
+    
+    if (root == NULL) {
+        printf("xv6fs_truncate: " WARN " xv6fs not mounted at /disk, skipping\n");
+        return;
+    }
+    
+    const char *filename = "trunctest";
+    const size_t filename_len = sizeof("trunctest") - 1;
+    
+    // Create test file
+    testfile = vfs_create(root, 0644, filename, filename_len);
+    if (IS_ERR_OR_NULL(testfile)) {
+        ret = IS_ERR(testfile) ? PTR_ERR(testfile) : -EINVAL;
+        printf("xv6fs_truncate: " FAIL " create %s errno=%d\n", filename, ret);
+        goto out;
+    }
+    printf("xv6fs_truncate: created %s ino=%lu\n", filename, testfile->ino);
+    
+    // Test 1: Grow to 512 bytes (within first direct block)
+    ret = vfs_itruncate(testfile, 512);
+    if (ret != 0) {
+        printf("xv6fs_truncate: " FAIL " grow to 512 bytes, errno=%d\n", ret);
+    } else {
+        printf("xv6fs_truncate: " PASS " grow to 512 bytes, size=%lld\n", testfile->size);
+    }
+    
+    // Test 2: Grow to 3 blocks (stay within transaction limit)
+    ret = vfs_itruncate(testfile, 3 * BSIZE);
+    if (ret != 0) {
+        printf("xv6fs_truncate: " FAIL " grow to 3 blocks, errno=%d\n", ret);
+    } else {
+        printf("xv6fs_truncate: " PASS " grow to 3 blocks, size=%lld\n", testfile->size);
+    }
+    
+    // Test 3: Truncate to zero (the only shrink xv6fs supports)
+    ret = vfs_itruncate(testfile, 0);
+    if (ret != 0) {
+        printf("xv6fs_truncate: " FAIL " shrink to zero, errno=%d\n", ret);
+    } else {
+        printf("xv6fs_truncate: " PASS " shrink to zero, size=%lld\n", testfile->size);
+    }
+    
+    // Test 4: Grow again after truncating to 0
+    ret = vfs_itruncate(testfile, 2 * BSIZE);
+    if (ret != 0) {
+        printf("xv6fs_truncate: " FAIL " grow after shrink, errno=%d\n", ret);
+    } else {
+        printf("xv6fs_truncate: " PASS " grow after shrink, size=%lld\n", testfile->size);
+    }
+    
+    // Test 5: Verify partial shrink returns ENOSYS
+    ret = vfs_itruncate(testfile, BSIZE);
+    if (ret == -ENOSYS) {
+        printf("xv6fs_truncate: " PASS " partial shrink correctly returns ENOSYS\n");
+    } else if (ret == 0) {
+        printf("xv6fs_truncate: " WARN " partial shrink succeeded (unexpected but ok)\n");
+    } else {
+        printf("xv6fs_truncate: " FAIL " partial shrink returned unexpected errno=%d\n", ret);
+    }
+    
+    // Final truncate to 0 for cleanup
+    vfs_itruncate(testfile, 0);
+    
+    // Cleanup
+    vfs_iput(testfile);
+    testfile = NULL;
+    
+    ret = vfs_unlink(root, filename, filename_len);
+    if (ret != 0) {
+        printf("xv6fs_truncate: " WARN " cleanup unlink %s errno=%d\n", filename, ret);
+    } else {
+        printf("xv6fs_truncate: cleanup complete\n");
+    }
+    
+out:
+    if (testfile != NULL) {
+        vfs_iput(testfile);
+    }
+    vfs_iput(root);
+}
+
+/******************************************************************************
+ * Namei (path resolution) smoke test
+ ******************************************************************************/
+
+// Test path resolution through the VFS layer
+void xv6fs_run_namei_smoketest(void) {
+    printf("\n=== xv6fs namei smoke test ===\n");
+    
+    int ret = 0;
+    struct vfs_inode *root = xv6fs_get_disk_root();
+    struct vfs_inode *result = NULL;
+    struct vfs_inode *subdir = NULL;
+    struct vfs_inode *nested = NULL;
+    struct vfs_inode *file = NULL;
+    
+    if (root == NULL) {
+        printf("xv6fs_namei: " WARN " xv6fs not mounted at /disk, skipping\n");
+        return;
+    }
+    
+    const char *subdir_name = "namei_dir";
+    const size_t subdir_len = sizeof("namei_dir") - 1;
+    const char *nested_name = "nested";
+    const size_t nested_len = sizeof("nested") - 1;
+    const char *file_name = "target";
+    const size_t file_len = sizeof("target") - 1;
+    
+    // Setup: create /disk/namei_dir/nested/target
+    subdir = vfs_mkdir(root, 0755, subdir_name, subdir_len);
+    if (IS_ERR_OR_NULL(subdir)) {
+        ret = IS_ERR(subdir) ? PTR_ERR(subdir) : -EINVAL;
+        printf("xv6fs_namei: " FAIL " setup mkdir %s errno=%d\n", subdir_name, ret);
+        goto out;
+    }
+    
+    nested = vfs_mkdir(subdir, 0755, nested_name, nested_len);
+    if (IS_ERR_OR_NULL(nested)) {
+        ret = IS_ERR(nested) ? PTR_ERR(nested) : -EINVAL;
+        printf("xv6fs_namei: " FAIL " setup mkdir %s errno=%d\n", nested_name, ret);
+        goto cleanup_subdir;
+    }
+    
+    file = vfs_create(nested, 0644, file_name, file_len);
+    if (IS_ERR_OR_NULL(file)) {
+        ret = IS_ERR(file) ? PTR_ERR(file) : -EINVAL;
+        printf("xv6fs_namei: " FAIL " setup create %s errno=%d\n", file_name, ret);
+        goto cleanup_nested;
+    }
+    uint64 file_ino = file->ino;
+    vfs_iput(file);
+    file = NULL;
+    
+    printf("xv6fs_namei: setup complete\n");
+    
+    // Test 1: Absolute path to disk root via /disk
+    const char *path1 = "/disk";
+    result = vfs_namei(path1, strlen(path1));
+    if (IS_ERR_OR_NULL(result)) {
+        printf("xv6fs_namei: " FAIL " namei(\"%s\") errno=%ld\n", path1, PTR_ERR(result));
+    } else {
+        printf("xv6fs_namei: " PASS " namei(\"%s\") -> ino=%lu\n", path1, result->ino);
+        vfs_iput(result);
+    }
+    result = NULL;
+    
+    // Test 2: Path to subdir
+    const char *path2 = "/disk/namei_dir";
+    result = vfs_namei(path2, strlen(path2));
+    if (IS_ERR_OR_NULL(result)) {
+        printf("xv6fs_namei: " FAIL " namei(\"%s\") errno=%ld\n", path2, PTR_ERR(result));
+    } else {
+        printf("xv6fs_namei: " PASS " namei(\"%s\") -> ino=%lu\n", path2, result->ino);
+        vfs_iput(result);
+    }
+    result = NULL;
+    
+    // Test 3: Full path to file
+    const char *path3 = "/disk/namei_dir/nested/target";
+    result = vfs_namei(path3, strlen(path3));
+    if (IS_ERR_OR_NULL(result)) {
+        printf("xv6fs_namei: " FAIL " namei(\"%s\") errno=%ld\n", path3, PTR_ERR(result));
+    } else if (result->ino != file_ino) {
+        printf("xv6fs_namei: " FAIL " namei(\"%s\") wrong ino=%lu expected=%lu\n",
+               path3, result->ino, file_ino);
+        vfs_iput(result);
+    } else {
+        printf("xv6fs_namei: " PASS " namei(\"%s\") -> ino=%lu\n", path3, result->ino);
+        vfs_iput(result);
+    }
+    result = NULL;
+    
+    // Test 4: Path with "." components
+    const char *path4 = "/disk/namei_dir/./nested/./target";
+    result = vfs_namei(path4, strlen(path4));
+    if (IS_ERR_OR_NULL(result)) {
+        printf("xv6fs_namei: " FAIL " namei(\"%s\") errno=%ld\n", path4, PTR_ERR(result));
+    } else if (result->ino != file_ino) {
+        printf("xv6fs_namei: " FAIL " namei(\"%s\") wrong ino\n", path4);
+        vfs_iput(result);
+    } else {
+        printf("xv6fs_namei: " PASS " namei(\"%s\") -> ino=%lu\n", path4, result->ino);
+        vfs_iput(result);
+    }
+    result = NULL;
+    
+    // Test 5: Path with ".." components
+    const char *path5 = "/disk/namei_dir/nested/../nested/target";
+    result = vfs_namei(path5, strlen(path5));
+    if (IS_ERR_OR_NULL(result)) {
+        printf("xv6fs_namei: " FAIL " namei(\"%s\") errno=%ld\n", path5, PTR_ERR(result));
+    } else if (result->ino != file_ino) {
+        printf("xv6fs_namei: " FAIL " namei(\"%s\") wrong ino\n", path5);
+        vfs_iput(result);
+    } else {
+        printf("xv6fs_namei: " PASS " namei(\"%s\") -> ino=%lu\n", path5, result->ino);
+        vfs_iput(result);
+    }
+    result = NULL;
+    
+    // Test 6: Non-existent path
+    const char *path6 = "/disk/namei_dir/noexist";
+    result = vfs_namei(path6, strlen(path6));
+    if (IS_ERR(result)) {
+        printf("xv6fs_namei: " PASS " namei(\"%s\") -> ENOENT errno=%ld\n", path6, PTR_ERR(result));
+    } else if (result == NULL) {
+        printf("xv6fs_namei: " PASS " namei(\"%s\") -> NULL (not found)\n", path6);
+    } else {
+        printf("xv6fs_namei: " FAIL " namei(\"%s\") should fail but got ino=%lu\n", path6, result->ino);
+        vfs_iput(result);
+    }
+    result = NULL;
+    
+cleanup_nested:
+    // Cleanup file
+    if (!IS_ERR_OR_NULL(nested)) {
+        ret = vfs_unlink(nested, file_name, file_len);
+        if (ret != 0 && ret != -ENOENT) {
+            printf("xv6fs_namei: " WARN " cleanup unlink %s errno=%d\n", file_name, ret);
+        }
+        vfs_iput(nested);
+    }
+    
+    // Cleanup nested directory
+    if (!IS_ERR_OR_NULL(subdir)) {
+        ret = vfs_rmdir(subdir, nested_name, nested_len);
+        if (ret != 0 && ret != -ENOENT) {
+            printf("xv6fs_namei: " WARN " cleanup rmdir %s errno=%d\n", nested_name, ret);
+        }
+    }
+    
+cleanup_subdir:
+    if (!IS_ERR_OR_NULL(subdir)) {
+        vfs_iput(subdir);
+    }
+    
+    // Cleanup subdir
+    ret = vfs_rmdir(root, subdir_name, subdir_len);
+    if (ret != 0 && ret != -ENOENT) {
+        printf("xv6fs_namei: " WARN " cleanup rmdir %s errno=%d\n", subdir_name, ret);
+    }
+    
+    printf("xv6fs_namei: complete\n");
+    
+out:
+    vfs_iput(root);
+}
+
+/******************************************************************************
+ * Directory iteration smoke test
+ ******************************************************************************/
+
+// Helper struct for tracking expected entries
+struct xv6fs_iter_expect {
+    const char *name;
+    bool required;
+    bool seen;
+};
+
+// Mark an entry as seen, check for duplicates
+static bool xv6fs_iter_mark_seen(const char *name, struct xv6fs_iter_expect *tbl, 
+                                  int tbl_cnt, bool *dup_out) {
+    for (int i = 0; i < tbl_cnt; i++) {
+        if (strncmp(name, tbl[i].name, strlen(tbl[i].name) + 1) == 0) {
+            if (tbl[i].seen) {
+                if (dup_out != NULL) {
+                    *dup_out = true;
+                }
+                return true;
+            }
+            tbl[i].seen = true;
+            return true;
+        }
+    }
+    return false;
+}
+
+// Test directory iteration
+void xv6fs_run_dir_iter_smoketest(void) {
+    printf("\n=== xv6fs dir_iter smoke test ===\n");
+    
+    int ret = 0;
+    struct vfs_inode *root = xv6fs_get_disk_root();
+    struct vfs_inode *testdir = NULL;
+    struct vfs_inode *tmp = NULL;
+    struct vfs_dir_iter iter = {0};
+    struct vfs_dentry dentry = {0};
+    
+    if (root == NULL) {
+        printf("xv6fs_dir_iter: " WARN " xv6fs not mounted at /disk, skipping\n");
+        return;
+    }
+    
+    const char *testdir_name = "iter_dir";
+    const size_t testdir_len = sizeof("iter_dir") - 1;
+    const char *file1_name = "file1";
+    const size_t file1_len = sizeof("file1") - 1;
+    const char *file2_name = "file2";
+    const size_t file2_len = sizeof("file2") - 1;
+    const char *subdir_name = "subdir";
+    const size_t subdir_len = sizeof("subdir") - 1;
+    
+    // Create test directory
+    testdir = vfs_mkdir(root, 0755, testdir_name, testdir_len);
+    if (IS_ERR_OR_NULL(testdir)) {
+        ret = IS_ERR(testdir) ? PTR_ERR(testdir) : -EINVAL;
+        printf("xv6fs_dir_iter: " FAIL " mkdir %s errno=%d\n", testdir_name, ret);
+        goto out;
+    }
+    
+    // Test 1: Empty directory (just . and ..)
+    printf("xv6fs_dir_iter: Test 1 - empty directory\n");
+    {
+        struct xv6fs_iter_expect exp[] = {
+            {".", true, false},
+            {"..", true, false},
+        };
+        int exp_count = 2;
+        bool ok = true;
+        int count = 0;
+        
+        memset(&iter, 0, sizeof(iter));
+        for (;;) {
+            ret = vfs_dir_iter(testdir, &iter, &dentry);
+            if (ret != 0) {
+                printf("xv6fs_dir_iter: " FAIL " dir_iter errno=%d\n", ret);
+                ok = false;
+                break;
+            }
+            if (dentry.name == NULL) {
+                break;
+            }
+            
+            bool dup = false;
+            if (!xv6fs_iter_mark_seen(dentry.name, exp, exp_count, &dup)) {
+                printf("xv6fs_dir_iter: " WARN " unexpected entry: %s\n", dentry.name);
+            } else if (dup) {
+                printf("xv6fs_dir_iter: " FAIL " duplicate entry: %s\n", dentry.name);
+                ok = false;
+            }
+            count++;
+            vfs_release_dentry(&dentry);
+            memset(&dentry, 0, sizeof(dentry));
+        }
+        
+        for (int i = 0; i < exp_count; i++) {
+            if (exp[i].required && !exp[i].seen) {
+                printf("xv6fs_dir_iter: " FAIL " missing entry: %s\n", exp[i].name);
+                ok = false;
+            }
+        }
+        
+        if (ok && count == 2) {
+            printf("xv6fs_dir_iter: " PASS " empty dir has . and .. only\n");
+        }
+        vfs_release_dentry(&dentry);
+    }
+    
+    // Add files and subdirectory
+    tmp = vfs_create(testdir, 0644, file1_name, file1_len);
+    if (IS_ERR_OR_NULL(tmp)) {
+        ret = IS_ERR(tmp) ? PTR_ERR(tmp) : -EINVAL;
+        printf("xv6fs_dir_iter: " FAIL " create %s errno=%d\n", file1_name, ret);
+        goto cleanup;
+    }
+    vfs_iput(tmp);
+    tmp = NULL;
+    
+    tmp = vfs_create(testdir, 0644, file2_name, file2_len);
+    if (IS_ERR_OR_NULL(tmp)) {
+        ret = IS_ERR(tmp) ? PTR_ERR(tmp) : -EINVAL;
+        printf("xv6fs_dir_iter: " FAIL " create %s errno=%d\n", file2_name, ret);
+        goto cleanup;
+    }
+    vfs_iput(tmp);
+    tmp = NULL;
+    
+    tmp = vfs_mkdir(testdir, 0755, subdir_name, subdir_len);
+    if (IS_ERR_OR_NULL(tmp)) {
+        ret = IS_ERR(tmp) ? PTR_ERR(tmp) : -EINVAL;
+        printf("xv6fs_dir_iter: " FAIL " mkdir %s errno=%d\n", subdir_name, ret);
+        goto cleanup;
+    }
+    vfs_iput(tmp);
+    tmp = NULL;
+    
+    // Test 2: Directory with entries
+    printf("xv6fs_dir_iter: Test 2 - populated directory\n");
+    {
+        struct xv6fs_iter_expect exp[] = {
+            {".", true, false},
+            {"..", true, false},
+            {"file1", true, false},
+            {"file2", true, false},
+            {"subdir", true, false},
+        };
+        int exp_count = 5;
+        bool ok = true;
+        int count = 0;
+        
+        memset(&iter, 0, sizeof(iter));
+        for (;;) {
+            ret = vfs_dir_iter(testdir, &iter, &dentry);
+            if (ret != 0) {
+                printf("xv6fs_dir_iter: " FAIL " dir_iter errno=%d\n", ret);
+                ok = false;
+                break;
+            }
+            if (dentry.name == NULL) {
+                break;
+            }
+            
+            bool dup = false;
+            if (!xv6fs_iter_mark_seen(dentry.name, exp, exp_count, &dup)) {
+                printf("xv6fs_dir_iter: " WARN " unexpected entry: %s\n", dentry.name);
+            } else if (dup) {
+                printf("xv6fs_dir_iter: " FAIL " duplicate entry: %s\n", dentry.name);
+                ok = false;
+            }
+            count++;
+            vfs_release_dentry(&dentry);
+            memset(&dentry, 0, sizeof(dentry));
+        }
+        
+        for (int i = 0; i < exp_count; i++) {
+            if (exp[i].required && !exp[i].seen) {
+                printf("xv6fs_dir_iter: " FAIL " missing entry: %s\n", exp[i].name);
+                ok = false;
+            }
+        }
+        
+        if (ok && count == 5) {
+            printf("xv6fs_dir_iter: " PASS " found all 5 entries\n");
+        } else {
+            printf("xv6fs_dir_iter: " WARN " found %d entries (expected 5)\n", count);
+        }
+        vfs_release_dentry(&dentry);
+    }
+    
+    // Test 3: Fetch inode for each entry
+    printf("xv6fs_dir_iter: Test 3 - fetch inodes during iteration\n");
+    {
+        bool ok = true;
+        int fetched = 0;
+        
+        memset(&iter, 0, sizeof(iter));
+        for (;;) {
+            ret = vfs_dir_iter(testdir, &iter, &dentry);
+            if (ret != 0) {
+                printf("xv6fs_dir_iter: " FAIL " dir_iter errno=%d\n", ret);
+                ok = false;
+                break;
+            }
+            if (dentry.name == NULL) {
+                break;
+            }
+            
+            struct vfs_inode *ent = vfs_get_dentry_inode(&dentry);
+            if (IS_ERR_OR_NULL(ent)) {
+                printf("xv6fs_dir_iter: " FAIL " get_inode %s errno=%ld\n", 
+                       dentry.name, PTR_ERR(ent));
+                ok = false;
+            } else {
+                fetched++;
+                vfs_iput(ent);
+            }
+            vfs_release_dentry(&dentry);
+            memset(&dentry, 0, sizeof(dentry));
+        }
+        
+        if (ok && fetched == 5) {
+            printf("xv6fs_dir_iter: " PASS " fetched all 5 inodes successfully\n");
+        }
+        vfs_release_dentry(&dentry);
+    }
+    
+cleanup:
+    // Remove entries
+    ret = vfs_rmdir(testdir, subdir_name, subdir_len);
+    if (ret != 0 && ret != -ENOENT) {
+        printf("xv6fs_dir_iter: " WARN " cleanup rmdir %s errno=%d\n", subdir_name, ret);
+    }
+    ret = vfs_unlink(testdir, file2_name, file2_len);
+    if (ret != 0 && ret != -ENOENT) {
+        printf("xv6fs_dir_iter: " WARN " cleanup unlink %s errno=%d\n", file2_name, ret);
+    }
+    ret = vfs_unlink(testdir, file1_name, file1_len);
+    if (ret != 0 && ret != -ENOENT) {
+        printf("xv6fs_dir_iter: " WARN " cleanup unlink %s errno=%d\n", file1_name, ret);
+    }
+    
+    vfs_iput(testdir);
+    testdir = NULL;
+    
+    ret = vfs_rmdir(root, testdir_name, testdir_len);
+    if (ret != 0) {
+        printf("xv6fs_dir_iter: " WARN " cleanup rmdir %s errno=%d\n", testdir_name, ret);
+    }
+    
+    printf("xv6fs_dir_iter: complete\n");
+    
+out:
+    vfs_iput(root);
+}
+
+/******************************************************************************
+ * Large file smoke test
+ ******************************************************************************/
+
+// Test read/write of larger files that span multiple blocks
+void xv6fs_run_large_file_smoketest(void) {
+    printf("\n=== xv6fs large file smoke test ===\n");
+    
+    int ret = 0;
+    struct vfs_inode *root = xv6fs_get_disk_root();
+    struct vfs_inode *testfile = NULL;
+    struct vfs_file *file = NULL;
+    
+    if (root == NULL) {
+        printf("xv6fs_largefile: " WARN " xv6fs not mounted at /disk, skipping\n");
+        return;
+    }
+    
+    const char *filename = "largefile";
+    const size_t filename_len = sizeof("largefile") - 1;
+    
+    // Create test file
+    testfile = vfs_create(root, 0644, filename, filename_len);
+    if (IS_ERR_OR_NULL(testfile)) {
+        ret = IS_ERR(testfile) ? PTR_ERR(testfile) : -EINVAL;
+        printf("xv6fs_largefile: " FAIL " create %s errno=%d\n", filename, ret);
+        goto out;
+    }
+    printf("xv6fs_largefile: created %s ino=%lu\n", filename, testfile->ino);
+    
+    // Write 10 blocks of data (10KB)
+    file = vfs_fileopen(testfile, O_WRONLY);
+    if (IS_ERR_OR_NULL(file)) {
+        ret = IS_ERR(file) ? PTR_ERR(file) : -EINVAL;
+        printf("xv6fs_largefile: " FAIL " open for write errno=%d\n", ret);
+        file = NULL;
+        goto cleanup_inode;
+    }
+    
+    // Create a pattern buffer
+    char write_buf[BSIZE];
+    ssize_t total_written = 0;
+    for (int block = 0; block < 10; block++) {
+        // Fill with pattern: block number in each byte
+        memset(write_buf, 'A' + block, BSIZE);
+        ssize_t written = vfs_filewrite(file, write_buf, BSIZE);
+        if (written != BSIZE) {
+            printf("xv6fs_largefile: " FAIL " write block %d: %ld/%d\n", block, written, BSIZE);
+            break;
+        }
+        total_written += written;
+    }
+    
+    if (total_written == 10 * BSIZE) {
+        printf("xv6fs_largefile: " PASS " wrote %ld bytes (10 blocks)\n", total_written);
+    }
+    
+    vfs_fileclose(file);
+    file = NULL;
+    
+    // Verify file size
+    vfs_ilock(testfile);
+    if (testfile->size == 10 * BSIZE) {
+        printf("xv6fs_largefile: " PASS " file size=%lld\n", testfile->size);
+    } else {
+        printf("xv6fs_largefile: " FAIL " file size=%lld expected=%d\n", 
+               testfile->size, 10 * BSIZE);
+    }
+    vfs_iunlock(testfile);
+    
+    // Read back and verify
+    file = vfs_fileopen(testfile, O_RDONLY);
+    if (IS_ERR_OR_NULL(file)) {
+        ret = IS_ERR(file) ? PTR_ERR(file) : -EINVAL;
+        printf("xv6fs_largefile: " FAIL " open for read errno=%d\n", ret);
+        file = NULL;
+        goto cleanup_inode;
+    }
+    
+    char read_buf[BSIZE];
+    bool read_ok = true;
+    for (int block = 0; block < 10; block++) {
+        memset(read_buf, 0, BSIZE);
+        ssize_t bytes_read = vfs_fileread(file, read_buf, BSIZE);
+        if (bytes_read != BSIZE) {
+            printf("xv6fs_largefile: " FAIL " read block %d: %ld/%d\n", block, bytes_read, BSIZE);
+            read_ok = false;
+            break;
+        }
+        // Verify pattern
+        char expected = 'A' + block;
+        for (int i = 0; i < BSIZE; i++) {
+            if (read_buf[i] != expected) {
+                printf("xv6fs_largefile: " FAIL " block %d byte %d: got 0x%02x expected 0x%02x\n",
+                       block, i, (unsigned char)read_buf[i], (unsigned char)expected);
+                read_ok = false;
+                break;
+            }
+        }
+        if (!read_ok) break;
+    }
+    
+    if (read_ok) {
+        printf("xv6fs_largefile: " PASS " read and verified 10 blocks\n");
+    }
+    
+    // Test seek to middle and read
+    loff_t new_pos = vfs_filelseek(file, 5 * BSIZE, SEEK_SET);
+    if (new_pos == 5 * BSIZE) {
+        memset(read_buf, 0, BSIZE);
+        ssize_t bytes_read = vfs_fileread(file, read_buf, BSIZE);
+        if (bytes_read == BSIZE && read_buf[0] == 'F') { // Block 5 has pattern 'F'
+            printf("xv6fs_largefile: " PASS " seek to block 5 and read verified\n");
+        } else {
+            printf("xv6fs_largefile: " FAIL " seek+read: read=%ld first_byte=0x%02x\n",
+                   bytes_read, (unsigned char)read_buf[0]);
+        }
+    } else {
+        printf("xv6fs_largefile: " FAIL " seek to block 5: pos=%lld\n", new_pos);
+    }
+    
+    vfs_fileclose(file);
+    file = NULL;
+    
+cleanup_inode:
+    if (testfile != NULL) {
+        vfs_iput(testfile);
+        testfile = NULL;
+    }
+    
+    ret = vfs_unlink(root, filename, filename_len);
+    if (ret != 0) {
+        printf("xv6fs_largefile: " WARN " cleanup unlink %s errno=%d\n", filename, ret);
+    } else {
+        printf("xv6fs_largefile: cleanup complete\n");
+    }
+    
+out:
+    vfs_iput(root);
+}
+
+/******************************************************************************
  * Run all smoke tests
  ******************************************************************************/
 
@@ -400,6 +1062,10 @@ void xv6fs_run_all_smoketests(void) {
     
     xv6fs_run_inode_smoketest();
     xv6fs_run_file_ops_smoketest();
+    xv6fs_run_truncate_smoketest();
+    xv6fs_run_namei_smoketest();
+    xv6fs_run_dir_iter_smoketest();
+    xv6fs_run_large_file_smoketest();
     
     printf("\n========================================\n");
     printf("        xv6fs Smoke Tests Complete\n");

@@ -432,30 +432,49 @@ int xv6fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
     
     struct xv6fs_inode *dp = container_of(dir, struct xv6fs_inode, vfs_inode);
     struct dirent de;
+    char *name = NULL;
     
-    // Handle special entries
-    if (iter->cookies == VFS_DENTRY_COOKIE_SELF) {
-        ret_dentry->ino = dir->ino;
-        ret_dentry->sb = dir->sb;
-        ret_dentry->name = ".";
-        ret_dentry->name_len = 1;
-        iter->cookies = VFS_DENTRY_COOKIE_PARENT;
-        iter->index++;
-        return 0;
+    // VFS handles "." via iter->index == 0.
+    // VFS calls driver with iter->index == 1 for ".." on ordinary directories.
+    // VFS calls driver with iter->index > 1 for regular entries.
+    
+    // Handle ".." entry when index == 1
+    if (iter->index == 1) {
+        // Look up ".." in the on-disk directory to get parent inode number
+        for (uint off = 0; off < dir->size; off += sizeof(de)) {
+            uint bn = off / BSIZE;
+            uint block_off = off % BSIZE;
+            uint addr = xv6fs_bmap(dp, bn);
+            if (addr == 0) continue;
+            
+            struct buf *bp = bread(dp->dev, addr);
+            if (bp == NULL) continue;
+            
+            memmove(&de, bp->data + block_off, sizeof(de));
+            brelse(bp);
+            
+            if (de.inum == 0) continue;
+            
+            if (de.name[0] == '.' && de.name[1] == '.' && de.name[2] == '\0') {
+                vfs_release_dentry(ret_dentry);
+                ret_dentry->name = strndup("..", 2);
+                if (ret_dentry->name == NULL) return -ENOMEM;
+                ret_dentry->name_len = 2;
+                ret_dentry->ino = de.inum;
+                ret_dentry->sb = dir->sb;  // VFS doesn't set sb for index==1
+                ret_dentry->cookies = 0;  // Will be reset by VFS for index > 1
+                return 0;
+            }
+        }
+        // ".." not found on disk (shouldn't happen for valid dirs)
+        return -ENOENT;
     }
     
-    if (iter->cookies == VFS_DENTRY_COOKIE_PARENT) {
-        ret_dentry->ino = dir->parent ? dir->parent->ino : dir->ino;
-        ret_dentry->sb = dir->sb;
-        ret_dentry->name = "..";
-        ret_dentry->name_len = 2;
-        iter->cookies = 2 * sizeof(de); // Skip . and ..
-        iter->index++;
-        return 0;
-    }
+    // Handle regular entries when index > 1
+    uint start_off = (uint)iter->cookies;
     
     // Iterate through directory entries starting from cookies offset
-    for (uint off = iter->cookies; off < dir->size; off += sizeof(de)) {
+    for (uint off = start_off; off < dir->size; off += sizeof(de)) {
         uint bn = off / BSIZE;
         uint block_off = off % BSIZE;
         uint addr = xv6fs_bmap(dp, bn);
@@ -469,24 +488,31 @@ int xv6fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         
         if (de.inum == 0) continue;
         
-        // Skip . and .. as we handle them specially
-        if (strncmp(de.name, ".", DIRSIZ) == 0 ||
-            strncmp(de.name, "..", DIRSIZ) == 0) {
+        // Skip . and .. as VFS handles them
+        if ((de.name[0] == '.' && de.name[1] == '\0') ||
+            (de.name[0] == '.' && de.name[1] == '.' && de.name[2] == '\0')) {
             continue;
         }
         
+        // Allocate memory for name (freed by vfs_release_dentry)
+        size_t namelen = strnlen(de.name, DIRSIZ);
+        name = strndup(de.name, namelen);
+        if (name == NULL) return -ENOMEM;
+        
+        vfs_release_dentry(ret_dentry);
         ret_dentry->ino = de.inum;
-        ret_dentry->sb = dir->sb;
-        ret_dentry->name = de.name;
-        ret_dentry->name_len = strnlen(de.name, DIRSIZ);
-        iter->cookies = off + sizeof(de);
-        iter->index++;
+        ret_dentry->name = name;
+        ret_dentry->name_len = namelen;
+        ret_dentry->cookies = off + sizeof(de);  // Next offset for continuation
         return 0;
     }
     
-    // End of directory
-    iter->cookies = VFS_DENTRY_COOKIE_END;
-    return -ENOENT;
+    // End of directory - return 0 with name=NULL to signal end
+    vfs_release_dentry(ret_dentry);
+    ret_dentry->name = NULL;
+    ret_dentry->name_len = 0;
+    ret_dentry->cookies = VFS_DENTRY_COOKIE_END;
+    return 0;
 }
 
 /******************************************************************************
