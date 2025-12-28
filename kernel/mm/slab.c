@@ -249,10 +249,10 @@ STATIC_INLINE slab_t *__slab_pop_partial(slab_cache_t *cache) {
     cache->slab_partial--;
     slab = list_node_pop_back(&cache->partial_list, slab_t, list_entry);
     if (slab == NULL) {
-        panic("__slab_pop_free(): failed to pop half-full SLAB");
+        panic("__slab_pop_partial(): failed to pop half-full SLAB");
     }
     if (__SLAB_EMPTY(slab) || __SLAB_FULL(slab)) {
-        panic("__slab_pop_free(): get an empty or full SLAB when trying to get an half-full one");
+        panic("__slab_pop_partial(): get an empty or full SLAB when trying to get an half-full one");
     }
     slab->state = SLAB_STATE_DEQUEUED;
     return slab;
@@ -320,7 +320,7 @@ STATIC_INLINE int __slab_obj2idx(slab_t *slab, void *ptr) {
         // parameters.
         return -1;
     }
-    page_base = __SLAB_PAGE_BASE(slab) - slab->cache->offset;
+    page_base = __SLAB_PAGE_BASE(slab) + slab->cache->offset;
     if (ptr < page_base) {
         // object not in the range of the SLAB
         return -1;
@@ -489,7 +489,7 @@ STATIC_INLINE int __slab_cache_shrink_unlocked(slab_cache_t *cache, int nums, li
     if (cache == NULL || tmp_list == NULL) {
         return -1;
     }
-    if (nums == 0 || nums >= cache->slab_free) {
+    if (nums == 0 || nums > cache->slab_free) {
         slab_free_after = 0;
     } else {
         slab_free_after = cache->slab_free - nums;
@@ -592,11 +592,12 @@ retry:
         goto retry;
     }
     // Find an empty or half-full SLAB
+    int was_empty = __SLAB_EMPTY(slab);
     obj = __slab_obj_get(slab);
     assert(obj != NULL , "slab_alloc(): Failed to get an object from a SLAB");
     cache->obj_active++;
-    if (__SLAB_FULL(slab) || slab->in_use == 1) {
-        // SLAB is now full, move it to the full list
+    if (__SLAB_FULL(slab) || was_empty) {
+        // SLAB is now full OR transitioned from FREE to PARTIAL, move to appropriate list
         __slab_dequeue(cache, slab);
         __slab_enqueue(cache, slab);
     }
@@ -612,11 +613,11 @@ void slab_free(void *obj) {
     slab_t *slab;
     slab_cache_t *cache;
     int tmp;
-    slab = __find_obj_slab(obj);
     if (obj == NULL) {
         printf("slab_free(): obj is NULL\n");
         return;
     }
+    slab = __find_obj_slab(obj);
     if (slab == NULL) {
         printf("slab_free(): slab is NULL for obj=%p\n", obj);
         return;
@@ -628,7 +629,8 @@ void slab_free(void *obj) {
     __slab_cache_lock(cache);
     __slab_obj_put(slab, obj);
     cache->obj_active--;
-    if (__SLAB_EMPTY(slab)) {
+    if (__SLAB_EMPTY(slab) || slab->in_use == (cache->slab_obj_num - 1)) {
+        // Move slab when it becomes empty OR when it transitions from FULL to PARTIAL
         __slab_dequeue(cache, slab);
         __slab_enqueue(cache, slab);
     }
@@ -636,7 +638,7 @@ void slab_free(void *obj) {
     if(tmp >= cache->limits) {
         list_node_t tmp_list;
         list_entry_init(&tmp_list);
-        tmp = tmp / (cache->slab_obj_num * 2);
+        tmp = tmp / ((uint64)cache->slab_obj_num * 2);
         int shrink_ret = __slab_cache_shrink_unlocked(cache, tmp, &tmp_list);
         assert(shrink_ret >= 0, "slab_free(): shrink returned negative");
         __slab_cache_unlock(cache);

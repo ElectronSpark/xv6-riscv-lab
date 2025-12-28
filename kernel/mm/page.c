@@ -15,7 +15,6 @@
 
 
 STATIC buddy_pool_t __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
-STATIC struct spinlock __buddy_pool_spinlock;
 
 // Every physical pages 
 // TODO: The number of managed pages are fix right now.
@@ -57,14 +56,41 @@ STATIC_INLINE void __page_sanitizer_check(const char *op, page_t *page, uint64 o
 #endif
 
 
-// acquire the spinlock of a buddy pool
-STATIC_INLINE void __buddy_pool_lock(void) {
-    spin_acquire(&__buddy_pool_spinlock);
+// acquire the spinlock of a specific buddy pool
+STATIC_INLINE void __buddy_pool_lock(uint64 order) {
+    if (order > PAGE_BUDDY_MAX_ORDER) {
+        panic("__buddy_pool_lock: invalid order");
+    }
+    spin_acquire(&__buddy_pools[order].lock);
 }
 
-// release the spinlock of a buddy pool
-STATIC_INLINE void __buddy_pool_unlock(void) {
-    spin_release(&__buddy_pool_spinlock);
+// release the spinlock of a specific buddy pool
+STATIC_INLINE void __buddy_pool_unlock(uint64 order) {
+    if (order > PAGE_BUDDY_MAX_ORDER) {
+        panic("__buddy_pool_unlock: invalid order");
+    }
+    spin_release(&__buddy_pools[order].lock);
+}
+
+// acquire spinlocks for a range of buddy pools (from low to high order)
+// This maintains lock ordering to prevent deadlock
+STATIC_INLINE void __buddy_pool_lock_range(uint64 order_start, uint64 order_end) {
+    if (order_start > order_end || order_end > PAGE_BUDDY_MAX_ORDER) {
+        panic("__buddy_pool_lock_range: invalid order range");
+    }
+    for (uint64 i = order_start; i <= order_end; i++) {
+        spin_acquire(&__buddy_pools[i].lock);
+    }
+}
+
+// release spinlocks for a range of buddy pools (in reverse order)
+STATIC_INLINE void __buddy_pool_unlock_range(uint64 order_start, uint64 order_end) {
+    if (order_start > order_end || order_end > PAGE_BUDDY_MAX_ORDER) {
+        panic("__buddy_pool_unlock_range: invalid order range");
+    }
+    for (int64 i = order_end; i >= (int64)order_start; i--) {
+        spin_release(&__buddy_pools[i].lock);
+    }
 }
 
 // get the total number of pages managed
@@ -134,10 +160,15 @@ STATIC_INLINE void __page_init( page_t *page, uint64 physical, int ref_count,
 // initialize a buddy pool
 // no validity check here
 STATIC_INLINE void __buddy_pool_init() {
-    spin_init(&__buddy_pool_spinlock, "buddy_system_pool");
+    static char *lock_names[PAGE_BUDDY_MAX_ORDER + 1] = {
+        "buddy_pool_0", "buddy_pool_1", "buddy_pool_2", "buddy_pool_3",
+        "buddy_pool_4", "buddy_pool_5", "buddy_pool_6", "buddy_pool_7",
+        "buddy_pool_8", "buddy_pool_9", "buddy_pool_10"
+    };
     for (int i = 0; i < PAGE_BUDDY_MAX_ORDER + 1; i++) {
         __buddy_pools[i].count = 0;
         list_entry_init(&__buddy_pools[i].lru_head);
+        spin_init(&__buddy_pools[i].lock, lock_names[i]);
     }
 }
 
@@ -179,6 +210,7 @@ STATIC_INLINE void __page_as_buddy( page_t *page, page_t *buddy_head,
     __page_init(page, page->physical_address, 0, PAGE_TYPE_BUDDY);
     page->buddy.buddy_head = buddy_head;
     page->buddy.order = order;
+    page->buddy.state = BUDDY_STATE_FREE;
     list_entry_init(&page->buddy.lru_entry);
 }
 
@@ -269,6 +301,10 @@ STATIC_INLINE page_t *__get_buddy_page(page_t *page) {
         // holding by someone else right now.
         return NULL;
     }
+    if (buddy_head->buddy.state != BUDDY_STATE_FREE) {
+        // The buddy is in the middle of being merged or is otherwise unavailable
+        return NULL;
+    }
     return buddy_head;
 }
 
@@ -332,23 +368,31 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
     page_t *buddy = NULL;
     uint64 tmp_order = order;
     uint64 page_count;
+
     if (!__page_flags_validity(flags)) {
         return NULL;
     }
     if (order > PAGE_BUDDY_MAX_ORDER) {
         return NULL;
     }
+
+    // Lock the requested order first
+    __buddy_pool_lock(order);
     pool = &__buddy_pools[order];
-    // to prevent the buddy page from being allocated before we locked
-    __buddy_pool_lock();
-    
     page = __buddy_pop_page(pool);
-    // found available buddy pages, 
+
+    // found available buddy pages at the requested order
     if (page != NULL) {
         goto found;
     }
 
-    // if don't find, try to get a bigger buddy page and split it.
+    // Need to search higher orders - lock them all to prevent races
+    // We already hold lock for 'order', now acquire locks for order+1 to MAX
+    for (tmp_order = order + 1; tmp_order <= PAGE_BUDDY_MAX_ORDER; tmp_order++) {
+        __buddy_pool_lock(tmp_order);
+    }
+
+    // Try to find a bigger buddy page to split
     for (tmp_order = order + 1; tmp_order <= PAGE_BUDDY_MAX_ORDER; tmp_order++) {
         pool = &__buddy_pools[tmp_order];
         page = __buddy_pop_page(pool);
@@ -361,16 +405,19 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
     // if still not found available buddy pages after the for loop, then
     // there's no buddy page that meets the requirement.
     if (page == NULL) {
-        __buddy_pool_unlock();
+        // Release all locks we acquired
+        for (uint64 i = order; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+            __buddy_pool_unlock(i);
+        }
         return NULL;
     }
 
-    // if found one, split it and return the header page from one of the 
+    // if found one, split it and return the header page from one of the
     // splitted groups.
     do {
         buddy = __buddy_split(page);
         if (buddy == NULL) {
-            // There's no way the splitting operation here would fail. If it 
+            // There's no way the splitting operation here would fail. If it
             // happens, then something wrong happened.
             panic("__buddy_get(): failed splitting buddy pages");
         }
@@ -382,13 +429,18 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
         __buddy_push_page(pool, buddy);
     } while (tmp_order > order);
 
+    // Release locks for orders we no longer need (order+1 to MAX)
+    for (uint64 i = order + 1; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+        __buddy_pool_unlock(i);
+    }
+
 found:
     page_count = 1UL << order;
-    for (int i = 0; i < page_count; i++) {
-        page->flags = 0;
+    for (uint64 i = 0; i < page_count; i++) {
+        page[i].flags = 0;
         __page_init(&page[i], page[i].physical_address, 1, flags);
     }
-    __buddy_pool_unlock();
+    __buddy_pool_unlock(order);
     return page;
 }
 
@@ -404,34 +456,67 @@ STATIC int __buddy_put(page_t *page) {
         return -1;
     }
 
-    __buddy_pool_lock();
+    // Initialize page as buddy and mark as merging
     __page_as_buddy(page, page, 0);
+    page_lock_acquire(page);
+    page->buddy.state = BUDDY_STATE_MERGING;
+    page_lock_release(page);
 
     for (tmp_order = 0; tmp_order <= PAGE_BUDDY_MAX_ORDER; tmp_order++) {
-        // to prevent the buddy page from being allocated before we locked
-        // the buddy pool.
         pool = &__buddy_pools[tmp_order];
+
+        // Lock pool to search for buddy
+        __buddy_pool_lock(tmp_order);
+
         // try to find the buddy page
         buddy = __get_buddy_page(page);
         if (buddy != NULL) {
-            // if buddy was found, pop the buddy for merge
+            // if buddy was found, detach it from pool first
             __buddy_detach_page(pool, buddy);
-        } 
-        if (buddy == NULL) {
-            // if no buddy was found, put it back to the pool and break the loop
+            __buddy_pool_unlock(tmp_order);
+
+            // Now change buddy state (it's no longer in pool, so safe)
+            page_lock_acquire(buddy);
+            buddy->buddy.state = BUDDY_STATE_MERGING;
+            page_lock_release(buddy);
+        } else {
+            // No buddy found, this is where the page will stay
+            // Change state to FREE before adding to pool
+            page_lock_acquire(page);
+            page->buddy.state = BUDDY_STATE_FREE;
+            page_lock_release(page);
+
             __page_order_change_commit(page);
             __buddy_push_page(pool, page);
+            __buddy_pool_unlock(tmp_order);
             break;
-        } else {
-            // otherwise, merge them, then continue the for loop to find the next
-            // buddy page group
-            page = __buddy_merge(page, buddy);
-            if (page == NULL) {
-                panic("__buddy_put(): Get NULL after merging pages");
-            }
         }
+
+        if (tmp_order == PAGE_BUDDY_MAX_ORDER) {
+            // Reached max order with a buddy, add merged page to pool
+            __buddy_pool_lock(tmp_order);
+            page_lock_acquire(page);
+            page->buddy.state = BUDDY_STATE_FREE;
+            page_lock_release(page);
+
+            __page_order_change_commit(page);
+            __buddy_push_page(pool, page);
+            __buddy_pool_unlock(tmp_order);
+            break;
+        }
+
+        // Merge the two buddies
+        page = __buddy_merge(page, buddy);
+        if (page == NULL) {
+            panic("__buddy_put(): Get NULL after merging pages");
+        }
+
+        // Mark the merged page as MERGING for next iteration
+        // Lock only the head page (the other half is unreachable)
+        page_lock_acquire(page);
+        page->buddy.state = BUDDY_STATE_MERGING;
+        page_lock_release(page);
     }
-    __buddy_pool_unlock();
 
     return 0;
 }
@@ -506,6 +591,10 @@ page_t *__page_alloc(uint64 order, uint64 flags) {
 void __page_free(page_t *page, uint64 order) {
     __page_sanitizer_check("page_free", page, order, 0);
     uint64 count = 1UL << order;
+    buddy_pool_t *pool = NULL;
+    page_t *buddy = NULL;
+    uint64 tmp_order = order;
+
     if (page == NULL) {
         return;
     }
@@ -515,10 +604,71 @@ void __page_free(page_t *page, uint64 order) {
     if (page->physical_address & PAGE_BUDDY_OFFSET_MASK(order)) {
         panic("free pages not aligned to order");
     }
-    for (int i = 0; i < count; i++) {
-        if (__buddy_put(&page[i]) != 0) {
-            panic("failed to free page(s)");
+
+    // Check that all pages in the block are freeable
+    for (uint64 i = 0; i < count; i++) {
+        if (!__page_is_freeable(&page[i])) {
+            panic("__page_free(): trying to free non-freeable page");
         }
+    }
+
+    // Initialize the block as a buddy group and mark as merging
+    __page_as_buddy_group(page, order);
+    page_lock_acquire(page);
+    page->buddy.state = BUDDY_STATE_MERGING;
+    page_lock_release(page);
+
+    for (tmp_order = order; tmp_order <= PAGE_BUDDY_MAX_ORDER; tmp_order++) {
+        pool = &__buddy_pools[tmp_order];
+
+        // Lock pool to search for buddy
+        __buddy_pool_lock(tmp_order);
+
+        buddy = __get_buddy_page(page);
+        if (buddy != NULL) {
+            // Detach buddy from pool first
+            __buddy_detach_page(pool, buddy);
+            __buddy_pool_unlock(tmp_order);
+
+            // Change buddy state (no longer in pool, so no pool lock needed)
+            page_lock_acquire(buddy);
+            buddy->buddy.state = BUDDY_STATE_MERGING;
+            page_lock_release(buddy);
+        } else {
+            // No buddy found, add to pool
+            page_lock_acquire(page);
+            page->buddy.state = BUDDY_STATE_FREE;
+            page_lock_release(page);
+
+            __page_order_change_commit(page);
+            __buddy_push_page(pool, page);
+            __buddy_pool_unlock(tmp_order);
+            break;
+        }
+
+        if (tmp_order == PAGE_BUDDY_MAX_ORDER) {
+            // Reached max order, add to pool
+            __buddy_pool_lock(tmp_order);
+            page_lock_acquire(page);
+            page->buddy.state = BUDDY_STATE_FREE;
+            page_lock_release(page);
+
+            __page_order_change_commit(page);
+            __buddy_push_page(pool, page);
+            __buddy_pool_unlock(tmp_order);
+            break;
+        }
+
+        // Merge and continue
+        page = __buddy_merge(page, buddy);
+        if (page == NULL) {
+            panic("__page_free(): Get NULL after merging pages");
+        }
+
+        // Mark merged page as MERGING (only lock first half's head)
+        page_lock_acquire(page);
+        page->buddy.state = BUDDY_STATE_MERGING;
+        page_lock_release(page);
     }
 }
 
@@ -600,11 +750,16 @@ int page_ref_dec_unlocked(page_t *page) {
     if (page == NULL) {
         return -1;
     }
-    if (page->ref_count < 2) {
-        // unlocked decrement is only allowed when the ref count is 2 or more
+    // Use atomic decrement to prevent race conditions when multiple threads
+    // call unlocked decrement simultaneously
+    int old_count = __sync_fetch_and_sub(&page->ref_count, 1);
+    if (old_count < 2) {
+        // unlocked decrement is only allowed when the ref count was 2 or more
+        // restore the count and return error
+        __sync_fetch_and_add(&page->ref_count, 1);
         return -1;
     }
-    return __page_ref_dec_unlocked(page);
+    return old_count - 1;
 }
 
 int __page_ref_dec(page_t *page) {
@@ -693,14 +848,15 @@ void page_buddy_stat(uint64 *ret_arr, bool *empty_arr, size_t size) {
     if (ret_arr == NULL || size < PAGE_BUDDY_MAX_ORDER + 1) {
         return;
     }
-    __buddy_pool_lock();
+    // Lock all orders to get a consistent snapshot
+    __buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
     for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER && i < size; i++) {
         ret_arr[i] = __buddy_pools[i].count;
         if (empty_arr != NULL) {
             empty_arr[i] = LIST_IS_EMPTY(&__buddy_pools[i].lru_head);
         }
     }
-    __buddy_pool_unlock();
+    __buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
 }
 
 void print_buddy_system_stat(void) {
@@ -723,7 +879,8 @@ void __check_page_pointer_in_range(void *ptr) {
 // helper function to check the integrity of the buddy system
 void check_buddy_system_integrity(void) {
     uint64 total_free_pages = 0;
-    // __buddy_pool_lock();
+    // Lock all orders to check integrity consistently
+    __buddy_pool_lock_range(0, PAGE_BUDDY_MAX_ORDER);
     for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
         int count = __buddy_pools[i].count;
         bool empty = LIST_IS_EMPTY(&__buddy_pools[i].lru_head);
@@ -755,7 +912,7 @@ void check_buddy_system_integrity(void) {
         }
         assert(count == 0, "buddy pool count mismatch, expected 0, got %d", count);
     }
-    // __buddy_pool_unlock();
+    __buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
 }
 
 uint64 sys_memstat(void) {
