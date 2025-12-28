@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.10)
 
+# Prevent in-source builds
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
+    message(FATAL_ERROR "In-source builds are not allowed. Please create a 'build' directory and run 'cmake ..' from there.")
+endif()
+
 # Project name
 project(xv6-riscv LANGUAGES C ASM)
 
