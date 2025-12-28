@@ -102,6 +102,8 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
+void            procdump_bt(void);
+void            procdump_bt_pid(int pid);
 
 // swtch.S
 uint64          __swtch_context(struct context *current, struct context *target, uint64 pcb_arg);
@@ -178,6 +180,7 @@ void            virtio_disk_intr(int diskno);
 
 // backtrace.c
 void            print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end);
+void            print_proc_backtrace(struct context *ctx, uint64 kstack, int kstack_order);
 void            ksymbols_init(void);
 void            db_break(void);
 

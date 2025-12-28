@@ -970,6 +970,117 @@ procdump(void)
   }
 }
 
+// Check if a process is currently running on any CPU
+// This is needed because running processes have their context in CPU registers,
+// not in p->context
+static bool
+__proc_is_on_cpu(struct proc *p)
+{
+  for (int i = 0; i < NCPU; i++) {
+    if (cpus[i].proc == p) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// Dump backtraces of all blocked (sleeping) processes.
+// This is useful for debugging deadlocks.
+void
+procdump_bt(void)
+{
+  struct proc *p;
+  int _panic_state = panic_state();
+  int idx;
+  hlist_bucket_t *bucket;
+  hlist_entry_t *pos_entry, *tmp;
+
+  printf("\n=== Blocked Process Backtraces ===\n");
+  if (!_panic_state)
+  {
+    __proctab_lock();
+  }
+
+  hlist_foreach_entry(&proc_table.procs, idx, bucket, pos_entry, tmp) {
+    p = __proctab_hash_get_node(pos_entry);
+    proc_lock(p);
+    enum procstate pstate = __proc_get_pstate(p);
+    int pid = p->pid;
+    char name[sizeof(p->name)];
+    safestrcpy(name, p->name, sizeof(name));
+    
+    // Only backtrace blocked processes (sleeping/uninterruptible)
+    if (pstate == PSTATE_INTERRUPTIBLE || pstate == PSTATE_UNINTERRUPTIBLE) {
+      // Skip if process is currently on a CPU (context not saved)
+      if (__proc_is_on_cpu(p)) {
+        printf("\n--- Process %d [%s] %s --- (on CPU, cannot backtrace)\n", pid,
+               pstate == PSTATE_INTERRUPTIBLE ? "interruptible" : "uninterruptible",
+               name);
+      } else {
+        printf("\n--- Process %d [%s] %s ---\n", pid, 
+               pstate == PSTATE_INTERRUPTIBLE ? "interruptible" : "uninterruptible",
+               name);
+        print_proc_backtrace(&p->context, p->kstack, p->kstack_order);
+      }
+    }
+    proc_unlock(p);
+  }
+
+  printf("\n=== End Backtraces ===\n");
+
+  if (!_panic_state)
+  {
+    __proctab_unlock();
+  }
+}
+
+// Backtrace a specific process by PID
+void
+procdump_bt_pid(int pid)
+{
+  struct proc *p = NULL;
+  int _panic_state = panic_state();
+
+  if (!_panic_state)
+  {
+    __proctab_lock();
+  }
+
+  p = __proctab_get_pid_proc(pid);
+  if (p == NULL) {
+    printf("Process %d not found\n", pid);
+    if (!_panic_state) {
+      __proctab_unlock();
+    }
+    return;
+  }
+
+  proc_lock(p);
+  enum procstate pstate = __proc_get_pstate(p);
+  char name[sizeof(p->name)];
+  safestrcpy(name, p->name, sizeof(name));
+
+  printf("\n--- Process %d [%s] %s ---\n", pid, 
+         procstate_to_str(pstate), name);
+  
+  if (__proc_is_on_cpu(p)) {
+    printf("Process is currently on a CPU, context not saved\n");
+  } else if (pstate == PSTATE_RUNNING) {
+    printf("Process is currently running, cannot backtrace\n");
+  } else if (pstate == PSTATE_UNUSED || pstate == PSTATE_ZOMBIE) {
+    printf("Process is %s, no valid context\n", procstate_to_str(pstate));
+  } else {
+    print_proc_backtrace(&p->context, p->kstack, p->kstack_order);
+  }
+  
+  proc_unlock(p);
+
+  if (!_panic_state)
+  {
+    __proctab_unlock();
+  }
+}
+
 uint64 sys_dumpproc(void)
 {
   // This function is called from the dumpproc user program.

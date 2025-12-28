@@ -118,9 +118,10 @@ usertrap(void)
     if (vma != NULL && vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_READ) == 0) {
       break;
     }
-    printf("usertrap(): page fault on read 0x%lx pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
-    printf("            pgtbl=0x%lx\n", (uint64)p->vm->pagetable);
+    // printf("usertrap(): page fault on read 0x%lx pid=%d\n", r_scause(), p->pid);
+    // printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+    // printf("            pgtbl=0x%lx\n", (uint64)p->vm->pagetable);
+    assert(p->pid != 1, "init exiting");
     kill(p->pid, SIGSEGV);
     break;
   case 15:
@@ -133,17 +134,18 @@ usertrap(void)
     if (vma != NULL && vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_WRITE) == 0) {
       break;
     }
-    printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
-    printf("            pgtbl=0x%lx\n", (uint64)p->vm->pagetable);
+    // printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(), p->pid);
+    // printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+    // printf("            pgtbl=0x%lx\n", (uint64)p->vm->pagetable);
+    assert(p->pid != 1, "init exiting");
     kill(p->pid, SIGSEGV);
     break;
   default:
     if((which_dev = devintr()) != 0){
       // ok
     } else {
-      printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
-      printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+      // printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
+      // printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
       assert(p->pid != 1, "init exiting");
       kill(p->pid, SIGSEGV);
     }

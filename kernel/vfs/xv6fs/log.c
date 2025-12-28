@@ -8,6 +8,16 @@
  * A log transaction contains updates from multiple FS operations.
  * The logging system only commits when there are no FS operations active.
  * This ensures atomicity of filesystem operations.
+ *
+ * Locking order (must acquire in this order to avoid deadlock):
+ * 1. vfs_superblock rwlock (if held by caller)
+ * 2. vfs_inode mutex (if held by caller)
+ * 3. log->lock spinlock (acquired by begin_op/end_op)
+ * 4. buffer mutex (acquired by bread during commit)
+ *
+ * CRITICAL: xv6fs_begin_op may sleep waiting for log space via sleep_on_chan.
+ * Callers holding superblock wlock should be aware this can block file I/O
+ * operations that need the same log.
  */
 
 #include "types.h"

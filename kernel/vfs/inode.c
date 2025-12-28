@@ -1,3 +1,19 @@
+/*
+ * VFS inode operations
+ *
+ * Locking order (must acquire in this order to avoid deadlock):
+ * 1. mount mutex (via vfs_mount_lock)
+ * 2. vfs_superblock rwlock (via vfs_superblock_rlock/wlock)
+ * 3. vfs_inode mutex (via vfs_ilock)
+ * 4. buffer mutex (via bread/brelse)
+ * 5. log spinlock (filesystem internal, e.g., xv6fs log->lock)
+ *
+ * CRITICAL: Operations that hold superblock wlock + inode lock must NOT
+ * call filesystem operations that can sleep waiting for log space or I/O,
+ * as this can cause priority inversion with file I/O paths that only
+ * hold inode lock.
+ */
+
 #include "types.h"
 #include "string.h"
 #include "riscv.h"
@@ -155,11 +171,26 @@ retry:
 
     // If inode has no links left (or fs is detached), destroy its data before freeing
     if ((inode->n_links == 0 || !sb->attached) && inode->ops->destroy_inode != NULL) {
+        // Mark inode as being destroyed so other threads looking up this inode
+        // number will not try to use it while destroy_inode is in progress.
+        // The inode stays in the cache until destroy_inode completes.
+        inode->destroying = 1;
+        
+        // Release superblock lock before calling destroy_inode, which may sleep
+        // (e.g., xv6fs_begin_op can sleep waiting for log space).
+        // Keep the inode lock to ensure exclusive access during destruction.
+        vfs_superblock_unlock(sb);
+        
         inode->ops->destroy_inode(inode);
+        
+        // Re-acquire superblock lock to remove inode from cache
+        vfs_superblock_wlock(sb);
+        
         // After destroy, the inode's on-disk data is freed.
         // Mark it invalid and not dirty so we don't try to sync it.
         inode->valid = 0;
         inode->dirty = 0;
+        inode->destroying = 0;
     }
 
     ret = vfs_remove_inode(inode->sb, inode);

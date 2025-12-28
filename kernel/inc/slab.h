@@ -25,5 +25,6 @@ int slab_cache_destroy(slab_cache_t *cache);
 int slab_cache_shrink(slab_cache_t *cache, int nums);
 void *slab_alloc(slab_cache_t *cache);
 void slab_free(void *obj);
+void slab_free_noshrink(void *obj);
 
 #endif          /* __KERNEL_SLAB_H */

@@ -39,10 +39,30 @@ static vma_t *__vma_alloc(vm_t *vm)
   return vma;
 }
 
+// Magic value to detect double-free
+#define VMA_FREED_MAGIC 0xDEAD0BADDEAD0BADULL
+
 static void __vma_free(vma_t *vma)
 {
   if (vma) {
-    slab_free((void*)vma);
+    // Check for double-free using magic value
+    if (vma->start == VMA_FREED_MAGIC && vma->end == VMA_FREED_MAGIC) {
+      printf("__vma_free: DOUBLE FREE detected for vma=%p\n", vma);
+      return; // Don't free again
+    }
+    // Sanity check: make sure this VMA was allocated from our slab
+    if (vma->vm == NULL) {
+      printf("__vma_free: vma->vm is NULL for vma=%p (possible double-free or corruption)\n", vma);
+      return; // Don't free a potentially already-freed VMA
+    }
+    // Poison the VMA to detect double-free and use-after-free
+    vma->vm = NULL;
+    vma->start = VMA_FREED_MAGIC;
+    vma->end = VMA_FREED_MAGIC;
+    // Use slab_free_noshrink to prevent slab shrinking from freeing pages
+    // that contain VMAs belonging to other processes that haven't exited yet.
+    // This is critical because VMAs from different VMs share slab pages.
+    slab_free_noshrink((void*)vma);
   }
 }
 
@@ -698,17 +718,40 @@ static void __vm_unmap_trapframe(vm_t *vm)
   uvmunmap(vm->pagetable, TRAPFRAME, 1, 0);
 }
 
+// Magic for detecting double-destroy of VM
+#define VM_DESTROYED_MAGIC ((pagetable_t)0xDEAD0BADULL)
+
 void vm_destroy(vm_t *vm)
 {
   if (vm == NULL) {
     return; // Nothing to destroy
   }
+  
+  // Check for double-destroy
+  if (vm->pagetable == VM_DESTROYED_MAGIC) {
+    printf("vm_destroy: DOUBLE DESTROY detected for vm=%p\n", vm);
+    return;
+  }
+  
   vm->valid = false; // Mark the VM as invalid
+  
+  // Free all VMAs
   vma_t *vma, *tmp;
   list_foreach_node_safe(&vm->vm_list, vma, tmp, list_entry) {
+    // Sanity check: verify the VMA is valid before freeing
+    if (vma->vm != vm) {
+      printf("vm_destroy: vma->vm mismatch! vma=%p vma->vm=%p expected=%p\n",
+             vma, vma->vm, vm);
+      continue;
+    }
+    if (vma->start == VMA_FREED_MAGIC || vma->end == VMA_FREED_MAGIC) {
+      printf("vm_destroy: vma already freed! vma=%p\n", vma);
+      continue;
+    }
     __vma_set_free(vma);
     __vma_free(vma);
   }
+  
   list_entry_init(&vm->vm_list);
   list_entry_init(&vm->vm_free_list);
   rb_root_init(&vm->vm_tree, &__vm_tree_opts);
@@ -717,9 +760,11 @@ void vm_destroy(vm_t *vm)
   }
   if (vm->pagetable != NULL) {
     uvmfree(vm->pagetable, 0); // Free the pagetable
-    vm->pagetable = NULL; // Clear the pagetable pointer
   }
-  slab_free((void*)vm); // Free the VM structure
+  // Mark as destroyed before freeing to detect double-destroy
+  vm->pagetable = VM_DESTROYED_MAGIC;
+  // Use noshrink to prevent slab shrinking from affecting other VM structures
+  slab_free_noshrink((void*)vm);
 }
 
 // Duplicate the VM structure from src to dst.
@@ -752,7 +797,8 @@ vm_t *vm_dup(vm_t *src, uint64 trapframe)
       dst->heap_size = src->heap_size; // Copy the heap size
     }
     if (vma->flags != VM_FLAG_NONE && __vma_dup(new_vma, vma) != 0) {
-      __vma_free(new_vma);
+      // Don't call __vma_free here - new_vma is still in dst's lists,
+      // vm_destroy will properly clean up all VMAs
       vm_destroy(dst);
       return NULL; // Duplication failed
     }
@@ -829,7 +875,7 @@ vm_t *vm_init(uint64 trapframe) {
   vma->end = UVMTOP; // End of user virtual memory
   // Add the initial VMA for the process.
   rb_insert_color(&vm->vm_tree, &vma->rb_entry);
-  list_node_push(&vm->vm_free_list, vma, list_entry);
+  list_node_push(&vm->vm_free_list, vma, free_list_entry);
   list_node_push(&vm->vm_list, vma, list_entry);
   vm->valid = true; // Mark the VM as valid
 
@@ -967,7 +1013,7 @@ vma_t *va_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags)
   if (va == 0) {
     vma_t *tmp = NULL;
     // If va is 0, then find the last free area with enough size.
-    list_foreach_node_inv_safe(&vm->vm_free_list, free_area, tmp, list_entry) {
+    list_foreach_node_inv_safe(&vm->vm_free_list, free_area, tmp, free_list_entry) {
       if (VMA_SIZE(free_area) >= size) {
         break;
       }

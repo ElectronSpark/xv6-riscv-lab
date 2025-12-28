@@ -1,3 +1,18 @@
+/*
+ * VFS file operations
+ *
+ * Locking order (must acquire in this order to avoid deadlock):
+ * 1. vfs_superblock rwlock (via vfs_superblock_rlock/wlock) - for metadata ops
+ * 2. vfs_inode mutex (via vfs_ilock) - for inode access
+ * 3. vfs_file mutex (via __vfs_file_lock) - for file descriptor state
+ * 4. buffer mutex (via bread/brelse) - for block cache
+ * 5. log spinlock (xv6fs internal) - for transaction management
+ *
+ * IMPORTANT: File read/write operations acquire inode lock WITHOUT superblock
+ * lock, since they don't modify filesystem metadata. This is safe as long as
+ * operations that DO hold superblock lock don't block waiting for file I/O.
+ */
+
 #include "types.h"
 #include "string.h"
 #include "riscv.h"
@@ -213,6 +228,12 @@ void vfs_fileclose(struct vfs_file *file) {
         
         struct vfs_inode *inode = vfs_inode_deref(&file->inode);
         int ret = 0;
+        
+        // Handle pipe cleanup for pipes without inodes (created via pipe() syscall)
+        // Must be done before the inode check since anonymous pipes have no inode
+        if (file->pipe != NULL && inode == NULL) {
+            pipeclose(file->pipe, (file->f_flags & O_ACCMODE) != O_RDONLY);
+        }
         
         // Handle special file cleanup
         if (inode != NULL) {

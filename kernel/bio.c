@@ -12,6 +12,15 @@
 // * Do not use the buffer after calling brelse.
 // * Only one process at a time can use a buffer,
 //     so do not keep them longer than necessary.
+//
+// Locking order:
+// 1. bcache.lock (spinlock) - protects LRU list and hash table
+// 2. buf->lock (mutex) - protects individual buffer contents
+// 3. disk I/O completion (via wait_for_completion)
+//
+// bread() acquires buf->lock and may block waiting for disk I/O.
+// Callers should not hold other sleeping locks while holding buffer locks
+// if those locks might be needed by the disk interrupt handler path.
 
 
 #include "types.h"

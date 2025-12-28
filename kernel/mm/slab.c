@@ -320,7 +320,7 @@ STATIC_INLINE int __slab_obj2idx(slab_t *slab, void *ptr) {
         // parameters.
         return -1;
     }
-    page_base = __SLAB_PAGE_BASE(slab) - slab->cache->offset;
+    page_base = __SLAB_PAGE_BASE(slab) + slab->cache->offset;
     if (ptr < page_base) {
         // object not in the range of the SLAB
         return -1;
@@ -646,4 +646,37 @@ void slab_free(void *obj) {
         __slab_cache_unlock(cache);
         __slab_sanitizer_check("slab_free", cache, slab, obj);
     }
+}
+
+// Free an object without triggering slab shrinking.
+// Use this when freeing multiple objects in a loop where the list pointers
+// are stored in the objects themselves (e.g., vm_destroy freeing VMAs).
+// Shrinking during such a loop can free the page containing list pointers
+// we're about to follow, causing use-after-free.
+void slab_free_noshrink(void *obj) {
+    slab_t *slab;
+    slab_cache_t *cache;
+    slab = __find_obj_slab(obj);
+    if (obj == NULL) {
+        printf("slab_free_noshrink(): obj is NULL\n");
+        return;
+    }
+    if (slab == NULL) {
+        printf("slab_free_noshrink(): slab is NULL for obj=%p\n", obj);
+        return;
+    }
+    cache = slab->cache;
+    if (cache == NULL) {
+        panic("slab_free_noshrink");
+    }
+    __slab_cache_lock(cache);
+    __slab_obj_put(slab, obj);
+    cache->obj_active--;
+    if (__SLAB_EMPTY(slab)) {
+        __slab_dequeue(cache, slab);
+        __slab_enqueue(cache, slab);
+    }
+    // Skip shrinking - caller is responsible for calling slab_cache_shrink later if needed
+    __slab_cache_unlock(cache);
+    __slab_sanitizer_check("slab_free_noshrink", cache, slab, obj);
 }

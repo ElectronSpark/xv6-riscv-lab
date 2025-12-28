@@ -2,6 +2,16 @@
  * xv6fs file operations
  * 
  * Handles file read, write, seek, and stat operations for the xv6 filesystem.
+ *
+ * Locking order (must acquire in this order to avoid deadlock):
+ * 1. vfs_inode mutex (held by VFS layer before calling these ops)
+ * 2. log->lock spinlock (acquired by xv6fs_begin_op/end_op)
+ * 3. buffer mutex (acquired by bread/brelse)
+ *
+ * NOTE: File read/write do NOT hold superblock lock. They only hold inode lock.
+ * This is intentional to allow concurrent file I/O. However, this means
+ * xv6fs_begin_op can sleep while holding inode lock, waiting for log space
+ * that may be blocked by operations holding superblock wlock.
  */
 
 #include "types.h"

@@ -345,9 +345,12 @@ void sleep_on_chan(void *chan, struct spinlock *lk) {
 
     myproc()->chan = chan;
     PROC_SET_ONCHAN(myproc());
+    sleep_unlock();  // Release sleep lock before blocking
     int ret = proc_tree_wait(&__chan_queue_root, (uint64)chan, lk, NULL);
+    sleep_lock();    // Reacquire for safe chan cleanup
     PROC_CLEAR_ONCHAN(myproc());
     myproc()->chan = NULL;
+    sleep_unlock();
     // @TODO: process return value
     (void)ret;
 }

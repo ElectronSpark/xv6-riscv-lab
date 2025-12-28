@@ -216,6 +216,7 @@ struct vfs_inode {
         uint64 dirty: 1;
         uint64 mount: 1; // indicates whether this inode is a mountpoint
         uint64 orphan: 1; // inode is orphaned (n_links=0, ref>0, on orphan_list)
+        uint64 destroying: 1; // inode is being destroyed (destroy_inode in progress)
     };
     list_node_t orphan_entry; // entry in sb->orphan_list when orphaned
     struct proc *owner; // process that holds the lock

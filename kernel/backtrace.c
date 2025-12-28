@@ -202,6 +202,62 @@ print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end)
     }
 }
 
+// Backtrace a process using its saved context.
+// The process must be in a sleeping/blocked state (not running on any CPU).
+// @param context: pointer to the process's saved context (struct context)
+// @param kstack: base address of kernel stack
+// @param kstack_order: order of kernel stack size (size = 1 << (PAGE_SHIFT + order))
+void
+print_proc_backtrace(struct context *ctx, uint64 kstack, int kstack_order)
+{
+    if (ctx == NULL || kstack == 0) {
+        printf("backtrace: invalid context or stack\n");
+        return;
+    }
+    
+    // s0 is the frame pointer in RISC-V
+    uint64 fp = ctx->s0;
+    uint64 stack_size = (1UL << (PAGE_SHIFT + kstack_order));
+    uint64 stack_start = kstack;
+    uint64 stack_end = kstack + stack_size;
+    
+    printf("backtrace (ra=%p, sp=%p, fp=%p):\n", 
+           (void *)ctx->ra, (void *)ctx->sp, (void *)fp);
+    
+    // First, print the return address from context (where the process will resume)
+    char buf[64] = { 0 };
+    void *return_addr = NULL;
+    int offset = bt_search(ctx->ra, buf, sizeof(buf), &return_addr);
+    if (offset < 0) {
+        printf("  > %p (resume point)\n", (void *)ctx->ra);
+    } else {
+        printf("  > %s(%p + %d) (resume point)\n", buf, return_addr, offset);
+    }
+    
+    // Now walk the stack frames
+    uint64 last_fp = fp;
+    for (uint64 curr_fp = BT_FRAME_TOP(fp), depth = 0;
+         curr_fp != 0 && depth < BACKTRACE_MAX_DEPTH;
+         last_fp = curr_fp, curr_fp = BT_FRAME_TOP(curr_fp), depth++) {
+
+        if (curr_fp < stack_start || curr_fp >= stack_end) {
+            printf("  * frame outside stack: %p\n", (void *)curr_fp);
+            break;
+        }
+
+        uint64 return_addr_val = BT_RETURN_ADDRESS(last_fp);
+        if (return_addr_val == 0) {
+            break;
+        }
+        offset = bt_search(return_addr_val, buf, sizeof(buf), &return_addr);
+        if (offset < 0) {
+            printf("  * %p\n", (void *)return_addr_val);
+        } else {
+            printf("  * %s(%p + %d)\n", buf, return_addr, offset);
+        }
+    }
+}
+
 // set breakpoint for GDB
 void db_break(void) {
     return;

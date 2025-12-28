@@ -172,8 +172,19 @@ static void __vfs_init_superblock_structure(struct vfs_superblock *sb, struct vf
 
 static int __vfs_init_sb_rooti(struct vfs_superblock *sb) {
     __vfs_inode_init(sb->root_inode);
+retry_add:;
     struct vfs_inode *inode = vfs_add_inode(sb, sb->root_inode);
     if (IS_ERR_OR_NULL(inode)) {
+        if (PTR_ERR(inode) == -EAGAIN) {
+            // Should not happen during init, but handle gracefully
+            vfs_superblock_unlock(sb);
+            yield();
+            vfs_superblock_wlock(sb);
+            if (!sb->valid && sb->initialized) {
+                return -EINVAL;
+            }
+            goto retry_add;
+        }
         if (inode == NULL) {
             return -ENOENT; // Failed to add root inode
         }
@@ -1090,8 +1101,21 @@ struct vfs_inode *vfs_alloc_inode(struct vfs_superblock *sb) {
         return inode;
     }
     __vfs_inode_init(inode);
+retry_add:;
     struct vfs_inode *existing = vfs_add_inode(sb, inode);
     if (IS_ERR_OR_NULL(existing)) {
+        if (PTR_ERR(existing) == -EAGAIN) {
+            // An inode with the same number is being destroyed.
+            // Release sb lock to let destruction complete, then retry.
+            vfs_superblock_unlock(sb);
+            yield();  // Give the destroying thread a chance to run
+            vfs_superblock_wlock(sb);
+            if (!sb->valid) {
+                inode->ops->free_inode(inode);
+                return ERR_PTR(-EINVAL);
+            }
+            goto retry_add;
+        }
         inode->ops->free_inode(inode);
         if (existing == NULL) {
             return ERR_PTR(-ENOENT); // Failed to add inode
@@ -1124,8 +1148,21 @@ struct vfs_inode *vfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         return inode;
     }
     __vfs_inode_init(inode);
+retry_add:;
     struct vfs_inode *existing = vfs_add_inode(sb, inode);
     if (IS_ERR_OR_NULL(existing)) {
+        if (PTR_ERR(existing) == -EAGAIN) {
+            // An inode with the same number is being destroyed.
+            // Release sb lock to let destruction complete, then retry.
+            vfs_superblock_unlock(sb);
+            yield();  // Give the destroying thread a chance to run
+            vfs_superblock_wlock(sb);
+            if (!sb->valid) {
+                inode->ops->free_inode(inode);
+                return ERR_PTR(-EINVAL);
+            }
+            goto retry_add;
+        }
         inode->ops->free_inode(inode);
         if (existing == NULL) {
             return ERR_PTR(-ENOENT); // Failed to add inode
@@ -1409,13 +1446,12 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
         return ERR_PTR(-ENOENT); // Inode not found
     }
     vfs_ilock(inode);
-    if (!inode->valid) {
+    if (!inode->valid || inode->destroying) {
         // Inode should be valid when first gotten from the cache,
-        // but it may have been invalidated during the windows between
-        // getting from cache and acquiring the inode lock.
-        // In this case, the inode should have been removed from the cache already.
+        // but it may have been invalidated or is being destroyed.
+        // In this case, the inode should be treated as not found.
         vfs_iunlock(inode);
-        return ERR_PTR(-ENOENT); // Inode is not valid
+        return ERR_PTR(-ENOENT); // Inode is not valid or being destroyed
     }
     return inode;
 }
@@ -1459,8 +1495,26 @@ struct vfs_inode *vfs_add_inode(struct vfs_superblock *sb,
     }
     struct vfs_inode *existing = __vfs_inode_hash_get(sb, inode->ino);
     if (existing != NULL) {
-        // When existing inode is found, return it
+        // Check if the existing inode is being destroyed.
+        // We check the flag WITHOUT locking the inode to avoid deadlock:
+        // - vfs_iput holds inode lock, releases sb lock, calls destroy_inode
+        // - We hold sb lock, if we tried to lock inode we'd deadlock
+        // The destroying flag is set while holding sb lock + inode lock,
+        // so if it's set and we hold sb lock, the destroying thread has
+        // released sb lock and is in destroy_inode.
+        if (existing->destroying) {
+            // Inode is being destroyed. The destroying thread will remove it
+            // from cache once it re-acquires sb lock (which we currently hold).
+            // Return EAGAIN so caller can release sb lock and retry.
+            return ERR_PTR(-EAGAIN);
+        }
+        // When existing inode is found and not being destroyed, lock and return it
         vfs_ilock(existing);
+        // Double-check after locking in case it started destroying
+        if (existing->destroying || !existing->valid) {
+            vfs_iunlock(existing);
+            return ERR_PTR(-EAGAIN);
+        }
         return existing; // Inode with the same number already exists
     }
     struct vfs_inode *popped = __vfs_inode_hash_add(sb, inode);
