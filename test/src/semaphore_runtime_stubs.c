@@ -3,6 +3,8 @@
 #include "spinlock.h"
 #include "sched.h"
 
+static struct proc g_self_proc;
+
 void proc_lock(struct proc *p) {
     (void)p;
 }
@@ -21,7 +23,7 @@ struct cpu *mycpu(void) {
 }
 
 struct proc *myproc(void) {
-    return NULL;
+    return &g_self_proc;
 }
 
 void sched_lock(void) {}

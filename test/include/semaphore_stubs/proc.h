@@ -11,6 +11,7 @@ struct cpu {
 
 struct proc {
     int dummy;
+    pid_t pid;
 };
 
 enum procstate {

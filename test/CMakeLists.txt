@@ -144,6 +144,7 @@ add_executable(ut_semaphore
     ${CMAKE_SOURCE_DIR}/src/ut_semaphore_main.c
     ${CMAKE_SOURCE_DIR}/../kernel/lock/semaphore.c
     ${CMAKE_SOURCE_DIR}/src/semaphore_runtime_stubs.c
+    ${CMAKE_SOURCE_DIR}/src/panic_stubs.c
 )
 target_link_libraries(ut_semaphore PRIVATE cmocka-static)
 target_compile_options(ut_semaphore PRIVATE ${TEST_C_FLAGS})
