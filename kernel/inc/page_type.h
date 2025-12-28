@@ -11,8 +11,9 @@
 #define PAGE_BUDDY_MAX_ORDER        10
 
 // Buddy page states
-#define BUDDY_STATE_FREE            0  // Free and available for allocation
+#define BUDDY_STATE_FREE            0  // Free and available for allocation in buddy pool
 #define BUDDY_STATE_MERGING         1  // Currently being merged with its buddy
+#define BUDDY_STATE_CACHED          2  // Cached in per-CPU cache
 
 
 // for pointers to slab pools

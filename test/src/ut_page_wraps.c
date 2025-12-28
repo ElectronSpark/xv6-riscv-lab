@@ -68,6 +68,32 @@ void __wrap_spin_init(struct spinlock *lock, char *name) {
     (void)name;
 }
 
+void __wrap_spin_lock(struct spinlock *lock) {
+    if (lock == NULL) {
+        return;
+    }
+    lock->locked = 1;
+}
+
+void __wrap_spin_unlock(struct spinlock *lock) {
+    if (lock == NULL) {
+        return;
+    }
+    lock->locked = 0;
+}
+
+int __wrap_cpuid(void) {
+    return 0;  // Always return CPU 0 for tests
+}
+
+void __wrap_push_off(void) {
+    // No-op for tests
+}
+
+void __wrap_pop_off(void) {
+    // No-op for tests
+}
+
 void *__wrap_kmm_alloc(size_t size) {
     return test_malloc(size);
 }

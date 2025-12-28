@@ -1,4 +1,25 @@
-// Page allocator, managing free pages using the buddy system.
+// Physical page allocator using the buddy system algorithm.
+//
+// The buddy system manages free pages by organizing them into pools of different
+// orders (power-of-2 sizes). This enables efficient allocation and coalescing of
+// physically contiguous memory regions.
+//
+// KEY FEATURES:
+//   - Per-order fine-grained locking for concurrent access
+//   - Per-CPU hot page cache for frequently allocated orders (0-8)
+//   - Lock-free order 0 cache using interrupt disabling
+//   - Lazy buddy merging with MERGING state to prevent races
+//   - Reference counting for shared pages
+//
+// LOCKING HIERARCHY (to prevent deadlocks):
+//   1. Per-CPU cache locks (push_off/pop_off for order 0, spinlocks for 1-8)
+//   2. Buddy pool locks (always acquired in ascending order)
+//   3. Individual page locks (acquired while holding pool locks)
+//
+// BUDDY STATES:
+//   - BUDDY_STATE_FREE: Page is in buddy pool, available for allocation
+//   - BUDDY_STATE_MERGING: Page is being merged with its buddy
+//   - BUDDY_STATE_CACHED: Page is in per-CPU cache
 //
 // ORGANIZATION:
 //   1. Global Data & Configuration
@@ -9,49 +30,16 @@
 //   6. Buddy Pool Operations (List Management)
 //   7. Buddy Finding & State Management
 //   8. Buddy Splitting & Merging
-//   9. Buddy Allocation (Core Algorithm)
-//  10. Buddy Deallocation (Single Page)
-//  11. Buddy System Initialization
-//  12. Reference Counting (Internal)
-//  13. Public API - Allocation & Deallocation
-//  14. Public API - Page Locking
-//  15. Public API - Reference Counting
-//  16. Public API - Address Translation
-//  17. Statistics & Debugging
-//
-// OPTIMIZATION TODO LIST:
-// ========================
-// [DONE] TODO-1: Remove atomic fences from list operations (lines 283, 298)
-//        Impact: ~200 cycles saved per allocation/deallocation
-//        Risk: Low - spinlock provides memory ordering
-//
-// [DONE] TODO-2: Remove excessive page locks in __buddy_put() merge path
-//        Impact: 95% reduction in lock operations (40-60 → 2)
-//        Risk: Low - pages detached from pool have exclusive access
-//
-// [DONE] TODO-3: Remove excessive page locks in __page_free() merge path
-//        Impact: Same as TODO-2 for multi-page frees
-//        Risk: Low - same reasoning as TODO-2
-//
-// [DONE] TODO-4: Implement lock-as-you-go in __buddy_get()
-//        Impact: Never hold multiple order locks simultaneously
-//        Implementation: Lock only when taking out or putting in buddy pages
-//        Risk: Low - follows the core design principle
-//
-// [SKIP] TODO-5: Skip redundant tail page initialization in __buddy_get()
-//        Status: Not applicable - need full reinitialization for user pages
-//        Reason: Pages from pool/split have buddy metadata that must be cleared
-//        Must call __page_init() which does memset() + proper field setup
-//
-// [DONE] TODO-6: Unify merge logic between __buddy_put() and __page_free()
-//        Impact: Code maintainability, single optimization point
-//        Implementation: Extracted common __buddy_merge_and_insert() function
-//        Risk: Low - refactoring only
-//
-// [DONE] TODO-7: Remove redundant buddy state check in __get_buddy_page()
-//        Impact: 5-10% speedup in buddy finding
-//        Implementation: Removed state check - pages in pool are always BUDDY_STATE_FREE
-//        Risk: Low - state guaranteed by pool membership
+//   9. Per-CPU Page Cache
+//  10. Buddy Allocation (Core Algorithm)
+//  11. Buddy Deallocation
+//  12. Buddy System Initialization
+//  13. Reference Counting (Internal)
+//  14. Public API - Allocation & Deallocation
+//  15. Public API - Page Locking
+//  16. Public API - Reference Counting
+//  17. Public API - Address Translation
+//  18. Statistics & Debugging
 
 #include "types.h"
 #include "string.h"
@@ -72,6 +60,36 @@
 // ============================================================================
 
 STATIC buddy_pool_t __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
+
+// Per-CPU hot page cache for small allocations (orders 0 to SLAB_DEFAULT_ORDER)
+// This reduces lock contention for the most frequent allocations
+#define PCPU_CACHE_MAX_ORDER    SLAB_DEFAULT_ORDER
+#define PCPU_CACHE_SIZE         4  // pages per order per CPU (small to save memory)
+#define PCPU_HOT_PAGE_CACHE_SIZE    64  // hot pages(order 0) per CPU
+
+// Atomic operations for per-CPU cache counters with overflow/underflow checks
+#define PCPU_CACHE_COUNT_INC(cache) \
+    do { \
+        uint32 __old_count = __atomic_fetch_add(&(cache)->count, 1, __ATOMIC_RELEASE); \
+        assert(__old_count < (uint32)-1, "PCPU cache counter overflow"); \
+    } while (0)
+
+#define PCPU_CACHE_COUNT_DEC(cache) \
+    do { \
+        uint32 __old_count = __atomic_fetch_sub(&(cache)->count, 1, __ATOMIC_RELEASE); \
+        assert(__old_count > 0, "PCPU cache counter underflow"); \
+    } while (0)
+
+#define PCPU_CACHE_COUNT_LOAD(cache) \
+    __atomic_load_n(&(cache)->count, __ATOMIC_ACQUIRE)
+
+typedef struct {
+    list_node_t lru_head;       // List of cached pages
+    _Atomic uint32 count;       // Number of pages in cache (atomic for thread-safety)
+    spinlock_t lock;            // Lock for orders > 0 (order 0 is lock-free via push_off)
+} pcpu_cache_t;
+
+STATIC pcpu_cache_t __pcpu_caches[NCPU][PCPU_CACHE_MAX_ORDER + 1];
 
 // Every physical pages
 // TODO: The number of managed pages are fix right now.
@@ -231,7 +249,7 @@ STATIC_INLINE void __page_init(page_t *page, uint64 physical, int ref_count,
     spin_init(&page->lock, "page_t");
 }
 
-// Initialize buddy pools
+// Initialize buddy pools and per-CPU caches
 STATIC_INLINE void __buddy_pool_init() {
     static char *lock_names[PAGE_BUDDY_MAX_ORDER + 1] = {
         "buddy_pool_0", "buddy_pool_1", "buddy_pool_2", "buddy_pool_3",
@@ -242,6 +260,16 @@ STATIC_INLINE void __buddy_pool_init() {
         __buddy_pools[i].count = 0;
         list_entry_init(&__buddy_pools[i].lru_head);
         spin_init(&__buddy_pools[i].lock, lock_names[i]);
+    }
+
+    // Initialize per-CPU caches for orders 0 to SLAB_DEFAULT_ORDER
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        for (int order = 0; order <= PCPU_CACHE_MAX_ORDER; order++) {
+            pcpu_cache_t *cache = &__pcpu_caches[cpu][order];
+            list_entry_init(&cache->lru_head);
+            cache->count = 0;
+            spin_init(&cache->lock, "pcpu_cache");
+        }
     }
 }
 
@@ -384,7 +412,11 @@ STATIC_INLINE page_t *__get_buddy_page(page_t *page) {
         // holding by someone else right now.
         return NULL;
     }
-    // State check is redundant: pages in pool are guaranteed to be BUDDY_STATE_FREE
+    // Check buddy state: must be FREE (not CACHED or MERGING)
+    // Pages in per-CPU cache have BUDDY_STATE_CACHED
+    if (buddy_head->buddy.state != BUDDY_STATE_FREE) {
+        return NULL;
+    }
     return buddy_head;
 }
 
@@ -449,7 +481,102 @@ STATIC_INLINE page_t *__buddy_merge(page_t *page1, page_t *page2) {
 
 
 // ============================================================================
-// SECTION 9: Buddy Allocation (Core Algorithm)
+// SECTION 9: Per-CPU Page Cache
+// ============================================================================
+
+// Try to get a page from per-CPU cache
+// Returns NULL if cache is empty
+STATIC page_t *__pcpu_cache_get(uint64 order, uint64 flags) {
+    if (order > PCPU_CACHE_MAX_ORDER) {
+        return NULL;
+    }
+
+    int cpu_id = cpuid();
+    pcpu_cache_t *cache = &__pcpu_caches[cpu_id][order];
+    page_t *page = NULL;
+
+    if (order == 0) {
+        // Lock-free for order 0 using interrupt disabling
+        push_off();
+        if (!LIST_IS_EMPTY(&cache->lru_head)) {
+            page = list_node_pop_back(&cache->lru_head, page_t, buddy.lru_entry);
+            if (page != NULL) {
+                PCPU_CACHE_COUNT_DEC(cache);
+            }
+        }
+        pop_off();
+    } else {
+        // Use spinlock for orders > 0 (for future cross-CPU stealing)
+        spin_acquire(&cache->lock);
+        if (!LIST_IS_EMPTY(&cache->lru_head)) {
+            page = list_node_pop_back(&cache->lru_head, page_t, buddy.lru_entry);
+            if (page != NULL) {
+                PCPU_CACHE_COUNT_DEC(cache);
+            }
+        }
+        spin_release(&cache->lock);
+    }
+
+    if (page != NULL) {
+        // Initialize the cached page for user allocation
+        // Physical addresses are already set correctly from when pages were cached
+        uint64 page_count = 1UL << order;
+        for (uint64 i = 0; i < page_count; i++) {
+            uint64 phys_addr = page[i].physical_address;  // Save physical address
+            page[i].flags = 0;
+            __page_init(&page[i], phys_addr, 1, flags);
+        }
+    }
+
+    return page;
+}
+
+// Try to put a page into per-CPU cache
+// Returns 0 on success, -1 if cache is full
+STATIC int __pcpu_cache_put(page_t *page, uint64 order) {
+    if (order > PCPU_CACHE_MAX_ORDER) {
+        return -1;
+    }
+
+    int cpu_id = cpuid();
+    pcpu_cache_t *cache = &__pcpu_caches[cpu_id][order];
+    uint32 cache_limit = (order == 0) ? PCPU_HOT_PAGE_CACHE_SIZE : PCPU_CACHE_SIZE;
+    int ret = -1;
+
+    if (order == 0) {
+        // Lock-free for order 0 using interrupt disabling
+        push_off();
+        uint32 current_count = PCPU_CACHE_COUNT_LOAD(cache);
+        if (current_count < cache_limit) {
+            // Initialize page as buddy before caching
+            __page_as_buddy_group(page, order);
+            page->buddy.state = BUDDY_STATE_CACHED;
+            list_node_push_back(&cache->lru_head, page, buddy.lru_entry);
+            PCPU_CACHE_COUNT_INC(cache);
+            ret = 0;
+        }
+        pop_off();
+    } else {
+        // Use spinlock for orders > 0 (for future cross-CPU stealing)
+        spin_acquire(&cache->lock);
+        uint32 current_count = PCPU_CACHE_COUNT_LOAD(cache);
+        if (current_count < cache_limit) {
+            // Initialize page as buddy before caching
+            __page_as_buddy_group(page, order);
+            page->buddy.state = BUDDY_STATE_CACHED;
+            list_node_push_back(&cache->lru_head, page, buddy.lru_entry);
+            PCPU_CACHE_COUNT_INC(cache);
+            ret = 0;
+        }
+        spin_release(&cache->lock);
+    }
+
+    return ret;
+}
+
+
+// ============================================================================
+// SECTION 10: Buddy Allocation (Core Algorithm)
 // ============================================================================
 
 STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
@@ -465,6 +592,14 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
     }
     if (order > PAGE_BUDDY_MAX_ORDER) {
         return NULL;
+    }
+
+    // Try per-CPU cache first for small orders
+    if (order <= PCPU_CACHE_MAX_ORDER) {
+        page = __pcpu_cache_get(order, flags);
+        if (page != NULL) {
+            return page;  // Cache hit - page already initialized
+        }
     }
 
     // Lock the requested order only when taking out
@@ -592,6 +727,12 @@ STATIC int __buddy_put(page_t *page) {
         return -1;
     }
 
+    // Try per-CPU cache first for order 0 pages
+    if (__pcpu_cache_put(page, 0) == 0) {
+        return 0;  // Successfully cached
+    }
+
+    // Cache full or order > PCPU_CACHE_MAX_ORDER, go to buddy system
     // Initialize page as buddy and mark as merging
     __page_as_buddy(page, page, 0);
     page_lock_acquire(page);
@@ -703,6 +844,14 @@ void __page_free(page_t *page, uint64 order) {
         }
     }
 
+    // Try per-CPU cache first for cacheable orders
+    if (order <= PCPU_CACHE_MAX_ORDER) {
+        if (__pcpu_cache_put(page, order) == 0) {
+            return;  // Successfully cached
+        }
+    }
+
+    // Cache full or order > PCPU_CACHE_MAX_ORDER, go to buddy system
     // Initialize the block as a buddy group and mark as merging
     __page_as_buddy_group(page, order);
     page_lock_acquire(page);
@@ -920,16 +1069,84 @@ void page_buddy_stat(uint64 *ret_arr, bool *empty_arr, size_t size) {
     __buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
 }
 
+// Helper function to print size in human-readable format
+STATIC void __print_size(uint64 bytes) {
+    if (bytes >= (1UL << 30)) {
+        // GB
+        uint64 gb = bytes >> 30;
+        uint64 mb = (bytes & ((1UL << 30) - 1)) >> 20;
+        printf("%ld.%ldG", gb, (mb * 10) / 1024);
+    } else if (bytes >= (1UL << 20)) {
+        // MB
+        uint64 mb = bytes >> 20;
+        uint64 kb = (bytes & ((1UL << 20) - 1)) >> 10;
+        printf("%ld.%ldM", mb, (kb * 10) / 1024);
+    } else if (bytes >= (1UL << 10)) {
+        // KB
+        uint64 kb = bytes >> 10;
+        printf("%ldK", kb);
+    } else {
+        // Bytes
+        printf("%ldB", bytes);
+    }
+}
+
 void print_buddy_system_stat(void) {
     uint64 total_free_pages = 0;
+    uint64 total_cached_pages = 0;
     uint64 ret_arr[PAGE_BUDDY_MAX_ORDER + 1] = { 0 };
     bool empty_arr[PAGE_BUDDY_MAX_ORDER + 1] = { false };
+
     page_buddy_stat(ret_arr, empty_arr, PAGE_BUDDY_MAX_ORDER + 1);
+
+    printf("Buddy System Statistics:\n");
+    printf("========================\n");
+
     for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
-        printf("order(%d): %ld - %s\n", i, ret_arr[i], empty_arr[i] ? "empty" : "not empty");
-        total_free_pages += (1UL << i) * ret_arr[i];
+        uint64 order_pages = (1UL << i) * ret_arr[i];
+        uint64 order_bytes = order_pages * PAGE_SIZE;
+        total_free_pages += order_pages;
+
+        printf("order(%d): %ld blocks (", i, ret_arr[i]);
+        __print_size(order_bytes);
+        printf(")");
+
+        // Add per-CPU cache stats for cacheable orders
+        if (i <= PCPU_CACHE_MAX_ORDER) {
+            uint64 cache_total = 0;
+            for (int cpu = 0; cpu < NCPU; cpu++) {
+                // Use atomic load for lock-free read
+                cache_total += PCPU_CACHE_COUNT_LOAD(&__pcpu_caches[cpu][i]);
+            }
+
+            if (cache_total > 0) {
+                uint64 cached_pages = (1UL << i) * cache_total;
+                uint64 cached_bytes = cached_pages * PAGE_SIZE;
+                total_cached_pages += cached_pages;
+
+                printf(" + %ld cached (", cache_total);
+                __print_size(cached_bytes);
+                printf(")");
+            }
+        }
+
+        printf("\n");
     }
-    printf("total free pages: %ld\n", total_free_pages);
+
+    printf("------------------------\n");
+    printf("Total free:   %ld pages (", total_free_pages);
+    __print_size(total_free_pages * PAGE_SIZE);
+    printf(")\n");
+
+    if (total_cached_pages > 0) {
+        printf("Total cached: %ld pages (", total_cached_pages);
+        __print_size(total_cached_pages * PAGE_SIZE);
+        printf(")\n");
+    }
+
+    printf("Total avail:  %ld pages (", total_free_pages + total_cached_pages);
+    __print_size((total_free_pages + total_cached_pages) * PAGE_SIZE);
+    printf(")\n");
 }
 
 void __check_page_pointer_in_range(void *ptr) {

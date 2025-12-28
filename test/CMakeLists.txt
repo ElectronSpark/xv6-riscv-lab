@@ -93,6 +93,11 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     spin_release
     spin_init
     spin_holding
+    spin_lock
+    spin_unlock
+    cpuid
+    push_off
+    pop_off
     kmm_alloc
     kmm_free
 )
