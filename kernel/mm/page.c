@@ -1,5 +1,24 @@
-// Page allocator, managing free pages.
-// Free pages are managed by buddy system.
+// Page allocator, managing free pages using the buddy system.
+//
+// ORGANIZATION:
+//   1. Global Data & Configuration
+//   2. Debugging & Sanitization
+//   3. Locking Primitives
+//   4. Validation & Helper Functions
+//   5. Page Initialization
+//   6. Buddy Pool Operations (List Management)
+//   7. Buddy Finding & State Management
+//   8. Buddy Splitting & Merging
+//   9. Buddy Allocation (Core Algorithm)
+//  10. Buddy Deallocation (Single Page)
+//  11. Buddy System Initialization
+//  12. Reference Counting (Internal)
+//  13. Public API - Allocation & Deallocation
+//  14. Public API - Page Locking
+//  15. Public API - Reference Counting
+//  16. Public API - Address Translation
+//  17. Statistics & Debugging
+
 #include "types.h"
 #include "string.h"
 #include "param.h"
@@ -14,9 +33,13 @@
 #include "slab.h"
 
 
+// ============================================================================
+// SECTION 1: Global Data & Configuration
+// ============================================================================
+
 STATIC buddy_pool_t __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
 
-// Every physical pages 
+// Every physical pages
 // TODO: The number of managed pages are fix right now.
 STATIC page_t __pages[TOTALPAGES] = { 0 };
 // The start address and the end address of the managed memory
@@ -26,26 +49,30 @@ STATIC uint64 __managed_end = PHYSTOP;
 // buddy pool of lower order must be locked before the buddy pool of higher order
 
 
+// ============================================================================
+// SECTION 2: Debugging & Sanitization
+// ============================================================================
+
 #ifdef KERNEL_PAGE_SANITIZER
 STATIC_INLINE void __page_sanitizer_check(const char *op, page_t *page, uint64 order, uint64 flags) {
     if (page == NULL) {
         return;
     }
     assert (order <= PAGE_BUDDY_MAX_ORDER, "__page_sanitizer_check: invalid order");
-    assert (!flags || page->flags == flags, 
+    assert (!flags || page->flags == flags,
             "__page_sanitizer_check: page flags mismatch, expected 0x%lx, got 0x%lx",
             flags, page->flags);
     assert (page - __pages < TOTALPAGES, "__page_sanitizer_check: page out of bounds");
-    assert ((page->physical_address - __managed_start) >> PAGE_SHIFT == 
+    assert ((page->physical_address - __managed_start) >> PAGE_SHIFT ==
             (page - __pages), "__page_sanitizer_check: page physical address mismatch, "
-            "expected 0x%lx, got 0x%lx", 
-            __managed_start + ((page - __pages) << PAGE_SHIFT), 
+            "expected 0x%lx, got 0x%lx",
+            __managed_start + ((page - __pages) << PAGE_SHIFT),
             page->physical_address);
     for (int i = 0; i < (1 << order); i++) {
         assert (page[i].physical_address == page->physical_address + (i << PAGE_SHIFT),
                 "__page_sanitizer_check: page physical address mismatch, "
-                "expected 0x%lx, got 0x%lx", 
-                page->physical_address + (i << PAGE_SHIFT), 
+                "expected 0x%lx, got 0x%lx",
+                page->physical_address + (i << PAGE_SHIFT),
                 page[i].physical_address);
     }
     printf("%s: order %ld, flags 0x%lx, page 0x%lx\n",
@@ -56,7 +83,11 @@ STATIC_INLINE void __page_sanitizer_check(const char *op, page_t *page, uint64 o
 #endif
 
 
-// acquire the spinlock of a specific buddy pool
+// ============================================================================
+// SECTION 3: Locking Primitives
+// ============================================================================
+
+// Acquire the spinlock of a specific buddy pool
 STATIC_INLINE void __buddy_pool_lock(uint64 order) {
     if (order > PAGE_BUDDY_MAX_ORDER) {
         panic("__buddy_pool_lock: invalid order");
@@ -64,7 +95,7 @@ STATIC_INLINE void __buddy_pool_lock(uint64 order) {
     spin_acquire(&__buddy_pools[order].lock);
 }
 
-// release the spinlock of a specific buddy pool
+// Release the spinlock of a specific buddy pool
 STATIC_INLINE void __buddy_pool_unlock(uint64 order) {
     if (order > PAGE_BUDDY_MAX_ORDER) {
         panic("__buddy_pool_unlock: invalid order");
@@ -72,7 +103,7 @@ STATIC_INLINE void __buddy_pool_unlock(uint64 order) {
     spin_release(&__buddy_pools[order].lock);
 }
 
-// acquire spinlocks for a range of buddy pools (from low to high order)
+// Acquire spinlocks for a range of buddy pools (from low to high order)
 // This maintains lock ordering to prevent deadlock
 STATIC_INLINE void __buddy_pool_lock_range(uint64 order_start, uint64 order_end) {
     if (order_start > order_end || order_end > PAGE_BUDDY_MAX_ORDER) {
@@ -83,7 +114,7 @@ STATIC_INLINE void __buddy_pool_lock_range(uint64 order_start, uint64 order_end)
     }
 }
 
-// release spinlocks for a range of buddy pools (in reverse order)
+// Release spinlocks for a range of buddy pools (in reverse order)
 STATIC_INLINE void __buddy_pool_unlock_range(uint64 order_start, uint64 order_end) {
     if (order_start > order_end || order_end > PAGE_BUDDY_MAX_ORDER) {
         panic("__buddy_pool_unlock_range: invalid order range");
@@ -93,18 +124,22 @@ STATIC_INLINE void __buddy_pool_unlock_range(uint64 order_start, uint64 order_en
     }
 }
 
-// get the total number of pages managed
+
+// ============================================================================
+// SECTION 4: Validation & Helper Functions
+// ============================================================================
+
+// Get the total number of pages managed
 STATIC_INLINE uint64 __total_pages() {
     return (__managed_end - __managed_start) >> PAGE_SHIFT;
 }
 
 // To check if a physical address is within the range of the managed address
-#define ADDR_IN_MANAGED(addr)                                               \
+#define ADDR_IN_MANAGED(addr) \
     ((addr) >= __managed_start && (addr) < __managed_end)
 
-// Check if a base address of a page is valid.
-// A valid page base address should be aligned to the page size, and is in
-// the range of managed memory.
+// Check if a base address of a page is valid
+// A valid page base address should be aligned to the page size and within managed memory
 STATIC_INLINE bool __page_base_validity(uint64 physical) {
     if ((physical & PAGE_MASK) || !ADDR_IN_MANAGED(physical)) {
         return false;
@@ -112,7 +147,7 @@ STATIC_INLINE bool __page_base_validity(uint64 physical) {
     return true;
 }
 
-// check if a group of flags is valid in initialization process
+// Check if flags are valid during initialization
 STATIC_INLINE bool __page_init_flags_validity(uint64 flags) {
     if (flags & (~(PAGE_FLAG_LOCKED))) {
         return false;
@@ -120,7 +155,7 @@ STATIC_INLINE bool __page_init_flags_validity(uint64 flags) {
     return true;
 }
 
-// check if a group of flags is valid in allocation process
+// Check if flags are valid during allocation
 STATIC_INLINE bool __page_flags_validity(uint64 flags) {
     // @TODO: Some flags need to be mutually exclusive
     if (PAGE_FLAG_GET_TYPE(flags) >= __PAGE_TYPE_MAX) {
@@ -140,15 +175,20 @@ STATIC_INLINE bool __page_is_freeable(page_t *page) {
     if (page->flags & PAGE_FLAG_LOCKED)
         return false;
     if (page->ref_count > 1) {
-        // cannot free a page that has been referenced by others
+        // Cannot free a page that has been referenced by others
         return false;
     }
     return true;
 }
 
-// initialize a page descriptor
+
+// ============================================================================
+// SECTION 5: Page Initialization
+// ============================================================================
+
+// Initialize a page descriptor
 // No validity check here
-STATIC_INLINE void __page_init( page_t *page, uint64 physical, int ref_count,
+STATIC_INLINE void __page_init(page_t *page, uint64 physical, int ref_count,
                                 uint64 flags) {
     memset(page, 0, sizeof(page_t));
     page->physical_address = physical;
@@ -157,8 +197,7 @@ STATIC_INLINE void __page_init( page_t *page, uint64 physical, int ref_count,
     spin_init(&page->lock, "page_t");
 }
 
-// initialize a buddy pool
-// no validity check here
+// Initialize buddy pools
 STATIC_INLINE void __buddy_pool_init() {
     static char *lock_names[PAGE_BUDDY_MAX_ORDER + 1] = {
         "buddy_pool_0", "buddy_pool_1", "buddy_pool_2", "buddy_pool_3",
@@ -172,8 +211,8 @@ STATIC_INLINE void __buddy_pool_init() {
     }
 }
 
-// initialize a range of page descriptoe with specific flags
-STATIC_INLINE int __init_range_flags( uint64 pa_start, uint64 pa_end, 
+// Initialize a range of page descriptors with specific flags
+STATIC_INLINE int __init_range_flags(uint64 pa_start, uint64 pa_end,
                                       uint64 flags) {
     page_t *page;
     if (pa_start >= pa_end) {
@@ -182,11 +221,11 @@ STATIC_INLINE int __init_range_flags( uint64 pa_start, uint64 pa_end,
     }
     if (    !__page_base_validity(pa_start) ||
             !__page_base_validity(pa_end - PAGE_SIZE)) {
-        // both pa_start and pa_end should be valid physical base page address
+        // Both pa_start and pa_end should be valid physical base page addresses
         return -1;
     }
     if (!__page_init_flags_validity(flags)) {
-        // invalid flags
+        // Invalid flags
         return -1;
     }
 
@@ -204,8 +243,8 @@ STATIC_INLINE int __init_range_flags( uint64 pa_start, uint64 pa_end,
     return 0;
 }
 
-// initialize a page descriptor as a buddy page
-STATIC_INLINE void __page_as_buddy( page_t *page, page_t *buddy_head,
+// Initialize a single page descriptor as a buddy page
+STATIC_INLINE void __page_as_buddy(page_t *page, page_t *buddy_head,
                                     uint64 order) {
     __page_init(page, page->physical_address, 0, PAGE_TYPE_BUDDY);
     page->buddy.buddy_head = buddy_head;
@@ -214,8 +253,8 @@ STATIC_INLINE void __page_as_buddy( page_t *page, page_t *buddy_head,
     list_entry_init(&page->buddy.lru_entry);
 }
 
-// initialize a continuous range of pages as a buddy page in specific order
-// will not check validity here
+// Initialize a continuous range of pages as a buddy page in specific order
+// Will not check validity here
 STATIC_INLINE void __page_as_buddy_group(page_t *buddy_head, uint64 order) {
     uint64 count = 1UL << order;
     for (int i = 0; i < count; i++) {
@@ -223,9 +262,14 @@ STATIC_INLINE void __page_as_buddy_group(page_t *buddy_head, uint64 order) {
     }
 }
 
-// Attach a buddy head page into the corresponding buddy pool and increse the
+
+// ============================================================================
+// SECTION 6: Buddy Pool Operations (List Management)
+// ============================================================================
+
+// Attach a buddy head page into the corresponding buddy pool and increase the
 // count value of the buddy pool by one.
-// will not do validity check here
+// Will not do validity check here
 STATIC_INLINE void __buddy_push_page(buddy_pool_t *pool, page_t *page) {
     if (LIST_IS_EMPTY(&pool->lru_head)) {
         if (pool->count != 0) {
@@ -241,7 +285,7 @@ STATIC_INLINE void __buddy_push_page(buddy_pool_t *pool, page_t *page) {
 
 // Pop a buddy page from a pool and return the page descriptor of the buddy
 // header. Return NULL if the given pool is empty
-// will not do validity check here
+// Will not do validity check here
 STATIC_INLINE page_t *__buddy_pop_page(buddy_pool_t *pool) {
     page_t *ret = list_node_pop_back(&pool->lru_head, page_t, buddy.lru_entry);
     if (ret == NULL) {
@@ -255,9 +299,9 @@ STATIC_INLINE page_t *__buddy_pop_page(buddy_pool_t *pool) {
     return ret;
 }
 
-// detach a buddy head page from a buddy pool and decrease the count value by
+// Detach a buddy head page from a buddy pool and decrease the count value by
 // one.
-// will not do validity check here
+// Will not do validity check here
 STATIC_INLINE void __buddy_detach_page(buddy_pool_t *pool, page_t *page) {
     if (LIST_IS_EMPTY(&pool->lru_head)) {
         panic("__buddy_detach_page");
@@ -265,6 +309,11 @@ STATIC_INLINE void __buddy_detach_page(buddy_pool_t *pool, page_t *page) {
     pool->count--;
     list_node_detach(page, buddy.lru_entry);
 }
+
+
+// ============================================================================
+// SECTION 7: Buddy Finding & State Management
+// ============================================================================
 
 // Try to calculate the address of a page's buddy with the page's physical
 // address. Will not validate the value of order
@@ -275,25 +324,25 @@ STATIC_INLINE uint64 __get_buddy_addr(uint64 physical, uint32 order) {
     return __buddy_base_address;
 }
 
-// try to find a page of a buddy
-// return the buddy page descriptor if found
-// return NULL if didn't find
+// Try to find a page's buddy
+// Return the buddy page descriptor if found
+// Return NULL if didn't find
 STATIC_INLINE page_t *__get_buddy_page(page_t *page) {
     uint64 buddy_base;
     page_t *buddy_head;
     if (!PAGE_IS_BUDDY_GROUP_HEAD(page)) {
-        // must be the page descriptor of a buddy header page
+        // Must be the page descriptor of a buddy header page
         return NULL;
     }
     if (page->buddy.order >= PAGE_BUDDY_MAX_ORDER) {
-        // page size reach PAGE_BUDDY_MAX_ORDER doesn't have buddy
+        // Page size reach PAGE_BUDDY_MAX_ORDER doesn't have buddy
         return NULL;
     }
     buddy_base = __get_buddy_addr(page->physical_address, page->buddy.order);
     buddy_head = __pa_to_page(buddy_base);
     if (buddy_head == NULL || !PAGE_IS_BUDDY_GROUP_HEAD(buddy_head)
         || buddy_head->buddy.order != page->buddy.order) {
-        // didn't find a complete buddy page.
+        // Didn't find a complete buddy page.
         return NULL;
     }
     if (LIST_ENTRY_IS_DETACHED(&buddy_head->buddy.lru_entry)) {
@@ -316,11 +365,16 @@ STATIC_INLINE void __page_order_change_commit(page_t *page) {
     __page_as_buddy_group(page, page->buddy.order);
 }
 
-// Split a buddy page in half and return the header page of the later half of 
-// the splitted buddy pages. This fundtion will not update the tail pages 
+
+// ============================================================================
+// SECTION 8: Buddy Splitting & Merging
+// ============================================================================
+
+// Split a buddy page in half and return the header page of the later half of
+// the splitted buddy pages. This function will not update the tail pages
 // immediately to avoid useless updates. Have to call __page_order_change_commit
 // after page splitting.
-// Return NULL if falied to split
+// Return NULL if failed to split
 STATIC_INLINE page_t *__buddy_split(page_t *page) {
     int order_after;
     page_t *buddy;
@@ -328,7 +382,7 @@ STATIC_INLINE page_t *__buddy_split(page_t *page) {
         return NULL;
     }
     if (page->buddy.order == 0) {
-        // a single page connot be splitted.
+        // A single page cannot be splitted.
         return NULL;
     }
     order_after = page->buddy.order - 1;
@@ -338,8 +392,8 @@ STATIC_INLINE page_t *__buddy_split(page_t *page) {
     return buddy;
 }
 
-// Merge two buddy pages in and return the header page of the merged 
-// buddy page. This fundtion will not update the tail pages immediately 
+// Merge two buddy pages and return the header page of the merged
+// buddy page. This function will not update the tail pages immediately
 // to avoid useless updates. Have to call __page_order_change_commit after page
 // splitting.
 // Return NULL if failed to merge
@@ -361,6 +415,11 @@ STATIC_INLINE page_t *__buddy_merge(page_t *page1, page_t *page2) {
     __page_as_buddy(tail, header, order_after);
     return header;
 }
+
+
+// ============================================================================
+// SECTION 9: Buddy Allocation (Core Algorithm)
+// ============================================================================
 
 STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
     buddy_pool_t *pool = NULL;
@@ -444,6 +503,11 @@ found:
     return page;
 }
 
+
+// ============================================================================
+// SECTION 10: Buddy Deallocation (Single Page)
+// ============================================================================
+
 // Put a page back to buddy system
 // Right now pages can only be put one by one
 STATIC int __buddy_put(page_t *page) {
@@ -492,19 +556,6 @@ STATIC int __buddy_put(page_t *page) {
             break;
         }
 
-        if (tmp_order == PAGE_BUDDY_MAX_ORDER) {
-            // Reached max order with a buddy, add merged page to pool
-            __buddy_pool_lock(tmp_order);
-            page_lock_acquire(page);
-            page->buddy.state = BUDDY_STATE_FREE;
-            page_lock_release(page);
-
-            __page_order_change_commit(page);
-            __buddy_push_page(pool, page);
-            __buddy_pool_unlock(tmp_order);
-            break;
-        }
-
         // Merge the two buddies
         page = __buddy_merge(page, buddy);
         if (page == NULL) {
@@ -521,7 +572,12 @@ STATIC int __buddy_put(page_t *page) {
     return 0;
 }
 
-// init buddy system and add the given range of pages into it
+
+// ============================================================================
+// SECTION 11: Buddy System Initialization
+// ============================================================================
+
+// Init buddy system and add the given range of pages into it
 int page_buddy_init(uint64 pa_start, uint64 pa_end) {
     if (__managed_start < pa_start
         && __init_range_flags(__managed_start, pa_start, PAGE_FLAG_LOCKED) != 0) {
@@ -536,7 +592,7 @@ int page_buddy_init(uint64 pa_start, uint64 pa_end) {
     }
 
     __buddy_pool_init();
-    
+
     for (uint64 base = pa_start; base < pa_end; base += PAGE_SIZE) {
         page_t *page = __pa_to_page(base);
         if (page == NULL) {
@@ -555,6 +611,11 @@ int page_buddy_init(uint64 pa_start, uint64 pa_end) {
 
     return 0;
 }
+
+
+// ============================================================================
+// SECTION 12: Reference Counting (Internal)
+// ============================================================================
 
 STATIC_INLINE int __page_ref_inc_unlocked(page_t *page) {
     assert(spin_holding(&page->lock),
@@ -577,6 +638,11 @@ STATIC_INLINE int __page_ref_dec_unlocked(page_t *page) {
     return -1;
 }
 
+
+// ============================================================================
+// SECTION 13: Public API - Allocation & Deallocation
+// ============================================================================
+
 page_t *__page_alloc(uint64 order, uint64 flags) {
     if (order > PAGE_BUDDY_MAX_ORDER) {
         return NULL;
@@ -586,8 +652,8 @@ page_t *__page_alloc(uint64 order, uint64 flags) {
     return ret;
 }
 
-// the base address of the page should be aligned to order
-// otherwise panic
+// The base address of the page should be aligned to order
+// Otherwise panic
 void __page_free(page_t *page, uint64 order) {
     __page_sanitizer_check("page_free", page, order, 0);
     uint64 count = 1UL << order;
@@ -598,12 +664,9 @@ void __page_free(page_t *page, uint64 order) {
     if (page == NULL) {
         return;
     }
-    if (order > PAGE_BUDDY_MAX_ORDER) {
-        panic("trying to free too many pages");
-    }
-    if (page->physical_address & PAGE_BUDDY_OFFSET_MASK(order)) {
-        panic("free pages not aligned to order");
-    }
+
+    assert(order <= PAGE_BUDDY_MAX_ORDER, "__page_free(): order too large");
+    assert(!(page->physical_address & PAGE_BUDDY_OFFSET_MASK(order)), "free pages not aligned to order");
 
     // Check that all pages in the block are freeable
     for (uint64 i = 0; i < count; i++) {
@@ -626,16 +689,16 @@ void __page_free(page_t *page, uint64 order) {
 
         buddy = __get_buddy_page(page);
         if (buddy != NULL) {
-            // Detach buddy from pool first
+            // Buddy found, detach it from pool
             __buddy_detach_page(pool, buddy);
             __buddy_pool_unlock(tmp_order);
 
-            // Change buddy state (no longer in pool, so no pool lock needed)
+            // Mark buddy as merging
             page_lock_acquire(buddy);
             buddy->buddy.state = BUDDY_STATE_MERGING;
             page_lock_release(buddy);
         } else {
-            // No buddy found, add to pool
+            // No buddy found, add page to pool and finish
             page_lock_acquire(page);
             page->buddy.state = BUDDY_STATE_FREE;
             page_lock_release(page);
@@ -646,24 +709,9 @@ void __page_free(page_t *page, uint64 order) {
             break;
         }
 
-        if (tmp_order == PAGE_BUDDY_MAX_ORDER) {
-            // Reached max order, add to pool
-            __buddy_pool_lock(tmp_order);
-            page_lock_acquire(page);
-            page->buddy.state = BUDDY_STATE_FREE;
-            page_lock_release(page);
-
-            __page_order_change_commit(page);
-            __buddy_push_page(pool, page);
-            __buddy_pool_unlock(tmp_order);
-            break;
-        }
-
-        // Merge and continue
+        // Merge the buddies
         page = __buddy_merge(page, buddy);
-        if (page == NULL) {
-            panic("__page_free(): Get NULL after merging pages");
-        }
+        assert(page != NULL, "__page_free(): failed to merge buddies");
 
         // Mark merged page as MERGING (only lock first half's head)
         page_lock_acquire(page);
@@ -672,7 +720,7 @@ void __page_free(page_t *page, uint64 order) {
     }
 }
 
-// helper function for __page_alloc. Convert the page struct to the base
+// Helper function for __page_alloc. Convert the page struct to the base
 // address of the page
 void *page_alloc(uint64 order, uint64 flags) {
     void *pa;
@@ -691,12 +739,17 @@ void *page_alloc(uint64 order, uint64 flags) {
     return pa;
 }
 
-// helper function for __page_free. Convert the base address of the page to be
+// Helper function for __page_free. Convert the base address of the page to be
 // free to page struct
 void page_free(void *ptr, uint64 order) {
     page_t *page = __pa_to_page((uint64)ptr);
     __page_free(page, order);
 }
+
+
+// ============================================================================
+// SECTION 14: Public API - Page Locking
+// ============================================================================
 
 void page_lock_acquire(page_t *page) {
     if (page == NULL) {
@@ -725,6 +778,11 @@ void page_lock_assert_unholding(page_t *page) {
     }
     assert(!spin_holding(&page->lock), "page_lock_assert_unholding failed");
 }
+
+
+// ============================================================================
+// SECTION 15: Public API - Reference Counting
+// ============================================================================
 
 int __page_ref_inc(page_t *page) {
     int ret = 0;
@@ -795,24 +853,29 @@ int __page_ref_dec(page_t *page) {
     return ret;
 }
 
-// return the reference count of a page
-// return -1 if failed
+// Return the reference count of a page
+// Return -1 if failed
 int page_refcnt(void *physical) {
   page_t *page = __pa_to_page((uint64)physical);
   return page_ref_count(page);
 }
 
-// helper function to __page_ref_inc
+// Helper function to __page_ref_inc
 int page_ref_inc(void *ptr) {
     page_t *page = __pa_to_page((uint64)ptr);
     return __page_ref_inc(page);
 }
 
-// helper function to __page_ref_dec
+// Helper function to __page_ref_dec
 int page_ref_dec(void *ptr) {
     page_t *page = __pa_to_page((uint64)ptr);
     return __page_ref_dec(page);
 }
+
+
+// ============================================================================
+// SECTION 16: Public API - Address Translation
+// ============================================================================
 
 // Get a page struct from its physical base address
 page_t *__pa_to_page(uint64 physical) {
@@ -842,8 +905,13 @@ uint64 managed_page_base() {
     return __managed_start;
 }
 
-// record the number of buddies in each order
-// will return an array of order 0 to size - 1
+
+// ============================================================================
+// SECTION 17: Statistics & Debugging
+// ============================================================================
+
+// Record the number of buddies in each order
+// Will return an array of order 0 to size - 1
 void page_buddy_stat(uint64 *ret_arr, bool *empty_arr, size_t size) {
     if (ret_arr == NULL || size < PAGE_BUDDY_MAX_ORDER + 1) {
         return;
@@ -876,7 +944,7 @@ void __check_page_pointer_in_range(void *ptr) {
     assert(ptr > (void *)__pages && ptr < (void *)&__pages[TOTALPAGES], "__check_page_pointer_in_range: page pointer out of range");
 }
 
-// helper function to check the integrity of the buddy system
+// Helper function to check the integrity of the buddy system
 void check_buddy_system_integrity(void) {
     uint64 total_free_pages = 0;
     // Lock all orders to check integrity consistently
@@ -904,7 +972,7 @@ void check_buddy_system_integrity(void) {
             assert(pos->buddy.order == i, "buddy page order mismatch");
             assert(pos->buddy.buddy_head == pos, "buddy head mismatch");
             __check_page_pointer_in_range(pos);
-            assert(__page_to_pa(pos) == pos->physical_address, 
+            assert(__page_to_pa(pos) == pos->physical_address,
                    "buddy page physical address mismatch");
             count--;
             printf("count = %d, buddy page: %p, order: %d, physical: 0x%lx\n",
