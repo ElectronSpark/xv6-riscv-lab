@@ -9,9 +9,14 @@ SECTIONS
    */
   . = 0x80000000;
 
+  /* Keep the entry stub at the very start so qemu -kernel jumps to real code. */
+  .text.entry : {
+    _entry = .;
+    KEEP(*(.text.entry))
+  }
+
   .text : {
-    /* @TODO: needs to specify _entry at the first */
-    *entry.*(.text .text.*)
+    . = ALIGN(16);
     *(.text .text.*);
     . = ALIGN(0x1000);
     _trampoline = .;
