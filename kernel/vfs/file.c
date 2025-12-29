@@ -90,6 +90,13 @@ static void __vfs_file_free(struct vfs_file *file) {
     if (file == NULL) {
         return;
     }
+    if (file->ops != NULL && file->ops->release != NULL) {
+        // Call file release operation
+        int ret = file->ops->release(file->inode.inode, file);
+        if (ret != 0) {
+            printf("__vfs_file_free: file ops release failed, errno=%d\n", ret);
+        }
+    }
     slab_free(file);
 }
 

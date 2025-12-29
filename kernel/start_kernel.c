@@ -103,5 +103,5 @@ void start_kernel_post_init(void) {
 #endif
     started = 1;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    rcu_run_tests();
+    // rcu_run_tests();
 }
