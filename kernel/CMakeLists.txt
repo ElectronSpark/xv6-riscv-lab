@@ -8,18 +8,14 @@ else()
     message(STATUS "Building kernel for lab: $ENV{LAB}")
 endif()
 
-# Separate .S and .c files for kernel source files
+# Core kernel sources in this directory (excluding subdirectories).
 set(KERNEL_C_FILES
-    ${KERNEL_C_FILES}
     ${KERNEL_DIR}/start_kernel.c
     ${KERNEL_DIR}/string.c
     ${KERNEL_DIR}/main.c
-    ${KERNEL_DIR}/trap.c
-    ${KERNEL_DIR}/syscall.c
     ${KERNEL_DIR}/bio.c
     ${KERNEL_DIR}/pipe.c
     ${KERNEL_DIR}/exec.c
-    ${KERNEL_DIR}/plic.c
     ${KERNEL_DIR}/virtio_disk.c
     ${KERNEL_DIR}/backtrace.c
     ${KERNEL_DIR}/e1000.c
@@ -31,76 +27,6 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/rbtree.c
     ${KERNEL_DIR}/kobject.c
     ${KERNEL_DIR}/bits.c
-)
-
-set(KERNEL_C_FILES
-    ${KERNEL_C_FILES}
-    ${KERNEL_DIR}/vfs/fs.c
-    ${KERNEL_DIR}/vfs/inode.c
-    ${KERNEL_DIR}/vfs/file.c
-    ${KERNEL_DIR}/vfs/fdtable.c
-    ${KERNEL_DIR}/vfs/vfs_syscall.c
-)
-
-set(KERNEL_C_FILES
-    ${KERNEL_C_FILES}
-    ${KERNEL_DIR}/vfs/tmpfs/superblock.c
-    ${KERNEL_DIR}/vfs/tmpfs/inode.c
-    ${KERNEL_DIR}/vfs/tmpfs/truncate.c
-    ${KERNEL_DIR}/vfs/tmpfs/file.c
-    ${KERNEL_DIR}/vfs/tmpfs/tmpfs_smoketest.c
-)
-
-set(KERNEL_C_FILES
-    ${KERNEL_C_FILES}
-    ${KERNEL_DIR}/vfs/xv6fs/superblock.c
-    ${KERNEL_DIR}/vfs/xv6fs/inode.c
-    ${KERNEL_DIR}/vfs/xv6fs/file.c
-    ${KERNEL_DIR}/vfs/xv6fs/log.c
-    ${KERNEL_DIR}/vfs/xv6fs/xv6fs_smoketest.c
-)
-
-set(KERNEL_C_FILES
-    ${KERNEL_C_FILES}
-    ${KERNEL_DIR}/lock/mutex.c
-    ${KERNEL_DIR}/lock/semaphore.c
-    ${KERNEL_DIR}/lock/semaphore_test.c
-    ${KERNEL_DIR}/lock/rwlock.c
-    ${KERNEL_DIR}/lock/rwlock_test.c
-    ${KERNEL_DIR}/lock/spinlock.c
-    ${KERNEL_DIR}/lock/completion.c
-    ${KERNEL_DIR}/lock/rcu.c
-    ${KERNEL_DIR}/lock/rcu_test.c
-)
-
-set(KERNEL_C_FILES
-    ${KERNEL_C_FILES}
-    ${KERNEL_DIR}/mm/kalloc.c
-    ${KERNEL_DIR}/mm/page.c
-    ${KERNEL_DIR}/mm/slab.c
-    ${KERNEL_DIR}/mm/vm.c
-    ${KERNEL_DIR}/mm/pcache.c
-)
-
-set(KERNEL_C_FILES
-    ${KERNEL_C_FILES}
-    ${KERNEL_DIR}/proc/proc.c
-    ${KERNEL_DIR}/proc/proc_queue.c
-    ${KERNEL_DIR}/proc/sched.c
-    ${KERNEL_DIR}/proc/signal.c
-    ${KERNEL_DIR}/proc/sys_signal.c
-    ${KERNEL_DIR}/proc/sysproc.c
-    ${KERNEL_DIR}/proc/workqueue.c
-    ${KERNEL_DIR}/proc/timer.c
-    ${KERNEL_DIR}/proc/sched_timer.c
-)
-
-set(KERNEL_C_FILES
-    ${KERNEL_C_FILES}
-    ${KERNEL_DIR}/dev/dev.c
-    ${KERNEL_DIR}/dev/cdev.c
-    ${KERNEL_DIR}/dev/blkdev.c
-    ${KERNEL_DIR}/dev/bio.c
 )
 
 if(DEFINED ENV{RWLOCK_TEST})
@@ -149,12 +75,16 @@ if($ENV{LAB} STREQUAL "net")
 endif()
 
 set(KERNEL_S_FILES
-    ${KERNEL_DIR}/kernelvec.S
     ${KERNEL_DIR}/entry.S
-    ${KERNEL_DIR}/trampoline.S
-    ${KERNEL_DIR}/proc/swtch.S
-    ${KERNEL_DIR}/proc/sig_trampoline.S
 )
+
+# Pull in subdirectory object libraries.
+add_subdirectory(${KERNEL_DIR}/interruption)
+add_subdirectory(${KERNEL_DIR}/dev)
+add_subdirectory(${KERNEL_DIR}/lock)
+add_subdirectory(${KERNEL_DIR}/mm)
+add_subdirectory(${KERNEL_DIR}/proc)
+add_subdirectory(${KERNEL_DIR}/vfs)
 
 set_source_files_properties(${KERNEL_C_FILES} PROPERTIES LANGUAGE C)
 set_source_files_properties(${KERNEL_SCAN_OBJS} PROPERTIES LANGUAGE C)
@@ -168,11 +98,24 @@ set(KERNEL_OBJS
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding ")
 
-# Add kernel executable
+# Add kernel executable from top-level objects; link in subdir object libraries below.
 add_executable(${KERNEL_BINARY} ${KERNEL_OBJS})
+
+# Object libraries do not automatically link; add their objects explicitly.
+target_sources(${KERNEL_BINARY} PRIVATE
+    $<TARGET_OBJECTS:interruption>
+    $<TARGET_OBJECTS:dev>
+    $<TARGET_OBJECTS:lock>
+    $<TARGET_OBJECTS:mm>
+    $<TARGET_OBJECTS:proc>
+    $<TARGET_OBJECTS:vfs_core>
+    $<TARGET_OBJECTS:vfs_tmpfs>
+    $<TARGET_OBJECTS:vfs_xv6fs>
+)
 
 # Use target_link_options to set linker flags so they appear in <LINK_FLAGS>
 target_link_options(${KERNEL_BINARY} PRIVATE -z max-page-size=4096 -T ${KERNEL_DIR}/kernel.ld)
+target_link_libraries(${KERNEL_BINARY} PRIVATE interruption dev lock mm proc vfs)
 
 if(DEFINED ENV{RWLOCK_TEST})
     target_compile_definitions(${KERNEL_BINARY} PRIVATE
