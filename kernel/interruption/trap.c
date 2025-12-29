@@ -9,6 +9,7 @@
 #include "printf.h"
 #include "sched.h"
 #include "signal.h"
+#include "page.h"
 #include "vm.h"
 
 uint64 ticks;
@@ -54,6 +55,13 @@ static const char *__scause_to_str(uint64 scause)
 void
 trapinit(void)
 {
+  // Allocate interrupt stacks for each CPU hart
+  for (int i = 0; i < NCPU; i++) {
+    cpus[i].intr_stacks = page_alloc(INTR_STACK_ORDER, 0);
+    assert(cpus[i].intr_stacks != NULL, "trapinit: page_alloc for intr_stacks failed");
+    memset(cpus[i].intr_stacks, 0, INTR_STACK_SIZE);
+    cpus[i].intr_sp = (uint64)cpus[i].intr_stacks + INTR_STACK_SIZE;
+  }
   ;
 }
 

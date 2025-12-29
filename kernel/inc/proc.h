@@ -35,6 +35,9 @@ struct context {
 struct cpu {
   struct proc *proc;          // The process running on this cpu, or null.
   struct context context;     // swtch() here to enter scheduler().
+  void **intr_stacks;         // Top of interrupt stack for each hart.
+  uint64 intr_sp;             // Saved sp value for interrupt.
+  int intr_depth;             // Depth of nested interruption.
   int noff;                   // Depth of push_off() nesting.
   int intena;                 // Were interrupts enabled before push_off()?
 };
