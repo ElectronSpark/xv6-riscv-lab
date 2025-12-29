@@ -1,7 +1,7 @@
 #ifndef __HOST_TEST_UT_RBTREE_H
 #define __HOST_TEST_UT_RBTREE_H
 
-#include <stdbool.h>
+#include "types.h"
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>

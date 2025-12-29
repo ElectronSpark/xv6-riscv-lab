@@ -2,7 +2,6 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <sys/mman.h>
-#include <stdbool.h>
 #include <stdlib.h>
 
 #include <cmocka.h>
@@ -10,14 +9,59 @@
 #include "ut_page_wraps.h"
 #include "param.h"
 #include "list.h"
+#include "slab.h"
+
+// Host tests compile some kernel sources directly. Under HOST_TEST, `STATIC`
+// expands to nothing, so we can legally reference internal symbols to validate
+// behavior. Keep these declarations in the test harness (not the kernel).
+typedef struct {
+    list_node_t lru_head;
+    _Atomic uint32 count;
+    spinlock_t lock;
+} pcpu_cache_t;
+
+extern pcpu_cache_t __pcpu_caches[NCPU][SLAB_DEFAULT_ORDER + 1];
+
+extern void __buddy_merge_and_insert(page_t *page, uint64 start_order);
+
+static void ut_flush_pcpu_caches(void) {
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        for (int order = 0; order <= SLAB_DEFAULT_ORDER; order++) {
+            pcpu_cache_t *cache = &__pcpu_caches[cpu][order];
+            while (!LIST_IS_EMPTY(&cache->lru_head)) {
+                page_t *page = list_node_pop_back(&cache->lru_head, page_t, buddy.lru_entry);
+                if (page == NULL) {
+                    break;
+                }
+                __atomic_fetch_sub(&cache->count, 1, __ATOMIC_RELEASE);
+
+                page->buddy.state = BUDDY_STATE_MERGING;
+
+                __buddy_merge_and_insert(page, (uint64)order);
+            }
+        }
+    }
+}
 
 // Structure to store buddy system state
 typedef struct {
     uint64 counts[PAGE_BUDDY_MAX_ORDER + 1];
-    bool empty[PAGE_BUDDY_MAX_ORDER + 1];
     uint64 total_free_pages;
+    uint64 total_cached_pages;
+    uint64 total_pages;
     bool skip;
 } buddy_system_state_t;
+
+static uint64 ut_pcpu_cached_pages_total(void) {
+    uint64 total = 0;
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        for (int order = 0; order <= SLAB_DEFAULT_ORDER; order++) {
+            uint32 c = __atomic_load_n(&__pcpu_caches[cpu][order].count, __ATOMIC_ACQUIRE);
+            total += (uint64)c * (1UL << order);
+        }
+    }
+    return total;
+}
 
 // Test initialization setup that runs before each test
 static int test_setup(void **state) {
@@ -32,15 +76,18 @@ static int test_setup(void **state) {
     // Initialize mock pages with proper values
     assert_int_equal(page_buddy_init(KERNBASE, PHYSTOP), 0);
     
-    // Record initial buddy system state
+    // Record initial buddy system state (buddy pools + per-CPU cache)
     memset(buddy_state, 0, sizeof(buddy_system_state_t));
-    page_buddy_stat(buddy_state->counts, buddy_state->empty, PAGE_BUDDY_MAX_ORDER + 1);
+    page_buddy_stat(buddy_state->counts, NULL, PAGE_BUDDY_MAX_ORDER + 1);
     
-    // Calculate total free pages
+    // Calculate total free pages (buddy pools only)
     buddy_state->total_free_pages = 0;
     for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
         buddy_state->total_free_pages += (1UL << i) * buddy_state->counts[i];
     }
+
+    buddy_state->total_cached_pages = ut_pcpu_cached_pages_total();
+    buddy_state->total_pages = buddy_state->total_free_pages + buddy_state->total_cached_pages;
     buddy_state->skip = true;
     
     // Pass the state to the test
@@ -59,25 +106,20 @@ static int test_teardown(void **state) {
     }
     
     // Get the current buddy system state
-    page_buddy_stat(final_state.counts, final_state.empty, PAGE_BUDDY_MAX_ORDER + 1);
+    page_buddy_stat(final_state.counts, NULL, PAGE_BUDDY_MAX_ORDER + 1);
     
-    // Calculate total free pages
+    // Calculate total free pages (buddy pools only)
     final_state.total_free_pages = 0;
     for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
         final_state.total_free_pages += (1UL << i) * final_state.counts[i];
     }
-    
-    for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
-        uint64 initial_count = initial_state->counts[i];
-        uint64 final_count = final_state.counts[i];
-        bool initial_empty = initial_state->empty[i];
-        bool final_empty = final_state.empty[i];
-        assert_int_equal(final_count, initial_count);
-        assert_int_equal(final_empty, initial_empty);
-    }
-    
-    // Check if the buddy system state matches the initial state
-    assert_int_equal(final_state.total_free_pages, initial_state->total_free_pages);
+
+    final_state.total_cached_pages = ut_pcpu_cached_pages_total();
+    final_state.total_pages = final_state.total_free_pages + final_state.total_cached_pages;
+
+    // With per-CPU caching enabled, the distribution between buddy pools and
+    // caches can vary across tests; enforce conservation instead.
+    assert_int_equal(final_state.total_pages, initial_state->total_pages);
     
     // Free the state
 skip:
@@ -439,7 +481,7 @@ static void test_page_buddy_init_detailed(void **state) {
     int result = page_buddy_init(start_addr, end_addr);
     assert_int_equal(result, 0);
     
-    // Check buddy pools after initialization
+    // Check buddy pools + cache after initialization
     // We expect different distributions based on how the buddy algorithm merged pages
     // At minimum, we should have pages available in the system
     bool found_pages = false;
@@ -449,6 +491,14 @@ static void test_page_buddy_init_detailed(void **state) {
         if (pool->count > 0) {
             found_pages = true;
             print_message("  Found %lu pages in order %d pool\n", pool->count, i);
+        }
+    }
+
+    if (!found_pages) {
+        uint64 cached = ut_pcpu_cached_pages_total();
+        if (cached > 0) {
+            found_pages = true;
+            print_message("  Found %lu cached pages in per-CPU cache\n", cached);
         }
     }
     
@@ -466,6 +516,11 @@ static void test_buddy_split_merge(void **state) {
     static page_t *pages[TOTALPAGES] = { 0 };
 
     for (int order = 0; order <= PAGE_BUDDY_MAX_ORDER; order++) {
+        // With per-CPU caching enabled, freed pages can accumulate in caches and
+        // prevent coalescing into larger orders. Flush caches to restore a fully
+        // coalesced buddy pool so this test can validate split/merge at scale.
+        ut_flush_pcpu_caches();
+
         int alloc_count = TOTALPAGES >> order;  // Number of pages in this order
 
         print_message("Allocating %d pages with order %d\n", alloc_count, order);

@@ -35,3 +35,15 @@ void printfinit(void)
 {
     /* serial output init not required for host tests */
 }
+
+// syscall argument helpers (host-test stubs)
+// Some kernel sources (e.g. syscalls embedded in otherwise-testable code)
+// reference argint(). Unit tests don't run the syscall path, so a simple
+// stub is sufficient to satisfy the linker.
+void argint(int n, int *ip)
+{
+    (void)n;
+    if (ip) {
+        *ip = 0;
+    }
+}

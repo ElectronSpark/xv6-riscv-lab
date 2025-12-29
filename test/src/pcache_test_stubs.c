@@ -1,13 +1,12 @@
 #include <assert.h>
 #include <limits.h>
 #include <stdarg.h>
-#include <stdbool.h>
+#include "types.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#include "types.h"
 #include "list.h"
 #include "spinlock.h"
 #include "page.h"
@@ -243,10 +242,21 @@ int slab_cache_init(slab_cache_t *cache, char *name, size_t obj_size, uint64 fla
     cache->name = name;
     cache->flags = flags;
     cache->obj_size = obj_size;
-    list_entry_init(&cache->free_list);
-    list_entry_init(&cache->partial_list);
-    list_entry_init(&cache->full_list);
-    spin_init(&cache->lock, "slab_cache_lock");
+
+    // Initialize per-CPU lists/locks (host tests don't emulate CPU locality,
+    // but kernel code expects these fields to be well-formed).
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        list_entry_init(&cache->percpu_caches[cpu].partial_list);
+        list_entry_init(&cache->percpu_caches[cpu].full_list);
+        spin_init(&cache->percpu_caches[cpu].lock, "slab_percpu_lock");
+    }
+
+    // Initialize global free list + lock.
+    list_entry_init(&cache->global_free_list);
+    spin_init(&cache->global_free_lock, "slab_global_free_lock");
+
+    // Initialize global cache list entry so list macros treat it as detached.
+    list_entry_init(&cache->cache_list_entry);
     return 0;
 }
 

@@ -38,6 +38,7 @@
 #define KERNEL_OBJECT_H
 #define __KERNEL_PCACHE_TYPES_H
 #define __KERNEL_VFS_STAT_H
+#define KERNEL_VIRTUAL_FILE_SYSTEM_STAT_H
 
 #include <stddef.h>
 #include <stdbool.h>
