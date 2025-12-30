@@ -167,7 +167,9 @@ void scheduler_run(void) {
         }
         // printf("CPU: %d -> %s (pid: %d)\n", cpuid(), p->name, p->pid);
         sched_lock();
+        p->cpu_id = cpuid();
         struct spinlock *lk = __switch_to(p);
+        p->cpu_id = -1;
         assert(!intr_get(), "Interrupts must be disabled after switching to a process");
         enum procstate pstate = __proc_get_pstate(p);
         struct proc *pparent = p->parent;

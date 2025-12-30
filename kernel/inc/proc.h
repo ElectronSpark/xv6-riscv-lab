@@ -158,6 +158,7 @@ struct proc {
   struct trapframe *trapframe; // data page for trampoline.S
 
   // both p->lock and __sched_lock must be held 
+  int cpu_id;                  // The CPU running this process.
   struct context context;      // swtch() here to run process
   uint64 kentry;               // Entry point for kernel process
   uint64 arg[2];               // Argument for kernel process

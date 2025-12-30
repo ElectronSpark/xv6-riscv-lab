@@ -961,7 +961,11 @@ procdump(void)
     printf("%d %s%s [%s] %s", pid, state, 
             PROC_STOPPED(p) ? " (stopped)" : "", 
             PROC_USER_SPACE(p) ? "U":"K", name);
-    printf("\n");
+    if (pstate == PSTATE_RUNNING) {
+      printf(" (CPU: %d)\n", p->cpu_id);
+    } else {
+      printf("\n");
+    }
   }
 
   if (!_panic_state)
