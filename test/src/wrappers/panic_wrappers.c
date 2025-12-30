@@ -1,3 +1,8 @@
+/*
+ * Panic function wrappers for unit tests
+ * Uses --wrap linker feature to intercept panic calls
+ */
+
 #include <stddef.h>
 #include <stdarg.h>
 #include <setjmp.h>
@@ -9,38 +14,35 @@
 
 static int __panic_panicked = 0;
 
-void __panic_start(void)
+void __wrap___panic_start(void)
 {
     __panic_panicked = 1;
 }
 
-void __panic_end(void) __attribute__((noreturn));
-void __panic_end(void)
+void __wrap___panic_end(void) __attribute__((noreturn));
+void __wrap___panic_end(void)
 {
     fail_msg("kernel panic reached in host test (see preceding log)");
     abort();
 }
 
-int panic_state(void)
+int __wrap_panic_state(void)
 {
     return __panic_panicked;
 }
 
-void panic_disable_bt(void)
+void __wrap_panic_disable_bt(void)
 {
     /* backtrace printing is not available in host tests */
 }
 
-void printfinit(void)
+void __wrap_printfinit(void)
 {
     /* serial output init not required for host tests */
 }
 
-// syscall argument helpers (host-test stubs)
-// Some kernel sources (e.g. syscalls embedded in otherwise-testable code)
-// reference argint(). Unit tests don't run the syscall path, so a simple
-// stub is sufficient to satisfy the linker.
-void argint(int n, int *ip)
+// Syscall argument helpers (used by some kernel code)
+void __wrap_argint(int n, int *ip)
 {
     (void)n;
     if (ip) {

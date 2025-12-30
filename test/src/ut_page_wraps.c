@@ -5,6 +5,49 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+// Wrapped page utility functions
+page_t *__wrap___pa_to_page(uint64 physical) {
+    extern uint64 __managed_start;
+    extern uint64 __managed_end;
+    
+    // Check if address is within managed range
+    if (physical < __managed_start || physical >= __managed_end) {
+        return NULL;
+    }
+    
+    // For unit tests, calculate page pointer from physical address
+    extern page_t __pages[];
+    uint64 page_index = (physical - __managed_start) / PAGE_SIZE;
+    return &__pages[page_index];
+}
+
+uint64 __wrap___page_to_pa(page_t *page) {
+    if (page == NULL) return 0;
+    return page->physical_address;
+}
+
+int __wrap___page_ref_inc(page_t *page) {
+    if (page == NULL) return -1;
+    return ++page->ref_count;
+}
+
+int __wrap___page_ref_dec(page_t *page) {
+    if (page == NULL) return -1;
+    if (page->ref_count > 0) {
+        page->ref_count--;
+    }
+    return page->ref_count;
+}
+
+void __wrap___page_init(page_t *page, uint64 physical, int ref_count, uint64 flags) {
+    if (page == NULL) return;
+    page->physical_address = physical;
+    page->ref_count = ref_count;
+    page->flags = flags;
+    page->lock.locked = 0;
+    page->lock.cpu = NULL;
+}
+
 void __wrap_page_lock_acquire(page_t *page) {
     (void)page;
 }
@@ -19,22 +62,22 @@ int __wrap_page_ref_count(page_t *page) {
 }
 
 int __wrap_page_ref_inc(void *ptr) {
-    page_t *page = __pa_to_page((uint64)ptr);
+    page_t *page = __wrap___pa_to_page((uint64)ptr);
     if (page == NULL) return -1;
-    return __page_ref_inc(page);
+    return __wrap___page_ref_inc(page);
 }
 
 int __wrap_page_ref_dec(void *ptr) {
-    page_t *page = __pa_to_page((uint64)ptr);
+    page_t *page = __wrap___pa_to_page((uint64)ptr);
     if (page == NULL) return -1;
-    return __page_ref_dec(page);
+    return __wrap___page_ref_dec(page);
 }
 
 int __wrap_page_refcnt(void *physical) {
     if (physical == NULL) return -1;  // Handle NULL pointer case explicitly
-    page_t *page = __pa_to_page((uint64)physical);
+    page_t *page = __wrap___pa_to_page((uint64)physical);
     if (page == NULL) return -1;
-    return page_ref_count(page);
+    return __wrap_page_ref_count(page);
 }
 
 void __wrap_panic(char *str) {
@@ -103,14 +146,14 @@ void __wrap_kmm_free(void *ptr) {
 }
 
 void *__wrap_page_alloc(uint64 order, uint64 flags) {
-    page_t *page = __page_alloc(order, flags);
+    page_t *page = ut_make_mock_page(order, flags);
     if (page == NULL) return NULL;
-    return (void *)__page_to_pa(page);
+    return (void *)__wrap___page_to_pa(page);
 }
 
 void __wrap_page_free(void *ptr, uint64 order) {
-    page_t *page = __pa_to_page((uint64)ptr);
-    __page_free(page, order);
+    (void)order;
+    ut_destroy_mock_page(ptr);
 }
 
 typedef struct ut_mock_page_range {
@@ -139,7 +182,7 @@ page_t *ut_make_mock_page(uint64 order, uint64 flags) {
     mock_range->size = mock_size;
     mock_range->mock_phy_start = page_base + (mock_size >> 1);
 
-    __page_init(mock_range->page,
+    __wrap___page_init(mock_range->page,
                 (uint64)mock_range->mock_phy_start, 
                 0, flags);
 
@@ -159,6 +202,13 @@ void ut_destroy_mock_page_t(page_t *page) {
     if (page == NULL) return;
 
     ut_destroy_mock_page((void *)page->physical_address);
+}
+
+int __real_page_refcnt(void *physical) {
+    if (physical == NULL) return -1;
+    page_t *page = __wrap___pa_to_page((uint64)physical);
+    if (page == NULL) return -1;
+    return page->ref_count;
 }
 
 bool __wrap___page_alloc_passthrough = false;

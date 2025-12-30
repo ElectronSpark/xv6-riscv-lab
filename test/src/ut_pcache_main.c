@@ -22,18 +22,17 @@
 #include "completion.h"
 #include "timer.h"
 
+// Forward declarations for wrapped functions (linked via --wrap)
+void spin_init(struct spinlock *lock, char *name);
+void spin_acquire(struct spinlock *lock);
+void spin_release(struct spinlock *lock);
+
 extern void pcache_test_run_flusher_round(uint64 round_start, bool force_round);
 extern void pcache_test_set_retry_hook(void (*hook)(struct pcache *, uint64));
 extern void pcache_test_fail_next_queue_work(void);
 extern void pcache_test_set_break_on_sleep(bool enable);
 extern void pcache_test_fail_next_page_alloc(void);
 extern void pcache_test_fail_next_slab_alloc(void);
-
-/* Stub function declarations */
-extern void spin_acquire(struct spinlock *lock);
-extern void spin_release(struct spinlock *lock);
-
-extern void spin_init(struct spinlock *lock, char *name);
 
 #define SCRIPTED_OP_MAX 8
 
@@ -150,6 +149,11 @@ static void configure_fixture_ops(struct pcache_test_fixture *fixture) {
 static int pcache_test_setup(void **state) {
     static bool global_initialized = false;
     if (!global_initialized) {
+        // Setup mock for kernel_proc_create that pcache_global_init will call
+        // We'll return a fake proc pointer and a positive PID
+        will_return(__wrap_kernel_proc_create, (void*)0x1000);  // Return fake proc pointer
+        will_return(__wrap_kernel_proc_create, 1);  // Return PID (success)
+        
         pcache_global_init();
         global_initialized = true;
     }

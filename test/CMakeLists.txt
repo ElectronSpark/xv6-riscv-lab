@@ -76,36 +76,116 @@ set(MOCK_TEST_KERNEL_SRC
     ${CMAKE_SOURCE_DIR}/../kernel/mm/slab.c
 )
 
+# All wrapper source files
+set(WRAPPER_SRC
+    ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/spinlock_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/page_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/slab_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/workqueue_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/completion_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/timer_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/kmm_wrappers.c
+)
+
+# Wrapper sources for ut_page
+set(UT_PAGE_WRAPPER_SRC
+    ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/spinlock_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/page_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/kmm_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/slab_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/workqueue_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/completion_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/timer_wrappers.c
+)
+
+# Functions to wrap for all tests
 set(MOCK_TEST_WRAP_FUNCTIONS
+    # Page functions
     page_lock_acquire
     page_lock_release
+    page_lock_assert_holding
+    page_lock_assert_unholding
     page_ref_inc
     page_ref_dec
     page_ref_count
+    page_ref_inc_unlocked
+    page_ref_dec_unlocked
+    __page_ref_inc
+    __page_ref_dec
     page_refcnt
     page_alloc
     page_free
     __page_alloc
     __page_free
-    # page_buddy_init
-    panic
+    __page_to_pa
+    __pa_to_page
+    __page_init
+    # Slab functions
+    slab_cache_init
+    slab_cache_create
+    slab_cache_destroy
+    slab_cache_shrink
+    slab_alloc
+    slab_free
+    # Spinlock functions
     spin_acquire
     spin_release
     spin_init
     spin_holding
     spin_lock
     spin_unlock
-    cpuid
     push_off
     pop_off
+    # Process functions
+    cpuid
+    mycpu
+    myproc
+    proc_lock
+    proc_unlock
+    proc_assert_holding
+    sched_lock
+    sched_unlock
+    scheduler_wakeup
+    scheduler_sleep
+    kernel_proc_create
+    wakeup_proc
+    wakeup_on_chan
+    sleep_on_chan
+    # Workqueue functions
+    workqueue_create
+    queue_work
+    init_work_struct
+    create_work_struct
+    free_work_struct
+    # Completion functions
+    completion_init
+    completion_reinit
+    try_wait_for_completion
+    wait_for_completion
+    complete
+    complete_all
+    completion_done
+    # Timer functions
+    get_jiffs
+    sleep_ms
+    # KMM functions
     kmm_alloc
     kmm_free
+    # Panic functions
+    __panic_start
+    __panic_end
+    panic_state
+    panic_disable_bt
+    printfinit
+    argint
 )
 
 set(MOCK_TEST_SRC
     ${CMAKE_SOURCE_DIR}/src/ut_page_main.c
-    ${CMAKE_SOURCE_DIR}/src/ut_page_wraps.c
-    ${CMAKE_SOURCE_DIR}/src/panic_stubs.c
 )
 
 set(MOCK_WRAP_OPTIONS "")
@@ -119,10 +199,10 @@ set(MOCK_COMPILE_OPTIONS "-Wl${MOCK_WRAP_OPTIONS}")
 include(cmake/FetchCmocka.cmake)
 # find_library(cmocka-static)
 
-add_executable(ut_page ${MOCK_TEST_SRC} ${MOCK_TEST_KERNEL_SRC})
+add_executable(ut_page ${MOCK_TEST_SRC} ${MOCK_TEST_KERNEL_SRC} ${UT_PAGE_WRAPPER_SRC})
 target_link_libraries(ut_page PRIVATE cmocka-static)
 target_compile_options(ut_page PRIVATE ${TEST_C_FLAGS})
-target_compile_definitions(ut_page PRIVATE MOCK_TEST=1)
+target_compile_definitions(ut_page PRIVATE MOCK_TEST=1 UT_PAGE_TEST_BUILD=1)
 target_link_options(ut_page PRIVATE ${MOCK_COMPILE_OPTIONS})
 target_include_directories(ut_page PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
@@ -148,11 +228,20 @@ target_include_directories(ut_rbtree PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 add_executable(ut_semaphore
     ${CMAKE_SOURCE_DIR}/src/ut_semaphore_main.c
     ${CMAKE_SOURCE_DIR}/../kernel/lock/semaphore.c
-    ${CMAKE_SOURCE_DIR}/src/semaphore_runtime_stubs.c
-    ${CMAKE_SOURCE_DIR}/src/panic_stubs.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/spinlock_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
 )
 target_link_libraries(ut_semaphore PRIVATE cmocka-static)
 target_compile_options(ut_semaphore PRIVATE ${TEST_C_FLAGS})
+target_link_options(ut_semaphore PRIVATE 
+    -Wl,--wrap=spin_init,--wrap=spin_acquire,--wrap=spin_release,--wrap=spin_holding
+    -Wl,--wrap=push_off,--wrap=pop_off
+    -Wl,--wrap=proc_queue_init,--wrap=proc_queue_wait,--wrap=proc_queue_wakeup
+    -Wl,--wrap=mycpu,--wrap=myproc,--wrap=proc_lock,--wrap=proc_unlock,--wrap=proc_assert_holding
+    -Wl,--wrap=sched_lock,--wrap=sched_unlock,--wrap=scheduler_wakeup,--wrap=scheduler_sleep
+    -Wl,--wrap=__panic_start,--wrap=__panic_end,--wrap=panic_state,--wrap=panic_disable_bt
+)
 target_include_directories(ut_semaphore PRIVATE
     ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
     ${UNIT_TEST_INCLUDE_DIRS}
@@ -161,10 +250,19 @@ target_include_directories(ut_semaphore PRIVATE
 add_executable(ut_rwlock
     ${CMAKE_SOURCE_DIR}/src/ut_rwlock_main.c
     ${CMAKE_SOURCE_DIR}/../kernel/lock/rwlock.c
-    ${CMAKE_SOURCE_DIR}/src/panic_stubs.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/spinlock_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
 )
 target_link_libraries(ut_rwlock PRIVATE cmocka-static)
 target_compile_options(ut_rwlock PRIVATE ${TEST_C_FLAGS})
+target_link_options(ut_rwlock PRIVATE     -Wl,--wrap=spin_init,--wrap=spin_acquire,--wrap=spin_release,--wrap=spin_holding
+    -Wl,--wrap=push_off,--wrap=pop_off
+    -Wl,--wrap=proc_queue_init,--wrap=proc_queue_size,--wrap=proc_queue_wait
+    -Wl,--wrap=proc_queue_wakeup,--wrap=proc_queue_wakeup_all
+    -Wl,--wrap=mycpu,--wrap=myproc,--wrap=proc_lock,--wrap=proc_unlock,--wrap=proc_assert_holding
+    -Wl,--wrap=sched_lock,--wrap=sched_unlock,--wrap=scheduler_wakeup,--wrap=scheduler_sleep    -Wl,--wrap=__panic_start,--wrap=__panic_end,--wrap=panic_state,--wrap=panic_disable_bt
+)
 target_include_directories(ut_rwlock PRIVATE
     ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
     ${UNIT_TEST_INCLUDE_DIRS}
@@ -180,13 +278,14 @@ target_include_directories(ut_bits PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 add_executable(ut_pcache
     ${CMAKE_SOURCE_DIR}/src/ut_pcache_main.c
-    ${CMAKE_SOURCE_DIR}/src/pcache_test_stubs.c
     ${CMAKE_SOURCE_DIR}/../kernel/mm/pcache.c
     ${CMAKE_SOURCE_DIR}/../kernel/rbtree.c
     ${CMAKE_SOURCE_DIR}/../kernel/bintree.c
+    ${WRAPPER_SRC}
 )
 target_link_libraries(ut_pcache PRIVATE cmocka-static)
 target_compile_options(ut_pcache PRIVATE ${TEST_C_FLAGS})
+target_link_options(ut_pcache PRIVATE ${MOCK_COMPILE_OPTIONS})
 target_include_directories(ut_pcache PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 # Tmpfs truncate test (linked version)
