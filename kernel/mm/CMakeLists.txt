@@ -4,4 +4,5 @@ add_library(mm OBJECT
     slab.c
     vm.c
     pcache.c
+    early_allocator.c
 )

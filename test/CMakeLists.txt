@@ -199,6 +199,13 @@ target_link_libraries(ut_tmpfs_truncate PRIVATE cmocka-static)
 target_compile_options(ut_tmpfs_truncate PRIVATE ${TEST_C_FLAGS})
 target_include_directories(ut_tmpfs_truncate PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
+add_executable(ut_early_allocator
+    ${CMAKE_SOURCE_DIR}/src/ut_early_allocator_main.c
+)
+target_link_libraries(ut_early_allocator PRIVATE cmocka-static)
+target_compile_options(ut_early_allocator PRIVATE ${TEST_C_FLAGS})
+target_include_directories(ut_early_allocator PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+
 enable_testing()
 add_test(NAME ut_mock_test
     COMMAND ut_page
@@ -234,5 +241,9 @@ add_test(NAME ut_pcache
 )
 add_test(NAME ut_tmpfs_truncate
     COMMAND ut_tmpfs_truncate
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+add_test(NAME ut_early_allocator
+    COMMAND ut_early_allocator
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )
