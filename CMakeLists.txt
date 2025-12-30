@@ -135,9 +135,9 @@ list(TRANSFORM USER_PROGRAMS PREPEND "${CMAKE_CURRENT_BINARY_DIR}/user/")
 # Update the custom command for fs.img to include the correct path for user executables
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fs.img
-    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/mkfs fs.img ${USER_PROGRAMS} ${CMAKE_SOURCE_DIR}/README
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/mkfs fs.img ${USER_PROGRAMS} ${CMAKE_SOURCE_DIR}/README.md
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mkfs ${CMAKE_SOURCE_DIR}/README ${USER_PROGRAMS}
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mkfs ${CMAKE_SOURCE_DIR}/README.md ${USER_PROGRAMS}
     COMMENT "Creating file system image with user programs and README"
 )
 
@@ -304,5 +304,29 @@ else()
         COMMAND_EXPAND_LISTS
         COMMENT "run grad-lab-util"
     )
+
+    # Doxygen documentation target
+    option(BUILD_DOCUMENTATION "Create and install the HTML based API documentation (requires Doxygen)" OFF)
+    if(BUILD_DOCUMENTATION)
+        find_package(Doxygen)
+        if(NOT DOXYGEN_FOUND)
+            message(WARNING "Doxygen not found. Documentation will not be built.")
+        else()
+            set(DOXYGEN_IN ${CMAKE_SOURCE_DIR}/Doxyfile)
+            set(DOXYGEN_OUT ${CMAKE_CURRENT_BINARY_DIR}/Doxyfile)
+            
+            configure_file(${DOXYGEN_IN} ${DOXYGEN_OUT} @ONLY)
+            message(STATUS "Doxygen build started")
+            
+            add_custom_target(doc
+                COMMAND ${DOXYGEN_EXECUTABLE} ${DOXYGEN_OUT}
+                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+                COMMENT "Generating API documentation with Doxygen"
+                VERBATIM
+            )
+            
+            message(STATUS "Documentation target 'doc' created. Run 'make doc' to generate documentation.")
+        endif()
+    endif()
 
 endif()
