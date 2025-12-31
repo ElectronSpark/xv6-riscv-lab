@@ -141,6 +141,9 @@ void rcu_cpu_init(int cpu) {
 //
 
 void rcu_read_lock(void) {
+    // Disable interrupts to prevent context switches during RCU critical section
+    push_off();
+
     struct proc *p = myproc();
     if (p == NULL) {
         // No process context (e.g., early boot or scheduler)
@@ -187,6 +190,8 @@ void rcu_read_unlock(void) {
         if (new_nesting == 0 && __atomic_load_n(&rcp->qs_pending, __ATOMIC_ACQUIRE)) {
             rcu_note_context_switch();
         }
+        // Re-enable interrupts - matching the push_off() in rcu_read_lock()
+        pop_off();
         return;
     }
 
@@ -194,7 +199,6 @@ void rcu_read_unlock(void) {
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
     // Decrement per-process nesting counter
-    // This counter follows the process, so it's correct even if we migrated CPUs
     p->rcu_read_lock_nesting--;
 
     if (p->rcu_read_lock_nesting < 0) {
@@ -208,9 +212,6 @@ void rcu_read_unlock(void) {
         rcu_cpu_data_t *rcp = &rcu_state.cpu_data[cpu];
 
         // Decrement per-CPU nesting counter
-        // Note: This might be a different CPU than the one where we called rcu_read_lock()
-        // The CPU counter tracks the total number of outermost RCU locks held by all
-        // processes currently on this CPU
         int cpu_nesting = __atomic_sub_fetch(&rcp->nesting, 1, __ATOMIC_RELEASE);
 
         // Check if we need to report quiescent state
@@ -218,6 +219,9 @@ void rcu_read_unlock(void) {
             rcu_note_context_switch();
         }
     }
+
+    // Re-enable interrupts - matching the push_off() in rcu_read_lock()
+    pop_off();
 }
 
 int rcu_is_watching(void) {
