@@ -1100,6 +1100,83 @@ procdump_bt_pid(int pid)
   }
 }
 
+// Helper function to recursively print process tree
+// Locks the parent process while traversing its children list, following
+// the lock order: parent lock before child lock (see lock order comment at top of file).
+static void
+__procdump_tree_recursive(struct proc *p, int depth)
+{
+  const char *state;
+  struct proc *child, *tmp;
+  enum procstate pstate;
+  int pid;
+  char name[16];
+  
+  // Print indentation
+  for (int i = 0; i < depth; i++) {
+    printf("  ");
+  }
+  
+  // Print tree connector
+  if (depth > 0) {
+    printf("└─ ");
+  }
+  
+  // Lock parent process and get its info
+  proc_lock(p);
+  pstate = __proc_get_pstate(p);
+  pid = p->pid;
+  safestrcpy(name, p->name, sizeof(name));
+  
+  state = procstate_to_str(pstate);
+  printf("%d %s%s [%s] %s", pid, state, 
+          PROC_STOPPED(p) ? " (stopped)" : "", 
+          PROC_USER_SPACE(p) ? "U":"K", name);
+  if (pstate == PSTATE_RUNNING) {
+    printf(" (CPU: %d)\n", p->cpu_id);
+  } else {
+    printf("\n");
+  }
+  
+  // Keep parent locked while traversing children (safe per lock order rules)
+  // Each recursive call will lock the child while parent remains locked
+  list_foreach_node_safe(&p->children, child, tmp, siblings) {
+    __procdump_tree_recursive(child, depth + 1);
+  }
+  
+  proc_unlock(p);
+}
+
+// Print process tree based on parent-child relationships.
+// Shows the hierarchical structure starting from init process.
+void
+procdump_tree(void)
+{
+  struct proc *initproc;
+  int _panic_state = panic_state();
+
+  printf("Process Tree:\n");
+  
+  if (!_panic_state) {
+    __proctab_lock();
+  }
+  
+  initproc = __proctab_get_initproc();
+  if (initproc == NULL) {
+    printf("No init process\n");
+    if (!_panic_state) {
+      __proctab_unlock();
+    }
+    return;
+  }
+  
+  __procdump_tree_recursive(initproc, 0);
+  
+  if (!_panic_state) {
+    __proctab_unlock();
+  }
+}
+
 uint64 sys_dumpproc(void)
 {
   // This function is called from the dumpproc user program.
