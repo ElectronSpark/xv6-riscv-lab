@@ -235,15 +235,19 @@ static void test_grace_period(void) {
 
     __atomic_store_n(&test_counter, 0, __ATOMIC_RELEASE);
 
-    // Mark start of critical section on this CPU
+    // Test RCU critical section
     rcu_read_lock();
-
-    // On another CPU (simulated by context switch), note quiescent state
-    for (int i = 0; i < 10; i++) {
-        yield(); // Context switches are quiescent states
+    // Do some work inside RCU critical section
+    volatile int sum = 0;
+    for (int i = 0; i < 100; i++) {
+        sum += i;
     }
-
     rcu_read_unlock();
+
+    // Context switches OUTSIDE of RCU critical section are quiescent states
+    for (int i = 0; i < 10; i++) {
+        yield(); // These context switches help advance grace periods
+    }
 
     // Force grace period completion
     synchronize_rcu();
@@ -256,6 +260,7 @@ static void test_grace_period(void) {
 // ============================================================================
 
 void rcu_run_tests(void) {
+    sleep_ms(100);
     printf("\n");
     printf("================================================================================\n");
     printf("RCU Test Suite Starting\n");

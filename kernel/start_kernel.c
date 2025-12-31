@@ -55,7 +55,7 @@ static void __start_kernel_main_hart(void) {
 }
 
 static void __start_kernel_secondary_hart(void) {
-    while(started == 0)
+    while(__atomic_load_n(&started, __ATOMIC_ACQUIRE) == 0)
       ;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     printf("hart %d starting\n", cpuid());
@@ -101,7 +101,6 @@ void start_kernel_post_init(void) {
     void semaphore_launch_tests(void);
     semaphore_launch_tests();
 #endif
-    started = 1;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    __atomic_store_n(&started, 1, __ATOMIC_RELEASE);
     // rcu_run_tests();
 }
