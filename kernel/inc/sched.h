@@ -13,7 +13,7 @@ int chan_holding(void);
 void sleep_lock(void);
 void sleep_unlock(void);
 void scheduler_run(void);
-void scheduler_yield(struct spinlock *lk);
+void scheduler_yield(void);
 void scheduler_pause(struct spinlock *lk);
 void scheduler_stop(struct proc *p);
 void scheduler_continue(struct proc *p);

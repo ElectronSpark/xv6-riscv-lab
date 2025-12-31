@@ -127,12 +127,18 @@ static void __idle(void) {
     asm volatile("wfi");  // Wait for interrupt
 }
 
+struct proc *process_switch_to(struct proc *current, struct proc *target) {
+    struct context *prev_context = __swtch_context(&current->context, &target->context);
+    assert(prev_context == &current->context, "Returned context does not match current process context, %p != %p", prev_context, &target->context);
+    return container_of(prev_context, struct proc, context);
+}
+
 // Switch to the given process.
 // The process will change its state to RUNNING afer the switching.
 // Before calling this function, the caller must hold both the process's lock
 //    and the scheduler lock.
 // Returns the previous process that was running on this CPU.
-static struct spinlock *__switch_to(struct proc *p) {
+static struct proc *__switch_to(struct proc *p) {
     __sched_assert_holding();
     assert(!intr_get(), "Interrupts must be disabled before switching to a process");
     assert(p != NULL, "Cannot switch to a NULL process");
@@ -143,16 +149,18 @@ static struct spinlock *__switch_to(struct proc *p) {
     mycpu()->proc = p; // Set the current process for this CPU
     __proc_set_pstate(p, PSTATE_RUNNING); // Set the process state to RUNNING
 
-    struct spinlock * lk = (struct spinlock *)__swtch_context(&mycpu()->context, &p->context, 0);
-    proc_assert_holding(p);
+    struct context *prev_context = __swtch_context(&mycpu()->context, &p->context);
+    struct proc *prev = container_of(prev_context, struct proc, context);
+    proc_assert_holding(prev);
     assert(!intr_get(), "Interrupts must be disabled before switching to a process");
 
     mycpu()->proc = NULL; // Clear the current process for this CPU
 
-    return lk;
+    return prev;
 }
 
 void scheduler_run(void) {
+    printf("entering scheduler on CPU %d\n", cpuid());
     intr_off(); // Disable interrupts to keep the atomicity of the scheduling operation
     while (1) {
         // Wake up processes with expired timers.
@@ -168,26 +176,23 @@ void scheduler_run(void) {
         // printf("CPU: %d -> %s (pid: %d)\n", cpuid(), p->name, p->pid);
         sched_lock();
         p->cpu_id = cpuid();
-        struct spinlock *lk = __switch_to(p);
-        p->cpu_id = -1;
+        struct proc *prev = __switch_to(p);
+        prev->cpu_id = -1;
         assert(!intr_get(), "Interrupts must be disabled after switching to a process");
-        enum procstate pstate = __proc_get_pstate(p);
-        struct proc *pparent = p->parent;
+        enum procstate pstate = __proc_get_pstate(prev);
+        struct proc *pparent = prev->parent;
 
         if (pstate == PSTATE_RUNNING) {
-            __proc_set_pstate(p, PSTATE_RUNNABLE); // If we returned to a RUNNING process, set it to RUNNABLE
-            if (!PROC_STOPPED(p)) {
-                __scheduler_add_ready(p); // Add the process back to the ready queue
+            __proc_set_pstate(prev, PSTATE_RUNNABLE); // If we returned to a RUNNING process, set it to RUNNABLE
+            if (!PROC_STOPPED(prev)) {
+                __scheduler_add_ready(prev); // Add the process back to the ready queue
             }
         }
         sched_unlock();
         // printf("CPU: %d <- %s: %s (pid: %d)\n", cpuid(), p->name, procstate_to_str(p->state), p->pid);
-        proc_unlock(p);
+        proc_unlock(prev);
         if (chan_holding()) {
             sleep_unlock();
-        }
-        if (lk != NULL) {
-            spin_release(lk); // Release the lock returned by __swtch_context
         }
 
         if (pstate == PSTATE_ZOMBIE) {
@@ -202,27 +207,23 @@ void scheduler_run(void) {
 
 // Yield the CPU to allow other processes to run.
 // lk will not be re-acquired after yielding.
-void scheduler_yield(struct spinlock *lk) {
+void scheduler_yield(void) {
     push_off();
     struct proc *proc = myproc();
     proc_assert_holding(proc);
     __sched_assert_holding();
-    int lk_holding = (lk != NULL && spin_holding(lk));
     pop_off();
 
     assert(!intr_get(), "Interrupts must be disabled after switching to a process");
     int intena = mycpu()->intena; // Save interrupt state
     int noff_expected = 2;
-    if (lk_holding) {
-        noff_expected++;
-    }
     if (chan_holding()) {
         noff_expected++;
     }
     assert(mycpu()->noff == noff_expected, 
            "Process must hold and only hold the proc lock and sched lock when yielding. Current noff: %d", mycpu()->noff);
     PROC_CLEAR_NEEDS_RESCHED(proc);
-    __swtch_context(&proc->context, &mycpu()->context, (uint64)lk);
+    __swtch_context(&proc->context, &mycpu()->context);
 
     assert(!intr_get(), "Interrupts must be disabled after switching to a process");
     assert(myproc() == proc, "Yield returned to a different process");
@@ -245,7 +246,10 @@ void scheduler_sleep(struct spinlock *lk, enum procstate sleep_state) {
     pop_off();  // Safe to decrease noff counter after acquiring the process lock
 
     sched_lock();
-    scheduler_yield(lk); // Switch to the scheduler
+    if (lk_holding) {
+        spin_release(lk); // Release the lock returned by __swtch_context
+    }
+    scheduler_yield(); // Switch to the scheduler
     sched_unlock();
 
     // Because the process lock is acquired after lk, we need to release it before acquiring lk.

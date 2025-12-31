@@ -4,7 +4,8 @@
 # 
 # Save current registers in old. Load from new.	
 
-# uint64 __swtch_context(struct context *current, struct context *target, uint64 pcb_arg);
+# struct context *__swtch_context(struct context *current, struct context *target);
+# The return value is the last context switched out (i.e., current).
 # 
 # Save current registers in old. Load from new.
 # The pcb_arg passed in a2 is returned to the target context in a0.
@@ -39,8 +40,6 @@ __swtch_context:
         ld s9, 88(a1)
         ld s10, 96(a1)
         ld s11, 104(a1)
-
-        addi a0, a2, 0
         
         ret
 

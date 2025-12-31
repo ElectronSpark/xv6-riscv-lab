@@ -104,9 +104,11 @@ int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
 void            procdump_bt(void);
 void            procdump_bt_pid(int pid);
+struct proc     *process_switch_to(struct proc *current, struct proc *target);
+
 
 // swtch.S
-uint64          __swtch_context(struct context *current, struct context *target, uint64 pcb_arg);
+struct context *__swtch_context(struct context *current, struct context *target);
 typedef void (*sw_noret_cb_t)(uint64, uint64);
 void            __switch_noreturn(uint64 irq_sp, uint64 s0, sw_noret_cb_t addr);
 
