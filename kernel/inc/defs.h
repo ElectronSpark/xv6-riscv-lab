@@ -107,6 +107,8 @@ void            procdump_bt_pid(int pid);
 
 // swtch.S
 uint64          __swtch_context(struct context *current, struct context *target, uint64 pcb_arg);
+typedef void (*sw_noret_cb_t)(uint64, uint64);
+void            __switch_noreturn(uint64 irq_sp, uint64 s0, sw_noret_cb_t addr);
 
 // spinlock.c
 void            spin_acquire(struct spinlock*);

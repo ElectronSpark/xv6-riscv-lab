@@ -362,6 +362,7 @@ allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order)
   p->ksp -= 16;
   p->ksp &= ~0x7UL; // align to 8 bytes
   p->context.sp = p->ksp;
+  p->context.s0 = p->ksp;
   p->kentry = (uint64)entry;
   p->arg[0] = arg1;
   p->arg[1] = arg2;
@@ -401,15 +402,17 @@ int kernel_proc_create(const char *name, struct proc **retp, void *entry,
   }
   struct proc *initproc = __proctab_get_initproc();
   assert(initproc != NULL, "kernel_proc_create: initproc is NULL");
-  proc_lock(initproc);
-  proc_lock(p);
-  attach_child(initproc, p);
-  proc_unlock(initproc);
-
+  
+  // Set up the context BEFORE making the process visible to scheduler
   p->context.ra = (uint64)__kernel_proc_entry;
   p->kentry = (uint64)entry;
   p->arg[0] = arg1;
   p->arg[1] = arg2;
+
+  proc_lock(initproc);
+  proc_lock(p);
+  attach_child(initproc, p);
+  proc_unlock(initproc);
   // Newly allocated process is a kernel process
   assert(!PROC_USER_SPACE(p), "kernel_proc_create: new proc is a user process");
   safestrcpy(p->name, name ? name : "kproc", sizeof(p->name));
@@ -490,13 +493,21 @@ uchar initcode[] = {
 };
 
 static void init_entry(void) {
-  // In post init, the proc lock is still held
-  // and will be released in forkret().
-  sched_unlock();
-  proc_unlock(myproc());
+  // When we arrive here from context switch, we hold:
+  //   1. myproc()->lock (from __sched_pick_next)
+  //   2. scheduler lock (from scheduler_run)
+  // Release them to do initialization work.
+  sched_unlock();  // Release scheduler lock first
+  proc_unlock(myproc());  // Then release process lock
+  
   start_kernel_post_init();
+  
+  // Re-acquire locks in the correct order before calling forkret:
+  //   1. Process lock first
+  //   2. Then scheduler lock
   proc_lock(myproc());
   sched_lock();
+  
   forkret();
 }
 
@@ -853,6 +864,10 @@ yield(void)
 void
 forkret(void)
 {
+  // Verify we're holding both locks as expected from scheduler
+  proc_assert_holding(myproc());
+  assert(sched_holding(), "forkret: scheduler lock not held");
+  
   assert(PROC_USER_SPACE(myproc()), "kernel process %d tries to return to user space", myproc()->pid);
   // The scheduler will disable interrupts to assure the atomicity of
   // the scheduler operations. For processes that gave up CPU by calling yield(),

@@ -68,6 +68,17 @@ uservec:
         csrrw t0, sscratch, t0
         sd t0, 112(a0)
 
+        # save scause, sstatus, stval, and sepc into the trapframe
+        csrr t0, scause
+        sd t0, 288(a0)
+        csrr t0, stval
+        sd t0, 296(a0)
+        csrr t0, sepc
+        sd t0, 24(a0)
+        #sd t0, 304(a0)
+        csrr t0, sstatus
+        sd t0, 312(a0)
+
         # initialize kernel stack pointer, from p->trapframe->kernel_sp
         ld sp, 8(a0)
 
@@ -108,6 +119,11 @@ userret:
 
         # store trapframe base in sscratch
         csrw sscratch, a0
+
+        # @TODO: restore sstatus from trapframe
+        # restore sepc from the trapframe
+        ld t0, 24(a0)
+        csrw sepc, t0
 
         # restore all but a0 from TRAPFRAME
         ld ra, 40(a0)

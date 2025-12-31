@@ -44,4 +44,25 @@ __swtch_context:
         
         ret
 
-	
+        #
+        # Jump to an address and change the sp pointer without return
+        # void __switch_noreturn(uint64 sp, uint64 s0, sw_noret_cb_t addr);
+        # the addr should point to a function with this prototype:
+        # typedef void (*sw_noret_cb_t)(uint64 ksp, uint64 s0);
+.globl __switch_noreturn
+.align 4
+__switch_noreturn:
+        # fake return point in convenient of debugging
+        # ld        ra, 8(sp)
+        # ld        s0, 0(sp)
+        # addi      sp, a0, -16
+        # sd        ra, 8(sp)
+        # sd        s0, 0(sp)
+        # mv        t0, s0
+        # mv        s0, a0
+        # mv        a0, t0
+        mv        t0, sp
+        mv        sp, a0
+        mv        a0, t0
+        jr        a2
+        # should not return
