@@ -28,6 +28,7 @@ This enhanced version has been substantially extended with production-grade feat
 - **Device Management**: Character and block device framework with proper abstraction
 - **Network Stack**: Basic networking capabilities with E1000 driver support
 - **Enhanced Process Management**: Improved scheduling and process lifecycle management
+- **Separate Interrupt Stacks**: Dedicated interrupt stacks per CPU for better interrupt handling and nested interrupt support
 
 ## Features
 
@@ -46,6 +47,7 @@ This enhanced version has been substantially extended with production-grade feat
 - **Page Cache**: Block-level caching for file system I/O
 - **Virtual Memory**: Demand paging and copy-on-write
 - **Memory Protection**: Per-process address spaces
+- **Dedicated Interrupt Stacks**: Separate per-CPU interrupt stacks (16KB) for robust nested interrupt handling
 
 ### Synchronization Primitives
 - **Mutexes**: Sleeping locks for kernel synchronization
@@ -554,7 +556,7 @@ Common GDB commands:
 Building a complete, stable Unix-like operating system:
 
 1. **Dynamic Memory Probing & Page Frames** - Memory detection, zones (DMA/Normal), per-CPU caches
-2. **⚡ Interrupt Handling** *(CURRENT FOCUS)* - Separate interrupt/kernel stacks, top-half/bottom-half processing
+2. **✅ Interrupt Handling** *(COMPLETED)* - Separate interrupt/kernel stacks (16KB per CPU), nested interrupt support, dual-entry trap handlers
 3. **Process Scheduling** - Implement MLFQ or CFS, priority levels, CPU affinity
 4. **Enhanced Kernel Threads** - Thread pools, work queues (for bottom-half), priorities
 5. **Multi-User Support** - User/group IDs, permission checking, setuid/setgid
