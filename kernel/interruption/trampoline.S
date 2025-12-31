@@ -75,7 +75,6 @@ uservec:
         sd t0, 296(a0)
         csrr t0, sepc
         sd t0, 24(a0)
-        #sd t0, 304(a0)
         csrr t0, sstatus
         sd t0, 312(a0)
 
@@ -84,6 +83,8 @@ uservec:
 
         # make tp hold the current hartid, from p->trapframe->kernel_hartid
         ld tp, 32(a0)
+        #make sure gp is also restored from trapframe
+        ld gp, 320(a0)
 
         # load the address of usertrap(), from p->trapframe->kernel_trap
         ld t0, 16(a0)

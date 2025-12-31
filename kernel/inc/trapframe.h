@@ -56,6 +56,7 @@ struct trapframe {
   /* 296 */ uint64 stval;        // saved stval
   /* 304 */ uint64 sepc;         // saved sepc
   /* 312 */ uint64 sstatus;      // saved sstatus
+  /* 320 */ uint64 kernel_gp;    // saved kernel gp
 };
 
 
