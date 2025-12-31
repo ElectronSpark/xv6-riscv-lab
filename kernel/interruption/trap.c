@@ -172,7 +172,7 @@ __user_kirq_return(uint64 irq_sp, uint64 s0)
 void
 __user_kirq_entrance(uint64 ksp, uint64 s0)
 {
-  mycpu()->intr_depth++;
+  assert(mycpu()->intr_depth++ == 0, "__user_kirq_entrance: nested interrupts not supported. level=%d", mycpu()->intr_depth);
 
   // irq indicates which device interrupted.
   int irq = plic_claim();
@@ -410,7 +410,7 @@ kerneltrap(struct ktrapframe *sp, uint64 s0)
 {
   int which_dev = 0;
 
-  mycpu()->intr_depth++;
+  assert(mycpu()->intr_depth++ == 0, "kerneltrap: nested interrupts not supported. level=%d", mycpu()->intr_depth);
   
   if((sp->sstatus & SSTATUS_SPP) == 0)
     panic("kerneltrap: not from supervisor mode");
