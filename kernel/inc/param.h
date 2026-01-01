@@ -59,7 +59,7 @@
 #define INTR_STACK_ORDER 2 // interrupt stack size is 16KB
 #define INTR_STACK_SIZE (1UL << (PAGE_SHIFT + INTR_STACK_ORDER)) // interrupt stack size in bytes
 #define TRAPFRAME_ORDER 0 // trapframe size is 4KB
-#define TRAPFRAME_SIZE (1UL << (PAGE_SHIFT + TRAPFRAME_ORDER)) // trapframe size in bytes
+#define TRAPFRAME_MAPSIZE (1UL << (PAGE_SHIFT + TRAPFRAME_ORDER)) // trapframe size in bytes
 
 #define BACKTRACE_MAX_DEPTH 32 // maximum depth of backtrace
 

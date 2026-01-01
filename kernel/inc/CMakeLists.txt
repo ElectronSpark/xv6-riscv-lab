@@ -15,7 +15,7 @@ endif()
 # Format: --struct name:header for auto-detection of all fields
 set(ASM_OFFSET_STRUCTS
     trapframe:trapframe.h
-    ktrapframe:trapframe.h
+    utrapframe:trapframe.h
     context:trapframe.h
     proc:proc.h
 )

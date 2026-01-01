@@ -265,7 +265,9 @@ class AsmOffsetsGenerator:
         
         # Pattern to match our special assembly directives
         # Looking for: .ascii "->define SYMBOL VALUE "
-        define_pattern = re.compile(r'\.ascii\s+"->define\s+(\S+)\s+(\S+)\s+"')
+        # Value can be a simple number or complex expression like (1UL << (12 + 0)) 184
+        # We want to extract the final numeric value
+        define_pattern = re.compile(r'\.ascii\s+"->define\s+(\S+)\s+(.+?)\s*"')
         comment_pattern = re.compile(r'\.ascii\s+"->##(.+)"')
         blank_pattern = re.compile(r'\.ascii\s+"->"')
         
@@ -276,8 +278,15 @@ class AsmOffsetsGenerator:
             match = define_pattern.search(stripped)
             if match:
                 symbol = match.group(1)
-                value = match.group(2)
-                lines.append(f'#define {symbol} {value}')
+                value_str = match.group(2)
+                
+                # The value might be an expression followed by the actual number
+                # e.g., "(1UL << (12 + 0)) 184" - we want the last number
+                value_parts = value_str.split()
+                if value_parts:
+                    # Take the last token as the value (handles expressions)
+                    value = value_parts[-1]
+                    lines.append(f'#define {symbol} {value}')
                 continue
             
             # Check for comment directive

@@ -125,7 +125,7 @@ struct proc {
   int kstack_order;            // Kernel stack order, used for allocation
   uint64 ksp;
   vm_t *vm;                     // Virtual memory areas and page table
-  struct trapframe *trapframe; // data page for trampoline.S
+  struct utrapframe *trapframe; // data page for trampoline.S
 
   // both p->lock and __sched_lock must be held 
   int cpu_id;                  // The CPU running this process.
@@ -148,7 +148,7 @@ struct proc {
   int rcu_read_lock_nesting;   // Number of nested rcu_read_lock() calls
 };
 
-BUILD_BUG_ON((sizeof(struct proc) + sizeof(struct trapframe) + 16) >= PGSIZE);
+BUILD_BUG_ON((sizeof(struct proc) + sizeof(struct utrapframe) + 16) >= PGSIZE);
 
 static inline uint64 proc_flags(struct proc *p) {
   if (p == NULL) {

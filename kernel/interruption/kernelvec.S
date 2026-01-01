@@ -15,12 +15,12 @@
 kernelvec_entrance:
         csrrw a0, sscratch, a0
         # make room to save registers.
-        addi a0, a0, -KTRAPFRAME_SIZE
-        sd sp, KTRAPFRAME_SP(a0)
+        addi a0, a0, -TRAPFRAME_SIZE
+        sd sp, TRAPFRAME_SP(a0)
         mv sp, a0
         csrrw a0, sscratch, a0
-        sd a0, KTRAPFRAME_A0(sp)
-        addi a0, sp, KTRAPFRAME_SIZE
+        sd a0, TRAPFRAME_A0(sp)
+        addi a0, sp, TRAPFRAME_SIZE
         csrrw a0, sscratch, a0
         j __kernelvec
 
@@ -33,40 +33,40 @@ kernelvec_entrance:
 .align 4
 kernelvec:
         # make room to save registers.
-        addi sp, sp, -KTRAPFRAME_SIZE
-        sd a0, KTRAPFRAME_A0(sp)
-        addi a0, sp, KTRAPFRAME_SIZE
-        sd a0, KTRAPFRAME_SP(sp)
+        addi sp, sp, -TRAPFRAME_SIZE
+        sd a0, TRAPFRAME_A0(sp)
+        addi a0, sp, TRAPFRAME_SIZE
+        sd a0, TRAPFRAME_SP(sp)
 
 __kernelvec:
         # save caller-saved registers.
-        sd ra, KTRAPFRAME_RA(sp)
-        sd s0, KTRAPFRAME_S0(sp)
-        sd t0, KTRAPFRAME_T0(sp)
-        sd t1, KTRAPFRAME_T1(sp)
-        sd t2, KTRAPFRAME_T2(sp)
-        sd a1, KTRAPFRAME_A1(sp)
-        sd a2, KTRAPFRAME_A2(sp)
-        sd a3, KTRAPFRAME_A3(sp)
-        sd a4, KTRAPFRAME_A4(sp)
-        sd a5, KTRAPFRAME_A5(sp)
-        sd a6, KTRAPFRAME_A6(sp)
-        sd a7, KTRAPFRAME_A7(sp)
-        sd t3, KTRAPFRAME_T3(sp)
-        sd t4, KTRAPFRAME_T4(sp)
-        sd t5, KTRAPFRAME_T5(sp)
-        sd t6, KTRAPFRAME_T6(sp)
+        sd ra, TRAPFRAME_RA(sp)
+        sd s0, TRAPFRAME_S0(sp)
+        sd t0, TRAPFRAME_T0(sp)
+        sd t1, TRAPFRAME_T1(sp)
+        sd t2, TRAPFRAME_T2(sp)
+        sd a1, TRAPFRAME_A1(sp)
+        sd a2, TRAPFRAME_A2(sp)
+        sd a3, TRAPFRAME_A3(sp)
+        sd a4, TRAPFRAME_A4(sp)
+        sd a5, TRAPFRAME_A5(sp)
+        sd a6, TRAPFRAME_A6(sp)
+        sd a7, TRAPFRAME_A7(sp)
+        sd t3, TRAPFRAME_T3(sp)
+        sd t4, TRAPFRAME_T4(sp)
+        sd t5, TRAPFRAME_T5(sp)
+        sd t6, TRAPFRAME_T6(sp)
 
         csrr t0, sepc
-        sd t0, KTRAPFRAME_SEPC(sp)
+        sd t0, TRAPFRAME_SEPC(sp)
         csrr t0, sstatus
-        sd t0, KTRAPFRAME_SSTATUS(sp)
+        sd t0, TRAPFRAME_SSTATUS(sp)
         csrr t0, scause
-        sd t0, KTRAPFRAME_SCAUSE(sp)
+        sd t0, TRAPFRAME_SCAUSE(sp)
         csrr t0, stval
-        sd t0, KTRAPFRAME_STVAL(sp)
+        sd t0, TRAPFRAME_STVAL(sp)
         csrr t0, stvec
-        sd t0, KTRAPFRAME_STVEC(sp)
+        sd t0, TRAPFRAME_STVEC(sp)
 
         # redirect all the following kernel trap to kernelvec
         la t0, kernelvec
@@ -77,39 +77,39 @@ __kernelvec:
         addi a1, s0, 0
         call kerneltrap
 
-        ld t0, KTRAPFRAME_SEPC(sp)
+        ld t0, TRAPFRAME_SEPC(sp)
         csrw sepc, t0
-        ld t0, KTRAPFRAME_SSTATUS(sp)
+        ld t0, TRAPFRAME_SSTATUS(sp)
         csrw sstatus, t0
-        ld t0, KTRAPFRAME_SCAUSE(sp)
+        ld t0, TRAPFRAME_SCAUSE(sp)
         csrw scause, t0
-        ld t0, KTRAPFRAME_STVAL(sp)
+        ld t0, TRAPFRAME_STVAL(sp)
         csrw stval, t0
-        ld t0, KTRAPFRAME_STVEC(sp)
+        ld t0, TRAPFRAME_STVEC(sp)
         csrw stvec, t0
 
         # restore registers.
-        ld ra, KTRAPFRAME_RA(sp)
-        ld s0, KTRAPFRAME_S0(sp)
+        ld ra, TRAPFRAME_RA(sp)
+        ld s0, TRAPFRAME_S0(sp)
         # not tp (contains hartid) and gp, in case we moved CPUs
-        ld t0, KTRAPFRAME_T0(sp)
-        ld t1, KTRAPFRAME_T1(sp)
-        ld t2, KTRAPFRAME_T2(sp)
-        ld a0, KTRAPFRAME_A0(sp)
-        ld a1, KTRAPFRAME_A1(sp)
-        ld a2, KTRAPFRAME_A2(sp)
-        ld a3, KTRAPFRAME_A3(sp)
-        ld a4, KTRAPFRAME_A4(sp)
-        ld a5, KTRAPFRAME_A5(sp)
-        ld a6, KTRAPFRAME_A6(sp)
-        ld a7, KTRAPFRAME_A7(sp)
-        ld t3, KTRAPFRAME_T3(sp)
-        ld t4, KTRAPFRAME_T4(sp)
-        ld t5, KTRAPFRAME_T5(sp)
-        ld t6, KTRAPFRAME_T6(sp)
+        ld t0, TRAPFRAME_T0(sp)
+        ld t1, TRAPFRAME_T1(sp)
+        ld t2, TRAPFRAME_T2(sp)
+        ld a0, TRAPFRAME_A0(sp)
+        ld a1, TRAPFRAME_A1(sp)
+        ld a2, TRAPFRAME_A2(sp)
+        ld a3, TRAPFRAME_A3(sp)
+        ld a4, TRAPFRAME_A4(sp)
+        ld a5, TRAPFRAME_A5(sp)
+        ld a6, TRAPFRAME_A6(sp)
+        ld a7, TRAPFRAME_A7(sp)
+        ld t3, TRAPFRAME_T3(sp)
+        ld t4, TRAPFRAME_T4(sp)
+        ld t5, TRAPFRAME_T5(sp)
+        ld t6, TRAPFRAME_T6(sp)
 
         # restore sp at last
-        ld sp, KTRAPFRAME_SP(sp)
+        ld sp, TRAPFRAME_SP(sp)
 
         # return to whatever we were doing in the kernel.
         sret

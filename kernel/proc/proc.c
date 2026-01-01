@@ -356,7 +356,7 @@ allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order)
   p->kstack = (uint64)kstack;
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)entry;
-  p->ksp = ((uint64)p - sizeof(struct trapframe) - 16);
+  p->ksp = ((uint64)p - sizeof(struct utrapframe) - 16);
   p->ksp &= ~0x7UL; // align to 8 bytes
   p->trapframe = (void *)p->ksp;
   p->ksp -= 16;
@@ -558,8 +558,8 @@ userinit(void)
   // printf("\n");
 
   // prepare for the very first "return" from kernel to user.
-  p->trapframe->sepc = UVMBOTTOM;      // user program counter
-  p->trapframe->sp = USTACKTOP;  // user stack pointer
+  p->trapframe->trapframe.sepc = UVMBOTTOM;      // user program counter
+  p->trapframe->trapframe.sp = USTACKTOP;  // user stack pointer
 
   safestrcpy(p->name, "initcode", sizeof(p->name));
   
@@ -653,7 +653,7 @@ fork(void)
   *(np->trapframe) = *(p->trapframe);
 
   // Cause fork to return 0 in the child.
-  np->trapframe->a0 = 0;
+  np->trapframe->trapframe.a0 = 0;
 
   // copy the process's signal actions.
   if (p->sigacts) {

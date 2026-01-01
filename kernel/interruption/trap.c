@@ -26,7 +26,7 @@ void kernelvec_entrance();
 // skip getting sscratch.
 void kernelvec();
 
-extern int devintr(struct ktrapframe *sp);
+extern int devintr(struct trapframe *sp);
 
 void
 trapinit(void)
@@ -65,9 +65,9 @@ clockintr()
 void
 __user_kirq_return(uint64 irq_sp, uint64 s0)
 {
-  if (myproc()->trapframe->scause >> 63 && myproc()->trapframe->scause != 0x8000000000000009L 
-      && myproc()->trapframe->scause != 0x8000000000000005L) {
-    assert(myproc()->trapframe->scause >> 63 == 0, "unexpected interrupt");
+  if (myproc()->trapframe->trapframe.scause >> 63 && myproc()->trapframe->trapframe.scause != 0x8000000000000009L 
+      && myproc()->trapframe->trapframe.scause != 0x8000000000000005L) {
+    assert(myproc()->trapframe->trapframe.scause >> 63 == 0, "unexpected interrupt");
     // printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), myproc()->pid);
     // printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
     assert(myproc()->pid != 1, "init exiting");
@@ -80,7 +80,7 @@ __user_kirq_return(uint64 irq_sp, uint64 s0)
 void
 user_kirq_entrance(uint64 ksp, uint64 s0)
 {
-  if((myproc()->trapframe->sstatus & SSTATUS_SPP) != 0)
+  if((myproc()->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
   // redirect traps to kerneltrap()
@@ -89,17 +89,17 @@ user_kirq_entrance(uint64 ksp, uint64 s0)
 
   assert(mycpu()->intr_depth++ == 0, "user_kirq_entrance: nested interrupts not supported. level=%d", mycpu()->intr_depth);
 
-  if (myproc()->trapframe->scause == 0x8000000000000005L) {
+  if (myproc()->trapframe->trapframe.scause == 0x8000000000000005L) {
     // timer interrupt.
     clockintr();
     PROC_SET_NEEDS_RESCHED(myproc());
-  } else if (myproc()->trapframe->scause == 0x8000000000000009L) {
+  } else if (myproc()->trapframe->trapframe.scause == 0x8000000000000009L) {
     // irq indicates which device interrupted.
-    do_irq(myproc()->trapframe->scause);
+    do_irq(myproc()->trapframe->trapframe.scause);
   }
   mycpu()->intr_depth--;
 
-  if (myproc()->trapframe->scause == 0x8000000000000009L) {
+  if (myproc()->trapframe->trapframe.scause == 0x8000000000000009L) {
     // For device interrupts, we don't need to reschedule immediately.
     // Just return to user space.
     usertrapret();
@@ -117,11 +117,11 @@ usertrap(void)
 {
   uint64 va;
   vma_t *vma = NULL;
-  uint64 scause = myproc()->trapframe->scause;
+  uint64 scause = myproc()->trapframe->trapframe.scause;
   // printf("usertrap: scause=0x%lx (%s), sepc=0x%lx, stval=0x%lx\n",
   //        r_scause(), __scause_to_str(r_scause()), r_sepc(), r_stval());
 
-  if((myproc()->trapframe->sstatus & SSTATUS_SPP) != 0)
+  if((myproc()->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
 
   // redirect traps to kerneltrap()
@@ -138,7 +138,7 @@ usertrap(void)
 
     // sepc points to the ecall instruction,
     // but we want to return to the next instruction.
-    myproc()->trapframe->sepc += 4;
+    myproc()->trapframe->trapframe.sepc += 4;
 
     // an interrupt will change sepc, scause, and sstatus,
     // so enable only now that we're done with those registers.
@@ -148,7 +148,7 @@ usertrap(void)
     break;
   case 13:
     // Load page fault - handle demand paging for read access
-    va = myproc()->trapframe->stval;
+    va = myproc()->trapframe->trapframe.stval;
     // First try to grow stack if the address is in stack region
     vm_try_growstack(myproc()->vm, va);
     // Now find the VMA (may be stack that just grew, or existing VMA needing demand paging)
@@ -164,7 +164,7 @@ usertrap(void)
     break;
   case 15:
     // Store page fault - handle demand paging for write access
-    va = myproc()->trapframe->stval;
+    va = myproc()->trapframe->trapframe.stval;
     // First try to grow stack if the address is in stack region
     vm_try_growstack(myproc()->vm, va);
     // Now find the VMA (may be stack that just grew, or existing VMA needing demand paging)
@@ -179,7 +179,7 @@ usertrap(void)
     kill(myproc()->pid, SIGSEGV);
     break;
   default:
-    assert(myproc()->trapframe->scause >> 63 == 0, "unexpected interrupt");
+    assert(myproc()->trapframe->trapframe.scause >> 63 == 0, "unexpected interrupt");
     // printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), myproc()->pid);
     // printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
     assert(myproc()->pid != 1, "init exiting");
@@ -213,7 +213,7 @@ int push_sigframe(struct proc *p,
     }
     new_sp = (uint64)p->sig_stack.ss_sp + p->sig_stack.ss_size;
   } else {
-    new_sp = p->trapframe->sp;
+    new_sp = p->trapframe->trapframe.sp;
   }
 
   new_sp -= 0x10UL;
@@ -255,12 +255,12 @@ int push_sigframe(struct proc *p,
     }
   }
 
-  p->trapframe->sp = new_sp;
-  p->trapframe->sepc = (uint64)SIG_TRAMPOLINE; // Set the epc to the signal trampoline
-  p->trapframe->a0 = signo; // Set the first argument
-  p->trapframe->a1 = user_siginfo; // Set the second argument
-  p->trapframe->a2 = new_ucontext; // Set the third argument
-  p->trapframe->t0 = (uint64)sa->sa_handler; // Set the handler address
+  p->trapframe->trapframe.sp = new_sp;
+  p->trapframe->trapframe.sepc = (uint64)SIG_TRAMPOLINE; // Set the epc to the signal trampoline
+  p->trapframe->trapframe.a0 = signo; // Set the first argument
+  p->trapframe->trapframe.a1 = user_siginfo; // Set the second argument
+  p->trapframe->trapframe.a2 = new_ucontext; // Set the third argument
+  p->trapframe->trapframe.t0 = (uint64)sa->sa_handler; // Set the handler address
   p->sig_ucontext = new_ucontext;
 
   return 0; // Success
@@ -348,7 +348,7 @@ usertrapret(void)
 }
 
 void
-kerneltrap_dump_regs(struct ktrapframe *sp)
+kerneltrap_dump_regs(struct trapframe *sp)
 {
   printf("kerneltrap_dump_regs:\n");
   printf("pc: 0x%lx\n", sp->sepc);
@@ -368,7 +368,7 @@ kerneltrap_dump_regs(struct ktrapframe *sp)
 // interrupts and exceptions from kernel code go here via kernelvec,
 // on whatever the current kernel stack is.
 void 
-kerneltrap(struct ktrapframe *sp, uint64 s0)
+kerneltrap(struct trapframe *sp, uint64 s0)
 {
   int which_dev = 0;
 
@@ -408,7 +408,7 @@ kerneltrap(struct ktrapframe *sp, uint64 s0)
 // 1 if other device,
 // 0 if not recognized.
 int
-devintr(struct ktrapframe *sp)
+devintr(struct trapframe *sp)
 {
   if(sp->scause == 0x8000000000000009L){
     // this is a supervisor external interrupt, via PLIC.

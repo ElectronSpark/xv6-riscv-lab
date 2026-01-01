@@ -70,7 +70,7 @@ typedef struct stack {
 	size_t ss_size; /* size */
 } stack_t;
 
-typedef struct trapframe mcontext_t;
+typedef struct utrapframe mcontext_t;
 
 typedef struct ucontext {
 	struct ucontext *uc_link; /* pointer to context resumed when */

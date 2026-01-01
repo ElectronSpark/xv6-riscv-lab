@@ -195,7 +195,7 @@ exec(char *path, char **argv)
   // arguments to user main(argc, argv)
   // argc is returned via the system call return
   // value, which goes in a0.
-  p->trapframe->a1 = sp;
+  p->trapframe->trapframe.a1 = sp;
 
   // Save program name for debugging.
   for (last = s = path; *s; s++)
@@ -206,8 +206,8 @@ exec(char *path, char **argv)
   // Commit to the user image.
   vm_destroy(p->vm); // Destroy the old VM
   p->vm = tmp_vm; // Set the new VM
-  p->trapframe->sepc = elf.entry;  // initial program counter = main
-  p->trapframe->sp = sp; // initial stack pointer
+  p->trapframe->trapframe.sepc = elf.entry;  // initial program counter = main
+  p->trapframe->trapframe.sp = sp; // initial stack pointer
   return argc; // this ends up in a0, the first argument to main(argc, argv)
 
  bad:

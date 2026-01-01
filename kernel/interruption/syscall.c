@@ -39,17 +39,17 @@ argraw(int n)
   struct proc *p = myproc();
   switch (n) {
   case 0:
-    return p->trapframe->a0;
+    return p->trapframe->trapframe.a0;
   case 1:
-    return p->trapframe->a1;
+    return p->trapframe->trapframe.a1;
   case 2:
-    return p->trapframe->a2;
+    return p->trapframe->trapframe.a2;
   case 3:
-    return p->trapframe->a3;
+    return p->trapframe->trapframe.a3;
   case 4:
-    return p->trapframe->a4;
+    return p->trapframe->trapframe.a4;
   case 5:
-    return p->trapframe->a5;
+    return p->trapframe->trapframe.a5;
   }
   panic("argraw");
   return -1;
@@ -207,12 +207,12 @@ syscall(void)
   int num;
   struct proc *p = myproc();
 
-  num = p->trapframe->a7;
+  num = p->trapframe->trapframe.a7;
   
   // Handle VFS syscalls (1000+)
   if (num >= 1000) {
-    p->trapframe->a0 = handle_vfs_syscall(num);
-    if (p->trapframe->a0 == (uint64)-1) {
+    p->trapframe->trapframe.a0 = handle_vfs_syscall(num);
+    if (p->trapframe->trapframe.a0 == (uint64)-1) {
       printf("%d %s: unknown vfs sys call %d\n", p->pid, p->name, num);
     }
     return;
@@ -221,10 +221,10 @@ syscall(void)
   if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
     // Use num to lookup the system call function for num, call it,
     // and store its return value in p->trapframe->a0
-    p->trapframe->a0 = syscalls[num]();
+    p->trapframe->trapframe.a0 = syscalls[num]();
   } else {
     printf("%d %s: unknown sys call %d\n",
             p->pid, p->name, num);
-    p->trapframe->a0 = -1;
+    p->trapframe->trapframe.a0 = -1;
   }
 }
