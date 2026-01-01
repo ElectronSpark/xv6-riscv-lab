@@ -62,7 +62,9 @@ struct trapframe {
   /*  32 */ uint64 kernel_hartid; // saved kernel tp
   /*  56 */ uint64 gp;
   /* 320 */ uint64 kernel_gp;    // saved kernel gp
-};
+} __attribute__((aligned(64)));
+
+
 
 
 struct ktrapframe {
@@ -90,7 +92,7 @@ struct ktrapframe {
   /* 144 */ uint64 stval;
   /* 152 */ uint64 stvec;
   /* 160 */ uint64 sscratch;
-} __attribute__((aligned(8)));
+} __attribute__((aligned(64)));
 
 
 // Saved registers for kernel context switches.
@@ -111,7 +113,7 @@ struct context {
   uint64 s9;
   uint64 s10;
   uint64 s11;
-} __attribute__((aligned(8)));
+} __attribute__((aligned(64)));
 
 // Per-CPU state.
 struct cpu {
@@ -122,6 +124,6 @@ struct cpu {
   int intr_depth;             // Depth of nested interruption.
   int noff;                   // Depth of push_off() nesting.
   int intena;                 // Were interrupts enabled before push_off()?
-};
+}  __attribute__((aligned(64)));
 
 #endif /* __KERNEL_TRAPFRAME_H */

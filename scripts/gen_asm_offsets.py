@@ -114,7 +114,7 @@ class AsmOffsetsGenerator:
         
         Args:
             struct_name: Name of the structure
-            fields: List of field names, or None to auto-detect
+            fields: List of field names (may include nested paths like "fs.rooti"), or None to auto-detect
         """
         prefix = struct_name.upper()
         code = []
@@ -123,7 +123,12 @@ class AsmOffsetsGenerator:
         if fields:
             # Use specified fields
             for field in fields:
-                offset_name = f"{prefix}_{field.upper()}"
+                # Convert nested path to macro name: "fs.rooti" -> "FS_ROOTI"
+                # Also handle dots in field paths for nested structures
+                macro_suffix = field.replace('.', '_').upper()
+                offset_name = f"{prefix}_{macro_suffix}"
+                
+                # For C offsetof, dots need to be preserved: offsetof(struct proc, fs.rooti)
                 code.append(f'    OFFSET({offset_name}, {struct_name}, {field});')
         else:
             # For auto-detection, we'll parse the structure later
@@ -322,70 +327,164 @@ class AsmOffsetsGenerator:
         content = re.sub(r'/\*.*?\*/', '', content, flags=re.DOTALL)
         
         lines = content.split('\n')
+        fields = self._parse_struct_body(lines, struct_name, "")
         
+        self.log(f"Found {len(fields)} fields in struct {struct_name}: {', '.join(fields[:5])}{'...' if len(fields) > 5 else ''}")
+        return fields
+    
+    def _parse_struct_body(self, lines, struct_name, prefix):
+        """Parse the body of a structure, handling nested structures.
+        
+        Args:
+            lines: List of lines to parse
+            struct_name: Name of the structure being parsed
+            prefix: Prefix for nested field names
+        
+        Returns:
+            List of field names (with paths for nested named structs)
+        """
+        fields = []
         in_struct = False
         struct_brace_count = 0
-        nested_brace_count = 0
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            
+            # Check for struct definition start
+            if not in_struct:
+                if f'struct {struct_name}' in stripped:
+                    in_struct = True
+                    if '{' in stripped:
+                        struct_brace_count = 1
+                i += 1
+                continue
+            
+            # Skip preprocessor directives and empty lines
+            if not stripped or stripped.startswith('#'):
+                i += 1
+                continue
+            
+            # Check if this line starts a nested struct/union
+            if ('struct' in stripped or 'union' in stripped) and '{' in stripped:
+                # This is a nested struct/union definition
+                # Collect all lines until we close it
+                nested_lines = [line]
+                nested_brace_count = stripped.count('{') - stripped.count('}')
+                j = i + 1
+                
+                # Continue collecting lines until the nested struct closes
+                while nested_brace_count > 0 and j < len(lines):
+                    nested_line = lines[j]
+                    nested_stripped = nested_line.strip()
+                    nested_lines.append(nested_line)
+                    nested_brace_count += nested_stripped.count('{') - nested_stripped.count('}')
+                    j += 1
+                
+                # Now check if the closing line has a field name
+                closing_line = lines[j-1] if j > i + 1 else line
+                closing_stripped = closing_line.strip()
+                
+                # Look for the pattern: } field_name;
+                if '}' in closing_stripped and ';' in closing_stripped:
+                    # Extract what comes after the }
+                    after_brace = closing_stripped.split('}', 1)[1].strip().rstrip(';')
+                    parts = after_brace.split()
+                    
+                    if parts:
+                        # This is a named nested struct
+                        field_name = parts[-1].lstrip('*')
+                        if '[' in field_name:
+                            field_name = field_name[:field_name.index('[')]
+                        
+                        if field_name and field_name.isidentifier():
+                            # Add the nested field itself
+                            full_name = f"{prefix}{field_name}" if prefix else field_name
+                            fields.append(full_name)
+                            
+                            # Parse nested fields and add them with path
+                            nested_fields = self._parse_nested_struct_body(nested_lines)
+                            for nf in nested_fields:
+                                nested_path = f"{full_name}.{nf}"
+                                fields.append(nested_path)
+                    else:
+                        # Anonymous nested struct - flatten fields
+                        nested_fields = self._parse_nested_struct_body(nested_lines)
+                        for nf in nested_fields:
+                            full_name = f"{prefix}{nf}" if prefix else nf
+                            fields.append(full_name)
+                else:
+                    # Anonymous nested struct - flatten fields
+                    nested_fields = self._parse_nested_struct_body(nested_lines)
+                    for nf in nested_fields:
+                        full_name = f"{prefix}{nf}" if prefix else nf
+                        fields.append(full_name)
+                
+                # Skip past the nested struct
+                i = j
+                continue
+            
+            # Track main struct braces
+            struct_brace_count += stripped.count('{') - stripped.count('}')
+            
+            # Check for end of main struct
+            if struct_brace_count <= 0 and '}' in stripped:
+                break
+            
+            # Extract regular field name (not part of nested struct)
+            if ';' in stripped and '{' not in stripped and '}' not in stripped:
+                parts = stripped.split()
+                if len(parts) >= 2:
+                    field_part = parts[-1].rstrip(';')
+                    if '[' in field_part:
+                        field_part = field_part[:field_part.index('[')]
+                    field_part = field_part.lstrip('*')
+                    if field_part and field_part.isidentifier():
+                        full_name = f"{prefix}{field_part}" if prefix else field_part
+                        fields.append(full_name)
+            
+            i += 1
+        
+        return fields
+    
+    def _parse_nested_struct_body(self, lines):
+        """Parse just the fields inside a nested struct body."""
+        fields = []
+        brace_count = 0
+        in_body = False
         
         for line in lines:
             stripped = line.strip()
-            
-            # Check for struct definition
-            if f'struct {struct_name}' in stripped and '{' in stripped:
-                in_struct = True
-                struct_brace_count = 1
-                continue
-            elif f'struct {struct_name}' in stripped:
-                in_struct = True
+            if not stripped or stripped.startswith('#'):
                 continue
             
-            if in_struct:
-                # Track brace levels
-                open_braces = stripped.count('{')
-                close_braces = stripped.count('}')
-                
-                # Skip preprocessor directives and empty lines
-                if not stripped or stripped.startswith('#'):
-                    continue
-                
-                # If we see an opening brace for a nested struct/union
-                if open_braces > 0 and nested_brace_count == 0:
-                    # Check if this is a nested anonymous struct/union
-                    if 'struct' in stripped or 'union' in stripped:
-                        nested_brace_count += open_braces
-                        nested_brace_count -= close_braces
+            # Track when we enter the body
+            if '{' in stripped:
+                brace_count += stripped.count('{')
+                in_body = True
+            
+            if '}' in stripped:
+                brace_count -= stripped.count('}')
+                if brace_count == 0:
+                    break
+            
+            # Extract fields only when we're in the body
+            if in_body and brace_count > 0 and ';' in stripped:
+                # Skip nested struct/union definitions
+                if 'struct' in stripped or 'union' in stripped:
+                    if '{' in stripped:
                         continue
                 
-                # If we're inside a nested struct/union, skip until we exit
-                if nested_brace_count > 0:
-                    nested_brace_count += open_braces
-                    nested_brace_count -= close_braces
-                    continue
-                
-                # Update main struct brace count
-                struct_brace_count += open_braces
-                struct_brace_count -= close_braces
-                
-                # Check for end of struct
-                if struct_brace_count <= 0 and '}' in stripped:
-                    break
-                
-                # Extract field name (simple heuristic)
-                if ';' in stripped:
-                    # Parse field declaration
-                    parts = stripped.split()
-                    if len(parts) >= 2:
-                        # Last part before ';' is usually the field name (possibly with array brackets)
-                        field_part = parts[-1].rstrip(';')
-                        # Remove array notation
-                        if '[' in field_part:
-                            field_part = field_part[:field_part.index('[')]
-                        # Remove pointer asterisks
-                        field_part = field_part.lstrip('*')
-                        if field_part and field_part.isidentifier():
-                            fields.append(field_part)
+                parts = stripped.split()
+                if len(parts) >= 2:
+                    field_part = parts[-1].rstrip(';')
+                    if '[' in field_part:
+                        field_part = field_part[:field_part.index('[')]
+                    field_part = field_part.lstrip('*')
+                    if field_part and field_part.isidentifier():
+                        fields.append(field_part)
         
-        self.log(f"Found {len(fields)} fields in struct {struct_name}: {', '.join(fields[:5])}{'...' if len(fields) > 5 else ''}")
         return fields
 
 

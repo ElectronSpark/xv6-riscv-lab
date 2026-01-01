@@ -88,6 +88,7 @@ struct proc {
   list_node_t sched_entry;     // entry for ready queue
   struct workqueue *wq;        // work queue this process belongs to
   list_node_t wq_entry;        // link to work queue
+  struct context context;      // swtch() here to run process
   uint64 flags;
 #define PROC_FLAG_VALID             0x1
 #define PROC_FLAG_NEEDS_RESCHED     0x4   // Process needs to be rescheduled
@@ -128,7 +129,6 @@ struct proc {
 
   // both p->lock and __sched_lock must be held 
   int cpu_id;                  // The CPU running this process.
-  struct context context;      // swtch() here to run process
   uint64 kentry;               // Entry point for kernel process
   uint64 arg[2];               // Argument for kernel process
   // struct file *ofile[NOFILE];  // Open files
