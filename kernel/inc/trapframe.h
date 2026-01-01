@@ -57,6 +57,8 @@ struct trapframe {
   /* 304 */ uint64 sepc;         // saved sepc
   /* 312 */ uint64 sstatus;      // saved sstatus
   /* 320 */ uint64 kernel_gp;    // saved kernel gp
+  /* 328 */ uint64 irq_sp;       // saved interrupt stack pointer
+  /* 336 */ uint64 irq_entry;    // saved interrupt entry point
 };
 
 

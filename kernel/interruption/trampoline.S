@@ -69,18 +69,26 @@ uservec:
         sd t0, 112(a0)
 
         # save scause, sstatus, stval, and sepc into the trapframe
-        csrr t0, scause
-        sd t0, 288(a0)
         csrr t0, stval
         sd t0, 296(a0)
         csrr t0, sepc
         sd t0, 24(a0)
         csrr t0, sstatus
         sd t0, 312(a0)
+        csrr t0, scause
+        sd t0, 288(a0)
 
+        srli t0, t0, 63         # is interrupt
+        beqz t0, 2f             # if not, jump to handle exception
+1:
+        ld sp, 328(a0)   # load irq_sp from trapframe
+        ld t2, 336(a0)   # load irq_entry from trapframe
+        j 3f
+2:
         # initialize kernel stack pointer, from p->trapframe->kernel_sp
         ld sp, 8(a0)
-
+        ld t2, 16(a0)   # load kernel_trap from trapframe
+3:
         # make tp hold the current hartid, from p->trapframe->kernel_hartid
         ld tp, 32(a0)
         #make sure gp is also restored from trapframe
@@ -103,7 +111,7 @@ uservec:
         sfence.vma zero, zero
 
         # jump to usertrap(), which does not return
-        jr t0
+        jr t2
 
 .globl userret
 userret:

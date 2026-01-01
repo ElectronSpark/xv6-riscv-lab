@@ -96,73 +96,19 @@ clockintr()
 void
 __user_kirq_return(uint64 irq_sp, uint64 s0)
 {
-  uint64 va;
-  vma_t *vma = NULL;
   struct proc *p = myproc();
   
   switch (p->trapframe->sscause)
   {
-  case 8:
-    // system call
-
-    if(killed(p))
-      exit(-1);
-
-    // sepc points to the ecall instruction,
-    // but we want to return to the next instruction.
-    p->trapframe->epc += 4;
-
-    // an interrupt will change sepc, scause, and sstatus,
-    // so enable only now that we're done with those registers.
-    intr_on();
-
-    syscall();
-    break;
-  case 13:
-    // Load page fault - handle demand paging for read access
-    va = p->trapframe->stval;
-    // First try to grow stack if the address is in stack region
-    vm_try_growstack(p->vm, va);
-    // Now find the VMA (may be stack that just grew, or existing VMA needing demand paging)
-    vma = vm_find_area(p->vm, va);
-    if (vma != NULL && vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_READ) == 0) {
-      break;
-    }
-    // printf("usertrap(): page fault on read 0x%lx pid=%d\n", r_scause(), p->pid);
-    // printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
-    // printf("            pgtbl=0x%lx\n", (uint64)p->vm->pagetable);
-    assert(p->pid != 1, "init exiting");
-    kill(p->pid, SIGSEGV);
-    break;
-  case 15:
-    // Store page fault - handle demand paging for write access
-    va = p->trapframe->stval;
-    // First try to grow stack if the address is in stack region
-    vm_try_growstack(p->vm, va);
-    // Now find the VMA (may be stack that just grew, or existing VMA needing demand paging)
-    vma = vm_find_area(p->vm, va);
-    if (vma != NULL && vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_WRITE) == 0) {
-      break;
-    }
-    // printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(), p->pid);
-    // printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
-    // printf("            pgtbl=0x%lx\n", (uint64)p->vm->pagetable);
-    assert(p->pid != 1, "init exiting");
-    kill(p->pid, SIGSEGV);
-    break;
   case 0x8000000000000005L:
-    // timer interrupt.
-    clockintr();
-    PROC_SET_NEEDS_RESCHED(p);
-    break;
   case 0x8000000000000009L:
     break; // already handled in usertrap()
   default:
-    assert(p->trapframe->sscause >> 63 == 0, "unexpected interrupt");
-    // printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
+    assert(myproc()->trapframe->sscause >> 63 == 0, "unexpected interrupt");
+    // printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), myproc()->pid);
     // printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
-    assert(p->pid != 1, "init exiting");
-    kill(p->pid, SIGSEGV);
+    assert(myproc()->pid != 1, "init exiting");
+    kill(myproc()->pid, SIGSEGV);
     break;
   }
 
@@ -170,33 +116,46 @@ __user_kirq_return(uint64 irq_sp, uint64 s0)
 }
 
 void
-__user_kirq_entrance(uint64 ksp, uint64 s0)
+user_kirq_entrance(uint64 ksp, uint64 s0)
 {
-  assert(mycpu()->intr_depth++ == 0, "__user_kirq_entrance: nested interrupts not supported. level=%d", mycpu()->intr_depth);
+  if((myproc()->trapframe->sstatus & SSTATUS_SPP) != 0)
+    panic("usertrap: not from user mode");
 
-  // irq indicates which device interrupted.
-  int irq = plic_claim();
+  // redirect traps to kerneltrap()
+  // Since we are on kernel stack
+  trapinithart();
 
-  if(irq == UART0_IRQ){
-    uartintr();
-  } else if(irq == VIRTIO0_IRQ){
-    virtio_disk_intr(0);
-  } else if(irq == VIRTIO1_IRQ){
-    virtio_disk_intr(1);
-  } else if(irq == E1000_IRQ){
-    e1000_intr();
-  } else if(irq){
-    printf("unexpected interrupt irq=%d\n", irq);
+  assert(mycpu()->intr_depth++ == 0, "user_kirq_entrance: nested interrupts not supported. level=%d", mycpu()->intr_depth);
+
+  if (myproc()->trapframe->sscause == 0x8000000000000005L) {
+    // timer interrupt.
+    clockintr();
+    PROC_SET_NEEDS_RESCHED(myproc());
+  } else if (myproc()->trapframe->sscause == 0x8000000000000009L) {
+    // irq indicates which device interrupted.
+    int irq = plic_claim();
+  
+    if(irq == UART0_IRQ){
+      uartintr();
+    } else if(irq == VIRTIO0_IRQ){
+      virtio_disk_intr(0);
+    } else if(irq == VIRTIO1_IRQ){
+      virtio_disk_intr(1);
+    } else if(irq == E1000_IRQ){
+      e1000_intr();
+    } else if(irq){
+      printf("unexpected interrupt irq=%d\n", irq);
+    }
+  
+    // the PLIC allows each device to raise at most one
+    // interrupt at a time; tell the PLIC the device is
+    // now allowed to interrupt again.
+    if(irq)
+      plic_complete(irq);
   }
 
-  // the PLIC allows each device to raise at most one
-  // interrupt at a time; tell the PLIC the device is
-  // now allowed to interrupt again.
-  if(irq)
-    plic_complete(irq);
-
   mycpu()->intr_depth--;
-  __switch_noreturn(ksp, s0, __user_kirq_return);
+  __switch_noreturn(myproc()->ksp, s0, __user_kirq_return);
 }
 
 //
@@ -206,6 +165,9 @@ __user_kirq_entrance(uint64 ksp, uint64 s0)
 void
 usertrap(void)
 {
+  uint64 va;
+  vma_t *vma = NULL;
+  uint64 sscause = myproc()->trapframe->sscause;
   // printf("usertrap: scause=0x%lx (%s), sepc=0x%lx, stval=0x%lx\n",
   //        r_scause(), __scause_to_str(r_scause()), r_sepc(), r_stval());
 
@@ -215,19 +177,67 @@ usertrap(void)
   // redirect traps to kerneltrap()
   // Since we are on kernel stack
   trapinithart();
+  
+  switch (sscause)
+  {
+  case 8:
+    // system call
 
-  struct proc *p = myproc();
-  
-  if (p->trapframe->sscause == 0x8000000000000009L) {
-    // external interrupt.
-    // Needs to switch to interrupt stack and jump to irq handler.
-    __switch_noreturn(mycpu()->intr_sp, 0, __user_kirq_entrance);
-    panic("usertrap: returned from __user_kirq_entrance");
+    if(killed(myproc()))
+      exit(-1);
+
+    // sepc points to the ecall instruction,
+    // but we want to return to the next instruction.
+    myproc()->trapframe->epc += 4;
+
+    // an interrupt will change sepc, scause, and sstatus,
+    // so enable only now that we're done with those registers.
+    intr_on();
+
+    syscall();
+    break;
+  case 13:
+    // Load page fault - handle demand paging for read access
+    va = myproc()->trapframe->stval;
+    // First try to grow stack if the address is in stack region
+    vm_try_growstack(myproc()->vm, va);
+    // Now find the VMA (may be stack that just grew, or existing VMA needing demand paging)
+    vma = vm_find_area(myproc()->vm, va);
+    if (vma != NULL && vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_READ) == 0) {
+      break;
+    }
+    // printf("usertrap(): page fault on read 0x%lx pid=%d\n", r_scause(), p->pid);
+    // printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+    // printf("            pgtbl=0x%lx\n", (uint64)myproc()->vm->pagetable);
+    assert(myproc()->pid != 1, "init exiting");
+    kill(myproc()->pid, SIGSEGV);
+    break;
+  case 15:
+    // Store page fault - handle demand paging for write access
+    va = myproc()->trapframe->stval;
+    // First try to grow stack if the address is in stack region
+    vm_try_growstack(myproc()->vm, va);
+    // Now find the VMA (may be stack that just grew, or existing VMA needing demand paging)
+    vma = vm_find_area(myproc()->vm, va);
+    if (vma != NULL && vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_WRITE) == 0) {
+      break;
+    }
+    // printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(), p->pid);
+    // printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+    // printf("            pgtbl=0x%lx\n", (uint64)myproc()->vm->pagetable);
+    assert(myproc()->pid != 1, "init exiting");
+    kill(myproc()->pid, SIGSEGV);
+    break;
+  default:
+    assert(myproc()->trapframe->sscause >> 63 == 0, "unexpected interrupt");
+    // printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), myproc()->pid);
+    // printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
+    assert(myproc()->pid != 1, "init exiting");
+    kill(myproc()->pid, SIGSEGV);
+    break;
   }
-  
-  // Otherwise, handle the trap (syscall, page fault, etc.) directly
-  __user_kirq_return(p->ksp, 0);
-  panic("usertrap: returned from __user_kirq_return");
+
+  usertrapret();
 }
 
 extern void sig_trampoline(uint64 arg0, uint64 arg1, uint64 arg2, void *handler);
@@ -357,7 +367,9 @@ usertrapret(void)
   // the process next traps into the kernel.
   p->trapframe->kernel_satp = r_satp();         // kernel page table
   p->trapframe->kernel_sp = p->ksp;
+  p->trapframe->irq_sp = mycpu()->intr_sp;
   p->trapframe->kernel_trap = (uint64)usertrap;
+  p->trapframe->irq_entry = (uint64)user_kirq_entrance;
   p->trapframe->kernel_hartid = r_tp();         // hartid for cpuid()
 
   // set up the registers that trampoline.S's sret will use
