@@ -349,7 +349,7 @@ after_enqueue:
     if (is_stop) {
         // Mark process stopped. If currently running, request reschedule.
         PROC_SET_STOPPED(p);
-        PROC_SET_NEEDS_RESCHED(p);
+        SET_NEEDS_RESCHED(p);
     }
     if (is_cont) {
         // Do NOT clear PROC_STOPPED here; scheduler_continue() requires the
@@ -819,7 +819,7 @@ void handle_signal(void) {
         exit(-1);
     }
     if (PROC_STOPPED(p)) {
-        PROC_SET_NEEDS_RESCHED(p);
+        SET_NEEDS_RESCHED(p);
     }
 }
 

@@ -92,10 +92,10 @@ user_kirq_entrance(uint64 ksp, uint64 s0)
   if (myproc()->trapframe->trapframe.scause == 0x8000000000000005L) {
     // timer interrupt.
     clockintr();
-    PROC_SET_NEEDS_RESCHED(myproc());
+    SET_NEEDS_RESCHED(myproc());
   } else if (myproc()->trapframe->trapframe.scause == 0x8000000000000009L) {
     // irq indicates which device interrupted.
-    do_irq(myproc()->trapframe->trapframe.scause);
+    do_irq(&myproc()->trapframe->trapframe);
   }
   mycpu()->intr_depth--;
 
@@ -300,7 +300,7 @@ usertrapret(void)
   
   handle_signal();
 
-  if (PROC_NEEDS_RESCHED(p)) {
+  if (NEEDS_RESCHED(p)) {
     yield();
   }
   
@@ -397,7 +397,7 @@ kerneltrap(struct trapframe *sp, uint64 s0)
   }
 
   if(which_dev == 2 && myproc() != 0 && !sched_holding())
-    PROC_SET_NEEDS_RESCHED(myproc());
+    SET_NEEDS_RESCHED(myproc());
 
   mycpu()->intr_depth--;
 }
@@ -412,7 +412,7 @@ devintr(struct trapframe *sp)
 {
   if(sp->scause == 0x8000000000000009L){
     // this is a supervisor external interrupt, via PLIC.
-    do_irq(0x8000000000000009L);
+    do_irq(sp);
     return 1;
   } else if(sp->scause == 0x8000000000000005L){
     // timer interrupt.

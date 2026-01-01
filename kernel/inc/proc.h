@@ -13,6 +13,13 @@ struct vfs_inode;
 
 extern struct cpu cpus[NCPU];
 
+#define SET_NEEDS_RESCHED(p) \
+  do { mycpu()->needs_resched = 1; } while(0)
+#define CLEAR_NEEDS_RESCHED(p) \
+  do { mycpu()->needs_resched = 0; } while(0)
+#define NEEDS_RESCHED(p) \
+  (!!(mycpu()->needs_resched))
+
 enum procstate {
   PSTATE_UNUSED,
   PSTATE_USED,
@@ -91,7 +98,6 @@ struct proc {
   struct context context;      // swtch() here to run process
   uint64 flags;
 #define PROC_FLAG_VALID             0x1
-#define PROC_FLAG_NEEDS_RESCHED     0x4   // Process needs to be rescheduled
 #define PROC_FLAG_KILLED            0x8   // Process is exiting or exited
 #define PROC_FLAG_ONCHAN            0x10  // Process is sleeping on a channel
 #define PROC_FLAG_STOPPED           0x20  // Process is stopped
@@ -175,8 +181,6 @@ static inline void proc_clear_flags(struct proc *p, uint64 flags) {
   proc_set_flags(p, PROC_FLAG_USER_SPACE)
 #define PROC_SET_VALID(p) \
   proc_set_flags(p, PROC_FLAG_VALID)
-#define PROC_SET_NEEDS_RESCHED(p) \
-  proc_set_flags(p, PROC_FLAG_NEEDS_RESCHED)
 #define PROC_SET_KILLED(p) \
   proc_set_flags(p, PROC_FLAG_KILLED)
 #define PROC_SET_ONCHAN(p) \
@@ -188,8 +192,6 @@ static inline void proc_clear_flags(struct proc *p, uint64 flags) {
   proc_clear_flags(p, PROC_FLAG_USER_SPACE)
 #define PROC_CLEAR_VALID(p) \
   proc_clear_flags(p, PROC_FLAG_VALID)
-#define PROC_CLEAR_NEEDS_RESCHED(p) \
-  proc_clear_flags(p, PROC_FLAG_NEEDS_RESCHED)
 #define PROC_CLEAR_KILLED(p) \
   proc_clear_flags(p, PROC_FLAG_KILLED)
 #define PROC_CLEAR_ONCHAN(p) \
@@ -199,8 +201,6 @@ static inline void proc_clear_flags(struct proc *p, uint64 flags) {
 
 #define PROC_VALID(p) \
   (!!(proc_flags(p) & PROC_FLAG_VALID))
-#define PROC_NEEDS_RESCHED(p) \
-  (!!(proc_flags(p) & PROC_FLAG_NEEDS_RESCHED))
 #define PROC_KILLED(p) \
   (!!(proc_flags(p) & PROC_FLAG_KILLED))
 #define PROC_ONCHAN(p) \

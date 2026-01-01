@@ -222,7 +222,7 @@ void scheduler_yield(void) {
     }
     assert(mycpu()->noff == noff_expected, 
            "Process must hold and only hold the proc lock and sched lock when yielding. Current noff: %d", mycpu()->noff);
-    PROC_CLEAR_NEEDS_RESCHED(proc);
+    CLEAR_NEEDS_RESCHED(proc);
     __swtch_context(&proc->context, &mycpu()->context);
 
     assert(!intr_get(), "Interrupts must be disabled after switching to a process");

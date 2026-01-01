@@ -81,6 +81,6 @@ void trapinithart(void);
 void irq_desc_init(void);
 int register_irq_handler(int irq_num, struct irq_desc *desc);
 int unregister_irq_handler(int irq_num);
-void do_irq(uint64 scause);
+void do_irq(struct trapframe *tf);
 
 #endif        /* __KERNEL_TRAP_H */

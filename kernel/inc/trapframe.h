@@ -100,6 +100,9 @@ struct cpu {
     int intr_depth;             // Depth of nested interruption.
     int noff;                   // Depth of push_off() nesting.
     int intena;                 // Were interrupts enabled before push_off()?
+    struct {
+        uint64 needs_resched: 1;   // Flag to indicate whether rescheduling is needed.
+    };
 }  __attribute__((aligned(64)));
 
 #endif /* __KERNEL_TRAPFRAME_H */

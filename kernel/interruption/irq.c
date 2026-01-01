@@ -13,6 +13,7 @@
 #include "slab.h"
 #include "rcu.h"
 #include "errno.h"
+#include "trap.h"
 
 static struct irq_desc *irq_descs[IRQCNT] = { 0 };
 static slab_cache_t __irq_desc_slab = { 0 };
@@ -153,9 +154,9 @@ static void __do_plic_irq(void) {
     plic_complete(irq - PLIC_IRQ_OFFSET);
 }
 
-void do_irq(uint64 scause) {
-    assert(scause >> 63, "do_irq: not an interrupt");
-    int irq_num = scause & ((1UL << 63) - 1);
+void do_irq(struct trapframe *tf) {
+    assert(tf->scause >> 63, "do_irq: not an interrupt");
+    int irq_num = tf->scause & ((1UL << 63) - 1);
     if (irq_num >= CLINT_IRQ_CNT) {
         printf("do_irq: invalid irq_num %d\n", irq_num);
         return;
