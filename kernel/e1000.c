@@ -9,6 +9,9 @@
 #include "printf.h"
 #include "e1000_dev.h"
 #include "net.h"
+#include "trap.h"
+
+static void e1000_intr(int irq, void *data, device_t *dev);
 
 #define TX_RING_SIZE 16
 STATIC struct tx_desc tx_ring[TX_RING_SIZE] __attribute__((aligned(16)));
@@ -200,6 +203,13 @@ e1000_init(uint32 *xregs)
   spin_init(&e1000_lock, "e1000");
 
   regs = xregs;
+  struct irq_desc e1000_irq_desc = {
+    .handler = e1000_intr,
+    .data = NULL,
+    .dev = NULL,
+  };
+  int ret = register_irq_handler(PLIC_IRQ(E1000_IRQ), &e1000_irq_desc);
+  assert(ret == 0, "e1000_init: failed to register irq handler");
 
   // Reset the device
   e1000_dev_reset();
@@ -319,8 +329,7 @@ e1000_recv(void)
   }
 }
 
-void
-e1000_intr(void)
+static void e1000_intr(int irq, void *data, device_t *dev)
 {
   // tell the e1000 we've seen this interrupt;
   // without this the e1000 won't raise any

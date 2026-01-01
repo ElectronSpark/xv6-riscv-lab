@@ -52,7 +52,7 @@ struct trapframe {
   /* 264 */ uint64 t4;
   /* 272 */ uint64 t5;
   /* 280 */ uint64 t6;
-  /* 288 */ uint64 sscause;      // saved scause
+  /* 288 */ uint64 scause;      // saved scause
   /* 296 */ uint64 stval;        // saved stval
   /* 304 */ uint64 sepc;         // saved sepc
   /* 312 */ uint64 sstatus;      // saved sstatus
@@ -80,7 +80,7 @@ struct ktrapframe {
   /* 112 */ uint64 a5;
   /* 120 */ uint64 a6;
   /* 128 */ uint64 a7;
-  /* 136 */ uint64 sscause;
+  /* 136 */ uint64 scause;
   /* 144 */ uint64 stval;
   /* 152 */ uint64 stvec;
   /* 160 */ uint64 sscratch;

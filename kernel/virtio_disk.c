@@ -21,6 +21,7 @@
 #include "errno.h"
 #include "sched.h"
 #include "completion.h"
+#include "trap.h"
 
 // the address of virtio mmio register r for disk n.
 #define R(n, r) ((volatile uint32 *)(virtio_base[n] + (r)))
@@ -29,6 +30,7 @@ static const uint64 virtio_base[NVIRTIO] = { VIRTIO0, VIRTIO1 };
 
 static void
 virtio_disk_rw(int diskno, struct bio *bio, uint64 sector, void *buf, size_t size, int write);
+static void virtio_disk_intr(int irq, void *data, device_t *dev);
 
 STATIC struct disk {
   // a set (not a ring) of DMA descriptors, with which the
@@ -133,6 +135,13 @@ static void __virtio_blkdev_init(int diskno) {
   virtio_disk_devs[diskno].ops = __virtio_disk_ops;
   int errno = blkdev_register(&virtio_disk_devs[diskno]);
   assert(errno == 0, "virtio_blkdev_init: blkdev_register failed: %d", errno);
+  struct irq_desc virtio_irq_desc = {
+    .handler = virtio_disk_intr,
+    .data = (void *)(uint64)diskno,
+    .dev = &virtio_disk_devs[diskno].dev,
+  };
+  errno = register_irq_handler(PLIC_IRQ(VIRTIO0_IRQ + diskno), &virtio_irq_desc);
+  assert(errno == 0, "virtio_blkdev_init: register_irq_handler failed: %d", errno);
 }
 
 static void
@@ -403,9 +412,9 @@ virtio_disk_rw(int diskno, struct bio *bio, uint64 sector, void *buf, size_t siz
   spin_release(&disk->vdisk_lock);
 }
 
-void
-virtio_disk_intr(int diskno)
+static void virtio_disk_intr(int irq, void *data, device_t *dev)
 {
+  uint64 diskno = (uint64)data;
   struct disk *disk = &disks[diskno];
   spin_acquire(&disk->vdisk_lock);
 

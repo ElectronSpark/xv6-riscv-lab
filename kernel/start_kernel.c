@@ -11,6 +11,7 @@
 #include "dev.h"
 #include "pcache.h"
 #include "vfs/fs.h"
+#include "trap.h"
 #include "rcu.h"
 
 volatile STATIC int started = 0;
@@ -32,11 +33,12 @@ static void __start_kernel_main_hart(void) {
     kinit();         // physical page allocator
     kvminit();       // create kernel page table
     kvminithart();   // turn on paging
+    rcu_init();      // RCU subsystem initialization
     dev_table_init(); // Initialize the device table
     procinit();      // process table
-    rcu_init();      // RCU subsystem initialization
     scheduler_init(); // initialize the scheduler
     workqueue_init(); // workqueue subsystem initialization
+    irq_desc_init(); // IRQ descriptor initialization
     trapinit();      // trap vectors
     trapinithart();  // install kernel trap vector
     plicinit();      // set up interrupt controller

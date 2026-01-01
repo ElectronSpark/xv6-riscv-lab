@@ -11,6 +11,7 @@
 #include "signal.h"
 #include "page.h"
 #include "vm.h"
+#include "trap.h"
 
 uint64 ticks;
 
@@ -27,37 +28,6 @@ void kernelvec();
 
 extern int devintr(struct ktrapframe *sp);
 
-static const char *__scause_to_str(uint64 scause)
-{
-  if (scause & 0x8000000000000000) {
-    // Interrupts are negative, exceptions are positive.
-    switch (scause & 0x7FFFFFFFFFFFFFFF) {
-      case 0: return "User software interrupt";
-      case 1: return "Supervisor software interrupt";
-      case 4: return "User timer interrupt";
-      case 5: return "Supervisor timer interrupt";
-      case 8: return "User external interrupt";
-      case 9: return "Supervisor external interrupt";
-      default: return "Unknown interrupt";
-    }
-  }
-  switch (scause) {
-    case 0: return "Instruction address misaligned";
-    case 1: return "Instruction access fault";
-    case 2: return "Illegal instruction";
-    case 3: return "Breakpoint";
-    case 5: return "Load access fault";
-    case 6: return "Store/AMO address misaligned";
-    case 7: return "Store/AMO access fault";
-    case 8: return "Environment call from U-mode";
-    case 9: return "Environment call from S-mode";
-    case 12: return "Instruction page fault";
-    case 13: return "Load page fault";
-    case 15: return "Store/AMO page fault";
-    default: return "Unknown exception";
-  }
-}
-
 void
 trapinit(void)
 {
@@ -68,7 +38,6 @@ trapinit(void)
     memset(cpus[i].intr_stacks, 0, INTR_STACK_SIZE);
     cpus[i].intr_sp = (uint64)cpus[i].intr_stacks + INTR_STACK_SIZE;
   }
-  ;
 }
 
 // set up to take exceptions and traps while in the kernel.
@@ -96,20 +65,13 @@ clockintr()
 void
 __user_kirq_return(uint64 irq_sp, uint64 s0)
 {
-  struct proc *p = myproc();
-  
-  switch (p->trapframe->sscause)
-  {
-  case 0x8000000000000005L:
-  case 0x8000000000000009L:
-    break; // already handled in usertrap()
-  default:
-    assert(myproc()->trapframe->sscause >> 63 == 0, "unexpected interrupt");
+  if (myproc()->trapframe->scause >> 63 && myproc()->trapframe->scause != 0x8000000000000009L 
+      && myproc()->trapframe->scause != 0x8000000000000005L) {
+    assert(myproc()->trapframe->scause >> 63 == 0, "unexpected interrupt");
     // printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), myproc()->pid);
     // printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
     assert(myproc()->pid != 1, "init exiting");
     kill(myproc()->pid, SIGSEGV);
-    break;
   }
 
   usertrapret();
@@ -127,35 +89,23 @@ user_kirq_entrance(uint64 ksp, uint64 s0)
 
   assert(mycpu()->intr_depth++ == 0, "user_kirq_entrance: nested interrupts not supported. level=%d", mycpu()->intr_depth);
 
-  if (myproc()->trapframe->sscause == 0x8000000000000005L) {
+  if (myproc()->trapframe->scause == 0x8000000000000005L) {
     // timer interrupt.
     clockintr();
     PROC_SET_NEEDS_RESCHED(myproc());
-  } else if (myproc()->trapframe->sscause == 0x8000000000000009L) {
+  } else if (myproc()->trapframe->scause == 0x8000000000000009L) {
     // irq indicates which device interrupted.
-    int irq = plic_claim();
-  
-    if(irq == UART0_IRQ){
-      uartintr();
-    } else if(irq == VIRTIO0_IRQ){
-      virtio_disk_intr(0);
-    } else if(irq == VIRTIO1_IRQ){
-      virtio_disk_intr(1);
-    } else if(irq == E1000_IRQ){
-      e1000_intr();
-    } else if(irq){
-      printf("unexpected interrupt irq=%d\n", irq);
-    }
-  
-    // the PLIC allows each device to raise at most one
-    // interrupt at a time; tell the PLIC the device is
-    // now allowed to interrupt again.
-    if(irq)
-      plic_complete(irq);
+    do_irq(myproc()->trapframe->scause);
   }
-
   mycpu()->intr_depth--;
-  __switch_noreturn(myproc()->ksp, s0, __user_kirq_return);
+
+  if (myproc()->trapframe->scause == 0x8000000000000009L) {
+    // For device interrupts, we don't need to reschedule immediately.
+    // Just return to user space.
+    usertrapret();
+  } else {
+    __switch_noreturn(myproc()->ksp, s0, __user_kirq_return);
+  }
 }
 
 //
@@ -167,7 +117,7 @@ usertrap(void)
 {
   uint64 va;
   vma_t *vma = NULL;
-  uint64 sscause = myproc()->trapframe->sscause;
+  uint64 scause = myproc()->trapframe->scause;
   // printf("usertrap: scause=0x%lx (%s), sepc=0x%lx, stval=0x%lx\n",
   //        r_scause(), __scause_to_str(r_scause()), r_sepc(), r_stval());
 
@@ -178,7 +128,7 @@ usertrap(void)
   // Since we are on kernel stack
   trapinithart();
   
-  switch (sscause)
+  switch (scause)
   {
   case 8:
     // system call
@@ -229,7 +179,7 @@ usertrap(void)
     kill(myproc()->pid, SIGSEGV);
     break;
   default:
-    assert(myproc()->trapframe->sscause >> 63 == 0, "unexpected interrupt");
+    assert(myproc()->trapframe->scause >> 63 == 0, "unexpected interrupt");
     // printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), myproc()->pid);
     // printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
     assert(myproc()->pid != 1, "init exiting");
@@ -432,7 +382,7 @@ kerneltrap(struct ktrapframe *sp, uint64 s0)
   if((which_dev = devintr(sp)) == 0){
     // interrupt or trap from an unknown source
     // printf("0x%lx 0x%lx\n", sp, s0);
-    printf("scause=0x%lx(%s) sepc=0x%lx stval=0x%lx\n", sp->sscause, __scause_to_str(sp->sscause), sp->sepc, sp->stval);
+    printf("scause=0x%lx(%s) sepc=0x%lx stval=0x%lx\n", sp->scause, __scause_to_str(sp->scause), sp->sepc, sp->stval);
     sp->ra = sp->sepc;
     // to enconvinient gdb back trace
     *(uint64 *)((uint64)sp - 8) = sp->sepc;
@@ -460,32 +410,11 @@ kerneltrap(struct ktrapframe *sp, uint64 s0)
 int
 devintr(struct ktrapframe *sp)
 {
-  if(sp->sscause == 0x8000000000000009L){
+  if(sp->scause == 0x8000000000000009L){
     // this is a supervisor external interrupt, via PLIC.
-
-    // irq indicates which device interrupted.
-    int irq = plic_claim();
-
-    if(irq == UART0_IRQ){
-      uartintr();
-    } else if(irq == VIRTIO0_IRQ){
-      virtio_disk_intr(0);
-    } else if(irq == VIRTIO1_IRQ){
-      virtio_disk_intr(1);
-    } else if(irq == E1000_IRQ){
-      e1000_intr();
-    } else if(irq){
-      printf("unexpected interrupt irq=%d\n", irq);
-    }
-
-    // the PLIC allows each device to raise at most one
-    // interrupt at a time; tell the PLIC the device is
-    // now allowed to interrupt again.
-    if(irq)
-      plic_complete(irq);
-
+    do_irq(0x8000000000000009L);
     return 1;
-  } else if(sp->sscause == 0x8000000000000005L){
+  } else if(sp->scause == 0x8000000000000005L){
     // timer interrupt.
     clockintr();
     return 2;

@@ -22,6 +22,7 @@
 #include "proc.h"
 #include "sched.h"
 #include "cdev.h"
+#include "trap.h"
 
 #ifndef CONSOLE_MAJOR
 #define CONSOLE_MAJOR  1
@@ -160,6 +161,8 @@ static cdev_t console_cdev = {
     .writable = 1,
 };
 
+extern void uartintr(int irq, void *data, device_t *dev);
+
 //
 // the console input interrupt handler.
 // uartintr() calls this for input character.
@@ -235,4 +238,11 @@ consoledevinit(void)
   console_cdev.ops = console_cdev_ops;
   int errno = cdev_register(&console_cdev);
   assert(errno == 0, "consoleinit: cdev_register failed, error code: %d\n", errno);
+  struct irq_desc uart_irq_desc = {
+    .handler = uartintr,
+    .data = NULL,
+    .dev = &console_cdev.dev,
+  };
+  errno = register_irq_handler(PLIC_IRQ(UART0_IRQ), &uart_irq_desc);
+  assert(errno == 0, "consoledevinit: register_irq_handler failed, error code: %d\n", errno);
 }

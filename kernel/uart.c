@@ -11,6 +11,9 @@
 #include "defs.h"
 #include "printf.h"
 #include "sched.h"
+#include "trap.h"
+
+void uartintr(int irq, void *data, device_t *dev);
 
 // the UART control registers are memory-mapped
 // at address UART0. this macro returns the
@@ -91,8 +94,9 @@ uartputc(int c)
   spin_acquire(&uart_tx_lock);
 
   if(panicked){
-    for(;;)
-      ;
+    for(;;) {
+      asm volatile("wfi");
+    }
   }
   while(uart_tx_w == uart_tx_r + UART_TX_BUF_SIZE){
     // buffer is full.
@@ -116,8 +120,9 @@ uartputc_sync(int c)
   push_off();
 
   if(panicked){
-    for(;;)
-      ;
+    for(;;) {
+      asm volatile("wfi");
+    }
   }
 
   // wait for Transmit Holding Empty to be set in LSR.
@@ -175,8 +180,7 @@ uartgetc(void)
 // handle a uart interrupt, raised because input has
 // arrived, or the uart is ready for more output, or
 // both. called from devintr().
-void
-uartintr(void)
+void uartintr(int irq, void *data, device_t *dev)
 {
   // read and process incoming characters.
   while(1){

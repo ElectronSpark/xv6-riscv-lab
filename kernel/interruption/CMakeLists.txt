@@ -2,6 +2,7 @@ set(INTERRUPTION_C_SRCS
     trap.c
     plic.c
     syscall.c
+    irq.c
 )
 
 set(INTERRUPTION_S_SRCS

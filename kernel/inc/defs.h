@@ -136,8 +136,6 @@ void            syscall();
 
 // trap.c
 extern uint64   ticks;
-void            trapinit(void);
-void            trapinithart(void);
 void            usertrapret(void);
 typedef struct ksiginfo ksiginfo_t;
 typedef struct sigaction sigaction_t;
@@ -152,7 +150,6 @@ int             restore_sigframe(struct proc *p,
 
 // uart.c
 void            uartinit(void);
-void            uartintr(void);
 void            uartputc(int);
 void            uartputc_sync(int);
 int             uartgetc(void);
@@ -179,8 +176,6 @@ void            plic_complete(int);
 
 // virtio_disk.c
 void            virtio_disk_init(void);
-// void            virtio_disk_rw(struct buf *, int);
-void            virtio_disk_intr(int diskno);
 
 // backtrace.c
 void            print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end);
@@ -196,7 +191,6 @@ void            pci_init();
 
 // e1000.c
 void            e1000_init(uint32 *);
-void            e1000_intr(void);
 int             e1000_transmit(struct mbuf*);
 
 // net.c

@@ -160,34 +160,6 @@ printf(char *fmt, ...)
       consputc('%');
       consputc(c0);
     }
-
-#if 0
-    switch(c){
-    case 'd':
-      printint(va_arg(ap, int), 10, 1);
-      break;
-    case 'x':
-      printint(va_arg(ap, int), 16, 1);
-      break;
-    case 'p':
-      printptr(va_arg(ap, uint64));
-      break;
-    case 's':
-      if((s = va_arg(ap, char*)) == 0)
-        s = "(null)";
-      for(; *s; s++)
-        consputc(*s);
-      break;
-    case '%':
-      consputc('%');
-      break;
-    default:
-      // Print unknown % sequence to draw attention.
-      consputc('%');
-      consputc(c);
-      break;
-    }
-#endif
   }
   va_end(ap);
 
