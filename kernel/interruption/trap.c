@@ -138,7 +138,7 @@ usertrap(void)
 
     // sepc points to the ecall instruction,
     // but we want to return to the next instruction.
-    myproc()->trapframe->epc += 4;
+    myproc()->trapframe->sepc += 4;
 
     // an interrupt will change sepc, scause, and sstatus,
     // so enable only now that we're done with those registers.
@@ -256,7 +256,7 @@ int push_sigframe(struct proc *p,
   }
 
   p->trapframe->sp = new_sp;
-  p->trapframe->epc = (uint64)SIG_TRAMPOLINE; // Set the epc to the signal trampoline
+  p->trapframe->sepc = (uint64)SIG_TRAMPOLINE; // Set the epc to the signal trampoline
   p->trapframe->a0 = signo; // Set the first argument
   p->trapframe->a1 = user_siginfo; // Set the second argument
   p->trapframe->a2 = new_ucontext; // Set the third argument
@@ -355,14 +355,14 @@ kerneltrap_dump_regs(struct ktrapframe *sp)
   printf("ra: 0x%lx, sp: 0x%lx, s0: 0x%lx\n", 
          sp->ra, sp->sp, sp->s0);
   printf("tp: 0x%lx, t0: 0x%lx, t1: 0x%lx, t2: 0x%lx\n",
-         sp->tp, sp->t0, sp->t1, sp->t2);
+         r_tp(), sp->t0, sp->t1, sp->t2);
   printf("a0: 0x%lx, a1: 0x%lx, a2: 0x%lx, a3: 0x%lx\n",
          sp->a0, sp->a1, sp->a2, sp->a3);
   printf("a4: 0x%lx, a5: 0x%lx, a6: 0x%lx, a7: 0x%lx\n",
          sp->a4, sp->a5, sp->a6, sp->a7);
   printf("t3: 0x%lx, t4: 0x%lx, t5: 0x%lx, t6: 0x%lx\n",
          sp->t3, sp->t4, sp->t5, sp->t6);
-  printf("gp: 0x%lx\n", sp->gp);
+  printf("gp: 0x%lx\n", r_gp());
 }
 
 // interrupts and exceptions from kernel code go here via kernelvec,

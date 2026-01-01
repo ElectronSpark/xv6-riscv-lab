@@ -558,7 +558,7 @@ userinit(void)
   // printf("\n");
 
   // prepare for the very first "return" from kernel to user.
-  p->trapframe->epc = UVMBOTTOM;      // user program counter
+  p->trapframe->sepc = UVMBOTTOM;      // user program counter
   p->trapframe->sp = USTACKTOP;  // user stack pointer
 
   safestrcpy(p->name, "initcode", sizeof(p->name));

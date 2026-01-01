@@ -78,6 +78,9 @@ set(KERNEL_S_FILES
     ${KERNEL_DIR}/entry.S
 )
 
+# Generate asm-offsets.h before building anything else
+add_subdirectory(${KERNEL_DIR}/inc)
+
 # Pull in subdirectory object libraries.
 add_subdirectory(${KERNEL_DIR}/interruption)
 add_subdirectory(${KERNEL_DIR}/dev)
@@ -100,6 +103,9 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding ")
 
 # Add kernel executable from top-level objects; link in subdir object libraries below.
 add_executable(${KERNEL_BINARY} ${KERNEL_OBJS})
+
+# Make sure asm-offsets.h is generated before building kernel
+add_dependencies(${KERNEL_BINARY} generate_asm_offsets)
 
 # Object libraries do not automatically link; add their objects explicitly.
 target_sources(${KERNEL_BINARY} PRIVATE

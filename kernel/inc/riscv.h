@@ -358,6 +358,20 @@ w_tp(uint64 x)
 }
 
 static inline uint64
+r_gp()
+{
+  uint64 x;
+  asm volatile("mv %0, gp" : "=r" (x) );
+  return x;
+}
+
+static inline void 
+w_gp(uint64 x)
+{
+  asm volatile("mv gp, %0" : : "r" (x));
+}
+
+static inline uint64
 r_ra()
 {
   uint64 x;

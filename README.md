@@ -102,6 +102,9 @@ xv6-riscv-6/
 │   └── ...
 ├── user/               # User-space programs
 ├── mkfs/              # File system creation tool
+├── scripts/           # Build and development scripts
+│   ├── gen_asm_offsets.py  # Assembly offset generator
+│   └── ...
 ├── test/              # Kernel unit tests
 ├── build/             # Build output directory
 ├── CMakeLists.txt     # Main CMake configuration
@@ -493,6 +496,37 @@ make doc
 **Integrated Development Environment:**
 
 The project includes full Visual Studio Code support with pre-configured debugging. See the [Using Visual Studio Code](#using-visual-studio-code-optional) section for setup instructions.
+
+### Build Tools
+
+**Assembly Offset Generator** (`scripts/gen_asm_offsets.py`)
+
+The project includes an automated tool for generating C structure offset definitions for use in assembly files. This eliminates manual offset calculations and ensures assembly code stays synchronized with C structure changes.
+
+```bash
+# Generate offsets from configuration
+./scripts/gen_asm_offsets.py --config kernel/inc/asm-offsets-config.json -o offsets.h
+
+# Generate offsets for specific structures
+./scripts/gen_asm_offsets.py \
+  -I kernel/inc \
+  --struct trapframe:trapframe.h:all \
+  --struct proc:proc.h:state,trapframe,context \
+  -o offsets.h
+```
+
+The generated header (`build/kernel/inc/asm-offsets.h`) is automatically created during the build process and can be included in assembly files:
+
+```asm
+#include "inc/asm-offsets.h"
+
+# Use symbolic offsets instead of magic numbers
+sd ra, TF_RA(a0)       # Clear and maintainable
+sd sp, TF_SP(a0)       # Auto-updates when structures change
+```
+
+See `scripts/README_gen_asm_offsets.md` for complete documentation.
+
 ### Code Style
 
 - Follow K&R C style

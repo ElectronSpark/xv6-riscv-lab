@@ -130,12 +130,14 @@ WARN_LOGFILE           =
 INPUT                  = kernel \
                          user \
                          mkfs \
+                         scripts \
                          README.md \
                          ROADMAP.md \
                          ABOUT.md \
                          XV6_ORIGINAL_README \
                          kernel/vfs/VFS_DESIGN.md \
-                         kernel/vfs/UNMOUNT_DESIGN.md
+                         kernel/vfs/UNMOUNT_DESIGN.md \
+                         scripts/README_gen_asm_offsets.md
 INPUT_ENCODING         = UTF-8
 INPUT_FILE_ENCODING    = 
 FILE_PATTERNS          = *.c \
@@ -149,6 +151,7 @@ FILE_PATTERNS          = *.c \
                          *.hpp \
                          *.h++ \
                          *.S \
+                         *.py \
                          *.md
 RECURSIVE              = YES
 EXCLUDE                = build \
