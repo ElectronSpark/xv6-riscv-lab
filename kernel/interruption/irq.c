@@ -117,14 +117,15 @@ int unregister_irq_handler(int irq_num) {
     return 0;
 }
 
-static void __do_plic_irq(void) {
+static int __do_plic_irq(void) {
     int irq = plic_claim();
     if (!irq) {
-        return;
+        // Assume hart may receive spurious interrupts
+        return 0;
     }
     if (irq >= PLIC_IRQ_CNT) {
         printf("do_irq: invalid PLIC irq %d\n", irq);
-        return;
+        return -ENODEV;
     }
 
     irq += PLIC_IRQ_OFFSET;
@@ -138,7 +139,7 @@ static void __do_plic_irq(void) {
         rcu_read_unlock();
         printf("do_irq: no handler for irq_num %d\n", irq);
         plic_complete(irq - PLIC_IRQ_OFFSET);
-        return;
+        return -ENODEV;
     }
 
     // When an IRQ exists, increase its counter no matter whether handler is NULL
@@ -152,21 +153,21 @@ static void __do_plic_irq(void) {
     // Exit RCU read-side critical section
     rcu_read_unlock();
     plic_complete(irq - PLIC_IRQ_OFFSET);
+    return irq;
 }
 
-void do_irq(struct trapframe *tf) {
+int do_irq(struct trapframe *tf) {
     assert(tf->scause >> 63, "do_irq: not an interrupt");
     int irq_num = tf->scause & ((1UL << 63) - 1);
     if (irq_num >= CLINT_IRQ_CNT) {
         printf("do_irq: invalid irq_num %d\n", irq_num);
-        return;
+        return -ENODEV;
     }
 
     if (irq_num == 9) {
         // PLIC IRQ
         // Treat separately
-        __do_plic_irq();
-        return;
+        return __do_plic_irq();
     }
 
     // Enter RCU read-side critical section
@@ -177,7 +178,7 @@ void do_irq(struct trapframe *tf) {
     if (desc == NULL) {
         rcu_read_unlock();
         printf("do_irq: no handler for irq_num %d\n", irq_num);
-        return;
+        return -ENODEV;
     }
 
     // When an IRQ exists, increase its counter no matter whether handler is NULL
@@ -190,4 +191,5 @@ void do_irq(struct trapframe *tf) {
     
     // Exit RCU read-side critical section
     rcu_read_unlock();
+    return irq_num;
 }

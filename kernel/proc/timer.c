@@ -10,6 +10,11 @@
 #include "timer.h"
 #include "list.h"
 #include "rbtree.h"
+#include "proc.h"
+#include "sched.h"
+#include "trap.h"
+
+static uint64 ticks;
 
 // The following functions are used to manage the red-black tree of process nodes
 // in insertion procedures.
@@ -53,6 +58,21 @@ static void __timer_update_next_tick(struct timer_root *timer) {
     }
 }
 
+static void clockintr(int irq, void *data, device_t *dev){
+    // ask for the next timer interrupt. this also clears
+    // the interrupt request. 1000000 is about a tenth
+    // of a second.
+    w_stimecmp(r_time() + JIFF_TICKS);
+    if(cpuid() == 0){
+        __atomic_fetch_add((uint64*)data, 1, __ATOMIC_SEQ_CST);
+        sched_timer_tick();
+    }
+    if(!sched_holding()) {
+        SET_NEEDS_RESCHED();
+    }
+}
+
+
 void timer_init(struct timer_root *timer) {
     if (timer == NULL) {
         return;
@@ -63,7 +83,15 @@ void timer_init(struct timer_root *timer) {
     timer->next_tick = 0;
     timer->current_tick = 0;
     timer->valid = 1;
+    ticks = 0;
     spin_init(&timer->lock, "timer_lock");
+    struct irq_desc timer_irq_desc = {
+        .handler = clockintr,
+        .data = &ticks,
+        .dev = NULL,
+    };
+    int ret = register_irq_handler(CLINT_TIMER_IRQ, &timer_irq_desc);
+    assert(ret == 0, "timer_init: Failed to register timer IRQ handler");
 }
 
 void timer_node_init(struct timer_node *node,

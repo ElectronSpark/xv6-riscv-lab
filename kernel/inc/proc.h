@@ -13,11 +13,11 @@ struct vfs_inode;
 
 extern struct cpu cpus[NCPU];
 
-#define SET_NEEDS_RESCHED(p) \
+#define SET_NEEDS_RESCHED() \
   do { mycpu()->needs_resched = 1; } while(0)
-#define CLEAR_NEEDS_RESCHED(p) \
+#define CLEAR_NEEDS_RESCHED() \
   do { mycpu()->needs_resched = 0; } while(0)
-#define NEEDS_RESCHED(p) \
+#define NEEDS_RESCHED() \
   (!!(mycpu()->needs_resched))
 
 enum procstate {

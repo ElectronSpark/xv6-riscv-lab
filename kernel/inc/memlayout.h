@@ -19,6 +19,8 @@
 #ifndef __KERNEL_MEMORY_LAYOUT_H
 #define __KERNEL_MEMORY_LAYOUT_H
 
+#define CLINT_TIMER_IRQ 5
+
 // qemu puts UART registers here in physical memory.
 #define UART0 0x10000000L
 #define UART0_IRQ 10

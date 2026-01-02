@@ -135,7 +135,6 @@ int             fetchaddr(uint64, uint64*);
 void            syscall();
 
 // trap.c
-extern uint64   ticks;
 void            usertrapret(void);
 typedef struct ksiginfo ksiginfo_t;
 typedef struct sigaction sigaction_t;

@@ -13,8 +13,6 @@
 #include "vm.h"
 #include "trap.h"
 
-uint64 ticks;
-
 extern char trampoline[], uservec[], userret[];
 
 // in kernelvec.S
@@ -25,8 +23,6 @@ void kernelvec_entrance();
 // Recursive kernel trap handler, already on interrupt stack,
 // skip getting sscratch.
 void kernelvec();
-
-extern int devintr(struct trapframe *sp);
 
 void
 trapinit(void)
@@ -49,32 +45,44 @@ trapinithart(void)
 }
 
 void
-clockintr()
+kerneltrap_dump_regs(struct trapframe *sp)
 {
-  if(cpuid() == 0){
-    __atomic_fetch_add(&ticks, 1, __ATOMIC_SEQ_CST);
-    sched_timer_tick();
-  }
-
-  // ask for the next timer interrupt. this also clears
-  // the interrupt request. 1000000 is about a tenth
-  // of a second.
-  w_stimecmp(r_time() + JIFF_TICKS);
+  printf("kerneltrap_dump_regs:\n");
+  printf("pc: 0x%lx\n", sp->sepc);
+  printf("ra: 0x%lx, sp: 0x%lx, s0: 0x%lx\n", 
+         sp->ra, sp->sp, sp->s0);
+  printf("tp: 0x%lx, t0: 0x%lx, t1: 0x%lx, t2: 0x%lx\n",
+         r_tp(), sp->t0, sp->t1, sp->t2);
+  printf("a0: 0x%lx, a1: 0x%lx, a2: 0x%lx, a3: 0x%lx\n",
+         sp->a0, sp->a1, sp->a2, sp->a3);
+  printf("a4: 0x%lx, a5: 0x%lx, a6: 0x%lx, a7: 0x%lx\n",
+         sp->a4, sp->a5, sp->a6, sp->a7);
+  printf("t3: 0x%lx, t4: 0x%lx, t5: 0x%lx, t6: 0x%lx\n",
+         sp->t3, sp->t4, sp->t5, sp->t6);
+  printf("gp: 0x%lx\n", r_gp());
 }
 
 void
 __user_kirq_return(uint64 irq_sp, uint64 s0)
 {
-  if (myproc()->trapframe->trapframe.scause >> 63 && myproc()->trapframe->trapframe.scause != 0x8000000000000009L 
-      && myproc()->trapframe->trapframe.scause != 0x8000000000000005L) {
-    assert(myproc()->trapframe->trapframe.scause >> 63 == 0, "unexpected interrupt");
-    // printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), myproc()->pid);
-    // printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
-    assert(myproc()->pid != 1, "init exiting");
-    kill(myproc()->pid, SIGSEGV);
-  }
-
   usertrapret();
+}
+
+static void __trap_panic(struct trapframe *tf, uint64 s0) {
+    // interrupt or trap from an unknown source
+    // printf("0x%lx 0x%lx\n", sp, s0);
+    printf("scause=0x%lx(%s) sepc=0x%lx stval=0x%lx\n", tf->scause, __scause_to_str(tf->scause), tf->sepc, tf->stval);
+    tf->ra = tf->sepc;
+    // to enconvinient gdb back trace
+    *(uint64 *)((uint64)tf - 8) = tf->sepc;
+    if (myproc() == NULL) {
+      printf("kerneltrap: no current process\n");
+    }
+    size_t kstack_size = (1UL << (PAGE_SHIFT + myproc()->kstack_order));
+    print_backtrace(tf->s0, myproc()->kstack, myproc()->kstack + kstack_size);
+    kerneltrap_dump_regs(tf);
+    panic_disable_bt();
+    panic("kerneltrap");
 }
 
 void
@@ -86,16 +94,9 @@ user_kirq_entrance(uint64 ksp, uint64 s0)
   // redirect traps to kerneltrap()
   // Since we are on kernel stack
   trapinithart();
-
   assert(mycpu()->intr_depth++ == 0, "user_kirq_entrance: nested interrupts not supported. level=%d", mycpu()->intr_depth);
-
-  if (myproc()->trapframe->trapframe.scause == 0x8000000000000005L) {
-    // timer interrupt.
-    clockintr();
-    SET_NEEDS_RESCHED(myproc());
-  } else if (myproc()->trapframe->trapframe.scause == 0x8000000000000009L) {
-    // irq indicates which device interrupted.
-    do_irq(&myproc()->trapframe->trapframe);
+  if (do_irq(&myproc()->trapframe->trapframe) < 0) {
+    __trap_panic(&myproc()->trapframe->trapframe, s0);
   }
   mycpu()->intr_depth--;
 
@@ -300,7 +301,7 @@ usertrapret(void)
   
   handle_signal();
 
-  if (NEEDS_RESCHED(p)) {
+  if (NEEDS_RESCHED()) {
     yield();
   }
   
@@ -347,79 +348,24 @@ usertrapret(void)
   ((void (*)(uint64, uint64))trampoline_userret)(trapframe_base, satp);
 }
 
-void
-kerneltrap_dump_regs(struct trapframe *sp)
-{
-  printf("kerneltrap_dump_regs:\n");
-  printf("pc: 0x%lx\n", sp->sepc);
-  printf("ra: 0x%lx, sp: 0x%lx, s0: 0x%lx\n", 
-         sp->ra, sp->sp, sp->s0);
-  printf("tp: 0x%lx, t0: 0x%lx, t1: 0x%lx, t2: 0x%lx\n",
-         r_tp(), sp->t0, sp->t1, sp->t2);
-  printf("a0: 0x%lx, a1: 0x%lx, a2: 0x%lx, a3: 0x%lx\n",
-         sp->a0, sp->a1, sp->a2, sp->a3);
-  printf("a4: 0x%lx, a5: 0x%lx, a6: 0x%lx, a7: 0x%lx\n",
-         sp->a4, sp->a5, sp->a6, sp->a7);
-  printf("t3: 0x%lx, t4: 0x%lx, t5: 0x%lx, t6: 0x%lx\n",
-         sp->t3, sp->t4, sp->t5, sp->t6);
-  printf("gp: 0x%lx\n", r_gp());
-}
-
 // interrupts and exceptions from kernel code go here via kernelvec,
 // on whatever the current kernel stack is.
 void 
 kerneltrap(struct trapframe *sp, uint64 s0)
 {
-  int which_dev = 0;
-
   assert(mycpu()->intr_depth++ == 0, "kerneltrap: nested interrupts not supported. level=%d", mycpu()->intr_depth);
-  
-  if((sp->sstatus & SSTATUS_SPP) == 0)
-    panic("kerneltrap: not from supervisor mode");
-  if(intr_get() != 0)
-    panic("kerneltrap: interrupts enabled");
+  assert(sp->sstatus & SSTATUS_SPP, "kerneltrap: not from supervisor mode");
+  assert(!intr_get(), "kerneltrap: interrupts enabled");
 
-  if((which_dev = devintr(sp)) == 0){
-    // interrupt or trap from an unknown source
-    // printf("0x%lx 0x%lx\n", sp, s0);
-    printf("scause=0x%lx(%s) sepc=0x%lx stval=0x%lx\n", sp->scause, __scause_to_str(sp->scause), sp->sepc, sp->stval);
-    sp->ra = sp->sepc;
-    // to enconvinient gdb back trace
-    *(uint64 *)((uint64)sp - 8) = sp->sepc;
-    if (myproc() == NULL) {
-      printf("kerneltrap: no current process\n");
-    }
-    size_t kstack_size = (1UL << (PAGE_SHIFT + myproc()->kstack_order));
-    print_backtrace(sp->s0, myproc()->kstack, myproc()->kstack + kstack_size);
-    kerneltrap_dump_regs(sp);
-    panic_disable_bt();
-    panic("kerneltrap");
+  if (sp->scause >> 63 == 0) {
+    // unexpected interrupt
+    printf("kerneltrap: unexpected scause 0x%lx\n", sp->scause);
+    __trap_panic(sp, s0);
   }
 
-  if(which_dev == 2 && myproc() != 0 && !sched_holding())
-    SET_NEEDS_RESCHED(myproc());
+  if(do_irq(sp) < 0){
+    __trap_panic(sp, s0);
+  }
 
   mycpu()->intr_depth--;
 }
-
-// check if it's an external interrupt or software interrupt,
-// and handle it.
-// returns 2 if timer interrupt,
-// 1 if other device,
-// 0 if not recognized.
-int
-devintr(struct trapframe *sp)
-{
-  if(sp->scause == 0x8000000000000009L){
-    // this is a supervisor external interrupt, via PLIC.
-    do_irq(sp);
-    return 1;
-  } else if(sp->scause == 0x8000000000000005L){
-    // timer interrupt.
-    clockintr();
-    return 2;
-  } else {
-    return 0;
-  }
-}
-
