@@ -16,10 +16,6 @@
 extern char trampoline[], uservec[], userret[];
 
 // in kernelvec.S
-// First time enter the kernel trap handler, needs to get interrupt stack
-// from sscratch.
-void kernelvec_entrance();
-// in kernelvec.S
 // Recursive kernel trap handler, already on interrupt stack,
 // skip getting sscratch.
 void kernelvec();
@@ -41,7 +37,7 @@ void
 trapinithart(void)
 {
   w_sscratch(cpus[cpuid()].intr_sp);
-  w_stvec((uint64)kernelvec_entrance);
+  w_stvec((uint64)kernelvec);
 }
 
 void
@@ -353,19 +349,31 @@ usertrapret(void)
 void 
 kerneltrap(struct trapframe *sp, uint64 s0)
 {
+  assert(CPU_IN_ITR(), "kerneltrap: exception preempted interrupt. level=%d", mycpu()->intr_depth);
   assert(mycpu()->intr_depth++ == 0, "kerneltrap: nested interrupts not supported. level=%d", mycpu()->intr_depth);
   assert(sp->sstatus & SSTATUS_SPP, "kerneltrap: not from supervisor mode");
   assert(!intr_get(), "kerneltrap: interrupts enabled");
 
-  if (sp->scause >> 63 == 0) {
-    // unexpected interrupt
-    printf("kerneltrap: unexpected scause 0x%lx\n", sp->scause);
-    __trap_panic(sp, s0);
-  }
+  // By now there's no valid exception from kernel mode.
+  printf("kerneltrap: unexpected scause 0x%lx\n", sp->scause);
+  __trap_panic(sp, s0);
+
+  mycpu()->intr_depth--;
+}
+
+void 
+kernel_irq(struct trapframe *sp, uint64 s0)
+{
+  assert(!CPU_IN_ITR(), "kerneltrap: nested interrupts not supported. level=%d", mycpu()->intr_depth);
+  mycpu()->intr_depth++;
+  CPU_SET_IN_ITR();
+  assert(sp->sstatus & SSTATUS_SPP, "kerneltrap: not from supervisor mode");
+  assert(!intr_get(), "kerneltrap: interrupts enabled");
 
   if(do_irq(sp) < 0){
     __trap_panic(sp, s0);
   }
 
   mycpu()->intr_depth--;
+  CPU_CLEAR_IN_ITR();
 }

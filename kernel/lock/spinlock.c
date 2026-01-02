@@ -103,7 +103,7 @@ push_off(void)
 void
 pop_off(void)
 {
-  struct cpu *c = mycpu();
+  struct cpu_local *c = mycpu();
   assert(!intr_get(), "pop_off - interruptible");
   assert(c->noff >= 1, "pop_off");
   c->noff -= 1;

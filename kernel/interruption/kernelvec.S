@@ -10,35 +10,32 @@
         # when kerneltrap() returns, restore registers, return.
         #
 .globl kerneltrap
-.globl kernelvec_entrance
-.align 4
-kernelvec_entrance:
-        csrrw a0, sscratch, a0
-        # make room to save registers.
-        addi a0, a0, -TRAPFRAME_SIZE
-        sd sp, TRAPFRAME_SP(a0)
-        mv sp, a0
-        csrrw a0, sscratch, a0
-        sd a0, TRAPFRAME_A0(sp)
-        addi a0, sp, TRAPFRAME_SIZE
-        csrrw a0, sscratch, a0
-        j __kernelvec
-
-        # the current stack is a interrupt stack.
-        # push registers, call kerneltrap().
-        # when kerneltrap() returns, restore registers, return.
-        # This will be a recursive interrupt
-        #
+.globl kernel_irq
 .globl kernelvec
 .align 4
 kernelvec:
-        # make room to save registers.
-        addi sp, sp, -TRAPFRAME_SIZE
-        sd a0, TRAPFRAME_A0(sp)
-        addi a0, sp, TRAPFRAME_SIZE
-        sd a0, TRAPFRAME_SP(sp)
+        csrrw a0, sscratch, a0
+        csrr a0, scause
+        srli a0, a0, 63         # is interrupt?
+        beqz a0, 1f             # if not, skip stack change
 
-__kernelvec:
+        ld a0, CPU_LOCAL_FLAGS(tp)    # is now in interrupt?
+        srli a0, a0, 1          # check in_itr flag
+        andi a0, a0, 1
+        beqz a0, 1f             # if was in interrupt, skip change stack
+
+        ld a0, CPU_LOCAL_INTR_SP(tp)   # load intr_sp from cpu struct
+        addi a0, a0, -TRAPFRAME_SIZE
+        sd sp, TRAPFRAME_SP(a0)
+        j 2f
+1:
+        addi a0, sp, -TRAPFRAME_SIZE
+        sd sp, TRAPFRAME_SP(a0)
+2:
+        addi sp, a0, 0
+        xor a0, a0, a0
+        csrrw a0, sscratch, a0
+        sd a0, TRAPFRAME_A0(sp)
         # save caller-saved registers.
         sd ra, TRAPFRAME_RA(sp)
         sd s0, TRAPFRAME_S0(sp)
@@ -61,22 +58,25 @@ __kernelvec:
         sd t0, TRAPFRAME_SEPC(sp)
         csrr t0, sstatus
         sd t0, TRAPFRAME_SSTATUS(sp)
-        csrr t0, scause
-        sd t0, TRAPFRAME_SCAUSE(sp)
         csrr t0, stval
         sd t0, TRAPFRAME_STVAL(sp)
         csrr t0, stvec
         sd t0, TRAPFRAME_STVEC(sp)
-
-        # redirect all the following kernel trap to kernelvec
-        la t0, kernelvec
-        csrw stvec, t0
-
-        # call the C trap handler in trap.c
+        csrr t0, scause
+        sd t0, TRAPFRAME_SCAUSE(sp)
         addi a0, sp, 0
         addi a1, s0, 0
-        call kerneltrap
 
+        srli t0, t0, 63         # is interrupt?
+        beqz t0, 1f             # if not, skip stack change
+
+        # call the C interrupt handler in trap.c
+        call kernel_irq
+        j 2f
+1:
+        # call the C trap handler in trap.c
+        call kerneltrap
+2:
         ld t0, TRAPFRAME_SEPC(sp)
         csrw sepc, t0
         ld t0, TRAPFRAME_SSTATUS(sp)

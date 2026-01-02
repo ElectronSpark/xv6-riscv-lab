@@ -11,14 +11,23 @@
 
 struct vfs_inode;
 
-extern struct cpu cpus[NCPU];
+extern struct cpu_local cpus[NCPU];
+
+#define CPU_FLAG_NEEDS_RESCHED  1
+#define CPU_FLAG_IN_ITR         2
 
 #define SET_NEEDS_RESCHED() \
-  do { mycpu()->needs_resched = 1; } while(0)
+  do { mycpu()->flags |= CPU_FLAG_NEEDS_RESCHED; } while(0)
 #define CLEAR_NEEDS_RESCHED() \
-  do { mycpu()->needs_resched = 0; } while(0)
+  do { mycpu()->flags &= ~CPU_FLAG_NEEDS_RESCHED; } while(0)
 #define NEEDS_RESCHED() \
-  (!!(mycpu()->needs_resched))
+  (!!(mycpu()->flags & CPU_FLAG_NEEDS_RESCHED))
+#define CPU_SET_IN_ITR() \
+  do { mycpu()->flags |= CPU_FLAG_IN_ITR; } while(0)
+#define CPU_CLEAR_IN_ITR() \
+  do { mycpu()->flags &= ~CPU_FLAG_IN_ITR; } while(0)
+#define CPU_IN_ITR() \
+  (!!(mycpu()->flags & CPU_FLAG_IN_ITR))
 
 enum procstate {
   PSTATE_UNUSED,

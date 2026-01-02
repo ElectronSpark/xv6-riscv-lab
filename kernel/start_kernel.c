@@ -67,7 +67,8 @@ static void __start_kernel_secondary_hart(void) {
     rcu_cpu_init(cpuid()); // Initialize RCU for this CPU
 }
 
-void start_kernel(void) {
+void start_kernel() {
+    mycpu_init(r_tp());
     if(cpuid() == 0){
         __start_kernel_main_hart();
     } else {

@@ -92,17 +92,15 @@ struct context {
 } __attribute__((aligned(64)));
 
 // Per-CPU state.
-struct cpu {
+struct cpu_local {
     struct proc *proc;          // The process running on this cpu, or null.
     struct context context;     // swtch() here to enter scheduler().
     void **intr_stacks;         // Top of interrupt stack for each hart.
     uint64 intr_sp;             // Saved sp value for interrupt.
-    int intr_depth;             // Depth of nested interruption.
+    int intr_depth;             // Depth of nested interruption or exception.
     int noff;                   // Depth of push_off() nesting.
     int intena;                 // Were interrupts enabled before push_off()?
-    struct {
-        uint64 needs_resched: 1;   // Flag to indicate whether rescheduling is needed.
-    };
+    uint64 flags;               // CPU flags
 }  __attribute__((aligned(64)));
 
 #endif /* __KERNEL_TRAPFRAME_H */

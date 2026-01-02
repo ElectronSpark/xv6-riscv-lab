@@ -17,6 +17,7 @@ set(ASM_OFFSET_STRUCTS
     trapframe:trapframe.h
     utrapframe:trapframe.h
     context:trapframe.h
+    cpu_local:trapframe.h
     proc:proc.h
 )
 

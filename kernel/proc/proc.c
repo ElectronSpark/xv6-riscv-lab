@@ -20,7 +20,7 @@
 
 #define NPROC_HASH_BUCKETS 31
 
-struct cpu cpus[NCPU];
+struct cpu_local cpus[NCPU];
 
 // Lock order for proc:
 // 1. proc table lock
@@ -249,24 +249,33 @@ procinit(void)
   __proctab_init();
 }
 
+// Return this CPU's cpu struct.
+// Interrupts must be disabled.
+struct cpu_local*
+mycpu(void)
+{
+  struct cpu_local *c =  (void *)r_tp();
+  // int id = cpuid();
+  // struct cpu_local *c = &cpus[id];
+  return c;
+}
+
 // Must be called with interrupts disabled,
 // to prevent race with process being moved
 // to a different CPU.
 int
 cpuid()
 {
-  int id = r_tp();
+  uint64 id = mycpu() - cpus;
   return id;
 }
 
-// Return this CPU's cpu struct.
-// Interrupts must be disabled.
-struct cpu*
-mycpu(void)
+void
+mycpu_init(uint64 hartid)
 {
-  int id = cpuid();
-  struct cpu *c = &cpus[id];
-  return c;
+  struct cpu_local *c = &cpus[hartid];
+  w_tp((uint64)c);
+  memset(c, 0, sizeof(*c));
 }
 
 // Return the current struct proc *, or zero if none.
@@ -274,7 +283,7 @@ struct proc*
 myproc(void)
 {
   push_off();
-  struct cpu *c = mycpu();
+  struct cpu_local *c = mycpu();
   struct proc *p = c->proc;
   pop_off();
   return p;
