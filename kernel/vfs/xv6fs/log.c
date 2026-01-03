@@ -30,6 +30,7 @@
 #include "buf.h"
 #include "sched.h"
 #include "printf.h"
+#include "vfs/fs.h"
 #include "xv6fs_private.h"
 
 /******************************************************************************
@@ -131,6 +132,8 @@ void xv6fs_initlog(struct xv6fs_superblock *xv6_sb) {
 }
 
 // Called at the start of each FS operation
+// CRITICAL: Must be called BEFORE acquiring any VFS-layer locks (superblock, inode)
+// to avoid deadlock, since this function may sleep waiting for log space.
 void xv6fs_begin_op(struct xv6fs_superblock *xv6_sb) {
     struct xv6fs_log *log = &xv6_sb->log;
     

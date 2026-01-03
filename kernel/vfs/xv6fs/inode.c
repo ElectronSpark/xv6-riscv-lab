@@ -929,12 +929,9 @@ struct vfs_inode *xv6fs_create(struct vfs_inode *dir, mode_t mode,
         return ERR_PTR(-EEXIST);
     }
     
-    xv6fs_begin_op(xv6_sb);
-    
     // Allocate new inode through VFS layer
     struct vfs_inode *new_inode = vfs_alloc_inode(dir->sb);
     if (IS_ERR_OR_NULL(new_inode)) {
-        xv6fs_end_op(xv6_sb);
         return new_inode == NULL ? ERR_PTR(-ENOMEM) : new_inode;
     }
     // vfs_alloc_inode returns the inode locked
@@ -951,11 +948,8 @@ struct vfs_inode *xv6fs_create(struct vfs_inode *dir, mode_t mode,
     if (ret != 0) {
         // TODO: Free inode on failure
         vfs_iunlock(new_inode);
-        xv6fs_end_op(xv6_sb);
         return ERR_PTR(ret);
     }
-    
-    xv6fs_end_op(xv6_sb);
     
     vfs_idup(new_inode);
     vfs_iunlock(new_inode);  // VFS's vfs_create will re-lock it
@@ -980,12 +974,9 @@ struct vfs_inode *xv6fs_mkdir(struct vfs_inode *dir, mode_t mode,
         return ERR_PTR(-EEXIST);
     }
     
-    xv6fs_begin_op(xv6_sb);
-    
     // Allocate new inode through VFS layer (handles mutex init and hash add)
     struct vfs_inode *new_inode = vfs_alloc_inode(dir->sb);
     if (IS_ERR_OR_NULL(new_inode)) {
-        xv6fs_end_op(xv6_sb);
         return new_inode == NULL ? ERR_PTR(-ENOMEM) : new_inode;
     }
     // vfs_alloc_inode returns the inode locked
@@ -1001,7 +992,6 @@ struct vfs_inode *xv6fs_mkdir(struct vfs_inode *dir, mode_t mode,
         __xv6fs_dirlink(xv6_sb, ip, "..", dir->ino) < 0) {
         // TODO: Cleanup on failure
         vfs_iunlock(new_inode);
-        xv6fs_end_op(xv6_sb);
         return ERR_PTR(-EIO);
     }
     
@@ -1010,15 +1000,12 @@ struct vfs_inode *xv6fs_mkdir(struct vfs_inode *dir, mode_t mode,
     // Add directory entry in parent (name_buf already set earlier)
     if (__xv6fs_dirlink(xv6_sb, dp, name_buf, new_inode->ino) < 0) {
         vfs_iunlock(new_inode);
-        xv6fs_end_op(xv6_sb);
         return ERR_PTR(-EIO);
     }
     
     // Update parent's link count for ..
     dir->n_links++;
     xv6fs_iupdate(dp);
-    
-    xv6fs_end_op(xv6_sb);
     
     vfs_idup(new_inode);
     vfs_iunlock(new_inode);  // VFS's vfs_mkdir will re-lock it
@@ -1042,8 +1029,6 @@ struct vfs_inode *xv6fs_unlink(struct vfs_inode *dir, const char *name, size_t n
     struct xv6fs_inode *dp = container_of(dir, struct xv6fs_inode, vfs_inode);
     struct dirent de;
     uint off;
-    
-    xv6fs_begin_op(xv6_sb);
     
     // Find the directory entry
     for (off = 0; off < dir->size; off += sizeof(de)) {
@@ -1072,7 +1057,6 @@ struct vfs_inode *xv6fs_unlink(struct vfs_inode *dir, const char *name, size_t n
             // Get the target inode (vfs_get_inode returns it locked)
             struct vfs_inode *target = vfs_get_inode(dir->sb, inum);
             if (IS_ERR_OR_NULL(target)) {
-                xv6fs_end_op(xv6_sb);
                 return target == NULL ? ERR_PTR(-ENOMEM) : target;
             }
             
@@ -1083,8 +1067,6 @@ struct vfs_inode *xv6fs_unlink(struct vfs_inode *dir, const char *name, size_t n
             xv6fs_iupdate(tip);
             vfs_iunlock(target);
             
-            xv6fs_end_op(xv6_sb);
-            
             // Return the target inode - VFS will call vfs_iput on it after
             // releasing the superblock lock. This handles both cases:
             // - n_links == 0: inode will be freed when refcount reaches 0
@@ -1093,7 +1075,6 @@ struct vfs_inode *xv6fs_unlink(struct vfs_inode *dir, const char *name, size_t n
         }
     }
     
-    xv6fs_end_op(xv6_sb);
     return ERR_PTR(-ENOENT);
 }
 
@@ -1126,8 +1107,6 @@ int xv6fs_link(struct vfs_inode *old, struct vfs_inode *dir,
         return -EEXIST;
     }
     
-    xv6fs_begin_op(xv6_sb);
-    
     old->n_links++;
     xv6fs_iupdate(ip);
     
@@ -1136,11 +1115,9 @@ int xv6fs_link(struct vfs_inode *old, struct vfs_inode *dir,
     if (ret != 0) {
         old->n_links--;
         xv6fs_iupdate(ip);
-        xv6fs_end_op(xv6_sb);
         return ret;
     }
     
-    xv6fs_end_op(xv6_sb);
     return 0;
 }
 
@@ -1213,12 +1190,9 @@ struct vfs_inode *xv6fs_symlink(struct vfs_inode *dir, mode_t mode,
         return ERR_PTR(-EEXIST);
     }
     
-    xv6fs_begin_op(xv6_sb);
-    
     // Allocate new inode through VFS layer
     struct vfs_inode *new_inode = vfs_alloc_inode(dir->sb);
     if (IS_ERR_OR_NULL(new_inode)) {
-        xv6fs_end_op(xv6_sb);
         return new_inode == NULL ? ERR_PTR(-ENOMEM) : new_inode;
     }
     // vfs_alloc_inode returns the inode locked
@@ -1244,7 +1218,6 @@ struct vfs_inode *xv6fs_symlink(struct vfs_inode *dir, mode_t mode,
             // Failed to allocate block - cleanup
             xv6fs_itrunc(ip);
             vfs_iunlock(new_inode);
-            xv6fs_end_op(xv6_sb);
             return ERR_PTR(-ENOSPC);
         }
         
@@ -1252,7 +1225,6 @@ struct vfs_inode *xv6fs_symlink(struct vfs_inode *dir, mode_t mode,
         if (bp == NULL) {
             xv6fs_itrunc(ip);
             vfs_iunlock(new_inode);
-            xv6fs_end_op(xv6_sb);
             return ERR_PTR(-EIO);
         }
         memmove(bp->data + off, target + bytes_written, n);
@@ -1270,14 +1242,11 @@ struct vfs_inode *xv6fs_symlink(struct vfs_inode *dir, mode_t mode,
     if (ret != 0) {
         xv6fs_itrunc(ip);
         vfs_iunlock(new_inode);
-        xv6fs_end_op(xv6_sb);
         return ERR_PTR(ret);
     }
     
-    xv6fs_end_op(xv6_sb);
-    
     vfs_idup(new_inode);
-    vfs_iunlock(new_inode);  // VFS's vfs_symlink will re-lock it
+    vfs_iunlock(new_inode);
     return new_inode;
 }
 
@@ -1299,12 +1268,9 @@ struct vfs_inode *xv6fs_mknod(struct vfs_inode *dir, mode_t mode,
     struct xv6fs_inode *dp = container_of(dir, struct xv6fs_inode, vfs_inode);
     struct xv6fs_superblock *xv6_sb = container_of(dir->sb, struct xv6fs_superblock, vfs_sb);
     
-    xv6fs_begin_op(xv6_sb);
-    
     // Allocate new inode through VFS layer
     struct vfs_inode *new_inode = vfs_alloc_inode(dir->sb);
     if (IS_ERR_OR_NULL(new_inode)) {
-        xv6fs_end_op(xv6_sb);
         return new_inode == NULL ? ERR_PTR(-ENOMEM) : new_inode;
     }
     // vfs_alloc_inode returns the inode locked
@@ -1331,11 +1297,8 @@ struct vfs_inode *xv6fs_mknod(struct vfs_inode *dir, mode_t mode,
     if (ret != 0) {
         // TODO: Free inode on failure
         vfs_iunlock(new_inode);
-        xv6fs_end_op(xv6_sb);
         return ERR_PTR(ret);
     }
-    
-    xv6fs_end_op(xv6_sb);
     
     vfs_idup(new_inode);
     vfs_iunlock(new_inode);  // VFS's vfs_mknod will re-lock it

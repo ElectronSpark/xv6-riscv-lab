@@ -168,6 +168,11 @@ struct vfs_superblock_ops {
     int (*add_orphan)(struct vfs_superblock *sb, struct vfs_inode *inode);
     int (*remove_orphan)(struct vfs_superblock *sb, struct vfs_inode *inode);
     int (*recover_orphans)(struct vfs_superblock *sb);
+    // Transaction/journaling support (optional, for backend filesystems)
+    // Must be called before acquiring any VFS-layer locks to avoid deadlock
+    // Returns 0 on success, negative error code on failure
+    int (*begin_transaction)(struct vfs_superblock *sb);
+    int (*end_transaction)(struct vfs_superblock *sb);
 };
 
 struct vfs_inode {

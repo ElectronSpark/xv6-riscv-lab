@@ -336,6 +336,18 @@ static int xv6fs_recover_orphans(struct vfs_superblock *sb) {
     return 0;
 }
 
+static int xv6fs_begin_transaction_op(struct vfs_superblock *sb) {
+    struct xv6fs_superblock *xv6_sb = container_of(sb, struct xv6fs_superblock, vfs_sb);
+    xv6fs_begin_op(xv6_sb);
+    return 0;
+}
+
+static int xv6fs_end_transaction_op(struct vfs_superblock *sb) {
+    struct xv6fs_superblock *xv6_sb = container_of(sb, struct xv6fs_superblock, vfs_sb);
+    xv6fs_end_op(xv6_sb);
+    return 0;
+}
+
 /******************************************************************************
  * VFS operations structures
  ******************************************************************************/
@@ -348,6 +360,8 @@ struct vfs_superblock_ops xv6fs_superblock_ops = {
     .add_orphan = xv6fs_add_orphan,
     .remove_orphan = xv6fs_remove_orphan,
     .recover_orphans = xv6fs_recover_orphans,
+    .begin_transaction = xv6fs_begin_transaction_op,
+    .end_transaction = xv6fs_end_transaction_op,
 };
 
 struct vfs_fs_type_ops xv6fs_fs_type_ops = {

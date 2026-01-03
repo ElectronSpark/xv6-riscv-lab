@@ -575,6 +575,15 @@ struct vfs_inode *vfs_create(struct vfs_inode *dir, uint32 mode,
         return ERR_PTR(-EINVAL); // Invalid argument
     }
     struct vfs_inode *ret_ptr = NULL;
+    
+    // Begin transaction BEFORE acquiring any locks
+    if (dir->sb->ops->begin_transaction != NULL) {
+        int ret = dir->sb->ops->begin_transaction(dir->sb);
+        if (ret != 0) {
+            return ERR_PTR(ret);
+        }
+    }
+    
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
@@ -594,6 +603,15 @@ struct vfs_inode *vfs_create(struct vfs_inode *dir, uint32 mode,
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
+    
+    // End transaction AFTER releasing locks
+    if (dir->sb->ops->end_transaction != NULL) {
+        int end_ret = dir->sb->ops->end_transaction(dir->sb);
+        if (end_ret != 0) {
+            printf("vfs_create: warning: end_transaction failed with error %d\n", end_ret);
+        }
+    }
+    
     return ret_ptr;
 }
 
@@ -606,6 +624,15 @@ struct vfs_inode *vfs_mknod(struct vfs_inode *dir, uint32 mode,
         return ERR_PTR(-EINVAL); // Invalid argument
     }
     struct vfs_inode *ret_ptr = NULL;
+    
+    // Begin transaction BEFORE acquiring any locks
+    if (dir->sb->ops->begin_transaction != NULL) {
+        int ret = dir->sb->ops->begin_transaction(dir->sb);
+        if (ret != 0) {
+            return ERR_PTR(ret);
+        }
+    }
+    
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
@@ -625,6 +652,15 @@ struct vfs_inode *vfs_mknod(struct vfs_inode *dir, uint32 mode,
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
+    
+    // End transaction AFTER releasing locks
+    if (dir->sb->ops->end_transaction != NULL) {
+        int end_ret = dir->sb->ops->end_transaction(dir->sb);
+        if (end_ret != 0) {
+            printf("vfs_mknod: warning: end_transaction failed with error %d\n", end_ret);
+        }
+    }
+    
     return ret_ptr;
 }
 
@@ -646,6 +682,16 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
         vfs_iput(target);
         return -EXDEV; // Cross-device hard link not supported
     }
+    
+    // Begin transaction BEFORE acquiring any locks
+    if (dir->sb->ops->begin_transaction != NULL) {
+        ret = dir->sb->ops->begin_transaction(dir->sb);
+        if (ret != 0) {
+            vfs_iput(target);
+            return ret;
+        }
+    }
+    
     vfs_superblock_wlock(dir->sb);
     if (S_ISDIR(target->mode)) {
         ret = -EPERM; // Cannot create hard link to a directory
@@ -674,6 +720,15 @@ out:
     vfs_iunlock_two(target, dir);
 out_unlock_sb:
     vfs_superblock_unlock(dir->sb);
+    
+    // End transaction AFTER releasing locks
+    if (dir->sb->ops->end_transaction != NULL) {
+        int end_ret = dir->sb->ops->end_transaction(dir->sb);
+        if (end_ret != 0) {
+            printf("vfs_link: warning: end_transaction failed with error %d\n", end_ret);
+        }
+    }
+    
     vfs_iput(target);
     return ret;
 }
@@ -687,6 +742,15 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
     }
     int ret = 0;
     struct vfs_inode *ret_ptr = NULL;
+    
+    // Begin transaction BEFORE acquiring any locks
+    if (dir->sb->ops->begin_transaction != NULL) {
+        ret = dir->sb->ops->begin_transaction(dir->sb);
+        if (ret != 0) {
+            return ret;
+        }
+    }
+    
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
     ret = __vfs_inode_valid(dir);
@@ -714,6 +778,15 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
+    
+    // End transaction AFTER releasing locks
+    if (dir->sb->ops->end_transaction != NULL) {
+        int end_ret = dir->sb->ops->end_transaction(dir->sb);
+        if (end_ret != 0) {
+            printf("vfs_unlink: warning: end_transaction failed with error %d\n", end_ret);
+        }
+    }
+    
     if (ret != 0) {
         return ret;
     }
@@ -736,6 +809,15 @@ struct vfs_inode *vfs_mkdir(struct vfs_inode *dir, uint32 mode,
         return ERR_PTR(-EINVAL); // Invalid argument
     }
     struct vfs_inode *ret_ptr = NULL;
+    
+    // Begin transaction BEFORE acquiring any locks
+    if (dir->sb->ops->begin_transaction != NULL) {
+        int ret = dir->sb->ops->begin_transaction(dir->sb);
+        if (ret != 0) {
+            return ERR_PTR(ret);
+        }
+    }
+    
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
@@ -761,6 +843,15 @@ struct vfs_inode *vfs_mkdir(struct vfs_inode *dir, uint32 mode,
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
+    
+    // End transaction AFTER releasing locks
+    if (dir->sb->ops->end_transaction != NULL) {
+        int end_ret = dir->sb->ops->end_transaction(dir->sb);
+        if (end_ret != 0) {
+            printf("vfs_mkdir: warning: end_transaction failed with error %d\n", end_ret);
+        }
+    }
+    
     return ret_ptr;
 }
 
@@ -773,6 +864,15 @@ int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len) {
     }
     int ret = 0;
     struct vfs_inode *ret_ptr = NULL;
+    
+    // Begin transaction BEFORE acquiring any locks
+    if (dir->sb->ops->begin_transaction != NULL) {
+        ret = dir->sb->ops->begin_transaction(dir->sb);
+        if (ret != 0) {
+            return ret;
+        }
+    }
+    
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
     ret = __vfs_inode_valid(dir);
@@ -800,6 +900,15 @@ int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len) {
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
+    
+    // End transaction AFTER releasing locks
+    if (dir->sb->ops->end_transaction != NULL) {
+        int end_ret = dir->sb->ops->end_transaction(dir->sb);
+        if (end_ret != 0) {
+            printf("vfs_rmdir: warning: end_transaction failed with error %d\n", end_ret);
+        }
+    }
+    
     if (ret != 0) {
         return ret;
     }
@@ -867,6 +976,15 @@ struct vfs_inode *vfs_symlink(struct vfs_inode *dir, uint32 mode,
     if (name == NULL || name_len == 0) {
         return ERR_PTR(-EINVAL); // Invalid symlink name
     }
+    
+    // Begin transaction BEFORE acquiring any locks
+    if (dir->sb->ops->begin_transaction != NULL) {
+        int ret = dir->sb->ops->begin_transaction(dir->sb);
+        if (ret != 0) {
+            return ERR_PTR(ret);
+        }
+    }
+    
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
     long ret = __vfs_inode_valid(dir);
@@ -884,9 +1002,22 @@ struct vfs_inode *vfs_symlink(struct vfs_inode *dir, uint32 mode,
         goto out;
     }
     ret_ptr = dir->ops->symlink(dir, mode, name, name_len, target, target_len);
+    if (!IS_ERR_OR_NULL(ret_ptr) && ret_ptr->parent == NULL) {
+        ret_ptr->parent = dir;
+        vfs_idup(dir); // increase parent dir refcount
+    }
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
+    
+    // End transaction AFTER releasing locks
+    if (dir->sb->ops->end_transaction != NULL) {
+        int end_ret = dir->sb->ops->end_transaction(dir->sb);
+        if (end_ret != 0) {
+            printf("vfs_symlink: warning: end_transaction failed with error %d\n", end_ret);
+        }
+    }
+    
     return ret_ptr;
 }
 
