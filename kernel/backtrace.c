@@ -167,7 +167,7 @@ found:
 
 #define BT_FRAME_TOP(__fp)          ((__fp) ? *(uint64 *)((uint64)(__fp) - 16) : 0)
 #define BT_RETURN_ADDRESS(__fp)     ((__fp) ? *(uint64 *)((uint64)(__fp) - 8) : 0)
-#define BT_IS_TOP_FRAME(__fp)       (!(uint64)(__fp) && (uint64)(__fp) == PGROUNDDOWN((uint64)(__fp)))
+#define BT_IS_TOP_FRAME(__fp)       (!(uint64)(__fp) || (uint64)(__fp) == PGROUNDDOWN((uint64)(__fp)))
 
 void
 print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end)
@@ -236,8 +236,12 @@ print_proc_backtrace(struct context *ctx, uint64 kstack, int kstack_order)
     
     // Now walk the stack frames
     uint64 last_fp = fp;
+    uint64 last_return_addr = ctx->ra;  // Track last return address to detect loops
+    int repeat_count = 0;
+    const int MAX_REPEATS = 3;
+    
     for (uint64 curr_fp = BT_FRAME_TOP(fp), depth = 0;
-         curr_fp != 0 && depth < BACKTRACE_MAX_DEPTH;
+         !BT_IS_TOP_FRAME(curr_fp) && depth < BACKTRACE_MAX_DEPTH;
          last_fp = curr_fp, curr_fp = BT_FRAME_TOP(curr_fp), depth++) {
 
         if (curr_fp < stack_start || curr_fp >= stack_end) {
@@ -249,6 +253,19 @@ print_proc_backtrace(struct context *ctx, uint64 kstack, int kstack_order)
         if (return_addr_val == 0) {
             break;
         }
+        
+        // Detect repeated entries (same return address)
+        if (return_addr_val == last_return_addr) {
+            repeat_count++;
+            if (repeat_count >= MAX_REPEATS) {
+                printf("  * ... (%ld more repeated frames)\n", depth);
+                break;
+            }
+        } else {
+            repeat_count = 0;
+            last_return_addr = return_addr_val;
+        }
+        
         offset = bt_search(return_addr_val, buf, sizeof(buf), &return_addr);
         if (offset < 0) {
             printf("  * %p\n", (void *)return_addr_val);
