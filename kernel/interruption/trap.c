@@ -349,10 +349,22 @@ usertrapret(void)
 void 
 kerneltrap(struct trapframe *sp, uint64 s0)
 {
-  assert(CPU_IN_ITR(), "kerneltrap: exception preempted interrupt. level=%d", mycpu()->intr_depth);
-  assert(mycpu()->intr_depth++ == 0, "kerneltrap: nested interrupts not supported. level=%d", mycpu()->intr_depth);
-  assert(sp->sstatus & SSTATUS_SPP, "kerneltrap: not from supervisor mode");
-  assert(!intr_get(), "kerneltrap: interrupts enabled");
+  if (CPU_IN_ITR()) {
+    printf("kerneltrap: exception preempted interrupt. level=%d", mycpu()->intr_depth);
+    __trap_panic(sp, s0);
+  }
+  if (mycpu()->intr_depth++) {
+    printf("kerneltrap: nested interrupts not supported. level=%d", mycpu()->intr_depth);
+    __trap_panic(sp, s0);
+  }
+  if (!(sp->sstatus & SSTATUS_SPP)) {
+    printf("kerneltrap: not from supervisor mode");
+    __trap_panic(sp, s0);
+  }
+  if (intr_get()) {
+    printf("kerneltrap: interrupts enabled");
+    __trap_panic(sp, s0);
+  }
 
   // By now there's no valid exception from kernel mode.
   printf("kerneltrap: unexpected scause 0x%lx\n", sp->scause);
