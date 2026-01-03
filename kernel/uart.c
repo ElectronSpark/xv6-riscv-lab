@@ -15,6 +15,7 @@
 #include "trap.h"
 #include "virtio.h"
 #include "string.h"
+#include "freelist.h"
 
 void uartintr(int irq, void *data, device_t *dev);
 
@@ -61,7 +62,7 @@ void uartstart();
 static struct {
   char free[NUM];  // is a buffer free?
   uint16 free_list[NUM];  // The index of the free buffers
-  uint16 free_idx;  // The position in the free list
+  struct freelist buf_freelist;  // Freelist manager for buffers
   int virtio_ready;
   int interrupt_ready;  // Set after interrupt handler is registered
   char tx_buffers[NUM][256];  // Transmit buffers for batching
@@ -72,14 +73,7 @@ static int
 alloc_uart_buffer(void)
 {
   spin_acquire(&uart_tx_lock);
-  if (uart_virtio.free_idx <= 0) {
-    spin_release(&uart_tx_lock);
-    return -1;
-  }
-
-  uart_virtio.free_idx--;
-  int idx = uart_virtio.free_list[uart_virtio.free_idx];
-  uart_virtio.free[idx] = 0; // Mark the buffer as used
+  int idx = freelist_alloc(&uart_virtio.buf_freelist);
   spin_release(&uart_tx_lock);
   return idx;
 }
@@ -89,16 +83,8 @@ static void
 free_uart_buffer(int i)
 {
   spin_acquire(&uart_tx_lock);
-  if(i >= NUM)
-    panic("free_uart_buffer: index out of bounds");
-  if(uart_virtio.free[i])
-    panic("free_uart_buffer: already free");
-  
-  uart_virtio.free[i] = 1;
-  uart_virtio.free_list[uart_virtio.free_idx] = i; // Add to free list
-  uart_virtio.free_idx++;
-  if(uart_virtio.free_idx > NUM)
-    panic("free_uart_buffer: free_idx out of bounds");
+  if(freelist_free(&uart_virtio.buf_freelist, i) != 0)
+    panic("free_uart_buffer: invalid free");
   
   // Wake up any waiting processes
   wakeup_on_chan(&uart_virtio.free[0]);
@@ -137,12 +123,7 @@ uartinit(void)
   uart_virtio.interrupt_ready = 0;  // Start in synchronous mode
   
   // Initialize buffer free list
-  uart_virtio.free_idx = 0;
-  for(int i = 0; i < NUM; i++) {
-    uart_virtio.free[i] = 1;
-    uart_virtio.free_list[i] = i;
-    uart_virtio.free_idx++;
-  }
+  freelist_init(&uart_virtio.buf_freelist, uart_virtio.free, uart_virtio.free_list, NUM);
 }
 
 // Register interrupt handler for async mode

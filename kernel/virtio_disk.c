@@ -22,6 +22,7 @@
 #include "sched.h"
 #include "completion.h"
 #include "trap.h"
+#include "freelist.h"
 
 // the address of virtio mmio register r for disk n.
 #define R(n, r) ((volatile uint32 *)(virtio_base[n] + (r)))
@@ -55,7 +56,7 @@ STATIC struct disk {
   char free[NUM];  // is a descriptor free?
   uint16 used_idx; // we've looked this far in used[2..NUM].
   uint16 free_list[NUM]; // The index of the free descriptors
-  uint16 free_idx; // The position in the free list
+  struct freelist desc_freelist; // Freelist manager for descriptors
 
   // track info about in-flight operations,
   // for use when completion interrupt arrives.
@@ -229,11 +230,7 @@ __virtio_disk_init_one(int diskno)
   *R(diskno, VIRTIO_MMIO_QUEUE_READY) = 0x1;
 
   // all NUM descriptors start out unused.
-  for(int i = 0; i < NUM; i++) {
-    disk->free[i] = 1;
-    disk->free_list[i] = i;
-    disk->free_idx++;
-  }
+  freelist_init(&disk->desc_freelist, disk->free, disk->free_list, NUM);
 
   // tell device we're completely ready.
   status |= VIRTIO_CONFIG_S_DRIVER_OK;
@@ -255,35 +252,23 @@ virtio_disk_init(void)
 STATIC int
 alloc_desc(struct disk *disk)
 {
-  if (disk->free_idx <= 0) {
-    return -1;
-  }
-
-  disk->free_idx--;
-  int idx = disk->free_list[disk->free_idx];
-  disk->free[idx] = 0; // Mark the descriptor as used
-  return idx;
+  return freelist_alloc(&disk->desc_freelist);
 }
 
 // mark a descriptor as free.
 STATIC void
 free_desc(struct disk *disk, int i)
 {
-  if(i >= NUM)
-    panic("free_desc 1");
-  if(disk->free[i])
-    panic("free_desc 2");
+  if(freelist_free(&disk->desc_freelist, i) != 0)
+    panic("free_desc: invalid free");
   
   disk->desc[i].addr = 0;
   disk->desc[i].len = 0;
   disk->desc[i].flags = 0;
   disk->desc[i].next = 0;
-  disk->free[i] = 1;
-  disk->free_list[disk->free_idx] = i; // Add to free list
-  disk->free_idx++;
-  assert(disk->free_idx <= NUM, "free_idx out of bounds");
+  
   __atomic_thread_fence(__ATOMIC_SEQ_CST);
-  if (disk->free_idx >= 3) {
+  if (freelist_available(&disk->desc_freelist) >= 3) {
     wakeup_on_chan(&disk->free[0]);
   }
 }
