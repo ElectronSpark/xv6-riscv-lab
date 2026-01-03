@@ -50,6 +50,22 @@ consputc(int c)
   }
 }
 
+//
+// send a string to the console.
+// for use by puts() and optimized printing.
+//
+void
+consputs(const char *s, int n)
+{
+  for(int i = 0; i < n; i++) {
+    if(s[i] == BACKSPACE){
+      uartputc_sync('\b'); uartputc_sync(' '); uartputc_sync('\b');
+    } else {
+      uartputc_sync(s[i]);
+    }
+  }
+}
+
 struct {
   struct spinlock lock;
   
@@ -69,15 +85,28 @@ consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n)
 {
   int i;
   uint64 src = (uint64)buffer;
+  char kbuf[256];  // Temporary kernel buffer for batching
+  int written = 0;
 
-  for(i = 0; i < n; i++){
-    char c;
-    if(either_copyin(&c, user_src, src+i, 1) == -1)
-      break;
-    uartputc(c);
+  while(written < n) {
+    int batch_size = n - written;
+    if(batch_size > 256)
+      batch_size = 256;
+    
+    // Copy batch to kernel buffer
+    for(i = 0; i < batch_size; i++){
+      char c;
+      if(either_copyin(&c, user_src, src + written + i, 1) == -1)
+        return written + i;
+      kbuf[i] = c;
+    }
+    
+    // Send entire batch at once
+    uartputs(kbuf, batch_size);
+    written += batch_size;
   }
 
-  return i;
+  return written;
 }
 
 //
@@ -245,4 +274,7 @@ consoledevinit(void)
   };
   errno = register_irq_handler(PLIC_IRQ(UART0_IRQ), &uart_irq_desc);
   assert(errno == 0, "consoledevinit: register_irq_handler failed, error code: %d\n", errno);
+  
+  // Register virtio console interrupt (enables async mode)
+  uart_register_interrupt();
 }

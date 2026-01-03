@@ -40,6 +40,7 @@ void            consoleinit(void);
 void            consoledevinit(void);
 void            consoleintr(int);
 void            consputc(int);
+void            consputs(const char*, int);
 
 // exec.c
 int             exec(char*, char**);
@@ -149,8 +150,10 @@ int             restore_sigframe(struct proc *p,
 
 // uart.c
 void            uartinit(void);
+void            uart_register_interrupt(void);
 void            uartputc(int);
 void            uartputc_sync(int);
+void            uartputs(const char*, int);
 int             uartgetc(void);
 
 // vm.c

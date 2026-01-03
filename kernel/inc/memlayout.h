@@ -30,6 +30,8 @@
 #define VIRTIO0_IRQ 1
 #define VIRTIO1 0x10002000
 #define VIRTIO1_IRQ 2
+#define VIRTIO2 0x10003000  // virtio console
+#define VIRTIO2_IRQ 3
 #define NVIRTIO 2  // number of virtio disks
 
 #define PCIE_ECAM 0x30000000L

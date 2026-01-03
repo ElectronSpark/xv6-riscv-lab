@@ -31,7 +31,7 @@ STATIC struct {
 STATIC char digits[] = "0123456789abcdef";
 
 STATIC void
-printint(long long xx, int base, int sign)
+printint(long long xx, int base, int sign, char *outbuf, int *outlen)
 {
   char buf[16];
   int i;
@@ -51,35 +51,35 @@ printint(long long xx, int base, int sign)
     buf[i++] = '-';
 
   while(--i >= 0)
-    consputc(buf[i]);
+    outbuf[(*outlen)++] = buf[i];
 }
 
 STATIC void
-printptr(uint64 x)
+printptr(uint64 x, char *outbuf, int *outlen)
 {
   int i;
-  consputc('0');
-  consputc('x');
+  outbuf[(*outlen)++] = '0';
+  outbuf[(*outlen)++] = 'x';
   for (i = 0; i < (sizeof(uint64) * 2); i++, x <<= 4)
-    consputc(digits[x >> (sizeof(uint64) * 8 - 4)]);
+    outbuf[(*outlen)++] = digits[x >> (sizeof(uint64) * 8 - 4)];
 }
 
 STATIC void
-print_padding(int len)
+print_padding(int len, char *outbuf, int *outlen)
 {
   for (int i = 0; i < len; i++) {
-    consputc(' ');
+    outbuf[(*outlen)++] = ' ';
   }
 }
 
 STATIC void
-print_timestamp(void)
+print_timestamp(char *outbuf, int *outlen)
 {
   uint64 stime = r_time();
-  consputc('[');
-  printint(stime, 10, 0);
-  consputc(']');
-  consputc(' ');
+  outbuf[(*outlen)++] = '[';
+  printint(stime, 10, 0, outbuf, outlen);
+  outbuf[(*outlen)++] = ']';
+  outbuf[(*outlen)++] = ' ';
 }
 
 // Print to the console.
@@ -90,21 +90,28 @@ printf(char *fmt, ...)
   int i, cx, c0, c1, c2, locking;
   char *s;
   static int nnewline = false;
+  char outbuf[512];  // Buffer for batched output
+  int outlen = 0;
 
   locking = pr.locking;
   if(locking)
     spin_acquire(&pr.lock);
 
   if (!__atomic_test_and_set(&nnewline, __ATOMIC_ACQUIRE)) {
-    print_timestamp();
+    print_timestamp(outbuf, &outlen);
   }
 
   va_start(ap, fmt);
   for(i = 0; (cx = fmt[i] & 0xff) != 0; i++){
     if(cx != '%'){
-      consputc(cx);
+      outbuf[outlen++] = cx;
       if (cx == '\n') {
         __atomic_clear(&nnewline, __ATOMIC_RELEASE);
+      }
+      // Flush if buffer is nearly full
+      if(outlen >= 500) {
+        consputs(outbuf, outlen);
+        outlen = 0;
       }
       continue;
     }
@@ -114,54 +121,70 @@ printf(char *fmt, ...)
     if(c0) c1 = fmt[i+1] & 0xff;
     if(c0 && c1 && c0 == '*' && c1 == 's'){
       int len = va_arg(ap, int);
-      print_padding(len);
+      print_padding(len, outbuf, &outlen);
       i++;
       c0 = c1;
       c1 = fmt[i+1] & 0xff;
     }
     if(c1) c2 = fmt[i+2] & 0xff;
     if(c0 == 'd'){
-      printint(va_arg(ap, int), 10, 1);
+      printint(va_arg(ap, int), 10, 1, outbuf, &outlen);
     } else if(c0 == 'l' && c1 == 'd'){
-      printint(va_arg(ap, uint64), 10, 1);
+      printint(va_arg(ap, uint64), 10, 1, outbuf, &outlen);
       i += 1;
     } else if(c0 == 'l' && c1 == 'l' && c2 == 'd'){
-      printint(va_arg(ap, uint64), 10, 1);
+      printint(va_arg(ap, uint64), 10, 1, outbuf, &outlen);
       i += 2;
     } else if(c0 == 'u'){
-      printint(va_arg(ap, int), 10, 0);
+      printint(va_arg(ap, int), 10, 0, outbuf, &outlen);
     } else if(c0 == 'l' && c1 == 'u'){
-      printint(va_arg(ap, uint64), 10, 0);
+      printint(va_arg(ap, uint64), 10, 0, outbuf, &outlen);
       i += 1;
     } else if(c0 == 'l' && c1 == 'l' && c2 == 'u'){
-      printint(va_arg(ap, uint64), 10, 0);
+      printint(va_arg(ap, uint64), 10, 0, outbuf, &outlen);
       i += 2;
     } else if(c0 == 'x'){
-      printint(va_arg(ap, int), 16, 0);
+      printint(va_arg(ap, int), 16, 0, outbuf, &outlen);
     } else if(c0 == 'l' && c1 == 'x'){
-      printint(va_arg(ap, uint64), 16, 0);
+      printint(va_arg(ap, uint64), 16, 0, outbuf, &outlen);
       i += 1;
     } else if(c0 == 'l' && c1 == 'l' && c2 == 'x'){
-      printint(va_arg(ap, uint64), 16, 0);
+      printint(va_arg(ap, uint64), 16, 0, outbuf, &outlen);
       i += 2;
     } else if(c0 == 'p'){
-      printptr(va_arg(ap, uint64));
+      printptr(va_arg(ap, uint64), outbuf, &outlen);
     } else if(c0 == 's'){
       if((s = va_arg(ap, char*)) == 0)
         s = "(null)";
-      for(; *s; s++)
-        consputc(*s);
+      for(; *s; s++) {
+        outbuf[outlen++] = *s;
+        // Flush if buffer is nearly full
+        if(outlen >= 500) {
+          consputs(outbuf, outlen);
+          outlen = 0;
+        }
+      }
     } else if(c0 == '%'){
-      consputc('%');
+      outbuf[outlen++] = '%';
     } else if(c0 == 0){
       break;
     } else {
       // Print unknown % sequence to draw attention.
-      consputc('%');
-      consputc(c0);
+      outbuf[outlen++] = '%';
+      outbuf[outlen++] = c0;
+    }
+    // Flush if buffer is nearly full
+    if(outlen >= 500) {
+      consputs(outbuf, outlen);
+      outlen = 0;
     }
   }
   va_end(ap);
+
+  // Flush remaining buffer
+  if(outlen > 0) {
+    consputs(outbuf, outlen);
+  }
 
   if(locking)
     spin_release(&pr.lock);
