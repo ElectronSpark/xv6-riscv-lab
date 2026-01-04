@@ -96,11 +96,13 @@ user_kirq_entrance(uint64 ksp, uint64 s0)
   }
   mycpu()->intr_depth--;
 
-  if (myproc()->trapframe->trapframe.scause == 0x8000000000000009L) {
-    // For device interrupts, we don't need to reschedule immediately.
-    // Just return to user space.
+  if (myproc()->trapframe->trapframe.scause == 0x8000000000000009L && !NEEDS_RESCHED()) {
+    // For device interrupts that don't need rescheduling,
+    // just return to user space directly.
     usertrapret();
   } else {
+    // For timer interrupts, or if rescheduling is needed,
+    // switch to kernel stack first (so yield() runs on the right stack)
     __switch_noreturn(myproc()->ksp, s0, __user_kirq_return);
   }
 }
@@ -305,6 +307,7 @@ usertrapret(void)
   // kerneltrap() to usertrap(), so turn off interrupts until
   // we're back in user space, where usertrap() is correct.
   intr_off();
+  assert(mycpu()->spin_depth == 0, "usertrapret: spin_depth not zero");
 
   // send syscalls, interrupts, and exceptions to uservec in trampoline.S
   uint64 trampoline_uservec = TRAMPOLINE + (uservec - trampoline);
