@@ -88,7 +88,7 @@ void __scheduler_add_ready(struct proc *p) {
     __sched_assert_holding();
     proc_assert_holding(p);
     enum procstate pstate = __proc_get_pstate(p);
-    assert(pstate == PSTATE_RUNNABLE, "Process must be in RUNNABLE state to be added to ready queue");
+    assert(pstate == PSTATE_RUNNING, "Process must be in RUNNING state to be added to ready queue");
 
     list_node_push(&ready_queue, p, sched_entry);
 }
@@ -102,10 +102,10 @@ static struct proc *__sched_pick_next(void) {
     sched_unlock();
     
     if (p) {
+        smp_store_release(&p->on_cpu, 1); // Mark the process as running on CPU
         proc_lock(p);
         enum procstate pstate = __proc_get_pstate(p);
-        if (pstate != PSTATE_RUNNABLE) {
-            assert(pstate != PSTATE_RUNNING, "found and running process in ready queue");
+        if (pstate != PSTATE_RUNNING) {
             assert(pstate != PSTATE_INTERRUPTIBLE, "try to schedule an interruptible process");
             assert(pstate != PSTATE_UNINTERRUPTIBLE, "try to schedule an uninterruptible process");
             assert(pstate != PSTATE_UNUSED, "try to schedule an uninitialized process");
@@ -142,7 +142,7 @@ static struct proc *__switch_to(struct proc *p) {
     __sched_assert_holding();
     assert(!intr_get(), "Interrupts must be disabled before switching to a process");
     assert(p != NULL, "Cannot switch to a NULL process");
-    assert(__proc_get_pstate(p) == PSTATE_RUNNABLE, "Cannot switch to a non-RUNNABLE process");
+    assert(__proc_get_pstate(p) == PSTATE_RUNNING, "Cannot switch to a non-RUNNING process");
     proc_assert_holding(p);
 
     // Switch to the process's context
@@ -182,8 +182,9 @@ void scheduler_run(void) {
         enum procstate pstate = __proc_get_pstate(prev);
         struct proc *pparent = prev->parent;
 
+        smp_store_release(&prev->on_cpu, 0); // Mark the previous process as not running on CPU
+
         if (pstate == PSTATE_RUNNING) {
-            __proc_set_pstate(prev, PSTATE_RUNNABLE); // If we returned to a RUNNING process, set it to RUNNABLE
             if (!PROC_STOPPED(prev)) {
                 __scheduler_add_ready(prev); // Add the process back to the ready queue
             }
@@ -295,7 +296,7 @@ void scheduler_continue(struct proc *p) {
     assert(p != myproc(), "Cannot wake up the current process");
 
     PROC_CLEAR_STOPPED(p); // Clear the stopped flag
-    if (__proc_get_pstate(p) == PSTATE_RUNNABLE) {
+    if (__proc_get_pstate(p) == PSTATE_RUNNING) {
         __scheduler_add_ready(p); // Add the process back to the ready queue
     }
 }
@@ -309,7 +310,7 @@ static void __scheduler_wakeup_assertion(struct proc *p) {
 
 // Internal function to wake up a sleeping process.
 static void __do_scheduler_wakeup(struct proc *p) {
-    __proc_set_pstate(p, PSTATE_RUNNABLE);
+    __proc_set_pstate(p, PSTATE_RUNNING);
     if (!PROC_STOPPED(p)) {
         __scheduler_add_ready(p); // Add the process back to the ready queue
     }
@@ -392,49 +393,49 @@ void scheduler_dump_chan_queue(void) {
 // Unconditionally wake up process
 void wakeup_proc(struct proc *p)
 {
-  if (p == NULL) {
-    return;
-  }
-  proc_lock(p);
-  sched_lock();
-  scheduler_wakeup(p);
-  sched_unlock();
-  proc_unlock(p);
+    if (p == NULL) {
+        return;
+    }
+    proc_lock(p);
+    sched_lock();
+    scheduler_wakeup(p);
+    sched_unlock();
+    proc_unlock(p);
 }
 
 void wakeup_timeout(struct proc *p) {
-  if (p == NULL) {
-    return;
-  }
-  proc_lock(p);
-  sched_lock();
-  scheduler_wakeup_timeout(p);
-  sched_unlock();
-  proc_unlock(p);
+    if (p == NULL) {
+        return;
+    }
+    proc_lock(p);
+    sched_lock();
+    scheduler_wakeup_timeout(p);
+    sched_unlock();
+    proc_unlock(p);
 }
 
 void wakeup_killable(struct proc *p) {
-  if (p == NULL) {
-    return;
-  }
-  proc_lock(p);
-  sched_lock();
-  scheduler_wakeup_killable(p);
-  sched_unlock();
-  proc_unlock(p);
+    if (p == NULL) {
+        return;
+    }
+    proc_lock(p);
+    sched_lock();
+    scheduler_wakeup_killable(p);
+    sched_unlock();
+    proc_unlock(p);
 }
 
 // Wake up a process sleeping in interruptible state
 void wakeup_interruptible(struct proc *p)
 {
-  if (p == NULL) {
-    return;
-  }
-  proc_lock(p);
-  sched_lock();
-  scheduler_wakeup_interruptible(p);
-  sched_unlock();
-  proc_unlock(p);
+    if (p == NULL) {
+        return;
+    }
+    proc_lock(p);
+    sched_lock();
+    scheduler_wakeup_interruptible(p);
+    sched_unlock();
+    proc_unlock(p);
 }
 
 uint64 sys_dumpchan(void) {
@@ -444,4 +445,30 @@ uint64 sys_dumpchan(void) {
     scheduler_dump_chan_queue();
     sleep_unlock();
     return 0;
+}
+
+// Context Switching Helpers
+// Refer to how Linux handle context switching and wakeup race conditions
+
+// Process sleep routine:
+// - process state change to one of SLEEPING states
+// - add sleep queue
+// - mark on_rq = false in context_switch_prepare
+// - context switch out
+// - mark on_cpu = false in context_switch_finish
+
+void context_switch_prepare(struct proc *prev, struct proc *next) {
+    assert(prev != NULL, "Previous process is NULL");
+    assert(next != NULL, "Next process is NULL");
+
+    // Mark the next process as on the CPU
+    smp_store_release(&next->on_cpu, 1);
+}
+
+void context_switch_finish(struct proc *prev, struct proc *next) {
+    assert(prev != NULL, "Previous process is NULL");
+    assert(next != NULL, "Next process is NULL");
+
+    // Mark the previous process as not on the CPU
+    smp_store_release(&prev->on_cpu, 0);
 }

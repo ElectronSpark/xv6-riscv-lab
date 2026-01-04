@@ -8,6 +8,7 @@
 #include "trapframe.h"
 #include "signal_types.h"
 #include "vm_types.h"
+#include "atomic.h"
 
 struct vfs_inode;
 
@@ -37,7 +38,6 @@ enum procstate {
   STATE_TIMER,
   STATE_KILLABLE_TIMER,
   PSTATE_UNINTERRUPTIBLE,
-  PSTATE_RUNNABLE,
   PSTATE_RUNNING,
   PSTATE_EXITING,
   PSTATE_ZOMBIE
@@ -68,7 +68,6 @@ enum procstate {
 })
 
 #define PSTATE_IS_AWOKEN(state) ({    \
-  (state) == PSTATE_RUNNABLE ||       \
   (state) == PSTATE_RUNNING;          \
 })
 
@@ -119,7 +118,7 @@ struct proc {
   list_node_t dmp_list_entry;  // Entry in the dump list
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
-
+  
   // Signal related fields
   sigacts_t *sigacts;          // Signal actions for this process
   sigset_t sig_pending_mask;   // Mark none empty signal pending queue
@@ -128,27 +127,34 @@ struct proc {
   // This is used to restore the user context when a signal is delivered.
   uint64 sig_ucontext;    // Address of the signal user context
   stack_t sig_stack;      // Alternate signal stack
-
+  
   // both p->lock and p->parent->lock must be held when using this:
   list_node_t siblings;       // List of sibling processes
   list_node_t children;       // List of child processes
   int children_count;         // Number of children
   struct proc *parent;        // Parent process
-
+  
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
   int kstack_order;            // Kernel stack order, used for allocation
   uint64 ksp;
   vm_t *vm;                     // Virtual memory areas and page table
   struct utrapframe *trapframe; // data page for trampoline.S
-
+  
   // both p->lock and __sched_lock must be held 
-  int cpu_id;                  // The CPU running this process.
+  // Priority Inheritance lock is adopted from Linux kernel.
+  // Although we don't have priority levels yet, we still need pi_lock to
+  // protect wakening up process.
+  // pi_lock does not protect sleeping process, it's role is to avoid
+  // multiple wakeups to the same process at the same time.
+  // pi_lock should be acquired before sched lock
+  spinlock_t pi_lock;           // priority inheritance lock
+  int on_rq;                   // The process is on a ready queue
+  int on_cpu;                  // The process is running on a CPU
   uint64 kentry;               // Entry point for kernel process
   uint64 arg[2];               // Argument for kernel process
-  // struct file *ofile[NOFILE];  // Open files
-  // struct inode *cwd;           // Current directory
-  // @TODO: replace the original XV6 fs subsystem with VFS
+  int cpu_id;                  // The CPU running this process.
+  
   struct {
     struct vfs_inode_ref rooti; // Root inode
     struct vfs_inode_ref cwd;   // Current working directory inode
@@ -225,7 +231,6 @@ static inline const char *procstate_to_str(enum procstate state) {
     case PSTATE_USED: return "used";
     case PSTATE_INTERRUPTIBLE: return "interruptible";
     case PSTATE_UNINTERRUPTIBLE: return "uninterruptible";
-    case PSTATE_RUNNABLE: return "runnable";
     case PSTATE_RUNNING: return "running";
     case PSTATE_EXITING: return "exiting";
     case PSTATE_ZOMBIE: return "zombie";

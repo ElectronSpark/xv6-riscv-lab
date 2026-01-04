@@ -24,6 +24,11 @@ void scheduler_wakeup_killable(struct proc *p);
 void scheduler_wakeup_interruptible(struct proc *p);
 void sleep_on_chan(void *chan, struct spinlock *lk);
 void wakeup_on_chan(void *chan);
+
+// Context Switching Helpers
+void context_switch_prepare(struct proc *prev, struct proc *next);
+void context_switch_finish(struct proc *prev, struct proc *next);
+
 // Timer related
 void sched_timer_init(void);
 void sched_timer_tick(void);

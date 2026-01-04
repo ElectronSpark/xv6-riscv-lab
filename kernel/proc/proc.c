@@ -218,6 +218,7 @@ __pcb_init(struct proc *p)
   list_entry_init(&p->children);
   hlist_entry_init(&p->proctab_entry);
   spin_init(&p->lock, "proc");
+  spin_init(&p->pi_lock, "proc_pi_lock");
   vfs_fdtable_init(&p->fs.fdtable);
 }
 
@@ -388,7 +389,7 @@ allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order)
   return p;
 }
 
-static void __kernel_proc_entry(void) {
+static void __kernel_proc_entry(struct context *prev) {
   // Still holding p->lock from scheduler.
   sched_unlock(); // Release the scheduler lock.
   proc_unlock(myproc());
@@ -985,7 +986,7 @@ procdump(void)
     printf("%d %s%s [%s] %s", pid, state, 
             PROC_STOPPED(p) ? " (stopped)" : "", 
             PROC_USER_SPACE(p) ? "U":"K", name);
-    if (pstate == PSTATE_RUNNING) {
+    if (smp_load_acquire(&p->on_cpu)) {
       printf(" (CPU: %d)\n", p->cpu_id);
     } else {
       printf("\n");
@@ -1141,7 +1142,7 @@ __procdump_tree_recursive(struct proc *p, int depth)
   printf("%d %s%s [%s] %s", pid, state, 
           PROC_STOPPED(p) ? " (stopped)" : "", 
           PROC_USER_SPACE(p) ? "U":"K", name);
-  if (pstate == PSTATE_RUNNING) {
+  if (smp_load_acquire(&p->on_cpu)) {
     printf(" (CPU: %d)\n", p->cpu_id);
   } else {
     printf("\n");

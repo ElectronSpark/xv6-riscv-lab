@@ -39,4 +39,35 @@ static inline void atomic_inc(int *value) {
     __atomic_fetch_add(value, 1, __ATOMIC_SEQ_CST);
 }
 
+// From Linux barrier.h
+#define __mb()       __atomic_thread_fence(__ATOMIC_SEQ_CST)
+#define __rmb()      __atomic_thread_fence(__ATOMIC_ACQUIRE)
+#define __wmb()      __atomic_thread_fence(__ATOMIC_RELEASE)
+
+#define __smp_store_release(p, v) \
+    __atomic_store_n((p), (v), __ATOMIC_RELEASE)
+
+#define __smp_load_acquire(p) \
+    __atomic_load_n((p), __ATOMIC_ACQUIRE)
+
+
+#define mb()    __mb()
+#define rmb()   __rmb()
+#define wmb()   __wmb()
+
+#define smp_store_release(p, v) __smp_store_release((p), (v))
+#define smp_load_acquire(p) __smp_load_acquire((p))
+#define smp_cond_load_acquire(ptr, cond) ({             \
+    typeof(ptr) __PTR = (ptr);                          \
+    typeof(*ptr) VAL;                                   \
+    for (;;) {                                          \
+        VAL = smp_load_acquire(__PTR);                  \
+        if (cond(VAL)) {                                \
+            break;                                      \
+        }                                               \
+    }                                                   \
+    VAL;                                                \
+})
+
+
 #endif // KERNEL_INC_ATOMIC_H
