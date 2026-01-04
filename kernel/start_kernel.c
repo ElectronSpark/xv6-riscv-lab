@@ -16,12 +16,6 @@
 
 volatile STATIC int started = 0;
 
-// just to test the kernel thread creation
-// will exit immediately after printing the args
-static inline void __idle(uint64 arg1, uint64 arg2) {
-    printf("kernel thread started with arg1: %lx, arg2: %lx\n", arg1, arg2);
-}
-
 static void __start_kernel_main_hart(void) {
     kobject_global_init();
     consoleinit();
@@ -49,10 +43,7 @@ static void __start_kernel_main_hart(void) {
     // Legacy iinit() and fileinit() removed - VFS handles these
     userinit();      // first user process
     sched_timer_init();
-    struct proc *idle_proc = NULL;
-    int kpid = kernel_proc_create("idle_process", &idle_proc, __idle, 128, 256, KERNEL_STACK_ORDER); // Create an idle kernel thread
-    wakeup_proc(idle_proc);
-    printf("Idle kernel thread created with pid: %d\n", kpid);
+    idle_proc_init();
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
 
@@ -60,6 +51,7 @@ static void __start_kernel_secondary_hart(void) {
     while(__atomic_load_n(&started, __ATOMIC_ACQUIRE) == 0)
       ;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    idle_proc_init();
     printf("hart %d starting\n", cpuid());
     kvminithart();    // turn on paging
     trapinithart();   // install kernel trap vector
@@ -75,6 +67,7 @@ void start_kernel() {
         __start_kernel_secondary_hart();
     }
 
+    // Now we are in idle process context. Just yield to scheduler.
     scheduler_run();     
 }
 

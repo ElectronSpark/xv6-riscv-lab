@@ -25,6 +25,8 @@ void scheduler_wakeup_interruptible(struct proc *p);
 void sleep_on_chan(void *chan, struct spinlock *lk);
 void wakeup_on_chan(void *chan);
 
+void idle_proc_init(void);
+
 // Context Switching Helpers
 void context_switch_prepare(struct proc *prev, struct proc *next);
 void context_switch_finish(struct proc *prev, struct proc *next);

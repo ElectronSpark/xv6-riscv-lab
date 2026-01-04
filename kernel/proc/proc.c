@@ -435,6 +435,38 @@ int kernel_proc_create(const char *name, struct proc **retp, void *entry,
   return p->pid;
 }
 
+// Initialize the current context as an idle process.
+// This function is called during CPU initialization.
+// Idle processes will never be added to the scheduler's ready queue,
+// and it will be scheduled only when there are no other running processes.
+// Idle processes will also not be added to process table
+// in entry.S:
+//   # with a KERNEL_STACK_SIZE-byte stack per CPU.
+void idle_proc_init(void) {
+  struct proc *p = NULL;
+  void *kstack = NULL;
+
+  // Allocate a kernel stack page.
+  size_t kstack_size = KERNEL_STACK_SIZE;
+  kstack = (void *)(r_sp() & (~(kstack_size - 1)));
+  
+  // Place PCB at the top of the kernel stack
+  p = (struct proc *)(kstack  + kstack_size - sizeof(struct proc));
+  __pcb_init(p);
+
+  // Set up new context to start executing at forkret,
+  // which returns to user space.
+  assert((PAGE_SIZE << KERNEL_STACK_ORDER) == kstack_size, "idle_proc_init: invalid KERNEL_STACK_ORDER");
+  p->kstack_order = KERNEL_STACK_ORDER;
+  p->kstack = (uint64)kstack;
+  smp_store_release(&mycpu()->proc, p);
+  smp_store_release(&p->on_cpu, 1);
+  smp_store_release(&p->on_rq, 1);
+  smp_store_release(&p->cpu_id, cpuid());
+
+  printf("CPU %d idle process initialized at kstack 0x%lx\n", cpuid(), (uint64)kstack);
+}
+
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must not be held.
