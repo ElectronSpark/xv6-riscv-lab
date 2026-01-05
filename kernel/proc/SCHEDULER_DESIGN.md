@@ -342,6 +342,22 @@ if (is_cont) {
 
 This pattern mirrors how `signal_notify()` calls `scheduler_wakeup_interruptible()`.
 
+### Why scheduler_continue Needs on_cpu Wait
+
+Previously, `scheduler_continue()` used a different protocol (`proc_lock` + `sched_lock`)
+and did NOT wait for `on_cpu == 0`. This was unsafe because:
+
+1. **Race with context switch**: If process P is still running on CPU 0 and CPU 1 sends
+   SIGCONT, the old code would add P to the ready queue while P was still on CPU 0.
+   
+2. **Double scheduling**: CPU 2 could pick P from the ready queue and try to run it,
+   while CPU 0 still had P on its CPU.
+
+The fix aligns `scheduler_continue()` with `__do_scheduler_wakeup()`:
+- Both use `pi_lock` (avoiding deadlock with `proc_lock`)
+- Both wait for `on_cpu == 0` before enqueuing
+- Both acquire `sched_lock` internally
+
 ## Sleep Path
 
 ### scheduler_sleep()
@@ -417,6 +433,7 @@ void sleep_on_chan(void *chan, struct spinlock *lk) {
 │  • State CAS prevents double-enqueue from multiple wakers                    │
 │  • context_switch_finish RE-READS state for interrupt wakeups               │
 │  • on_rq changes only under sched_lock                                       │
-│  • Wakeup requires pi_lock (not proc_lock) to avoid deadlock                │
+│  • Wakeup AND continue require pi_lock (not proc_lock) to avoid deadlock    │
+│  • Both wakeup and continue wait for on_cpu == 0 before enqueuing           │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
