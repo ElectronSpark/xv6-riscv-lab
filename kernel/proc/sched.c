@@ -174,6 +174,8 @@ void scheduler_yield(void) {
     struct proc *proc = myproc();
     struct proc *prev = NULL;
 
+    assert(!CPU_IN_ITR(), "Cannot yield CPU in interrupt context");
+
     // Wake up processes with expired timers.
     __do_timer_tick();
     
@@ -257,21 +259,30 @@ void scheduler_stop(struct proc *p) {
 }
 
 void scheduler_continue(struct proc *p) {
-    push_off(); // Increase noff counter to ensure interruptions are disabled
-    proc_assert_holding(p);
+    // Uses pi_lock protocol like __do_scheduler_wakeup.
+    // Caller must hold p->pi_lock, must NOT hold proc_lock or sched_lock.
+    assert(p != NULL, "Cannot continue a NULL process");
+    assert(spin_holding(&p->pi_lock), "pi_lock must be held for scheduler_continue");
+    assert(!spin_holding(&p->lock), "proc_lock must not be held for scheduler_continue");
+    assert(!sched_holding(), "sched_lock must not be held for scheduler_continue");
+    assert(p != myproc(), "Cannot continue the current process");
+
     if (!PROC_STOPPED(p)) {
-        pop_off(); // Balance push_off before early return
         return; // Process is not stopped, nothing to do
     }
-    __sched_assert_holding();
-    pop_off(); // Safe to decrease noff counter after acquiring the process lock
-    // __sched_assert_unholding();
-    assert(p != NULL, "Cannot wake up a NULL process");
-    assert(p != myproc(), "Cannot wake up the current process");
+
+    // Wait for process to be off CPU before modifying state.
+    // Like Linux's smp_cond_load_acquire in try_to_wake_up().
+    // "One must be running (->on_cpu == 1) in order to remove oneself from the runqueue."
+    smp_cond_load_acquire(&p->on_cpu, !VAL);
 
     PROC_CLEAR_STOPPED(p); // Clear the stopped flag
+
+    // If process is RUNNING, add it back to the ready queue
     if (__proc_get_pstate(p) == PSTATE_RUNNING) {
-        __scheduler_add_ready(p); // Add the process back to the ready queue
+        sched_lock();
+        __scheduler_add_ready(p);
+        sched_unlock();
     }
 }
 

@@ -39,6 +39,17 @@ static inline void atomic_inc(int *value) {
     __atomic_fetch_add(value, 1, __ATOMIC_SEQ_CST);
 }
 
+#define atomic_cas_ptr(ptr, old, new_val) ({                                \
+    bool __RES = __atomic_compare_exchange_n((ptr), (old), (new_val),       \
+                                false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); \
+    __RES;                                                                  \
+})
+
+#define atomic_cas(ptr, old, new_val) ({        \
+    typeof(*(ptr)) __OLD = (old);                    \
+    atomic_cas_ptr((ptr), &__OLD, (new_val));   \
+})
+
 // From Linux barrier.h
 #define __mb()       __atomic_thread_fence(__ATOMIC_SEQ_CST)
 #define __rmb()      __atomic_thread_fence(__ATOMIC_ACQUIRE)

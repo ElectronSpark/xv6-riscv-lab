@@ -9,6 +9,7 @@
 #include "slab.h"
 #include "list.h"
 #include "kobject.h"
+#include "atomic.h"
 
 static list_node_t __kobject_list = {0};
 static int64 __kobject_count = 0;
@@ -57,8 +58,7 @@ bool kobject_try_get(struct kobject *obj) {
       return false; // Object is already dead or dying
     }
     // Try to atomically increment only if current value is still old_count
-  } while (!__atomic_compare_exchange_n(&obj->refcount, &old_count, old_count + 1,
-                                        false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+  } while (!atomic_cas_ptr(&obj->refcount, &old_count, old_count + 1));
   return true;
 }
 

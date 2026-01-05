@@ -189,7 +189,8 @@ static void test_stop_continue(void) {
         }
         printf("Child %d waiting for stop signal...\n", getpid());
         // Need two resume events (two SIGCONT) in this test.
-        for (int i = 0; i < 2; i++) {
+        // Wait until we've received both signals.
+        while (cont_handler_count < 2) {
             pause();
         }
         printf("Child %d exiting (cont_handler_count=%d)\n", getpid(), cont_handler_count);

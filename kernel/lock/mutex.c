@@ -17,12 +17,7 @@
     __atomic_store_n(&lk->holder, pid, __ATOMIC_SEQ_CST)
 #define __mutex_holder(lk) \
     __atomic_load_n(&lk->holder, __ATOMIC_SEQ_CST)
-#define __mutex_try_set_holder(lk, pid) ({           \
-  pid_t old = 0;                              \
-  __atomic_compare_exchange_n(&lk->holder, &old, pid, 0,  \
-                              __ATOMIC_SEQ_CST,         \
-                              __ATOMIC_SEQ_CST);        \
-})
+#define __mutex_try_set_holder(lk, pid)   atomic_cas(&lk->holder, 0, pid)
 
 static int __do_wakeup(mutex_t *lk) {
   if (LIST_IS_EMPTY(&lk->wait_queue.head)) {

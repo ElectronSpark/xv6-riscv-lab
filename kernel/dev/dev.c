@@ -10,6 +10,7 @@
 #include <slab.h>
 #include <page.h>
 #include <errno.h>
+#include "atomic.h"
 
 static mutex_t __dev_tab_sleeplock;
 static slab_cache_t __dev_type_cache;
@@ -293,9 +294,7 @@ int device_unregister(device_t *dev) {
         return -EINVAL;
     }
     // Mark device as unregistering atomically
-    int expected = 0;
-    if (!__atomic_compare_exchange_n(&dev->unregistering, &expected, 1,
-                                     false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+    if (!atomic_cas(&dev->unregistering, 0, 1)) {
         return -EALREADY; // Already unregistering
     }
     // Remove from device table immediately so no new lookups find it

@@ -358,9 +358,13 @@ after_enqueue:
         // in scheduler_continue() ("if (!PROC_STOPPED(p)) return") leaving
         // the process stranded (RUNNABLE state but not re-queued), and the
         // parent blocked in wait() (uninterruptible) forever.
-        sched_lock();
+        //
+        // scheduler_continue uses pi_lock protocol (like scheduler_wakeup).
+        proc_unlock(p);
+        spin_acquire(&p->pi_lock);
         scheduler_continue(p); // handles clearing PROC_STOPPED and requeueing
-        sched_unlock();
+        spin_release(&p->pi_lock);
+        proc_lock(p);
     }
 
     ret = (ret == -1) ? 0 : ret; // Treat enqueue allocation failure as soft failure.
@@ -369,10 +373,13 @@ after_enqueue:
     if (sigismember(&sa->sa_sigterm, info->signo)) {
         PROC_SET_KILLED(p);
         if (PROC_STOPPED(p)) {
-            // If the process is stopped, we need to wake it up
-            sched_lock();
+            // If the process is stopped, we need to wake it up.
+            // scheduler_continue uses pi_lock protocol.
+            proc_unlock(p);
+            spin_acquire(&p->pi_lock);
             scheduler_continue(p);
-            sched_unlock();
+            spin_release(&p->pi_lock);
+            proc_lock(p);
         }
     }
     if (signal_pending(p)) {
@@ -422,9 +429,16 @@ int signal_notify(struct proc *p) {
         return -1; // Process is not sleeping
     }
     if (__proc_get_pstate(p) == PSTATE_INTERRUPTIBLE) {
-        sched_lock();
-        scheduler_wakeup(p);
-        sched_unlock();
+        // Must follow wakeup locking protocol:
+        // - Release proc_lock (must NOT be held during wakeup)
+        // - Acquire pi_lock (required for wakeup)
+        // - Call wakeup
+        // - Release pi_lock, reacquire proc_lock
+        proc_unlock(p);
+        spin_acquire(&p->pi_lock);
+        scheduler_wakeup_interruptible(p);
+        spin_release(&p->pi_lock);
+        proc_lock(p);
         return 0; // Success
     }
     return -1; // No signals pending or process not in interruptible state
