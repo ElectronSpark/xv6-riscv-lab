@@ -13,7 +13,7 @@
 
 // start() jumps here in supervisor mode on all CPUs.
 void
-main()
+main(int hartid, void *fdt_base)
 {
-   start_kernel();    
+   start_kernel(hartid, fdt_base);    
 }

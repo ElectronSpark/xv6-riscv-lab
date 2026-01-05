@@ -16,13 +16,14 @@
 
 volatile STATIC int started = 0;
 
-static void __start_kernel_main_hart(void) {
+static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     kobject_global_init();
     consoleinit();
     printfinit();
     printf("\n");
     printf("xv6 kernel is booting\n");
     printf("\n");
+    printf("hart %d, fdt_base %p\n", hartid, fdt_base);
     ksymbols_init(); // Initialize kernel symbols
     kinit();         // physical page allocator
     kvminit();       // create kernel page table
@@ -59,10 +60,10 @@ static void __start_kernel_secondary_hart(void) {
     rcu_cpu_init(cpuid()); // Initialize RCU for this CPU
 }
 
-void start_kernel() {
+void start_kernel(int hartid, void *fdt_base) {
     mycpu_init(r_tp());
     if(cpuid() == 0){
-        __start_kernel_main_hart();
+        __start_kernel_main_hart(hartid, fdt_base);
     } else {
         __start_kernel_secondary_hart();
     }

@@ -11,6 +11,8 @@ _entry:
         # with a KERNEL_STACK_SIZE-byte stack per CPU.
         # sp = stack0 + (hartid * KERNEL_STACK_SIZE)
         la sp, stack0
+        sd a0, 0(sp)  # save hartid for later
+        sd a1, 8(sp)  # save fdt_base for later
         li a0, KERNEL_STACK_SIZE
         csrr a1, mhartid
         addi a1, a1, 1
@@ -18,6 +20,9 @@ _entry:
         add sp, sp, a0
         li a0, 4096    # Make room for PCB
         sub sp, sp, a0
+        la a1, stack0
+        ld a0, 0(a1)   # load hartid
+        ld a1, 8(a1)   # load fdt_base
         # jump to start() in start.c
         call start
 spin:
