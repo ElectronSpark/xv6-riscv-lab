@@ -33,13 +33,14 @@ spin_acquire(struct spinlock *lk)
   while(__atomic_test_and_set(&lk->locked, __ATOMIC_ACQUIRE) != 0) {
       __debug_count += 1;
       if (__debug_count >= 10) {
-        asm volatile ("nop");
+        cpu_relax();
       }
     ;
   }
   
   // Record info about lock acquisition for spin_holding() and debugging.
   __atomic_store_n(&lk->cpu, mycpu(), __ATOMIC_RELAXED);
+  mycpu()->spin_depth++;
   __atomic_signal_fence(__ATOMIC_ACQUIRE);
 }
 
@@ -66,6 +67,7 @@ spin_release(struct spinlock *lk)
   //   s1 = &lk->locked
   //   amoswap.w zero, zero, (s1)
   __atomic_clear(&lk->locked, __ATOMIC_RELEASE);
+  mycpu()->spin_depth--;
   pop_off();
 }
 

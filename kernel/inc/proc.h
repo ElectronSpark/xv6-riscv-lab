@@ -38,6 +38,7 @@ enum procstate {
   STATE_TIMER,
   STATE_KILLABLE_TIMER,
   PSTATE_UNINTERRUPTIBLE,
+  PSTATE_WAKENING,
   PSTATE_RUNNING,
   PSTATE_EXITING,
   PSTATE_ZOMBIE
@@ -231,6 +232,7 @@ static inline const char *procstate_to_str(enum procstate state) {
     case PSTATE_USED: return "used";
     case PSTATE_INTERRUPTIBLE: return "interruptible";
     case PSTATE_UNINTERRUPTIBLE: return "uninterruptible";
+    case PSTATE_WAKENING: return "wakening";
     case PSTATE_RUNNING: return "running";
     case PSTATE_EXITING: return "exiting";
     case PSTATE_ZOMBIE: return "zombie";

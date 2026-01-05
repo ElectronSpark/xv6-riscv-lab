@@ -126,9 +126,7 @@ void sleep_ms(uint64 ms) {
         return;
     }
 
-    proc_lock(p);
     scheduler_sleep(NULL, PSTATE_INTERRUPTIBLE);
-    proc_unlock(p);
 
     // After waking up, cancel the timer to avoid unnecessary callback
     sched_timer_done(&tn);

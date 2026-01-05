@@ -95,11 +95,11 @@ struct context {
 struct cpu_local {
     struct proc *proc;          // The process running on this cpu, or null.
     struct proc *idle_proc;     // The idle process for this cpu.
-    struct context context;     // swtch() here to enter scheduler().
     void **intr_stacks;         // Top of interrupt stack for each hart.
     uint64 intr_sp;             // Saved sp value for interrupt.
     int intr_depth;             // Depth of nested interruption or exception.
     int noff;                   // Depth of push_off() nesting.
+    int spin_depth;             // Depth of spinlock nesting.
     int intena;                 // Were interrupts enabled before push_off()?
     uint64 flags;               // CPU flags
 }  __attribute__((aligned(64)));

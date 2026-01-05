@@ -297,7 +297,6 @@ int proc_queue_wait_in_state(proc_queue_t *q, struct spinlock *lock,
     proc_node_init(&waiter);
     // Will be cleared when waking up a process with proc queue APIs
     waiter.error_no = -EINTR;
-    proc_lock(myproc());
     if (proc_queue_push(q, &waiter) != 0) {
         panic("Failed to push process to sleep queue");
     }
@@ -308,7 +307,6 @@ int proc_queue_wait_in_state(proc_queue_t *q, struct spinlock *lock,
         // If it's waken up asynchronously(e.g by signals), we need to remove it from the queue.
         assert(proc_queue_remove(q, &waiter) == 0, "Failed to remove interrupted waiter from queue");
     }
-    proc_unlock(myproc());
     
     if (rdata != NULL) {
         *rdata = waiter.data;
@@ -331,15 +329,13 @@ static void __do_wakeup(proc_node_t *woken, int error_no, uint64 rdata, struct p
     woken->error_no = error_no; // Set the error number for the woken process
     woken->data = rdata; // Set the data for the woken process
     struct proc *p = woken->proc;
-    proc_lock(p);
-    sched_lock();
+    spin_acquire(&p->pi_lock);
     if (retp != NULL) {
         *retp = p;
     }
     // @TODO: only wake up if the process receives sigchld
     scheduler_wakeup(p);
-    sched_unlock();
-    proc_unlock(p);
+    spin_release(&p->pi_lock);
 }
 
 static int __proc_queue_wakeup_one(proc_queue_t *q, int error_no, uint64 rdata, struct proc **retp) {
@@ -540,7 +536,6 @@ int proc_tree_wait_in_state(proc_tree_t *q, uint64 key, struct spinlock *lock,
     waiter.error_no = -EINTR;
     waiter.tree.key = key;
 
-    proc_lock(myproc());
     if (proc_tree_add(q, &waiter) != 0) {
         panic("Failed to push process to sleep tree");
     }
@@ -551,7 +546,6 @@ int proc_tree_wait_in_state(proc_tree_t *q, uint64 key, struct spinlock *lock,
         // If it's waken up asynchronously(e.g by signals), we need to remove it from the queue.
         assert(proc_tree_remove(q, &waiter) == 0, "Failed to remove interrupted waiter from tree");
     }
-    proc_unlock(myproc());
 
     if (rdata != NULL) {
         *rdata = waiter.data;

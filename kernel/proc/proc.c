@@ -178,7 +178,7 @@ int proctab_get_pid_proc(int pid, struct proc **pp) {
   return 0;
 }
 
-extern void forkret(void);
+extern void forkret(struct context *prev);
 STATIC void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
@@ -390,10 +390,9 @@ allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order)
 }
 
 static void __kernel_proc_entry(struct context *prev) {
-  // Still holding p->lock from scheduler.
-  sched_unlock(); // Release the scheduler lock.
-  proc_unlock(myproc());
-  intr_on();
+  assert(prev != NULL, "kernel_proc_entry: prev context is NULL");
+  context_switch_finish(container_of(prev, struct proc, context), myproc());
+  
   // Set up the kernel stack and context for the new process.
   int (*entry)(uint64, uint64) = (void*)myproc()->kentry;
   int ret = entry(myproc()->arg[0], myproc()->arg[1]);
@@ -459,7 +458,10 @@ void idle_proc_init(void) {
   assert((PAGE_SIZE << KERNEL_STACK_ORDER) == kstack_size, "idle_proc_init: invalid KERNEL_STACK_ORDER");
   p->kstack_order = KERNEL_STACK_ORDER;
   p->kstack = (uint64)kstack;
-  smp_store_release(&mycpu()->proc, p);
+  strncpy(p->name, "idle", sizeof(p->name));
+  __proc_set_pstate(p, PSTATE_RUNNING);
+  mycpu()->proc = p;
+  mycpu()->idle_proc = p;
   smp_store_release(&p->on_cpu, 1);
   smp_store_release(&p->on_rq, 1);
   smp_store_release(&p->cpu_id, cpuid());
@@ -485,19 +487,19 @@ freeproc(struct proc *p)
   // Remove from the global list of processes for dumping.
   list_entry_detach(&p->dmp_list_entry);
   __proctab_unlock();
-
+  
   assert(existing == NULL || existing == p, "freeproc called with a different proc");
   if(p->sigacts)
-    sigacts_free(p->sigacts);
+  sigacts_free(p->sigacts);
   if (p->vm != NULL) {
     proc_freepagetable(p);
   }
   // Purge any remaining pending signals (e.g., SIGKILL) before destroy assertions.
   sigpending_empty(p, 0);
   sigpending_destroy(p);
+  proc_unlock(p);
 
   page_free((void *)p->kstack, p->kstack_order);
-  pop_off();  // PCB has been freed, so no need to keep noff counter increased
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -534,23 +536,19 @@ uchar initcode[] = {
   0x00, 0x00, 0x00, 0x00
 };
 
-static void init_entry(void) {
+static void init_entry(struct context *prev) {
   // When we arrive here from context switch, we hold:
   //   1. myproc()->lock (from __sched_pick_next)
   //   2. scheduler lock (from scheduler_run)
   // Release them to do initialization work.
   sched_unlock();  // Release scheduler lock first
-  proc_unlock(myproc());  // Then release process lock
   
   start_kernel_post_init();
-  
-  // Re-acquire locks in the correct order before calling forkret:
-  //   1. Process lock first
-  //   2. Then scheduler lock
-  proc_lock(myproc());
+
+  // All the following forked processes will start from forkret.
+  // And forkret will release the sched lock.
   sched_lock();
-  
-  forkret();
+  forkret(prev);
 }
 
 // Set up first user process.
@@ -607,12 +605,12 @@ userinit(void)
   
   PROC_SET_USER_SPACE(p);
 
-  // Don't forget to wake up the process.
-  __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
-  sched_lock();
-  scheduler_wakeup(p);
-  sched_unlock();
   proc_unlock(p);
+  // Don't forget to wake up the process.
+  spin_acquire(&p->pi_lock);
+  __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
+  scheduler_wakeup(p);
+  spin_release(&p->pi_lock);
 }
 
 /*
@@ -746,10 +744,11 @@ fork(void)
   // because vfs_filedup may call cdev_dup which needs a mutex
   vfs_fdtable_clone(&np->fs.fdtable, &p->fs.fdtable);
   
-  sched_lock();
-  scheduler_wakeup(np);
-  sched_unlock();
   proc_unlock(np);
+  
+  spin_acquire(&np->pi_lock);
+  scheduler_wakeup(np);
+  spin_release(&np->pi_lock);
 
   return pid;
 }
@@ -797,10 +796,8 @@ __exit_yield(int status)
   proc_lock(p);
   p->xstate = status;
   __proc_set_pstate(p, PSTATE_ZOMBIE);
-  sched_lock();
-  scheduler_yield();
-  sched_unlock();
   proc_unlock(p);
+  scheduler_yield();
   panic("exit: __exit_yield should not return");
 }
 
@@ -882,7 +879,7 @@ wait(uint64 addr)
     }
     
     // Wait for a child to exit.
-    scheduler_sleep(NULL, PSTATE_INTERRUPTIBLE);  //DOC: wait-sleep
+    scheduler_sleep(&p->lock, PSTATE_INTERRUPTIBLE);  //DOC: wait-sleep
   }
 
 ret:
@@ -894,31 +891,23 @@ ret:
 void
 yield(void)
 {
-  proc_lock(myproc());
-  sched_lock();
   scheduler_yield();
-  sched_unlock();
-  proc_unlock(myproc());
 }
 
 // A fork child's very first scheduling by scheduler()
 // will swtch to forkret.
 void
-forkret(void)
-{
-  // Verify we're holding both locks as expected from scheduler
-  proc_assert_holding(myproc());
-  assert(sched_holding(), "forkret: scheduler lock not held");
-  
+forkret(struct context *prev)
+{ 
   assert(PROC_USER_SPACE(myproc()), "kernel process %d tries to return to user space", myproc()->pid);
   // The scheduler will disable interrupts to assure the atomicity of
   // the scheduler operations. For processes that gave up CPU by calling yield(),
   //   yield() would restore the previous interruption state when switched back. 
   // But at here, we need to enable interrupts for the first time.
-  
+  assert(prev != NULL, "kernel_proc_entry: prev context is NULL");
+  context_switch_finish(container_of(prev, struct proc, context), myproc());
+
   // Still holding p->lock from scheduler.
-  sched_unlock(); // Release the scheduler lock.
-  proc_unlock(myproc());
   intr_on();
 
   // printf("forkret: process %d is running\n", myproc()->pid);

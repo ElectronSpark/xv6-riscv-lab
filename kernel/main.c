@@ -15,5 +15,5 @@
 void
 main()
 {
-  start_kernel();    
+   start_kernel();    
 }

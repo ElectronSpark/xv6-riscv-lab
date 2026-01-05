@@ -68,7 +68,12 @@ void start_kernel() {
     }
 
     // Now we are in idle process context. Just yield to scheduler.
-    scheduler_run();     
+    for (;;) {
+        scheduler_yield();
+        intr_on();
+        asm volatile("wfi");
+        intr_off();
+    } 
 }
 
 // Initialization that requires a process context

@@ -241,9 +241,7 @@ static void __manager_routine(void) {
                 printf("warning: Failed to wake up idle worker\n");
             }
         }
-        proc_lock(myproc());
         scheduler_sleep(&wq->lock, PSTATE_INTERRUPTIBLE);
-        proc_unlock(myproc());
         // @TODO: handle signals
     }
     __wq_unlock(wq);
@@ -270,13 +268,9 @@ static int __create_manager(struct workqueue *wq) {
 // Try to wake up the manager process of a work queue
 // Will try to acquire manager process lock and scheduler lock
 static void __wakeup_manager(struct workqueue *wq) {
-    proc_lock(wq->manager);
-    if (PROC_SLEEPING(wq->manager)) {
-        sched_lock();
-        scheduler_wakeup(wq->manager);
-        sched_unlock();
-    }
-    proc_unlock(wq->manager);
+    spin_acquire(&wq->manager->pi_lock);
+    scheduler_wakeup(wq->manager);
+    spin_release(&wq->manager->pi_lock);
 }
 
 void workqueue_init(void) {

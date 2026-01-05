@@ -55,16 +55,26 @@ static inline void atomic_inc(int *value) {
 #define rmb()   __rmb()
 #define wmb()   __wmb()
 
+// SMP memory barriers - on SMP these are real barriers
+#define smp_mb()    __mb()
+#define smp_rmb()   __rmb()
+#define smp_wmb()   __wmb()
+
 #define smp_store_release(p, v) __smp_store_release((p), (v))
 #define smp_load_acquire(p) __smp_load_acquire((p))
+
+// Hint to the CPU that we're in a spin-wait loop
+#define cpu_relax() asm volatile("nop" ::: "memory")
+
 #define smp_cond_load_acquire(ptr, cond) ({             \
     typeof(ptr) __PTR = (ptr);                          \
     typeof(*ptr) VAL;                                   \
     for (;;) {                                          \
         VAL = smp_load_acquire(__PTR);                  \
-        if (cond(VAL)) {                                \
+        if (cond) {                                     \
             break;                                      \
         }                                               \
+        cpu_relax();                                    \
     }                                                   \
     VAL;                                                \
 })
