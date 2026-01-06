@@ -207,9 +207,9 @@ else()
 
     # Compose QEMU options
     set(QEMUOPTS_PARAM
-        -bios none
+        -bios default
         -kernel ${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel
-        -m 130M
+        -m 512M
         -smp ${CPUS}
         -nographic
         -global virtio-mmio.force-legacy=false
@@ -220,7 +220,7 @@ else()
         -netdev user,id=net0,hostfwd=udp::${FWDPORT1}-:2000,hostfwd=udp::${FWDPORT2}-:2001
         -object filter-dump,id=net0,netdev=net0,file=packets.pcap
         -device e1000,netdev=net0,bus=pcie.0
-        -device loader,addr=0x88000000,file=${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel.sym,force-raw=on
+        -device loader,addr=0x88200000,file=${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel.sym,force-raw=on
     )
 
     set(QEMUOPTS

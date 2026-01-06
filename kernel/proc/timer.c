@@ -63,7 +63,7 @@ static void clockintr(int irq, void *data, device_t *dev){
     // the interrupt request. 1000000 is about a tenth
     // of a second.
     w_stimecmp(r_time() + JIFF_TICKS);
-    if(cpuid() == 0){
+    if(IS_BOOT_HART()) {
         __atomic_fetch_add((uint64*)data, 1, __ATOMIC_SEQ_CST);
         sched_timer_tick();
     }

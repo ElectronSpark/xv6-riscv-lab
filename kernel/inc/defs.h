@@ -24,7 +24,7 @@ struct mbuf;
 struct sock;
 
 // start_kernel.c
-void            start_kernel(int hartid, void *fdt_base);
+void            start_kernel(int hartid, void *fdt_base, bool is_boot_hart);
 void            start_kernel_post_init(void);
 
 // bio.c

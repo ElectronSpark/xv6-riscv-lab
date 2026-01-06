@@ -4,10 +4,10 @@ ENTRY( _entry )
 SECTIONS
 {
   /*
-   * ensure that entry.S / _entry is at 0x80000000,
+   * ensure that entry.S / _entry is at 0x80200000,
    * where qemu's -kernel jumps.
    */
-  . = 0x80000000;
+  . = 0x80200000;
 
   /* Keep the entry stub at the very start so qemu -kernel jumps to real code. */
   .text.entry : {

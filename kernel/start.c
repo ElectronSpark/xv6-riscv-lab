@@ -4,64 +4,52 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
+#include "atomic.h"
 
-void main();
+void start_kernel(int hartid, void *fdt_base, bool is_boot_hart);
 void timerinit();
 
 // entry.S needs one stack per CPU.
-__attribute__ ((aligned (16))) char stack0[KERNEL_STACK_SIZE * NCPU];
+// Must be aligned to KERNEL_STACK_SIZE so that idle_proc_init can find
+// the stack base by masking the current SP.
+__attribute__ ((aligned (KERNEL_STACK_SIZE))) char stack0[KERNEL_STACK_SIZE * NCPU];
 
-// entry.S jumps here in machine mode on stack0.
+// The hartid of the boot hart (set by the first hart to reach start())
+_Atomic int boot_hartid = -1;
+
+// entry.S jumps here in supervisor mode on stack0.
+// When booting from OpenSBI:
+//   - We're already in S-mode
+//   - hartid is passed in a0 (already saved to tp in entry.S)
+//   - dtb pointer is passed in a1
 void
-start()
+start(int hartid, void *fdt_base)
 {
-  // set M Previous Privilege mode to Supervisor, for mret.
-  unsigned long x = r_mstatus();
-  x &= ~MSTATUS_MPP_MASK;
-  x |= MSTATUS_MPP_S;
-  w_mstatus(x);
-
-  // set M Exception Program Counter to main, for mret.
-  // requires gcc -mcmodel=medany
-  w_mepc((uint64)main);
+  bool is_boot_hart = false;
+  // The first hart to get here becomes the boot hart
+  is_boot_hart = atomic_cas(&boot_hartid, -1, hartid);
 
   // disable paging for now.
   w_satp(0);
 
-  // delegate all interrupts and exceptions to supervisor mode.
-  w_medeleg(0xffff);
-  w_mideleg(0xffff);
+  // enable supervisor-mode interrupts.
   w_sie(r_sie() | SIE_SEIE | SIE_STIE | SIE_SSIE);
-
-  // configure Physical Memory Protection to give supervisor mode
-  // access to all of physical memory.
-  w_pmpaddr0(0x3fffffffffffffull);
-  w_pmpcfg0(0xf);
 
   // ask for clock interrupts.
   timerinit();
 
-  // keep each CPU's hartid in its tp register, for cpuid().
-  int id = r_mhartid();
-  w_tp(id);
-
-  // switch to supervisor mode and jump to main().
-  asm volatile("mret");
+  // jump to main().
+  start_kernel(hartid, fdt_base, is_boot_hart);
 }
 
 // ask each hart to generate timer interrupts.
+// When using OpenSBI, the firmware has already configured:
+//   - menvcfg STCE bit for sstc extension
+//   - mcounteren for stimecmp and time access
+// We just need to set up the first timer interrupt.
 void
 timerinit()
 {
-  // enable supervisor-mode timer interrupts.
-  w_mie(r_mie() | MIE_STIE);
-  
-  // enable the sstc extension (i.e. stimecmp).
-  w_menvcfg(r_menvcfg() | (1L << 63)); 
-  
-  // allow supervisor to use stimecmp and time.
-  w_mcounteren(r_mcounteren() | 2);
-  
   // ask for the very first timer interrupt.
   w_stimecmp(r_time() + JIFF_TICKS);
 }

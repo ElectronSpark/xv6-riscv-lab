@@ -60,9 +60,10 @@ static void __start_kernel_secondary_hart(void) {
     rcu_cpu_init(cpuid()); // Initialize RCU for this CPU
 }
 
-void start_kernel(int hartid, void *fdt_base) {
-    mycpu_init(r_tp());
-    if(cpuid() == 0){
+void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
+    mycpu_init(hartid);
+    if(is_boot_hart){
+        SET_BOOT_HART();
         __start_kernel_main_hart(hartid, fdt_base);
     } else {
         __start_kernel_secondary_hart();
