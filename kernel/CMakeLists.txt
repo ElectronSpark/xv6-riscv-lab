@@ -123,6 +123,12 @@ target_sources(${KERNEL_BINARY} PRIVATE
 target_link_options(${KERNEL_BINARY} PRIVATE -z max-page-size=4096 -T ${KERNEL_DIR}/kernel.ld)
 target_link_libraries(${KERNEL_BINARY} PRIVATE interruption dev lock mm proc vfs)
 
+# Note: USE_LIBSBI is not applicable for S-mode kernels.
+# libsbi is for M-mode firmware (OpenSBI itself), not for S-mode OS kernels.
+# S-mode kernels call SBI services via ecall instruction, which is already
+# implemented in kernel/sbi.c. The OpenSBI build (OPENSBI_MODE=build) provides
+# the fw_jump.elf firmware that QEMU loads to handle these SBI calls.
+
 if(DEFINED ENV{RWLOCK_TEST})
     target_compile_definitions(${KERNEL_BINARY} PRIVATE
         RWAD_WRITE_TEST=1

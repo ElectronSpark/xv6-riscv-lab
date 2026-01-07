@@ -8,6 +8,50 @@ endif()
 # Project name
 project(xv6-riscv LANGUAGES C ASM)
 
+# ==============================================================================
+# OpenSBI Configuration
+# ==============================================================================
+# Options:
+#   OPENSBI_MODE - Controls how OpenSBI is used:
+#     - "default"  : Use QEMU's built-in OpenSBI (default)
+#     - "none"     : Run without BIOS (original xv6 mode)
+#     - "build"    : Build OpenSBI from source (fw_jump.elf firmware)
+#     - "external" : Use an external OpenSBI binary (set OPENSBI_PATH)
+#
+#   OPENSBI_PATH - Path to external OpenSBI fw_jump.elf (when OPENSBI_MODE=external)
+#
+# Note: libsbi.a is for M-mode firmware development, not S-mode kernels.
+# Your kernel already has SBI ecall wrappers in kernel/sbi.c that work with
+# any SBI-compliant firmware (OpenSBI, etc).
+# ==============================================================================
+
+set(OPENSBI_MODE "default" CACHE STRING "OpenSBI mode: default, none, build, or external")
+set_property(CACHE OPENSBI_MODE PROPERTY STRINGS "default" "none" "build" "external")
+
+set(OPENSBI_PATH "" CACHE FILEPATH "Path to external OpenSBI fw_jump.elf binary")
+
+# Validate OPENSBI_MODE
+if(NOT OPENSBI_MODE MATCHES "^(default|none|build|external)$")
+    message(FATAL_ERROR "Invalid OPENSBI_MODE: ${OPENSBI_MODE}. Must be one of: default, none, build, external")
+endif()
+
+# Validate external path if specified
+if(OPENSBI_MODE STREQUAL "external")
+    if(NOT OPENSBI_PATH OR NOT EXISTS "${OPENSBI_PATH}")
+        message(FATAL_ERROR "OPENSBI_MODE is 'external' but OPENSBI_PATH is not set or file doesn't exist: ${OPENSBI_PATH}")
+    endif()
+    message(STATUS "Using external OpenSBI: ${OPENSBI_PATH}")
+endif()
+
+# Build OpenSBI from source if requested
+if(OPENSBI_MODE STREQUAL "build")
+    add_subdirectory(opensbi)
+    set(OPENSBI_PATH ${OPENSBI_FW_JUMP})
+    message(STATUS "OpenSBI will be built from source: ${OPENSBI_PATH}")
+endif()
+
+message(STATUS "OpenSBI mode: ${OPENSBI_MODE}")
+
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 # # Set the C standard to C19
@@ -205,9 +249,18 @@ else()
     math(EXPR FWDPORT1 "${USER_ID} % 5000 + 25999")
     math(EXPR FWDPORT2 "${USER_ID} % 5000 + 30999")
 
+    # Configure OpenSBI BIOS option for QEMU
+    if(OPENSBI_MODE STREQUAL "none")
+        set(QEMU_BIOS_OPT -bios none)
+    elseif(OPENSBI_MODE STREQUAL "default")
+        set(QEMU_BIOS_OPT -bios default)
+    elseif(OPENSBI_MODE STREQUAL "build" OR OPENSBI_MODE STREQUAL "external")
+        set(QEMU_BIOS_OPT -bios ${OPENSBI_PATH})
+    endif()
+
     # Compose QEMU options
     set(QEMUOPTS_PARAM
-        -bios default
+        ${QEMU_BIOS_OPT}
         -kernel ${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel
         -m 512M
         -smp ${CPUS}
@@ -233,13 +286,18 @@ else()
         ${QEMUOPTS_PARAM}
     )
 
+    # Base dependencies for QEMU targets
+    set(QEMU_BASE_DEPS
+        kernel/kernel
+        kernel/kernel.sym
+        fs.img
+        fs0.img
+    )
+
     add_custom_target(qemu-dts
         COMMAND ${QEMU} ${QEMUOPTS_DTB}
         COMMAND dtc -o virt.dts -O dts -I dtb ${CMAKE_CURRENT_BINARY_DIR}/virt.dtb
-        DEPENDS kernel/kernel 
-                kernel/kernel.sym
-                fs.img
-                fs0.img
+        DEPENDS ${QEMU_BASE_DEPS}
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         COMMENT "Generate the device tree file"
     )
@@ -247,13 +305,16 @@ else()
     # Add custom target to run QEMU
     add_custom_target(qemu
         COMMAND ${QEMU} ${QEMUOPTS}
-        DEPENDS kernel/kernel 
-                kernel/kernel.sym
-                fs.img
-                fs0.img
+        DEPENDS ${QEMU_BASE_DEPS}
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         COMMENT "Running QEMU with kernel and fs.img"
     )
+
+    # Add OpenSBI dependency if building from source
+    if(OPENSBI_MODE STREQUAL "build")
+        add_dependencies(qemu-dts ${OPENSBI_DEPENDENCY})
+        add_dependencies(qemu ${OPENSBI_DEPENDENCY})
+    endif()
 
     # Generate .gdbinit from template
     add_custom_command(
@@ -274,14 +335,16 @@ else()
     add_custom_target(qemu-gdb
         COMMAND ${CMAKE_COMMAND} -E echo "*** Now run 'gdb' in another window."
         COMMAND ${QEMU} ${QEMUOPTS} -S ${QEMUGDB}
-        DEPENDS kernel/kernel 
-                kernel/kernel.sym
-                .gdbinit 
-                fs.img
-                fs0.img
+        DEPENDS ${QEMU_BASE_DEPS}
+                .gdbinit
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         COMMENT "Running QEMU with GDB stub"
     )
+
+    # Add OpenSBI dependency to qemu-gdb if building from source
+    if(OPENSBI_MODE STREQUAL "build")
+        add_dependencies(qemu-gdb ${OPENSBI_DEPENDENCY})
+    endif()
 
     # If LAB is net, generate SERVERPORT
     if(DEFINED ENV{LAB} AND "$ENV{LAB}" STREQUAL "net")

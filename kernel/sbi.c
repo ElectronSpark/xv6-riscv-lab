@@ -3,6 +3,9 @@
  * 
  * Provides interface to OpenSBI or other SBI firmware for
  * machine-mode operations.
+ * 
+ * Note: libsbi is for M-mode firmware, not S-mode kernels.
+ * S-mode kernels must use ecall to invoke SBI services.
  */
 
 #include "types.h"
@@ -13,7 +16,7 @@
 // Forward declaration to avoid pulling in proc.h
 int cpuid(void);
 
-// Generic SBI ecall
+// Generic SBI ecall - S-mode kernel uses ecall to invoke SBI services
 struct sbiret sbi_ecall(int ext, int fid, unsigned long arg0,
                         unsigned long arg1, unsigned long arg2,
                         unsigned long arg3, unsigned long arg4,
