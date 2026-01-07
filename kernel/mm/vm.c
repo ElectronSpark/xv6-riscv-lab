@@ -526,37 +526,56 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
   }
 }
 
+// Top-level PTE index for trampoline region
+// PX(2, TRAMPOLINE) = (TRAMPOLINE >> 30) & 0x1FF = 255 for MAXVA=256GiB
+#define TRAMPOLINE_PTE_IDX ((TRAMPOLINE >> 30) & 0x1FF)
+
 // create an empty user page table.
 // returns 0 if out of memory.
+// The top-level PTE containing trampoline is shared with the kernel page table
+// so that trampoline mappings are available in all address spaces.
 pagetable_t
 uvmcreate()
 {
   pagetable_t pagetable;
+  pagetable_t kpgtbl = (pagetable_t)_data_ktlb;
   pagetable = (pagetable_t) __pgtab_alloc();
   if(pagetable == 0)
     return 0;
   memset(pagetable, 0, PGSIZE);
+  // Copy the trampoline PTE from kernel page table
+  pagetable[TRAMPOLINE_PTE_IDX] = kpgtbl[TRAMPOLINE_PTE_IDX];
   return pagetable;
 }
 
 // Recursively free page-table pages.
 // All leaf mappings must already have been removed.
-void
-freewalk(pagetable_t pagetable)
+// skip_idx: if >= 0, skip that entry (shared with kernel).
+static void
+__freewalk(pagetable_t pagetable, int skip_idx)
 {
   // there are 2^9 = 512 PTEs in a page table.
   for(int i = 0; i < 512; i++){
+    if(i == skip_idx)
+      continue; // Skip the shared entry
     pte_t pte = pagetable[i];
     if((pte & PTE_V) && (pte & (PTE_R|PTE_W|PTE_RSW_w|PTE_X)) == 0){
       // this PTE points to a lower-level page table.
       uint64 child = PTE2PA(pte);
-      freewalk((pagetable_t)child);
+      __freewalk((pagetable_t)child, -1);
       pagetable[i] = 0;
     } else if(pte & PTE_V){
       panic("freewalk: leaf");
     }
   }
   __pgtab_free((void*)pagetable);
+}
+
+void
+freewalk(pagetable_t pagetable)
+{
+  // Skip the trampoline PTE which is shared with kernel page table
+  __freewalk(pagetable, TRAMPOLINE_PTE_IDX);
 }
 
 // Free user memory pages,
@@ -736,63 +755,23 @@ static void __vm_unmap_trapframe(vm_t *vm)
   if (vm == NULL || vm->pagetable == NULL) {
     return; // Invalid VM or pagetable
   }
-  uvmunmap(vm->pagetable, TRAMPOLINE, 1, 0);
-  uvmunmap(vm->pagetable, TRAMPOLINE_CPULOCAL, 1, 0);
-  uvmunmap(vm->pagetable, TRAMPOLINE_DATA, 1, 0);
-  uvmunmap(vm->pagetable, SIG_TRAMPOLINE, 1, 0);
+  // Only unmap TRAPFRAME - the trampoline pages are shared via the last PTE
   uvmunmap(vm->pagetable, TRAPFRAME, 1, 0);
 }
 
-// map trapframe and trampolines for user processes.
+// map trapframe for user processes.
+// Trampoline pages are shared via the last PTE from the kernel page table.
+// TRAPFRAME is mapped below UVMTOP (outside the shared region) so it's per-process.
 static int __vm_map_trampoline(vm_t *vm, uint64 trapframe)
 {
-  extern char sig_trampoline[];
   if (vm == NULL || vm->pagetable == NULL) {
     return -1; // Invalid VM or pagetable
   }
-  // map the trampoline code (for system call return)
-  // at the highest user virtual address.
-  // only the supervisor uses it, on the way
-  // to/from user space, so not PTE_U.
-  if(mappages(vm->pagetable, TRAMPOLINE, PGSIZE,
-              (uint64)trampoline, PTE_R | PTE_X) < 0){
-    return -1;
-  }
 
-  // percpu data for trampoline and kernel.
-  if(mappages(vm->pagetable, TRAMPOLINE_CPULOCAL, PGSIZE,
-              (uint64)cpus, PTE_R | PTE_W) < 0){
-    uvmunmap(vm->pagetable, TRAMPOLINE, 1, 0);
-    return -1;
-  }
-
-  // trampoline data used by both trampoline.S and the kernel.
-  if(mappages(vm->pagetable, TRAMPOLINE_DATA, PGSIZE,
-              (uint64)_trampoline_data, PTE_R) < 0){
-    uvmunmap(vm->pagetable, TRAMPOLINE_CPULOCAL, 1, 0);
-    uvmunmap(vm->pagetable, TRAMPOLINE, 1, 0);
-    return -1;
-  }
-
-  // Map the signal trampoline page just below the trampoline page.
-  // The user epc will point to this page when a signal is delivered.
-  if(mappages(vm->pagetable, SIG_TRAMPOLINE, PGSIZE,
-              (uint64)sig_trampoline, PTE_U | PTE_R) < 0){
-    uvmunmap(vm->pagetable, TRAMPOLINE, 1, 0);
-    uvmunmap(vm->pagetable, TRAMPOLINE_DATA, 1, 0);
-    uvmunmap(vm->pagetable, TRAMPOLINE_CPULOCAL, 1, 0);
-    return -1;
-  }
-
-  // map the trapframe page just below the signal trampoline page, for
-  // trampoline.S.
+  // map the trapframe page at TRAPFRAME virtual address (just below UVMTOP)
   trapframe = PGROUNDDOWN(trapframe); // Ensure trapframe is page-aligned
   if(mappages(vm->pagetable, TRAPFRAME, PGSIZE,
               trapframe, PTE_R | PTE_W | PTE_RSW_w) < 0){
-    uvmunmap(vm->pagetable, TRAMPOLINE, 1, 0);
-    uvmunmap(vm->pagetable, SIG_TRAMPOLINE, 1, 0);
-    uvmunmap(vm->pagetable, TRAMPOLINE_DATA, 1, 0);
-    uvmunmap(vm->pagetable, TRAMPOLINE_CPULOCAL, 1, 0);
     return -1;
   }
   vm->trapframe = trapframe; // Store the trapframe pointer in the VM

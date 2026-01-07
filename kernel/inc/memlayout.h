@@ -90,8 +90,15 @@
 #endif
 
 #define UVMBOTTOM 0x1000L
-#define UVMTOP (MAXVA - (MAXVA >> 9))   // Leave the last pte identical to kernel page table
-#define USTACKTOP UVMTOP
+// Leave the top-level PTE containing TRAMPOLINE identical to kernel page table
+// Index 255 covers 0x3FC0000000 to 0x3FFFFFFFFF (last 1 GiB of 256 GiB address space)
+#define UVMTOP (TRAMPOLINE & ~((1UL << 30) - 1))   // Start of the shared 1 GiB region
+
+// TRAPFRAME must be below UVMTOP (outside the shared region)
+// so it can be mapped per-process.
+#define TRAPFRAME (UVMTOP - PGSIZE)
+#define USTACKTOP (TRAPFRAME - PGSIZE)  // Guard page between stack and trapframe
+
 #if UVMBOTTOM + MAXUSTACK > USTACKTOP
 #error "User stack too large"
 #endif
@@ -111,12 +118,12 @@
 //   expandable heap
 //   ...
 //   user stack
-//   128MB padding
+//   guard page
 //   TRAPFRAME (p->trapframe, used by the trampoline)
+// --- UVMTOP boundary (last PTE shared with kernel) ---
 //   SIG_TRAMPOLINE (used by the signal handling code)
 //   CPU_LOCAL (per-cpu data, used by trampoline and kernel)
 //   TRAMPOLINE_DATA (global data for trampoline code)
 //   TRAMPOLINE (the same page as in the kernel)
-#define TRAPFRAME (TRAMPOLINE - (PGSIZE << 2))
 
 #endif          /* __KERNEL_MEMORY_LAYOUT_H */

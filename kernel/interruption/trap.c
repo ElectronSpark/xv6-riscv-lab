@@ -130,8 +130,6 @@ usertrap(void)
   uint64 va;
   vma_t *vma = NULL;
   uint64 scause = myproc()->trapframe->trapframe.scause;
-  // printf("usertrap: scause=0x%lx (%s), sepc=0x%lx, stval=0x%lx\n",
-  //        r_scause(), __scause_to_str(r_scause()), r_sepc(), r_stval());
 
   if((myproc()->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
     panic("usertrap: not from user mode");
