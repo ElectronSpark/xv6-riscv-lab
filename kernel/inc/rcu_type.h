@@ -25,18 +25,10 @@ typedef struct rcu_head {
 
 // Per-CPU RCU data structure
 typedef struct {
-    // Current grace period number when this CPU last reported quiescent state
-    _Atomic uint64      gp_seq;
-
-    // Tracks total number of outermost RCU read locks held by processes on this CPU
-    // Used for quiescent state detection (CPU is quiescent when nesting == 0)
-    // Note: This is incremented only for OUTERMOST locks (when process nesting was 0)
-    // Combined with per-process nesting (proc->rcu_read_lock_nesting) for preemptible RCU
-    _Atomic int         nesting;
-
-    // Indicates if this CPU needs to report a quiescent state
-    _Atomic int         qs_pending;
-
+    // Timestamp when this CPU last context switched (stored in cpu_local->rcu_timestamp)
+    // Used for grace period detection - all CPUs must have context switched after grace period start
+    // We don't store timestamp here, we read it from mycpu()->rcu_timestamp
+    
     // Segmented callback lists (Linux-inspired 4-segment design)
     // All callbacks in a single list, with pointers to segment boundaries
     rcu_head_t          *cb_head;                        // Head of callback list
@@ -51,14 +43,11 @@ typedef struct {
 
 // Global RCU state structure
 typedef struct {
-    // Current grace period sequence number
-    _Atomic uint64      gp_seq;
+    // Grace period start timestamp
+    _Atomic uint64      gp_start_timestamp;
 
-    // Completed grace period sequence number
+    // Completed grace period count
     _Atomic uint64      gp_seq_completed;
-
-    // Bitmap of CPUs that have passed through quiescent state
-    _Atomic uint64      qs_mask;
 
     // Grace period in progress flag
     _Atomic int         gp_in_progress;

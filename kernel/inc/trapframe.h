@@ -102,6 +102,7 @@ struct cpu_local {
     int spin_depth;             // Depth of spinlock nesting.
     int intena;                 // Were interrupts enabled before push_off()?
     uint64 flags;               // CPU flags
+    uint64 rcu_timestamp;       // RCU timestamp - updated before context switch
 }  __attribute__((aligned(64)));
 
 #endif /* __KERNEL_TRAPFRAME_H */

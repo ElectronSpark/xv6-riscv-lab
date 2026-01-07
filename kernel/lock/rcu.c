@@ -9,35 +9,45 @@
 //   - Grace period: Time interval during which all pre-existing readers complete
 //   - Quiescent state: Point where a CPU is not in RCU read-side critical section
 //   - Callbacks: Functions invoked after a grace period completes
-//   - Preemptible RCU: Processes can migrate CPUs while holding RCU read locks
+//   - Timestamp-based RCU: Grace period detection based on context switch timestamps
 //   - RCU GP kthread: Background kernel thread for grace period management
 //
-// GRACE PERIOD DETECTION:
-//   A grace period completes when all CPUs have passed through a quiescent state.
-//   Quiescent states include:
-//     - Context switch (even if process holds RCU lock - safe due to per-process tracking)
-//     - Idle loop
-//     - User mode execution
-//     - Explicit rcu_read_unlock() when nesting reaches 0
-//   
+// GRACE PERIOD DETECTION (Timestamp-based):
+//   A grace period completes when all CPUs have context switched after the grace
+//   period start timestamp. Each CPU records its last context switch timestamp
+//   in mycpu()->rcu_timestamp, which is updated before every context switch.
+//
+//   Algorithm:
+//     1. When a grace period starts, record the current jiffies as gp_start_timestamp
+//     2. Poll each CPU's rcu_timestamp to check if it's >= gp_start_timestamp
+//     3. When all CPUs have timestamps >= gp_start, the grace period is complete
+//     4. Process callbacks that were waiting for this grace period
+//
+//   Timestamp overflow handling:
+//     - Only check overflow risk using current_time from get_jiffs()
+//     - When current_time >= RCU_UINT64_MAX/2, normalize ALL stored timestamps
+//     - Normalization: subtract RCU_UINT64_MAX/4 from all CPU and GP timestamps
+//     - After normalization, direct comparison (t1 > t2) is safe
+//     - This is checked periodically by the RCU GP kthread
+//
 //   The RCU GP kthread periodically:
-//     - Forces quiescent states for idle/offline CPUs
-//     - Advances grace periods when all CPUs report quiescent states
+//     - Checks for timestamp overflow and normalizes if needed
+//     - Checks if all CPUs have switched context since GP start
+//     - Advances grace periods when all CPUs have newer timestamps
 //     - Processes callbacks and wakes waiters
 //
-// NESTING COUNTERS (Hybrid Per-Process/Per-CPU):
-//   - Per-process: Each process has rcu_read_lock_nesting counter that follows it
-//     across CPU migrations, allowing safe preemption and context switches
-//   - Per-CPU: Each CPU tracks total nesting for quiescent state detection
-//   - When a process locks RCU: both process counter and current CPU counter increment
-//   - When a process unlocks RCU: both counters decrement (even if on different CPU)
-//   - No process context: Falls back to per-CPU tracking only
+// READ-SIDE CRITICAL SECTIONS:
+//   rcu_read_lock() and rcu_read_unlock() are very lightweight:
+//     - push_off() / pop_off() to prevent preemption during critical section
+//     - Increment / decrement per-process nesting counter
+//   No per-CPU nesting counters needed - grace period detection relies solely
+//   on context switch timestamps, not on tracking nested read locks.
 //
 // IMPLEMENTATION STRATEGY:
 //   - Per-CPU data structures minimize lock contention
-//   - Grace periods tracked with sequence numbers
+//   - Grace periods tracked with timestamps instead of sequence numbers
 //   - Callbacks queued per-CPU and invoked after grace period
-//   - Scheduler integration for quiescent state detection
+//   - Context switch in process_switch_to() updates mycpu()->rcu_timestamp
 //   - Background kernel thread for grace period management
 //   - Wait queue support for efficient synchronize_rcu()
 //
@@ -52,6 +62,7 @@
 #include "proc.h"
 #include "proc_queue.h"
 #include "sched.h"
+#include "timer.h"
 
 // Global RCU state
 static rcu_state_t rcu_state;
@@ -76,16 +87,35 @@ static void rcu_start_gp(void);
 static int rcu_gp_completed(void);
 static void rcu_advance_gp(void);
 static void rcu_invoke_callbacks(rcu_head_t *list);
-static void rcu_advance_cbs(rcu_cpu_data_t *rcp, uint64 gp_seq);
+static void rcu_advance_cbs(rcu_cpu_data_t *rcp, uint64 gp_timestamp);
 static rcu_head_t *rcu_cblist_dequeue(rcu_cpu_data_t *rcp);
 static void rcu_cblist_enqueue(rcu_cpu_data_t *rcp, rcu_head_t *head);
 static int rcu_cblist_ready_cbs(rcu_cpu_data_t *rcp);
 static void rcu_expedited_gp(void);
+static void rcu_check_timestamp_overflow(void);
 
 // Configuration constants (Linux-inspired)
 #define RCU_LAZY_GP_DELAY   100   // Callbacks to accumulate before starting GP
 #define RCU_BATCH_SIZE      16    // Number of callbacks to invoke per batch
 #define RCU_GP_KTHREAD_INTERVAL_MS  10  // GP kthread wake interval in ms
+
+// Maximum value for uint64 type (defined locally to avoid stdint.h dependency)
+#define RCU_UINT64_MAX      ((uint64)-1)
+
+// Timestamp overflow handling constants:
+//   THRESHOLD: When get_jiffs() reaches this value, trigger normalization
+//   NORMALIZE_VALUE: Amount to subtract from all timestamps during normalization
+// This ensures timestamps stay in a safe range for direct comparison.
+#define TIMESTAMP_OVERFLOW_THRESHOLD  (RCU_UINT64_MAX / 2)
+#define TIMESTAMP_NORMALIZE_VALUE     (RCU_UINT64_MAX / 4)
+
+// Helper function to compare timestamps
+// Returns 1 if t1 > t2, 0 otherwise
+// Safe to use direct comparison since rcu_check_timestamp_overflow() ensures
+// all stored timestamps are periodically normalized to prevent wraparound.
+static inline int safe_timestamp_after(uint64 t1, uint64 t2) {
+    return t1 > t2;
+}
 
 // ============================================================================
 // RCU GP Kthread - Background Grace Period Processing
@@ -94,31 +124,79 @@ static void rcu_expedited_gp(void);
 // Forward declaration for use in kthread
 static void rcu_wakeup_gp_waiters(void);
 
-// Force quiescent states for CPUs that aren't in RCU critical sections
-// This is necessary because offline/idle CPUs may never report QS naturally
-static void rcu_force_quiescent_states(void) {
-    if (!__atomic_load_n(&rcu_state.gp_in_progress, __ATOMIC_ACQUIRE)) {
-        return;
-    }
+// Check and normalize timestamps if needed (called periodically by GP kthread)
+//
+// Overflow prevention strategy:
+//   1. Check current_time from get_jiffs() against THRESHOLD
+//   2. If threshold reached, read each stored timestamp into a local variable
+//   3. Subtract NORMALIZE_VALUE from local copy and store back
+//   4. This keeps all timestamps in a safe range for direct comparison
+//
+// Note: Only current_time determines if normalization is needed. Individual
+// timestamp values are never compared to the threshold - they are simply
+// normalized when the global time crosses the threshold.
+static void rcu_check_timestamp_overflow(void) {
+    uint64 current_time = get_jiffs();
     
-    for (int i = 0; i < NCPU; i++) {
-        rcu_cpu_data_t *rcp = &rcu_state.cpu_data[i];
+    // Only trigger normalization when current time reaches the threshold
+    if (current_time >= TIMESTAMP_OVERFLOW_THRESHOLD) {
+        // Normalize all CPU timestamps: read into local, subtract, store back
+        for (int i = 0; i < NCPU; i++) {
+            struct cpu_local *cpu = &cpus[i];
+            uint64 cpu_ts = __atomic_load_n(&cpu->rcu_timestamp, __ATOMIC_ACQUIRE);
+            if (cpu_ts >= TIMESTAMP_NORMALIZE_VALUE) {
+                __atomic_store_n(&cpu->rcu_timestamp, cpu_ts - TIMESTAMP_NORMALIZE_VALUE, __ATOMIC_RELEASE);
+            }
+        }
         
-        // If CPU is not in an RCU read-side critical section, force QS
-        if (__atomic_load_n(&rcp->nesting, __ATOMIC_ACQUIRE) == 0) {
-            // Clear this CPU's bit in the quiescent state mask
-            uint64 cpu_mask = 1UL << i;
-            __atomic_fetch_and(&rcu_state.qs_mask, ~cpu_mask, __ATOMIC_ACQ_REL);
-            __atomic_store_n(&rcp->qs_pending, 0, __ATOMIC_RELEASE);
+        // Normalize grace period start timestamp
+        uint64 gp_start = __atomic_load_n(&rcu_state.gp_start_timestamp, __ATOMIC_ACQUIRE);
+        if (gp_start >= TIMESTAMP_NORMALIZE_VALUE) {
+            __atomic_store_n(&rcu_state.gp_start_timestamp, gp_start - TIMESTAMP_NORMALIZE_VALUE, __ATOMIC_RELEASE);
         }
     }
 }
+
+// Check if grace period has completed by verifying all CPUs have context switched
+// Returns 1 if all CPUs have switched since GP start, 0 otherwise
+//
+// Algorithm: Compare each CPU's rcu_timestamp against gp_start_timestamp.
+// A CPU has passed through a quiescent state if its timestamp >= gp_start.
+// Direct comparison is safe because rcu_check_timestamp_overflow() ensures
+// all timestamps are normalized before they can wrap around.
+static int rcu_gp_completed(void) {
+    uint64 gp_start = __atomic_load_n(&rcu_state.gp_start_timestamp, __ATOMIC_ACQUIRE);
+    
+    // A grace period completes when all CPUs have timestamps >= gp_start
+    // This means they have all context switched at or after the GP began
+    
+    for (int i = 0; i < NCPU; i++) {
+        struct cpu_local *cpu = &cpus[i];
+        uint64 cpu_timestamp = __atomic_load_n(&cpu->rcu_timestamp, __ATOMIC_ACQUIRE);
+        
+        // If CPU timestamp is 0, it's uninitialized - skip it
+        if (cpu_timestamp == 0) {
+            continue;
+        }
+        
+        // If CPU timestamp is less than GP start, this CPU hasn't context switched yet
+        if (cpu_timestamp < gp_start) {
+            return 0;
+        }
+    }
+    
+    return 1; // All CPUs have switched
+}
+
+// Force quiescent states - not needed in timestamp-based RCU
+// Removed as it's unused in the new implementation
 
 // RCU GP kthread main function
 // This thread handles:
 // 1. Periodic grace period advancement
 // 2. Callback processing for all CPUs
 // 3. Waking up processes waiting in synchronize_rcu()
+// 4. Timestamp overflow checking
 static int rcu_gp_kthread_fn(uint64 arg1, uint64 arg2) {
     (void)arg1;
     (void)arg2;
@@ -126,6 +204,9 @@ static int rcu_gp_kthread_fn(uint64 arg1, uint64 arg2) {
     __atomic_store_n(&rcu_gp_kthread_running, 1, __ATOMIC_RELEASE);
     
     while (__atomic_load_n(&rcu_gp_kthread_should_run, __ATOMIC_ACQUIRE)) {
+        // Check for timestamp overflow and normalize if needed
+        rcu_check_timestamp_overflow();
+        
         // Check if there are pending callbacks that need a grace period
         int has_pending_cbs = 0;
         for (int i = 0; i < NCPU; i++) {
@@ -135,16 +216,12 @@ static int rcu_gp_kthread_fn(uint64 arg1, uint64 arg2) {
             }
         }
         
-        // If there are pending callbacks or lazy threshold reached, start GP
+        // If there are pending callbacks, start GP if none in progress
         if (has_pending_cbs) {
-            // Start a new grace period if none in progress
             if (!__atomic_load_n(&rcu_state.gp_in_progress, __ATOMIC_ACQUIRE)) {
                 rcu_start_gp();
             }
         }
-        
-        // Force quiescent states for idle/offline CPUs
-        rcu_force_quiescent_states();
         
         // Try to advance grace period
         rcu_advance_gp();
@@ -155,8 +232,8 @@ static int rcu_gp_kthread_fn(uint64 arg1, uint64 arg2) {
             
             // Advance callback segments based on completed grace period
             spin_acquire(&rcu_cb_lock);
-            uint64 gp_seq_completed = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
-            rcu_advance_cbs(rcp, gp_seq_completed);
+            uint64 gp_completed = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
+            rcu_advance_cbs(rcp, gp_completed);
             
             // Check if there are ready callbacks
             if (rcu_cblist_ready_cbs(rcp)) {
@@ -239,9 +316,8 @@ void rcu_init(void) {
     spin_init(&rcu_gp_waitq_lock, "rcu_gp_waitq");
     proc_queue_init(&rcu_gp_waitq, "rcu_gp_waitq", &rcu_gp_waitq_lock);
 
-    __atomic_store_n(&rcu_state.gp_seq, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&rcu_state.gp_start_timestamp, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&rcu_state.gp_seq_completed, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&rcu_state.qs_mask, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&rcu_state.gp_in_progress, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&rcu_state.gp_count, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&rcu_state.cb_invoked, 0, __ATOMIC_RELEASE);
@@ -259,9 +335,11 @@ void rcu_init(void) {
     __atomic_store_n(&rcu_gp_kthread_should_run, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&rcu_gp_kthread_running, 0, __ATOMIC_RELEASE);
 
-    // Initialize per-CPU data
+    // Initialize per-CPU data and timestamps
     for (int i = 0; i < NCPU; i++) {
         rcu_cpu_init(i);
+        // Initialize CPU timestamp
+        cpus[i].rcu_timestamp = 0;
     }
 }
 
@@ -271,10 +349,6 @@ void rcu_cpu_init(int cpu) {
     }
 
     rcu_cpu_data_t *rcp = &rcu_state.cpu_data[cpu];
-
-    __atomic_store_n(&rcp->gp_seq, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&rcp->nesting, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&rcp->qs_pending, 0, __ATOMIC_RELEASE);
 
     // Initialize segmented callback list
     rcp->cb_head = NULL;
@@ -292,21 +366,16 @@ void rcu_cpu_init(int cpu) {
 // RCU Read-Side Critical Sections
 // ============================================================================
 //
-// IMPLEMENTATION NOTE - Hybrid Per-Process/Per-CPU Nesting:
+// IMPLEMENTATION NOTE - Simplified Per-Process Nesting:
 //
-// This implementation uses BOTH per-process and per-CPU nesting counters to
-// support preemptible RCU (processes can migrate CPUs while holding RCU locks).
+// This implementation uses only per-process nesting counters.
+// Grace period detection is based on context switch timestamps, not nesting.
 //
-// Example scenario showing why both counters are needed:
-//   1. Process P on CPU 0: rcu_read_lock()  -> P.nesting=1, CPU0.nesting=1
-//   2. Process P yields and migrates to CPU 1
-//   3. Process P on CPU 1: rcu_read_unlock() -> P.nesting=0, CPU1.nesting=-1 (BUG!)
+// rcu_read_lock() and rcu_read_unlock() only do:
+//   - push_off() / pop_off() to prevent preemption
+//   - increment / decrement process nesting counter
 //
-// Solution: Track nesting in BOTH process and CPU:
-//   - Process counter: Follows process across CPUs (detects unbalanced locks)
-//   - CPU counter: Tracks total locks on this CPU (for quiescent state detection)
-//   - Only increment CPU counter on OUTERMOST lock (old_nesting == 0)
-//   - Only decrement CPU counter when process nesting reaches 0
+// No per-CPU counters are needed since we rely on timestamps.
 //
 
 void rcu_read_lock(void) {
@@ -314,78 +383,22 @@ void rcu_read_lock(void) {
     push_off();
 
     struct proc *p = myproc();
-    if (p == NULL) {
-        // No process context (e.g., early boot or scheduler)
-        // Fall back to per-CPU tracking only
-        int cpu = cpuid();
-        rcu_cpu_data_t *rcp = &rcu_state.cpu_data[cpu];
-        __atomic_fetch_add(&rcp->nesting, 1, __ATOMIC_ACQUIRE);
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        if (__atomic_load_n(&rcp->nesting, __ATOMIC_ACQUIRE) == 1) {
-            __atomic_store_n(&rcp->qs_pending, 1, __ATOMIC_RELEASE);
-        }
-        return;
+    if (p != NULL) {
+        // Per-process nesting
+        p->rcu_read_lock_nesting++;
     }
-
-    // Per-process nesting (allows migration across CPUs)
-    int old_nesting = p->rcu_read_lock_nesting++;
-
-    // Compiler barrier to prevent code motion
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-
-    // If this is the outermost lock, increment CPU counter
-    // This ensures CPU quiescent state tracking works correctly even if
-    // the process migrates to another CPU before unlocking
-    if (old_nesting == 0) {
-        int cpu = cpuid();
-        rcu_cpu_data_t *rcp = &rcu_state.cpu_data[cpu];
-        __atomic_store_n(&rcp->qs_pending, 1, __ATOMIC_RELEASE);
-        __atomic_fetch_add(&rcp->nesting, 1, __ATOMIC_ACQUIRE);
-    }
+    // If no process context (early boot), just the push_off() is sufficient
 }
 
 void rcu_read_unlock(void) {
     struct proc *p = myproc();
-    if (p == NULL) {
-        // No process context (e.g., early boot or scheduler)
-        // Fall back to per-CPU tracking only
-        int cpu = cpuid();
-        rcu_cpu_data_t *rcp = &rcu_state.cpu_data[cpu];
-        __atomic_thread_fence(__ATOMIC_SEQ_CST);
-        int new_nesting = __atomic_sub_fetch(&rcp->nesting, 1, __ATOMIC_RELEASE);
-        if (new_nesting < 0) {
-            panic("rcu_read_unlock: unbalanced unlock on CPU %d", cpu);
-        }
-        if (new_nesting == 0 && __atomic_load_n(&rcp->qs_pending, __ATOMIC_ACQUIRE)) {
-            rcu_note_context_switch();
-        }
-        // Re-enable interrupts - matching the push_off() in rcu_read_lock()
-        pop_off();
-        return;
-    }
+    if (p != NULL) {
+        // Decrement per-process nesting counter
+        p->rcu_read_lock_nesting--;
 
-    // Compiler barrier before decrementing
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-
-    // Decrement per-process nesting counter
-    p->rcu_read_lock_nesting--;
-
-    if (p->rcu_read_lock_nesting < 0) {
-        panic("rcu_read_unlock: unbalanced unlock in process %s (pid %d)", p->name, p->pid);
-    }
-
-    // If nesting reaches 0, we've exited all critical sections
-    // Decrement the CPU counter (possibly on a different CPU than where we locked)
-    if (p->rcu_read_lock_nesting == 0) {
-        int cpu = cpuid();
-        rcu_cpu_data_t *rcp = &rcu_state.cpu_data[cpu];
-
-        // Decrement per-CPU nesting counter
-        int cpu_nesting = __atomic_sub_fetch(&rcp->nesting, 1, __ATOMIC_RELEASE);
-
-        // Check if we need to report quiescent state
-        if (cpu_nesting == 0 && __atomic_load_n(&rcp->qs_pending, __ATOMIC_ACQUIRE)) {
-            rcu_note_context_switch();
+        if (p->rcu_read_lock_nesting < 0) {
+            panic("rcu_read_unlock: unbalanced unlock in process %s (pid %d)", 
+                  p->name, p->pid);
         }
     }
 
@@ -396,10 +409,8 @@ void rcu_read_unlock(void) {
 int rcu_is_watching(void) {
     struct proc *p = myproc();
     if (p == NULL) {
-        // No process context - check per-CPU
-        int cpu = cpuid();
-        rcu_cpu_data_t *rcp = &rcu_state.cpu_data[cpu];
-        return __atomic_load_n(&rcp->nesting, __ATOMIC_ACQUIRE) > 0;
+        // No process context - assume not watching
+        return 0;
     }
     return p->rcu_read_lock_nesting > 0;
 }
@@ -470,28 +481,28 @@ static int rcu_cblist_ready_cbs(rcu_cpu_data_t *rcp) {
     return rcp->cb_tail[RCU_DONE_TAIL] != (rcu_head_t **)&(rcp->cb_head);
 }
 
-// Advance callback segments based on completed grace period
-static void rcu_advance_cbs(rcu_cpu_data_t *rcp, uint64 gp_seq) {
+// Advance callback segments based on completed grace period timestamp
+static void rcu_advance_cbs(rcu_cpu_data_t *rcp, uint64 gp_completed) {
     if (rcp->cb_head == NULL) {
         return;
     }
 
     // Move segments forward as grace periods complete
     // WAIT_TAIL -> DONE_TAIL when their GP completes
-    if (rcp->gp_seq_needed[RCU_WAIT_TAIL] <= gp_seq) {
+    if (rcp->gp_seq_needed[RCU_WAIT_TAIL] <= gp_completed) {
         rcp->cb_tail[RCU_DONE_TAIL] = rcp->cb_tail[RCU_WAIT_TAIL];
         rcp->gp_seq_needed[RCU_DONE_TAIL] = rcp->gp_seq_needed[RCU_WAIT_TAIL];
     }
 
     // NEXT_READY_TAIL -> WAIT_TAIL when GP starts
-    if (rcp->gp_seq_needed[RCU_NEXT_READY_TAIL] <= gp_seq) {
+    if (rcp->gp_seq_needed[RCU_NEXT_READY_TAIL] <= gp_completed) {
         rcp->cb_tail[RCU_WAIT_TAIL] = rcp->cb_tail[RCU_NEXT_READY_TAIL];
-        rcp->gp_seq_needed[RCU_WAIT_TAIL] = gp_seq + 1;
+        rcp->gp_seq_needed[RCU_WAIT_TAIL] = gp_completed + 1;
     }
 
     // NEXT_TAIL -> NEXT_READY_TAIL
     rcp->cb_tail[RCU_NEXT_READY_TAIL] = rcp->cb_tail[RCU_NEXT_TAIL];
-    rcp->gp_seq_needed[RCU_NEXT_READY_TAIL] = gp_seq + 2;
+    rcp->gp_seq_needed[RCU_NEXT_READY_TAIL] = gp_completed + 2;
 }
 
 // ============================================================================
@@ -508,27 +519,12 @@ static void rcu_start_gp(void) {
         return;
     }
 
-    // Start new grace period
-    uint64 new_gp_seq = __atomic_load_n(&rcu_state.gp_seq, __ATOMIC_ACQUIRE) + 1;
-    __atomic_store_n(&rcu_state.gp_seq, new_gp_seq, __ATOMIC_RELEASE);
+    // Start new grace period with current timestamp
+    uint64 now = get_jiffs();
+    __atomic_store_n(&rcu_state.gp_start_timestamp, now, __ATOMIC_RELEASE);
     __atomic_store_n(&rcu_state.gp_in_progress, 1, __ATOMIC_RELEASE);
 
-    // Set quiescent state mask - need all CPUs to report
-    uint64 qs_mask = 0;
-    for (int i = 0; i < NCPU; i++) {
-        qs_mask |= (1UL << i);
-        __atomic_store_n(&rcu_state.cpu_data[i].qs_pending, 1, __ATOMIC_RELEASE);
-    }
-    __atomic_store_n(&rcu_state.qs_mask, qs_mask, __ATOMIC_RELEASE);
-
     spin_release(&rcu_gp_lock);
-}
-
-// Check if current grace period has completed
-static int rcu_gp_completed(void) {
-    // Grace period completes when all CPUs have reported quiescent state
-    uint64 qs_mask = __atomic_load_n(&rcu_state.qs_mask, __ATOMIC_ACQUIRE);
-    return qs_mask == 0;
 }
 
 // Advance to next grace period if current one is complete
@@ -550,9 +546,8 @@ static void rcu_advance_gp(void) {
         return;
     }
 
-    // Grace period complete - update completed sequence number
-    uint64 gp_seq = __atomic_load_n(&rcu_state.gp_seq, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&rcu_state.gp_seq_completed, gp_seq, __ATOMIC_RELEASE);
+    // Grace period complete - update completed counter
+    uint64 gp_completed = __atomic_fetch_add(&rcu_state.gp_seq_completed, 1, __ATOMIC_ACQ_REL) + 1;
     __atomic_store_n(&rcu_state.gp_in_progress, 0, __ATOMIC_RELEASE);
     __atomic_fetch_add(&rcu_state.gp_count, 1, __ATOMIC_RELEASE);
 
@@ -562,40 +557,23 @@ static void rcu_advance_gp(void) {
     spin_acquire(&rcu_cb_lock);
     for (int i = 0; i < NCPU; i++) {
         rcu_cpu_data_t *rcp = &rcu_state.cpu_data[i];
-        rcu_advance_cbs(rcp, gp_seq);
+        rcu_advance_cbs(rcp, gp_completed);
     }
     spin_release(&rcu_cb_lock);
-
-    // Wake up any processes waiting in synchronize_rcu()
-    // Note: In xv6, we don't have a proper wait queue, so they'll wake on next yield
 }
 
 // Note that current CPU has passed through a quiescent state
+// In timestamp-based RCU, this is called during context switches
 void rcu_note_context_switch(void) {
+    // Update CPU timestamp to current time
     int cpu = cpuid();
+    struct cpu_local *mycpu_ptr = &cpus[cpu];
+    uint64 now = get_jiffs();
+    __atomic_store_n(&mycpu_ptr->rcu_timestamp, now, __ATOMIC_RELEASE);
+    
+    // Update statistics
     rcu_cpu_data_t *rcp = &rcu_state.cpu_data[cpu];
-
-    // Don't report if not in critical section
-    if (__atomic_load_n(&rcp->nesting, __ATOMIC_ACQUIRE) > 0) {
-        return;
-    }
-
-    // Check if we need to report quiescent state
-    if (!__atomic_load_n(&rcp->qs_pending, __ATOMIC_ACQUIRE)) {
-        return;
-    }
-
-    // Clear pending flag
-    __atomic_store_n(&rcp->qs_pending, 0, __ATOMIC_RELEASE);
-
-    // Update CPU's grace period sequence
-    uint64 gp_seq = __atomic_load_n(&rcu_state.gp_seq, __ATOMIC_ACQUIRE);
-    __atomic_store_n(&rcp->gp_seq, gp_seq, __ATOMIC_RELEASE);
     __atomic_fetch_add(&rcp->qs_count, 1, __ATOMIC_RELEASE);
-
-    // Clear this CPU's bit in the quiescent state mask
-    uint64 cpu_mask = 1UL << cpu;
-    __atomic_fetch_and(&rcu_state.qs_mask, ~cpu_mask, __ATOMIC_ACQ_REL);
 
     // Try to advance grace period
     rcu_advance_gp();
@@ -603,8 +581,8 @@ void rcu_note_context_switch(void) {
 
 // Called by scheduler to check for quiescent states
 void rcu_check_callbacks(void) {
-    // A context switch is a quiescent state
-    rcu_note_context_switch();
+    // A context switch is a quiescent state - timestamp is updated elsewhere
+    // This function is kept for compatibility but doesn't need to do much
 }
 
 // ============================================================================
@@ -712,19 +690,19 @@ void rcu_process_callbacks(void) {
 // ============================================================================
 
 void synchronize_rcu(void) {
-    uint64 start_gp = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
+    uint64 start_gp_count = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
 
     // Disable lazy GP start for synchronous operations
     int old_lazy = __atomic_exchange_n(&rcu_state.gp_lazy_start, 0, __ATOMIC_ACQ_REL);
 
     // Start a new grace period immediately
     rcu_start_gp();
-
-    // If the RCU GP kthread is running, we can sleep and be woken up
-    // Otherwise, fall back to polling mode (always use polling for now - simpler)
-    // int kthread_active = __atomic_load_n(&rcu_gp_kthread_running, __ATOMIC_ACQUIRE);
-    int kthread_active = 0; // Force polling mode for debugging
     
+    // Mark the current CPU as having passed through a quiescent state
+    // This is important for single-CPU or low-activity scenarios
+    rcu_note_context_switch();
+
+    // Poll mode - wait for grace period to complete
     int max_wait = 100000;
     int wait_count = 0;
 
@@ -732,24 +710,22 @@ void synchronize_rcu(void) {
         uint64 current_gp = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
 
         // Check if a grace period has completed since we started
-        if (current_gp > start_gp) {
+        if (current_gp > start_gp_count) {
             // Restore lazy GP setting
             __atomic_store_n(&rcu_state.gp_lazy_start, old_lazy, __ATOMIC_RELEASE);
             return;
         }
 
-        // Force quiescent states for idle CPUs
-        rcu_force_quiescent_states();
-        
         // Try to advance grace period ourselves
         rcu_advance_gp();
 
+        // Sleep on the wait queue if kthread is running, otherwise yield
+        int kthread_active = __atomic_load_n(&rcu_gp_kthread_running, __ATOMIC_ACQUIRE);
         if (kthread_active) {
-            // Sleep on the wait queue - kthread will wake us
             spin_acquire(&rcu_gp_waitq_lock);
             // Double-check before sleeping
             current_gp = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
-            if (current_gp > start_gp) {
+            if (current_gp > start_gp_count) {
                 spin_release(&rcu_gp_waitq_lock);
                 __atomic_store_n(&rcu_state.gp_lazy_start, old_lazy, __ATOMIC_RELEASE);
                 return;
@@ -758,8 +734,8 @@ void synchronize_rcu(void) {
             proc_queue_wait(&rcu_gp_waitq, &rcu_gp_waitq_lock, NULL);
             spin_release(&rcu_gp_waitq_lock);
         } else {
-            // Fallback: polling mode when kthread not running
-            rcu_force_quiescent_states();
+            // In polling mode, update our timestamp and yield to allow other work
+            rcu_note_context_switch();
             yield();
         }
 
@@ -805,6 +781,7 @@ void rcu_barrier(void) {
 
 // Expedited grace period - forces immediate quiescent states on all CPUs
 // This is faster than normal GP but has higher overhead (Linux-inspired)
+// In timestamp-based RCU, we just wait for all CPUs to context switch
 static void rcu_expedited_gp(void) {
     spin_acquire(&rcu_gp_lock);
 
@@ -818,41 +795,38 @@ static void rcu_expedited_gp(void) {
     __atomic_store_n(&rcu_state.expedited_in_progress, 1, __ATOMIC_RELEASE);
     __atomic_fetch_add(&rcu_state.expedited_seq, 1, __ATOMIC_ACQ_REL);
 
-    // Set quiescent state mask for expedited GP
-    uint64 qs_mask = 0;
-    for (int i = 0; i < NCPU; i++) {
-        qs_mask |= (1UL << i);
-    }
-    __atomic_store_n(&rcu_state.qs_mask, qs_mask, __ATOMIC_RELEASE);
-
+    // Record start timestamp
+    uint64 exp_start = get_jiffs();
+    
     spin_release(&rcu_gp_lock);
 
-    // Force quiescent states on all CPUs by sending IPIs (simulated)
-    // In a real system, this would send IPIs to all CPUs
-    // For xv6, we aggressively call rcu_check_callbacks on all CPUs
-    for (int i = 0; i < NCPU; i++) {
-        // This simulates forcing a context switch / quiescent state check
-        rcu_cpu_data_t *rcp = &rcu_state.cpu_data[i];
-        if (__atomic_load_n(&rcp->nesting, __ATOMIC_ACQUIRE) == 0) {
-            // CPU not in RCU read-side critical section - report QS
-            uint64 cpu_mask = 1UL << i;
-            __atomic_fetch_and(&rcu_state.qs_mask, ~cpu_mask, __ATOMIC_ACQ_REL);
-        }
-    }
-
-    // Wait for all CPUs to report quiescent states (with timeout)
+    // Wait for all CPUs to context switch (with timeout)
     int max_wait = 10000;
     int wait_count = 0;
-    while (__atomic_load_n(&rcu_state.qs_mask, __ATOMIC_ACQUIRE) != 0 &&
-           wait_count < max_wait) {
-        // Try to advance
+    
+    while (wait_count < max_wait) {
+        int all_switched = 1;
+        
         for (int i = 0; i < NCPU; i++) {
-            rcu_cpu_data_t *rcp = &rcu_state.cpu_data[i];
-            if (__atomic_load_n(&rcp->nesting, __ATOMIC_ACQUIRE) == 0) {
-                uint64 cpu_mask = 1UL << i;
-                __atomic_fetch_and(&rcu_state.qs_mask, ~cpu_mask, __ATOMIC_ACQ_REL);
+            struct cpu_local *cpu = &cpus[i];
+            uint64 cpu_timestamp = __atomic_load_n(&cpu->rcu_timestamp, __ATOMIC_ACQUIRE);
+            
+            // Skip uninitialized timestamps
+            if (cpu_timestamp == 0) {
+                continue;
+            }
+            
+            // Check if CPU has switched since expedited GP start
+            if (cpu_timestamp <= exp_start) {
+                all_switched = 0;
+                break;
             }
         }
+        
+        if (all_switched) {
+            break;
+        }
+        
         yield();
         wait_count++;
     }

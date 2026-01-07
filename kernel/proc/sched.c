@@ -16,6 +16,7 @@
 #include "errno.h"
 #include "sched_timer_private.h"
 #include "rcu.h"
+#include "timer.h"
 
 // Locking order:
 // - sleep_lock
@@ -133,6 +134,10 @@ static struct proc *__sched_pick_next(void) {
 }
 
 struct proc *process_switch_to(struct proc *current, struct proc *target) {
+    // Update RCU timestamp before context switch
+    uint64 now = get_jiffs();
+    __atomic_store_n(&mycpu()->rcu_timestamp, now, __ATOMIC_RELEASE);
+    
     mycpu()->proc = target;
     struct context *prev_context = __swtch_context(&current->context, &target->context);
     return container_of(prev_context, struct proc, context);
