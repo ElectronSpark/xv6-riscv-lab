@@ -25,6 +25,12 @@ This implementation includes **Linux-inspired performance enhancements** specifi
 - **Adaptive yielding**: Optimized synchronize_rcu() with exponential backoff
 - **Expedited grace periods**: Fast-path synchronization for latency-critical operations
 
+### Background Processing (v2.1)
+- **RCU GP kernel thread**: Dedicated background thread for grace period management
+- **Automatic callback processing**: Periodic processing of callbacks across all CPUs
+- **Wait queue support**: Efficient sleep/wake mechanism for `synchronize_rcu()`
+- **Forced quiescent states**: Handles offline/idle CPUs to prevent grace period stalls
+
 ## Architecture
 
 ### Core Data Structures
@@ -174,10 +180,109 @@ synchronize_rcu_expedited();  // 5-10x faster than synchronize_rcu()
 ```c
 void rcu_init(void);              // Initialize RCU subsystem
 void rcu_cpu_init(int cpu);       // Initialize per-CPU RCU
+void rcu_gp_kthread_start(void);  // Start RCU GP background thread
 void rcu_check_callbacks(void);   // Check for quiescent states
 void rcu_process_callbacks(void); // Invoke completed callbacks
 void rcu_note_context_switch(void); // Report quiescent state
 void rcu_run_tests(void);         // Run comprehensive test suite
+```
+
+## RCU GP Kernel Thread (v2.1)
+
+### Overview
+
+The RCU GP (Grace Period) kernel thread is a dedicated background thread that manages grace periods and callback processing. It runs continuously, handling lazy grace period starts, callback processing, and waking up waiters.
+
+### Thread Functionality
+
+The RCU GP kthread (`rcu_gp`) performs the following tasks in a periodic loop (every 10ms):
+
+1. **Grace Period Management**:
+   - Checks for pending callbacks across all CPUs
+   - Starts new grace periods when needed (lazy threshold or pending callbacks)
+   - Forces quiescent states for idle/offline CPUs
+   - Advances grace periods when all CPUs have reported quiescent states
+
+2. **Callback Processing**:
+   - Advances callback segments based on completed grace periods
+   - Dequeues ready callbacks from the DONE segment
+   - Invokes callbacks in batches to prevent CPU monopolization
+   - Updates per-CPU callback statistics
+
+3. **Waiter Management**:
+   - Wakes up processes sleeping in `synchronize_rcu()`
+   - Maintains wait queue for efficient sleep/wake mechanism
+
+### Starting the Kthread
+
+The kthread is started during kernel initialization:
+
+```c
+void start_kernel_post_init(void) {
+    // ... other initialization ...
+    
+    // Start the RCU GP kthread before running RCU tests
+    rcu_gp_kthread_start();
+    sleep_ms(100); // Give kthread time to start
+    
+    rcu_run_tests();
+}
+```
+
+### Configuration
+
+```c
+#define RCU_GP_KTHREAD_INTERVAL_MS  10  // GP kthread wake interval in ms
+```
+
+**Tuning**:
+- High-throughput: Increase to 20-50ms for lower overhead
+- Low-latency: Decrease to 5ms for faster grace period completion
+- Default (10ms): Balanced for most workloads
+
+### Benefits
+
+1. **Reduced Latency**: Background processing means `synchronize_rcu()` can sleep instead of polling
+2. **Better Scalability**: Centralized grace period management reduces contention
+3. **Automatic Cleanup**: Periodic callback processing even without explicit calls
+4. **Stall Prevention**: Forced quiescent states prevent grace period stalls from offline CPUs
+
+### Implementation Details
+
+**Wait Queue Support**:
+```c
+static proc_queue_t rcu_gp_waitq;
+static spinlock_t rcu_gp_waitq_lock;
+```
+
+**Forced Quiescent States**:
+```c
+static void rcu_force_quiescent_states(void) {
+    for (int i = 0; i < NCPU; i++) {
+        if (cpu_not_in_rcu_critical_section(i)) {
+            clear_quiescent_state_bit(i);
+        }
+    }
+}
+```
+
+This prevents grace period stalls when:
+- CPUs are offline (NCPU > actual online CPUs)
+- CPUs are idle and not actively context switching
+- CPUs haven't reported quiescent states naturally
+
+### Debugging
+
+Monitor kthread status:
+
+```c
+extern _Atomic int rcu_gp_kthread_running;
+
+if (__atomic_load_n(&rcu_gp_kthread_running, __ATOMIC_ACQUIRE)) {
+    printf("RCU GP kthread is running\n");
+} else {
+    printf("RCU GP kthread is NOT running\n");
+}
 ```
 
 ## Linux-Inspired Enhancements (v2.0)
@@ -249,6 +354,41 @@ void rcu_run_tests(void);         // Run comprehensive test suite
 - Useful for system shutdown, module unload, etc.
 
 **Usage**: Use sparingly - trades CPU overhead for reduced latency.
+
+## RCU GP Kernel Thread (v2.1)
+
+### Overview
+
+A dedicated background kernel thread that manages grace periods, processes callbacks, and prevents grace period stalls.
+
+### Features
+
+**Automatic Grace Period Management**:
+- Starts grace periods when needed (lazy threshold or pending callbacks)
+- Forces quiescent states for idle/offline CPUs
+- Advances grace periods when all CPUs report quiescent states
+- Prevents stalls from CPUs that never context switch
+
+**Callback Processing**:
+- Periodically processes callbacks on all CPUs
+- Advances callback segments through the 4-segment pipeline
+- Invokes ready callbacks in batches
+
+**Wait Queue Support**:
+- Allows `synchronize_rcu()` to sleep instead of busy-wait
+- Wakes waiters when grace periods complete
+- Reduces CPU overhead for synchronous operations
+
+### Configuration
+
+```c
+#define RCU_GP_KTHREAD_INTERVAL_MS  10  // GP kthread wake interval
+```
+
+**Tuning**:
+- High-throughput: 20-50ms (lower overhead)
+- Low-latency: 5ms (faster grace periods)
+- Default: 10ms (balanced)
 
 ## Performance Characteristics
 
@@ -568,6 +708,7 @@ Located in `kernel/lock/rcu.c`:
 - **CPU limit**: Optimized for ≤64 CPUs (bitmap-based quiescent state tracking)
 - **No CPU hotplug**: Assumes fixed number of CPUs
 - **Simulated expedited GPs**: No true IPI support, uses aggressive polling
+- **Kthread dependency**: Some features (wait queue sleep) require the RCU GP kthread to be running
 
 ## Future Enhancements
 
@@ -583,13 +724,13 @@ Potential Linux RCU features that could be added:
 
 ## Files
 
-- **kernel/inc/rcu.h**: Public RCU API
+- **kernel/inc/rcu.h**: Public RCU API with kthread declarations
 - **kernel/inc/rcu_type.h**: RCU data structure definitions
-- **kernel/lock/rcu.c**: Core RCU implementation (~645 lines)
-- **kernel/lock/rcu_test.c**: Comprehensive test suite (~287 lines)
+- **kernel/lock/rcu.c**: Core RCU implementation with GP kthread (~900 lines)
+- **kernel/lock/rcu_test.c**: Comprehensive test suite (~300 lines)
 - **kernel/lock/RCU_README.md**: Complete documentation (this file)
-- **kernel/proc/sched.c**: Scheduler integration
-- **kernel/start_kernel.c**: RCU initialization
+- **kernel/proc/sched.c**: Scheduler integration for quiescent states
+- **kernel/start_kernel.c**: RCU initialization and kthread startup
 
 ## References
 
@@ -619,6 +760,16 @@ Potential Linux RCU features that could be added:
   - 200-300% higher callback throughput
   - 80% reduction in idle CPU overhead
   - 10x faster expedited grace periods
+
+### v2.1 - Background Processing and Stall Prevention
+- **RCU GP kernel thread** for background grace period management
+- **Wait queue support** for efficient `synchronize_rcu()` sleep/wake
+- **Forced quiescent states** to prevent stalls from offline/idle CPUs
+- **Automatic callback processing** across all CPUs
+- **Improved reliability**:
+  - Prevents grace period stalls from offline CPUs
+  - Handles NCPU > actual online CPUs gracefully
+  - Better CPU utilization in mixed workloads
 
 ## Authors
 

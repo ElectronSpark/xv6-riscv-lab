@@ -10,6 +10,7 @@
 //   - Quiescent state: Point where a CPU is not in RCU read-side critical section
 //   - Callbacks: Functions invoked after a grace period completes
 //   - Preemptible RCU: Processes can migrate CPUs while holding RCU read locks
+//   - RCU GP kthread: Background kernel thread for grace period management
 //
 // GRACE PERIOD DETECTION:
 //   A grace period completes when all CPUs have passed through a quiescent state.
@@ -18,6 +19,11 @@
 //     - Idle loop
 //     - User mode execution
 //     - Explicit rcu_read_unlock() when nesting reaches 0
+//   
+//   The RCU GP kthread periodically:
+//     - Forces quiescent states for idle/offline CPUs
+//     - Advances grace periods when all CPUs report quiescent states
+//     - Processes callbacks and wakes waiters
 //
 // NESTING COUNTERS (Hybrid Per-Process/Per-CPU):
 //   - Per-process: Each process has rcu_read_lock_nesting counter that follows it
@@ -32,6 +38,8 @@
 //   - Grace periods tracked with sequence numbers
 //   - Callbacks queued per-CPU and invoked after grace period
 //   - Scheduler integration for quiescent state detection
+//   - Background kernel thread for grace period management
+//   - Wait queue support for efficient synchronize_rcu()
 //
 
 #include "types.h"
