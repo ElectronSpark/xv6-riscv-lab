@@ -26,6 +26,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/rbtree.c
     ${KERNEL_DIR}/kobject.c
     ${KERNEL_DIR}/bits.c
+    ${KERNEL_DIR}/sbi.c
 )
 
 if(DEFINED ENV{RWLOCK_TEST})

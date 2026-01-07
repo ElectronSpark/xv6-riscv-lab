@@ -13,6 +13,7 @@
 #include "vfs/fs.h"
 #include "trap.h"
 #include "rcu.h"
+#include "sbi.h"
 
 volatile STATIC int started = 0;
 extern void _entry(); // entry.S
@@ -107,27 +108,13 @@ void start_kernel_post_init(void) {
     void semaphore_launch_tests(void);
     semaphore_launch_tests();
 #endif
-    // // Release secondary harts to proceed with their initialization
-    // printf("Releasing secondary harts...\n");
-    // __atomic_store_n(&started, 1, __ATOMIC_RELEASE);
-    // // Start secondary harts using SBI HSM extension.
-    // // Linux-style: boot hart explicitly starts other harts after initialization.
-    // // OpenSBI keeps other harts stopped until we request them via sbi_hart_start().
-    // printf("Starting secondary harts...\n");
-    // int boot_hart = cpuid();;
-    // for (int i = 0; i < NCPU; i++) {
-    //     if (i == boot_hart)
-    //         continue;
-        
-    //     long status = sbi_hart_get_status(i);
-    //     if (status == SBI_HSM_STATE_STOPPED) {
-    //         // Start the hart at _entry with hartid in a0, 0 in a1
-    //         long ret = sbi_hart_start(i, (unsigned long)_entry, 0);
-    //         if (ret != SBI_SUCCESS && ret != SBI_ERR_ALREADY_AVAILABLE && ret != SBI_ERR_ALREADY_STARTED) {
-    //             printf("hart %d: failed to start (error %ld)\n", i, ret);
-    //         }
-    //     }
-    // }
-    // // sleep_ms(1000);
-    // // rcu_run_tests();
+    // Release secondary harts to proceed with their initialization
+    printf("Releasing secondary harts...\n");
+    __atomic_store_n(&started, 1, __ATOMIC_RELEASE);
+    // Start secondary harts using SBI HSM extension.
+    // Linux-style: boot hart explicitly starts other harts after initialization.
+    // OpenSBI keeps other harts stopped until we request them via sbi_hart_start().
+    sbi_start_secondary_harts((unsigned long)_entry);
+    // sleep_ms(1000);
+    // rcu_run_tests();
 }
