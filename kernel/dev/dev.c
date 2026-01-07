@@ -11,25 +11,29 @@
 #include <page.h>
 #include <errno.h>
 #include "atomic.h"
+#include "rcu.h"
 
-static mutex_t __dev_tab_sleeplock;
+// RCU-protected device table
+// Readers use rcu_read_lock/unlock + rcu_dereference
+// Writers use spinlock for serialization + rcu_assign_pointer + call_rcu for deferred free
+static spinlock_t __dev_tab_spinlock;
 static slab_cache_t __dev_type_cache;
 static device_major_t *__dev_table[MAX_MAJOR_DEVICES] = { NULL };
 
 static void __dev_tab_lock_init(void) {
-    mutex_init(&__dev_tab_sleeplock, "dev_tab_lock");
+    spin_init(&__dev_tab_spinlock, "dev_tab_lock");
 }
 
 static void __dev_tab_lock(void) {
-    mutex_lock(&__dev_tab_sleeplock);
+    spin_acquire(&__dev_tab_spinlock);
 }
 
 static void __dev_tab_unlock(void) {
-    mutex_unlock(&__dev_tab_sleeplock);
+    spin_release(&__dev_tab_spinlock);
 }
 
 static void __dev_tab_assert_held(void) {
-    holding_mutex(&__dev_tab_sleeplock);
+    assert(spin_holding(&__dev_tab_spinlock), "dev_tab_lock not held");
 }
 
 static void __dev_tab_slab_init(void) {
@@ -40,6 +44,7 @@ static void __dev_tab_slab_init(void) {
     assert(ret == 0, "Failed to initialize device type slab cache");
 }
 
+// Free a device_major_t structure and its minors array
 static void dev_type_free(device_major_t *dev_type) {
     if (dev_type) {
         if (dev_type->minors) {
@@ -48,6 +53,12 @@ static void dev_type_free(device_major_t *dev_type) {
         }
         slab_free(dev_type);
     }
+}
+
+// RCU callback to free device_major_t after grace period
+static void dev_type_rcu_free(void *data) {
+    device_major_t *dev_type = (device_major_t *)data;
+    dev_type_free(dev_type);
 }
 
 static device_major_t *dev_type_alloc(void) {
@@ -93,14 +104,25 @@ static bool __dev_type_validate(dev_type_e type) {
 
 // Get a device slot by its major and minor numbers
 // Allocate device_major_t if not exist
-// Unlocked
+// For writers (alloc=true): must hold __dev_tab_spinlock
+// For readers (alloc=false): must be in RCU read-side critical section
 static int __dev_slot_get(int major, int minor, device_major_t ***ret_major, int *ret_minor, device_t ***ret_dev, bool alloc) {
-    __dev_tab_assert_held();
+    if (alloc) {
+        __dev_tab_assert_held();
+    }
     if (major <= 0 || major >= MAX_MAJOR_DEVICES || minor < 0 || minor >= MAX_MINOR_DEVICES) {
         return -EINVAL;
     }
     
-    device_major_t *dmajor = __dev_table[major];
+    device_major_t *dmajor;
+    if (alloc) {
+        // Writer path - direct access since we hold the lock
+        dmajor = __dev_table[major];
+    } else {
+        // Reader path - use RCU dereference
+        dmajor = rcu_dereference(__dev_table[major]);
+    }
+    
     if (dmajor == NULL) {
         if (!alloc) {
             return -ENODEV; // Device type not found
@@ -109,7 +131,7 @@ static int __dev_slot_get(int major, int minor, device_major_t ***ret_major, int
         if (dmajor == NULL) {
             return -ENOMEM;
         }
-        __dev_table[major] = dmajor;
+        rcu_assign_pointer(__dev_table[major], dmajor);
     }
 
     // If minor is 0, return the slot with the lowest minor number
@@ -156,7 +178,7 @@ static int __dev_call_release(device_t *dev) {
 
 // Unregister a device from the device table
 // Called either by device_unregister() or when refcount reaches 0
-// 
+// Uses RCU for safe removal - old device_major_t freed after grace period
 static void __device_unregister(device_t *dev) {
     __dev_tab_lock();
     device_t **dev_slot = NULL;
@@ -172,19 +194,21 @@ static void __device_unregister(device_t *dev) {
         __dev_tab_unlock();
         return;
     }
-    *dev_slot = NULL;
+    // Use RCU-safe pointer assignment to clear the device slot
+    rcu_assign_pointer(*dev_slot, NULL);
     device_major_t *dmajor = *dmajor_slot;
-    bool needs_free = false;
+    device_major_t *to_free = NULL;
     dmajor->num_minors--;
     if (dmajor->num_minors == 0) {
-        // No more minors, free the device type
-        needs_free = true;
-        *dmajor_slot = NULL;
+        // No more minors, schedule the device type for RCU-deferred free
+        to_free = dmajor;
+        rcu_assign_pointer(*dmajor_slot, NULL);
     }
     __dev_tab_unlock();
 
-    if (needs_free) {
-        dev_type_free(dmajor);
+    if (to_free) {
+        // Defer freeing until after grace period so readers can finish
+        call_rcu(&to_free->rcu_head, dev_type_rcu_free, to_free);
     }
 }
 
@@ -197,30 +221,44 @@ static void __underlying_kobject_release(struct kobject *obj) {
 
 // Get a device by its major and minor numbers
 // And increment its reference count
+// Uses RCU for lock-free read access
 device_t *device_get(int major, int minor) {
-    __dev_tab_lock();
-    device_t **dev_slot = NULL;
-    int ret = __dev_slot_get(major, minor, NULL, NULL, &dev_slot, false);
-    if (ret != 0) {
-        __dev_tab_unlock();
-        return ERR_PTR(ret);
+    rcu_read_lock();
+    
+    // Validate parameters first
+    if (major <= 0 || major >= MAX_MAJOR_DEVICES || minor <= 0 || minor >= MAX_MINOR_DEVICES) {
+        rcu_read_unlock();
+        return ERR_PTR(-EINVAL);
     }
-    device_t *device = *dev_slot;
+    
+    // RCU-safe dereference of the device major entry
+    device_major_t *dmajor = rcu_dereference(__dev_table[major]);
+    if (dmajor == NULL) {
+        rcu_read_unlock();
+        return ERR_PTR(-ENODEV);
+    }
+    
+    // RCU-safe dereference of the device minor entry
+    device_t *device = rcu_dereference(dmajor->minors[minor]);
     if (device == NULL) {
-        __dev_tab_unlock();
-        return ERR_PTR(-ENODEV); // Device not found or not valid
+        rcu_read_unlock();
+        return ERR_PTR(-ENODEV);
     }
+    
     // Check if device is being unregistered
     if (__atomic_load_n(&device->unregistering, __ATOMIC_SEQ_CST)) {
-        __dev_tab_unlock();
-        return ERR_PTR(-ENODEV); // Device is being unregistered
+        rcu_read_unlock();
+        return ERR_PTR(-ENODEV);
     }
+    
     // Use kobject_try_get to avoid racing with final put
+    // This must succeed before we exit the RCU read-side critical section
     if (!kobject_try_get(&device->kobj)) {
-        __dev_tab_unlock();
-        return ERR_PTR(-ENODEV); // Device refcount already reached 0
+        rcu_read_unlock();
+        return ERR_PTR(-ENODEV);
     }
-    __dev_tab_unlock();
+    
+    rcu_read_unlock();
     return device;
 }
 
@@ -274,13 +312,17 @@ int device_register(device_t *dev) {
         __dev_tab_unlock();
         return -EBUSY; // Device already registered
     }
-    *dev_slot = dev;
-    (*dmajor_slot)->num_minors++;
+    
+    // Initialize kobject before making device visible to readers
     dev->kobj.name = "device";
     dev->kobj.refcount = 0;
     dev->unregistering = 0;
     dev->kobj.ops.release = __underlying_kobject_release;
     kobject_init(&dev->kobj);
+    (*dmajor_slot)->num_minors++;
+    
+    // Use RCU-safe pointer assignment to publish the device
+    rcu_assign_pointer(*dev_slot, dev);
     __dev_tab_unlock();
     return __dev_call_open(dev);
 }

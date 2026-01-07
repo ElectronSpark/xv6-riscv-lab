@@ -5,6 +5,7 @@
 #include <param.h>
 #include <types.h>
 #include <kobject.h>
+#include <rcu_type.h>
 
 #define MAX_MAJOR_DEVICES 256 // Maximum number of major devices
 #define MAX_MINOR_DEVICES 256 // Maximum number of minor devices per major device
@@ -21,6 +22,7 @@ struct bio;
 typedef struct device_major {
     int num_minors;                         // Number of minor devices
     device_t **minors;                      // Array of pointers to minor device instances
+    rcu_head_t rcu_head;                    // RCU callback head for deferred freeing
 } device_major_t;
 
 typedef struct device_ops {

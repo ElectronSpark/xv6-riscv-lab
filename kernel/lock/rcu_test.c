@@ -15,6 +15,10 @@
 #include "sched.h"
 #include "timer.h"
 
+// Test configuration
+#define RCU_TEST_NUM_READERS     4      // Number of concurrent reader threads
+#define RCU_TEST_ITERATIONS      50     // Iterations per reader thread
+
 // Test data structures
 typedef struct test_node {
     int value;
@@ -215,10 +219,10 @@ static void test_concurrent_readers(void) {
     rcu_assign_pointer(test_list, node);
 
     // Create multiple reader threads
-    struct proc *readers[4];
-    for (int i = 0; i < 4; i++) {
+    struct proc *readers[RCU_TEST_NUM_READERS];
+    for (int i = 0; i < RCU_TEST_NUM_READERS; i++) {
         kernel_proc_create("rcu_reader", &readers[i],
-                          (void *)reader_thread, i, 50, KERNEL_STACK_ORDER);
+                          (void *)reader_thread, i, RCU_TEST_ITERATIONS, KERNEL_STACK_ORDER);
         wakeup_proc(readers[i]);
     }
 
@@ -474,6 +478,10 @@ void rcu_run_tests(void) {
     printf("\n");
     printf("================================================================================\n");
     printf("RCU Test Suite Starting\n");
+    printf("================================================================================\n");
+    printf("  Configuration:\n");
+    printf("    - Concurrent reader threads: %d\n", RCU_TEST_NUM_READERS);
+    printf("    - Iterations per reader: %d\n", RCU_TEST_ITERATIONS);
     printf("================================================================================\n");
     printf("\n");
 

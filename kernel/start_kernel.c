@@ -137,6 +137,9 @@ void start_kernel_post_init(void) {
     sleep_ms(100); // Give kthread time to start
     
     rcu_run_tests();
+    
+    // Run device table stress tests
+    dev_table_test();
 
     // Initialize IPI subsystem and run demo
     // sleep_ms(100);
