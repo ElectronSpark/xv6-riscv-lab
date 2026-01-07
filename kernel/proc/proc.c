@@ -18,9 +18,11 @@
 #include "vfs/fs.h"
 #include "vfs/file.h"
 
-#define NPROC_HASH_BUCKETS 31
+// Per-CPU state, placed in special linker section for trampoline access
+__attribute__((section("cpu_local_sec"), aligned(4096)))
+struct cpu_local cpus[NCPU] = {0};
 
-struct cpu_local cpus[NCPU];
+#define NPROC_HASH_BUCKETS 31
 
 // Lock order for proc:
 // 1. proc table lock
@@ -256,8 +258,6 @@ struct cpu_local*
 mycpu(void)
 {
   struct cpu_local *c =  (void *)r_tp();
-  // int id = cpuid();
-  // struct cpu_local *c = &cpus[id];
   return c;
 }
 
@@ -267,16 +267,27 @@ mycpu(void)
 int
 cpuid()
 {
-  uint64 id = mycpu() - cpus;
-  return id;
+  // Calculate cpuid from offset within page, works for both physical and virtual addresses
+  struct cpu_local *offset = (void *)(r_tp() & PAGE_MASK);
+  return offset - (struct cpu_local *)0;
 }
 
 void
-mycpu_init(uint64 hartid)
+mycpu_init(uint64 hartid, bool trampoline)
 {
-  struct cpu_local *c = &cpus[hartid];
-  w_tp((uint64)c);
-  memset(c, 0, sizeof(*c));
+  if (trampoline) {
+    // Convert physical address to virtual address in trampoline region
+    // Keep the offset within the page, but change to TRAMPOLINE_CPULOCAL base
+    uint64 offset = (uint64)&cpus[hartid] & PAGE_MASK;
+    uint64 c = TRAMPOLINE_CPULOCAL + offset;
+    w_tp(c);
+    printf("hart %ld mycpu_init: setting tp to %p - %p\n", hartid, (void *)c, (void *)(c + sizeof(struct cpu_local)));
+  } else {
+    struct cpu_local *c = &cpus[hartid];
+    w_tp((uint64)c);
+    memset(c, 0, sizeof(*c));
+    printf("hart %ld mycpu_init: setting tp to %p - %p\n", hartid, (void *)c, (void *)((uint64)c + sizeof(struct cpu_local)));
+  }
 }
 
 // Return the current struct proc *, or zero if none.

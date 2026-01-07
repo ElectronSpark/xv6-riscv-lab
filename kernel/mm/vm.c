@@ -67,6 +67,10 @@ extern char _rodata[], _rodata_end[]; // kernel.ld sets these to boundaries of r
 extern char _data[], _data_end[]; // kernel.ld sets these to boundaries of data
 extern char _bss[], _bss_end[]; // kernel.ld sets these to boundaries of bss
 extern char trampoline[], _trampoline_data[]; // trampoline.S
+extern char _data_ktlb[];
+
+extern uint64 trampoline_ksatp;
+extern uint64 trampoline_trapframe_base;
 
 /*
  * ============================
@@ -109,9 +113,8 @@ static void __pgtab_free(void *pa)
 pagetable_t
 kvmmake(void)
 {
-  pagetable_t kpgtbl;
+  pagetable_t kpgtbl = (void *)_data_ktlb;
 
-  kpgtbl = (pagetable_t) __pgtab_alloc();
   memset(kpgtbl, 0, PGSIZE);
 
   // uart registers
@@ -136,10 +139,18 @@ kvmmake(void)
   // map the trampoline for trap entry/exit to
   // the highest virtual address in the kernel.
   kvmmap(kpgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+  // trampoline data used by both trampoline.S and the kernel.
   kvmmap(kpgtbl, TRAMPOLINE_DATA, (uint64)_trampoline_data, PGSIZE, PTE_R);
   kvmmap(kpgtbl, (uint64)_trampoline_data, (uint64)_trampoline_data, PGSIZE, PTE_R | PTE_W);
+
+  // percpu data for trampoline and kernel.
+  kvmmap(kpgtbl, TRAMPOLINE_CPULOCAL, (uint64)cpus, PGSIZE, PTE_R | PTE_W);
+  kvmmap(kpgtbl, (uint64)cpus, (uint64)cpus, PGSIZE, PTE_R | PTE_W);
+
   printf("trampoline 0x%lx -> %p\n", TRAMPOLINE, trampoline);
   printf("trampoline data 0x%lx -> %p\n", TRAMPOLINE_DATA, _trampoline_data);
+  printf("trampoline cpu local 0x%lx -> %p\n", TRAMPOLINE_CPULOCAL, cpus);
   printf("signal trampoline would be at 0x%lx\n", SIG_TRAMPOLINE);
 
   // map read-only data and the physical RAM we'll make use of.
@@ -174,11 +185,10 @@ kvminit(void)
   __vm_pool_init(); // Initialize the VM pool
   kernel_pagetable = kvmmake();
 
-  extern uint64 trampoline_ksatp;
-  trampoline_ksatp = MAKE_SATP(kernel_pagetable);
+  smp_store_release(&trampoline_ksatp, MAKE_SATP(kernel_pagetable));
+  smp_mb();
 
   // Calculate trampoline_trapframe_base
-  extern uint64 trampoline_trapframe_base;
   trampoline_trapframe_base = TRAPFRAME + PAGE_SIZE - sizeof(struct proc);
   trampoline_trapframe_base -= sizeof(struct utrapframe) + 16;
   trampoline_trapframe_base &= ~0x7UL; // align to 8 bytes
@@ -192,10 +202,11 @@ kvminithart()
   // wait for any previous writes to the page table memory to finish.
   sfence_vma();
 
-  w_satp(MAKE_SATP(kernel_pagetable));
-
+  w_satp(trampoline_ksatp);
+  
   // flush stale entries from the TLB.
   sfence_vma();
+  printf("hart %d switched to kernel page table, satp: %lx\n", cpuid(), trampoline_ksatp);
 }
 
 /*
@@ -723,6 +734,7 @@ static void __vm_unmap_trapframe(vm_t *vm)
     return; // Invalid VM or pagetable
   }
   uvmunmap(vm->pagetable, TRAMPOLINE, 1, 0);
+  uvmunmap(vm->pagetable, TRAMPOLINE_CPULOCAL, 1, 0);
   uvmunmap(vm->pagetable, TRAMPOLINE_DATA, 1, 0);
   uvmunmap(vm->pagetable, SIG_TRAMPOLINE, 1, 0);
   uvmunmap(vm->pagetable, TRAPFRAME, 1, 0);
@@ -744,8 +756,17 @@ static int __vm_map_trampoline(vm_t *vm, uint64 trapframe)
     return -1;
   }
 
+  // percpu data for trampoline and kernel.
+  if(mappages(vm->pagetable, TRAMPOLINE_CPULOCAL, PGSIZE,
+              (uint64)cpus, PTE_R | PTE_W) < 0){
+    uvmunmap(vm->pagetable, TRAMPOLINE, 1, 0);
+    return -1;
+  }
+
+  // trampoline data used by both trampoline.S and the kernel.
   if(mappages(vm->pagetable, TRAMPOLINE_DATA, PGSIZE,
               (uint64)_trampoline_data, PTE_R) < 0){
+    uvmunmap(vm->pagetable, TRAMPOLINE_CPULOCAL, 1, 0);
     uvmunmap(vm->pagetable, TRAMPOLINE, 1, 0);
     return -1;
   }
@@ -756,6 +777,7 @@ static int __vm_map_trampoline(vm_t *vm, uint64 trapframe)
               (uint64)sig_trampoline, PTE_U | PTE_R) < 0){
     uvmunmap(vm->pagetable, TRAMPOLINE, 1, 0);
     uvmunmap(vm->pagetable, TRAMPOLINE_DATA, 1, 0);
+    uvmunmap(vm->pagetable, TRAMPOLINE_CPULOCAL, 1, 0);
     return -1;
   }
 
@@ -767,6 +789,7 @@ static int __vm_map_trampoline(vm_t *vm, uint64 trapframe)
     uvmunmap(vm->pagetable, TRAMPOLINE, 1, 0);
     uvmunmap(vm->pagetable, SIG_TRAMPOLINE, 1, 0);
     uvmunmap(vm->pagetable, TRAMPOLINE_DATA, 1, 0);
+    uvmunmap(vm->pagetable, TRAMPOLINE_CPULOCAL, 1, 0);
     return -1;
   }
   vm->trapframe = trapframe; // Store the trapframe pointer in the VM

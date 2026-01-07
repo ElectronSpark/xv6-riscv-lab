@@ -72,8 +72,10 @@
 #define TRAMPOLINE (MAXVA - PGSIZE)
 #define TRAMPOLINE_DATA (TRAMPOLINE - PGSIZE)
 // Trampoline page for signal handling.
+// percpu data for trampoline and kernel.
+#define TRAMPOLINE_CPULOCAL (TRAMPOLINE - (PGSIZE * 2))
 // SIG_TRAMPOLINE would be mapped to the user space
-#define SIG_TRAMPOLINE (TRAMPOLINE - (PGSIZE << 1))
+#define SIG_TRAMPOLINE (TRAMPOLINE - (PGSIZE * 3))
 
 // map kernel stacks beneath the trampoline,
 // each surrounded by invalid guard pages.
@@ -99,8 +101,8 @@
 //   user stack
 //   128MB padding
 //   TRAPFRAME (p->trapframe, used by the trampoline)
-//   reserved page for trampoline code
 //   SIG_TRAMPOLINE (used by the signal handling code)
+//   CPU_LOCAL (per-cpu data, used by trampoline and kernel)
 //   TRAMPOLINE_DATA (global data for trampoline code)
 //   TRAMPOLINE (the same page as in the kernel)
 #define TRAPFRAME (TRAMPOLINE - (PGSIZE << 2))

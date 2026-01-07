@@ -22,19 +22,31 @@ SECTIONS
     _sigtrampoline = .;
     *(sig_trampsec)
     . = ALIGN(0x1000);
-    ASSERT(. - _sigtrampoline == 0x1000, "error: signal trampoline larger than one page");
+    ASSERT(. - _sigtrampoline <= 0x1000, "error: signal trampoline larger than one page");
     PROVIDE(etext = .);
   }
 
-  .trampoline : {
+  .trampoline.cpu_local : {
+    . = ALIGN(0x1000);
+    _cpulocal_start = .;
+    *(cpu_local_sec)
+    . = ALIGN(0x1000);
+    ASSERT(. - _cpulocal_start <= 0x1000, "error: cpu_local_sec larger than one page");
+  }
+
+  .trampoline.data : {
     . = ALIGN(0x1000);
     PROVIDE(_trampoline_data = .);
     *(trampdatasec)
     . = ALIGN(0x1000);
+    ASSERT(. - _trampoline_data <= 0x1000, "error: trampoline larger than one page");
+  }
+  
+  .trampoline : {
     PROVIDE(_trampoline = .);
     *(trampsec)
     . = ALIGN(0x1000);
-    ASSERT(. - _trampoline == 0x1000, "error: trampoline larger than one page");
+    ASSERT(. - _trampoline <= 0x1000, "error: trampoline larger than one page");
   }
 
   .rodata : {
@@ -45,6 +57,13 @@ SECTIONS
     *(.rodata .rodata.*)
     . = ALIGN(4096);
     _rodata_end = .;
+  }
+
+  .data.ktlb : {
+    . = ALIGN(4096);
+    PROVIDE(_data_ktlb = .);
+    . += 4096;
+    _data_ktlb_end = .;
   }
 
   .data : {

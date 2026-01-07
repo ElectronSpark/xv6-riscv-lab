@@ -27,8 +27,10 @@ void
 trapinit(void)
 {
   trampoline_userret = (void*)(TRAMPOLINE + ((uint64)userret - (uint64)trampoline));
+  printf("trapinit: trampoline_userret at %p\n", trampoline_userret);
   // send syscalls, interrupts, and exceptions to uservec in trampoline.S
   trampoline_uservec = TRAMPOLINE + (uservec - trampoline);
+  printf("trapinit: trampoline_uservec at %p\n", (void*)trampoline_uservec);
   // Allocate interrupt stacks for each CPU hart
   for (int i = 0; i < NCPU; i++) {
     cpus[i].intr_stacks = page_alloc(INTR_STACK_ORDER, 0);

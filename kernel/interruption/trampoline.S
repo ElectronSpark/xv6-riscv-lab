@@ -30,7 +30,7 @@ trampoline_utrap:
 .globl trampoline_ksatp
 .align 8
 trampoline_ksatp:
-    .dword 0              # filled in by trap.c: usertrapret()
+    .dword 0      # filled in by trap.c: usertrapret()
 .globl trampoline_kirq
 .align 8
 trampoline_kirq:
