@@ -14,6 +14,9 @@
 #include "trap.h"
 
 extern char trampoline[], uservec[], userret[];
+extern uint64 trampoline_uservec;
+
+static void (*trampoline_userret)(uint64) = NULL;
 
 // in kernelvec.S
 // Recursive kernel trap handler, already on interrupt stack,
@@ -23,6 +26,9 @@ void kernelvec();
 void
 trapinit(void)
 {
+  trampoline_userret = (void*)(TRAMPOLINE + ((uint64)userret - (uint64)trampoline));
+  // send syscalls, interrupts, and exceptions to uservec in trampoline.S
+  trampoline_uservec = TRAMPOLINE + (uservec - trampoline);
   // Allocate interrupt stacks for each CPU hart
   for (int i = 0; i < NCPU; i++) {
     cpus[i].intr_stacks = page_alloc(INTR_STACK_ORDER, 0);
@@ -309,18 +315,10 @@ usertrapret(void)
   intr_off();
   assert(mycpu()->spin_depth == 0, "usertrapret: spin_depth not zero");
 
-  // send syscalls, interrupts, and exceptions to uservec in trampoline.S
-  uint64 trampoline_uservec = TRAMPOLINE + (uservec - trampoline);
-  w_stvec(trampoline_uservec);
-
   // set up trapframe values that uservec will need when
   // the process next traps into the kernel.
-  p->trapframe->kernel_satp = r_satp();         // kernel page table
   p->trapframe->kernel_sp = p->ksp;
   p->trapframe->irq_sp = mycpu()->intr_sp;
-  p->trapframe->kernel_trap = (uint64)usertrap;
-  p->trapframe->irq_entry = (uint64)user_kirq_entrance;
-  p->trapframe->kernel_hartid = r_tp();         // hartid for cpuid()
 
   // set up the registers that trampoline.S's sret will use
   // to get to user space.
@@ -331,9 +329,6 @@ usertrapret(void)
   x |= SSTATUS_SPIE; // enable interrupts in user mode
   w_sstatus(x);
 
-  // tell trampoline.S the user page table to switch to.
-  uint64 satp = MAKE_SATP(p->vm->pagetable);
-
   // printf("user pagetable before usertrapret:\n");
   // dump_pagetable(p->vm.pagetable, 2, 0, 0, 0, false);
   // printf("\n");
@@ -341,10 +336,7 @@ usertrapret(void)
   // jump to userret in trampoline.S at the top of memory, which 
   // switches to the user page table, restores user registers,
   // and switches to user mode with sret.
-  uint64 trampoline_userret = TRAMPOLINE + (userret - trampoline);
-  uint64 trapframe_base = TRAPFRAME;
-  trapframe_base += (uint64)p->trapframe - PGROUNDDOWN((uint64)p->trapframe);
-  ((void (*)(uint64, uint64))trampoline_userret)(trapframe_base, satp);
+  trampoline_userret(MAKE_SATP(p->vm->pagetable));
 }
 
 // interrupts and exceptions from kernel code go here via kernelvec,

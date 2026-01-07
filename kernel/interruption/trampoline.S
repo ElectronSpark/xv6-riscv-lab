@@ -14,9 +14,38 @@
 #include "riscv.h"
 #include "memlayout.h"
 
+.globl kernelvec
+.globl usertrap
+.globl user_kirq_entrance
+
+.section trampdatasec
+.globl trampoline_kvec
+.align 8
+trampoline_kvec:
+    .dword kernelvec      # kernelvec is in kernel/trap.c
+.globl trampoline_utrap
+.align 8
+trampoline_utrap:
+    .dword usertrap        # usertrap is defined below
+.globl trampoline_ksatp
+.align 8
+trampoline_ksatp:
+    .dword 0              # filled in by trap.c: usertrapret()
+.globl trampoline_kirq
+.align 8
+trampoline_kirq:
+    .dword user_kirq_entrance  # user_kirq_entrance is in kernel/trap.c
+.globl trampoline_trapframe_base
+.align 8
+trampoline_trapframe_base:
+    .dword 0              # filled in by trap.c: usertrapret()
+.globl trampoline_uservec
+.align 8
+trampoline_uservec:
+    .dword 0              # filled in by trap.c: trapinit()
+
 .section trampsec
 .globl trampoline
-.globl usertrap
 trampoline:
 .align 4
 .globl uservec
@@ -32,6 +61,12 @@ uservec:
         # a0 can be used to get at TRAPFRAME.
         # sscratch also stores the trapframe base address
         csrrw a0, sscratch, a0
+
+        # set kernelvec as the trap handler
+        ld a0, trampoline_kvec
+        csrw stvec, a0
+
+        ld a0, trampoline_trapframe_base
 
         # save the user registers in TRAPFRAME
         sd ra, TRAPFRAME_RA(a0)
@@ -82,12 +117,12 @@ uservec:
         beqz t0, 2f             # if not, jump to handle exception
 1:
         ld sp, UTRAPFRAME_IRQ_SP(a0)   # load irq_sp from trapframe
-        ld t2, UTRAPFRAME_IRQ_ENTRY(a0)   # load irq_entry from trapframe
+        ld t2, trampoline_kirq   # load irq_entry from trapframe
         j 3f
 2:
         # initialize kernel stack pointer, from p->trapframe->kernel_sp
         ld sp, UTRAPFRAME_KERNEL_SP(a0)
-        ld t2, UTRAPFRAME_KERNEL_TRAP(a0)   # load kernel_trap from trapframe
+        ld t2, trampoline_utrap
 3:
         # make tp hold the current hartid, from p->trapframe->kernel_hartid
         ld tp, UTRAPFRAME_KERNEL_HARTID(a0)
@@ -97,20 +132,19 @@ uservec:
         # load the address of usertrap(), from p->trapframe->kernel_trap
         ld t0, UTRAPFRAME_KERNEL_TRAP(a0)
 
-        # fetch the kernel page table address, from p->trapframe->kernel_satp.
-        ld t1, UTRAPFRAME_KERNEL_SATP(a0)
-
         # wait for any previous memory operations to complete, so that
         # they use the user page table.
         sfence.vma zero, zero
 
         # install the kernel page table.
+        ld t1, trampoline_ksatp
         csrw satp, t1
 
         # flush now-stale user entries from the TLB.
         sfence.vma zero, zero
 
-        # jump to usertrap(), which does not return
+        # jump to usertrap (exceptions) or user_kirq_entrance (interrupts)
+        # t2 was loaded in path 1 or 2 above
         jr t2
 
 .globl userret
@@ -123,11 +157,14 @@ userret:
 
         # switch to the user page table.
         sfence.vma zero, zero
-        csrw satp, a1
+        csrw satp, a0
         sfence.vma zero, zero
 
+        ld a0, trampoline_uservec
+        csrw stvec, a0
+
         # store trapframe base in sscratch
-        csrw sscratch, a0
+        ld a0, trampoline_trapframe_base
 
         # @TODO: restore sstatus from trapframe
         # restore sepc from the trapframe
