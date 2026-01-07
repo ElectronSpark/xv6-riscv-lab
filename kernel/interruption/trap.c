@@ -13,7 +13,7 @@
 #include "vm.h"
 #include "trap.h"
 
-extern char trampoline[], uservec[], userret[];
+extern char trampoline[], uservec[], userret[], _data_ktlb[];
 extern uint64 trampoline_uservec;
 
 static void (*trampoline_userret)(uint64) = NULL;
@@ -31,12 +31,17 @@ trapinit(void)
   // send syscalls, interrupts, and exceptions to uservec in trampoline.S
   trampoline_uservec = TRAMPOLINE + (uservec - trampoline);
   printf("trapinit: trampoline_uservec at %p\n", (void*)trampoline_uservec);
-  // Allocate interrupt stacks for each CPU hart
+
+  // Allocate and map interrupt stacks for each CPU hart
+  pagetable_t kpgtbl = (void *)_data_ktlb;
   for (int i = 0; i < NCPU; i++) {
-    cpus[i].intr_stacks = page_alloc(INTR_STACK_ORDER, 0);
-    assert(cpus[i].intr_stacks != NULL, "trapinit: page_alloc for intr_stacks failed");
-    memset(cpus[i].intr_stacks, 0, INTR_STACK_SIZE);
+    void *intr_stacks = page_alloc(INTR_STACK_ORDER, 0);
+    assert(intr_stacks != NULL, "trapinit: page_alloc for intr_stacks failed");
+    memset(intr_stacks, 0, INTR_STACK_SIZE);
+    kvmmap(kpgtbl, KIRQSTACK(i), (uint64)intr_stacks, INTR_STACK_SIZE, PTE_R | PTE_W);
+    cpus[i].intr_stacks = (void *)KIRQSTACK(i);
     cpus[i].intr_sp = (uint64)cpus[i].intr_stacks + INTR_STACK_SIZE;
+    printf("trapinit: CPU %d intr_stack at %lx -> %p\n", i, KIRQSTACK(i), intr_stacks);
   }
 }
 
@@ -44,7 +49,7 @@ trapinit(void)
 void
 trapinithart(void)
 {
-  w_sscratch(cpus[cpuid()].intr_sp);
+  w_sscratch(mycpu()->intr_sp);
   w_stvec((uint64)kernelvec);
 }
 

@@ -16,6 +16,9 @@
 // 80000000 -- entry.S, then kernel text and data
 // end -- start of kernel page allocation area
 // PHYSTOP -- end RAM used by the kernel
+#include "param.h"
+#include "riscv.h"
+
 #ifndef __KERNEL_MEMORY_LAYOUT_H
 #define __KERNEL_MEMORY_LAYOUT_H
 
@@ -79,17 +82,26 @@
 
 // map kernel stacks beneath the trampoline,
 // each surrounded by invalid guard pages.
-#define KSTACK(p) (TRAMPOLINE - (PGSIZE << 1) - ((p)+1)* 2*PGSIZE)
+#define KIRQSTACKTOP (MAXVA - (PGSIZE << 6))
+#define KIRQSTACK(hartid) (KIRQSTACKTOP - ((hartid)+1)*(INTR_STACK_SIZE << 1)) // each stack has guard pages above and below
+
+#if NCPU > 64
+#error "NCPU too large"
+#endif
 
 #define UVMBOTTOM 0x1000L
-#define UVMTOP (MAXVA - (1UL << 32))
+#define UVMTOP (MAXVA - (MAXVA >> 9))   // Leave the last pte identical to kernel page table
 #define USTACKTOP UVMTOP
-#if UVMBOTTOM + (MAXUSTACK << PAGE_SHIFT) > USTACKTOP
+#if UVMBOTTOM + MAXUSTACK > USTACKTOP
 #error "User stack too large"
 #endif
 // The lowest address of the user stack.
 #define USTACK_MAX_BOTTOM   (USTACKTOP - (MAXUSTACK << PAGE_SHIFT))
 #define UHEAP_MAX_TOP       (UVMBOTTOM + (MAXUHEAP << PAGE_SHIFT))
+
+#if KIRQSTACK(64) < UVMTOP
+#error "Not enough space for kernel stacks"
+#endif
 
 // User memory layout.
 // Address zero first:

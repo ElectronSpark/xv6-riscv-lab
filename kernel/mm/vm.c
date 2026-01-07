@@ -156,6 +156,9 @@ kvmmake(void)
   // map read-only data and the physical RAM we'll make use of.
   kvmmap(kpgtbl, (uint64)_rodata, (uint64)_rodata, (uint64)_rodata_end-(uint64)_rodata, PTE_R);
 
+  // map kernel top-level page table (needs to be writable)
+  kvmmap(kpgtbl, (uint64)_data_ktlb, (uint64)_data_ktlb, PGSIZE, PTE_R | PTE_W);
+
   // map data and the physical RAM we'll make use of.
   kvmmap(kpgtbl, (uint64)_data, (uint64)_data, (uint64)_data_end-(uint64)_data, PTE_R | PTE_W);
 
