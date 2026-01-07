@@ -91,6 +91,7 @@ int             killed(struct proc*);
 void            proc_lock(struct proc *p);
 void            proc_unlock(struct proc *p);
 void            proc_assert_holding(struct proc *p);
+void            cpus_init(void);
 void            mycpu_init(uint64 hartid, bool trampoline);
 struct cpu_local*     mycpu(void);
 struct proc*    myproc();

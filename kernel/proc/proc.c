@@ -273,6 +273,12 @@ cpuid()
 }
 
 void
+cpus_init(void)
+{
+  memset(cpus, 0, sizeof(cpus));
+}
+
+void
 mycpu_init(uint64 hartid, bool trampoline)
 {
   if (trampoline) {
@@ -285,7 +291,6 @@ mycpu_init(uint64 hartid, bool trampoline)
   } else {
     struct cpu_local *c = &cpus[hartid];
     w_tp((uint64)c);
-    memset(c, 0, sizeof(*c));
     printf("hart %ld mycpu_init: setting tp to %p - %p\n", hartid, (void *)c, (void *)((uint64)c + sizeof(struct cpu_local)));
   }
 }

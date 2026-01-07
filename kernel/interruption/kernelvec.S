@@ -20,7 +20,7 @@ kernelvec:
         beqz a0, 1f             # if not, skip stack change
 
         ld a0, CPU_LOCAL_FLAGS(tp)    # is now in interrupt?
-        srli a0, a0, 1          # check in_itr flag
+        srli a0, a0, 2          # check in_itr flag
         andi a0, a0, 1
         beqz a0, 1f             # if was in interrupt, skip change stack
 

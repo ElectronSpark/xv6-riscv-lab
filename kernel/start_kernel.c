@@ -14,6 +14,7 @@
 #include "trap.h"
 #include "rcu.h"
 #include "sbi.h"
+#include "ipi.h"
 
 volatile STATIC int started = 0;
 extern void _entry(); // entry.S
@@ -51,27 +52,38 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
 
-static void __start_kernel_secondary_hart(void) {
-    while(__atomic_load_n(&started, __ATOMIC_ACQUIRE) == 0)
-      ;
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    mycpu_init(cpuid(), true);
-    idle_proc_init();
-    printf("hart %d starting, sp: %p\n", cpuid(), __builtin_frame_address(0));
+static void __start_kernel_secondary_hart(int hartid) {
+    // Set tp to physical address first. cpus[] was already zeroed by boot hart's
+    // cpus_init(), and intr_sp will be set by trapinit() before we proceed.
+    mycpu_init(hartid, false);
+
+    // while(__atomic_load_n(&started, __ATOMIC_ACQUIRE) == 0)
+    //   ;
+    // __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    smp_cond_load_acquire(&started, VAL != 0);
+
+    // First turn on paging (still using physical TP)
     kvminithart();    // turn on paging
+    // Now switch TP to trampoline virtual address (paging is now on)
+    mycpu_init(hartid, true);
+    idle_proc_init();
     trapinithart();   // install kernel trap vector
     plicinithart();   // ask PLIC for device interrupts
     rcu_cpu_init(cpuid()); // Initialize RCU for this CPU
 }
 
 void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
-    mycpu_init(hartid, false);
+    // Boot hart initializes all cpu structs first, before any hart sets tp
     if(is_boot_hart){
+        cpus_init();
+        mycpu_init(hartid, false);
         SET_BOOT_HART();
         __start_kernel_main_hart(hartid, fdt_base);
     } else {
-        __start_kernel_secondary_hart();
+        __start_kernel_secondary_hart(hartid);
     }
+
+    printf("hart %d initialized. intr_sp: %p\n", hartid, (void*)mycpu()->intr_sp);
 
     // Now we are in idle process context. Just yield to scheduler.
     for (;;) {
@@ -117,4 +129,9 @@ void start_kernel_post_init(void) {
     sbi_start_secondary_harts((unsigned long)_entry);
     // sleep_ms(1000);
     // rcu_run_tests();
+
+    // Initialize IPI subsystem and run demo
+    // sleep_ms(100);
+    // ipi_init();
+    // ipi_demo();
 }
