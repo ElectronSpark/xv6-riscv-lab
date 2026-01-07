@@ -149,9 +149,19 @@ static void test_call_rcu(void) {
     call_rcu(head, test_callback, data);
     printf("  Callback registered\n");
 
-    // Wait for callback to be invoked
+    // Force grace period completion and callback processing
+    // The segmented callback list requires multiple grace periods to advance
+    // callbacks through NEXT_TAIL -> NEXT_READY_TAIL -> WAIT_TAIL -> DONE_TAIL
+    for (int i = 0; i < 3; i++) {
+        synchronize_rcu();
+        rcu_process_callbacks();
+    }
+
+    // Wait for callback to be invoked (should already be done after above)
     int timeout = 100;
     while (__atomic_load_n(&callback_invoked, __ATOMIC_ACQUIRE) == 0 && timeout > 0) {
+        synchronize_rcu();
+        rcu_process_callbacks();
         yield();
         timeout--;
     }

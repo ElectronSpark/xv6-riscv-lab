@@ -110,6 +110,9 @@ void start_kernel_post_init(void) {
     // Set up root directory for init process (must be after vfs_init)
     install_user_root();
 
+    // Start the RCU GP kthread for background grace period processing
+    rcu_gp_kthread_start();
+
 #ifdef RWAD_WRITE_TEST
     // forward decl for rwlock tests
     void rwlock_launch_tests(void);
@@ -127,8 +130,13 @@ void start_kernel_post_init(void) {
     // Linux-style: boot hart explicitly starts other harts after initialization.
     // OpenSBI keeps other harts stopped until we request them via sbi_hart_start().
     sbi_start_secondary_harts((unsigned long)_entry);
-    // sleep_ms(1000);
-    // rcu_run_tests();
+    sleep_ms(1000);
+
+    // Start the RCU GP kthread before running RCU tests
+    rcu_gp_kthread_start();
+    sleep_ms(100); // Give kthread time to start
+    
+    rcu_run_tests();
 
     // Initialize IPI subsystem and run demo
     // sleep_ms(100);

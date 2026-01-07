@@ -166,6 +166,20 @@ void rcu_init(void);
 void rcu_cpu_init(int cpu);
 
 /**
+ * rcu_gp_kthread_start() - Start the RCU grace period kthread
+ *
+ * Starts the background kernel thread that handles grace period processing
+ * and callback invocation. This should be called after the process subsystem
+ * is initialized and kernel threads can be created.
+ *
+ * The RCU GP kthread periodically:
+ * - Starts and advances grace periods
+ * - Processes callbacks from all CPUs
+ * - Wakes up processes waiting in synchronize_rcu()
+ */
+void rcu_gp_kthread_start(void);
+
+/**
  * rcu_run_tests() - Run comprehensive RCU test suite
  *
  * Executes all RCU tests including basic operations, pointer operations,

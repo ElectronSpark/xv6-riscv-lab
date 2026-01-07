@@ -42,12 +42,23 @@
 #include "spinlock.h"
 #include "rcu.h"
 #include "proc.h"
+#include "proc_queue.h"
+#include "sched.h"
 
 // Global RCU state
 static rcu_state_t rcu_state;
 
 // Lock protecting grace period state transitions
 static spinlock_t rcu_gp_lock;
+
+// RCU GP kthread state
+static struct proc *rcu_gp_kthread = NULL;
+static _Atomic int rcu_gp_kthread_should_run = 0;
+static _Atomic int rcu_gp_kthread_running = 0;
+
+// Wait queue for processes waiting on grace period completion
+static proc_queue_t rcu_gp_waitq;
+static spinlock_t rcu_gp_waitq_lock;
 
 // Lock protecting callback processing
 static spinlock_t rcu_cb_lock;
@@ -66,6 +77,149 @@ static void rcu_expedited_gp(void);
 // Configuration constants (Linux-inspired)
 #define RCU_LAZY_GP_DELAY   100   // Callbacks to accumulate before starting GP
 #define RCU_BATCH_SIZE      16    // Number of callbacks to invoke per batch
+#define RCU_GP_KTHREAD_INTERVAL_MS  10  // GP kthread wake interval in ms
+
+// ============================================================================
+// RCU GP Kthread - Background Grace Period Processing
+// ============================================================================
+
+// Forward declaration for use in kthread
+static void rcu_wakeup_gp_waiters(void);
+
+// Force quiescent states for CPUs that aren't in RCU critical sections
+// This is necessary because offline/idle CPUs may never report QS naturally
+static void rcu_force_quiescent_states(void) {
+    if (!__atomic_load_n(&rcu_state.gp_in_progress, __ATOMIC_ACQUIRE)) {
+        return;
+    }
+    
+    for (int i = 0; i < NCPU; i++) {
+        rcu_cpu_data_t *rcp = &rcu_state.cpu_data[i];
+        
+        // If CPU is not in an RCU read-side critical section, force QS
+        if (__atomic_load_n(&rcp->nesting, __ATOMIC_ACQUIRE) == 0) {
+            // Clear this CPU's bit in the quiescent state mask
+            uint64 cpu_mask = 1UL << i;
+            __atomic_fetch_and(&rcu_state.qs_mask, ~cpu_mask, __ATOMIC_ACQ_REL);
+            __atomic_store_n(&rcp->qs_pending, 0, __ATOMIC_RELEASE);
+        }
+    }
+}
+
+// RCU GP kthread main function
+// This thread handles:
+// 1. Periodic grace period advancement
+// 2. Callback processing for all CPUs
+// 3. Waking up processes waiting in synchronize_rcu()
+static int rcu_gp_kthread_fn(uint64 arg1, uint64 arg2) {
+    (void)arg1;
+    (void)arg2;
+    
+    __atomic_store_n(&rcu_gp_kthread_running, 1, __ATOMIC_RELEASE);
+    
+    while (__atomic_load_n(&rcu_gp_kthread_should_run, __ATOMIC_ACQUIRE)) {
+        // Check if there are pending callbacks that need a grace period
+        int has_pending_cbs = 0;
+        for (int i = 0; i < NCPU; i++) {
+            if (__atomic_load_n(&rcu_state.cpu_data[i].cb_count, __ATOMIC_ACQUIRE) > 0) {
+                has_pending_cbs = 1;
+                break;
+            }
+        }
+        
+        // If there are pending callbacks or lazy threshold reached, start GP
+        if (has_pending_cbs) {
+            // Start a new grace period if none in progress
+            if (!__atomic_load_n(&rcu_state.gp_in_progress, __ATOMIC_ACQUIRE)) {
+                rcu_start_gp();
+            }
+        }
+        
+        // Force quiescent states for idle/offline CPUs
+        rcu_force_quiescent_states();
+        
+        // Try to advance grace period
+        rcu_advance_gp();
+        
+        // Process callbacks on all CPUs
+        for (int i = 0; i < NCPU; i++) {
+            rcu_cpu_data_t *rcp = &rcu_state.cpu_data[i];
+            
+            // Advance callback segments based on completed grace period
+            spin_acquire(&rcu_cb_lock);
+            uint64 gp_seq_completed = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
+            rcu_advance_cbs(rcp, gp_seq_completed);
+            
+            // Check if there are ready callbacks
+            if (rcu_cblist_ready_cbs(rcp)) {
+                rcu_head_t *done_list = rcu_cblist_dequeue(rcp);
+                if (done_list != NULL) {
+                    // Count callbacks in the list
+                    int count = 0;
+                    for (rcu_head_t *p = done_list; p != NULL; p = p->next) {
+                        count++;
+                    }
+                    __atomic_fetch_sub(&rcp->cb_count, count, __ATOMIC_RELEASE);
+                    spin_release(&rcu_cb_lock);
+                    
+                    // Invoke callbacks outside the lock
+                    rcu_invoke_callbacks(done_list);
+                    __atomic_fetch_add(&rcp->cb_invoked, count, __ATOMIC_RELEASE);
+                } else {
+                    spin_release(&rcu_cb_lock);
+                }
+            } else {
+                spin_release(&rcu_cb_lock);
+            }
+        }
+        
+        // Wake up any processes waiting for grace period completion
+        rcu_wakeup_gp_waiters();
+        
+        // Sleep for a short interval before next check
+        sleep_ms(RCU_GP_KTHREAD_INTERVAL_MS);
+    }
+    
+    __atomic_store_n(&rcu_gp_kthread_running, 0, __ATOMIC_RELEASE);
+    return 0;
+}
+
+// Wake up processes waiting in synchronize_rcu()
+static void rcu_wakeup_gp_waiters(void) {
+    spin_acquire(&rcu_gp_waitq_lock);
+    // Wake up all waiters - they will check if their GP has completed
+    proc_queue_wakeup_all(&rcu_gp_waitq, 0, 0);
+    spin_release(&rcu_gp_waitq_lock);
+}
+
+// Start the RCU GP kthread
+void rcu_gp_kthread_start(void) {
+    if (rcu_gp_kthread != NULL) {
+        return; // Already started
+    }
+    
+    __atomic_store_n(&rcu_gp_kthread_should_run, 1, __ATOMIC_RELEASE);
+    
+    int ret = kernel_proc_create("rcu_gp", &rcu_gp_kthread, 
+                                  rcu_gp_kthread_fn, 0, 0, KERNEL_STACK_ORDER);
+    if (ret <= 0 || rcu_gp_kthread == NULL) {
+        printf("rcu: failed to create RCU GP kthread\n");
+        return;
+    }
+    
+    // Wake up the kthread to start it
+    wakeup_proc(rcu_gp_kthread);
+    
+    // Wait for kthread to actually start running
+    int wait = 0;
+    while (!__atomic_load_n(&rcu_gp_kthread_running, __ATOMIC_ACQUIRE) && wait < 1000) {
+        yield();
+        wait++;
+    }
+    
+    printf("rcu: RCU GP kthread started (pid %d, running=%d)\n", 
+           ret, __atomic_load_n(&rcu_gp_kthread_running, __ATOMIC_ACQUIRE));
+}
 
 // ============================================================================
 // RCU Initialization
@@ -74,6 +228,8 @@ static void rcu_expedited_gp(void);
 void rcu_init(void) {
     spin_init(&rcu_gp_lock, "rcu_gp");
     spin_init(&rcu_cb_lock, "rcu_cb");
+    spin_init(&rcu_gp_waitq_lock, "rcu_gp_waitq");
+    proc_queue_init(&rcu_gp_waitq, "rcu_gp_waitq", &rcu_gp_waitq_lock);
 
     __atomic_store_n(&rcu_state.gp_seq, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&rcu_state.gp_seq_completed, 0, __ATOMIC_RELEASE);
@@ -89,6 +245,11 @@ void rcu_init(void) {
     __atomic_store_n(&rcu_state.expedited_seq, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&rcu_state.expedited_count, 0, __ATOMIC_RELEASE);
     rcu_state.gp_wait_queue = NULL;
+
+    // Initialize RCU GP kthread state
+    rcu_gp_kthread = NULL;
+    __atomic_store_n(&rcu_gp_kthread_should_run, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&rcu_gp_kthread_running, 0, __ATOMIC_RELEASE);
 
     // Initialize per-CPU data
     for (int i = 0; i < NCPU; i++) {
@@ -551,11 +712,13 @@ void synchronize_rcu(void) {
     // Start a new grace period immediately
     rcu_start_gp();
 
-    // Optimized wait loop with better yielding (Linux-inspired)
-    // Instead of busy-waiting, we aggressively yield and check
-    int max_wait = 100000; // Reduced from 1000000 for better responsiveness
+    // If the RCU GP kthread is running, we can sleep and be woken up
+    // Otherwise, fall back to polling mode (always use polling for now - simpler)
+    // int kthread_active = __atomic_load_n(&rcu_gp_kthread_running, __ATOMIC_ACQUIRE);
+    int kthread_active = 0; // Force polling mode for debugging
+    
+    int max_wait = 100000;
     int wait_count = 0;
-    int yield_interval = 1; // Start with frequent yields
 
     while (wait_count < max_wait) {
         uint64 current_gp = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
@@ -567,21 +730,32 @@ void synchronize_rcu(void) {
             return;
         }
 
-        // Try to advance grace period
+        // Force quiescent states for idle CPUs
+        rcu_force_quiescent_states();
+        
+        // Try to advance grace period ourselves
         rcu_advance_gp();
 
-        // Adaptive yielding - yield more aggressively initially,
-        // then back off to reduce context switch overhead
-        for (int i = 0; i < yield_interval; i++) {
+        if (kthread_active) {
+            // Sleep on the wait queue - kthread will wake us
+            spin_acquire(&rcu_gp_waitq_lock);
+            // Double-check before sleeping
+            current_gp = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
+            if (current_gp > start_gp) {
+                spin_release(&rcu_gp_waitq_lock);
+                __atomic_store_n(&rcu_state.gp_lazy_start, old_lazy, __ATOMIC_RELEASE);
+                return;
+            }
+            // Wait on the queue (will release lock while sleeping)
+            proc_queue_wait(&rcu_gp_waitq, &rcu_gp_waitq_lock, NULL);
+            spin_release(&rcu_gp_waitq_lock);
+        } else {
+            // Fallback: polling mode when kthread not running
+            rcu_force_quiescent_states();
             yield();
         }
 
         wait_count++;
-
-        // Exponential backoff on yielding (max 10 yields per iteration)
-        if (wait_count % 100 == 0 && yield_interval < 10) {
-            yield_interval++;
-        }
     }
 
     // Restore lazy GP setting
