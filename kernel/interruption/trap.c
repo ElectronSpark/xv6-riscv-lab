@@ -251,7 +251,7 @@ int push_sigframe(struct proc *p,
 
   ucontext_t uc = {0};
   uc.uc_link = (ucontext_t*)p->sig_ucontext;
-  uc.uc_sigmask = sa->sa_mask;
+  uc.uc_sigmask = p->sigacts->sa_sigmask;  // Save current mask to restore after handler
   memmove(&uc.uc_mcontext, p->trapframe, sizeof(mcontext_t));
   memmove(&uc.uc_stack, &p->sig_stack, sizeof(stack_t));
 

@@ -20,6 +20,7 @@ static volatile int nodefer_depth_max = 0;        // For SA_NODEFER recursion de
 static volatile int nodefer_current_depth = 0;
 static volatile int cont_handler_count = 0;       // SIGCONT handler invocations
 static volatile int change_handler_count = 0;     // Post-change handler delivery count (SIGALRM)
+static int test_failures = 0;                     // Track test failures
 
 /* ---------------- Basic Handlers ---------------- */
 static void simple_handler(int signo) {
@@ -107,8 +108,11 @@ static void test_siginfo_queue_cap(void) {
         pause();
     }
     printf("Delivered %d SIGALRM (should be 8 due to cap)\n", siginfo_count);
-    if (siginfo_count != 8) {
-        printf("[WARN] Queue cap mismatch (got %d)\n", siginfo_count);
+    if (siginfo_count == 8) {
+        printf("[Test 1] PASS\n");
+    } else {
+        printf("[Test 1] FAIL: Queue cap mismatch (got %d, expected 8)\n", siginfo_count);
+        test_failures++;
     }
 }
 
@@ -140,6 +144,12 @@ static void test_resehand(void) {
     // Give time for second (ignored) signal.
     sleep(2);
     printf("SA_RESETHAND rese_count=%d (expected 1)\n", rese_count);
+    if (rese_count == 1) {
+        printf("[Test 2] PASS\n");
+    } else {
+        printf("[Test 2] FAIL: rese_count=%d, expected 1\n", rese_count);
+        test_failures++;
+    }
     wait(0); // reap child
 }
 
@@ -168,6 +178,12 @@ static void test_nodefer(void) {
         pause();
     }
     printf("SA_NODEFER max recursion depth observed=%d (expected 2)\n", nodefer_depth_max);
+    if (nodefer_depth_max == 2) {
+        printf("[Test 3] PASS\n");
+    } else {
+        printf("[Test 3] FAIL: max depth=%d, expected 2\n", nodefer_depth_max);
+        test_failures++;
+    }
     wait(0); // reap child
 }
 
@@ -208,7 +224,15 @@ static void test_stop_continue(void) {
     kill(child, SIGCONT);
     sleep(2);
     printf("Parent: done with stop/continue test\n");
-    wait(0); // reap child
+    int status;
+    wait(&status);
+    // Child sets cont_handler_count=2 before exit; we check exit status.
+    if (status == 0) {
+        printf("[Test 4] PASS\n");
+    } else {
+        printf("[Test 4] FAIL: child exited with status %d\n", status);
+        test_failures++;
+    }
 }
 
 /* --------------- Test 5: Change handler clears pending --------------- */
@@ -241,6 +265,12 @@ static void test_change_handler_clears_pending(void) {
         pause();
     }
     printf("Post-change handler count=%d (expected 1)\n", change_handler_count);
+    if (change_handler_count == 1) {
+        printf("[Test 5] PASS\n");
+    } else {
+        printf("[Test 5] FAIL: change_handler_count=%d, expected 1\n", change_handler_count);
+        test_failures++;
+    }
 }
 
 int main(void) {
@@ -252,8 +282,12 @@ int main(void) {
     test_stop_continue();
     test_change_handler_clears_pending();
 
-    printf("All tests initiated. Waiting before final exit...\n");
-    sleep(5);
-    printf("Final exit.\n");
-    return 0;
+    printf("\n========================================\n");
+    if (test_failures == 0) {
+        printf("ALL TESTS PASSED (5/5)\n");
+    } else {
+        printf("TESTS FAILED: %d/5 failed\n", test_failures);
+    }
+    printf("========================================\n");
+    return test_failures;
 }

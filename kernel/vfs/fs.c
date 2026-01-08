@@ -342,10 +342,10 @@ void vfs_init(void) {
     __vfs_inode_init(&vfs_root_inode);
     __vfs_file_init();
     proc_lock(proc);
-    proc->fs.rooti.inode = NULL;
-    proc->fs.rooti.sb = NULL;
-    proc->fs.cwd.inode = NULL;
-    proc->fs.cwd.sb = NULL;
+    proc->fs->rooti.inode = NULL;
+    proc->fs->rooti.sb = NULL;
+    proc->fs->cwd.inode = NULL;
+    proc->fs->cwd.sb = NULL;
     proc_unlock(proc);
     tmpfs_init_fs_type();
     xv6fs_init_fs_type();

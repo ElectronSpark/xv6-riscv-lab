@@ -338,4 +338,18 @@ struct vfs_file_ops {
     int (*stat)(struct vfs_file *file, struct stat *stat);
 };
 
+struct vfs_fdtable {
+    int fd_count;
+    int next_fd;
+    struct vfs_file *files[NOFILE];
+};
+
+// Per-process filesystem state
+// Allocated on the kernel stack, below utrapframe
+struct fs_struct {
+    struct vfs_inode_ref rooti; // Root inode
+    struct vfs_inode_ref cwd;   // Current working directory inode
+    struct vfs_fdtable *fdtable; // File descriptor table (on kernel stack below proc_fs)
+};
+
 #endif // KERNEL_VIRTUAL_FILE_SYSTEM_TYPES_H

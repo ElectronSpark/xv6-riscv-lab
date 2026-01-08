@@ -186,29 +186,11 @@ STATIC void freeproc(struct proc *p);
 extern char trampoline[]; // trampoline.S
 extern char sig_trampoline[]; // sig_trampoline.S
 
-// Allocate a page for each process's kernel stack.
-// Map it high in memory, followed by an invalid
-// guard page.
-// @TODO:
-// void
-// proc_mapkstack(pagetable_t kpgtbl, void *kstack)
-// {
-//   struct proc *p;
-
-//   for(p = proc; p < &proc[NPROC]; p++) {
-//     char *pa = kalloc();
-//     assert(pa != 0, "kalloc failed for proc stack");
-//     uint64 va = KSTACK((int) (p - proc));
-//     kvmmap(kpgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W | PTE_RSW_w);
-//   }
-// }
-
-// @TODO: proc_unmapkstack
 
 // Initialize a proc structure and set it to UNUSED state.
 // Its spinlock and kstack will not be initialized here
 static void
-__pcb_init(struct proc *p)
+__pcb_init(struct proc *p, struct fs_struct *fs, struct vfs_fdtable *fdtable)
 {
   memset(p, 0, sizeof(*p));
   __proc_set_pstate(p, PSTATE_UNUSED);
@@ -221,7 +203,75 @@ __pcb_init(struct proc *p)
   hlist_entry_init(&p->proctab_entry);
   spin_init(&p->lock, "proc");
   spin_init(&p->pi_lock, "proc_pi_lock");
-  vfs_fdtable_init(&p->fs.fdtable);
+  p->fs = fs;
+  if (fs != NULL) {
+    memset(fs, 0, sizeof(*fs));
+    fs->fdtable = fdtable;
+    if (fdtable != NULL) {
+      memset(fdtable, 0, sizeof(*fdtable));
+      vfs_fdtable_init(fdtable);
+    }
+  }
+}
+
+// Arrange proc, utrapframe, proc_fs, and vfs_fdtable on the kernel stack.
+// Memory layout (from high to low addresses):
+//   - struct proc (at top of stack)
+//   - struct utrapframe (below proc, with 16-byte gap)
+//   - struct fs_struct (below utrapframe)
+//   - struct vfs_fdtable (below proc_fs)
+//   - kernel stack pointer (aligned, with 16-byte gap)
+// Returns the initialized proc structure.
+#define KSTACK_ARRANGE_FLAGS_TF 0x1 // place utrapframe
+#define KSTACK_ARRANGE_FLAGS_FS 0x2 // place fs_struct
+#define KSTACK_ARRANGE_FLAGS_FD 0x4 // place vfs_fdtable
+#define KSTACK_ARRANGE_FLAGS_ALL (KSTACK_ARRANGE_FLAGS_TF | KSTACK_ARRANGE_FLAGS_FS | KSTACK_ARRANGE_FLAGS_FD)
+static struct proc*
+__kstack_arrange(void *kstack, size_t kstack_size, uint64 flags)
+{
+  // Place PCB at the top of the kernel stack
+  struct proc *p = (struct proc *)(kstack + kstack_size - sizeof(struct proc));
+  uint64 next_addr = (uint64)p;
+  
+  struct utrapframe *trapframe = NULL;
+  struct fs_struct *fs = NULL;
+  struct vfs_fdtable *fdtable = NULL;
+  
+  if (flags & KSTACK_ARRANGE_FLAGS_TF) {
+    // Place utrapframe below struct proc (matching original layout)
+    // Original: p->ksp = ((uint64)p - sizeof(struct utrapframe) - 16);
+    //           p->trapframe = (void *)p->ksp;
+    next_addr = (uint64)p - sizeof(struct utrapframe) - 16;
+    next_addr &= ~0x7UL; // align to 8 bytes
+    trapframe = (struct utrapframe *)next_addr;
+  }
+  
+  if (flags & KSTACK_ARRANGE_FLAGS_FS) {
+    // Place fs_struct below utrapframe (or proc if no trapframe)
+    next_addr = next_addr - sizeof(struct fs_struct);
+    next_addr &= ~0x7UL; // align to 8 bytes
+    fs = (struct fs_struct *)next_addr;
+  }
+  
+  if (flags & KSTACK_ARRANGE_FLAGS_FD) {
+    // Place vfs_fdtable below fs_struct (or previous structure)
+    next_addr = next_addr - sizeof(struct vfs_fdtable);
+    next_addr &= ~0x7UL; // align to 8 bytes
+    fdtable = (struct vfs_fdtable *)next_addr;
+  }
+  
+  // Initialize the proc structure
+  __pcb_init(p, fs, fdtable);
+  
+  // Set trapframe pointer
+  p->trapframe = trapframe;
+  
+  // Set kernel stack pointer below the last allocated structure
+  uint64 ksp = next_addr - 16;
+  ksp &= ~0x7UL; // align to 8 bytes
+  p->ksp = ksp;
+  
+  return p;
 }
 
 void
@@ -372,9 +422,9 @@ allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order)
   }
   size_t kstack_size = (1UL << (PAGE_SHIFT + kstack_order));
   memset(kstack, 0, kstack_size);
-  // Place PCB at the top of the kernel stack
-  p = (struct proc *)(kstack  + kstack_size - sizeof(struct proc));
-  __pcb_init(p);
+  
+  // Arrange proc, utrapframe, fs_struct, and vfs_fdtable on the kernel stack
+  p = __kstack_arrange(kstack, kstack_size, KSTACK_ARRANGE_FLAGS_ALL);
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
@@ -382,11 +432,6 @@ allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order)
   p->kstack = (uint64)kstack;
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)entry;
-  p->ksp = ((uint64)p - sizeof(struct utrapframe) - 16);
-  p->ksp &= ~0x7UL; // align to 8 bytes
-  p->trapframe = (void *)p->ksp;
-  p->ksp -= 16;
-  p->ksp &= ~0x7UL; // align to 8 bytes
   p->context.sp = p->ksp;
   p->context.s0 = p->ksp;
   p->kentry = (uint64)entry;
@@ -465,13 +510,12 @@ void idle_proc_init(void) {
   size_t kstack_size = KERNEL_STACK_SIZE;
   kstack = (void *)(r_sp() & (~(kstack_size - 1)));
   
-  // Place PCB at the top of the kernel stack
-  p = (struct proc *)(kstack  + kstack_size - sizeof(struct proc));
-  __pcb_init(p);
+  // Arrange proc on the kernel stack (idle proc doesn't need trapframe/fs/fdtable)
+  assert((PAGE_SIZE << KERNEL_STACK_ORDER) == kstack_size, "idle_proc_init: invalid KERNEL_STACK_ORDER");
+  p = __kstack_arrange(kstack, kstack_size, 0);
 
   // Set up new context to start executing at forkret,
   // which returns to user space.
-  assert((PAGE_SIZE << KERNEL_STACK_ORDER) == kstack_size, "idle_proc_init: invalid KERNEL_STACK_ORDER");
   p->kstack_order = KERNEL_STACK_ORDER;
   p->kstack = (uint64)kstack;
   strncpy(p->name, "idle", sizeof(p->name));
@@ -635,10 +679,10 @@ userinit(void)
  * Sets up the initial current working directory for the init process.
  * Uses VFS interfaces instead of legacy namei/idup:
  *   - vfs_namei() to look up "/" path
- *   - vfs_inode_get_ref() to set p->fs.cwd
+ *   - vfs_inode_get_ref() to set p->fs->cwd
  *   - vfs_iput() to release lookup reference
  *
- * The process struct now uses p->fs.cwd (vfs_inode_ref) instead of
+ * The process struct now uses p->fs->cwd (vfs_inode_ref) instead of
  * the legacy p->cwd (struct inode*).
  */
 void
@@ -655,7 +699,7 @@ install_user_root(void) {
   PROC_SET_USER_SPACE(p);
   
   // Set the VFS cwd to root
-  vfs_inode_get_ref(root_inode, &p->fs.cwd);
+  vfs_inode_get_ref(root_inode, &p->fs->cwd);
   
   proc_unlock(p);
   
@@ -723,9 +767,9 @@ fork(void)
   }
 
   // Clone VFS cwd and root inode references
-  inode = vfs_inode_deref(&p->fs.cwd);
+  inode = vfs_inode_deref(&p->fs->cwd);
   if (inode != NULL) {
-    ret = vfs_inode_get_ref(inode, &np->fs.cwd);
+    ret = vfs_inode_get_ref(inode, &np->fs->cwd);
     if (ret != 0) {
       proc_unlock(np);
       proc_unlock(p);
@@ -733,13 +777,13 @@ fork(void)
       return -1;
     }
   }
-  inode = vfs_inode_deref(&p->fs.rooti);
+  inode = vfs_inode_deref(&p->fs->rooti);
   if (inode != NULL) {
-    ret = vfs_inode_get_ref(inode, &np->fs.rooti);
+    ret = vfs_inode_get_ref(inode, &np->fs->rooti);
     if (ret != 0) {
       proc_unlock(np);
       proc_unlock(p);
-      vfs_inode_put_ref(&np->fs.cwd);
+      vfs_inode_put_ref(&np->fs->cwd);
       freeproc(np);
       return -1;
     }
@@ -758,7 +802,7 @@ fork(void)
 
   // Clone VFS file descriptor table - must be done after releasing parent lock
   // because vfs_filedup may call cdev_dup which needs a mutex
-  vfs_fdtable_clone(&np->fs.fdtable, &p->fs.fdtable);
+  vfs_fdtable_clone(np->fs->fdtable, p->fs->fdtable);
   
   proc_unlock(np);
   
@@ -829,16 +873,16 @@ exit(int status)
   struct vfs_inode_ref cwd_ref;
 
   // VFS file descriptor table cleanup (closes all VFS files)
-  vfs_fdtable_destroy(&p->fs.fdtable, 0);
+  vfs_fdtable_destroy(p->fs->fdtable, 0);
 
   proc_lock(p);
   assert(p != proc_table.initproc, "init exiting");
 
   // Save and clear VFS inode refs
-  rooti_ref = p->fs.rooti;
-  cwd_ref = p->fs.cwd;
-  p->fs.rooti = (struct vfs_inode_ref){ 0 };
-  p->fs.cwd = (struct vfs_inode_ref){ 0 };
+  rooti_ref = p->fs->rooti;
+  cwd_ref = p->fs->cwd;
+  p->fs->rooti = (struct vfs_inode_ref){ 0 };
+  p->fs->cwd = (struct vfs_inode_ref){ 0 };
   proc_unlock(p);
 
   // Release VFS inode references

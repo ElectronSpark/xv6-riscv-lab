@@ -67,6 +67,7 @@ extern char _rodata[], _rodata_end[]; // kernel.ld sets these to boundaries of r
 extern char _data[], _data_end[]; // kernel.ld sets these to boundaries of data
 extern char _bss[], _bss_end[]; // kernel.ld sets these to boundaries of bss
 extern char trampoline[], _trampoline_data[]; // trampoline.S
+extern char sig_trampoline[]; // sig_trampoline.S
 extern char _data_ktlb[];
 
 extern uint64 trampoline_ksatp;
@@ -148,10 +149,14 @@ kvmmake(void)
   kvmmap(kpgtbl, TRAMPOLINE_CPULOCAL, (uint64)cpus, PGSIZE, PTE_R | PTE_W);
   kvmmap(kpgtbl, (uint64)cpus, (uint64)cpus, PGSIZE, PTE_R | PTE_W);
 
+  // map the signal trampoline for user space signal handling.
+  // PTE_U is required so user mode can execute the trampoline code.
+  kvmmap(kpgtbl, SIG_TRAMPOLINE, (uint64)sig_trampoline, PGSIZE, PTE_R | PTE_X | PTE_U);
+
   printf("trampoline 0x%lx -> %p\n", TRAMPOLINE, trampoline);
   printf("trampoline data 0x%lx -> %p\n", TRAMPOLINE_DATA, _trampoline_data);
   printf("trampoline cpu local 0x%lx -> %p\n", TRAMPOLINE_CPULOCAL, cpus);
-  printf("signal trampoline would be at 0x%lx\n", SIG_TRAMPOLINE);
+  printf("signal trampoline 0x%lx -> %p\n", SIG_TRAMPOLINE, sig_trampoline);
 
   // map read-only data and the physical RAM we'll make use of.
   kvmmap(kpgtbl, (uint64)_rodata, (uint64)_rodata, (uint64)_rodata_end-(uint64)_rodata, PTE_R);

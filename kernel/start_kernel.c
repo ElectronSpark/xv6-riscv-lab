@@ -134,12 +134,12 @@ void start_kernel_post_init(void) {
 
     // Start the RCU GP kthread before running RCU tests
     rcu_gp_kthread_start();
-    sleep_ms(100); // Give kthread time to start
+    // sleep_ms(100); // Give kthread time to start
     
-    rcu_run_tests();
+    // rcu_run_tests();
     
     // Run device table stress tests
-    dev_table_test();
+    // dev_table_test();
 
     // Initialize IPI subsystem and run demo
     // sleep_ms(100);

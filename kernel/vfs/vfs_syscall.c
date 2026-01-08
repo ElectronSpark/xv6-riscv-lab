@@ -39,19 +39,19 @@ static struct vfs_file *__vfs_argfd(int fd) {
     if (fd < 0 || fd >= NOFILE) {
         return NULL;
     }
-    return vfs_fdtable_get_file(&p->fs.fdtable, fd);
+    return vfs_fdtable_get_file(p->fs->fdtable, fd);
 }
 
 // Allocate a fd for the given file in current process
 static int __vfs_fdalloc(struct vfs_file *file) {
     struct proc *p = myproc();
-    return vfs_fdtable_alloc_fd(&p->fs.fdtable, file);
+    return vfs_fdtable_alloc_fd(p->fs->fdtable, file);
 }
 
 // Deallocate fd and return the file
 static struct vfs_file *__vfs_fdfree(int fd) {
     struct proc *p = myproc();
-    return vfs_fdtable_dealloc_fd(&p->fs.fdtable, fd);
+    return vfs_fdtable_dealloc_fd(p->fs->fdtable, fd);
 }
 
 /******************************************************************************
@@ -511,10 +511,10 @@ uint64 sys_vfs_chdir(void) {
     proc_lock(p);
     
     // Release old cwd
-    vfs_inode_put_ref(&p->fs.cwd);
+    vfs_inode_put_ref(&p->fs->cwd);
     
     // Set new cwd
-    vfs_inode_get_ref(inode, &p->fs.cwd);
+    vfs_inode_get_ref(inode, &p->fs->cwd);
     
     proc_unlock(p);
     vfs_iput(inode);

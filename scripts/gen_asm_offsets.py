@@ -352,10 +352,14 @@ class AsmOffsetsGenerator:
         Returns:
             List of field names (with paths for nested named structs)
         """
+        import re
         fields = []
         in_struct = False
         struct_brace_count = 0
         i = 0
+        
+        # Pattern to match "struct NAME" followed by space or {, not as part of longer identifier
+        struct_pattern = re.compile(rf'\bstruct\s+{re.escape(struct_name)}\b\s*(\{{|$)')
         
         while i < len(lines):
             line = lines[i]
@@ -363,7 +367,7 @@ class AsmOffsetsGenerator:
             
             # Check for struct definition start
             if not in_struct:
-                if f'struct {struct_name}' in stripped:
+                if struct_pattern.search(stripped):
                     in_struct = True
                     if '{' in stripped:
                         struct_brace_count = 1

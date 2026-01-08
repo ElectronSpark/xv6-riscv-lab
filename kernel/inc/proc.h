@@ -8,6 +8,7 @@
 #include "trapframe.h"
 #include "signal_types.h"
 #include "vm_types.h"
+#include "vfs/vfs_types.h"
 #include "atomic.h"
 
 struct vfs_inode;
@@ -84,15 +85,6 @@ enum procstate {
 })
 
 struct workqueue;
-struct vfs_file;
-
-// Per-process file descriptor table
-// It is protected by proc lock when used within a process
-struct vfs_fdtable {
-    int fd_count;
-    int next_fd;
-    struct vfs_file *files[NOFILE];
-};
 
 // Per-process state
 struct proc {
@@ -163,11 +155,7 @@ struct proc {
   uint64 arg[2];               // Argument for kernel process
   int cpu_id;                  // The CPU running this process.
   
-  struct {
-    struct vfs_inode_ref rooti; // Root inode
-    struct vfs_inode_ref cwd;   // Current working directory inode
-    struct vfs_fdtable fdtable; // File descriptor table
-  } fs;
+  struct fs_struct *fs;          // Filesystem state (on kernel stack below utrapframe)
   char name[16];               // Process name (debugging)
 
   // RCU read-side critical section nesting counter (per-process)
@@ -177,7 +165,7 @@ struct proc {
   int rcu_read_lock_nesting;   // Number of nested rcu_read_lock() calls
 };
 
-BUILD_BUG_ON((sizeof(struct proc) + sizeof(struct utrapframe) + 16) >= PGSIZE);
+BUILD_BUG_ON((sizeof(struct proc) + sizeof(struct utrapframe) + sizeof(struct fs_struct) + sizeof(struct vfs_fdtable) + 64) >= PGSIZE);
 
 static inline uint64 proc_flags(struct proc *p) {
   if (p == NULL) {
