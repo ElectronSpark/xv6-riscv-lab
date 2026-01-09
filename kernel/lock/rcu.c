@@ -67,26 +67,21 @@
 // Global RCU state
 static rcu_state_t rcu_state;
 
+// Per-CPU RCU data - cache-line aligned to prevent false sharing
+rcu_cpu_data_t rcu_cpu_data[NCPU] __attribute__((aligned(RCU_CACHE_LINE_SIZE)));
+
 // Lock protecting grace period state transitions
 static spinlock_t rcu_gp_lock;
-
-// RCU GP kthread state
-static struct proc *rcu_gp_kthread = NULL;
-static _Atomic int rcu_gp_kthread_should_run = 0;
-static _Atomic int rcu_gp_kthread_running = 0;
 
 // Wait queue for processes waiting on grace period completion
 static proc_queue_t rcu_gp_waitq;
 static spinlock_t rcu_gp_waitq_lock;
 
-// Lock protecting callback processing
-static spinlock_t rcu_cb_lock;
-
 // Forward declarations
 static void rcu_start_gp(void);
 static int rcu_gp_completed(void);
 static void rcu_advance_gp(void);
-static void rcu_invoke_callbacks(rcu_head_t *list);
+static int rcu_invoke_callbacks(rcu_head_t *list);
 static void rcu_advance_cbs(rcu_cpu_data_t *rcp, uint64 gp_timestamp);
 static rcu_head_t *rcu_cblist_dequeue(rcu_cpu_data_t *rcp);
 static void rcu_cblist_enqueue(rcu_cpu_data_t *rcp, rcu_head_t *head);
@@ -191,82 +186,43 @@ static int rcu_gp_completed(void) {
 // Force quiescent states - not needed in timestamp-based RCU
 // Removed as it's unused in the new implementation
 
-// RCU GP kthread main function
-// This thread handles:
-// 1. Periodic grace period advancement
-// 2. Callback processing for all CPUs
-// 3. Waking up processes waiting in synchronize_rcu()
-// 4. Timestamp overflow checking
-static int rcu_gp_kthread_fn(uint64 arg1, uint64 arg2) {
-    (void)arg1;
-    (void)arg2;
+// Per-CPU RCU processing function called from idle loop
+// Each CPU handles its own RCU work:
+// 1. Timestamp overflow checking (any CPU can do this)
+// 2. Starting grace periods if pending callbacks
+// 3. Advancing grace period state
+// 4. Processing own callbacks
+// 5. Waking up synchronize_rcu() waiters
+void rcu_idle_enter(void) {
+    // Mark that we're in the idle loop - provides RCU quiescent state
+    rcu_note_context_switch();
     
-    __atomic_store_n(&rcu_gp_kthread_running, 1, __ATOMIC_RELEASE);
+    // Check for timestamp overflow and normalize if needed
+    // Any CPU can do this - it's atomic and safe
+    rcu_check_timestamp_overflow();
     
-    while (__atomic_load_n(&rcu_gp_kthread_should_run, __ATOMIC_ACQUIRE)) {
-        // Check for timestamp overflow and normalize if needed
-        rcu_check_timestamp_overflow();
-        
-        // Check if there are pending callbacks that need a grace period
-        int has_pending_cbs = 0;
-        for (int i = 0; i < NCPU; i++) {
-            if (__atomic_load_n(&rcu_state.cpu_data[i].cb_count, __ATOMIC_ACQUIRE) > 0) {
-                has_pending_cbs = 1;
-                break;
-            }
+    // Check if this CPU has pending callbacks that need a grace period
+    push_off();
+    int cpu = cpuid();
+    rcu_cpu_data_t *rcp = &rcu_cpu_data[cpu];
+    int has_pending_cbs = __atomic_load_n(&rcp->cb_count, __ATOMIC_ACQUIRE) > 0;
+    pop_off();
+    
+    // If there are pending callbacks, start GP if none in progress
+    if (has_pending_cbs) {
+        if (!__atomic_load_n(&rcu_state.gp_in_progress, __ATOMIC_ACQUIRE)) {
+            rcu_start_gp();
         }
-        
-        // If there are pending callbacks, start GP if none in progress
-        if (has_pending_cbs) {
-            if (!__atomic_load_n(&rcu_state.gp_in_progress, __ATOMIC_ACQUIRE)) {
-                rcu_start_gp();
-            }
-        }
-        
-        // Try to advance grace period
-        rcu_advance_gp();
-        
-        // Process callbacks on all CPUs
-        for (int i = 0; i < NCPU; i++) {
-            rcu_cpu_data_t *rcp = &rcu_state.cpu_data[i];
-            
-            // Advance callback segments based on completed grace period
-            spin_acquire(&rcu_cb_lock);
-            uint64 gp_completed = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
-            rcu_advance_cbs(rcp, gp_completed);
-            
-            // Check if there are ready callbacks
-            if (rcu_cblist_ready_cbs(rcp)) {
-                rcu_head_t *done_list = rcu_cblist_dequeue(rcp);
-                if (done_list != NULL) {
-                    // Count callbacks in the list
-                    int count = 0;
-                    for (rcu_head_t *p = done_list; p != NULL; p = p->next) {
-                        count++;
-                    }
-                    __atomic_fetch_sub(&rcp->cb_count, count, __ATOMIC_RELEASE);
-                    spin_release(&rcu_cb_lock);
-                    
-                    // Invoke callbacks outside the lock
-                    rcu_invoke_callbacks(done_list);
-                    __atomic_fetch_add(&rcp->cb_invoked, count, __ATOMIC_RELEASE);
-                } else {
-                    spin_release(&rcu_cb_lock);
-                }
-            } else {
-                spin_release(&rcu_cb_lock);
-            }
-        }
-        
-        // Wake up any processes waiting for grace period completion
-        rcu_wakeup_gp_waiters();
-        
-        // Sleep for a short interval before next check
-        sleep_ms(RCU_GP_KTHREAD_INTERVAL_MS);
     }
     
-    __atomic_store_n(&rcu_gp_kthread_running, 0, __ATOMIC_RELEASE);
-    return 0;
+    // Try to advance grace period (any CPU can do this)
+    rcu_advance_gp();
+    
+    // Process this CPU's ready callbacks
+    rcu_process_callbacks();
+    
+    // Wake up any processes waiting for grace period completion
+    rcu_wakeup_gp_waiters();
 }
 
 // Wake up processes waiting in synchronize_rcu()
@@ -277,42 +233,12 @@ static void rcu_wakeup_gp_waiters(void) {
     spin_release(&rcu_gp_waitq_lock);
 }
 
-// Start the RCU GP kthread
-void rcu_gp_kthread_start(void) {
-    if (rcu_gp_kthread != NULL) {
-        return; // Already started
-    }
-    
-    __atomic_store_n(&rcu_gp_kthread_should_run, 1, __ATOMIC_RELEASE);
-    
-    int ret = kernel_proc_create("rcu_gp", &rcu_gp_kthread, 
-                                  rcu_gp_kthread_fn, 0, 0, KERNEL_STACK_ORDER);
-    if (ret <= 0 || rcu_gp_kthread == NULL) {
-        printf("rcu: failed to create RCU GP kthread\n");
-        return;
-    }
-    
-    // Wake up the kthread to start it
-    wakeup_proc(rcu_gp_kthread);
-    
-    // Wait for kthread to actually start running
-    int wait = 0;
-    while (!__atomic_load_n(&rcu_gp_kthread_running, __ATOMIC_ACQUIRE) && wait < 1000) {
-        yield();
-        wait++;
-    }
-    
-    printf("rcu: RCU GP kthread started (pid %d, running=%d)\n", 
-           ret, __atomic_load_n(&rcu_gp_kthread_running, __ATOMIC_ACQUIRE));
-}
-
 // ============================================================================
 // RCU Initialization
 // ============================================================================
 
 void rcu_init(void) {
     spin_init(&rcu_gp_lock, "rcu_gp");
-    spin_init(&rcu_cb_lock, "rcu_cb");
     spin_init(&rcu_gp_waitq_lock, "rcu_gp_waitq");
     proc_queue_init(&rcu_gp_waitq, "rcu_gp_waitq", &rcu_gp_waitq_lock);
 
@@ -330,11 +256,6 @@ void rcu_init(void) {
     __atomic_store_n(&rcu_state.expedited_count, 0, __ATOMIC_RELEASE);
     rcu_state.gp_wait_queue = NULL;
 
-    // Initialize RCU GP kthread state
-    rcu_gp_kthread = NULL;
-    __atomic_store_n(&rcu_gp_kthread_should_run, 0, __ATOMIC_RELEASE);
-    __atomic_store_n(&rcu_gp_kthread_running, 0, __ATOMIC_RELEASE);
-
     // Initialize per-CPU data and timestamps
     for (int i = 0; i < NCPU; i++) {
         rcu_cpu_init(i);
@@ -348,14 +269,15 @@ void rcu_cpu_init(int cpu) {
         return;
     }
 
-    rcu_cpu_data_t *rcp = &rcu_state.cpu_data[cpu];
+    rcu_cpu_data_t *rcp = &rcu_cpu_data[cpu];
 
-    // Initialize segmented callback list
-    rcp->cb_head = NULL;
-    for (int i = 0; i < RCU_CBLIST_NSEGS; i++) {
-        rcp->cb_tail[i] = NULL;
-        rcp->gp_seq_needed[i] = 0;
-    }
+    // Initialize two-list callback structure
+    __atomic_store_n(&rcp->pending_head, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&rcp->pending_tail, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&rcp->pending_gp, 0, __ATOMIC_RELEASE);
+    
+    __atomic_store_n(&rcp->ready_head, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&rcp->ready_tail, NULL, __ATOMIC_RELEASE);
 
     __atomic_store_n(&rcp->cb_count, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&rcp->qs_count, 0, __ATOMIC_RELEASE);
@@ -416,93 +338,83 @@ int rcu_is_watching(void) {
 }
 
 // ============================================================================
-// Segmented Callback List Management (Linux-inspired)
+// Simple Two-List Callback Management
 // ============================================================================
+//
+// Instead of the complex 4-segment approach, we use a simple two-list design:
+// - pending list: callbacks waiting for a grace period to complete
+// - ready list: callbacks ready to invoke (their GP completed)
+//
+// When a GP completes, pending callbacks are moved to the ready list.
+// This avoids pointer-into-freed-memory bugs that the segment approach had.
+//
 
-// Enqueue a callback to the per-CPU callback list
+// Enqueue a callback to the pending list
 static void rcu_cblist_enqueue(rcu_cpu_data_t *rcp, rcu_head_t *head) {
     head->next = NULL;
 
-    if (rcp->cb_head == NULL) {
-        // Empty list - initialize all segments to point to this callback
-        rcp->cb_head = head;
-        for (int i = 0; i < RCU_CBLIST_NSEGS; i++) {
-            rcp->cb_tail[i] = &head->next;
-        }
+    rcu_head_t *tail = __atomic_load_n(&rcp->pending_tail, __ATOMIC_ACQUIRE);
+    if (tail == NULL) {
+        // Empty list
+        __atomic_store_n(&rcp->pending_head, head, __ATOMIC_RELEASE);
+        __atomic_store_n(&rcp->pending_tail, head, __ATOMIC_RELEASE);
     } else {
-        // Add to NEXT_TAIL segment (newest callbacks)
-        *rcp->cb_tail[RCU_NEXT_TAIL] = head;
-        rcp->cb_tail[RCU_NEXT_TAIL] = &head->next;
+        // Append to tail
+        tail->next = head;
+        __atomic_store_n(&rcp->pending_tail, head, __ATOMIC_RELEASE);
     }
 }
 
-// Dequeue callbacks that are ready to invoke
-static rcu_head_t *rcu_cblist_dequeue(rcu_cpu_data_t *rcp) {
-    // Extract callbacks from DONE_TAIL segment
-    rcu_head_t *head = rcp->cb_head;
-
-    if (head == NULL || rcp->cb_tail[RCU_DONE_TAIL] == (rcu_head_t **)&(rcp->cb_head)) {
-        // No callbacks ready
-        return NULL;
+// Move pending callbacks to ready list when GP completes
+static void rcu_advance_cbs(rcu_cpu_data_t *rcp, uint64 gp_completed) {
+    // Check if pending callbacks are waiting for a GP that has now completed
+    uint64 pending_gp = __atomic_load_n(&rcp->pending_gp, __ATOMIC_ACQUIRE);
+    rcu_head_t *pending_head = __atomic_load_n(&rcp->pending_head, __ATOMIC_ACQUIRE);
+    
+    if (pending_head == NULL) {
+        return;  // No pending callbacks
     }
-
-    // Find the end of the DONE segment
-    rcu_head_t **done_tail = rcp->cb_tail[RCU_DONE_TAIL];
-    rcu_head_t *done_list = head;
-
-    // Update head to point to remaining callbacks
-    rcp->cb_head = *done_tail;
-
-    // Terminate the done list
-    *done_tail = NULL;
-
-    // Shift segment pointers
-    for (int i = RCU_DONE_TAIL; i < RCU_CBLIST_NSEGS - 1; i++) {
-        rcp->cb_tail[i] = rcp->cb_tail[i + 1];
+    
+    if (pending_gp > gp_completed) {
+        return;  // GP not yet completed for these callbacks
     }
-
-    if (rcp->cb_head == NULL) {
-        // List is now empty
-        for (int i = 0; i < RCU_CBLIST_NSEGS; i++) {
-            rcp->cb_tail[i] = NULL;
-        }
+    
+    // GP completed - move all pending callbacks to ready list
+    rcu_head_t *pending_tail = __atomic_load_n(&rcp->pending_tail, __ATOMIC_ACQUIRE);
+    rcu_head_t *ready_tail = __atomic_load_n(&rcp->ready_tail, __ATOMIC_ACQUIRE);
+    
+    if (ready_tail == NULL) {
+        // Ready list is empty - pending becomes ready
+        __atomic_store_n(&rcp->ready_head, pending_head, __ATOMIC_RELEASE);
+        __atomic_store_n(&rcp->ready_tail, pending_tail, __ATOMIC_RELEASE);
     } else {
-        rcp->cb_tail[RCU_NEXT_TAIL] = done_tail;
+        // Append pending to ready
+        ready_tail->next = pending_head;
+        __atomic_store_n(&rcp->ready_tail, pending_tail, __ATOMIC_RELEASE);
     }
-
-    return done_list;
+    
+    // Clear pending list
+    __atomic_store_n(&rcp->pending_head, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&rcp->pending_tail, NULL, __ATOMIC_RELEASE);
 }
 
 // Check if there are callbacks ready to invoke
 static int rcu_cblist_ready_cbs(rcu_cpu_data_t *rcp) {
-    if (rcp->cb_head == NULL) {
-        return 0;
-    }
-    return rcp->cb_tail[RCU_DONE_TAIL] != (rcu_head_t **)&(rcp->cb_head);
+    return __atomic_load_n(&rcp->ready_head, __ATOMIC_ACQUIRE) != NULL;
 }
 
-// Advance callback segments based on completed grace period timestamp
-static void rcu_advance_cbs(rcu_cpu_data_t *rcp, uint64 gp_completed) {
-    if (rcp->cb_head == NULL) {
-        return;
+// Dequeue all ready callbacks for invocation
+static rcu_head_t *rcu_cblist_dequeue(rcu_cpu_data_t *rcp) {
+    rcu_head_t *head = __atomic_load_n(&rcp->ready_head, __ATOMIC_ACQUIRE);
+    if (head == NULL) {
+        return NULL;
     }
-
-    // Move segments forward as grace periods complete
-    // WAIT_TAIL -> DONE_TAIL when their GP completes
-    if (rcp->gp_seq_needed[RCU_WAIT_TAIL] <= gp_completed) {
-        rcp->cb_tail[RCU_DONE_TAIL] = rcp->cb_tail[RCU_WAIT_TAIL];
-        rcp->gp_seq_needed[RCU_DONE_TAIL] = rcp->gp_seq_needed[RCU_WAIT_TAIL];
-    }
-
-    // NEXT_READY_TAIL -> WAIT_TAIL when GP starts
-    if (rcp->gp_seq_needed[RCU_NEXT_READY_TAIL] <= gp_completed) {
-        rcp->cb_tail[RCU_WAIT_TAIL] = rcp->cb_tail[RCU_NEXT_READY_TAIL];
-        rcp->gp_seq_needed[RCU_WAIT_TAIL] = gp_completed + 1;
-    }
-
-    // NEXT_TAIL -> NEXT_READY_TAIL
-    rcp->cb_tail[RCU_NEXT_READY_TAIL] = rcp->cb_tail[RCU_NEXT_TAIL];
-    rcp->gp_seq_needed[RCU_NEXT_READY_TAIL] = gp_completed + 2;
+    
+    // Take the entire ready list
+    __atomic_store_n(&rcp->ready_head, NULL, __ATOMIC_RELEASE);
+    __atomic_store_n(&rcp->ready_tail, NULL, __ATOMIC_RELEASE);
+    
+    return head;
 }
 
 // ============================================================================
@@ -548,23 +460,22 @@ static void rcu_advance_gp(void) {
 
     // Grace period complete - update completed counter
     uint64 gp_completed = __atomic_fetch_add(&rcu_state.gp_seq_completed, 1, __ATOMIC_ACQ_REL) + 1;
+    (void)gp_completed; // Used by per-CPU callback advancement
     __atomic_store_n(&rcu_state.gp_in_progress, 0, __ATOMIC_RELEASE);
     __atomic_fetch_add(&rcu_state.gp_count, 1, __ATOMIC_RELEASE);
 
     spin_release(&rcu_gp_lock);
 
-    // Advance callback segments based on completed grace period
-    spin_acquire(&rcu_cb_lock);
-    for (int i = 0; i < NCPU; i++) {
-        rcu_cpu_data_t *rcp = &rcu_state.cpu_data[i];
-        rcu_advance_cbs(rcp, gp_completed);
-    }
-    spin_release(&rcu_cb_lock);
+    // Note: Each CPU advances its own callbacks during rcu_process_callbacks()
+    // or rcu_note_context_switch(). We don't access other CPUs' data here.
 }
 
 // Note that current CPU has passed through a quiescent state
 // In timestamp-based RCU, this is called during context switches
 void rcu_note_context_switch(void) {
+    // Disable preemption to ensure we stay on the same CPU
+    push_off();
+    
     // Update CPU timestamp to current time
     int cpu = cpuid();
     struct cpu_local *mycpu_ptr = &cpus[cpu];
@@ -572,11 +483,17 @@ void rcu_note_context_switch(void) {
     __atomic_store_n(&mycpu_ptr->rcu_timestamp, now, __ATOMIC_RELEASE);
     
     // Update statistics
-    rcu_cpu_data_t *rcp = &rcu_state.cpu_data[cpu];
+    rcu_cpu_data_t *rcp = &rcu_cpu_data[cpu];
     __atomic_fetch_add(&rcp->qs_count, 1, __ATOMIC_RELEASE);
 
     // Try to advance grace period
     rcu_advance_gp();
+    
+    // Advance our own CPU's callbacks (protected by push_off)
+    uint64 gp_completed = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
+    rcu_advance_cbs(rcp, gp_completed);
+    
+    pop_off();
 }
 
 // Called by scheduler to check for quiescent states
@@ -594,24 +511,34 @@ void call_rcu(rcu_head_t *head, rcu_callback_t func, void *data) {
         return;
     }
 
-    int cpu = cpuid();
-    rcu_cpu_data_t *rcp = &rcu_state.cpu_data[cpu];
-
-    // Initialize callback
+    // Initialize callback before disabling preemption
     head->next = NULL;
     head->func = func;
     head->data = data;
 
-    // Add to per-CPU segmented callback list
-    spin_acquire(&rcu_cb_lock);
+    // Disable preemption to ensure we stay on the same CPU
+    push_off();
+    
+    int cpu = cpuid();
+    rcu_cpu_data_t *rcp = &rcu_cpu_data[cpu];
 
+    // Add to per-CPU pending callback list
     rcu_cblist_enqueue(rcp, head);
     __atomic_fetch_add(&rcp->cb_count, 1, __ATOMIC_RELEASE);
+    
+    // Set the GP sequence this callback is waiting for
+    // Callbacks need to wait for the NEXT grace period to complete
+    uint64 current_gp = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
+    uint64 pending_gp = __atomic_load_n(&rcp->pending_gp, __ATOMIC_ACQUIRE);
+    if (pending_gp == 0 || pending_gp <= current_gp) {
+        // Set to wait for next GP
+        __atomic_store_n(&rcp->pending_gp, current_gp + 1, __ATOMIC_RELEASE);
+    }
 
     // Update lazy callback counter
     int lazy_count = __atomic_fetch_add(&rcu_state.lazy_cb_count, 1, __ATOMIC_RELEASE);
 
-    spin_release(&rcu_cb_lock);
+    pop_off();
 
     // Start a grace period based on lazy threshold (Linux-inspired batching)
     // This reduces overhead by accumulating callbacks before starting GP
@@ -628,16 +555,23 @@ void call_rcu(rcu_head_t *head, rcu_callback_t func, void *data) {
 
 // Invoke callbacks that have completed their grace period
 // Uses batching to limit the number of callbacks invoked per call (Linux-inspired)
-static void rcu_invoke_callbacks(rcu_head_t *list) {
+// Returns the number of callbacks invoked
+static int rcu_invoke_callbacks(rcu_head_t *list) {
     rcu_head_t *cur = list;
-    uint64 count = 0;
+    int count = 0;
 
     while (cur != NULL) {
+        // Copy callback info BEFORE invoking, since callback may free the rcu_head
         rcu_head_t *next = cur->next;
+        rcu_callback_t func = cur->func;
+        void *data = cur->data;
 
-        // Invoke the callback
-        if (cur->func != NULL) {
-            cur->func(cur->data);
+        // Detach this node from the list before invoking callback
+        cur->next = NULL;
+
+        // Invoke the callback - after this, cur may be freed
+        if (func != NULL) {
+            func(data);
             count++;
         }
 
@@ -650,37 +584,36 @@ static void rcu_invoke_callbacks(rcu_head_t *list) {
     }
 
     __atomic_fetch_add(&rcu_state.cb_invoked, count, __ATOMIC_RELEASE);
+    return count;
 }
 
 // Process completed RCU callbacks
 void rcu_process_callbacks(void) {
+    // Disable preemption to ensure we stay on the same CPU
+    push_off();
+    
     int cpu = cpuid();
-    rcu_cpu_data_t *rcp = &rcu_state.cpu_data[cpu];
+    rcu_cpu_data_t *rcp = &rcu_cpu_data[cpu];
+
+    // First, advance our callback segments based on completed grace periods
+    uint64 gp_completed = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
+    rcu_advance_cbs(rcp, gp_completed);
 
     // Check if there are ready callbacks using segmented list
     if (!rcu_cblist_ready_cbs(rcp)) {
+        pop_off();
         return;
     }
 
     // Get callbacks to process from DONE segment
-    spin_acquire(&rcu_cb_lock);
     rcu_head_t *done_list = rcu_cblist_dequeue(rcp);
+    
+    pop_off();
 
-    // Update callback count
+    // Invoke callbacks outside the critical section
     if (done_list != NULL) {
-        // Count callbacks in the list
-        int count = 0;
-        for (rcu_head_t *p = done_list; p != NULL; p = p->next) {
-            count++;
-        }
+        int count = rcu_invoke_callbacks(done_list);
         __atomic_fetch_sub(&rcp->cb_count, count, __ATOMIC_RELEASE);
-    }
-
-    spin_release(&rcu_cb_lock);
-
-    // Invoke callbacks outside the lock
-    if (done_list != NULL) {
-        rcu_invoke_callbacks(done_list);
         __atomic_fetch_add(&rcp->cb_invoked, 1, __ATOMIC_RELEASE);
     }
 }
@@ -719,25 +652,20 @@ void synchronize_rcu(void) {
         // Try to advance grace period ourselves
         rcu_advance_gp();
 
-        // Sleep on the wait queue if kthread is running, otherwise yield
-        int kthread_active = __atomic_load_n(&rcu_gp_kthread_running, __ATOMIC_ACQUIRE);
-        if (kthread_active) {
-            spin_acquire(&rcu_gp_waitq_lock);
-            // Double-check before sleeping
-            current_gp = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
-            if (current_gp > start_gp_count) {
-                spin_release(&rcu_gp_waitq_lock);
-                __atomic_store_n(&rcu_state.gp_lazy_start, old_lazy, __ATOMIC_RELEASE);
-                return;
-            }
-            // Wait on the queue (will release lock while sleeping)
-            proc_queue_wait(&rcu_gp_waitq, &rcu_gp_waitq_lock, NULL);
+        // Sleep on the wait queue - idle loops will wake us up
+        // The idle loop on each CPU calls rcu_idle_enter() which advances
+        // grace periods and wakes waiters
+        spin_acquire(&rcu_gp_waitq_lock);
+        // Double-check before sleeping
+        current_gp = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
+        if (current_gp > start_gp_count) {
             spin_release(&rcu_gp_waitq_lock);
-        } else {
-            // In polling mode, update our timestamp and yield to allow other work
-            rcu_note_context_switch();
-            yield();
+            __atomic_store_n(&rcu_state.gp_lazy_start, old_lazy, __ATOMIC_RELEASE);
+            return;
         }
+        // Wait on the queue (will release lock while sleeping)
+        proc_queue_wait(&rcu_gp_waitq, &rcu_gp_waitq_lock, NULL);
+        spin_release(&rcu_gp_waitq_lock);
 
         wait_count++;
     }
@@ -757,7 +685,7 @@ void rcu_barrier(void) {
 
     // Process any remaining callbacks
     for (int i = 0; i < NCPU; i++) {
-        rcu_cpu_data_t *rcp = &rcu_state.cpu_data[i];
+        rcu_cpu_data_t *rcp = &rcu_cpu_data[i];
 
         // Wait for callback count to reach zero
         int max_wait = 100000;

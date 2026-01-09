@@ -15,31 +15,42 @@ typedef struct rcu_head {
     void                *data;          // Data to pass to callback
 } rcu_head_t;
 
-// RCU callback segmentation (Linux-style 4-segment approach)
-// Segments progress through grace period stages for efficient batching
-#define RCU_NEXT_READY_TAIL     0  // Callbacks ready for next GP
-#define RCU_NEXT_TAIL           1  // Callbacks for GP after next
-#define RCU_WAIT_TAIL           2  // Callbacks waiting for current GP
-#define RCU_DONE_TAIL           3  // Callbacks ready to invoke
-#define RCU_CBLIST_NSEGS        4
+// Simplified callback list approach:
+// Instead of complex 4-segment lists, use a simple two-list design:
+// 1. pending_head/pending_tail: callbacks waiting for a grace period to complete
+// 2. ready_head/ready_tail: callbacks ready to invoke (their GP completed)
+// This avoids the complexity and bugs of maintaining segment pointers
+// that can point into freed memory.
+
+// Cache line size for alignment (typical RISC-V cache line)
+#define RCU_CACHE_LINE_SIZE 64
 
 // Per-CPU RCU data structure
+// Aligned to cache line to prevent false sharing between CPUs
 typedef struct {
     // Timestamp when this CPU last context switched (stored in cpu_local->rcu_timestamp)
     // Used for grace period detection - all CPUs must have context switched after grace period start
     // We don't store timestamp here, we read it from mycpu()->rcu_timestamp
     
-    // Segmented callback lists (Linux-inspired 4-segment design)
-    // All callbacks in a single list, with pointers to segment boundaries
-    rcu_head_t          *cb_head;                        // Head of callback list
-    rcu_head_t          **cb_tail[RCU_CBLIST_NSEGS];     // Tail pointers (ptr to ptr) for each segment
-    uint64              gp_seq_needed[RCU_CBLIST_NSEGS]; // GP seq needed for each segment
+    // Simple two-list callback design:
+    // - pending list: callbacks registered, waiting for a GP to complete
+    // - ready list: callbacks whose GP has completed, ready to invoke
+    // Access is protected by push_off()/pop_off() to ensure CPU-local exclusivity
+    
+    // Pending callbacks (waiting for GP)
+    rcu_head_t * _Atomic pending_head;
+    rcu_head_t * _Atomic pending_tail;
+    _Atomic uint64       pending_gp;    // GP sequence these callbacks are waiting for
+    
+    // Ready callbacks (GP completed, ready to invoke)
+    rcu_head_t * _Atomic ready_head;
+    rcu_head_t * _Atomic ready_tail;
 
     // Statistics
-    _Atomic uint64      cb_count;       // Number of callbacks pending
+    _Atomic uint64      cb_count;       // Number of callbacks pending (in both lists)
     _Atomic uint64      qs_count;       // Number of quiescent states reported
     _Atomic uint64      cb_invoked;     // Number of callbacks invoked on this CPU
-} rcu_cpu_data_t;
+} __attribute__((aligned(RCU_CACHE_LINE_SIZE))) rcu_cpu_data_t;
 
 // Global RCU state structure
 typedef struct {
@@ -63,13 +74,14 @@ typedef struct {
     // Waiting processes for synchronize_rcu() (for sleep/wakeup optimization)
     void                *gp_wait_queue;  // Will be cast to appropriate wait structure
 
-    // Per-CPU RCU data
-    rcu_cpu_data_t      cpu_data[NCPU];
-
     // Global statistics
     _Atomic uint64      gp_count;       // Total grace periods completed
     _Atomic uint64      cb_invoked;     // Total callbacks invoked
     _Atomic uint64      expedited_count; // Number of expedited GPs
 } rcu_state_t;
+
+// Per-CPU RCU data - declared separately to ensure cache-line alignment per CPU
+// Each CPU's data is in its own cache line to prevent false sharing
+extern rcu_cpu_data_t rcu_cpu_data[NCPU];
 
 #endif /* __KERNEL_RCU_TYPE_H */

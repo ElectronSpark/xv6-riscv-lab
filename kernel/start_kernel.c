@@ -87,8 +87,36 @@ void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
     printf("hart %d initialized. intr_sp: %p\n", hartid, (void*)mycpu()->intr_sp);
 
     // Now we are in idle process context. Just yield to scheduler.
+    //
+    // RCU PROCESSING IN IDLE LOOP:
+    // Each CPU handles its own RCU work in the idle loop rather than using a
+    // dedicated RCU GP kthread. This design has several advantages:
+    //
+    // 1. Per-CPU locality: Each CPU processes only its own callback list,
+    //    avoiding cross-CPU synchronization and cache line bouncing.
+    //
+    // 2. Natural quiescent states: The idle loop is a natural quiescent state
+    //    for RCU - when a CPU is idle, it's guaranteed not to be in an RCU
+    //    read-side critical section.
+    //
+    // 3. No extra scheduling overhead: The idle process runs when no other
+    //    work is available, so RCU processing doesn't compete with real work.
+    //
+    // 4. Simpler synchronization: Using push_off()/pop_off() within the idle
+    //    context provides CPU-local exclusivity without additional locks.
+    //
+    // The rcu_idle_enter() function:
+    //   - Updates CPU timestamp (marks quiescent state)
+    //   - Checks/normalizes timestamps for overflow prevention
+    //   - Starts grace periods if callbacks are pending
+    //   - Advances grace period state
+    //   - Processes ready callbacks for this CPU
+    //   - Wakes up synchronize_rcu() waiters
+    //
     for (;;) {
         scheduler_yield();
+        // Per-CPU RCU processing: advance grace periods, process callbacks
+        rcu_idle_enter();
         intr_on();
         asm volatile("wfi");
         intr_off();
@@ -111,8 +139,8 @@ void start_kernel_post_init(void) {
     // Set up root directory for init process (must be after vfs_init)
     install_user_root();
 
-    // Start the RCU GP kthread for background grace period processing
-    rcu_gp_kthread_start();
+    // RCU processing is done per-CPU in the idle loop (see start_kernel()).
+    // No dedicated kthread is needed.
 
 #ifdef RWAD_WRITE_TEST
     // forward decl for rwlock tests
@@ -133,11 +161,8 @@ void start_kernel_post_init(void) {
     sbi_start_secondary_harts((unsigned long)_entry);
     sleep_ms(1000);
 
-    // Start the RCU GP kthread before running RCU tests
-    rcu_gp_kthread_start();
-    // sleep_ms(100); // Give kthread time to start
-    
-    // rcu_run_tests();
+    // RCU processing is now done per-CPU in idle loops
+    rcu_run_tests();
     
     // Run device table stress tests
     // dev_table_test();

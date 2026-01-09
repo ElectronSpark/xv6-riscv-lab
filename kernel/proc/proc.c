@@ -18,6 +18,7 @@
 #include "vm.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
+#include "rcu.h"
 
 #define NPROC_HASH_BUCKETS 31
 
@@ -313,30 +314,48 @@ void idle_proc_init(void) {
   printf("CPU %ld idle process initialized at kstack 0x%lx\n", cpuid(), (uint64)kstack);
 }
 
+// RCU callback to free proc kernel stack after grace period
+// IMPORTANT: Read all needed values from proc BEFORE calling page_free,
+// since page_free will free the memory containing the proc structure.
+static void freeproc_rcu_callback(void *data) {
+  struct proc *p = (struct proc *)data;
+  // Copy kstack info to local variables BEFORE freeing
+  uint64 kstack_addr = p->kstack;
+  int kstack_order = p->kstack_order;
+  // Now free the kernel stack - proc structure is gone after this, never access p again
+  page_free((void *)kstack_addr, kstack_order);
+}
+
 // free a proc structure and the data hanging from it,
 // including user pages.
-// p->lock must not be held.
+// p->lock must not be held on entry.
 STATIC void
 freeproc(struct proc *p)
 {
   assert(p != NULL, "freeproc called with NULL proc");
+  proc_lock(p);
   assert(!PROC_AWOKEN(p), "freeproc called with a runnable proc");
   assert(!PROC_SLEEPING(p), "freeproc called with a sleeping proc");
   assert(p->kstack_order >= 0 && p->kstack_order <= PAGE_BUDDY_MAX_ORDER,
             "freeproc: invalid kstack_order %d", p->kstack_order);
-  proctab_proc_remove(p);
   
   if(p->sigacts)
-  sigacts_free(p->sigacts);
+    sigacts_free(p->sigacts);
   if (p->vm != NULL) {
     proc_freepagetable(p);
   }
   // Purge any remaining pending signals (e.g., SIGKILL) before destroy assertions.
   sigpending_empty(p, 0);
   sigpending_destroy(p);
+  
+  // Remove from process table (requires proc lock to be held)
+  proctab_proc_remove(p);
+  
   proc_unlock(p);
 
-  page_free((void *)p->kstack, p->kstack_order);
+  // Defer freeing of the kernel stack until after the RCU grace period.
+  // This ensures all RCU readers have finished accessing the proc structure.
+  call_rcu(&p->rcu_head, freeproc_rcu_callback, p);
 }
 
 // Create a user page table for a given process, with no user memory,

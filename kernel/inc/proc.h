@@ -11,6 +11,7 @@
 #include "vfs/vfs_types.h"
 #include "atomic.h"
 #include "percpu.h"
+#include "rcu_type.h"
 
 struct vfs_inode;
 
@@ -139,6 +140,9 @@ struct proc {
   // It tracks how many times this process has called rcu_read_lock() without matching
   // rcu_read_unlock(). The process can safely yield and migrate CPUs while this is > 0.
   int rcu_read_lock_nesting;   // Number of nested rcu_read_lock() calls
+
+  // RCU deferred freeing - rcu_head must be last since callback frees the kstack
+  rcu_head_t rcu_head;         // RCU callback head (must be last)
 };
 
 BUILD_BUG_ON((sizeof(struct proc) + sizeof(struct utrapframe) + sizeof(struct fs_struct) + sizeof(struct vfs_fdtable) + 64) >= PGSIZE);

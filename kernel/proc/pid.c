@@ -20,6 +20,7 @@
 #include "vm.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
+#include "rcu.h"
 
 static struct {
     struct {
@@ -122,21 +123,24 @@ void __proctab_proc_add_locked(struct proc *p) {
     assert(LIST_ENTRY_IS_DETACHED(&p->dmp_list_entry),
             "Process %d is already in the dump list", p->pid);
 
-    struct proc *existing = hlist_put(&proc_table.procs, p, false);
+    // Use RCU-safe insertion for concurrent readers
+    struct proc *existing = hlist_put_rcu(&proc_table.procs, p, false);
 
     assert(existing != p, "Failed to add process with pid %d", p->pid);
     assert(existing == NULL, "Process with pid %d already exists", p->pid);
-    // Add to the global list of processes for dumping.
-    list_entry_push_back(&proc_table.procs_list, &p->dmp_list_entry);
+    // Add to the global list of processes for dumping (RCU-safe).
+    list_entry_add_tail_rcu(&proc_table.procs_list, &p->dmp_list_entry);
 }
 
+// RCU-safe version: get a PCB by pid without holding locks.
+// Caller MUST be within rcu_read_lock()/rcu_read_unlock() critical section.
+// The returned pointer is only valid within the RCU critical section.
 int proctab_get_pid_proc(int pid, struct proc **pp) {
     if (!pp) {
         return -1; // Invalid argument
     }
-    __proctab_lock();
-    struct proc *p = __proctab_get_pid_proc_locked(pid);
-    __proctab_unlock();
+    struct proc dummy = { .pid = pid };
+    struct proc *p = hlist_get_rcu(&proc_table.procs, &dummy);
     *pp = p;
     return 0;
 }
@@ -148,36 +152,38 @@ void proctab_proc_add(struct proc *p) {
 }
 
 void proctab_proc_remove(struct proc *p) {
+    // Caller must hold p->lock
+    proc_assert_holding(p);
+    
     __proctab_lock();
-    proc_lock(p);
-    struct proc *existing = hlist_pop(&proc_table.procs, p);
-    // Remove from the global list of processes for dumping.
-    list_entry_detach(&p->dmp_list_entry);
+    // Use RCU-safe removal for concurrent readers
+    struct proc *existing = hlist_pop_rcu(&proc_table.procs, p);
+    // Remove from the global list of processes for dumping (RCU-safe).
+    list_entry_del_init_rcu(&p->dmp_list_entry);
     __proctab_unlock();
     
     assert(existing == NULL || existing == p, "freeproc called with a different proc");
+    
+    // Note: Caller must call synchronize_rcu() or use call_rcu() before freeing
+    // the proc structure, to ensure all RCU readers have finished accessing it.
 }
 
 // Print a process listing to console.  For debugging.
 // Runs when user types ^P on console.
-// No lock to avoid wedging a stuck machine further.
+// Uses RCU for lock-free iteration to avoid wedging a stuck machine.
 void procdump(void) {
     struct proc *p;
     const char *state;
     int _panic_state = panic_state();
-    int idx;
-    hlist_bucket_t *bucket;
-    hlist_entry_t *pos_entry, *tmp;
 
     printf("Process List:\n");
     if (!_panic_state)
     {
-        __proctab_lock();
+        rcu_read_lock();
     }
 
-    // list_foreach_node_safe(&proc_table.procs_list, p, tmp, dmp_list_entry) {
-    hlist_foreach_entry(&proc_table.procs, idx, bucket, pos_entry, tmp) {
-        p = __proctab_hash_get_node(pos_entry);
+    // Use RCU-safe iteration for concurrent access
+    hlist_foreach_node_rcu(&proc_table.procs, p, proctab_entry) {
         proc_lock(p);
         enum procstate pstate = __proc_get_pstate(p);
         int pid = p->pid;
@@ -201,7 +207,7 @@ void procdump(void) {
 
     if (!_panic_state)
     {
-        __proctab_unlock();
+        rcu_read_unlock();
     }
 }
 
@@ -219,21 +225,19 @@ static bool __proc_is_on_cpu(struct proc *p) {
 
 // Dump backtraces of all blocked (sleeping) processes.
 // This is useful for debugging deadlocks.
+// Uses RCU for lock-free iteration.
 void procdump_bt(void) {
     struct proc *p;
     int _panic_state = panic_state();
-    int idx;
-    hlist_bucket_t *bucket;
-    hlist_entry_t *pos_entry, *tmp;
 
     printf("\n=== Blocked Process Backtraces ===\n");
     if (!_panic_state)
     {
-        __proctab_lock();
+        rcu_read_lock();
     }
 
-    hlist_foreach_entry(&proc_table.procs, idx, bucket, pos_entry, tmp) {
-        p = __proctab_hash_get_node(pos_entry);
+    // Use RCU-safe iteration for concurrent access
+    hlist_foreach_node_rcu(&proc_table.procs, p, proctab_entry) {
         proc_lock(p);
         enum procstate pstate = __proc_get_pstate(p);
         int pid = p->pid;
@@ -261,25 +265,28 @@ void procdump_bt(void) {
 
     if (!_panic_state)
     {
-        __proctab_unlock();
+        rcu_read_unlock();
     }
 }
 
 // Backtrace a specific process by PID
+// Uses RCU for lock-free lookup.
 void procdump_bt_pid(int pid) {
     struct proc *p = NULL;
     int _panic_state = panic_state();
 
     if (!_panic_state)
     {
-        __proctab_lock();
+        rcu_read_lock();
     }
 
-    p = __proctab_get_pid_proc_locked(pid);
+    // Use RCU-safe lookup
+    struct proc dummy = { .pid = pid };
+    p = hlist_get_rcu(&proc_table.procs, &dummy);
     if (p == NULL) {
         printf("Process %d not found\n", pid);
         if (!_panic_state) {
-        __proctab_unlock();
+        rcu_read_unlock();
         }
         return;
     }
@@ -306,7 +313,7 @@ void procdump_bt_pid(int pid) {
 
     if (!_panic_state)
     {
-        __proctab_unlock();
+        rcu_read_unlock();
     }
 }
 
@@ -357,6 +364,7 @@ static void __procdump_tree_recursive(struct proc *p, int depth) {
 
 // Print process tree based on parent-child relationships.
 // Shows the hierarchical structure starting from init process.
+// Uses RCU for lock-free access to initproc.
 void procdump_tree(void) {
     struct proc *initproc;
     int _panic_state = panic_state();
@@ -364,14 +372,14 @@ void procdump_tree(void) {
     printf("Process Tree:\n");
     
     if (!_panic_state) {
-        __proctab_lock();
+        rcu_read_lock();
     }
     
     initproc = __proctab_get_initproc();
     if (initproc == NULL) {
         printf("No init process\n");
         if (!_panic_state) {
-        __proctab_unlock();
+        rcu_read_unlock();
         }
         return;
     }
@@ -379,7 +387,7 @@ void procdump_tree(void) {
     __procdump_tree_recursive(initproc, 0);
     
     if (!_panic_state) {
-        __proctab_unlock();
+        rcu_read_unlock();
     }
 }
 
