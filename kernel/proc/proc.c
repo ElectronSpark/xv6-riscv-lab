@@ -18,10 +18,6 @@
 #include "vfs/fs.h"
 #include "vfs/file.h"
 
-// Per-CPU state, placed in special linker section for trampoline access
-__attribute__((section("cpu_local_sec"), aligned(4096)))
-struct cpu_local cpus[NCPU] = {0};
-
 #define NPROC_HASH_BUCKETS 31
 
 // Lock order for proc:
@@ -302,60 +298,6 @@ procinit(void)
   __proctab_init();
 }
 
-// Return this CPU's cpu struct.
-// Interrupts must be disabled.
-struct cpu_local*
-mycpu(void)
-{
-  struct cpu_local *c =  (void *)r_tp();
-  return c;
-}
-
-// Must be called with interrupts disabled,
-// to prevent race with process being moved
-// to a different CPU.
-int
-cpuid()
-{
-  // Calculate cpuid from offset within page, works for both physical and virtual addresses
-  struct cpu_local *offset = (void *)(r_tp() & PAGE_MASK);
-  return offset - (struct cpu_local *)0;
-}
-
-void
-cpus_init(void)
-{
-  memset(cpus, 0, sizeof(cpus));
-}
-
-void
-mycpu_init(uint64 hartid, bool trampoline)
-{
-  if (trampoline) {
-    // Convert physical address to virtual address in trampoline region
-    // Keep the offset within the page, but change to TRAMPOLINE_CPULOCAL base
-    uint64 offset = (uint64)&cpus[hartid] & PAGE_MASK;
-    uint64 c = TRAMPOLINE_CPULOCAL + offset;
-    w_tp(c);
-    printf("hart %ld mycpu_init: setting tp to %p - %p\n", hartid, (void *)c, (void *)(c + sizeof(struct cpu_local)));
-  } else {
-    struct cpu_local *c = &cpus[hartid];
-    w_tp((uint64)c);
-    printf("hart %ld mycpu_init: setting tp to %p - %p\n", hartid, (void *)c, (void *)((uint64)c + sizeof(struct cpu_local)));
-  }
-}
-
-// Return the current struct proc *, or zero if none.
-struct proc*
-myproc(void)
-{
-  push_off();
-  struct cpu_local *c = mycpu();
-  struct proc *p = c->proc;
-  pop_off();
-  return p;
-}
-
 // attach a newly forked process to the current process as its child.
 // This function is called by fork() to set up the parent-child relationship.
 // caller must hold the lock of its process (the parent) and the lock of the new process (the child).
@@ -526,7 +468,7 @@ void idle_proc_init(void) {
   smp_store_release(&p->on_rq, 1);
   smp_store_release(&p->cpu_id, cpuid());
 
-  printf("CPU %d idle process initialized at kstack 0x%lx\n", cpuid(), (uint64)kstack);
+  printf("CPU %ld idle process initialized at kstack 0x%lx\n", cpuid(), (uint64)kstack);
 }
 
 // free a proc structure and the data hanging from it,

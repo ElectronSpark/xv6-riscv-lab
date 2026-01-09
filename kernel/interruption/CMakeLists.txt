@@ -3,7 +3,6 @@ set(INTERRUPTION_C_SRCS
     plic.c
     syscall.c
     irq.c
-    ipi.c
 )
 
 set(INTERRUPTION_S_SRCS

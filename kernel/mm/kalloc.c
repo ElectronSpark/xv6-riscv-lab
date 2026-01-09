@@ -13,6 +13,7 @@
 #include "page.h"
 #include "slab.h"
 #include "bits.h"
+#include "percpu.h"
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.

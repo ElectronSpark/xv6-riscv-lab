@@ -8,6 +8,7 @@ set(PROC_C_SRCS
     workqueue.c
     timer.c
     sched_timer.c
+    thread.c
 )
 
 set(PROC_S_SRCS

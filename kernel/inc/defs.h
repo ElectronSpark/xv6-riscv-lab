@@ -77,7 +77,6 @@ int             pipewrite_kernel(struct pipe*, const char*, int);
 
 // proc.c
 int             proctab_get_pid_proc(int pid, struct proc **pp);
-int             cpuid(void);
 void            exit(int);
 int             fork(void);
 int             kernel_proc_create(const char *name, struct proc **retp, void *entry,
@@ -91,10 +90,6 @@ int             killed(struct proc*);
 void            proc_lock(struct proc *p);
 void            proc_unlock(struct proc *p);
 void            proc_assert_holding(struct proc *p);
-void            cpus_init(void);
-void            mycpu_init(uint64 hartid, bool trampoline);
-struct cpu_local*     mycpu(void);
-struct proc*    myproc();
 void            procinit(void);
 void            sched(void);
 void            userinit(void);
@@ -119,8 +114,6 @@ void            spin_acquire(struct spinlock*);
 int             spin_holding(struct spinlock*);
 void            spin_init(struct spinlock*, char*);
 void            spin_release(struct spinlock*);
-void            push_off(void);
-void            pop_off(void);
 
 // sleeplock.c
 int             mutex_lock(mutex_t*);

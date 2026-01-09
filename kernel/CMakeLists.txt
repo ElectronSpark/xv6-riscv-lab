@@ -88,6 +88,7 @@ add_subdirectory(${KERNEL_DIR}/lock)
 add_subdirectory(${KERNEL_DIR}/mm)
 add_subdirectory(${KERNEL_DIR}/proc)
 add_subdirectory(${KERNEL_DIR}/vfs)
+add_subdirectory(${KERNEL_DIR}/ipi)
 
 set_source_files_properties(${KERNEL_C_FILES} PROPERTIES LANGUAGE C)
 set_source_files_properties(${KERNEL_SCAN_OBJS} PROPERTIES LANGUAGE C)
@@ -117,6 +118,7 @@ target_sources(${KERNEL_BINARY} PRIVATE
     $<TARGET_OBJECTS:vfs_core>
     $<TARGET_OBJECTS:vfs_tmpfs>
     $<TARGET_OBJECTS:vfs_xv6fs>
+    $<TARGET_OBJECTS:ipi>
 )
 
 # Use target_link_options to set linker flags so they appear in <LINK_FLAGS>

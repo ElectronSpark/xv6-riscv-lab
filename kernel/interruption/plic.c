@@ -4,6 +4,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
+#include "percpu.h"
 
 //
 // the riscv Platform Level Interrupt Controller (PLIC).

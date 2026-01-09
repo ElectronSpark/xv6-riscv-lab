@@ -3,6 +3,7 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "defs.h"
+#include "percpu.h"
 #include "printf.h"
 #include "sched.h"
 #include "signal.h"

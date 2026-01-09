@@ -6,6 +6,7 @@
 #include "spinlock.h"
 #include "riscv.h"
 #include "proc.h"
+#include "percpu.h"
 #include "defs.h"
 #include "printf.h"
 
@@ -83,32 +84,4 @@ spin_holding(struct spinlock *lk)
     return 0;
   }
   return 1;
-}
-
-// push_off/pop_off are like intr_off()/intr_on() except that they are matched:
-// it takes two pop_off()s to undo two push_off()s.  Also, if interrupts
-// are initially off, then push_off, pop_off leaves them off.
-
-void
-push_off(void)
-{
-  int old = intr_get();
-
-  if (old) {
-    intr_off();
-  }
-  if(mycpu()->noff++ == 0) {
-    mycpu()->intena = old;
-  }
-}
-
-void
-pop_off(void)
-{
-  struct cpu_local *c = mycpu();
-  assert(!intr_get(), "pop_off - interruptible");
-  assert(c->noff >= 1, "pop_off");
-  c->noff -= 1;
-  if(c->noff == 0 && c->intena)
-    intr_on();
 }

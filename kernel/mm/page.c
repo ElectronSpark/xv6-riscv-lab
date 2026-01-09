@@ -53,6 +53,7 @@
 #include "page.h"
 #include "page_private.h"
 #include "slab.h"
+#include "percpu.h"
 
 
 // ============================================================================

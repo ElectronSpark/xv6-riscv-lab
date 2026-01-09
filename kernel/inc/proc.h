@@ -10,33 +10,9 @@
 #include "vm_types.h"
 #include "vfs/vfs_types.h"
 #include "atomic.h"
+#include "percpu.h"
 
 struct vfs_inode;
-
-extern struct cpu_local cpus[NCPU];
-
-#define CPU_FLAG_NEEDS_RESCHED  1
-#define CPU_FLAG_BOOT_HART      2
-#define CPU_FLAG_IN_ITR         4
-
-#define SET_NEEDS_RESCHED() \
-  do { mycpu()->flags |= CPU_FLAG_NEEDS_RESCHED; } while(0)
-#define CLEAR_NEEDS_RESCHED() \
-  do { mycpu()->flags &= ~CPU_FLAG_NEEDS_RESCHED; } while(0)
-#define NEEDS_RESCHED() \
-  (!!(mycpu()->flags & CPU_FLAG_NEEDS_RESCHED))
-#define CPU_SET_IN_ITR() \
-  do { mycpu()->flags |= CPU_FLAG_IN_ITR; } while(0)
-#define CPU_CLEAR_IN_ITR() \
-  do { mycpu()->flags &= ~CPU_FLAG_IN_ITR; } while(0)
-#define CPU_IN_ITR() \
-  (!!(mycpu()->flags & CPU_FLAG_IN_ITR))
-#define SET_BOOT_HART() \
-  do { mycpu()->flags |= CPU_FLAG_BOOT_HART; } while(0)
-#define CLEAR_BOOT_HART() \
-  do { mycpu()->flags &= ~CPU_FLAG_BOOT_HART; } while(0)
-#define IS_BOOT_HART() \
-  (!!(mycpu()->flags & CPU_FLAG_BOOT_HART))
 
 enum procstate {
   PSTATE_UNUSED,

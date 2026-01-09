@@ -7,6 +7,7 @@
 
 #include "types.h"
 #include "param.h"
+#include "memlayout.h"
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
@@ -16,6 +17,12 @@
 #include "ipi.h"
 #include "errno.h"
 #include "proc.h"
+#include "percpu.h"
+#include "string.h"
+
+// Per-CPU state, placed in special linker section for trampoline access
+__attribute__((section("cpu_local_sec"), aligned(4096)))
+struct cpu_local cpus[NCPU] = {0};
 
 // IRQ number for supervisor software interrupt
 #define IRQ_S_SOFT  1
@@ -272,3 +279,29 @@ void ipi_secondary_send_to_boot(void) {
         printf("[IPI] Hart %d failed to send IPI: %ld\n", hartid, ret);
     }
 }
+
+void cpus_init(void) {
+    memset(cpus, 0, sizeof(cpus));
+}
+
+void mycpu_init(uint64 hartid, bool trampoline) {
+  if (trampoline) {
+    // Convert physical address to virtual address in trampoline region
+    // Keep the offset within the page, but change to TRAMPOLINE_CPULOCAL base
+    uint64 offset = (uint64)&cpus[hartid] & PAGE_MASK;
+    uint64 c = TRAMPOLINE_CPULOCAL + offset;
+    w_tp(c);
+    printf("hart %ld mycpu_init: setting tp to %p - %p\n", 
+            hartid, 
+            (void *)c, 
+            (void *)(c + sizeof(struct cpu_local)));
+  } else {
+    struct cpu_local *c = &cpus[hartid];
+    w_tp((uint64)c);
+    printf("hart %ld mycpu_init: setting tp to %p - %p\n", 
+            hartid, 
+            (void *)c, 
+            (void *)((uint64)c + sizeof(struct cpu_local)));
+  }
+}
+

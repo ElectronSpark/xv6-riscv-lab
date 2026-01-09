@@ -42,6 +42,7 @@
 #include "vm.h"
 #include "slab.h"
 #include "proc.h"
+#include "percpu.h"
 
 static slab_cache_t __vma_pool = {0};
 static slab_cache_t __vm_pool = {0};
@@ -214,7 +215,7 @@ kvminithart()
   
   // flush stale entries from the TLB.
   sfence_vma();
-  printf("hart %d switched to kernel page table, satp: %lx\n", cpuid(), trampoline_ksatp);
+  printf("hart %ld switched to kernel page table, satp: %lx\n", cpuid(), trampoline_ksatp);
 }
 
 /*

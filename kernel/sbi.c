@@ -12,9 +12,8 @@
 #include "param.h"
 #include "sbi.h"
 #include "printf.h"
+#include "percpu.h"
 
-// Forward declaration to avoid pulling in proc.h
-int cpuid(void);
 
 // Generic SBI ecall - S-mode kernel uses ecall to invoke SBI services
 struct sbiret sbi_ecall(int ext, int fid, unsigned long arg0,
