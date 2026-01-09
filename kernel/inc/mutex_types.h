@@ -2,7 +2,7 @@
 #define __KERNEL_MUTEX_TYPES_H
 
 #include "compiler.h"
-#include "proc_queue_type.h"
+#include "proc/proc_queue_type.h"
 
 // Long-term locks for processes
 typedef struct mutex {

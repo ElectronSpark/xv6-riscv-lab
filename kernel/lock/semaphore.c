@@ -7,9 +7,9 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "percpu.h"
-#include "proc.h"
-#include "proc_queue.h"
-#include "sched.h"
+#include "proc/proc.h"
+#include "proc/proc_queue.h"
+#include "proc/sched.h"
 #include "semaphore.h"
 
 static int __sem_value_inc(sem_t *sem) {

@@ -2,7 +2,7 @@
 #define __KERNEL_COMPLETION_TYPES_H
 
 #include <types.h>
-#include <proc_queue_type.h>
+#include <proc/proc_queue_type.h>
 
 typedef struct {
     int done;

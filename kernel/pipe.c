@@ -11,11 +11,11 @@
 #include "printf.h"
 #include "param.h"
 #include "spinlock.h"
-#include "proc.h"
+#include "proc/proc.h"
 #include "mutex_types.h"
 #include "pipe.h"
 #include "vm.h"
-#include "sched.h"
+#include "proc/sched.h"
 
 void
 pipeclose(struct pipe *pi, int writable)

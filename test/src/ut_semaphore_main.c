@@ -9,8 +9,8 @@
 #include "errno.h"
 #include "list.h"
 #include "semaphore.h"
-#include "proc.h"
-#include "sched.h"
+#include "proc/proc.h"
+#include "proc/sched.h"
 #include "wrapper_tracking.h"
 
 // Fake runtime observers for host testing

@@ -5,9 +5,9 @@
 #include "param.h"
 #include "memlayout.h"
 #include "spinlock.h"
-#include "proc.h"
+#include "proc/proc.h"
 #include "timer.h"
-#include "sched.h"
+#include "proc/sched.h"
 
 uint64
 sys_exit(void)

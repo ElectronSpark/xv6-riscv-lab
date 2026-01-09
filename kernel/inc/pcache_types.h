@@ -11,7 +11,7 @@
 #include "kobject.h"
 #include "completion_types.h"
 #include "dev_types.h"
-#include "workqueue_types.h"
+#include "proc/workqueue_types.h"
 
 
 typedef struct page_struct page_t;

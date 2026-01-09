@@ -2,8 +2,8 @@
  * Scheduler wrappers for unit tests
  */
 #include "types.h"
-#include "proc.h"
-#include "sched.h"
+#include "proc/proc.h"
+#include "proc/sched.h"
 #include "spinlock.h"
 
 void __wrap_sched_lock(void) {

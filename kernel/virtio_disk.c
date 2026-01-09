@@ -19,7 +19,7 @@
 #include "blkdev.h"
 #include "page.h"
 #include "errno.h"
-#include "sched.h"
+#include "proc/sched.h"
 #include "completion.h"
 #include "trap.h"
 #include "freelist.h"

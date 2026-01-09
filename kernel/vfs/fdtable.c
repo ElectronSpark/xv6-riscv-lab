@@ -9,7 +9,7 @@
 #include "vfs/stat.h"
 #include "vfs/fcntl.h"
 #include "spinlock.h"
-#include "proc.h"
+#include "proc/proc.h"
 #include "mutex_types.h"
 #include "rwlock.h"
 #include "vfs/fs.h"

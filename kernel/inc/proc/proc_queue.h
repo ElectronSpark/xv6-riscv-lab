@@ -1,7 +1,7 @@
 #ifndef KERNEL_PROC_QUEUE_H
 #define KERNEL_PROC_QUEUE_H
 
-#include "proc_queue_type.h"
+#include "proc/proc_queue_type.h"
 #include "list.h"
 
 // Traverse the process queue without locking

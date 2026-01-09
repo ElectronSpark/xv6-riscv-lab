@@ -3,10 +3,10 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
-#include "proc.h"
+#include "proc/proc.h"
 #include "signal.h"
 #include "syscall.h"
-#include "sched.h"
+#include "proc/sched.h"
 
 uint64 sys_sigprocmask(void) {
     int how;

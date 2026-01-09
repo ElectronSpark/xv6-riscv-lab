@@ -22,10 +22,10 @@
 // Note: pagetable_t is defined in riscv.h, don't redefine it here
 
 #include "percpu_types.h"
-#include "proc.h"
-#include "proc_queue.h"
+#include "proc/proc.h"
+#include "proc/proc_queue.h"
 #include "spinlock.h"
-#include "sched.h"
+#include "proc/sched.h"
 #include "wrapper_tracking.h"
 
 static struct cpu_local g_cpu_stub;

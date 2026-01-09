@@ -59,9 +59,9 @@
 #include "printf.h"
 #include "spinlock.h"
 #include "rcu.h"
-#include "proc.h"
-#include "proc_queue.h"
-#include "sched.h"
+#include "proc/proc.h"
+#include "proc/proc_queue.h"
+#include "proc/sched.h"
 #include "timer.h"
 
 // Global RCU state

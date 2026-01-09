@@ -11,8 +11,8 @@
 #include "printf.h"
 #include "spinlock.h"
 #include "rcu.h"
-#include "proc.h"
-#include "sched.h"
+#include "proc/proc.h"
+#include "proc/sched.h"
 #include "timer.h"
 #include "string.h"
 

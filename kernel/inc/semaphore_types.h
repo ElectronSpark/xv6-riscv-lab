@@ -2,7 +2,7 @@
 #define __KERNEL_SEMAPHORE_TYPES_H
 
 #include "compiler.h"
-#include "proc_queue_type.h"
+#include "proc/proc_queue_type.h"
 #include "spinlock.h"
 
 // Long-term locks for processes

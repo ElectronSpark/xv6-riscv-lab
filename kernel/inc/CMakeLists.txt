@@ -18,7 +18,7 @@ set(ASM_OFFSET_STRUCTS
     utrapframe:trapframe.h
     context:trapframe.h
     cpu_local:percpu_types.h
-    proc:proc.h
+    proc:proc/proc.h
 )
 
 # Define prerequisite headers needed for compilation

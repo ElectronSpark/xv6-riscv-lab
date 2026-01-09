@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "types.h"
-#include "workqueue.h"
+#include "proc/workqueue.h"
 
 struct queued_work_entry {
     struct workqueue *wq;

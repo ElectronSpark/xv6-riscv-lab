@@ -1,7 +1,7 @@
 #ifndef __KERNEL_WORKQUEUE_H
 #define __KERNEL_WORKQUEUE_H
 
-#include "workqueue_types.h"
+#include "proc/workqueue_types.h"
 
 #define MAX_WORKQUEUE_ACTIVE 64
 #define WORKQUEUE_DEFAULT_MAX_ACTIVE 8

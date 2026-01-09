@@ -41,7 +41,7 @@
 #include "list.h"
 #include "vm.h"
 #include "slab.h"
-#include "proc.h"
+#include "proc/proc.h"
 #include "percpu.h"
 
 static slab_cache_t __vma_pool = {0};

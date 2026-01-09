@@ -6,12 +6,12 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
-#include "proc.h"
-#include "sched.h"
+#include "proc/proc.h"
+#include "proc/sched.h"
 #include "defs.h"
 #include "slab.h"
-#include "proc_queue.h"
-#include "workqueue.h"
+#include "proc/proc_queue.h"
+#include "proc/workqueue.h"
 
 static slab_cache_t __workqueue_cache;
 static slab_cache_t __work_struct_cache;

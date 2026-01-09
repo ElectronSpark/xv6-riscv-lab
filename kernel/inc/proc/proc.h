@@ -4,7 +4,7 @@
 #include "compiler.h"
 #include "list_type.h"
 #include "hlist_type.h"
-#include "proc_queue_type.h"
+#include "proc/proc_queue_type.h"
 #include "trapframe.h"
 #include "signal_types.h"
 #include "vm_types.h"

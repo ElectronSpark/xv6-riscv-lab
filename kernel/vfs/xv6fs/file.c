@@ -21,7 +21,7 @@
 #include "param.h"
 #include "errno.h"
 #include "spinlock.h"
-#include "proc.h"
+#include "proc/proc.h"
 #include "vm.h"
 #include "mutex_types.h"
 #include "buf.h"

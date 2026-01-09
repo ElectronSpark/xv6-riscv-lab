@@ -7,10 +7,10 @@
 #include "param.h"
 #include "memlayout.h"
 #include "spinlock.h"
-#include "proc.h"
+#include "proc/proc.h"
 #include "mutex_types.h"
-#include "proc_queue.h"
-#include "sched.h"
+#include "proc/proc_queue.h"
+#include "proc/sched.h"
 #include "errno.h"
 
 #define __mutex_set_holder(lk, pid) \

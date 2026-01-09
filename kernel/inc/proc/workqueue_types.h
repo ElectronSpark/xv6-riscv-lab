@@ -3,7 +3,7 @@
 
 #include "types.h"
 #include "spinlock.h"
-#include "proc_queue_type.h"
+#include "proc/proc_queue_type.h"
 
 #define WORKQUEUE_NAME_MAX 31
 

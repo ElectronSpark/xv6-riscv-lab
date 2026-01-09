@@ -1,8 +1,8 @@
 #ifndef SCHED_H
 #define SCHED_H
 
-#include "proc.h"
-#include "proc_queue.h"
+#include "proc/proc.h"
+#include "proc/proc_queue.h"
 #include "timer_types.h"
 
 void scheduler_init(void);

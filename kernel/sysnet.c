@@ -10,14 +10,14 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
-#include "proc.h"
+#include "proc/proc.h"
 #include "defs.h"
 #include "printf.h"
 #include "mutex_types.h"
 #include "net.h"
 #include "vm.h"
 #include "signal.h"
-#include "sched.h"
+#include "proc/sched.h"
 
 struct sock {
   struct sock *next; // the next socket in the list

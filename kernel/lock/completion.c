@@ -6,9 +6,9 @@
 #include "errno.h"
 #include "memlayout.h"
 #include "spinlock.h"
-#include "proc.h"
-#include "proc_queue.h"
-#include "sched.h"
+#include "proc/proc.h"
+#include "proc/proc_queue.h"
+#include "proc/sched.h"
 #include "completion.h"
 
 #define MAX_COMPLETIONS 65535

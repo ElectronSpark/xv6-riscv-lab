@@ -28,7 +28,7 @@
 #include "errno.h"
 #include "spinlock.h"
 #include "buf.h"
-#include "sched.h"
+#include "proc/sched.h"
 #include "printf.h"
 #include "vfs/fs.h"
 #include "xv6fs_private.h"

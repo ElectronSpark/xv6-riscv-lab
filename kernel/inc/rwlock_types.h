@@ -1,7 +1,7 @@
 #ifndef __KERNEL_RWLOCK_TYPES_H
 #define __KERNEL_RWLOCK_TYPES_H
 
-#include "proc_queue_type.h"
+#include "proc/proc_queue_type.h"
 #include "spinlock.h"
 
 typedef struct rwlock {

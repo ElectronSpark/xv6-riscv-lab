@@ -13,7 +13,7 @@
 #include "param.h"
 #include "errno.h"
 #include "spinlock.h"
-#include "proc.h"
+#include "proc/proc.h"
 #include "mutex_types.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"

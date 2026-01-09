@@ -10,8 +10,8 @@
 #include "timer.h"
 #include "list.h"
 #include "rbtree.h"
-#include "proc.h"
-#include "sched.h"
+#include "proc/proc.h"
+#include "proc/sched.h"
 #include "trap.h"
 
 static uint64 ticks;

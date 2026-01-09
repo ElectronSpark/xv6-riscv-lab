@@ -7,10 +7,10 @@
 #include "host_test_stubs.h"
 #include "types.h"
 #include "rwlock.h"
-#include "proc.h"
-#include "proc_queue.h"
+#include "proc/proc.h"
+#include "proc/proc_queue.h"
 #include "spinlock.h"
-#include "sched.h"
+#include "proc/sched.h"
 #include "list.h"
 #include "wrapper_tracking.h"
 

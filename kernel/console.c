@@ -19,8 +19,8 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
-#include "proc.h"
-#include "sched.h"
+#include "proc/proc.h"
+#include "proc/sched.h"
 #include "cdev.h"
 #include "trap.h"
 
