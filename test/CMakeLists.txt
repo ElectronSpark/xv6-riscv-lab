@@ -7,6 +7,9 @@ project(xv6-riscv-unit-test LANGUAGES C ASM)
 
 ENABLE_LANGUAGE(C)
 
+# Option to enable AddressSanitizer
+option(ENABLE_ASAN "Enable AddressSanitizer for detecting memory errors" ON)
+
 set(TEST_C_FLAGS
     -ggdb
     -Wall
@@ -14,6 +17,17 @@ set(TEST_C_FLAGS
     -DHOST_TEST=1
     # -DUSE_SOFTWARE_FFS=1
 )
+
+# AddressSanitizer flags
+if(ENABLE_ASAN)
+    message(STATUS "AddressSanitizer enabled")
+    set(ASAN_COMPILE_FLAGS -fsanitize=address -fno-omit-frame-pointer)
+    set(ASAN_LINK_FLAGS -fsanitize=address)
+else()
+    message(STATUS "AddressSanitizer disabled")
+    set(ASAN_COMPILE_FLAGS "")
+    set(ASAN_LINK_FLAGS "")
+endif()
 
 # Define the executable(s) to be built
 set(PROGRAMS list_test)
@@ -26,9 +40,9 @@ set(UNIT_TEST_INCLUDE_DIRS
 # Add an executable for each program
 foreach(PROGRAM ${PROGRAMS})
     add_executable(${PROGRAM} ${CMAKE_SOURCE_DIR}/src/${PROGRAM}.c)
-    target_compile_options(${PROGRAM} PRIVATE ${TEST_C_FLAGS})
+    target_compile_options(${PROGRAM} PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
     target_include_directories(${PROGRAM} PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
-    target_link_options(${PROGRAM} PRIVATE -ggdb)
+    target_link_options(${PROGRAM} PRIVATE -ggdb ${ASAN_LINK_FLAGS})
 endforeach()
 
 # Add a custom target for running tests
@@ -203,19 +217,21 @@ include(cmake/FetchCmocka.cmake)
 
 add_executable(ut_page ${MOCK_TEST_SRC} ${MOCK_TEST_KERNEL_SRC} ${UT_PAGE_WRAPPER_SRC})
 target_link_libraries(ut_page PRIVATE cmocka-static)
-target_compile_options(ut_page PRIVATE ${TEST_C_FLAGS})
+target_compile_options(ut_page PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
 target_compile_definitions(ut_page PRIVATE MOCK_TEST=1 UT_PAGE_TEST_BUILD=1)
-target_link_options(ut_page PRIVATE ${MOCK_COMPILE_OPTIONS})
+target_link_options(ut_page PRIVATE ${MOCK_COMPILE_OPTIONS} ${ASAN_LINK_FLAGS})
 target_include_directories(ut_page PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 add_executable(ut_list ${CMAKE_SOURCE_DIR}/src/ut_list_main.c)
 target_link_libraries(ut_list PRIVATE cmocka-static)
-target_compile_options(ut_list PRIVATE ${TEST_C_FLAGS})
+target_compile_options(ut_list PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
+target_link_options(ut_list PRIVATE ${ASAN_LINK_FLAGS})
 target_include_directories(ut_list PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 add_executable(ut_hlist ${CMAKE_SOURCE_DIR}/src/ut_hlist_main.c ${CMAKE_SOURCE_DIR}/../kernel/hlist.c)
 target_link_libraries(ut_hlist PRIVATE cmocka-static)
-target_compile_options(ut_hlist PRIVATE ${TEST_C_FLAGS})
+target_compile_options(ut_hlist PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
+target_link_options(ut_hlist PRIVATE ${ASAN_LINK_FLAGS})
 target_include_directories(ut_hlist PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 add_executable(ut_rbtree
@@ -224,7 +240,8 @@ add_executable(ut_rbtree
     ${CMAKE_SOURCE_DIR}/../kernel/bintree.c
 )
 target_link_libraries(ut_rbtree PRIVATE cmocka-static)
-target_compile_options(ut_rbtree PRIVATE ${TEST_C_FLAGS})
+target_compile_options(ut_rbtree PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
+target_link_options(ut_rbtree PRIVATE ${ASAN_LINK_FLAGS})
 target_include_directories(ut_rbtree PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 add_executable(ut_semaphore
@@ -236,8 +253,8 @@ add_executable(ut_semaphore
     ${CMAKE_SOURCE_DIR}/src/wrappers/cpu_wrappers.c
 )
 target_link_libraries(ut_semaphore PRIVATE cmocka-static)
-target_compile_options(ut_semaphore PRIVATE ${TEST_C_FLAGS})
-target_link_options(ut_semaphore PRIVATE 
+target_compile_options(ut_semaphore PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
+target_link_options(ut_semaphore PRIVATE ${ASAN_LINK_FLAGS}
     -Wl,--wrap=spin_init,--wrap=spin_acquire,--wrap=spin_release,--wrap=spin_holding
     -Wl,--wrap=push_off,--wrap=pop_off
     -Wl,--wrap=proc_queue_init,--wrap=proc_queue_wait,--wrap=proc_queue_wakeup
@@ -259,8 +276,8 @@ add_executable(ut_rwlock
     ${CMAKE_SOURCE_DIR}/src/wrappers/cpu_wrappers.c
 )
 target_link_libraries(ut_rwlock PRIVATE cmocka-static)
-target_compile_options(ut_rwlock PRIVATE ${TEST_C_FLAGS})
-target_link_options(ut_rwlock PRIVATE     -Wl,--wrap=spin_init,--wrap=spin_acquire,--wrap=spin_release,--wrap=spin_holding
+target_compile_options(ut_rwlock PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
+target_link_options(ut_rwlock PRIVATE ${ASAN_LINK_FLAGS}    -Wl,--wrap=spin_init,--wrap=spin_acquire,--wrap=spin_release,--wrap=spin_holding
     -Wl,--wrap=push_off,--wrap=pop_off
     -Wl,--wrap=proc_queue_init,--wrap=proc_queue_size,--wrap=proc_queue_wait
     -Wl,--wrap=proc_queue_wakeup,--wrap=proc_queue_wakeup_all
@@ -277,7 +294,8 @@ add_executable(ut_bits
     ${CMAKE_SOURCE_DIR}/../kernel/bits.c
 )
 target_link_libraries(ut_bits PRIVATE cmocka-static)
-target_compile_options(ut_bits PRIVATE ${TEST_C_FLAGS})
+target_compile_options(ut_bits PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
+target_link_options(ut_bits PRIVATE ${ASAN_LINK_FLAGS})
 target_include_directories(ut_bits PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 add_executable(ut_pcache
@@ -288,8 +306,8 @@ add_executable(ut_pcache
     ${WRAPPER_SRC}
 )
 target_link_libraries(ut_pcache PRIVATE cmocka-static)
-target_compile_options(ut_pcache PRIVATE ${TEST_C_FLAGS})
-target_link_options(ut_pcache PRIVATE ${MOCK_COMPILE_OPTIONS})
+target_compile_options(ut_pcache PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
+target_link_options(ut_pcache PRIVATE ${MOCK_COMPILE_OPTIONS} ${ASAN_LINK_FLAGS})
 target_include_directories(ut_pcache PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 # Tmpfs truncate test (linked version)
@@ -299,14 +317,16 @@ add_executable(ut_tmpfs_truncate
     ${CMAKE_SOURCE_DIR}/src/ut_tmpfs_truncate_linked.c
 )
 target_link_libraries(ut_tmpfs_truncate PRIVATE cmocka-static)
-target_compile_options(ut_tmpfs_truncate PRIVATE ${TEST_C_FLAGS})
+target_compile_options(ut_tmpfs_truncate PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
+target_link_options(ut_tmpfs_truncate PRIVATE ${ASAN_LINK_FLAGS})
 target_include_directories(ut_tmpfs_truncate PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 add_executable(ut_early_allocator
     ${CMAKE_SOURCE_DIR}/src/ut_early_allocator_main.c
 )
 target_link_libraries(ut_early_allocator PRIVATE cmocka-static)
-target_compile_options(ut_early_allocator PRIVATE ${TEST_C_FLAGS})
+target_compile_options(ut_early_allocator PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
+target_link_options(ut_early_allocator PRIVATE ${ASAN_LINK_FLAGS})
 target_include_directories(ut_early_allocator PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 enable_testing()
