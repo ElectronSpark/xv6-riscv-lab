@@ -11,7 +11,7 @@ typedef struct spinlock {
   // For debugging:
   char *name;        // Name of lock.
   struct cpu_local *cpu;   // The cpu holding the lock.
-} spinlock_t __attribute__ ((aligned(64)));
+} spinlock_t __ALIGNED_CACHELINE;
 
 #define SPINLOCK_INITIALIZED(lock_name) { \
   .locked = 0,                            \

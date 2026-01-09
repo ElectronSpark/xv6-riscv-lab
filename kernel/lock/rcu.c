@@ -68,7 +68,7 @@
 static rcu_state_t rcu_state;
 
 // Per-CPU RCU data - cache-line aligned to prevent false sharing
-rcu_cpu_data_t rcu_cpu_data[NCPU] __attribute__((aligned(RCU_CACHE_LINE_SIZE)));
+rcu_cpu_data_t rcu_cpu_data[NCPU] __ALIGNED_CACHELINE;
 
 // Lock protecting grace period state transitions
 static spinlock_t rcu_gp_lock;

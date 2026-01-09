@@ -16,7 +16,7 @@ struct buf {
   hlist_entry_t hlist_entry; // hash list entry
   list_node_t lru_entry;
   uchar *data;
-} __attribute__((aligned(64)));
+} __ALIGNED_CACHELINE;
 
 #define BIO_HASH_BUCKETS 63
 

@@ -1,6 +1,7 @@
 #ifndef __KERNEL_RCU_TYPE_H
 #define __KERNEL_RCU_TYPE_H
 
+#include "compiler.h"
 #include "types.h"
 #include "param.h"
 #include "list_type.h"
@@ -21,9 +22,6 @@ typedef struct rcu_head {
 // 2. ready_head/ready_tail: callbacks ready to invoke (their GP completed)
 // This avoids the complexity and bugs of maintaining segment pointers
 // that can point into freed memory.
-
-// Cache line size for alignment (typical RISC-V cache line)
-#define RCU_CACHE_LINE_SIZE 64
 
 // Per-CPU RCU data structure
 // Aligned to cache line to prevent false sharing between CPUs
@@ -50,7 +48,7 @@ typedef struct {
     _Atomic uint64      cb_count;       // Number of callbacks pending (in both lists)
     _Atomic uint64      qs_count;       // Number of quiescent states reported
     _Atomic uint64      cb_invoked;     // Number of callbacks invoked on this CPU
-} __attribute__((aligned(RCU_CACHE_LINE_SIZE))) rcu_cpu_data_t;
+} __ALIGNED_CACHELINE rcu_cpu_data_t;
 
 // Global RCU state structure
 typedef struct {

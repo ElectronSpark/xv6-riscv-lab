@@ -27,7 +27,7 @@ struct trapframe {
     uint64 scause;
     uint64 stval;
     uint64 stvec;
-} __attribute__((aligned(8)));
+} __ALIGNED(8);
 
 // per-process data for the trap handling code in trampoline.S.
 // sits in a page by itself just under the trampoline page in the
@@ -66,7 +66,7 @@ struct utrapframe {
     uint64 kernel_hartid; // saved kernel tp
     uint64 gp;
     uint64 kernel_gp;    // saved kernel gp
-} __attribute__((aligned(8)));
+} __ALIGNED(8);
 
 
 // Saved registers for kernel context switches.
@@ -87,6 +87,6 @@ struct context {
     uint64 s9;
     uint64 s10;
     uint64 s11;
-} __attribute__((aligned(64)));
+} __ALIGNED_CACHELINE;
 
 #endif /* __KERNEL_TRAPFRAME_H */

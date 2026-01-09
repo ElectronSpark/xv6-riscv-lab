@@ -5,6 +5,7 @@
  * IPIs are delivered as supervisor software interrupts (IRQ 1).
  */
 
+#include "compiler.h"
 #include "types.h"
 #include "param.h"
 #include "memlayout.h"
@@ -21,7 +22,8 @@
 #include "string.h"
 
 // Per-CPU state, placed in special linker section for trampoline access
-__attribute__((section("cpu_local_sec"), aligned(4096)))
+__SECTION(cpu_local_sec)
+__ALIGNED_PAGE
 struct cpu_local cpus[NCPU] = {0};
 
 // IRQ number for supervisor software interrupt

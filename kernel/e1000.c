@@ -1,3 +1,4 @@
+#include "compiler.h"
 #include "types.h"
 #include "string.h"
 #include "param.h"
@@ -14,11 +15,11 @@
 static void e1000_intr(int irq, void *data, device_t *dev);
 
 #define TX_RING_SIZE 16
-STATIC struct tx_desc tx_ring[TX_RING_SIZE] __attribute__((aligned(16)));
+STATIC struct tx_desc tx_ring[TX_RING_SIZE] __ALIGNED(16);
 STATIC struct mbuf *tx_mbufs[TX_RING_SIZE];
 
 #define RX_RING_SIZE 16
-STATIC struct rx_desc rx_ring[RX_RING_SIZE] __attribute__((aligned(16)));
+STATIC struct rx_desc rx_ring[RX_RING_SIZE] __ALIGNED(16);
 STATIC struct mbuf *rx_mbufs[RX_RING_SIZE];
 
 // remember where the e1000's registers live.

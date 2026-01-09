@@ -3,6 +3,7 @@
 // Uses batched buffering for improved output performance.
 //
 
+#include "compiler.h"
 #include "types.h"
 #include "param.h"
 #include "memlayout.h"
@@ -50,7 +51,7 @@ void uartintr(int irq, void *data, device_t *dev);
 // the transmit output buffer.
 struct spinlock uart_tx_lock;
 #define UART_TX_BUF_SIZE 4096
-char uart_tx_buf[UART_TX_BUF_SIZE] __attribute__((aligned(4096)));
+char uart_tx_buf[UART_TX_BUF_SIZE] __ALIGNED_PAGE;
 uint64 uart_tx_w; // write next to uart_tx_buf[uart_tx_w % UART_TX_BUF_SIZE]
 uint64 uart_tx_r; // read next from uart_tx_buf[uart_tx_r % UART_TX_BUF_SIZE]
 
