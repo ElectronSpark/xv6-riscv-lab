@@ -16,12 +16,11 @@
 // RCU-protected device table
 // Readers use rcu_read_lock/unlock + rcu_dereference
 // Writers use spinlock for serialization + rcu_assign_pointer + call_rcu for deferred free
-static spinlock_t __dev_tab_spinlock;
+static spinlock_t __dev_tab_spinlock = SPINLOCK_INITIALIZED("dev_tab_lock");
 static slab_cache_t __dev_type_cache;
 static device_major_t *__dev_table[MAX_MAJOR_DEVICES] = { NULL };
 
 static void __dev_tab_lock_init(void) {
-    spin_init(&__dev_tab_spinlock, "dev_tab_lock");
 }
 
 static void __dev_tab_lock(void) {

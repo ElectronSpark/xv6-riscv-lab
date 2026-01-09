@@ -17,7 +17,7 @@
 
 static struct irq_desc *irq_descs[IRQCNT] = { 0 };
 static slab_cache_t __irq_desc_slab = { 0 };
-static spinlock_t irq_write_lock; // Protects write operations to irq_descs
+static spinlock_t irq_write_lock = SPINLOCK_INITIALIZED("irq_write_lock"); // Protects write operations to irq_descs
 
 static struct irq_desc *__alloc_irq_desc(struct irq_desc *in_desc) {
     struct irq_desc *desc = slab_alloc(&__irq_desc_slab);
@@ -42,7 +42,6 @@ static void __free_irq_desc(struct irq_desc *desc) {
 }
 
 void irq_desc_init(void) {
-    spin_init(&irq_write_lock, "irq_write");
     int ret = slab_cache_init(&__irq_desc_slab, "irq_desc", 
                               sizeof(struct irq_desc), 
                               SLAB_FLAG_EMBEDDED);

@@ -49,7 +49,7 @@ void uartintr(int irq, void *data, device_t *dev);
 #define WriteReg(reg, v) (*(Reg(reg)) = (v))
 
 // the transmit output buffer.
-struct spinlock uart_tx_lock;
+struct spinlock uart_tx_lock = SPINLOCK_INITIALIZED("uart_tx_lock");
 #define UART_TX_BUF_SIZE 4096
 char uart_tx_buf[UART_TX_BUF_SIZE] __ALIGNED_PAGE;
 uint64 uart_tx_w; // write next to uart_tx_buf[uart_tx_w % UART_TX_BUF_SIZE]
@@ -117,8 +117,6 @@ uartinit(void)
   // enable transmit and receive interrupts.
   WriteReg(IER, IER_TX_ENABLE | IER_RX_ENABLE);
 
-  spin_init(&uart_tx_lock, "uart");
-  
   // Initialize buffering system
   uart_virtio.virtio_ready = 1;  // Enable batched buffering
   uart_virtio.interrupt_ready = 0;  // Start in synchronous mode

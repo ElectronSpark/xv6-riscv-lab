@@ -325,7 +325,7 @@ static inline void list_entry_replace_rcu(list_node_t *old, list_node_t *new) {
 #define LIST_PREV_ENTRY(entry) ((entry)->prev)
 #define LIST_FIRST_ENTRY(head) LIST_NEXT_ENTRY(head)
 #define LIST_LAST_ENTRY(head) LIST_PREV_ENTRY(head)
-#define LIST_ENTRY_INITIALIZED(entry) { .prev = (entry), .next = (entry) }
+#define LIST_ENTRY_INITIALIZED(entry) { .prev = &(entry), .next = &(entry) }
 
 
 /* <--- macros do test on entries ---> */

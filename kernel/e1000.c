@@ -25,7 +25,7 @@ STATIC struct mbuf *rx_mbufs[RX_RING_SIZE];
 // remember where the e1000's registers live.
 STATIC volatile uint32 *regs;
 
-struct spinlock e1000_lock;
+struct spinlock e1000_lock = SPINLOCK_INITIALIZED("e1000_lock");
 
 // Full reset the device
 // Called by e1000_init()
@@ -200,8 +200,6 @@ void
 e1000_init(uint32 *xregs)
 {
   uint8 default_mac_address[6] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
-
-  spin_init(&e1000_lock, "e1000");
 
   regs = xregs;
   struct irq_desc e1000_irq_desc = {

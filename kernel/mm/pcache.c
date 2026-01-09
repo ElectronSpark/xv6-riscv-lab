@@ -30,10 +30,10 @@
  * Global variables
  *****************************************************************************/
 // Store all pcache with dirty pages
-static list_node_t __global_pcache_list = {0};
+static list_node_t __global_pcache_list = LIST_ENTRY_INITIALIZED(__global_pcache_list);
 static int __global_pcache_count = 0;
 static struct workqueue *__global_pcache_flush_wq = NULL;
-static spinlock_t __pcache_global_spinlock = {0};
+static spinlock_t __pcache_global_spinlock = SPINLOCK_INITIALIZED("pcache_global_spinlock");
 static slab_cache_t __pcache_node_slab = {0};
 static completion_t __global_flusher_completion = {0};
 static struct proc *__flusher_thread_pcb = NULL;
@@ -967,8 +967,6 @@ static page_t *__pcache_evict_lru(struct pcache *pcache) {
  *****************************************************************************/
 // Init page cache subsystem
 void pcache_global_init(void) {
-    list_entry_init(&__global_pcache_list);
-    spin_init(&__pcache_global_spinlock, "global_pcache_spinlock");
     int ret = slab_cache_init(  &__pcache_node_slab, 
                                 "pcache_node", 
                                 sizeof(struct pcache_node), 

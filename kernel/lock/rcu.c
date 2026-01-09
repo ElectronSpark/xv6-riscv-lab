@@ -71,11 +71,11 @@ static rcu_state_t rcu_state;
 rcu_cpu_data_t rcu_cpu_data[NCPU] __ALIGNED_CACHELINE;
 
 // Lock protecting grace period state transitions
-static spinlock_t rcu_gp_lock;
+static spinlock_t rcu_gp_lock = SPINLOCK_INITIALIZED("rcu_gp_lock");
 
 // Wait queue for processes waiting on grace period completion
 static proc_queue_t rcu_gp_waitq;
-static spinlock_t rcu_gp_waitq_lock;
+static spinlock_t rcu_gp_waitq_lock = SPINLOCK_INITIALIZED("rcu_gp_waitq_lock");
 
 // Forward declarations
 static void rcu_start_gp(void);
@@ -238,8 +238,6 @@ static void rcu_wakeup_gp_waiters(void) {
 // ============================================================================
 
 void rcu_init(void) {
-    spin_init(&rcu_gp_lock, "rcu_gp");
-    spin_init(&rcu_gp_waitq_lock, "rcu_gp_waitq");
     proc_queue_init(&rcu_gp_waitq, "rcu_gp_waitq", &rcu_gp_waitq_lock);
 
     __atomic_store_n(&rcu_state.gp_start_timestamp, 0, __ATOMIC_RELEASE);

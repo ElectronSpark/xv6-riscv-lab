@@ -28,13 +28,12 @@ struct sock {
   struct mbufq rxq;  // a queue of packets waiting to be received
 };
 
-struct spinlock sock_lock;
+struct spinlock sock_lock = SPINLOCK_INITIALIZED("socktbl");
 struct sock *sockets;
 
 void
 sockinit(void)
 {
-  spin_init(&sock_lock, "socktbl");
 }
 
 // Legacy sockalloc removed - VFS uses vfs_sockalloc in vfs/file.c

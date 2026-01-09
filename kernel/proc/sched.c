@@ -25,12 +25,11 @@
 
 static proc_tree_t __chan_queue_root;
 
-list_node_t ready_queue;
-static spinlock_t __sched_lock;   // ready_queue and sleep_queue share this lock
-static spinlock_t __sleep_lock; // Lock for sleep queues
+list_node_t ready_queue = LIST_ENTRY_INITIALIZED(ready_queue);
+static spinlock_t __sched_lock = SPINLOCK_INITIALIZED("sched_lock");   // ready_queue and sleep_queue share this lock
+static spinlock_t __sleep_lock = SPINLOCK_INITIALIZED("sleep_lock"); // Lock for sleep queues
 
 static void chan_queue_init(void) {
-    spin_init(&__sleep_lock, "sleep_lock");
     proc_tree_init(&__chan_queue_root, "chan_queue_root", &__sleep_lock);
 }
 
@@ -79,8 +78,6 @@ void sched_unlock(void) {
 
 /* Scheduler functions */
 void scheduler_init(void) {
-    spin_init(&__sched_lock, "sched_lock");
-    list_entry_init(&ready_queue);
     chan_queue_init();
 }
 

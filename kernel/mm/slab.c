@@ -77,7 +77,7 @@
 // Global Slab Cache Registry
 // ============================================================================
 // All slab caches are registered here so we can shrink them all on OOM.
-static list_node_t __all_slab_caches = LIST_ENTRY_INITIALIZED(&__all_slab_caches);
+static list_node_t __all_slab_caches = LIST_ENTRY_INITIALIZED(__all_slab_caches);
 static spinlock_t __all_slab_caches_lock = SPINLOCK_INITIALIZED("all_slab_caches");
 
 // Shrink all registered slab caches - called on OOM
