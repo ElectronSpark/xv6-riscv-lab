@@ -9,6 +9,7 @@ set(PROC_C_SRCS
     timer.c
     sched_timer.c
     thread.c
+    pid.c
 )
 
 set(PROC_S_SRCS
