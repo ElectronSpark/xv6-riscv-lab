@@ -7,7 +7,9 @@
 #include "list_type.h"
 #include "trapframe.h"
 
+#if !defined(ON_HOST_OS)
 typedef uint64 sigset_t;
+#endif
 struct proc;
 
 typedef union sigval {

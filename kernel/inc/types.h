@@ -49,6 +49,9 @@ typedef int pid_t;
     #if !defined(dev_t)
     typedef uint32 dev_t;
     #endif              /* dev_t */
+#else /* ON_HOST_OS */
+    #include <sys/types.h>
+    /* loff_t, ssize_t, dev_t are provided by sys/types.h on host */
 #endif // ON_HOST_OS
 
 #ifndef bool

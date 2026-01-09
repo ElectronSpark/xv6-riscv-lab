@@ -12,6 +12,8 @@ extern struct cpu_local cpus[NCPU];
 #define CPU_FLAG_BOOT_HART      2
 #define CPU_FLAG_IN_ITR         4
 
+#if !defined(ON_HOST_OS)
+
 #define SET_NEEDS_RESCHED() \
   do { mycpu()->flags |= CPU_FLAG_NEEDS_RESCHED; } while(0)
 #define CLEAR_NEEDS_RESCHED() \
@@ -83,6 +85,32 @@ extern struct cpu_local cpus[NCPU];
     }                                               \
     __MYPROC;                                       \
 })
+
+#else /* ON_HOST_OS */
+
+/*
+ * Host OS declarations for unit testing - these are function declarations
+ * that can be intercepted by the linker's --wrap mechanism for mocking.
+ * The actual implementations are in test/src/wrappers/proc_wrappers.c
+ */
+#define SET_NEEDS_RESCHED()     do { } while(0)
+#define CLEAR_NEEDS_RESCHED()   do { } while(0)
+#define NEEDS_RESCHED()         (0)
+#define CPU_SET_IN_ITR()        do { } while(0)
+#define CPU_CLEAR_IN_ITR()      do { } while(0)
+#define CPU_IN_ITR()            (0)
+#define SET_BOOT_HART()         do { } while(0)
+#define CLEAR_BOOT_HART()       do { } while(0)
+#define IS_BOOT_HART()          (0)
+
+/* Function declarations for wrappable functions */
+struct cpu_local *mycpu(void);
+void push_off(void);
+void pop_off(void);
+int cpuid(void);
+struct proc *myproc(void);
+
+#endif /* ON_HOST_OS */
 
 void cpus_init(void);
 void mycpu_init(uint64 hartid, bool trampoline);

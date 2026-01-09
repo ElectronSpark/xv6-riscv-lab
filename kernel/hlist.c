@@ -346,3 +346,214 @@ size_t hlist_len(hlist_t *hlist) {
     }
     return hlist->elem_cnt;
 }
+
+
+/* ============================================================================
+ * RCU (Read-Copy-Update) Hash List Operations
+ * ============================================================================
+ *
+ * Note: Basic entry operations (insert, remove, replace) are provided as
+ * inline functions in hlist.h:
+ *   - hlist_entry_add_rcu()
+ *   - hlist_entry_del_rcu()
+ *   - hlist_entry_replace_rcu()
+ *
+ * The functions below provide higher-level RCU-safe hash list operations.
+ */
+
+/**
+ * @brief Find an entry in a bucket with RCU safety (for readers)
+ * @param hlist The hash list
+ * @param bucket The bucket to search
+ * @param node The node containing the key to search for
+ * @return The found entry, or NULL if not found
+ * 
+ * Must be called within rcu_read_lock()/rcu_read_unlock().
+ */
+STATIC_INLINE hlist_entry_t *__hlist_find_entry_in_bucket_rcu(hlist_t *hlist,
+                                                              hlist_bucket_t *bucket,
+                                                              void *node) {
+    hlist_entry_t *pos = NULL;
+    hlist_foreach_bucket_entry_rcu(bucket, pos) {
+        void *node1 = __hlist_get_node(hlist, pos);
+        if (__hlist_cmp_node(hlist, node1, node) == 0) {
+            return pos;
+        }
+    }
+    return NULL;
+}
+
+/**
+ * @brief Get a hash list entry by node key with RCU safety (for readers)
+ * @param hlist The hash list
+ * @param node The node containing the key to search for
+ * @param ret_bucket Output parameter for the bucket (may be NULL)
+ * @param ret_entry Output parameter for the entry (may be NULL)
+ * 
+ * Must be called within rcu_read_lock()/rcu_read_unlock().
+ */
+void __hlist_get_rcu(hlist_t *hlist, void *node,
+                     hlist_bucket_t **ret_bucket, hlist_entry_t **ret_entry) {
+    ht_hash_t hash_val = 0;
+    hlist_bucket_t *bucket = NULL;
+    hlist_entry_t *entry = NULL;
+
+    hash_val = __hlist_hash(hlist, node);
+    if (hash_val == 0) {
+        goto ret;
+    }
+    
+    bucket = __hlist_calc_hash_bucket(hlist, hash_val);
+    if (bucket == NULL) {
+        goto ret;
+    }
+
+    entry = __hlist_find_entry_in_bucket_rcu(hlist, bucket, node);
+
+ret:
+    if (ret_bucket != NULL) {
+        *ret_bucket = bucket;
+    }
+    if (ret_entry != NULL) {
+        *ret_entry = entry;
+    }
+}
+
+/**
+ * @brief Get a node by its key with RCU safety
+ * @param hlist The hash list to search
+ * @param node A node containing the key to search for
+ * @return The found node, or NULL if not found
+ * 
+ * This is an RCU read-side operation. Must be called within
+ * rcu_read_lock()/rcu_read_unlock(). The returned pointer is only
+ * valid within the RCU read-side critical section.
+ */
+void *hlist_get_rcu(hlist_t *hlist, void *node) {
+    hlist_entry_t *entry = NULL;
+
+    if (node == NULL) {
+        return NULL;
+    }
+    if (!__hlist_validate(hlist)) {
+        return NULL;
+    }
+
+    __hlist_get_rcu(hlist, node, NULL, &entry);
+
+    if (entry == NULL) {
+        return NULL;
+    }
+
+    return __hlist_get_node(hlist, entry);
+}
+
+/**
+ * @brief Put a node into a hash list with RCU safety
+ * @param hlist The hash list to insert into
+ * @param node The node to insert
+ * @param replace Whether to replace an existing node with the same key
+ * @return 
+ *   - NULL if the node was inserted successfully
+ *   - The original node if insertion failed
+ *   - The preexisting node if found (and optionally replaced)
+ * 
+ * This is an RCU write-side operation. The caller must hold appropriate
+ * locks to synchronize with other writers. After replacing a node, the
+ * caller must defer freeing the old node using synchronize_rcu() or call_rcu().
+ */
+void *hlist_put_rcu(hlist_t *hlist, void *node, bool replace) {
+    hlist_bucket_t *bucket = NULL;
+    hlist_entry_t *entry = NULL;
+    void *old_node = NULL;
+    hlist_entry_t *new_entry = NULL;
+
+    if (!__hlist_validate(hlist)) {
+        return node;
+    }
+
+    new_entry = __hlist_get_entry(hlist, node);
+    if (new_entry == NULL) {
+        return node;
+    }
+
+    if (HLIST_ENTRY_ATTACHED(new_entry)) {
+        return node;
+    }
+
+    /* Use non-RCU lookup since we're the writer with locks held */
+    __hlist_get(hlist, node, &bucket, &entry);
+    if (bucket == NULL) {
+        return node;
+    }
+
+    if (entry == NULL) {
+        /* Node doesn't exist, insert with RCU safety */
+        hlist_entry_add_rcu(hlist, bucket, new_entry);
+        return NULL;
+    } else {
+        old_node = __hlist_get_node(hlist, entry);
+        if (old_node == NULL) {
+            return node;
+        } else if (node == old_node) {
+            return node;
+        }
+        if (replace) {
+            hlist_entry_replace_rcu(hlist, entry, new_entry);
+        }
+        return old_node;
+    }
+}
+
+/**
+ * @brief Pop a node from a hash list with RCU safety
+ * @param hlist The hash list to remove from
+ * @param node The node containing the key to remove, or NULL to remove any
+ * @return The removed node, or NULL if no node was removed
+ * 
+ * This is an RCU write-side operation. The caller must hold appropriate
+ * locks to synchronize with other writers. The caller must defer freeing
+ * the returned node using synchronize_rcu() or call_rcu().
+ */
+void *hlist_pop_rcu(hlist_t *hlist, void *node) {
+    if (!__hlist_validate(hlist)) {
+        return NULL;
+    }
+
+    if (hlist->elem_cnt == 0) {
+        return NULL;
+    }
+    
+    if (node == NULL) {
+        /* Pop the first node */
+        uint64 idx = 0;
+        hlist_bucket_t *bucket = NULL;
+        hlist_foreach_bucket(hlist, idx, bucket) {
+            if (!LIST_IS_EMPTY(bucket)) {
+                list_node_t *first_entry = LIST_FIRST_ENTRY(bucket);
+                hlist_entry_t *entry = container_of(first_entry,
+                                                    hlist_entry_t, list_entry);
+                void *ret_node = __hlist_get_node(hlist, entry);
+                hlist_entry_del_rcu(hlist, entry);
+                return ret_node;
+            }
+        }
+        return NULL;
+    }
+
+    /* Find and remove the specific node */
+    hlist_bucket_t *bucket = NULL;
+    hlist_entry_t *entry = NULL;
+    
+    __hlist_get(hlist, node, &bucket, &entry);
+    
+    if (entry != NULL) {
+        void *ret_node = __hlist_get_node(hlist, entry);
+        if (ret_node != NULL) {
+            hlist_entry_del_rcu(hlist, entry);
+        }
+        return ret_node;
+    } else {
+        return NULL;
+    }
+}

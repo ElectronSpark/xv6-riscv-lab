@@ -6,6 +6,7 @@
 #include "errno.h"
 #include "memlayout.h"
 #include "spinlock.h"
+#include "percpu.h"
 #include "proc.h"
 #include "proc_queue.h"
 #include "sched.h"

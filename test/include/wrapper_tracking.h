@@ -6,6 +6,8 @@
 // Forward declarations to avoid pulling in all headers
 struct spinlock;
 struct proc_queue;
+struct proc;
+struct cpu_local;
 
 // Tracking structure for spinlock operations
 typedef struct {
@@ -17,6 +19,13 @@ typedef struct {
     int spin_release_count;
     struct spinlock *last_spin_release;
 } spinlock_tracking_t;
+
+// Tracking structure for proc/cpu operations
+typedef struct {
+    struct proc *current_proc;      // What myproc() returns
+    struct cpu_local *current_cpu;  // What mycpu() returns
+    int current_cpuid;              // What cpuid() returns
+} proc_tracking_t;
 
 // Tracking structure for proc_queue operations
 typedef struct {
@@ -52,11 +61,14 @@ typedef struct {
 // Global tracking instances (can be NULL if tracking not needed)
 extern spinlock_tracking_t *g_spinlock_tracking;
 extern proc_queue_tracking_t *g_proc_queue_tracking;
+extern proc_tracking_t *g_proc_tracking;
 
 // Tracking control functions
 void wrapper_tracking_enable_spinlock(spinlock_tracking_t *tracking);
 void wrapper_tracking_enable_proc_queue(proc_queue_tracking_t *tracking);
+void wrapper_tracking_enable_proc(proc_tracking_t *tracking);
 void wrapper_tracking_disable_spinlock(void);
 void wrapper_tracking_disable_proc_queue(void);
+void wrapper_tracking_disable_proc(void);
 
 #endif // WRAPPER_TRACKING_H

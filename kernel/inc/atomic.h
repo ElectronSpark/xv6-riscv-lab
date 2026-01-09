@@ -3,6 +3,27 @@
 
 #include "types.h"
 
+/* <--- Compiler Barrier Primitives ---> */
+
+/**
+ * READ_ONCE - Prevent compiler from optimizing away or reordering reads
+ * @x: the value to read
+ * 
+ * Returns the value of @x, ensuring the compiler generates a single read
+ * and doesn't cache or reorder it.
+ */
+#define READ_ONCE(x) (*(volatile typeof(x) *)&(x))
+
+/**
+ * WRITE_ONCE - Prevent compiler from optimizing away or reordering writes
+ * @x: the variable to write to
+ * @val: the value to write
+ * 
+ * Ensures the compiler generates a single write and doesn't cache or reorder it.
+ */
+#define WRITE_ONCE(x, val) (*(volatile typeof(x) *)&(x) = (val))
+
+
 static inline bool atomic_dec_unless(int *value, int unless) {
     int old = __atomic_load_n(value, __ATOMIC_SEQ_CST);
     while (old != unless) {

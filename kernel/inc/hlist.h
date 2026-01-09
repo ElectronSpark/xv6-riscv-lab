@@ -530,4 +530,322 @@ static inline hlist_entry_t *hlist_last_entry(hlist_t *hlist) {
          (pos) = (tmp),                                                         \
          (tmp) = (pos) ? HLIST_PREV_NODE(hlist, pos, member) : NULL)
 
+
+/* ============================================================================
+ * RCU (Read-Copy-Update) Hash List Operations
+ * 
+ * These operations allow lock-free read access to hash lists while writers
+ * still need to synchronize among themselves. Based on Linux kernel's
+ * rculist.h implementation.
+ * 
+ * Key concepts:
+ * - Readers use rcu_read_lock()/rcu_read_unlock() (from rcu.h)
+ * - Writers must use appropriate locking (spinlocks, etc.)
+ * - Memory barriers ensure proper ordering on weakly-ordered architectures
+ * ============================================================================
+ */
+
+/* <--- RCU Hash List Entry Operations ---> */
+
+/**
+ * @brief Initialize a hash list entry visible to RCU readers
+ * @param entry The hash list entry to initialize
+ * 
+ * Use this when the entry being initialized may be visible to RCU readers.
+ */
+static inline void hlist_entry_init_rcu(hlist_entry_t *entry) {
+    if (entry) {
+        WRITE_ONCE(entry->bucket, NULL);
+        list_entry_init_rcu(&entry->list_entry);
+    }
+}
+
+/**
+ * @brief Add a hash list entry with RCU safety
+ * @param hlist The hash list
+ * @param bucket The bucket to add to
+ * @param entry The entry to add
+ * 
+ * The caller must take appropriate locks to avoid racing with other writers.
+ * It is safe to run concurrently with RCU readers.
+ */
+static inline void hlist_entry_add_rcu(hlist_t *hlist, hlist_bucket_t *bucket,
+                                       hlist_entry_t *entry) {
+    list_entry_add_rcu(bucket, &entry->list_entry);
+    WRITE_ONCE(entry->bucket, bucket);
+    hlist->elem_cnt += 1;
+}
+
+/**
+ * @brief Delete a hash list entry with RCU safety
+ * @param hlist The hash list
+ * @param entry The entry to delete
+ * 
+ * Note: The entry is NOT reinitialized after deletion - readers may still
+ * traverse it. The caller must defer freeing using synchronize_rcu() or call_rcu().
+ * 
+ * The caller must take appropriate locks to avoid racing with other writers.
+ * It is safe to run concurrently with RCU readers.
+ */
+static inline void hlist_entry_del_rcu(hlist_t *hlist, hlist_entry_t *entry) {
+    list_entry_del_rcu(&entry->list_entry);
+    /* Do NOT clear entry->bucket - readers may still check it */
+    hlist->elem_cnt -= 1;
+}
+
+/**
+ * @brief Delete and reinitialize a hash list entry with RCU safety
+ * @param hlist The hash list
+ * @param entry The entry to delete
+ * 
+ * Same as hlist_entry_del_rcu() but also reinitializes the entry.
+ */
+static inline void hlist_entry_del_init_rcu(hlist_t *hlist, hlist_entry_t *entry) {
+    list_entry_del_rcu(&entry->list_entry);
+    hlist_entry_init_rcu(entry);
+    hlist->elem_cnt -= 1;
+}
+
+/**
+ * @brief Replace a hash list entry with RCU safety
+ * @param hlist The hash list
+ * @param old The entry to replace
+ * @param new The new entry to insert
+ * 
+ * The caller must take appropriate locks to avoid racing with other writers.
+ * It is safe to run concurrently with RCU readers.
+ */
+static inline void hlist_entry_replace_rcu(hlist_t *hlist,
+                                           hlist_entry_t *old,
+                                           hlist_entry_t *new) {
+    list_entry_replace_rcu(&old->list_entry, &new->list_entry);
+    WRITE_ONCE(new->bucket, old->bucket);
+    /* Do NOT clear old->bucket - readers may still check it */
+}
+
+
+/* <--- RCU Hash List Entry Accessors ---> */
+
+/**
+ * @brief Get the first entry in a bucket (RCU-safe)
+ * @param bucket The bucket to get the first entry from
+ * @return Pointer to the first entry, or NULL if empty
+ */
+static inline hlist_entry_t *hlist_bucket_first_entry_rcu(hlist_bucket_t *bucket) {
+    if (bucket == NULL) {
+        return NULL;
+    }
+    return LIST_FIRST_NODE_RCU(bucket, hlist_entry_t, list_entry);
+}
+
+/**
+ * @brief Get the next entry in a hash list (RCU-safe)
+ * @param hlist The hash list to iterate
+ * @param entry The current entry
+ * @return Pointer to the next entry, or NULL if at the end
+ */
+static inline hlist_entry_t *hlist_next_entry_rcu(hlist_t *hlist, hlist_entry_t *entry) {
+    if (hlist == NULL || entry == NULL) {
+        return NULL;
+    }
+    hlist_bucket_t *bucket = READ_ONCE(entry->bucket);
+    if (bucket == NULL) {
+        return NULL;
+    }
+    hlist_entry_t *next = LIST_NEXT_NODE_RCU(bucket, entry, list_entry);
+    while (next == NULL) {
+        bucket = hlist_next_bucket(hlist, bucket);
+        if (bucket == NULL) {
+            return NULL;
+        }
+        next = LIST_FIRST_NODE_RCU(bucket, hlist_entry_t, list_entry);
+    }
+    return next;
+}
+
+/**
+ * @brief Get the first entry in a hash list (RCU-safe)
+ * @param hlist The hash list to search
+ * @return Pointer to the first entry, or NULL if empty
+ */
+static inline hlist_entry_t *hlist_first_entry_rcu(hlist_t *hlist) {
+    if (hlist == NULL) {
+        return NULL;
+    }
+    for (int i = 0; i < hlist->bucket_cnt; i++) {
+        hlist_entry_t *entry = LIST_FIRST_NODE_RCU(&hlist->buckets[i],
+                                                    hlist_entry_t, list_entry);
+        if (entry != NULL) {
+            return entry;
+        }
+    }
+    return NULL;
+}
+
+
+/* <--- RCU Hash List Node Macros ---> */
+
+/**
+ * @brief Get the first node in a hash list (RCU-safe)
+ * @param hlist The hash list to search
+ * @param type The type of the container struct
+ * @param member The name of the hlist_entry_t member within the container
+ * @return Pointer to the first node, or NULL if empty
+ */
+#define HLIST_FIRST_NODE_RCU(hlist, type, member) ({                            \
+    hlist_entry_t *__e = hlist_first_entry_rcu(hlist);                          \
+    __e ? container_of(__e, type, member) : NULL;                               \
+})
+
+/**
+ * @brief Get the next node in a hash list (RCU-safe)
+ * @param hlist The hash list to iterate
+ * @param node The current node (container type pointer)
+ * @param member The name of the hlist_entry_t member within the container
+ * @return Pointer to the next node, or NULL if at the end
+ */
+#define HLIST_NEXT_NODE_RCU(hlist, node, member) ({                             \
+    hlist_entry_t *__e = hlist_next_entry_rcu(hlist, &(node)->member);          \
+    __e ? container_of(__e, typeof(*(node)), member) : NULL;                    \
+})
+
+/**
+ * @brief Get the first node in a bucket (RCU-safe)
+ * @param bucket The bucket to get the first node from
+ * @param type The type of the container struct
+ * @param member The name of the hlist_entry_t member within the container
+ * @return Pointer to the first node, or NULL if empty
+ */
+#define HLIST_BUCKET_FIRST_NODE_RCU(bucket, type, member) ({                    \
+    hlist_entry_t *__e = hlist_bucket_first_entry_rcu(bucket);                  \
+    __e ? container_of(__e, type, member) : NULL;                               \
+})
+
+
+/* <--- RCU Hash List Traversal Macros ---> */
+
+/**
+ * @brief Iterate over hash list nodes (RCU-safe)
+ * @param hlist The hash list to iterate
+ * @param pos Variable for the loop cursor (container type pointer)
+ * @param member The name of the hlist_entry_t member within the container
+ *
+ * This primitive may safely run concurrently with _rcu list-mutation
+ * primitives as long as it's guarded by rcu_read_lock().
+ *
+ * Example:
+ *   rcu_read_lock();
+ *   my_node_t *node;
+ *   hlist_foreach_node_rcu(hlist, node, entry) {
+ *       // use node
+ *   }
+ *   rcu_read_unlock();
+ */
+#define hlist_foreach_node_rcu(hlist, pos, member)                              \
+    for (hlist_entry_t *__entry = hlist_first_entry_rcu(hlist);                 \
+         __entry && (pos = container_of(__entry, typeof(*(pos)), member), 1);   \
+         __entry = hlist_next_entry_rcu(hlist, __entry))
+
+/**
+ * @brief Iterate over entries in a bucket (RCU-safe)
+ * @param bucket The bucket to iterate
+ * @param pos Current position (hlist_entry_t *)
+ *
+ * Example:
+ *   rcu_read_lock();
+ *   hlist_entry_t *entry;
+ *   hlist_foreach_bucket_entry_rcu(bucket, entry) {
+ *       // use entry
+ *   }
+ *   rcu_read_unlock();
+ */
+#define hlist_foreach_bucket_entry_rcu(bucket, pos)                             \
+    for ((pos) = hlist_bucket_first_entry_rcu(bucket);                          \
+         (pos) != NULL;                                                         \
+         (pos) = LIST_NEXT_NODE_RCU(bucket, pos, list_entry))
+
+/**
+ * @brief Iterate over nodes in a bucket (RCU-safe)
+ * @param bucket The bucket to iterate
+ * @param pos Variable for the loop cursor (container type pointer)
+ * @param member The name of the hlist_entry_t member within the container
+ *
+ * Example:
+ *   rcu_read_lock();
+ *   my_node_t *node;
+ *   hlist_foreach_bucket_node_rcu(bucket, node, entry) {
+ *       // use node
+ *   }
+ *   rcu_read_unlock();
+ */
+#define hlist_foreach_bucket_node_rcu(bucket, pos, member)                      \
+    for (hlist_entry_t *__entry = hlist_bucket_first_entry_rcu(bucket);         \
+         __entry && (pos = container_of(__entry, typeof(*(pos)), member), 1);   \
+         __entry = LIST_NEXT_NODE_RCU(bucket, __entry, list_entry))
+
+
+/* <--- RCU Hash List Lookup Functions ---> */
+
+/**
+ * @brief Check if an entry is attached to a bucket (RCU-safe)
+ * @param entry The hash list entry to check
+ * @return true if the entry is attached to a bucket, false otherwise
+ */
+#define HLIST_ENTRY_ATTACHED_RCU(entry) (!!(READ_ONCE((entry)->bucket)))
+
+/**
+ * @brief Check if a hash list is empty (RCU-safe)
+ * @param hlist The hash list to check
+ * @return true if the hash list is NULL or has no elements, false otherwise
+ * 
+ * Note: Due to the nature of RCU, this check may be stale immediately
+ * after returning.
+ */
+#define HLIST_EMPTY_RCU(hlist)  ({                                              \
+    (hlist) == NULL || READ_ONCE((hlist)->elem_cnt) == 0;                       \
+})
+
+
+/* <--- RCU Hash List Functions ---> */
+
+/**
+ * @brief Get a node by its key with RCU safety
+ * @param hlist The hash list to search
+ * @param node A node containing the key to search for
+ * @return The found node, or NULL if not found
+ * 
+ * This is an RCU read-side operation. Must be called within
+ * rcu_read_lock()/rcu_read_unlock(). The returned pointer is only
+ * valid within the RCU read-side critical section.
+ */
+void *hlist_get_rcu(hlist_t *hlist, void *node);
+
+/**
+ * @brief Put a node into a hash list with RCU safety
+ * @param hlist The hash list to insert into
+ * @param node The node to insert
+ * @param replace Whether to replace an existing node with the same key
+ * @return 
+ *   - NULL if the node was inserted successfully
+ *   - The original node if insertion failed
+ *   - The preexisting node if found (and optionally replaced)
+ * 
+ * This is an RCU write-side operation. The caller must hold appropriate
+ * locks to synchronize with other writers. After replacing a node, the
+ * caller must defer freeing the old node using synchronize_rcu() or call_rcu().
+ */
+void *hlist_put_rcu(hlist_t *hlist, void *node, bool replace);
+
+/**
+ * @brief Pop a node from a hash list with RCU safety
+ * @param hlist The hash list to remove from
+ * @param node The node containing the key to remove, or NULL to remove any
+ * @return The removed node, or NULL if no node was removed
+ * 
+ * This is an RCU write-side operation. The caller must hold appropriate
+ * locks to synchronize with other writers. The caller must defer freeing
+ * the returned node using synchronize_rcu() or call_rcu().
+ */
+void *hlist_pop_rcu(hlist_t *hlist, void *node);
+
 #endif      /* __HASH_LIST_H__ */

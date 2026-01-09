@@ -4,6 +4,13 @@
 
 #include "compiler.h"
 
+/*
+ * The following inline assembly functions are RISC-V specific and should
+ * only be compiled when targeting RISC-V. When building unit tests on the
+ * host OS (x86/ARM), these functions are excluded.
+ */
+#if !defined(ON_HOST_OS)
+
 // which hart (core) is this?
 static inline uint64
 r_mhartid()
@@ -386,6 +393,8 @@ sfence_vma()
   // the zero, zero means flush all TLB entries.
   asm volatile("sfence.vma zero, zero");
 }
+
+#endif /* !defined(ON_HOST_OS) */
 
 typedef uint64 pte_t;
 typedef uint64 *pagetable_t; // 512 PTEs

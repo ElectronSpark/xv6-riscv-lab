@@ -2,6 +2,7 @@
 #define __KERNEL_VM_TYPES_H
 
 #include "types.h"
+#include "riscv.h"
 #include "page_type.h"
 #include "list_type.h" 
 #include "bintree_type.h"

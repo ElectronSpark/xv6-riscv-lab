@@ -11,6 +11,7 @@
 #include "sched.h"
 #include "list.h"
 #include "bits.h"
+#include "rcu.h"
 
 static slab_cache_t __sigacts_pool;
 static slab_cache_t __ksiginfo_pool;
@@ -397,15 +398,20 @@ int signal_send(int pid, ksiginfo_t *info) {
     if (pid < 0 || info == NULL || SIGBAD(info->signo)) {
         return -1; // Invalid PID or signal number
     }
+    rcu_read_lock();
     if (proctab_get_pid_proc(pid, &p) != 0) {
+        rcu_read_unlock();
         return -1; // No process found
     }
     if (p == NULL) {
+        rcu_read_unlock();
         return -1; // No process found
     }
     assert(p != NULL, "signal_send: proc is NULL");
     
-    return __signal_send(p, info);
+    int ret = __signal_send(p, info);
+    rcu_read_unlock();
+    return ret;
 }
 
 bool signal_pending(struct proc *p) {

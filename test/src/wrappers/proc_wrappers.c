@@ -19,21 +19,21 @@
 #ifndef NOFILE
 #define NOFILE 64
 #endif
-#ifndef pagetable_t
-typedef void* pagetable_t;
-#endif
+// Note: pagetable_t is defined in riscv.h, don't redefine it here
 
+#include "percpu_types.h"
 #include "proc.h"
 #include "proc_queue.h"
 #include "spinlock.h"
 #include "sched.h"
 #include "wrapper_tracking.h"
 
-static struct cpu g_cpu_stub;
+static struct cpu_local g_cpu_stub;
 static struct proc g_proc_stub = {.pid = 1};
 
-// Global tracking pointer (NULL if tracking disabled)
+// Global tracking pointers (NULL if tracking disabled)
 proc_queue_tracking_t *g_proc_queue_tracking = NULL;
+proc_tracking_t *g_proc_tracking = NULL;
 
 void wrapper_tracking_enable_proc_queue(proc_queue_tracking_t *tracking)
 {
@@ -44,6 +44,17 @@ void wrapper_tracking_disable_proc_queue(void)
 {
     g_proc_queue_tracking = NULL;
 }
+
+void wrapper_tracking_enable_proc(proc_tracking_t *tracking)
+{
+    g_proc_tracking = tracking;
+}
+
+void wrapper_tracking_disable_proc(void)
+{
+    g_proc_tracking = NULL;
+}
+
 static bool g_test_break_on_sleep = false;
 static int g_test_sleep_call_count = 0;
 static int g_test_max_sleep_calls = 1;
@@ -59,20 +70,36 @@ void pcache_test_set_max_sleep_calls(int max_calls)
     g_test_max_sleep_calls = max_calls;
 }
 
-struct cpu *__wrap_mycpu(void)
+struct cpu_local *__wrap_mycpu(void)
 {
+    if (g_proc_tracking && g_proc_tracking->current_cpu) {
+        return g_proc_tracking->current_cpu;
+    }
     return &g_cpu_stub;
 }
 
 struct proc *__wrap_myproc(void)
 {
+    if (g_proc_tracking && g_proc_tracking->current_proc) {
+        return g_proc_tracking->current_proc;
+    }
     return &g_proc_stub;
 }
 
 int __wrap_cpuid(void)
 {
+    if (g_proc_tracking) {
+        return g_proc_tracking->current_cpuid;
+    }
     return 0;
 }
+
+/*
+ * Note: When using --wrap=myproc etc., the linker automatically redirects
+ * calls to myproc() in other object files to __wrap_myproc().
+ * We don't define real myproc/mycpu/cpuid here - they're declared in percpu.h
+ * for ON_HOST_OS and the wrapper mechanism handles the redirection.
+ */
 
 void __wrap_proc_lock(struct proc *p)
 {

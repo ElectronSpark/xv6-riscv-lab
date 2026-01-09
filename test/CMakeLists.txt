@@ -87,6 +87,7 @@ set(WRAPPER_SRC
     ${CMAKE_SOURCE_DIR}/src/wrappers/completion_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/timer_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/kmm_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/cpu_wrappers.c
 )
 
 # Wrapper sources for ut_page
@@ -100,6 +101,7 @@ set(UT_PAGE_WRAPPER_SRC
     ${CMAKE_SOURCE_DIR}/src/wrappers/workqueue_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/completion_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/timer_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/cpu_wrappers.c
 )
 
 # Functions to wrap for all tests
@@ -231,6 +233,7 @@ add_executable(ut_semaphore
     ${CMAKE_SOURCE_DIR}/src/wrappers/spinlock_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/cpu_wrappers.c
 )
 target_link_libraries(ut_semaphore PRIVATE cmocka-static)
 target_compile_options(ut_semaphore PRIVATE ${TEST_C_FLAGS})
@@ -243,8 +246,8 @@ target_link_options(ut_semaphore PRIVATE
     -Wl,--wrap=__panic_start,--wrap=__panic_end,--wrap=panic_state,--wrap=panic_disable_bt
 )
 target_include_directories(ut_semaphore PRIVATE
-    ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
     ${UNIT_TEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
 )
 
 add_executable(ut_rwlock
@@ -253,6 +256,7 @@ add_executable(ut_rwlock
     ${CMAKE_SOURCE_DIR}/src/wrappers/spinlock_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/cpu_wrappers.c
 )
 target_link_libraries(ut_rwlock PRIVATE cmocka-static)
 target_compile_options(ut_rwlock PRIVATE ${TEST_C_FLAGS})
@@ -264,8 +268,8 @@ target_link_options(ut_rwlock PRIVATE     -Wl,--wrap=spin_init,--wrap=spin_acqui
     -Wl,--wrap=sched_lock,--wrap=sched_unlock,--wrap=scheduler_wakeup,--wrap=scheduler_sleep    -Wl,--wrap=__panic_start,--wrap=__panic_end,--wrap=panic_state,--wrap=panic_disable_bt
 )
 target_include_directories(ut_rwlock PRIVATE
-    ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
     ${UNIT_TEST_INCLUDE_DIRS}
+    ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
 )
 
 add_executable(ut_bits

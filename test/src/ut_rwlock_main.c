@@ -17,6 +17,7 @@
 typedef struct {
     spinlock_tracking_t spinlock;
     proc_queue_tracking_t proc_queue;
+    proc_tracking_t proc;
     
     int wait_calls;
     
@@ -61,9 +62,13 @@ static int test_setup(void **state) {
     g_runtime.proc_queue.wakeup_all_return = 0;
     g_runtime.proc_queue.next_wakeup_proc = &g_wait_proc;
     
+    // Set up proc tracking so myproc() returns g_self_proc
+    g_runtime.proc.current_proc = &g_self_proc;
+    
     // Enable tracking
     wrapper_tracking_enable_spinlock(&g_runtime.spinlock);
     wrapper_tracking_enable_proc_queue(&g_runtime.proc_queue);
+    wrapper_tracking_enable_proc(&g_runtime.proc);
     
     return 0;
 }

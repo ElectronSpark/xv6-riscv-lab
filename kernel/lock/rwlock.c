@@ -5,6 +5,7 @@
 #include "param.h"
 #include "memlayout.h"
 #include "spinlock.h"
+#include "percpu.h"
 #include "proc.h"
 #include "rwlock.h"
 #include "proc_queue.h"
