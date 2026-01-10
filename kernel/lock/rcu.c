@@ -62,7 +62,7 @@
 #include "proc/proc.h"
 #include "proc/proc_queue.h"
 #include "proc/sched.h"
-#include "timer.h"
+#include "timer/timer.h"
 
 // Global RCU state
 static rcu_state_t rcu_state;

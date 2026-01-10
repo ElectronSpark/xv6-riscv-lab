@@ -87,6 +87,7 @@ add_subdirectory(${KERNEL_DIR}/dev)
 add_subdirectory(${KERNEL_DIR}/lock)
 add_subdirectory(${KERNEL_DIR}/mm)
 add_subdirectory(${KERNEL_DIR}/proc)
+add_subdirectory(${KERNEL_DIR}/timer)
 add_subdirectory(${KERNEL_DIR}/vfs)
 add_subdirectory(${KERNEL_DIR}/ipi)
 
@@ -119,11 +120,12 @@ target_sources(${KERNEL_BINARY} PRIVATE
     $<TARGET_OBJECTS:vfs_tmpfs>
     $<TARGET_OBJECTS:vfs_xv6fs>
     $<TARGET_OBJECTS:ipi>
+    $<TARGET_OBJECTS:timer>
 )
 
 # Use target_link_options to set linker flags so they appear in <LINK_FLAGS>
 target_link_options(${KERNEL_BINARY} PRIVATE -z max-page-size=4096 -T ${KERNEL_DIR}/kernel.ld)
-target_link_libraries(${KERNEL_BINARY} PRIVATE interruption dev lock mm proc vfs)
+target_link_libraries(${KERNEL_BINARY} PRIVATE interruption dev lock mm proc timer vfs)
 
 # Note: USE_LIBSBI is not applicable for S-mode kernels.
 # libsbi is for M-mode firmware (OpenSBI itself), not for S-mode OS kernels.

@@ -1,7 +1,7 @@
 #ifndef __KERNEL_TIMER_H
 #define __KERNEL_TIMER_H
 
-#include "timer_types.h"
+#include "timer/timer_types.h"
 
 #define TIMER_DEFAULT_RETRY_LIMIT 3
 

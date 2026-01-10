@@ -3,7 +3,7 @@
 
 #include "proc/proc.h"
 #include "proc/proc_queue.h"
-#include "timer_types.h"
+#include "timer/timer_types.h"
 
 void scheduler_init(void);
 int sched_holding(void);

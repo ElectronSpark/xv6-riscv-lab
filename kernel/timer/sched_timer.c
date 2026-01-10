@@ -9,9 +9,9 @@
 #include "proc/sched.h"
 #include "slab.h"
 #include "errno.h"
-#include "timer.h"
+#include "timer/timer.h"
 #include "proc/workqueue.h"
-#include "sched_timer_private.h"
+#include "timer/sched_timer_private.h"
 
 struct sched_timer_work {
     struct timer_node tn;

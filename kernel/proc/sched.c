@@ -14,9 +14,9 @@
 #include "rbtree.h"
 #include "signal.h"
 #include "errno.h"
-#include "sched_timer_private.h"
+#include "timer/sched_timer_private.h"
 #include "rcu.h"
-#include "timer.h"
+#include "timer/timer.h"
 
 // Locking order:
 // - sleep_lock

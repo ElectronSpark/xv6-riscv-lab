@@ -6,7 +6,7 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc/proc.h"
-#include "timer.h"
+#include "timer/timer.h"
 #include "proc/sched.h"
 
 uint64

@@ -13,7 +13,7 @@
 #include "rcu.h"
 #include "proc/proc.h"
 #include "proc/sched.h"
-#include "timer.h"
+#include "timer/timer.h"
 #include "string.h"
 
 // Test configuration

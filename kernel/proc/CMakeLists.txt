@@ -6,8 +6,6 @@ set(PROC_C_SRCS
     sys_signal.c
     sysproc.c
     workqueue.c
-    timer.c
-    sched_timer.c
     thread.c
     pid.c
 )

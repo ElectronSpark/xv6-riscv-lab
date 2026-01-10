@@ -20,7 +20,7 @@
 #include "spinlock.h"
 #include "riscv.h"
 #include "completion.h"
-#include "timer.h"
+#include "timer/timer.h"
 
 // Forward declarations for wrapped functions (linked via --wrap)
 void spin_init(struct spinlock *lock, char *name);

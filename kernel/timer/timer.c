@@ -7,7 +7,7 @@
 #include "riscv.h"
 #include "spinlock.h"
 #include "defs.h"
-#include "timer.h"
+#include "timer/timer.h"
 #include "list.h"
 #include "rbtree.h"
 #include "proc/proc.h"
