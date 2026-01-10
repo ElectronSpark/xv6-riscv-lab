@@ -43,6 +43,10 @@
 #define E1000_PCI_ADDR 0x40000000L
 #define E1000_IRQ 33
 
+// Goldfish RTC (Real Time Clock)
+#define GOLDFISH_RTC 0x101000L
+#define GOLDFISH_RTC_IRQ 11
+
 // qemu puts platform-level interrupt controller (PLIC) here.
 #define PLIC 0x0c000000L
 #define PLIC_PRIORITY (PLIC + 0x0)

@@ -1,6 +1,7 @@
 set(TIMER_C_SRCS
     timer.c
     sched_timer.c
+    goldfish_rtc.c
 )
 
 add_library(timer OBJECT

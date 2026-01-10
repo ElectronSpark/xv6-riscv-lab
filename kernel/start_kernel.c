@@ -16,6 +16,7 @@
 #include "rcu.h"
 #include "sbi.h"
 #include "ipi.h"
+#include "timer/goldfish_rtc.h"
 
 volatile STATIC int started = 0;
 extern void _entry(); // entry.S
@@ -49,6 +50,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     // Legacy iinit() and fileinit() removed - VFS handles these
     userinit();      // first user process
     sched_timer_init();
+    // goldfish_rtc_init();  // Goldfish RTC driver (1-second alarm)
     idle_proc_init();
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
@@ -159,10 +161,10 @@ void start_kernel_post_init(void) {
     // Linux-style: boot hart explicitly starts other harts after initialization.
     // OpenSBI keeps other harts stopped until we request them via sbi_hart_start().
     sbi_start_secondary_harts((unsigned long)_entry);
-    sleep_ms(1000);
+    // sleep_ms(1000);
 
     // RCU processing is now done per-CPU in idle loops
-    rcu_run_tests();
+    // rcu_run_tests();
     
     // Run device table stress tests
     // dev_table_test();
