@@ -27,6 +27,8 @@ typedef long int64;
 
 typedef uint64 pde_t;
 
+typedef uint64 cpumask_t;
+
 #ifndef size_t
 typedef typeof(sizeof(0)) size_t;
 #endif              /* size_t */

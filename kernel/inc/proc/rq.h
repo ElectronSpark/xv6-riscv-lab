@@ -3,4 +3,51 @@
 
 #include "proc/rq_types.h"
 
+// The priority values are made of two parts:
+// - 0bit-4bit: sub-priority (0-31), lower value means higher priority.
+//      Managed by specific scheduling class.
+// - 5bit-7bit: main priority (0-7), lower value means
+//      Managed by rq layer.
+//      Each main level corresponds to a sched class.
+//      Always prefer lower main priority level when picking next task.
+#define PRIORITY_SUBLEVEL_MASK      0x1F
+#define PRIORITY_MAINLEVEL_MASK     0xE0
+#define PRIORITY_MAINLEVEL_SHIFT    5
+#define PRIORITY_MAINLEVELS         8
+#define MAJOR_PRIORITY(prio)    (((prio) & PRIORITY_MAINLEVEL_MASK) >> PRIORITY_MAINLEVEL_SHIFT)
+#define MINOR_PRIORITY(prio)    ((prio) & PRIORITY_SUBLEVEL_MASK)
+
+#define DEFAULT_MAJOR_PRIORITY   4
+#define DEFAULT_MINOR_PRIORITY   16
+#define DEFAULT_PRIORITY    ((DEFAULT_MAJOR_PRIORITY << PRIORITY_MAINLEVEL_SHIFT) | DEFAULT_MINOR_PRIORITY)
+
+struct rq *get_rq_for_cpu(int cls_id, int cpu_id);
+struct rq *pick_next_rq(void);
+void rq_global_init(void);
+void rq_init(struct rq* rq, struct sched_class* sched_class);
+void sched_entity_init(struct sched_entity* se);
+void sched_class_register(int id, struct sched_class* cls_id);
+void rq_lock(int cpu_id);
+void rq_unlock(int cpu_id);
+void rq_lock_current(void);
+void rq_unlock_current(void);
+
+struct rq *rq_select_task_rq(struct sched_entity* se, cpumask_t cpumask);
+
+// Set/Clear the ready status of a scheduling class on a CPU
+void rq_set_ready(int cls_id, int cpu_id);
+void rq_clear_ready(int cls_id, int cpu_id);
+
+// The following are wrappers around the sched_class callbacks
+// Will assume the validity of rq and se
+void rq_enqueue_task(struct rq* rq, struct sched_entity* se);
+void rq_dequeue_task(struct sched_entity* se);
+struct sched_entity *rq_pick_next_task(struct rq* rq);
+void rq_put_prev_task(struct sched_entity* se);
+void rq_set_next_task(struct sched_entity* se);
+void rq_task_tick(struct sched_entity* se);
+void rq_task_fork(struct sched_entity* se);
+void rq_task_dead(struct sched_entity* se);
+void rq_yield_task(void);
+
 #endif // __KERNEL_PROC_RQ_H

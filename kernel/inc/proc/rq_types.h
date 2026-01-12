@@ -10,17 +10,65 @@
 struct rq;
 struct sched_entity;
 
+#define SCHED_FIXEDPOINT_SHIFT 10
+#define SCHED_FIXEDPOINT_ONE (1 << SCHED_FIXEDPOINT_SHIFT)
+struct load_weight {
+    uint32 weight;      // Weight for scheduling
+    uint32 inv_weight;  // Inverse weight for calculations
+};
+
+// I picked some callbacks from Linux's sched_class as examples.
+struct sched_class {
+    // When a task is added to or removed from the run queue
+    void (*enqueue_task)(struct rq *rq, struct sched_entity *se);
+    void (*dequeue_task)(struct rq *rq, struct sched_entity *se);
+
+    struct rq *(*select_task_rq)(struct rq *rq, struct sched_entity *se, cpumask_t cpumask);
+
+    // Select the next task to run
+    // May temporarily remove the task from the run queue datastructure,
+    // but will eventually re-add it back if eligible
+    // Every sched class has to implement at least pick_next_task
+    struct sched_entity* (*pick_next_task)(struct rq *rq);
+    void (*put_prev_task)(struct rq *rq, struct sched_entity *se);
+    void (*set_next_task)(struct rq *rq, struct sched_entity *se);
+
+    // Called on each timer tick for the currently running task
+    void (*task_tick)(struct rq *rq, struct sched_entity *se);
+
+    // When creating or exiting a process
+    void (*task_fork)(struct rq *rq, struct sched_entity *se);
+    void (*task_dead)(struct rq *rq, struct sched_entity *se);
+
+    // When volunrarily yielding the CPU
+    void (*yield_task)(struct rq *rq);
+};
+
 struct rq {
-    struct spinlock lock;
-    list_node_t proc_list;  // List of processes in this run queue
-    int proc_count;         // Number of processes in the run queue
+    struct sched_class *sched_class;  // Scheduling class in use
+    int task_count;         // Number of processes in the run queue
+    int cpu_id;             // CPU ID this run queue belongs to
 } __ALIGNED_CACHELINE;
 
 struct sched_entity {
     struct rq *rq;          // Pointer to the run queue
-    list_node_t run_list;   // List node for the run queue
-    int priority;           // Priority of the scheduling entity
-    
+    int priority;           // Scheduling priority
+    struct sched_class *sched_class;  // Scheduling class
+    // Priority Inheritance lock is adopted from Linux kernel.
+    // Although we don't have priority levels yet, we still need pi_lock to
+    // protect wakening up process.
+    // pi_lock does not protect sleeping process, it's role is to avoid
+    // multiple wakeups to the same process at the same time.
+    // pi_lock should be acquired before sched lock
+    spinlock_t pi_lock;             // priority inheritance lock
+    int on_rq;                    // The process is on a ready queue
+    int on_cpu;                   // The process is running on a CPU
+    int cpu_id;                   // The CPU running this process.
+    cpumask_t affinity_mask;      // CPU affinity mask
+
+    uint64 start_time;            // Time when the process started running
+    uint64 exec_start;            // Last time the process started executing
+    uint64 exec_end;              // Last time the process stopped executing
 };
 
 #endif  // __KERNEL_PROC_RQ_TYPES_H

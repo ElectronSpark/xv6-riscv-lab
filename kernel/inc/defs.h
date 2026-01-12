@@ -9,6 +9,7 @@
 #define	mkdev(m,n)  ((uint)((m)<<20| (n)))
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
+#define max(a, b) ((a) > (b) ? (a) : (b))
 
 struct buf;
 struct context;

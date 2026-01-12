@@ -8,6 +8,7 @@ set(PROC_C_SRCS
     workqueue.c
     thread.c
     pid.c
+    rq.c
 )
 
 set(PROC_S_SRCS

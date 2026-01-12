@@ -5,6 +5,7 @@
 #include "list_type.h"
 #include "hlist_type.h"
 #include "proc/proc_queue_type.h"
+#include "proc/rq_types.h"
 #include "trapframe.h"
 #include "signal_types.h"
 #include "vm_types.h"
@@ -118,13 +119,13 @@ struct proc {
   vm_t *vm;                     // Virtual memory areas and page table
   struct utrapframe *trapframe; // data page for trampoline.S
   
-  // both p->lock and __sched_lock must be held 
   // Priority Inheritance lock is adopted from Linux kernel.
   // Although we don't have priority levels yet, we still need pi_lock to
   // protect wakening up process.
   // pi_lock does not protect sleeping process, it's role is to avoid
   // multiple wakeups to the same process at the same time.
   // pi_lock should be acquired before sched lock
+  struct sched_entity sched_entity;
   spinlock_t pi_lock;           // priority inheritance lock
   int on_rq;                   // The process is on a ready queue
   int on_cpu;                  // The process is running on a CPU
@@ -141,7 +142,7 @@ struct proc {
   // rcu_read_unlock(). The process can safely yield and migrate CPUs while this is > 0.
   int rcu_read_lock_nesting;   // Number of nested rcu_read_lock() calls
 
-  // RCU deferred freeing - rcu_head must be last since callback frees the kstack
+  // RCU deferred freeing
   rcu_head_t rcu_head;         // RCU callback head (must be last)
 };
 

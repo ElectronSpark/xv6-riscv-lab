@@ -10,6 +10,7 @@
 #include "hlist.h"
 #include "proc/proc_queue.h"
 #include "proc/sched.h"
+#include "proc/rq.h"
 #include "slab.h"
 #include "rbtree.h"
 #include "signal.h"
@@ -79,6 +80,7 @@ void sched_unlock(void) {
 /* Scheduler functions */
 void scheduler_init(void) {
     chan_queue_init();
+    rq_global_init();
 }
 
 void __scheduler_add_ready(struct proc *p) {

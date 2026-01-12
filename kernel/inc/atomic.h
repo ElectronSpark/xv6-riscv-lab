@@ -60,6 +60,9 @@ static inline void atomic_inc(int *value) {
     __atomic_fetch_add(value, 1, __ATOMIC_SEQ_CST);
 }
 
+#define atomic_or(ptr, val)   __atomic_fetch_or((ptr), (val), __ATOMIC_SEQ_CST)
+#define atomic_and(ptr, val)  __atomic_fetch_and((ptr), (val), __ATOMIC_SEQ_CST)
+
 #define atomic_cas_ptr(ptr, old, new_val) ({                                \
     bool __RES = __atomic_compare_exchange_n((ptr), (old), (new_val),       \
                                 false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST); \
