@@ -198,8 +198,8 @@ void procdump(void) {
         printf("%d %s%s [%s] %s", pid, state, 
                 PROC_STOPPED(p) ? " (stopped)" : "", 
                 PROC_USER_SPACE(p) ? "U":"K", name);
-        if (smp_load_acquire(&p->on_cpu)) {
-            printf(" (CPU: %d)\n", p->cpu_id);
+        if (smp_load_acquire(&p->sched_entity->on_cpu)) {
+            printf(" (CPU: %d)\n", p->sched_entity->cpu_id);
         } else {
             printf("\n");
         }
@@ -255,7 +255,7 @@ void procdump_bt(void) {
             printf("\n--- Process %d [%s] %s ---\n", pid, 
                 pstate == PSTATE_INTERRUPTIBLE ? "interruptible" : "uninterruptible",
                 name);
-            print_proc_backtrace(&p->context, p->kstack, p->kstack_order);
+            print_proc_backtrace(&p->sched_entity->context, p->kstack, p->kstack_order);
         }
         }
         proc_unlock(p);
@@ -306,7 +306,7 @@ void procdump_bt_pid(int pid) {
     } else if (pstate == PSTATE_UNUSED || pstate == PSTATE_ZOMBIE) {
         printf("Process is %s, no valid context\n", procstate_to_str(pstate));
     } else {
-        print_proc_backtrace(&p->context, p->kstack, p->kstack_order);
+        print_proc_backtrace(&p->sched_entity->context, p->kstack, p->kstack_order);
     }
     
     proc_unlock(p);
@@ -347,8 +347,8 @@ static void __procdump_tree_recursive(struct proc *p, int depth) {
     printf("%d %s%s [%s] %s", pid, state, 
             PROC_STOPPED(p) ? " (stopped)" : "", 
             PROC_USER_SPACE(p) ? "U":"K", name);
-    if (smp_load_acquire(&p->on_cpu)) {
-        printf(" (CPU: %d)\n", p->cpu_id);
+    if (smp_load_acquire(&p->sched_entity->on_cpu)) {
+        printf(" (CPU: %d)\n", p->sched_entity->cpu_id);
     } else {
         printf("\n");
     }

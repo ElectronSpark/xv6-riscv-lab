@@ -81,7 +81,6 @@ struct proc {
   list_node_t sched_entry;     // entry for ready queue
   struct workqueue *wq;        // work queue this process belongs to
   list_node_t wq_entry;        // link to work queue
-  struct context context;      // swtch() here to run process
   uint64 flags;
 #define PROC_FLAG_VALID             0x1
 #define PROC_FLAG_KILLED            0x8   // Process is exiting or exited
@@ -119,19 +118,11 @@ struct proc {
   vm_t *vm;                     // Virtual memory areas and page table
   struct utrapframe *trapframe; // data page for trampoline.S
   
-  // Priority Inheritance lock is adopted from Linux kernel.
-  // Although we don't have priority levels yet, we still need pi_lock to
-  // protect wakening up process.
-  // pi_lock does not protect sleeping process, it's role is to avoid
-  // multiple wakeups to the same process at the same time.
-  // pi_lock should be acquired before sched lock
+  // Priority Inheritance lock, on_rq, on_cpu, cpu_id, and context are now
+  // stored in sched_entity. Access them via p->sched_entity-><field>.
   struct sched_entity *sched_entity;
-  spinlock_t pi_lock;           // priority inheritance lock
-  int on_rq;                   // The process is on a ready queue
-  int on_cpu;                  // The process is running on a CPU
   uint64 kentry;               // Entry point for kernel process
   uint64 arg[2];               // Argument for kernel process
-  int cpu_id;                  // The CPU running this process.
   
   struct fs_struct *fs;          // Filesystem state (on kernel stack below utrapframe)
   char name[16];               // Process name (debugging)

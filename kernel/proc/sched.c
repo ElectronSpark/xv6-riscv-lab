@@ -91,7 +91,7 @@ void __scheduler_add_ready(struct proc *p) {
            "Process must be in RUNNING state to be added to ready queue");
     
     // Check on_rq flag - if already on a queue, skip (like Linux)
-    if (smp_load_acquire(&p->on_rq)) {
+    if (smp_load_acquire(&p->sched_entity->on_rq)) {
         return; // Already on a run queue, nothing to do
     }
     
@@ -101,7 +101,7 @@ void __scheduler_add_ready(struct proc *p) {
               p->name, p->pid);
     }
 
-    smp_store_release(&p->on_rq, 1); // Mark as on run queue
+    smp_store_release(&p->sched_entity->on_rq, 1); // Mark as on run queue
     list_node_push(&ready_queue, p, sched_entry);
 }
 
@@ -112,12 +112,12 @@ static struct proc *__sched_pick_next(void) {
     sched_lock();
     struct proc *p = list_node_pop_back(&ready_queue, struct proc, sched_entry);
     if (p) {
-        smp_store_release(&p->on_rq, 0); // Mark as off run queue (while holding sched_lock)
+        smp_store_release(&p->sched_entity->on_rq, 0); // Mark as off run queue (while holding sched_lock)
     }
     sched_unlock();
     
     if (p) {
-        smp_store_release(&p->on_cpu, 1); // Mark the process as running on CPU
+        smp_store_release(&p->sched_entity->on_cpu, 1); // Mark the process as running on CPU
         enum procstate pstate = __proc_get_pstate(p);
         if (pstate != PSTATE_RUNNING) {
             assert(pstate != PSTATE_INTERRUPTIBLE, "try to schedule an interruptible process");
@@ -138,8 +138,8 @@ struct proc *process_switch_to(struct proc *current, struct proc *target) {
     __atomic_store_n(&mycpu()->rcu_timestamp, now, __ATOMIC_RELEASE);
     
     mycpu()->proc = target;
-    struct context *prev_context = __swtch_context(&current->context, &target->context);
-    return container_of(prev_context, struct proc, context);
+    struct context *prev_context = __swtch_context(&current->sched_entity->context, &target->sched_entity->context);
+    return proc_from_context(prev_context);
 }
 
 // Switch to the given process.
@@ -264,9 +264,9 @@ void scheduler_stop(struct proc *p) {
 
 void scheduler_continue(struct proc *p) {
     // Uses pi_lock protocol like __do_scheduler_wakeup.
-    // Caller must hold p->pi_lock, must NOT hold proc_lock or sched_lock.
+    // Caller must hold p->sched_entity->pi_lock, must NOT hold proc_lock or sched_lock.
     assert(p != NULL, "Cannot continue a NULL process");
-    assert(spin_holding(&p->pi_lock), "pi_lock must be held for scheduler_continue");
+    assert(spin_holding(&p->sched_entity->pi_lock), "pi_lock must be held for scheduler_continue");
     assert(!spin_holding(&p->lock), "proc_lock must not be held for scheduler_continue");
     assert(!sched_holding(), "sched_lock must not be held for scheduler_continue");
     assert(p != myproc(), "Cannot continue the current process");
@@ -278,7 +278,7 @@ void scheduler_continue(struct proc *p) {
     // Wait for process to be off CPU before modifying state.
     // Like Linux's smp_cond_load_acquire in try_to_wake_up().
     // "One must be running (->on_cpu == 1) in order to remove oneself from the runqueue."
-    smp_cond_load_acquire(&p->on_cpu, !VAL);
+    smp_cond_load_acquire(&p->sched_entity->on_cpu, !VAL);
 
     PROC_CLEAR_STOPPED(p); // Clear the stopped flag
 
@@ -298,7 +298,7 @@ static void __scheduler_wakeup_assertion(struct proc *p) {
     if (p == myproc()) {
         assert(CPU_IN_ITR(), "Cannot wake up current process outside interrupt context");
     }
-    assert(spin_holding(&p->pi_lock), "Process pi_lock must be held when waking up a process");
+    assert(spin_holding(&p->sched_entity->pi_lock), "Process pi_lock must be held when waking up a process");
     assert(!spin_holding(&p->lock), "Process lock must not be held when waking up a process");
     assert(!sched_holding(), "Scheduler lock must not be held when waking up a process");
 }
@@ -334,7 +334,7 @@ static void __do_scheduler_wakeup(struct proc *p) {
     // If on_rq is set, the task is already queued - no need for full wakeup
     // (In Linux this would call ttwu_runnable() to potentially preempt)
     smp_rmb();
-    if (smp_load_acquire(&p->on_rq)) {
+    if (smp_load_acquire(&p->sched_entity->on_rq)) {
         return; // Already on a run queue, nothing to do
     }
     
@@ -344,9 +344,9 @@ static void __do_scheduler_wakeup(struct proc *p) {
     
     // Wait for the process to finish context switching out (on_cpu == 0)
     // This is critical: we must not add to run queue while still on a CPU
-    // Linux: smp_cond_load_acquire(&p->on_cpu, !VAL)
+    // Linux: smp_cond_load_acquire(&p->sched_entity->on_cpu, !VAL)
     // "Pairs with the smp_store_release() in finish_task()."
-    smp_cond_load_acquire(&p->on_cpu, !VAL);
+    smp_cond_load_acquire(&p->sched_entity->on_cpu, !VAL);
     
     // Atomically transition state from SLEEPING to WAKENING
     // This prevents multiple wakers from racing to add the task to the run queue
@@ -474,27 +474,27 @@ void wakeup_proc(struct proc *p)
     if (p == NULL) {
         return;
     }
-    spin_acquire(&p->pi_lock);
+    spin_acquire(&p->sched_entity->pi_lock);
     scheduler_wakeup(p);
-    spin_release(&p->pi_lock);
+    spin_release(&p->sched_entity->pi_lock);
 }
 
 void wakeup_timeout(struct proc *p) {
     if (p == NULL) {
         return;
     }
-    spin_acquire(&p->pi_lock);
+    spin_acquire(&p->sched_entity->pi_lock);
     scheduler_wakeup_timeout(p);
-    spin_release(&p->pi_lock);
+    spin_release(&p->sched_entity->pi_lock);
 }
 
 void wakeup_killable(struct proc *p) {
     if (p == NULL) {
         return;
     }
-    spin_acquire(&p->pi_lock);
+    spin_acquire(&p->sched_entity->pi_lock);
     scheduler_wakeup_killable(p);
-    spin_release(&p->pi_lock);
+    spin_release(&p->sched_entity->pi_lock);
 }
 
 // Wake up a process sleeping in interruptible state
@@ -503,9 +503,9 @@ void wakeup_interruptible(struct proc *p)
     if (p == NULL) {
         return;
     }
-    spin_acquire(&p->pi_lock);
+    spin_acquire(&p->sched_entity->pi_lock);
     scheduler_wakeup_interruptible(p);
-    spin_release(&p->pi_lock);
+    spin_release(&p->sched_entity->pi_lock);
 }
 
 uint64 sys_dumpchan(void) {
@@ -532,9 +532,9 @@ void context_switch_prepare(struct proc *prev, struct proc *next) {
     assert(next != NULL, "Next process is NULL");
 
     // Mark the next process as on the CPU
-    smp_store_release(&next->on_cpu, 1);
+    smp_store_release(&next->sched_entity->on_cpu, 1);
     sched_lock();
-    next->cpu_id = cpuid();
+    next->sched_entity->cpu_id = cpuid();
 }
 
 void context_switch_finish(struct proc *prev, struct proc *next) {
@@ -555,7 +555,7 @@ void context_switch_finish(struct proc *prev, struct proc *next) {
     sched_unlock();
     
     // Now safe to mark as not on CPU - wakeup path can proceed
-    smp_store_release(&prev->on_cpu, 0);
+    smp_store_release(&prev->sched_entity->on_cpu, 0);
     
     if (chan_holding()) {
         sleep_unlock();

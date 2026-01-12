@@ -50,7 +50,6 @@ __pcb_init(struct proc *p, struct fs_struct *fs, struct vfs_fdtable *fdtable)
   list_entry_init(&p->children);
   hlist_entry_init(&p->proctab_entry);
   spin_init(&p->lock, "proc");
-  spin_init(&p->pi_lock, "proc_pi_lock");
   p->fs = fs;
   if (fs != NULL) {
     memset(fs, 0, sizeof(*fs));
@@ -231,10 +230,10 @@ allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order)
   // which returns to user space.
   p->kstack_order = kstack_order;
   p->kstack = (uint64)kstack;
-  memset(&p->context, 0, sizeof(p->context));
-  p->context.ra = (uint64)entry;
-  p->context.sp = p->ksp;
-  p->context.s0 = p->ksp;
+  memset(&p->sched_entity->context, 0, sizeof(p->sched_entity->context));
+  p->sched_entity->context.ra = (uint64)entry;
+  p->sched_entity->context.sp = p->ksp;
+  p->sched_entity->context.s0 = p->ksp;
   p->kentry = (uint64)entry;
   p->arg[0] = arg1;
   p->arg[1] = arg2;
@@ -248,7 +247,7 @@ allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order)
 
 static void __kernel_proc_entry(struct context *prev) {
   assert(prev != NULL, "kernel_proc_entry: prev context is NULL");
-  context_switch_finish(container_of(prev, struct proc, context), myproc());
+  context_switch_finish(proc_from_context(prev), myproc());
   
   // Set up the kernel stack and context for the new process.
   int (*entry)(uint64, uint64) = (void*)myproc()->kentry;
@@ -270,7 +269,7 @@ int kernel_proc_create(const char *name, struct proc **retp, void *entry,
   assert(initproc != NULL, "kernel_proc_create: initproc is NULL");
   
   // Set up the context BEFORE making the process visible to scheduler
-  p->context.ra = (uint64)__kernel_proc_entry;
+  p->sched_entity->context.ra = (uint64)__kernel_proc_entry;
   p->kentry = (uint64)entry;
   p->arg[0] = arg1;
   p->arg[1] = arg2;
@@ -318,9 +317,9 @@ void idle_proc_init(void) {
   __proc_set_pstate(p, PSTATE_RUNNING);
   mycpu()->proc = p;
   mycpu()->idle_proc = p;
-  smp_store_release(&p->on_cpu, 1);
-  smp_store_release(&p->on_rq, 1);
-  smp_store_release(&p->cpu_id, cpuid());
+  smp_store_release(&p->sched_entity->on_cpu, 1);
+  smp_store_release(&p->sched_entity->on_rq, 1);
+  smp_store_release(&p->sched_entity->cpu_id, cpuid());
 
   printf("CPU %ld idle process initialized at kstack 0x%lx\n", cpuid(), (uint64)kstack);
 }
@@ -472,10 +471,10 @@ userinit(void)
 
   proc_unlock(p);
   // Don't forget to wake up the process.
-  spin_acquire(&p->pi_lock);
+  spin_acquire(&p->sched_entity->pi_lock);
   __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
   scheduler_wakeup(p);
-  spin_release(&p->pi_lock);
+  spin_release(&p->sched_entity->pi_lock);
 }
 
 /*
@@ -611,9 +610,9 @@ fork(void)
   
   proc_unlock(np);
   
-  spin_acquire(&np->pi_lock);
+  spin_acquire(&np->sched_entity->pi_lock);
   scheduler_wakeup(np);
-  spin_release(&np->pi_lock);
+  spin_release(&np->sched_entity->pi_lock);
 
   return pid;
 }
@@ -769,8 +768,8 @@ forkret(struct context *prev)
   // the scheduler operations. For processes that gave up CPU by calling yield(),
   //   yield() would restore the previous interruption state when switched back. 
   // But at here, we need to enable interrupts for the first time.
-  assert(prev != NULL, "kernel_proc_entry: prev context is NULL");
-  context_switch_finish(container_of(prev, struct proc, context), myproc());
+  assert(prev != NULL, "forkret: prev context is NULL");
+  context_switch_finish(proc_from_context(prev), myproc());
 
   // Still holding p->lock from scheduler.
   intr_on();

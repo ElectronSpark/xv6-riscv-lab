@@ -72,6 +72,18 @@ struct sched_entity {
     uint64 start_time;            // Time when the process started running
     uint64 exec_start;            // Last time the process started executing
     uint64 exec_end;              // Last time the process stopped executing
+
+    struct context context;       // swtch() here to run process
 };
+
+// Helper to get sched_entity from context pointer (used after context switch)
+static inline struct sched_entity *se_from_context(struct context *ctx) {
+    return container_of(ctx, struct sched_entity, context);
+}
+
+// Helper to get proc from context pointer (used after context switch)
+static inline struct proc *proc_from_context(struct context *ctx) {
+    return se_from_context(ctx)->proc;
+}
 
 #endif  // __KERNEL_PROC_RQ_TYPES_H

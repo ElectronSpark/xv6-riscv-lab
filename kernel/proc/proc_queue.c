@@ -329,13 +329,13 @@ static void __do_wakeup(proc_node_t *woken, int error_no, uint64 rdata, struct p
     woken->error_no = error_no; // Set the error number for the woken process
     woken->data = rdata; // Set the data for the woken process
     struct proc *p = woken->proc;
-    spin_acquire(&p->pi_lock);
+    spin_acquire(&p->sched_entity->pi_lock);
     if (retp != NULL) {
         *retp = p;
     }
     // @TODO: only wake up if the process receives sigchld
     scheduler_wakeup(p);
-    spin_release(&p->pi_lock);
+    spin_release(&p->sched_entity->pi_lock);
 }
 
 static int __proc_queue_wakeup_one(proc_queue_t *q, int error_no, uint64 rdata, struct proc **retp) {

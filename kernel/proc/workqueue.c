@@ -268,9 +268,9 @@ static int __create_manager(struct workqueue *wq) {
 // Try to wake up the manager process of a work queue
 // Will try to acquire manager process lock and scheduler lock
 static void __wakeup_manager(struct workqueue *wq) {
-    spin_acquire(&wq->manager->pi_lock);
+    spin_acquire(&wq->manager->sched_entity->pi_lock);
     scheduler_wakeup(wq->manager);
-    spin_release(&wq->manager->pi_lock);
+    spin_release(&wq->manager->sched_entity->pi_lock);
 }
 
 void workqueue_init(void) {
