@@ -12,6 +12,7 @@
 #include "hlist.h"
 #include "proc/proc_queue.h"
 #include "proc/sched.h"
+#include "proc/rq.h"
 #include "slab.h"
 #include "page.h"
 #include "signal.h"
@@ -40,7 +41,6 @@ extern char sig_trampoline[]; // sig_trampoline.S
 static void
 __pcb_init(struct proc *p, struct fs_struct *fs, struct vfs_fdtable *fdtable)
 {
-  memset(p, 0, sizeof(*p));
   __proc_set_pstate(p, PSTATE_UNUSED);
   sigpending_init(p);
   sigstack_init(&p->sig_stack);
@@ -59,6 +59,10 @@ __pcb_init(struct proc *p, struct fs_struct *fs, struct vfs_fdtable *fdtable)
       memset(fdtable, 0, sizeof(*fdtable));
       vfs_fdtable_init(fdtable);
     }
+  }
+  if (p->sched_entity != NULL) {
+    memset(p->sched_entity, 0, sizeof(*(p->sched_entity)));
+    sched_entity_init(p->sched_entity, p);
   }
 }
 
@@ -107,6 +111,11 @@ __kstack_arrange(void *kstack, size_t kstack_size, uint64 flags)
     next_addr &= ~0x7UL; // align to 8 bytes
     fdtable = (struct vfs_fdtable *)next_addr;
   }
+
+  // Allocate space for sched_entity
+  next_addr = next_addr - sizeof(struct sched_entity);
+  next_addr &= ~CACHELINE_MASK; // align to cache line size
+  p->sched_entity = (struct sched_entity *)next_addr;
   
   // Initialize the proc structure
   __pcb_init(p, fs, fdtable);
@@ -213,7 +222,7 @@ allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order)
     return NULL;
   }
   size_t kstack_size = (1UL << (PAGE_SHIFT + kstack_order));
-  memset(kstack, 0, kstack_size);
+  memset(kstack + kstack_size - PAGE_SIZE, 0, PAGE_SIZE);
   
   // Arrange proc, utrapframe, fs_struct, and vfs_fdtable on the kernel stack
   p = __kstack_arrange(kstack, kstack_size, KSTACK_ARRANGE_FLAGS_ALL);
@@ -229,6 +238,8 @@ allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order)
   p->kentry = (uint64)entry;
   p->arg[0] = arg1;
   p->arg[1] = arg2;
+
+  sched_entity_init(p->sched_entity, p);
 
   p->pid = __alloc_pid();
   proctab_proc_add(p);

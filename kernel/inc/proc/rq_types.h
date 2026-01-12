@@ -5,10 +5,12 @@
 #include "riscv.h"
 #include "types.h"
 #include "spinlock.h"
+#include "trapframe.h"
 #include "list_type.h"
 
 struct rq;
 struct sched_entity;
+struct proc;
 
 #define SCHED_FIXEDPOINT_SHIFT 10
 #define SCHED_FIXEDPOINT_ONE (1 << SCHED_FIXEDPOINT_SHIFT)
@@ -53,6 +55,7 @@ struct rq {
 struct sched_entity {
     struct rq *rq;          // Pointer to the run queue
     int priority;           // Scheduling priority
+    struct proc *proc;      // Back pointer to the process
     struct sched_class *sched_class;  // Scheduling class
     // Priority Inheritance lock is adopted from Linux kernel.
     // Although we don't have priority levels yet, we still need pi_lock to

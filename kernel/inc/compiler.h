@@ -10,8 +10,10 @@
 #define STATIC_INLINE static inline
 #endif
 
+#define CACHELINE_SIZE 64UL
+#define CACHELINE_MASK (CACHELINE_SIZE - 1UL)
 #define __ALIGNED(x) __attribute__((aligned(x)))
-#define __ALIGNED_CACHELINE __ALIGNED(64)
+#define __ALIGNED_CACHELINE __ALIGNED(CACHELINE_SIZE)
 #define __ALIGNED_PAGE __ALIGNED(4096)
 #define __PACKED __attribute__((packed))
 #define __SECTION(seg_name) __attribute__((section(#seg_name)))

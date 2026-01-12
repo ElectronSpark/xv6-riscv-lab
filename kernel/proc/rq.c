@@ -118,7 +118,7 @@ void rq_init(struct rq* rq, struct sched_class* sched_class) {
     rq->task_count = 0;
 }
 
-void sched_entity_init(struct sched_entity* se) {
+void sched_entity_init(struct sched_entity* se, struct proc* p) {
     assert(se != NULL, "sched_entity_init: se is NULL");
     se->rq = NULL;
     se->priority = -1;
@@ -131,16 +131,20 @@ void sched_entity_init(struct sched_entity* se) {
     se->start_time = 0;
     se->exec_start = 0;
     se->exec_end = 0;
+    se->proc = p;
 }
 
-void sched_class_register(int id, struct sched_class* cls_id) {
+void sched_class_register(int id, struct sched_class* cls) {
     if (id < 0 || id >= PRIORITY_MAINLEVELS) {
         panic("sched_class_register: invalid sched class id %d\n", id);
     }
-    if (cls_id->pick_next_task == NULL) {
+    if (cls == NULL) {
+        panic("sched_class_register: sched class id %d is NULL\n", id);
+    }
+    if (cls->pick_next_task == NULL) {
         panic("sched_class_register: sched class id %d has no pick_next_task\n", id);
     }
-    rq_global.sched_class[id] = cls_id;
+    rq_global.sched_class[id] = cls;
 }
 
 void rq_lock(int cpu_id) {
@@ -242,7 +246,7 @@ void rq_task_tick(struct sched_entity* se) {
 void rq_task_fork(struct sched_entity* se) {
     // This is called by the parent process's rq when forking a new process
     // Thus the rq and se are of the parent process
-    struct sched_entity* current_se = &myproc()->sched_entity;
+    struct sched_entity* current_se = myproc()->sched_entity;
 
     if (current_se->sched_class->task_fork) {
         current_se->sched_class->task_fork(se->rq, se);
@@ -261,7 +265,7 @@ void rq_task_dead(struct sched_entity* se) {
 }
 
 void rq_yield_task(void) {
-    struct rq *current_rq = myproc()->sched_entity.rq;
+    struct rq *current_rq = myproc()->sched_entity->rq;
     if (current_rq->sched_class->yield_task) {
         current_rq->sched_class->yield_task(current_rq);
     }

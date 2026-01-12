@@ -125,7 +125,7 @@ struct proc {
   // pi_lock does not protect sleeping process, it's role is to avoid
   // multiple wakeups to the same process at the same time.
   // pi_lock should be acquired before sched lock
-  struct sched_entity sched_entity;
+  struct sched_entity *sched_entity;
   spinlock_t pi_lock;           // priority inheritance lock
   int on_rq;                   // The process is on a ready queue
   int on_cpu;                  // The process is running on a CPU
@@ -146,7 +146,10 @@ struct proc {
   rcu_head_t rcu_head;         // RCU callback head (must be last)
 };
 
-BUILD_BUG_ON((sizeof(struct proc) + sizeof(struct utrapframe) + sizeof(struct fs_struct) + sizeof(struct vfs_fdtable) + 64) >= PGSIZE);
+BUILD_BUG_ON(((sizeof(struct proc) + sizeof(struct utrapframe)   \
+            + sizeof(struct fs_struct) + sizeof(struct vfs_fdtable)   \
+            + sizeof(struct sched_entity) + 80  \
+            + CACHELINE_SIZE) & ~CACHELINE_MASK) >= PGSIZE);
 
 static inline uint64 proc_flags(struct proc *p) {
   if (p == NULL) {
