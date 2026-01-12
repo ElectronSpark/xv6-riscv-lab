@@ -4,6 +4,7 @@
 #include "riscv.h"
 #include "spinlock.h"
 #include "proc/proc.h"
+#include "proc_private.h"
 #include "defs.h"
 #include "printf.h"
 #include "list.h"
@@ -109,13 +110,25 @@ void rq_global_init(void) {
         assert(rq_global.rqs[i] != NULL, "rq_global_init: failed to allocate rqs array");
         memset(rq_global.rqs[i], 0, size);
     }
+
+    // Initialize each individual rq structure is done in rq_register
+    init_idle_rq();
 }
 
-void rq_init(struct rq* rq, struct sched_class* sched_class) {
+void rq_init(struct rq* rq, struct sched_class* sched_class, int cpu_id) {
     assert(rq != NULL, "rq_init: rq is NULL");
     assert(sched_class != NULL, "rq_init: sched_class is NULL");
     rq->sched_class = sched_class;
     rq->task_count = 0;
+    rq->cpu_id = cpu_id;
+}
+
+void rq_register(struct rq* rq, int cls_id, int cpu_id) {
+    assert(rq != NULL, "rq_register: rq is NULL");
+    assert(cls_id >= 0 && cls_id < PRIORITY_MAINLEVELS, "rq_register: invalid cls_id %d", cls_id);
+    assert(cpu_id >= 0 && cpu_id < NCPU, "rq_register: invalid cpu_id %d", cpu_id);
+    assert(rq_global.rqs[cls_id][cpu_id] == NULL, "rq_register: rq for cls_id %d cpu_id %d already registered", cls_id, cpu_id);
+    rq_global.rqs[cls_id][cpu_id] = rq;
 }
 
 void sched_entity_init(struct sched_entity* se, struct proc* p) {

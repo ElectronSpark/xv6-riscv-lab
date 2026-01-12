@@ -7,6 +7,7 @@
 #include "spinlock.h"
 #include "trapframe.h"
 #include "list_type.h"
+#include "bintree_type.h"
 
 struct rq;
 struct sched_entity;
@@ -53,6 +54,10 @@ struct rq {
 } __ALIGNED_CACHELINE;
 
 struct sched_entity {
+    union {
+        struct rb_node rb_entry;    // For red-black tree (if needed)
+        list_node_t list_entry;     // For linked list (if needed)
+    };
     struct rq *rq;          // Pointer to the run queue
     int priority;           // Scheduling priority
     struct proc *proc;      // Back pointer to the process
@@ -85,5 +90,11 @@ static inline struct sched_entity *se_from_context(struct context *ctx) {
 static inline struct proc *proc_from_context(struct context *ctx) {
     return se_from_context(ctx)->proc;
 }
+
+// Idle proc rq
+struct idle_rq {
+    struct rq rq;
+    struct proc *idle_proc;   // Idle process for this CPU
+};
 
 #endif  // __KERNEL_PROC_RQ_TYPES_H

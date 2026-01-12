@@ -29,5 +29,9 @@ int proctab_get_pid_proc(int pid, struct proc **pp);
 void proctab_proc_add(struct proc *p);
 void proctab_proc_remove(struct proc *p);
 
+// Register the given process as the idle process for the current CPU.
+void register_idle_process(struct proc *p);
+
+void init_idle_rq(void);
 
 #endif // __KERNEL_PROC_PRIVATE_H__

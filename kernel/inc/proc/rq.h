@@ -21,12 +21,17 @@
 #define DEFAULT_MINOR_PRIORITY   16
 #define DEFAULT_PRIORITY    ((DEFAULT_MAJOR_PRIORITY << PRIORITY_MAINLEVEL_SHIFT) | DEFAULT_MINOR_PRIORITY)
 
+#define EXIT_MAJOR_PRIORITY      0
+#define FIFO_MAJOR_PRIORITY      1
+#define IDLE_MAJOR_PRIORITY      7
+
 struct rq *get_rq_for_cpu(int cls_id, int cpu_id);
 struct rq *pick_next_rq(void);
 void rq_global_init(void);
-void rq_init(struct rq* rq, struct sched_class* sched_class);
+void rq_init(struct rq* rq, struct sched_class* sched_class, int cpu_id);
 void sched_entity_init(struct sched_entity* se, struct proc* p);
 void sched_class_register(int id, struct sched_class* cls);
+void rq_register(struct rq* rq, int cls_id, int cpu_id);
 void rq_lock(int cpu_id);
 void rq_unlock(int cpu_id);
 void rq_lock_current(void);

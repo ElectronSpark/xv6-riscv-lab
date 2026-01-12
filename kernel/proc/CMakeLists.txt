@@ -9,6 +9,7 @@ set(PROC_C_SRCS
     thread.c
     pid.c
     rq.c
+    sched_idle.c
 )
 
 set(PROC_S_SRCS
