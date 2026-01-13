@@ -26,6 +26,9 @@
 #define FIFO_MAJOR_PRIORITY      1
 #define IDLE_MAJOR_PRIORITY      7
 
+#define MAKE_PRIORITY(major, minor)  (((major) << PRIORITY_MAINLEVEL_SHIFT) | (minor))
+#define IDLE_PRIORITY    MAKE_PRIORITY(IDLE_MAJOR_PRIORITY, DEFAULT_MINOR_PRIORITY)
+
 #define GET_RQ_FOR_CURRENT(cls_id)    get_rq_for_cpu((cls_id), cpuid())
 
 struct rq *get_rq_for_cpu(int cls_id, int cpu_id);
@@ -59,5 +62,17 @@ void rq_task_tick(struct sched_entity* se);
 void rq_task_fork(struct sched_entity* se);
 void rq_task_dead(struct sched_entity* se);
 void rq_yield_task(void);
+
+// Check if a CPU is allowed by the task's affinity mask
+bool rq_cpu_allowed(struct sched_entity *se, int cpu_id);
+
+// Scheduler attribute get/set APIs
+// These allow getting and setting scheduling parameters for a task.
+// Note: time_slice is currently a placeholder and not enforced by the scheduler.
+int sched_getattr(struct sched_entity *se, struct sched_attr *attr);
+int sched_setattr(struct sched_entity *se, const struct sched_attr *attr);
+
+// Initialize a sched_attr structure with default values
+void sched_attr_init(struct sched_attr *attr);
 
 #endif // __KERNEL_PROC_RQ_H

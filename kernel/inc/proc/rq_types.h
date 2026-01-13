@@ -20,6 +20,16 @@ struct load_weight {
     uint32 inv_weight;  // Inverse weight for calculations
 };
 
+// Scheduler attributes for configuring a task's scheduling parameters.
+// Used with sched_getattr() and sched_setattr() APIs.
+struct sched_attr {
+    uint32 size;              // Size of this structure (for versioning)
+    cpumask_t affinity_mask;  // CPU affinity bitmask
+    uint32 time_slice;        // Time slice length in ticks (placeholder - not yet implemented)
+    int priority;             // Scheduling priority (major + minor)
+    uint32 flags;             // Reserved for future use
+};
+
 // I picked some callbacks from Linux's sched_class as examples.
 // Note: se->on_rq and se->on_cpu should be managed out of rq layer
 struct sched_class {

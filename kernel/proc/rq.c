@@ -311,6 +311,19 @@ void rq_set_next_task(struct sched_entity* se) {
     }
 }
 
+// Check if the current CPU is allowed by the task's affinity mask.
+// Returns true if current CPU is allowed, false if migration is needed.
+// Note: Migration is handled lazily - when a process sleeps and wakes up,
+// rq_select_task_rq() in the wakeup path respects affinity_mask and places
+// the task on an allowed CPU. Processes that only yield() without sleeping
+// will stay on their current CPU until they sleep.
+bool rq_cpu_allowed(struct sched_entity *se, int cpu_id) {
+    if (se == NULL) {
+        return false;
+    }
+    return (se->affinity_mask & (1ULL << cpu_id)) != 0;
+}
+
 void rq_task_tick(struct sched_entity* se) {
     assert(se->sched_class != NULL, "rq_task_tick: se->sched_class is NULL");
     assert(se->rq != NULL, "rq_task_tick: se->rq is NULL");
@@ -360,4 +373,77 @@ void rq_yield_task(void) {
     if (current_rq->sched_class->yield_task) {
         current_rq->sched_class->yield_task(current_rq);
     }
+}
+
+// Default time slice value (placeholder - not yet enforced by scheduler)
+#define DEFAULT_TIME_SLICE 10
+
+// Initialize a sched_attr structure with default values
+void sched_attr_init(struct sched_attr *attr) {
+    if (attr == NULL) {
+        return;
+    }
+    attr->size = sizeof(struct sched_attr);
+    attr->affinity_mask = (1ULL << NCPU) - 1;  // All CPUs
+    attr->time_slice = DEFAULT_TIME_SLICE;     // Placeholder - not yet implemented
+    attr->priority = DEFAULT_PRIORITY;
+    attr->flags = 0;
+}
+
+// Get scheduling attributes for a sched_entity
+// Returns 0 on success, negative errno on error.
+// Caller must NOT hold se->pi_lock - this function acquires it internally.
+int sched_getattr(struct sched_entity *se, struct sched_attr *attr) {
+    if (se == NULL || attr == NULL) {
+        return -EINVAL;
+    }
+    
+    spin_acquire(&se->pi_lock);
+    
+    attr->size = sizeof(struct sched_attr);
+    attr->affinity_mask = se->affinity_mask;
+    attr->time_slice = DEFAULT_TIME_SLICE;  // Placeholder - not stored per-task yet
+    attr->priority = se->priority;
+    attr->flags = 0;
+    
+    spin_release(&se->pi_lock);
+    
+    return 0;
+}
+
+// Set scheduling attributes for a sched_entity
+// Returns 0 on success, negative errno on error.
+// Note: time_slice is currently a placeholder and will be ignored.
+// Caller must NOT hold se->pi_lock - this function acquires it internally.
+int sched_setattr(struct sched_entity *se, const struct sched_attr *attr) {
+    if (se == NULL || attr == NULL) {
+        return -EINVAL;
+    }
+    
+    // Validate priority range (before acquiring lock)
+    int major = MAJOR_PRIORITY(attr->priority);
+    if (major < 0 || major >= PRIORITY_MAINLEVELS) {
+        return -EINVAL;
+    }
+    
+    // Validate affinity mask - must have at least one valid CPU
+    cpumask_t valid_mask = (1ULL << NCPU) - 1;
+    if ((attr->affinity_mask & valid_mask) == 0) {
+        return -EINVAL;
+    }
+    
+    spin_acquire(&se->pi_lock);
+    
+    // Apply the new attributes
+    // Note: If the task is currently on a run queue, we may need to re-enqueue
+    // it to reflect priority changes. For now, changes take effect on next enqueue.
+    se->affinity_mask = attr->affinity_mask & valid_mask;
+    se->priority = attr->priority;
+    
+    // time_slice is ignored for now (placeholder)
+    // attr->time_slice would be stored when time slice support is implemented
+    
+    spin_release(&se->pi_lock);
+    
+    return 0;
 }
