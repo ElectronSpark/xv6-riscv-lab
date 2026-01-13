@@ -15,7 +15,6 @@
 #include "page.h"
 
 static struct idle_rq *__idle_rqs; // Array of idle_rq structures, one per CPU
-static struct rq **__idle_rq_list; // Array of pointers to idle_rq structures
 
 static struct sched_entity *__idle_pick_next_task(struct rq *rq) {
     // The idle rq only has the idle process
@@ -23,9 +22,19 @@ static struct sched_entity *__idle_pick_next_task(struct rq *rq) {
     return idle_rq->idle_proc->sched_entity;
 }
 
+static void __idle_enqueue_task(struct rq *rq, struct sched_entity *se) {
+    // Idle rq should never have any other task enqueued
+    panic("idle_enqueue_task: trying to enqueue task to idle rq\n");
+}
+
+static void __idle_dequeue_task(struct rq *rq, struct sched_entity *se) {
+    // Idle rq should never have any other task dequeued
+    panic("idle_dequeue_task: trying to dequeue task from idle rq\n");
+}
+
 static struct sched_class __idle_sched_class = {
-    .enqueue_task = NULL,
-    .dequeue_task = NULL,
+    .enqueue_task = __idle_enqueue_task,
+    .dequeue_task = __idle_dequeue_task,
     .select_task_rq = NULL,
     .pick_next_task = __idle_pick_next_task,
     .put_prev_task = NULL,
@@ -44,17 +53,8 @@ static void __alloc_idle_rqs(void) {
     }
     memset(__idle_rqs, 0, idle_rq_size);
 
-    size_t idle_rq_list_size = sizeof(struct rq *) * NCPU;
-    __idle_rq_list = (struct rq **)kmm_alloc(idle_rq_list_size);
-    if (!__idle_rq_list) {
-        panic("alloc_idle_rqs: failed to allocate idle_rq_list\n");
-    }
-    memset(__idle_rq_list, 0, idle_rq_list_size);
-
     for (int i = 0; i < NCPU; i++) {
-        __idle_rq_list[i] = &__idle_rqs[i].rq;
-        rq_init(&__idle_rqs[i].rq, &__idle_sched_class, i);
-        __idle_rqs[i].rq.task_count = 0;
+        rq_init(&__idle_rqs[i].rq);
         rq_register(&__idle_rqs[i].rq, IDLE_MAJOR_PRIORITY, i);
         rq_set_ready(IDLE_MAJOR_PRIORITY, i);
     }

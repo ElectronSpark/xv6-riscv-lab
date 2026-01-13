@@ -33,5 +33,6 @@ void proctab_proc_remove(struct proc *p);
 void register_idle_process(struct proc *p);
 
 void init_idle_rq(void);
+void init_fifo_rq(void);
 
 #endif // __KERNEL_PROC_PRIVATE_H__

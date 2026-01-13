@@ -113,14 +113,13 @@ void rq_global_init(void) {
 
     // Initialize each individual rq structure is done in rq_register
     init_idle_rq();
+    init_fifo_rq();
 }
 
-void rq_init(struct rq* rq, struct sched_class* sched_class, int cpu_id) {
+void rq_init(struct rq* rq) {
     assert(rq != NULL, "rq_init: rq is NULL");
-    assert(sched_class != NULL, "rq_init: sched_class is NULL");
-    rq->sched_class = sched_class;
+    memset(rq, 0, sizeof(struct rq));
     rq->task_count = 0;
-    rq->cpu_id = cpu_id;
 }
 
 void rq_register(struct rq* rq, int cls_id, int cpu_id) {
@@ -128,6 +127,10 @@ void rq_register(struct rq* rq, int cls_id, int cpu_id) {
     assert(cls_id >= 0 && cls_id < PRIORITY_MAINLEVELS, "rq_register: invalid cls_id %d", cls_id);
     assert(cpu_id >= 0 && cpu_id < NCPU, "rq_register: invalid cpu_id %d", cpu_id);
     assert(rq_global.rqs[cls_id][cpu_id] == NULL, "rq_register: rq for cls_id %d cpu_id %d already registered", cls_id, cpu_id);
+    rq->class_id = cls_id;
+    rq->cpu_id = cpu_id;
+    rq->sched_class = __sched_class_of_id(cls_id);
+    assert(rq->sched_class != NULL, "rq_init: sched_class is NULL");
     rq_global.rqs[cls_id][cpu_id] = rq;
 }
 

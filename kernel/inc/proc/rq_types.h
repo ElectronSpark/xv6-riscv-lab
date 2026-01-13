@@ -21,6 +21,7 @@ struct load_weight {
 };
 
 // I picked some callbacks from Linux's sched_class as examples.
+// Note: se->on_rq and se->on_cpu should be managed out of rq layer
 struct sched_class {
     // When a task is added to or removed from the run queue
     void (*enqueue_task)(struct rq *rq, struct sched_entity *se);
@@ -29,9 +30,40 @@ struct sched_class {
     struct rq *(*select_task_rq)(struct rq *rq, struct sched_entity *se, cpumask_t cpumask);
 
     // Select the next task to run
-    // May temporarily remove the task from the run queue datastructure,
-    // but will eventually re-add it back if eligible
     // Every sched class has to implement at least pick_next_task
+    //
+    // Task Switch Flow:
+    // =================
+    //
+    //   Run Queue (data structure)          CPU (current task)
+    //   ┌─────────────────────────┐         ┌─────────────────┐
+    //   │  [A] [B] [C] [D] ...    │         │     prev        │
+    //   └─────────────────────────┘         └─────────────────┘
+    //             │                                  │
+    //             │ pick_next_task(rq)               │
+    //             │ (select next, keep in queue)     │
+    //             ▼                                  │
+    //        next = [A]                              │
+    //             │                                  │
+    //             │ set_next_task(rq, next)          │
+    //             │ (remove next from queue,         │
+    //             │  set as current)                 │
+    //             ▼                                  ▼
+    //   ┌─────────────────────────┐         ┌─────────────────┐
+    //   │  [B] [C] [D] ...        │         │     next        │
+    //   └─────────────────────────┘         └─────────────────┘
+    //             │                                  │
+    //             │         ~~~ context switch ~~~   │
+    //             │         (now running as next)    │
+    //             │                                  │
+    //             │                    put_prev_task(rq, prev)
+    //             │                    (insert prev back to queue,
+    //             │                     unset as current)
+    //             ▼                                  │
+    //   ┌─────────────────────────┐         ┌─────────────────┐
+    //   │  [B] [C] [D] [prev] ... │         │     next        │
+    //   └─────────────────────────┘         └─────────────────┘
+    //
     struct sched_entity* (*pick_next_task)(struct rq *rq);
     void (*put_prev_task)(struct rq *rq, struct sched_entity *se);
     void (*set_next_task)(struct rq *rq, struct sched_entity *se);
@@ -49,6 +81,7 @@ struct sched_class {
 
 struct rq {
     struct sched_class *sched_class;  // Scheduling class in use
+    int class_id;           // Scheduling class ID
     int task_count;         // Number of processes in the run queue
     int cpu_id;             // CPU ID this run queue belongs to
 } __ALIGNED_CACHELINE;
@@ -95,6 +128,11 @@ static inline struct proc *proc_from_context(struct context *ctx) {
 struct idle_rq {
     struct rq rq;
     struct proc *idle_proc;   // Idle process for this CPU
+};
+
+struct fifo_rq {
+    struct rq rq;
+    list_node_t run_queue;    // FIFO run queue
 };
 
 #endif  // __KERNEL_PROC_RQ_TYPES_H

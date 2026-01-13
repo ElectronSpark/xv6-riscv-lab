@@ -17,7 +17,8 @@
 #define MAJOR_PRIORITY(prio)    (((prio) & PRIORITY_MAINLEVEL_MASK) >> PRIORITY_MAINLEVEL_SHIFT)
 #define MINOR_PRIORITY(prio)    ((prio) & PRIORITY_SUBLEVEL_MASK)
 
-#define DEFAULT_MAJOR_PRIORITY   4
+// #define DEFAULT_MAJOR_PRIORITY   4
+#define DEFAULT_MAJOR_PRIORITY   1
 #define DEFAULT_MINOR_PRIORITY   16
 #define DEFAULT_PRIORITY    ((DEFAULT_MAJOR_PRIORITY << PRIORITY_MAINLEVEL_SHIFT) | DEFAULT_MINOR_PRIORITY)
 
@@ -28,7 +29,7 @@
 struct rq *get_rq_for_cpu(int cls_id, int cpu_id);
 struct rq *pick_next_rq(void);
 void rq_global_init(void);
-void rq_init(struct rq* rq, struct sched_class* sched_class, int cpu_id);
+void rq_init(struct rq* rq);
 void sched_entity_init(struct sched_entity* se, struct proc* p);
 void sched_class_register(int id, struct sched_class* cls);
 void rq_register(struct rq* rq, int cls_id, int cpu_id);

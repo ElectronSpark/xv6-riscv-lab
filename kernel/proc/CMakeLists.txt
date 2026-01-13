@@ -10,6 +10,7 @@ set(PROC_C_SRCS
     pid.c
     rq.c
     sched_idle.c
+    sched_fifo.c
 )
 
 set(PROC_S_SRCS
