@@ -83,19 +83,17 @@ void scheduler_init(void) {
 
 // Pick the next process to run from the run queue.
 // Returns a RUNNABLE state process or NULL if no process is ready.
-// Caller must NOT hold rq_lock. This function acquires rq_lock internally.
+// Caller must hold rq_lock.
 static struct proc *__sched_pick_next(void) {
-    rq_lock_current();
+    __sched_assert_holding();
     
     struct rq *rq = pick_next_rq();
     if (IS_ERR_OR_NULL(rq)) {
-        rq_unlock_current();
         return NULL;
     }
     
     struct sched_entity *se = rq_pick_next_task(rq);
     if (se == NULL) {
-        rq_unlock_current();
         return NULL;
     }
     
@@ -105,8 +103,6 @@ static struct proc *__sched_pick_next(void) {
     // Prepare the task for running - this removes it from the queue
     rq_set_next_task(se);
     smp_store_release(&se->on_rq, 0); // Mark as off run queue (while holding rq_lock)
-    
-    rq_unlock_current();
     
     smp_store_release(&se->on_cpu, 1); // Mark the process as running on CPU
     enum procstate pstate = __proc_get_pstate(p);
@@ -170,6 +166,9 @@ void scheduler_yield(void) {
     // Wake up processes with expired timers.
     __do_timer_tick();
     
+    // Acquire the rq_lock for the entire yield process
+    rq_lock_current();
+    
     // Check if we should abort a pending sleep.
     // If state was changed back to RUNNING (e.g., by an interrupt waking us),
     // and we're not the idle process, we should abort and stay on CPU.
@@ -185,6 +184,7 @@ void scheduler_yield(void) {
     if (cur_state == PSTATE_RUNNING && proc != mycpu()->idle_proc) {
         if (p == NULL || p == mycpu()->idle_proc) {
             // No other runnable process, just continue running
+            rq_unlock_current();
             pop_off();
             return;
         }
@@ -195,6 +195,7 @@ void scheduler_yield(void) {
     if (!p) {
         if (proc == mycpu()->idle_proc) {
             // Already in idle process, just return
+            rq_unlock_current();
             pop_off();
             return;
         }
@@ -537,13 +538,15 @@ uint64 sys_dumpchan(void) {
 // - context switch out
 // - mark on_cpu = false in context_switch_finish
 
+// Prepare for context switch from prev to next.
+// Caller must hold the current CPU's rq_lock (asserted).
 void context_switch_prepare(struct proc *prev, struct proc *next) {
     assert(prev != NULL, "Previous process is NULL");
     assert(next != NULL, "Next process is NULL");
+    __sched_assert_holding();
 
     // Mark the next process as on the CPU
     smp_store_release(&next->sched_entity->on_cpu, 1);
-    rq_lock_current();
     next->sched_entity->cpu_id = cpuid();
     if (PROC_ZOMBIE(prev)) {
         // Previous process is exiting, clean up scheduler resources
@@ -551,6 +554,8 @@ void context_switch_prepare(struct proc *prev, struct proc *next) {
     }
 }
 
+// Finish context switch - clean up prev task and release rq_lock.
+// This function releases the current CPU's rq_lock.
 void context_switch_finish(struct proc *prev, struct proc *next) {
     assert(prev != NULL, "Previous process is NULL");
     assert(next != NULL, "Next process is NULL");
