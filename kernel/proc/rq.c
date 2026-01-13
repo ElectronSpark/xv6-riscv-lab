@@ -62,9 +62,13 @@ void rq_clear_ready(int cls_id, int cpu_id) {
 
 #define __sched_class_of_id(cls_id)    (rq_global.sched_class[cls_id])
 #define __get_rq_for_cpu(cls_id, cpu_id)    (rq_global.rqs[cls_id] ? rq_global.rqs[cls_id][cpu_id] : NULL)
+#define __rq_lock_held(cpu_id)    spin_holding(&rq_global.rq_lock[cpu_id])
 
 struct rq *get_rq_for_cpu(int cls_id, int cpu_id) {
     if (cls_id < 0 || cls_id >= PRIORITY_MAINLEVELS) {
+        return ERR_PTR(-EINVAL);
+    }
+    if (cpu_id < 0 || cpu_id >= NCPU) {
         return ERR_PTR(-EINVAL);
     }
     return __get_rq_for_cpu(cls_id, cpu_id);
@@ -137,7 +141,7 @@ void rq_register(struct rq* rq, int cls_id, int cpu_id) {
 void sched_entity_init(struct sched_entity* se, struct proc* p) {
     assert(se != NULL, "sched_entity_init: se is NULL");
     se->rq = NULL;
-    se->priority = -1;
+    se->priority = DEFAULT_PRIORITY;  // Set default priority for scheduling
     se->sched_class = NULL;
     spin_init(&se->pi_lock, "se_pi_lock");
     se->on_rq = 0;
@@ -164,10 +168,13 @@ void sched_class_register(int id, struct sched_class* cls) {
 }
 
 void rq_lock(int cpu_id) {
+    assert(cpu_id >= 0 && cpu_id < NCPU, "rq_lock: invalid cpu_id %d", cpu_id);
     spin_acquire(&rq_global.rq_lock[cpu_id]);
 }
 
 void rq_unlock(int cpu_id) {
+    assert(cpu_id >= 0 && cpu_id < NCPU, "rq_unlock: invalid cpu_id %d", cpu_id);
+    assert(__rq_lock_held(cpu_id), "rq_unlock: lock not held for cpu_id %d", cpu_id);
     spin_release(&rq_global.rq_lock[cpu_id]);
 }
 
@@ -178,12 +185,28 @@ void rq_lock_current(void) {
 }
 
 void rq_unlock_current(void) {
-    // Assumes preemption is disabled
-    rq_unlock(cpuid());
+    push_off();
+    int cpu = cpuid();
+    pop_off();
+    rq_unlock(cpu);
+}
+
+int rq_holding(int cpu_id) {
+    if (cpu_id < 0 || cpu_id >= NCPU) {
+        return 0;
+    }
+    return __rq_lock_held(cpu_id);
+}
+
+int rq_holding_current(void) {
+    push_off();
+    int holding = spin_holding(&rq_global.rq_lock[cpuid()]);
+    pop_off();
+    return holding;
 }
 
 // Select the appropriate run queue for the given sched_entity and cpumask
-// @TODO: by now it just returns the current rq, or the corresponding rq in cpumask
+// Prefer the current CPU's rq if allowed by cpumask (for locality)
 struct rq *rq_select_task_rq(struct sched_entity* se, cpumask_t cpumask) {
     if (se == NULL) {
         return ERR_PTR(-EINVAL);
@@ -202,28 +225,35 @@ struct rq *rq_select_task_rq(struct sched_entity* se, cpumask_t cpumask) {
         return rq_global.sched_class[major_prio]->select_task_rq(se->rq, se, cpumask);
     }
 
-    struct rq *selected = NULL;
+    if (cpumask == 0) {
+        cpumask = (1ULL << NCPU) - 1; // all CPUs
+    }
 
+    // Prefer the current CPU's rq for locality
+    int cur_cpu = cpuid();
+    if (cpumask & (1ULL << cur_cpu)) {
+        struct rq *rq = get_rq_for_cpu(major_prio, cur_cpu);
+        if (!IS_ERR_OR_NULL(rq)) {
+            return rq;
+        }
+    }
+
+    // Fallback: find any allowed CPU's rq
     for (int cpu = 0; cpu < NCPU; cpu++) {
         cpumask_t mask = (1ULL << cpu);
-        if (mask > cpumask) {
-            break;
-        }
         if (cpumask & mask) {
             struct rq *rq = get_rq_for_cpu(major_prio, cpu);
-            if (IS_ERR_OR_NULL(rq)) {
-                continue;
-            }
-            if (selected == NULL || rq->task_count < selected->task_count) {
-                selected = rq;
+            if (!IS_ERR_OR_NULL(rq)) {
+                return rq;
             }
         }
     }
-    return selected;
+    return NULL;
 }
 
 void rq_enqueue_task(struct rq *rq, struct sched_entity *se) {
-    assert(se->rq == NULL, "fifo_enqueue_task: se rq is not NULL\n");
+    assert(__rq_lock_held(rq->cpu_id), "rq_enqueue_task: rq lock not held");
+    assert(se->rq == NULL, "rq_enqueue_task: se rq is not NULL");
     if (rq->sched_class->enqueue_task) {
         rq->sched_class->enqueue_task(rq, se);
     }
@@ -235,8 +265,9 @@ void rq_enqueue_task(struct rq *rq, struct sched_entity *se) {
 }
 
 void rq_dequeue_task(struct rq *rq, struct sched_entity* se) {
-    assert(se->rq == rq, "fifo_dequeue_task: se->rq does not match rq\n");
-    assert(rq->task_count > 0, "fifo_dequeue_task: rq task_count is zero\n");
+    assert(__rq_lock_held(rq->cpu_id), "rq_dequeue_task: rq lock not held");
+    assert(se->rq == rq, "rq_dequeue_task: se->rq does not match rq");
+    assert(rq->task_count > 0, "rq_dequeue_task: rq task_count is zero");
     assert(se->sched_class == se->rq->sched_class,
            "rq_dequeue_task: se->sched_class does not match rq's sched_class\n");
     if (se->sched_class->dequeue_task) {
@@ -251,6 +282,7 @@ void rq_dequeue_task(struct rq *rq, struct sched_entity* se) {
 }
 
 struct sched_entity *rq_pick_next_task(struct rq* rq) {
+    assert(__rq_lock_held(rq->cpu_id), "rq_pick_next_task: rq lock not held");
     if (rq->sched_class->pick_next_task) {
         return rq->sched_class->pick_next_task(rq);
     }
@@ -258,8 +290,9 @@ struct sched_entity *rq_pick_next_task(struct rq* rq) {
 }
 
 void rq_put_prev_task(struct sched_entity* se) {
-    assert(se->rq != NULL, "rq_put_prev_task: se->rq is NULL\n");
-    assert(se->rq->task_count > 0, "rq_put_prev_task: rq task_count is zero\n");
+    assert(se->rq != NULL, "rq_put_prev_task: se->rq is NULL");
+    assert(__rq_lock_held(se->rq->cpu_id), "rq_put_prev_task: rq lock not held");
+    assert(se->rq->task_count > 0, "rq_put_prev_task: rq task_count is zero");
     assert(se->sched_class == se->rq->sched_class,
            "rq_put_prev_task: se->sched_class does not match rq's sched_class\n");
     if (se->sched_class->put_prev_task) {
@@ -268,7 +301,9 @@ void rq_put_prev_task(struct sched_entity* se) {
 }
 
 void rq_set_next_task(struct sched_entity* se) {
-    assert(se->rq->task_count > 0, "rq_set_next_task: rq task_count is zero\n");
+    assert(se->rq != NULL, "rq_set_next_task: se->rq is NULL");
+    assert(__rq_lock_held(se->rq->cpu_id), "rq_set_next_task: rq lock not held");
+    assert(se->rq->task_count > 0, "rq_set_next_task: rq task_count is zero");
     assert(se->sched_class == se->rq->sched_class,
            "rq_set_next_task: se->sched_class does not match rq's sched_class\n");
     if (se->sched_class->set_next_task) {
@@ -277,9 +312,11 @@ void rq_set_next_task(struct sched_entity* se) {
 }
 
 void rq_task_tick(struct sched_entity* se) {
-    assert(se->sched_class != NULL, "rq_task_tick: se->sched_class is NULL\n");
+    assert(se->sched_class != NULL, "rq_task_tick: se->sched_class is NULL");
+    assert(se->rq != NULL, "rq_task_tick: se->rq is NULL");
+    assert(__rq_lock_held(se->rq->cpu_id), "rq_task_tick: rq lock not held");
     assert(se->sched_class == se->rq->sched_class,
-           "rq_task_tick: se->sched_class does not match rq's sched_class\n");
+           "rq_task_tick: se->sched_class does not match rq's sched_class");
     if (se->sched_class->task_tick) {
         se->sched_class->task_tick(se->rq, se);
     }
@@ -290,28 +327,36 @@ void rq_task_fork(struct sched_entity* se) {
     // Thus the rq and se are of the parent process
     struct sched_entity* current_se = myproc()->sched_entity;
 
-    if (current_se->sched_class->task_fork) {
+    if (current_se->sched_class && current_se->sched_class->task_fork) {
         current_se->sched_class->task_fork(se->rq, se);
-    } else {
-        // Otherwise, pick default scheduler class
-        assert(__sched_class_of_id(DEFAULT_MAJOR_PRIORITY) != NULL,
-               "rq_task_fork: default sched class is NULL");
+    } else if (__sched_class_of_id(DEFAULT_MAJOR_PRIORITY) != NULL &&
+               __sched_class_of_id(DEFAULT_MAJOR_PRIORITY)->task_fork != NULL) {
+        // Otherwise, pick default scheduler class if it has task_fork
         __sched_class_of_id(DEFAULT_MAJOR_PRIORITY)->task_fork(se->rq, se);
     }
+    // If no task_fork callback, just inherit the priority from default
+    // The child will inherit the same sched_class as the parent when enqueued
 }
 
 void rq_task_dead(struct sched_entity* se) {
-    assert(se->rq != NULL, "rq_task_dead: se->rq is NULL\n");
-    assert(se->sched_class == se->rq->sched_class,
-           "rq_task_dead: se->sched_class does not match rq's sched_class\n");
-    if (se->sched_class->task_dead) {
+    // When a process is exiting (becoming zombie), it's still on the CPU
+    // but not on any run queue. We need to clean up its sched_entity.
+    // The process may or may not have an rq set depending on if it was ever scheduled.
+    if (se->rq != NULL && se->sched_class != NULL && se->sched_class->task_dead) {
         se->sched_class->task_dead(se->rq, se);
     }
+    // Dequeue the task from the run queue if it's still on one
+    if (se->rq != NULL) {
+        rq_dequeue_task(se->rq, se);
+    }
+    // Clear the sched_class to mark this process as dead
+    se->sched_class = NULL;
 }
 
 void rq_yield_task(void) {
     struct rq *current_rq = myproc()->sched_entity->rq;
     assert(current_rq != NULL, "rq_yield_task: current_rq is NULL");
+    assert(__rq_lock_held(current_rq->cpu_id), "rq_yield_task: rq lock not held");
     if (current_rq->sched_class->yield_task) {
         current_rq->sched_class->yield_task(current_rq);
     }

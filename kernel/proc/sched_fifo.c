@@ -41,6 +41,10 @@ static void __fifo_set_next_task(struct rq *rq, struct sched_entity *se) {
     list_node_detach(se, list_entry);
 }
 
+// static void __fifo_fork_task(struct rq *rq, struct sched_entity *se) {
+//     // No special handling needed for FIFO on fork
+// }
+
 static struct sched_class __fifo_sched_class = {
     .enqueue_task = __fifo_enqueue_task,
     .dequeue_task = __fifo_dequeue_task,

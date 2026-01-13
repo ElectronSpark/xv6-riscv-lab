@@ -22,12 +22,10 @@
 // Locking order:
 // - sleep_lock
 // - proc_lock
-// - sched_lock
+// - rq_lock (per-CPU run queue lock)
 
 static proc_tree_t __chan_queue_root;
 
-list_node_t ready_queue = LIST_ENTRY_INITIALIZED(ready_queue);
-static spinlock_t __sched_lock = SPINLOCK_INITIALIZED("sched_lock");   // ready_queue and sleep_queue share this lock
 static spinlock_t __sleep_lock = SPINLOCK_INITIALIZED("sleep_lock"); // Lock for sleep queues
 
 static void chan_queue_init(void) {
@@ -51,30 +49,30 @@ void sleep_unlock(void) {
 // To avoid deadlocks, locks must be held in the following order:
 // - locks of each process -- proc.c
 // - locks related to the process queue -- proc_queue.c
-// - sched_lock -- sched.c
+// - rq_lock (per-CPU run queue lock) -- rq.c
 // - proc table lock -- proc.c
 //
-// The locks of task queues and the scheduler lock should not be held simultaneously,
+// The locks of task queues and the rq_lock should not be held simultaneously,
 int sched_holding(void) {
-    // Check if the scheduler lock is currently held
-    return spin_holding(&__sched_lock);
+    // Check if the current CPU's rq lock is held
+    return rq_holding_current();
 }
 
 /* Scheduler lock assertions */
 static inline void __sched_assert_holding(void) {
-    assert(spin_holding(&__sched_lock), "sched_lock must be held");
+    assert(rq_holding_current(), "rq_lock must be held");
 }
 
 static inline void __sched_assert_unholding(void) {
-    assert(!spin_holding(&__sched_lock), "sched_lock must not be held");
+    assert(!rq_holding_current(), "rq_lock must not be held");
 }
 
 void sched_lock(void) {
-    spin_acquire(&__sched_lock);
+    rq_lock_current();
 }
 
 void sched_unlock(void) {
-    spin_release(&__sched_lock);
+    rq_unlock_current();
 }
 
 /* Scheduler functions */
@@ -83,53 +81,43 @@ void scheduler_init(void) {
     rq_global_init();
 }
 
-void __scheduler_add_ready(struct proc *p) {
-    assert(p != NULL, "Cannot add NULL process to ready queue");
-    __sched_assert_holding();
-    enum procstate pstate = __proc_get_pstate(p);
-    assert(pstate == PSTATE_RUNNING, 
-           "Process must be in RUNNING state to be added to ready queue");
-    
-    // Check on_rq flag - if already on a queue, skip (like Linux)
-    if (smp_load_acquire(&p->sched_entity->on_rq)) {
-        return; // Already on a run queue, nothing to do
-    }
-    
-    // Check if already in a list (prev and next point to self when detached)
-    if (p->sched_entry.prev != &p->sched_entry || p->sched_entry.next != &p->sched_entry) {
-        panic("__scheduler_add_ready: process %s (pid %d) already in a queue!", 
-              p->name, p->pid);
-    }
-
-    smp_store_release(&p->sched_entity->on_rq, 1); // Mark as on run queue
-    list_node_push(&ready_queue, p, sched_entry);
-}
-
-// Pick the next process to run from the ready queue.
-// Returns a RUNABLE state process or NULL if no process is ready.
-// The process returned will be locked
+// Pick the next process to run from the run queue.
+// Returns a RUNNABLE state process or NULL if no process is ready.
+// Caller must NOT hold rq_lock. This function acquires rq_lock internally.
 static struct proc *__sched_pick_next(void) {
-    sched_lock();
-    struct proc *p = list_node_pop_back(&ready_queue, struct proc, sched_entry);
-    if (p) {
-        smp_store_release(&p->sched_entity->on_rq, 0); // Mark as off run queue (while holding sched_lock)
-    }
-    sched_unlock();
+    rq_lock_current();
     
-    if (p) {
-        smp_store_release(&p->sched_entity->on_cpu, 1); // Mark the process as running on CPU
-        enum procstate pstate = __proc_get_pstate(p);
-        if (pstate != PSTATE_RUNNING) {
-            assert(pstate != PSTATE_INTERRUPTIBLE, "try to schedule an interruptible process");
-            assert(pstate != PSTATE_UNINTERRUPTIBLE, "try to schedule an uninterruptible process");
-            assert(pstate != PSTATE_UNUSED, "try to schedule an uninitialized process");
-            assert(pstate != PSTATE_ZOMBIE, "found and zombie process in ready queue");
-            panic("try to schedule unknown process state");
-        }
-        return p;
+    struct rq *rq = pick_next_rq();
+    if (IS_ERR_OR_NULL(rq)) {
+        rq_unlock_current();
+        return NULL;
     }
-
-    return NULL;
+    
+    struct sched_entity *se = rq_pick_next_task(rq);
+    if (se == NULL) {
+        rq_unlock_current();
+        return NULL;
+    }
+    
+    struct proc *p = se->proc;
+    assert(p != NULL, "__sched_pick_next: se->proc is NULL");
+    
+    // Prepare the task for running - this removes it from the queue
+    rq_set_next_task(se);
+    smp_store_release(&se->on_rq, 0); // Mark as off run queue (while holding rq_lock)
+    
+    rq_unlock_current();
+    
+    smp_store_release(&se->on_cpu, 1); // Mark the process as running on CPU
+    enum procstate pstate = __proc_get_pstate(p);
+    if (pstate != PSTATE_RUNNING) {
+        assert(pstate != PSTATE_INTERRUPTIBLE, "try to schedule an interruptible process");
+        assert(pstate != PSTATE_UNINTERRUPTIBLE, "try to schedule an uninterruptible process");
+        assert(pstate != PSTATE_UNUSED, "try to schedule an uninitialized process");
+        assert(pstate != PSTATE_ZOMBIE, "found and zombie process in ready queue");
+        panic("try to schedule unknown process state");
+    }
+    return p;
 }
 
 struct proc *process_switch_to(struct proc *current, struct proc *target) {
@@ -144,8 +132,7 @@ struct proc *process_switch_to(struct proc *current, struct proc *target) {
 
 // Switch to the given process.
 // The process will change its state to RUNNING afer the switching.
-// Before calling this function, the caller must hold both the process's lock
-//    and the scheduler lock.
+// Before calling this function, the caller must hold the rq_lock.
 // Returns the previous process that was running on this CPU.
 static struct proc *__switch_to(struct proc *p) {
     __sched_assert_holding();
@@ -157,7 +144,7 @@ static struct proc *__switch_to(struct proc *p) {
         spin_depth_expected++;
     }
     assert(mycpu()->spin_depth == spin_depth_expected, 
-           "Process must hold and only hold the proc lock and sched lock when yielding. Current spin_depth: %d", mycpu()->spin_depth);
+           "Process must hold and only hold the rq_lock when yielding. Current spin_depth: %d", mycpu()->spin_depth);
 
     // Switch to the process's context
     struct proc *prev = process_switch_to(proc, p);
@@ -264,11 +251,11 @@ void scheduler_stop(struct proc *p) {
 
 void scheduler_continue(struct proc *p) {
     // Uses pi_lock protocol like __do_scheduler_wakeup.
-    // Caller must hold p->sched_entity->pi_lock, must NOT hold proc_lock or sched_lock.
+    // Caller must hold p->sched_entity->pi_lock, must NOT hold proc_lock or rq_lock.
     assert(p != NULL, "Cannot continue a NULL process");
     assert(spin_holding(&p->sched_entity->pi_lock), "pi_lock must be held for scheduler_continue");
     assert(!spin_holding(&p->lock), "proc_lock must not be held for scheduler_continue");
-    assert(!sched_holding(), "sched_lock must not be held for scheduler_continue");
+    assert(!sched_holding(), "rq_lock must not be held for scheduler_continue");
     assert(p != myproc(), "Cannot continue the current process");
 
     if (!PROC_STOPPED(p)) {
@@ -284,9 +271,21 @@ void scheduler_continue(struct proc *p) {
 
     // If process is RUNNING, add it back to the ready queue
     if (__proc_get_pstate(p) == PSTATE_RUNNING) {
-        sched_lock();
-        __scheduler_add_ready(p);
-        sched_unlock();
+        // Select which run queue to put the task into
+        push_off();  // Disable interrupts to avoid CPU migration during rq selection
+        struct sched_entity *se = p->sched_entity;
+        struct rq *rq = rq_select_task_rq(se, se->affinity_mask);
+        assert(!IS_ERR_OR_NULL(rq), "scheduler_continue: rq_select_task_rq failed");
+        
+        // Lock the target CPU's run queue
+        rq_lock(rq->cpu_id);
+        pop_off();  // Restore interrupt state (acquiring spinlock increases intr counter)
+        
+        // Enqueue the task
+        smp_store_release(&se->on_rq, 1);
+        rq_enqueue_task(rq, se);
+        
+        rq_unlock(rq->cpu_id);
     }
 }
 
@@ -372,10 +371,21 @@ static void __do_scheduler_wakeup(struct proc *p) {
     smp_store_release(&p->state, PSTATE_RUNNING);
     
     if (!PROC_STOPPED(p)) {
-        sched_lock();
-        // __scheduler_add_ready checks on_rq and skips if already queued
-        __scheduler_add_ready(p);
-        sched_unlock();
+        // Select which run queue to put the task into
+        push_off();  // Disable interrupts to avoid CPU migration during rq selection
+        struct sched_entity *se = p->sched_entity;
+        struct rq *rq = rq_select_task_rq(se, se->affinity_mask);
+        assert(!IS_ERR_OR_NULL(rq), "__do_scheduler_wakeup: rq_select_task_rq failed");
+        
+        // Lock the target CPU's run queue
+        rq_lock(rq->cpu_id);
+        pop_off();  // Restore interrupt state (acquiring spinlock increases intr counter)
+        
+        // Enqueue the task
+        smp_store_release(&se->on_rq, 1);
+        rq_enqueue_task(rq, se);
+        
+        rq_unlock(rq->cpu_id);
     }
 }
 
@@ -533,8 +543,12 @@ void context_switch_prepare(struct proc *prev, struct proc *next) {
 
     // Mark the next process as on the CPU
     smp_store_release(&next->sched_entity->on_cpu, 1);
-    sched_lock();
+    rq_lock_current();
     next->sched_entity->cpu_id = cpuid();
+    if (PROC_ZOMBIE(prev)) {
+        // Previous process is exiting, clean up scheduler resources
+        rq_task_dead(prev->sched_entity);
+    }
 }
 
 void context_switch_finish(struct proc *prev, struct proc *next) {
@@ -543,16 +557,27 @@ void context_switch_finish(struct proc *prev, struct proc *next) {
 
     enum procstate pstate = __proc_get_pstate(prev);
     struct proc *pparent = prev->parent;
+    struct sched_entity *se = prev->sched_entity;
 
     // In Linux kernel order: first add back to queue (if needed), then clear on_cpu
     // This is because wakeup path waits for on_cpu to be 0 before adding to queue
-    if (pstate == PSTATE_RUNNING && prev != mycpu()->idle_proc) {
-        if (!PROC_STOPPED(prev)) {
-            // __scheduler_add_ready will check on_rq and skip if already queued
-            __scheduler_add_ready(prev);
+    // @TODO: try not to treat idle process specially
+    if (prev != mycpu()->idle_proc) {
+        if (pstate == PSTATE_RUNNING && !PROC_STOPPED(prev)) {
+            // Process is still running, put it back to the queue
+            rq_put_prev_task(se);
+            // Mark as back on run queue - matches the on_rq=0 in __sched_pick_next
+            smp_store_release(&se->on_rq, 1);
+        } else if (PSTATE_IS_SLEEPING(pstate) || PROC_STOPPED(prev)) {
+            // Process entered sleeping/stopped state, properly dequeue it
+            // so that wakeup path can enqueue to a (potentially different) rq
+            if (se->rq != NULL) {
+                rq_dequeue_task(se->rq, se);
+            }
         }
+        // If zombie, rq_task_dead was already called before entering zombie state
     }
-    sched_unlock();
+    rq_unlock_current();
     
     // Now safe to mark as not on CPU - wakeup path can proceed
     smp_store_release(&prev->sched_entity->on_cpu, 0);

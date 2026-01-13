@@ -318,10 +318,14 @@ void idle_proc_init(void) {
   mycpu()->proc = p;
   mycpu()->idle_proc = p;
   
-  struct rq *idle_rq = get_rq_for_cpu(IDLE_MAJOR_PRIORITY, cpuid());
-  rq_enqueue_task(idle_rq, p->sched_entity);
-  smp_store_release(&p->sched_entity->on_cpu, 1);
+  rq_lock_current();
+  struct rq *idle_rq = GET_RQ_FOR_CURRENT(IDLE_MAJOR_PRIORITY);
+  // Set on_rq before enqueue (matches the pattern in __do_scheduler_wakeup)
   smp_store_release(&p->sched_entity->on_rq, 1);
+  rq_enqueue_task(idle_rq, p->sched_entity);
+  rq_unlock_current();
+  // Idle process is currently on CPU
+  smp_store_release(&p->sched_entity->on_cpu, 1);
 
   printf("CPU %ld idle process initialized at kstack 0x%lx\n", cpuid(), (uint64)kstack);
 }
@@ -604,6 +608,10 @@ fork(void)
   attach_child(p, np);
   PROC_SET_USER_SPACE(np);
   __proc_set_pstate(np, PSTATE_UNINTERRUPTIBLE);
+  
+  // Initialize the child's scheduling entity with parent's info
+  rq_task_fork(np->sched_entity);
+  
   proc_unlock(p);
 
   // Clone VFS file descriptor table - must be done after releasing parent lock
@@ -652,7 +660,7 @@ reparent(struct proc *p)
 
 
 // Yield the CPU after the process becomes zombie.
-// The caller need to hold p->lock, and not to hold the scheduler lock.
+// The caller need to hold p->lock, and not to hold the rq_lock.
 // This is to ensure that its parent can be scheduled after it becomes zombie
 // and not to wake up before it becomes zombie.
 static void
@@ -713,6 +721,7 @@ wait(uint64 addr)
   int pid;
   struct proc *p = myproc();
   struct proc *child, *tmp;
+  bool needs_yield = false;
 
   proc_lock(p);
   for(;;){
@@ -721,6 +730,13 @@ wait(uint64 addr)
       // make sure the child isn't still in exit() or swtch().
       proc_lock(child);
       if(PROC_ZOMBIE(child)) {
+        // Make sure the zombie child has fully switched out of CPU
+        if (smp_load_acquire(&child->sched_entity->on_cpu)) {
+          // Still on CPU, mark needs yields and try again later
+          needs_yield = true;
+          proc_unlock(child);
+          continue;
+        }
         // Found one.
         pid = child->pid;
         if(addr != 0 && vm_copyout(p->vm, addr, (char *)&child->xstate,
@@ -745,7 +761,14 @@ wait(uint64 addr)
     }
     
     // Wait for a child to exit.
-    scheduler_sleep(&p->lock, PSTATE_INTERRUPTIBLE);  //DOC: wait-sleep
+    if (needs_yield) {
+      proc_unlock(p);
+      needs_yield = false;
+      yield();
+      proc_lock(p);
+    } else {
+      scheduler_sleep(&p->lock, PSTATE_INTERRUPTIBLE);  //DOC: wait-sleep
+    }
   }
 
 ret:

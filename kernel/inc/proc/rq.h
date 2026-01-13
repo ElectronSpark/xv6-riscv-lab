@@ -26,6 +26,8 @@
 #define FIFO_MAJOR_PRIORITY      1
 #define IDLE_MAJOR_PRIORITY      7
 
+#define GET_RQ_FOR_CURRENT(cls_id)    get_rq_for_cpu((cls_id), cpuid())
+
 struct rq *get_rq_for_cpu(int cls_id, int cpu_id);
 struct rq *pick_next_rq(void);
 void rq_global_init(void);
@@ -37,6 +39,8 @@ void rq_lock(int cpu_id);
 void rq_unlock(int cpu_id);
 void rq_lock_current(void);
 void rq_unlock_current(void);
+int rq_holding(int cpu_id);
+int rq_holding_current(void);
 
 struct rq *rq_select_task_rq(struct sched_entity* se, cpumask_t cpumask);
 
