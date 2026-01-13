@@ -223,14 +223,30 @@ struct rq *rq_select_task_rq(struct sched_entity* se, cpumask_t cpumask) {
 }
 
 void rq_enqueue_task(struct rq *rq, struct sched_entity *se) {
+    assert(se->rq == NULL, "fifo_enqueue_task: se rq is not NULL\n");
     if (rq->sched_class->enqueue_task) {
         rq->sched_class->enqueue_task(rq, se);
     }
+    se->rq = rq;
+    smp_store_release(&se->cpu_id, rq->cpu_id);
+    se->sched_class = rq->sched_class;
+    rq->task_count++;
+    rq_set_ready(rq->class_id, rq->cpu_id);
 }
 
-void rq_dequeue_task(struct sched_entity* se) {
-    if (se->rq->sched_class->dequeue_task) {
-        se->rq->sched_class->dequeue_task(se->rq, se);
+void rq_dequeue_task(struct rq *rq, struct sched_entity* se) {
+    assert(se->rq == rq, "fifo_dequeue_task: se->rq does not match rq\n");
+    assert(rq->task_count > 0, "fifo_dequeue_task: rq task_count is zero\n");
+    assert(se->sched_class == se->rq->sched_class,
+           "rq_dequeue_task: se->sched_class does not match rq's sched_class\n");
+    if (se->sched_class->dequeue_task) {
+        se->sched_class->dequeue_task(se->rq, se);
+    }
+    se->rq = NULL;
+    se->sched_class = NULL;
+    rq->task_count--;
+    if (rq->task_count == 0) {
+        rq_clear_ready(rq->class_id, rq->cpu_id);
     }
 }
 
@@ -242,20 +258,30 @@ struct sched_entity *rq_pick_next_task(struct rq* rq) {
 }
 
 void rq_put_prev_task(struct sched_entity* se) {
-    if (se->rq->sched_class->put_prev_task) {
-        se->rq->sched_class->put_prev_task(se->rq, se);
+    assert(se->rq != NULL, "rq_put_prev_task: se->rq is NULL\n");
+    assert(se->rq->task_count > 0, "rq_put_prev_task: rq task_count is zero\n");
+    assert(se->sched_class == se->rq->sched_class,
+           "rq_put_prev_task: se->sched_class does not match rq's sched_class\n");
+    if (se->sched_class->put_prev_task) {
+        se->sched_class->put_prev_task(se->rq, se);
     }
 }
 
 void rq_set_next_task(struct sched_entity* se) {
-    if (se->rq->sched_class->set_next_task) {
-        se->rq->sched_class->set_next_task(se->rq, se);
+    assert(se->rq->task_count > 0, "rq_set_next_task: rq task_count is zero\n");
+    assert(se->sched_class == se->rq->sched_class,
+           "rq_set_next_task: se->sched_class does not match rq's sched_class\n");
+    if (se->sched_class->set_next_task) {
+        se->sched_class->set_next_task(se->rq, se);
     }
 }
 
 void rq_task_tick(struct sched_entity* se) {
-    if (se->rq->sched_class->task_tick) {
-        se->rq->sched_class->task_tick(se->rq, se);
+    assert(se->sched_class != NULL, "rq_task_tick: se->sched_class is NULL\n");
+    assert(se->sched_class == se->rq->sched_class,
+           "rq_task_tick: se->sched_class does not match rq's sched_class\n");
+    if (se->sched_class->task_tick) {
+        se->sched_class->task_tick(se->rq, se);
     }
 }
 
@@ -275,13 +301,17 @@ void rq_task_fork(struct sched_entity* se) {
 }
 
 void rq_task_dead(struct sched_entity* se) {
-    if (se->rq->sched_class->task_dead) {
-        se->rq->sched_class->task_dead(se->rq, se);
+    assert(se->rq != NULL, "rq_task_dead: se->rq is NULL\n");
+    assert(se->sched_class == se->rq->sched_class,
+           "rq_task_dead: se->sched_class does not match rq's sched_class\n");
+    if (se->sched_class->task_dead) {
+        se->sched_class->task_dead(se->rq, se);
     }
 }
 
 void rq_yield_task(void) {
     struct rq *current_rq = myproc()->sched_entity->rq;
+    assert(current_rq != NULL, "rq_yield_task: current_rq is NULL");
     if (current_rq->sched_class->yield_task) {
         current_rq->sched_class->yield_task(current_rq);
     }

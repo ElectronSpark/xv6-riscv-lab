@@ -317,9 +317,11 @@ void idle_proc_init(void) {
   __proc_set_pstate(p, PSTATE_RUNNING);
   mycpu()->proc = p;
   mycpu()->idle_proc = p;
+  
+  struct rq *idle_rq = get_rq_for_cpu(IDLE_MAJOR_PRIORITY, cpuid());
+  rq_enqueue_task(idle_rq, p->sched_entity);
   smp_store_release(&p->sched_entity->on_cpu, 1);
   smp_store_release(&p->sched_entity->on_rq, 1);
-  smp_store_release(&p->sched_entity->cpu_id, cpuid());
 
   printf("CPU %ld idle process initialized at kstack 0x%lx\n", cpuid(), (uint64)kstack);
 }

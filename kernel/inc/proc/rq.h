@@ -47,7 +47,7 @@ void rq_clear_ready(int cls_id, int cpu_id);
 // The following are wrappers around the sched_class callbacks
 // Will assume the validity of rq and se
 void rq_enqueue_task(struct rq* rq, struct sched_entity* se);
-void rq_dequeue_task(struct sched_entity* se);
+void rq_dequeue_task(struct rq *rq, struct sched_entity* se);
 struct sched_entity *rq_pick_next_task(struct rq* rq);
 void rq_put_prev_task(struct sched_entity* se);
 void rq_set_next_task(struct sched_entity* se);

@@ -23,8 +23,11 @@ static struct sched_entity *__idle_pick_next_task(struct rq *rq) {
 }
 
 static void __idle_enqueue_task(struct rq *rq, struct sched_entity *se) {
-    // Idle rq should never have any other task enqueued
-    panic("idle_enqueue_task: trying to enqueue task to idle rq\n");
+    struct idle_rq *idle_rq = container_of(rq, struct idle_rq, rq);
+    assert(idle_rq->idle_proc == NULL, "idle_enqueue_task: idle rq already has a process\n");
+    idle_rq->idle_proc = se->proc;
+    se->rq = rq;
+    se->priority = (IDLE_MAJOR_PRIORITY << PRIORITY_MAINLEVEL_SHIFT) | PRIORITY_SUBLEVEL_MASK;
 }
 
 static void __idle_dequeue_task(struct rq *rq, struct sched_entity *se) {

@@ -24,37 +24,20 @@ static struct sched_entity *__fifo_pick_next_task(struct rq *rq) {
 
 static void __fifo_enqueue_task(struct rq *rq, struct sched_entity *se) {
     struct fifo_rq *fifo_rq = container_of(rq, struct fifo_rq, rq);
-    assert(se->rq == NULL, "fifo_enqueue_task: se rq is not NULL\n");
     list_node_push(&fifo_rq->run_queue, se, list_entry);
-    se->rq = rq;
-    se->cpu_id = rq->cpu_id;
-    se->sched_class = rq->sched_class;
-    rq->task_count++;
-    rq_set_ready(FIFO_MAJOR_PRIORITY, rq->cpu_id);
 }
 
 static void __fifo_dequeue_task(struct rq *rq, struct sched_entity *se) {
     // struct fifo_rq *fifo_rq = container_of(rq, struct fifo_rq, rq);
-    assert(rq->task_count > 0, "fifo_dequeue_task: rq task_count is zero\n");
-    assert(se->rq == rq, "fifo_dequeue_task: se->rq does not match rq\n");
     list_node_detach(se, list_entry);
-    se->rq = NULL;
-    se->sched_class = NULL;
-    rq->task_count--;
-    if (rq->task_count == 0) {
-        rq_clear_ready(FIFO_MAJOR_PRIORITY, rq->cpu_id);
-    }
 }
 
 static void __fifo_put_prev_task(struct rq *rq, struct sched_entity *se) {
     struct fifo_rq *fifo_rq = container_of(rq, struct fifo_rq, rq);
-    assert(se->rq == rq, "fifo_put_prev_task: run queue doesn't match\n");
     list_node_push(&fifo_rq->run_queue, se, list_entry);
 }
 
 static void __fifo_set_next_task(struct rq *rq, struct sched_entity *se) {
-    assert(rq->task_count > 0, "fifo_set_next_task: rq task_count is zero\n");
-    assert(se->rq == rq, "fifo_set_next_task: se->rq does not match rq\n");
     list_node_detach(se, list_entry);
 }
 
