@@ -72,6 +72,32 @@ spin_release(struct spinlock *lk)
   pop_off();
 }
 
+// Try to acquire the lock without spinning.
+// Returns 1 if the lock was acquired, 0 if not.
+int
+spin_trylock(struct spinlock *lk)
+{
+  push_off(); // disable interrupts
+  
+  if (spin_holding(lk)) {
+    pop_off();
+    return 0; // Already holding the lock (deadlock prevention)
+  }
+  
+  // Try to atomically set locked to 1
+  if (__atomic_test_and_set(&lk->locked, __ATOMIC_ACQUIRE) != 0) {
+    // Lock was already held
+    pop_off();
+    return 0;
+  }
+  
+  // Successfully acquired the lock
+  __atomic_store_n(&lk->cpu, mycpu(), __ATOMIC_RELAXED);
+  mycpu()->spin_depth++;
+  __atomic_signal_fence(__ATOMIC_ACQUIRE);
+  return 1;
+}
+
 // Check whether this cpu is holding the lock.
 // Interrupts must be off.
 int

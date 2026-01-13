@@ -115,6 +115,7 @@ void            spin_acquire(struct spinlock*);
 int             spin_holding(struct spinlock*);
 void            spin_init(struct spinlock*, char*);
 void            spin_release(struct spinlock*);
+int             spin_trylock(struct spinlock*);
 
 // sleeplock.c
 int             mutex_lock(mutex_t*);
