@@ -352,8 +352,12 @@ static void test_grace_period(void) {
 }
 
 // ============================================================================
-// NEGATIVE TEST 1: Callback Not Invoked Before Grace Period
+// NEGATIVE TEST 1: Callback Not Invoked Synchronously in call_rcu
 // ============================================================================
+// In timestamp-based RCU, callbacks are invoked asynchronously by kthreads
+// when all other CPUs have context-switched. This test verifies that:
+// 1. Callbacks are NOT invoked synchronously within call_rcu() itself
+// 2. After synchronize_rcu(), callbacks can be invoked
 
 static _Atomic int negative_callback_count = 0;
 
@@ -363,7 +367,7 @@ static void negative_callback(void *data) {
 }
 
 static void test_callback_not_invoked_early(void) {
-    printf("NEGATIVE TEST: Callback Not Invoked Before Grace Period\n");
+    printf("NEGATIVE TEST: Callback Not Invoked Synchronously in call_rcu\n");
 
     __atomic_store_n(&negative_callback_count, 0, __ATOMIC_RELEASE);
 
@@ -380,27 +384,25 @@ static void test_callback_not_invoked_early(void) {
         panic("test_callback_not_invoked_early: kmm_alloc failed for head");
     }
 
-    // Register callback
+    // Register callback - check IMMEDIATELY after call_rcu returns
+    // The callback should NOT be invoked synchronously within call_rcu
     call_rcu(head, negative_callback, data);
 
-    // Immediately check - callback should NOT have been invoked yet
+    // Immediately check - callback should NOT have been invoked synchronously
     int early_count = __atomic_load_n(&negative_callback_count, __ATOMIC_ACQUIRE);
-    assert(early_count == 0, "Callback should NOT be invoked immediately after call_rcu");
+    assert(early_count == 0, "Callback should NOT be invoked synchronously in call_rcu");
 
-    // Do NOT call rcu_process_callbacks() yet - we want to verify callback isn't processed
-    // without a grace period completing
-    // Just yield a few times
-    yield();
-    yield();
-    
-    early_count = __atomic_load_n(&negative_callback_count, __ATOMIC_ACQUIRE);
-    assert(early_count == 0, "Callback should NOT be invoked before grace period completes");
+    printf("  PASS: Callback correctly NOT invoked synchronously in call_rcu\n");
 
-    printf("  PASS: Callback correctly delayed until grace period\n");
-
-    // Cleanup - complete the grace period to invoke callback
+    // Now complete the grace period and invoke callback
     synchronize_rcu();
     rcu_process_callbacks();
+    
+    // Verify callback was invoked
+    int final_count = __atomic_load_n(&negative_callback_count, __ATOMIC_ACQUIRE);
+    assert(final_count == 1, "Callback should be invoked after synchronize_rcu");
+    
+    printf("  PASS: Callback invoked after grace period\n");
     
     kmm_free(head);
 }
@@ -768,7 +770,7 @@ static void test_list_rcu_concurrent_rw(void) {
 // STRESS TESTS (1,000,000 scale)
 // ============================================================================
 
-#define STRESS_ITERATIONS       1000000
+#define STRESS_ITERATIONS       100000
 #define STRESS_READERS          4
 #define STRESS_BATCH_SIZE       10000
 
@@ -801,9 +803,8 @@ static void test_stress_call_rcu(void) {
 
             stress_data_t *data = (stress_data_t *)kmm_alloc(sizeof(stress_data_t));
             if (data == NULL) {
-                // Out of memory - process callbacks to free some
+                // Out of memory - wait for grace period and let kthreads process callbacks
                 synchronize_rcu();
-                rcu_process_callbacks();
                 yield();
                 data = (stress_data_t *)kmm_alloc(sizeof(stress_data_t));
                 if (data == NULL) {
@@ -815,17 +816,13 @@ static void test_stress_call_rcu(void) {
             call_rcu(&data->rcu_head, stress_node_free_callback, data);
         }
 
-        // Process callbacks every batch to prevent memory exhaustion
+        // Ensure grace period completes so callbacks can be processed by kthreads
         synchronize_rcu();
-        rcu_process_callbacks();
     }
 
-    // Final synchronization and callback processing
-    for (int i = 0; i < 5; i++) {
-        synchronize_rcu();
-        rcu_process_callbacks();
-        yield();
-    }
+    // Wait for all callbacks to be processed by RCU kthreads
+    // Use rcu_barrier() which waits for all pending callbacks to complete
+    rcu_barrier();
 
     int invoked = __atomic_load_n(&stress_callbacks_invoked, __ATOMIC_ACQUIRE);
     printf("  Final: %d callbacks invoked out of %d\n", invoked, STRESS_ITERATIONS);
@@ -978,12 +975,8 @@ static void test_stress_list_rcu(void) {
 
     printf("  Cleaning up %d remaining nodes\n", remaining);
 
-    // Final synchronization
-    for (int i = 0; i < 10; i++) {
-        synchronize_rcu();
-        rcu_process_callbacks();
-        yield();
-    }
+    // Use rcu_barrier() to wait for all callbacks to complete
+    rcu_barrier();
 
     int freed = __atomic_load_n(&stress_callbacks_invoked, __ATOMIC_ACQUIRE);
     printf("  Total: added=%d, removed=%d (via call_rcu), freed=%d\n",

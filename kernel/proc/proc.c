@@ -29,7 +29,8 @@
 // 3. target pcb lock
 // 4. children pcb lock
 
-extern void forkret(struct context *prev);
+static void forkret(void);
+static void forkret_entry(struct context *prev);
 STATIC void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
@@ -318,6 +319,13 @@ void idle_proc_init(void) {
   mycpu()->proc = p;
   mycpu()->idle_proc = p;
   
+  // Set idle process scheduling attributes using the new sched_attr API
+  struct sched_attr attr;
+  sched_attr_init(&attr);
+  attr.priority = IDLE_PRIORITY;  // Lowest priority for idle process
+  attr.affinity_mask = (1ULL << cpuid());  // Pin to current CPU
+  sched_setattr(p->sched_entity, &attr);
+  
   rq_lock_current();
   struct rq *idle_rq = GET_RQ_FOR_CURRENT(IDLE_MAJOR_PRIORITY);
   // Set on_rq before enqueue (matches the pattern in __do_scheduler_wakeup)
@@ -409,18 +417,15 @@ uchar initcode[] = {
 };
 
 static void init_entry(struct context *prev) {
-  // When we arrive here from context switch, we hold:
-  //   1. myproc()->lock (from __sched_pick_next)
-  //   2. scheduler lock (from scheduler_run)
-  // Release them to do initialization work.
-  sched_unlock();  // Release scheduler lock first
+  // When we arrive here from context switch, we hold the rq lock.
+  // Finish the context switch first to release the rq lock properly.
+  context_switch_finish(proc_from_context(prev), myproc());
   
+  // Now do post-init work without holding any scheduler locks
   start_kernel_post_init();
 
-  // All the following forked processes will start from forkret.
-  // And forkret will release the sched lock.
-  sched_lock();
-  forkret(prev);
+  // Return to user space via forkret
+  forkret();
 }
 
 // Set up first user process.
@@ -476,6 +481,13 @@ userinit(void)
   PROC_SET_USER_SPACE(p);
 
   proc_unlock(p);
+  
+  // Set init process scheduling attributes using the new sched_attr API
+  struct sched_attr attr;
+  sched_attr_init(&attr);
+  // Use default priority and allow running on all CPUs
+  sched_setattr(p->sched_entity, &attr);
+  
   // Don't forget to wake up the process.
   spin_acquire(&p->sched_entity->pi_lock);
   __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
@@ -543,7 +555,7 @@ fork(void)
   }
 
   // Allocate process.
-  if((np = allocproc(forkret, 0, 0, p->kstack_order)) == 0){
+  if((np = allocproc(forkret_entry, 0, 0, p->kstack_order)) == 0){
     return -1;
   }
 
@@ -783,20 +795,28 @@ yield(void)
   scheduler_yield();
 }
 
-// A fork child's very first scheduling by scheduler()
-// will swtch to forkret.
-void
-forkret(struct context *prev)
-{ 
+// Entry wrapper for forked user processes.
+// This is called as the entry point from context switch.
+static void forkret_entry(struct context *prev) {
   assert(PROC_USER_SPACE(myproc()), "kernel process %d tries to return to user space", myproc()->pid);
+  assert(prev != NULL, "forkret_entry: prev context is NULL");
+  
+  // Finish the context switch first - this releases the rq lock
+  context_switch_finish(proc_from_context(prev), myproc());
+  
+  // Now safe to do the rest without holding scheduler locks
+  forkret();
+}
+
+// A fork child's very first scheduling by scheduler()
+// will swtch to forkret_entry, which calls this after context_switch_finish.
+static void
+forkret(void)
+{ 
   // The scheduler will disable interrupts to assure the atomicity of
   // the scheduler operations. For processes that gave up CPU by calling yield(),
   //   yield() would restore the previous interruption state when switched back. 
   // But at here, we need to enable interrupts for the first time.
-  assert(prev != NULL, "forkret: prev context is NULL");
-  context_switch_finish(proc_from_context(prev), myproc());
-
-  // Still holding p->lock from scheduler.
   intr_on();
 
   // printf("forkret: process %d is running\n", myproc()->pid);

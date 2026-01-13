@@ -10,31 +10,23 @@
 //   - Quiescent state: Point where a CPU is not in RCU read-side critical section
 //   - Callbacks: Functions invoked after a grace period completes
 //   - Timestamp-based RCU: Grace period detection based on context switch timestamps
-//   - RCU GP kthread: Background kernel thread for grace period management
+//   - Per-CPU RCU kthreads: Background kernel threads for callback processing
 //
 // GRACE PERIOD DETECTION (Timestamp-based):
 //   A grace period completes when all CPUs have context switched after the grace
 //   period start timestamp. Each CPU records its last context switch timestamp
-//   in mycpu()->rcu_timestamp, which is updated before every context switch.
+//   in mycpu()->rcu_timestamp, which is updated on every context switch.
 //
 //   Algorithm:
-//     1. When a grace period starts, record the current jiffies as gp_start_timestamp
-//     2. Poll each CPU's rcu_timestamp to check if it's >= gp_start_timestamp
-//     3. When all CPUs have timestamps >= gp_start, the grace period is complete
-//     4. Process callbacks that were waiting for this grace period
+//     1. When call_rcu() is called, callback records timestamp = get_jiffs()
+//     2. Each CPU updates its rcu_timestamp on context switch
+//     3. Callback ready when: callback.timestamp <= min(other CPUs' rcu_timestamp)
+//     4. Ready callbacks are invoked by per-CPU kthreads
 //
-//   Timestamp overflow handling:
-//     - Only check overflow risk using current_time from get_jiffs()
-//     - When current_time >= RCU_UINT64_MAX/2, normalize ALL stored timestamps
-//     - Normalization: subtract RCU_UINT64_MAX/4 from all CPU and GP timestamps
-//     - After normalization, direct comparison (t1 > t2) is safe
-//     - This is checked periodically by the RCU GP kthread
-//
-//   The RCU GP kthread periodically:
-//     - Checks for timestamp overflow and normalizes if needed
-//     - Checks if all CPUs have switched context since GP start
-//     - Advances grace periods when all CPUs have newer timestamps
-//     - Processes callbacks and wakes waiters
+//   The per-CPU RCU kthreads periodically:
+//     - Check which callbacks are ready based on timestamps
+//     - Invoke ready callbacks
+//     - Wake synchronize_rcu() waiters
 //
 // READ-SIDE CRITICAL SECTIONS:
 //   rcu_read_lock() and rcu_read_unlock() are very lightweight:
@@ -43,12 +35,16 @@
 //   No per-CPU nesting counters needed - grace period detection relies solely
 //   on context switch timestamps, not on tracking nested read locks.
 //
+// PER-CPU CALLBACK LIST SYNCHRONIZATION:
+//   Both call_rcu() and the kthread access the same CPU's callback list.
+//   To prevent races, both use push_off()/pop_off() during list manipulation.
+//   Since push_off()/pop_off() are re-entrant, this is safe.
+//
 // IMPLEMENTATION STRATEGY:
 //   - Per-CPU data structures minimize lock contention
-//   - Grace periods tracked with timestamps instead of sequence numbers
 //   - Callbacks queued per-CPU and invoked after grace period
-//   - Context switch in process_switch_to() updates mycpu()->rcu_timestamp
-//   - Background kernel thread for grace period management
+//   - Context switch updates mycpu()->rcu_timestamp
+//   - Per-CPU kernel threads for callback processing
 //   - Wait queue support for efficient synchronize_rcu()
 //
 
@@ -62,6 +58,7 @@
 #include "proc/proc.h"
 #include "proc/proc_queue.h"
 #include "proc/sched.h"
+#include "proc/rq.h"
 #include "timer/timer.h"
 
 // Global RCU state
@@ -77,39 +74,61 @@ static spinlock_t rcu_gp_lock = SPINLOCK_INITIALIZED("rcu_gp_lock");
 static proc_queue_t rcu_gp_waitq;
 static spinlock_t rcu_gp_waitq_lock = SPINLOCK_INITIALIZED("rcu_gp_waitq_lock");
 
+// Per-CPU RCU kthread state (forward declaration for rcu_barrier)
+static struct {
+    struct proc *proc;           // The kthread process
+    volatile int wakeup_pending; // Flag to signal wakeup
+} rcu_kthread[NCPU];
+
+// Flag indicating if RCU kthreads have been started
+static volatile int rcu_kthreads_started = 0;
+
 // Forward declarations
 static void rcu_start_gp(void);
 static int rcu_gp_completed(void);
 static void rcu_advance_gp(void);
 static int rcu_invoke_callbacks(rcu_head_t *list);
-static void rcu_advance_cbs(rcu_cpu_data_t *rcp, uint64 gp_timestamp);
-static rcu_head_t *rcu_cblist_dequeue(rcu_cpu_data_t *rcp);
 static void rcu_cblist_enqueue(rcu_cpu_data_t *rcp, rcu_head_t *head);
-static int rcu_cblist_ready_cbs(rcu_cpu_data_t *rcp);
 static void rcu_expedited_gp(void);
 static void rcu_check_timestamp_overflow(void);
 
 // Configuration constants (Linux-inspired)
 #define RCU_LAZY_GP_DELAY   100   // Callbacks to accumulate before starting GP
-#define RCU_BATCH_SIZE      16    // Number of callbacks to invoke per batch
-#define RCU_GP_KTHREAD_INTERVAL_MS  10  // GP kthread wake interval in ms
 
 // Maximum value for uint64 type (defined locally to avoid stdint.h dependency)
 #define RCU_UINT64_MAX      ((uint64)-1)
 
-// Timestamp overflow handling constants:
-//   THRESHOLD: When get_jiffs() reaches this value, trigger normalization
-//   NORMALIZE_VALUE: Amount to subtract from all timestamps during normalization
-// This ensures timestamps stay in a safe range for direct comparison.
-#define TIMESTAMP_OVERFLOW_THRESHOLD  (RCU_UINT64_MAX / 2)
-#define TIMESTAMP_NORMALIZE_VALUE     (RCU_UINT64_MAX / 4)
+// Note on timestamp overflow:
+// With a 64-bit timestamp counter incrementing at 10MHz (100ns per tick),
+// overflow would take ~58,000 years. At 1GHz it would take ~584 years.
+// Therefore, timestamp normalization is not needed and has been removed
+// to avoid the complexity and race conditions it would introduce
+// (particularly with callback timestamps that are harder to normalize safely).
 
-// Helper function to compare timestamps
-// Returns 1 if t1 > t2, 0 otherwise
-// Safe to use direct comparison since rcu_check_timestamp_overflow() ensures
-// all stored timestamps are periodically normalized to prevent wraparound.
-static inline int safe_timestamp_after(uint64 t1, uint64 t2) {
-    return t1 > t2;
+// Calculate the minimum rcu_timestamp among all CPUs OTHER than exclude_cpu.
+// Returns RCU_UINT64_MAX if no other CPUs are initialized (timestamp != 0).
+// This is used to determine which callbacks are safe to invoke - a callback
+// is ready when its registration timestamp is less than this minimum,
+// meaning all other CPUs have context-switched after it was registered.
+//
+// Special case: If no other CPUs have initialized timestamps (single-CPU system
+// or early boot), returns RCU_UINT64_MAX. This means all callbacks are considered
+// ready, which is correct because there are no other CPUs that could be in
+// RCU read-side critical sections.
+static uint64 rcu_get_min_other_cpu_timestamp(int exclude_cpu) {
+    uint64 min_ts = RCU_UINT64_MAX;
+    for (int i = 0; i < NCPU; i++) {
+        if (i == exclude_cpu) continue;  // Skip the excluded CPU
+        struct cpu_local *cpu = &cpus[i];
+        uint64 cpu_ts = __atomic_load_n(&cpu->rcu_timestamp, __ATOMIC_ACQUIRE);
+        if (cpu_ts == 0) continue;  // Skip uninitialized CPUs
+        if (cpu_ts < min_ts) {
+            min_ts = cpu_ts;
+        }
+    }
+    // If no other CPUs have initialized timestamps, min_ts remains RCU_UINT64_MAX,
+    // which means all callbacks are ready (no other CPUs to wait for)
+    return min_ts;
 }
 
 // ============================================================================
@@ -119,37 +138,19 @@ static inline int safe_timestamp_after(uint64 t1, uint64 t2) {
 // Forward declaration for use in kthread
 static void rcu_wakeup_gp_waiters(void);
 
-// Check and normalize timestamps if needed (called periodically by GP kthread)
+// Timestamp overflow check - no longer needed
 //
-// Overflow prevention strategy:
-//   1. Check current_time from get_jiffs() against THRESHOLD
-//   2. If threshold reached, read each stored timestamp into a local variable
-//   3. Subtract NORMALIZE_VALUE from local copy and store back
-//   4. This keeps all timestamps in a safe range for direct comparison
+// With 64-bit timestamps, overflow is not a practical concern:
+// - At 10MHz (100ns ticks): overflow in ~58,000 years
+// - At 1GHz (1ns ticks): overflow in ~584 years
 //
-// Note: Only current_time determines if normalization is needed. Individual
-// timestamp values are never compared to the threshold - they are simply
-// normalized when the global time crosses the threshold.
+// The previous normalization approach had bugs:
+// 1. Callback timestamps in rcu_head_t were never normalized
+// 2. Race conditions when normalizing while other CPUs context-switch
+//
+// This function is kept as a no-op for compatibility but does nothing.
 static void rcu_check_timestamp_overflow(void) {
-    uint64 current_time = get_jiffs();
-    
-    // Only trigger normalization when current time reaches the threshold
-    if (current_time >= TIMESTAMP_OVERFLOW_THRESHOLD) {
-        // Normalize all CPU timestamps: read into local, subtract, store back
-        for (int i = 0; i < NCPU; i++) {
-            struct cpu_local *cpu = &cpus[i];
-            uint64 cpu_ts = __atomic_load_n(&cpu->rcu_timestamp, __ATOMIC_ACQUIRE);
-            if (cpu_ts >= TIMESTAMP_NORMALIZE_VALUE) {
-                __atomic_store_n(&cpu->rcu_timestamp, cpu_ts - TIMESTAMP_NORMALIZE_VALUE, __ATOMIC_RELEASE);
-            }
-        }
-        
-        // Normalize grace period start timestamp
-        uint64 gp_start = __atomic_load_n(&rcu_state.gp_start_timestamp, __ATOMIC_ACQUIRE);
-        if (gp_start >= TIMESTAMP_NORMALIZE_VALUE) {
-            __atomic_store_n(&rcu_state.gp_start_timestamp, gp_start - TIMESTAMP_NORMALIZE_VALUE, __ATOMIC_RELEASE);
-        }
-    }
+    // No-op: timestamp overflow is not a practical concern with uint64
 }
 
 // Check if grace period has completed by verifying all CPUs have context switched
@@ -157,10 +158,13 @@ static void rcu_check_timestamp_overflow(void) {
 //
 // Algorithm: Compare each CPU's rcu_timestamp against gp_start_timestamp.
 // A CPU has passed through a quiescent state if its timestamp >= gp_start.
-// Direct comparison is safe because rcu_check_timestamp_overflow() ensures
-// all timestamps are normalized before they can wrap around.
 static int rcu_gp_completed(void) {
     uint64 gp_start = __atomic_load_n(&rcu_state.gp_start_timestamp, __ATOMIC_ACQUIRE);
+    
+    // If no grace period has been started yet (gp_start == 0), it cannot be complete
+    if (gp_start == 0) {
+        return 0;
+    }
     
     // A grace period completes when all CPUs have timestamps >= gp_start
     // This means they have all context switched at or after the GP began
@@ -185,45 +189,6 @@ static int rcu_gp_completed(void) {
 
 // Force quiescent states - not needed in timestamp-based RCU
 // Removed as it's unused in the new implementation
-
-// Per-CPU RCU processing function called from idle loop
-// Each CPU handles its own RCU work:
-// 1. Timestamp overflow checking (any CPU can do this)
-// 2. Starting grace periods if pending callbacks
-// 3. Advancing grace period state
-// 4. Processing own callbacks
-// 5. Waking up synchronize_rcu() waiters
-void rcu_idle_enter(void) {
-    // Mark that we're in the idle loop - provides RCU quiescent state
-    rcu_note_context_switch();
-    
-    // Check for timestamp overflow and normalize if needed
-    // Any CPU can do this - it's atomic and safe
-    rcu_check_timestamp_overflow();
-    
-    // Check if this CPU has pending callbacks that need a grace period
-    push_off();
-    int cpu = cpuid();
-    rcu_cpu_data_t *rcp = &rcu_cpu_data[cpu];
-    int has_pending_cbs = __atomic_load_n(&rcp->cb_count, __ATOMIC_ACQUIRE) > 0;
-    pop_off();
-    
-    // If there are pending callbacks, start GP if none in progress
-    if (has_pending_cbs) {
-        if (!__atomic_load_n(&rcu_state.gp_in_progress, __ATOMIC_ACQUIRE)) {
-            rcu_start_gp();
-        }
-    }
-    
-    // Try to advance grace period (any CPU can do this)
-    rcu_advance_gp();
-    
-    // Process this CPU's ready callbacks
-    rcu_process_callbacks();
-    
-    // Wake up any processes waiting for grace period completion
-    rcu_wakeup_gp_waiters();
-}
 
 // Wake up processes waiting in synchronize_rcu()
 static void rcu_wakeup_gp_waiters(void) {
@@ -252,7 +217,6 @@ void rcu_init(void) {
     __atomic_store_n(&rcu_state.expedited_in_progress, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&rcu_state.expedited_seq, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&rcu_state.expedited_count, 0, __ATOMIC_RELEASE);
-    rcu_state.gp_wait_queue = NULL;
 
     // Initialize per-CPU data and timestamps
     for (int i = 0; i < NCPU; i++) {
@@ -269,13 +233,9 @@ void rcu_cpu_init(int cpu) {
 
     rcu_cpu_data_t *rcp = &rcu_cpu_data[cpu];
 
-    // Initialize two-list callback structure
+    // Initialize pending callback list
     __atomic_store_n(&rcp->pending_head, NULL, __ATOMIC_RELEASE);
     __atomic_store_n(&rcp->pending_tail, NULL, __ATOMIC_RELEASE);
-    __atomic_store_n(&rcp->pending_gp, 0, __ATOMIC_RELEASE);
-    
-    __atomic_store_n(&rcp->ready_head, NULL, __ATOMIC_RELEASE);
-    __atomic_store_n(&rcp->ready_tail, NULL, __ATOMIC_RELEASE);
 
     __atomic_store_n(&rcp->cb_count, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&rcp->qs_count, 0, __ATOMIC_RELEASE);
@@ -363,57 +323,6 @@ static void rcu_cblist_enqueue(rcu_cpu_data_t *rcp, rcu_head_t *head) {
     }
 }
 
-// Move pending callbacks to ready list when GP completes
-static void rcu_advance_cbs(rcu_cpu_data_t *rcp, uint64 gp_completed) {
-    // Check if pending callbacks are waiting for a GP that has now completed
-    uint64 pending_gp = __atomic_load_n(&rcp->pending_gp, __ATOMIC_ACQUIRE);
-    rcu_head_t *pending_head = __atomic_load_n(&rcp->pending_head, __ATOMIC_ACQUIRE);
-    
-    if (pending_head == NULL) {
-        return;  // No pending callbacks
-    }
-    
-    if (pending_gp > gp_completed) {
-        return;  // GP not yet completed for these callbacks
-    }
-    
-    // GP completed - move all pending callbacks to ready list
-    rcu_head_t *pending_tail = __atomic_load_n(&rcp->pending_tail, __ATOMIC_ACQUIRE);
-    rcu_head_t *ready_tail = __atomic_load_n(&rcp->ready_tail, __ATOMIC_ACQUIRE);
-    
-    if (ready_tail == NULL) {
-        // Ready list is empty - pending becomes ready
-        __atomic_store_n(&rcp->ready_head, pending_head, __ATOMIC_RELEASE);
-        __atomic_store_n(&rcp->ready_tail, pending_tail, __ATOMIC_RELEASE);
-    } else {
-        // Append pending to ready
-        ready_tail->next = pending_head;
-        __atomic_store_n(&rcp->ready_tail, pending_tail, __ATOMIC_RELEASE);
-    }
-    
-    // Clear pending list
-    __atomic_store_n(&rcp->pending_head, NULL, __ATOMIC_RELEASE);
-    __atomic_store_n(&rcp->pending_tail, NULL, __ATOMIC_RELEASE);
-}
-
-// Check if there are callbacks ready to invoke
-static int rcu_cblist_ready_cbs(rcu_cpu_data_t *rcp) {
-    return __atomic_load_n(&rcp->ready_head, __ATOMIC_ACQUIRE) != NULL;
-}
-
-// Dequeue all ready callbacks for invocation
-static rcu_head_t *rcu_cblist_dequeue(rcu_cpu_data_t *rcp) {
-    rcu_head_t *head = __atomic_load_n(&rcp->ready_head, __ATOMIC_ACQUIRE);
-    if (head == NULL) {
-        return NULL;
-    }
-    
-    // Take the entire ready list
-    __atomic_store_n(&rcp->ready_head, NULL, __ATOMIC_RELEASE);
-    __atomic_store_n(&rcp->ready_tail, NULL, __ATOMIC_RELEASE);
-    
-    return head;
-}
 
 // ============================================================================
 // Grace Period Management
@@ -430,7 +339,7 @@ static void rcu_start_gp(void) {
     }
 
     // Start new grace period with current timestamp
-    uint64 now = get_jiffs();
+    uint64 now = r_time();
     __atomic_store_n(&rcu_state.gp_start_timestamp, now, __ATOMIC_RELEASE);
     __atomic_store_n(&rcu_state.gp_in_progress, 1, __ATOMIC_RELEASE);
 
@@ -477,7 +386,7 @@ void rcu_note_context_switch(void) {
     // Update CPU timestamp to current time
     int cpu = cpuid();
     struct cpu_local *mycpu_ptr = &cpus[cpu];
-    uint64 now = get_jiffs();
+    uint64 now = r_time();
     __atomic_store_n(&mycpu_ptr->rcu_timestamp, now, __ATOMIC_RELEASE);
     
     // Update statistics
@@ -487,17 +396,19 @@ void rcu_note_context_switch(void) {
     // Try to advance grace period
     rcu_advance_gp();
     
-    // Advance our own CPU's callbacks (protected by push_off)
-    uint64 gp_completed = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
-    rcu_advance_cbs(rcp, gp_completed);
+    // Note: In timestamp-based RCU, callbacks are processed by checking
+    // timestamps directly in rcu_process_callbacks_for_cpu(), not by
+    // moving them between lists based on GP sequence numbers.
     
     pop_off();
 }
 
-// Called by scheduler to check for quiescent states
+// Called by scheduler to note that a context switch has occurred
+// This is the main mechanism for tracking quiescent states in RCU
 void rcu_check_callbacks(void) {
-    // A context switch is a quiescent state - timestamp is updated elsewhere
-    // This function is kept for compatibility but doesn't need to do much
+    // A context switch is a quiescent state - update the CPU's timestamp
+    // This allows RCU to determine when grace periods have completed
+    rcu_note_context_switch();
 }
 
 // ============================================================================
@@ -513,6 +424,7 @@ void call_rcu(rcu_head_t *head, rcu_callback_t func, void *data) {
     head->next = NULL;
     head->func = func;
     head->data = data;
+    head->timestamp = r_time();  // Record when callback was registered
 
     // Disable preemption to ensure we stay on the same CPU
     push_off();
@@ -523,15 +435,6 @@ void call_rcu(rcu_head_t *head, rcu_callback_t func, void *data) {
     // Add to per-CPU pending callback list
     rcu_cblist_enqueue(rcp, head);
     __atomic_fetch_add(&rcp->cb_count, 1, __ATOMIC_RELEASE);
-    
-    // Set the GP sequence this callback is waiting for
-    // Callbacks need to wait for the NEXT grace period to complete
-    uint64 current_gp = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
-    uint64 pending_gp = __atomic_load_n(&rcp->pending_gp, __ATOMIC_ACQUIRE);
-    if (pending_gp == 0 || pending_gp <= current_gp) {
-        // Set to wait for next GP
-        __atomic_store_n(&rcp->pending_gp, current_gp + 1, __ATOMIC_RELEASE);
-    }
 
     // Update lazy callback counter
     int lazy_count = __atomic_fetch_add(&rcu_state.lazy_cb_count, 1, __ATOMIC_RELEASE);
@@ -549,6 +452,9 @@ void call_rcu(rcu_head_t *head, rcu_callback_t func, void *data) {
         // Non-lazy mode - start GP immediately
         rcu_start_gp();
     }
+    
+    // Wake up the RCU kthread to process callbacks
+    rcu_kthread_wakeup();
 }
 
 // Invoke callbacks that have completed their grace period
@@ -575,45 +481,102 @@ static int rcu_invoke_callbacks(rcu_head_t *list) {
 
         cur = next;
 
-        // Batch limit - yield to prevent monopolizing CPU (Linux-inspired)
-        if (count > 0 && count % RCU_BATCH_SIZE == 0) {
-            yield();
-        }
+        // Note: We don't yield here because rcu_invoke_callbacks can be called
+        // from various contexts (kthreads, synchronize_rcu, rcu_barrier) and
+        // yielding could disrupt scheduler state in some callers.
     }
 
     __atomic_fetch_add(&rcu_state.cb_invoked, count, __ATOMIC_RELEASE);
     return count;
 }
 
-// Process completed RCU callbacks
-void rcu_process_callbacks(void) {
-    // Disable preemption to ensure we stay on the same CPU
-    push_off();
-    
-    int cpu = cpuid();
+// Process completed RCU callbacks for a specific CPU using timestamp-based readiness
+// IMPORTANT: This must only be called for the CURRENT CPU to maintain per-CPU exclusivity.
+// This function manages its own push_off()/pop_off() calls around list manipulation.
+static void rcu_process_callbacks_for_cpu(int cpu) {
     rcu_cpu_data_t *rcp = &rcu_cpu_data[cpu];
 
-    // First, advance our callback segments based on completed grace periods
-    uint64 gp_completed = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
-    rcu_advance_cbs(rcp, gp_completed);
+    // Get the minimum timestamp among CPUs OTHER than the target CPU
+    // A callback is safe to invoke only if ALL other CPUs have context
+    // switched after the callback was registered
+    uint64 min_other_cpu_ts = rcu_get_min_other_cpu_timestamp(cpu);
 
-    // Check if there are ready callbacks using segmented list
-    if (!rcu_cblist_ready_cbs(rcp)) {
-        pop_off();
-        return;
-    }
-
-    // Get callbacks to process from DONE segment
-    rcu_head_t *done_list = rcu_cblist_dequeue(rcp);
+    // Disable preemption while taking the list to prevent race with call_rcu()
+    push_off();
+    
+    // Take the entire pending list
+    rcu_head_t *pending = __atomic_exchange_n(&rcp->pending_head, NULL, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&rcp->pending_tail, NULL, __ATOMIC_RELEASE);
     
     pop_off();
 
-    // Invoke callbacks outside the critical section
-    if (done_list != NULL) {
-        int count = rcu_invoke_callbacks(done_list);
-        __atomic_fetch_sub(&rcp->cb_count, count, __ATOMIC_RELEASE);
-        __atomic_fetch_add(&rcp->cb_invoked, 1, __ATOMIC_RELEASE);
+    if (pending == NULL) {
+        return;
     }
+
+    // Separate into ready (timestamp <= min) and not-ready (timestamp > min)
+    // This operates on local lists, no protection needed
+    rcu_head_t *ready_head = NULL;
+    rcu_head_t *ready_tail = NULL;
+    rcu_head_t *notready_head = NULL;
+    rcu_head_t *notready_tail = NULL;
+
+    while (pending != NULL) {
+        rcu_head_t *cur = pending;
+        pending = pending->next;
+        cur->next = NULL;
+
+        // Check if this callback is ready (all other CPUs have switched at or after it)
+        if (cur->timestamp <= min_other_cpu_ts) {
+            // Ready to invoke
+            if (ready_tail == NULL) {
+                ready_head = ready_tail = cur;
+            } else {
+                ready_tail->next = cur;
+                ready_tail = cur;
+            }
+        } else {
+            // Not ready yet - put in temp list
+            if (notready_tail == NULL) {
+                notready_head = notready_tail = cur;
+            } else {
+                notready_tail->next = cur;
+                notready_tail = cur;
+            }
+        }
+    }
+
+    // Invoke ready callbacks (preemption enabled - callbacks may need to sleep/yield)
+    if (ready_head != NULL) {
+        int count = rcu_invoke_callbacks(ready_head);
+        __atomic_fetch_sub(&rcp->cb_count, count, __ATOMIC_RELEASE);
+        __atomic_fetch_add(&rcp->cb_invoked, count, __ATOMIC_RELEASE);
+    }
+
+    // Disable preemption while putting callbacks back to prevent race with call_rcu()
+    if (notready_head != NULL) {
+        push_off();
+        
+        rcu_head_t *old_head = __atomic_load_n(&rcp->pending_head, __ATOMIC_ACQUIRE);
+        notready_tail->next = old_head;
+        __atomic_store_n(&rcp->pending_head, notready_head, __ATOMIC_RELEASE);
+        if (old_head == NULL) {
+            __atomic_store_n(&rcp->pending_tail, notready_tail, __ATOMIC_RELEASE);
+        }
+        
+        pop_off();
+    }
+}
+
+// Process completed RCU callbacks for current CPU using timestamp-based readiness
+void rcu_process_callbacks(void) {
+    // Get current CPU with preemption disabled
+    push_off();
+    int cpu = cpuid();
+    pop_off();
+    
+    // Process callbacks - function manages its own push_off()/pop_off() internally
+    rcu_process_callbacks_for_cpu(cpu);
 }
 
 // ============================================================================
@@ -621,83 +584,119 @@ void rcu_process_callbacks(void) {
 // ============================================================================
 
 void synchronize_rcu(void) {
-    uint64 start_gp_count = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
-
-    // Disable lazy GP start for synchronous operations
-    int old_lazy = __atomic_exchange_n(&rcu_state.gp_lazy_start, 0, __ATOMIC_ACQ_REL);
-
-    // Start a new grace period immediately
-    rcu_start_gp();
+    // Record the timestamp when synchronize_rcu was called
+    // All CPUs must context-switch after this time for the grace period to complete
+    uint64 sync_timestamp = r_time();
     
-    // Mark the current CPU as having passed through a quiescent state
-    // This is important for single-CPU or low-activity scenarios
+    // Update our own CPU's timestamp
     rcu_note_context_switch();
 
-    // Poll mode - wait for grace period to complete
+    // Wait for all OTHER CPUs to have timestamps >= sync_timestamp
+    // This means they have all context-switched since we started
     int max_wait = 100000;
     int wait_count = 0;
 
+    push_off();
+    int my_cpu = cpuid();
+    pop_off();
+
     while (wait_count < max_wait) {
-        uint64 current_gp = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
-
-        // Check if a grace period has completed since we started
-        if (current_gp > start_gp_count) {
-            // Restore lazy GP setting
-            __atomic_store_n(&rcu_state.gp_lazy_start, old_lazy, __ATOMIC_RELEASE);
+        // Get minimum timestamp among other CPUs
+        // If min >= sync_timestamp, all CPUs have passed quiescent state
+        uint64 min_ts = rcu_get_min_other_cpu_timestamp(my_cpu);
+        
+        if (min_ts >= sync_timestamp) {
+            // All CPUs have passed through a quiescent state
+            // Wake up kthreads to process any ready callbacks
+            for (int i = 0; i < NCPU; i++) {
+                if (rcu_kthread[i].proc != NULL) {
+                    wakeup_interruptible(rcu_kthread[i].proc);
+                }
+            }
             return;
         }
-
-        // Try to advance grace period ourselves
-        rcu_advance_gp();
-
-        // Sleep on the wait queue - idle loops will wake us up
-        // The idle loop on each CPU calls rcu_idle_enter() which advances
-        // grace periods and wakes waiters
-        spin_acquire(&rcu_gp_waitq_lock);
-        // Double-check before sleeping
-        current_gp = __atomic_load_n(&rcu_state.gp_seq_completed, __ATOMIC_ACQUIRE);
-        if (current_gp > start_gp_count) {
-            spin_release(&rcu_gp_waitq_lock);
-            __atomic_store_n(&rcu_state.gp_lazy_start, old_lazy, __ATOMIC_RELEASE);
-            return;
-        }
-        // Wait on the queue (will release lock while sleeping)
-        proc_queue_wait(&rcu_gp_waitq, &rcu_gp_waitq_lock, NULL);
-        spin_release(&rcu_gp_waitq_lock);
-
+        
+        // Yield to allow other CPUs to context switch
+        yield();
         wait_count++;
     }
 
-    // Restore lazy GP setting
-    __atomic_store_n(&rcu_state.gp_lazy_start, old_lazy, __ATOMIC_RELEASE);
-
-    // If we got here, something is wrong
-    printf("synchronize_rcu: WARNING - grace period did not complete after %d iterations\n",
+    printf("synchronize_rcu: WARNING - not all CPUs passed quiescent state after %d iterations\n",
            max_wait);
 }
 
 void rcu_barrier(void) {
-    // Wait for all pending callbacks to complete
-    // First, ensure current grace period completes
+    // Wait for all pending callbacks that existed BEFORE this call to complete.
+    // 
+    // Timestamp-based strategy:
+    // 1. Record barrier_timestamp = r_time()
+    // 2. All callbacks registered before this have timestamp <= barrier_timestamp
+    // 3. A callback is ready when callback.timestamp <= min_other_cpu_ts
+    // 4. After synchronize_rcu(), all CPUs have rcu_timestamp >= barrier_timestamp
+    // 5. So all pre-barrier callbacks become ready (their timestamp <= barrier_timestamp <= min_ts)
+    // 6. Wake kthreads to process ready callbacks and wait until all are invoked
+    
+    // Record the barrier timestamp - all callbacks we care about have timestamp <= this
+    uint64 barrier_timestamp = r_time();
+    
+    // First synchronize_rcu() ensures all CPUs have timestamp >= barrier_timestamp
+    // This makes all pre-barrier callbacks ready for invocation
     synchronize_rcu();
 
-    // Process any remaining callbacks
-    for (int i = 0; i < NCPU; i++) {
-        rcu_cpu_data_t *rcp = &rcu_cpu_data[i];
-
-        // Wait for callback count to reach zero
-        int max_wait = 100000;
-        int wait_count = 0;
-
-        while (__atomic_load_n(&rcp->cb_count, __ATOMIC_ACQUIRE) > 0 &&
-               wait_count < max_wait) {
-            rcu_process_callbacks();
+    // Now all callbacks with timestamp <= barrier_timestamp are ready to invoke
+    // Keep processing until all CPUs have no callbacks with timestamp <= barrier_timestamp
+    int max_wait = 100000;
+    int wait_count = 0;
+    int all_done = 0;
+    
+    while (!all_done && wait_count < max_wait) {
+        // Wake up all RCU kthreads to process callbacks
+        for (int i = 0; i < NCPU; i++) {
+            if (rcu_kthread[i].proc != NULL) {
+                wakeup_interruptible(rcu_kthread[i].proc);
+            }
+        }
+        
+        // Process our own CPU's callbacks
+        rcu_process_callbacks();
+        
+        // Check if all pre-barrier callbacks have been processed
+        // We check each CPU's pending list for callbacks with timestamp <= barrier_timestamp
+        all_done = 1;
+        for (int i = 0; i < NCPU; i++) {
+            rcu_cpu_data_t *rcp = &rcu_cpu_data[i];
+            
+            // Quick check: if cb_count is 0, no callbacks pending
+            if (__atomic_load_n(&rcp->cb_count, __ATOMIC_ACQUIRE) == 0) {
+                continue;
+            }
+            
+            // Scan the pending list for old callbacks
+            // Note: This is a read-only scan, safe to do from any CPU
+            rcu_head_t *cb = __atomic_load_n(&rcp->pending_head, __ATOMIC_ACQUIRE);
+            while (cb != NULL) {
+                if (cb->timestamp <= barrier_timestamp) {
+                    // Found an old callback that hasn't been processed yet
+                    all_done = 0;
+                    break;
+                }
+                cb = cb->next;
+            }
+            
+            if (!all_done) {
+                break;
+            }
+        }
+        
+        if (!all_done) {
+            // Do another synchronize to advance timestamps and make more callbacks ready
+            synchronize_rcu();
             yield();
             wait_count++;
         }
     }
-
-    // One more grace period to ensure all callbacks are invoked
+    
+    // Final synchronize to ensure everything is flushed
     synchronize_rcu();
 }
 
@@ -722,7 +721,7 @@ static void rcu_expedited_gp(void) {
     __atomic_fetch_add(&rcu_state.expedited_seq, 1, __ATOMIC_ACQ_REL);
 
     // Record start timestamp
-    uint64 exp_start = get_jiffs();
+    uint64 exp_start = r_time();
     
     spin_release(&rcu_gp_lock);
 
@@ -798,3 +797,202 @@ void synchronize_rcu_expedited(void) {
 
     printf("synchronize_rcu_expedited: WARNING - expedited GP did not complete\n");
 }
+
+// ============================================================================
+// Per-CPU RCU Callback Kernel Threads
+// ============================================================================
+//
+// Each CPU has a dedicated kernel thread for processing RCU callbacks.
+// This separates callback processing from the scheduler path, avoiding
+// potential deadlocks and reducing latency in the context switch path.
+//
+// The kthreads:
+// - Sleep when there are no ready callbacks
+// - Wake up when rcu_kthread_wakeup() is called
+// - Process callbacks in batches
+// - Run at normal priority (not idle)
+//
+
+// RCU callback kthread main function
+static int rcu_cb_kthread(uint64 cpu_id, uint64 arg2) {
+    (void)arg2;
+    
+    // Set CPU affinity for this kthread
+    struct sched_attr attr;
+    sched_attr_init(&attr);
+    attr.affinity_mask = (1ULL << cpu_id);  // Pin to this CPU
+    sched_setattr(myproc()->sched_entity, &attr);
+    
+    // Sleep to trigger migration - wakeup path will place us on correct CPU
+    scheduler_sleep(NULL, PSTATE_INTERRUPTIBLE);
+    
+    // After wakeup, verify we're on the correct CPU
+    assert(cpuid() == (int)cpu_id, "RCU kthread running on wrong CPU after migration");
+    
+    printf("RCU callback kthread started on CPU %lu\n", cpu_id);
+    
+    while (1) {
+        // Verify we're on the correct CPU after each wakeup
+        assert(cpuid() == (int)cpu_id, "RCU kthread running on wrong CPU");
+        
+        rcu_cpu_data_t *rcp = &rcu_cpu_data[cpu_id];
+        
+        // First, advance grace period state
+        rcu_check_timestamp_overflow();
+        rcu_advance_gp();
+        
+        // Get the minimum timestamp among OTHER CPUs
+        // A callback is safe to invoke only if ALL other CPUs have context
+        // switched after the callback was registered
+        uint64 min_other_cpu_ts = rcu_get_min_other_cpu_timestamp((int)cpu_id);
+        
+        // Process callbacks from the pending list
+        // Disable preemption while manipulating the list to prevent race with call_rcu()
+        // which also runs on this CPU with preemption disabled.
+        push_off();
+        
+        // Take the entire pending list atomically
+        rcu_head_t *pending = __atomic_exchange_n(&rcp->pending_head, NULL, __ATOMIC_ACQ_REL);
+        __atomic_store_n(&rcp->pending_tail, NULL, __ATOMIC_RELEASE);
+        
+        pop_off();
+        
+        // Separate into ready (timestamp < min) and not-ready (timestamp >= min)
+        rcu_head_t *ready_head = NULL;
+        rcu_head_t *ready_tail = NULL;
+        rcu_head_t *notready_head = NULL;
+        rcu_head_t *notready_tail = NULL;
+        int ready_count = 0;
+        
+        while (pending != NULL) {
+            rcu_head_t *cur = pending;
+            pending = pending->next;
+            cur->next = NULL;
+            
+            // Check if this callback is ready (all other CPUs have switched at or after it)
+            if (cur->timestamp <= min_other_cpu_ts) {
+                // Ready to invoke
+                if (ready_tail == NULL) {
+                    ready_head = ready_tail = cur;
+                } else {
+                    ready_tail->next = cur;
+                    ready_tail = cur;
+                }
+                ready_count++;
+            } else {
+                // Not ready yet - put in temp list
+                if (notready_tail == NULL) {
+                    notready_head = notready_tail = cur;
+                } else {
+                    notready_tail->next = cur;
+                    notready_tail = cur;
+                }
+            }
+        }
+        
+        // Invoke ready callbacks
+        if (ready_head != NULL) {
+            int count = rcu_invoke_callbacks(ready_head);
+            __atomic_fetch_sub(&rcp->cb_count, count, __ATOMIC_RELEASE);
+            __atomic_fetch_add(&rcp->cb_invoked, count, __ATOMIC_RELEASE);
+        }
+        
+        // Wake up any synchronize_rcu() waiters
+        rcu_wakeup_gp_waiters();
+        
+        // Clear wakeup flag
+        __atomic_store_n(&rcu_kthread[cpu_id].wakeup_pending, 0, __ATOMIC_RELEASE);
+        
+        // Put not-ready callbacks back to the pending list
+        // Disable preemption to prevent race with call_rcu() during list manipulation
+        if (notready_head != NULL) {
+            push_off();
+            
+            // Prepend not-ready list to pending list
+            // Since we hold push_off(), call_rcu() cannot interleave
+            rcu_head_t *old_head = __atomic_load_n(&rcp->pending_head, __ATOMIC_ACQUIRE);
+            notready_tail->next = old_head;
+            __atomic_store_n(&rcp->pending_head, notready_head, __ATOMIC_RELEASE);
+            if (old_head == NULL) {
+                __atomic_store_n(&rcp->pending_tail, notready_tail, __ATOMIC_RELEASE);
+            }
+            
+            pop_off();
+            
+            // There are still pending callbacks - yield but don't sleep
+            yield();
+        } else {
+            // No pending callbacks - can sleep
+            scheduler_sleep(NULL, PSTATE_INTERRUPTIBLE);
+        }
+    }
+    
+    return 0;
+}
+
+// Wake up the RCU callback thread for current CPU
+void rcu_kthread_wakeup(void) {
+    if (!__atomic_load_n(&rcu_kthreads_started, __ATOMIC_ACQUIRE)) {
+        return;  // Kthreads not started yet
+    }
+    
+    push_off();
+    int cpu = cpuid();
+    pop_off();
+    
+    struct proc *p = rcu_kthread[cpu].proc;
+    if (p != NULL) {
+        // Set wakeup flag and wake the thread
+        __atomic_store_n(&rcu_kthread[cpu].wakeup_pending, 1, __ATOMIC_RELEASE);
+        wakeup_interruptible(p);
+    }
+}
+
+// Start per-CPU RCU callback processing threads
+void rcu_kthread_start(void) {
+    if (__atomic_load_n(&rcu_kthreads_started, __ATOMIC_ACQUIRE)) {
+        return;  // Already started
+    }
+    
+    printf("Starting per-CPU RCU callback kthreads...\n");
+    
+    // Names for RCU kthreads - simple static strings
+    static const char *rcu_names[NCPU] = {
+        "rcu_cb/0", "rcu_cb/1", "rcu_cb/2", "rcu_cb/3",
+        "rcu_cb/4", "rcu_cb/5", "rcu_cb/6", "rcu_cb/7"
+    };
+    
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        rcu_kthread[cpu].proc = NULL;
+        rcu_kthread[cpu].wakeup_pending = 0;
+        
+        struct proc *p = NULL;
+        const char *name = (cpu < 8) ? rcu_names[cpu] : "rcu_cb";
+        
+        int pid = kernel_proc_create(name, &p, rcu_cb_kthread, cpu, 0, KERNEL_STACK_ORDER);
+        if (pid < 0 || p == NULL) {
+            printf("Failed to create RCU kthread for CPU %d\n", cpu);
+            continue;
+        }
+        
+        rcu_kthread[cpu].proc = p;
+        
+        // Initial wake - kthread will set affinity and sleep
+        wakeup_proc(p);
+    }
+    
+    __atomic_store_n(&rcu_kthreads_started, 1, __ATOMIC_RELEASE);
+    
+    // Let kthreads run to set their affinity and go to sleep
+    yield();
+    
+    // Wake them up again - this time wakeup path will place them on correct CPUs
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        if (rcu_kthread[cpu].proc != NULL) {
+            wakeup_interruptible(rcu_kthread[cpu].proc);
+        }
+    }
+    
+    printf("RCU callback kthreads started\n");
+}
+

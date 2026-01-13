@@ -166,20 +166,23 @@ void rcu_init(void);
 void rcu_cpu_init(int cpu);
 
 /**
- * rcu_idle_enter() - Per-CPU RCU processing in idle loop
+ * rcu_kthread_start() - Start per-CPU RCU callback processing threads
  *
- * Called from each CPU's idle loop to perform per-CPU RCU work:
- * - Check timestamp overflow and normalize if needed
- * - Start grace period if there are pending callbacks
- * - Advance grace period and callbacks
- * - Process ready callbacks
- * - Wake up processes waiting in synchronize_rcu()
+ * Creates a kernel thread on each CPU to handle RCU callback processing.
+ * These threads wake up when there are ready callbacks to process and
+ * handle callback invocation separately from the scheduler path.
  *
- * This replaces the dedicated RCU GP kthread - each CPU now handles
- * its own RCU work in the idle loop. See start_kernel.c for detailed
- * explanation of why idle-based processing is preferred.
+ * Must be called after scheduler and process subsystems are initialized.
  */
-void rcu_idle_enter(void);
+void rcu_kthread_start(void);
+
+/**
+ * rcu_kthread_wakeup() - Wake up the RCU callback thread for current CPU
+ *
+ * Called when there are ready callbacks that need processing.
+ * The RCU kthread will wake up and invoke the callbacks.
+ */
+void rcu_kthread_wakeup(void);
 
 /**
  * rcu_run_tests() - Run comprehensive RCU test suite

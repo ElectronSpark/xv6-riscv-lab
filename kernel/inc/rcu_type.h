@@ -14,14 +14,13 @@ typedef struct rcu_head {
     struct rcu_head     *next;          // Next callback in the list
     rcu_callback_t      func;           // Callback function
     void                *data;          // Data to pass to callback
+    uint64              timestamp;      // Timestamp when callback was registered
 } rcu_head_t;
 
 // Simplified callback list approach:
-// Instead of complex 4-segment lists, use a simple two-list design:
-// 1. pending_head/pending_tail: callbacks waiting for a grace period to complete
-// 2. ready_head/ready_tail: callbacks ready to invoke (their GP completed)
-// This avoids the complexity and bugs of maintaining segment pointers
-// that can point into freed memory.
+// Use a single pending list per CPU. Callbacks record their registration timestamp.
+// A callback is ready when: callback.timestamp <= min(all other CPUs' rcu_timestamp)
+// This avoids complex segment pointer management and ready/not-ready list separation.
 
 // Per-CPU RCU data structure
 // Aligned to cache line to prevent false sharing between CPUs
@@ -30,22 +29,14 @@ typedef struct {
     // Used for grace period detection - all CPUs must have context switched after grace period start
     // We don't store timestamp here, we read it from mycpu()->rcu_timestamp
     
-    // Simple two-list callback design:
-    // - pending list: callbacks registered, waiting for a GP to complete
-    // - ready list: callbacks whose GP has completed, ready to invoke
+    // Pending callbacks list
+    // Callbacks are checked for readiness based on their timestamp vs other CPUs' timestamps
     // Access is protected by push_off()/pop_off() to ensure CPU-local exclusivity
-    
-    // Pending callbacks (waiting for GP)
     rcu_head_t * _Atomic pending_head;
     rcu_head_t * _Atomic pending_tail;
-    _Atomic uint64       pending_gp;    // GP sequence these callbacks are waiting for
-    
-    // Ready callbacks (GP completed, ready to invoke)
-    rcu_head_t * _Atomic ready_head;
-    rcu_head_t * _Atomic ready_tail;
 
     // Statistics
-    _Atomic uint64      cb_count;       // Number of callbacks pending (in both lists)
+    _Atomic uint64      cb_count;       // Number of callbacks pending
     _Atomic uint64      qs_count;       // Number of quiescent states reported
     _Atomic uint64      cb_invoked;     // Number of callbacks invoked on this CPU
 } __ALIGNED_CACHELINE rcu_cpu_data_t;
@@ -68,9 +59,6 @@ typedef struct {
     // Expedited grace period support (Linux-inspired)
     _Atomic int         expedited_in_progress;
     _Atomic uint64      expedited_seq;
-
-    // Waiting processes for synchronize_rcu() (for sleep/wakeup optimization)
-    void                *gp_wait_queue;  // Will be cast to appropriate wait structure
 
     // Global statistics
     _Atomic uint64      gp_count;       // Total grace periods completed

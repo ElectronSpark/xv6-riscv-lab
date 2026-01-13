@@ -570,6 +570,9 @@ void context_switch_finish(struct proc *prev, struct proc *next) {
     if (prev != mycpu()->idle_proc) {
         if (pstate == PSTATE_RUNNING && !PROC_STOPPED(prev)) {
             // Process is still running, put it back to the queue
+            // Note: If affinity was changed to exclude current CPU, the task
+            // stays here until it sleeps. On wakeup, rq_select_task_rq() will
+            // place it on an allowed CPU.
             rq_put_prev_task(se);
             // Mark as back on run queue - matches the on_rq=0 in __sched_pick_next
             smp_store_release(&se->on_rq, 1);
@@ -596,7 +599,7 @@ void context_switch_finish(struct proc *prev, struct proc *next) {
         wakeup_interruptible(pparent);
     }
 
-    // Check RCU callbacks - context switch is a quiescent state
+    // Note quiescent state for RCU - context switch is a quiescent state
+    // Callback processing is now handled by per-CPU RCU kthreads
     rcu_check_callbacks();
-    rcu_process_callbacks();
 }
