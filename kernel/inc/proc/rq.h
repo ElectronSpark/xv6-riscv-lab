@@ -10,24 +10,24 @@
 //      Managed by rq layer.
 //      Each main level corresponds to a sched class.
 //      Always prefer lower main priority level when picking next task.
-#define PRIORITY_SUBLEVEL_MASK      0x1F
-#define PRIORITY_MAINLEVEL_MASK     0xE0
-#define PRIORITY_MAINLEVEL_SHIFT    5
-#define PRIORITY_MAINLEVELS         8
+#define PRIORITY_SUBLEVEL_MASK      0x03
+#define PRIORITY_MAINLEVEL_MASK     0xFC
+#define PRIORITY_MAINLEVEL_SHIFT    2
+#define PRIORITY_MAINLEVELS         64
 #define MAJOR_PRIORITY(prio)    (((prio) & PRIORITY_MAINLEVEL_MASK) >> PRIORITY_MAINLEVEL_SHIFT)
 #define MINOR_PRIORITY(prio)    ((prio) & PRIORITY_SUBLEVEL_MASK)
 
 // #define DEFAULT_MAJOR_PRIORITY   4
-#define DEFAULT_MAJOR_PRIORITY   1
-#define DEFAULT_MINOR_PRIORITY   16
-#define DEFAULT_PRIORITY    ((DEFAULT_MAJOR_PRIORITY << PRIORITY_MAINLEVEL_SHIFT) | DEFAULT_MINOR_PRIORITY)
+#define DEFAULT_MAJOR_PRIORITY   17
+#define DEFAULT_MINOR_PRIORITY   0
 
 #define EXIT_MAJOR_PRIORITY      0
-#define FIFO_MAJOR_PRIORITY      1
-#define IDLE_MAJOR_PRIORITY      7
+#define FIFO_MAJOR_PRIORITY      17
+#define IDLE_MAJOR_PRIORITY      63
 
 #define MAKE_PRIORITY(major, minor)  (((major) << PRIORITY_MAINLEVEL_SHIFT) | (minor))
 #define IDLE_PRIORITY    MAKE_PRIORITY(IDLE_MAJOR_PRIORITY, DEFAULT_MINOR_PRIORITY)
+#define DEFAULT_PRIORITY   MAKE_PRIORITY(DEFAULT_MAJOR_PRIORITY, DEFAULT_MINOR_PRIORITY)
 
 #define GET_RQ_FOR_CURRENT(cls_id)    get_rq_for_cpu((cls_id), cpuid())
 

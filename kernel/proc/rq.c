@@ -18,11 +18,11 @@
 
 // Global run queue structure
 // rqs structure:
-//   rqs[PRIORITY_MAINLEVELS] (fixed size array)
+//   rqs[PRIORITY_MAINLEVELS] (fixed size array, 64 priority levels)
 //       |
 //       v
 //   +-------+-------+-------+-------+-------+-------+-------+-------+
-//   |  [0]  |  [1]  |  [2]  |  [3]  |  [4]  |  [5]  |  [6]  |  [7]  |
+//   |  [0]  |  [1]  |  [2]  | ...                           | [63]  |
 //   +-------+-------+-------+-------+-------+-------+-------+-------+
 //       |       |       |       ...
 //       |       |       +---> NULL or pointer to dynamic array
@@ -36,8 +36,16 @@
 //     struct  struct  struct  struct
 //       rq      rq      rq      rq
 //
-// ready_mask: indicates which main priority levels have runnable tasks.
-//      Only 8 bits are used.
+// Two-layer ready mask for O(1) lookup of highest priority ready queue:
+//   ready_mask (8 bits): Each bit indicates if the corresponding group has any ready tasks.
+//       Bit i is set if any priority level in group i (cls_id 8*i to 8*i+7) has tasks.
+//   ready_mask_secondary (64 bits): Each bit indicates if that priority level has ready tasks.
+//       Organized as 8 groups of 8 bits each, matching ready_mask groups.
+//
+// Lookup algorithm:
+//   1. Find lowest set bit in ready_mask -> top_id (group 0-7)
+//   2. Extract 8-bit group from ready_mask_secondary at (top_id * 8)
+//   3. Find lowest set bit in that group -> cls_id = top_id*8 + bit_position
 //
 // sched_class: scheduling class for each main priority level.
 //
@@ -45,19 +53,35 @@
 static struct rq_global {
     struct rq **rqs[PRIORITY_MAINLEVELS];
     uint64 *ready_mask;
+    uint64 *ready_mask_secondary;
     struct sched_class *sched_class[PRIORITY_MAINLEVELS];
     spinlock_t *rq_lock;
 } rq_global;
 
 
 void rq_set_ready(int cls_id, int cpu_id) {
-    atomic_or(&rq_global.ready_mask[cpu_id], (1 << (cls_id)));
+    uint64 top_mask = (1ULL << (cls_id >> 3));
+    uint64 secondary_mask = (1ULL << cls_id);
+    rq_global.ready_mask[cpu_id] |= top_mask;
+    rq_global.ready_mask_secondary[cpu_id] |= secondary_mask;
 }
 
 void rq_clear_ready(int cls_id, int cpu_id) {
-    atomic_and(&rq_global.ready_mask[cpu_id], ~(1 << (cls_id)));
+    int top_id = cls_id >> 3;
+    uint64 secondary_mask = (1ULL << cls_id);
+    uint64 group_mask = 0xffULL << (top_id << 3);
+    uint64 top_mask = (1ULL << top_id);
+
+    // Clear the secondary bit
+    rq_global.ready_mask_secondary[cpu_id] &= ~secondary_mask;
+    
+    // If the group is now empty, clear the top bit
+    if ((rq_global.ready_mask_secondary[cpu_id] & group_mask) == 0) {
+        rq_global.ready_mask[cpu_id] &= ~top_mask;
+    }
 }
 
+// Find the lowest set bit index (used for two-layer mask lookup)
 #define RQ_PICK_READY_ID(value)         bits_ctz8(value)
 
 #define __sched_class_of_id(cls_id)    (rq_global.sched_class[cls_id])
@@ -76,13 +100,31 @@ struct rq *get_rq_for_cpu(int cls_id, int cpu_id) {
 
 // Pick the highest priority runnable rq across all CPUs and lock it
 struct rq *pick_next_rq(void) {
-    int idx = 0;
+    int cpu = cpuid();
+    uint64 top_mask = rq_global.ready_mask[cpu];
+    uint64 secondary_mask = rq_global.ready_mask_secondary[cpu];
 
-    idx = RQ_PICK_READY_ID(rq_global.ready_mask[cpuid()]);
-    struct rq *rq = get_rq_for_cpu(idx, cpuid());
+    // Two-layer lookup: first find top-level group, then find class within group
+    int top_id = RQ_PICK_READY_ID(top_mask);
+    if (top_id < 0) {
+        // No ready tasks at all - this shouldn't happen as idle should always be ready
+        panic("pick_next_rq: no ready tasks on cpu %d\n", cpu);
+    }
+    uint8 group_bits = (secondary_mask >> (top_id << 3)) & 0xff;
+    if (group_bits == 0) {
+        // Race: top bit set but group is empty, retry with fresh read
+        secondary_mask = rq_global.ready_mask_secondary[cpu];
+        group_bits = (secondary_mask >> (top_id << 3)) & 0xff;
+        if (group_bits == 0) {
+            panic("pick_next_rq: inconsistent ready mask on cpu %d, top_id %d\n", cpu, top_id);
+        }
+    }
+    int cls_id = (top_id << 3) + RQ_PICK_READY_ID(group_bits);
+
+    struct rq *rq = get_rq_for_cpu(cls_id, cpu);
     if (IS_ERR_OR_NULL(rq)) {
         // There should be at least idle rq that are always ready
-        panic("pick_next_rq: invalid rq for cls_id %d cpu_id %ld\n", idx, cpuid());
+        panic("pick_next_rq: invalid rq for cls_id %d cpu_id %d\n", cls_id, cpu);
     }
     return rq;
 }
@@ -101,6 +143,9 @@ void rq_global_init(void) {
     rq_global.ready_mask = kmm_alloc(size);
     assert(rq_global.ready_mask != NULL, "rq_global_init: failed to allocate ready_mask array");
     memset(rq_global.ready_mask, 0, size);
+    rq_global.ready_mask_secondary = kmm_alloc(size);
+    assert(rq_global.ready_mask_secondary != NULL, "rq_global_init: failed to allocate ready_mask_secondary array");
+    memset(rq_global.ready_mask_secondary, 0, size);
 
     // Initialize sched class
     for (int i = 0; i < PRIORITY_MAINLEVELS; i++) {
