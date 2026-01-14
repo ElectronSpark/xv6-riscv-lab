@@ -75,4 +75,13 @@ int sched_setattr(struct sched_entity *se, const struct sched_attr *attr);
 // Initialize a sched_attr structure with default values
 void sched_attr_init(struct sched_attr *attr);
 
+// Dump run queue info to console
+void rq_dump(void);
+
+// Mark a CPU as active in the rq subsystem
+void rq_cpu_activate(int cpu);
+
+// Get the bitmask of active CPUs
+uint64 rq_get_active_cpu_mask(void);
+
 #endif // __KERNEL_PROC_RQ_H

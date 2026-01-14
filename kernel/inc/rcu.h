@@ -177,6 +177,15 @@ void rcu_cpu_init(int cpu);
 void rcu_kthread_start(void);
 
 /**
+ * rcu_kthread_start_cpu() - Start RCU callback kthread for a specific CPU
+ * @cpu: CPU ID to start the kthread for
+ *
+ * Called from each CPU's init context (after rq_cpu_activate) to create
+ * the RCU callback kthread for that CPU. Only active CPUs should call this.
+ */
+void rcu_kthread_start_cpu(int cpu);
+
+/**
  * rcu_kthread_wakeup() - Wake up the RCU callback thread for current CPU
  *
  * Called when there are ready callbacks that need processing.

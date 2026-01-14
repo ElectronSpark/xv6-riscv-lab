@@ -88,13 +88,10 @@ void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
 
     printf("hart %d initialized. intr_sp: %p\n", hartid, (void*)mycpu()->intr_sp);
 
+    // Start the RCU kthread for this CPU before entering idle loop
+    rcu_kthread_start_cpu(cpuid());
+
     // Now we are in idle process context. Just yield to scheduler.
-    //
-    // RCU GRACE PERIOD TRACKING:
-    // RCU quiescent states are tracked via rcu_check_callbacks() called from
-    // context_switch_finish(). Per-CPU RCU kthreads handle callback processing,
-    // timestamp overflow checks, and grace period advancement.
-    //
     for (;;) {
         scheduler_yield();
         intr_on();
@@ -118,10 +115,6 @@ void start_kernel_post_init(void) {
     
     // Set up root directory for init process (must be after vfs_init)
     install_user_root();
-
-    // Start per-CPU RCU callback kthreads
-    // These handle RCU callback invocation separately from the scheduler path
-    rcu_kthread_start();
 
 #ifdef RWAD_WRITE_TEST
     // forward decl for rwlock tests
@@ -150,8 +143,8 @@ void start_kernel_post_init(void) {
 
 // #ifdef RQ_RUNTIME_TEST
     // Run queue priority tests
-    void rq_test_run(void);
-    rq_test_run();
+    // void rq_test_run(void);
+    // rq_test_run();
 // #endif
 
     // Initialize IPI subsystem and run demo

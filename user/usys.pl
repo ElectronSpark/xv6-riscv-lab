@@ -65,5 +65,6 @@ entry("memstat");
 entry("dumpproc");
 entry("dumpchan");
 entry("dumppcache");
+entry("dumprq");
 
 entry("sync");

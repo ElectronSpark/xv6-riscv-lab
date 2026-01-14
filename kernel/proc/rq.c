@@ -56,6 +56,7 @@ static struct rq_global {
     uint64 *ready_mask_secondary;
     struct sched_class *sched_class[PRIORITY_MAINLEVELS];
     spinlock_t *rq_lock;
+    uint64 active_cpu_mask;  // Bitmask of active CPUs
 } rq_global;
 
 
@@ -266,17 +267,20 @@ struct rq *rq_select_task_rq(struct sched_entity* se, cpumask_t cpumask) {
         return ERR_PTR(-EINVAL);
     }
 
-    if (__sched_class_of_id(major_prio)->select_task_rq) {
-        return rq_global.sched_class[major_prio]->select_task_rq(se->rq, se, cpumask);
+    // Mask out inactive CPUs
+    cpumask_t effective_mask = cpumask & rq_global.active_cpu_mask;
+    if (effective_mask == 0) {
+        // If no active CPUs match the requested mask, fall back to all active CPUs
+        effective_mask = rq_global.active_cpu_mask;
     }
 
-    if (cpumask == 0) {
-        cpumask = (1ULL << NCPU) - 1; // all CPUs
+    if (__sched_class_of_id(major_prio)->select_task_rq) {
+        return rq_global.sched_class[major_prio]->select_task_rq(se->rq, se, effective_mask);
     }
 
     // Prefer the current CPU's rq for locality
     int cur_cpu = cpuid();
-    if (cpumask & (1ULL << cur_cpu)) {
+    if (effective_mask & (1ULL << cur_cpu)) {
         struct rq *rq = get_rq_for_cpu(major_prio, cur_cpu);
         if (!IS_ERR_OR_NULL(rq)) {
             return rq;
@@ -286,7 +290,7 @@ struct rq *rq_select_task_rq(struct sched_entity* se, cpumask_t cpumask) {
     // Fallback: find any allowed CPU's rq
     for (int cpu = 0; cpu < NCPU; cpu++) {
         cpumask_t mask = (1ULL << cpu);
-        if (cpumask & mask) {
+        if (effective_mask & mask) {
             struct rq *rq = get_rq_for_cpu(major_prio, cpu);
             if (!IS_ERR_OR_NULL(rq)) {
                 return rq;
@@ -354,6 +358,10 @@ void rq_set_next_task(struct sched_entity* se) {
     if (se->sched_class->set_next_task) {
         se->sched_class->set_next_task(se->rq, se);
     }
+    // Note: We do NOT decrement task_count here. The task is still logically
+    // "on rq" (counted in task_count) while running, but on_rq=0 and on_cpu=1.
+    // The caller (__sched_pick_next) sets on_rq=0 after this call.
+    // Only dequeue_task (called on sleep or migration) decrements task_count.
 }
 
 // Check if the current CPU is allowed by the task's affinity mask.
@@ -490,5 +498,107 @@ int sched_setattr(struct sched_entity *se, const struct sched_attr *attr) {
     
     spin_release(&se->pi_lock);
     
+    return 0;
+}
+
+// Mark a CPU as active in the rq subsystem
+void rq_cpu_activate(int cpu) {
+    if (cpu >= 0 && cpu < NCPU) {
+        rq_global.active_cpu_mask |= (1ULL << cpu);
+    }
+}
+
+// Get the bitmask of active CPUs
+uint64 rq_get_active_cpu_mask(void) {
+    return rq_global.active_cpu_mask;
+}
+
+// Dump run queue info: shows task count per priority per CPU
+void rq_dump(void) {
+    printf("Run Queue Status:\n");
+    
+    // Print header
+    printf("Priority    ");
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        printf("CPU%d        ", cpu);
+    }
+    printf("\n");
+    
+    // Print separator
+    printf("--------    ");
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        printf("--------    ");
+    }
+    printf("\n");
+    
+    // Iterate through all priority levels, skip empty ones
+    for (int prio = 0; prio < PRIORITY_MAINLEVELS; prio++) {
+        // Check if any CPU has tasks at this priority
+        int has_tasks = 0;
+        for (int cpu = 0; cpu < NCPU; cpu++) {
+            struct rq *rq = get_rq_for_cpu(prio, cpu);
+            if (!IS_ERR_OR_NULL(rq) && rq->task_count > 0) {
+                has_tasks = 1;
+                break;
+            }
+        }
+        
+        if (!has_tasks) {
+            continue; // Skip empty priority levels
+        }
+        
+        // Print priority level (pad to 12 chars)
+        if (prio < 10) {
+            printf("%d           ", prio);
+        } else {
+            printf("%d          ", prio);
+        }
+        
+        // Print task count for each CPU
+        for (int cpu = 0; cpu < NCPU; cpu++) {
+            struct rq *rq = get_rq_for_cpu(prio, cpu);
+            if (IS_ERR_OR_NULL(rq)) {
+                printf("-           ");
+            } else {
+                int count = rq->task_count;
+                if (count < 10) {
+                    printf("%d           ", count);
+                } else if (count < 100) {
+                    printf("%d          ", count);
+                } else {
+                    printf("%d         ", count);
+                }
+            }
+        }
+        printf("\n");
+    }
+    
+    // Print ready masks
+    printf("\nReady Masks:\n");
+    printf("            ");
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        printf("CPU%d        ", cpu);
+    }
+    printf("\n");
+    
+    printf("Top (8b)    ");
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        rq_lock(cpu);
+        printf("0x%lx        ", rq_global.ready_mask[cpu] & 0xff);
+        rq_unlock(cpu);
+    }
+    printf("\n");
+    
+    printf("Secondary   ");
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        rq_lock(cpu);
+        printf("0x%lx ", rq_global.ready_mask_secondary[cpu]);
+        rq_unlock(cpu);
+    }
+    printf("\n");
+}
+
+uint64 sys_dumprq(void) {
+    rq_dump();
     return 0;
 }

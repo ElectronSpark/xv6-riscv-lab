@@ -817,22 +817,13 @@ void synchronize_rcu_expedited(void) {
 static int rcu_cb_kthread(uint64 cpu_id, uint64 arg2) {
     (void)arg2;
     
-    // Set CPU affinity for this kthread
-    struct sched_attr attr;
-    sched_attr_init(&attr);
-    attr.affinity_mask = (1ULL << cpu_id);  // Pin to this CPU
-    sched_setattr(myproc()->sched_entity, &attr);
-    
-    // Sleep to trigger migration - wakeup path will place us on correct CPU
-    scheduler_sleep(NULL, PSTATE_INTERRUPTIBLE);
-    
-    // After wakeup, verify we're on the correct CPU
-    assert(cpuid() == (int)cpu_id, "RCU kthread running on wrong CPU after migration");
+    // RCU kthreads should never migrate - affinity is set at creation
+    assert(cpuid() == (int)cpu_id, "RCU kthread started on wrong CPU");
     
     printf("RCU callback kthread started on CPU %lu\n", cpu_id);
     
     while (1) {
-        // Verify we're on the correct CPU after each wakeup
+        // Verify we're still on the correct CPU after each wakeup
         assert(cpuid() == (int)cpu_id, "RCU kthread running on wrong CPU");
         
         rcu_cpu_data_t *rcp = &rcu_cpu_data[cpu_id];
@@ -948,51 +939,50 @@ void rcu_kthread_wakeup(void) {
     }
 }
 
-// Start per-CPU RCU callback processing threads
-void rcu_kthread_start(void) {
-    if (__atomic_load_n(&rcu_kthreads_started, __ATOMIC_ACQUIRE)) {
-        return;  // Already started
+// Names for RCU kthreads - simple static strings
+static const char *rcu_names[NCPU] = {
+    "rcu_cb/0", "rcu_cb/1", "rcu_cb/2", "rcu_cb/3",
+    "rcu_cb/4", "rcu_cb/5", "rcu_cb/6", "rcu_cb/7"
+};
+
+// Start RCU callback processing thread for a specific CPU
+// Called from each CPU's init context (after rq_cpu_activate)
+void rcu_kthread_start_cpu(int cpu) {
+    if (cpu < 0 || cpu >= NCPU) {
+        return;
     }
     
-    printf("Starting per-CPU RCU callback kthreads...\n");
+    // Initialize the kthread entry for this CPU
+    rcu_kthread[cpu].proc = NULL;
+    rcu_kthread[cpu].wakeup_pending = 0;
     
-    // Names for RCU kthreads - simple static strings
-    static const char *rcu_names[NCPU] = {
-        "rcu_cb/0", "rcu_cb/1", "rcu_cb/2", "rcu_cb/3",
-        "rcu_cb/4", "rcu_cb/5", "rcu_cb/6", "rcu_cb/7"
-    };
+    struct proc *p = NULL;
+    const char *name = (cpu < 8) ? rcu_names[cpu] : "rcu_cb";
     
-    for (int cpu = 0; cpu < NCPU; cpu++) {
-        rcu_kthread[cpu].proc = NULL;
-        rcu_kthread[cpu].wakeup_pending = 0;
-        
-        struct proc *p = NULL;
-        const char *name = (cpu < 8) ? rcu_names[cpu] : "rcu_cb";
-        
-        int pid = kernel_proc_create(name, &p, rcu_cb_kthread, cpu, 0, KERNEL_STACK_ORDER);
-        if (pid < 0 || p == NULL) {
-            printf("Failed to create RCU kthread for CPU %d\n", cpu);
-            continue;
-        }
-        
-        rcu_kthread[cpu].proc = p;
-        
-        // Initial wake - kthread will set affinity and sleep
-        wakeup_proc(p);
+    int pid = kernel_proc_create(name, &p, rcu_cb_kthread, cpu, 0, KERNEL_STACK_ORDER);
+    if (pid < 0 || p == NULL) {
+        printf("Failed to create RCU kthread for CPU %d\n", cpu);
+        return;
     }
     
+    // Set CPU affinity BEFORE waking the kthread
+    struct sched_attr attr;
+    sched_attr_init(&attr);
+    attr.affinity_mask = (1ULL << cpu);
+    sched_setattr(p->sched_entity, &attr);
+    
+    rcu_kthread[cpu].proc = p;
+    
+    // Wake the kthread - it will start on the correct CPU
+    wakeup_proc(p);
+    
+    // Mark that at least one kthread is started
     __atomic_store_n(&rcu_kthreads_started, 1, __ATOMIC_RELEASE);
-    
-    // Let kthreads run to set their affinity and go to sleep
-    yield();
-    
-    // Wake them up again - this time wakeup path will place them on correct CPUs
-    for (int cpu = 0; cpu < NCPU; cpu++) {
-        if (rcu_kthread[cpu].proc != NULL) {
-            wakeup_interruptible(rcu_kthread[cpu].proc);
-        }
-    }
-    
-    printf("RCU callback kthreads started\n");
 }
 
+// Legacy function - kthreads are now started per-CPU in start_kernel()
+// This is kept for compatibility but does nothing.
+void rcu_kthread_start(void) {
+    // Each CPU calls rcu_kthread_start_cpu() before entering idle loop
+    // No global initialization needed here
+}

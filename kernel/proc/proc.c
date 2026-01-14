@@ -319,6 +319,9 @@ void idle_proc_init(void) {
   mycpu()->proc = p;
   mycpu()->idle_proc = p;
   
+  // Mark this CPU as active in the rq subsystem
+  rq_cpu_activate(cpuid());
+  
   // Set idle process scheduling attributes using the new sched_attr API
   struct sched_attr attr;
   sched_attr_init(&attr);

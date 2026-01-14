@@ -68,21 +68,41 @@ static void __fifo_dequeue_task(struct rq *rq, struct sched_entity *se) {
 }
 
 static void __fifo_put_prev_task(struct rq *rq, struct sched_entity *se) {
+    // put_prev_task re-adds the previously running task back to the list.
+    // We update the list and masks to reflect the list state.
+    // Counts (sq->count, rq->task_count) are NOT changed - task was always logically "on rq".
     struct fifo_rq *fifo_rq = container_of(rq, struct fifo_rq, rq);
     int idx = __fifo_minor_prio(se);
     struct fifo_subqueue *sq = __fifo_get_subqueue(fifo_rq, idx);
+    
     list_node_push(&sq->head, se, list_entry);
-    sq->count++;
+    
+    // Set the subqueue ready bit (subqueue now has at least one task in list)
     fifo_rq->ready_mask |= (1 << idx);
+    
+    // Set global ready masks (rq now has at least one task in list)
+    rq_set_ready(rq->class_id, rq->cpu_id);
 }
 
 static void __fifo_set_next_task(struct rq *rq, struct sched_entity *se) {
     // set_next_task is called when picking a task to run.
-    // We detach from the list but do NOT decrement count because the task
-    // is still "on rq" (will be put back via put_prev_task or fully removed
-    // via dequeue_task later).
-    // Note: The list detach is idempotent - safe if already detached.
+    // We detach from the list and update masks to reflect the list state.
+    // Counts (sq->count, rq->task_count) are NOT changed - task is still logically "on rq".
+    struct fifo_rq *fifo_rq = container_of(rq, struct fifo_rq, rq);
+    int idx = __fifo_minor_prio(se);
+    struct fifo_subqueue *sq = __fifo_get_subqueue(fifo_rq, idx);
+    
     list_node_detach(se, list_entry);
+    
+    // If this was the last task in the subqueue list, clear the subqueue ready bit
+    if (sq->count == 1) {
+        fifo_rq->ready_mask &= ~(1 << idx);
+    }
+    
+    // If this was the last task in the rq list, clear global ready masks
+    if (rq->task_count == 1) {
+        rq_clear_ready(rq->class_id, rq->cpu_id);
+    }
 }
 
 // Select the best CPU's run queue for a task
