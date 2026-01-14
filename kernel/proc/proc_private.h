@@ -34,5 +34,9 @@ void register_idle_process(struct proc *p);
 
 void init_idle_rq(void);
 void init_fifo_rq(void);
+void init_fifo_rq_range(int start_cls_id, int end_cls_id);
+
+// Run queue priority tests
+void rq_test_run(void);
 
 #endif // __KERNEL_PROC_PRIVATE_H__

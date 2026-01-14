@@ -4,10 +4,10 @@
 #include "proc/rq_types.h"
 
 // The priority values are made of two parts:
-// - 0bit-4bit: sub-priority (0-31), lower value means higher priority.
-//      Managed by specific scheduling class.
-// - 5bit-7bit: main priority (0-7), lower value means
-//      Managed by rq layer.
+// - 0bit-1bit: sub-priority (0-3), lower value means higher priority.
+//      Managed by specific scheduling class (e.g., FIFO has 4 sub-queues).
+// - 2bit-7bit: main priority (0-63), lower value means higher priority.
+//      Managed by rq layer using two-layer bitmask.
 //      Each main level corresponds to a sched class.
 //      Always prefer lower main priority level when picking next task.
 #define PRIORITY_SUBLEVEL_MASK      0x03

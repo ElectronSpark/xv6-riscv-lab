@@ -11,6 +11,7 @@ set(PROC_C_SRCS
     rq.c
     sched_idle.c
     sched_fifo.c
+    rq_test.c
 )
 
 set(PROC_S_SRCS

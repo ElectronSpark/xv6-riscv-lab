@@ -148,6 +148,12 @@ void start_kernel_post_init(void) {
     // Run device table stress tests
     // dev_table_test();
 
+// #ifdef RQ_RUNTIME_TEST
+    // Run queue priority tests
+    void rq_test_run(void);
+    rq_test_run();
+// #endif
+
     // Initialize IPI subsystem and run demo
     // sleep_ms(100);
     // ipi_init();

@@ -140,9 +140,18 @@ struct idle_rq {
     struct proc *idle_proc;   // Idle process for this CPU
 };
 
+#define FIFO_RQ_SUBLEVELS   4  // Number of minor priority levels (2 bits)
+
+// Sublevel queue structure for FIFO scheduler
+struct fifo_subqueue {
+    list_node_t head;         // FIFO run queue head
+    int count;                // Number of tasks in this subqueue
+};
+
 struct fifo_rq {
     struct rq rq;
-    list_node_t run_queue;    // FIFO run queue
+    struct fifo_subqueue subqueues[FIFO_RQ_SUBLEVELS];  // One per minor priority
+    uint8 ready_mask;         // Bitmask of non-empty subqueues
 };
 
 #endif  // __KERNEL_PROC_RQ_TYPES_H
