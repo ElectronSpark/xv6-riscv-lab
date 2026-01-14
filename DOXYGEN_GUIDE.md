@@ -143,9 +143,36 @@ struct sched_entity {
  */
 struct rq {
     struct sched_class *sched_class; /**< Scheduling class for this queue */
-    int class_id;                    /**< Scheduling class identifier */
+    int class_id;                    /**< Scheduling class identifier (0-63) */
     int task_count;                  /**< Number of tasks in queue */
     int cpu_id;                      /**< Owning CPU identifier */
+};
+
+/**
+ * @brief FIFO subqueue for minor priority ordering
+ * 
+ * Tasks within a major priority level are organized into 4 subqueues
+ * based on their minor priority (0-3). This provides 256 total priority
+ * levels (64 major × 4 minor).
+ */
+struct fifo_subqueue {
+    list_node_t head;              /**< List head for tasks in this subqueue */
+    int count;                     /**< Number of tasks in subqueue */
+};
+
+/**
+ * @brief FIFO scheduling class run queue
+ * 
+ * Extends the base rq structure with minor priority subqueues.
+ * Each major priority level (0-63) has its own fifo_rq with 4 subqueues.
+ * 
+ * @see struct rq
+ * @see sched_class_fifo
+ */
+struct fifo_rq {
+    struct rq rq;                  /**< Base run queue (must be first) */
+    struct fifo_subqueue subqueues[4]; /**< Minor priority subqueues (0-3) */
+    uint8 ready_mask;              /**< Bitmask of non-empty subqueues */
 };
 ```
 

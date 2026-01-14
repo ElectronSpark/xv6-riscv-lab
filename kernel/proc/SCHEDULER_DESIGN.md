@@ -58,7 +58,7 @@ The scheduler uses per-CPU run queues with pluggable scheduling classes:
 ```c
 struct rq {
     struct sched_class *sched_class;  // Scheduling class in use
-    int class_id;           // Scheduling class ID
+    int class_id;           // Scheduling class ID (0-63)
     int task_count;         // Number of processes in the run queue
     int cpu_id;             // CPU ID this run queue belongs to
 };
@@ -77,9 +77,67 @@ struct sched_class {
 };
 ```
 
+### Priority System
+
+The scheduler uses a two-level priority system with 64 major priority levels:
+
+```c
+// Priority structure: 6-bit major (0-63) + 2-bit minor (0-3)
+#define MAJOR_PRIORITY(prio)  ((prio) >> 2)
+#define MINOR_PRIORITY(prio)  ((prio) & 0x3)
+#define MAKE_PRIORITY(major, minor)  (((major) << 2) | (minor))
+
+// Special priority levels
+#define EXIT_MAJOR_PRIORITY   0   // Exiting processes (highest)
+#define FIFO_MAJOR_PRIORITY   1   // Regular FIFO tasks (1-62)
+#define IDLE_MAJOR_PRIORITY  63   // Idle processes (lowest)
+```
+
+### Two-Layer Ready Mask for O(1) Lookup
+
+The scheduler uses a two-layer bitmask for O(1) lookup of the highest priority ready queue:
+
+```
+ready_mask (8 bits): Each bit indicates if the corresponding group has any ready tasks.
+    Bit i is set if any priority level in group i (cls_id 8*i to 8*i+7) has tasks.
+
+ready_mask_secondary (64 bits): Each bit indicates if that priority level has ready tasks.
+    Organized as 8 groups of 8 bits each, matching ready_mask groups.
+
+Lookup algorithm:
+  1. Find lowest set bit in ready_mask -> top_id (group 0-7)
+  2. Extract 8-bit group from ready_mask_secondary at (top_id * 8)
+  3. Find lowest set bit in that group -> cls_id = top_id*8 + bit_position
+```
+
 Currently implemented scheduling classes:
-- **FIFO** (`fifo_rq`): Simple first-in-first-out scheduling for regular tasks
-- **IDLE** (`idle_rq`): Idle process scheduling (lowest priority)
+
+- **FIFO** (`fifo_rq`): FIFO scheduling for major priorities 1-62, with 4 minor priority subqueues per level
+- **IDLE** (`idle_rq`): Idle process scheduling (major priority 63)
+
+### FIFO Scheduling Class
+
+The FIFO scheduling class manages tasks within each major priority level using minor priority subqueues:
+
+```c
+struct fifo_subqueue {
+    list_node_t head;   // List of sched_entities at this minor priority
+    int count;          // Number of tasks in this subqueue
+};
+
+struct fifo_rq {
+    struct rq rq;                               // Base run queue
+    struct fifo_subqueue subqueues[4];          // Subqueues for minor priorities 0-3
+    uint8 ready_mask;                           // Bitmask: which subqueues have tasks
+};
+```
+
+**Task Selection**: Within a major priority level, tasks are selected from the lowest-index non-empty subqueue (minor priority 0 has highest priority within the major level).
+
+**Load Balancing**: The `select_task_rq` callback implements load balancing:
+1. Prefer current CPU for cache locality
+2. If current CPU's subqueue is empty, use it immediately
+3. Otherwise, find the CPU with the lowest task count in the relevant subqueue
 
 ### Process States
 
@@ -228,11 +286,19 @@ void context_switch_finish(struct proc *prev, struct proc *next) {
 ```c
 static struct proc *__sched_pick_next(void) {
     // Caller must hold rq_lock
-    struct rq *rq = pick_next_rq();  // Find rq with ready tasks
-    if (IS_ERR_OR_NULL(rq)) {
-        return NULL;
-    }
     
+    // Two-layer O(1) lookup for highest priority ready queue
+    uint64 top_mask = rq_global.ready_mask[cpu];
+    uint64 secondary_mask = rq_global.ready_mask_secondary[cpu];
+    
+    // Find top-level group (0-7)
+    int top_id = bits_ctz8(top_mask);
+    // Extract 8-bit group from secondary mask
+    uint8 group_bits = (secondary_mask >> (top_id << 3)) & 0xff;
+    // Find class within group
+    int cls_id = (top_id << 3) + bits_ctz8(group_bits);
+    
+    struct rq *rq = get_rq_for_cpu(cls_id, cpu);
     struct sched_entity *se = rq_pick_next_task(rq);
     if (se == NULL) {
         return NULL;
@@ -488,6 +554,31 @@ The scheduler supports CPU affinity via `sched_entity.affinity_mask`. When enque
 2. The task is enqueued to that CPU's run queue
 3. If affinity changes while running, the task stays on the current CPU until it sleeps
 4. On wakeup, `rq_select_task_rq()` places it on an allowed CPU
+
+### Active CPU Tracking
+
+The scheduler tracks which CPUs are active at runtime via `rq_cpu_activate()`:
+
+```c
+// Called from idle_proc_init() on each CPU
+void rq_cpu_activate(int cpu);
+
+// Get bitmask of active CPUs
+uint64 rq_get_active_cpu_mask(void);
+```
+
+When selecting a run queue, `rq_select_task_rq()` masks the requested cpumask with
+the active CPU mask to ensure tasks are never placed on inactive CPUs:
+
+```c
+cpumask_t effective_mask = cpumask & rq_global.active_cpu_mask;
+if (effective_mask == 0) {
+    effective_mask = rq_global.active_cpu_mask;  // Fallback to all active CPUs
+}
+```
+
+This is essential when `NCPU` (compile-time constant) exceeds the actual number of
+CPUs available at runtime (e.g., NCPU=8 but QEMU runs with 3 CPUs).
 
 ## Sleep Path
 

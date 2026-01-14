@@ -90,9 +90,10 @@ This enhanced version has been substantially extended with production-grade feat
 - **Per-CPU Run Queues**: Independent run queues per CPU with per-CPU locking
 - **Pluggable Scheduling Classes**: `sched_class` interface for different policies
 - **CPU Affinity**: Process-level CPU affinity with `cpumask_t` support
-- **Priority System**: Major/minor priority levels for scheduling decisions
+- **O(1) Priority Lookup**: Two-layer ready mask (8-bit top + 64-bit secondary)
+- **256 Priority Levels**: 64 major priorities × 4 minor subqueue levels
 - **Implemented Policies**:
-  - FIFO scheduling class for regular tasks
+  - FIFO scheduling class with minor priority subqueues and load balancing
   - IDLE scheduling class for idle processes
 
 ### System Calls

@@ -76,9 +76,11 @@ Interrupt → Per-CPU Interrupt Stack (16KB) → Top-half processing
 - ✅ Per-CPU run queues (`struct rq`) with per-CPU locking
 - ✅ Scheduling entity abstraction (`struct sched_entity`)
 - ✅ CPU affinity support (`cpumask_t affinity_mask`)
-- ✅ Priority levels (major/minor priority system)
-- ✅ FIFO scheduling class (`sched_fifo.c`)
+- ✅ 64 major priority levels with two-layer O(1) bitmask lookup
+- ✅ 4 minor priority subqueues within each major priority (256 total levels)
+- ✅ FIFO scheduling class with load balancing (`sched_fifo.c`)
 - ✅ IDLE scheduling class for idle processes
+- ✅ Comprehensive scheduler test suite (`rq_test.c`)
 - ⏳ CFS-like fair scheduler - planned
 - ⏳ Nice values and dynamic priority - planned
 - ⏳ Real-time scheduling (SCHED_RR) - planned
@@ -88,12 +90,20 @@ Interrupt → Per-CPU Interrupt Stack (16KB) → Top-half processing
 - Completed: `sched_entity` separates scheduling state from process structure
 - Completed: Task switch flow: pick_next_task → set_next_task → context_switch → put_prev_task
 - Completed: Run queue selection with CPU affinity (`rq_select_task_rq()`)
-- Files: `kernel/proc/sched.c`, `kernel/proc/rq.c` (new), `kernel/proc/sched_fifo.c` (new), `kernel/inc/proc/rq.h`, `kernel/inc/proc/rq_types.h`
+- Completed: Two-layer ready mask (8-bit top + 64-bit secondary) for O(1) priority lookup
+- Completed: FIFO subqueues with minor priority ordering and load balancing
+- Files: `kernel/proc/sched.c`, `kernel/proc/rq.c`, `kernel/proc/sched_fifo.c`, `kernel/proc/rq_test.c` (new), `kernel/inc/proc/rq.h`, `kernel/inc/proc/rq_types.h`
 
 **Scheduling Architecture** (Implemented):
 ```
 struct proc → struct sched_entity → struct rq (per-CPU)
                                   → struct sched_class (FIFO/IDLE/future CFS)
+
+Priority System (256 levels):
+  Major Priority (6-bit, 0-63): Two-layer O(1) lookup
+    → ready_mask (8-bit): Group presence (8 groups of 8 priorities)
+    → ready_mask_secondary (64-bit): Individual priority presence
+  Minor Priority (2-bit, 0-3): FIFO subqueue index within major
 
 Task Switch:
   pick_next_task(rq) → set_next_task(se) → __switch_to()
@@ -117,13 +127,14 @@ Task Switch:
 
 **Implementation Notes**:
 - Completed: Work queues with manager and worker processes
-- Completed: Per-CPU RCU kthreads (`rcu_kthread_start()`)
+- Completed: Per-CPU RCU kthreads (`rcu_kthread_start_cpu()` called per-CPU in `start_kernel()`)
 - Completed: Kernel threads use `sched_entity` for scheduling
 - RCU callbacks processed by dedicated per-CPU kthreads, not in scheduler path
 - Files: `kernel/proc/kthread.c`, `kernel/proc/workqueue.c`, `kernel/lock/rcu.c`
 
 **RCU Kthread Architecture**:
 ```
+start_kernel() → rcu_kthread_start_cpu(cpuid()) (per-CPU initialization)
 Context switch → rcu_check_callbacks() (note quiescent state)
 Per-CPU RCU kthread → rcu_process_callbacks_for_cpu()
                     → Invoke ready callbacks (grace period elapsed)

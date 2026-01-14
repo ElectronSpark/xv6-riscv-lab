@@ -190,7 +190,7 @@ synchronize_rcu_expedited();  // 5-10x faster than synchronize_rcu()
 ```c
 void rcu_init(void);              // Initialize RCU subsystem
 void rcu_cpu_init(int cpu);       // Initialize per-CPU RCU
-void rcu_kthread_start(void);     // Start per-CPU RCU callback kthreads
+void rcu_kthread_start_cpu(int cpu); // Start RCU callback kthread for specific CPU
 void rcu_kthread_wakeup(void);    // Wake up RCU callback thread for current CPU
 void rcu_check_callbacks(void);   // Called from scheduler on context switch
 void rcu_process_callbacks(void); // Invoke completed callbacks
@@ -286,16 +286,25 @@ This ensures every context switch is a quiescent state for RCU, allowing grace p
 
 ### Starting the Kthreads
 
+Each CPU starts its own RCU kthread before entering the idle loop in `start_kernel()`:
+
 ```c
-void start_kernel_post_init(void) {
-    // ... other initialization ...
+void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
+    // ... hart initialization ...
     
-    // Start the per-CPU RCU callback kthreads
-    rcu_kthread_start();
+    // Start the RCU kthread for this CPU before entering idle loop
+    rcu_kthread_start_cpu(cpuid());
     
-    rcu_run_tests();
+    // Enter idle loop
+    for (;;) {
+        scheduler_yield();
+        // ...
+    }
 }
 ```
+
+This ensures each RCU kthread is created in the context of its corresponding CPU,
+and only active CPUs have RCU kthreads (inactive CPUs never call this).
 
 ### Configuration
 
@@ -961,7 +970,7 @@ Potential Linux RCU features that could be added:
 - **ASAN-style testing** with poison pattern detection
 - **Per-CPU data separation** with explicit cache-line alignment
 - **New APIs**:
-  - `rcu_kthread_start()` - Start per-CPU kthreads
+  - `rcu_kthread_start_cpu(int cpu)` - Start RCU kthread for specific CPU
   - `rcu_kthread_wakeup()` - Wake current CPU's kthread
   - `hlist_get_rcu()`, `hlist_put_rcu()`, `hlist_pop_rcu()` - Hash list RCU ops
 - **Architectural improvements**:
