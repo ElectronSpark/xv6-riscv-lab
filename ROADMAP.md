@@ -39,70 +39,95 @@ Target:
 
 ---
 
-### 2. Interrupt Handling Architecture ⚡ **CURRENT FOCUS**
+### 2. Interrupt Handling Architecture ✅ **COMPLETED**
 **Dependencies**: None (foundational improvement)  
-**Priority**: Critical
+**Priority**: Critical  
+**Status**: ✅ Completed (January 2026)
 
-- Separate interrupt stacks from kernel stacks (per-CPU interrupt stacks)
-- Implement top-half (hard IRQ context) and bottom-half (deferred processing)
-- Bottom-half mechanisms: softirq, tasklets, or workqueues
-- Interrupt threading support (optional threaded IRQs)
-- Improve interrupt latency and reduce time spent with interrupts disabled
-- Nested interrupt handling (if supported by RISC-V configuration)
+- ✅ Separate interrupt stacks from kernel stacks (per-CPU interrupt stacks, 16KB each)
+- ✅ Per-CPU state in `percpu.h` with CPU flags (`CPU_FLAG_IN_ITR`, `CPU_FLAG_NEEDS_RESCHED`)
+- ✅ Nested interrupt handling support
+- ⏳ Bottom-half mechanisms (softirq, tasklets) - planned for future
+- ⏳ Interrupt threading support - planned for future
 
 **Implementation Notes**:
-- Current: Interrupts use kernel stack, all processing in interrupt context
-- Target: Dedicated interrupt stacks, minimal top-half with deferred bottom-half
-- Top-half: Acknowledge interrupt, minimal critical work, schedule bottom-half
-- Bottom-half: Process bulk of interrupt work with interrupts enabled
+- Completed: Dedicated 16KB per-CPU interrupt stacks
+- Completed: `CPU_SET_IN_ITR()`/`CPU_CLEAR_IN_ITR()` for interrupt context tracking
+- Completed: `NEEDS_RESCHED` flag for deferred rescheduling
 - Benefits: Better stack isolation, improved responsiveness, safer interrupt handling
-- Files: `kernel/trap.c`, `kernel/inc/riscv.h`, `kernel/proc/softirq.c` (new), `kernel/proc/tasklet.c` (new)
+- Files: `kernel/inc/percpu.h`, `kernel/inc/percpu_types.h`, `kernel/trap.c`, `kernel/interruption/`
 
-**Stack Architecture**:
+**Stack Architecture** (Implemented):
 ```
-Current:
-  Process → Kernel Stack (handles both syscalls and interrupts)
-
-Target:
-  Process → Kernel Stack (syscalls only)
-  Interrupt → Interrupt Stack → Top-half → Schedule bottom-half
-  Bottom-half → Kernel thread or softirq context (safe for sleeping)
+Process → Kernel Stack (syscalls)
+Interrupt → Per-CPU Interrupt Stack (16KB) → Top-half processing
+          → RCU quiescent state via rcu_check_callbacks()
+          → Deferred work via per-CPU RCU kthreads
 ```
 
 ---
 
-### 3. Process Scheduling Improvements
-**Dependencies**: Interrupt handling improvements (optional, but beneficial)  
-**Priority**: High
+### 3. Process Scheduling Improvements ✅ **PARTIALLY COMPLETED**
+**Dependencies**: Interrupt handling improvements (completed)  
+**Priority**: High  
+**Status**: 🔄 Scheduler infrastructure completed, policies in progress
 
-- Implement Multilevel Feedback Queue (MLFQ) or Completely Fair Scheduler (CFS)
-- Add process priority levels and nice values
-- Support CPU affinity for multi-core systems
-- Implement real-time scheduling classes (SCHED_FIFO, SCHED_RR)
+- ✅ Pluggable scheduling class infrastructure (`struct sched_class`)
+- ✅ Per-CPU run queues (`struct rq`) with per-CPU locking
+- ✅ Scheduling entity abstraction (`struct sched_entity`)
+- ✅ CPU affinity support (`cpumask_t affinity_mask`)
+- ✅ Priority levels (major/minor priority system)
+- ✅ FIFO scheduling class (`sched_fifo.c`)
+- ✅ IDLE scheduling class for idle processes
+- ⏳ CFS-like fair scheduler - planned
+- ⏳ Nice values and dynamic priority - planned
+- ⏳ Real-time scheduling (SCHED_RR) - planned
 
 **Implementation Notes**:
-- Current: Simple round-robin scheduler
-- Target: Fair, priority-based scheduling with interactive process boost
-- Interrupt improvements help reduce scheduling latency
-- Files: `kernel/proc/proc.c`, `kernel/proc/sched.c` (new)
+- Completed: Linux-style `sched_class` with callbacks (enqueue/dequeue/pick_next/put_prev)
+- Completed: `sched_entity` separates scheduling state from process structure
+- Completed: Task switch flow: pick_next_task → set_next_task → context_switch → put_prev_task
+- Completed: Run queue selection with CPU affinity (`rq_select_task_rq()`)
+- Files: `kernel/proc/sched.c`, `kernel/proc/rq.c` (new), `kernel/proc/sched_fifo.c` (new), `kernel/inc/proc/rq.h`, `kernel/inc/proc/rq_types.h`
+
+**Scheduling Architecture** (Implemented):
+```
+struct proc → struct sched_entity → struct rq (per-CPU)
+                                  → struct sched_class (FIFO/IDLE/future CFS)
+
+Task Switch:
+  pick_next_task(rq) → set_next_task(se) → __switch_to()
+  → context_switch_finish() → put_prev_task(se) / rq_dequeue_task()
+```
 
 ---
 
-### 4. Enhanced Kernel Thread Support
-**Dependencies**: Interrupt handling (work queues integrate with bottom-half)  
-**Priority**: High
+### 4. Enhanced Kernel Thread Support ✅ **PARTIALLY COMPLETED**
+**Dependencies**: Interrupt handling (completed)  
+**Priority**: High  
+**Status**: 🔄 Core infrastructure completed, advanced features in progress
 
-- Improve kernel thread creation and management APIs
-- Add thread pools for async operations
-- Implement work queues for deferred work (integrates with interrupt bottom-half)
-- Support kernel thread priorities
-- Per-CPU worker threads for interrupt processing
+- ✅ Kernel thread creation and management (`kthread_create()`)
+- ✅ Work queues for deferred work (`kernel/proc/workqueue.c`)
+- ✅ Per-CPU RCU callback kthreads
+- ✅ Per-CPU worker threads (manager and worker processes)
+- ✅ Kernel thread scheduling via `sched_entity`
+- ⏳ Thread pools for async operations - planned
+- ⏳ Thread-local storage - planned
 
 **Implementation Notes**:
-- Current: Basic kernel threads via `kthread_create()`
-- Target: Full-featured threading with thread-local storage
-- Work queues can be used as bottom-half mechanism for interrupts
-- Files: `kernel/proc/kthread.c`, `kernel/proc/workqueue.c` (new)
+- Completed: Work queues with manager and worker processes
+- Completed: Per-CPU RCU kthreads (`rcu_kthread_start()`)
+- Completed: Kernel threads use `sched_entity` for scheduling
+- RCU callbacks processed by dedicated per-CPU kthreads, not in scheduler path
+- Files: `kernel/proc/kthread.c`, `kernel/proc/workqueue.c`, `kernel/lock/rcu.c`
+
+**RCU Kthread Architecture**:
+```
+Context switch → rcu_check_callbacks() (note quiescent state)
+Per-CPU RCU kthread → rcu_process_callbacks_for_cpu()
+                    → Invoke ready callbacks (grace period elapsed)
+```
 
 ---
 
@@ -386,22 +411,23 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 **Near-Term Goals:**
 1. **Memory Management** (dynamic probing, zones) - Foundational
    - Feeds into → Interrupt Handling, Scheduling, all memory-intensive features
-2. **Interrupt Handling** [CURRENT] (separate stacks, top/bottom-half)
+2. **Interrupt Handling** ✅ COMPLETED (separate stacks, per-CPU state)
    - Depends on → Memory Management
    - Feeds into → Kernel Threads (work queues), Network Stack
-3. **Scheduling** (MLFQ/CFS) 
-   - Benefits from → Interrupt improvements
-4. **Kernel Threads** (work queues for bottom-half)
-   - Depends on → Interrupt Handling
+3. **Scheduling** ✅ INFRASTRUCTURE COMPLETE (sched_class, per-CPU rq, sched_entity)
+   - Benefits from → Interrupt improvements ✅
+   - Remaining: CFS policy, nice values
+4. **Kernel Threads** ✅ PARTIALLY COMPLETE (work queues, RCU kthreads)
+   - Depends on → Interrupt Handling ✅
 5. Multi-User Support (depends on VFS - done)
 6. LibC Expansion → Feeds into Async VFS, Self-hosting
 7. TTY/Terminal → Block Device Layer → Pseudo-FS → Async VFS
-8. Network Stack (benefits from Interrupt + Memory improvements)
+8. Network Stack (benefits from Interrupt ✅ + Memory improvements)
 9. FS Features (ext2, xattrs)
 
 **Long-Term Goals:**
 - ALL NEAR-TERM → **14. Self-Hosting** ⭐ (TOP PRIORITY)  
-- Network + Threading + FS → **15. Web Server Hosting** ⭐ (MAJOR GOAL)
+- Network + Threading ✅ + FS → **15. Web Server Hosting** ⭐ (MAJOR GOAL)
 - 16. Dynamic Linking → 18. Kernel Modules  
 - 17. Advanced Pseudo-FS  
 - 19. GUI (exploratory)  
@@ -411,14 +437,14 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 
 ## Recommended Implementation Order
 
-### Phase 1: Core Infrastructure (3-6 months) ⚡ **CURRENT PHASE**
-1. **Dynamic memory probing and page frame management**
-2. **Interrupt handling architecture** (separate stacks, top/bottom half)
-3. Process scheduling improvements
-4. Enhanced kernel threads (with work queue bottom-half support)
-5. Multi-user support
+### Phase 1: Core Infrastructure (3-6 months) ✅ **MOSTLY COMPLETE**
+1. **Dynamic memory probing and page frame management** - In progress
+2. ✅ **Interrupt handling architecture** (separate stacks, per-CPU state) - COMPLETED
+3. ✅ **Process scheduling infrastructure** (sched_class, per-CPU rq, sched_entity) - COMPLETED
+4. ✅ **Enhanced kernel threads** (work queues, RCU kthreads) - COMPLETED
+5. Multi-user support - Pending
 
-### Phase 2: I/O Infrastructure (3-6 months)
+### Phase 2: I/O Infrastructure (3-6 months) ⚡ **CURRENT PHASE**
 6. TTY/terminal subsystem
 7. Block device layer
 8. File system features (ext2)
@@ -427,23 +453,24 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 
 ### Phase 3: System Completeness (3-6 months)
 11. Standard LibC expansion
-12. Network stack enhancements (benefits from interrupt + memory improvements)
+12. Network stack enhancements (benefits from interrupt ✅ + memory improvements)
 13. File locking and advanced FS features
+14. CFS-like fair scheduler policy (infrastructure ✅ ready)
 
 ### Phase 4: Self-Hosting Push (6-12 months) ⭐
-14. **Toolchain bootstrap** (GCC/Clang port)
-15. **System utilities** (editors, build tools)
-16. **Self-compilation** milestone
-17. Dynamic linking for smaller binaries
+15. **Toolchain bootstrap** (GCC/Clang port)
+16. **System utilities** (editors, build tools)
+17. **Self-compilation** milestone
+18. Dynamic linking for smaller binaries
 
 ### Phase 5: Advanced Features (6-12 months) ⭐
-18. **Web server hosting** capability
-19. Advanced pseudo-filesystems
-20. Kernel modules system
+19. **Web server hosting** capability
+20. Advanced pseudo-filesystems
+21. Kernel modules system
 
 ### Phase 6: Experimental (ongoing)
-21. GUI framework (exploratory)
-22. MicroPython (for fun)
+22. GUI framework (exploratory)
+23. MicroPython (for fun)
 
 ---
 
@@ -451,8 +478,13 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 
 ### Near-Term Success:
 - [ ] **Dynamic memory probing supports varied hardware configurations**
-- [ ] **Interrupt handling separated from process context**
-- [ ] **Bottom-half processing reduces interrupt latency**
+- [x] **Interrupt handling separated from process context** ✅
+- [x] **Per-CPU interrupt stacks (16KB)** ✅
+- [x] **Pluggable scheduler infrastructure with sched_class** ✅
+- [x] **Per-CPU run queues with CPU affinity support** ✅
+- [x] **Per-CPU RCU kthreads for callback processing** ✅
+- [ ] Bottom-half processing (softirq/tasklets) reduces interrupt latency
+- [ ] CFS-like fair scheduler policy
 - [ ] Can run standard Unix utilities (bash, coreutils)
 - [ ] Multiple users can log in with proper permissions
 - [ ] System remains stable under load (stressfs, usertests)
@@ -486,4 +518,4 @@ When implementing features from this roadmap:
 - **Web Hosting Milestone**: Demonstrates network stack reliability and real-world utility.
 - **Experimental Features**: GUI and kernel MicroPython are low priority - mention only for future exploration.
 
-Last Updated: December 30, 2025
+Last Updated: January 13, 2026

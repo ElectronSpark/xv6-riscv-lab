@@ -27,8 +27,9 @@ This enhanced version has been substantially extended with production-grade feat
 - **Advanced Synchronization**: Reader-writer locks, completions, and fine-grained locking
 - **Device Management**: Character and block device framework with proper abstraction
 - **Network Stack**: Basic networking capabilities with E1000 driver support
-- **Enhanced Process Management**: Improved scheduling and process lifecycle management
+- **Enhanced Process Management**: Improved scheduling with pluggable scheduling classes and CPU affinity
 - **Separate Interrupt Stacks**: Dedicated interrupt stacks per CPU for better interrupt handling and nested interrupt support
+- **Linux-style Scheduler Infrastructure**: Per-CPU run queues, scheduling entities, and sched_class abstraction
 
 ## Features
 
@@ -82,6 +83,17 @@ This enhanced version has been substantially extended with production-grade feat
 - **Pipes**: Anonymous and named pipes (FIFOs)
 - **File Descriptor Table**: Per-process fd management
 - **Working Directory**: Per-process current and root directories (chroot support)
+
+### Scheduler Features
+- **Linux-style Scheduler**: Modular scheduler infrastructure inspired by Linux kernel
+- **Scheduling Entity (`sched_entity`)**: Separate scheduling state from process structure
+- **Per-CPU Run Queues**: Independent run queues per CPU with per-CPU locking
+- **Pluggable Scheduling Classes**: `sched_class` interface for different policies
+- **CPU Affinity**: Process-level CPU affinity with `cpumask_t` support
+- **Priority System**: Major/minor priority levels for scheduling decisions
+- **Implemented Policies**:
+  - FIFO scheduling class for regular tasks
+  - IDLE scheduling class for idle processes
 
 ### System Calls
 Complete POSIX-style system call interface including:

@@ -4,11 +4,11 @@
 
 This is a fully functional Linux-style RCU (Read-Copy-Update) synchronization mechanism for the xv6 operating system. RCU is a synchronization primitive that allows extremely efficient read-side access to shared data structures while allowing updates to proceed concurrently.
 
-This implementation includes **Linux-inspired performance enhancements** specifically designed for high-throughput environments, featuring segmented callback lists, lazy grace period start, callback batching, and expedited grace periods.
+This implementation includes **Linux-inspired performance enhancements** specifically designed for high-throughput environments, featuring timestamp-based grace period detection, per-CPU callback processing, lazy grace period start, and expedited grace periods.
 
 ## Key Features
 
-### Core RCU Features
+### Core RCU Semantics
 - **Lock-free reads**: Readers never block or take locks
 - **Scalable**: Per-CPU data structures minimize contention
 - **Preemptible**: Per-process nesting allows safe migration across CPUs
@@ -18,27 +18,31 @@ This implementation includes **Linux-inspired performance enhancements** specifi
 - **Nested read sections**: Support for nested `rcu_read_lock()` calls
 - **Scheduler integration**: Context switches automatically report quiescent states
 
-### Linux-Inspired Performance Enhancements (v2.0)
-- **Segmented callback lists**: 4-segment design for efficient callback batching
+### Performance Optimizations
+- **Timestamp-based callback readiness**: Callbacks include registration timestamp for precise grace period tracking
 - **Lazy grace period start**: Accumulates callbacks before starting grace periods
 - **Callback batching**: Processes callbacks in batches to prevent CPU monopolization
-- **Adaptive yielding**: Optimized synchronize_rcu() with exponential backoff
-- **Expedited grace periods**: Fast-path synchronization for latency-critical operations
+- **Expedited grace periods**: Fast-path synchronization via `synchronize_rcu_expedited()`
 
-### Background Processing (v2.1)
-- **RCU GP kernel thread**: Dedicated background thread for grace period management
-- **Automatic callback processing**: Periodic processing of callbacks across all CPUs
+### Per-CPU Processing Architecture
+- **Per-CPU RCU callback kthreads**: Dedicated kernel thread per CPU for callback processing
+- **Context-switch-based quiescent states**: Tracked via `rcu_check_callbacks()` called from scheduler
+- **Timestamp-based callback readiness**: Callbacks checked against other CPUs' timestamps to determine readiness
 - **Wait queue support**: Efficient sleep/wake mechanism for `synchronize_rcu()`
-- **Forced quiescent states**: Handles offline/idle CPUs to prevent grace period stalls
+
+### RCU-Safe Data Structure Primitives
+- **RCU list operations**: Full set of RCU-safe list traversal and modification macros in `list.h`
+- **RCU hash list operations**: `hlist_get_rcu()`, `hlist_put_rcu()`, `hlist_pop_rcu()` in `hlist.h`/`hlist.c`
+- **Memory barrier integration**: Proper `rcu_dereference()` / `rcu_assign_pointer()` throughout
 
 ## Architecture
 
 ### Core Data Structures
 
 - **`rcu_state_t`**: Global RCU state tracking grace periods
-- **`rcu_cpu_data_t`**: Per-CPU data for tracking quiescent states and callbacks
-- **`rcu_head_t`**: Callback structure for deferred reclamation
-- **`struct proc`**: Per-process RCU nesting counter (`rcu_read_lock_nesting`)
+- **`rcu_cpu_data_t`**: Per-CPU data for tracking callbacks (cache-line aligned, declared separately as `rcu_cpu_data[NCPU]`)
+- **`rcu_head_t`**: Callback structure for deferred reclamation (includes registration timestamp)
+- **`struct proc`**: Per-process RCU nesting counter (`rcu_read_lock_nesting`) and RCU callback head (`rcu_head`)
 
 ### Grace Period State Machine
 
@@ -48,29 +52,35 @@ IDLE
 GP_STARTED
   ↓ (all CPUs marked)
 GP_IN_PROGRESS
-  ↓ (all CPUs report QS)
+  ↓ (all CPUs report QS via timestamp update)
 GP_COMPLETED
-  ↓ (advance segments, invoke callbacks)
+  ↓ (callbacks moved from pending to ready)
 IDLE
 ```
 
-### Segmented Callback List Structure (v2.0)
+### Timestamp-Based Callback Design
+
+Each CPU maintains a single pending callback list. Callback readiness is determined by timestamps:
 
 ```
-Callback List:  [cb1] -> [cb2] -> [cb3] -> [cb4] -> [cb5] -> NULL
-                  ^        ^        ^        ^
-                  |        |        |        |
-cb_tail[DONE]  ---+        |        |        |
-cb_tail[WAIT]  ------------+        |        |
-cb_tail[NEXT_READY]  ---------------+        |
-cb_tail[NEXT]  ------------------------------+
+Per-CPU Callback Processing:
+
+  Pending List:  [cb1] -> [cb2] -> [cb3] -> NULL
+                   │        │        │
+                   ├─ ts=100├─ ts=110├─ ts=120
+                   │        │        │
+  min_other_cpu_ts = 115
+                   │        │        │
+                Ready?  ✓     ✓       ✗
+                   │        │
+                   └── Invoke ──┘  (put cb3 back)
 ```
 
-Callbacks progress through four segments:
-1. **NEXT_TAIL**: Newly registered callbacks
-2. **NEXT_READY_TAIL**: Callbacks ready for next GP
-3. **WAIT_TAIL**: Callbacks waiting for current GP to complete
-4. **DONE_TAIL**: Callbacks ready to invoke
+Each callback includes:
+- **`timestamp`**: When the callback was registered (`get_jiffs()`)
+- **Readiness check**: Callback ready when `timestamp <= min_other_cpu_timestamp`
+
+This means a callback is safe to invoke when ALL other CPUs have context-switched after the callback was registered.
 
 ### Quiescent States
 
@@ -140,7 +150,7 @@ rcu_read_unlock();
 
 ```c
 void synchronize_rcu(void);          // Wait for grace period (blocking)
-void synchronize_rcu_expedited(void); // Expedited GP (v2.0)
+void synchronize_rcu_expedited(void); // Expedited grace period (faster)
 void call_rcu(rcu_head_t *head,      // Register callback (non-blocking)
               rcu_callback_t func,
               void *data);
@@ -168,7 +178,7 @@ rcu_assign_pointer(global_ptr, new_data);
 call_rcu(&old->rcu_head, free_callback, old);
 ```
 
-**Example - Expedited (v2.0)**:
+**Example - Expedited**:
 ```c
 // For latency-critical operations
 rcu_assign_pointer(critical_ptr, new_value);
@@ -180,50 +190,108 @@ synchronize_rcu_expedited();  // 5-10x faster than synchronize_rcu()
 ```c
 void rcu_init(void);              // Initialize RCU subsystem
 void rcu_cpu_init(int cpu);       // Initialize per-CPU RCU
-void rcu_gp_kthread_start(void);  // Start RCU GP background thread
-void rcu_check_callbacks(void);   // Check for quiescent states
+void rcu_kthread_start(void);     // Start per-CPU RCU callback kthreads
+void rcu_kthread_wakeup(void);    // Wake up RCU callback thread for current CPU
+void rcu_check_callbacks(void);   // Called from scheduler on context switch
 void rcu_process_callbacks(void); // Invoke completed callbacks
-void rcu_note_context_switch(void); // Report quiescent state
+void rcu_note_context_switch(void); // Report quiescent state (updates timestamp)
 void rcu_run_tests(void);         // Run comprehensive test suite
 ```
 
-## RCU GP Kernel Thread (v2.1)
+## Per-CPU RCU Callback Kthreads
 
 ### Overview
 
-The RCU GP (Grace Period) kernel thread is a dedicated background thread that manages grace periods and callback processing. It runs continuously, handling lazy grace period starts, callback processing, and waking up waiters.
+Each CPU has a dedicated kernel thread (`rcu_cb/<cpu>`) for processing RCU callbacks. This separates callback processing from the scheduler path, avoiding potential deadlocks and reducing latency in the context switch path.
+
+### Architecture
+
+```
+CPU 0                    CPU 1                    CPU N
+  ↓                        ↓                        ↓
+[rcu_cb/0]             [rcu_cb/1]             [rcu_cb/N]
+  │                        │                        │
+  ├─ Check timestamps      ├─ Check timestamps      ├─ Check timestamps
+  ├─ Process ready CBs     ├─ Process ready CBs     ├─ Process ready CBs
+  ├─ Wake GP waiters       ├─ Wake GP waiters       ├─ Wake GP waiters
+  └─ Sleep/Wakeup          └─ Sleep/Wakeup          └─ Sleep/Wakeup
+```
 
 ### Thread Functionality
 
-The RCU GP kthread (`rcu_gp`) performs the following tasks in a periodic loop (every 10ms):
+Each per-CPU RCU kthread:
 
-1. **Grace Period Management**:
-   - Checks for pending callbacks across all CPUs
-   - Starts new grace periods when needed (lazy threshold or pending callbacks)
-   - Forces quiescent states for idle/offline CPUs
-   - Advances grace periods when all CPUs have reported quiescent states
+1. **Sets CPU affinity**: Pins itself to its designated CPU
+2. **Advances grace period state**: Calls `rcu_advance_gp()` periodically
+3. **Takes pending list with preemption disabled**: Uses `push_off()`/`pop_off()` for exclusivity
+4. **Separates callbacks**: Ready (timestamp <= min) vs not-ready based on timestamps
+5. **Invokes ready callbacks**: With preemption enabled (callbacks may sleep/yield)
+6. **Returns not-ready callbacks**: Back to pending list with preemption disabled
+7. **Wakes synchronize_rcu() waiters**: Signals completion to waiting processes
+8. **Sleeps when idle**: Waits for `rcu_kthread_wakeup()` when no pending callbacks
 
-2. **Callback Processing**:
-   - Advances callback segments based on completed grace periods
-   - Dequeues ready callbacks from the DONE segment
-   - Invokes callbacks in batches to prevent CPU monopolization
-   - Updates per-CPU callback statistics
+### Per-CPU List Synchronization
 
-3. **Waiter Management**:
-   - Wakes up processes sleeping in `synchronize_rcu()`
-   - Maintains wait queue for efficient sleep/wake mechanism
+The per-CPU callback list is accessed by two contexts on the same CPU:
+- **`call_rcu()`**: Enqueues new callbacks (always runs with `push_off()` held)
+- **RCU kthread**: Takes and processes the list
 
-### Starting the Kthread
+To prevent races, both use `push_off()`/`pop_off()` during list manipulation:
 
-The kthread is started during kernel initialization:
+```c
+// In call_rcu() - enqueue with preemption disabled
+push_off();
+rcu_cblist_enqueue(rcp, head);
+pop_off();
+
+// In kthread - take list with preemption disabled
+push_off();
+pending = atomic_exchange(&rcp->pending_head, NULL);
+atomic_store(&rcp->pending_tail, NULL);
+pop_off();
+
+// Process callbacks (preemption enabled - callbacks may sleep)
+invoke_ready_callbacks(...);
+
+// Put not-ready callbacks back with preemption disabled
+push_off();
+old_head = atomic_load(&rcp->pending_head);
+notready_tail->next = old_head;
+atomic_store(&rcp->pending_head, notready_head);
+if (old_head == NULL) {
+    atomic_store(&rcp->pending_tail, notready_tail);
+}
+pop_off();
+```
+
+Since `push_off()`/`pop_off()` are re-entrant (they maintain a nesting counter), this approach is safe even when nested.
+
+### Scheduler Integration
+
+Quiescent states are tracked via the scheduler's context switch path:
+
+```c
+// Called from context_switch_finish() in the scheduler
+void rcu_check_callbacks(void) {
+    rcu_note_context_switch();  // Updates CPU timestamp
+}
+
+void rcu_note_context_switch(void) {
+    mycpu()->rcu_timestamp = get_jiffs();  // Mark quiescent state
+    rcu_advance_gp();                       // Try to advance GP
+}
+```
+
+This ensures every context switch is a quiescent state for RCU, allowing grace periods to complete when all CPUs have context-switched.
+
+### Starting the Kthreads
 
 ```c
 void start_kernel_post_init(void) {
     // ... other initialization ...
     
-    // Start the RCU GP kthread before running RCU tests
-    rcu_gp_kthread_start();
-    sleep_ms(100); // Give kthread time to start
+    // Start the per-CPU RCU callback kthreads
+    rcu_kthread_start();
     
     rcu_run_tests();
 }
@@ -232,76 +300,60 @@ void start_kernel_post_init(void) {
 ### Configuration
 
 ```c
-#define RCU_GP_KTHREAD_INTERVAL_MS  10  // GP kthread wake interval in ms
+#define RCU_GP_KTHREAD_INTERVAL_MS  10  // Minimum interval between callback processing
 ```
 
-**Tuning**:
-- High-throughput: Increase to 20-50ms for lower overhead
-- Low-latency: Decrease to 5ms for faster grace period completion
-- Default (10ms): Balanced for most workloads
+### Benefits Over Single GP Kthread
 
-### Benefits
+1. **No Cross-CPU Data Access**: Each kthread only processes its own CPU's callbacks
+2. **Better Cache Locality**: Callbacks processed on the CPU where they were registered
+3. **Reduced Contention**: No global callback lock needed
+4. **Faster Wakeup**: `rcu_kthread_wakeup()` wakes only the local CPU's kthread
+5. **Scheduler Integration**: Grace periods advance on every context switch via `rcu_check_callbacks()`
 
-1. **Reduced Latency**: Background processing means `synchronize_rcu()` can sleep instead of polling
-2. **Better Scalability**: Centralized grace period management reduces contention
-3. **Automatic Cleanup**: Periodic callback processing even without explicit calls
-4. **Stall Prevention**: Forced quiescent states prevent grace period stalls from offline CPUs
+## Implementation Details
 
-### Implementation Details
+### Timestamp-Based Callback Readiness
 
-**Wait Queue Support**:
-```c
-static proc_queue_t rcu_gp_waitq;
-static spinlock_t rcu_gp_waitq_lock;
-```
-
-**Forced Quiescent States**:
-```c
-static void rcu_force_quiescent_states(void) {
-    for (int i = 0; i < NCPU; i++) {
-        if (cpu_not_in_rcu_critical_section(i)) {
-            clear_quiescent_state_bit(i);
-        }
-    }
-}
-```
-
-This prevents grace period stalls when:
-- CPUs are offline (NCPU > actual online CPUs)
-- CPUs are idle and not actively context switching
-- CPUs haven't reported quiescent states naturally
-
-### Debugging
-
-Monitor kthread status:
-
-```c
-extern _Atomic int rcu_gp_kthread_running;
-
-if (__atomic_load_n(&rcu_gp_kthread_running, __ATOMIC_ACQUIRE)) {
-    printf("RCU GP kthread is running\n");
-} else {
-    printf("RCU GP kthread is NOT running\n");
-}
-```
-
-## Linux-Inspired Enhancements (v2.0)
-
-### 1. Segmented Callback Lists
-
-**What it does**: Replaces simple double-buffering with a 4-segment callback list structure.
+**What it does**: Each callback records its registration timestamp. A callback is ready when all other CPUs have context-switched (updated their `rcu_timestamp`) since the callback was registered.
 
 **Benefits**:
-- Better callback batching across multiple grace periods
-- Reduced lock contention by batching segment advancement
-- More efficient callback state transitions
-- Enables better pipelining of grace periods
+- Precise per-callback grace period tracking
+- No complex segment pointer management
+- Avoids pointer-into-freed-memory bugs
+
+**Implementation**:
+```c
+typedef struct rcu_head {
+    struct rcu_head     *next;
+    rcu_callback_t      func;
+    void                *data;
+    uint64              timestamp;  // When callback was registered
+} rcu_head_t;
+```
+
+### Pending Callback List
+
+A single pending list is maintained per CPU:
+
+**Fields**:
+- **`pending_head/pending_tail`**: Callbacks waiting for their grace period to complete
+
+**Callback Readiness**:
+- Each callback stores its registration `timestamp`
+- Callback is ready when: `callback.timestamp <= min(other CPUs' rcu_timestamp)`
+- Ready callbacks are invoked, not-ready callbacks are put back
+
+**Benefits**:
+- Simple single-list design
+- No separate ready list needed
+- Timestamp comparison determines readiness directly
 
 **Configuration**: None required, automatically enabled.
 
-### 2. Lazy Grace Period Start
+### Lazy Grace Period Start
 
-**What it does**: Delays starting new grace periods until sufficient callbacks accumulate.
+Grace periods are delayed until sufficient callbacks accumulate.
 
 **Benefits**:
 - 15-30% throughput improvement in high-load scenarios
@@ -317,34 +369,33 @@ if (__atomic_load_n(&rcu_gp_kthread_running, __ATOMIC_ACQUIRE)) {
 - High-throughput workloads: Increase to 200-500
 - Low-latency workloads: Decrease to 10-50
 
-### 3. Callback Batching with Adaptive Yielding
+### Callback Batching
 
 **What it does**: Processes callbacks in batches to prevent CPU monopolization.
 
-**Benefits**:
-- 40% improvement in system responsiveness under heavy load
-- Prevents callback storm from monopolizing CPU
-- Maintains fair CPU scheduling
+### Optimized synchronize_rcu()
 
-**Configuration**:
+**What it does**: Uses timestamp-based waiting instead of complex GP sequence tracking.
+
+**Implementation**:
 ```c
-#define RCU_BATCH_SIZE      16    // Callbacks per batch
+void synchronize_rcu(void) {
+    uint64 sync_timestamp = get_jiffs();
+    rcu_note_context_switch();
+    
+    // Wait for all OTHER CPUs to have timestamps >= sync_timestamp
+    while (rcu_get_min_other_cpu_timestamp(my_cpu) < sync_timestamp) {
+        yield();
+    }
+}
 ```
 
-**Tuning**:
-- Many small callbacks: Increase to 32-64
-- Large callbacks: Decrease to 4-8
-
-### 4. Optimized synchronize_rcu()
-
-**What it does**: Uses adaptive yielding with exponential backoff.
-
 **Benefits**:
-- 50% reduction in synchronize_rcu() latency
+- Simpler and more predictable behavior
+- No dependency on global GP sequence numbers
 - Reduced context switch overhead
-- Better CPU utilization
 
-### 5. Expedited Grace Periods
+### Expedited Grace Periods
 
 **What it does**: Provides `synchronize_rcu_expedited()` for ultra-low latency.
 
@@ -355,53 +406,103 @@ if (__atomic_load_n(&rcu_gp_kthread_running, __ATOMIC_ACQUIRE)) {
 
 **Usage**: Use sparingly - trades CPU overhead for reduced latency.
 
-## RCU GP Kernel Thread (v2.1)
+## RCU-Safe Data Structure Primitives
 
-### Overview
+### List Operations
 
-A dedicated background kernel thread that manages grace periods, processes callbacks, and prevents grace period stalls.
-
-### Features
-
-**Automatic Grace Period Management**:
-- Starts grace periods when needed (lazy threshold or pending callbacks)
-- Forces quiescent states for idle/offline CPUs
-- Advances grace periods when all CPUs report quiescent states
-- Prevents stalls from CPUs that never context switch
-
-**Callback Processing**:
-- Periodically processes callbacks on all CPUs
-- Advances callback segments through the 4-segment pipeline
-- Invokes ready callbacks in batches
-
-**Wait Queue Support**:
-- Allows `synchronize_rcu()` to sleep instead of busy-wait
-- Wakes waiters when grace periods complete
-- Reduces CPU overhead for synchronous operations
-
-### Configuration
+RCU-safe list operations in `list.h`:
 
 ```c
-#define RCU_GP_KTHREAD_INTERVAL_MS  10  // GP kthread wake interval
+// Initialization
+void list_entry_init_rcu(list_node_t *entry);
+
+// Add operations
+void list_entry_add_rcu(list_node_t *head, list_node_t *entry);
+void list_entry_add_tail_rcu(list_node_t *head, list_node_t *entry);
+
+// Delete operations  
+void list_entry_del_rcu(list_node_t *entry);
+void list_entry_del_init_rcu(list_node_t *entry);
+void list_entry_replace_rcu(list_node_t *old, list_node_t *new);
+
+// Traversal macros
+list_foreach_entry_rcu(head, pos)
+list_foreach_node_rcu(head, pos, member)
+
+// Accessors
+#define LIST_FIRST_NODE_RCU(head, type, member)
+#define LIST_NEXT_NODE_RCU(head, node, member)
+#define LIST_IS_EMPTY_RCU(head)
 ```
 
-**Tuning**:
-- High-throughput: 20-50ms (lower overhead)
-- Low-latency: 5ms (faster grace periods)
-- Default: 10ms (balanced)
+### Hash List Operations
+
+New RCU-safe hash list operations in `hlist.h` and `hlist.c`:
+
+```c
+// Entry-level operations (inline in hlist.h)
+void hlist_entry_init_rcu(hlist_entry_t *entry);
+void hlist_entry_add_rcu(hlist_t *hlist, hlist_bucket_t *bucket, hlist_entry_t *entry);
+void hlist_entry_del_rcu(hlist_t *hlist, hlist_entry_t *entry);
+void hlist_entry_replace_rcu(hlist_t *hlist, hlist_entry_t *old, hlist_entry_t *new);
+
+// High-level operations (in hlist.c)
+void *hlist_get_rcu(hlist_t *hlist, void *node);    // RCU-safe lookup
+void *hlist_put_rcu(hlist_t *hlist, void *node, bool replace);  // RCU-safe insert
+void *hlist_pop_rcu(hlist_t *hlist, void *node);    // RCU-safe remove
+
+// Traversal macros
+hlist_foreach_node_rcu(hlist, pos, member)
+hlist_foreach_bucket_entry_rcu(bucket, pos)
+hlist_foreach_bucket_node_rcu(bucket, pos, member)
+
+// Utility macros
+#define HLIST_ENTRY_ATTACHED_RCU(entry)
+#define HLIST_EMPTY_RCU(hlist)
+```
+
+### Usage Example: RCU-Protected Hash Table
+
+```c
+// Reader - no locks needed
+void *lookup(hlist_t *ht, int key) {
+    void *result = NULL;
+    
+    rcu_read_lock();
+    my_node_t *node = hlist_get_rcu(ht, &(my_node_t){.key = key});
+    if (node != NULL) {
+        result = node->value;
+    }
+    rcu_read_unlock();
+    
+    return result;
+}
+
+// Writer - must hold lock
+void insert(hlist_t *ht, spinlock_t *lock, my_node_t *new_node) {
+    spin_acquire(lock);
+    my_node_t *old = hlist_put_rcu(ht, new_node, true);
+    spin_release(lock);
+    
+    if (old != NULL && old != new_node) {
+        call_rcu(&old->rcu_head, free_callback, old);
+    }
+}
+```
 
 ## Performance Characteristics
 
-### Comparison: Before vs After Enhancements
+### Key Metrics
 
-| Metric | v1.0 (Original) | v2.0 (Enhanced) | Improvement |
-|--------|-----------------|-----------------|-------------|
-| Grace period latency | 10-50ms | 5-25ms | **50% faster** |
-| Expedited GP latency | N/A | 0.5-2ms | **10x faster** |
-| synchronize_rcu() latency | 50-200ms | 25-100ms | **50% faster** |
-| Callback throughput | Baseline | 2-3x higher | **200-300%** |
-| Idle CPU overhead | Baseline | Very low | **80% reduction** |
-| Loaded CPU overhead | High | Medium | **60% reduction** |
+| Metric | Typical Value | Notes |
+|--------|---------------|-------|
+| Grace period latency | 5-25ms | Per-CPU quiescent state tracking |
+| Expedited GP latency | 0.5-2ms | IPI-based immediate detection |
+| synchronize_rcu() latency | 25-100ms | Depends on reader hold time |
+| Callback throughput | High | Per-CPU kthread processing |
+| Idle CPU overhead | Very low | Scheduler-integrated detection |
+| Loaded CPU overhead | Low | Efficient timestamp checking |
+| Cross-CPU data access | Minimal | Per-CPU data structures |
 
 ### Read-Side Performance
 - **Read-side overhead**: ~2 atomic operations (increment/decrement nesting counter)
@@ -544,39 +645,79 @@ void read_config(int *s1, int *s2) {
 
 ## Implementation Details
 
-### Grace Period Detection
+### Timestamp-Based Grace Period Detection
 
-1. **Grace Period Start**: When `call_rcu()` accumulates enough callbacks or `synchronize_rcu()` is called
-2. **Quiescent State Tracking**: Each CPU must report passing through a quiescent state
-3. **Completion**: When all CPUs have reported quiescent states
-4. **Callback Invocation**: Callbacks in DONE segment are dequeued and invoked
+1. **Callback Registration**: When `call_rcu()` is called, callback records `timestamp = get_jiffs()`
+2. **Quiescent State Tracking**: Each CPU updates `mycpu()->rcu_timestamp` on context switch
+3. **Readiness Check**: Callback ready when `callback.timestamp <= min(all other CPUs' rcu_timestamp)`
+4. **Callback Invocation**: Ready callbacks are dequeued and invoked by per-CPU kthreads
+
+**Special Cases**:
+- **Single-CPU systems**: When no other CPUs have initialized timestamps, `min_other_cpu_timestamp` returns `UINT64_MAX`, meaning all callbacks are immediately ready (no other CPUs to wait for)
+- **Initial state**: Grace period is not considered complete until `gp_start_timestamp > 0` (a GP has actually been started)
+- **Timestamp overflow**: Not a concern - 64-bit timestamps at 1GHz would take ~584 years to overflow
 
 ### Per-CPU Architecture
 
 ```
-CPU 0          CPU 1          CPU N
-  ↓              ↓              ↓
-[Per-CPU     [Per-CPU     [Per-CPU
-  Data]         Data]         Data]
-  |              |              |
-  ├─ nesting     ├─ nesting     ├─ nesting
-  ├─ qs_pending  ├─ qs_pending  ├─ qs_pending
-  ├─ cb_head     ├─ cb_head     ├─ cb_head
-  ├─ cb_tail[4]  ├─ cb_tail[4]  ├─ cb_tail[4]
-  └─ gp_seq_needed[4]
-                    ↓
-            [Global State]
-            - gp_seq
-            - qs_mask
-            - gp_in_progress
-            - lazy_cb_count
-            - expedited_seq
+CPU 0                  CPU 1                  CPU N
+  ↓                      ↓                      ↓
+[rcu_cpu_data[0]]    [rcu_cpu_data[1]]    [rcu_cpu_data[N]]
+  │                      │                      │
+  ├─ pending_head        ├─ pending_head        ├─ pending_head
+  ├─ pending_tail        ├─ pending_tail        ├─ pending_tail
+  ├─ cb_count            ├─ cb_count            ├─ cb_count
+  ├─ qs_count            ├─ qs_count            ├─ qs_count
+  └─ cb_invoked          └─ cb_invoked          └─ cb_invoked
+       ↓                      ↓                      ↓
+[cpus[0].rcu_timestamp] [cpus[1].rcu_timestamp] [cpus[N].rcu_timestamp]
+                               ↓
+                        [Global State]
+                        - gp_start_timestamp
+                        - gp_seq_completed
+                        - gp_in_progress
+                        - lazy_cb_count
+                        - expedited_seq
 ```
 
 ### Memory Ordering
 
-- **rcu_dereference()**: Uses `__ATOMIC_CONSUME` ordering
+- **rcu_dereference()**: Uses `__ATOMIC_CONSUME` ordering (or `READ_ONCE` fallback)
 - **rcu_assign_pointer()**: Uses `__ATOMIC_RELEASE` ordering
+- **Timestamp updates**: Use `__ATOMIC_RELEASE` for store, `__ATOMIC_ACQUIRE` for load
+- **Grace period barriers**: Full memory barriers ensure visibility
+3. **Completion**: When all CPUs have reported quiescent states (timestamp-based)
+4. **Callback Invocation**: Ready callbacks invoked by per-CPU kthreads
+
+### Per-CPU Architecture
+
+```
+CPU 0                  CPU 1                  CPU N
+  ↓                      ↓                      ↓
+[rcu_cpu_data[0]]    [rcu_cpu_data[1]]    [rcu_cpu_data[N]]
+  │                      │                      │
+  ├─ pending_head        ├─ pending_head        ├─ pending_head
+  ├─ pending_tail        ├─ pending_tail        ├─ pending_tail
+  ├─ cb_count            ├─ cb_count            ├─ cb_count
+  └─ cb_invoked          └─ cb_invoked          └─ cb_invoked
+       ↓                      ↓                      ↓
+[cpus[0].rcu_timestamp] [cpus[1].rcu_timestamp] [cpus[N].rcu_timestamp]
+                               ↓
+                        [Global State]
+                        - gp_seq
+                        - gp_seq_completed
+                        - gp_in_progress
+                        - lazy_cb_count
+                        - expedited_seq
+```
+
+Note: `rcu_cpu_data[]` is declared separately from `rcu_state_t` to ensure each CPU's data is in its own cache line, preventing false sharing.
+
+### Memory Ordering
+
+- **rcu_dereference()**: Uses `__ATOMIC_CONSUME` ordering (or `READ_ONCE` fallback)
+- **rcu_assign_pointer()**: Uses `__ATOMIC_RELEASE` ordering
+- **Timestamp updates**: Use `__ATOMIC_RELEASE` for store, `__ATOMIC_ACQUIRE` for load
 - **Grace period barriers**: Full memory barriers ensure visibility
 
 ## Testing
@@ -599,7 +740,32 @@ Tests cover:
 - Callback mechanisms (call_rcu and rcu_barrier)
 - Concurrent readers
 - Grace period detection
-- Segmented callback list operations
+- RCU-safe list operations (add, delete, traverse)
+- RCU-safe hash list operations
+- Use-after-free detection via simple ASAN (poison pattern detection)
+
+### ASAN (Address Sanitizer) Integration
+
+The test suite includes a simple use-after-free detection mechanism:
+
+```c
+#define ASAN_POISON_ID      0xDEADBEEF
+#define ASAN_POISON_VALUE   0xBADCAFE
+#define ASAN_POISON_BYTE    0x5A
+
+// Poison a node before freeing
+#define ASAN_POISON_NODE(node) do {
+    (node)->id = ASAN_POISON_ID;
+    (node)->value = ASAN_POISON_VALUE;
+} while(0)
+
+// Check for poisoned memory access
+#define ASAN_CHECK_NODE(node, context) do {
+    if (asan_is_poisoned_int((node)->id)) {
+        panic("ASAN: use-after-free detected!");
+    }
+} while(0)
+```
 
 ### Running Tests
 
@@ -669,6 +835,20 @@ printf("Lazy GP: %d, pending callbacks: %d\n",
 // Monitor expedited GP statistics
 printf("Expedited GPs completed: %ld\n",
        rcu_state.expedited_count);
+
+// Monitor per-CPU RCU data
+extern rcu_cpu_data_t rcu_cpu_data[NCPU];
+for (int i = 0; i < NCPU; i++) {
+    rcu_cpu_data_t *rcp = &rcu_cpu_data[i];
+    printf("CPU %d: pending=%p, cb_count=%ld, invoked=%ld\n",
+           i, rcp->pending_head,
+           rcp->cb_count, rcp->cb_invoked);
+}
+
+// Monitor per-CPU timestamps
+for (int i = 0; i < NCPU; i++) {
+    printf("CPU %d timestamp: %ld\n", i, cpus[i].rcu_timestamp);
+}
 ```
 
 ## Configuration and Tuning
@@ -679,36 +859,32 @@ Located in `kernel/lock/rcu.c`:
 
 ```c
 #define RCU_LAZY_GP_DELAY   100   // Callbacks to accumulate before starting GP
-#define RCU_BATCH_SIZE      16    // Number of callbacks to invoke per batch
 ```
 
 ### Tuning Guidelines
 
 **For High-Throughput Workloads**:
 ```c
-#define RCU_LAZY_GP_DELAY   200   // Accumulate more callbacks
-#define RCU_BATCH_SIZE      32    // Larger batches
+#define RCU_LAZY_GP_DELAY   200   // Accumulate more callbacks for batching
 ```
 
 **For Low-Latency Workloads**:
 ```c
 #define RCU_LAZY_GP_DELAY   10    // Start GPs quickly
-#define RCU_BATCH_SIZE      8     // Smaller batches, more responsive
 ```
 
 **For Mixed Workloads** (default):
 ```c
 #define RCU_LAZY_GP_DELAY   100   // Balanced
-#define RCU_BATCH_SIZE      16    // Balanced
 ```
 
 ## Limitations
 
-- **No preemption support**: xv6 doesn't have preemption, so we rely on explicit context switches
+- **Per-CPU exclusivity via push_off()**: List manipulation requires preemption disabled to prevent races
 - **CPU limit**: Optimized for ≤64 CPUs (bitmap-based quiescent state tracking)
 - **No CPU hotplug**: Assumes fixed number of CPUs
 - **Simulated expedited GPs**: No true IPI support, uses aggressive polling
-- **Kthread dependency**: Some features (wait queue sleep) require the RCU GP kthread to be running
+- **Kthread dependency**: Full callback processing requires RCU kthreads to be running
 
 ## Future Enhancements
 
@@ -718,17 +894,21 @@ Potential Linux RCU features that could be added:
 2. **Hierarchical Grace Period Tracking**: For scaling beyond 64 CPUs
 3. **RCU Stall Detection**: Detect CPUs that fail to report quiescent states
 4. **CPU Hotplug Support**: Dynamic CPU addition/removal
-5. **RCU List Primitives**: Helper macros for common list operations
-6. **Offloadable Callbacks**: Move callback processing to dedicated threads
-7. **True IPI Support**: For genuine expedited grace periods
+5. **Offloadable Callbacks**: Move callback processing to dedicated offload threads
+6. **True IPI Support**: For genuine expedited grace periods
+7. **RCU Tasks**: For tracing hooks that may sleep
 
 ## Files
 
 - **kernel/inc/rcu.h**: Public RCU API with kthread declarations
-- **kernel/inc/rcu_type.h**: RCU data structure definitions
-- **kernel/lock/rcu.c**: Core RCU implementation with GP kthread (~900 lines)
-- **kernel/lock/rcu_test.c**: Comprehensive test suite (~300 lines)
+- **kernel/inc/rcu_type.h**: RCU data structure definitions (`rcu_cpu_data_t` with pending list, `rcu_state_t`)
+- **kernel/lock/rcu.c**: Core RCU implementation with per-CPU kthreads (~1000 lines)
+- **kernel/lock/rcu_test.c**: Comprehensive test suite with ASAN (~800 lines)
 - **kernel/lock/RCU_README.md**: Complete documentation (this file)
+- **kernel/inc/list.h**: RCU-safe list operations
+- **kernel/inc/hlist.h**: RCU-safe hash list inline operations
+- **kernel/hlist.c**: RCU-safe hash list functions (`hlist_get_rcu`, `hlist_put_rcu`, `hlist_pop_rcu`)
+- **kernel/inc/percpu.h**: Per-CPU macros including `rcu_timestamp` access
 - **kernel/proc/sched.c**: Scheduler integration for quiescent states
 - **kernel/start_kernel.c**: RCU initialization and kthread startup
 
@@ -770,6 +950,25 @@ Potential Linux RCU features that could be added:
   - Prevents grace period stalls from offline CPUs
   - Handles NCPU > actual online CPUs gracefully
   - Better CPU utilization in mixed workloads
+
+### v2.2 - Per-CPU Processing and RCU Data Structure Primitives
+- **Per-CPU RCU callback kthreads** replace single GP kthread
+- **Simple two-list callback design** replaces 4-segment lists
+- **Timestamp-based callback readiness** for precise GP tracking
+- **Scheduler-integrated quiescent state tracking** via `rcu_check_callbacks()`
+- **RCU-safe list operations** in list.h
+- **RCU-safe hash list operations** in hlist.h/hlist.c
+- **ASAN-style testing** with poison pattern detection
+- **Per-CPU data separation** with explicit cache-line alignment
+- **New APIs**:
+  - `rcu_kthread_start()` - Start per-CPU kthreads
+  - `rcu_kthread_wakeup()` - Wake current CPU's kthread
+  - `hlist_get_rcu()`, `hlist_put_rcu()`, `hlist_pop_rcu()` - Hash list RCU ops
+- **Architectural improvements**:
+  - No cross-CPU callback processing
+  - Better cache locality
+  - Reduced lock contention
+  - Simpler callback management (no segment pointer bugs)
 
 ## Authors
 

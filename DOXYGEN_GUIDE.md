@@ -98,6 +98,57 @@ struct vfs_inode {
 };
 ```
 
+### Scheduler Structure Documentation
+
+For scheduler-related structures:
+
+```c
+/**
+ * @brief Scheduling entity for process scheduling
+ * 
+ * Contains scheduling-related state separate from the process structure.
+ * Modeled after Linux kernel's struct sched_entity. Each process has
+ * a pointer to its scheduling entity (p->sched_entity).
+ * 
+ * @note The pi_lock, on_rq, on_cpu, and context fields were moved here
+ *       from struct proc to separate scheduling concerns.
+ * 
+ * @see struct proc
+ * @see struct rq
+ * @see struct sched_class
+ */
+struct sched_entity {
+    struct rq *rq;                 /**< Current run queue */
+    int priority;                  /**< Scheduling priority (major + minor) */
+    struct proc *proc;             /**< Back pointer to owning process */
+    struct sched_class *sched_class; /**< Scheduling class (FIFO, IDLE, etc.) */
+    spinlock_t pi_lock;            /**< Priority inheritance lock for wakeup */
+    int on_rq;                     /**< 1 if on a ready queue */
+    int on_cpu;                    /**< 1 if currently running on a CPU */
+    int cpu_id;                    /**< CPU this entity is running on */
+    cpumask_t affinity_mask;       /**< CPU affinity bitmask */
+    struct context context;        /**< Saved context for swtch() */
+};
+
+/**
+ * @brief Per-CPU run queue structure
+ * 
+ * Each CPU has its own run queue protected by a per-CPU lock.
+ * The run queue delegates task management to its scheduling class.
+ * 
+ * @note Use rq_lock(cpu_id) and rq_unlock(cpu_id) for synchronization.
+ * 
+ * @see rq_enqueue_task()
+ * @see rq_pick_next_task()
+ */
+struct rq {
+    struct sched_class *sched_class; /**< Scheduling class for this queue */
+    int class_id;                    /**< Scheduling class identifier */
+    int task_count;                  /**< Number of tasks in queue */
+    int cpu_id;                      /**< Owning CPU identifier */
+};
+```
+
 ### Macro Documentation
 
 ```c
@@ -163,6 +214,61 @@ struct vfs_file {
 };
 ```
 
+### Callback Structure Documentation
+
+For structures with function pointers (like scheduling classes):
+
+```c
+/**
+ * @brief Scheduling class operations
+ * 
+ * Defines the interface for pluggable scheduling policies. Each scheduling
+ * class implements these callbacks to manage tasks on run queues.
+ * Modeled after Linux kernel's struct sched_class.
+ * 
+ * @note At minimum, pick_next_task must be implemented.
+ * 
+ * Task Switch Flow:
+ * 1. pick_next_task() - Select next task (keep in queue)
+ * 2. set_next_task() - Remove from queue, set as current
+ * 3. Context switch occurs
+ * 4. put_prev_task() - Insert prev back to queue
+ * 
+ * @see struct rq
+ * @see struct sched_entity
+ */
+struct sched_class {
+    /**
+     * @brief Add task to run queue
+     * @param rq Run queue to add to
+     * @param se Scheduling entity to enqueue
+     */
+    void (*enqueue_task)(struct rq *rq, struct sched_entity *se);
+    
+    /**
+     * @brief Remove task from run queue
+     * @param rq Run queue to remove from
+     * @param se Scheduling entity to dequeue
+     */
+    void (*dequeue_task)(struct rq *rq, struct sched_entity *se);
+    
+    /**
+     * @brief Select next task to run
+     * @param rq Run queue to pick from
+     * @return Next scheduling entity, or NULL if queue empty
+     * @note Task remains in queue until set_next_task() is called
+     */
+    struct sched_entity* (*pick_next_task)(struct rq *rq);
+    
+    /**
+     * @brief Put previous task back on queue after context switch
+     * @param rq Run queue
+     * @param se Previous task's scheduling entity
+     */
+    void (*put_prev_task)(struct rq *rq, struct sched_entity *se);
+};
+```
+
 ## Special Commands
 
 ### Grouping Related Functions
@@ -181,6 +287,40 @@ void vfs_init(void);
 struct vfs_inode *vfs_namei(const char *path, size_t len);
 
 /** @} */ // end of vfs_core group
+```
+
+### Scheduler Module Grouping
+
+```c
+/**
+ * @defgroup scheduler Process Scheduler
+ * @brief Linux-style process scheduling infrastructure
+ * @{
+ */
+
+/**
+ * @defgroup scheduler_rq Run Queue Management
+ * @ingroup scheduler
+ * @brief Per-CPU run queue operations
+ * @{
+ */
+
+void rq_enqueue_task(struct rq *rq, struct sched_entity *se);
+struct sched_entity *rq_pick_next_task(struct rq *rq);
+
+/** @} */ // end of scheduler_rq
+
+/**
+ * @defgroup scheduler_class Scheduling Classes
+ * @ingroup scheduler
+ * @brief Pluggable scheduling policies (FIFO, IDLE, etc.)
+ * @{
+ */
+
+void sched_class_register(int id, struct sched_class *cls);
+
+/** @} */ // end of scheduler_class
+/** @} */ // end of scheduler
 ```
 
 ### Cross-References
@@ -342,6 +482,49 @@ Organize code into logical modules:
 
 /** @} */ // end of vfs_mount
 /** @} */ // end of vfs
+```
+
+### Process and Scheduler Modules
+
+```c
+/**
+ * @defgroup proc Process Management
+ * @brief Process lifecycle and scheduling
+ * @{
+ */
+
+/**
+ * @defgroup proc_sched Scheduler
+ * @ingroup proc
+ * @brief Linux-style scheduler infrastructure
+ * @{
+ */
+
+/**
+ * @defgroup proc_sched_rq Run Queues
+ * @ingroup proc_sched
+ * @brief Per-CPU run queue management
+ */
+
+/**
+ * @defgroup proc_sched_class Scheduling Classes
+ * @ingroup proc_sched
+ * @brief Pluggable scheduling policies
+ */
+
+/** @} */ // end of proc_sched
+
+/**
+ * @defgroup proc_rcu RCU Synchronization
+ * @ingroup proc
+ * @brief Read-Copy-Update for lock-free reads
+ * @{
+ */
+
+// RCU functions: rcu_read_lock(), call_rcu(), synchronize_rcu()
+
+/** @} */ // end of proc_rcu
+/** @} */ // end of proc
 ```
 
 ## Markdown in Comments
