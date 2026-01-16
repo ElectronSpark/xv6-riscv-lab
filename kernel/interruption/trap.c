@@ -91,6 +91,9 @@ static void __trap_panic(struct trapframe *tf, uint64 s0) {
 void user_kirq_entrance(uint64 ksp, uint64 s0) {
     if ((myproc()->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
         panic("usertrap: not from user mode");
+    
+    // Mark the current CPU as offline for this process's VM
+    vm_cpu_offline(myproc()->vm, cpuid());
 
     // redirect traps to kerneltrap()
     // Since we are on kernel stack
@@ -126,6 +129,9 @@ void usertrap(void) {
 
     if ((myproc()->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
         panic("usertrap: not from user mode");
+    
+    // Mark the current CPU as offline for this process's VM
+    vm_cpu_offline(myproc()->vm, cpuid());
 
     // redirect traps to kerneltrap()
     // Since we are on kernel stack
@@ -338,6 +344,9 @@ void usertrapret(void) {
     // printf("user pagetable before usertrapret:\n");
     // dump_pagetable(p->vm.pagetable, 2, 0, 0, 0, false);
     // printf("\n");
+
+    // Before returning, mark the current CPU as online for this process's VM
+    vm_cpu_online(p->vm, cpuid());
 
     // jump to userret in trampoline.S at the top of memory, which
     // switches to the user page table, restores user registers,

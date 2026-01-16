@@ -779,6 +779,18 @@ static int __vm_map_trampoline(vm_t *vm, uint64 trapframe) {
     return 0;
 }
 
+// Mark a CPU is using this VM (for TLB shootdown tracking).
+// Called when returning to user mode.
+void vm_cpu_online(vm_t *vm, int cpu) {
+    atomic_or(&vm->cpumask, (1ULL << cpu));
+}
+
+// Mark a CPU is no longer using this VM (for TLB shootdown tracking).
+// Called when entering kernel mode.
+void vm_cpu_offline(vm_t *vm, int cpu) {
+    atomic_and(&vm->cpumask, ~(1ULL << cpu));
+}
+
 // Initialize the vm struct of a process.
 vm_t *vm_init(uint64 trapframe) {
     vm_t *vm = slab_alloc(&__vm_pool);
@@ -814,6 +826,7 @@ vm_t *vm_init(uint64 trapframe) {
     list_node_push(&vm->vm_free_list, vma, free_list_entry);
     list_node_push(&vm->vm_list, vma, list_entry);
     vm->valid = true; // Mark the VM as valid
+    vm->refcount = 1;
 
     return vm;
 }

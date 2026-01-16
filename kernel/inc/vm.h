@@ -15,6 +15,8 @@
     ((__vma1)->end == (__vma2)->start || \
      (__vma2)->end == (__vma1)->start)
 
+void vm_cpu_online(vm_t *vm, int cpu);
+void vm_cpu_offline(vm_t *vm, int cpu);
 vm_t *vm_init(uint64 trapframe);
 void vm_dup(vm_t *src);
 void vm_put(vm_t *vm);
