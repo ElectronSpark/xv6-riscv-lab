@@ -48,6 +48,8 @@ typedef struct vm {
     size_t          heap_size;  // Size of the heap area
     list_node_t     vm_list;  // List of VM areas
     list_node_t     vm_free_list;  // List of free VM areas
+    cpumask_t       cpumask; // CPUs using this VM
+    int             refcount; // Reference count
 } vm_t;
 
 #endif // __KERNEL_VM_TYPES_H
