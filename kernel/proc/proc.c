@@ -392,7 +392,10 @@ int proc_pagetable(struct proc *p) {
 
 // Free a process's page table, and free the
 // physical memory it refers to.
-void proc_freepagetable(struct proc *p) { vm_destroy(p->vm); }
+void proc_freepagetable(struct proc *p) { 
+    vm_put(p->vm);
+    p->vm = NULL;
+}
 
 // a user program that calls exec("/init")
 // assembled from ../user/initcode.S

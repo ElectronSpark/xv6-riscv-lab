@@ -12,7 +12,7 @@
  *   free_list_entry, not list_entry. Using the wrong member caused list
  *   corruption and crashes in rb_insert_color with NULL grand_parent.
  * - Use-after-free in vm_copy (Dec 2024): When vm_copy fails, don't free
- *   new_vma before calling vm_destroy(dst) - let vm_destroy handle cleanup.
+ *   new_vma before calling __vm_destroy(dst) - let __vm_destroy handle cleanup.
  * - OOM handling (Dec 2024): Changed asserts to return -1 for OOM conditions
  *   in va_alloc, vm_growstack, vm_growheap for graceful degradation.
  *
@@ -22,7 +22,7 @@
  *  3) Generic Sv39 page-table helpers (walk/walkaddr/mappages/uvm*)
  *  4) Process VM subsystem:
  *     - VMA allocator + lifetime helpers (slab-backed)
- *     - VM creation/dup/destroy (vm_init/vm_copy/vm_destroy)
+ *     - VM creation/dup/destroy (vm_init/vm_copy/__vm_destroy)
  *     - VMA tree/list operations
  * (vm_find_area/vma_split/vma_merge/va_alloc/va_free)
  *     - Demand paging + COW handling (vma_validate + vm_copy*)
@@ -40,6 +40,7 @@
 #include "percpu.h"
 #include "printf.h"
 #include "proc/proc.h"
+#include "atomic.h"
 #include "rbtree.h"
 #include "riscv.h"
 #include "slab.h"
@@ -48,6 +49,8 @@
 
 static slab_cache_t __vma_pool = {0};
 static slab_cache_t __vm_pool = {0};
+
+static void __vm_destroy(vm_t *vm);
 
 static void __vma_pool_init(void) {
     slab_cache_init(&__vma_pool, "vm area", sizeof(vma_t), SLAB_FLAG_STATIC);
@@ -393,7 +396,6 @@ void dump_vm(vm_t *vm) {
         return; // Nothing to dump
     }
     printf("VM dump:\n");
-    printf("Valid: %d\n", vm->valid);
     printf("Pagetable: %p\n", vm->pagetable);
     printf("VMAs:\n");
     vma_t *vma, *tmp;
@@ -592,7 +594,7 @@ void uvmfree(pagetable_t pagetable, uint64 sz) { freewalk(pagetable); }
  * ============================
  *
  * Start here for process address-space logic:
- *  - Creation/teardown: `vm_init()`, `vm_destroy()`, `vm_copy()`
+ *  - Creation/teardown: `vm_init()`, `__vm_destroy()`, `vm_copy()`
  *  - Reserving VA ranges: `va_alloc()`, `va_free()`, `vm_find_area()`
  *  - Fault handling: `vma_validate()` (demand paging + COW)
  *  - Safe user copies: `vm_copyin/out/instr()` (call `vma_validate()` first)
@@ -683,7 +685,7 @@ static void __vma_set_free(vma_t *vma) {
            "__vma_set_free: vma already in free list");
 }
 
-static int __vma_dup(vma_t *dst, vma_t *src) {
+static int __vma_copy(vma_t *dst, vma_t *src) {
     // @TODO: need to take care of file and pgoff if they are not NULL
     if (dst == NULL || src == NULL) {
         return -1; // Invalid parameters
@@ -710,7 +712,7 @@ static int __vma_dup(vma_t *dst, vma_t *src) {
             if (src_pte == NULL || *src_pte == 0)
                 continue; // Not mapped, skip
             if (PTE_FLAGS(*src_pte) == PTE_V)
-                panic("__vma_dup: not a leaf");
+                panic("__vma_copy: not a leaf");
             if ((PTE_FLAGS(*src_pte) & PTE_V) == 0)
                 continue;
             pte_t *new_pte = walk(pgtb_dst, a, 1, NULL, NULL);
@@ -723,7 +725,7 @@ static int __vma_dup(vma_t *dst, vma_t *src) {
             *new_pte = *src_pte;   // Copy the PTE
             uint64 pa = PTE2PA(*src_pte);
             assert(page_ref_inc((void *)pa) > 0,
-                   "__vma_dup: page refcnt should be greater than 0");
+                   "__vma_copy: page refcnt should be greater than 0");
         }
         // Flush TLB so downgraded parent PTEs lose stale writable entries (COW
         // safety).
@@ -792,6 +794,7 @@ void vm_cpu_offline(vm_t *vm, int cpu) {
 }
 
 // Initialize the vm struct of a process.
+// Will destroy vm directly and return NULL on failure.
 vm_t *vm_init(uint64 trapframe) {
     vm_t *vm = slab_alloc(&__vm_pool);
     if (vm == NULL) {
@@ -803,18 +806,18 @@ vm_t *vm_init(uint64 trapframe) {
     list_entry_init(&vm->vm_free_list);
     vma_t *vma = __vma_alloc(vm);
     if (vma == NULL) {
-        vm_destroy(vm);
+        __vm_destroy(vm);
         return NULL;
     }
 
     vm->pagetable = uvmcreate();
     if (vm->pagetable == NULL) {
-        vm_destroy(vm);
+        __vm_destroy(vm);
         return NULL;
     }
     if (trapframe != 0) {
         if (__vm_map_trampoline(vm, trapframe) != 0) {
-            vm_destroy(vm);
+            __vm_destroy(vm);
             return NULL; // Failed to map trampoline
         }
     }
@@ -825,28 +828,38 @@ vm_t *vm_init(uint64 trapframe) {
     rb_insert_color(&vm->vm_tree, &vma->rb_entry);
     list_node_push(&vm->vm_free_list, vma, free_list_entry);
     list_node_push(&vm->vm_list, vma, list_entry);
-    vm->valid = true; // Mark the VM as valid
     vm->refcount = 1;
 
     return vm;
+}
+
+void vm_dup(vm_t *vm) {
+    atomic_inc(&vm->refcount);
+}
+
+void vm_put(vm_t *vm) {
+    if (!atomic_dec_unless(&vm->refcount, 1)) {
+        // By now, suppose only the processes holding a reference to this VM can
+        // increase the refcount again. Thus, no other processes can access this VM
+        // after we see refcount reach zero.
+        __vm_destroy(vm);
+    }
 }
 
 // Magic for detecting double-destroy of VM.
 // We deliberately poison vm->pagetable to catch accidental reuse.
 #define VM_DESTROYED_MAGIC ((pagetable_t)0xDEAD0BADULL)
 
-void vm_destroy(vm_t *vm) {
+static void __vm_destroy(vm_t *vm) {
     if (vm == NULL) {
         return; // Nothing to destroy
     }
 
     // Check for double-destroy
     if (vm->pagetable == VM_DESTROYED_MAGIC) {
-        printf("vm_destroy: DOUBLE DESTROY detected for vm=%p\n", vm);
+        printf("__vm_destroy: DOUBLE DESTROY detected for vm=%p\n", vm);
         return;
     }
-
-    vm->valid = false; // Mark the VM as invalid
 
     // Free all VMAs.
     // Note: VMAs are slab-backed; __vma_set_free handles page
@@ -856,12 +869,12 @@ void vm_destroy(vm_t *vm) {
         // Sanity check: verify the VMA is valid before freeing
         if (vma->vm != vm) {
             printf(
-                "vm_destroy: vma->vm mismatch! vma=%p vma->vm=%p expected=%p\n",
+                "__vm_destroy: vma->vm mismatch! vma=%p vma->vm=%p expected=%p\n",
                 vma, vma->vm, vm);
             continue;
         }
         if (vma->start == VMA_FREED_MAGIC || vma->end == VMA_FREED_MAGIC) {
-            printf("vm_destroy: vma already freed! vma=%p\n", vma);
+            printf("__vm_destroy: vma already freed! vma=%p\n", vma);
             continue;
         }
         __vma_set_free(vma);
@@ -893,6 +906,9 @@ vm_t *vm_copy(vm_t *src, uint64 trapframe) {
         return NULL; // Cannot duplicate if src has a trapframe but dst does not
     }
     vm_t *dst = vm_init(trapframe);
+    if (dst == NULL) {
+        return NULL; // Allocation failed
+    }
     vma_t *vma, *tmp;
     list_foreach_node_safe(&src->vm_list, vma, tmp, list_entry) {
         if (vma->flags == VM_FLAG_NONE) {
@@ -900,7 +916,7 @@ vm_t *vm_copy(vm_t *src, uint64 trapframe) {
         }
         vma_t *new_vma = va_alloc(dst, vma->start, VMA_SIZE(vma), vma->flags);
         if (new_vma == NULL) {
-            vm_destroy(dst);
+            vm_put(dst);
             return NULL; // Allocation failed
         }
         if (vma == src->stack) {
@@ -910,9 +926,9 @@ vm_t *vm_copy(vm_t *src, uint64 trapframe) {
             dst->heap = new_vma;
             dst->heap_size = src->heap_size;
         }
-        if (vma->flags != VM_FLAG_NONE && __vma_dup(new_vma, vma) != 0) {
-            // new_vma is still linked into dst; vm_destroy will clean it up.
-            vm_destroy(dst);
+        if (vma->flags != VM_FLAG_NONE && __vma_copy(new_vma, vma) != 0) {
+            // new_vma is still linked into dst; vm_put will clean it up.
+            vm_put(dst);
             return NULL;
         }
     }

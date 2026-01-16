@@ -18,7 +18,7 @@
 void vm_cpu_online(vm_t *vm, int cpu);
 void vm_cpu_offline(vm_t *vm, int cpu);
 vm_t *vm_init(uint64 trapframe);
-void vm_dup(vm_t *src);
+void vm_dup(vm_t *vm);
 void vm_put(vm_t *vm);
 vm_t *vm_copy(vm_t *src, uint64 trapframe);
 void vm_destroy(vm_t *vm);

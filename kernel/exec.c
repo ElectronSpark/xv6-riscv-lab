@@ -204,14 +204,16 @@ int exec(char *path, char **argv) {
     safestrcpy(p->name, last, sizeof(p->name));
 
     // Commit to the user image.
-    vm_destroy(p->vm);                        // Destroy the old VM
+    vm_put(p->vm);                        // Destroy the old VM
+    p->vm = NULL;
     p->vm = tmp_vm;                           // Set the new VM
     p->trapframe->trapframe.sepc = elf.entry; // initial program counter = main
     p->trapframe->trapframe.sp = sp;          // initial stack pointer
     return argc; // this ends up in a0, the first argument to main(argc, argv)
 
 bad:
-    vm_destroy(tmp_vm); // Clean up the temporary VM
+    vm_put(tmp_vm); // Clean up the temporary VM
+    tmp_vm = NULL;
     if (file) {
         vfs_fileclose(file);
     }
