@@ -7,6 +7,32 @@
  * - vm_list: Linked list of all VMAs (using list_entry member)
  * - vm_free_list: Linked list of free VMAs (using free_list_entry member)
  *
+ * LOCKING ORDER:
+ * When acquiring multiple locks, always follow this order to prevent deadlocks.
+ * Rule: Always acquire sleep locks (mutexes, rwlocks) before spinlocks.
+ *
+ * Sleep locks (acquire first):
+ * 1. mount mutex (vfs_mount_lock)
+ * 2. vfs_superblock lock
+ * 3. vfs_inode lock
+ * 4. vm rw_lock (read or write)
+ *
+ * Spinlocks (acquire after all sleep locks):
+ * 5. proc table lock (pid_lock)
+ * 6. pcb locks (parent -> target -> children)
+ * 7. pagetable spinlock (vm->pagetable.spinlock)
+ * 8. pcache_global_spinlock
+ * 9. pcache spinlock (per-cache)
+ * 10. page lock
+ * 11. pcache tree_lock
+ *
+ * Notes:
+ * - Never acquire a sleep lock while holding a spinlock
+ * - When holding vm rw_lock, do NOT attempt to acquire VFS sleep locks
+ * - VFS inode lock must be acquired before vm locks during mmap/file operations
+ * - When crossing filesystems, release inode lock before acquiring another
+ * - Always acquire directory inode lock before child inode lock
+ *
  * BUG FIXES:
  * - List entry mismatch (Dec 2024): vm_free_list operations must use
  *   free_list_entry, not list_entry. Using the wrong member caused list
@@ -830,6 +856,8 @@ vm_t *vm_init(uint64 trapframe) {
     rb_insert_color(&vm->vm_tree, &vma->rb_entry);
     list_node_push(&vm->vm_free_list, vma, free_list_entry);
     list_node_push(&vm->vm_list, vma, list_entry);
+    spin_init(&vm->spinlock, "vm_pgtable_lock");
+    rwlock_init(&vm->rw_lock, RWLOCK_PRIO_READ, "vm_rw_lock");
     vm->refcount = 1;
 
     return vm;
@@ -849,27 +877,27 @@ void vm_put(vm_t *vm) {
 }
 
 void vm_rlock(vm_t *vm) {
-    rwlock_rlock(&vm->rw_lock);
+    rwlock_acquire_read(&vm->rw_lock);
 }
 
 void vm_runlock(vm_t *vm) {
-    rwlock_unlock(&vm->rw_lock);
+    rwlock_release(&vm->rw_lock);
 }
 
 void vm_wlock(vm_t *vm) {
-    rwlock_wlock(&vm->rw_lock);
+    rwlock_acquire_write(&vm->rw_lock);
 }
 
 void vm_wunlock(vm_t *vm) {
-    rwlock_unlock(&vm->rw_lock);
+    rwlock_release(&vm->rw_lock);
 }
 
 void vm_pgtable_lock(vm_t *vm) {
-    spinlock_lock(&vm->spinlock);
+    spin_acquire(&vm->spinlock);
 }
 
 void vm_pgtable_unlock(vm_t *vm) {
-    spinlock_unlock(&vm->spinlock);
+    spin_release(&vm->spinlock);
 }
 
 // Magic for detecting double-destroy of VM.

@@ -17,6 +17,12 @@
 
 void vm_cpu_online(vm_t *vm, int cpu);
 void vm_cpu_offline(vm_t *vm, int cpu);
+void vm_rlock(vm_t *vm);
+void vm_runlock(vm_t *vm);
+void vm_wlock(vm_t *vm);
+void vm_wunlock(vm_t *vm);
+void vm_pgtable_lock(vm_t *vm);
+void vm_pgtable_unlock(vm_t *vm);
 vm_t *vm_init(uint64 trapframe);
 void vm_dup(vm_t *vm);
 void vm_put(vm_t *vm);

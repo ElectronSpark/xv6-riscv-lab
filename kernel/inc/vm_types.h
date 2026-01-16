@@ -6,6 +6,7 @@
 #include "page_type.h"
 #include "list_type.h" 
 #include "bintree_type.h"
+#include "rwlock_types.h"
 
 typedef struct vm vm_t;
 struct file;
@@ -38,7 +39,7 @@ typedef struct vma {
 
 // Virtual Memory Management structure
 typedef struct vm {
-    pagetable_t     pagetable;
+    rwlock_t        rw_lock;    // protect the vm tree and vma list
     struct rb_root  vm_tree;
     uint64          trapframe; // Pointer to the trap frame for this VM
     vma_t           *stack;
@@ -48,6 +49,9 @@ typedef struct vm {
     list_node_t     vm_list;  // List of VM areas
     list_node_t     vm_free_list;  // List of free VM areas
     cpumask_t       cpumask; // CPUs using this VM
+    
+    spinlock_t      spinlock;       // Spinlock for protecting the pagetable
+    pagetable_t     pagetable;
     int             refcount; // Reference count
 } vm_t;
 
