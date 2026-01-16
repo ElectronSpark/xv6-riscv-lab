@@ -49,6 +49,8 @@ static int __sem_do_post(sem_t *sem) {
 
 int sem_wait(sem_t *sem) {
     assert(myproc() != NULL, "sem_wait called from non-process context");
+    assert(mycpu()->spin_depth == 0, "sem_wait called with spinlock held");
+    assert(!CPU_IN_ITR(), "sem_wait called in interrupt context");
     if (sem == NULL) {
         return -EINVAL;
     }

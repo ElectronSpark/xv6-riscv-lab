@@ -48,6 +48,8 @@ mutex_lock(mutex_t *lk)
 {
   struct proc *self = myproc();
   assert(self != NULL, "mutex_lock: no current process");
+  assert(mycpu()->spin_depth == 0, "mutex_lock called with spinlock held");
+  assert(!CPU_IN_ITR(), "mutex_lock called in interrupt context");
 
   // If the lock is not held, acquire it and return success.
   if (__mutex_try_set_holder(lk, self->pid)) {

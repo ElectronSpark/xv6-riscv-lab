@@ -88,6 +88,8 @@ int rwlock_init(rwlock_t *lock, uint64 flags, const char *name) {
 
 int rwlock_acquire_read(rwlock_t *lock) {
     assert(myproc() != NULL, "rwlock_acquire_read: no current process");
+    assert(mycpu()->spin_depth == 0, "rwlock_acquire_read called with spinlock held");
+    assert(!CPU_IN_ITR(), "rwlock_acquire_read called in interrupt context");
     if (!lock) {
         return -1; // Invalid lock
     }
@@ -109,6 +111,8 @@ int rwlock_acquire_read(rwlock_t *lock) {
 
 int rwlock_acquire_write(rwlock_t *lock) {
     assert(myproc() != NULL, "rwlock_acquire_write: no current process");
+    assert(mycpu()->spin_depth == 0, "rwlock_acquire_write called with spinlock held");
+    assert(!CPU_IN_ITR(), "rwlock_acquire_write called in interrupt context");
     if (!lock) {
         return -1; // Invalid lock
     }

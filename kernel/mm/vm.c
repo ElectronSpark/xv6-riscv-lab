@@ -40,6 +40,8 @@
 #include "percpu.h"
 #include "printf.h"
 #include "proc/proc.h"
+#include "spinlock.h"
+#include "rwlock.h"
 #include "atomic.h"
 #include "rbtree.h"
 #include "riscv.h"
@@ -844,6 +846,30 @@ void vm_put(vm_t *vm) {
         // after we see refcount reach zero.
         __vm_destroy(vm);
     }
+}
+
+void vm_rlock(vm_t *vm) {
+    rwlock_rlock(&vm->rw_lock);
+}
+
+void vm_runlock(vm_t *vm) {
+    rwlock_unlock(&vm->rw_lock);
+}
+
+void vm_wlock(vm_t *vm) {
+    rwlock_wlock(&vm->rw_lock);
+}
+
+void vm_wunlock(vm_t *vm) {
+    rwlock_unlock(&vm->rw_lock);
+}
+
+void vm_pgtable_lock(vm_t *vm) {
+    spinlock_lock(&vm->spinlock);
+}
+
+void vm_pgtable_unlock(vm_t *vm) {
+    spinlock_unlock(&vm->spinlock);
 }
 
 // Magic for detecting double-destroy of VM.

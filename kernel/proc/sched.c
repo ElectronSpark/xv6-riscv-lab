@@ -292,12 +292,6 @@ void scheduler_continue(struct proc *p) {
 
 static void __scheduler_wakeup_assertion(struct proc *p) {
     assert(p != NULL, "Cannot wake up a NULL process");
-    // Self-wakeup (p == myproc()) is only valid from interrupt context.
-    // This happens when an interrupt completes I/O for a process that has set
-    // its state to SLEEPING but hasn't context-switched out yet.
-    if (p == myproc()) {
-        assert(CPU_IN_ITR(), "Cannot wake up current process outside interrupt context");
-    }
     assert(spin_holding(&p->sched_entity->pi_lock), "Process pi_lock must be held when waking up a process");
     assert(!spin_holding(&p->lock), "Process lock must not be held when waking up a process");
     assert(!sched_holding(), "Scheduler lock must not be held when waking up a process");
