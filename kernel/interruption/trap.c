@@ -160,12 +160,15 @@ void usertrap(void) {
         // First try to grow stack if the address is in stack region
         vm_try_growstack(myproc()->vm, va);
         // Now find the VMA (may be stack that just grew, or existing VMA
-        // needing demand paging)
+        // needing demand paging). Hold vm_rlock to protect VMA tree traversal.
+        vm_rlock(myproc()->vm);
         vma = vm_find_area(myproc()->vm, va);
         if (vma != NULL &&
             vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_READ) == 0) {
+            vm_runlock(myproc()->vm);
             break;
         }
+        vm_runlock(myproc()->vm);
         // printf("usertrap(): page fault on read 0x%lx pid=%d\n", r_scause(),
         // p->pid); printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(),
         // r_stval()); printf("            pgtbl=0x%lx\n",
@@ -179,12 +182,15 @@ void usertrap(void) {
         // First try to grow stack if the address is in stack region
         vm_try_growstack(myproc()->vm, va);
         // Now find the VMA (may be stack that just grew, or existing VMA
-        // needing demand paging)
+        // needing demand paging). Hold vm_rlock to protect VMA tree traversal.
+        vm_rlock(myproc()->vm);
         vma = vm_find_area(myproc()->vm, va);
         if (vma != NULL &&
             vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_WRITE) == 0) {
+            vm_runlock(myproc()->vm);
             break;
         }
+        vm_runlock(myproc()->vm);
         // printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(),
         // p->pid); printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(),
         // r_stval()); printf("            pgtbl=0x%lx\n",

@@ -116,29 +116,33 @@ int exec(char *path, char **argv) {
         goto bad;
     }
 
+    // Because by this time no one else can see tmp_vm, we don't need to worry about
+    // lock contention. But we still need to hold write lock to supress assertions.
+    vm_wlock(tmp_vm);
+
     // Load program into memory.
     for (i = 0, off = elf.phoff; i < elf.phnum; i++, off += sizeof(ph)) {
         // Seek to program header
         if (vfs_filelseek(file, off, SEEK_SET) != off)
-            goto bad;
+            goto bad_locked;
 
         // Read program header
         if (vfs_fileread(file, &ph, sizeof(ph)) != sizeof(ph))
-            goto bad;
+            goto bad_locked;
 
         if (ph.type != ELF_PROG_LOAD)
             continue;
         if (ph.memsz < ph.filesz)
-            goto bad;
+            goto bad_locked;
         if (ph.vaddr + ph.memsz < ph.vaddr)
-            goto bad;
+            goto bad_locked;
         if (ph.vaddr % PGSIZE != 0)
-            goto bad;
+            goto bad_locked;
 
         vma_t *vma = va_alloc(tmp_vm, ph.vaddr, ph.memsz,
                               flags2vmperm(ph.flags) | VM_FLAG_USERMAP);
         if (vma == NULL) {
-            goto bad; // Allocation failed
+            goto bad_locked; // Allocation failed
         }
 
         // Track the end of loaded segments for heap start
@@ -149,7 +153,7 @@ int exec(char *path, char **argv) {
 
         if (loadseg(tmp_vm->pagetable, ph.vaddr, file, ph.off, ph.filesz,
                     flags2perm(ph.flags)) < 0)
-            goto bad;
+            goto bad_locked;
     }
 
     // Done with the file
@@ -163,11 +167,12 @@ int exec(char *path, char **argv) {
     // Use the rest as the user stack.
     // Create heap area and reserve one page for heap space.
     if (vm_createheap(tmp_vm, heap_start, USERSTACK * PGSIZE) != 0) {
-        goto bad; // Heap allocation failed
+        goto bad_locked; // Heap allocation failed
     }
     if (vm_createstack(tmp_vm, USTACKTOP, USERSTACK * PGSIZE) != 0) {
-        goto bad; // Stack allocation failed
+        goto bad_locked; // Stack allocation failed
     }
+    vm_wunlock(tmp_vm);
     sp = USTACKTOP;
 
     // Push argument strings, prepare rest of stack in ustack.
@@ -211,6 +216,8 @@ int exec(char *path, char **argv) {
     p->trapframe->trapframe.sp = sp;          // initial stack pointer
     return argc; // this ends up in a0, the first argument to main(argc, argv)
 
+bad_locked:
+    vm_wunlock(tmp_vm);
 bad:
     vm_put(tmp_vm); // Clean up the temporary VM
     tmp_vm = NULL;

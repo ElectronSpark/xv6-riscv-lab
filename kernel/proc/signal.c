@@ -1,3 +1,19 @@
+/*
+ * Signal handling for xv6
+ *
+ * LOCKING ORDER:
+ * Signal delivery must respect the global locking order:
+ *   sleep locks (vm_rwlock, mutexes) -> spinlocks (proc_lock)
+ *
+ * In handle_signal():
+ * 1. Acquire proc_lock to pick and dequeue signal, copy sigaction locally
+ * 2. Release proc_lock BEFORE calling __deliver_signal/push_sigframe
+ * 3. push_sigframe may call vm_try_growstack which needs vm_wlock (sleep lock)
+ * 4. Re-acquire proc_lock only for updating signal masks after delivery
+ *
+ * This ensures we never hold a spinlock when acquiring a sleep lock.
+ */
+
 #include "types.h"
 #include "string.h"
 #include "param.h"
@@ -21,11 +37,11 @@ sig_defact signo_default_action(int signo) {
     case SIGCHLD:
     case SIGURG:
     case SIGWINCH:
+        return SIG_ACT_IGN;
     case SIGALRM:
     case SIGUSR1:
     case SIGUSR2:
     // case SIGCLD:
-        return SIG_ACT_IGN;
     // case SIGEMT:
     case SIGHUP:
     case SIGINT:
@@ -645,16 +661,19 @@ int sigreturn(void) {
         proc_unlock(p);
         return -1; // No signal trap frame to restore
     }
+    proc_unlock(p);
 
+    // Call restore_sigframe without holding proc_lock since it calls
+    // vm_copyin which needs vm_rlock (sleep lock)
     ucontext_t uc = {0};
     if (restore_sigframe(p, &uc) != 0) {
-        proc_unlock(p);
         // @TODO:
         exit(-1); // Restore failed, exit the process
     }
     
+    // Re-acquire proc_lock to update signal state
+    proc_lock(p);
     assert(signal_restore(p, &uc) == 0, "sigreturn: signal_restore failed");
-
     proc_unlock(p);
 
     return 0; // Success
@@ -728,7 +747,9 @@ static int __dequeue_signal_update_pending(struct proc *p, int signo, ksiginfo_t
 }
 
 static int __deliver_signal(struct proc *p, int signo, ksiginfo_t *info, sigaction_t *sa, bool *repeat) {
-    proc_assert_holding(p);
+    // NOTE: This function is called WITHOUT proc_lock held to allow
+    // push_sigframe to acquire vm_wlock (sleep lock). The caller must
+    // ensure the signal state (sa, info) was captured while holding the lock.
     if (repeat) {
         *repeat = false; // Default to not repeat
     }
@@ -751,16 +772,21 @@ static int __deliver_signal(struct proc *p, int signo, ksiginfo_t *info, sigacti
     if ((uint64)sa->sa_handler < PAGE_SIZE) {
         printf("__deliver_signal: invalid signal handler address %p for signal %d\n", 
                sa->sa_handler, signo);
+        proc_lock(p);
         PROC_SET_KILLED(p);
+        proc_unlock(p);
         return 0;
     }
 
     int ret = 0;
     if (PROC_USER_SPACE(myproc())) {
         // If the process has user space, push the signal to its user stack
+        // This may call vm_try_growstack which needs vm_wlock (sleep lock)
         ret = push_sigframe(p, signo, sa, info);
     }
 
+    // Re-acquire proc_lock to update signal masks
+    proc_lock(p);
     if ((sa->sa_flags & SA_NODEFER) == 0) {
         sigaddset(&p->sigacts->sa_sigmask, signo);
     }
@@ -774,6 +800,7 @@ static int __deliver_signal(struct proc *p, int signo, ksiginfo_t *info, sigacti
         assert(__sig_setdefault(p->sigacts, signo) == 0,
                "__deliver_signal: __sig_setdefault failed");
     }
+    proc_unlock(p);
     
     return ret;
 }
@@ -807,18 +834,27 @@ void handle_signal(void) {
             break; // No pending signals to handle
         }
     
-        sigaction_t *sa = &p->sigacts->sa[signo];
+        // Copy sigaction to local variable while holding the lock
+        sigaction_t sa_copy = p->sigacts->sa[signo];
         ksiginfo_t *info = NULL;
         bool repeat = false;
     
         assert(__dequeue_signal_update_pending(p, signo, &info) == 0,
                "handle_signal: __dequeue_signal_update_pending failed");
-        assert(__deliver_signal(p, signo, info, sa, &repeat) == 0,
+        signal_assert_invariants(p);
+        
+        // Release lock before calling __deliver_signal, which may need
+        // to acquire vm_wlock (sleep lock) via push_sigframe/vm_try_growstack
+        proc_unlock(p);
+        
+        assert(__deliver_signal(p, signo, info, &sa_copy, &repeat) == 0,
                "handle_signal: __deliver_signal failed");
 
+        // Re-acquire lock to check repeat condition
+        proc_lock(p);
         // Decide if we should immediately deliver another queued instance of the same
         // SA_SIGINFO signal without returning to user space.
-        if ((sa->sa_flags & SA_SIGINFO) &&
+        if ((sa_copy.sa_flags & SA_SIGINFO) &&
             sigismember(&p->sigacts->sa_sigmask, signo) == 0 &&
             sigismember(&p->sig_pending_mask, signo) > 0) {
             // More queued; loop again.

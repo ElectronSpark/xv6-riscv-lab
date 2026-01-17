@@ -451,6 +451,8 @@ void userinit(void) {
     assert(vma_mmap(p->vm, UVMBOTTOM, PGSIZE, flags, NULL, 0, initcode_page) ==
                0,
            "userinit: vma_mmap failed");
+    // myproc() hasn't been set yet, so we can call createstack without holding
+    // the vm lock
     assert(vm_createstack(p->vm, ustack_top, USERSTACK * PGSIZE) == 0,
            "userinit: vm_createstack failed");
 
@@ -544,17 +546,17 @@ int fork(void) {
         return -1;
     }
 
+    vm_t *new_vm = vm_copy(p->vm, (uint64)np->trapframe);
+    if (new_vm == NULL) {
+        freeproc(np);
+        return -1;
+    }
+
     proc_lock(p);
     proc_lock(np);
 
     // Copy user memory from parent to child.
-    if ((np->vm = vm_copy(p->vm, (uint64)np->trapframe)) == NULL) {
-        // @TODO: need to make sure no one would access np before freeing it.
-        proc_unlock(np);
-        proc_unlock(p);
-        freeproc(np);
-        return -1;
-    }
+    np->vm = new_vm;
 
     // copy saved user registers.
     *(np->trapframe) = *(p->trapframe);
@@ -705,7 +707,8 @@ void exit(int status) {
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
 int wait(uint64 addr) {
-    int pid;
+    int pid = -1;
+    int xstate = 0;
     struct proc *p = myproc();
     struct proc *child, *tmp;
     bool needs_yield = false;
@@ -725,13 +728,7 @@ int wait(uint64 addr) {
                     continue;
                 }
                 // Found one.
-                pid = child->pid;
-                if (addr != 0 && vm_copyout(p->vm, addr, (char *)&child->xstate,
-                                            sizeof(child->xstate)) < 0) {
-                    proc_unlock(child);
-                    pid = -1;
-                    goto ret;
-                }
+                xstate = child->xstate;
                 pid = child->pid;
                 detach_child(p, child);
                 proc_unlock(child);
@@ -760,6 +757,12 @@ int wait(uint64 addr) {
 
 ret:
     proc_unlock(p);
+    if (pid >= 0 && addr != 0) {
+        // copy xstate to user.
+        if (either_copyout(1, addr, (char *)&xstate, sizeof(xstate)) < 0) {
+            return -1;
+        }
+    }
     return pid;
 }
 

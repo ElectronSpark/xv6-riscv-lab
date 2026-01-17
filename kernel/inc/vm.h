@@ -34,7 +34,7 @@ int vm_growheap(vm_t *vm, int change_size);
 int vm_createheap(vm_t *vm, uint64 va, uint64 size);
 int vm_createstack(vm_t *vm, uint64 stack_top, uint64 size);
 int vm_try_growstack(vm_t *vm, uint64 va);
-int va_free(vma_t *vma);
+int va_free(vm_t *vm, vma_t *vma);
 vma_t *vm_find_area(vm_t *vm, uint64 va);
 vma_t *vma_split(vma_t *vma, uint64 va);
 vma_t *vma_merge(vma_t *vma1, vma_t *vma2);
