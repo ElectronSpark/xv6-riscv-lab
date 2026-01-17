@@ -23,11 +23,34 @@
 
 // SBI extension IDs
 #define SBI_EXT_BASE             0x10
-#define SBI_EXT_TIME             0x54494D45
+#define SBI_EXT_TIMER            0x54494D45
 #define SBI_EXT_IPI              0x735049
 #define SBI_EXT_RFENCE           0x52464E43
 #define SBI_EXT_HSM              0x48534D
 #define SBI_EXT_SRST             0x53525354
+#define SBI_EXT_PMU              0x504D55
+#define SBI_EXT_DBCN             0x4442434E
+#define SBI_EXT_SUSP             0x53555350
+#define SBI_EXT_CPPC             0x43505043
+#define SBI_EXT_NACL             0x4E41434C
+#define SBI_EXT_STA              0x535441
+
+// SBI extension indices (for use with sbi_ext_is_available)
+enum sbi_ext_id {
+  SBI_EXT_ID_BASE = 0,
+  SBI_EXT_ID_TIMER,
+  SBI_EXT_ID_IPI,
+  SBI_EXT_ID_RFENCE,
+  SBI_EXT_ID_HSM,
+  SBI_EXT_ID_SRST,
+  SBI_EXT_ID_PMU,
+  SBI_EXT_ID_DBCN,
+  SBI_EXT_ID_SUSP,
+  SBI_EXT_ID_CPPC,
+  SBI_EXT_ID_NACL,
+  SBI_EXT_ID_STA,
+  SBI_EXT_ID_COUNT  // Must be last
+};
 
 // SBI Base extension function IDs
 #define SBI_BASE_GET_SPEC_VERSION    0
@@ -38,8 +61,8 @@
 #define SBI_BASE_GET_MARCHID         5
 #define SBI_BASE_GET_MIMPID          6
 
-// SBI TIME extension function IDs
-#define SBI_TIME_SET_TIMER       0
+// SBI TIMER extension function IDs
+#define SBI_TIMER_SET_TIMER      0
 
 // SBI IPI extension function IDs
 #define SBI_IPI_SEND_IPI         0
@@ -112,6 +135,11 @@ long sbi_hart_suspend(uint32 suspend_type, unsigned long resume_addr,
 void sbi_system_reset(uint32 reset_type, uint32 reset_reason);
 void sbi_shutdown(void);
 void sbi_reboot(void);
+
+// Extension availability
+void sbi_probe_extensions(void);
+int sbi_ext_is_available(enum sbi_ext_id ext_id);
+const char *sbi_ext_name(enum sbi_ext_id ext_id);
 
 // Convenience functions
 const char *sbi_error_str(long error);

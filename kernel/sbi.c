@@ -14,6 +14,40 @@
 #include "printf.h"
 #include "percpu.h"
 
+// Extension ID to probe value mapping
+static const long sbi_ext_ids[SBI_EXT_ID_COUNT] = {
+  [SBI_EXT_ID_BASE]   = SBI_EXT_BASE,
+  [SBI_EXT_ID_TIMER]   = SBI_EXT_TIMER,
+  [SBI_EXT_ID_IPI]    = SBI_EXT_IPI,
+  [SBI_EXT_ID_RFENCE] = SBI_EXT_RFENCE,
+  [SBI_EXT_ID_HSM]    = SBI_EXT_HSM,
+  [SBI_EXT_ID_SRST]   = SBI_EXT_SRST,
+  [SBI_EXT_ID_PMU]    = SBI_EXT_PMU,
+  [SBI_EXT_ID_DBCN]   = SBI_EXT_DBCN,
+  [SBI_EXT_ID_SUSP]   = SBI_EXT_SUSP,
+  [SBI_EXT_ID_CPPC]   = SBI_EXT_CPPC,
+  [SBI_EXT_ID_NACL]   = SBI_EXT_NACL,
+  [SBI_EXT_ID_STA]    = SBI_EXT_STA,
+};
+
+// Extension name strings
+static const char *sbi_ext_names[SBI_EXT_ID_COUNT] = {
+  [SBI_EXT_ID_BASE]   = "BASE",
+  [SBI_EXT_ID_TIMER]  = "TIMER",
+  [SBI_EXT_ID_IPI]    = "IPI",
+  [SBI_EXT_ID_RFENCE] = "RFENCE",
+  [SBI_EXT_ID_HSM]    = "HSM",
+  [SBI_EXT_ID_SRST]   = "SRST",
+  [SBI_EXT_ID_PMU]    = "PMU",
+  [SBI_EXT_ID_DBCN]   = "DBCN",
+  [SBI_EXT_ID_SUSP]   = "SUSP",
+  [SBI_EXT_ID_CPPC]   = "CPPC",
+  [SBI_EXT_ID_NACL]   = "NACL",
+  [SBI_EXT_ID_STA]    = "STA",
+};
+
+// Array storing extension availability (0 = not available, 1 = available)
+static int sbi_ext_available[SBI_EXT_ID_COUNT];
 
 // Generic SBI ecall - S-mode kernel uses ecall to invoke SBI services
 struct sbiret sbi_ecall(int ext, int fid, unsigned long arg0,
@@ -106,7 +140,7 @@ long sbi_get_mimpid(void)
 // Timer extension
 void sbi_set_timer(uint64 stime_value)
 {
-  sbi_ecall(SBI_EXT_TIME, SBI_TIME_SET_TIMER, stime_value, 0, 0, 0, 0, 0);
+  sbi_ecall(SBI_EXT_TIMER, SBI_TIMER_SET_TIMER, stime_value, 0, 0, 0, 0, 0);
 }
 
 // IPI extension
@@ -167,6 +201,32 @@ void sbi_shutdown(void)
 void sbi_reboot(void)
 {
   sbi_system_reset(SBI_SRST_TYPE_COLD_REBOOT, SBI_SRST_REASON_NONE);
+}
+
+// Extension probing
+void sbi_probe_extensions(void)
+{
+  printf("SBI extensions:\n");
+  for (int i = 0; i < SBI_EXT_ID_COUNT; i++) {
+    long result = sbi_probe_extension(sbi_ext_ids[i]);
+    sbi_ext_available[i] = (result > 0) ? 1 : 0;
+    printf("  %s: %s\n", sbi_ext_names[i], 
+           sbi_ext_available[i] ? "available" : "not available");
+  }
+}
+
+int sbi_ext_is_available(enum sbi_ext_id ext_id)
+{
+  if (ext_id < 0 || ext_id >= SBI_EXT_ID_COUNT)
+    return 0;
+  return sbi_ext_available[ext_id];
+}
+
+const char *sbi_ext_name(enum sbi_ext_id ext_id)
+{
+  if (ext_id < 0 || ext_id >= SBI_EXT_ID_COUNT)
+    return "UNKNOWN";
+  return sbi_ext_names[ext_id];
 }
 
 // Convenience functions
