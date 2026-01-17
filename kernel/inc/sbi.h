@@ -1,6 +1,6 @@
 /**
  * SBI (Supervisor Binary Interface) for RISC-V
- * 
+ *
  * This module provides an interface to the SBI firmware (e.g., OpenSBI)
  * for operations that require machine-mode privileges.
  */
@@ -11,95 +11,95 @@
 #include "types.h"
 
 // SBI return error codes
-#define SBI_SUCCESS               0
-#define SBI_ERR_FAILED           -1
-#define SBI_ERR_NOT_SUPPORTED    -2
-#define SBI_ERR_INVALID_PARAM    -3
-#define SBI_ERR_DENIED           -4
-#define SBI_ERR_INVALID_ADDRESS  -5
+#define SBI_SUCCESS 0
+#define SBI_ERR_FAILED -1
+#define SBI_ERR_NOT_SUPPORTED -2
+#define SBI_ERR_INVALID_PARAM -3
+#define SBI_ERR_DENIED -4
+#define SBI_ERR_INVALID_ADDRESS -5
 #define SBI_ERR_ALREADY_AVAILABLE -6
-#define SBI_ERR_ALREADY_STARTED  -7
-#define SBI_ERR_ALREADY_STOPPED  -8
+#define SBI_ERR_ALREADY_STARTED -7
+#define SBI_ERR_ALREADY_STOPPED -8
 
 // SBI extension IDs
-#define SBI_EXT_BASE             0x10
-#define SBI_EXT_TIMER            0x54494D45
-#define SBI_EXT_IPI              0x735049
-#define SBI_EXT_RFENCE           0x52464E43
-#define SBI_EXT_HSM              0x48534D
-#define SBI_EXT_SRST             0x53525354
-#define SBI_EXT_PMU              0x504D55
-#define SBI_EXT_DBCN             0x4442434E
-#define SBI_EXT_SUSP             0x53555350
-#define SBI_EXT_CPPC             0x43505043
-#define SBI_EXT_NACL             0x4E41434C
-#define SBI_EXT_STA              0x535441
+#define SBI_EXT_BASE 0x10
+#define SBI_EXT_TIMER 0x54494D45
+#define SBI_EXT_IPI 0x735049
+#define SBI_EXT_RFENCE 0x52464E43
+#define SBI_EXT_HSM 0x48534D
+#define SBI_EXT_SRST 0x53525354
+#define SBI_EXT_PMU 0x504D55
+#define SBI_EXT_DBCN 0x4442434E
+#define SBI_EXT_SUSP 0x53555350
+#define SBI_EXT_CPPC 0x43505043
+#define SBI_EXT_NACL 0x4E41434C
+#define SBI_EXT_STA 0x535441
 
 // SBI extension indices (for use with sbi_ext_is_available)
 enum sbi_ext_id {
-  SBI_EXT_ID_BASE = 0,
-  SBI_EXT_ID_TIMER,
-  SBI_EXT_ID_IPI,
-  SBI_EXT_ID_RFENCE,
-  SBI_EXT_ID_HSM,
-  SBI_EXT_ID_SRST,
-  SBI_EXT_ID_PMU,
-  SBI_EXT_ID_DBCN,
-  SBI_EXT_ID_SUSP,
-  SBI_EXT_ID_CPPC,
-  SBI_EXT_ID_NACL,
-  SBI_EXT_ID_STA,
-  SBI_EXT_ID_COUNT  // Must be last
+    SBI_EXT_ID_BASE = 0,
+    SBI_EXT_ID_TIMER,
+    SBI_EXT_ID_IPI,
+    SBI_EXT_ID_RFENCE,
+    SBI_EXT_ID_HSM,
+    SBI_EXT_ID_SRST,
+    SBI_EXT_ID_PMU,
+    SBI_EXT_ID_DBCN,
+    SBI_EXT_ID_SUSP,
+    SBI_EXT_ID_CPPC,
+    SBI_EXT_ID_NACL,
+    SBI_EXT_ID_STA,
+    SBI_EXT_ID_COUNT // Must be last
 };
 
 // SBI Base extension function IDs
-#define SBI_BASE_GET_SPEC_VERSION    0
-#define SBI_BASE_GET_IMPL_ID         1
-#define SBI_BASE_GET_IMPL_VERSION    2
-#define SBI_BASE_PROBE_EXT           3
-#define SBI_BASE_GET_MVENDORID       4
-#define SBI_BASE_GET_MARCHID         5
-#define SBI_BASE_GET_MIMPID          6
+#define SBI_BASE_GET_SPEC_VERSION 0
+#define SBI_BASE_GET_IMPL_ID 1
+#define SBI_BASE_GET_IMPL_VERSION 2
+#define SBI_BASE_PROBE_EXT 3
+#define SBI_BASE_GET_MVENDORID 4
+#define SBI_BASE_GET_MARCHID 5
+#define SBI_BASE_GET_MIMPID 6
 
 // SBI TIMER extension function IDs
-#define SBI_TIMER_SET_TIMER      0
+#define SBI_TIMER_SET_TIMER 0
 
 // SBI IPI extension function IDs
-#define SBI_IPI_SEND_IPI         0
+#define SBI_IPI_SEND_IPI 0
 
 // SBI HSM (Hart State Management) function IDs
-#define SBI_HSM_HART_START       0
-#define SBI_HSM_HART_STOP        1
-#define SBI_HSM_HART_GET_STATUS  2
-#define SBI_HSM_HART_SUSPEND     3
+#define SBI_HSM_HART_START 0
+#define SBI_HSM_HART_STOP 1
+#define SBI_HSM_HART_GET_STATUS 2
+#define SBI_HSM_HART_SUSPEND 3
 
 // SBI HSM hart states
-#define SBI_HSM_STATE_STARTED         0
-#define SBI_HSM_STATE_STOPPED         1
-#define SBI_HSM_STATE_START_PENDING   2
-#define SBI_HSM_STATE_STOP_PENDING    3
-#define SBI_HSM_STATE_SUSPENDED       4
+#define SBI_HSM_STATE_STARTED 0
+#define SBI_HSM_STATE_STOPPED 1
+#define SBI_HSM_STATE_START_PENDING 2
+#define SBI_HSM_STATE_STOP_PENDING 3
+#define SBI_HSM_STATE_SUSPENDED 4
 #define SBI_HSM_STATE_SUSPEND_PENDING 5
-#define SBI_HSM_STATE_RESUME_PENDING  6
+#define SBI_HSM_STATE_RESUME_PENDING 6
 
 // SBI SRST (System Reset) function IDs
-#define SBI_SRST_RESET           0
+#define SBI_SRST_RESET 0
 
 // SBI SRST reset types
-#define SBI_SRST_TYPE_SHUTDOWN   0
+#define SBI_SRST_TYPE_SHUTDOWN 0
 #define SBI_SRST_TYPE_COLD_REBOOT 1
 #define SBI_SRST_TYPE_WARM_REBOOT 2
 
 // SBI SRST reset reasons
-#define SBI_SRST_REASON_NONE     0
-#define SBI_SRST_REASON_SYSFAIL  1
+#define SBI_SRST_REASON_NONE 0
+#define SBI_SRST_REASON_SYSFAIL 1
 
 #ifndef __ASSEMBLER__
 
 // SBI return value structure
 struct sbiret {
-  long error;
-  long value;
+    long error;
+    long value;
 };
 
 // Generic SBI ecall - implemented in sbi.c
