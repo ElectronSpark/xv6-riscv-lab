@@ -510,11 +510,12 @@ void install_user_root(void) {
 
     proc_lock(p);
     PROC_SET_USER_SPACE(p);
+    proc_unlock(p);
 
     // Set the VFS cwd to root
+    vfs_struct_lock(p->fs);
     vfs_inode_get_ref(root_inode, &p->fs->cwd);
-
-    proc_unlock(p);
+    vfs_struct_unlock(p->fs);
 
     // Release the lookup reference (cwd now holds its own ref)
     vfs_iput(root_inode);
@@ -578,7 +579,9 @@ int fork(void) {
     // Clone VFS cwd and root inode references
     inode = vfs_inode_deref(&p->fs->cwd);
     if (inode != NULL) {
+        vfs_struct_lock(np->fs);
         ret = vfs_inode_get_ref(inode, &np->fs->cwd);
+        vfs_struct_unlock(np->fs);
         if (ret != 0) {
             proc_unlock(np);
             proc_unlock(p);
@@ -588,7 +591,9 @@ int fork(void) {
     }
     inode = vfs_inode_deref(&p->fs->rooti);
     if (inode != NULL) {
+        vfs_struct_lock(np->fs);
         ret = vfs_inode_get_ref(inode, &np->fs->rooti);
+        vfs_struct_unlock(np->fs);
         if (ret != 0) {
             proc_unlock(np);
             proc_unlock(p);
@@ -680,15 +685,15 @@ void exit(int status) {
     // VFS file descriptor table cleanup (closes all VFS files)
     vfs_fdtable_destroy(p->fdtable, 0);
 
-    proc_lock(p);
     assert(p != __proctab_get_initproc(), "init exiting");
-
+    
+    vfs_struct_lock(p->fs);
     // Save and clear VFS inode refs
     rooti_ref = p->fs->rooti;
     cwd_ref = p->fs->cwd;
     p->fs->rooti = (struct vfs_inode_ref){0};
     p->fs->cwd = (struct vfs_inode_ref){0};
-    proc_unlock(p);
+    vfs_struct_unlock(p->fs);
 
     // Release VFS inode references
     vfs_inode_put_ref(&rooti_ref);

@@ -97,6 +97,16 @@ struct vfs_inode *vfs_get_dentry_inode(struct vfs_dentry *dentry);
 void vfs_release_dentry(struct vfs_dentry *dentry);
 int vfs_superblock_set_dirty(struct vfs_superblock *sb);
 
+// fs_struct locking operations
+// fs_struct lock should be the least significant lock to avoid deadlocks
+static inline void vfs_struct_lock(struct fs_struct *fs) {
+    spin_acquire(&fs->lock);
+}
+
+static inline void vfs_struct_unlock(struct fs_struct *fs) {
+    spin_release(&fs->lock);
+}
+
 // Inode reference operations
 int vfs_inode_get_ref(struct vfs_inode *inode, struct vfs_inode_ref *ref);
 void vfs_inode_put_ref(struct vfs_inode_ref *ref);

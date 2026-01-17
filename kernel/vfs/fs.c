@@ -341,12 +341,12 @@ void vfs_init(void) {
     assert(proc != NULL, "vfs_init must be called from a process context");
     __vfs_inode_init(&vfs_root_inode);
     __vfs_file_init();
-    proc_lock(proc);
+    vfs_struct_lock(proc->fs);
     proc->fs->rooti.inode = NULL;
     proc->fs->rooti.sb = NULL;
     proc->fs->cwd.inode = NULL;
     proc->fs->cwd.sb = NULL;
-    proc_unlock(proc);
+    vfs_struct_unlock(proc->fs);
     tmpfs_init_fs_type();
     xv6fs_init_fs_type();
 }

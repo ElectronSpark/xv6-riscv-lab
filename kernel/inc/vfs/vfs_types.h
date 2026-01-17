@@ -347,6 +347,7 @@ struct vfs_fdtable {
 // Per-process filesystem state
 // Allocated on the kernel stack, below utrapframe
 struct fs_struct {
+    spinlock_t lock; // protects the fs_struct
     struct vfs_inode_ref rooti; // Root inode
     struct vfs_inode_ref cwd;   // Current working directory inode
 };

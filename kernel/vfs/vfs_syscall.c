@@ -508,15 +508,15 @@ uint64 sys_vfs_chdir(void) {
     
     // Update process cwd
     struct proc *p = myproc();
-    proc_lock(p);
-    
-    // Release old cwd
-    vfs_inode_put_ref(&p->fs->cwd);
-    
+    vfs_struct_lock(p->fs);
+    // Save old cwd, in order to release it out of the lock
+    struct vfs_inode_ref old_cwd = p->fs->cwd;
     // Set new cwd
     vfs_inode_get_ref(inode, &p->fs->cwd);
+    vfs_struct_unlock(p->fs);
     
-    proc_unlock(p);
+    // Release old cwd
+    vfs_inode_put_ref(&old_cwd);
     vfs_iput(inode);
     
     return 0;

@@ -1137,26 +1137,33 @@ int vfs_chdir(struct vfs_inode *new_cwd) {
     vfs_ilock(new_cwd);
     int ret = __vfs_inode_valid(new_cwd);
     if (ret != 0) {
-        goto out;
+        goto out_locked;
     }
     if (!S_ISDIR(new_cwd->mode)) {
         ret = -ENOTDIR; // Inode is not a directory
-        goto out;
+        goto out_locked;
     }
     struct vfs_inode_ref ref ={ 0 };
     struct vfs_inode_ref old = { 0 };
     ret = vfs_inode_get_ref(new_cwd, &ref);
     if (ret != 0) {
-        goto out;
+        goto out_locked;
     }
-    proc_lock(myproc());
-    old = myproc()->fs->cwd;
-    myproc()->fs->cwd = ref;
-    proc_unlock(myproc());
-    ret = 0;
-out:
     vfs_iunlock(new_cwd);
     vfs_superblock_unlock(new_cwd->sb);
+
+    // to keep it simple, we don't lock fs struct here
+    vfs_struct_lock(myproc()->fs);
+    old = myproc()->fs->cwd;
+    myproc()->fs->cwd = ref;
+    vfs_struct_unlock(myproc()->fs);
+    ret = 0;
+    goto out;
+
+out_locked:
+    vfs_iunlock(new_cwd);
+    vfs_superblock_unlock(new_cwd->sb);
+out:
     vfs_inode_put_ref(&old);
     return ret;
 }
@@ -1178,10 +1185,10 @@ int vfs_chroot(struct vfs_inode *new_root)  {
         return ret;
     }
     vfs_idup(new_root);
-    proc_lock(myproc());
+    vfs_struct_lock(myproc()->fs);
     old = myproc()->fs->rooti;
     myproc()->fs->rooti = ref;
-    proc_unlock(myproc());
+    vfs_struct_unlock(myproc()->fs);
     vfs_inode_put_ref(&old);
     return 0;
 }
