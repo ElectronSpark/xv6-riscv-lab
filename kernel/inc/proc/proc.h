@@ -82,11 +82,11 @@ struct proc {
   struct workqueue *wq;        // work queue this process belongs to
   list_node_t wq_entry;        // link to work queue
   uint64 flags;
-#define PROC_FLAG_VALID             0x1
-#define PROC_FLAG_KILLED            0x8   // Process is exiting or exited
-#define PROC_FLAG_ONCHAN            0x10  // Process is sleeping on a channel
-#define PROC_FLAG_STOPPED           0x20  // Process is stopped
-#define PROC_FLAG_USER_SPACE        0x40  // Process has user space
+#define PROC_FLAG_VALID             1
+#define PROC_FLAG_KILLED            2   // Process is exiting or exited
+#define PROC_FLAG_ONCHAN            3  // Process is sleeping on a channel
+#define PROC_FLAG_STOPPED           4  // Process is stopped
+#define PROC_FLAG_USER_SPACE        5  // Process has user space
   
   // proc table lock must be held before holding p->lock to use this:
   hlist_entry_t proctab_entry; // Entry to link the process hash table
@@ -163,38 +163,32 @@ static inline void proc_clear_flags(struct proc *p, uint64 flags) {
   __atomic_and_fetch(&p->flags, ~flags, __ATOMIC_SEQ_CST);
 }
 
-#define PROC_SET_USER_SPACE(p) \
-  proc_set_flags(p, PROC_FLAG_USER_SPACE)
-#define PROC_SET_VALID(p) \
-  proc_set_flags(p, PROC_FLAG_VALID)
-#define PROC_SET_KILLED(p) \
-  proc_set_flags(p, PROC_FLAG_KILLED)
-#define PROC_SET_ONCHAN(p) \
-  proc_set_flags(p, PROC_FLAG_ONCHAN)
-#define PROC_SET_STOPPED(p) \
-  proc_set_flags(p, PROC_FLAG_STOPPED)
+#define DEFINE_PROC_FLAG(__NAME, __VALUE)                                 \
+static inline bool PROC_##__NAME(struct proc *p) {                        \
+  if (p == NULL) {                                                        \
+    return false;                                                         \
+  }                                                                       \
+  uint64 __flags = smp_load_acquire(&p->flags);                           \
+  return !!(__flags & (1ULL << (__VALUE)));                               \
+}                                                                         \
+static inline void PROC_SET_##__NAME(struct proc *p) {                    \
+  if (p == NULL) {                                                        \
+    return;                                                               \
+  }                                                                       \
+  __atomic_or_fetch(&p->flags, (1ULL << (__VALUE)), __ATOMIC_SEQ_CST);    \
+}                                                                         \
+static inline void PROC_CLEAR_##__NAME(struct proc *p) {                  \
+  if (p == NULL) {                                                        \
+    return;                                                               \
+  }                                                                       \
+  __atomic_and_fetch(&p->flags, ~(1ULL << (__VALUE)), __ATOMIC_SEQ_CST);  \
+}
 
-#define PROC_CLEAR_USER_SPACE(p) \
-  proc_clear_flags(p, PROC_FLAG_USER_SPACE)
-#define PROC_CLEAR_VALID(p) \
-  proc_clear_flags(p, PROC_FLAG_VALID)
-#define PROC_CLEAR_KILLED(p) \
-  proc_clear_flags(p, PROC_FLAG_KILLED)
-#define PROC_CLEAR_ONCHAN(p) \
-  proc_clear_flags(p, PROC_FLAG_ONCHAN)
-#define PROC_CLEAR_STOPPED(p) \
-  proc_clear_flags(p, PROC_FLAG_STOPPED)
-
-#define PROC_VALID(p) \
-  (!!(proc_flags(p) & PROC_FLAG_VALID))
-#define PROC_KILLED(p) \
-  (!!(proc_flags(p) & PROC_FLAG_KILLED))
-#define PROC_ONCHAN(p) \
-  (!!(proc_flags(p) & PROC_FLAG_ONCHAN))
-#define PROC_STOPPED(p) \
-  (!!(proc_flags(p) & PROC_FLAG_STOPPED))
-#define PROC_USER_SPACE(p) \
-  (!!(proc_flags(p) & PROC_FLAG_USER_SPACE))
+DEFINE_PROC_FLAG(USER_SPACE, PROC_FLAG_USER_SPACE)
+DEFINE_PROC_FLAG(VALID, PROC_FLAG_VALID)
+DEFINE_PROC_FLAG(KILLED, PROC_FLAG_KILLED)
+DEFINE_PROC_FLAG(ONCHAN, PROC_FLAG_ONCHAN)
+DEFINE_PROC_FLAG(STOPPED, PROC_FLAG_STOPPED)
 
 static inline const char *procstate_to_str(enum procstate state) {
   switch (state) {
