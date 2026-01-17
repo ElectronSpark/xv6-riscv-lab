@@ -45,6 +45,7 @@
 #include "vm.h"
 #include "net.h"
 #include "pipe.h"
+#include "proc/proc_queue.h"
 
 static slab_cache_t __vfs_file_slab = { 0 };
 static struct spinlock __vfs_ftable_lock = { 0 };
@@ -124,7 +125,7 @@ static int __vfs_open_cdev(struct vfs_inode *inode, struct vfs_file *file) {
     if (cdev == NULL) {
         return -ENODEV;
     }
-    file->cdev = *cdev;
+    file->cdev = cdev;
     file->ops = NULL; // Device files use direct device I/O
     return 0;
 }
@@ -138,7 +139,7 @@ static int __vfs_open_blkdev(struct vfs_inode *inode, struct vfs_file *file) {
     if (blkdev == NULL) {
         return -ENODEV;
     }
-    file->blkdev = *blkdev;
+    file->blkdev = blkdev;
     file->ops = NULL; // Device files use direct device I/O
     return 0;
 }
@@ -252,12 +253,14 @@ void vfs_fileclose(struct vfs_file *file) {
         // Handle special file cleanup
         if (inode != NULL) {
             if (S_ISCHR(inode->mode)) {
-                ret = cdev_put(&file->cdev);
+                ret = cdev_put(file->cdev);
+                file->cdev = NULL;
                 if (ret != 0) {
                     printf("vfs_fileclose: cdev_put failed: %d\n", ret);
                 }
             } else if (S_ISBLK(inode->mode)) {
-                ret = blkdev_put(&file->blkdev);
+                ret = blkdev_put(file->blkdev);
+                file->blkdev = NULL;
                 if (ret != 0) {
                     printf("vfs_fileclose: blkdev_put failed: %d\n", ret);
                 }
@@ -290,9 +293,9 @@ struct vfs_file *vfs_filedup(struct vfs_file *file) {
     if (inode != NULL) {
         int ret = 0;
         if (S_ISCHR(inode->mode)) {
-            ret = cdev_dup(&file->cdev);
+            ret = cdev_dup(file->cdev);
         } else if (S_ISBLK(inode->mode)) {
-            ret = blkdev_dup(&file->blkdev);
+            ret = blkdev_dup(file->blkdev);
         }
         
         if (ret != 0) {
@@ -340,7 +343,7 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n) {
     
     // Handle character device read
     if (S_ISCHR(inode->mode)) {
-        ret = cdev_read(&file->cdev, false, buf, n);  // false = kernel buffer
+        ret = cdev_read(file->cdev, false, buf, n);  // false = kernel buffer
         __vfs_file_unlock(file);
         return ret;
     }
@@ -442,7 +445,7 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n) {
     
     // Handle character device write
     if (S_ISCHR(inode->mode)) {
-        ret = cdev_write(&file->cdev, false, buf, n);  // false = kernel buffer
+        ret = cdev_write(file->cdev, false, buf, n);  // false = kernel buffer
         __vfs_file_unlock(file);
         return ret;
     }
@@ -585,11 +588,13 @@ int vfs_pipealloc(struct vfs_file **rf, struct vfs_file **wf) {
     }
     
     // Initialize pipe
-    pi->readopen = 1;
-    pi->writeopen = 1;
+    smp_store_release(&pi->flags, PIPE_FLAGS_RW);
     pi->nwrite = 0;
     pi->nread = 0;
-    spin_init(&pi->lock, "vfs_pipe");
+    spin_init(&pi->reader_lock, "vfs_pipe_reader");
+    spin_init(&pi->writer_lock, "vfs_pipe_writer");
+    proc_queue_init(&pi->nread_queue, "pipe_nread_queue", NULL);
+    proc_queue_init(&pi->nwrite_queue, "pipe_nwrite_queue", NULL);
     
     // Initialize read file
     (*rf)->f_flags = O_RDONLY;

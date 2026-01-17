@@ -2,16 +2,45 @@
 #define __KERNEL_PIPE_H
 
 #include "spinlock.h"
+#include "proc/proc_queue_type.h"
+#include "atomic.h"
 
 #define PIPESIZE 512
 
+#define PIPE_FLAGS_READABLE 1
+#define PIPE_FLAGS_WRITABLE 2
+#define PIPE_FLAGS_RW ((1 << PIPE_FLAGS_READABLE) | (1 << PIPE_FLAGS_WRITABLE))
+
+#define PIPE_WRITABLE(pi)                                                      \
+    (!!(smp_load_acquire(&(pi)->flags) & (1 << PIPE_FLAGS_WRITABLE)))
+#define PIPE_READABLE(pi)                                                      \
+    (!!(smp_load_acquire(&(pi)->flags) & (1 << PIPE_FLAGS_READABLE)))
+// Clear the writable flag; returns true if both readable and writable are cleared
+// after the operation
+#define PIPE_CLEAR_WRITABLE(pi)                                                \
+    ({                                                                         \
+        uint64 __flags;                                                        \
+        __flags = __atomic_fetch_and(                                          \
+            &(pi)->flags, ~(1 << PIPE_FLAGS_WRITABLE), __ATOMIC_SEQ_CST);      \
+        !!(__flags == (1 << PIPE_FLAGS_WRITABLE));                             \
+    })
+#define PIPE_CLEAR_READABLE(pi)                                                \
+    ({                                                                         \
+        uint64 __flags;                                                        \
+        __flags = __atomic_fetch_and(                                          \
+            &(pi)->flags, ~(1 << PIPE_FLAGS_READABLE), __ATOMIC_SEQ_CST);      \
+        !!(__flags == (1 << PIPE_FLAGS_READABLE));                             \
+    })
+
 struct pipe {
-  struct spinlock lock;
-  uint nread;     // number of bytes read
-  uint nwrite;    // number of bytes written
-  int readopen: 1;   // read fd is still open
-  int writeopen: 1;  // write fd is still open
-  char data[PIPESIZE];
+    uint nread; // number of bytes read
+    proc_queue_t nread_queue;
+    struct spinlock reader_lock;
+    uint nwrite; // number of bytes written
+    proc_queue_t nwrite_queue;
+    struct spinlock writer_lock;
+    int flags;
+    char data[PIPESIZE];
 };
 
 #endif // __KERNEL_PIPE_H

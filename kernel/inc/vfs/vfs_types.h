@@ -322,8 +322,8 @@ struct vfs_file {
     union {
         loff_t f_pos; // file position(regular files)
         struct vfs_dir_iter dir_iter; // directory iterator state (directories)
-        cdev_t cdev; // character device specific data (character device files)
-        blkdev_t blkdev; // block device specific data (block device files)
+        cdev_t *cdev; // reference to character device
+        blkdev_t *blkdev; // reference to block device
         struct pipe *pipe; // FD_PIPE
         struct sock *sock;  // FD_SOCKET
     };

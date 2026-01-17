@@ -9,6 +9,7 @@
 #include "types.h"
 #include "riscv.h"
 #include "defs.h"
+#include "string.h"
 #include "printf.h"
 #include "param.h"
 #include "spinlock.h"
@@ -19,116 +20,301 @@
 #include "proc/sched.h"
 
 void pipeclose(struct pipe *pi, int writable) {
-    spin_acquire(&pi->lock);
+    bool freed = false;
     if (writable) {
-        pi->writeopen = 0;
-        wakeup_on_chan(&pi->nread);
+        spin_acquire(&pi->writer_lock);
+        freed = PIPE_CLEAR_WRITABLE(pi);
+        proc_queue_wakeup_all(&pi->nread_queue, -1, 0);
+        spin_release(&pi->writer_lock);
     } else {
-        pi->readopen = 0;
-        wakeup_on_chan(&pi->nwrite);
+        spin_acquire(&pi->reader_lock);
+        freed = PIPE_CLEAR_READABLE(pi);
+        proc_queue_wakeup_all(&pi->nwrite_queue, -1, 0);
+        spin_release(&pi->reader_lock);
     }
-    if (pi->readopen == 0 && pi->writeopen == 0) {
-        spin_release(&pi->lock);
+    if (freed) {
         kfree((char *)pi);
-    } else
-        spin_release(&pi->lock);
+    }
+}
+
+#define PIPE_READABLE_SIZE(nwrite, nread) ((nwrite) - (nread))
+#define PIPE_WRITABLE_SIZE(nwrite, nread) (PIPESIZE - PIPE_READABLE_SIZE(nwrite, nread))
+
+static int __pipe_wait_writer(struct pipe *pi) {
+    spin_acquire(&pi->writer_lock);
+    if (!PIPE_WRITABLE(pi) || killed(myproc())) {
+        spin_release(&pi->writer_lock);
+        // Return 0 to let caller re-check and detect EOF properly
+        return 0;
+    }
+    proc_queue_wait(&pi->nread_queue, &pi->writer_lock, NULL);
+    spin_release(&pi->writer_lock);
+    // Return 0 to re-check conditions (wakeup may be from close or data)
+    return 0;
+}
+
+static int __pipe_wait_reader(struct pipe *pi) {
+    spin_acquire(&pi->reader_lock);
+    if (!PIPE_READABLE(pi) || killed(myproc())) {
+        spin_release(&pi->reader_lock);
+        // Return 0 to let caller re-check and detect broken pipe properly
+        return 0;
+    }
+    proc_queue_wait(&pi->nwrite_queue, &pi->reader_lock, NULL);
+    spin_release(&pi->reader_lock);
+    // Return 0 to re-check conditions (wakeup may be from close or space available)
+    return 0;
 }
 
 int pipewrite(struct pipe *pi, uint64 addr, int n) {
     int i = 0;
+    int ret = 0;
     struct proc *pr = myproc();
+    char buf[128];
+    size_t buf_pos = 0;
+    size_t buf_len = 0;
 
-    spin_acquire(&pi->lock);
     while (i < n) {
-        if (pi->readopen == 0 || killed(pr)) {
-            spin_release(&pi->lock);
-            return -1;
+        if (buf_len == 0) {
+            buf_len = min(n - i, sizeof(buf));
+            if (buf_len == 0) {
+                goto out;
+            }
+            if (vm_copyin(pr->vm, buf, addr + i, buf_len) == -1) {
+                goto out;
+            }
         }
-        if (pi->nwrite == pi->nread + PIPESIZE) { // DOC: pipewrite-full
-            wakeup_on_chan(&pi->nread);
-            sleep_on_chan(&pi->nwrite, &pi->lock);
-        } else {
-            char ch;
-            if (vm_copyin(pr->vm, &ch, addr + i, 1) == -1)
-                break;
-            pi->data[pi->nwrite++ % PIPESIZE] = ch;
-            i++;
-        }
-    }
-    wakeup_on_chan(&pi->nread);
-    spin_release(&pi->lock);
+        i += buf_len;
+        spin_acquire(&pi->writer_lock);
+        while (buf_len > buf_pos) {
+            uint nread = smp_load_acquire(&pi->nread);
+            if (!PIPE_READABLE(pi) || killed(pr)) {
+                spin_release(&pi->writer_lock);
+                return -1;
+            }
+            uint nwrite_old = pi->nwrite;
+            size_t writable = PIPE_WRITABLE_SIZE(nwrite_old, nread);
+            if (writable == 0) {
+                proc_queue_wakeup_all(&pi->nread_queue, 0, 0);
+                spin_release(&pi->writer_lock);
 
-    return i;
+                ret = __pipe_wait_reader(pi);   // need to acquire reader_lock to wait for reader
+                if (ret < 0) {
+                    goto out;
+                }
+                spin_acquire(&pi->writer_lock);
+            } else {
+                size_t write_size = min(buf_len - buf_pos, writable);
+                uint nwrite = nwrite_old + write_size;
+                uint nwrite_idx = nwrite_old % PIPESIZE;
+
+                if (nwrite_idx + write_size <= PIPESIZE) {
+                    // No wrap-around
+                    memmove(&pi->data[nwrite_idx], &buf[buf_pos], write_size);
+                } else {
+                    // Wrap-around
+                    size_t first_part = PIPESIZE - nwrite_idx;
+                    memmove(&pi->data[nwrite_idx], &buf[buf_pos], first_part);
+                    memmove(&pi->data[0], &buf[buf_pos + first_part],
+                            write_size - first_part);
+                }
+
+                smp_store_release(&pi->nwrite, nwrite);
+                buf_pos += write_size;
+            }
+        }
+        spin_release(&pi->writer_lock);
+        buf_pos = 0;
+        buf_len = 0;
+    }
+out:
+    spin_acquire(&pi->writer_lock);
+    proc_queue_wakeup_all(&pi->nread_queue, 0, 0);
+    spin_release(&pi->writer_lock);
+    return i - (buf_len - buf_pos);
 }
 
 int piperead(struct pipe *pi, uint64 addr, int n) {
-    int i;
+    int i = 0;
+    int ret = 0;
     struct proc *pr = myproc();
-    char ch;
+    char buf[128];
+    size_t buf_pos = 0;
+    size_t buf_len = 0;
 
-    spin_acquire(&pi->lock);
-    while (pi->nread == pi->nwrite && pi->writeopen) { // DOC: pipe-empty
-        if (killed(pr)) {
-            spin_release(&pi->lock);
-            return -1;
+    while (i < n) {
+        spin_acquire(&pi->reader_lock);
+        while (buf_len == 0) {
+            uint nwrite = smp_load_acquire(&pi->nwrite);
+            uint nread_old = pi->nread;
+            size_t readable = PIPE_READABLE_SIZE(nwrite, nread_old);
+            
+            if (readable == 0) {
+                // Pipe is empty - check if we should wait or return EOF
+                if (!PIPE_WRITABLE(pi)) {
+                    // Writer closed and no data left - EOF
+                    spin_release(&pi->reader_lock);
+                    goto out;
+                }
+                if (killed(pr)) {
+                    spin_release(&pi->reader_lock);
+                    return -1;
+                }
+                // Pipe empty but writer still open - wait for data
+                proc_queue_wakeup_all(&pi->nwrite_queue, 0, 0);
+                spin_release(&pi->reader_lock);
+
+                ret = __pipe_wait_writer(pi);
+                if (ret < 0) {
+                    goto out;
+                }
+                spin_acquire(&pi->reader_lock);
+            } else {
+                // Data available - read it (even if writer closed)
+                size_t read_size = min(min((size_t)(n - i), readable), sizeof(buf));
+                uint nread = nread_old + read_size;
+                uint nread_idx = nread_old % PIPESIZE;
+
+                if (nread_idx + read_size <= PIPESIZE) {
+                    // No wrap-around
+                    memmove(buf, &pi->data[nread_idx], read_size);
+                } else {
+                    // Wrap-around
+                    size_t first_part = PIPESIZE - nread_idx;
+                    memmove(buf, &pi->data[nread_idx], first_part);
+                    memmove(&buf[first_part], &pi->data[0], read_size - first_part);
+                }
+
+                smp_store_release(&pi->nread, nread);
+                buf_len = read_size;
+            }
         }
-        sleep_on_chan(&pi->nread, &pi->lock); // DOC: piperead-sleep
+        spin_release(&pi->reader_lock);
+
+        // Copy to user space outside the lock
+        size_t copy_size = min(buf_len - buf_pos, (size_t)(n - i));
+        if (vm_copyout(pr->vm, addr + i, &buf[buf_pos], copy_size) == -1) {
+            goto out;
+        }
+        i += copy_size;
+        buf_pos += copy_size;
+        if (buf_pos >= buf_len) {
+            buf_pos = 0;
+            buf_len = 0;
+        }
     }
-    for (i = 0; i < n; i++) { // DOC: piperead-copy
-        if (pi->nread == pi->nwrite)
-            break;
-        ch = pi->data[pi->nread++ % PIPESIZE];
-        if (vm_copyout(pr->vm, addr + i, &ch, 1) == -1)
-            break;
-    }
-    wakeup_on_chan(&pi->nwrite); // DOC: piperead-wakeup
-    spin_release(&pi->lock);
+out:
+    spin_acquire(&pi->reader_lock);
+    proc_queue_wakeup_all(&pi->nwrite_queue, 0, 0);
+    spin_release(&pi->reader_lock);
     return i;
 }
 
 // Kernel-mode pipe read (for VFS layer)
 int piperead_kernel(struct pipe *pi, char *buf, int n) {
-    int i;
+    int i = 0;
+    int ret = 0;
     struct proc *pr = myproc();
 
-    spin_acquire(&pi->lock);
-    while (pi->nread == pi->nwrite && pi->writeopen) {
-        if (killed(pr)) {
-            spin_release(&pi->lock);
-            return -1;
+    while (i < n) {
+        spin_acquire(&pi->reader_lock);
+        uint nwrite = smp_load_acquire(&pi->nwrite);
+        uint nread_old = pi->nread;
+        size_t readable = PIPE_READABLE_SIZE(nwrite, nread_old);
+        
+        if (readable == 0) {
+            // Pipe is empty - check if we should wait or return EOF
+            if (!PIPE_WRITABLE(pi)) {
+                // Writer closed and no data left - EOF
+                spin_release(&pi->reader_lock);
+                goto out;
+            }
+            if (killed(pr)) {
+                spin_release(&pi->reader_lock);
+                return -1;
+            }
+            // Pipe empty but writer still open - wait for data
+            proc_queue_wakeup_all(&pi->nwrite_queue, 0, 0);
+            spin_release(&pi->reader_lock);
+
+            ret = __pipe_wait_writer(pi);
+            if (ret < 0) {
+                goto out;
+            }
+        } else {
+            // Data available - read it (even if writer closed)
+            size_t read_size = min((size_t)(n - i), readable);
+            uint nread = nread_old + read_size;
+            uint nread_idx = nread_old % PIPESIZE;
+
+            if (nread_idx + read_size <= PIPESIZE) {
+                // No wrap-around
+                memmove(&buf[i], &pi->data[nread_idx], read_size);
+            } else {
+                // Wrap-around
+                size_t first_part = PIPESIZE - nread_idx;
+                memmove(&buf[i], &pi->data[nread_idx], first_part);
+                memmove(&buf[i + first_part], &pi->data[0], read_size - first_part);
+            }
+
+            smp_store_release(&pi->nread, nread);
+            i += read_size;
+            spin_release(&pi->reader_lock);
         }
-        sleep_on_chan(&pi->nread, &pi->lock);
     }
-    for (i = 0; i < n; i++) {
-        if (pi->nread == pi->nwrite)
-            break;
-        buf[i] = pi->data[pi->nread++ % PIPESIZE];
-    }
-    wakeup_on_chan(&pi->nwrite);
-    spin_release(&pi->lock);
+out:
+    spin_acquire(&pi->reader_lock);
+    proc_queue_wakeup_all(&pi->nwrite_queue, 0, 0);
+    spin_release(&pi->reader_lock);
     return i;
 }
 
 // Kernel-mode pipe write (for VFS layer)
 int pipewrite_kernel(struct pipe *pi, const char *buf, int n) {
     int i = 0;
+    int ret = 0;
     struct proc *pr = myproc();
 
-    spin_acquire(&pi->lock);
     while (i < n) {
-        if (pi->readopen == 0 || killed(pr)) {
-            spin_release(&pi->lock);
+        spin_acquire(&pi->writer_lock);
+        uint nread = smp_load_acquire(&pi->nread);
+        if (!PIPE_READABLE(pi) || killed(pr)) {
+            spin_release(&pi->writer_lock);
             return -1;
         }
-        if (pi->nwrite == pi->nread + PIPESIZE) {
-            wakeup_on_chan(&pi->nread);
-            sleep_on_chan(&pi->nwrite, &pi->lock);
+        uint nwrite_old = pi->nwrite;
+        size_t writable = PIPE_WRITABLE_SIZE(nwrite_old, nread);
+        if (writable == 0) {
+            proc_queue_wakeup_all(&pi->nread_queue, 0, 0);
+            spin_release(&pi->writer_lock);
+
+            ret = __pipe_wait_reader(pi);
+            if (ret < 0) {
+                goto out;
+            }
         } else {
-            pi->data[pi->nwrite++ % PIPESIZE] = buf[i];
-            i++;
+            size_t write_size = min((size_t)(n - i), writable);
+            uint nwrite = nwrite_old + write_size;
+            uint nwrite_idx = nwrite_old % PIPESIZE;
+
+            if (nwrite_idx + write_size <= PIPESIZE) {
+                // No wrap-around
+                memmove(&pi->data[nwrite_idx], &buf[i], write_size);
+            } else {
+                // Wrap-around
+                size_t first_part = PIPESIZE - nwrite_idx;
+                memmove(&pi->data[nwrite_idx], &buf[i], first_part);
+                memmove(&pi->data[0], &buf[i + first_part], write_size - first_part);
+            }
+
+            smp_store_release(&pi->nwrite, nwrite);
+            i += write_size;
+            spin_release(&pi->writer_lock);
         }
     }
-    wakeup_on_chan(&pi->nread);
-    spin_release(&pi->lock);
+out:
+    spin_acquire(&pi->writer_lock);
+    proc_queue_wakeup_all(&pi->nread_queue, 0, 0);
+    spin_release(&pi->writer_lock);
     return i;
 }
