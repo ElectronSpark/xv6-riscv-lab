@@ -10,6 +10,8 @@
 #define STATIC_INLINE static inline
 #endif
 
+#define __force __attribute__((force))
+
 #define CACHELINE_SIZE 64UL
 #define CACHELINE_MASK (CACHELINE_SIZE - 1UL)
 #define __ALIGNED(x) __attribute__((aligned(x)))

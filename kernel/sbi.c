@@ -47,84 +47,47 @@ static const char *sbi_ext_names[SBI_EXT_ID_COUNT] = {
 // Array storing extension availability (0 = not available, 1 = available)
 static int sbi_ext_available[SBI_EXT_ID_COUNT];
 
-// Generic SBI ecall - S-mode kernel uses ecall to invoke SBI services
-struct sbiret sbi_ecall(int ext, int fid, unsigned long arg0,
-                        unsigned long arg1, unsigned long arg2,
-                        unsigned long arg3, unsigned long arg4,
-                        unsigned long arg5) {
-    struct sbiret ret;
-    register unsigned long a0 asm("a0") = arg0;
-    register unsigned long a1 asm("a1") = arg1;
-    register unsigned long a2 asm("a2") = arg2;
-    register unsigned long a3 asm("a3") = arg3;
-    register unsigned long a4 asm("a4") = arg4;
-    register unsigned long a5 asm("a5") = arg5;
-    register unsigned long a6 asm("a6") = fid;
-    register unsigned long a7 asm("a7") = ext;
-    asm volatile("ecall"
-                 : "+r"(a0), "+r"(a1)
-                 : "r"(a2), "r"(a3), "r"(a4), "r"(a5), "r"(a6), "r"(a7)
-                 : "memory");
-    ret.error = a0;
-    ret.value = a1;
-    return ret;
-}
-
 // Base extension functions
 long sbi_get_spec_version(void) {
     struct sbiret ret =
         sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_SPEC_VERSION, 0, 0, 0, 0, 0, 0);
-    if (ret.error)
-        return ret.error;
-    return ret.value;
+    return __SBI_RETVAL(ret);
 }
 
 long sbi_get_impl_id(void) {
     struct sbiret ret =
         sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_IMPL_ID, 0, 0, 0, 0, 0, 0);
-    if (ret.error)
-        return ret.error;
-    return ret.value;
+    return __SBI_RETVAL(ret);
 }
 
 long sbi_get_impl_version(void) {
     struct sbiret ret =
         sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_IMPL_VERSION, 0, 0, 0, 0, 0, 0);
-    if (ret.error)
-        return ret.error;
-    return ret.value;
+    return __SBI_RETVAL(ret);
 }
 
 long sbi_probe_extension(long extid) {
     struct sbiret ret =
         sbi_ecall(SBI_EXT_BASE, SBI_BASE_PROBE_EXT, extid, 0, 0, 0, 0, 0);
-    if (ret.error)
-        return ret.error;
-    return ret.value;
+    return __SBI_RETVAL(ret);
 }
 
 long sbi_get_mvendorid(void) {
     struct sbiret ret =
         sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_MVENDORID, 0, 0, 0, 0, 0, 0);
-    if (ret.error)
-        return ret.error;
-    return ret.value;
+    return __SBI_RETVAL(ret);
 }
 
 long sbi_get_marchid(void) {
     struct sbiret ret =
         sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_MARCHID, 0, 0, 0, 0, 0, 0);
-    if (ret.error)
-        return ret.error;
-    return ret.value;
+    return __SBI_RETVAL(ret);
 }
 
 long sbi_get_mimpid(void) {
     struct sbiret ret =
         sbi_ecall(SBI_EXT_BASE, SBI_BASE_GET_MIMPID, 0, 0, 0, 0, 0, 0);
-    if (ret.error)
-        return ret.error;
-    return ret.value;
+    return __SBI_RETVAL(ret);
 }
 
 // Timer extension
@@ -136,7 +99,72 @@ void sbi_set_timer(uint64 stime_value) {
 long sbi_send_ipi(unsigned long hart_mask, unsigned long hart_mask_base) {
     struct sbiret ret = sbi_ecall(SBI_EXT_IPI, SBI_IPI_SEND_IPI, hart_mask,
                                   hart_mask_base, 0, 0, 0, 0);
-    return ret.error;
+    return __SBI_ERRNO(ret);
+}
+
+// Remote Fence extension
+void sbi_remote_hfence_i(unsigned long hart_mask,
+                         unsigned long hart_mask_base) {
+    sbi_ecall(SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_I, hart_mask,
+              hart_mask_base, 0, 0, 0, 0);
+}
+
+long sbi_remote_hfence_vma(unsigned long hart_mask,
+                           unsigned long hart_mask_base,
+                           unsigned long start_addr, unsigned long size) {
+    struct sbiret ret =
+        sbi_ecall(SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_VMA, hart_mask,
+                  hart_mask_base, start_addr, size, 0, 0);
+
+    return __SBI_ERRNO(ret);
+}
+
+long sbi_remote_hfence_vma_asid(unsigned long hart_mask,
+                                unsigned long hart_mask_base,
+                                unsigned long start_addr, unsigned long size,
+                                unsigned long asid) {
+    struct sbiret ret =
+        sbi_ecall(SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_VMA_ASID, hart_mask,
+                  hart_mask_base, start_addr, size, asid, 0);
+    return __SBI_ERRNO(ret);
+}
+
+long sbi_remote_hfence_gvma_vmid(unsigned long hart_mask,
+                                 unsigned long hart_mask_base,
+                                 unsigned long start_addr, unsigned long size,
+                                 unsigned long vmid) {
+    struct sbiret ret =
+        sbi_ecall(SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_GVMA_VMID, hart_mask,
+                  hart_mask_base, start_addr, size, vmid, 0);
+    return __SBI_ERRNO(ret);
+}
+
+long sbi_remote_hfence_gvma(unsigned long hart_mask,
+                            unsigned long hart_mask_base,
+                            unsigned long start_addr, unsigned long size) {
+    struct sbiret ret =
+        sbi_ecall(SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_GVMA, hart_mask,
+                  hart_mask_base, start_addr, size, 0, 0);
+    return __SBI_ERRNO(ret);
+}
+
+long sbi_remote_hfence_vvma_asid(unsigned long hart_mask,
+                                 unsigned long hart_mask_base,
+                                 unsigned long start_addr, unsigned long size,
+                                 unsigned long asid) {
+    struct sbiret ret =
+        sbi_ecall(SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_VVMA_ASID, hart_mask,
+                  hart_mask_base, start_addr, size, asid, 0);
+    return __SBI_ERRNO(ret);
+}
+
+long sbi_remote_hfence_vvma(unsigned long hart_mask,
+                            unsigned long hart_mask_base,
+                            unsigned long start_addr, unsigned long size) {
+    struct sbiret ret =
+        sbi_ecall(SBI_EXT_RFENCE, SBI_RFENCE_REMOTE_HFENCE_VVMA, hart_mask,
+                  hart_mask_base, start_addr, size, 0, 0);
+    return __SBI_ERRNO(ret);
 }
 
 // HSM (Hart State Management) extension functions
@@ -144,28 +172,26 @@ long sbi_hart_start(unsigned long hartid, unsigned long start_addr,
                     unsigned long opaque) {
     struct sbiret ret = sbi_ecall(SBI_EXT_HSM, SBI_HSM_HART_START, hartid,
                                   start_addr, opaque, 0, 0, 0);
-    return ret.error;
+    return __SBI_ERRNO(ret);
 }
 
 long sbi_hart_stop(void) {
     struct sbiret ret =
         sbi_ecall(SBI_EXT_HSM, SBI_HSM_HART_STOP, 0, 0, 0, 0, 0, 0);
-    return ret.error;
+    return __SBI_ERRNO(ret);
 }
 
 long sbi_hart_get_status(unsigned long hartid) {
     struct sbiret ret =
         sbi_ecall(SBI_EXT_HSM, SBI_HSM_HART_GET_STATUS, hartid, 0, 0, 0, 0, 0);
-    if (ret.error)
-        return ret.error;
-    return ret.value;
+    return __SBI_RETVAL(ret);
 }
 
 long sbi_hart_suspend(uint32 suspend_type, unsigned long resume_addr,
                       unsigned long opaque) {
     struct sbiret ret = sbi_ecall(SBI_EXT_HSM, SBI_HSM_HART_SUSPEND,
                                   suspend_type, resume_addr, opaque, 0, 0, 0);
-    return ret.error;
+    return __SBI_ERRNO(ret);
 }
 
 // System Reset extension

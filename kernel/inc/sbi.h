@@ -9,6 +9,7 @@
 #define __KERNEL_SBI_H
 
 #include "types.h"
+#include "riscv.h"
 
 // SBI return error codes
 #define SBI_SUCCESS 0
@@ -67,6 +68,15 @@ enum sbi_ext_id {
 // SBI IPI extension function IDs
 #define SBI_IPI_SEND_IPI 0
 
+// SBI RFENCE extension function IDs
+#define SBI_RFENCE_REMOTE_HFENCE_I 0
+#define SBI_RFENCE_REMOTE_HFENCE_VMA 1
+#define SBI_RFENCE_REMOTE_HFENCE_VMA_ASID 2
+#define SBI_RFENCE_REMOTE_HFENCE_GVMA_VMID 3
+#define SBI_RFENCE_REMOTE_HFENCE_GVMA 4
+#define SBI_RFENCE_REMOTE_HFENCE_VVMA_ASID 5
+#define SBI_RFENCE_REMOTE_HFENCE_VVMA 6
+
 // SBI HSM (Hart State Management) function IDs
 #define SBI_HSM_HART_START 0
 #define SBI_HSM_HART_STOP 1
@@ -102,11 +112,40 @@ struct sbiret {
     long value;
 };
 
-// Generic SBI ecall - implemented in sbi.c
-struct sbiret sbi_ecall(int ext, int fid, unsigned long arg0,
-                        unsigned long arg1, unsigned long arg2,
-                        unsigned long arg3, unsigned long arg4,
-                        unsigned long arg5);
+// Generic SBI ecall - S-mode kernel uses ecall to invoke SBI services
+static inline struct sbiret sbi_ecall(int ext, int fid, unsigned long arg0,
+                                      unsigned long arg1, unsigned long arg2,
+                                      unsigned long arg3, unsigned long arg4,
+                                      unsigned long arg5) {
+    struct sbiret ret;
+    register unsigned long a0 asm("a0") = arg0;
+    register unsigned long a1 asm("a1") = arg1;
+    register unsigned long a2 asm("a2") = arg2;
+    register unsigned long a3 asm("a3") = arg3;
+    register unsigned long a4 asm("a4") = arg4;
+    register unsigned long a5 asm("a5") = arg5;
+    register unsigned long a6 asm("a6") = fid;
+    register unsigned long a7 asm("a7") = ext;
+    asm volatile("ecall"
+                 : "+r"(a0), "+r"(a1)
+                 : "r"(a2), "r"(a3), "r"(a4), "r"(a5), "r"(a6), "r"(a7)
+                 : "memory");
+    ret.error = a0;
+    ret.value = a1;
+    return ret;
+}
+
+// Macro to extract return value or error from sbiret
+#define __SBI_RETVAL(__RET)                                                    \
+    ({                                                                         \
+        long __ret = (__RET).error;                                            \
+        if (__ret == SBI_SUCCESS) {                                            \
+            __ret = (__RET).value;                                             \
+        }                                                                      \
+        __ret;                                                                 \
+    })
+
+#define __SBI_ERRNO(__RET) ((__RET).error)
 
 // Base extension
 long sbi_get_spec_version(void);
@@ -122,6 +161,30 @@ void sbi_set_timer(uint64 stime_value);
 
 // IPI extension
 long sbi_send_ipi(unsigned long hart_mask, unsigned long hart_mask_base);
+
+// Remote Fence extension
+void sbi_remote_hfence_i(unsigned long hart_mask, unsigned long hart_mask_base);
+long sbi_remote_hfence_vma(unsigned long hart_mask,
+                           unsigned long hart_mask_base,
+                           unsigned long start_addr, unsigned long size);
+long sbi_remote_hfence_vma_asid(unsigned long hart_mask,
+                                unsigned long hart_mask_base,
+                                unsigned long start_addr, unsigned long size,
+                                unsigned long asid);
+long sbi_remote_hfence_gvma_vmid(unsigned long hart_mask,
+                                 unsigned long hart_mask_base,
+                                 unsigned long start_addr, unsigned long size,
+                                 unsigned long vmid);
+long sbi_remote_hfence_gvma(unsigned long hart_mask,
+                            unsigned long hart_mask_base,
+                            unsigned long start_addr, unsigned long size);
+long sbi_remote_hfence_vvma_asid(unsigned long hart_mask,
+                                 unsigned long hart_mask_base,
+                                 unsigned long start_addr, unsigned long size,
+                                 unsigned long asid);
+long sbi_remote_hfence_vvma(unsigned long hart_mask,
+                            unsigned long hart_mask_base,
+                            unsigned long start_addr, unsigned long size);
 
 // HSM (Hart State Management) extension
 long sbi_hart_start(unsigned long hartid, unsigned long start_addr,
