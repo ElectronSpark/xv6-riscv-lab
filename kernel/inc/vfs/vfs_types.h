@@ -349,7 +349,6 @@ struct vfs_fdtable {
 struct fs_struct {
     struct vfs_inode_ref rooti; // Root inode
     struct vfs_inode_ref cwd;   // Current working directory inode
-    struct vfs_fdtable *fdtable; // File descriptor table (on kernel stack below proc_fs)
 };
 
 #endif // KERNEL_VIRTUAL_FILE_SYSTEM_TYPES_H

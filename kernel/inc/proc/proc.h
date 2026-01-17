@@ -125,6 +125,7 @@ struct proc {
   uint64 arg[2];               // Argument for kernel process
   
   struct fs_struct *fs;          // Filesystem state (on kernel stack below utrapframe)
+  struct vfs_fdtable *fdtable;   // File descriptor table (on kernel stack below fs)
   char name[16];               // Process name (debugging)
 
   // RCU read-side critical section nesting counter (per-process)

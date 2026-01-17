@@ -52,11 +52,11 @@ static void __pcb_init(struct proc *p, struct fs_struct *fs,
     p->fs = fs;
     if (fs != NULL) {
         memset(fs, 0, sizeof(*fs));
-        fs->fdtable = fdtable;
-        if (fdtable != NULL) {
-            memset(fdtable, 0, sizeof(*fdtable));
-            vfs_fdtable_init(fdtable);
-        }
+    }
+    p->fdtable = fdtable;
+    if (fdtable != NULL) {
+        memset(fdtable, 0, sizeof(*fdtable));
+        vfs_fdtable_init(fdtable);
     }
     if (p->sched_entity != NULL) {
         memset(p->sched_entity, 0, sizeof(*(p->sched_entity)));
@@ -615,7 +615,7 @@ int fork(void) {
 
     // Clone VFS file descriptor table - must be done after releasing parent
     // lock because vfs_filedup may call cdev_dup which needs a mutex
-    vfs_fdtable_clone(np->fs->fdtable, p->fs->fdtable);
+    vfs_fdtable_clone(np->fdtable, p->fdtable);
 
     proc_unlock(np);
 
@@ -678,7 +678,7 @@ void exit(int status) {
     struct vfs_inode_ref cwd_ref;
 
     // VFS file descriptor table cleanup (closes all VFS files)
-    vfs_fdtable_destroy(p->fs->fdtable, 0);
+    vfs_fdtable_destroy(p->fdtable, 0);
 
     proc_lock(p);
     assert(p != __proctab_get_initproc(), "init exiting");
