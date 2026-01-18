@@ -51,10 +51,6 @@ static void __pcb_init(struct proc *p, struct vfs_fdtable *fdtable) {
     spin_init(&p->lock, "proc");
     p->fs = NULL;
     p->fdtable = fdtable;
-    if (fdtable != NULL) {
-        memset(fdtable, 0, sizeof(*fdtable));
-        vfs_fdtable_init(fdtable);
-    }
     if (p->sched_entity != NULL) {
         memset(p->sched_entity, 0, sizeof(*(p->sched_entity)));
         sched_entity_init(p->sched_entity, p);
@@ -69,9 +65,7 @@ static void __pcb_init(struct proc *p, struct vfs_fdtable *fdtable) {
 //   - kernel stack pointer (aligned, with 16-byte gap)
 // Returns the initialized proc structure.
 #define KSTACK_ARRANGE_FLAGS_TF 0x1 // place utrapframe
-#define KSTACK_ARRANGE_FLAGS_FD 0x4 // place vfs_fdtable
-#define KSTACK_ARRANGE_FLAGS_ALL                                               \
-    (KSTACK_ARRANGE_FLAGS_TF | KSTACK_ARRANGE_FLAGS_FD)
+#define KSTACK_ARRANGE_FLAGS_ALL (KSTACK_ARRANGE_FLAGS_TF)
 static struct proc *__kstack_arrange(void *kstack, size_t kstack_size,
                                      uint64 flags) {
     // Place PCB at the top of the kernel stack
@@ -89,13 +83,6 @@ static struct proc *__kstack_arrange(void *kstack, size_t kstack_size,
         next_addr = (uint64)p - sizeof(struct utrapframe) - 16;
         next_addr &= ~0x7UL; // align to 8 bytes
         trapframe = (struct utrapframe *)next_addr;
-    }
-
-    if (flags & KSTACK_ARRANGE_FLAGS_FD) {
-        // Place vfs_fdtable below fs_struct (or previous structure)
-        next_addr = next_addr - sizeof(struct vfs_fdtable);
-        next_addr &= ~0x7UL; // align to 8 bytes
-        fdtable = (struct vfs_fdtable *)next_addr;
     }
 
     // Allocate space for sched_entity
@@ -521,7 +508,6 @@ int growproc(int n) {
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
 int fork(void) {
-    int pid;
     struct proc *np;
     struct proc *p = myproc();
 
@@ -534,8 +520,27 @@ int fork(void) {
         return -1;
     }
 
+    // Copy user memory from parent to child.
     vm_t *new_vm = vm_copy(p->vm, (uint64)np->trapframe);
     if (new_vm == NULL) {
+        freeproc(np);
+        return -1;
+    }
+
+    // Clone VFS cwd and root inode references
+    struct fs_struct *fs_clone = vfs_struct_clone(p->fs, 0);
+    if (IS_ERR_OR_NULL(fs_clone)) {
+        vm_put(new_vm);
+        freeproc(np);
+        return -1;
+    }
+
+    // Clone VFS file descriptor table - must be done after releasing parent
+    // lock because vfs_fdup may call cdev_dup which needs a mutex
+    struct vfs_fdtable *new_fdtable = vfs_fdtable_clone(p->fdtable, 0);
+    if (IS_ERR_OR_NULL(new_fdtable)) {
+        vm_put(new_vm);
+        vfs_struct_put(fs_clone);
         freeproc(np);
         return -1;
     }
@@ -543,7 +548,22 @@ int fork(void) {
     proc_lock(p);
     proc_lock(np);
 
-    // Copy user memory from parent to child.
+    // copy the process's signal actions.
+    if (p->sigacts) {
+        np->sigacts = sigacts_dup(p->sigacts);
+        if (np->sigacts == NULL) {
+            proc_unlock(p);
+            proc_unlock(np);
+            vm_put(new_vm);
+            vfs_struct_put(fs_clone);
+            vfs_fdtable_put(new_fdtable);
+            freeproc(np);
+            return -1;
+        }
+    }
+
+    np->fdtable = new_fdtable;
+    np->fs = fs_clone;
     np->vm = new_vm;
 
     // copy saved user registers.
@@ -552,32 +572,8 @@ int fork(void) {
     // Cause fork to return 0 in the child.
     np->trapframe->trapframe.a0 = 0;
 
-    // copy the process's signal actions.
-    if (p->sigacts) {
-        np->sigacts = sigacts_dup(p->sigacts);
-        if (np->sigacts == NULL) {
-            proc_unlock(np);
-            proc_unlock(p);
-            freeproc(np);
-            return -1;
-        }
-    }
-
-    // Clone VFS cwd and root inode references
-    np->fs = vfs_struct_clone(p->fs, 0);
-    if (IS_ERR_OR_NULL(np->fs)) {
-        proc_unlock(np);
-        proc_unlock(p);
-        sigacts_free(np->sigacts);
-        freeproc(np);
-        return -1;
-    }
-
     // VFS cwd and rooti already cloned above
-
     safestrcpy(np->name, p->name, sizeof(p->name));
-
-    pid = np->pid;
 
     attach_child(p, np);
     PROC_SET_USER_SPACE(np);
@@ -587,18 +583,13 @@ int fork(void) {
     rq_task_fork(np->sched_entity);
 
     proc_unlock(p);
-
-    // Clone VFS file descriptor table - must be done after releasing parent
-    // lock because vfs_filedup may call cdev_dup which needs a mutex
-    vfs_fdtable_clone(np->fdtable, p->fdtable);
-
     proc_unlock(np);
 
     spin_acquire(&np->sched_entity->pi_lock);
     scheduler_wakeup(np);
     spin_release(&np->sched_entity->pi_lock);
 
-    return pid;
+    return np->pid;
 }
 
 // Pass p's abandoned children to init.
@@ -651,7 +642,8 @@ void exit(int status) {
     struct proc *p = myproc();
 
     // VFS file descriptor table cleanup (closes all VFS files)
-    vfs_fdtable_destroy(p->fdtable, 0);
+    vfs_fdtable_put(p->fdtable);
+    p->fdtable = NULL;
 
     assert(p != __proctab_get_initproc(), "init exiting");
 

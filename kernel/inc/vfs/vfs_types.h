@@ -339,9 +339,11 @@ struct vfs_file_ops {
 };
 
 struct vfs_fdtable {
+    spinlock_t lock; // protects the fdtable
     int fd_count;
     int next_fd;
     struct vfs_file *files[NOFILE];
+    int ref_count;
 };
 
 // Per-process filesystem state

@@ -320,7 +320,7 @@ void xv6fs_run_file_ops_smoketest(void) {
     }
     
     // Close file
-    vfs_fileclose(file);
+    vfs_fput(file);
     file = NULL;
     
     // Open file for reading
@@ -355,7 +355,7 @@ void xv6fs_run_file_ops_smoketest(void) {
     }
     
     // Close file
-    vfs_fileclose(file);
+    vfs_fput(file);
     file = NULL;
     
     // Check file size
@@ -980,7 +980,7 @@ void xv6fs_run_large_file_smoketest(void) {
         printf("xv6fs_largefile: " PASS " wrote %ld bytes (10 blocks)\n", total_written);
     }
     
-    vfs_fileclose(file);
+    vfs_fput(file);
     file = NULL;
     
     // Verify file size
@@ -1044,7 +1044,7 @@ void xv6fs_run_large_file_smoketest(void) {
         printf("xv6fs_largefile: " FAIL " seek to block 5: pos=%lld\n", new_pos);
     }
     
-    vfs_fileclose(file);
+    vfs_fput(file);
     file = NULL;
     
 cleanup_inode:

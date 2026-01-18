@@ -1324,7 +1324,7 @@ cleanup_test1_mp:
     }
 
     // Close the file - this should trigger final cleanup
-    vfs_fileclose(open_file);
+    vfs_fput(open_file);
     open_file = NULL;
     printf("lazy_unmount: " PASS " test2 file closed, cleanup complete\n");
 
@@ -1339,7 +1339,7 @@ cleanup_test2_mount:
         mnt_root = NULL;
     }
     if (open_file != NULL) {
-        vfs_fileclose(open_file);
+        vfs_fput(open_file);
         open_file = NULL;
     }
     // Mount already lazily unmounted above
@@ -1560,7 +1560,7 @@ void tmpfs_run_file_ops_smoketest(void) {
     }
 
     // Test 9: Close and reopen to verify persistence
-    vfs_fileclose(file);
+    vfs_fput(file);
     file = NULL;
 
     file = vfs_fileopen(test_inode, O_RDONLY);
@@ -1578,7 +1578,7 @@ void tmpfs_run_file_ops_smoketest(void) {
         printf("file_ops_smoketest: " PASS " re-read after close, data persisted\n");
     }
 
-    vfs_fileclose(file);
+    vfs_fput(file);
     file = NULL;
 
     // Test 10: Test larger write spanning multiple blocks
@@ -1623,12 +1623,12 @@ void tmpfs_run_file_ops_smoketest(void) {
                (long)bytes_read, (int)(unsigned char)read_buf[0]);
     }
 
-    vfs_fileclose(file);
+    vfs_fput(file);
     file = NULL;
 
 cleanup:
     if (file != NULL && !IS_ERR(file)) {
-        vfs_fileclose(file);
+        vfs_fput(file);
     }
 
     if (test_inode != NULL && !IS_ERR(test_inode)) {
@@ -1802,7 +1802,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
 
     // Extend file through double indirect sequentially using truncate first
     // to avoid sparse write issues with the allocate_blocks function
-    vfs_fileclose(file);
+    vfs_fput(file);
     file = NULL;
     
     // Extend to 10MB, 32MB, then 64MB via truncate (sequential growth)
@@ -1831,7 +1831,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
     write_and_verify(file, mid_dindirect - 50, 100, write_buf, read_buf, 
                      "cross page boundary in dindirect (5MB)");
 
-    vfs_fileclose(file);
+    vfs_fput(file);
     file = NULL;
     
     // Extend to 32MB
@@ -1857,7 +1857,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
     write_and_verify(file, 20 * 1024 * 1024, PAGE_SIZE + 500, write_buf, read_buf,
                      "multi-page write in dindirect (20MB)");
 
-    vfs_fileclose(file);
+    vfs_fput(file);
     file = NULL;
     
     // Extend to 64MB
@@ -1939,7 +1939,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
     // =========================================================================
     printf("\ndindirect_smoketest: === Part 3: Truncate across layers ===\n");
 
-    vfs_fileclose(file);
+    vfs_fput(file);
     file = NULL;
 
     struct tmpfs_inode *ti = container_of(test_inode, struct tmpfs_inode, vfs_inode);
@@ -2062,7 +2062,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
                      "extend into indirect via write");
 
     // Test 4b: Truncate shorter but still in indirect, then write at boundary
-    vfs_fileclose(file);
+    vfs_fput(file);
     file = NULL;
     
     vfs_ilock(test_inode);
@@ -2073,7 +2073,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
     if (!IS_ERR(file)) {
         write_and_verify(file, DIRECT_END - 20, 50, write_buf, read_buf,
                          "write across direct/indirect after truncate");
-        vfs_fileclose(file);
+        vfs_fput(file);
         file = NULL;
     }
 
@@ -2111,7 +2111,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
                     printf("dindirect_smoketest: " WARN " gap not zero-filled\n");
                 }
             }
-            vfs_fileclose(file);
+            vfs_fput(file);
             file = NULL;
         }
     } else {
@@ -2142,7 +2142,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
         write_and_verify(file, span_start, span_len, write_buf, read_buf,
                          "span direct->indirect (3 pages)");
 
-        vfs_fileclose(file);
+        vfs_fput(file);
         file = NULL;
     }
     
@@ -2159,7 +2159,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
         write_and_verify(file, span_start, span_len, write_buf, read_buf,
                          "span indirect->dindirect (3 pages)");
 
-        vfs_fileclose(file);
+        vfs_fput(file);
         file = NULL;
     }
 
@@ -2178,13 +2178,13 @@ void tmpfs_run_double_indirect_smoketest(void) {
         } else {
             printf("dindirect_smoketest: " FAIL " final stat failed\n");
         }
-        vfs_fileclose(file);
+        vfs_fput(file);
         file = NULL;
     }
 
 cleanup:
     if (file != NULL && !IS_ERR(file)) {
-        vfs_fileclose(file);
+        vfs_fput(file);
     }
 
     if (test_inode != NULL && !IS_ERR(test_inode)) {

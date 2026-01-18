@@ -13,6 +13,7 @@
 #include "rwlock.h"
 #include "completion.h"
 #include "vfs/fs.h"
+#include "vfs/file.h"
 #include "vfs_private.h"
 #include "list.h"
 #include "hlist.h"
@@ -344,6 +345,7 @@ void vfs_init(void) {
     __vfs_rooti_init();
     list_entry_init(&vfs_fs_types);
     mutex_init(&__mount_mutex, "vfs_mount_mutex");
+    __vfs_fdtable_global_init();
     int ret = slab_cache_init(&vfs_superblock_cache, 
                               "vfs_superblock_cache",
                               sizeof(struct vfs_superblock), 
@@ -365,7 +367,7 @@ void vfs_init(void) {
     __vfs_inode_init(&vfs_root_inode);
     __vfs_file_init();
     proc->fs = vfs_struct_init();
-    assert(!IS_ERR_OR_NULL(proc->fs), "idle_proc_init: failed to create fs_struct");
+    proc->fdtable = vfs_fdtable_init();
     tmpfs_init_fs_type();
     xv6fs_init_fs_type();
 }
@@ -1611,9 +1613,7 @@ void vfs_release_dentry(struct vfs_dentry *dentry) {
 
 struct fs_struct *vfs_struct_init(void) {
     struct fs_struct *fs = __vfs_struct_alloc_init();
-    if (fs == NULL) {
-        return NULL;
-    }
+    assert(fs != NULL, "idle_proc_init: failed to create fs_struct");
     smp_store_release(&fs->ref_count, 1);
     spin_init(&fs->lock, "fs_struct_lock");
     fs->rooti.sb = NULL;

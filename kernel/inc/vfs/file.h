@@ -5,8 +5,8 @@
 #include "clone_flags.h"
 
 struct vfs_file *vfs_fileopen(struct vfs_inode *inode, int f_flags);
-void vfs_fileclose(struct vfs_file *file);
-struct vfs_file *vfs_filedup(struct vfs_file *file);
+void vfs_fput(struct vfs_file *file);
+struct vfs_file *vfs_fdup(struct vfs_file *file);
 ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n);
 int vfs_filestat(struct vfs_file *file, struct stat *stat);
 ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n);
@@ -23,11 +23,10 @@ int vfs_sockalloc(struct vfs_file **f, uint32 raddr, uint16 lport, uint16 rport)
 // Caller should hold the proc lock when manipulating the fdtable
 // vfs_fdtable_init, vfs_fdtable_clone, and vfs_fdtable_destroy don't 
 // require the victim proc lock to be held
-void vfs_fdtable_init(struct vfs_fdtable *fdtable);
-
+struct vfs_fdtable *vfs_fdtable_init(void);
+struct vfs_fdtable *vfs_fdtable_clone(struct vfs_fdtable *src, int clone_flags);
+void vfs_fdtable_put(struct vfs_fdtable *fdtable);
 int vfs_fdtable_alloc_fd(struct vfs_fdtable *fdtable, struct vfs_file *file);
-int vfs_fdtable_clone(struct vfs_fdtable *dest, struct vfs_fdtable *src);
-void vfs_fdtable_destroy(struct vfs_fdtable *fdtable, int start_fd);
 struct vfs_file *vfs_fdtable_get_file(struct vfs_fdtable *fdtable, int fd);
 struct vfs_file *vfs_fdtable_dealloc_fd(struct vfs_fdtable *fdtable, int fd);
 

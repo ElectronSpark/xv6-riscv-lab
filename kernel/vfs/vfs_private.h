@@ -14,6 +14,7 @@ struct vfs_inode *vfs_add_inode(struct vfs_superblock *sb,
 int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode);
 void __vfs_inode_init(struct vfs_inode *inode);
 void __vfs_file_init(void);
+void __vfs_fdtable_global_init(void);
 void __vfs_file_shrink_cache(void);
 void __vfs_shrink_caches(void);
 void tmpfs_init_fs_type(void);

@@ -166,7 +166,7 @@ int exec(char *path, char **argv) {
     }
 
     // Done with the file
-    vfs_fileclose(file);
+    vfs_fput(file);
     file = NULL;
 
     p = myproc();
@@ -231,7 +231,7 @@ bad:
     vm_put(tmp_vm); // Clean up the temporary VM
     tmp_vm = NULL;
     if (file) {
-        vfs_fileclose(file);
+        vfs_fput(file);
     }
     return -1;
 }

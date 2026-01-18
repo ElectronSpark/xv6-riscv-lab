@@ -14,7 +14,7 @@
  *
  * BUG FIXES:
  * - Anonymous pipe leak (Dec 2024): Pipes created via pipe() syscall have
- *   pipe != NULL but inode == NULL. vfs_fileclose() must call pipeclose()
+ *   pipe != NULL but inode == NULL. vfs_fput() must call pipeclose()
  *   for these pipes BEFORE the inode NULL check, otherwise pipe buffers leak.
  */
 
@@ -231,9 +231,9 @@ struct vfs_file *vfs_fileopen(struct vfs_inode *inode, int f_flags) {
     return file;
 }
 
-void vfs_fileclose(struct vfs_file *file) {
+void vfs_fput(struct vfs_file *file) {
     if (file == NULL) {
-        printf("vfs_fileclose: file is NULL\n");
+        printf("vfs_fput: file is NULL\n");
         return;
     }
     if (!atomic_dec_unless(&file->ref_count, 1)) {
@@ -256,13 +256,13 @@ void vfs_fileclose(struct vfs_file *file) {
                 ret = cdev_put(file->cdev);
                 file->cdev = NULL;
                 if (ret != 0) {
-                    printf("vfs_fileclose: cdev_put failed: %d\n", ret);
+                    printf("vfs_fput: cdev_put failed: %d\n", ret);
                 }
             } else if (S_ISBLK(inode->mode)) {
                 ret = blkdev_put(file->blkdev);
                 file->blkdev = NULL;
                 if (ret != 0) {
-                    printf("vfs_fileclose: blkdev_put failed: %d\n", ret);
+                    printf("vfs_fput: blkdev_put failed: %d\n", ret);
                 }
             } else if (S_ISFIFO(inode->mode) && file->pipe != NULL) {
                 pipeclose(file->pipe, (file->f_flags & O_ACCMODE) != O_RDONLY);
@@ -275,36 +275,16 @@ void vfs_fileclose(struct vfs_file *file) {
     }
 }
 
-struct vfs_file *vfs_filedup(struct vfs_file *file) {
+struct vfs_file *vfs_fdup(struct vfs_file *file) {
     if (file == NULL) {
         return NULL;
     }
     
-    // First, increment the file refcount - if this fails, we shouldn't dup device refs
+    // Only increase the ref count of the file descriptor
     bool success = atomic_inc_unless(&file->ref_count, 0);
     if (!success) {
         // File was already closed
         return NULL;
-    }
-    
-    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
-    
-    // For device files, we need to dup the device reference
-    if (inode != NULL) {
-        int ret = 0;
-        if (S_ISCHR(inode->mode)) {
-            ret = cdev_dup(file->cdev);
-        } else if (S_ISBLK(inode->mode)) {
-            ret = blkdev_dup(file->blkdev);
-        }
-        
-        if (ret != 0) {
-            // Device dup failed, undo the file refcount increment
-            // Use atomic_dec_unless to prevent underflow (should never happen
-            // since we just incremented, but be safe)
-            atomic_dec_unless(&file->ref_count, 0);
-            return NULL;
-        }
     }
     
     return file;

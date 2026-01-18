@@ -67,14 +67,14 @@ uint64 sys_vfs_dup(void) {
         return -EBADF;
     }
     
-    struct vfs_file *nf = vfs_filedup(f);
+    struct vfs_file *nf = vfs_fdup(f);
     if (nf == NULL) {
         return -ENOMEM;
     }
     
     int newfd = __vfs_fdalloc(nf);
     if (newfd < 0) {
-        vfs_fileclose(nf);
+        vfs_fput(nf);
         return newfd;
     }
     
@@ -149,7 +149,7 @@ uint64 sys_vfs_close(void) {
         return -EBADF;
     }
     
-    vfs_fileclose(f);
+    vfs_fput(f);
     return 0;
 }
 
@@ -289,14 +289,14 @@ uint64 sys_vfs_open(void) {
     if ((omode & O_TRUNC) && S_ISREG(inode->mode)) {
         ret = vfs_itruncate(vfs_inode_deref(&f->inode), 0);
         if (ret != 0) {
-            vfs_fileclose(f);
+            vfs_fput(f);
             return ret;
         }
     }
     
     int fd = __vfs_fdalloc(f);
     if (fd < 0) {
-        vfs_fileclose(f);
+        vfs_fput(f);
         return fd;
     }
 
@@ -538,16 +538,16 @@ uint64 sys_vfs_pipe(void) {
     
     int fd0 = __vfs_fdalloc(rf);
     if (fd0 < 0) {
-        vfs_fileclose(rf);
-        vfs_fileclose(wf);
+        vfs_fput(rf);
+        vfs_fput(wf);
         return fd0;
     }
     
     int fd1 = __vfs_fdalloc(wf);
     if (fd1 < 0) {
         __vfs_fdfree(fd0);
-        vfs_fileclose(rf);
-        vfs_fileclose(wf);
+        vfs_fput(rf);
+        vfs_fput(wf);
         return fd1;
     }
     
@@ -556,8 +556,8 @@ uint64 sys_vfs_pipe(void) {
         vm_copyout(p->vm, fdarray + sizeof(fd0), (char *)&fd1, sizeof(fd1)) < 0) {
         __vfs_fdfree(fd0);
         __vfs_fdfree(fd1);
-        vfs_fileclose(rf);
-        vfs_fileclose(wf);
+        vfs_fput(rf);
+        vfs_fput(wf);
         return -EFAULT;
     }
     
@@ -583,7 +583,7 @@ uint64 sys_vfs_connect(void) {
     
     int fd = __vfs_fdalloc(f);
     if (fd < 0) {
-        vfs_fileclose(f);
+        vfs_fput(f);
         return fd;
     }
     

@@ -258,7 +258,9 @@ sigacts_t *sigacts_dup(sigacts_t *psa) {
 }
 
 void sigacts_free(sigacts_t *sa) {
-    slab_free(sa);
+    if (sa) {
+        slab_free(sa);
+    }
 }
 
 void signal_init(void) {
