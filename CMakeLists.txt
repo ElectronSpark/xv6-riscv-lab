@@ -5,6 +5,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
     message(FATAL_ERROR "In-source builds are not allowed. Please create a 'build' directory and run 'cmake ..' from there.")
 endif()
 
+# For bare-metal cross-compilers (like riscv64-unknown-elf-gcc), skip the
+# linker test during compiler verification. These compilers don't have
+# standard C libraries (libc, crt0.o, etc.) so linking a test executable fails.
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+
 # Project name
 project(xv6-riscv LANGUAGES C ASM)
 
