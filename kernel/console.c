@@ -24,6 +24,8 @@
 #include "cdev.h"
 #include "trap.h"
 
+#include "sbi.h"
+
 #ifndef CONSOLE_MAJOR
 #define CONSOLE_MAJOR  1
 #endif
@@ -34,6 +36,10 @@
 #define BACKSPACE 0x100
 #define C(x)  ((x)-'@')  // Control-x
 
+// Flag to track if UART has been initialized
+// Before UART init, we use SBI for console output
+static volatile int uart_initialized = 0;
+
 //
 // send one character to the uart.
 // called by printf(), and to echo input characters,
@@ -42,6 +48,16 @@
 void
 consputc(int c)
 {
+  if(!uart_initialized) {
+    // Use SBI for early console output before UART is ready
+    if(c == BACKSPACE){
+      sbi_console_putchar('\b'); sbi_console_putchar(' '); sbi_console_putchar('\b');
+    } else {
+      sbi_console_putchar(c);
+    }
+    return;
+  }
+  
   if(c == BACKSPACE){
     // if the user typed backspace, overwrite with a space.
     uartputc_sync('\b'); uartputc_sync(' '); uartputc_sync('\b');
@@ -57,6 +73,18 @@ consputc(int c)
 void
 consputs(const char *s, int n)
 {
+  if(!uart_initialized) {
+    // Use SBI for early console output before UART is ready
+    for(int i = 0; i < n; i++) {
+      if(s[i] == BACKSPACE){
+        sbi_console_putchar('\b'); sbi_console_putchar(' '); sbi_console_putchar('\b');
+      } else {
+        sbi_console_putchar(s[i]);
+      }
+    }
+    return;
+  }
+  
   for(int i = 0; i < n; i++) {
     if(s[i] == BACKSPACE){
       uartputc_sync('\b'); uartputc_sync(' '); uartputc_sync('\b');
@@ -257,6 +285,9 @@ consoleinit(void)
   spin_init(&cons.lock, "cons");
 
   uartinit();
+  
+  // Mark UART as initialized - switch from SBI to UART output
+  uart_initialized = 1;
 }
 
 void

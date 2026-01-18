@@ -23,12 +23,12 @@ extern void _entry(); // entry.S
 
 static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     kobject_global_init();
-    consoleinit();
     printfinit();
     printf("\n");
     printf("xv6 kernel is booting\n");
     printf("\n");
     sbi_probe_extensions();
+    consoleinit();
     printf("hart %d, fdt_base %p, sp: %p\n", hartid, fdt_base, __builtin_frame_address(0));
     ksymbols_init(); // Initialize kernel symbols
     kinit();         // physical page allocator

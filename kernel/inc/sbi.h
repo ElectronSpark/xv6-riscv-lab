@@ -104,6 +104,15 @@ enum sbi_ext_id {
 #define SBI_SRST_REASON_NONE 0
 #define SBI_SRST_REASON_SYSFAIL 1
 
+// SBI DBCN (Debug Console) function IDs
+#define SBI_DBCN_WRITE 0
+#define SBI_DBCN_READ 1
+#define SBI_DBCN_WRITE_BYTE 2
+
+// SBI Legacy Console extension (deprecated but widely supported)
+#define SBI_EXT_LEGACY_CONSOLE_PUTCHAR 0x01
+#define SBI_EXT_LEGACY_CONSOLE_GETCHAR 0x02
+
 #ifndef __ASSEMBLER__
 
 // SBI return value structure
@@ -203,6 +212,11 @@ void sbi_reboot(void);
 void sbi_probe_extensions(void);
 int sbi_ext_is_available(enum sbi_ext_id ext_id);
 const char *sbi_ext_name(enum sbi_ext_id ext_id);
+
+// Early console output (before UART init)
+void sbi_console_putchar(int c);
+void sbi_console_puts(const char *s);
+int sbi_console_getchar(void);
 
 // Convenience functions
 const char *sbi_error_str(long error);
