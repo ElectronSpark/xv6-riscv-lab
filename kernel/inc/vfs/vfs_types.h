@@ -350,6 +350,7 @@ struct fs_struct {
     spinlock_t lock; // protects the fs_struct
     struct vfs_inode_ref rooti; // Root inode
     struct vfs_inode_ref cwd;   // Current working directory inode
+    int ref_count; // Reference count
 };
 
 #endif // KERNEL_VIRTUAL_FILE_SYSTEM_TYPES_H

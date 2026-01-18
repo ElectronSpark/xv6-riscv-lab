@@ -32,6 +32,7 @@
 
 static slab_cache_t vfs_fs_type_cache = { 0 };
 static slab_cache_t vfs_superblock_cache = { 0 };
+static slab_cache_t vfs_struct_cache = { 0 };
 static struct mutex __mount_mutex = { 0 };
 static list_node_t vfs_fs_types = { 0 };
 static uint16 vfs_fs_type_count = 0;
@@ -57,6 +58,8 @@ static void __vfs_detach_superblock_from_fstype(struct vfs_superblock *sb);
 static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint);
 static void __vfs_set_mountpoint(struct vfs_superblock *sb, struct vfs_inode *mountpoint);
 static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint);
+static struct fs_struct *__vfs_struct_alloc_init(void);
+static void __vfs_struct_free(struct fs_struct *fs);
 
 /******************************************************************************
  * Private functions
@@ -313,6 +316,21 @@ static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint) {
     mountpoint->mount = 0;
 }
 
+static struct fs_struct *__vfs_struct_alloc_init(void) {
+    struct fs_struct *fs = slab_alloc(&vfs_struct_cache);
+    if (fs == NULL) {
+        return NULL;
+    }
+    memset(fs, 0, sizeof(*fs));
+    spin_init(&fs->lock, "fs_struct_lock");
+    smp_store_release(&fs->ref_count, 1);
+    return fs;
+}
+
+static void __vfs_struct_free(struct fs_struct *fs) {
+    slab_free(fs);
+}
+
  /******************************************************************************
  * Files System Type Public APIs
  *****************************************************************************/
@@ -335,18 +353,19 @@ void vfs_init(void) {
                           "vfs_fs_type_cache",
                           sizeof(struct vfs_fs_type), 
                           SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
-    assert(ret == 0, "Failed to initialize vfs_fs_type_cache slab cache, errno=%d", ret);
+    assert(ret == 0, "Failed to initialize vfs_fs_type_cache slab cache, errno=%d", ret);\
+    ret = slab_cache_init(&vfs_struct_cache,
+                          "vfs_struct_cache",
+                          sizeof(struct fs_struct),
+                          SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
+    assert(ret == 0, "Failed to initialize vfs_struct_cache slab cache, errno=%d", ret);
     vfs_fs_type_count = 0;
     struct proc *proc = myproc();
     assert(proc != NULL, "vfs_init must be called from a process context");
     __vfs_inode_init(&vfs_root_inode);
     __vfs_file_init();
-    vfs_struct_lock(proc->fs);
-    proc->fs->rooti.inode = NULL;
-    proc->fs->rooti.sb = NULL;
-    proc->fs->cwd.inode = NULL;
-    proc->fs->cwd.sb = NULL;
-    vfs_struct_unlock(proc->fs);
+    proc->fs = vfs_struct_init();
+    assert(!IS_ERR_OR_NULL(proc->fs), "idle_proc_init: failed to create fs_struct");
     tmpfs_init_fs_type();
     xv6fs_init_fs_type();
 }
@@ -1587,6 +1606,77 @@ void vfs_release_dentry(struct vfs_dentry *dentry) {
         kmm_free(dentry->name);
         dentry->name = NULL;
         dentry->name_len = 0;
+    }
+}
+
+struct fs_struct *vfs_struct_init(void) {
+    struct fs_struct *fs = __vfs_struct_alloc_init();
+    if (fs == NULL) {
+        return NULL;
+    }
+    smp_store_release(&fs->ref_count, 1);
+    spin_init(&fs->lock, "fs_struct_lock");
+    fs->rooti.sb = NULL;
+    fs->rooti.inode = NULL;
+    fs->cwd.sb = NULL;
+    fs->cwd.inode = NULL;
+    return fs;
+}
+
+struct fs_struct *vfs_struct_clone(struct fs_struct *old_fs, uint64 clone_flags) {
+    if (old_fs == NULL) {
+        return ERR_PTR(-EINVAL);
+    }
+
+    if (clone_flags & CLONE_FS) {
+        // share the fs_struct
+        atomic_inc(&old_fs->ref_count);
+        return old_fs;
+    }
+
+    struct fs_struct *new_fs = __vfs_struct_alloc_init();
+    if (new_fs == NULL) {
+        return ERR_PTR(-ENOMEM);
+    }
+
+    vfs_struct_lock(old_fs);
+    // Clone root and cwd
+    int ret = 0;
+    struct vfs_inode *rooti = vfs_inode_deref(&old_fs->rooti);
+    if (rooti) {
+        ret = vfs_inode_get_ref(rooti, &new_fs->rooti);
+        if (ret != 0) {
+            goto out_locked;
+        }
+    }
+    struct vfs_inode *cwdi = vfs_inode_deref(&old_fs->cwd);
+    if (cwdi) {
+        ret = vfs_inode_get_ref(cwdi, &new_fs->cwd);
+        if (ret != 0) {
+            goto out_locked;
+        }
+    }
+    ret = 0;
+out_locked:
+    vfs_struct_unlock(old_fs);
+    if (ret != 0) {
+        vfs_inode_put_ref(&new_fs->rooti);
+        vfs_inode_put_ref(&new_fs->cwd);
+        __vfs_struct_free(new_fs);
+        return ERR_PTR(ret);
+    }
+    return new_fs;
+}
+
+void vfs_struct_put(struct fs_struct *fs) {
+    if (fs == NULL) {
+        return;
+    }
+    if (!atomic_dec_unless(&fs->ref_count, 1)) {
+        // Release root and cwd inodes
+        vfs_inode_put_ref(&fs->rooti);
+        vfs_inode_put_ref(&fs->cwd);
+        __vfs_struct_free(fs);
     }
 }
 

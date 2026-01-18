@@ -4,6 +4,7 @@
 #include "vfs/vfs_types.h"
 #include "printf.h"
 #include "atomic.h"
+#include "clone_flags.h"
 
 #define VFS_PATH_MAX 65535
 #define VFS_INODE_MAX_REFCOUNT 0x7FFF0000
@@ -106,6 +107,10 @@ static inline void vfs_struct_lock(struct fs_struct *fs) {
 static inline void vfs_struct_unlock(struct fs_struct *fs) {
     spin_release(&fs->lock);
 }
+
+struct fs_struct *vfs_struct_init(void);    // Create the first fs_struct
+struct fs_struct *vfs_struct_clone(struct fs_struct *old_fs, uint64 clone_flags);
+void vfs_struct_put(struct fs_struct *fs);
 
 // Inode reference operations
 int vfs_inode_get_ref(struct vfs_inode *inode, struct vfs_inode_ref *ref);
