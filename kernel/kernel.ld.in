@@ -4,10 +4,13 @@ ENTRY( _entry )
 SECTIONS
 {
   /*
-   * ensure that entry.S / _entry is at 0x80200000,
-   * where qemu's -kernel jumps.
+   * Kernel load address:
+   * - QEMU virt machine: 0x80200000 (RAM starts at 0x80000000)
+   * - Orange Pi RV2:     0x00200000 (RAM starts at 0x00080000)
+   *
+   * Configured by CMake via -DKERNEL_BASE=<address>
    */
-  . = 0x80200000;
+  . = @KERNEL_BASE@;
 
   /* Keep the entry stub at the very start so qemu -kernel jumps to real code. */
   .text.entry : {
