@@ -84,6 +84,7 @@
 #include "pci.h"
 #include "timer/goldfish_rtc.h"
 #include "e1000_dev.h"
+#include "plic.h"
 #include "memlayout.h"
 #include "page.h"
 #include "param.h"

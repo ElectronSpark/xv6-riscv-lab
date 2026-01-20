@@ -8,6 +8,7 @@
 #include "trap.h"
 #include "uart.h"
 #include "virtio.h"
+#include "plic.h"
 #include "timer/goldfish_rtc.h"
 
 //

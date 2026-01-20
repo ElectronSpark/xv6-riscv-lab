@@ -16,6 +16,7 @@
 #include "trap.h"
 #include "printf.h"
 #include "defs.h"
+#include "plic.h"
 #include "timer/goldfish_rtc.h"
 
 uint64 __goldfish_rtc_mmio_base = 0x101000L;
