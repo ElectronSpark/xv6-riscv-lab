@@ -9,7 +9,7 @@
 struct buf {
   int valid;   // has data been read from disk?
   int disk;    // does disk "own" buf?
-  uint dev;
+  dev_t dev;
   uint blockno;
   mutex_t lock;
   uint refcnt;
