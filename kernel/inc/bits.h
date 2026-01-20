@@ -301,4 +301,27 @@ static inline int64 __bits_ctz_ptr(const void *ptr, size_t limit, bool inv) {
 #define bits_ctz_ptr(ptr, limit)   __bits_ctz_ptr((ptr), (limit), !!0)
 #define bits_ctz_ptr_inv(ptr, limit)   __bits_ctz_ptr((ptr), (limit), !!1)
 
+// set bit macros
+static inline bool bits_test_and_set_bit(void *bitmap, size_t bit_index) {
+    size_t byte_index = bit_index >> 3;
+    uint8 bit_mask = 1U << (bit_index & 0x7U);
+    bool was_set = (((uint8*)bitmap)[byte_index] & bit_mask) != 0;
+    ((uint8*)bitmap)[byte_index] |= bit_mask;
+    return was_set;
+}
+
+static inline bool bits_test_and_clear_bit(void *bitmap, size_t bit_index) {
+    size_t byte_index = bit_index >> 3;
+    uint8 bit_mask = 1U << (bit_index & 0x7U);
+    bool was_set = (((uint8*)bitmap)[byte_index] & bit_mask) != 0;
+    ((uint8*)bitmap)[byte_index] &= ~bit_mask;
+    return was_set;
+}
+
+static inline bool bits_test_bit(const void *bitmap, size_t bit_index) {
+    size_t byte_index = bit_index >> 3;
+    uint8 bit_mask = 1U << (bit_index & 0x7U);
+    return (((const uint8*)bitmap)[byte_index] & bit_mask) != 0;
+}
+
 #endif // KERNEL_INC_BITS_H
