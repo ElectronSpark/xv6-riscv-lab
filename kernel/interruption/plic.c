@@ -42,7 +42,7 @@ plicinithart(void)
   *(uint32*)PLIC_SENABLE(hart) = (1 << UART0_IRQ) | (1 << VIRTIO0_IRQ) | (1 << VIRTIO1_IRQ) | (1 << GOLDFISH_RTC_IRQ);
 
   // set this hart's S-mode priority threshold to 0.
-  *(uint32*)PLIC_SPRIORITY(hart) = 0;
+  *(uint32*)PLIC_SPRIORITY_THRESH(hart) = 0;
 
   // hack to get at next 32 IRQs for e1000
   *(uint32*)(PLIC_SENABLE(hart)+4) = 0xffffffff;

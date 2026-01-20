@@ -301,27 +301,84 @@ static inline int64 __bits_ctz_ptr(const void *ptr, size_t limit, bool inv) {
 #define bits_ctz_ptr(ptr, limit)   __bits_ctz_ptr((ptr), (limit), !!0)
 #define bits_ctz_ptr_inv(ptr, limit)   __bits_ctz_ptr((ptr), (limit), !!1)
 
-// set bit macros
-static inline bool bits_test_and_set_bit(void *bitmap, size_t bit_index) {
-    size_t byte_index = bit_index >> 3;
-    uint8 bit_mask = 1U << (bit_index & 0x7U);
-    bool was_set = (((uint8*)bitmap)[byte_index] & bit_mask) != 0;
-    ((uint8*)bitmap)[byte_index] |= bit_mask;
-    return was_set;
-}
+/***
+ * Bitmap manipulation macros
+ *
+ * These macros generate inline functions for atomic-style bit operations on bitmaps.
+ * The bitmap is treated as an array of unsigned integers of the specified width.
+ *
+ * Generated functions (where N is 8, 16, 32, or 64):
+ *   - bits_test_and_set_bitN(bitmap, bit_index)   : Set bit and return previous value
+ *   - bits_test_and_clear_bitN(bitmap, bit_index) : Clear bit and return previous value
+ *   - bits_test_bitN(bitmap, bit_index)           : Test if bit is set
+ *
+ * Macro expansion:
+ *   __bits_bitmap_action generates a function that computes the element index and
+ *   bit mask, then delegates to __ACTION for the actual bit operation. The __ACTION
+ *   parameter is a macro that receives a pointer to the storage element and the mask:
+ *     - __bit_bitmap_setter  : Sets the bit, returns true if it was already set
+ *     - __bit_bitmap_clearer : Clears the bit, returns true if it was set
+ *     - __bit_bitmap_tester  : Returns true if the bit is set (no modification)
+ *
+ * Parameters:
+ *   @bitmap    : Pointer to the bitmap (void* for flexibility)
+ *   @bit_index : Zero-based index of the bit to operate on
+ *
+ * Return value:
+ *   - test_and_set / test_and_clear: true if the bit WAS set before the operation
+ *   - test: true if the bit IS currently set
+ *
+ * Implementation notes:
+ *   - __NAME  : Suffix for generated function names (e.g., bit8, bit64)
+ *   - __BITS  : Width of storage unit (8, 16, 32, 64) - must be literal for token pasting
+ *   - __SHIFT : log2(__BITS) for index calculation (3, 4, 5, 6) - must be literal
+ *   - The bit mask uses (uint##__BITS)1 to ensure proper width before shifting,
+ *     avoiding undefined behavior when bit positions exceed 32 for 64-bit operations.
+ */
 
-static inline bool bits_test_and_clear_bit(void *bitmap, size_t bit_index) {
-    size_t byte_index = bit_index >> 3;
-    uint8 bit_mask = 1U << (bit_index & 0x7U);
-    bool was_set = (((uint8*)bitmap)[byte_index] & bit_mask) != 0;
-    ((uint8*)bitmap)[byte_index] &= ~bit_mask;
-    return was_set;
-}
+#define __bits_bitmap_action(__NAME, __ACTION_NAME, __BITS, __SHIFT, __ACTION)        \
+static inline bool bits_##__ACTION_NAME##_##__NAME(void *bitmap, size_t bit_index) {  \
+    size_t byte_index = bit_index >> __SHIFT;                              \
+    uint##__BITS bit_mask = (uint##__BITS)1 << (bit_index & ((1UL << __SHIFT) - 1UL));         \
+    return __ACTION(&((uint##__BITS *)bitmap)[byte_index], bit_mask);                   \
+}   \
 
-static inline bool bits_test_bit(const void *bitmap, size_t bit_index) {
-    size_t byte_index = bit_index >> 3;
-    uint8 bit_mask = 1U << (bit_index & 0x7U);
-    return (((const uint8*)bitmap)[byte_index] & bit_mask) != 0;
-}
+/* Set bit at __ptr using __mask, return true if bit was previously set */
+#define __bit_bitmap_setter(__ptr, __mask)    ({        \
+    bool was_set = (*(__ptr) & (__mask)) != 0;    \
+    *(__ptr) |= (__mask);                          \
+    was_set;                                                          \
+})
+
+/* Clear bit at __ptr using __mask, return true if bit was previously set */
+#define __bit_bitmap_clearer(__ptr, __mask)    ({      \
+    bool was_set = (*(__ptr) & (__mask)) != 0;    \
+    *(__ptr) &= ~(__mask);                         \
+    was_set;                                                          \
+})
+
+/* Test bit at __ptr using __mask, return true if bit is set */
+#define __bit_bitmap_tester(__ptr, __mask)    ({       \
+    bool is_set = (*(__ptr) & (__mask)) != 0;     \
+    is_set;                                                           \
+})
+
+/*
+ * Generate test_and_set, test_and_clear, and test functions for a given bit width.
+ * __SETTER, __CLEARER, __TESTER are interface macros that must conform to:
+ *   __INTERFACE(__ptr, __mask) -> bool
+ * where __ptr is a pointer to the storage element and __mask is the bit mask.
+ * Each interface should return the previous or current state of the bit.
+ */
+#define __bits_bitmap_helpers(__NAME ,__BITS, __SHIFT, __SETTER, __CLEARER, __TESTER)        \
+__bits_bitmap_action(__NAME, test_and_set, __BITS, __SHIFT, __SETTER)    \
+__bits_bitmap_action(__NAME, test_and_clear, __BITS, __SHIFT, __CLEARER)    \
+__bits_bitmap_action(__NAME, test, __BITS, __SHIFT, __TESTER)    \
+
+/* Instantiate bitmap helpers for 8, 16, 32, and 64-bit storage units */
+__bits_bitmap_helpers(bit8, 8, 3, __bit_bitmap_setter, __bit_bitmap_clearer, __bit_bitmap_tester)
+__bits_bitmap_helpers(bit16, 16, 4, __bit_bitmap_setter, __bit_bitmap_clearer, __bit_bitmap_tester)
+__bits_bitmap_helpers(bit32, 32, 5, __bit_bitmap_setter, __bit_bitmap_clearer, __bit_bitmap_tester)
+__bits_bitmap_helpers(bit64, 64, 6, __bit_bitmap_setter, __bit_bitmap_clearer, __bit_bitmap_tester)
 
 #endif // KERNEL_INC_BITS_H
