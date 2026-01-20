@@ -25,9 +25,10 @@
 #include "freelist.h"
 
 // the address of virtio mmio register r for disk n.
-#define R(n, r) ((volatile uint32 *)(virtio_base[n] + (r)))
+#define R(n, r) ((volatile uint32 *)(__virtio_mmio_base[n] + (r)))
 
-static const uint64 virtio_base[NVIRTIO] = { VIRTIO0, VIRTIO1 };
+const uint64 __virtio_mmio_base[N_VIRTIO] = { 0x10001000, 0x10002000, 0x10003000 };
+const uint64 __virtio_irqno[N_VIRTIO] = { 1, 2, 3 };
 
 static void
 virtio_disk_rw(int diskno, struct bio *bio, uint64 sector, void *buf, size_t size, int write);
@@ -74,7 +75,7 @@ STATIC struct disk {
   
   struct spinlock vdisk_lock;
   
-} disks[NVIRTIO];
+} disks[N_VIRTIO_DISK];
 
 static int __virtio_disk_open(blkdev_t *blkdev) {
   return 0;
@@ -111,7 +112,7 @@ static blkdev_ops_t __virtio_disk_ops = {
     .submit_bio = __virtio_disk_submit_bio
 };
 
-static blkdev_t virtio_disk_devs[NVIRTIO] = {
+static blkdev_t virtio_disk_devs[N_VIRTIO_DISK] = {
     {
         .dev = {
             .major = 2,
@@ -243,7 +244,7 @@ __virtio_disk_init_one(int diskno)
 void
 virtio_disk_init(void)
 {
-  for(int i = 0; i < NVIRTIO; i++) {
+  for(int i = 0; i < N_VIRTIO_DISK; i++) {
     __virtio_disk_init_one(i);
   }
 }

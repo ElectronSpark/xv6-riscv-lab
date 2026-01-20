@@ -1,5 +1,4 @@
 #include "riscv.h"
-#include "memlayout.h"
 #include "syscall.h"
 
 .section sig_trampsec

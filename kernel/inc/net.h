@@ -5,6 +5,7 @@
 #define __KERNEL_NET_H
 
 #include "compiler.h"
+#include "bits.h"
 
 #define MBUF_SIZE              2048
 #define MBUF_DEFAULT_HEADROOM  128
@@ -51,20 +52,8 @@ void mbufq_init(struct mbufq *q);
 //
 // endianness support
 //
-
-static inline uint16 bswaps(uint16 val)
-{
-  return (((val & 0x00ffU) << 8) |
-          ((val & 0xff00U) >> 8));
-}
-
-static inline uint32 bswapl(uint32 val)
-{
-  return (((val & 0x000000ffUL) << 24) |
-          ((val & 0x0000ff00UL) << 8) |
-          ((val & 0x00ff0000UL) >> 8) |
-          ((val & 0xff000000UL) >> 24));
-}
+#define bswaps(__VAL) bswap16(__VAL)
+#define bswapl(__VAL) bswap32(__VAL)
 
 // Use these macros to convert network bytes to the native byte order.
 // Note that Risc-V uses little endian while network order is big endian.

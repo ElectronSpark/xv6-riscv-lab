@@ -11,7 +11,7 @@ void page_lock_acquire(page_t *page);
 void page_lock_release(page_t *page);
 void page_lock_assert_holding(page_t *page);
 void page_lock_assert_unholding(page_t *page);
-int page_buddy_init(uint64 pa_start, uint64 pa_end);
+int page_buddy_init(void);
 page_t *__page_alloc(uint64 order, uint64 flags);
 void __page_free(page_t *page, uint64 order);
 void *page_alloc(uint64 order, uint64 flags);

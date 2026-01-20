@@ -14,6 +14,9 @@
 #include "proc/sched.h"
 #include "trap.h"
 
+uint64 __clint_timer_irqno = 5;
+uint64 __timebase_frequency = 10000000UL;
+uint64 __jiff_ticks = 0; // Calculated in timerinit()
 static uint64 ticks;
 
 // The following functions are used to manage the red-black tree of process nodes

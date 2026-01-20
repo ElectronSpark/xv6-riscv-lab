@@ -16,12 +16,21 @@
 #include "rcu.h"
 #include "sbi.h"
 #include "ipi.h"
+#include "early_allocator.h"
 #include "timer/goldfish_rtc.h"
+
+uint64 __physical_memory_end;
+uint64 __physical_total_pages;
 
 volatile STATIC int started = 0;
 extern void _entry(); // entry.S
+extern char end[]; // first address after kernel.
+                   // defined by kernel.ld.
 
 static void __start_kernel_main_hart(int hartid, void *fdt_base) {
+    __physical_memory_end = (KERNBASE + 128*1024*1024);
+    __physical_total_pages = (__physical_memory_end - KERNBASE) >> 12;
+    early_allocator_init((void*)end, (void*)__physical_memory_end);
     kobject_global_init();
     printfinit();
     printf("\n");

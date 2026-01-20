@@ -12,6 +12,9 @@
 #include "net.h"
 #include "trap.h"
 
+uint64 __e1000_pci_mmio_base = 0x40000000L;
+uint64 __e1000_pci_irqno = 33;
+
 static void e1000_intr(int irq, void *data, device_t *dev);
 
 #define TX_RING_SIZE 16

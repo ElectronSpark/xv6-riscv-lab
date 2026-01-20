@@ -5,6 +5,7 @@
 #include "defs.h"
 #include "printf.h"
 #include "atomic.h"
+#include "timer/timer.h"
 
 void start_kernel(int hartid, void *fdt_base, bool is_boot_hart);
 void timerinit();
@@ -50,6 +51,10 @@ start(int hartid, void *fdt_base)
 void
 timerinit()
 {
+  // calculate jiff ticks.
+  // One time calculation, thus no optimization needed.
+  __jiff_ticks = TIMEBASE_FREQUENCY / HZ;
+
   // ask for the very first timer interrupt.
   w_stimecmp(r_time() + JIFF_TICKS);
 }

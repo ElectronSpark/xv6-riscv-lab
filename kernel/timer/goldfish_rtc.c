@@ -18,6 +18,9 @@
 #include "defs.h"
 #include "timer/goldfish_rtc.h"
 
+uint64 __goldfish_rtc_mmio_base = 0x101000L;
+uint64 __goldfish_rtc_irqno = 11;
+
 // RTC base address (mapped in physical memory)
 #define RTC_BASE    GOLDFISH_RTC
 

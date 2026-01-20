@@ -15,9 +15,6 @@
 #include "bits.h"
 #include "percpu.h"
 
-extern char end[]; // first address after kernel.
-                   // defined by kernel.ld.
-
 STATIC slab_cache_t __kmm_slab_cache[SLAB_CACHE_NUMS][1];
 STATIC char __kmm_slab_names[SLAB_CACHE_NUMS][32] = { 0 };
 
@@ -38,7 +35,8 @@ void
 kinit()
 {
   size_t obj_size = SLAB_OBJ_MIN_SIZE;
-  page_buddy_init(PGROUNDUP((uint64)end), PHYSTOP);
+  
+  page_buddy_init();
   for (int i = 0; i < SLAB_CACHE_NUMS; i++) {
     __init_kmm_slab_name(i, obj_size);
     if (slab_cache_init(__kmm_slab_cache[i], __kmm_slab_names[i], obj_size,

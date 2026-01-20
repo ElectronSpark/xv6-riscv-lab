@@ -23,7 +23,7 @@
 #include "proc/sched.h"
 #include "cdev.h"
 #include "trap.h"
-
+#include "uart.h"
 #include "sbi.h"
 
 #ifndef CONSOLE_MAJOR

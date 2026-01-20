@@ -12,7 +12,6 @@
         #
 
 #include "riscv.h"
-#include "memlayout.h"
 
 .globl kernelvec
 .globl usertrap

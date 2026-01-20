@@ -10,45 +10,6 @@ _entry:
         # (we're already in S-mode, so use tp to store hartid)
         mv tp, a0
 
-        # Print early boot banner via SBI console (no memory access)
-        # SBI legacy console putchar: a7 = 0x01, a0 = char
-        li a7, 0x01
-
-        # Print "\r\n[xv6] entry\r\n"
-        li a0, '\r'
-        ecall
-        li a0, '\n'
-        ecall
-        li a0, '['
-        ecall
-        li a0, 'x'
-        ecall
-        li a0, 'v'
-        ecall
-        li a0, '6'
-        ecall
-        li a0, ']'
-        ecall
-        li a0, ' '
-        ecall
-        li a0, 'e'
-        ecall
-        li a0, 'n'
-        ecall
-        li a0, 't'
-        ecall
-        li a0, 'r'
-        ecall
-        li a0, 'y'
-        ecall
-        li a0, '\r'
-        ecall
-        li a0, '\n'
-        ecall
-
-        # Restore hartid to a0 (was clobbered by ecalls)
-        mv a0, tp
-
         # set up a stack for C.
         # stack0 is declared in start.c,
         # with a 4096-byte stack per CPU.

@@ -12,7 +12,7 @@
 void
 simpletest()
 {
-  uint64 phys_size = PHYSTOP - KERNBASE;
+  uint64 phys_size = 128 * 1024 * 1024; // assume 128MB physical memory
   int sz = (phys_size / 3) * 2;
 
   printf("simple: ");
@@ -53,7 +53,7 @@ simpletest()
 void
 threetest()
 {
-  uint64 phys_size = PHYSTOP - KERNBASE;
+  uint64 phys_size = 128 * 1024 * 1024; // assume 128MB physical memory
   int sz = phys_size / 4;
   int pid1, pid2;
 

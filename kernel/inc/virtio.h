@@ -11,6 +11,18 @@
 
 #include "compiler.h"
 
+// virtio mmio interface
+#define N_VIRTIO_DISK 2  // number of virtio disks
+#define N_VIRTIO 3  // number of virtio devices
+extern const uint64 __virtio_mmio_base[N_VIRTIO];
+extern const uint64 __virtio_irqno[N_VIRTIO];
+#define VIRTIO0 __virtio_mmio_base[0]
+#define VIRTIO0_IRQ __virtio_irqno[0]
+#define VIRTIO1 __virtio_mmio_base[1]
+#define VIRTIO1_IRQ __virtio_irqno[1]
+#define VIRTIO2 __virtio_mmio_base[2]  // virtio console
+#define VIRTIO2_IRQ __virtio_irqno[2]
+
 // virtio mmio control registers, mapped starting at 0x10001000.
 // from qemu virtio_mmio.h
 #define VIRTIO_MMIO_MAGIC_VALUE		0x000 // 0x74726976

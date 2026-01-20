@@ -13,6 +13,8 @@
 #include "printf.h"
 #include "pci.h"
 
+uint64 __pcie_ecam_mmio_base = 0x30000000L;
+
 void pci_init() {
     // we'll place the e1000 registers at this address.
     // vm.c maps this range.

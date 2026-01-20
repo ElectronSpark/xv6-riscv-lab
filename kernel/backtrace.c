@@ -8,6 +8,9 @@
 #include "defs.h"
 #include "printf.h"
 
+uint64 __kernel_symbols_base = 0x88200000LL;
+size_t __kernel_symbols_size = 0x100000;
+
 extern char stack0[];
 
 // Names end with a newline character or a null terminator.
@@ -17,7 +20,7 @@ typedef struct {
     const char *name;
 } __ksymbols_t;
 
-static __ksymbols_t *__ksymbols = (void *)KERNEL_SYMBOLS_IDX_START;
+static __ksymbols_t *__ksymbols;
 
 static int __ksymbol_count = -1;
 
@@ -73,6 +76,7 @@ __ksymbol_parse(int idx,
 void
 ksymbols_init(void)
 {
+    __ksymbols = (void *)KERNEL_SYMBOLS_IDX_START;
     __ksymbol_count = 0;
 
     int saddr_start = 0;

@@ -17,6 +17,10 @@
 #include "virtio.h"
 #include "string.h"
 #include "freelist.h"
+#include "uart.h"
+
+uint64 __uart0_mmio_base = 0x10000000L;
+uint64 __uart0_irqno = 10;
 
 void uartintr(int irq, void *data, device_t *dev);
 

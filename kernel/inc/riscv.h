@@ -442,11 +442,6 @@ typedef uint64 *pagetable_t; // 512 PTEs
 // that have the high bit set.
 #define MAXVA (1UL << (9 + 9 + 9 + 12 - 1))
 
-#define TIMEBASE_FREQUENCY 10000000UL
-#define HZ 1000UL
-#define JIFF_TICKS (TIMEBASE_FREQUENCY / HZ)
-#define TICK_MS 1UL
-#define TICK_S (TICK_MS * 1000)
 
 // SBI definitions moved to sbi.h
 

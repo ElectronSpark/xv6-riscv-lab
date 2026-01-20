@@ -3,6 +3,12 @@
 
 #include "types.h"
 
+// Goldfish RTC (Real Time Clock)
+extern uint64 __goldfish_rtc_mmio_base;
+extern uint64 __goldfish_rtc_irqno;
+#define GOLDFISH_RTC __goldfish_rtc_mmio_base
+#define GOLDFISH_RTC_IRQ __goldfish_rtc_irqno
+
 // Goldfish RTC Register Offsets
 // The RTC returns time in nanoseconds since Unix epoch
 #define GOLDFISH_RTC_TIME_LOW       0x00    // Low 32 bits of time (ns)

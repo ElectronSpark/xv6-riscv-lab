@@ -5,6 +5,12 @@
 #ifndef __KERNEL_E1000_DEV_H
 #define __KERNEL_E1000_DEV_H
 
+// Intel E1000 Ethernet Controller interface
+extern uint64 __e1000_pci_mmio_base;
+extern uint64 __e1000_pci_irqno;
+#define E1000_PCI_ADDR __e1000_pci_mmio_base
+#define E1000_IRQ __e1000_pci_irqno
+
 /* Registers */
 #define E1000_CTL      (0x00000/4)  /* Device Control Register - RW */
 #define E1000_ICR      (0x000C0/4)  /* Interrupt Cause Read - R */

@@ -22,58 +22,31 @@
 #ifndef __KERNEL_MEMORY_LAYOUT_H
 #define __KERNEL_MEMORY_LAYOUT_H
 
-#define CLINT_TIMER_IRQ 5
-
-// qemu puts UART registers here in physical memory.
-#define UART0 0x10000000L
-#define UART0_IRQ 10
-
-// virtio mmio interface
-#define VIRTIO0 0x10001000
-#define VIRTIO0_IRQ 1
-#define VIRTIO1 0x10002000
-#define VIRTIO1_IRQ 2
-#define VIRTIO2 0x10003000  // virtio console
-#define VIRTIO2_IRQ 3
-#define NVIRTIO 2  // number of virtio disks
-
-#define PCIE_ECAM 0x30000000L
-
-// Intel E1000 Ethernet Controller interface
-#define E1000_PCI_ADDR 0x40000000L
-#define E1000_IRQ 33
-
-// Goldfish RTC (Real Time Clock)
-#define GOLDFISH_RTC 0x101000L
-#define GOLDFISH_RTC_IRQ 11
-
-// qemu puts platform-level interrupt controller (PLIC) here.
-#define PLIC 0x0c000000L
-#define PLIC_PRIORITY (PLIC + 0x0)
-#define PLIC_PENDING (PLIC + 0x1000)
-#define PLIC_SENABLE(hart) (PLIC + 0x2080 + (hart)*0x100)
-#define PLIC_SPRIORITY(hart) (PLIC + 0x201000 + (hart)*0x2000)
-#define PLIC_SCLAIM(hart) (PLIC + 0x201004 + (hart)*0x2000)
+// We keep the actual highest 1MB of physical memory to store symbols
+extern uint64 __kernel_symbols_base;
+extern size_t __kernel_symbols_size;
+#define KERNEL_SYMBOLS_START    __kernel_symbols_base
+#define KERNEL_SYMBOLS_SIZE     __kernel_symbols_size
+#define KERNEL_SYMBOLS_END      (KERNEL_SYMBOLS_START + KERNEL_SYMBOLS_SIZE)
+#define KERNEL_SYMBOLS_IDX_START KERNEL_SYMBOLS_END
+#define KERNEL_SYMBOLS_IDX_SIZE 0x80000
+#define KERNEL_SYMBOLS_IDX_END (KERNEL_SYMBOLS_IDX_START + KERNEL_SYMBOLS_IDX_SIZE)
 
 // the kernel expects there to be RAM
 // for use by the kernel and user pages
 // from physical address 0x80200000 to PHYSTOP.
+extern uint64 __physical_memory_start;
+extern uint64 __physical_memory_end;
+extern uint64 __physical_total_pages;
 #ifdef HOST_TEST
 // Make sure the whole memory area is in the user space when testing
 #define KERNBASE 0x40000000L
 #else
 #define KERNBASE 0x80000000L
 #endif
-#define PHYSTOP (KERNBASE + 128*1024*1024)
-#define TOTALPAGES  ((PHYSTOP - KERNBASE) >> 12)
+#define PHYSTOP __physical_memory_end
+#define TOTALPAGES  __physical_total_pages
 
-// We keep the actual highest 1MB of physical memory to store symbols
-#define KERNEL_SYMBOLS_START    0x88200000LL
-#define KERNEL_SYMBOLS_SIZE     0x100000
-#define KERNEL_SYMBOLS_END      (KERNEL_SYMBOLS_START + KERNEL_SYMBOLS_SIZE)
-#define KERNEL_SYMBOLS_IDX_START KERNEL_SYMBOLS_END
-#define KERNEL_SYMBOLS_IDX_SIZE 0x80000
-#define KERNEL_SYMBOLS_IDX_END (KERNEL_SYMBOLS_IDX_START + KERNEL_SYMBOLS_IDX_SIZE)
 // map the trampoline page to the highest address,
 // in both user and kernel space.
 #define TRAMPOLINE (MAXVA - PGSIZE)

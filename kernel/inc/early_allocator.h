@@ -9,6 +9,7 @@
 
 void early_allocator_init(void *pa_start, void *pa_end);
 void *early_alloc(size_t size);
+void *early_alloc_align(size_t size, size_t align);
 void *early_alloc_end_ptr(void);
 
 #endif        /* __KERNEL_EARLY_ALLOCATOR_H */

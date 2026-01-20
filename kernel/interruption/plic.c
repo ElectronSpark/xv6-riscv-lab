@@ -5,10 +5,16 @@
 #include "defs.h"
 #include "printf.h"
 #include "percpu.h"
+#include "trap.h"
+#include "uart.h"
+#include "virtio.h"
+#include "timer/goldfish_rtc.h"
 
 //
 // the riscv Platform Level Interrupt Controller (PLIC).
 //
+
+uint64 __plic_mmio_base = 0x0c000000L;
 
 void
 plicinit(void)

@@ -4,6 +4,9 @@
 
 #include "compiler.h"
 
+extern uint64 __pcie_ecam_mmio_base;
+#define PCIE_ECAM __pcie_ecam_mmio_base
+
 // PCI-E Common Configuration Space Header Structure
 struct pci_common_confspace_header {
     uint16 vendor_id;
