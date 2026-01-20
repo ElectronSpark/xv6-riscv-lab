@@ -21,14 +21,14 @@ void
 plicinit(void)
 {
   // set desired IRQ priorities non-zero (otherwise disabled).
-  *(uint32*)(PLIC + UART0_IRQ*4) = 1;
-  *(uint32*)(PLIC + VIRTIO0_IRQ*4) = 1;
-  *(uint32*)(PLIC + GOLDFISH_RTC_IRQ*4) = 1;  // Goldfish RTC
+  *PLIC_PRIORITY(UART0_IRQ) = 1;
+  *PLIC_PRIORITY(VIRTIO0_IRQ) = 1;
+  *PLIC_PRIORITY(GOLDFISH_RTC_IRQ) = 1;  // Goldfish RTC
 
   // PCIE IRQs are 32 to 35
   for(int irq = 1; irq < 0x35; irq++){
     // TODO
-    *(uint32*)(PLIC + irq*4) = 1;
+    *PLIC_PRIORITY(irq) = 1;
   }
 }
 
@@ -39,13 +39,17 @@ plicinithart(void)
   
   // set enable bits for this hart's S-mode
   // for the uart, virtio disk, and Goldfish RTC.
-  *(uint32*)PLIC_SENABLE(hart) = (1 << UART0_IRQ) | (1 << VIRTIO0_IRQ) | (1 << VIRTIO1_IRQ) | (1 << GOLDFISH_RTC_IRQ);
+  PLIC_SET_SENABLE(hart, UART0_IRQ);
+  PLIC_SET_SENABLE(hart, VIRTIO0_IRQ);
+  PLIC_SET_SENABLE(hart, VIRTIO1_IRQ);
+  PLIC_SET_SENABLE(hart, GOLDFISH_RTC_IRQ);
+  // *(uint32*)PLIC_SENABLE(hart) = (1 << UART0_IRQ) | (1 << VIRTIO0_IRQ) | (1 << VIRTIO1_IRQ) | (1 << GOLDFISH_RTC_IRQ);
 
   // set this hart's S-mode priority threshold to 0.
-  *(uint32*)PLIC_SPRIORITY_THRESH(hart) = 0;
+  *PLIC_SPRIORITY_THRESH(hart) = 0;
 
   // hack to get at next 32 IRQs for e1000
-  *(uint32*)(PLIC_SENABLE(hart)+4) = 0xffffffff;
+  *(PLIC_SENABLE(hart)+4) = 0xffffffff;
 }
 
 // ask the PLIC what interrupt we should serve.
@@ -53,7 +57,7 @@ int
 plic_claim(void)
 {
   int hart = cpuid();
-  int irq = *(uint32*)PLIC_SCLAIM(hart);
+  int irq = *PLIC_SCLAIM(hart);
   return irq;
 }
 
@@ -62,5 +66,5 @@ void
 plic_complete(int irq)
 {
   int hart = cpuid();
-  *(uint32*)PLIC_SCLAIM(hart) = irq;
+  *PLIC_SCLAIM(hart) = irq;
 }
