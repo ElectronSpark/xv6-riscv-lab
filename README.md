@@ -1,4 +1,4 @@
-# Enhanced xv6-RISCV Operating System
+# Enhanced xv6-RISCV Operating System {#mainpage}
 
 A significantly extended and modernized version of the xv6 operating system for RISC-V architecture, featuring advanced kernel subsystems and a modern build system.
 

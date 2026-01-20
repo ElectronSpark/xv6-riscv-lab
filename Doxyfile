@@ -48,7 +48,7 @@ OPTIMIZE_OUTPUT_VHDL   = NO
 OPTIMIZE_OUTPUT_SLICE  = NO
 EXTENSION_MAPPING      = 
 MARKDOWN_SUPPORT       = YES
-TOC_INCLUDE_HEADINGS   = 5
+TOC_INCLUDE_HEADINGS   = 2
 AUTOLINK_SUPPORT       = YES
 BUILTIN_STL_SUPPORT    = NO
 CPP_CLI_SUPPORT        = NO
@@ -127,14 +127,14 @@ WARN_LOGFILE           =
 # Configuration options related to the input files
 #---------------------------------------------------------------------------
 
-INPUT                  = kernel \
-                         user \
-                         mkfs \
-                         scripts \
-                         README.md \
+INPUT                  = README.md \
                          ROADMAP.md \
                          ABOUT.md \
                          XV6_ORIGINAL_README \
+                         kernel \
+                         user \
+                         mkfs \
+                         scripts \
                          kernel/vfs/VFS_DESIGN.md \
                          kernel/vfs/UNMOUNT_DESIGN.md \
                          scripts/README_gen_asm_offsets.md
