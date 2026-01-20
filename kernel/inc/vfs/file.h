@@ -1,12 +1,42 @@
+/**
+ * @file file.h
+ * @brief VFS file operations interface
+ *
+ * Provides the public API for file operations including open, read, write,
+ * seek, and file descriptor management. Uses reference counting for
+ * shared file descriptors.
+ */
+
 #ifndef KERNEL_VIRTUAL_FILE_SYSTEM_FILE_H
 #define KERNEL_VIRTUAL_FILE_SYSTEM_FILE_H
 
 #include "vfs/vfs_types.h"
 #include "clone_flags.h"
 
+/**
+ * @brief Open a file from an inode
+ * @param inode The inode to open
+ * @param f_flags Open flags (O_RDONLY, O_WRONLY, O_RDWR, etc.)
+ * @return File pointer or ERR_PTR on error
+ */
 struct vfs_file *vfs_fileopen(struct vfs_inode *inode, int f_flags);
+
+/**
+ * @brief Release a file reference (put)
+ * @param file File to release
+ * @note Decrements reference count; frees file when count reaches zero
+ * @note Formerly named vfs_fileclose()
+ */
 void vfs_fput(struct vfs_file *file);
+
+/**
+ * @brief Duplicate a file reference (get)
+ * @param file File to duplicate
+ * @return Same file pointer with incremented reference count, or NULL
+ * @note Formerly named vfs_filedup()
+ */
 struct vfs_file *vfs_fdup(struct vfs_file *file);
+
 ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n);
 int vfs_filestat(struct vfs_file *file, struct stat *stat);
 ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n);

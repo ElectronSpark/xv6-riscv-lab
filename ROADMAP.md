@@ -10,32 +10,58 @@ These features focus on building a complete, functional Unix-like system with mo
 
 ### 1. Dynamic Memory Probing and Page Frame Management
 **Dependencies**: None (foundational improvement)  
-**Priority**: Critical
+**Priority**: Critical  
+**Status**: 🔄 Partially Completed (January 2026)
 
-- Dynamic memory detection and probing at boot time
-- Support non-contiguous memory regions (multiple DRAM banks)
-- Improved page frame allocator with better metadata management
-- Memory zone management (DMA, Normal, High memory zones)
-- Per-CPU page frame caches for allocation performance
-- Memory hot-add/hot-remove support (basic)
-- Better memory statistics and accounting
-- NUMA-aware memory allocation (if multi-node support added)
+- ✅ Dynamic memory detection via FDT (Flattened Device Tree)
+- ✅ Runtime-configurable physical memory boundaries
+- ✅ Page array allocated dynamically during boot
+- ✅ Device MMIO addresses configurable at runtime (UART, PLIC, VirtIO, etc.)
+- ⏳ Support non-contiguous memory regions (multiple DRAM banks) - planned
+- ⏳ Memory zone management (DMA, Normal, High memory zones) - planned
+- ⏳ Per-CPU page frame caches for allocation performance - basic implementation
+- ⏳ Memory hot-add/hot-remove support (basic) - planned
+- ⏳ Better memory statistics and accounting - planned
+- ⏳ NUMA-aware memory allocation (if multi-node support added) - planned
 
 **Implementation Notes**:
-- Current: Fixed memory layout, simple buddy allocator
-- Target: Dynamic memory discovery, zone-based allocation, optimized page frame management
-- Benefits: Support varied hardware configs, better memory utilization, improved allocation performance
-- Files: `kernel/mm/page_alloc.c`, `kernel/mm/memblock.c` (new), `kernel/mm/zone.c` (new), `kernel/start.c`
+- Completed: Dynamic memory detection and page array allocation
+- Completed: Device addresses (UART0, PLIC, VirtIO, E1000, etc.) are now runtime variables
+- Completed: Support for multiple kernel base addresses (QEMU: 0x80200000, Orange Pi: 0x00200000)
+- Target: Zone-based allocation, optimized page frame management
+- Benefits: Support varied hardware configs (QEMU and real hardware), better memory utilization
+- Files: `kernel/mm/page.c`, `kernel/mm/kalloc.c`, `kernel/start_kernel.c`, `kernel/inc/memlayout.h`
 
 **Memory Architecture**:
 ```
-Current:
-  Fixed memory layout → Buddy allocator → Page allocation
+Current (Partially Implemented):
+  FDT probe → Dynamic page array allocation → Buddy allocator → Page allocation
+  Device addresses: Runtime configurable via extern variables
 
 Target:
   Boot probe → Memory zones (DMA/Normal/High) → Per-CPU caches
   → Buddy allocator (zone-aware) → Optimized page allocation
 ```
+
+---
+
+### 2.5. Orange Pi RV2 Hardware Support ✅ **COMPLETED**
+**Dependencies**: Dynamic Memory Probing (completed)  
+**Priority**: High  
+**Status**: ✅ Completed (January 2026)
+
+- ✅ Configurable kernel base address (QEMU: 0x80200000, Orange Pi: 0x00200000)
+- ✅ U-Boot boot scripts with dual-boot menu (boot.cmd, xv6.cmd, default.cmd)
+- ✅ Flat binary output (xv6.bin) for direct hardware loading
+- ✅ SBI console output for early boot messages (before UART init)
+- ✅ CMake deployment target (`make deploy`) for SCP to device
+- ✅ Separate linker scripts generated from template (kernel.ld.in)
+
+**Implementation Notes**:
+- CMake generates two linker scripts: kernel.ld (QEMU) and kernel.orangepi.ld (Orange Pi)
+- `make orangepi` builds xv6.bin, xv6.sym, and compiled U-Boot scripts
+- SBI console uses legacy putchar/getchar for early output
+- Files: `kernel/CMakeLists.txt`, `kernel/kernel.ld.in`, `boot.cmd`, `xv6.cmd`, `default.cmd`, `kernel/console.c`, `kernel/sbi.c`
 
 ---
 
@@ -142,7 +168,25 @@ Per-CPU RCU kthread → rcu_process_callbacks_for_cpu()
 
 ---
 
-### 6. Multi-User Support
+### 5. VM Locking and Reference Counting ✅ **COMPLETED**
+**Dependencies**: None  
+**Priority**: High  
+**Status**: ✅ Completed (January 2026)
+
+- ✅ Two-level VM locking (rwlock for VMA tree, spinlock for pagetable)
+- ✅ VM reference counting with `vm_dup()` and `vm_put()`
+- ✅ CPU tracking bitmap for TLB shootdown optimization
+- ✅ Process flag macros converted to bit-field operations
+- ✅ fd_table and fs_struct reference counting and cloning
+- ✅ Clone flags support for process creation
+
+**Implementation Notes**:
+- `vm->rw_lock`: Rwlock protects VMA tree structure (read for lookup, write for modify)
+- `vm->spinlock`: Spinlock protects pagetable PTE modifications
+- `vm->cpumask`: Tracks which CPUs are using this VM (for future TLB shootdown)
+- `vm->refcount`: Reference counting for shared VMs
+- Locking order: Sleep locks (VFS, VM rwlock) before spinlocks (pgtable, proc)
+- Files: `kernel/mm/vm.c`, `kernel/inc/vm.h`, `kernel/inc/vm_types.h`, `kernel/vfs/file.c`, `kernel/vfs/fs.c`
 **Dependencies**: VFS enhancements (partially complete)  
 **Priority**: High
 
@@ -488,12 +532,16 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 ## Success Metrics
 
 ### Near-Term Success:
-- [ ] **Dynamic memory probing supports varied hardware configurations**
+- [x] **Dynamic memory probing via FDT** ✅ (partially - runtime device config)
 - [x] **Interrupt handling separated from process context** ✅
 - [x] **Per-CPU interrupt stacks (16KB)** ✅
 - [x] **Pluggable scheduler infrastructure with sched_class** ✅
 - [x] **Per-CPU run queues with CPU affinity support** ✅
 - [x] **Per-CPU RCU kthreads for callback processing** ✅
+- [x] **VM locking with rwlock + spinlock separation** ✅
+- [x] **Orange Pi RV2 hardware support** ✅
+- [x] **SBI console for early boot output** ✅
+- [ ] Memory zone management (DMA/Normal/High)
 - [ ] Bottom-half processing (softirq/tasklets) reduces interrupt latency
 - [ ] CFS-like fair scheduler policy
 - [ ] Can run standard Unix utilities (bash, coreutils)
@@ -527,6 +575,7 @@ When implementing features from this roadmap:
 - **System Completeness Focus**: Near-term goals prioritize building a complete, stable Unix-like system before attempting ambitious features.
 - **Self-Hosting is Key**: The ability to compile xv6 under xv6 validates OS maturity and completeness.
 - **Web Hosting Milestone**: Demonstrates network stack reliability and real-world utility.
+- **Hardware Support**: Orange Pi RV2 support demonstrates portability to real hardware.
 - **Experimental Features**: GUI and kernel MicroPython are low priority - mention only for future exploration.
 
-Last Updated: January 13, 2026
+Last Updated: January 20, 2026

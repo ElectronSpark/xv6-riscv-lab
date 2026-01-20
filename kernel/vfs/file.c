@@ -231,6 +231,20 @@ struct vfs_file *vfs_fileopen(struct vfs_inode *inode, int f_flags) {
     return file;
 }
 
+/**
+ * @brief Release a file reference
+ *
+ * Decrements the file's reference count. When the count reaches 1 (last reference),
+ * performs cleanup including:
+ *   - Detaching from global file table
+ *   - Closing pipes (both anonymous and named)
+ *   - Releasing character/block device references
+ *   - Releasing inode reference
+ *   - Freeing the file structure
+ *
+ * @param file File to release (may be NULL)
+ * @note Thread-safe via atomic reference counting
+ */
 void vfs_fput(struct vfs_file *file) {
     if (file == NULL) {
         printf("vfs_fput: file is NULL\n");
@@ -275,6 +289,16 @@ void vfs_fput(struct vfs_file *file) {
     }
 }
 
+/**
+ * @brief Duplicate a file reference
+ *
+ * Increments the file's reference count, allowing the same file structure
+ * to be shared across multiple file descriptors (e.g., via dup() syscall).
+ *
+ * @param file File to duplicate (may be NULL)
+ * @return Same file pointer with incremented refcount, or NULL if file was NULL/closed
+ * @note Thread-safe via atomic reference counting
+ */
 struct vfs_file *vfs_fdup(struct vfs_file *file) {
     if (file == NULL) {
         return NULL;

@@ -8,6 +8,12 @@
 //   control-d -- end of file
 //   control-p -- print process list
 //
+// Early Boot Console:
+//   Before UART is initialized, console output uses SBI (Supervisor Binary
+//   Interface) calls to OpenSBI firmware. This allows printf() to work
+//   immediately after kernel entry, before device drivers are ready.
+//   The uart_initialized flag tracks when UART becomes available.
+//
 
 #include <stdarg.h>
 

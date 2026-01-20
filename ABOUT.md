@@ -14,12 +14,15 @@ This repository contains an **extensively modified and enhanced version** of xv6
 
 - **Virtual File System (VFS)** layer replacing the original monolithic file system
 - **Multiple file system support** (xv6fs, tmpfs)
-- **Advanced memory management** (slab allocator, enhanced page cache)
-- **Modern synchronization primitives** (rwlocks, completions)
+- **Advanced memory management** (slab allocator, enhanced page cache, dynamic page arrays)
+- **Modern synchronization primitives** (rwlocks, completions, two-level VM locking)
 - **CMake build system** replacing the original Makefile
 - **Device driver framework** for modular device support
 - **Extended networking** capabilities
 - **Hierarchical mounting** and advanced file system operations
+- **Multi-platform support**: QEMU virt machine and Orange Pi RV2 (Allwinner D1)
+- **Runtime device discovery**: Dynamic MMIO addresses instead of compile-time constants
+- **SBI console**: Early boot output via OpenSBI before UART initialization
 
 **These enhancements were developed independently and are not part of the original xv6 project.**
 
@@ -100,6 +103,7 @@ If you're considering this for teaching:
 - This enhanced version is more complex than original xv6
 - It demonstrates more production-like OS architecture
 - The VFS layer and advanced features require more background knowledge
+- Multi-platform support (QEMU and Orange Pi RV2) shows real hardware porting techniques
 - Original xv6 may be more appropriate for introductory OS courses
 
 ## Contributing

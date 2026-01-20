@@ -176,6 +176,79 @@ struct fifo_rq {
 };
 ```
 
+### Virtual Memory Structure Documentation
+
+For VM-related structures with complex locking:
+
+```c
+/**
+ * @brief Virtual Memory Management structure
+ * 
+ * Each process has a vm_t structure containing VMAs and the page table.
+ * Two separate locks protect different aspects:
+ * - rw_lock (rwlock_t): Protects VMA tree structure
+ * - spinlock: Protects page table PTE modifications
+ * 
+ * @note Always acquire rw_lock before spinlock to prevent deadlocks.
+ * @note Use vm_rlock()/vm_runlock() for read access, vm_wlock()/vm_wunlock() for write.
+ * 
+ * @see vma_t
+ * @see vm_find_area()
+ * @see vma_validate()
+ */
+typedef struct vm {
+    rwlock_t rw_lock;              /**< Protects VMA tree and list */
+    struct rb_root vm_tree;        /**< Red-black tree for VMA lookup */
+    uint64 trapframe;              /**< Pointer to process trapframe */
+    vma_t *stack;                  /**< Stack VMA pointer */
+    size_t stack_size;             /**< Size of stack area */
+    vma_t *heap;                   /**< Heap VMA pointer */
+    size_t heap_size;              /**< Size of heap area */
+    list_node_t vm_list;           /**< List of all VMAs */
+    list_node_t vm_free_list;      /**< List of free VMAs */
+    cpumask_t cpumask;             /**< CPUs using this VM (for TLB shootdown) */
+    spinlock_t spinlock;           /**< Protects pagetable PTE modifications */
+    pagetable_t pagetable;         /**< Sv39 page table */
+    int refcount;                  /**< Reference count for sharing */
+} vm_t;
+
+/**
+ * @brief Pipe structure with lock-free reader/writer
+ * 
+ * Uses atomic flags for reader/writer state instead of mutex.
+ * Separate locks for reader and writer for better concurrency.
+ * 
+ * @note Use PIPE_READABLE()/PIPE_WRITABLE() macros to check state.
+ * @note Use PIPE_CLEAR_READABLE()/PIPE_CLEAR_WRITABLE() for atomic close.
+ */
+struct pipe {
+    uint nread;                    /**< Number of bytes read */
+    proc_queue_t nread_queue;      /**< Queue of waiting readers */
+    struct spinlock reader_lock;   /**< Protects read side */
+    uint nwrite;                   /**< Number of bytes written */
+    proc_queue_t nwrite_queue;     /**< Queue of waiting writers */
+    struct spinlock writer_lock;   /**< Protects write side */
+    int flags;                     /**< Atomic flags (PIPE_FLAGS_READABLE, PIPE_FLAGS_WRITABLE) */
+    char data[PIPESIZE];           /**< Circular buffer */
+};
+
+/**
+ * @brief File descriptor table with reference counting
+ * 
+ * Supports shared fd tables between processes (via CLONE_FILES).
+ * Reference counted for safe sharing.
+ * 
+ * @note Use vfs_fdtable_clone() with clone_flags to control sharing.
+ */
+struct vfs_fdtable {
+    spinlock_t lock;               /**< Protects fd operations */
+    int fd_count;                  /**< Number of open file descriptors */
+    int next_fd;                   /**< Next fd to allocate */
+    struct vfs_file *files[NOFILE]; /**< Array of file pointers */
+    int ref_count;                 /**< Reference count for sharing */
+};
+```
+
 ### Macro Documentation
 
 ```c

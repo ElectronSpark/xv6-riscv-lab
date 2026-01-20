@@ -21,15 +21,17 @@ This enhanced version has been substantially extended with production-grade feat
 ### Key Improvements Over Original xv6
 
 - **Virtual File System (VFS) Layer**: Complete VFS abstraction supporting multiple file systems
-- **Advanced Memory Management**: Slab allocator, page cache, and sophisticated memory subsystems
+- **Advanced Memory Management**: Slab allocator, page cache, dynamic memory probing, and sophisticated memory subsystems
 - **Modern Build System**: CMake-based build system with proper dependency management
 - **Extended File System Support**: Multiple file system types (xv6fs, tmpfs)
-- **Advanced Synchronization**: Reader-writer locks, completions, and fine-grained locking
+- **Advanced Synchronization**: Reader-writer locks, completions, RCU, and fine-grained locking
 - **Device Management**: Character and block device framework with proper abstraction
 - **Network Stack**: Basic networking capabilities with E1000 driver support
 - **Enhanced Process Management**: Improved scheduling with pluggable scheduling classes and CPU affinity
 - **Separate Interrupt Stacks**: Dedicated interrupt stacks per CPU for better interrupt handling and nested interrupt support
 - **Linux-style Scheduler Infrastructure**: Per-CPU run queues, scheduling entities, and sched_class abstraction
+- **Multi-Platform Support**: QEMU virt machine and Orange Pi RV2 hardware support
+- **Dynamic Hardware Configuration**: Runtime-configurable device addresses via FDT (Flattened Device Tree)
 
 ## Features
 
@@ -95,6 +97,13 @@ This enhanced version has been substantially extended with production-grade feat
 - **Implemented Policies**:
   - FIFO scheduling class with minor priority subqueues and load balancing
   - IDLE scheduling class for idle processes
+
+### Multi-Platform Support
+- **QEMU virt Machine**: Default development and testing platform (kernel base: 0x80200000)
+- **Orange Pi RV2**: Real hardware support with Allwinner D1 SoC (kernel base: 0x00200000)
+- **U-Boot Integration**: Boot menu scripts for dual-boot between Linux and xv6
+- **Flat Binary Output**: `xv6.bin` for direct hardware loading
+- **SBI Console**: Early console output via SBI before UART initialization
 
 ### System Calls
 Complete POSIX-style system call interface including:
@@ -230,9 +239,25 @@ cd build
 # Configure with CMake
 cmake ..
 
-# Build kernel and user programs
+# Build kernel and user programs (for QEMU)
 make -j$(nproc)
 ```
+
+**Building for Orange Pi RV2:**
+
+```bash
+# Build Orange Pi deployment files (xv6.bin, xv6.sym, U-Boot scripts)
+make orangepi
+
+# Deploy to Orange Pi via SCP
+cmake .. -DORANGEPI_IP=192.168.0.201
+make deploy
+```
+
+The `orangepi` target builds:
+- `kernel/xv6.bin`: Flat binary for direct loading (base address 0x00200000)
+- `kernel/xv6.sym`: Symbol table for debugging
+- `kernel/*.scr`: Compiled U-Boot scripts for boot menu
 
 **Note**: Do not use the root directory Makefile - it is obsolete and for reference only. Always use the CMake build system as described above.
 
@@ -609,18 +634,20 @@ Common GDB commands:
 
 Building a complete, stable Unix-like operating system:
 
-1. **Dynamic Memory Probing & Page Frames** - Memory detection, zones (DMA/Normal), per-CPU caches
-2. **✅ Interrupt Handling** *(COMPLETED)* - Separate interrupt/kernel stacks (16KB per CPU), nested interrupt support, dual-entry trap handlers
-3. **Process Scheduling** - Implement MLFQ or CFS, priority levels, CPU affinity
-4. **Enhanced Kernel Threads** - Thread pools, work queues (for bottom-half), priorities
-5. **Multi-User Support** - User/group IDs, permission checking, setuid/setgid
-6. **Standard LibC** - POSIX-compliant file I/O, strings, time, math functions
-7. **TTY/Terminal** - Line discipline, job control, PTY support
-8. **Block Device Layer** - Generic block I/O, I/O scheduler, partition support
-9. **Pseudo-Filesystems** - devfs, basic procfs (/proc/<pid>/status, /proc/meminfo)
-10. **Async VFS** - Non-blocking I/O, aio_read/aio_write, epoll/select
-11. **Network Enhancements** - TCP improvements, UDP, UNIX sockets (benefits from interrupt improvements)
-12. **FS Features** - EXT2 support, journaling, xattrs, file locking
+1. **✅ Dynamic Memory Probing & Device Config** *(PARTIAL)* - FDT-based memory detection, runtime device addresses
+2. **✅ Interrupt Handling** *(COMPLETED)* - Separate interrupt/kernel stacks (16KB per CPU), nested interrupt support
+3. **✅ Orange Pi RV2 Hardware Support** *(COMPLETED)* - Real hardware support with U-Boot integration
+4. **✅ VM Locking** *(COMPLETED)* - Two-level locking (rwlock + spinlock), reference counting
+5. **Process Scheduling** - Implement MLFQ or CFS, priority levels, CPU affinity
+6. **Enhanced Kernel Threads** - Thread pools, work queues (for bottom-half), priorities
+7. **Multi-User Support** - User/group IDs, permission checking, setuid/setgid
+8. **Standard LibC** - POSIX-compliant file I/O, strings, time, math functions
+9. **TTY/Terminal** - Line discipline, job control, PTY support
+10. **Block Device Layer** - Generic block I/O, I/O scheduler, partition support
+11. **Pseudo-Filesystems** - devfs, basic procfs (/proc/<pid>/status, /proc/meminfo)
+12. **Async VFS** - Non-blocking I/O, aio_read/aio_write, epoll/select
+13. **Network Enhancements** - TCP improvements, UDP, UNIX sockets
+14. **FS Features** - EXT2 support, journaling, xattrs, file locking
 
 ### 🚀 Long-Term Goals (Ambitious)
 
@@ -693,6 +720,6 @@ This enhanced version includes significant new implementations:
 
 **Status**: Active Development  
 **Target Platform**: RISC-V 64-bit (RV64GC)  
-**Emulation**: QEMU virt machine  
+**Supported Hardware**: QEMU virt machine, Orange Pi RV2  
 **Build System**: CMake 3.10+  
-**Last Updated**: December 2025
+**Last Updated**: January 2026

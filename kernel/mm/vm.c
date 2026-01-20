@@ -887,10 +887,30 @@ vm_t *vm_init(uint64 trapframe) {
     return vm;
 }
 
+/**
+ * @brief Increment VM reference count
+ *
+ * Used when sharing a VM between processes (e.g., threads).
+ * The VM will not be destroyed until all references are released.
+ *
+ * @param vm VM to duplicate reference to
+ * @note Thread-safe via atomic increment
+ * @see vm_put()
+ */
 void vm_dup(vm_t *vm) {
     atomic_inc(&vm->refcount);
 }
 
+/**
+ * @brief Decrement VM reference count and destroy if last reference
+ *
+ * Releases one reference to the VM. When the reference count reaches zero,
+ * the VM and all its VMAs are destroyed.
+ *
+ * @param vm VM to release
+ * @note Thread-safe via atomic decrement
+ * @see vm_dup()
+ */
 void vm_put(vm_t *vm) {
     if (!atomic_dec_unless(&vm->refcount, 1)) {
         // By now, suppose only the processes holding a reference to this VM can
@@ -900,26 +920,53 @@ void vm_put(vm_t *vm) {
     }
 }
 
+/**
+ * @brief Acquire VM read lock for VMA tree traversal
+ * @param vm VM to lock
+ * @note Safe to hold across blocking operations (rwlock)
+ */
 void vm_rlock(vm_t *vm) {
     rwlock_acquire_read(&vm->rw_lock);
 }
 
+/**
+ * @brief Release VM read lock
+ * @param vm VM to unlock
+ */
 void vm_runlock(vm_t *vm) {
     rwlock_release(&vm->rw_lock);
 }
 
+/**
+ * @brief Acquire VM write lock for VMA tree modification
+ * @param vm VM to lock
+ * @note Required for va_alloc(), va_free(), vma_split(), vma_merge()
+ */
 void vm_wlock(vm_t *vm) {
     rwlock_acquire_write(&vm->rw_lock);
 }
 
+/**
+ * @brief Release VM write lock
+ * @param vm VM to unlock
+ */
 void vm_wunlock(vm_t *vm) {
     rwlock_release(&vm->rw_lock);
 }
 
+/**
+ * @brief Acquire VM page table spinlock for PTE modifications
+ * @param vm VM to lock
+ * @warning Do not sleep while holding this lock
+ */
 void vm_pgtable_lock(vm_t *vm) {
     spin_acquire(&vm->spinlock);
 }
 
+/**
+ * @brief Release VM page table spinlock
+ * @param vm VM to unlock
+ */
 void vm_pgtable_unlock(vm_t *vm) {
     spin_release(&vm->spinlock);
 }

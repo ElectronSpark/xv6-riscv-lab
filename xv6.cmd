@@ -1,3 +1,19 @@
+# xv6.cmd - U-Boot script to load and boot xv6-riscv kernel
+#
+# This script is sourced from boot.cmd when xv6 boot is selected.
+# It loads the xv6 kernel binary and device tree, then jumps to the kernel.
+#
+# Requirements:
+#   - xv6.bin: Flat binary kernel at /boot/xv6.bin
+#   - Device tree: /boot/dtb/${fdtfile}
+#   - Kernel must be linked for KERNEL_BASE=0x200000 (Orange Pi)
+#
+# Boot sequence:
+#   1. Load orangepiEnv.txt for fdtfile variable
+#   2. Load xv6.bin to 0x200000
+#   3. Load device tree to fdt_addr_r
+#   4. Jump to kernel entry point
+#
 # xv6-riscv boot script for U-Boot
 #
 # This script loads and boots the xv6 RISC-V kernel

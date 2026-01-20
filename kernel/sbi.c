@@ -342,9 +342,15 @@ void sbi_start_secondary_harts(unsigned long start_addr) {
     }
 }
 
-// Early console output using SBI (before UART is initialized)
-// Uses DBCN extension if available, falls back to legacy console putchar
-
+/**
+ * @brief Output a character via SBI console
+ *
+ * Used for early boot console output before UART is initialized.
+ * Uses legacy SBI console putchar which is widely supported.
+ *
+ * @param c Character to output
+ * @note Cannot use DBCN extension here due to circular dependency with printf
+ */
 void sbi_console_putchar(int c) {
     // Try DBCN extension first (modern SBI)
     // Note: We can't check sbi_ext_available here because that requires
@@ -353,12 +359,20 @@ void sbi_console_putchar(int c) {
     sbi_ecall(SBI_EXT_LEGACY_CONSOLE_PUTCHAR, 0, c, 0, 0, 0, 0, 0);
 }
 
+/**
+ * @brief Output a string via SBI console
+ * @param s Null-terminated string to output
+ */
 void sbi_console_puts(const char *s) {
     while (*s) {
         sbi_console_putchar(*s++);
     }
 }
 
+/**
+ * @brief Read a character from SBI console
+ * @return Character read, or -1 if no character available
+ */
 int sbi_console_getchar(void) {
     struct sbiret ret = sbi_ecall(SBI_EXT_LEGACY_CONSOLE_GETCHAR, 0, 0, 0, 0, 0, 0, 0);
     if (ret.error < 0)
