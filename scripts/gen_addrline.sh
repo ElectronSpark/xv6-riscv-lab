@@ -3,7 +3,7 @@
 # Usage: gen_addrline.sh <objdump> <elf_file> <output_file>
 #
 # Output format:
-#   <file name>:
+#   <relative file path>:
 #   :<symbol>
 #   <start address> <end address(not include)> <line number>
 #   ...
@@ -19,12 +19,38 @@ if [ $# -ne 3 ]; then
     exit 1
 fi
 
+# Get project root (parent of build directory, or where CMakeLists.txt is)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
 # Extract symbols sorted numerically by address, and DWARF line info
 # Then merge them in a single awk pass with binary search for O(n log m) complexity
 
 "$OBJDUMP" -t "$ELF_FILE" | awk '/^[0-9a-f]+ / && $NF !~ /^\./ {print "S", $1, $NF}' | \
     sort -k2 | \
-    cat - <("$OBJDUMP" --dwarf=decodedline "$ELF_FILE" | awk 'NF >= 3 && $2 ~ /^[0-9]+$/ {print "L", $3, $1, $2}') | \
+    cat - <("$OBJDUMP" --dwarf=decodedline "$ELF_FILE" | awk -v project_root="$PROJECT_ROOT" '
+    # Track the current full path from section headers
+    /^[^[:space:]].*:$/ && !/file format/ {
+        # This is a section header with full path
+        current_path = $0
+        sub(/:$/, "", current_path)
+        # Make it relative to project root
+        if (index(current_path, project_root) == 1) {
+            current_path = substr(current_path, length(project_root) + 2)
+        }
+        # Remove leading slashes if any
+        sub(/^\/+/, "", current_path)
+        next
+    }
+    # Output line entries with the current path
+    NF >= 3 && $2 ~ /^[0-9]+$/ {
+        if (current_path != "") {
+            print "L", $3, current_path, $2
+        } else {
+            print "L", $3, $1, $2
+        }
+    }
+    ') | \
     awk '
 BEGIN {
     nsym = 0
