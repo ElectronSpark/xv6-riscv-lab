@@ -7,20 +7,81 @@
 #include "proc/proc.h"
 #include "defs.h"
 #include "printf.h"
+#include "bintree.h"
+#include "rbtree.h"
 
 uint64 __kernel_symbols_base = 0x88200000LL;
 size_t __kernel_symbols_size = 0x100000;
 
 extern char stack0[];
 
-// Names end with a newline character or a null terminator.
+// New format:
+// <file name>:
+// :<symbol>
+// <start address> <end address(not include)> <line number>
+// ...
 typedef struct {
-    void *addr;
-    size_t size;
-    const char *name;
+    struct rb_node rb;      // rb-tree node, keyed by start_addr
+    void *start_addr;
+    void *end_addr;
+    uint32 line;
+    const char *symbol;     // Points to symbol name (after ':')
+    uint16 symbol_len;
+    const char *filename;   // Points to filename (before ':')
+    uint16 filename_len;
 } __ksymbols_t;
 
-static __ksymbols_t *__ksymbols;
+// rb-tree ops for symbol lookup
+// Two-level key: start_addr first, then node address as tie-breaker
+// This allows multiple entries with the same start_addr
+static int ksym_keys_cmp(uint64 a, uint64 b) {
+    __ksymbols_t *sym_a = (__ksymbols_t *)a;
+    __ksymbols_t *sym_b = (__ksymbols_t *)b;
+    
+    // Primary key: start_addr
+    if ((uint64)sym_a->start_addr < (uint64)sym_b->start_addr) return -1;
+    if ((uint64)sym_a->start_addr > (uint64)sym_b->start_addr) return 1;
+    
+    // Secondary key: node address (tie-breaker for duplicates)
+    if (a < b) return -1;
+    if (a > b) return 1;
+    return 0;
+}
+
+static uint64 ksym_get_key(struct rb_node *node) {
+    __ksymbols_t *sym = container_of(node, __ksymbols_t, rb);
+    return (uint64)sym;  // Return pointer to the symbol struct as key
+}
+
+static struct rb_root_opts __ksym_rb_opts = {
+    .keys_cmp_fun = ksym_keys_cmp,
+    .get_key_fun = ksym_get_key,
+};
+
+// Special comparison for "round down" search - finds first node with start_addr >= target
+// When keys are equal, return 1 to continue searching left (find minimum)
+static int ksym_keys_cmp_rdown(uint64 a, uint64 b) {
+    __ksymbols_t *sym_a = (__ksymbols_t *)a;
+    __ksymbols_t *sym_b = (__ksymbols_t *)b;
+    
+    if ((uint64)sym_a->start_addr < (uint64)sym_b->start_addr) return -1;
+    if ((uint64)sym_a->start_addr > (uint64)sym_b->start_addr) return 1;
+    // Equal start_addr: return 1 to find the first (minimum) entry
+    if (a == 0) return 0;  // Dummy node comparison
+    return 1;
+}
+
+static struct rb_root_opts __ksym_rb_rdown_opts = {
+    .keys_cmp_fun = ksym_keys_cmp_rdown,
+    .get_key_fun = ksym_get_key,
+};
+
+static struct rb_root __ksym_rb_root = {
+    .node = NULL,
+    .opts = &__ksym_rb_opts,
+};
+
+static __ksymbols_t *__ksymbols;    // Storage pool for symbol entries
 
 static int __ksymbol_count = -1;
 
@@ -51,122 +112,210 @@ strtoul(const char *nptr, char **endptr, int base)
     return result;
 }
 
-static inline void
-__ksymbol_parse(int idx,
-                const char *saddr_start, 
-                const char *saddr_end, 
-                const char *sname_start, 
-                const char *sname_end)
-{
-    assert(idx < KERNEL_SYMBOLS_IDX_SIZE / sizeof(*__ksymbols), "Too many symbols %d", idx);
-    assert(saddr_end - saddr_start > 0, "Invalid symbol address range [%p, %p)", 
-           saddr_start, saddr_end);
-    assert(sname_start >= 0 && sname_end > sname_start, "Invalid symbol name range [%p, %p)", 
-           sname_start, sname_end);
-    assert(saddr_end - saddr_start < 32, "Symbol address too long [%p, %p)", 
-           saddr_start, saddr_end);
-
-    char saddr_str[32] = { 0 };
-    strncpy(saddr_str, saddr_start, saddr_end - saddr_start);
-    __ksymbols[idx].addr = (void *)strtoul(saddr_str, NULL, 16);
-    __ksymbols[idx].size = sname_end - sname_start;
-    __ksymbols[idx].name = sname_start;
-}
-
 void
 ksymbols_init(void)
 {
     __ksymbols = (void *)KERNEL_SYMBOLS_IDX_START;
     __ksymbol_count = 0;
 
-    int saddr_start = 0;
-    int saddr_end = -1;
-    int sname_start = -1;
-    int sname_end = -1;
-    for (const char *p = (const char *)KERNEL_SYMBOLS_START; 
-         p < (const char *)KERNEL_SYMBOLS_END; p++) {
+    const char *current_file = NULL;
+    int current_file_len = 0;
+    const char *current_symbol = NULL;
+    int current_symbol_len = 0;
+    
+    const char *line_start = (const char *)KERNEL_SYMBOLS_START;
+    const char *end = (const char *)KERNEL_SYMBOLS_END;
+    
+    for (const char *p = line_start; p < end; p++) {
         if (*p == '\n' || *p == '\0') {
-            sname_end = p - (const char *)KERNEL_SYMBOLS_START;
-            // printf("%d %d %d %d\n", saddr_start, saddr_end, sname_start, sname_end);
-            if (saddr_end == -1 || sname_start == -1 || sname_end == -1) {
-                // Invalid symbol line, skip
-                saddr_start = p - (const char *)KERNEL_SYMBOLS_START + 1;
+            const char *line_end = p;
+            int line_len = line_end - line_start;
+            
+            if (line_len == 0) {
+                // Empty line, skip
+            } else if (line_start[line_len - 1] == ':' && line_start[0] != ':') {
+                // File header: "filename:"
+                current_file = line_start;
+                current_file_len = line_len - 1;  // Exclude ':'
+            } else if (line_start[0] == ':') {
+                // Symbol header: ":symbol"
+                current_symbol = line_start + 1;  // Skip ':'
+                current_symbol_len = line_len - 1;
             } else {
-                __ksymbol_parse(__ksymbol_count,
-                    (const char *)KERNEL_SYMBOLS_START + saddr_start,
-                    (const char *)KERNEL_SYMBOLS_START + saddr_end,
-                    (const char *)KERNEL_SYMBOLS_START + sname_start,
-                    (const char *)KERNEL_SYMBOLS_START + sname_end);
-                __ksymbol_count++;
-                saddr_start = sname_end + 1;
+                // Address line: "start_addr end_addr line_number"
+                // Parse start address
+                char *next = NULL;
+                uint64 start_addr = strtoul(line_start, &next, 16);
+                if (next && *next == ' ') {
+                    next++;
+                    uint64 end_addr = strtoul(next, &next, 16);
+                    if (next && *next == ' ') {
+                        next++;
+                        uint32 line_num = (uint32)strtoul(next, NULL, 10);
+                        
+                        // Store the entry
+                        if (__ksymbol_count < (int)(KERNEL_SYMBOLS_IDX_SIZE / sizeof(__ksymbols_t))) {
+                            __ksymbols_t *entry = &__ksymbols[__ksymbol_count];
+                            entry->start_addr = (void *)start_addr;
+                            entry->end_addr = (void *)end_addr;
+                            entry->line = line_num;
+                            entry->symbol = current_symbol;
+                            entry->symbol_len = current_symbol_len;
+                            entry->filename = current_file;
+                            entry->filename_len = current_file_len;
+                            
+                            // Initialize rb node and insert into tree
+                            entry->rb.__parent_color = 0;
+                            entry->rb.left = NULL;
+                            entry->rb.right = NULL;
+                            rb_insert_color(&__ksym_rb_root, &entry->rb);
+                            
+                            __ksymbol_count++;
+                        }
+                    }
+                }
             }
-            saddr_end = -1;
-            sname_start = -1;
-            sname_end = -1;
+            
+            line_start = p + 1;
             
             if (*p == '\0') {
-                // Reached the end of the symbols
                 break;
             }
-        } else if (*p == ' ') {
-            saddr_end = p - (char *)KERNEL_SYMBOLS_START;
-            sname_start = saddr_end + 1;
         }
     }
 
-    // Sort symbols by address using bubble sort
-    for (int i = 0; i < __ksymbol_count - 1; i++) {
-        for (int j = 0; j < __ksymbol_count - 1 - i; j++) {
-            if (__ksymbols[j].addr > __ksymbols[j + 1].addr) {
-                // Swap symbols
-                __ksymbols_t temp = __ksymbols[j];
-                __ksymbols[j] = __ksymbols[j + 1];
-                __ksymbols[j + 1] = temp;
+    printf("Kernel symbols initialized: %d entries\n", __ksymbol_count);
+}
+
+// Search for symbol containing the given address using rb-tree
+// Returns pointer to __ksymbols_t or NULL if not found
+// When multiple entries have the same start_addr, find the best match
+// (where start_addr <= addr < end_addr)
+static __ksymbols_t *
+bt_search_sym(uint64 addr)
+{
+    if (__ksymbol_count <= 0) {
+        return NULL;
+    }
+
+    // Create a dummy symbol for searching with the target address
+    __ksymbols_t dummy = { .start_addr = (void *)addr };
+    
+    // Use rdown opts to find the last entry with start_addr <= addr
+    struct rb_root search_root = __ksym_rb_root;
+    search_root.opts = &__ksym_rb_rdown_opts;
+    
+    struct rb_node *node = rb_find_key_rdown(&search_root, (uint64)&dummy);
+    if (node == NULL) {
+        return NULL;
+    }
+    
+    __ksymbols_t *sym = container_of(node, __ksymbols_t, rb);
+    
+    // Check if addr is within this entry's range
+    if ((uint64)sym->start_addr <= addr && addr < (uint64)sym->end_addr) {
+        return sym;
+    }
+    
+    // If not in range, walk backwards through entries with the same start_addr
+    // to find one where addr < end_addr
+    __ksymbols_t *best = sym;  // Default to the found entry
+    uint64 target_start = (uint64)sym->start_addr;
+    
+    // Check previous entries with the same start_addr
+    struct rb_node *prev = rb_prev_node(node);
+    while (prev != NULL) {
+        __ksymbols_t *prev_sym = container_of(prev, __ksymbols_t, rb);
+        if ((uint64)prev_sym->start_addr != target_start) {
+            break;  // Different start_addr, stop
+        }
+        // Check if this entry contains the address
+        if (addr < (uint64)prev_sym->end_addr) {
+            best = prev_sym;  // This is a better match
+        }
+        prev = rb_prev_node(prev);
+    }
+    
+    // Also check following entries with the same start_addr
+    struct rb_node *next = rb_next_node(node);
+    while (next != NULL) {
+        __ksymbols_t *next_sym = container_of(next, __ksymbols_t, rb);
+        if ((uint64)next_sym->start_addr != target_start) {
+            break;  // Different start_addr, stop
+        }
+        // Check if this entry contains the address
+        if (addr < (uint64)next_sym->end_addr) {
+            // Prefer the entry with the largest end_addr (longest range)
+            if ((uint64)next_sym->end_addr > (uint64)best->end_addr) {
+                best = next_sym;
             }
         }
+        next = rb_next_node(next);
     }
-
-    printf("Kernel symbols initialized: %d symbols\n", __ksymbol_count);
+    
+    return best;
 }
 
 int
 bt_search(uint64 addr, char *buf, size_t buflen, void **return_addr)
 {
-    int found_idx = -1;
-    if (__ksymbol_count <= 0) {
+    __ksymbols_t *sym = bt_search_sym(addr);
+    if (sym == NULL) {
+        buf[0] = '\0';
         return -1;
     }
-
-    if (__ksymbols[0].addr > (void *)addr) {
-        return -1;
-    }
-
-    if (__ksymbols[__ksymbol_count - 1].addr <= (void *)addr) {
-        found_idx = __ksymbol_count - 1;
-        goto found;
-    }
-
-    int start = 0;
-    int end = __ksymbol_count - 1;
-    while (start < end) {
-        int mid = (start + end + 1) / 2;
-        if (__ksymbols[mid].addr <= (void *)addr) {
-            start = mid;
-        } else {
-            end = mid - 1;
+    
+    if (sym->symbol && sym->symbol_len > 0) {
+        size_t copy_len = sym->symbol_len;
+        if (copy_len >= buflen) {
+            copy_len = buflen - 1;
         }
+        memmove(buf, sym->symbol, copy_len);
+        buf[copy_len] = '\0';
+    } else {
+        buf[0] = '\0';
     }
-    found_idx = start;
-found:
-    if (buflen > __ksymbols[found_idx].size) {
-        buflen = __ksymbols[found_idx].size + 1;
-    }
-    memmove(buf, __ksymbols[found_idx].name, buflen - 1);
-    buf[buflen - 1] = '\0';
+    
     if (return_addr) {
-        *return_addr = __ksymbols[found_idx].addr;
+        *return_addr = sym->start_addr;
     }
-    return (void *)addr - __ksymbols[found_idx].addr;
+    
+    // Return index for backwards compatibility (though not strictly needed)
+    return (int)(sym - __ksymbols);
+}
+
+// Get file:line info for a symbol pointer
+static void
+bt_get_location_sym(__ksymbols_t *sym, char *filebuf, size_t filebuflen, uint32 *line)
+{
+    if (sym == NULL) {
+        filebuf[0] = '\0';
+        *line = 0;
+        return;
+    }
+    
+    if (sym->filename && sym->filename_len > 0) {
+        size_t copy_len = sym->filename_len;
+        if (copy_len >= filebuflen) {
+            copy_len = filebuflen - 1;
+        }
+        memmove(filebuf, sym->filename, copy_len);
+        filebuf[copy_len] = '\0';
+    } else {
+        filebuf[0] = '\0';
+    }
+    
+    *line = sym->line;
+}
+
+// Get offset from symbol start for a given address
+static int
+bt_get_offset_sym(__ksymbols_t *sym, uint64 addr)
+{
+    if (sym == NULL) {
+        return 0;
+    }
+    return (int)((void *)addr - sym->start_addr);
 }
 
 #define BT_FRAME_TOP(__fp)          ((__fp) ? *(uint64 *)((uint64)(__fp) - 16) : 0)
@@ -183,25 +332,30 @@ print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end)
          last_fp = fp, fp = BT_FRAME_TOP(fp), depth++) {
 
         if (fp < stack_start || fp >= stack_end) {
-            printf("* unknown frame: %p\n", (void *)fp);
+            printf("  * unknown frame: %p\n", (void *)fp);
             break;
         } else if (fp == 0) {
-            printf("top frame\n");
+            printf("  top frame\n");
             break;
         }
 
-        char buf[64] = { 0 };
-        void *return_addr = NULL;
+        char symbuf[64] = { 0 };
+        char filebuf[128] = { 0 };
+        uint32 line = 0;
+        void *sym_addr = NULL;
         uint64 return_addr_val = BT_RETURN_ADDRESS(last_fp);
         if (return_addr_val == 0) {
-            printf("top frame\n");
+            printf("  top frame\n");
             break;
         }
-        int offset = bt_search(return_addr_val, buf, sizeof(buf), &return_addr);
-        if (offset < 0) {
-            printf("* unknown(%p)\n", (void *)return_addr_val);
+        int idx = bt_search(return_addr_val, symbuf, sizeof(symbuf), &sym_addr);
+        if (idx < 0) {
+            printf("  * %p: unknown\n", (void *)return_addr_val);
         } else {
-            printf("* %p - %p %s(%p + %d)\n", (void *)fp, (void *)return_addr_val, buf, return_addr, offset);
+            __ksymbols_t *sym = bt_search_sym(return_addr_val);
+            bt_get_location_sym(sym, filebuf, sizeof(filebuf), &line);
+            int offset = bt_get_offset_sym(sym, return_addr_val);
+            printf("  * %s:%d: %s+%d\n", filebuf, line, symbuf, offset);
         }
     }
 }
@@ -225,17 +379,24 @@ print_proc_backtrace(struct context *ctx, uint64 kstack, int kstack_order)
     uint64 stack_start = kstack;
     uint64 stack_end = kstack + stack_size;
     
-    printf("backtrace (ra=%p, sp=%p, fp=%p):\n", 
-           (void *)ctx->ra, (void *)ctx->sp, (void *)fp);
+    printf("backtrace:\n");
     
     // First, print the return address from context (where the process will resume)
-    char buf[64] = { 0 };
-    void *return_addr = NULL;
-    int offset = bt_search(ctx->ra, buf, sizeof(buf), &return_addr);
-    if (offset < 0) {
-        printf("  > %p (resume point)\n", (void *)ctx->ra);
+    char symbuf[64] = { 0 };
+    char filebuf[128] = { 0 };
+    uint32 line = 0;
+    __ksymbols_t *sym = bt_search_sym(ctx->ra);
+    if (sym == NULL) {
+        printf("  > %p: unknown (resume point)\n", (void *)ctx->ra);
     } else {
-        printf("  > %s(%p + %d) (resume point)\n", buf, return_addr, offset);
+        if (sym->symbol && sym->symbol_len > 0) {
+            size_t copy_len = sym->symbol_len < sizeof(symbuf) - 1 ? sym->symbol_len : sizeof(symbuf) - 1;
+            memmove(symbuf, sym->symbol, copy_len);
+            symbuf[copy_len] = '\0';
+        }
+        bt_get_location_sym(sym, filebuf, sizeof(filebuf), &line);
+        int offset = bt_get_offset_sym(sym, ctx->ra);
+        printf("  > %s:%d: %s+%d (resume point)\n", filebuf, line, symbuf, offset);
     }
     
     // Now walk the stack frames
@@ -270,11 +431,20 @@ print_proc_backtrace(struct context *ctx, uint64 kstack, int kstack_order)
             last_return_addr = return_addr_val;
         }
         
-        offset = bt_search(return_addr_val, buf, sizeof(buf), &return_addr);
-        if (offset < 0) {
-            printf("  * %p\n", (void *)return_addr_val);
+        sym = bt_search_sym(return_addr_val);
+        if (sym == NULL) {
+            printf("  * %p: unknown\n", (void *)return_addr_val);
         } else {
-            printf("  * %s(%p + %d)\n", buf, return_addr, offset);
+            if (sym->symbol && sym->symbol_len > 0) {
+                size_t copy_len = sym->symbol_len < sizeof(symbuf) - 1 ? sym->symbol_len : sizeof(symbuf) - 1;
+                memmove(symbuf, sym->symbol, copy_len);
+                symbuf[copy_len] = '\0';
+            } else {
+                symbuf[0] = '\0';
+            }
+            bt_get_location_sym(sym, filebuf, sizeof(filebuf), &line);
+            int offset = bt_get_offset_sym(sym, return_addr_val);
+            printf("  * %s:%d: %s+%d\n", filebuf, line, symbuf, offset);
         }
     }
 }

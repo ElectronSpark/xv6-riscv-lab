@@ -54,6 +54,13 @@ void *memcpy(void *dst, const void *src, size_t n)
   return memmove(dst, src, n);
 }
 
+int strcmp(const char *p, const char *q)
+{
+    while(*p && *p == *q) {
+        p++, q++;
+    }
+    return *p - *q;
+}
 
 int strncmp(const char *p, const char *q, size_t n)
 {
@@ -169,6 +176,21 @@ char *strtok(char *str, const char *delim)
 {
     static char *saveptr;
     return strtok_r(str, delim, &saveptr);
+}
+
+// Bounded substring search
+char* strstr(char *haystack, const char *needle) {
+    size_t needle_len = strlen(needle);
+    if (needle_len == 0)
+        return haystack;
+
+    size_t haystack_len = strlen(haystack);
+
+    for (size_t i = 0; i <= haystack_len - needle_len; i++) {
+        if (strncmp(haystack + i, needle, needle_len) == 0)
+            return haystack + i;
+    }
+    return 0;
 }
 
 char *strndup(const char *s, size_t n) {

@@ -29,7 +29,7 @@ extern size_t __kernel_symbols_size;
 #define KERNEL_SYMBOLS_SIZE     __kernel_symbols_size
 #define KERNEL_SYMBOLS_END      (KERNEL_SYMBOLS_START + KERNEL_SYMBOLS_SIZE)
 #define KERNEL_SYMBOLS_IDX_START KERNEL_SYMBOLS_END
-#define KERNEL_SYMBOLS_IDX_SIZE 0x80000
+#define KERNEL_SYMBOLS_IDX_SIZE 0x300000  // 3MB for ~39000 entries @ 80 bytes each (with rb_node)
 #define KERNEL_SYMBOLS_IDX_END (KERNEL_SYMBOLS_IDX_START + KERNEL_SYMBOLS_IDX_SIZE)
 
 // the kernel expects there to be RAM

@@ -192,11 +192,11 @@ add_custom_target(${KERNEL_DECOMPILED}
     DEPENDS ${KERNEL_BINARY}
 )
 
-# extract symbols from the kernel binary
+# Generate address-to-line mapping for QEMU kernel (replaces kernel.sym)
 add_custom_target(${KERNEL_SYMBOLS}
-    COMMAND ${CMAKE_OBJDUMP} -t ${KERNEL_BINARY} | sed '1,/SYMBOL TABLE/d\; s/ .* / /\; /^$$/d' > ${KERNEL_SYMBOLS}
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/gen_addrline.sh ${CMAKE_OBJDUMP} ${KERNEL_BINARY} ${KERNEL_SYMBOLS}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Extracting symbols from kernel binary to ${KERNEL_SYMBOLS}"
+    COMMENT "Generating symbols and address-to-line mapping to ${KERNEL_SYMBOLS}"
     DEPENDS ${KERNEL_BINARY}
 )
 
@@ -244,13 +244,13 @@ add_custom_command(
     DEPENDS ${KERNEL_ORANGEPI_ELF}
 )
 
-# Generate symbols for Orange Pi kernel
+# Generate symbols and address-to-line mapping for Orange Pi kernel
 set(KERNEL_SYM_DEPLOY xv6.sym)
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_SYM_DEPLOY}
-    COMMAND ${CMAKE_OBJDUMP} -t ${KERNEL_ORANGEPI_ELF} | sed '1,/SYMBOL TABLE/d\; s/ .* / /\; /^$$/d' > ${KERNEL_SYM_DEPLOY}
+    COMMAND ${CMAKE_SOURCE_DIR}/scripts/gen_addrline.sh ${CMAKE_OBJDUMP} ${KERNEL_ORANGEPI_ELF} ${KERNEL_SYM_DEPLOY}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Extracting symbols from Orange Pi kernel to ${KERNEL_SYM_DEPLOY}"
+    COMMENT "Generating symbols and address-to-line mapping to ${KERNEL_SYM_DEPLOY}"
     DEPENDS ${KERNEL_ORANGEPI_ELF}
 )
 
