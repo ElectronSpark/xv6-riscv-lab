@@ -2,11 +2,15 @@
 # Generate address-to-line mapping from DWARF debug info
 # Usage: gen_addrline.sh <objdump> <elf_file> <output_file>
 #
-# Output format:
+# Output format (optimized - adjacent symbols share boundaries):
 #   <relative file path>:
 #   :<symbol>
-#   <start address> <end address(not include)> <line number>
+#   <start address> <line number>
 #   ...
+#   :/
+#
+# The ':/' guard marks the end of each file's symbols.
+# Lookup finds entry with largest start_addr <= target.
 
 set -e
 
@@ -94,6 +98,7 @@ function find_symbol(addr,    lo, hi, mid) {
 END {
     current_file = ""
     current_sym = ""
+    last_addr = ""
     
     for (i = 0; i < nentries; i++) {
         file = entries_file[i]
@@ -102,16 +107,14 @@ END {
         addr_num = strtonum(addr)
         sym = find_symbol(addr_num)
         
-        # Determine end address
-        if (i + 1 < nentries) {
-            end_addr = entries_addr[i + 1]
-        } else {
-            end_addr = addr
-        }
-        
         # Print file header if changed
         if (file != current_file) {
-            if (current_file != "") print ""
+            # End previous file with guard symbol
+            if (current_file != "" && last_addr != "") {
+                print ":/"
+                print last_addr, "0"
+            }
+            print ""
             print file ":"
             current_file = file
             current_sym = ""
@@ -123,12 +126,17 @@ END {
             current_sym = sym
         }
         
-        # Print start address, end address, line number (strip 0x prefix)
+        # Print start address and line number only (strip 0x prefix)
         start_hex = addr
-        end_hex = end_addr
         sub(/^0x/, "", start_hex)
-        sub(/^0x/, "", end_hex)
-        printf "%s %s %s\n", start_hex, end_hex, line
+        printf "%s %s\n", start_hex, line
+        last_addr = start_hex
+    }
+    
+    # End last file with guard symbol
+    if (current_file != "" && last_addr != "") {
+        print ":/"
+        print last_addr, "0"
     }
 }
 ' > "$OUTPUT_FILE"

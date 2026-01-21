@@ -12,15 +12,19 @@
 
 extern char stack0[];
 
-// New format:
+// New format (optimized - adjacent symbols share boundaries):
 // <file name>:
 // :<symbol>
-// <start address> <end address(not include)> <line number>
+// <start address> <line number>
 // ...
+// :/
+// <end address> 0
+//
+// The ':/' guard marks end of each file's symbols (line=0).
+// Lookup finds entry with largest start_addr <= target.
 typedef struct {
     struct rb_node rb;      // rb-tree node, keyed by start_addr
     void *start_addr;
-    void *end_addr;
     uint32 line;
     const char *symbol;     // Points to symbol name (after ':')
     uint16 symbol_len;
@@ -148,36 +152,31 @@ ksymbols_init(void)
                 current_symbol = line_start + 1;  // Skip ':'
                 current_symbol_len = line_len - 1;
             } else {
-                // Address line: "start_addr end_addr line_number"
+                // Address line: "start_addr line_number"
                 // Parse start address
                 char *next = NULL;
                 uint64 start_addr = strtoul(line_start, &next, 16);
                 if (next && *next == ' ') {
                     next++;
-                    uint64 end_addr = strtoul(next, &next, 16);
-                    if (next && *next == ' ') {
-                        next++;
-                        uint32 line_num = (uint32)strtoul(next, NULL, 10);
+                    uint32 line_num = (uint32)strtoul(next, NULL, 10);
+                    
+                    // Store the entry
+                    if (__ksymbol_count < (int)(KERNEL_SYMBOLS_IDX_SIZE / sizeof(__ksymbols_t))) {
+                        __ksymbols_t *entry = &__ksymbols[__ksymbol_count];
+                        entry->start_addr = (void *)start_addr;
+                        entry->line = line_num;
+                        entry->symbol = current_symbol;
+                        entry->symbol_len = current_symbol_len;
+                        entry->filename = current_file;
+                        entry->filename_len = current_file_len;
                         
-                        // Store the entry
-                        if (__ksymbol_count < (int)(KERNEL_SYMBOLS_IDX_SIZE / sizeof(__ksymbols_t))) {
-                            __ksymbols_t *entry = &__ksymbols[__ksymbol_count];
-                            entry->start_addr = (void *)start_addr;
-                            entry->end_addr = (void *)end_addr;
-                            entry->line = line_num;
-                            entry->symbol = current_symbol;
-                            entry->symbol_len = current_symbol_len;
-                            entry->filename = current_file;
-                            entry->filename_len = current_file_len;
-                            
-                            // Initialize rb node and insert into tree
-                            entry->rb.__parent_color = 0;
-                            entry->rb.left = NULL;
-                            entry->rb.right = NULL;
-                            rb_insert_color(&__ksym_rb_root, &entry->rb);
-                            
-                            __ksymbol_count++;
-                        }
+                        // Initialize rb node and insert into tree
+                        entry->rb.__parent_color = 0;
+                        entry->rb.left = NULL;
+                        entry->rb.right = NULL;
+                        rb_insert_color(&__ksym_rb_root, &entry->rb);
+                        
+                        __ksymbol_count++;
                     }
                 }
             }
@@ -195,8 +194,8 @@ ksymbols_init(void)
 
 // Search for symbol containing the given address using rb-tree
 // Returns pointer to __ksymbols_t or NULL if not found
-// When multiple entries have the same start_addr, find the best match
-// (where start_addr <= addr < end_addr)
+// Finds entry with largest start_addr <= addr
+// Guard entries (symbol='/') have line=0 and are skipped
 static __ksymbols_t *
 bt_search_sym(uint64 addr)
 {
@@ -218,48 +217,12 @@ bt_search_sym(uint64 addr)
     
     __ksymbols_t *sym = container_of(node, __ksymbols_t, rb);
     
-    // Check if addr is within this entry's range
-    if ((uint64)sym->start_addr <= addr && addr < (uint64)sym->end_addr) {
-        return sym;
+    // Skip guard entries (symbol='/' has line=0)
+    if (sym->line == 0) {
+        return NULL;
     }
     
-    // If not in range, walk backwards through entries with the same start_addr
-    // to find one where addr < end_addr
-    __ksymbols_t *best = sym;  // Default to the found entry
-    uint64 target_start = (uint64)sym->start_addr;
-    
-    // Check previous entries with the same start_addr
-    struct rb_node *prev = rb_prev_node(node);
-    while (prev != NULL) {
-        __ksymbols_t *prev_sym = container_of(prev, __ksymbols_t, rb);
-        if ((uint64)prev_sym->start_addr != target_start) {
-            break;  // Different start_addr, stop
-        }
-        // Check if this entry contains the address
-        if (addr < (uint64)prev_sym->end_addr) {
-            best = prev_sym;  // This is a better match
-        }
-        prev = rb_prev_node(prev);
-    }
-    
-    // Also check following entries with the same start_addr
-    struct rb_node *next = rb_next_node(node);
-    while (next != NULL) {
-        __ksymbols_t *next_sym = container_of(next, __ksymbols_t, rb);
-        if ((uint64)next_sym->start_addr != target_start) {
-            break;  // Different start_addr, stop
-        }
-        // Check if this entry contains the address
-        if (addr < (uint64)next_sym->end_addr) {
-            // Prefer the entry with the largest end_addr (longest range)
-            if ((uint64)next_sym->end_addr > (uint64)best->end_addr) {
-                best = next_sym;
-            }
-        }
-        next = rb_next_node(next);
-    }
-    
-    return best;
+    return sym;
 }
 
 int
