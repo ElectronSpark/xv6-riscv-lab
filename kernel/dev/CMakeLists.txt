@@ -4,4 +4,5 @@ add_library(dev OBJECT
     cdev.c
     blkdev.c
     bio.c
+    fdt.c
 )
