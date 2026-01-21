@@ -5,13 +5,20 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
     message(FATAL_ERROR "In-source builds are not allowed. Please create a 'build' directory and run 'cmake ..' from there.")
 endif()
 
-# For bare-metal cross-compilers (like riscv64-unknown-elf-gcc), skip the
-# linker test during compiler verification. These compilers don't have
-# standard C libraries (libc, crt0.o, etc.) so linking a test executable fails.
-set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+# ==============================================================================
+# Platform Configuration
+# ==============================================================================
+# Read PLATFORM from environment variable, default to "qemu"
+if(DEFINED ENV{PLATFORM})
+    set(PLATFORM "$ENV{PLATFORM}")
+else()
+    set(PLATFORM "qemu")
+endif()
 
-# Project name
-project(xv6-riscv LANGUAGES C ASM)
+# Validate platform
+if(NOT PLATFORM MATCHES "^(qemu|orangepi)$")
+    message(FATAL_ERROR "Invalid PLATFORM: ${PLATFORM}. Must be 'qemu' or 'orangepi'")
+endif()
 
 # ==============================================================================
 # OpenSBI Configuration
@@ -45,30 +52,48 @@ if(OPENSBI_MODE STREQUAL "external")
     if(NOT OPENSBI_PATH OR NOT EXISTS "${OPENSBI_PATH}")
         message(FATAL_ERROR "OPENSBI_MODE is 'external' but OPENSBI_PATH is not set or file doesn't exist: ${OPENSBI_PATH}")
     endif()
-    message(STATUS "Using external OpenSBI: ${OPENSBI_PATH}")
 endif()
 
-# Build OpenSBI from source if requested
+# ==============================================================================
+# LAB Configuration
+# ==============================================================================
+# Set default value for LAB environment variable
+if(NOT DEFINED ENV{LAB} OR "$ENV{LAB}" STREQUAL "")
+    set(ENV{LAB} "util")
+endif()
+set(LAB_NAME "$ENV{LAB}")
+
+# ==============================================================================
+# Display Build Configuration Banner
+# ==============================================================================
+message(STATUS "")
+message(STATUS "========================================")
+message(STATUS "  xv6-riscv build configuration")
+message(STATUS "----------------------------------------")
+message(STATUS "  Platform:     ${PLATFORM}")
+message(STATUS "  OpenSBI:      ${OPENSBI_MODE}")
+message(STATUS "  Lab:          ${LAB_NAME}")
+message(STATUS "========================================")
+message(STATUS "")
+
+# Build OpenSBI from source if requested (after banner)
 if(OPENSBI_MODE STREQUAL "build")
     add_subdirectory(opensbi)
     set(OPENSBI_PATH ${OPENSBI_FW_JUMP})
     message(STATUS "OpenSBI will be built from source: ${OPENSBI_PATH}")
 endif()
 
-message(STATUS "OpenSBI mode: ${OPENSBI_MODE}")
-
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-
-# # Set the C standard to C19
-# set(CMAKE_C_STANDARD 17)  # CMake uses 17 for C18/C19
 
 find_package(Perl REQUIRED)
 
-# Set default value for LAB environment variable
-if(NOT DEFINED ENV{LAB} OR "$ENV{LAB}" STREQUAL "")
-    set(ENV{LAB} "util")
-    message(STATUS "Setting default LAB=util")
-endif()
+# For bare-metal cross-compilers (like riscv64-unknown-elf-gcc), skip the
+# linker test during compiler verification. These compilers don't have
+# standard C libraries (libc, crt0.o, etc.) so linking a test executable fails.
+set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
+
+# Project name
+project(xv6-riscv LANGUAGES C ASM)
 
 # Set the RISC-V toolchain using a single base path environment variable
 if(DEFINED ENV{TOOLPREFIX})
@@ -145,7 +170,6 @@ if(NOT $ENV{LAB} STREQUAL "")
         OUTPUT_STRIP_TRAILING_WHITESPACE
     )
     set(XCFLAGS "${XCFLAGS} -DSOL_${LABUPPER} -DLAB_${LABUPPER}")
-    message("In lab: ${LABUPPER}")
 else()
     message(FATAL_ERROR "Environment variable LAB is not set")
 endif()

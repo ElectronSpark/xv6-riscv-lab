@@ -235,12 +235,16 @@ target_link_options(${KERNEL_ORANGEPI_ELF} PRIVATE
 target_link_libraries(${KERNEL_ORANGEPI_ELF} PRIVATE interruption dev lock mm proc timer vfs)
 
 # Generate flat binary for direct loading (no ELF parsing needed)
+# Then patch the Linux RISC-V boot header with the actual image size
 set(KERNEL_BIN xv6.bin)
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_BIN}
     COMMAND ${CMAKE_OBJCOPY} -O binary ${KERNEL_ORANGEPI_ELF} ${KERNEL_BIN}
+    # Patch image_size field at offset 0x10 (16 bytes) with actual file size
+    # The field is 64-bit little-endian, required by U-Boot booti
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/patch_image_size.py ${KERNEL_BIN}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Generating flat binary ${KERNEL_BIN} from Orange Pi kernel (entry: ${KERNEL_BASE_ORANGEPI})"
+    COMMENT "Generating flat binary ${KERNEL_BIN} and patching Linux boot header"
     DEPENDS ${KERNEL_ORANGEPI_ELF}
 )
 

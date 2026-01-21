@@ -1,22 +1,7 @@
-# xv6.cmd - U-Boot script to load and boot xv6-riscv kernel
-#
-# This script is sourced from boot.cmd when xv6 boot is selected.
-# It loads the xv6 kernel binary and device tree, then jumps to the kernel.
-#
-# Requirements:
-#   - xv6.bin: Flat binary kernel at /boot/xv6.bin
-#   - Device tree: /boot/dtb/${fdtfile}
-#   - Kernel must be linked for KERNEL_BASE=0x200000 (Orange Pi)
-#
-# Boot sequence:
-#   1. Load orangepiEnv.txt for fdtfile variable
-#   2. Load xv6.bin to 0x200000
-#   3. Load device tree to fdt_addr_r
-#   4. Jump to kernel entry point
-#
 # xv6-riscv boot script for U-Boot
 #
 # This script loads and boots the xv6 RISC-V kernel
+# Uses booti command which properly passes DTB address and fixes up memory
 #
 
 echo "=========================================="
@@ -53,22 +38,34 @@ else
 	echo "WARNING: Failed to load device tree from ${prefix}dtb/${fdtfile}"
 fi
 
+# Load filesystem image into memory (ramdisk)
+echo "Loading filesystem image to ${ramdisk_addr_r}..."
+if load ${devtype} ${devnum} ${ramdisk_addr_r} ${prefix}fs.img; then
+	# filesize is set by U-Boot after load command
+	setenv ramdisk_size ${filesize}
+	echo "Filesystem image loaded at ${ramdisk_addr_r} (size: ${ramdisk_size})"
+else
+	echo "WARNING: Failed to load filesystem image"
+	setenv ramdisk_size 0
+fi
+
 echo ""
-echo "Booting xv6 kernel..."
-echo "Jumping to ${xv6_addr} - kernel should print '[xv6] entry'"
+echo "Booting xv6 kernel with booti..."
+echo "  Kernel: ${xv6_addr}"
+echo "  DTB: ${fdt_addr_r}"
 echo ""
 
-# Jump to kernel entry point
-# go command: a0=addr (will be overwritten), doesn't set up a0/a1 for kernel
-# We need to manually set up: a0=hartid (0), a1=dtb address
-# Unfortunately go doesn't let us set registers, so kernel must handle this
+# Boot using booti - this properly:
+# 1. Fixes up memory regions in DTB
+# 2. Passes hartid in a0, DTB address in a1
+# 3. Relocates DTB if needed
+# xv6 now has a Linux-compatible boot header
+booti ${xv6_addr} ${ramdisk_addr_r}:${ramdisk_size} ${fdt_addr_r}
 
-go ${xv6_addr}
-
-# If we get here, go failed
+# If we get here, booti failed
 echo ""
 echo "=========================================="
-echo "ERROR: go command returned - kernel did not start!"
+echo "ERROR: booti command returned - kernel did not start!"
 echo "=========================================="
 echo ""
 
