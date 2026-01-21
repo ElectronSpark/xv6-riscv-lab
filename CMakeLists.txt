@@ -154,6 +154,12 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${XCFLAGS}")
 
 add_subdirectory(kernel)
 add_subdirectory(user)
+add_subdirectory(boot)
+
+# Add uboot-scripts as dependency of orangepi target if mkimage is available
+if(MKIMAGE_FOUND)
+    add_dependencies(orangepi uboot-scripts)
+endif()
 
 # @TODO:
 # set(UEXTRA_FILES "")
@@ -206,195 +212,9 @@ add_custom_target(fs_img ALL
 
 
 # @TODO: run etags on kernel and _init
-# Find QEMU
-find_program(QEMU_EXECUTABLE NAMES qemu-system-riscv64 qemu-system-riscv32 qemu-system-riscv)
-if(NOT QEMU_EXECUTABLE)
-    message("QEMU executable not found. Please install QEMU or set the QEMU environment variable.")
-else()
-    set(QEMU ${QEMU_EXECUTABLE})
 
-    # Generate a unique GDB port
-    execute_process(
-        COMMAND bash -c "expr \$(id -u) % 5000 + 25000"
-        OUTPUT_VARIABLE GDBPORT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
+# QEMU, GDB, and debug targets
+include(${CMAKE_SOURCE_DIR}/cmake/qemu.cmake)
 
-    # Generate QEMU GDB stub options
-    # Check if QEMU supports the '-gdb' option
-    execute_process(
-        COMMAND ${QEMU} -help
-        OUTPUT_VARIABLE QEMU_HELP
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    if(QEMU_HELP MATCHES "-gdb")
-        set(QEMUGDB -gdb tcp::${GDBPORT})
-    else()
-        set(QEMUGDB -s -p ${GDBPORT})
-    endif()
-
-    # Set default CPUS
-    if(NOT DEFINED ENV{CPUS} OR "$ENV{CPUS}" STREQUAL "")
-        set(CPUS 6)
-    else()
-        set(CPUS $ENV{CPUS})
-    endif()
-
-    # If LAB is fs, set CPUS to 1
-    if(DEFINED ENV{LAB} AND "$ENV{LAB}" STREQUAL "fs")
-        set(CPUS 1)
-    endif()
-
-    # Generate unique FWDPORT1 and FWDPORT2 using CMake math and user id
-    execute_process(
-        COMMAND id -u
-        OUTPUT_VARIABLE USER_ID
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    math(EXPR FWDPORT1 "${USER_ID} % 5000 + 25999")
-    math(EXPR FWDPORT2 "${USER_ID} % 5000 + 30999")
-
-    # Configure OpenSBI BIOS option for QEMU
-    if(OPENSBI_MODE STREQUAL "none")
-        set(QEMU_BIOS_OPT -bios none)
-    elseif(OPENSBI_MODE STREQUAL "default")
-        set(QEMU_BIOS_OPT -bios default)
-    elseif(OPENSBI_MODE STREQUAL "build" OR OPENSBI_MODE STREQUAL "external")
-        set(QEMU_BIOS_OPT -bios ${OPENSBI_PATH})
-    endif()
-
-    # Compose QEMU options
-    set(QEMUOPTS_PARAM
-        ${QEMU_BIOS_OPT}
-        -kernel ${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel
-        -m 512M
-        -smp ${CPUS}
-        -nographic
-        -global virtio-mmio.force-legacy=false
-        -drive file=fs.img,if=none,format=raw,id=x0
-        -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
-        -drive file=fs0.img,if=none,format=raw,id=x1
-        -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
-        -netdev user,id=net0,hostfwd=udp::${FWDPORT1}-:2000,hostfwd=udp::${FWDPORT2}-:2001
-        -object filter-dump,id=net0,netdev=net0,file=packets.pcap
-        -device e1000,netdev=net0,bus=pcie.0
-        -device loader,addr=0x88200000,file=${CMAKE_CURRENT_BINARY_DIR}/kernel/kernel.sym,force-raw=on
-    )
-
-    set(QEMUOPTS
-        -machine virt
-        ${QEMUOPTS_PARAM}
-    )
-
-    set(QEMUOPTS_DTB
-        -machine virt,dumpdtb=${CMAKE_CURRENT_BINARY_DIR}/virt.dtb
-        ${QEMUOPTS_PARAM}
-    )
-
-    # Base dependencies for QEMU targets
-    set(QEMU_BASE_DEPS
-        kernel/kernel
-        kernel/kernel.sym
-        fs.img
-        fs0.img
-    )
-
-    add_custom_target(qemu-dts
-        COMMAND ${QEMU} ${QEMUOPTS_DTB}
-        COMMAND dtc -o virt.dts -O dts -I dtb ${CMAKE_CURRENT_BINARY_DIR}/virt.dtb
-        DEPENDS ${QEMU_BASE_DEPS}
-        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-        COMMENT "Generate the device tree file"
-    )
-
-    # Add custom target to run QEMU
-    add_custom_target(qemu
-        COMMAND ${QEMU} ${QEMUOPTS}
-        DEPENDS ${QEMU_BASE_DEPS}
-        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-        COMMENT "Running QEMU with kernel and fs.img"
-    )
-
-    # Add OpenSBI dependency if building from source
-    if(OPENSBI_MODE STREQUAL "build")
-        add_dependencies(qemu-dts ${OPENSBI_DEPENDENCY})
-        add_dependencies(qemu ${OPENSBI_DEPENDENCY})
-    endif()
-
-    # Generate .gdbinit from template
-    add_custom_command(
-        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit
-        COMMAND sed "s/:1234/:${GDBPORT}/" < ${CMAKE_SOURCE_DIR}/.gdbinit.tmpl-riscv > ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit
-        # COMMAND echo "b main" >> ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit
-        COMMAND echo "b __panic_end" >> ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit
-        COMMAND echo "thread 1" >> ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit
-        DEPENDS ${CMAKE_SOURCE_DIR}/.gdbinit.tmpl-riscv
-        COMMENT "Generating .gdbinit with unique GDB port"
-    )
-
-    add_custom_target(gdbinit ALL
-        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/.gdbinit
-    )
-
-    # Add custom target to run QEMU with GDB stub
-    add_custom_target(qemu-gdb
-        COMMAND ${CMAKE_COMMAND} -E echo "*** Now run 'gdb' in another window."
-        COMMAND ${QEMU} ${QEMUOPTS} -S ${QEMUGDB}
-        DEPENDS ${QEMU_BASE_DEPS}
-                .gdbinit
-        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-        COMMENT "Running QEMU with GDB stub"
-    )
-
-    # Add OpenSBI dependency to qemu-gdb if building from source
-    if(OPENSBI_MODE STREQUAL "build")
-        add_dependencies(qemu-gdb ${OPENSBI_DEPENDENCY})
-    endif()
-
-    # If LAB is net, generate SERVERPORT
-    if(DEFINED ENV{LAB} AND "$ENV{LAB}" STREQUAL "net")
-        execute_process(
-            COMMAND bash -c "expr \$(id -u) % 5000 + 25099"
-            OUTPUT_VARIABLE SERVERPORT
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-        )
-    endif()
-    
-    add_custom_target(print-gdbport
-        COMMAND ${CMAKE_COMMAND} -E echo "[GDBPORT NUMBER]: ${GDBPORT}"
-    )
-
-    add_custom_target(grade
-        COMMAND ${CMAKE_COMMAND} -E env 
-                LAB=$ENV{LAB}
-                python3 "grade-lab-util"
-        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-        COMMAND_EXPAND_LISTS
-        COMMENT "run grad-lab-util"
-    )
-
-    # Doxygen documentation target
-    option(BUILD_DOCUMENTATION "Create and install the HTML based API documentation (requires Doxygen)" OFF)
-    if(BUILD_DOCUMENTATION)
-        find_package(Doxygen)
-        if(NOT DOXYGEN_FOUND)
-            message(WARNING "Doxygen not found. Documentation will not be built.")
-        else()
-            set(DOXYGEN_IN ${CMAKE_SOURCE_DIR}/Doxyfile)
-            set(DOXYGEN_OUT ${CMAKE_CURRENT_BINARY_DIR}/Doxyfile)
-            
-            configure_file(${DOXYGEN_IN} ${DOXYGEN_OUT} @ONLY)
-            message(STATUS "Doxygen build started")
-            
-            add_custom_target(doc
-                COMMAND ${DOXYGEN_EXECUTABLE} ${DOXYGEN_OUT}
-                WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-                COMMENT "Generating API documentation with Doxygen"
-                VERBATIM
-            )
-            
-            message(STATUS "Documentation target 'doc' created. Run 'make doc' to generate documentation.")
-        endif()
-    endif()
-
-endif()
+# Doxygen documentation
+include(${CMAKE_SOURCE_DIR}/cmake/doc.cmake)

@@ -254,52 +254,6 @@ add_custom_command(
     DEPENDS ${KERNEL_ORANGEPI_ELF}
 )
 
-# ==============================================================================
-# U-Boot script compilation
-# ==============================================================================
-# Compile .cmd scripts to .scr format using mkimage
-# These are architecture-independent and can be compiled on any host
-
-find_program(MKIMAGE mkimage)
-
-if(MKIMAGE)
-    message(STATUS "Found mkimage: ${MKIMAGE}")
-    
-    # List of U-Boot scripts to compile
-    set(UBOOT_SCRIPTS
-        ${CMAKE_SOURCE_DIR}/boot.cmd
-        ${CMAKE_SOURCE_DIR}/xv6.cmd
-        ${CMAKE_SOURCE_DIR}/default.cmd
-    )
-    
-    set(UBOOT_SCR_FILES)
-    
-    foreach(CMD_FILE ${UBOOT_SCRIPTS})
-        if(EXISTS ${CMD_FILE})
-            get_filename_component(SCRIPT_NAME ${CMD_FILE} NAME_WE)
-            set(SCR_FILE ${CMAKE_CURRENT_BINARY_DIR}/${SCRIPT_NAME}.scr)
-            
-            add_custom_command(
-                OUTPUT ${SCR_FILE}
-                COMMAND ${MKIMAGE} -C none -A riscv -T script -d ${CMD_FILE} ${SCR_FILE}
-                DEPENDS ${CMD_FILE}
-                COMMENT "Compiling U-Boot script: ${SCRIPT_NAME}.cmd -> ${SCRIPT_NAME}.scr"
-            )
-            
-            list(APPEND UBOOT_SCR_FILES ${SCR_FILE})
-        endif()
-    endforeach()
-    
-    # Target to compile all U-Boot scripts
-    add_custom_target(uboot-scripts
-        DEPENDS ${UBOOT_SCR_FILES}
-        COMMENT "Compiling U-Boot scripts (.cmd -> .scr)"
-    )
-else()
-    message(STATUS "mkimage not found - U-Boot script compilation disabled")
-    message(STATUS "  Install with: sudo apt-get install u-boot-tools")
-endif()
-
 # Target to build deployment files for Orange Pi
 add_custom_target(orangepi
     DEPENDS 
@@ -308,32 +262,6 @@ add_custom_target(orangepi
     COMMENT "Building Orange Pi deployment files (xv6.bin, xv6.sym)"
 )
 
-# Add uboot-scripts as dependency of orangepi target if mkimage is available
-if(MKIMAGE)
-    add_dependencies(orangepi uboot-scripts)
-endif()
-
-# ==============================================================================
-# Deployment target
-# ==============================================================================
-# Deploy to Orange Pi via scp
-# Usage: cmake -DORANGEPI_IP=192.168.0.201 .. && make deploy
-# Or:    make deploy ORANGEPI_IP=192.168.0.201
-
-set(ORANGEPI_IP "192.168.0.201" CACHE STRING "Orange Pi IP address for deployment")
-set(ORANGEPI_USER "root" CACHE STRING "Orange Pi SSH user for deployment")
-set(ORANGEPI_BOOT_DIR "/boot" CACHE STRING "Orange Pi boot directory")
-
-add_custom_target(deploy
-    COMMAND scp 
-        ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_BIN}
-        ${CMAKE_CURRENT_BINARY_DIR}/${KERNEL_SYM_DEPLOY}
-        ${CMAKE_CURRENT_BINARY_DIR}/boot.scr
-        ${CMAKE_CURRENT_BINARY_DIR}/default.scr
-        ${CMAKE_CURRENT_BINARY_DIR}/xv6.scr
-        ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/
-    DEPENDS orangepi
-    COMMENT "Deploying to Orange Pi at ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/"
-)
-
-message(STATUS "Deploy target: scp to ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/")
+# Export variables needed by boot/CMakeLists.txt
+set(KERNEL_BIN ${KERNEL_BIN} PARENT_SCOPE)
+set(KERNEL_SYM_DEPLOY ${KERNEL_SYM_DEPLOY} PARENT_SCOPE)
