@@ -79,6 +79,23 @@ SECTIONS
     _data_end = .;
   }
 
+  /*
+   * Embedded kernel symbols section.
+   * This section contains the symbol table data embedded directly in the kernel.
+   * It's placed after .data but before .bss so it's included in the flat binary.
+   * The build system generates this from the first-pass kernel.
+   */
+  .ksymbols : {
+    . = ALIGN(4096);
+    _ksymbols_start = .;
+    KEEP(*(.ksymbols))
+    . = ALIGN(4096);
+    _ksymbols_end = .;
+  }
+
+  /* Mark end of loaded kernel image (before BSS) */
+  _kernel_image_end = .;
+
   .bss : {
     . = ALIGN(16);
     _bss = .;
@@ -87,6 +104,17 @@ SECTIONS
     *(.bss .bss.*)
     . = ALIGN(4096);
     _bss_end = .;
+  }
+
+  /*
+   * Reserve space for parsed symbol index (rb-tree nodes).
+   * This is in BSS (zero-initialized at runtime).
+   */
+  .ksymbols_idx (NOLOAD) : {
+    . = ALIGN(4096);
+    _ksymbols_idx_start = .;
+    . += @KERNEL_SYMBOLS_IDX_SIZE@;
+    _ksymbols_idx_end = .;
   }
 
   PROVIDE(end = .);

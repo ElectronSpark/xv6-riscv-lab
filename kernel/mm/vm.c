@@ -237,13 +237,21 @@ pagetable_t kvmmake(void) {
     kvmmap(kpgtbl, (uint64)_bss_end, (uint64)_bss_end,
            PHYSTOP - (uint64)_bss_end, PTE_R | PTE_W);
 
-    // map kernel symbols
-    kvmmap(kpgtbl, KERNEL_SYMBOLS_START, KERNEL_SYMBOLS_START,
-           KERNEL_SYMBOLS_SIZE, PTE_R);
+    // map embedded kernel symbols (read-only, part of kernel image)
+    // The .ksymbols section is between .data and .bss in the linker script
+    if (KERNEL_SYMBOLS_SIZE > 0) {
+        kvmmap(kpgtbl, KERNEL_SYMBOLS_START, KERNEL_SYMBOLS_START,
+               KERNEL_SYMBOLS_SIZE, PTE_R);
+        printf("kernel symbols 0x%lx - 0x%lx (size: %ld)\n", 
+               KERNEL_SYMBOLS_START, KERNEL_SYMBOLS_END, KERNEL_SYMBOLS_SIZE);
+    }
 
-    // map kernel symbols index
-    kvmmap(kpgtbl, KERNEL_SYMBOLS_IDX_START, KERNEL_SYMBOLS_IDX_START,
-           KERNEL_SYMBOLS_IDX_SIZE, PTE_R | PTE_W);
+    // map kernel symbols index (writable, for rb-tree nodes)
+    // This is in BSS, so already mapped, but needs to be explicitly accessible
+    if (KERNEL_SYMBOLS_IDX_SIZE > 0) {
+        printf("kernel symbols index 0x%lx - 0x%lx (size: %ld)\n",
+               KERNEL_SYMBOLS_IDX_START, KERNEL_SYMBOLS_IDX_END, KERNEL_SYMBOLS_IDX_SIZE);
+    }
 
     // allocate and map a kernel stack for each process.
     // proc_mapstacks(kpgtbl);

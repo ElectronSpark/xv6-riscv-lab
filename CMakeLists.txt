@@ -92,17 +92,14 @@ find_package(Perl REQUIRED)
 # standard C libraries (libc, crt0.o, etc.) so linking a test executable fails.
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
-# Project name
-project(xv6-riscv LANGUAGES C ASM)
-
-# Set the RISC-V toolchain using a single base path environment variable
+# Set the RISC-V toolchain BEFORE project() so CMake uses the correct compilers
+# CMake detects compilers during project() - setting them afterward has no effect
 if(DEFINED ENV{TOOLPREFIX})
     set(CMAKE_C_COMPILER $ENV{TOOLPREFIX}gcc CACHE STRING "C compiler" FORCE)
-    # set(CMAKE_ASM_COMPILER $ENV{TOOLPREFIX}as)
+    set(CMAKE_ASM_COMPILER $ENV{TOOLPREFIX}gcc CACHE STRING "ASM compiler" FORCE)
     set(CMAKE_LINKER $ENV{TOOLPREFIX}ld CACHE FILEPATH "Linker" FORCE)
     set(CMAKE_OBJCOPY $ENV{TOOLPREFIX}objcopy)
     set(CMAKE_OBJDUMP $ENV{TOOLPREFIX}objdump)
-    # Use ld directly for linking executables
     set(CMAKE_C_LINK_EXECUTABLE "$ENV{TOOLPREFIX}ld <LINK_FLAGS> -o <TARGET> <LINK_LIBRARIES> <OBJECTS>")
 else()
     # Try to find riscv64-unknown-elf tools automatically
@@ -116,6 +113,7 @@ else()
         get_filename_component(TOOLPREFIX ${RISCV_GCC} DIRECTORY)
         set(TOOLPREFIX "${TOOLPREFIX}/riscv64-unknown-elf-")
         set(CMAKE_C_COMPILER ${TOOLPREFIX}gcc CACHE STRING "C compiler" FORCE)
+        set(CMAKE_ASM_COMPILER ${TOOLPREFIX}gcc CACHE STRING "ASM compiler" FORCE)
         set(CMAKE_LINKER ${TOOLPREFIX}ld CACHE FILEPATH "Linker" FORCE)
         set(CMAKE_OBJCOPY ${TOOLPREFIX}objcopy)
         set(CMAKE_OBJDUMP ${TOOLPREFIX}objdump)
@@ -125,6 +123,9 @@ else()
         message(FATAL_ERROR "TOOLPREFIX environment variable not set and riscv64-unknown-elf tools not found in PATH or /opt/riscv/bin")
     endif()
 endif()
+
+# Project name
+project(xv6-riscv LANGUAGES C ASM)
 
 # Specify the C standard
 # set(CMAKE_C_STANDARD 17)

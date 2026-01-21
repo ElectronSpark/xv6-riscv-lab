@@ -10,9 +10,6 @@
 #include "bintree.h"
 #include "rbtree.h"
 
-uint64 __kernel_symbols_base = 0x88200000LL;
-size_t __kernel_symbols_size = 0x100000;
-
 extern char stack0[];
 
 // New format:
@@ -117,6 +114,15 @@ ksymbols_init(void)
 {
     __ksymbols = (void *)KERNEL_SYMBOLS_IDX_START;
     __ksymbol_count = 0;
+
+    // Check if symbols are embedded
+    if (KERNEL_SYMBOLS_SIZE == 0 || KERNEL_SYMBOLS_START == KERNEL_SYMBOLS_END) {
+        printf("ksymbols: no embedded symbols found\n");
+        return;
+    }
+
+    printf("ksymbols: loading embedded symbols from 0x%lx-0x%lx (%ld bytes)\n",
+           KERNEL_SYMBOLS_START, KERNEL_SYMBOLS_END, KERNEL_SYMBOLS_SIZE);
 
     const char *current_file = NULL;
     int current_file_len = 0;
@@ -396,7 +402,7 @@ print_proc_backtrace(struct context *ctx, uint64 kstack, int kstack_order)
         }
         bt_get_location_sym(sym, filebuf, sizeof(filebuf), &line);
         int offset = bt_get_offset_sym(sym, ctx->ra);
-        printf("  > %s:%d: %s+%d (resume point)\n", filebuf, line, symbuf, offset);
+        printf("  > %s:%d: %s+%d (resume point) [%p]\n", filebuf, line, symbuf, offset, (void *)ctx->ra);
     }
     
     // Now walk the stack frames
@@ -444,7 +450,7 @@ print_proc_backtrace(struct context *ctx, uint64 kstack, int kstack_order)
             }
             bt_get_location_sym(sym, filebuf, sizeof(filebuf), &line);
             int offset = bt_get_offset_sym(sym, return_addr_val);
-            printf("  * %s:%d: %s+%d\n", filebuf, line, symbuf, offset);
+            printf("  * %s:%d: %s+%d [%p]\n", filebuf, line, symbuf, offset, (void *)return_addr_val);
         }
     }
 }

@@ -22,15 +22,33 @@
 #ifndef __KERNEL_MEMORY_LAYOUT_H
 #define __KERNEL_MEMORY_LAYOUT_H
 
-// We keep the actual highest 1MB of physical memory to store symbols
-extern uint64 __kernel_symbols_base;
-extern size_t __kernel_symbols_size;
-#define KERNEL_SYMBOLS_START    __kernel_symbols_base
-#define KERNEL_SYMBOLS_SIZE     __kernel_symbols_size
-#define KERNEL_SYMBOLS_END      (KERNEL_SYMBOLS_START + KERNEL_SYMBOLS_SIZE)
-#define KERNEL_SYMBOLS_IDX_START KERNEL_SYMBOLS_END
-#define KERNEL_SYMBOLS_IDX_SIZE 0x300000  // 3MB for ~39000 entries @ 80 bytes each (with rb_node)
-#define KERNEL_SYMBOLS_IDX_END (KERNEL_SYMBOLS_IDX_START + KERNEL_SYMBOLS_IDX_SIZE)
+// ============================================================================
+// Embedded kernel symbols
+// ============================================================================
+// The symbol table is embedded directly in the kernel image (.ksymbols section).
+// These linker symbols mark the boundaries:
+//   _ksymbols_start / _ksymbols_end   - Raw symbol data (text format)
+//   _ksymbols_idx_start / _ksymbols_idx_end - Parsed index (rb-tree nodes)
+//   _kernel_image_end - End of loaded kernel image (before BSS)
+
+extern char _ksymbols_start[];
+extern char _ksymbols_end[];
+extern char _ksymbols_idx_start[];
+extern char _ksymbols_idx_end[];
+extern char _kernel_image_end[];
+
+// Raw symbol data embedded in kernel
+#define KERNEL_SYMBOLS_START    ((uint64)_ksymbols_start)
+#define KERNEL_SYMBOLS_END      ((uint64)_ksymbols_end)
+#define KERNEL_SYMBOLS_SIZE     (KERNEL_SYMBOLS_END - KERNEL_SYMBOLS_START)
+
+// Parsed symbol index (for rb-tree nodes)
+#define KERNEL_SYMBOLS_IDX_START ((uint64)_ksymbols_idx_start)
+#define KERNEL_SYMBOLS_IDX_END   ((uint64)_ksymbols_idx_end)
+#define KERNEL_SYMBOLS_IDX_SIZE  (KERNEL_SYMBOLS_IDX_END - KERNEL_SYMBOLS_IDX_START)
+
+// End of kernel image (before BSS) - used for memory calculations
+#define KERNEL_IMAGE_END        ((uint64)_kernel_image_end)
 
 // the kernel expects there to be RAM
 // for use by the kernel and user pages

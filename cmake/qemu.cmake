@@ -63,9 +63,10 @@ elseif(OPENSBI_MODE STREQUAL "build" OR OPENSBI_MODE STREQUAL "external")
 endif()
 
 # Compose QEMU options
+# Use kernel_with_symbols_elf which has embedded symbols (no external loader needed)
 set(QEMUOPTS_PARAM
     ${QEMU_BIOS_OPT}
-    -kernel ${CMAKE_BINARY_DIR}/kernel/kernel
+    -kernel ${CMAKE_BINARY_DIR}/kernel/kernel_with_symbols_elf
     -m 512M
     -smp ${CPUS}
     -nographic
@@ -77,7 +78,6 @@ set(QEMUOPTS_PARAM
     -netdev user,id=net0,hostfwd=udp::${FWDPORT1}-:2000,hostfwd=udp::${FWDPORT2}-:2001
     -object filter-dump,id=net0,netdev=net0,file=packets.pcap
     -device e1000,netdev=net0,bus=pcie.0
-    -device loader,addr=0x88200000,file=${CMAKE_BINARY_DIR}/kernel/kernel.sym,force-raw=on
 )
 
 set(QEMUOPTS
@@ -91,9 +91,9 @@ set(QEMUOPTS_DTB
 )
 
 # Base dependencies for QEMU targets
+# Use kernel_with_symbols which has embedded symbols
 set(QEMU_BASE_DEPS
-    kernel/kernel
-    kernel/kernel.sym
+    kernel_with_symbols
     fs.img
     fs0.img
 )
