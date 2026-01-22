@@ -1,6 +1,5 @@
 //
 // low-level driver routines for 16550a UART.
-// Uses batched buffering for improved output performance.
 //
 
 #include "compiler.h"
@@ -14,13 +13,12 @@
 #include "printf.h"
 #include "proc/sched.h"
 #include "trap.h"
-#include "virtio.h"
-#include "string.h"
-#include "freelist.h"
 #include "uart.h"
 
 uint64 __uart0_mmio_base = 0x10000000L;
 uint64 __uart0_irqno = 10;
+// uint64 __uart0_mmio_base = 0xd4017000L;
+// uint64 __uart0_irqno = 42;
 
 void uartintr(int irq, void *data, device_t *dev);
 
@@ -41,6 +39,10 @@ void uartintr(int irq, void *data, device_t *dev);
 #define FCR 2                 // FIFO control register
 #define FCR_FIFO_ENABLE (1<<0)
 #define FCR_FIFO_CLEAR (3<<1) // clear the content of the two FIFOs
+#define FCR_TRIGGER_1   (0<<6) // RX FIFO trigger level: 1 byte
+#define FCR_TRIGGER_4   (1<<6) // RX FIFO trigger level: 4 bytes
+#define FCR_TRIGGER_8   (2<<6) // RX FIFO trigger level: 8 bytes
+#define FCR_TRIGGER_14  (3<<6) // RX FIFO trigger level: 14 bytes
 #define ISR 2                 // interrupt status register
 #define LCR 3                 // line control register
 #define LCR_EIGHT_BITS (3<<0)
@@ -49,52 +51,30 @@ void uartintr(int irq, void *data, device_t *dev);
 #define LSR_RX_READY (1<<0)   // input is waiting to be read from RHR
 #define LSR_TX_IDLE (1<<5)    // THR can accept another character to send
 
+// 16550A FIFO size
+#define UART_FIFO_SIZE 16
+
 #define ReadReg(reg) (*(Reg(reg)))
 #define WriteReg(reg, v) (*(Reg(reg)) = (v))
 
 // the transmit output buffer.
 struct spinlock uart_tx_lock = SPINLOCK_INITIALIZED("uart_tx_lock");
-#define UART_TX_BUF_SIZE 4096
-char uart_tx_buf[UART_TX_BUF_SIZE] __ALIGNED_PAGE;
+#define UART_TX_BUF_SIZE 128
+char uart_tx_buf[UART_TX_BUF_SIZE];
 uint64 uart_tx_w; // write next to uart_tx_buf[uart_tx_w % UART_TX_BUF_SIZE]
 uint64 uart_tx_r; // read next from uart_tx_buf[uart_tx_r % UART_TX_BUF_SIZE]
+
+// the receive input buffer.
+struct spinlock uart_rx_lock = SPINLOCK_INITIALIZED("uart_rx_lock");
+#define UART_RX_BUF_SIZE 128
+char uart_rx_buf[UART_RX_BUF_SIZE];
+uint64 uart_rx_w; // write next to uart_rx_buf[uart_rx_w % UART_RX_BUF_SIZE]
+uint64 uart_rx_r; // read next from uart_rx_buf[uart_rx_r % UART_RX_BUF_SIZE]
 
 extern volatile int panicked; // from printf.c
 
 void uartstart();
-
-// UART buffering control
-static struct {
-  char free[NUM];  // is a buffer free?
-  uint16 free_list[NUM];  // The index of the free buffers
-  struct freelist buf_freelist;  // Freelist manager for buffers
-  int virtio_ready;
-  int interrupt_ready;  // Set after interrupt handler is registered
-  char tx_buffers[NUM][256];  // Transmit buffers for batching
-} uart_virtio;
-
-// find a free buffer, mark it non-free, return its index.
-static int
-alloc_uart_buffer(void)
-{
-  spin_acquire(&uart_tx_lock);
-  int idx = freelist_alloc(&uart_virtio.buf_freelist);
-  spin_release(&uart_tx_lock);
-  return idx;
-}
-
-// mark a buffer as free.
-static void
-free_uart_buffer(int i)
-{
-  spin_acquire(&uart_tx_lock);
-  if(freelist_free(&uart_virtio.buf_freelist, i) != 0)
-    panic("free_uart_buffer: invalid free");
-  
-  // Wake up any waiting processes
-  wakeup_on_chan(&uart_virtio.free[0]);
-  spin_release(&uart_tx_lock);
-}
+static void uartrecv(void);
 
 void
 uartinit(void)
@@ -115,27 +95,12 @@ uartinit(void)
   // and set word length to 8 bits, no parity.
   WriteReg(LCR, LCR_EIGHT_BITS);
 
-  // reset and enable FIFOs.
-  WriteReg(FCR, FCR_FIFO_ENABLE | FCR_FIFO_CLEAR);
+  // reset and enable FIFOs with RX trigger level at 8 bytes.
+  // This reduces interrupt frequency while maintaining responsiveness.
+  WriteReg(FCR, FCR_FIFO_ENABLE | FCR_FIFO_CLEAR | FCR_TRIGGER_8);
 
   // enable transmit and receive interrupts.
   WriteReg(IER, IER_TX_ENABLE | IER_RX_ENABLE);
-
-  // Initialize buffering system
-  uart_virtio.virtio_ready = 1;  // Enable batched buffering
-  uart_virtio.interrupt_ready = 0;  // Start in synchronous mode
-  
-  // Initialize buffer free list
-  freelist_init(&uart_virtio.buf_freelist, uart_virtio.free, uart_virtio.free_list, NUM);
-}
-
-// Register interrupt handler for async mode
-// Call this after interrupt system is initialized
-void
-uart_register_interrupt(void)
-{
-  // Enable interrupt-driven mode for batched buffering
-  uart_virtio.interrupt_ready = 1;
 }
 
 // add a character to the output buffer and tell the
@@ -161,10 +126,37 @@ uartputc(int c)
   }
   uart_tx_buf[uart_tx_w % UART_TX_BUF_SIZE] = c;
   uart_tx_w += 1;
-  spin_release(&uart_tx_lock);
   uartstart();
+  spin_release(&uart_tx_lock);
 }
 
+// batch version of uartputc() - write multiple characters at once.
+// blocks if the output buffer is full.
+// because it may block, it can't be called from interrupts.
+void
+uartputs(const char *s, int n)
+{
+  spin_acquire(&uart_tx_lock);
+
+  if(panicked){
+    for(;;) {
+      asm volatile("wfi");
+    }
+  }
+  
+  for(int i = 0; i < n; i++) {
+    while(uart_tx_w == uart_tx_r + UART_TX_BUF_SIZE){
+      // buffer is full.
+      // wait for uartstart() to open up space in the buffer.
+      sleep_on_chan(&uart_tx_r, &uart_tx_lock);
+    }
+    uart_tx_buf[uart_tx_w % UART_TX_BUF_SIZE] = s[i];
+    uart_tx_w += 1;
+  }
+  
+  uartstart();
+  spin_release(&uart_tx_lock);
+}
 
 // alternate version of uartputc() that doesn't 
 // use interrupts, for use by kernel printf() and
@@ -189,148 +181,55 @@ uartputc_sync(int c)
   pop_off();
 }
 
-// batch version of uartputc() - write multiple characters at once
-void
-uartputs(const char *s, int n)
-{
-  spin_acquire(&uart_tx_lock);
-
-  if(panicked){
-    for(;;) {
-      asm volatile("wfi");
-    }
-  }
-  
-  // Add all characters to the buffer
-  for(int i = 0; i < n; i++) {
-    while(uart_tx_w == uart_tx_r + UART_TX_BUF_SIZE){
-      // buffer is full.
-      // wait for uartstart() to open up space in the buffer.
-      sleep_on_chan(&uart_tx_r, &uart_tx_lock);
-    }
-    uart_tx_buf[uart_tx_w % UART_TX_BUF_SIZE] = s[i];
-    uart_tx_w += 1;
-  }
-  
-  // Transmit all batched characters
-  spin_release(&uart_tx_lock);
-  uartstart();
-}
-
 // if the UART is idle, and a character is waiting
 // in the transmit buffer, send it.
-// handles its own locking internally.
+// caller must hold uart_tx_lock.
 // called from both the top- and bottom-half.
 void
 uartstart()
 {
-  if(!uart_virtio.interrupt_ready) {
-    // Synchronous mode: batch characters into buffer, then transmit
-    while(1) {
-      spin_acquire(&uart_tx_lock);
-      if(uart_tx_w == uart_tx_r) {
-        spin_release(&uart_tx_lock);
-        break;
-      }
-      
-      // Calculate how many characters to batch
-      uint64 count = uart_tx_w - uart_tx_r;
-      if(count > 256)
-        count = 256;  // Limit batch size
-      
-      // Copy characters to temporary buffer
-      char temp_buf[256];
-      for(uint64 i = 0; i < count; i++) {
-        temp_buf[i] = uart_tx_buf[uart_tx_r % UART_TX_BUF_SIZE];
-        uart_tx_r++;
-      }
-      
-      // Wake up any waiting uartputc() calls
-      wakeup_on_chan(&uart_tx_r);
-      spin_release(&uart_tx_lock);
-      
-      // Allocate a free buffer (this acquires its own lock)
-      int idx = alloc_uart_buffer();
-      
-      if(idx < 0) {
-        // No free buffers, send directly via UART
-        for(uint64 i = 0; i < count; i++) {
-          while((ReadReg(LSR) & LSR_TX_IDLE) == 0)
-            ;
-          WriteReg(THR, temp_buf[i]);
-        }
-        continue;
-      }
-
-      // Copy to the buffer
-      char *buf = uart_virtio.tx_buffers[idx];
-      for(uint64 i = 0; i < count; i++) {
-        buf[i] = temp_buf[i];
-      }
-
-      // Transmit the batched characters via UART (without holding lock)
-      for(uint64 i = 0; i < count; i++) {
-        while((ReadReg(LSR) & LSR_TX_IDLE) == 0)
-          ;
-        WriteReg(THR, buf[i]);
-      }
-      
-      // Mark buffer as free (this acquires its own lock)
-      free_uart_buffer(idx);
-    }
+  // Check if UART TX FIFO is ready (THR empty)
+  if((ReadReg(LSR) & LSR_TX_IDLE) == 0){
+    // the UART transmit holding register is full,
+    // it will interrupt when it's ready for more bytes.
     return;
   }
 
-  // Asynchronous mode: batch into buffer and use interrupts
-  while(1) {
-    spin_acquire(&uart_tx_lock);
-    if(uart_tx_w == uart_tx_r) {
-      spin_release(&uart_tx_lock);
+  // Fill the TX FIFO with up to UART_FIFO_SIZE bytes
+  int sent = 0;
+  while(sent < UART_FIFO_SIZE){
+    if(uart_tx_w == uart_tx_r){
+      // transmit buffer is empty.
       break;
     }
     
-    // Calculate how many characters to send
-    uint64 count = uart_tx_w - uart_tx_r;
-    if(count > 256)
-      count = 256;  // Limit batch size
-
-    // Copy characters to temporary buffer
-    char temp_buf[256];
-    for(uint64 i = 0; i < count; i++) {
-      temp_buf[i] = uart_tx_buf[uart_tx_r % UART_TX_BUF_SIZE];
-      uart_tx_r++;
-    }
-
-    // Wake up any waiting uartputc() calls
+    int c = uart_tx_buf[uart_tx_r % UART_TX_BUF_SIZE];
+    uart_tx_r += 1;
+    sent++;
+    
+    WriteReg(THR, c);
+  }
+  
+  // maybe uartputc() is waiting for space in the buffer.
+  if(sent > 0){
     wakeup_on_chan(&uart_tx_r);
-    spin_release(&uart_tx_lock);
-    
-    // Allocate a free buffer (this acquires its own lock)
-    int idx = alloc_uart_buffer();
-    
-    if(idx < 0) {
-      // No free descriptors, will retry on next interrupt
-      return;
-    }
+  }
+}
 
-    // Copy characters to the buffer for batching
-    char *buf = uart_virtio.tx_buffers[idx];
-    for(uint64 i = 0; i < count; i++) {
-      buf[i] = temp_buf[i];
+// Drain the hardware RX FIFO into the software buffer.
+// caller must hold uart_rx_lock.
+static void
+uartrecv(void)
+{
+  // Read all available bytes from the hardware RX FIFO
+  while(ReadReg(LSR) & LSR_RX_READY){
+    if(uart_rx_w == uart_rx_r + UART_RX_BUF_SIZE){
+      // software buffer is full, discard incoming data
+      ReadReg(RHR);  // discard
+      continue;
     }
-
-    // Transmit batch via UART (interrupt will process remaining)
-    for(uint64 i = 0; i < count; i++) {
-      if((ReadReg(LSR) & LSR_TX_IDLE) == 0){
-        // UART not ready, will continue in interrupt handler
-        free_uart_buffer(idx);  // Return to free list (this acquires its own lock)
-        return;
-      }
-      WriteReg(THR, buf[i]);
-    }
-    
-    // Transmission complete, free the buffer (this acquires its own lock)
-    free_uart_buffer(idx);
+    uart_rx_buf[uart_rx_w % UART_RX_BUF_SIZE] = ReadReg(RHR);
+    uart_rx_w += 1;
   }
 }
 
@@ -339,13 +238,41 @@ uartstart()
 int
 uartgetc(void)
 {
-  // Input comes from legacy UART registers
-  if(ReadReg(LSR) & 0x01){
-    // input data is ready.
-    return ReadReg(RHR);
-  } else {
-    return -1;
+  int c = -1;
+  spin_acquire(&uart_rx_lock);
+  
+  // First drain any new data from hardware FIFO
+  uartrecv();
+  
+  if(uart_rx_r != uart_rx_w){
+    c = uart_rx_buf[uart_rx_r % UART_RX_BUF_SIZE];
+    uart_rx_r += 1;
   }
+  
+  spin_release(&uart_rx_lock);
+  return c;
+}
+
+// batch read from the UART.
+// reads up to n characters into buf.
+// returns the number of characters read.
+int
+uartgets(char *buf, int n)
+{
+  int i = 0;
+  spin_acquire(&uart_rx_lock);
+  
+  // First drain hardware FIFO into software buffer
+  uartrecv();
+  
+  // Then read from software buffer
+  while(i < n && uart_rx_r != uart_rx_w){
+    buf[i++] = uart_rx_buf[uart_rx_r % UART_RX_BUF_SIZE];
+    uart_rx_r += 1;
+  }
+  
+  spin_release(&uart_rx_lock);
+  return i;
 }
 
 // handle a uart interrupt, raised because input has
@@ -353,17 +280,22 @@ uartgetc(void)
 // both. called from devintr().
 void uartintr(int irq, void *data, device_t *dev)
 {
-  // read and process incoming characters.
-  while(1){
-    int c = uartgetc();
-    if(c == -1)
-      break;
+  // Drain hardware RX FIFO into software buffer and process
+  spin_acquire(&uart_rx_lock);
+  uartrecv();
+  
+  // Process all buffered input
+  while(uart_rx_r != uart_rx_w){
+    int c = uart_rx_buf[uart_rx_r % UART_RX_BUF_SIZE];
+    uart_rx_r += 1;
+    spin_release(&uart_rx_lock);
     consoleintr(c);
+    spin_acquire(&uart_rx_lock);
   }
+  spin_release(&uart_rx_lock);
 
-  // Send buffered characters (interrupt-driven mode)
-  // uartstart now handles its own locking internally
-  if(uart_virtio.interrupt_ready) {
-    uartstart();
-  }
+  // send buffered characters.
+  spin_acquire(&uart_tx_lock);
+  uartstart();
+  spin_release(&uart_tx_lock);
 }

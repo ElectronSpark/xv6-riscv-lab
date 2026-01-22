@@ -119,23 +119,19 @@ consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n)
 {
   int i;
   uint64 src = (uint64)buffer;
-  char kbuf[256];  // Temporary kernel buffer for batching
+  char kbuf[64];
   int written = 0;
 
   while(written < n) {
     int batch_size = n - written;
-    if(batch_size > 256)
-      batch_size = 256;
+    if(batch_size > 64)
+      batch_size = 64;
     
-    // Copy batch to kernel buffer
     for(i = 0; i < batch_size; i++){
-      char c;
-      if(either_copyin(&c, user_src, src + written + i, 1) == -1)
+      if(either_copyin(&kbuf[i], user_src, src + written + i, 1) == -1)
         return written + i;
-      kbuf[i] = c;
     }
     
-    // Send entire batch at once
     uartputs(kbuf, batch_size);
     written += batch_size;
   }
@@ -311,7 +307,4 @@ consoledevinit(void)
   };
   errno = register_irq_handler(PLIC_IRQ(UART0_IRQ), &uart_irq_desc);
   assert(errno == 0, "consoledevinit: register_irq_handler failed, error code: %d\n", errno);
-  
-  // Register virtio console interrupt (enables async mode)
-  uart_register_interrupt();
 }
