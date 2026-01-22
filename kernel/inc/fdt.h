@@ -9,6 +9,7 @@
 #ifndef __KERNEL_FDT_H
 #define __KERNEL_FDT_H
 
+#include "compiler.h"
 #include "types.h"
 
 // FDT header magic number
@@ -33,7 +34,7 @@ struct fdt_header {
     uint32 boot_cpuid_phys;
     uint32 size_dt_strings;
     uint32 size_dt_struct;
-};
+} __PACKED;
 
 #define MAX_MEM_REGIONS 8
 #define MAX_RESERVED_REGIONS 16
@@ -42,7 +43,7 @@ struct fdt_header {
 struct mem_region {
     uint64 base;
     uint64 size;
-};
+} __PACKED;
 
 // Probed platform information
 struct platform_info {

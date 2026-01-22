@@ -301,6 +301,20 @@ static inline int64 __bits_ctz_ptr(const void *ptr, size_t limit, bool inv) {
 #define bits_ctz_ptr(ptr, limit)   __bits_ctz_ptr((ptr), (limit), !!0)
 #define bits_ctz_ptr_inv(ptr, limit)   __bits_ctz_ptr((ptr), (limit), !!1)
 
+#define bswap16(x) (typeof(x))((((x) & 0x00FF) << 8) | (((x) & 0xFF00) >> 8))
+#define bswap32(x)                                                             \
+    (typeof(x))((((x) & 0x000000FF) << 24) | (((x) & 0x0000FF00) << 8) |       \
+                (((x) & 0x00FF0000) >> 8) | (((x) & 0xFF000000) >> 24))
+#define bswap64(x)                                                             \
+    (typeof(x))((((x) & 0x00000000000000FFULL) << 56) |                        \
+                    (((x) & 0x000000000000FF00ULL) << 40) |                    \
+                    (((x) & 0x0000000000FF0000ULL) << 24) |                    \
+                    (((x) & 0x00000000FF000000ULL) << 8) |                     \
+                    (((x) & 0x000000FF00000000ULL) >> 8) ||                    \
+                    (((x) & 0x0000FF0000000000ULL) >> 24) |                    \
+                    (((x) & 0x00FF0000000000000ULL) >> 40) |                   \
+                    (((x) & 0xFF00000000000000ULL) >> 56))
+
 /***
  * Bitmap manipulation macros
  *

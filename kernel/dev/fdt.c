@@ -7,6 +7,7 @@
 
 #include "types.h"
 #include "fdt.h"
+#include "bits.h"
 #include "printf.h"
 #include "string.h"
 
@@ -15,29 +16,14 @@
 struct platform_info platform;
 
 // Byte-swap for big-endian FDT format
-static inline uint32 fdt32_to_cpu(uint32 x) {
-    return ((x & 0xff) << 24) |
-           ((x & 0xff00) << 8) |
-           ((x & 0xff0000) >> 8) |
-           ((x & 0xff000000) >> 24);
-}
-
-static inline uint64 fdt64_to_cpu(uint64 x) {
-    return ((uint64)fdt32_to_cpu(x & 0xffffffff) << 32) |
-           fdt32_to_cpu(x >> 32);
-}
+#define fdt32_to_cpu(x) bswap32(x)
+#define fdt64_to_cpu(x) bswap64(x)
 
 // Get FDT header field
-static inline uint32 fdt_get_header(void *dtb, int offset) {
-    return fdt32_to_cpu(*(uint32*)((char*)dtb + offset));
-}
+#define fdt_get_header(dtb, offset) fdt32_to_cpu(*(uint32*)((char*)dtb + offset))
 
 // Validate FDT header
-int fdt_valid(void *dtb) {
-    if (!dtb)
-        return 0;
-    return fdt_get_header(dtb, 0) == FDT_MAGIC;
-}
+#define fdt_valid(dtb) ((dtb) && fdt_get_header(dtb, 0) == FDT_MAGIC)
 
 uint32 fdt_totalsize(void *dtb) {
     return fdt_get_header(dtb, 4);
@@ -431,45 +417,9 @@ static void fdt_parse(struct fdt_state *state) {
     }
 }
 
-// Known DTB load addresses to try as fallback
-// (used when bootloader-provided address is invalid)
-// Orange Pi: U-Boot's 'go' command doesn't pass DTB in a1,
-// so our boot script stores it at 0x1F0000 before jumping
-#define DTB_ADDR_LOCATION 0x1F0000
-
-static void *fdt_fallback_addrs[] = {
-    (void*)0x7c744000,  // Orange Pi: U-Boot relocates fixed DTB here during boot
-    (void*)0x31000000,  // Orange Pi: fdt_addr_r where static DTB is loaded
-    (void*)0x82000000,  // QEMU: common DTB location
-    0
-};
-
 int fdt_init(void *dtb) {
     // Try the provided address first
     printf("fdt: checking DTB at %p\n", dtb);
-    
-    if (!fdt_valid(dtb)) {
-        printf("fdt: invalid DTB at %p, trying stored address...\n", dtb);
-        
-        // On Orange Pi, boot script stores DTB address at 0x1F0000
-        void **dtb_ptr = (void **)DTB_ADDR_LOCATION;
-        void *stored_dtb = *dtb_ptr;
-        if (fdt_valid(stored_dtb)) {
-            printf("fdt: found valid DTB at stored address %p\n", stored_dtb);
-            dtb = stored_dtb;
-        } else {
-            printf("fdt: stored address %p invalid, trying fallbacks...\n", stored_dtb);
-            // Try known fallback addresses
-            for (int i = 0; fdt_fallback_addrs[i]; i++) {
-                void *fallback = fdt_fallback_addrs[i];
-                if (fdt_valid(fallback)) {
-                    printf("fdt: found valid DTB at fallback %p\n", fallback);
-                    dtb = fallback;
-                    break;
-                }
-            }
-        }
-    }
     
     if (!fdt_valid(dtb)) {
         printf("fdt: no valid DTB found!\n");
@@ -551,11 +501,12 @@ void fdt_dump(void *dtb) {
         printf("fdt_dump: invalid DTB\n");
         return;
     }
+    struct fdt_header *header = dtb;
     
     printf("FDT at %p:\n", dtb);
-    printf("  magic: 0x%x\n", fdt_get_header(dtb, 0));
-    printf("  totalsize: %d\n", fdt_get_header(dtb, 4));
-    printf("  off_dt_struct: 0x%x\n", fdt_get_header(dtb, 8));
-    printf("  off_dt_strings: 0x%x\n", fdt_get_header(dtb, 12));
-    printf("  version: %d\n", fdt_get_header(dtb, 20));
+    printf("  magic: 0x%x\n", fdt32_to_cpu(header->magic));
+    printf("  totalsize: %d\n", fdt32_to_cpu(header->totalsize));
+    printf("  off_dt_struct: 0x%x\n", fdt32_to_cpu(header->off_dt_struct));
+    printf("  off_dt_strings: 0x%x\n", fdt32_to_cpu(header->off_dt_strings));
+    printf("  version: %d\n", fdt32_to_cpu(header->version));
 }

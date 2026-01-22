@@ -64,6 +64,25 @@ _start_kernel:
         # OpenSBI/U-Boot passes hartid in a0, dtb pointer in a1
         mv tp, a0
 
+        # Clear BSS exactly once using atomic test-and-set on a flag in .data section
+        # The boot hart may not be hart 0 (e.g., Orange Pi boots on hart 4)
+        la t0, __bss_cleared_flag
+        li t1, 1
+        amoswap.w.aq t2, t1, (t0)   # Atomically swap 1 into flag, get old value
+        bnez t2, _skip_bss_clear    # If flag was already 1, skip clearing
+
+        # Clear BSS section (required on real hardware, QEMU may pre-zero)
+        la t0, _bss
+        la t1, _bss_end
+1:      bgeu t0, t1, 2f
+        sd zero, 0(t0)
+        addi t0, t0, 8
+        j 1b
+2:
+        # Memory barrier to ensure BSS is visible to other harts
+        fence w, rw
+
+_skip_bss_clear:
         # set up a stack for C.
         # stack0 is declared in start.c,
         # with a 4096-byte stack per CPU.
@@ -82,3 +101,9 @@ _start_kernel:
 spin:
         wfi
         j spin
+
+# Flag in .data section (initialized to 0) - NOT in BSS!
+.section .data
+.align 2
+__bss_cleared_flag:
+        .word 0

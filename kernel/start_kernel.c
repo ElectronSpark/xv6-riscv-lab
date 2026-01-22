@@ -1,6 +1,7 @@
 #include "types.h"
 #include "param.h"
 #include "memlayout.h"
+#include "string.h"
 #include "riscv.h"
 #include "defs.h"
 #include "percpu.h"
@@ -16,6 +17,7 @@
 #include "rcu.h"
 #include "sbi.h"
 #include "ipi.h"
+#include "fdt.h"
 #include "early_allocator.h"
 #include "timer/goldfish_rtc.h"
 
@@ -36,6 +38,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     printf("\n");
     printf("xv6 kernel is booting\n");
     printf("\n");
+    fdt_init(fdt_base);
     sbi_probe_extensions();
     consoleinit();
     printf("hart %d, fdt_base %p, sp: %p\n", hartid, fdt_base, __builtin_frame_address(0));
