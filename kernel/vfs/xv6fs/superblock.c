@@ -106,7 +106,7 @@ struct vfs_inode *xv6fs_alloc_inode(struct vfs_superblock *sb) {
     
     struct xv6fs_superblock *xv6_sb = container_of(sb, struct xv6fs_superblock, vfs_sb);
     struct superblock *disk_sb = &xv6_sb->disk_sb;
-    uint dev = xv6_sb->dev;
+    uint dev = xv6fs_sb_dev(xv6_sb);
     
     // Find a free inode on disk
     struct buf *bp;
@@ -155,7 +155,7 @@ struct vfs_inode *xv6fs_get_inode(struct vfs_superblock *sb, uint64 ino) {
     
     struct xv6fs_superblock *xv6_sb = container_of(sb, struct xv6fs_superblock, vfs_sb);
     struct superblock *disk_sb = &xv6_sb->disk_sb;
-    uint dev = xv6_sb->dev;
+    uint dev = xv6fs_sb_dev(xv6_sb);
     
     if (ino >= disk_sb->ninodes) {
         return ERR_PTR(-ENOENT);
@@ -216,7 +216,7 @@ int xv6fs_sync_fs(struct vfs_superblock *sb, int wait) {
     
     // Write superblock to disk if dirty
     if (xv6_sb->dirty) {
-        int ret = __xv6fs_write_superblock(xv6_sb->dev, &xv6_sb->disk_sb);
+        int ret = __xv6fs_write_superblock(xv6fs_sb_dev(xv6_sb), &xv6_sb->disk_sb);
         if (ret != 0) {
             return ret;
         }
@@ -238,6 +238,9 @@ void xv6fs_unmount_begin(struct vfs_superblock *sb) {
 
 void xv6fs_free(struct vfs_superblock *sb) {
     struct xv6fs_superblock *xv6_sb = container_of(sb, struct xv6fs_superblock, vfs_sb);
+    if (xv6_sb->blkdev != NULL) {
+        blkdev_put(xv6_sb->blkdev);
+    }
     slab_free(xv6_sb);
 }
 
@@ -248,27 +251,42 @@ int xv6fs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
     }
     
     /*
-     * Use disk1 (mkdev(2, 1) = ROOTDEV) as the root filesystem.
-     * Previously used disk0 for legacy fs and disk1 for VFS to avoid conflicts.
-     * Now that legacy fs is removed, VFS takes over disk1 as the root device.
+     * Get the block device from the device inode.
+     * The device inode's bdev field contains the device number (major:minor).
+     * If no device inode is provided, fall back to ROOTDEV for compatibility.
      */
-    uint dev = ROOTDEV;
+    dev_t dev_num;
+    if (device != NULL && S_ISBLK(device->mode)) {
+        dev_num = device->bdev;
+    } else {
+        return -EINVAL; // xv6fs does not support block device inode
+    }
+    
+    // Get blkdev reference
+    blkdev_t *blkdev = blkdev_get(major(dev_num), minor(dev_num));
+    if (IS_ERR(blkdev)) {
+        return PTR_ERR(blkdev);
+    }
     
     // Allocate superblock
     struct xv6fs_superblock *xv6_sb = slab_alloc(&__xv6fs_sb_cache);
     if (xv6_sb == NULL) {
+        blkdev_put(blkdev);
         return -ENOMEM;
     }
     memset(xv6_sb, 0, sizeof(*xv6_sb));
     
+    // Store blkdev reference
+    xv6_sb->blkdev = blkdev;
+    
     // Read on-disk superblock
-    int ret = __xv6fs_read_superblock(dev, &xv6_sb->disk_sb);
+    int ret = __xv6fs_read_superblock(xv6fs_sb_dev(xv6_sb), &xv6_sb->disk_sb);
     if (ret != 0) {
+        blkdev_put(blkdev);
         slab_free(xv6_sb);
         return ret;
     }
     
-    xv6_sb->dev = dev;
     xv6_sb->dirty = 0;
     
     // Initialize logging layer
@@ -286,6 +304,7 @@ int xv6fs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
     // Load root inode (inode 1 in xv6)
     struct vfs_inode *root_inode = xv6fs_get_inode(&xv6_sb->vfs_sb, ROOTINO);
     if (IS_ERR_OR_NULL(root_inode)) {
+        blkdev_put(blkdev);
         slab_free(xv6_sb);
         return root_inode == NULL ? -ENOMEM : PTR_ERR(root_inode);
     }
@@ -399,15 +418,28 @@ void xv6fs_init_fs_type(void) {
         struct vfs_inode *root_dir = vfs_mkdir(tmpfs_root, 0755, "root", 4);
         
         if (!IS_ERR_OR_NULL(root_dir)) {
+            // Create a block device inode for ROOTDEV
+            struct vfs_inode *dev_inode = vfs_mknod(tmpfs_root, S_IFBLK | 0600, 
+                                                     ROOTDEV, "rootdev", 7);
+            if (IS_ERR_OR_NULL(dev_inode)) {
+                printf("xv6fs: failed to create device inode, errno=%ld\n", 
+                       dev_inode ? PTR_ERR(dev_inode) : -ENOMEM);
+                vfs_iput(root_dir);
+                return;
+            }
+            
             // Mount xv6fs at /root
             // vfs_mount requires: mount mutex, superblock write lock, and inode lock
             vfs_mount_lock();
             vfs_superblock_wlock(root_dir->sb);
             vfs_ilock(root_dir);
-            ret = vfs_mount("xv6fs", root_dir, NULL, 0, NULL);
+            ret = vfs_mount("xv6fs", root_dir, dev_inode, 0, NULL);
             vfs_iunlock(root_dir);
             vfs_superblock_unlock(root_dir->sb);
             vfs_mount_unlock();
+            
+            // Release device inode reference (mount holds its own if needed)
+            vfs_iput(dev_inode);
             
             if (ret == 0) {
                 printf("xv6fs: mounted at /root\n");

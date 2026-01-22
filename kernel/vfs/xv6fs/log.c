@@ -123,7 +123,7 @@ void xv6fs_initlog(struct xv6fs_superblock *xv6_sb) {
     spin_init(&log->lock, "xv6fs_log");
     log->start = disk_sb->logstart;
     log->size = disk_sb->nlog;
-    log->dev = xv6_sb->dev;
+    log->dev = xv6fs_sb_dev(xv6_sb);
     log->outstanding = 0;
     log->committing = 0;
     log->lh.n = 0;

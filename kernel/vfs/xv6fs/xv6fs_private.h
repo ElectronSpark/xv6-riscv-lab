@@ -6,6 +6,7 @@
 #include "spinlock.h"
 #include "vfs/xv6fs/ondisk.h"  // xv6 on-disk format definitions
 #include "slab.h"
+#include "blkdev.h"
 
 // Block size for xv6 filesystem
 #define XV6FS_BSIZE BSIZE
@@ -63,10 +64,14 @@ struct xv6fs_log {
 struct xv6fs_superblock {
     struct vfs_superblock vfs_sb;
     struct superblock disk_sb;   // Copy of the on-disk superblock
-    uint dev;                     // Device number
+    blkdev_t *blkdev;             // Block device descriptor reference
     int dirty;                    // Superblock metadata dirty flag
     struct xv6fs_log log;         // Per-superblock logging
 };
+
+// Helper to get device number from xv6fs superblock
+#define xv6fs_sb_dev(xv6_sb) \
+    mkdev((xv6_sb)->blkdev->dev.major, (xv6_sb)->blkdev->dev.minor)
 
 /*
  * xv6fs inode structure
