@@ -1284,7 +1284,11 @@ struct vfs_inode *xv6fs_mknod(struct vfs_inode *dir, mode_t mode,
     // Set major/minor device numbers
     ip->major = major(dev);
     ip->minor = minor(dev);
-    new_inode->cdev = dev;
+    if (S_ISCHR(mode)) {
+        new_inode->cdev = dev;
+    } else if (S_ISBLK(mode)) {
+        new_inode->bdev = dev;
+    }
     
     xv6fs_iupdate(ip);
     

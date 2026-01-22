@@ -134,10 +134,15 @@ static int __vfs_open_cdev(struct vfs_inode *inode, struct vfs_file *file) {
 static int __vfs_open_blkdev(struct vfs_inode *inode, struct vfs_file *file) {
     blkdev_t *blkdev = blkdev_get(major(inode->bdev), minor(inode->bdev));
     if (IS_ERR(blkdev)) {
-        return PTR_ERR(blkdev);
+        // Device not found - allow open for stat but not I/O
+        file->blkdev = NULL;
+        file->ops = NULL;
+        return 0;
     }
     if (blkdev == NULL) {
-        return -ENODEV;
+        file->blkdev = NULL;
+        file->ops = NULL;
+        return 0;
     }
     file->blkdev = blkdev;
     file->ops = NULL; // Device files use direct device I/O

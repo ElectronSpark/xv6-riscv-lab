@@ -36,7 +36,7 @@ entry_aliased("close", "vfs_close");
 entry("kill");
 entry("exec");
 entry_aliased("open", "vfs_open");
-entry_aliased("mknod", "vfs_mknod");
+entry("mknod");
 entry_aliased("unlink", "vfs_unlink");
 entry_aliased("fstat", "vfs_fstat");
 entry_aliased("link", "vfs_link");

@@ -194,9 +194,13 @@ struct vfs_inode *xv6fs_get_inode(struct vfs_superblock *sb, uint64 ino) {
     xv6fs_inode->minor = dip->minor;
     memmove(xv6fs_inode->addrs, dip->addrs, sizeof(dip->addrs));
     
-    // Set device number for character/block devices
-    if (S_ISCHR(xv6fs_inode->vfs_inode.mode)) {
-        xv6fs_inode->vfs_inode.cdev = mkdev(xv6fs_inode->major, xv6fs_inode->minor);
+    // For device inodes, set the appropriate device number field
+    if (dip->type == XV6FS_T_BLKDEVICE) {
+        dev_t devno = mkdev(xv6fs_inode->major, xv6fs_inode->minor);
+        xv6fs_inode->vfs_inode.bdev = devno;
+    } else if (dip->type == XV6FS_T_CDEVICE) {
+        dev_t devno = mkdev(xv6fs_inode->major, xv6fs_inode->minor);
+        xv6fs_inode->vfs_inode.cdev = devno;
     }
     
     brelse(bp);

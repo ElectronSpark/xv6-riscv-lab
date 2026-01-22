@@ -624,6 +624,79 @@ ret:
 }
 
 /*
+ * __vfs_evict_unused_inodes - Evict all unreferenced inodes from a superblock.
+ *
+ * This removes inodes that have refcount <= 1 from the inode cache.
+ * For backend filesystems, cached inodes have refcount == 1 (base state).
+ * For backendless filesystems, cached inodes have refcount == 0.
+ * Inodes with refcount > 1 are actively in use and cannot be evicted.
+ *
+ * Locking:
+ *   - Caller must hold the superblock write lock.
+ *
+ * Returns:
+ *   - Number of inodes evicted.
+ */
+static size_t __vfs_evict_unused_inodes(struct vfs_superblock *sb) {
+    size_t evicted = 0;
+    struct vfs_inode *inode, *tmp;
+    
+    VFS_SUPERBLOCK_ASSERT_WHOLDING(sb, "Superblock lock must be write held to evict inodes");
+    
+    hlist_foreach_node_safe(&sb->inodes, inode, tmp, hash_entry) {
+        // Skip inodes that are actively in use (refcount > 1)
+        // refcount == 1 means "cached but not actively used" for backend fs
+        // refcount == 0 means "cached but not actively used" for backendless fs
+        if (inode->ref_count > 1) {
+            continue;
+        }
+        
+        // Skip inodes being destroyed
+        if (inode->destroying) {
+            continue;
+        }
+        
+        // Skip invalid inodes (already being cleaned up)
+        if (!inode->valid) {
+            continue;
+        }
+        
+        // Skip mountpoint inodes (they have extra references from mounts)
+        if (inode->mount) {
+            continue;
+        }
+        
+        // Lock the inode to safely remove it
+        vfs_ilock(inode);
+        
+        // Double-check after locking
+        if (inode->ref_count > 1 || inode->destroying || !inode->valid || inode->mount) {
+            vfs_iunlock(inode);
+            continue;
+        }
+        
+        // Sync if dirty
+        if (inode->dirty && inode->ops->sync_inode) {
+            inode->ops->sync_inode(inode);
+        }
+        
+        // Remove from cache - decrement refcount to 0 if needed
+        if (inode->ref_count == 1) {
+            atomic_dec(&inode->ref_count);
+        }
+        inode->valid = 0;
+        vfs_remove_inode(sb, inode);
+        vfs_iunlock(inode);
+        
+        // Free the inode
+        inode->ops->free_inode(inode);
+        evicted++;
+    }
+    
+    return evicted;
+}
+
+/*
  * vfs_unmount - Detach the filesystem rooted at `mountpoint`.
  *
  * Locking:
@@ -701,6 +774,11 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
         sb->ops->unmount_begin(sb);
     }
 
+    // Evict all unreferenced inodes from the cache before checking.
+    // Inodes with refcount == 0 are kept for performance but must be
+    // evicted to allow clean unmounting.
+    __vfs_evict_unused_inodes(sb);
+
     // Superblock should have no active inodes except the root inode.
     // The root inode is expected to still be in the cache - it will be
     // removed and freed below.
@@ -718,10 +796,9 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
         }
     }
 
-    // Destroy root inode's data before freeing
-    if (mounted_inode->ops->destroy_inode) {
-        mounted_inode->ops->destroy_inode(mounted_inode);
-    }
+    // Note: Do NOT call destroy_inode on the root inode during unmount!
+    // destroy_inode frees on-disk data (marks inode type=0), which would
+    // corrupt the filesystem. We just need to clean up in-memory state.
     mounted_inode->valid = 0;
     vfs_remove_inode(sb, mounted_inode);
 
@@ -1293,6 +1370,27 @@ static struct vfs_inode *__vfs_dentry_get_self_inode(struct vfs_dentry *dentry) 
 }
 
 /*
+ * __vfs_set_parent_from_dentry - Set inode's parent pointer from dentry context.
+ *
+ * Called only on fresh inode load from disk. Directory inodes need their parent
+ * relationship for proper ".." traversal across mount boundaries. The parent
+ * is not stored on disk, so we derive it from the dentry used to look up the inode.
+ *
+ * Locking:
+ *   - Caller holds the inode lock.
+ */
+static void __vfs_set_parent_from_dentry(struct vfs_inode *inode, struct vfs_inode *parent) {
+    // Only set parent for directories (parent is used for ".." traversal)
+    if (parent != NULL && S_ISDIR(inode->mode)) {
+        // Don't set parent to itself (that's a local root indicator)
+        if (inode != parent) {
+            inode->parent = parent;
+            vfs_idup(parent);
+        }
+    }
+}
+
+/*
  * __vfs_get_dentry_inode_impl - Internal helper to resolve a dentry to an inode.
  *
  * This is the core implementation that performs cache lookup and, if necessary,
@@ -1348,6 +1446,8 @@ static struct vfs_inode *__vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) 
         return inode;
     }
 
+    // Set parent on fresh load - directory inodes need parent for ".." traversal
+    __vfs_set_parent_from_dentry(inode, dentry->parent);
     vfs_idup(inode);
     vfs_iunlock(inode);
     return inode;

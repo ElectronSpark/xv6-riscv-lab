@@ -31,8 +31,9 @@
 // xv6 file types to VFS mode conversion
 #define XV6FS_T_DIR     1   // Directory
 #define XV6FS_T_FILE    2   // File
-#define XV6FS_T_DEVICE  3   // Device
+#define XV6FS_T_CDEVICE  3   // Character device
 #define XV6FS_T_SYMLINK 4   // Symbolic link
+#define XV6FS_T_BLKDEVICE 5   // Block device
 
 /*
  * xv6fs log header structure
@@ -156,8 +157,10 @@ static inline mode_t xv6fs_type_to_mode(short type) {
         return S_IFDIR | 0755;
     case XV6FS_T_FILE:
         return S_IFREG | 0644;
-    case XV6FS_T_DEVICE:
+    case XV6FS_T_CDEVICE:
         return S_IFCHR | 0666;
+    case XV6FS_T_BLKDEVICE:
+        return S_IFBLK | 0660;
     case XV6FS_T_SYMLINK:
         return S_IFLNK | 0777;
     default:
@@ -171,8 +174,10 @@ static inline short xv6fs_mode_to_type(mode_t mode) {
         return XV6FS_T_DIR;
     if (S_ISREG(mode))
         return XV6FS_T_FILE;
-    if (S_ISCHR(mode) || S_ISBLK(mode))
-        return XV6FS_T_DEVICE;
+    if (S_ISCHR(mode))
+        return XV6FS_T_CDEVICE;
+    if (S_ISBLK(mode))
+        return XV6FS_T_BLKDEVICE;
     if (S_ISLNK(mode))
         return XV6FS_T_SYMLINK;
     return 0;

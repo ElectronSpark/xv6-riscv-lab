@@ -336,14 +336,15 @@ uint64 sys_vfs_mkdir(void) {
 uint64 sys_vfs_mknod(void) {
     char path[MAXPATH];
     char name[DIRSIZ];
-    int major, minor;
+    int mode, major, minor;
     int n;
     
     if ((n = argstr(0, path, MAXPATH)) < 0) {
         return -EFAULT;
     }
-    argint(1, &major);
-    argint(2, &minor);
+    argint(1, &mode);
+    argint(2, &major);
+    argint(3, &minor);
     
     struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ);
     if (IS_ERR(parent)) {
@@ -355,9 +356,8 @@ uint64 sys_vfs_mknod(void) {
     
     size_t name_len = strlen(name);
     
-    // Create character device node
     dev_t dev = mkdev(major, minor);
-    struct vfs_inode *node = vfs_mknod(parent, S_IFCHR | 0666, dev, name, name_len);
+    struct vfs_inode *node = vfs_mknod(parent, (mode_t)mode, dev, name, name_len);
     vfs_iput(parent);
     
     if (IS_ERR(node)) {
@@ -789,8 +789,22 @@ uint64 sys_mount(void) {
         }
     }
     
+    // Acquire required locks for vfs_mount:
+    // 1. Mount mutex
+    // 2. Superblock write lock
+    // 3. Inode lock on mountpoint
+    vfs_mount_lock();
+    vfs_superblock_wlock(target_dir->sb);
+    vfs_ilock(target_dir);
+    
     // Mount the filesystem
     int ret = vfs_mount(fstype, target_dir, source_inode, 0, NULL);
+    
+    // Release locks in reverse order
+    vfs_iunlock(target_dir);
+    vfs_superblock_unlock(target_dir->sb);
+    vfs_mount_unlock();
+    
     if (source_inode) {
         vfs_iput(source_inode);
     }
@@ -799,7 +813,8 @@ uint64 sys_mount(void) {
         return ret;
     }
     
-    // target_dir ownership transferred to mount point
+    // target_dir reference kept by mount, but we still need to release our ref
+    vfs_iput(target_dir);
     return 0;
 }
 
@@ -815,17 +830,68 @@ uint64 sys_umount(void) {
         return -EFAULT;
     }
     
-    // Look up target directory
-    struct vfs_inode *target_dir = vfs_namei(target, n);
-    if (IS_ERR(target_dir)) {
-        return PTR_ERR(target_dir);
+    // Look up target directory - vfs_namei follows mounts, so we get the
+    // mounted filesystem's root inode, not the mountpoint directory itself
+    struct vfs_inode *mounted_root = vfs_namei(target, n);
+    if (IS_ERR(mounted_root)) {
+        return PTR_ERR(mounted_root);
     }
-    if (target_dir == NULL) {
+    if (mounted_root == NULL) {
         return -ENOENT;
     }
     
-    int ret = vfs_unmount(target_dir);
-    vfs_iput(target_dir);
+    // Check if this is a mounted filesystem root (parent == self for local root)
+    if (!vfs_inode_is_local_root(mounted_root)) {
+        vfs_iput(mounted_root);
+        return -EINVAL;  // Not a mounted filesystem root
+    }
     
-    return ret;
+    // Get the mountpoint from the superblock
+    struct vfs_superblock *child_sb = mounted_root->sb;
+    if (child_sb == NULL || child_sb->mountpoint == NULL) {
+        vfs_iput(mounted_root);
+        return -EINVAL;  // Not mounted or no mountpoint
+    }
+    
+    struct vfs_inode *target_dir = child_sb->mountpoint;
+    if (!target_dir->mount) {
+        vfs_iput(mounted_root);
+        return -EINVAL;  // Mountpoint not marked as mount
+    }
+    
+    // Acquire required locks for vfs_unmount:
+    // 1. Mount mutex
+    // 2. Parent superblock write lock
+    // 3. Child superblock write lock
+    // 4. Mountpoint inode lock
+    // 5. Mounted root inode lock
+    vfs_mount_lock();
+    vfs_superblock_wlock(target_dir->sb);
+    vfs_superblock_wlock(child_sb);
+    vfs_ilock(target_dir);
+    vfs_ilock(mounted_root);
+    
+    int ret = vfs_unmount(target_dir);
+    
+    if (ret != 0) {
+        // On failure, release locks in reverse order
+        // (vfs_unmount did not free anything)
+        vfs_iunlock(mounted_root);
+        vfs_iunlock(target_dir);
+        vfs_superblock_unlock(child_sb);
+        vfs_superblock_unlock(target_dir->sb);
+        vfs_mount_unlock();
+        vfs_iput(mounted_root);
+        return ret;
+    }
+    
+    // On success, vfs_unmount has already:
+    // - Unlocked and freed mounted_root
+    // - Unlocked and freed child_sb
+    // We just need to release what's left
+    vfs_iunlock(target_dir);
+    vfs_superblock_unlock(target_dir->sb);
+    vfs_mount_unlock();
+    
+    return 0;
 }

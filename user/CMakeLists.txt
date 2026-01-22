@@ -116,6 +116,9 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/testsig.c
     ${USER_DIR}/cowtest.c
     ${USER_DIR}/devtest.c
+    ${USER_DIR}/mount.c
+    ${USER_DIR}/umount.c
+    ${USER_DIR}/mknod.c
 )
 
 set(USER_PROGRAMS_C_FILES 
