@@ -127,6 +127,7 @@ extern uint64 sys_getdents(void);
 extern uint64 sys_chroot(void);
 extern uint64 sys_mount(void);
 extern uint64 sys_umount(void);
+extern uint64 sys_getcwd(void);
 
 /*
  * Syscall routing table
@@ -199,6 +200,7 @@ static uint64 handle_vfs_syscall(int num) {
     case SYS_chroot:      return sys_chroot();
     case SYS_mount:       return sys_mount();
     case SYS_umount:      return sys_umount();
+    case SYS_getcwd:      return sys_getcwd();
     default:              return (uint64)-1;
   }
 }

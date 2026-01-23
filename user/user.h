@@ -48,6 +48,7 @@ int getdents(int fd, void *dirp, int count);
 int chroot(const char *path);
 int mount(const char *source, const char *target, const char *fstype);
 int umount(const char *target);
+char *getcwd(char *buf, int size);
 
 void sync(void);
 

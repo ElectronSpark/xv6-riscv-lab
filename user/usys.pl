@@ -60,6 +60,7 @@ entry("getdents");
 entry("chroot");
 entry("mount");
 entry("umount");
+entry("getcwd");
 
 entry("memstat");
 entry("dumpproc");

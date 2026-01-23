@@ -523,6 +523,108 @@ uint64 sys_vfs_chdir(void) {
 }
 
 /******************************************************************************
+ * Getcwd Syscall
+ ******************************************************************************/
+
+/*
+ * sys_getcwd - Get current working directory path
+ *
+ * Builds the path by walking from cwd up to root using parent pointers
+ * and inode name fields. Directory inodes store their name when loaded.
+ *
+ * Args:
+ *   arg0: buf - user buffer to store path
+ *   arg1: size - buffer size
+ *
+ * Returns:
+ *   Pointer to buf on success, or negative errno on failure.
+ */
+uint64 sys_getcwd(void) {
+    uint64 buf_addr;
+    int size;
+    
+    argaddr(0, &buf_addr);
+    argint(1, &size);
+    
+    if (size <= 0) {
+        return -EINVAL;
+    }
+    
+    char path[MAXPATH];
+    int pathlen = 0;
+    
+    struct proc *p = myproc();
+    vfs_struct_lock(p->fs);
+    struct vfs_inode *cwd = vfs_inode_deref(&p->fs->cwd);
+    struct vfs_inode *root = vfs_inode_deref(&p->fs->rooti);
+    vfs_struct_unlock(p->fs);
+    
+    if (cwd == NULL) {
+        return -ENOENT;
+    }
+    
+    // Build path from cwd to root by collecting names
+    // We build it in reverse, then reverse the result
+    char *names[MAXPATH / 2];  // Stack of name pointers
+    int name_count = 0;
+    
+    struct vfs_inode *inode = cwd;
+    while (inode != root) {
+        // Check if we're at a local root (mount point)
+        if (inode->parent == inode) {
+            // Cross mount boundary: get the mountpoint from the superblock
+            struct vfs_inode *mountpoint = inode->sb->mountpoint;
+            if (mountpoint == NULL) {
+                // We're at the global root
+                break;
+            }
+            // Use the mountpoint's name and continue from the mountpoint
+            if (mountpoint->name != NULL) {
+                names[name_count++] = mountpoint->name;
+            }
+            inode = mountpoint->parent;
+            if (inode == NULL || inode == mountpoint) {
+                break;
+            }
+            continue;
+        }
+        
+        if (inode->name != NULL) {
+            names[name_count++] = inode->name;
+        }
+        inode = inode->parent;
+        if (inode == NULL) {
+            break;
+        }
+    }
+    
+    // Build path from names (in reverse order)
+    path[pathlen++] = '/';
+    for (int i = name_count - 1; i >= 0; i--) {
+        int len = strlen(names[i]);
+        if (pathlen + len + 1 >= MAXPATH) {
+            return -ENAMETOOLONG;
+        }
+        memmove(path + pathlen, names[i], len);
+        pathlen += len;
+        if (i > 0) {
+            path[pathlen++] = '/';
+        }
+    }
+    path[pathlen] = '\0';
+    
+    if (pathlen + 1 > size) {
+        return -ERANGE;
+    }
+    
+    if (vm_copyout(p->vm, buf_addr, path, pathlen + 1) < 0) {
+        return -EFAULT;
+    }
+    
+    return buf_addr;
+}
+
+/******************************************************************************
  * Pipe Syscall
  ******************************************************************************/
 

@@ -54,6 +54,17 @@ void panic(char*);
 struct cmd *parsecmd(char*);
 void runcmd(struct cmd*) __attribute__((noreturn));
 
+// Current working directory path buffer
+static char cwd_path[512] = "/";
+
+// Update cwd_path using getcwd syscall
+static void update_cwd(void) {
+  if (getcwd(cwd_path, sizeof(cwd_path)) == 0) {
+    // On failure, keep previous value or set to "?"
+    strcpy(cwd_path, "?");
+  }
+}
+
 // Execute cmd.  Never returns.
 void
 runcmd(struct cmd *cmd)
@@ -140,7 +151,7 @@ runcmd(struct cmd *cmd)
 int
 getcmd(char *buf, int nbuf)
 {
-  write(2, "$ ", 2);
+  fprintf(2, "%s $ ", cwd_path);
   memset(buf, 0, nbuf);
   gets(buf, nbuf);
   if(buf[0] == 0) // EOF
@@ -162,6 +173,8 @@ main(void)
     }
   }
 
+  // Initialize cwd path
+  update_cwd();
   // Read and run input commands.
   while(getcmd(buf, sizeof(buf)) >= 0){
     if(buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' '){
@@ -169,6 +182,8 @@ main(void)
       buf[strlen(buf)-1] = 0;  // chop \n
       if(chdir(buf+3) < 0)
         fprintf(2, "cannot cd %s\n", buf+3);
+      else
+        update_cwd();
       continue;
     }
     if(fork1() == 0)

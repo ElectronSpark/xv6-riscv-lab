@@ -73,6 +73,7 @@
 #define SYS_chroot       1015
 #define SYS_mount        1016
 #define SYS_umount       1017
+#define SYS_getcwd       1018
 // SYS_mknod2 removed - mknod now takes 4 args (path, type, major, minor)
 
 #endif          /* __KERNEL_SYSCALL_H */

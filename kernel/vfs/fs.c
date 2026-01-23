@@ -1391,6 +1391,23 @@ static void __vfs_set_parent_from_dentry(struct vfs_inode *inode, struct vfs_ino
 }
 
 /*
+ * __vfs_set_name_if_null - Set inode's name from dentry if not already set.
+ *
+ * Directory inodes need their name for getcwd to build the path.
+ * The name may not be set if the inode was created (mkdir) and cached
+ * before being looked up via dentry resolution.
+ *
+ * Locking:
+ *   - Caller holds the inode lock.
+ */
+static void __vfs_set_name_if_null(struct vfs_inode *inode, struct vfs_dentry *dentry) {
+    if (S_ISDIR(inode->mode) && inode->name == NULL && 
+        dentry->name != NULL && dentry->name_len > 0) {
+        inode->name = strndup(dentry->name, dentry->name_len);
+    }
+}
+
+/*
  * __vfs_get_dentry_inode_impl - Internal helper to resolve a dentry to an inode.
  *
  * This is the core implementation that performs cache lookup and, if necessary,
@@ -1411,6 +1428,7 @@ static struct vfs_inode *__vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) 
 
     inode = vfs_get_inode_cached(dentry->sb, dentry->ino);
     if (!IS_ERR_OR_NULL(inode)) {
+        __vfs_set_name_if_null(inode, dentry);
         vfs_idup(inode);
         vfs_iunlock(inode);
         return inode;
@@ -1432,6 +1450,7 @@ static struct vfs_inode *__vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) 
 
     inode = vfs_get_inode_cached(dentry->sb, dentry->ino);
     if (!IS_ERR_OR_NULL(inode)) {
+        __vfs_set_name_if_null(inode, dentry);
         vfs_idup(inode);
         vfs_iunlock(inode);
         return inode;
@@ -1454,9 +1473,7 @@ static struct vfs_inode *__vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) 
 
     // Set parent and name on fresh load - directory inodes need these for ".." traversal
     __vfs_set_parent_from_dentry(inode, dentry->parent);
-    if (S_ISDIR(inode->mode) && dentry->name != NULL && dentry->name_len > 0) {
-        inode->name = strndup(dentry->name, dentry->name_len);
-    }
+    __vfs_set_name_if_null(inode, dentry);
     vfs_idup(inode);
     vfs_iunlock(inode);
     return inode;
