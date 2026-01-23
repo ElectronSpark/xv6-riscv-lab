@@ -454,6 +454,97 @@ uint64 sys_vfs_link(void) {
     return ret;
 }
 
+/**
+ * vfs_make_absolute_path - Convert a relative path to absolute based on cwd
+ * @relpath: the relative path to convert
+ * @relpath_len: length of the relative path
+ * @abspath: buffer to store the absolute path (must be MAXPATH size)
+ *
+ * If relpath is already absolute (starts with '/'), it is copied as-is.
+ * Otherwise, the current working directory is prepended.
+ *
+ * Returns: length of the absolute path, or negative errno on error
+ */
+static int vfs_make_absolute_path(const char *relpath, int relpath_len, char *abspath) {
+    if (relpath_len <= 0) {
+        return -EINVAL;
+    }
+    
+    // Already absolute - just copy
+    if (relpath[0] == '/') {
+        if (relpath_len >= MAXPATH) {
+            return -ENAMETOOLONG;
+        }
+        memmove(abspath, relpath, relpath_len);
+        abspath[relpath_len] = '\0';
+        return relpath_len;
+    }
+    
+    // Relative path - need to prepend cwd
+    struct proc *p = myproc();
+    vfs_struct_lock(p->fs);
+    struct vfs_inode *cwd = vfs_inode_deref(&p->fs->cwd);
+    struct vfs_inode *root = vfs_inode_deref(&p->fs->rooti);
+    vfs_struct_unlock(p->fs);
+    
+    if (cwd == NULL) {
+        return -ENOENT;
+    }
+    
+    // Collect names from cwd to root
+    char *names[MAXPATH / 2];
+    int name_count = 0;
+    
+    struct vfs_inode *inode = cwd;
+    while (inode != root) {
+        if (inode->parent == inode) {
+            // Cross mount boundary
+            struct vfs_inode *mountpoint = inode->sb->mountpoint;
+            if (mountpoint == NULL) {
+                break;
+            }
+            if (mountpoint->name != NULL) {
+                names[name_count++] = mountpoint->name;
+            }
+            inode = mountpoint->parent;
+            if (inode == NULL || inode == mountpoint) {
+                break;
+            }
+            continue;
+        }
+        
+        if (inode->name != NULL) {
+            names[name_count++] = inode->name;
+        }
+        inode = inode->parent;
+        if (inode == NULL) {
+            break;
+        }
+    }
+    
+    // Build absolute path: /cwd/relpath
+    int pathlen = 0;
+    abspath[pathlen++] = '/';
+    for (int i = name_count - 1; i >= 0; i--) {
+        int len = strlen(names[i]);
+        if (pathlen + len + 1 >= MAXPATH) {
+            return -ENAMETOOLONG;
+        }
+        memmove(abspath + pathlen, names[i], len);
+        pathlen += len;
+        abspath[pathlen++] = '/';
+    }
+    // Append relative path
+    if (pathlen + relpath_len >= MAXPATH) {
+        return -ENAMETOOLONG;
+    }
+    memmove(abspath + pathlen, relpath, relpath_len);
+    pathlen += relpath_len;
+    abspath[pathlen] = '\0';
+    
+    return pathlen;
+}
+
 uint64 sys_vfs_symlink(void) {
     char target[MAXPATH], linkpath[MAXPATH];
     char name[DIRSIZ];
@@ -462,6 +553,13 @@ uint64 sys_vfs_symlink(void) {
     if ((n1 = argstr(0, target, MAXPATH)) < 0 ||
         (n2 = argstr(1, linkpath, MAXPATH)) < 0) {
         return -EFAULT;
+    }
+    
+    // Convert target to absolute path if it's relative
+    char abs_target[MAXPATH];
+    int abs_len = vfs_make_absolute_path(target, n1, abs_target);
+    if (abs_len < 0) {
+        return abs_len;
     }
     
     struct vfs_inode *parent = vfs_nameiparent(linkpath, n2, name, DIRSIZ);
@@ -474,7 +572,7 @@ uint64 sys_vfs_symlink(void) {
     
     size_t name_len = strlen(name);
     
-    struct vfs_inode *sym = vfs_symlink(parent, 0777, name, name_len, target, n1);
+    struct vfs_inode *sym = vfs_symlink(parent, 0777, name, name_len, abs_target, abs_len);
     vfs_iput(parent);
     
     if (IS_ERR(sym)) {
@@ -854,20 +952,24 @@ uint64 sys_chroot(void) {
  * mount - Mount a filesystem
  ******************************************************************************/
 
-uint64 sys_mount(void) {
-    char source[MAXPATH];
-    char target[MAXPATH];
-    char fstype[32];
-    int n1, n2;
-    
-    if ((n1 = argstr(0, source, MAXPATH)) < 0 ||
-        (n2 = argstr(1, target, MAXPATH)) < 0 ||
-        argstr(2, fstype, 32) < 0) {
-        return -EFAULT;
-    }
-    
+/**
+ * vfs_mount_path - Mount a filesystem at the given path
+ * @fstype: filesystem type name (e.g., "tmpfs", "xv6fs")
+ * @target: target mount point path
+ * @target_len: length of target path
+ * @source: source device path (may be NULL for pseudo filesystems)
+ * @source_len: length of source path
+ *
+ * This is the kernel-internal mount function that handles path resolution,
+ * device lookup, locking, and calling vfs_mount(). Can be called from both
+ * kernel initialization code and sys_mount.
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int vfs_mount_path(const char *fstype, const char *target, int target_len,
+                   const char *source, int source_len) {
     // Look up target directory
-    struct vfs_inode *target_dir = vfs_namei(target, n2);
+    struct vfs_inode *target_dir = vfs_namei(target, target_len);
     if (IS_ERR(target_dir)) {
         return PTR_ERR(target_dir);
     }
@@ -881,13 +983,15 @@ uint64 sys_mount(void) {
     }
     
     // Parse source device (for block-device-based filesystems)
-    struct vfs_inode *source_dev = vfs_namei(source, n1);
     struct vfs_inode *source_inode = NULL;
-    if (!IS_ERR_OR_NULL(source_dev)) {
-        if (S_ISBLK(source_dev->mode)) {
-            source_inode = source_dev;
-        } else {
-            vfs_iput(source_dev);
+    if (source != NULL && source_len > 0) {
+        struct vfs_inode *source_dev = vfs_namei(source, source_len);
+        if (!IS_ERR_OR_NULL(source_dev)) {
+            if (S_ISBLK(source_dev->mode)) {
+                source_inode = source_dev;
+            } else {
+                vfs_iput(source_dev);
+            }
         }
     }
     
@@ -910,31 +1014,45 @@ uint64 sys_mount(void) {
     if (source_inode) {
         vfs_iput(source_inode);
     }
-    if (ret != 0) {
-        vfs_iput(target_dir);
-        return ret;
+    vfs_iput(target_dir);
+    
+    return ret;
+}
+
+uint64 sys_mount(void) {
+    char source[MAXPATH];
+    char target[MAXPATH];
+    char fstype[32];
+    int n1, n2;
+    
+    if ((n1 = argstr(0, source, MAXPATH)) < 0 ||
+        (n2 = argstr(1, target, MAXPATH)) < 0 ||
+        argstr(2, fstype, 32) < 0) {
+        return -EFAULT;
     }
     
-    // target_dir reference kept by mount, but we still need to release our ref
-    vfs_iput(target_dir);
-    return 0;
+    return vfs_mount_path(fstype, target, n2, source, n1);
 }
 
 /******************************************************************************
  * umount - Unmount a filesystem
  ******************************************************************************/
 
-uint64 sys_umount(void) {
-    char target[MAXPATH];
-    int n;
-    
-    if ((n = argstr(0, target, MAXPATH)) < 0) {
-        return -EFAULT;
-    }
-    
+/**
+ * vfs_umount_path - Unmount a filesystem at the given path
+ * @target: target mount point path
+ * @target_len: length of target path
+ *
+ * This is the kernel-internal unmount function that handles path resolution,
+ * locking, and calling vfs_unmount(). Can be called from both kernel code
+ * and sys_umount.
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int vfs_umount_path(const char *target, int target_len) {
     // Look up target directory - vfs_namei follows mounts, so we get the
     // mounted filesystem's root inode, not the mountpoint directory itself
-    struct vfs_inode *mounted_root = vfs_namei(target, n);
+    struct vfs_inode *mounted_root = vfs_namei(target, target_len);
     if (IS_ERR(mounted_root)) {
         return PTR_ERR(mounted_root);
     }
@@ -996,4 +1114,15 @@ uint64 sys_umount(void) {
     vfs_mount_unlock();
     
     return 0;
+}
+
+uint64 sys_umount(void) {
+    char target[MAXPATH];
+    int n;
+    
+    if ((n = argstr(0, target, MAXPATH)) < 0) {
+        return -EFAULT;
+    }
+    
+    return vfs_umount_path(target, n);
 }
