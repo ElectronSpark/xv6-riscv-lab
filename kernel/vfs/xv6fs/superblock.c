@@ -396,76 +396,89 @@ struct vfs_fs_type_ops xv6fs_fs_type_ops = {
  * Filesystem type initialization
  ******************************************************************************/
 
-void xv6fs_init_fs_type(void) {
+/**
+ * Initialize xv6fs caches and register the filesystem type.
+ * Does NOT mount the filesystem - call xv6fs_mount_root() for that.
+ */
+void xv6fs_init(void) {
     // Initialize caches
     int ret = __xv6fs_init_cache();
-    assert(ret == 0, "xv6fs_init_fs_type: __xv6fs_init_cache failed, errno=%d", ret);
+    assert(ret == 0, "xv6fs_init: __xv6fs_init_cache failed, errno=%d", ret);
     
     // Allocate and register filesystem type
     struct vfs_fs_type *fs_type = vfs_fs_type_allocate();
-    assert(fs_type != NULL, "xv6fs_init_fs_type: vfs_fs_type_allocate failed");
+    assert(fs_type != NULL, "xv6fs_init: vfs_fs_type_allocate failed");
     
     fs_type->name = "xv6fs";
     fs_type->ops = &xv6fs_fs_type_ops;
     
     vfs_mount_lock();
     ret = vfs_register_fs_type(fs_type);
-    assert(ret == 0, "xv6fs_init_fs_type: vfs_register_fs_type failed, errno=%d", ret);
+    assert(ret == 0, "xv6fs_init: vfs_register_fs_type failed, errno=%d", ret);
     vfs_mount_unlock();
     
     printf("xv6fs: filesystem type registered\n");
-    
-    // Mount xv6fs at /root and chroot onto it
+}
+
+/**
+ * Mount xv6fs at /root and chroot into it.
+ * Requires: tmpfs already mounted as initial root (vfs_root_inode.mnt_rooti set).
+ */
+void xv6fs_mount_root(void) {
     struct vfs_inode *tmpfs_root = vfs_root_inode.mnt_rooti;
-    if (tmpfs_root != NULL) {
-        // Create /root directory in tmpfs root (vfs_mkdir handles its own locking)
-        struct vfs_inode *root_dir = vfs_mkdir(tmpfs_root, 0755, "root", 4);
-        
-        if (!IS_ERR_OR_NULL(root_dir)) {
-            // Create a block device inode for ROOTDEV
-            struct vfs_inode *dev_inode = vfs_mknod(tmpfs_root, S_IFBLK | 0600, 
-                                                     ROOTDEV, "rootdev", 7);
-            if (IS_ERR_OR_NULL(dev_inode)) {
-                printf("xv6fs: failed to create device inode, errno=%ld\n", 
-                       dev_inode ? PTR_ERR(dev_inode) : -ENOMEM);
-                vfs_iput(root_dir);
-                return;
-            }
-            
-            // Mount xv6fs at /root
-            // vfs_mount requires: mount mutex, superblock write lock, and inode lock
-            vfs_mount_lock();
-            vfs_superblock_wlock(root_dir->sb);
-            vfs_ilock(root_dir);
-            ret = vfs_mount("xv6fs", root_dir, dev_inode, 0, NULL);
-            vfs_iunlock(root_dir);
-            vfs_superblock_unlock(root_dir->sb);
-            vfs_mount_unlock();
-            
-            // Release device inode reference (mount holds its own if needed)
-            vfs_iput(dev_inode);
-            
-            if (ret == 0) {
-                printf("xv6fs: mounted at /root\n");
-                
-                // Now chroot into the xv6fs root
-                struct vfs_inode *xv6fs_root = root_dir->mnt_rooti;
-                if (xv6fs_root != NULL) {
-                    ret = vfs_chroot(xv6fs_root);
-                    if (ret == 0) {
-                        printf("xv6fs: chroot to /root successful\n");
-                    } else {
-                        printf("xv6fs: chroot to /root failed, errno=%d\n", ret);
-                    }
-                }
-            } else {
-                printf("xv6fs: failed to mount at /root, errno=%d\n", ret);
-            }
-            vfs_iput(root_dir);
-        } else {
-            printf("xv6fs: failed to create /root directory\n");
-        }
+    if (tmpfs_root == NULL) {
+        printf("xv6fs: no root filesystem to mount onto\n");
+        return;
     }
+    
+    // Create /root directory in tmpfs root (vfs_mkdir handles its own locking)
+    struct vfs_inode *root_dir = vfs_mkdir(tmpfs_root, 0755, "root", 4);
+    
+    if (IS_ERR_OR_NULL(root_dir)) {
+        printf("xv6fs: failed to create /root directory\n");
+        return;
+    }
+    
+    // Create a block device inode for ROOTDEV
+    struct vfs_inode *dev_inode = vfs_mknod(tmpfs_root, S_IFBLK | 0600, 
+                                             ROOTDEV, "rootdev", 7);
+    if (IS_ERR_OR_NULL(dev_inode)) {
+        printf("xv6fs: failed to create device inode, errno=%ld\n", 
+               dev_inode ? PTR_ERR(dev_inode) : -ENOMEM);
+        vfs_iput(root_dir);
+        return;
+    }
+    
+    // Mount xv6fs at /root
+    // vfs_mount requires: mount mutex, superblock write lock, and inode lock
+    vfs_mount_lock();
+    vfs_superblock_wlock(root_dir->sb);
+    vfs_ilock(root_dir);
+    int ret = vfs_mount("xv6fs", root_dir, dev_inode, 0, NULL);
+    vfs_iunlock(root_dir);
+    vfs_superblock_unlock(root_dir->sb);
+    vfs_mount_unlock();
+    
+    // Release device inode reference (mount holds its own if needed)
+    vfs_iput(dev_inode);
+    
+    if (ret == 0) {
+        printf("xv6fs: mounted at /root\n");
+        
+        // Now chroot into the xv6fs root
+        struct vfs_inode *xv6fs_root = root_dir->mnt_rooti;
+        if (xv6fs_root != NULL) {
+            ret = vfs_chroot(xv6fs_root);
+            if (ret == 0) {
+                printf("xv6fs: chroot to /root successful\n");
+            } else {
+                printf("xv6fs: chroot to /root failed, errno=%d\n", ret);
+            }
+        }
+    } else {
+        printf("xv6fs: failed to mount at /root, errno=%d\n", ret);
+    }
+    vfs_iput(root_dir);
     
     // xv6fs_run_all_smoketests();
 }

@@ -18,6 +18,8 @@
 #include "list.h"
 #include "hlist.h"
 #include "slab.h"
+#include "tmpfs/tmpfs_smoketest.h"
+#include "xv6fs/xv6fs_smoketest.h"
 
 // Locking order
 // 1. mount mutex acquired via vfs_mount_lock()
@@ -368,8 +370,28 @@ void vfs_init(void) {
     __vfs_file_init();
     proc->fs = vfs_struct_init();
     proc->fdtable = vfs_fdtable_init();
-    tmpfs_init_fs_type();
-    xv6fs_init_fs_type();
+    
+    // Initialize filesystem types (registers them with VFS)
+    tmpfs_init();
+    xv6fs_init();
+
+    // Mount filesystems
+    tmpfs_mount_root();
+    xv6fs_mount_root();
+    
+    // Mount tmpfs at /tmp (after chroot to xv6fs)
+    ret = vfs_mount_path("tmpfs", "/tmp", 4, NULL, 0);
+    if (ret == 0) {
+        printf("tmpfs: mounted at /tmp\n");
+    } else if (ret == -ENOENT) {
+        printf("tmpfs: /tmp directory not found\n");
+    } else {
+        printf("tmpfs: failed to mount at /tmp, errno=%d\n", ret);
+    }
+    
+    // Optional: run smoke tests
+    // tmpfs_run_all_smoketests();
+    // xv6fs_run_all_smoketests();
 }
 
 /*

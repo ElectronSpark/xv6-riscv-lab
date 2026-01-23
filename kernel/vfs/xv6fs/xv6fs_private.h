@@ -140,7 +140,8 @@ loff_t xv6fs_file_llseek(struct vfs_file *file, loff_t offset, int whence);
 int xv6fs_file_stat(struct vfs_file *file, struct stat *stat);
 
 // Helper functions
-void xv6fs_init_fs_type(void);
+void xv6fs_init(void);
+void xv6fs_mount_root(void);
 uint xv6fs_bmap(struct xv6fs_inode *ip, uint bn);
 uint xv6fs_bmap_read(struct xv6fs_inode *ip, uint bn);
 void xv6fs_itrunc(struct xv6fs_inode *ip);

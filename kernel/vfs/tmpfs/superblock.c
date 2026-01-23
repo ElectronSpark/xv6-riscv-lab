@@ -237,27 +237,27 @@ struct vfs_fs_type_ops tmpfs_fs_type_ops = {
     .free = tmpfs_free,
 };
 
-void tmpfs_init_fs_type(void) {
+/*
+ * tmpfs_init - Initialize tmpfs filesystem type (caches and registration).
+ *
+ * This only initializes the tmpfs infrastructure. It does NOT mount anything.
+ * Call this once during kernel initialization before any tmpfs can be mounted.
+ */
+void tmpfs_init(void) {
     // Initialize tmpfs inode and superblock caches
     int ret = __tmpfs_init_cache();
-    assert(ret == 0, "tmpfs_init_fs_type: __tmpfs_init_cache failed, errno=%d", ret);
+    assert(ret == 0, "tmpfs_init: __tmpfs_init_cache failed, errno=%d", ret);
 
     // Allocate and initialize the tmpfs filesystem type
     struct vfs_fs_type *fs_type = vfs_fs_type_allocate();
-    assert(fs_type != NULL, "tmpfs_init_fs_type: vfs_fs_type_allocate failed");
+    assert(fs_type != NULL, "tmpfs_init: vfs_fs_type_allocate failed");
     fs_type->name = "tmpfs";
     fs_type->ops = &tmpfs_fs_type_ops;
 
     // Register the filesystem type with the VFS
     vfs_mount_lock();
     ret = vfs_register_fs_type(fs_type);
-    assert(ret == 0, "tmpfs_init_fs_type: vfs_register_fs_type failed, errno=%d", ret);
-    vfs_ilock(&vfs_root_inode);
-
-    // Mount the tmpfs at the root inode
-    ret = vfs_mount("tmpfs", &vfs_root_inode, NULL, 0, NULL);
-    assert(ret == 0, "tmpfs_init_fs_type: vfs_mount failed, errno=%d", ret);
-    vfs_iunlock(&vfs_root_inode);
+    assert(ret == 0, "tmpfs_init: vfs_register_fs_type failed, errno=%d", ret);
     vfs_mount_unlock();
     
     printf("sizeof(tmpfs_inode)=%lu, TMPFS_INODE_EMBEDDED_DATA_LEN=%lu\n",
@@ -265,9 +265,26 @@ void tmpfs_init_fs_type(void) {
     printf("tmpfs max file size=%lu bytes\n", TMPFS_MAX_FILE_SIZE);
     printf("TMPFS_INODE_DBLOCKS=%lu, TMPFS_INODE_INDRECT_ITEMS=%lu\n",
            TMPFS_INODE_DBLOCKS, TMPFS_INODE_INDRECT_ITEMS);
+}
+
+/*
+ * tmpfs_mount_root - Mount tmpfs as the root filesystem.
+ *
+ * This mounts a fresh tmpfs instance at the VFS root inode and sets it
+ * as the process root. Call this after tmpfs_init() during early boot.
+ */
+void tmpfs_mount_root(void) {
+    int ret;
+    
+    vfs_mount_lock();
+    vfs_ilock(&vfs_root_inode);
+
+    // Mount the tmpfs at the root inode
+    ret = vfs_mount("tmpfs", &vfs_root_inode, NULL, 0, NULL);
+    assert(ret == 0, "tmpfs_mount_root: vfs_mount failed, errno=%d", ret);
+    vfs_iunlock(&vfs_root_inode);
+    vfs_mount_unlock();
 
     ret = vfs_chroot(vfs_root_inode.mnt_rooti);
-    assert(ret == 0, "tmpfs_init_fs_type: vfs_chroot failed, errno=%d", ret);
-
-    // tmpfs_run_all_smoketests();
+    assert(ret == 0, "tmpfs_mount_root: vfs_chroot failed, errno=%d", ret);
 }
