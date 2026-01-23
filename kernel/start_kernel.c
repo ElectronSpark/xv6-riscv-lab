@@ -21,6 +21,7 @@
 #include "early_allocator.h"
 #include "timer/goldfish_rtc.h"
 
+uint64 __physical_memory_start;
 uint64 __physical_memory_end;
 uint64 __physical_total_pages;
 
@@ -30,8 +31,19 @@ extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
 static void __start_kernel_main_hart(int hartid, void *fdt_base) {
-    __physical_memory_end = (KERNBASE + 128*1024*1024);
-    __physical_total_pages = (__physical_memory_end - KERNBASE) >> 12;
+    // Early memory detection from FDT (lightweight scan, no allocations)
+    uint64 mem_base = 0x80000000;  // Default for QEMU
+    uint64 mem_size = 128*1024*1024;
+    if (fdt_early_scan_memory(fdt_base, &mem_base, &mem_size) == 0) {
+        // Successfully found memory from FDT
+    }
+    
+    // Set up memory boundaries for early allocator
+    __physical_memory_start = mem_base;
+    __physical_memory_end = mem_base + mem_size;
+    __physical_total_pages = mem_size >> 12;
+    
+    // Early allocator uses memory after kernel end
     early_allocator_init((void*)end, (void*)__physical_memory_end);
     kobject_global_init();
     printfinit();
@@ -40,6 +52,14 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     printf("\n");
     fdt_init(fdt_base);
     fdt_walk(fdt_base);
+    
+    // Refine memory info from full FDT parse (may have multiple regions)
+    if (platform.mem_count > 0 && platform.mem[0].size > 0) {
+        __physical_memory_start = platform.mem[0].base;
+        __physical_memory_end = platform.mem[0].base + platform.mem[0].size;
+        __physical_total_pages = platform.mem[0].size >> 12;
+    }
+    
     sbi_probe_extensions();
     consoleinit();
     printf("hart %d, fdt_base %p, sp: %p\n", hartid, fdt_base, __builtin_frame_address(0));

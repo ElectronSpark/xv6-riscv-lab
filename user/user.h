@@ -42,6 +42,7 @@ int dumpproc(void);
 int dumpchan(void);
 int dumppcache(void);
 int dumprq(void);
+uint64 kernbase(void);
 
 // New VFS syscalls
 int getdents(int fd, void *dirp, int count);

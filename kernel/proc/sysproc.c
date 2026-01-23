@@ -68,3 +68,7 @@ uint64 sys_kill(void) {
 // return how many clock tick interrupts have occurred
 // since start.
 uint64 sys_uptime(void) { return get_jiffs(); }
+
+// return the physical memory start address (KERNBASE)
+// for user-space tests that need to verify they can't access kernel memory
+uint64 sys_kernbase(void) { return __physical_memory_start; }

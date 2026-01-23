@@ -133,6 +133,11 @@ struct platform_info {
 // Global platform info (populated by fdt_init)
 extern struct platform_info platform;
 
+// Early boot: quickly find memory region without full FDT parsing
+// Returns 0 on success, -1 on failure
+// This is a lightweight linear scan used before full FDT tree is built
+int fdt_early_scan_memory(void *dtb, uint64 *base_out, uint64 *size_out);
+
 // Initialize FDT parser and probe platform info
 // dtb: pointer to the device tree blob (passed by bootloader in a1)
 int fdt_init(void *dtb);

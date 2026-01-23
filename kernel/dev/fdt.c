@@ -41,6 +41,106 @@ static const char *fdt_get_string(void *dtb, uint32 offset) {
     return (const char *)dtb + str_off + offset;
 }
 
+// Early boot: quickly scan FDT to find first memory region
+// This is a lightweight linear scan - no allocations, no tree building
+// Returns 0 on success with base/size filled in, -1 on failure
+int fdt_early_scan_memory(void *dtb, uint64 *base_out, uint64 *size_out) {
+    if (!fdt_valid(dtb) || !base_out || !size_out) {
+        return -1;
+    }
+
+    char *struct_start = (char *)dtb + fdt_get_header(dtb, 8);  // off_dt_struct
+    char *p = struct_start;
+    uint32 token;
+    int depth = 0;
+    int in_memory_node = 0;
+    int root_addr_cells = 2;  // Default
+    int root_size_cells = 1;  // Default
+
+    while (1) {
+        token = fdt32_to_cpu(*(uint32 *)p);
+        p += 4;
+
+        switch (token) {
+        case FDT_BEGIN_NODE: {
+            const char *name = p;
+            int namelen = strlen(name);
+            p += fdt_align(namelen + 1);
+
+            depth++;
+            // Check if this is a memory node (name starts with "memory")
+            if (depth == 1 && strncmp(name, "memory", 6) == 0) {
+                in_memory_node = 1;
+            }
+            break;
+        }
+
+        case FDT_END_NODE:
+            if (in_memory_node && depth == 1) {
+                in_memory_node = 0;
+            }
+            depth--;
+            break;
+
+        case FDT_PROP: {
+            uint32 len = fdt32_to_cpu(*(uint32 *)p);
+            p += 4;
+            uint32 nameoff = fdt32_to_cpu(*(uint32 *)p);
+            p += 4;
+
+            const char *propname = fdt_get_string(dtb, nameoff);
+            void *data = p;
+            p += fdt_align(len);
+
+            // At root level, capture #address-cells and #size-cells
+            if (depth == 1) {
+                if (strcmp(propname, "#address-cells") == 0 && len >= 4) {
+                    root_addr_cells = fdt32_to_cpu(*(uint32 *)data);
+                } else if (strcmp(propname, "#size-cells") == 0 && len >= 4) {
+                    root_size_cells = fdt32_to_cpu(*(uint32 *)data);
+                }
+            }
+
+            // If we're in a memory node, look for "reg" property
+            if (in_memory_node && strcmp(propname, "reg") == 0) {
+                // Parse the first entry of the reg property
+                uint32 *cells = (uint32 *)data;
+                uint64 base = 0, size = 0;
+
+                if (root_addr_cells == 2) {
+                    base = ((uint64)fdt32_to_cpu(cells[0]) << 32) |
+                           fdt32_to_cpu(cells[1]);
+                } else {
+                    base = fdt32_to_cpu(cells[0]);
+                }
+
+                int size_offset = root_addr_cells;
+                if (root_size_cells == 2) {
+                    size = ((uint64)fdt32_to_cpu(cells[size_offset]) << 32) |
+                           fdt32_to_cpu(cells[size_offset + 1]);
+                } else {
+                    size = fdt32_to_cpu(cells[size_offset]);
+                }
+
+                *base_out = base;
+                *size_out = size;
+                return 0;  // Success!
+            }
+            break;
+        }
+
+        case FDT_NOP:
+            break;
+
+        case FDT_END:
+            return -1;  // Reached end without finding memory
+
+        default:
+            return -1;  // Unknown token
+        }
+    }
+}
+
 // Parse and copy namestring into fdt_node
 // The full namestring (including @addr) is stored for comparison
 // name_size is the length of the base name (before @)

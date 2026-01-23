@@ -60,7 +60,9 @@ extern uint64 __physical_total_pages;
 // Make sure the whole memory area is in the user space when testing
 #define KERNBASE 0x40000000L
 #else
-#define KERNBASE 0x80000000L
+// KERNBASE is a runtime variable set from FDT at boot time
+// For user-space, use kernbase() syscall to get the actual value
+#define KERNBASE __physical_memory_start
 #endif
 #define PHYSTOP __physical_memory_end
 #define TOTALPAGES  __physical_total_pages

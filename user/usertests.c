@@ -2128,8 +2128,9 @@ kernmem(char *s)
 {
   char *a;
   int pid;
+  uint64 kb = kernbase();  // Get KERNBASE from kernel via syscall
 
-  for(a = (char*)(KERNBASE); a < (char*) (KERNBASE+2000000); a += 50000){
+  for(a = (char*)(kb); a < (char*) (kb+2000000); a += 50000){
     pid = fork();
     if(pid < 0){
       printf("%s: fork failed\n", s);
