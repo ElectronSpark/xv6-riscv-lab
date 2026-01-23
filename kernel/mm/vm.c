@@ -99,6 +99,7 @@
 #include "slab.h"
 #include "string.h"
 #include "types.h"
+#include "fdt.h"
 
 static slab_cache_t __vma_pool = {0};
 static slab_cache_t __vm_pool = {0};
@@ -174,21 +175,71 @@ pagetable_t kvmmake(void) {
     // uart registers
     kvmmap(kpgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
 
-    // Goldfish RTC (Real Time Clock)
-    kvmmap(kpgtbl, GOLDFISH_RTC, GOLDFISH_RTC, PGSIZE, PTE_R | PTE_W);
+    // Goldfish RTC (Real Time Clock) - only on QEMU
+    if (GOLDFISH_RTC != 0) {
+        kvmmap(kpgtbl, GOLDFISH_RTC, GOLDFISH_RTC, PGSIZE, PTE_R | PTE_W);
+    }
 
-    // virtio mmio disk interface
-    kvmmap(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
-    kvmmap(kpgtbl, VIRTIO1, VIRTIO1, PGSIZE, PTE_R | PTE_W);
+    // virtio mmio disk interface - only if platform has VirtIO devices
+    if (platform.has_virtio && platform.virtio_count > 0) {
+        for (int i = 0; i < platform.virtio_count && i < N_VIRTIO; i++) {
+            if (platform.virtio_base[i] != 0) {
+                kvmmap(kpgtbl, platform.virtio_base[i], platform.virtio_base[i],
+                       PGSIZE, PTE_R | PTE_W);
+            }
+        }
+    }
 
-    // PCI-E ECAM (configuration space), for pci.c
-    kvmmap(kpgtbl, PCIE_ECAM, PCIE_ECAM, 0x10000000, PTE_R | PTE_W);
-
-    // pci.c maps the e1000's registers here.
-    kvmmap(kpgtbl, E1000_PCI_ADDR, E1000_PCI_ADDR, 0x20000, PTE_R | PTE_W);
+    // PCI-E ECAM (configuration space), for pci.c - only if platform has PCIe
+    if (platform.has_pcie && PCIE_ECAM != 0) {
+        // Track already-mapped ranges to avoid overlaps
+        uint64 mapped_ranges[PCIE_REG_MAX][2];  // [base, end]
+        int num_mapped = 0;
+        
+        // Map all PCIe regions (round down start, round up end for alignment)
+        for (int i = 0; i < platform.pcie_reg_count; i++) {
+            uint64 base = platform.pcie_reg[i].base;
+            uint64 size = platform.pcie_reg[i].size;
+            if (base == 0 || size == 0) {
+                continue;
+            }
+            // Round down start, round up end
+            uint64 aligned_base = PGROUNDDOWN(base);
+            uint64 aligned_end = PGROUNDUP(base + size);
+            
+            // Check for overlap with already-mapped regions
+            int overlap = 0;
+            for (int j = 0; j < num_mapped; j++) {
+                if (aligned_base < mapped_ranges[j][1] && aligned_end > mapped_ranges[j][0]) {
+                    overlap = 1;
+                    break;
+                }
+            }
+            if (overlap) {
+                continue;  // Skip overlapping regions
+            }
+            
+            uint64 aligned_size = aligned_end - aligned_base;
+            kvmmap(kpgtbl, aligned_base, aligned_base, aligned_size, PTE_R | PTE_W);
+            
+            // Record this mapped range
+            if (num_mapped < PCIE_REG_MAX) {
+                mapped_ranges[num_mapped][0] = aligned_base;
+                mapped_ranges[num_mapped][1] = aligned_end;
+                num_mapped++;
+            }
+        }
+        // pci.c maps the e1000's registers here - only on QEMU
+        // (VirtIO presence indicates QEMU; real hardware won't have E1000 at hardcoded addr)
+        if (platform.has_virtio && E1000_PCI_ADDR != 0) {
+            kvmmap(kpgtbl, E1000_PCI_ADDR, E1000_PCI_ADDR, 0x20000, PTE_R | PTE_W);
+        }
+    }
 
     // PLIC
-    kvmmap(kpgtbl, PLIC, PLIC, 0x4000000, PTE_R | PTE_W);
+    if (platform.plic_base != 0 && platform.plic_size != 0) {
+        kvmmap(kpgtbl, PLIC, PLIC, platform.plic_size, PTE_R | PTE_W);
+    }
 
     // map kernel text executable and read-only.
     kvmmap(kpgtbl, (uint64)_entry, (uint64)_entry,
@@ -549,13 +600,13 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa,
     pte_t *pte;
 
     if ((va % PGSIZE) != 0)
-        panic("mappages: va not aligned");
+        panic("mappages: va not aligned, va %p", (void *)va);
 
     if ((size % PGSIZE) != 0)
-        panic("mappages: size not aligned");
+        panic("mappages: size not aligned, va %p, size %p", (void *)va, (void *)size);
 
     if (size == 0)
-        panic("mappages: size");
+        panic("mappages: size zero, va %p", (void *)va);
 
     a = va;
     last = va + size - PGSIZE;
@@ -563,7 +614,7 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa,
         if ((pte = walk(pagetable, a, 1, NULL, NULL)) == 0)
             return -1;
         if (*pte & PTE_V)
-            panic("mappages: remap");
+            panic("mappages: remap, %p", (void *)a);
         *pte = PA2PTE(pa) | perm | PTE_V;
         if (a == last)
             break;

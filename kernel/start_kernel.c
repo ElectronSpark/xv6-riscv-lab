@@ -20,6 +20,10 @@
 #include "fdt.h"
 #include "early_allocator.h"
 #include "timer/goldfish_rtc.h"
+#include "uart.h"
+#include "plic.h"
+#include "pci.h"
+#include "virtio.h"
 
 uint64 __physical_memory_start;
 uint64 __physical_memory_end;
@@ -51,14 +55,10 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     printf("xv6 kernel is booting\n");
     printf("\n");
     fdt_init(fdt_base);
-    fdt_walk(fdt_base);
+    // fdt_walk(fdt_base);
     
-    // Refine memory info from full FDT parse (may have multiple regions)
-    if (platform.mem_count > 0 && platform.mem[0].size > 0) {
-        __physical_memory_start = platform.mem[0].base;
-        __physical_memory_end = platform.mem[0].base + platform.mem[0].size;
-        __physical_total_pages = platform.mem[0].size >> 12;
-    }
+    // Apply platform configuration from FDT to kernel globals
+    fdt_apply_platform_config();
     
     sbi_probe_extensions();
     consoleinit();
@@ -66,8 +66,11 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     ksymbols_init(); // Initialize kernel symbols
     kinit();         // physical page allocator
     kvminit();       // create kernel page table
+    printf("page table initialized\n");
     kvminithart();   // turn on paging
+    printf("paging enabled\n");
     mycpu_init(hartid, true);  // Change mycpu pointer to use trampoline stack
+    printf("mycpu initialized\n");
     rcu_init();      // RCU subsystem initialization
     dev_table_init(); // Initialize the device table
     procinit();      // process table

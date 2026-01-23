@@ -23,12 +23,14 @@
 #include "completion.h"
 #include "trap.h"
 #include "freelist.h"
+#include "fdt.h"
 
 // the address of virtio mmio register r for disk n.
 #define R(n, r) ((volatile uint32 *)(__virtio_mmio_base[n] + (r)))
 
-const uint64 __virtio_mmio_base[N_VIRTIO] = { 0x10001000, 0x10002000, 0x10003000 };
-const uint64 __virtio_irqno[N_VIRTIO] = { 1, 2, 3 };
+// These are initialized from platform info at runtime
+uint64 __virtio_mmio_base[N_VIRTIO] = { 0x10001000, 0x10002000, 0x10003000 };
+uint64 __virtio_irqno[N_VIRTIO] = { 1, 2, 3 };
 
 static void
 virtio_disk_rw(int diskno, struct bio *bio, uint64 sector, void *buf, size_t size, int write);

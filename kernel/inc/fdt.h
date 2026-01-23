@@ -54,6 +54,36 @@ struct fdt_prop {
     // followed by property value
 } __PACKED;
 
+// Forward declarations for hash table linkage
+struct fdt_compat_hash_node;
+struct fdt_phandle_hash_node;
+
+// Link node attached to each fdt_node for compatible string indexing
+// Multiple fdt_nodes can share the same compatible string
+struct fdt_compat_link {
+    list_node_t list_entry;                 // Link in fdt_compat_hash_node's nodes list
+    struct fdt_compat_hash_node *hash_node; // Back pointer to hash table entry
+    struct fdt_node *fdt_node;              // The FDT node this refers to
+};
+
+// Hash table entry for compatible strings
+// One entry per unique compatible string, links to all fdt_nodes with that compat
+struct fdt_compat_hash_node {
+    hlist_entry_t hash_entry;   // Link in hash table bucket
+    const char *compat;         // The compatible string (points into fdt_node data)
+    size_t compat_len;          // Length of compatible string
+    list_node_t nodes;          // List of fdt_compat_link nodes
+    int count;                  // Number of nodes with this compatible
+};
+
+// Hash table entry for phandle lookup
+// One entry per phandle, directly points to the fdt_node
+struct fdt_phandle_hash_node {
+    hlist_entry_t hash_entry;   // Link in hash table bucket
+    uint32 phandle;             // The phandle value
+    struct fdt_node *fdt_node;  // The FDT node with this phandle
+};
+
 // FDT node structure for internal representation
 // Structure:
 // | fd_node | date[0] ... data[n] | name string |
@@ -75,6 +105,7 @@ struct fdt_node {
     struct rb_root children;  // Properties/sub-nodes in this node
     uint64 addr;        // The unit address (from name@addr)
     const char *name;
+    list_node_t compat_links;   // List of fdt_compat_link for this node's compatible strings
     uint32 data[0];  // Property data follows
 };
 
@@ -89,6 +120,10 @@ struct fdt_blob_info {
     // Reserved memory regions (from /memreserve/ and /reserved-memory)
     struct mem_region *reserved;
     int reserved_count;
+    
+    // Hash tables for fast lookup (pointers because hlist_t has flexible array)
+    hlist_t *compat_table;      // Hash table for compatible string lookup
+    hlist_t *phandle_table;     // Hash table for phandle lookup
 };
 
 // Probed platform information
@@ -116,6 +151,20 @@ struct platform_info {
     // PLIC
     uint64 plic_base;
     uint64 plic_size;
+    
+    // PCIe regions (if present)
+    // Common regions: dbi (controller), config (ECAM), atu (address translation)
+    #define PCIE_REG_DBI     0  // Controller DBI registers
+    #define PCIE_REG_ATU     1  // Address Translation Unit
+    #define PCIE_REG_CONFIG  2  // Config space (ECAM)
+    #define PCIE_REG_MAX     8  // Maximum number of regions
+    int has_pcie;
+    struct {
+        uint64 base;
+        uint64 size;
+        const char *name;  // Region name from reg-names (NULL if not available)
+    } pcie_reg[PCIE_REG_MAX];
+    int pcie_reg_count;
     
     // VirtIO (if present)
     int has_virtio;
@@ -166,5 +215,24 @@ struct fdt_node *fdt_node_lookup(struct fdt_node *parent,
 // Path must start with '/' for absolute paths
 struct fdt_node *fdt_path_lookup(struct fdt_blob_info *blob,
                                  const char *path);
+
+// Lookup nodes by compatible string
+// Returns the first fdt_node with the given compatible string, or NULL if not found
+// Use fdt_compat_next() to iterate through all matching nodes
+struct fdt_node *fdt_compat_lookup(struct fdt_blob_info *blob,
+                                   const char *compat);
+
+// Get next node with the same compatible string
+// link: pointer to the current fdt_compat_link (from previous call)
+// Returns the next fdt_node, or NULL if no more nodes
+struct fdt_node *fdt_compat_next(struct fdt_compat_link **link);
+
+// Lookup node by phandle
+// Returns the fdt_node with the given phandle, or NULL if not found
+struct fdt_node *fdt_phandle_lookup(struct fdt_blob_info *blob, uint32 phandle);
+
+// Apply platform configuration to kernel globals
+// Sets up device addresses (UART, PLIC, PCIe, VirtIO) from parsed FDT
+void fdt_apply_platform_config(void);
 
 #endif /* __KERNEL_FDT_H */

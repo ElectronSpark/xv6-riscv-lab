@@ -14,8 +14,8 @@
 // virtio mmio interface
 #define N_VIRTIO_DISK 2  // number of virtio disks
 #define N_VIRTIO 3  // number of virtio devices
-extern const uint64 __virtio_mmio_base[N_VIRTIO];
-extern const uint64 __virtio_irqno[N_VIRTIO];
+extern uint64 __virtio_mmio_base[N_VIRTIO];
+extern uint64 __virtio_irqno[N_VIRTIO];
 #define VIRTIO0 __virtio_mmio_base[0]
 #define VIRTIO0_IRQ __virtio_irqno[0]
 #define VIRTIO1 __virtio_mmio_base[1]

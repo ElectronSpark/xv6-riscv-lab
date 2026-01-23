@@ -10,9 +10,14 @@
 #include "bits.h"
 #include "printf.h"
 #include "string.h"
+#include "list.h"
 #include "hlist.h"
 #include "rbtree.h"
 #include "early_allocator.h"
+#include "uart.h"
+#include "plic.h"
+#include "pci.h"
+#include "virtio.h"
 
 // Global platform info - populated by fdt_init()
 // Code can access platform.uart_base, platform.plic_base, etc. for runtime
@@ -241,6 +246,7 @@ static struct fdt_node *__fdt_create_node(size_t name_size, size_t data_size) {
     node->data_size = data_size;
     node->name_size = name_size;
     node->name = (const char *)node->data + data_size;
+    list_entry_init(&node->compat_links);  // Initialize compat links list
     return node;
 }
 
@@ -655,11 +661,48 @@ static uint64 __fdt_prop_u64(struct fdt_node *prop, int index) {
 }
 
 // Helper to check if property contains a compatible string
+// FDT compatible properties contain null-separated strings
 static bool __fdt_prop_compat(struct fdt_node *prop, const char *compat) {
-    if (prop == NULL || prop->data_size == 0) {
+    if (prop == NULL || prop->data_size == 0 || compat == NULL) {
         return false;
     }
-    return strstr((const char *)prop->data, compat) != NULL;
+    
+    const char *data = (const char *)prop->data;
+    size_t data_len = prop->data_size;
+    size_t compat_len = strlen(compat);
+    size_t pos = 0;
+    
+    // Iterate through null-separated strings in the compatible property
+    while (pos < data_len) {
+        const char *str = data + pos;
+        size_t str_len = strnlen(str, data_len - pos);
+        
+        // Check if this string contains the compat substring
+        if (str_len >= compat_len) {
+            // Use simple substring search within bounds
+            for (size_t i = 0; i <= str_len - compat_len; i++) {
+                if (strncmp(str + i, compat, compat_len) == 0) {
+                    return true;
+                }
+            }
+        }
+        
+        pos += str_len + 1;  // Move past null terminator
+    }
+    return false;
+}
+
+// Helper to check if property matches any string in a NULL-terminated list
+static bool __fdt_prop_compat_list(struct fdt_node *prop, const char **compat_list) {
+    if (prop == NULL || prop->data_size == 0 || compat_list == NULL) {
+        return false;
+    }
+    for (int i = 0; compat_list[i] != NULL; i++) {
+        if (__fdt_prop_compat(prop, compat_list[i])) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // Parse reg property based on address-cells and size-cells
@@ -684,6 +727,282 @@ static void __fdt_parse_reg_prop(struct fdt_node *prop, int addr_cells, int size
             *size_out = __fdt_prop_u32(prop, addr_cells);
         }
     }
+}
+
+/******************************************************************************
+ * FDT Compatible String Hash Table
+ *****************************************************************************/
+#define FDT_COMPAT_HASH_BUCKETS 64
+#define FDT_PHANDLE_HASH_BUCKETS 32
+
+// Hash function for compatible string hash table
+static ht_hash_t __fdt_compat_hash_func(void *data) {
+    struct fdt_compat_hash_node *node = (struct fdt_compat_hash_node *)data;
+    return hlist_hash_str((char *)node->compat, node->compat_len);
+}
+
+// Compare function for compatible string hash table
+static int __fdt_compat_cmp_func(hlist_t *hlist, void *node, void *key) {
+    (void)hlist;
+    struct fdt_compat_hash_node *hash_node = (struct fdt_compat_hash_node *)node;
+    struct fdt_compat_hash_node *hash_key = (struct fdt_compat_hash_node *)key;
+    size_t min_len = hash_node->compat_len < hash_key->compat_len ?
+                     hash_node->compat_len : hash_key->compat_len;
+    int cmp = strncmp(hash_node->compat, hash_key->compat, min_len);
+    if (cmp != 0) return cmp;
+    if (hash_node->compat_len > hash_key->compat_len) return 1;
+    if (hash_node->compat_len < hash_key->compat_len) return -1;
+    return 0;
+}
+
+static void *__fdt_compat_get_node_func(hlist_entry_t *entry) {
+    if (entry == NULL) return NULL;
+    return container_of(entry, struct fdt_compat_hash_node, hash_entry);
+}
+
+static hlist_entry_t *__fdt_compat_get_entry_func(void *node) {
+    if (node == NULL) return NULL;
+    return &((struct fdt_compat_hash_node *)node)->hash_entry;
+}
+
+static struct hlist_func_struct __fdt_compat_hlist_funcs = {
+    .hash = __fdt_compat_hash_func,
+    .cmp_node = __fdt_compat_cmp_func,
+    .get_node = __fdt_compat_get_node_func,
+    .get_entry = __fdt_compat_get_entry_func,
+};
+
+/******************************************************************************
+ * FDT Phandle Hash Table
+ *****************************************************************************/
+// Hash function for phandle hash table
+static ht_hash_t __fdt_phandle_hash_func(void *data) {
+    struct fdt_phandle_hash_node *node = (struct fdt_phandle_hash_node *)data;
+    return (ht_hash_t)node->phandle;
+}
+
+// Compare function for phandle hash table
+static int __fdt_phandle_cmp_func(hlist_t *hlist, void *node, void *key) {
+    (void)hlist;
+    struct fdt_phandle_hash_node *hash_node = (struct fdt_phandle_hash_node *)node;
+    struct fdt_phandle_hash_node *hash_key = (struct fdt_phandle_hash_node *)key;
+    if (hash_node->phandle > hash_key->phandle) return 1;
+    if (hash_node->phandle < hash_key->phandle) return -1;
+    return 0;
+}
+
+static void *__fdt_phandle_get_node_func(hlist_entry_t *entry) {
+    if (entry == NULL) return NULL;
+    return container_of(entry, struct fdt_phandle_hash_node, hash_entry);
+}
+
+static hlist_entry_t *__fdt_phandle_get_entry_func(void *node) {
+    if (node == NULL) return NULL;
+    return &((struct fdt_phandle_hash_node *)node)->hash_entry;
+}
+
+static struct hlist_func_struct __fdt_phandle_hlist_funcs = {
+    .hash = __fdt_phandle_hash_func,
+    .cmp_node = __fdt_phandle_cmp_func,
+    .get_node = __fdt_phandle_get_node_func,
+    .get_entry = __fdt_phandle_get_entry_func,
+};
+
+// Allocate and initialize a compat hash node
+static struct fdt_compat_hash_node *__fdt_alloc_compat_hash_node(const char *compat, size_t len) {
+    struct fdt_compat_hash_node *node = early_alloc_align(sizeof(*node), sizeof(uint64));
+    if (node == NULL) return NULL;
+    memset(node, 0, sizeof(*node));
+    node->compat = compat;
+    node->compat_len = len;
+    list_entry_init(&node->nodes);
+    hlist_entry_init(&node->hash_entry);
+    return node;
+}
+
+// Allocate a compat link node
+static struct fdt_compat_link *__fdt_alloc_compat_link(struct fdt_node *fdt_node,
+                                                        struct fdt_compat_hash_node *hash_node) {
+    struct fdt_compat_link *link = early_alloc_align(sizeof(*link), sizeof(uint64));
+    if (link == NULL) return NULL;
+    memset(link, 0, sizeof(*link));
+    link->fdt_node = fdt_node;
+    link->hash_node = hash_node;
+    return link;
+}
+
+// Allocate a phandle hash node
+static struct fdt_phandle_hash_node *__fdt_alloc_phandle_hash_node(uint32 phandle,
+                                                                    struct fdt_node *fdt_node) {
+    struct fdt_phandle_hash_node *node = early_alloc_align(sizeof(*node), sizeof(uint64));
+    if (node == NULL) return NULL;
+    memset(node, 0, sizeof(*node));
+    node->phandle = phandle;
+    node->fdt_node = fdt_node;
+    hlist_entry_init(&node->hash_entry);
+    return node;
+}
+
+// Add a compatible string to the hash table, linking to the given fdt_node
+static int __fdt_index_compat_string(struct fdt_blob_info *blob,
+                                      struct fdt_node *fdt_node,
+                                      const char *compat, size_t len) {
+    // Search for existing hash node
+    struct fdt_compat_hash_node key = { .compat = compat, .compat_len = len };
+    struct fdt_compat_hash_node *hash_node = hlist_get(blob->compat_table, &key);
+    
+    if (hash_node == NULL) {
+        // Create new hash node for this compatible string
+        hash_node = __fdt_alloc_compat_hash_node(compat, len);
+        if (hash_node == NULL) return -1;
+        
+        struct fdt_compat_hash_node *ret = hlist_put(blob->compat_table, hash_node, false);
+        if (ret != hash_node && ret != NULL) {
+            // Already exists (race condition, shouldn't happen in single-threaded early boot)
+            hash_node = ret;
+        }
+    }
+    
+    // Create link node
+    struct fdt_compat_link *link = __fdt_alloc_compat_link(fdt_node, hash_node);
+    if (link == NULL) return -1;
+    
+    // Add link to hash node's list
+    list_entry_push_back(&hash_node->nodes, &link->list_entry);
+    hash_node->count++;
+    
+    // Note: We don't add link to fdt_node's compat_links here because each link
+    // can only be in one list. The fdt_node->compat_links is not used for now.
+    
+    return 0;
+}
+
+// Index all compatible strings from an fdt_node's "compatible" property
+static void __fdt_index_node_compat(struct fdt_blob_info *blob, struct fdt_node *fdt_node) {
+    // Find "compatible" property
+    struct fdt_node *compat_prop = fdt_node_lookup(fdt_node, "compatible", NULL);
+    if (compat_prop == NULL || compat_prop->data_size == 0) {
+        return;
+    }
+    
+    // Parse null-separated compatible strings
+    const char *data = (const char *)compat_prop->data;
+    size_t data_len = compat_prop->data_size;
+    size_t pos = 0;
+    
+    while (pos < data_len) {
+        const char *str = data + pos;
+        size_t str_len = strnlen(str, data_len - pos);
+        if (str_len > 0) {
+            __fdt_index_compat_string(blob, fdt_node, str, str_len);
+        }
+        pos += str_len + 1;
+    }
+}
+
+// Index phandle from an fdt_node
+static void __fdt_index_node_phandle(struct fdt_blob_info *blob, struct fdt_node *fdt_node) {
+    if (!fdt_node->has_phandle || fdt_node->phandle == 0) {
+        return;
+    }
+    
+    struct fdt_phandle_hash_node *hash_node = 
+        __fdt_alloc_phandle_hash_node(fdt_node->phandle, fdt_node);
+    if (hash_node == NULL) return;
+    
+    hlist_put(blob->phandle_table, hash_node, false);
+}
+
+// Allocate a hash list with flexible array for buckets
+static hlist_t *__fdt_alloc_hlist(uint64 bucket_cnt, hlist_func_t *func) {
+    size_t size = sizeof(hlist_t) + bucket_cnt * sizeof(hlist_bucket_t);
+    hlist_t *hlist = early_alloc_align(size, sizeof(uint64));
+    if (hlist == NULL) return NULL;
+    memset(hlist, 0, size);
+    
+    int ret = hlist_init(hlist, bucket_cnt, func);
+    if (ret != 0) {
+        return NULL;
+    }
+    return hlist;
+}
+
+// Build indexes for all nodes in the FDT
+static void __fdt_build_indexes(struct fdt_blob_info *blob) {
+    // Allocate and initialize hash tables
+    blob->compat_table = __fdt_alloc_hlist(FDT_COMPAT_HASH_BUCKETS, &__fdt_compat_hlist_funcs);
+    if (blob->compat_table == NULL) {
+        printf("fdt: failed to alloc compat hash table\n");
+        return;
+    }
+    
+    blob->phandle_table = __fdt_alloc_hlist(FDT_PHANDLE_HASH_BUCKETS, &__fdt_phandle_hlist_funcs);
+    if (blob->phandle_table == NULL) {
+        printf("fdt: failed to alloc phandle hash table\n");
+        return;
+    }
+    
+    // Iterate through all nodes and build indexes
+    list_node_t *pos;
+    list_foreach_entry(&blob->all_nodes, pos) {
+        struct fdt_node *node = container_of(pos, struct fdt_node, list_entry);
+        
+        // Only index device nodes (not properties)
+        if (node->fdt_type == FDT_BEGIN_NODE) {
+            __fdt_index_node_compat(blob, node);
+            __fdt_index_node_phandle(blob, node);
+        }
+    }
+}
+
+/******************************************************************************
+ * FDT Lookup by Compatible String and Phandle
+ *****************************************************************************/
+
+// Lookup nodes by compatible string
+struct fdt_node *fdt_compat_lookup(struct fdt_blob_info *blob, const char *compat) {
+    if (blob == NULL || compat == NULL || blob->compat_table == NULL) return NULL;
+    
+    struct fdt_compat_hash_node key = { .compat = compat, .compat_len = strlen(compat) };
+    struct fdt_compat_hash_node *hash_node = hlist_get(blob->compat_table, &key);
+    
+    if (hash_node == NULL || LIST_IS_EMPTY(&hash_node->nodes)) {
+        return NULL;
+    }
+    
+    // Return first node's fdt_node
+    struct fdt_compat_link *link = LIST_FIRST_NODE(&hash_node->nodes, 
+                                                    struct fdt_compat_link, list_entry);
+    if (link == NULL) return NULL;
+    return link->fdt_node;
+}
+
+// Get next node with the same compatible string
+struct fdt_node *fdt_compat_next(struct fdt_compat_link **link) {
+    if (link == NULL || *link == NULL) return NULL;
+    
+    struct fdt_compat_hash_node *hash_node = (*link)->hash_node;
+    list_node_t *next = LIST_NEXT_ENTRY(&(*link)->list_entry);
+    
+    if (LIST_ENTRY_IS_HEAD(&hash_node->nodes, next)) {
+        // End of list
+        *link = NULL;
+        return NULL;
+    }
+    
+    *link = container_of(next, struct fdt_compat_link, list_entry);
+    return (*link)->fdt_node;
+}
+
+// Lookup node by phandle
+struct fdt_node *fdt_phandle_lookup(struct fdt_blob_info *blob, uint32 phandle) {
+    if (blob == NULL || phandle == 0 || blob->phandle_table == NULL) return NULL;
+    
+    struct fdt_phandle_hash_node key = { .phandle = phandle };
+    struct fdt_phandle_hash_node *hash_node = hlist_get(blob->phandle_table, &key);
+    
+    if (hash_node == NULL) return NULL;
+    return hash_node->fdt_node;
 }
 
 // Global blob info
@@ -787,6 +1106,28 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
         }
     }
 
+    // Compatible string lists for device detection
+    // UART: various 8250/16550 compatible UARTs
+    static const char *uart_compat[] = {
+        "ns16550a", "ns16550", "snps,dw-apb-uart", "ti,omap3-uart",
+        "xlnx,xuartps", "ky,pxa-uart", "arm,sbsa-uart", NULL
+    };
+    // PLIC: RISC-V platform-level interrupt controller
+    static const char *plic_compat[] = {
+        "riscv,plic0", "sifive,plic-1.0.0", "thead,c900-plic",
+        "andestech,nceplic100", NULL
+    };
+    // PCIe ECAM: generic ECAM-compliant PCIe host controllers
+    static const char *pcie_compat[] = {
+        "pci-host-ecam-generic", "pci-host-cam-generic",
+        "x1,dwc-pcie", "spacemit,k1-pcie",  // Orange Pi / SpacemiT K1
+        NULL
+    };
+    // VirtIO: virtio MMIO devices
+    static const char *virtio_compat[] = {
+        "virtio,mmio", NULL
+    };
+
     // Parse /soc node for devices (common structure)
     struct fdt_node *soc = fdt_node_lookup(root, "soc", NULL);
     struct fdt_node *device_parent = soc ? soc : root;
@@ -811,10 +1152,7 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
         struct fdt_node *interrupts = __fdt_get_prop(node, "interrupts");
         
         // UART detection
-        if (platform.uart_base == 0 && compat &&
-            (__fdt_prop_compat(compat, "ns16550") ||
-             __fdt_prop_compat(compat, "uart") ||
-             __fdt_prop_compat(compat, "serial"))) {
+        if (platform.uart_base == 0 && __fdt_prop_compat_list(compat, uart_compat)) {
             if (reg) {
                 __fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells,
                                      &platform.uart_base, NULL);
@@ -825,17 +1163,58 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
         }
         
         // PLIC detection
-        if (platform.plic_base == 0 && compat &&
-            (__fdt_prop_compat(compat, "plic") ||
-             __fdt_prop_compat(compat, "riscv,plic"))) {
+        if (platform.plic_base == 0 && __fdt_prop_compat_list(compat, plic_compat)) {
             if (reg) {
                 __fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells,
                                      &platform.plic_base, &platform.plic_size);
             }
         }
         
+        // PCIe detection - parse all reg entries
+        if (!platform.has_pcie && __fdt_prop_compat_list(compat, pcie_compat)) {
+            if (reg) {
+                platform.has_pcie = 1;
+                // Calculate number of reg entries
+                int entry_size = (soc_addr_cells + soc_size_cells) * sizeof(uint32);
+                int num_entries = reg->data_size / entry_size;
+                if (num_entries > PCIE_REG_MAX) num_entries = PCIE_REG_MAX;
+                
+                // Get reg-names if available
+                struct fdt_node *reg_names = __fdt_get_prop(node, "reg-names");
+                const char *names_data = reg_names ? (const char *)reg_names->data : NULL;
+                size_t names_len = reg_names ? reg_names->data_size : 0;
+                size_t name_pos = 0;
+                
+                // Parse each reg entry
+                for (int i = 0; i < num_entries; i++) {
+                    int offset = i * (soc_addr_cells + soc_size_cells);
+                    if (soc_addr_cells == 2) {
+                        platform.pcie_reg[i].base = __fdt_prop_u64(reg, offset);
+                    } else {
+                        platform.pcie_reg[i].base = __fdt_prop_u32(reg, offset);
+                    }
+                    if (soc_size_cells == 2) {
+                        uint32 hi = __fdt_prop_u32(reg, offset + soc_addr_cells);
+                        uint32 lo = __fdt_prop_u32(reg, offset + soc_addr_cells + 1);
+                        platform.pcie_reg[i].size = ((uint64)hi << 32) | lo;
+                    } else {
+                        platform.pcie_reg[i].size = __fdt_prop_u32(reg, offset + soc_addr_cells);
+                    }
+                    
+                    // Get corresponding name from reg-names
+                    if (names_data && name_pos < names_len) {
+                        platform.pcie_reg[i].name = names_data + name_pos;
+                        name_pos += strnlen(names_data + name_pos, names_len - name_pos) + 1;
+                    } else {
+                        platform.pcie_reg[i].name = NULL;
+                    }
+                    platform.pcie_reg_count++;
+                }
+            }
+        }
+        
         // VirtIO detection
-        if (compat && __fdt_prop_compat(compat, "virtio") &&
+        if (__fdt_prop_compat_list(compat, virtio_compat) &&
             platform.virtio_count < 8) {
             platform.has_virtio = 1;
             if (reg) {
@@ -941,6 +1320,9 @@ int fdt_init(void *dtb) {
 
     printf("fdt: parsed %d nodes\n", fdt_blob->n_nodes);
 
+    // Build indexes for fast lookup by compatible string and phandle
+    __fdt_build_indexes(fdt_blob);
+
     // Extract platform info from the tree
     fdt_extract_platform_info(fdt_blob);
 
@@ -967,6 +1349,19 @@ int fdt_init(void *dtb) {
     }
     printf("  UART: 0x%lx, IRQ %d\n", platform.uart_base, platform.uart_irq);
     printf("  PLIC: 0x%lx (size 0x%lx)\n", platform.plic_base, platform.plic_size);
+    if (platform.has_pcie) {
+        printf("  PCIe regions: %d\n", platform.pcie_reg_count);
+        for (int i = 0; i < platform.pcie_reg_count; i++) {
+            if (platform.pcie_reg[i].name) {
+                printf("    [%d] %s: 0x%lx (size 0x%lx)\n", i,
+                       platform.pcie_reg[i].name,
+                       platform.pcie_reg[i].base, platform.pcie_reg[i].size);
+            } else {
+                printf("    [%d] 0x%lx (size 0x%lx)\n", i,
+                       platform.pcie_reg[i].base, platform.pcie_reg[i].size);
+            }
+        }
+    }
     printf("  CPUs: %d, timebase: %ld Hz\n", platform.ncpu, platform.timebase_freq);
 
     if (platform.has_virtio) {
@@ -1128,4 +1523,53 @@ void fdt_walk(void *dtb) {
     }
 
     printf("\n=== End of FDT ===\n");
+}
+
+// Apply platform configuration to kernel globals
+// This sets up device addresses from the parsed FDT information
+void fdt_apply_platform_config(void) {
+    extern uint64 __physical_memory_start;
+    extern uint64 __physical_memory_end;
+    extern uint64 __physical_total_pages;
+
+    // Refine memory info from full FDT parse (may have multiple regions)
+    if (platform.mem_count > 0 && platform.mem[0].size > 0) {
+        __physical_memory_start = platform.mem[0].base;
+        __physical_memory_end = platform.mem[0].base + platform.mem[0].size;
+        __physical_total_pages = platform.mem[0].size >> 12;
+    }
+
+    // Set device addresses from FDT
+    if (platform.uart_base != 0) {
+        __uart0_mmio_base = platform.uart_base;
+        __uart0_irqno = platform.uart_irq;
+    }
+    if (platform.plic_base != 0) {
+        __plic_mmio_base = platform.plic_base;
+    }
+
+    // Set PCIe ECAM base from the "config" or first valid region
+    // Look for "config" region by name, or use dbi region as fallback
+    if (platform.has_pcie) {
+        for (int i = 0; i < platform.pcie_reg_count; i++) {
+            // Prefer "config" region (ECAM space) if available
+            if (platform.pcie_reg[i].name &&
+                strncmp(platform.pcie_reg[i].name, "config", 6) == 0) {
+                __pcie_ecam_mmio_base = platform.pcie_reg[i].base;
+                break;
+            }
+        }
+        // Fallback to first region (dbi) if no config found
+        if (__pcie_ecam_mmio_base == 0 && platform.pcie_reg_count > 0) {
+            __pcie_ecam_mmio_base = platform.pcie_reg[0].base;
+        }
+    }
+
+    // Initialize VirtIO addresses from platform info
+    if (platform.has_virtio) {
+        for (int i = 0; i < platform.virtio_count && i < N_VIRTIO; i++) {
+            __virtio_mmio_base[i] = platform.virtio_base[i];
+            __virtio_irqno[i] = platform.virtio_irq[i];
+        }
+    }
 }
