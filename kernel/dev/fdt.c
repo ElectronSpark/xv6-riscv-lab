@@ -42,19 +42,25 @@ static const char *fdt_get_string(void *dtb, uint32 offset) {
 }
 
 // Parse and copy namestring into fdt_node
+// The full namestring (including @addr) is stored for comparison
+// name_size is the length of the base name (before @)
+// The node->name points to the full string
 static void fdt_parse_namestring(struct fdt_node *node, const char *namestring,
                                  bool copy, bool ignore_addr) {
     int len = 0;
+    int full_len = strlen(namestring);
 
-    // Find length up to '@' or null terminator
+    // Find length of base name (up to '@' or null terminator)
     while (namestring[len] != '\0' && namestring[len] != '@') {
         len++;
     }
 
     node->name_size = len;
     node->hash = hlist_hash_str((char *)namestring, len);
+    
     if (namestring[len] == '\0' || ignore_addr) {
         node->has_addr = 0;
+        node->addr = 0;
         if (copy) {
             memcpy((char *)node->name, namestring, len + 1);
         } else {
@@ -63,8 +69,22 @@ static void fdt_parse_namestring(struct fdt_node *node, const char *namestring,
         return;
     }
 
+    // Has unit address
     node->has_addr = 1;
-    node->addr = strtoul(&namestring[len + 1], NULL, 16);
+    
+    // Try to parse as hex number
+    char *endptr = NULL;
+    node->addr = strtoul(&namestring[len + 1], &endptr, 16);
+    
+    // If parsing failed or didn't consume all chars, hash the address string instead
+    // This handles non-numeric unit addresses like "SPT_PD_VPU"
+    if (endptr == &namestring[len + 1] || *endptr != '\0') {
+        // Use hash of the unit address string as the numeric addr for comparison
+        // Add a flag or use a different approach - for now, hash it
+        node->addr = hlist_hash_str((char *)&namestring[len + 1], 
+                                     full_len - len - 1);
+    }
+    
     return;
 }
 
@@ -308,6 +328,7 @@ static bool __fdt_insert_node(struct fdt_blob_info *blob, struct fdt_node *paren
 // Returns NULL on failure
 static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
     if (!fdt_valid(dtb)) {
+        printf("fdt: invalid magic\n");
         return NULL;
     }
 
@@ -315,6 +336,7 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
     struct fdt_blob_info *blob = early_alloc_align(sizeof(struct fdt_blob_info),
                                                     sizeof(uint64));
     if (blob == NULL) {
+        printf("fdt: alloc blob failed\n");
         return NULL;
     }
     memset(blob, 0, sizeof(struct fdt_blob_info));
@@ -343,6 +365,7 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
         blob->reserved = early_alloc_align(rsv_count * sizeof(struct mem_region),
                                            sizeof(uint64));
         if (blob->reserved == NULL) {
+            printf("fdt: alloc reserved failed\n");
             return NULL;
         }
         blob->reserved_count = rsv_count;
@@ -365,6 +388,7 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
     // Create a virtual root node to hold the actual root "/"
     struct fdt_node *virtual_root = __fdt_create_node(0, 0);
     if (virtual_root == NULL) {
+        printf("fdt: alloc virtual root failed\n");
         return NULL;
     }
     rb_root_init(&virtual_root->children, &fdt_rb_opts);
@@ -387,6 +411,7 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
             // Create new node with space for name (no property data for nodes)
             struct fdt_node *new_node = __fdt_create_node(dummy.name_size, 0);
             if (new_node == NULL) {
+                printf("fdt: alloc node '%s' failed\n", name);
                 return NULL;
             }
 
@@ -406,12 +431,14 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
             // Insert into parent's children
             struct fdt_node *parent = node_stack[depth];
             if (!__fdt_insert_node(blob, parent, new_node)) {
+                printf("fdt: insert node '%s' failed (dup?)\n", name);
                 return NULL;  // Insertion failed (duplicate?)
             }
 
             // Push this node onto stack as new parent
             depth++;
             if (depth >= FDT_MAX_DEPTH) {
+                printf("fdt: tree too deep\n");
                 return NULL;  // Tree too deep
             }
             node_stack[depth] = new_node;
@@ -457,6 +484,7 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
             // Create new node with space for name and property data
             struct fdt_node *prop_node = __fdt_create_node(dummy.name_size, len);
             if (prop_node == NULL) {
+                printf("fdt: alloc prop '%s' failed\n", propname);
                 return NULL;
             }
 
@@ -479,6 +507,7 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
 
             // Insert into parent's children
             if (!__fdt_insert_node(blob, parent, prop_node)) {
+                printf("fdt: insert prop '%s' in '%s' failed\n", propname, parent->name);
                 return NULL;  // Insertion failed
             }
             break;
@@ -494,6 +523,7 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
 
         default:
             // Unknown token
+            printf("fdt: unknown token 0x%x\n", token);
             return NULL;
         }
     }
