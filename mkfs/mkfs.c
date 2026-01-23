@@ -128,6 +128,30 @@ main(int argc, char *argv[])
   strcpy(de.name, "..");
   iappend(rootino, &de, sizeof(de));
 
+  // Create standard directories: dev, proc, tmp, sys
+  const char *stdirs[] = {"dev", "proc", "tmp", "sys"};
+  for(i = 0; i < 4; i++){
+    uint dirino = ialloc(XV6_T_DIR);
+    
+    // Add "." entry pointing to itself
+    bzero(&de, sizeof(de));
+    de.inum = xshort(dirino);
+    strcpy(de.name, ".");
+    iappend(dirino, &de, sizeof(de));
+    
+    // Add ".." entry pointing to root
+    bzero(&de, sizeof(de));
+    de.inum = xshort(rootino);
+    strcpy(de.name, "..");
+    iappend(dirino, &de, sizeof(de));
+    
+    // Add entry in root directory
+    bzero(&de, sizeof(de));
+    de.inum = xshort(dirino);
+    strncpy(de.name, stdirs[i], DIRSIZ);
+    iappend(rootino, &de, sizeof(de));
+  }
+
   for(i = 2; i < argc; i++){
     // get rid of "user/"
     char *shortname = basename(argv[i]);
