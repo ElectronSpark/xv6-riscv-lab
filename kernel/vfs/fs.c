@@ -1446,8 +1446,17 @@ static struct vfs_inode *__vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) 
         return inode;
     }
 
-    // Set parent on fresh load - directory inodes need parent for ".." traversal
+    // "." and ".." are synthesized by VFS and should always hit the cache
+    assert(!(dentry->name_len == 1 && dentry->name[0] == '.'),
+           "__vfs_get_dentry_inode_impl: \".\" should not reach fresh load path");
+    assert(!(dentry->name_len == 2 && dentry->name[0] == '.' && dentry->name[1] == '.'),
+           "__vfs_get_dentry_inode_impl: \"..\" should not reach fresh load path");
+
+    // Set parent and name on fresh load - directory inodes need these for ".." traversal
     __vfs_set_parent_from_dentry(inode, dentry->parent);
+    if (S_ISDIR(inode->mode) && dentry->name != NULL && dentry->name_len > 0) {
+        inode->name = strndup(dentry->name, dentry->name_len);
+    }
     vfs_idup(inode);
     vfs_iunlock(inode);
     return inode;

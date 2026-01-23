@@ -204,6 +204,11 @@ retry:
     assert(completion_done(&inode->completion),
            "vfs_iput: someone is waiting on inode completion without reference");
 out:
+    // Free directory name if allocated
+    if (inode->name != NULL) {
+        kmm_free(inode->name);
+        inode->name = NULL;
+    }
     inode->ops->free_inode(inode);
 
     // Final superblock cleanup if all orphans are gone on detached fs

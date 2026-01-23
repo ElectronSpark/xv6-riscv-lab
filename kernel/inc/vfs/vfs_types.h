@@ -234,6 +234,7 @@ struct vfs_inode {
     int ref_count; // reference count
     void *fs_data; // filesystem-specific data
     struct vfs_inode *parent; // parent inode for directories (self for root inodes)
+    char *name; // directory name (for directories only, NULL for root)
     union {
         uint32 cdev; // for character device inode
         uint32 bdev; // for block device inode
