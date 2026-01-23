@@ -70,8 +70,8 @@ static struct vfs_inode *xv6fs_get_disk_root(void) {
         return NULL;
     }
     
-    // Look for "disk" mount point in tmpfs root
-    struct vfs_inode *disk_mp = xv6fs_fetch_inode(tmpfs_root, "disk", 4);
+    // Look for "root" mount point in tmpfs root (xv6fs is mounted at /root)
+    struct vfs_inode *disk_mp = xv6fs_fetch_inode(tmpfs_root, "root", 4);
     if (IS_ERR_OR_NULL(disk_mp)) {
         return NULL;
     }
@@ -101,7 +101,7 @@ void xv6fs_run_inode_smoketest(void) {
     struct vfs_inode *root = xv6fs_get_disk_root();
     
     if (root == NULL) {
-        printf("xv6fs_inode_test: " WARN " xv6fs not mounted at /disk, skipping\n");
+        printf("xv6fs_inode_test: " WARN " xv6fs not mounted at /root, skipping\n");
         return;
     }
     
@@ -278,7 +278,7 @@ void xv6fs_run_file_ops_smoketest(void) {
     struct vfs_inode *root = xv6fs_get_disk_root();
     
     if (root == NULL) {
-        printf("xv6fs_file_test: " WARN " xv6fs not mounted at /disk, skipping\n");
+        printf("xv6fs_file_test: " WARN " xv6fs not mounted at /root, skipping\n");
         return;
     }
     
@@ -406,7 +406,7 @@ void xv6fs_run_truncate_smoketest(void) {
     (void)file; // suppress unused warning
     
     if (root == NULL) {
-        printf("xv6fs_truncate: " WARN " xv6fs not mounted at /disk, skipping\n");
+        printf("xv6fs_truncate: " WARN " xv6fs not mounted at /root, skipping\n");
         return;
     }
     
@@ -515,7 +515,7 @@ void xv6fs_run_namei_smoketest(void) {
     struct vfs_inode *file = NULL;
     
     if (root == NULL) {
-        printf("xv6fs_namei: " WARN " xv6fs not mounted at /disk, skipping\n");
+        printf("xv6fs_namei: " WARN " xv6fs not mounted at /root, skipping\n");
         return;
     }
     
@@ -526,7 +526,7 @@ void xv6fs_run_namei_smoketest(void) {
     const char *file_name = "target";
     const size_t file_len = sizeof("target") - 1;
     
-    // Setup: create /disk/namei_dir/nested/target
+    // Setup: create /namei_dir/nested/target (we're chrooted into xv6fs)
     subdir = vfs_mkdir(root, 0755, subdir_name, subdir_len);
     if (IS_ERR_OR_NULL(subdir)) {
         ret = IS_ERR(subdir) ? PTR_ERR(subdir) : -EINVAL;
@@ -553,8 +553,8 @@ void xv6fs_run_namei_smoketest(void) {
     
     printf("xv6fs_namei: setup complete\n");
     
-    // Test 1: Absolute path to disk root via /disk
-    const char *path1 = "/disk";
+    // Test 1: Absolute path to xv6fs root (we're chrooted into xv6fs)
+    const char *path1 = "/";
     result = vfs_namei(path1, strlen(path1));
     if (IS_ERR_OR_NULL(result)) {
         printf("xv6fs_namei: " FAIL " namei(\"%s\") errno=%ld\n", path1, PTR_ERR(result));
@@ -565,7 +565,7 @@ void xv6fs_run_namei_smoketest(void) {
     result = NULL;
     
     // Test 2: Path to subdir
-    const char *path2 = "/disk/namei_dir";
+    const char *path2 = "/namei_dir";
     result = vfs_namei(path2, strlen(path2));
     if (IS_ERR_OR_NULL(result)) {
         printf("xv6fs_namei: " FAIL " namei(\"%s\") errno=%ld\n", path2, PTR_ERR(result));
@@ -576,7 +576,7 @@ void xv6fs_run_namei_smoketest(void) {
     result = NULL;
     
     // Test 3: Full path to file
-    const char *path3 = "/disk/namei_dir/nested/target";
+    const char *path3 = "/namei_dir/nested/target";
     result = vfs_namei(path3, strlen(path3));
     if (IS_ERR_OR_NULL(result)) {
         printf("xv6fs_namei: " FAIL " namei(\"%s\") errno=%ld\n", path3, PTR_ERR(result));
@@ -591,7 +591,7 @@ void xv6fs_run_namei_smoketest(void) {
     result = NULL;
     
     // Test 4: Path with "." components
-    const char *path4 = "/disk/namei_dir/./nested/./target";
+    const char *path4 = "/namei_dir/./nested/./target";
     result = vfs_namei(path4, strlen(path4));
     if (IS_ERR_OR_NULL(result)) {
         printf("xv6fs_namei: " FAIL " namei(\"%s\") errno=%ld\n", path4, PTR_ERR(result));
@@ -605,7 +605,7 @@ void xv6fs_run_namei_smoketest(void) {
     result = NULL;
     
     // Test 5: Path with ".." components
-    const char *path5 = "/disk/namei_dir/nested/../nested/target";
+    const char *path5 = "/namei_dir/nested/../nested/target";
     result = vfs_namei(path5, strlen(path5));
     if (IS_ERR_OR_NULL(result)) {
         printf("xv6fs_namei: " FAIL " namei(\"%s\") errno=%ld\n", path5, PTR_ERR(result));
@@ -619,7 +619,7 @@ void xv6fs_run_namei_smoketest(void) {
     result = NULL;
     
     // Test 6: Non-existent path
-    const char *path6 = "/disk/namei_dir/noexist";
+    const char *path6 = "/namei_dir/noexist";
     result = vfs_namei(path6, strlen(path6));
     if (IS_ERR(result)) {
         printf("xv6fs_namei: " PASS " namei(\"%s\") -> ENOENT errno=%ld\n", path6, PTR_ERR(result));
@@ -707,7 +707,7 @@ void xv6fs_run_dir_iter_smoketest(void) {
     struct vfs_dentry dentry = {0};
     
     if (root == NULL) {
-        printf("xv6fs_dir_iter: " WARN " xv6fs not mounted at /disk, skipping\n");
+        printf("xv6fs_dir_iter: " WARN " xv6fs not mounted at /root, skipping\n");
         return;
     }
     
@@ -937,7 +937,7 @@ void xv6fs_run_large_file_smoketest(void) {
     struct vfs_file *file = NULL;
     
     if (root == NULL) {
-        printf("xv6fs_largefile: " WARN " xv6fs not mounted at /disk, skipping\n");
+        printf("xv6fs_largefile: " WARN " xv6fs not mounted at /root, skipping\n");
         return;
     }
     

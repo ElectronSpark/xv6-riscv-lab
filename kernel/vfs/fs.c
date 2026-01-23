@@ -9,6 +9,7 @@
 #include "vfs/stat.h"
 #include "spinlock.h"
 #include "proc/proc.h"
+#include "proc/sched.h"
 #include "mutex_types.h"
 #include "rwlock.h"
 #include "completion.h"
@@ -337,6 +338,51 @@ static void __vfs_struct_free(struct fs_struct *fs) {
  /******************************************************************************
  * Files System Type Public APIs
  *****************************************************************************/
+/******************************************************************************
+ * tmpfs smoketest kernel process
+ * Runs tmpfs tests in a separate kernel process with chroot to /tmp (tmpfs)
+ *****************************************************************************/
+static int __tmpfs_smoketest_kthread(uint64 arg1, uint64 arg2) {
+    (void)arg1;
+    (void)arg2;
+    
+    // Resolve /tmp path (tmpfs is already mounted there by parent)
+    struct vfs_inode *tmp_root = vfs_namei("/tmp", 4);
+    if (IS_ERR_OR_NULL(tmp_root)) {
+        printf("tmpfs_smoketest: failed to resolve /tmp, errno=%ld\n", 
+               IS_ERR(tmp_root) ? PTR_ERR(tmp_root) : -ENOENT);
+        return -1;
+    }
+    
+    // Chroot into the tmpfs at /tmp
+    int ret = vfs_chroot(tmp_root);
+    vfs_iput(tmp_root);
+    if (ret != 0) {
+        printf("tmpfs_smoketest: failed to chroot to /tmp, errno=%d\n", ret);
+        return ret;
+    }
+    
+    printf("tmpfs_smoketest: chrooted into /tmp (tmpfs), running tests...\n");
+    tmpfs_run_all_smoketests();
+    printf("tmpfs_smoketest: tests completed\n");
+    
+    return 0;
+}
+
+// Start the tmpfs smoketest kernel process
+void tmpfs_smoketest_start(void) {
+    struct proc *p = NULL;
+    int pid = kernel_proc_create("tmpfs_test", &p, __tmpfs_smoketest_kthread, 
+                                  0, 0, KERNEL_STACK_ORDER);
+    if (pid < 0 || p == NULL) {
+        printf("tmpfs_smoketest: failed to create kernel process\n");
+        return;
+    }
+    
+    wakeup_proc(p);
+    printf("tmpfs_smoketest: kernel process started (pid=%d)\n", pid);
+}
+
 /*
  * vfs_init - Initialize the VFS subsystem and root inode.
  *
@@ -389,8 +435,8 @@ void vfs_init(void) {
         printf("tmpfs: failed to mount at /tmp, errno=%d\n", ret);
     }
     
-    // Optional: run smoke tests
-    // tmpfs_run_all_smoketests();
+    // Optional: run smoke tests in a separate kernel process with chroot to /tmp
+    // tmpfs_smoketest_start();
     // xv6fs_run_all_smoketests();
 }
 

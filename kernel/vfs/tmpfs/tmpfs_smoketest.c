@@ -56,7 +56,7 @@ static struct vfs_inode *tmpfs_fetch_inode(struct vfs_inode *dir, const char *na
 // perform lookups, moves, and readlinks. This is debug-only scaffolding invoked at init.
 void tmpfs_run_inode_smoketest(void) {
     int ret = 0;
-    struct vfs_inode *root = vfs_root_inode.mnt_rooti;
+    struct vfs_inode *root = vfs_curroot();
     struct vfs_inode *subdir = NULL;
     struct vfs_inode *nested = NULL;
     struct vfs_inode *file_a = NULL;
@@ -88,7 +88,10 @@ void tmpfs_run_inode_smoketest(void) {
     const char *symlink_b_target = "..";
     const size_t symlink_b_target_len = sizeof("..") - 1;
 
-    vfs_idup(root);
+    if (root == NULL) {
+        printf("inode_smoketest: " FAIL " vfs_curroot returned NULL\n");
+        return;
+    }
     root_pinned = true;
 
     subdir = vfs_mkdir(root, 0755, subdir_name, subdir_len);
@@ -353,13 +356,16 @@ out_put_root:
 // Uses at most ~1000 blocks (~4MB) to stay well under 64MB limit.
 void tmpfs_run_truncate_smoketest(void) {
     int ret = 0;
-    struct vfs_inode *root = vfs_root_inode.mnt_rooti;
+    struct vfs_inode *root = vfs_curroot();
     struct vfs_inode *test_file = NULL;
     const char *file_name = "truncate_test";
     const size_t file_len = sizeof("truncate_test") - 1;
     bool root_pinned = false;
 
-    vfs_idup(root);
+    if (root == NULL) {
+        printf("truncate_smoketest: " FAIL " vfs_curroot returned NULL\n");
+        return;
+    }
     root_pinned = true;
 
     test_file = vfs_create(root, 0644, file_name, file_len);
@@ -513,7 +519,7 @@ out:
 // Test vfs_namei path resolution with various cases
 void tmpfs_run_namei_smoketest(void) {
     int ret = 0;
-    struct vfs_inode *root = vfs_root_inode.mnt_rooti;
+    struct vfs_inode *root = NULL;
     struct vfs_inode *result = NULL;
     struct vfs_inode *subdir = NULL;
     struct vfs_inode *nested = NULL;
@@ -777,6 +783,8 @@ static void tmpfs_iter_and_fetch_ex(const char *tag, struct vfs_inode *dir,
                 if (!allow_extra) {
                     printf("dir_iter_mount: " FAIL " %s unexpected entry %s\n", tag, dentry.name);
                     ok = false;
+                } else {
+                    printf("dir_iter_mount: " WARN " %s extra entry %s\n", tag, dentry.name);
                 }
             } else if (duplicate) {
                 ok = false;
@@ -813,7 +821,7 @@ void tmpfs_run_dir_iter_mount_smoketest(void) {
     const size_t subdir_len = sizeof("iter_subdir") - 1;
 
     int ret = 0;
-    struct vfs_inode *root = vfs_root_inode.mnt_rooti;
+    struct vfs_inode *root = vfs_curroot();
     struct vfs_inode *mp = NULL;
     struct vfs_inode *mnt_root = NULL;
     struct vfs_inode *tmp = NULL;
@@ -821,8 +829,10 @@ void tmpfs_run_dir_iter_mount_smoketest(void) {
     struct vfs_dir_iter iter = {0};
     bool root_pinned = false;
 
-
-    vfs_idup(root);
+    if (root == NULL) {
+        printf("dir_iter_mount: " FAIL " vfs_curroot returned NULL\n");
+        return;
+    }
     root_pinned = true;
 
     mp = vfs_mkdir(root, 0755, mp_name, mp_len);
@@ -950,117 +960,152 @@ void tmpfs_run_dir_iter_mount_smoketest(void) {
         }
     }
 
-    // --- Test 6: non-empty process root (has iter_mount_dir, allow extra from other tests) ---
+    // --- Test 6: non-empty process root (has iter_mount_dir only - fresh tmpfs) ---
+    // Temporarily chroot to the populated tmpfs root
     {
-        struct iter_expect exp[] = {
-            {".", true, false},
-            {"..", true, false},
-            {"iter_mount_dir", true, false},
-        };
-        tmpfs_iter_and_fetch_ex("process_root_nonempty", root, &iter, exp, 3, true);
+        struct vfs_inode *old_root = vfs_curroot();
+        if (old_root != NULL) {
+            ret = vfs_chroot(root);
+            if (ret != 0) {
+                printf("dir_iter_mount: " FAIL " chroot to root for process_root_nonempty errno=%d\n", ret);
+                vfs_iput(old_root);
+            } else {
+                struct iter_expect exp[] = {
+                    {".", true, false},
+                    {"..", true, false},
+                    {"iter_mount_dir", true, false},
+                };
+                tmpfs_iter_and_fetch_ex("process_root_nonempty", root, &iter, exp, 3, false);
+                // Restore original root
+                ret = vfs_chroot(old_root);
+                if (ret != 0) {
+                    printf("dir_iter_mount: " FAIL " restore chroot errno=%d\n", ret);
+                }
+                vfs_iput(old_root);
+            }
+        }
     }
 
     // --- Test 7-12: vfs_ilookup ".." in various scenarios ---
+    // These tests need to chroot to root (tmpfs) so that root IS the process root
     printf("dir_iter_mount: BEGIN ilookup_dotdot tests\n");
-
-    // Test 7: ".." at process root -> should return self
     {
-        struct vfs_dentry d = {0};
-        ret = vfs_ilookup(root, &d, "..", 2);
-        if (ret != 0) {
-            printf("dir_iter_mount: " FAIL " ilookup(..) at process_root errno=%d\n", ret);
-        } else if (d.ino != root->ino) {
-            printf("dir_iter_mount: " FAIL " ilookup(..) at process_root wrong ino=%lu expected=%lu\n",
-                   d.ino, root->ino);
+        struct vfs_inode *old_root = vfs_curroot();
+        if (old_root == NULL) {
+            printf("dir_iter_mount: " FAIL " vfs_curroot returned NULL for ilookup tests\n");
         } else {
-            printf("dir_iter_mount: " PASS " ilookup(..) at process_root -> self ino=%lu\n", d.ino);
-        }
-        vfs_release_dentry(&d);
-    }
-
-    // Test 8: ".." at FS local root (mnt_root) -> should cross mount and return root
-    {
-        struct vfs_dentry d = {0};
-        ret = vfs_ilookup(mnt_root, &d, "..", 2);
-        if (ret != 0) {
-            printf("dir_iter_mount: " FAIL " ilookup(..) at mnt_root errno=%d\n", ret);
-        } else {
-            // Must fetch the actual inode to compare across superblock boundaries
-            struct vfs_inode *parent = vfs_get_dentry_inode(&d);
-            if (IS_ERR_OR_NULL(parent)) {
-                printf("dir_iter_mount: " FAIL " ilookup(..) at mnt_root get_inode failed\n");
-            } else if (parent != root) {
-                printf("dir_iter_mount: " FAIL " ilookup(..) at mnt_root wrong inode (got ino=%lu sb=%p, expected ino=%lu sb=%p)\n",
-                       parent->ino, parent->sb, root->ino, root->sb);
-                vfs_iput(parent);
+            ret = vfs_chroot(root);
+            if (ret != 0) {
+                printf("dir_iter_mount: " FAIL " chroot to root for ilookup tests errno=%d\n", ret);
+                vfs_iput(old_root);
             } else {
-                printf("dir_iter_mount: " PASS " ilookup(..) at mnt_root -> parent ino=%lu\n", parent->ino);
-                vfs_iput(parent);
+                // Test 7: ".." at process root -> should return self
+                {
+                    struct vfs_dentry d = {0};
+                    ret = vfs_ilookup(root, &d, "..", 2);
+                    if (ret != 0) {
+                        printf("dir_iter_mount: " FAIL " ilookup(..) at process_root errno=%d\n", ret);
+                    } else if (d.ino != root->ino) {
+                        printf("dir_iter_mount: " FAIL " ilookup(..) at process_root wrong ino=%lu expected=%lu\n",
+                               d.ino, root->ino);
+                    } else {
+                        printf("dir_iter_mount: " PASS " ilookup(..) at process_root -> self ino=%lu\n", d.ino);
+                    }
+                    vfs_release_dentry(&d);
+                }
+
+                // Test 8: ".." at FS local root (mnt_root) -> should cross mount and return root
+                {
+                    struct vfs_dentry d = {0};
+                    ret = vfs_ilookup(mnt_root, &d, "..", 2);
+                    if (ret != 0) {
+                        printf("dir_iter_mount: " FAIL " ilookup(..) at mnt_root errno=%d\n", ret);
+                    } else {
+                        // Must fetch the actual inode to compare across superblock boundaries
+                        struct vfs_inode *parent = vfs_get_dentry_inode(&d);
+                        if (IS_ERR_OR_NULL(parent)) {
+                            printf("dir_iter_mount: " FAIL " ilookup(..) at mnt_root get_inode failed\n");
+                        } else if (parent != root) {
+                            printf("dir_iter_mount: " FAIL " ilookup(..) at mnt_root wrong inode (got ino=%lu sb=%p, expected ino=%lu sb=%p)\n",
+                                   parent->ino, parent->sb, root->ino, root->sb);
+                            vfs_iput(parent);
+                        } else {
+                            printf("dir_iter_mount: " PASS " ilookup(..) at mnt_root -> parent ino=%lu\n", parent->ino);
+                            vfs_iput(parent);
+                        }
+                    }
+                    vfs_release_dentry(&d);
+                }
+
+                // Test 9: ".." at ordinary subdir (mnt_subdir) -> should return mnt_root
+                {
+                    struct vfs_dentry d = {0};
+                    ret = vfs_ilookup(mnt_subdir, &d, "..", 2);
+                    if (ret != 0) {
+                        printf("dir_iter_mount: " FAIL " ilookup(..) at mnt_subdir errno=%d\n", ret);
+                    } else if (d.ino != mnt_root->ino || d.sb != mnt_root->sb) {
+                        printf("dir_iter_mount: " FAIL " ilookup(..) at mnt_subdir wrong ino=%lu expected=%lu\n",
+                               d.ino, mnt_root->ino);
+                    } else {
+                        printf("dir_iter_mount: " PASS " ilookup(..) at mnt_subdir -> parent ino=%lu\n", d.ino);
+                    }
+                    vfs_release_dentry(&d);
+                }
+
+                // Test 10: "." at process root -> should return self
+                {
+                    struct vfs_dentry d = {0};
+                    ret = vfs_ilookup(root, &d, ".", 1);
+                    if (ret != 0) {
+                        printf("dir_iter_mount: " FAIL " ilookup(.) at process_root errno=%d\n", ret);
+                    } else if (d.ino != root->ino) {
+                        printf("dir_iter_mount: " FAIL " ilookup(.) at process_root wrong ino=%lu expected=%lu\n",
+                               d.ino, root->ino);
+                    } else {
+                        printf("dir_iter_mount: " PASS " ilookup(.) at process_root -> self ino=%lu\n", d.ino);
+                    }
+                    vfs_release_dentry(&d);
+                }
+
+                // Test 11: "." at FS local root -> should return self
+                {
+                    struct vfs_dentry d = {0};
+                    ret = vfs_ilookup(mnt_root, &d, ".", 1);
+                    if (ret != 0) {
+                        printf("dir_iter_mount: " FAIL " ilookup(.) at mnt_root errno=%d\n", ret);
+                    } else if (d.ino != mnt_root->ino) {
+                        printf("dir_iter_mount: " FAIL " ilookup(.) at mnt_root wrong ino=%lu expected=%lu\n",
+                               d.ino, mnt_root->ino);
+                    } else {
+                        printf("dir_iter_mount: " PASS " ilookup(.) at mnt_root -> self ino=%lu\n", d.ino);
+                    }
+                    vfs_release_dentry(&d);
+                }
+
+                // Test 12: "." at ordinary subdir -> should return self
+                {
+                    struct vfs_dentry d = {0};
+                    ret = vfs_ilookup(mnt_subdir, &d, ".", 1);
+                    if (ret != 0) {
+                        printf("dir_iter_mount: " FAIL " ilookup(.) at mnt_subdir errno=%d\n", ret);
+                    } else if (d.ino != mnt_subdir->ino) {
+                        printf("dir_iter_mount: " FAIL " ilookup(.) at mnt_subdir wrong ino=%lu expected=%lu\n",
+                               d.ino, mnt_subdir->ino);
+                    } else {
+                        printf("dir_iter_mount: " PASS " ilookup(.) at mnt_subdir -> self ino=%lu\n", d.ino);
+                    }
+                    vfs_release_dentry(&d);
+                }
+
+                // Restore original root
+                ret = vfs_chroot(old_root);
+                if (ret != 0) {
+                    printf("dir_iter_mount: " FAIL " restore chroot after ilookup tests errno=%d\n", ret);
+                }
+                vfs_iput(old_root);
             }
         }
-        vfs_release_dentry(&d);
     }
-
-    // Test 9: ".." at ordinary subdir (mnt_subdir) -> should return mnt_root
-    {
-        struct vfs_dentry d = {0};
-        ret = vfs_ilookup(mnt_subdir, &d, "..", 2);
-        if (ret != 0) {
-            printf("dir_iter_mount: " FAIL " ilookup(..) at mnt_subdir errno=%d\n", ret);
-        } else if (d.ino != mnt_root->ino || d.sb != mnt_root->sb) {
-            printf("dir_iter_mount: " FAIL " ilookup(..) at mnt_subdir wrong ino=%lu expected=%lu\n",
-                   d.ino, mnt_root->ino);
-        } else {
-            printf("dir_iter_mount: " PASS " ilookup(..) at mnt_subdir -> parent ino=%lu\n", d.ino);
-        }
-        vfs_release_dentry(&d);
-    }
-
-    // Test 10: "." at process root -> should return self
-    {
-        struct vfs_dentry d = {0};
-        ret = vfs_ilookup(root, &d, ".", 1);
-        if (ret != 0) {
-            printf("dir_iter_mount: " FAIL " ilookup(.) at process_root errno=%d\n", ret);
-        } else if (d.ino != root->ino) {
-            printf("dir_iter_mount: " FAIL " ilookup(.) at process_root wrong ino=%lu expected=%lu\n",
-                   d.ino, root->ino);
-        } else {
-            printf("dir_iter_mount: " PASS " ilookup(.) at process_root -> self ino=%lu\n", d.ino);
-        }
-        vfs_release_dentry(&d);
-    }
-
-    // Test 11: "." at FS local root -> should return self
-    {
-        struct vfs_dentry d = {0};
-        ret = vfs_ilookup(mnt_root, &d, ".", 1);
-        if (ret != 0) {
-            printf("dir_iter_mount: " FAIL " ilookup(.) at mnt_root errno=%d\n", ret);
-        } else if (d.ino != mnt_root->ino) {
-            printf("dir_iter_mount: " FAIL " ilookup(.) at mnt_root wrong ino=%lu expected=%lu\n",
-                   d.ino, mnt_root->ino);
-        } else {
-            printf("dir_iter_mount: " PASS " ilookup(.) at mnt_root -> self ino=%lu\n", d.ino);
-        }
-        vfs_release_dentry(&d);
-    }
-
-    // Test 12: "." at ordinary subdir -> should return self
-    {
-        struct vfs_dentry d = {0};
-        ret = vfs_ilookup(mnt_subdir, &d, ".", 1);
-        if (ret != 0) {
-            printf("dir_iter_mount: " FAIL " ilookup(.) at mnt_subdir errno=%d\n", ret);
-        } else if (d.ino != mnt_subdir->ino) {
-            printf("dir_iter_mount: " FAIL " ilookup(.) at mnt_subdir wrong ino=%lu expected=%lu\n",
-                   d.ino, mnt_subdir->ino);
-        } else {
-            printf("dir_iter_mount: " PASS " ilookup(.) at mnt_subdir -> self ino=%lu\n", d.ino);
-        }
-        vfs_release_dentry(&d);
-    }
-
     printf("dir_iter_mount: END ilookup_dotdot tests\n");
 
     // Tear down populated entries before unmount to avoid EBUSY
@@ -1147,7 +1192,7 @@ void tmpfs_run_lazy_unmount_smoketest(void) {
     const size_t test_data_len = sizeof("lazy unmount test data") - 1;
 
     int ret = 0;
-    struct vfs_inode *root = vfs_root_inode.mnt_rooti;
+    struct vfs_inode *root = vfs_curroot();
     struct vfs_inode *mp = NULL;
     struct vfs_inode *mnt_root = NULL;
     struct vfs_inode *file_inode = NULL;
@@ -1157,7 +1202,10 @@ void tmpfs_run_lazy_unmount_smoketest(void) {
 
     printf("lazy_unmount: BEGIN tests\n");
 
-    vfs_idup(root);
+    if (root == NULL) {
+        printf("lazy_unmount: " FAIL " vfs_curroot returned NULL\n");
+        return;
+    }
     root_pinned = true;
 
     // =========================================================================
@@ -1457,7 +1505,7 @@ out:
 // Test file descriptor operations: open, read, write, lseek, stat, close
 void tmpfs_run_file_ops_smoketest(void) {
     int ret = 0;
-    struct vfs_inode *root = vfs_root_inode.mnt_rooti;
+    struct vfs_inode *root = vfs_curroot();
     struct vfs_inode *test_inode = NULL;
     struct vfs_file *file = NULL;
     bool root_pinned = false;
@@ -1470,7 +1518,10 @@ void tmpfs_run_file_ops_smoketest(void) {
     const char *test_data = "Hello, tmpfs file operations!";
     size_t test_data_len = strlen(test_data);
 
-    vfs_idup(root);
+    if (root == NULL) {
+        printf("file_ops_smoketest: " FAIL " vfs_curroot returned NULL\n");
+        return;
+    }
     root_pinned = true;
 
     // Create a test file
@@ -1732,7 +1783,7 @@ static bool write_and_verify(struct vfs_file *file, loff_t offset, size_t len,
 // Test file I/O reaching into double indirect blocks with various edge cases
 void tmpfs_run_double_indirect_smoketest(void) {
     int ret = 0;
-    struct vfs_inode *root = vfs_root_inode.mnt_rooti;
+    struct vfs_inode *root = vfs_curroot();
     struct vfs_inode *test_inode = NULL;
     struct vfs_file *file = NULL;
     bool root_pinned = false;
@@ -1754,7 +1805,10 @@ void tmpfs_run_double_indirect_smoketest(void) {
     printf("  Indirect end: block %lu, offset %lld\n", (unsigned long)(TMPFS_INODE_DBLOCKS + 512), (long long)INDIRECT_END);
     printf("  Target size:  64MB = %lld bytes\n", (long long)TARGET_64MB);
 
-    vfs_idup(root);
+    if (root == NULL) {
+        printf("dindirect_smoketest: " FAIL " vfs_curroot returned NULL\n");
+        return;
+    }
     root_pinned = true;
 
     // Create test file

@@ -266,6 +266,7 @@ int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     }
     dentry->ino = child_dentry->inode->vfs_inode.ino;
     dentry->sb = dir->sb;
+    dentry->parent = dir;
     dentry->name = strndup(name, name_len);
     if (dentry->name == NULL) {
         return -ENOMEM;
@@ -365,20 +366,21 @@ struct vfs_inode *__tmpfs_unlink(struct vfs_inode *dir, const char *name, size_t
     }
     target = &tmpfs_dentry->inode->vfs_inode;
     vfs_ilock(target);
-    uint64 refcnt = vfs_inode_refcount(target);
-    if (refcnt > 1) {
-        vfs_iunlock(target);
-        return ERR_PTR(-EBUSY); // Target inode is busy
-    }
+    
+    // Remove directory entry - this makes the file inaccessible by name
+    // even if it's still open (Unix semantics)
     target->n_links--;
     __tmpfs_do_unlink(tmpfs_dentry);
     __tmpfs_free_dentry(tmpfs_dentry);
+    
     if (target->n_links > 0) {
         vfs_iunlock(target);
         return NULL; // Still has links, nothing more to do
     } else if (target->n_links == 0) {
+        // Increment refcount because caller (vfs_unlink) will call vfs_iput
+        vfs_idup(target);
         vfs_iunlock(target);
-        return target;
+        return target;  // Caller (vfs_unlink) will make orphan if needed
     }
 
     panic("Tmpfs unlink: negative link count");

@@ -712,6 +712,11 @@ int xv6fs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
             dentry->ino = de.inum;
             dentry->sb = dir->sb;
             dentry->parent = dir;
+            dentry->name = strndup(name, name_len);
+            if (dentry->name == NULL) {
+                return -ENOMEM;
+            }
+            dentry->name_len = name_len;
             return 0;
         }
     }

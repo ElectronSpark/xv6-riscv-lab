@@ -232,6 +232,17 @@ int kernel_proc_create(const char *name, struct proc **retp, void *entry,
     struct proc *initproc = __proctab_get_initproc();
     assert(initproc != NULL, "kernel_proc_create: initproc is NULL");
 
+    // Clone fs_struct from initproc so kernel process has valid cwd/root
+    struct fs_struct *fs_clone = NULL;
+    if (initproc->fs != NULL) {
+        fs_clone = vfs_struct_clone(initproc->fs, 0);
+        if (IS_ERR_OR_NULL(fs_clone)) {
+            freeproc(p);
+            *retp = NULL;
+            return -1; // Failed to clone fs_struct
+        }
+    }
+
     // Set up the context BEFORE making the process visible to scheduler
     p->sched_entity->context.ra = (uint64)__kernel_proc_entry;
     p->kentry = (uint64)entry;
@@ -240,6 +251,7 @@ int kernel_proc_create(const char *name, struct proc **retp, void *entry,
 
     proc_lock(initproc);
     proc_lock(p);
+    p->fs = fs_clone;
     attach_child(initproc, p);
     proc_unlock(initproc);
     // Newly allocated process is a kernel process

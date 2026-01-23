@@ -272,6 +272,10 @@ static struct vfs_inode *__get_mnt_recursive(struct vfs_inode *rooti) {
             // Reached process root
             return inode;
         }
+        if (inode == &vfs_root_inode) {
+            // Reached VFS root (special inode with no superblock)
+            return inode;
+        }
         assert(sb != NULL, "__get_mnt_recursive: inode's superblock mismatch");
         if (inode != sb->root_inode) {
             assert(sb->root_inode != NULL,
@@ -297,6 +301,10 @@ static struct vfs_inode *__mountpoint_go_up(struct vfs_inode *dir) {
             // Reached process root
             return inode;
         }
+        if (inode == &vfs_root_inode) {
+            // Reached VFS root (special inode with no parent)
+            return inode;
+        }
         if (inode->parent != inode) {
             assert(inode->parent != NULL,
                    "__mountpoint_go_up: inode's parent is NULL");
@@ -318,7 +326,12 @@ static struct vfs_inode *__vfs_dotdot_target(struct vfs_inode *dir) {
         return dir;
     }
     if (vfs_inode_is_local_root(dir)) {
-        return __mountpoint_go_up(dir);
+        struct vfs_inode *parent = __mountpoint_go_up(dir);
+        // If we reached VFS root, return self (can't go higher than VFS root)
+        if (parent == &vfs_root_inode) {
+            return dir;
+        }
+        return parent;
     }
     return NULL;
 }
@@ -502,6 +515,8 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         iter->index++;
         ret_dentry->sb = dir->sb;
         ret_dentry->parent = dir;
+        // Restore cookies from iter so driver knows where to continue from
+        ret_dentry->cookies = iter->cookies;
     }
     ret = dir->ops->dir_iter(dir, iter, ret_dentry);
     if (ret == 0 && iter->index == 1) {

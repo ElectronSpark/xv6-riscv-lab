@@ -211,8 +211,14 @@ int tmpfs_open(struct vfs_inode *inode, struct vfs_file *file, int f_flags) {
     }
     
     if (S_ISLNK(inode->mode)) {
-        // Symlinks are typically not opened directly
-        return -ELOOP;
+        /*
+         * Allow opening symlinks with O_NOFOLLOW flag.
+         * POSIX requires that symlinks can be opened with O_NOFOLLOW to allow
+         * fstat() on the symlink itself (not its target). This is needed by
+         * programs like ls and symlinktest that want to stat symlink info.
+         */
+        file->ops = &tmpfs_file_ops;
+        return 0;
     }
     
     // Character/block devices and pipes are handled by VFS core
