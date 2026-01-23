@@ -86,33 +86,6 @@ static __ksymbols_t *__ksymbols;    // Storage pool for symbol entries
 
 static int __ksymbol_count = -1;
 
-static inline uint64
-strtoul(const char *nptr, char **endptr, int base)
-{
-    uint64 result = 0;
-    const char *p = NULL;
-    for (p = nptr; *p; p++) {
-        int digit = 0;
-        if (*p >= '0' && *p <= '9') {
-            digit = *p - '0';
-        } else if (*p >= 'a' && *p <= 'f') {
-            digit = *p - 'a' + 10;
-        } else if (*p >= 'A' && *p <= 'F') {
-            digit = *p - 'A' + 10;
-        } else {
-            break;
-        }
-        if (digit >= base) {
-            break;
-        }
-        result = result * base + digit;
-    }
-    if (endptr) {
-        *endptr = (char *)p;
-    }
-    return result;
-}
-
 void
 ksymbols_init(void)
 {
@@ -171,9 +144,7 @@ ksymbols_init(void)
                         entry->filename_len = current_file_len;
                         
                         // Initialize rb node and insert into tree
-                        entry->rb.__parent_color = 0;
-                        entry->rb.left = NULL;
-                        entry->rb.right = NULL;
+                        rb_node_init(&entry->rb);
                         rb_insert_color(&__ksym_rb_root, &entry->rb);
                         
                         __ksymbol_count++;
