@@ -18,6 +18,7 @@
 #include "plic.h"
 #include "pci.h"
 #include "virtio.h"
+#include "timer/timer.h"
 
 // Global platform info - populated by fdt_init()
 // Code can access platform.uart_base, platform.plic_base, etc. for runtime
@@ -1599,5 +1600,10 @@ void fdt_apply_platform_config(void) {
             __virtio_mmio_base[i] = platform.virtio_base[i];
             __virtio_irqno[i] = platform.virtio_irq[i];
         }
+    }
+
+    // Update timer tick interval from FDT timebase
+    if (platform.timebase_freq != 0) {
+        __jiff_ticks = platform.timebase_freq / HZ;
     }
 }
