@@ -63,10 +63,10 @@ elseif(OPENSBI_MODE STREQUAL "build" OR OPENSBI_MODE STREQUAL "external")
 endif()
 
 # Compose QEMU options
-# Use kernel_with_symbols_elf which has embedded symbols (no external loader needed)
+# Use xv6.bin flat binary with Linux boot header (unified with Orange Pi)
 set(QEMUOPTS_PARAM
     ${QEMU_BIOS_OPT}
-    -kernel ${CMAKE_BINARY_DIR}/kernel/kernel_with_symbols_elf
+    -kernel ${CMAKE_BINARY_DIR}/kernel/xv6.bin
     -m 512M
     -smp ${CPUS}
     -nographic
