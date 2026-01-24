@@ -55,19 +55,6 @@ int ustack_alloc(vm_t *vm, uint64 *sp) {
                      VM_FLAG_GROWSDOWN) == NULL) {
         return -1; // Allocation failed
     }
-    for (uint64 i = stackbase; i < USTACKTOP; i += PGSIZE) {
-        pte_t *pte = walk(vm->pagetable, i, 1, NULL, NULL);
-        if (pte == NULL) {
-            return -1; // Walk failed
-        }
-        uint64 pa = (uint64)kalloc();
-        if (pa == 0) {
-            return -1; // kalloc failed
-        }
-        memset((void *)pa, 0, PGSIZE); // Initialize the page
-        *pte = PA2PTE(pa) | PTE_V | PTE_U | PTE_W |
-               PTE_R | PTE_A | PTE_D; // Allocate and map the page
-    }
     *sp = ret_sp; // Set the stack pointer
     return 0;     // Success
 }
