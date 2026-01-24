@@ -9,12 +9,6 @@ echo "       xv6-riscv Boot Loader"
 echo "=========================================="
 echo ""
 
-# Disable watchdog timer - SpacemiT K1 watchdog at 0xd4080000
-# The watchdog can cause the system to hang if not serviced
-echo "Disabling watchdog timer..."
-mw.l 0xd4080000 0x0
-mw.l 0xd4050000 0x0
-
 # Load orangepiEnv.txt to get fdtfile and other env variables
 if test -e ${devtype} ${devnum} ${prefix}orangepiEnv.txt; then
 	load ${devtype} ${devnum} 0x9000000 ${prefix}orangepiEnv.txt
