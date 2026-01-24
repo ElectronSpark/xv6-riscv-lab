@@ -56,6 +56,7 @@
 #include "percpu.h"
 #include "early_allocator.h"
 #include "fdt.h"
+#include "memstat.h"
 
 // ============================================================================
 // SECTION 1: Global Data & Configuration
@@ -1146,29 +1147,18 @@ STATIC void __print_size(uint64 bytes) {
     }
 }
 
-void print_buddy_system_stat(int detailed) {
-    uint64 total_free_pages = 0;
-    uint64 total_cached_pages = 0;
-    uint64 ret_arr[PAGE_BUDDY_MAX_ORDER + 1] = {0};
-    bool empty_arr[PAGE_BUDDY_MAX_ORDER + 1] = {false};
+static void __buddy_stat_totals(uint64 *total_free_pages,
+                                uint64 *total_cached_pages,
+                                uint64 *ret_arr,
+                                bool *empty_arr) {
+    *total_free_pages = 0;
+    *total_cached_pages = 0;
 
     page_buddy_stat(ret_arr, empty_arr, PAGE_BUDDY_MAX_ORDER + 1);
 
-    if (detailed) {
-        printf("Buddy System Statistics:\n");
-        printf("========================\n");
-    }
-
     for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
         uint64 order_pages = (1UL << i) * ret_arr[i];
-        uint64 order_bytes = order_pages * PAGE_SIZE;
-        total_free_pages += order_pages;
-
-        if (detailed) {
-            printf("order(%d): %ld blocks (", i, ret_arr[i]);
-            __print_size(order_bytes);
-            printf(")");
-        }
+        *total_free_pages += order_pages;
 
         // Add per-CPU cache stats for cacheable orders
         if (i <= PCPU_CACHE_MAX_ORDER) {
@@ -1180,8 +1170,53 @@ void print_buddy_system_stat(int detailed) {
 
             if (cache_total > 0) {
                 uint64 cached_pages = (1UL << i) * cache_total;
+                *total_cached_pages += cached_pages;
+            }
+        }
+    }
+}
+
+void print_buddy_system_stat(int detailed) {
+    uint64 total_free_pages = 0;
+    uint64 total_cached_pages = 0;
+    uint64 ret_arr[PAGE_BUDDY_MAX_ORDER + 1] = {0};
+    bool empty_arr[PAGE_BUDDY_MAX_ORDER + 1] = {false};
+
+    __buddy_stat_totals(&total_free_pages, &total_cached_pages,
+                        ret_arr, empty_arr);
+
+    if (detailed <= 0) {
+        printf("Buddy: %ld free + %ld cached = %ld pages (", total_free_pages,
+               total_cached_pages, total_free_pages + total_cached_pages);
+        __print_size((total_free_pages + total_cached_pages) * PAGE_SIZE);
+        printf(")\n");
+        return;
+    }
+
+    if (detailed) {
+        printf("Buddy System Statistics:\n");
+        printf("========================\n");
+    }
+
+    for (int i = 0; i <= PAGE_BUDDY_MAX_ORDER; i++) {
+        uint64 order_pages = (1UL << i) * ret_arr[i];
+        uint64 order_bytes = order_pages * PAGE_SIZE;
+
+        if (detailed) {
+            printf("order(%d): %ld blocks (", i, ret_arr[i]);
+            __print_size(order_bytes);
+            printf(")");
+        }
+
+        if (i <= PCPU_CACHE_MAX_ORDER) {
+            uint64 cache_total = 0;
+            for (int cpu = 0; cpu < NCPU; cpu++) {
+                cache_total += PCPU_CACHE_COUNT_LOAD(&__pcpu_caches[cpu][i]);
+            }
+
+            if (cache_total > 0) {
+                uint64 cached_pages = (1UL << i) * cache_total;
                 uint64 cached_bytes = cached_pages * PAGE_SIZE;
-                total_cached_pages += cached_pages;
 
                 if (detailed) {
                     printf(" + %ld cached (", cache_total);
@@ -1255,9 +1290,58 @@ void check_buddy_system_integrity(void) {
 }
 
 uint64 sys_memstat(void) {
-    int detailed;
-    argint(0, &detailed);
-    print_buddy_system_stat(detailed);
-    slab_dump_all(detailed);
-    return 0;
+    int flags_arg;
+    argint(0, &flags_arg);
+    uint32 flags = (uint32)flags_arg;
+    uint64 total_free_pages = 0;
+    uint64 total_cached_pages = 0;
+    uint64 ret_arr[PAGE_BUDDY_MAX_ORDER + 1] = {0};
+    bool empty_arr[PAGE_BUDDY_MAX_ORDER + 1] = {false};
+    uint64 free_bytes = 0;
+    uint64 used_bytes = 0;
+    uint64 ret = 0;
+
+    if (flags & MEMSTAT_INCLUDE_BUDDY) {
+        if (flags & MEMSTAT_DETAILED) {
+            print_buddy_system_stat(1);
+        } else if (flags & MEMSTAT_VERBOSE) {
+            print_buddy_system_stat(0);
+        }
+    }
+
+    if (flags & MEMSTAT_INCLUDE_SLAB) {
+        if (flags & MEMSTAT_DETAILED) {
+            slab_dump_all(2);
+        } else if (flags & MEMSTAT_VERBOSE) {
+            slab_dump_all(1);
+        }
+    }
+
+    __buddy_stat_totals(&total_free_pages, &total_cached_pages,
+                        ret_arr, empty_arr);
+    free_bytes = (total_free_pages + total_cached_pages) * PAGE_SIZE;
+
+    uint64 managed_bytes = __total_pages() * PAGE_SIZE;
+    used_bytes = (managed_bytes > free_bytes) ? (managed_bytes - free_bytes) : 0;
+
+    if ((flags & (MEMSTAT_VERBOSE | MEMSTAT_DETAILED)) != 0) {
+        if (flags & MEMSTAT_ADD_FREE) {
+            printf("Free: ");
+            __print_size(free_bytes);
+            printf("\n");
+        }
+        if (flags & MEMSTAT_ADD_USED) {
+            printf("Used: ");
+            __print_size(used_bytes);
+            printf("\n");
+        }
+    }
+
+    if (flags & MEMSTAT_ADD_FREE) {
+        ret += free_bytes;
+    }
+    if (flags & MEMSTAT_ADD_USED) {
+        ret += used_bytes;
+    }
+    return ret;
 }

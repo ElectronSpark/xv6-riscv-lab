@@ -84,9 +84,9 @@ copyout(char *s)
   for(int ai = 0; ai < sizeof(addrs)/sizeof(addrs[0]); ai++){
     uint64 addr = addrs[ai];
 
-    int fd = open("README", 0);
+    int fd = open("README.md", 0);
     if(fd < 0){
-      printf("open(README) failed\n");
+      printf("open(README.md) failed\n");
       exit(1);
     }
     int n = read(fd, (void*)addr, 8192);
@@ -147,26 +147,26 @@ copyinstr2(char *s)
   b[MAXPATH] = '\0';
   
   int ret = unlink(b);
-  if(ret != -1){
+  if(ret >= 0){
     printf("unlink(%s) returned %d, not -1\n", b, ret);
     exit(1);
   }
 
   int fd = open(b, O_CREAT | O_WRONLY);
-  if(fd != -1){
+  if(fd >= 0){
     printf("open(%s) returned %d, not -1\n", b, fd);
     exit(1);
   }
 
   ret = link(b, b);
-  if(ret != -1){
+  if(ret >= 0){
     printf("link(%s, %s) returned %d, not -1\n", b, b, ret);
     exit(1);
   }
 
   char *args[] = { "xx", 0 };
   ret = exec(b, args);
-  if(ret != -1){
+  if(ret >= 0){
     printf("exec(%s) returned %d, not -1\n", b, fd);
     exit(1);
   }
@@ -183,7 +183,7 @@ copyinstr2(char *s)
     big[PGSIZE] = '\0';
     char *args2[] = { big, big, big, 0 };
     ret = exec("echo", args2);
-    if(ret != -1){
+    if(ret >= 0){
       printf("exec(echo, BIG) returned %d, not -1\n", fd);
       exit(1);
     }
@@ -217,26 +217,26 @@ copyinstr3(char *s)
   *b = 'x';
 
   int ret = unlink(b);
-  if(ret != -1){
+  if(ret >= 0){
     printf("unlink(%s) returned %d, not -1\n", b, ret);
     exit(1);
   }
 
   int fd = open(b, O_CREAT | O_WRONLY);
-  if(fd != -1){
+  if(fd >= 0){
     printf("open(%s) returned %d, not -1\n", b, fd);
     exit(1);
   }
 
   ret = link(b, b);
-  if(ret != -1){
+  if(ret >= 0){
     printf("link(%s, %s) returned %d, not -1\n", b, b, ret);
     exit(1);
   }
 
   char *args[] = { "xx", 0 };
   ret = exec(b, args);
-  if(ret != -1){
+  if(ret >= 0){
     printf("exec(%s) returned %d, not -1\n", b, fd);
     exit(1);
   }
@@ -275,9 +275,9 @@ rwsbrk(char *s)
   close(fd);
   unlink("rwsbrk");
 
-  fd = open("README", O_RDONLY);
+  fd = open("README.md", O_RDONLY);
   if(fd < 0){
-    printf("open(rwsbrk) failed\n");
+    printf("open(README.md) failed\n");
     exit(1);
   }
   n = read(fd, (void*)(a+4096), 10);
@@ -361,7 +361,7 @@ truncate2(char *s)
   int fd2 = open("truncfile", O_TRUNC|O_WRONLY);
 
   int n = write(fd1, "x", 1);
-  if(n != -1){
+  if(n >= 0){
     printf("%s: write returned %d, expected -1\n", s, n);
     exit(1);
   }
@@ -526,7 +526,7 @@ opentest(char *s)
 {
   int fd;
 
-  fd = open("echo", 0);
+  fd = open("/bin/echo", 0);
   if(fd < 0){
     printf("%s: open echo failed!\n", s);
     exit(1);
@@ -812,7 +812,7 @@ killstatus(char *s)
     sleep(1);
     kill(pid1, SIGKILL);
     wait(&xst);
-    if(xst != -1) {
+     if(xst >= 0) {
        printf("%s: status should be -1\n", s);
        exit(1);
     }
@@ -1899,7 +1899,7 @@ dirfile(char *s)
     printf("%s: unlink dirfile/xx succeeded!\n", s);
     exit(1);
   }
-  if(link("README", "dirfile/xx") == 0){
+  if(link("README.md", "dirfile/xx") == 0){
     printf("%s: link to dirfile/xx succeeded!\n", s);
     exit(1);
   }
@@ -1939,7 +1939,7 @@ iref(char *s)
     }
 
     mkdir("");
-    link("README", "");
+    link("README.md", "");
     fd = open("", O_CREAT);
     if(fd >= 0)
       close(fd);
@@ -1992,7 +1992,7 @@ forktest(char *s)
     }
   }
 
-  if(wait(0) != -1){
+  if(wait(0) >= 0){
     printf("%s: wait got too many\n", s);
     exit(1);
   }
@@ -2142,7 +2142,7 @@ kernmem(char *s)
     }
     int xstatus;
     wait(&xstatus);
-    if(xstatus != -1)  // did kernel kill child?
+    if(xstatus >= 0)  // did kernel kill child?
       exit(1);
   }
 }
@@ -2166,7 +2166,7 @@ MAXVAplus(char *s)
     }
     int xstatus;
     wait(&xstatus);
-    if(xstatus != -1)  // did kernel kill child?
+    if(xstatus >= 0)  // did kernel kill child?
       exit(1);
   }
 }
@@ -2196,7 +2196,7 @@ sbrkfail(char *s)
       // sit around until killed
       for(;;) sleep(1000);
     }
-    if(pids[i] != -1)
+    if(pids[i] >= 0)
       read(fds[0], &scratch, 1);
   }
 
@@ -2236,7 +2236,7 @@ sbrkfail(char *s)
     exit(1);
   }
   wait(&xstatus);
-  if(xstatus != -1 && xstatus != 2)
+  if(xstatus >= 0 && xstatus != 2)
     exit(1);
 }
 
@@ -2278,7 +2278,7 @@ validatetest(char *s)
   hi = 1100*1024;
   for(p = 0; p <= (uint)hi; p += PGSIZE){
     // try to crash the kernel by passing in a bad string pointer
-    if(link("nosuchfile", (char*)p) != -1){
+    if(link("nosuchfile", (char*)p) >= 0){
       printf("%s: link should not succeed\n", s);
       exit(1);
     }
@@ -2998,77 +2998,11 @@ runtests(struct test *tests, char *justone, int continuous) {
 }
 
 
-//
-// use sbrk() to count how many free physical memory pages there are.
-// touches the pages to force allocation.
-// because out of memory with lazy allocation results in the process
-// taking a fault and being killed, fork and report back.
-//
-int
-countfree()
-{
-  int fds[2];
-
-  if(pipe(fds) < 0){
-    printf("pipe() failed in countfree()\n");
-    exit(1);
-  }
-  
-  int pid = fork();
-
-  if(pid < 0){
-    printf("fork failed in countfree()\n");
-    exit(1);
-  }
-
-  if(pid == 0){
-    close(fds[0]);
-    
-    while(1){
-      uint64 a = (uint64) sbrk(4096);
-      if(a == 0xffffffffffffffff){
-        break;
-      }
-
-      // modify the memory to make sure it's really allocated.
-      *(char *)(a + 4096 - 1) = 1;
-
-      // report back one more page.
-      if(write(fds[1], "x", 1) != 1){
-        printf("write() failed in countfree()\n");
-        exit(1);
-      }
-    }
-
-    exit(0);
-  }
-
-  close(fds[1]);
-
-  int n = 0;
-  while(1){
-    char c;
-    int cc = read(fds[0], &c, 1);
-    if(cc < 0){
-      printf("read() failed in countfree()\n");
-      exit(1);
-    }
-    if(cc == 0)
-      break;
-    n += 1;
-  }
-
-  close(fds[0]);
-  wait((int*)0);
-  
-  return n;
-}
-
 int
 drivetests(int quick, int continuous, char *justone) {
   do {
     printf("usertests starting\n");
-    int free0 = countfree();
+    int free0 = memstat(MEMSTAT_ADD_FREE) / PGSIZE;
     int free1 = 0;
     if (runtests(quicktests, justone, continuous)) {
       if(continuous != 2) {
@@ -3084,7 +3018,7 @@ drivetests(int quick, int continuous, char *justone) {
         }
       }
     }
-    if((free1 = countfree()) < free0) {
+    if((free1 = memstat(MEMSTAT_ADD_FREE) / PGSIZE) < free0) {
       printf("FAILED -- lost some free pages %d (out of %d)\n", free1, free0);
       if(continuous != 2) {
         return 1;

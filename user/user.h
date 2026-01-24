@@ -6,6 +6,7 @@ struct stat;
 typedef uint64 sigset_t;
 
 #include "kernel/inc/signal_types.h"
+#include "kernel/inc/memstat.h"
 
 // system calls
 int fork(void);
@@ -37,7 +38,7 @@ int sigpending(sigset_t *set);
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
 void pause(void);
 
-int memstat(int detailed);
+uint64 memstat(uint64 flags);
 int dumpproc(void);
 int dumpchan(void);
 int dumppcache(void);

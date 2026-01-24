@@ -26,7 +26,7 @@ slab_cache_t *slab_cache_create(char *name, size_t obj_size, uint64 flags);
 int slab_cache_destroy(slab_cache_t *cache);
 int slab_cache_shrink(slab_cache_t *cache, int nums);
 void slab_shrink_all(void);  // Shrink all registered slab caches (for OOM recovery)
-void slab_dump_all(int detailed);  // Dump statistics for all slab caches
+uint64 slab_dump_all(int detailed);  // Dump statistics for all slab caches, return total bytes
 void *slab_alloc(slab_cache_t *cache);
 void slab_free(void *obj);
 void slab_free_noshrink(void *obj);

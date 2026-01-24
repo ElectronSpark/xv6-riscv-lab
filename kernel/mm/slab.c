@@ -105,12 +105,12 @@ void slab_shrink_all(void) {
 }
 
 // Dump statistics for all slab caches - useful for debugging memory leaks
-void slab_dump_all(int detailed) {
+uint64 slab_dump_all(int detailed) {
     slab_cache_t *cache, *tmp;
     uint64 total_pages = 0;
     uint64 total_bytes;
-    
-    if (detailed) {
+
+    if (detailed >= 2) {
         printf("\n=== SLAB CACHE STATISTICS ===\n");
         printf("NAME             OBJSZ    TOTAL   ACTIVE     FREE    PAGES\n");
     }
@@ -123,29 +123,33 @@ void slab_dump_all(int detailed) {
         uint64 pages = slab_total * (1UL << cache->slab_order);
         total_pages += pages;
         
-        if (detailed) {
+        if (detailed >= 2) {
             printf("%s: objsz=%ld total=%ld active=%lu free=%ld pages=%lu\n",
                    cache->name, cache->obj_size, slab_total, obj_active, global_free, pages);
         }
     }
     spin_release(&__all_slab_caches_lock);
     
-    if (detailed) {
+    if (detailed >= 2) {
         printf("-----------------------------\n");
     }
     total_bytes = total_pages * PAGE_SIZE;
-    printf("Slab:  %lu pages (", total_pages);
-    if (total_bytes >= 1024 * 1024) {
-        uint64 mb = total_bytes / (1024 * 1024);
-        uint64 kb_remainder = (total_bytes % (1024 * 1024)) / 1024;
-        printf("%lu.%luMB", mb, kb_remainder * 10 / 1024);
-    } else {
-        printf("%luKB", total_bytes / 1024);
+    if (detailed >= 1) {
+        printf("Slab:  %lu pages (", total_pages);
+        if (total_bytes >= 1024 * 1024) {
+            uint64 mb = total_bytes / (1024 * 1024);
+            uint64 kb_remainder = (total_bytes % (1024 * 1024)) / 1024;
+            printf("%lu.%luMB", mb, kb_remainder * 10 / 1024);
+        } else {
+            printf("%luKB", total_bytes / 1024);
+        }
+        printf(")\n");
+        if (detailed >= 2) {
+            printf("=============================\n");
+        }
     }
-    printf(")\n");
-    if (detailed) {
-        printf("=============================\n");
-    }
+
+    return total_bytes;
 }
 
 #ifdef KERNEL_PAGE_SANITIZER

@@ -120,9 +120,11 @@ void sleep_ms(uint64 ms) {
 
     struct timer_node tn = {0};
 
+    uint64 before = get_jiffs();
     int ret = sched_timer_set(&tn, ms);
     if (ret != 0) {
-        printf("Failed to set timer\n");
+        printf("proc %s: ", myproc() ? myproc()->name : "unknown");
+        printf("Failed to set timer - ret=%d, before=%lu\n", ret, before);
         return;
     }
 
