@@ -85,16 +85,16 @@ int exec(char *path, char **argv) {
 
     // Look up the file using VFS
     struct vfs_inode *inode = vfs_namei(path, strlen(path));
-    if (IS_ERR_OR_NULL(inode) && path[0] != '/') {
+    if (IS_ERR_OR_NULL(inode) && strncmp(path, "/bin/", 5) != 0) {
         // In case of failing to find the inode in cwd, try absolute path
         size_t path_len = strlen(path);
-        char *path1 = kmm_alloc(path_len + 2);
+        char *path1 = kmm_alloc(path_len + 5);
         if (path1 == NULL) {
             return -1;
         }
-        path1[0] = '/';
-        memmove(path1 + 1, path, path_len + 1);
-        inode = vfs_namei(path1, path_len + 1);
+        strncpy(path1, "/bin/", 5);
+        memmove(path1 + 5, path, path_len + 1);
+        inode = vfs_namei(path1, path_len + 5);
         kmm_free(path1);
         if (IS_ERR_OR_NULL(inode)) {
             return -1;

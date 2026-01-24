@@ -128,9 +128,10 @@ main(int argc, char *argv[])
   strcpy(de.name, "..");
   iappend(rootino, &de, sizeof(de));
 
-  // Create standard directories: dev, proc, tmp, sys
-  const char *stdirs[] = {"dev", "proc", "tmp", "sys"};
-  for(i = 0; i < 4; i++){
+  // Create standard directories: dev, proc, tmp, sys, bin
+  const char *stdirs[] = {"dev", "proc", "tmp", "sys", "bin"};
+  uint binino = 0;
+  for(i = 0; i < 5; i++){
     uint dirino = ialloc(XV6_T_DIR);
     
     // Add "." entry pointing to itself
@@ -150,6 +151,9 @@ main(int argc, char *argv[])
     de.inum = xshort(dirino);
     strncpy(de.name, stdirs[i], DIRSIZ);
     iappend(rootino, &de, sizeof(de));
+
+    if(strcmp(stdirs[i], "bin") == 0)
+      binino = dirino;
   }
 
   for(i = 2; i < argc; i++){
@@ -179,7 +183,10 @@ main(int argc, char *argv[])
     bzero(&de, sizeof(de));
     de.inum = xshort(inum);
     strncpy(de.name, shortname, DIRSIZ);
-    iappend(rootino, &de, sizeof(de));
+    if(strcmp(shortname, "README.md") == 0)
+      iappend(rootino, &de, sizeof(de));
+    else
+      iappend(binino, &de, sizeof(de));
 
     while((cc = read(fd, buf, sizeof(buf))) > 0)
       iappend(inum, buf, cc);
