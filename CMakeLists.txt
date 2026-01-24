@@ -8,11 +8,13 @@ endif()
 # ==============================================================================
 # Platform Configuration
 # ==============================================================================
-# Read PLATFORM from environment variable, default to "qemu"
-if(DEFINED ENV{PLATFORM})
-    set(PLATFORM "$ENV{PLATFORM}")
-else()
-    set(PLATFORM "qemu")
+# PLATFORM can be set via cmake -DPLATFORM=orangepi or environment variable
+if(NOT DEFINED PLATFORM)
+    if(DEFINED ENV{PLATFORM})
+        set(PLATFORM "$ENV{PLATFORM}")
+    else()
+        set(PLATFORM "qemu")
+    endif()
 endif()
 
 # Validate platform

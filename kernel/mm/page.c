@@ -55,6 +55,7 @@
 #include "slab.h"
 #include "percpu.h"
 #include "early_allocator.h"
+#include "fdt.h"
 
 // ============================================================================
 // SECTION 1: Global Data & Configuration
@@ -764,6 +765,29 @@ STATIC int __buddy_put(page_t *page) {
 // SECTION 11: Buddy System Initialization
 // ============================================================================
 
+// Check if a physical address falls within any reserved region from FDT
+static int __is_reserved_page(uint64 pa) {
+    // Check ramdisk region
+    if (platform.has_ramdisk && platform.ramdisk_base != 0) {
+        uint64 rd_start = PGROUNDDOWN(platform.ramdisk_base);
+        uint64 rd_end = PGROUNDUP(platform.ramdisk_base + platform.ramdisk_size);
+        if (pa >= rd_start && pa < rd_end) {
+            return 1;
+        }
+    }
+    
+    // Check reserved memory regions from FDT
+    for (int i = 0; i < platform.reserved_count; i++) {
+        uint64 res_start = PGROUNDDOWN(platform.reserved[i].base);
+        uint64 res_end = PGROUNDUP(platform.reserved[i].base + platform.reserved[i].size);
+        if (res_start < res_end && pa >= res_start && pa < res_end) {
+            return 1;
+        }
+    }
+    
+    return 0;
+}
+
 // Init buddy system and add the given range of pages into it
 int page_buddy_init(void) {
     size_t page_arr_size = sizeof(page_t) * TOTALPAGES;
@@ -804,14 +828,20 @@ int page_buddy_init(void) {
         if (page == NULL) {
             panic("page_buddy_init(): get NULL page");
         }
+        
+        // Skip reserved and ramdisk regions - mark them as locked instead
+        if (__is_reserved_page(base)) {
+            page->flags = PAGE_FLAG_LOCKED;
+            continue;
+        }
+        
         if (__buddy_put(page) != 0) {
             panic("page_buddy_init(): page put error");
         }
     }
+    
 #ifndef HOST_TEST
     print_buddy_system_stat(1);
-    printf("page_buddy_init(): buddy pages from 0x%lx to 0x%lx\n",
-           __managed_start, __managed_end);
 #endif
 
     return 0;

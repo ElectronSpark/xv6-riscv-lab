@@ -246,7 +246,14 @@ __virtio_disk_init_one(int diskno)
 void
 virtio_disk_init(void)
 {
-  for(int i = 0; i < N_VIRTIO_DISK; i++) {
+  if (!platform.has_virtio || platform.virtio_count == 0)
+    return;
+  
+  int num_disks = platform.virtio_count;
+  if (num_disks > N_VIRTIO_DISK)
+    num_disks = N_VIRTIO_DISK;
+  
+  for(int i = 0; i < num_disks; i++) {
     __virtio_disk_init_one(i);
   }
 }

@@ -1151,15 +1151,33 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
         struct fdt_node *reg = __fdt_get_prop(node, "reg");
         struct fdt_node *interrupts = __fdt_get_prop(node, "interrupts");
         
-        // UART detection
+        // UART detection (ns16550a, ns16750, snps,dw-apb-uart)
+        // PXA UART (SpacemiT K1): reg-shift=2, reg-io-width=4, IER_UUE, MCR_OUT2
         if (platform.uart_base == 0 && __fdt_prop_compat_list(compat, uart_compat)) {
+            uint64 uart_addr = 0;
             if (reg) {
                 __fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells,
-                                     &platform.uart_base, NULL);
+                                     &uart_addr, NULL);
             }
+            platform.uart_base = uart_addr;
             if (interrupts) {
                 platform.uart_irq = __fdt_prop_u32(interrupts, 0);
             }
+            struct fdt_node *clock_freq = __fdt_get_prop(node, "clock-frequency");
+            if (clock_freq)
+                platform.uart_clock = __fdt_prop_u32(clock_freq, 0);
+            struct fdt_node *baud = __fdt_get_prop(node, "current-speed");
+            if (baud)
+                platform.uart_baud = __fdt_prop_u32(baud, 0);
+            // Default to 8-bit, 1-byte spacing (ns16550a). PXA DT will provide reg-shift/reg-io-width.
+            struct fdt_node *reg_shift = __fdt_get_prop(node, "reg-shift");
+            platform.uart_reg_shift = reg_shift ? __fdt_prop_u32(reg_shift, 0) : 0;
+            struct fdt_node *reg_io_width = __fdt_get_prop(node, "reg-io-width");
+            platform.uart_reg_io_width = reg_io_width ? __fdt_prop_u32(reg_io_width, 0) : 1;
+            printf("fdt: found UART at 0x%lx, IRQ %d, clock %u Hz, baud %u, reg-shift %u, io-width %u\n",
+                   platform.uart_base, platform.uart_irq,
+                   platform.uart_clock, platform.uart_baud, platform.uart_reg_shift,
+                   platform.uart_reg_io_width);
         }
         
         // PLIC detection
@@ -1347,7 +1365,13 @@ int fdt_init(void *dtb) {
                platform.ramdisk_base + platform.ramdisk_size,
                platform.ramdisk_size / 1024);
     }
-    printf("  UART: 0x%lx, IRQ %d\n", platform.uart_base, platform.uart_irq);
+    printf("  UART: 0x%lx, IRQ %d", platform.uart_base, platform.uart_irq);
+    if (platform.uart_clock || platform.uart_baud) {
+        printf(", clock %u Hz, baud %u",
+               platform.uart_clock ? platform.uart_clock : 1843200,
+               platform.uart_baud ? platform.uart_baud : 115200);
+    }
+    printf("\n");
     printf("  PLIC: 0x%lx (size 0x%lx)\n", platform.plic_base, platform.plic_size);
     if (platform.has_pcie) {
         printf("  PCIe regions: %d\n", platform.pcie_reg_count);
@@ -1543,6 +1567,10 @@ void fdt_apply_platform_config(void) {
     if (platform.uart_base != 0) {
         __uart0_mmio_base = platform.uart_base;
         __uart0_irqno = platform.uart_irq;
+        __uart0_clock = platform.uart_clock;
+        __uart0_baud = platform.uart_baud;
+        __uart0_reg_shift = platform.uart_reg_shift;
+        __uart0_reg_io_width = platform.uart_reg_io_width;
     }
     if (platform.plic_base != 0) {
         __plic_mmio_base = platform.plic_base;

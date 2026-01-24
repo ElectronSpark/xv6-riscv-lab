@@ -78,11 +78,16 @@ static void __trap_panic(struct trapframe *tf, uint64 s0) {
     tf->ra = tf->sepc;
     // to enconvinient gdb back trace
     *(uint64 *)((uint64)tf - 8) = tf->sepc;
-    if (myproc() == NULL) {
+    struct proc *p = myproc();
+    if (p == NULL) {
         printf("kerneltrap: no current process\n");
+        kerneltrap_dump_regs(tf);
+        panic_disable_bt();
+        panic("kerneltrap");
     }
-    size_t kstack_size = (1UL << (PAGE_SHIFT + myproc()->kstack_order));
-    print_backtrace(tf->s0, myproc()->kstack, myproc()->kstack + kstack_size);
+
+    size_t kstack_size = (1UL << (PAGE_SHIFT + p->kstack_order));
+    print_backtrace(tf->s0, p->kstack, p->kstack + kstack_size);
     kerneltrap_dump_regs(tf);
     panic_disable_bt();
     panic("kerneltrap");

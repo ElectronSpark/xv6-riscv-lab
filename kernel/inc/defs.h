@@ -142,7 +142,7 @@ int push_sigframe(struct proc *p, int signo, sigaction_t *sa, ksiginfo_t *info);
 int restore_sigframe(struct proc *p, ucontext_t *ret_uc);
 
 // uart.c
-void uartinit(void);
+int  uartinit(void);
 void uartputc(int);
 void uartputs(const char *, int);
 void uartputc_sync(int);
@@ -168,9 +168,13 @@ void plicinit(void);
 void plicinithart(void);
 int plic_claim(void);
 void plic_complete(int);
+void plic_enable_irq(int);
 
 // virtio_disk.c
 void virtio_disk_init(void);
+
+// ramdisk.c
+void ramdisk_init(void);
 
 // backtrace.c
 void print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end);

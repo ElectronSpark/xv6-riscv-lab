@@ -51,9 +51,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     early_allocator_init((void*)end, (void*)__physical_memory_end);
     kobject_global_init();
     printfinit();
-    printf("\n");
-    printf("xv6 kernel is booting\n");
-    printf("\n");
+    printf("\nxv6 kernel booting (hart %d)\n\n", hartid);
     fdt_init(fdt_base);
     // fdt_walk(fdt_base);
     
@@ -61,8 +59,6 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     fdt_apply_platform_config();
     
     sbi_probe_extensions();
-    consoleinit();
-    printf("hart %d, fdt_base %p, sp: %p\n", hartid, fdt_base, __builtin_frame_address(0));
     ksymbols_init(); // Initialize kernel symbols
     kinit();         // physical page allocator
     kvminit();       // create kernel page table
@@ -81,6 +77,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     trapinithart();  // install kernel trap vector
     plicinit();      // set up interrupt controller
     plicinithart();  // ask PLIC for device interrupts
+    consoleinit();
     pci_init();
     signal_init();   // signal handling initialization  
     binit();         // buffer cache
@@ -128,7 +125,7 @@ void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
     // Start the RCU kthread for this CPU before entering idle loop
     rcu_kthread_start_cpu(cpuid());
 
-    // Now we are in idle process context. Just yield to scheduler.
+    // Idle loop
     for (;;) {
         scheduler_yield();
         intr_on();
@@ -140,7 +137,8 @@ void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
 // Initialization that requires a process context
 void start_kernel_post_init(void) {
     consoledevinit(); // Initialize and register the console character device
-    virtio_disk_init(); // emulated hard disk
+    virtio_disk_init(); // emulated hard disk (QEMU)
+    ramdisk_init();     // ramdisk from FDT initrd (real hardware)
     sockinit();
     pcache_global_init(); // page cache subsystem initialization
 

@@ -15,6 +15,7 @@
 #include "vm.h"
 #include "mutex_types.h"
 #include "buf.h"
+#include "blkdev.h"
 #include "vfs/fs.h"
 #include "../vfs_private.h"
 #include "slab.h"
@@ -423,6 +424,8 @@ void xv6fs_init(void) {
 /**
  * Mount xv6fs at /root and chroot into it.
  * Requires: tmpfs already mounted as initial root (vfs_root_inode.mnt_rooti set).
+ * 
+ * Prefers ramdisk (major 3) if available, falls back to virtio disk (major 2).
  */
 void xv6fs_mount_root(void) {
     struct vfs_inode *tmpfs_root = vfs_root_inode.mnt_rooti;
@@ -439,9 +442,18 @@ void xv6fs_mount_root(void) {
         return;
     }
     
-    // Create a block device inode for ROOTDEV
+    // Select root device: prefer ramdisk if available
+    dev_t root_dev;
+    blkdev_t *ramdisk = blkdev_get(major(RAMDISK_DEV), minor(RAMDISK_DEV));
+    if (ramdisk != NULL && !IS_ERR(ramdisk)) {
+        root_dev = RAMDISK_DEV;
+    } else {
+        root_dev = ROOTDEV;
+    }
+    
+    // Create a block device inode for root device
     struct vfs_inode *dev_inode = vfs_mknod(tmpfs_root, S_IFBLK | 0600, 
-                                             ROOTDEV, "rootdev", 7);
+                                             root_dev, "rootdev", 7);
     if (IS_ERR_OR_NULL(dev_inode)) {
         printf("xv6fs: failed to create device inode, errno=%ld\n", 
                dev_inode ? PTR_ERR(dev_inode) : -ENOMEM);

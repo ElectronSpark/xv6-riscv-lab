@@ -87,6 +87,12 @@ int register_irq_handler(int irq_num, struct irq_desc *desc) {
 
     spin_release(&irq_write_lock);
 
+    // Enable PLIC interrupt after handler is registered
+    // plic_enable_irq sets priority=1 and enables the IRQ on all harts
+    if (irq_num >= PLIC_IRQ_OFFSET && irq_num < PLIC_IRQ_OFFSET + PLIC_IRQ_CNT) {
+        plic_enable_irq(irq_num - PLIC_IRQ_OFFSET);
+    }
+
     return 0;
 }
 

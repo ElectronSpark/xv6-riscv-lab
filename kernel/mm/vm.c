@@ -172,8 +172,9 @@ pagetable_t kvmmake(void) {
 
     memset(kpgtbl, 0, PGSIZE);
 
-    // uart registers
-    kvmmap(kpgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
+    // uart registers - page-align the address (UART5 is at 0xd4017100, not page-aligned)
+    uint64 uart_page = PGROUNDDOWN(UART0);
+    kvmmap(kpgtbl, uart_page, uart_page, PGSIZE, PTE_R | PTE_W);
 
     // Goldfish RTC (Real Time Clock) - only on QEMU
     if (GOLDFISH_RTC != 0) {
@@ -615,7 +616,7 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa,
             return -1;
         if (*pte & PTE_V)
             panic("mappages: remap, %p", (void *)a);
-        *pte = PA2PTE(pa) | perm | PTE_V;
+        *pte = PA2PTE(pa) | perm | PTE_V | PTE_A | PTE_D;
         if (a == last)
             break;
         a += PGSIZE;
@@ -1402,7 +1403,7 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte) {
         return -1; // Page is already present and writable
     }
 
-    flags |= PTE_V | PTE_W; // Set the flags for writable page
+    flags |= PTE_V | PTE_W | PTE_A | PTE_D; // Set the flags for writable page
     if (vma->flags & VM_FLAG_READ) {
         flags |= PTE_R; // Set the read permission if VM_FLAG_READ is set
     }
@@ -1454,7 +1455,7 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte) {
      * Note: __vma_validate_pte_rxw already sets PTE_V via "flags |= PTE_V |
      * PTE_W", but this function was missing it for read-only/execute pages.
      */
-    flags |= PTE_V;            // Set the valid bit
+    flags |= PTE_V | PTE_A | PTE_D;            // Set the valid bit
     *pte = PA2PTE(pa) | flags; // Update the PTE with the new address and flags
 
     // Flush TLB so faulting hart sees the new private writable mapping (COW

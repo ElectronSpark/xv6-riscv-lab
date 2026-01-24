@@ -64,10 +64,12 @@ endif()
 
 # Compose QEMU options
 # Use xv6.bin flat binary with Linux boot header (unified with Orange Pi)
+# Load fs.img as initrd/ramdisk - appears in FDT for ramdisk driver
 set(QEMUOPTS_PARAM
     ${QEMU_BIOS_OPT}
     -kernel ${CMAKE_BINARY_DIR}/kernel/xv6.bin
-    -m 512M
+    -initrd ${CMAKE_BINARY_DIR}/fs.img
+    -m 1024M
     -smp ${CPUS}
     -nographic
     -global virtio-mmio.force-legacy=false
@@ -92,7 +94,9 @@ set(QEMUOPTS_DTB
 
 # Base dependencies for QEMU targets
 # Use kernel_with_symbols which has embedded symbols
+# kernel_all generates xv6.bin (the flat binary with Linux boot header)
 set(QEMU_BASE_DEPS
+    kernel_all
     kernel_with_symbols
     fs.img
     fs0.img

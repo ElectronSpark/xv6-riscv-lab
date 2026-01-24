@@ -346,17 +346,18 @@ void sbi_start_secondary_harts(unsigned long start_addr) {
  * @brief Output a character via SBI console
  *
  * Used for early boot console output before UART is initialized.
- * Uses legacy SBI console putchar which is widely supported.
+ * Uses DBCN extension if available, otherwise legacy putchar.
  *
  * @param c Character to output
- * @note Cannot use DBCN extension here due to circular dependency with printf
  */
 void sbi_console_putchar(int c) {
-    // Try DBCN extension first (modern SBI)
-    // Note: We can't check sbi_ext_available here because that requires
-    // sbi_probe_extensions() which uses printf, causing a circular dependency.
-    // Use legacy console putchar which is widely supported.
-    sbi_ecall(SBI_EXT_LEGACY_CONSOLE_PUTCHAR, 0, c, 0, 0, 0, 0, 0);
+    if (sbi_ext_available[SBI_EXT_ID_DBCN]) {
+        // Use DBCN write byte - more reliable on some platforms
+        sbi_ecall(SBI_EXT_DBCN, SBI_DBCN_WRITE_BYTE, c, 0, 0, 0, 0, 0);
+    } else {
+        // Use legacy console putchar for early boot
+        sbi_ecall(SBI_EXT_LEGACY_CONSOLE_PUTCHAR, 0, c, 0, 0, 0, 0, 0);
+    }
 }
 
 /**

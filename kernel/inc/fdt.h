@@ -147,6 +147,10 @@ struct platform_info {
     // UART
     uint64 uart_base;
     uint32 uart_irq;
+    uint32 uart_clock;  // Clock frequency in Hz (0 = unknown, use default)
+    uint32 uart_baud;   // Desired baud rate (0 = use default 115200)
+    uint32 uart_reg_shift;  // Register spacing shift (0=1-byte, 2=4-byte)
+    uint32 uart_reg_io_width;  // Register I/O width (1=8-bit, 4=32-bit)
     
     // PLIC
     uint64 plic_base;

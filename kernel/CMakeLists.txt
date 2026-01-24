@@ -16,6 +16,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/pipe.c
     ${KERNEL_DIR}/exec.c
     ${KERNEL_DIR}/virtio_disk.c
+    ${KERNEL_DIR}/ramdisk.c
     ${KERNEL_DIR}/backtrace.c
     ${KERNEL_DIR}/e1000.c
     ${KERNEL_DIR}/net.c
@@ -359,13 +360,15 @@ add_custom_target(kernel_with_symbols
 
 if(NOT PLATFORM STREQUAL "orangepi")
     # QEMU platform: generate xv6.bin directly from QEMU kernel
+    # Note: We depend on both the target AND the ELF file to ensure rebuild
+    # when source changes. The embed script modifies the ELF in-place.
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin
         COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:kernel_with_symbols_elf> xv6.bin
         COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/patch_image_size.py xv6.bin
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         COMMENT "Generating xv6.bin (QEMU platform)"
-        DEPENDS kernel_with_symbols
+        DEPENDS kernel_with_symbols $<TARGET_FILE:kernel_with_symbols_elf>
     )
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6.sym
@@ -482,7 +485,7 @@ add_custom_command(
             $<TARGET_FILE:kernel_orangepi_with_symbols_elf> ${KERNEL_ORANGEPI_SYM_FINAL}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Generating symbols from Orange Pi kernel"
-    DEPENDS kernel_orangepi_with_symbols_elf
+    DEPENDS kernel_orangepi_with_symbols_elf $<TARGET_FILE:kernel_orangepi_with_symbols_elf>
 )
 
 # Embed symbols, then convert to flat binary
@@ -498,11 +501,12 @@ add_custom_command(
             --elf
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     COMMENT "Embedding symbols into Orange Pi kernel"
-    DEPENDS kernel_orangepi_with_symbols_elf ${KERNEL_ORANGEPI_SYM_FINAL}
+    DEPENDS kernel_orangepi_with_symbols_elf $<TARGET_FILE:kernel_orangepi_with_symbols_elf>
+            ${KERNEL_ORANGEPI_SYM_FINAL}
             ${CMAKE_SOURCE_DIR}/scripts/embed_ksymbols.py
 )
 
-# Orange Pi platform: generate xv6.bin directly
+# Orange Pi platform: generate xv6.bin directly (mutually exclusive with QEMU)
 if(PLATFORM STREQUAL "orangepi")
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin
@@ -526,12 +530,13 @@ if(PLATFORM STREQUAL "orangepi")
     )
 endif()
 
-# Legacy target for explicit Orange Pi build (when using PLATFORM=qemu but want orangepi files)
+# Target for explicit Orange Pi build (builds xv6.bin for deploy)
 add_custom_target(orangepi
-    DEPENDS ${KERNEL_ORANGEPI_EMBEDDED}
-    COMMENT "Building Orange Pi kernel (use PLATFORM=orangepi for xv6.bin)"
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin ${CMAKE_CURRENT_BINARY_DIR}/xv6.sym
+    COMMENT "Building Orange Pi kernel"
 )
 
 # Export variables needed by boot/CMakeLists.txt
+# Both QEMU and Orange Pi output to kernel/xv6.bin (mutually exclusive platforms)
 set(KERNEL_BIN xv6.bin PARENT_SCOPE)
 set(KERNEL_SYM_DEPLOY xv6.sym PARENT_SCOPE)

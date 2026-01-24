@@ -1,18 +1,8 @@
 //
-// Console input and output, to the uart.
-// Reads are line at a time.
-// Implements special input characters:
-//   newline -- end of line
-//   control-h -- backspace
-//   control-u -- kill line
-//   control-d -- end of file
-//   control-p -- print process list
-//
-// Early Boot Console:
-//   Before UART is initialized, console output uses SBI (Supervisor Binary
-//   Interface) calls to OpenSBI firmware. This allows printf() to work
-//   immediately after kernel entry, before device drivers are ready.
-//   The uart_initialized flag tracks when UART becomes available.
+// Console input and output to UART. Reads are line-buffered.
+// Special keys: ^H=backspace, ^U=kill line, ^D=EOF, ^P=process list
+// Uses SBI for early boot output before UART init.
+// Converts \n to \r\n for proper terminal display.
 //
 
 #include <stdarg.h>
@@ -59,15 +49,22 @@ consputc(int c)
     if(c == BACKSPACE){
       sbi_console_putchar('\b'); sbi_console_putchar(' '); sbi_console_putchar('\b');
     } else {
+      // Convert \n to \r\n for proper terminal output
+      if(c == '\n')
+        sbi_console_putchar('\r');
       sbi_console_putchar(c);
     }
     return;
   }
   
+  // Use synchronous UART output (safe for interrupt context, like xv6-OrangePi_RV2)
   if(c == BACKSPACE){
     // if the user typed backspace, overwrite with a space.
     uartputc_sync('\b'); uartputc_sync(' '); uartputc_sync('\b');
   } else {
+    // Convert \n to \r\n for proper terminal output
+    if(c == '\n')
+      uartputc_sync('\r');
     uartputc_sync(c);
   }
 }
@@ -85,6 +82,9 @@ consputs(const char *s, int n)
       if(s[i] == BACKSPACE){
         sbi_console_putchar('\b'); sbi_console_putchar(' '); sbi_console_putchar('\b');
       } else {
+        // Convert \n to \r\n for proper terminal output
+        if(s[i] == '\n')
+          sbi_console_putchar('\r');
         sbi_console_putchar(s[i]);
       }
     }
@@ -95,6 +95,9 @@ consputs(const char *s, int n)
     if(s[i] == BACKSPACE){
       uartputc_sync('\b'); uartputc_sync(' '); uartputc_sync('\b');
     } else {
+      // Convert \n to \r\n for proper terminal output
+      if(s[i] == '\n')
+        uartputc_sync('\r');
       uartputc_sync(s[i]);
     }
   }
@@ -132,7 +135,13 @@ consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n)
         return written + i;
     }
     
-    uartputs(kbuf, batch_size);
+    // Output with \n -> \r\n conversion for proper terminal display
+    // Use interrupt-driven uartputc for efficiency
+    for(i = 0; i < batch_size; i++) {
+      if(kbuf[i] == '\n')
+        uartputc('\r');
+      uartputc(kbuf[i]);
+    }
     written += batch_size;
   }
 
@@ -286,20 +295,50 @@ consoleinit(void)
 {
   spin_init(&cons.lock, "cons");
 
-  uartinit();
-  
-  // Mark UART as initialized - switch from SBI to UART output
-  uart_initialized = 1;
+  // Try to initialize UART hardware
+  // Returns 1 if successful (QEMU), 0 if deferred (real hardware uses SBI)
+  if (uartinit()) {
+    // Mark UART as initialized - switch from SBI to UART output
+    uart_initialized = 1;
+  }
+  // If uartinit returned 0, keep uart_initialized = 0 to continue using SBI
+}
+
+// SBI console input polling thread
+// On non-QEMU platforms where UART hardware isn't used, we poll SBI for input
+static void
+sbi_console_poll_thread(uint64 arg1, uint64 arg2)
+{
+  (void)arg1;
+  (void)arg2;
+  for (;;) {
+    // Read all available characters in a batch
+    int got_input = 0;
+    for (int i = 0; i < 32; i++) {  // Read up to 32 chars per cycle
+      int c = sbi_console_getchar();
+      if (c >= 0) {
+        consoleintr(c);
+        got_input = 1;
+      } else {
+        break;  // No more input available
+      }
+    }
+    
+    if (!got_input) {
+      // No input available, sleep briefly to avoid busy-waiting
+      // Use 1ms for responsive interactive typing
+      sleep_ms(1);
+    }
+    // If we got input, immediately check for more without sleeping
+  }
 }
 
 void
 consoledevinit(void)
 {
-  // connect read and write system calls
-  // to consoleread and consolewrite.
   console_cdev.ops = console_cdev_ops;
   int errno = cdev_register(&console_cdev);
-  assert(errno == 0, "consoleinit: cdev_register failed, error code: %d\n", errno);
+  assert(errno == 0, "consoleinit: cdev_register failed: %d\n", errno);
   struct irq_desc uart_irq_desc = {
     .handler = uartintr,
     .data = NULL,
@@ -307,4 +346,12 @@ consoledevinit(void)
   };
   errno = register_irq_handler(PLIC_IRQ(UART0_IRQ), &uart_irq_desc);
   assert(errno == 0, "consoledevinit: register_irq_handler failed, error code: %d\n", errno);
+  
+  // Start SBI polling thread if UART hardware not available
+  if (!uart_initialized) {
+    struct proc *p = NULL;
+    int pid = kernel_proc_create("sbi_console", &p, sbi_console_poll_thread, 0, 0, 0);
+    if (pid >= 0 && p != NULL)
+      wakeup_proc(p);
+  }
 }

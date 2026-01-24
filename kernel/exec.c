@@ -66,7 +66,7 @@ int ustack_alloc(vm_t *vm, uint64 *sp) {
         }
         memset((void *)pa, 0, PGSIZE); // Initialize the page
         *pte = PA2PTE(pa) | PTE_V | PTE_U | PTE_W |
-               PTE_R; // Allocate and map the page
+               PTE_R | PTE_A | PTE_D; // Allocate and map the page
     }
     *sp = ret_sp; // Set the stack pointer
     return 0;     // Success

@@ -17,7 +17,8 @@
 #define NFILE       256  // open files per system
 #define NINODE       50  // maximum number of active i-nodes
 #define NDEV         10  // maximum major device number
-#define ROOTDEV       mkdev(2, 1)  // device number of file system root disk
+#define ROOTDEV       mkdev(2, 1)  // device number of file system root disk (virtio)
+#define RAMDISK_DEV   mkdev(3, 1)  // device number of ramdisk
 #define MAXARG       32  // max exec arguments
 #define MAXOPBLOCKS  80  // max # of blocks any FS op writes
 #define LOGSIZE      (MAXOPBLOCKS*3)  // max data blocks in on-disk log

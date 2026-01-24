@@ -417,6 +417,9 @@ typedef uint64 *pagetable_t; // 512 PTEs
 #define PTE_W (1L << 2)
 #define PTE_X (1L << 3)
 #define PTE_U (1L << 4) // user can access
+#define PTE_G (1L << 5) // global
+#define PTE_A (1L << 6) // accessed
+#define PTE_D (1L << 7) // dirty
 #define PTE_RSW_w (1 << 8)  // can perform cow operation
 
 
@@ -429,7 +432,7 @@ typedef uint64 *pagetable_t; // 512 PTEs
 
 #define PTE2PA(pte) (((pte) >> 10) << 12)
 
-#define PTE_FLAGS(pte) ((pte) & 0x3FF)
+#define PTE_FLAGS(pte) ((pte) & 0x3FF &(~(PTE_A | PTE_D)))
 
 // extract the three 9-bit page table indices from a virtual address.
 #define PXMASK          0x1FFUL // 9 bits

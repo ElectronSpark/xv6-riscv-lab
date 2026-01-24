@@ -20,16 +20,9 @@ uint64 __plic_mmio_base = 0x0c000000L;
 void
 plicinit(void)
 {
-  // set desired IRQ priorities non-zero (otherwise disabled).
-  *PLIC_PRIORITY(UART0_IRQ) = 1;
-  *PLIC_PRIORITY(VIRTIO0_IRQ) = 1;
-  *PLIC_PRIORITY(GOLDFISH_RTC_IRQ) = 1;  // Goldfish RTC
-
-  // PCIE IRQs are 32 to 35
-  for(int irq = 1; irq < 0x35; irq++){
-    // TODO
-    *PLIC_PRIORITY(irq) = 1;
-  }
+  // Core PLIC initialization
+  // Device-specific IRQ priorities are set by each device's init function
+  // using plic_enable_irq()
 }
 
 void
@@ -37,19 +30,10 @@ plicinithart(void)
 {
   int hart = cpuid();
   
-  // set enable bits for this hart's S-mode
-  // for the uart, virtio disk, and Goldfish RTC.
-  PLIC_SET_SENABLE(hart, UART0_IRQ);
-  PLIC_SET_SENABLE(hart, VIRTIO0_IRQ);
-  PLIC_SET_SENABLE(hart, VIRTIO1_IRQ);
-  PLIC_SET_SENABLE(hart, GOLDFISH_RTC_IRQ);
-  // *(uint32*)PLIC_SENABLE(hart) = (1 << UART0_IRQ) | (1 << VIRTIO0_IRQ) | (1 << VIRTIO1_IRQ) | (1 << GOLDFISH_RTC_IRQ);
-
-  // set this hart's S-mode priority threshold to 0.
+  // Set this hart's S-mode priority threshold to 0.
+  // Device-specific IRQ enables are done by each device's init function
+  // using plic_enable_irq()
   *PLIC_SPRIORITY_THRESH(hart) = 0;
-
-  // hack to get at next 32 IRQs for e1000
-  *(PLIC_SENABLE(hart)+4) = 0xffffffff;
 }
 
 // ask the PLIC what interrupt we should serve.
@@ -67,4 +51,14 @@ plic_complete(int irq)
 {
   int hart = cpuid();
   *PLIC_SCLAIM(hart) = irq;
+}
+
+// Enable a specific IRQ on PLIC for all harts
+void
+plic_enable_irq(int irq)
+{
+  *PLIC_PRIORITY(irq) = 1;
+  for (int hart = 0; hart < NCPU; hart++) {
+    PLIC_SET_SENABLE(hart, irq);
+  }
 }
