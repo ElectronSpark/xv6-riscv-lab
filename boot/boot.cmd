@@ -45,7 +45,13 @@ if test -e ${devtype} ${devnum} ${prefix}xv6.scr; then
 	setenv bootmenu_1 "Boot xv6-riscv kernel=source ${load_addr2}"
 fi
 
-setenv bootmenu_2 "U-Boot console=echo Dropping to U-Boot console..."
+if test -e ${devtype} ${devnum} ${prefix}xv6-tftp.scr; then
+	load ${devtype} ${devnum} 0x9030000 ${prefix}xv6-tftp.scr
+	setenv bootmenu_2 "Boot xv6-riscv (TFTP)=source 0x9030000"
+	setenv bootmenu_3 "U-Boot console=echo Dropping to U-Boot console..."
+else
+	setenv bootmenu_2 "U-Boot console=echo Dropping to U-Boot console..."
+fi
 
 # Show boot menu
 bootmenu
