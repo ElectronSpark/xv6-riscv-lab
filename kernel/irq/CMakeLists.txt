@@ -10,7 +10,7 @@ set(INTERRUPTION_S_SRCS
     trampoline.S
 )
 
-add_library(interruption OBJECT
+add_library(irq OBJECT
     ${INTERRUPTION_C_SRCS}
     ${INTERRUPTION_S_SRCS}
 )
@@ -19,7 +19,7 @@ add_library(interruption OBJECT
 set_source_files_properties(${INTERRUPTION_S_SRCS} PROPERTIES LANGUAGE C)
 
 # Ensure asm-offsets.h is generated before building assembly files
-add_dependencies(interruption generate_asm_offsets)
+add_dependencies(irq generate_asm_offsets)
 
 # Add build directory to include path for generated headers
-target_include_directories(interruption PRIVATE ${CMAKE_BINARY_DIR}/kernel/inc)
+target_include_directories(irq PRIVATE ${CMAKE_BINARY_DIR}/kernel/inc)

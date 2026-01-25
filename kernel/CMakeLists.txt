@@ -86,7 +86,7 @@ set(KERNEL_S_FILES ${KERNEL_DIR}/entry.S)
 add_subdirectory(${KERNEL_DIR}/inc)
 
 # Pull in subdirectory object libraries.
-add_subdirectory(${KERNEL_DIR}/interruption)
+add_subdirectory(${KERNEL_DIR}/irq)
 add_subdirectory(${KERNEL_DIR}/dev)
 add_subdirectory(${KERNEL_DIR}/lock)
 add_subdirectory(${KERNEL_DIR}/mm)
@@ -103,7 +103,7 @@ set(KERNEL_OBJS ${KERNEL_S_FILES} ${KERNEL_C_FILES} ${KERNEL_SCAN_OBJS})
 
 # Object libraries to link
 set(KERNEL_OBJ_LIBS
-    $<TARGET_OBJECTS:interruption>
+    $<TARGET_OBJECTS:irq>
     $<TARGET_OBJECTS:dev>
     $<TARGET_OBJECTS:lock>
     $<TARGET_OBJECTS:mm>
@@ -115,7 +115,7 @@ set(KERNEL_OBJ_LIBS
     $<TARGET_OBJECTS:timer>
 )
 
-set(KERNEL_LINK_LIBS interruption dev lock mm proc timer vfs)
+set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding ")
 
