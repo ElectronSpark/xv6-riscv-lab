@@ -7,11 +7,8 @@
 #define CONSOLE_MAJOR  1
 #define CONSOLE_MINOR  1
 
-#ifdef LAB_FS
-#define NPROC        10  // maximum number of processes
-#else
-#define NPROC        64  // maximum number of processes (speedsup bigfile)
-#endif
+#define MAXPID      0x7FFFFFF0  // maximum process ID
+#define NPROC        10000  // maximum number of processes
 #define NCPU          8  // maximum number of CPUs
 #define NOFILE       64  // open files per process
 #define NFILE       256  // open files per system

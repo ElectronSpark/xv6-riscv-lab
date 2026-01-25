@@ -27,6 +27,8 @@ static struct {
         hlist_t procs;
         hlist_bucket_t buckets[NPROC_HASH_BUCKETS];
     };
+    int64 registered_cnt;
+    int64 allocated_cnt;
     list_node_t procs_list; // List of all processes, for dumping
     struct proc *initproc;
     int nextpid;
@@ -105,17 +107,51 @@ static struct proc *__proctab_get_pid_proc_locked(int pid) {
     return p;
 }
 
+// Increment nextpid with wraparound.
+// PID 1 is reserved for init, so valid range is [2, MAXPID).
+// Must be called with proc_table lock held.
+static void __nextpid_inc(void) {
+    proc_table.nextpid++;
+    if (proc_table.nextpid >= MAXPID) {
+        proc_table.nextpid = 2;
+    }
+}
+
 // allocate a new pid.
+// If process creation fails after this, the caller must call __free_pid to release it.
 int __alloc_pid(void) {
     __proctab_lock();
 
-    while (__proctab_get_pid_proc_locked(proc_table.nextpid) != NULL) {
-        proc_table.nextpid++;
+    // Limit the number of allocated PIDs to NPROC
+    if (proc_table.allocated_cnt >= NPROC) {
+        __proctab_unlock();
+        return -1; // No available PIDs
     }
+
+    int start = proc_table.nextpid;
+    
+    // Search for an unused PID, wrapping around if necessary
+    while (__proctab_get_pid_proc_locked(proc_table.nextpid) != NULL) {
+        __nextpid_inc();
+        if (proc_table.nextpid == start) {
+            // We've searched the entire range, no free PID
+            __proctab_unlock();
+            return -1;
+        }
+    }
+
     int pid = proc_table.nextpid;
-    proc_table.nextpid++;
+    __nextpid_inc();
+    proc_table.allocated_cnt++;
     __proctab_unlock();
     return pid;
+}
+
+void __free_pid(int pid) {
+    (void)pid;
+    __proctab_lock();
+    proc_table.allocated_cnt--;
+    __proctab_unlock();
 }
 
 void __proctab_proc_add_locked(struct proc *p) {
@@ -130,6 +166,7 @@ void __proctab_proc_add_locked(struct proc *p) {
     assert(existing == NULL, "Process with pid %d already exists", p->pid);
     // Add to the global list of processes for dumping (RCU-safe).
     list_entry_add_tail_rcu(&proc_table.procs_list, &p->dmp_list_entry);
+    proc_table.registered_cnt++;
 }
 
 // RCU-safe version: get a PCB by pid without holding locks.
@@ -160,6 +197,7 @@ void proctab_proc_remove(struct proc *p) {
     struct proc *existing = hlist_pop_rcu(&proc_table.procs, p);
     // Remove from the global list of processes for dumping (RCU-safe).
     list_entry_del_init_rcu(&p->dmp_list_entry);
+    proc_table.registered_cnt--;
     __proctab_unlock();
     
     assert(existing == NULL || existing == p, "freeproc called with a different proc");

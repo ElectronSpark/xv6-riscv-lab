@@ -179,9 +179,15 @@ STATIC struct proc *allocproc(void *entry, uint64 arg1, uint64 arg2,
         return NULL; // Invalid kernel stack order
     }
 
+    int pid = __alloc_pid();
+    if (pid < 0) {
+        return NULL; // Failed to allocate PID
+    }
+
     // Allocate a kernel stack page.
     kstack = page_alloc(kstack_order, PAGE_TYPE_ANON);
     if (kstack == NULL) {
+        __free_pid(pid); // Release the allocated PID
         return NULL;
     }
     size_t kstack_size = (1UL << (PAGE_SHIFT + kstack_order));
@@ -204,7 +210,7 @@ STATIC struct proc *allocproc(void *entry, uint64 arg1, uint64 arg2,
 
     sched_entity_init(p->sched_entity, p);
 
-    p->pid = __alloc_pid();
+    p->pid = pid;
     proctab_proc_add(p);
     return p;
 }
@@ -359,6 +365,8 @@ STATIC void freeproc(struct proc *p) {
     proctab_proc_remove(p);
 
     proc_unlock(p);
+
+    __free_pid(p->pid); // Mark one PID is freed
 
     // Defer freeing of the kernel stack until after the RCU grace period.
     // This ensures all RCU readers have finished accessing the proc structure.

@@ -13,6 +13,7 @@ void __proctab_set_initproc(struct proc *p);
 struct proc *__proctab_get_initproc(void);
 struct proc *__proctab_get_pid_proc(int pid);
 int __alloc_pid(void);
+void __free_pid(int pid);
 
 /**
  * @brief Get a process by PID using RCU (lock-free)
