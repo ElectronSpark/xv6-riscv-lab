@@ -200,8 +200,7 @@ STATIC_INLINE uint64 __total_pages() {
 }
 
 // To check if a physical address is within the range of the managed address
-#define ADDR_IN_MANAGED(addr)                                                  \
-    ((addr) >= KERNBASE && (addr) < __managed_end)
+#define ADDR_IN_MANAGED(addr) ((addr) >= KERNBASE && (addr) < __managed_end)
 
 // Check if a base address of a page is valid
 // A valid page base address should be aligned to the page size and within
@@ -291,13 +290,15 @@ STATIC_INLINE int __init_range_flags(uint64 pa_start, uint64 pa_end,
     page_t *page;
     if (pa_start >= pa_end) {
         // The start address must be lower than the end address
-        printf("invalid range, pa_start: 0x%lx, pa_end: 0x%lx\n", pa_start, pa_end);
+        printf("invalid range, pa_start: 0x%lx, pa_end: 0x%lx\n", pa_start,
+               pa_end);
         return -1;
     }
     if (!__page_base_validity(pa_start) ||
         !__page_base_validity(pa_end - PAGE_SIZE)) {
         // Both pa_start and pa_end should be valid physical base page addresses
-        printf("invalid range base, pa_start: 0x%lx, pa_end: 0x%lx\n", pa_start, pa_end);
+        printf("invalid range base, pa_start: 0x%lx, pa_end: 0x%lx\n", pa_start,
+               pa_end);
         return -1;
     }
     if (!__page_init_flags_validity(flags)) {
@@ -766,27 +767,120 @@ STATIC int __buddy_put(page_t *page) {
 // SECTION 11: Buddy System Initialization
 // ============================================================================
 
+static void __page_buddy_reserve_range(uint64 pa_start, uint64 pa_end,
+                                       uint64 region_start, uint64 region_end) {
+    uint64 r_start = max(PGROUNDDOWN(region_start), pa_start);
+    // Don't need round up here since we are marking reserved pages
+    uint64 r_end = min(PGROUNDUP(region_end), pa_end);
+    if (r_start >= r_end) {
+        printf("reserved mem out of range: 0x%lx to 0x%lx\n", region_start,
+               region_end);
+        return;
+    }
+    printf("reserving pages from 0x%lx to 0x%lx\n", r_start, r_end);
+    for (uint64 base = r_start; base < r_end; base += PAGE_SIZE) {
+        page_t *page = __pa_to_page(base);
+        assert(page != NULL, "__page_buddy_reserve_range(): get NULL page");
+        page->flags |= PAGE_FLAG_LOCKED;
+    }
+}
+
 // Check if a physical address falls within any reserved region from FDT
-static int __is_reserved_page(uint64 pa) {
+static void __mark_reserved_page(uint64 pa_start, uint64 pa_end) {
     // Check ramdisk region
     if (platform.has_ramdisk && platform.ramdisk_base != 0) {
-        uint64 rd_start = PGROUNDDOWN(platform.ramdisk_base);
-        uint64 rd_end = PGROUNDUP(platform.ramdisk_base + platform.ramdisk_size);
-        if (pa >= rd_start && pa < rd_end) {
-            return 1;
-        }
+        // __page_buddy_reserve_range will do the rounding
+        uint64 rd_start = platform.ramdisk_base;
+        uint64 rd_end = platform.ramdisk_base + platform.ramdisk_size;
+        __page_buddy_reserve_range(pa_start, pa_end, rd_start, rd_end);
     }
-    
+
     // Check reserved memory regions from FDT
     for (int i = 0; i < platform.reserved_count; i++) {
-        uint64 res_start = PGROUNDDOWN(platform.reserved[i].base);
-        uint64 res_end = PGROUNDUP(platform.reserved[i].base + platform.reserved[i].size);
-        if (res_start < res_end && pa >= res_start && pa < res_end) {
-            return 1;
-        }
+        uint64 res_start = platform.reserved[i].base;
+        uint64 res_end = platform.reserved[i].base + platform.reserved[i].size;
+        __page_buddy_reserve_range(pa_start, pa_end, res_start, res_end);
     }
-    
-    return 0;
+}
+
+// Find the next available (non-reserved) page starting from start_pa
+// Will also set the the reserved pages' flags to LOCKED
+static uint64 __page_init_find_next_avail(uint64 start_pa, uint64 end_pa) {
+    uint64 pa = start_pa;
+    while (pa < end_pa) {
+        page_t *page = __pa_to_page(pa);
+        assert(page != NULL, "__page_init_find_next_avail(): get NULL page");
+        if (!(page->flags & PAGE_FLAG_LOCKED)) {
+            break;
+        }
+        pa += PAGE_SIZE;
+    }
+    return pa;
+}
+
+static uint64 __page_init_find_current_end(uint64 start_pa, uint64 end_pa) {
+    uint64 pa = start_pa;
+    while (pa < end_pa) {
+        page_t *page = __pa_to_page(pa);
+        assert(page != NULL, "__page_init_find_current_end(): get NULL page");
+        if (page->flags & PAGE_FLAG_LOCKED) {
+            break;
+        }
+        pa += PAGE_SIZE;
+    }
+    return pa;
+}
+
+static void __page_buddy_init_as_order(uint64 pa_start, int order) {
+    page_t *buddy_head = __pa_to_page(pa_start);
+    assert(buddy_head != NULL,
+           "__page_buddy_init_as_order(): get NULL page");
+    __page_as_buddy_group(buddy_head, order);
+
+    buddy_pool_t *pool = &__buddy_pools[order];
+    __buddy_push_page(pool, buddy_head);
+}
+
+static void __page_buddy_init_range(uint64 pa_start, uint64 pa_end) {
+    if (pa_start >= pa_end) {
+        return;
+    }
+    size_t remain_size = pa_end - pa_start;
+    int order = 0;
+    size_t block_size = PAGE_SIZE << order;
+    uint64 pa = pa_start;
+
+    // Try to initialize smaller heading blocks
+    while (remain_size >= block_size && order < PAGE_BUDDY_MAX_ORDER) {
+        if (pa & block_size) {
+            // Found a small block
+            __page_buddy_init_as_order(pa, order);
+            remain_size -= block_size;
+            pa += block_size;
+        }
+        order++;
+        block_size = PAGE_SIZE << order;
+    }
+
+    // When there's blocks of PAGE_BUDDY_MAX_ORDER, the following condition
+    // will be true.
+    while (remain_size >= block_size) {
+        __page_buddy_init_as_order(pa, order);
+        remain_size -= block_size;
+        pa += block_size;
+    }
+
+    // Now try to initialize smaller tailing blocks
+    while (remain_size > 0 && order >= 0) {
+        if (remain_size >= block_size) {
+            // Found a small block
+            __page_buddy_init_as_order(pa, order);
+            remain_size -= block_size;
+            pa += block_size;
+        }
+        order--;
+        block_size = PAGE_SIZE << order;
+    }
 }
 
 // Init buddy system and add the given range of pages into it
@@ -798,7 +892,8 @@ int page_buddy_init(void) {
     __managed_end = PHYSTOP;
     printf("page_buddy_init(): page array at 0x%lx, size 0x%lx\n",
            (uint64)__pages, page_arr_size);
-    printf("__managed_start: 0x%lx, __managed_end: 0x%lx\n", __managed_start, __managed_end);
+    printf("__managed_start: 0x%lx, __managed_end: 0x%lx\n", __managed_start,
+           __managed_end);
     assert(KERNBASE < __managed_start,
            "page_buddy_init(): KERNBASE: 0x%lx not less than pa_start: 0x%lx",
            KERNBASE, __managed_start);
@@ -814,7 +909,8 @@ int page_buddy_init(void) {
            __managed_start);
     if (__managed_end < PHYSTOP) {
         // Usually the managed_end is equal to PHYSTOP. Just in case
-        assert(__init_range_flags(__managed_end, PHYSTOP, PAGE_FLAG_LOCKED) == 0,
+        assert(__init_range_flags(__managed_end, PHYSTOP, PAGE_FLAG_LOCKED) ==
+                   0,
                "page_buddy_init(): higher locked memory: 0x%lx to 0x%lx",
                __managed_end, PHYSTOP);
     }
@@ -823,24 +919,18 @@ int page_buddy_init(void) {
            __managed_end);
 
     __buddy_pool_init();
+    __mark_reserved_page(__managed_start, __managed_end);
 
-    for (uint64 base = __managed_start; base < __managed_end; base += PAGE_SIZE) {
-        page_t *page = __pa_to_page(base);
-        if (page == NULL) {
-            panic("page_buddy_init(): get NULL page");
-        }
-        
-        // Skip reserved and ramdisk regions - mark them as locked instead
-        if (__is_reserved_page(base)) {
-            page->flags = PAGE_FLAG_LOCKED;
-            continue;
-        }
-        
-        if (__buddy_put(page) != 0) {
-            panic("page_buddy_init(): page put error");
-        }
+    uint64 base = __page_init_find_next_avail(__managed_start, __managed_end);
+    uint64 curr_end = __page_init_find_current_end(base, __managed_end);
+
+    while (base < __managed_end) {
+        __page_buddy_init_range(base, curr_end);
+        printf("buddy init range: 0x%lx - 0x%lx\n", base, curr_end);
+        base = __page_init_find_next_avail(curr_end, __managed_end);
+        curr_end = __page_init_find_current_end(base, __managed_end);
     }
-    
+
 #ifndef HOST_TEST
     print_buddy_system_stat(1);
 #endif
@@ -1148,8 +1238,7 @@ STATIC void __print_size(uint64 bytes) {
 }
 
 static void __buddy_stat_totals(uint64 *total_free_pages,
-                                uint64 *total_cached_pages,
-                                uint64 *ret_arr,
+                                uint64 *total_cached_pages, uint64 *ret_arr,
                                 bool *empty_arr) {
     *total_free_pages = 0;
     *total_cached_pages = 0;
@@ -1182,8 +1271,8 @@ void print_buddy_system_stat(int detailed) {
     uint64 ret_arr[PAGE_BUDDY_MAX_ORDER + 1] = {0};
     bool empty_arr[PAGE_BUDDY_MAX_ORDER + 1] = {false};
 
-    __buddy_stat_totals(&total_free_pages, &total_cached_pages,
-                        ret_arr, empty_arr);
+    __buddy_stat_totals(&total_free_pages, &total_cached_pages, ret_arr,
+                        empty_arr);
 
     if (detailed <= 0) {
         printf("Buddy: %ld free + %ld cached = %ld pages (", total_free_pages,
@@ -1317,12 +1406,13 @@ uint64 sys_memstat(void) {
         }
     }
 
-    __buddy_stat_totals(&total_free_pages, &total_cached_pages,
-                        ret_arr, empty_arr);
+    __buddy_stat_totals(&total_free_pages, &total_cached_pages, ret_arr,
+                        empty_arr);
     free_bytes = (total_free_pages + total_cached_pages) * PAGE_SIZE;
 
     uint64 managed_bytes = __total_pages() * PAGE_SIZE;
-    used_bytes = (managed_bytes > free_bytes) ? (managed_bytes - free_bytes) : 0;
+    used_bytes =
+        (managed_bytes > free_bytes) ? (managed_bytes - free_bytes) : 0;
 
     if ((flags & (MEMSTAT_VERBOSE | MEMSTAT_DETAILED)) != 0) {
         if (flags & MEMSTAT_ADD_FREE) {
