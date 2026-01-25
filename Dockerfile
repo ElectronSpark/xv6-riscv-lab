@@ -11,7 +11,7 @@ RUN apt-get update && \
     autoconf automake autotools-dev curl python3 python3-pip \
     libmpc-dev libmpfr-dev libgmp-dev gawk build-essential bison flex \
     texinfo gperf libtool patchutils bc zlib1g-dev libexpat-dev \
-    ninja-build git cmake libglib2.0-dev \
+    ninja-build git cmake libglib2.0-dev libslirp-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Build RISC-V GNU Toolchain with newlib
@@ -28,11 +28,33 @@ FROM ubuntu:24.04
 # Set noninteractive installation
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Install only the necessary packages to run XV6
+# Install development packages
 RUN apt-get update && \
     apt-get install -y \
-    gdb-multiarch python3 git make cmake \
+    # Build essentials
+    build-essential make cmake ninja-build \
+    # Version control
+    git \
+    # Python and tools
+    python3 python3-pip python3-venv \
+    # QEMU for RISC-V
     qemu-system-misc \
+    # Debugging
+    gdb-multiarch \
+    # U-Boot tools (for mkimage)
+    u-boot-tools \
+    # Deployment tools
+    sshpass openssh-client \
+    # Documentation
+    doxygen graphviz \
+    # Utilities
+    curl wget file \
+    # Editor (optional, lightweight)
+    vim nano \
+    # Terminal utilities
+    tmux htop \
+    # Network utilities
+    netcat-openbsd iputils-ping \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the built RISC-V toolchain from the builder stage
@@ -52,9 +74,14 @@ RUN echo '#!/bin/bash\n\
 echo "xv6 RISC-V Development Environment"\n\
 echo "--------------------------------"\n\
 echo "Available commands:"\n\
-echo "  make          - Build xv6"\n\
-echo "  make qemu     - Run xv6 in QEMU"\n\
-echo "  make clean    - Clean the build"\n\
+echo "  mkdir build && cd build && cmake .. - Configure build"\n\
+echo "  make -j$(nproc)                      - Build xv6"\n\
+echo "  make qemu                            - Run xv6 in QEMU"\n\
+echo "  make clean                           - Clean the build"\n\
+echo ""\n\
+echo "Environment variables:"\n\
+echo "  LAB=$LAB (set with: export LAB=<lab>)"\n\
+echo "  PLATFORM=qemu|orangepi"\n\
 ' > /usr/local/bin/xv6-help && \
 chmod +x /usr/local/bin/xv6-help
 
@@ -66,7 +93,7 @@ RUN useradd -m -s /bin/bash xv6user && \
 RUN chmod +x /usr/local/bin/xv6-help
 
 # Switch to the non-root user
-USER ubuntu
+USER xv6user
 
 # Default command when container starts
 CMD ["/bin/bash", "-c", "echo 'xv6 RISC-V Development Environment. Type xv6-help for info.'; bash"]

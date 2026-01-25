@@ -98,8 +98,6 @@ set(QEMUOPTS_DTB
 set(QEMU_BASE_DEPS
     kernel_all
     kernel_with_symbols
-    fs.img
-    fs0.img
 )
 
 # ==============================================================================

@@ -183,9 +183,9 @@ add_subdirectory(kernel)
 add_subdirectory(user)
 add_subdirectory(boot)
 
-# Add uboot-scripts as dependency of orangepi target if mkimage is available
-if(MKIMAGE_FOUND)
-    add_dependencies(orangepi uboot-scripts)
+# Add uboot-scripts as dependency of kernel_all for Orange Pi platform
+if(MKIMAGE_FOUND AND PLATFORM STREQUAL "orangepi")
+    add_dependencies(kernel_all uboot-scripts)
 endif()
 
 # @TODO:
