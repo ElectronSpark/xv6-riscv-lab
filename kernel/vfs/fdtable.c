@@ -99,7 +99,7 @@ struct vfs_fdtable *vfs_fdtable_clone(struct vfs_fdtable *src, int clone_flags) 
     memset(dest->files, 0, sizeof(dest->files));
 
     // Duplicate file references
-    spin_acquire(&src->lock);
+    spin_lock(&src->lock);
     for (int i = 0; i < NOFILE; i++) {
         struct vfs_file *src_file = src->files[i];
         if (IS_FD(src_file)) {
@@ -110,7 +110,7 @@ struct vfs_fdtable *vfs_fdtable_clone(struct vfs_fdtable *src, int clone_flags) 
             }
         }
     }
-    spin_release(&src->lock);
+    spin_unlock(&src->lock);
     
     // construct free list
     dest->next_fd = -1;

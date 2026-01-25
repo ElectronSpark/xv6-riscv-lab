@@ -157,7 +157,7 @@ void
 uartputc(int c)
 {
   // TX path is lock-protected and can sleep; not IRQ-safe
-  spin_acquire(&uart_tx_lock);
+  spin_lock(&uart_tx_lock);
 
   if(panicked){
     for(;;) {
@@ -171,7 +171,7 @@ uartputc(int c)
   uart_tx_buf[uart_tx_w % UART_TX_BUF_SIZE] = c;
   uart_tx_w += 1;
   uartstart();
-  spin_release(&uart_tx_lock);
+  spin_unlock(&uart_tx_lock);
 }
 
 // batch version of uartputc() - write multiple characters at once.
@@ -181,7 +181,7 @@ void
 uartputs(const char *s, int n)
 {
   // Bulk TX; same locking/sleeping semantics as uartputc
-  spin_acquire(&uart_tx_lock);
+  spin_lock(&uart_tx_lock);
 
   if(panicked){
     for(;;) {
@@ -199,7 +199,7 @@ uartputs(const char *s, int n)
   }
   
   uartstart();
-  spin_release(&uart_tx_lock);
+  spin_unlock(&uart_tx_lock);
 }
 
 // alternate version of uartputc() that doesn't 
@@ -307,7 +307,7 @@ int
 uartgetc(void)
 {
   int c = -1;
-  spin_acquire(&uart_rx_lock);
+  spin_lock(&uart_rx_lock);
   
   // First drain any new data from hardware FIFO
   uartrecv();
@@ -317,7 +317,7 @@ uartgetc(void)
     uart_rx_r += 1;
   }
   
-  spin_release(&uart_rx_lock);
+  spin_unlock(&uart_rx_lock);
   return c;
 }
 
@@ -328,7 +328,7 @@ int
 uartgets(char *buf, int n)
 {
   int i = 0;
-  spin_acquire(&uart_rx_lock);
+  spin_lock(&uart_rx_lock);
   
   // First drain hardware FIFO into software buffer
   uartrecv();
@@ -339,7 +339,7 @@ uartgets(char *buf, int n)
     uart_rx_r += 1;
   }
   
-  spin_release(&uart_rx_lock);
+  spin_unlock(&uart_rx_lock);
   return i;
 }
 
@@ -349,21 +349,21 @@ uartgets(char *buf, int n)
 void uartintr(int irq, void *data, device_t *dev)
 {
   // Drain hardware RX FIFO into software buffer and process
-  spin_acquire(&uart_rx_lock);
+  spin_lock(&uart_rx_lock);
   uartrecv();
   
   // Process all buffered input
   while(uart_rx_r != uart_rx_w){
     int c = uart_rx_buf[uart_rx_r % UART_RX_BUF_SIZE];
     uart_rx_r += 1;
-    spin_release(&uart_rx_lock);
+    spin_unlock(&uart_rx_lock);
     consoleintr(c);
-    spin_acquire(&uart_rx_lock);
+    spin_lock(&uart_rx_lock);
   }
-  spin_release(&uart_rx_lock);
+  spin_unlock(&uart_rx_lock);
 
   // send buffered characters.
-  spin_acquire(&uart_tx_lock);
+  spin_lock(&uart_tx_lock);
   uartstart();
-  spin_release(&uart_tx_lock);
+  spin_unlock(&uart_tx_lock);
 }

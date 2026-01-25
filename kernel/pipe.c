@@ -22,15 +22,15 @@
 void pipeclose(struct pipe *pi, int writable) {
     bool freed = false;
     if (writable) {
-        spin_acquire(&pi->writer_lock);
+        spin_lock(&pi->writer_lock);
         freed = PIPE_CLEAR_WRITABLE(pi);
         proc_queue_wakeup_all(&pi->nread_queue, -1, 0);
-        spin_release(&pi->writer_lock);
+        spin_unlock(&pi->writer_lock);
     } else {
-        spin_acquire(&pi->reader_lock);
+        spin_lock(&pi->reader_lock);
         freed = PIPE_CLEAR_READABLE(pi);
         proc_queue_wakeup_all(&pi->nwrite_queue, -1, 0);
-        spin_release(&pi->reader_lock);
+        spin_unlock(&pi->reader_lock);
     }
     if (freed) {
         kfree((char *)pi);
@@ -41,27 +41,27 @@ void pipeclose(struct pipe *pi, int writable) {
 #define PIPE_WRITABLE_SIZE(nwrite, nread) (PIPESIZE - PIPE_READABLE_SIZE(nwrite, nread))
 
 static int __pipe_wait_writer(struct pipe *pi) {
-    spin_acquire(&pi->writer_lock);
+    spin_lock(&pi->writer_lock);
     if (!PIPE_WRITABLE(pi) || killed(myproc())) {
-        spin_release(&pi->writer_lock);
+        spin_unlock(&pi->writer_lock);
         // Return 0 to let caller re-check and detect EOF properly
         return 0;
     }
     proc_queue_wait(&pi->nread_queue, &pi->writer_lock, NULL);
-    spin_release(&pi->writer_lock);
+    spin_unlock(&pi->writer_lock);
     // Return 0 to re-check conditions (wakeup may be from close or data)
     return 0;
 }
 
 static int __pipe_wait_reader(struct pipe *pi) {
-    spin_acquire(&pi->reader_lock);
+    spin_lock(&pi->reader_lock);
     if (!PIPE_READABLE(pi) || killed(myproc())) {
-        spin_release(&pi->reader_lock);
+        spin_unlock(&pi->reader_lock);
         // Return 0 to let caller re-check and detect broken pipe properly
         return 0;
     }
     proc_queue_wait(&pi->nwrite_queue, &pi->reader_lock, NULL);
-    spin_release(&pi->reader_lock);
+    spin_unlock(&pi->reader_lock);
     // Return 0 to re-check conditions (wakeup may be from close or space available)
     return 0;
 }
@@ -85,24 +85,24 @@ int pipewrite(struct pipe *pi, uint64 addr, int n) {
             }
         }
         i += buf_len;
-        spin_acquire(&pi->writer_lock);
+        spin_lock(&pi->writer_lock);
         while (buf_len > buf_pos) {
             uint nread = smp_load_acquire(&pi->nread);
             if (!PIPE_READABLE(pi) || killed(pr)) {
-                spin_release(&pi->writer_lock);
+                spin_unlock(&pi->writer_lock);
                 return -1;
             }
             uint nwrite_old = pi->nwrite;
             size_t writable = PIPE_WRITABLE_SIZE(nwrite_old, nread);
             if (writable == 0) {
                 proc_queue_wakeup_all(&pi->nread_queue, 0, 0);
-                spin_release(&pi->writer_lock);
+                spin_unlock(&pi->writer_lock);
 
                 ret = __pipe_wait_reader(pi);   // need to acquire reader_lock to wait for reader
                 if (ret < 0) {
                     goto out;
                 }
-                spin_acquire(&pi->writer_lock);
+                spin_lock(&pi->writer_lock);
             } else {
                 size_t write_size = min(buf_len - buf_pos, writable);
                 uint nwrite = nwrite_old + write_size;
@@ -123,14 +123,14 @@ int pipewrite(struct pipe *pi, uint64 addr, int n) {
                 buf_pos += write_size;
             }
         }
-        spin_release(&pi->writer_lock);
+        spin_unlock(&pi->writer_lock);
         buf_pos = 0;
         buf_len = 0;
     }
 out:
-    spin_acquire(&pi->writer_lock);
+    spin_lock(&pi->writer_lock);
     proc_queue_wakeup_all(&pi->nread_queue, 0, 0);
-    spin_release(&pi->writer_lock);
+    spin_unlock(&pi->writer_lock);
     return i - (buf_len - buf_pos);
 }
 
@@ -143,7 +143,7 @@ int piperead(struct pipe *pi, uint64 addr, int n) {
     size_t buf_len = 0;
 
     while (i < n) {
-        spin_acquire(&pi->reader_lock);
+        spin_lock(&pi->reader_lock);
         while (buf_len == 0) {
             uint nwrite = smp_load_acquire(&pi->nwrite);
             uint nread_old = pi->nread;
@@ -153,22 +153,22 @@ int piperead(struct pipe *pi, uint64 addr, int n) {
                 // Pipe is empty - check if we should wait or return EOF
                 if (!PIPE_WRITABLE(pi)) {
                     // Writer closed and no data left - EOF
-                    spin_release(&pi->reader_lock);
+                    spin_unlock(&pi->reader_lock);
                     goto out;
                 }
                 if (killed(pr)) {
-                    spin_release(&pi->reader_lock);
+                    spin_unlock(&pi->reader_lock);
                     return -1;
                 }
                 // Pipe empty but writer still open - wait for data
                 proc_queue_wakeup_all(&pi->nwrite_queue, 0, 0);
-                spin_release(&pi->reader_lock);
+                spin_unlock(&pi->reader_lock);
 
                 ret = __pipe_wait_writer(pi);
                 if (ret < 0) {
                     goto out;
                 }
-                spin_acquire(&pi->reader_lock);
+                spin_lock(&pi->reader_lock);
             } else {
                 // Data available - read it (even if writer closed)
                 size_t read_size = min(min((size_t)(n - i), readable), sizeof(buf));
@@ -189,7 +189,7 @@ int piperead(struct pipe *pi, uint64 addr, int n) {
                 buf_len = read_size;
             }
         }
-        spin_release(&pi->reader_lock);
+        spin_unlock(&pi->reader_lock);
 
         // Copy to user space outside the lock
         size_t copy_size = min(buf_len - buf_pos, (size_t)(n - i));
@@ -204,9 +204,9 @@ int piperead(struct pipe *pi, uint64 addr, int n) {
         }
     }
 out:
-    spin_acquire(&pi->reader_lock);
+    spin_lock(&pi->reader_lock);
     proc_queue_wakeup_all(&pi->nwrite_queue, 0, 0);
-    spin_release(&pi->reader_lock);
+    spin_unlock(&pi->reader_lock);
     return i;
 }
 
@@ -217,7 +217,7 @@ int piperead_kernel(struct pipe *pi, char *buf, int n) {
     struct proc *pr = myproc();
 
     while (i < n) {
-        spin_acquire(&pi->reader_lock);
+        spin_lock(&pi->reader_lock);
         uint nwrite = smp_load_acquire(&pi->nwrite);
         uint nread_old = pi->nread;
         size_t readable = PIPE_READABLE_SIZE(nwrite, nread_old);
@@ -226,16 +226,16 @@ int piperead_kernel(struct pipe *pi, char *buf, int n) {
             // Pipe is empty - check if we should wait or return EOF
             if (!PIPE_WRITABLE(pi)) {
                 // Writer closed and no data left - EOF
-                spin_release(&pi->reader_lock);
+                spin_unlock(&pi->reader_lock);
                 goto out;
             }
             if (killed(pr)) {
-                spin_release(&pi->reader_lock);
+                spin_unlock(&pi->reader_lock);
                 return -1;
             }
             // Pipe empty but writer still open - wait for data
             proc_queue_wakeup_all(&pi->nwrite_queue, 0, 0);
-            spin_release(&pi->reader_lock);
+            spin_unlock(&pi->reader_lock);
 
             ret = __pipe_wait_writer(pi);
             if (ret < 0) {
@@ -259,13 +259,13 @@ int piperead_kernel(struct pipe *pi, char *buf, int n) {
 
             smp_store_release(&pi->nread, nread);
             i += read_size;
-            spin_release(&pi->reader_lock);
+            spin_unlock(&pi->reader_lock);
         }
     }
 out:
-    spin_acquire(&pi->reader_lock);
+    spin_lock(&pi->reader_lock);
     proc_queue_wakeup_all(&pi->nwrite_queue, 0, 0);
-    spin_release(&pi->reader_lock);
+    spin_unlock(&pi->reader_lock);
     return i;
 }
 
@@ -276,17 +276,17 @@ int pipewrite_kernel(struct pipe *pi, const char *buf, int n) {
     struct proc *pr = myproc();
 
     while (i < n) {
-        spin_acquire(&pi->writer_lock);
+        spin_lock(&pi->writer_lock);
         uint nread = smp_load_acquire(&pi->nread);
         if (!PIPE_READABLE(pi) || killed(pr)) {
-            spin_release(&pi->writer_lock);
+            spin_unlock(&pi->writer_lock);
             return -1;
         }
         uint nwrite_old = pi->nwrite;
         size_t writable = PIPE_WRITABLE_SIZE(nwrite_old, nread);
         if (writable == 0) {
             proc_queue_wakeup_all(&pi->nread_queue, 0, 0);
-            spin_release(&pi->writer_lock);
+            spin_unlock(&pi->writer_lock);
 
             ret = __pipe_wait_reader(pi);
             if (ret < 0) {
@@ -309,12 +309,12 @@ int pipewrite_kernel(struct pipe *pi, const char *buf, int n) {
 
             smp_store_release(&pi->nwrite, nwrite);
             i += write_size;
-            spin_release(&pi->writer_lock);
+            spin_unlock(&pi->writer_lock);
         }
     }
 out:
-    spin_acquire(&pi->writer_lock);
+    spin_lock(&pi->writer_lock);
     proc_queue_wakeup_all(&pi->nread_queue, 0, 0);
-    spin_release(&pi->writer_lock);
+    spin_unlock(&pi->writer_lock);
     return i;
 }

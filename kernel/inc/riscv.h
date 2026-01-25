@@ -332,6 +332,22 @@ intr_get()
   return (x & SSTATUS_SIE) != 0;
 }
 
+static inline int
+intr_off_save()
+{
+  uint64 x = r_sstatus();
+  int enabled = (x & SSTATUS_SIE) != 0;
+  intr_off();
+  return enabled;
+}
+
+static inline void
+intr_restore(int enabled)
+{
+  if (enabled)
+    intr_on();
+}
+
 static inline uint64
 r_sp()
 {

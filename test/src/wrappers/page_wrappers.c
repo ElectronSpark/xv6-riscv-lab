@@ -8,7 +8,7 @@
  * - Reference counting (page_ref_inc, page_ref_dec, page_refcnt)
  * - Page locking (page_lock_acquire, page_lock_release)
  * - Page initialization (__page_init)
- * - Spinlock operations (spin_acquire, spin_release, etc.)
+ * - Spinlock operations (spin_lock, spin_unlock, etc.)
  * - CPU and memory management utilities (cpuid, kmm_alloc, kmm_free)
  * - Mock page creation utilities for tests (ut_make_mock_page, ut_destroy_mock_page)
  */
@@ -66,7 +66,7 @@ void __wrap_page_lock_release(page_t *page)
     page->lock.locked = 0;
 }
 
-void __wrap_page_lock_spin_release(page_t *page)
+void __wrap_page_lock_spin_unlock(page_t *page)
 {
     (void)page;
 }

@@ -137,7 +137,7 @@ void xv6fs_initlog(struct xv6fs_superblock *xv6_sb) {
 void xv6fs_begin_op(struct xv6fs_superblock *xv6_sb) {
     struct xv6fs_log *log = &xv6_sb->log;
     
-    spin_acquire(&log->lock);
+    spin_lock(&log->lock);
     while (1) {
         if (log->committing) {
             sleep_on_chan(log, &log->lock);
@@ -146,7 +146,7 @@ void xv6fs_begin_op(struct xv6fs_superblock *xv6_sb) {
             sleep_on_chan(log, &log->lock);
         } else {
             log->outstanding += 1;
-            spin_release(&log->lock);
+            spin_unlock(&log->lock);
             break;
         }
     }
@@ -158,7 +158,7 @@ void xv6fs_end_op(struct xv6fs_superblock *xv6_sb) {
     struct xv6fs_log *log = &xv6_sb->log;
     int do_commit = 0;
     
-    spin_acquire(&log->lock);
+    spin_lock(&log->lock);
     log->outstanding -= 1;
     if (log->committing)
         panic("xv6fs: log.committing");
@@ -169,14 +169,14 @@ void xv6fs_end_op(struct xv6fs_superblock *xv6_sb) {
         // begin_op() may be waiting for log space
         wakeup_on_chan(log);
     }
-    spin_release(&log->lock);
+    spin_unlock(&log->lock);
     
     if (do_commit) {
         __xv6fs_commit(log);
-        spin_acquire(&log->lock);
+        spin_lock(&log->lock);
         log->committing = 0;
         wakeup_on_chan(log);
-        spin_release(&log->lock);
+        spin_unlock(&log->lock);
     }
 }
 
@@ -186,7 +186,7 @@ void xv6fs_log_write(struct xv6fs_superblock *xv6_sb, struct buf *b) {
     struct xv6fs_log *log = &xv6_sb->log;
     int i;
     
-    spin_acquire(&log->lock);
+    spin_lock(&log->lock);
     if (log->lh.n >= XV6FS_LOGSIZE || log->lh.n >= log->size - 1)
         panic("xv6fs: too big a transaction");
     if (log->outstanding < 1)
@@ -201,5 +201,5 @@ void xv6fs_log_write(struct xv6fs_superblock *xv6_sb, struct buf *b) {
         bpin(b);
         log->lh.n++;
     }
-    spin_release(&log->lock);
+    spin_unlock(&log->lock);
 }

@@ -606,9 +606,9 @@ static void test_list_rcu_basic(void) {
         node->value = i * 100;
         list_entry_init(&node->list_entry);
 
-        spin_acquire(&rcu_test_list_lock);
+        spin_lock(&rcu_test_list_lock);
         list_entry_add_tail_rcu(&rcu_test_list_head, &node->list_entry);
-        spin_release(&rcu_test_list_lock);
+        spin_unlock(&rcu_test_list_lock);
     }
 
     // Verify all nodes are readable
@@ -624,14 +624,14 @@ static void test_list_rcu_basic(void) {
     assert(count == 10, "Should have 10 nodes in list");
 
     // Delete all nodes with RCU
-    spin_acquire(&rcu_test_list_lock);
+    spin_lock(&rcu_test_list_lock);
     list_node_t *safe;
     list_for_each_entry_safe(&rcu_test_list_head, pos, safe) {
         list_test_node_t *node = container_of(pos, list_test_node_t, list_entry);
         list_entry_del_rcu(&node->list_entry);
         call_rcu(&node->rcu_head, list_node_free_callback, node);
     }
-    spin_release(&rcu_test_list_lock);
+    spin_unlock(&rcu_test_list_lock);
 
     // Wait for callbacks - need multiple cycles to ensure all are processed
     // With two-list design: pending -> (GP completes) -> ready -> invoked
@@ -719,23 +719,23 @@ static void test_list_rcu_concurrent_rw(void) {
             node->value = node->id * 100;
             list_entry_init(&node->list_entry);
 
-            spin_acquire(&rcu_test_list_lock);
+            spin_lock(&rcu_test_list_lock);
             list_entry_add_tail_rcu(&rcu_test_list_head, &node->list_entry);
-            spin_release(&rcu_test_list_lock);
+            spin_unlock(&rcu_test_list_lock);
         }
 
         yield();
 
         // Remove 3 nodes from head
         for (int i = 0; i < 3; i++) {
-            spin_acquire(&rcu_test_list_lock);
+            spin_lock(&rcu_test_list_lock);
             if (!LIST_IS_EMPTY(&rcu_test_list_head)) {
                 list_node_t *first = rcu_test_list_head.next;
                 list_test_node_t *node = container_of(first, list_test_node_t, list_entry);
                 list_entry_del_rcu(&node->list_entry);
                 call_rcu(&node->rcu_head, list_node_free_callback, node);
             }
-            spin_release(&rcu_test_list_lock);
+            spin_unlock(&rcu_test_list_lock);
         }
 
         yield();
@@ -747,14 +747,14 @@ static void test_list_rcu_concurrent_rw(void) {
     }
 
     // Cleanup remaining nodes
-    spin_acquire(&rcu_test_list_lock);
+    spin_lock(&rcu_test_list_lock);
     list_node_t *pos, *safe;
     list_for_each_entry_safe(&rcu_test_list_head, pos, safe) {
         list_test_node_t *node = container_of(pos, list_test_node_t, list_entry);
         list_entry_del_rcu(&node->list_entry);
         call_rcu(&node->rcu_head, list_node_free_callback, node);
     }
-    spin_release(&rcu_test_list_lock);
+    spin_unlock(&rcu_test_list_lock);
 
     synchronize_rcu();
     rcu_process_callbacks();
@@ -920,13 +920,13 @@ static void test_stress_list_rcu(void) {
             node->value = node->id * 10;
             list_entry_init(&node->list_entry);
 
-            spin_acquire(&rcu_test_list_lock);
+            spin_lock(&rcu_test_list_lock);
             list_entry_add_tail_rcu(&rcu_test_list_head, &node->list_entry);
-            spin_release(&rcu_test_list_lock);
+            spin_unlock(&rcu_test_list_lock);
             total_added++;
         } else {
             // Remove a node from head
-            spin_acquire(&rcu_test_list_lock);
+            spin_lock(&rcu_test_list_lock);
             if (!LIST_IS_EMPTY(&rcu_test_list_head)) {
                 list_node_t *first = rcu_test_list_head.next;
                 list_test_node_t *node = container_of(first, list_test_node_t, list_entry);
@@ -934,7 +934,7 @@ static void test_stress_list_rcu(void) {
                 call_rcu(&node->rcu_head, stress_node_free_callback, node);
                 total_removed++;
             }
-            spin_release(&rcu_test_list_lock);
+            spin_unlock(&rcu_test_list_lock);
         }
 
         // Process callbacks frequently to prevent memory exhaustion
@@ -962,7 +962,7 @@ static void test_stress_list_rcu(void) {
     printf("\n");
 
     // Cleanup remaining nodes
-    spin_acquire(&rcu_test_list_lock);
+    spin_lock(&rcu_test_list_lock);
     list_node_t *pos, *safe;
     int remaining = 0;
     list_for_each_entry_safe(&rcu_test_list_head, pos, safe) {
@@ -971,7 +971,7 @@ static void test_stress_list_rcu(void) {
         call_rcu(&node->rcu_head, stress_node_free_callback, node);
         remaining++;
     }
-    spin_release(&rcu_test_list_lock);
+    spin_unlock(&rcu_test_list_lock);
 
     printf("  Cleaning up %d remaining nodes\n", remaining);
 
@@ -1079,19 +1079,19 @@ static void test_stress_mixed_workload(void) {
             node->value = node->id * 10;
             list_entry_init(&node->list_entry);
 
-            spin_acquire(&rcu_test_list_lock);
+            spin_lock(&rcu_test_list_lock);
             list_entry_add_tail_rcu(&rcu_test_list_head, &node->list_entry);
-            spin_release(&rcu_test_list_lock);
+            spin_unlock(&rcu_test_list_lock);
         } else {
             // Remove
-            spin_acquire(&rcu_test_list_lock);
+            spin_lock(&rcu_test_list_lock);
             if (!LIST_IS_EMPTY(&rcu_test_list_head)) {
                 list_node_t *first = rcu_test_list_head.next;
                 list_test_node_t *node = container_of(first, list_test_node_t, list_entry);
                 list_entry_del_rcu(&node->list_entry);
                 call_rcu(&node->rcu_head, stress_node_free_callback, node);
             }
-            spin_release(&rcu_test_list_lock);
+            spin_unlock(&rcu_test_list_lock);
         }
 
         __atomic_fetch_add(&mixed_ops_completed, 1, __ATOMIC_RELEASE);
@@ -1112,14 +1112,14 @@ static void test_stress_mixed_workload(void) {
     printf("  Total operations completed: %d (target: 10,000)\n", total_ops);
 
     // Cleanup
-    spin_acquire(&rcu_test_list_lock);
+    spin_lock(&rcu_test_list_lock);
     list_node_t *pos, *safe;
     list_for_each_entry_safe(&rcu_test_list_head, pos, safe) {
         list_test_node_t *node = container_of(pos, list_test_node_t, list_entry);
         list_entry_del_rcu(&node->list_entry);
         call_rcu(&node->rcu_head, stress_node_free_callback, node);
     }
-    spin_release(&rcu_test_list_lock);
+    spin_unlock(&rcu_test_list_lock);
 
     for (int i = 0; i < 10; i++) {
         synchronize_rcu();

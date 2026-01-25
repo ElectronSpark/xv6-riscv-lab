@@ -112,11 +112,20 @@ typedef void (*sw_noret_cb_t)(uint64, uint64);
 void __switch_noreturn(uint64 irq_sp, uint64 s0, sw_noret_cb_t addr);
 
 // spinlock.c
-void            spin_acquire(struct spinlock*);
-int             spin_holding(struct spinlock*);
+// Initialize a spinlock.
 void            spin_init(struct spinlock*, char*);
+// Check if the current CPU is holding the lock.
+int             spin_holding(struct spinlock*);
+// Basic spin lock functions. Will NOT modify preempt counter or disable interrupts.
+void            spin_acquire(struct spinlock*);
 void            spin_release(struct spinlock*);
+// Default spin lock functions. Will modify preempt counter.
+void            spin_lock(struct spinlock*);
+void            spin_unlock(struct spinlock*);
 int             spin_trylock(struct spinlock*);
+// Functions to save/restore interrupt state with spinlock.
+int             spin_lock_irqsave(struct spinlock*);
+void            spin_unlock_irqrestore(struct spinlock*, int);
 
 // sleeplock.c
 int mutex_lock(mutex_t *);

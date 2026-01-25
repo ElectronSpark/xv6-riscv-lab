@@ -37,11 +37,19 @@ int chan_holding(void) {
 }
 
 void sleep_lock(void) {
-    spin_acquire(&__sleep_lock);
+    spin_lock(&__sleep_lock);
 }
 
 void sleep_unlock(void) {
-    spin_release(&__sleep_lock);
+    spin_unlock(&__sleep_lock);
+}
+
+int sleep_lock_irqsave(void) {
+    return spin_lock_irqsave(&__sleep_lock);
+}
+
+void sleep_unlock_irqrestore(int state) {
+    spin_unlock_irqrestore(&__sleep_lock, state);
 }
 
 /* Scheduler lock functions */
@@ -65,14 +73,6 @@ static inline void __sched_assert_holding(void) {
 
 static inline void __sched_assert_unholding(void) {
     assert(!rq_holding_current(), "rq_lock must not be held");
-}
-
-void sched_lock(void) {
-    rq_lock_current();
-}
-
-void sched_unlock(void) {
-    rq_unlock_current();
 }
 
 /* Scheduler functions */
@@ -139,6 +139,8 @@ static struct proc *__switch_to(struct proc *p) {
     if (chan_holding()) {
         spin_depth_expected++;
     }
+    assert(mycpu()->noff == 0, 
+           "Process must not hold any other locks when yielding. Current noff: %d", mycpu()->noff);
     assert(mycpu()->spin_depth == spin_depth_expected, 
            "Process must hold and only hold the rq_lock when yielding. Current spin_depth: %d", mycpu()->spin_depth);
 
@@ -157,18 +159,16 @@ static struct proc *__switch_to(struct proc *p) {
 // Yield the CPU to allow other processes to run.
 // lk will not be re-acquired after yielding.
 void scheduler_yield(void) {
-    push_off();
+    // Wake up processes with expired timers.
+    // It may add processes to the run queue, so do it before acquiring rq_lock.
+    __do_timer_tick();
+
+    int intr = rq_lock_current_irqsave();
     struct proc *proc = myproc();
     struct proc *prev = NULL;
 
     assert(!CPU_IN_ITR(), "Cannot yield CPU in interrupt context");
 
-    // Wake up processes with expired timers.
-    __do_timer_tick();
-    
-    // Acquire the rq_lock for the entire yield process
-    rq_lock_current();
-    
     // Check if we should abort a pending sleep.
     // If state was changed back to RUNNING (e.g., by an interrupt waking us),
     // and we're not the idle process, we should abort and stay on CPU.
@@ -184,8 +184,7 @@ void scheduler_yield(void) {
     if (cur_state == PSTATE_RUNNING && proc != mycpu()->idle_proc) {
         if (p == NULL || p == mycpu()->idle_proc) {
             // No other runnable process, just continue running
-            rq_unlock_current();
-            pop_off();
+            rq_unlock_current_irqrestore(intr);
             return;
         }
         // There is another process, but we were woken up too.
@@ -195,8 +194,7 @@ void scheduler_yield(void) {
     if (!p) {
         if (proc == mycpu()->idle_proc) {
             // Already in idle process, just return
-            rq_unlock_current();
-            pop_off();
+            rq_unlock_current_irqrestore(intr);
             return;
         }
         p = mycpu()->idle_proc;
@@ -206,17 +204,15 @@ void scheduler_yield(void) {
     // prepare to switch
     context_switch_prepare(proc, p);
     
-    
     prev = __switch_to(p);
     
-    
-    context_switch_finish(prev, myproc());
-    pop_off();
+    context_switch_finish(prev, myproc(), intr);
 }
 
 // Change the process state to SLEEPING and yield CPU
 // This function will lock both the process and scheduler locks.
 void scheduler_sleep(struct spinlock *lk, enum procstate sleep_state) {
+    int intr = intr_off_save();
     struct proc *proc = myproc();
     assert(proc != NULL, "PCB is NULL");
     __proc_set_pstate(myproc(), sleep_state);
@@ -224,13 +220,14 @@ void scheduler_sleep(struct spinlock *lk, enum procstate sleep_state) {
     int lk_holding = (lk != NULL && spin_holding(lk));
     
     if (lk_holding) {
-        spin_release(lk); // Release the lock returned by __swtch_context
+        spin_unlock(lk); // Release the lock returned by __swtch_context
     }
     scheduler_yield(); // Switch to the scheduler
     
     if (lk_holding) {
-        spin_acquire(lk);
+        spin_lock(lk);
     }
+    intr_restore(intr);
 }
 
 // Put the current process to sleep in interruptible state,
@@ -419,7 +416,7 @@ void scheduler_wakeup_interruptible(struct proc *p) {
 }
 
 void sleep_on_chan(void *chan, struct spinlock *lk) {
-    sleep_lock();
+    int intr = sleep_lock_irqsave();
     assert(myproc() != NULL, "PCB is NULL");
     assert(chan != NULL, "Cannot sleep on a NULL channel");
 
@@ -429,22 +426,24 @@ void sleep_on_chan(void *chan, struct spinlock *lk) {
     // Release caller's lock if held (we'll reacquire after waking)
     int lk_holding = (lk != NULL && spin_holding(lk));
     if (lk_holding) {
-        spin_release(lk);
+        spin_unlock(lk);
     }
     
     // proc_tree_wait will release sleep_lock via scheduler_sleep,
     // keeping the tree protected during add operation.
     // After waking, scheduler_sleep will reacquire sleep_lock.
-    int ret = proc_tree_wait(&__chan_queue_root, (uint64)chan, &__sleep_lock, NULL);
+    int ret = proc_tree_wait(&__chan_queue_root, (uint64)chan, NULL, NULL);
     
-    // sleep_lock is already held here (reacquired by scheduler_sleep)
+    // Re-acqiore sleep lock.
+    // Discard saved interrupt state because it was saved before sleeping.
+    sleep_lock_irqsave();
     PROC_CLEAR_ONCHAN(myproc());
     myproc()->chan = NULL;
-    sleep_unlock();
+    sleep_unlock_irqrestore(intr);
     
     // Reacquire caller's lock if it was held
     if (lk_holding) {
-        spin_acquire(lk);
+        spin_lock(lk);
     }
     // @TODO: process return value
     (void)ret;
@@ -479,27 +478,27 @@ void wakeup_proc(struct proc *p)
     if (p == NULL) {
         return;
     }
-    spin_acquire(&p->sched_entity->pi_lock);
+    spin_lock(&p->sched_entity->pi_lock);
     scheduler_wakeup(p);
-    spin_release(&p->sched_entity->pi_lock);
+    spin_unlock(&p->sched_entity->pi_lock);
 }
 
 void wakeup_timeout(struct proc *p) {
     if (p == NULL) {
         return;
     }
-    spin_acquire(&p->sched_entity->pi_lock);
+    spin_lock(&p->sched_entity->pi_lock);
     scheduler_wakeup_timeout(p);
-    spin_release(&p->sched_entity->pi_lock);
+    spin_unlock(&p->sched_entity->pi_lock);
 }
 
 void wakeup_killable(struct proc *p) {
     if (p == NULL) {
         return;
     }
-    spin_acquire(&p->sched_entity->pi_lock);
+    spin_lock(&p->sched_entity->pi_lock);
     scheduler_wakeup_killable(p);
-    spin_release(&p->sched_entity->pi_lock);
+    spin_unlock(&p->sched_entity->pi_lock);
 }
 
 // Wake up a process sleeping in interruptible state
@@ -508,9 +507,9 @@ void wakeup_interruptible(struct proc *p)
     if (p == NULL) {
         return;
     }
-    spin_acquire(&p->sched_entity->pi_lock);
+    spin_lock(&p->sched_entity->pi_lock);
     scheduler_wakeup_interruptible(p);
-    spin_release(&p->sched_entity->pi_lock);
+    spin_unlock(&p->sched_entity->pi_lock);
 }
 
 uint64 sys_dumpchan(void) {
@@ -550,7 +549,7 @@ void context_switch_prepare(struct proc *prev, struct proc *next) {
 
 // Finish context switch - clean up prev task and release rq_lock.
 // This function releases the current CPU's rq_lock.
-void context_switch_finish(struct proc *prev, struct proc *next) {
+void context_switch_finish(struct proc *prev, struct proc *next, int intr) {
     assert(prev != NULL, "Previous process is NULL");
     assert(next != NULL, "Next process is NULL");
 
@@ -579,13 +578,15 @@ void context_switch_finish(struct proc *prev, struct proc *next) {
         }
         // If zombie, rq_task_dead was already called before entering zombie state
     }
-    rq_unlock_current();
+    rq_unlock_current_irqrestore(intr);
     
     // Now safe to mark as not on CPU - wakeup path can proceed
     smp_store_release(&prev->sched_entity->on_cpu, 0);
     
     if (chan_holding()) {
-        sleep_unlock();
+        // Basically ignored the saved state here, because the peocess
+        // went to sleep will record its own interrupt state and restore it.
+        sleep_unlock_irqrestore(intr);
     }
 
     if (pstate == PSTATE_ZOMBIE && pparent != NULL && pparent != next) {

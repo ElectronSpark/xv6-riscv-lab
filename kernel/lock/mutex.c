@@ -57,12 +57,12 @@ mutex_lock(mutex_t *lk)
   }
 
   // Slow path
-  spin_acquire(&lk->lk);
+  spin_lock(&lk->lk);
   if (__mutex_try_set_holder(lk, self->pid)) {
     // It's possible that someone releases the mutex just right before the current process
     // tried to acquire the mutex without holding spinlock. In that case, we just need to
     // claim the mutex and return.
-    spin_release(&lk->lk);
+    spin_unlock(&lk->lk);
     return 0;
   }
 
@@ -84,11 +84,11 @@ mutex_lock(mutex_t *lk)
           __mutex_set_holder(lk, 0);
         }
       }
-      spin_release(&lk->lk);
+      spin_unlock(&lk->lk);
       return ret;
     }
   }
-  spin_release(&lk->lk);
+  spin_unlock(&lk->lk);
 
   return 0;
 }
@@ -101,13 +101,13 @@ mutex_unlock(mutex_t *lk)
   // so that we can detach them from the wait queue, and then wake them up.
   // This is to avoid deadlocks, as we cannot hold the lock while waking up processes
   // from the wait queue.
-  spin_acquire(&lk->lk);
+  spin_lock(&lk->lk);
   struct proc *self = myproc();
   pid_t self_pid = (self != NULL) ? self->pid : 0;
   assert(__mutex_holder(lk) == self_pid, "mutex_unlock: process does not hold the lock");
   int ret = __do_wakeup(lk);
   assert(ret == 0 || ret == -ENOENT, "mutex_unlock: failed to wake up processes");
-  spin_release(&lk->lk);
+  spin_unlock(&lk->lk);
 }
 
 int

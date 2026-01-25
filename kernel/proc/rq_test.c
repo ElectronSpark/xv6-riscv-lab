@@ -456,13 +456,13 @@ static int priority_test_proc_entry(uint64 my_index, uint64 unused) {
     (void)unused;
     
     // Record our activation order
-    spin_acquire(&priority_test_lock);
+    spin_lock(&priority_test_lock);
     int my_order = activation_index++;
     activation_order[my_index] = my_order;
     processes_done++;
     
     int all_done = (processes_done == PRIORITY_TEST_COUNT);
-    spin_release(&priority_test_lock);
+    spin_unlock(&priority_test_lock);
     
     // When all processes are done, wake up the main thread
     if (all_done) {
@@ -540,12 +540,12 @@ static void test_priority_ordered_activation(void) {
     // =========================================================================
     printf("  Phase 4: Waiting for all processes to complete\n");
     
-    spin_acquire(&priority_test_lock);
+    spin_lock(&priority_test_lock);
     while (processes_done < PRIORITY_TEST_COUNT) {
         // Wait on the queue - will be woken when last process completes
         proc_queue_wait(&main_wait_queue, &priority_test_lock, 0);
     }
-    spin_release(&priority_test_lock);
+    spin_unlock(&priority_test_lock);
     
     // =========================================================================
     // Phase 5: Verify activation order

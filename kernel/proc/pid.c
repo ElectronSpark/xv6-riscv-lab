@@ -77,11 +77,11 @@ void __proctab_init(void)
    Required to hold when modifying proc table */
 
 static void __proctab_lock(void) {
-    spin_acquire(&proc_table.pid_lock);
+    spin_lock(&proc_table.pid_lock);
 }
 
 static void __proctab_unlock(void) {
-    spin_release(&proc_table.pid_lock);
+    spin_unlock(&proc_table.pid_lock);
 }
 
 /* The following will assert that the process table is locked */

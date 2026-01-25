@@ -489,9 +489,9 @@ void *lookup(hlist_t *ht, int key) {
 
 // Writer - must hold lock
 void insert(hlist_t *ht, spinlock_t *lock, my_node_t *new_node) {
-    spin_acquire(lock);
+    spin_lock(lock);
     my_node_t *old = hlist_put_rcu(ht, new_node, true);
-    spin_release(lock);
+    spin_unlock(lock);
     
     if (old != NULL && old != new_node) {
         call_rcu(&old->rcu_head, free_callback, old);

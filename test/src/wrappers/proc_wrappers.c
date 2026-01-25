@@ -116,16 +116,6 @@ void __wrap_proc_assert_holding(struct proc *p)
     (void)p;
 }
 
-void __wrap_sched_lock(void)
-{
-    /* Scheduler lock not needed in host tests */
-}
-
-void __wrap_sched_unlock(void)
-{
-    /* Scheduler unlock not needed in host tests */
-}
-
 void __wrap_scheduler_wakeup(struct proc *p)
 {
     (void)p;

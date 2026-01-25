@@ -72,12 +72,12 @@ int register_irq_handler(int irq_num, struct irq_desc *desc) {
     new_desc->count = 0;
 
     // Acquire write lock to serialize registration
-    spin_acquire(&irq_write_lock);
+    spin_lock(&irq_write_lock);
 
     // Check if handler already exists - fail to prevent double registration
     struct irq_desc *old_desc = rcu_dereference(irq_descs[irq_num]);
     if (old_desc != NULL) {
-        spin_release(&irq_write_lock);
+        spin_unlock(&irq_write_lock);
         __free_irq_desc(new_desc);
         return -EEXIST; // Handler already registered
     }
@@ -85,7 +85,7 @@ int register_irq_handler(int irq_num, struct irq_desc *desc) {
     // Use RCU to safely publish the new descriptor
     rcu_assign_pointer(irq_descs[irq_num], new_desc);
 
-    spin_release(&irq_write_lock);
+    spin_unlock(&irq_write_lock);
 
     // Enable PLIC interrupt after handler is registered
     // plic_enable_irq sets priority=1 and enables the IRQ on all harts
@@ -102,19 +102,19 @@ int unregister_irq_handler(int irq_num) {
     }
 
     // Acquire write lock to serialize unregistration
-    spin_acquire(&irq_write_lock);
+    spin_lock(&irq_write_lock);
 
     // Get the old descriptor
     struct irq_desc *old_desc = irq_descs[irq_num];
     if (old_desc == NULL) {
-        spin_release(&irq_write_lock);
+        spin_unlock(&irq_write_lock);
         return -ENOENT; // No handler registered
     }
 
     // Clear the descriptor pointer using RCU
     rcu_assign_pointer(irq_descs[irq_num], NULL);
 
-    spin_release(&irq_write_lock);
+    spin_unlock(&irq_write_lock);
 
     // Use call_rcu() for non-blocking deferred freeing
     // The descriptor will be freed after all readers complete

@@ -60,18 +60,18 @@ static void __vfs_file_unlock(struct vfs_file *file) {
 }
 
 static void __vfs_ftable_attatch(struct vfs_file *file) {
-    spin_acquire(&__vfs_ftable_lock);
+    spin_lock(&__vfs_ftable_lock);
     list_node_push(&__vfs_ftable, file, list_entry);
     int count = __atomic_add_fetch(&__vfs_open_file_count, 1, __ATOMIC_SEQ_CST);
-    spin_release(&__vfs_ftable_lock);
+    spin_unlock(&__vfs_ftable_lock);
     assert(count > 0, "vfs file open count overflow");
 }
 
 static void __vfs_ftable_detatch(struct vfs_file *file) {
-    spin_acquire(&__vfs_ftable_lock);
+    spin_lock(&__vfs_ftable_lock);
     list_node_detach(file, list_entry);
     int count = __atomic_sub_fetch(&__vfs_open_file_count, 1, __ATOMIC_SEQ_CST);
-    spin_release(&__vfs_ftable_lock);
+    spin_unlock(&__vfs_ftable_lock);
     assert(count >= 0, "vfs file open count underflow");
 }
 
@@ -669,13 +669,13 @@ int vfs_sockalloc(struct vfs_file **f, uint32 raddr, uint16 lport, uint16 rport)
     __vfs_ftable_attatch(*f);
     
     // Add to list of sockets (check for duplicates)
-    spin_acquire(&sock_lock);
+    spin_lock(&sock_lock);
     pos = sockets;
     while (pos) {
         if (pos->raddr == raddr &&
             pos->lport == lport &&
             pos->rport == rport) {
-            spin_release(&sock_lock);
+            spin_unlock(&sock_lock);
             kfree((char *)si);
             __vfs_file_free(*f);
             *f = NULL;
@@ -685,7 +685,7 @@ int vfs_sockalloc(struct vfs_file **f, uint32 raddr, uint16 lport, uint16 rport)
     }
     si->next = sockets;
     sockets = si;
-    spin_release(&sock_lock);
+    spin_unlock(&sock_lock);
     
     return 0;
 }

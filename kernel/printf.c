@@ -95,7 +95,7 @@ printf(char *fmt, ...)
 
   locking = pr.locking;
   if(locking)
-    spin_acquire(&pr.lock);
+    spin_lock(&pr.lock);
 
   if (!__atomic_test_and_set(&nnewline, __ATOMIC_ACQUIRE)) {
     print_timestamp(outbuf, &outlen);
@@ -187,7 +187,7 @@ printf(char *fmt, ...)
   }
 
   if(locking)
-    spin_release(&pr.lock);
+    spin_unlock(&pr.lock);
 
   return 0;
 }

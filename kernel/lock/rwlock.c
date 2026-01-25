@@ -95,17 +95,17 @@ int rwlock_acquire_read(rwlock_t *lock) {
     }
 
     int ret = 0;
-    spin_acquire(&lock->lock);
+    spin_lock(&lock->lock);
     // @TODO: signal handling (wait is still uninterruptible for now)
     while (__reader_should_wait(lock)) {
         ret = proc_queue_wait(&lock->read_queue, &lock->lock, NULL);
         if (ret != 0) {
-            spin_release(&lock->lock);
+            spin_unlock(&lock->lock);
             return ret;
         }
     }
     lock->readers++;
-    spin_release(&lock->lock);
+    spin_unlock(&lock->lock);
     return ret;
 }
 
@@ -118,7 +118,7 @@ int rwlock_acquire_write(rwlock_t *lock) {
     }
 
     int ret = 0;
-    spin_acquire(&lock->lock);
+    spin_lock(&lock->lock);
     struct proc *self = myproc();
     int self_pid = (self != NULL) ? self->pid : 0;
     assert(lock->holder_pid != self_pid, "rwlock_acquire_write: deadlock detected, process already holds the write lock");
@@ -127,12 +127,12 @@ int rwlock_acquire_write(rwlock_t *lock) {
         assert(lock->holder_pid != self_pid, "rwlock_acquire_write: deadlock detected, process already holds the write lock");
         ret = proc_queue_wait(&lock->write_queue, &lock->lock, NULL);
         if (ret != 0) {
-            spin_release(&lock->lock);
+            spin_unlock(&lock->lock);
             return ret;
         }
     }
     lock->holder_pid = self_pid;
-    spin_release(&lock->lock);
+    spin_unlock(&lock->lock);
     return ret; // Success
 }
 
@@ -141,7 +141,7 @@ void rwlock_release(rwlock_t *lock) {
         return; // Invalid lock
     }
 
-    spin_acquire(&lock->lock);
+    spin_lock(&lock->lock);
     struct proc *self = myproc();
     int self_pid = (self != NULL) ? self->pid : 0;
     if (lock->holder_pid == self_pid) {
@@ -157,7 +157,7 @@ void rwlock_release(rwlock_t *lock) {
             __do_wake_up(lock);
         }
     }
-    spin_release(&lock->lock);
+    spin_unlock(&lock->lock);
 }
 
 bool rwlock_is_write_holding(rwlock_t *lock) {
@@ -166,10 +166,10 @@ bool rwlock_is_write_holding(rwlock_t *lock) {
         return false; // Invalid lock
     }
 
-    spin_acquire(&lock->lock);
+    spin_lock(&lock->lock);
     struct proc *self = myproc();
     int self_pid = (self != NULL) ? self->pid : 0;
     bool is_locked = (lock->holder_pid == self_pid);
-    spin_release(&lock->lock);
+    spin_unlock(&lock->lock);
     return is_locked;
 }

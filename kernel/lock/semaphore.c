@@ -55,16 +55,16 @@ int sem_wait(sem_t *sem) {
         return -EINVAL;
     }
 
-    spin_acquire(&sem->lk);
+    spin_lock(&sem->lk);
     int val = __sem_value_dec(sem); // Decrement the semaphore value
     if (val < -SEM_VALUE_MAX) {
         // Prevent semaphore value from going below -SEM_VALUE_MAX
         __sem_value_inc(sem); // Revert the decrement
-        spin_release(&sem->lk);
+        spin_unlock(&sem->lk);
         return -EOVERFLOW;
     }
     if (val >= 0) {
-        spin_release(&sem->lk);
+        spin_unlock(&sem->lk);
         return 0; // Semaphore acquired successfully
     }
 
@@ -76,7 +76,7 @@ int sem_wait(sem_t *sem) {
         }
     }
 
-    spin_release(&sem->lk);
+    spin_unlock(&sem->lk);
     return ret;
 }
 
@@ -84,13 +84,13 @@ int sem_trywait(sem_t *sem) {
     if (sem == NULL) {
         return -EINVAL;
     }
-    spin_acquire(&sem->lk);
+    spin_lock(&sem->lk);
     if (__sem_value_get(sem) > 0) {
         __sem_value_dec(sem);
-        spin_release(&sem->lk);
+        spin_unlock(&sem->lk);
         return 0;
     }
-    spin_release(&sem->lk);
+    spin_unlock(&sem->lk);
     return -EAGAIN;
 }
 
@@ -99,13 +99,13 @@ int sem_post(sem_t *sem) {
         return -EINVAL;
     }
 
-    spin_acquire(&sem->lk);
+    spin_lock(&sem->lk);
     if (__sem_value_get(sem) == SEM_VALUE_MAX) {
-        spin_release(&sem->lk);
+        spin_unlock(&sem->lk);
         return -EOVERFLOW; // Prevent semaphore value from exceeding SEM_VALUE_MAX
     }
     int ret = __sem_do_post(sem);
-    spin_release(&sem->lk);
+    spin_unlock(&sem->lk);
     if (ret == -ENOENT) {
         // No process to wake up, not an error
         return 0;
@@ -118,8 +118,8 @@ int sem_getvalue(sem_t *sem, int *value) {
         return -EINVAL;
     }
 
-    spin_acquire(&sem->lk);
+    spin_lock(&sem->lk);
     *value = __sem_value_get(sem);
-    spin_release(&sem->lk);
+    spin_unlock(&sem->lk);
     return 0;
 }

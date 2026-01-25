@@ -126,23 +126,23 @@ int timer_add(struct timer_root *timer, struct timer_node *node) {
     if (node->callback == NULL) {
         return -EINVAL;
     }
-    spin_acquire(&timer->lock);
+    spin_lock(&timer->lock);
     if (!timer->valid) {
-        spin_release(&timer->lock);
+        spin_unlock(&timer->lock);
         return -EINVAL;
     }
     if (timer->current_tick >= node->expires) {
         // Timer already expired
-        spin_release(&timer->lock);
+        spin_unlock(&timer->lock);
         return -EINVAL;
     }
     struct rb_node *inserted = rb_insert_color(&timer->root, &node->rb);
     if (inserted == NULL) {
-        spin_release(&timer->lock);
+        spin_unlock(&timer->lock);
         return -ETXTBSY;
     }
     if (inserted != &node->rb) {
-        spin_release(&timer->lock);
+        spin_unlock(&timer->lock);
         return -EEXIST;
     }
     struct rb_node *prev = rb_prev_node(&node->rb);
@@ -154,7 +154,7 @@ int timer_add(struct timer_root *timer, struct timer_node *node) {
         list_node_insert(prev_node, node, list_entry);
     }
     node->timer = timer;
-    spin_release(&timer->lock);
+    spin_unlock(&timer->lock);
     return 0;
 }
 
@@ -171,9 +171,9 @@ void timer_remove(struct timer_node *node) {
     if (timer == NULL) {
         return;
     }
-    spin_acquire(&timer->lock);
+    spin_lock(&timer->lock);
     __timer_remove_unlocked(timer, node);
-    spin_release(&timer->lock);
+    spin_unlock(&timer->lock);
 }
 
 // Handle timer tick
@@ -192,19 +192,19 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
     if (timer->valid == 0) {
         return;
     }
-    spin_acquire(&timer->lock);
+    spin_lock(&timer->lock);
     if (timer->next_tick == 0) {
-        spin_release(&timer->lock);
+        spin_unlock(&timer->lock);
         return;
     }
     if (timer->current_tick >= ticks) {
-        spin_release(&timer->lock);
+        spin_unlock(&timer->lock);
         return;
     }
     timer->current_tick = ticks;
     if (timer->next_tick > ticks) {
         // No timer expired
-        spin_release(&timer->lock);
+        spin_unlock(&timer->lock);
         return;
     }
 
@@ -230,7 +230,7 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
         node->callback(node);
     }
 
-    spin_release(&timer->lock);
+    spin_unlock(&timer->lock);
 }
 
 uint64 get_jiffs(void) {

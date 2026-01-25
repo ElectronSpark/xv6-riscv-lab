@@ -84,16 +84,16 @@ static spinlock_t __all_slab_caches_lock = SPINLOCK_INITIALIZED("all_slab_caches
 void slab_shrink_all(void) {
     slab_cache_t *cache, *tmp;
     
-    spin_acquire(&__all_slab_caches_lock);
+    spin_lock(&__all_slab_caches_lock);
     list_foreach_node_safe(&__all_slab_caches, cache, tmp, cache_list_entry) {
         // Shrink up to half the global free slabs
         int64 free_count = __atomic_load_n(&cache->global_free_count, __ATOMIC_ACQUIRE);
         if (free_count > 0) {
             int to_shrink = (free_count + 1) / 2;
             if (to_shrink > 0) {
-                spin_release(&__all_slab_caches_lock);
+                spin_unlock(&__all_slab_caches_lock);
                 slab_cache_shrink(cache, to_shrink);
-                spin_acquire(&__all_slab_caches_lock);
+                spin_lock(&__all_slab_caches_lock);
                 // tmp may be invalid after releasing lock, restart from beginning
                 cache = LIST_FIRST_NODE(&__all_slab_caches, slab_cache_t, cache_list_entry);
                 if (cache == NULL) break;
@@ -101,7 +101,7 @@ void slab_shrink_all(void) {
             }
         }
     }
-    spin_release(&__all_slab_caches_lock);
+    spin_unlock(&__all_slab_caches_lock);
 }
 
 // Dump statistics for all slab caches - useful for debugging memory leaks
@@ -115,7 +115,7 @@ uint64 slab_dump_all(int detailed) {
         printf("NAME             OBJSZ    TOTAL   ACTIVE     FREE    PAGES\n");
     }
     
-    spin_acquire(&__all_slab_caches_lock);
+    spin_lock(&__all_slab_caches_lock);
     list_foreach_node_safe(&__all_slab_caches, cache, tmp, cache_list_entry) {
         int64 slab_total = __atomic_load_n(&cache->slab_total, __ATOMIC_ACQUIRE);
         uint64 obj_active = __atomic_load_n(&cache->obj_active, __ATOMIC_ACQUIRE);
@@ -128,7 +128,7 @@ uint64 slab_dump_all(int detailed) {
                    cache->name, cache->obj_size, slab_total, obj_active, global_free, pages);
         }
     }
-    spin_release(&__all_slab_caches_lock);
+    spin_unlock(&__all_slab_caches_lock);
     
     if (detailed >= 2) {
         printf("-----------------------------\n");
@@ -513,35 +513,35 @@ STATIC_INLINE slab_t *__find_obj_slab(void *ptr) {
 // Acquire lock for current CPU's cache
 STATIC_INLINE void __percpu_cache_lock(slab_cache_t *cache) {
     int cpu_id = cpuid();
-    spin_acquire(&cache->percpu_caches[cpu_id].lock);
+    spin_lock(&cache->percpu_caches[cpu_id].lock);
 }
 
 // Release lock for current CPU's cache
 STATIC_INLINE void __percpu_cache_unlock(slab_cache_t *cache) {
     int cpu_id = cpuid();
-    spin_release(&cache->percpu_caches[cpu_id].lock);
+    spin_unlock(&cache->percpu_caches[cpu_id].lock);
 }
 
 // Acquire lock for a specific CPU's cache
 STATIC_INLINE void __percpu_cache_lock_cpu(slab_cache_t *cache, int cpu_id) {
     assert(cpu_id >= 0 && cpu_id < NCPU, "invalid cpu_id");
-    spin_acquire(&cache->percpu_caches[cpu_id].lock);
+    spin_lock(&cache->percpu_caches[cpu_id].lock);
 }
 
 // Release lock for a specific CPU's cache
 STATIC_INLINE void __percpu_cache_unlock_cpu(slab_cache_t *cache, int cpu_id) {
     assert(cpu_id >= 0 && cpu_id < NCPU, "invalid cpu_id");
-    spin_release(&cache->percpu_caches[cpu_id].lock);
+    spin_unlock(&cache->percpu_caches[cpu_id].lock);
 }
 
 // Acquire global free list lock
 STATIC_INLINE void __global_free_lock(slab_cache_t *cache) {
-    spin_acquire(&cache->global_free_lock);
+    spin_lock(&cache->global_free_lock);
 }
 
 // Release global free list lock
 STATIC_INLINE void __global_free_unlock(slab_cache_t *cache) {
-    spin_release(&cache->global_free_lock);
+    spin_unlock(&cache->global_free_lock);
 }
 
 // ============================================================================
@@ -644,10 +644,10 @@ STATIC_INLINE void __slab_cache_init(slab_cache_t *cache, char *name,
 
     // Register in global cache list for OOM shrinking
     list_entry_init(&cache->cache_list_entry);
-    spin_acquire(&__all_slab_caches_lock);
+    spin_lock(&__all_slab_caches_lock);
     // Insert at end of list (after the last entry, which is prev of head)
     list_entry_insert(LIST_LAST_ENTRY(&__all_slab_caches), &cache->cache_list_entry);
-    spin_release(&__all_slab_caches_lock);
+    spin_unlock(&__all_slab_caches_lock);
 
 }
 

@@ -566,11 +566,11 @@ static void __pcache_global_lock_assert_holding(void) {
 }
 
 static void __pcache_global_lock(void) {
-    spin_acquire(&__pcache_global_spinlock);
+    spin_lock(&__pcache_global_spinlock);
 }
 
 static void __pcache_global_unlock(void) {
-    spin_release(&__pcache_global_spinlock);
+    spin_unlock(&__pcache_global_spinlock);
 }
 
 /******************************************************************************
@@ -624,19 +624,19 @@ static struct pcache_node *__pcache_insert_node(
 }
 
 static void __pcache_tree_lock(struct pcache *pcache) {
-    spin_acquire(&pcache->tree_lock);
+    spin_lock(&pcache->tree_lock);
 }
 
 static void __pcache_tree_unlock(struct pcache *pcache) {
-    spin_release(&pcache->tree_lock);
+    spin_unlock(&pcache->tree_lock);
 }
 
 static void __pcache_spin_lock(struct pcache *pcache) {
-    spin_acquire(&pcache->spinlock);
+    spin_lock(&pcache->spinlock);
 }
 
 static void __pcache_spin_unlock(struct pcache *pcache) {
-    spin_release(&pcache->spinlock);
+    spin_unlock(&pcache->spinlock);
 }
 
 static void __pcache_spin_assert_holding(struct pcache *pcache) {

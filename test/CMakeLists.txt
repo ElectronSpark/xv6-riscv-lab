@@ -148,8 +148,8 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     slab_alloc
     slab_free
     # Spinlock functions
-    spin_acquire
-    spin_release
+    spin_lock
+    spin_unlock
     spin_init
     spin_holding
     spin_lock
@@ -255,7 +255,7 @@ add_executable(ut_semaphore
 target_link_libraries(ut_semaphore PRIVATE cmocka-static)
 target_compile_options(ut_semaphore PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
 target_link_options(ut_semaphore PRIVATE ${ASAN_LINK_FLAGS}
-    -Wl,--wrap=spin_init,--wrap=spin_acquire,--wrap=spin_release,--wrap=spin_holding
+    -Wl,--wrap=spin_init,--wrap=spin_lock,--wrap=spin_unlock,--wrap=spin_holding
     -Wl,--wrap=push_off,--wrap=pop_off
     -Wl,--wrap=proc_queue_init,--wrap=proc_queue_wait,--wrap=proc_queue_wakeup
     -Wl,--wrap=mycpu,--wrap=myproc,--wrap=proc_lock,--wrap=proc_unlock,--wrap=proc_assert_holding
@@ -277,7 +277,7 @@ add_executable(ut_rwlock
 )
 target_link_libraries(ut_rwlock PRIVATE cmocka-static)
 target_compile_options(ut_rwlock PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
-target_link_options(ut_rwlock PRIVATE ${ASAN_LINK_FLAGS}    -Wl,--wrap=spin_init,--wrap=spin_acquire,--wrap=spin_release,--wrap=spin_holding
+target_link_options(ut_rwlock PRIVATE ${ASAN_LINK_FLAGS}    -Wl,--wrap=spin_init,--wrap=spin_lock,--wrap=spin_unlock,--wrap=spin_holding
     -Wl,--wrap=push_off,--wrap=pop_off
     -Wl,--wrap=proc_queue_init,--wrap=proc_queue_size,--wrap=proc_queue_wait
     -Wl,--wrap=proc_queue_wakeup,--wrap=proc_queue_wakeup_all

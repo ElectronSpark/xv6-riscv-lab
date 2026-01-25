@@ -61,8 +61,8 @@ static int test_setup(void **state) {
 }
 
 static void assert_spin_locked_counts(int acquire, int release) {
-    assert_int_equal(g_runtime.spinlock.spin_acquire_count, acquire);
-    assert_int_equal(g_runtime.spinlock.spin_release_count, release);
+    assert_int_equal(g_runtime.spinlock.spin_lock_count, acquire);
+    assert_int_equal(g_runtime.spinlock.spin_unlock_count, release);
 }
 
 // ---- Tests: sem_init -----------------------------------------------------

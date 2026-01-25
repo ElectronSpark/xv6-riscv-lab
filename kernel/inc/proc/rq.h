@@ -42,6 +42,10 @@ void rq_lock(int cpu_id);
 void rq_unlock(int cpu_id);
 void rq_lock_current(void);
 void rq_unlock_current(void);
+int rq_lock_irqsave(int cpu_id);
+void rq_unlock_irqrestore(int cpu_id, int state);
+int rq_lock_current_irqsave(void);
+void rq_unlock_current_irqrestore(int state);
 int rq_holding(int cpu_id);
 int rq_holding_current(void);
 

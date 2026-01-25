@@ -16,19 +16,19 @@ static int64 __kobject_count = 0;
 static struct spinlock kobject_lock = SPINLOCK_INITIALIZED("kobject_lock");
 
 static void __kobject_attach(struct kobject *obj) {
-  spin_acquire(&kobject_lock);
+  spin_lock(&kobject_lock);
   list_node_push_back(&__kobject_list, obj, list_entry);
   int64 count = __atomic_add_fetch(&__kobject_count, 1, __ATOMIC_SEQ_CST);
   assert(count > 0, "kobject count underflow");
-  spin_release(&kobject_lock);
+  spin_unlock(&kobject_lock);
 }
 
 static void __kobject_detach(struct kobject *obj) {
-  spin_acquire(&kobject_lock);
+  spin_lock(&kobject_lock);
   list_node_detach(obj, list_entry);
   int64 count = __atomic_sub_fetch(&__kobject_count, 1, __ATOMIC_SEQ_CST);
   assert(count >= 0, "kobject count underflow");
-  spin_release(&kobject_lock);
+  spin_unlock(&kobject_lock);
 }
 
 void kobject_global_init(void) {

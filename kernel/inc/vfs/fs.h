@@ -104,11 +104,11 @@ int vfs_superblock_set_dirty(struct vfs_superblock *sb);
 // fs_struct locking operations
 // fs_struct lock should be the least significant lock to avoid deadlocks
 static inline void vfs_struct_lock(struct fs_struct *fs) {
-    spin_acquire(&fs->lock);
+    spin_lock(&fs->lock);
 }
 
 static inline void vfs_struct_unlock(struct fs_struct *fs) {
-    spin_release(&fs->lock);
+    spin_unlock(&fs->lock);
 }
 
 struct fs_struct *vfs_struct_init(void);    // Create the first fs_struct

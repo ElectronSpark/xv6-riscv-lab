@@ -51,9 +51,9 @@ bool try_wait_for_completion(completion_t *c) {
     if (c == NULL) {
         return false;
     }
-    spin_acquire(&c->lock);
+    spin_lock(&c->lock);
     bool ret = __try_wait_for_completion(c);
-    spin_release(&c->lock);
+    spin_unlock(&c->lock);
     return ret;
 }
 
@@ -62,7 +62,7 @@ void wait_for_completion(completion_t *c) {
     if (c == NULL) {
         return;
     }
-    spin_acquire(&c->lock);
+    spin_lock(&c->lock);
     while (!__try_wait_for_completion(c)) {
         int ret = proc_queue_wait(&c->wait_queue, &c->lock, NULL);
         (void)ret; // @TODO: ignore interrupt by now
@@ -70,37 +70,37 @@ void wait_for_completion(completion_t *c) {
     if (c->done > 0) {
         __completion_do_wake(c);
     }
-    spin_release(&c->lock);
+    spin_unlock(&c->lock);
 }
 
 void complete(completion_t *c) {
     if (c == NULL) {
         return;
     }
-    spin_acquire(&c->lock);
+    spin_lock(&c->lock);
     if (c->done != MAX_COMPLETIONS) {
         c->done++;
     }
     __completion_do_wake(c);
-    spin_release(&c->lock);
+    spin_unlock(&c->lock);
 }
 
 void complete_all(completion_t *c) {
     if (c == NULL) {
         return;
     }
-    spin_acquire(&c->lock);
+    spin_lock(&c->lock);
     c->done = MAX_COMPLETIONS;
     __completion_do_wake_all(c);
-    spin_release(&c->lock);
+    spin_unlock(&c->lock);
 }
 
 bool completion_done(completion_t *c) {
     if (c == NULL) {
         return false;
     }
-    spin_acquire(&c->lock);
+    spin_lock(&c->lock);
     bool done = proc_queue_size(&c->wait_queue) == 0;
-    spin_release(&c->lock);
+    spin_unlock(&c->lock);
     return done;
 }

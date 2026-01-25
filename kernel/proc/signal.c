@@ -380,9 +380,9 @@ after_enqueue:
         //
         // scheduler_continue uses pi_lock protocol (like scheduler_wakeup).
         proc_unlock(p);
-        spin_acquire(&p->sched_entity->pi_lock);
+        spin_lock(&p->sched_entity->pi_lock);
         scheduler_continue(p); // handles clearing PROC_STOPPED and requeueing
-        spin_release(&p->sched_entity->pi_lock);
+        spin_unlock(&p->sched_entity->pi_lock);
         proc_lock(p);
     }
 
@@ -395,9 +395,9 @@ after_enqueue:
             // If the process is stopped, we need to wake it up.
             // scheduler_continue uses pi_lock protocol.
             proc_unlock(p);
-            spin_acquire(&p->sched_entity->pi_lock);
+            spin_lock(&p->sched_entity->pi_lock);
             scheduler_continue(p);
-            spin_release(&p->sched_entity->pi_lock);
+            spin_unlock(&p->sched_entity->pi_lock);
             proc_lock(p);
         }
     }
@@ -459,9 +459,9 @@ int signal_notify(struct proc *p) {
         // - Call wakeup
         // - Release pi_lock, reacquire proc_lock
         proc_unlock(p);
-        spin_acquire(&p->sched_entity->pi_lock);
+        spin_lock(&p->sched_entity->pi_lock);
         scheduler_wakeup_interruptible(p);
-        spin_release(&p->sched_entity->pi_lock);
+        spin_unlock(&p->sched_entity->pi_lock);
         proc_lock(p);
         return 0; // Success
     }

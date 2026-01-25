@@ -9,7 +9,7 @@ Consolidates all page-related mocking functionality:
 - **Page allocation/deallocation**: `page_alloc`, `page_free`, `__page_alloc`, `__page_free`
 - **Address conversion**: `__pa_to_page`, `__page_to_pa`  
 - **Reference counting**: `page_ref_inc`, `page_ref_dec`, `page_refcnt`, `__page_ref_inc`, `__page_ref_dec`
-- **Page locking**: `page_lock_acquire`, `page_lock_release`, `page_lock_assert_holding`, `page_lock_spin_release`
+- **Page locking**: `page_lock_acquire`, `page_lock_release`, `page_lock_assert_holding`, `page_lock_spin_unlock`
 - **Page initialization**: `__page_init`
 - **Mock page utilities**: `ut_make_mock_page`, `ut_destroy_mock_page`, `ut_destroy_mock_page_t`
 - **Panic handling**: `__wrap_panic`
@@ -22,7 +22,7 @@ Consolidates all page-related mocking functionality:
 
 ### Spinlock Wrappers (`spinlock_wrappers.c`)
 Mock spinlock operations:
-- `spin_acquire`, `spin_release`
+- `spin_lock`, `spin_unlock`
 - `spin_lock`, `spin_unlock`
 - `spin_init`, `spin_holding`
 - `push_off`, `pop_off`

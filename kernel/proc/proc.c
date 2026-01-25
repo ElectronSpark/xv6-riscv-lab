@@ -106,12 +106,12 @@ static struct proc *__kstack_arrange(void *kstack, size_t kstack_size,
 
 void proc_lock(struct proc *p) {
     assert(p != NULL, "proc_lock: proc is NULL");
-    spin_acquire(&p->lock);
+    spin_lock(&p->lock);
 }
 
 void proc_unlock(struct proc *p) {
     assert(p != NULL, "proc_unlock: proc is NULL");
-    spin_release(&p->lock);
+    spin_unlock(&p->lock);
 }
 
 void proc_assert_holding(struct proc *p) {
@@ -217,7 +217,9 @@ STATIC struct proc *allocproc(void *entry, uint64 arg1, uint64 arg2,
 
 static void __kernel_proc_entry(struct context *prev) {
     assert(prev != NULL, "kernel_proc_entry: prev context is NULL");
-    context_switch_finish(proc_from_context(prev), myproc());
+    context_switch_finish(proc_from_context(prev), myproc(), 0);
+    mycpu()->noff = 0;  // in a new process, noff should be 0
+    intr_on();
 
     // Set up the kernel stack and context for the new process.
     int (*entry)(uint64, uint64) = (void *)myproc()->kentry;
@@ -404,7 +406,9 @@ uchar initcode[] = {0x17, 0x05, 0x00, 0x00, 0x13, 0x05, 0x45, 0x02, 0x97,
 static void init_entry(struct context *prev) {
     // When we arrive here from context switch, we hold the rq lock.
     // Finish the context switch first to release the rq lock properly.
-    context_switch_finish(proc_from_context(prev), myproc());
+    context_switch_finish(proc_from_context(prev), myproc(), 0);
+    mycpu()->noff = 0;  // in a new process, noff should be 0
+    intr_on();
 
     // Now do post-init work without holding any scheduler locks
     start_kernel_post_init();
@@ -475,10 +479,10 @@ void userinit(void) {
     sched_setattr(p->sched_entity, &attr);
 
     // Don't forget to wake up the process.
-    spin_acquire(&p->sched_entity->pi_lock);
+    spin_lock(&p->sched_entity->pi_lock);
     __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
     scheduler_wakeup(p);
-    spin_release(&p->sched_entity->pi_lock);
+    spin_unlock(&p->sched_entity->pi_lock);
 }
 
 /*
@@ -605,9 +609,9 @@ int fork(void) {
     proc_unlock(p);
     proc_unlock(np);
 
-    spin_acquire(&np->sched_entity->pi_lock);
+    spin_lock(&np->sched_entity->pi_lock);
     scheduler_wakeup(np);
-    spin_release(&np->sched_entity->pi_lock);
+    spin_unlock(&np->sched_entity->pi_lock);
 
     return np->pid;
 }
@@ -753,7 +757,9 @@ static void forkret_entry(struct context *prev) {
     assert(prev != NULL, "forkret_entry: prev context is NULL");
 
     // Finish the context switch first - this releases the rq lock
-    context_switch_finish(proc_from_context(prev), myproc());
+    context_switch_finish(proc_from_context(prev), myproc(), 0);
+    mycpu()->noff = 0;  // in a new process, noff should be 0
+    intr_on();
 
     // Now safe to do the rest without holding scheduler locks
     forkret();
@@ -762,13 +768,8 @@ static void forkret_entry(struct context *prev) {
 // A fork child's very first scheduling by scheduler()
 // will swtch to forkret_entry, which calls this after context_switch_finish.
 static void forkret(void) {
-    // The scheduler will disable interrupts to assure the atomicity of
-    // the scheduler operations. For processes that gave up CPU by calling
-    // yield(),
-    //   yield() would restore the previous interruption state when switched
-    //   back.
-    // But at here, we need to enable interrupts for the first time.
-    intr_on();
+    // Interrupts are now enabled by the intr_on() call in forkret_entry/init_entry
+    // after setting noff = 0 to start with a clean preemption counter.
 
     // printf("forkret: process %d is running\n", myproc()->pid);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);

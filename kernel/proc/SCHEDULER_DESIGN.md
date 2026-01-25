@@ -318,9 +318,9 @@ static struct proc *__sched_pick_next(void) {
 
 ```c
 void wakeup_proc(struct proc *p) {
-    spin_acquire(&p->sched_entity->pi_lock);
+    spin_lock(&p->sched_entity->pi_lock);
     scheduler_wakeup(p);
-    spin_release(&p->sched_entity->pi_lock);
+    spin_unlock(&p->sched_entity->pi_lock);
 }
 ```
 
@@ -521,9 +521,9 @@ void scheduler_continue(struct proc *p) {
 if (is_cont) {
     // scheduler_continue uses pi_lock protocol.
     proc_unlock(p);
-    spin_acquire(&p->sched_entity->pi_lock);
+    spin_lock(&p->sched_entity->pi_lock);
     scheduler_continue(p);
-    spin_release(&p->sched_entity->pi_lock);
+    spin_unlock(&p->sched_entity->pi_lock);
     proc_lock(p);
 }
 ```
@@ -589,13 +589,13 @@ void scheduler_sleep(struct spinlock *lk, enum procstate sleep_state) {
     __proc_set_pstate(myproc(), sleep_state);  // Set to SLEEPING
     
     if (lk_holding) {
-        spin_release(lk);
+        spin_unlock(lk);
     }
     
     scheduler_yield();  // Context switch out
     
     if (lk_holding) {
-        spin_acquire(lk);
+        spin_lock(lk);
     }
 }
 ```

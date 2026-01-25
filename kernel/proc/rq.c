@@ -215,13 +215,38 @@ void sched_class_register(int id, struct sched_class* cls) {
 
 void rq_lock(int cpu_id) {
     assert(cpu_id >= 0 && cpu_id < NCPU, "rq_lock: invalid cpu_id %d", cpu_id);
-    spin_acquire(&rq_global.rq_lock[cpu_id]);
+    spin_lock(&rq_global.rq_lock[cpu_id]);
 }
 
 void rq_unlock(int cpu_id) {
     assert(cpu_id >= 0 && cpu_id < NCPU, "rq_unlock: invalid cpu_id %d", cpu_id);
     assert(__rq_lock_held(cpu_id), "rq_unlock: lock not held for cpu_id %d", cpu_id);
-    spin_release(&rq_global.rq_lock[cpu_id]);
+    spin_unlock(&rq_global.rq_lock[cpu_id]);
+}
+
+int rq_lock_irqsave(int cpu_id) {
+    assert(cpu_id >= 0 && cpu_id < NCPU, "rq_lock: invalid cpu_id %d", cpu_id);
+    return spin_lock_irqsave(&rq_global.rq_lock[cpu_id]);
+}
+
+void rq_unlock_irqrestore(int cpu_id, int state) {
+    assert(cpu_id >= 0 && cpu_id < NCPU, "rq_unlock: invalid cpu_id %d", cpu_id);
+    assert(__rq_lock_held(cpu_id), "rq_unlock: lock not held for cpu_id %d", cpu_id);
+    spin_unlock_irqrestore(&rq_global.rq_lock[cpu_id], state);
+}
+
+int rq_lock_current_irqsave(void) {
+    int intr_state = intr_get();
+    intr_off();
+    // We recorded the interrupt state before disabling interrupts.
+    // So we can discard the current interrupt state here.
+    rq_lock_irqsave(cpuid());
+    return intr_state;
+}
+
+void rq_unlock_current_irqrestore(int state) {
+    int cpu = cpuid();
+    rq_unlock_irqrestore(cpu, state);
 }
 
 void rq_lock_current(void) {
@@ -231,9 +256,7 @@ void rq_lock_current(void) {
 }
 
 void rq_unlock_current(void) {
-    push_off();
     int cpu = cpuid();
-    pop_off();
     rq_unlock(cpu);
 }
 
@@ -451,7 +474,7 @@ int sched_getattr(struct sched_entity *se, struct sched_attr *attr) {
         return -EINVAL;
     }
     
-    spin_acquire(&se->pi_lock);
+    spin_lock(&se->pi_lock);
     
     attr->size = sizeof(struct sched_attr);
     attr->affinity_mask = se->affinity_mask;
@@ -459,7 +482,7 @@ int sched_getattr(struct sched_entity *se, struct sched_attr *attr) {
     attr->priority = se->priority;
     attr->flags = 0;
     
-    spin_release(&se->pi_lock);
+    spin_unlock(&se->pi_lock);
     
     return 0;
 }
@@ -485,7 +508,7 @@ int sched_setattr(struct sched_entity *se, const struct sched_attr *attr) {
         return -EINVAL;
     }
     
-    spin_acquire(&se->pi_lock);
+    spin_lock(&se->pi_lock);
     
     // Apply the new attributes
     // Note: If the task is currently on a run queue, we may need to re-enqueue
@@ -496,7 +519,7 @@ int sched_setattr(struct sched_entity *se, const struct sched_attr *attr) {
     // time_slice is ignored for now (placeholder)
     // attr->time_slice would be stored when time slice support is implemented
     
-    spin_release(&se->pi_lock);
+    spin_unlock(&se->pi_lock);
     
     return 0;
 }

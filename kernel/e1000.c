@@ -267,7 +267,7 @@ e1000_transmit(struct mbuf *m)
   // the TX descriptor ring so that the e1000 sends it. Stash
   // a pointer so that it can be freed after sending.
   //
-  spin_acquire(&e1000_lock);
+  spin_lock(&e1000_lock);
   // get the current tail pointer of the transmission ring buffer
   uint32 index = regs[E1000_TDT];
   if(index > TX_RING_SIZE) {
@@ -276,7 +276,7 @@ e1000_transmit(struct mbuf *m)
   struct tx_desc *desc = tx_ring + index;
   if(!(desc->status & E1000_TXD_STAT_DD)){
     // if the descriptor is not finished, return error
-    spin_release(&e1000_lock);
+    spin_unlock(&e1000_lock);
     return -1;
   }
   if(tx_mbufs[index]){
@@ -295,7 +295,7 @@ e1000_transmit(struct mbuf *m)
   tx_mbufs[index] = m;
   // move forward the tail pointer of the transmission ring buffer
   regs[E1000_TDT] = (regs[E1000_TDT] + 1) % TX_RING_SIZE;
-  spin_release(&e1000_lock);
+  spin_unlock(&e1000_lock);
   return 0;
 }
 

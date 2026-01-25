@@ -24,8 +24,8 @@
 
 // Forward declarations for wrapped functions (linked via --wrap)
 void spin_init(struct spinlock *lock, char *name);
-void spin_acquire(struct spinlock *lock);
-void spin_release(struct spinlock *lock);
+void spin_lock(struct spinlock *lock);
+void spin_unlock(struct spinlock *lock);
 
 extern void pcache_test_run_flusher_round(uint64 round_start, bool force_round);
 extern void pcache_test_set_retry_hook(void (*hook)(struct pcache *, uint64));
@@ -337,11 +337,11 @@ static void test_pcache_mark_page_dirty_detaches_lru(void **state) {
     assert_int_equal(cache->lru_count, 1);
     assert_int_equal(cache->dirty_count, 0);
 
-    spin_acquire(&cache->spinlock);
+    spin_lock(&cache->spinlock);
     page_lock_acquire(page);
     page->ref_count = 2;
     page_lock_release(page);
-    spin_release(&cache->spinlock);
+    spin_unlock(&cache->spinlock);
 
     int rc = pcache_mark_page_dirty(cache, page);
     assert_int_equal(rc, 0);
@@ -751,13 +751,13 @@ static void test_pcache_put_page_requeues_dirty_detached(void **state) {
     assert_int_equal(pcache_mark_page_dirty(cache, page), 0);
     assert_int_equal(cache->dirty_count, 1);
 
-    spin_acquire(&cache->spinlock);
+    spin_lock(&cache->spinlock);
     page_lock_acquire(page);
     list_node_detach(node, lru_entry);
     cache->dirty_count--;
     page->ref_count = 2;
     page_lock_release(page);
-    spin_release(&cache->spinlock);
+    spin_unlock(&cache->spinlock);
 
     assert_true(LIST_NODE_IS_DETACHED(node, lru_entry));
     assert_int_equal(cache->dirty_count, 0);
@@ -765,7 +765,7 @@ static void test_pcache_put_page_requeues_dirty_detached(void **state) {
     pcache_put_page(cache, page);
 
     assert_int_equal(cache->dirty_count, 1);
-    spin_acquire(&cache->spinlock);
+    spin_lock(&cache->spinlock);
     page_lock_acquire(page);
     assert_true(node->dirty);
     assert_false(LIST_NODE_IS_DETACHED(node, lru_entry));
@@ -776,7 +776,7 @@ static void test_pcache_put_page_requeues_dirty_detached(void **state) {
     node->uptodate = 1;
     page->ref_count = 2;
     page_lock_release(page);
-    spin_release(&cache->spinlock);
+    spin_unlock(&cache->spinlock);
 
     pcache_put_page(cache, page);
 }

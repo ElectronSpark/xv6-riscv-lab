@@ -7,11 +7,11 @@
 
 void scheduler_init(void);
 int sched_holding(void);
-void sched_lock(void);
-void sched_unlock(void);
 int chan_holding(void);
 void sleep_lock(void);
 void sleep_unlock(void);
+int sleep_lock_irqsave(void);
+void sleep_unlock_irqrestore(int state);
 void scheduler_run(void);
 void scheduler_yield(void);
 void scheduler_pause(struct spinlock *lk);
@@ -28,8 +28,11 @@ void wakeup_on_chan(void *chan);
 void idle_proc_init(void);
 
 // Context Switching Helpers
+// Note context_switch_prepare will not acquire rq_lock,
+// so caller must ensure rq_lock is held before calling it.
+// And context_switch_finish will release the rq_lock of the target CPU
 void context_switch_prepare(struct proc *prev, struct proc *next);
-void context_switch_finish(struct proc *prev, struct proc *next);
+void context_switch_finish(struct proc *prev, struct proc *next, int intr);
 
 // Timer related
 void sched_timer_init(void);

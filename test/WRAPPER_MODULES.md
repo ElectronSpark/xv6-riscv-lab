@@ -18,7 +18,7 @@ For mock tests, wrapper interdependencies are avoided because:
 - Direct structure manipulation is sufficient for testing
 
 Instead of calling other wrapper functions, each wrapper directly manipulates
-the structures it needs. For example, instead of calling `__wrap_spin_acquire()`,
+the structures it needs. For example, instead of calling `__wrap_spin_lock()`,
 a wrapper will directly set `lock->locked = 1`.
 
 ## Wrapper Modules
@@ -32,8 +32,8 @@ Some wrappers support optional tracking for test instrumentation. The tracking i
 ### Tracking Types
 
 **spinlock_tracking_t**: Tracks spinlock operations
-- `spin_init_count`, `spin_acquire_count`, `spin_release_count`
-- `last_spin_init`, `last_spin_acquire`, `last_spin_release`
+- `spin_init_count`, `spin_lock_count`, `spin_unlock_count`
+- `last_spin_init`, `last_spin_lock`, `last_spin_unlock`
 - `last_spin_name`
 
 **proc_queue_tracking_t**: Tracks proc_queue operations
@@ -70,8 +70,8 @@ Tracking is completely optional - wrappers work without it. When tracking is dis
 **Purpose:** Spinlock synchronization primitives with optional tracking
 **Functions:**
 - `__wrap_spin_init()` - Initialize spinlock
-- `__wrap_spin_acquire()` - Acquire spinlock
-- `__wrap_spin_release()` - Release spinlock
+- `__wrap_spin_lock()` - Acquire spinlock
+- `__wrap_spin_unlock()` - Release spinlock
 - `__wrap_spin_holding()` - Check if holding spinlock
 - `__wrap_spin_lock()` - Lock (alias for acquire)
 - `__wrap_spin_unlock()` - Unlock (alias for release)
@@ -279,7 +279,7 @@ Example link options:
 ```cmake
 target_link_options(ut_semaphore PRIVATE 
     -Wl,--wrap=mycpu,--wrap=myproc
-    -Wl,--wrap=spin_init,--wrap=spin_acquire,--wrap=spin_release
+    -Wl,--wrap=spin_init,--wrap=spin_lock,--wrap=spin_unlock
     -Wl,--wrap=proc_queue_init,--wrap=proc_queue_wait
     -Wl,--wrap=proc_queue_wakeup,--wrap=proc_queue_wakeup_all
 )

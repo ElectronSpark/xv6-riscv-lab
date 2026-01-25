@@ -156,7 +156,7 @@ STATIC_INLINE void __buddy_pool_lock(uint64 order) {
     if (order > PAGE_BUDDY_MAX_ORDER) {
         panic("__buddy_pool_lock: invalid order");
     }
-    spin_acquire(&__buddy_pools[order].lock);
+    spin_lock(&__buddy_pools[order].lock);
 }
 
 // Release the spinlock of a specific buddy pool
@@ -164,7 +164,7 @@ STATIC_INLINE void __buddy_pool_unlock(uint64 order) {
     if (order > PAGE_BUDDY_MAX_ORDER) {
         panic("__buddy_pool_unlock: invalid order");
     }
-    spin_release(&__buddy_pools[order].lock);
+    spin_unlock(&__buddy_pools[order].lock);
 }
 
 // Acquire spinlocks for a range of buddy pools (from low to high order)
@@ -175,7 +175,7 @@ STATIC_INLINE void __buddy_pool_lock_range(uint64 order_start,
         panic("__buddy_pool_lock_range: invalid order range");
     }
     for (uint64 i = order_start; i <= order_end; i++) {
-        spin_acquire(&__buddy_pools[i].lock);
+        spin_lock(&__buddy_pools[i].lock);
     }
 }
 
@@ -186,7 +186,7 @@ STATIC_INLINE void __buddy_pool_unlock_range(uint64 order_start,
         panic("__buddy_pool_unlock_range: invalid order range");
     }
     for (int64 i = order_end; i >= (int64)order_start; i--) {
-        spin_release(&__buddy_pools[i].lock);
+        spin_unlock(&__buddy_pools[i].lock);
     }
 }
 
@@ -520,7 +520,7 @@ STATIC page_t *__pcpu_cache_get(uint64 order, uint64 flags) {
         pop_off();
     } else {
         // Use spinlock for orders > 0 (for future cross-CPU stealing)
-        spin_acquire(&cache->lock);
+        spin_lock(&cache->lock);
         if (!LIST_IS_EMPTY(&cache->lru_head)) {
             page =
                 list_node_pop_back(&cache->lru_head, page_t, buddy.lru_entry);
@@ -528,7 +528,7 @@ STATIC page_t *__pcpu_cache_get(uint64 order, uint64 flags) {
                 PCPU_CACHE_COUNT_DEC(cache);
             }
         }
-        spin_release(&cache->lock);
+        spin_unlock(&cache->lock);
     }
 
     if (page != NULL) {
@@ -575,7 +575,7 @@ STATIC int __pcpu_cache_put(page_t *page, uint64 order) {
         pop_off();
     } else {
         // Use spinlock for orders > 0 (for future cross-CPU stealing)
-        spin_acquire(&cache->lock);
+        spin_lock(&cache->lock);
         uint32 current_count = PCPU_CACHE_COUNT_LOAD(cache);
         if (current_count < cache_limit) {
             // Initialize page as buddy before caching
@@ -585,7 +585,7 @@ STATIC int __pcpu_cache_put(page_t *page, uint64 order) {
             PCPU_CACHE_COUNT_INC(cache);
             ret = 0;
         }
-        spin_release(&cache->lock);
+        spin_unlock(&cache->lock);
     }
 
     return ret;
@@ -958,14 +958,14 @@ void page_lock_acquire(page_t *page) {
     if (page == NULL) {
         return;
     }
-    spin_acquire(&page->lock);
+    spin_lock(&page->lock);
 }
 
 void page_lock_release(page_t *page) {
     if (page == NULL) {
         return;
     }
-    spin_release(&page->lock);
+    spin_unlock(&page->lock);
 }
 
 void page_lock_assert_holding(page_t *page) {

@@ -325,7 +325,7 @@ virtio_disk_rw(int diskno, struct bio *bio, uint64 sector, void *buf, size_t siz
   completion_t comp;
   completion_init(&comp);
 
-  spin_acquire(&disk->vdisk_lock);
+  spin_lock(&disk->vdisk_lock);
 
   // the spec's Section 5.2 says that legacy block operations use
   // three descriptors: one for type/reserved/sector, one for the
@@ -394,24 +394,24 @@ virtio_disk_rw(int diskno, struct bio *bio, uint64 sector, void *buf, size_t siz
   // @TODO: not allow interrupt here
   disk->info[idx[0]].done = false;
   disk->info[idx[0]].comp = &comp;
-  spin_release(&disk->vdisk_lock);
+  spin_unlock(&disk->vdisk_lock);
 
   wait_for_completion(&comp);
 
-  spin_acquire(&disk->vdisk_lock);
+  spin_lock(&disk->vdisk_lock);
   assert(disk->info[idx[0]].done == true, "virtio_disk_rw: not done");
   disk->info[idx[0]].comp = NULL;
   disk->info[idx[0]].bio = NULL;
   free_chain(disk, idx[0]);
 
-  spin_release(&disk->vdisk_lock);
+  spin_unlock(&disk->vdisk_lock);
 }
 
 static void virtio_disk_intr(int irq, void *data, device_t *dev)
 {
   uint64 diskno = (uint64)data;
   struct disk *disk = &disks[diskno];
-  spin_acquire(&disk->vdisk_lock);
+  spin_lock(&disk->vdisk_lock);
 
   // the device won't raise another interrupt until we tell it
   // we've seen this interrupt, which the following line does.
@@ -451,5 +451,5 @@ static void virtio_disk_intr(int irq, void *data, device_t *dev)
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
   }
 
-  spin_release(&disk->vdisk_lock);
+  spin_unlock(&disk->vdisk_lock);
 }

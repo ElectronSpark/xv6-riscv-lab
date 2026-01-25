@@ -1021,7 +1021,7 @@ void vm_wunlock(vm_t *vm) {
  * @warning Do not sleep while holding this lock
  */
 void vm_pgtable_lock(vm_t *vm) {
-    spin_acquire(&vm->spinlock);
+    spin_lock(&vm->spinlock);
 }
 
 /**
@@ -1029,7 +1029,7 @@ void vm_pgtable_lock(vm_t *vm) {
  * @param vm VM to unlock
  */
 void vm_pgtable_unlock(vm_t *vm) {
-    spin_release(&vm->spinlock);
+    spin_unlock(&vm->spinlock);
 }
 
 // Magic for detecting double-destroy of VM.

@@ -45,7 +45,7 @@ sockclose(struct sock *si)
   struct mbuf *m;
 
   // remove from list of sockets
-  spin_acquire(&sock_lock);
+  spin_lock(&sock_lock);
   pos = &sockets;
   while (*pos) {
     if (*pos == si){
@@ -54,7 +54,7 @@ sockclose(struct sock *si)
     }
     pos = &(*pos)->next;
   }
-  spin_release(&sock_lock);
+  spin_unlock(&sock_lock);
 
   // free any pending mbufs
   while (!mbufq_empty(&si->rxq)) {
@@ -72,16 +72,16 @@ sockread(struct sock *si, uint64 addr, int n)
   struct mbuf *m;
   int len;
 
-  spin_acquire(&si->lock);
+  spin_lock(&si->lock);
   while (mbufq_empty(&si->rxq) && !signal_terminated(pr)) {
     sleep_on_chan(&si->rxq, &si->lock);
   }
   if (signal_terminated(pr)) {
-    spin_release(&si->lock);
+    spin_unlock(&si->lock);
     return -1;
   }
   m = mbufq_pophead(&si->rxq);
-  spin_release(&si->lock);
+  spin_unlock(&si->lock);
 
   len = m->len;
   if (len > n)
@@ -123,21 +123,21 @@ sockrecvudp(struct mbuf *m, uint32 raddr, uint16 lport, uint16 rport)
   //
   struct sock *si;
 
-  spin_acquire(&sock_lock);
+  spin_lock(&sock_lock);
   si = sockets;
   while (si) {
     if (si->raddr == raddr && si->lport == lport && si->rport == rport)
       goto found;
     si = si->next;
   }
-  spin_release(&sock_lock);
+  spin_unlock(&sock_lock);
   mbuffree(m);
   return;
 
 found:
-  spin_acquire(&si->lock);
+  spin_lock(&si->lock);
   mbufq_pushtail(&si->rxq, m);
   wakeup_on_chan(&si->rxq);
-  spin_release(&si->lock);
-  spin_release(&sock_lock);
+  spin_unlock(&si->lock);
+  spin_unlock(&sock_lock);
 }

@@ -14,10 +14,10 @@ typedef struct {
     int spin_init_count;
     struct spinlock *last_spin_init;
     const char *last_spin_name;
-    int spin_acquire_count;
-    struct spinlock *last_spin_acquire;
-    int spin_release_count;
-    struct spinlock *last_spin_release;
+    int spin_lock_count;
+    struct spinlock *last_spin_lock;
+    int spin_unlock_count;
+    struct spinlock *last_spin_unlock;
 } spinlock_tracking_t;
 
 // Tracking structure for proc/cpu operations

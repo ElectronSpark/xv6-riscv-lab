@@ -192,10 +192,10 @@ static int rcu_gp_completed(void) {
 
 // Wake up processes waiting in synchronize_rcu()
 static void rcu_wakeup_gp_waiters(void) {
-    spin_acquire(&rcu_gp_waitq_lock);
+    spin_lock(&rcu_gp_waitq_lock);
     // Wake up all waiters - they will check if their GP has completed
     proc_queue_wakeup_all(&rcu_gp_waitq, 0, 0);
-    spin_release(&rcu_gp_waitq_lock);
+    spin_unlock(&rcu_gp_waitq_lock);
 }
 
 // ============================================================================
@@ -330,11 +330,11 @@ static void rcu_cblist_enqueue(rcu_cpu_data_t *rcp, rcu_head_t *head) {
 
 // Start a new grace period
 static void rcu_start_gp(void) {
-    spin_acquire(&rcu_gp_lock);
+    spin_lock(&rcu_gp_lock);
 
     // Check if a grace period is already in progress
     if (__atomic_load_n(&rcu_state.gp_in_progress, __ATOMIC_ACQUIRE)) {
-        spin_release(&rcu_gp_lock);
+        spin_unlock(&rcu_gp_lock);
         return;
     }
 
@@ -343,7 +343,7 @@ static void rcu_start_gp(void) {
     __atomic_store_n(&rcu_state.gp_start_timestamp, now, __ATOMIC_RELEASE);
     __atomic_store_n(&rcu_state.gp_in_progress, 1, __ATOMIC_RELEASE);
 
-    spin_release(&rcu_gp_lock);
+    spin_unlock(&rcu_gp_lock);
 }
 
 // Advance to next grace period if current one is complete
@@ -356,12 +356,12 @@ static void rcu_advance_gp(void) {
         return;
     }
 
-    spin_acquire(&rcu_gp_lock);
+    spin_lock(&rcu_gp_lock);
 
     // Double-check under lock
     if (!__atomic_load_n(&rcu_state.gp_in_progress, __ATOMIC_ACQUIRE) ||
         !rcu_gp_completed()) {
-        spin_release(&rcu_gp_lock);
+        spin_unlock(&rcu_gp_lock);
         return;
     }
 
@@ -371,7 +371,7 @@ static void rcu_advance_gp(void) {
     __atomic_store_n(&rcu_state.gp_in_progress, 0, __ATOMIC_RELEASE);
     __atomic_fetch_add(&rcu_state.gp_count, 1, __ATOMIC_RELEASE);
 
-    spin_release(&rcu_gp_lock);
+    spin_unlock(&rcu_gp_lock);
 
     // Note: Each CPU advances its own callbacks during rcu_process_callbacks()
     // or rcu_note_context_switch(). We don't access other CPUs' data here.
@@ -708,11 +708,11 @@ void rcu_barrier(void) {
 // This is faster than normal GP but has higher overhead (Linux-inspired)
 // In timestamp-based RCU, we just wait for all CPUs to context switch
 static void rcu_expedited_gp(void) {
-    spin_acquire(&rcu_gp_lock);
+    spin_lock(&rcu_gp_lock);
 
     // Check if expedited GP already in progress
     if (__atomic_load_n(&rcu_state.expedited_in_progress, __ATOMIC_ACQUIRE)) {
-        spin_release(&rcu_gp_lock);
+        spin_unlock(&rcu_gp_lock);
         return;
     }
 
@@ -723,7 +723,7 @@ static void rcu_expedited_gp(void) {
     // Record start timestamp
     uint64 exp_start = r_time();
     
-    spin_release(&rcu_gp_lock);
+    spin_unlock(&rcu_gp_lock);
 
     // Wait for all CPUs to context switch (with timeout)
     int max_wait = 10000;
@@ -757,10 +757,10 @@ static void rcu_expedited_gp(void) {
     }
 
     // Complete expedited GP
-    spin_acquire(&rcu_gp_lock);
+    spin_lock(&rcu_gp_lock);
     __atomic_store_n(&rcu_state.expedited_in_progress, 0, __ATOMIC_RELEASE);
     __atomic_fetch_add(&rcu_state.expedited_count, 1, __ATOMIC_RELEASE);
-    spin_release(&rcu_gp_lock);
+    spin_unlock(&rcu_gp_lock);
 }
 
 void synchronize_rcu_expedited(void) {

@@ -36,7 +36,7 @@ static int ramdisk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
   struct bio_vec bvec;
   struct bio_iter iter;
 
-  spin_acquire(&ramdisk.lock);
+  spin_lock(&ramdisk.lock);
 
   bio_start_io_acct(bio);
   bio_for_each_segment(&bvec, bio, &iter) {
@@ -44,7 +44,7 @@ static int ramdisk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
     page_t *page = bvec.bv_page;
     
     if (page == NULL) {
-      spin_release(&ramdisk.lock);
+      spin_unlock(&ramdisk.lock);
       bio_end_io_acct(bio);
       bio_endio(bio);
       return -EINVAL;
@@ -57,7 +57,7 @@ static int ramdisk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
     if (offset + bvec.len > ramdisk.size_bytes) {
       printf("ramdisk: access beyond end of device (offset=%lx, len=%d, size=%lx)\n",
              offset, bvec.len, ramdisk.size_bytes);
-      spin_release(&ramdisk.lock);
+      spin_unlock(&ramdisk.lock);
       bio_end_io_acct(bio);
       bio_endio(bio);
       return -EINVAL;
@@ -65,7 +65,7 @@ static int ramdisk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
 
     void *pa = (void *)__page_to_pa(page);
     if (pa == NULL) {
-      spin_release(&ramdisk.lock);
+      spin_unlock(&ramdisk.lock);
       bio_end_io_acct(bio);
       bio_endio(bio);
       return -EINVAL;
@@ -85,7 +85,7 @@ static int ramdisk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
     iter.size_done += bvec.len;
   }
 
-  spin_release(&ramdisk.lock);
+  spin_unlock(&ramdisk.lock);
   
   bio_end_io_acct(bio);
   bio_endio(bio);

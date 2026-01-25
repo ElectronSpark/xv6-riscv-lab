@@ -24,11 +24,11 @@ static void __dev_tab_lock_init(void) {
 }
 
 static void __dev_tab_lock(void) {
-    spin_acquire(&__dev_tab_spinlock);
+    spin_lock(&__dev_tab_spinlock);
 }
 
 static void __dev_tab_unlock(void) {
-    spin_release(&__dev_tab_spinlock);
+    spin_unlock(&__dev_tab_spinlock);
 }
 
 static void __dev_tab_assert_held(void) {

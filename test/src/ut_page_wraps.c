@@ -52,7 +52,7 @@ void __wrap_page_lock_acquire(page_t *page) {
     (void)page;
 }
 
-void __wrap_page_lock_spin_release(page_t *page) {
+void __wrap_page_lock_spin_unlock(page_t *page) {
     (void)page;
 }
 
@@ -85,14 +85,14 @@ void __wrap_panic(char *str) {
     fail_msg("Panic encountered: %s", str);
 }
 
-void __wrap_spin_acquire(struct spinlock *lock) {
+void __wrap_spin_lock(struct spinlock *lock) {
     if (lock == NULL) {
         return;
     }
     lock->locked = 1;
 }
 
-void __wrap_spin_release(struct spinlock *lock) {
+void __wrap_spin_unlock(struct spinlock *lock) {
     if (lock == NULL) {
         return;
     }

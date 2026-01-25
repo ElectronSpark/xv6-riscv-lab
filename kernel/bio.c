@@ -158,7 +158,7 @@ void binit(void) {
 STATIC struct buf *bget(uint dev, uint blockno) {
     struct buf *b, *b1, *tmp;
 
-    spin_acquire(&bcache.lock);
+    spin_lock(&bcache.lock);
 
     // Is the block already cached?
     b = __bcache_hlist_get(dev, blockno);
@@ -168,7 +168,7 @@ STATIC struct buf *bget(uint dev, uint blockno) {
             list_node_detach(b, lru_entry);
         }
         b->refcnt++;
-        spin_release(&bcache.lock);
+        spin_unlock(&bcache.lock);
         assert(mutex_lock(&b->lock) == 0, "bget: failed to lock buffer");
         return b;
     }
@@ -206,7 +206,7 @@ STATIC struct buf *bget(uint dev, uint blockno) {
                 printf("dev: %d, blockno: %d\n", dev, blockno);
                 panic("bget: failed to push recycled buffer into hash list");
             }
-            spin_release(&bcache.lock);
+            spin_unlock(&bcache.lock);
             assert(mutex_lock(&b->lock) == 0, "bget: failed to lock buffer");
             return b;
         }
@@ -286,24 +286,24 @@ void brelse(struct buf *b) {
 
     mutex_unlock(&b->lock);
 
-    spin_acquire(&bcache.lock);
+    spin_lock(&bcache.lock);
     b->refcnt--;
     if (b->refcnt == 0) {
         // no one is waiting for it.
         list_node_push(&bcache.lru_entry, b, lru_entry);
     }
 
-    spin_release(&bcache.lock);
+    spin_unlock(&bcache.lock);
 }
 
 void bpin(struct buf *b) {
-    spin_acquire(&bcache.lock);
+    spin_lock(&bcache.lock);
     b->refcnt++;
-    spin_release(&bcache.lock);
+    spin_unlock(&bcache.lock);
 }
 
 void bunpin(struct buf *b) {
-    spin_acquire(&bcache.lock);
+    spin_lock(&bcache.lock);
     b->refcnt--;
-    spin_release(&bcache.lock);
+    spin_unlock(&bcache.lock);
 }

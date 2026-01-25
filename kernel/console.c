@@ -163,13 +163,13 @@ consoleread(cdev_t *cdev, bool user_dst, void *buffer, size_t n)
   uint64 dst = (uint64)buffer;
 
   target = n;
-  spin_acquire(&cons.lock);
+  spin_lock(&cons.lock);
   while(n > 0){
     // wait until interrupt handler has put some
     // input into cons.buffer.
     while(cons.r == cons.w){
       if(killed(myproc())){
-        spin_release(&cons.lock);
+        spin_unlock(&cons.lock);
         return -1;
       }
       sleep_on_chan(&cons.r, &cons.lock);
@@ -200,7 +200,7 @@ consoleread(cdev_t *cdev, bool user_dst, void *buffer, size_t n)
       break;
     }
   }
-  spin_release(&cons.lock);
+  spin_unlock(&cons.lock);
 
   return target - n;
 }
@@ -240,7 +240,7 @@ extern void uartintr(int irq, void *data, device_t *dev);
 void
 consoleintr(int c)
 {
-  spin_acquire(&cons.lock);
+  spin_lock(&cons.lock);
 
   switch(c){
   case C('P'):  // Print process list.
@@ -287,7 +287,7 @@ consoleintr(int c)
     break;
   }
   
-  spin_release(&cons.lock);
+  spin_unlock(&cons.lock);
 }
 
 void
