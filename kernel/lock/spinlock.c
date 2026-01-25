@@ -6,7 +6,7 @@
 #include "lock/spinlock.h"
 #include "riscv.h"
 #include "proc/proc.h"
-#include "percpu.h"
+#include <smp/percpu.h>
 #include "defs.h"
 #include "printf.h"
 

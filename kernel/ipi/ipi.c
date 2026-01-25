@@ -15,10 +15,10 @@
 #include "proc/sched.h"
 #include "trap.h"
 #include "sbi.h"
-#include "ipi.h"
+#include <smp/ipi.h>
 #include "errno.h"
 #include "proc/proc.h"
-#include "percpu.h"
+#include <smp/percpu.h>
 #include "string.h"
 
 // Per-CPU state, placed in special linker section for trampoline access

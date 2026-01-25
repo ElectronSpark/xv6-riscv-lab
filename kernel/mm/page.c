@@ -53,7 +53,7 @@
 #include <mm/page.h>
 #include "page_private.h"
 #include <mm/slab.h>
-#include "percpu.h"
+#include <smp/percpu.h>
 #include <mm/early_allocator.h>
 #include "dev/fdt.h"
 #include <mm/memstat.h>

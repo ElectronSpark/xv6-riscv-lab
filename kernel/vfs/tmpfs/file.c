@@ -8,7 +8,7 @@
 #include "string.h"
 #include "riscv.h"
 #include "defs.h"
-#include "atomic.h"
+#include <smp/atomic.h>
 #include "param.h"
 #include "errno.h"
 #include "bits.h"

@@ -15,7 +15,7 @@
 #include <mm/page.h>
 #include "bits.h"
 #include "errno.h"
-#include "percpu.h"
+#include <smp/percpu.h>
 
 #ifndef INT_MAX
 #define INT_MAX 0x7FFFFFFF

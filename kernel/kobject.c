@@ -9,7 +9,7 @@
 #include <mm/slab.h>
 #include "list.h"
 #include "kobject.h"
-#include "atomic.h"
+#include <smp/atomic.h>
 
 static list_node_t __kobject_list = LIST_ENTRY_INITIALIZED(__kobject_list);
 static int64 __kobject_count = 0;

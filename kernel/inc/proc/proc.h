@@ -10,8 +10,8 @@
 #include "signal_types.h"
 #include "mm/vm_types.h"
 #include "vfs/vfs_types.h"
-#include "atomic.h"
-#include "percpu.h"
+#include <smp/atomic.h>
+#include <smp/percpu.h>
 #include "lock/rcu_type.h"
 
 struct vfs_inode;

@@ -4,7 +4,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
-#include "atomic.h"
+#include <smp/atomic.h>
 #include "timer/timer.h"
 
 void start_kernel(int hartid, void *fdt_base, bool is_boot_hart);

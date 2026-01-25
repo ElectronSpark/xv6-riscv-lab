@@ -10,7 +10,7 @@
 #include "defs.h"
 #include "printf.h"
 #include "lock/spinlock.h"
-#include "percpu.h"
+#include <smp/percpu.h>
 #include "proc/proc.h"
 #include "proc/sched.h"
 #include "proc/rq.h"

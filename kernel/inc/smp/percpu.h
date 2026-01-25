@@ -3,7 +3,7 @@
 
 #include "param.h"
 #include "riscv.h"
-#include "percpu_types.h"
+#include <smp/percpu_types.h>
 #include "printf.h"
 
 extern struct cpu_local cpus[NCPU];

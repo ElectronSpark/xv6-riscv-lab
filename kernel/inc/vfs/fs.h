@@ -3,7 +3,7 @@
 
 #include "vfs/vfs_types.h"
 #include "printf.h"
-#include "atomic.h"
+#include <smp/atomic.h>
 #include "clone_flags.h"
 
 #define VFS_PATH_MAX 65535

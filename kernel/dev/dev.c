@@ -10,7 +10,7 @@
 #include <mm/slab.h>
 #include <mm/page.h>
 #include <errno.h>
-#include "atomic.h"
+#include <smp/atomic.h>
 #include "lock/rcu.h"
 
 // RCU-protected device table

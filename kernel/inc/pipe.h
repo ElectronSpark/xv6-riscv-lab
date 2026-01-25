@@ -3,7 +3,7 @@
 
 #include "lock/spinlock.h"
 #include "proc/proc_queue_type.h"
-#include "atomic.h"
+#include <smp/atomic.h>
 
 #define PIPESIZE 512
 

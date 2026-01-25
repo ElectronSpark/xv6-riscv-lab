@@ -13,7 +13,7 @@
 #include <mm/page.h>
 #include <mm/slab.h>
 #include "bits.h"
-#include "percpu.h"
+#include <smp/percpu.h>
 
 STATIC slab_cache_t __kmm_slab_cache[SLAB_CACHE_NUMS][1];
 STATIC char __kmm_slab_names[SLAB_CACHE_NUMS][32] = { 0 };

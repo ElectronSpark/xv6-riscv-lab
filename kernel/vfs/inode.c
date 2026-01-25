@@ -19,7 +19,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
-#include "atomic.h"
+#include <smp/atomic.h>
 #include "param.h"
 #include "errno.h"
 #include "bits.h"

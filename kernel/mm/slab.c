@@ -71,7 +71,7 @@
 #include "list.h"
 #include <mm/slab.h>
 #include "slab_private.h"
-#include "percpu.h"
+#include <smp/percpu.h>
 
 // ============================================================================
 // Global Slab Cache Registry

@@ -88,12 +88,12 @@
 #include <mm/memlayout.h>
 #include <mm/page.h>
 #include "param.h"
-#include "percpu.h"
+#include <smp/percpu.h>
 #include "printf.h"
 #include "proc/proc.h"
 #include "lock/spinlock.h"
 #include "lock/rwlock.h"
-#include "atomic.h"
+#include <smp/atomic.h>
 #include "rbtree.h"
 #include "riscv.h"
 #include <mm/slab.h>

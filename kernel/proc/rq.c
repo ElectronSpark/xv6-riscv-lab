@@ -11,7 +11,7 @@
 #include <mm/slab.h>
 #include "proc/rq.h"
 #include "rbtree.h"
-#include "atomic.h"
+#include <smp/atomic.h>
 #include "string.h"
 #include "bits.h"
 #include "errno.h"

@@ -12,7 +12,7 @@
 #include "param.h"
 #include "sbi.h"
 #include "printf.h"
-#include "percpu.h"
+#include <smp/percpu.h>
 
 // Extension ID to probe value mapping
 static const long sbi_ext_ids[SBI_EXT_ID_COUNT] = {

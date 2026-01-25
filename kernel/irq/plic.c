@@ -4,7 +4,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
-#include "percpu.h"
+#include <smp/percpu.h>
 #include "trap.h"
 #include "dev/uart.h"
 #include "dev/virtio.h"

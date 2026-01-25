@@ -4,7 +4,7 @@
 #include "string.h"
 #include "riscv.h"
 #include "defs.h"
-#include "percpu.h"
+#include <smp/percpu.h>
 #include "printf.h"
 #include "proc/sched.h"
 #include "signal.h"
@@ -16,7 +16,7 @@
 #include "trap.h"
 #include "lock/rcu.h"
 #include "sbi.h"
-#include "ipi.h"
+#include <smp/ipi.h>
 #include "dev/fdt.h"
 #include <mm/early_allocator.h>
 #include "timer/goldfish_rtc.h"

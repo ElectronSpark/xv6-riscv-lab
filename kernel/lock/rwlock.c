@@ -6,7 +6,7 @@
 #include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "lock/rwlock.h"
-#include "percpu.h"
+#include <smp/percpu.h>
 #include "proc/proc.h"
 #include "proc/proc_queue.h"
 #include "proc/sched.h"

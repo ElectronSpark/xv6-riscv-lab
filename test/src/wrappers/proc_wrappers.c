@@ -21,7 +21,7 @@
 #endif
 // Note: pagetable_t is defined in riscv.h, don't redefine it here
 
-#include "percpu_types.h"
+#include <smp/percpu_types.h>
 #include "proc/proc.h"
 #include "proc/proc_queue.h"
 #include "spinlock.h"
