@@ -12,7 +12,6 @@
 #include "proc/sched.h"
 #include "mutex_types.h"
 #include "rwlock.h"
-#include "completion.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
 #include "vfs_private.h"
@@ -1257,6 +1256,27 @@ void vfs_superblock_put(struct vfs_superblock *sb) {
  *
  * Returns:
  *   - inode* (locked) on success with refcount=1, or ERR_PTR(errno).
+ *
+ * EAGAIN Retry Logic:
+ *   This function may return -EAGAIN if the newly allocated inode number
+ *   collides with an inode that is currently being destroyed (has destroying=1).
+ *   
+ *   When the caller receives -EAGAIN, it MUST:
+ *     1. Release the directory inode mutex (vfs_iunlock)
+ *     2. Release the superblock write lock (vfs_superblock_unlock)
+ *     3. End any active transaction (end_transaction)
+ *     4. Yield to let the destroying thread complete
+ *     5. Retry the entire operation from the beginning (re-acquire transaction,
+ *        superblock lock, and inode mutex in that order)
+ *
+ *   This ordering is critical to avoid deadlock:
+ *     - Lock order: transaction → superblock lock → inode mutex
+ *     - The destroying thread releases locks BEFORE calling begin_transaction
+ *     - If we hold locks while waiting for the destroying thread, and it's
+ *       waiting for a transaction held by someone waiting for our locks,
+ *       we have a circular dependency (deadlock)
+ *
+ *   Callers that handle -EAGAIN: vfs_create, vfs_mknod, vfs_mkdir, vfs_symlink
  */
 struct vfs_inode *vfs_alloc_inode(struct vfs_superblock *sb) {
     if (sb == NULL) {
@@ -1271,20 +1291,14 @@ struct vfs_inode *vfs_alloc_inode(struct vfs_superblock *sb) {
         return inode;
     }
     __vfs_inode_init(inode);
-retry_add:;
     struct vfs_inode *existing = vfs_add_inode(sb, inode);
     if (IS_ERR_OR_NULL(existing)) {
         if (PTR_ERR(existing) == -EAGAIN) {
             // An inode with the same number is being destroyed.
-            // Release sb lock to let destruction complete, then retry.
-            vfs_superblock_unlock(sb);
-            yield();  // Give the destroying thread a chance to run
-            vfs_superblock_wlock(sb);
-            if (!sb->valid) {
-                inode->ops->free_inode(inode);
-                return ERR_PTR(-EINVAL);
-            }
-            goto retry_add;
+            // Return EAGAIN to caller - caller must release all locks (including
+            // inode mutex and transaction) before retrying, to avoid deadlock.
+            inode->ops->free_inode(inode);
+            return ERR_PTR(-EAGAIN);
         }
         inode->ops->free_inode(inode);
         if (existing == NULL) {
@@ -1304,6 +1318,19 @@ retry_add:;
  *
  * Returns:
  *   - inode* (locked) on success or ERR_PTR(errno) on failure.
+ *
+ * EAGAIN Retry Logic:
+ *   This function may return -EAGAIN if the requested inode is currently
+ *   being destroyed (has destroying=1 set by vfs_iput).
+ *   
+ *   When the caller receives -EAGAIN, it MUST:
+ *     1. Release any held inode mutexes
+ *     2. Release the superblock write lock
+ *     3. End any active transaction
+ *     4. Yield to let the destroying thread complete
+ *     5. Retry the entire operation from the beginning
+ *
+ *   See vfs_alloc_inode documentation for detailed deadlock explanation.
  */
 struct vfs_inode *vfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
     if (sb == NULL) {
@@ -1318,20 +1345,14 @@ struct vfs_inode *vfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         return inode;
     }
     __vfs_inode_init(inode);
-retry_add:;
     struct vfs_inode *existing = vfs_add_inode(sb, inode);
     if (IS_ERR_OR_NULL(existing)) {
         if (PTR_ERR(existing) == -EAGAIN) {
             // An inode with the same number is being destroyed.
-            // Release sb lock to let destruction complete, then retry.
-            vfs_superblock_unlock(sb);
-            yield();  // Give the destroying thread a chance to run
-            vfs_superblock_wlock(sb);
-            if (!sb->valid) {
-                inode->ops->free_inode(inode);
-                return ERR_PTR(-EINVAL);
-            }
-            goto retry_add;
+            // Return EAGAIN to caller - caller must release all locks (including
+            // inode mutex and transaction) before retrying, to avoid deadlock.
+            inode->ops->free_inode(inode);
+            return ERR_PTR(-EAGAIN);
         }
         inode->ops->free_inode(inode);
         if (existing == NULL) {

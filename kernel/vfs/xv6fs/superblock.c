@@ -360,6 +360,53 @@ static int xv6fs_recover_orphans(struct vfs_superblock *sb) {
     return 0;
 }
 
+/*
+ * Transaction Callbacks for VFS-managed operations
+ *
+ * DESIGN: VFS Transaction Management vs FS-Internal Management
+ * ============================================================
+ *
+ * Filesystems have two choices for transaction management:
+ *
+ * 1. REGISTER CALLBACKS (begin_transaction/end_transaction):
+ *    - VFS manages transactions for METADATA operations
+ *    - VFS calls begin_transaction BEFORE acquiring any locks
+ *    - VFS calls end_transaction AFTER releasing all locks
+ *    - FS inode operations (create, mkdir, unlink, link, rename, etc.)
+ *      must NOT call begin_op/end_op internally
+ *    - This ensures correct lock ordering: transaction → locks
+ *    - Use this for filesystems with simple transaction requirements
+ *
+ * 2. DO NOT REGISTER CALLBACKS (set to NULL):
+ *    - FS manages ALL transactions internally
+ *    - FS is responsible for correct lock ordering
+ *    - FS inode operations must call begin_op/end_op themselves
+ *    - Use this for filesystems that need complex transaction control
+ *      (e.g., batching, nested transactions, custom commit logic)
+ *    - WARNING: Must be careful about lock ordering to avoid deadlock
+ *
+ * xv6fs HYBRID APPROACH:
+ * ----------------------
+ * xv6fs registers callbacks for metadata operations (create, unlink, etc.)
+ * because these are single-transaction operations that benefit from VFS
+ * lock ordering management.
+ *
+ * However, FILE OPERATIONS (write, truncate) manage transactions INTERNALLY:
+ * - File write needs multiple transactions (batching for large writes)
+ * - Truncate needs batched transactions for large files
+ * - VFS holds inode lock before calling file ops, so VFS can't wrap them
+ * - These ops call xv6fs_begin_op/end_op directly
+ *
+ * This hybrid approach works because:
+ * - Metadata ops use directory inodes + superblock lock
+ * - File ops use file inodes only (no superblock lock)
+ * - Different lock sets means no direct circular dependency
+ *
+ * Lock ordering summary:
+ * - Metadata ops (VFS-managed): transaction → superblock_wlock → inode_mutex
+ * - File ops (FS-managed): inode_mutex → transaction (reversed but safe)
+ */
+
 static int xv6fs_begin_transaction_op(struct vfs_superblock *sb) {
     struct xv6fs_superblock *xv6_sb = container_of(sb, struct xv6fs_superblock, vfs_sb);
     xv6fs_begin_op(xv6_sb);

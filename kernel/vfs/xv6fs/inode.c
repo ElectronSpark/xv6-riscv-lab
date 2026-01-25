@@ -59,11 +59,7 @@ int xv6fs_sync_inode(struct vfs_inode *inode) {
     if (inode == NULL) return -EINVAL;
     
     struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
-    struct xv6fs_superblock *xv6_sb = container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
-    
-    xv6fs_begin_op(xv6_sb);
     xv6fs_iupdate(ip);
-    xv6fs_end_op(xv6_sb);
     
     inode->dirty = 0;
     return 0;
@@ -727,7 +723,7 @@ void xv6fs_destroy_inode(struct vfs_inode *inode) {
     struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
     struct xv6fs_superblock *xv6_sb = container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
     
-    xv6fs_begin_op(xv6_sb);
+    // Note: Transaction is managed by VFS layer (vfs_iput calls begin/end_transaction)
     xv6fs_itrunc(ip);
     
     // Mark inode as free on disk
@@ -736,8 +732,6 @@ void xv6fs_destroy_inode(struct vfs_inode *inode) {
     dip->type = 0;
     xv6fs_log_write(xv6_sb, bp);
     brelse(bp);
-    
-    xv6fs_end_op(xv6_sb);
 }
 
 void xv6fs_free_inode(struct vfs_inode *inode) {

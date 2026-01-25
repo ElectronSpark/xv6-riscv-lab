@@ -1,5 +1,20 @@
 /*
  * xv6fs block allocation and truncation
+ *
+ * TRANSACTION MANAGEMENT: FS-INTERNAL (not VFS-managed)
+ * =====================================================
+ * File operations (write, truncate) manage transactions internally because:
+ * 1. They require BATCHED transactions for large files (multiple begin/end cycles)
+ * 2. VFS holds inode lock before calling file ops, so VFS can't wrap them
+ *
+ * This is the "hybrid approach" documented in superblock.c:
+ * - Metadata ops: VFS manages transactions via callbacks
+ * - File ops: FS manages transactions internally (here)
+ *
+ * Lock ordering for truncate: inode_mutex → transaction
+ * (Reversed from metadata ops, but safe because different inodes are involved)
+ *
+ * See superblock.c "Transaction Callbacks" comment for full design explanation.
  */
 
 #include "types.h"

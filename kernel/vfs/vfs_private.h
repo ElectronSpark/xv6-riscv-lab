@@ -2,8 +2,8 @@
 #define KERNEL_VIRTUAL_FILE_SYSTEM_PRIVATE_H
 
 #include "vfs/vfs_types.h"
-#include "completion.h"
 #include "printf.h"
+#include "completion.h"
 
 extern struct vfs_inode vfs_root_inode;
 
@@ -70,16 +70,21 @@ static inline void __vfs_i_reinit_completion(struct vfs_inode *inode) {
     completion_reinit(&inode->completion);
 }
 
-// Validate that the inode is valid and caller holds the ilock
 static inline int __vfs_inode_valid(struct vfs_inode *inode) {
+    if (inode == NULL) {
+        return -EINVAL; // Invalid argument
+    }
+    if (!holding_mutex(&inode->mutex)) {
+        return -EPERM; // Caller does not hold the inode lock
+    }
     if (!inode->valid) {
         return -EINVAL; // Inode is not valid
     }
-    // Allow orphan inodes on detached superblocks - they're still usable
-    // until their last reference is dropped
-    if (!inode->sb->valid && inode->sb->attached) {
-        printf("__vfs_inode_valid: inode's superblock is not valid\n");
-        return -EINVAL; // Inode's superblock is not valid
+    if (inode != &vfs_root_inode) {
+        if (inode->sb == NULL || !inode->sb->valid) {
+            printf("__vfs_inode_valid: inode's superblock is not valid\n");
+            return -EINVAL; // Inode's superblock is not valid
+        }
     }
     return 0;
 }

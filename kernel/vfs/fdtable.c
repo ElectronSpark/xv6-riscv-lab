@@ -136,7 +136,6 @@ struct vfs_fdtable *vfs_fdtable_clone(struct vfs_fdtable *src, int clone_flags) 
 
 void vfs_fdtable_put(struct vfs_fdtable *fdtable) {
     if (fdtable == NULL) {
-        printf("vfs_fdtable_destroy: fdtable is NULL\n");
         return;
     }
 

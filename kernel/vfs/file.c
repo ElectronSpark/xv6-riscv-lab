@@ -31,7 +31,6 @@
 #include "proc/proc.h"
 #include "mutex_types.h"
 #include "rwlock.h"
-#include "completion.h"
 #include "vfs/fs.h"
 #include "printf.h"
 #include "vfs/file.h"

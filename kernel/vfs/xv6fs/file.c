@@ -1,17 +1,20 @@
 /*
  * xv6fs file operations
- * 
- * Handles file read, write, seek, and stat operations for the xv6 filesystem.
  *
- * Locking order (must acquire in this order to avoid deadlock):
- * 1. vfs_inode mutex (held by VFS layer before calling these ops)
- * 2. log->lock spinlock (acquired by xv6fs_begin_op/end_op)
- * 3. buffer mutex (acquired by bread/brelse)
+ * TRANSACTION MANAGEMENT: FS-INTERNAL (not VFS-managed)
+ * =====================================================
+ * File write manages transactions internally because:
+ * 1. Large writes require BATCHED transactions (multiple begin/end cycles)
+ * 2. VFS holds inode lock before calling file->ops->write
  *
- * NOTE: File read/write do NOT hold superblock lock. They only hold inode lock.
- * This is intentional to allow concurrent file I/O. However, this means
- * xv6fs_begin_op can sleep while holding inode lock, waiting for log space
- * that may be blocked by operations holding superblock wlock.
+ * This is the "hybrid approach" documented in superblock.c:
+ * - Metadata ops: VFS manages transactions via callbacks
+ * - File ops: FS manages transactions internally (here)
+ *
+ * Lock ordering for file write: inode_mutex → transaction
+ * (Reversed from metadata ops, but safe because different inodes are involved)
+ *
+ * See superblock.c "Transaction Callbacks" comment for full design explanation.
  */
 
 #include "types.h"

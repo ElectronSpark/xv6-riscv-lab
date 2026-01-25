@@ -168,9 +168,35 @@ struct vfs_superblock_ops {
     int (*add_orphan)(struct vfs_superblock *sb, struct vfs_inode *inode);
     int (*remove_orphan)(struct vfs_superblock *sb, struct vfs_inode *inode);
     int (*recover_orphans)(struct vfs_superblock *sb);
-    // Transaction/journaling support (optional, for backend filesystems)
-    // Must be called before acquiring any VFS-layer locks to avoid deadlock
-    // Returns 0 on success, negative error code on failure
+    
+    /*
+     * Transaction/journaling support (optional)
+     *
+     * DESIGN CHOICE - Register callbacks OR manage internally, not both:
+     *
+     * Option 1: REGISTER CALLBACKS (recommended for simple transactions)
+     *   - Set begin_transaction and end_transaction to non-NULL
+     *   - VFS will call these for METADATA operations (create, unlink, etc.)
+     *   - VFS calls begin_transaction BEFORE acquiring any locks
+     *   - VFS calls end_transaction AFTER releasing all locks
+     *   - Ensures correct lock ordering: transaction → superblock → inode
+     *   - FS inode callbacks must NOT call begin/end internally
+     *
+     * Option 2: MANAGE INTERNALLY (for complex transaction needs)
+     *   - Set begin_transaction and end_transaction to NULL
+     *   - FS manages ALL transactions internally in its callbacks
+     *   - Required for: batched transactions, nested transactions, etc.
+     *   - FS must ensure correct lock ordering to avoid deadlock
+     *   - WARNING: Calling begin while holding VFS locks can deadlock!
+     *
+     * HYBRID APPROACH (xv6fs example):
+     *   - Register callbacks for metadata ops (single transaction each)
+     *   - File ops (write, truncate) manage transactions internally
+     *     because they need batching for large files
+     *   - This works because file ops use different inodes than metadata ops
+     *
+     * Returns: 0 on success, negative error code on failure
+     */
     int (*begin_transaction)(struct vfs_superblock *sb);
     int (*end_transaction)(struct vfs_superblock *sb);
 };

@@ -197,7 +197,7 @@ STATIC struct proc *allocproc(void *entry, uint64 arg1, uint64 arg2,
     memset(&p->sched_entity->context, 0, sizeof(p->sched_entity->context));
     p->sched_entity->context.ra = (uint64)entry;
     p->sched_entity->context.sp = p->ksp;
-    p->sched_entity->context.s0 = p->ksp;
+    p->sched_entity->context.s0 = 0;
     p->kentry = (uint64)entry;
     p->arg[0] = arg1;
     p->arg[1] = arg2;

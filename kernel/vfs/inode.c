@@ -28,7 +28,6 @@
 #include "proc/proc.h"
 #include "mutex_types.h"
 #include "rwlock.h"
-#include "completion.h"
 #include "vfs/fs.h"
 #include "vfs_private.h"
 #include "list.h"
@@ -52,7 +51,6 @@
 // Caller should ensure the inode pointer is valid
 void __vfs_inode_init(struct vfs_inode *inode) {
     mutex_init(&inode->mutex, "vfs_inode_mutex");
-    completion_init(&inode->completion);
     hlist_entry_init(&inode->hash_entry);
     list_entry_init(&inode->orphan_entry);
     inode->orphan = 0;
@@ -65,7 +63,8 @@ void __vfs_inode_init(struct vfs_inode *inode) {
 
 void vfs_ilock(struct vfs_inode *inode) {
     assert(inode != NULL, "vfs_ilock: inode is NULL");
-    assert(mutex_lock(&inode->mutex) == 0, "vfs_ilock: failed to lock inode mutex");
+    assert(mutex_lock(&inode->mutex) == 0,
+           "vfs_ilock: failed to lock inode mutex");
 }
 
 void vfs_iunlock(struct vfs_inode *inode) {
@@ -176,15 +175,39 @@ retry:
         // The inode stays in the cache until destroy_inode completes.
         inode->destroying = 1;
         
-        // Release superblock lock before calling destroy_inode, which may sleep
-        // (e.g., xv6fs_begin_op can sleep waiting for log space).
-        // Keep the inode lock to ensure exclusive access during destruction.
+        // Release locks before calling destroy_inode, which may sleep
+        // when acquiring a transaction. We must release locks BEFORE
+        // begin_transaction to avoid deadlock (lock ordering: transaction
+        // must be acquired before superblock/inode locks).
+        vfs_iunlock(inode);
         vfs_superblock_unlock(sb);
+        
+        // Begin transaction for destroy_inode (it does disk I/O)
+        if (sb->ops->begin_transaction != NULL) {
+            int tx_ret = sb->ops->begin_transaction(sb);
+            if (tx_ret != 0) {
+                // Transaction failed - mark as not destroying and skip destroy
+                // The inode's on-disk data remains, will be cleaned on next mount
+                inode->destroying = 0;
+                vfs_superblock_wlock(sb);
+                vfs_ilock(inode);
+                goto skip_destroy;
+            }
+        }
         
         inode->ops->destroy_inode(inode);
         
-        // Re-acquire superblock lock to remove inode from cache
+        // End transaction after destroy_inode
+        if (sb->ops->end_transaction != NULL) {
+            int end_ret = sb->ops->end_transaction(sb);
+            if (end_ret != 0) {
+                printf("vfs_iput: warning: end_transaction failed with error %d\n", end_ret);
+            }
+        }
+        
+        // Re-acquire locks to remove inode from cache
         vfs_superblock_wlock(sb);
+        vfs_ilock(inode);
         
         // After destroy, the inode's on-disk data is freed.
         // Mark it invalid and not dirty so we don't try to sync it.
@@ -193,6 +216,7 @@ retry:
         inode->destroying = 0;
     }
 
+skip_destroy:
     ret = vfs_remove_inode(inode->sb, inode);
     assert(ret == 0, "vfs_iput: failed to remove inode from superblock inode cache");
     
@@ -201,8 +225,6 @@ retry:
     
     vfs_iunlock(inode);
     vfs_superblock_unlock(sb);
-    assert(completion_done(&inode->completion),
-           "vfs_iput: someone is waiting on inode completion without reference");
 out:
     // Free directory name if allocated
     if (inode->name != NULL) {
@@ -248,13 +270,37 @@ int vfs_sync_inode(struct vfs_inode *inode) {
     if (inode == NULL || inode->sb == NULL) {
         return -EINVAL; // Invalid argument
     }
-    int ret = __vfs_inode_valid(inode);
+    struct vfs_superblock *sb = inode->sb;
+    int ret = 0;
+
+    // Begin transaction BEFORE acquiring inode lock to avoid sleeping with locks held
+    if (sb->ops->begin_transaction != NULL) {
+        ret = sb->ops->begin_transaction(sb);
+        if (ret != 0) {
+            return ret;
+        }
+    }
+
+    vfs_ilock(inode);
+    ret = __vfs_inode_valid(inode);
     if (ret != 0) {
+        vfs_iunlock(inode);
+        if (sb->ops->end_transaction != NULL) {
+            sb->ops->end_transaction(sb);
+        }
         return ret; // Inode is not valid or caller does not hold the ilock
     }
 
     if (inode->ops->sync_inode != NULL) {
         ret = inode->ops->sync_inode(inode);
+    }
+    vfs_iunlock(inode);
+
+    if (sb->ops->end_transaction != NULL) {
+        int end_ret = sb->ops->end_transaction(sb);
+        if (end_ret != 0) {
+            printf("vfs_sync_inode: warning: end_transaction failed with error %d\n", end_ret);
+        }
     }
     return ret;
 }
@@ -596,6 +642,7 @@ struct vfs_inode *vfs_create(struct vfs_inode *dir, uint32 mode,
     }
     struct vfs_inode *ret_ptr = NULL;
     
+retry:
     // Begin transaction BEFORE acquiring any locks
     if (dir->sb->ops->begin_transaction != NULL) {
         int ret = dir->sb->ops->begin_transaction(dir->sb);
@@ -620,6 +667,18 @@ struct vfs_inode *vfs_create(struct vfs_inode *dir, uint32 mode,
         goto out;
     }
     ret_ptr = dir->ops->create(dir, mode, name, name_len);
+    
+    // Handle EAGAIN: inode allocation collided with destroying inode.
+    // Release all locks and transaction, yield, and retry.
+    if (PTR_ERR(ret_ptr) == -EAGAIN) {
+        vfs_iunlock(dir);
+        vfs_superblock_unlock(dir->sb);
+        if (dir->sb->ops->end_transaction != NULL) {
+            dir->sb->ops->end_transaction(dir->sb);
+        }
+        yield();
+        goto retry;
+    }
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
@@ -645,6 +704,7 @@ struct vfs_inode *vfs_mknod(struct vfs_inode *dir, uint32 mode,
     }
     struct vfs_inode *ret_ptr = NULL;
     
+retry:
     // Begin transaction BEFORE acquiring any locks
     if (dir->sb->ops->begin_transaction != NULL) {
         int ret = dir->sb->ops->begin_transaction(dir->sb);
@@ -669,6 +729,18 @@ struct vfs_inode *vfs_mknod(struct vfs_inode *dir, uint32 mode,
         goto out;
     }
     ret_ptr = dir->ops->mknod(dir, mode, dev, name, name_len);
+    
+    // Handle EAGAIN: inode allocation collided with destroying inode.
+    // Release all locks and transaction, yield, and retry.
+    if (PTR_ERR(ret_ptr) == -EAGAIN) {
+        vfs_iunlock(dir);
+        vfs_superblock_unlock(dir->sb);
+        if (dir->sb->ops->end_transaction != NULL) {
+            dir->sb->ops->end_transaction(dir->sb);
+        }
+        yield();
+        goto retry;
+    }
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
@@ -830,6 +902,7 @@ struct vfs_inode *vfs_mkdir(struct vfs_inode *dir, uint32 mode,
     }
     struct vfs_inode *ret_ptr = NULL;
     
+retry:
     // Begin transaction BEFORE acquiring any locks
     if (dir->sb->ops->begin_transaction != NULL) {
         int ret = dir->sb->ops->begin_transaction(dir->sb);
@@ -854,6 +927,19 @@ struct vfs_inode *vfs_mkdir(struct vfs_inode *dir, uint32 mode,
         goto out;
     }
     ret_ptr = dir->ops->mkdir(dir, mode, name, name_len);
+    
+    // Handle EAGAIN: inode allocation collided with destroying inode.
+    // Release all locks and transaction, yield, and retry.
+    if (PTR_ERR(ret_ptr) == -EAGAIN) {
+        vfs_iunlock(dir);
+        vfs_superblock_unlock(dir->sb);
+        if (dir->sb->ops->end_transaction != NULL) {
+            dir->sb->ops->end_transaction(dir->sb);
+        }
+        yield();
+        goto retry;
+    }
+    
     if (!IS_ERR(ret_ptr)) {
         vfs_ilock(ret_ptr);
         ret_ptr->parent = dir;
@@ -997,6 +1083,9 @@ struct vfs_inode *vfs_symlink(struct vfs_inode *dir, uint32 mode,
         return ERR_PTR(-EINVAL); // Invalid symlink name
     }
     
+    struct vfs_inode *ret_ptr = NULL;
+
+retry:
     // Begin transaction BEFORE acquiring any locks
     if (dir->sb->ops->begin_transaction != NULL) {
         int ret = dir->sb->ops->begin_transaction(dir->sb);
@@ -1008,7 +1097,6 @@ struct vfs_inode *vfs_symlink(struct vfs_inode *dir, uint32 mode,
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
     long ret = __vfs_inode_valid(dir);
-    struct vfs_inode *ret_ptr = NULL;
     if (ret != 0) {
         ret_ptr = ERR_PTR(ret);
         goto out;
@@ -1022,6 +1110,19 @@ struct vfs_inode *vfs_symlink(struct vfs_inode *dir, uint32 mode,
         goto out;
     }
     ret_ptr = dir->ops->symlink(dir, mode, name, name_len, target, target_len);
+    
+    // Handle EAGAIN: inode allocation collided with destroying inode.
+    // Release all locks and transaction, yield, and retry.
+    if (PTR_ERR(ret_ptr) == -EAGAIN) {
+        vfs_iunlock(dir);
+        vfs_superblock_unlock(dir->sb);
+        if (dir->sb->ops->end_transaction != NULL) {
+            dir->sb->ops->end_transaction(dir->sb);
+        }
+        yield();
+        goto retry;
+    }
+    
     if (!IS_ERR_OR_NULL(ret_ptr) && ret_ptr->parent == NULL) {
         ret_ptr->parent = dir;
         vfs_idup(dir); // increase parent dir refcount
