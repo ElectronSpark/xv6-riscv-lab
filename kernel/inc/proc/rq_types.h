@@ -4,7 +4,7 @@
 #include "compiler.h"
 #include "riscv.h"
 #include "types.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 #include "trapframe.h"
 #include "list_type.h"
 #include "bintree_type.h"

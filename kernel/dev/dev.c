@@ -5,13 +5,13 @@
 #include <dev.h>
 #include <defs.h>
 #include "printf.h"
-#include <spinlock.h>
-#include <mutex_types.h>
+#include <lock/spinlock.h>
+#include <lock/mutex_types.h>
 #include <slab.h>
 #include <page.h>
 #include <errno.h>
 #include "atomic.h"
-#include "rcu.h"
+#include "lock/rcu.h"
 
 // RCU-protected device table
 // Readers use rcu_read_lock/unlock + rcu_dereference

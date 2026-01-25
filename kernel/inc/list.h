@@ -4,7 +4,7 @@
 #include "types.h"
 #include "list_type.h"
 #include "atomic.h"     /* For memory barriers: smp_wmb, smp_rmb, smp_mb, etc. */
-#include "rcu.h"        /* For RCU primitives: rcu_dereference, rcu_assign_pointer, etc. */
+#include "lock/rcu.h"        /* For RCU primitives: rcu_dereference, rcu_assign_pointer, etc. */
 
 // initialize a new node entry, making it an empty head or detached node
 static inline void list_entry_init(list_node_t *entry) {

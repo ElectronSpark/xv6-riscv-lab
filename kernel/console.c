@@ -9,8 +9,8 @@
 
 #include "types.h"
 #include "param.h"
-#include "spinlock.h"
-#include "mutex_types.h"
+#include "lock/spinlock.h"
+#include "lock/mutex_types.h"
 #include "memlayout.h"
 #include "riscv.h"
 #include "defs.h"

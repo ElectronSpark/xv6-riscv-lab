@@ -5,11 +5,11 @@
 #include "param.h"
 #include "errno.h"
 #include "memlayout.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 #include "proc/proc.h"
 #include "proc/proc_queue.h"
 #include "proc/sched.h"
-#include "completion.h"
+#include "lock/completion.h"
 
 #define MAX_COMPLETIONS 65535
 

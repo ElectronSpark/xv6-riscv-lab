@@ -2,7 +2,7 @@
 #define __KERNEL_WORKQUEUE_TYPES_H
 
 #include "types.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 #include "proc/proc_queue_type.h"
 
 #define WORKQUEUE_NAME_MAX 31

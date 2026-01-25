@@ -2,7 +2,7 @@
 #define __KERNEL_TRAP_H
 
 #include "types.h"
-#include "rcu_type.h"
+#include "lock/rcu_type.h"
 
 // Interrupts are asynchronous events that require the CPU to stop its current
 // execution flow and jump to a specific handler function. They can be triggered

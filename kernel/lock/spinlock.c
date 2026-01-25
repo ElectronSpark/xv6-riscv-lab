@@ -3,7 +3,7 @@
 #include "types.h"
 #include "param.h"
 #include "memlayout.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 #include "riscv.h"
 #include "proc/proc.h"
 #include "percpu.h"

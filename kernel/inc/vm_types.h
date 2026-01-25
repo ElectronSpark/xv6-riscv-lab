@@ -6,7 +6,7 @@
 #include "page_type.h"
 #include "list_type.h" 
 #include "bintree_type.h"
-#include "rwlock_types.h"
+#include "lock/rwlock_types.h"
 
 typedef struct vm vm_t;
 struct file;

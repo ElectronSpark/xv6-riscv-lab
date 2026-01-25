@@ -1,7 +1,7 @@
 #ifndef __KERNEL_PIPE_H
 #define __KERNEL_PIPE_H
 
-#include "spinlock.h"
+#include "lock/spinlock.h"
 #include "proc/proc_queue_type.h"
 #include "atomic.h"
 

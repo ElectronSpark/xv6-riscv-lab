@@ -3,7 +3,7 @@
 
 #include "types.h"
 #include "signo.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 #include "list_type.h"
 #include "trapframe.h"
 

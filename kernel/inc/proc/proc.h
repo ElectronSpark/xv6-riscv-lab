@@ -12,7 +12,7 @@
 #include "vfs/vfs_types.h"
 #include "atomic.h"
 #include "percpu.h"
-#include "rcu_type.h"
+#include "lock/rcu_type.h"
 
 struct vfs_inode;
 

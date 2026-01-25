@@ -9,7 +9,7 @@
 #include "types.h"
 #include "virtio.h"
 #include "freelist.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 
 // Generic virtqueue structure that can be used by any virtio device
 struct virtqueue {

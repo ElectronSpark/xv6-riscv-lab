@@ -14,7 +14,7 @@
 #include "pcache.h"
 #include "vfs/fs.h"
 #include "trap.h"
-#include "rcu.h"
+#include "lock/rcu.h"
 #include "sbi.h"
 #include "ipi.h"
 #include "fdt.h"

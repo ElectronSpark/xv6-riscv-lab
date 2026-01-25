@@ -4,7 +4,7 @@
 #include "compiler.h"
 #include "list_type.h"
 #include "hlist_type.h"
-#include "mutex_types.h"
+#include "lock/mutex_types.h"
 
 struct buf {
   int valid;   // has data been read from disk?

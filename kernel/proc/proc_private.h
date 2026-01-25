@@ -4,7 +4,7 @@
 #include "types.h"
 #include "hlist.h"
 #include "list.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 
 #define NPROC_HASH_BUCKETS 31
 

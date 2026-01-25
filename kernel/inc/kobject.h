@@ -5,7 +5,7 @@
 
 #include "types.h"
 #include "list.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 
 struct kobject;
 struct kobject_ops {

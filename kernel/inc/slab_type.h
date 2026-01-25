@@ -4,7 +4,7 @@
 #include "types.h"
 #include "param.h"
 #include "list_type.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 
 
 typedef struct page_struct page_t;

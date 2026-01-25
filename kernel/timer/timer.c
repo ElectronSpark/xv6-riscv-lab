@@ -5,7 +5,7 @@
 #include "printf.h"
 #include "memlayout.h"
 #include "riscv.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 #include "defs.h"
 #include "timer/timer.h"
 #include "list.h"

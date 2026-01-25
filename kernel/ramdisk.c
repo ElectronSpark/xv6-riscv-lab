@@ -9,7 +9,7 @@
 #include "printf.h"
 #include "param.h"
 #include "memlayout.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 #include "vfs/xv6fs/ondisk.h"
 #include "buf.h"
 #include "blkdev.h"

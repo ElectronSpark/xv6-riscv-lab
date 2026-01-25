@@ -12,7 +12,7 @@
 #include "param.h"
 #include "memlayout.h"
 #include "riscv.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 #include "proc/proc.h"
 #include "defs.h"
 #include "printf.h"

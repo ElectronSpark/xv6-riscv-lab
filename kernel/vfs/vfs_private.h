@@ -3,7 +3,7 @@
 
 #include "vfs/vfs_types.h"
 #include "printf.h"
-#include "completion.h"
+#include "lock/completion.h"
 
 extern struct vfs_inode vfs_root_inode;
 

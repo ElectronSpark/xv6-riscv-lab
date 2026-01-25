@@ -3,7 +3,7 @@
 
 #include "types.h"
 #include "vfs/vfs_types.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 #include "vfs/xv6fs/ondisk.h"  // xv6 on-disk format definitions
 #include "slab.h"
 #include "blkdev.h"

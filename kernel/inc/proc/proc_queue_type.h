@@ -3,7 +3,7 @@
 
 #include "types.h"
 #include "list_type.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 #include "bintree_type.h"
 
 typedef struct proc_queue proc_queue_t;

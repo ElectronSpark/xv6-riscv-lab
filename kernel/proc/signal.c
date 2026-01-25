@@ -21,13 +21,13 @@
 #include "defs.h"
 #include "printf.h"
 #include "signal.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
+#include "lock/rcu.h"
 #include "proc/proc.h"
 #include "slab.h"
 #include "proc/sched.h"
 #include "list.h"
 #include "bits.h"
-#include "rcu.h"
 
 static slab_cache_t __sigacts_pool;
 static slab_cache_t __ksiginfo_pool;

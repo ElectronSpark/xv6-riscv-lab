@@ -12,7 +12,8 @@
 #include "printf.h"
 #include "param.h"
 #include "memlayout.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
+#include "lock/completion.h"
 #include "vfs/xv6fs/ondisk.h"  // for BSIZE
 #include "buf.h"
 #include "virtio.h"
@@ -20,7 +21,6 @@
 #include "page.h"
 #include "errno.h"
 #include "proc/sched.h"
-#include "completion.h"
 #include "trap.h"
 #include "freelist.h"
 #include "fdt.h"

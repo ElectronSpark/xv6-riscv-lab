@@ -3,7 +3,7 @@
 #define __KERNEL_PAGE_TYPE_H
 
 #include "types.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
 #include "list_type.h"
 #include "bintree.h"
 

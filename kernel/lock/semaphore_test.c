@@ -4,12 +4,12 @@
 #include "printf.h"
 #include "param.h"
 #include "memlayout.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
+#include "lock/semaphore.h"
+#include "lock/mutex_types.h"
 #include "proc/proc.h"
-#include "semaphore.h"
 #include "proc/proc_queue.h"
 #include "proc/sched.h"
-#include "mutex_types.h"
 #include "errno.h"
 
 /*

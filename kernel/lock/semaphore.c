@@ -5,12 +5,12 @@
 #include "param.h"
 #include "errno.h"
 #include "memlayout.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
+#include "lock/semaphore.h"
 #include "percpu.h"
 #include "proc/proc.h"
 #include "proc/proc_queue.h"
 #include "proc/sched.h"
-#include "semaphore.h"
 
 static int __sem_value_inc(sem_t *sem) {
     return __atomic_add_fetch(&sem->value, 1, __ATOMIC_SEQ_CST);

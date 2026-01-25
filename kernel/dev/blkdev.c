@@ -5,8 +5,8 @@
 #include <blkdev.h>
 #include <defs.h>
 #include "printf.h"
-#include <spinlock.h>
-#include <mutex_types.h>
+#include <lock/spinlock.h>
+#include <lock/mutex_types.h>
 #include <slab.h>
 #include <page.h>
 #include <errno.h>

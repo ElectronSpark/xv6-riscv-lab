@@ -2,7 +2,8 @@
 #include "param.h"
 #include "memlayout.h"
 #include "riscv.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
+#include "lock/rcu.h"
 #include "proc/proc.h"
 #include "defs.h"
 #include "printf.h"
@@ -16,7 +17,6 @@
 #include "signal.h"
 #include "errno.h"
 #include "timer/sched_timer_private.h"
-#include "rcu.h"
 #include "timer/timer.h"
 
 // Locking order:

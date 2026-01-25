@@ -1,7 +1,7 @@
 #ifndef __KERNEL_COMPLETION_H
 #define __KERNEL_COMPLETION_H
 
-#include <completion_types.h>
+#include <lock/completion_types.h>
 
 void completion_init(completion_t *c);
 void completion_reinit(completion_t *c);

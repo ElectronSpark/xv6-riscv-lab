@@ -5,7 +5,7 @@
 #include <param.h>
 #include <types.h>
 #include <kobject.h>
-#include <rcu_type.h>
+#include <lock/rcu_type.h>
 
 #define MAX_MAJOR_DEVICES 256 // Maximum number of major devices
 #define MAX_MINOR_DEVICES 256 // Maximum number of minor devices per major device

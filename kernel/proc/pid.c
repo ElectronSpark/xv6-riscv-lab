@@ -5,7 +5,8 @@
 #include "param.h"
 #include "memlayout.h"
 #include "riscv.h"
-#include "spinlock.h"
+#include "lock/spinlock.h"
+#include "lock/rcu.h"
 #include "proc/proc.h"
 #include "proc_private.h"
 #include "defs.h"
@@ -20,7 +21,6 @@
 #include "vm.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
-#include "rcu.h"
 
 static struct {
     struct {
