@@ -647,14 +647,36 @@ void reparent(struct proc *p) {
 
 // Yield the CPU after the process becomes zombie.
 // The caller need to hold p->lock, and not to hold the rq_lock.
-// This is to ensure that its parent can be scheduled after it becomes zombie
-// and not to wake up before it becomes zombie.
+// 
+// IMPORTANT: We wake the parent BEFORE yielding, not after.
+// This matches Linux's pattern where do_notify_parent() is called
+// from exit_notify() BEFORE the zombie calls do_task_dead()/schedule().
+// 
+// If we wake the parent from context_switch_finish (after we've switched out),
+// the waker would need to spin on smp_cond_load_acquire(&parent->on_cpu, !VAL)
+// waiting for the parent to finish its context switch. This can cause a deadlock
+// on real hardware where the spin loop creates memory contention.
+// 
+// By waking the parent while we're still running (before scheduler_yield),
+// try_to_wake_up will see that parent->on_cpu is 1 and can either:
+// - Return early if parent is already waking/running
+// - Successfully wake the parent before we enter the scheduler
 static void __exit_yield(int status) {
     struct proc *p = myproc();
+    struct proc *parent = p->parent;
+    
     proc_lock(p);
     p->xstate = status;
     __proc_set_pstate(p, PSTATE_ZOMBIE);
     proc_unlock(p);
+    
+    // Wake parent BEFORE we yield - this is the Linux pattern.
+    // The parent might be sleeping in wait(), and we need to wake it
+    // before we enter the scheduler to avoid the on_cpu spin race.
+    if (parent != NULL) {
+        wakeup_interruptible(parent);
+    }
+    
     scheduler_yield();
     panic("exit: __exit_yield should not return");
 }
@@ -686,6 +708,15 @@ void exit(int status) {
 
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
+//
+// Uses the Linux "set-state-before-check" pattern to avoid lost wakeups:
+// 1. Set state to INTERRUPTIBLE before scanning children
+// 2. Scan for zombies - if found, restore RUNNING and return
+// 3. If not found, yield (scheduler_yield will abort if we were woken)
+// 4. Loop back to step 1
+//
+// This works because any wakeup between steps 1-3 will change our state
+// back to RUNNING, and scheduler_yield will detect this and not sleep.
 int wait(uint64 addr) {
     int pid = -1;
     int xstate = 0;
@@ -695,19 +726,24 @@ int wait(uint64 addr) {
 
     proc_lock(p);
     for (;;) {
+        // Set INTERRUPTIBLE BEFORE scanning - this is the Linux pattern.
+        // Any child that calls wakeup_interruptible() while we're scanning
+        // will change our state back to RUNNING.
+        __proc_set_pstate(p, PSTATE_INTERRUPTIBLE);
+        
         // Scan through table looking for exited children.
         list_foreach_node_safe(&p->children, child, tmp, siblings) {
-            // make sure the child isn't still in exit() or swtch().
             proc_lock(child);
             if (PROC_ZOMBIE(child)) {
                 // Make sure the zombie child has fully switched out of CPU
                 if (smp_load_acquire(&child->sched_entity->on_cpu)) {
-                    // Still on CPU, mark needs yields and try again later
+                    // Still on CPU, mark needs yield and try again later
                     needs_yield = true;
                     proc_unlock(child);
                     continue;
                 }
-                // Found one.
+                // Found one - restore RUNNING state and return
+                __proc_set_pstate(p, PSTATE_RUNNING);
                 xstate = child->xstate;
                 pid = child->pid;
                 detach_child(p, child);
@@ -720,18 +756,24 @@ int wait(uint64 addr) {
 
         // No point waiting if we don't have any children.
         if (p->children_count == 0 || signal_terminated(p)) {
+            __proc_set_pstate(p, PSTATE_RUNNING);
             pid = -1;
             goto ret;
         }
 
         // Wait for a child to exit.
+        // Release lock and yield. If we were woken during the scan above,
+        // our state will be RUNNING and scheduler_yield will abort the sleep.
         if (needs_yield) {
+            __proc_set_pstate(p, PSTATE_RUNNING);
             proc_unlock(p);
             needs_yield = false;
             yield();
             proc_lock(p);
         } else {
-            scheduler_sleep(&p->lock, PSTATE_INTERRUPTIBLE); // DOC: wait-sleep
+            spin_release(&p->lock);
+            scheduler_yield();
+            spin_acquire(&p->lock);
         }
     }
 

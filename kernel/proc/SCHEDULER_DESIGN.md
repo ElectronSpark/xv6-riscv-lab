@@ -228,10 +228,12 @@ void context_switch_prepare(struct proc *prev, struct proc *next) {
 void context_switch_finish(struct proc *prev, struct proc *next) {
     pstate = __proc_get_pstate(prev);       // RE-READ state (critical!)
     struct sched_entity *se = prev->sched_entity;
+    int did_enqueue = 0;
     
     if (pstate == PSTATE_RUNNING && !PROC_STOPPED(prev)) {
         rq_put_prev_task(se);               // Put prev back on queue
         smp_store_release(&se->on_rq, 1);   // Mark as on run queue
+        did_enqueue = 1;
     } else if (PSTATE_IS_SLEEPING(pstate) || PROC_STOPPED(prev)) {
         if (se->rq != NULL) {
             rq_dequeue_task(se->rq, se);    // Properly dequeue
@@ -239,11 +241,19 @@ void context_switch_finish(struct proc *prev, struct proc *next) {
     }
     rq_unlock_current();                    // Release rq_lock
     
-    smp_store_release(&se->on_cpu, 0);      // Now safe for wakers
+    // Race fix: If state changed to RUNNING after our read, enqueue now.
+    // CAS on on_rq serializes with wakeup path — no pi_lock needed here.
+    if (!did_enqueue && !PROC_ZOMBIE(prev) && !PROC_STOPPED(prev)) {
+        if (__proc_get_pstate(prev) == PSTATE_RUNNING) {
+            int expected = 0;
+            if (CAS(&se->on_rq, &expected, 1)) {
+                rq_lock(...); rq_enqueue_task(rq, se); rq_unlock(...);
+            }
+            // If CAS failed, waker already enqueued
+        }
+    }
     
-    // Handle zombie parent wakeup
-    // Note quiescent state for RCU - context switch is a quiescent state
-    // Callback processing is handled by per-CPU RCU kthreads
+    smp_store_release(&se->on_cpu, 0);      // Now safe for wakers
     rcu_check_callbacks();
 }
 ```
@@ -356,15 +366,19 @@ static void __do_scheduler_wakeup(struct proc *p) {
     // 4. Set to RUNNING before enqueue
     smp_store_release(&p->state, PSTATE_RUNNING);
     
-    // 5. Select run queue and enqueue
+    // 5. Select run queue and enqueue (CAS serializes with context_switch_finish)
     if (!PROC_STOPPED(p)) {
         push_off();
         struct rq *rq = rq_select_task_rq(se, se->affinity_mask);
         rq_lock(rq->cpu_id);
         pop_off();
         
-        smp_store_release(&se->on_rq, 1);
-        rq_enqueue_task(rq, se);
+        // CAS on on_rq to serialize with context_switch_finish race fix
+        int expected = 0;
+        if (__atomic_compare_exchange_n(&se->on_rq, &expected, 1, ...)) {
+            rq_enqueue_task(rq, se);
+        }
+        // If CAS failed, context_switch_finish already enqueued
         
         rq_unlock(rq->cpu_id);
     }
@@ -646,6 +660,7 @@ The scheduler integrates with RCU (Read-Copy-Update) for grace period tracking:
 │       - RE-READ state                                                        │
 │       - if RUNNING: rq_put_prev_task() → se->on_rq = 1                      │
 │       - rq_unlock_current()                                                  │
+│       - Race fix: if state now RUNNING, CAS(on_rq, 0→1) and enqueue         │
 │       - se->on_cpu = 0                                                       │
 │       - rcu_check_callbacks()                                                │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -659,7 +674,7 @@ The scheduler integrates with RCU (Read-Copy-Update) for grace period tracking:
 │  4. Wait for se->on_cpu == 0                                                │
 │  5. CAS state: SLEEPING → WAKENING                                          │
 │  6. state = RUNNING                                                          │
-│  7. rq_select_task_rq() → rq_lock(); se->on_rq = 1; rq_enqueue_task()       │
+│  7. rq_select_task_rq() → rq_lock(); CAS(on_rq, 0→1); rq_enqueue_task()    │
 │  8. rq_unlock(); release se->pi_lock                                        │
 └─────────────────────────────────────────────────────────────────────────────┘
 
@@ -670,9 +685,173 @@ The scheduler integrates with RCU (Read-Copy-Update) for grace period tracking:
 │  • Waker reads on_rq BEFORE on_cpu (read order matches write order)         │
 │  • State CAS prevents double-enqueue from multiple wakers                    │
 │  • context_switch_finish RE-READS state for interrupt wakeups               │
-│  • on_rq changes only under rq_lock                                          │
+│  • on_rq changes via CAS to serialize waker vs context_switch_finish        │
 │  • Wakeup AND continue require pi_lock (not proc_lock) to avoid deadlock    │
 │  • Both wakeup and continue wait for on_cpu == 0 before enqueuing           │
 │  • CPU affinity is respected via rq_select_task_rq()                         │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+## Wakeup-Context Switch Deadlock Analysis (January 2026)
+
+This section documents a subtle deadlock discovered during testing and its resolution.
+
+### The Problem: on_cpu Spin Deadlock
+
+During stress testing (e.g., `usertests`), a deadlock was observed where multiple CPUs
+would hang in the wakeup path:
+
+```
+Thread 3: __do_scheduler_wakeup spinning on smp_cond_load_acquire(&se->on_cpu, !VAL)
+          - Holding: pi_lock for process P
+          - Waiting: P->on_cpu to become 0
+
+Thread 2: context_switch_finish trying to acquire pi_lock for process P
+          - Stuck: waiting for pi_lock
+          - Hasn't cleared: P->on_cpu yet
+```
+
+#### Root Cause Analysis
+
+The deadlock occurred because:
+
+1. **Waker** (in `__do_scheduler_wakeup`): Holds `pi_lock`, spins indefinitely on `on_cpu`
+2. **Target** (in `context_switch_finish`): Needs `pi_lock` to handle race fix path, 
+   but can't acquire it, so can't proceed to clear `on_cpu`
+
+This created a circular dependency:
+- Waker needs `on_cpu = 0` to proceed → Target must clear it
+- Target needs `pi_lock` to complete → Waker is holding it
+
+#### Why Did context_switch_finish Need pi_lock?
+
+A race fix was added to handle the following scenario:
+
+```
+Waker (CPU 1)                           Target (CPU 0, in context_switch_finish)
+============                            ========================================
+CAS state = RUNNING                     read state → sees SLEEPING (stale)
+spin on on_cpu...                       dequeue from rq (or skip enqueue)
+                                        release rq_lock
+                                        ← waker's CAS happened before here
+                                        on_cpu = 0
+spin ends
+check on_rq → 0!
+enqueue task ← CORRECT
+```
+
+But if the waker gave up (bounded spin) or wasn't fast enough:
+
+```
+Waker (CPU 1)                           Target (CPU 0)
+============                            ==============
+                                        read state → SLEEPING
+                                        skip enqueue
+                                        release rq_lock
+CAS state = RUNNING                     
+spin on on_cpu...                       on_cpu = 0
+spin ends                               ← TARGET IS GONE FROM CPU
+check on_rq → 0
+return (rely on target)                 ← OOPS! Target never enqueues!
+```
+
+The race fix had `context_switch_finish` re-read state after releasing `rq_lock` and
+enqueue if state was now RUNNING. But this required serialization with wakeup paths,
+which was implemented using `pi_lock` — causing the deadlock.
+
+### The Solution: CAS on on_rq
+
+The key insight: **We don't need a lock to serialize; we need an atomic operation.**
+
+Instead of using `pi_lock` in `context_switch_finish`, we use **CAS on on_rq** to
+ensure exactly one path (waker OR context_switch_finish) succeeds in enqueuing:
+
+#### context_switch_finish (race fix path)
+
+```c
+// Race fix: If state changed to RUNNING after our initial read, enqueue now.
+// CAS on on_rq serializes with wakeup path — no pi_lock needed here.
+if (!did_enqueue && !PROC_ZOMBIE(prev) && !PROC_STOPPED(prev)) {
+    enum procstate new_pstate = __proc_get_pstate(prev);
+    if (new_pstate == PSTATE_RUNNING) {
+        int expected = 0;
+        if (__atomic_compare_exchange_n(&se->on_rq, &expected, 1,
+                                        false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+            // We won the CAS — enqueue the task
+            rq_lock(...);
+            rq_enqueue_task(rq, se);
+            rq_unlock(...);
+        }
+        // If CAS failed, waker already set on_rq = 1 and will/did enqueue
+    }
+}
+
+// Now safe to clear on_cpu
+smp_store_release(&se->on_cpu, 0);
+```
+
+#### __do_scheduler_wakeup (waker path)
+
+```c
+// Wait for on_cpu to clear — no deadlock since target doesn't need pi_lock
+smp_cond_load_acquire(&se->on_cpu, !VAL);
+
+// Claim wakeup via state CAS
+CAS state: SLEEPING → WAKENING → RUNNING
+
+// CAS on on_rq to serialize with context_switch_finish race fix
+rq_lock(...);
+int expected = 0;
+if (__atomic_compare_exchange_n(&se->on_rq, &expected, 1,
+                                false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+    rq_enqueue_task(rq, se);
+}
+// If CAS failed, context_switch_finish already enqueued
+rq_unlock(...);
+```
+
+### Why This Works
+
+1. **No pi_lock in context_switch_finish**: Target doesn't need any lock that waker holds,
+   so waker can spin on `on_cpu` freely without deadlock.
+
+2. **CAS provides mutual exclusion**: Exactly one of {waker, context_switch_finish}
+   wins the `CAS(on_rq, 0, 1)` and performs the enqueue.
+
+3. **Both paths are correct**:
+   - If waker wins: Target's CAS fails, target knows waker handled it
+   - If target wins: Waker's CAS fails, waker knows target handled it
+   - Either way, the process is enqueued exactly once
+
+4. **Memory ordering preserved**: The CAS uses `__ATOMIC_SEQ_CST` for full ordering.
+
+### Key Lessons Learned
+
+1. **Avoid holding locks while spinning**: If A holds lock L and spins waiting for B,
+   and B needs L to make progress, deadlock is inevitable.
+
+2. **CAS is sufficient for mutual exclusion**: When serializing two paths that each
+   should execute at most once, CAS on a flag is simpler and deadlock-free.
+
+3. **Separate serialization concerns**: 
+   - State CAS (`SLEEPING → WAKENING`) serializes multiple wakers
+   - on_rq CAS serializes waker vs context_switch_finish race fix
+   - pi_lock serializes wakeup path internals (but not context_switch_finish)
+
+4. **The pi_lock purpose**: pi_lock protects against races during the wakeup path
+   (e.g., multiple CPUs trying to wake the same process). It should NOT be used
+   in context_switch_finish because that creates the deadlock.
+
+### Updated Invariants
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    UPDATED KEY INVARIANTS                                    │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  • on_rq changes via CAS(__ATOMIC_SEQ_CST) to serialize waker vs switch     │
+│  • Wakeup holds pi_lock but context_switch_finish does NOT acquire it       │
+│  • Waker can safely spin on on_cpu — no deadlock possible                   │
+│  • Exactly one of {waker, context_switch_finish} enqueues via on_rq CAS     │
+│  • State CAS (SLEEPING→WAKENING) prevents multiple wakers                   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
