@@ -131,9 +131,9 @@ static void test_resehand(void) {
     int kid = fork();
     if (kid == 0) {
         // Child: send one signal after short delay so parent is already paused.
-        sleep(1);
+        sleep(100);
         kill(parent, SIGUSR1); // first (handled & resets)
-        sleep(1);
+        sleep(100);
         kill(parent, SIGUSR1); // second (ignored)
         exit(0);
     }
@@ -142,7 +142,7 @@ static void test_resehand(void) {
         pause();
     }
     // Give time for second (ignored) signal.
-    sleep(2);
+    sleep(200);
     printf("SA_RESETHAND rese_count=%d (expected 1)\n", rese_count);
     if (rese_count == 1) {
         printf("[Test 2] PASS\n");
@@ -169,7 +169,7 @@ static void test_nodefer(void) {
     int kid = fork();
     if (kid == 0) {
         // Ensure parent is paused before sending
-        sleep(1);
+        sleep(100);
         kill(parent, SIGUSR2);
         exit(0);
     }
@@ -213,16 +213,16 @@ static void test_stop_continue(void) {
         exit(0);
     }
     // Parent: allow child to setup
-    sleep(1);
+    sleep(100);
     printf("Parent: sending two SIGSTOP then a SIGCONT to child %d\n", child);
     kill(child, SIGSTOP);
     kill(child, SIGSTOP); // duplicate stop while already stopping
-    sleep(1);
+    sleep(100);
     kill(child, SIGCONT); // should resume + deliver handler once
-    sleep(2);
+    sleep(200);
     printf("Parent: sending another SIGCONT (should still deliver handler)\n");
     kill(child, SIGCONT);
-    sleep(2);
+    sleep(200);
     printf("Parent: done with stop/continue test\n");
     int status;
     wait(&status);
@@ -258,7 +258,7 @@ static void test_change_handler_clears_pending(void) {
         printf("Failed to change handler for SIGALRM\n");
     }
     unblock_signal(SIGALRM); // If pending were cleared, none delivered yet.
-    sleep(1);
+    sleep(100);
     // Now send one SIGALRM which should invoke new handler exactly once.
     kill(getpid(), SIGALRM);
     if (change_handler_count == 0) {

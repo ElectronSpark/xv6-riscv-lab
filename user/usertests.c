@@ -510,7 +510,7 @@ openiputtest(char *s)
     }
     exit(0);
   }
-  sleep(1);
+  sleep(100);
   if(unlink("oidir") != 0){
     printf("%s: unlink failed\n", s);
     exit(1);
@@ -809,7 +809,7 @@ killstatus(char *s)
       }
       exit(0);
     }
-    sleep(1);
+    sleep(100);
     kill(pid1, SIGKILL);
     wait(&xst);
      if(xst >= 0) {
@@ -1023,10 +1023,10 @@ forkforkfork(char *s)
     exit(0);
   }
 
-  sleep(20); // two seconds
+  sleep(2000); // two seconds
   close(open("stopforking", O_CREAT|O_RDWR));
   wait(0);
-  sleep(10); // one second
+  sleep(1000); // one second
 }
 
 // regression test. does reparent() violate the parent-then-child

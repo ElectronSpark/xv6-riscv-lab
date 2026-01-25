@@ -100,7 +100,7 @@ threetest()
 
   wait(0);
 
-  sleep(1);
+  sleep(100);
 
   for(char *q = p; q < p + sz; q += 4096){
     if(*(int*)q != getpid()){
@@ -142,12 +142,12 @@ filetest()
       exit(-1);
     }
     if(pid == 0){
-      sleep(1);
+      sleep(100);
       if(read(fds[0], buf, sizeof(i)) != sizeof(i)){
         printf("error: read failed\n");
         exit(1);
       }
-      sleep(1);
+      sleep(100);
       int j = *(int*)buf;
       if(j != i){
         printf("error: read the wrong value\n");
@@ -194,7 +194,7 @@ forkforktest()
   for(int iter = 0; iter < 100; iter++){
     for(int nc = 0; nc < children; nc++){
       if(fork() == 0){
-        sleep(2);
+        sleep(200);
         fork();
         fork();
         exit(0);
@@ -207,7 +207,7 @@ forkforktest()
     }
   }
 
-  sleep(5);
+  sleep(500);
   for(int i = 0; i < sz; i += 4096){
     if(p[i] != 27){
       printf("error: parent's memory was modified!\n");
