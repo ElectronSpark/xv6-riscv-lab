@@ -578,16 +578,18 @@ void context_switch_finish(struct proc *prev, struct proc *next, int intr) {
         }
         // If zombie, rq_task_dead was already called before entering zombie state
     }
-    rq_unlock_current_irqrestore(intr);
     
     // Now safe to mark as not on CPU - wakeup path can proceed
     smp_store_release(&prev->sched_entity->on_cpu, 0);
     
+    // Release sleep_lock BEFORE rq_lock to avoid deadlock with interrupt handlers.
+    // sleep_lock was acquired with sleep_lock_irqsave(), so use sleep_unlock_irqrestore().
+    // Pass 0 to NOT enable interrupts yet - let rq_unlock_current_irqrestore handle that.
     if (chan_holding()) {
-        // Basically ignored the saved state here, because the peocess
-        // went to sleep will record its own interrupt state and restore it.
-        sleep_unlock_irqrestore(intr);
+        sleep_unlock_irqrestore(0);
     }
+
+    rq_unlock_current_irqrestore(intr);
 
     if (pstate == PSTATE_ZOMBIE && pparent != NULL && pparent != next) {
         // Wake up the parent only if it's not the current process

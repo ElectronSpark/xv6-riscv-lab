@@ -84,4 +84,9 @@ int register_irq_handler(int irq_num, struct irq_desc *desc);
 int unregister_irq_handler(int irq_num);
 int do_irq(struct trapframe *tf);
 
+void enter_irq(void);
+void exit_irq(void);
+void enter_softirq(void);
+void exit_softirq(void);
+
 #endif        /* __KERNEL_TRAP_H */
