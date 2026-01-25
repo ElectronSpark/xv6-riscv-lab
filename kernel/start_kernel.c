@@ -1,6 +1,6 @@
 #include "types.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "string.h"
 #include "riscv.h"
 #include "defs.h"
@@ -11,14 +11,14 @@
 #include "proc/workqueue.h"
 #include "kobject.h"
 #include "dev/dev.h"
-#include "pcache.h"
+#include <mm/pcache.h>
 #include "vfs/fs.h"
 #include "trap.h"
 #include "lock/rcu.h"
 #include "sbi.h"
 #include "ipi.h"
 #include "dev/fdt.h"
-#include "early_allocator.h"
+#include <mm/early_allocator.h>
 #include "timer/goldfish_rtc.h"
 #include "dev/uart.h"
 #include "dev/plic.h"

@@ -11,12 +11,12 @@
 #include "lock/rwlock.h"
 #include "lock/completion.h"
 #include "proc/proc.h"
-#include "vm.h"
+#include <mm/vm.h>
 #include "vfs/fs.h"
 #include "../vfs_private.h"
 #include "list.h"
 #include "hlist.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "tmpfs_private.h"
 
 // Initialize a tmpfs inode as a symlink with embedded target

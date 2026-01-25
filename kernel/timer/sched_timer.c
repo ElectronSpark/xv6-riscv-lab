@@ -1,13 +1,13 @@
 #include "types.h"
 #include "string.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "riscv.h"
 #include "proc/proc.h"
 #include "defs.h"
 #include "printf.h"
 #include "proc/sched.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "errno.h"
 #include "timer/timer.h"
 #include "proc/workqueue.h"

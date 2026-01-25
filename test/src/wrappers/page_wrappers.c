@@ -23,8 +23,8 @@
 #include <sys/mman.h>
 #include <cmocka.h>
 #include "types.h"
-#include "page.h"
-#include "page_type.h"
+#include <mm/page.h>
+#include "mm/page_type.h"
 #include "spinlock.h"
 #include "param.h"
 #include "list.h"

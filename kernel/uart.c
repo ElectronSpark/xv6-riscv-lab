@@ -10,7 +10,7 @@
 #include "compiler.h"
 #include "types.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "proc/proc.h"

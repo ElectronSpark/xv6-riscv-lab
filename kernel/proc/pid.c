@@ -3,7 +3,7 @@
 #include "types.h"
 #include "string.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "lock/rcu.h"
@@ -15,10 +15,10 @@
 #include "hlist.h"
 #include "proc/proc_queue.h"
 #include "proc/sched.h"
-#include "slab.h"
-#include "page.h"
+#include <mm/slab.h>
+#include <mm/page.h>
 #include "signal.h"
-#include "vm.h"
+#include <mm/vm.h>
 #include "vfs/fs.h"
 #include "vfs/file.h"
 

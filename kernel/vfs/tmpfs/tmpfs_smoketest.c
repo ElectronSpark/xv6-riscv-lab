@@ -17,7 +17,7 @@
 #include "../vfs_private.h" // for vfs_root_inode
 #include "list.h"
 #include "hlist.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "tmpfs_private.h"
 #include "tmpfs_smoketest.h"
 

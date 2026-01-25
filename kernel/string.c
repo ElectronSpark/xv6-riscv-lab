@@ -1,7 +1,7 @@
 #include "types.h"
 #include "riscv.h"
 #include "defs.h"
-#include "slab.h"
+#include <mm/slab.h>
 
 void *memset(void *dst, int c, size_t n)
 {

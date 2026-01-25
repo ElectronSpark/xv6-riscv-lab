@@ -10,7 +10,7 @@
  */
 
 #include "types.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "riscv.h"
 #include "trapframe.h"
 #include "trap.h"

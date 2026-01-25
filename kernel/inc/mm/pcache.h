@@ -1,7 +1,7 @@
 #ifndef __KERNEL_PAGE_CACHE_H__
 #define __KERNEL_PAGE_CACHE_H__
 
-#include "pcache_types.h"
+#include <mm/pcache_types.h>
 
 void pcache_global_init(void);
 int pcache_init(struct pcache *pcache);

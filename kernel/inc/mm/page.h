@@ -2,7 +2,7 @@
 #define __KERNEL_PAGE_H
 
 #include "compiler.h"
-#include "page_type.h"
+#include <mm/page_type.h>
 
 uint64 managed_page_base();
 page_t *__pa_to_page(uint64 physical);

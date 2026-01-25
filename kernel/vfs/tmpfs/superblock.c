@@ -15,8 +15,8 @@
 #include "../vfs_private.h"
 #include "list.h"
 #include "hlist.h"
-#include "slab.h"
-#include "page.h"
+#include <mm/slab.h>
+#include <mm/page.h>
 #include "tmpfs_private.h"
 #include "tmpfs_smoketest.h"
 

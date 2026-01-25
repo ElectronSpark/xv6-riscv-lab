@@ -32,7 +32,7 @@
 #include "vfs_private.h"
 #include "list.h"
 #include "hlist.h"
-#include "slab.h"
+#include <mm/slab.h>
 
 // When need to acquire multiple inode locks:
 // - First acquire directory inode lock

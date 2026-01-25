@@ -3,7 +3,7 @@
 #include "errno.h"
 #include "param.h"
 #include "printf.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "defs.h"

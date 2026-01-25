@@ -17,7 +17,7 @@
 #include "timer/timer.h"
 #include "dev/dev.h"
 #include "errno.h"
-#include "page.h"
+#include <mm/page.h>
 
 // Test configuration
 #define TEST_MAJOR_BASE     100     // Starting major number for tests

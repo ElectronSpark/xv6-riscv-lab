@@ -17,7 +17,7 @@
 #include "vfs_private.h"
 #include "list.h"
 #include "hlist.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "tmpfs/tmpfs_smoketest.h"
 #include "xv6fs/xv6fs_smoketest.h"
 

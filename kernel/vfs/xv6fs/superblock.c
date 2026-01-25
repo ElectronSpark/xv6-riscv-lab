@@ -13,12 +13,12 @@
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
 #include "proc/proc.h"
-#include "vm.h"
+#include <mm/vm.h>
 #include "dev/buf.h"
 #include "dev/blkdev.h"
 #include "vfs/fs.h"
 #include "../vfs_private.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "xv6fs_private.h"
 #include "xv6fs_smoketest.h"
 

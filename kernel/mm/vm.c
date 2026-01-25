@@ -73,7 +73,7 @@
  *     - Heap/stack growth and mmap-style helpers
  */
 
-#include "vm.h"
+#include <mm/vm.h>
 
 #include "defs.h"
 #include "elf.h"
@@ -85,8 +85,8 @@
 #include "timer/goldfish_rtc.h"
 #include "dev/e1000_dev.h"
 #include "dev/plic.h"
-#include "memlayout.h"
-#include "page.h"
+#include <mm/memlayout.h>
+#include <mm/page.h>
 #include "param.h"
 #include "percpu.h"
 #include "printf.h"
@@ -96,7 +96,7 @@
 #include "atomic.h"
 #include "rbtree.h"
 #include "riscv.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "string.h"
 #include "types.h"
 #include "dev/fdt.h"

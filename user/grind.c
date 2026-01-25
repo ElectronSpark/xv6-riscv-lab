@@ -9,7 +9,7 @@
 #include "kernel/inc/vfs/xv6fs/ondisk.h"
 #include "kernel/inc/vfs/fcntl.h"
 #include "kernel/inc/syscall.h"
-#include "kernel/inc/memlayout.h"
+#include "kernel/inc/mm/memlayout.h"
 #include "kernel/inc/riscv.h"
 #include "kernel/inc/signo.h"
 

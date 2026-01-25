@@ -24,7 +24,7 @@
 #include "lock/spinlock.h"
 #include "lock/rcu.h"
 #include "proc/proc.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "proc/sched.h"
 #include "list.h"
 #include "bits.h"

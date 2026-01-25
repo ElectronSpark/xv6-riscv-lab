@@ -11,14 +11,14 @@
 #include "defs.h"
 #include "printf.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "lock/completion.h"
 #include "vfs/xv6fs/ondisk.h"  // for BSIZE
 #include "dev/buf.h"
 #include "dev/virtio.h"
 #include "dev/blkdev.h"
-#include "page.h"
+#include <mm/page.h>
 #include "errno.h"
 #include "proc/sched.h"
 #include "trap.h"

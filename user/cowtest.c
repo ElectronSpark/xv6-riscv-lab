@@ -3,7 +3,7 @@
 //
 
 #include "kernel/inc/types.h"
-#include "kernel/inc/memlayout.h"
+#include "kernel/inc/mm/memlayout.h"
 #include "user/user.h"
 
 // allocate more than half of physical memory,

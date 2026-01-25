@@ -1,7 +1,7 @@
 #include "types.h"
 #include "string.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "defs.h"
@@ -9,8 +9,8 @@
 #include "printf.h"
 #include "proc/sched.h"
 #include "signal.h"
-#include "page.h"
-#include "vm.h"
+#include <mm/page.h>
+#include <mm/vm.h>
 #include "trap.h"
 
 extern char trampoline[], uservec[], userret[], _data_ktlb[];

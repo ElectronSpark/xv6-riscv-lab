@@ -2,8 +2,8 @@
 #include "defs.h"
 #include "hlist.h"
 #include "list.h"
-#include "memlayout.h"
-#include "page.h"
+#include <mm/memlayout.h>
+#include <mm/page.h>
 #include "param.h"
 #include "printf.h"
 #include "proc/proc_queue.h"
@@ -14,12 +14,12 @@
 #include "lock/spinlock.h"
 #include "riscv.h"
 #include "signal.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "string.h"
 #include "types.h"
 #include "vfs/file.h"
 #include "vfs/fs.h"
-#include "vm.h"
+#include <mm/vm.h>
 #include "errno.h"
 
 #define NPROC_HASH_BUCKETS 31

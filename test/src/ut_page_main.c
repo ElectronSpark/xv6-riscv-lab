@@ -9,7 +9,7 @@
 #include "ut_page_wraps.h"
 #include "param.h"
 #include "list.h"
-#include "slab.h"
+#include <mm/slab.h>
 
 // Host tests compile some kernel sources directly. Under HOST_TEST, `STATIC`
 // expands to nothing, so we can legally reference internal symbols to validate

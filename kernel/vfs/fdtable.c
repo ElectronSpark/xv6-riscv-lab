@@ -15,7 +15,7 @@
 #include "vfs/fs.h"
 #include "vfs/file.h"
 #include "vfs_private.h"
-#include "slab.h"
+#include <mm/slab.h>
 
 #define IS_FD(fd) ((uint64)(fd) > NOFILE)
 

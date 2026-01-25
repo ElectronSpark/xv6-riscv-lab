@@ -13,7 +13,7 @@
 #include "list.h"
 #include "hlist.h"
 #include "rbtree.h"
-#include "early_allocator.h"
+#include <mm/early_allocator.h>
 #include "dev/uart.h"
 #include "dev/plic.h"
 #include "dev/pci.h"

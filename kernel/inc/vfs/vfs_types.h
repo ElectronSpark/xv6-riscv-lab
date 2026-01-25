@@ -8,7 +8,7 @@
 #include "lock/mutex_types.h"
 #include "lock/rwlock_types.h"
 #include "hlist_type.h"
-#include "pcache_types.h"
+#include "mm/pcache_types.h"
 #include "kobject.h"
 #include "vfs/stat.h"
 

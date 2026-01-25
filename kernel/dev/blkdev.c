@@ -7,8 +7,8 @@
 #include "printf.h"
 #include <lock/spinlock.h>
 #include <lock/mutex_types.h>
-#include <slab.h>
-#include <page.h>
+#include <mm/slab.h>
+#include <mm/page.h>
 #include <errno.h>
 
 static int __underlying_dev_open(device_t *dev) {

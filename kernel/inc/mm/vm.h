@@ -1,6 +1,6 @@
 #ifndef __KERNEL_VM_H
 #define __KERNEL_VM_H
-#include "vm_types.h"
+#include <mm/vm_types.h>
 
 #define VMA_SIZE(__vma) ((__vma)->end - (__vma)->start)
 #define VMA_PG_ALIGNED(__vma) \

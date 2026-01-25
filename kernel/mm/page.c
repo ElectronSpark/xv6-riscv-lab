@@ -44,19 +44,19 @@
 #include "types.h"
 #include "string.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
 #include "list.h"
-#include "page.h"
+#include <mm/page.h>
 #include "page_private.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "percpu.h"
-#include "early_allocator.h"
+#include <mm/early_allocator.h>
 #include "dev/fdt.h"
-#include "memstat.h"
+#include <mm/memstat.h>
 
 // ============================================================================
 // SECTION 1: Global Data & Configuration

@@ -3,7 +3,7 @@
 #include "defs.h"
 #include "printf.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "lock/rwlock.h"
 #include "percpu.h"

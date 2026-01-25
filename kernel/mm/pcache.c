@@ -1,22 +1,22 @@
 #include "types.h"
 #include "string.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "lock/completion.h"
 #include "lock/rwlock.h"
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
-#include "page.h"
+#include <mm/page.h>
 #include "list.h"
 #include "proc/sched.h"
 #include "rbtree.h"
 #include "proc/workqueue.h"
 #include "kobject.h"
-#include "pcache.h"
+#include <mm/pcache.h>
 #include "errno.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "dev/bio.h"
 #include "timer/timer.h"
 

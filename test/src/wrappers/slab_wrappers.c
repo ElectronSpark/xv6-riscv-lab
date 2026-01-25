@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "types.h"
-#include "slab.h"
+#include <mm/slab.h>
 
 // Global flags for simulating failures
 static bool g_test_fail_slab_alloc = false;

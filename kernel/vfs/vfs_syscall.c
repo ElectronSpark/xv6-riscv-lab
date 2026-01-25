@@ -20,7 +20,7 @@
 #include "vfs/fcntl.h"
 #include "vfs/stat.h"
 #include "vfs/xv6fs/ondisk.h"  // for DIRSIZ
-#include "vm.h"
+#include <mm/vm.h>
 #include "printf.h"
 #include "dev/cdev.h"
 

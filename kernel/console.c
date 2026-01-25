@@ -11,7 +11,7 @@
 #include "param.h"
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"

@@ -23,7 +23,7 @@
 #include "vfs/fcntl.h"
 #include "list.h"
 #include "hlist.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "tmpfs_private.h"
 
 // Forward declarations

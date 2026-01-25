@@ -2,7 +2,7 @@
 #ifndef __KERNEL_PAGE_PRIVATE_H__
 #define __KERNEL_PAGE_PRIVATE_H__
 
-#include "page_type.h"
+#include <mm/page_type.h>
 
 // The page struct belongs to a buddy page
 #define PAGE_IS_BUDDY(page) PAGE_IS_TYPE(page, PAGE_TYPE_BUDDY)

@@ -2,7 +2,7 @@
 #include "types.h"
 #include "string.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "proc/proc.h"

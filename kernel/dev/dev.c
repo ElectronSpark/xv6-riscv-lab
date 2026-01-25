@@ -7,8 +7,8 @@
 #include "printf.h"
 #include <lock/spinlock.h>
 #include <lock/mutex_types.h>
-#include <slab.h>
-#include <page.h>
+#include <mm/slab.h>
+#include <mm/page.h>
 #include <errno.h>
 #include "atomic.h"
 #include "lock/rcu.h"

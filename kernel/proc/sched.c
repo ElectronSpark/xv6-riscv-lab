@@ -1,6 +1,6 @@
 #include "types.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "lock/rcu.h"
@@ -12,7 +12,7 @@
 #include "proc/proc_queue.h"
 #include "proc/sched.h"
 #include "proc/rq.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "rbtree.h"
 #include "signal.h"
 #include "errno.h"

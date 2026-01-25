@@ -10,13 +10,13 @@
 
 #include <cmocka.h>
 
-#include "pcache.h"
+#include <mm/pcache.h>
 #include "list.h"
 #include "param.h"
 #include "dev/bio.h"
 #include "rbtree.h"
-#include "page.h"
-#include "page_type.h"
+#include <mm/page.h>
+#include "mm/page_type.h"
 #include "spinlock.h"
 #include "riscv.h"
 #include "completion.h"

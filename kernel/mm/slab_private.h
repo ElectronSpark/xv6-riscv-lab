@@ -2,7 +2,7 @@
 #define __KERNEL_SLAB_PRIVATE_H__
 
 #include "compiler.h"
-#include "slab_type.h"
+#include <mm/slab_type.h>
 
 // If the SLAB is attached to a SLAB CACHE is determined by its 'cache' pointer
 #define __SLAB_ATTACHED(slab)       ((slab)->cache != NULL)

@@ -1,7 +1,7 @@
 #include "types.h"
 #include "string.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "lock/rcu.h"
@@ -9,9 +9,9 @@
 #include "defs.h"
 #include "printf.h"
 #include "proc/sched.h"
-#include "page.h"
+#include <mm/page.h>
 #include "trap.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "errno.h"
 #include "trap.h"
 #include "dev/plic.h"

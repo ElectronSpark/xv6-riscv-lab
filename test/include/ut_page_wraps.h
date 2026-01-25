@@ -10,9 +10,9 @@
 
 #include "types.h"
 #include "riscv.h"
-#include "memlayout.h"
-#include "page.h"
-#include "page_private.h"
+#include <mm/memlayout.h>
+#include <mm/page.h>
+#include "mm/page_private.h"
 #include "spinlock.h"
 
 // Mock function declarations to prevent implicit function declaration warnings

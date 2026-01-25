@@ -8,7 +8,7 @@
 #include "proc/rq_types.h"
 #include "trapframe.h"
 #include "signal_types.h"
-#include "vm_types.h"
+#include "mm/vm_types.h"
 #include "vfs/vfs_types.h"
 #include "atomic.h"
 #include "percpu.h"

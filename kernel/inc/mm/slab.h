@@ -2,7 +2,7 @@
 #define __KERNEL_SLAB_H
 
 #include "compiler.h"
-#include "slab_type.h"
+#include <mm/slab_type.h>
 
 #define SLAB_CACHE_NUMS             8
 #define SLAB_OBJ_MAX_SHIFT          PAGE_SHIFT

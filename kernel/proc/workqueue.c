@@ -3,13 +3,13 @@
 #include "errno.h"
 #include "param.h"
 #include "printf.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "proc/proc.h"
 #include "proc/sched.h"
 #include "defs.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "proc/proc_queue.h"
 #include "proc/workqueue.h"
 

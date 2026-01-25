@@ -34,7 +34,7 @@
 #include "printf.h"
 #include "vfs/xv6fs/ondisk.h" // for BSIZE
 #include "dev/buf.h"
-#include "page.h"
+#include <mm/page.h>
 #include "dev/blkdev.h"
 #include "list.h"
 #include "hlist.h"

@@ -33,7 +33,7 @@
 #include "../vfs_private.h"
 #include "list.h"
 #include "hlist.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "xv6fs_private.h"
 #include "xv6fs_smoketest.h"
 

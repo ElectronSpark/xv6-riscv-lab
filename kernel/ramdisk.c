@@ -8,12 +8,12 @@
 #include "defs.h"
 #include "printf.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "vfs/xv6fs/ondisk.h"
 #include "dev/buf.h"
 #include "dev/blkdev.h"
-#include "page.h"
+#include <mm/page.h>
 #include "errno.h"
 #include "dev/fdt.h"
 

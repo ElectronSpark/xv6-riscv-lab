@@ -4,7 +4,7 @@
 #include "printf.h"
 #include "param.h"
 #include "errno.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "proc/proc.h"
 #include "proc/proc_queue.h"

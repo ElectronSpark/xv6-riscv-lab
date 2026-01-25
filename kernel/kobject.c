@@ -1,12 +1,12 @@
 #include "types.h"
 #include "errno.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "defs.h"
 #include "printf.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "list.h"
 #include "kobject.h"
 #include "atomic.h"

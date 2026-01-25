@@ -16,7 +16,7 @@
 #include "proc/proc.h"
 #include "lock/mutex_types.h"
 #include "pipe.h"
-#include "vm.h"
+#include <mm/vm.h>
 #include "proc/sched.h"
 
 void pipeclose(struct pipe *pi, int writable) {

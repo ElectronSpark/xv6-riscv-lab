@@ -38,10 +38,10 @@
 #include "vfs/fcntl.h"
 #include "list.h"
 #include "hlist.h"
-#include "slab.h"
+#include <mm/slab.h>
 #include "dev/cdev.h"
 #include "dev/blkdev.h"
-#include "vm.h"
+#include <mm/vm.h>
 #include "dev/net.h"
 #include "pipe.h"
 #include "proc/proc_queue.h"

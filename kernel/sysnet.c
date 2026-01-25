@@ -7,7 +7,7 @@
 
 #include "types.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
@@ -15,7 +15,7 @@
 #include "defs.h"
 #include "printf.h"
 #include "dev/net.h"
-#include "vm.h"
+#include <mm/vm.h>
 #include "signal.h"
 #include "proc/sched.h"
 

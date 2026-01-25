@@ -1,7 +1,7 @@
 #include "types.h"
 #include "string.h"
 #include "param.h"
-#include "memlayout.h"
+#include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "proc/proc.h"
@@ -11,8 +11,8 @@
 #include "defs.h"
 #include "printf.h"
 #include "list.h"
-#include "slab.h"
-#include "page.h"
+#include <mm/slab.h>
+#include <mm/page.h>
 
 static struct idle_rq *__idle_rqs; // Array of idle_rq structures, one per CPU
 
