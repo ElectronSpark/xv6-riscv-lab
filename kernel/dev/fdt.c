@@ -6,7 +6,7 @@
  */
 
 #include "types.h"
-#include "fdt.h"
+#include "dev/fdt.h"
 #include "bits.h"
 #include "printf.h"
 #include "string.h"
@@ -14,10 +14,10 @@
 #include "hlist.h"
 #include "rbtree.h"
 #include "early_allocator.h"
-#include "uart.h"
-#include "plic.h"
-#include "pci.h"
-#include "virtio.h"
+#include "dev/uart.h"
+#include "dev/plic.h"
+#include "dev/pci.h"
+#include "dev/virtio.h"
 #include "timer/timer.h"
 
 // Global platform info - populated by fdt_init()

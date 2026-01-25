@@ -11,11 +11,11 @@
 #include "memlayout.h"
 #include "lock/spinlock.h"
 #include "vfs/xv6fs/ondisk.h"
-#include "buf.h"
-#include "blkdev.h"
+#include "dev/buf.h"
+#include "dev/blkdev.h"
 #include "page.h"
 #include "errno.h"
-#include "fdt.h"
+#include "dev/fdt.h"
 
 static struct {
   struct spinlock lock;

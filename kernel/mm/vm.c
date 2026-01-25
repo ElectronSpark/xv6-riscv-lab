@@ -79,12 +79,12 @@
 #include "elf.h"
 #include "list.h"
 #include "trap.h"
-#include "uart.h"
-#include "virtio.h"
-#include "pci.h"
+#include "dev/uart.h"
+#include "dev/virtio.h"
+#include "dev/pci.h"
 #include "timer/goldfish_rtc.h"
-#include "e1000_dev.h"
-#include "plic.h"
+#include "dev/e1000_dev.h"
+#include "dev/plic.h"
 #include "memlayout.h"
 #include "page.h"
 #include "param.h"
@@ -99,7 +99,7 @@
 #include "slab.h"
 #include "string.h"
 #include "types.h"
-#include "fdt.h"
+#include "dev/fdt.h"
 
 static slab_cache_t __vma_pool = {0};
 static slab_cache_t __vm_pool = {0};

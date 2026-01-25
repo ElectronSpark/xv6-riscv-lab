@@ -6,7 +6,7 @@
 #include "lock/spinlock.h"
 #include "vfs/xv6fs/ondisk.h"  // xv6 on-disk format definitions
 #include "slab.h"
-#include "blkdev.h"
+#include "dev/blkdev.h"
 
 // Block size for xv6 filesystem
 #define XV6FS_BSIZE BSIZE

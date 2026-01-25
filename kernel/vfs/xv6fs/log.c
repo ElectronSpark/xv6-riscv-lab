@@ -27,7 +27,7 @@
 #include "param.h"
 #include "errno.h"
 #include "lock/spinlock.h"
-#include "buf.h"
+#include "dev/buf.h"
 #include "proc/sched.h"
 #include "printf.h"
 #include "vfs/fs.h"

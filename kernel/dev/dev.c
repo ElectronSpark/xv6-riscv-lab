@@ -2,7 +2,7 @@
 #include <types.h>
 #include "string.h"
 #include <riscv.h>
-#include <dev.h>
+#include <dev/dev.h>
 #include <defs.h>
 #include "printf.h"
 #include <lock/spinlock.h>

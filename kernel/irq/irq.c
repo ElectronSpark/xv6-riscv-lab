@@ -14,7 +14,7 @@
 #include "slab.h"
 #include "errno.h"
 #include "trap.h"
-#include "plic.h"
+#include "dev/plic.h"
 
 static struct irq_desc *irq_descs[IRQCNT] = { 0 };
 static slab_cache_t __irq_desc_slab = { 0 };

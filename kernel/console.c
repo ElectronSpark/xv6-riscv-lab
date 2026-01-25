@@ -17,9 +17,9 @@
 #include "printf.h"
 #include "proc/proc.h"
 #include "proc/sched.h"
-#include "cdev.h"
+#include "dev/cdev.h"
 #include "trap.h"
-#include "uart.h"
+#include "dev/uart.h"
 #include "sbi.h"
 
 #ifndef CONSOLE_MAJOR

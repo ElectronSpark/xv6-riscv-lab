@@ -1,8 +1,8 @@
 #include <param.h>
 #include <types.h>
 #include <riscv.h>
-#include <dev.h>
-#include <cdev.h>
+#include <dev/dev.h>
+#include <dev/cdev.h>
 #include <defs.h>
 #include "printf.h"
 #include <lock/spinlock.h>

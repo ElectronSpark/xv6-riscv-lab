@@ -1,7 +1,7 @@
 #ifndef __KERNEL_CHARACTER_DEVICE_H
 #define __KERNEL_CHARACTER_DEVICE_H
 
-#include <dev_types.h>
+#include <dev/dev_types.h>
 
 // Return cdev on success, or ERR_PTR on error
 cdev_t *cdev_get(int major, int minor);

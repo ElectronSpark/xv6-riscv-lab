@@ -9,7 +9,7 @@
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "proc/proc.h"
-#include "net.h"
+#include "dev/net.h"
 #include "defs.h"
 #include "printf.h"
 

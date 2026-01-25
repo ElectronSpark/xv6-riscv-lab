@@ -1,7 +1,7 @@
 #ifndef __KERNEL_DEV_DEV_H
 #define __KERNEL_DEV_DEV_H
 
-#include <dev_types.h>
+#include <dev/dev_types.h>
 
 void dev_table_init(void);
 // Get a device by its major and minor numbers

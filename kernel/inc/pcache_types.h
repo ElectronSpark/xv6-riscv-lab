@@ -10,7 +10,7 @@
 #include "lock/spinlock.h"
 #include "lock/completion_types.h"
 #include "kobject.h"
-#include "dev_types.h"
+#include "dev/dev_types.h"
 #include "proc/workqueue_types.h"
 
 

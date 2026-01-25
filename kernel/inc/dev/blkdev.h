@@ -1,8 +1,8 @@
 #ifndef __KERNEL_BLOCK_DRIVER_H
 #define __KERNEL_BLOCK_DRIVER_H
 
-#include <dev_types.h>
-#include <bio.h>
+#include <dev/dev_types.h>
+#include <dev/bio.h>
 
 #define blkdev_blk_size(dev) ((size_t)BLK_SIZE << (dev)->block_shift)
 

@@ -22,7 +22,7 @@
 #include "vfs/xv6fs/ondisk.h"  // for DIRSIZ
 #include "vm.h"
 #include "printf.h"
-#include "cdev.h"
+#include "dev/cdev.h"
 
 // Forward declaration for syscall argument helpers
 void argint(int n, int *ip);

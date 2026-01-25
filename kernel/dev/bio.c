@@ -4,8 +4,8 @@
 #include <riscv.h>
 #include <defs.h>
 #include "printf.h"
-#include <blkdev.h>
-#include <bio.h>
+#include <dev/blkdev.h>
+#include <dev/bio.h>
 #include <page.h>
 #include <errno.h>
 

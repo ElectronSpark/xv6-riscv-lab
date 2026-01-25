@@ -15,15 +15,15 @@
 #include "lock/spinlock.h"
 #include "lock/completion.h"
 #include "vfs/xv6fs/ondisk.h"  // for BSIZE
-#include "buf.h"
-#include "virtio.h"
-#include "blkdev.h"
+#include "dev/buf.h"
+#include "dev/virtio.h"
+#include "dev/blkdev.h"
 #include "page.h"
 #include "errno.h"
 #include "proc/sched.h"
 #include "trap.h"
 #include "freelist.h"
-#include "fdt.h"
+#include "dev/fdt.h"
 
 // the address of virtio mmio register r for disk n.
 #define R(n, r) ((volatile uint32 *)(__virtio_mmio_base[n] + (r)))

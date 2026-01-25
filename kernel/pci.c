@@ -11,7 +11,7 @@
 #include "proc/proc.h"
 #include "defs.h"
 #include "printf.h"
-#include "pci.h"
+#include "dev/pci.h"
 
 uint64 __pcie_ecam_mmio_base = 0x30000000L;
 

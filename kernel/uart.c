@@ -18,7 +18,7 @@
 #include "printf.h"
 #include "proc/sched.h"
 #include "trap.h"
-#include "uart.h"
+#include "dev/uart.h"
 
 uint64 __uart0_mmio_base = 0x10000000L;
 uint64 __uart0_irqno = 10;

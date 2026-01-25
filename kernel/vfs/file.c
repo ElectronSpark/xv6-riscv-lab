@@ -39,10 +39,10 @@
 #include "list.h"
 #include "hlist.h"
 #include "slab.h"
-#include "cdev.h"
-#include "blkdev.h"
+#include "dev/cdev.h"
+#include "dev/blkdev.h"
 #include "vm.h"
-#include "net.h"
+#include "dev/net.h"
 #include "pipe.h"
 #include "proc/proc_queue.h"
 

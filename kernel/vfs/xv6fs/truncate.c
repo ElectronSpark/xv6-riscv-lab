@@ -27,7 +27,7 @@
 #include "lock/mutex_types.h"
 #include "proc/proc.h"
 #include "vm.h"
-#include "buf.h"
+#include "dev/buf.h"
 #include "vfs/fs.h"
 #include "../vfs_private.h"
 #include "slab.h"

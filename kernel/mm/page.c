@@ -55,7 +55,7 @@
 #include "slab.h"
 #include "percpu.h"
 #include "early_allocator.h"
-#include "fdt.h"
+#include "dev/fdt.h"
 #include "memstat.h"
 
 // ============================================================================

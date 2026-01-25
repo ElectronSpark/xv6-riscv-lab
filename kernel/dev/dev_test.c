@@ -15,7 +15,7 @@
 #include "proc/proc.h"
 #include "proc/sched.h"
 #include "timer/timer.h"
-#include "dev.h"
+#include "dev/dev.h"
 #include "errno.h"
 #include "page.h"
 

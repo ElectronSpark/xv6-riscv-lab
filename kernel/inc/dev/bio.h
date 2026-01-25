@@ -1,7 +1,7 @@
 #ifndef __KERNEL_BLOCK_IO_H
 #define __KERNEL_BLOCK_IO_H
 
-#include <bio_types.h>
+#include <dev/bio_types.h>
 
 #define BLK_SIZE_SHIFT 9 // Number of bits to represent block size (2^9 = 512)
 #define BLK_SIZE (1UL << BLK_SIZE_SHIFT) // Block size in bytes, 512 bytes

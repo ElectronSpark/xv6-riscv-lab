@@ -14,7 +14,7 @@
 #include "proc/proc.h"
 #include "defs.h"
 #include "printf.h"
-#include "net.h"
+#include "dev/net.h"
 #include "vm.h"
 #include "signal.h"
 #include "proc/sched.h"

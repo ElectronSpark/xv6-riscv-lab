@@ -8,8 +8,8 @@
 #include "proc/proc.h"
 #include "defs.h"
 #include "printf.h"
-#include "e1000_dev.h"
-#include "net.h"
+#include "dev/e1000_dev.h"
+#include "dev/net.h"
 #include "trap.h"
 
 uint64 __e1000_pci_mmio_base = 0x40000000L;
