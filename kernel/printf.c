@@ -207,7 +207,12 @@ __panic_start()
   uint64 fp = r_fp();
   struct proc *p = myproc();
   if (p == NULL || p->kstack == 0) {
-    printf("unknown back trace context\n");
+    // No process context - use kernel memory bounds for backtrace
+    printf("No process context, fp=%p\n", (void *)fp);
+    if (__bt_enabled) {
+      // Use KERNBASE to PHYSTOP as conservative stack bounds
+      print_backtrace(fp, KERNBASE, PHYSTOP);
+    }
     return;
   }
   printf("In process %d (%s) at %p\n", p->pid, p->name, (void *)fp);

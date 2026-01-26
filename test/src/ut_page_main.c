@@ -35,7 +35,7 @@ static void ut_flush_pcpu_caches(void) {
                 }
                 __atomic_fetch_sub(&cache->count, 1, __ATOMIC_RELEASE);
 
-                page->buddy.state = BUDDY_STATE_MERGING;
+                page->buddy.state = BUDDY_STATE_INTERMEDIATE;
 
                 __buddy_merge_and_insert(page, (uint64)order);
             }

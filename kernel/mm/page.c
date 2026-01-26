@@ -18,7 +18,7 @@
 //
 // BUDDY STATES:
 //   - BUDDY_STATE_FREE: Page is in buddy pool, available for allocation
-//   - BUDDY_STATE_MERGING: Page is being merged with its buddy
+//   - BUDDY_STATE_INTERMEDIATE: Page is being merged with its buddy
 //   - BUDDY_STATE_CACHED: Page is in per-CPU cache
 //
 // ORGANIZATION:
@@ -235,8 +235,6 @@ STATIC_INLINE bool __page_flags_validity(uint64 flags) {
 // To check if a page can be put back to the buddy system as a free page to be
 // allocated again.
 STATIC_INLINE bool __page_is_freeable(page_t *page) {
-    if (page == NULL)
-        return false;
     if (page->flags & PAGE_FLAG_LOCKED)
         return false;
     if (page->ref_count > 1) {
@@ -250,7 +248,9 @@ STATIC_INLINE bool __page_is_freeable(page_t *page) {
 // SECTION 5: Page Initialization
 // ============================================================================
 
-// Initialize a page descriptor
+// Initialize a page descriptor (full initialization including spinlock)
+// Only use this during boot or when the page is guaranteed to not be
+// accessible by other threads.
 // No validity check here
 STATIC_INLINE void __page_init(page_t *page, uint64 physical, int ref_count,
                                uint64 flags) {
@@ -259,6 +259,25 @@ STATIC_INLINE void __page_init(page_t *page, uint64 physical, int ref_count,
     page->flags = flags;
     page->ref_count = ref_count;
     spin_init(&page->lock, "page_t");
+}
+
+// Reinitialize a page descriptor for allocation (preserves spinlock)
+// Use this when recycling a page from buddy system or cache.
+// The spinlock must already be initialized and must not be held by anyone.
+// No validity check here
+STATIC_INLINE void __page_reinit(page_t *page, uint64 physical, int ref_count,
+                                 uint64 flags) {
+    // Save the lock - it should already be properly initialized
+    // Clear everything except the lock
+    page->physical_address = physical;
+    page->flags = flags;
+    page->ref_count = ref_count;
+    // Reset buddy/slab union fields
+    page->buddy.buddy_head = NULL;
+    page->buddy.order = 0;
+    page->buddy.state = 0;
+    list_entry_init(&page->buddy.lru_entry);
+    // Note: We do NOT reinitialize the spinlock - it remains valid
 }
 
 // Initialize buddy pools and per-CPU caches
@@ -324,20 +343,42 @@ STATIC_INLINE int __init_range_flags(uint64 pa_start, uint64 pa_end,
 
 // Initialize a single page descriptor as a buddy page
 STATIC_INLINE void __page_as_buddy(page_t *page, page_t *buddy_head,
-                                   uint64 order) {
+                                   uint64 order, uint32 state) {
+    page->flags = PAGE_TYPE_BUDDY;
+    page->ref_count = 0;
+    page->buddy.buddy_head = buddy_head;
+    page->buddy.order = order;
+    page->buddy.state = state;
+    list_entry_init(&page->buddy.lru_entry);
+}
+
+// Initialize a single page descriptor as a buddy page
+// including page spinlock
+STATIC_INLINE void __page_as_buddy_init(page_t *page, page_t *buddy_head,
+                                   uint64 order, uint32 state) {
     __page_init(page, page->physical_address, 0, PAGE_TYPE_BUDDY);
     page->buddy.buddy_head = buddy_head;
     page->buddy.order = order;
-    page->buddy.state = BUDDY_STATE_FREE;
+    page->buddy.state = state;
     list_entry_init(&page->buddy.lru_entry);
 }
 
 // Initialize a continuous range of pages as a buddy page in specific order
 // Will not check validity here
-STATIC_INLINE void __page_as_buddy_group(page_t *buddy_head, uint64 order) {
+STATIC_INLINE void __page_as_buddy_group(page_t *buddy_head, uint64 order, uint32 state) {
     uint64 count = 1UL << order;
     for (int i = 0; i < count; i++) {
-        __page_as_buddy(&buddy_head[i], buddy_head, order);
+        __page_as_buddy(&buddy_head[i], buddy_head, order, state);
+    }
+}
+
+// Initialize a continuous range of pages as a buddy page in specific order
+// including page spinlock
+// Will not check validity here
+STATIC_INLINE void __page_as_buddy_group_init(page_t *buddy_head, uint64 order, uint32 state) {
+    uint64 count = 1UL << order;
+    for (int i = 0; i < count; i++) {
+        __page_as_buddy_init(&buddy_head[i], buddy_head, order, state);
     }
 }
 
@@ -401,10 +442,11 @@ STATIC_INLINE uint64 __get_buddy_addr(uint64 physical, uint32 order) {
     return __buddy_base_address;
 }
 
-// Try to find a page's buddy
-// Return the buddy page descriptor if found
-// Return NULL if didn't find
-STATIC_INLINE page_t *__get_buddy_page(page_t *page) {
+// Try to find a page's buddy and lock both of them.
+// Return the buddy page descriptor if found. The buddy page will be marked as
+// INTERMEDIATE state to prevent other threads from allocating it.
+// Return NULL if didn't find. In this case, they will be left unlocked.
+STATIC_INLINE page_t *__lock_get_buddy_page(page_t *page) {
     uint64 buddy_base;
     page_t *buddy_head;
     if (!PAGE_IS_BUDDY_GROUP_HEAD(page)) {
@@ -417,21 +459,31 @@ STATIC_INLINE page_t *__get_buddy_page(page_t *page) {
     }
     buddy_base = __get_buddy_addr(page->physical_address, page->buddy.order);
     buddy_head = __pa_to_page(buddy_base);
+    if (buddy_head == NULL) {
+        // Buddy address is out of managed range
+        return NULL;
+    }
+
+    __lock_two_pages(page, buddy_head);
     if (buddy_head == NULL || !PAGE_IS_BUDDY_GROUP_HEAD(buddy_head) ||
         buddy_head->buddy.order != page->buddy.order) {
         // Didn't find a complete buddy page.
+        __unlock_two_pages(page, buddy_head);
         return NULL;
     }
     if (LIST_ENTRY_IS_DETACHED(&buddy_head->buddy.lru_entry)) {
         // The buddy header page is not in the buddy pool, which means it's
         // holding by someone else right now.
+        __unlock_two_pages(page, buddy_head);
         return NULL;
     }
     // Check buddy state: must be FREE (not CACHED or MERGING)
     // Pages in per-CPU cache have BUDDY_STATE_CACHED
     if (buddy_head->buddy.state != BUDDY_STATE_FREE) {
+        __unlock_two_pages(page, buddy_head);
         return NULL;
     }
+    buddy_head->buddy.state = BUDDY_STATE_INTERMEDIATE;
     return buddy_head;
 }
 
@@ -440,7 +492,7 @@ STATIC_INLINE void __page_order_change_commit(page_t *page) {
     if (!PAGE_IS_BUDDY_GROUP_HEAD(page)) {
         panic("__page_order_change_commit");
     }
-    __page_as_buddy_group(page, page->buddy.order);
+    __page_as_buddy_group(page, page->buddy.order, BUDDY_STATE_FREE);
 }
 
 // ============================================================================
@@ -464,8 +516,9 @@ STATIC_INLINE page_t *__buddy_split(page_t *page) {
     }
     order_after = page->buddy.order - 1;
     buddy = page + (1UL << order_after);
-    __page_as_buddy(page, page, order_after);
-    __page_as_buddy(buddy, buddy, order_after);
+    page->buddy.order = order_after; // Update order in header
+    __page_as_buddy(buddy, buddy, order_after, BUDDY_STATE_INTERMEDIATE);
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
     return buddy;
 }
 
@@ -475,21 +528,18 @@ STATIC_INLINE page_t *__buddy_split(page_t *page) {
 // splitting.
 // Return NULL if failed to merge
 STATIC_INLINE page_t *__buddy_merge(page_t *page1, page_t *page2) {
-    page_t *header, *tail;
+    page_t *header;
     uint64 order_after;
     if (!PAGES_ARE_BUDDIES(page1, page2)) {
         return NULL;
     }
     if (page1->physical_address < page2->physical_address) {
         header = page1;
-        tail = page2;
     } else {
         header = page2;
-        tail = page1;
     }
     order_after = page1->buddy.order + 1;
-    __page_as_buddy(header, header, order_after);
-    __page_as_buddy(tail, header, order_after);
+    header->buddy.order = order_after;  // Update order in header
     return header;
 }
 
@@ -515,6 +565,9 @@ STATIC page_t *__pcpu_cache_get(uint64 order, uint64 flags) {
             page =
                 list_node_pop_back(&cache->lru_head, page_t, buddy.lru_entry);
             if (page != NULL) {
+                // Mark as intermediate to indicate it's being allocated
+                // (consistent with order > 0 path)
+                page->buddy.state = BUDDY_STATE_INTERMEDIATE;
                 PCPU_CACHE_COUNT_DEC(cache);
             }
         }
@@ -526,6 +579,9 @@ STATIC page_t *__pcpu_cache_get(uint64 order, uint64 flags) {
             page =
                 list_node_pop_back(&cache->lru_head, page_t, buddy.lru_entry);
             if (page != NULL) {
+                // It is safe to change the state here as we hold the cache lock,
+                // and no other CPU can access this page right now.
+                page->buddy.state = BUDDY_STATE_INTERMEDIATE;
                 PCPU_CACHE_COUNT_DEC(cache);
             }
         }
@@ -533,15 +589,13 @@ STATIC page_t *__pcpu_cache_get(uint64 order, uint64 flags) {
     }
 
     if (page != NULL) {
-        // Initialize the cached page for user allocation
+        // Reinitialize the cached page for user allocation
         // Physical addresses are already set correctly from when pages were
-        // cached
+        // cached. Use __page_reinit to preserve spinlocks - another thread
+        // may be trying to lock these pages in __lock_get_buddy_page.
         uint64 page_count = 1UL << order;
         for (uint64 i = 0; i < page_count; i++) {
-            uint64 phys_addr =
-                page[i].physical_address; // Save physical address
-            page[i].flags = 0;
-            __page_init(&page[i], phys_addr, 1, flags);
+            __page_reinit(&page[i], page[i].physical_address, 1, flags);
         }
     }
 
@@ -567,11 +621,12 @@ STATIC int __pcpu_cache_put(page_t *page, uint64 order) {
         uint32 current_count = PCPU_CACHE_COUNT_LOAD(cache);
         if (current_count < cache_limit) {
             // Initialize page as buddy before caching
-            __page_as_buddy_group(page, order);
-            page->buddy.state = BUDDY_STATE_CACHED;
+            page_lock_acquire(page);
+            __page_as_buddy_group(page, order, BUDDY_STATE_CACHED);
             list_node_push_back(&cache->lru_head, page, buddy.lru_entry);
             PCPU_CACHE_COUNT_INC(cache);
             ret = 0;
+            page_lock_release(page);
         }
         pop_off();
     } else {
@@ -580,11 +635,12 @@ STATIC int __pcpu_cache_put(page_t *page, uint64 order) {
         uint32 current_count = PCPU_CACHE_COUNT_LOAD(cache);
         if (current_count < cache_limit) {
             // Initialize page as buddy before caching
-            __page_as_buddy_group(page, order);
-            page->buddy.state = BUDDY_STATE_CACHED;
+            page_lock_acquire(page);
+            __page_as_buddy_group(page, order, BUDDY_STATE_CACHED);
             list_node_push_back(&cache->lru_head, page, buddy.lru_entry);
             PCPU_CACHE_COUNT_INC(cache);
             ret = 0;
+            page_lock_release(page);
         }
         spin_unlock(&cache->lock);
     }
@@ -619,20 +675,9 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
         }
     }
 
-    // Lock the requested order only when taking out
-    __buddy_pool_lock(order);
-    pool = &__buddy_pools[order];
-    page = __buddy_pop_page(pool);
-    __buddy_pool_unlock(order); // Unlock immediately after taking out
-
-    // found available buddy pages at the requested order
-    if (page != NULL) {
-        goto found;
-    }
-
     // Need to search higher orders - lock only when taking out
     // Try to find a bigger buddy page to split
-    for (tmp_order = order + 1; tmp_order <= PAGE_BUDDY_MAX_ORDER;
+    for (tmp_order = order; tmp_order <= PAGE_BUDDY_MAX_ORDER;
          tmp_order++) {
         __buddy_pool_lock(tmp_order);
         pool = &__buddy_pools[tmp_order];
@@ -656,7 +701,7 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
     // if found one, split it and return the header page from one of the
     // splitted groups. Lock each order only when putting buddy back.
     tmp_order = found_order;
-    do {
+    while (tmp_order > order) {
         buddy = __buddy_split(page);
         if (buddy == NULL) {
             // There's no way the splitting operation here would fail. If it
@@ -667,19 +712,18 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
         // put the later half back - lock only when putting in
         tmp_order--;
         pool = &__buddy_pools[tmp_order];
-        __page_order_change_commit(buddy);
-
         __buddy_pool_lock(tmp_order);
+        __page_order_change_commit(buddy);
         __buddy_push_page(pool, buddy);
         __buddy_pool_unlock(tmp_order); // Unlock immediately after putting in
-    } while (tmp_order > order);
+    };
 
-found:
-    // Initialize all pages for user allocation
+    // Reinitialize all pages for user allocation
+    // Use __page_reinit to preserve spinlocks - another thread may be
+    // trying to lock these pages in __lock_get_buddy_page.
     page_count = 1UL << order;
     for (uint64 i = 0; i < page_count; i++) {
-        page[i].flags = 0;
-        __page_init(&page[i], page[i].physical_address, 1, flags);
+        __page_reinit(&page[i], page[i].physical_address, 1, flags);
     }
     return page;
 }
@@ -703,44 +747,41 @@ STATIC void __buddy_merge_and_insert(page_t *page, uint64 start_order) {
         // Lock pool to search for buddy
         __buddy_pool_lock(tmp_order);
 
-        buddy = __get_buddy_page(page);
+        buddy = __lock_get_buddy_page(page);
         if (buddy != NULL) {
             // Buddy found, detach it from pool
             __buddy_detach_page(pool, buddy);
             __buddy_pool_unlock(tmp_order);
 
-            // Mark buddy as merging
-            page_lock_acquire(buddy);
-            buddy->buddy.state = BUDDY_STATE_MERGING;
-            page_lock_release(buddy);
+            // Merge the buddies while still holding both page locks
+            // This prevents race conditions where another thread could observe
+            // inconsistent order values during the merge
+            page_t *merged = __buddy_merge(page, buddy);
+            if (merged == NULL) {
+                __unlock_two_pages(page, buddy);
+                panic("__buddy_merge_and_insert(): failed to merge buddies");
+            }
+            // Now unlock after the order has been updated
+            __unlock_two_pages(page, buddy);
+            page = merged;
         } else {
             // No buddy found, add page to pool and finish
             page_lock_acquire(page);
-            page->buddy.state = BUDDY_STATE_FREE;
-            page_lock_release(page);
-
             __page_order_change_commit(page);
             __buddy_push_page(pool, page);
+            page_lock_release(page);
             __buddy_pool_unlock(tmp_order);
             return;
         }
-
-        // Merge the buddies
-        page = __buddy_merge(page, buddy);
-        if (page == NULL) {
-            panic("__buddy_merge_and_insert(): failed to merge buddies");
-        }
-
-        // Mark merged page as MERGING (only lock first half's head)
-        page_lock_acquire(page);
-        page->buddy.state = BUDDY_STATE_MERGING;
-        page_lock_release(page);
     }
 }
 
 // Put a page back to buddy system
 // Right now pages can only be put one by one
 STATIC int __buddy_put(page_t *page) {
+    if (page == NULL) {
+        return -1;
+    }
     if (!__page_is_freeable(page)) {
         // cannot free a page that's not freeable
         return -1;
@@ -753,9 +794,8 @@ STATIC int __buddy_put(page_t *page) {
 
     // Cache full or order > PCPU_CACHE_MAX_ORDER, go to buddy system
     // Initialize page as buddy and mark as merging
-    __page_as_buddy(page, page, 0);
     page_lock_acquire(page);
-    page->buddy.state = BUDDY_STATE_MERGING;
+    __page_as_buddy(page, page, 0, BUDDY_STATE_INTERMEDIATE);
     page_lock_release(page);
 
     // Use common merge-and-insert logic starting from order 0
@@ -835,7 +875,7 @@ static void __page_buddy_init_as_order(uint64 pa_start, int order) {
     page_t *buddy_head = __pa_to_page(pa_start);
     assert(buddy_head != NULL,
            "__page_buddy_init_as_order(): get NULL page");
-    __page_as_buddy_group(buddy_head, order);
+    __page_as_buddy_group_init(buddy_head, order, BUDDY_STATE_FREE);
 
     buddy_pool_t *pool = &__buddy_pools[order];
     __buddy_push_page(pool, buddy_head);
@@ -1006,9 +1046,8 @@ void __page_free(page_t *page, uint64 order) {
 
     // Cache full or order > PCPU_CACHE_MAX_ORDER, go to buddy system
     // Initialize the block as a buddy group and mark as merging
-    __page_as_buddy_group(page, order);
     page_lock_acquire(page);
-    page->buddy.state = BUDDY_STATE_MERGING;
+    __page_as_buddy_group(page, order, BUDDY_STATE_INTERMEDIATE);
     page_lock_release(page);
 
     // Use common merge-and-insert logic starting from the given order
