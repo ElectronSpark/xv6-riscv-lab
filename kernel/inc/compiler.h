@@ -20,6 +20,8 @@
 #define __PACKED __attribute__((packed))
 #define __SECTION(seg_name) __attribute__((section(#seg_name)))
 #define WEAK __attribute__((weak))
+#define __STRUCT_ALIGNMENT(x) struct {} __attribute__((aligned(x)))
+#define __STRUCT_CACHELINE_PADDING __STRUCT_ALIGNMENT(CACHELINE_SIZE)
 
 #define BUILD_BUG_ON(condition) static inline void  \
 __BUILD_BUG_ON_##__FILE__##__##__LINE__(void) {     \
