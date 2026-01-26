@@ -94,23 +94,21 @@ static void __trap_panic(struct trapframe *tf, uint64 s0) {
 }
 
 void user_kirq_entrance(uint64 ksp, uint64 s0) {
+    enter_irq();
     if ((myproc()->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
         panic("usertrap: not from user mode");
-    
+
     // Mark the current CPU as offline for this process's VM
     vm_cpu_offline(myproc()->vm, cpuid());
 
     // redirect traps to kerneltrap()
     // Since we are on kernel stack
     trapinithart();
-    assert(mycpu()->intr_depth++ == 0,
-           "user_kirq_entrance: nested interrupts not supported. level=%d",
-           mycpu()->intr_depth);
     if (do_irq(&myproc()->trapframe->trapframe) < 0) {
         __trap_panic(&myproc()->trapframe->trapframe, s0);
     }
-    mycpu()->intr_depth--;
-
+    exit_irq();
+    
     if (myproc()->trapframe->trapframe.scause == 0x8000000000000009L &&
         !NEEDS_RESCHED()) {
         // For device interrupts that don't need rescheduling,
@@ -134,7 +132,7 @@ void usertrap(void) {
 
     if ((myproc()->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
         panic("usertrap: not from user mode");
-    
+
     // Mark the current CPU as offline for this process's VM
     vm_cpu_offline(myproc()->vm, cpuid());
 
@@ -395,18 +393,28 @@ void kerneltrap(struct trapframe *sp, uint64 s0) {
 }
 
 void kernel_irq(struct trapframe *sp, uint64 s0) {
-    assert(!CPU_IN_ITR(),
-           "kerneltrap: nested interrupts not supported. level=%d",
-           mycpu()->intr_depth);
-    mycpu()->intr_depth++;
-    CPU_SET_IN_ITR();
+    enter_irq();
     assert(sp->sstatus & SSTATUS_SPP, "kerneltrap: not from supervisor mode");
-    assert(!intr_get(), "kerneltrap: interrupts enabled");
-
     if (do_irq(sp) < 0) {
         __trap_panic(sp, s0);
     }
+    exit_irq();
+}
 
+void enter_irq(void) {
+    assert(!CPU_IN_ITR(),
+           "enter_irq: nested interrupts not supported. level=%d",
+           mycpu()->intr_depth);
+    mycpu()->intr_depth++;
+    if (mycpu()->intr_depth == 1) {
+        CPU_SET_IN_ITR();
+    }
+    assert(!intr_get(), "kerneltrap: interrupts enabled");
+}
+
+void exit_irq(void) {
     mycpu()->intr_depth--;
-    CPU_CLEAR_IN_ITR();
+    if (mycpu()->intr_depth == 0) {
+        CPU_CLEAR_IN_ITR();
+    }
 }
