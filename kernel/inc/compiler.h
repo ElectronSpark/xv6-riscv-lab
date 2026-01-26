@@ -23,8 +23,12 @@
 #define __STRUCT_ALIGNMENT(x) struct {} __attribute__((aligned(x)))
 #define __STRUCT_CACHELINE_PADDING __STRUCT_ALIGNMENT(CACHELINE_SIZE)
 
+// Helper macros for token concatenation with proper expansion
+#define __BUILD_BUG_ON_PASTE(a, b) a##b
+#define __BUILD_BUG_ON_PASTE2(a, b) __BUILD_BUG_ON_PASTE(a, b)
+
 #define BUILD_BUG_ON(condition) static inline void  \
-__BUILD_BUG_ON_##__FILE__##__##__LINE__(void) {     \
+__BUILD_BUG_ON_PASTE2(__build_bug_on_, __LINE__)(void) { \
     ((void)sizeof(char[1 - 2*!!(condition)]));      \
 }
 
