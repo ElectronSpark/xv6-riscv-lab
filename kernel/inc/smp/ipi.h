@@ -11,19 +11,17 @@
 #include "types.h"
 
 // IPI reason codes - can be extended for different IPI purposes
-#define IPI_REASON_GENERIC      0   // Generic IPI (no specific action)
-#define IPI_REASON_RESCHEDULE   1   // Request target hart to reschedule
-#define IPI_REASON_CALL_FUNC    2   // Request target hart to call a function
+#define IPI_REASON_CRASH        0   // Request target hart to crash (for testing)
+#define IPI_REASON_CALL_FUNC    1   // Request target hart to call a function
+#define IPI_REASON_RESCHEDULE   2   // Request target hart to reschedule
 #define IPI_REASON_TLB_FLUSH    3   // Request target hart to flush TLB
+#define IPI_REASON_GENERIC      4   // Generic IPI (no specific action)
+#define NR_IPI_REASON           5   // Maximum reason code
+
+BUILD_BUG_ON(NR_IPI_REASON > 8); // Limit to 8 reasons for bitmasking
 
 // IPI callback function type
-typedef void (*ipi_callback_t)(void *arg);
-
-struct ipi_msg {
-    ipi_callback_t callback;   // Function to call on IPI
-    int reason;                // Reason code for the IPI
-    void *arg;                 // Argument to pass to the callback
-} __ALIGNED_CACHELINE;
+typedef void (*ipi_callback_t)(void);
 
 /**
  * Initialize the IPI subsystem.
@@ -36,7 +34,7 @@ void ipi_init(void);
  * @param hartid The target hart ID
  * @return 0 on success, negative error code on failure
  */
-int ipi_send_single(int hartid, struct ipi_msg *msg);
+int ipi_send_single(int hartid, int reason);
 
 /**
  * Send an IPI to multiple harts specified by a mask.
@@ -44,18 +42,18 @@ int ipi_send_single(int hartid, struct ipi_msg *msg);
  * @param hart_mask_base Base hart ID for the mask
  * @return 0 on success, negative error code on failure
  */
-int ipi_send_mask(unsigned long hart_mask, unsigned long hart_mask_base);
+int ipi_send_mask(unsigned long hart_mask, unsigned long hart_mask_base, int reason);
 
 /**
  * Send an IPI to all harts except the calling hart.
  * @return 0 on success, negative error code on failure
  */
-int ipi_send_all_but_self(void);
+int ipi_send_all_but_self(int reason);
 
 /**
  * Send an IPI to all harts including the calling hart.
  * @return 0 on success, negative error code on failure
  */
-int ipi_send_all(void);
+int ipi_send_all(int reason);
 
 #endif /* __KERNEL_IPI_H */

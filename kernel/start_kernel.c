@@ -77,6 +77,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     trapinithart();  // install kernel trap vector
     plicinit();      // set up interrupt controller
     plicinithart();  // ask PLIC for device interrupts
+    ipi_init();      // inter-processor interrupts
     consoleinit();
     pci_init();
     signal_init();   // signal handling initialization  
@@ -168,8 +169,6 @@ void start_kernel_post_init(void) {
     // Linux-style: boot hart explicitly starts other harts after initialization.
     // OpenSBI keeps other harts stopped until we request them via sbi_hart_start().
     sbi_start_secondary_harts((unsigned long)_entry);
-    sleep_ms(100);
-
     // RCU processing is now done per-CPU in idle loops
     // rcu_run_tests();
     
