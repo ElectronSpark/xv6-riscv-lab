@@ -352,6 +352,18 @@ STATIC_INLINE void __page_as_buddy(page_t *page, page_t *buddy_head,
     list_entry_init(&page->buddy.lru_entry);
 }
 
+// Initialize only the header page before commit.
+// Only sets the essential fields for header identification during merge/split.
+// Tail pages are NOT touched - they will be initialized at commit time.
+STATIC_INLINE void __page_as_buddy_header(page_t *page, uint64 order, uint32 state) {
+    page->flags = PAGE_TYPE_BUDDY;
+    page->ref_count = 0;
+    page->buddy.buddy_head = page;  // Header points to itself
+    page->buddy.order = order;
+    page->buddy.state = state;
+    // Note: lru_entry will be initialized at commit time
+}
+
 // Initialize a single page descriptor as a buddy page
 // including page spinlock
 STATIC_INLINE void __page_as_buddy_init(page_t *page, page_t *buddy_head,
@@ -488,11 +500,23 @@ STATIC_INLINE page_t *__lock_get_buddy_page(page_t *page) {
 }
 
 // Update tail pages after merging and splitting operations.
+// The header page is assumed to already have the correct order set.
+// This function updates the state to FREE and initializes all tail pages.
 STATIC_INLINE void __page_order_change_commit(page_t *page) {
     if (!PAGE_IS_BUDDY_GROUP_HEAD(page)) {
         panic("__page_order_change_commit");
     }
-    __page_as_buddy_group(page, page->buddy.order, BUDDY_STATE_FREE);
+    uint64 order = page->buddy.order;
+    uint64 count = 1UL << order;
+    
+    // Update header state only (order and buddy_head already correct)
+    page->buddy.state = BUDDY_STATE_FREE;
+    list_entry_init(&page->buddy.lru_entry);
+    
+    // Initialize tail pages (skip header at index 0)
+    for (uint64 i = 1; i < count; i++) {
+        __page_as_buddy(&page[i], page, order, BUDDY_STATE_FREE);
+    }
 }
 
 // ============================================================================
@@ -517,7 +541,8 @@ STATIC_INLINE page_t *__buddy_split(page_t *page) {
     order_after = page->buddy.order - 1;
     buddy = page + (1UL << order_after);
     page->buddy.order = order_after; // Update order in header
-    __page_as_buddy(buddy, buddy, order_after, BUDDY_STATE_INTERMEDIATE);
+    // Only initialize buddy header - tail pages will be set at commit time
+    __page_as_buddy_header(buddy, order_after, BUDDY_STATE_INTERMEDIATE);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     return buddy;
 }
@@ -682,7 +707,12 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
         __buddy_pool_lock(tmp_order);
         pool = &__buddy_pools[tmp_order];
         page = __buddy_pop_page(pool);
-        __buddy_pool_unlock(tmp_order); // Unlock immediately after taking out
+        if (page != NULL) {
+            // Set state to INTERMEDIATE atomically with pop under pool lock
+            // This prevents race with __lock_get_buddy_page
+            page->buddy.state = BUDDY_STATE_INTERMEDIATE;
+        }
+        __buddy_pool_unlock(tmp_order); // Unlock after state is set
 
         // break the for loop when finding a free buddy page
         if (page != NULL) {
@@ -793,9 +823,9 @@ STATIC int __buddy_put(page_t *page) {
     }
 
     // Cache full or order > PCPU_CACHE_MAX_ORDER, go to buddy system
-    // Initialize page as buddy and mark as merging
+    // Only initialize header as buddy - tail pages will be set at commit time
     page_lock_acquire(page);
-    __page_as_buddy(page, page, 0, BUDDY_STATE_INTERMEDIATE);
+    __page_as_buddy_header(page, 0, BUDDY_STATE_INTERMEDIATE);
     page_lock_release(page);
 
     // Use common merge-and-insert logic starting from order 0
@@ -1045,9 +1075,9 @@ void __page_free(page_t *page, uint64 order) {
     }
 
     // Cache full or order > PCPU_CACHE_MAX_ORDER, go to buddy system
-    // Initialize the block as a buddy group and mark as merging
+    // Only initialize header as buddy - tail pages will be set at commit time
     page_lock_acquire(page);
-    __page_as_buddy_group(page, order, BUDDY_STATE_INTERMEDIATE);
+    __page_as_buddy_header(page, order, BUDDY_STATE_INTERMEDIATE);
     page_lock_release(page);
 
     // Use common merge-and-insert logic starting from the given order
