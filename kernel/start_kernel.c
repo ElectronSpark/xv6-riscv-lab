@@ -181,9 +181,4 @@ void start_kernel_post_init(void) {
     // void rq_test_run(void);
     // rq_test_run();
 // #endif
-
-    // Initialize IPI subsystem and run demo
-    // sleep_ms(100);
-    // ipi_init();
-    // ipi_demo();
 }

@@ -19,6 +19,12 @@
 // IPI callback function type
 typedef void (*ipi_callback_t)(void *arg);
 
+struct ipi_msg {
+    ipi_callback_t callback;   // Function to call on IPI
+    int reason;                // Reason code for the IPI
+    void *arg;                 // Argument to pass to the callback
+} __ALIGNED_CACHELINE;
+
 /**
  * Initialize the IPI subsystem.
  * Registers the software interrupt handler for IPIs.
@@ -30,7 +36,7 @@ void ipi_init(void);
  * @param hartid The target hart ID
  * @return 0 on success, negative error code on failure
  */
-int ipi_send_single(int hartid);
+int ipi_send_single(int hartid, struct ipi_msg *msg);
 
 /**
  * Send an IPI to multiple harts specified by a mask.
@@ -51,23 +57,5 @@ int ipi_send_all_but_self(void);
  * @return 0 on success, negative error code on failure
  */
 int ipi_send_all(void);
-
-/**
- * Run an IPI demonstration showing inter-processor communication.
- * This function sends IPIs to all harts and prints messages.
- */
-void ipi_demo(void);
-
-/**
- * Called by secondary harts to participate in IPI demo.
- * Secondary harts should call this to send IPI to boot hart.
- */
-void ipi_secondary_send_to_boot(void);
-
-/**
- * Get the current IPI demo phase.
- * 0 = not active, 1 = secondary->boot, 2 = boot->secondary
- */
-int ipi_get_demo_phase(void);
 
 #endif /* __KERNEL_IPI_H */
