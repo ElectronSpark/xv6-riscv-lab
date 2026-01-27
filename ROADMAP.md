@@ -30,7 +30,7 @@ These features focus on building a complete, functional Unix-like system with mo
 - Completed: Support for multiple kernel base addresses (QEMU: 0x80200000, Orange Pi: 0x00200000)
 - Target: Zone-based allocation, optimized page frame management
 - Benefits: Support varied hardware configs (QEMU and real hardware), better memory utilization
-- Files: `kernel/mm/page.c`, `kernel/mm/kalloc.c`, `kernel/start_kernel.c`, `kernel/inc/memlayout.h`
+- Files: `kernel/mm/page.c`, `kernel/mm/kalloc.c`, `kernel/start_kernel.c`, `kernel/inc/mm/memlayout.h`
 
 **Memory Architecture**:
 ```
@@ -58,10 +58,10 @@ Target:
 - ✅ Separate linker scripts generated from template (kernel.ld.in)
 
 **Implementation Notes**:
-- CMake generates two linker scripts: kernel.ld (QEMU) and kernel.orangepi.ld (Orange Pi)
-- `make orangepi` builds xv6.bin, xv6.sym, and compiled U-Boot scripts
+- CMake generates linker script from `kernel.ld.in` with platform-specific KERNEL_BASE
+- Build for Orange Pi: `PLATFORM=orangepi cmake .. && make`
 - SBI console uses legacy putchar/getchar for early output
-- Files: `kernel/CMakeLists.txt`, `kernel/kernel.ld.in`, `boot.cmd`, `xv6.cmd`, `default.cmd`, `kernel/console.c`, `kernel/sbi.c`
+- Files: `kernel/CMakeLists.txt`, `kernel/kernel.ld.in`, `boot/boot.cmd`, `boot/xv6.cmd`, `boot/default.cmd`, `kernel/console.c`, `kernel/sbi.c`
 
 ---
 
@@ -81,7 +81,7 @@ Target:
 - Completed: `CPU_SET_IN_ITR()`/`CPU_CLEAR_IN_ITR()` for interrupt context tracking
 - Completed: `NEEDS_RESCHED` flag for deferred rescheduling
 - Benefits: Better stack isolation, improved responsiveness, safer interrupt handling
-- Files: `kernel/inc/percpu.h`, `kernel/inc/percpu_types.h`, `kernel/trap.c`, `kernel/interruption/`
+- Files: `kernel/inc/smp/percpu.h`, `kernel/inc/smp/percpu_types.h`, `kernel/irq/trap.c`, `kernel/irq/`
 
 **Stack Architecture** (Implemented):
 ```
@@ -186,7 +186,7 @@ Per-CPU RCU kthread → rcu_process_callbacks_for_cpu()
 - `vm->cpumask`: Tracks which CPUs are using this VM (for future TLB shootdown)
 - `vm->refcount`: Reference counting for shared VMs
 - Locking order: Sleep locks (VFS, VM rwlock) before spinlocks (pgtable, proc)
-- Files: `kernel/mm/vm.c`, `kernel/inc/vm.h`, `kernel/inc/vm_types.h`, `kernel/vfs/file.c`, `kernel/vfs/fs.c`
+- Files: `kernel/mm/vm.c`, `kernel/inc/mm/vm.h`, `kernel/inc/mm/vm_types.h`, `kernel/vfs/file.c`, `kernel/vfs/fs.c`
 **Dependencies**: VFS enhancements (partially complete)  
 **Priority**: High
 

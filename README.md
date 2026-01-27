@@ -119,18 +119,28 @@ Complete POSIX-style system call interface including:
 ### Directory Structure
 
 ```
-xv6-riscv-6/
+xv6-riscv/
 ├── kernel/              # Kernel source code
 │   ├── inc/            # Kernel headers
+│   │   ├── dev/       # Device driver headers
+│   │   ├── lock/      # Synchronization primitive headers
+│   │   ├── mm/        # Memory management headers
+│   │   ├── proc/      # Process management headers
+│   │   ├── smp/       # SMP and per-CPU headers
+│   │   ├── timer/     # Timer subsystem headers
 │   │   └── vfs/       # VFS headers
 │   ├── vfs/           # Virtual File System implementation
 │   ├── mm/            # Memory management subsystem
 │   ├── proc/          # Process management
 │   ├── lock/          # Synchronization primitives
 │   ├── dev/           # Device drivers
+│   ├── irq/           # Interrupt handling (trap, syscall, plic)
+│   ├── ipi/           # Inter-processor interrupts
+│   ├── timer/         # Timer subsystem
 │   └── ...
 ├── user/               # User-space programs
 ├── mkfs/              # File system creation tool
+├── boot/              # U-Boot scripts for Orange Pi
 ├── scripts/           # Build and development scripts
 │   ├── gen_asm_offsets.py  # Assembly offset generator
 │   └── ...
@@ -146,8 +156,9 @@ xv6-riscv-6/
 - **File Systems** (`kernel/vfs/xv6fs/`, `kernel/vfs/tmpfs/`): File system implementations
 - **Memory Management** (`kernel/mm/`): Physical and virtual memory, slab allocator
 - **Process Management** (`kernel/proc/`): Scheduler, context switching, fork/exec
-- **Locking** (`kernel/lock/`): Mutexes, spinlocks, rwlocks
+- **Locking** (`kernel/lock/`): Mutexes, spinlocks, rwlocks, RCU
 - **Devices** (`kernel/dev/`): Device driver framework
+- **Interrupt Handling** (`kernel/irq/`): Trap handling, syscalls, PLIC
 
 ## Building and Running
 
@@ -246,18 +257,21 @@ make -j$(nproc)
 **Building for Orange Pi RV2:**
 
 ```bash
-# Build Orange Pi deployment files (xv6.bin, xv6.sym, U-Boot scripts)
-make orangepi
+# Configure for Orange Pi platform
+PLATFORM=orangepi cmake ..
 
-# Deploy to Orange Pi via SCP
-cmake .. -DORANGEPI_IP=192.168.0.201
+# Build kernel and user programs
+make -j$(nproc)
+
+# Deploy to Orange Pi via SCP (configure IP address)
+PLATFORM=orangepi cmake -DORANGEPI_IP=192.168.0.201 ..
 make deploy
 ```
 
-The `orangepi` target builds:
+The Orange Pi build produces:
 - `kernel/xv6.bin`: Flat binary for direct loading (base address 0x00200000)
 - `kernel/xv6.sym`: Symbol table for debugging
-- `kernel/*.scr`: Compiled U-Boot scripts for boot menu
+- `boot/*.scr`: Compiled U-Boot scripts for boot menu
 
 **Note**: Do not use the root directory Makefile - it is obsolete and for reference only. Always use the CMake build system as described above.
 
@@ -480,8 +494,8 @@ Due to the extensive architectural changes (VFS implementation, new memory manag
 ### Kernel Parameters
 
 Edit `kernel/param.h` to configure:
-- `NPROC`: Maximum number of processes (default: 64)
-- `NOFILE`: Maximum open files per process (default: 16)
+- `NPROC`: Maximum number of processes (default: 10000)
+- `NOFILE`: Maximum open files per process (default: 64)
 - `MAXOPBLOCKS`: Maximum file system operations per transaction
 - `NBUF`: Number of buffer cache entries
 

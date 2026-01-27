@@ -1,8 +1,18 @@
 /**
- * IPI (Inter-Processor Interrupt) implementation for RISC-V
+ * @file ipi.c
+ * @brief IPI (Inter-Processor Interrupt) implementation for RISC-V
  * 
  * This module handles inter-processor interrupts using the SBI IPI extension.
  * IPIs are delivered as supervisor software interrupts (IRQ 1).
+ * 
+ * The implementation uses a per-CPU pending bitmask (ipi_pending[]) to track
+ * which IPI reasons are pending for each hart. When an IPI is sent:
+ * 1. The sender sets the appropriate bit in the target's ipi_pending
+ * 2. The sender triggers a software interrupt via SBI
+ * 3. The target's IPI handler reads ipi_pending to determine the reason
+ * 4. The target clears the processed reason bit
+ * 
+ * This allows multiple IPI reasons to be queued and processed in order.
  */
 
 #include "compiler.h"
@@ -22,14 +32,15 @@
 #include "string.h"
 #include "bits.h"
 
-// Per-CPU state, placed in special linker section for trampoline access
+/** @brief Per-CPU state, placed in special linker section for trampoline access */
 __SECTION(cpu_local_sec)
 __ALIGNED_PAGE
 struct cpu_local cpus[NCPU] = {0};
 
-uint64 ipi_pending[NCPU] = {0}; // Pending IPI bitmask per hart
+/** @brief Pending IPI bitmask per hart (indexed by hart ID) */
+uint64 ipi_pending[NCPU] = {0};
 
-// IRQ number for supervisor software interrupt
+/** @brief IRQ number for supervisor software interrupt */
 #define IRQ_S_SOFT  1
 
 /**
@@ -52,7 +63,7 @@ static void __ipi_irq_handler(int irq, void *data, device_t *dev) {
 
     switch (reason) {
     case IPI_REASON_CRASH:
-        // propogate crash to all other harts
+        // Propagate crash to all other harts
         ipi_send_all_but_self(IPI_REASON_CRASH);
         for(;;) {
             asm volatile("wfi");
@@ -83,7 +94,10 @@ static void __ipi_irq_handler(int irq, void *data, device_t *dev) {
 }
 
 /**
- * Initialize the IPI subsystem.
+ * @brief Initialize the IPI subsystem.
+ * 
+ * Registers the software interrupt handler for IPIs and clears
+ * all pending IPI bitmasks.
  */
 void ipi_init(void) {    
     // Register the IPI handler for supervisor software interrupt
@@ -103,7 +117,10 @@ void ipi_init(void) {
 }
 
 /**
- * Send an IPI to a specific hart.
+ * @brief Send an IPI to a specific hart.
+ * @param hartid The target hart ID (0 to NCPU-1)
+ * @param reason The IPI reason code (IPI_REASON_*)
+ * @return 0 on success, -EINVAL for invalid parameters
  */
 int ipi_send_single(int hartid, int reason) {
     if (hartid < 0 || hartid >= NCPU) {
@@ -121,8 +138,12 @@ int ipi_send_single(int hartid, int reason) {
 }
 
 /**
- * Send an IPI to multiple harts specified by a mask.
- * Bits out of bounds are ignored.
+ * @brief Send an IPI to multiple harts specified by a mask.
+ * @param hart_mask Bitmask of target harts (bit i = hart i)
+ * @param hart_mask_base Base hart ID for the mask
+ * @param reason The IPI reason code (IPI_REASON_*)
+ * @return 0 on success, -EINVAL for invalid reason
+ * @note Bits out of bounds are ignored.
  */
 int ipi_send_mask(unsigned long hart_mask, unsigned long hart_mask_base, int reason) {
     if (reason < 0 || reason >= NR_IPI_REASON) {
@@ -140,7 +161,9 @@ int ipi_send_mask(unsigned long hart_mask, unsigned long hart_mask_base, int rea
 }
 
 /**
- * Send an IPI to all harts except the calling hart.
+ * @brief Send an IPI to all harts except the calling hart.
+ * @param reason The IPI reason code (IPI_REASON_*)
+ * @return 0 on success, negative error code on failure
  */
 int ipi_send_all_but_self(int reason) {
     cpumask_t hart_mask = ((1UL << NCPU) - 1) & ~(1UL << cpuid());
@@ -148,7 +171,9 @@ int ipi_send_all_but_self(int reason) {
 }
 
 /**
- * Send an IPI to all harts including the calling hart.
+ * @brief Send an IPI to all harts including the calling hart.
+ * @param reason The IPI reason code (IPI_REASON_*)
+ * @return 0 on success, negative error code on failure
  */
 int ipi_send_all(int reason) {
     cpumask_t hart_mask = (1UL << NCPU) - 1;

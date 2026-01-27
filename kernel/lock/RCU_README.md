@@ -909,15 +909,15 @@ Potential Linux RCU features that could be added:
 
 ## Files
 
-- **kernel/inc/rcu.h**: Public RCU API with kthread declarations
-- **kernel/inc/rcu_type.h**: RCU data structure definitions (`rcu_cpu_data_t` with pending list, `rcu_state_t`)
+- **kernel/inc/lock/rcu.h**: Public RCU API with kthread declarations
+- **kernel/inc/lock/rcu_type.h**: RCU data structure definitions (`rcu_cpu_data_t` with pending list, `rcu_state_t`)
 - **kernel/lock/rcu.c**: Core RCU implementation with per-CPU kthreads (~1000 lines)
 - **kernel/lock/rcu_test.c**: Comprehensive test suite with ASAN (~800 lines)
 - **kernel/lock/RCU_README.md**: Complete documentation (this file)
 - **kernel/inc/list.h**: RCU-safe list operations
 - **kernel/inc/hlist.h**: RCU-safe hash list inline operations
 - **kernel/hlist.c**: RCU-safe hash list functions (`hlist_get_rcu`, `hlist_put_rcu`, `hlist_pop_rcu`)
-- **kernel/inc/percpu.h**: Per-CPU macros including `rcu_timestamp` access
+- **kernel/inc/smp/percpu.h**: Per-CPU macros including `rcu_timestamp` access
 - **kernel/proc/sched.c**: Scheduler integration for quiescent states
 - **kernel/start_kernel.c**: RCU initialization and kthread startup
 
