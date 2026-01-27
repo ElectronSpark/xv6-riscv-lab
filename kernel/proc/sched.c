@@ -650,10 +650,8 @@ void context_switch_finish(struct proc *prev, struct proc *next, int intr) {
 
     rq_unlock_current_irqrestore(intr);
 
-    if (pstate == PSTATE_ZOMBIE && pparent != NULL && pparent != next) {
-        // Wake up the parent only if it's not the current process
-        wakeup_interruptible(pparent);
-    }
+    // Note: Parent wakeup for zombie processes is handled in __exit_yield()
+    // BEFORE the zombie calls scheduler_yield(). See the comment block above.
 
     // Note quiescent state for RCU - context switch is a quiescent state.
     // Callback processing is now handled by per-CPU RCU kthreads.
