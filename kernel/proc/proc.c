@@ -771,9 +771,12 @@ int wait(uint64 addr) {
             yield();
             proc_lock(p);
         } else {
-            spin_release(&p->lock);
+            // Release lock around context switch. Must use spin_unlock/spin_lock
+            // to match proc_lock's use of spin_lock (which manages noff via push_off/pop_off).
+            // Using spin_unlock_irqrestore here would leave noff unbalanced.
+            spin_unlock(&p->lock);
             scheduler_yield();
-            spin_acquire(&p->lock);
+            spin_lock(&p->lock);
         }
     }
 

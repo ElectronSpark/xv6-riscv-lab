@@ -162,6 +162,9 @@ void scheduler_yield(void) {
     // Wake up processes with expired timers.
     // It may add processes to the run queue, so do it before acquiring rq_lock.
     __do_timer_tick();
+    
+    // Flush the wake list - atomically drain pending wakeups and enqueue them
+    rq_flush_wake_list(cpuid());
 
     int intr = rq_lock_current_irqsave();
     struct proc *proc = myproc();

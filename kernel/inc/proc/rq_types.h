@@ -10,8 +10,12 @@
 #include "bintree_type.h"
 
 struct rq;
+struct rq_percpu;
 struct sched_entity;
 struct proc;
+
+// Priority level count - needed for struct rq_percpu definition
+#define PRIORITY_MAINLEVELS         64
 
 #define SCHED_FIXEDPOINT_SHIFT 10
 #define SCHED_FIXEDPOINT_ONE (1 << SCHED_FIXEDPOINT_SHIFT)
@@ -96,6 +100,21 @@ struct rq {
     int class_id;                    // Scheduling class ID
     int task_count;                  // Number of processes in the run queue
     int cpu_id;                      // CPU ID this run queue belongs to
+} __ALIGNED_CACHELINE;
+
+/**
+ * @brief Per-CPU run queue data, cache-line aligned to avoid false sharing.
+ * 
+ * Each CPU has its own instance of this structure, containing all per-CPU
+ * scheduler state. Use rq_percpu_lock_get() / rq_percpu_put_unlock() to access.
+ */
+struct rq_percpu {
+    struct rq *rqs[PRIORITY_MAINLEVELS];  /**< Per-priority run queues for this CPU */
+    uint64 ready_mask;                     /**< Top-level ready mask (8 groups of 8 priorities) */
+    uint64 ready_mask_secondary;           /**< Secondary ready mask (64 priority bits) */
+    spinlock_t rq_lock;                    /**< Lock protecting this CPU's run queue data */
+    struct sched_entity *wake_list_head;   /**< Head of the wake list for this CPU */
+    struct sched_entity *current_se;       /**< Currently running sched_entity on this CPU */
 } __ALIGNED_CACHELINE;
 
 struct sched_entity {

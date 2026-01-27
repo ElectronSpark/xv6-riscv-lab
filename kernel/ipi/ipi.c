@@ -31,6 +31,7 @@
 #include <smp/percpu.h>
 #include "string.h"
 #include "bits.h"
+#include "smp/percpu.h"
 
 /** @brief Per-CPU state, placed in special linker section for trampoline access */
 __SECTION(cpu_local_sec)
@@ -75,6 +76,7 @@ static void __ipi_irq_handler(int irq, void *data, device_t *dev) {
     case IPI_REASON_RESCHEDULE:
         // Request to reschedule
         // sched_yield();
+        SET_NEEDS_RESCHED();
         break;
     case IPI_REASON_TLB_FLUSH:
         // Request to flush TLB

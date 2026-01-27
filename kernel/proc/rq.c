@@ -11,83 +11,97 @@
 #include <mm/slab.h>
 #include "proc/rq.h"
 #include "rbtree.h"
+#include "llist.h"
 #include <smp/atomic.h>
 #include "string.h"
 #include "bits.h"
 #include "errno.h"
+#include "compiler.h"
 
-// Global run queue structure
-// rqs structure:
-//   rqs[PRIORITY_MAINLEVELS] (fixed size array, 64 priority levels)
-//       |
-//       v
-//   +-------+-------+-------+-------+-------+-------+-------+-------+
-//   |  [0]  |  [1]  |  [2]  | ...                           | [63]  |
-//   +-------+-------+-------+-------+-------+-------+-------+-------+
-//       |       |       |       ...
-//       |       |       +---> NULL or pointer to dynamic array
-//       |       +-----------> NULL or pointer to dynamic array
-//       v
-//   +-------+-------+-------+-------+-------+
-//   |  *rq  |  *rq  |  *rq  |  *rq  | ....  |  (size: n-cpus)
-//   +-------+-------+-------+-------+-------+
-//       |       |       |       |
-//       v       v       v       v
-//     struct  struct  struct  struct
-//       rq      rq      rq      rq
-//
-// Two-layer ready mask for O(1) lookup of highest priority ready queue:
-//   ready_mask (8 bits): Each bit indicates if the corresponding group has any ready tasks.
-//       Bit i is set if any priority level in group i (cls_id 8*i to 8*i+7) has tasks.
-//   ready_mask_secondary (64 bits): Each bit indicates if that priority level has ready tasks.
-//       Organized as 8 groups of 8 bits each, matching ready_mask groups.
-//
-// Lookup algorithm:
-//   1. Find lowest set bit in ready_mask -> top_id (group 0-7)
-//   2. Extract 8-bit group from ready_mask_secondary at (top_id * 8)
-//   3. Find lowest set bit in that group -> cls_id = top_id*8 + bit_position
-//
-// sched_class: scheduling class for each main priority level.
-//
-// rq_lock: Each CPU has a global rq_lock to protect the rqs and ready_mask
+/** @brief Static per-CPU run queue data array (cache-line aligned). */
+static struct rq_percpu rq_percpu_data[NCPU] __ALIGNED_CACHELINE;
+
+/**
+ * @brief Global run queue structure.
+ * 
+ * rqs structure (now organized per-CPU for cache efficiency):
+ *   percpu[NCPU] (fixed size array, one per CPU, cache-line aligned)
+ *       |
+ *       v
+ *   +------------------+------------------+------------------+
+ *   | percpu[0]        | percpu[1]        | percpu[N-1]      |
+ *   | (64B aligned)    | (64B aligned)    | (64B aligned)    |
+ *   +------------------+------------------+------------------+
+ *       |
+ *       v
+ *   +-------+-------+-------+-------+-------+-------+-------+-------+
+ *   |  [0]  |  [1]  |  [2]  | ...                           | [63]  |  rqs[PRIORITY_MAINLEVELS]
+ *   +-------+-------+-------+-------+-------+-------+-------+-------+
+ *       |       |       |       ...
+ *       v       v       v
+ *     struct  struct  struct
+ *       rq      rq      rq
+ *
+ * Two-layer ready mask for O(1) lookup of highest priority ready queue:
+ *   ready_mask (8 bits): Each bit indicates if the corresponding group has any ready tasks.
+ *       Bit i is set if any priority level in group i (cls_id 8*i to 8*i+7) has tasks.
+ *   ready_mask_secondary (64 bits): Each bit indicates if that priority level has ready tasks.
+ *       Organized as 8 groups of 8 bits each, matching ready_mask groups.
+ *
+ * Lookup algorithm:
+ *   1. Find lowest set bit in ready_mask -> top_id (group 0-7)
+ *   2. Extract 8-bit group from ready_mask_secondary at (top_id * 8)
+ *   3. Find lowest set bit in that group -> cls_id = top_id*8 + bit_position
+ *
+ * sched_class: scheduling class for each main priority level (global, not per-CPU).
+ */
 static struct rq_global {
-    struct rq **rqs[PRIORITY_MAINLEVELS];
-    uint64 *ready_mask;
-    uint64 *ready_mask_secondary;
-    struct sched_class *sched_class[PRIORITY_MAINLEVELS];
-    spinlock_t *rq_lock;
-    uint64 active_cpu_mask;  // Bitmask of active CPUs
+    struct rq_percpu *percpu;              /**< Per-CPU run queue data (cache-line aligned) */
+    struct sched_class *sched_class[PRIORITY_MAINLEVELS];  /**< Scheduling class per priority */
+    uint64 active_cpu_mask;                /**< Bitmask of active CPUs */
 } rq_global;
 
-
-void rq_set_ready(int cls_id, int cpu_id) {
-    uint64 top_mask = (1ULL << (cls_id >> 3));
-    uint64 secondary_mask = (1ULL << cls_id);
-    rq_global.ready_mask[cpu_id] |= top_mask;
-    rq_global.ready_mask_secondary[cpu_id] |= secondary_mask;
-}
-
-void rq_clear_ready(int cls_id, int cpu_id) {
-    int top_id = cls_id >> 3;
-    uint64 secondary_mask = (1ULL << cls_id);
-    uint64 group_mask = 0xffULL << (top_id << 3);
-    uint64 top_mask = (1ULL << top_id);
-
-    // Clear the secondary bit
-    rq_global.ready_mask_secondary[cpu_id] &= ~secondary_mask;
-    
-    // If the group is now empty, clear the top bit
-    if ((rq_global.ready_mask_secondary[cpu_id] & group_mask) == 0) {
-        rq_global.ready_mask[cpu_id] &= ~top_mask;
-    }
+/**
+ * @brief Check if the RQ subsystem is initialized.
+ * @return true if initialized, false otherwise.
+ */
+bool rq_is_initialized(void) {
+    return rq_global.percpu != NULL;
 }
 
 // Find the lowest set bit index (used for two-layer mask lookup)
 #define RQ_PICK_READY_ID(value)         bits_ctz8(value)
 
 #define __sched_class_of_id(cls_id)    (rq_global.sched_class[cls_id])
-#define __get_rq_for_cpu(cls_id, cpu_id)    (rq_global.rqs[cls_id] ? rq_global.rqs[cls_id][cpu_id] : NULL)
-#define __rq_lock_held(cpu_id)    spin_holding(&rq_global.rq_lock[cpu_id])
+#define __rqpc(cpu_id)                 (&rq_global.percpu[cpu_id])
+#define __rqpc_current()               (&rq_global.percpu[cpuid()])
+#define __get_rq_for_cpu(cls_id, cpu_id)    (__rqpc(cpu_id)->rqs[cls_id])
+#define __rq_lock_held(cpu_id)         spin_holding(&__rqpc(cpu_id)->rq_lock)
+
+
+void rq_set_ready(int cls_id, int cpu_id) {
+    struct rq_percpu *rq_pc = __rqpc(cpu_id);
+    uint64 top_mask = (1ULL << (cls_id >> 3));
+    uint64 secondary_mask = (1ULL << cls_id);
+    rq_pc->ready_mask |= top_mask;
+    rq_pc->ready_mask_secondary |= secondary_mask;
+}
+
+void rq_clear_ready(int cls_id, int cpu_id) {
+    struct rq_percpu *rq_pc = __rqpc(cpu_id);
+    int top_id = cls_id >> 3;
+    uint64 secondary_mask = (1ULL << cls_id);
+    uint64 group_mask = 0xffULL << (top_id << 3);
+    uint64 top_mask = (1ULL << top_id);
+
+    // Clear the secondary bit
+    rq_pc->ready_mask_secondary &= ~secondary_mask;
+    
+    // If the group is now empty, clear the top bit
+    if ((rq_pc->ready_mask_secondary & group_mask) == 0) {
+        rq_pc->ready_mask &= ~top_mask;
+    }
+}
 
 struct rq *get_rq_for_cpu(int cls_id, int cpu_id) {
     if (cls_id < 0 || cls_id >= PRIORITY_MAINLEVELS) {
@@ -102,8 +116,9 @@ struct rq *get_rq_for_cpu(int cls_id, int cpu_id) {
 // Pick the highest priority runnable rq across all CPUs and lock it
 struct rq *pick_next_rq(void) {
     int cpu = cpuid();
-    uint64 top_mask = rq_global.ready_mask[cpu];
-    uint64 secondary_mask = rq_global.ready_mask_secondary[cpu];
+    struct rq_percpu *rq_pc = __rqpc(cpu);
+    uint64 top_mask = rq_pc->ready_mask;
+    uint64 secondary_mask = rq_pc->ready_mask_secondary;
 
     // Two-layer lookup: first find top-level group, then find class within group
     int top_id = RQ_PICK_READY_ID(top_mask);
@@ -114,7 +129,7 @@ struct rq *pick_next_rq(void) {
     uint8 group_bits = (secondary_mask >> (top_id << 3)) & 0xff;
     if (group_bits == 0) {
         // Race: top bit set but group is empty, retry with fresh read
-        secondary_mask = rq_global.ready_mask_secondary[cpu];
+        secondary_mask = rq_pc->ready_mask_secondary;
         group_bits = (secondary_mask >> (top_id << 3)) & 0xff;
         if (group_bits == 0) {
             panic("pick_next_rq: inconsistent ready mask on cpu %d, top_id %d\n", cpu, top_id);
@@ -131,34 +146,24 @@ struct rq *pick_next_rq(void) {
 }
 
 void rq_global_init(void) {
-    // Allocate and initialize rq spinlocks
-    size_t size = sizeof(spinlock_t) * NCPU;
-    rq_global.rq_lock = kmm_alloc(size);
-    assert(rq_global.rq_lock != NULL, "rq_global_init: failed to allocate rq_lock array");
+    // Use statically allocated cache-line-aligned per-CPU array
+    rq_global.percpu = rq_percpu_data;
+    
+    // Initialize each per-CPU structure
     for (int i = 0; i < NCPU; i++) {
-        spin_init(&rq_global.rq_lock[i], "rq_global_lock");
+        struct rq_percpu *rq_pc = __rqpc(i);
+        spin_init(&rq_pc->rq_lock, "rq_percpu_lock");
+        rq_pc->ready_mask = 0;
+        rq_pc->ready_mask_secondary = 0;
+        rq_pc->wake_list_head = NULL;
+        for (int j = 0; j < PRIORITY_MAINLEVELS; j++) {
+            rq_pc->rqs[j] = NULL;
+        }
     }
 
-    // Allocate and initialize ready_mask
-    size = sizeof(uint64) * NCPU;
-    rq_global.ready_mask = kmm_alloc(size);
-    assert(rq_global.ready_mask != NULL, "rq_global_init: failed to allocate ready_mask array");
-    memset(rq_global.ready_mask, 0, size);
-    rq_global.ready_mask_secondary = kmm_alloc(size);
-    assert(rq_global.ready_mask_secondary != NULL, "rq_global_init: failed to allocate ready_mask_secondary array");
-    memset(rq_global.ready_mask_secondary, 0, size);
-
-    // Initialize sched class
+    // Initialize sched class (global, not per-CPU)
     for (int i = 0; i < PRIORITY_MAINLEVELS; i++) {
         rq_global.sched_class[i] = NULL;
-    }
-
-    // Allocate and initialize rqs array
-    size = sizeof(struct rq*) * NCPU;
-    for (int i = 0; i < PRIORITY_MAINLEVELS; i++) {
-        rq_global.rqs[i] = kmm_alloc(size);
-        assert(rq_global.rqs[i] != NULL, "rq_global_init: failed to allocate rqs array");
-        memset(rq_global.rqs[i], 0, size);
     }
 
     // Initialize each individual rq structure is done in rq_register
@@ -176,12 +181,13 @@ void rq_register(struct rq* rq, int cls_id, int cpu_id) {
     assert(rq != NULL, "rq_register: rq is NULL");
     assert(cls_id >= 0 && cls_id < PRIORITY_MAINLEVELS, "rq_register: invalid cls_id %d", cls_id);
     assert(cpu_id >= 0 && cpu_id < NCPU, "rq_register: invalid cpu_id %d", cpu_id);
-    assert(rq_global.rqs[cls_id][cpu_id] == NULL, "rq_register: rq for cls_id %d cpu_id %d already registered", cls_id, cpu_id);
+    struct rq_percpu *rq_pc = __rqpc(cpu_id);
+    assert(rq_pc->rqs[cls_id] == NULL, "rq_register: rq for cls_id %d cpu_id %d already registered", cls_id, cpu_id);
     rq->class_id = cls_id;
     rq->cpu_id = cpu_id;
     rq->sched_class = __sched_class_of_id(cls_id);
     assert(rq->sched_class != NULL, "rq_init: sched_class is NULL");
-    rq_global.rqs[cls_id][cpu_id] = rq;
+    rq_pc->rqs[cls_id] = rq;
 }
 
 void sched_entity_init(struct sched_entity* se, struct proc* p) {
@@ -215,24 +221,24 @@ void sched_class_register(int id, struct sched_class* cls) {
 
 void rq_lock(int cpu_id) {
     assert(cpu_id >= 0 && cpu_id < NCPU, "rq_lock: invalid cpu_id %d", cpu_id);
-    spin_lock(&rq_global.rq_lock[cpu_id]);
+    spin_lock(&__rqpc(cpu_id)->rq_lock);
 }
 
 void rq_unlock(int cpu_id) {
     assert(cpu_id >= 0 && cpu_id < NCPU, "rq_unlock: invalid cpu_id %d", cpu_id);
     assert(__rq_lock_held(cpu_id), "rq_unlock: lock not held for cpu_id %d", cpu_id);
-    spin_unlock(&rq_global.rq_lock[cpu_id]);
+    spin_unlock(&__rqpc(cpu_id)->rq_lock);
 }
 
 int rq_lock_irqsave(int cpu_id) {
     assert(cpu_id >= 0 && cpu_id < NCPU, "rq_lock: invalid cpu_id %d", cpu_id);
-    return spin_lock_irqsave(&rq_global.rq_lock[cpu_id]);
+    return spin_lock_irqsave(&__rqpc(cpu_id)->rq_lock);
 }
 
 void rq_unlock_irqrestore(int cpu_id, int state) {
     assert(cpu_id >= 0 && cpu_id < NCPU, "rq_unlock: invalid cpu_id %d", cpu_id);
     assert(__rq_lock_held(cpu_id), "rq_unlock: lock not held for cpu_id %d", cpu_id);
-    spin_unlock_irqrestore(&rq_global.rq_lock[cpu_id], state);
+    spin_unlock_irqrestore(&__rqpc(cpu_id)->rq_lock, state);
 }
 
 int rq_lock_current_irqsave(void) {
@@ -268,10 +274,52 @@ int rq_holding(int cpu_id) {
 }
 
 int rq_holding_current(void) {
-    push_off();
-    int holding = spin_holding(&rq_global.rq_lock[cpuid()]);
-    pop_off();
+    int holding = spin_holding(&__rqpc_current()->rq_lock);
     return holding;
+}
+
+/**
+ * @brief Acquire a per-CPU run queue structure with lock held.
+ * @param cpu_id The CPU ID to get the percpu structure for.
+ * @return Pointer to the locked rq_percpu structure, or NULL on invalid cpu_id.
+ * 
+ * Caller must call rq_percpu_put_unlock() when done.
+ */
+struct rq_percpu *rq_percpu_lock_get(int cpu_id) {
+    if (cpu_id < 0 || cpu_id >= NCPU) {
+        return NULL;
+    }
+    struct rq_percpu *rq_pc = __rqpc(cpu_id);
+    spin_lock(&rq_pc->rq_lock);
+    return rq_pc;
+}
+
+/**
+ * @brief Acquire the current CPU's run queue structure with lock held.
+ * @return Pointer to the locked rq_percpu structure for the current CPU.
+ * 
+ * Disables preemption to ensure CPU doesn't change. Caller must call
+ * rq_percpu_put_unlock_current() when done.
+ */
+struct rq_percpu *rq_percpu_lock_get_current(void) {
+    push_off();  // Disable preemption to pin to current CPU
+    struct rq_percpu *rq_pc = __rqpc_current();
+    spin_lock(&rq_pc->rq_lock);
+    pop_off();
+    return rq_pc;
+}
+
+/**
+ * @brief Release the lock on a per-CPU run queue structure.
+ * @param rq_pc Pointer to the rq_percpu structure to unlock.
+ * 
+ * Pairs with rq_percpu_lock_get().
+ */
+void rq_percpu_put_unlock(struct rq_percpu *rq_pc) {
+    if (rq_pc == NULL) {
+        return;
+    }
+    spin_unlock(&rq_pc->rq_lock);
 }
 
 // Select the appropriate run queue for the given sched_entity and cpumask
@@ -378,6 +426,7 @@ void rq_set_next_task(struct sched_entity* se) {
     assert(se->rq->task_count > 0, "rq_set_next_task: rq task_count is zero");
     assert(se->sched_class == se->rq->sched_class,
            "rq_set_next_task: se->sched_class does not match rq's sched_class\n");
+    smp_store_release(&__rqpc(se->rq->cpu_id)->current_se, se);
     if (se->sched_class->set_next_task) {
         se->sched_class->set_next_task(se->rq, se);
     }
@@ -449,6 +498,87 @@ void rq_yield_task(void) {
     if (current_rq->sched_class->yield_task) {
         current_rq->sched_class->yield_task(current_rq);
     }
+}
+
+bool rq_cpu_is_idle(int cpu_id) {
+    if (cpu_id < 0 || cpu_id >= NCPU) {
+        return false;
+    }
+    if (!(rq_global.active_cpu_mask & (1ULL << cpu_id))) {
+        return true; // Inactive CPU is considered idle
+    }
+    struct sched_entity *current_se = smp_load_acquire(&__rqpc(cpu_id)->current_se);
+    if (current_se == NULL || current_se == cpus[cpu_id].idle_proc->sched_entity) {
+        return true; // No current task or running idle process means idle
+    }
+    return false;
+}
+
+int rq_add_wake_list(int cpu_id, struct sched_entity *se) {
+    if (se == NULL || se->proc == NULL) {
+        return -EINVAL;
+    }
+    if (!PROC_AWOKEN(se->proc)) {
+        // processes need to be marked as awoken before adding to wake list
+        return -EINVAL;
+    }
+    struct rq_percpu *rq_pc = rq_percpu_lock_get(cpu_id);
+    if (rq_pc == NULL) {
+        return -EINVAL;
+    }
+    // Add to the front of the wake list
+    LLIST_PUSH(rq_pc->wake_list_head, se, wake_next);
+    rq_percpu_put_unlock(rq_pc);
+    return 0;
+}
+
+struct sched_entity *rq_pop_all_wake_list(struct rq_percpu *rq_pc) {
+    struct sched_entity *wake_list = NULL;
+    // Atomically pop all entries from the wake list
+    LLIST_MIGRATE(wake_list, rq_pc->wake_list_head);
+    return wake_list;
+}
+
+/**
+ * @brief Flush all processes in the wake list and enqueue them.
+ * @param cpu_id The CPU whose wake list to flush.
+ * 
+ * Acquires the rq lock, pops all sched_entities from the wake list, and
+ * enqueues each one to the appropriate priority run queue on this CPU.
+ * The waker has already selected this CPU as the target.
+ */
+void rq_flush_wake_list(int cpu_id) {
+    if (cpu_id < 0 || cpu_id >= NCPU) {
+        return;
+    }
+    struct rq_percpu *rq_pc = __rqpc(cpu_id);
+    
+    // Atomically pop all entries from the wake list (lock-free)
+    struct sched_entity *wake_list = NULL;
+    LLIST_MIGRATE(wake_list, rq_pc->wake_list_head);
+    
+    if (wake_list == NULL) {
+        return;  // Nothing to flush
+    }
+    
+    // Acquire lock only for enqueueing tasks
+    spin_lock(&rq_pc->rq_lock);
+    
+    struct sched_entity *se;
+    while (wake_list != NULL) {
+        se = wake_list;
+        wake_list = se->wake_next;
+        se->wake_next = NULL;
+        
+        // Get the rq for this task's priority on this CPU
+        int major_prio = se->priority >> PRIORITY_MAINLEVEL_SHIFT;
+        struct rq *rq = rq_pc->rqs[major_prio];
+        if (rq != NULL) {
+            rq_enqueue_task(rq, se);
+        }
+    }
+    
+    spin_unlock(&rq_pc->rq_lock);
 }
 
 // Default time slice value (placeholder - not yet enforced by scheduler)
@@ -606,17 +736,17 @@ void rq_dump(void) {
     
     printf("Top (8b)    ");
     for (int cpu = 0; cpu < NCPU; cpu++) {
-        rq_lock(cpu);
-        printf("0x%lx        ", rq_global.ready_mask[cpu] & 0xff);
-        rq_unlock(cpu);
+        struct rq_percpu *rq_pc = rq_percpu_lock_get(cpu);
+        printf("0x%lx        ", rq_pc->ready_mask & 0xff);
+        rq_percpu_put_unlock(rq_pc);
     }
     printf("\n");
     
     printf("Secondary   ");
     for (int cpu = 0; cpu < NCPU; cpu++) {
-        rq_lock(cpu);
-        printf("0x%lx ", rq_global.ready_mask_secondary[cpu]);
-        rq_unlock(cpu);
+        struct rq_percpu *rq_pc = rq_percpu_lock_get(cpu);
+        printf("0x%lx ", rq_pc->ready_mask_secondary);
+        rq_percpu_put_unlock(rq_pc);
     }
     printf("\n");
 }

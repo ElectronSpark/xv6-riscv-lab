@@ -10,10 +10,10 @@
 //      Managed by rq layer using two-layer bitmask.
 //      Each main level corresponds to a sched class.
 //      Always prefer lower main priority level when picking next task.
+// PRIORITY_MAINLEVELS is defined in rq_types.h (needed for struct rq_percpu)
 #define PRIORITY_SUBLEVEL_MASK      0x03
 #define PRIORITY_MAINLEVEL_MASK     0xFC
 #define PRIORITY_MAINLEVEL_SHIFT    2
-#define PRIORITY_MAINLEVELS         64
 #define MAJOR_PRIORITY(prio)    (((prio) & PRIORITY_MAINLEVEL_MASK) >> PRIORITY_MAINLEVEL_SHIFT)
 #define MINOR_PRIORITY(prio)    ((prio) & PRIORITY_SUBLEVEL_MASK)
 
@@ -49,6 +49,11 @@ void rq_unlock_current_irqrestore(int state);
 int rq_holding(int cpu_id);
 int rq_holding_current(void);
 
+// Per-CPU run queue lock_get/put_unlock accessors
+struct rq_percpu *rq_percpu_lock_get(int cpu_id);
+struct rq_percpu *rq_percpu_lock_get_current(void);
+void rq_percpu_put_unlock(struct rq_percpu *rq_pc);
+
 struct rq *rq_select_task_rq(struct sched_entity* se, cpumask_t cpumask);
 
 // Set/Clear the ready status of a scheduling class on a CPU
@@ -66,6 +71,11 @@ void rq_task_tick(struct sched_entity* se);
 void rq_task_fork(struct sched_entity* se);
 void rq_task_dead(struct sched_entity* se);
 void rq_yield_task(void);
+
+bool rq_cpu_is_idle(int cpu_id);
+int rq_add_wake_list(int cpu_id, struct sched_entity *se);
+struct sched_entity *rq_pop_all_wake_list(struct rq_percpu *rq_pc);
+void rq_flush_wake_list(int cpu_id);
 
 // Check if a CPU is allowed by the task's affinity mask
 bool rq_cpu_allowed(struct sched_entity *se, int cpu_id);
