@@ -212,13 +212,9 @@ void proctab_proc_remove(struct proc *p) {
 void procdump(void) {
     struct proc *p;
     const char *state;
-    int _panic_state = panic_state();
 
     printf("Process List:\n");
-    if (!_panic_state)
-    {
-        rcu_read_lock();
-    }
+    rcu_read_lock();
 
     // Use RCU-safe iteration for concurrent access
     hlist_foreach_node_rcu(&proc_table.procs, p, proctab_entry) {
@@ -243,10 +239,7 @@ void procdump(void) {
         }
     }
 
-    if (!_panic_state)
-    {
-        rcu_read_unlock();
-    }
+    rcu_read_unlock();
 }
 
 // Check if a process is currently running on any CPU
@@ -266,14 +259,9 @@ static bool __proc_is_on_cpu(struct proc *p) {
 // Uses RCU for lock-free iteration.
 void procdump_bt(void) {
     struct proc *p;
-    int _panic_state = panic_state();
 
     printf("\n=== Blocked Process Backtraces ===\n");
-    if (!_panic_state)
-    {
-        rcu_read_lock();
-    }
-
+    rcu_read_lock();
     // Use RCU-safe iteration for concurrent access
     hlist_foreach_node_rcu(&proc_table.procs, p, proctab_entry) {
         proc_lock(p);
@@ -301,31 +289,21 @@ void procdump_bt(void) {
 
     printf("\n=== End Backtraces ===\n");
 
-    if (!_panic_state)
-    {
-        rcu_read_unlock();
-    }
+    rcu_read_unlock();
 }
 
 // Backtrace a specific process by PID
 // Uses RCU for lock-free lookup.
 void procdump_bt_pid(int pid) {
     struct proc *p = NULL;
-    int _panic_state = panic_state();
-
-    if (!_panic_state)
-    {
-        rcu_read_lock();
-    }
+    rcu_read_lock();
 
     // Use RCU-safe lookup
     struct proc dummy = { .pid = pid };
     p = hlist_get_rcu(&proc_table.procs, &dummy);
     if (p == NULL) {
         printf("Process %d not found\n", pid);
-        if (!_panic_state) {
         rcu_read_unlock();
-        }
         return;
     }
 
@@ -349,10 +327,7 @@ void procdump_bt_pid(int pid) {
     
     proc_unlock(p);
 
-    if (!_panic_state)
-    {
-        rcu_read_unlock();
-    }
+    rcu_read_unlock();
 }
 
 // Helper function to recursively print process tree
@@ -405,28 +380,20 @@ static void __procdump_tree_recursive(struct proc *p, int depth) {
 // Uses RCU for lock-free access to initproc.
 void procdump_tree(void) {
     struct proc *initproc;
-    int _panic_state = panic_state();
-
     printf("Process Tree:\n");
     
-    if (!_panic_state) {
-        rcu_read_lock();
-    }
+    rcu_read_lock();
     
     initproc = __proctab_get_initproc();
     if (initproc == NULL) {
         printf("No init process\n");
-        if (!_panic_state) {
         rcu_read_unlock();
-        }
         return;
     }
     
     __procdump_tree_recursive(initproc, 0);
     
-    if (!_panic_state) {
-        rcu_read_unlock();
-    }
+    rcu_read_unlock();
 }
 
 uint64 sys_dumpproc(void) {

@@ -88,8 +88,6 @@ char uart_rx_buf[UART_RX_BUF_SIZE];
 uint64 uart_rx_w;
 uint64 uart_rx_r;
 
-extern volatile int panicked;
-
 void uartstart();
 static void uartrecv(void);
 
@@ -159,11 +157,6 @@ uartputc(int c)
   // TX path is lock-protected and can sleep; not IRQ-safe
   spin_lock(&uart_tx_lock);
 
-  if(panicked){
-    for(;;) {
-      asm volatile("wfi");
-    }
-  }
   while(uart_tx_w == uart_tx_r + UART_TX_BUF_SIZE){
     // Buffer full: sleep until uartstart() frees space
     sleep_on_chan(&uart_tx_r, &uart_tx_lock);
@@ -183,12 +176,6 @@ uartputs(const char *s, int n)
   // Bulk TX; same locking/sleeping semantics as uartputc
   spin_lock(&uart_tx_lock);
 
-  if(panicked){
-    for(;;) {
-      asm volatile("wfi");
-    }
-  }
-  
   for(int i = 0; i < n; i++) {
     while(uart_tx_w == uart_tx_r + UART_TX_BUF_SIZE){
       // Buffer full: sleep until uartstart() frees space
@@ -211,13 +198,6 @@ uartputc_sync(int c)
 {
   // IRQ-safe, spin-waits on hardware THR empty; used by early printf/echo
   push_off();
-
-  if(panicked){
-    for(;;) {
-      asm volatile("wfi");
-    }
-  }
-
   // wait for Transmit Holding Empty to be set in LSR.
   while((ReadReg(LSR) & LSR_TX_IDLE) == 0)
     ;

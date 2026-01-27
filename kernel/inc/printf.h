@@ -4,7 +4,6 @@
 int             printf(char*, ...) __attribute__ ((format (printf, 1, 2)));
 void            __panic_start(void);
 void            __panic_end(void) __attribute__((noreturn));
-int             panic_state(void);
 void            panic_disable_bt(void);
 #define __panic(type, fmt, ...) \
     do { \

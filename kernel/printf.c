@@ -13,14 +13,7 @@
 #include "defs.h"
 #include "printf.h"
 #include "proc/proc.h"
-
-volatile int panicked = 0;
-
-int
-panic_state(void)
-{
-  return panicked;
-}
+#include "smp/ipi.h"
 
 // lock to avoid interleaving concurrent printf's.
 STATIC struct {
@@ -225,11 +218,10 @@ __panic_start()
 void 
 __panic_end()
 {
-  panicked = 1; // freeze uart output from other CPUs
-  intr_off();
-  for(;;) {
+  // Send IPI to all harts(including self) to crash
+  ipi_send_all(IPI_REASON_CRASH);
+  for(;;)
     asm volatile("wfi");
-  }
 }
 
 void
