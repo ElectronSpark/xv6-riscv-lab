@@ -93,7 +93,6 @@ set(USER_PROGRAMS_C_FILES
 	${USER_DIR}/init.c
 	${USER_DIR}/kill.c
 	${USER_DIR}/ln.c
-	${USER_DIR}/ls.c
 	${USER_DIR}/mkdir.c
 	${USER_DIR}/rm.c
 	${USER_DIR}/sh.c

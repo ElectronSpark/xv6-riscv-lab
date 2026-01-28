@@ -3,6 +3,19 @@
 #include "kernel/inc/types.h"
 #include "user/user.h"
 #include "kernel/inc/vfs/fcntl.h"
+#include "kernel/inc/vfs/stat.h"
+
+// Linux-compatible dirent structure for getdents (used by ls)
+struct linux_dirent64 {
+    uint64 d_ino;      // Inode number
+    int64 d_off;       // Offset to next structure
+    uint16 d_reclen;   // Size of this dirent
+    uint8 d_type;      // File type
+    char d_name[];     // Filename (null-terminated)
+};
+
+#define NAME_MAX 255
+#define LS_FMT_WIDTH 14  // Display width for formatting
 
 // Parsed command representation
 #define EXEC 1
@@ -63,6 +76,79 @@ static void update_cwd(void) {
         // On failure, keep previous value or set to "?"
         strcpy(cwd_path, "?");
     }
+}
+
+// Built-in ls command implementation
+static char *ls_fmtname(char *path) {
+    static char buf[LS_FMT_WIDTH + 1];
+    char *p;
+
+    // Find first character after last slash.
+    for (p = path + strlen(path); p >= path && *p != '/'; p--)
+        ;
+    p++;
+
+    // Return blank-padded name.
+    int len = strlen(p);
+    if (len >= LS_FMT_WIDTH)
+        return p;
+    memmove(buf, p, len);
+    memset(buf + len, ' ', LS_FMT_WIDTH - len);
+    buf[LS_FMT_WIDTH] = 0;
+    return buf;
+}
+
+static void builtin_ls(char *path) {
+    char buf[512], *p;
+    int fd;
+    struct stat st;
+    char dirent_buf[1024];  // Buffer for getdents
+    int nread;
+
+    if ((fd = open(path, O_RDONLY | O_NOFOLLOW)) < 0) {
+        fprintf(2, "ls: cannot open %s\n", path);
+        return;
+    }
+
+    if (fstat(fd, &st) < 0) {
+        fprintf(2, "ls: cannot stat %s\n", path);
+        close(fd);
+        return;
+    }
+
+    if (S_ISREG(st.mode) || S_ISCHR(st.mode) || S_ISBLK(st.mode)) {
+        printf("%s %o %ld %ld\n", ls_fmtname(path), st.mode, st.ino, st.size);
+    } else if (S_ISDIR(st.mode)) {
+        if (strlen(path) + 1 + NAME_MAX + 1 > sizeof buf) {
+            printf("ls: path too long\n");
+            close(fd);
+            return;
+        }
+        strcpy(buf, path);
+        p = buf + strlen(buf);
+        *p++ = '/';
+
+        // Use getdents to read directory entries
+        while ((nread = getdents(fd, dirent_buf, sizeof(dirent_buf))) > 0) {
+            int pos = 0;
+            while (pos < nread) {
+                struct linux_dirent64 *de = (struct linux_dirent64 *)(dirent_buf + pos);
+                if (de->d_ino == 0) {
+                    pos += de->d_reclen;
+                    continue;
+                }
+                strcpy(p, de->d_name);
+                if (stat(buf, &st) < 0) {
+                    printf("ls: cannot stat %s\n", buf);
+                    pos += de->d_reclen;
+                    continue;
+                }
+                printf("%s %o %ld %ld\n", ls_fmtname(buf), st.mode, st.ino, st.size);
+                pos += de->d_reclen;
+            }
+        }
+    }
+    close(fd);
 }
 
 // Execute cmd.  Never returns.
@@ -171,6 +257,7 @@ int main(void) {
     update_cwd();
     // Read and run input commands.
     while (getcmd(buf, sizeof(buf)) >= 0) {
+        // Built-in: cd
         if (buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' ') {
             // Chdir must be called by the parent, not the child.
             buf[strlen(buf) - 1] = 0; // chop \n
@@ -178,6 +265,18 @@ int main(void) {
                 fprintf(2, "cannot cd %s\n", buf + 3);
             else
                 update_cwd();
+            continue;
+        }
+        // Built-in: ls
+        if (buf[0] == 'l' && buf[1] == 's' && (buf[2] == '\n' || buf[2] == ' ')) {
+            buf[strlen(buf) - 1] = 0; // chop \n
+            if (buf[2] == 0 || buf[3] == 0) {
+                // ls with no arguments
+                builtin_ls(".");
+            } else {
+                // ls with path argument
+                builtin_ls(buf + 3);
+            }
             continue;
         }
         if (fork1() == 0)
