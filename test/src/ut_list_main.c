@@ -277,13 +277,14 @@ test_context_t test_find_first_detach_prestates[] = {
 static void test_find_first_detach(void **state) {
     test_context_t *context = *(test_context_t **)state;
     const int *args = context->params.args;
+    size_t args_size = context->params.args_size;
     const int *expected = context->params.expected;
     size_t expected_size = context->params.expected_size;
     list_node_t *head = context->head;
     assert_non_null(head);
     
     test_node_t *node = NULL;
-    for (int i = 0; i < 2; i++) {
+    for (size_t i = 0; i < args_size; i++) {
         node = list_find_first(head, test_node_t, entry, node, node->val == args[i]);
         if (node != NULL) {
             list_node_detach(node, entry);
@@ -337,13 +338,14 @@ test_context_t test_find_last_detach_prestates[] = {
 static void test_find_last_detach(void **state) {
     test_context_t *context = *(test_context_t **)state;
     const int *args = context->params.args;
+    size_t args_size = context->params.args_size;
     const int *expected = context->params.expected;
     size_t expected_size = context->params.expected_size;
     list_node_t *head = context->head;
     assert_non_null(head);
     
     test_node_t *node = NULL;
-    for (int i = 0; i < 2; i++) {
+    for (size_t i = 0; i < args_size; i++) {
         node = list_find_last(head, test_node_t, entry, node, node->val == args[i]);
         if (node != NULL) {
             list_node_detach(node, entry);

@@ -105,7 +105,7 @@ STATIC int __buddy_put(page_t *page);
 
 #ifdef HOST_TEST
 extern buddy_pool_t __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
-extern page_t __pages[TOTALPAGES];
+extern page_t *__pages;
 extern uint64 __managed_start;
 extern uint64 __managed_end;
 #endif

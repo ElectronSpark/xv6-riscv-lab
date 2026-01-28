@@ -231,6 +231,20 @@ void pcache_test_unregister(struct pcache *pcache) {
             __global_pcache_count--;
         }
     }
+
+    // Free all pcache_nodes in the tree for HOST_TEST cleanup
+    __pcache_tree_lock(pcache);
+    struct pcache_node *node, *tmp;
+    rb_foreach_entry_safe(&pcache->page_map, node, tmp, tree_entry) {
+        slab_free(node);
+    }
+    pcache->page_map.node = NULL;  // Clear tree root
+    __pcache_tree_unlock(pcache);
+
+    pcache->page_count = 0;
+    pcache->lru_count = 0;
+    pcache->dirty_count = 0;
+
     __pcache_spin_unlock(pcache);
     __pcache_global_unlock();
 }
@@ -956,9 +970,14 @@ static page_t *__pcache_evict_lru(struct pcache *pcache) {
     if (page == NULL) {
         return NULL;
     }
+    struct pcache_node *pcnode = page->pcache.pcache_node;
     __pcache_remove_node(pcache, page);
     __pcache_node_detach_page(pcache, page);
+    // Clear dangling pointers and free the orphaned pcache_node
+    page->pcache.pcache_node = NULL;
+    pcnode->page = NULL;
     page_lock_release(page);
+    slab_free(pcnode);
     return page;
 }
 
@@ -1192,9 +1211,13 @@ void pcache_put_page(struct pcache *pcache, page_t *page) {
                 // The cache is the lone owner of a stale page; drop it entirely.
                 __pcache_remove_node(pcache, page);
                 __pcache_node_detach_page(pcache, page);
+                // Clear dangling pointers and free the orphaned pcache_node
+                page->pcache.pcache_node = NULL;
+                pcnode->page = NULL;
                 wakeup_on_chan(pcache);
                 page_lock_release(page);
                 __pcache_spin_unlock(pcache);
+                slab_free(pcnode);
                 __pcache_page_put(page);
                 return;
             }

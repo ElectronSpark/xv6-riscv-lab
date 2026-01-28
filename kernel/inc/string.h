@@ -20,6 +20,8 @@ const char* strstr(const char *haystack, const char *needle);
 char *strndup(const char *s, size_t n);
 char *strdup(const char *s);
 
+// Only define strtoul if not already provided by host stdlib (for unit tests)
+#ifndef __KERNEL_SKIP_STRTOUL
 static inline uint64
 strtoul(const char *nptr, char **endptr, int base)
 {
@@ -46,6 +48,7 @@ strtoul(const char *nptr, char **endptr, int base)
     }
     return result;
 }
+#endif // __KERNEL_SKIP_STRTOUL
 
 // None standard functions
 static inline bool str_startswith(const char *str, const char *prefix) {

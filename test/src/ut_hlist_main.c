@@ -166,7 +166,7 @@ static int teardown(void **state) {
         }
 
         // Free any allocated nodes
-        for (int i = 0; i < 5; i++) {
+        for (int i = 0; i < TEST_NUMBERS_COUNT; i++) {
             if (fixture->nodes[i]) {
                 free_test_node(fixture->nodes[i]);
                 fixture->nodes[i] = NULL;

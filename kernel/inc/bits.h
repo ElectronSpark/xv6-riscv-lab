@@ -285,7 +285,13 @@ static inline int64 __bits_ctz_ptr(const void *ptr, size_t limit, bool inv) {
             chunk = ~chunk;
         }
         if (chunk) {
-            return (index << 3) | bits_ctz64(chunk);
+            int64 bit_pos = (index << 3) | bits_ctz64(chunk);
+            // Verify found bit is within the limit
+            if (bit_pos < (int64)(limit << 3)) {
+                return bit_pos;
+            }
+            // Bit is beyond limit, fall through to remaining bytes processing
+            break;
         }
     }
 
@@ -318,11 +324,15 @@ static inline int64 __bits_ctz_ptr(const void *ptr, size_t limit, bool inv) {
  *   }
  */
 static inline int bits_next_bit_set(uint64 bits, int last) {
-    int delta = bits_ctz64(bits >> (last + 1));
+    int start = last + 1;
+    if (start >= 64) {
+        return -1;  // No more bits to search
+    }
+    int delta = bits_ctz64(bits >> start);
     if (delta < 0) {
         return -1;
     }
-    return last + 1 + delta;
+    return start + delta;
 }
 
 /**

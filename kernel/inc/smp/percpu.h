@@ -5,6 +5,7 @@
 #include "riscv.h"
 #include <smp/percpu_types.h>
 #include "printf.h"
+#include "bits.h"
 
 extern struct cpu_local cpus[NCPU];
 
@@ -114,7 +115,18 @@ struct proc *myproc(void);
 
 void cpus_init(void);
 void mycpu_init(uint64 hartid, bool trampoline);
+cpumask_t get_cpu_active_mask(void);
 
+#define PERCPU_NCPU_MASK   ((1UL << NCPU) - 1)
+
+#define cpu_for_each_in_mask(cpu, mask) \
+    bits_foreach_set_bit((mask), cpu)
+
+#define cpu_for_each_active(cpu) \
+    cpu_for_each_in_mask(cpu, get_cpu_active_mask())
+
+#define cpu_for_each_all(cpu) \
+    for (cpu = 0; cpu < NCPU; cpu++)
 
 
 #endif        /* __KERNEL_PER_CPU_H */
