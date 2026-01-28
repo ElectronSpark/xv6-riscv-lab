@@ -28,6 +28,7 @@
 #include "proc/sched.h"
 #include "list.h"
 #include "bits.h"
+#include "smp/ipi.h"
 
 static slab_cache_t __sigacts_pool;
 static slab_cache_t __ksiginfo_pool;
@@ -366,22 +367,40 @@ after_enqueue:
     bool is_cont = sigismember(&sa->sa_sigcont, info->signo) && !sigismember(&sa->sa_sigmask, info->signo);
 
     if (is_stop) {
-        // Mark process stopped. If currently running, request reschedule.
-        PROC_SET_STOPPED(p);
-        SET_NEEDS_RESCHED();
+        // Stop signals: The process will enter PSTATE_STOPPED voluntarily when it
+        // processes signals in handle_signal(). If it's currently sleeping in an
+        // interruptible state, wake it up so it can process the stop signal.
+        // Uninterruptible processes will process the stop when they wake up naturally.
+        enum procstate pstate = __proc_get_pstate(p);
+        if (PSTATE_IS_INTERRUPTIBLE(pstate)) {
+            // Wake up interruptible sleeper so it can handle the stop signal
+            proc_unlock(p);
+            spin_lock(&p->sched_entity->pi_lock);
+            scheduler_wakeup(p);
+            spin_unlock(&p->sched_entity->pi_lock);
+            proc_lock(p);
+        } else if (pstate == PSTATE_RUNNING) {
+            // Process is running, request reschedule so it handles signals soon
+            if (smp_load_acquire(&p->sched_entity->on_cpu)) {
+                // Process is actively running on a CPU - send IPI to that CPU
+                int target_cpu = smp_load_acquire(&p->sched_entity->cpu_id);
+                if (target_cpu != cpuid()) {
+                    ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
+                } else {
+                    SET_NEEDS_RESCHED();
+                }
+            } else {
+                SET_NEEDS_RESCHED();
+            }
+        }
+        // If uninterruptible, the process will handle the stop signal when it wakes up
     }
     if (is_cont) {
-        // Do NOT clear PROC_STOPPED here; scheduler_continue() requires the
-        // stopped flag to still be set so it can transition the process back
-        // to the ready queue. Clearing it first caused the early-return path
-        // in scheduler_continue() ("if (!PROC_STOPPED(p)) return") leaving
-        // the process stranded (RUNNABLE state but not re-queued), and the
-        // parent blocked in wait() (uninterruptible) forever.
-        //
-        // scheduler_continue uses pi_lock protocol (like scheduler_wakeup).
+        // Continue signal: Wake up the process from PSTATE_STOPPED state.
+        // scheduler_wakeup_stopped handles transitioning from STOPPED to RUNNING.
         proc_unlock(p);
         spin_lock(&p->sched_entity->pi_lock);
-        scheduler_continue(p); // handles clearing PROC_STOPPED and requeueing
+        scheduler_wakeup_stopped(p);
         spin_unlock(&p->sched_entity->pi_lock);
         proc_lock(p);
     }
@@ -393,10 +412,10 @@ after_enqueue:
         PROC_SET_KILLED(p);
         if (PROC_STOPPED(p)) {
             // If the process is stopped, we need to wake it up.
-            // scheduler_continue uses pi_lock protocol.
+            // scheduler_wakeup_stopped uses pi_lock protocol.
             proc_unlock(p);
             spin_lock(&p->sched_entity->pi_lock);
-            scheduler_continue(p);
+            scheduler_wakeup_stopped(p);
             spin_unlock(&p->sched_entity->pi_lock);
             proc_lock(p);
         }
@@ -490,6 +509,8 @@ bool signal_test_clear_stopped(struct proc *p) {
     if (pending_cont) {
         // A continue-category signal is pending. Determine if any of them
         // have user handlers installed. We resume the process in all cases.
+        // Note: This shouldn't happen here since scheduler_wakeup_stopped handles
+        // waking from PSTATE_STOPPED, but handle it defensively.
         bool user_handler = false;
         for (int signo = 1; signo <= NSIG; signo++) {
             if (sigismember(&sa->sa_sigcont, signo) > 0 && sigismember(&pending_cont, signo) > 0) {
@@ -500,8 +521,6 @@ bool signal_test_clear_stopped(struct proc *p) {
                 }
             }
         }
-        // Resume the process (clear stopped state)
-        PROC_CLEAR_STOPPED(p);
         // Clear all pending stop signals (they are canceled by any continue)
         p->sig_pending_mask &= ~sa->sa_sigstop;
         if (!user_handler) {
@@ -510,13 +529,13 @@ bool signal_test_clear_stopped(struct proc *p) {
         } else {
             // Leave pending_cont bits so they can be picked and delivered.
         }
-        return 0; // Do not request re-stop.
+        return 0; // Do not request stop.
     }
 
     if (pending_stopped) {
         // Consume all pending stop signals (they stop the process) and request STOPPED state.
         p->sig_pending_mask &= ~pending_stopped;
-        return 1; // Caller will set STOPPED and break.
+        return 1; // Caller will transition to PSTATE_STOPPED.
     }
 
     // No new stop/cont signals; indicate whether process is already stopped.
@@ -824,9 +843,13 @@ void handle_signal(void) {
         }
     
         if (signal_test_clear_stopped(p)) {
-            PROC_SET_STOPPED(p);
+            // Process should enter PSTATE_STOPPED state voluntarily
+            __proc_set_pstate(p, PSTATE_STOPPED);
             proc_unlock(p);
-            break;
+            // Yield CPU - context_switch_finish will dequeue us
+            scheduler_yield();
+            // When we return here, scheduler_wakeup_stopped was called
+            continue; // Re-check for more signals
         }
     
         int signo = __pick_signal(p);
@@ -875,9 +898,6 @@ void handle_signal(void) {
     }
     if (PROC_KILLED(p)) {
         exit(-1);
-    }
-    if (PROC_STOPPED(p)) {
-        SET_NEEDS_RESCHED();
     }
 }
 

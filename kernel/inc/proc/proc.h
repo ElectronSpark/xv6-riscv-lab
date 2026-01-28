@@ -26,6 +26,7 @@ enum procstate {
   PSTATE_UNINTERRUPTIBLE,
   PSTATE_WAKENING,
   PSTATE_RUNNING,
+  PSTATE_STOPPED,
   PSTATE_EXITING,
   PSTATE_ZOMBIE
 };
@@ -55,11 +56,16 @@ enum procstate {
 })
 
 #define PSTATE_IS_AWOKEN(state) ({    \
-  (state) == PSTATE_RUNNING;          \
+  (state) == PSTATE_RUNNING ||        \
+  (state) == PSTATE_WAKENING;         \
 })
 
 #define PSTATE_IS_ZOMBIE(state) ({    \
   (state) == PSTATE_ZOMBIE;           \
+})
+
+#define PSTATE_IS_STOPPED(state) ({   \
+  (state) == PSTATE_STOPPED;          \
 })
 
 struct workqueue;
@@ -85,7 +91,6 @@ struct proc {
 #define PROC_FLAG_VALID             1
 #define PROC_FLAG_KILLED            2   // Process is exiting or exited
 #define PROC_FLAG_ONCHAN            3  // Process is sleeping on a channel
-#define PROC_FLAG_STOPPED           4  // Process is stopped
 #define PROC_FLAG_USER_SPACE        5  // Process has user space
   
   // proc table lock must be held before holding p->lock to use this:
@@ -189,16 +194,19 @@ DEFINE_PROC_FLAG(USER_SPACE, PROC_FLAG_USER_SPACE)
 DEFINE_PROC_FLAG(VALID, PROC_FLAG_VALID)
 DEFINE_PROC_FLAG(KILLED, PROC_FLAG_KILLED)
 DEFINE_PROC_FLAG(ONCHAN, PROC_FLAG_ONCHAN)
-DEFINE_PROC_FLAG(STOPPED, PROC_FLAG_STOPPED)
 
 static inline const char *procstate_to_str(enum procstate state) {
   switch (state) {
     case PSTATE_UNUSED: return "unused";
     case PSTATE_USED: return "used";
     case PSTATE_INTERRUPTIBLE: return "interruptible";
+    case STATE_KILLABLE: return "killable";
+    case STATE_TIMER: return "timer";
+    case STATE_KILLABLE_TIMER: return "killable_timer";
     case PSTATE_UNINTERRUPTIBLE: return "uninterruptible";
     case PSTATE_WAKENING: return "wakening";
     case PSTATE_RUNNING: return "running";
+    case PSTATE_STOPPED: return "stopped";
     case PSTATE_EXITING: return "exiting";
     case PSTATE_ZOMBIE: return "zombie";
     default: return "*unknown";
@@ -222,6 +230,7 @@ static inline void __proc_set_pstate(struct proc *p, enum procstate state) {
 #define PROC_AWOKEN(p) PSTATE_IS_AWOKEN(__proc_get_pstate(p))
 #define PROC_SLEEPING(p) PSTATE_IS_SLEEPING(__proc_get_pstate(p))
 #define PROC_ZOMBIE(p) PSTATE_IS_ZOMBIE(__proc_get_pstate(p))
+#define PROC_STOPPED(p) PSTATE_IS_STOPPED(__proc_get_pstate(p))
 #define PROC_KILLABLE(p) PSTATE_IS_KILLABLE(__proc_get_pstate(p))
 #define PROC_TIMER(p) PSTATE_IS_TIMER(__proc_get_pstate(p))
 #define PROC_INTERRUPTIBLE(p) PSTATE_IS_INTERRUPTIBLE(__proc_get_pstate(p))

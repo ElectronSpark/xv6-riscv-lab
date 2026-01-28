@@ -87,4 +87,33 @@
         smp_store_release(&(dest), old_head);                                  \
     } while (0)
 
+/**
+ * @brief Pop one node from a thread-local list (non-atomic)
+ *
+ * This macro pops a single node from the front of a list and stores it
+ * in the destination pointer. After this operation, head advances to
+ * the next node, and the popped node's next pointer is cleared.
+ *
+ * @param dest   The destination pointer (T*, must be an lvalue) to store
+ *               the popped node, or NULL if list was empty
+ * @param head   The list head pointer (T*, must be an lvalue)
+ * @param member Name of the next-pointer field within the node structure
+ *
+ * @warning This is NOT thread-safe. The list must be thread-local or
+ * protected by external synchronization (e.g., after LLIST_MIGRATE to
+ * a local list, or while holding a lock).
+ *
+ * @note Typical usage pattern:
+ *       1. LLIST_MIGRATE to steal entire list to local pointer
+ *       2. Loop with LLIST_POP to process nodes one by one
+ */
+#define LLIST_POP(dest, head, member)                                          \
+    do {                                                                       \
+        (dest) = (head);                                                       \
+        if ((dest) != NULL) {                                                  \
+            (head) = (dest)->member;                                           \
+            (dest)->member = NULL;                                             \
+        }                                                                      \
+    } while (0)
+
 #endif /* __KERNEL_LOCKLESS_LIST_H */

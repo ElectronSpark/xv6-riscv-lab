@@ -84,9 +84,13 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     binit();         // buffer cache
     // Legacy iinit() and fileinit() removed - VFS handles these
     userinit();      // first user process
+    // idle_proc_init must be called before sched_timer_init (or any workqueue_create)
+    // because idle_proc_init calls rq_cpu_activate() to mark this CPU as active.
+    // Without an active CPU, rq_select_task_rq() returns NULL and new processes
+    // cannot be enqueued to any run queue.
+    idle_proc_init();
     sched_timer_init();
     // goldfish_rtc_init();  // Goldfish RTC driver (1-second alarm)
-    idle_proc_init();
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
 

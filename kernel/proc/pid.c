@@ -229,8 +229,7 @@ void procdump(void) {
             continue;
 
         state = procstate_to_str(pstate);
-        printf("%d %s%s [%s] %s", pid, state, 
-                PROC_STOPPED(p) ? " (stopped)" : "", 
+        printf("%d %s [%s] %s", pid, state, 
                 PROC_USER_SPACE(p) ? "U":"K", name);
         if (smp_load_acquire(&p->sched_entity->on_cpu)) {
             printf(" (CPU: %d)\n", p->sched_entity->cpu_id);
@@ -357,8 +356,7 @@ static void __procdump_tree_recursive(struct proc *p, int depth) {
     safestrcpy(name, p->name, sizeof(name));
     
     state = procstate_to_str(pstate);
-    printf("%d %s%s [%s] %s", pid, state, 
-            PROC_STOPPED(p) ? " (stopped)" : "", 
+    printf("%d %s [%s] %s", pid, state, 
             PROC_USER_SPACE(p) ? "U":"K", name);
     if (smp_load_acquire(&p->sched_entity->on_cpu)) {
         printf(" (CPU: %d)\n", p->sched_entity->cpu_id);

@@ -551,24 +551,25 @@ void rq_flush_wake_list(int cpu_id) {
     if (cpu_id < 0 || cpu_id >= NCPU) {
         return;
     }
-    struct rq_percpu *rq_pc = __rqpc(cpu_id);
     
-    // Atomically pop all entries from the wake list (lock-free)
+    // Acquire lock for enqueueing tasks
+    struct rq_percpu *rq_pc = rq_percpu_lock_get(cpu_id);
+    
+    // Migrate all entries from the wake list (lock-free)
     struct sched_entity *wake_list = NULL;
     LLIST_MIGRATE(wake_list, rq_pc->wake_list_head);
     
     if (wake_list == NULL) {
+        rq_percpu_put_unlock(rq_pc);
         return;  // Nothing to flush
     }
     
-    // Acquire lock only for enqueueing tasks
-    spin_lock(&rq_pc->rq_lock);
-    
+    // Pop and enqueue one element at a time
     struct sched_entity *se;
-    while (wake_list != NULL) {
-        se = wake_list;
-        wake_list = se->wake_next;
-        se->wake_next = NULL;
+    LLIST_POP(se, wake_list, wake_next);
+    while (se != NULL) {
+        // State stays as WAKENING - the process will set itself to RUNNING
+        // when it gets scheduled via __sched_pick_next
         
         // Get the rq for this task's priority on this CPU
         int major_prio = se->priority >> PRIORITY_MAINLEVEL_SHIFT;
@@ -576,9 +577,11 @@ void rq_flush_wake_list(int cpu_id) {
         if (rq != NULL) {
             rq_enqueue_task(rq, se);
         }
+        
+        LLIST_POP(se, wake_list, wake_next);
     }
     
-    spin_unlock(&rq_pc->rq_lock);
+    rq_percpu_put_unlock(rq_pc);
 }
 
 // Default time slice value (placeholder - not yet enforced by scheduler)

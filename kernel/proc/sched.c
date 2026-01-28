@@ -18,6 +18,7 @@
 #include "errno.h"
 #include "timer/sched_timer_private.h"
 #include "timer/timer.h"
+#include "smp/ipi.h"
 
 // Locking order:
 // - sleep_lock
@@ -106,7 +107,12 @@ static struct proc *__sched_pick_next(void) {
     
     smp_store_release(&se->on_cpu, 1); // Mark the process as running on CPU
     enum procstate pstate = __proc_get_pstate(p);
-    if (pstate != PSTATE_RUNNING) {
+    
+    // Process can be RUNNING (normal case) or WAKENING (just woken up)
+    // If WAKENING, transition to RUNNING now - the process wakes itself
+    if (pstate == PSTATE_WAKENING) {
+        smp_store_release(&p->state, PSTATE_RUNNING);
+    } else if (pstate != PSTATE_RUNNING) {
         assert(pstate != PSTATE_INTERRUPTIBLE, "try to schedule an interruptible process");
         assert(pstate != PSTATE_UNINTERRUPTIBLE, "try to schedule an uninterruptible process");
         assert(pstate != PSTATE_UNUSED, "try to schedule an uninitialized process");
@@ -241,57 +247,11 @@ void scheduler_pause(struct spinlock *lk) {
     scheduler_sleep(lk, PSTATE_INTERRUPTIBLE); // Sleep with the specified lock
 }
 
+// DEPRECATED: Processes now enter PSTATE_STOPPED voluntarily via handle_signal.
+// This function is kept for backward compatibility but does nothing.
+// Use __proc_set_pstate(p, PSTATE_STOPPED) directly if needed.
 void scheduler_stop(struct proc *p) {
-    if (!p) {
-        return; // Invalid process
-    }
-    proc_assert_holding(p);
-    if (!PROC_STOPPED(p)) {
-        PROC_SET_STOPPED(p); // Set the process as stopped
-    }
-}
-
-void scheduler_continue(struct proc *p) {
-    // Uses pi_lock protocol like __do_scheduler_wakeup.
-    // Caller must hold p->sched_entity->pi_lock, must NOT hold proc_lock or rq_lock.
-    assert(p != NULL, "Cannot continue a NULL process");
-    assert(spin_holding(&p->sched_entity->pi_lock), "pi_lock must be held for scheduler_continue");
-    assert(!spin_holding(&p->lock), "proc_lock must not be held for scheduler_continue");
-    assert(!sched_holding(), "rq_lock must not be held for scheduler_continue");
-    assert(p != myproc(), "Cannot continue the current process");
-
-    if (!PROC_STOPPED(p)) {
-        return; // Process is not stopped, nothing to do
-    }
-
-    // Wait for process to be off CPU before modifying state.
-    // Like Linux's smp_cond_load_acquire in try_to_wake_up().
-    // "One must be running (->on_cpu == 1) in order to remove oneself from the runqueue."
-    smp_cond_load_acquire(&p->sched_entity->on_cpu, !VAL);
-
-    PROC_CLEAR_STOPPED(p); // Clear the stopped flag
-
-    // If process is RUNNING, add it back to the ready queue
-    if (__proc_get_pstate(p) == PSTATE_RUNNING) {
-        // Select which run queue to put the task into
-        push_off();  // Disable interrupts to avoid CPU migration during rq selection
-        struct sched_entity *se = p->sched_entity;
-        struct rq *rq = rq_select_task_rq(se, se->affinity_mask);
-        assert(!IS_ERR_OR_NULL(rq), "scheduler_continue: rq_select_task_rq failed");
-        
-        // Lock the target CPU's run queue
-        rq_lock(rq->cpu_id);
-        pop_off();  // Restore interrupt state (acquiring spinlock increases intr counter)
-        
-        // CAS on on_rq to serialize with context_switch_finish race fix path
-        int expected = 0;
-        if (__atomic_compare_exchange_n(&se->on_rq, &expected, 1,
-                                        false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
-            rq_enqueue_task(rq, se);
-        }
-        
-        rq_unlock(rq->cpu_id);
-    }
+    (void)p; // Unused - processes voluntarily stop via handle_signal
 }
 
 static void __scheduler_wakeup_assertion(struct proc *p) {
@@ -301,15 +261,21 @@ static void __scheduler_wakeup_assertion(struct proc *p) {
     assert(!sched_holding(), "Scheduler lock must not be held when waking up a process");
 }
 
-// Internal function to wake up a sleeping process.
-// Modeled after Linux's try_to_wake_up() in kernel/sched/core.c
-static void __do_scheduler_wakeup(struct proc *p) {
+// Internal function to wake up a sleeping or stopped process.
+// New pattern: CAS to WAKENING, select RQ, then either:
+// - If not on_cpu: enqueue directly and set to RUNNING
+// - If on_cpu: add to wake list and send IPI (state stays WAKENING)
+// The 'from_stopped' flag indicates whether we're waking from PSTATE_STOPPED.
+static void __do_scheduler_wakeup(struct proc *p, bool from_stopped) {
     // Special case: waking up the current process (p == myproc())
     // This happens when an interrupt wakes up a process that set its state to SLEEPING
     // but hasn't context-switched out yet. In this case, just change the state back
     // to RUNNING - the process will see this when it checks before context switching.
-    // Linux: "We're waking current, this means 'p->on_rq'... we can special case"
+    // Note: Cannot wake self from STOPPED - that's done via scheduler_yield loop.
     if (p == myproc()) {
+        if (from_stopped) {
+            return; // Cannot continue self
+        }
         // The current process is still on CPU, just change state to abort the sleep
         enum procstate old_state = smp_load_acquire(&p->state);
         if (old_state == PSTATE_WAKENING || old_state == PSTATE_RUNNING) {
@@ -319,75 +285,73 @@ static void __do_scheduler_wakeup(struct proc *p) {
         if (!PSTATE_IS_SLEEPING(old_state)) {
             return;
         }
-        // Try to change state back to RUNNING - this will abort the pending sleep
-        __atomic_compare_exchange_n(&p->state, &old_state, PSTATE_RUNNING,
-                                    false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+        // Set state to RUNNING - no CAS needed since we're the current process
+        smp_store_release(&p->state, PSTATE_RUNNING);
         return;
     }
     
-    // Linux pattern: check on_rq first, then smp_rmb, then on_cpu
-    // "Ensure we load p->on_cpu _after_ p->on_rq, otherwise it would be
-    //  possible to, falsely, observe p->on_cpu == 0."
-    //
-    // If on_rq is set, the task is already queued - no need for full wakeup
-    // (In Linux this would call ttwu_runnable() to potentially preempt)
+    // Check on_rq first - if already queued, nothing to do
     smp_rmb();
     if (smp_load_acquire(&p->sched_entity->on_rq)) {
-        return; // Already on a run queue, nothing to do
+        return; // Already on a run queue
     }
     
-    // Ensure we load on_cpu after on_rq (see Linux comment above)
-    // "One must be running (->on_cpu == 1) in order to remove oneself from the runqueue."
-    smp_rmb();
-    
-    // Wait for the process to finish context switching out (on_cpu == 0)
-    // This is critical: we must not add to run queue while still on a CPU
-    // Linux: smp_cond_load_acquire(&p->sched_entity->on_cpu, !VAL)
-    // "Pairs with the smp_store_release() in finish_task()."
-    // 
-    // No deadlock: context_switch_finish doesn't need pi_lock anymore,
-    // it uses CAS on on_rq instead to serialize with us.
-    smp_cond_load_acquire(&p->sched_entity->on_cpu, !VAL);
-    
-    // Atomically transition state from SLEEPING to WAKENING
+    // Atomically transition state to WAKENING
     // This prevents multiple wakers from racing to add the task to the run queue
     enum procstate old_state = smp_load_acquire(&p->state);
-    // Only wake up processes that are actually sleeping
-    if (!PSTATE_IS_SLEEPING(old_state)) {
-        return; // Process is not in a sleepable state (could be RUNNING, WAKENING, ZOMBIE, etc.)
+    
+    if (from_stopped) {
+        // Wake from STOPPED state
+        if (old_state != PSTATE_STOPPED) {
+            return; // Not stopped
+        }
+    } else {
+        // Wake from sleeping state
+        if (!PSTATE_IS_SLEEPING(old_state)) {
+            return; // Process is not in a sleepable state
+        }
     }
+    
+    // CAS to WAKENING to win the race
     bool success = __atomic_compare_exchange_n(&p->state, &old_state, PSTATE_WAKENING, 
                                                false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
     if (!success) {
-        // State changed - either someone else woke it, or it changed to a non-sleeping state
-        return;
+        return; // State changed - someone else woke it
     }
     
-    // Set to RUNNING BEFORE enqueue so another CPU picking this process
-    // from the run queue sees the correct state. The WAKENING state was just
-    // to win the race of multiple wakers.
-    smp_store_release(&p->state, PSTATE_RUNNING);
+    // Select which run queue to put the task into
+    struct sched_entity *se = p->sched_entity;
+    push_off();  // Disable interrupts to avoid CPU migration during rq selection
+    struct rq *rq = rq_select_task_rq(se, se->affinity_mask);
+    assert(!IS_ERR_OR_NULL(rq), "__do_scheduler_wakeup: rq_select_task_rq failed");
+    int target_cpu = rq->cpu_id;
+    pop_off();
     
-    if (!PROC_STOPPED(p)) {
-        // Select which run queue to put the task into
-        push_off();  // Disable interrupts to avoid CPU migration during rq selection
-        struct sched_entity *se = p->sched_entity;
-        struct rq *rq = rq_select_task_rq(se, se->affinity_mask);
-        assert(!IS_ERR_OR_NULL(rq), "__do_scheduler_wakeup: rq_select_task_rq failed");
+    // Check if process is still on CPU
+    // smp_rmb ensures we see the on_cpu write from context_switch_finish
+    smp_rmb();
+    if (!smp_load_acquire(&se->on_cpu)) {
+        // Process is off CPU - enqueue directly
+        // State stays as WAKENING - the process will set itself to RUNNING when scheduled
+        // pi_lock is held, so no other waker can race with us
+        smp_store_release(&se->on_rq, 1);
         
-        // Lock the target CPU's run queue
-        rq_lock(rq->cpu_id);
-        pop_off();  // Restore interrupt state (acquiring spinlock increases intr counter)
+        rq_lock(target_cpu);
+        rq_enqueue_task(rq, se);
+        rq_unlock(target_cpu);
+    } else {
+        // Process is still on CPU - add to wake list and send IPI
+        // State stays as WAKENING until the target CPU flushes the wake list
+        // Set on_rq now so context_switch_finish race fix knows we're handling it
+        smp_store_release(&se->on_rq, 1);
         
-        // CAS on on_rq to serialize with context_switch_finish race fix path
-        int expected = 0;
-        if (__atomic_compare_exchange_n(&se->on_rq, &expected, 1,
-                                        false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
-            rq_enqueue_task(rq, se);
+        rq_add_wake_list(target_cpu, se);
+        
+        // Send IPI to target CPU to process the wake list
+        if (target_cpu != cpuid()) {
+            ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
         }
-        // If CAS failed, context_switch_finish already enqueued
-        
-        rq_unlock(rq->cpu_id);
+        // If target is current CPU, rq_flush_wake_list will be called in scheduler_yield
     }
 }
 
@@ -397,7 +361,7 @@ void scheduler_wakeup(struct proc *p) {
     if (!PROC_SLEEPING(p)) {
         return; // Process is not sleeping, nothing to do
     }
-    __do_scheduler_wakeup(p);
+    __do_scheduler_wakeup(p, false);
 }
 
 // Wake up a process sleeping in timer, timer_killable or interruptible state.
@@ -406,7 +370,7 @@ void scheduler_wakeup_timeout(struct proc *p) {
     if (!PROC_TIMER(p)) {
         return; // Process is not in timer, timer_killable or interruptible state, nothing to do
     }
-    __do_scheduler_wakeup(p);
+    __do_scheduler_wakeup(p, false);
 }
 
 void scheduler_wakeup_killable(struct proc *p) {
@@ -414,7 +378,7 @@ void scheduler_wakeup_killable(struct proc *p) {
     if (!PROC_KILLABLE(p)) {
         return; // Process is not in killable state, nothing to do
     }
-    __do_scheduler_wakeup(p);
+    __do_scheduler_wakeup(p, false);
 }
 
 void scheduler_wakeup_interruptible(struct proc *p) {
@@ -422,7 +386,16 @@ void scheduler_wakeup_interruptible(struct proc *p) {
     if (!PROC_INTERRUPTIBLE(p)) {
         return; // Process is not in interruptible state, nothing to do
     }
-    __do_scheduler_wakeup(p);
+    __do_scheduler_wakeup(p, false);
+}
+
+// Wake up a stopped process (continue from PSTATE_STOPPED).
+void scheduler_wakeup_stopped(struct proc *p) {
+    __scheduler_wakeup_assertion(p);
+    if (!PROC_STOPPED(p)) {
+        return; // Process is not stopped, nothing to do
+    }
+    __do_scheduler_wakeup(p, true);
 }
 
 void sleep_on_chan(void *chan, struct spinlock *lk) {
@@ -598,7 +571,7 @@ void context_switch_finish(struct proc *prev, struct proc *next, int intr) {
     // @TODO: try not to treat idle process specially
     int did_enqueue = 0;
     if (prev != mycpu()->idle_proc) {
-        if (pstate == PSTATE_RUNNING && !PROC_STOPPED(prev)) {
+        if (pstate == PSTATE_RUNNING) {
             // Process is still running, put it back to the queue.
             // Note: If affinity was changed to exclude current CPU, the task
             // stays here until it sleeps. On wakeup, rq_select_task_rq() will
@@ -606,9 +579,9 @@ void context_switch_finish(struct proc *prev, struct proc *next, int intr) {
             rq_put_prev_task(se);
             smp_store_release(&se->on_rq, 1);
             did_enqueue = 1;
-        } else if (PSTATE_IS_SLEEPING(pstate) || PROC_STOPPED(prev)) {
+        } else if (PSTATE_IS_SLEEPING(pstate) || pstate == PSTATE_STOPPED) {
             // Process entered sleeping/stopped state, properly dequeue it
-            // so that wakeup path can enqueue to a (potentially different) rq.
+            // so that wakeup/continue path can enqueue to a (potentially different) rq.
             if (se->rq != NULL) {
                 rq_dequeue_task(se->rq, se);
             }
@@ -616,28 +589,25 @@ void context_switch_finish(struct proc *prev, struct proc *next, int intr) {
         // If zombie, rq_task_dead was already called in context_switch_prepare
     }
     
-    // Race fix: If we didn't enqueue (saw SLEEPING state), but a waker already
-    // set state to RUNNING via CAS, we must enqueue now.
-    // Use CAS on on_rq to serialize with wakeup path - no pi_lock needed here.
-    // This avoids deadlock where waker holds pi_lock spinning on on_cpu.
-    if (prev != mycpu()->idle_proc && !did_enqueue && !PROC_ZOMBIE(prev) && !PROC_STOPPED(prev)) {
+    // Race fix: If we didn't enqueue (saw SLEEPING state), check if a waker already
+    // handled it. If state is WAKENING or on_rq is set, waker took care of enqueuing.
+    // Note: STOPPED processes are handled by scheduler_wakeup_stopped, not this race fix.
+    if (prev != mycpu()->idle_proc && !did_enqueue && !PROC_ZOMBIE(prev) && pstate != PSTATE_STOPPED) {
         enum procstate new_pstate = __proc_get_pstate(prev);
-        if (new_pstate == PSTATE_RUNNING) {
-            // State changed to RUNNING after our initial read - try to enqueue
-            // CAS ensures only one path (us or waker) succeeds
-            int expected = 0;
-            if (__atomic_compare_exchange_n(&se->on_rq, &expected, 1,
-                                            false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
-                push_off();
-                struct rq *rq = rq_select_task_rq(se, se->affinity_mask);
-                assert(!IS_ERR_OR_NULL(rq), "context_switch_finish: rq_select_task_rq failed");
-                rq_lock(rq->cpu_id);
-                pop_off();
-                rq_enqueue_task(rq, se);
-                rq_unlock(rq->cpu_id);
-            }
-            // If CAS failed, waker already set on_rq = 1 and will/did enqueue
+        // If WAKENING, waker handled it (set on_rq and enqueued/added to wake list)
+        // If on_rq is already set, waker handled it
+        if (new_pstate == PSTATE_RUNNING && !smp_load_acquire(&se->on_rq)) {
+            // State is RUNNING but not on_rq - this means waker aborted a self-wakeup
+            // (when waking myproc). We need to enqueue.
+            smp_store_release(&se->on_rq, 1);
+            push_off();
+            struct rq *rq = rq_select_task_rq(se, se->affinity_mask);
+            rq_lock(rq->cpu_id);
+            pop_off();
+            rq_enqueue_task(rq, se);
+            rq_unlock(rq->cpu_id);
         }
+        // If WAKENING, waker added to wake list or enqueued - target CPU will handle
     }
     
     // Now safe to mark as not on CPU - wakeup path can proceed.

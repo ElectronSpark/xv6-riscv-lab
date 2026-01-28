@@ -16,12 +16,12 @@ void scheduler_run(void);
 void scheduler_yield(void);
 void scheduler_pause(struct spinlock *lk);
 void scheduler_stop(struct proc *p);
-void scheduler_continue(struct proc *p);
 void scheduler_sleep(struct spinlock *lk, enum procstate sleep_state);
 void scheduler_wakeup(struct proc *p);
 void scheduler_wakeup_timeout(struct proc *p);
 void scheduler_wakeup_killable(struct proc *p);
 void scheduler_wakeup_interruptible(struct proc *p);
+void scheduler_wakeup_stopped(struct proc *p);
 void sleep_on_chan(void *chan, struct spinlock *lk);
 void wakeup_on_chan(void *chan);
 
