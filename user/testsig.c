@@ -132,22 +132,26 @@ static void test_resehand(void) {
     if (kid == 0) {
         // Child: send one signal after short delay so parent is already paused.
         sleep(100);
-        kill(parent, SIGUSR1); // first (handled & resets)
-        sleep(100);
-        kill(parent, SIGUSR1); // second (ignored)
+        kill(parent, SIGUSR1); // first (handled & resets to SIG_DFL)
+        // Note: We do NOT send a second SIGUSR1 because after SA_RESETHAND,
+        // the handler is SIG_DFL, and SIG_DFL for SIGUSR1 terminates the process.
         exit(0);
     }
     // Parent waits for first (only) handler run.
     while (rese_count == 0) {
         pause();
     }
-    // Give time for second (ignored) signal.
-    sleep(200);
-    printf("SA_RESETHAND rese_count=%d (expected 1)\n", rese_count);
-    if (rese_count == 1) {
+    // Verify the handler was reset: check that sigaction now returns SIG_DFL
+    sigaction_t old = {0};
+    sigaction(SIGUSR1, 0, &old);
+    int handler_was_reset = (old.sa_handler == SIG_DFL);
+    
+    printf("SA_RESETHAND rese_count=%d (expected 1), handler_reset=%d\n", rese_count, handler_was_reset);
+    if (rese_count == 1 && handler_was_reset) {
         printf("[Test 2] PASS\n");
     } else {
-        printf("[Test 2] FAIL: rese_count=%d, expected 1\n", rese_count);
+        printf("[Test 2] FAIL: rese_count=%d (expected 1), handler_reset=%d (expected 1)\n", 
+               rese_count, handler_was_reset);
         test_failures++;
     }
     wait(0); // reap child
@@ -190,6 +194,8 @@ static void test_nodefer(void) {
 /* --------------- Test 4: Stop / Continue semantics --------------- */
 static void test_stop_continue(void) {
     printf("\n[Test 4] Stop / Continue semantics with SIGCONT handler\n");
+    cont_handler_count = 0;
+    
     int child = fork();
     if (child < 0) {
         printf("fork failed\n");
@@ -203,29 +209,43 @@ static void test_stop_continue(void) {
             printf("Child: failed to set SIGCONT handler\n");
             exit(-1);
         }
-        printf("Child %d waiting for stop signal...\n", getpid());
-        // Need two resume events (two SIGCONT) in this test.
-        // Wait until we've received both signals.
+        printf("Child %d ready, entering pause loop...\n", getpid());
+        
+        // Loop: each SIGCONT should wake us from pause and invoke handler
+        // We expect 2 stop/continue cycles
         while (cont_handler_count < 2) {
             pause();
+            printf("Child: woke from pause, cont_handler_count=%d\n", cont_handler_count);
         }
         printf("Child %d exiting (cont_handler_count=%d)\n", getpid(), cont_handler_count);
         exit(0);
     }
-    // Parent: allow child to setup
+    
+    // Parent: allow child to setup and enter pause
     sleep(100);
-    printf("Parent: sending two SIGSTOP then a SIGCONT to child %d\n", child);
+    
+    // First stop/continue cycle
+    printf("Parent: sending SIGSTOP to child %d\n", child);
     kill(child, SIGSTOP);
-    kill(child, SIGSTOP); // duplicate stop while already stopping
-    sleep(100);
-    kill(child, SIGCONT); // should resume + deliver handler once
+    sleep(200);  // Give time for child to actually stop
+    
+    printf("Parent: sending SIGCONT to resume child\n");
+    kill(child, SIGCONT);  // Should resume child and invoke handler
+    sleep(200);  // Give time for child to wake and run handler
+    
+    // Second stop/continue cycle
+    printf("Parent: sending second SIGSTOP\n");
+    kill(child, SIGSTOP);
     sleep(200);
-    printf("Parent: sending another SIGCONT (should still deliver handler)\n");
+    
+    printf("Parent: sending second SIGCONT\n");
     kill(child, SIGCONT);
     sleep(200);
-    printf("Parent: done with stop/continue test\n");
+    
+    printf("Parent: waiting for child to exit\n");
     int status;
     wait(&status);
+    
     // Child sets cont_handler_count=2 before exit; we check exit status.
     if (status == 0) {
         printf("[Test 4] PASS\n");

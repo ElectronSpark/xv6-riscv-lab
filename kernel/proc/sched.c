@@ -585,6 +585,12 @@ void context_switch_finish(struct proc *prev, struct proc *next, int intr) {
             if (se->rq != NULL) {
                 rq_dequeue_task(se->rq, se);
             }
+        } else if (pstate == PSTATE_WAKENING) {
+            // Waker already CAS'd state to WAKENING and added to wake list.
+            // We must still dequeue from old rq so wake list flush can enqueue cleanly.
+            if (se->rq != NULL) {
+                rq_dequeue_task(se->rq, se);
+            }
         }
         // If zombie, rq_task_dead was already called in context_switch_prepare
     }
