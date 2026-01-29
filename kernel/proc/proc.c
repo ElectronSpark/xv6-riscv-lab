@@ -318,8 +318,6 @@ void idle_proc_init(void) {
 
     rq_lock_current();
     struct rq *idle_rq = GET_RQ_FOR_CURRENT(IDLE_MAJOR_PRIORITY);
-    // Set on_rq before enqueue (matches the pattern in __do_scheduler_wakeup)
-    smp_store_release(&p->sched_entity->on_rq, 1);
     rq_enqueue_task(idle_rq, p->sched_entity);
     rq_unlock_current();
     // Idle process is currently on CPU
@@ -664,6 +662,7 @@ void reparent(struct proc *p) {
 static void __exit_yield(int status) {
     struct proc *p = myproc();
     struct proc *parent = p->parent;
+    struct proc *initproc = __proctab_get_initproc();
     
     proc_lock(p);
     p->xstate = status;
@@ -675,6 +674,13 @@ static void __exit_yield(int status) {
     // before we enter the scheduler to avoid the on_cpu spin race.
     if (parent != NULL) {
         wakeup_interruptible(parent);
+    }
+    
+    // Also wake init - if our parent exits before reaping us, we'll be
+    // reparented to init. By waking init now, it will be ready to reap
+    // any orphaned zombies promptly.
+    if (initproc != NULL && initproc != parent && initproc != p) {
+        wakeup_interruptible(initproc);
     }
     
     scheduler_yield();
@@ -722,13 +728,12 @@ int wait(uint64 addr) {
     int xstate = 0;
     struct proc *p = myproc();
     struct proc *child, *tmp;
-    bool needs_yield = false;
 
     proc_lock(p);
     for (;;) {
         // Set INTERRUPTIBLE BEFORE scanning - this is the Linux pattern.
         // Any child that calls wakeup_interruptible() while we're scanning
-        // will change our state back to RUNNING.
+        // will change our state back to RUNNING (or WAKENING if on_cpu).
         __proc_set_pstate(p, PSTATE_INTERRUPTIBLE);
         
         // Scan through table looking for exited children.
@@ -738,11 +743,13 @@ int wait(uint64 addr) {
                 // Make sure the zombie child has fully switched out of CPU
                 if (smp_load_acquire(&child->sched_entity->on_cpu)) {
                     // Still on CPU, mark needs yield and try again later
-                    needs_yield = true;
                     proc_unlock(child);
+                    __proc_set_pstate(p, PSTATE_RUNNING);
                     continue;
                 }
-                // Found one - restore RUNNING state and return
+                // Found one - set state to RUNNING before returning.
+                // If we were in WAKENING, rq_flush_wake_list will skip us
+                // when it sees our state is no longer WAKENING.
                 __proc_set_pstate(p, PSTATE_RUNNING);
                 xstate = child->xstate;
                 pid = child->pid;
@@ -756,28 +763,19 @@ int wait(uint64 addr) {
 
         // No point waiting if we don't have any children.
         if (p->children_count == 0 || signal_terminated(p)) {
+            // Set state to RUNNING before returning.
+            // If we were in WAKENING, rq_flush_wake_list will skip us
+            // when it sees our state is no longer WAKENING.
             __proc_set_pstate(p, PSTATE_RUNNING);
             pid = -1;
             goto ret;
         }
 
-        // Wait for a child to exit.
-        // Release lock and yield. If we were woken during the scan above,
-        // our state will be RUNNING and scheduler_yield will abort the sleep.
-        if (needs_yield) {
-            __proc_set_pstate(p, PSTATE_RUNNING);
-            proc_unlock(p);
-            needs_yield = false;
-            yield();
-            proc_lock(p);
-        } else {
-            // Release lock around context switch. Must use spin_unlock/spin_lock
-            // to match proc_lock's use of spin_lock (which manages noff via push_off/pop_off).
-            // Using spin_unlock_irqrestore here would leave noff unbalanced.
-            spin_unlock(&p->lock);
-            scheduler_yield();
-            spin_lock(&p->lock);
-        }
+        proc_unlock(p);
+        scheduler_yield();
+        proc_lock(p);
+        // Set state back to INTERRUPTIBLE for the next loop iteration.
+        __proc_set_pstate(p, PSTATE_INTERRUPTIBLE);
     }
 
 ret:

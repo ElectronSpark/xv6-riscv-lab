@@ -107,6 +107,7 @@ Interrupt → Per-CPU Interrupt Stack (16KB) → Top-half processing
 - ✅ FIFO scheduling class with load balancing (`sched_fifo.c`)
 - ✅ IDLE scheduling class for idle processes
 - ✅ Comprehensive scheduler test suite (`rq_test.c`)
+- ✅ Linux-style `on_rq`/`on_cpu` semantics with lock-based wakeup synchronization
 - ⏳ CFS-like fair scheduler - planned
 - ⏳ Nice values and dynamic priority - planned
 - ⏳ Real-time scheduling (SCHED_RR) - planned
@@ -118,7 +119,8 @@ Interrupt → Per-CPU Interrupt Stack (16KB) → Top-half processing
 - Completed: Run queue selection with CPU affinity (`rq_select_task_rq()`)
 - Completed: Two-layer ready mask (8-bit top + 64-bit secondary) for O(1) priority lookup
 - Completed: FIFO subqueues with minor priority ordering and load balancing
-- Files: `kernel/proc/sched.c`, `kernel/proc/rq.c`, `kernel/proc/sched_fifo.c`, `kernel/proc/rq_test.c` (new), `kernel/inc/proc/rq.h`, `kernel/inc/proc/rq_types.h`
+- Completed: Wakeup synchronization with retry loop for CPU migration races
+- Files: `kernel/proc/sched.c`, `kernel/proc/rq.c`, `kernel/proc/sched_fifo.c`, `kernel/proc/rq_test.c` (new), `kernel/inc/proc/rq.h`, `kernel/inc/proc/rq_types.h`, `kernel/proc/SCHEDULER_DESIGN.md`
 
 **Scheduling Architecture** (Implemented):
 ```
@@ -537,6 +539,7 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 - [x] **Per-CPU interrupt stacks (16KB)** ✅
 - [x] **Pluggable scheduler infrastructure with sched_class** ✅
 - [x] **Per-CPU run queues with CPU affinity support** ✅
+- [x] **Linux-style on_rq/on_cpu semantics with lock-based wakeup synchronization** ✅
 - [x] **Per-CPU RCU kthreads for callback processing** ✅
 - [x] **VM locking with rwlock + spinlock separation** ✅
 - [x] **Orange Pi RV2 hardware support** ✅
@@ -578,4 +581,4 @@ When implementing features from this roadmap:
 - **Hardware Support**: Orange Pi RV2 support demonstrates portability to real hardware.
 - **Experimental Features**: GUI and kernel MicroPython are low priority - mention only for future exploration.
 
-Last Updated: January 20, 2026
+Last Updated: January 29, 2026

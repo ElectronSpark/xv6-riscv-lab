@@ -539,6 +539,7 @@ make doc
 
 - **VFS Design**: [kernel/vfs/VFS_DESIGN.md](kernel/vfs/VFS_DESIGN.md) - Comprehensive VFS architecture documentation
 - **Unmount Design**: [kernel/vfs/UNMOUNT_DESIGN.md](kernel/vfs/UNMOUNT_DESIGN.md) - Mount/unmount implementation details
+- **Scheduler Design**: [kernel/proc/SCHEDULER_DESIGN.md](kernel/proc/SCHEDULER_DESIGN.md) - Linux-style scheduler architecture and wakeup synchronization
 
 ### Original xv6 Documentation
 
@@ -637,7 +638,7 @@ Common GDB commands:
 ## Known Issues and Limitations
 
 1. **No Dentry Cache**: Path resolution may be slower than modern systems
-2. **Simple Scheduler**: Round-robin scheduler without priority or real-time support
+2. **No CFS Scheduler**: FIFO scheduling with 256 priority levels, but no fair/proportional scheduling
 3. **Limited Networking**: Basic network stack, not full TCP/IP
 4. **No SMP Optimization**: Limited multiprocessor scalability
 5. **Educational Focus**: Not intended for production use without further hardening
@@ -652,8 +653,8 @@ Building a complete, stable Unix-like operating system:
 2. **✅ Interrupt Handling** *(COMPLETED)* - Separate interrupt/kernel stacks (16KB per CPU), nested interrupt support
 3. **✅ Orange Pi RV2 Hardware Support** *(COMPLETED)* - Real hardware support with U-Boot integration
 4. **✅ VM Locking** *(COMPLETED)* - Two-level locking (rwlock + spinlock), reference counting
-5. **Process Scheduling** - Implement MLFQ or CFS, priority levels, CPU affinity
-6. **Enhanced Kernel Threads** - Thread pools, work queues (for bottom-half), priorities
+5. **✅ Scheduler Infrastructure** *(COMPLETED)* - Per-CPU run queues, sched_class, 256 priority levels, CPU affinity
+6. **✅ Enhanced Kernel Threads** *(PARTIAL)* - Work queues, RCU kthreads; thread pools planned
 7. **Multi-User Support** - User/group IDs, permission checking, setuid/setgid
 8. **Standard LibC** - POSIX-compliant file I/O, strings, time, math functions
 9. **TTY/Terminal** - Line discipline, job control, PTY support

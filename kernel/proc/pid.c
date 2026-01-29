@@ -42,7 +42,7 @@ static ht_hash_t __proctab_hash(void *node) {
     return hlist_hash_int(p->pid);
 }
 
-static int __proctab_hash_cmp(hlist_t* ht, void *node1, void *node2) {
+static int __proctab_hash_cmp(hlist_t *ht, void *node1, void *node2) {
     struct proc *p1 = (struct proc *)node1;
     struct proc *p2 = (struct proc *)node2;
     return p1->pid - p2->pid;
@@ -58,8 +58,7 @@ static void *__proctab_hash_get_node(hlist_entry_t *entry) {
 }
 
 // initialize the proc table and pid_lock.
-void __proctab_init(void)
-{
+void __proctab_init(void) {
     hlist_func_t funcs = {
         .hash = __proctab_hash,
         .get_node = __proctab_hash_get_node,
@@ -73,16 +72,12 @@ void __proctab_init(void)
     proc_table.nextpid = 1;
 }
 
-/* Lock and unlock proc table 
+/* Lock and unlock proc table
    Required to hold when modifying proc table */
 
-static void __proctab_lock(void) {
-    spin_lock(&proc_table.pid_lock);
-}
+static void __proctab_lock(void) { spin_lock(&proc_table.pid_lock); }
 
-static void __proctab_unlock(void) {
-    spin_unlock(&proc_table.pid_lock);
-}
+static void __proctab_unlock(void) { spin_unlock(&proc_table.pid_lock); }
 
 /* The following will assert that the process table is locked */
 void __proctab_set_initproc(struct proc *p) {
@@ -102,7 +97,7 @@ struct proc *__proctab_get_initproc(void) {
 
 // get a PCB by pid.
 static struct proc *__proctab_get_pid_proc_locked(int pid) {
-    struct proc dummy = { .pid = pid };
+    struct proc dummy = {.pid = pid};
     struct proc *p = hlist_get(&proc_table.procs, &dummy);
     return p;
 }
@@ -118,7 +113,8 @@ static void __nextpid_inc(void) {
 }
 
 // allocate a new pid.
-// If process creation fails after this, the caller must call __free_pid to release it.
+// If process creation fails after this, the caller must call __free_pid to
+// release it.
 int __alloc_pid(void) {
     __proctab_lock();
 
@@ -129,7 +125,7 @@ int __alloc_pid(void) {
     }
 
     int start = proc_table.nextpid;
-    
+
     // Search for an unused PID, wrapping around if necessary
     while (__proctab_get_pid_proc_locked(proc_table.nextpid) != NULL) {
         __nextpid_inc();
@@ -157,7 +153,7 @@ void __free_pid(int pid) {
 void __proctab_proc_add_locked(struct proc *p) {
     assert(p != NULL, "NULL proc passed to __proctab_proc_add_locked");
     assert(LIST_ENTRY_IS_DETACHED(&p->dmp_list_entry),
-            "Process %d is already in the dump list", p->pid);
+           "Process %d is already in the dump list", p->pid);
 
     // Use RCU-safe insertion for concurrent readers
     struct proc *existing = hlist_put_rcu(&proc_table.procs, p, false);
@@ -176,7 +172,7 @@ int proctab_get_pid_proc(int pid, struct proc **pp) {
     if (!pp) {
         return -1; // Invalid argument
     }
-    struct proc dummy = { .pid = pid };
+    struct proc dummy = {.pid = pid};
     struct proc *p = hlist_get_rcu(&proc_table.procs, &dummy);
     *pp = p;
     return 0;
@@ -191,7 +187,7 @@ void proctab_proc_add(struct proc *p) {
 void proctab_proc_remove(struct proc *p) {
     // Caller must hold p->lock
     proc_assert_holding(p);
-    
+
     __proctab_lock();
     // Use RCU-safe removal for concurrent readers
     struct proc *existing = hlist_pop_rcu(&proc_table.procs, p);
@@ -199,9 +195,10 @@ void proctab_proc_remove(struct proc *p) {
     list_entry_del_init_rcu(&p->dmp_list_entry);
     proc_table.registered_cnt--;
     __proctab_unlock();
-    
-    assert(existing == NULL || existing == p, "freeproc called with a different proc");
-    
+
+    assert(existing == NULL || existing == p,
+           "freeproc called with a different proc");
+
     // Note: Caller must call synchronize_rcu() or use call_rcu() before freeing
     // the proc structure, to ensure all RCU readers have finished accessing it.
 }
@@ -213,7 +210,7 @@ void procdump(void) {
     struct proc *p;
     const char *state;
 
-    printf("Process List:\n");
+    printf("Process List(* means on_cpu is set):\n");
     rcu_read_lock();
 
     // Use RCU-safe iteration for concurrent access
@@ -223,19 +220,22 @@ void procdump(void) {
         int pid = p->pid;
         char name[sizeof(p->name)];
         safestrcpy(name, p->name, sizeof(name));
+        char pname[sizeof(p->parent->name)];
+        if (p->parent) {
+            safestrcpy(pname, p->parent->name, sizeof(pname));
+        } else {
+            safestrcpy(pname, "N/A", sizeof(pname));
+        }
         proc_unlock(p);
 
         if (pstate == PSTATE_UNUSED)
             continue;
 
         state = procstate_to_str(pstate);
-        printf("%d %s [%s] %s", pid, state, 
-                PROC_USER_SPACE(p) ? "U":"K", name);
-        if (smp_load_acquire(&p->sched_entity->on_cpu)) {
-            printf(" (CPU: %d)\n", p->sched_entity->cpu_id);
-        } else {
-            printf("\n");
-        }
+        printf("(CPU: %s%d) %d %s [%s] %s : %s\n",
+               smp_load_acquire(&p->sched_entity->on_cpu) ? "*" : "",
+               p->sched_entity->cpu_id, pid, state,
+               PROC_USER_SPACE(p) ? "U" : "K", pname, name);
     }
 
     rcu_read_unlock();
@@ -268,20 +268,26 @@ void procdump_bt(void) {
         int pid = p->pid;
         char name[sizeof(p->name)];
         safestrcpy(name, p->name, sizeof(name));
-        
+
         // Only backtrace blocked processes (sleeping/uninterruptible)
-        if (pstate == PSTATE_INTERRUPTIBLE || pstate == PSTATE_UNINTERRUPTIBLE) {
-        // Skip if process is currently on a CPU (context not saved)
-        if (__proc_is_on_cpu(p)) {
-            printf("\n--- Process %d [%s] %s --- (on CPU, cannot backtrace)\n", pid,
-                pstate == PSTATE_INTERRUPTIBLE ? "interruptible" : "uninterruptible",
-                name);
-        } else {
-            printf("\n--- Process %d [%s] %s ---\n", pid, 
-                pstate == PSTATE_INTERRUPTIBLE ? "interruptible" : "uninterruptible",
-                name);
-            print_proc_backtrace(&p->sched_entity->context, p->kstack, p->kstack_order);
-        }
+        if (pstate == PSTATE_INTERRUPTIBLE ||
+            pstate == PSTATE_UNINTERRUPTIBLE) {
+            // Skip if process is currently on a CPU (context not saved)
+            if (__proc_is_on_cpu(p)) {
+                printf(
+                    "\n--- Process %d [%s] %s --- (on CPU, cannot backtrace)\n",
+                    pid,
+                    pstate == PSTATE_INTERRUPTIBLE ? "interruptible"
+                                                   : "uninterruptible",
+                    name);
+            } else {
+                printf("\n--- Process %d [%s] %s ---\n", pid,
+                       pstate == PSTATE_INTERRUPTIBLE ? "interruptible"
+                                                      : "uninterruptible",
+                       name);
+                print_proc_backtrace(&p->sched_entity->context, p->kstack,
+                                     p->kstack_order);
+            }
         }
         proc_unlock(p);
     }
@@ -298,7 +304,7 @@ void procdump_bt_pid(int pid) {
     rcu_read_lock();
 
     // Use RCU-safe lookup
-    struct proc dummy = { .pid = pid };
+    struct proc dummy = {.pid = pid};
     p = hlist_get_rcu(&proc_table.procs, &dummy);
     if (p == NULL) {
         printf("Process %d not found\n", pid);
@@ -311,19 +317,18 @@ void procdump_bt_pid(int pid) {
     char name[sizeof(p->name)];
     safestrcpy(name, p->name, sizeof(name));
 
-    printf("\n--- Process %d [%s] %s ---\n", pid, 
-            procstate_to_str(pstate), name);
-    
+    printf("\n--- Process %d [%s] %s ---\n", pid, procstate_to_str(pstate),
+           name);
+
     if (__proc_is_on_cpu(p)) {
         printf("Process is currently on a CPU, context not saved\n");
-    } else if (pstate == PSTATE_RUNNING) {
-        printf("Process is currently running, cannot backtrace\n");
     } else if (pstate == PSTATE_UNUSED || pstate == PSTATE_ZOMBIE) {
         printf("Process is %s, no valid context\n", procstate_to_str(pstate));
     } else {
-        print_proc_backtrace(&p->sched_entity->context, p->kstack, p->kstack_order);
+        print_proc_backtrace(&p->sched_entity->context, p->kstack,
+                             p->kstack_order);
     }
-    
+
     proc_unlock(p);
 
     rcu_read_unlock();
@@ -331,45 +336,45 @@ void procdump_bt_pid(int pid) {
 
 // Helper function to recursively print process tree
 // Locks the parent process while traversing its children list, following
-// the lock order: parent lock before child lock (see lock order comment at top of file).
+// the lock order: parent lock before child lock (see lock order comment at top
+// of file).
 static void __procdump_tree_recursive(struct proc *p, int depth) {
     const char *state;
     struct proc *child, *tmp;
     enum procstate pstate;
     int pid;
     char name[16];
-    
+
     // Print indentation
     for (int i = 0; i < depth; i++) {
         printf("  ");
     }
-    
+
     // Print tree connector
     if (depth > 0) {
         printf("└─ ");
     }
-    
+
     // Lock parent process and get its info
     proc_lock(p);
     pstate = __proc_get_pstate(p);
     pid = p->pid;
     safestrcpy(name, p->name, sizeof(name));
-    
+
     state = procstate_to_str(pstate);
-    printf("%d %s [%s] %s", pid, state, 
-            PROC_USER_SPACE(p) ? "U":"K", name);
+    printf("%d %s [%s] %s", pid, state, PROC_USER_SPACE(p) ? "U" : "K", name);
     if (smp_load_acquire(&p->sched_entity->on_cpu)) {
         printf(" (CPU: %d)\n", p->sched_entity->cpu_id);
     } else {
         printf("\n");
     }
-    
+
     // Keep parent locked while traversing children (safe per lock order rules)
     // Each recursive call will lock the child while parent remains locked
     list_foreach_node_safe(&p->children, child, tmp, siblings) {
         __procdump_tree_recursive(child, depth + 1);
     }
-    
+
     proc_unlock(p);
 }
 
@@ -379,18 +384,18 @@ static void __procdump_tree_recursive(struct proc *p, int depth) {
 void procdump_tree(void) {
     struct proc *initproc;
     printf("Process Tree:\n");
-    
+
     rcu_read_lock();
-    
+
     initproc = __proctab_get_initproc();
     if (initproc == NULL) {
         printf("No init process\n");
         rcu_read_unlock();
         return;
     }
-    
+
     __procdump_tree_recursive(initproc, 0);
-    
+
     rcu_read_unlock();
 }
 

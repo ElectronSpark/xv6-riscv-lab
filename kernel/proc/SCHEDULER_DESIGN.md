@@ -152,16 +152,24 @@ struct fifo_rq {
 | `PSTATE_WAKENING` | Transient state during wakeup (race protection) |
 | `PSTATE_ZOMBIE` | Exited, waiting for parent to reap |
 
-### on_cpu and on_rq Semantics
+### on_cpu and on_rq Semantics (Matching Linux Kernel)
 
-A RUNNING process is either:
-- **On the ready queue** (`se->on_rq = 1, se->on_cpu = 0`) — waiting to be scheduled
-- **On a CPU** (`se->on_rq = 0, se->on_cpu = 1`) — currently executing
-- **Transitioning** — briefly both or neither during context switch
+`on_rq` indicates whether the task is logically part of a run queue:
+- `on_rq = 1`: Task is runnable (either waiting in queue OR currently executing)
+- `on_rq = 0`: Task is sleeping or dead
 
-A SLEEPING process has:
-- `se->on_rq = 0` — not on any run queue
-- `se->on_cpu = 0` — not executing (after context switch completes)
+`on_cpu` indicates whether the task is physically running on a CPU:
+- `on_cpu = 1`: Task is currently executing on a CPU
+- `on_cpu = 0`: Task is not executing
+
+**State combinations:**
+- **Waiting in queue** (`on_rq = 1, on_cpu = 0`) — runnable, waiting to be picked
+- **Running on CPU** (`on_rq = 1, on_cpu = 1`) — currently executing
+- **Sleeping** (`on_rq = 0, on_cpu = 0`) — dequeued, waiting for wakeup
+- **Transitioning** (`on_rq = 0, on_cpu = 1`) — brief window during context_switch_finish
+  when task is being dequeued but hasn't cleared on_cpu yet
+
+This matches Linux kernel behavior where tasks stay "on rq" while running.
 
 ## Locking Hierarchy
 
@@ -225,38 +233,28 @@ void context_switch_prepare(struct proc *prev, struct proc *next) {
 ### context_switch_finish()
 
 ```c
-void context_switch_finish(struct proc *prev, struct proc *next) {
+void context_switch_finish(struct proc *prev, struct proc *next, int intr) {
     pstate = __proc_get_pstate(prev);       // RE-READ state (critical!)
     struct sched_entity *se = prev->sched_entity;
-    int did_enqueue = 0;
     
-    if (pstate == PSTATE_RUNNING && !PROC_STOPPED(prev)) {
-        rq_put_prev_task(se);               // Put prev back on queue
-        smp_store_release(&se->on_rq, 1);   // Mark as on run queue
-        did_enqueue = 1;
-    } else if (PSTATE_IS_SLEEPING(pstate) || PROC_STOPPED(prev)) {
-        if (se->rq != NULL) {
-            rq_dequeue_task(se->rq, se);    // Properly dequeue
-        }
-    }
-    rq_unlock_current();                    // Release rq_lock
-    
-    // Race fix: If state changed to RUNNING after our read, enqueue now.
-    // CAS on on_rq serializes with wakeup path — no pi_lock needed here.
-    if (!did_enqueue && !PROC_ZOMBIE(prev) && !PROC_STOPPED(prev)) {
-        if (__proc_get_pstate(prev) == PSTATE_RUNNING) {
-            int expected = 0;
-            if (CAS(&se->on_rq, &expected, 1)) {
-                rq_lock(...); rq_enqueue_task(rq, se); rq_unlock(...);
+    if (prev != mycpu()->idle_proc) {
+        if (pstate == PSTATE_RUNNING) {
+            rq_put_prev_task(se);           // Put prev back in scheduler list
+        } else if (PSTATE_IS_SLEEPING(pstate) || pstate == PSTATE_STOPPED) {
+            if (se->rq != NULL) {
+                rq_dequeue_task(se->rq, se); // Dequeue: sets on_rq=0
             }
-            // If CAS failed, waker already enqueued
         }
     }
     
     smp_store_release(&se->on_cpu, 0);      // Now safe for wakers
+    rq_unlock_current_irqrestore(intr);     // Release rq_lock
     rcu_check_callbacks();
 }
 ```
+
+**Key insight:** The rq_lock is held throughout state checking and on_cpu clearing.
+This serializes with wakeup, which also acquires the rq_lock before checking on_rq/on_cpu.
 
 ### Task Switch Flow (via sched_class)
 
@@ -315,11 +313,15 @@ static struct proc *__sched_pick_next(void) {
     }
     
     struct proc *p = se->proc;
-    rq_set_next_task(se);                     // Remove from queue, set as current
-    smp_store_release(&se->on_rq, 0);         // Mark as off run queue
+    rq_set_next_task(se);                     // Detach from list (on_rq stays 1!)
     smp_store_release(&se->on_cpu, 1);        // Mark as on CPU
     return p;
 }
+```
+
+**Note:** Unlike older designs, `on_rq` stays 1 while running (matching Linux).
+The task is removed from the scheduler's internal list but is still logically
+"on the run queue". This simplifies wakeup - if on_rq=1, no enqueue needed.
 ```
 
 ## Wakeup Flow
@@ -336,52 +338,102 @@ void wakeup_proc(struct proc *p) {
 
 ### Internal Wakeup Logic
 
-`__do_scheduler_wakeup()` follows the Linux `try_to_wake_up()` pattern:
+`__do_scheduler_wakeup()` follows the Linux `try_to_wake_up()` pattern with a critical
+addition: **lock-based serialization with retry** to handle CPU migration races.
 
 ```c
-static void __do_scheduler_wakeup(struct proc *p) {
+static void __do_scheduler_wakeup(struct proc *p, bool from_stopped) {
     struct sched_entity *se = p->sched_entity;
     
     // Special case: self-wakeup from interrupt
+    // Current process set SLEEPING but hasn't switched out yet.
+    // Just change state back - it will see this before context switching.
     if (p == myproc()) {
-        atomic_cas(&p->state, old_state, PSTATE_RUNNING);
+        smp_store_release(&p->state, PSTATE_RUNNING);
         return;
     }
     
-    // 1. Check if already queued (Linux: ttwu_runnable path)
-    smp_rmb();
+    // Validate state is sleepable
+    enum procstate old_state = smp_load_acquire(&p->state);
+    if (!PSTATE_IS_SLEEPING(old_state)) {
+        return;
+    }
+    
+retry:
+    // Read origin CPU and select target CPU
+    push_off();
+    struct rq *rq = rq_select_task_rq(se, se->affinity_mask);
+    int origin_cpuid = smp_load_acquire(&se->cpu_id);
+    int target_cpu = rq->cpu_id;
+    if (origin_cpuid < 0) {
+        origin_cpuid = target_cpu;  // New task, no origin to serialize with
+    }
+    pop_off();
+    
+    // Lock BOTH origin and target rq to serialize with context_switch_finish
+    rq_lock_two(origin_cpuid, target_cpu);
+    
+    // **Critical:** Re-check cpu_id after acquiring locks.
+    // If task migrated between read and lock, we have the wrong lock!
+    int current_cpuid = smp_load_acquire(&se->cpu_id);
+    if (current_cpuid >= 0 && current_cpuid != origin_cpuid) {
+        rq_unlock_two(origin_cpuid, target_cpu);
+        goto retry;  // Retry with correct locks
+    }
+    
+    smp_store_release(&p->state, PSTATE_WAKENING);
+    
+    // Linux ttwu pattern - check on_rq FIRST (under lock):
     if (smp_load_acquire(&se->on_rq)) {
-        return;  // Already on run queue
+        // Task logically on rq (on_rq=1 while running).
+        // Just set RUNNING - put_prev_task will add back to list.
+        smp_store_release(&p->state, PSTATE_RUNNING);
+        rq_unlock_two(origin_cpuid, target_cpu);
+        return;
     }
     
-    // 2. Wait for context switch out (Linux: smp_cond_load_acquire)
-    smp_rmb();
-    smp_cond_load_acquire(&se->on_cpu, !VAL);
-    
-    // 3. Atomically claim wakeup (prevent double-enqueue)
-    if (!atomic_cas(&p->state, SLEEPING, PSTATE_WAKENING)) {
-        return;  // Someone else woke it, or state changed
+    // on_rq=0: check if still on CPU (brief dequeue→on_cpu=0 window)
+    if (smp_load_acquire(&se->on_cpu)) {
+        // Task switching out, use wake_list for deferred enqueue
+        int running_cpu = smp_load_acquire(&se->cpu_id);
+        rq_add_wake_list(running_cpu, se);
+        rq_unlock_two(origin_cpuid, target_cpu);
+        ipi_send_single(running_cpu, IPI_REASON_RESCHEDULE);
+        return;
     }
     
-    // 4. Set to RUNNING before enqueue
-    smp_store_release(&p->state, PSTATE_RUNNING);
-    
-    // 5. Select run queue and enqueue (CAS serializes with context_switch_finish)
-    if (!PROC_STOPPED(p)) {
-        push_off();
-        struct rq *rq = rq_select_task_rq(se, se->affinity_mask);
-        rq_lock(rq->cpu_id);
-        pop_off();
-        
-        // CAS on on_rq to serialize with context_switch_finish race fix
-        int expected = 0;
-        if (__atomic_compare_exchange_n(&se->on_rq, &expected, 1, ...)) {
-            rq_enqueue_task(rq, se);
-        }
-        // If CAS failed, context_switch_finish already enqueued
-        
-        rq_unlock(rq->cpu_id);
-    }
+    // on_rq=0 and on_cpu=0: task fully off CPU, enqueue directly
+    rq_enqueue_task(rq, se);
+    rq_unlock_two(origin_cpuid, target_cpu);
+}
+```
+
+### The CPU Migration Race
+
+The retry loop fixes a subtle race condition:
+
+```
+CPU 0 (task P running)              CPU 1 (waker)
+─────────────────────               ─────────────────
+                                    origin = se->cpu_id (= 0)
+P yields, context_switch
+  to different CPU (migrated)       
+se->cpu_id = 2                      rq_lock_two(0, target)
+                                    // Locked CPU 0's rq, but P is on CPU 2!
+context_switch_finish on CPU 2
+  reads state = INTERRUPTIBLE
+  dequeues P (on_rq = 0)
+  releases CPU 2's rq_lock
+                                    // Stale: sees on_rq=1 (cached)
+                                    // Sets RUNNING and returns
+                                    // BUG: P not in any list!
+```
+
+**Fix:** After locking, re-check `cpu_id`. If it changed, release and retry:
+```c
+if (current_cpuid != origin_cpuid) {
+    rq_unlock_two(...);
+    goto retry;
 }
 ```
 
@@ -389,32 +441,28 @@ static void __do_scheduler_wakeup(struct proc *p) {
 
 ### The Critical Invariant
 
-**Writer (context_switch_finish):**
-```
-on_rq = 1          (1) First: enqueue (via rq_put_prev_task)
-rq_unlock()        (2) Release barrier
-on_cpu = 0         (3) Last: signal completion
-```
+With rq_lock-based serialization, memory ordering is simpler:
+- All on_rq/on_cpu reads in wakeup happen **under rq_lock**
+- All on_rq/on_cpu writes in context_switch_finish happen **under rq_lock**
+- The lock provides the necessary memory barriers
 
-**Reader (waker):**
+**Writer (context_switch_finish) under rq_lock:**
 ```
-read on_rq         (1) First: check if queued
-smp_rmb()          (2) Read barrier
-read/wait on_cpu   (3) Last: wait for completion
+if SLEEPING: rq_dequeue_task() → on_rq = 0
+smp_store_release(&on_cpu, 0)
+rq_unlock()                     // Release barrier
 ```
 
-This ensures: **If waker sees `se->on_cpu = 0`, it must also see `se->on_rq = 1` (if it was set).**
+**Reader (wakeup) under rq_lock:**
+```
+rq_lock_two(origin, target)     // Acquire barrier, waits for unlock
+read on_rq                      // Sees consistent state
+read on_cpu
+... decide path ...
+```
 
-### Why This Order?
-
-Without proper ordering, a waker could:
-1. See stale `on_cpu = 0` (from cache)
-2. See stale `on_rq = 0` (not propagated yet)
-3. Conclude: "process is not queued and not on CPU"
-4. Attempt to enqueue → **double enqueue bug!**
-
-The `smp_rmb()` between reads, combined with the write ordering (on_rq before on_cpu),
-prevents this race.
+This ensures: **If wakeup holds the origin CPU's rq_lock, it sees the final
+state written by context_switch_finish (which held the same lock).**
 
 ## Race Condition Handling
 
@@ -422,25 +470,72 @@ prevents this race.
 
 **Scenario:** Two CPUs try to wake the same process simultaneously.
 
-**Solution:** Atomic CAS on state: `SLEEPING → WAKENING`
-- Only one CAS succeeds
-- Loser sees `WAKENING` and returns
-- Winner proceeds to enqueue
+**Solution:** Both acquire the same rq_lock (origin CPU's lock), serializing access.
+The first waker to acquire the lock sets state to WAKENING under the lock.
+The second waker sees non-sleeping state and returns early.
 
-### Wakeup During Context Switch
+### Wakeup During Context Switch (on_rq=1 path)
 
-**Scenario:** Process P is context-switching out. CPU 1 tries to wake P.
+**Scenario:** Process P is running, sets state=SLEEPING, yields. Waker runs.
 
-**Solution:** Waker spin-waits on `se->on_cpu`
 ```
-CPU 0: P switching out          CPU 1: Waker
+CPU 0: P yielding               CPU 1: Waker
 ────────────────────            ────────────────
-on_rq = 1
+state = SLEEPING
+rq_lock_current()
+pick_next(), switch             rq_lock_two(origin=0, target)
+                                // blocked on CPU 0's lock
+context_switch_finish:
+  reads state = SLEEPING
+  dequeues (on_rq = 0)
+  on_cpu = 0
 rq_unlock()
-                                spin on on_cpu...
-on_cpu = 0 ─────────────────────►spin ends
-                                CAS state
-                                sees on_rq = 1, returns
+                                // lock acquired
+                                state = WAKENING
+                                sees on_rq = 0, on_cpu = 0
+                                enqueues directly
+```
+
+### Wakeup During Context Switch (on_rq=1, waker first)
+
+**Scenario:** Waker acquires lock before context_switch_finish dequeues.
+
+```
+CPU 0: P yielding               CPU 1: Waker
+────────────────────            ────────────────
+state = SLEEPING
+(P still has on_rq=1, on_cpu=1)
+context_switch to next
+                                rq_lock_two(origin=0, target)
+                                state = WAKENING
+                                sees on_rq = 1
+                                → sets RUNNING, returns
+context_switch_finish on next:
+  re-reads state = RUNNING
+  calls rq_put_prev_task()
+  P is back in scheduler list ✓
+```
+
+### CPU Migration Race
+
+**Scenario:** Task migrated between reading cpu_id and locking.
+
+**Solution:** Retry loop with re-check after lock acquisition.
+```
+Waker                           context_switch_finish
+─────                           ─────────────────────
+origin = cpu_id (= 0)           
+                                task migrates to CPU 2
+rq_lock_two(0, target)          context_switch_finish on CPU 2
+  // has CPU 0's lock             holds CPU 2's lock
+                                  dequeues, clears on_cpu
+current_cpuid = 2
+2 != 0 → unlock, retry
+origin = cpu_id (= 2)
+rq_lock_two(2, target)
+  // now correct lock
+sees on_rq = 0, on_cpu = 0
+enqueues correctly ✓
 ```
 
 ### Self-Wakeup (Interrupt Wakeup)
@@ -653,15 +748,15 @@ The scheduler integrates with RCU (Read-Copy-Update) for grace period tracking:
 │                              SLEEP PATH                                      │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  1. state = SLEEPING                                                         │
-│  2. yield() → rq_lock_current() → pick_next()                               │
-│  3. context_switch_prepare: se->on_cpu = 1                                  │
+│  2. yield() → rq_lock_current() → pick_next() → set_next_task()             │
+│  3. context_switch_prepare: next->on_cpu = 1                                │
 │  4. __switch_to()                                                            │
-│  5. context_switch_finish:                                                   │
-│       - RE-READ state                                                        │
-│       - if RUNNING: rq_put_prev_task() → se->on_rq = 1                      │
+│  5. context_switch_finish (on new process's stack):                          │
+│       - RE-READ prev state (under rq_lock)                                   │
+│       - if RUNNING: rq_put_prev_task() → add back to list                   │
+│       - if SLEEPING: rq_dequeue_task() → on_rq = 0                          │
+│       - smp_store_release(&on_cpu, 0)                                       │
 │       - rq_unlock_current()                                                  │
-│       - Race fix: if state now RUNNING, CAS(on_rq, 0→1) and enqueue         │
-│       - se->on_cpu = 0                                                       │
 │       - rcu_check_callbacks()                                                │
 └─────────────────────────────────────────────────────────────────────────────┘
 
@@ -669,189 +764,110 @@ The scheduler integrates with RCU (Read-Copy-Update) for grace period tracking:
 │                              WAKEUP PATH                                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  1. Acquire se->pi_lock                                                      │
-│  2. Check se->on_rq → if set, return (already queued)                       │
-│  3. smp_rmb()                                                                │
-│  4. Wait for se->on_cpu == 0                                                │
-│  5. CAS state: SLEEPING → WAKENING                                          │
-│  6. state = RUNNING                                                          │
-│  7. rq_select_task_rq() → rq_lock(); CAS(on_rq, 0→1); rq_enqueue_task()    │
-│  8. rq_unlock(); release se->pi_lock                                        │
+│  2. Self-wakeup check: if p == myproc(), set RUNNING and return             │
+│  3. Validate state is sleepable                                              │
+│  4. retry: Read origin_cpu = se->cpu_id, select target_cpu                  │
+│  5. rq_lock_two(origin_cpu, target_cpu)                                      │
+│  6. Re-check cpu_id: if changed, unlock and goto retry                      │
+│  7. state = WAKENING                                                         │
+│  8. if on_rq=1: state = RUNNING, return (will be put back by put_prev_task) │
+│  9. if on_cpu=1: add to wake_list, send IPI, return                         │
+│ 10. else: rq_enqueue_task() directly                                        │
+│ 11. rq_unlock_two(); release pi_lock                                        │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           KEY INVARIANTS                                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  • se->on_rq = 1 always happens BEFORE se->on_cpu = 0 (write order)         │
-│  • Waker reads on_rq BEFORE on_cpu (read order matches write order)         │
-│  • State CAS prevents double-enqueue from multiple wakers                    │
-│  • context_switch_finish RE-READS state for interrupt wakeups               │
-│  • on_rq changes via CAS to serialize waker vs context_switch_finish        │
-│  • Wakeup AND continue require pi_lock (not proc_lock) to avoid deadlock    │
-│  • Both wakeup and continue wait for on_cpu == 0 before enqueuing           │
-│  • CPU affinity is respected via rq_select_task_rq()                         │
+│  • on_rq = 1 while running (task logically on rq, detached from list)       │
+│  • on_rq = 0 only when sleeping (dequeued via rq_dequeue_task)              │
+│  • rq_lock serializes wakeup with context_switch_finish                     │
+│  • Retry loop handles cpu_id changing between read and lock                  │
+│  • pi_lock required for wakeup (not proc_lock) to avoid deadlock            │
+│  • CPU affinity respected via rq_select_task_rq()                            │
+│  • wake_list handles the brief on_rq=0, on_cpu=1 window during dequeue      │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
-## Wakeup-Context Switch Deadlock Analysis (January 2026)
+## Historical Notes: Evolution of Wakeup Synchronization
 
-This section documents a subtle deadlock discovered during testing and its resolution.
+This section documents key design decisions and bugs encountered during development.
 
-### The Problem: on_cpu Spin Deadlock
+### The on_cpu Spin Deadlock Problem (Resolved)
 
-During stress testing (e.g., `usertests`), a deadlock was observed where multiple CPUs
-would hang in the wakeup path:
+An earlier design used `smp_cond_load_acquire(&se->on_cpu, !VAL)` to spin-wait for
+the target to finish context switching. This caused deadlocks when combined with
+lock requirements.
 
-```
-Thread 3: __do_scheduler_wakeup spinning on smp_cond_load_acquire(&se->on_cpu, !VAL)
-          - Holding: pi_lock for process P
-          - Waiting: P->on_cpu to become 0
+**Root cause:** Waker held `pi_lock` while spinning; target needed `pi_lock` to proceed.
 
-Thread 2: context_switch_finish trying to acquire pi_lock for process P
-          - Stuck: waiting for pi_lock
-          - Hasn't cleared: P->on_cpu yet
-```
+**Solution:** Replace spin-wait with lock-based serialization. The wakeup path now:
+1. Locks the origin CPU's rq (where task is/was)
+2. Checks on_rq/on_cpu under the lock
+3. Serializes with context_switch_finish (which holds the same lock)
 
-#### Root Cause Analysis
+### The CPU Migration Race (Resolved January 2026)
 
-The deadlock occurred because:
+**Symptom:** Parent process stuck in RUNNING state but never scheduled.
 
-1. **Waker** (in `__do_scheduler_wakeup`): Holds `pi_lock`, spins indefinitely on `on_cpu`
-2. **Target** (in `context_switch_finish`): Needs `pi_lock` to handle race fix path, 
-   but can't acquire it, so can't proceed to clear `on_cpu`
+**Root cause:** Wakeup read `cpu_id` before locking, but task migrated before lock acquired:
+- Wakeup locked CPU 0's rq (stale cpu_id)
+- context_switch_finish ran on CPU 2 (actual location), dequeued task
+- Wakeup saw stale `on_rq=1`, set RUNNING and returned
+- Task was dequeued but not in any scheduler list
 
-This created a circular dependency:
-- Waker needs `on_cpu = 0` to proceed → Target must clear it
-- Target needs `pi_lock` to complete → Waker is holding it
-
-#### Why Did context_switch_finish Need pi_lock?
-
-A race fix was added to handle the following scenario:
-
-```
-Waker (CPU 1)                           Target (CPU 0, in context_switch_finish)
-============                            ========================================
-CAS state = RUNNING                     read state → sees SLEEPING (stale)
-spin on on_cpu...                       dequeue from rq (or skip enqueue)
-                                        release rq_lock
-                                        ← waker's CAS happened before here
-                                        on_cpu = 0
-spin ends
-check on_rq → 0!
-enqueue task ← CORRECT
-```
-
-But if the waker gave up (bounded spin) or wasn't fast enough:
-
-```
-Waker (CPU 1)                           Target (CPU 0)
-============                            ==============
-                                        read state → SLEEPING
-                                        skip enqueue
-                                        release rq_lock
-CAS state = RUNNING                     
-spin on on_cpu...                       on_cpu = 0
-spin ends                               ← TARGET IS GONE FROM CPU
-check on_rq → 0
-return (rely on target)                 ← OOPS! Target never enqueues!
-```
-
-The race fix had `context_switch_finish` re-read state after releasing `rq_lock` and
-enqueue if state was now RUNNING. But this required serialization with wakeup paths,
-which was implemented using `pi_lock` — causing the deadlock.
-
-### The Solution: CAS on on_rq
-
-The key insight: **We don't need a lock to serialize; we need an atomic operation.**
-
-Instead of using `pi_lock` in `context_switch_finish`, we use **CAS on on_rq** to
-ensure exactly one path (waker OR context_switch_finish) succeeds in enqueuing:
-
-#### context_switch_finish (race fix path)
-
+**Solution:** Retry loop with re-check after lock acquisition:
 ```c
-// Race fix: If state changed to RUNNING after our initial read, enqueue now.
-// CAS on on_rq serializes with wakeup path — no pi_lock needed here.
-if (!did_enqueue && !PROC_ZOMBIE(prev) && !PROC_STOPPED(prev)) {
-    enum procstate new_pstate = __proc_get_pstate(prev);
-    if (new_pstate == PSTATE_RUNNING) {
-        int expected = 0;
-        if (__atomic_compare_exchange_n(&se->on_rq, &expected, 1,
-                                        false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
-            // We won the CAS — enqueue the task
-            rq_lock(...);
-            rq_enqueue_task(rq, se);
-            rq_unlock(...);
-        }
-        // If CAS failed, waker already set on_rq = 1 and will/did enqueue
+retry:
+    origin_cpuid = se->cpu_id;
+    rq_lock_two(origin_cpuid, target_cpu);
+    
+    current_cpuid = se->cpu_id;  // Re-read under lock
+    if (current_cpuid != origin_cpuid) {
+        rq_unlock_two(...);
+        goto retry;  // Locked wrong rq, retry
     }
-}
-
-// Now safe to clear on_cpu
-smp_store_release(&se->on_cpu, 0);
 ```
 
-#### __do_scheduler_wakeup (waker path)
+### Why on_rq Stays 1 While Running (Linux Pattern)
 
-```c
-// Wait for on_cpu to clear — no deadlock since target doesn't need pi_lock
-smp_cond_load_acquire(&se->on_cpu, !VAL);
+Earlier xv6 designs set `on_rq=0` when picking a task to run. This complicated wakeup:
+- Wakeup couldn't tell if task was "running" vs "sleeping and dequeued"
+- Required complex state machine with CAS operations
 
-// Claim wakeup via state CAS
-CAS state: SLEEPING → WAKENING → RUNNING
+Linux keeps `on_rq=1` while running:
+- Task is removed from scheduler's internal list (via `set_next_task`)
+- But logically still "on the run queue" (counts, flags remain)
+- Wakeup sees `on_rq=1` → knows task will be re-added by `put_prev_task`
+- Simplifies wakeup: just set state to RUNNING and return
 
-// CAS on on_rq to serialize with context_switch_finish race fix
-rq_lock(...);
-int expected = 0;
-if (__atomic_compare_exchange_n(&se->on_rq, &expected, 1,
-                                false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
-    rq_enqueue_task(rq, se);
-}
-// If CAS failed, context_switch_finish already enqueued
-rq_unlock(...);
-```
+### The Current Solution: Lock-Based Serialization with Retry
 
-### Why This Works
+The final design avoids both spinning and CAS complexity by using proper locking:
 
-1. **No pi_lock in context_switch_finish**: Target doesn't need any lock that waker holds,
-   so waker can spin on `on_cpu` freely without deadlock.
+1. **Lock the origin CPU's rq**: Wakeup locks the rq where the task currently is
+   (read from `cpu_id`), which is the same lock held by `context_switch_finish`.
 
-2. **CAS provides mutual exclusion**: Exactly one of {waker, context_switch_finish}
-   wins the `CAS(on_rq, 0, 1)` and performs the enqueue.
+2. **Retry if cpu_id changed**: After locking, re-check `cpu_id`. If it changed
+   (task migrated), release locks and retry with the correct rq.
 
-3. **Both paths are correct**:
-   - If waker wins: Target's CAS fails, target knows waker handled it
-   - If target wins: Waker's CAS fails, waker knows target handled it
-   - Either way, the process is enqueued exactly once
+3. **Read on_rq/on_cpu under lock**: All checks happen with the origin rq locked,
+   ensuring visibility of `context_switch_finish`'s writes.
 
-4. **Memory ordering preserved**: The CAS uses `__ATOMIC_SEQ_CST` for full ordering.
+This provides the correctness of spin-waiting (wakeup sees final state) without
+the deadlock risk (no spinning while holding locks).
 
 ### Key Lessons Learned
 
-1. **Avoid holding locks while spinning**: If A holds lock L and spins waiting for B,
-   and B needs L to make progress, deadlock is inevitable.
+1. **Lock both source and destination**: For task migration/wakeup, lock the CPU
+   where the task currently is (to serialize with context_switch_finish), not just
+   the target CPU.
 
-2. **CAS is sufficient for mutual exclusion**: When serializing two paths that each
-   should execute at most once, CAS on a flag is simpler and deadlock-free.
+2. **Re-validate after locking**: Any value read before acquiring a lock may be
+   stale. Re-check critical values after locking.
 
-3. **Separate serialization concerns**: 
-   - State CAS (`SLEEPING → WAKENING`) serializes multiple wakers
-   - on_rq CAS serializes waker vs context_switch_finish race fix
-   - pi_lock serializes wakeup path internals (but not context_switch_finish)
+3. **Prefer lock retry over spin-wait**: Spin-waiting while holding locks is
+   dangerous. A retry loop that releases and re-acquires locks is safer.
 
-4. **The pi_lock purpose**: pi_lock protects against races during the wakeup path
-   (e.g., multiple CPUs trying to wake the same process). It should NOT be used
-   in context_switch_finish because that creates the deadlock.
-
-### Updated Invariants
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    UPDATED KEY INVARIANTS                                    │
-├─────────────────────────────────────────────────────────────────────────────┤
-│  • on_rq changes via CAS(__ATOMIC_SEQ_CST) to serialize waker vs switch     │
-│  • Wakeup holds pi_lock but context_switch_finish does NOT acquire it       │
-│  • Waker can safely spin on on_cpu — no deadlock possible                   │
-│  • Exactly one of {waker, context_switch_finish} enqueues via on_rq CAS     │
-│  • State CAS (SLEEPING→WAKENING) prevents multiple wakers                   │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
+4. **on_rq=1 while running simplifies logic**: Following Linux's pattern reduces
+   the number of state transitions and race conditions to handle.

@@ -255,6 +255,34 @@ void rq_unlock_current_irqrestore(int state) {
     rq_unlock_irqrestore(cpu, state);
 }
 
+void rq_lock_two(int cpu_id1, int cpu_id2) {
+    assert(cpu_id1 >= 0 && cpu_id1 < NCPU, "rq_lock_two: invalid cpu_id1 %d", cpu_id1);
+    assert(cpu_id2 >= 0 && cpu_id2 < NCPU, "rq_lock_two: invalid cpu_id2 %d", cpu_id2);
+    if (cpu_id1 < cpu_id2) {
+        rq_lock(cpu_id1);
+        rq_lock(cpu_id2);
+    } else if (cpu_id2 < cpu_id1) {
+        rq_lock(cpu_id2);
+        rq_lock(cpu_id1);
+    } else {
+        rq_lock(cpu_id1);
+    }
+}
+
+void rq_unlock_two(int cpu_id1, int cpu_id2) {
+    assert(cpu_id1 >= 0 && cpu_id1 < NCPU, "rq_unlock_two: invalid cpu_id1 %d", cpu_id1);
+    assert(cpu_id2 >= 0 && cpu_id2 < NCPU, "rq_unlock_two: invalid cpu_id2 %d", cpu_id2);
+    if (cpu_id1 < cpu_id2) {
+        rq_unlock(cpu_id2);
+        rq_unlock(cpu_id1);
+    } else if (cpu_id2 < cpu_id1) {
+        rq_unlock(cpu_id1);
+        rq_unlock(cpu_id2);
+    } else {
+        rq_unlock(cpu_id1);
+    }
+}
+
 void rq_lock_current(void) {
     push_off();
     rq_lock(cpuid());
@@ -373,12 +401,22 @@ struct rq *rq_select_task_rq(struct sched_entity* se, cpumask_t cpumask) {
 
 void rq_enqueue_task(struct rq *rq, struct sched_entity *se) {
     assert(__rq_lock_held(rq->cpu_id), "rq_enqueue_task: rq lock not held");
-    assert(se->rq == NULL, "rq_enqueue_task: se rq is not NULL");
+    if (se->rq != NULL) {
+        struct proc *p = se->proc;
+        printf("rq_enqueue_task BUG: se->rq=%p (cpu=%d), target rq=%p (cpu=%d)\n",
+               se->rq, se->rq ? se->rq->cpu_id : -1, rq, rq->cpu_id);
+        printf("  proc=%s pid=%d state=%d on_rq=%d on_cpu=%d se_cpu=%d\n",
+               p ? p->name : "NULL", p ? p->pid : -1, 
+               p ? __proc_get_pstate(p) : -1,
+               se->on_rq, se->on_cpu, se->cpu_id);
+        panic("rq_enqueue_task: se rq is not NULL");
+    }
     if (rq->sched_class->enqueue_task) {
         rq->sched_class->enqueue_task(rq, se);
     }
     se->rq = rq;
     smp_store_release(&se->cpu_id, rq->cpu_id);
+    smp_store_release(&se->on_rq, 1);
     se->sched_class = rq->sched_class;
     rq->task_count++;
     rq_set_ready(rq->class_id, rq->cpu_id);
@@ -395,6 +433,7 @@ void rq_dequeue_task(struct rq *rq, struct sched_entity* se) {
     }
     se->rq = NULL;
     se->sched_class = NULL;
+    smp_store_release(&se->on_rq, 0);  // Clear on_rq when dequeued
     rq->task_count--;
     if (rq->task_count == 0) {
         rq_clear_ready(rq->class_id, rq->cpu_id);
@@ -431,9 +470,11 @@ void rq_set_next_task(struct sched_entity* se) {
         se->sched_class->set_next_task(se->rq, se);
     }
     // Note: We do NOT decrement task_count here. The task is still logically
-    // "on rq" (counted in task_count) while running, but on_rq=0 and on_cpu=1.
-    // The caller (__sched_pick_next) sets on_rq=0 after this call.
-    // Only dequeue_task (called on sleep or migration) decrements task_count.
+    // "on rq" (counted in task_count) while running. Matching Linux behavior,
+    // on_rq stays 1 while the task is running. The task is removed from the
+    // scheduler's internal list but not from the rq conceptually.
+    // Only dequeue_task (called on sleep or migration) decrements task_count
+    // and clears on_rq.
 }
 
 // Check if the current CPU is allowed by the task's affinity mask.
@@ -526,6 +567,11 @@ int rq_add_wake_list(int cpu_id, struct sched_entity *se) {
     if (rq_pc == NULL) {
         return -EINVAL;
     }
+    if (smp_load_acquire(&se->on_rq)) {
+        // Already on a run queue, no need to add to wake list
+        rq_percpu_put_unlock(rq_pc);
+        return -EALREADY;
+    }
     // Add to the front of the wake list
     LLIST_PUSH(rq_pc->wake_list_head, se, wake_next);
     rq_percpu_put_unlock(rq_pc);
@@ -564,21 +610,51 @@ void rq_flush_wake_list(int cpu_id) {
         return;  // Nothing to flush
     }
     
-    // Pop and enqueue one element at a time
+    // Process each entry - either enqueue or re-add to wake list for later
     struct sched_entity *se;
-    LLIST_POP(se, wake_list, wake_next);
-    while (se != NULL) {
-        // State stays as WAKENING - the process will set itself to RUNNING
-        // when it gets scheduled via __sched_pick_next
+    struct sched_entity *retry_list = NULL;  // Entries to retry later
+    
+    while (wake_list != NULL) {
+        // Pop one entry from wake_list
+        se = wake_list;
+        wake_list = se->wake_next;
+        se->wake_next = NULL;
         
-        // Get the rq for this task's priority on this CPU
-        int major_prio = se->priority >> PRIORITY_MAINLEVEL_SHIFT;
-        struct rq *rq = rq_pc->rqs[major_prio];
-        if (rq != NULL) {
-            rq_enqueue_task(rq, se);
+        // Check if the task's state is still WAKENING - if not, the task
+        // already ran and is now in a different state, skip it.
+        if (__proc_get_pstate(se->proc) != PSTATE_WAKENING) {
+            continue;
         }
         
-        LLIST_POP(se, wake_list, wake_next);
+        // If task is already on_rq (matches Linux behavior where on_rq stays 1
+        // while running), just change state to RUNNING. The task was added to
+        // wake_list because it was on_cpu at wakeup time, but context_switch_finish
+        // has since called put_prev_task which re-added it to the scheduler list.
+        if (smp_load_acquire(&se->on_rq)) {
+            __proc_set_pstate(se->proc, PSTATE_RUNNING);
+            continue;
+        }
+        
+        // Task is not on_rq - need to enqueue it
+        int major_prio = se->priority >> PRIORITY_MAINLEVEL_SHIFT;
+        struct rq *rq = rq_pc->rqs[major_prio];
+        
+        // Enqueue to this CPU's rq
+        if (rq != NULL) {
+            rq_enqueue_task(rq, se);
+            // Set state to RUNNING after successful enqueue
+            __proc_set_pstate(se->proc, PSTATE_RUNNING);
+        } else {
+            // No valid rq - retry later
+            LLIST_PUSH(retry_list, se, wake_next);
+        }
+    }
+    
+    // Put retry entries back on the wake list for next flush
+    while (retry_list != NULL) {
+        se = retry_list;
+        retry_list = retry_list->wake_next;
+        LLIST_PUSH(rq_pc->wake_list_head, se, wake_next);
     }
     
     rq_percpu_put_unlock(rq_pc);
