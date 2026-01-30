@@ -26,6 +26,32 @@
 #define IRQCNT          (PLIC_IRQ_OFFSET + PLIC_IRQ_CNT)
 #define PLIC_IRQ(hw_irq)    ((hw_irq) + PLIC_IRQ_OFFSET)
 
+#define RISCV_INSTRUCTION_ADDR_MISALIGNED   0
+#define RISCV_INSTRUCTION_ACCESS_FAULT      1
+#define RISCV_ILLEGAL_INSTRUCTION           2
+#define RISCV_BREAKPOINT_TRAP               3
+#define RISCV_LOAD_ADDR_MISALIGNED          4
+#define RISCV_LOAD_ACCESS_FAULT             5
+#define RISCV_STORE_ADDR_MISALIGNED         6
+#define RISCV_STORE_ACCESS_FAULT            7
+#define RISCV_ENV_CALL_FROM_U_MODE          8
+#define RISCV_ENV_CALL_FROM_S_MODE          9
+#define RISCV_ENV_CALL_FROM_M_MODE          11
+#define RISCV_INSTRUCTION_PAGE_FAULT        12
+#define RISCV_LOAD_PAGE_FAULT               13
+#define RISCV_STORE_PAGE_FAULT              15
+#define RISCV_DOUBLE_TRAP                   16
+#define RISCV_SOFTWARE_CHECK_FAIL           18
+#define RISCV_HARDWARE_ERROR                19
+
+#define RISCV_S_SOFTWARE_INTERRUPT          1
+#define RISCV_M_SOFTWARE_INTERRUPT          3
+#define RISCV_S_TIMER_INTERRUPT             5
+#define RISCV_M_TIMER_INTERRUPT             7
+#define RISCV_S_EXTERNAL_INTERRUPT          9
+#define RISCV_M_EXTERNAL_INTERRUPT          11
+#define RISCV_COUNTER_INTERRUPT             12
+
 struct trapframe;
 typedef struct rcu_head rcu_head_t;
 typedef struct device_instance device_t;

@@ -169,8 +169,8 @@ int do_irq(struct trapframe *tf) {
         printf("do_irq: invalid irq_num %d\n", irq_num);
         return -ENODEV;
     }
-
-    if (irq_num == 9) {
+    
+    if (irq_num == RISCV_S_EXTERNAL_INTERRUPT) {
         // PLIC IRQ
         // Treat separately
         return __do_plic_irq();

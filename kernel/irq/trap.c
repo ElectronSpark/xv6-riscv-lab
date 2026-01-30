@@ -109,16 +109,13 @@ void user_kirq_entrance(uint64 ksp, uint64 s0) {
     }
     exit_irq();
     
-    if (myproc()->trapframe->trapframe.scause == 0x8000000000000009L &&
-        !NEEDS_RESCHED()) {
-        // For device interrupts that don't need rescheduling,
-        // just return to user space directly.
-        usertrapret();
-    } else {
-        // For timer interrupts, or if rescheduling is needed,
+    if (NEEDS_RESCHED()) {
+        // If anyone has requested a reschedule, do it now.
         // switch to kernel stack first (so yield() runs on the right stack)
         __switch_noreturn(myproc()->ksp, s0, __user_kirq_return);
     }
+    // Otherwise return to user space.
+    usertrapret();
 }
 
 //
@@ -141,7 +138,7 @@ void usertrap(void) {
     trapinithart();
 
     switch (scause) {
-    case 8:
+    case RISCV_ENV_CALL_FROM_U_MODE:
         // system call
 
         if (killed(myproc()))
@@ -157,7 +154,7 @@ void usertrap(void) {
 
         syscall();
         break;
-    case 13:
+    case RISCV_LOAD_PAGE_FAULT:
         // Load page fault - handle demand paging for read access
         va = myproc()->trapframe->trapframe.stval;
         // First try to grow stack if the address is in stack region
@@ -179,7 +176,7 @@ void usertrap(void) {
         assert(myproc()->pid != 1, "init exiting");
         kill(myproc()->pid, SIGSEGV);
         break;
-    case 15:
+    case RISCV_STORE_PAGE_FAULT:
         // Store page fault - handle demand paging for write access
         va = myproc()->trapframe->trapframe.stval;
         // First try to grow stack if the address is in stack region
