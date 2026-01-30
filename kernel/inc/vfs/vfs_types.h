@@ -368,8 +368,8 @@ struct vfs_file_ops {
 struct vfs_fdtable {
     spinlock_t lock; // protects the fdtable
     int fd_count;
-    int next_fd;
     struct vfs_file *files[NOFILE];
+    uint64 files_bitmap[1];
     int ref_count;
 };
 
