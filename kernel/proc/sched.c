@@ -325,12 +325,12 @@ retry:
     if (origin_cpuid < 0) {
         origin_cpuid = target_cpu;  // New task, no origin rq to serialize with
     }
-    pop_off();
     
     // Lock both source and target rq to serialize with context_switch_finish.
     // This ensures we see the final state of on_rq/on_cpu after the task
     // has finished switching out of the origin CPU.
     rq_lock_two(origin_cpuid, target_cpu);
+    pop_off();
     
     // Re-check cpu_id after acquiring locks. If the task migrated between
     // our initial read and lock acquisition, we locked the wrong rq and
