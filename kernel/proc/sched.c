@@ -97,6 +97,24 @@ static struct proc *__sched_pick_next(void) {
     if (se == NULL) {
         return NULL;
     }
+
+    int this_priority = myproc()->sched_entity->priority;
+    int next_priority = se->priority;
+    // @TODO: The following code is disabled before implementing EEVDF scheduling.
+    // if (__proc_get_pstate(myproc()) == PSTATE_RUNNING 
+    //     && this_priority < next_priority
+    //     && (!IS_EEVDF_PRIORITY(this_priority)
+    //         || !IS_EEVDF_PRIORITY(next_priority))) {
+    //     // Current process has higher priority than the picked one
+    //     // Do not switch
+    //     return myproc();
+    // }
+    if (__proc_get_pstate(myproc()) == PSTATE_RUNNING 
+        && this_priority < next_priority) {
+        // Current process has higher priority than the picked one
+        // Do not switch
+        return myproc();
+    }
     
     struct proc *p = se->proc;
     assert(p != NULL, "__sched_pick_next: se->proc is NULL");
@@ -178,35 +196,24 @@ void scheduler_yield(void) {
     struct proc *prev = NULL;
 
     assert(!CPU_IN_ITR(), "Cannot yield CPU in interrupt context");
-
-    // Check if we should abort a pending sleep.
-    // If state was changed back to RUNNING (e.g., by an interrupt waking us),
-    // and we're not the idle process, we should abort and stay on CPU.
-    // Note: PSTATE_RUNNING processes that call yield() for preemption will have
-    // picked a next process, so this check passes through for them.
-    enum procstate cur_state = __proc_get_pstate(proc);
     
     // Pick the next process to run
     struct proc *p = __sched_pick_next();
     
     // If our state changed back to RUNNING (woken before sleep completed),
     // and there's no other process to run (or only idle), stay on CPU
-    if (cur_state == PSTATE_RUNNING && proc != mycpu()->idle_proc) {
-        if (p == NULL || p == mycpu()->idle_proc) {
-            // No other runnable process, just continue running
-            // This is normal - process was woken but nothing else to switch to
-            rq_unlock_current_irqrestore(intr);
-            return;
-        }
-        // There is another process, but we were woken up too.
-        // Put ourselves back on the ready queue via context_switch_finish
+    if (p == myproc()) {
+        // No other runnable process, just continue running
+        // This is normal - process was woken but nothing else to switch to
+        rq_unlock_current_irqrestore(intr);
+        goto out;
     }
     
     if (!p) {
         if (proc == mycpu()->idle_proc) {
             // Already in idle process, just return
             rq_unlock_current_irqrestore(intr);
-            return;
+            goto out;
         }
         p = mycpu()->idle_proc;
         assert(p != NULL, "Idle process is NULL");
@@ -219,8 +226,13 @@ void scheduler_yield(void) {
     
     context_switch_finish(prev, myproc(), intr);
 
-    // The previous peocess may be in the wake list because it's on_cpu was set the last time we flush the wake list.
+out:
+    // The previous peocess may be in the wake list because it's on_cpu was set 
+    // the last time we flush the wake list.
     rq_flush_wake_list(cpuid());
+    // Note quiescent state for RCU - context switch is a quiescent state.
+    // Callback processing is now handled by per-CPU RCU kthreads.
+    rcu_check_callbacks();
 }
 
 // Change the process state to SLEEPING and yield CPU
@@ -631,8 +643,4 @@ void context_switch_finish(struct proc *prev, struct proc *next, int intr) {
 
     // Note: Parent wakeup for zombie processes is handled in __exit_yield()
     // BEFORE the zombie calls scheduler_yield(). See the comment block above.
-
-    // Note quiescent state for RCU - context switch is a quiescent state.
-    // Callback processing is now handled by per-CPU RCU kthreads.
-    rcu_check_callbacks();
 }

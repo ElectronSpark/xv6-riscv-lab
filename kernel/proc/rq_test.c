@@ -175,7 +175,7 @@ static void test_rq_selection(void) {
 // - Minor priority: 2-bit (0-3) within each major priority
 //
 // Priority range for FIFO: major 1-62 (0 is EXIT, 63 is IDLE)
-// Major priority 80-119 (currently beyond 64) reserved for future EEVDF
+// Priority 80-119 (major 20-29) reserved for future EEVDF
 //
 // This test covers three cases:
 // Case 1: Different top-layer groups (e.g., group 0 vs group 1 vs group 2)

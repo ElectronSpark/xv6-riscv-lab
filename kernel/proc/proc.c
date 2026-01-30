@@ -220,6 +220,9 @@ static void __kernel_proc_entry(struct context *prev) {
     context_switch_finish(proc_from_context(prev), myproc(), 0);
     mycpu()->noff = 0;  // in a new process, noff should be 0
     intr_on();
+    // Note quiescent state for RCU - context switch is a quiescent state.
+    // Callback processing is now handled by per-CPU RCU kthreads.
+    rcu_check_callbacks();
 
     // Set up the kernel stack and context for the new process.
     int (*entry)(uint64, uint64) = (void *)myproc()->kentry;
@@ -803,6 +806,9 @@ static void forkret_entry(struct context *prev) {
     context_switch_finish(proc_from_context(prev), myproc(), 0);
     mycpu()->noff = 0;  // in a new process, noff should be 0
     intr_on();
+    // Note quiescent state for RCU - context switch is a quiescent state.
+    // Callback processing is now handled by per-CPU RCU kthreads.
+    rcu_check_callbacks();
 
     // Now safe to do the rest without holding scheduler locks
     forkret();
