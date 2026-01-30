@@ -60,6 +60,10 @@
 #include "proc/sched.h"
 #include "proc/rq.h"
 #include "timer/timer.h"
+#include "mm/slab.h"
+
+// Slab cache for rcu_head_t structures
+static slab_cache_t rcu_head_slab = {0};
 
 // Global RCU state
 static rcu_state_t rcu_state;
@@ -204,6 +208,12 @@ static void rcu_wakeup_gp_waiters(void) {
 
 void rcu_init(void) {
     proc_queue_init(&rcu_gp_waitq, "rcu_gp_waitq", &rcu_gp_waitq_lock);
+
+    int ret = slab_cache_init(&rcu_head_slab, "rcu_head_cache",
+                    sizeof(rcu_head_t),
+                    SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
+    assert(ret == 0,
+           "Failed to initialize rcu_head_cache slab cache, errno=%d", ret);
 
     __atomic_store_n(&rcu_state.gp_start_timestamp, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&rcu_state.gp_seq_completed, 0, __ATOMIC_RELEASE);
@@ -416,8 +426,22 @@ void rcu_check_callbacks(void) {
 // ============================================================================
 
 void call_rcu(rcu_head_t *head, rcu_callback_t func, void *data) {
-    if (head == NULL || func == NULL) {
+    if (func == NULL) {
         return;
+    }
+
+    if (head == NULL) {
+        // Allocate rcu_head_t from slab cache
+        head = (rcu_head_t *)slab_alloc(&rcu_head_slab);
+        if (head == NULL) {
+            // Allocation failed, fall back to immediate invocation
+            synchronize_rcu();
+            func(data);
+            return;
+        }
+        head->embedded_head = 0;
+    } else {
+        head->embedded_head = 1;
     }
 
     // Initialize callback before disabling preemption
@@ -469,14 +493,20 @@ static int rcu_invoke_callbacks(rcu_head_t *list) {
         rcu_head_t *next = cur->next;
         rcu_callback_t func = cur->func;
         void *data = cur->data;
+        int embedded = cur->embedded_head;
 
         // Detach this node from the list before invoking callback
         cur->next = NULL;
 
-        // Invoke the callback - after this, cur may be freed
+        // Invoke the callback - after this, cur may be freed by user if embedded
         if (func != NULL) {
             func(data);
             count++;
+        }
+
+        // Free the rcu_head if it was allocated by call_rcu() (not embedded)
+        if (!embedded) {
+            slab_free(cur);
         }
 
         cur = next;

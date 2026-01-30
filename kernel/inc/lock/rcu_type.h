@@ -15,6 +15,9 @@ typedef struct rcu_head {
     rcu_callback_t      func;           // Callback function
     void                *data;          // Data to pass to callback
     uint64              timestamp;      // Timestamp when callback was registered
+    struct {
+        uint64 embedded_head: 1;   // Flag: is this an embedded head?
+    };
 } rcu_head_t;
 
 // Simplified callback list approach:

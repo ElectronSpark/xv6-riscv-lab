@@ -277,25 +277,70 @@ struct vfs_file {
 
 ```c
 struct vfs_fdtable {
-    struct vfs_file *files[NOFILE];  // Array of file pointers
-    int fd_count;                     // Number of open files
-    int next_fd;                      // Next free fd
+    struct spinlock lock;            // Protects writes to table
+    struct vfs_file *files[NOFILE];  // Array of file pointers (RCU-protected)
+    uint64 files_bitmap[...];        // Bitmap for fast fd allocation
+    int fd_count;                    // Number of open files (atomic)
+    int ref_count;                   // Reference count (for CLONE_FILES)
 };
 ```
 
+**Synchronization:**
+
+The fdtable uses a hybrid **RCU + spinlock** approach for concurrent access:
+
+- **Readers** (`vfs_fdtable_get_file`): Use RCU read-side critical section
+  - No spinlock needed - wait-free read path
+  - Must increment file refcount before exiting RCU critical section
+  
+- **Writers** (`vfs_fdtable_alloc_fd`, `vfs_fdtable_dealloc_fd`): 
+  - Must hold `fdtable->lock` spinlock
+  - Use `rcu_assign_pointer()` for pointer updates
+  - File release deferred via `call_rcu()` for safe reclamation
+
+- **Cloning** (`vfs_fdtable_clone`):
+  - Uses RCU read lock to safely iterate source fdtable
+  - Supports `CLONE_FILES` flag for shared fdtable (just increments refcount)
+
+**RCU-Safe File Close Pattern:**
+
+When closing a file descriptor, the file cannot be freed immediately because
+concurrent readers may still be accessing it via RCU. The pattern is:
+
+```c
+spin_lock(&fdtable->lock);
+file = vfs_fdtable_dealloc_fd(fdtable, fd);  // Remove from table
+spin_unlock(&fdtable->lock);
+
+call_rcu(NULL, rcu_callback, file);  // Defer vfs_fput() until grace period
+```
+
+This ensures all concurrent `vfs_fdtable_get_file()` calls complete before
+the file's refcount is decremented.
+
 **Design:**
-- Uses intrusive free list: free slots store index of next free slot
-- Values > NOFILE indicate allocated fd (pointer to vfs_file)
-- Values <= NOFILE indicate free slot (next free fd index)
-- Efficient O(1) allocation and deallocation
+- Uses bitmap for O(1) allocation of lowest available fd
+- Values in `files[]` array are RCU-protected pointers
+- Valid file pointers have addresses > NOFILE
+- Reference counted for shared fdtables (CLONE_FILES)
 
 **Operations:**
 - `vfs_fdtable_init()`: Initialize empty table
-- `vfs_fdtable_alloc_fd()`: Allocate lowest available fd
-- `vfs_fdtable_get_file()`: Get file by fd
-- `vfs_fdtable_dealloc_fd()`: Free fd and return file
-- `vfs_fdtable_clone()`: Duplicate table (for fork)
-- `vfs_fdtable_destroy()`: Close all files
+- `vfs_fdtable_alloc_fd()`: Allocate lowest available fd (caller holds lock)
+- `vfs_fdtable_get_file()`: Get file by fd (RCU-protected, increments refcount)
+- `vfs_fdtable_dealloc_fd()`: Free fd and return file (caller holds lock)
+- `vfs_fdtable_clone()`: Duplicate or share table (for fork/clone)
+- `vfs_fdtable_put()`: Release reference, close all files when last ref
+
+**Locking Requirements:**
+
+| Function | Lock Required | Notes |
+|----------|---------------|-------|
+| `vfs_fdtable_get_file()` | None (uses RCU) | Increments file refcount |
+| `vfs_fdtable_alloc_fd()` | `fdtable->lock` | Caller must hold spinlock |
+| `vfs_fdtable_dealloc_fd()` | `fdtable->lock` | Caller must hold spinlock |
+| `vfs_fdtable_clone()` | None (uses RCU) | Safe for concurrent reads |
+| `vfs_fdtable_put()` | None | Only when last reference |
 
 ### 6. Dentry (`struct vfs_dentry`)
 
@@ -328,10 +373,15 @@ To prevent deadlock, locks must be acquired in this order:
 1. Global mount mutex (__mount_mutex)
 2. Superblock rwlock (parent before child)
 3. Inode mutex (parent/ancestor before child/descendant)
-4. File mutex
-5. Buffer cache mutex
-6. Log spinlock (xv6fs internal)
+4. File descriptor table spinlock (fdtable->lock)
+5. File mutex
+6. Buffer cache mutex
+7. Log spinlock (xv6fs internal)
 ```
+
+**Important:** RCU read-side critical sections (`rcu_read_lock/unlock`) are
+lightweight and can be nested with any of the above locks. However, spinlocks
+must NOT be held when calling functions that may sleep (e.g., `vm_copyout`).
 
 ### Rules
 
@@ -351,9 +401,42 @@ To prevent deadlock, locks must be acquired in this order:
      - For siblings: acquire lower memory address first
      - Use special helpers: `vfs_ilock_two_nondirectories()`, `vfs_ilock_two_directories()`
 
-4. **File Mutex**: Protects file descriptor state (offset, flags)
+4. **File Descriptor Table Spinlock**: Protects fdtable modifications
+   - Must be held for `vfs_fdtable_alloc_fd()` and `vfs_fdtable_dealloc_fd()`
+   - NOT required for `vfs_fdtable_get_file()` (uses RCU instead)
+   - Must NOT call sleeping functions while holding this lock
+
+5. **File Mutex**: Protects file descriptor state (offset, flags)
    - Rarely held for extended periods
    - File I/O may hold both inode and file locks
+
+### RCU Usage
+
+RCU (Read-Copy-Update) is used for wait-free file descriptor table lookups:
+
+```c
+// Reader pattern (vfs_fdtable_get_file)
+rcu_read_lock();
+file = rcu_dereference(fdtable->files[fd]);
+if (IS_VALID(file)) {
+    vfs_fdup(file);  // Increment refcount before leaving RCU
+}
+rcu_read_unlock();
+
+// Writer pattern (vfs_fdtable_dealloc_fd)
+spin_lock(&fdtable->lock);
+file = fdtable->files[fd];
+rcu_assign_pointer(fdtable->files[fd], NULL);  // Safe for concurrent readers
+spin_unlock(&fdtable->lock);
+
+// Defer actual file release until all readers complete
+call_rcu(NULL, callback, file);
+```
+
+**RCU Guarantees:**
+- Readers see consistent pointer values (old or new, never torn)
+- Writers use `rcu_assign_pointer()` for proper memory ordering
+- `call_rcu()` defers callback until all pre-existing readers complete
 
 ### Critical Locking Patterns
 
@@ -406,6 +489,10 @@ vfs_mount_unlock();
 4. **Read-then-write**: Don't upgrade read locks to write locks (drop and reacquire)
 
 5. **Completion-based I/O**: Use completion variables to wait for I/O without holding locks
+
+6. **No sleeping with spinlocks**: Never call functions that may sleep (e.g., `vm_copyout`, rwlock operations) while holding a spinlock. Release spinlocks before such operations.
+
+7. **RCU is lightweight**: `rcu_read_lock/unlock` can be nested with any lock, but the RCU critical section must not sleep. RCU is ideal for read-heavy paths like fd table lookups.
 
 ---
 
@@ -482,11 +569,15 @@ vfs_root_inode (VFS root)
 #### Process File State
 ```c
 struct proc {
-    struct {
-        struct vfs_inode_ref rooti;  // Root directory reference (for chroot)
-        struct vfs_inode_ref cwd;    // Current working directory reference
-        struct vfs_fdtable fdtable;  // File descriptor table
-    } fs;
+    struct vfs_struct *fs;       // VFS state (cwd, root) - may be shared
+    struct vfs_fdtable *fdtable; // File descriptor table - may be shared
+};
+
+struct vfs_struct {
+    struct vfs_inode_ref rooti;  // Root directory reference (for chroot)
+    struct vfs_inode_ref cwd;    // Current working directory reference
+    struct spinlock lock;         // Protects cwd/root modifications
+    int ref_count;                // Reference count (for CLONE_FS)
 };
 ```
 
@@ -497,9 +588,32 @@ The process structure uses `vfs_inode_ref` instead of direct `vfs_inode*` pointe
 See `vfs_inode_get_ref()`, `vfs_inode_put_ref()`, and `vfs_inode_deref()` for reference management operations.
 
 #### File Descriptor Allocation
-- Search for lowest available fd
-- Uses intrusive free list for O(1) allocation
-- Supports fd cloning (fork)
+
+The fdtable uses **RCU-protected** lookups with **spinlock-protected** modifications:
+
+```c
+// Allocating a new file descriptor
+spin_lock(&p->fdtable->lock);
+int fd = vfs_fdtable_alloc_fd(p->fdtable, file);  // Increments file refcount
+spin_unlock(&p->fdtable->lock);
+
+// Getting a file from fd (wait-free)
+struct vfs_file *f = vfs_fdtable_get_file(p->fdtable, fd);  // Uses RCU
+// ... use file ...
+vfs_fput(f);  // Must release the reference
+
+// Closing a file descriptor
+spin_lock(&p->fdtable->lock);
+struct vfs_file *f = vfs_fdtable_dealloc_fd(p->fdtable, fd);
+spin_unlock(&p->fdtable->lock);
+call_rcu(NULL, callback, f);  // Defer vfs_fput() until RCU grace period
+```
+
+**Key Points:**
+- Uses bitmap for O(1) allocation of lowest available fd
+- Lookups are wait-free via RCU (no lock contention on read path)
+- File release deferred via RCU to prevent use-after-free
+- Supports shared fdtables (`CLONE_FILES`) via reference counting
 
 ---
 
@@ -718,23 +832,58 @@ vfs_iput(inode);  // Drop the reference from vfs_namei
 
 #### Rules
 1. Each file descriptor holds a reference
-2. Use `vfs_filedup()` for dup/fork
-3. Use `vfs_fileclose()` to close
+2. Use `vfs_fdup()` to duplicate (increments refcount)
+3. Use `vfs_fput()` to release (decrements refcount)
 4. File freed when refcount reaches 0
 
-#### Example (fork)
+#### RCU-Safe File Descriptor Close
+
+When closing a file descriptor, concurrent readers may still be accessing
+the file via `vfs_fdtable_get_file()`. To prevent use-after-free:
+
+```c
+// Step 1: Remove fd from table (under spinlock)
+spin_lock(&fdtable->lock);
+file = vfs_fdtable_dealloc_fd(fdtable, fd);
+spin_unlock(&fdtable->lock);
+
+// Step 2: Defer refcount decrement until RCU grace period
+call_rcu(NULL, callback_that_calls_vfs_fput, file);
+```
+
+The RCU grace period ensures all `rcu_read_lock()` holders (from concurrent
+`vfs_fdtable_get_file()` calls) have completed before the file is released.
+
+#### Example (fork with fdtable cloning)
 ```c
 // In parent process
-struct vfs_file *file = fdtable->files[3];  // refcount=1
+struct vfs_file *file = vfs_fdtable_get_file(p->fdtable, 3);  // refcount incremented
 
-// Fork
+// Fork (without CLONE_FILES - creates new fdtable)
 if (fork() == 0) {
-    // Child process has dup'd fdtable
-    // file->refcount=2 now
+    // Child has cloned fdtable with duplicated file references
+    // file->refcount includes child's reference
 }
 
 // Both parent and child can close independently
-vfs_fileclose(file);  // Decrements refcount
+vfs_fput(file);  // Release our lookup reference
+```
+
+### File Descriptor Table Reference Counting
+
+#### Rules
+1. Each process holds a reference to its fdtable
+2. `CLONE_FILES` flag shares fdtable (increments refcount)
+3. Use `vfs_fdtable_clone()` during fork/clone
+4. Use `vfs_fdtable_put()` on process exit
+
+#### Example (clone with CLONE_FILES)
+```c
+// Thread creation with shared fdtable
+clone(CLONE_FILES, ...);  // fdtable->ref_count++
+
+// Both threads share the same fdtable
+// Opening a file in one thread is visible to the other
 ```
 
 ### Orphan Inode Management
