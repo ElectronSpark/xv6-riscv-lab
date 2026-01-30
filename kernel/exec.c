@@ -101,7 +101,7 @@ int exec(char *path, char **argv) {
     }
 
     // Read ELF header
-    ssize_t n = vfs_fileread(file, &elf, sizeof(elf));
+    ssize_t n = vfs_fileread(file, &elf, sizeof(elf), false);
     if (n != sizeof(elf))
         goto bad;
 
@@ -123,7 +123,7 @@ int exec(char *path, char **argv) {
             goto bad_locked;
 
         // Read program header
-        if (vfs_fileread(file, &ph, sizeof(ph)) != sizeof(ph))
+        if (vfs_fileread(file, &ph, sizeof(ph), false) != sizeof(ph))
             goto bad_locked;
 
         if (ph.type != ELF_PROG_LOAD)
@@ -256,7 +256,7 @@ STATIC int loadseg(pagetable_t pagetable, uint64 va, struct vfs_file *file,
         }
 
         // Read directly into the physical page (kernel address)
-        ssize_t bytes_read = vfs_fileread(file, (void *)pa, n);
+        ssize_t bytes_read = vfs_fileread(file, (void *)pa, n, false);
         if (bytes_read != (ssize_t)n) {
             kfree((void *)pa);
             return -1;

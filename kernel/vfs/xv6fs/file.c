@@ -38,7 +38,7 @@
  * File read
  ******************************************************************************/
 
-ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count) {
+ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool user) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
     
@@ -66,7 +66,22 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count) {
         uint addr = xv6fs_bmap_read(ip, bn);
         if (addr == 0) {
             // Sparse file - return zeros
-            memset(buf + bytes_read, 0, n);
+            if (user) {
+                // Zero out user buffer
+                char zeros[64];
+                memset(zeros, 0, sizeof(zeros));
+                uint remaining = n;
+                while (remaining > 0) {
+                    uint chunk = remaining < sizeof(zeros) ? remaining : sizeof(zeros);
+                    if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read + (n - remaining)), zeros, chunk) < 0) {
+                        if (bytes_read == 0) return -EFAULT;
+                        return bytes_read;
+                    }
+                    remaining -= chunk;
+                }
+            } else {
+                memset(buf + bytes_read, 0, n);
+            }
         } else {
             struct buf *bp = bread(ip->dev, addr);
             if (bp == NULL) {
@@ -75,7 +90,15 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count) {
                 }
                 break;
             }
-            memmove(buf + bytes_read, bp->data + off, n);
+            if (user) {
+                if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read), bp->data + off, n) < 0) {
+                    brelse(bp);
+                    if (bytes_read == 0) return -EFAULT;
+                    return bytes_read;
+                }
+            } else {
+                memmove(buf + bytes_read, bp->data + off, n);
+            }
             brelse(bp);
         }
         
@@ -90,7 +113,7 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count) {
  * File write
  ******************************************************************************/
 
-ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count) {
+ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, bool user) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
     struct xv6fs_superblock *xv6_sb = container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
@@ -147,7 +170,16 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count) {
                 goto done;
             }
             
-            memmove(bp->data + off, buf + bytes_written + chunk_written, chunk);
+            if (user) {
+                if (vm_copyin(myproc()->vm, bp->data + off, (uint64)(buf + bytes_written + chunk_written), chunk) < 0) {
+                    brelse(bp);
+                    xv6fs_end_op(xv6_sb);
+                    if (bytes_written == 0) return -EFAULT;
+                    goto done;
+                }
+            } else {
+                memmove(bp->data + off, buf + bytes_written + chunk_written, chunk);
+            }
             xv6fs_log_write(xv6_sb, bp);
             brelse(bp);
             

@@ -148,7 +148,6 @@ int piperead(struct pipe *pi, uint64 addr, int n) {
             uint nwrite = smp_load_acquire(&pi->nwrite);
             uint nread_old = pi->nread;
             size_t readable = PIPE_READABLE_SIZE(nwrite, nread_old);
-            
             if (readable == 0) {
                 // Pipe is empty - check if we should wait or return EOF
                 if (!PIPE_WRITABLE(pi)) {

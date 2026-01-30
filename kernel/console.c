@@ -151,56 +151,92 @@ consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n)
 //
 // user read()s from the console go here.
 // copy (up to) a whole input line to dst.
-// user_dist indicates whether dst is a user
+// user_dst indicates whether dst is a user
 // or kernel address.
+//
+// IMPORTANT: Must not hold spinlock while copying to userspace, because
+// vm_copyout acquires a rwlock and that would violate lock ordering.
+// We batch characters into a kernel buffer while holding the lock,
+// then copy to userspace after releasing the lock.
 //
 int
 consoleread(cdev_t *cdev, bool user_dst, void *buffer, size_t n)
 {
   uint target;
   int c;
-  char cbuf;
+  char kbuf[64];   // kernel buffer for batching characters
+  int batch_count; // number of chars in current batch
   uint64 dst = (uint64)buffer;
+  int got_newline = 0;
+  int got_eof = 0;
 
   target = n;
   spin_lock(&cons.lock);
-  while(n > 0){
-    // wait until interrupt handler has put some
-    // input into cons.buffer.
-    while(cons.r == cons.w){
-      if(killed(myproc())){
-        spin_unlock(&cons.lock);
-        return -1;
+  while(n > 0 && !got_newline && !got_eof){
+    batch_count = 0;
+    
+    // Collect up to 64 chars (or until newline/EOF) while holding lock
+    while(n > 0 && batch_count < 64 && !got_newline && !got_eof){
+      // wait until interrupt handler has put some input into cons.buffer.
+      while(cons.r == cons.w){
+        if(killed(myproc())){
+          spin_unlock(&cons.lock);
+          // Copy any pending data before returning
+          if(batch_count > 0) {
+            if(either_copyout(user_dst, dst, kbuf, batch_count) == -1)
+              return target - n; // return bytes read so far
+            dst += batch_count;
+            n -= batch_count;
+          }
+          return target - n;
+        }
+        sleep_on_chan(&cons.r, &cons.lock);
       }
-      sleep_on_chan(&cons.r, &cons.lock);
-    }
 
-    c = cons.buf[cons.r++ % INPUT_BUF_SIZE];
+      c = cons.buf[cons.r++ % INPUT_BUF_SIZE];
 
-    if(c == C('D')){  // end-of-file
-      if(n < target){
-        // Save ^D for next time, to make sure
-        // caller gets a 0-byte result.
-        cons.r--;
+      if(c == C('D')){  // end-of-file
+        if(n < target || batch_count > 0){
+          // Save ^D for next time, to make sure
+          // caller gets a 0-byte result.
+          cons.r--;
+        }
+        got_eof = 1;
+        break;
       }
-      break;
+
+      kbuf[batch_count++] = c;
+      n--;
+
+      if(c == '\n'){
+        // a whole line has arrived
+        got_newline = 1;
+        break;
+      }
     }
-
-    // copy the input byte to the user-space buffer.
-    cbuf = c;
-    if(either_copyout(user_dst, dst, &cbuf, 1) == -1)
-      break;
-
-    dst++;
-    --n;
-
-    if(c == '\n'){
-      // a whole line has arrived, return to
-      // the user-level read().
-      break;
+    
+    // Release lock before copying to userspace
+    spin_unlock(&cons.lock);
+    
+    // Copy batch to userspace (without holding spinlock)
+    if(batch_count > 0) {
+      if(either_copyout(user_dst, dst, kbuf, batch_count) == -1) {
+        // Copy failed, return what we've read so far
+        return target - n - batch_count;
+      }
+      dst += batch_count;
+    }
+    
+    // Re-acquire lock if we need to continue
+    if(n > 0 && !got_newline && !got_eof) {
+      spin_lock(&cons.lock);
     }
   }
-  spin_unlock(&cons.lock);
+  
+  // If we exited the loop while holding the lock, release it
+  // (This happens if we hit EOF or newline in the first iteration)
+  // Actually, we always release the lock inside the loop before copying,
+  // so we should not be holding it here.
 
   return target - n;
 }

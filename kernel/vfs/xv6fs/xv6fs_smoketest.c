@@ -310,7 +310,7 @@ void xv6fs_run_file_ops_smoketest(void) {
     }
     
     // Write data
-    ssize_t written = vfs_filewrite(file, test_data, test_data_len);
+    ssize_t written = vfs_filewrite(file, test_data, test_data_len, false);
     if (written < 0) {
         printf("xv6fs_file_test: " FAIL " write errno=%ld\n", written);
     } else if ((size_t)written != test_data_len) {
@@ -333,7 +333,7 @@ void xv6fs_run_file_ops_smoketest(void) {
     }
     
     // Read data
-    ssize_t bytes_read = vfs_fileread(file, read_buf, sizeof(read_buf) - 1);
+    ssize_t bytes_read = vfs_fileread(file, read_buf, sizeof(read_buf) - 1, false);
     if (bytes_read < 0) {
         printf("xv6fs_file_test: " FAIL " read errno=%ld\n", bytes_read);
     } else if ((size_t)bytes_read != test_data_len) {
@@ -968,7 +968,7 @@ void xv6fs_run_large_file_smoketest(void) {
     for (int block = 0; block < 10; block++) {
         // Fill with pattern: block number in each byte
         memset(write_buf, 'A' + block, BSIZE);
-        ssize_t written = vfs_filewrite(file, write_buf, BSIZE);
+        ssize_t written = vfs_filewrite(file, write_buf, BSIZE, false);
         if (written != BSIZE) {
             printf("xv6fs_largefile: " FAIL " write block %d: %ld/%d\n", block, written, BSIZE);
             break;
@@ -1006,7 +1006,7 @@ void xv6fs_run_large_file_smoketest(void) {
     bool read_ok = true;
     for (int block = 0; block < 10; block++) {
         memset(read_buf, 0, BSIZE);
-        ssize_t bytes_read = vfs_fileread(file, read_buf, BSIZE);
+        ssize_t bytes_read = vfs_fileread(file, read_buf, BSIZE, false);
         if (bytes_read != BSIZE) {
             printf("xv6fs_largefile: " FAIL " read block %d: %ld/%d\n", block, bytes_read, BSIZE);
             read_ok = false;
@@ -1033,7 +1033,7 @@ void xv6fs_run_large_file_smoketest(void) {
     loff_t new_pos = vfs_filelseek(file, 5 * BSIZE, SEEK_SET);
     if (new_pos == 5 * BSIZE) {
         memset(read_buf, 0, BSIZE);
-        ssize_t bytes_read = vfs_fileread(file, read_buf, BSIZE);
+        ssize_t bytes_read = vfs_fileread(file, read_buf, BSIZE, false);
         if (bytes_read == BSIZE && read_buf[0] == 'F') { // Block 5 has pattern 'F'
             printf("xv6fs_largefile: " PASS " seek to block 5 and read verified\n");
         } else {

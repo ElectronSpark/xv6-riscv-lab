@@ -357,8 +357,8 @@ struct vfs_file {
 };
 
 struct vfs_file_ops {
-    ssize_t (*read)(struct vfs_file *file, char *buf, size_t count);
-    ssize_t (*write)(struct vfs_file *file, const char *buf, size_t count);
+    ssize_t (*read)(struct vfs_file *file, char *buf, size_t count, bool user);
+    ssize_t (*write)(struct vfs_file *file, const char *buf, size_t count, bool user);
     loff_t (*llseek)(struct vfs_file *file, loff_t offset, int whence);
     int (*release)(struct vfs_inode *inode, struct vfs_file *file);
     int (*fsync)(struct vfs_file *file);

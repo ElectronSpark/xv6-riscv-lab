@@ -1324,7 +1324,7 @@ cleanup_test1_mp:
     }
 
     // Write some data before unmount
-    ssize_t written = vfs_filewrite(open_file, test_data, test_data_len);
+    ssize_t written = vfs_filewrite(open_file, test_data, test_data_len, false);
     if (written != (ssize_t)test_data_len) {
         printf("lazy_unmount: " WARN " test2 write returned %ld\n", (long)written);
     }
@@ -1360,7 +1360,7 @@ cleanup_test1_mp:
             printf("lazy_unmount: " FAIL " test2a lseek errno=%lld\n", (long long)pos);
         } else {
             char read_buf[64] = {0};
-            ssize_t bytes_read = vfs_fileread(open_file, read_buf, test_data_len);
+            ssize_t bytes_read = vfs_fileread(open_file, read_buf, test_data_len, false);
             if (bytes_read != (ssize_t)test_data_len) {
                 printf("lazy_unmount: " FAIL " test2a read returned %ld\n", (long)bytes_read);
             } else if (memcmp(read_buf, test_data, test_data_len) != 0) {
@@ -1543,7 +1543,7 @@ void tmpfs_run_file_ops_smoketest(void) {
     printf("file_ops_smoketest: " PASS " open O_RDWR\n");
 
     // Test 2: Write to empty file
-    ssize_t written = vfs_filewrite(file, test_data, test_data_len);
+    ssize_t written = vfs_filewrite(file, test_data, test_data_len, false);
     if (written < 0) {
         printf("file_ops_smoketest: " FAIL " write to file failed, errno=%ld\n", (long)written);
     } else if (written != (ssize_t)test_data_len) {
@@ -1562,7 +1562,7 @@ void tmpfs_run_file_ops_smoketest(void) {
 
     // Test 4: Read back data
     memset(read_buf, 0, sizeof(read_buf));
-    ssize_t bytes_read = vfs_fileread(file, read_buf, test_data_len);
+    ssize_t bytes_read = vfs_fileread(file, read_buf, test_data_len, false);
     if (bytes_read != (ssize_t)test_data_len) {
         printf("file_ops_smoketest: " FAIL " read %lu bytes, got %ld\n", (unsigned long)test_data_len, (long)bytes_read);
     } else if (memcmp(read_buf, test_data, test_data_len) != 0) {
@@ -1590,7 +1590,7 @@ void tmpfs_run_file_ops_smoketest(void) {
     }
 
     // Test 7: Read at EOF should return 0
-    bytes_read = vfs_fileread(file, read_buf, 10);
+    bytes_read = vfs_fileread(file, read_buf, 10, false);
     if (bytes_read != 0) {
         printf("file_ops_smoketest: " FAIL " read at EOF, expected 0 got %ld\n", (long)bytes_read);
     } else {
@@ -1622,7 +1622,7 @@ void tmpfs_run_file_ops_smoketest(void) {
     }
 
     memset(read_buf, 0, sizeof(read_buf));
-    bytes_read = vfs_fileread(file, read_buf, test_data_len);
+    bytes_read = vfs_fileread(file, read_buf, test_data_len, false);
     if (bytes_read != (ssize_t)test_data_len || memcmp(read_buf, test_data, test_data_len) != 0) {
         printf("file_ops_smoketest: " FAIL " re-read after close mismatch\n");
     } else {
@@ -1651,7 +1651,7 @@ void tmpfs_run_file_ops_smoketest(void) {
     while (total_written < target_size) {
         size_t to_write = target_size - total_written;
         if (to_write > sizeof(write_buf)) to_write = sizeof(write_buf);
-        written = vfs_filewrite(file, write_buf, to_write);
+        written = vfs_filewrite(file, write_buf, to_write, false);
         if (written <= 0) {
             printf("file_ops_smoketest: " FAIL " multi-block write at %lu, errno=%ld\n", 
                    (unsigned long)total_written, (long)written);
@@ -1666,7 +1666,7 @@ void tmpfs_run_file_ops_smoketest(void) {
     // Seek to middle of second page and read
     pos = vfs_filelseek(file, PAGE_SIZE + 100, SEEK_SET);
     memset(read_buf, 0, sizeof(read_buf));
-    bytes_read = vfs_fileread(file, read_buf, 50);
+    bytes_read = vfs_fileread(file, read_buf, 50, false);
     if (bytes_read == 50 && read_buf[0] == 'A') {
         printf("file_ops_smoketest: " PASS " read from middle of second page\n");
     } else {
@@ -1748,7 +1748,7 @@ static bool write_and_verify(struct vfs_file *file, loff_t offset, size_t len,
     }
     
     fill_pattern(write_buf, len, offset);
-    ssize_t written = vfs_filewrite(file, write_buf, len);
+    ssize_t written = vfs_filewrite(file, write_buf, len, false);
     if (written != (ssize_t)len) {
         printf("dindirect_smoketest: " FAIL " %s write %lu bytes at %lld failed (got %ld)\n",
                desc, (unsigned long)len, (long long)offset, (long)written);
@@ -1763,7 +1763,7 @@ static bool write_and_verify(struct vfs_file *file, loff_t offset, size_t len,
     }
     
     memset(read_buf, 0, len);
-    ssize_t bytes_read = vfs_fileread(file, read_buf, len);
+    ssize_t bytes_read = vfs_fileread(file, read_buf, len, false);
     if (bytes_read != (ssize_t)len) {
         printf("dindirect_smoketest: " FAIL " %s read %lu bytes got %ld\n",
                desc, (unsigned long)len, (long)bytes_read);
@@ -1971,7 +1971,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
         }
         
         memset(read_buf, 0, len);
-        ssize_t bytes_read = vfs_fileread(file, read_buf, len);
+        ssize_t bytes_read = vfs_fileread(file, read_buf, len, false);
         if (bytes_read != (ssize_t)len) {
             printf("dindirect_smoketest: " FAIL " verify read %s (got %ld)\n", 
                    verify_points[i].desc, (long)bytes_read);
@@ -2150,7 +2150,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
             // Verify zeros in the gap (zero-filled by truncate)
             (void)vfs_filelseek(file, DIRECT_END + 100, SEEK_SET);
             memset(read_buf, 0xFF, 100);
-            ssize_t bytes_read = vfs_fileread(file, read_buf, 100);
+            ssize_t bytes_read = vfs_fileread(file, read_buf, 100, false);
             if (bytes_read == 100) {
                 bool all_zero = true;
                 for (int i = 0; i < 100; i++) {

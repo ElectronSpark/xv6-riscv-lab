@@ -156,22 +156,8 @@ uint64 sys_vfs_read(void) {
         return -EBADF;
     }
     
-    // For user-space reads, we need to use copyout
-    char *kbuf = kmm_alloc(n);
-    if (kbuf == NULL) {
-        vfs_fput(f); // remove the reference from __vfs_argfd 
-        return -ENOMEM;
-    }
-    
-    ssize_t ret = vfs_fileread(f, kbuf, n);
-    if (ret > 0) {
-        if (vm_copyout(myproc()->vm, p, kbuf, ret) < 0) {
-            ret = -EFAULT;
-        }
-    }
-    
-    vfs_fput(f); // remove the reference from __vfs_argfd
-    kmm_free(kbuf);
+    ssize_t ret = vfs_fileread(f, (void *)p, n, true);
+    vfs_fput(f);
     return ret;
 }
 
@@ -188,22 +174,8 @@ uint64 sys_vfs_write(void) {
         return -EBADF;
     }
     
-    // For user-space writes, we need to use copyin
-    char *kbuf = kmm_alloc(n);
-    if (kbuf == NULL) {
-        vfs_fput(f); // remove the reference from __vfs_argfd 
-        return -ENOMEM;
-    }
-    
-    if (vm_copyin(myproc()->vm, kbuf, p, n) < 0) {
-        kmm_free(kbuf);
-        vfs_fput(f); // remove the reference from __vfs_argfd 
-        return -EFAULT;
-    }
-    
-    ssize_t ret = vfs_filewrite(f, kbuf, n);
-    kmm_free(kbuf);
-    vfs_fput(f); // remove the reference from __vfs_argfd 
+    ssize_t ret = vfs_filewrite(f, (const void *)p, n, true);
+    vfs_fput(f);
     return ret;
 }
 
@@ -351,15 +323,18 @@ uint64 sys_vfs_open(void) {
         return -EISDIR;
     }
     
+    // Check for O_TRUNC before releasing inode reference
+    int should_truncate = (omode & O_TRUNC) && S_ISREG(inode->mode);
+    
     struct vfs_file *f = vfs_fileopen(inode, omode);
-    vfs_iput(inode);
+    vfs_iput(inode);  // Release local inode reference (file holds its own ref)
     
     if (IS_ERR(f)) {
         return PTR_ERR(f);
     }
     
-    // Handle O_TRUNC
-    if ((omode & O_TRUNC) && S_ISREG(inode->mode)) {
+    // Handle O_TRUNC - truncate the file to zero length
+    if (should_truncate) {
         ret = vfs_itruncate(vfs_inode_deref(&f->inode), 0);
         if (ret != 0) {
             vfs_fput(f);
@@ -850,6 +825,11 @@ uint64 sys_vfs_pipe(void) {
         __vfs_fput_call_rcu(wf);
         return -EFAULT;
     }
+    
+    // Release the references from pipealloc - fdtable holds its own references now
+    // (same pattern as sys_vfs_open which calls vfs_fput after __vfs_fdalloc)
+    vfs_fput(rf);
+    vfs_fput(wf);
     
     return 0;
 }

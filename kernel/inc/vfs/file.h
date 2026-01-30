@@ -37,9 +37,9 @@ void vfs_fput(struct vfs_file *file);
  */
 struct vfs_file *vfs_fdup(struct vfs_file *file);
 
-ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n);
+ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user);
 int vfs_filestat(struct vfs_file *file, struct stat *stat);
-ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n);
+ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n, bool user);
 loff_t vfs_filelseek(struct vfs_file *file, loff_t offset, int whence);
 int truncate(struct vfs_file *file, loff_t length);
 

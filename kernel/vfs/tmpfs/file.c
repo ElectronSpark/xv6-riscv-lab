@@ -24,11 +24,12 @@
 #include "list.h"
 #include "hlist.h"
 #include <mm/slab.h>
+#include <mm/vm.h>
 #include "tmpfs_private.h"
 
 // Forward declarations
-static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count);
-static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t count);
+static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count, bool user);
+static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t count, bool user);
 static loff_t __tmpfs_file_llseek(struct vfs_file *file, loff_t offset, int whence);
 static int __tmpfs_file_stat(struct vfs_file *file, struct stat *stat);
 
@@ -41,7 +42,7 @@ struct vfs_file_ops tmpfs_file_ops = {
     .stat = __tmpfs_file_stat,
 };
 
-static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count) {
+static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count, bool user) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     struct tmpfs_inode *ti = container_of(inode, struct tmpfs_inode, vfs_inode);
     
@@ -63,7 +64,13 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count)
             // This shouldn't happen - embedded files are limited in size
             count = TMPFS_INODE_EMBEDDED_DATA_LEN - pos;
         }
-        memmove(buf, ti->file.data + pos, count);
+        if (user) {
+            if (vm_copyout(myproc()->vm, (uint64)buf, ti->file.data + pos, count) < 0) {
+                return -EFAULT;
+            }
+        } else {
+            memmove(buf, ti->file.data + pos, count);
+        }
         return count;
     }
     
@@ -79,9 +86,30 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count)
         void *block = __tmpfs_lookup_block(ti, block_idx, false);
         if (block == NULL) {
             // Hole in file, return zeros
-            memset(buf + bytes_read, 0, chunk);
+            if (user) {
+                char zeros[64];
+                memset(zeros, 0, sizeof(zeros));
+                size_t remaining = chunk;
+                while (remaining > 0) {
+                    size_t c = remaining < sizeof(zeros) ? remaining : sizeof(zeros);
+                    if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read + (chunk - remaining)), zeros, c) < 0) {
+                        if (bytes_read == 0) return -EFAULT;
+                        return bytes_read;
+                    }
+                    remaining -= c;
+                }
+            } else {
+                memset(buf + bytes_read, 0, chunk);
+            }
         } else {
-            memmove(buf + bytes_read, (char *)block + block_off, chunk);
+            if (user) {
+                if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read), (char *)block + block_off, chunk) < 0) {
+                    if (bytes_read == 0) return -EFAULT;
+                    return bytes_read;
+                }
+            } else {
+                memmove(buf + bytes_read, (char *)block + block_off, chunk);
+            }
         }
         
         bytes_read += chunk;
@@ -91,7 +119,7 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count)
     return bytes_read;
 }
 
-static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t count) {
+static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t count, bool user) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     struct tmpfs_inode *ti = container_of(inode, struct tmpfs_inode, vfs_inode);
     
@@ -111,7 +139,13 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t
     if (ti->embedded) {
         if (end_pos <= TMPFS_INODE_EMBEDDED_DATA_LEN) {
             // Still fits in embedded storage
-            memmove(ti->file.data + pos, buf, count);
+            if (user) {
+                if (vm_copyin(myproc()->vm, ti->file.data + pos, (uint64)buf, count) < 0) {
+                    return -EFAULT;
+                }
+            } else {
+                memmove(ti->file.data + pos, buf, count);
+            }
             return count;
         }
         // Need to migrate to block storage
@@ -145,7 +179,14 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t
             break;
         }
         
-        memmove((char *)block + block_off, buf + bytes_written, chunk);
+        if (user) {
+            if (vm_copyin(myproc()->vm, (char *)block + block_off, (uint64)(buf + bytes_written), chunk) < 0) {
+                if (bytes_written == 0) return -EFAULT;
+                break;
+            }
+        } else {
+            memmove((char *)block + block_off, buf + bytes_written, chunk);
+        }
         
         bytes_written += chunk;
         pos += chunk;

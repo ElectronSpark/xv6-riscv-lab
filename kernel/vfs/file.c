@@ -251,7 +251,6 @@ struct vfs_file *vfs_fileopen(struct vfs_inode *inode, int f_flags) {
  */
 void vfs_fput(struct vfs_file *file) {
     if (file == NULL) {
-        printf("vfs_fput: file is NULL\n");
         return;
     }
     if (!atomic_dec_unless(&file->ref_count, 1)) {
@@ -318,7 +317,7 @@ struct vfs_file *vfs_fdup(struct vfs_file *file) {
     return file;
 }
 
-ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n) {
+ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
     if (file == NULL || buf == NULL || n == 0) {
         return -EINVAL; // Invalid arguments
     }
@@ -336,7 +335,28 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n) {
             __vfs_file_unlock(file);
             return -EBADF; // File not opened for reading
         }
-        ssize_t ret = piperead_kernel(file->pipe, buf, n);
+        struct pipe *pipe = file->pipe;
+        // Use piperead for userspace buffers, piperead_kernel for kernel buffers
+        ssize_t ret;
+        if (user) {
+            ret = piperead(pipe, (uint64)buf, n);
+        } else {
+            ret = piperead_kernel(pipe, buf, n);
+        }
+        __vfs_file_unlock(file);
+        return ret;
+    }
+    
+    // Handle character device read - check access and call without holding lock
+    // (cdev operations may sleep and handle their own synchronization)
+    if (S_ISCHR(inode->mode)) {
+        __vfs_file_lock(file);
+        if ((file->f_flags & O_ACCMODE) == O_WRONLY) {
+            __vfs_file_unlock(file);
+            return -EBADF;
+        }
+        struct cdev *cdev = file->cdev;
+        int ret = cdev_read(cdev, user, buf, n);
         __vfs_file_unlock(file);
         return ret;
     }
@@ -348,13 +368,6 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n) {
     }
     
     ssize_t ret = 0;
-    
-    // Handle character device read
-    if (S_ISCHR(inode->mode)) {
-        ret = cdev_read(file->cdev, false, buf, n);  // false = kernel buffer
-        __vfs_file_unlock(file);
-        return ret;
-    }
     
     // Handle block device read - not directly supported, use buffer cache
     if (S_ISBLK(inode->mode)) {
@@ -383,7 +396,7 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n) {
     if (inode->size - file->f_pos < n) {
         n = inode->size - file->f_pos; // Adjust n to read up to EOF
     }
-    ret = file->ops->read(file, buf, n);
+    ret = file->ops->read(file, buf, n, user);
     if (ret > 0) {
         file->f_pos += ret;
     }
@@ -420,7 +433,7 @@ int vfs_filestat(struct vfs_file *file, struct stat *stat) {
     return file->ops->stat(file, stat);
 }
 
-ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n) {
+ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n, bool user) {
     if (file == NULL || buf == NULL || n == 0) {
         return -EINVAL; // Invalid arguments
     }
@@ -438,7 +451,28 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n) {
             __vfs_file_unlock(file);
             return -EBADF; // File not opened for writing
         }
-        ssize_t ret = pipewrite_kernel(file->pipe, buf, n);
+        struct pipe *pipe = file->pipe;
+        // Use pipewrite for userspace buffers, pipewrite_kernel for kernel buffers
+        ssize_t ret;
+        if (user) {
+            ret = pipewrite(pipe, (uint64)buf, n);
+        } else {
+            ret = pipewrite_kernel(pipe, buf, n);
+        }
+        __vfs_file_unlock(file);
+        return ret;
+    }
+    
+    // Handle character device write - check access and call without holding lock
+    // (cdev operations may sleep and handle their own synchronization)
+    if (S_ISCHR(inode->mode)) {
+        __vfs_file_lock(file);
+        if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
+            __vfs_file_unlock(file);
+            return -EBADF;
+        }
+        struct cdev *cdev = file->cdev;
+        int ret = cdev_write(cdev, user, buf, n);
         __vfs_file_unlock(file);
         return ret;
     }
@@ -450,13 +484,6 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n) {
     }
     
     ssize_t ret = 0;
-    
-    // Handle character device write
-    if (S_ISCHR(inode->mode)) {
-        ret = cdev_write(file->cdev, false, buf, n);  // false = kernel buffer
-        __vfs_file_unlock(file);
-        return ret;
-    }
     
     // Handle block device write - not directly supported, use buffer cache
     if (S_ISBLK(inode->mode)) {
@@ -495,7 +522,7 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n) {
             goto out;
         }
     }
-    ret = file->ops->write(file, buf, n);
+    ret = file->ops->write(file, buf, n, user);
     if (ret > 0) {
         file->f_pos += ret;
     }
