@@ -17,178 +17,173 @@
 struct vfs_inode;
 
 enum procstate {
-  PSTATE_UNUSED,
-  PSTATE_USED,
-  PSTATE_INTERRUPTIBLE,
-  STATE_KILLABLE,
-  STATE_TIMER,
-  STATE_KILLABLE_TIMER,
-  PSTATE_UNINTERRUPTIBLE,
-  PSTATE_WAKENING,
-  PSTATE_RUNNING,
-  PSTATE_STOPPED,
-  PSTATE_EXITING,
-  PSTATE_ZOMBIE
+    PSTATE_UNUSED,
+    PSTATE_USED,
+    PSTATE_INTERRUPTIBLE,
+    STATE_KILLABLE,
+    STATE_TIMER,
+    STATE_KILLABLE_TIMER,
+    PSTATE_UNINTERRUPTIBLE,
+    PSTATE_WAKENING,
+    PSTATE_RUNNING,
+    PSTATE_STOPPED,
+    PSTATE_EXITING,
+    PSTATE_ZOMBIE
 };
 
-#define PSTATE_IS_SLEEPING(state) ({    \
-  (state) == PSTATE_INTERRUPTIBLE ||    \
-  (state) == PSTATE_UNINTERRUPTIBLE ||  \
-  (state) == STATE_KILLABLE ||          \
-  (state) == STATE_TIMER ||             \
-  (state) == STATE_KILLABLE_TIMER;      \
-})
+#define PSTATE_IS_SLEEPING(state)                                              \
+    ({                                                                         \
+        (state) == PSTATE_INTERRUPTIBLE ||                                     \
+            (state) == PSTATE_UNINTERRUPTIBLE || (state) == STATE_KILLABLE ||  \
+            (state) == STATE_TIMER || (state) == STATE_KILLABLE_TIMER;         \
+    })
 
-#define PSTATE_IS_KILLABLE(state) ({    \
-  (state) == STATE_KILLABLE ||          \
-  (state) == STATE_KILLABLE_TIMER ||    \
-  (state) == PSTATE_INTERRUPTIBLE;      \
-})
+#define PSTATE_IS_KILLABLE(state)                                              \
+    ({                                                                         \
+        (state) == STATE_KILLABLE || (state) == STATE_KILLABLE_TIMER ||        \
+            (state) == PSTATE_INTERRUPTIBLE;                                   \
+    })
 
-#define PSTATE_IS_TIMER(state) ({       \
-  (state) == STATE_TIMER ||             \
-  (state) == STATE_KILLABLE_TIMER ||    \
-  (state) == PSTATE_INTERRUPTIBLE;      \
-})
+#define PSTATE_IS_TIMER(state)                                                 \
+    ({                                                                         \
+        (state) == STATE_TIMER || (state) == STATE_KILLABLE_TIMER ||           \
+            (state) == PSTATE_INTERRUPTIBLE;                                   \
+    })
 
-#define PSTATE_IS_INTERRUPTIBLE(state) ({ \
-  (state) == PSTATE_INTERRUPTIBLE;        \
-})
+#define PSTATE_IS_INTERRUPTIBLE(state) ({ (state) == PSTATE_INTERRUPTIBLE; })
 
-#define PSTATE_IS_AWOKEN(state) ({    \
-  (state) == PSTATE_RUNNING ||        \
-  (state) == PSTATE_WAKENING;         \
-})
+#define PSTATE_IS_AWOKEN(state)                                                \
+    ({ (state) == PSTATE_RUNNING || (state) == PSTATE_WAKENING; })
 
-#define PSTATE_IS_ZOMBIE(state) ({    \
-  (state) == PSTATE_ZOMBIE;           \
-})
+#define PSTATE_IS_RUNNING(state) ({ (state) == PSTATE_RUNNING; })
 
-#define PSTATE_IS_STOPPED(state) ({   \
-  (state) == PSTATE_STOPPED;          \
-})
+#define PSTATE_IS_ZOMBIE(state) ({ (state) == PSTATE_ZOMBIE; })
+
+#define PSTATE_IS_STOPPED(state) ({ (state) == PSTATE_STOPPED; })
 
 struct workqueue;
 
 // Per-process state
 struct proc {
-  struct spinlock lock;
+    struct spinlock lock;
 
-  // both p->lock and the corresponding proc queue lock must be held
-  // when using these. 
-  // 
-  // If the process is trying to yield as RUNNABLE, it must hold __sched_lock
-  // after acquiring p->lock, and before switching to the scheduler.
-  //
-  // When the process is in SLEEPING state, these fields are managed by the scheduler,
-  // and the process queue it's in.
-  enum procstate state;        // Process state
-  void *chan;                  // If non-zero, sleeping on chan
-  list_node_t sched_entry;     // entry for ready queue
-  struct workqueue *wq;        // work queue this process belongs to
-  list_node_t wq_entry;        // link to work queue
-  uint64 flags;
-#define PROC_FLAG_VALID             1
-#define PROC_FLAG_KILLED            2   // Process is exiting or exited
-#define PROC_FLAG_ONCHAN            3  // Process is sleeping on a channel
-#define PROC_FLAG_USER_SPACE        5  // Process has user space
-  
-  // proc table lock must be held before holding p->lock to use this:
-  hlist_entry_t proctab_entry; // Entry to link the process hash table
-  
-  // p->lock must be held when using these:
-  list_node_t dmp_list_entry;  // Entry in the dump list
-  int xstate;                  // Exit status to be returned to parent's wait
-  int pid;                     // Process ID
-  
-  // Signal related fields
-  sigacts_t *sigacts;          // Signal actions for this process
-  sigset_t sig_pending_mask;   // Mark none empty signal pending queue
-  sigpending_t sig_pending[NSIG]; // Queue of pending signals
-  // signal trap frames would be put at the user stack.
-  // This is used to restore the user context when a signal is delivered.
-  uint64 sig_ucontext;    // Address of the signal user context
-  stack_t sig_stack;      // Alternate signal stack
-  
-  // both p->lock and p->parent->lock must be held when using this:
-  list_node_t siblings;       // List of sibling processes
-  list_node_t children;       // List of child processes
-  int children_count;         // Number of children
-  struct proc *parent;        // Parent process
-  
-  // these are private to the process, so p->lock need not be held.
-  uint64 kstack;               // Virtual address of kernel stack
-  int kstack_order;            // Kernel stack order, used for allocation
-  uint64 ksp;
-  vm_t *vm;                     // Virtual memory areas and page table
-  struct utrapframe *trapframe; // data page for trampoline.S
-  
-  // Priority Inheritance lock, on_rq, on_cpu, cpu_id, and context are now
-  // stored in sched_entity. Access them via p->sched_entity-><field>.
-  struct sched_entity *sched_entity;
-  uint64 kentry;               // Entry point for kernel process
-  uint64 arg[2];               // Argument for kernel process
-  
-  struct fs_struct *fs;          // Filesystem state (on kernel stack below utrapframe)
-  struct vfs_fdtable *fdtable;   // File descriptor table (on kernel stack below fs)
-  char name[16];               // Process name (debugging)
+    // both p->lock and the corresponding proc queue lock must be held
+    // when using these.
+    //
+    // If the process is trying to yield as RUNNABLE, it must hold __sched_lock
+    // after acquiring p->lock, and before switching to the scheduler.
+    //
+    // When the process is in SLEEPING state, these fields are managed by the
+    // scheduler, and the process queue it's in.
+    enum procstate state;    // Process state
+    void *chan;              // If non-zero, sleeping on chan
+    list_node_t sched_entry; // entry for ready queue
+    struct workqueue *wq;    // work queue this process belongs to
+    list_node_t wq_entry;    // link to work queue
+    uint64 flags;
+#define PROC_FLAG_VALID 1
+#define PROC_FLAG_KILLED 2     // Process is exiting or exited
+#define PROC_FLAG_ONCHAN 3     // Process is sleeping on a channel
+#define PROC_FLAG_USER_SPACE 5 // Process has user space
 
-  // RCU read-side critical section nesting counter (per-process)
-  // This counter follows the process across CPU migrations, enabling preemptible RCU.
-  // It tracks how many times this process has called rcu_read_lock() without matching
-  // rcu_read_unlock(). The process can safely yield and migrate CPUs while this is > 0.
-  int rcu_read_lock_nesting;   // Number of nested rcu_read_lock() calls
+    // proc table lock must be held before holding p->lock to use this:
+    hlist_entry_t proctab_entry; // Entry to link the process hash table
 
-  // RCU deferred freeing
-  rcu_head_t rcu_head;         // RCU callback head (must be last)
+    // p->lock must be held when using these:
+    list_node_t dmp_list_entry; // Entry in the dump list
+    int xstate;                 // Exit status to be returned to parent's wait
+    int pid;                    // Process ID
+
+    // Signal related fields
+    sigacts_t *sigacts;             // Signal actions for this process
+    sigset_t sig_pending_mask;      // Mark none empty signal pending queue
+    sigpending_t sig_pending[NSIG]; // Queue of pending signals
+    // signal trap frames would be put at the user stack.
+    // This is used to restore the user context when a signal is delivered.
+    uint64 sig_ucontext; // Address of the signal user context
+    stack_t sig_stack;   // Alternate signal stack
+
+    // both p->lock and p->parent->lock must be held when using this:
+    list_node_t siblings; // List of sibling processes
+    list_node_t children; // List of child processes
+    int children_count;   // Number of children
+    struct proc *parent;  // Parent process
+
+    // these are private to the process, so p->lock need not be held.
+    uint64 kstack;    // Virtual address of kernel stack
+    int kstack_order; // Kernel stack order, used for allocation
+    uint64 ksp;
+    vm_t *vm;                     // Virtual memory areas and page table
+    struct utrapframe *trapframe; // data page for trampoline.S
+
+    // Priority Inheritance lock, on_rq, on_cpu, cpu_id, and context are now
+    // stored in sched_entity. Access them via p->sched_entity-><field>.
+    struct sched_entity *sched_entity;
+    uint64 kentry; // Entry point for kernel process
+    uint64 arg[2]; // Argument for kernel process
+
+    struct fs_struct *fs; // Filesystem state (on kernel stack below utrapframe)
+    struct vfs_fdtable
+        *fdtable;  // File descriptor table (on kernel stack below fs)
+    char name[16]; // Process name (debugging)
+
+    // RCU read-side critical section nesting counter (per-process)
+    // This counter follows the process across CPU migrations, enabling
+    // preemptible RCU. It tracks how many times this process has called
+    // rcu_read_lock() without matching rcu_read_unlock(). The process can
+    // safely yield and migrate CPUs while this is > 0.
+    int rcu_read_lock_nesting; // Number of nested rcu_read_lock() calls
+
+    // RCU deferred freeing
+    rcu_head_t rcu_head; // RCU callback head (must be last)
 };
 
-BUILD_BUG_ON(((sizeof(struct proc) + sizeof(struct utrapframe)   \
-            + sizeof(struct fs_struct) + sizeof(struct vfs_fdtable)   \
-            + sizeof(struct sched_entity) + 80  \
-            + CACHELINE_SIZE) & ~CACHELINE_MASK) >= PGSIZE);
+BUILD_BUG_ON(((sizeof(struct proc) + sizeof(struct utrapframe) +
+               sizeof(struct fs_struct) + sizeof(struct vfs_fdtable) +
+               sizeof(struct sched_entity) + 80 + CACHELINE_SIZE) &
+              ~CACHELINE_MASK) >= PGSIZE);
 
 static inline uint64 proc_flags(struct proc *p) {
-  if (p == NULL) {
-    return 0;
-  }
-  return __atomic_load_n(&p->flags, __ATOMIC_SEQ_CST);
+    if (p == NULL) {
+        return 0;
+    }
+    return __atomic_load_n(&p->flags, __ATOMIC_SEQ_CST);
 }
 
 static inline void proc_set_flags(struct proc *p, uint64 flags) {
-  if (p == NULL) {
-    return;
-  }
-  __atomic_or_fetch(&p->flags, flags, __ATOMIC_SEQ_CST);
+    if (p == NULL) {
+        return;
+    }
+    __atomic_or_fetch(&p->flags, flags, __ATOMIC_SEQ_CST);
 }
 
 static inline void proc_clear_flags(struct proc *p, uint64 flags) {
-  if (p == NULL) {
-    return;
-  }
-  __atomic_and_fetch(&p->flags, ~flags, __ATOMIC_SEQ_CST);
+    if (p == NULL) {
+        return;
+    }
+    __atomic_and_fetch(&p->flags, ~flags, __ATOMIC_SEQ_CST);
 }
 
-#define DEFINE_PROC_FLAG(__NAME, __VALUE)                                 \
-static inline bool PROC_##__NAME(struct proc *p) {                        \
-  if (p == NULL) {                                                        \
-    return false;                                                         \
-  }                                                                       \
-  uint64 __flags = smp_load_acquire(&p->flags);                           \
-  return !!(__flags & (1ULL << (__VALUE)));                               \
-}                                                                         \
-static inline void PROC_SET_##__NAME(struct proc *p) {                    \
-  if (p == NULL) {                                                        \
-    return;                                                               \
-  }                                                                       \
-  __atomic_or_fetch(&p->flags, (1ULL << (__VALUE)), __ATOMIC_SEQ_CST);    \
-}                                                                         \
-static inline void PROC_CLEAR_##__NAME(struct proc *p) {                  \
-  if (p == NULL) {                                                        \
-    return;                                                               \
-  }                                                                       \
-  __atomic_and_fetch(&p->flags, ~(1ULL << (__VALUE)), __ATOMIC_SEQ_CST);  \
-}
+#define DEFINE_PROC_FLAG(__NAME, __VALUE)                                      \
+    static inline bool PROC_##__NAME(struct proc *p) {                         \
+        if (p == NULL) {                                                       \
+            return false;                                                      \
+        }                                                                      \
+        uint64 __flags = smp_load_acquire(&p->flags);                          \
+        return !!(__flags & (1ULL << (__VALUE)));                              \
+    }                                                                          \
+    static inline void PROC_SET_##__NAME(struct proc *p) {                     \
+        if (p == NULL) {                                                       \
+            return;                                                            \
+        }                                                                      \
+        __atomic_or_fetch(&p->flags, (1ULL << (__VALUE)), __ATOMIC_SEQ_CST);   \
+    }                                                                          \
+    static inline void PROC_CLEAR_##__NAME(struct proc *p) {                   \
+        if (p == NULL) {                                                       \
+            return;                                                            \
+        }                                                                      \
+        __atomic_and_fetch(&p->flags, ~(1ULL << (__VALUE)), __ATOMIC_SEQ_CST); \
+    }
 
 DEFINE_PROC_FLAG(USER_SPACE, PROC_FLAG_USER_SPACE)
 DEFINE_PROC_FLAG(VALID, PROC_FLAG_VALID)
@@ -196,38 +191,52 @@ DEFINE_PROC_FLAG(KILLED, PROC_FLAG_KILLED)
 DEFINE_PROC_FLAG(ONCHAN, PROC_FLAG_ONCHAN)
 
 static inline const char *procstate_to_str(enum procstate state) {
-  switch (state) {
-    case PSTATE_UNUSED: return "unused";
-    case PSTATE_USED: return "used";
-    case PSTATE_INTERRUPTIBLE: return "interruptible";
-    case STATE_KILLABLE: return "killable";
-    case STATE_TIMER: return "timer";
-    case STATE_KILLABLE_TIMER: return "killable_timer";
-    case PSTATE_UNINTERRUPTIBLE: return "uninterruptible";
-    case PSTATE_WAKENING: return "wakening";
-    case PSTATE_RUNNING: return "running";
-    case PSTATE_STOPPED: return "stopped";
-    case PSTATE_EXITING: return "exiting";
-    case PSTATE_ZOMBIE: return "zombie";
-    default: return "*unknown";
-  }
+    switch (state) {
+    case PSTATE_UNUSED:
+        return "unused";
+    case PSTATE_USED:
+        return "used";
+    case PSTATE_INTERRUPTIBLE:
+        return "interruptible";
+    case STATE_KILLABLE:
+        return "killable";
+    case STATE_TIMER:
+        return "timer";
+    case STATE_KILLABLE_TIMER:
+        return "killable_timer";
+    case PSTATE_UNINTERRUPTIBLE:
+        return "uninterruptible";
+    case PSTATE_WAKENING:
+        return "wakening";
+    case PSTATE_RUNNING:
+        return "running";
+    case PSTATE_STOPPED:
+        return "stopped";
+    case PSTATE_EXITING:
+        return "exiting";
+    case PSTATE_ZOMBIE:
+        return "zombie";
+    default:
+        return "*unknown";
+    }
 }
 
 static inline enum procstate __proc_get_pstate(struct proc *p) {
-  if (p == NULL) {
-    return PSTATE_UNUSED;
-  }
-  return __atomic_load_n(&p->state, __ATOMIC_SEQ_CST);
+    if (p == NULL) {
+        return PSTATE_UNUSED;
+    }
+    return __atomic_load_n(&p->state, __ATOMIC_SEQ_CST);
 }
 
 static inline void __proc_set_pstate(struct proc *p, enum procstate state) {
-  if (p == NULL) {
-    return;
-  }
-  __atomic_store_n(&p->state, state, __ATOMIC_SEQ_CST);
+    if (p == NULL) {
+        return;
+    }
+    __atomic_store_n(&p->state, state, __ATOMIC_SEQ_CST);
 }
 
 #define PROC_AWOKEN(p) PSTATE_IS_AWOKEN(__proc_get_pstate(p))
+#define PROC_RUNNING(p) PSTATE_IS_RUNNING(__proc_get_pstate(p))
 #define PROC_SLEEPING(p) PSTATE_IS_SLEEPING(__proc_get_pstate(p))
 #define PROC_ZOMBIE(p) PSTATE_IS_ZOMBIE(__proc_get_pstate(p))
 #define PROC_STOPPED(p) PSTATE_IS_STOPPED(__proc_get_pstate(p))
@@ -235,5 +244,4 @@ static inline void __proc_set_pstate(struct proc *p, enum procstate state) {
 #define PROC_TIMER(p) PSTATE_IS_TIMER(__proc_get_pstate(p))
 #define PROC_INTERRUPTIBLE(p) PSTATE_IS_INTERRUPTIBLE(__proc_get_pstate(p))
 
-
-#endif        /* __KERNEL_PROC_H */
+#endif /* __KERNEL_PROC_H */

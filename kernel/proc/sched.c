@@ -101,7 +101,7 @@ static struct proc *__sched_pick_next(void) {
     int this_priority = myproc()->sched_entity->priority;
     int next_priority = se->priority;
     // @TODO: The following code is disabled before implementing EEVDF scheduling.
-    // if (__proc_get_pstate(myproc()) == PSTATE_RUNNING 
+    // if (PROC_RUNNING(myproc()) 
     //     && this_priority < next_priority
     //     && (!IS_EEVDF_PRIORITY(this_priority)
     //         || !IS_EEVDF_PRIORITY(next_priority))) {
@@ -109,8 +109,7 @@ static struct proc *__sched_pick_next(void) {
     //     // Do not switch
     //     return myproc();
     // }
-    if (__proc_get_pstate(myproc()) == PSTATE_RUNNING 
-        && this_priority < next_priority) {
+    if (PROC_RUNNING(myproc()) && this_priority < next_priority) {
         // Current process has higher priority than the picked one
         // Do not switch
         return myproc();
@@ -175,7 +174,7 @@ static struct proc *__switch_to(struct proc *p) {
     // After switching, the current process is now 'p'
     assert(!intr_get(), "Interrupts must be disabled before switching to a process");
     assert(myproc() == proc, "Yield returned to a different process");
-    assert(__proc_get_pstate(proc) == PSTATE_RUNNING, "Process state must be RUNNING after yield");
+    assert(PROC_RUNNING(proc), "Process state must be RUNNING after yield");
     mycpu()->intena = intena; // Restore interrupt state
 
     return prev;
@@ -605,14 +604,14 @@ void context_switch_finish(struct proc *prev, struct proc *next, int intr) {
     // All operations here are under rq_lock, which serializes with wakeup path.
     // @TODO: try not to treat idle process specially
     if (prev != mycpu()->idle_proc) {
-        if (pstate == PSTATE_RUNNING) {
+        if (PSTATE_IS_RUNNING(pstate)) {
             // Process is still running, put it back to the scheduler's list.
             // Note: on_rq is still 1 (task was logically on rq while running).
             // Note: If affinity was changed to exclude current CPU, the task
             // stays here until it sleeps. On wakeup, rq_select_task_rq() will
             // place it on an allowed CPU.
             rq_put_prev_task(se);
-        } else if (PSTATE_IS_SLEEPING(pstate) || pstate == PSTATE_STOPPED) {
+        } else if (PSTATE_IS_SLEEPING(pstate) || PSTATE_IS_STOPPED(pstate)) {
             // Process entered sleeping/stopped state, properly dequeue it
             // so that wakeup/continue path can enqueue to a (potentially different) rq.
             // This sets on_rq = 0.
