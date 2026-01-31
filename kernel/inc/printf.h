@@ -9,13 +9,28 @@
 /**
  * @brief Check if system is in panic state
  * @return Non-zero if any core has panicked
+ * @note Used by spinlock to detect if another core panicked and
+ *       enable IPI-only interrupts to receive crash notification.
  */
 int panic_state(void);
 
+/**
+ * @brief Trigger a system panic and halt all CPUs
+ * @note Sends IPI_REASON_CRASH to all cores, then halts.
+ *       Called after __panic_start() has printed the panic message.
+ */
 void trigger_panic(void) __attribute__((noreturn));
 
+/**
+ * @brief Acquire the panic message lock
+ * @note Used to serialize panic output across multiple cores.
+ *       Must be paired with panic_msg_unlock().
+ */
 void panic_msg_lock(void);
 
+/**
+ * @brief Release the panic message lock
+ */
 void panic_msg_unlock(void);
 
 /**

@@ -77,7 +77,15 @@ STATIC struct disk {
   struct virtio_blk_req ops[NUM];
   
   struct spinlock vdisk_lock;
-  proc_queue_t desc_wait_queue;  // Wait queue for descriptor allocation
+  
+  /**
+   * Wait queue for processes waiting for free descriptors.
+   * Used instead of global sleep_on_chan() to avoid contention
+   * on the global sleep_lock. Processes waiting in alloc3_desc()
+   * sleep on this per-disk queue and are woken when free_desc()
+   * returns descriptors to the freelist.
+   */
+  proc_queue_t desc_wait_queue;
   
 } disks[N_VIRTIO_DISK];
 

@@ -48,10 +48,18 @@ struct xv6fs_logheader {
 /*
  * xv6fs log structure
  * Per-superblock logging for crash recovery
+ * 
+ * The wait_queue is used instead of global sleep_on_chan() to avoid
+ * contention on the global sleep_lock. Waiters in begin_op() use the
+ * per-log queue, and end_op() wakes them after commit completes.
+ * 
+ * Pattern: end_op() uses proc_queue_bulk_move() to a temp queue, then
+ * wakes outside the lock to avoid lock convoy (woken processes competing
+ * to reacquire log->lock).
  */
 struct xv6fs_log {
     struct spinlock lock;
-    proc_queue_t wait_queue;  // Per-log wait queue for begin_op waiters
+    proc_queue_t wait_queue;  /**< Per-log wait queue for begin_op waiters */
     int start;          // Log start block
     int size;           // Log size in blocks
     int outstanding;    // How many FS ops are executing

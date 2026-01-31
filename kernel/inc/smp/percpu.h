@@ -9,10 +9,15 @@
 
 extern struct cpu_local cpus[NCPU];
 
-#define CPU_FLAG_NEEDS_RESCHED  1
-#define CPU_FLAG_BOOT_HART      2
-#define CPU_FLAG_IN_ITR         4
-#define CPU_FLAG_CRASHED        8
+/** @defgroup cpu_flags CPU Flags
+ * @brief Per-CPU status flags for scheduler and panic handling
+ * @{
+ */
+#define CPU_FLAG_NEEDS_RESCHED  1  /**< CPU should reschedule at next opportunity */
+#define CPU_FLAG_BOOT_HART      2  /**< This is the boot hart */
+#define CPU_FLAG_IN_ITR         4  /**< CPU is currently in interrupt handler */
+#define CPU_FLAG_CRASHED        8  /**< CPU has received panic IPI and halted */
+/** @} */
 
 #if !defined(ON_HOST_OS)
 
@@ -34,12 +39,20 @@ extern struct cpu_local cpus[NCPU];
   do { mycpu()->flags &= ~CPU_FLAG_BOOT_HART; } while(0)
 #define IS_BOOT_HART() \
   (!!(mycpu()->flags & CPU_FLAG_BOOT_HART))
+
+/**
+ * @name CPU Crashed Flag Macros
+ * @brief Mark/check if this CPU has received a panic notification
+ * Used to prevent IPI storms during system panic.
+ * @{
+ */
 #define SET_CPU_CRASHED() \
   do { mycpu()->flags |= CPU_FLAG_CRASHED; } while(0)
 #define CPU_CRASHED() \
   (!!(mycpu()->flags & CPU_FLAG_CRASHED))
 #define CLEAR_CPU_CRASHED() \
   do { mycpu()->flags &= ~CPU_FLAG_CRASHED; } while(0)
+/** @} */
 
 // Return this CPU's cpu struct.
 // Interrupts must be disabled.

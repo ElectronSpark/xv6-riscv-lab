@@ -190,7 +190,7 @@ rq_lock                        (lowest)
 | Lock | Purpose |
 |------|---------|
 | `rq_lock` | Per-CPU run queue lock protecting enqueue/dequeue operations |
-| `pi_lock` | Protects wakeup operations (must be held to call wakeup) |
+| `pi_lock` | Serializes concurrent wakeup attempts (acquired internally by wakeup) |
 | `proc_lock` | Protects process data fields |
 | `sleep_lock` | Protects channel-based sleep queues |
 
@@ -198,7 +198,20 @@ rq_lock                        (lowest)
 
 The wakeup path may spin-wait on `on_cpu`. If the caller held `proc_lock` while waiting,
 and the target process needed that lock before clearing `on_cpu`, we'd have deadlock.
-Therefore, **wakeup functions require `pi_lock`, not `proc_lock`**.
+Therefore, **wakeup functions must NOT be called with proc_lock held**.
+
+### trylock Functions for Lock Convoy Prevention
+
+To avoid lock convoy when many processes wake the same target (e.g., many children
+exiting and waking the same parent), wakeup uses trylock with backoff:
+
+| Function | Purpose |
+|----------|---------|
+| `rq_trylock(cpu_id)` | Try to acquire rq_lock without spinning; returns 1 if acquired |
+| `rq_trylock_two(cpu1, cpu2)` | Try to acquire two rq_locks atomically (ordered to prevent deadlock) |
+
+**Pattern:** `__do_scheduler_wakeup` acquires `pi_lock`, then uses `rq_trylock_two()`.
+If trylock fails, it releases `pi_lock`, backs off with `cpu_relax()`, then retries.
 
 ## Context Switch Flow
 
@@ -330,32 +343,42 @@ The task is removed from the scheduler's internal list but is still logically
 
 ```c
 void wakeup_proc(struct proc *p) {
-    spin_lock(&p->sched_entity->pi_lock);
+    // Note: pi_lock is acquired internally by __do_scheduler_wakeup
     scheduler_wakeup(p);
-    spin_unlock(&p->sched_entity->pi_lock);
 }
 ```
 
 ### Internal Wakeup Logic
 
-`__do_scheduler_wakeup()` follows the Linux `try_to_wake_up()` pattern with a critical
-addition: **lock-based serialization with retry** to handle CPU migration races.
+`__do_scheduler_wakeup()` follows the Linux `try_to_wake_up()` pattern with critical
+improvements: **internal pi_lock acquisition** and **trylock with backoff** to prevent
+lock convoy when many processes wake the same target (e.g., many children exiting
+simultaneously, all waking the same parent).
+
+**Key change:** `pi_lock` is now acquired **inside** `__do_scheduler_wakeup()`, not
+by external callers. This, combined with `rq_trylock_two()`, avoids the convoy scenario
+where processes serialize on pi_lock while spinning on rq_lock.
 
 ```c
 static void __do_scheduler_wakeup(struct proc *p, bool from_stopped) {
     struct sched_entity *se = p->sched_entity;
+    
+    // Acquire pi_lock to serialize wakeup attempts on this process
+    spin_lock(&se->pi_lock);
     
     // Special case: self-wakeup from interrupt
     // Current process set SLEEPING but hasn't switched out yet.
     // Just change state back - it will see this before context switching.
     if (p == myproc()) {
         smp_store_release(&p->state, PSTATE_RUNNING);
+        spin_unlock(&se->pi_lock);
         return;
     }
     
     // Validate state is sleepable
     enum procstate old_state = smp_load_acquire(&p->state);
     if (!PSTATE_IS_SLEEPING(old_state)) {
+        spin_unlock(&se->pi_lock);
         return;
     }
     
@@ -368,16 +391,35 @@ retry:
     if (origin_cpuid < 0) {
         origin_cpuid = target_cpu;  // New task, no origin to serialize with
     }
-    pop_off();
     
-    // Lock BOTH origin and target rq to serialize with context_switch_finish
-    rq_lock_two(origin_cpuid, target_cpu);
+    // Use trylock to avoid spinning while holding pi_lock (prevents lock convoy)
+    if (!rq_trylock_two(origin_cpuid, target_cpu)) {
+        pop_off();
+        // Couldn't get rq locks - release pi_lock, backoff, re-check state
+        spin_unlock(&se->pi_lock);
+        for (volatile int i = 0; i < 10; i++) cpu_relax();
+        spin_lock(&se->pi_lock);
+        // Re-check state after reacquiring pi_lock
+        if (!PSTATE_IS_SLEEPING(smp_load_acquire(&p->state))) {
+            spin_unlock(&se->pi_lock);
+            return;
+        }
+        goto retry;
+    }
+    pop_off();
     
     // **Critical:** Re-check cpu_id after acquiring locks.
     // If task migrated between read and lock, we have the wrong lock!
     int current_cpuid = smp_load_acquire(&se->cpu_id);
     if (current_cpuid >= 0 && current_cpuid != origin_cpuid) {
         rq_unlock_two(origin_cpuid, target_cpu);
+        // Release pi_lock, re-acquire and re-check state
+        spin_unlock(&se->pi_lock);
+        spin_lock(&se->pi_lock);
+        if (!PSTATE_IS_SLEEPING(smp_load_acquire(&p->state))) {
+            spin_unlock(&se->pi_lock);
+            return;
+        }
         goto retry;  // Retry with correct locks
     }
     
@@ -388,6 +430,7 @@ retry:
         // Task logically on rq (on_rq=1 while running).
         // Just set RUNNING - put_prev_task will add back to list.
         smp_store_release(&p->state, PSTATE_RUNNING);
+        spin_unlock(&se->pi_lock);
         rq_unlock_two(origin_cpuid, target_cpu);
         return;
     }
@@ -395,15 +438,16 @@ retry:
     // on_rq=0: check if still on CPU (brief dequeue→on_cpu=0 window)
     if (smp_load_acquire(&se->on_cpu)) {
         // Task switching out, use wake_list for deferred enqueue
-        int running_cpu = smp_load_acquire(&se->cpu_id);
-        rq_add_wake_list(running_cpu, se);
+        rq_add_wake_list(origin_cpuid, se);
+        spin_unlock(&se->pi_lock);
         rq_unlock_two(origin_cpuid, target_cpu);
-        ipi_send_single(running_cpu, IPI_REASON_RESCHEDULE);
+        ipi_send_single(origin_cpuid, IPI_REASON_RESCHEDULE);
         return;
     }
     
     // on_rq=0 and on_cpu=0: task fully off CPU, enqueue directly
     rq_enqueue_task(rq, se);
+    spin_unlock(&se->pi_lock);
     rq_unlock_two(origin_cpuid, target_cpu);
 }
 ```
@@ -579,81 +623,26 @@ The sleeper will be on a wait queue; the proper event will wake it later.
 The `stopped` flag is orthogonal to process state. It handles SIGSTOP/SIGCONT:
 
 - `scheduler_stop(p)`: Sets `PROC_STOPPED` flag, requires `proc_lock`
-- `scheduler_continue(p)`: Clears flag, re-enqueues if RUNNING, requires `pi_lock`
+- `scheduler_wakeup_stopped(p)`: Clears flag, re-enqueues if RUNNING (pi_lock acquired internally)
 
 A stopped process is not enqueued even if RUNNING. When continued, it resumes
 from where it was.
-
-### scheduler_continue() Implementation
-
-`scheduler_continue()` uses the same protocol as `__do_scheduler_wakeup()` to safely
-re-enqueue a stopped process:
-
-```c
-void scheduler_continue(struct proc *p) {
-    // Uses pi_lock protocol like __do_scheduler_wakeup.
-    // Caller must hold p->sched_entity->pi_lock, must NOT hold proc_lock or rq_lock.
-    struct sched_entity *se = p->sched_entity;
-    assert(spin_holding(&se->pi_lock));
-    assert(!spin_holding(&p->lock));
-    assert(!sched_holding());
-    
-    if (!PROC_STOPPED(p)) {
-        return;  // Not stopped, nothing to do
-    }
-    
-    // Wait for process to be off CPU before modifying state.
-    // Like Linux's smp_cond_load_acquire in try_to_wake_up().
-    smp_cond_load_acquire(&se->on_cpu, !VAL);
-    
-    PROC_CLEAR_STOPPED(p);
-    
-    // If process is RUNNING, add it back to the ready queue
-    if (__proc_get_pstate(p) == PSTATE_RUNNING) {
-        push_off();
-        struct rq *rq = rq_select_task_rq(se, se->affinity_mask);
-        rq_lock(rq->cpu_id);
-        pop_off();
-        
-        smp_store_release(&se->on_rq, 1);
-        rq_enqueue_task(rq, se);
-        
-        rq_unlock(rq->cpu_id);
-    }
-}
-```
 
 ### Caller Pattern (from signal.c)
 
 ```c
 // In signal_send() when handling SIGCONT:
 if (is_cont) {
-    // scheduler_continue uses pi_lock protocol.
+    // Note: pi_lock no longer needed - rq_lock serializes wakeups
     proc_unlock(p);
-    spin_lock(&p->sched_entity->pi_lock);
-    scheduler_continue(p);
-    spin_unlock(&p->sched_entity->pi_lock);
+    scheduler_wakeup_stopped(p);
     proc_lock(p);
 }
 ```
 
 This pattern mirrors how `signal_notify()` calls `scheduler_wakeup_interruptible()`.
-
-### Why scheduler_continue Needs on_cpu Wait
-
-Previously, `scheduler_continue()` used a different protocol (`proc_lock` + `sched_lock`)
-and did NOT wait for `on_cpu == 0`. This was unsafe because:
-
-1. **Race with context switch**: If process P is still running on CPU 0 and CPU 1 sends
-   SIGCONT, the old code would add P to the ready queue while P was still on CPU 0.
-   
-2. **Double scheduling**: CPU 2 could pick P from the ready queue and try to run it,
-   while CPU 0 still had P on its CPU.
-
-The fix aligns `scheduler_continue()` with `__do_scheduler_wakeup()`:
-- Both use `pi_lock` (avoiding deadlock with `proc_lock`)
-- Both wait for `on_cpu == 0` before enqueuing
-- Both acquire `rq_lock` internally via `rq_lock()`/`rq_unlock()`
+Note that pi_lock is no longer required externally - it's acquired internally by the
+wakeup functions.
 
 ## CPU Affinity
 
@@ -763,17 +752,19 @@ The scheduler integrates with RCU (Read-Copy-Update) for grace period tracking:
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              WAKEUP PATH                                     │
 ├─────────────────────────────────────────────────────────────────────────────┤
-│  1. Acquire se->pi_lock                                                      │
-│  2. Self-wakeup check: if p == myproc(), set RUNNING and return             │
+│  1. [Internal] Acquire se->pi_lock                                           │
+│  2. Self-wakeup check: if p == myproc(), set RUNNING, release pi_lock       │
 │  3. Validate state is sleepable                                              │
 │  4. retry: Read origin_cpu = se->cpu_id, select target_cpu                  │
-│  5. rq_lock_two(origin_cpu, target_cpu)                                      │
-│  6. Re-check cpu_id: if changed, unlock and goto retry                      │
+│  5. rq_trylock_two(origin_cpu, target_cpu) - if fail, release pi_lock,      │
+│     backoff, re-acquire pi_lock, re-check state, goto retry                 │
+│  6. Re-check cpu_id: if changed, unlock, release/re-acquire pi_lock,        │
+│     re-check state, goto retry                                               │
 │  7. state = WAKENING                                                         │
-│  8. if on_rq=1: state = RUNNING, return (will be put back by put_prev_task) │
-│  9. if on_cpu=1: add to wake_list, send IPI, return                         │
-│ 10. else: rq_enqueue_task() directly                                        │
-│ 11. rq_unlock_two(); release pi_lock                                        │
+│  8. if on_rq=1: state = RUNNING, release pi_lock, rq_unlock_two, return     │
+│  9. if on_cpu=1: add to wake_list, release pi_lock, rq_unlock_two,          │
+│     send IPI, return                                                         │
+│ 10. else: rq_enqueue_task(), release pi_lock, rq_unlock_two                 │
 └─────────────────────────────────────────────────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -783,7 +774,8 @@ The scheduler integrates with RCU (Read-Copy-Update) for grace period tracking:
 │  • on_rq = 0 only when sleeping (dequeued via rq_dequeue_task)              │
 │  • rq_lock serializes wakeup with context_switch_finish                     │
 │  • Retry loop handles cpu_id changing between read and lock                  │
-│  • pi_lock required for wakeup (not proc_lock) to avoid deadlock            │
+│  • pi_lock acquired INTERNALLY by wakeup, not by callers                    │
+│  • trylock + backoff avoids lock convoy when many wake same target          │
 │  • CPU affinity respected via rq_select_task_rq()                            │
 │  • wake_list handles the brief on_rq=0, on_cpu=1 window during dequeue      │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -871,3 +863,52 @@ the deadlock risk (no spinning while holding locks).
 
 4. **on_rq=1 while running simplifies logic**: Following Linux's pattern reduces
    the number of state transitions and race conditions to handle.
+
+5. **Avoid lock convoy with trylock+backoff**: When many processes wake the same
+   target, blocking on locks creates a convoy that serializes all wakers.
+
+### The Lock Convoy Problem (Resolved January 2026)
+
+**Symptom:** `cowtest forkfork` hung on 8-core hardware. Spinlock panic showed
+many cores blocked on `pi_lock`, `rq_lock`, and `sleep_lock`.
+
+**Multiple contributing factors:**
+
+1. **Wakeup convoy (pi_lock + rq_lock):** When many children exit simultaneously
+   and wake the same parent, all compete for `pi_lock` then `rq_lock`. Each process
+   must wait for all previous ones to complete, causing severe serialization.
+
+2. **Global sleep_lock contention:** Filesystem operations (checking file existence
+   to decide whether to continue forking) used `sleep_on_chan()` which acquires the
+   global `sleep_lock`. With many processes doing concurrent FS operations, this
+   single lock became a severe bottleneck, serializing all waiters.
+
+**The convoy effect (wakeup path):**
+```
+Child 1: [holds pi_lock] [spins on rq_lock.......] [enqueues] [releases]
+Child 2:                 [waits for pi_lock.......] [spins on rq_lock...] ...
+Child 3:                                            [waits for pi_lock...] ...
+```
+
+**The sleep_lock bottleneck (filesystem path):**
+```
+Process A: [holds sleep_lock] [FS operation...] [releases]
+Process B:                    [spins on sleep_lock.............] ...
+Process C:                    [spins on sleep_lock.............] ...
+...all processes serialize on global lock...
+```
+
+**Solutions applied:**
+
+1. **Wakeup path:** Move `pi_lock` inside `__do_scheduler_wakeup()`, use
+   `rq_trylock_two()` with backoff. Concurrent wakers don't block each other.
+
+2. **Filesystem/driver paths:** Replace `sleep_on_chan()` with per-subsystem
+   `proc_queue_t` wait queues:
+   - `log.c`: Per-log `wait_queue` instead of `sleep_on_chan(log, ...)`
+   - `virtio_disk.c`: Per-disk `desc_wait_queue` for descriptor allocation
+   - Wakeup uses temp queue pattern: `proc_queue_bulk_move()` then wake outside lock
+
+**Key insight:** Global locks that seem innocuous become critical bottlenecks
+at higher core counts. Per-subsystem queues eliminate false sharing and allow
+independent subsystems to operate in parallel.

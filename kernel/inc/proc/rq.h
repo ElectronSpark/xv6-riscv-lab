@@ -46,8 +46,21 @@ void rq_init(struct rq* rq);
 void sched_entity_init(struct sched_entity* se, struct proc* p);
 void sched_class_register(int id, struct sched_class* cls);
 void rq_register(struct rq* rq, int cls_id, int cpu_id);
+
+/**
+ * @brief Acquire the run queue lock for a specific CPU
+ * @param cpu_id The CPU whose run queue lock to acquire
+ */
 void rq_lock(int cpu_id);
+
+/**
+ * @brief Try to acquire the run queue lock without spinning
+ * @param cpu_id The CPU whose run queue lock to try
+ * @return 1 if lock acquired, 0 if lock is held by another
+ * @note Used to avoid lock convoy in wakeup path
+ */
 int rq_trylock(int cpu_id);
+
 void rq_unlock(int cpu_id);
 void rq_lock_current(void);
 void rq_unlock_current(void);
@@ -55,8 +68,26 @@ int rq_lock_irqsave(int cpu_id);
 void rq_unlock_irqrestore(int cpu_id, int state);
 int rq_lock_current_irqsave(void);
 void rq_unlock_current_irqrestore(int state);
+
+/**
+ * @brief Acquire two run queue locks in consistent order
+ * @param cpu_id1 First CPU's run queue
+ * @param cpu_id2 Second CPU's run queue
+ * @note Locks lower cpu_id first to prevent deadlock
+ */
 void rq_lock_two(int cpu_id1, int cpu_id2);
+
+/**
+ * @brief Try to acquire two run queue locks without spinning
+ * @param cpu_id1 First CPU's run queue
+ * @param cpu_id2 Second CPU's run queue
+ * @return 1 if both locks acquired, 0 if either is held
+ * @note Locks lower cpu_id first; releases first lock if second fails.
+ *       Used in wakeup to avoid lock convoy when many processes
+ *       wake the same target simultaneously.
+ */
 int rq_trylock_two(int cpu_id1, int cpu_id2);
+
 void rq_unlock_two(int cpu_id1, int cpu_id2);
 int rq_holding(int cpu_id);
 int rq_holding_current(void);

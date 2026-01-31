@@ -112,6 +112,7 @@ For scheduler-related structures:
  * 
  * @note The pi_lock, on_rq, on_cpu, and context fields were moved here
  *       from struct proc to separate scheduling concerns.
+ * @note pi_lock is acquired internally by wakeup functions, not by callers.
  * 
  * @see struct proc
  * @see struct rq
@@ -122,7 +123,7 @@ struct sched_entity {
     int priority;                  /**< Scheduling priority (major + minor) */
     struct proc *proc;             /**< Back pointer to owning process */
     struct sched_class *sched_class; /**< Scheduling class (FIFO, IDLE, etc.) */
-    spinlock_t pi_lock;            /**< Priority inheritance lock for wakeup */
+    spinlock_t pi_lock;            /**< Priority inheritance lock (acquired by wakeup internally) */
     int on_rq;                     /**< 1 if on a ready queue */
     int on_cpu;                    /**< 1 if currently running on a CPU */
     int cpu_id;                    /**< CPU this entity is running on */
