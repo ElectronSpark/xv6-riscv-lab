@@ -602,6 +602,37 @@ out:
     return ret;
 }
 
+// Check if a directory is empty (contains only "." and "..").
+// Returns 1 if empty, 0 if not empty.
+// Caller must hold the inode lock.
+int vfs_dir_isempty(struct vfs_inode *dir) {
+    if (!S_ISDIR(dir->mode)) {
+        return 0;
+    }
+    if (dir->ops->dir_iter == NULL) {
+        return 0; // Can't check, assume not empty
+    }
+    
+    struct vfs_dir_iter iter = {0};
+    struct vfs_dentry dentry = {0};
+    int ret;
+    
+    // Start iteration (index 0 is ".", index 1 is "..", index 2+ are real entries)
+    iter.index = 2; // Skip "." and ".."
+    iter.cookies = 0;
+    
+    ret = dir->ops->dir_iter(dir, &iter, &dentry);
+    if (ret != 0) {
+        vfs_release_dentry(&dentry);
+        return 0; // Error, assume not empty
+    }
+    
+    // If name is NULL, we reached end of directory (empty)
+    int is_empty = (dentry.name == NULL);
+    vfs_release_dentry(&dentry);
+    return is_empty;
+}
+
 ssize_t vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen) {
     if (inode == NULL || inode->sb == NULL) {
         return -EINVAL; // Invalid argument

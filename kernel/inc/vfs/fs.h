@@ -74,6 +74,7 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len);
 struct vfs_inode *vfs_mkdir(struct vfs_inode *dir, mode_t mode,
                            const char *name, size_t name_len);
 int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len);
+int vfs_dir_isempty(struct vfs_inode *dir);  // Check if directory contains only "." and ".."
 int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
              struct vfs_inode *new_dir, const char *name, size_t name_len);
 struct vfs_inode *vfs_symlink(struct vfs_inode *dir, mode_t mode,
