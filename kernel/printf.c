@@ -15,6 +15,15 @@
 #include "proc/proc.h"
 #include "smp/ipi.h"
 
+static spinlock_t __panic_bt_lock = SPINLOCK_INITIALIZED("panic_bt_lock");
+
+// Global panic state - set when any core panics
+static volatile int __global_panic_state = 0;
+
+int panic_state(void) {
+    return __atomic_load_n(&__global_panic_state, __ATOMIC_ACQUIRE);
+}
+
 // lock to avoid interleaving concurrent printf's.
 STATIC struct {
   struct spinlock lock;
@@ -86,7 +95,8 @@ printf(char *fmt, ...)
   char outbuf[512];  // Buffer for batched output
   int outlen = 0;
 
-  locking = pr.locking;
+  // Use atomic load to see if panic disabled locking
+  locking = __atomic_load_n(&pr.locking, __ATOMIC_ACQUIRE);
   if(locking)
     spin_lock(&pr.lock);
 
@@ -196,32 +206,57 @@ panic_disable_bt(void)
 void
 __panic_start()
 {
-  pr.locking = 0;
+  // Set global panic state FIRST so other cores can see it
+  __atomic_store_n(&__global_panic_state, 1, __ATOMIC_RELEASE);
+  
+  // Disable printf locking FIRST, before anything else.
+  // This prevents recursive deadlock when panic is called due to
+  // a deadlock on pr.lock itself (spin_acquire timeout on "pr" lock).
+  // Use atomic store with release semantics so other cores see it.
+  __atomic_store_n(&pr.locking, 0, __ATOMIC_RELEASE);
+  
+  SET_CPU_CRASHED();
+  panic_msg_lock();
   uint64 fp = r_fp();
   struct proc *p = myproc();
   if (p == NULL || p->kstack == 0) {
     // No process context - use kernel memory bounds for backtrace
-    printf("No process context, fp=%p\n", (void *)fp);
+    printf("[Core: %ld] No process context, fp=%p\n", cpuid(), (void *)fp);
     if (__bt_enabled) {
       // Use KERNBASE to PHYSTOP as conservative stack bounds
       print_backtrace(fp, KERNBASE, PHYSTOP);
     }
     return;
   }
-  printf("In process %d (%s) at %p\n", p->pid, p->name, (void *)fp);
+  printf("[Core: %ld] In process %d (%s) at %p\n", cpuid(), p->pid, p->name, (void *)fp);
   if (__bt_enabled) {
     size_t kstack_size = (1UL << (PAGE_SHIFT + p->kstack_order));
     print_backtrace(fp, p->kstack, p->kstack + kstack_size);
   }
 }
 
+void
+trigger_panic(void)
+{
+  SET_CPU_CRASHED();
+  // Mask all interrupts except software interrupt (IPI)
+  w_sie(SIE_SSIE);
+  
+  // Send IPI to all harts(including self) to crash
+  ipi_send_all(IPI_REASON_CRASH);
+  
+  // Enable interrupts so IPI can be received
+  intr_on();
+  
+  for(;;)
+    asm volatile("wfi");
+}
+
 void 
 __panic_end()
 {
-  // Send IPI to all harts(including self) to crash
-  ipi_send_all(IPI_REASON_CRASH);
-  for(;;)
-    asm volatile("wfi");
+  panic_msg_unlock();
+  trigger_panic();
 }
 
 void
@@ -229,4 +264,16 @@ printfinit(void)
 {
   spin_init(&pr.lock, "pr");
   pr.locking = 1;
+}
+
+void
+panic_msg_lock(void)
+{
+  spin_lock(&__panic_bt_lock);
+}
+
+void
+panic_msg_unlock(void)
+{
+  spin_unlock(&__panic_bt_lock);
 }

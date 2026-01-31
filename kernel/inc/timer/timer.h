@@ -10,8 +10,8 @@ extern uint64 __jiff_ticks;
 #define TIMEBASE_FREQUENCY __timebase_frequency
 #define HZ 1000UL
 #define JIFF_TICKS __jiff_ticks
-#define TICK_MS 1UL
-#define TICK_S (TICK_MS * 1000)
+#define TICK_MS (TIMEBASE_FREQUENCY / HZ)
+#define TICK_S TIMEBASE_FREQUENCY
 
 extern uint64 __clint_timer_irqno;
 #define CLINT_TIMER_IRQ __clint_timer_irqno

@@ -7,6 +7,18 @@
 #define __KERNEL_PRINTF_H
 
 /**
+ * @brief Check if system is in panic state
+ * @return Non-zero if any core has panicked
+ */
+int panic_state(void);
+
+void trigger_panic(void) __attribute__((noreturn));
+
+void panic_msg_lock(void);
+
+void panic_msg_unlock(void);
+
+/**
  * @brief Kernel printf function
  * @param fmt Format string (printf-style)
  * @return Number of characters printed

@@ -9,6 +9,7 @@
 #include <smp/percpu.h>
 #include "defs.h"
 #include "printf.h"
+#include "timer/timer.h"
 
 void spin_init(struct spinlock *lk, char *name) {
     lk->name = name;
@@ -31,6 +32,11 @@ void spin_acquire(struct spinlock *lk) {
         if (__debug_count >= 10) {
             cpu_relax();
         };
+        if (__debug_count >= TICK_S * 100) {
+            if (!CPU_CRASHED()) {
+                panic("spin_acquire: deadlock detected on lock %s\n", lk->name);
+            }
+        }
     }
 
     // Record info about lock acquisition for spin_holding() and debugging.

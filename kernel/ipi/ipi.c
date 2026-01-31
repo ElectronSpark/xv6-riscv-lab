@@ -23,6 +23,7 @@
 #include "defs.h"
 #include "printf.h"
 #include "proc/sched.h"
+#include "proc/rq.h"
 #include "trap.h"
 #include "sbi.h"
 #include <smp/ipi.h>
@@ -49,7 +50,7 @@ uint64 ipi_pending[NCPU] = {0};
 
 /**
  * IPI handler - called when a hart receives a software interrupt.
- * This clears the interrupt pending bit and processes the IPI.
+ * This clears the interrupt pending bit and processes ALL pending IPI reasons.
  */
 static void __ipi_irq_handler(int irq, void *data, device_t *dev) {
     // Clear the software interrupt pending bit (SIP.SSIP)
@@ -57,45 +58,54 @@ static void __ipi_irq_handler(int irq, void *data, device_t *dev) {
     w_sip(r_sip() & ~SIE_SSIE);
 
     int hartid = cpuid();
-    uint64 pending = smp_load_acquire(&ipi_pending[hartid]);
-    int reason = bits_ctz8((uint8)pending);
-
-    if (reason < 0 || reason >= NR_IPI_REASON) {
-        // No valid pending IPI
-        return;
-    }
-
-    switch (reason) {
-    case IPI_REASON_CRASH:
-        // Propagate crash to all other harts
-        ipi_send_all_but_self(IPI_REASON_CRASH);
-        for (;;) {
-            asm volatile("wfi");
+    
+    // Process all pending IPI reasons in a loop
+    // Use atomic exchange to grab all pending reasons at once
+    uint64 pending = __atomic_exchange_n(&ipi_pending[hartid], 0, __ATOMIC_ACQ_REL);
+    
+    while (pending != 0) {
+        int reason = bits_ctz8((uint8)pending);
+        if (reason < 0 || reason >= NR_IPI_REASON) {
+            break;
         }
-        break;
-    case IPI_REASON_CALL_FUNC:
-        // Request to call a function - not implemented yet
-        break;
-    case IPI_REASON_RESCHEDULE:
-        // Request to reschedule
-        // sched_yield();
-        SET_NEEDS_RESCHED();
-        break;
-    case IPI_REASON_TLB_FLUSH:
-        // Request to flush TLB
-        // Since XV6 use different page tables for kernel and user,
-        // TLB will be flushed when returning to user mode.
-        break;
-    case IPI_REASON_GENERIC:
-        // Generic IPI - no specific action
-        break;
-    default:
-        // Unknown reason
-        break;
-    }
+        
+        // Clear this reason from our local copy
+        pending &= ~(1UL << reason);
 
-    // Clear the processed IPI reason bit
-    atomic_and(&ipi_pending[hartid], ~(1UL << reason));
+        switch (reason) {
+        case IPI_REASON_CRASH:
+            // Propagate crash to all other harts
+            SET_CPU_CRASHED();
+            panic_msg_lock();
+            printf("[Core: %d] Received IPI_REASON_CRASH, crashing...\n", hartid);
+            print_backtrace(r_fp(), KERNBASE, PHYSTOP);
+            panic_msg_unlock();
+            ipi_send_all_but_self(IPI_REASON_CRASH);
+            for (;;) {
+                asm volatile("wfi");
+            }
+            break;
+        case IPI_REASON_CALL_FUNC:
+            // Request to call a function - not implemented yet
+            break;
+        case IPI_REASON_RESCHEDULE:
+            // Request to reschedule
+            rq_flush_wake_list(cpuid());
+            SET_NEEDS_RESCHED();
+            break;
+        case IPI_REASON_TLB_FLUSH:
+            // Request to flush TLB
+            // Since XV6 use different page tables for kernel and user,
+            // TLB will be flushed when returning to user mode.
+            break;
+        case IPI_REASON_GENERIC:
+            // Generic IPI - no specific action
+            break;
+        default:
+            // Unknown reason
+            break;
+        }
+    }
 }
 
 /**

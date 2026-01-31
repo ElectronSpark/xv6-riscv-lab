@@ -12,6 +12,7 @@ extern struct cpu_local cpus[NCPU];
 #define CPU_FLAG_NEEDS_RESCHED  1
 #define CPU_FLAG_BOOT_HART      2
 #define CPU_FLAG_IN_ITR         4
+#define CPU_FLAG_CRASHED        8
 
 #if !defined(ON_HOST_OS)
 
@@ -33,6 +34,12 @@ extern struct cpu_local cpus[NCPU];
   do { mycpu()->flags &= ~CPU_FLAG_BOOT_HART; } while(0)
 #define IS_BOOT_HART() \
   (!!(mycpu()->flags & CPU_FLAG_BOOT_HART))
+#define SET_CPU_CRASHED() \
+  do { mycpu()->flags |= CPU_FLAG_CRASHED; } while(0)
+#define CPU_CRASHED() \
+  (!!(mycpu()->flags & CPU_FLAG_CRASHED))
+#define CLEAR_CPU_CRASHED() \
+  do { mycpu()->flags &= ~CPU_FLAG_CRASHED; } while(0)
 
 // Return this CPU's cpu struct.
 // Interrupts must be disabled.
