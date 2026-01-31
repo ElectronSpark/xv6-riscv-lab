@@ -33,7 +33,7 @@ fetchstr(uint64 addr, char *buf, int max)
   return strlen(buf);
 }
 
-STATIC uint64
+uint64
 argraw(int n)
 {
   struct proc *p = myproc();
@@ -58,6 +58,12 @@ argraw(int n)
 // Fetch the nth 32-bit system call argument.
 void
 argint(int n, int *ip)
+{
+  *ip = argraw(n);
+}
+
+void
+argint64(int n, int64 *ip)
 {
   *ip = argraw(n);
 }

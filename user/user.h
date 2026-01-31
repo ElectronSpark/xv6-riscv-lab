@@ -28,7 +28,7 @@ int mkdir(const char*);
 int chdir(const char*);
 int dup(int);
 int getpid(void);
-char* sbrk(int);
+char* sbrk(int64);
 int sleep(int);
 int uptime(void);
 // int sigalarm(int ticks, void (*handler)());

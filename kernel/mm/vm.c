@@ -1738,7 +1738,7 @@ int vm_createstack(vm_t *vm, uint64 stack_top, uint64 size) {
     return 0;              // Success
 }
 
-int vm_growstack(vm_t *vm, int change_size) {
+int vm_growstack(vm_t *vm, int64 change_size) {
     assert(myproc() == NULL || rwlock_is_write_holding(&vm->rw_lock),
            "vm_growstack: vm rwlock must be write-held");
     if (vm == NULL || vm->pagetable == NULL) {
@@ -1754,7 +1754,7 @@ int vm_growstack(vm_t *vm, int change_size) {
         return 0; // No change in stack size
     }
 
-    if (change_size < 0 && (uint64)(-change_size) > vm->stack_size - PGSIZE) {
+    if (change_size < 0 && -change_size > vm->stack_size - PGSIZE) {
         return -1; // Cannot shrink stack beyond current size
     } else if ((uint64)change_size > (MAXUSTACK << PGSHIFT) - vm->stack_size) {
         return -1; // Cannot grow stack beyond maximum size
@@ -1857,7 +1857,7 @@ out:
     return ret;
 }
 
-int vm_growheap(vm_t *vm, int change_size) {
+int vm_growheap(vm_t *vm, int64 change_size) {
     int ret = 0;
     vm_wlock(vm);
     if (vm == NULL || vm->pagetable == NULL) {
@@ -1878,7 +1878,7 @@ int vm_growheap(vm_t *vm, int change_size) {
     }
 
     if (change_size < 0) {
-        if ((uint64)(-change_size) > vm->heap_size - PGSIZE) {
+        if (-change_size > vm->heap_size - PGSIZE) {
             ret = -1; // Cannot shrink heap beyond current size
             goto ret;
         }

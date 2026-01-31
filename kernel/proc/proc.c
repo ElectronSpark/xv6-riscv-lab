@@ -523,7 +523,7 @@ void install_user_root(void) {
 
 // Grow or shrink user memory by n bytes.
 // Return 0 on success, -1 on failure.
-int growproc(int n) {
+int growproc(int64 n) {
     struct proc *p = myproc();
 
     return vm_growheap(p->vm, n);

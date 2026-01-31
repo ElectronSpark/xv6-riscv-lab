@@ -28,9 +28,9 @@ uint64 sys_wait(void) {
 
 uint64 sys_sbrk(void) {
     uint64 addr;
-    int n;
+    int64 n;
 
-    argint(0, &n);
+    argint64(0, &n);
     vma_t *vma = myproc()->vm->heap;
     if (vma == NULL) {
         return -1; // No heap VMA found

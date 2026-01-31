@@ -1898,8 +1898,10 @@ void forktest(char *s) {
         exit(1);
     }
 
-    if (n == N) {
-        printf("%s: fork claimed to work 1000 times!\n", s);
+    if (n != N) {
+        // the new kernel now can handle 10,000 processes with 2GB of memory
+        // so the original 64 process limit is no longer relevant.
+        printf("%s: the number of times that fork claimed to work is not 1000!\n", s);
         exit(1);
     }
 
@@ -1917,7 +1919,7 @@ void forktest(char *s) {
 }
 
 void sbrkbasic(char *s) {
-    enum { TOOMUCH = 1024 * 1024 * 1024 };
+    enum { TOOMUCH = 8ULL << 32 };
     int i, pid, xstatus;
     char *c, *a, *b;
 
@@ -2086,6 +2088,7 @@ void MAXVAplus(char *s) {
 
 // if we run the system out of memory, does it clean up the last
 // failed allocation?
+// This test does not work with lazy allocation.
 void sbrkfail(char *s) {
     enum { BIG = 100 * 1024 * 1024 };
     int i, xstatus;
@@ -2297,7 +2300,7 @@ void fsfull() {
 
 void argptest(char *s) {
     int fd;
-    fd = open("init", O_RDONLY);
+    fd = open("/bin/init", O_RDONLY);
     if (fd < 0) {
         printf("%s: open failed\n", s);
         exit(1);

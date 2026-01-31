@@ -82,7 +82,7 @@ void            exit(int);
 int             fork(void);
 int             kernel_proc_create(const char *name, struct proc **retp, void *entry,
                                    uint64 arg1, uint64 arg2, int stack_order);
-int             growproc(int);
+int             growproc(int64);
 void            proc_mapstacks(pagetable_t);
 int             proc_pagetable(struct proc *);
 void            proc_freepagetable(struct proc *);
@@ -134,7 +134,9 @@ int holding_mutex(mutex_t *);
 void mutex_init(mutex_t *, char *);
 
 // syscall.c
+uint64 argraw(int n);
 void argint(int, int *);
+void argint64(int, int64 *);
 int argstr(int, char *, int);
 void argaddr(int, uint64 *);
 int fetchstr(uint64, char *, int);
