@@ -126,6 +126,7 @@ extern uint64 sys_vfs_open(void);
 extern uint64 sys_vfs_mkdir(void);
 extern uint64 sys_vfs_mknod(void);
 extern uint64 sys_vfs_unlink(void);
+extern uint64 sys_vfs_rmdir(void);
 extern uint64 sys_vfs_link(void);
 extern uint64 sys_vfs_symlink(void);
 extern uint64 sys_vfs_chdir(void);
@@ -197,6 +198,7 @@ STATIC uint64 (*syscalls[])(void) = {
 [SYS_vfs_mknod]   sys_vfs_mknod,
 [SYS_vfs_unlink]  sys_vfs_unlink,
 [SYS_vfs_link]    sys_vfs_link,
+[SYS_vfs_rmdir]   sys_vfs_rmdir,
 [SYS_vfs_symlink] sys_vfs_symlink,
 [SYS_vfs_chdir]   sys_vfs_chdir,
 [SYS_vfs_pipe]    sys_vfs_pipe,

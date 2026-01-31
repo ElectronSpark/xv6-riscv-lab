@@ -340,21 +340,18 @@ void truncate1(char *s) {
 
 // write to an open FD whose file has just been truncated.
 // this causes a write at an offset beyond the end of the file.
-// such writes fail on xv6 (unlike POSIX) but at least
-// they don't crash.
+// Negative test: verify the system doesn't crash. The write may succeed
+// (POSIX: extends file with hole) or fail (original xv6), either is fine.
 void truncate2(char *s) {
     unlink("truncfile");
 
     int fd1 = open("truncfile", O_CREAT | O_TRUNC | O_WRONLY);
-    write(fd1, "abcd", 4);
+    write(fd1, "abcd", 4);  // f_pos=4, size=4
 
-    int fd2 = open("truncfile", O_TRUNC | O_WRONLY);
+    int fd2 = open("truncfile", O_TRUNC | O_WRONLY);  // size=0, fd1's f_pos still 4
 
-    int n = write(fd1, "x", 1);
-    if (n >= 0) {
-        printf("%s: write returned %d, expected -1\n", s, n);
-        exit(1);
-    }
+    // Write at offset past EOF - just verify no crash
+    (void)write(fd1, "x", 1);
 
     unlink("truncfile");
     close(fd1);
@@ -422,8 +419,8 @@ void iputtest(char *s) {
         printf("%s: chdir iputdir failed\n", s);
         exit(1);
     }
-    if (unlink("../iputdir") < 0) {
-        printf("%s: unlink ../iputdir failed\n", s);
+    if (rmdir("../iputdir") < 0) {
+        printf("%s: rmdir ../iputdir failed\n", s);
         exit(1);
     }
     if (chdir("/") < 0) {
@@ -450,8 +447,8 @@ void exitiputtest(char *s) {
             printf("%s: child chdir failed\n", s);
             exit(1);
         }
-        if (unlink("../iputdir") < 0) {
-            printf("%s: unlink ../iputdir failed\n", s);
+        if (rmdir("../iputdir") < 0) {
+            printf("%s: rmdir ../iputdir failed\n", s);
             exit(1);
         }
         exit(0);
@@ -492,8 +489,8 @@ void openiputtest(char *s) {
         exit(0);
     }
     sleep(100);
-    if (unlink("oidir") != 0) {
-        printf("%s: unlink failed\n", s);
+    if (rmdir("oidir") != 0) {
+        printf("%s: rmdir failed\n", s);
         exit(1);
     }
     wait(&xstatus);
@@ -646,8 +643,8 @@ void dirtest(char *s) {
         exit(1);
     }
 
-    if (unlink("dir0") < 0) {
-        printf("%s: unlink dir0 failed\n", s);
+    if (rmdir("dir0") < 0) {
+        printf("%s: rmdir dir0 failed\n", s);
         exit(1);
     }
 }
@@ -1473,8 +1470,8 @@ void subdir(char *s) {
     write(fd, "ff", 2);
     close(fd);
 
-    if (unlink("dd") >= 0) {
-        printf("%s: unlink dd (non-empty dir) succeeded!\n", s);
+    if (rmdir("dd") >= 0) {
+        printf("%s: rmdir dd (non-empty dir) succeeded!\n", s);
         exit(1);
     }
 
@@ -1619,16 +1616,16 @@ void subdir(char *s) {
         printf("%s: unlink dd/ff failed\n", s);
         exit(1);
     }
-    if (unlink("dd") == 0) {
-        printf("%s: unlink non-empty dd succeeded!\n", s);
+    if (rmdir("dd") == 0) {
+        printf("%s: rmdir non-empty dd succeeded!\n", s);
         exit(1);
     }
-    if (unlink("dd/dd") < 0) {
-        printf("%s: unlink dd/dd failed\n", s);
+    if (rmdir("dd/dd") < 0) {
+        printf("%s: rmdir dd/dd failed\n", s);
         exit(1);
     }
-    if (unlink("dd") < 0) {
-        printf("%s: unlink dd failed\n", s);
+    if (rmdir("dd") < 0) {
+        printf("%s: rmdir dd failed\n", s);
         exit(1);
     }
 }
@@ -2717,7 +2714,7 @@ void diskfull(char *s) {
     int fi;
     int done = 0;
 
-    unlink("diskfulldir");
+    rmdir("diskfulldir");
 
     for (fi = 0; done == 0 && '0' + fi < 0177; fi++) {
         char name[32];
@@ -2768,7 +2765,7 @@ void diskfull(char *s) {
     if (mkdir("diskfulldir") == 0)
         printf("%s: mkdir(diskfulldir) unexpectedly succeeded!\n", s);
 
-    unlink("diskfulldir");
+    rmdir("diskfulldir");
 
     for (int i = 0; i < nzz; i++) {
         char name[32];

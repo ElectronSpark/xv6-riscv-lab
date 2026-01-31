@@ -65,16 +65,17 @@
 #define SYS_vfs_mkdir    1006
 #define SYS_vfs_mknod    1007
 #define SYS_vfs_unlink   1008
-#define SYS_vfs_link     1009
-#define SYS_vfs_symlink  1010
-#define SYS_vfs_chdir    1011
-#define SYS_vfs_pipe     1012
-#define SYS_vfs_connect  1013
-#define SYS_getdents     1014
-#define SYS_chroot       1015
-#define SYS_mount        1016
-#define SYS_umount       1017
-#define SYS_getcwd       1018
+#define SYS_vfs_rmdir    1009
+#define SYS_vfs_link     1010
+#define SYS_vfs_symlink  1011
+#define SYS_vfs_chdir    1012
+#define SYS_vfs_pipe     1013
+#define SYS_vfs_connect  1014
+#define SYS_getdents     1015
+#define SYS_chroot       1016
+#define SYS_mount        1017
+#define SYS_umount       1018
+#define SYS_getcwd       1019
 // SYS_mknod2 removed - mknod now takes 4 args (path, type, major, minor)
 
 #endif          /* __KERNEL_SYSCALL_H */

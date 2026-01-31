@@ -270,6 +270,11 @@ uint64 sys_vfs_open(void) {
             if (PTR_ERR(inode) == -EEXIST && !(omode & O_EXCL)) {
                 // File exists, try to open it
                 inode = vfs_namei(path, n);
+                // O_CREAT on an existing directory is not allowed
+                if (!IS_ERR_OR_NULL(inode) && S_ISDIR(inode->mode)) {
+                    vfs_iput(inode);
+                    return -EISDIR;
+                }
             } else {
                 return PTR_ERR(inode);
             }
@@ -443,6 +448,38 @@ uint64 sys_vfs_unlink(void) {
     }
     
     int ret = vfs_unlink(parent, name, name_len);
+    vfs_iput(parent);
+    
+    return ret;
+}
+
+uint64 sys_vfs_rmdir(void) {
+    char path[MAXPATH];
+    char name[DIRSIZ];
+    int n;
+    
+    if ((n = argstr(0, path, MAXPATH)) < 0) {
+        return -EFAULT;
+    }
+    
+    struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ);
+    if (IS_ERR(parent)) {
+        return PTR_ERR(parent);
+    }
+    if (parent == NULL) {
+        return -ENOENT;
+    }
+    
+    size_t name_len = strlen(name);
+    
+    // Cannot rmdir "." or ".."
+    if ((name_len == 1 && name[0] == '.') ||
+        (name_len == 2 && name[0] == '.' && name[1] == '.')) {
+        vfs_iput(parent);
+        return -EINVAL;
+    }
+    
+    int ret = vfs_rmdir(parent, name, name_len);
     vfs_iput(parent);
     
     return ret;
