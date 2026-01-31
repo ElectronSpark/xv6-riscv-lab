@@ -27,8 +27,9 @@
 #include "param.h"
 #include "errno.h"
 #include "lock/spinlock.h"
-#include "dev/buf.h"
 #include "proc/sched.h"
+#include "proc/proc_queue.h"
+#include "dev/buf.h"
 #include "printf.h"
 #include "vfs/fs.h"
 #include "xv6fs_private.h"
@@ -121,6 +122,7 @@ void xv6fs_initlog(struct xv6fs_superblock *xv6_sb) {
         panic("xv6fs_initlog: too big logheader");
     
     spin_init(&log->lock, "xv6fs_log");
+    proc_queue_init(&log->wait_queue, "xv6fs_log_wait", &log->lock);
     log->start = disk_sb->logstart;
     log->size = disk_sb->nlog;
     log->dev = xv6fs_sb_dev(xv6_sb);
@@ -140,10 +142,10 @@ void xv6fs_begin_op(struct xv6fs_superblock *xv6_sb) {
     spin_lock(&log->lock);
     while (1) {
         if (log->committing) {
-            sleep_on_chan(log, &log->lock);
+            proc_queue_wait(&log->wait_queue, &log->lock, NULL);
         } else if (log->lh.n + (log->outstanding + 1) * MAXOPBLOCKS > XV6FS_LOGSIZE) {
             // this op might exhaust log space; wait for commit.
-            sleep_on_chan(log, &log->lock);
+            proc_queue_wait(&log->wait_queue, &log->lock, NULL);
         } else {
             log->outstanding += 1;
             spin_unlock(&log->lock);
@@ -165,18 +167,26 @@ void xv6fs_end_op(struct xv6fs_superblock *xv6_sb) {
     if (log->outstanding == 0) {
         do_commit = 1;
         log->committing = 1;
-    } else {
-        // begin_op() may be waiting for log space
-        wakeup_on_chan(log);
     }
     spin_unlock(&log->lock);
     
     if (do_commit) {
         __xv6fs_commit(log);
+        
+        // Collect waiters while holding lock, then wake outside lock
+        // to avoid lock convoy (woken processes try to reacquire log->lock)
+        proc_queue_t temp_queue;
+        proc_queue_init(&temp_queue, "xv6fs_log_temp", NULL);
+        
         spin_lock(&log->lock);
         log->committing = 0;
-        wakeup_on_chan(log);
+        proc_queue_bulk_move(&temp_queue, &log->wait_queue);
         spin_unlock(&log->lock);
+        
+        // Wake all outside the lock
+        if (temp_queue.counter > 0) {
+            proc_queue_wakeup_all(&temp_queue, 0, 0);
+        }
     }
 }
 

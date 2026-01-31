@@ -31,7 +31,20 @@ void spin_acquire(struct spinlock *lk) {
         __debug_count += 1;
         if (__debug_count >= 10) {
             cpu_relax();
-        };
+        }
+        // Periodically check if system panicked - if so, enable IPI-only
+        // interrupts so we can receive the crash IPI.
+        // Skip if this core already crashed (avoid IPI storm).
+        if ((__debug_count & 0xFFFF) == 0 && !CPU_CRASHED() && panic_state()) {
+            // Mark this core as crashed before enabling interrupts
+            SET_CPU_CRASHED();
+            // System panicked, enable only software interrupts (IPI)
+            w_sie(SIE_SSIE);
+            intr_on();
+            // Spin waiting for crash IPI
+            for (;;)
+                asm volatile("wfi");
+        }
         if (__debug_count >= TICK_S * 100) {
             if (!CPU_CRASHED()) {
                 panic("spin_acquire: deadlock detected on lock %s\n", lk->name);

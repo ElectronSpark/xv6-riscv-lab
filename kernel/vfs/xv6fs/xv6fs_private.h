@@ -4,6 +4,7 @@
 #include "types.h"
 #include "vfs/vfs_types.h"
 #include "lock/spinlock.h"
+#include "proc/proc_queue.h"
 #include "vfs/xv6fs/ondisk.h"  // xv6 on-disk format definitions
 #include <mm/slab.h>
 #include "dev/blkdev.h"
@@ -50,6 +51,7 @@ struct xv6fs_logheader {
  */
 struct xv6fs_log {
     struct spinlock lock;
+    proc_queue_t wait_queue;  // Per-log wait queue for begin_op waiters
     int start;          // Log start block
     int size;           // Log size in blocks
     int outstanding;    // How many FS ops are executing
