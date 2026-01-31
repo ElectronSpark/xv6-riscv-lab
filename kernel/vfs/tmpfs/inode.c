@@ -375,9 +375,7 @@ int __tmpfs_unlink(struct vfs_dentry *dentry, struct vfs_inode *target) {
     __tmpfs_free_dentry(tmpfs_dentry);
     
     assert (target->n_links >= 0, "Tmpfs unlink: negative link count");
-    if (target->n_links == 0) {
-        assert(vfs_try_iput(target), "Tmpfs unlink: failed to decrease refcount of target inode");
-    }
+    // VFS layer will call vfs_iput on target after we return
     return 0;
 }
 
@@ -413,6 +411,10 @@ struct vfs_inode *__tmpfs_mkdir(struct vfs_inode *dir, mode_t mode,
         return ERR_PTR(PTR_ERR(tmpfs_inode));
     }
     tmpfs_make_directory(tmpfs_inode);
+    // Directory has n_links=2 for "." and ".." entries
+    tmpfs_inode->vfs_inode.n_links = 2;
+    // Increment parent's n_links for this subdir's ".." entry
+    dir->n_links++;
     vfs_iunlock(&tmpfs_inode->vfs_inode);
     return &tmpfs_inode->vfs_inode;
 }
@@ -431,11 +433,14 @@ int __tmpfs_rmdir(struct vfs_dentry *dentry, struct vfs_inode *target) {
     if (vfs_inode_refcount(target) > 2) {
         return -EBUSY; // Target inode is busy
     }
-    assert(target->n_links == 1, "Tmpfs rmdir: directory link count is not 1");
-    target->n_links--;
+    // Directory n_links should be 2 (for "." and "..") when empty
+    assert(target->n_links == 2, "Tmpfs rmdir: directory link count is not 2");
+    target->n_links -= 2;  // Remove both "." and ".." links
+    // Decrement parent's n_links for this subdir's ".." entry
+    dentry->parent->n_links--;
     __tmpfs_do_unlink(tmpfs_dentry);
     __tmpfs_free_dentry(tmpfs_dentry);
-    assert(vfs_try_iput(target), "Tmpfs rmdir: failed to decrease refcount of target inode");
+    // VFS layer will call vfs_iput on target after we return
     
     return 0;
 }

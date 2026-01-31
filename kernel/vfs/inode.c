@@ -79,12 +79,6 @@ void vfs_idup(struct vfs_inode *inode) {
     assert(success, "vfs_idup: inode refcount overflow");
 }
 
-// Try to increase inode ref count; return true on success, false if ref count is at max
-// Used by some filesystems
-bool vfs_try_iput(struct vfs_inode *inode) {
-    return atomic_inc_unless(&inode->ref_count, VFS_INODE_MAX_REFCOUNT);
-}
-
 // Decrease inode ref count; free the inode when the last reference is dropped.
 // Caller must not hold the inode lock when calling (vfs_iput() will acquire locks internally
 // when it needs to remove/free an inode).

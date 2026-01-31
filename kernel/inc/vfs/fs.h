@@ -56,7 +56,6 @@ int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
 void vfs_ilock(struct vfs_inode *inode);
 void vfs_iunlock(struct vfs_inode *inode);
 void vfs_idup(struct vfs_inode *inode);         // Increase ref count
-bool vfs_try_iput(struct vfs_inode *inode); // Try to increase ref count; return true on success, false if at max
 void vfs_iput(struct vfs_inode *inode);         // Decrease ref count. Caller must not hold inode lock when calling
 int vfs_invalidate(struct vfs_inode *inode);    // Decrease ref count and invalidate inode
 int vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty

@@ -1455,6 +1455,15 @@ void linkunlink(char *s) {
 
 void subdir(char *s) {
     int fd, cc;
+    struct stat st_dot, st_dotdot;
+    int at_root;
+    
+    // Check if we're at a root directory (. and .. are the same inode on the same device)
+    if (stat(".", &st_dot) != 0 || stat("..", &st_dotdot) != 0) {
+        printf("%s: stat . or .. failed\n", s);
+        exit(1);
+    }
+    at_root = (st_dot.dev == st_dotdot.dev && st_dot.ino == st_dotdot.ino);
 
     unlink("ff");
     if (mkdir("dd") != 0) {
@@ -1475,7 +1484,7 @@ void subdir(char *s) {
         exit(1);
     }
 
-    if (mkdir("/dd/dd") != 0) {
+    if (mkdir("dd/dd") != 0) {
         printf("%s: subdir mkdir dd/dd failed\n", s);
         exit(1);
     }
@@ -1522,14 +1531,19 @@ void subdir(char *s) {
         printf("%s: chdir dd/../../dd failed\n", s);
         exit(1);
     }
-    if (chdir("dd/../../../dd") != 0) {
-        printf("%s: chdir dd/../../../dd failed\n", s);
-        exit(1);
+    // We're still in dd after dd/../../dd (go to dd/dd, up 2, down to dd)
+    // Only test deep traversal past root if we started at a root directory
+    if (at_root) {
+        if (chdir("dd/../../../dd") != 0) {
+            printf("%s: chdir dd/../../../dd failed\n", s);
+            exit(1);
+        }
     }
     if (chdir("./..") != 0) {
         printf("%s: chdir ./.. failed\n", s);
         exit(1);
     }
+    // Now we're back at the test root directory
 
     fd = open("dd/dd/ffff", 0);
     if (fd < 0) {
