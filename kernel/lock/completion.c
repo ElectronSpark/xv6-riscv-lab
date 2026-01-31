@@ -40,13 +40,6 @@ static void __completion_do_wake(completion_t *c) {
     }
 }
 
-static void __completion_do_wake_all(completion_t *c) {
-    if (proc_queue_size(&c->wait_queue) > 0) {
-        int ret = proc_queue_wakeup_all(&c->wait_queue, 0, 0);
-        (void)ret; // @TODO: ignore interrupt by now
-    }
-}
-
 bool try_wait_for_completion(completion_t *c) {
     if (c == NULL) {
         return false;
@@ -89,10 +82,23 @@ void complete_all(completion_t *c) {
     if (c == NULL) {
         return;
     }
+    
+    // Use a temporary queue to collect waiters, so we can release
+    // the lock before waking them (avoiding lock convoy when woken
+    // processes try to re-acquire c->lock in scheduler_sleep).
+    proc_queue_t temp_queue;
+    proc_queue_init(&temp_queue, "completion_temp", NULL);
+    
     spin_lock(&c->lock);
     c->done = MAX_COMPLETIONS;
-    __completion_do_wake_all(c);
+    // Move all waiters to temp queue
+    proc_queue_bulk_move(&temp_queue, &c->wait_queue);
     spin_unlock(&c->lock);
+    
+    // Wake all waiters outside the lock
+    if (temp_queue.counter > 0) {
+        proc_queue_wakeup_all(&temp_queue, 0, 0);
+    }
 }
 
 bool completion_done(completion_t *c) {
