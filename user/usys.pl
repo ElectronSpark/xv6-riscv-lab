@@ -38,7 +38,6 @@ entry("exec");
 entry_aliased("open", "vfs_open");
 entry("mknod");
 entry_aliased("unlink", "vfs_unlink");
-entry_aliased("rmdir", "vfs_rmdir");
 entry_aliased("fstat", "vfs_fstat");
 entry_aliased("link", "vfs_link");
 entry_aliased("symlink", "vfs_symlink");

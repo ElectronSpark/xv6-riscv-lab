@@ -1563,7 +1563,6 @@ static struct vfs_inode *__vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) 
     // Set parent and name on fresh load - directory inodes need these for ".." traversal
     __vfs_set_parent_from_dentry(inode, dentry->parent);
     __vfs_set_name_if_null(inode, dentry);
-    vfs_idup(inode);
     vfs_iunlock(inode);
     return inode;
 }

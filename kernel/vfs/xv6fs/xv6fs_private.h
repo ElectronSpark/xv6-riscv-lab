@@ -127,8 +127,8 @@ struct vfs_inode *xv6fs_create(struct vfs_inode *dir, mode_t mode,
                                 const char *name, size_t name_len);
 struct vfs_inode *xv6fs_mkdir(struct vfs_inode *dir, mode_t mode,
                                const char *name, size_t name_len);
-struct vfs_inode *xv6fs_unlink(struct vfs_inode *dir, const char *name, size_t name_len);
-struct vfs_inode *xv6fs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len);
+int xv6fs_unlink(struct vfs_dentry *dentry, struct vfs_inode *target);
+int xv6fs_rmdir(struct vfs_dentry *dentry, struct vfs_inode *target);
 struct vfs_inode *xv6fs_mknod(struct vfs_inode *dir, mode_t mode,
                                dev_t dev, const char *name, size_t name_len);
 struct vfs_inode *xv6fs_symlink(struct vfs_inode *dir, mode_t mode,

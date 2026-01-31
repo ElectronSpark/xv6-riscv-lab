@@ -356,35 +356,29 @@ struct vfs_inode *__tmpfs_create(struct vfs_inode *dir, mode_t mode,
     return &tmpfs_inode->vfs_inode;
 }
 
-struct vfs_inode *__tmpfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
-    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
+int __tmpfs_unlink(struct vfs_dentry *dentry, struct vfs_inode *target) {
+    struct tmpfs_inode *tmpfs_dir = container_of(dentry->parent, struct tmpfs_inode, vfs_inode);
     struct tmpfs_dentry *tmpfs_dentry = NULL;
-    struct vfs_inode *target = NULL;
-    tmpfs_dentry = __tmpfs_dir_lookup_by_name(tmpfs_dir, name, name_len);
+    // We need to lookup the dentry again to get the tmpfs_dentry
+    tmpfs_dentry = __tmpfs_dir_lookup_by_name(tmpfs_dir, dentry->name, dentry->name_len);
     if (tmpfs_dentry == NULL) {
-        return ERR_PTR(-ENOENT); // Entry not found
+        return -ENOENT; // Entry not found
     }
-    target = &tmpfs_dentry->inode->vfs_inode;
-    vfs_ilock(target);
-    
+    if (&tmpfs_dentry->inode->vfs_inode != target) {
+        return -EINVAL; // Target inode does not match
+    }
+
     // Remove directory entry - this makes the file inaccessible by name
     // even if it's still open (Unix semantics)
     target->n_links--;
     __tmpfs_do_unlink(tmpfs_dentry);
     __tmpfs_free_dentry(tmpfs_dentry);
     
-    if (target->n_links > 0) {
-        vfs_iunlock(target);
-        return NULL; // Still has links, nothing more to do
-    } else if (target->n_links == 0) {
-        // Increment refcount because caller (vfs_unlink) will call vfs_iput
-        vfs_idup(target);
-        vfs_iunlock(target);
-        return target;  // Caller (vfs_unlink) will make orphan if needed
+    assert (target->n_links >= 0, "Tmpfs unlink: negative link count");
+    if (target->n_links == 0) {
+        assert(vfs_try_iput(target), "Tmpfs unlink: failed to decrease refcount of target inode");
     }
-
-    panic("Tmpfs unlink: negative link count");
-    return NULL;    // should not reach here
+    return 0;
 }
 
 int __tmpfs_link(struct vfs_inode *target, struct vfs_inode *dir,
@@ -423,32 +417,27 @@ struct vfs_inode *__tmpfs_mkdir(struct vfs_inode *dir, mode_t mode,
     return &tmpfs_inode->vfs_inode;
 }
 
-struct vfs_inode *__tmpfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len) {
-    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
+int __tmpfs_rmdir(struct vfs_dentry *dentry, struct vfs_inode *target) {
+    struct tmpfs_inode *tmpfs_dir = container_of(dentry->parent, struct tmpfs_inode, vfs_inode);
     struct tmpfs_dentry *tmpfs_dentry = NULL;
-    struct vfs_inode *target = NULL;
-    struct tmpfs_inode *tmpfs_target = NULL;
-    tmpfs_dentry = __tmpfs_dir_lookup_by_name(tmpfs_dir, name, name_len);
+    tmpfs_dentry = __tmpfs_dir_lookup_by_name(tmpfs_dir, dentry->name, dentry->name_len);
     if (tmpfs_dentry == NULL) {
-        return ERR_PTR(-ENOENT); // Entry not found
+        return -ENOENT; // Entry not found
     }
-    target = &tmpfs_dentry->inode->vfs_inode;
-    tmpfs_target = container_of(target, struct tmpfs_inode, vfs_inode);
-    vfs_ilock(target);
-    if (hlist_len(&tmpfs_target->dir.children) != 0) {
-        vfs_iunlock(target);
-        return ERR_PTR(-ENOTEMPTY); // Directory not empty
+    if (&tmpfs_dentry->inode->vfs_inode != target) {
+        return -EINVAL; // Target inode does not match
     }
-    if (vfs_inode_refcount(target) > 1) {
-        vfs_iunlock(target);
-        return ERR_PTR(-EBUSY); // Target inode is busy
+    
+    if (vfs_inode_refcount(target) > 2) {
+        return -EBUSY; // Target inode is busy
     }
     assert(target->n_links == 1, "Tmpfs rmdir: directory link count is not 1");
     target->n_links--;
     __tmpfs_do_unlink(tmpfs_dentry);
     __tmpfs_free_dentry(tmpfs_dentry);
-    vfs_iunlock(target);
-    return target;
+    assert(vfs_try_iput(target), "Tmpfs rmdir: failed to decrease refcount of target inode");
+    
+    return 0;
 }
 
 struct vfs_inode *__tmpfs_mknod(struct vfs_inode *dir, mode_t mode,

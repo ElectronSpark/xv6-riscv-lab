@@ -355,7 +355,6 @@ struct vfs_inode *xv6fs_create(struct vfs_inode *dir, mode_t mode,
         return ERR_PTR(ret);
     }
     
-    vfs_idup(new_inode);
     vfs_iunlock(new_inode);  // VFS's vfs_create will re-lock it
     return new_inode;
 }
@@ -411,31 +410,33 @@ struct vfs_inode *xv6fs_mkdir(struct vfs_inode *dir, mode_t mode,
     dir->n_links++;
     xv6fs_iupdate(dp);
     
-    vfs_idup(new_inode);
     vfs_iunlock(new_inode);  // VFS's vfs_mkdir will re-lock it
     return new_inode;
 }
 
-struct vfs_inode *xv6fs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
-    if (dir == NULL || name == NULL) {
-        return ERR_PTR(-EINVAL);
+int xv6fs_unlink(struct vfs_dentry *dentry, struct vfs_inode *target) {
+    if (dentry == NULL || target == NULL) {
+        return -EINVAL;
     }
-    
-    if (name_len == 1 && name[0] == '.') {
-        return ERR_PTR(-EINVAL);
+
+    if (dentry->sb == NULL || dentry->sb != target->sb) {
+        return -EINVAL;
     }
-    if (name_len == 2 && name[0] == '.' && name[1] == '.') {
-        return ERR_PTR(-EINVAL);
+
+    if (dentry->ino != target->ino) {
+        return -EINVAL;
     }
+
+    // VFS core handled checking for "." and ".."
     
-    struct xv6fs_superblock *xv6_sb = container_of(dir->sb, struct xv6fs_superblock, vfs_sb);
+    struct xv6fs_superblock *xv6_sb = container_of(dentry->sb, struct xv6fs_superblock, vfs_sb);
     
-    struct xv6fs_inode *dp = container_of(dir, struct xv6fs_inode, vfs_inode);
+    struct xv6fs_inode *dp = container_of(dentry->parent, struct xv6fs_inode, vfs_inode);
     struct dirent de;
     uint off;
     
     // Find the directory entry
-    for (off = 0; off < dir->size; off += sizeof(de)) {
+    for (off = 0; off < dentry->parent->size; off += sizeof(de)) {
         uint bn = off / BSIZE;
         uint block_off = off % BSIZE;
         uint addr = xv6fs_bmap(dp, bn);
@@ -447,10 +448,13 @@ struct vfs_inode *xv6fs_unlink(struct vfs_inode *dir, const char *name, size_t n
         
         if (de.inum == 0) continue;
         
-        if (name_len == strnlen(de.name, DIRSIZ) &&
-            strncmp(name, de.name, name_len) == 0) {
+        if (dentry->name_len == strnlen(de.name, DIRSIZ) &&
+            strncmp(dentry->name, de.name, dentry->name_len) == 0) {
             // Found - clear the entry
-            uint inum = de.inum;
+            if (de.inum != target->ino) {
+                return -EINVAL; // Inode number mismatch
+            }
+
             memset(&de, 0, sizeof(de));
             
             bp = bread(dp->dev, addr);
@@ -458,34 +462,33 @@ struct vfs_inode *xv6fs_unlink(struct vfs_inode *dir, const char *name, size_t n
             xv6fs_log_write(xv6_sb, bp);
             brelse(bp);
             
-            // Get the target inode (vfs_get_inode returns it locked)
-            struct vfs_inode *target = vfs_get_inode(dir->sb, inum);
-            if (IS_ERR_OR_NULL(target)) {
-                return target == NULL ? ERR_PTR(-ENOMEM) : target;
-            }
-            
             // inode is already locked by vfs_get_inode
             target->n_links--;
             
             struct xv6fs_inode *tip = container_of(target, struct xv6fs_inode, vfs_inode);
             xv6fs_iupdate(tip);
-            vfs_iunlock(target);
             
             // Return the target inode - VFS will call vfs_iput on it after
             // releasing the superblock lock. This handles both cases:
             // - n_links == 0: inode will be freed when refcount reaches 0
             // - n_links > 0: just releases the reference from vfs_get_inode
-            return target;
+            return 0;
         }
     }
     
-    return ERR_PTR(-ENOENT);
+    return -ENOENT;
 }
 
-struct vfs_inode *xv6fs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len) {
-    // For now, just use unlink logic
-    // TODO: Check if directory is empty
-    return xv6fs_unlink(dir, name, name_len);
+int xv6fs_rmdir(struct vfs_dentry *dentry, struct vfs_inode *target) {
+    int ret = xv6fs_unlink(dentry, target);
+    if (ret == 0) {
+        // Decrement parent's link count (for the ".." entry in the removed directory)
+        // This mirrors xv6fs_mkdir which increments parent's n_links when creating a subdir
+        struct xv6fs_inode *dp = container_of(dentry->parent, struct xv6fs_inode, vfs_inode);
+        dentry->parent->n_links--;
+        xv6fs_iupdate(dp);
+    }
+    return ret;
 }
 
 int xv6fs_link(struct vfs_inode *old, struct vfs_inode *dir,
@@ -649,7 +652,6 @@ struct vfs_inode *xv6fs_symlink(struct vfs_inode *dir, mode_t mode,
         return ERR_PTR(ret);
     }
     
-    vfs_idup(new_inode);
     vfs_iunlock(new_inode);
     return new_inode;
 }
@@ -708,7 +710,6 @@ struct vfs_inode *xv6fs_mknod(struct vfs_inode *dir, mode_t mode,
         return ERR_PTR(ret);
     }
     
-    vfs_idup(new_inode);
     vfs_iunlock(new_inode);  // VFS's vfs_mknod will re-lock it
     return new_inode;
 }

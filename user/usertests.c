@@ -419,7 +419,7 @@ void iputtest(char *s) {
         printf("%s: chdir iputdir failed\n", s);
         exit(1);
     }
-    if (rmdir("../iputdir") < 0) {
+    if (unlink("../iputdir") < 0) {
         printf("%s: rmdir ../iputdir failed\n", s);
         exit(1);
     }
@@ -447,7 +447,7 @@ void exitiputtest(char *s) {
             printf("%s: child chdir failed\n", s);
             exit(1);
         }
-        if (rmdir("../iputdir") < 0) {
+        if (unlink("../iputdir") < 0) {
             printf("%s: rmdir ../iputdir failed\n", s);
             exit(1);
         }
@@ -489,7 +489,7 @@ void openiputtest(char *s) {
         exit(0);
     }
     sleep(100);
-    if (rmdir("oidir") != 0) {
+    if (unlink("oidir") != 0) {
         printf("%s: rmdir failed\n", s);
         exit(1);
     }
@@ -643,7 +643,7 @@ void dirtest(char *s) {
         exit(1);
     }
 
-    if (rmdir("dir0") < 0) {
+    if (unlink("dir0") < 0) {
         printf("%s: rmdir dir0 failed\n", s);
         exit(1);
     }
@@ -1470,7 +1470,7 @@ void subdir(char *s) {
     write(fd, "ff", 2);
     close(fd);
 
-    if (rmdir("dd") >= 0) {
+    if (unlink("dd") >= 0) {
         printf("%s: rmdir dd (non-empty dir) succeeded!\n", s);
         exit(1);
     }
@@ -1616,15 +1616,15 @@ void subdir(char *s) {
         printf("%s: unlink dd/ff failed\n", s);
         exit(1);
     }
-    if (rmdir("dd") == 0) {
+    if (unlink("dd") == 0) {
         printf("%s: rmdir non-empty dd succeeded!\n", s);
         exit(1);
     }
-    if (rmdir("dd/dd") < 0) {
+    if (unlink("dd/dd") < 0) {
         printf("%s: rmdir dd/dd failed\n", s);
         exit(1);
     }
-    if (rmdir("dd") < 0) {
+    if (unlink("dd") < 0) {
         printf("%s: rmdir dd failed\n", s);
         exit(1);
     }
@@ -2714,7 +2714,7 @@ void diskfull(char *s) {
     int fi;
     int done = 0;
 
-    rmdir("diskfulldir");
+    unlink("diskfulldir");
 
     for (fi = 0; done == 0 && '0' + fi < 0177; fi++) {
         char name[32];
@@ -2765,7 +2765,7 @@ void diskfull(char *s) {
     if (mkdir("diskfulldir") == 0)
         printf("%s: mkdir(diskfulldir) unexpectedly succeeded!\n", s);
 
-    rmdir("diskfulldir");
+    unlink("diskfulldir");
 
     for (int i = 0; i < nzz; i++) {
         char name[32];

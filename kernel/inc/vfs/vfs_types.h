@@ -248,6 +248,7 @@ struct vfs_inode {
         uint64 mount: 1; // indicates whether this inode is a mountpoint
         uint64 orphan: 1; // inode is orphaned (n_links=0, ref>0, on orphan_list)
         uint64 destroying: 1; // inode is being destroyed (destroy_inode in progress)
+        uint64 delay_put: 1; // delay freeing inode until later (used by some filesystems)
     };
     list_node_t orphan_entry; // entry in sb->orphan_list when orphaned
     struct proc *owner; // process that holds the lock
@@ -300,10 +301,10 @@ struct vfs_inode_ops {
                        const char *name, size_t name_len);        // Create a regular file
     int (*link)(struct vfs_inode *old, struct vfs_inode *dir,
             const char *name, size_t name_len);         // Create a hard link
-    struct vfs_inode *(*unlink)(struct vfs_inode *dir, const char *name, size_t name_len);
+    int (*unlink)(struct vfs_dentry *dentry, struct vfs_inode *target); // Remove a file or directory entry
     struct vfs_inode *(*mkdir)(struct vfs_inode *dir, mode_t mode,
                                const char *name, size_t name_len);
-    struct vfs_inode *(*rmdir)(struct vfs_inode *dir, const char *name, size_t name_len);
+    int (*rmdir)(struct vfs_dentry *dentry, struct vfs_inode *target);
     struct vfs_inode *(*mknod)(struct vfs_inode *dir, mode_t mode,
                                dev_t dev, const char *name, size_t name_len);    // Create a file of special types
     int (*move)(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,

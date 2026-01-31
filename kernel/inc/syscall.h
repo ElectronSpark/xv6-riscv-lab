@@ -65,7 +65,6 @@
 #define SYS_vfs_mkdir    1006
 #define SYS_vfs_mknod    1007
 #define SYS_vfs_unlink   1008
-#define SYS_vfs_rmdir    1009
 #define SYS_vfs_link     1010
 #define SYS_vfs_symlink  1011
 #define SYS_vfs_chdir    1012

@@ -440,46 +440,7 @@ uint64 sys_vfs_unlink(void) {
     
     size_t name_len = strlen(name);
     
-    // Cannot unlink "." or ".."
-    if ((name_len == 1 && name[0] == '.') ||
-        (name_len == 2 && name[0] == '.' && name[1] == '.')) {
-        vfs_iput(parent);
-        return -EINVAL;
-    }
-    
     int ret = vfs_unlink(parent, name, name_len);
-    vfs_iput(parent);
-    
-    return ret;
-}
-
-uint64 sys_vfs_rmdir(void) {
-    char path[MAXPATH];
-    char name[DIRSIZ];
-    int n;
-    
-    if ((n = argstr(0, path, MAXPATH)) < 0) {
-        return -EFAULT;
-    }
-    
-    struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ);
-    if (IS_ERR(parent)) {
-        return PTR_ERR(parent);
-    }
-    if (parent == NULL) {
-        return -ENOENT;
-    }
-    
-    size_t name_len = strlen(name);
-    
-    // Cannot rmdir "." or ".."
-    if ((name_len == 1 && name[0] == '.') ||
-        (name_len == 2 && name[0] == '.' && name[1] == '.')) {
-        vfs_iput(parent);
-        return -EINVAL;
-    }
-    
-    int ret = vfs_rmdir(parent, name, name_len);
     vfs_iput(parent);
     
     return ret;

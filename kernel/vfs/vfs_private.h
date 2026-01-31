@@ -5,6 +5,11 @@
 #include "printf.h"
 #include "lock/completion.h"
 
+#define VFS_DITER_INDEX_END (-1LL)
+#define VFS_DITER_INDEX_START (0LL)
+#define VFS_DITER_INDEX_CURRENT (1LL)
+#define VFS_DITER_INDEX_PARENT (2LL)
+
 extern struct vfs_inode vfs_root_inode;
 
 

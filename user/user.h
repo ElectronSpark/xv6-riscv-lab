@@ -21,7 +21,6 @@ int exec(const char*, char**);
 int open(const char*, int);
 int mknod(const char*, int mode, int major, int minor);
 int unlink(const char*);
-int rmdir(const char*);
 int fstat(int fd, struct stat*);
 int link(const char*, const char*);
 int symlink(const char*, const char*);

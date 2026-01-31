@@ -79,6 +79,12 @@ void vfs_idup(struct vfs_inode *inode) {
     assert(success, "vfs_idup: inode refcount overflow");
 }
 
+// Try to increase inode ref count; return true on success, false if ref count is at max
+// Used by some filesystems
+bool vfs_try_iput(struct vfs_inode *inode) {
+    return atomic_inc_unless(&inode->ref_count, VFS_INODE_MAX_REFCOUNT);
+}
+
 // Decrease inode ref count; free the inode when the last reference is dropped.
 // Caller must not hold the inode lock when calling (vfs_iput() will acquire locks internally
 // when it needs to remove/free an inode).
@@ -451,7 +457,7 @@ static int __make_iter_present(struct vfs_dir_iter *iter,
     ret_dentry->name_len = 1;
     ret_dentry->cookies = 0;
     iter->cookies = 0;
-    iter->index = 1;
+    iter->index = VFS_DITER_INDEX_CURRENT;
     return 0;
 }
 
@@ -465,7 +471,7 @@ static int __make_iter_parent(struct vfs_dir_iter *iter,
     ret_dentry->name_len = 2;
     ret_dentry->cookies = 0;
     iter->cookies = 0;
-    iter->index = 2;
+    iter->index = VFS_DITER_INDEX_PARENT;
     return 0;
 }
 
@@ -507,8 +513,8 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         goto out;
     }
 
-    // Check if iteration already completed (index == -1 means end of directory)
-    if (iter->index == -1) {
+    // Check if iteration already completed
+    if (iter->index == VFS_DITER_INDEX_END) {
         ret_dentry->name = NULL;
         ret_dentry->name_len = 0;
         ret = 0;
@@ -516,7 +522,7 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
     }
 
     // Synthesize "." on the first iteration to keep cookies opaque at the VFS layer
-    if (iter->index == 0) {
+    if (iter->index == VFS_DITER_INDEX_START) {
         ret = __make_iter_present(iter, ret_dentry);
         if (ret != 0) {
             goto out;
@@ -557,7 +563,7 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         // Fall through to driver call without modifying iter->index
     }
     
-    if (iter->index > 1) {
+    if (iter->index >= VFS_DITER_INDEX_PARENT) {
         iter->index++;
         ret_dentry->sb = dir->sb;
         ret_dentry->parent = dir;
@@ -565,9 +571,9 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         ret_dentry->cookies = iter->cookies;
     }
     ret = dir->ops->dir_iter(dir, iter, ret_dentry);
-    if (ret == 0 && iter->index == 1) {
+    if (ret == 0 && iter->index == VFS_DITER_INDEX_CURRENT) {
         // Driver returned ".." successfully, advance index
-        iter->index = 2;
+        iter->index = VFS_DITER_INDEX_PARENT;
     }
 
 out:
@@ -575,21 +581,24 @@ out:
     vfs_superblock_unlock(dir->sb);
 
     if (ret == 0) {
-        if (iter->index == 2 && need_lookup) {
+        if (iter->index == VFS_DITER_INDEX_PARENT && need_lookup) {
             // when synthesizing ".." for a mounted root, fill in the correct parent inode now
             struct vfs_inode *target = __vfs_dotdot_target(dir);
             ret_dentry->ino = target->ino;
             ret_dentry->sb = target->sb;
             ret_dentry->parent = target;
         }
-        if (iter->index > 2) {
-            if (ret_dentry->name != NULL) {
+        if (iter->index > VFS_DITER_INDEX_PARENT) {
+            if (ret_dentry->name != NULL && ret_dentry->name_len > 0) {
+                if (ret_dentry->ino == 0) {
+                    return -EINVAL; // Driver did not fill ino
+                }
                 // Normal entry returned
                 iter->cookies = ret_dentry->cookies;
                 return 0;
             }
             // Otherwise, reached end of directory; reset iterator
-            iter->index = -1;
+            iter->index = VFS_DITER_INDEX_END;
             iter->cookies = 0;
             ret_dentry->parent = NULL;
             ret_dentry->cookies = 0;
@@ -618,7 +627,7 @@ int vfs_dir_isempty(struct vfs_inode *dir) {
     int ret;
     
     // Start iteration (index 0 is ".", index 1 is "..", index 2+ are real entries)
-    iter.index = 2; // Skip "." and ".."
+    iter.index = VFS_DITER_INDEX_PARENT; // Skip "." and ".."
     iter.cookies = 0;
     
     ret = dir->ops->dir_iter(dir, &iter, &dentry);
@@ -864,44 +873,78 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
         return -EINVAL; // Invalid argument
     }
     int ret = 0;
-    struct vfs_inode *ret_ptr = NULL;
+
+    if (strncmp(name, ".", name_len) == 0 ||
+        strncmp(name, "..", name_len) == 0) {
+        // Cannot unlink "." or ".."
+        return -EINVAL;
+    }
+
+    struct vfs_dentry dentry = {0};
+    ret = vfs_ilookup(dir, &dentry, name, name_len);
+    if (ret != 0) {
+        return ret;
+    }
+
+    struct vfs_inode *target = vfs_get_dentry_inode(&dentry);
+    if (IS_ERR(target)) {
+        ret = PTR_ERR(target);
+        vfs_release_dentry(&dentry);
+        return ret;
+    }
     
     // Begin transaction BEFORE acquiring any locks
     if (dir->sb->ops->begin_transaction != NULL) {
         ret = dir->sb->ops->begin_transaction(dir->sb);
         if (ret != 0) {
+            vfs_iput(target); // Drop our reference from lookup
+            vfs_release_dentry(&dentry);
             return ret;
         }
     }
-    
+
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
+    vfs_ilock(target);
     ret = __vfs_inode_valid(dir);
     if (ret != 0) {
         goto out;
     }
-    if (!S_ISDIR(dir->mode)) {
-        ret = -EISDIR; // Inode is a directory
+    ret = __vfs_inode_valid(target);
+    if (ret != 0) {
         goto out;
     }
-    if (dir->ops->unlink == NULL) {
-        ret = -ENOSYS; // Unlink operation not supported
-        goto out;
+    if (S_ISDIR(target->mode)) {
+        // Inode is a directory
+        if (dir->ops->rmdir == NULL) {
+            ret = -ENOSYS; // Rmdir operation not supported
+            goto out;
+        }
+        // Check if directory is empty
+        if (!vfs_dir_isempty(target)) {
+            ret = -ENOTEMPTY; // Directory not empty
+            goto out;
+        }
+        ret = dir->ops->rmdir(&dentry, target);
+    } else {
+        // Inode is a file or other non-directory
+        if (dir->ops->unlink == NULL) {
+            ret = -ENOSYS; // Unlink operation not supported
+            goto out;
+        }
+        ret = dir->ops->unlink(&dentry, target);
     }
-    ret_ptr = dir->ops->unlink(dir, name, name_len);
     
     // If unlink succeeded and the inode still has references beyond ours,
     // mark it as orphan. This is checked while we still hold the locks.
-    if (!IS_ERR_OR_NULL(ret_ptr) && ret_ptr->n_links == 0 && 
-        ret_ptr->ref_count > 1 && !ret_ptr->orphan) {
-        vfs_ilock(ret_ptr);
-        vfs_make_orphan(ret_ptr);
-        vfs_iunlock(ret_ptr);
+    if (target->n_links == 0 && target->ref_count > 1 && !target->orphan) {
+        vfs_make_orphan(target);
     }
 out:
+    vfs_iunlock(target);
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
-    
+
     // End transaction AFTER releasing locks
     if (dir->sb->ops->end_transaction != NULL) {
         int end_ret = dir->sb->ops->end_transaction(dir->sb);
@@ -909,18 +952,9 @@ out:
             printf("vfs_unlink: warning: end_transaction failed with error %d\n", end_ret);
         }
     }
-    
-    if (ret != 0) {
-        return ret;
-    }
-    if (IS_ERR(ret_ptr)) {
-        return PTR_ERR(ret_ptr);
-    }
-    if (ret_ptr != NULL) {
-        // Decrease the unlinked inode refcount
-        vfs_iput(ret_ptr);
-    }
-    return 0;
+    vfs_iput(target); // Drop our reference from lookup
+    vfs_release_dentry(&dentry);
+    return ret;
 }
 
 struct vfs_inode *vfs_mkdir(struct vfs_inode *dir, uint32 mode,
@@ -990,73 +1024,6 @@ out:
     }
     
     return ret_ptr;
-}
-
-int vfs_rmdir(struct vfs_inode *dir, const char *name, size_t name_len) {
-    if (dir == NULL || dir->sb == NULL) {
-        return -EINVAL; // Invalid argument
-    }
-    if (name == NULL || name_len == 0) {
-        return -EINVAL; // Invalid argument
-    }
-    int ret = 0;
-    struct vfs_inode *ret_ptr = NULL;
-    
-    // Begin transaction BEFORE acquiring any locks
-    if (dir->sb->ops->begin_transaction != NULL) {
-        ret = dir->sb->ops->begin_transaction(dir->sb);
-        if (ret != 0) {
-            return ret;
-        }
-    }
-    
-    vfs_superblock_wlock(dir->sb);
-    vfs_ilock(dir);
-    ret = __vfs_inode_valid(dir);
-    if (ret != 0) {
-        goto out;
-    }
-    if (!S_ISDIR(dir->mode)) {
-        ret = -ENOTDIR; // Inode is not a directory
-        goto out;
-    }
-    if (dir->ops->rmdir == NULL) {
-        ret = -ENOSYS; // Rmdir operation not supported
-        goto out;
-    }
-    ret_ptr = dir->ops->rmdir(dir, name, name_len);
-    
-    // If rmdir succeeded and the inode still has references beyond ours,
-    // mark it as orphan. This is checked while we still hold the locks.
-    if (!IS_ERR_OR_NULL(ret_ptr) && ret_ptr->n_links == 0 && 
-        ret_ptr->ref_count > 1 && !ret_ptr->orphan) {
-        vfs_ilock(ret_ptr);
-        vfs_make_orphan(ret_ptr);
-        vfs_iunlock(ret_ptr);
-    }
-out:
-    vfs_iunlock(dir);
-    vfs_superblock_unlock(dir->sb);
-    
-    // End transaction AFTER releasing locks
-    if (dir->sb->ops->end_transaction != NULL) {
-        int end_ret = dir->sb->ops->end_transaction(dir->sb);
-        if (end_ret != 0) {
-            printf("vfs_rmdir: warning: end_transaction failed with error %d\n", end_ret);
-        }
-    }
-    
-    if (ret != 0) {
-        return ret;
-    }
-    if (IS_ERR(ret_ptr)) {
-        return PTR_ERR(ret_ptr);
-    }
-    if (ret_ptr != NULL) {
-        // Decrease the unlinked inode refcount
-        vfs_iput(ret_ptr);
-    }
-    return 0;
 }
 
 int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,

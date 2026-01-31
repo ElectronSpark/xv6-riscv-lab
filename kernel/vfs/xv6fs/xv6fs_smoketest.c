@@ -246,7 +246,7 @@ cleanup:
     }
     
     // Remove subdirectory
-    ret = vfs_rmdir(testdir, subdir_name, subdir_len);
+    ret = vfs_unlink(testdir, subdir_name, subdir_len);
     if (ret != 0 && ret != -ENOENT) {
         printf("xv6fs_inode_test: " WARN " cleanup rmdir %s errno=%d\n", subdir_name, ret);
     }
@@ -255,7 +255,7 @@ cleanup:
     testdir = NULL;
     
     // Remove test directory
-    ret = vfs_rmdir(root, testdir_name, testdir_len);
+    ret = vfs_unlink(root, testdir_name, testdir_len);
     if (ret != 0) {
         printf("xv6fs_inode_test: " WARN " cleanup rmdir %s errno=%d\n", testdir_name, ret);
     }
@@ -643,7 +643,7 @@ cleanup_nested:
     
     // Cleanup nested directory
     if (!IS_ERR_OR_NULL(subdir)) {
-        ret = vfs_rmdir(subdir, nested_name, nested_len);
+        ret = vfs_unlink(subdir, nested_name, nested_len);
         if (ret != 0 && ret != -ENOENT) {
             printf("xv6fs_namei: " WARN " cleanup rmdir %s errno=%d\n", nested_name, ret);
         }
@@ -655,7 +655,7 @@ cleanup_subdir:
     }
     
     // Cleanup subdir
-    ret = vfs_rmdir(root, subdir_name, subdir_len);
+    ret = vfs_unlink(root, subdir_name, subdir_len);
     if (ret != 0 && ret != -ENOENT) {
         printf("xv6fs_namei: " WARN " cleanup rmdir %s errno=%d\n", subdir_name, ret);
     }
@@ -896,7 +896,7 @@ void xv6fs_run_dir_iter_smoketest(void) {
     
 cleanup:
     // Remove entries
-    ret = vfs_rmdir(testdir, subdir_name, subdir_len);
+    ret = vfs_unlink(testdir, subdir_name, subdir_len);
     if (ret != 0 && ret != -ENOENT) {
         printf("xv6fs_dir_iter: " WARN " cleanup rmdir %s errno=%d\n", subdir_name, ret);
     }
@@ -912,7 +912,7 @@ cleanup:
     vfs_iput(testdir);
     testdir = NULL;
     
-    ret = vfs_rmdir(root, testdir_name, testdir_len);
+    ret = vfs_unlink(root, testdir_name, testdir_len);
     if (ret != 0) {
         printf("xv6fs_dir_iter: " WARN " cleanup rmdir %s errno=%d\n", testdir_name, ret);
     }

@@ -332,7 +332,7 @@ out_cleanup:
         nested = NULL;
     }
     if (!IS_ERR_OR_NULL(subdir)) {
-        ret = vfs_rmdir(subdir, nested_name, nested_len);
+        ret = vfs_unlink(subdir, nested_name, nested_len);
         if (ret != 0) {
             printf("inode_smoketest: " FAIL " cleanup rmdir /%s/%s, errno=%d\n", subdir_name, nested_name, ret);
         }
@@ -340,7 +340,7 @@ out_cleanup:
     vfs_iput(subdir);
     subdir = NULL;
 
-    ret = vfs_rmdir(root, subdir_name, subdir_len);
+    ret = vfs_unlink(root, subdir_name, subdir_len);
     if (ret != 0) {
         printf("inode_smoketest: " FAIL " cleanup rmdir /%s, errno=%d\n", subdir_name, ret);
     }
@@ -685,7 +685,7 @@ cleanup_nested:
     }
     vfs_iput(nested);
     nested = NULL;
-    ret = vfs_rmdir(subdir, nested_name, nested_len);
+    ret = vfs_unlink(subdir, nested_name, nested_len);
     if (ret != 0) {
         printf("namei_smoketest: cleanup rmdir %s failed, errno=%d\n", nested_name, ret);
     } else {
@@ -694,7 +694,7 @@ cleanup_nested:
 cleanup_subdir:
     vfs_iput(subdir);
     subdir = NULL;
-    ret = vfs_rmdir(root, subdir_name, subdir_len);
+    ret = vfs_unlink(root, subdir_name, subdir_len);
     if (ret != 0) {
         printf("namei_smoketest: cleanup rmdir %s failed, errno=%d\n", subdir_name, ret);
     } else {
@@ -1117,7 +1117,7 @@ void tmpfs_run_dir_iter_mount_smoketest(void) {
     if (ret != 0) {
         printf("dir_iter_mount: " WARN " cleanup unlink %s errno=%d\n", file_name, ret);
     }
-    ret = vfs_rmdir(mnt_root, subdir_name, subdir_len);
+    ret = vfs_unlink(mnt_root, subdir_name, subdir_len);
     if (ret != 0) {
         printf("dir_iter_mount: " WARN " cleanup rmdir %s errno=%d\n", subdir_name, ret);
     }
@@ -1156,13 +1156,13 @@ cleanup_mount:
 
 cleanup_mp_dir:
     if (mp != NULL) {
-        int rmdir_ret = vfs_rmdir(root, mp_name, mp_len);
+        int rmdir_ret = vfs_unlink(root, mp_name, mp_len);
         if (rmdir_ret != 0) {
             printf("dir_iter_mount: " WARN " cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
             // Only iput if rmdir failed - if rmdir succeeded, it already freed the inode
             vfs_iput(mp);
         }
-        // Note: if rmdir succeeded, the inode is already freed by vfs_rmdir's internal vfs_iput
+        // Note: if rmdir succeeded, the inode is already freed by vfs_unlink's internal vfs_iput
     }
 out:
     if (root_pinned) {
@@ -1265,7 +1265,7 @@ cleanup_test1_mount:
     // Already unmounted above
 cleanup_test1_mp:
     if (mp != NULL) {
-        int rmdir_ret = vfs_rmdir(root, mp_name, mp_len);
+        int rmdir_ret = vfs_unlink(root, mp_name, mp_len);
         if (rmdir_ret != 0) {
             printf("lazy_unmount: " WARN " test1 cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
             vfs_iput(mp);
@@ -1393,7 +1393,7 @@ cleanup_test2_mount:
     // Mount already lazily unmounted above
 cleanup_test2_mp:
     if (mp != NULL) {
-        int rmdir_ret = vfs_rmdir(root, mp_name, mp_len);
+        int rmdir_ret = vfs_unlink(root, mp_name, mp_len);
         if (rmdir_ret != 0) {
             printf("lazy_unmount: " WARN " test2 cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
             vfs_iput(mp);
@@ -1486,7 +1486,7 @@ cleanup_test3_mount:
     // Mount already lazily unmounted
 cleanup_test3_mp:
     if (mp != NULL) {
-        int rmdir_ret = vfs_rmdir(root, mp_name, mp_len);
+        int rmdir_ret = vfs_unlink(root, mp_name, mp_len);
         if (rmdir_ret != 0) {
             printf("lazy_unmount: " WARN " test3 cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
             vfs_iput(mp);
