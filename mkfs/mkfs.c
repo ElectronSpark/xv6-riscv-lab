@@ -117,6 +117,12 @@ main(int argc, char *argv[])
 
   rootino = ialloc(XV6_T_DIR);
   assert(rootino == ROOTINO);
+  
+  // Root directory nlink: starts at 2 for "." and ".." (both point to self)
+  // Will be incremented for each subdirectory created
+  rinode(rootino, &din);
+  din.nlink = xshort(2);
+  winode(rootino, &din);
 
   bzero(&de, sizeof(de));
   de.inum = xshort(rootino);
@@ -134,6 +140,11 @@ main(int argc, char *argv[])
   for(i = 0; i < 5; i++){
     uint dirino = ialloc(XV6_T_DIR);
     
+    // Subdirectory nlink = 2 for "." and ".." entries in itself
+    rinode(dirino, &din);
+    din.nlink = xshort(2);
+    winode(dirino, &din);
+    
     // Add "." entry pointing to itself
     bzero(&de, sizeof(de));
     de.inum = xshort(dirino);
@@ -145,6 +156,11 @@ main(int argc, char *argv[])
     de.inum = xshort(rootino);
     strcpy(de.name, "..");
     iappend(dirino, &de, sizeof(de));
+    
+    // Increment root's nlink for this subdirectory's ".." entry
+    rinode(rootino, &din);
+    din.nlink = xshort(xshort(din.nlink) + 1);
+    winode(rootino, &din);
     
     // Add entry in root directory
     bzero(&de, sizeof(de));

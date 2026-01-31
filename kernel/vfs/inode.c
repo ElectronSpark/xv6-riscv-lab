@@ -129,13 +129,22 @@ retry:
     // they have positive link count AND the superblock is still attached.
     // Mountpoint inodes keep an extra reference from the mount.
     // When detached, we must clean up all inodes regardless of n_links.
-    if (sb->backendless && sb->attached && (inode->n_links > 0 || inode->mount)) {
-        // Decrement refcount to 0 but keep inode in cache
-        atomic_dec(&inode->ref_count);
-        assert(inode->ref_count >= 0, "vfs_iput: backendless inode refcount underflow");
-        vfs_iunlock(inode);
-        vfs_superblock_unlock(sb);
-        return;
+    //
+    // For backend filesystems (e.g., xv6fs), inodes can be evicted from cache
+    // when refcount reaches 0 (even if n_links > 0) since they can be re-read
+    // from disk. Directory inodes hold a reference to their parent, so evicting
+    // a directory will cascade vfs_iput to its parent.
+    //
+    // Root inodes and mountpoint inodes must always stay in cache while attached.
+    if (sb->attached && (inode->n_links > 0 || inode->mount)) {
+        if (sb->backendless || inode == sb->root_inode || inode->mount) {
+            // Decrement refcount to 0 but keep inode in cache
+            atomic_dec(&inode->ref_count);
+            assert(inode->ref_count >= 0, "vfs_iput: inode refcount underflow");
+            vfs_iunlock(inode);
+            vfs_superblock_unlock(sb);
+            return;
+        }
     }
 
     assert(!inode->mount, "vfs_iput: refcount of mountpoint inode reached zero");

@@ -218,6 +218,7 @@ static bool __vfs_superblock_ops_valid(struct vfs_superblock *sb) {
 
 // After a filesystem's mount callback returns a freshly allocated superblock,
 // the VFS validates it with this helper before attaching it to the mount tree.
+// Note: sb->device is set by vfs_mount after this validation, so we don't check it here.
 static bool __vfs_init_superblock_valid(struct vfs_superblock *sb) {
     if (sb == NULL) {
         return false;
@@ -226,12 +227,6 @@ static bool __vfs_init_superblock_valid(struct vfs_superblock *sb) {
         return false;
     }
     if (!__vfs_superblock_ops_valid(sb)) {
-        return false;
-    }
-    if (sb->backendless && (sb->device != NULL)) {
-        return false;
-    }
-    if (!sb->backendless && (sb->device == NULL)) {
         return false;
     }
     if (sb->mountpoint != NULL || sb->parent_sb != NULL) {
@@ -281,6 +276,9 @@ static int __vfs_turn_mountpoint(struct vfs_inode *mountpoint) {
     mountpoint->mnt_sb = NULL;
     if (mountpoint != &vfs_root_inode) {
         vfs_superblock_mountcount_inc(mountpoint->sb);
+        // Hold a reference on the mountpoint while the filesystem is mounted
+        // (skip for vfs_root_inode which has no superblock)
+        vfs_idup(mountpoint);
     }
     return 0;
 }
@@ -300,11 +298,13 @@ static void __vfs_set_mountpoint(struct vfs_superblock *sb, struct vfs_inode *mo
     sb->parent_sb = mountpoint->sb;
     mountpoint->mnt_sb = sb;
     mountpoint->mnt_rooti = sb->root_inode;
+    // Note: We do NOT add a ref on root_inode here - sb->root_inode owns it.
+    // Code accessing mnt_rooti (like vfs_get_mnt_rooti) must call vfs_idup.
 }
 
 // Clear the mountpoint inode of a superblock, undoing __vfs_set_mountpoint().
-// Caller must hold the parent superblock write lock and the mountpoint inode lock;
-// this helper drops the reference taken in __vfs_turn_mountpoint().
+// Caller must hold the parent superblock write lock and the mountpoint inode lock.
+// Caller must also call vfs_iput on mountpoint after releasing locks.
 static void __vfs_clear_mountpoint(struct vfs_inode *mountpoint) {
     if (mountpoint != &vfs_root_inode) {
         VFS_SUPERBLOCK_ASSERT_WHOLDING(mountpoint->sb, "Mountpoint inode's superblock lock must be write held to clear mountpoint");
@@ -569,11 +569,16 @@ void vfs_mount_unlock(void) {
  *
  * Locking:
  *   - Caller holds vfs_mount_lock().
- *   - Caller holds the parent superblock write lock.
+ *   - Caller holds the parent superblock write lock (except for vfs_root_inode).
  *   - Caller holds the mountpoint inode mutex (and any device inode lock if applicable).
  *
- * Returns:
- *   - 0 on success or negative errno on failure.
+ * On success:
+ *   - Returns 0, caller still holds all locks and must release them.
+ *
+ * On failure:
+ *   - Returns negative errno.
+ *   - vfs_mount releases mountpoint inode lock and superblock lock.
+ *   - Caller must still release vfs_mount_lock().
  */
  int vfs_mount(const char *type, struct vfs_inode *mountpoint,
               struct vfs_inode *device, int flags, const char *data) {
@@ -680,6 +685,18 @@ ret:
         }
         // On failure, need to revert mountpoint inode type
         __vfs_clear_mountpoint(mountpoint);
+        // Release locks before putting mountpoint
+        vfs_iunlock(mountpoint);
+        if (mountpoint->sb != NULL) {
+            vfs_superblock_unlock(mountpoint->sb);
+        }
+        // Put the mountpoint reference taken in __vfs_turn_mountpoint
+        // (skip for vfs_root_inode which has no superblock)
+        if (mountpoint != &vfs_root_inode) {
+            vfs_iput(mountpoint);
+        }
+        vfs_put_fs_type(fs_type);
+        return ret_val;
     } else if (vfs_superblock_wholding(sb)) {
         sb->initialized = 1;
         sb->valid = 1;
@@ -871,16 +888,31 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
 
     // Detach superblock from filesystem type
     __vfs_detach_superblock_from_fstype(sb);
+    // Clear mountpoint
     __vfs_clear_mountpoint(mountpoint);
 
-    // Unlock root inode before freeing (caller expects it unlocked after free)
+    // Unlock root inode before freeing
     vfs_iunlock(mounted_inode);
+    // Free the root inode (the one ref from __vfs_set_mountpoint's vfs_idup
+    // plus the initial ref from creation - we free directly since it's already
+    // removed from cache)
     mounted_inode->ops->free_inode(mounted_inode);
     sb->root_inode = NULL;
 
     // Free the superblock (caller must release sb lock before this)
     struct vfs_fs_type *fs_type = sb->fs_type;
     vfs_superblock_unlock(sb);
+    
+    // Release mountpoint lock and put the reference from __vfs_turn_mountpoint
+    vfs_iunlock(mountpoint);
+    if (mountpoint != &vfs_root_inode && mountpoint->sb != NULL) {
+        vfs_superblock_unlock(mountpoint->sb);
+    }
+    // vfs_root_inode has no superblock, skip iput for it
+    if (mountpoint != &vfs_root_inode) {
+        vfs_iput(mountpoint);
+    }
+    
     fs_type->ops->free(sb);
 
     return 0; // Successfully unmounted
@@ -1038,12 +1070,22 @@ int vfs_unmount_lazy(struct vfs_inode *mountpoint) {
     sb->unmounting = 1;
     
     // Phase 2: Detach from mount tree
-    // Note: __vfs_clear_mountpoint already decrements parent's mount count
     __vfs_clear_mountpoint(mountpoint);
     sb->mountpoint = NULL;
     sb->parent_sb = NULL;
     sb->attached = 0;
     sb->valid = 0;  // Prevent new lookups
+    
+    // Unlock and put mountpoint now that we've detached
+    vfs_iunlock(mountpoint);
+    if (mountpoint != &vfs_root_inode && mountpoint->sb != NULL) {
+        vfs_superblock_unlock(mountpoint->sb);
+    }
+    // Put the reference from __vfs_turn_mountpoint (deferred until locks released)
+    // vfs_root_inode has no superblock, skip iput for it
+    if (mountpoint != &vfs_root_inode) {
+        vfs_iput(mountpoint);
+    }
     
     // Phase 3: Sync if needed (for backend filesystems)
     if (!sb->backendless && sb->dirty) {

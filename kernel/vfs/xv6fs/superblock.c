@@ -300,9 +300,10 @@ int xv6fs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
     // Initialize VFS superblock
     xv6_sb->vfs_sb.block_size = XV6FS_BSIZE;
     xv6_sb->vfs_sb.total_blocks = xv6_sb->disk_sb.size;
-    // Mark as backendless from VFS perspective since xv6fs manages device access
-    // internally via bread(dev, blockno) rather than through a VFS device inode
-    xv6_sb->vfs_sb.backendless = 1;
+    // xv6fs is a backend filesystem - inodes can be evicted from cache
+    // when refcount reaches 0 since they can be re-read from disk.
+    // Root inodes and mountpoint inodes are protected in vfs_iput.
+    xv6_sb->vfs_sb.backendless = 0;
     xv6_sb->vfs_sb.ops = &xv6fs_superblock_ops;
     xv6_sb->vfs_sb.fs_data = xv6_sb;
     
@@ -510,12 +511,17 @@ void xv6fs_mount_root(void) {
     
     // Mount xv6fs at /root
     // vfs_mount requires: mount mutex, superblock write lock, and inode lock
+    // On success, caller must release locks. On failure, vfs_mount releases them.
     vfs_mount_lock();
     vfs_superblock_wlock(root_dir->sb);
     vfs_ilock(root_dir);
     int ret = vfs_mount("xv6fs", root_dir, dev_inode, 0, NULL);
-    vfs_iunlock(root_dir);
-    vfs_superblock_unlock(root_dir->sb);
+    if (ret == 0) {
+        // Success: caller releases locks
+        vfs_iunlock(root_dir);
+        vfs_superblock_unlock(root_dir->sb);
+    }
+    // On failure, vfs_mount already released locks
     vfs_mount_unlock();
     
     // Release device inode reference (mount holds its own if needed)

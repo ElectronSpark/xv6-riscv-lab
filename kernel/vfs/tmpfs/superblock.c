@@ -282,7 +282,10 @@ void tmpfs_mount_root(void) {
     // Mount the tmpfs at the root inode
     ret = vfs_mount("tmpfs", &vfs_root_inode, NULL, 0, NULL);
     assert(ret == 0, "tmpfs_mount_root: vfs_mount failed, errno=%d", ret);
-    vfs_iunlock(&vfs_root_inode);
+    // On success, release locks. On failure, vfs_mount already released them.
+    if (ret == 0) {
+        vfs_iunlock(&vfs_root_inode);
+    }
     vfs_mount_unlock();
 
     ret = vfs_chroot(vfs_root_inode.mnt_rooti);

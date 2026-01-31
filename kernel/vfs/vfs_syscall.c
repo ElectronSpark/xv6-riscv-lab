@@ -1080,9 +1080,11 @@ int vfs_mount_path(const char *fstype, const char *target, int target_len,
     // Mount the filesystem
     int ret = vfs_mount(fstype, target_dir, source_inode, 0, NULL);
     
-    // Release locks in reverse order
-    vfs_iunlock(target_dir);
-    vfs_superblock_unlock(target_dir->sb);
+    // On success, release locks. On failure, vfs_mount already released them.
+    if (ret == 0) {
+        vfs_iunlock(target_dir);
+        vfs_superblock_unlock(target_dir->sb);
+    }
     vfs_mount_unlock();
     
     if (source_inode) {

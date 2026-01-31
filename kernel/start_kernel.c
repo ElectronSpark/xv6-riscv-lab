@@ -173,6 +173,7 @@ void start_kernel_post_init(void) {
     // Linux-style: boot hart explicitly starts other harts after initialization.
     // OpenSBI keeps other harts stopped until we request them via sbi_hart_start().
     sbi_start_secondary_harts((unsigned long)_entry);
+    sleep_ms(100); // Give secondary harts time to start
     // RCU processing is now done per-CPU in idle loops
     // rcu_run_tests();
     
