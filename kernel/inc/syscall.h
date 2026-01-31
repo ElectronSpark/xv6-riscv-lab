@@ -52,6 +52,7 @@
 #define SYS_dumppcache 536
 #define SYS_dumprq 537
 #define SYS_kernbase 538
+#define SYS_dumpinode 539
 
 #define SYS_sync 900
 

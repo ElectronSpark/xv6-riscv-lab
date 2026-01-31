@@ -159,5 +159,8 @@ static inline bool vfs_inode_is_local_root(struct vfs_inode *inode) {
     return false;
 }
 
+// Debug
+void vfs_dump_inodes(void);
+void vfs_dump_sb_inodes(struct vfs_superblock *sb);
 
 #endif // __KERNEL_VIRTUAL_FILE_SYSTEM_FS_H

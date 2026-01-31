@@ -1200,3 +1200,40 @@ uint64 sys_umount(void) {
     
     return vfs_umount_path(target, n);
 }
+
+/******************************************************************************
+ * Debug: Dump active inodes
+ * If path is provided (non-null arg0), dump only the superblock containing that path.
+ * Otherwise, dump all superblocks.
+ ******************************************************************************/
+
+uint64 sys_dumpinode(void) {
+    char path[MAXPATH];
+    int n;
+    
+    // Try to get path argument - if not provided, dump all
+    n = argstr(0, path, MAXPATH);
+    if (n < 0) {
+        // No path argument, dump all inodes
+        vfs_dump_inodes();
+        return 0;
+    }
+    
+    // Path provided - resolve it to find its superblock
+    struct vfs_inode *inode = vfs_namei(path, n);
+    if (!inode) {
+        printf("dumpinode: cannot find path '%s'\n", path);
+        return -ENOENT;
+    }
+    
+    struct vfs_superblock *sb = inode->sb;
+    vfs_iput(inode);
+    
+    if (!sb) {
+        printf("dumpinode: inode has no superblock\n");
+        return -EINVAL;
+    }
+    
+    vfs_dump_sb_inodes(sb);
+    return 0;
+}

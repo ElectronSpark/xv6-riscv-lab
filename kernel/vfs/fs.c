@@ -1929,3 +1929,114 @@ struct vfs_inode *vfs_inode_deref(struct vfs_inode_ref *ref) {
     }
     return ref->inode;
 }
+
+/******************************************************************************
+ * Debug: Dump all active inodes
+ ******************************************************************************/
+
+static const char *__inode_mode_str(mode_t mode) {
+    if (S_ISDIR(mode)) return "DIR";
+    if (S_ISREG(mode)) return "REG";
+    if (S_ISLNK(mode)) return "LNK";
+    if (S_ISCHR(mode)) return "CHR";
+    if (S_ISBLK(mode)) return "BLK";
+    if (S_ISFIFO(mode)) return "FIFO";
+    if (S_ISSOCK(mode)) return "SOCK";
+    return "???";
+}
+
+// Helper to dump inodes of a single superblock (caller must hold sb rlock)
+static void __dump_sb_inodes(struct vfs_superblock *sb) {
+    struct vfs_inode *inode, *inode_tmp;
+    int inode_count = 0;
+    int active_count = 0;
+    
+    // First pass: count inodes
+    hlist_foreach_node_safe(&sb->inodes, inode, inode_tmp, hash_entry) {
+        inode_count++;
+        if (inode->ref_count > 0) {
+            active_count++;
+        }
+    }
+    
+    printf("  Superblock %p: valid=%d attached=%d backendless=%d "
+           "inodes: total=%d active=%d\n",
+           sb, sb->valid, sb->attached, sb->backendless,
+           inode_count, active_count);
+    
+    // Second pass: print active inodes
+    hlist_foreach_node_safe(&sb->inodes, inode, inode_tmp, hash_entry) {
+        if (inode->ref_count > 0 || inode->n_links > 0) {
+            printf("    ino=%lu type=%s ref=%d n_links=%d valid=%d "
+                   "dirty=%d destroying=%d orphan=%d",
+                   inode->ino, __inode_mode_str(inode->mode),
+                   inode->ref_count, inode->n_links, 
+                   inode->valid, inode->dirty, 
+                   inode->destroying, inode->orphan);
+            if (S_ISDIR(inode->mode)) {
+                // name and parent only apply to directories
+                if (inode->name) {
+                    printf(" name=\"%s\"", inode->name);
+                }
+                if (inode->parent) {
+                    printf(" parent_ino=%lu", inode->parent->ino);
+                }
+            }
+            // Union fields: only access based on inode type
+            if (inode->mount) {
+                // mountpoint uses mnt_sb/mnt_rooti union variant
+                printf(" [mountpoint mnt_sb=%p]", inode->mnt_sb);
+            } else if (S_ISCHR(inode->mode)) {
+                // character device uses cdev union variant
+                printf(" cdev=%u", inode->cdev);
+            } else if (S_ISBLK(inode->mode)) {
+                // block device uses bdev union variant
+                printf(" bdev=%u", inode->bdev);
+            }
+            printf("\n");
+        }
+    }
+}
+
+void vfs_dump_sb_inodes(struct vfs_superblock *sb) {
+    if (!sb) {
+        printf("vfs_dump_sb_inodes: NULL superblock\n");
+        return;
+    }
+    
+    printf("\n=== VFS Superblock Inode Dump ===\n");
+    printf("Filesystem type: %s\n", sb->fs_type ? sb->fs_type->name : "(null)");
+    
+    vfs_superblock_rlock(sb);
+    __dump_sb_inodes(sb);
+    vfs_superblock_unlock(sb);
+    
+    printf("\n=== End of Superblock Inode Dump ===\n\n");
+}
+
+void vfs_dump_inodes(void) {
+    struct vfs_fs_type *fstype, *fstype_tmp;
+    struct vfs_superblock *sb, *sb_tmp;
+    
+    printf("\n=== VFS Inode Dump ===\n");
+    
+    vfs_mount_lock();
+    
+    list_foreach_node_safe(&vfs_fs_types, fstype, fstype_tmp, list_entry) {
+        if (fstype->sb_count == 0) {
+            continue;
+        }
+        
+        printf("\nFilesystem type: %s (superblocks: %d)\n", 
+               fstype->name, fstype->sb_count);
+        
+        list_foreach_node_safe(&fstype->superblocks, sb, sb_tmp, siblings) {
+            vfs_superblock_rlock(sb);
+            __dump_sb_inodes(sb);
+            vfs_superblock_unlock(sb);
+        }
+    }
+    
+    vfs_mount_unlock();
+    printf("\n=== End of Inode Dump ===\n\n");
+}

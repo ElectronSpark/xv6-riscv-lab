@@ -43,6 +43,7 @@ int dumpproc(void);
 int dumpchan(void);
 int dumppcache(void);
 int dumprq(void);
+int dumpinode(const char *path);
 uint64 kernbase(void);
 
 // New VFS syscalls

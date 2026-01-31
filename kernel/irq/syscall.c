@@ -111,7 +111,7 @@ extern uint64 sys_dumpchan(void);
 extern uint64 sys_dumppcache(void);
 extern uint64 sys_dumprq(void);
 extern uint64 sys_kernbase(void);
-extern uint64 sys_dumprq(void);
+extern uint64 sys_dumpinode(void);
 
 //900
 extern uint64 sys_sync(void);
@@ -185,6 +185,7 @@ STATIC uint64 (*syscalls[])(void) = {
 [SYS_dumppcache] sys_dumppcache,
 [SYS_dumprq] sys_dumprq,
 [SYS_kernbase] sys_kernbase,
+[SYS_dumpinode] sys_dumpinode,
 [SYS_sync]    sys_sync,
 // VFS extended syscalls (1000+)
 [SYS_vfs_dup]     sys_vfs_dup,

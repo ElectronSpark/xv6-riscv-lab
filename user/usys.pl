@@ -68,5 +68,6 @@ entry("dumpchan");
 entry("dumppcache");
 entry("dumprq");
 entry("kernbase");
+entry("dumpinode", 1);
 
 entry("sync");
