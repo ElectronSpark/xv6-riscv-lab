@@ -271,7 +271,8 @@ void scheduler_stop(struct proc *p) {
 
 static void __scheduler_wakeup_assertion(struct proc *p) {
     assert(p != NULL, "Cannot wake up a NULL process");
-    assert(spin_holding(&p->sched_entity->pi_lock), "Process pi_lock must be held when waking up a process");
+    // Note: pi_lock is now acquired inside __do_scheduler_wakeup, not by callers.
+    // This avoids lock convoy when many processes wake the same target.
     assert(!spin_holding(&p->lock), "Process lock must not be held when waking up a process");
     assert(!sched_holding(), "Scheduler lock must not be held when waking up a process");
 }
@@ -281,7 +282,15 @@ static void __scheduler_wakeup_assertion(struct proc *p) {
 // - If not on_cpu: enqueue directly and set to RUNNING
 // - If on_cpu: add to wake list and send IPI (state stays WAKENING)
 // The 'from_stopped' flag indicates whether we're waking from PSTATE_STOPPED.
+//
+// Locking: Acquires pi_lock first, then rq_lock. Uses trylock with backoff
+// to avoid lock convoy when many processes wake the same target.
 static void __do_scheduler_wakeup(struct proc *p, bool from_stopped) {
+    struct sched_entity *se = p->sched_entity;
+    
+    // Acquire pi_lock to serialize wakeup attempts on this process
+    spin_lock(&se->pi_lock);
+    
     // Special case: waking up the current process (p == myproc())
     // This happens when an interrupt wakes up a process that set its state to SLEEPING
     // but hasn't context-switched out yet. In this case, just change the state back
@@ -290,39 +299,40 @@ static void __do_scheduler_wakeup(struct proc *p, bool from_stopped) {
     if (p == myproc()) {
         smp_rmb();
         if (from_stopped) {
+            spin_unlock(&se->pi_lock);
             return; // Cannot continue self
         }
         // The current process is still on CPU, just change state to abort the sleep
         enum procstate old_state = smp_load_acquire(&p->state);
         // Only wake from sleeping states
         if (!PSTATE_IS_SLEEPING(old_state)) {
+            spin_unlock(&se->pi_lock);
             return;
         }
         // Set state to RUNNING - no CAS needed since we're the current process
         smp_store_release(&p->state, PSTATE_RUNNING);
+        spin_unlock(&se->pi_lock);
         return;
     }
     
-    // Check on_rq first - if already queued, nothing to do
+    // Check state - if not in expected state, nothing to do
     smp_rmb();
-    // Atomically transition state to WAKENING
-    // This prevents multiple wakers from racing to add the task to the run queue
     enum procstate old_state = smp_load_acquire(&p->state);
-    
     if (from_stopped) {
-        // Wake from STOPPED state
         if (old_state != PSTATE_STOPPED) {
-            return; // Not stopped
+            spin_unlock(&se->pi_lock);
+            return;
         }
     } else {
-        // Wake from sleeping state
         if (!PSTATE_IS_SLEEPING(old_state)) {
-            return; // Process is not in a sleepable state
+            spin_unlock(&se->pi_lock);
+            return;
         }
     }
     
-    // Select which run queue to put the task into
-    struct sched_entity *se = p->sched_entity;
+    // Now we hold pi_lock and the process is in a wakeable state.
+    // We'll try to acquire rq_lock while holding pi_lock.
+    // Use trylock to avoid lock convoy when many processes wake the same target.
     
 retry:
     push_off();  // Disable interrupts to avoid CPU migration during rq selection
@@ -337,10 +347,29 @@ retry:
         origin_cpuid = target_cpu;  // New task, no origin rq to serialize with
     }
     
-    // Lock both source and target rq to serialize with context_switch_finish.
-    // This ensures we see the final state of on_rq/on_cpu after the task
-    // has finished switching out of the origin CPU.
-    rq_lock_two(origin_cpuid, target_cpu);
+    // Try to lock both source and target rq to serialize with context_switch_finish.
+    // Use trylock to avoid spinning while holding pi_lock (prevents lock convoy).
+    if (!rq_trylock_two(origin_cpuid, target_cpu)) {
+        pop_off();
+        // Couldn't get rq locks - release pi_lock, backoff, re-check state
+        spin_unlock(&se->pi_lock);
+        for (volatile int i = 0; i < 10; i++) cpu_relax();
+        spin_lock(&se->pi_lock);
+        // Re-check state after reacquiring pi_lock
+        old_state = smp_load_acquire(&p->state);
+        if (from_stopped) {
+            if (old_state != PSTATE_STOPPED) {
+                spin_unlock(&se->pi_lock);
+                return;
+            }
+        } else {
+            if (!PSTATE_IS_SLEEPING(old_state)) {
+                spin_unlock(&se->pi_lock);
+                return;
+            }
+        }
+        goto retry;
+    }
     pop_off();
     
     // Re-check cpu_id after acquiring locks. If the task migrated between
@@ -350,9 +379,25 @@ retry:
     int current_cpuid = smp_load_acquire(&se->cpu_id);
     if (current_cpuid >= 0 && current_cpuid != origin_cpuid) {
         rq_unlock_two(origin_cpuid, target_cpu);
+        // Release pi_lock, re-acquire and re-check state
+        spin_unlock(&se->pi_lock);
+        spin_lock(&se->pi_lock);
+        old_state = smp_load_acquire(&p->state);
+        if (from_stopped) {
+            if (old_state != PSTATE_STOPPED) {
+                spin_unlock(&se->pi_lock);
+                return;
+            }
+        } else {
+            if (!PSTATE_IS_SLEEPING(old_state)) {
+                spin_unlock(&se->pi_lock);
+                return;
+            }
+        }
         goto retry;
     }
     
+    // We now hold both pi_lock and rq_lock - safe to transition state
     smp_store_release(&p->state, PSTATE_WAKENING);
     
     // Match Linux ttwu() behavior - check on_rq FIRST:
@@ -366,6 +411,7 @@ retry:
         // The task is already in the run queue and will be scheduled.
         // This is true regardless of on_cpu (Linux: ttwu_runnable path).
         smp_store_release(&p->state, PSTATE_RUNNING);
+        spin_unlock(&se->pi_lock);
         rq_unlock_two(origin_cpuid, target_cpu);
         return;
     }
@@ -375,16 +421,18 @@ retry:
     if (smp_load_acquire(&se->on_cpu)) {
         // Task is currently running on a CPU but not on_rq (switching out).
         // Use wake_list - the running CPU will enqueue after context_switch_finish.
-        int running_cpu = smp_load_acquire(&se->cpu_id);
-        rq_add_wake_list(running_cpu, se);
+        // Use origin_cpuid (already validated) rather than re-reading cpu_id.
+        rq_add_wake_list(origin_cpuid, se);
+        spin_unlock(&se->pi_lock);
         rq_unlock_two(origin_cpuid, target_cpu);
-        // Send IPI to running CPU to process the wake list
-        ipi_send_single(running_cpu, IPI_REASON_RESCHEDULE);
+        // Send IPI to origin CPU to process the wake list
+        ipi_send_single(origin_cpuid, IPI_REASON_RESCHEDULE);
         return;
     }
 
     // on_rq=0 and on_cpu=0: task is fully off CPU, enqueue directly
     rq_enqueue_task(rq, se);
+    spin_unlock(&se->pi_lock);
     rq_unlock_two(origin_cpuid, target_cpu);
 }
 
@@ -489,43 +537,40 @@ void scheduler_dump_chan_queue(void) {
 }
 
 // Unconditionally wake up process
+// Note: pi_lock is not needed here - rq_lock_two in __do_scheduler_wakeup
+// provides serialization for concurrent wakeups to the same target.
 void wakeup_proc(struct proc *p)
 {
     if (p == NULL) {
         return;
     }
-    spin_lock(&p->sched_entity->pi_lock);
     scheduler_wakeup(p);
-    spin_unlock(&p->sched_entity->pi_lock);
 }
 
 void wakeup_timeout(struct proc *p) {
     if (p == NULL) {
         return;
     }
-    spin_lock(&p->sched_entity->pi_lock);
     scheduler_wakeup_timeout(p);
-    spin_unlock(&p->sched_entity->pi_lock);
 }
 
 void wakeup_killable(struct proc *p) {
     if (p == NULL) {
         return;
     }
-    spin_lock(&p->sched_entity->pi_lock);
     scheduler_wakeup_killable(p);
-    spin_unlock(&p->sched_entity->pi_lock);
 }
 
 // Wake up a process sleeping in interruptible state
+// Note: pi_lock is not needed - rq_lock_two in __do_scheduler_wakeup
+// handles concurrent wakeups. Removing pi_lock prevents lock convoy
+// when many processes exit and wake the same parent.
 void wakeup_interruptible(struct proc *p)
 {
     if (p == NULL) {
         return;
     }
-    spin_lock(&p->sched_entity->pi_lock);
     scheduler_wakeup_interruptible(p);
-    spin_unlock(&p->sched_entity->pi_lock);
 }
 
 uint64 sys_dumpchan(void) {

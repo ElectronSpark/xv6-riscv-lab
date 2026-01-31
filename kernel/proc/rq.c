@@ -224,6 +224,13 @@ void rq_lock(int cpu_id) {
     spin_lock(&__rqpc(cpu_id)->rq_lock);
 }
 
+// Try to acquire the rq lock without spinning.
+// Returns 1 if acquired, 0 if not.
+int rq_trylock(int cpu_id) {
+    assert(cpu_id >= 0 && cpu_id < NCPU, "rq_trylock: invalid cpu_id %d", cpu_id);
+    return spin_trylock(&__rqpc(cpu_id)->rq_lock);
+}
+
 void rq_unlock(int cpu_id) {
     assert(cpu_id >= 0 && cpu_id < NCPU, "rq_unlock: invalid cpu_id %d", cpu_id);
     assert(__rq_lock_held(cpu_id), "rq_unlock: lock not held for cpu_id %d", cpu_id);
@@ -267,6 +274,41 @@ void rq_lock_two(int cpu_id1, int cpu_id2) {
     } else {
         rq_lock(cpu_id1);
     }
+}
+
+// Try to acquire two rq locks without spinning.
+// Uses consistent ordering (lower cpu_id first) to prevent deadlock.
+// Returns 1 if both acquired, 0 if not (releases any acquired lock).
+int rq_trylock_two(int cpu_id1, int cpu_id2) {
+    assert(cpu_id1 >= 0 && cpu_id1 < NCPU, "rq_trylock_two: invalid cpu_id1 %d", cpu_id1);
+    assert(cpu_id2 >= 0 && cpu_id2 < NCPU, "rq_trylock_two: invalid cpu_id2 %d", cpu_id2);
+    
+    int first, second;
+    if (cpu_id1 <= cpu_id2) {
+        first = cpu_id1;
+        second = cpu_id2;
+    } else {
+        first = cpu_id2;
+        second = cpu_id1;
+    }
+    
+    // Try to acquire first lock
+    if (!rq_trylock(first)) {
+        return 0;
+    }
+    
+    // If same cpu, we're done
+    if (first == second) {
+        return 1;
+    }
+    
+    // Try to acquire second lock
+    if (!rq_trylock(second)) {
+        rq_unlock(first);  // Release first lock on failure
+        return 0;
+    }
+    
+    return 1;
 }
 
 void rq_unlock_two(int cpu_id1, int cpu_id2) {

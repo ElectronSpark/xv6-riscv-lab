@@ -480,10 +480,9 @@ void userinit(void) {
     sched_setattr(p->sched_entity, &attr);
 
     // Don't forget to wake up the process.
-    spin_lock(&p->sched_entity->pi_lock);
+    // Note: pi_lock no longer needed - rq_lock serializes wakeups
     __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
     scheduler_wakeup(p);
-    spin_unlock(&p->sched_entity->pi_lock);
 }
 
 /*
@@ -610,15 +609,17 @@ int fork(void) {
     proc_unlock(p);
     proc_unlock(np);
 
-    spin_lock(&np->sched_entity->pi_lock);
+    // Wake up the new child process
+    // Note: pi_lock no longer needed - rq_lock serializes wakeups
     scheduler_wakeup(np);
-    spin_unlock(&np->sched_entity->pi_lock);
 
     return np->pid;
 }
 
 // Pass p's abandoned children to init.
 // Caller must not hold p->lock.
+// Uses trylock with backoff to avoid lock convoy when many processes
+// exit simultaneously and all compete for initproc's lock.
 void reparent(struct proc *p) {
     struct proc *initproc = __proctab_get_initproc();
     struct proc *child, *tmp;
@@ -627,8 +628,20 @@ void reparent(struct proc *p) {
     assert(initproc != NULL, "reparent: initproc is NULL");
     assert(p != initproc, "reparent: p is init process");
 
-    proc_lock(initproc);
-    proc_lock(p);
+retry:
+    // Try to acquire both locks without blocking
+    if (!spin_trylock(&initproc->lock)) {
+        // Couldn't get initproc lock - backoff and retry
+        for (volatile int i = 0; i < 100; i++) cpu_relax();
+        goto retry;
+    }
+    
+    if (!spin_trylock(&p->lock)) {
+        // Couldn't get p's lock - release initproc and retry
+        spin_unlock(&initproc->lock);
+        for (volatile int i = 0; i < 100; i++) cpu_relax();
+        goto retry;
+    }
 
     list_foreach_node_safe(&p->children, child, tmp, siblings) {
         // make sure the child isn't still in exit() or swtch().
@@ -743,12 +756,25 @@ int wait(uint64 addr) {
         list_foreach_node_safe(&p->children, child, tmp, siblings) {
             proc_lock(child);
             if (PROC_ZOMBIE(child)) {
-                // Make sure the zombie child has fully switched out of CPU
-                if (smp_load_acquire(&child->sched_entity->on_cpu)) {
-                    // Still on CPU, mark needs yield and try again later
-                    proc_unlock(child);
-                    __proc_set_pstate(p, PSTATE_RUNNING);
-                    continue;
+                // Make sure the zombie child has fully switched out of CPU.
+                // The on_cpu window is very short (just context_switch_finish),
+                // so we spin-wait with cpu_relax() rather than yielding.
+                // This avoids a tight loop that could starve other processes.
+                int spin_count = 0;
+                while (smp_load_acquire(&child->sched_entity->on_cpu)) {
+                    cpu_relax();
+                    spin_count++;
+                    // If spinning too long, yield to let other CPU progress
+                    if (spin_count > 1000) {
+                        proc_unlock(child);
+                        __proc_set_pstate(p, PSTATE_RUNNING);
+                        proc_unlock(p);
+                        scheduler_yield();  // Give other CPUs a chance
+                        proc_lock(p);
+                        __proc_set_pstate(p, PSTATE_INTERRUPTIBLE);
+                        proc_lock(child);
+                        spin_count = 0;
+                    }
                 }
                 // Found one - set state to RUNNING before returning.
                 // If we were in WAKENING, rq_flush_wake_list will skip us
@@ -777,8 +803,7 @@ int wait(uint64 addr) {
         proc_unlock(p);
         scheduler_yield();
         proc_lock(p);
-        // Set state back to INTERRUPTIBLE for the next loop iteration.
-        __proc_set_pstate(p, PSTATE_INTERRUPTIBLE);
+        // State will be set to INTERRUPTIBLE at the start of next loop iteration
     }
 
 ret:

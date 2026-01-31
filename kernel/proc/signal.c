@@ -374,10 +374,9 @@ after_enqueue:
         enum procstate pstate = __proc_get_pstate(p);
         if (PSTATE_IS_INTERRUPTIBLE(pstate)) {
             // Wake up interruptible sleeper so it can handle the stop signal
+            // Note: pi_lock no longer needed - rq_lock serializes wakeups
             proc_unlock(p);
-            spin_lock(&p->sched_entity->pi_lock);
             scheduler_wakeup(p);
-            spin_unlock(&p->sched_entity->pi_lock);
             proc_lock(p);
         } else if (pstate == PSTATE_RUNNING) {
             // Process is running, request reschedule so it handles signals soon
@@ -398,10 +397,9 @@ after_enqueue:
     if (is_cont) {
         // Continue signal: Wake up the process from PSTATE_STOPPED state.
         // scheduler_wakeup_stopped handles transitioning from STOPPED to RUNNING.
+        // Note: pi_lock no longer needed - rq_lock serializes wakeups
         proc_unlock(p);
-        spin_lock(&p->sched_entity->pi_lock);
         scheduler_wakeup_stopped(p);
-        spin_unlock(&p->sched_entity->pi_lock);
         proc_lock(p);
     }
 
@@ -412,11 +410,9 @@ after_enqueue:
         PROC_SET_KILLED(p);
         if (PROC_STOPPED(p)) {
             // If the process is stopped, we need to wake it up.
-            // scheduler_wakeup_stopped uses pi_lock protocol.
+            // Note: pi_lock no longer needed - rq_lock serializes wakeups
             proc_unlock(p);
-            spin_lock(&p->sched_entity->pi_lock);
             scheduler_wakeup_stopped(p);
-            spin_unlock(&p->sched_entity->pi_lock);
             proc_lock(p);
         }
     }
@@ -474,13 +470,10 @@ int signal_notify(struct proc *p) {
     if (__proc_get_pstate(p) == PSTATE_INTERRUPTIBLE) {
         // Must follow wakeup locking protocol:
         // - Release proc_lock (must NOT be held during wakeup)
-        // - Acquire pi_lock (required for wakeup)
-        // - Call wakeup
-        // - Release pi_lock, reacquire proc_lock
+        // - Call wakeup (no pi_lock needed - rq_lock serializes)
+        // - Reacquire proc_lock
         proc_unlock(p);
-        spin_lock(&p->sched_entity->pi_lock);
         scheduler_wakeup_interruptible(p);
-        spin_unlock(&p->sched_entity->pi_lock);
         proc_lock(p);
         return 0; // Success
     }
