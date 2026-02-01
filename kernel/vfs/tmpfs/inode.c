@@ -429,10 +429,7 @@ int __tmpfs_rmdir(struct vfs_dentry *dentry, struct vfs_inode *target) {
     if (&tmpfs_dentry->inode->vfs_inode != target) {
         return -EINVAL; // Target inode does not match
     }
-    
-    if (vfs_inode_refcount(target) > 2) {
-        return -EBUSY; // Target inode is busy
-    }
+    // VFS core already verified directory is empty and not in use
     // Directory n_links should be 2 (for "." and "..") when empty
     assert(target->n_links == 2, "Tmpfs rmdir: directory link count is not 2");
     target->n_links -= 2;  // Remove both "." and ".." links

@@ -928,6 +928,11 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
             ret = -ENOTEMPTY; // Directory not empty
             goto out;
         }
+        // Check if directory is in use (refcount > 1 means someone else has it open)
+        if (vfs_inode_refcount(target) > 1) {
+            ret = -EBUSY; // Directory is in use
+            goto out;
+        }
         ret = dir->ops->rmdir(&dentry, target);
     } else {
         // Inode is a file or other non-directory
