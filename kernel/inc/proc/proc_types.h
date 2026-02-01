@@ -55,6 +55,7 @@ struct proc {
 #define PROC_FLAG_KILLED 2     // Process is exiting or exited
 #define PROC_FLAG_ONCHAN 3     // Process is sleeping on a channel
 #define PROC_FLAG_USER_SPACE 5 // Process has user space
+    uint64 clone_flags;         // flags used during clone
 
     // proc table lock must be held before holding p->lock to use this:
     hlist_entry_t proctab_entry; // Entry to link the process hash table
@@ -73,6 +74,7 @@ struct proc {
     uint64 sig_ucontext; // Address of the signal user context
     stack_t sig_stack;   // Alternate signal stack
     uint64 esignal;     // Signal to be sent to parent on exit
+    struct proc *vfork_parent;  // Parent waiting for vfork child (NULL if not vfork)
 
     // both p->lock and p->parent->lock must be held when using this:
     list_node_t siblings; // List of sibling processes

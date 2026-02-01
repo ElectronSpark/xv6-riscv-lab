@@ -46,6 +46,22 @@ static void wake_up_parent(struct proc *parent) {
     }
 }
 
+// Wake the vfork parent when child exits or execs.
+// The vfork parent is blocked in UNINTERRUPTIBLE state waiting for us.
+// After waking, clear the vfork_parent pointer so we don't wake twice.
+void vfork_done(struct proc *p) {
+    struct proc *vfork_parent;
+    
+    proc_lock(p);
+    vfork_parent = p->vfork_parent;
+    p->vfork_parent = NULL;  // Clear so we don't wake again on exit after exec
+    proc_unlock(p);
+    
+    if (vfork_parent != NULL) {
+        scheduler_wakeup(vfork_parent);
+    }
+}
+
 // Pass p's abandoned children to init.
 // Caller must not hold p->lock.
 // Uses trylock with backoff to avoid lock convoy when many processes
@@ -104,6 +120,10 @@ retry:
 void exit(int status) {
     struct proc *p = myproc();
     struct proc *parent = p->parent;
+
+    // Wake vfork parent FIRST - they're sharing our address space
+    // and need to resume before we tear anything down
+    vfork_done(p);
 
     // VFS file descriptor table cleanup (closes all VFS files)
     vfs_fdtable_put(p->fdtable);

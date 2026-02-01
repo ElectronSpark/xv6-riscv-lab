@@ -663,6 +663,33 @@ void dirtest(char *s) {
     }
 }
 
+// Test vfork() - child immediately execs, following vfork contract
+void vforktest(char *s) {
+    int pid, xstatus;
+    char *echoargv[] = {"echo", "vfork-ok", 0};
+
+    pid = vfork();
+    if (pid < 0) {
+        printf("%s: vfork failed\n", s);
+        exit(1);
+    }
+    if (pid == 0) {
+        // Child: immediately exec - this is the only safe thing to do after vfork
+        exec("echo", echoargv);
+        // If exec fails, exit immediately
+        exit(1);
+    }
+    // Parent: should resume after child execs
+    if (wait(&xstatus) != pid) {
+        printf("%s: wait failed!\n", s);
+        exit(1);
+    }
+    if (xstatus != 0) {
+        printf("%s: child exited with status %d\n", s, xstatus);
+        exit(1);
+    }
+}
+
 void exectest(char *s) {
     int fd, xstatus, pid;
     char *echoargv[] = {"echo", "OK", 0};
@@ -2558,6 +2585,7 @@ struct test {
     {createtest, "createtest"},
     {dirtest, "dirtest"},
     {exectest, "exectest"},
+    {vforktest, "vforktest"},
     {pipe1, "pipe1"},
     {killstatus, "killstatus"},
     {preempt, "preempt"},

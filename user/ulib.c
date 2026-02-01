@@ -14,11 +14,39 @@ start()
   exit(0);
 }
 
-// fork() wrapper - calls clone with NULL args for default fork behavior
+// fork() wrapper - calls clone with default fork args
 int
 fork(void)
 {
-  return clone(0);
+  struct clone_args args = {
+    .flags = 0,
+    .stack = 0,
+    .stack_size = 0,
+    .entry = 0,
+    .esignal = SIGCHLD,
+    .tls = 0,
+    .ctid = 0,
+    .ptid = 0,
+  };
+  return clone(&args);
+}
+
+// vfork() wrapper - calls clone with CLONE_VM | CLONE_VFORK
+// Parent blocks until child execs or exits
+int
+vfork(void)
+{
+  struct clone_args args = {
+    .flags = CLONE_VM | CLONE_VFORK,
+    .stack = 0,       // use parent's stack
+    .stack_size = 0,
+    .entry = 0,
+    .esignal = SIGCHLD,
+    .tls = 0,
+    .ctid = 0,
+    .ptid = 0,
+  };
+  return clone(&args);
 }
 
 char*

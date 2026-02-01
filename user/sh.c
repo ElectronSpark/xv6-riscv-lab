@@ -62,7 +62,6 @@ struct backcmd {
     struct cmd *cmd;
 };
 
-int fork1(void); // Fork but panics on failure.
 void panic(char *);
 struct cmd *parsecmd(char *);
 void runcmd(struct cmd *) __attribute__((noreturn));
@@ -151,6 +150,28 @@ static void builtin_ls(char *path) {
     close(fd);
 }
 
+// Helper for pipe left side: redirect stdout to pipe write end, then run cmd
+// Never returns - safe to call after vfork
+static void run_pipe_left(struct cmd *cmd, int *p) __attribute__((noreturn));
+static void run_pipe_left(struct cmd *cmd, int *p) {
+    close(1);
+    dup(p[1]);
+    close(p[0]);
+    close(p[1]);
+    runcmd(cmd);
+}
+
+// Helper for pipe right side: redirect stdin to pipe read end, then run cmd
+// Never returns - safe to call after vfork
+static void run_pipe_right(struct cmd *cmd, int *p) __attribute__((noreturn));
+static void run_pipe_right(struct cmd *cmd, int *p) {
+    close(0);
+    dup(p[0]);
+    close(p[0]);
+    close(p[1]);
+    runcmd(cmd);
+}
+
 // Execute cmd.  Never returns.
 void runcmd(struct cmd *cmd) {
     int p[2];
@@ -159,6 +180,7 @@ void runcmd(struct cmd *cmd) {
     struct listcmd *lcmd;
     struct pipecmd *pcmd;
     struct redircmd *rcmd;
+    int pid;
 
     if (cmd == 0)
         exit(1);
@@ -193,7 +215,12 @@ void runcmd(struct cmd *cmd) {
 
     case LIST:
         lcmd = (struct listcmd *)cmd;
-        if (fork1() == 0)
+        // vfork child calls runcmd which never returns - safe because
+        // child uses stack space above parent's frame
+        pid = vfork();
+        if (pid < 0)
+            panic("vfork");
+        if (pid == 0)
             runcmd(lcmd->left);
         wait(0);
         runcmd(lcmd->right);
@@ -203,20 +230,21 @@ void runcmd(struct cmd *cmd) {
         pcmd = (struct pipecmd *)cmd;
         if (pipe(p) < 0)
             panic("pipe");
-        if (fork1() == 0) {
-            close(1);
-            dup(p[1]);
-            close(p[0]);
-            close(p[1]);
-            runcmd(pcmd->left);
-        }
-        if (fork1() == 0) {
-            close(0);
-            dup(p[0]);
-            close(p[0]);
-            close(p[1]);
-            runcmd(pcmd->right);
-        }
+        
+        // Left side of pipe: stdout -> pipe write end
+        pid = vfork();
+        if (pid < 0)
+            panic("vfork");
+        if (pid == 0)
+            run_pipe_left(pcmd->left, p);
+        
+        // Right side of pipe: stdin <- pipe read end
+        pid = vfork();
+        if (pid < 0)
+            panic("vfork");
+        if (pid == 0)
+            run_pipe_right(pcmd->right, p);
+        
         close(p[0]);
         close(p[1]);
         wait(0);
@@ -225,8 +253,12 @@ void runcmd(struct cmd *cmd) {
 
     case BACK:
         bcmd = (struct backcmd *)cmd;
-        if (fork1() == 0)
+        pid = vfork();
+        if (pid < 0)
+            panic("vfork");
+        if (pid == 0)
             runcmd(bcmd->cmd);
+        // Don't wait - that's the point of &
         break;
     }
     exit(0);
@@ -279,8 +311,20 @@ int main(void) {
             }
             continue;
         }
-        if (fork1() == 0)
-            runcmd(parsecmd(buf));
+        
+        // Parse command first (before vfork)
+        struct cmd *cmd = parsecmd(buf);
+        if (cmd == 0)
+            continue;  // Parse error, try next command
+        int pid;
+        
+        // vfork + runcmd: child calls runcmd which never returns,
+        // so parent's call frame stays intact
+        pid = vfork();
+        if (pid < 0)
+            panic("vfork");
+        if (pid == 0)
+            runcmd(cmd);
         wait(0);
     }
     exit(0);
@@ -289,15 +333,6 @@ int main(void) {
 void panic(char *s) {
     fprintf(2, "%s\n", s);
     exit(1);
-}
-
-int fork1(void) {
-    int pid;
-
-    pid = fork();
-    if (pid == -1)
-        panic("fork");
-    return pid;
 }
 
 // PAGEBREAK!
@@ -430,8 +465,8 @@ struct cmd *parsecmd(char *s) {
     cmd = parseline(&s, es);
     peek(&s, es, "");
     if (s != es) {
-        fprintf(2, "leftovers: %s\n", s);
-        panic("syntax");
+        fprintf(2, "syntax error near: %s\n", s);
+        return 0;  // Return NULL instead of panicking
     }
     nulterminate(cmd);
     return cmd;
@@ -444,6 +479,12 @@ struct cmd *parseline(char **ps, char *es) {
     while (peek(ps, es, "&")) {
         gettoken(ps, es, 0, 0);
         cmd = backcmd(cmd);
+        // After &, if there's more input, parse it as a continuation
+        // This allows "cmd1 & cmd2" syntax (implicit ; after &)
+        if (*ps < es && !peek(ps, es, ";&")) {
+            cmd = listcmd(cmd, parseline(ps, es));
+            return cmd;
+        }
     }
     if (peek(ps, es, ";")) {
         gettoken(ps, es, 0, 0);

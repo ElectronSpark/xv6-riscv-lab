@@ -3,8 +3,7 @@
 
 struct stat;
 
-typedef uint64 sigset_t;
-
+#include "kernel/inc/types.h"
 #include "kernel/inc/signal_types.h"
 #include "kernel/inc/mm/memstat.h"
 #include "kernel/inc/clone_flags.h"
@@ -41,6 +40,7 @@ void pause(void);
 
 // ulib wrapper functions
 int fork(void);
+int vfork(void);
 
 uint64 memstat(uint64 flags);
 int dumpproc(void);

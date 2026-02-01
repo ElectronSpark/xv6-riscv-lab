@@ -45,20 +45,23 @@ static void forkret_entry(struct context *prev) {
 
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
+// Caller must always provide valid clone_args.
 int proc_clone(struct clone_args *args) {
     struct proc *ret_ptr;
     struct proc *p = myproc();
-
-    if (!PROC_USER_SPACE(p)) {
-        return -EINVAL;
-    }
 
     if (args == NULL) {
         return -EINVAL;
     }
 
-    if ((args->flags & CLONE_VM) && (args->stack == 0 || args->entry == 0)) {
-        // When CLONE_VM is specified, stack and entry must be provided.
+    if (!PROC_USER_SPACE(p)) {
+        return -EINVAL;
+    }
+
+    // When CLONE_VM is specified without CLONE_VFORK, stack and entry must be provided.
+    // CLONE_VFORK is special: child shares parent's stack temporarily and must exec/exit.
+    if ((args->flags & CLONE_VM) && !(args->flags & CLONE_VFORK) &&
+        (args->stack == 0 || args->entry == 0)) {
         return -EINVAL;
     }
 
@@ -128,6 +131,7 @@ int proc_clone(struct clone_args *args) {
 
     // signal to be sent to parent on exit
     ret_ptr->esignal = args->esignal;
+    ret_ptr->clone_flags = args->flags;
 
     ret_ptr->fdtable = new_fdtable;
     ret_ptr->fs = fs_clone;
@@ -160,12 +164,28 @@ int proc_clone(struct clone_args *args) {
     // Initialize the child's scheduling entity with parent's info
     rq_task_fork(ret_ptr->sched_entity);
 
+    // For vfork, set up the parent-child relationship so child can wake parent
+    if (args->flags & CLONE_VFORK) {
+        ret_ptr->vfork_parent = p;
+        // Set parent state BEFORE waking child to avoid race:
+        // child might exit before parent goes to sleep
+        __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
+    } else {
+        ret_ptr->vfork_parent = NULL;
+    }
+    
     proc_unlock(p);
     proc_unlock(ret_ptr);
 
     // Wake up the new child process
     // Note: pi_lock no longer needed - rq_lock serializes wakeups
     scheduler_wakeup(ret_ptr);
+
+    // For vfork, parent blocks until child exits or execs
+    if (args->flags & CLONE_VFORK) {
+        scheduler_yield();
+        // When we return here, child has called exec() or exit()
+    }
 
 out:
     if (IS_ERR(ret_ptr)) {

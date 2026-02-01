@@ -150,6 +150,7 @@ struct clone_args;
 
 int             proctab_get_pid_proc(int pid, struct proc **pp);
 void            exit(int);
+void            vfork_done(struct proc *p);
 int             proc_clone(struct clone_args *args);
 void            attach_child(struct proc *parent, struct proc *child);
 void            detach_child(struct proc *parent, struct proc *child);
