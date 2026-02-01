@@ -374,20 +374,14 @@ after_enqueue:
         enum procstate pstate = __proc_get_pstate(p);
         if (PSTATE_IS_INTERRUPTIBLE(pstate)) {
             // Wake up interruptible sleeper so it can handle the stop signal
-            // Note: pi_lock no longer needed - rq_lock serializes wakeups
             proc_unlock(p);
             scheduler_wakeup(p);
             proc_lock(p);
         } else if (pstate == PSTATE_RUNNING) {
-            // Process is running, request reschedule so it handles signals soon
-            if (smp_load_acquire(&p->sched_entity->on_cpu)) {
-                // Process is actively running on a CPU - send IPI to that CPU
-                int target_cpu = smp_load_acquire(&p->sched_entity->cpu_id);
-                if (target_cpu != cpuid()) {
-                    ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
-                } else {
-                    SET_NEEDS_RESCHED();
-                }
+            // Process is running, send IPI so it handles the stop signal promptly
+            int target_cpu = smp_load_acquire(&p->sched_entity->cpu_id);
+            if (target_cpu != cpuid()) {
+                ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
             } else {
                 SET_NEEDS_RESCHED();
             }
