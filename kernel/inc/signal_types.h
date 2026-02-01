@@ -29,6 +29,7 @@ typedef struct sigaction {
 } sigaction_t;
 
 typedef struct sigacts {
+	spinlock_t lock; // protect the sigacts structure
     struct sigaction sa[NSIG+1];
 	sigset_t sa_sigmask;  // signals currently blocked at the process level
 	sigset_t sa_original_mask; // original signal mask before any changes

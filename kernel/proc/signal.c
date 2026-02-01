@@ -129,6 +129,14 @@ ksiginfo_t *ksiginfo_alloc(void) {
     return ksi;
 }
 
+void sigacts_lock(sigacts_t *sa) {
+    spin_lock(&sa->lock);
+}
+
+void sigacts_unlock(sigacts_t *sa) {
+    spin_unlock(&sa->lock);
+}
+
 void ksiginfo_free(ksiginfo_t *ksi) {
     if (ksi) {
         slab_free(ksi);
@@ -238,6 +246,7 @@ sigacts_t *sigacts_init(void) {
     sigemptyset(&sa->sa_sigstop);
     sigemptyset(&sa->sa_sigcont);
     sigemptyset(&sa->sa_sigignore);
+    spin_init(&sa->lock, "sigacts_lock");
     
     for (int i = 1; i <= NSIG; i++) {
         assert(__sig_setdefault(sa, i) == 0, "sigacts_init: failed to set default action for signal %d", i);
