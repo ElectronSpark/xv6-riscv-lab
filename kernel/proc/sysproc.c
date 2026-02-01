@@ -29,9 +29,14 @@ uint64 sys_clone(void) {
     if (uargs == 0) {
         // No args provided - default to fork behavior
         args.flags = SIGCHLD;
+        args.esignal = SIGCHLD;
     } else {
         if (vm_copyin(myproc()->vm, &args, uargs, sizeof(args)) < 0) {
             return -EFAULT;
+        }
+        // If esignal not explicitly set, extract from low bits of flags (Linux convention)
+        if (args.esignal == 0) {
+            args.esignal = args.flags & 0xFF;
         }
     }
     return proc_clone(&args);

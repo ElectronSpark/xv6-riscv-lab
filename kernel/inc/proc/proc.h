@@ -162,6 +162,7 @@ void            proc_mapstacks(pagetable_t);
 int             proc_pagetable(struct proc *);
 void            proc_freepagetable(struct proc *);
 int             kill(int, int);
+int             kill_proc(struct proc *p, int signum);
 int             killed(struct proc*);
 void            proc_lock(struct proc *p);
 void            proc_unlock(struct proc *p);

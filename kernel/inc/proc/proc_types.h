@@ -72,6 +72,7 @@ struct proc {
     // This is used to restore the user context when a signal is delivered.
     uint64 sig_ucontext; // Address of the signal user context
     stack_t sig_stack;   // Alternate signal stack
+    uint64 esignal;     // Signal to be sent to parent on exit
 
     // both p->lock and p->parent->lock must be held when using this:
     list_node_t siblings; // List of sibling processes

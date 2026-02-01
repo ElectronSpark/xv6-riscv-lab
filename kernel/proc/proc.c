@@ -547,14 +547,38 @@ int growproc(int64 n) {
     return vm_growheap(p->vm, n);
 }
 
+// Wake up a parent process that may be sleeping in wait().
+// This is called unconditionally when a child exits, regardless of
+// the exit_signal. Matches Linux's __wake_up_parent() which always
+// wakes the wait_chldexit wait queue.
+//
+// This ensures wait() returns even when:
+// - exit_signal is 0 (threads with CLONE_THREAD)
+// - exit_signal is ignored (SIGCHLD with SIG_IGN)
+// - exit_signal is any other signal
+static void wake_up_parent(struct proc *parent) {
+    if (parent == NULL)
+        return;
+    
+    proc_lock(parent);
+    enum procstate pstate = __proc_get_pstate(parent);
+    if (PSTATE_IS_INTERRUPTIBLE(pstate)) {
+        proc_unlock(parent);
+        scheduler_wakeup_interruptible(parent);
+    } else {
+        proc_unlock(parent);
+    }
+}
+
 // Pass p's abandoned children to init.
 // Caller must not hold p->lock.
 // Uses trylock with backoff to avoid lock convoy when many processes
 // exit simultaneously and all compete for initproc's lock.
 void reparent(struct proc *p) {
     struct proc *initproc = __proctab_get_initproc();
+    struct proc *parent = p->parent;
     struct proc *child, *tmp;
-    bool found = false;
+    bool zombie_found = false;
 
     assert(initproc != NULL, "reparent: initproc is NULL");
     assert(p != initproc, "reparent: p is init process");
@@ -577,61 +601,25 @@ retry:
     list_foreach_node_safe(&p->children, child, tmp, siblings) {
         // make sure the child isn't still in exit() or swtch().
         proc_lock(child);
+        child->esignal = SIGCHLD;   // reset to default exit signal
+        if (__proc_get_pstate(child) == PSTATE_ZOMBIE) {
+            zombie_found = true;
+        }
         detach_child(p, child);
         attach_child(initproc, child);
         proc_unlock(child);
-        found = true;
     }
 
+    
     proc_unlock(p);
     proc_unlock(initproc);
 
-    if (found)
-        wakeup_interruptible(initproc);
-}
-
-// Yield the CPU after the process becomes zombie.
-// The caller need to hold p->lock, and not to hold the rq_lock.
-// 
-// IMPORTANT: We wake the parent BEFORE yielding, not after.
-// This matches Linux's pattern where do_notify_parent() is called
-// from exit_notify() BEFORE the zombie calls do_task_dead()/schedule().
-// 
-// If we wake the parent from context_switch_finish (after we've switched out),
-// the waker would need to spin on smp_cond_load_acquire(&parent->on_cpu, !VAL)
-// waiting for the parent to finish its context switch. This can cause a deadlock
-// on real hardware where the spin loop creates memory contention.
-// 
-// By waking the parent while we're still running (before scheduler_yield),
-// try_to_wake_up will see that parent->on_cpu is 1 and can either:
-// - Return early if parent is already waking/running
-// - Successfully wake the parent before we enter the scheduler
-static void __exit_yield(int status) {
-    struct proc *p = myproc();
-    struct proc *parent = p->parent;
-    struct proc *initproc = __proctab_get_initproc();
-    
-    proc_lock(p);
-    p->xstate = status;
-    __proc_set_pstate(p, PSTATE_ZOMBIE);
-    proc_unlock(p);
-    
-    // Wake parent BEFORE we yield - this is the Linux pattern.
-    // The parent might be sleeping in wait(), and we need to wake it
-    // before we enter the scheduler to avoid the on_cpu spin race.
-    if (parent != NULL) {
-        wakeup_interruptible(parent);
+    if (zombie_found) {
+        wake_up_parent(initproc);
+        if (initproc != NULL && initproc != parent && initproc != p && p->esignal > 0) {
+            kill_proc(initproc, p->esignal);
+        }
     }
-    
-    // Also wake init - if our parent exits before reaping us, we'll be
-    // reparented to init. By waking init now, it will be ready to reap
-    // any orphaned zombies promptly.
-    if (initproc != NULL && initproc != parent && initproc != p) {
-        wakeup_interruptible(initproc);
-    }
-    
-    scheduler_yield();
-    panic("exit: __exit_yield should not return");
 }
 
 // Exit the current process.  Does not return.
@@ -639,6 +627,7 @@ static void __exit_yield(int status) {
 // until its parent calls wait().
 void exit(int status) {
     struct proc *p = myproc();
+    struct proc *parent = p->parent;
 
     // VFS file descriptor table cleanup (closes all VFS files)
     vfs_fdtable_put(p->fdtable);
@@ -649,39 +638,67 @@ void exit(int status) {
     vfs_struct_put(p->fs);
     p->fs = NULL;
 
-    // Give any children to init.
     reparent(p);
 
-    __exit_yield(status);
-
-    // Jump into the scheduler, never to return.
-    yield();
-    panic("zombie exit");
+    proc_lock(p);
+    p->xstate = status;
+    __proc_set_pstate(p, PSTATE_ZOMBIE);
+    proc_unlock(p);
+    
+    // Wake parent BEFORE we yield - this is the Linux pattern.
+    // Always wake parent regardless of exit signal (handles threads with
+    // esignal=0 or ignored signals). Then send the exit signal if set.
+    wake_up_parent(parent);
+    if (parent != NULL && p->esignal > 0) {
+        kill_proc(parent, p->esignal);
+    }
+    
+    scheduler_yield();
+    panic("exit: __exit_yield should not return");
 }
 
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
+// Return -EINTR if interrupted by a signal other than SIGCHLD.
 //
 // Uses the Linux "set-state-before-check" pattern to avoid lost wakeups:
 // 1. Set state to INTERRUPTIBLE before scanning children
 // 2. Scan for zombies - if found, restore RUNNING and return
 // 3. If not found, yield (scheduler_yield will abort if we were woken)
-// 4. Loop back to step 1
+// 4. On wakeup, check for SIGCHLD - consume it and continue scanning
+// 5. If other signal pending, return -EINTR
+// 6. Loop back to step 1
 //
-// This works because any wakeup between steps 1-3 will change our state
-// back to RUNNING, and scheduler_yield will detect this and not sleep.
+// This matches Linux's do_wait() behavior where wait() is specifically
+// waiting for SIGCHLD from exiting children.
 int wait(uint64 addr) {
     int pid = -1;
     int xstate = 0;
     struct proc *p = myproc();
     struct proc *child, *tmp;
+    sigset_t saved_mask = 0;
+    bool mask_saved = false;
 
     proc_lock(p);
+    
+    // Save current signal mask and unmask SIGCHLD so we can receive it
+    if (p->sigacts != NULL) {
+        saved_mask = p->sigacts->sa_sigmask;
+        mask_saved = true;
+        sigdelset(&p->sigacts->sa_sigmask, SIGCHLD);
+    }
+    
     for (;;) {
         // Set INTERRUPTIBLE BEFORE scanning - this is the Linux pattern.
         // Any child that calls wakeup_interruptible() while we're scanning
         // will change our state back to RUNNING (or WAKENING if on_cpu).
         __proc_set_pstate(p, PSTATE_INTERRUPTIBLE);
+        
+        // Check for pending SIGCHLD and consume it
+        // This allows us to process multiple child exits
+        if (sigismember(&p->sig_pending_mask, SIGCHLD) > 0) {
+            sigpending_empty(p, SIGCHLD);
+        }
         
         // Scan through table looking for exited children.
         list_foreach_node_safe(&p->children, child, tmp, siblings) {
@@ -722,12 +739,19 @@ int wait(uint64 addr) {
         }
 
         // No point waiting if we don't have any children.
-        if (p->children_count == 0 || signal_terminated(p)) {
+        if (p->children_count == 0) {
+            __proc_set_pstate(p, PSTATE_RUNNING);
+            pid = -1;
+            goto ret;
+        }
+        
+        // Check if terminated by a fatal signal (not SIGCHLD)
+        if (signal_terminated(p)) {
             // Set state to RUNNING before returning.
             // If we were in WAKENING, rq_flush_wake_list will skip us
             // when it sees our state is no longer WAKENING.
             __proc_set_pstate(p, PSTATE_RUNNING);
-            pid = -1;
+            pid = -EINTR;
             goto ret;
         }
 
@@ -738,11 +762,15 @@ int wait(uint64 addr) {
     }
 
 ret:
+    // Restore the original signal mask before returning
+    if (mask_saved && p->sigacts != NULL) {
+        p->sigacts->sa_sigmask = saved_mask;
+    }
     proc_unlock(p);
     if (pid >= 0 && addr != 0) {
         // copy xstate to user.
         if (either_copyout(1, addr, (char *)&xstate, sizeof(xstate)) < 0) {
-            return -1;
+            return -EFAULT;
         }
     }
     return pid;
@@ -781,6 +809,20 @@ int kill(int pid, int signum) {
     info.info.si_pid = myproc()->pid;
 
     return signal_send(pid, &info);
+}
+
+// Kill the given process.
+// Instead of looking up by pid, directly send signal to the given proc.
+int kill_proc(struct proc *p, int signum) {
+    ksiginfo_t info = {0};
+    info.signo = signum;
+    info.sender = myproc();
+    info.info.si_pid = myproc()->pid;
+
+    rcu_read_lock();
+    int ret = __signal_send(p, &info);
+    rcu_read_unlock();
+    return ret;
 }
 
 int killed(struct proc *p) {

@@ -52,6 +52,7 @@ struct clone_args {
     uint64 stack;       // User stack pointer (required if CLONE_VM)
     uint64 stack_size;  // Size of the user stack
     uint64 entry;       // Entry point for child (required if CLONE_VM)
+    uint64 esignal;     // Signal to be sent to parent on child exit
     uint64 tls;         // Thread Local Storage descriptor
     uint64 ctid;        // Child TID address (for CLONE_CHILD_SETTID/CLEARTID)
     uint64 ptid;        // Parent TID address (for CLONE_PARENT_SETTID)

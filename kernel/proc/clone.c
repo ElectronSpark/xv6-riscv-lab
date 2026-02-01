@@ -111,6 +111,9 @@ int proc_clone(struct clone_args *args) {
         }
     }
 
+    // signal to be sent to parent on exit
+    np->esignal = args->esignal;
+
     np->fdtable = new_fdtable;
     np->fs = fs_clone;
     np->vm = new_vm;
