@@ -28,6 +28,7 @@
 #include "lock/mutex_types.h"
 #include "lock/rwlock.h"
 #include "proc/proc.h"
+#include "proc/sched.h"
 #include "vfs/fs.h"
 #include "vfs_private.h"
 #include "list.h"
@@ -719,7 +720,7 @@ retry:
         if (dir->sb->ops->end_transaction != NULL) {
             dir->sb->ops->end_transaction(dir->sb);
         }
-        yield();
+       scheduler_yield();
         goto retry;
     }
 out:
@@ -781,7 +782,7 @@ retry:
         if (dir->sb->ops->end_transaction != NULL) {
             dir->sb->ops->end_transaction(dir->sb);
         }
-        yield();
+       scheduler_yield();
         goto retry;
     }
 out:
@@ -1009,7 +1010,7 @@ retry:
         if (dir->sb->ops->end_transaction != NULL) {
             dir->sb->ops->end_transaction(dir->sb);
         }
-        yield();
+       scheduler_yield();
         goto retry;
     }
     
@@ -1125,7 +1126,7 @@ retry:
         if (dir->sb->ops->end_transaction != NULL) {
             dir->sb->ops->end_transaction(dir->sb);
         }
-        yield();
+       scheduler_yield();
         goto retry;
     }
     

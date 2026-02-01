@@ -776,9 +776,6 @@ ret:
     return pid;
 }
 
-// Give up the CPU for one scheduling round.
-void yield(void) { scheduler_yield(); }
-
 // Entry wrapper for forked user processes.
 // This is called as the entry point from context switch.
 static void forkret_entry(struct context *prev) {

@@ -48,7 +48,7 @@ static int sem_wait_for(volatile int *ptr, int expected, int spin_loops) {
   while(spin_loops-- > 0) {
     if(__atomic_load_n(ptr, __ATOMIC_SEQ_CST) == expected)
       return 0;
-    yield();
+   scheduler_yield();
   }
   if(__sync_add_and_fetch(&sem_t4_log_budget, 1) <= 8) {
     printf("[sem][diag] wait_for timed out target=%p value=%d expected=%d\n",
@@ -180,7 +180,7 @@ static void sem_t4_producer(uint64 a1, uint64 a2) {
       sem_error_flag = 1;
       return;
     }
-    yield();
+   scheduler_yield();
   }
   __sync_add_and_fetch(&sem_t4_producers_done, 1);
 }
@@ -245,7 +245,7 @@ static void sem_t4_consumer(uint64 a1, uint64 a2) {
        __atomic_load_n(&sem_t4_producers_done, __ATOMIC_SEQ_CST) >= SEM_T4_PRODUCERS)
       break;
 
-    yield();
+   scheduler_yield();
   }
   __sync_add_and_fetch(&sem_t4_consumers_done, 1);
 }
@@ -318,7 +318,7 @@ static void sem_run_test4(void) {
 static void semaphore_test_master(uint64 a1, uint64 a2) {
   (void)a1; (void)a2;
   for(int i = 0; i < 10000; i++)
-    yield();
+   scheduler_yield();
 
   printf("[sem] starting semaphore tests\n");
   sem_run_test1();

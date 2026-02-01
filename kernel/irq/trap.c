@@ -337,7 +337,7 @@ void usertrapret(void) {
     handle_signal();
 
     if (NEEDS_RESCHED()) {
-        yield();
+       scheduler_yield();
     }
 
     // we're about to switch the destination of traps from

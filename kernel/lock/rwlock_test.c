@@ -121,7 +121,7 @@ static void t1_reader(uint64 a1, uint64 a2) {
   __sync_add_and_fetch(&t1_started_readers, 1);
   // Wait until main test signals release so all readers hold lock concurrently.
   while(!t1_release_readers) {
-    yield();
+   scheduler_yield();
   }
   __sync_add_and_fetch(&active_readers, -1);
   rwlock_release(&test_lock);
@@ -135,7 +135,7 @@ static void t2_reader(uint64 a1, uint64 a2) {
   check_rwlock_integrity("T2 reader acquired");
   __sync_add_and_fetch(&active_readers, 1);
   // Simulate work by yielding a few times while holding read lock
-  for(int i=0;i<5;i++) yield();
+  for(int i=0;i<5;i++)scheduler_yield();
   __sync_add_and_fetch(&active_readers, -1);
   rwlock_release(&test_lock);
   check_rwlock_integrity("T2 reader released");
@@ -152,7 +152,7 @@ static void t2_writer(uint64 a1, uint64 a2) {
   }
   active_writers = 1;
   t2_writer_acquired = 1;
-  for(int i=0;i<5;i++) yield();
+  for(int i=0;i<5;i++)scheduler_yield();
   active_writers = 0;
   rwlock_release(&test_lock);
   check_rwlock_integrity("T2 writer released");
@@ -167,7 +167,7 @@ static void t3_writer(uint64 a1, uint64 a2) {
     error_flag = 1;
   }
   active_writers = 1;
-  yield(); yield(); yield();
+ scheduler_yield();scheduler_yield();scheduler_yield();
   active_writers = 0;
   rwlock_release(&test_lock);
   check_rwlock_integrity("T3 writer released");
@@ -194,7 +194,7 @@ static void t4_writer(uint64 a1, uint64 a2) {
     t4_ds.checksum = sum;
     rwlock_release(&test_lock);
     check_rwlock_integrity("T4 writer released");
-    yield(); // allow readers to interleave
+   scheduler_yield(); // allow readers to interleave
   }
   __sync_add_and_fetch(&t4_writers_done, 1);
 }
@@ -235,7 +235,7 @@ static void t4_reader(uint64 a1, uint64 a2) {
     rwlock_release(&test_lock);
     check_rwlock_integrity("T4 reader released");
     if(t4_writers_done >= T4_WRITER_THREADS) break;
-    yield();
+   scheduler_yield();
   }
   __sync_add_and_fetch(&t4_reader_done, 1);
 }
@@ -243,7 +243,7 @@ static void t4_reader(uint64 a1, uint64 a2) {
 static int wait_for(volatile int *ptr, int expected, int spin_loops) {
   while(spin_loops-- > 0) {
     if(*ptr == expected) return 0;
-    yield();
+   scheduler_yield();
   }
   return -1;
 }
@@ -355,7 +355,7 @@ static void run_test4(void) {
 
 static void rwlock_test_master(uint64 a1, uint64 a2) {
   for (int i = 0; i < 10000; i++) {
-    yield();
+   scheduler_yield();
   }
   printf("[rwlock] starting simple rwlock tests\n");
   if(rwlock_init(&test_lock, 0, "rwlock-test") != 0) {

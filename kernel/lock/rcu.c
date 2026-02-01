@@ -647,7 +647,7 @@ void synchronize_rcu(void) {
         }
         
         // Yield to allow other CPUs to context switch
-        yield();
+       scheduler_yield();
         wait_count++;
     }
 
@@ -721,7 +721,7 @@ void rcu_barrier(void) {
         if (!all_done) {
             // Do another synchronize to advance timestamps and make more callbacks ready
             synchronize_rcu();
-            yield();
+           scheduler_yield();
             wait_count++;
         }
     }
@@ -782,7 +782,7 @@ static void rcu_expedited_gp(void) {
             break;
         }
         
-        yield();
+       scheduler_yield();
         wait_count++;
     }
 
@@ -818,7 +818,7 @@ void synchronize_rcu_expedited(void) {
         }
 
         rcu_advance_gp();
-        yield();
+       scheduler_yield();
         wait_count++;
     }
 
@@ -941,7 +941,7 @@ static int rcu_cb_kthread(uint64 cpu_id, uint64 arg2) {
             pop_off();
             
             // There are still pending callbacks - yield but don't sleep
-            yield();
+           scheduler_yield();
         } else {
             // No pending callbacks - can sleep
             scheduler_sleep(NULL, PSTATE_INTERRUPTIBLE);

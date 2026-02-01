@@ -240,7 +240,7 @@ static void test_call_rcu(void) {
     while (__atomic_load_n(&callback_invoked, __ATOMIC_ACQUIRE) == 0 && timeout > 0) {
         synchronize_rcu();
         rcu_process_callbacks();
-        yield();
+       scheduler_yield();
         timeout--;
     }
 
@@ -277,7 +277,7 @@ static void reader_thread(uint64 id, uint64 iterations) {
         rcu_read_unlock();
 
         if (i % 10 == 0) {
-            yield(); // Give other threads a chance
+           scheduler_yield(); // Give other threads a chance
         }
     }
 
@@ -311,7 +311,7 @@ static void test_concurrent_readers(void) {
 
     // Wait for all readers to complete
     while (__atomic_load_n(&concurrent_readers_done, __ATOMIC_ACQUIRE) < RCU_TEST_NUM_READERS) {
-        yield();
+       scheduler_yield();
     }
 
     printf("  PASS: Concurrent readers completed successfully\n");
@@ -342,7 +342,7 @@ static void test_grace_period(void) {
 
     // Context switches OUTSIDE of RCU critical section are quiescent states
     for (int i = 0; i < 10; i++) {
-        yield(); // These context switches help advance grace periods
+       scheduler_yield(); // These context switches help advance grace periods
     }
 
     // Force grace period completion
@@ -638,7 +638,7 @@ static void test_list_rcu_basic(void) {
     for (int i = 0; i < 5; i++) {
         synchronize_rcu();
         rcu_process_callbacks();
-        yield();
+       scheduler_yield();
     }
 
     int invoked = __atomic_load_n(&list_callback_count, __ATOMIC_ACQUIRE);
@@ -683,7 +683,7 @@ static void list_stress_reader(uint64 iterations, uint64 unused) {
         rcu_read_unlock();
         
         if (i % 100 == 0) {
-            yield();
+           scheduler_yield();
         }
     }
     __atomic_fetch_add(&list_stress_reader_done, 1, __ATOMIC_RELEASE);
@@ -724,7 +724,7 @@ static void test_list_rcu_concurrent_rw(void) {
             spin_unlock(&rcu_test_list_lock);
         }
 
-        yield();
+       scheduler_yield();
 
         // Remove 3 nodes from head
         for (int i = 0; i < 3; i++) {
@@ -738,12 +738,12 @@ static void test_list_rcu_concurrent_rw(void) {
             spin_unlock(&rcu_test_list_lock);
         }
 
-        yield();
+       scheduler_yield();
     }
 
     // Wait for readers to finish
     while (__atomic_load_n(&list_stress_reader_done, __ATOMIC_ACQUIRE) < 2) {
-        yield();
+       scheduler_yield();
     }
 
     // Cleanup remaining nodes
@@ -805,7 +805,7 @@ static void test_stress_call_rcu(void) {
             if (data == NULL) {
                 // Out of memory - wait for grace period and let kthreads process callbacks
                 synchronize_rcu();
-                yield();
+               scheduler_yield();
                 data = (stress_data_t *)kmm_alloc(sizeof(stress_data_t));
                 if (data == NULL) {
                     panic("stress: out of memory even after processing callbacks");
@@ -865,7 +865,7 @@ static void stress_list_reader(uint64 reader_id, uint64 unused) {
         iterations++;
         
         if (iterations % 100 == 0) {
-            yield();
+           scheduler_yield();
         }
     }
     
@@ -893,7 +893,7 @@ static void test_stress_list_rcu(void) {
     }
 
     // Give readers time to start
-    for (int i = 0; i < 10; i++) yield();
+    for (int i = 0; i < 10; i++)scheduler_yield();
 
     int next_id = 0;
     int total_added = 0;
@@ -909,7 +909,7 @@ static void test_stress_list_rcu(void) {
                 // Out of memory - process callbacks to free some
                 synchronize_rcu();
                 rcu_process_callbacks();
-                yield();
+               scheduler_yield();
                 node = (list_test_node_t *)kmm_alloc(sizeof(list_test_node_t));
                 if (node == NULL) {
                     // Still no memory - skip this add
@@ -944,7 +944,7 @@ static void test_stress_list_rcu(void) {
         }
 
         if (op % 100 == 0) {
-            yield();
+           scheduler_yield();
         }
     }
 
@@ -952,7 +952,7 @@ static void test_stress_list_rcu(void) {
     __atomic_store_n(&stress_readers_done, 1, __ATOMIC_RELEASE);
 
     // Wait for readers to finish
-    for (int i = 0; i < 50; i++) yield();
+    for (int i = 0; i < 50; i++)scheduler_yield();
 
     // Print reader statistics
     printf("  Reader iterations: ");
@@ -1038,7 +1038,7 @@ static void mixed_reader_thread(uint64 id, uint64 target_ops) {
         
         __atomic_fetch_add(&mixed_ops_completed, 1, __ATOMIC_RELEASE);
         
-        if (i % 100 == 0) yield();
+        if (i % 100 == 0)scheduler_yield();
     }
 
     __atomic_fetch_sub(&mixed_readers_running, 1, __ATOMIC_RELEASE);
@@ -1063,7 +1063,7 @@ static void test_stress_mixed_workload(void) {
 
     // Wait for readers to start
     while (__atomic_load_n(&mixed_readers_running, __ATOMIC_ACQUIRE) < 4) {
-        yield();
+       scheduler_yield();
     }
 
     // Writer does 2000 operations (adds + removes = ~1000 each)
@@ -1099,13 +1099,13 @@ static void test_stress_mixed_workload(void) {
         if (op % 100 == 0) {
             synchronize_rcu();
             rcu_process_callbacks();
-            yield();
+           scheduler_yield();
         }
     }
 
     // Wait for readers to complete
     while (__atomic_load_n(&mixed_readers_running, __ATOMIC_ACQUIRE) > 0) {
-        yield();
+       scheduler_yield();
     }
 
     int total_ops = __atomic_load_n(&mixed_ops_completed, __ATOMIC_ACQUIRE);
@@ -1124,7 +1124,7 @@ static void test_stress_mixed_workload(void) {
     for (int i = 0; i < 10; i++) {
         synchronize_rcu();
         rcu_process_callbacks();
-        yield();
+       scheduler_yield();
     }
 
     printf("  PASS: Mixed workload stress test completed\n");

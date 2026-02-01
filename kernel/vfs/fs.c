@@ -184,7 +184,7 @@ retry_add:;
         if (PTR_ERR(inode) == -EAGAIN) {
             // Should not happen during init, but handle gracefully
             vfs_superblock_unlock(sb);
-            yield();
+           scheduler_yield();
             vfs_superblock_wlock(sb);
             if (!sb->valid && sb->initialized) {
                 return -EINVAL;

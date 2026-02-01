@@ -121,7 +121,7 @@ static void reader_thread_fn(uint64 id, uint64 iterations) {
         
         // Small delay to allow other threads to run
         if (i % 10 == 0) {
-            yield();
+           scheduler_yield();
         }
     }
     
@@ -158,13 +158,13 @@ static void test_concurrent_readers(void) {
     printf("  Waiting for readers to complete...\n");
     int wait_count = 0;
     while (__atomic_load_n(&readers_running, __ATOMIC_SEQ_CST) > 0 && wait_count < 10000) {
-        yield();
+       scheduler_yield();
         wait_count++;
     }
     
     // Stop any remaining readers
     __atomic_store_n(&test_stop_flag, 1, __ATOMIC_SEQ_CST);
-    yield();
+   scheduler_yield();
     
     // Cleanup
     device_unregister(reader_test_device);
@@ -222,7 +222,7 @@ static void test_register_unregister_stress(void) {
         }
         
         if (iter % 10 == 0) {
-            yield();
+           scheduler_yield();
         }
     }
     
@@ -261,7 +261,7 @@ static void rw_reader_thread_fn(uint64 id, uint64 iterations) {
         }
         
         if (i % 5 == 0) {
-            yield();
+           scheduler_yield();
         }
     }
     
@@ -285,7 +285,7 @@ static void rw_writer_thread_fn(uint64 id, uint64 iterations) {
             
             // Let readers access it
             for (int j = 0; j < 5; j++) {
-                yield();
+               scheduler_yield();
             }
             
             // Unregister
@@ -295,7 +295,7 @@ static void rw_writer_thread_fn(uint64 id, uint64 iterations) {
             __atomic_fetch_add(&test_writes_completed, 1, __ATOMIC_SEQ_CST);
         }
         
-        yield();
+       scheduler_yield();
     }
     
     __atomic_fetch_sub(&writers_running, 1, __ATOMIC_SEQ_CST);
@@ -339,14 +339,14 @@ static void test_concurrent_readers_writers(void) {
     while ((__atomic_load_n(&readers_running, __ATOMIC_SEQ_CST) > 0 ||
             __atomic_load_n(&writers_running, __ATOMIC_SEQ_CST) > 0) && 
            wait_count < 20000) {
-        yield();
+       scheduler_yield();
         wait_count++;
     }
     
     // Stop any remaining threads
     __atomic_store_n(&test_stop_flag, 1, __ATOMIC_SEQ_CST);
     for (int i = 0; i < 10; i++) {
-        yield();
+       scheduler_yield();
     }
     
     int reads = __atomic_load_n(&test_reads_completed, __ATOMIC_SEQ_CST);
@@ -432,7 +432,7 @@ static void test_rapid_reuse(void) {
             success_count++;
         }
         
-        yield();
+       scheduler_yield();
     }
     
     printf("  Completed %d successful operations\n", success_count);
