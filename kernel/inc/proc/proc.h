@@ -150,9 +150,12 @@ static inline void __proc_set_pstate(struct proc *p, enum procstate state) {
 int             proctab_get_pid_proc(int pid, struct proc **pp);
 void            exit(int);
 int             fork(void);
+void            attach_child(struct proc *parent, struct proc *child);
+void            detach_child(struct proc *parent, struct proc *child);
 int             kernel_proc_create(const char *name, struct proc **retp, void *entry,
                                    uint64 arg1, uint64 arg2, int stack_order);
 struct proc     *allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order);
+void            freeproc(struct proc *p);
 int             growproc(int64);
 void            proc_mapstacks(pagetable_t);
 int             proc_pagetable(struct proc *);

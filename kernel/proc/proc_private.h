@@ -37,6 +37,9 @@ void init_idle_rq(void);
 void init_fifo_rq(void);
 void init_fifo_rq_range(int start_cls_id, int end_cls_id);
 
+// Create a user process for fork/clone.
+int user_proc_create(struct proc **retp, int stack_order);
+
 // Run queue priority tests
 void rq_test_run(void);
 

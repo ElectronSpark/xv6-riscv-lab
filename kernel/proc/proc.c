@@ -30,9 +30,7 @@
 // 3. target pcb lock
 // 4. children pcb lock
 
-static void forkret(void);
 static void forkret_entry(struct context *prev);
-STATIC void freeproc(struct proc *p);
 
 extern char trampoline[];     // trampoline.S
 extern char sig_trampoline[]; // sig_trampoline.S
@@ -278,6 +276,19 @@ int kernel_proc_create(const char *name, struct proc **retp, void *entry,
     return p->pid;
 }
 
+// Allocate a process for clone.
+int user_proc_create(struct proc **retp, int stack_order) {
+    if (retp == NULL) {
+        return -1;
+    }    
+    struct proc *np;
+    if ((np = allocproc(forkret_entry, 0, 0, stack_order)) == 0) {
+        return -1;
+    }
+    *retp = np;
+    return np->pid;
+}
+
 // Initialize the current context as an idle process.
 // This function is called during CPU initialization.
 // Idle processes will never be added to the scheduler's ready queue,
@@ -346,7 +357,7 @@ static void freeproc_rcu_callback(void *data) {
 // free a proc structure and the data hanging from it,
 // including user pages.
 // p->lock must not be held on entry.
-STATIC void freeproc(struct proc *p) {
+void freeproc(struct proc *p) {
     assert(p != NULL, "freeproc called with NULL proc");
     proc_lock(p);
     assert(!PROC_AWOKEN(p), "freeproc called with a runnable proc");
@@ -415,7 +426,8 @@ static void init_entry(struct context *prev) {
     start_kernel_post_init();
 
     // Return to user space via forkret
-    forkret();
+    smp_mb();
+    usertrapret();
 }
 
 // Set up first user process.
@@ -527,93 +539,6 @@ int growproc(int64 n) {
     struct proc *p = myproc();
 
     return vm_growheap(p->vm, n);
-}
-
-// Create a new process, copying the parent.
-// Sets up child kernel stack to return as if from fork() system call.
-int fork(void) {
-    struct proc *np;
-    struct proc *p = myproc();
-
-    if (!PROC_USER_SPACE(p)) {
-        return -1;
-    }
-
-    // Allocate process.
-    if ((np = allocproc(forkret_entry, 0, 0, p->kstack_order)) == 0) {
-        return -1;
-    }
-
-    // Copy user memory from parent to child.
-    vm_t *new_vm = vm_copy(p->vm, (uint64)np->trapframe);
-    if (new_vm == NULL) {
-        freeproc(np);
-        return -1;
-    }
-
-    // Clone VFS cwd and root inode references
-    struct fs_struct *fs_clone = vfs_struct_clone(p->fs, 0);
-    if (IS_ERR_OR_NULL(fs_clone)) {
-        vm_put(new_vm);
-        freeproc(np);
-        return -1;
-    }
-
-    // Clone VFS file descriptor table - must be done after releasing parent
-    // lock because vfs_fdup may call cdev_dup which needs a mutex
-    struct vfs_fdtable *new_fdtable = vfs_fdtable_clone(p->fdtable, 0);
-    if (IS_ERR_OR_NULL(new_fdtable)) {
-        vm_put(new_vm);
-        vfs_struct_put(fs_clone);
-        freeproc(np);
-        return -1;
-    }
-
-    proc_lock(p);
-    proc_lock(np);
-
-    // copy the process's signal actions.
-    if (p->sigacts) {
-        np->sigacts = sigacts_dup(p->sigacts);
-        if (np->sigacts == NULL) {
-            proc_unlock(p);
-            proc_unlock(np);
-            vm_put(new_vm);
-            vfs_struct_put(fs_clone);
-            vfs_fdtable_put(new_fdtable);
-            freeproc(np);
-            return -1;
-        }
-    }
-
-    np->fdtable = new_fdtable;
-    np->fs = fs_clone;
-    np->vm = new_vm;
-
-    // copy saved user registers.
-    *(np->trapframe) = *(p->trapframe);
-
-    // Cause fork to return 0 in the child.
-    np->trapframe->trapframe.a0 = 0;
-
-    // VFS cwd and rooti already cloned above
-    safestrcpy(np->name, p->name, sizeof(p->name));
-
-    attach_child(p, np);
-    PROC_SET_USER_SPACE(np);
-    __proc_set_pstate(np, PSTATE_UNINTERRUPTIBLE);
-
-    // Initialize the child's scheduling entity with parent's info
-    rq_task_fork(np->sched_entity);
-
-    proc_unlock(p);
-    proc_unlock(np);
-
-    // Wake up the new child process
-    // Note: pi_lock no longer needed - rq_lock serializes wakeups
-    scheduler_wakeup(np);
-
-    return np->pid;
 }
 
 // Pass p's abandoned children to init.
@@ -836,18 +761,7 @@ static void forkret_entry(struct context *prev) {
     rcu_check_callbacks();
 
     // Now safe to do the rest without holding scheduler locks
-    forkret();
-}
-
-// A fork child's very first scheduling by scheduler()
-// will swtch to forkret_entry, which calls this after context_switch_finish.
-static void forkret(void) {
-    // Interrupts are now enabled by the intr_on() call in forkret_entry/init_entry
-    // after setting noff = 0 to start with a clean preemption counter.
-
-    // printf("forkret: process %d is running\n", myproc()->pid);
-    __atomic_thread_fence(__ATOMIC_SEQ_CST);
-
+    smp_mb();
     usertrapret();
 }
 
