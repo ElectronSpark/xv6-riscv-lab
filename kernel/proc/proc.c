@@ -30,8 +30,6 @@
 // 3. target pcb lock
 // 4. children pcb lock
 
-static void forkret_entry(struct context *prev);
-
 extern char trampoline[];     // trampoline.S
 extern char sig_trampoline[]; // sig_trampoline.S
 
@@ -275,24 +273,6 @@ int kernel_proc_create(const char *name, struct proc **retp, void *entry,
 
     proc_unlock(p);
     return p->pid;
-}
-
-// Allocate a process for clone.
-int user_proc_create(struct proc **retp, int stack_order) {
-    if (retp == NULL) {
-        return -EINVAL;
-    }    
-    struct proc *np = allocproc(forkret_entry, 0, 0, stack_order);
-    if (np == NULL) {
-        *retp = NULL;
-        return -ENOMEM;
-    }
-    if (IS_ERR(np)) {
-        *retp = NULL;
-        return PTR_ERR(np);
-    }
-    *retp = np;
-    return np->pid;
 }
 
 // Initialize the current context as an idle process.
@@ -774,26 +754,6 @@ ret:
         }
     }
     return pid;
-}
-
-// Entry wrapper for forked user processes.
-// This is called as the entry point from context switch.
-static void forkret_entry(struct context *prev) {
-    assert(PROC_USER_SPACE(myproc()),
-           "kernel process %d tries to return to user space", myproc()->pid);
-    assert(prev != NULL, "forkret_entry: prev context is NULL");
-
-    // Finish the context switch first - this releases the rq lock
-    context_switch_finish(proc_from_context(prev), myproc(), 0);
-    mycpu()->noff = 0;  // in a new process, noff should be 0
-    intr_on();
-    // Note quiescent state for RCU - context switch is a quiescent state.
-    // Callback processing is now handled by per-CPU RCU kthreads.
-    rcu_check_callbacks();
-
-    // Now safe to do the rest without holding scheduler locks
-    smp_mb();
-    usertrapret();
 }
 
 // Kill the process with the given pid.

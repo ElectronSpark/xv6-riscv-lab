@@ -23,11 +23,30 @@
 #include <mm/vm.h>
 #include "errno.h"
 
+// Entry wrapper for forked user processes.
+// This is called as the entry point from context switch.
+static void forkret_entry(struct context *prev) {
+    assert(PROC_USER_SPACE(myproc()),
+           "kernel process %d tries to return to user space", myproc()->pid);
+    assert(prev != NULL, "forkret_entry: prev context is NULL");
+
+    // Finish the context switch first - this releases the rq lock
+    context_switch_finish(proc_from_context(prev), myproc(), 0);
+    mycpu()->noff = 0;  // in a new process, noff should be 0
+    intr_on();
+    // Note quiescent state for RCU - context switch is a quiescent state.
+    // Callback processing is now handled by per-CPU RCU kthreads.
+    rcu_check_callbacks();
+
+    // Now safe to do the rest without holding scheduler locks
+    smp_mb();
+    usertrapret();
+}
+
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
 int proc_clone(struct clone_args *args) {
-    struct proc *np;
-    int ret = 0;
+    struct proc *ret_ptr;
     struct proc *p = myproc();
 
     if (!PROC_USER_SPACE(p)) {
@@ -50,9 +69,9 @@ int proc_clone(struct clone_args *args) {
     }
 
     // Allocate process.
-    ret = user_proc_create(&np, p->kstack_order);
-    if (ret < 0) {
-        return ret;
+    ret_ptr = allocproc(forkret_entry, 0, 0, p->kstack_order);
+    if (IS_ERR_OR_NULL(ret_ptr)) {
+        goto out;
     }
 
     // Copy user memory from parent to child.
@@ -64,8 +83,9 @@ int proc_clone(struct clone_args *args) {
     } else {
         new_vm = vm_copy(p->vm);
         if (IS_ERR_OR_NULL(new_vm)) {
-            freeproc(np);
-            return -ENOMEM;
+            freeproc(ret_ptr);
+            ret_ptr = (void*)new_vm;
+            goto out;
         }
     }
 
@@ -73,11 +93,9 @@ int proc_clone(struct clone_args *args) {
     struct fs_struct *fs_clone = vfs_struct_clone(p->fs, args->flags);
     if (IS_ERR_OR_NULL(fs_clone)) {
         vm_put(new_vm);
-        freeproc(np);
-        if (IS_ERR(fs_clone)) {
-            return PTR_ERR(fs_clone);
-        }
-        return -ENOMEM;
+        freeproc(ret_ptr);
+        ret_ptr = (void*)fs_clone;
+        goto out;
     }
 
     // Clone VFS file descriptor table - must be done after releasing parent
@@ -86,71 +104,75 @@ int proc_clone(struct clone_args *args) {
     if (IS_ERR_OR_NULL(new_fdtable)) {
         vm_put(new_vm);
         vfs_struct_put(fs_clone);
-        freeproc(np);
-        if (IS_ERR(new_fdtable)) {
-            return PTR_ERR(new_fdtable);
-        }
-        return -ENOMEM;
+        freeproc(ret_ptr);
+        ret_ptr = (void*)new_fdtable;
+        goto out;
     }
 
     proc_lock(p);
-    proc_lock(np);
+    proc_lock(ret_ptr);
 
     // copy the process's signal actions.
     // @TODO: handle CLONE_SIGHAND
     if (p->sigacts) {
-        np->sigacts = sigacts_dup(p->sigacts);
-        if (np->sigacts == NULL) {
+        ret_ptr->sigacts = sigacts_dup(p->sigacts);
+        if (ret_ptr->sigacts == NULL) {
             proc_unlock(p);
-            proc_unlock(np);
+            proc_unlock(ret_ptr);
             vm_put(new_vm);
             vfs_struct_put(fs_clone);
             vfs_fdtable_put(new_fdtable);
-            freeproc(np);
+            freeproc(ret_ptr);
             return -ENOMEM;
         }
     }
 
     // signal to be sent to parent on exit
-    np->esignal = args->esignal;
+    ret_ptr->esignal = args->esignal;
 
-    np->fdtable = new_fdtable;
-    np->fs = fs_clone;
-    np->vm = new_vm;
+    ret_ptr->fdtable = new_fdtable;
+    ret_ptr->fs = fs_clone;
+    ret_ptr->vm = new_vm;
 
     // copy saved user registers.
-    *(np->trapframe) = *(p->trapframe);
+    *(ret_ptr->trapframe) = *(p->trapframe);
 
     if (args->entry != 0) {
         // If entry point specified, set child's sepc to it
-        np->trapframe->trapframe.sepc = args->entry;
+        ret_ptr->trapframe->trapframe.sepc = args->entry;
     }
 
     if (args->stack != 0) {
         // If stack specified, set child's sp to top of the stack
         uint64 stack_top = (args->stack + args->stack_size) & ~0xFUL;
-        np->trapframe->trapframe.sp = stack_top;
+        ret_ptr->trapframe->trapframe.sp = stack_top;
     }
 
     // Cause fork to return 0 in the child.
-    np->trapframe->trapframe.a0 = 0;
+    ret_ptr->trapframe->trapframe.a0 = 0;
 
     // VFS cwd and rooti already cloned above
-    safestrcpy(np->name, p->name, sizeof(p->name));
+    safestrcpy(ret_ptr->name, p->name, sizeof(p->name));
 
-    attach_child(p, np);
-    PROC_SET_USER_SPACE(np);
-    __proc_set_pstate(np, PSTATE_UNINTERRUPTIBLE);
+    attach_child(p, ret_ptr);
+    PROC_SET_USER_SPACE(ret_ptr);
+    __proc_set_pstate(ret_ptr, PSTATE_UNINTERRUPTIBLE);
 
     // Initialize the child's scheduling entity with parent's info
-    rq_task_fork(np->sched_entity);
+    rq_task_fork(ret_ptr->sched_entity);
 
     proc_unlock(p);
-    proc_unlock(np);
+    proc_unlock(ret_ptr);
 
     // Wake up the new child process
     // Note: pi_lock no longer needed - rq_lock serializes wakeups
-    scheduler_wakeup(np);
+    scheduler_wakeup(ret_ptr);
 
-    return np->pid;
+out:
+    if (IS_ERR(ret_ptr)) {
+        return PTR_ERR(ret_ptr);
+    } else if (ret_ptr == NULL) {
+        return -ENOMEM;
+    }
+    return ret_ptr->pid;
 }
