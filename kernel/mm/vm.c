@@ -132,7 +132,6 @@ extern char sig_trampoline[];                 // sig_trampoline.S
 extern char _data_ktlb[];
 
 extern uint64 trampoline_ksatp;
-extern uint64 trampoline_trapframe_base;
 
 /*
  * ============================
@@ -340,11 +339,6 @@ void kvminit(void) {
 
     smp_store_release(&trampoline_ksatp, MAKE_SATP(kernel_pagetable));
     smp_mb();
-
-    // Calculate trampoline_trapframe_base
-    trampoline_trapframe_base = TRAPFRAME + PAGE_SIZE - sizeof(struct proc);
-    trampoline_trapframe_base -= sizeof(struct utrapframe) + 16;
-    trampoline_trapframe_base &= ~0x7UL; // align to 8 bytes
 }
 
 // Switch h/w page table register to the kernel's page table,

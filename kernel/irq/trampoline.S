@@ -34,10 +34,6 @@ trampoline_ksatp:
 .align 8
 trampoline_kirq:
     .dword user_kirq_entrance  # user_kirq_entrance is in kernel/trap.c
-.globl trampoline_trapframe_base
-.align 8
-trampoline_trapframe_base:
-    .dword 0              # filled in by trap.c: usertrapret()
 .globl trampoline_uservec
 .align 8
 trampoline_uservec:
@@ -60,12 +56,6 @@ uservec:
         # a0 can be used to get at TRAPFRAME.
         # sscratch also stores the trapframe base address
         csrrw a0, sscratch, a0
-
-        # set kernelvec as the trap handler
-        ld a0, trampoline_kvec
-        csrw stvec, a0
-
-        ld a0, trampoline_trapframe_base
 
         # save the user registers in TRAPFRAME
         sd ra, TRAPFRAME_RA(a0)
@@ -101,6 +91,10 @@ uservec:
 	# save the user a0 in p->trapframe->a0
         csrrw t0, sscratch, t0
         sd t0, TRAPFRAME_A0(a0)
+
+        # set kernelvec as the trap handler
+        ld t0, trampoline_kvec
+        csrw stvec, t0
 
         # save scause, sstatus, stval, and sepc into the trapframe
         csrr t0, stval
@@ -148,22 +142,23 @@ uservec:
 
 .globl userret
 userret:
-        # userret(pagetable)
+        # userret(trapframe, satp)
         # called by usertrapret() in trap.c to
         # switch from kernel to user.
         # a0: trapframe base
-        # a1: user page table, for satp.
+        # a1: user page table satp
 
         # switch to the user page table.
         sfence.vma zero, zero
-        csrw satp, a0
+        csrw satp, a1
         sfence.vma zero, zero
 
-        ld a0, trampoline_uservec
-        csrw stvec, a0
+        # set stvec to uservec
+        ld t0, trampoline_uservec
+        csrw stvec, t0
 
-        # store trapframe base in sscratch
-        ld a0, trampoline_trapframe_base
+        # store the trapframe base address in sscratch
+        csrw sscratch, a0
 
         # @TODO: restore sstatus from trapframe
         # restore sepc from the trapframe

@@ -16,7 +16,7 @@
 extern char trampoline[], uservec[], userret[], _data_ktlb[];
 extern uint64 trampoline_uservec;
 
-static void (*trampoline_userret)(uint64) = NULL;
+static void (*trampoline_userret)(uint64, uint64) = NULL;
 
 // in kernelvec.S
 // Recursive kernel trap handler, already on interrupt stack,
@@ -370,7 +370,7 @@ void usertrapret(void) {
     // jump to userret in trampoline.S at the top of memory, which
     // switches to the user page table, restores user registers,
     // and switches to user mode with sret.
-    trampoline_userret(MAKE_SATP(p->vm->pagetable));
+    trampoline_userret(TRAPFRAME + TRAPFRAME_POFFSET, MAKE_SATP(p->vm->pagetable));
 }
 
 // interrupts and exceptions from kernel code go here via kernelvec,
