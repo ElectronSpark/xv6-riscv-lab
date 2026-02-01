@@ -927,7 +927,7 @@ uint64 vm_cpu_online(vm_t *vm, int cpu) {
         // All 64 trapframe pages fit within a single 2MB region, so they share the same leaf page table
         int pte_idx = PX(0, TRAPFRAME + (cpu * PGSIZE));
         uint64 trapframe_pa = PGROUNDDOWN((uint64)p->trapframe);
-        vm->trapframe_pte[pte_idx] = PA2PTE(trapframe_pa) | PTE_R | PTE_W | PTE_V | PTE_RSW_w;
+        vm->trapframe_pte[pte_idx] = PA2PTE(trapframe_pa) | PTE_R | PTE_W | PTE_V | PTE_A | PTE_D;
         // Ensure PTE write is visible before page table switch
         smp_wmb();
         // Calculate trapframe offset within the page from p->trapframe
