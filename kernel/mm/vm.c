@@ -102,6 +102,7 @@
 #include "dev/fdt.h"
 #include "smp/ipi.h"
 #include "sbi.h"
+#include "errno.h"
 
 static slab_cache_t __vma_pool = {0};
 static slab_cache_t __vm_pool = {0};
@@ -1107,16 +1108,17 @@ static void __vm_destroy(vm_t *vm) {
 
 // Duplicate a process address space.
 // The new VM starts with an empty VMA layout, then we re-create+duplicate VMAs.
+// return ERR_PTR on failure.
 vm_t *vm_copy(vm_t *src, uint64 trapframe) {
     if (src == NULL) {
-        return NULL; // Invalid parameters
+        return ERR_PTR(-EINVAL); // Invalid parameters
     }
     if (src->trapframe != 0 && trapframe == 0) {
-        return NULL; // Cannot duplicate if src has a trapframe but dst does not
+        return ERR_PTR(-EINVAL); // Cannot duplicate if src has a trapframe but dst does not
     }
     vm_t *dst = vm_init(trapframe);
     if (dst == NULL) {
-        return NULL; // Allocation failed
+        return ERR_PTR(-ENOMEM); // Allocation failed
     }
     vm_rlock(src);
     // In other places, we shouldn't hold both src and dst locks at the same time to avoid
@@ -1132,7 +1134,7 @@ vm_t *vm_copy(vm_t *src, uint64 trapframe) {
             vm_runlock(src);
             vm_wunlock(dst);
             vm_put(dst);
-            return NULL; // Allocation failed
+            return ERR_PTR(-ENOMEM); // Allocation failed
         }
         if (vma == src->stack) {
             dst->stack = new_vma;
@@ -1146,7 +1148,7 @@ vm_t *vm_copy(vm_t *src, uint64 trapframe) {
             vm_runlock(src);
             vm_wunlock(dst);
             vm_put(dst);
-            return NULL;
+            return ERR_PTR(-ENOMEM);
         }
     }
     vm_runlock(src);

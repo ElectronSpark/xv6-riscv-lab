@@ -149,6 +149,7 @@ static inline void __proc_set_pstate(struct proc *p, enum procstate state) {
 
 int             proctab_get_pid_proc(int pid, struct proc **pp);
 void            exit(int);
+int             proc_clone(struct proc_clone_args *args);
 int             fork(void);
 void            attach_child(struct proc *parent, struct proc *child);
 void            detach_child(struct proc *parent, struct proc *child);

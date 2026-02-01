@@ -85,6 +85,7 @@ struct proc {
     uint64 ksp;
     vm_t *vm;                     // Virtual memory areas and page table
     struct utrapframe *trapframe; // data page for trampoline.S
+    uint64 trapframe_vbase;    // Base virtual address of the trapframe
 
     // Priority Inheritance lock, on_rq, on_cpu, cpu_id, and context are now
     // stored in sched_entity. Access them via p->sched_entity-><field>.
@@ -112,5 +113,12 @@ BUILD_BUG_ON(((sizeof(struct proc) + sizeof(struct utrapframe) +
                sizeof(struct fs_struct) + sizeof(struct vfs_fdtable) +
                sizeof(struct sched_entity) + 80 + CACHELINE_SIZE) &
               ~CACHELINE_MASK) >= PGSIZE);
+
+// Arguments for proc_clone
+struct proc_clone_args {
+    uint64 user_stack; // User stack pointer
+    size_t stack_size; // Size of the user stack
+    uint64 flags;      // Clone flags
+};
 
 #endif /* __KERNEL_PROC_TYPES_H */

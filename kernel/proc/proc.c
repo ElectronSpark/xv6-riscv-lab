@@ -168,25 +168,26 @@ void detach_child(struct proc *parent, struct proc *child) {
 // have user space environment set up. and return without p->lock held. If there
 // are no free procs, or a memory allocation fails, return NULL. Signal actions
 // will not be initialized here.
+// Return ERR_PTR on failure.
 struct proc *allocproc(void *entry, uint64 arg1, uint64 arg2,
                        int kstack_order) {
     struct proc *p = NULL;
     void *kstack = NULL;
 
     if (kstack_order < 0 || kstack_order > PAGE_BUDDY_MAX_ORDER) {
-        return NULL; // Invalid kernel stack order
+        return ERR_PTR(-EINVAL); // Invalid kernel stack order
     }
 
     int pid = __alloc_pid();
     if (pid < 0) {
-        return NULL; // Failed to allocate PID
+        return ERR_PTR(-ENOMEM); // Failed to allocate PID
     }
 
     // Allocate a kernel stack page.
     kstack = page_alloc(kstack_order, PAGE_TYPE_ANON);
     if (kstack == NULL) {
         __free_pid(pid); // Release the allocated PID
-        return NULL;
+        return ERR_PTR(-ENOMEM);
     }
     size_t kstack_size = (1UL << (PAGE_SHIFT + kstack_order));
     memset(kstack + kstack_size - PAGE_SIZE, 0, PAGE_SIZE);
@@ -234,7 +235,7 @@ static void __kernel_proc_entry(struct context *prev) {
 int kernel_proc_create(const char *name, struct proc **retp, void *entry,
                        uint64 arg1, uint64 arg2, int stack_order) {
     struct proc *p = allocproc(entry, arg1, arg2, stack_order);
-    if (p == NULL) {
+    if (IS_ERR_OR_NULL(p)) {
         *retp = NULL;
         return -1; // Allocation failed
     }
@@ -279,11 +280,16 @@ int kernel_proc_create(const char *name, struct proc **retp, void *entry,
 // Allocate a process for clone.
 int user_proc_create(struct proc **retp, int stack_order) {
     if (retp == NULL) {
-        return -1;
+        return -EINVAL;
     }    
-    struct proc *np;
-    if ((np = allocproc(forkret_entry, 0, 0, stack_order)) == 0) {
-        return -1;
+    struct proc *np = allocproc(forkret_entry, 0, 0, stack_order);
+    if (np == NULL) {
+        *retp = NULL;
+        return -ENOMEM;
+    }
+    if (IS_ERR(np)) {
+        *retp = NULL;
+        return PTR_ERR(np);
     }
     *retp = np;
     return np->pid;
@@ -435,7 +441,7 @@ void userinit(void) {
     struct proc *p;
 
     p = allocproc(init_entry, 0, 0, KERNEL_STACK_ORDER);
-    assert(p != NULL, "userinit: allocproc failed");
+    assert(!IS_ERR_OR_NULL(p), "userinit: allocproc failed");
     printf("Init process kernel stack size order: %d\n", p->kstack_order);
 
     // Allocate pagetable for the process.

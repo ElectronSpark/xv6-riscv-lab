@@ -23,6 +23,7 @@
 #define FSSIZE       200000  // size of file system in blocks
 #define MAXPATH      128   // maximum file path name
 
+#define USERSTACK_MINSZ  (PAGE_SIZE << 2) // minimum user stack size
 #define USERSTACK    32     // user stack pages
 #define USERSTACK_GROWTH  8  // user stack growth pages
 #define MAXUSTACK    (1UL << 5)    // maximum number of pages in user stack

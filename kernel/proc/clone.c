@@ -22,51 +22,82 @@
 #include <mm/vm.h>
 #include "errno.h"
 
-
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
-int fork(void) {
+int proc_clone(struct proc_clone_args *args) {
     struct proc *np;
+    int ret = 0;
     struct proc *p = myproc();
 
     if (!PROC_USER_SPACE(p)) {
-        return -1;
+        return -EINVAL;
+    }
+
+    if (args == NULL) {
+        return -EINVAL;
+    }
+
+    if ((args->flags & CLONE_VM) && (args->user_stack == 0)) {
+        // When CLONE_VM is specified, user_stack must be provided.
+        return -EINVAL;
+    }
+
+    // When user_stack is specified, stack_size must be valid.
+    if (args->user_stack != 0 && (args->stack_size < USERSTACK_MINSZ ||
+                                  (args->stack_size & (PAGE_SIZE - 1)) != 0)) {
+        return -EINVAL;
     }
 
     // Allocate process.
-    if (user_proc_create(&np, p->kstack_order) < 0) {
-        return -1;
+    ret = user_proc_create(&np, p->kstack_order);
+    if (ret < 0) {
+        return ret;
     }
 
     // Copy user memory from parent to child.
-    vm_t *new_vm = vm_copy(p->vm, (uint64)np->trapframe);
-    if (new_vm == NULL) {
-        freeproc(np);
-        return -1;
+    vm_t *new_vm = NULL;
+    if (args->flags & CLONE_VM) {
+        // Share the VM
+        new_vm = p->vm;
+        vm_dup(new_vm);
+    } else {
+        // @TODO: handle trapframe!!!!
+        new_vm = vm_copy(p->vm, (uint64)np->trapframe);
+        if (IS_ERR_OR_NULL(new_vm)) {
+            freeproc(np);
+            return -ENOMEM;
+        }
     }
 
     // Clone VFS cwd and root inode references
-    struct fs_struct *fs_clone = vfs_struct_clone(p->fs, 0);
+    struct fs_struct *fs_clone = vfs_struct_clone(p->fs, args->flags);
     if (IS_ERR_OR_NULL(fs_clone)) {
         vm_put(new_vm);
         freeproc(np);
-        return -1;
+        if (IS_ERR(fs_clone)) {
+            return PTR_ERR(fs_clone);
+        }
+        return -ENOMEM;
     }
 
     // Clone VFS file descriptor table - must be done after releasing parent
     // lock because vfs_fdup may call cdev_dup which needs a mutex
-    struct vfs_fdtable *new_fdtable = vfs_fdtable_clone(p->fdtable, 0);
+    struct vfs_fdtable *new_fdtable = vfs_fdtable_clone(p->fdtable, args->flags);
     if (IS_ERR_OR_NULL(new_fdtable)) {
         vm_put(new_vm);
         vfs_struct_put(fs_clone);
         freeproc(np);
-        return -1;
+        if (IS_ERR(new_fdtable)) {
+            return PTR_ERR(new_fdtable);
+        }
+        return -ENOMEM;
     }
 
     proc_lock(p);
     proc_lock(np);
 
     // copy the process's signal actions.
+    // @TODO: handle CLONE_SIGHAND
     if (p->sigacts) {
         np->sigacts = sigacts_dup(p->sigacts);
         if (np->sigacts == NULL) {
@@ -76,7 +107,7 @@ int fork(void) {
             vfs_struct_put(fs_clone);
             vfs_fdtable_put(new_fdtable);
             freeproc(np);
-            return -1;
+            return -ENOMEM;
         }
     }
 
@@ -108,4 +139,19 @@ int fork(void) {
     scheduler_wakeup(np);
 
     return np->pid;
+}
+
+int fork(void) {
+    // The following will be used to create pthread-like processes.
+    // struct proc_clone_args args = {
+    //     .flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
+    //              CLONE_THREAD
+    //              // | CLONE_SYSVSEM
+    //              | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID
+    //              | CLONE_DETACHED,
+    // };
+    struct proc_clone_args args = {
+        .flags = SIGCHLD,
+    };
+    return proc_clone(&args);
 }
