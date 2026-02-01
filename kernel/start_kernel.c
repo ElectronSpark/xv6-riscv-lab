@@ -6,9 +6,10 @@
 #include "defs.h"
 #include <smp/percpu.h>
 #include "printf.h"
-#include "proc/sched.h"
 #include "signal.h"
+#include "proc/sched.h"
 #include "proc/workqueue.h"
+#include "proc/proc.h"
 #include "kobject.h"
 #include "dev/dev.h"
 #include <mm/pcache.h>

@@ -1,7 +1,7 @@
 #ifndef SCHED_H
 #define SCHED_H
 
-#include "proc/proc.h"
+#include "proc/proc_types.h"
 
 struct spinlock;
 

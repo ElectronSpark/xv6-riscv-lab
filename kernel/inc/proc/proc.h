@@ -13,23 +13,7 @@
 #include <smp/atomic.h>
 #include <smp/percpu.h>
 #include "lock/rcu_type.h"
-
-struct vfs_inode;
-
-enum procstate {
-    PSTATE_UNUSED,
-    PSTATE_USED,
-    PSTATE_INTERRUPTIBLE,
-    STATE_KILLABLE,
-    STATE_TIMER,
-    STATE_KILLABLE_TIMER,
-    PSTATE_UNINTERRUPTIBLE,
-    PSTATE_WAKENING,
-    PSTATE_RUNNING,
-    PSTATE_STOPPED,
-    PSTATE_EXITING,
-    PSTATE_ZOMBIE
-};
+#include "proc/proc_types.h"
 
 #define PSTATE_IS_SLEEPING(state)                                              \
     ({                                                                         \
@@ -60,88 +44,6 @@ enum procstate {
 #define PSTATE_IS_ZOMBIE(state) ({ (state) == PSTATE_ZOMBIE; })
 
 #define PSTATE_IS_STOPPED(state) ({ (state) == PSTATE_STOPPED; })
-
-struct workqueue;
-
-// Per-process state
-struct proc {
-    struct spinlock lock;
-
-    // both p->lock and the corresponding proc queue lock must be held
-    // when using these.
-    //
-    // If the process is trying to yield as RUNNABLE, it must hold __sched_lock
-    // after acquiring p->lock, and before switching to the scheduler.
-    //
-    // When the process is in SLEEPING state, these fields are managed by the
-    // scheduler, and the process queue it's in.
-    enum procstate state;    // Process state
-    void *chan;              // If non-zero, sleeping on chan
-    list_node_t sched_entry; // entry for ready queue
-    struct workqueue *wq;    // work queue this process belongs to
-    list_node_t wq_entry;    // link to work queue
-    uint64 flags;
-#define PROC_FLAG_VALID 1
-#define PROC_FLAG_KILLED 2     // Process is exiting or exited
-#define PROC_FLAG_ONCHAN 3     // Process is sleeping on a channel
-#define PROC_FLAG_USER_SPACE 5 // Process has user space
-
-    // proc table lock must be held before holding p->lock to use this:
-    hlist_entry_t proctab_entry; // Entry to link the process hash table
-
-    // p->lock must be held when using these:
-    list_node_t dmp_list_entry; // Entry in the dump list
-    int xstate;                 // Exit status to be returned to parent's wait
-    int pid;                    // Process ID
-
-    // Signal related fields
-    sigacts_t *sigacts;             // Signal actions for this process
-    sigset_t sig_pending_mask;      // Mark none empty signal pending queue
-    sigpending_t sig_pending[NSIG]; // Queue of pending signals
-    // signal trap frames would be put at the user stack.
-    // This is used to restore the user context when a signal is delivered.
-    uint64 sig_ucontext; // Address of the signal user context
-    stack_t sig_stack;   // Alternate signal stack
-
-    // both p->lock and p->parent->lock must be held when using this:
-    list_node_t siblings; // List of sibling processes
-    list_node_t children; // List of child processes
-    int children_count;   // Number of children
-    struct proc *parent;  // Parent process
-
-    // these are private to the process, so p->lock need not be held.
-    uint64 kstack;    // Virtual address of kernel stack
-    int kstack_order; // Kernel stack order, used for allocation
-    uint64 ksp;
-    vm_t *vm;                     // Virtual memory areas and page table
-    struct utrapframe *trapframe; // data page for trampoline.S
-
-    // Priority Inheritance lock, on_rq, on_cpu, cpu_id, and context are now
-    // stored in sched_entity. Access them via p->sched_entity-><field>.
-    struct sched_entity *sched_entity;
-    uint64 kentry; // Entry point for kernel process
-    uint64 arg[2]; // Argument for kernel process
-
-    struct fs_struct *fs; // Filesystem state (on kernel stack below utrapframe)
-    struct vfs_fdtable
-        *fdtable;  // File descriptor table (on kernel stack below fs)
-    char name[16]; // Process name (debugging)
-
-    // RCU read-side critical section nesting counter (per-process)
-    // This counter follows the process across CPU migrations, enabling
-    // preemptible RCU. It tracks how many times this process has called
-    // rcu_read_lock() without matching rcu_read_unlock(). The process can
-    // safely yield and migrate CPUs while this is > 0.
-    int rcu_read_lock_nesting; // Number of nested rcu_read_lock() calls
-
-    // RCU deferred freeing
-    rcu_head_t rcu_head; // RCU callback head (must be last)
-};
-
-BUILD_BUG_ON(((sizeof(struct proc) + sizeof(struct utrapframe) +
-               sizeof(struct fs_struct) + sizeof(struct vfs_fdtable) +
-               sizeof(struct sched_entity) + 80 + CACHELINE_SIZE) &
-              ~CACHELINE_MASK) >= PGSIZE);
 
 static inline uint64 proc_flags(struct proc *p) {
     if (p == NULL) {
@@ -243,5 +145,34 @@ static inline void __proc_set_pstate(struct proc *p, enum procstate state) {
 #define PROC_KILLABLE(p) PSTATE_IS_KILLABLE(__proc_get_pstate(p))
 #define PROC_TIMER(p) PSTATE_IS_TIMER(__proc_get_pstate(p))
 #define PROC_INTERRUPTIBLE(p) PSTATE_IS_INTERRUPTIBLE(__proc_get_pstate(p))
+
+
+int             proctab_get_pid_proc(int pid, struct proc **pp);
+void            exit(int);
+int             fork(void);
+int             kernel_proc_create(const char *name, struct proc **retp, void *entry,
+                                   uint64 arg1, uint64 arg2, int stack_order);
+struct proc     *allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order);
+int             growproc(int64);
+void            proc_mapstacks(pagetable_t);
+int             proc_pagetable(struct proc *);
+void            proc_freepagetable(struct proc *);
+int             kill(int, int);
+int             killed(struct proc*);
+void            proc_lock(struct proc *p);
+void            proc_unlock(struct proc *p);
+void            proc_assert_holding(struct proc *p);
+void            procinit(void);
+void            sched(void);
+void            userinit(void);
+void            install_user_root(void);
+int             wait(uint64);
+void            yield(void);
+int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
+int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
+void            procdump(void);
+void            procdump_bt(void);
+void            procdump_bt_pid(int pid);
+struct proc     *process_switch_to(struct proc *current, struct proc *target);
 
 #endif /* __KERNEL_PROC_H */

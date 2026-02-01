@@ -22,9 +22,7 @@
 #include "defs.h"
 #include "param.h"
 #include "errno.h"
-#include "lock/spinlock.h"
 #include "lock/mutex_types.h"
-#include "proc/proc.h"
 #include <mm/vm.h>
 #include "dev/buf.h"
 #include "vfs/fs.h"

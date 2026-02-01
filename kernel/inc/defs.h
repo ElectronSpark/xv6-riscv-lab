@@ -76,36 +76,6 @@ int pipewrite(struct pipe *, uint64, int);
 int piperead_kernel(struct pipe *, char *, int);
 int pipewrite_kernel(struct pipe *, const char *, int);
 
-// proc.c
-int             proctab_get_pid_proc(int pid, struct proc **pp);
-void            exit(int);
-int             fork(void);
-int             kernel_proc_create(const char *name, struct proc **retp, void *entry,
-                                   uint64 arg1, uint64 arg2, int stack_order);
-struct proc     *allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order);
-int             growproc(int64);
-void            proc_mapstacks(pagetable_t);
-int             proc_pagetable(struct proc *);
-void            proc_freepagetable(struct proc *);
-int             kill(int, int);
-int             killed(struct proc*);
-void            proc_lock(struct proc *p);
-void            proc_unlock(struct proc *p);
-void            proc_assert_holding(struct proc *p);
-void            procinit(void);
-void            sched(void);
-void            userinit(void);
-void            install_user_root(void);
-int             wait(uint64);
-void            yield(void);
-int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
-int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
-void            procdump(void);
-void            procdump_bt(void);
-void            procdump_bt_pid(int pid);
-struct proc     *process_switch_to(struct proc *current, struct proc *target);
-
-
 // swtch.S
 struct context *__swtch_context(struct context *current,
                                 struct context *target);

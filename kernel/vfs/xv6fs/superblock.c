@@ -12,7 +12,6 @@
 #include "errno.h"
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
-#include "proc/proc.h"
 #include <mm/vm.h>
 #include "dev/buf.h"
 #include "dev/blkdev.h"

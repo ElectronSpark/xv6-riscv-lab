@@ -6,11 +6,8 @@
 #include "errno.h"
 #include "bits.h"
 #include "vfs/stat.h"
-#include "lock/spinlock.h"
 #include "lock/mutex_types.h"
 #include "lock/rwlock.h"
-#include "lock/completion.h"
-#include "proc/proc.h"
 #include <mm/vm.h>
 #include "vfs/fs.h"
 #include "../vfs_private.h"

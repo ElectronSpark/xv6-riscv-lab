@@ -2,7 +2,7 @@
 #define KERNEL_PROC_QUEUE_H
 
 #include "proc/proc_queue_type.h"
-#include "proc/proc.h"
+#include "proc/proc_types.h"
 #include "list.h"
 
 // Traverse the process queue without locking

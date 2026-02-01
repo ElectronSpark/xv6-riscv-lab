@@ -7,8 +7,6 @@
 #include "param.h"
 #include <mm/memlayout.h>
 #include "riscv.h"
-#include "lock/spinlock.h"
-#include "proc/proc.h"
 #include "defs.h"
 #include "printf.h"
 #include "dev/pci.h"

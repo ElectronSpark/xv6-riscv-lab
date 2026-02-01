@@ -11,6 +11,7 @@
 #include <mm/page.h>
 #include "list.h"
 #include "proc/sched.h"
+#include "proc/proc.h"
 #include "rbtree.h"
 #include "proc/workqueue.h"
 #include "kobject.h"
