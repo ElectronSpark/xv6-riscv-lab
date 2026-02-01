@@ -6,7 +6,6 @@ set(PROC_C_SRCS
     sys_signal.c
     sysproc.c
     workqueue.c
-    thread.c
     pid.c
     rq.c
     sched_idle.c

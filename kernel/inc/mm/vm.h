@@ -17,6 +17,8 @@
 
 void vm_cpu_online(vm_t *vm, int cpu);
 void vm_cpu_offline(vm_t *vm, int cpu);
+cpumask_t vm_get_cpumask(vm_t *vm);
+void vm_remote_sfence(vm_t *vm);
 void vm_rlock(vm_t *vm);
 void vm_runlock(vm_t *vm);
 void vm_wlock(vm_t *vm);

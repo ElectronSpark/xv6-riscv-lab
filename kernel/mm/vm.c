@@ -100,6 +100,8 @@
 #include "string.h"
 #include "types.h"
 #include "dev/fdt.h"
+#include "smp/ipi.h"
+#include "sbi.h"
 
 static slab_cache_t __vma_pool = {0};
 static slab_cache_t __vm_pool = {0};
@@ -164,6 +166,24 @@ static void __pgtab_free(void *pa) {
     }
     page_lock_release(page);
     page_free(pa, 0);
+}
+
+// Send remote sfence.vma to all CPUs using this vm
+// Since kernel space and user space are separated, we only need to
+// invalidate user space mappings.
+void vm_remote_sfence(vm_t *vm) {
+    push_off();
+    smp_mb();
+
+    cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
+    cpumask &= ~(1ULL << cpuid()); // Exclude self
+
+    // Send IPI to other CPUs to perform hfence.vma
+    if (cpumask) {
+        sbi_remote_hfence_vma(cpumask, 0, 0, 0);
+    }
+
+    pop_off();
 }
 
 // Make a direct-map page table for the kernel.
@@ -785,10 +805,10 @@ static void __vma_set_free(vma_t *vma) {
                 continue;
             uint64 pa = PTE2PA(*pte);
             *pte = 0;
+            // Notify any remote core that's using this page
+            vm_remote_sfence(vma->vm);
             page_ref_dec((void *)pa);
         }
-        // Drop any stale TLB entries covering the unmapped range.
-        sfence_vma();
     }
 
     vma->flags = VM_FLAG_NONE; // Set the VMA as free
@@ -840,9 +860,8 @@ static int __vma_copy(vma_t *dst, vma_t *src) {
             assert(page_ref_inc((void *)pa) > 0,
                    "__vma_copy: page refcnt should be greater than 0");
         }
-        // Flush TLB so downgraded parent PTEs lose stale writable entries (COW
-        // safety).
-        sfence_vma();
+        // Notify any remote core that's using this page
+        vm_remote_sfence(src->vm);
     }
     return 0;
 }
@@ -904,6 +923,10 @@ void vm_cpu_online(vm_t *vm, int cpu) {
 // Called when entering kernel mode.
 void vm_cpu_offline(vm_t *vm, int cpu) {
     atomic_and(&vm->cpumask, ~(1ULL << cpu));
+}
+
+cpumask_t vm_get_cpumask(vm_t *vm) {
+    return smp_load_acquire(&vm->cpumask);
 }
 
 // Initialize the vm struct of a process.
@@ -1523,6 +1546,7 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags) {
 
     // Acquire page table lock for PTE modifications (demand paging, COW)
     vm_pgtable_lock(vma->vm);
+    smp_mb(); // Ensure we see the latest PTE updates
     for (uint64 i = va; i < va_end; i += PGSIZE) {
         pte_t *pte = walk(vma->vm->pagetable, va, 1, NULL, NULL);
         if (pte == NULL) {
