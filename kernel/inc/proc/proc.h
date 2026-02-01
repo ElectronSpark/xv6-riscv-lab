@@ -165,8 +165,6 @@ void            procinit(void);
 void            userinit(void);
 void            install_user_root(void);
 int             wait(uint64);
-int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
-int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
 void            procdump_bt(void);
 void            procdump_bt_pid(int pid);

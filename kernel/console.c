@@ -17,6 +17,7 @@
 #include "printf.h"
 #include "proc/proc.h"
 #include "proc/sched.h"
+#include "mm/vm.h"
 #include "dev/cdev.h"
 #include "trap.h"
 #include "dev/uart.h"

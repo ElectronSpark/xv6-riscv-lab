@@ -888,3 +888,38 @@ void handle_signal(void) {
     }
 }
 
+
+// Kill the process with the given pid.
+// The victim won't exit until it tries to return
+// to user space (see usertrap() in trap.c).
+int kill(int pid, int signum) {
+    ksiginfo_t info = {0};
+    info.signo = signum;
+    info.sender = myproc();
+    info.info.si_pid = myproc()->pid;
+
+    return signal_send(pid, &info);
+}
+
+// Kill the given process.
+// Instead of looking up by pid, directly send signal to the given proc.
+int kill_proc(struct proc *p, int signum) {
+    ksiginfo_t info = {0};
+    info.signo = signum;
+    info.sender = myproc();
+    info.info.si_pid = myproc()->pid;
+
+    rcu_read_lock();
+    int ret = __signal_send(p, &info);
+    rcu_read_unlock();
+    return ret;
+}
+
+int killed(struct proc *p) {
+    int k;
+
+    proc_lock(p);
+    k = signal_terminated(p);
+    proc_unlock(p);
+    return k;
+}

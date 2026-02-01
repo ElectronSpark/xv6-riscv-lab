@@ -44,6 +44,8 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags);
 int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len);
 int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len);
 int vm_copyinstr(vm_t *vm, char *dst, uint64 srcva, uint64 max);
+int either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
+int either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 
 uint64 vm2pte_flags(uint64 flags);
 uint64 pte2vm_flags(uint64 pte_flags);

@@ -4,9 +4,10 @@
 #include "defs.h"
 #include "printf.h"
 #include "proc/proc.h"
+#include "proc/sched.h"
+#include "mm/vm.h"
 #include "signal.h"
 #include "syscall.h"
-#include "proc/sched.h"
 
 uint64 sys_sigprocmask(void) {
     int how;
