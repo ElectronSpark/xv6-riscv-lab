@@ -296,6 +296,7 @@ void signal_init(void) {
 // Cap for number of queued ksiginfo entries per signal when SA_SIGINFO set.
 #define MAX_SIGINFO_PER_SIGNAL 8
 
+#if 0
 // Internal invariant checker (debug aid). Intentional: does not attempt to
 // compensate for known indexing inconsistencies elsewhere; only validates
 // the data we manipulate here.
@@ -315,6 +316,12 @@ static void signal_assert_invariants(struct proc *p) {
         }
     }
 }
+#else
+static void signal_assert_invariants(struct proc *p) {
+    // No-op in non-debug builds
+    (void)p;
+}
+#endif
 
 // Helper: count ksiginfo entries currently queued for a signal.
 static int __siginfo_queue_len(struct proc *p, int signo) {
