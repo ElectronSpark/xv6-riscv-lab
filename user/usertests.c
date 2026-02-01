@@ -1348,10 +1348,15 @@ void concreate(char *s) {
     char file[3];
     int i, pid, n, fd;
     char fa[N];
-    struct {
-        ushort inum;
-        char name[DIRSIZ];
-    } de;
+    // Use linux_dirent64 for getdents
+    struct linux_dirent64 {
+        uint64 d_ino;
+        int64 d_off;
+        uint16 d_reclen;
+        uint8 d_type;
+        char d_name[];
+    };
+    char dirent_buf[1024];
 
     file[0] = 'C';
     file[2] = '\0';
@@ -1383,28 +1388,54 @@ void concreate(char *s) {
 
     memset(fa, 0, sizeof(fa));
     fd = open(".", 0);
+    if (fd < 0) {
+        printf("%s: concreate cannot open .\n", s);
+        exit(1);
+    }
     n = 0;
-    while (read(fd, &de, sizeof(de)) > 0) {
-        if (de.inum == 0)
-            continue;
-        if (de.name[0] == 'C' && de.name[2] == '\0') {
-            i = de.name[1] - '0';
-            if (i < 0 || i >= sizeof(fa)) {
-                printf("%s: concreate weird file %s\n", s, de.name);
-                exit(1);
+    int nread;
+    int total_entries = 0;
+    while ((nread = getdents(fd, dirent_buf, sizeof(dirent_buf))) > 0) {
+        int bpos = 0;
+        while (bpos < nread) {
+            struct linux_dirent64 *de = (struct linux_dirent64 *)(dirent_buf + bpos);
+            total_entries++;
+            // Match files starting with 'C' that are 2 chars long
+            if (de->d_ino != 0 && de->d_name[0] == 'C' && de->d_name[2] == '\0') {
+                i = de->d_name[1] - '0';
+                if (i < 0 || i >= (int)sizeof(fa)) {
+                    printf("%s: concreate weird file %s (i=%d)\n", s, de->d_name, i);
+                    exit(1);
+                }
+                if (fa[i]) {
+                    printf("%s: concreate duplicate file %s\n", s, de->d_name);
+                    exit(1);
+                }
+                fa[i] = 1;
+                n++;
             }
-            if (fa[i]) {
-                printf("%s: concreate duplicate file %s\n", s, de.name);
-                exit(1);
-            }
-            fa[i] = 1;
-            n++;
+            bpos += de->d_reclen;
         }
     }
     close(fd);
 
     if (n != N) {
-        printf("%s: concreate not enough files in directory listing\n", s);
+        printf("%s: concreate not enough files in directory listing (got %d C-files, %d total entries, expected %d)\n", s, n, total_entries, N);
+        printf("%s: missing file indices: ", s);
+        for (i = 0; i < N; i++) {
+            if (!fa[i]) {
+                file[1] = '0' + i;
+                printf("%d ", i);
+                // Check if file exists using stat
+                struct stat st;
+                if (stat(file, &st) == 0) {
+                    printf("(but %s exists with ino=%ld!) ", file, st.ino);
+                } else {
+                    printf("(%s stat failed) ", file);
+                }
+            }
+        }
+        printf("\n");
         exit(1);
     }
 

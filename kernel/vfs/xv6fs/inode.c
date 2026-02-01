@@ -85,6 +85,11 @@ int xv6fs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         return -ENOTDIR;
     }
     
+    // Truncate name to DIRSIZ for xv6 compatibility
+    if (name_len > DIRSIZ) {
+        name_len = DIRSIZ;
+    }
+    
     struct xv6fs_inode *dp = container_of(dir, struct xv6fs_inode, vfs_inode);
     struct dirent de;
     
@@ -299,7 +304,7 @@ found:
 
 struct vfs_inode *xv6fs_create(struct vfs_inode *dir, mode_t mode,
                                 const char *name, size_t name_len) {
-    if (dir == NULL || name == NULL || name_len == 0 || name_len >= DIRSIZ) {
+    if (dir == NULL || name == NULL || name_len == 0 || name_len > DIRSIZ) {
         return ERR_PTR(-EINVAL);
     }
     
@@ -361,7 +366,7 @@ struct vfs_inode *xv6fs_create(struct vfs_inode *dir, mode_t mode,
 
 struct vfs_inode *xv6fs_mkdir(struct vfs_inode *dir, mode_t mode,
                                const char *name, size_t name_len) {
-    if (dir == NULL || name == NULL || name_len == 0 || name_len >= DIRSIZ) {
+    if (dir == NULL || name == NULL || name_len == 0 || name_len > DIRSIZ) {
         return ERR_PTR(-EINVAL);
     }
     
@@ -493,7 +498,7 @@ int xv6fs_rmdir(struct vfs_dentry *dentry, struct vfs_inode *target) {
 
 int xv6fs_link(struct vfs_inode *old, struct vfs_inode *dir,
                const char *name, size_t name_len) {
-    if (old == NULL || dir == NULL || name == NULL || name_len >= DIRSIZ) {
+    if (old == NULL || dir == NULL || name == NULL || name_len > DIRSIZ) {
         return -EINVAL;
     }
     
@@ -580,7 +585,7 @@ ssize_t xv6fs_readlink(struct vfs_inode *inode, char *buf, size_t buflen) {
 struct vfs_inode *xv6fs_symlink(struct vfs_inode *dir, mode_t mode,
                                  const char *name, size_t name_len,
                                  const char *target, size_t target_len) {
-    if (dir == NULL || name == NULL || name_len == 0 || name_len >= DIRSIZ ||
+    if (dir == NULL || name == NULL || name_len == 0 || name_len > DIRSIZ ||
         target == NULL || target_len == 0) {
         return ERR_PTR(-EINVAL);
     }
@@ -662,7 +667,7 @@ struct vfs_inode *xv6fs_symlink(struct vfs_inode *dir, mode_t mode,
 
 struct vfs_inode *xv6fs_mknod(struct vfs_inode *dir, mode_t mode,
                                dev_t dev, const char *name, size_t name_len) {
-    if (dir == NULL || name == NULL || name_len == 0 || name_len >= DIRSIZ) {
+    if (dir == NULL || name == NULL || name_len == 0 || name_len > DIRSIZ) {
         return ERR_PTR(-EINVAL);
     }
     

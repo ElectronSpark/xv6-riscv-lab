@@ -1487,10 +1487,11 @@ struct vfs_inode *vfs_nameiparent(const char *path, size_t path_len,
         name_start--;
     }
     
-    // Extract the name component
+    // Extract the name component, truncating to fit buffer (xv6 compatibility)
     size_t final_name_len = end - name_start;
     if (final_name_len >= name_size) {
-        return ERR_PTR(-ENAMETOOLONG);
+        // Truncate to fit buffer (leaves room for null terminator)
+        final_name_len = name_size - 1;
     }
     
     memmove(name, path + name_start, final_name_len);

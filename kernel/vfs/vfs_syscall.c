@@ -238,7 +238,7 @@ uint64 sys_vfs_fstat(void) {
 
 uint64 sys_vfs_open(void) {
     char path[MAXPATH];
-    char name[DIRSIZ];
+    char name[DIRSIZ + 1];
     int omode;
     int n;
     
@@ -252,7 +252,7 @@ uint64 sys_vfs_open(void) {
     
     if (omode & O_CREAT) {
         // Create file if it doesn't exist
-        struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ);
+        struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
         if (IS_ERR(parent)) {
             return PTR_ERR(parent);
         }
@@ -358,14 +358,14 @@ uint64 sys_vfs_open(void) {
 
 uint64 sys_vfs_mkdir(void) {
     char path[MAXPATH];
-    char name[DIRSIZ];
+    char name[DIRSIZ + 1];
     int n;
     
     if ((n = argstr(0, path, MAXPATH)) < 0) {
         return -EFAULT;
     }
     
-    struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ);
+    struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
     if (IS_ERR(parent)) {
         return PTR_ERR(parent);
     }
@@ -388,7 +388,7 @@ uint64 sys_vfs_mkdir(void) {
 
 uint64 sys_vfs_mknod(void) {
     char path[MAXPATH];
-    char name[DIRSIZ];
+    char name[DIRSIZ + 1];
     int mode, major, minor;
     int n;
     
@@ -399,7 +399,7 @@ uint64 sys_vfs_mknod(void) {
     argint(2, &major);
     argint(3, &minor);
     
-    struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ);
+    struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
     if (IS_ERR(parent)) {
         return PTR_ERR(parent);
     }
@@ -423,14 +423,14 @@ uint64 sys_vfs_mknod(void) {
 
 uint64 sys_vfs_unlink(void) {
     char path[MAXPATH];
-    char name[DIRSIZ];
+    char name[DIRSIZ + 1];
     int n;
     
     if ((n = argstr(0, path, MAXPATH)) < 0) {
         return -EFAULT;
     }
     
-    struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ);
+    struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
     if (IS_ERR(parent)) {
         return PTR_ERR(parent);
     }
@@ -448,7 +448,7 @@ uint64 sys_vfs_unlink(void) {
 
 uint64 sys_vfs_link(void) {
     char old[MAXPATH], new[MAXPATH];
-    char name[DIRSIZ];
+    char name[DIRSIZ + 1];
     int n1, n2;
     
     if ((n1 = argstr(0, old, MAXPATH)) < 0 ||
@@ -472,7 +472,7 @@ uint64 sys_vfs_link(void) {
     }
     
     // Get parent directory of new path
-    struct vfs_inode *parent = vfs_nameiparent(new, n2, name, DIRSIZ);
+    struct vfs_inode *parent = vfs_nameiparent(new, n2, name, DIRSIZ + 1);
     if (IS_ERR(parent)) {
         vfs_iput(src);
         return PTR_ERR(parent);
@@ -593,7 +593,7 @@ static int vfs_make_absolute_path(const char *relpath, int relpath_len, char *ab
 
 uint64 sys_vfs_symlink(void) {
     char target[MAXPATH], linkpath[MAXPATH];
-    char name[DIRSIZ];
+    char name[DIRSIZ + 1];
     int n1, n2;
     
     if ((n1 = argstr(0, target, MAXPATH)) < 0 ||
@@ -608,7 +608,7 @@ uint64 sys_vfs_symlink(void) {
         return abs_len;
     }
     
-    struct vfs_inode *parent = vfs_nameiparent(linkpath, n2, name, DIRSIZ);
+    struct vfs_inode *parent = vfs_nameiparent(linkpath, n2, name, DIRSIZ + 1);
     if (IS_ERR(parent)) {
         return PTR_ERR(parent);
     }
@@ -925,6 +925,10 @@ uint64 sys_getdents(void) {
     int ret;
     
     while (bytes_written < count) {
+        // Save iterator state before calling dir_iter, in case we need to revert
+        uint64 saved_cookies = f->dir_iter.cookies;
+        uint64 saved_index = f->dir_iter.index;
+        
         ret = vfs_dir_iter(inode, &f->dir_iter, &dentry);
         if (ret != 0) {
             kmm_free(kbuf);
@@ -943,7 +947,9 @@ uint64 sys_getdents(void) {
         reclen = (reclen + 7) & ~7; // Align to 8 bytes
         
         if (bytes_written + (int)reclen > count) {
-            // Not enough space, put back for next call
+            // Not enough space, restore iterator state for next call
+            f->dir_iter.cookies = saved_cookies;
+            f->dir_iter.index = saved_index;
             vfs_release_dentry(&dentry);
             break;
         }
