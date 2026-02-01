@@ -21,6 +21,7 @@
 #include "trap.h"
 #include "dev/uart.h"
 #include "sbi.h"
+#include "signal.h"
 
 #ifndef CONSOLE_MAJOR
 #define CONSOLE_MAJOR  1

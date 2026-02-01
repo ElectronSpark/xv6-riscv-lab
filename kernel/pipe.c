@@ -18,6 +18,7 @@
 #include "pipe.h"
 #include <mm/vm.h>
 #include "proc/sched.h"
+#include "signal.h"
 
 void pipeclose(struct pipe *pi, int writable) {
     bool freed = false;

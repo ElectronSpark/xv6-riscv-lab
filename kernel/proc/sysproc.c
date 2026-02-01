@@ -6,8 +6,9 @@
 #include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "proc/proc.h"
-#include "timer/timer.h"
 #include "proc/sched.h"
+#include "signal.h"
+#include "timer/timer.h"
 #include <mm/vm.h>
 #include "clone_flags.h"
 #include "errno.h"

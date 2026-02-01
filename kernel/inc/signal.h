@@ -79,6 +79,10 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
 int sigpending(struct proc *p, sigset_t *set);
 int sigreturn(void);
 
+int kill(int, int);
+int kill_proc(struct proc *p, int signum);
+int killed(struct proc*);
+
 #define SIG_BLOCK   1
 #define SIG_UNBLOCK 2
 #define SIG_SETMASK 3
