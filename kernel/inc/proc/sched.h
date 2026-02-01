@@ -14,8 +14,6 @@ int sleep_lock_irqsave(void);
 void sleep_unlock_irqrestore(int state);
 void scheduler_run(void);
 void scheduler_yield(void);
-void scheduler_pause(struct spinlock *lk);
-void scheduler_stop(struct proc *p);
 void scheduler_sleep(struct spinlock *lk, enum procstate sleep_state);
 void scheduler_wakeup(struct proc *p);
 void scheduler_wakeup_timeout(struct proc *p);

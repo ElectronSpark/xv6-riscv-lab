@@ -107,6 +107,17 @@ uint64 sys_pause(void) {
         return 0;
     }
     proc_unlock(p);
-    scheduler_pause(NULL); // Pause the current process
+    scheduler_sleep(NULL, PSTATE_INTERRUPTIBLE); // Pause the current process
     return 0;
 }
+
+uint64 sys_kill(void) {
+    int pid;
+    int signum;
+
+    argint(0, &pid);
+    argint(1, &signum);
+
+    return kill(pid, signum);
+}
+

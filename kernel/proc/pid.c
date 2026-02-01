@@ -17,7 +17,6 @@
 #include "proc/sched.h"
 #include <mm/slab.h>
 #include <mm/page.h>
-#include "signal.h"
 #include <mm/vm.h>
 #include "vfs/fs.h"
 #include "vfs/file.h"

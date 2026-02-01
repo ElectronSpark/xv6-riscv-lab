@@ -73,10 +73,10 @@ sockread(struct sock *si, uint64 addr, int n)
   int len;
 
   spin_lock(&si->lock);
-  while (mbufq_empty(&si->rxq) && !signal_terminated(pr)) {
+  while (mbufq_empty(&si->rxq) && !killed(pr)) {
     sleep_on_chan(&si->rxq, &si->lock);
   }
-  if (signal_terminated(pr)) {
+  if (killed(pr)) {
     spin_unlock(&si->lock);
     return -1;
   }

@@ -255,20 +255,6 @@ void scheduler_sleep(struct spinlock *lk, enum procstate sleep_state) {
     intr_restore(intr);
 }
 
-// Put the current process to sleep in interruptible state,
-// so it would pause until receiving a signal.
-void scheduler_pause(struct spinlock *lk) {
-    assert(myproc() != NULL, "Cannot pause a NULL process");
-    scheduler_sleep(lk, PSTATE_INTERRUPTIBLE); // Sleep with the specified lock
-}
-
-// DEPRECATED: Processes now enter PSTATE_STOPPED voluntarily via handle_signal.
-// This function is kept for backward compatibility but does nothing.
-// Use __proc_set_pstate(p, PSTATE_STOPPED) directly if needed.
-void scheduler_stop(struct proc *p) {
-    (void)p; // Unused - processes voluntarily stop via handle_signal
-}
-
 static void __scheduler_wakeup_assertion(struct proc *p) {
     assert(p != NULL, "Cannot wake up a NULL process");
     // Note: pi_lock is now acquired inside __do_scheduler_wakeup, not by callers.

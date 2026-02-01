@@ -7,7 +7,6 @@
 #include "lock/spinlock.h"
 #include "proc/proc.h"
 #include "proc/sched.h"
-#include "signal.h"
 #include "timer/timer.h"
 #include <mm/vm.h>
 #include "clone_flags.h"
@@ -76,16 +75,6 @@ uint64 sys_sleep(void) {
         n = 0;
     sleep_ms(n);
     return 0;
-}
-
-uint64 sys_kill(void) {
-    int pid;
-    int signum;
-
-    argint(0, &pid);
-    argint(1, &signum);
-
-    return kill(pid, signum);
 }
 
 // return how many clock tick interrupts have occurred
