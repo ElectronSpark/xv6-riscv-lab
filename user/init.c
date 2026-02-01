@@ -31,7 +31,7 @@ main(void)
 
   for(;;){
     printf("init: starting sh\n");
-    pid = vfork();
+    pid = fork();  // Use fork instead of vfork to debug OrangePi hang
     if(pid < 0){
       printf("init: fork failed\n");
       exit(1);

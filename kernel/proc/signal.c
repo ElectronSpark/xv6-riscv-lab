@@ -3,13 +3,21 @@
  *
  * LOCKING ORDER:
  * Signal delivery must respect the global locking order:
- *   sleep locks (vm_rwlock, mutexes) -> spinlocks (proc_lock)
+ *   sleep locks (vm_rwlock, mutexes) -> proc_lock -> sigacts_lock
+ *
+ * sigacts_lock protects the sigacts structure (signal masks and actions).
+ * It is nested inside proc_lock when both are needed.
+ * 
+ * Key rules:
+ * - If holding proc_lock, you may acquire sigacts_lock
+ * - If holding sigacts_lock, you must NOT acquire proc_lock
+ * - Copy data from sigacts while holding sigacts_lock if needed after release
  *
  * In handle_signal():
- * 1. Acquire proc_lock to pick and dequeue signal, copy sigaction locally
- * 2. Release proc_lock BEFORE calling __deliver_signal/push_sigframe
+ * 1. Acquire proc_lock, then sigacts_lock to pick signal and copy sigaction
+ * 2. Release both locks BEFORE calling __deliver_signal/push_sigframe
  * 3. push_sigframe may call vm_try_growstack which needs vm_wlock (sleep lock)
- * 4. Re-acquire proc_lock only for updating signal masks after delivery
+ * 4. Acquire sigacts_lock only for updating signal masks after delivery
  *
  * This ensures we never hold a spinlock when acquiring a sleep lock.
  */
@@ -340,8 +348,12 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
         return -1; // No signal actions available
     }
 
+    // Lock sigacts for reading signal action configuration
+    sigacts_lock(sa);
+
     // ignored signals are not sent
     if (sigismember(&sa->sa_sigignore, info->signo)) {
+        sigacts_unlock(sa);
         proc_unlock(p);
         return 0;
     }
@@ -381,6 +393,11 @@ after_enqueue:
 
     bool is_stop = sigismember(&sa->sa_sigstop, info->signo) && !sigismember(&sa->sa_sigmask, info->signo);
     bool is_cont = sigismember(&sa->sa_sigcont, info->signo) && !sigismember(&sa->sa_sigmask, info->signo);
+    bool is_term = sigismember(&sa->sa_sigterm, info->signo);
+    sigset_t sigmask = sa->sa_sigmask;
+    
+    // Release sigacts lock before scheduler operations
+    sigacts_unlock(sa);
 
     if (is_stop) {
         // Stop signals: The process will enter PSTATE_STOPPED voluntarily when it
@@ -416,7 +433,7 @@ after_enqueue:
     ret = (ret == -1) ? 0 : ret; // Treat enqueue allocation failure as soft failure.
 
     // If the action is to terminate the process, set the killed flag
-    if (sigismember(&sa->sa_sigterm, info->signo)) {
+    if (is_term) {
         PROC_SET_KILLED(p);
         if (PROC_STOPPED(p)) {
             // If the process is stopped, we need to wake it up.
@@ -426,7 +443,10 @@ after_enqueue:
             proc_lock(p);
         }
     }
-    if (signal_pending(p)) {
+    
+    // Check if signal is pending (unmasked)
+    sigset_t pending_unmasked = p->sig_pending_mask & ~sigmask;
+    if (pending_unmasked != 0) {
         signal_notify(p); // Notify the process if needed
     }
 
@@ -462,7 +482,26 @@ bool signal_pending(struct proc *p) {
         return false;
     }
     proc_assert_holding(p);
-    sigset_t masked = p->sig_pending_mask & ~p->sigacts->sa_sigmask;
+    sigacts_t *sa = p->sigacts;
+    if (!sa) {
+        return false;  // No sigacts means no signals can be pending
+    }
+    sigacts_lock(sa);
+    sigset_t masked = p->sig_pending_mask & ~sa->sa_sigmask;
+    sigacts_unlock(sa);
+    return masked != 0;
+}
+
+// Version that takes sigacts as parameter when caller already holds sigacts_lock
+// Caller must hold proc_lock but NOT sigacts_lock (we acquire it here)
+bool signal_pending_locked(struct proc *p, sigacts_t *sa) {
+    if (!p || !sa) {
+        return false;
+    }
+    proc_assert_holding(p);
+    sigacts_lock(sa);
+    sigset_t masked = p->sig_pending_mask & ~sa->sa_sigmask;
+    sigacts_unlock(sa);
     return masked != 0;
 }
 
@@ -495,8 +534,15 @@ bool signal_terminated(struct proc *p) {
         return 0;
     }
     proc_assert_holding(p);
-    sigset_t masked = p->sig_pending_mask & ~p->sigacts->sa_sigmask;
-    return (masked & p->sigacts->sa_sigterm) != 0;
+    sigacts_t *sa = p->sigacts;
+    if (!sa) {
+        return false;  // No sigacts means no termination signals
+    }
+    sigacts_lock(sa);
+    sigset_t masked = p->sig_pending_mask & ~sa->sa_sigmask;
+    bool terminated = (masked & sa->sa_sigterm) != 0;
+    sigacts_unlock(sa);
+    return terminated;
 }
 
 bool signal_test_clear_stopped(struct proc *p) {
@@ -505,9 +551,16 @@ bool signal_test_clear_stopped(struct proc *p) {
     }
     proc_assert_holding(p);
     sigacts_t *sa = p->sigacts;
-    sigset_t masked = p->sig_pending_mask & ~sa->sa_sigmask;
-    sigset_t pending_stopped = masked & sa->sa_sigstop;
-    sigset_t pending_cont = masked & sa->sa_sigcont;
+    if (!sa) {
+        return PROC_STOPPED(p);  // No sigacts, just return current stopped state
+    }
+    sigacts_lock(sa);
+    sigset_t sigmask = sa->sa_sigmask;
+    sigset_t sigstop_mask = sa->sa_sigstop;
+    sigset_t sigcont_mask = sa->sa_sigcont;
+    sigset_t masked = p->sig_pending_mask & ~sigmask;
+    sigset_t pending_stopped = masked & sigstop_mask;
+    sigset_t pending_cont = masked & sigcont_mask;
 
     if (pending_cont) {
         // A continue-category signal is pending. Determine if any of them
@@ -516,7 +569,7 @@ bool signal_test_clear_stopped(struct proc *p) {
         // waking from PSTATE_STOPPED, but handle it defensively.
         bool user_handler = false;
         for (int signo = 1; signo <= NSIG; signo++) {
-            if (sigismember(&sa->sa_sigcont, signo) > 0 && sigismember(&pending_cont, signo) > 0) {
+            if (sigismember(&sigcont_mask, signo) > 0 && sigismember(&pending_cont, signo) > 0) {
                 sigaction_t *act = &sa->sa[signo];
                 if (act->sa_handler != SIG_DFL && act->sa_handler != SIG_IGN) {
                     user_handler = true;
@@ -524,8 +577,9 @@ bool signal_test_clear_stopped(struct proc *p) {
                 }
             }
         }
+        sigacts_unlock(sa);
         // Clear all pending stop signals (they are canceled by any continue)
-        p->sig_pending_mask &= ~sa->sa_sigstop;
+        p->sig_pending_mask &= ~sigstop_mask;
         if (!user_handler) {
             // Default action: consume the continue signals here so they are not delivered.
             p->sig_pending_mask &= ~pending_cont;
@@ -535,6 +589,7 @@ bool signal_test_clear_stopped(struct proc *p) {
         return 0; // Do not request stop.
     }
 
+    sigacts_unlock(sa);
     if (pending_stopped) {
         // Consume all pending stop signals (they stop the process) and request STOPPED state.
         p->sig_pending_mask &= ~pending_stopped;
@@ -553,17 +608,21 @@ int signal_restore(struct proc *p, ucontext_t *context) {
 
     p->sig_stack = context->uc_stack;
     p->sig_ucontext = (uint64)context->uc_link;
+    
+    sigacts_t *sa = p->sigacts;
+    sigacts_lock(sa);
     if (p->sig_ucontext == 0) {
-        p->sigacts->sa_sigmask = p->sigacts->sa_original_mask; // Reset to original mask
+        sa->sa_sigmask = sa->sa_original_mask; // Reset to original mask
     } else {
-        p->sigacts->sa_sigmask = context->uc_sigmask;
-        p->sigacts->sa_sigmask |= p->sigacts->sa_original_mask; // Update the signal mask
+        sa->sa_sigmask = context->uc_sigmask;
+        sa->sa_sigmask |= sa->sa_original_mask; // Update the signal mask
     }
 
-    sigdelset(&p->sigacts->sa_sigmask, SIGKILL);
-    sigdelset(&p->sigacts->sa_sigmask, SIGSTOP);
-    sigdelset(&p->sigacts->sa_sigignore, SIGKILL);
-    sigdelset(&p->sigacts->sa_sigignore, SIGSTOP);
+    sigdelset(&sa->sa_sigmask, SIGKILL);
+    sigdelset(&sa->sa_sigmask, SIGSTOP);
+    sigdelset(&sa->sa_sigignore, SIGKILL);
+    sigdelset(&sa->sa_sigignore, SIGSTOP);
+    sigacts_unlock(sa);
 
     return 0; // Success
 }
@@ -583,8 +642,8 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
         return -1; // sigaction can only be called in user space
     }
     
-    proc_lock(p);
     sigacts_t *sa = p->sigacts;
+    sigacts_lock(sa);
     
     if (oldact) {
         *oldact = sa->sa[signum];
@@ -596,21 +655,25 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
             sigaddset(&sa->sa_sigignore, signum);
         } else if (act->sa_handler == SIG_DFL) {
             if (__sig_setdefault(sa, signum) != 0) {
-                proc_unlock(p);
+                sigacts_unlock(sa);
                 return -1; // Failed to set default action
             }
         }
         sa->sa[signum] = *act;
         sigdelset(&sa->sa[signum].sa_mask, SIGKILL); // Unblock the signal
         sigdelset(&sa->sa[signum].sa_mask, SIGSTOP); // Unblock the signal
-        // Ignore all the previous pending signals
+        sigacts_unlock(sa);
+        // Clear pending signals for this signum (needs proc_lock)
+        proc_lock(p);
         if (sigpending_empty(p, signum) != 0) {
             proc_unlock(p);
             return -1; // Failed to clear pending signals
         }
+        proc_unlock(p);
+    } else {
+        sigacts_unlock(sa);
     }
     
-    proc_unlock(p);
     return 0; // Success
 }
 
@@ -623,10 +686,11 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     }
     struct proc *p = myproc();
     assert(p != NULL, "sigprocmask: myproc returned NULL");
-    proc_lock(p);
 
     sigacts_t *sa = p->sigacts;
     assert(sa != NULL, "sigprocmask: sigacts is NULL");
+    
+    sigacts_lock(sa);
     if (oldset) {
         *oldset = sa->sa_original_mask; // Save the old mask
     }
@@ -647,12 +711,13 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     sigdelset(&sa->sa_original_mask, SIGSTOP);
     sigdelset(&sa->sa_sigmask, SIGKILL);
     sigdelset(&sa->sa_sigmask, SIGSTOP);
+    sigacts_unlock(sa);
 
     // If newly unmasked signals are pending and process is sleeping, wake it.
-    if (signal_pending(p)) {
+    proc_lock(p);
+    if (signal_pending_locked(p, sa)) {
         (void)signal_notify(p);
     }
-
     proc_unlock(p);
     return 0; // Success
 }
@@ -662,11 +727,18 @@ int sigpending(struct proc *p, sigset_t *set) {
         return -1; // Invalid set pointer
     }
     assert(p != NULL, "sigpending: myproc returned NULL");
-    proc_lock(p);
 
     sigacts_t *sa = p->sigacts;
     assert(sa != NULL, "sigpending: sigacts is NULL");
-    *set = sa->sa_sigmask & p->sig_pending_mask; // Get the pending signals
+    
+    // Read both masks atomically - sigacts_lock protects sa_sigmask,
+    // sig_pending_mask is accessed without lock (atomic read is sufficient)
+    sigacts_lock(sa);
+    sigset_t mask = sa->sa_sigmask;
+    sigacts_unlock(sa);
+    
+    proc_lock(p);
+    *set = mask & p->sig_pending_mask; // Get the pending signals
     proc_unlock(p);
     
     return 0; // Success
@@ -706,22 +778,31 @@ int sigreturn(void) {
 // Pick a pending signal for the process.
 // Returns the signal number if a signal is found, 0 if no pending signals,
 // or -1 on error.
+// Caller must hold proc_lock. This function acquires sigacts_lock internally.
 static int __pick_signal(struct proc *p) {
     proc_assert_holding(p);
 
+    sigacts_t *sa = p->sigacts;
+    if (!sa) {
+        return 0;  // No sigacts means no signals to pick
+    }
+    sigacts_lock(sa);
     sigset_t pending = p->sig_pending_mask;
-    pending &= ~p->sigacts->sa_sigmask; // Remove blocked signals
+    pending &= ~sa->sa_sigmask; // Remove blocked signals
     if (pending == 0) {
+        sigacts_unlock(sa);
         return 0; // No pending signals
     }
 
-    if (pending & p->sigacts->sa_sigterm) {
+    if (pending & sa->sa_sigterm) {
         // @TODO: exit code
+        sigacts_unlock(sa);
         proc_unlock(p);
         exit(-1);
     }
 
     int signo = bits_ffsg(pending);
+    sigacts_unlock(sa);
     if (signo >= 1 && signo <= NSIG) { 
         return signo; // Return the first pending signal
     }
@@ -729,19 +810,28 @@ static int __pick_signal(struct proc *p) {
     return -1; // No valid signal found, should not happen
 }
 
+// Caller must hold proc_lock. This function acquires sigacts_lock internally.
 static int __dequeue_signal_update_pending(struct proc *p, int signo, ksiginfo_t **ret_info) {
-    sigaction_t *sa = &p->sigacts->sa[signo];
     if (p == NULL || ret_info == NULL) {
         return -1;
     }
-    if (SIGBAD(signo) || sigismember(&p->sigacts->sa_sigmask, signo) > 0) {
+    
+    sigacts_t *sa = p->sigacts;
+    if (!sa) {
+        return -1;  // No sigacts
+    }
+    sigacts_lock(sa);
+    sigaction_t *act = &sa->sa[signo];
+    if (SIGBAD(signo) || sigismember(&sa->sa_sigmask, signo) > 0) {
+        sigacts_unlock(sa);
         return -1;
     }
 
-    assert(sa->sa_handler != SIG_IGN,
+    assert(act->sa_handler != SIG_IGN,
            "__dequeue_signal_update_pending: signal handler is SIG_IGN");
     sigpending_t *sq = &p->sig_pending[signo - 1];
-    if ((sa->sa_flags & SA_SIGINFO) == 0) {
+    if ((act->sa_flags & SA_SIGINFO) == 0) {
+        sigacts_unlock(sa);
         assert(LIST_IS_EMPTY(&sq->queue),
                "sig_pending is not empty for a non-SA_SIGINFO signal");
         sigdelset(&p->sig_pending_mask, signo);
@@ -749,6 +839,7 @@ static int __dequeue_signal_update_pending(struct proc *p, int signo, ksiginfo_t
         signal_assert_invariants(p);
         return 0; // No signal info to return
     }
+    sigacts_unlock(sa);
 
     // Pop exactly one ksiginfo (FIFO order: head of list).
     if (LIST_IS_EMPTY(&sq->queue)) {
@@ -809,22 +900,23 @@ static int __deliver_signal(struct proc *p, int signo, ksiginfo_t *info, sigacti
         ret = push_sigframe(p, signo, sa, info);
     }
 
-    // Re-acquire proc_lock to update signal masks
-    proc_lock(p);
+    // Acquire sigacts_lock to update signal masks
+    sigacts_t *sigacts = p->sigacts;
+    sigacts_lock(sigacts);
     if ((sa->sa_flags & SA_NODEFER) == 0) {
-        sigaddset(&p->sigacts->sa_sigmask, signo);
+        sigaddset(&sigacts->sa_sigmask, signo);
     }
 
-    p->sigacts->sa_sigmask |= sa->sa_mask; // Block the signal during delivery
-    sigdelset(&p->sigacts->sa_sigmask, SIGKILL);
-    sigdelset(&p->sigacts->sa_sigmask, SIGSTOP);
+    sigacts->sa_sigmask |= sa->sa_mask; // Block the signal during delivery
+    sigdelset(&sigacts->sa_sigmask, SIGKILL);
+    sigdelset(&sigacts->sa_sigmask, SIGSTOP);
 
     if ((sa->sa_flags & SA_RESETHAND) != 0) {
         // Reset the signal handler to default action
-        assert(__sig_setdefault(p->sigacts, signo) == 0,
+        assert(__sig_setdefault(sigacts, signo) == 0,
                "__deliver_signal: __sig_setdefault failed");
     }
-    proc_unlock(p);
+    sigacts_unlock(sigacts);
     
     return ret;
 }
@@ -835,6 +927,7 @@ void handle_signal(void) {
     if (p->sigacts == NULL) {
         return; // No signal actions defined
     }
+    sigacts_t *sa = p->sigacts;
 
     for (;;) {
         proc_lock(p);
@@ -862,8 +955,11 @@ void handle_signal(void) {
             break; // No pending signals to handle
         }
     
-        // Copy sigaction to local variable while holding the lock
-        sigaction_t sa_copy = p->sigacts->sa[signo];
+        // Copy sigaction to local variable while holding sigacts_lock
+        sigacts_lock(sa);
+        sigaction_t sa_copy = sa->sa[signo];
+        sigacts_unlock(sa);
+        
         ksiginfo_t *info = NULL;
         bool repeat = false;
     
@@ -878,18 +974,22 @@ void handle_signal(void) {
         assert(__deliver_signal(p, signo, info, &sa_copy, &repeat) == 0,
                "handle_signal: __deliver_signal failed");
 
-        // Re-acquire lock to check repeat condition
-        proc_lock(p);
+        // Check repeat condition with sigacts_lock
         // Decide if we should immediately deliver another queued instance of the same
         // SA_SIGINFO signal without returning to user space.
-        if ((sa_copy.sa_flags & SA_SIGINFO) &&
-            sigismember(&p->sigacts->sa_sigmask, signo) == 0 &&
-            sigismember(&p->sig_pending_mask, signo) > 0) {
-            // More queued; loop again.
-            repeat = true;
+        if (sa_copy.sa_flags & SA_SIGINFO) {
+            sigacts_lock(sa);
+            bool unmasked = sigismember(&sa->sa_sigmask, signo) == 0;
+            sigacts_unlock(sa);
+            
+            proc_lock(p);
+            if (unmasked && sigismember(&p->sig_pending_mask, signo) > 0) {
+                // More queued; loop again.
+                repeat = true;
+            }
+            signal_assert_invariants(p);
+            proc_unlock(p);
         }
-        signal_assert_invariants(p);
-        proc_unlock(p);
     
         if (info) {
             ksiginfo_free(info); // Free the ksiginfo after delivering the signal

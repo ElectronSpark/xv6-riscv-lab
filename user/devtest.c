@@ -28,7 +28,7 @@ concurrent_open_close()
     if(pids[i] == 0){
       // Child: repeatedly open and close console
       for(int j = 0; j < NITER; j++){
-        int fd = open("console", O_RDWR);
+        int fd = open("/dev/console", O_RDWR);
         if(fd < 0){
           // May fail if system is busy, that's ok
           continue;
@@ -63,7 +63,7 @@ fork_with_device_fd()
   
   for(int iter = 0; iter < NITER; iter++){
     // Open console
-    int fd = open("console", O_RDWR);
+    int fd = open("/dev/console", O_RDWR);
     if(fd < 0){
       printf("open console failed\n");
       exit(-1);
@@ -108,7 +108,7 @@ parallel_fork_device()
   printf("devtest: parallel_fork_device... ");
   
   // Open console once
-  int fd = open("console", O_RDWR);
+  int fd = open("/dev/console", O_RDWR);
   if(fd < 0){
     printf("open console failed\n");
     exit(-1);
@@ -154,7 +154,7 @@ nested_fork_device()
 {
   printf("devtest: nested_fork_device... ");
   
-  int fd = open("console", O_RDWR);
+  int fd = open("/dev/console", O_RDWR);
   if(fd < 0){
     printf("open console failed\n");
     exit(-1);
@@ -209,7 +209,7 @@ stress_fork_exit()
 {
   printf("devtest: stress_fork_exit... ");
   
-  int fd = open("console", O_RDWR);
+  int fd = open("/dev/console", O_RDWR);
   if(fd < 0){
     printf("open console failed\n");
     exit(-1);
