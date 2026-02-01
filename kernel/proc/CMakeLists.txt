@@ -7,6 +7,7 @@ set(PROC_C_SRCS
     sysproc.c
     workqueue.c
     clone.c
+    exit.c
     pid.c
     rq.c
     sched_idle.c
