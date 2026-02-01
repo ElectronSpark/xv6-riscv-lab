@@ -354,7 +354,8 @@ void freeproc(struct proc *p) {
     if (p->sigacts)
         sigacts_free(p->sigacts);
     if (p->vm != NULL) {
-        proc_freepagetable(p);
+        vm_put(p->vm);
+        p->vm = NULL;
     }
     // Purge any remaining pending signals (e.g., SIGKILL) before destroy
     // assertions.
@@ -371,24 +372,6 @@ void freeproc(struct proc *p) {
     // Defer freeing of the kernel stack until after the RCU grace period.
     // This ensures all RCU readers have finished accessing the proc structure.
     call_rcu(&p->rcu_head, freeproc_rcu_callback, p);
-}
-
-// Create a user page table for a given process, with no user memory,
-// but with trampoline and trapframe pages.
-int proc_pagetable(struct proc *p) {
-    // Create a new VM structure for the process.
-    p->vm = vm_init();
-    if (p->vm == NULL) {
-        return -1; // Failed to initialize VM
-    }
-    return 0;
-}
-
-// Free a process's page table, and free the
-// physical memory it refers to.
-void proc_freepagetable(struct proc *p) {
-    vm_put(p->vm);
-    p->vm = NULL;
 }
 
 // a user program that calls exec("/init")
@@ -425,7 +408,9 @@ void userinit(void) {
     printf("Init process kernel stack size order: %d\n", p->kstack_order);
 
     // Allocate pagetable for the process.
-    assert(proc_pagetable(p) == 0, "userinit: proc_pagetable failed");
+    vm_t *vm = vm_init();
+    assert(!IS_ERR_OR_NULL(vm), "userinit: vm_init failed");
+    p->vm = vm;
 
     // // printf user pagetable
     // printf("\nuser pagetable after allocproc:\n");
@@ -517,14 +502,6 @@ void install_user_root(void) {
 
     // Release the lookup reference (cwd now holds its own ref)
     vfs_iput(root_inode);
-}
-
-// Grow or shrink user memory by n bytes.
-// Return 0 on success, -1 on failure.
-int growproc(int64 n) {
-    struct proc *p = myproc();
-
-    return vm_growheap(p->vm, n);
 }
 
 // Wake up a parent process that may be sleeping in wait().

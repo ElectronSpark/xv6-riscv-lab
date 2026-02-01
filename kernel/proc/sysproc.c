@@ -60,7 +60,7 @@ uint64 sys_sbrk(void) {
     }
     addr = myproc()->vm->heap->start + myproc()->vm->heap_size;
     // printf("sbrk: addr %p n %d -> ", (void*)addr, n);
-    if (growproc(n) < 0) {
+    if (vm_growheap(myproc()->vm, n) < 0) {
         // printf("growproc failed\n");
         return -1;
     }

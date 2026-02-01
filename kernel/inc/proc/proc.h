@@ -157,10 +157,7 @@ int             kernel_proc_create(const char *name, struct proc **retp, void *e
                                    uint64 arg1, uint64 arg2, int stack_order);
 struct proc     *allocproc(void *entry, uint64 arg1, uint64 arg2, int kstack_order);
 void            freeproc(struct proc *p);
-int             growproc(int64);
 void            proc_mapstacks(pagetable_t);
-int             proc_pagetable(struct proc *);
-void            proc_freepagetable(struct proc *);
 void            proc_lock(struct proc *p);
 void            proc_unlock(struct proc *p);
 void            proc_assert_holding(struct proc *p);
