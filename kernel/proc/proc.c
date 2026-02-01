@@ -170,8 +170,8 @@ void detach_child(struct proc *parent, struct proc *child) {
 // have user space environment set up. and return without p->lock held. If there
 // are no free procs, or a memory allocation fails, return NULL. Signal actions
 // will not be initialized here.
-STATIC struct proc *allocproc(void *entry, uint64 arg1, uint64 arg2,
-                              int kstack_order) {
+struct proc *allocproc(void *entry, uint64 arg1, uint64 arg2,
+                       int kstack_order) {
     struct proc *p = NULL;
     void *kstack = NULL;
 
