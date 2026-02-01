@@ -410,6 +410,10 @@ void truncate3(char *s) {
 }
 
 // does chdir() call iput(p->cwd) in a transaction?
+//
+// NOTE: Original xv6 allowed rmdir of a directory while it's someone's cwd.
+// Our VFS returns -EBUSY if the directory is in use (refcount > 1), which is
+// stricter but safer. This test is modified to chdir out first before rmdir.
 void iputtest(char *s) {
     if (mkdir("iputdir") < 0) {
         printf("%s: mkdir failed\n", s);
@@ -419,17 +423,22 @@ void iputtest(char *s) {
         printf("%s: chdir iputdir failed\n", s);
         exit(1);
     }
-    if (unlink("../iputdir") < 0) {
-        printf("%s: rmdir ../iputdir failed\n", s);
-        exit(1);
-    }
+    // Must chdir out before rmdir - our VFS returns -EBUSY if directory is in use
     if (chdir("/") < 0) {
         printf("%s: chdir / failed\n", s);
+        exit(1);
+    }
+    if (unlink("iputdir") < 0) {
+        printf("%s: rmdir iputdir failed\n", s);
         exit(1);
     }
 }
 
 // does exit() call iput(p->cwd) in a transaction?
+//
+// NOTE: Original xv6 allowed rmdir of a directory while it's someone's cwd.
+// Our VFS returns -EBUSY if the directory is in use (refcount > 1), which is
+// stricter but safer. This test is modified to chdir out first before rmdir.
 void exitiputtest(char *s) {
     int pid, xstatus;
 
@@ -447,8 +456,13 @@ void exitiputtest(char *s) {
             printf("%s: child chdir failed\n", s);
             exit(1);
         }
-        if (unlink("../iputdir") < 0) {
-            printf("%s: rmdir ../iputdir failed\n", s);
+        // Must chdir out before rmdir - our VFS returns -EBUSY if directory is in use
+        if (chdir("/") < 0) {
+            printf("%s: chdir / failed\n", s);
+            exit(1);
+        }
+        if (unlink("iputdir") < 0) {
+            printf("%s: rmdir iputdir failed\n", s);
             exit(1);
         }
         exit(0);
