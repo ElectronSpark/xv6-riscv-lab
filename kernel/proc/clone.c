@@ -61,8 +61,7 @@ int proc_clone(struct proc_clone_args *args) {
         new_vm = p->vm;
         vm_dup(new_vm);
     } else {
-        // @TODO: handle trapframe!!!!
-        new_vm = vm_copy(p->vm, (uint64)np->trapframe);
+        new_vm = vm_copy(p->vm);
         if (IS_ERR_OR_NULL(new_vm)) {
             freeproc(np);
             return -ENOMEM;

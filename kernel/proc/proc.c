@@ -397,7 +397,7 @@ void freeproc(struct proc *p) {
 // but with trampoline and trapframe pages.
 int proc_pagetable(struct proc *p) {
     // Create a new VM structure for the process.
-    p->vm = vm_init((uint64)p->trapframe);
+    p->vm = vm_init();
     if (p->vm == NULL) {
         return -1; // Failed to initialize VM
     }

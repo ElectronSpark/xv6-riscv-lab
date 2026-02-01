@@ -41,7 +41,7 @@ typedef struct vma {
 typedef struct vm {
     rwlock_t        rw_lock;    // protect the vm tree and vma list
     struct rb_root  vm_tree;
-    uint64          trapframe; // Pointer to the trap frame for this VM
+    pte_t           *trapframe_pte; // Pointer to the leaf page table for trapframes
     vma_t           *stack;
     size_t          stack_size; // Size of the stack area
     vma_t           *heap;

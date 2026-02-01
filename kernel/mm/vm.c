@@ -882,36 +882,59 @@ static struct rb_root_opts __vm_tree_opts = {
 };
 
 static void __vm_unmap_trapframe(vm_t *vm) {
-    if (vm == NULL || vm->pagetable == NULL) {
+    if (vm == NULL || vm->pagetable == NULL || vm->trapframe_pte == NULL) {
         return; // Invalid VM or pagetable
     }
-    // Only unmap TRAPFRAME - the trampoline pages are shared via the last PTE
-    uvmunmap(vm->pagetable, TRAPFRAME, 1, 0);
+    // Clear all trapframe PTEs but don't free the physical pages
+    // (they belong to kernel stacks, not to this VM)
+    for (int i = 0; i < NCPU; i++) {
+        int pte_idx = PX(0, TRAPFRAME + (i * PGSIZE));
+        vm->trapframe_pte[pte_idx] = 0;
+    }
 }
 
-// map trapframe for user processes.
+// Initialize trapframe page table for user processes.
 // Trampoline pages are shared via the last PTE from the kernel page table.
 // TRAPFRAME is mapped below UVMTOP (outside the shared region) so it's
-// per-process.
-static int __vm_map_trampoline(vm_t *vm, uint64 trapframe) {
+// per-process. Each CPU has its own trapframe page.
+static int __vm_map_trampoline(vm_t *vm) {
     if (vm == NULL || vm->pagetable == NULL) {
         return -1; // Invalid VM or pagetable
     }
 
-    // map the trapframe page at TRAPFRAME virtual address (just below UVMTOP)
-    trapframe = PGROUNDDOWN(trapframe); // Ensure trapframe is page-aligned
-    if (mappages(vm->pagetable, TRAPFRAME, PGSIZE, trapframe,
-                 PTE_R | PTE_W | PTE_RSW_w) < 0) {
+    // Walk to the first trapframe VA to create intermediate page tables
+    // and get the leaf page table pointer. alloc=1 ensures page tables are created.
+    pte_t *pte = walk(vm->pagetable, TRAPFRAME, 1, NULL, NULL);
+    if (pte == NULL) {
         return -1;
     }
-    vm->trapframe = trapframe; // Store the trapframe pointer in the VM
+
+    // Store the leaf page table base (the page containing this PTE)
+    // The leaf page table covers 512 consecutive 4KB pages
+    vm->trapframe_pte = (pte_t *)PGROUNDDOWN((uint64)pte);
     return 0;
 }
 
 // Mark a CPU is using this VM (for TLB shootdown tracking).
 // Called when returning to user mode.
-void vm_cpu_online(vm_t *vm, int cpu) {
+// Also updates the trapframe PTE for the current CPU.
+// Returns the trapframe base virtual address for this CPU.
+uint64 vm_cpu_online(vm_t *vm, int cpu) {
+    struct proc *p = myproc();
+    uint64 trapframe_poffset = TRAPFRAME_POFFSET;
+    if (vm->trapframe_pte != NULL && p != NULL && p->trapframe != NULL) {
+        // Calculate the PTE index for this CPU's trapframe page
+        // All 64 trapframe pages fit within a single 2MB region, so they share the same leaf page table
+        int pte_idx = PX(0, TRAPFRAME + (cpu * PGSIZE));
+        uint64 trapframe_pa = PGROUNDDOWN((uint64)p->trapframe);
+        vm->trapframe_pte[pte_idx] = PA2PTE(trapframe_pa) | PTE_R | PTE_W | PTE_V | PTE_RSW_w;
+        // Ensure PTE write is visible before page table switch
+        smp_wmb();
+        // Calculate trapframe offset within the page from p->trapframe
+        trapframe_poffset = (uint64)p->trapframe & (PGSIZE - 1);
+    }
     atomic_or(&vm->cpumask, (1ULL << cpu));
+    return TRAPFRAME + (cpu * PGSIZE) + trapframe_poffset;
 }
 
 // Mark a CPU is no longer using this VM (for TLB shootdown tracking).
@@ -926,7 +949,7 @@ cpumask_t vm_get_cpumask(vm_t *vm) {
 
 // Initialize the vm struct of a process.
 // Will destroy vm directly and return NULL on failure.
-vm_t *vm_init(uint64 trapframe) {
+vm_t *vm_init(void) {
     vm_t *vm = slab_alloc(&__vm_pool);
     if (vm == NULL) {
         return NULL; // Out of memory
@@ -953,11 +976,9 @@ vm_t *vm_init(uint64 trapframe) {
         __vm_destroy(vm);
         return NULL;
     }
-    if (trapframe != 0) {
-        if (__vm_map_trampoline(vm, trapframe) != 0) {
-            __vm_destroy(vm);
-            return NULL; // Failed to map trampoline
-        }
+    if (__vm_map_trampoline(vm) != 0) {
+        __vm_destroy(vm);
+        return NULL; // Failed to set up trapframe page table
     }
     spin_init(&vm->spinlock, "vm_pgtable_lock");
     rwlock_init(&vm->rw_lock, RWLOCK_PRIO_READ, "vm_rw_lock");
@@ -1088,7 +1109,7 @@ static void __vm_destroy(vm_t *vm) {
     list_entry_init(&vm->vm_list);
     list_entry_init(&vm->vm_free_list);
     rb_root_init(&vm->vm_tree, &__vm_tree_opts);
-    if (vm->trapframe != 0) {
+    if (vm->trapframe_pte != NULL) {
         __vm_unmap_trapframe(vm); // Unmap the trapframe and trampolines
     }
     if (vm->pagetable != NULL) {
@@ -1103,14 +1124,11 @@ static void __vm_destroy(vm_t *vm) {
 // Duplicate a process address space.
 // The new VM starts with an empty VMA layout, then we re-create+duplicate VMAs.
 // return ERR_PTR on failure.
-vm_t *vm_copy(vm_t *src, uint64 trapframe) {
+vm_t *vm_copy(vm_t *src) {
     if (src == NULL) {
         return ERR_PTR(-EINVAL); // Invalid parameters
     }
-    if (src->trapframe != 0 && trapframe == 0) {
-        return ERR_PTR(-EINVAL); // Cannot duplicate if src has a trapframe but dst does not
-    }
-    vm_t *dst = vm_init(trapframe);
+    vm_t *dst = vm_init();
     if (dst == NULL) {
         return ERR_PTR(-ENOMEM); // Allocation failed
     }

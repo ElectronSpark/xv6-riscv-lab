@@ -93,7 +93,7 @@ extern uint64 __physical_total_pages;
 
 // TRAPFRAME must be below UVMTOP (outside the shared region)
 // so it can be mapped per-process.
-#define TRAPFRAME (UVMTOP - PGSIZE)
+#define TRAPFRAME (UVMTOP - (PGSIZE << 6))  // Leave space for 64 trapframes (one per CPU)
 #define TRAPFRAME_POFFSET ((PAGE_SIZE - sizeof(struct proc) - sizeof(struct utrapframe) - 16) & ~0x7UL)
 #define USTACKTOP (TRAPFRAME - PGSIZE)  // Guard page between stack and trapframe
 
@@ -117,7 +117,7 @@ extern uint64 __physical_total_pages;
 //   ...
 //   user stack
 //   guard page
-//   TRAPFRAME (p->trapframe, used by the trampoline)
+//   TRAPFRAME * 64 (per CPU, mapped the last page of kernel stack, used by the trampoline)
 // --- UVMTOP boundary (last PTE shared with kernel) ---
 //   SIG_TRAMPOLINE (used by the signal handling code)
 //   CPU_LOCAL (per-cpu data, used by trampoline and kernel)

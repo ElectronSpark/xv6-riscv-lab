@@ -365,12 +365,13 @@ void usertrapret(void) {
     // printf("\n");
 
     // Before returning, mark the current CPU as online for this process's VM
-    vm_cpu_online(p->vm, cpuid());
+    // and get the trapframe base virtual address for this CPU
+    uint64 trapframe_base = vm_cpu_online(p->vm, cpuid());
 
     // jump to userret in trampoline.S at the top of memory, which
     // switches to the user page table, restores user registers,
     // and switches to user mode with sret.
-    trampoline_userret(TRAPFRAME + TRAPFRAME_POFFSET, MAKE_SATP(p->vm->pagetable));
+    trampoline_userret(trapframe_base, MAKE_SATP(p->vm->pagetable));
 }
 
 // interrupts and exceptions from kernel code go here via kernelvec,

@@ -15,7 +15,7 @@
     ((__vma1)->end == (__vma2)->start || \
      (__vma2)->end == (__vma1)->start)
 
-void vm_cpu_online(vm_t *vm, int cpu);
+uint64 vm_cpu_online(vm_t *vm, int cpu);
 void vm_cpu_offline(vm_t *vm, int cpu);
 cpumask_t vm_get_cpumask(vm_t *vm);
 void vm_remote_sfence(vm_t *vm);
@@ -25,10 +25,10 @@ void vm_wlock(vm_t *vm);
 void vm_wunlock(vm_t *vm);
 void vm_pgtable_lock(vm_t *vm);
 void vm_pgtable_unlock(vm_t *vm);
-vm_t *vm_init(uint64 trapframe);
+vm_t *vm_init(void);
 void vm_dup(vm_t *vm);
 void vm_put(vm_t *vm);
-vm_t *vm_copy(vm_t *src, uint64 trapframe);
+vm_t *vm_copy(vm_t *src);
 void vm_destroy(vm_t *vm);
 vma_t *va_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags);
 int vm_growstack(vm_t *vm, int64 change_size);
