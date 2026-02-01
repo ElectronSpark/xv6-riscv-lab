@@ -8,6 +8,9 @@
 #include "proc/proc.h"
 #include "timer/timer.h"
 #include "proc/sched.h"
+#include <mm/vm.h>
+#include "clone_flags.h"
+#include "errno.h"
 
 uint64 sys_exit(void) {
     int n;
@@ -18,7 +21,21 @@ uint64 sys_exit(void) {
 
 uint64 sys_getpid(void) { return myproc()->pid; }
 
-uint64 sys_fork(void) { return fork(); }
+uint64 sys_clone(void) {
+    uint64 uargs;
+    argaddr(0, &uargs);
+
+    struct clone_args args = {0};
+    if (uargs == 0) {
+        // No args provided - default to fork behavior
+        args.flags = SIGCHLD;
+    } else {
+        if (vm_copyin(myproc()->vm, &args, uargs, sizeof(args)) < 0) {
+            return -EFAULT;
+        }
+    }
+    return proc_clone(&args);
+}
 
 uint64 sys_wait(void) {
     uint64 p;

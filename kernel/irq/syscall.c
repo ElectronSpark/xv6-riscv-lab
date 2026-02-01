@@ -89,7 +89,7 @@ argstr(int n, char *buf, int max)
 }
 
 // Prototypes for the functions that handle system calls.
-extern uint64 sys_fork(void);
+extern uint64 sys_clone(void);
 extern uint64 sys_exit(void);
 extern uint64 sys_wait(void);
 extern uint64 sys_kill(void);
@@ -150,7 +150,7 @@ extern uint64 sys_getcwd(void);
  *   - vfs_inode for inode operations (replaces struct inode)
  */
 STATIC uint64 (*syscalls[])(void) = {
-[SYS_fork]    sys_fork,
+[SYS_clone]   sys_clone,
 [SYS_exit]    sys_exit,
 [SYS_wait]    sys_wait,
 [SYS_pipe]    sys_vfs_pipe,     // VFS

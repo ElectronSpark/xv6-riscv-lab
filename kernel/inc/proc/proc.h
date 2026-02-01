@@ -146,11 +146,11 @@ static inline void __proc_set_pstate(struct proc *p, enum procstate state) {
 #define PROC_TIMER(p) PSTATE_IS_TIMER(__proc_get_pstate(p))
 #define PROC_INTERRUPTIBLE(p) PSTATE_IS_INTERRUPTIBLE(__proc_get_pstate(p))
 
+struct clone_args;
 
 int             proctab_get_pid_proc(int pid, struct proc **pp);
 void            exit(int);
-int             proc_clone(struct proc_clone_args *args);
-int             fork(void);
+int             proc_clone(struct clone_args *args);
 void            attach_child(struct proc *parent, struct proc *child);
 void            detach_child(struct proc *parent, struct proc *child);
 int             kernel_proc_create(const char *name, struct proc **retp, void *entry,

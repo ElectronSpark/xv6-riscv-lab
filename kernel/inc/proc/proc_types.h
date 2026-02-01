@@ -114,11 +114,4 @@ BUILD_BUG_ON(((sizeof(struct proc) + sizeof(struct utrapframe) +
                sizeof(struct sched_entity) + 80 + CACHELINE_SIZE) &
               ~CACHELINE_MASK) >= PGSIZE);
 
-// Arguments for proc_clone
-struct proc_clone_args {
-    uint64 user_stack; // User stack pointer
-    size_t stack_size; // Size of the user stack
-    uint64 flags;      // Clone flags
-};
-
 #endif /* __KERNEL_PROC_TYPES_H */

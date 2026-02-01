@@ -7,9 +7,10 @@ typedef uint64 sigset_t;
 
 #include "kernel/inc/signal_types.h"
 #include "kernel/inc/mm/memstat.h"
+#include "kernel/inc/clone_flags.h"
 
 // system calls
-int fork(void);
+int clone(struct clone_args*);
 int exit(int) __attribute__((noreturn));
 int wait(int*);
 int pipe(int*);
@@ -37,6 +38,9 @@ int sigreturn(void);
 int sigpending(sigset_t *set);
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
 void pause(void);
+
+// ulib wrapper functions
+int fork(void);
 
 uint64 memstat(uint64 flags);
 int dumpproc(void);

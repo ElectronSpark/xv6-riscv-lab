@@ -14,6 +14,13 @@ start()
   exit(0);
 }
 
+// fork() wrapper - calls clone with NULL args for default fork behavior
+int
+fork(void)
+{
+  return clone(0);
+}
+
 char*
 strcpy(char *s, const char *t)
 {

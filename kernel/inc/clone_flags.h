@@ -41,4 +41,20 @@
 #define CLONE_VFORK 0x4000000000        // Fork without copying page tables
 #define CLONE_VM 0x8000000000          // Share memory space
 
+/**
+ * @brief Arguments for clone() system call
+ * 
+ * This structure is shared between user space and kernel space.
+ * User space passes a pointer to this structure to clone().
+ */
+struct clone_args {
+    uint64 flags;       // Clone flags (CLONE_*)
+    uint64 stack;       // User stack pointer (required if CLONE_VM)
+    uint64 stack_size;  // Size of the user stack
+    uint64 entry;       // Entry point for child (required if CLONE_VM)
+    uint64 tls;         // Thread Local Storage descriptor
+    uint64 ctid;        // Child TID address (for CLONE_CHILD_SETTID/CLEARTID)
+    uint64 ptid;        // Parent TID address (for CLONE_PARENT_SETTID)
+};
+
 #endif // __KERNEL_CLONE_FLAGS_H

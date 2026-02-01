@@ -25,7 +25,7 @@ sub entry_aliased {
     print " ret\n";
 }
 	
-entry("fork");
+entry("clone");
 entry("exit");
 entry("wait");
 # Use VFS syscalls for file operations

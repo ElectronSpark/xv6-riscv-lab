@@ -1,4 +1,5 @@
 #include "proc/proc.h"
+#include "clone_flags.h"
 #include "defs.h"
 #include "hlist.h"
 #include "list.h"
@@ -24,7 +25,7 @@
 
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
-int proc_clone(struct proc_clone_args *args) {
+int proc_clone(struct clone_args *args) {
     struct proc *np;
     int ret = 0;
     struct proc *p = myproc();
@@ -37,14 +38,14 @@ int proc_clone(struct proc_clone_args *args) {
         return -EINVAL;
     }
 
-    if ((args->flags & CLONE_VM) && (args->user_stack == 0)) {
-        // When CLONE_VM is specified, user_stack must be provided.
+    if ((args->flags & CLONE_VM) && (args->stack == 0 || args->entry == 0)) {
+        // When CLONE_VM is specified, stack and entry must be provided.
         return -EINVAL;
     }
 
-    // When user_stack is specified, stack_size must be valid.
-    if (args->user_stack != 0 && (args->stack_size < USERSTACK_MINSZ ||
-                                  (args->stack_size & (PAGE_SIZE - 1)) != 0)) {
+    // When stack is specified, stack_size must be valid.
+    if (args->stack != 0 && (args->stack_size < USERSTACK_MINSZ ||
+                             (args->stack_size & (PAGE_SIZE - 1)) != 0)) {
         return -EINVAL;
     }
 
@@ -117,6 +118,17 @@ int proc_clone(struct proc_clone_args *args) {
     // copy saved user registers.
     *(np->trapframe) = *(p->trapframe);
 
+    if (args->entry != 0) {
+        // If entry point specified, set child's sepc to it
+        np->trapframe->trapframe.sepc = args->entry;
+    }
+
+    if (args->stack != 0) {
+        // If stack specified, set child's sp to top of the stack
+        uint64 stack_top = (args->stack + args->stack_size) & ~0xFUL;
+        np->trapframe->trapframe.sp = stack_top;
+    }
+
     // Cause fork to return 0 in the child.
     np->trapframe->trapframe.a0 = 0;
 
@@ -138,19 +150,4 @@ int proc_clone(struct proc_clone_args *args) {
     scheduler_wakeup(np);
 
     return np->pid;
-}
-
-int fork(void) {
-    // The following will be used to create pthread-like processes.
-    // struct proc_clone_args args = {
-    //     .flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND |
-    //              CLONE_THREAD
-    //              // | CLONE_SYSVSEM
-    //              | CLONE_SETTLS | CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID
-    //              | CLONE_DETACHED,
-    // };
-    struct proc_clone_args args = {
-        .flags = SIGCHLD,
-    };
-    return proc_clone(&args);
 }
