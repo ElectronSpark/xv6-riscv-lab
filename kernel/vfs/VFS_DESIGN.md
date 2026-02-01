@@ -176,7 +176,9 @@ struct vfs_inode {
     
     uint8 valid:1;       // Inode is valid
     uint8 dirty:1;       // Needs writeback
-    uint8 is_orphan:1;   // In orphan list
+    uint8 orphan:1;      // In orphan list (n_links=0, ref>0)
+    uint8 destroying:1;  // destroy_inode in progress
+    uint8 delay_put:1;   // Delay freeing inode (used by some filesystems)
     
     // File metadata
     uint32 n_links;      // Hard link count
@@ -221,8 +223,8 @@ Use the standard macros to test file types:
 - `mknod()`: Create a special file (device, fifo)
 - `mkdir()`: Create a directory
 - `link()`: Create a hard link
-- `unlink()`: Remove a directory entry
-- `rmdir()`: Remove a directory
+- `unlink(dentry, target)`: Remove a file directory entry (VFS verifies target matches and handles orphan creation)
+- `rmdir(dentry, target)`: Remove a directory (VFS verifies directory is empty and not in use before calling)
 - `move()`: Rename/move a file
 - `symlink()`: Create a symbolic link
 - `truncate()`: Change file size
@@ -230,6 +232,7 @@ Use the standard macros to test file types:
 - `write()`: Write file data
 - `readdir()`: Read directory entries
 - `writeback()`: Write inode metadata to disk
+- `destroy_inode()`: Free filesystem-specific data when inode is destroyed (n_links=0, ref_count=0)
 
 **Lifecycle:**
 - Loaded from disk via `vfs_get_inode()`
@@ -646,8 +649,9 @@ vfs_superblock_wlock(parent_sb);
 vfs_ilock(mountpoint);
 
 // Convert directory to mountpoint (mark as having mounted fs)
+// Note: vfs_idup(mountpoint) is called to hold a reference while mounted
 mountpoint->mounted_sb = new_sb;
-vfs_idup(mountpoint);  // Extra reference
+mountpoint->mount = 1;  // Mark as mountpoint
 
 // Link superblocks
 new_sb->parent_sb = parent_sb;
@@ -658,6 +662,12 @@ vfs_iunlock(mountpoint);
 vfs_superblock_unlock(parent_sb);
 vfs_mount_unlock();
 ```
+
+**Mount Reference Counting:**
+- The mountpoint inode gets an extra reference via `vfs_idup()` when a filesystem is mounted
+- This reference is held as long as the filesystem remains mounted
+- The reference is released via `vfs_iput()` during unmount (after locks are released)
+- Exception: `vfs_root_inode` (the global VFS root) has no superblock and does not participate in reference counting
 
 ### Unmount Process
 
@@ -679,7 +689,8 @@ vfs_unmount(mountpoint);
 3. **Detach**
    - Set `sb->unmounting = 1`
    - Remove from mount tree
-   - Restore mountpoint to directory type
+   - Clear mountpoint's `mount` flag and `mounted_sb` pointer
+   - Caller releases mountpoint reference via `vfs_iput()` after releasing locks
    
 4. **Sync and Free**
    - Call `sb->ops->unmount_begin()`
@@ -897,6 +908,28 @@ clone(CLONE_FILES, ...);  // fdtable->ref_count++
 - Maintained in `sb->orphan_list`
 - Added when inode becomes orphan: `vfs_make_orphan()`
 - Removed when inode is freed or re-linked
+
+### VFS Core Validation
+
+#### Directory Operations
+The VFS core performs validation before calling filesystem callbacks:
+
+- **rmdir**: Before calling `ops->rmdir(dentry, target)`, VFS checks:
+  1. `vfs_dir_isempty(target)` - directory contains only "." and ".."
+  2. `vfs_inode_refcount(target) <= 1` - directory is not in use (e.g., as cwd)
+  
+- **unlink**: VFS verifies the dentry matches the target inode
+
+#### Helper Functions
+- `vfs_dir_isempty(dir)`: Check if directory contains only "." and ".."
+- `vfs_inode_refcount(inode)`: Get current reference count
+
+### Debugging Support
+
+#### Inode Dump Functions
+- `vfs_dump_inodes()`: Dump all inodes across all superblocks
+- `vfs_dump_sb_inodes(sb)`: Dump all inodes for a specific superblock
+- `dumpinode <path>`: User-space command to inspect inode state
 
 #### Unmount Behavior
 - Normal unmount: Fails if orphans exist (filesystem busy)

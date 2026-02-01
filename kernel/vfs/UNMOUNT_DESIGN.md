@@ -37,18 +37,18 @@ Key design goals:
 
 ```c
 struct vfs_superblock {
-    // Existing flags
+    // Core flags
     uint64 valid: 1;        // Superblock is usable
     uint64 initialized: 1;  // Setup complete
     uint64 dirty: 1;        // Has unsaved changes
     uint64 backendless: 1;  // In-memory only (e.g., tmpfs)
     
-    // NEW: Unmount/sync state flags
+    // Unmount/sync state flags
     uint64 syncing: 1;      // Currently syncing to backend
     uint64 unmounting: 1;   // Unmount initiated, blocking new operations
     uint64 attached: 1;     // Attached to mount tree (0 = detached/lazy unmounted)
     
-    // NEW: Orphan tracking
+    // Orphan tracking
     int orphan_count;       // Number of orphan inodes (n_links=0, ref>0)
     list_node_t orphan_list; // List of orphan inodes
 };
@@ -58,8 +58,10 @@ struct vfs_superblock {
 
 ```c
 struct vfs_inode {
-    // NEW: Orphan tracking
+    // Orphan tracking
     uint64 orphan: 1;          // On orphan list (n_links=0, ref>0)
+    uint64 destroying: 1;      // destroy_inode in progress
+    uint64 delay_put: 1;       // Delay freeing inode (used by some filesystems)
     list_entry_t orphan_entry; // Entry in sb->orphan_list
 };
 ```
@@ -182,6 +184,30 @@ Cleanup happens automatically in `vfs_iput()` when the last reference drops.
 
 ---
 
+## Mountpoint Reference Counting
+
+When a filesystem is mounted on a directory inode, the VFS holds an extra reference on that mountpoint inode to prevent it from being freed while a filesystem is mounted on it.
+
+### Mount Reference Lifecycle
+
+```
+Mount:
+  __vfs_turn_mountpoint(mountpoint)
+    → vfs_idup(mountpoint)  // Add reference (skip for vfs_root_inode)
+    → mountpoint->mount = 1
+
+Unmount:
+  __vfs_clear_mountpoint(mountpoint)  // Under locks
+  ... release locks ...
+  vfs_iput(mountpoint)  // Release reference (skip for vfs_root_inode)
+```
+
+### Special Case: vfs_root_inode
+
+The global `vfs_root_inode` is a special static inode that serves as the root of the entire VFS mount tree. It has no superblock (`sb == NULL`) and does not participate in reference counting. When checking whether to call `vfs_idup`/`vfs_iput` on a mountpoint, the code skips these calls for `vfs_root_inode`.
+
+---
+
 ## Lazy Unmount Flow
 
 ### Phase 1: Validation
@@ -203,8 +229,10 @@ Locks: mount_mutex, parent_sb wlock, mountpoint inode lock
 • Set child sb->mountpoint = NULL
 • Set child sb->parent_sb = NULL
 • Set sb->attached = 0
+• Release mountpoint inode lock
 • Release parent_sb wlock
 • Release mount_mutex
+• vfs_iput(mountpoint)  // Release mount reference (skip for vfs_root_inode)
 ```
 
 ### Phase 3: Sync and Orphan Processing
