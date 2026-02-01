@@ -154,6 +154,19 @@ void usertrap(void) {
 
         syscall();
         break;
+    case RISCV_INSTRUCTION_PAGE_FAULT:
+        va = myproc()->trapframe->trapframe.stval;
+        vm_rlock(myproc()->vm);
+        vma = vm_find_area(myproc()->vm, va);
+        if (vma != NULL &&
+            vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_EXEC) == 0) {
+            vm_runlock(myproc()->vm);
+            break;
+        }
+        vm_runlock(myproc()->vm);
+        assert(myproc()->pid != 1, "init exiting");
+        kill(myproc()->pid, SIGSEGV);
+        break;
     case RISCV_LOAD_PAGE_FAULT:
         // Load page fault - handle demand paging for read access
         va = myproc()->trapframe->trapframe.stval;
