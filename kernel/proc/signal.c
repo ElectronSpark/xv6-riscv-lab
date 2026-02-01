@@ -29,6 +29,7 @@
 #include "list.h"
 #include "bits.h"
 #include "smp/ipi.h"
+#include "clone_flags.h"
 
 static slab_cache_t __sigacts_pool;
 static slab_cache_t __ksiginfo_pool;
@@ -244,9 +245,15 @@ sigacts_t *sigacts_init(void) {
     return sa;
 }
 
-sigacts_t *sigacts_dup(sigacts_t *psa) {
+sigacts_t *sigacts_dup(sigacts_t *psa, uint64 clone_flags) {
     if (!psa) {
         return NULL;
+    }
+    if (clone_flags & CLONE_SIGHAND) {
+        // Share the signal actions
+        // simply increase the reference count
+        atomic_inc(&psa->refcount);
+        return psa;
     }
     sigacts_t *sa = slab_alloc(&__sigacts_pool);
     if (sa) {
@@ -258,8 +265,8 @@ sigacts_t *sigacts_dup(sigacts_t *psa) {
     return sa;
 }
 
-void sigacts_free(sigacts_t *sa) {
-    if (sa) {
+void sigacts_put(sigacts_t *sa) {
+    if (sa != NULL && !atomic_dec_unless(&sa->refcount, 1)) {
         slab_free(sa);
     }
 }

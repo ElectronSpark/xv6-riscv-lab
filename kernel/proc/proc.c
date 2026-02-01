@@ -352,7 +352,7 @@ void freeproc(struct proc *p) {
            "freeproc: invalid kstack_order %d", p->kstack_order);
 
     if (p->sigacts)
-        sigacts_free(p->sigacts);
+        sigacts_put(p->sigacts);
     if (p->vm != NULL) {
         vm_put(p->vm);
         p->vm = NULL;

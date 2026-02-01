@@ -113,9 +113,8 @@ int proc_clone(struct clone_args *args) {
     proc_lock(ret_ptr);
 
     // copy the process's signal actions.
-    // @TODO: handle CLONE_SIGHAND
     if (p->sigacts) {
-        ret_ptr->sigacts = sigacts_dup(p->sigacts);
+        ret_ptr->sigacts = sigacts_dup(p->sigacts, args->flags);
         if (ret_ptr->sigacts == NULL) {
             proc_unlock(p);
             proc_unlock(ret_ptr);

@@ -57,8 +57,8 @@ static inline int sigismember(const sigset_t *set, int signo) {
 void signal_init(void);
 void sigstack_init(stack_t *stack);
 sigacts_t *sigacts_init(void);
-sigacts_t *sigacts_dup(sigacts_t *psa);
-void sigacts_free(sigacts_t *sa);
+sigacts_t *sigacts_dup(sigacts_t *psa, uint64 clone_flags);
+void sigacts_put(sigacts_t *sa);
 
 void sigpending_init(struct proc *p);
 void sigpending_destroy(struct proc *p);

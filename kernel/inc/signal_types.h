@@ -38,6 +38,7 @@ typedef struct sigacts {
 	sigset_t sa_sigcont;    // signals that continue the process
 	// sigset_t sa_sigcore;    // signals that generate a core dump (not used)
     sigset_t sa_sigignore;  // signals ignored by this process
+	_Atomic int refcount; // reference count for shared usage
 } sigacts_t;
 
 typedef enum {
