@@ -256,6 +256,7 @@ sigacts_t *sigacts_init(void) {
     sigemptyset(&sa->sa_sigcont);
     sigemptyset(&sa->sa_sigignore);
     spin_init(&sa->lock, "sigacts_lock");
+    sa->refcount = 1;
     
     for (int i = 1; i <= NSIG; i++) {
         assert(__sig_setdefault(sa, i) == 0, "sigacts_init: failed to set default action for signal %d", i);

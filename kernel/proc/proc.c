@@ -351,12 +351,26 @@ void freeproc(struct proc *p) {
     assert(p->kstack_order >= 0 && p->kstack_order <= PAGE_BUDDY_MAX_ORDER,
            "freeproc: invalid kstack_order %d", p->kstack_order);
 
-    if (p->sigacts)
+    if (p->sigacts != NULL) {
         sigacts_put(p->sigacts);
+        p->sigacts = NULL;
+    }
+
     if (p->vm != NULL) {
         vm_put(p->vm);
         p->vm = NULL;
     }
+
+    if (p->fdtable != NULL) {
+        vfs_fdtable_put(p->fdtable);
+        p->fdtable = NULL;
+    }
+
+    if (p->fs != NULL) {
+        vfs_struct_put(p->fs);
+        p->fs = NULL;
+    }
+
     // Purge any remaining pending signals (e.g., SIGKILL) before destroy
     // assertions.
     sigpending_empty(p, 0);

@@ -120,19 +120,22 @@ retry:
 void exit(int status) {
     struct proc *p = myproc();
     struct proc *parent = p->parent;
+    assert(p != __proctab_get_initproc(), "init exiting");
 
     // Wake vfork parent FIRST - they're sharing our address space
     // and need to resume before we tear anything down
     vfork_done(p);
 
     // VFS file descriptor table cleanup (closes all VFS files)
-    vfs_fdtable_put(p->fdtable);
-    p->fdtable = NULL;
+    if (p->fdtable != NULL) {
+        vfs_fdtable_put(p->fdtable);
+        p->fdtable = NULL;
+    }
 
-    assert(p != __proctab_get_initproc(), "init exiting");
-
-    vfs_struct_put(p->fs);
-    p->fs = NULL;
+    if (p->fs != NULL) {
+        vfs_struct_put(p->fs);
+        p->fs = NULL;
+    }
 
     reparent(p);
 
