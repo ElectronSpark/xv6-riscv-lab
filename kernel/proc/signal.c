@@ -38,6 +38,7 @@
 #include "bits.h"
 #include "smp/ipi.h"
 #include "clone_flags.h"
+#include "errno.h"
 
 static slab_cache_t __sigacts_pool;
 static slab_cache_t __ksiginfo_pool;
@@ -158,7 +159,7 @@ void ksiginfo_free(ksiginfo_t *ksi) {
 // Returns 0 on success, -1 on error.
 int sigpending_empty(struct proc *p, int signo) {
     if (!p) {
-        return -1; // Invalid process pointer
+        return -EINVAL; // Invalid process pointer
     }
     proc_assert_holding(p);
 
@@ -178,7 +179,7 @@ int sigpending_empty(struct proc *p, int signo) {
     }
 
     if (SIGBAD(signo)) {
-        return -1; // Invalid signal number
+        return -EINVAL; // Invalid signal number
     }
 
     ksiginfo_t *ksi = NULL;
@@ -207,7 +208,7 @@ static void __sig_reset_act_mask(sigacts_t *sa, int signo) {
 
 static int __sig_setdefault(sigacts_t *sa, int signo) {
     if (!sa || SIGBAD(signo)) {
-        return -1; // Invalid signal number or signal actions
+        return -EINVAL; // Invalid signal number or signal actions
     }
     sig_defact defact = signo_default_action(signo);
     if (defact == SIG_ACT_INVALID) {
@@ -232,7 +233,7 @@ static int __sig_setdefault(sigacts_t *sa, int signo) {
         sigaddset(&sa->sa_sigterm, signo);
         break;
     default:
-        return -1;
+        return -EINVAL;
     }
 
     sa->sa[signo].sa_handler = SIG_DFL;
@@ -335,24 +336,24 @@ static int __siginfo_queue_len(struct proc *p, int signo) {
 }
 
 int __signal_send(struct proc *p, ksiginfo_t *info) {
-    int ret = -1; // Default to error
+    int ret = -EINVAL; // Default to error
     if (p == NULL || info == NULL) {
-        return -1; // No process available
+        return -EINVAL; // No process available
     }
     if (SIGBAD(info->signo)) {
-        return -1; // Invalid process or signal number
+        return -EINVAL; // Invalid process or signal number
     }
 
     proc_lock(p);
     if (p->state == PSTATE_UNUSED || p->state == PSTATE_ZOMBIE || PROC_KILLED(p)) {
         proc_unlock(p);
-        return -1; // Process is not valid or already killed
+        return -EINVAL; // Process is not valid or already killed
     }
 
     sigacts_t *sa = p->sigacts;
     if (!sa) {
         proc_unlock(p);
-        return -1; // No signal actions available
+        return -EINVAL; // No signal actions available
     }
 
     // Lock sigacts for reading signal action configuration
@@ -384,7 +385,7 @@ int __signal_send(struct proc *p, ksiginfo_t *info) {
         }
         ksiginfo_t *ksi = ksiginfo_alloc();
         if (!ksi) {
-            ret = -1; // Allocation failed (still set pending bit below)
+            ret = -EINVAL; // Allocation failed (still set pending bit below)
             goto after_enqueue; // fall through to set pending bit & notify
         }
         *ksi = *info; // Copy the signal info
@@ -437,7 +438,7 @@ after_enqueue:
         proc_lock(p);
     }
 
-    ret = (ret == -1) ? 0 : ret; // Treat enqueue allocation failure as soft failure.
+    ret = (ret == -EINVAL) ? 0 : ret; // Treat enqueue allocation failure as soft failure.
 
     // If the action is to terminate the process, set the killed flag
     if (is_term) {
@@ -466,16 +467,16 @@ after_enqueue:
 int signal_send(int pid, ksiginfo_t *info) {
     struct proc *p = NULL;
     if (pid < 0 || info == NULL || SIGBAD(info->signo)) {
-        return -1; // Invalid PID or signal number
+        return -EINVAL; // Invalid PID or signal number
     }
     rcu_read_lock();
     if (proctab_get_pid_proc(pid, &p) != 0) {
         rcu_read_unlock();
-        return -1; // No process found
+        return -EINVAL; // No process found
     }
     if (p == NULL) {
         rcu_read_unlock();
-        return -1; // No process found
+        return -EINVAL; // No process found
     }
     assert(p != NULL, "signal_send: proc is NULL");
     
@@ -818,20 +819,24 @@ static int __pick_signal(struct proc *p) {
 }
 
 // Caller must hold proc_lock. This function acquires sigacts_lock internally.
-static int __dequeue_signal_update_pending(struct proc *p, int signo, ksiginfo_t **ret_info) {
-    if (p == NULL || ret_info == NULL) {
-        return -1;
+static ksiginfo_t *__dequeue_signal_update_pending(struct proc *p, int signo) {
+    if (p == NULL) {
+        return ERR_PTR(-EINVAL);
     }
     
     sigacts_t *sa = p->sigacts;
     if (!sa) {
-        return -1;  // No sigacts
+        return ERR_PTR(-EINVAL);  // No sigacts
     }
     sigacts_lock(sa);
     sigaction_t *act = &sa->sa[signo];
-    if (SIGBAD(signo) || sigismember(&sa->sa_sigmask, signo) > 0) {
+    if (SIGBAD(signo)) {
         sigacts_unlock(sa);
-        return -1;
+        return ERR_PTR(-EINVAL);
+    }
+    if (sigismember(&sa->sa_sigmask, signo)) {
+        sigacts_unlock(sa);
+        return ERR_PTR(-EINTR); // Signal is masked
     }
 
     assert(act->sa_handler != SIG_IGN,
@@ -842,9 +847,8 @@ static int __dequeue_signal_update_pending(struct proc *p, int signo, ksiginfo_t
         assert(LIST_IS_EMPTY(&sq->queue),
                "sig_pending is not empty for a non-SA_SIGINFO signal");
         sigdelset(&p->sig_pending_mask, signo);
-        *ret_info = NULL;
         signal_assert_invariants(p);
-        return 0; // No signal info to return
+        return NULL; // No signal info to return
     }
     sigacts_unlock(sa);
 
@@ -852,9 +856,8 @@ static int __dequeue_signal_update_pending(struct proc *p, int signo, ksiginfo_t
     if (LIST_IS_EMPTY(&sq->queue)) {
         // Queue empty but bit set implies inconsistency; clear defensively.
         sigdelset(&p->sig_pending_mask, signo);
-        *ret_info = NULL;
         signal_assert_invariants(p);
-        return 0;
+        return NULL;
     }
     ksiginfo_t *info = LIST_FIRST_NODE(&sq->queue, ksiginfo_t, list_entry);
     assert(info->signo == signo, "__dequeue_signal_update_pending: pos->signo != signo");
@@ -863,9 +866,8 @@ static int __dequeue_signal_update_pending(struct proc *p, int signo, ksiginfo_t
     if (LIST_IS_EMPTY(&sq->queue)) {
         sigdelset(&p->sig_pending_mask, signo);
     }
-    *ret_info = info;
     signal_assert_invariants(p);
-    return 0; // Success
+    return info;
 }
 
 static int __deliver_signal(struct proc *p, int signo, ksiginfo_t *info, sigaction_t *sa, bool *repeat) {
@@ -967,11 +969,10 @@ void handle_signal(void) {
         sigaction_t sa_copy = sa->sa[signo];
         sigacts_unlock(sa);
         
-        ksiginfo_t *info = NULL;
         bool repeat = false;
+        ksiginfo_t *info = __dequeue_signal_update_pending(p, signo);
     
-        assert(__dequeue_signal_update_pending(p, signo, &info) == 0,
-               "handle_signal: __dequeue_signal_update_pending failed");
+        assert(!IS_ERR(info) , "handle_signal: __dequeue_signal_update_pending failed");
         signal_assert_invariants(p);
         
         // Release lock before calling __deliver_signal, which may need
