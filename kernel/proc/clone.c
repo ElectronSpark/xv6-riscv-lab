@@ -91,39 +91,31 @@ int proc_clone(struct clone_args *args) {
             goto out;
         }
     }
+    ret_ptr->vm = new_vm;
 
     // Clone VFS cwd and root inode references
     struct fs_struct *fs_clone = vfs_struct_clone(p->fs, args->flags);
     if (IS_ERR_OR_NULL(fs_clone)) {
-        vm_put(new_vm);
         freeproc(ret_ptr);
         ret_ptr = (void*)fs_clone;
         goto out;
     }
+    ret_ptr->fs = fs_clone;
 
     // Clone VFS file descriptor table - must be done after releasing parent
     // lock because vfs_fdup may call cdev_dup which needs a mutex
     struct vfs_fdtable *new_fdtable = vfs_fdtable_clone(p->fdtable, args->flags);
     if (IS_ERR_OR_NULL(new_fdtable)) {
-        vm_put(new_vm);
-        vfs_struct_put(fs_clone);
         freeproc(ret_ptr);
         ret_ptr = (void*)new_fdtable;
         goto out;
     }
-
-    proc_lock(p);
-    proc_lock(ret_ptr);
+    ret_ptr->fdtable = new_fdtable;
 
     // copy the process's signal actions.
     if (p->sigacts) {
         ret_ptr->sigacts = sigacts_dup(p->sigacts, args->flags);
         if (ret_ptr->sigacts == NULL) {
-            proc_unlock(p);
-            proc_unlock(ret_ptr);
-            vm_put(new_vm);
-            vfs_struct_put(fs_clone);
-            vfs_fdtable_put(new_fdtable);
             freeproc(ret_ptr);
             return -ENOMEM;
         }
@@ -132,10 +124,6 @@ int proc_clone(struct clone_args *args) {
     // signal to be sent to parent on exit
     ret_ptr->esignal = args->esignal;
     ret_ptr->clone_flags = args->flags;
-
-    ret_ptr->fdtable = new_fdtable;
-    ret_ptr->fs = fs_clone;
-    ret_ptr->vm = new_vm;
 
     // copy saved user registers.
     *(ret_ptr->trapframe) = *(p->trapframe);
@@ -157,6 +145,8 @@ int proc_clone(struct clone_args *args) {
     // VFS cwd and rooti already cloned above
     safestrcpy(ret_ptr->name, p->name, sizeof(p->name));
 
+    proc_lock(p);
+    proc_lock(ret_ptr);
     attach_child(p, ret_ptr);
     PROC_SET_USER_SPACE(ret_ptr);
     __proc_set_pstate(ret_ptr, PSTATE_UNINTERRUPTIBLE);
