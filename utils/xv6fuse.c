@@ -15,6 +15,9 @@
 # if __has_include(<sys/mman.h>)
 #  include <sys/mman.h>
 # endif
+# if __has_include(<sys/statvfs.h>)
+#  include <sys/statvfs.h>
+# endif
 #endif
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -61,6 +64,413 @@ static struct xv6fs_context g_fs = {
   .image_path = NULL,
   .readonly = false,
 };
+
+/* Forward declarations for functions used by block cache */
+static int bitmap_get(uint32_t blockno, bool *is_set);
+static int free_block(uint32_t blockno);
+
+/*
+ * Buddy-like Bitmap Cache for Free Block Tracking
+ *
+ * This implements a multi-level bitmap cache to efficiently track free blocks:
+ * - Level 0: 1 bit per block (direct mapping from on-disk bitmap)
+ * - Level 1: 1 bit per 64 blocks (set if any block in the group is free)
+ * - Level 2: 1 bit per 4096 blocks (set if any group in the region is free)
+ * - Level 3: 1 bit per 262144 blocks (set if any region has free blocks)
+ *
+ * Features:
+ * - Fast free block lookup using hierarchical search
+ * - Wear leveling with rotating allocation pointer
+ * - Consecutive block allocation support
+ */
+
+#define BCACHE_BITS_PER_LEVEL 64
+#define BCACHE_MAX_LEVELS 4
+
+struct block_cache {
+  uint8_t *levels[BCACHE_MAX_LEVELS];    /* Bitmap for each level */
+  uint32_t level_bits[BCACHE_MAX_LEVELS]; /* Number of bits in each level */
+  uint32_t level_bytes[BCACHE_MAX_LEVELS];/* Number of bytes in each level */
+  uint32_t nblocks;                       /* Total data blocks */
+  uint32_t data_start;                    /* First data block number */
+  uint32_t alloc_cursor;                  /* Rotating allocation pointer for wear leveling */
+  uint32_t free_count;                    /* Total number of free blocks */
+  bool initialized;
+};
+
+static struct block_cache g_bcache = {
+  .levels = {NULL, NULL, NULL, NULL},
+  .initialized = false,
+};
+
+/*
+ * Get the bit value at a specific position in a bitmap
+ */
+static inline bool
+bcache_get_bit(const uint8_t *bitmap, uint32_t bit_index)
+{
+  return (bitmap[bit_index / 8] & (1u << (bit_index & 7))) != 0;
+}
+
+/*
+ * Set a bit in a bitmap
+ */
+static inline void
+bcache_set_bit(uint8_t *bitmap, uint32_t bit_index)
+{
+  bitmap[bit_index / 8] |= (uint8_t)(1u << (bit_index & 7));
+}
+
+/*
+ * Clear a bit in a bitmap
+ */
+static inline void
+bcache_clear_bit(uint8_t *bitmap, uint32_t bit_index)
+{
+  bitmap[bit_index / 8] &= (uint8_t)~(1u << (bit_index & 7));
+}
+
+/*
+ * Count trailing zeros in a 64-bit value
+ */
+static inline int
+bcache_ctz64(uint64_t val)
+{
+  if (val == 0) return 64;
+#if defined(__GNUC__) || defined(__clang__)
+  return __builtin_ctzll(val);
+#else
+  int count = 0;
+  while ((val & 1) == 0) {
+    val >>= 1;
+    count++;
+  }
+  return count;
+#endif
+}
+
+/*
+ * Check if a 64-bit group has any set bits
+ */
+static inline bool
+bcache_group_has_free(const uint8_t *bitmap, uint32_t group_start, uint32_t max_bits)
+{
+  uint32_t end = group_start + 64;
+  if (end > max_bits) end = max_bits;
+
+  for (uint32_t i = group_start; i < end; i++) {
+    if (bcache_get_bit(bitmap, i)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/*
+ * Update a parent level bit based on children
+ */
+static void
+bcache_update_parent(struct block_cache *bc, int level, uint32_t parent_index)
+{
+  if (level >= BCACHE_MAX_LEVELS - 1 || !bc->levels[level + 1]) {
+    return;
+  }
+
+  uint32_t child_start = parent_index * BCACHE_BITS_PER_LEVEL;
+  bool has_free = bcache_group_has_free(bc->levels[level], child_start, bc->level_bits[level]);
+
+  if (has_free) {
+    bcache_set_bit(bc->levels[level + 1], parent_index);
+  } else {
+    bcache_clear_bit(bc->levels[level + 1], parent_index);
+  }
+
+  /* Recursively update parent levels */
+  bcache_update_parent(bc, level + 1, parent_index / BCACHE_BITS_PER_LEVEL);
+}
+
+/*
+ * Mark a block as free in the cache
+ */
+static void
+bcache_mark_free(struct block_cache *bc, uint32_t blockno)
+{
+  if (!bc->initialized || blockno < bc->data_start) {
+    return;
+  }
+
+  uint32_t data_index = blockno - bc->data_start;
+  if (data_index >= bc->nblocks) {
+    return;
+  }
+
+  if (!bcache_get_bit(bc->levels[0], data_index)) {
+    bcache_set_bit(bc->levels[0], data_index);
+    bc->free_count++;
+    bcache_update_parent(bc, 0, data_index / BCACHE_BITS_PER_LEVEL);
+  }
+}
+
+/*
+ * Mark a block as used in the cache
+ */
+static void
+bcache_mark_used(struct block_cache *bc, uint32_t blockno)
+{
+  if (!bc->initialized || blockno < bc->data_start) {
+    return;
+  }
+
+  uint32_t data_index = blockno - bc->data_start;
+  if (data_index >= bc->nblocks) {
+    return;
+  }
+
+  if (bcache_get_bit(bc->levels[0], data_index)) {
+    bcache_clear_bit(bc->levels[0], data_index);
+    if (bc->free_count > 0) bc->free_count--;
+    bcache_update_parent(bc, 0, data_index / BCACHE_BITS_PER_LEVEL);
+  }
+}
+
+/*
+ * Find a free block using hierarchical search with wear leveling
+ */
+static int
+bcache_find_free_block(struct block_cache *bc, uint32_t *blockno_out)
+{
+  if (!bc->initialized || bc->free_count == 0) {
+    return -ENOSPC;
+  }
+
+  /* Start from the allocation cursor for wear leveling */
+  uint32_t start = bc->alloc_cursor;
+  uint32_t n = bc->nblocks;
+
+  /* First, do a quick check using higher levels */
+  for (uint32_t offset = 0; offset < n; offset++) {
+    uint32_t idx = (start + offset) % n;
+
+    if (bcache_get_bit(bc->levels[0], idx)) {
+      /* Found a free block */
+      *blockno_out = bc->data_start + idx;
+      /* Advance cursor for wear leveling */
+      bc->alloc_cursor = (idx + 1) % n;
+      return 0;
+    }
+
+    /* Skip ahead using higher level hints */
+    if (bc->levels[1]) {
+      uint32_t group = idx / BCACHE_BITS_PER_LEVEL;
+      if (!bcache_get_bit(bc->levels[1], group)) {
+        /* No free blocks in this group, skip to next group */
+        uint32_t next_group_start = (group + 1) * BCACHE_BITS_PER_LEVEL;
+        if (next_group_start > idx) {
+          offset += (next_group_start - idx - 1);
+        }
+      }
+    }
+  }
+
+  return -ENOSPC;
+}
+
+/*
+ * Find a free block near a hint block for better locality.
+ * Searches in a small window around the hint first, then falls back
+ * to the regular wear-leveling search.
+ */
+static int
+bcache_find_free_block_near(struct block_cache *bc, uint32_t hint, uint32_t *blockno_out)
+{
+  if (!bc->initialized || bc->free_count == 0) {
+    return -ENOSPC;
+  }
+
+  /* If hint is invalid, use regular search */
+  if (hint < bc->data_start) {
+    return bcache_find_free_block(bc, blockno_out);
+  }
+
+  uint32_t hint_idx = hint - bc->data_start;
+  if (hint_idx >= bc->nblocks) {
+    return bcache_find_free_block(bc, blockno_out);
+  }
+
+  /* Search in a window around the hint for locality */
+  #define LOCALITY_WINDOW 64
+  uint32_t n = bc->nblocks;
+
+  /* First try blocks immediately after hint */
+  for (uint32_t i = 0; i < LOCALITY_WINDOW && hint_idx + i < n; i++) {
+    uint32_t idx = hint_idx + i;
+    if (bcache_get_bit(bc->levels[0], idx)) {
+      *blockno_out = bc->data_start + idx;
+      return 0;
+    }
+  }
+
+  /* Try blocks before hint */
+  for (uint32_t i = 1; i < LOCALITY_WINDOW && i <= hint_idx; i++) {
+    uint32_t idx = hint_idx - i;
+    if (bcache_get_bit(bc->levels[0], idx)) {
+      *blockno_out = bc->data_start + idx;
+      return 0;
+    }
+  }
+
+  #undef LOCALITY_WINDOW
+
+  /* Fall back to regular wear-leveling search */
+  return bcache_find_free_block(bc, blockno_out);
+}
+
+/*
+ * Find consecutive free blocks for better locality
+ */
+static int
+bcache_find_consecutive_blocks(struct block_cache *bc, uint32_t count, uint32_t *start_out)
+{
+  if (!bc->initialized || bc->free_count < count || count == 0) {
+    return -ENOSPC;
+  }
+
+  if (count == 1) {
+    return bcache_find_free_block(bc, start_out);
+  }
+
+  uint32_t start = bc->alloc_cursor;
+  uint32_t n = bc->nblocks;
+  uint32_t consecutive = 0;
+  uint32_t run_start = 0;
+
+  for (uint32_t offset = 0; offset < n; offset++) {
+    uint32_t idx = (start + offset) % n;
+
+    if (bcache_get_bit(bc->levels[0], idx)) {
+      if (consecutive == 0) {
+        run_start = idx;
+      }
+      consecutive++;
+      if (consecutive >= count) {
+        *start_out = bc->data_start + run_start;
+        bc->alloc_cursor = (run_start + count) % n;
+        return 0;
+      }
+    } else {
+      consecutive = 0;
+    }
+  }
+
+  /* Try to find any available consecutive blocks without wrap-around */
+  consecutive = 0;
+  for (uint32_t idx = 0; idx < n; idx++) {
+    if (bcache_get_bit(bc->levels[0], idx)) {
+      if (consecutive == 0) {
+        run_start = idx;
+      }
+      consecutive++;
+      if (consecutive >= count) {
+        *start_out = bc->data_start + run_start;
+        bc->alloc_cursor = (run_start + count) % n;
+        return 0;
+      }
+    } else {
+      consecutive = 0;
+    }
+  }
+
+  return -ENOSPC;
+}
+
+/*
+ * Initialize the block cache from the on-disk bitmap
+ */
+static int
+bcache_init(struct block_cache *bc, uint32_t nblocks, uint32_t data_start)
+{
+  if (bc->initialized) {
+    return 0;
+  }
+
+  bc->nblocks = nblocks;
+  bc->data_start = data_start;
+  bc->alloc_cursor = 0;
+  bc->free_count = 0;
+
+  /* Calculate sizes for each level */
+  uint32_t bits = nblocks;
+  for (int level = 0; level < BCACHE_MAX_LEVELS; level++) {
+    bc->level_bits[level] = bits;
+    bc->level_bytes[level] = (bits + 7) / 8;
+    bc->levels[level] = calloc(bc->level_bytes[level], 1);
+    if (!bc->levels[level]) {
+      /* Cleanup on failure */
+      for (int j = 0; j < level; j++) {
+        free(bc->levels[j]);
+        bc->levels[j] = NULL;
+      }
+      return -ENOMEM;
+    }
+    bits = (bits + BCACHE_BITS_PER_LEVEL - 1) / BCACHE_BITS_PER_LEVEL;
+    if (bits <= 1) {
+      /* No need for more levels */
+      for (int j = level + 1; j < BCACHE_MAX_LEVELS; j++) {
+        bc->levels[j] = NULL;
+        bc->level_bits[j] = 0;
+        bc->level_bytes[j] = 0;
+      }
+      break;
+    }
+  }
+
+  /* Populate level 0 from on-disk bitmap */
+  for (uint32_t b = 0; b < nblocks; b++) {
+    uint32_t blockno = data_start + b;
+    bool used = false;
+    int rc = bitmap_get(blockno, &used);
+    if (rc != 0) {
+      continue;
+    }
+    if (!used) {
+      bcache_set_bit(bc->levels[0], b);
+      bc->free_count++;
+    }
+  }
+
+  /* Build higher levels */
+  for (int level = 0; level < BCACHE_MAX_LEVELS - 1; level++) {
+    if (!bc->levels[level + 1]) break;
+
+    uint32_t parent_count = bc->level_bits[level + 1];
+    for (uint32_t p = 0; p < parent_count; p++) {
+      uint32_t child_start = p * BCACHE_BITS_PER_LEVEL;
+      if (bcache_group_has_free(bc->levels[level], child_start, bc->level_bits[level])) {
+        bcache_set_bit(bc->levels[level + 1], p);
+      }
+    }
+  }
+
+  bc->initialized = true;
+  fprintf(stderr, "[xv6fs] block cache initialized: %u data blocks, %u free\n",
+          nblocks, bc->free_count);
+
+  return 0;
+}
+
+/*
+ * Free the block cache
+ */
+static void
+bcache_destroy(struct block_cache *bc)
+{
+  for (int level = 0; level < BCACHE_MAX_LEVELS; level++) {
+    free(bc->levels[level]);
+    bc->levels[level] = NULL;
+  }
+  bc->initialized = false;
+  bc->free_count = 0;
+}
 
 STATIC_INLINE uint16_t
 from_le16(uint16_t value)
@@ -209,6 +619,51 @@ bitmap_update(uint32_t blockno, bool set)
 static int
 alloc_block(uint32_t *blockno_out)
 {
+  /* Try to use the block cache if initialized */
+  if (g_bcache.initialized) {
+    uint32_t candidate;
+    int rc = bcache_find_free_block(&g_bcache, &candidate);
+    if (rc != 0) {
+      return rc;
+    }
+
+    /* Verify and update on-disk bitmap */
+    bool used = false;
+    rc = bitmap_get(candidate, &used);
+    if (rc != 0) {
+      return rc;
+    }
+    if (used) {
+      /* Cache inconsistency - mark used and retry */
+      bcache_mark_used(&g_bcache, candidate);
+      return alloc_block(blockno_out);
+    }
+
+    rc = bitmap_update(candidate, true);
+    if (rc != 0) {
+      return rc;
+    }
+
+    /* Update cache */
+    bcache_mark_used(&g_bcache, candidate);
+
+    void *block = block_ptr(candidate);
+    if (!block) {
+      return -EIO;
+    }
+    memset(block, 0, BSIZE);
+    rc = sync_block(block);
+    if (rc != 0) {
+      return rc;
+    }
+
+    if (blockno_out) {
+      *blockno_out = candidate;
+    }
+    return 0;
+  }
+
+  /* Fallback to linear search if cache not available */
   uint32_t start = data_start_block();
   for (uint32_t offset = 0; offset < g_fs.sb.nblocks; ++offset) {
     uint32_t candidate = start + offset;
@@ -245,6 +700,140 @@ alloc_block(uint32_t *blockno_out)
   return -ENOSPC;
 }
 
+/*
+ * Allocate a block near a hint for better file locality.
+ * If hint is 0 or invalid, falls back to regular wear-leveling allocation.
+ */
+static int
+alloc_block_near(uint32_t hint, uint32_t *blockno_out)
+{
+  if (hint == 0) {
+    return alloc_block(blockno_out);
+  }
+
+  /* Try to use the block cache with locality hint */
+  if (g_bcache.initialized) {
+    uint32_t candidate;
+    int rc = bcache_find_free_block_near(&g_bcache, hint, &candidate);
+    if (rc != 0) {
+      return rc;
+    }
+
+    /* Verify and update on-disk bitmap */
+    bool used = false;
+    rc = bitmap_get(candidate, &used);
+    if (rc != 0) {
+      return rc;
+    }
+    if (used) {
+      /* Cache inconsistency - mark used and retry */
+      bcache_mark_used(&g_bcache, candidate);
+      return alloc_block_near(hint, blockno_out);
+    }
+
+    rc = bitmap_update(candidate, true);
+    if (rc != 0) {
+      return rc;
+    }
+
+    /* Update cache */
+    bcache_mark_used(&g_bcache, candidate);
+
+    void *block = block_ptr(candidate);
+    if (!block) {
+      return -EIO;
+    }
+    memset(block, 0, BSIZE);
+    rc = sync_block(block);
+    if (rc != 0) {
+      return rc;
+    }
+
+    if (blockno_out) {
+      *blockno_out = candidate;
+    }
+    return 0;
+  }
+
+  /* Fall back to regular allocation */
+  return alloc_block(blockno_out);
+}
+
+/*
+ * Allocate multiple consecutive blocks for better locality.
+ * Returns the starting block number in start_out.
+ * On success, all count blocks from start_out are allocated.
+ *
+ * Note: This function is available for future use when batch allocation
+ * is beneficial. Currently marked unused to suppress warning.
+ */
+static int __attribute__((unused))
+alloc_consecutive_blocks(uint32_t count, uint32_t *start_out)
+{
+  if (count == 0) {
+    return -EINVAL;
+  }
+  if (count == 1) {
+    return alloc_block(start_out);
+  }
+
+  if (!g_bcache.initialized) {
+    /* Without cache, allocate individually */
+    uint32_t first;
+    int rc = alloc_block(&first);
+    if (rc != 0) return rc;
+    if (start_out) *start_out = first;
+
+    for (uint32_t i = 1; i < count; i++) {
+      uint32_t next;
+      rc = alloc_block(&next);
+      if (rc != 0) {
+        /* Rollback allocated blocks */
+        for (uint32_t j = 0; j < i; j++) {
+          free_block(first + j);
+        }
+        return rc;
+      }
+    }
+    return 0;
+  }
+
+  /* Use cache for consecutive allocation */
+  uint32_t start;
+  int rc = bcache_find_consecutive_blocks(&g_bcache, count, &start);
+  if (rc != 0) {
+    return rc;
+  }
+
+  /* Allocate all blocks */
+  for (uint32_t i = 0; i < count; i++) {
+    uint32_t blockno = start + i;
+
+    rc = bitmap_update(blockno, true);
+    if (rc != 0) {
+      /* Rollback */
+      for (uint32_t j = 0; j < i; j++) {
+        bitmap_update(start + j, false);
+        bcache_mark_free(&g_bcache, start + j);
+      }
+      return rc;
+    }
+
+    bcache_mark_used(&g_bcache, blockno);
+
+    void *block = block_ptr(blockno);
+    if (block) {
+      memset(block, 0, BSIZE);
+      sync_block(block);
+    }
+  }
+
+  if (start_out) {
+    *start_out = start;
+  }
+  return 0;
+}
+
 static int
 free_block(uint32_t blockno)
 {
@@ -260,6 +849,11 @@ free_block(uint32_t blockno)
   rc = bitmap_update(blockno, false);
   if (rc != 0) {
     return rc;
+  }
+
+  /* Update the cache */
+  if (g_bcache.initialized) {
+    bcache_mark_free(&g_bcache, blockno);
   }
 
   void *block = block_ptr(blockno);
@@ -373,13 +967,40 @@ inode_block_address(const struct dinode *ip, uint32_t block_index, uint32_t *add
   return -EFBIG;
 }
 
+/*
+ * Get a hint for block allocation based on adjacent blocks in the inode.
+ * Returns the previous block's address if available, or 0 otherwise.
+ */
+static uint32_t
+get_allocation_hint(const struct dinode *ip, uint32_t block_index)
+{
+  /* Try to get the previous block as a hint for locality */
+  if (block_index > 0 && block_index <= NDIRECT) {
+    uint32_t prev_addr = from_le32(ip->addrs[block_index - 1]);
+    if (prev_addr != 0) {
+      return prev_addr;
+    }
+  } else if (block_index == 0 && NDIRECT > 1) {
+    /* For the first block, try to use an existing block as hint */
+    for (uint32_t i = 1; i < NDIRECT; i++) {
+      uint32_t addr = from_le32(ip->addrs[i]);
+      if (addr != 0) {
+        return addr;
+      }
+    }
+  }
+  return 0;
+}
+
 static int
 inode_ensure_block(uint32_t inum, struct dinode *ip, uint32_t block_index, uint32_t *addr_out)
 {
   if (block_index < NDIRECT) {
     uint32_t addr = from_le32(ip->addrs[block_index]);
     if (addr == 0) {
-      int rc = alloc_block(&addr);
+      /* Use hint-based allocation for better locality */
+      uint32_t hint = get_allocation_hint(ip, block_index);
+      int rc = alloc_block_near(hint, &addr);
       if (rc != 0) {
         return rc;
       }
@@ -400,7 +1021,9 @@ inode_ensure_block(uint32_t inum, struct dinode *ip, uint32_t block_index, uint3
   if (block_index < NINDIRECT) {
     uint32_t indirect = from_le32(ip->addrs[NDIRECT]);
     if (indirect == 0) {
-      int rc = alloc_block(&indirect);
+      /* Use last direct block as hint for indirect block */
+      uint32_t hint = from_le32(ip->addrs[NDIRECT - 1]);
+      int rc = alloc_block_near(hint, &indirect);
       if (rc != 0) {
         return rc;
       }
@@ -418,7 +1041,9 @@ inode_ensure_block(uint32_t inum, struct dinode *ip, uint32_t block_index, uint3
 
     uint32_t addr = from_le32(entries[block_index]);
     if (addr == 0) {
-      int rc = alloc_block(&addr);
+      /* Use previous entry or indirect block as hint */
+      uint32_t hint = (block_index > 0) ? from_le32(entries[block_index - 1]) : indirect;
+      int rc = alloc_block_near(hint, &addr);
       if (rc != 0) {
         return rc;
       }
@@ -440,7 +1065,9 @@ inode_ensure_block(uint32_t inum, struct dinode *ip, uint32_t block_index, uint3
   if (block_index < NDINDIRECT) {
     uint32_t doubly = from_le32(ip->addrs[NDIRECT + 1]);
     if (doubly == 0) {
-      int rc = alloc_block(&doubly);
+      /* Use single indirect block as hint */
+      uint32_t hint = from_le32(ip->addrs[NDIRECT]);
+      int rc = alloc_block_near(hint, &doubly);
       if (rc != 0) {
         return rc;
       }
@@ -461,7 +1088,9 @@ inode_ensure_block(uint32_t inum, struct dinode *ip, uint32_t block_index, uint3
 
     uint32_t indirect = from_le32(l1[idx1]);
     if (indirect == 0) {
-      int rc = alloc_block(&indirect);
+      /* Use previous L1 entry or doubly block as hint */
+      uint32_t hint = (idx1 > 0) ? from_le32(l1[idx1 - 1]) : doubly;
+      int rc = alloc_block_near(hint, &indirect);
       if (rc != 0) {
         return rc;
       }
@@ -479,7 +1108,9 @@ inode_ensure_block(uint32_t inum, struct dinode *ip, uint32_t block_index, uint3
 
     uint32_t addr = from_le32(l2[idx2]);
     if (addr == 0) {
-      int rc = alloc_block(&addr);
+      /* Use previous L2 entry or indirect block as hint */
+      uint32_t hint = (idx2 > 0) ? from_le32(l2[idx2 - 1]) : indirect;
+      int rc = alloc_block_near(hint, &addr);
       if (rc != 0) {
         return rc;
       }
@@ -1838,6 +2469,10 @@ static void
 xv6_destroy(void *userdata)
 {
   (void)userdata;
+
+  /* Destroy the block cache */
+  bcache_destroy(&g_bcache);
+
   if (g_fs.image && g_fs.image_size) {
     munmap(g_fs.image, g_fs.image_size);
   }
@@ -1850,6 +2485,56 @@ xv6_destroy(void *userdata)
   free(g_fs.image_path);
   g_fs.image_path = NULL;
   g_fs.readonly = false;
+}
+
+/*
+ * Return filesystem statistics
+ */
+static int
+xv6_statfs(const char *path, struct statvfs *stbuf)
+{
+  (void)path;
+
+  memset(stbuf, 0, sizeof(*stbuf));
+
+  stbuf->f_bsize = BSIZE;
+  stbuf->f_frsize = BSIZE;
+  stbuf->f_blocks = g_fs.sb.nblocks;
+
+  /* Use cache for accurate free block count */
+  if (g_bcache.initialized) {
+    stbuf->f_bfree = g_bcache.free_count;
+    stbuf->f_bavail = g_bcache.free_count;
+  } else {
+    /* Fall back to counting from bitmap */
+    uint32_t free_count = 0;
+    uint32_t start = data_start_block();
+    for (uint32_t i = 0; i < g_fs.sb.nblocks; i++) {
+      bool used = false;
+      if (bitmap_get(start + i, &used) == 0 && !used) {
+        free_count++;
+      }
+    }
+    stbuf->f_bfree = free_count;
+    stbuf->f_bavail = free_count;
+  }
+
+  stbuf->f_files = g_fs.sb.ninodes;
+
+  /* Count free inodes */
+  uint32_t free_inodes = 0;
+  for (uint32_t i = 1; i < g_fs.sb.ninodes; i++) {
+    const struct dinode *dip = get_inode(i);
+    if (dip && inode_type(dip) == 0) {
+      free_inodes++;
+    }
+  }
+  stbuf->f_ffree = free_inodes;
+  stbuf->f_favail = free_inodes;
+
+  stbuf->f_namemax = DIRSIZ;
+
+  return 0;
 }
 
 static struct fuse_operations xv6_ops = {
@@ -1869,6 +2554,7 @@ static struct fuse_operations xv6_ops = {
   .mkdir = xv6_mkdir,
   .utimens = xv6_utimens,
   .truncate = xv6_truncate_cb,
+  .statfs = xv6_statfs,
 };
 
 struct xv6_options {
@@ -1930,6 +2616,15 @@ load_superblock(void)
   if (g_fs.image_size < (size_t)g_fs.sb.size * BSIZE) {
     fprintf(stderr, "[xv6fs] warning: image smaller than advertised (%zu < %u blocks)\n",
             g_fs.image_size, g_fs.sb.size);
+  }
+
+  /* Initialize the block cache for free block tracking */
+  uint32_t data_start = data_start_block();
+  int rc = bcache_init(&g_bcache, g_fs.sb.nblocks, data_start);
+  if (rc != 0) {
+    fprintf(stderr, "[xv6fs] warning: failed to initialize block cache: %s\n",
+            strerror(-rc));
+    /* Non-fatal - we can fall back to linear search */
   }
 
   return 0;
