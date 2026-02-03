@@ -58,6 +58,7 @@ void signal_init(void);
 void sigstack_init(stack_t *stack);
 void sigacts_lock(sigacts_t *sa);
 void sigacts_unlock(sigacts_t *sa);
+int sigacts_holding(sigacts_t *sa);
 sigacts_t *sigacts_init(void);
 sigacts_t *sigacts_dup(sigacts_t *psa, uint64 clone_flags);
 void sigacts_put(sigacts_t *sa);
@@ -73,6 +74,11 @@ int __signal_send(struct proc *p, ksiginfo_t *info);
 int signal_send(int pid, ksiginfo_t *info);
 bool signal_pending(struct proc *p);
 int signal_notify(struct proc *p);
+
+// Recalculate and update TIF_SIGPENDING flag for process
+// Call this after any change to sig_pending_mask or sa_sigmask
+void recalc_sigpending(void);
+bool recalc_sigpending_tsk(struct proc *p);
 bool signal_terminated(struct proc *p);
 void handle_signal(void);
 

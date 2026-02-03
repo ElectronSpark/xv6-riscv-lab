@@ -54,6 +54,7 @@ struct proc {
 #define PROC_FLAG_VALID 1
 #define PROC_FLAG_KILLED 2     // Process is exiting or exited
 #define PROC_FLAG_ONCHAN 3     // Process is sleeping on a channel
+#define PROC_FLAG_SIGPENDING 4 // Process has pending deliverable signals
 #define PROC_FLAG_USER_SPACE 5 // Process has user space
     uint64 clone_flags;         // flags used during clone
 

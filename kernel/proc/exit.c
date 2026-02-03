@@ -240,7 +240,10 @@ int wait(uint64 addr) {
 ret:
     // Restore the original signal mask before returning
     if (mask_saved && p->sigacts != NULL) {
+        sigacts_lock(p->sigacts);
         p->sigacts->sa_sigmask = saved_mask;
+        recalc_sigpending_tsk(p);
+        sigacts_unlock(p->sigacts);
     }
     proc_unlock(p);
     if (pid >= 0 && addr != 0) {
