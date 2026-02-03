@@ -19,6 +19,7 @@
 #include "../vfs_private.h"
 #include <mm/slab.h>
 #include "xv6fs_private.h"
+#include "block_cache.h"
 #include "xv6fs_smoketest.h"
 
 // Slab caches for xv6fs structures
@@ -242,6 +243,10 @@ void xv6fs_unmount_begin(struct vfs_superblock *sb) {
 
 void xv6fs_free(struct vfs_superblock *sb) {
     struct xv6fs_superblock *xv6_sb = container_of(sb, struct xv6fs_superblock, vfs_sb);
+    
+    // Destroy block cache
+    xv6fs_bcache_destroy(xv6_sb);
+    
     if (xv6_sb->blkdev != NULL) {
         blkdev_put(xv6_sb->blkdev);
     }
@@ -295,6 +300,13 @@ int xv6fs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
     
     // Initialize logging layer
     xv6fs_initlog(xv6_sb);
+    
+    // Initialize block allocation cache
+    ret = xv6fs_bcache_init(xv6_sb);
+    if (ret != 0) {
+        printf("xv6fs: warning: block cache init failed (%d), using fallback\n", ret);
+        // Don't fail mount - the fallback linear scan will still work
+    }
     
     // Initialize VFS superblock
     xv6_sb->vfs_sb.block_size = XV6FS_BSIZE;

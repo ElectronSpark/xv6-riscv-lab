@@ -14,7 +14,7 @@ struct buf {
   mutex_t lock;
   uint refcnt;
   hlist_entry_t hlist_entry; // hash list entry
-  list_node_t lru_entry;
+  list_node_t free_entry;    // Free list for O(1) free buffer lookup (LRU order)
   uchar *data;
 } __ALIGNED_CACHELINE;
 

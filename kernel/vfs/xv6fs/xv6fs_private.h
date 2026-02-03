@@ -8,6 +8,7 @@
 #include "vfs/xv6fs/ondisk.h"  // xv6 on-disk format definitions
 #include <mm/slab.h>
 #include "dev/blkdev.h"
+#include "block_cache.h"
 
 // Block size for xv6 filesystem
 #define XV6FS_BSIZE BSIZE
@@ -78,6 +79,7 @@ struct xv6fs_superblock {
     blkdev_t *blkdev;             // Block device descriptor reference
     int dirty;                    // Superblock metadata dirty flag
     struct xv6fs_log log;         // Per-superblock logging
+    struct xv6fs_block_cache block_cache; // Block allocation cache
 };
 
 // Helper to get device number from xv6fs superblock

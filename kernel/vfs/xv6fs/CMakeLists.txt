@@ -4,5 +4,6 @@ add_library(vfs_xv6fs OBJECT
     truncate.c
     file.c
     log.c
+    block_cache.c
     xv6fs_smoketest.c
 )

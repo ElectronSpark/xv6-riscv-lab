@@ -31,9 +31,99 @@
 #include "../vfs_private.h"
 #include <mm/slab.h>
 #include "xv6fs_private.h"
+#include "block_cache.h"
 
 // Bitmap block calculation for pointer-based superblock
 #define BBLOCK_PTR(b, sbp) ((b)/BPB + (sbp)->bmapstart)
+
+/******************************************************************************
+ * Block allocation using cache
+ ******************************************************************************/
+
+/*
+ * Allocate a block using the block cache.
+ * Marks the block as used in both the cache and the on-disk bitmap.
+ * Zeros the block and returns the block number.
+ * Returns 0 if no free block is available.
+ * 
+ * hint: If non-zero, try to allocate near this block for locality
+ */
+static uint
+__xv6fs_balloc(struct xv6fs_superblock *xv6_sb, uint dev, uint hint)
+{
+    struct superblock *disk_sb = &xv6_sb->disk_sb;
+    uint32 blockno = 0;
+    int rc;
+    
+    /* Try to find a free block using the cache */
+    if (xv6_sb->block_cache.initialized) {
+        if (hint != 0) {
+            rc = xv6fs_bcache_find_free_block_near(xv6_sb, hint, &blockno);
+        } else {
+            rc = xv6fs_bcache_find_free_block(xv6_sb, &blockno);
+        }
+        
+        if (rc == 0) {
+            /* Mark as used in cache */
+            xv6fs_bcache_mark_used(xv6_sb, blockno);
+            
+            /* Also mark in on-disk bitmap */
+            struct buf *bp = bread(dev, BBLOCK_PTR(blockno, disk_sb));
+            if (!bp) {
+                /* Revert cache state on error */
+                xv6fs_bcache_mark_free(xv6_sb, blockno);
+                return 0;
+            }
+            
+            int bi = blockno % BPB;
+            int m = 1 << (bi % 8);
+            bp->data[bi/8] |= m;
+            xv6fs_log_write(xv6_sb, bp);
+            brelse(bp);
+            
+            /* Zero the block */
+            struct buf *zbp = bread(dev, blockno);
+            if (!zbp) {
+                return 0;
+            }
+            memset(zbp->data, 0, BSIZE);
+            xv6fs_log_write(xv6_sb, zbp);
+            brelse(zbp);
+            
+            return blockno;
+        }
+    }
+    
+    /* Fallback: Linear scan (when cache not initialized) */
+    for (int b = 0; b < disk_sb->size; b += BPB) {
+        struct buf *bp = bread(dev, BBLOCK_PTR(b, disk_sb));
+        if (!bp) return 0;
+        
+        for (int bi = 0; bi < BPB && b + bi < disk_sb->size; bi++) {
+            int m = 1 << (bi % 8);
+            if ((bp->data[bi/8] & m) == 0) {
+                /* Found free block */
+                bp->data[bi/8] |= m;
+                xv6fs_log_write(xv6_sb, bp);
+                brelse(bp);
+                
+                blockno = b + bi;
+                
+                /* Zero the block */
+                struct buf *zbp = bread(dev, blockno);
+                if (!zbp) return 0;
+                memset(zbp->data, 0, BSIZE);
+                xv6fs_log_write(xv6_sb, zbp);
+                brelse(zbp);
+                
+                return blockno;
+            }
+        }
+        brelse(bp);
+    }
+    
+    return 0; /* No free blocks */
+}
 
 /******************************************************************************
  * Block mapping
@@ -41,47 +131,18 @@
 
 // Get the disk block address for the bn-th block of inode
 // If alloc is true, allocate the block if it doesn't exist
-static uint __xv6fs_bmap_ind(struct xv6fs_superblock *xv6_sb, uint *entry, uint dev, uint bn) {
+// hint: Last allocated block for locality, 0 if none
+static uint __xv6fs_bmap_ind(struct xv6fs_superblock *xv6_sb, uint *entry, uint dev, uint bn, uint hint) {
     uint addr;
     struct buf *bp;
     
     if (*entry == 0) {
-        // Allocate indirect block
-        // Find a free block
-        int b, bi;
-        struct buf *alloc_bp;
-        addr = 0;
-        
-        struct superblock *disk_sb = &xv6_sb->disk_sb;
-        for (b = 0; b < disk_sb->size; b += BPB) {
-            alloc_bp = bread(dev, BBLOCK_PTR(b, disk_sb));
-            if (alloc_bp == NULL) return 0;
-            
-            for (bi = 0; bi < BPB && b + bi < disk_sb->size; bi++) {
-                int m = 1 << (bi % 8);
-                if ((alloc_bp->data[bi/8] & m) == 0) {
-                    // Found free block
-                    alloc_bp->data[bi/8] |= m;
-                    xv6fs_log_write(xv6_sb, alloc_bp);
-                    brelse(alloc_bp);
-                    addr = b + bi;
-                    
-                    // Zero the block
-                    struct buf *zbp = bread(dev, addr);
-                    memset(zbp->data, 0, BSIZE);
-                    xv6fs_log_write(xv6_sb, zbp);
-                    brelse(zbp);
-                    
-                    *entry = addr;
-                    goto found_indirect;
-                }
-            }
-            brelse(alloc_bp);
-        }
-        return 0; // No free blocks
+        // Allocate indirect block using cache
+        addr = __xv6fs_balloc(xv6_sb, dev, hint);
+        if (addr == 0) return 0;
+        *entry = addr;
     }
     
-found_indirect:
     bp = bread(dev, *entry);
     if (bp == NULL) return 0;
     
@@ -89,42 +150,16 @@ found_indirect:
     addr = a[bn];
     
     if (addr == 0) {
-        // Allocate data block
-        int b, bi;
-        struct buf *alloc_bp;
-        
-        struct superblock *disk_sb = &xv6_sb->disk_sb;
-        for (b = 0; b < disk_sb->size; b += BPB) {
-            alloc_bp = bread(dev, BBLOCK_PTR(b, disk_sb));
-            if (alloc_bp == NULL) {
-                brelse(bp);
-                return 0;
-            }
-            
-            for (bi = 0; bi < BPB && b + bi < disk_sb->size; bi++) {
-                int m = 1 << (bi % 8);
-                if ((alloc_bp->data[bi/8] & m) == 0) {
-                    alloc_bp->data[bi/8] |= m;
-                    xv6fs_log_write(xv6_sb, alloc_bp);
-                    brelse(alloc_bp);
-                    addr = b + bi;
-                    
-                    // Zero the block
-                    struct buf *zbp = bread(dev, addr);
-                    memset(zbp->data, 0, BSIZE);
-                    xv6fs_log_write(xv6_sb, zbp);
-                    brelse(zbp);
-                    
-                    a[bn] = addr;
-                    xv6fs_log_write(xv6_sb, bp);
-                    brelse(bp);
-                    return addr;
-                }
-            }
-            brelse(alloc_bp);
+        // Allocate data block using cache with locality hint
+        uint locality_hint = *entry; // Use indirect block as hint for locality
+        addr = __xv6fs_balloc(xv6_sb, dev, locality_hint);
+        if (addr == 0) {
+            brelse(bp);
+            return 0;
         }
-        brelse(bp);
-        return 0;
+        
+        a[bn] = addr;
+        xv6fs_log_write(xv6_sb, bp);
     }
     
     brelse(bp);
@@ -193,39 +228,22 @@ uint xv6fs_bmap(struct xv6fs_inode *ip, uint bn) {
     uint addr;
     struct buf *bp;
     
+    /* Get hint for locality: use last allocated block if any */
+    uint hint = 0;
+    for (int i = XV6FS_NDIRECT - 1; i >= 0; i--) {
+        if (ip->addrs[i] != 0) {
+            hint = ip->addrs[i];
+            break;
+        }
+    }
+    
     // Direct blocks
     if (bn < XV6FS_NDIRECT) {
         if ((addr = ip->addrs[bn]) == 0) {
-            // Allocate new block
-            int b, bi;
-            struct buf *alloc_bp;
-            
-            struct superblock *disk_sb = &xv6_sb->disk_sb;
-            for (b = 0; b < disk_sb->size; b += BPB) {
-                alloc_bp = bread(dev, BBLOCK_PTR(b, disk_sb));
-                if (alloc_bp == NULL) return 0;
-                
-                for (bi = 0; bi < BPB && b + bi < disk_sb->size; bi++) {
-                    int m = 1 << (bi % 8);
-                    if ((alloc_bp->data[bi/8] & m) == 0) {
-                        alloc_bp->data[bi/8] |= m;
-                        xv6fs_log_write(xv6_sb, alloc_bp);
-                        brelse(alloc_bp);
-                        addr = b + bi;
-                        
-                        // Zero the block
-                        struct buf *zbp = bread(dev, addr);
-                        memset(zbp->data, 0, BSIZE);
-                        xv6fs_log_write(xv6_sb, zbp);
-                        brelse(zbp);
-                        
-                        ip->addrs[bn] = addr;
-                        return addr;
-                    }
-                }
-                brelse(alloc_bp);
-            }
-            return 0;
+            // Allocate new block using cache with locality hint
+            addr = __xv6fs_balloc(xv6_sb, dev, hint);
+            if (addr == 0) return 0;
+            ip->addrs[bn] = addr;
         }
         return addr;
     }
@@ -233,45 +251,19 @@ uint xv6fs_bmap(struct xv6fs_inode *ip, uint bn) {
     
     // Single indirect block
     if (bn < XV6FS_NINDIRECT) {
-        return __xv6fs_bmap_ind(xv6_sb, &ip->addrs[XV6FS_NDIRECT], dev, bn);
+        return __xv6fs_bmap_ind(xv6_sb, &ip->addrs[XV6FS_NDIRECT], dev, bn, hint);
     }
     bn -= XV6FS_NINDIRECT;
     
     // Double indirect block
     if (bn < XV6FS_NDINDIRECT) {
         if (ip->addrs[XV6FS_NDIRECT + 1] == 0) {
-            // Allocate double indirect block
-            int b, bi;
-            struct buf *alloc_bp;
-            
-            struct superblock *disk_sb = &xv6_sb->disk_sb;
-            for (b = 0; b < disk_sb->size; b += BPB) {
-                alloc_bp = bread(dev, BBLOCK_PTR(b, disk_sb));
-                if (alloc_bp == NULL) return 0;
-                
-                for (bi = 0; bi < BPB && b + bi < disk_sb->size; bi++) {
-                    int m = 1 << (bi % 8);
-                    if ((alloc_bp->data[bi/8] & m) == 0) {
-                        alloc_bp->data[bi/8] |= m;
-                        xv6fs_log_write(xv6_sb, alloc_bp);
-                        brelse(alloc_bp);
-                        addr = b + bi;
-                        
-                        struct buf *zbp = bread(dev, addr);
-                        memset(zbp->data, 0, BSIZE);
-                        xv6fs_log_write(xv6_sb, zbp);
-                        brelse(zbp);
-                        
-                        ip->addrs[XV6FS_NDIRECT + 1] = addr;
-                        goto have_dindirect;
-                    }
-                }
-                brelse(alloc_bp);
-            }
-            return 0;
+            // Allocate double indirect block using cache
+            addr = __xv6fs_balloc(xv6_sb, dev, hint);
+            if (addr == 0) return 0;
+            ip->addrs[XV6FS_NDIRECT + 1] = addr;
         }
         
-    have_dindirect:
         bp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
         if (bp == NULL) return 0;
         
@@ -279,7 +271,7 @@ uint xv6fs_bmap(struct xv6fs_inode *ip, uint bn) {
         uint l2_idx = bn % XV6FS_NINDIRECT;
         uint *a = (uint*)bp->data;
         
-        addr = __xv6fs_bmap_ind(xv6_sb, &a[l1_idx], dev, l2_idx);
+        addr = __xv6fs_bmap_ind(xv6_sb, &a[l1_idx], dev, l2_idx, ip->addrs[XV6FS_NDIRECT + 1]);
         if (a[l1_idx] != 0) {
             xv6fs_log_write(xv6_sb, bp);
         }
@@ -306,6 +298,9 @@ static void __xv6fs_bfree(struct xv6fs_superblock *xv6_sb, uint dev, uint b) {
     bp->data[bi/8] &= ~m;
     xv6fs_log_write(xv6_sb, bp);
     brelse(bp);
+    
+    /* Update the block cache */
+    xv6fs_bcache_mark_free(xv6_sb, b);
 }
 
 // Free indirect blocks starting from index 'start_idx'

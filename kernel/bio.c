@@ -43,10 +43,9 @@ struct {
     struct spinlock lock;
     struct buf buf[NBUF];
 
-    // Linked list of all buffers, through prev/next.
-    // Sorted by how recently the buffer was used.
-    // head.next is most recent, head.prev is least.
-    list_node_t lru_entry; // For debugging, not used in the code.
+    // Free list of unused buffers (refcnt == 0), sorted by LRU order.
+    // Push at head (most recently used), pop from tail (oldest/least recently used).
+    list_node_t free_list;
     hlist_t cached;        // Hash list of buffers, sorted by (dev, blockno).
     hlist_bucket_t
         buckets[BIO_HASH_BUCKETS]; // stores the hash buckets of the hash list
@@ -138,16 +137,17 @@ void binit(void) {
     spin_init(&bcache.lock, "bcache");
 
     // Create linked list of buffers
-    list_entry_init(&bcache.lru_entry);
+    list_entry_init(&bcache.free_list);
     hlist_func_t hlist_func = {.hash = __bcache_hash_func,
                                .get_node = __bcache_hlist_get_node,
                                .get_entry = __bcache_hlist_get_entry,
                                .cmp_node = __bcache_hlist_cmp};
     hlist_init(&bcache.cached, BIO_HASH_BUCKETS, &hlist_func);
     for (b = bcache.buf; b < bcache.buf + NBUF; b++) {
-        list_entry_init(&b->lru_entry);
+        list_entry_init(&b->free_entry);
         mutex_init(&b->lock, "buffer");
-        list_entry_push(&bcache.lru_entry, &b->lru_entry);
+        // Add to free list
+        list_entry_push(&bcache.free_list, &b->free_entry);
     }
     __buf_cache_prealloc();
 }
@@ -156,7 +156,7 @@ void binit(void) {
 // If not found, allocate a buffer.
 // In either case, return locked buffer.
 STATIC struct buf *bget(uint dev, uint blockno) {
-    struct buf *b, *b1, *tmp;
+    struct buf *b, *b1;
 
     spin_lock(&bcache.lock);
 
@@ -164,8 +164,9 @@ STATIC struct buf *bget(uint dev, uint blockno) {
     b = __bcache_hlist_get(dev, blockno);
     if (b != NULL) {
         // Found it.
-        if (!LIST_NODE_IS_DETACHED(b, lru_entry)) {
-            list_node_detach(b, lru_entry);
+        // Remove from free list if it's there (refcnt was 0)
+        if (!LIST_NODE_IS_DETACHED(b, free_entry)) {
+            list_node_detach(b, free_entry);
         }
         b->refcnt++;
         spin_unlock(&bcache.lock);
@@ -174,44 +175,44 @@ STATIC struct buf *bget(uint dev, uint blockno) {
     }
 
     // Not cached.
-    // Recycle the least recently used (LRU) unused buffer.
-    list_foreach_node_safe(&bcache.lru_entry, b, tmp, lru_entry) {
-        if (b->refcnt == 0) {
-            // Found an unused buffer.
-            b1 = __bcache_hlist_pop(b->dev, b->blockno);
-            if (b1 && b1 != b) {
-                if (b->blockno != 0 || b->dev != 0) {
-                    // Only unused buffers could clash, otherwise it is a bug.
-                    printf("bget: found a buffer with blockno %d, dev %d, but "
-                           "it is not the same as the one we are recycling\n",
-                           b1->blockno, b1->dev);
-                    panic("bget: found a buffer that is not the same as the "
-                          "one we are recycling");
-                }
-                // the buffer b is unused, so we can put back b1 and safely use
-                // b
-                if (__bcache_hlist_push(b1) != 0) {
-                    panic("bget: failed to push cached buffer into hash list");
-                }
-            }
-            list_node_detach(b, lru_entry);
-            __atomic_thread_fence(__ATOMIC_SEQ_CST); // Ensure the buffer is
-                                                     // detached before using it
-            // list_node_push(&bcache.lru_entry, b, lru_entry);
-            b->dev = dev;
-            b->blockno = blockno;
-            b->valid = 0;
-            b->refcnt = 1;
-            if (__bcache_hlist_push(b) != 0) {
-                printf("dev: %d, blockno: %d\n", dev, blockno);
-                panic("bget: failed to push recycled buffer into hash list");
-            }
-            spin_unlock(&bcache.lock);
-            assert(mutex_lock(&b->lock) == 0, "bget: failed to lock buffer");
-            return b;
+    // Get a free buffer from the free list (O(1) instead of O(n) scan)
+    if (LIST_IS_EMPTY(&bcache.free_list)) {
+        panic("bget: no buffers");
+    }
+    
+    // Pop from free list (get oldest free buffer for LRU behavior)
+    b = list_node_pop_back(&bcache.free_list, struct buf, free_entry);
+    
+    // Remove from hash table if it was caching a different block
+    b1 = __bcache_hlist_pop(b->dev, b->blockno);
+    if (b1 && b1 != b) {
+        if (b->blockno != 0 || b->dev != 0) {
+            // Only unused buffers could clash, otherwise it is a bug.
+            printf("bget: found a buffer with blockno %d, dev %d, but "
+                   "it is not the same as the one we are recycling\n",
+                   b1->blockno, b1->dev);
+            panic("bget: found a buffer that is not the same as the "
+                  "one we are recycling");
+        }
+        // the buffer b is unused, so we can put back b1 and safely use b
+        if (__bcache_hlist_push(b1) != 0) {
+            panic("bget: failed to push cached buffer into hash list");
         }
     }
-    panic("bget: no buffers");
+    
+    __atomic_thread_fence(__ATOMIC_SEQ_CST); // Ensure the buffer is detached before using it
+    
+    b->dev = dev;
+    b->blockno = blockno;
+    b->valid = 0;
+    b->refcnt = 1;
+    if (__bcache_hlist_push(b) != 0) {
+        printf("dev: %d, blockno: %d\n", dev, blockno);
+        panic("bget: failed to push recycled buffer into hash list");
+    }
+    spin_unlock(&bcache.lock);
+    assert(mutex_lock(&b->lock) == 0, "bget: failed to lock buffer");
+    return b;
 }
 
 static struct bio *__buf_alloc_bio(struct buf *b, blkdev_t *blkdev,
@@ -290,7 +291,8 @@ void brelse(struct buf *b) {
     b->refcnt--;
     if (b->refcnt == 0) {
         // no one is waiting for it.
-        list_node_push(&bcache.lru_entry, b, lru_entry);
+        // Add to free list (most recently used at head, oldest at tail)
+        list_node_push(&bcache.free_list, b, free_entry);
     }
 
     spin_unlock(&bcache.lock);
@@ -298,6 +300,10 @@ void brelse(struct buf *b) {
 
 void bpin(struct buf *b) {
     spin_lock(&bcache.lock);
+    // If refcnt was 0, remove from free list
+    if (b->refcnt == 0 && !LIST_NODE_IS_DETACHED(b, free_entry)) {
+        list_node_detach(b, free_entry);
+    }
     b->refcnt++;
     spin_unlock(&bcache.lock);
 }
@@ -305,5 +311,9 @@ void bpin(struct buf *b) {
 void bunpin(struct buf *b) {
     spin_lock(&bcache.lock);
     b->refcnt--;
+    // If refcnt becomes 0, add to free list
+    if (b->refcnt == 0) {
+        list_node_push(&bcache.free_list, b, free_entry);
+    }
     spin_unlock(&bcache.lock);
 }
