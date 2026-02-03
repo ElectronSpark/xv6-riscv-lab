@@ -74,14 +74,32 @@ if(PLATFORM STREQUAL "orangepi")
         message(STATUS "sshpass not found - deploy will prompt for password (install with: sudo apt-get install sshpass)")
     endif()
 
-    add_custom_target(deploy
-        COMMAND ${SCP_CMD} ${CMAKE_BINARY_DIR}/kernel/${KERNEL_BIN} ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/
-        COMMAND ${SCP_CMD} ${CMAKE_BINARY_DIR}/kernel/${KERNEL_SYM_DEPLOY} ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/
-        COMMAND ${SCP_CMD} ${CMAKE_CURRENT_BINARY_DIR}/boot.scr ${CMAKE_CURRENT_BINARY_DIR}/xv6.scr ${CMAKE_CURRENT_BINARY_DIR}/xv6-tftp.scr ${CMAKE_CURRENT_BINARY_DIR}/default.scr ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/
-        COMMAND ${SSH_CMD} ${ORANGEPI_USER}@${ORANGEPI_IP} sync
-        COMMENT "Deploying to Orange Pi at ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/"
-    )
-    add_dependencies(deploy kernel_all fs_img)
+    # Deploy both compressed and uncompressed images for compatibility
+    # The U-Boot script will try compressed first, fall back to uncompressed
+    if(ENABLE_COMPRESSION)
+        add_custom_target(deploy
+            # Deploy compressed kernel
+            COMMAND ${SCP_CMD} ${CMAKE_BINARY_DIR}/kernel/${KERNEL_BIN_GZ} ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/
+            # Deploy compressed filesystem
+            COMMAND ${SCP_CMD} ${CMAKE_BINARY_DIR}/fs.img.gz ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/
+            # Deploy symbol file
+            COMMAND ${SCP_CMD} ${CMAKE_BINARY_DIR}/kernel/${KERNEL_SYM_DEPLOY} ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/
+            # Deploy boot scripts
+            COMMAND ${SCP_CMD} ${CMAKE_CURRENT_BINARY_DIR}/boot.scr ${CMAKE_CURRENT_BINARY_DIR}/xv6.scr ${CMAKE_CURRENT_BINARY_DIR}/xv6-tftp.scr ${CMAKE_CURRENT_BINARY_DIR}/default.scr ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/
+            COMMAND ${SSH_CMD} ${ORANGEPI_USER}@${ORANGEPI_IP} sync
+            COMMENT "Deploying compressed images to Orange Pi at ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/"
+        )
+    else()
+        add_custom_target(deploy
+            COMMAND ${SCP_CMD} ${CMAKE_BINARY_DIR}/kernel/${KERNEL_BIN} ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/
+            COMMAND ${SCP_CMD} ${CMAKE_BINARY_DIR}/fs.img ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/
+            COMMAND ${SCP_CMD} ${CMAKE_BINARY_DIR}/kernel/${KERNEL_SYM_DEPLOY} ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/
+            COMMAND ${SCP_CMD} ${CMAKE_CURRENT_BINARY_DIR}/boot.scr ${CMAKE_CURRENT_BINARY_DIR}/xv6.scr ${CMAKE_CURRENT_BINARY_DIR}/xv6-tftp.scr ${CMAKE_CURRENT_BINARY_DIR}/default.scr ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/
+            COMMAND ${SSH_CMD} ${ORANGEPI_USER}@${ORANGEPI_IP} sync
+            COMMENT "Deploying to Orange Pi at ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/"
+        )
+    endif()
+    add_dependencies(deploy kernel_all fs_img uboot-scripts)
 
     message(STATUS "Deploy target: scp to ${ORANGEPI_USER}@${ORANGEPI_IP}:${ORANGEPI_BOOT_DIR}/")
 endif()

@@ -231,12 +231,35 @@ add_custom_command(
     DEPENDS ${KERNEL_SYM_FINAL}
 )
 
+# ==============================================================================
+# Compressed kernel image (optional)
+# ==============================================================================
+# Both QEMU and U-Boot (booti) support gzip-compressed kernel images.
+# The compressed image is named xv6.bin.gz
+# ==============================================================================
+if(ENABLE_COMPRESSION)
+    find_program(GZIP gzip)
+    if(GZIP)
+        add_custom_command(
+            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin.gz
+            COMMAND ${GZIP} -9 -k -f xv6.bin
+            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+            COMMENT "Compressing xv6.bin -> xv6.bin.gz"
+            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin
+        )
+        set(KERNEL_BIN_COMPRESSED ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin.gz)
+    endif()
+endif()
+
 add_custom_target(kernel_all ALL
     DEPENDS kernel_with_symbols ${KERNEL_DECOMPILED}
             ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin
             ${CMAKE_CURRENT_BINARY_DIR}/xv6.sym
+            $<$<BOOL:${ENABLE_COMPRESSION}>:${KERNEL_BIN_COMPRESSED}>
 )
 
 # Export variables needed by boot/CMakeLists.txt
 set(KERNEL_BIN xv6.bin PARENT_SCOPE)
+set(KERNEL_BIN_GZ xv6.bin.gz PARENT_SCOPE)
 set(KERNEL_SYM_DEPLOY xv6.sym PARENT_SCOPE)
+set(ENABLE_COMPRESSION ${ENABLE_COMPRESSION} PARENT_SCOPE)

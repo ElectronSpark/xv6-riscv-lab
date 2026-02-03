@@ -179,6 +179,24 @@ endif()
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${XCFLAGS}")
 
+# ==============================================================================
+# Compression Support (defined before subdirectories for propagation)
+# ==============================================================================
+# Enable compression for kernel and filesystem images.
+# Both QEMU and U-Boot support gzip-compressed images.
+# ==============================================================================
+option(ENABLE_COMPRESSION "Compress kernel and filesystem images with gzip" ON)
+
+if(ENABLE_COMPRESSION)
+    find_program(GZIP gzip)
+    if(NOT GZIP)
+        message(WARNING "gzip not found - compression disabled")
+        set(ENABLE_COMPRESSION OFF)
+    else()
+        message(STATUS "Compression enabled (gzip found)")
+    endif()
+endif()
+
 add_subdirectory(kernel)
 add_subdirectory(user)
 add_subdirectory(boot)
@@ -232,8 +250,21 @@ add_custom_command(
     COMMENT "Creating empty xv6fs disk image fs0.img"
 )
 
+# Compressed filesystem image
+if(ENABLE_COMPRESSION)
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fs.img.gz
+        COMMAND ${GZIP} -9 -k -f fs.img
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/fs.img
+        COMMENT "Compressing fs.img -> fs.img.gz"
+    )
+    set(FS_IMG_COMPRESSED ${CMAKE_CURRENT_BINARY_DIR}/fs.img.gz)
+endif()
+
 add_custom_target(fs_img ALL
     DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/fs.img ${CMAKE_CURRENT_BINARY_DIR}/fs0.img
+            $<$<BOOL:${ENABLE_COMPRESSION}>:${FS_IMG_COMPRESSED}>
     COMMENT "Creating file system images"
 )
 

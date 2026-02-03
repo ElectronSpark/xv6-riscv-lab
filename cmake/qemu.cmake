@@ -65,10 +65,19 @@ endif()
 # Compose QEMU options
 # Use xv6.bin flat binary with Linux boot header (unified with Orange Pi)
 # Load fs.img as initrd/ramdisk - appears in FDT for ramdisk driver
+#
+# NOTE: QEMU's -kernel option for RISC-V does NOT support gzip-compressed
+# kernels. Only U-Boot's 'booti' command can decompress gzip kernels.
+# Therefore, QEMU always uses uncompressed images.
+# Compressed images (xv6.bin.gz, fs.img.gz) are for U-Boot deployment only.
+
+set(QEMU_KERNEL_IMG ${CMAKE_BINARY_DIR}/kernel/xv6.bin)
+set(QEMU_INITRD_IMG ${CMAKE_BINARY_DIR}/fs.img)
+
 set(QEMUOPTS_PARAM
     ${QEMU_BIOS_OPT}
-    -kernel ${CMAKE_BINARY_DIR}/kernel/xv6.bin
-    -initrd ${CMAKE_BINARY_DIR}/fs.img
+    -kernel ${QEMU_KERNEL_IMG}
+    -initrd ${QEMU_INITRD_IMG}
     -m 1024M
     -smp ${CPUS}
     -nographic
