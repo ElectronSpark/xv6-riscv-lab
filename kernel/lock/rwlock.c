@@ -15,7 +15,7 @@
 
 static inline int __reader_should_wait(rwlock_t *lock) {
     if (lock->readers == 0) {
-        return lock->holder_pid != 0;
+        return lock->holder_pid != -1;  // -1 = no holder
     }
     if ((lock->flags & RWLOCK_PRIO_WRITE) && proc_queue_size(&lock->write_queue) > 0) {
         return 1;
@@ -28,7 +28,7 @@ static inline int __writer_should_wait(rwlock_t *lock, int pid) {
         // The caller already holds the write lock
         return 0;
     }
-    if (lock->holder_pid != 0) {
+    if (lock->holder_pid != -1) {  // -1 = no holder
         return 1;
     }
     if (lock->readers > 0) {
@@ -80,7 +80,7 @@ int rwlock_init(rwlock_t *lock, uint64 flags, const char *name) {
     proc_queue_init(&lock->read_queue, "rwlock read queue", &lock->lock);
     proc_queue_init(&lock->write_queue, "rwlock write queue", &lock->lock);
     lock->name = name;
-    lock->holder_pid = 0;
+    lock->holder_pid = -1;  // -1 = no holder (0 is valid PID for idle)
     lock->flags = flags;
 
     return 0; // Success
@@ -120,7 +120,7 @@ int rwlock_acquire_write(rwlock_t *lock) {
     int ret = 0;
     spin_lock(&lock->lock);
     struct proc *self = myproc();
-    int self_pid = (self != NULL) ? self->pid : 0;
+    int self_pid = self->pid;  // myproc() != NULL asserted above
     assert(lock->holder_pid != self_pid, "rwlock_acquire_write: deadlock detected, process already holds the write lock");
     // @TODO: signal handling (wait is still uninterruptible for now)
     while (__writer_should_wait(lock, self_pid)) {
@@ -143,11 +143,11 @@ void rwlock_release(rwlock_t *lock) {
 
     spin_lock(&lock->lock);
     struct proc *self = myproc();
-    int self_pid = (self != NULL) ? self->pid : 0;
-    if (lock->holder_pid == self_pid) {
+    int self_pid = (self != NULL) ? self->pid : -1;
+    if (lock->holder_pid == self_pid && self_pid != -1) {
         // When the current process is the writer holding the lock
         // Then the current process is holding the write lock
-        lock->holder_pid = 0; // Clear the holder if no writers are waiting
+        lock->holder_pid = -1; // Clear the holder (-1 = no holder)
         __do_wake_up(lock);
     } else {
         assert(lock->readers > 0, "rwlock_release: no readers to release");
@@ -161,15 +161,16 @@ void rwlock_release(rwlock_t *lock) {
 }
 
 bool rwlock_is_write_holding(rwlock_t *lock) {
-    assert(myproc() != NULL, "rwlock_is_write_holding: no current process");
     if (!lock) {
         return false; // Invalid lock
     }
+    struct proc *self = myproc();
+    if (self == NULL) {
+        return false; // No process context, can't be holding the lock
+    }
 
     spin_lock(&lock->lock);
-    struct proc *self = myproc();
-    int self_pid = (self != NULL) ? self->pid : 0;
-    bool is_locked = (lock->holder_pid == self_pid);
+    bool is_locked = (lock->holder_pid == self->pid);
     spin_unlock(&lock->lock);
     return is_locked;
 }

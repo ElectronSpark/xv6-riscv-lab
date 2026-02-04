@@ -1,20 +1,26 @@
 /*
  * xv6fs file operations
  *
- * TRANSACTION MANAGEMENT: FS-INTERNAL (not VFS-managed)
- * =====================================================
- * File write manages transactions internally because:
- * 1. Large writes require BATCHED transactions (multiple begin/end cycles)
- * 2. VFS holds inode lock before calling file->ops->write
+ * LOCKING DESIGN: DRIVER-MANAGED INODE LOCKS
+ * ==========================================
+ * VFS file operations (vfs_fileread, vfs_filewrite, etc.) do NOT acquire
+ * the inode lock before calling into the driver. Instead, each driver
+ * callback is responsible for acquiring the inode lock when needed.
  *
- * This is the "hybrid approach" documented in superblock.c:
- * - Metadata ops: VFS manages transactions via callbacks
- * - File ops: FS manages transactions internally (here)
+ * This design is necessary because:
+ * 1. xv6fs_file_write needs to acquire a transaction (begin_op) BEFORE
+ *    locking the inode, to match VFS lock ordering: transaction → superblock → inode
+ * 2. If VFS held the inode lock when calling write, and write called begin_op,
+ *    it would cause deadlock with other paths that do begin_op → ilock.
  *
- * Lock ordering for file write: inode_mutex → transaction
- * (Reversed from metadata ops, but safe because different inodes are involved)
+ * LOCK ORDERING:
+ * - xv6fs_file_write: begin_op → vfs_ilock → work → vfs_iunlock → end_op
+ * - xv6fs_file_read: vfs_ilock → read → vfs_iunlock (no transaction needed)
+ * - xv6fs_file_llseek: vfs_ilock → read size → vfs_iunlock (for SEEK_END)
+ * - xv6fs_file_stat: vfs_ilock → read fields → vfs_iunlock
  *
- * See superblock.c "Transaction Callbacks" comment for full design explanation.
+ * The VFS file lock (per-file mutex) still serializes concurrent operations
+ * on the same file descriptor and protects the file position.
  */
 
 #include "types.h"
@@ -45,14 +51,23 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool use
         return -EINVAL;
     }
     
+    // Acquire inode lock to safely read size and prevent truncation during read.
+    // Read doesn't need a transaction (no modifications), so we can just lock the inode.
+    // Note: The file reference guarantees the inode remains allocated - no validity
+    // check needed per Linux VFS model (file holds inode reference).
+    vfs_ilock(inode);
+    
     loff_t pos = file->f_pos;
     if (pos >= inode->size) {
+        vfs_iunlock(inode);
         return 0;  // EOF
     }
     if (pos + count > inode->size) {
         count = inode->size - pos;
     }
     
+    // Capture size for later checks (size won't change while we hold the lock,
+    // and we don't release it until we're done reading)
     size_t bytes_read = 0;
     while (bytes_read < count) {
         uint bn = pos / BSIZE;
@@ -73,6 +88,7 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool use
                 while (remaining > 0) {
                     uint chunk = remaining < sizeof(zeros) ? remaining : sizeof(zeros);
                     if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read + (n - remaining)), zeros, chunk) < 0) {
+                        vfs_iunlock(inode);
                         if (bytes_read == 0) return -EFAULT;
                         return bytes_read;
                     }
@@ -84,14 +100,16 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool use
         } else {
             struct buf *bp = bread(ip->dev, addr);
             if (bp == NULL) {
+                vfs_iunlock(inode);
                 if (bytes_read == 0) {
                     return -EIO;
                 }
-                break;
+                return bytes_read;
             }
             if (user) {
                 if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read), bp->data + off, n) < 0) {
                     brelse(bp);
+                    vfs_iunlock(inode);
                     if (bytes_read == 0) return -EFAULT;
                     return bytes_read;
                 }
@@ -105,6 +123,7 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool use
         pos += n;
     }
     
+    vfs_iunlock(inode);
     return bytes_read;
 }
 
@@ -140,7 +159,14 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, b
             n = max;
         }
         
+        // Acquire transaction BEFORE inode lock to match VFS locking order:
+        // transaction → superblock → inode
+        // VFS releases inode lock before calling this function to avoid deadlock.
         xv6fs_begin_op(xv6_sb);
+        
+        // Now acquire inode lock to protect inode metadata during write.
+        // The file reference guarantees the inode remains allocated.
+        vfs_ilock(inode);
         
         size_t chunk_written = 0;
         while (chunk_written < n) {
@@ -153,6 +179,7 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, b
             
             uint addr = xv6fs_bmap(ip, bn);
             if (addr == 0) {
+                vfs_iunlock(inode);
                 xv6fs_end_op(xv6_sb);
                 if (bytes_written == 0) {
                     return -ENOSPC;
@@ -162,6 +189,7 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, b
             
             struct buf *bp = bread(ip->dev, addr);
             if (bp == NULL) {
+                vfs_iunlock(inode);
                 xv6fs_end_op(xv6_sb);
                 if (bytes_written == 0) {
                     return -EIO;
@@ -172,6 +200,7 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, b
             if (user) {
                 if (vm_copyin(myproc()->vm, bp->data + off, (uint64)(buf + bytes_written + chunk_written), chunk) < 0) {
                     brelse(bp);
+                    vfs_iunlock(inode);
                     xv6fs_end_op(xv6_sb);
                     if (bytes_written == 0) return -EFAULT;
                     goto done;
@@ -192,6 +221,8 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, b
         }
         xv6fs_iupdate(ip);
         
+        // Release inode lock before ending transaction
+        vfs_iunlock(inode);
         xv6fs_end_op(xv6_sb);
         
         bytes_written += chunk_written;
@@ -217,7 +248,10 @@ loff_t xv6fs_file_llseek(struct vfs_file *file, loff_t offset, int whence) {
         new_pos = file->f_pos + offset;
         break;
     case SEEK_END:
+        // Need to lock inode to safely read size
+        vfs_ilock(inode);
         new_pos = inode->size + offset;
+        vfs_iunlock(inode);
         break;
     default:
         return -EINVAL;
@@ -242,6 +276,10 @@ int xv6fs_file_stat(struct vfs_file *file, struct stat *stat) {
         return -EINVAL;
     }
     
+    // Lock inode to get consistent snapshot of inode fields.
+    // The file reference guarantees the inode remains allocated.
+    vfs_ilock(inode);
+    
     memset(stat, 0, sizeof(*stat));
     stat->dev = ip->dev;
     stat->ino = inode->ino;
@@ -249,6 +287,7 @@ int xv6fs_file_stat(struct vfs_file *file, struct stat *stat) {
     stat->nlink = inode->n_links;
     stat->size = inode->size;
     
+    vfs_iunlock(inode);
     return 0;
 }
 

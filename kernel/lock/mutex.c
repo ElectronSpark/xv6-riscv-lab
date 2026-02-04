@@ -17,11 +17,11 @@
     __atomic_store_n(&lk->holder, pid, __ATOMIC_SEQ_CST)
 #define __mutex_holder(lk) \
     __atomic_load_n(&lk->holder, __ATOMIC_SEQ_CST)
-#define __mutex_try_set_holder(lk, pid)   atomic_cas(&lk->holder, 0, pid)
+#define __mutex_try_set_holder(lk, pid)   atomic_cas(&lk->holder, -1, pid)  // -1 = no holder
 
 static int __do_wakeup(mutex_t *lk) {
   if (LIST_IS_EMPTY(&lk->wait_queue.head)) {
-    __mutex_set_holder(lk, 0); // No process holds the lock
+    __mutex_set_holder(lk, -1); // -1 = no holder
     assert(proc_queue_size(&lk->wait_queue) == 0,
            "mutex_unlock: wait queue is not empty");
     return 0; // Nothing to release
@@ -40,7 +40,7 @@ mutex_init(mutex_t *lk, char *name)
   spin_init(&lk->lk, "sleep lock");
   proc_queue_init(&lk->wait_queue, "sleep lock wait queue", &lk->lk);
   lk->name = name;
-  __mutex_set_holder(lk, 0);
+  __mutex_set_holder(lk, -1);  // -1 = no holder (0 is valid PID for idle)
 }
 
 int
@@ -81,7 +81,7 @@ mutex_lock(mutex_t *lk)
           // When wait queue is not empty, __do_wakeup will not return -ENOENT
           assert(__do_wakeup(lk) == 0, "mutex_unlock: failed to wake up processes");
         } else if (__mutex_holder(lk) == self->pid) {
-          __mutex_set_holder(lk, 0);
+          __mutex_set_holder(lk, -1);  // -1 = no holder
         }
       }
       spin_unlock(&lk->lk);
@@ -103,8 +103,8 @@ mutex_unlock(mutex_t *lk)
   // from the wait queue.
   spin_lock(&lk->lk);
   struct proc *self = myproc();
-  pid_t self_pid = (self != NULL) ? self->pid : 0;
-  assert(__mutex_holder(lk) == self_pid, "mutex_unlock: process does not hold the lock");
+  assert(self != NULL, "mutex_unlock: no process context");
+  assert(__mutex_holder(lk) == self->pid, "mutex_unlock: process does not hold the lock");
   int ret = __do_wakeup(lk);
   assert(ret == 0 || ret == -ENOENT, "mutex_unlock: failed to wake up processes");
   spin_unlock(&lk->lk);
@@ -114,6 +114,23 @@ int
 holding_mutex(mutex_t *lk)
 {
   struct proc *self = myproc();
-  pid_t self_pid = (self != NULL) ? self->pid : 0;
-  return __atomic_load_n(&lk->holder, __ATOMIC_SEQ_CST) == self_pid;
+  if (self == NULL) {
+    return 0;  // No process context, can't be holding the lock
+  }
+  return __atomic_load_n(&lk->holder, __ATOMIC_SEQ_CST) == self->pid;
+}
+
+int
+mutex_trylock(mutex_t *lk)
+{
+  struct proc *self = myproc();
+  assert(self != NULL, "mutex_trylock: no current process");
+  assert(mycpu()->spin_depth == 0, "mutex_trylock called with spinlock held");
+  assert(!CPU_IN_ITR(), "mutex_trylock called in interrupt context");
+
+  // Try to acquire the lock without blocking
+  if (__mutex_try_set_holder(lk, self->pid)) {
+    return 1;  // Successfully acquired
+  }
+  return 0;  // Failed to acquire
 }

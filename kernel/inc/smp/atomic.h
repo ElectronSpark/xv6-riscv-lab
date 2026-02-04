@@ -56,6 +56,55 @@
         ret;                                                                   \
     })
 
+/**
+ * atomic_inc_not_zero - atomically increment if not zero
+ * @value: pointer to the atomic variable
+ *
+ * Returns true if increment succeeded, false if value was zero.
+ * Use this when getting a reference from a cache/lookup where the
+ * object might be in the process of being freed.
+ */
+#define atomic_inc_not_zero(value)                                             \
+    ({                                                                         \
+        typeof(*value) old = __atomic_load_n(value, __ATOMIC_SEQ_CST);         \
+        bool ret = false;                                                      \
+        while (old != 0) {                                                     \
+            typeof(*value) new_val = old + 1;                                  \
+            if (__atomic_compare_exchange_n(value, &old, new_val, false,       \
+                                            __ATOMIC_SEQ_CST,                  \
+                                            __ATOMIC_SEQ_CST)) {               \
+                ret = true;                                                    \
+                break;                                                         \
+            }                                                                  \
+        }                                                                      \
+        ret;                                                                   \
+    })
+
+/**
+ * atomic_inc_in_range - atomically increment if value is in (min, max) exclusive
+ * @value: pointer to the atomic variable
+ * @min: minimum value (exclusive) - won't increment if value <= min
+ * @max: maximum value (exclusive) - won't increment if value >= max
+ *
+ * Returns true if increment succeeded, false otherwise.
+ * Useful for refcounting where you need to check both 0 and overflow.
+ */
+#define atomic_inc_in_range(value, min, max)                                   \
+    ({                                                                         \
+        typeof(*value) old = __atomic_load_n(value, __ATOMIC_SEQ_CST);         \
+        bool ret = false;                                                      \
+        while (old > (min) && old < (max)) {                                   \
+            typeof(*value) new_val = old + 1;                                  \
+            if (__atomic_compare_exchange_n(value, &old, new_val, false,       \
+                                            __ATOMIC_SEQ_CST,                  \
+                                            __ATOMIC_SEQ_CST)) {               \
+                ret = true;                                                    \
+                break;                                                         \
+            }                                                                  \
+        }                                                                      \
+        ret;                                                                   \
+    })
+
 #define atomic_dec(value) __atomic_fetch_sub(value, 1, __ATOMIC_SEQ_CST)
 #define atomic_inc(value) __atomic_fetch_add(value, 1, __ATOMIC_SEQ_CST)
 #define atomic_or(ptr, val) __atomic_fetch_or((ptr), (val), __ATOMIC_SEQ_CST)

@@ -103,6 +103,7 @@ void            spin_unlock_irqrestore(struct spinlock*, int);
 
 // sleeplock.c
 int mutex_lock(mutex_t *);
+int mutex_trylock(mutex_t *);
 void mutex_unlock(mutex_t *);
 int holding_mutex(mutex_t *);
 void mutex_init(mutex_t *, char *);

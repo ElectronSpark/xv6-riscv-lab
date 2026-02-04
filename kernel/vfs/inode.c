@@ -68,11 +68,44 @@ void vfs_ilock(struct vfs_inode *inode) {
            "vfs_ilock: failed to lock inode mutex");
 }
 
+int vfs_ilock_trylock(struct vfs_inode *inode) {
+    assert(inode != NULL, "vfs_ilock_trylock: inode is NULL");
+    return mutex_trylock(&inode->mutex);
+}
+
 void vfs_iunlock(struct vfs_inode *inode) {
     assert(inode != NULL, "vfs_iunlock: inode is NULL");
     mutex_unlock(&inode->mutex);
 }
 
+/**
+ * Check if an inode is valid for use.
+ * Must be called while holding the inode lock.
+ * 
+ * @param inode The inode to check
+ * @return 0 if valid, negative error code otherwise:
+ *         -EINVAL if inode is NULL, invalid, or superblock is not valid
+ *         -EPERM if caller doesn't hold the inode lock
+ */
+int vfs_inode_check_valid(struct vfs_inode *inode) {
+    return __vfs_inode_valid(inode);
+}
+
+/**
+ * Increment inode reference count.
+ *
+ * SAFETY: This function uses only atomic operations and does NOT:
+ * - Acquire any locks
+ * - Sleep or block
+ * - Allocate memory
+ *
+ * This is critical because vfs_inode_get_ref() may call this while
+ * holding the inode lock. Any blocking here would risk deadlock.
+ *
+ * IMPORTANT: This function assumes the caller already holds a valid
+ * reference to the inode. Use vfs_idup_not_zero() when getting a
+ * reference from a cache/lookup where the inode might be dying.
+ */
 void vfs_idup(struct vfs_inode *inode) {
     assert(inode != NULL, "vfs_idup: inode is NULL");
     assert(inode->sb != NULL, "vfs_idup: inode's superblock is NULL");
@@ -80,13 +113,33 @@ void vfs_idup(struct vfs_inode *inode) {
     assert(success, "vfs_idup: inode refcount overflow");
 }
 
+/**
+ * Try to increment inode reference count if not zero.
+ *
+ * Returns true if successful, false if inode refcount was 0 (inode dying)
+ * or at max (overflow).
+ * Use this when getting a reference from a cache/lookup.
+ *
+ * SAFETY: Same as vfs_idup - uses only atomic operations, no locks/blocking.
+ */
+bool vfs_idup_not_zero(struct vfs_inode *inode) {
+    assert(inode != NULL, "vfs_idup_not_zero: inode is NULL");
+    // Atomically increment only if refcount is in range (0, MAX)
+    return atomic_inc_in_range(&inode->ref_count, 0, VFS_INODE_MAX_REFCOUNT);
+}
+
 // Decrease inode ref count; free the inode when the last reference is dropped.
 // Caller must not hold the inode lock when calling (vfs_iput() will acquire locks internally
 // when it needs to remove/free an inode).
+//
+// IMPORTANT: Caller must NOT hold:
+// - superblock read or write lock (we acquire wlock internally)
+// - inode lock (we acquire it internally)
+// The assertion only checks write lock; callers must ensure they don't hold rlock.
 void vfs_iput(struct vfs_inode *inode) {
     assert(inode != NULL, "vfs_iput: inode is NULL");
     assert(inode->sb == NULL || !vfs_superblock_wholding(inode->sb),
-           "vfs_iput: cannot hold superblock read lock when calling");
+           "vfs_iput: cannot hold superblock write lock when calling");
     assert(!holding_mutex(&inode->mutex), "vfs_iput: cannot hold inode lock when calling");
 
     // tried to cleanup the inode but failed
@@ -107,9 +160,20 @@ retry:
         goto out;
     }
 
-    // acquire related locks to delete the inode
+    // Standard VFS lock order: superblock wlock → inode lock
+    // We use trylock for inode to avoid deadlock with xv6fs which uses
+    // inode lock → begin_op order. If trylock fails, yield and retry.
+    // We do NOT acquire transaction here - only acquire it if we actually
+    // need to call destroy_inode. This avoids wasting limited transaction
+    // slots for the common case where inode has links and won't be destroyed.
     vfs_superblock_wlock(sb);
-    vfs_ilock(inode);
+    if (!vfs_ilock_trylock(inode)) {
+        // Couldn't get inode lock - release superblock and retry
+        // This avoids deadlock with threads holding inode lock waiting for transaction
+        vfs_superblock_unlock(sb);
+        scheduler_yield();
+        goto retry;
+    }
 
     // Retry decreasing refcount again, as it may have changed meanwhile
     if (atomic_dec_unless(&inode->ref_count, 1)) {
@@ -142,7 +206,7 @@ retry:
         }
     }
 
-    assert(!inode->mount, "vfs_iput: refcount of mountpoint inode reached zero");
+    assert(!inode->mount, "vfs_iput: refcount of mountpoint inode reached zero");;
 
     // Handle orphan cleanup: remove from orphan list
     if (inode->orphan) {
@@ -165,7 +229,7 @@ retry:
     // If sync failed, just delete it.
     if (inode->dirty && inode->valid && !failed_clean && sb->attached) {
         vfs_iunlock(inode);
-        vfs_superblock_unlock(inode->sb);
+        vfs_superblock_unlock(sb);
         failed_clean = vfs_sync_inode(inode) != 0;
         // Someone else may have acquired the inode meanwhile, so retry
         goto retry;
@@ -185,26 +249,29 @@ retry:
         // The inode stays in the cache until destroy_inode completes.
         inode->destroying = 1;
         
-        // Release locks before calling destroy_inode, which may sleep
-        // when acquiring a transaction. We must release locks BEFORE
-        // begin_transaction to avoid deadlock (lock ordering: transaction
-        // must be acquired before superblock/inode locks).
+        // Release locks before acquiring transaction.
+        // Unlock in standard order (inode first, then superblock).
+        // destroy_inode (e.g., xv6fs_itrunc) may do end_op/begin_op cycles
+        // internally for batching, and we cannot hold locks during those cycles.
         vfs_iunlock(inode);
         vfs_superblock_unlock(sb);
         
-        // Begin transaction for destroy_inode (it does disk I/O)
+        // Now acquire transaction for destroy_inode
         if (sb->ops->begin_transaction != NULL) {
             int tx_ret = sb->ops->begin_transaction(sb);
             if (tx_ret != 0) {
-                // Transaction failed - mark as not destroying and skip destroy
-                // The inode's on-disk data remains, will be cleaned on next mount
+                // Transaction failed - inode's on-disk data remains
+                // Will be cleaned on next mount via orphan recovery
                 inode->destroying = 0;
+                // Still need to remove from cache - re-acquire locks
+                // Standard lock order: superblock first, then inode
                 vfs_superblock_wlock(sb);
                 vfs_ilock(inode);
                 goto skip_destroy;
             }
         }
         
+        // destroy_inode expects caller to have an active transaction
         inode->ops->destroy_inode(inode);
         
         // End transaction after destroy_inode
@@ -216,6 +283,7 @@ retry:
         }
         
         // Re-acquire locks to remove inode from cache
+        // Standard lock order: superblock first, then inode
         vfs_superblock_wlock(sb);
         vfs_ilock(inode);
         
@@ -227,14 +295,17 @@ retry:
     }
 
 skip_destroy:
+
     ret = vfs_remove_inode(inode->sb, inode);
     assert(ret == 0, "vfs_iput: failed to remove inode from superblock inode cache");
     
     // Check if this was the last orphan on a detached fs
     should_free_sb = (!sb->attached && sb->orphan_count == 0);
     
+    // Unlock in standard order: inode first, then superblock
     vfs_iunlock(inode);
     vfs_superblock_unlock(sb);
+    
 out:
     // Free directory name if allocated
     if (inode->name != NULL) {
@@ -252,6 +323,7 @@ out:
     if (parent != NULL) {
         // Due to the limited kernel space stack, we avoid recursive calls here
         inode = parent;
+        sb = inode->sb;  // Update sb for the parent inode
         parent = NULL;
         failed_clean = false;
         should_free_sb = false;
@@ -1343,7 +1415,13 @@ struct vfs_inode *vfs_curroot(void) {
     return rooti;
 }
 
-struct vfs_inode *vfs_namei(const char *path, size_t path_len) {
+/*
+ * __vfs_namei - Internal path lookup implementation.
+ *
+ * Returns -EAGAIN if a transient race condition is detected (e.g., inode
+ * being freed during mount traversal). Caller should retry.
+ */
+static struct vfs_inode *__vfs_namei(const char *path, size_t path_len) {
     if (path == NULL || path_len == 0) {
         return ERR_PTR(-EINVAL); // Invalid argument
     }
@@ -1378,7 +1456,11 @@ struct vfs_inode *vfs_namei(const char *path, size_t path_len) {
             return ERR_PTR(-EINVAL); // Mounted root inode has no mounted root
         }
         struct vfs_inode *mnt_root = rooti->mnt_rooti;
-        vfs_idup(mnt_root);
+        if (!vfs_idup_not_zero(mnt_root)) {
+            vfs_iput(rooti);
+            kmm_free(pathbuf);
+            return ERR_PTR(-EAGAIN); // Mounted root is dying, retry
+        }
         vfs_iput(rooti);
         rooti = mnt_root;
     }
@@ -1439,7 +1521,13 @@ struct vfs_inode *vfs_namei(const char *path, size_t path_len) {
 
         while (pos->mount && pos->mnt_rooti != NULL) {
             struct vfs_inode *mnt_root = pos->mnt_rooti;
-            vfs_idup(mnt_root);
+            if (!vfs_idup_not_zero(mnt_root)) {
+                // Mount root is dying, need to retry entire lookup
+                vfs_iput(pos);
+                pos = NULL;
+                ret_inode = ERR_PTR(-EAGAIN);
+                goto out;
+            }
             vfs_iput(pos);
             pos = mnt_root;
         }
@@ -1455,6 +1543,38 @@ out:
         return ERR_PTR(-ENOENT);
     }
     return ret_inode;
+}
+
+#define VFS_NAMEI_MAX_RETRIES 10
+
+/*
+ * vfs_namei - Resolve a path to an inode.
+ *
+ * This is the public wrapper that handles retry logic for transient
+ * race conditions (e.g., inode being freed during mount traversal).
+ *
+ * @path: Path to resolve
+ * @path_len: Length of path string
+ *
+ * Returns: Inode pointer on success (with refcount incremented),
+ *          ERR_PTR(errno) on failure.
+ */
+struct vfs_inode *vfs_namei(const char *path, size_t path_len) {
+    struct vfs_inode *result;
+    int retries = 0;
+
+    do {
+        result = __vfs_namei(path, path_len);
+        if (!IS_ERR(result) || PTR_ERR(result) != -EAGAIN) {
+            return result;
+        }
+        // Transient race condition, yield and retry
+        scheduler_yield();
+        retries++;
+    } while (retries < VFS_NAMEI_MAX_RETRIES);
+
+    // Too many retries, return the error
+    return ERR_PTR(-EAGAIN);
 }
 
 // vfs_nameiparent resolves the parent directory of a path and copies the final

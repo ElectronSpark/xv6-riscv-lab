@@ -509,9 +509,17 @@ void install_user_root(void) {
     PROC_SET_USER_SPACE(p);
     proc_unlock(p);
 
-    // Set the VFS cwd to root
+    // Get reference to root inode BEFORE acquiring spinlock
+    // (vfs_inode_get_ref may acquire the inode mutex internally)
+    struct vfs_inode_ref cwd_ref;
+    int ret = vfs_inode_get_ref(root_inode, &cwd_ref);
+    if (ret < 0) {
+        panic("install_user_root: failed to get ref to root inode");
+    }
+
+    // Set the VFS cwd to root (only assignment under spinlock)
     vfs_struct_lock(p->fs);
-    vfs_inode_get_ref(root_inode, &p->fs->cwd);
+    p->fs->cwd = cwd_ref;
     vfs_struct_unlock(p->fs);
 
     // Release the lookup reference (cwd now holds its own ref)

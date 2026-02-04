@@ -5,11 +5,13 @@
 #include "printf.h"
 #include <smp/atomic.h>
 #include "clone_flags.h"
+#include "proc/workqueue_types.h"
 
 #define VFS_PATH_MAX 65535
 #define VFS_INODE_MAX_REFCOUNT 0x7FFF0000
 
 void vfs_init(void);
+struct workqueue *vfs_get_deferred_iput_wq(void);
 
 // Filesystem type registration
 struct vfs_fs_type *vfs_fs_type_allocate(void);
@@ -54,8 +56,11 @@ int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
 // - Do not access an inode after calling the last vfs_iput() on it.
 
 void vfs_ilock(struct vfs_inode *inode);
+int vfs_ilock_trylock(struct vfs_inode *inode); // Try to lock, returns 1 on success, 0 on failure
 void vfs_iunlock(struct vfs_inode *inode);
-void vfs_idup(struct vfs_inode *inode);         // Increase ref count
+int vfs_inode_check_valid(struct vfs_inode *inode); // Check inode validity (must hold inode lock)
+void vfs_idup(struct vfs_inode *inode);         // Increase ref count (caller must hold a reference)
+bool vfs_idup_not_zero(struct vfs_inode *inode); // Try to increase ref count if not zero (for cache lookups)
 void vfs_iput(struct vfs_inode *inode);         // Decrease ref count. Caller must not hold inode lock when calling
 int vfs_invalidate(struct vfs_inode *inode);    // Decrease ref count and invalidate inode
 int vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty

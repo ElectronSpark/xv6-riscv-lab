@@ -376,11 +376,10 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
     }
     
     // Regular files
-    vfs_ilock(inode);
-    ret = __vfs_inode_valid(inode);
-    if (ret != 0) {
-        goto out;
-    }
+    // Note: We do NOT lock the inode here. The driver callback (e.g., xv6fs_file_read)
+    // is responsible for acquiring the inode lock to read size and data.
+    // This avoids lock ordering issues where the driver may need to acquire
+    // transactions that conflict with VFS locking order (transaction → superblock → inode).
     if (!S_ISREG(inode->mode)) {
         ret = -EINVAL; // Inode is not a regular file
         goto out;
@@ -389,19 +388,12 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
         ret = -ENOSYS; // Read operation not supported
         goto out;
     }
-    if (file->f_pos >= inode->size) {
-        ret = 0; // EOF
-        goto out;
-    }
-    if (inode->size - file->f_pos < n) {
-        n = inode->size - file->f_pos; // Adjust n to read up to EOF
-    }
+    // Pass requested size to driver; driver handles EOF and size checks internally
     ret = file->ops->read(file, buf, n, user);
     if (ret > 0) {
         file->f_pos += ret;
     }
 out:
-    vfs_iunlock(inode);
     __vfs_file_unlock(file);
     return ret;
 }
@@ -492,11 +484,12 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n, bool use
     }
     
     // Regular files
-    vfs_ilock(inode);
-    ret = __vfs_inode_valid(inode);
-    if (ret != 0) {
-        goto out;
-    }
+    // Note: We do NOT lock the inode here. The driver callback (e.g., xv6fs_file_write)
+    // is responsible for acquiring transactions and inode lock in the correct order:
+    // transaction → inode lock. This avoids deadlock because xv6fs_truncate also
+    // needs to acquire transactions, and we can't hold the inode lock when calling
+    // into the filesystem which needs transactions.
+    // The file lock still protects file position and serializes concurrent writes.
     if (!S_ISREG(inode->mode)) {
         ret = -EINVAL; // Inode is not a regular file
         goto out;
@@ -505,29 +498,12 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n, bool use
         ret = -ENOSYS; // Write operation not supported
         goto out;
     }
-    loff_t new_pos = file->f_pos + n;
-    if (new_pos < file->f_pos) {
-        // Overflow
-        ret = -EFBIG; // File too large
-        goto out;
-    }
-    if (new_pos > inode->size) {
-        // Need to extend the file - use truncate to allocate blocks
-        if (inode->ops == NULL || inode->ops->truncate == NULL) {
-            ret = -EFBIG; // Truncate operation not supported
-            goto out;
-        }
-        ret = inode->ops->truncate(inode, new_pos);
-        if (ret != 0) {
-            goto out;
-        }
-    }
+    // The driver handles file extension, size updates, and truncation internally
     ret = file->ops->write(file, buf, n, user);
     if (ret > 0) {
         file->f_pos += ret;
     }
 out:
-    vfs_iunlock(inode);
     __vfs_file_unlock(file);
     return ret;
 }
@@ -547,13 +523,9 @@ loff_t vfs_filelseek(struct vfs_file *file, loff_t offset, int whence) {
         return -ESPIPE; // Illegal seek
     }
     __vfs_file_lock(file);
-    vfs_ilock(inode);
-    ret = __vfs_inode_valid(inode);
-    if (ret != 0) {
-        vfs_iunlock(inode);
-        goto out;
-    }
-    vfs_iunlock(inode);
+    // Note: We do NOT lock the inode here. The driver callback (e.g., xv6fs_file_llseek)
+    // is responsible for acquiring the inode lock when needed (e.g., for SEEK_END).
+    // This matches the design used for read/write operations.
     if (file->ops == NULL || file->ops->llseek == NULL) {
         ret = -ENOSYS; // Llseek operation not supported
         goto out;

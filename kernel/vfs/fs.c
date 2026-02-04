@@ -12,6 +12,7 @@
 #include "lock/rwlock.h"
 #include "proc/proc.h"
 #include "proc/sched.h"
+#include "proc/workqueue.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
 #include "vfs_private.h"
@@ -39,6 +40,13 @@ static slab_cache_t vfs_struct_cache = { 0 };
 static struct mutex __mount_mutex = { 0 };
 static list_node_t vfs_fs_types = { 0 };
 static uint16 vfs_fs_type_count = 0;
+
+// Workqueue for deferred iput operations.
+// vfs_iput() can block on superblock wlock, inode mutex, and transactions.
+// It must not be called directly from RCU callbacks since that can cause
+// deadlocks (RCU callbacks block on locks held by processes waiting for
+// RCU grace periods). Instead, RCU callbacks queue work to this workqueue.
+static struct workqueue *__vfs_deferred_iput_wq = NULL;
 
 // The absolute root inode of the VFS
 // It is a special inode that serves as the root of the entire filesystem tree
@@ -409,6 +417,16 @@ void vfs_init(void) {
                           SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
     assert(ret == 0, "Failed to initialize vfs_struct_cache slab cache, errno=%d", ret);
     vfs_fs_type_count = 0;
+    
+    // Create single-threaded workqueue for deferred iput operations.
+    // Using max_active=1 serializes all deferred iputs, reducing lock contention
+    // on vfs_superblock_wlock. This prevents the "thundering herd" effect where
+    // many workers simultaneously compete for the same locks, potentially causing
+    // deadlock with processes doing regular FS operations (create/write).
+    // This must be done early, before any file operations that might use RCU.
+    __vfs_deferred_iput_wq = workqueue_create("vfs_iput_wq", 1);
+    assert(__vfs_deferred_iput_wq != NULL, "Failed to create vfs_iput workqueue");
+    
     struct proc *proc = myproc();
     assert(proc != NULL, "vfs_init must be called from a process context");
     __vfs_inode_init(&vfs_root_inode);
@@ -437,6 +455,19 @@ void vfs_init(void) {
     // Optional: run smoke tests in a separate kernel process with chroot to /tmp
     // tmpfs_smoketest_start();
     // xv6fs_run_all_smoketests();
+}
+
+/*
+ * vfs_get_deferred_iput_wq - Get the VFS deferred iput workqueue.
+ *
+ * Returns the workqueue used for deferred iput operations. RCU callbacks
+ * that need to call vfs_fput() or vfs_iput() should queue work to this
+ * workqueue instead of calling those functions directly.
+ *
+ * Returns: Pointer to the workqueue, or NULL if not yet initialized.
+ */
+struct workqueue *vfs_get_deferred_iput_wq(void) {
+    return __vfs_deferred_iput_wq;
 }
 
 /*
@@ -1192,11 +1223,15 @@ int vfs_get_mnt_rooti(struct vfs_inode *mountpoint, struct vfs_inode **ret_rooti
         vfs_iunlock(mountpoint);
         return -EINVAL; // Mounted superblock has no root inode
     }
+    // Take a reference to root inode BEFORE unlocking mountpoint.
+    // Use vfs_idup_not_zero since we don't hold a reference yet.
+    if (!vfs_idup_not_zero(rooti)) {
+        vfs_iunlock(mountpoint);
+        return -EINVAL; // Root inode is being freed
+    }
     vfs_iunlock(mountpoint);
 
-    // Avoid acquiring multiple superblock locks and inode locks at once
-    // So we first increase the refcount of the root inode to keep it alive
-    vfs_idup(rooti);
+    // Now we hold a reference, safe to lock
     vfs_ilock(rooti);
     *ret_rooti = rooti;
     return ret_val;
@@ -1277,6 +1312,17 @@ void vfs_superblock_mountcount_dec(struct vfs_superblock *sb) {
     // references to the superblock itself.
 }
 
+/**
+ * Increment superblock reference count.
+ *
+ * SAFETY: This function uses only atomic operations and does NOT:
+ * - Acquire any locks
+ * - Sleep or block
+ * - Allocate memory
+ *
+ * This is critical because vfs_inode_get_ref() may call this while
+ * holding the inode lock. Any blocking here would risk deadlock.
+ */
 void vfs_superblock_dup(struct vfs_superblock *sb) {
     assert(sb != NULL, "Superblock cannot be NULL when duplicating");
     int ret = __atomic_add_fetch(&sb->refcount, 1, __ATOMIC_SEQ_CST);
@@ -1557,10 +1603,10 @@ static void __vfs_set_name_if_null(struct vfs_inode *inode, struct vfs_dentry *d
 static struct vfs_inode *__vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) {
     struct vfs_inode *inode = NULL;
 
+    // vfs_get_inode_cached now returns with refcount already incremented
     inode = vfs_get_inode_cached(dentry->sb, dentry->ino);
     if (!IS_ERR_OR_NULL(inode)) {
         __vfs_set_name_if_null(inode, dentry);
-        vfs_idup(inode);
         vfs_iunlock(inode);
         return inode;
     }
@@ -1582,7 +1628,6 @@ static struct vfs_inode *__vfs_get_dentry_inode_impl(struct vfs_dentry *dentry) 
     inode = vfs_get_inode_cached(dentry->sb, dentry->ino);
     if (!IS_ERR_OR_NULL(inode)) {
         __vfs_set_name_if_null(inode, dentry);
-        vfs_idup(inode);
         vfs_iunlock(inode);
         return inode;
     }
@@ -1726,14 +1771,21 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
     if (inode == NULL) {
         return ERR_PTR(-ENOENT); // Inode not found
     }
+    // CRITICAL: Take a reference BEFORE locking to prevent use-after-free.
+    // If refcount is 0, the inode is being freed - treat as not found.
+    if (!vfs_idup_not_zero(inode)) {
+        return ERR_PTR(-ENOENT); // Inode is dying
+    }
     vfs_ilock(inode);
     if (!inode->valid || inode->destroying) {
         // Inode should be valid when first gotten from the cache,
         // but it may have been invalidated or is being destroyed.
         // In this case, the inode should be treated as not found.
         vfs_iunlock(inode);
+        vfs_iput(inode); // Release the reference we just took
         return ERR_PTR(-ENOENT); // Inode is not valid or being destroyed
     }
+    // Return with reference held and inode locked
     return inode;
 }
 
@@ -1895,33 +1947,43 @@ struct fs_struct *vfs_struct_clone(struct fs_struct *old_fs, uint64 clone_flags)
         return ERR_PTR(-ENOMEM);
     }
 
+    // Get inode pointers under spinlock, but take references outside
+    // (vfs_inode_get_ref may acquire inode mutex, can't hold spinlock)
     vfs_struct_lock(old_fs);
-    // Clone root and cwd
-    int ret = 0;
     struct vfs_inode *rooti = vfs_inode_deref(&old_fs->rooti);
-    if (rooti) {
+    struct vfs_inode *cwdi = vfs_inode_deref(&old_fs->cwd);
+    // Take temporary references while holding spinlock to keep them alive
+    // (these are atomic ops, safe under spinlock)
+    // Use vfs_idup_not_zero since the inodes might be dying during exit
+    bool rooti_ok = rooti && vfs_idup_not_zero(rooti);
+    bool cwdi_ok = cwdi && vfs_idup_not_zero(cwdi);
+    vfs_struct_unlock(old_fs);
+
+    // Now get the full refs outside spinlock
+    int ret = 0;
+    if (rooti_ok) {
         ret = vfs_inode_get_ref(rooti, &new_fs->rooti);
+        vfs_iput(rooti);  // release temporary ref
         if (ret != 0) {
-            goto out_locked;
+            if (cwdi_ok) vfs_iput(cwdi);
+            goto out_free;
         }
     }
-    struct vfs_inode *cwdi = vfs_inode_deref(&old_fs->cwd);
-    if (cwdi) {
+    if (cwdi_ok) {
         ret = vfs_inode_get_ref(cwdi, &new_fs->cwd);
+        vfs_iput(cwdi);  // release temporary ref
         if (ret != 0) {
-            goto out_locked;
+            goto out_free;
         }
     }
     ret = 0;
-out_locked:
-    vfs_struct_unlock(old_fs);
-    if (ret != 0) {
-        vfs_inode_put_ref(&new_fs->rooti);
-        vfs_inode_put_ref(&new_fs->cwd);
-        __vfs_struct_free(new_fs);
-        return ERR_PTR(ret);
-    }
     return new_fs;
+
+out_free:
+    vfs_inode_put_ref(&new_fs->rooti);
+    vfs_inode_put_ref(&new_fs->cwd);
+    __vfs_struct_free(new_fs);
+    return ERR_PTR(ret);
 }
 
 void vfs_struct_put(struct fs_struct *fs) {
@@ -1936,14 +1998,26 @@ void vfs_struct_put(struct fs_struct *fs) {
     }
 }
 
+/**
+ * Get a reference to an inode, storing it in the provided ref structure.
+ *
+ * The caller must already hold a valid reference to the inode.
+ * This function simply takes an additional reference and populates
+ * the ref structure.
+ *
+ * @param inode The inode to reference (caller must hold a reference)
+ * @param ref   Output: the inode reference structure to populate
+ * @return 0 on success, -EINVAL if inode is NULL
+ */
 int vfs_inode_get_ref(struct vfs_inode *inode, struct vfs_inode_ref *ref) {
     if (inode == NULL || ref == NULL) {
         return -EINVAL;
     }
     struct vfs_superblock *sb = inode->sb;
-    if (!inode->valid || sb == NULL || !sb->valid) {
-        return -EINVAL; // Inode is not valid
+    if (sb == NULL) {
+        return -EINVAL;
     }
+    // Caller must already hold a reference, so these can't fail
     vfs_superblock_dup(sb);
     vfs_idup(inode);
     ref->sb = sb;

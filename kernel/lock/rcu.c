@@ -944,7 +944,7 @@ static int rcu_cb_kthread(uint64 cpu_id, uint64 arg2) {
            scheduler_yield();
         } else {
             // No pending callbacks - can sleep
-            scheduler_sleep(NULL, PSTATE_INTERRUPTIBLE);
+            sleep_ms(5000);
         }
     }
     

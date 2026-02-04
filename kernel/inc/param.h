@@ -8,7 +8,8 @@
 #define CONSOLE_MINOR  1
 
 #define MAXPID      0x7FFFFFF0  // maximum process ID
-#define NPROC        10000  // maximum number of processes
+// #define NPROC        10000  // maximum number of processes
+#define NPROC       0xFFFFFFFFFFFFFFUL
 #define NCPU          8  // maximum number of CPUs
 #define NOFILE       64  // open files per process
 #define NFILE       256  // open files per system

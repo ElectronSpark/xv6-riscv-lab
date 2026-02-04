@@ -2,6 +2,15 @@
  * tmpfs file operations
  * 
  * This file implements the VFS file operations for tmpfs regular files.
+ *
+ * LOCKING DESIGN: DRIVER-MANAGED INODE LOCKS
+ * ==========================================
+ * VFS file operations (vfs_fileread, vfs_filewrite, etc.) do NOT acquire
+ * the inode lock before calling into the driver. Instead, each driver
+ * callback is responsible for acquiring the inode lock when needed.
+ *
+ * For tmpfs, we acquire the inode lock to protect size and data access.
+ * Unlike xv6fs, tmpfs doesn't have transactions, so the locking is simpler.
  */
 
 #include "types.h"
@@ -50,8 +59,13 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
         return -EINVAL;
     }
     
+    // Acquire inode lock to safely read size and data.
+    // The file reference guarantees the inode remains allocated.
+    vfs_ilock(inode);
+    
     loff_t pos = file->f_pos;
     if (pos >= inode->size) {
+        vfs_iunlock(inode);
         return 0; // EOF
     }
     if (pos + count > inode->size) {
@@ -66,11 +80,13 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
         }
         if (user) {
             if (vm_copyout(myproc()->vm, (uint64)buf, ti->file.data + pos, count) < 0) {
+                vfs_iunlock(inode);
                 return -EFAULT;
             }
         } else {
             memmove(buf, ti->file.data + pos, count);
         }
+        vfs_iunlock(inode);
         return count;
     }
     
@@ -93,6 +109,7 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
                 while (remaining > 0) {
                     size_t c = remaining < sizeof(zeros) ? remaining : sizeof(zeros);
                     if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read + (chunk - remaining)), zeros, c) < 0) {
+                        vfs_iunlock(inode);
                         if (bytes_read == 0) return -EFAULT;
                         return bytes_read;
                     }
@@ -104,6 +121,7 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
         } else {
             if (user) {
                 if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read), (char *)block + block_off, chunk) < 0) {
+                    vfs_iunlock(inode);
                     if (bytes_read == 0) return -EFAULT;
                     return bytes_read;
                 }
@@ -116,6 +134,7 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
         pos += chunk;
     }
     
+    vfs_iunlock(inode);
     return bytes_read;
 }
 
@@ -127,11 +146,16 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t
         return -EINVAL;
     }
     
+    // Acquire inode lock to protect size and data.
+    // The file reference guarantees the inode remains allocated.
+    vfs_ilock(inode);
+    
     loff_t pos = file->f_pos;
     loff_t end_pos = pos + count;
     
     // Check for file size limits
     if (end_pos > TMPFS_MAX_FILE_SIZE) {
+        vfs_iunlock(inode);
         return -EFBIG;
     }
     
@@ -141,22 +165,34 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t
             // Still fits in embedded storage
             if (user) {
                 if (vm_copyin(myproc()->vm, ti->file.data + pos, (uint64)buf, count) < 0) {
-                    return -EFAULT;
-                }
+                vfs_iunlock(inode);
+                return -EFAULT;
+            }
             } else {
                 memmove(ti->file.data + pos, buf, count);
             }
+            if (end_pos > inode->size) {
+                inode->size = end_pos;
+            }
+            vfs_iunlock(inode);
             return count;
         }
         // Need to migrate to block storage
         int ret = __tmpfs_migrate_to_allocated_blocks(ti);
         if (ret != 0) {
+            vfs_iunlock(inode);
             return ret;
         }
     }
     
-    // VFS core already called truncate to extend the file if needed.
-    // All blocks should be allocated.
+    // Extend file if needed - allocate blocks for the new data
+    if (end_pos > inode->size) {
+        int ret = __tmpfs_truncate(inode, end_pos);
+        if (ret != 0) {
+            vfs_iunlock(inode);
+            return ret;
+        }
+    }
     
     size_t bytes_written = 0;
     while (bytes_written < count) {
@@ -181,8 +217,9 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t
         
         if (user) {
             if (vm_copyin(myproc()->vm, (char *)block + block_off, (uint64)(buf + bytes_written), chunk) < 0) {
+                vfs_iunlock(inode);
                 if (bytes_written == 0) return -EFAULT;
-                break;
+                return bytes_written;
             }
         } else {
             memmove((char *)block + block_off, buf + bytes_written, chunk);
@@ -192,6 +229,7 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t
         pos += chunk;
     }
     
+    vfs_iunlock(inode);
     return bytes_written;
 }
 
@@ -207,7 +245,10 @@ static loff_t __tmpfs_file_llseek(struct vfs_file *file, loff_t offset, int when
         new_pos = file->f_pos + offset;
         break;
     case SEEK_END:
+        // Need to lock inode to safely read size
+        vfs_ilock(inode);
         new_pos = inode->size + offset;
+        vfs_iunlock(inode);
         break;
     default:
         return -EINVAL;
@@ -223,6 +264,10 @@ static loff_t __tmpfs_file_llseek(struct vfs_file *file, loff_t offset, int when
 static int __tmpfs_file_stat(struct vfs_file *file, struct stat *stat) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     
+    // Lock inode to get consistent snapshot of inode fields.
+    // The file reference guarantees the inode remains allocated.
+    vfs_ilock(inode);
+    
     memset(stat, 0, sizeof(*stat));
     stat->dev = inode->sb ? (int)(uint64)inode->sb : 0;
     stat->ino = inode->ino;
@@ -230,6 +275,7 @@ static int __tmpfs_file_stat(struct vfs_file *file, struct stat *stat) {
     stat->nlink = inode->n_links;
     stat->size = inode->size;
     
+    vfs_iunlock(inode);
     return 0;
 }
 

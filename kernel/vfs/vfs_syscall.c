@@ -16,6 +16,7 @@
 #include "lock/mutex_types.h"
 #include "lock/rcu.h"
 #include "proc/proc.h"
+#include "proc/workqueue.h"
 #include "vfs_private.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
@@ -56,14 +57,46 @@ int argstr(int n, char *buf, int max);
  ******************************************************************************/
 
 /**
- * __vfs_fd_rcucb - RCU callback to release file reference
+ * __vfs_fput_work_func - Workqueue callback to release file reference
+ * @work: Work struct containing file to release
+ *
+ * Called by workqueue worker to perform vfs_fput(). This runs in a normal
+ * kthread context where blocking on locks is allowed (unlike RCU callbacks).
+ */
+static void __vfs_fput_work_func(struct work_struct *work) {
+    struct vfs_file *fd = (struct vfs_file *)work->data;
+    vfs_fput(fd);
+    free_work_struct(work);
+}
+
+/**
+ * __vfs_fd_rcucb - RCU callback to queue deferred file release
  * @data: Pointer to vfs_file to release
  *
- * Called after RCU grace period to safely decrement file refcount.
+ * Called after RCU grace period. Instead of calling vfs_fput() directly
+ * (which can block on superblock wlock/inode mutex and cause RCU callback
+ * deadlocks), we queue the work to a workqueue. This allows the RCU callback
+ * to complete immediately and unblocks RCU grace period completion.
  */
 static void __vfs_fd_rcucb(void *data) {
     struct vfs_file *fd = (struct vfs_file *)data;
-    vfs_fput(fd);
+    struct workqueue *wq = vfs_get_deferred_iput_wq();
+    
+    // If workqueue not available (early init or shutdown), fall back to direct call
+    if (wq == NULL) {
+        vfs_fput(fd);
+        return;
+    }
+    
+    struct work_struct *work = create_work_struct(__vfs_fput_work_func, (uint64)fd);
+    if (work == NULL) {
+        // Allocation failed, fall back to direct call (risky but better than leak)
+        printf("__vfs_fd_rcucb: failed to allocate work_struct, falling back to direct vfs_fput\n");
+        vfs_fput(fd);
+        return;
+    }
+    
+    queue_work(wq, work);
 }
 
 /**
@@ -650,13 +683,20 @@ uint64 sys_vfs_chdir(void) {
         return -ENOTDIR;
     }
     
-    // Update process cwd
+    // Get reference to new cwd BEFORE acquiring spinlock
+    // (vfs_inode_get_ref may acquire the inode mutex internally)
+    struct vfs_inode_ref new_cwd_ref;
+    int ret = vfs_inode_get_ref(inode, &new_cwd_ref);
+    if (ret != 0) {
+        vfs_iput(inode);
+        return ret;
+    }
+
+    // Update process cwd (only assignment under spinlock)
     struct proc *p = myproc();
     vfs_struct_lock(p->fs);
-    // Save old cwd, in order to release it out of the lock
     struct vfs_inode_ref old_cwd = p->fs->cwd;
-    // Set new cwd
-    vfs_inode_get_ref(inode, &p->fs->cwd);
+    p->fs->cwd = new_cwd_ref;
     vfs_struct_unlock(p->fs);
     
     // Release old cwd
