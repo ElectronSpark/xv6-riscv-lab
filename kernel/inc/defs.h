@@ -33,6 +33,9 @@ void binit(void);
 struct buf *bread(uint, uint);
 void brelse(struct buf *);
 void bwrite(struct buf *);
+void bwrite_async(struct buf *);  // mark dirty, don't wait for I/O
+void bsync(void);                 // flush all dirty buffers
+uint bdirty_count(void);          // get count of dirty buffers
 void bpin(struct buf *);
 void bunpin(struct buf *);
 

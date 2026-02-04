@@ -44,11 +44,21 @@ static void __xv6fs_install_trans(struct xv6fs_log *log, int recovering) {
         struct buf *lbuf = bread(log->dev, log->start + tail + 1);  // read log block
         struct buf *dbuf = bread(log->dev, log->lh.block[tail]);     // read dst
         memmove(dbuf->data, lbuf->data, BSIZE);  // copy block to dst
-        bwrite(dbuf);  // write dst to disk
-        if (recovering == 0)
+        if (recovering) {
+            // During recovery, use synchronous writes for safety
+            bwrite(dbuf);
+        } else {
+            // Normal operation: use async writes, sync at end
+            bwrite_async(dbuf);
             bunpin(dbuf);
+        }
         brelse(lbuf);
         brelse(dbuf);
+    }
+    
+    // Flush all async writes to disk
+    if (!recovering && log->lh.n > 0) {
+        bsync();
     }
 }
 
@@ -88,14 +98,20 @@ static void __xv6fs_recover_from_log(struct xv6fs_log *log) {
  ******************************************************************************/
 
 // Copy modified blocks from cache to log
+// Uses async writes with a final sync for better I/O batching
 static void __xv6fs_write_log(struct xv6fs_log *log) {
     for (int tail = 0; tail < log->lh.n; tail++) {
         struct buf *to = bread(log->dev, log->start + tail + 1);    // log block
         struct buf *from = bread(log->dev, log->lh.block[tail]);    // cache block
         memmove(to->data, from->data, BSIZE);
-        bwrite(to);  // write the log
+        bwrite_async(to);  // mark dirty, will flush at end
         brelse(from);
         brelse(to);
+    }
+    
+    // Flush all log writes before writing header
+    if (log->lh.n > 0) {
+        bsync();
     }
 }
 

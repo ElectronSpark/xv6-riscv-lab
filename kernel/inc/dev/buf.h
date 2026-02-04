@@ -9,12 +9,14 @@
 struct buf {
   int valid;   // has data been read from disk?
   int disk;    // does disk "own" buf?
+  int dirty;   // buffer has been modified, needs writeback
   dev_t dev;
   uint blockno;
   mutex_t lock;
   uint refcnt;
   hlist_entry_t hlist_entry; // hash list entry
   list_node_t free_entry;    // Free list for O(1) free buffer lookup (LRU order)
+  list_node_t dirty_entry;   // Dirty list for writeback
   uchar *data;
 } __ALIGNED_CACHELINE;
 

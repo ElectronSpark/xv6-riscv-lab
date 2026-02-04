@@ -46,6 +46,12 @@ struct {
     // Free list of unused buffers (refcnt == 0), sorted by LRU order.
     // Push at head (most recently used), pop from tail (oldest/least recently used).
     list_node_t free_list;
+    
+    // Dirty list of buffers that need writeback.
+    // Buffers are added when marked dirty, removed after writeback.
+    list_node_t dirty_list;
+    uint dirty_count;  // number of dirty buffers
+    
     hlist_t cached;        // Hash list of buffers, sorted by (dev, blockno).
     hlist_bucket_t
         buckets[BIO_HASH_BUCKETS]; // stores the hash buckets of the hash list
@@ -138,6 +144,9 @@ void binit(void) {
 
     // Create linked list of buffers
     list_entry_init(&bcache.free_list);
+    list_entry_init(&bcache.dirty_list);
+    bcache.dirty_count = 0;
+    
     hlist_func_t hlist_func = {.hash = __bcache_hash_func,
                                .get_node = __bcache_hlist_get_node,
                                .get_entry = __bcache_hlist_get_entry,
@@ -145,6 +154,8 @@ void binit(void) {
     hlist_init(&bcache.cached, BIO_HASH_BUCKETS, &hlist_func);
     for (b = bcache.buf; b < bcache.buf + NBUF; b++) {
         list_entry_init(&b->free_entry);
+        list_entry_init(&b->dirty_entry);
+        b->dirty = 0;
         mutex_init(&b->lock, "buffer");
         // Add to free list
         list_entry_push(&bcache.free_list, &b->free_entry);
@@ -275,8 +286,103 @@ void bwrite(struct buf *b) {
     assert(!IS_ERR_OR_NULL(bio), "bwrite: bio_alloc failed");
     blkdev_submit_bio(blkdev, bio);
     __buf_bio_cleanup(bio);
+    
+    // Clear dirty flag after successful write
+    spin_lock(&bcache.lock);
+    if (b->dirty) {
+        b->dirty = 0;
+        if (!LIST_NODE_IS_DETACHED(b, dirty_entry)) {
+            list_node_detach(b, dirty_entry);
+            bcache.dirty_count--;
+        }
+    }
+    spin_unlock(&bcache.lock);
+    
     int ret = blkdev_put(blkdev);
     assert(ret == 0, "bwrite: blkdev_put failed: %d", ret);
+}
+
+// Mark buffer as dirty for later writeback. Must be locked.
+// This is much faster than bwrite() as it doesn't block on disk I/O.
+void bwrite_async(struct buf *b) {
+    if (!holding_mutex(&b->lock))
+        panic("bwrite_async");
+    
+    spin_lock(&bcache.lock);
+    if (!b->dirty) {
+        b->dirty = 1;
+        // Add to dirty list (at tail for FIFO writeback order)
+        list_node_push_back(&bcache.dirty_list, b, dirty_entry);
+        bcache.dirty_count++;
+    }
+    spin_unlock(&bcache.lock);
+}
+
+// Flush all dirty buffers to disk.
+// Called periodically or on sync().
+void bsync(void) {
+    struct buf *b;
+    int flushed = 0;
+    
+    while (1) {
+        spin_lock(&bcache.lock);
+        
+        if (LIST_IS_EMPTY(&bcache.dirty_list)) {
+            spin_unlock(&bcache.lock);
+            break;
+        }
+        
+        // Get oldest dirty buffer (FIFO order)
+        b = list_node_pop_back(&bcache.dirty_list, struct buf, dirty_entry);
+        b->dirty = 0;
+        bcache.dirty_count--;
+        
+        // Increment refcnt to prevent buffer from being recycled
+        if (b->refcnt == 0 && !LIST_NODE_IS_DETACHED(b, free_entry)) {
+            list_node_detach(b, free_entry);
+        }
+        b->refcnt++;
+        
+        spin_unlock(&bcache.lock);
+        
+        // Lock buffer and write to disk
+        assert(mutex_lock(&b->lock) == 0, "bsync: failed to lock buffer");
+        
+        if (b->valid) {
+            blkdev_t *blkdev = blkdev_get(major(b->dev), minor(b->dev));
+            if (!IS_ERR(blkdev)) {
+                struct bio *bio = __buf_alloc_bio(b, blkdev, true);
+                if (!IS_ERR_OR_NULL(bio)) {
+                    blkdev_submit_bio(blkdev, bio);
+                    __buf_bio_cleanup(bio);
+                    flushed++;
+                }
+                blkdev_put(blkdev);
+            }
+        }
+        
+        mutex_unlock(&b->lock);
+        
+        // Release our reference
+        spin_lock(&bcache.lock);
+        b->refcnt--;
+        if (b->refcnt == 0) {
+            list_node_push(&bcache.free_list, b, free_entry);
+        }
+        spin_unlock(&bcache.lock);
+    }
+    
+    if (flushed > 0) {
+        // Could add debug output here if needed
+    }
+}
+
+// Get count of dirty buffers (for debugging/stats)
+uint bdirty_count(void) {
+    spin_lock(&bcache.lock);
+    uint count = bcache.dirty_count;
+    spin_unlock(&bcache.lock);
+    return count;
 }
 
 // release a locked buffer.
