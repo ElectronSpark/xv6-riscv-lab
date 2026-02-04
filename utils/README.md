@@ -10,7 +10,7 @@ the image is not writable.
 ### Build
 
 ```sh
-gcc -Wall -Wextra -O2 utils/xv6fuse.c -o utils/xv6fuse \
+gcc -Wall -Wextra -O2 utils/xv6fuse.c utils/rbtree.c -o utils/xv6fuse \
     $(pkg-config --cflags --libs fuse3)
 ```
 
