@@ -1,17 +1,15 @@
 /*
- * xv6fs block cache - buddy-like bitmap cache for free block tracking
+ * xv6fs block cache - Red-Black Tree based free extent tracking
  *
- * This implements a hierarchical bitmap cache for fast free block allocation
+ * This implements a red-black tree cache for fast free block allocation
  * with the following features:
- * - Multi-level bitmap for O(log n) free block search
- * - Wear leveling via rotating allocation cursor
+ * - O(log n) free extent search using rb-tree keyed by block number
+ * - Extent merging for contiguous free regions
  * - Locality-aware allocation for consecutive block placement
+ * - Wear leveling via rotating allocation cursor
  *
- * The hierarchy works as follows:
- * - Level 0: 1 bit per block (1 = free, 0 = used)
- * - Level 1: 1 bit per 64 blocks (1 = has free, 0 = all used)
- * - Level 2: 1 bit per 4096 blocks
- * - Level 3: 1 bit per 262144 blocks
+ * Free blocks are stored as extents (start, length) in an rb-tree,
+ * allowing efficient allocation of contiguous blocks for large files.
  */
 
 #ifndef KERNEL_VFS_XV6FS_BLOCK_CACHE_H
@@ -19,27 +17,33 @@
 
 #include "types.h"
 #include "lock/spinlock.h"
+#include "bintree_type.h"
+#include "mm/slab.h"
 
-#define BCACHE_BITS_PER_LEVEL 64
-#define BCACHE_MAX_LEVELS 4
-#define BCACHE_MAX_PAGES 8    /* Max pages per level (32KB = 256K blocks) */
+/*
+ * Free extent node - represents a contiguous range of free blocks
+ */
+struct free_extent {
+    struct rb_node rb_node;     /* Red-black tree node (keyed by start block) */
+    uint32 start;               /* First block number in this extent */
+    uint32 length;              /* Number of contiguous free blocks */
+};
 
 /*
  * Block allocation cache structure
  * Embedded in xv6fs_superblock for per-mount caching
  */
 struct xv6fs_block_cache {
-    uint8 *levels[BCACHE_MAX_LEVELS];      /* Bitmap for each level */
-    uint8 *level_pages[BCACHE_MAX_LEVELS][BCACHE_MAX_PAGES]; /* Page pointers for freeing */
-    uint32 level_npages[BCACHE_MAX_LEVELS]; /* Number of pages per level */
-    uint32 level_bits[BCACHE_MAX_LEVELS];  /* Number of bits in each level */
-    uint32 level_bytes[BCACHE_MAX_LEVELS]; /* Number of bytes in each level */
-    uint32 nblocks;                        /* Total data blocks */
-    uint32 data_start;                     /* First data block number */
-    uint32 alloc_cursor;                   /* Rotating allocation pointer for wear leveling */
-    uint32 free_count;                     /* Total number of free blocks */
-    struct spinlock lock;                  /* Protect cache operations */
-    int initialized;                       /* Cache is ready for use */
+    struct rb_root extent_tree;         /* RB-tree of free extents */
+    struct rb_root_opts tree_opts;      /* Tree comparison functions */
+    slab_cache_t extent_cache;          /* Slab cache for extent nodes */
+    uint32 nblocks;                     /* Total data blocks */
+    uint32 data_start;                  /* First data block number */
+    uint32 alloc_cursor;                /* Rotating allocation pointer for wear leveling */
+    uint32 free_count;                  /* Total number of free blocks */
+    uint32 extent_count;                /* Number of extents in tree */
+    struct spinlock lock;               /* Protect cache operations */
+    int initialized;                    /* Cache is ready for use */
 };
 
 /* Forward declaration */
@@ -65,13 +69,7 @@ void xv6fs_bcache_destroy(struct xv6fs_superblock *xv6_sb);
 void xv6fs_bcache_mark_free(struct xv6fs_superblock *xv6_sb, uint32 blockno);
 
 /*
- * Mark a block as used in the cache
- * Called when a block is allocated
- */
-void xv6fs_bcache_mark_used(struct xv6fs_superblock *xv6_sb, uint32 blockno);
-
-/*
- * Find a free block using hierarchical search with wear leveling
+ * Find a free block using rb-tree search with wear leveling
  * Returns 0 on success with block number in blockno_out
  * Returns -ENOSPC if no free blocks available
  */
@@ -79,8 +77,7 @@ int xv6fs_bcache_find_free_block(struct xv6fs_superblock *xv6_sb, uint32 *blockn
 
 /*
  * Find a free block near a hint block for better locality
- * Searches in a window around the hint first, then falls back
- * to the regular wear-leveling search
+ * Searches for extent containing or near the hint first
  * Returns 0 on success, -ENOSPC if no free blocks
  */
 int xv6fs_bcache_find_free_block_near(struct xv6fs_superblock *xv6_sb, 

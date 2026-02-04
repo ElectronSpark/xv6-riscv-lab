@@ -18,6 +18,9 @@ struct buf {
   uchar *data;
 } __ALIGNED_CACHELINE;
 
-#define BIO_HASH_BUCKETS 63
+// Use a prime number close to NBUF for good distribution
+// NBUF = MAXOPBLOCKS * 300 = 80 * 300 = 24000
+// Use a prime ~NBUF for ~1 item per bucket on average
+#define BIO_HASH_BUCKETS 24007
 
 #endif      /* __KERNEL_BUF_H */

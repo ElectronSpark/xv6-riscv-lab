@@ -64,10 +64,9 @@ __xv6fs_balloc(struct xv6fs_superblock *xv6_sb, uint dev, uint hint)
         }
         
         if (rc == 0) {
-            /* Mark as used in cache */
-            xv6fs_bcache_mark_used(xv6_sb, blockno);
+            /* Block already removed from cache by find_free_block */
             
-            /* Also mark in on-disk bitmap */
+            /* Mark in on-disk bitmap */
             struct buf *bp = bread(dev, BBLOCK_PTR(blockno, disk_sb));
             if (!bp) {
                 /* Revert cache state on error */
@@ -93,7 +92,7 @@ __xv6fs_balloc(struct xv6fs_superblock *xv6_sb, uint dev, uint hint)
             return blockno;
         }
     }
-    
+    panic("xv6fs: block cache not initialized or no free blocks in cache");
     /* Fallback: Linear scan (when cache not initialized) */
     for (int b = 0; b < disk_sb->size; b += BPB) {
         struct buf *bp = bread(dev, BBLOCK_PTR(b, disk_sb));
