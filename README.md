@@ -102,6 +102,7 @@ This enhanced version has been substantially extended with production-grade feat
 - **QEMU virt Machine**: Default development and testing platform (kernel base: 0x80200000)
 - **Orange Pi RV2**: Real hardware support with Allwinner D1 SoC (kernel base: 0x00200000)
 - **U-Boot Integration**: Boot menu scripts for dual-boot between Linux and xv6
+- **Compressed Images**: Gzip-compressed kernel (`xv6.bin.gz`) and filesystem (`fs.img.gz`) for faster loading
 - **Flat Binary Output**: `xv6.bin` for direct hardware loading
 - **SBI Console**: Early console output via SBI before UART initialization
 
@@ -269,9 +270,13 @@ make deploy
 ```
 
 The Orange Pi build produces:
-- `kernel/xv6.bin`: Flat binary for direct loading (base address 0x00200000)
+- `kernel/xv6.bin.gz`: Compressed kernel binary (auto-decompressed by booti)
+- `kernel/xv6.bin`: Uncompressed flat binary for direct loading (base address 0x00200000)
+- `fs.img.gz`: Compressed filesystem image
 - `kernel/xv6.sym`: Symbol table for debugging
 - `boot/*.scr`: Compiled U-Boot scripts for boot menu
+
+**Note**: Compression is enabled by default and can be disabled with `-DENABLE_COMPRESSION=OFF`.
 
 **Note**: Do not use the root directory Makefile - it is obsolete and for reference only. Always use the CMake build system as described above.
 

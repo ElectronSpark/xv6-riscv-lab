@@ -53,6 +53,7 @@ Target:
 - ✅ Configurable kernel base address (QEMU: 0x80200000, Orange Pi: 0x00200000)
 - ✅ U-Boot boot scripts with dual-boot menu (boot.cmd, xv6.cmd, default.cmd)
 - ✅ Flat binary output (xv6.bin) for direct hardware loading
+- ✅ Compressed image support (xv6.bin.gz, fs.img.gz) for faster SD card transfers
 - ✅ SBI console output for early boot messages (before UART init)
 - ✅ CMake deployment target (`make deploy`) for SCP to device
 - ✅ Separate linker scripts generated from template (kernel.ld.in)
@@ -60,6 +61,7 @@ Target:
 **Implementation Notes**:
 - CMake generates linker script from `kernel.ld.in` with platform-specific KERNEL_BASE
 - Build for Orange Pi: `PLATFORM=orangepi cmake .. && make`
+- Gzip-compressed images generated automatically; boot scripts try compressed first, fallback to raw
 - SBI console uses legacy putchar/getchar for early output
 - Files: `kernel/CMakeLists.txt`, `kernel/kernel.ld.in`, `boot/boot.cmd`, `boot/xv6.cmd`, `boot/default.cmd`, `kernel/console.c`, `kernel/sbi.c`
 
