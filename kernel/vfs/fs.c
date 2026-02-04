@@ -471,6 +471,47 @@ struct workqueue *vfs_get_deferred_iput_wq(void) {
 }
 
 /*
+ * __vfs_iput_work_func - Workqueue callback to release inode reference
+ * @work: Work struct containing inode to release
+ *
+ * Called by workqueue worker to perform vfs_iput(). This runs in a normal
+ * kthread context where blocking on locks is allowed.
+ */
+static void __vfs_iput_work_func(struct work_struct *work) {
+    struct vfs_inode *inode = (struct vfs_inode *)work->data;
+    vfs_iput(inode);
+    free_work_struct(work);
+}
+
+/*
+ * __vfs_queue_deferred_iput - Queue iput to workqueue
+ *
+ * Use this when you need to call vfs_iput but can't because you're holding
+ * locks that vfs_iput would try to acquire (e.g., superblock wlock).
+ *
+ * @inode: Inode to release (caller's reference will be transferred)
+ */
+static void __vfs_queue_deferred_iput(struct vfs_inode *inode) {
+    struct workqueue *wq = vfs_get_deferred_iput_wq();
+    
+    // If workqueue not available (early init or shutdown), fall back to direct call
+    if (wq == NULL) {
+        vfs_iput(inode);
+        return;
+    }
+    
+    struct work_struct *work = create_work_struct(__vfs_iput_work_func, (uint64)inode);
+    if (work == NULL) {
+        // Allocation failed, fall back to direct call (risky but better than leak)
+        printf("__vfs_queue_deferred_iput: failed to allocate work_struct, falling back to direct vfs_iput\n");
+        vfs_iput(inode);
+        return;
+    }
+    
+    queue_work(wq, work);
+}
+
+/*
  * __vfs_shrink_caches - Shrink VFS slab caches to release unused pages.
  *
  * This should be called when checking for memory leaks to ensure that
@@ -1780,9 +1821,10 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
     if (!inode->valid || inode->destroying) {
         // Inode should be valid when first gotten from the cache,
         // but it may have been invalidated or is being destroyed.
-        // In this case, the inode should be treated as not found.
+        // Release the reference we just took. We can't call vfs_iput here
+        // because caller may hold superblock wlock. Queue to workqueue instead.
         vfs_iunlock(inode);
-        vfs_iput(inode); // Release the reference we just took
+        __vfs_queue_deferred_iput(inode);
         return ERR_PTR(-ENOENT); // Inode is not valid or being destroyed
     }
     // Return with reference held and inode locked
