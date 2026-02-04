@@ -940,10 +940,10 @@ static int rcu_cb_kthread(uint64 cpu_id, uint64 arg2) {
             
             pop_off();
             
-            // There are still pending callbacks - yield but don't sleep
-           scheduler_yield();
+            // There are still pending callbacks - take a nap before next iteration
+           sleep_ms(50);
         } else {
-            // No pending callbacks - can sleep
+            // No pending callbacks - can sleep longer
             sleep_ms(5000);
         }
     }
