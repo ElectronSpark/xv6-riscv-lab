@@ -4,22 +4,32 @@
 
 #include <mm/page_type.h>
 
-// The page struct belongs to a buddy page
+// The page struct belongs to a buddy page (header)
 #define PAGE_IS_BUDDY(page) PAGE_IS_TYPE(page, PAGE_TYPE_BUDDY)
 
-// The page struct is the head of a buddy page
-#define PAGE_IS_BUDDY_GROUP_HEAD(page)                                      \
-    (PAGE_IS_BUDDY(page) && (page)->buddy.buddy_head == (page))
+// The page struct is a tail page of a buddy group
+#define PAGE_IS_TAIL(page) PAGE_IS_TYPE(page, PAGE_TYPE_TAIL)
 
-// The page struct is a tail of a buddy page
+// The page struct is the head of a buddy page (identified by PAGE_TYPE_BUDDY)
+#define PAGE_IS_BUDDY_GROUP_HEAD(page) PAGE_IS_BUDDY(page)
+
+// The page struct is a tail of a buddy page (uses PAGE_TYPE_TAIL)
 #define PAGE_IS_BUDDY_GROUP_TAIL(page)                                      \
-    (PAGE_IS_BUDDY(page) && (page)->buddy_head != (page))
+    (PAGE_IS_TAIL(page) && (page)->tail.head_page != (page))
 
-// Try to get the head of a buddy page
+// Check if page belongs to a buddy group (either header or tail)
+#define PAGE_IS_BUDDY_MEMBER(page)                                          \
+    (PAGE_IS_BUDDY(page) || PAGE_IS_TAIL(page))
+
+// Get the header of any page in a buddy group
+// For header pages: returns itself
+// For tail pages: returns head_page pointer
 #define PAGE_GET_BUDDY_GROUP_HEAD(page) ({                                  \
     page_t *__buddy_head_ptr = NULL;                                        \
     if (PAGE_IS_BUDDY(page)) {                                              \
-        __buddy_head_ptr = (page)->buddy.buddy_head;                        \
+        __buddy_head_ptr = (page);                                          \
+    } else if (PAGE_IS_TAIL(page)) {                                        \
+        __buddy_head_ptr = (page)->tail.head_page;                          \
     }                                                                       \
     __buddy_head_ptr;                                                       \
 })
@@ -89,10 +99,13 @@ STATIC_INLINE bool __page_is_freeable(page_t *page);
 STATIC_INLINE void __buddy_pool_init();
 STATIC_INLINE int __init_range_flags( uint64 pa_start, uint64 pa_end, 
                                       uint64 flags);
+STATIC_INLINE void __page_as_buddy_tail(page_t *page, page_t *buddy_head);
 STATIC_INLINE void __page_as_buddy( page_t *page, page_t *buddy_head,
                                     uint64 order, uint32 state);
 STATIC_INLINE void __page_as_buddy_group(page_t *buddy_head, uint64 order, uint32 state);
 STATIC_INLINE void __page_order_change_commit(page_t *page);
+STATIC_INLINE void __page_split_commit_later_half(page_t *new_header, uint64 order);
+STATIC_INLINE void __page_merge_commit_later_half(page_t *merged_header, uint64 merged_order);
 STATIC_INLINE void __buddy_push_page(buddy_pool_t *pool, page_t *page);
 STATIC_INLINE page_t *__buddy_pop_page(buddy_pool_t *pool);
 STATIC_INLINE void __buddy_detach_page(buddy_pool_t *pool, page_t *page);

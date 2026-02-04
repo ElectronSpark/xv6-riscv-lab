@@ -27,6 +27,7 @@ enum page_type {
     PAGE_TYPE_SLAB,          // Slab page
     PAGE_TYPE_PGTABLE,       // Page table page
     PAGE_TYPE_PCACHE,        // Page cache page
+    PAGE_TYPE_TAIL,          // member of a header page
     __PAGE_TYPE_MAX
 };
 
@@ -89,7 +90,6 @@ typedef struct page_struct {
             Pages managed by buddy system are free pages*/
         struct {
             list_node_t            lru_entry;
-            struct page_struct     *buddy_head;
             uint32                 order;
             uint32                 state;  // buddy state: FREE, MERGING, etc.
         } buddy;
@@ -98,6 +98,7 @@ typedef struct page_struct {
             One slab  */
         struct {
             slab_t              *slab;     // pointing its slab descriptor
+            uint32               order;    // order of the compound page for alignment check
         } slab;
         /* Page cache pages
             Pages used by pcache system to cache disk blocks */
@@ -105,6 +106,11 @@ typedef struct page_struct {
             struct pcache      *pcache;    // pointing its pcache
             struct pcache_node *pcache_node; // pointing its pcache node
         } pcache;
+        /* Tail pages
+            Pages that are members of a compound page */
+        struct {
+            struct page_struct *head_page; // pointing to its head page
+        } tail;
     };
 } page_t;
 

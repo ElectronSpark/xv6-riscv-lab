@@ -172,7 +172,6 @@ STATIC_INLINE void __slab_sanitizer_check(const char *op ,slab_cache_t *cache, s
 STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
                                   size_t obj_size, uint32 obj_num, uint32 bitmap_size) {
     page_t *page;
-    int page_nums;
     void *page_base, **prev, **tmp;
     slab_t *slab;
 
@@ -201,9 +200,17 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
         __page_free(page, order);
         return NULL;
     }
-    page_nums = 1 << order;
-    for (int i = 0; i < page_nums; i++) {
-        page[i].slab.slab = slab;
+    // Header page gets PAGE_TYPE_SLAB with slab pointer and order.
+    // After buddy merging or when coming from per-CPU cache, tail pages may
+    // point to wrong headers or have wrong types. We must update all tails.
+    page[0].slab.slab = slab;
+    page[0].slab.order = order;
+    
+    // Ensure all tail pages have correct type and point to this header
+    uint64 page_count = 1UL << order;
+    for (uint64 i = 1; i < page_count; i++) {
+        page[i].flags = PAGE_TYPE_TAIL;
+        page[i].tail.head_page = &page[0];
     }
 
     slab->cache = NULL;
@@ -484,9 +491,11 @@ STATIC_INLINE int __slab_obj2idx(slab_t *slab, void *ptr) {
 }
 
 // find the SLAB of a object giving its address
+// Handles both header pages (PAGE_TYPE_SLAB) and tail pages (PAGE_TYPE_TAIL)
 STATIC_INLINE slab_t *__find_obj_slab(void *ptr) {
     uint64 page_base;
     page_t *page = NULL;
+    page_t *header = NULL;
 
     if (ptr == NULL) {
         return NULL;
@@ -497,13 +506,26 @@ STATIC_INLINE slab_t *__find_obj_slab(void *ptr) {
     if (page == NULL) {
         return NULL;
     }
-    if (!PAGE_IS_TYPE(page, PAGE_TYPE_SLAB)) {
+    
+    // Handle both header and tail pages
+    if (PAGE_IS_TYPE(page, PAGE_TYPE_SLAB)) {
+        // This is the header page - slab pointer is directly accessible
+        header = page;
+    } else if (PAGE_IS_TYPE(page, PAGE_TYPE_TAIL)) {
+        // This is a tail page - follow head_page to get to header
+        header = page->tail.head_page;
+        if (header == NULL || !PAGE_IS_TYPE(header, PAGE_TYPE_SLAB)) {
+            return NULL;
+        }
+    } else {
+        // Neither SLAB nor TAIL - not a slab page
         return NULL;
     }
-    if (page->slab.slab == NULL) {
+    
+    if (header->slab.slab == NULL) {
         return NULL;
     }
-    return page->slab.slab;
+    return header->slab.slab;
 }
 
 // ============================================================================

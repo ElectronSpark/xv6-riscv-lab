@@ -110,11 +110,11 @@ static slab_cache_t __vm_pool = {0};
 static void __vm_destroy(vm_t *vm);
 
 static void __vma_pool_init(void) {
-    slab_cache_init(&__vma_pool, "vm area", sizeof(vma_t), SLAB_FLAG_STATIC);
+    slab_cache_init(&__vma_pool, "vm area", sizeof(vma_t), SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
 }
 
 static void __vm_pool_init(void) {
-    slab_cache_init(&__vm_pool, "vm", sizeof(vm_t), SLAB_FLAG_STATIC);
+    slab_cache_init(&__vm_pool, "vm", sizeof(vm_t), SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
 }
 
 /*
