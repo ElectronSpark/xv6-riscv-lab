@@ -193,6 +193,12 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
     if (page_base == NULL) {
         panic("__slab_make");
     }
+    
+    // Set the page's slab order immediately so that if we need to free
+    // the page on a subsequent failure (e.g., kmm_alloc failure), the
+    // __page_free assertion check will see the correct order.
+    page[0].slab.order = order;
+    
     if (flags & SLAB_FLAG_EMBEDDED) {
         // Embedded SLAB puts its descriptor at the start of its cache page
         slab = page_base;
@@ -204,7 +210,6 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
     // After buddy merging or when coming from per-CPU cache, tail pages may
     // point to wrong headers or have wrong types. We must update all tails.
     page[0].slab.slab = slab;
-    page[0].slab.order = order;
     
     // Ensure all tail pages have correct type and point to this header
     uint64 page_count = 1UL << order;
