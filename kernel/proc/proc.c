@@ -38,7 +38,7 @@ extern char sig_trampoline[]; // sig_trampoline.S
 static void __pcb_init(struct proc *p, struct vfs_fdtable *fdtable) {
     __proc_set_pstate(p, PSTATE_UNUSED);
     sigpending_init(p);
-    sigstack_init(&p->sig_stack);
+    sigstack_init(&p->signal.sig_stack);
     list_entry_init(&p->sched_entry);
     list_entry_init(&p->dmp_list_entry);
     list_entry_init(&p->siblings);

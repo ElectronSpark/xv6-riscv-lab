@@ -228,7 +228,7 @@ void usertrap(void) {
 extern void sig_trampoline(uint64 arg0, uint64 arg1, uint64 arg2,
                            void *handler);
 
-// Will only modify the user space memory and p->sig_ucontext
+// Will only modify the user space memory and p->signal.sig_ucontext
 // Further modifications to the process struct need to be done if it succeeds.
 int push_sigframe(struct proc *p, int signo, sigaction_t *sa,
                   ksiginfo_t *info) {
@@ -238,13 +238,13 @@ int push_sigframe(struct proc *p, int signo, sigaction_t *sa,
 
     uint64 new_sp = 0;
     if ((sa->sa_flags & SA_ONSTACK) != 0 &&
-        (p->sig_stack.ss_flags & (SS_ONSTACK | SS_DISABLE)) == 0) {
+        (p->signal.sig_stack.ss_flags & (SS_ONSTACK | SS_DISABLE)) == 0) {
         // Use the alternate stack if SA_ONSTACK is set.
 
-        if (p->sig_stack.ss_size < MINSIGSTKSZ) {
+        if (p->signal.sig_stack.ss_size < MINSIGSTKSZ) {
             return -1; // Stack too small
         }
-        new_sp = (uint64)p->sig_stack.ss_sp + p->sig_stack.ss_size;
+        new_sp = (uint64)p->signal.sig_stack.ss_sp + p->signal.sig_stack.ss_size;
     } else {
         new_sp = p->trapframe->trapframe.sp;
     }
@@ -274,11 +274,11 @@ int push_sigframe(struct proc *p, int signo, sigaction_t *sa,
     }
 
     ucontext_t uc = {0};
-    uc.uc_link = (ucontext_t *)p->sig_ucontext;
+    uc.uc_link = (ucontext_t *)p->signal.sig_ucontext;
     uc.uc_sigmask =
         p->sigacts->sa_sigmask; // Save current mask to restore after handler
     memmove(&uc.uc_mcontext, p->trapframe, sizeof(mcontext_t));
-    memmove(&uc.uc_stack, &p->sig_stack, sizeof(stack_t));
+    memmove(&uc.uc_stack, &p->signal.sig_stack, sizeof(stack_t));
 
     // Copy the trap frame to the signal trap frame.
     if (vm_copyout(p->vm, new_ucontext, (void *)&uc, sizeof(ucontext_t)) != 0) {
@@ -299,13 +299,13 @@ int push_sigframe(struct proc *p, int signo, sigaction_t *sa,
     p->trapframe->trapframe.a2 = new_ucontext; // Set the third argument
     p->trapframe->trapframe.t0 =
         (uint64)sa->sa_handler; // Set the handler address
-    p->sig_ucontext = new_ucontext;
+    p->signal.sig_ucontext = new_ucontext;
 
     return 0; // Success
 }
 
 int restore_sigframe(struct proc *p, ucontext_t *ret_uc) {
-    uint64 sig_ucontext = p->sig_ucontext;
+    uint64 sig_ucontext = p->signal.sig_ucontext;
 
     if (sig_ucontext == 0 || ret_uc == NULL) {
         return -1; // No signal trap frame to restore
@@ -317,7 +317,7 @@ int restore_sigframe(struct proc *p, ucontext_t *ret_uc) {
         return -1; // Copy failed
     }
 
-    p->sig_ucontext = (uint64)ret_uc->uc_link;
+    p->signal.sig_ucontext = (uint64)ret_uc->uc_link;
     memmove(p->trapframe, &ret_uc->uc_mcontext, sizeof(mcontext_t));
 
     return 0; // Success

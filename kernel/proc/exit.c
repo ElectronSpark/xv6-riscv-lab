@@ -93,7 +93,7 @@ retry:
     list_foreach_node_safe(&p->children, child, tmp, siblings) {
         // make sure the child isn't still in exit() or swtch().
         proc_lock(child);
-        child->esignal = SIGCHLD;   // reset to default exit signal
+        child->signal.esignal = SIGCHLD;   // reset to default exit signal
         if (__proc_get_pstate(child) == PSTATE_ZOMBIE) {
             zombie_found = true;
         }
@@ -108,8 +108,8 @@ retry:
 
     if (zombie_found) {
         wake_up_parent(initproc);
-        if (initproc != NULL && initproc != parent && initproc != p && p->esignal > 0) {
-            kill_proc(initproc, p->esignal);
+        if (initproc != NULL && initproc != parent && initproc != p && p->signal.esignal > 0) {
+            kill_proc(initproc, p->signal.esignal);
         }
     }
 }
@@ -148,8 +148,8 @@ void exit(int status) {
     // Always wake parent regardless of exit signal (handles threads with
     // esignal=0 or ignored signals). Then send the exit signal if set.
     wake_up_parent(parent);
-    if (parent != NULL && p->esignal > 0) {
-        kill_proc(parent, p->esignal);
+    if (parent != NULL && p->signal.esignal > 0) {
+        kill_proc(parent, p->signal.esignal);
     }
     
     scheduler_yield();

@@ -76,7 +76,7 @@ bool signal_pending(struct proc *p);
 int signal_notify(struct proc *p);
 
 // Recalculate and update TIF_SIGPENDING flag for process
-// Call this after any change to sig_pending_mask or sa_sigmask
+// Call this after any change to signal.sig_pending_mask or sa_sigmask
 void recalc_sigpending(void);
 bool recalc_sigpending_tsk(struct proc *p);
 bool signal_terminated(struct proc *p);

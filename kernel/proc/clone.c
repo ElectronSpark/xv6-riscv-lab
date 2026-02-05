@@ -122,7 +122,7 @@ int proc_clone(struct clone_args *args) {
     }
 
     // signal to be sent to parent on exit
-    ret_ptr->esignal = args->esignal;
+    ret_ptr->signal.esignal = args->esignal;
     ret_ptr->clone_flags = args->flags;
 
     // copy saved user registers.

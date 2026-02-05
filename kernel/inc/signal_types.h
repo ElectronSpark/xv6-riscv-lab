@@ -42,6 +42,31 @@ typedef struct sigacts {
 	_Atomic int refcount; // reference count for shared usage
 } sigacts_t;
 
+typedef struct stack {
+	void *ss_sp;    /* stack base pointer */
+	int ss_flags;   /* flags */
+#define SS_AUTOREARM 0x1 /* automatically rearm the signal stack */
+#define SS_ONSTACK   0x2 /* use the alternate stack */
+#define SS_DISABLE   0x4 /* disable the signal stack */
+	size_t ss_size; /* size */
+} stack_t;
+
+typedef struct sigpending {
+	list_node_t queue;
+} sigpending_t;
+
+// Thread local signal state
+// Protected by sigacts lock
+typedef struct thread_signal {
+	sigset_t sig_pending_mask;      // Mark none empty signal pending queue
+    sigpending_t sig_pending[NSIG]; // Queue of pending signals
+    // signal trap frames would be put at the user stack.
+    // This is used to restore the user context when a signal is delivered.
+    uint64 sig_ucontext; // Address of the signal user context
+    stack_t sig_stack;   // Alternate signal stack
+    uint64 esignal;     // Signal to be sent to parent on exit
+} thread_signal_t;
+
 typedef enum {
     SIG_ACT_INVALID = -1,
     SIG_ACT_IGN = 0,
@@ -65,15 +90,6 @@ typedef struct siginfo {
 	/* possibly other fields also */
 } siginfo_t;
 
-typedef struct stack {
-	void *ss_sp;    /* stack base pointer */
-	int ss_flags;   /* flags */
-#define SS_AUTOREARM 0x1 /* automatically rearm the signal stack */
-#define SS_ONSTACK   0x2 /* use the alternate stack */
-#define SS_DISABLE   0x4 /* disable the signal stack */
-	size_t ss_size; /* size */
-} stack_t;
-
 typedef struct utrapframe mcontext_t;
 
 typedef struct ucontext {
@@ -85,10 +101,6 @@ typedef struct ucontext {
 	mcontext_t uc_mcontext; /* machine-specific representation of */
 	/* saved context */
 } ucontext_t;
-
-typedef struct sigpending {
-	list_node_t queue;
-} sigpending_t;
 
 typedef struct ksiginfo {
 	list_node_t list_entry;
