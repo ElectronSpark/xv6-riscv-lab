@@ -8,6 +8,7 @@
 #include "types.h"
 #include "spinlock.h"
 #include "wrapper_tracking.h"
+#include "concurrency_harness.h"
 
 // Global tracking pointer (NULL if tracking disabled)
 spinlock_tracking_t *g_spinlock_tracking = NULL;
@@ -48,6 +49,9 @@ void __wrap_spin_lock(struct spinlock *lock)
     if (lock == NULL) {
         return;
     }
+    if (g_concurrency_mode) {
+        conc_spin_lock(lock);
+    }
     __atomic_store_n(&lock->locked, 1, __ATOMIC_SEQ_CST);
 }
 
@@ -62,6 +66,9 @@ void __wrap_spin_unlock(struct spinlock *lock)
         return;
     }
     __atomic_store_n(&lock->locked, 0, __ATOMIC_SEQ_CST);
+    if (g_concurrency_mode) {
+        conc_spin_unlock(lock);
+    }
 }
 
 int __wrap_spin_holding(struct spinlock *lock)

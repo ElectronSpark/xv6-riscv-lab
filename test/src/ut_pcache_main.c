@@ -21,6 +21,15 @@
 #include "riscv.h"
 #include "completion.h"
 #include "timer/timer.h"
+#include "concurrency_harness.h"
+
+// proc_queue_t is available via pcache_types.h -> proc_queue_type.h.
+// We only forward-declare the functions we call to avoid the heavy
+// proc_queue.h -> proc_types.h -> percpu.h -> printf.h include chain
+// that conflicts with the host stdio.h.
+void proc_queue_init(proc_queue_t *q, const char *name, spinlock_t *lock);
+
+#include "wrapper_tracking.h"
 
 // Forward declarations for wrapped functions (linked via --wrap)
 void spin_init(struct spinlock *lock, char *name);
@@ -175,6 +184,12 @@ static int pcache_test_setup(void **state) {
     int rc = pcache_init(&fixture->cache);
     assert_int_equal(rc, 0);
 
+    // Enable proc_queue tracking so wakeup_all/wait wrappers don't
+    // require will_return() entries — they return 0 via the tracking struct.
+    static proc_queue_tracking_t pq_tracking;
+    memset(&pq_tracking, 0, sizeof(pq_tracking));
+    wrapper_tracking_enable_proc_queue(&pq_tracking);
+
     g_active_fixture = fixture;
     *state = fixture;
     return 0;
@@ -182,6 +197,7 @@ static int pcache_test_setup(void **state) {
 
 static int pcache_test_teardown(void **state) {
     struct pcache_test_fixture *fixture = *state;
+    wrapper_tracking_disable_proc_queue();
     pcache_test_unregister(&fixture->cache);
     pcache_test_set_retry_hook(NULL);
     g_retry_page = NULL;
@@ -218,7 +234,7 @@ static void init_mock_node(struct pcache_node *node, struct pcache *cache, page_
 static void make_dirty_page(struct pcache *cache, struct pcache_node *node, page_t *page, uint64 blkno) {
     init_mock_page(page, blkno << BLK_SIZE_SHIFT);
     init_mock_node(node, cache, page, blkno);
-    completion_init(&node->io_completion);
+    proc_queue_init(&node->io_waiters, "pcache_io_test", NULL);
     int rc = pcache_mark_page_dirty(cache, page);
     assert_int_equal(rc, 0);
     assert_int_equal(cache->dirty_count, 1);
@@ -966,6 +982,298 @@ static void test_pcache_flusher_time_based_flush(void **state) {
     assert_int_equal(fixture->write_end_calls, 1);
 }
 
+/******************************************************************************
+ * Concurrency tests
+ *
+ * These use real pthread threads and the concurrency harness that maps xv6
+ * spinlocks to pthread mutexes and proc_queue to condvars so that
+ * lock contention and blocking/wakeup actually happen.
+ ******************************************************************************/
+
+static int pcache_conc_test_setup(void **state) {
+    int rc = pcache_test_setup(state);
+    if (rc != 0) return rc;
+    concurrency_mode_enable();
+    return 0;
+}
+
+static int pcache_conc_test_teardown(void **state) {
+    concurrency_mode_disable();
+    return pcache_test_teardown(state);
+}
+
+// ---------------------------------------------------------------------------
+// Test 1: Two threads call pcache_get_page for the same block concurrently.
+//         Both must receive the same page.
+// ---------------------------------------------------------------------------
+
+struct conc_get_same_page_ctx {
+    struct pcache *cache;
+    uint64 blkno;
+    page_t *result;
+};
+
+static void *conc_get_same_page_thread(void *arg) {
+    struct conc_get_same_page_ctx *ctx = arg;
+    ctx->result = pcache_get_page(ctx->cache, ctx->blkno);
+    return NULL;
+}
+
+static void test_conc_get_page_same_block(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    struct conc_get_same_page_ctx ctx1 = { .cache = cache, .blkno = 8, .result = NULL };
+    struct conc_get_same_page_ctx ctx2 = { .cache = cache, .blkno = 8, .result = NULL };
+
+    conc_thread_create(0, conc_get_same_page_thread, &ctx1);
+    conc_thread_create(1, conc_get_same_page_thread, &ctx2);
+    conc_thread_join(0, NULL);
+    conc_thread_join(1, NULL);
+
+    // Both threads must get a valid page
+    assert_non_null(ctx1.result);
+    assert_non_null(ctx2.result);
+    // Both must point to the same physical page (same block number -> same cache entry)
+    assert_ptr_equal(ctx1.result, ctx2.result);
+
+    pcache_put_page(cache, ctx1.result);
+    pcache_put_page(cache, ctx2.result);
+}
+
+// ---------------------------------------------------------------------------
+// Test 2: Two threads call pcache_get_page for different blocks concurrently.
+//         They must get distinct pages.
+// ---------------------------------------------------------------------------
+
+static void test_conc_get_page_different_blocks(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    uint64 blks_per_page = (uint64)PGSIZE >> BLK_SIZE_SHIFT;
+    struct conc_get_same_page_ctx ctx1 = { .cache = cache, .blkno = 0, .result = NULL };
+    struct conc_get_same_page_ctx ctx2 = { .cache = cache, .blkno = blks_per_page, .result = NULL };
+
+    conc_thread_create(0, conc_get_same_page_thread, &ctx1);
+    conc_thread_create(1, conc_get_same_page_thread, &ctx2);
+    conc_thread_join(0, NULL);
+    conc_thread_join(1, NULL);
+
+    assert_non_null(ctx1.result);
+    assert_non_null(ctx2.result);
+    assert_ptr_not_equal(ctx1.result, ctx2.result);
+
+    pcache_put_page(cache, ctx1.result);
+    pcache_put_page(cache, ctx2.result);
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: IO wait / IO end across threads.
+//         Thread A reads a page (starts IO, marks in-progress, calls read_page
+//         callback, completes IO).
+//         Thread B calls pcache_read_page on the same page after IO is
+//         started, sees io_in_progress, and waits. Thread A finishing IO wakes
+//         Thread B.
+// ---------------------------------------------------------------------------
+
+struct conc_io_ctx {
+    struct pcache *cache;
+    page_t *page;
+    int result;
+};
+
+static void *conc_read_page_thread(void *arg) {
+    struct conc_io_ctx *ctx = arg;
+    ctx->result = pcache_read_page(ctx->cache, ctx->page);
+    return NULL;
+}
+
+static _Atomic int g_conc_read_page_calls;
+
+static int conc_slow_read_page(struct pcache *pcache, page_t *page) {
+    (void)pcache;
+    (void)page;
+    __atomic_fetch_add(&g_conc_read_page_calls, 1, __ATOMIC_SEQ_CST);
+    // Sleep long enough for Thread B to see io_in_progress and block
+    // on the proc_queue before we finish IO.
+    conc_sleep_ms(50);
+    return 0;
+}
+
+static void test_conc_io_wait_and_complete(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    // Override read_page with a slow callback
+    fixture->ops.read_page = conc_slow_read_page;
+    __atomic_store_n(&g_conc_read_page_calls, 0, __ATOMIC_SEQ_CST);
+
+    // Pre-create a cached page that is NOT up-to-date
+    page_t *page = pcache_get_page(cache, 16);
+    assert_non_null(page);
+
+    struct conc_io_ctx ctx1 = { .cache = cache, .page = page, .result = -1 };
+    struct conc_io_ctx ctx2 = { .cache = cache, .page = page, .result = -1 };
+
+    // Thread A: first reader, will call read_page callback (sleeps 50ms)
+    conc_thread_create(0, conc_read_page_thread, &ctx1);
+    // Small delay so Thread A wins the race to io_begin
+    conc_sleep_ms(5);
+    // Thread B: second reader, should see io_in_progress and wait
+    conc_thread_create(1, conc_read_page_thread, &ctx2);
+
+    conc_thread_join(0, NULL);
+    conc_thread_join(1, NULL);
+
+    assert_int_equal(ctx1.result, 0);
+    assert_int_equal(ctx2.result, 0);
+
+    // Only one thread should have actually called the read_page callback
+    // (the other should have waited and then seen uptodate=1)
+    assert_int_equal(__atomic_load_n(&g_conc_read_page_calls, __ATOMIC_SEQ_CST), 1);
+
+    pcache_put_page(cache, page);
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: Many threads all get different pages concurrently.
+//         Stress test for lock contention on the pcache spinlock and tree_lock.
+// ---------------------------------------------------------------------------
+
+#define CONC_STRESS_THREAD_COUNT 8
+#define CONC_STRESS_PAGES_PER_THREAD 4
+
+struct conc_stress_ctx {
+    struct pcache *cache;
+    int thread_id;
+    page_t *pages[CONC_STRESS_PAGES_PER_THREAD];
+    int success_count;
+};
+
+static void *conc_stress_get_pages_thread(void *arg) {
+    struct conc_stress_ctx *ctx = arg;
+    uint64 blks_per_page = (uint64)PGSIZE >> BLK_SIZE_SHIFT;
+    ctx->success_count = 0;
+    for (int i = 0; i < CONC_STRESS_PAGES_PER_THREAD; i++) {
+        uint64 blkno = (uint64)(ctx->thread_id * CONC_STRESS_PAGES_PER_THREAD + i) * blks_per_page;
+        ctx->pages[i] = pcache_get_page(ctx->cache, blkno);
+        if (ctx->pages[i] != NULL) {
+            ctx->success_count++;
+        }
+    }
+    return NULL;
+}
+
+static void test_conc_stress_get_pages(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+
+    // Make sure max_pages and blk_count are high enough for all threads
+    cache->max_pages = CONC_STRESS_THREAD_COUNT * CONC_STRESS_PAGES_PER_THREAD + 16;
+    uint64 blks_per_page = (uint64)PGSIZE >> BLK_SIZE_SHIFT;
+    cache->blk_count = (uint64)CONC_STRESS_THREAD_COUNT * CONC_STRESS_PAGES_PER_THREAD * blks_per_page + blks_per_page;
+
+    struct conc_stress_ctx ctxs[CONC_STRESS_THREAD_COUNT];
+
+    for (int i = 0; i < CONC_STRESS_THREAD_COUNT; i++) {
+        memset(&ctxs[i], 0, sizeof(ctxs[i]));
+        ctxs[i].cache = cache;
+        ctxs[i].thread_id = i;
+    }
+
+    for (int i = 0; i < CONC_STRESS_THREAD_COUNT; i++) {
+        conc_thread_create(i, conc_stress_get_pages_thread, &ctxs[i]);
+    }
+    for (int i = 0; i < CONC_STRESS_THREAD_COUNT; i++) {
+        conc_thread_join(i, NULL);
+    }
+
+    // All pages should be successfully allocated
+    int total = 0;
+    for (int i = 0; i < CONC_STRESS_THREAD_COUNT; i++) {
+        total += ctxs[i].success_count;
+    }
+    assert_int_equal(total, CONC_STRESS_THREAD_COUNT * CONC_STRESS_PAGES_PER_THREAD);
+
+    // All pages should be distinct
+    page_t *all_pages[CONC_STRESS_THREAD_COUNT * CONC_STRESS_PAGES_PER_THREAD];
+    int idx = 0;
+    for (int i = 0; i < CONC_STRESS_THREAD_COUNT; i++) {
+        for (int j = 0; j < CONC_STRESS_PAGES_PER_THREAD; j++) {
+            assert_non_null(ctxs[i].pages[j]);
+            all_pages[idx++] = ctxs[i].pages[j];
+        }
+    }
+    // Check uniqueness with O(n^2) - fine for small counts
+    for (int i = 0; i < idx; i++) {
+        for (int j = i + 1; j < idx; j++) {
+            assert_ptr_not_equal(all_pages[i], all_pages[j]);
+        }
+    }
+
+    // Cleanup
+    for (int i = 0; i < idx; i++) {
+        pcache_put_page(cache, all_pages[i]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: Concurrent get_page + mark_dirty.
+//         Multiple threads each get a page and immediately mark it dirty.
+//         Verify dirty_count is correct at the end.
+// ---------------------------------------------------------------------------
+
+struct conc_dirty_ctx {
+    struct pcache *cache;
+    uint64 blkno;
+    page_t *page;
+    int get_ok;
+    int dirty_ok;
+};
+
+static void *conc_get_and_dirty_thread(void *arg) {
+    struct conc_dirty_ctx *ctx = arg;
+    ctx->page = pcache_get_page(ctx->cache, ctx->blkno);
+    ctx->get_ok = (ctx->page != NULL);
+    if (ctx->get_ok) {
+        ctx->dirty_ok = (pcache_mark_page_dirty(ctx->cache, ctx->page) == 0);
+    }
+    return NULL;
+}
+
+static void test_conc_get_and_dirty(void **state) {
+    struct pcache_test_fixture *fixture = *state;
+    struct pcache *cache = &fixture->cache;
+    cache->max_pages = 64;
+
+    const int N = 4;
+    struct conc_dirty_ctx ctxs[4];
+    uint64 blks_per_page = (uint64)PGSIZE >> BLK_SIZE_SHIFT;
+
+    for (int i = 0; i < N; i++) {
+        memset(&ctxs[i], 0, sizeof(ctxs[i]));
+        ctxs[i].cache = cache;
+        ctxs[i].blkno = (uint64)i * blks_per_page;
+    }
+
+    for (int i = 0; i < N; i++) {
+        conc_thread_create(i, conc_get_and_dirty_thread, &ctxs[i]);
+    }
+    for (int i = 0; i < N; i++) {
+        conc_thread_join(i, NULL);
+    }
+
+    for (int i = 0; i < N; i++) {
+        assert_true(ctxs[i].get_ok);
+        assert_true(ctxs[i].dirty_ok);
+    }
+    assert_int_equal(cache->dirty_count, N);
+
+    for (int i = 0; i < N; i++) {
+        pcache_put_page(cache, ctxs[i].page);
+    }
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test_setup_teardown(test_pcache_init_defaults, pcache_test_setup, pcache_test_teardown),
@@ -998,6 +1306,12 @@ int main(void) {
         cmocka_unit_test_setup_teardown(test_pcache_flusher_force_round_flushes_dirty_page, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_flusher_respects_dirty_threshold, pcache_test_setup, pcache_test_teardown),
         cmocka_unit_test_setup_teardown(test_pcache_flusher_time_based_flush, pcache_test_setup, pcache_test_teardown),
+        // Concurrency tests
+        cmocka_unit_test_setup_teardown(test_conc_get_page_same_block, pcache_conc_test_setup, pcache_conc_test_teardown),
+        cmocka_unit_test_setup_teardown(test_conc_get_page_different_blocks, pcache_conc_test_setup, pcache_conc_test_teardown),
+        cmocka_unit_test_setup_teardown(test_conc_io_wait_and_complete, pcache_conc_test_setup, pcache_conc_test_teardown),
+        cmocka_unit_test_setup_teardown(test_conc_stress_get_pages, pcache_conc_test_setup, pcache_conc_test_teardown),
+        cmocka_unit_test_setup_teardown(test_conc_get_and_dirty, pcache_conc_test_setup, pcache_conc_test_teardown),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

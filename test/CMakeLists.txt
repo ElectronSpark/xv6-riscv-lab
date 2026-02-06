@@ -175,6 +175,12 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     wakeup_proc
     wakeup_on_chan
     sleep_on_chan
+    # Proc queue functions
+    proc_queue_init
+    proc_queue_size
+    proc_queue_wait
+    proc_queue_wakeup
+    proc_queue_wakeup_all
     # Workqueue functions
     workqueue_create
     queue_work
@@ -251,13 +257,14 @@ target_include_directories(ut_rbtree PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 add_executable(ut_semaphore
     ${CMAKE_SOURCE_DIR}/src/ut_semaphore_main.c
+    ${CMAKE_SOURCE_DIR}/src/concurrency_harness.c
     ${CMAKE_SOURCE_DIR}/../kernel/lock/semaphore.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/spinlock_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/cpu_wrappers.c
 )
-target_link_libraries(ut_semaphore PRIVATE cmocka-static)
+target_link_libraries(ut_semaphore PRIVATE cmocka-static pthread)
 target_compile_options(ut_semaphore PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
 target_link_options(ut_semaphore PRIVATE ${ASAN_LINK_FLAGS}
     -Wl,--wrap=spin_init,--wrap=spin_lock,--wrap=spin_unlock,--wrap=spin_holding
@@ -274,13 +281,14 @@ target_include_directories(ut_semaphore PRIVATE
 
 add_executable(ut_rwlock
     ${CMAKE_SOURCE_DIR}/src/ut_rwlock_main.c
+    ${CMAKE_SOURCE_DIR}/src/concurrency_harness.c
     ${CMAKE_SOURCE_DIR}/../kernel/lock/rwlock.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/spinlock_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/cpu_wrappers.c
 )
-target_link_libraries(ut_rwlock PRIVATE cmocka-static)
+target_link_libraries(ut_rwlock PRIVATE cmocka-static pthread)
 target_compile_options(ut_rwlock PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
 target_link_options(ut_rwlock PRIVATE ${ASAN_LINK_FLAGS}    -Wl,--wrap=spin_init,--wrap=spin_lock,--wrap=spin_unlock,--wrap=spin_holding
     -Wl,--wrap=push_off,--wrap=pop_off
@@ -305,12 +313,13 @@ target_include_directories(ut_bits PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
 add_executable(ut_pcache
     ${CMAKE_SOURCE_DIR}/src/ut_pcache_main.c
+    ${CMAKE_SOURCE_DIR}/src/concurrency_harness.c
     ${CMAKE_SOURCE_DIR}/../kernel/mm/pcache.c
     ${CMAKE_SOURCE_DIR}/../kernel/rbtree.c
     ${CMAKE_SOURCE_DIR}/../kernel/bintree.c
     ${WRAPPER_SRC}
 )
-target_link_libraries(ut_pcache PRIVATE cmocka-static)
+target_link_libraries(ut_pcache PRIVATE cmocka-static pthread)
 target_compile_options(ut_pcache PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
 target_link_options(ut_pcache PRIVATE ${MOCK_COMPILE_OPTIONS} ${ASAN_LINK_FLAGS})
 target_include_directories(ut_pcache PRIVATE ${UNIT_TEST_INCLUDE_DIRS})

@@ -34,10 +34,10 @@ static void expect_integrity(const rwlock_t *lock, const char *label) {
     if (lock->readers < 0) {
         fail_msg("%s: readers negative (%d)", label, lock->readers);
     }
-    if (lock->readers > 0 && lock->holder_pid != 0) {
+    if (lock->readers > 0 && lock->holder_pid != -1) {
         fail_msg("%s: reader/writer overlap (readers=%d)", label, lock->readers);
     }
-    if (lock->holder_pid != 0 && lock->readers != 0) {
+    if (lock->holder_pid != -1 && lock->readers != 0) {
         fail_msg("%s: holder present with readers=%d", label, lock->readers);
     }
     if (lock->read_queue.lock != &lock->lock) {
@@ -79,7 +79,7 @@ static void test_rwlock_init_integrity(void **state) {
     assert_int_equal(rwlock_init(&lock, 0, "ut"), 0);
     expect_integrity(&lock, "after init");
     assert_int_equal(lock.readers, 0);
-    assert_int_equal(lock.holder_pid, 0);
+    assert_int_equal(lock.holder_pid, -1);
 }
 
 static void test_rwlock_read_acquire_release_integrity(void **state) {
@@ -88,7 +88,7 @@ static void test_rwlock_read_acquire_release_integrity(void **state) {
     assert_int_equal(rwlock_init(&lock, 0, "ut"), 0);
     assert_int_equal(rwlock_acquire_read(&lock), 0);
     assert_int_equal(lock.readers, 1);
-    assert_int_equal(lock.holder_pid, 0);
+    assert_int_equal(lock.holder_pid, -1);
     expect_integrity(&lock, "after read acquire");
     rwlock_release(&lock);
     assert_int_equal(lock.readers, 0);
@@ -103,7 +103,7 @@ static void test_rwlock_write_acquire_release_integrity(void **state) {
     assert_int_equal(lock.holder_pid, g_self_proc.pid);
     expect_integrity(&lock, "after write acquire");
     rwlock_release(&lock);
-    assert_true(lock.holder_pid == 0 || lock.holder_pid == g_wait_proc.pid);
+    assert_true(lock.holder_pid == -1 || lock.holder_pid == g_wait_proc.pid);
     expect_integrity(&lock, "after write release");
 }
 

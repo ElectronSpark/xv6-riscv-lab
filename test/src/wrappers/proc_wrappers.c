@@ -27,6 +27,7 @@
 #include "spinlock.h"
 #include "proc/sched.h"
 #include "wrapper_tracking.h"
+#include "concurrency_harness.h"
 
 static struct cpu_local g_cpu_stub;
 static struct proc g_proc_stub = {.pid = 1};
@@ -202,6 +203,14 @@ int __wrap_proc_queue_size(proc_queue_t *q)
 
 int __wrap_proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata)
 {
+    if (g_concurrency_mode) {
+        // Real blocking: release lock atomically and wait on condvar
+        __atomic_store_n(&lock->locked, 0, __ATOMIC_SEQ_CST);
+        conc_proc_queue_wait(q, lock);
+        // Caller re-acquires the lock explicitly
+        return 0;
+    }
+
     if (g_proc_queue_tracking) {
         g_proc_queue_tracking->queue_wait_count++;
         g_proc_queue_tracking->last_queue_wait = q;
@@ -248,6 +257,11 @@ int __wrap_proc_queue_wakeup(proc_queue_t *q, int error_no, uint64 rdata, struct
 
 int __wrap_proc_queue_wakeup_all(proc_queue_t *q, int error_no, uint64 rdata)
 {
+    if (g_concurrency_mode) {
+        conc_proc_queue_wakeup_all(q);
+        return 0;
+    }
+
     if (g_proc_queue_tracking) {
         g_proc_queue_tracking->queue_wakeup_all_count++;
         g_proc_queue_tracking->last_queue_wakeup_all = q;
