@@ -12,6 +12,7 @@
 #include "list.h"
 #include "proc/sched.h"
 #include "proc/proc.h"
+#include "proc/proc_queue.h"
 #include "rbtree.h"
 #include "proc/workqueue.h"
 #include "kobject.h"
@@ -102,6 +103,7 @@ static void __pcache_spin_assert_holding(struct pcache *pcache);
 static void __pcache_node_init(struct pcache_node *node);
 static page_t *__pcache_page_alloc(void);
 static void __pcache_page_put(page_t *page);
+static void __pcache_page_discard(page_t *page);
 static void __pcache_node_attach_page(
     struct pcache *pcache, 
     page_t *page
@@ -233,13 +235,17 @@ void pcache_test_unregister(struct pcache *pcache) {
         }
     }
 
-    // Free all pcache_nodes in the tree for HOST_TEST cleanup
+    // Free all pcache_nodes in the tree for HOST_TEST cleanup.
+    // We cannot use rb_foreach_entry_safe + slab_free directly because
+    // rb_next_node traverses parent pointers that may have been freed.
+    // Instead, repeatedly delete the first node from the tree.
     __pcache_tree_lock(pcache);
-    struct pcache_node *node, *tmp;
-    rb_foreach_entry_safe(&pcache->page_map, node, tmp, tree_entry) {
+    struct rb_node *rbnode;
+    while ((rbnode = rb_first_node(&pcache->page_map)) != NULL) {
+        rb_delete_node_color(&pcache->page_map, rbnode);
+        struct pcache_node *node = rb_entry(rbnode, struct pcache_node, tree_entry);
         slab_free(node);
     }
-    pcache->page_map.node = NULL;  // Clear tree root
     __pcache_tree_unlock(pcache);
 
     pcache->page_count = 0;
@@ -731,7 +737,7 @@ static void __pcache_node_init(struct pcache_node *node) {
     memset(node, 0, sizeof(struct pcache_node));
     rb_node_init(&node->tree_entry);
     list_entry_init(&node->lru_entry);
-    completion_init(&node->io_completion);
+    proc_queue_init(&node->io_waiters, "pcache_io", NULL);
     node->blkno = -1;
     node->page_count = 0;
 }
@@ -763,6 +769,21 @@ static page_t *__pcache_page_alloc(void) {
 static void __pcache_page_put(page_t *page) {
     if (page == NULL) {
         return;
+    }
+    __page_ref_dec(page);
+}
+
+// Discard a freshly-allocated page that was never attached to a pcache.
+// Frees the pcache_node (allocated by __pcache_page_alloc) since no
+// tree or list holds a reference to it, then drops the page ref.
+static void __pcache_page_discard(page_t *page) {
+    if (page == NULL) {
+        return;
+    }
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+    if (pcnode != NULL) {
+        page->pcache.pcache_node = NULL;
+        slab_free(pcnode);
     }
     __page_ref_dec(page);
 }
@@ -820,7 +841,6 @@ static int __pcache_node_io_begin(struct pcache *pcache, page_t *page) {
     }
     node->io_in_progress = 1;
     node->last_request = get_jiffs();
-    completion_reinit(&node->io_completion);
     __pcache_tree_unlock(pcache);
     return 0;
 }
@@ -834,20 +854,18 @@ static int __pcache_node_io_end(struct pcache *pcache, page_t *page) {
     }
     node->io_in_progress = 0;
     node->last_flushed = get_jiffs();
+    proc_queue_wakeup_all(&node->io_waiters, 0, 0);
     __pcache_tree_unlock(pcache);
-    complete_all(&node->io_completion);
     return 0;
 }
 
 static int __pcache_node_io_wait(struct pcache *pcache, page_t *page) {
     __pcache_tree_lock(pcache);
     struct pcache_node *node = page->pcache.pcache_node;
-    if (!node->io_in_progress) {
-        __pcache_tree_unlock(pcache);
-        return 0;
+    while (node->io_in_progress) {
+        proc_queue_wait(&node->io_waiters, &pcache->tree_lock, NULL);
     }
     __pcache_tree_unlock(pcache);
-    wait_for_completion(&node->io_completion);
     return 0;
 }
 
@@ -1145,7 +1163,7 @@ retry_lookup:
             if (!__pcache_is_active(pcache)) {
                 page_lock_release(new_page);
                 __pcache_spin_unlock(pcache);
-                __pcache_page_put(new_page);
+                __pcache_page_discard(new_page);
                 return NULL;
             }
         }
@@ -1155,14 +1173,14 @@ retry_lookup:
     if (page == NULL) {
         page_lock_release(new_page);
         __pcache_spin_unlock(pcache);
-        __pcache_page_put(new_page);
+        __pcache_page_discard(new_page);
         return NULL;
     }
 
     if (page != new_page) {
         page_lock_release(new_page);
         __pcache_spin_unlock(pcache);
-        __pcache_page_put(new_page);
+        __pcache_page_discard(new_page);
         goto retry_lookup;
     }
 
