@@ -445,25 +445,25 @@ int proc_tree_add(proc_tree_t *q, proc_node_t *node) {
     return 0; // Success
 }
 
-int proc_tree_first(proc_tree_t *q, proc_node_t **ret_node) {
-    if (q == NULL || ret_node == NULL) {
-        return -EINVAL; // Error: queue or return node pointer is NULL
+proc_node_t *proc_tree_first(proc_tree_t *q) {
+    if (q == NULL) {
+        return ERR_PTR(-EINVAL); // Error: queue or return node pointer is NULL
     }
 
     struct rb_node *first_node = rb_first_node(&q->root);
-    if (first_node == NULL) {
-        return -ENODATA; // Error: no first node found
+    if (IS_ERR_OR_NULL(first_node)) {
+        return ERR_CAST(first_node); // No first node found
     }
 
-    *ret_node = container_of(first_node, proc_node_t, tree.entry);
-    return 0; // Success
+    return container_of(first_node, proc_node_t, tree.entry);
 }
 
 int proc_tree_key_min(proc_tree_t *q, uint64 *key) {
-    proc_node_t *min_node = NULL;
-    int ret = proc_tree_first(q, &min_node);
-    if (ret != 0) {
-        return ret; // Error: failed to get the first node
+    proc_node_t *min_node = proc_tree_first(q);
+    if (min_node == NULL) {
+        return -ENOENT; // Error: tree is empty
+    } else if (IS_ERR(min_node)) {
+        return PTR_ERR(min_node); // Error: failed to get the first node
     }
     *key = min_node->tree.key;
     return 0; // Success
@@ -533,32 +533,22 @@ int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock, uint64 *rd
 
 // Wake up one node with a given key
 // Process Tree will always expect the waiter to detach itself from the tree when woken up.
-int proc_tree_wakeup_one(proc_tree_t *q, uint64 key, int error_no, uint64 rdata, struct proc **retp) {
+struct proc *proc_tree_wakeup_one(proc_tree_t *q, uint64 key, int error_no, uint64 rdata) {
     if (q == NULL) {
-        return -EINVAL; // Error: queue is NULL
+        return ERR_PTR(-EINVAL); // Error: queue is NULL
     }
 
     proc_node_t *target = __proc_tree_find_key_min(q, key);
     if (target == NULL) {
-        return -ENOENT; // Error: no matching node found
+        return ERR_PTR(-ENOENT); // Error: no matching node found
     }
 
-    if (__proc_tree_do_remove(q, target) != 0) {
-        return -ENOENT; // Error: failed to remove node from tree
+    int ret = __proc_tree_do_remove(q, target);
+    if (ret != 0) {
+        return ERR_PTR(ret); // Error: failed to remove node from tree
     }
 
-    struct proc *p = __do_wakeup(target, error_no, rdata);
-    if (IS_ERR_OR_NULL(p)) {
-        if (retp != NULL) {
-            *retp = NULL;
-        }
-        if (p == NULL) {
-            return -ENOENT; // Error: no process to wake up
-        }
-        return PTR_ERR(p);
-    }
-
-    return 0; // Success
+    return __do_wakeup(target, error_no, rdata);
 }
 
 // Wake up all nodes with a given key
@@ -569,7 +559,7 @@ int proc_tree_wakeup_key(proc_tree_t *q, uint64 key, int error_no, uint64 rdata)
 
     int count = 0;
 
-    while (proc_tree_wakeup_one(q, key, error_no, rdata, NULL) == 0) {
+    while (!IS_ERR_OR_NULL(proc_tree_wakeup_one(q, key, error_no, rdata))) {
         count++;
     }
 
