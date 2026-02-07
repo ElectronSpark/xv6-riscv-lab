@@ -1813,9 +1813,17 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
         return ERR_PTR(-ENOENT); // Inode not found
     }
     // CRITICAL: Take a reference BEFORE locking to prevent use-after-free.
-    // If refcount is 0, the inode is being freed - treat as not found.
+    // For backendless filesystems, inodes with refcount=0 but n_links>0 are
+    // kept alive in cache (see vfs_iput). We must allow bumping refcount from
+    // 0 in this case, otherwise the inode becomes inaccessible.
     if (!vfs_idup_not_zero(inode)) {
-        return ERR_PTR(-ENOENT); // Inode is dying
+        // For backendless fs: try unconditional bump if inode looks alive
+        if (sb->backendless && inode->n_links > 0 && 
+            inode->valid && !inode->destroying) {
+            atomic_inc(&inode->ref_count);
+        } else {
+            return ERR_PTR(-ENOENT); // Inode is dying
+        }
     }
     vfs_ilock(inode);
     if (!inode->valid || inode->destroying) {

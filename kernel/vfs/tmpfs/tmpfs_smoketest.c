@@ -1147,22 +1147,23 @@ cleanup_mount:
             vfs_iunlock(child_root);
             vfs_superblock_unlock(child_sb);
             printf("dir_iter_mount: " WARN " vfs_unmount errno=%d\n", ret);
+            // On failure, we still hold mp's lock, so unlock it
+            vfs_iunlock(mp);
+            vfs_superblock_unlock(mp->sb);
         }
-        // On success, vfs_unmount already freed child_root and child_sb
-        vfs_iunlock(mp);
-        vfs_superblock_unlock(mp->sb);
+        // On success, vfs_unmount already unlocked/freed child_root, child_sb, mp, and mp->sb
         vfs_mount_unlock();
     }
 
 cleanup_mp_dir:
     if (mp != NULL) {
+        // Release our reference first so rmdir doesn't see refcount > 1
+        vfs_iput(mp);
+        mp = NULL;
         int rmdir_ret = vfs_unlink(root, mp_name, mp_len);
         if (rmdir_ret != 0) {
             printf("dir_iter_mount: " WARN " cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
-            // Only iput if rmdir failed - if rmdir succeeded, it already freed the inode
-            vfs_iput(mp);
         }
-        // Note: if rmdir succeeded, the inode is already freed by vfs_unlink's internal vfs_iput
     }
 out:
     if (root_pinned) {
@@ -1250,27 +1251,29 @@ void tmpfs_run_lazy_unmount_smoketest(void) {
         vfs_superblock_wlock(mp->sb);
         vfs_ilock(mp);
         ret = vfs_unmount_lazy(mp);
-        vfs_iunlock(mp);
-        vfs_superblock_unlock(mp->sb);
-        vfs_mount_unlock();
-
         if (ret != 0) {
+            // On failure, we still hold locks
+            vfs_iunlock(mp);
+            vfs_superblock_unlock(mp->sb);
             printf("lazy_unmount: " FAIL " test1 vfs_unmount_lazy errno=%d\n", ret);
         } else {
+            // On success, vfs_unmount_lazy already unlocked mp and mp->sb
             printf("lazy_unmount: " PASS " test1 no-open-files lazy unmount\n");
         }
+        vfs_mount_unlock();
     }
 
 cleanup_test1_mount:
     // Already unmounted above
 cleanup_test1_mp:
     if (mp != NULL) {
+        // Release our reference first so rmdir doesn't see refcount > 1
+        vfs_iput(mp);
+        mp = NULL;
         int rmdir_ret = vfs_unlink(root, mp_name, mp_len);
         if (rmdir_ret != 0) {
             printf("lazy_unmount: " WARN " test1 cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
-            vfs_iput(mp);
         }
-        mp = NULL;
     }
 
     // =========================================================================
@@ -1342,14 +1345,16 @@ cleanup_test1_mp:
         vfs_superblock_wlock(mp->sb);
         vfs_ilock(mp);
         ret = vfs_unmount_lazy(mp);
-        vfs_iunlock(mp);
-        vfs_superblock_unlock(mp->sb);
-        vfs_mount_unlock();
-
         if (ret != 0) {
+            // On failure, we still hold locks
+            vfs_iunlock(mp);
+            vfs_superblock_unlock(mp->sb);
+            vfs_mount_unlock();
             printf("lazy_unmount: " FAIL " test2 vfs_unmount_lazy errno=%d\n", ret);
             goto cleanup_test2_file;
         }
+        // On success, vfs_unmount_lazy already unlocked mp and mp->sb
+        vfs_mount_unlock();
         printf("lazy_unmount: " PASS " test2 lazy unmount with open file\n");
     }
 
@@ -1393,12 +1398,13 @@ cleanup_test2_mount:
     // Mount already lazily unmounted above
 cleanup_test2_mp:
     if (mp != NULL) {
+        // Release our reference first so rmdir doesn't see refcount > 1
+        vfs_iput(mp);
+        mp = NULL;
         int rmdir_ret = vfs_unlink(root, mp_name, mp_len);
         if (rmdir_ret != 0) {
             printf("lazy_unmount: " WARN " test2 cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
-            vfs_iput(mp);
         }
-        mp = NULL;
     }
 
     // =========================================================================
@@ -1455,15 +1461,17 @@ cleanup_test2_mp:
         vfs_superblock_wlock(mp->sb);
         vfs_ilock(mp);
         ret = vfs_unmount_lazy(mp);
-        vfs_iunlock(mp);
-        vfs_superblock_unlock(mp->sb);
-        vfs_mount_unlock();
-
         if (ret != 0) {
+            // On failure, we still hold locks
+            vfs_iunlock(mp);
+            vfs_superblock_unlock(mp->sb);
+            vfs_mount_unlock();
             printf("lazy_unmount: " FAIL " test3 vfs_unmount_lazy errno=%d\n", ret);
             vfs_iput(subdir);  // Drop the extra ref
             goto cleanup_test3_subdir;
         }
+        // On success, vfs_unmount_lazy already unlocked mp and mp->sb
+        vfs_mount_unlock();
         printf("lazy_unmount: " PASS " test3 lazy unmount with held directory\n");
     }
 
@@ -1486,12 +1494,13 @@ cleanup_test3_mount:
     // Mount already lazily unmounted
 cleanup_test3_mp:
     if (mp != NULL) {
+        // Release our reference first so rmdir doesn't see refcount > 1
+        vfs_iput(mp);
+        mp = NULL;
         int rmdir_ret = vfs_unlink(root, mp_name, mp_len);
         if (rmdir_ret != 0) {
             printf("lazy_unmount: " WARN " test3 cleanup rmdir %s errno=%d\n", mp_name, rmdir_ret);
-            vfs_iput(mp);
         }
-        mp = NULL;
     }
 
     printf("lazy_unmount: END tests\n");

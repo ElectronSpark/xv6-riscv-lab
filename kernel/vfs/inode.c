@@ -235,7 +235,8 @@ retry:
         goto retry;
     }
 
-    if (S_ISDIR(inode->mode) && inode->parent != inode && sb->attached) {
+    if (S_ISDIR(inode->mode) && inode->parent != NULL && 
+        inode->parent != inode && sb->attached) {
         // For non-root directory inode, decrease parent dir refcount
         // Root directory's parent is itself
         // Skip parent handling for detached fs (parent may already be freed)
@@ -1202,10 +1203,7 @@ retry:
         goto retry;
     }
     
-    if (!IS_ERR_OR_NULL(ret_ptr) && ret_ptr->parent == NULL) {
-        ret_ptr->parent = dir;
-        vfs_idup(dir); // increase parent dir refcount
-    }
+    // Note: symlinks don't need parent reference (no ".." traversal needed)
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
