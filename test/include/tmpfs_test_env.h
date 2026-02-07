@@ -4,6 +4,9 @@
  * This file provides all the types and stubs needed to compile truncate.c
  * for unit testing. It uses guards to prevent the kernel headers from
  * being included.
+ *
+ * Since the bmap has been replaced with pcache, this header provides mock
+ * pcache types and function declarations.
  */
 #ifndef TMPFS_TEST_ENV_H
 #define TMPFS_TEST_ENV_H
@@ -36,9 +39,11 @@
 #define KERNEL_INC_ATOMIC_H
 #define __KERNEL_COMPILER_H
 #define KERNEL_OBJECT_H
-#define __KERNEL_PCACHE_TYPES_H
 #define __KERNEL_VFS_STAT_H
 #define KERNEL_VIRTUAL_FILE_SYSTEM_STAT_H
+/* Block pcache headers — we provide mock types below */
+#define __KERNEL_PAGE_CACHE_H__
+#define KERNEL_PAGE_CACHE_TYPES_H
 
 #include <stddef.h>
 #include <stdbool.h>
@@ -66,6 +71,10 @@ typedef int64 loff_t;
 #ifndef PAGE_MASK
 #define PAGE_MASK (PAGE_SIZE - 1)
 #endif
+/* Kernel uses PGSIZE; alias it to PAGE_SIZE for the test environment */
+#ifndef PGSIZE
+#define PGSIZE PAGE_SIZE
+#endif
 
 /* ============================================================================
  * Error codes (matching errno.h)
@@ -78,67 +87,92 @@ typedef int64 loff_t;
 #endif
 
 /* ============================================================================
- * TMPFS constants (matching tmpfs_private.h)
+ * Mock pcache types — just enough for truncate.c to compile
  * ============================================================================ */
-#define TMPFS_INODE_DBLOCKS 32UL
-#define TMPFS_INODE_INDRECT_START TMPFS_INODE_DBLOCKS
-#define TMPFS_INODE_INDRECT_ITEMS (PAGE_SIZE / sizeof(void *))
-#define TMPFS_INODE_DINDRECT_START (TMPFS_INODE_INDRECT_START + TMPFS_INODE_INDRECT_ITEMS)
-#define TMPFS_INODE_DINDRECT_ITEMS (TMPFS_INODE_INDRECT_ITEMS * TMPFS_INODE_INDRECT_ITEMS)
-#define TMPFS_INODE_TINDRECT_START (TMPFS_INODE_DINDRECT_START + TMPFS_INODE_DINDRECT_ITEMS)
-#define TMPFS_INODE_TINDRECT_ITEMS (TMPFS_INODE_DINDRECT_ITEMS * TMPFS_INODE_INDRECT_ITEMS)
-#define TMPFS_MAX_FILE_SIZE ((TMPFS_INODE_TINDRECT_START + TMPFS_INODE_TINDRECT_ITEMS) * PAGE_SIZE)
-#define TMPFS_IBLOCK(pos) ((pos) >> PAGE_SHIFT)
+
+/* Forward declarations */
+struct pcache;
+struct pcache_node;
+
+/* Minimal page_t with pcache extension */
+typedef struct page_struct {
+    struct {
+        struct pcache_node *pcache_node;
+    } pcache;
+} page_t;
+
+/* Minimal pcache_node — only the data pointer is used by truncate.c */
+struct pcache_node {
+    void *data;
+};
+
+/* Minimal pcache structure — only 'active' flag is checked by truncate.c */
+struct pcache {
+    int active;
+};
+
+/* pcache function declarations (implementations in the test .c file) */
+page_t *pcache_get_page(struct pcache *pcache, uint64 blkno);
+void pcache_put_page(struct pcache *pcache, page_t *page);
+int pcache_read_page(struct pcache *pcache, page_t *page);
+int pcache_mark_page_dirty(struct pcache *pcache, page_t *page);
+int pcache_discard_blk(struct pcache *pcache, uint64 blkno);
+void pcache_teardown(struct pcache *pcache);
+
+/* ============================================================================
+ * TMPFS constants (matching kernel tmpfs_private.h — pcache model)
+ * ============================================================================ */
+#define TMPFS_MAX_FILE_SIZE ((uint64)1 * 1024 * 1024 * 1024)
+#define TMPFS_IBLOCK(pos)        ((pos) >> PAGE_SHIFT)
 #define TMPFS_IBLOCK_OFFSET(pos) ((pos) & PAGE_MASK)
 
 /* ============================================================================
  * Minimal structures for testing (matching vfs_types.h and tmpfs_private.h)
  * ============================================================================ */
 
-/* Minimal vfs_inode - only fields used by truncate.c */
+/* Minimal vfs_inode — includes i_data pcache used by truncate.c */
 struct vfs_inode {
     loff_t size;
     int n_blocks;
-    /* Padding to match kernel structure size if needed */
+    struct pcache i_data;
 };
 
-/* Minimal tmpfs_inode - matches kernel tmpfs_private.h */
+/* Minimal tmpfs_inode — matches the simplified kernel tmpfs_private.h
+ * (no bmap; non-embedded data lives entirely in i_data pcache).
+ * The dir variant is the largest union member in the kernel and determines
+ * the amount of space available for embedded file data.  We replicate the
+ * size here with a padding array so TMPFS_INODE_EMBEDDED_DATA_LEN is the
+ * same as in the kernel (~288 bytes). */
 struct tmpfs_inode {
     struct vfs_inode vfs_inode;
     bool embedded;
     union {
+        char _dir_padding[288]; /* same size as kernel dir { hlist_t + buckets[15] } */
         union {
-            struct {
-                void *direct[TMPFS_INODE_DBLOCKS];
-                void **indirect;
-                void ***double_indirect;
-                void ****triple_indirect;
-            };
-            uint8 data[0];
+            char *symlink_target;
+            char data[0];
+        } sym;
+        union {
+            uint8 data[0]; /* embedded data for small files */
         } file;
     };
 };
 
 #define TMPFS_INODE_EMBEDDED_DATA_LEN   \
-    (sizeof(struct tmpfs_inode) - offsetof(struct tmpfs_inode, file.data))
+    (sizeof(struct tmpfs_inode) - offsetof(struct tmpfs_inode, sym.data))
 
 /* container_of macro */
 #define container_of(ptr, type, member) \
     ((type *)((char *)(ptr) - offsetof(type, member)))
 
 /* ============================================================================
- * Function stubs - to be implemented in test file or linked via --wrap
+ * Function stubs — to be implemented in the test .c file
  * ============================================================================ */
-
-/* Memory allocation - declare as extern, implement in test file */
-extern void *kalloc(void);
-extern void kfree(void *);
 
 /* Panic handling */
 #define ASSERTION_FAILURE "Assertion failure"
 #define PANIC "Panic"
 
-/* These will be defined in the test file */
 extern void __panic_impl(const char *type, const char *fmt, ...);
 
 #define __panic(type, fmt, ...) __panic_impl(type, fmt, ##__VA_ARGS__)
@@ -149,5 +183,9 @@ extern void __panic_impl(const char *type, const char *fmt, ...);
             __panic(ASSERTION_FAILURE, fmt, ##__VA_ARGS__); \
         } \
     } while (0)
+
+/* tmpfs pcache lifecycle — declared in tmpfs_private.h, mocked in test */
+extern void tmpfs_inode_pcache_init(struct vfs_inode *inode);
+extern void tmpfs_inode_pcache_teardown(struct vfs_inode *inode);
 
 #endif /* TMPFS_TEST_ENV_H */
