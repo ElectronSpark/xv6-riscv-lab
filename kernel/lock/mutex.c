@@ -22,16 +22,16 @@
 #define __mutex_try_set_holder(lk, pid)                                        \
     atomic_cas(&lk->holder, -1, pid) // -1 = no holder
 
-static int __do_wakeup(mutex_t *lk) {
+static struct proc *__do_wakeup(mutex_t *lk) {
     struct proc *next = proc_queue_wakeup(&lk->wait_queue, 0, 0);
     if (next == NULL) {
         __mutex_set_holder(lk, -1); // -1 = no holder
-        return 0;
+        return NULL;
     } else if (IS_ERR(next)) {
-        return PTR_ERR(next); // Error: failed to wake up process
+        return ERR_CAST(next); // Error: failed to wake up process
     }
     __mutex_set_holder(lk, next->pid);
-    return 0;
+    return next;
 }
 
 void mutex_init(mutex_t *lk, char *name) {
@@ -75,14 +75,9 @@ int mutex_lock(mutex_t *lk) {
             // gotten the lock, we need to release the lock and return the error
             // code.
             if (__mutex_holder(lk) == self->pid) {
-                if (proc_queue_size(&lk->wait_queue) > 0) {
-                    // When wait queue is not empty, __do_wakeup will not return
-                    // -ENOENT
-                    assert(__do_wakeup(lk) == 0,
-                           "mutex_unlock: failed to wake up processes");
-                } else if (__mutex_holder(lk) == self->pid) {
-                    __mutex_set_holder(lk, -1); // -1 = no holder
-                }
+                assert(
+                    !IS_ERR_OR_NULL(__do_wakeup(lk)),
+                    "mutex_lock: failed to wake up processes after interrupt");
             }
             spin_unlock(&lk->lk);
             return ret;
@@ -104,9 +99,8 @@ void mutex_unlock(mutex_t *lk) {
     assert(self != NULL, "mutex_unlock: no process context");
     assert(__mutex_holder(lk) == self->pid,
            "mutex_unlock: process does not hold the lock");
-    int ret = __do_wakeup(lk);
-    assert(ret == 0 || ret == -ENOENT,
-           "mutex_unlock: failed to wake up processes");
+    struct proc *next = __do_wakeup(lk);
+    assert(!IS_ERR(next), "mutex_unlock: failed to wake up processes");
     spin_unlock(&lk->lk);
 }
 
