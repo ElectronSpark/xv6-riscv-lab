@@ -202,7 +202,7 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
     if (flags & SLAB_FLAG_EMBEDDED) {
         // Embedded SLAB puts its descriptor at the start of its cache page
         slab = page_base;
-    } else if ((slab = kmm_alloc(sizeof(slab_t))) == NULL){
+    } else if ((slab = slab_t_desc_alloc()) == NULL){
         __page_free(page, order);
         return NULL;
     }
@@ -233,7 +233,7 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
         if (slab->bitmap == NULL) {
             // Failed to allocate bitmap, cleanup and return
             if ((uint64)slab != (uint64)page_base) {
-                kmm_free(slab);
+                slab_t_desc_free(slab);
             }
             __page_free(page, order);
             return NULL;
@@ -282,7 +282,7 @@ STATIC_INLINE void __slab_destroy(slab_t *slab) {
         slab->bitmap = NULL;
     }
     if ((uint64)slab != page_base) {
-        kmm_free(slab);
+        slab_t_desc_free(slab);
     }
     __page_free(page, order);
 }
@@ -703,12 +703,12 @@ int slab_cache_init(slab_cache_t *cache, char *name, size_t obj_size,
 
 // create and initialize a SLAB cache
 slab_cache_t *slab_cache_create(char *name, size_t obj_size, uint64 flags) {
-    slab_cache_t *slab_cache = kmm_alloc(sizeof(slab_cache_t));
+    slab_cache_t *slab_cache = slab_cache_t_alloc();
     if (slab_cache == NULL) {
         return NULL;
     }
     if (slab_cache_init(slab_cache, name, obj_size, flags) != 0) {
-        kmm_free(slab_cache);
+        slab_cache_t_free(slab_cache);
         slab_cache = NULL;
     }
     return slab_cache;
@@ -758,7 +758,7 @@ int slab_cache_destroy(slab_cache_t *cache) {
         return -1;
     }
     __slab_cache_free_tmp_list(&tmp_list, shrink_ret);
-    kmm_free(cache);
+    slab_cache_t_free(cache);
     return 0;
 }
 
@@ -866,6 +866,7 @@ void *slab_alloc(slab_cache_t *cache) {
         return NULL;
     }
 
+    push_off();
     cpu_id = cpuid();
     pcpu_cache = &cache->percpu_caches[cpu_id];
 
@@ -890,6 +891,7 @@ void *slab_alloc(slab_cache_t *cache) {
         __atomic_fetch_add(&cache->obj_active, 1, __ATOMIC_RELEASE);
         __percpu_cache_unlock_cpu(cache, cpu_id);
         __slab_sanitizer_check("slab_alloc", cache, slab, obj);
+        pop_off();
         return obj;
     }
 
@@ -925,6 +927,7 @@ void *slab_alloc(slab_cache_t *cache) {
         __percpu_cache_unlock_cpu(cache, cpu_id);
 
         __slab_sanitizer_check("slab_alloc", cache, slab, obj);
+        pop_off();
         return obj;
     }
 
@@ -936,6 +939,7 @@ void *slab_alloc(slab_cache_t *cache) {
                        cache->obj_size, cache->slab_obj_num, cache->bitmap_size);
     if (slab == NULL) {
         // Still failed after emergency shrink - truly out of memory
+        pop_off();
         return NULL;
     }
 
@@ -963,6 +967,7 @@ void *slab_alloc(slab_cache_t *cache) {
     __percpu_cache_unlock_cpu(cache, cpu_id);
 
     __slab_sanitizer_check("slab_alloc", cache, slab, obj);
+    pop_off();
     return obj;
 }
 

@@ -31,4 +31,10 @@ void *slab_alloc(slab_cache_t *cache);
 void slab_free(void *obj);
 void slab_free_noshrink(void *obj);
 
+// kalloc.c
+slab_t *slab_t_desc_alloc(void);
+void slab_t_desc_free(slab_t *slab_desc);
+slab_cache_t *slab_cache_t_alloc(void);
+void slab_cache_t_free(slab_cache_t *cache_desc);
+
 #endif          /* __KERNEL_SLAB_H */

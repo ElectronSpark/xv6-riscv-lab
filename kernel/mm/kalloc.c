@@ -17,6 +17,8 @@
 
 STATIC slab_cache_t __kmm_slab_cache[SLAB_CACHE_NUMS][1];
 STATIC char __kmm_slab_names[SLAB_CACHE_NUMS][32] = { 0 };
+static slab_cache_t __slab_t_pool = { 0 }; // Special cache for slab descriptors themselves
+static slab_cache_t __slab_cache_t_pool = { 0 }; // Special cache for slab_cache_t descriptors themselves
 
 STATIC_INLINE void __init_kmm_slab_name(int idx, size_t bytes) {
   char num[32] = { '\0' };
@@ -37,6 +39,14 @@ kinit()
   size_t obj_size = SLAB_OBJ_MIN_SIZE;
   
   page_buddy_init();
+
+  int ret = slab_cache_init(&__slab_t_pool, "slab_t_pool", sizeof(slab_t), 
+                                SLAB_FLAG_STATIC | SLAB_FLAG_EMBEDDED);
+  assert(ret == 0, "__slab_t_pool_init: failed to initialize slab_t pool, errno=%d", ret);
+  ret = slab_cache_init(&__slab_cache_t_pool, "slab_cache_t_pool", sizeof(slab_cache_t), 
+                                SLAB_FLAG_STATIC | SLAB_FLAG_EMBEDDED);
+  assert(ret == 0, "__slab_cache_t_pool_init: failed to initialize slab_cache_t pool, errno=%d", ret);
+
   for (int i = 0; i < SLAB_CACHE_NUMS; i++) {
     __init_kmm_slab_name(i, obj_size);
     if (slab_cache_init(__kmm_slab_cache[i], __kmm_slab_names[i], obj_size,
@@ -46,6 +56,30 @@ kinit()
     }
     obj_size *= 2;
   }
+}
+
+slab_t *slab_t_desc_alloc(void) {
+    slab_t *slab_desc = slab_alloc(&__slab_t_pool);
+    return slab_desc;
+}
+
+void slab_t_desc_free(slab_t *slab_desc) {
+  if (slab_desc == NULL) {
+    return;
+  }
+  slab_free(slab_desc);
+}
+
+slab_cache_t *slab_cache_t_alloc(void) {
+    slab_cache_t *cache_desc = slab_alloc(&__slab_cache_t_pool);
+    return cache_desc;
+}
+
+void slab_cache_t_free(slab_cache_t *cache_desc) {
+  if (cache_desc == NULL) {
+    return;
+  }
+  slab_free(cache_desc);
 }
 
 // allocate memory of size bytes from the pre-defined SLABs
@@ -74,17 +108,13 @@ void *kmm_alloc(size_t size) {
     if (obj_shift > SLAB_OBJ_MAX_SHIFT || slab_idx >= SLAB_CACHE_NUMS) {
       return NULL;
     }
-    push_off();
     void *ret = slab_alloc(__kmm_slab_cache[slab_idx]);
-    pop_off();
     return ret;
 }
 
 // free the memory allocated from kmm_alloc
 void kmm_free(void *ptr) {
-  push_off();
     slab_free(ptr);
-    pop_off();
 }
 
 // Shrink all kmm slab caches, releasing unused slabs back to buddy system.
