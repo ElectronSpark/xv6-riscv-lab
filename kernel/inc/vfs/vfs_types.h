@@ -362,7 +362,8 @@ struct vfs_file_ops {
     ssize_t (*write)(struct vfs_file *file, const char *buf, size_t count, bool user);
     loff_t (*llseek)(struct vfs_file *file, loff_t offset, int whence);
     int (*release)(struct vfs_inode *inode, struct vfs_file *file);
-    int (*fsync)(struct vfs_file *file);
+    int (*fsync)(struct vfs_file *file, loff_t start, loff_t len);  // Sync a range of data
+    int (*fflush)(struct vfs_file *file);  // Flush all dirty data
     int (*stat)(struct vfs_file *file, struct stat *stat);
 };
 

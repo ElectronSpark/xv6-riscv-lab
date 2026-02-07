@@ -1057,6 +1057,90 @@ int pcache_init(struct pcache *pcache) {
     return 0;
 }
 
+/*
+ * pcache_teardown - Deactivate a pcache, evict all its pages, and unregister
+ * it from the global list.  Safe to call on an embedded pcache before the
+ * owning structure is freed (e.g. per-inode i_data).
+ *
+ * After this call the pcache must not be accessed again unless re-initialised
+ * with pcache_init().
+ */
+void pcache_teardown(struct pcache *pcache) {
+    if (pcache == NULL)
+        return;
+
+    /* 1. Mark inactive so no new get_page / flush can be scheduled. */
+    __pcache_spin_lock(pcache);
+    pcache->active = 0;
+    bool flush_pending = pcache->flush_requested;
+    wakeup_on_chan(pcache);
+    __pcache_spin_unlock(pcache);
+
+    /* 1b. Wait for any in-flight flush worker to finish.  Once active=0
+     *     the flusher thread will not queue new work for this pcache, so
+     *     after this wait no worker can be running write_page on our
+     *     private_data.  This closes the race between the global flusher
+     *     scheduling a flush and the caller freeing the owning structure. */
+    if (flush_pending) {
+        __pcache_wait_flush_complete(pcache);
+    }
+
+    /* 2. Evict every clean LRU page. __pcache_evict_lru pops from LRU,
+     *    removes from rb-tree, frees the pcache_node, and releases the
+     *    page lock.  We just need to drop the final page reference. */
+    __pcache_spin_lock(pcache);
+    for (;;) {
+        page_t *victim = __pcache_evict_lru(pcache);
+        if (victim == NULL)
+            break;
+        __pcache_page_put(victim);
+    }
+    __pcache_spin_unlock(pcache);
+
+    /* 3. Drain remaining rb-tree nodes (dirty pages that weren't on LRU,
+     *    or any other leftovers). */
+    __pcache_spin_lock(pcache);
+    __pcache_tree_lock(pcache);
+    {
+        struct rb_node *rbnode;
+        while ((rbnode = rb_first_node(&pcache->page_map)) != NULL) {
+            struct pcache_node *node = rb_entry(rbnode, struct pcache_node, tree_entry);
+            rb_delete_node_color(&pcache->page_map, rbnode);
+            page_t *p = node->page;
+            if (p != NULL) {
+                page_lock_acquire(p);
+                /* Detach manually since we already removed from tree. */
+                if (!LIST_NODE_IS_DETACHED(node, lru_entry)) {
+                    list_node_detach(node, lru_entry);
+                }
+                p->pcache.pcache_node = NULL;
+                p->pcache.pcache = NULL;
+                node->page = NULL;
+                page_lock_release(p);
+                __pcache_page_put(p);
+            }
+            slab_free(node);
+        }
+    }
+    pcache->page_count = 0;
+    pcache->lru_count = 0;
+    pcache->dirty_count = 0;
+    __pcache_tree_unlock(pcache);
+    __pcache_spin_unlock(pcache);
+
+    /* 4. Unregister from the global pcache list so the flusher thread
+     *    never touches this pcache again. */
+    __pcache_global_lock();
+    __pcache_spin_lock(pcache);
+    if (!LIST_ENTRY_IS_DETACHED(&pcache->list_entry)) {
+        list_node_detach(pcache, list_entry);
+        if (__global_pcache_count > 0)
+            __global_pcache_count--;
+    }
+    __pcache_spin_unlock(pcache);
+    __pcache_global_unlock();
+}
+
 // Try to get a page from pcache
 // The reference count of the page will be increased by 1 if found (2 minimum)
 // Block number is in 512-byte block unit
@@ -1351,6 +1435,64 @@ out:
     page_lock_release(page);
     __pcache_spin_unlock(pcache);
     return ret;
+}
+
+/*
+ * Invalidate a cached page by 512-byte block number.
+ * Looks up the page without allocating; if the block is not cached, returns 0.
+ * On success the page's uptodate and dirty flags are cleared so the next
+ * accessor will re-read from disk.
+ */
+int pcache_invalidate_blk(struct pcache *pcache, uint64 blkno) {
+    page_t *page;
+    uint64 base_blkno;
+    struct pcache_node *pcnode;
+
+    if (pcache == NULL || !pcache->active) {
+        return -EINVAL;
+    }
+
+    base_blkno = PCACHE_ALIGN_BLKNO(blkno);
+
+    // Lookup without allocating (NULL default_page → tree search only)
+    page = __pcache_get_page(pcache, base_blkno, PGSIZE, NULL);
+    if (page == NULL) {
+        return 0;  // Not cached, nothing to invalidate
+    }
+
+    __pcache_spin_lock(pcache);
+    page_lock_acquire(page);
+
+    if (!__pcache_page_valid(pcache, page)) {
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+        return 0;
+    }
+
+    pcnode = page->pcache.pcache_node;
+    if (pcnode->blkno != base_blkno) {
+        // Page was repurposed for a different block range
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+        return 0;
+    }
+
+    if (pcnode->io_in_progress) {
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+        return -EBUSY;
+    }
+
+    if (!LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
+        __pcache_remove_lru(pcache, page);
+    }
+
+    pcnode->dirty = 0;
+    pcnode->uptodate = 0;
+
+    page_lock_release(page);
+    __pcache_spin_unlock(pcache);
+    return 0;
 }
 
 // Flush all dirty pages in pcache and wait for completion

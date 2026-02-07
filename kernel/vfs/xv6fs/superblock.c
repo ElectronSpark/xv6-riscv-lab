@@ -18,6 +18,8 @@
 #include "vfs/fs.h"
 #include "../vfs_private.h"
 #include <mm/slab.h>
+#include <mm/pcache.h>
+#include "dev/bio.h"
 #include "xv6fs_private.h"
 #include "block_cache.h"
 #include "xv6fs_smoketest.h"
@@ -25,6 +27,129 @@
 // Slab caches for xv6fs structures
 slab_cache_t __xv6fs_inode_cache;
 static slab_cache_t __xv6fs_sb_cache;
+
+/******************************************************************************
+ * Per-inode page cache operations for file data
+ *
+ * The pcache is keyed by logical file offset in 512-byte units.
+ * One pcache page (4KB) covers BSIZE_PER_PAGE (4) xv6fs blocks.
+ * read_page translates logical block → physical via bmap, then reads via bio.
+ * write_page translates logical block → physical via bmap, then writes via bio
+ * (data=writeback: data blocks bypass the xv6fs log).
+ ******************************************************************************/
+
+#define BSIZE_PER_PAGE   (PGSIZE / BSIZE)   /* 4 */
+#define BLK512_PER_BSIZE (BSIZE / 512)      /* 2 */
+
+static int xv6fs_pcache_read_page(struct pcache *pcache, page_t *page) {
+    struct vfs_inode *inode = (struct vfs_inode *)pcache->private_data;
+    struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
+    struct xv6fs_superblock *xv6_sb = container_of(inode->sb,
+                                                    struct xv6fs_superblock, vfs_sb);
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+
+    /* pcnode->blkno is the page-aligned logical offset in 512-byte units */
+    uint base_bn = pcnode->blkno / BLK512_PER_BSIZE; /* first xv6fs block */
+
+    for (int i = 0; i < BSIZE_PER_PAGE; i++) {
+        uint addr = xv6fs_bmap_read(ip, base_bn + i);
+        if (addr == 0) {
+            /* Sparse / beyond file — zero-fill this 1 KB slot */
+            memset((char *)pcnode->data + i * BSIZE, 0, BSIZE);
+            continue;
+        }
+
+        struct bio *bio = bio_alloc(xv6_sb->blkdev, 1, false, NULL, NULL);
+        if (IS_ERR_OR_NULL(bio))
+            return -ENOMEM;
+
+        bio->blkno = (uint64)addr * BLK512_PER_BSIZE;
+        int ret = bio_add_seg(bio, page, 0, BSIZE, i * BSIZE);
+        if (ret != 0) {
+            bio_release(bio);
+            return ret;
+        }
+
+        ret = blkdev_submit_bio(xv6_sb->blkdev, bio);
+        bio_release(bio);
+        if (ret != 0)
+            return ret;
+    }
+
+    return 0;
+}
+
+static int xv6fs_pcache_write_page(struct pcache *pcache, page_t *page) {
+    struct vfs_inode *inode = (struct vfs_inode *)pcache->private_data;
+
+    /*
+     * The flush worker may run concurrently with inode teardown.  If the
+     * inode has already been detached from its superblock (inode->sb == NULL),
+     * skip the writeback — the data is about to be truncated anyway.
+     */
+    if (inode == NULL || inode->sb == NULL)
+        return 0;
+
+    struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
+    struct xv6fs_superblock *xv6_sb = container_of(inode->sb,
+                                                    struct xv6fs_superblock, vfs_sb);
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+
+    /* pcnode->blkno is the page-aligned logical offset in 512-byte units */
+    uint base_bn = pcnode->blkno / BLK512_PER_BSIZE;
+
+    for (int i = 0; i < BSIZE_PER_PAGE; i++) {
+        uint addr = xv6fs_bmap_read(ip, base_bn + i);
+        if (addr == 0) {
+            continue;  /* Sparse / beyond file — nothing to write back */
+        }
+
+        struct bio *bio = bio_alloc(xv6_sb->blkdev, 1, true, NULL, NULL);
+        if (IS_ERR_OR_NULL(bio))
+            return -ENOMEM;
+
+        bio->blkno = (uint64)addr * BLK512_PER_BSIZE;
+        int ret = bio_add_seg(bio, page, 0, BSIZE, i * BSIZE);
+        if (ret != 0) {
+            bio_release(bio);
+            return ret;
+        }
+
+        ret = blkdev_submit_bio(xv6_sb->blkdev, bio);
+        bio_release(bio);
+        if (ret != 0)
+            return ret;
+    }
+
+    return 0;
+}
+
+static struct pcache_ops xv6fs_pcache_ops = {
+    .read_page = xv6fs_pcache_read_page,
+    .write_page = xv6fs_pcache_write_page,
+};
+
+/*
+ * Initialise the embedded per-inode pcache (i_data).
+ * Call once for every regular-file inode after its mode is known.
+ */
+void xv6fs_inode_pcache_init(struct vfs_inode *inode) {
+    if (!S_ISREG(inode->mode))
+        return;
+
+    struct pcache *pc = &inode->i_data;
+    memset(pc, 0, sizeof(*pc));
+    pc->ops = &xv6fs_pcache_ops;
+    /* blk_count in 512-byte units, rounded up to page boundary (8 blocks) */
+    pc->blk_count = ((uint64)XV6FS_MAXFILE * BLK512_PER_BSIZE + 7) & ~(uint64)7;
+
+    int ret = pcache_init(pc);
+    if (ret != 0)
+        return; /* proceed without pcache */
+
+    /* pcache_init resets private_data, so set it after init */
+    pc->private_data = inode;
+}
 
 /******************************************************************************
  * Slab cache initialization
@@ -243,7 +368,7 @@ void xv6fs_unmount_begin(struct vfs_superblock *sb) {
 
 void xv6fs_free(struct vfs_superblock *sb) {
     struct xv6fs_superblock *xv6_sb = container_of(sb, struct xv6fs_superblock, vfs_sb);
-    
+
     // Destroy block cache
     xv6fs_bcache_destroy(xv6_sb);
     

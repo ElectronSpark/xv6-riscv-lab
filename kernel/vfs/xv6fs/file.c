@@ -39,16 +39,28 @@
 #include "../vfs_private.h"
 #include "xv6fs_private.h"
 
+/*
+ * Blocks-per-page constants for pcache ↔ xv6fs block address translation.
+ * One pcache page (4KB) covers BSIZE_PER_PAGE xv6fs blocks (BSIZE=1024).
+ * Block addresses from bmap are in BSIZE units; pcache uses 512-byte units.
+ */
+#define BSIZE_PER_PAGE  (PGSIZE / BSIZE)         /* 4 */
+#define BLK512_PER_BSIZE (BSIZE / 512)           /* 2 */
+
 /******************************************************************************
  * File read
  ******************************************************************************/
 
 ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool user) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
-    struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
+    struct pcache *pc = &inode->i_data;
     
     if (!S_ISREG(inode->mode)) {
         return -EINVAL;
+    }
+    
+    if (!pc->active) {
+        return -EIO;
     }
     
     // Acquire inode lock to safely read size and prevent truncation during read.
@@ -66,8 +78,6 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool use
         count = inode->size - pos;
     }
     
-    // Capture size for later checks (size won't change while we hold the lock,
-    // and we don't release it until we're done reading)
     size_t bytes_read = 0;
     while (bytes_read < count) {
         uint bn = pos / BSIZE;
@@ -77,47 +87,37 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool use
             n = count - bytes_read;
         }
         
-        uint addr = xv6fs_bmap_read(ip, bn);
-        if (addr == 0) {
-            // Sparse file - return zeros
-            if (user) {
-                // Zero out user buffer
-                char zeros[64];
-                memset(zeros, 0, sizeof(zeros));
-                uint remaining = n;
-                while (remaining > 0) {
-                    uint chunk = remaining < sizeof(zeros) ? remaining : sizeof(zeros);
-                    if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read + (n - remaining)), zeros, chunk) < 0) {
-                        vfs_iunlock(inode);
-                        if (bytes_read == 0) return -EFAULT;
-                        return bytes_read;
-                    }
-                    remaining -= chunk;
-                }
-            } else {
-                memset(buf + bytes_read, 0, n);
-            }
-        } else {
-            struct buf *bp = bread(ip->dev, addr);
-            if (bp == NULL) {
+        // Per-inode pcache path (keyed by logical file offset).
+        // The read_page callback handles bmap + bio internally, including
+        // zero-filling of sparse blocks, so no bmap call is needed here.
+        uint64 blkno_512 = (uint64)bn * BLK512_PER_BSIZE;
+        page_t *page = pcache_get_page(pc, blkno_512);
+        if (page == NULL) {
+            vfs_iunlock(inode);
+            if (bytes_read == 0) return -EIO;
+            return bytes_read;
+        }
+        int ret = pcache_read_page(pc, page);
+        if (ret != 0) {
+            pcache_put_page(pc, page);
+            vfs_iunlock(inode);
+            if (bytes_read == 0) return -EIO;
+            return bytes_read;
+        }
+        struct pcache_node *pcn = page->pcache.pcache_node;
+        uint page_off = (bn % BSIZE_PER_PAGE) * BSIZE + off;
+        char *data = (char *)pcn->data + page_off;
+        if (user) {
+            if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read), data, n) < 0) {
+                pcache_put_page(pc, page);
                 vfs_iunlock(inode);
-                if (bytes_read == 0) {
-                    return -EIO;
-                }
+                if (bytes_read == 0) return -EFAULT;
                 return bytes_read;
             }
-            if (user) {
-                if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read), bp->data + off, n) < 0) {
-                    brelse(bp);
-                    vfs_iunlock(inode);
-                    if (bytes_read == 0) return -EFAULT;
-                    return bytes_read;
-                }
-            } else {
-                memmove(buf + bytes_read, bp->data + off, n);
-            }
-            brelse(bp);
+        } else {
+            memmove(buf + bytes_read, data, n);
         }
+        pcache_put_page(pc, page);
         
         bytes_read += n;
         pos += n;
@@ -129,15 +129,28 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool use
 
 /******************************************************************************
  * File write
+ *
+ * Data goes through the per-inode pcache: user bytes are copied into pcache
+ * pages which are marked dirty.  The pcache flusher thread writes dirty pages
+ * back to disk via bio (data=writeback semantics).
+ *
+ * Metadata (block allocation, inode size) still goes through the log for
+ * crash consistency.  Each transaction chunk covers bmap + iupdate only;
+ * data blocks are NOT logged.
  ******************************************************************************/
 
 ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, bool user) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
     struct xv6fs_superblock *xv6_sb = container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
+    struct pcache *pc = &inode->i_data;
     
     if (!S_ISREG(inode->mode)) {
         return -EINVAL;
+    }
+    
+    if (!pc->active) {
+        return -EIO;
     }
     
     loff_t pos = file->f_pos;
@@ -148,8 +161,9 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, b
         return -EFBIG;
     }
     
-    // Write in chunks to avoid exceeding log transaction size
-    // Maximum blocks per transaction: MAXOPBLOCKS - overhead
+    // Write in chunks to avoid exceeding log transaction size.
+    // Only metadata (bmap allocations + iupdate) goes through the log now;
+    // data blocks are written by the pcache flusher via bio.
     int max = ((MAXOPBLOCKS - 1 - 1 - 2) / 2) * BSIZE;
     size_t bytes_written = 0;
     
@@ -177,6 +191,7 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, b
                 chunk = n - chunk_written;
             }
             
+            // Ensure the block is allocated (may log indirect-block changes)
             uint addr = xv6fs_bmap(ip, bn);
             if (addr == 0) {
                 vfs_iunlock(inode);
@@ -187,29 +202,41 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, b
                 goto done;
             }
             
-            struct buf *bp = bread(ip->dev, addr);
-            if (bp == NULL) {
+            // Write data through per-inode pcache
+            uint64 blkno_512 = (uint64)bn * BLK512_PER_BSIZE;
+            page_t *page = pcache_get_page(pc, blkno_512);
+            if (page == NULL) {
                 vfs_iunlock(inode);
                 xv6fs_end_op(xv6_sb);
-                if (bytes_written == 0) {
-                    return -EIO;
-                }
+                if (bytes_written == 0) return -EIO;
+                goto done;
+            }
+            int ret = pcache_read_page(pc, page);
+            if (ret != 0) {
+                pcache_put_page(pc, page);
+                vfs_iunlock(inode);
+                xv6fs_end_op(xv6_sb);
+                if (bytes_written == 0) return -EIO;
                 goto done;
             }
             
+            struct pcache_node *pcn = page->pcache.pcache_node;
+            uint page_off = (bn % BSIZE_PER_PAGE) * BSIZE + off;
+            char *data = (char *)pcn->data + page_off;
+            
             if (user) {
-                if (vm_copyin(myproc()->vm, bp->data + off, (uint64)(buf + bytes_written + chunk_written), chunk) < 0) {
-                    brelse(bp);
+                if (vm_copyin(myproc()->vm, data, (uint64)(buf + bytes_written + chunk_written), chunk) < 0) {
+                    pcache_put_page(pc, page);
                     vfs_iunlock(inode);
                     xv6fs_end_op(xv6_sb);
                     if (bytes_written == 0) return -EFAULT;
                     goto done;
                 }
             } else {
-                memmove(bp->data + off, buf + bytes_written + chunk_written, chunk);
+                memmove(data, buf + bytes_written + chunk_written, chunk);
             }
-            xv6fs_log_write(xv6_sb, bp);
-            brelse(bp);
+            pcache_mark_page_dirty(pc, page);
+            pcache_put_page(pc, page);
             
             chunk_written += chunk;
             pos += chunk;
@@ -292,6 +319,44 @@ int xv6fs_file_stat(struct vfs_file *file, struct stat *stat) {
 }
 
 /******************************************************************************
+ * File fsync - flush a range of dirty pcache pages to disk
+ ******************************************************************************/
+
+int xv6fs_file_fsync(struct vfs_file *file, loff_t start, loff_t len) {
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    struct pcache *pc;
+    (void)start;  /* TODO: implement range-based flush */
+    (void)len;
+
+    if (inode == NULL)
+        return 0;
+
+    pc = &inode->i_data;
+    if (!pc->active)
+        return 0;
+
+    return pcache_flush(pc);
+}
+
+/******************************************************************************
+ * File fflush - flush all dirty pcache pages to disk
+ ******************************************************************************/
+
+int xv6fs_file_fflush(struct vfs_file *file) {
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    struct pcache *pc;
+
+    if (inode == NULL)
+        return 0;
+
+    pc = &inode->i_data;
+    if (!pc->active)
+        return 0;
+
+    return pcache_flush(pc);
+}
+
+/******************************************************************************
  * VFS file operations structure
  ******************************************************************************/
 
@@ -300,6 +365,7 @@ struct vfs_file_ops xv6fs_file_ops = {
     .write = xv6fs_file_write,
     .llseek = xv6fs_file_llseek,
     .release = NULL,
-    .fsync = NULL,  // TODO: Implement fsync
+    .fsync = xv6fs_file_fsync,
+    .fflush = xv6fs_file_fflush,
     .stat = xv6fs_file_stat,
 };

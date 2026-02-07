@@ -727,6 +727,15 @@ void xv6fs_destroy_inode(struct vfs_inode *inode) {
     struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
     struct xv6fs_superblock *xv6_sb = container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
     
+    // Tear down the pcache (unregister + evict all pages).
+    // pcache_teardown waits for any in-flight flush workers to complete.
+    // We don't call pcache_flush here because:
+    // 1. fflush was called in vfs_fput before releasing the file reference
+    // 2. The data is being truncated below anyway
+    if (inode->i_data.active) {
+        pcache_teardown(&inode->i_data);
+    }
+
     // Note: Transaction is managed by VFS layer (vfs_iput calls begin/end_transaction)
     xv6fs_itrunc(ip);
     
@@ -741,6 +750,14 @@ void xv6fs_destroy_inode(struct vfs_inode *inode) {
 void xv6fs_free_inode(struct vfs_inode *inode) {
     if (inode == NULL) return;
     
+    // Tear down the pcache (unregister + evict all pages).
+    // pcache_teardown waits for any in-flight flush workers to complete.
+    // We don't call pcache_flush here because fflush was called in vfs_fput
+    // before releasing the file reference, so pages should already be clean.
+    if (inode->i_data.active) {
+        pcache_teardown(&inode->i_data);
+    }
+
     struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
     // Free the in-memory structure
     slab_free(ip);
@@ -757,6 +774,11 @@ int xv6fs_open(struct vfs_inode *inode, struct vfs_file *file, int f_flags) {
     
     if (S_ISREG(inode->mode)) {
         file->ops = &xv6fs_file_ops;
+        /* Lazily initialise the per-inode page cache on first open.
+         * VFS calls open with the inode locked, so this is race-free. */
+        if (!inode->i_data.active) {
+            xv6fs_inode_pcache_init(inode);
+        }
         return 0;
     }
     

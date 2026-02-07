@@ -5,6 +5,7 @@
 
 void pcache_global_init(void);
 int pcache_init(struct pcache *pcache);
+void pcache_teardown(struct pcache *pcache);
 page_t *pcache_get_page(struct pcache *pcache, uint64 blkno);
 void pcache_put_page(struct pcache *pcache, page_t *page);
 int pcache_invalidate_page(struct pcache *pcache, page_t *page);
@@ -15,6 +16,7 @@ int pcache_sync(void);
 // @TODO: do eviction in OOM
 int pcache_read_page(struct pcache *pcache, page_t *page);
 int pcache_mark_page_dirty(struct pcache *pcache, page_t *page);
+int pcache_invalidate_blk(struct pcache *pcache, uint64 blkno);
 
 #ifdef HOST_TEST
 void pcache_test_run_flusher_round(uint64 round_start, bool force_round);

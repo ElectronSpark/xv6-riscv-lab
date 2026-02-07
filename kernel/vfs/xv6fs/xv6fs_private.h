@@ -7,6 +7,7 @@
 #include "proc/proc_queue.h"
 #include "vfs/xv6fs/ondisk.h"  // xv6 on-disk format definitions
 #include <mm/slab.h>
+#include <mm/pcache.h>
 #include "dev/blkdev.h"
 #include "block_cache.h"
 
@@ -118,6 +119,9 @@ void xv6fs_unmount_begin(struct vfs_superblock *sb);
 void xv6fs_free(struct vfs_superblock *sb);
 int xv6fs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
                 int flags, const char *data, struct vfs_superblock **ret_sb);
+
+// Per-inode page cache initialization (call for regular files after mode is set)
+void xv6fs_inode_pcache_init(struct vfs_inode *inode);
 
 // Inode operations
 int xv6fs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,

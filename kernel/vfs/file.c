@@ -261,6 +261,16 @@ void vfs_fput(struct vfs_file *file) {
         struct vfs_inode *inode = vfs_inode_deref(&file->inode);
         int ret = 0;
         
+        // Flush dirty pages before releasing the inode reference.
+        // This ensures all data is written to disk before the inode can be
+        // torn down (avoids flush worker racing with inode destruction).
+        if (file->ops != NULL && file->ops->fflush != NULL) {
+            ret = file->ops->fflush(file);
+            if (ret != 0 && ret != -EAGAIN) {
+                printf("vfs_fput: fflush failed: %d\n", ret);
+            }
+        }
+        
         // Handle pipe cleanup for pipes without inodes (created via pipe() syscall)
         // Must be done before the inode check since anonymous pipes have no inode
         if (file->pipe != NULL && inode == NULL) {
