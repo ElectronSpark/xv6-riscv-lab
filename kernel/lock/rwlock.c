@@ -43,10 +43,8 @@ static void __wake_readers(rwlock_t *lock) {
 }
 
 static void __wake_writer(rwlock_t *lock) {
-    struct proc *next = NULL;
-    int ret = proc_queue_wakeup(&lock->write_queue, 0, 0, &next);
-    assert(ret == 0, "rwlock: failed to wake writer");
-    assert(next != NULL, "rwlock: woke writer with NULL proc");
+    struct proc *next = proc_queue_wakeup(&lock->write_queue, 0, 0);
+    assert(IS_ERR_OR_NULL(next), "rwlock: failed to wake writer");
     lock->holder_pid = next->pid;
 }
 

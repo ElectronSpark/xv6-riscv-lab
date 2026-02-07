@@ -183,25 +183,20 @@ int proc_queue_push(proc_queue_t *q, proc_node_t *node) {
     return 0; // Success
 }
 
-int proc_queue_first(proc_queue_t *q, proc_node_t **ret_node) {
-    if (q == NULL || ret_node == NULL) {
-        return -1; // Error: queue or process is NULL
+proc_node_t *proc_queue_first(proc_queue_t *q) {
+    if (q == NULL) {
+        return ERR_PTR(-EINVAL); // Error: queue is NULL
     }
 
-    if (q->counter <= 0) {
-        *ret_node = NULL; // Set ret_node to NULL if queue is empty
-        if (q->counter == 0) {
-            return 0;
-        } else {
-            return -EINVAL;
-        }
+    if (q->counter == 0) {
+        return NULL; // Queue is empty or invalid
+    } else if (q->counter < 0) {
+        return ERR_PTR(-EINVAL); // Error: queue has invalid counter
     }
 
     proc_node_t *first_node = LIST_FIRST_NODE(&q->head, proc_node_t, list.entry);
     assert(first_node != NULL, "proc_queue_first: queue is not empty but failed to get the first node");
-    *ret_node = first_node; // Copy the process data
-
-    return 0; // Success
+    return first_node;
 }
 
 int proc_queue_remove(proc_queue_t *q, proc_node_t *node) {
@@ -227,27 +222,20 @@ int proc_queue_remove(proc_queue_t *q, proc_node_t *node) {
     return 0; // Success
 }
 
-int proc_queue_pop(proc_queue_t *q, proc_node_t **ret_node) {
-    if (q == NULL || ret_node == NULL) {
-        return -EINVAL; // Error: queue or ret_node is NULL
+proc_node_t *proc_queue_pop(proc_queue_t *q) {
+    if (q == NULL) {
+        return ERR_PTR(-EINVAL); // Error: queue is NULL
     }
-    proc_node_t *dequeued_node = NULL;
-    int ret = proc_queue_first(q, &dequeued_node);
-    if (ret != 0) {
-        return ret;
-    }
-    if (dequeued_node == NULL) {
-        *ret_node = NULL; // Queue is empty
-        return -ENOENT; // No process to dequeue
+    proc_node_t *dequeued_node = proc_queue_first(q);
+    if (IS_ERR_OR_NULL(dequeued_node)) {
+        return dequeued_node;
     }
     assert(proc_node_get_queue(dequeued_node) == q, "Dequeued node is not in the expected queue");
-    ret = proc_queue_remove(q, dequeued_node);
+    int ret = proc_queue_remove(q, dequeued_node);
     if (ret == 0) {
-        *ret_node = dequeued_node; // Return the dequeued node
-    } else {
-        *ret_node = NULL; // Error occurred, set ret_node to NULL
+        return dequeued_node; // Return the dequeued node
     }
-    return ret;
+    return ERR_PTR(ret); // Return the error code if failed to remove the node
 }
 
 // Move all process from one queue to another.
@@ -318,51 +306,37 @@ int proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata) {
     return proc_queue_wait_in_state(q, lock, rdata, PSTATE_UNINTERRUPTIBLE);
 }
 
-static void __do_wakeup(proc_node_t *woken, int error_no, uint64 rdata, struct proc **retp) {
+static struct proc *__do_wakeup(proc_node_t *woken, int error_no, uint64 rdata) {
     if (woken == NULL) {
-        return; // Nothing to wake up
+        return ERR_PTR(-EINVAL); // Nothing to wake up
     }
     if (woken->proc == NULL) {
         printf("woken process is NULL\n");
-        return;
+        return ERR_PTR(-EINVAL);
     }
     woken->error_no = error_no; // Set the error number for the woken process
     woken->data = rdata; // Set the data for the woken process
     struct proc *p = woken->proc;
-    if (retp != NULL) {
-        *retp = p;
-    }
     // Note: pi_lock is acquired internally by scheduler_wakeup
     scheduler_wakeup(p);
+    return p;
 }
 
-static int __proc_queue_wakeup_one(proc_queue_t *q, int error_no, uint64 rdata, struct proc **retp) {
+static struct proc *__proc_queue_wakeup_one(proc_queue_t *q, int error_no, uint64 rdata) {
     if (q == NULL) {
-        return -EINVAL;
+        return ERR_PTR(-EINVAL);
     }
 
-    proc_node_t *woken = NULL;
-    struct proc *p = NULL;
-    int ret = proc_queue_pop(q, &woken);
-    if (ret != 0) {
-        if (woken != NULL) {
-            __do_wakeup(woken, ret, rdata, &p);
-        }
-        if (retp != NULL) {
-            __atomic_store_n(retp, p, __ATOMIC_SEQ_CST);
-        }
-        return ret; // Error: failed to pop process from queue
+    proc_node_t *woken = proc_queue_pop(q);
+    if (IS_ERR_OR_NULL(woken)) {
+        return ERR_CAST(woken); // No process to wake up
     }
 
-    __do_wakeup(woken, error_no, rdata, &p);
-    if (retp != NULL) {
-        __atomic_store_n(retp, p, __ATOMIC_SEQ_CST);
-    }
-    return 0; // Success
+    return __do_wakeup(woken, error_no, rdata);
 }
 
-int proc_queue_wakeup(proc_queue_t *q, int error_no, uint64 rdata, struct proc **retp) {
-    return __proc_queue_wakeup_one(q, error_no, rdata, retp);
+struct proc *proc_queue_wakeup(proc_queue_t *q, int error_no, uint64 rdata) {
+    return __proc_queue_wakeup_one(q, error_no, rdata);
 }
 
 int proc_queue_wakeup_all(proc_queue_t *q, int error_no, uint64 rdata) {
@@ -370,18 +344,20 @@ int proc_queue_wakeup_all(proc_queue_t *q, int error_no, uint64 rdata) {
         return -EINVAL;
     }
 
+    int counter = 0;
     for(;;) {
-        int ret = __proc_queue_wakeup_one(q, error_no, rdata, NULL);
-        if (ret == -ENOENT) {
+        struct proc *p = __proc_queue_wakeup_one(q, error_no, rdata);
+        if (p == NULL) {
             assert(q->counter == 0, "Queue counter is not zero when queue is empty");
             break; // Queue is empty
         }
-        if (ret != 0) {
-            return ret;
+        if (IS_ERR(p)) {
+            return PTR_ERR(p);
         }
+        counter++;
     }
 
-    return 0;
+    return counter; // Return the number of processes woken up
 }
 
 // RB Tree based proc queue
@@ -571,13 +547,15 @@ int proc_tree_wakeup_one(proc_tree_t *q, uint64 key, int error_no, uint64 rdata,
         return -ENOENT; // Error: failed to remove node from tree
     }
 
-    struct proc *p = NULL;
-    __do_wakeup(target, error_no, rdata, &p);
-    if (retp != NULL) {
-        __atomic_store_n(retp, p, __ATOMIC_SEQ_CST);
-    }
-    if (p == NULL) {
-        return -ENOENT; // Error: no process to wake up
+    struct proc *p = __do_wakeup(target, error_no, rdata);
+    if (IS_ERR_OR_NULL(p)) {
+        if (retp != NULL) {
+            *retp = NULL;
+        }
+        if (p == NULL) {
+            return -ENOENT; // Error: no process to wake up
+        }
+        return PTR_ERR(p);
     }
 
     return 0; // Success
@@ -619,7 +597,7 @@ int proc_tree_wakeup_all(proc_tree_t *q, int error_no, uint64 rdata) {
         if (__proc_tree_do_remove(q, pos) != 0) {
             printf("warning: Failed to remove node from tree during wakeup all\n");
         }
-        __do_wakeup(pos, error_no, rdata, NULL);
+        __do_wakeup(pos, error_no, rdata);
         count++;
     }
 

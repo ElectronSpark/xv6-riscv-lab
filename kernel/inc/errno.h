@@ -138,6 +138,7 @@
 #define EHWPOISON       133
 
 #define MAX_ERRNO 4095L
+#define ERR_CAST(x) ((void *)(x))
 #define ERR_PTR(err) ((void *)(long)(err))
 #define PTR_ERR(ptr) ((long)(void *)(ptr))
 #define IS_ERR(ptr) ((PTR_ERR(ptr) >= -(MAX_ERRNO)) && (PTR_ERR(ptr) < 0))

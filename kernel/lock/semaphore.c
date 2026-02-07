@@ -42,7 +42,13 @@ static int __sem_do_post(sem_t *sem) {
     int val = __sem_value_inc(sem);
     if (val <= 0) {
         // If the semaphore value was or is negative, wake up one waiting process
-        return proc_queue_wakeup(&sem->wait_queue, 0, 0, NULL);
+        struct proc *p = proc_queue_wakeup(&sem->wait_queue, 0, 0);
+        if (p == NULL) {
+            return -ENOENT; // No process to wake up
+        }
+        if (IS_ERR(p)) {
+            return PTR_ERR(p);
+        }
     }
     return 0;
 }

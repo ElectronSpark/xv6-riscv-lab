@@ -236,8 +236,8 @@ static void __manager_routine(void) {
         while (proc_queue_size(&wq->idle_queue) && 
                wq->nr_workers - proc_queue_size(&wq->idle_queue) < wq->pending_works) {
             // Wake up an idle worker if any
-            int wake_ret = proc_queue_wakeup(&wq->idle_queue, 0, 0, NULL);
-            if (wake_ret != 0) {
+            struct proc *p = proc_queue_wakeup(&wq->idle_queue, 0, 0);
+            if (IS_ERR_OR_NULL(p)) {
                 printf("warning: Failed to wake up idle worker\n");
             }
         }
