@@ -92,34 +92,6 @@ __xv6fs_balloc(struct xv6fs_superblock *xv6_sb, uint dev, uint hint)
             return blockno;
         }
     }
-    panic("xv6fs: block cache not initialized or no free blocks in cache");
-    /* Fallback: Linear scan (when cache not initialized) */
-    for (int b = 0; b < disk_sb->size; b += BPB) {
-        struct buf *bp = bread(dev, BBLOCK_PTR(b, disk_sb));
-        if (!bp) return 0;
-        
-        for (int bi = 0; bi < BPB && b + bi < disk_sb->size; bi++) {
-            int m = 1 << (bi % 8);
-            if ((bp->data[bi/8] & m) == 0) {
-                /* Found free block */
-                bp->data[bi/8] |= m;
-                xv6fs_log_write(xv6_sb, bp);
-                brelse(bp);
-                
-                blockno = b + bi;
-                
-                /* Zero the block */
-                struct buf *zbp = bread(dev, blockno);
-                if (!zbp) return 0;
-                memset(zbp->data, 0, BSIZE);
-                xv6fs_log_write(xv6_sb, zbp);
-                brelse(zbp);
-                
-                return blockno;
-            }
-        }
-        brelse(bp);
-    }
     
     return 0; /* No free blocks */
 }
