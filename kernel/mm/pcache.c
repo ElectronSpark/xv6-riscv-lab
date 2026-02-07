@@ -509,14 +509,27 @@ static void __pcache_wait_for_pending_flushes(void) {
         __pcache_global_lock();
         struct pcache *pcache = NULL;
         int ret = __pcache_pick_pending_before(start_jiffs, &pcache);
-        __pcache_global_unlock();
         if (ret == -ENOENT) {
+            __pcache_global_unlock();
             break;  // No more pending flushes
         }
+        /* Increment wait_refcount under global lock so pcache_teardown
+         * knows we have a reference and won't free the memory. */
+        __pcache_spin_lock(pcache);
+        pcache->wait_refcount++;
+        __pcache_spin_unlock(pcache);
+        __pcache_global_unlock();
+
         ret = __pcache_wait_flush_complete(pcache);
         if (ret != 0) {
             printf("warning: __pcache_wait_for_pending_flushes: pcache %p flush error %d\n", pcache, ret);
         }
+
+        /* Release our reference so teardown can proceed. */
+        __pcache_spin_lock(pcache);
+        pcache->wait_refcount--;
+        wakeup_on_chan(pcache);  // Wake teardown if waiting
+        __pcache_spin_unlock(pcache);
 
         sleep_ms(10);
     }
@@ -1042,6 +1055,7 @@ int pcache_init(struct pcache *pcache) {
     complete_all(&pcache->flush_completion);
     pcache->private_data = NULL;
     pcache->flush_error = 0;
+    pcache->wait_refcount = 0;
     pcache->active = 1;
     pcache->flush_requested = 0;
     if (pcache->max_pages == 0) {
@@ -1069,14 +1083,34 @@ void pcache_teardown(struct pcache *pcache) {
     if (pcache == NULL)
         return;
 
-    /* 1. Mark inactive so no new get_page / flush can be scheduled. */
+    /* 1. Unregister from the global pcache list FIRST so the flusher thread
+     *    cannot pick this pcache for new wait operations. */
+    __pcache_global_lock();
+    __pcache_spin_lock(pcache);
+    if (!LIST_ENTRY_IS_DETACHED(&pcache->list_entry)) {
+        list_node_detach(pcache, list_entry);
+        if (__global_pcache_count > 0)
+            __global_pcache_count--;
+    }
+    __pcache_spin_unlock(pcache);
+    __pcache_global_unlock();
+
+    /* 2. Wait for any flusher waiter threads to release their reference.
+     *    They incremented wait_refcount before calling wait_for_completion. */
+    __pcache_spin_lock(pcache);
+    while (pcache->wait_refcount > 0) {
+        sleep_on_chan(pcache, &pcache->spinlock);
+    }
+    __pcache_spin_unlock(pcache);
+
+    /* 3. Mark inactive so no new get_page / flush can be scheduled. */
     __pcache_spin_lock(pcache);
     pcache->active = 0;
     bool flush_pending = pcache->flush_requested;
     wakeup_on_chan(pcache);
     __pcache_spin_unlock(pcache);
 
-    /* 1b. Wait for any in-flight flush worker to finish.  Once active=0
+    /* 3b. Wait for any in-flight flush worker to finish.  Once active=0
      *     the flusher thread will not queue new work for this pcache, so
      *     after this wait no worker can be running write_page on our
      *     private_data.  This closes the race between the global flusher
@@ -1085,7 +1119,7 @@ void pcache_teardown(struct pcache *pcache) {
         __pcache_wait_flush_complete(pcache);
     }
 
-    /* 2. Evict every clean LRU page. __pcache_evict_lru pops from LRU,
+    /* 4. Evict every clean LRU page. __pcache_evict_lru pops from LRU,
      *    removes from rb-tree, frees the pcache_node, and releases the
      *    page lock.  We just need to drop the final page reference. */
     __pcache_spin_lock(pcache);
@@ -1097,7 +1131,7 @@ void pcache_teardown(struct pcache *pcache) {
     }
     __pcache_spin_unlock(pcache);
 
-    /* 3. Drain remaining rb-tree nodes (dirty pages that weren't on LRU,
+    /* 5. Drain remaining rb-tree nodes (dirty pages that weren't on LRU,
      *    or any other leftovers). */
     __pcache_spin_lock(pcache);
     __pcache_tree_lock(pcache);
@@ -1127,18 +1161,6 @@ void pcache_teardown(struct pcache *pcache) {
     pcache->dirty_count = 0;
     __pcache_tree_unlock(pcache);
     __pcache_spin_unlock(pcache);
-
-    /* 4. Unregister from the global pcache list so the flusher thread
-     *    never touches this pcache again. */
-    __pcache_global_lock();
-    __pcache_spin_lock(pcache);
-    if (!LIST_ENTRY_IS_DETACHED(&pcache->list_entry)) {
-        list_node_detach(pcache, list_entry);
-        if (__global_pcache_count > 0)
-            __global_pcache_count--;
-    }
-    __pcache_spin_unlock(pcache);
-    __pcache_global_unlock();
 }
 
 // Try to get a page from pcache

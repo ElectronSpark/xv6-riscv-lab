@@ -81,6 +81,7 @@ struct pcache {
     struct pcache_ops *ops;
     struct work_struct flush_work; // Work structure for flush operation
     int flush_error;
+    uint32 wait_refcount;  // Reference count for flusher waiter threads
 };
 
 // Extension of page structure for page cache use

@@ -454,7 +454,7 @@ void vfs_init(void) {
     
     // Optional: run smoke tests in a separate kernel process with chroot to /tmp
     // tmpfs_smoketest_start();
-    // xv6fs_run_all_smoketests();
+    xv6fs_run_all_smoketests();
 }
 
 /*
