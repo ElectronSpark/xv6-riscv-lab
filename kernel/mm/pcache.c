@@ -1463,7 +1463,8 @@ out:
  * Invalidate a cached page by 512-byte block number.
  * Looks up the page without allocating; if the block is not cached, returns 0.
  * On success the page's uptodate and dirty flags are cleared so the next
- * accessor will re-read from disk.
+ * accessor will re-read from the backing store.  The page itself remains in
+ * the cache (matching pcache_invalidate_page semantics).
  */
 int pcache_invalidate_blk(struct pcache *pcache, uint64 blkno) {
     page_t *page;
@@ -1476,13 +1477,14 @@ int pcache_invalidate_blk(struct pcache *pcache, uint64 blkno) {
 
     base_blkno = PCACHE_ALIGN_BLKNO(blkno);
 
-    // Lookup without allocating (NULL default_page → tree search only)
+    __pcache_spin_lock(pcache);
+
     page = __pcache_get_page(pcache, base_blkno, PGSIZE, NULL);
     if (page == NULL) {
-        return 0;  // Not cached, nothing to invalidate
+        __pcache_spin_unlock(pcache);
+        return 0;
     }
 
-    __pcache_spin_lock(pcache);
     page_lock_acquire(page);
 
     if (!__pcache_page_valid(pcache, page)) {
@@ -1493,7 +1495,6 @@ int pcache_invalidate_blk(struct pcache *pcache, uint64 blkno) {
 
     pcnode = page->pcache.pcache_node;
     if (pcnode->blkno != base_blkno) {
-        // Page was repurposed for a different block range
         page_lock_release(page);
         __pcache_spin_unlock(pcache);
         return 0;
@@ -1505,15 +1506,90 @@ int pcache_invalidate_blk(struct pcache *pcache, uint64 blkno) {
         return -EBUSY;
     }
 
+    // Detach from whichever list currently tracks this page.
     if (!LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
         __pcache_remove_lru(pcache, page);
     }
 
+    // Mark content as stale; keep the page in the cache.
     pcnode->dirty = 0;
     pcnode->uptodate = 0;
 
     page_lock_release(page);
     __pcache_spin_unlock(pcache);
+    return 0;
+}
+
+/*
+ * Discard a cached page by 512-byte block number.
+ * Like pcache_invalidate_blk, but goes further: the page is removed from the
+ * rb-tree and its memory is freed.  Use this when the backing data no longer
+ * exists (e.g. tmpfs truncation) and keeping the page around would be a leak.
+ * Returns 0 on success, -EBUSY if IO is in progress.
+ */
+int pcache_discard_blk(struct pcache *pcache, uint64 blkno) {
+    page_t *page;
+    uint64 base_blkno;
+    struct pcache_node *pcnode;
+
+    if (pcache == NULL || !pcache->active) {
+        return -EINVAL;
+    }
+
+    base_blkno = PCACHE_ALIGN_BLKNO(blkno);
+
+    __pcache_spin_lock(pcache);
+
+    page = __pcache_get_page(pcache, base_blkno, PGSIZE, NULL);
+    if (page == NULL) {
+        __pcache_spin_unlock(pcache);
+        return 0;  // Not cached, nothing to discard
+    }
+
+    page_lock_acquire(page);
+
+    if (!__pcache_page_valid(pcache, page)) {
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+        return 0;
+    }
+
+    pcnode = page->pcache.pcache_node;
+    if (pcnode->blkno != base_blkno) {
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+        return 0;
+    }
+
+    if (pcnode->io_in_progress) {
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+        return -EBUSY;
+    }
+
+    // Remove from LRU / dirty list if present
+    if (!LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
+        __pcache_remove_lru(pcache, page);
+    }
+
+    // Remove from rb-tree
+    __pcache_tree_lock(pcache);
+    rb_delete_node_color(&pcache->page_map, &pcnode->tree_entry);
+    pcache->page_count--;
+    __pcache_tree_unlock(pcache);
+
+    // Detach page from pcache
+    page->pcache.pcache_node = NULL;
+    page->pcache.pcache = NULL;
+    pcnode->page = NULL;
+
+    page_lock_release(page);
+    __pcache_spin_unlock(pcache);
+
+    // Free the pcache_node and release the page
+    slab_free(pcnode);
+    __pcache_page_put(page);
+
     return 0;
 }
 
@@ -1718,6 +1794,11 @@ void dump_all_pcache_stats(void) {
 /******************************************************************************
  * System Call Handlers
  *****************************************************************************/
+
+void pcache_shrink_caches(void) {
+    slab_cache_shrink(&__pcache_node_slab, 0x7fffffff);
+}
+
 uint64 sys_sync(void) {
     int ret = pcache_sync();
     if (ret != 0) {

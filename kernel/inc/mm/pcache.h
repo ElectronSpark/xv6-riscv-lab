@@ -17,6 +17,8 @@ int pcache_sync(void);
 int pcache_read_page(struct pcache *pcache, page_t *page);
 int pcache_mark_page_dirty(struct pcache *pcache, page_t *page);
 int pcache_invalidate_blk(struct pcache *pcache, uint64 blkno);
+int pcache_discard_blk(struct pcache *pcache, uint64 blkno);
+void pcache_shrink_caches(void);
 
 #ifdef HOST_TEST
 void pcache_test_run_flusher_round(uint64 round_start, bool force_round);

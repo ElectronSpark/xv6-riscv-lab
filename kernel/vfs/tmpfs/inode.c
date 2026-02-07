@@ -541,8 +541,9 @@ void __tmpfs_destroy_inode(struct vfs_inode *inode) {
     struct tmpfs_inode *ti = container_of(inode, struct tmpfs_inode, vfs_inode);
     
     if (S_ISREG(inode->mode)) {
-        // For regular files, truncate to 0 to free all allocated blocks
-        __tmpfs_truncate(inode, 0);
+        // For regular files, teardown pcache (which frees all cached pages).
+        // Embedded files have no pcache, so this is a no-op for them.
+        tmpfs_inode_pcache_teardown(inode);
     } else if (S_ISLNK(inode->mode)) {
         // For symlinks, free the target string if allocated externally
         tmpfs_free_symlink_target(ti);

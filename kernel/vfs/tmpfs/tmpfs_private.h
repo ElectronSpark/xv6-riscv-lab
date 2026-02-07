@@ -10,24 +10,10 @@
 
 #define TMPFS_HASH_BUCKETS 15
 
-// Number of direct blocks in a tmpfs inode
-#define TMPFS_INODE_DBLOCKS 32UL
-
-// Index of first indirect block
-#define TMPFS_INODE_INDRECT_START TMPFS_INODE_DBLOCKS
-#define TMPFS_INODE_INDRECT_ITEMS (PAGE_SIZE / sizeof(void *))
-
-// Index of first double indirect block
-#define TMPFS_INODE_DINDRECT_START (TMPFS_INODE_INDRECT_START + TMPFS_INODE_INDRECT_ITEMS)
-#define TMPFS_INODE_DINDRECT_ITEMS (TMPFS_INODE_INDRECT_ITEMS * TMPFS_INODE_INDRECT_ITEMS)
-
-// Index of first triple indirect block
-#define TMPFS_INODE_TINDRECT_START (TMPFS_INODE_DINDRECT_START + TMPFS_INODE_DINDRECT_ITEMS)
-#define TMPFS_INODE_TINDRECT_ITEMS (TMPFS_INODE_DINDRECT_ITEMS * TMPFS_INODE_INDRECT_ITEMS)
-
-// Maximum file size supported by tmpfs
-#define TMPFS_MAX_FILE_SIZE                                 \
-    ((TMPFS_INODE_TINDRECT_START + TMPFS_INODE_TINDRECT_ITEMS) * PAGE_SIZE)
+// Maximum file size supported by tmpfs (1 GB).
+// All non-embedded file data is stored in the per-inode pcache (i_data),
+// which allocates pages on demand.
+#define TMPFS_MAX_FILE_SIZE ((uint64)1 * 1024 * 1024 * 1024)
 
 extern struct vfs_inode_ops tmpfs_inode_ops;
 
@@ -58,13 +44,9 @@ struct tmpfs_inode {
             char data[0];        // file data (for regular files)
         } sym;
         union {
-            // data blocks or other file-specific data (for regular files)
-            struct {
-                void *direct[TMPFS_INODE_DBLOCKS];
-                void **indirect;
-                void ***double_indirect;
-                void ****triple_indirect;
-            };
+            // Non-embedded file data is stored in the per-inode pcache
+            // (vfs_inode.i_data). Only the embedded data[] overlay is used
+            // directly from the tmpfs_inode when embedded == true.
             uint8 data[0];
         } file;
     };
@@ -103,18 +85,16 @@ void tmpfs_free_symlink_target(struct tmpfs_inode *tmpfs_inode);
 void tmpfs_make_directory(struct tmpfs_inode *tmpfs_inode);
 int __tmpfs_truncate(struct vfs_inode *inode, loff_t new_size);
 
-// Block lookup - shared between file.c and truncate.c
-// Returns pointer to data block at block_idx, allocating if alloc is true
-// Does NOT update n_blocks - caller must handle that
-// Does NOT handle embedded data migration - caller must handle that
-void *__tmpfs_lookup_block(struct tmpfs_inode *ti, size_t block_idx, bool alloc);
-
-// Migrate from embedded data to allocated block storage
+// Migrate from embedded data to pcache-based storage
 int __tmpfs_migrate_to_allocated_blocks(struct tmpfs_inode *tmpfs_inode);
 
 // File operations
 extern struct vfs_file_ops tmpfs_file_ops;
 int tmpfs_open(struct vfs_inode *inode, struct vfs_file *file, int f_flags);
+
+// pcache operations for tmpfs regular files
+void tmpfs_inode_pcache_init(struct vfs_inode *inode);
+void tmpfs_inode_pcache_teardown(struct vfs_inode *inode);
 
 // Shrink all tmpfs slab caches to release unused memory
 void tmpfs_shrink_caches(void);

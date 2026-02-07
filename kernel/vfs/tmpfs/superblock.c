@@ -260,9 +260,7 @@ void tmpfs_init(void) {
     
     printf("sizeof(tmpfs_inode)=%lu, TMPFS_INODE_EMBEDDED_DATA_LEN=%lu\n",
            sizeof(struct tmpfs_inode), TMPFS_INODE_EMBEDDED_DATA_LEN);
-    printf("tmpfs max file size=%lu bytes\n", TMPFS_MAX_FILE_SIZE);
-    printf("TMPFS_INODE_DBLOCKS=%lu, TMPFS_INODE_INDRECT_ITEMS=%lu\n",
-           TMPFS_INODE_DBLOCKS, TMPFS_INODE_INDRECT_ITEMS);
+    printf("tmpfs max file size=%lu bytes\n", (unsigned long)TMPFS_MAX_FILE_SIZE);
 }
 
 /*

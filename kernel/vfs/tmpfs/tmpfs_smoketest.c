@@ -18,6 +18,7 @@
 #include "list.h"
 #include "hlist.h"
 #include <mm/slab.h>
+#include <mm/pcache.h>
 #include "tmpfs_private.h"
 #include "tmpfs_smoketest.h"
 
@@ -376,8 +377,6 @@ void tmpfs_run_truncate_smoketest(void) {
     }
     printf("truncate_smoketest: created /%s ino=%lu\n", file_name, test_file->ino);
 
-    struct tmpfs_inode *ti = container_of(test_file, struct tmpfs_inode, vfs_inode);
-
     // Test 1: Grow embedded (0 -> 100 bytes, stays in embedded)
     vfs_ilock(test_file);
     ret = __tmpfs_truncate(test_file, 100);
@@ -410,64 +409,59 @@ void tmpfs_run_truncate_smoketest(void) {
                (unsigned long long)test_file->size, test_file->n_blocks);
     }
 
-    // Test 4: Grow to full direct blocks (50 -> 32*PAGE_SIZE, block 0-31)
+    // Test 4: Grow to 32 pages (50 -> 32*PAGE_SIZE)
     vfs_ilock(test_file);
-    ret = __tmpfs_truncate(test_file, TMPFS_INODE_DBLOCKS * PAGE_SIZE);
+    ret = __tmpfs_truncate(test_file, 32 * PAGE_SIZE);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: " FAIL " grow to full direct, errno=%d\n", ret);
+        printf("truncate_smoketest: " FAIL " grow to 32 pages, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: " PASS " grow to full direct %lu blocks, size=%llu n_blocks=%lu\n",
-               TMPFS_INODE_DBLOCKS, (unsigned long long)test_file->size, test_file->n_blocks);
+        printf("truncate_smoketest: " PASS " grow to 32 pages, size=%llu\n",
+               (unsigned long long)test_file->size);
     }
 
-    // Test 5: Grow into indirect layer (32*PAGE_SIZE -> 100*PAGE_SIZE, uses indirect pointer)
+    // Test 5: Grow to 100 pages (32*PAGE_SIZE -> 100*PAGE_SIZE)
     vfs_ilock(test_file);
     ret = __tmpfs_truncate(test_file, 100 * PAGE_SIZE);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: " FAIL " grow to indirect, errno=%d\n", ret);
+        printf("truncate_smoketest: " FAIL " grow to 100 pages, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: " PASS " grow to indirect 100 blocks, size=%llu n_blocks=%lu indirect=%s\n",
-               (unsigned long long)test_file->size, test_file->n_blocks,
-               ti->file.indirect ? "set" : "null");
+        printf("truncate_smoketest: " PASS " grow to 100 pages, size=%llu\n",
+               (unsigned long long)test_file->size);
     }
 
-    // Test 6: Shrink from indirect back to direct (100*PAGE_SIZE -> 20*PAGE_SIZE)
+    // Test 6: Shrink from 100 pages to 20 pages (100*PAGE_SIZE -> 20*PAGE_SIZE)
     vfs_ilock(test_file);
     ret = __tmpfs_truncate(test_file, 20 * PAGE_SIZE);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: " FAIL " shrink indirect to direct, errno=%d\n", ret);
+        printf("truncate_smoketest: " FAIL " shrink to 20 pages, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: " PASS " shrink to direct 20 blocks, size=%llu n_blocks=%lu indirect=%s\n",
-               (unsigned long long)test_file->size, test_file->n_blocks,
-               ti->file.indirect ? "set" : "null");
+        printf("truncate_smoketest: " PASS " shrink to 20 pages, size=%llu\n",
+               (unsigned long long)test_file->size);
     }
 
-    // Test 7: Grow to double indirect layer (20*PAGE_SIZE -> 600*PAGE_SIZE)
-    // Block 544 is start of double indirect (32 direct + 512 indirect)
+    // Test 7: Grow to 600 pages (20*PAGE_SIZE -> 600*PAGE_SIZE)
     vfs_ilock(test_file);
     ret = __tmpfs_truncate(test_file, 600 * PAGE_SIZE);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: " FAIL " grow to double indirect, errno=%d\n", ret);
+        printf("truncate_smoketest: " FAIL " grow to 600 pages, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: " PASS " grow to double indirect 600 blocks, size=%llu n_blocks=%lu dindirect=%s\n",
-               (unsigned long long)test_file->size, test_file->n_blocks,
-               ti->file.double_indirect ? "set" : "null");
+        printf("truncate_smoketest: " PASS " grow to 600 pages, size=%llu\n",
+               (unsigned long long)test_file->size);
     }
 
-    // Test 8: Shrink from double indirect to indirect (600*PAGE_SIZE -> 40*PAGE_SIZE)
+    // Test 8: Shrink from 600 pages to 40 pages (600*PAGE_SIZE -> 40*PAGE_SIZE)
     vfs_ilock(test_file);
     ret = __tmpfs_truncate(test_file, 40 * PAGE_SIZE);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: " FAIL " shrink double to indirect, errno=%d\n", ret);
+        printf("truncate_smoketest: " FAIL " shrink to 40 pages, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: " PASS " shrink to indirect 40 blocks, size=%llu n_blocks=%lu dindirect=%s\n",
-               (unsigned long long)test_file->size, test_file->n_blocks,
-               ti->file.double_indirect ? "set" : "null");
+        printf("truncate_smoketest: " PASS " shrink to 40 pages, size=%llu\n",
+               (unsigned long long)test_file->size);
     }
 
     // Test 9: Shrink to zero
@@ -477,19 +471,19 @@ void tmpfs_run_truncate_smoketest(void) {
     if (ret != 0) {
         printf("truncate_smoketest: " FAIL " shrink to zero, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: " PASS " shrink to zero, size=%llu n_blocks=%lu\n",
-               (unsigned long long)test_file->size, test_file->n_blocks);
+        printf("truncate_smoketest: " PASS " shrink to zero, size=%llu\n",
+               (unsigned long long)test_file->size);
     }
 
-    // Test 10: Grow directly to double indirect (0 -> 1000*PAGE_SIZE)
+    // Test 10: Grow from zero to 1000 pages (0 -> 1000*PAGE_SIZE)
     vfs_ilock(test_file);
     ret = __tmpfs_truncate(test_file, 1000 * PAGE_SIZE);
     vfs_iunlock(test_file);
     if (ret != 0) {
-        printf("truncate_smoketest: " FAIL " grow zero to double indirect, errno=%d\n", ret);
+        printf("truncate_smoketest: " FAIL " grow zero to 1000 pages, errno=%d\n", ret);
     } else {
-        printf("truncate_smoketest: " PASS " grow zero to double indirect 1000 blocks, size=%llu n_blocks=%lu\n",
-               (unsigned long long)test_file->size, test_file->n_blocks);
+        printf("truncate_smoketest: " PASS " grow zero to 1000 pages, size=%llu\n",
+               (unsigned long long)test_file->size);
     }
 
     // Cleanup: shrink to zero and unlink
@@ -1804,14 +1798,14 @@ void tmpfs_run_double_indirect_smoketest(void) {
     static char write_buf[PAGE_SIZE * 3];
     static char read_buf[PAGE_SIZE * 3];
 
-    // Key byte offsets for boundary testing
-    const loff_t DIRECT_END = TMPFS_INODE_DBLOCKS * PAGE_SIZE;           // 128KB
-    const loff_t INDIRECT_END = (TMPFS_INODE_DBLOCKS + 512) * PAGE_SIZE; // ~2.12MB (block 544)
-    const loff_t TARGET_64MB = DOUBLE_INDIRECT_MAX_SIZE;                 // 64MB
+    // Key byte offsets for boundary testing (use concrete page counts)
+    const loff_t DIRECT_END = 32UL * PAGE_SIZE;              // 128KB
+    const loff_t INDIRECT_END = (32UL + 512) * PAGE_SIZE;    // ~2.12MB (page 544)
+    const loff_t TARGET_64MB = DOUBLE_INDIRECT_MAX_SIZE;      // 64MB
 
-    printf("dindirect_smoketest: Block boundaries:\n");
-    printf("  Direct end:   block %lu, offset %lld\n", TMPFS_INODE_DBLOCKS, (long long)DIRECT_END);
-    printf("  Indirect end: block %lu, offset %lld\n", (unsigned long)(TMPFS_INODE_DBLOCKS + 512), (long long)INDIRECT_END);
+    printf("dindirect_smoketest: I/O boundary offsets:\n");
+    printf("  DIRECT_END:   offset %lld\n", (long long)DIRECT_END);
+    printf("  INDIRECT_END: offset %lld\n", (long long)INDIRECT_END);
     printf("  Target size:  64MB = %lld bytes\n", (long long)TARGET_64MB);
 
     if (root == NULL) {
@@ -2005,8 +1999,6 @@ void tmpfs_run_double_indirect_smoketest(void) {
     vfs_fput(file);
     file = NULL;
 
-    struct tmpfs_inode *ti = container_of(test_inode, struct tmpfs_inode, vfs_inode);
-
     // Test 3a: Truncate to zero
     vfs_ilock(test_inode);
     ret = __tmpfs_truncate(test_inode, 0);
@@ -2023,8 +2015,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
     ret = __tmpfs_truncate(test_inode, 5 * 1024 * 1024);
     vfs_iunlock(test_inode);
     if (ret == 0 && test_inode->size == 5 * 1024 * 1024) {
-        printf("dindirect_smoketest: " PASS " grow 0 -> 5MB (dindirect=%s)\n",
-               ti->file.double_indirect ? "set" : "null");
+        printf("dindirect_smoketest: " PASS " grow 0 -> 5MB\n");
     } else {
         printf("dindirect_smoketest: " FAIL " grow 0 -> 5MB\n");
     }
@@ -2034,8 +2025,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
     ret = __tmpfs_truncate(test_inode, 1 * 1024 * 1024);
     vfs_iunlock(test_inode);
     if (ret == 0 && test_inode->size == 1 * 1024 * 1024) {
-        printf("dindirect_smoketest: " PASS " shrink 5MB -> 1MB (dindirect=%s)\n",
-               ti->file.double_indirect ? "set" : "null");
+        printf("dindirect_smoketest: " PASS " shrink 5MB -> 1MB\n");
     } else {
         printf("dindirect_smoketest: " FAIL " shrink 5MB -> 1MB\n");
     }
@@ -2045,8 +2035,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
     ret = __tmpfs_truncate(test_inode, 64 * 1024);
     vfs_iunlock(test_inode);
     if (ret == 0 && test_inode->size == 64 * 1024) {
-        printf("dindirect_smoketest: " PASS " shrink 1MB -> 64KB (indirect=%s)\n",
-               ti->file.indirect ? "set" : "null");
+        printf("dindirect_smoketest: " PASS " shrink 1MB -> 64KB\n");
     } else {
         printf("dindirect_smoketest: " FAIL " shrink 1MB -> 64KB\n");
     }
@@ -2066,8 +2055,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
     ret = __tmpfs_truncate(test_inode, DIRECT_END + 1);
     vfs_iunlock(test_inode);
     if (ret == 0 && test_inode->size == DIRECT_END + 1) {
-        printf("dindirect_smoketest: " PASS " grow to direct_end + 1 (indirect=%s)\n",
-               ti->file.indirect ? "set" : "null");
+        printf("dindirect_smoketest: " PASS " grow to direct_end + 1\n");
     } else {
         printf("dindirect_smoketest: " FAIL " grow to direct_end + 1\n");
     }
@@ -2087,8 +2075,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
     ret = __tmpfs_truncate(test_inode, INDIRECT_END + 1);
     vfs_iunlock(test_inode);
     if (ret == 0 && test_inode->size == INDIRECT_END + 1) {
-        printf("dindirect_smoketest: " PASS " grow to indirect_end + 1 (dindirect=%s)\n",
-               ti->file.double_indirect ? "set" : "null");
+        printf("dindirect_smoketest: " PASS " grow to indirect_end + 1\n");
     } else {
         printf("dindirect_smoketest: " FAIL " grow to indirect_end + 1\n");
     }
@@ -2274,6 +2261,7 @@ void tmpfs_run_all_smoketests(void) {
     // Shrink all caches before baseline to get a clean state
     tmpfs_shrink_caches();
     __vfs_shrink_caches();
+    pcache_shrink_caches();
     kmm_shrink_all();
 
     // Memory leak check for inode smoketest
@@ -2281,6 +2269,7 @@ void tmpfs_run_all_smoketests(void) {
     tmpfs_run_inode_smoketest();
     tmpfs_shrink_caches();
     __vfs_shrink_caches();
+    pcache_shrink_caches();
     kmm_shrink_all();
     uint64 after_pages = get_total_free_pages();
     if (before_pages != after_pages) {
@@ -2295,6 +2284,7 @@ void tmpfs_run_all_smoketests(void) {
     tmpfs_run_truncate_smoketest();
     tmpfs_shrink_caches();
     __vfs_shrink_caches();
+    pcache_shrink_caches();
     kmm_shrink_all();
     after_pages = get_total_free_pages();
     if (before_pages != after_pages) {
@@ -2309,6 +2299,7 @@ void tmpfs_run_all_smoketests(void) {
     tmpfs_run_namei_smoketest();
     tmpfs_shrink_caches();
     __vfs_shrink_caches();
+    pcache_shrink_caches();
     kmm_shrink_all();
     after_pages = get_total_free_pages();
     if (before_pages != after_pages) {
@@ -2323,6 +2314,7 @@ void tmpfs_run_all_smoketests(void) {
     tmpfs_run_dir_iter_mount_smoketest();
     tmpfs_shrink_caches();
     __vfs_shrink_caches();
+    pcache_shrink_caches();
     kmm_shrink_all();
     after_pages = get_total_free_pages();
     if (before_pages != after_pages) {
@@ -2337,6 +2329,7 @@ void tmpfs_run_all_smoketests(void) {
     tmpfs_run_file_ops_smoketest();
     tmpfs_shrink_caches();
     __vfs_shrink_caches();
+    pcache_shrink_caches();
     kmm_shrink_all();
     after_pages = get_total_free_pages();
     if (before_pages != after_pages) {
@@ -2351,6 +2344,7 @@ void tmpfs_run_all_smoketests(void) {
     tmpfs_run_lazy_unmount_smoketest();
     tmpfs_shrink_caches();
     __vfs_shrink_caches();
+    pcache_shrink_caches();
     kmm_shrink_all();
     after_pages = get_total_free_pages();
     if (before_pages != after_pages) {
@@ -2365,6 +2359,7 @@ void tmpfs_run_all_smoketests(void) {
     tmpfs_run_double_indirect_smoketest();
     tmpfs_shrink_caches();
     __vfs_shrink_caches();
+    pcache_shrink_caches();
     kmm_shrink_all();
     after_pages = get_total_free_pages();
     if (before_pages != after_pages) {

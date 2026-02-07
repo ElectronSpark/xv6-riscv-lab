@@ -34,7 +34,69 @@
 #include "hlist.h"
 #include <mm/slab.h>
 #include <mm/vm.h>
+#include <mm/pcache.h>
 #include "tmpfs_private.h"
+
+/******************************************************************************
+ * tmpfs pcache operations
+ *
+ * For tmpfs (backendless file system), the pcache IS the backing store.
+ * - read_page: Zero-fill the page (for holes/first access)
+ * - write_page: No-op (data stays in memory, no disk to persist to)
+ *****************************************************************************/
+
+/* Convert block size to 512-byte units for pcache */
+#define PCACHE_BLKS_PER_PAGE (PGSIZE / 512)
+
+static int tmpfs_pcache_read_page(struct pcache *pcache, page_t *page) {
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+    // Zero-fill the page - for tmpfs, unwritten data is zeros
+    memset(pcnode->data, 0, PGSIZE);
+    return 0;
+}
+
+static int tmpfs_pcache_write_page(struct pcache *pcache, page_t *page) {
+    // No-op for tmpfs - data stays in memory, nothing to persist
+    (void)pcache;
+    (void)page;
+    return 0;
+}
+
+static struct pcache_ops tmpfs_pcache_ops = {
+    .read_page = tmpfs_pcache_read_page,
+    .write_page = tmpfs_pcache_write_page,
+};
+
+/*
+ * Initialize the embedded per-inode pcache (i_data) for tmpfs.
+ * Call once for every regular-file inode after deciding to use pcache.
+ */
+void tmpfs_inode_pcache_init(struct vfs_inode *inode) {
+    struct pcache *pc = &inode->i_data;
+    memset(pc, 0, sizeof(*pc));
+    pc->ops = &tmpfs_pcache_ops;
+    /* blk_count in 512-byte units, rounded up to page boundary */
+    pc->blk_count = (TMPFS_MAX_FILE_SIZE / 512 + PCACHE_BLKS_PER_PAGE - 1) 
+                    & ~(uint64)(PCACHE_BLKS_PER_PAGE - 1);
+
+    int ret = pcache_init(pc);
+    if (ret != 0)
+        return; /* proceed without pcache */
+
+    /* pcache_init resets private_data, so set it after init */
+    pc->private_data = inode;
+}
+
+/*
+ * Teardown the per-inode pcache for tmpfs.
+ * Call when destroying a regular file inode.
+ */
+void tmpfs_inode_pcache_teardown(struct vfs_inode *inode) {
+    struct pcache *pc = &inode->i_data;
+    if (pc->active) {
+        pcache_teardown(pc);
+    }
+}
 
 // Forward declarations
 static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count, bool user);
@@ -54,6 +116,7 @@ struct vfs_file_ops tmpfs_file_ops = {
 static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count, bool user) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     struct tmpfs_inode *ti = container_of(inode, struct tmpfs_inode, vfs_inode);
+    struct pcache *pc = &inode->i_data;
     
     if (!S_ISREG(inode->mode)) {
         return -EINVAL;
@@ -90,6 +153,12 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
         return count;
     }
     
+    // pcache-based read
+    if (!pc->active) {
+        vfs_iunlock(inode);
+        return -EIO;
+    }
+    
     size_t bytes_read = 0;
     while (bytes_read < count) {
         size_t block_idx = TMPFS_IBLOCK(pos);
@@ -99,36 +168,35 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
             chunk = count - bytes_read;
         }
         
-        void *block = __tmpfs_lookup_block(ti, block_idx, false);
-        if (block == NULL) {
-            // Hole in file, return zeros
-            if (user) {
-                char zeros[64];
-                memset(zeros, 0, sizeof(zeros));
-                size_t remaining = chunk;
-                while (remaining > 0) {
-                    size_t c = remaining < sizeof(zeros) ? remaining : sizeof(zeros);
-                    if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read + (chunk - remaining)), zeros, c) < 0) {
-                        vfs_iunlock(inode);
-                        if (bytes_read == 0) return -EFAULT;
-                        return bytes_read;
-                    }
-                    remaining -= c;
-                }
-            } else {
-                memset(buf + bytes_read, 0, chunk);
+        // Get page from pcache (blkno in 512-byte units)
+        uint64 blkno_512 = (uint64)block_idx * PCACHE_BLKS_PER_PAGE;
+        page_t *page = pcache_get_page(pc, blkno_512);
+        if (page == NULL) {
+            vfs_iunlock(inode);
+            if (bytes_read == 0) return -EIO;
+            return bytes_read;
+        }
+        int ret = pcache_read_page(pc, page);
+        if (ret != 0) {
+            pcache_put_page(pc, page);
+            vfs_iunlock(inode);
+            if (bytes_read == 0) return -EIO;
+            return bytes_read;
+        }
+        struct pcache_node *pcn = page->pcache.pcache_node;
+        char *data = (char *)pcn->data + block_off;
+        
+        if (user) {
+            if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read), data, chunk) < 0) {
+                pcache_put_page(pc, page);
+                vfs_iunlock(inode);
+                if (bytes_read == 0) return -EFAULT;
+                return bytes_read;
             }
         } else {
-            if (user) {
-                if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read), (char *)block + block_off, chunk) < 0) {
-                    vfs_iunlock(inode);
-                    if (bytes_read == 0) return -EFAULT;
-                    return bytes_read;
-                }
-            } else {
-                memmove(buf + bytes_read, (char *)block + block_off, chunk);
-            }
+            memmove(buf + bytes_read, data, chunk);
         }
+        pcache_put_page(pc, page);
         
         bytes_read += chunk;
         pos += chunk;
@@ -141,6 +209,7 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
 static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t count, bool user) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     struct tmpfs_inode *ti = container_of(inode, struct tmpfs_inode, vfs_inode);
+    struct pcache *pc = &inode->i_data;
     
     if (!S_ISREG(inode->mode)) {
         return -EINVAL;
@@ -177,7 +246,7 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t
             vfs_iunlock(inode);
             return count;
         }
-        // Need to migrate to block storage
+        // Need to migrate to pcache storage
         int ret = __tmpfs_migrate_to_allocated_blocks(ti);
         if (ret != 0) {
             vfs_iunlock(inode);
@@ -185,13 +254,10 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t
         }
     }
     
-    // Extend file if needed - allocate blocks for the new data
-    if (end_pos > inode->size) {
-        int ret = __tmpfs_truncate(inode, end_pos);
-        if (ret != 0) {
-            vfs_iunlock(inode);
-            return ret;
-        }
+    // pcache-based write
+    if (!pc->active) {
+        vfs_iunlock(inode);
+        return -EIO;
     }
     
     size_t bytes_written = 0;
@@ -203,33 +269,48 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t
             chunk = count - bytes_written;
         }
         
-        // Block should already be allocated by VFS core's truncate call
-        void *block = __tmpfs_lookup_block(ti, block_idx, false);
-        if (block == NULL) {
-            // This shouldn't happen after truncate, but handle gracefully
-            printf("tmpfs_file_write: block_idx=%lu is NULL! pos=%lld, n_blocks=%ld\n",
-                   (unsigned long)block_idx, (long long)pos, (long)inode->n_blocks);
-            if (bytes_written == 0) {
-                return -EIO;
-            }
-            break;
+        // Get page from pcache (blkno in 512-byte units)
+        uint64 blkno_512 = (uint64)block_idx * PCACHE_BLKS_PER_PAGE;
+        page_t *page = pcache_get_page(pc, blkno_512);
+        if (page == NULL) {
+            vfs_iunlock(inode);
+            if (bytes_written == 0) return -ENOMEM;
+            goto done;
         }
+        int ret = pcache_read_page(pc, page);
+        if (ret != 0) {
+            pcache_put_page(pc, page);
+            vfs_iunlock(inode);
+            if (bytes_written == 0) return ret;
+            goto done;
+        }
+        struct pcache_node *pcn = page->pcache.pcache_node;
+        char *data = (char *)pcn->data + block_off;
         
         if (user) {
-            if (vm_copyin(myproc()->vm, (char *)block + block_off, (uint64)(buf + bytes_written), chunk) < 0) {
+            if (vm_copyin(myproc()->vm, data, (uint64)(buf + bytes_written), chunk) < 0) {
+                pcache_put_page(pc, page);
                 vfs_iunlock(inode);
                 if (bytes_written == 0) return -EFAULT;
-                return bytes_written;
+                goto done;
             }
         } else {
-            memmove((char *)block + block_off, buf + bytes_written, chunk);
+            memmove(data, buf + bytes_written, chunk);
         }
+        pcache_mark_page_dirty(pc, page);
+        pcache_put_page(pc, page);
         
         bytes_written += chunk;
         pos += chunk;
     }
     
+    // Update size if we extended the file
+    if (pos > inode->size) {
+        inode->size = pos;
+    }
+    
     vfs_iunlock(inode);
+done:
     return bytes_written;
 }
 
