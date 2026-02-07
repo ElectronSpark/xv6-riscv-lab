@@ -12,11 +12,12 @@
 #include "proc/proc_queue.h"
 #include "proc/sched.h"
 #include "errno.h"
+#include "smp/atomic.h"
 
 #define __mutex_set_holder(lk, pid) \
-    __atomic_store_n(&lk->holder, pid, __ATOMIC_SEQ_CST)
+    smp_store_release(&lk->holder, pid)  // Use atomic store with release semantics to set holder
 #define __mutex_holder(lk) \
-    __atomic_load_n(&lk->holder, __ATOMIC_SEQ_CST)
+    smp_load_acquire(&lk->holder)
 #define __mutex_try_set_holder(lk, pid)   atomic_cas(&lk->holder, -1, pid)  // -1 = no holder
 
 static int __do_wakeup(mutex_t *lk) {
