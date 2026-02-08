@@ -110,6 +110,53 @@ static void __vfs_fdtable_free(struct vfs_fdtable *fdtable) {
 }
 
 /**
+ * vfs_fdtable_alloc_fd_from - Allocate a file descriptor starting from a minimum fd
+ * @fdtable: The file descriptor table
+ * @file: The file to associate with the new fd
+ * @start_fd: Lowest fd number to consider (0 to NOFILE-1)
+ *
+ * Searches for the lowest available file descriptor >= @start_fd and
+ * associates it with @file.  Increments @file's reference count via
+ * vfs_fdup() and updates the fdtable's bitmap and fd_count.
+ *
+ * This is the core allocation routine; vfs_fdtable_alloc_fd() is a
+ * convenience wrapper that passes @start_fd = 0.
+ *
+ * LOCKING: Caller MUST hold fdtable->lock
+ *
+ * Returns: Non-negative fd on success, negative errno on failure
+ *   -EINVAL: NULL fdtable or file, or @start_fd out of range
+ *   -EMFILE: No free fd available (table full or none >= @start_fd)
+ *   -ENOMEM: Failed to increment file reference count
+ */
+int vfs_fdtable_alloc_fd_from(struct vfs_fdtable *fdtable, struct vfs_file *file, int start_fd) {
+    if (fdtable == NULL || file == NULL) {
+        return -EINVAL; // Invalid arguments
+    }
+    if (start_fd < 0 || start_fd >= NOFILE) {
+        return -EINVAL; // Invalid starting fd
+    }
+    assert(spin_holding(&fdtable->lock),
+           "vfs_fdtable_alloc_fd_from: fdtable lock not held");
+    if (fdtable->fd_count >= NOFILE) {
+        return -EMFILE; // Too many open files
+    }
+    int fd = bits_ctz_ptr_from_inv(fdtable->files_bitmap, start_fd, NOFILE);
+    if (fd < 0 || fd >= NOFILE) {
+        return -EMFILE; // No free file descriptor
+    }
+    if (vfs_fdup(file) == NULL) {
+        return -ENOMEM; // Failed to duplicate file reference
+    }
+
+    bits_test_and_set_bit64(&fdtable->files_bitmap[fd >> 6], fd & 63);
+    rcu_assign_pointer(fdtable->files[fd], file);
+    atomic_inc(&fdtable->fd_count);
+    rcu_assign_pointer(file->fd, fd);
+    return fd;
+}
+
+/**
  * vfs_fdtable_alloc_fd - Allocate a file descriptor for a file
  * @fdtable: The file descriptor table
  * @file: The file to associate with the new fd
@@ -125,27 +172,7 @@ static void __vfs_fdtable_free(struct vfs_fdtable *fdtable) {
  *   -ENOMEM: Failed to increment file reference count
  */
 int vfs_fdtable_alloc_fd(struct vfs_fdtable *fdtable, struct vfs_file *file) {
-    if (fdtable == NULL || file == NULL) {
-        return -EINVAL; // Invalid arguments
-    }
-    assert(spin_holding(&fdtable->lock),
-           "vfs_fdtable_alloc_fd: fdtable lock not held");
-    if (fdtable->fd_count >= NOFILE) {
-        return -EMFILE; // Too many open files
-    }
-    int fd = bits_ctz_ptr_inv(fdtable->files_bitmap, NOFILE);
-    if (fd < 0 || fd >= NOFILE) {
-        return -EMFILE; // No free file descriptor
-    }
-    if (vfs_fdup(file) == NULL) {
-        return -ENOMEM; // Failed to duplicate file reference
-    }
-
-    bits_test_and_set_bit64(&fdtable->files_bitmap[fd >> 6], fd & 63);
-    rcu_assign_pointer(fdtable->files[fd], file);
-    atomic_inc(&fdtable->fd_count);
-    rcu_assign_pointer(file->fd, fd);
-    return fd;
+    return vfs_fdtable_alloc_fd_from(fdtable, file, 0);
 }
 
 /**
