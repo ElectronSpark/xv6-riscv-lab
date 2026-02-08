@@ -25,6 +25,41 @@
 #define WRITE_ONCE(x, val) (*(volatile typeof(x) *)&(x) = (val))
 
 /**
+ * atomic_oper_cond_hook - conditional atomic read-modify-write with hooks
+ * @__TGT_PTR: pointer to the atomic variable
+ * @__OPER: expression producing the new value (may reference VAL)
+ * @__COND: loop condition expression (may reference VAL)
+ * @__SUCCESS_HOOK: statement executed after a successful CAS, before returning
+ * @__FAILURE_HOOK: statement executed after each failed CAS, before retrying
+ *
+ * Like atomic_oper_cond(), but invokes @__SUCCESS_HOOK or @__FAILURE_HOOK at
+ * the appropriate point in the CAS loop.  Useful when the caller needs
+ * side-effects on success (e.g. setting w_holder) or on retry (e.g. a
+ * cpu_relax() hint).
+ *
+ * Returns true if the CAS succeeded, false if @__COND became false.
+ */
+#define atomic_oper_cond_hook(__TGT_PTR, __OPER, __COND, __SUCCESS_HOOK,       \
+                              __FAILURE_HOOK)                                  \
+    ({                                                                         \
+        typeof(*(__TGT_PTR)) VAL =                                             \
+            __atomic_load_n(__TGT_PTR, __ATOMIC_ACQUIRE);                      \
+        bool ret = false;                                                      \
+        while (__COND) {                                                       \
+            typeof(*(__TGT_PTR)) __new_val = __OPER;                           \
+            if (__atomic_compare_exchange_n(__TGT_PTR, &VAL, __new_val, false, \
+                                            __ATOMIC_SEQ_CST,                  \
+                                            __ATOMIC_SEQ_CST)) {               \
+                ret = true;                                                    \
+                __SUCCESS_HOOK;                                                \
+                break;                                                         \
+            }                                                                  \
+            __FAILURE_HOOK;                                                    \
+        }                                                                      \
+        ret;                                                                   \
+    })
+
+/**
  * atomic_oper_cond - generic conditional atomic read-modify-write
  * @__TGT_PTR: pointer to the atomic variable
  * @__OPER: expression producing the new value (may reference VAL)
@@ -38,21 +73,7 @@
  * Returns true if the CAS succeeded, false if @__COND became false.
  */
 #define atomic_oper_cond(__TGT_PTR, __OPER, __COND)                            \
-    ({                                                                         \
-        typeof(*(__TGT_PTR)) VAL =                                             \
-            __atomic_load_n(__TGT_PTR, __ATOMIC_ACQUIRE);                      \
-        bool ret = false;                                                      \
-        while (__COND) {                                                       \
-            typeof(*(__TGT_PTR)) __new_val = __OPER;                           \
-            if (__atomic_compare_exchange_n(__TGT_PTR, &VAL, __new_val, false, \
-                                            __ATOMIC_SEQ_CST,                  \
-                                            __ATOMIC_SEQ_CST)) {               \
-                ret = true;                                                    \
-                break;                                                         \
-            }                                                                  \
-        }                                                                      \
-        ret;                                                                   \
-    })
+    atomic_oper_cond_hook(__TGT_PTR, __OPER, __COND, /* no hook */, /* no hook */)
 
 /**
  * atomic_dec_unless - atomically decrement unless value equals @unless
@@ -98,8 +119,12 @@
 #define atomic_inc_in_range(value, min, max)                                   \
     atomic_oper_cond((value), (VAL + 1), (VAL > (min) && VAL < (max)))
 
-#define atomic_dec(value) __atomic_fetch_sub(value, 1, __ATOMIC_SEQ_CST)
-#define atomic_inc(value) __atomic_fetch_add(value, 1, __ATOMIC_SEQ_CST)
+#define atomic_add(value, amount)                                              \
+    __atomic_fetch_add(value, amount, __ATOMIC_SEQ_CST)
+#define atomic_sub(value, amount)                                              \
+    __atomic_fetch_sub(value, amount, __ATOMIC_SEQ_CST)
+#define atomic_dec(value) atomic_sub(value, 1)
+#define atomic_inc(value) atomic_add(value, 1)
 #define atomic_or(ptr, val) __atomic_fetch_or((ptr), (val), __ATOMIC_SEQ_CST)
 #define atomic_and(ptr, val) __atomic_fetch_and((ptr), (val), __ATOMIC_SEQ_CST)
 

@@ -8,4 +8,5 @@ add_library(lock OBJECT
     completion.c
     rcu.c
     rcu_test.c
+    rwlock.c
 )
