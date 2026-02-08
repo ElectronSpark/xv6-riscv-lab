@@ -6,7 +6,7 @@
 #include <mm/page.h>
 #include "param.h"
 #include "printf.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "proc/rq.h"
 #include "proc/sched.h"
 #include "proc_private.h"

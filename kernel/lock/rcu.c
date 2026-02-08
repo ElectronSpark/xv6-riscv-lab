@@ -56,7 +56,7 @@
 #include "lock/spinlock.h"
 #include "lock/rcu.h"
 #include "proc/proc.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "proc/sched.h"
 #include "proc/rq.h"
 #include "timer/timer.h"
@@ -75,7 +75,7 @@ rcu_cpu_data_t rcu_cpu_data[NCPU] __ALIGNED_CACHELINE;
 static spinlock_t rcu_gp_lock = SPINLOCK_INITIALIZED("rcu_gp_lock");
 
 // Wait queue for processes waiting on grace period completion
-static proc_queue_t rcu_gp_waitq;
+static tq_t rcu_gp_waitq;
 static spinlock_t rcu_gp_waitq_lock = SPINLOCK_INITIALIZED("rcu_gp_waitq_lock");
 
 // Per-CPU RCU kthread state (forward declaration for rcu_barrier)
@@ -198,7 +198,7 @@ static int rcu_gp_completed(void) {
 static void rcu_wakeup_gp_waiters(void) {
     spin_lock(&rcu_gp_waitq_lock);
     // Wake up all waiters - they will check if their GP has completed
-    proc_queue_wakeup_all(&rcu_gp_waitq, 0, 0);
+    tq_wakeup_all(&rcu_gp_waitq, 0, 0);
     spin_unlock(&rcu_gp_waitq_lock);
 }
 
@@ -207,7 +207,7 @@ static void rcu_wakeup_gp_waiters(void) {
 // ============================================================================
 
 void rcu_init(void) {
-    proc_queue_init(&rcu_gp_waitq, "rcu_gp_waitq", &rcu_gp_waitq_lock);
+    tq_init(&rcu_gp_waitq, "rcu_gp_waitq", &rcu_gp_waitq_lock);
 
     int ret = slab_cache_init(&rcu_head_slab, "rcu_head_cache",
                     sizeof(rcu_head_t),

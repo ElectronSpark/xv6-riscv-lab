@@ -8,7 +8,7 @@
 #include "lock/rwlock.h"
 #include <smp/percpu.h>
 #include "proc/proc.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "proc/sched.h"
 #include "string.h"
 
@@ -17,7 +17,7 @@ static inline int __reader_should_wait(rwlock_t *lock) {
     if (lock->readers == 0) {
         return lock->holder_pid != -1;  // -1 = no holder
     }
-    if ((lock->flags & RWLOCK_PRIO_WRITE) && proc_queue_size(&lock->write_queue) > 0) {
+    if ((lock->flags & RWLOCK_PRIO_WRITE) && tq_size(&lock->write_queue) > 0) {
         return 1;
     }
     return 0;
@@ -38,12 +38,12 @@ static inline int __writer_should_wait(rwlock_t *lock, int pid) {
 }
 
 static void __wake_readers(rwlock_t *lock) {
-    int ret = proc_queue_wakeup_all(&lock->read_queue, 0, 0);
+    int ret = tq_wakeup_all(&lock->read_queue, 0, 0);
     assert(ret >= 0, "rwlock: failed to wake readers");
 }
 
 static void __wake_writer(rwlock_t *lock) {
-    struct proc *next = proc_queue_wakeup(&lock->write_queue, 0, 0);
+    struct proc *next = tq_wakeup(&lock->write_queue, 0, 0);
     assert(!IS_ERR_OR_NULL(next), "rwlock: failed to wake writer");
     lock->holder_pid = next->pid;
 }
@@ -52,16 +52,16 @@ static void __wake_writer(rwlock_t *lock) {
 static void __do_wake_up(rwlock_t *lock) {
     if (lock->flags & RWLOCK_PRIO_WRITE) {
         // If the lock is in write priority mode, first try to wake up the next writer
-        if (proc_queue_size(&lock->write_queue) > 0) {
+        if (tq_size(&lock->write_queue) > 0) {
             __wake_writer(lock);
-        } else if (proc_queue_size(&lock->read_queue) > 0) {
+        } else if (tq_size(&lock->read_queue) > 0) {
             __wake_readers(lock);
         }
     } else {
         // If the lock is in read priority mode, first try to wake up all readers
-        if (proc_queue_size(&lock->read_queue) > 0) {
+        if (tq_size(&lock->read_queue) > 0) {
             __wake_readers(lock);
-        } else if (proc_queue_size(&lock->write_queue) > 0) {
+        } else if (tq_size(&lock->write_queue) > 0) {
             __wake_writer(lock);
         }
     }
@@ -75,8 +75,8 @@ int rwlock_init(rwlock_t *lock, uint64 flags, const char *name) {
 
     spin_init(&lock->lock, "rwlock spinlock");
     lock->readers = 0;
-    proc_queue_init(&lock->read_queue, "rwlock read queue", &lock->lock);
-    proc_queue_init(&lock->write_queue, "rwlock write queue", &lock->lock);
+    tq_init(&lock->read_queue, "rwlock read queue", &lock->lock);
+    tq_init(&lock->write_queue, "rwlock write queue", &lock->lock);
     lock->name = name;
     lock->holder_pid = -1;  // -1 = no holder (0 is valid PID for idle)
     lock->flags = flags;
@@ -96,7 +96,7 @@ int rwlock_acquire_read(rwlock_t *lock) {
     spin_lock(&lock->lock);
     // @TODO: signal handling (wait is still uninterruptible for now)
     while (__reader_should_wait(lock)) {
-        ret = proc_queue_wait(&lock->read_queue, &lock->lock, NULL);
+        ret = tq_wait(&lock->read_queue, &lock->lock, NULL);
         if (ret != 0) {
             spin_unlock(&lock->lock);
             return ret;
@@ -123,7 +123,7 @@ int rwlock_acquire_write(rwlock_t *lock) {
     // @TODO: signal handling (wait is still uninterruptible for now)
     while (__writer_should_wait(lock, self_pid)) {
         assert(lock->holder_pid != self_pid, "rwlock_acquire_write: deadlock detected, process already holds the write lock");
-        ret = proc_queue_wait(&lock->write_queue, &lock->lock, NULL);
+        ret = tq_wait(&lock->write_queue, &lock->lock, NULL);
         if (ret != 0) {
             spin_unlock(&lock->lock);
             return ret;

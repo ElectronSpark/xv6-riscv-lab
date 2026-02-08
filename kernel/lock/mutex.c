@@ -9,7 +9,7 @@
 #include "lock/spinlock.h"
 #include "proc/proc.h"
 #include "lock/mutex_types.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "proc/sched.h"
 #include "errno.h"
 #include "smp/atomic.h"
@@ -23,7 +23,7 @@
     atomic_cas(&lk->holder, -1, pid) // -1 = no holder
 
 static struct proc *__do_wakeup(mutex_t *lk) {
-    struct proc *next = proc_queue_wakeup(&lk->wait_queue, 0, 0);
+    struct proc *next = tq_wakeup(&lk->wait_queue, 0, 0);
     if (next == NULL) {
         __mutex_set_holder(lk, -1); // -1 = no holder
         return NULL;
@@ -36,7 +36,7 @@ static struct proc *__do_wakeup(mutex_t *lk) {
 
 void mutex_init(mutex_t *lk, char *name) {
     spin_init(&lk->lk, "sleep lock");
-    proc_queue_init(&lk->wait_queue, "sleep lock wait queue", &lk->lk);
+    tq_init(&lk->wait_queue, "sleep lock wait queue", &lk->lk);
     lk->name = name;
     __mutex_set_holder(lk, -1); // -1 = no holder (0 is valid PID for idle)
 }
@@ -69,9 +69,9 @@ int mutex_lock(mutex_t *lk) {
            "mutex_lock: deadlock detected, process already holds the lock");
 
     while (__mutex_holder(lk) != self->pid) {
-        int ret = proc_queue_wait(&lk->wait_queue, &lk->lk, NULL);
+        int ret = tq_wait(&lk->wait_queue, &lk->lk, NULL);
         if (ret != 0) {
-            // If proc_queue_wait returns an error, and the process has already
+            // If tq_wait returns an error, and the process has already
             // gotten the lock, we need to release the lock and return the error
             // code.
             if (__mutex_holder(lk) == self->pid) {

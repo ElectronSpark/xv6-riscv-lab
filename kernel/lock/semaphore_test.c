@@ -8,7 +8,7 @@
 #include "lock/semaphore.h"
 #include "lock/mutex_types.h"
 #include "proc/proc.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "proc/sched.h"
 #include "errno.h"
 

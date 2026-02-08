@@ -4,7 +4,7 @@
 #include "types.h"
 #include "vfs/vfs_types.h"
 #include "lock/spinlock.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "vfs/xv6fs/ondisk.h"  // xv6 on-disk format definitions
 #include <mm/slab.h>
 #include <mm/pcache.h>
@@ -55,13 +55,13 @@ struct xv6fs_logheader {
  * contention on the global sleep_lock. Waiters in begin_op() use the
  * per-log queue, and end_op() wakes them after commit completes.
  * 
- * Pattern: end_op() uses proc_queue_bulk_move() to a temp queue, then
+ * Pattern: end_op() uses tq_bulk_move() to a temp queue, then
  * wakes outside the lock to avoid lock convoy (woken processes competing
  * to reacquire log->lock).
  */
 struct xv6fs_log {
     struct spinlock lock;
-    proc_queue_t wait_queue;  /**< Per-log wait queue for begin_op waiters */
+    tq_t wait_queue;  /**< Per-log wait queue for begin_op waiters */
     int start;          // Log start block
     int size;           // Log size in blocks
     int outstanding;    // How many FS ops are executing

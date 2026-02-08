@@ -3,7 +3,7 @@
 
 #include "types.h"
 #include "lock/spinlock.h"
-#include "proc/proc_queue_type.h"
+#include "proc/tq_type.h"
 
 #define WORKQUEUE_NAME_MAX 31
 
@@ -17,7 +17,7 @@ struct work_struct {
 
 struct workqueue {
     struct spinlock lock;
-    proc_queue_t idle_queue;
+    tq_t idle_queue;
     list_node_t worker_list;
     struct proc *manager;
     int pending_works;

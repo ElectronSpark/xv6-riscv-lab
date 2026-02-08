@@ -2,7 +2,7 @@
 #define __KERNEL_PIPE_H
 
 #include "lock/spinlock.h"
-#include "proc/proc_queue_type.h"
+#include "proc/tq_type.h"
 #include <smp/atomic.h>
 
 #define PIPESIZE 512
@@ -34,10 +34,10 @@
 
 struct pipe {
     uint nread; // number of bytes read
-    proc_queue_t nread_queue;
+    tq_t nread_queue;
     struct spinlock reader_lock;
     uint nwrite; // number of bytes written
-    proc_queue_t nwrite_queue;
+    tq_t nwrite_queue;
     struct spinlock writer_lock;
     int flags;
     char data[PIPESIZE];

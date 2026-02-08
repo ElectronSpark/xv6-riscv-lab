@@ -9,7 +9,7 @@
 #include "lock/semaphore.h"
 #include <smp/percpu.h>
 #include "proc/proc.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "proc/sched.h"
 
 static int __sem_value_inc(sem_t *sem) {
@@ -34,7 +34,7 @@ int sem_init(sem_t *sem, const char *name, int value) {
     sem->name = name ? name : "unnamed";
     sem->value = value;
     spin_init(&sem->lk, "semaphore spinlock");
-    proc_queue_init(&sem->wait_queue, "semaphore wait queue", &sem->lk);
+    tq_init(&sem->wait_queue, "semaphore wait queue", &sem->lk);
     return 0;
 }
 
@@ -42,7 +42,7 @@ static int __sem_do_post(sem_t *sem) {
     int val = __sem_value_inc(sem);
     if (val <= 0) {
         // If the semaphore value was or is negative, wake up one waiting process
-        struct proc *p = proc_queue_wakeup(&sem->wait_queue, 0, 0);
+        struct proc *p = tq_wakeup(&sem->wait_queue, 0, 0);
         if (p == NULL) {
             return -ENOENT; // No process to wake up
         }
@@ -74,7 +74,7 @@ int sem_wait(sem_t *sem) {
         return 0; // Semaphore acquired successfully
     }
 
-    int ret = proc_queue_wait(&sem->wait_queue, &sem->lk, NULL);
+    int ret = tq_wait(&sem->wait_queue, &sem->lk, NULL);
     if (ret != 0) {
         int wake_ret = __sem_do_post(sem);
         if (wake_ret != 0 && wake_ret != -ENOENT) {

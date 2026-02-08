@@ -2,7 +2,7 @@
  * Concurrency harness for pcache host tests
  *
  * Provides real mutual exclusion for xv6 spinlocks using pthread mutexes,
- * and real blocking/wakeup for proc_queue using pthread condvars.
+ * and real blocking/wakeup for tq using pthread condvars.
  *
  * This header deliberately does NOT include <pthread.h> because the test
  * include paths contain kernel/inc/proc which causes <pthread.h> ->
@@ -15,8 +15,8 @@
  *
  * When enabled:
  *   - spin_lock/spin_unlock use a global hash table of pthread mutexes
- *   - proc_queue_wait blocks on a condvar and releases the associated spinlock
- *   - proc_queue_wakeup_all broadcasts the condvar
+ *   - tq_wait blocks on a condvar and releases the associated spinlock
+ *   - tq_wakeup_all broadcasts the condvar
  */
 #ifndef CONCURRENCY_HARNESS_H
 #define CONCURRENCY_HARNESS_H
@@ -35,9 +35,9 @@ void concurrency_mode_disable(void);
 void conc_spin_lock(void *lock_ptr);
 void conc_spin_unlock(void *lock_ptr);
 
-/* proc_queue -> pthread_cond operations (called from proc wrappers) */
-void conc_proc_queue_wait(void *queue_ptr, void *lock_ptr);
-void conc_proc_queue_wakeup_all(void *queue_ptr);
+/* tq -> pthread_cond operations (called from proc wrappers) */
+void conc_tq_wait(void *queue_ptr, void *lock_ptr);
+void conc_tq_wakeup_all(void *queue_ptr);
 
 /* ---- Thread management (wraps pthread_create/join) ---- */
 #define CONC_MAX_THREADS 16

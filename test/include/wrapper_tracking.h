@@ -5,7 +5,7 @@
 
 // Forward declarations to avoid pulling in all headers
 struct spinlock;
-struct proc_queue;
+struct tq;
 struct proc;
 struct cpu_local;
 
@@ -27,24 +27,24 @@ typedef struct {
     int current_cpuid;              // What cpuid() returns
 } proc_tracking_t;
 
-// Tracking structure for proc_queue operations
+// Tracking structure for tq operations
 typedef struct {
     int queue_init_count;
-    struct proc_queue *last_queue_init;
+    struct tq *last_queue_init;
     const char *last_queue_name;
     struct spinlock *last_queue_lock;
     
     int queue_wait_count;
-    struct proc_queue *last_queue_wait;
+    struct tq *last_queue_wait;
     struct spinlock *last_wait_lock;
     
     int queue_wakeup_count;
-    struct proc_queue *last_queue_wakeup;
+    struct tq *last_queue_wakeup;
     int last_wakeup_errno;
     uint64 last_wakeup_rdata;
     
     int queue_wakeup_all_count;
-    struct proc_queue *last_queue_wakeup_all;
+    struct tq *last_queue_wakeup_all;
     int last_wakeup_all_errno;
     uint64 last_wakeup_all_rdata;
     
@@ -54,21 +54,21 @@ typedef struct {
     
     // For custom behavior
     void *user_data;
-    int (*wait_callback)(struct proc_queue *q, struct spinlock *lock, uint64 *rdata, void *user_data);
+    int (*wait_callback)(struct tq *q, struct spinlock *lock, uint64 *rdata, void *user_data);
     struct proc *next_wakeup_proc;
-} proc_queue_tracking_t;
+} tq_tracking_t;
 
 // Global tracking instances (can be NULL if tracking not needed)
 extern spinlock_tracking_t *g_spinlock_tracking;
-extern proc_queue_tracking_t *g_proc_queue_tracking;
+extern tq_tracking_t *g_tq_tracking;
 extern proc_tracking_t *g_proc_tracking;
 
 // Tracking control functions
 void wrapper_tracking_enable_spinlock(spinlock_tracking_t *tracking);
-void wrapper_tracking_enable_proc_queue(proc_queue_tracking_t *tracking);
+void wrapper_tracking_enable_tq(tq_tracking_t *tracking);
 void wrapper_tracking_enable_proc(proc_tracking_t *tracking);
 void wrapper_tracking_disable_spinlock(void);
-void wrapper_tracking_disable_proc_queue(void);
+void wrapper_tracking_disable_tq(void);
 void wrapper_tracking_disable_proc(void);
 
 #endif // WRAPPER_TRACKING_H

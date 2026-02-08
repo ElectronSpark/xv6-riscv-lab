@@ -12,7 +12,7 @@
 #include "kobject.h"
 #include "dev/dev_types.h"
 #include "proc/workqueue_types.h"
-#include "proc/proc_queue_type.h"
+#include "proc/tq_type.h"
 
 
 typedef struct page_struct page_t;
@@ -104,7 +104,7 @@ struct pcache_node {
     };
     uint64             blkno;      // starting block number (512-byte) of the page
     size_t             size;       // size of valid data area in the page
-    proc_queue_t       io_waiters;  // Wait queue for IO completion
+    tq_t       io_waiters;  // Wait queue for IO completion
 };
 
 #endif // KERNEL_PAGE_CACHE_TYPES_H

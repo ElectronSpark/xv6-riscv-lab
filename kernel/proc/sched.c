@@ -9,7 +9,7 @@
 #include "printf.h"
 #include "list.h"
 #include "hlist.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "proc/sched.h"
 #include "proc/rq.h"
 #include <mm/slab.h>
@@ -25,12 +25,12 @@
 // - proc_lock
 // - rq_lock (per-CPU run queue lock)
 
-static proc_tree_t __chan_queue_root;
+static ttree_t __chan_queue_root;
 
 static spinlock_t __sleep_lock = SPINLOCK_INITIALIZED("sleep_lock"); // Lock for sleep queues
 
 static void chan_queue_init(void) {
-    proc_tree_init(&__chan_queue_root, "chan_queue_root", &__sleep_lock);
+    ttree_init(&__chan_queue_root, "chan_queue_root", &__sleep_lock);
 }
 
 int chan_holding(void) {
@@ -57,7 +57,7 @@ void sleep_unlock_irqrestore(int state) {
 // These functions are used to acquire and release the scheduler lock.
 // To avoid deadlocks, locks must be held in the following order:
 // - locks of each process -- proc.c
-// - locks related to the process queue -- proc_queue.c
+// - locks related to the process queue -- tq.c
 // - rq_lock (per-CPU run queue lock) -- rq.c
 // - proc table lock -- proc.c
 //
@@ -479,10 +479,10 @@ void sleep_on_chan(void *chan, struct spinlock *lk) {
         spin_unlock(lk);
     }
     
-    // proc_tree_wait will release sleep_lock via scheduler_sleep,
+    // ttree_wait will release sleep_lock via scheduler_sleep,
     // keeping the tree protected during add operation.
     // After waking, scheduler_sleep will reacquire sleep_lock.
-    int ret = proc_tree_wait(&__chan_queue_root, (uint64)chan, NULL, NULL);
+    int ret = ttree_wait(&__chan_queue_root, (uint64)chan, NULL, NULL);
     
     // Re-acqiore sleep lock.
     // Discard saved interrupt state because it was saved before sleeping.
@@ -501,19 +501,19 @@ void sleep_on_chan(void *chan, struct spinlock *lk) {
 
 void wakeup_on_chan(void *chan) {
     sleep_lock();
-    int ret = proc_tree_wakeup_key(&__chan_queue_root, (uint64)chan, 0, 0);
+    int ret = ttree_wakeup_key(&__chan_queue_root, (uint64)chan, 0, 0);
     // @TODO: process return value
     (void)ret;
     sleep_unlock();
 }
 
 void scheduler_dump_chan_queue(void) {
-    struct proc_node *node = NULL;
-    struct proc_node *tmp = NULL;
+    struct tnode *node = NULL;
+    struct tnode *tmp = NULL;
 
     printf("Channel Queue Dump:\n");
     rb_foreach_entry_safe(&__chan_queue_root.root, node, tmp, tree.entry) {
-        struct proc *proc = proc_node_get_proc(node);
+        struct proc *proc = tnode_get_proc(node);
         if (proc == NULL) {
             printf("  Process: NULL\n");
             continue;

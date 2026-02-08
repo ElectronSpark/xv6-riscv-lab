@@ -1,15 +1,15 @@
 #ifndef __KERNEL_RWLOCK_TYPES_H
 #define __KERNEL_RWLOCK_TYPES_H
 
-#include "proc/proc_queue_type.h"
+#include "proc/tq_type.h"
 #include "spinlock.h"
 
 typedef struct rwlock {
     struct spinlock lock; // Spinlock to protect the rwlock structure
     int readers;          // Number of active readers
     pid_t holder_pid; // Process holding write lock, if any
-    proc_queue_t read_queue;  // Queue for processes waiting to read
-    proc_queue_t write_queue; // Queue for processes waiting to write
+    tq_t read_queue;  // Queue for processes waiting to read
+    tq_t write_queue; // Queue for processes waiting to write
     const char *name; // Name of the rwlock
     uint64 flags; // Additional flags for rwlock behavior
 } rwlock_t;

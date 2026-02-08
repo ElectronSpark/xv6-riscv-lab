@@ -2,11 +2,11 @@
 #define __KERNEL_MUTEX_TYPES_H
 
 #include "compiler.h"
-#include "proc/proc_queue_type.h"
+#include "proc/tq_type.h"
 
 // Long-term locks for processes
 typedef struct mutex {
-  proc_queue_t wait_queue; // Queue of processes waiting for the lock
+  tq_t wait_queue; // Queue of processes waiting for the lock
   struct spinlock lk; // spinlock protecting this sleep lock
   
   // For debugging:

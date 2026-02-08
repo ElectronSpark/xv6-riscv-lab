@@ -10,7 +10,7 @@
 #include "proc/sched.h"
 #include "defs.h"
 #include <mm/slab.h>
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "proc/workqueue.h"
 
 static slab_cache_t __workqueue_cache;
@@ -40,7 +40,7 @@ static void __workqueue_struct_init(struct workqueue *wq) {
     list_entry_init(&wq->worker_list);
     list_entry_init(&wq->work_list);
     spin_init(&wq->lock, "workqueue_lock");
-    proc_queue_init(&wq->idle_queue, "workqueue_idle", &wq->lock);
+    tq_init(&wq->idle_queue, "workqueue_idle", &wq->lock);
 }
 
 static void __wq_lock(struct workqueue *wq) {
@@ -167,7 +167,7 @@ static void __worker_routine(void) {
                 __exit_routine(0);
             }
             // Otherwise wait for work to be assigned
-            int ret = proc_queue_wait(&wq->idle_queue, &wq->lock, (uint64*)&work);
+            int ret = tq_wait(&wq->idle_queue, &wq->lock, (uint64*)&work);
             if (ret != 0) {
                 __wq_unlock(wq);
                 __exit_routine((uint64)ret);
@@ -233,10 +233,10 @@ static void __manager_routine(void) {
                 break;
             }
         }
-        while (proc_queue_size(&wq->idle_queue) && 
-               wq->nr_workers - proc_queue_size(&wq->idle_queue) < wq->pending_works) {
+        while (tq_size(&wq->idle_queue) && 
+               wq->nr_workers - tq_size(&wq->idle_queue) < wq->pending_works) {
             // Wake up an idle worker if any
-            struct proc *p = proc_queue_wakeup(&wq->idle_queue, 0, 0);
+            struct proc *p = tq_wakeup(&wq->idle_queue, 0, 0);
             if (IS_ERR_OR_NULL(p)) {
                 printf("warning: Failed to wake up idle worker\n");
             }

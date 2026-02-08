@@ -25,12 +25,12 @@ void pipeclose(struct pipe *pi, int writable) {
     if (writable) {
         spin_lock(&pi->writer_lock);
         freed = PIPE_CLEAR_WRITABLE(pi);
-        proc_queue_wakeup_all(&pi->nread_queue, -1, 0);
+        tq_wakeup_all(&pi->nread_queue, -1, 0);
         spin_unlock(&pi->writer_lock);
     } else {
         spin_lock(&pi->reader_lock);
         freed = PIPE_CLEAR_READABLE(pi);
-        proc_queue_wakeup_all(&pi->nwrite_queue, -1, 0);
+        tq_wakeup_all(&pi->nwrite_queue, -1, 0);
         spin_unlock(&pi->reader_lock);
     }
     if (freed) {
@@ -48,7 +48,7 @@ static int __pipe_wait_writer(struct pipe *pi) {
         // Return 0 to let caller re-check and detect EOF properly
         return 0;
     }
-    proc_queue_wait(&pi->nread_queue, &pi->writer_lock, NULL);
+    tq_wait(&pi->nread_queue, &pi->writer_lock, NULL);
     spin_unlock(&pi->writer_lock);
     // Return 0 to re-check conditions (wakeup may be from close or data)
     return 0;
@@ -61,7 +61,7 @@ static int __pipe_wait_reader(struct pipe *pi) {
         // Return 0 to let caller re-check and detect broken pipe properly
         return 0;
     }
-    proc_queue_wait(&pi->nwrite_queue, &pi->reader_lock, NULL);
+    tq_wait(&pi->nwrite_queue, &pi->reader_lock, NULL);
     spin_unlock(&pi->reader_lock);
     // Return 0 to re-check conditions (wakeup may be from close or space available)
     return 0;
@@ -96,7 +96,7 @@ int pipewrite(struct pipe *pi, uint64 addr, int n) {
             uint nwrite_old = pi->nwrite;
             size_t writable = PIPE_WRITABLE_SIZE(nwrite_old, nread);
             if (writable == 0) {
-                proc_queue_wakeup_all(&pi->nread_queue, 0, 0);
+                tq_wakeup_all(&pi->nread_queue, 0, 0);
                 spin_unlock(&pi->writer_lock);
 
                 ret = __pipe_wait_reader(pi);   // need to acquire reader_lock to wait for reader
@@ -130,7 +130,7 @@ int pipewrite(struct pipe *pi, uint64 addr, int n) {
     }
 out:
     spin_lock(&pi->writer_lock);
-    proc_queue_wakeup_all(&pi->nread_queue, 0, 0);
+    tq_wakeup_all(&pi->nread_queue, 0, 0);
     spin_unlock(&pi->writer_lock);
     return i - (buf_len - buf_pos);
 }
@@ -161,7 +161,7 @@ int piperead(struct pipe *pi, uint64 addr, int n) {
                     return -1;
                 }
                 // Pipe empty but writer still open - wait for data
-                proc_queue_wakeup_all(&pi->nwrite_queue, 0, 0);
+                tq_wakeup_all(&pi->nwrite_queue, 0, 0);
                 spin_unlock(&pi->reader_lock);
 
                 ret = __pipe_wait_writer(pi);
@@ -205,7 +205,7 @@ int piperead(struct pipe *pi, uint64 addr, int n) {
     }
 out:
     spin_lock(&pi->reader_lock);
-    proc_queue_wakeup_all(&pi->nwrite_queue, 0, 0);
+    tq_wakeup_all(&pi->nwrite_queue, 0, 0);
     spin_unlock(&pi->reader_lock);
     return i;
 }
@@ -234,7 +234,7 @@ int piperead_kernel(struct pipe *pi, char *buf, int n) {
                 return -1;
             }
             // Pipe empty but writer still open - wait for data
-            proc_queue_wakeup_all(&pi->nwrite_queue, 0, 0);
+            tq_wakeup_all(&pi->nwrite_queue, 0, 0);
             spin_unlock(&pi->reader_lock);
 
             ret = __pipe_wait_writer(pi);
@@ -264,7 +264,7 @@ int piperead_kernel(struct pipe *pi, char *buf, int n) {
     }
 out:
     spin_lock(&pi->reader_lock);
-    proc_queue_wakeup_all(&pi->nwrite_queue, 0, 0);
+    tq_wakeup_all(&pi->nwrite_queue, 0, 0);
     spin_unlock(&pi->reader_lock);
     return i;
 }
@@ -285,7 +285,7 @@ int pipewrite_kernel(struct pipe *pi, const char *buf, int n) {
         uint nwrite_old = pi->nwrite;
         size_t writable = PIPE_WRITABLE_SIZE(nwrite_old, nread);
         if (writable == 0) {
-            proc_queue_wakeup_all(&pi->nread_queue, 0, 0);
+            tq_wakeup_all(&pi->nread_queue, 0, 0);
             spin_unlock(&pi->writer_lock);
 
             ret = __pipe_wait_reader(pi);
@@ -314,7 +314,7 @@ int pipewrite_kernel(struct pipe *pi, const char *buf, int n) {
     }
 out:
     spin_lock(&pi->writer_lock);
-    proc_queue_wakeup_all(&pi->nread_queue, 0, 0);
+    tq_wakeup_all(&pi->nread_queue, 0, 0);
     spin_unlock(&pi->writer_lock);
     return i;
 }

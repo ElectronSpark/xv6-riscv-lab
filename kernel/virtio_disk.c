@@ -14,7 +14,7 @@
 #include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "lock/completion.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "vfs/xv6fs/ondisk.h"  // for BSIZE
 #include "dev/buf.h"
 #include "dev/virtio.h"
@@ -85,7 +85,7 @@ STATIC struct disk {
    * sleep on this per-disk queue and are woken when free_desc()
    * returns descriptors to the freelist.
    */
-  proc_queue_t desc_wait_queue;
+  tq_t desc_wait_queue;
   
 } disks[N_VIRTIO_DISK];
 
@@ -244,7 +244,7 @@ __virtio_disk_init_one(int diskno)
 
   // all NUM descriptors start out unused.
   freelist_init(&disk->desc_freelist, disk->free, disk->free_list, NUM);
-  proc_queue_init(&disk->desc_wait_queue, "virtio_desc_wait", &disk->vdisk_lock);
+  tq_init(&disk->desc_wait_queue, "virtio_desc_wait", &disk->vdisk_lock);
 
   // tell device we're completely ready.
   status |= VIRTIO_CONFIG_S_DRIVER_OK;
@@ -292,7 +292,7 @@ free_desc(struct disk *disk, int i)
   // Wake waiters if enough descriptors are free
   // Note: We're already holding vdisk_lock, so wake directly
   if (freelist_available(&disk->desc_freelist) >= 3) {
-    proc_queue_wakeup_all(&disk->desc_wait_queue, 0, 0);
+    tq_wakeup_all(&disk->desc_wait_queue, 0, 0);
   }
 }
 
@@ -351,7 +351,7 @@ virtio_disk_rw(int diskno, struct bio *bio, uint64 sector, void *buf, size_t siz
       break;
     }
     // No free descriptors, wait on per-disk queue
-    proc_queue_wait(&disk->desc_wait_queue, &disk->vdisk_lock, NULL);
+    tq_wait(&disk->desc_wait_queue, &disk->vdisk_lock, NULL);
   }
 
   // format the three descriptors.

@@ -9,15 +9,15 @@
 #include "proc/sched.h"
 #include "defs.h"
 #include "printf.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "list.h"
 #include "rbtree.h"
 
-#define proc_queue_enqueued(node)   \
-    (((node)->type == PROC_QUEUE_TYPE_LIST && (node)->list.queue != NULL)   \
-    || ((node)->type == PROC_QUEUE_TYPE_TREE && (node)->tree.queue != NULL))
+#define tq_enqueued(node)   \
+    (((node)->type == THREAD_QUEUE_TYPE_LIST && (node)->list.queue != NULL)   \
+    || ((node)->type == THREAD_QUEUE_TYPE_TREE && (node)->tree.queue != NULL))
 
-void proc_queue_init(proc_queue_t *q, const char *name, spinlock_t *lock) {
+void tq_init(tq_t *q, const char *name, spinlock_t *lock) {
     list_entry_init(&q->head);
     q->counter = 0;
     if (name == NULL) {
@@ -29,8 +29,8 @@ void proc_queue_init(proc_queue_t *q, const char *name, spinlock_t *lock) {
 }
 
 static int __q_root_keys_cmp_fun(uint64 key1, uint64 key2) {
-    proc_node_t *node1 = (proc_node_t *)key1;
-    proc_node_t *node2 = (proc_node_t *)key2;
+    tnode_t *node1 = (tnode_t *)key1;
+    tnode_t *node2 = (tnode_t *)key2;
     // First compare node->tree.key, it they are equal, use the address of
     // the nodes as distinguishing factors.
     if (node1->tree.key < node2->tree.key) {
@@ -48,8 +48,8 @@ static int __q_root_keys_cmp_fun(uint64 key1, uint64 key2) {
 
 static uint64 __q_root_get_key_fun(struct rb_node *node) {
     assert(node != NULL, "node is NULL");
-    proc_node_t *proc_node = container_of(node, proc_node_t, tree.entry);
-    return (uint64)proc_node;
+    tnode_t *tnode = container_of(node, tnode_t, tree.entry);
+    return (uint64)tnode;
 }
 
 static struct rb_root_opts __q_root_opts = {
@@ -57,7 +57,7 @@ static struct rb_root_opts __q_root_opts = {
     .get_key_fun = __q_root_get_key_fun,
 };
 
-void proc_tree_init(proc_tree_t *q, const char *name, spinlock_t *lock) {
+void ttree_init(ttree_t *q, const char *name, spinlock_t *lock) {
     rb_root_init(&q->root, &__q_root_opts);
     q->counter = 0;
     if (name == NULL) {
@@ -68,95 +68,95 @@ void proc_tree_init(proc_tree_t *q, const char *name, spinlock_t *lock) {
     q->lock = lock;
 }
 
-void proc_queue_set_lock(proc_queue_t *q, spinlock_t *lock) {
+void tq_set_lock(tq_t *q, spinlock_t *lock) {
     if (q != NULL) {
         q->lock = lock;
     }
 }
 
-void proc_tree_set_lock(proc_tree_t *q, spinlock_t *lock) {
+void ttree_set_lock(ttree_t *q, spinlock_t *lock) {
     if (q != NULL) {
         q->lock = lock;
     }
 }
 
 // Initialize a proc node to None type
-static void __proc_node_to_none(proc_node_t *node) {
+static void __tnode_to_none(tnode_t *node) {
     if (node == NULL) {
         return;
     }
-    node->type = PROC_QUEUE_TYPE_NONE;
+    node->type = THREAD_QUEUE_TYPE_NONE;
 }
 
 // Initialize a proc node as a list node
-static void __proc_node_to_list(proc_node_t *node) {
+static void __tnode_to_list(tnode_t *node) {
     if (node == NULL) {
         return;
     }
-    node->type = PROC_QUEUE_TYPE_LIST;
+    node->type = THREAD_QUEUE_TYPE_LIST;
     list_entry_init(&node->list.entry);
     node->list.queue = NULL; // Initialize the queue pointer to NULL
 }
 
 // Initialize a proc node as a tree node
-static void __proc_node_to_tree(proc_node_t *node) {
+static void __tnode_to_tree(tnode_t *node) {
     if (node == NULL) {
         return;
     }
-    node->type = PROC_QUEUE_TYPE_TREE;
+    node->type = THREAD_QUEUE_TYPE_TREE;
     rb_node_init(&node->tree.entry);
     node->tree.queue = NULL; // Initialize the queue pointer to NULL
 }
 
-void proc_node_init(proc_node_t *node) {
-    memset(node, 0, sizeof(proc_node_t));
-    __proc_node_to_none(node);
+void tnode_init(tnode_t *node) {
+    memset(node, 0, sizeof(tnode_t));
+    __tnode_to_none(node);
     node->error_no = 0; // Initialize error_no to 0
     node->proc = myproc();  // Initialize the process pointer to the current process
 }
 
-int proc_queue_size(proc_queue_t *q) {
+int tq_size(tq_t *q) {
     if (q == NULL) {
         return -EINVAL; // Error: queue is NULL
     }
     return q->counter;
 }
 
-int proc_tree_size(proc_tree_t *q) {
+int ttree_size(ttree_t *q) {
     if (q == NULL) {
         return -EINVAL; // Error: queue is NULL
     }
     return q->counter;
 }
 
-proc_queue_t *proc_node_get_queue(proc_node_t *node) {
+tq_t *tnode_get_queue(tnode_t *node) {
     if (node == NULL) {
         return NULL; // Error: node is NULL
     }
-    if (node->type != PROC_QUEUE_TYPE_LIST) {
+    if (node->type != THREAD_QUEUE_TYPE_LIST) {
         return NULL; // Error: node is not in a list
     }
     return node->list.queue;
 }
 
-proc_tree_t *proc_node_get_tree(proc_node_t *node) {
+ttree_t *tnode_get_tree(tnode_t *node) {
     if (node == NULL) {
         return NULL; // Error: node is NULL
     }
-    if (node->type != PROC_QUEUE_TYPE_TREE) {
+    if (node->type != THREAD_QUEUE_TYPE_TREE) {
         return NULL; // Error: node is not in a tree
     }
     return node->tree.queue;
 }
 
-struct proc *proc_node_get_proc(proc_node_t *node) {
+struct proc *tnode_get_proc(tnode_t *node) {
     if (node == NULL) {
         return NULL; // Error: node is NULL
     }
     return node->proc;
 }
 
-int proc_node_get_errno(proc_node_t *node, int *error_no) {
+int tnode_get_errno(tnode_t *node, int *error_no) {
     if (node == NULL || error_no == NULL) {
         return -EINVAL; // Error: node or errno pointer is NULL
     }
@@ -164,16 +164,16 @@ int proc_node_get_errno(proc_node_t *node, int *error_no) {
     return 0;
 }
 
-int proc_queue_push(proc_queue_t *q, proc_node_t *node) {
-    if (q == NULL || proc_node_get_proc(node) == NULL) {
+int tq_push(tq_t *q, tnode_t *node) {
+    if (q == NULL || tnode_get_proc(node) == NULL) {
         return -EINVAL; // Error: queue or process is NULL
     }
 
-    if (proc_queue_enqueued(node)) {
+    if (tq_enqueued(node)) {
         return -EINVAL; // Error: process is already in a queue
     }
 
-    __proc_node_to_list(node); // Initialize the node as a list node
+    __tnode_to_list(node); // Initialize the node as a list node
     list_node_push(&q->head, node, list.entry);
     node->list.queue = q;
     q->counter++;
@@ -183,7 +183,7 @@ int proc_queue_push(proc_queue_t *q, proc_node_t *node) {
     return 0; // Success
 }
 
-proc_node_t *proc_queue_first(proc_queue_t *q) {
+tnode_t *tq_first(tq_t *q) {
     if (q == NULL) {
         return ERR_PTR(-EINVAL); // Error: queue is NULL
     }
@@ -194,44 +194,44 @@ proc_node_t *proc_queue_first(proc_queue_t *q) {
         return ERR_PTR(-EINVAL); // Error: queue has invalid counter
     }
 
-    proc_node_t *first_node = LIST_FIRST_NODE(&q->head, proc_node_t, list.entry);
-    assert(first_node != NULL, "proc_queue_first: queue is not empty but failed to get the first node");
+    tnode_t *first_node = LIST_FIRST_NODE(&q->head, tnode_t, list.entry);
+    assert(first_node != NULL, "tq_first: queue is not empty but failed to get the first node");
     return first_node;
 }
 
-int proc_queue_remove(proc_queue_t *q, proc_node_t *node) {
-    if (q == NULL || proc_node_get_proc(node) == NULL) {
+int tq_remove(tq_t *q, tnode_t *node) {
+    if (q == NULL || tnode_get_proc(node) == NULL) {
         return -EINVAL; // Error: queue or process is NULL
     }
 
-    if (proc_node_get_queue(node) != q) {
+    if (tnode_get_queue(node) != q) {
         return -EINVAL; // Error: process is not in the specified queue
     }
 
     if (q->counter <= 0) {
-        panic("proc_queue_remove: queue is empty");
+        panic("tq_remove: queue is empty");
     }
 
     list_node_detach(node, list.entry);
-    __proc_node_to_none(node);
+    __tnode_to_none(node);
     q->counter--;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
-    // printf("removing process %d from queue %s\n", proc_node_get_proc(node)->pid, q->name);
+    // printf("removing process %d from queue %s\n", tnode_get_proc(node)->pid, q->name);
 
     return 0; // Success
 }
 
-proc_node_t *proc_queue_pop(proc_queue_t *q) {
+tnode_t *tq_pop(tq_t *q) {
     if (q == NULL) {
         return ERR_PTR(-EINVAL); // Error: queue is NULL
     }
-    proc_node_t *dequeued_node = proc_queue_first(q);
+    tnode_t *dequeued_node = tq_first(q);
     if (IS_ERR_OR_NULL(dequeued_node)) {
         return dequeued_node;
     }
-    assert(proc_node_get_queue(dequeued_node) == q, "Dequeued node is not in the expected queue");
-    int ret = proc_queue_remove(q, dequeued_node);
+    assert(tnode_get_queue(dequeued_node) == q, "Dequeued node is not in the expected queue");
+    int ret = tq_remove(q, dequeued_node);
     if (ret == 0) {
         return dequeued_node; // Return the dequeued node
     }
@@ -242,7 +242,7 @@ proc_node_t *proc_queue_pop(proc_queue_t *q) {
 // This is to enconvinience walking up all process in a queue.
 // This will not change the pointer of the processes to their queues.
 // 'to' and 'from' must be different queues.
-int proc_queue_bulk_move(proc_queue_t *to, proc_queue_t *from) {
+int tq_bulk_move(tq_t *to, tq_t *from) {
     if (to == NULL || from == NULL) {
         return -EINVAL; // Error: one of the queues is NULL
     }
@@ -261,17 +261,17 @@ int proc_queue_bulk_move(proc_queue_t *to, proc_queue_t *from) {
     to->counter += from->counter;
     from->counter = 0;
     list_entry_insert_bulk(LIST_LAST_ENTRY(&to->head), &from->head);
-    proc_node_t *proc = NULL;
-    proc_node_t *tmp = NULL;
+    tnode_t *proc = NULL;
+    tnode_t *tmp = NULL;
     list_foreach_node_safe(&to->head, proc, tmp, list.entry) {
-        assert(proc_node_get_queue(proc) == from, "Process is not in the expected queue");
+        assert(tnode_get_queue(proc) == from, "Process is not in the expected queue");
         proc->list.queue = to; // Update the queue pointer for each process
     }
 
     return 0; // Success
 }
 
-int proc_queue_wait_in_state(proc_queue_t *q, struct spinlock *lock, 
+int tq_wait_in_state(tq_t *q, struct spinlock *lock, 
                              uint64 *rdata, enum procstate state) {
     if (q == NULL) {
         return -EINVAL;
@@ -281,19 +281,19 @@ int proc_queue_wait_in_state(proc_queue_t *q, struct spinlock *lock,
         return -EINVAL; // Invalid state for sleeping
     }
 
-    proc_node_t waiter = { 0 };
-    proc_node_init(&waiter);
+    tnode_t waiter = { 0 };
+    tnode_init(&waiter);
     // Will be cleared when waking up a process with proc queue APIs
     waiter.error_no = -EINTR;
-    if (proc_queue_push(q, &waiter) != 0) {
+    if (tq_push(q, &waiter) != 0) {
         panic("Failed to push process to sleep queue");
     }
 
     scheduler_sleep(lock, state);
-    if (proc_queue_enqueued(&waiter)) {
+    if (tq_enqueued(&waiter)) {
         // When the process is waken up by the queue leader, the waiter is already detached from the queue.
         // If it's waken up asynchronously(e.g by signals), we need to remove it from the queue.
-        assert(proc_queue_remove(q, &waiter) == 0, "Failed to remove interrupted waiter from queue");
+        assert(tq_remove(q, &waiter) == 0, "Failed to remove interrupted waiter from queue");
     }
     
     if (rdata != NULL) {
@@ -302,11 +302,11 @@ int proc_queue_wait_in_state(proc_queue_t *q, struct spinlock *lock,
     return waiter.error_no;
 }
 
-int proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata) {
-    return proc_queue_wait_in_state(q, lock, rdata, PSTATE_UNINTERRUPTIBLE);
+int tq_wait(tq_t *q, struct spinlock *lock, uint64 *rdata) {
+    return tq_wait_in_state(q, lock, rdata, PSTATE_UNINTERRUPTIBLE);
 }
 
-static struct proc *__do_wakeup(proc_node_t *woken, int error_no, uint64 rdata) {
+static struct proc *__do_wakeup(tnode_t *woken, int error_no, uint64 rdata) {
     if (woken == NULL) {
         return ERR_PTR(-EINVAL); // Nothing to wake up
     }
@@ -322,12 +322,12 @@ static struct proc *__do_wakeup(proc_node_t *woken, int error_no, uint64 rdata) 
     return p;
 }
 
-static struct proc *__proc_queue_wakeup_one(proc_queue_t *q, int error_no, uint64 rdata) {
+static struct proc *__tq_wakeup_one(tq_t *q, int error_no, uint64 rdata) {
     if (q == NULL) {
         return ERR_PTR(-EINVAL);
     }
 
-    proc_node_t *woken = proc_queue_pop(q);
+    tnode_t *woken = tq_pop(q);
     if (IS_ERR_OR_NULL(woken)) {
         return ERR_CAST(woken); // No process to wake up
     }
@@ -335,18 +335,18 @@ static struct proc *__proc_queue_wakeup_one(proc_queue_t *q, int error_no, uint6
     return __do_wakeup(woken, error_no, rdata);
 }
 
-struct proc *proc_queue_wakeup(proc_queue_t *q, int error_no, uint64 rdata) {
-    return __proc_queue_wakeup_one(q, error_no, rdata);
+struct proc *tq_wakeup(tq_t *q, int error_no, uint64 rdata) {
+    return __tq_wakeup_one(q, error_no, rdata);
 }
 
-int proc_queue_wakeup_all(proc_queue_t *q, int error_no, uint64 rdata) {
+int tq_wakeup_all(tq_t *q, int error_no, uint64 rdata) {
     if (q == NULL) {
         return -EINVAL;
     }
 
     int counter = 0;
     for(;;) {
-        struct proc *p = __proc_queue_wakeup_one(q, error_no, rdata);
+        struct proc *p = __tq_wakeup_one(q, error_no, rdata);
         if (p == NULL) {
             assert(q->counter == 0, "Queue counter is not zero when queue is empty");
             break; // Queue is empty
@@ -366,8 +366,8 @@ int proc_queue_wakeup_all(proc_queue_t *q, int error_no, uint64 rdata) {
 // Since key2 is the node to compare with, and we want to find the first node
 // with key >= key1, we can just return 1 when key1 == key2
 static int __q_root_keys_cmp_rdown(uint64 key1, uint64 key2) {
-    proc_node_t *node1 = (proc_node_t *)key1;
-    proc_node_t *node2 = (proc_node_t *)key2;
+    tnode_t *node1 = (tnode_t *)key1;
+    tnode_t *node2 = (tnode_t *)key2;
     // First compare node->tree.key, it they are equal, use the address of
     // the nodes as distinguishing factors.
     if (node1->tree.key < node2->tree.key) {
@@ -388,12 +388,12 @@ static struct rb_root_opts __q_root_rdown_opts = {
 
 // Check if a process node is in the tree.
 // It will only check the node. Will not try to search in the tree.
-static bool __proc_node_in_tree(proc_tree_t *q, proc_node_t *node) {
+static bool __tnode_in_tree(ttree_t *q, tnode_t *node) {
     if (q == NULL || node == NULL) {
         return false;
     }
 
-    if (node->type != PROC_QUEUE_TYPE_TREE) {
+    if (node->type != THREAD_QUEUE_TYPE_TREE) {
         return false; // Node is not a tree node
     }
     if (node->tree.queue != q) {
@@ -402,7 +402,7 @@ static bool __proc_node_in_tree(proc_tree_t *q, proc_node_t *node) {
     return true;
 }
 
-static proc_node_t *__proc_tree_find_key_min(proc_tree_t *q, uint64 key) {
+static tnode_t *__ttree_find_key_min(ttree_t *q, uint64 key) {
     if (q == NULL) {
         return NULL;
     }
@@ -410,7 +410,7 @@ static proc_node_t *__proc_tree_find_key_min(proc_tree_t *q, uint64 key) {
     struct rb_root dummy_root = q->root;
     dummy_root.opts = &__q_root_rdown_opts;
 
-    proc_node_t dummy = {
+    tnode_t dummy = {
         .tree.key = key,
         0
     };
@@ -419,23 +419,23 @@ static proc_node_t *__proc_tree_find_key_min(proc_tree_t *q, uint64 key) {
     if (node == NULL) {
         return NULL; // No node found
     }
-    proc_node_t *target = container_of(node, proc_node_t, tree.entry);
+    tnode_t *target = container_of(node, tnode_t, tree.entry);
     if (target->tree.key != key) {
         return NULL; // No matching key found
     }
     return target;
 }
 
-int proc_tree_add(proc_tree_t *q, proc_node_t *node) {
-    if (q == NULL || node == NULL || proc_node_get_proc(node) == NULL) {
+int ttree_add(ttree_t *q, tnode_t *node) {
+    if (q == NULL || node == NULL || tnode_get_proc(node) == NULL) {
         return -EINVAL; // Error: queue or process is NULL
     }
 
-    if (proc_queue_enqueued(node)) {
+    if (tq_enqueued(node)) {
         return -EINVAL; // Error: process is already in a queue
     }
 
-    __proc_node_to_tree(node); // Initialize the node as a tree node
+    __tnode_to_tree(node); // Initialize the node as a tree node
     node->tree.queue = q; // Set the queue pointer
     struct rb_node *inserted_node = rb_insert_color(&q->root, &node->tree.entry);
     assert(inserted_node == &node->tree.entry, "Failed to insert node into tree");
@@ -445,7 +445,7 @@ int proc_tree_add(proc_tree_t *q, proc_node_t *node) {
     return 0; // Success
 }
 
-proc_node_t *proc_tree_first(proc_tree_t *q) {
+tnode_t *ttree_first(ttree_t *q) {
     if (q == NULL) {
         return ERR_PTR(-EINVAL); // Error: queue or return node pointer is NULL
     }
@@ -455,11 +455,11 @@ proc_node_t *proc_tree_first(proc_tree_t *q) {
         return ERR_CAST(first_node); // No first node found
     }
 
-    return container_of(first_node, proc_node_t, tree.entry);
+    return container_of(first_node, tnode_t, tree.entry);
 }
 
-int proc_tree_key_min(proc_tree_t *q, uint64 *key) {
-    proc_node_t *min_node = proc_tree_first(q);
+int ttree_key_min(ttree_t *q, uint64 *key) {
+    tnode_t *min_node = ttree_first(q);
     if (min_node == NULL) {
         return -ENOENT; // Error: tree is empty
     } else if (IS_ERR(min_node)) {
@@ -469,13 +469,13 @@ int proc_tree_key_min(proc_tree_t *q, uint64 *key) {
     return 0; // Success
 }
 
-static int __proc_tree_do_remove(proc_tree_t *q, proc_node_t *node) {
+static int __ttree_do_remove(ttree_t *q, tnode_t *node) {
     struct rb_node *removed_node = rb_delete_node_color(&q->root, &node->tree.entry);
     if (removed_node == NULL) {
         return -ENOENT; // Error: node not found
     }
 
-    __proc_node_to_none(node);
+    __tnode_to_none(node);
     q->counter--;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
@@ -484,17 +484,17 @@ static int __proc_tree_do_remove(proc_tree_t *q, proc_node_t *node) {
 
 // Remove a proc node from a proc tree.
 // Will not check if the node is in the tree.
-int proc_tree_remove(proc_tree_t *q, proc_node_t *node) {
+int ttree_remove(ttree_t *q, tnode_t *node) {
     if (q == NULL || node == NULL) {
         return -EINVAL; // Error: queue or node is NULL
     }
-    if (!__proc_node_in_tree(q, node)) {
+    if (!__tnode_in_tree(q, node)) {
         return -EINVAL; // Error: node is not in the tree
     }
-    return __proc_tree_do_remove(q, node);
+    return __ttree_do_remove(q, node);
 }
 
-int proc_tree_wait_in_state(proc_tree_t *q, uint64 key, struct spinlock *lock, 
+int ttree_wait_in_state(ttree_t *q, uint64 key, struct spinlock *lock, 
                             uint64 *rdata, enum procstate state) {
     if (q == NULL) {
         return -EINVAL; // Error: queue is NULL
@@ -504,21 +504,21 @@ int proc_tree_wait_in_state(proc_tree_t *q, uint64 key, struct spinlock *lock,
         return -EINVAL; // Invalid state for sleeping
     }
 
-    proc_node_t waiter = { 0 };
-    proc_node_init(&waiter);
+    tnode_t waiter = { 0 };
+    tnode_init(&waiter);
     // Will be cleared when waking up a process with proc queue APIs
     waiter.error_no = -EINTR;
     waiter.tree.key = key;
 
-    if (proc_tree_add(q, &waiter) != 0) {
+    if (ttree_add(q, &waiter) != 0) {
         panic("Failed to push process to sleep tree");
     }
 
     scheduler_sleep(lock, state);
-    if (proc_queue_enqueued(&waiter)) {
+    if (tq_enqueued(&waiter)) {
         // When the process is waken up by the queue leader, the waiter is already detached from the queue.
         // If it's waken up asynchronously(e.g by signals), we need to remove it from the queue.
-        assert(proc_tree_remove(q, &waiter) == 0, "Failed to remove interrupted waiter from tree");
+        assert(ttree_remove(q, &waiter) == 0, "Failed to remove interrupted waiter from tree");
     }
 
     if (rdata != NULL) {
@@ -527,23 +527,23 @@ int proc_tree_wait_in_state(proc_tree_t *q, uint64 key, struct spinlock *lock,
     return waiter.error_no;
 }
 
-int proc_tree_wait(proc_tree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata) {
-    return proc_tree_wait_in_state(q, key, lock, rdata, PSTATE_UNINTERRUPTIBLE);
+int ttree_wait(ttree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata) {
+    return ttree_wait_in_state(q, key, lock, rdata, PSTATE_UNINTERRUPTIBLE);
 }
 
 // Wake up one node with a given key
 // Process Tree will always expect the waiter to detach itself from the tree when woken up.
-struct proc *proc_tree_wakeup_one(proc_tree_t *q, uint64 key, int error_no, uint64 rdata) {
+struct proc *ttree_wakeup_one(ttree_t *q, uint64 key, int error_no, uint64 rdata) {
     if (q == NULL) {
         return ERR_PTR(-EINVAL); // Error: queue is NULL
     }
 
-    proc_node_t *target = __proc_tree_find_key_min(q, key);
+    tnode_t *target = __ttree_find_key_min(q, key);
     if (target == NULL) {
         return ERR_PTR(-ENOENT); // Error: no matching node found
     }
 
-    int ret = __proc_tree_do_remove(q, target);
+    int ret = __ttree_do_remove(q, target);
     if (ret != 0) {
         return ERR_PTR(ret); // Error: failed to remove node from tree
     }
@@ -552,14 +552,14 @@ struct proc *proc_tree_wakeup_one(proc_tree_t *q, uint64 key, int error_no, uint
 }
 
 // Wake up all nodes with a given key
-int proc_tree_wakeup_key(proc_tree_t *q, uint64 key, int error_no, uint64 rdata) {
+int ttree_wakeup_key(ttree_t *q, uint64 key, int error_no, uint64 rdata) {
     if (q == NULL) {
         return -EINVAL; // Error: queue is NULL
     }
 
     int count = 0;
 
-    while (!IS_ERR_OR_NULL(proc_tree_wakeup_one(q, key, error_no, rdata))) {
+    while (!IS_ERR_OR_NULL(ttree_wakeup_one(q, key, error_no, rdata))) {
         count++;
     }
 
@@ -569,7 +569,7 @@ int proc_tree_wakeup_key(proc_tree_t *q, uint64 key, int error_no, uint64 rdata)
     return 0;
 }
 
-int proc_tree_wakeup_all(proc_tree_t *q, int error_no, uint64 rdata) {
+int ttree_wakeup_all(ttree_t *q, int error_no, uint64 rdata) {
     if (q == NULL) {
         return -EINVAL; // Error: queue is NULL
     }
@@ -578,13 +578,13 @@ int proc_tree_wakeup_all(proc_tree_t *q, int error_no, uint64 rdata) {
     }
 
     int count = 0;
-    proc_node_t *pos = NULL;
-    proc_node_t *n = NULL;
+    tnode_t *pos = NULL;
+    tnode_t *n = NULL;
 
     rb_foreach_entry_safe(&q->root, pos, n, tree.entry) {
-        assert(__proc_node_in_tree(q, pos), "Process node is not in the tree");
+        assert(__tnode_in_tree(q, pos), "Process node is not in the tree");
         // @TODO: The whole tree will be abandoned, so don't need to adjust its structure.
-        if (__proc_tree_do_remove(q, pos) != 0) {
+        if (__ttree_do_remove(q, pos) != 0) {
             printf("warning: Failed to remove node from tree during wakeup all\n");
         }
         __do_wakeup(pos, error_no, rdata);

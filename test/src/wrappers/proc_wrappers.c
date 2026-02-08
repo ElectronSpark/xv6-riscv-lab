@@ -23,7 +23,7 @@
 
 #include <smp/percpu_types.h>
 #include "proc/proc.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "spinlock.h"
 #include "proc/sched.h"
 #include "wrapper_tracking.h"
@@ -33,17 +33,17 @@ static struct cpu_local g_cpu_stub;
 static struct proc g_proc_stub = {.pid = 1};
 
 // Global tracking pointers (NULL if tracking disabled)
-proc_queue_tracking_t *g_proc_queue_tracking = NULL;
+tq_tracking_t *g_tq_tracking = NULL;
 proc_tracking_t *g_proc_tracking = NULL;
 
-void wrapper_tracking_enable_proc_queue(proc_queue_tracking_t *tracking)
+void wrapper_tracking_enable_tq(tq_tracking_t *tracking)
 {
-    g_proc_queue_tracking = tracking;
+    g_tq_tracking = tracking;
 }
 
-void wrapper_tracking_disable_proc_queue(void)
+void wrapper_tracking_disable_tq(void)
 {
-    g_proc_queue_tracking = NULL;
+    g_tq_tracking = NULL;
 }
 
 void wrapper_tracking_enable_proc(proc_tracking_t *tracking)
@@ -174,13 +174,13 @@ void __wrap_sleep_on_chan(void *chan, struct spinlock *lk)
 }
 
 // Proc queue wrappers
-void __wrap_proc_queue_init(proc_queue_t *q, const char *name, spinlock_t *lock)
+void __wrap_tq_init(tq_t *q, const char *name, spinlock_t *lock)
 {
-    if (g_proc_queue_tracking) {
-        g_proc_queue_tracking->queue_init_count++;
-        g_proc_queue_tracking->last_queue_init = q;
-        g_proc_queue_tracking->last_queue_name = name;
-        g_proc_queue_tracking->last_queue_lock = lock;
+    if (g_tq_tracking) {
+        g_tq_tracking->queue_init_count++;
+        g_tq_tracking->last_queue_init = q;
+        g_tq_tracking->last_queue_name = name;
+        g_tq_tracking->last_queue_lock = lock;
     }
     
     if (q == NULL) {
@@ -193,7 +193,7 @@ void __wrap_proc_queue_init(proc_queue_t *q, const char *name, spinlock_t *lock)
     q->flags = 0;
 }
 
-int __wrap_proc_queue_size(proc_queue_t *q)
+int __wrap_tq_size(tq_t *q)
 {
     if (q == NULL) {
         return -1;
@@ -201,24 +201,24 @@ int __wrap_proc_queue_size(proc_queue_t *q)
     return q->counter;
 }
 
-int __wrap_proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata)
+int __wrap_tq_wait(tq_t *q, struct spinlock *lock, uint64 *rdata)
 {
     if (g_concurrency_mode) {
         // Real blocking: release lock atomically and wait on condvar
         __atomic_store_n(&lock->locked, 0, __ATOMIC_SEQ_CST);
-        conc_proc_queue_wait(q, lock);
+        conc_tq_wait(q, lock);
         // Caller re-acquires the lock explicitly
         return 0;
     }
 
-    if (g_proc_queue_tracking) {
-        g_proc_queue_tracking->queue_wait_count++;
-        g_proc_queue_tracking->last_queue_wait = q;
-        g_proc_queue_tracking->last_wait_lock = lock;
+    if (g_tq_tracking) {
+        g_tq_tracking->queue_wait_count++;
+        g_tq_tracking->last_queue_wait = q;
+        g_tq_tracking->last_wait_lock = lock;
         
         // Call custom callback if provided
-        if (g_proc_queue_tracking->wait_callback) {
-            return g_proc_queue_tracking->wait_callback(q, lock, rdata, g_proc_queue_tracking->user_data);
+        if (g_tq_tracking->wait_callback) {
+            return g_tq_tracking->wait_callback(q, lock, rdata, g_tq_tracking->user_data);
         }
         
         // Increment counter to simulate waiting process
@@ -226,49 +226,49 @@ int __wrap_proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata
             q->counter++;
         }
         
-        return g_proc_queue_tracking->wait_return;
+        return g_tq_tracking->wait_return;
     }
     
     return mock_type(int);
 }
 
-struct proc *__wrap_proc_queue_wakeup(proc_queue_t *q, int error_no, uint64 rdata)
+struct proc *__wrap_tq_wakeup(tq_t *q, int error_no, uint64 rdata)
 {
-    if (g_proc_queue_tracking) {
-        g_proc_queue_tracking->queue_wakeup_count++;
-        g_proc_queue_tracking->last_queue_wakeup = q;
-        g_proc_queue_tracking->last_wakeup_errno = error_no;
-        g_proc_queue_tracking->last_wakeup_rdata = rdata;
+    if (g_tq_tracking) {
+        g_tq_tracking->queue_wakeup_count++;
+        g_tq_tracking->last_queue_wakeup = q;
+        g_tq_tracking->last_wakeup_errno = error_no;
+        g_tq_tracking->last_wakeup_rdata = rdata;
         
         // Decrement counter if queue tracking is enabled
         if (q != NULL && q->counter > 0) {
             q->counter--;
         }
         
-        return g_proc_queue_tracking->next_wakeup_proc;
+        return g_tq_tracking->next_wakeup_proc;
     }
     
     return mock_ptr_type(struct proc *);
 }
 
-int __wrap_proc_queue_wakeup_all(proc_queue_t *q, int error_no, uint64 rdata)
+int __wrap_tq_wakeup_all(tq_t *q, int error_no, uint64 rdata)
 {
     if (g_concurrency_mode) {
-        conc_proc_queue_wakeup_all(q);
+        conc_tq_wakeup_all(q);
         return 0;
     }
 
-    if (g_proc_queue_tracking) {
-        g_proc_queue_tracking->queue_wakeup_all_count++;
-        g_proc_queue_tracking->last_queue_wakeup_all = q;
-        g_proc_queue_tracking->last_wakeup_all_errno = error_no;
-        g_proc_queue_tracking->last_wakeup_all_rdata = rdata;
+    if (g_tq_tracking) {
+        g_tq_tracking->queue_wakeup_all_count++;
+        g_tq_tracking->last_queue_wakeup_all = q;
+        g_tq_tracking->last_wakeup_all_errno = error_no;
+        g_tq_tracking->last_wakeup_all_rdata = rdata;
         
         // Reset counter when waking all
         if (q != NULL) {
             q->counter = 0;
         }
-        return g_proc_queue_tracking->wakeup_all_return;
+        return g_tq_tracking->wakeup_all_return;
     }
     
     return mock_type(int);

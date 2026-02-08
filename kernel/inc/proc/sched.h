@@ -2,7 +2,7 @@
 #define SCHED_H
 
 #include "proc/proc_types.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "timer/timer_types.h"
 
 void scheduler_init(void);

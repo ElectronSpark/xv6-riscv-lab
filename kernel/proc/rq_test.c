@@ -435,7 +435,7 @@ static volatile int activation_order[PRIORITY_TEST_COUNT];
 static volatile int activation_index;
 static volatile int processes_done;
 static struct spinlock priority_test_lock;
-static proc_queue_t main_wait_queue;
+static tq_t main_wait_queue;
 
 // Priority values for test processes (lower = higher priority)
 // Using priorities from different groups to test two-layer mask
@@ -466,7 +466,7 @@ static int priority_test_proc_entry(uint64 my_index, uint64 unused) {
     
     // When all processes are done, wake up the main thread
     if (all_done) {
-        proc_queue_wakeup_all(&main_wait_queue, 0, 0);
+        tq_wakeup_all(&main_wait_queue, 0, 0);
     }
     
     return 0; // Exit cleanly
@@ -477,7 +477,7 @@ static void test_priority_ordered_activation(void) {
     
     // Initialize shared state
     spin_init(&priority_test_lock, "prio_test");
-    proc_queue_init(&main_wait_queue, "main_wait", &priority_test_lock);
+    tq_init(&main_wait_queue, "main_wait", &priority_test_lock);
     activation_index = 0;
     processes_done = 0;
     for (int i = 0; i < PRIORITY_TEST_COUNT; i++) {
@@ -543,7 +543,7 @@ static void test_priority_ordered_activation(void) {
     spin_lock(&priority_test_lock);
     while (processes_done < PRIORITY_TEST_COUNT) {
         // Wait on the queue - will be woken when last process completes
-        proc_queue_wait(&main_wait_queue, &priority_test_lock, 0);
+        tq_wait(&main_wait_queue, &priority_test_lock, 0);
     }
     spin_unlock(&priority_test_lock);
     

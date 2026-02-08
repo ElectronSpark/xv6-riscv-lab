@@ -2,11 +2,11 @@
 #define __KERNEL_COMPLETION_TYPES_H
 
 #include <types.h>
-#include <proc/proc_queue_type.h>
+#include <proc/tq_type.h>
 
 typedef struct {
     int done;
-    proc_queue_t wait_queue;
+    tq_t wait_queue;
     struct spinlock lock;
 } completion_t;
 

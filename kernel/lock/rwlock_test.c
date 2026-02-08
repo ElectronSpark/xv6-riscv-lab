@@ -8,7 +8,7 @@
 #include "lock/rwlock.h"
 #include "lock/mutex_types.h"
 #include "proc/proc.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "proc/sched.h"
 
 /*
@@ -69,8 +69,8 @@ static void record_integrity_failure(const char *label, const char *reason, long
 }
 
 static void check_rwlock_integrity(const char *label) {
-  int read_waiters = proc_queue_size(&test_lock.read_queue);
-  int write_waiters = proc_queue_size(&test_lock.write_queue);
+  int read_waiters = tq_size(&test_lock.read_queue);
+  int write_waiters = tq_size(&test_lock.write_queue);
   if (read_waiters < 0 || write_waiters < 0) {
     record_integrity_failure(label, "negative waiter count", read_waiters, write_waiters);
     return;

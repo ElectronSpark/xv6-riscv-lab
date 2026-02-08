@@ -71,13 +71,13 @@ static pthread_mutex_t *conc_lock_table_get(conc_lock_table_t *t, void *key) {
 }
 
 /* =========================================================================
- * proc_queue -> pthread_cond hash table
+ * tq -> pthread_cond hash table
  * ========================================================================= */
 
 #define CONC_COND_TABLE_SIZE 64
 
 typedef struct {
-    void *key;              /* proc_queue_t pointer (NULL = empty) */
+    void *key;              /* tq_t pointer (NULL = empty) */
     pthread_cond_t cond;
 } conc_cond_entry_t;
 
@@ -157,24 +157,24 @@ void conc_spin_unlock(void *lock_ptr) {
 }
 
 /* =========================================================================
- * Concurrency-aware proc_queue
+ * Concurrency-aware tq
  *
- * proc_queue_wait semantics: release the associated spinlock, block on
+ * tq_wait semantics: release the associated spinlock, block on
  * the condvar, and leave the spinlock released on return (pcache caller
  * re-acquires tree_lock explicitly).
  * ========================================================================= */
 
-void conc_proc_queue_wait(void *queue_ptr, void *lock_ptr) {
+void conc_tq_wait(void *queue_ptr, void *lock_ptr) {
     pthread_cond_t  *cv = conc_cond_table_get(&g_conc_cond_table, queue_ptr);
     pthread_mutex_t *m  = conc_lock_table_get(&g_conc_lock_table, lock_ptr);
     /* pthread_cond_wait atomically releases m and blocks on cv,
      * then re-acquires m upon wakeup.  We immediately unlock m to
-     * match the kernel proc_queue_wait semantic. */
+     * match the kernel tq_wait semantic. */
     pthread_cond_wait(cv, m);
     pthread_mutex_unlock(m);
 }
 
-void conc_proc_queue_wakeup_all(void *queue_ptr) {
+void conc_tq_wakeup_all(void *queue_ptr) {
     pthread_cond_t *cv = conc_cond_table_get(&g_conc_cond_table, queue_ptr);
     pthread_cond_broadcast(cv);
 }

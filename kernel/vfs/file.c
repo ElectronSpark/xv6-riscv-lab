@@ -44,7 +44,7 @@
 #include <mm/vm.h>
 #include "dev/net.h"
 #include "pipe.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 
 static slab_cache_t __vfs_file_slab = { 0 };
 static struct spinlock __vfs_ftable_lock = { 0 };
@@ -610,8 +610,8 @@ int vfs_pipealloc(struct vfs_file **rf, struct vfs_file **wf) {
     pi->nread = 0;
     spin_init(&pi->reader_lock, "vfs_pipe_reader");
     spin_init(&pi->writer_lock, "vfs_pipe_writer");
-    proc_queue_init(&pi->nread_queue, "pipe_nread_queue", NULL);
-    proc_queue_init(&pi->nwrite_queue, "pipe_nwrite_queue", NULL);
+    tq_init(&pi->nread_queue, "pipe_nread_queue", NULL);
+    tq_init(&pi->nwrite_queue, "pipe_nwrite_queue", NULL);
     
     // Initialize read file
     (*rf)->f_flags = O_RDONLY;

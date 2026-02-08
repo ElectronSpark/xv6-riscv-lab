@@ -23,11 +23,11 @@
 #include "timer/timer.h"
 #include "concurrency_harness.h"
 
-// proc_queue_t is available via pcache_types.h -> proc_queue_type.h.
+// tq_t is available via pcache_types.h -> tq_type.h.
 // We only forward-declare the functions we call to avoid the heavy
-// proc_queue.h -> proc_types.h -> percpu.h -> printf.h include chain
+// tq.h -> proc_types.h -> percpu.h -> printf.h include chain
 // that conflicts with the host stdio.h.
-void proc_queue_init(proc_queue_t *q, const char *name, spinlock_t *lock);
+void tq_init(tq_t *q, const char *name, spinlock_t *lock);
 
 #include "wrapper_tracking.h"
 
@@ -184,11 +184,11 @@ static int pcache_test_setup(void **state) {
     int rc = pcache_init(&fixture->cache);
     assert_int_equal(rc, 0);
 
-    // Enable proc_queue tracking so wakeup_all/wait wrappers don't
+    // Enable tq tracking so wakeup_all/wait wrappers don't
     // require will_return() entries — they return 0 via the tracking struct.
-    static proc_queue_tracking_t pq_tracking;
+    static tq_tracking_t pq_tracking;
     memset(&pq_tracking, 0, sizeof(pq_tracking));
-    wrapper_tracking_enable_proc_queue(&pq_tracking);
+    wrapper_tracking_enable_tq(&pq_tracking);
 
     g_active_fixture = fixture;
     *state = fixture;
@@ -197,7 +197,7 @@ static int pcache_test_setup(void **state) {
 
 static int pcache_test_teardown(void **state) {
     struct pcache_test_fixture *fixture = *state;
-    wrapper_tracking_disable_proc_queue();
+    wrapper_tracking_disable_tq();
     pcache_test_unregister(&fixture->cache);
     pcache_test_set_retry_hook(NULL);
     g_retry_page = NULL;
@@ -234,7 +234,7 @@ static void init_mock_node(struct pcache_node *node, struct pcache *cache, page_
 static void make_dirty_page(struct pcache *cache, struct pcache_node *node, page_t *page, uint64 blkno) {
     init_mock_page(page, blkno << BLK_SIZE_SHIFT);
     init_mock_node(node, cache, page, blkno);
-    proc_queue_init(&node->io_waiters, "pcache_io_test", NULL);
+    tq_init(&node->io_waiters, "pcache_io_test", NULL);
     int rc = pcache_mark_page_dirty(cache, page);
     assert_int_equal(rc, 0);
     assert_int_equal(cache->dirty_count, 1);
@@ -986,7 +986,7 @@ static void test_pcache_flusher_time_based_flush(void **state) {
  * Concurrency tests
  *
  * These use real pthread threads and the concurrency harness that maps xv6
- * spinlocks to pthread mutexes and proc_queue to condvars so that
+ * spinlocks to pthread mutexes and tq to condvars so that
  * lock contention and blocking/wakeup actually happen.
  ******************************************************************************/
 
@@ -1095,7 +1095,7 @@ static int conc_slow_read_page(struct pcache *pcache, page_t *page) {
     (void)page;
     __atomic_fetch_add(&g_conc_read_page_calls, 1, __ATOMIC_SEQ_CST);
     // Sleep long enough for Thread B to see io_in_progress and block
-    // on the proc_queue before we finish IO.
+    // on the tq before we finish IO.
     conc_sleep_ms(50);
     return 0;
 }

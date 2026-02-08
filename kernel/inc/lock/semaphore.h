@@ -1,7 +1,7 @@
 #ifndef __KERNEL_SEMAPHORE_H
 #define __KERNEL_SEMAPHORE_H
 
-#include "proc/proc_queue_type.h"
+#include "proc/tq_type.h"
 #include "semaphore_types.h"
 
 #define SEM_VALUE_MAX 2147483640 // Maximum value for a semaphore

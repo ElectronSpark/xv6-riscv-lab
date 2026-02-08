@@ -13,7 +13,7 @@
 #include "printf.h"
 #include "list.h"
 #include "hlist.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "proc/sched.h"
 #include <mm/slab.h>
 #include <mm/page.h>

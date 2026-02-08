@@ -12,7 +12,7 @@
 #include "list.h"
 #include "proc/sched.h"
 #include "proc/proc.h"
-#include "proc/proc_queue.h"
+#include "proc/tq.h"
 #include "rbtree.h"
 #include "proc/workqueue.h"
 #include "kobject.h"
@@ -750,7 +750,7 @@ static void __pcache_node_init(struct pcache_node *node) {
     memset(node, 0, sizeof(struct pcache_node));
     rb_node_init(&node->tree_entry);
     list_entry_init(&node->lru_entry);
-    proc_queue_init(&node->io_waiters, "pcache_io", NULL);
+    tq_init(&node->io_waiters, "pcache_io", NULL);
     node->blkno = -1;
     node->page_count = 0;
 }
@@ -867,7 +867,7 @@ static int __pcache_node_io_end(struct pcache *pcache, page_t *page) {
     }
     node->io_in_progress = 0;
     node->last_flushed = get_jiffs();
-    proc_queue_wakeup_all(&node->io_waiters, 0, 0);
+    tq_wakeup_all(&node->io_waiters, 0, 0);
     __pcache_tree_unlock(pcache);
     return 0;
 }
@@ -876,7 +876,7 @@ static int __pcache_node_io_wait(struct pcache *pcache, page_t *page) {
     __pcache_tree_lock(pcache);
     struct pcache_node *node = page->pcache.pcache_node;
     while (node->io_in_progress) {
-        proc_queue_wait(&node->io_waiters, &pcache->tree_lock, NULL);
+        tq_wait(&node->io_waiters, &pcache->tree_lock, NULL);
     }
     __pcache_tree_unlock(pcache);
     return 0;
