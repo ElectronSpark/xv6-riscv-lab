@@ -25,7 +25,7 @@
 
 // tq_t is available via pcache_types.h -> tq_type.h.
 // We only forward-declare the functions we call to avoid the heavy
-// tq.h -> proc_types.h -> percpu.h -> printf.h include chain
+// tq.h -> thread_types.h -> percpu.h -> printf.h include chain
 // that conflicts with the host stdio.h.
 void tq_init(tq_t *q, const char *name, spinlock_t *lock);
 
@@ -158,10 +158,10 @@ static void configure_fixture_ops(struct pcache_test_fixture *fixture) {
 static int pcache_test_setup(void **state) {
     static bool global_initialized = false;
     if (!global_initialized) {
-        // Setup mock for kernel_proc_create that pcache_global_init will call
+        // Setup mock for kthread_create that pcache_global_init will call
         // We'll return a fake proc pointer and a positive PID
-        will_return(__wrap_kernel_proc_create, (void*)0x1000);  // Return fake proc pointer
-        will_return(__wrap_kernel_proc_create, 1);  // Return PID (success)
+        will_return(__wrap_kthread_create, (void*)0x1000);  // Return fake proc pointer
+        will_return(__wrap_kthread_create, 1);  // Return PID (success)
         
         pcache_global_init();
         global_initialized = true;

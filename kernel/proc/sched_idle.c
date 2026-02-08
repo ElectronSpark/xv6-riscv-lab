@@ -4,7 +4,7 @@
 #include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "proc/rq.h"
 #include "proc_private.h"
@@ -19,15 +19,17 @@ static struct idle_rq *__idle_rqs; // Array of idle_rq structures, one per CPU
 static struct sched_entity *__idle_pick_next_task(struct rq *rq) {
     // The idle rq only has the idle process
     struct idle_rq *idle_rq = container_of(rq, struct idle_rq, rq);
-    return idle_rq->idle_proc->sched_entity;
+    return idle_rq->idle_thread->sched_entity;
 }
 
 static void __idle_enqueue_task(struct rq *rq, struct sched_entity *se) {
     struct idle_rq *idle_rq = container_of(rq, struct idle_rq, rq);
-    assert(idle_rq->idle_proc == NULL, "idle_enqueue_task: idle rq already has a process\n");
-    idle_rq->idle_proc = se->proc;
+    assert(idle_rq->idle_thread == NULL,
+           "idle_enqueue_task: idle rq already has a thread\n");
+    idle_rq->idle_thread = se->thread;
     se->rq = rq;
-    se->priority = (IDLE_MAJOR_PRIORITY << PRIORITY_MAINLEVEL_SHIFT) | PRIORITY_SUBLEVEL_MASK;
+    se->priority = (IDLE_MAJOR_PRIORITY << PRIORITY_MAINLEVEL_SHIFT) |
+                   PRIORITY_SUBLEVEL_MASK;
 }
 
 static void __idle_dequeue_task(struct rq *rq, struct sched_entity *se) {

@@ -9,7 +9,7 @@
 #include "errno.h"
 #include "list.h"
 #include "semaphore.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "wrapper_tracking.h"
 

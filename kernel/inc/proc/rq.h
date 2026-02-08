@@ -1,5 +1,5 @@
-#ifndef __KERNEL_PROC_RQ_H
-#define __KERNEL_PROC_RQ_H
+#ifndef __KERNEL_THREAD_RQ_H
+#define __KERNEL_THREAD_RQ_H
 
 #include "proc/rq_types.h"
 
@@ -43,7 +43,7 @@ struct rq *get_rq_for_cpu(int cls_id, int cpu_id);
 struct rq *pick_next_rq(void);
 void rq_global_init(void);
 void rq_init(struct rq* rq);
-void sched_entity_init(struct sched_entity* se, struct proc* p);
+void sched_entity_init(struct sched_entity *se, struct thread *p);
 void sched_class_register(int id, struct sched_class* cls);
 void rq_register(struct rq* rq, int cls_id, int cpu_id);
 
@@ -83,7 +83,7 @@ void rq_lock_two(int cpu_id1, int cpu_id2);
  * @param cpu_id2 Second CPU's run queue
  * @return 1 if both locks acquired, 0 if either is held
  * @note Locks lower cpu_id first; releases first lock if second fails.
- *       Used in wakeup to avoid lock convoy when many processes
+ *       Used in wakeup to avoid lock convoy when many threads
  *       wake the same target simultaneously.
  */
 int rq_trylock_two(int cpu_id1, int cpu_id2);
@@ -141,4 +141,4 @@ void rq_cpu_activate(int cpu);
 // Get the bitmask of active CPUs
 uint64 rq_get_active_cpu_mask(void);
 
-#endif // __KERNEL_PROC_RQ_H
+#endif // __KERNEL_THREAD_RQ_H

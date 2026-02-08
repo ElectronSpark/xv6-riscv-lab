@@ -22,7 +22,7 @@
 #include "errno.h"
 #include "bits.h"
 #include "lock/spinlock.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "lock/mutex_types.h"
 #include "lock/rwlock.h"
 #include "lock/completion.h"

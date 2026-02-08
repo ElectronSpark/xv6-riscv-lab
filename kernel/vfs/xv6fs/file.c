@@ -108,7 +108,7 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool use
         uint page_off = (bn % BSIZE_PER_PAGE) * BSIZE + off;
         char *data = (char *)pcn->data + page_off;
         if (user) {
-            if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read), data, n) < 0) {
+            if (vm_copyout(current->vm, (uint64)(buf + bytes_read), data, n) < 0) {
                 pcache_put_page(pc, page);
                 vfs_iunlock(inode);
                 if (bytes_read == 0) return -EFAULT;
@@ -225,7 +225,7 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, b
             char *data = (char *)pcn->data + page_off;
             
             if (user) {
-                if (vm_copyin(myproc()->vm, data, (uint64)(buf + bytes_written + chunk_written), chunk) < 0) {
+                if (vm_copyin(current->vm, data, (uint64)(buf + bytes_written + chunk_written), chunk) < 0) {
                     pcache_put_page(pc, page);
                     vfs_iunlock(inode);
                     xv6fs_end_op(xv6_sb);

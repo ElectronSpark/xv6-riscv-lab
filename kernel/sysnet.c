@@ -11,7 +11,7 @@
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "defs.h"
 #include "printf.h"
 #include "dev/net.h"
@@ -68,7 +68,7 @@ sockclose(struct sock *si)
 int
 sockread(struct sock *si, uint64 addr, int n)
 {
-  struct proc *pr = myproc();
+  struct thread *pr = current;
   struct mbuf *m;
   int len;
 
@@ -97,7 +97,7 @@ sockread(struct sock *si, uint64 addr, int n)
 int
 sockwrite(struct sock *si, uint64 addr, int n)
 {
-  struct proc *pr = myproc();
+  struct thread *pr = current;
   struct mbuf *m;
 
   m = mbufalloc(MBUF_DEFAULT_HEADROOM);

@@ -1,5 +1,5 @@
 set(PROC_C_SRCS
-    proc.c
+    thread.c
     thread_queue.c
     sched.c
     signal.c

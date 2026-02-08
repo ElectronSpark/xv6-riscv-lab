@@ -10,7 +10,7 @@
 #include "lock/mutex_types.h"
 #include "lock/rwlock.h"
 #include "lock/completion.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
 #include "vfs/fcntl.h"

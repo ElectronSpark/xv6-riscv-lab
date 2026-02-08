@@ -11,7 +11,7 @@ void start_kernel(int hartid, void *fdt_base, bool is_boot_hart);
 void timerinit();
 
 // entry.S needs one stack per CPU.
-// Must be aligned to KERNEL_STACK_SIZE so that idle_proc_init can find
+// Must be aligned to KERNEL_STACK_SIZE so that idle_thread_init can find
 // the stack base by masking the current SP.
 __attribute__ ((aligned (KERNEL_STACK_SIZE))) char stack0[KERNEL_STACK_SIZE * NCPU];
 

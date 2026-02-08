@@ -6,7 +6,7 @@
 #include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "defs.h"
 #include <mm/slab.h>
@@ -116,44 +116,44 @@ static struct work_struct *__dequeue_work(struct workqueue *wq) {
     return work;
 }
 
-// exit routine for worker processes
+// exit routine for worker threads
 static void __exit_routine(uint64 exit_code) {
-    proc_lock(myproc());
-    struct workqueue *wq = myproc()->wq;
-    proc_unlock(myproc());
+    tcb_lock(current);
+    struct workqueue *wq = current->wq;
+    tcb_unlock(current);
     if (wq != NULL) {
         __wq_lock(wq);
-        assert(wq->manager != myproc(), "Manager process try to exit using worker exit routine");
-        proc_lock(myproc());
-        if (!LIST_NODE_IS_DETACHED(myproc(), wq_entry)) {
-            list_node_detach(myproc(), wq_entry);
+        assert(wq->manager != current, "Manager thread try to exit using worker exit routine");
+        tcb_lock(current);
+        if (!LIST_NODE_IS_DETACHED(current, wq_entry)) {
+            list_node_detach(current, wq_entry);
         }
-        proc_unlock(myproc());
+        tcb_unlock(current);
         wq->nr_workers--;
-        assert(wq->nr_workers >= 0, "Worker process count is invalid\n");
+        assert(wq->nr_workers >= 0, "Worker thread count is invalid\n");
         __wq_unlock(wq);
     } else {
-        proc_lock(myproc());
-        assert (LIST_NODE_IS_DETACHED(myproc(), wq_entry),
-                "Worker process not belong to a workqueue but attached\n");
-        proc_unlock(myproc());
+        tcb_lock(current);
+        assert (LIST_NODE_IS_DETACHED(current, wq_entry),
+                "Worker thread not belong to a workqueue but attached\n");
+        tcb_unlock(current);
     }
     exit((int)exit_code);
 }
 
-// Worker routine for worker processes
+// Worker routine for worker threads
 // @TODO: exit after idling too long
 static void __worker_routine(void) {
-    proc_lock(myproc());
-    struct workqueue *wq = myproc()->wq;
+    tcb_lock(current);
+    struct workqueue *wq = current->wq;
     if (wq == NULL) {
-        proc_unlock(myproc());
+        tcb_unlock(current);
         exit(-EINVAL);
     }
-    proc_unlock(myproc());
+    tcb_unlock(current);
 
     __wq_lock(wq);
-    if (wq->manager == myproc()) {
+    if (wq->manager == current) {
         __wq_unlock(wq);
         exit(-EINVAL);
     }
@@ -162,7 +162,7 @@ static void __worker_routine(void) {
         if (work == NULL) {
             if (!wq->active) {
                 // If not more works to do, and the workqueue is inactive, just
-                // exit the worker process
+                // exit the worker thread
                 __wq_unlock(wq);
                 __exit_routine(0);
             }
@@ -172,9 +172,9 @@ static void __worker_routine(void) {
                 __wq_unlock(wq);
                 __exit_routine((uint64)ret);
             }
-            // If a work is assigned to the worker process, it will be 
+            // If a work is assigned to the worker thread, it will be 
             // passed via `work` variable.
-            // If the worker process is waken up but no work is assigned,
+            // If the worker thread is waken up but no work is assigned,
             // Then enter the next loop and try to get a work from the queue.
             if (work == NULL) {
                 continue;
@@ -190,45 +190,45 @@ static void __worker_routine(void) {
     __exit_routine(0);
 }
 
-// This function will only try to acquire the work process lock
+// This function will only try to acquire the work thread lock
 static int __create_worker(struct workqueue *wq) {
-    struct proc *worker = NULL;
-    int ret = kernel_proc_create("worker_process", &worker, __worker_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
+    struct thread *worker = NULL;
+    int ret = kthread_create("worker_thread", &worker, __worker_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
     if (ret <= 0) {
         return ret;
     }
-    assert(worker != NULL, "Failed to create worker process");
-    proc_lock(worker);
+    assert(worker != NULL, "Failed to create worker thread");
+    tcb_lock(worker);
     worker->wq = wq;
     wq->nr_workers++;
     list_node_push(&wq->worker_list, worker, wq_entry);
-    proc_unlock(worker);
-    wakeup_proc(worker);
+    tcb_unlock(worker);
+    wakeup(worker);
     return 0;
 }
 
-// Manager routine for managing worker processes
-// Each workqueue has a manager process that is responsible for creating and destroying worker processes
+// Manager routine for managing worker threads
+// Each workqueue has a manager thread that is responsible for creating and destroying worker threads
 static void __manager_routine(void) {
-    proc_lock(myproc());
-    struct workqueue *wq = myproc()->wq;
+    tcb_lock(current);
+    struct workqueue *wq = current->wq;
     if (wq == NULL) {
-        proc_unlock(myproc());
+        tcb_unlock(current);
         exit(-EINVAL);
     }
-    proc_unlock(myproc());
+    tcb_unlock(current);
 
     __wq_lock(wq);
-    if (wq->manager != myproc()) {
+    if (wq->manager != current) {
         __wq_unlock(wq);
         exit(-EINVAL);
     }
     for (;;) {
-        assert(wq->nr_workers >= 0, "Worker process count is invalid\n");
+        assert(wq->nr_workers >= 0, "Worker thread count is invalid\n");
         while (wq->nr_workers < wq->min_active || 
                (wq->pending_works > wq->nr_workers && 
                 wq->nr_workers < wq->max_active)) {
-            // Need to create more worker processes
+            // Need to create more worker threads
             if (__create_worker(wq) != 0) {
                 break;
             }
@@ -236,36 +236,36 @@ static void __manager_routine(void) {
         while (tq_size(&wq->idle_queue) && 
                wq->nr_workers - tq_size(&wq->idle_queue) < wq->pending_works) {
             // Wake up an idle worker if any
-            struct proc *p = tq_wakeup(&wq->idle_queue, 0, 0);
+            struct thread *p = tq_wakeup(&wq->idle_queue, 0, 0);
             if (IS_ERR_OR_NULL(p)) {
                 printf("warning: Failed to wake up idle worker\n");
             }
         }
-        scheduler_sleep(&wq->lock, PSTATE_INTERRUPTIBLE);
+        scheduler_sleep(&wq->lock, THREAD_INTERRUPTIBLE);
         // @TODO: handle signals
     }
     __wq_unlock(wq);
 }
 
-// Create a manager process for a work queue
+// Create a manager thread for a work queue
 // Will be called at the creation process of a work queue,
 // during which the work queue lock is being hold.
-// Thus, it will only try to hold the manager process lock
+// Thus, it will only try to hold the manager thread lock
 static int __create_manager(struct workqueue *wq) {
-    struct proc *manager = NULL;
-    int ret = kernel_proc_create("manager_process", &manager, __manager_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
+    struct thread *manager = NULL;
+    int ret = kthread_create("manager_thread", &manager, __manager_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
     if (ret <= 0) {
         return ret;
     }
-    assert(manager != NULL, "Failed to create manager process");
-    proc_lock(manager);
+    assert(manager != NULL, "Failed to create manager thread");
+    tcb_lock(manager);
     manager->wq = wq;
-    proc_unlock(manager);
+    tcb_unlock(manager);
     wq->manager = manager;
     return 0;
 }
 
-// Try to wake up the manager process of a work queue
+// Try to wake up the manager thread of a work queue
 // Note: pi_lock is acquired internally by scheduler_wakeup
 static void __wakeup_manager(struct workqueue *wq) {
     scheduler_wakeup(wq->manager);

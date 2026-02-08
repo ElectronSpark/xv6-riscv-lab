@@ -3,7 +3,7 @@
 #include "param.h"
 #include <mm/memlayout.h>
 #include "riscv.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "defs.h"
 #include "printf.h"
 #include "proc/sched.h"
@@ -62,7 +62,7 @@ static struct sched_timer_work *__alloc_sched_timer_work(uint64 deadline, void (
     memset(stw, 0, sizeof(*stw));
     stw->callback = callback;
     stw->data = data;
-    // Because no process is waiting for the timer, we can set retry_limit to 1
+    // Because no thread is waiting for the timer, we can set retry_limit to 1
     timer_node_init(&stw->tn, deadline, __timer_callback, stw, 1);
     init_work_struct(&stw->work, __work_callback, (uint64)stw);
     return stw;
@@ -87,10 +87,10 @@ void __do_timer_tick(void) {
 }
 
 static void __sched_timer_callback(struct timer_node *tn) {
-    // Wake up processes with expired timers.
-    struct proc *p = tn->data;
-    if (PROC_SLEEPING(p)) {
-        wakeup_proc(p);
+    // Wake up threads with expired timers.
+    struct thread *p = tn->data;
+    if (THREAD_SLEEPING(p)) {
+        wakeup(p);
     }
 }
 
@@ -99,7 +99,7 @@ int sched_timer_set(struct timer_node *tn, uint64 ticks) {
         return -EINVAL; // Invalid timer node
     }
     uint64 expires = get_jiffs() + ticks;
-    timer_node_init(tn, expires, __sched_timer_callback, myproc(), TIMER_DEFAULT_RETRY_LIMIT);
+    timer_node_init(tn, expires, __sched_timer_callback, current, TIMER_DEFAULT_RETRY_LIMIT);
     int ret = timer_add(&__sched_timer, tn);
     return ret;
 }
@@ -115,20 +115,20 @@ void sleep_ms(uint64 ms) {
     if (ms == 0) {
         return;
     }
-    struct proc *p = myproc();
-    assert(p != NULL, "Current process must not be NULL");
+    struct thread *p = current;
+    assert(p != NULL, "Current thread must not be NULL");
 
     struct timer_node tn = {0};
 
     uint64 before = get_jiffs();
     int ret = sched_timer_set(&tn, ms);
     if (ret != 0) {
-        printf("proc %s: ", myproc() ? myproc()->name : "unknown");
+        printf("thread %s: ", current ? current->name : "unknown");
         printf("Failed to set timer - ret=%d, before=%lu\n", ret, before);
         return;
     }
 
-    scheduler_sleep(NULL, PSTATE_INTERRUPTIBLE);
+    scheduler_sleep(NULL, THREAD_INTERRUPTIBLE);
 
     // After waking up, cancel the timer to avoid unnecessary callback
     sched_timer_done(&tn);

@@ -5,7 +5,7 @@
 #include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "riscv.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include <smp/percpu.h>
 #include "defs.h"
 #include "printf.h"

@@ -1,4 +1,4 @@
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "clone_flags.h"
 #include "defs.h"
 #include "hlist.h"
@@ -23,16 +23,16 @@
 #include <mm/vm.h>
 #include "errno.h"
 
-// Entry wrapper for forked user processes.
+// Entry wrapper for forked user threads.
 // This is called as the entry point from context switch.
 static void forkret_entry(struct context *prev) {
-    assert(PROC_USER_SPACE(myproc()),
-           "kernel process %d tries to return to user space", myproc()->pid);
+    assert(THREAD_USER_SPACE(current),
+           "kernel thread %d tries to return to user space", current->pid);
     assert(prev != NULL, "forkret_entry: prev context is NULL");
 
     // Finish the context switch first - this releases the rq lock
-    context_switch_finish(proc_from_context(prev), myproc(), 0);
-    mycpu()->noff = 0;  // in a new process, noff should be 0
+    context_switch_finish(thread_from_context(prev), current, 0);
+    mycpu()->noff = 0; // in a new thread, noff should be 0
     intr_on();
     // Note quiescent state for RCU - context switch is a quiescent state.
     // Callback processing is now handled by per-CPU RCU kthreads.
@@ -43,23 +43,24 @@ static void forkret_entry(struct context *prev) {
     usertrapret();
 }
 
-// Create a new process, copying the parent.
+// Create a new thread, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
 // Caller must always provide valid clone_args.
-int proc_clone(struct clone_args *args) {
-    struct proc *ret_ptr;
-    struct proc *p = myproc();
+int thread_clone(struct clone_args *args) {
+    struct thread *ret_ptr;
+    struct thread *p = current;
 
     if (args == NULL) {
         return -EINVAL;
     }
 
-    if (!PROC_USER_SPACE(p)) {
+    if (!THREAD_USER_SPACE(p)) {
         return -EINVAL;
     }
 
-    // When CLONE_VM is specified without CLONE_VFORK, stack and entry must be provided.
-    // CLONE_VFORK is special: child shares parent's stack temporarily and must exec/exit.
+    // When CLONE_VM is specified without CLONE_VFORK, stack and entry must be
+    // provided. CLONE_VFORK is special: child shares parent's stack temporarily
+    // and must exec/exit.
     if ((args->flags & CLONE_VM) && !(args->flags & CLONE_VFORK) &&
         (args->stack == 0 || args->entry == 0)) {
         return -EINVAL;
@@ -71,8 +72,8 @@ int proc_clone(struct clone_args *args) {
         return -EINVAL;
     }
 
-    // Allocate process.
-    ret_ptr = allocproc(forkret_entry, 0, 0, p->kstack_order);
+    // Allocate thread.
+    ret_ptr = thread_create(forkret_entry, 0, 0, p->kstack_order);
     if (IS_ERR_OR_NULL(ret_ptr)) {
         goto out;
     }
@@ -86,8 +87,8 @@ int proc_clone(struct clone_args *args) {
     } else {
         new_vm = vm_copy(p->vm);
         if (IS_ERR_OR_NULL(new_vm)) {
-            freeproc(ret_ptr);
-            ret_ptr = (void*)new_vm;
+            thread_destroy(ret_ptr);
+            ret_ptr = (void *)new_vm;
             goto out;
         }
     }
@@ -96,18 +97,19 @@ int proc_clone(struct clone_args *args) {
     // Clone VFS cwd and root inode references
     struct fs_struct *fs_clone = vfs_struct_clone(p->fs, args->flags);
     if (IS_ERR_OR_NULL(fs_clone)) {
-        freeproc(ret_ptr);
-        ret_ptr = (void*)fs_clone;
+        thread_destroy(ret_ptr);
+        ret_ptr = (void *)fs_clone;
         goto out;
     }
     ret_ptr->fs = fs_clone;
 
     // Clone VFS file descriptor table - must be done after releasing parent
     // lock because vfs_fdup may call cdev_dup which needs a mutex
-    struct vfs_fdtable *new_fdtable = vfs_fdtable_clone(p->fdtable, args->flags);
+    struct vfs_fdtable *new_fdtable =
+        vfs_fdtable_clone(p->fdtable, args->flags);
     if (IS_ERR_OR_NULL(new_fdtable)) {
-        freeproc(ret_ptr);
-        ret_ptr = (void*)new_fdtable;
+        thread_destroy(ret_ptr);
+        ret_ptr = (void *)new_fdtable;
         goto out;
     }
     ret_ptr->fdtable = new_fdtable;
@@ -116,7 +118,7 @@ int proc_clone(struct clone_args *args) {
     if (p->sigacts) {
         ret_ptr->sigacts = sigacts_dup(p->sigacts, args->flags);
         if (ret_ptr->sigacts == NULL) {
-            freeproc(ret_ptr);
+            thread_destroy(ret_ptr);
             return -ENOMEM;
         }
     }
@@ -145,11 +147,11 @@ int proc_clone(struct clone_args *args) {
     // VFS cwd and rooti already cloned above
     safestrcpy(ret_ptr->name, p->name, sizeof(p->name));
 
-    proc_lock(p);
-    proc_lock(ret_ptr);
+    tcb_lock(p);
+    tcb_lock(ret_ptr);
     attach_child(p, ret_ptr);
-    PROC_SET_USER_SPACE(ret_ptr);
-    __proc_set_pstate(ret_ptr, PSTATE_UNINTERRUPTIBLE);
+    THREAD_SET_USER_SPACE(ret_ptr);
+    __thread_state_set(ret_ptr, THREAD_UNINTERRUPTIBLE);
 
     // Initialize the child's scheduling entity with parent's info
     rq_task_fork(ret_ptr->sched_entity);
@@ -159,15 +161,15 @@ int proc_clone(struct clone_args *args) {
         ret_ptr->vfork_parent = p;
         // Set parent state BEFORE waking child to avoid race:
         // child might exit before parent goes to sleep
-        __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
+        __thread_state_set(p, THREAD_UNINTERRUPTIBLE);
     } else {
         ret_ptr->vfork_parent = NULL;
     }
-    
-    proc_unlock(p);
-    proc_unlock(ret_ptr);
 
-    // Wake up the new child process
+    tcb_unlock(p);
+    tcb_unlock(ret_ptr);
+
+    // Wake up the new child thread
     // Note: pi_lock no longer needed - rq_lock serializes wakeups
     scheduler_wakeup(ret_ptr);
 

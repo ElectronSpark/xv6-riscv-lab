@@ -13,7 +13,7 @@
 #include "printf.h"
 #include "param.h"
 #include "lock/spinlock.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "lock/mutex_types.h"
 #include "pipe.h"
 #include <mm/vm.h>
@@ -43,7 +43,7 @@ void pipeclose(struct pipe *pi, int writable) {
 
 static int __pipe_wait_writer(struct pipe *pi) {
     spin_lock(&pi->writer_lock);
-    if (!PIPE_WRITABLE(pi) || killed(myproc())) {
+    if (!PIPE_WRITABLE(pi) || killed(current)) {
         spin_unlock(&pi->writer_lock);
         // Return 0 to let caller re-check and detect EOF properly
         return 0;
@@ -56,7 +56,7 @@ static int __pipe_wait_writer(struct pipe *pi) {
 
 static int __pipe_wait_reader(struct pipe *pi) {
     spin_lock(&pi->reader_lock);
-    if (!PIPE_READABLE(pi) || killed(myproc())) {
+    if (!PIPE_READABLE(pi) || killed(current)) {
         spin_unlock(&pi->reader_lock);
         // Return 0 to let caller re-check and detect broken pipe properly
         return 0;
@@ -70,7 +70,7 @@ static int __pipe_wait_reader(struct pipe *pi) {
 int pipewrite(struct pipe *pi, uint64 addr, int n) {
     int i = 0;
     int ret = 0;
-    struct proc *pr = myproc();
+    struct thread *pr = current;
     char buf[128];
     size_t buf_pos = 0;
     size_t buf_len = 0;
@@ -138,7 +138,7 @@ out:
 int piperead(struct pipe *pi, uint64 addr, int n) {
     int i = 0;
     int ret = 0;
-    struct proc *pr = myproc();
+    struct thread *pr = current;
     char buf[128];
     size_t buf_pos = 0;
     size_t buf_len = 0;
@@ -214,7 +214,7 @@ out:
 int piperead_kernel(struct pipe *pi, char *buf, int n) {
     int i = 0;
     int ret = 0;
-    struct proc *pr = myproc();
+    struct thread *pr = current;
 
     while (i < n) {
         spin_lock(&pi->reader_lock);
@@ -273,7 +273,7 @@ out:
 int pipewrite_kernel(struct pipe *pi, const char *buf, int n) {
     int i = 0;
     int ret = 0;
-    struct proc *pr = myproc();
+    struct thread *pr = current;
 
     while (i < n) {
         spin_lock(&pi->writer_lock);

@@ -251,7 +251,7 @@ struct vfs_inode {
         uint64 delay_put: 1; // delay freeing inode until later (used by some filesystems)
     };
     list_node_t orphan_entry; // entry in sb->orphan_list when orphaned
-    struct proc *owner; // process that holds the lock
+    struct thread *owner; // thread that holds the lock
     struct vfs_superblock *sb;
     // The two pcaches below are managed by the drivers/filesystems
     // Initialize them as needed

@@ -16,7 +16,7 @@ struct context;
 struct file;
 struct inode;
 struct pipe;
-struct proc;
+struct thread;
 struct spinlock;
 typedef struct mutex mutex_t;
 struct stat;
@@ -80,7 +80,7 @@ int piperead_kernel(struct pipe *, char *, int);
 int pipewrite_kernel(struct pipe *, const char *, int);
 
 // swtch.S
-struct context *__swtch_context(struct context *current,
+struct context *__swtch_context(struct context *cur,
                                 struct context *target);
 typedef void (*sw_noret_cb_t)(uint64, uint64);
 void __switch_noreturn(uint64 irq_sp, uint64 s0, sw_noret_cb_t addr);
@@ -124,8 +124,8 @@ typedef struct ksiginfo ksiginfo_t;
 typedef struct sigaction sigaction_t;
 typedef struct stack stack_t;
 typedef struct ucontext ucontext_t;
-int push_sigframe(struct proc *p, int signo, sigaction_t *sa, ksiginfo_t *info);
-int restore_sigframe(struct proc *p, ucontext_t *ret_uc);
+int push_sigframe(struct thread *p, int signo, sigaction_t *sa, ksiginfo_t *info);
+int restore_sigframe(struct thread *p, ucontext_t *ret_uc);
 
 // uart.c
 int  uartinit(void);
@@ -164,7 +164,7 @@ void ramdisk_init(void);
 
 // backtrace.c
 void print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end);
-void print_proc_backtrace(struct context *ctx, uint64 kstack, int kstack_order);
+void print_thread_backtrace(struct context *ctx, uint64 kstack, int kstack_order);
 void ksymbols_init(void);
 void db_break(void);
 

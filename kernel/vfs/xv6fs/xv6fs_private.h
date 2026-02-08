@@ -56,7 +56,7 @@ struct xv6fs_logheader {
  * per-log queue, and end_op() wakes them after commit completes.
  * 
  * Pattern: end_op() uses tq_bulk_move() to a temp queue, then
- * wakes outside the lock to avoid lock convoy (woken processes competing
+ * wakes outside the lock to avoid lock convoy (woken threads competing
  * to reacquire log->lock).
  */
 struct xv6fs_log {

@@ -12,7 +12,7 @@
 #include "printf.h"
 #include "lock/spinlock.h"
 #include "lock/rcu.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "timer/timer.h"
 #include "dev/dev.h"
@@ -145,13 +145,13 @@ static void test_concurrent_readers(void) {
     assert(ret == 0, "device_register should succeed");
     
     // Start reader threads
-    struct proc *readers[NUM_READER_THREADS];
+    struct thread *readers[NUM_READER_THREADS];
     for (int i = 0; i < NUM_READER_THREADS; i++) {
-        ret = kernel_proc_create("dev_reader", &readers[i], 
+        ret = kthread_create("dev_reader", &readers[i], 
                                   (int (*)(uint64, uint64))reader_thread_fn, 
                                   i, TEST_ITERATIONS, KERNEL_STACK_ORDER);
         assert(ret > 0, "Failed to create reader thread");
-        wakeup_proc(readers[i]);
+        wakeup(readers[i]);
     }
     
     // Wait for readers to complete
@@ -314,23 +314,23 @@ static void test_concurrent_readers_writers(void) {
     __atomic_store_n(&rw_test_major, 0, __ATOMIC_SEQ_CST);
     
     // Start reader threads
-    struct proc *readers[NUM_READER_THREADS];
+    struct thread *readers[NUM_READER_THREADS];
     for (int i = 0; i < NUM_READER_THREADS; i++) {
-        int ret = kernel_proc_create("dev_rw_reader", &readers[i], 
+        int ret = kthread_create("dev_rw_reader", &readers[i], 
                                       (int (*)(uint64, uint64))rw_reader_thread_fn, 
                                       i, TEST_ITERATIONS * 2, KERNEL_STACK_ORDER);
         assert(ret > 0, "Failed to create reader thread");
-        wakeup_proc(readers[i]);
+        wakeup(readers[i]);
     }
     
     // Start writer threads
-    struct proc *writers[NUM_WRITER_THREADS];
+    struct thread *writers[NUM_WRITER_THREADS];
     for (int i = 0; i < NUM_WRITER_THREADS; i++) {
-        int ret = kernel_proc_create("dev_rw_writer", &writers[i], 
+        int ret = kthread_create("dev_rw_writer", &writers[i], 
                                       (int (*)(uint64, uint64))rw_writer_thread_fn, 
                                       i, TEST_ITERATIONS / 2, KERNEL_STACK_ORDER);
         assert(ret > 0, "Failed to create writer thread");
-        wakeup_proc(writers[i]);
+        wakeup(writers[i]);
     }
     
     // Wait for completion

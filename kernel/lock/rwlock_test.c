@@ -7,7 +7,7 @@
 #include "lock/spinlock.h"
 #include "lock/rwlock.h"
 #include "lock/mutex_types.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/tq.h"
 #include "proc/sched.h"
 
@@ -250,17 +250,17 @@ static int wait_for(volatile int *ptr, int expected, int spin_loops) {
 
 static void run_test1(void) {
   printf("[rwlock][T1] multiple readers... ");
-  struct proc *np = NULL;
+  struct thread *np = NULL;
   t1_target_readers = 4;
   t1_done_readers = 0;
   t1_started_readers = 0;
   t1_release_readers = 0;
   active_readers = 0; max_active_readers = 0; error_flag = 0;
   for(int i=0;i<t1_target_readers;i++) {
-    if(kernel_proc_create("run_test1", &np, t1_reader, 0, 0, KERNEL_STACK_ORDER) < 0)
+    if(kthread_create("run_test1", &np, t1_reader, 0, 0, KERNEL_STACK_ORDER) < 0)
       error_flag = 1;
     else
-      wakeup_proc(np);
+      wakeup(np);
   }
   if(wait_for(&t1_started_readers, t1_target_readers, 50000) != 0)
     error_flag = 1;
@@ -278,24 +278,24 @@ static void run_test1(void) {
 
 static void run_test2(void) {
   printf("[rwlock][T2] writer waits for readers... ");
-  struct proc *np = NULL;
+  struct thread *np = NULL;
   t2_target_readers = 3;
   t2_done_readers = 0;
   t2_writer_acquired = 0;
   active_readers = 0; active_writers = 0; error_flag = 0;
   for(int i=0;i<t2_target_readers;i++) {
-    if(kernel_proc_create("run_test2", &np, t2_reader, 0, 0, KERNEL_STACK_ORDER) < 0)
+    if(kthread_create("run_test2", &np, t2_reader, 0, 0, KERNEL_STACK_ORDER) < 0)
       error_flag = 1;
     else
-      wakeup_proc(np);
+      wakeup(np);
   }
   // Wait until all readers finished
   if(wait_for(&t2_done_readers, t2_target_readers, 80000) != 0)
     error_flag = 1;
-  if(kernel_proc_create("run_test2", &np, t2_writer, 0, 0, KERNEL_STACK_ORDER) < 0)
+  if(kthread_create("run_test2", &np, t2_writer, 0, 0, KERNEL_STACK_ORDER) < 0)
     error_flag = 1;
   else
-    wakeup_proc(np);
+    wakeup(np);
   if(wait_for(&t2_writer_acquired, 1, 40000) != 0)
     error_flag = 1;
   if(active_readers != 0) error_flag = 1;
@@ -305,16 +305,16 @@ static void run_test2(void) {
 
 static void run_test3(void) {
   printf("[rwlock][T3] mutual exclusion for writers... ");
-  struct proc *np = NULL;
+  struct thread *np = NULL;
   t3_done_writers = 0; active_writers = 0; error_flag = 0;
-  if(kernel_proc_create("run_test3", &np, t3_writer, 0, 0, KERNEL_STACK_ORDER) < 0)
+  if(kthread_create("run_test3", &np, t3_writer, 0, 0, KERNEL_STACK_ORDER) < 0)
     error_flag = 1;
   else
-    wakeup_proc(np);
-  if(kernel_proc_create("run_test3", &np, t3_writer, 0, 0, KERNEL_STACK_ORDER) < 0)
+    wakeup(np);
+  if(kthread_create("run_test3", &np, t3_writer, 0, 0, KERNEL_STACK_ORDER) < 0)
     error_flag = 1;
   else
-    wakeup_proc(np);
+    wakeup(np);
   if(wait_for(&t3_done_writers, 2, 80000) != 0) error_flag = 1;
   check_rwlock_integrity("T3 final");
   printf(error_flag?"FAIL\n":"OK\n");
@@ -322,7 +322,7 @@ static void run_test3(void) {
 
 static void run_test4(void) {
   printf("[rwlock][T4] data consistency under stress... ");
-  struct proc *np = NULL;
+  struct thread *np = NULL;
   error_flag = 0;
   t4_ds.version = 0;
   t4_ds.len = T4_DATA_LEN;
@@ -336,15 +336,15 @@ static void run_test4(void) {
   // Acquire barrier sleeplock so spawned threads block when they try to acquire
   if(mutex_lock(&t4_start_lock) != 0) error_flag = 1;
   for(int i=0;i<T4_WRITER_THREADS;i++)
-    if(kernel_proc_create("run_test4", &np, t4_writer, 0, 0, KERNEL_STACK_ORDER) < 0)
+    if(kthread_create("run_test4", &np, t4_writer, 0, 0, KERNEL_STACK_ORDER) < 0)
       error_flag = 1;
     else
-      wakeup_proc(np);
+      wakeup(np);
   for(int i=0;i<T4_READER_THREADS;i++)
-    if(kernel_proc_create("run_test4", &np, t4_reader, 0, 0, KERNEL_STACK_ORDER) < 0)
+    if(kthread_create("run_test4", &np, t4_reader, 0, 0, KERNEL_STACK_ORDER) < 0)
       error_flag = 1;
     else
-      wakeup_proc(np);
+      wakeup(np);
   // Release barrier
   mutex_unlock(&t4_start_lock);
   if(wait_for(&t4_writers_done, T4_WRITER_THREADS, 400000) != 0) error_flag = 1;
@@ -371,10 +371,10 @@ static void rwlock_test_master(uint64 a1, uint64 a2) {
 }
 
 void rwlock_launch_tests(void) {
-  struct proc *np = NULL;
-  if(kernel_proc_create("rwlock_test_master", &np, rwlock_test_master, 0, 0, KERNEL_STACK_ORDER) < 0) {
+  struct thread *np = NULL;
+  if(kthread_create("rwlock_test_master", &np, rwlock_test_master, 0, 0, KERNEL_STACK_ORDER) < 0) {
     printf("[rwlock] cannot create test master thread\n");
   } else {
-    wakeup_proc(np);
+    wakeup(np);
   }
 }

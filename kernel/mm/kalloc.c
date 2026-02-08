@@ -1,4 +1,4 @@
-// Physical memory allocator, for user processes,
+// Physical memory allocator, for user threads,
 // kernel stacks, page-table pages,
 // and pipe buffers. Allocates whole 4096-byte pages.
 
@@ -126,7 +126,7 @@ void kmm_free(void *ptr) { slab_free(ptr); }
 // Shrink all kmm slab caches, releasing unused slabs back to buddy system.
 // Called as emergency memory reclaim when slab allocation fails due to OOM.
 // This allows the system to recover during stress tests (e.g., forkforkfork)
-// where many processes exit and their slabs are freed but not yet shrunk.
+// where many threads exit and their slabs are freed but not yet shrunk.
 void kmm_shrink_all(void) {
     for (int i = 0; i < SLAB_CACHE_NUMS; i++) {
         slab_cache_shrink(__kmm_slab_cache[i], 0x7fffffff);

@@ -51,10 +51,10 @@ The system currently generates offsets for:
 - `KTF_STVEC`, `KTF_SSCRATCH`, `KTF_GP`
 - `KTRAPFRAME_SIZE`
 
-### Process (struct proc)
-- `PROC_KSTACK`, `PROC_STATE`, `PROC_TRAPFRAME`
-- `PROC_CONTEXT`, `PROC_VM`
-- `PROC_SIZE`
+### Thread (struct thread)
+- `THREAD_KSTACK`, `THREAD_STATE`, `THREAD_TRAPFRAME`
+- `THREAD_CONTEXT`, `THREAD_VM`
+- `THREAD_SIZE`
 
 ## Adding New Offsets
 

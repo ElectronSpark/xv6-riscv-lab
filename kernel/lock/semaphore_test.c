@@ -7,7 +7,7 @@
 #include "lock/spinlock.h"
 #include "lock/semaphore.h"
 #include "lock/mutex_types.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/tq.h"
 #include "proc/sched.h"
 #include "errno.h"
@@ -77,12 +77,12 @@ static void sem_run_test1(void) {
   if(sem_init(&sem_t1, "sem-test1", 0) != 0)
     sem_error_flag = 1;
 
-  struct proc *np = NULL;
+  struct thread *np = NULL;
   for(int i = 0; i < SEM_TEST_WAITERS; i++) {
-    if(kernel_proc_create("sem_t1", &np, sem_test1_waiter, 0, 0, KERNEL_STACK_ORDER) < 0) {
+    if(kthread_create("sem_t1", &np, sem_test1_waiter, 0, 0, KERNEL_STACK_ORDER) < 0) {
       sem_error_flag = 1;
     } else {
-      wakeup_proc(np);
+      wakeup(np);
     }
   }
 
@@ -270,18 +270,18 @@ static void sem_run_test4(void) {
   for(int i = 0; i < SEM_T4_TOTAL_ITEMS; i++)
     sem_t4_seen[i] = 0;
 
-  struct proc *np = NULL;
+  struct thread *np = NULL;
   for(int i = 0; i < SEM_T4_PRODUCERS; i++) {
-    if(kernel_proc_create("sem_prod", &np, sem_t4_producer, 0, 0, KERNEL_STACK_ORDER) < 0)
+    if(kthread_create("sem_prod", &np, sem_t4_producer, 0, 0, KERNEL_STACK_ORDER) < 0)
       sem_error_flag = 1;
     else
-      wakeup_proc(np);
+      wakeup(np);
   }
   for(int i = 0; i < SEM_T4_CONSUMERS; i++) {
-    if(kernel_proc_create("sem_cons", &np, sem_t4_consumer, 0, 0, KERNEL_STACK_ORDER) < 0)
+    if(kthread_create("sem_cons", &np, sem_t4_consumer, 0, 0, KERNEL_STACK_ORDER) < 0)
       sem_error_flag = 1;
     else
-      wakeup_proc(np);
+      wakeup(np);
   }
 
   if(sem_wait_for(&sem_t4_producers_done, SEM_T4_PRODUCERS, 400000) != 0)
@@ -329,10 +329,10 @@ static void semaphore_test_master(uint64 a1, uint64 a2) {
 }
 
 void semaphore_launch_tests(void) {
-  struct proc *np = NULL;
-  if(kernel_proc_create("semaphore_test_master", &np, semaphore_test_master, 0, 0, KERNEL_STACK_ORDER) < 0) {
+  struct thread *np = NULL;
+  if(kthread_create("semaphore_test_master", &np, semaphore_test_master, 0, 0, KERNEL_STACK_ORDER) < 0) {
     printf("[sem] cannot create test master thread\n");
   } else {
-    wakeup_proc(np);
+    wakeup(np);
   }
 }

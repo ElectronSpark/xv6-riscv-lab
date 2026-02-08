@@ -92,9 +92,9 @@ extern uint64 __physical_total_pages;
 #define UVMTOP (TRAMPOLINE & ~((1UL << 30) - 1))   // Start of the shared 1 GiB region
 
 // TRAPFRAME must be below UVMTOP (outside the shared region)
-// so it can be mapped per-process.
+// so it can be mapped per-thread.
 #define TRAPFRAME (UVMTOP - (PGSIZE << 6))  // Leave space for 64 trapframes (one per CPU)
-#define TRAPFRAME_POFFSET ((PAGE_SIZE - sizeof(struct proc) - sizeof(struct utrapframe) - 16) & ~0x7UL)
+#define TRAPFRAME_POFFSET ((PAGE_SIZE - sizeof(struct thread) - sizeof(struct utrapframe) - 16) & ~0x7UL)
 #define USTACKTOP (TRAPFRAME - PGSIZE)  // Guard page between stack and trapframe
 
 #if UVMBOTTOM + MAXUSTACK > USTACKTOP

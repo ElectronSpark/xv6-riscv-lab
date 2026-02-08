@@ -11,7 +11,7 @@
 #include <mm/page.h>
 #include "list.h"
 #include "proc/sched.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/tq.h"
 #include "rbtree.h"
 #include "proc/workqueue.h"
@@ -38,7 +38,7 @@ static struct workqueue *__global_pcache_flush_wq = NULL;
 static spinlock_t __pcache_global_spinlock = SPINLOCK_INITIALIZED("pcache_global_spinlock");
 static slab_cache_t __pcache_node_slab = {0};
 static completion_t __global_flusher_completion = {0};
-static struct proc *__flusher_thread_pcb = NULL;
+static struct thread *__flusher_thread_pcb = NULL;
 static bool __global_flusher_running = false;
 
 #define PCACHE_BLKS_PER_PAGE (PGSIZE >> BLK_SIZE_SHIFT)
@@ -323,8 +323,8 @@ static void __pcache_flusher_start(void) {
     }
     __global_flusher_running = true;
     completion_reinit(&__global_flusher_completion);
-    if (myproc() != __flusher_thread_pcb) {
-        wakeup_proc(__flusher_thread_pcb);
+    if (current != __flusher_thread_pcb) {
+        wakeup(__flusher_thread_pcb);
     }
 }
 
@@ -583,11 +583,11 @@ static void __flusher_thread(uint64 a1, uint64 a2) {
 }
 
 static void __create_flusher_thread(void) {
-    struct proc *np = NULL;
-    int ret = kernel_proc_create("pcache_flusher", &np, __flusher_thread, 0, 0, KERNEL_STACK_ORDER);
+    struct thread *np = NULL;
+    int ret = kthread_create("pcache_flusher", &np, __flusher_thread, 0, 0, KERNEL_STACK_ORDER);
     assert(ret > 0 && np != NULL, "Failed to create pcache flusher thread");
     __flusher_thread_pcb = np;
-    wakeup_proc(np);
+    wakeup(np);
 }
 
 /******************************************************************************

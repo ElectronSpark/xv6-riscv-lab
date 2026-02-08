@@ -10,7 +10,7 @@
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
 #include "lock/rwlock.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "proc/workqueue.h"
 #include "vfs/fs.h"
@@ -44,7 +44,7 @@ static uint16 vfs_fs_type_count = 0;
 // Workqueue for deferred iput operations.
 // vfs_iput() can block on superblock wlock, inode mutex, and transactions.
 // It must not be called directly from RCU callbacks since that can cause
-// deadlocks (RCU callbacks block on locks held by processes waiting for
+// deadlocks (RCU callbacks block on locks held by threads waiting for
 // RCU grace periods). Instead, RCU callbacks queue work to this workqueue.
 static struct workqueue *__vfs_deferred_iput_wq = NULL;
 
@@ -346,8 +346,8 @@ static void __vfs_struct_free(struct fs_struct *fs) {
  * Files System Type Public APIs
  *****************************************************************************/
 /******************************************************************************
- * tmpfs smoketest kernel process
- * Runs tmpfs tests in a separate kernel process with chroot to /tmp (tmpfs)
+ * tmpfs smoketest kernel thread
+ * Runs tmpfs tests in a separate kernel thread with chroot to /tmp (tmpfs)
  *****************************************************************************/
 static int __tmpfs_smoketest_kthread(uint64 arg1, uint64 arg2) {
     (void)arg1;
@@ -376,18 +376,18 @@ static int __tmpfs_smoketest_kthread(uint64 arg1, uint64 arg2) {
     return 0;
 }
 
-// Start the tmpfs smoketest kernel process
+// Start the tmpfs smoketest kernel thread
 void tmpfs_smoketest_start(void) {
-    struct proc *p = NULL;
-    int pid = kernel_proc_create("tmpfs_test", &p, __tmpfs_smoketest_kthread, 
+    struct thread *p = NULL;
+    int pid = kthread_create("tmpfs_test", &p, __tmpfs_smoketest_kthread, 
                                   0, 0, KERNEL_STACK_ORDER);
     if (pid < 0 || p == NULL) {
-        printf("tmpfs_smoketest: failed to create kernel process\n");
+        printf("tmpfs_smoketest: failed to create kernel thread\n");
         return;
     }
     
-    wakeup_proc(p);
-    printf("tmpfs_smoketest: kernel process started (pid=%d)\n", pid);
+    wakeup(p);
+    printf("tmpfs_smoketest: kernel thread started (pid=%d)\n", pid);
 }
 
 /*
@@ -422,17 +422,17 @@ void vfs_init(void) {
     // Using max_active=1 serializes all deferred iputs, reducing lock contention
     // on vfs_superblock_wlock. This prevents the "thundering herd" effect where
     // many workers simultaneously compete for the same locks, potentially causing
-    // deadlock with processes doing regular FS operations (create/write).
+    // deadlock with threads doing regular FS operations (create/write).
     // This must be done early, before any file operations that might use RCU.
     __vfs_deferred_iput_wq = workqueue_create("vfs_iput_wq", 1);
     assert(__vfs_deferred_iput_wq != NULL, "Failed to create vfs_iput workqueue");
     
-    struct proc *proc = myproc();
-    assert(proc != NULL, "vfs_init must be called from a process context");
+    struct thread *thread = current;
+    assert(thread != NULL, "vfs_init must be called from a thread context");
     __vfs_inode_init(&vfs_root_inode);
     __vfs_file_init();
-    proc->fs = vfs_struct_init();
-    proc->fdtable = vfs_fdtable_init();
+    thread->fs = vfs_struct_init();
+    thread->fdtable = vfs_fdtable_init();
     
     // Initialize filesystem types (registers them with VFS)
     tmpfs_init();
@@ -452,7 +452,7 @@ void vfs_init(void) {
         printf("tmpfs: failed to mount at /tmp, errno=%d\n", ret);
     }
     
-    // Optional: run smoke tests in a separate kernel process with chroot to /tmp
+    // Optional: run smoke tests in a separate kernel thread with chroot to /tmp
     tmpfs_smoketest_start();
     // xv6fs_run_all_smoketests();
 }
@@ -1971,7 +1971,7 @@ void vfs_release_dentry(struct vfs_dentry *dentry) {
 
 struct fs_struct *vfs_struct_init(void) {
     struct fs_struct *fs = __vfs_struct_alloc_init();
-    assert(fs != NULL, "idle_proc_init: failed to create fs_struct");
+    assert(fs != NULL, "idle_thread_init: failed to create fs_struct");
     smp_store_release(&fs->ref_count, 1);
     spin_init(&fs->lock, "fs_struct_lock");
     fs->rooti.sb = NULL;

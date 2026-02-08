@@ -1,6 +1,6 @@
 /**
  * @file clone_flags.h
- * @brief Clone flags for process creation
+ * @brief Clone flags for thread creation
  *
  * Defines flags used with clone() system call to control process/thread creation.
  * Most flags are inspired by Linux but with different values.
@@ -15,7 +15,7 @@
 #define CLONE_CHILD_CLEARTID 0x00010000 // Clear child TID in child's memory on exit
 #define CLONE_CHILD_SETTID 0x00020000   // Set child TID in child's memory on creation
 #define CLONE_CLEAR_SIGHAND 0x00040000 // Clear signal handlers in child
-#define CLONE_DETACHED 0x00080000       // Create detached process
+#define CLONE_DETACHED 0x00080000       // Create detached thread
 #define CLONE_FILES 0x00100000         // Share file descriptor table
 #define CLONE_FS 0x00200000            // Share filesystem info
 #define CLONE_INTO_CGROUP 0x00400000  // Move to new cgroup
@@ -35,7 +35,7 @@
 #define CLONE_SETTLS 0x0100000000        // Set TLS in child
 #define CLONE_SIGHAND 0x0200000000      // Share signal handlers
 #define CLONE_SIGSTOPPED 0x0400000000   // Start child stopped
-#define CLONE_SYSTEM 0x0800000000        // Child is a system process
+#define CLONE_SYSTEM 0x0800000000        // Child is a system thread
 #define CLONE_THREAD 0x1000000000       // Share thread group
 #define CLONE_UNTRACED 0x2000000000     // Child cannot be traced
 #define CLONE_VFORK 0x4000000000        // Fork without copying page tables

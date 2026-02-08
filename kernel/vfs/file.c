@@ -30,7 +30,7 @@
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
 #include "lock/rwlock.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "vfs/fs.h"
 #include "printf.h"
 #include "vfs/file.h"
@@ -255,7 +255,7 @@ void vfs_fput(struct vfs_file *file) {
     }
     if (!atomic_dec_unless(&file->ref_count, 1)) {
         // File descriptors are shared through dup, thus when refcount reach 1,
-        // no other process will be using it. No need to lock the file structure.
+        // no other threads will be using it. No need to lock the file structure.
         __vfs_ftable_detatch(file);
         
         struct vfs_inode *inode = vfs_inode_deref(&file->inode);

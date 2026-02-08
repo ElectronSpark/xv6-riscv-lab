@@ -84,7 +84,7 @@ extern struct cpu_local cpus[NCPU];
 
 
 // Must be called with interrupts disabled,
-// to prevent race with process being moved
+// to prevent race with thread being moved
 // to a different CPU.
 #define cpuid()     ({                                          \
     /* Calculate cpuid from offset within page */               \
@@ -93,19 +93,21 @@ extern struct cpu_local cpus[NCPU];
     offset - (struct cpu_local *)0;                             \
 })
 
-// Return the current struct proc *, or zero if none.
-#define myproc() ({                                 \
+// Return the current struct thread *, or zero if none.
+#define __current_thread() ({                       \
     int __OLD = intr_get();                         \
     if (__OLD) {                                    \
         intr_off();                                 \
     }                                               \
     struct cpu_local *__CPU_LOCAL = mycpu();        \
-    struct proc *__MYPROC = __CPU_LOCAL->proc;      \
+    struct thread *__CURRENT = __CPU_LOCAL->proc;   \
     if (__OLD) {                                    \
         intr_on();                                  \
     }                                               \
-    __MYPROC;                                       \
+    __CURRENT;                                      \
 })
+
+#define current __current_thread()
 
 #else /* ON_HOST_OS */
 
@@ -129,7 +131,7 @@ struct cpu_local *mycpu(void);
 void push_off(void);
 void pop_off(void);
 int cpuid(void);
-struct proc *myproc(void);
+struct thread *myproc(void);
 
 #endif /* ON_HOST_OS */
 

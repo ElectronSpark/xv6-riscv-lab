@@ -30,7 +30,7 @@
 #include <smp/percpu.h>
 #include "smp/percpu.h"
 #include "errno.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "string.h"
 #include "bits.h"
 

@@ -12,7 +12,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "smp/ipi.h"
 
 static spinlock_t __panic_bt_lock = SPINLOCK_INITIALIZED("panic_bt_lock");
@@ -218,17 +218,17 @@ __panic_start()
   SET_CPU_CRASHED();
   panic_msg_lock();
   uint64 fp = r_fp();
-  struct proc *p = myproc();
+  struct thread *p = current;
   if (p == NULL || p->kstack == 0) {
-    // No process context - use kernel memory bounds for backtrace
-    printf("[Core: %ld] No process context, fp=%p\n", cpuid(), (void *)fp);
+    // No thread context - use kernel memory bounds for backtrace
+    printf("[Core: %ld] No thread context, fp=%p\n", cpuid(), (void *)fp);
     if (__bt_enabled) {
       // Use KERNBASE to PHYSTOP as conservative stack bounds
       print_backtrace(fp, KERNBASE, PHYSTOP);
     }
     return;
   }
-  printf("[Core: %ld] In process %d (%s) at %p\n", cpuid(), p->pid, p->name, (void *)fp);
+  printf("[Core: %ld] In thread %d (%s) at %p\n", cpuid(), p->pid, p->name, (void *)fp);
   if (__bt_enabled) {
     size_t kstack_size = (1UL << (PAGE_SHIFT + p->kstack_order));
     print_backtrace(fp, p->kstack, p->kstack + kstack_size);

@@ -29,13 +29,13 @@ typedef struct tnode {
         } tree;
     };
     int error_no;  // 0: Wake up by queue leader, -EINTR: Wake up by signal
-    uint64 data; // data passed to the process when wakening it up
-    struct proc *proc;   // Pointer to the process this node represents
+    uint64 data; // data passed to the thread when wakening it up
+    struct thread *thread;   // Pointer to the thread this node represents
 } tnode_t;
 
 typedef struct tq {
-    list_node_t head; // List of processes in the queue
-    int counter; // Number of processes in the queue
+    list_node_t head; // List of threads in the queue
+    int counter; // Number of threads in the queue
     const char *name; // Name of the queue
     spinlock_t *lock; // Spinlock for the queue, it's optional
     uint64 flags;
@@ -43,7 +43,7 @@ typedef struct tq {
 
 typedef struct ttree {
     struct rb_root root;
-    int counter; // Number of processes in the queue
+    int counter; // Number of threads in the queue
     const char *name; // Name of the queue
     spinlock_t *lock; // Spinlock for the queue, it's optional
     uint64 flags;

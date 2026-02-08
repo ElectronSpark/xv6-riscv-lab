@@ -31,7 +31,7 @@
 // READ-SIDE CRITICAL SECTIONS:
 //   rcu_read_lock() and rcu_read_unlock() are very lightweight:
 //     - push_off() / pop_off() to prevent preemption during critical section
-//     - Increment / decrement per-process nesting counter
+//     - Increment / decrement per-thread nesting counter
 //   No per-CPU nesting counters needed - grace period detection relies solely
 //   on context switch timestamps, not on tracking nested read locks.
 //
@@ -55,7 +55,7 @@
 #include "printf.h"
 #include "lock/spinlock.h"
 #include "lock/rcu.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/tq.h"
 #include "proc/sched.h"
 #include "proc/rq.h"
@@ -74,13 +74,13 @@ rcu_cpu_data_t rcu_cpu_data[NCPU] __ALIGNED_CACHELINE;
 // Lock protecting grace period state transitions
 static spinlock_t rcu_gp_lock = SPINLOCK_INITIALIZED("rcu_gp_lock");
 
-// Wait queue for processes waiting on grace period completion
+// Wait queue for threads waiting on grace period completion
 static tq_t rcu_gp_waitq;
 static spinlock_t rcu_gp_waitq_lock = SPINLOCK_INITIALIZED("rcu_gp_waitq_lock");
 
 // Per-CPU RCU kthread state (forward declaration for rcu_barrier)
 static struct {
-    struct proc *proc;           // The kthread process
+    struct thread *kthread;           // The kthread
     volatile int wakeup_pending; // Flag to signal wakeup
 } rcu_kthread[NCPU];
 
@@ -194,7 +194,7 @@ static int rcu_gp_completed(void) {
 // Force quiescent states - not needed in timestamp-based RCU
 // Removed as it's unused in the new implementation
 
-// Wake up processes waiting in synchronize_rcu()
+// Wake up threads waiting in synchronize_rcu()
 static void rcu_wakeup_gp_waiters(void) {
     spin_lock(&rcu_gp_waitq_lock);
     // Wake up all waiters - they will check if their GP has completed
@@ -256,14 +256,14 @@ void rcu_cpu_init(int cpu) {
 // RCU Read-Side Critical Sections
 // ============================================================================
 //
-// IMPLEMENTATION NOTE - Simplified Per-Process Nesting:
+// IMPLEMENTATION NOTE - Simplified Per-Thread Nesting:
 //
-// This implementation uses only per-process nesting counters.
+// This implementation uses only per-thread nesting counters.
 // Grace period detection is based on context switch timestamps, not nesting.
 //
 // rcu_read_lock() and rcu_read_unlock() only do:
 //   - push_off() / pop_off() to prevent preemption
-//   - increment / decrement process nesting counter
+//   - increment / decrement thread nesting counter
 //
 // No per-CPU counters are needed since we rely on timestamps.
 //
@@ -272,23 +272,23 @@ void rcu_read_lock(void) {
     // Disable interrupts to prevent context switches during RCU critical section
     push_off();
 
-    struct proc *p = myproc();
-    if (p != NULL) {
-        // Per-process nesting
-        p->rcu_read_lock_nesting++;
+    struct thread *t = current;
+    if (t != NULL) {
+        // Per-thread nesting
+        t->rcu_read_lock_nesting++;
     }
-    // If no process context (early boot), just the push_off() is sufficient
+    // If no thread context (early boot), just the push_off() is sufficient
 }
 
 void rcu_read_unlock(void) {
-    struct proc *p = myproc();
-    if (p != NULL) {
-        // Decrement per-process nesting counter
-        p->rcu_read_lock_nesting--;
+    struct thread *t = current;
+    if (t != NULL) {
+        // Decrement per-thread nesting counter
+        t->rcu_read_lock_nesting--;
 
-        if (p->rcu_read_lock_nesting < 0) {
-            panic("rcu_read_unlock: unbalanced unlock in process %s (pid %d)", 
-                  p->name, p->pid);
+        if (t->rcu_read_lock_nesting < 0) {
+            panic("rcu_read_unlock: unbalanced unlock in thread %s (pid %d)", 
+                  t->name, t->pid);
         }
     }
 
@@ -297,12 +297,12 @@ void rcu_read_unlock(void) {
 }
 
 int rcu_is_watching(void) {
-    struct proc *p = myproc();
-    if (p == NULL) {
-        // No process context - assume not watching
+    struct thread *t = current;
+    if (t == NULL) {
+        // No thread context - assume not watching
         return 0;
     }
-    return p->rcu_read_lock_nesting > 0;
+    return t->rcu_read_lock_nesting > 0;
 }
 
 // ============================================================================
@@ -639,8 +639,8 @@ void synchronize_rcu(void) {
             // All CPUs have passed through a quiescent state
             // Wake up kthreads to process any ready callbacks
             for (int i = 0; i < NCPU; i++) {
-                if (rcu_kthread[i].proc != NULL) {
-                    wakeup_interruptible(rcu_kthread[i].proc);
+                if (rcu_kthread[i].kthread != NULL) {
+                    wakeup_interruptible(rcu_kthread[i].kthread);
                 }
             }
             return;
@@ -682,8 +682,8 @@ void rcu_barrier(void) {
     while (!all_done && wait_count < max_wait) {
         // Wake up all RCU kthreads to process callbacks
         for (int i = 0; i < NCPU; i++) {
-            if (rcu_kthread[i].proc != NULL) {
-                wakeup_interruptible(rcu_kthread[i].proc);
+            if (rcu_kthread[i].kthread != NULL) {
+                wakeup_interruptible(rcu_kthread[i].kthread);
             }
         }
         
@@ -961,7 +961,7 @@ void rcu_kthread_wakeup(void) {
     int cpu = cpuid();
     pop_off();
     
-    struct proc *p = rcu_kthread[cpu].proc;
+    struct thread *p = rcu_kthread[cpu].kthread;
     if (p != NULL) {
         // Set wakeup flag and wake the thread
         __atomic_store_n(&rcu_kthread[cpu].wakeup_pending, 1, __ATOMIC_RELEASE);
@@ -983,13 +983,13 @@ void rcu_kthread_start_cpu(int cpu) {
     }
     
     // Initialize the kthread entry for this CPU
-    rcu_kthread[cpu].proc = NULL;
+    rcu_kthread[cpu].kthread = NULL;
     rcu_kthread[cpu].wakeup_pending = 0;
     
-    struct proc *p = NULL;
+    struct thread *p = NULL;
     const char *name = (cpu < 8) ? rcu_names[cpu] : "rcu_cb";
     
-    int pid = kernel_proc_create(name, &p, rcu_cb_kthread, cpu, 0, KERNEL_STACK_ORDER);
+    int pid = kthread_create(name, &p, rcu_cb_kthread, cpu, 0, KERNEL_STACK_ORDER);
     if (pid < 0 || p == NULL) {
         printf("Failed to create RCU kthread for CPU %d\n", cpu);
         return;
@@ -1001,10 +1001,10 @@ void rcu_kthread_start_cpu(int cpu) {
     attr.affinity_mask = (1ULL << cpu);
     sched_setattr(p->sched_entity, &attr);
     
-    rcu_kthread[cpu].proc = p;
-    
+    rcu_kthread[cpu].kthread = p;
+
     // Wake the kthread - it will start on the correct CPU
-    wakeup_proc(p);
+    wakeup(p);
     
     // Mark that at least one kthread is started
     __atomic_store_n(&rcu_kthreads_started, 1, __ATOMIC_RELEASE);

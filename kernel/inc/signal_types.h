@@ -10,7 +10,6 @@
 #if !defined(ON_HOST_OS)
 typedef uint64 sigset_t;
 #endif
-struct proc;
 
 typedef union sigval {
 	int sival_int;
@@ -104,8 +103,8 @@ typedef struct ucontext {
 
 typedef struct ksiginfo {
 	list_node_t list_entry;
-	struct proc *receiver;
-	struct proc *sender;	// Process that sent the signal. May be NULL
+	struct thread *receiver;
+	struct thread *sender;	// Process that sent the signal. May be NULL
 	int signo;          	// Signal number
 	siginfo_t info;    		// Signal information
 } ksiginfo_t;

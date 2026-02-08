@@ -5,7 +5,7 @@
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "defs.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "printf.h"
 #include "proc/sched.h"
 #include "signal.h"
@@ -78,9 +78,9 @@ static void __trap_panic(struct trapframe *tf, uint64 s0) {
     tf->ra = tf->sepc;
     // to enconvinient gdb back trace
     *(uint64 *)((uint64)tf - 8) = tf->sepc;
-    struct proc *p = myproc();
+    struct thread *p = current;
     if (p == NULL) {
-        printf("kerneltrap: no current process\n");
+        printf("kerneltrap: no current thread\n");
         kerneltrap_dump_regs(tf);
         panic_disable_bt();
         panic("kerneltrap");
@@ -95,24 +95,24 @@ static void __trap_panic(struct trapframe *tf, uint64 s0) {
 
 void user_kirq_entrance(uint64 ksp, uint64 s0) {
     enter_irq();
-    if ((myproc()->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
+    if ((current->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
         panic("usertrap: not from user mode");
 
     // Mark the current CPU as offline for this process's VM
-    vm_cpu_offline(myproc()->vm, cpuid());
+    vm_cpu_offline(current->vm, cpuid());
 
     // redirect traps to kerneltrap()
     // Since we are on kernel stack
     trapinithart();
-    if (do_irq(&myproc()->trapframe->trapframe) < 0) {
-        __trap_panic(&myproc()->trapframe->trapframe, s0);
+    if (do_irq(&current->trapframe->trapframe) < 0) {
+        __trap_panic(&current->trapframe->trapframe, s0);
     }
     exit_irq();
     
     if (NEEDS_RESCHED()) {
         // If anyone has requested a reschedule, do it now.
         // switch to kernel stack first (so yield() runs on the right stack)
-        __switch_noreturn(myproc()->ksp, s0, __user_kirq_return);
+        __switch_noreturn(current->ksp, s0, __user_kirq_return);
     }
     // Otherwise return to user space.
     usertrapret();
@@ -125,13 +125,13 @@ void user_kirq_entrance(uint64 ksp, uint64 s0) {
 void usertrap(void) {
     uint64 va;
     vma_t *vma = NULL;
-    uint64 scause = myproc()->trapframe->trapframe.scause;
+    uint64 scause = current->trapframe->trapframe.scause;
 
-    if ((myproc()->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
+    if ((current->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
         panic("usertrap: not from user mode");
 
     // Mark the current CPU as offline for this process's VM
-    vm_cpu_offline(myproc()->vm, cpuid());
+    vm_cpu_offline(current->vm, cpuid());
 
     // redirect traps to kerneltrap()
     // Since we are on kernel stack
@@ -141,12 +141,12 @@ void usertrap(void) {
     case RISCV_ENV_CALL_FROM_U_MODE:
         // system call
 
-        if (killed(myproc()))
+        if (killed(current))
             exit(-1);
 
         // sepc points to the ecall instruction,
         // but we want to return to the next instruction.
-        myproc()->trapframe->trapframe.sepc += 4;
+        current->trapframe->trapframe.sepc += 4;
 
         // an interrupt will change sepc, scause, and sstatus,
         // so enable only now that we're done with those registers.
@@ -155,70 +155,70 @@ void usertrap(void) {
         syscall();
         break;
     case RISCV_INSTRUCTION_PAGE_FAULT:
-        va = myproc()->trapframe->trapframe.stval;
-        vm_rlock(myproc()->vm);
-        vma = vm_find_area(myproc()->vm, va);
+        va = current->trapframe->trapframe.stval;
+        vm_rlock(current->vm);
+        vma = vm_find_area(current->vm, va);
         if (vma != NULL &&
             vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_EXEC) == 0) {
-            vm_runlock(myproc()->vm);
+            vm_runlock(current->vm);
             break;
         }
-        vm_runlock(myproc()->vm);
-        assert(myproc()->pid != 1, "init exiting");
-        kill(myproc()->pid, SIGSEGV);
+        vm_runlock(current->vm);
+        assert(current->pid != 1, "init exiting");
+        kill(current->pid, SIGSEGV);
         break;
     case RISCV_LOAD_PAGE_FAULT:
         // Load page fault - handle demand paging for read access
-        va = myproc()->trapframe->trapframe.stval;
+        va = current->trapframe->trapframe.stval;
         // First try to grow stack if the address is in stack region
-        vm_try_growstack(myproc()->vm, va);
+        vm_try_growstack(current->vm, va);
         // Now find the VMA (may be stack that just grew, or existing VMA
         // needing demand paging). Hold vm_rlock to protect VMA tree traversal.
-        vm_rlock(myproc()->vm);
-        vma = vm_find_area(myproc()->vm, va);
+        vm_rlock(current->vm);
+        vma = vm_find_area(current->vm, va);
         if (vma != NULL &&
             vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_READ) == 0) {
-            vm_runlock(myproc()->vm);
+            vm_runlock(current->vm);
             break;
         }
-        vm_runlock(myproc()->vm);
+        vm_runlock(current->vm);
         // printf("usertrap(): page fault on read 0x%lx pid=%d\n", r_scause(),
         // p->pid); printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(),
         // r_stval()); printf("            pgtbl=0x%lx\n",
-        // (uint64)myproc()->vm->pagetable);
-        assert(myproc()->pid != 1, "init exiting");
-        kill(myproc()->pid, SIGSEGV);
+        // (uint64)current->vm->pagetable);
+        assert(current->pid != 1, "init exiting");
+        kill(current->pid, SIGSEGV);
         break;
     case RISCV_STORE_PAGE_FAULT:
         // Store page fault - handle demand paging for write access
-        va = myproc()->trapframe->trapframe.stval;
+        va = current->trapframe->trapframe.stval;
         // First try to grow stack if the address is in stack region
-        vm_try_growstack(myproc()->vm, va);
+        vm_try_growstack(current->vm, va);
         // Now find the VMA (may be stack that just grew, or existing VMA
         // needing demand paging). Hold vm_rlock to protect VMA tree traversal.
-        vm_rlock(myproc()->vm);
-        vma = vm_find_area(myproc()->vm, va);
+        vm_rlock(current->vm);
+        vma = vm_find_area(current->vm, va);
         if (vma != NULL &&
             vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_WRITE) == 0) {
-            vm_runlock(myproc()->vm);
+            vm_runlock(current->vm);
             break;
         }
-        vm_runlock(myproc()->vm);
+        vm_runlock(current->vm);
         // printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(),
         // p->pid); printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(),
         // r_stval()); printf("            pgtbl=0x%lx\n",
-        // (uint64)myproc()->vm->pagetable);
-        assert(myproc()->pid != 1, "init exiting");
-        kill(myproc()->pid, SIGSEGV);
+        // (uint64)current->vm->pagetable);
+        assert(current->pid != 1, "init exiting");
+        kill(current->pid, SIGSEGV);
         break;
     default:
-        assert(myproc()->trapframe->trapframe.scause >> 63 == 0,
+        assert(current->trapframe->trapframe.scause >> 63 == 0,
                "unexpected interrupt");
         // printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(),
-        // myproc()->pid); printf("            sepc=0x%lx stval=0x%lx\n",
+        // current->pid); printf("            sepc=0x%lx stval=0x%lx\n",
         // r_sepc(), r_stval());
-        assert(myproc()->pid != 1, "init exiting");
-        kill(myproc()->pid, SIGSEGV);
+        assert(current->pid != 1, "init exiting");
+        kill(current->pid, SIGSEGV);
         break;
     }
 
@@ -229,8 +229,8 @@ extern void sig_trampoline(uint64 arg0, uint64 arg1, uint64 arg2,
                            void *handler);
 
 // Will only modify the user space memory and p->signal.sig_ucontext
-// Further modifications to the process struct need to be done if it succeeds.
-int push_sigframe(struct proc *p, int signo, sigaction_t *sa,
+// Further modifications to the thread struct need to be done if it succeeds.
+int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
                   ksiginfo_t *info) {
     if (sa == NULL || sa->sa_handler == NULL || p == NULL) {
         return -1; // Invalid arguments
@@ -304,7 +304,7 @@ int push_sigframe(struct proc *p, int signo, sigaction_t *sa,
     return 0; // Success
 }
 
-int restore_sigframe(struct proc *p, ucontext_t *ret_uc) {
+int restore_sigframe(struct thread *p, ucontext_t *ret_uc) {
     uint64 sig_ucontext = p->signal.sig_ucontext;
 
     if (sig_ucontext == 0 || ret_uc == NULL) {
@@ -327,10 +327,10 @@ int restore_sigframe(struct proc *p, ucontext_t *ret_uc) {
 // return to user space
 //
 void usertrapret(void) {
-    struct proc *p = myproc();
+    struct thread *p = current;
 
     if (killed(p)) {
-        // If the process is terminated, exit it.
+        // If the thread is terminated, exit it.
         exit(-1);
     }
 
@@ -347,7 +347,7 @@ void usertrapret(void) {
     assert(mycpu()->spin_depth == 0, "usertrapret: spin_depth not zero");
 
     // set up trapframe values that uservec will need when
-    // the process next traps into the kernel.
+    // the thread next traps into the kernel.
     p->trapframe->kernel_sp = p->ksp;
     p->trapframe->irq_sp = mycpu()->intr_sp;
 

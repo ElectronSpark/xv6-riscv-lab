@@ -7,7 +7,7 @@
 #include "host_test_stubs.h"
 #include "types.h"
 #include "rwlock.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/tq.h"
 #include "spinlock.h"
 #include "proc/sched.h"
@@ -26,8 +26,8 @@ typedef struct {
 } fake_runtime_t;
 
 static fake_runtime_t g_runtime;
-static struct proc g_self_proc;
-static struct proc g_wait_proc;
+static struct thread g_self_proc;
+static struct thread g_wait_proc;
 
 static void expect_integrity(const rwlock_t *lock, const char *label) {
     assert_non_null(lock);
@@ -60,9 +60,9 @@ static int test_setup(void **state) {
     g_runtime.tq.wait_return = 0;
     g_runtime.tq.wakeup_return = 0;
     g_runtime.tq.wakeup_all_return = 0;
-    g_runtime.tq.next_wakeup_proc = &g_wait_proc;
+    g_runtime.tq.next_wakeup = &g_wait_proc;
     
-    // Set up proc tracking so myproc() returns g_self_proc
+    // Set up proc tracking so current returns g_self_proc
     g_runtime.proc.current_proc = &g_self_proc;
     
     // Enable tracking
@@ -113,7 +113,7 @@ static void test_rwlock_release_wakes_writer_integrity(void **state) {
     assert_int_equal(rwlock_init(&lock, RWLOCK_PRIO_WRITE, "ut"), 0);
     assert_int_equal(rwlock_acquire_write(&lock), 0);
     lock.write_queue.counter = 1;
-    g_runtime.tq.next_wakeup_proc = &g_wait_proc;
+    g_runtime.tq.next_wakeup = &g_wait_proc;
     rwlock_release(&lock);
     assert_int_equal(tq_size(&lock.write_queue), 0);
     assert_int_equal(lock.holder_pid, g_wait_proc.pid);

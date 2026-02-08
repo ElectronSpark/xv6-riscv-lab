@@ -196,7 +196,7 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
     if (page == NULL) {
         // Emergency reclaim: try shrinking ALL slab caches to free pages
         // This handles OOM during stress tests (e.g., forkforkfork) where
-        // many processes exit and their slabs are freed but not yet shrunk.
+        // many threads exit and their slabs are freed but not yet shrunk.
         // Note: slab_shrink_all() covers all registered caches including
         // specialized ones like __vm_pool, __vma_pool, etc., not just kmm
         // caches.

@@ -6,7 +6,7 @@
 #include "errno.h"
 #include <mm/memlayout.h>
 #include "lock/spinlock.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/tq.h"
 #include "proc/sched.h"
 #include "lock/completion.h"
@@ -35,7 +35,7 @@ static bool __try_wait_for_completion(completion_t *c) {
 
 static void __completion_do_wake(completion_t *c) {
     if (tq_size(&c->wait_queue) > 0) {
-        struct proc *p = tq_wakeup(&c->wait_queue, 0, 0);
+        struct thread *p = tq_wakeup(&c->wait_queue, 0, 0);
         (void)p; // @TODO: ignore interrupt by now
     }
 }
@@ -51,7 +51,7 @@ bool try_wait_for_completion(completion_t *c) {
 }
 
 void wait_for_completion(completion_t *c) {
-    assert(myproc() != NULL, "wait_for_completion called from non-process context");
+    assert(current != NULL, "wait_for_completion called from non-thread context");
     if (c == NULL) {
         return;
     }
@@ -85,7 +85,7 @@ void complete_all(completion_t *c) {
     
     // Use a temporary queue to collect waiters, so we can release
     // the lock before waking them (avoiding lock convoy when woken
-    // processes try to re-acquire c->lock in scheduler_sleep).
+    // threads try to re-acquire c->lock in scheduler_sleep).
     tq_t temp_queue;
     tq_init(&temp_queue, "completion_temp", NULL);
     

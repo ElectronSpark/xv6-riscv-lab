@@ -5,7 +5,7 @@
 #include "param.h"
 #include <mm/memlayout.h>
 #include "lock/spinlock.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "timer/timer.h"
 #include <mm/vm.h>
@@ -19,7 +19,7 @@ uint64 sys_exit(void) {
     return 0; // not reached
 }
 
-uint64 sys_getpid(void) { return myproc()->pid; }
+uint64 sys_getpid(void) { return current->pid; }
 
 uint64 sys_clone(void) {
     uint64 uargs;
@@ -31,7 +31,7 @@ uint64 sys_clone(void) {
         args.flags = SIGCHLD;
         args.esignal = SIGCHLD;
     } else {
-        if (vm_copyin(myproc()->vm, &args, uargs, sizeof(args)) < 0) {
+        if (vm_copyin(current->vm, &args, uargs, sizeof(args)) < 0) {
             return -EFAULT;
         }
         // If esignal not explicitly set, extract from low bits of flags (Linux convention)
@@ -39,7 +39,7 @@ uint64 sys_clone(void) {
             args.esignal = args.flags & 0xFF;
         }
     }
-    return proc_clone(&args);
+    return thread_clone(&args);
 }
 
 uint64 sys_wait(void) {
@@ -53,18 +53,14 @@ uint64 sys_sbrk(void) {
     int64 n;
 
     argint64(0, &n);
-    vma_t *vma = myproc()->vm->heap;
+    vma_t *vma = current->vm->heap;
     if (vma == NULL) {
         return -1; // No heap VMA found
     }
-    addr = myproc()->vm->heap->start + myproc()->vm->heap_size;
-    // printf("sbrk: addr %p n %d -> ", (void*)addr, n);
-    if (vm_growheap(myproc()->vm, n) < 0) {
-        // printf("growproc failed\n");
+    addr = current->vm->heap->start + current->vm->heap_size;
+    if (vm_growheap(current->vm, n) < 0) {
         return -1;
     }
-    // printf("new addr %p\n", (void*)(myproc()->vm->heap->start +
-    // myproc()->vm->heap_size));
     return addr;
 }
 

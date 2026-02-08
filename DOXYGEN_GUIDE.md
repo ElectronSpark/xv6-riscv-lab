@@ -104,24 +104,24 @@ For scheduler-related structures:
 
 ```c
 /**
- * @brief Scheduling entity for process scheduling
+ * @brief Scheduling entity for thread scheduling
  * 
- * Contains scheduling-related state separate from the process structure.
- * Modeled after Linux kernel's struct sched_entity. Each process has
- * a pointer to its scheduling entity (p->sched_entity).
+ * Contains scheduling-related state separate from the thread structure.
+ * Modeled after Linux kernel's struct sched_entity. Each thread has
+ * a pointer to its scheduling entity (t->sched_entity).
  * 
  * @note The pi_lock, on_rq, on_cpu, and context fields were moved here
- *       from struct proc to separate scheduling concerns.
+ *       from struct thread to separate scheduling concerns.
  * @note pi_lock is acquired internally by wakeup functions, not by callers.
  * 
- * @see struct proc
+ * @see struct thread
  * @see struct rq
  * @see struct sched_class
  */
 struct sched_entity {
     struct rq *rq;                 /**< Current run queue */
     int priority;                  /**< Scheduling priority (major + minor) */
-    struct proc *proc;             /**< Back pointer to owning process */
+    struct thread *thread;         /**< Back pointer to owning thread */
     struct sched_class *sched_class; /**< Scheduling class (FIFO, IDLE, etc.) */
     spinlock_t pi_lock;            /**< Priority inheritance lock (acquired by wakeup internally) */
     int on_rq;                     /**< 1 if on a ready queue */
@@ -185,7 +185,7 @@ For VM-related structures with complex locking:
 /**
  * @brief Virtual Memory Management structure
  * 
- * Each process has a vm_t structure containing VMAs and the page table.
+ * Each thread has a vm_t structure containing VMAs and the page table.
  * Two separate locks protect different aspects:
  * - rw_lock (rwlock_t): Protects VMA tree structure
  * - spinlock: Protects page table PTE modifications
@@ -200,7 +200,7 @@ For VM-related structures with complex locking:
 typedef struct vm {
     rwlock_t rw_lock;              /**< Protects VMA tree and list */
     struct rb_root vm_tree;        /**< Red-black tree for VMA lookup */
-    uint64 trapframe;              /**< Pointer to process trapframe */
+    uint64 trapframe;              /**< Pointer to thread trapframe */
     vma_t *stack;                  /**< Stack VMA pointer */
     size_t stack_size;             /**< Size of stack area */
     vma_t *heap;                   /**< Heap VMA pointer */
@@ -236,7 +236,7 @@ struct pipe {
 /**
  * @brief File descriptor table with reference counting
  * 
- * Supports shared fd tables between processes (via CLONE_FILES).
+ * Supports shared fd tables between threads (via CLONE_FILES).
  * Reference counted for safe sharing.
  * 
  * @note Use vfs_fdtable_clone() with clone_flags to control sharing.
@@ -394,8 +394,8 @@ struct vfs_inode *vfs_namei(const char *path, size_t len);
 
 ```c
 /**
- * @defgroup scheduler Process Scheduler
- * @brief Linux-style process scheduling infrastructure
+ * @defgroup scheduler Thread Scheduler
+ * @brief Linux-style thread scheduling infrastructure
  * @{
  */
 
@@ -585,12 +585,12 @@ Organize code into logical modules:
 /** @} */ // end of vfs
 ```
 
-### Process and Scheduler Modules
+### Thread and Scheduler Modules
 
 ```c
 /**
- * @defgroup proc Process Management
- * @brief Process lifecycle and scheduling
+ * @defgroup proc Thread Management
+ * @brief Thread lifecycle and scheduling
  * @{
  */
 

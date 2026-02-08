@@ -1,11 +1,11 @@
 #ifndef SCHED_H
 #define SCHED_H
 
-#include "proc/proc_types.h"
+#include "proc/thread_types.h"
 
 struct spinlock;
 
-void scheduler_wakeup(struct proc *p);
-void scheduler_sleep(struct spinlock *lk, enum procstate state);
+void scheduler_wakeup(struct thread *p);
+void scheduler_sleep(struct spinlock *lk, enum thread_state state);
 
 #endif /* SCHED_H */

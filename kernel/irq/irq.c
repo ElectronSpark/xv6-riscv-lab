@@ -5,7 +5,7 @@
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "lock/rcu.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "defs.h"
 #include "printf.h"
 #include "proc/sched.h"

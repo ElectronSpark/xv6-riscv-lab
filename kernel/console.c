@@ -15,7 +15,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "mm/vm.h"
 #include "dev/cdev.h"
@@ -25,14 +25,14 @@
 #include "signal.h"
 
 #ifndef CONSOLE_MAJOR
-#define CONSOLE_MAJOR  1
+#define CONSOLE_MAJOR 1
 #endif
 #ifndef CONSOLE_MINOR
-#define CONSOLE_MINOR  1
+#define CONSOLE_MINOR 1
 #endif
 
 #define BACKSPACE 0x100
-#define C(x)  ((x)-'@')  // Control-x
+#define C(x) ((x) - '@') // Control-x
 
 // Flag to track if UART has been initialized
 // Before UART init, we use SBI for console output
@@ -43,111 +43,114 @@ static volatile int uart_initialized = 0;
 // called by printf(), and to echo input characters,
 // but not from write().
 //
-void
-consputc(int c)
-{
-  if(!uart_initialized) {
-    // Use SBI for early console output before UART is ready
-    if(c == BACKSPACE){
-      sbi_console_putchar('\b'); sbi_console_putchar(' '); sbi_console_putchar('\b');
-    } else {
-      // Convert \n to \r\n for proper terminal output
-      if(c == '\n')
-        sbi_console_putchar('\r');
-      sbi_console_putchar(c);
+void consputc(int c) {
+    if (!uart_initialized) {
+        // Use SBI for early console output before UART is ready
+        if (c == BACKSPACE) {
+            sbi_console_putchar('\b');
+            sbi_console_putchar(' ');
+            sbi_console_putchar('\b');
+        } else {
+            // Convert \n to \r\n for proper terminal output
+            if (c == '\n')
+                sbi_console_putchar('\r');
+            sbi_console_putchar(c);
+        }
+        return;
     }
-    return;
-  }
-  
-  // Use synchronous UART output (safe for interrupt context, like xv6-OrangePi_RV2)
-  if(c == BACKSPACE){
-    // if the user typed backspace, overwrite with a space.
-    uartputc_sync('\b'); uartputc_sync(' '); uartputc_sync('\b');
-  } else {
-    // Convert \n to \r\n for proper terminal output
-    if(c == '\n')
-      uartputc_sync('\r');
-    uartputc_sync(c);
-  }
+
+    // Use synchronous UART output (safe for interrupt context, like
+    // xv6-OrangePi_RV2)
+    if (c == BACKSPACE) {
+        // if the user typed backspace, overwrite with a space.
+        uartputc_sync('\b');
+        uartputc_sync(' ');
+        uartputc_sync('\b');
+    } else {
+        // Convert \n to \r\n for proper terminal output
+        if (c == '\n')
+            uartputc_sync('\r');
+        uartputc_sync(c);
+    }
 }
 
 //
 // send a string to the console.
 // for use by puts() and optimized printing.
 //
-void
-consputs(const char *s, int n)
-{
-  if(!uart_initialized) {
-    // Use SBI for early console output before UART is ready
-    for(int i = 0; i < n; i++) {
-      if(s[i] == BACKSPACE){
-        sbi_console_putchar('\b'); sbi_console_putchar(' '); sbi_console_putchar('\b');
-      } else {
-        // Convert \n to \r\n for proper terminal output
-        if(s[i] == '\n')
-          sbi_console_putchar('\r');
-        sbi_console_putchar(s[i]);
-      }
+void consputs(const char *s, int n) {
+    if (!uart_initialized) {
+        // Use SBI for early console output before UART is ready
+        for (int i = 0; i < n; i++) {
+            if (s[i] == BACKSPACE) {
+                sbi_console_putchar('\b');
+                sbi_console_putchar(' ');
+                sbi_console_putchar('\b');
+            } else {
+                // Convert \n to \r\n for proper terminal output
+                if (s[i] == '\n')
+                    sbi_console_putchar('\r');
+                sbi_console_putchar(s[i]);
+            }
+        }
+        return;
     }
-    return;
-  }
-  
-  for(int i = 0; i < n; i++) {
-    if(s[i] == BACKSPACE){
-      uartputc_sync('\b'); uartputc_sync(' '); uartputc_sync('\b');
-    } else {
-      // Convert \n to \r\n for proper terminal output
-      if(s[i] == '\n')
-        uartputc_sync('\r');
-      uartputc_sync(s[i]);
+
+    for (int i = 0; i < n; i++) {
+        if (s[i] == BACKSPACE) {
+            uartputc_sync('\b');
+            uartputc_sync(' ');
+            uartputc_sync('\b');
+        } else {
+            // Convert \n to \r\n for proper terminal output
+            if (s[i] == '\n')
+                uartputc_sync('\r');
+            uartputc_sync(s[i]);
+        }
     }
-  }
 }
 
 struct {
-  struct spinlock lock;
-  
-  // input
+    struct spinlock lock;
+
+    // input
 #define INPUT_BUF_SIZE 128
-  char buf[INPUT_BUF_SIZE];
-  uint r;  // Read index
-  uint w;  // Write index
-  uint e;  // Edit index
+    char buf[INPUT_BUF_SIZE];
+    uint r; // Read index
+    uint w; // Write index
+    uint e; // Edit index
 } cons;
 
 //
 // user write()s to the console go here.
 //
-int
-consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n)
-{
-  int i;
-  uint64 src = (uint64)buffer;
-  char kbuf[64];
-  int written = 0;
+int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
+    int i;
+    uint64 src = (uint64)buffer;
+    char kbuf[64];
+    int written = 0;
 
-  while(written < n) {
-    int batch_size = n - written;
-    if(batch_size > 64)
-      batch_size = 64;
-    
-    for(i = 0; i < batch_size; i++){
-      if(either_copyin(&kbuf[i], user_src, src + written + i, 1) == -1)
-        return written + i;
-    }
-    
-    // Output with \n -> \r\n conversion for proper terminal display
-    // Use interrupt-driven uartputc for efficiency
-    for(i = 0; i < batch_size; i++) {
-      if(kbuf[i] == '\n')
-        uartputc('\r');
-      uartputc(kbuf[i]);
-    }
-    written += batch_size;
-  }
+    while (written < n) {
+        int batch_size = n - written;
+        if (batch_size > 64)
+            batch_size = 64;
 
-  return written;
+        for (i = 0; i < batch_size; i++) {
+            if (either_copyin(&kbuf[i], user_src, src + written + i, 1) == -1)
+                return written + i;
+        }
+
+        // Output with \n -> \r\n conversion for proper terminal display
+        // Use interrupt-driven uartputc for efficiency
+        for (i = 0; i < batch_size; i++) {
+            if (kbuf[i] == '\n')
+                uartputc('\r');
+            uartputc(kbuf[i]);
+        }
+        written += batch_size;
+    }
+
+    return written;
 }
 
 //
@@ -161,95 +164,90 @@ consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n)
 // We batch characters into a kernel buffer while holding the lock,
 // then copy to userspace after releasing the lock.
 //
-int
-consoleread(cdev_t *cdev, bool user_dst, void *buffer, size_t n)
-{
-  uint target;
-  int c;
-  char kbuf[64];   // kernel buffer for batching characters
-  int batch_count; // number of chars in current batch
-  uint64 dst = (uint64)buffer;
-  int got_newline = 0;
-  int got_eof = 0;
+int consoleread(cdev_t *cdev, bool user_dst, void *buffer, size_t n) {
+    uint target;
+    int c;
+    char kbuf[64];   // kernel buffer for batching characters
+    int batch_count; // number of chars in current batch
+    uint64 dst = (uint64)buffer;
+    int got_newline = 0;
+    int got_eof = 0;
 
-  target = n;
-  spin_lock(&cons.lock);
-  while(n > 0 && !got_newline && !got_eof){
-    batch_count = 0;
-    
-    // Collect up to 64 chars (or until newline/EOF) while holding lock
-    while(n > 0 && batch_count < 64 && !got_newline && !got_eof){
-      // wait until interrupt handler has put some input into cons.buffer.
-      while(cons.r == cons.w){
-        if(killed(myproc())){
-          spin_unlock(&cons.lock);
-          // Copy any pending data before returning
-          if(batch_count > 0) {
-            if(either_copyout(user_dst, dst, kbuf, batch_count) == -1)
-              return target - n; // return bytes read so far
+    target = n;
+    spin_lock(&cons.lock);
+    while (n > 0 && !got_newline && !got_eof) {
+        batch_count = 0;
+
+        // Collect up to 64 chars (or until newline/EOF) while holding lock
+        while (n > 0 && batch_count < 64 && !got_newline && !got_eof) {
+            // wait until interrupt handler has put some input into cons.buffer.
+            while (cons.r == cons.w) {
+                if (killed(current)) {
+                    spin_unlock(&cons.lock);
+                    // Copy any pending data before returning
+                    if (batch_count > 0) {
+                        if (either_copyout(user_dst, dst, kbuf, batch_count) ==
+                            -1)
+                            return target - n; // return bytes read so far
+                        dst += batch_count;
+                        n -= batch_count;
+                    }
+                    return target - n;
+                }
+                sleep_on_chan(&cons.r, &cons.lock);
+            }
+
+            c = cons.buf[cons.r++ % INPUT_BUF_SIZE];
+
+            if (c == C('D')) { // end-of-file
+                if (n < target || batch_count > 0) {
+                    // Save ^D for next time, to make sure
+                    // caller gets a 0-byte result.
+                    cons.r--;
+                }
+                got_eof = 1;
+                break;
+            }
+
+            kbuf[batch_count++] = c;
+            n--;
+
+            if (c == '\n') {
+                // a whole line has arrived
+                got_newline = 1;
+                break;
+            }
+        }
+
+        // Release lock before copying to userspace
+        spin_unlock(&cons.lock);
+
+        // Copy batch to userspace (without holding spinlock)
+        if (batch_count > 0) {
+            if (either_copyout(user_dst, dst, kbuf, batch_count) == -1) {
+                // Copy failed, return what we've read so far
+                return target - n - batch_count;
+            }
             dst += batch_count;
-            n -= batch_count;
-          }
-          return target - n;
         }
-        sleep_on_chan(&cons.r, &cons.lock);
-      }
 
-      c = cons.buf[cons.r++ % INPUT_BUF_SIZE];
-
-      if(c == C('D')){  // end-of-file
-        if(n < target || batch_count > 0){
-          // Save ^D for next time, to make sure
-          // caller gets a 0-byte result.
-          cons.r--;
+        // Re-acquire lock if we need to continue
+        if (n > 0 && !got_newline && !got_eof) {
+            spin_lock(&cons.lock);
         }
-        got_eof = 1;
-        break;
-      }
-
-      kbuf[batch_count++] = c;
-      n--;
-
-      if(c == '\n'){
-        // a whole line has arrived
-        got_newline = 1;
-        break;
-      }
     }
-    
-    // Release lock before copying to userspace
-    spin_unlock(&cons.lock);
-    
-    // Copy batch to userspace (without holding spinlock)
-    if(batch_count > 0) {
-      if(either_copyout(user_dst, dst, kbuf, batch_count) == -1) {
-        // Copy failed, return what we've read so far
-        return target - n - batch_count;
-      }
-      dst += batch_count;
-    }
-    
-    // Re-acquire lock if we need to continue
-    if(n > 0 && !got_newline && !got_eof) {
-      spin_lock(&cons.lock);
-    }
-  }
-  
-  // If we exited the loop while holding the lock, release it
-  // (This happens if we hit EOF or newline in the first iteration)
-  // Actually, we always release the lock inside the loop before copying,
-  // so we should not be holding it here.
 
-  return target - n;
+    // If we exited the loop while holding the lock, release it
+    // (This happens if we hit EOF or newline in the first iteration)
+    // Actually, we always release the lock inside the loop before copying,
+    // so we should not be holding it here.
+
+    return target - n;
 }
 
-static int consoleopen(cdev_t *cdev) {
-    return 0;
-}
+static int consoleopen(cdev_t *cdev) { return 0; }
 
-static int consoleclose(cdev_t *cdev) {
-    return 0;
-}
+static int consoleclose(cdev_t *cdev) { return 0; }
 
 static cdev_ops_t console_cdev_ops = {
     .read = consoleread,
@@ -259,10 +257,11 @@ static cdev_ops_t console_cdev_ops = {
 };
 
 static cdev_t console_cdev = {
-    .dev = {
-        .major = CONSOLE_MAJOR,
-        .minor = CONSOLE_MINOR,
-    },
+    .dev =
+        {
+            .major = CONSOLE_MAJOR,
+            .minor = CONSOLE_MINOR,
+        },
     .readable = 1,
     .writable = 1,
 };
@@ -275,121 +274,118 @@ extern void uartintr(int irq, void *data, device_t *dev);
 // do erase/kill processing, append to cons.buf,
 // wake up consoleread() if a whole line has arrived.
 //
-void
-consoleintr(int c)
-{
-  spin_lock(&cons.lock);
+void consoleintr(int c) {
+    spin_lock(&cons.lock);
 
-  switch(c){
-  case C('P'):  // Print process list.
-    procdump();
-    break;
-  case C('U'):  // Kill line.
-    while(cons.e != cons.w &&
-          cons.buf[(cons.e-1) % INPUT_BUF_SIZE] != '\n'){
-      cons.e--;
-      consputc(BACKSPACE);
+    switch (c) {
+    case C('P'): // Print process list.
+        procdump();
+        break;
+    case C('U'): // Kill line.
+        while (cons.e != cons.w &&
+               cons.buf[(cons.e - 1) % INPUT_BUF_SIZE] != '\n') {
+            cons.e--;
+            consputc(BACKSPACE);
+        }
+        break;
+    case C('H'): // Backspace
+    case '\x7f': // Delete key
+        if (cons.e != cons.w) {
+            cons.e--;
+            consputc(BACKSPACE);
+        }
+        break;
+    default:
+        if (c != 0 && cons.e - cons.r < INPUT_BUF_SIZE) {
+            c = (c == '\r') ? '\n' : c;
+
+            // echo back to the user.
+            if (c == '\x1b')
+                consputc('['); // Escape sequence start
+            else if (c == '\t')
+                consputc(' '); // Convert tab to space for simplicity
+            else if ((c < 32 || c > 126) &&
+                     c != '\n') // Non-printable characters
+                consputc('?');  // Replace with '?'
+            else
+                consputc(c);
+
+            // store for consumption by consoleread().
+            cons.buf[cons.e++ % INPUT_BUF_SIZE] = c;
+
+            if (c == '\n' || c == '\t' || c == C('D') ||
+                cons.e - cons.r == INPUT_BUF_SIZE) {
+                // wake up consoleread() if a whole line (or end-of-file)
+                // has arrived.
+                cons.w = cons.e;
+                wakeup_on_chan(&cons.r);
+            }
+        }
+        break;
     }
-    break;
-  case C('H'): // Backspace
-  case '\x7f': // Delete key
-    if(cons.e != cons.w){
-      cons.e--;
-      consputc(BACKSPACE);
-    }
-    break;
-  default:
-    if(c != 0 && cons.e-cons.r < INPUT_BUF_SIZE){
-      c = (c == '\r') ? '\n' : c;
 
-      // echo back to the user.
-      if (c == '\x1b')
-        consputc('[');  // Escape sequence start
-      else if (c == '\t')
-        consputc(' ');  // Convert tab to space for simplicity
-      else if ((c < 32 || c > 126) && c != '\n')  // Non-printable characters
-        consputc('?');  // Replace with '?'
-      else
-        consputc(c);
-
-      // store for consumption by consoleread().
-      cons.buf[cons.e++ % INPUT_BUF_SIZE] = c;
-
-      if(c == '\n' || c == '\t' || c == C('D') || cons.e-cons.r == INPUT_BUF_SIZE){
-        // wake up consoleread() if a whole line (or end-of-file)
-        // has arrived.
-        cons.w = cons.e;
-        wakeup_on_chan(&cons.r);
-      }
-    }
-    break;
-  }
-  
-  spin_unlock(&cons.lock);
+    spin_unlock(&cons.lock);
 }
 
-void
-consoleinit(void)
-{
-  spin_init(&cons.lock, "cons");
+void consoleinit(void) {
+    spin_init(&cons.lock, "cons");
 
-  // Try to initialize UART hardware
-  // Returns 1 if successful (QEMU), 0 if deferred (real hardware uses SBI)
-  if (uartinit()) {
-    // Mark UART as initialized - switch from SBI to UART output
-    uart_initialized = 1;
-  }
-  // If uartinit returned 0, keep uart_initialized = 0 to continue using SBI
+    // Try to initialize UART hardware
+    // Returns 1 if successful (QEMU), 0 if deferred (real hardware uses SBI)
+    if (uartinit()) {
+        // Mark UART as initialized - switch from SBI to UART output
+        uart_initialized = 1;
+    }
+    // If uartinit returned 0, keep uart_initialized = 0 to continue using SBI
 }
 
 // SBI console input polling thread
 // On non-QEMU platforms where UART hardware isn't used, we poll SBI for input
-static void
-sbi_console_poll_thread(uint64 arg1, uint64 arg2)
-{
-  (void)arg1;
-  (void)arg2;
-  for (;;) {
-    // Read all available characters in a batch
-    int got_input = 0;
-    for (int i = 0; i < 32; i++) {  // Read up to 32 chars per cycle
-      int c = sbi_console_getchar();
-      if (c >= 0) {
-        consoleintr(c);
-        got_input = 1;
-      } else {
-        break;  // No more input available
-      }
+static void sbi_console_poll_thread(uint64 arg1, uint64 arg2) {
+    (void)arg1;
+    (void)arg2;
+    for (;;) {
+        // Read all available characters in a batch
+        int got_input = 0;
+        for (int i = 0; i < 32; i++) { // Read up to 32 chars per cycle
+            int c = sbi_console_getchar();
+            if (c >= 0) {
+                consoleintr(c);
+                got_input = 1;
+            } else {
+                break; // No more input available
+            }
+        }
+
+        if (!got_input) {
+            // No input available, sleep briefly to avoid busy-waiting
+            // Use 1ms for responsive interactive typing
+            sleep_ms(1);
+        }
+        // If we got input, immediately check for more without sleeping
     }
-    
-    if (!got_input) {
-      // No input available, sleep briefly to avoid busy-waiting
-      // Use 1ms for responsive interactive typing
-      sleep_ms(1);
-    }
-    // If we got input, immediately check for more without sleeping
-  }
 }
 
-void
-consoledevinit(void)
-{
-  console_cdev.ops = console_cdev_ops;
-  int errno = cdev_register(&console_cdev);
-  assert(errno == 0, "consoleinit: cdev_register failed: %d\n", errno);
-  struct irq_desc uart_irq_desc = {
-    .handler = uartintr,
-    .data = NULL,
-    .dev = &console_cdev.dev,
-  };
-  errno = register_irq_handler(PLIC_IRQ(UART0_IRQ), &uart_irq_desc);
-  assert(errno == 0, "consoledevinit: register_irq_handler failed, error code: %d\n", errno);
-  
-  // Start SBI polling thread if UART hardware not available
-  if (!uart_initialized) {
-    struct proc *p = NULL;
-    int pid = kernel_proc_create("sbi_console", &p, sbi_console_poll_thread, 0, 0, 0);
-    if (pid >= 0 && p != NULL)
-      wakeup_proc(p);
-  }
+void consoledevinit(void) {
+    console_cdev.ops = console_cdev_ops;
+    int errno = cdev_register(&console_cdev);
+    assert(errno == 0, "consoleinit: cdev_register failed: %d\n", errno);
+    struct irq_desc uart_irq_desc = {
+        .handler = uartintr,
+        .data = NULL,
+        .dev = &console_cdev.dev,
+    };
+    errno = register_irq_handler(PLIC_IRQ(UART0_IRQ), &uart_irq_desc);
+    assert(errno == 0,
+           "consoledevinit: register_irq_handler failed, error code: %d\n",
+           errno);
+
+    // Start SBI polling thread if UART hardware not available
+    if (!uart_initialized) {
+        struct thread *p = NULL;
+        int pid =
+            kthread_create("sbi_console", &p, sbi_console_poll_thread, 0, 0, 0);
+        if (pid >= 0 && p != NULL)
+            wakeup(p);
+    }
 }

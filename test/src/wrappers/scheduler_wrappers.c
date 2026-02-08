@@ -2,16 +2,16 @@
  * Scheduler wrappers for unit tests
  */
 #include "types.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "spinlock.h"
 
-void __wrap_scheduler_wakeup(struct proc *p) {
+void __wrap_scheduler_wakeup(struct thread *p) {
     (void)p;
     // No-op for tests
 }
 
-void __wrap_scheduler_sleep(struct spinlock *lk, enum procstate state) {
+void __wrap_scheduler_sleep(struct spinlock *lk, enum thread_state state) {
     (void)lk;
     (void)state;
     // No-op for tests

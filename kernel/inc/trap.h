@@ -12,7 +12,7 @@
 // When in IRQ stack, we should:
 // - Finish handling the interrupt as soon as possible
 // When in IRQ stack, we should NOT:
-// - Call functions that may sleep or yield the CPU. IRQ context doesn't belong to any process.
+// - Call functions that may sleep or yield the CPU. IRQ context doesn't belong to any thread.
 // - Perform long computations
 // IRQ numbers will be distributed as the following:
 // HW Exeption Codes 0 - 16(not including 9):

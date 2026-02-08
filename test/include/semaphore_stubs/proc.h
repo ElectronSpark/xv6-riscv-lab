@@ -1,5 +1,5 @@
-#ifndef __KERNEL_PROC_H
-#define __KERNEL_PROC_H
+#ifndef __KERNEL_THREAD_H
+#define __KERNEL_THREAD_H
 
 #include "types.h"
 
@@ -9,30 +9,30 @@ struct cpu {
     int dummy;
 };
 
-struct proc {
+struct thread {
     pid_t pid;
     int dummy;
 };
 
-enum procstate {
-    PSTATE_UNUSED = 0,
-    PSTATE_USED,
-    PSTATE_INTERRUPTIBLE,
-    STATE_KILLABLE,
-    STATE_TIMER,
-    STATE_KILLABLE_TIMER,
-    PSTATE_UNINTERRUPTIBLE,
-    // PSTATE_RUNNABLE,
-    PSTATE_RUNNING,
-    PSTATE_EXITING,
-    PSTATE_ZOMBIE,
+enum thread_state {
+    THREAD_UNUSED = 0,
+    THREAD_USED,
+    THREAD_INTERRUPTIBLE,
+    THREAD_KIILABLE,
+    THREAD_TIMER,
+    THREAD_KIILABLE_TIMER,
+    THREAD_UNINTERRUPTIBLE,
+    // THREAD_RUNNABLE,
+    THREAD_RUNNING,
+    THREAD_EXITING,
+    THREAD_ZOMBIE,
 };
 
-#define PSTATE_IS_SLEEPING(state)                              \
-    ((state) == PSTATE_INTERRUPTIBLE ||                        \
-     (state) == PSTATE_UNINTERRUPTIBLE ||                      \
-     (state) == STATE_KILLABLE ||                              \
-     (state) == STATE_TIMER ||                                 \
-     (state) == STATE_KILLABLE_TIMER)
+#define THREAD_IS_SLEEPING(state)                              \
+    ((state) == THREAD_INTERRUPTIBLE ||                        \
+     (state) == THREAD_UNINTERRUPTIBLE ||                      \
+     (state) == THREAD_KIILABLE ||                              \
+     (state) == THREAD_TIMER ||                                 \
+     (state) == THREAD_KIILABLE_TIMER)
 
-#endif /* __KERNEL_PROC_H */
+#endif /* __KERNEL_THREAD_H */

@@ -12,7 +12,7 @@
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "defs.h"
 #include "printf.h"
 #include "elf.h"
@@ -68,7 +68,7 @@ int exec(char *path, char **argv) {
     struct vfs_file *file = NULL;
     struct proghdr ph;
     vm_t *tmp_vm = NULL;
-    struct proc *p = myproc();
+    struct thread *p = current;
 
     // Look up the file using VFS
     struct vfs_inode *inode = vfs_namei(path, strlen(path));
@@ -156,7 +156,7 @@ int exec(char *path, char **argv) {
     vfs_fput(file);
     file = NULL;
 
-    p = myproc();
+    p = current;
 
     // Allocate some pages at the next page boundary.
     // Make the first inaccessible as a stack guard.

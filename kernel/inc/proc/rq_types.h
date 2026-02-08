@@ -1,5 +1,5 @@
-#ifndef __KERNEL_PROC_RQ_TYPES_H
-#define __KERNEL_PROC_RQ_TYPES_H
+#ifndef __KERNEL_THREAD_RQ_TYPES_H
+#define __KERNEL_THREAD_RQ_TYPES_H
 
 #include "compiler.h"
 #include "riscv.h"
@@ -12,10 +12,9 @@
 struct rq;
 struct rq_percpu;
 struct sched_entity;
-struct proc;
 
 // Priority level count - needed for struct rq_percpu definition
-#define PRIORITY_MAINLEVELS         64
+#define PRIORITY_MAINLEVELS 64
 
 #define SCHED_FIXEDPOINT_SHIFT 10
 #define SCHED_FIXEDPOINT_ONE (1 << SCHED_FIXEDPOINT_SHIFT)
@@ -87,7 +86,7 @@ struct sched_class {
     // Called on each timer tick for the currently running task
     void (*task_tick)(struct rq *rq, struct sched_entity *se);
 
-    // When creating or exiting a process
+    // When creating or exiting a thread
     void (*task_fork)(struct rq *rq, struct sched_entity *se);
     void (*task_dead)(struct rq *rq, struct sched_entity *se);
 
@@ -98,23 +97,26 @@ struct sched_class {
 struct rq {
     struct sched_class *sched_class; // Scheduling class in use
     int class_id;                    // Scheduling class ID
-    int task_count;                  // Number of processes in the run queue
+    int task_count;                  // Number of threads in the run queue
     int cpu_id;                      // CPU ID this run queue belongs to
 } __ALIGNED_CACHELINE;
 
 /**
  * @brief Per-CPU run queue data, cache-line aligned to avoid false sharing.
- * 
+ *
  * Each CPU has its own instance of this structure, containing all per-CPU
  * scheduler state. Use rq_percpu_lock_get() / rq_percpu_put_unlock() to access.
  */
 struct rq_percpu {
-    struct rq *rqs[PRIORITY_MAINLEVELS];  /**< Per-priority run queues for this CPU */
-    uint64 ready_mask;                     /**< Top-level ready mask (8 groups of 8 priorities) */
-    uint64 ready_mask_secondary;           /**< Secondary ready mask (64 priority bits) */
-    spinlock_t rq_lock;                    /**< Lock protecting this CPU's run queue data */
-    struct sched_entity *wake_list_head;   /**< Head of the wake list for this CPU */
-    struct sched_entity *current_se;       /**< Currently running sched_entity on this CPU */
+    struct rq
+        *rqs[PRIORITY_MAINLEVELS]; /**< Per-priority run queues for this CPU */
+    uint64 ready_mask; /**< Top-level ready mask (8 groups of 8 priorities) */
+    uint64 ready_mask_secondary; /**< Secondary ready mask (64 priority bits) */
+    spinlock_t rq_lock; /**< Lock protecting this CPU's run queue data */
+    struct sched_entity
+        *wake_list_head; /**< Head of the wake list for this CPU */
+    struct sched_entity
+        *current_se; /**< Currently running sched_entity on this CPU */
 } __ALIGNED_CACHELINE;
 
 struct sched_entity {
@@ -124,27 +126,27 @@ struct sched_entity {
     };
     struct rq *rq;                   // Pointer to the run queue
     int priority;                    // Scheduling priority
-    struct proc *proc;               // Back pointer to the process
+    struct thread *thread;           // Back pointer to the thread
     struct sched_class *sched_class; // Scheduling class
     // Priority Inheritance lock is adopted from Linux kernel.
     // Although we don't have priority levels yet, we still need pi_lock to
-    // protect wakening up process.
-    // pi_lock does not protect sleeping process, it's role is to avoid
-    // multiple wakeups to the same process at the same time.
+    // protect wakening up thread.
+    // pi_lock does not protect sleeping thread, it's role is to avoid
+    // multiple wakeups to the same thread at the same time.
     // pi_lock should be acquired before sched lock
     spinlock_t pi_lock; // priority inheritance lock
-    int on_rq;          // The process is on a ready queue
-    int on_cpu;         // The process is running on a CPU
-    int cpu_id;         // The CPU running this process.
-    struct sched_entity
-        *wake_next;          // Next entity to wake up(entry in wake list)
+    int on_rq;          // The thread is on a ready queue
+    int on_cpu;         // The thread is running on a CPU
+    int cpu_id;         // The CPU running this thread.
+    // Next entity to wake up(entry in wake list)
+    struct sched_entity *wake_next;
     cpumask_t affinity_mask; // CPU affinity mask
 
-    uint64 start_time; // Time when the process started running
-    uint64 exec_start; // Last time the process started executing
-    uint64 exec_end;   // Last time the process stopped executing
+    uint64 start_time; // Time when the thread started running
+    uint64 exec_start; // Last time the thread started executing
+    uint64 exec_end;   // Last time the thread stopped executing
 
-    struct context context; // swtch() here to run process
+    struct context context; // swtch() here to run thread
 };
 
 // Helper to get sched_entity from context pointer (used after context switch)
@@ -152,15 +154,15 @@ static inline struct sched_entity *se_from_context(struct context *ctx) {
     return container_of(ctx, struct sched_entity, context);
 }
 
-// Helper to get proc from context pointer (used after context switch)
-static inline struct proc *proc_from_context(struct context *ctx) {
-    return se_from_context(ctx)->proc;
+// Helper to get thread from context pointer (used after context switch)
+static inline struct thread *thread_from_context(struct context *ctx) {
+    return se_from_context(ctx)->thread;
 }
 
-// Idle proc rq
+// Idle process rq
 struct idle_rq {
     struct rq rq;
-    struct proc *idle_proc; // Idle process for this CPU
+    struct thread *idle_thread; // Idle process for this CPU
 };
 
 #define FIFO_RQ_SUBLEVELS 4 // Number of minor priority levels (2 bits)
@@ -177,4 +179,4 @@ struct fifo_rq {
     uint8 ready_mask; // Bitmask of non-empty subqueues
 };
 
-#endif // __KERNEL_PROC_RQ_TYPES_H
+#endif // __KERNEL_THREAD_RQ_TYPES_H

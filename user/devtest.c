@@ -8,18 +8,18 @@
 #include "kernel/inc/vfs/fcntl.h"
 #include "user/user.h"
 
-#define NPROC 10
+#define NR_THREAD 10
 #define NITER 50
 
 // Test 1: Many processes opening/closing console concurrently
 void
 concurrent_open_close()
 {
-  int pids[NPROC];
+  int pids[NR_THREAD];
   
   printf("devtest: concurrent_open_close... ");
   
-  for(int i = 0; i < NPROC; i++){
+  for(int i = 0; i < NR_THREAD; i++){
     pids[i] = fork();
     if(pids[i] < 0){
       printf("fork failed\n");
@@ -42,7 +42,7 @@ concurrent_open_close()
   }
   
   // Parent: wait for all children
-  for(int i = 0; i < NPROC; i++){
+  for(int i = 0; i < NR_THREAD; i++){
     int status;
     wait(&status);
     if(status != 0){
@@ -114,10 +114,10 @@ parallel_fork_device()
     exit(-1);
   }
   
-  int pids[NPROC];
+  int pids[NR_THREAD];
   
   // Fork many children that all inherit the fd
-  for(int i = 0; i < NPROC; i++){
+  for(int i = 0; i < NR_THREAD; i++){
     pids[i] = fork();
     if(pids[i] < 0){
       printf("fork failed\n");
@@ -134,7 +134,7 @@ parallel_fork_device()
   }
   
   // Parent waits
-  for(int i = 0; i < NPROC; i++){
+  for(int i = 0; i < NR_THREAD; i++){
     int status;
     wait(&status);
     if(status != 0){

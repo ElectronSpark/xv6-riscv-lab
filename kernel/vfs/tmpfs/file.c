@@ -26,7 +26,7 @@
 #include "lock/mutex_types.h"
 #include "lock/rwlock.h"
 #include "lock/completion.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
 #include "vfs/fcntl.h"
@@ -142,7 +142,7 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
             count = TMPFS_INODE_EMBEDDED_DATA_LEN - pos;
         }
         if (user) {
-            if (vm_copyout(myproc()->vm, (uint64)buf, ti->file.data + pos, count) < 0) {
+            if (vm_copyout(current->vm, (uint64)buf, ti->file.data + pos, count) < 0) {
                 vfs_iunlock(inode);
                 return -EFAULT;
             }
@@ -187,7 +187,7 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
         char *data = (char *)pcn->data + block_off;
         
         if (user) {
-            if (vm_copyout(myproc()->vm, (uint64)(buf + bytes_read), data, chunk) < 0) {
+            if (vm_copyout(current->vm, (uint64)(buf + bytes_read), data, chunk) < 0) {
                 pcache_put_page(pc, page);
                 vfs_iunlock(inode);
                 if (bytes_read == 0) return -EFAULT;
@@ -233,7 +233,7 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t
         if (end_pos <= TMPFS_INODE_EMBEDDED_DATA_LEN) {
             // Still fits in embedded storage
             if (user) {
-                if (vm_copyin(myproc()->vm, ti->file.data + pos, (uint64)buf, count) < 0) {
+                if (vm_copyin(current->vm, ti->file.data + pos, (uint64)buf, count) < 0) {
                 vfs_iunlock(inode);
                 return -EFAULT;
             }
@@ -288,7 +288,7 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf, size_t
         char *data = (char *)pcn->data + block_off;
         
         if (user) {
-            if (vm_copyin(myproc()->vm, data, (uint64)(buf + bytes_written), chunk) < 0) {
+            if (vm_copyin(current->vm, data, (uint64)(buf + bytes_written), chunk) < 0) {
                 pcache_put_page(pc, page);
                 vfs_iunlock(inode);
                 if (bytes_written == 0) return -EFAULT;

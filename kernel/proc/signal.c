@@ -13,10 +13,10 @@
  * - Release sigacts->lock BEFORE scheduler operations (wakeup, yield)
  * - Copy data from protected structures before releasing lock if needed after
  *
- * This is simpler than the old two-lock (proc_lock + sigacts_lock) approach
+ * This is simpler than the old two-lock (tcb_lock + sigacts_lock) approach
  * and matches Linux's design where sighand->siglock is THE signal lock.
  *
- * The PROC_FLAG_SIGPENDING flag provides O(1) checks for pending signals.
+ * The THREAD_FLAG_SIGPENDING flag provides O(1) checks for pending signals.
  * recalc_sigpending_tsk() updates this flag and must be called after any
  * change to signal.sig_pending_mask or sa_sigmask.
  */
@@ -30,7 +30,7 @@
 #include "signal.h"
 #include "lock/spinlock.h"
 #include "lock/rcu.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include <mm/slab.h>
 #include "proc/sched.h"
 #include "list.h"
@@ -108,7 +108,7 @@ sig_defact signo_default_action(int signo) {
  * 
  * Caller must hold sigacts_lock (or ensure sigacts won't change).
  */
-bool recalc_sigpending_tsk(struct proc *p) {
+bool recalc_sigpending_tsk(struct thread *p) {
     if (!p || !p->sigacts) {
         return false;
     }
@@ -118,7 +118,7 @@ bool recalc_sigpending_tsk(struct proc *p) {
     sigset_t blocked = sa->sa_sigmask;
     
     if ((pending & ~blocked) != 0) {
-        PROC_SET_SIGPENDING(p);
+        THREAD_SET_SIGPENDING(p);
         return true;
     }
     
@@ -135,7 +135,7 @@ bool recalc_sigpending_tsk(struct proc *p) {
  * This can clear the flag if no signals are pending.
  */
 void recalc_sigpending(void) {
-    struct proc *p = myproc();
+    struct thread *p = current;
     if (!p || !p->sigacts) {
         return;
     }
@@ -144,12 +144,12 @@ void recalc_sigpending(void) {
     sigacts_lock(sa);
     if (!recalc_sigpending_tsk(p)) {
         // No pending signals, safe to clear flag for current process
-        PROC_CLEAR_SIGPENDING(p);
+        THREAD_CLEAR_SIGPENDING(p);
     }
     sigacts_unlock(sa);
 }
 
-void sigpending_init(struct proc *p) {
+void sigpending_init(struct thread *p) {
     if (!p) {
         return; // Invalid pointer
     }
@@ -159,7 +159,7 @@ void sigpending_init(struct proc *p) {
     }
 }
 
-void sigpending_destroy(struct proc *p) {
+void sigpending_destroy(struct thread *p) {
     if (!p) {
         return; // Invalid pointer
     }
@@ -224,7 +224,7 @@ void ksiginfo_free(ksiginfo_t *ksi) {
 // Ksiginfo being cleaned will be freed.
 // The caller must hold sigacts->lock.
 // Returns 0 on success, -1 on error.
-int sigpending_empty(struct proc *p, int signo) {
+int sigpending_empty(struct thread *p, int signo) {
     if (!p) {
         return -EINVAL; // Invalid process pointer
     }
@@ -246,7 +246,7 @@ int sigpending_empty(struct proc *p, int signo) {
         }
         p->signal.sig_pending_mask = 0;
         // Update sigpending flag after clearing all pending signals
-        PROC_CLEAR_SIGPENDING(p);
+        THREAD_CLEAR_SIGPENDING(p);
         return 0;
     }
 
@@ -381,7 +381,7 @@ void signal_init(void) {
 #define MAX_SIGINFO_PER_SIGNAL 8
 
 // Helper: count ksiginfo entries currently queued for a signal.
-static int __siginfo_queue_len(struct proc *p, int signo) {
+static int __siginfo_queue_len(struct thread *p, int signo) {
     sigpending_t *sq = &p->signal.sig_pending[signo - 1];
     int n = 0;
     ksiginfo_t *pos = NULL; ksiginfo_t *tmp = NULL;
@@ -391,19 +391,19 @@ static int __siginfo_queue_len(struct proc *p, int signo) {
     return n;
 }
 
-int __signal_send(struct proc *p, ksiginfo_t *info) {
+int __signal_send(struct thread *p, ksiginfo_t *info) {
     int ret = -EINVAL; // Default to error
     if (p == NULL || info == NULL) {
-        return -EINVAL; // No process available
+        return -EINVAL; // No threads available
     }
     if (SIGBAD(info->signo)) {
-        return -EINVAL; // Invalid process or signal number
+        return -EINVAL; // Invalid thread or signal number
     }
 
-    // Check process validity - use atomic load for lockless initial check
-    enum procstate pstate = __proc_get_pstate(p);
-    if (pstate == PSTATE_UNUSED || pstate == PSTATE_ZOMBIE || PROC_KILLED(p)) {
-        return -EINVAL; // Process is not valid or already killed
+    // Check thread validity - use atomic load for lockless initial check
+    enum thread_state pstate = __thread_state_get(p);
+    if (pstate == THREAD_UNUSED || pstate == THREAD_ZOMBIE || THREAD_KILLED(p)) {
+        return -EINVAL; // Thread is not valid or already killed
     }
 
     sigacts_t *sa = p->sigacts;
@@ -464,20 +464,20 @@ after_enqueue:
     // Release sigacts lock before scheduler operations
     sigacts_unlock(sa);
 
-    // For scheduler operations, we need proc_lock to check/modify state
+    // For scheduler operations, we need tcb_lock to check/modify state
     if (is_stop) {
-        // Stop signals: The process will enter PSTATE_STOPPED voluntarily when it
-        // processes signals in handle_signal(). If it's currently sleeping in an
+        // Stop signals: The thread will enter THREAD_STOPPED voluntarily when it
+        // Process signals in handle_signal(). If it's currently sleeping in an
         // interruptible state, wake it up so it can process the stop signal.
-        proc_lock(p);
-        pstate = __proc_get_pstate(p);
-        if (PSTATE_IS_INTERRUPTIBLE(pstate)) {
+        tcb_lock(p);
+        pstate = __thread_state_get(p);
+        if (THREAD_IS_INTERRUPTIBLE(pstate)) {
             // Wake up interruptible sleeper so it can handle the stop signal
-            proc_unlock(p);
+            tcb_unlock(p);
             scheduler_wakeup(p);
-        } else if (pstate == PSTATE_RUNNING) {
-            proc_unlock(p);
-            // Process is running, send IPI so it handles the stop signal promptly
+        } else if (pstate == THREAD_RUNNING) {
+            tcb_unlock(p);
+            // Thread is running, send IPI so it handles the stop signal promptly
             int target_cpu = smp_load_acquire(&p->sched_entity->cpu_id);
             if (target_cpu != cpuid()) {
                 ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
@@ -485,101 +485,101 @@ after_enqueue:
                 SET_NEEDS_RESCHED();
             }
         } else {
-            proc_unlock(p);
+            tcb_unlock(p);
         }
-        // If uninterruptible, the process will handle the stop signal when it wakes up
+        // If uninterruptible, the thread will handle the stop signal when it wakes up
     }
     if (is_cont) {
-        // Continue signal: Wake up the process from PSTATE_STOPPED state.
+        // Continue signal: Wake up the thread from THREAD_STOPPED state.
         scheduler_wakeup_stopped(p);
     }
 
     ret = (ret == -EINVAL) ? 0 : ret; // Treat enqueue allocation failure as soft failure.
 
-    // If the action is to terminate the process, set the killed flag
+    // If the action is to terminate the thread, set the killed flag
     if (is_term) {
-        PROC_SET_KILLED(p);
-        if (PROC_STOPPED(p)) {
-            // If the process is stopped, we need to wake it up.
+        THREAD_SET_KILLED(p);
+        if (THREAD_STOPPED(p)) {
+            // If the thread is stopped, we need to wake it up.
             scheduler_wakeup_stopped(p);
         }
     }
     
-    // Check if signal is pending (unmasked) and notify if process is sleeping
+    // Check if signal is pending (unmasked) and notify if thread is sleeping
     sigset_t pending_unmasked = smp_load_acquire(&p->signal.sig_pending_mask) & ~sigmask;
     if (pending_unmasked != 0) {
-        proc_lock(p);
+        tcb_lock(p);
         signal_notify(p);
-        proc_unlock(p);
+        tcb_unlock(p);
     }
 
     return ret; // Signal sent successfully
 }
 
 int signal_send(int pid, ksiginfo_t *info) {
-    struct proc *p = NULL;
+    struct thread *p = NULL;
     if (pid < 0 || info == NULL || SIGBAD(info->signo)) {
         return -EINVAL; // Invalid PID or signal number
     }
     rcu_read_lock();
-    if (proctab_get_pid_proc(pid, &p) != 0) {
+    if (get_pid_thread(pid, &p) != 0) {
         rcu_read_unlock();
-        return -EINVAL; // No process found
+        return -EINVAL; // No thrae found
     }
     if (p == NULL) {
         rcu_read_unlock();
-        return -EINVAL; // No process found
+        return -EINVAL; // No thread found
     }
-    assert(p != NULL, "signal_send: proc is NULL");
+    assert(p != NULL, "signal_send: thread is NULL");
     
     int ret = __signal_send(p, info);
     rcu_read_unlock();
     return ret;
 }
 
-bool signal_pending(struct proc *p) {
+bool signal_pending(struct thread *p) {
     if (!p) {
         return false;
     }
     // Fast path: just check the flag
-    return PROC_SIGPENDING(p);
+    return THREAD_SIGPENDING(p);
 }
 
 // Version that takes sigacts as parameter when caller already holds sigacts_lock
-// Caller must hold proc_lock but NOT sigacts_lock (we acquire it here)
-bool signal_pending_locked(struct proc *p, sigacts_t *sa) {
+// Caller must hold tcb_lock but NOT sigacts_lock (we acquire it here)
+bool signal_pending_locked(struct thread *p, sigacts_t *sa) {
     if (!p || !sa) {
         return false;
     }
     // Fast path: just check the flag
-    return PROC_SIGPENDING(p);
+    return THREAD_SIGPENDING(p);
 }
 
-int signal_notify(struct proc *p) {
+int signal_notify(struct thread *p) {
     if (!p) {
         return -1;
     }
     proc_assert_holding(p);
-    if (PROC_AWOKEN(p)) {
+    if (THREAD_AWOKEN(p)) {
         return 0;
     }
-    if (!PROC_SLEEPING(p)) {
+    if (!THREAD_SLEEPING(p)) {
         return -1; // Process is not sleeping
     }
-    if (__proc_get_pstate(p) == PSTATE_INTERRUPTIBLE) {
+    if (__thread_state_get(p) == THREAD_INTERRUPTIBLE) {
         // Must follow wakeup locking protocol:
-        // - Release proc_lock (must NOT be held during wakeup)
+        // - Release tcb_lock (must NOT be held during wakeup)
         // - Call wakeup (no pi_lock needed - rq_lock serializes)
-        // - Reacquire proc_lock
-        proc_unlock(p);
+        // - Reacquire tcb_lock
+        tcb_unlock(p);
         scheduler_wakeup_interruptible(p);
-        proc_lock(p);
+        tcb_lock(p);
         return 0; // Success
     }
-    return -1; // No signals pending or process not in interruptible state
+    return -1; // No signals pending or thread not in interruptible state
 }
 
-bool signal_terminated(struct proc *p) {
+bool signal_terminated(struct thread *p) {
     if (!p) {
         return 0;
     }
@@ -594,13 +594,13 @@ bool signal_terminated(struct proc *p) {
     return terminated;
 }
 
-bool signal_test_clear_stopped(struct proc *p) {
+bool signal_test_clear_stopped(struct thread *p) {
     if (!p) {
         return 0;
     }
     sigacts_t *sa = p->sigacts;
     if (!sa) {
-        return PROC_STOPPED(p);  // No sigacts, just return current stopped state
+        return THREAD_STOPPED(p);  // No sigacts, just return current stopped state
     }
     
     sigacts_lock(sa);
@@ -613,7 +613,7 @@ bool signal_test_clear_stopped(struct proc *p) {
 
     if (pending_cont) {
         // A continue-category signal is pending. Determine if any of them
-        // have user handlers installed. We resume the process in all cases.
+        // have user handlers installed. We resume the thread in all cases.
         bool user_handler = false;
         for (int signo = 1; signo <= NSIG; signo++) {
             if (sigismember(&sigcont_mask, signo) > 0 && sigismember(&pending_cont, signo) > 0) {
@@ -637,22 +637,22 @@ bool signal_test_clear_stopped(struct proc *p) {
     }
 
     if (pending_stopped) {
-        // Consume all pending stop signals (they stop the process) and request STOPPED state.
+        // Consume all pending stop signals (they stop the thread) and request STOPPED state.
         p->signal.sig_pending_mask &= ~pending_stopped;
         // Recalc after modifying pending mask
         recalc_sigpending_tsk(p);
         sigacts_unlock(sa);
-        return 1; // Caller will transition to PSTATE_STOPPED.
+        return 1; // Caller will transition to THREAD_STOPPED.
     }
 
     sigacts_unlock(sa);
-    // No new stop/cont signals; indicate whether process is already stopped.
-    return PROC_STOPPED(p);
+    // No new stop/cont signals; indicate whether thread is already stopped.
+    return THREAD_STOPPED(p);
 }
 
-int signal_restore(struct proc *p, ucontext_t *context) {
+int signal_restore(struct thread *p, ucontext_t *context) {
     if (p == NULL || context == NULL) {
-        return -1; // Invalid process or context
+        return -1; // Invalid thread or context
     }
     
     sigacts_t *sa = p->sigacts;
@@ -687,10 +687,10 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
         return -1; // SIGKILL and SIGSTOP cannot be caught or ignored
     }
 
-    struct proc *p = myproc();
-    assert(p != NULL, "sys_sigaction: myproc returned NULL");
+    struct thread *p = current;
+    assert(p != NULL, "sys_sigaction: current returned NULL");
 
-    if (!PROC_USER_SPACE(p)) {
+    if (!THREAD_USER_SPACE(p)) {
         return -1; // sigaction can only be called in user space
     }
     
@@ -713,10 +713,10 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
                 return -1; // Failed to set default action
             }
             // After changing to SIG_DFL, check if any pending signals 
-            // are now termination signals and update PROC_KILLED accordingly
+            // are now termination signals and update THREAD_KILLED accordingly
             sigset_t pending_term = p->signal.sig_pending_mask & sa->sa_sigterm & ~sa->sa_sigmask;
             if (pending_term != 0) {
-                PROC_SET_KILLED(p);
+                THREAD_SET_KILLED(p);
             }
         }
         sa->sa[signum] = *act;
@@ -740,8 +740,8 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     if (how != SIG_BLOCK && how != SIG_UNBLOCK && how != SIG_SETMASK) {
         return -1; // Invalid operation
     }
-    struct proc *p = myproc();
-    assert(p != NULL, "sigprocmask: myproc returned NULL");
+    struct thread *p = current;
+    assert(p != NULL, "sigprocmask: current returned NULL");
 
     sigacts_t *sa = p->sigacts;
     assert(sa != NULL, "sigprocmask: sigacts is NULL");
@@ -775,28 +775,28 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     // Check if newly unmasked signals are pending
     sigset_t pending_unmasked = p->signal.sig_pending_mask & ~sa->sa_sigmask;
     
-    // If newly unmasked termination signals are pending, set PROC_KILLED
+    // If newly unmasked termination signals are pending, set THREAD_KILLED
     sigset_t pending_term = pending_unmasked & sa->sa_sigterm;
     if (pending_term != 0) {
-        PROC_SET_KILLED(p);
+        THREAD_SET_KILLED(p);
     }
     sigacts_unlock(sa);
 
-    // If newly unmasked signals are pending and process is sleeping, wake it.
-    // Need proc_lock for signal_notify (which checks process state)
+    // If newly unmasked signals are pending and thread is sleeping, wake it.
+    // Need tcb_lock for signal_notify (which checks thread state)
     if (pending_unmasked != 0) {
-        proc_lock(p);
+        tcb_lock(p);
         (void)signal_notify(p);
-        proc_unlock(p);
+        tcb_unlock(p);
     }
     return 0; // Success
 }
 
-int sigpending(struct proc *p, sigset_t *set) {
+int sigpending(struct thread *p, sigset_t *set) {
     if (!set) {
         return -1; // Invalid set pointer
     }
-    assert(p != NULL, "sigpending: myproc returned NULL");
+    assert(p != NULL, "sigpending: current returned NULL");
 
     sigacts_t *sa = p->sigacts;
     assert(sa != NULL, "sigpending: sigacts is NULL");
@@ -811,10 +811,10 @@ int sigpending(struct proc *p, sigset_t *set) {
 }
 
 int sigreturn(void) {
-    struct proc *p = myproc();
-    assert(p != NULL, "sys_sigreturn: myproc returned NULL");
+    struct thread *p = current;
+    assert(p != NULL, "sys_sigreturn: current returned NULL");
 
-    if (!PROC_USER_SPACE(p)) {
+    if (!THREAD_USER_SPACE(p)) {
         return -1; // sigreturn can only be called in user space
     }
 
@@ -831,7 +831,7 @@ int sigreturn(void) {
     ucontext_t uc = {0};
     if (restore_sigframe(p, &uc) != 0) {
         // @TODO:
-        exit(-1); // Restore failed, exit the process
+        exit(-1); // Restore failed, exit the thread
     }
     
     // signal_restore now acquires sigacts_lock internally
@@ -842,7 +842,7 @@ int sigreturn(void) {
 
 // Dequeue signal - caller provides the sigaction copy.
 // Caller must hold sigacts->lock.
-static ksiginfo_t *__dequeue_signal_update_pending_nolock(struct proc *p, int signo, 
+static ksiginfo_t *__dequeue_signal_update_pending_nolock(struct thread *p, int signo, 
                                                            sigaction_t *act) {
     if (p == NULL || act == NULL) {
         return ERR_PTR(-EINVAL);
@@ -883,8 +883,8 @@ static ksiginfo_t *__dequeue_signal_update_pending_nolock(struct proc *p, int si
     return info;
 }
 
-static int __deliver_signal(struct proc *p, int signo, ksiginfo_t *info, sigaction_t *sa, bool *repeat) {
-    // NOTE: This function is called WITHOUT proc_lock held to allow
+static int __deliver_signal(struct thread *p, int signo, ksiginfo_t *info, sigaction_t *sa, bool *repeat) {
+    // NOTE: This function is called WITHOUT tcb_lock held to allow
     // push_sigframe to acquire vm_wlock (sleep lock). The caller must
     // ensure the signal state (sa, info) was captured while holding the lock.
     if (repeat) {
@@ -909,15 +909,15 @@ static int __deliver_signal(struct proc *p, int signo, ksiginfo_t *info, sigacti
     if ((uint64)sa->sa_handler < PAGE_SIZE) {
         printf("__deliver_signal: invalid signal handler address %p for signal %d\n", 
                sa->sa_handler, signo);
-        proc_lock(p);
-        PROC_SET_KILLED(p);
-        proc_unlock(p);
+        tcb_lock(p);
+        THREAD_SET_KILLED(p);
+        tcb_unlock(p);
         return 0;
     }
 
     int ret = 0;
-    if (PROC_USER_SPACE(myproc())) {
-        // If the process has user space, push the signal to its user stack
+    if (THREAD_USER_SPACE(current)) {
+        // If the thread has user space, push the signal to its user stack
         // This may call vm_try_growstack which needs vm_wlock (sleep lock)
         ret = push_sigframe(p, signo, sa, info);
     }
@@ -947,8 +947,8 @@ static int __deliver_signal(struct proc *p, int signo, ksiginfo_t *info, sigacti
 }
 
 void handle_signal(void) {
-    struct proc *p = myproc();
-    assert(p != NULL, "handle_signal: myproc returned NULL");
+    struct thread *p = current;
+    assert(p != NULL, "handle_signal: current returned NULL");
     if (p->sigacts == NULL) {
         return; // No signal actions defined
     }
@@ -965,8 +965,8 @@ void handle_signal(void) {
         sigset_t masked = pending & ~sigmask;
         
         // Check termination
-        if ((masked & sigterm) || PROC_KILLED(p)) {
-            PROC_SET_KILLED(p);
+        if ((masked & sigterm) || THREAD_KILLED(p)) {
+            THREAD_SET_KILLED(p);
             sigacts_unlock(sa);
             break;
         }
@@ -1009,10 +1009,10 @@ void handle_signal(void) {
             recalc_sigpending_tsk(p);
             sigacts_unlock(sa);
             
-            // Use proc_lock for state transition
-            proc_lock(p);
-            __proc_set_pstate(p, PSTATE_STOPPED);
-            proc_unlock(p);
+            // Use tcb_lock for state transition
+            tcb_lock(p);
+            __thread_state_set(p, THREAD_STOPPED);
+            tcb_unlock(p);
             scheduler_yield();
             continue; // Re-check after wakeup
         }
@@ -1075,31 +1075,31 @@ void handle_signal(void) {
             break;
         }
     }
-    if (PROC_KILLED(p)) {
+    if (THREAD_KILLED(p)) {
         exit(-1);
     }
 }
 
 
-// Kill the process with the given pid.
+// Kill the threads with the given pid.
 // The victim won't exit until it tries to return
 // to user space (see usertrap() in trap.c).
 int kill(int pid, int signum) {
     ksiginfo_t info = {0};
     info.signo = signum;
-    info.sender = myproc();
-    info.info.si_pid = myproc()->pid;
+    info.sender = current;
+    info.info.si_pid = current->pid;
 
     return signal_send(pid, &info);
 }
 
-// Kill the given process.
-// Instead of looking up by pid, directly send signal to the given proc.
-int kill_proc(struct proc *p, int signum) {
+// Kill the given thread.
+// Instead of looking up by pid, directly send signal to the given thread.
+int kill_thread(struct thread *p, int signum) {
     ksiginfo_t info = {0};
     info.signo = signum;
-    info.sender = myproc();
-    info.info.si_pid = myproc()->pid;
+    info.sender = current;
+    info.info.si_pid = current->pid;
 
     rcu_read_lock();
     int ret = __signal_send(p, &info);
@@ -1107,12 +1107,12 @@ int kill_proc(struct proc *p, int signum) {
     return ret;
 }
 
-// Check if process should be terminated.
-// This only checks the PROC_KILLED flag which is set atomically by __signal_send
+// Check if thread should be terminated.
+// This only checks the THREAD_KILLED flag which is set atomically by __signal_send
 // when a termination signal is delivered. No locks needed.
-int killed(struct proc *p) {
+int killed(struct thread *p) {
     if (!p) {
         return 0;
     }
-    return PROC_KILLED(p);
+    return THREAD_KILLED(p);
 }

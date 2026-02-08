@@ -4,17 +4,17 @@
 #include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "syscall.h"
 #include "defs.h"
 #include "printf.h"
 #include <mm/vm.h>
 
-// Fetch the uint64 at addr from the current process.
+// Fetch the uint64 at addr from the current thread.
 int
 fetchaddr(uint64 addr, uint64 *ip)
 {
-  struct proc *p = myproc();
+  struct thread *p = current;
   // if(addr >= p->sz || addr+sizeof(uint64) > p->sz) // both tests needed, in case of overflow
   //   return -1;
   if(vm_copyin(p->vm, (char *)ip, addr, sizeof(*ip)) != 0)
@@ -22,12 +22,12 @@ fetchaddr(uint64 addr, uint64 *ip)
   return 0;
 }
 
-// Fetch the nul-terminated string at addr from the current process.
+// Fetch the nul-terminated string at addr from the current thread.
 // Returns length of string, not including nul, or -1 for error.
 int
 fetchstr(uint64 addr, char *buf, int max)
 {
-  struct proc *p = myproc();
+  struct thread *p = current;
   if(vm_copyinstr(p->vm, buf, addr, max) < 0)
     return -1;
   return strlen(buf);
@@ -36,7 +36,7 @@ fetchstr(uint64 addr, char *buf, int max)
 uint64
 argraw(int n)
 {
-  struct proc *p = myproc();
+  struct thread *p = current;
   switch (n) {
   case 0:
     return p->trapframe->trapframe.a0;
@@ -213,7 +213,7 @@ void
 syscall(void)
 {
   int num;
-  struct proc *p = myproc();
+  struct thread *p = current;
 
   num = p->trapframe->trapframe.a7;
   

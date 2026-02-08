@@ -9,7 +9,7 @@
 #include "signal.h"
 #include "proc/sched.h"
 #include "proc/workqueue.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "kobject.h"
 #include "dev/dev.h"
 #include <mm/pcache.h>
@@ -70,7 +70,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     printf("mycpu initialized\n");
     rcu_init();      // RCU subsystem initialization
     dev_table_init(); // Initialize the device table
-    procinit();      // process table
+    thread_init();      // process table
     scheduler_init(); // initialize the scheduler
     workqueue_init(); // workqueue subsystem initialization
     irq_desc_init(); // IRQ descriptor initialization
@@ -84,12 +84,12 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     signal_init();   // signal handling initialization  
     binit();         // buffer cache
     // Legacy iinit() and fileinit() removed - VFS handles these
-    userinit();      // first user process
-    // idle_proc_init must be called before sched_timer_init (or any workqueue_create)
-    // because idle_proc_init calls rq_cpu_activate() to mark this CPU as active.
-    // Without an active CPU, rq_select_task_rq() returns NULL and new processes
+    userinit();      // first user thread
+    // idle_thread_init must be called before sched_timer_init (or any workqueue_create)
+    // because idle_thread_init calls rq_cpu_activate() to mark this CPU as active.
+    // Without an active CPU, rq_select_task_rq() returns NULL and new threads
     // cannot be enqueued to any run queue.
-    idle_proc_init();
+    idle_thread_init();
     sched_timer_init();
     // goldfish_rtc_init();  // Goldfish RTC driver (1-second alarm)
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -109,7 +109,7 @@ static void __start_kernel_secondary_hart(int hartid) {
     kvminithart();    // turn on paging
     // Now switch TP to trampoline virtual address (paging is now on)
     mycpu_init(hartid, true);
-    idle_proc_init();
+    idle_thread_init();
     trapinithart();   // install kernel trap vector
     plicinithart();   // ask PLIC for device interrupts
     rcu_cpu_init(cpuid()); // Initialize RCU for this CPU
@@ -140,7 +140,7 @@ void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
     } 
 }
 
-// Initialization that requires a process context
+// Initialization that requires a thread context
 void start_kernel_post_init(void) {
     consoledevinit(); // Initialize and register the console character device
     virtio_disk_init(); // emulated hard disk (QEMU)
@@ -149,7 +149,7 @@ void start_kernel_post_init(void) {
     pcache_global_init(); // page cache subsystem initialization
 
     // File system initialization must be run in the context of a
-    // regular process (e.g., because it calls sleep), and thus cannot
+    // regular thread (e.g., because it calls sleep), and thus cannot
     // be run from main().
     // VFS initialization - mounts xv6fs and sets up root filesystem
     vfs_init();

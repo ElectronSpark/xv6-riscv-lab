@@ -11,7 +11,7 @@
 #include "printf.h"
 #include "lock/spinlock.h"
 #include "lock/rcu.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "timer/timer.h"
 #include "string.h"
@@ -182,9 +182,9 @@ static void test_synchronize_rcu(void) {
 
     // Verify new node is accessible
     rcu_read_lock();
-    test_node_t *current = rcu_dereference(test_list);
-    assert(current != NULL, "List should not be NULL");
-    assert(current->value == 200, "Should read new value");
+    test_node_t *cur = rcu_dereference(test_list);
+    assert(cur != NULL, "List should not be NULL");
+    assert(cur->value == 200, "Should read new value");
     rcu_read_unlock();
 
     printf("  PASS: synchronize_rcu() allows safe reclamation\n");
@@ -300,11 +300,11 @@ static void test_concurrent_readers(void) {
     rcu_assign_pointer(test_list, node);
 
     // Create multiple reader threads
-    struct proc *readers[RCU_TEST_NUM_READERS];
+    struct thread *readers[RCU_TEST_NUM_READERS];
     for (int i = 0; i < RCU_TEST_NUM_READERS; i++) {
-        kernel_proc_create("rcu_reader", &readers[i],
+        kthread_create("rcu_reader", &readers[i],
                           (void *)reader_thread, i, RCU_TEST_ITERATIONS, KERNEL_STACK_ORDER);
-        wakeup_proc(readers[i]);
+        wakeup(readers[i]);
     }
 
     printf("  Waiting for readers to complete...\n");
@@ -490,7 +490,7 @@ static void test_unbalanced_unlock(void) {
     // We can't actually trigger the panic in a test, but we can verify
     // the nesting counter works correctly
     
-    struct proc *p = myproc();
+    struct thread *p = current;
     int initial_nesting = p->rcu_read_lock_nesting;
     
     rcu_read_lock();
@@ -699,11 +699,11 @@ static void test_list_rcu_concurrent_rw(void) {
     __atomic_store_n(&list_stress_errors, 0, __ATOMIC_RELEASE);
 
     // Start reader threads
-    struct proc *readers[2];
+    struct thread *readers[2];
     for (int i = 0; i < 2; i++) {
-        kernel_proc_create("list_reader", &readers[i],
+        kthread_create("list_reader", &readers[i],
                           (void *)list_stress_reader, 500, 0, KERNEL_STACK_ORDER);
-        wakeup_proc(readers[i]);
+        wakeup(readers[i]);
     }
 
     // Writer: add and remove nodes concurrently
@@ -885,11 +885,11 @@ static void test_stress_list_rcu(void) {
     }
 
     // Start reader threads
-    struct proc *readers[STRESS_READERS];
+    struct thread *readers[STRESS_READERS];
     for (int i = 0; i < STRESS_READERS; i++) {
-        kernel_proc_create("stress_reader", &readers[i],
+        kthread_create("stress_reader", &readers[i],
                           (void *)stress_list_reader, i, 0, KERNEL_STACK_ORDER);
-        wakeup_proc(readers[i]);
+        wakeup(readers[i]);
     }
 
     // Give readers time to start
@@ -1054,11 +1054,11 @@ static void test_stress_mixed_workload(void) {
     __atomic_store_n(&mixed_readers_running, 0, __ATOMIC_RELEASE);
 
     // Start reader threads (each does 2000 reads = 8000 total reads)
-    struct proc *readers[4];
+    struct thread *readers[4];
     for (int i = 0; i < 4; i++) {
-        kernel_proc_create("mixed_reader", &readers[i],
+        kthread_create("mixed_reader", &readers[i],
                           (void *)mixed_reader_thread, i, 2000, KERNEL_STACK_ORDER);
-        wakeup_proc(readers[i]);
+        wakeup(readers[i]);
     }
 
     // Wait for readers to start

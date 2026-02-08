@@ -1,12 +1,12 @@
 // VFS File Descriptor Table Management
 //
-// This module manages per-process file descriptor tables for the VFS layer.
-// Each process has an fdtable that maps integer file descriptors to vfs_file
+// This module manages per-thread file descriptor tables for the VFS layer.
+// Each thread has an fdtable that maps integer file descriptors to vfs_file
 // structures.
 //
 // KEY CONCEPTS:
 //   - File descriptor: Integer handle (0 to NOFILE-1) used by userspace
-//   - fdtable: Per-process table mapping fd -> vfs_file pointer
+//   - fdtable: Per-thread table mapping fd -> vfs_file pointer
 //   - Reference counting: Both fdtable and vfs_file use refcounts
 //   - RCU protection: Readers use RCU, writers use spinlock
 //
@@ -30,7 +30,7 @@
 //     - Supports CLONE_FILES flag for shared fdtable
 //
 // REFERENCE COUNTING:
-//   - fdtable->ref_count: Number of processes sharing this fdtable
+//   - fdtable->ref_count: Number of threads sharing this fdtable
 //   - vfs_file->ref_count: Number of references to the file
 //   - vfs_fdtable_alloc_fd() increments file refcount
 //   - vfs_fdtable_dealloc_fd() returns file for caller to release via RCU
@@ -51,7 +51,7 @@
 #include "vfs/stat.h"
 #include "vfs/fcntl.h"
 #include "lock/spinlock.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "lock/mutex_types.h"
 #include "lock/rwlock.h"
 #include "vfs/fs.h"
@@ -179,7 +179,7 @@ int vfs_fdtable_alloc_fd(struct vfs_fdtable *fdtable, struct vfs_file *file) {
  * vfs_fdtable_init - Create a new empty fdtable
  *
  * Allocates and initializes a new file descriptor table with no open files.
- * Used when creating a new process that doesn't share its parent's fdtable.
+ * Used when creating a new thread that doesn't share its parent's fdtable.
  *
  * Returns: Pointer to new fdtable (panics on allocation failure)
  */
@@ -255,7 +255,7 @@ struct vfs_fdtable *vfs_fdtable_clone(struct vfs_fdtable *src,
  * Decrements the fdtable's reference count. When the last reference
  * is released, closes all open files and frees the fdtable.
  *
- * Called when a process exits or when unsharing an fdtable.
+ * Called when a thread exits or when unsharing an fdtable.
  */
 void vfs_fdtable_put(struct vfs_fdtable *fdtable) {
     if (fdtable == NULL) {

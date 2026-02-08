@@ -1,4 +1,4 @@
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "defs.h"
 #include "hlist.h"
 #include "list.h"
@@ -22,21 +22,21 @@
 #include <mm/vm.h>
 #include "errno.h"
 
-#define NPROC_HASH_BUCKETS 31
+#define NR_THREAD_HASH_BUCKETS 31
 
-// Lock order for proc:
-// 1. proc table lock
-// 2. parent pcb lock
-// 3. target pcb lock
-// 4. children pcb lock
+// Lock order for thread:
+// 1. process table lock
+// 2. parent thread lock
+// 3. target thread lock
+// 4. children thread lock
 
 extern char trampoline[];     // trampoline.S
 extern char sig_trampoline[]; // sig_trampoline.S
 
-// Initialize a proc structure and set it to UNUSED state.
+// Initialize a thread structure and set it to UNUSED state.
 // Its spinlock and kstack will not be initialized here
-static void __pcb_init(struct proc *p, struct vfs_fdtable *fdtable) {
-    __proc_set_pstate(p, PSTATE_UNUSED);
+static void __pcb_init(struct thread *p, struct vfs_fdtable *fdtable) {
+    __thread_state_set(p, THREAD_UNUSED);
     sigpending_init(p);
     sigstack_init(&p->signal.sig_stack);
     list_entry_init(&p->sched_entry);
@@ -44,7 +44,7 @@ static void __pcb_init(struct proc *p, struct vfs_fdtable *fdtable) {
     list_entry_init(&p->siblings);
     list_entry_init(&p->children);
     hlist_entry_init(&p->proctab_entry);
-    spin_init(&p->lock, "proc");
+    spin_init(&p->lock, "thread");
     p->fs = NULL;
     p->fdtable = fdtable;
     if (p->sched_entity != NULL) {
@@ -53,27 +53,27 @@ static void __pcb_init(struct proc *p, struct vfs_fdtable *fdtable) {
     }
 }
 
-// Arrange proc, utrapframe, proc_fs, and vfs_fdtable on the kernel stack.
+// Arrange thread, utrapframe, thread_fs, and vfs_fdtable on the kernel stack.
 // Memory layout (from high to low addresses):
-//   - struct proc (at top of stack)
-//   - struct utrapframe (below proc, with 16-byte gap)
-//   - struct vfs_fdtable (below proc_fs)
+//   - struct thread (at top of stack)
+//   - struct utrapframe (below thread, with 16-byte gap)
+//   - struct vfs_fdtable (below thread_fs)
 //   - kernel stack pointer (aligned, with 16-byte gap)
-// Returns the initialized proc structure.
+// Returns the initialized thread structure.
 #define KSTACK_ARRANGE_FLAGS_TF 0x1 // place utrapframe
 #define KSTACK_ARRANGE_FLAGS_ALL (KSTACK_ARRANGE_FLAGS_TF)
-static struct proc *__kstack_arrange(void *kstack, size_t kstack_size,
-                                     uint64 flags) {
+static struct thread *__kstack_arrange(void *kstack, size_t kstack_size,
+                                       uint64 flags) {
     // Place PCB at the top of the kernel stack
-    struct proc *p =
-        (struct proc *)(kstack + kstack_size - sizeof(struct proc));
+    struct thread *p =
+        (struct thread *)(kstack + kstack_size - sizeof(struct thread));
     uint64 next_addr = (uint64)p;
 
     struct utrapframe *trapframe = NULL;
     struct vfs_fdtable *fdtable = NULL;
 
     if (flags & KSTACK_ARRANGE_FLAGS_TF) {
-        // Place utrapframe below struct proc (matching original layout)
+        // Place utrapframe below struct thread (matching original layout)
         // Original: p->ksp = ((uint64)p - sizeof(struct utrapframe) - 16);
         //           p->trapframe = (void *)p->ksp;
         next_addr = (uint64)p - sizeof(struct utrapframe) - 16;
@@ -86,7 +86,7 @@ static struct proc *__kstack_arrange(void *kstack, size_t kstack_size,
     next_addr &= ~CACHELINE_MASK; // align to cache line size
     p->sched_entity = (struct sched_entity *)next_addr;
 
-    // Initialize the proc structure
+    // Initialize the thread structure
     __pcb_init(p, fdtable);
 
     // Set trapframe pointer
@@ -100,29 +100,29 @@ static struct proc *__kstack_arrange(void *kstack, size_t kstack_size,
     return p;
 }
 
-void proc_lock(struct proc *p) {
-    assert(p != NULL, "proc_lock: proc is NULL");
+void tcb_lock(struct thread *p) {
+    assert(p != NULL, "tcb_lock: thread is NULL");
     spin_lock(&p->lock);
 }
 
-void proc_unlock(struct proc *p) {
-    assert(p != NULL, "proc_unlock: proc is NULL");
+void tcb_unlock(struct thread *p) {
+    assert(p != NULL, "tcb_unlock: thread is NULL");
     spin_unlock(&p->lock);
 }
 
-void proc_assert_holding(struct proc *p) {
-    assert(p != NULL, "proc_assert_holding: proc is NULL");
-    assert(spin_holding(&p->lock), "proc_assert_holding: proc lock not held");
+void proc_assert_holding(struct thread *p) {
+    assert(p != NULL, "proc_assert_holding: thread is NULL");
+    assert(spin_holding(&p->lock), "proc_assert_holding: thread lock not held");
 }
 
 // initialize the proc table.
-void procinit(void) { __proctab_init(); }
+void thread_init(void) { __proctab_init(); }
 
-// attach a newly forked process to the current process as its child.
+// attach a newly forked thread to the current thread as its child.
 // This function is called by fork() to set up the parent-child relationship.
-// caller must hold the lock of its process (the parent) and the lock of the new
-// process (the child).
-void attach_child(struct proc *parent, struct proc *child) {
+// caller must hold the lock of its thread (the parent) and the lock of the new
+// thread (the child).
+void attach_child(struct thread *parent, struct thread *child) {
     assert(parent != NULL, "attach_child: parent is NULL");
     assert(child != NULL, "attach_child: child is NULL");
     assert(child != __proctab_get_initproc(),
@@ -139,7 +139,7 @@ void attach_child(struct proc *parent, struct proc *child) {
     parent->children_count++;
 }
 
-void detach_child(struct proc *parent, struct proc *child) {
+void detach_child(struct thread *parent, struct thread *child) {
     assert(parent != NULL, "detach_child: parent is NULL");
     assert(child != NULL, "detach_child: child is NULL");
     proc_assert_holding(parent);
@@ -161,15 +161,15 @@ void detach_child(struct proc *parent, struct proc *child) {
            "detach_child: parent has no children after detaching child");
 }
 
-// allocate and initialize a new proc structure.
-// The newly created process will be a kernel process, which means it will not
+// allocate and initialize a new thread structure.
+// The newly created thread will be a kernel thread, which means it will not
 // have user space environment set up. and return without p->lock held. If there
-// are no free procs, or a memory allocation fails, return NULL. Signal actions
+// are no free pid, or a memory allocation fails, return NULL. Signal actions
 // will not be initialized here.
 // Return ERR_PTR on failure.
-struct proc *allocproc(void *entry, uint64 arg1, uint64 arg2,
-                       int kstack_order) {
-    struct proc *p = NULL;
+struct thread *thread_create(void *entry, uint64 arg1, uint64 arg2,
+                             int kstack_order) {
+    struct thread *p = NULL;
     void *kstack = NULL;
 
     if (kstack_order < 0 || kstack_order > PAGE_BUDDY_MAX_ORDER) {
@@ -190,7 +190,8 @@ struct proc *allocproc(void *entry, uint64 arg1, uint64 arg2,
     size_t kstack_size = (1UL << (PAGE_SHIFT + kstack_order));
     memset(kstack + kstack_size - PAGE_SIZE, 0, PAGE_SIZE);
 
-    // Arrange proc, utrapframe, fs_struct, and vfs_fdtable on the kernel stack
+    // Arrange thread, utrapframe, fs_struct, and vfs_fdtable on the kernel
+    // stack
     p = __kstack_arrange(kstack, kstack_size, KSTACK_ARRANGE_FLAGS_ALL);
 
     // Set up new context to start executing at forkret,
@@ -212,99 +213,99 @@ struct proc *allocproc(void *entry, uint64 arg1, uint64 arg2,
     return p;
 }
 
-static void __kernel_proc_entry(struct context *prev) {
-    assert(prev != NULL, "kernel_proc_entry: prev context is NULL");
-    context_switch_finish(proc_from_context(prev), myproc(), 0);
-    mycpu()->noff = 0;  // in a new process, noff should be 0
+static void __kthread_entry(struct context *prev) {
+    assert(prev != NULL, "kthread_entry: prev context is NULL");
+    context_switch_finish(thread_from_context(prev), current, 0);
+    mycpu()->noff = 0; // in a new thread, noff should be 0
     intr_on();
     // Note quiescent state for RCU - context switch is a quiescent state.
     // Callback processing is now handled by per-CPU RCU kthreads.
     rcu_check_callbacks();
 
-    // Set up the kernel stack and context for the new process.
-    int (*entry)(uint64, uint64) = (void *)myproc()->kentry;
-    int ret = entry(myproc()->arg[0], myproc()->arg[1]);
+    // Set up the kernel stack and context for the new thread.
+    int (*entry)(uint64, uint64) = (void *)current->kentry;
+    int ret = entry(current->arg[0], current->arg[1]);
     exit(ret);
 }
 
-// create a new kernel process, which runs the function entry.
+// create a new kernel thread, which runs the function entry.
 // The newly created functions are sleeping.
 // Kernel thread will be attached to the init process as its child.
-int kernel_proc_create(const char *name, struct proc **retp, void *entry,
-                       uint64 arg1, uint64 arg2, int stack_order) {
-    struct proc *p = allocproc(entry, arg1, arg2, stack_order);
+int kthread_create(const char *name, struct thread **retp, void *entry,
+                   uint64 arg1, uint64 arg2, int stack_order) {
+    struct thread *p = thread_create(entry, arg1, arg2, stack_order);
     if (IS_ERR_OR_NULL(p)) {
         *retp = NULL;
         return -1; // Allocation failed
     }
-    struct proc *initproc = __proctab_get_initproc();
-    assert(initproc != NULL, "kernel_proc_create: initproc is NULL");
+    struct thread *initproc = __proctab_get_initproc();
+    assert(initproc != NULL, "kthread_create: initproc is NULL");
 
-    // Clone fs_struct from initproc so kernel process has valid cwd/root
+    // Clone fs_struct from initproc so kernel thread has valid cwd/root
     struct fs_struct *fs_clone = NULL;
     if (initproc->fs != NULL) {
         fs_clone = vfs_struct_clone(initproc->fs, 0);
         if (IS_ERR_OR_NULL(fs_clone)) {
-            freeproc(p);
+            thread_destroy(p);
             *retp = NULL;
             return -1; // Failed to clone fs_struct
         }
     }
 
-    // Set up the context BEFORE making the process visible to scheduler
-    p->sched_entity->context.ra = (uint64)__kernel_proc_entry;
+    // Set up the context BEFORE making the thread visible to scheduler
+    p->sched_entity->context.ra = (uint64)__kthread_entry;
     p->kentry = (uint64)entry;
     p->arg[0] = arg1;
     p->arg[1] = arg2;
 
-    proc_lock(initproc);
-    proc_lock(p);
+    tcb_lock(initproc);
+    tcb_lock(p);
     p->fs = fs_clone;
     attach_child(initproc, p);
-    proc_unlock(initproc);
-    // Newly allocated process is a kernel process
-    assert(!PROC_USER_SPACE(p),
-           "kernel_proc_create: new proc is a user process");
-    safestrcpy(p->name, name ? name : "kproc", sizeof(p->name));
-    __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
+    tcb_unlock(initproc);
+    // Newly allocated thread is a kernel thread
+    assert(!THREAD_USER_SPACE(p),
+           "kthread_create: new thread is a user thread");
+    safestrcpy(p->name, name ? name : "kthread", sizeof(p->name));
+    __thread_state_set(p, THREAD_UNINTERRUPTIBLE);
     if (retp != NULL) {
         *retp = p;
     }
 
-    proc_unlock(p);
+    tcb_unlock(p);
     return p->pid;
 }
 
 // Initialize the current context as an idle process.
 // This function is called during CPU initialization.
 // Idle processes will never be added to the scheduler's ready queue,
-// and it will be scheduled only when there are no other running processes.
+// and it will be scheduled only when there are no other running threads.
 // Idle processes will also not be added to process table
 // in entry.S:
 //   # with a KERNEL_STACK_SIZE-byte stack per CPU.
-void idle_proc_init(void) {
-    struct proc *p = NULL;
+void idle_thread_init(void) {
+    struct thread *p = NULL;
     void *kstack = NULL;
 
     // Allocate a kernel stack page.
     size_t kstack_size = KERNEL_STACK_SIZE;
     kstack = (void *)(r_sp() & (~(kstack_size - 1)));
 
-    // Arrange proc on the kernel stack (idle proc doesn't need
+    // Arrange thread on the kernel stack (idle process doesn't need
     // trapframe/fs/fdtable)
     assert((PAGE_SIZE << KERNEL_STACK_ORDER) == kstack_size,
-           "idle_proc_init: invalid KERNEL_STACK_ORDER");
+           "idle_thread_init: invalid KERNEL_STACK_ORDER");
     p = __kstack_arrange(kstack, kstack_size, 0);
-    assert(p != NULL, "idle_proc_init: failed to arrange kstack");
+    assert(p != NULL, "idle_thread_init: failed to arrange kstack");
 
     // Set up new context to start executing at forkret,
     // which returns to user space.
     p->kstack_order = KERNEL_STACK_ORDER;
     p->kstack = (uint64)kstack;
     strncpy(p->name, "idle", sizeof(p->name));
-    __proc_set_pstate(p, PSTATE_RUNNING);
+    __thread_state_set(p, THREAD_RUNNING);
     mycpu()->proc = p;
-    mycpu()->idle_proc = p;
+    mycpu()->idle_thread = p;
 
     // Mark this CPU as active in the rq subsystem
     rq_cpu_activate(cpuid());
@@ -327,29 +328,29 @@ void idle_proc_init(void) {
            (uint64)kstack);
 }
 
-// RCU callback to free proc kernel stack after grace period
-// IMPORTANT: Read all needed values from proc BEFORE calling page_free,
-// since page_free will free the memory containing the proc structure.
-static void freeproc_rcu_callback(void *data) {
-    struct proc *p = (struct proc *)data;
+// RCU callback to free thread kernel stack after grace period
+// IMPORTANT: Read all needed values from thread BEFORE calling page_free,
+// since page_free will free the memory containing the thread structure.
+static void thread_destroy_rcu_callback(void *data) {
+    struct thread *p = (struct thread *)data;
     // Copy kstack info to local variables BEFORE freeing
     uint64 kstack_addr = p->kstack;
     int kstack_order = p->kstack_order;
-    // Now free the kernel stack - proc structure is gone after this, never
+    // Now free the kernel stack - thread structure is gone after this, never
     // access p again
     page_free((void *)kstack_addr, kstack_order);
 }
 
-// free a proc structure and the data hanging from it,
+// free a thread structure and the data hanging from it,
 // including user pages.
 // p->lock must not be held on entry.
-void freeproc(struct proc *p) {
-    assert(p != NULL, "freeproc called with NULL proc");
-    proc_lock(p);
-    assert(!PROC_AWOKEN(p), "freeproc called with a runnable proc");
-    assert(!PROC_SLEEPING(p), "freeproc called with a sleeping proc");
+void thread_destroy(struct thread *p) {
+    assert(p != NULL, "thread_destroy called with NULL thread");
+    tcb_lock(p);
+    assert(!THREAD_AWOKEN(p), "thread_destroy called with a runnable thread");
+    assert(!THREAD_SLEEPING(p), "thread_destroy called with a sleeping thread");
     assert(p->kstack_order >= 0 && p->kstack_order <= PAGE_BUDDY_MAX_ORDER,
-           "freeproc: invalid kstack_order %d", p->kstack_order);
+           "thread_destroy: invalid kstack_order %d", p->kstack_order);
 
     if (p->sigacts != NULL) {
         sigacts_put(p->sigacts);
@@ -376,16 +377,17 @@ void freeproc(struct proc *p) {
     sigpending_empty(p, 0);
     sigpending_destroy(p);
 
-    // Remove from process table (requires proc lock to be held)
+    // Remove from pid table (requires thread lock to be held)
     proctab_proc_remove(p);
 
-    proc_unlock(p);
+    tcb_unlock(p);
 
     __free_pid(p->pid); // Mark one PID is freed
 
     // Defer freeing of the kernel stack until after the RCU grace period.
-    // This ensures all RCU readers have finished accessing the proc structure.
-    call_rcu(&p->rcu_head, freeproc_rcu_callback, p);
+    // This ensures all RCU readers have finished accessing the thread
+    // structure.
+    call_rcu(&p->rcu_head, thread_destroy_rcu_callback, p);
 }
 
 // a user program that calls exec("/init")
@@ -401,8 +403,8 @@ uchar initcode[] = {0x17, 0x05, 0x00, 0x00, 0x13, 0x05, 0x45, 0x02, 0x97,
 static void init_entry(struct context *prev) {
     // When we arrive here from context switch, we hold the rq lock.
     // Finish the context switch first to release the rq lock properly.
-    context_switch_finish(proc_from_context(prev), myproc(), 0);
-    mycpu()->noff = 0;  // in a new process, noff should be 0
+    context_switch_finish(thread_from_context(prev), current, 0);
+    mycpu()->noff = 0; // in a new thread, noff should be 0
     intr_on();
 
     // Now do post-init work without holding any scheduler locks
@@ -413,21 +415,21 @@ static void init_entry(struct context *prev) {
     usertrapret();
 }
 
-// Set up first user process.
+// Set up first user thread.
 void userinit(void) {
-    struct proc *p;
+    struct thread *p;
 
-    p = allocproc(init_entry, 0, 0, KERNEL_STACK_ORDER);
-    assert(!IS_ERR_OR_NULL(p), "userinit: allocproc failed");
+    p = thread_create(init_entry, 0, 0, KERNEL_STACK_ORDER);
+    assert(!IS_ERR_OR_NULL(p), "userinit: thread_create failed");
     printf("Init process kernel stack size order: %d\n", p->kstack_order);
 
-    // Allocate pagetable for the process.
+    // Allocate pagetable for the thread.
     vm_t *vm = vm_init();
     assert(!IS_ERR_OR_NULL(vm), "userinit: vm_init failed");
     p->vm = vm;
 
     // // printf user pagetable
-    // printf("\nuser pagetable after allocproc:\n");
+    // printf("\nuser pagetable after thread_create:\n");
     // dump_pagetable(p->vm.pagetable, 2, 0, 0, 0, false);
     // printf("\n");
 
@@ -437,7 +439,7 @@ void userinit(void) {
     // and data into it.
     uint64 ustack_top = USTACKTOP;
     printf("user stack top at 0x%lx\n", ustack_top);
-    proc_lock(p);
+    tcb_lock(p);
     uint64 flags = VM_FLAG_EXEC | VM_FLAG_READ | VM_FLAG_USERMAP;
     assert(sizeof(initcode) <= PGSIZE, "userinit: initcode too large");
     void *initcode_page = page_alloc(0, PAGE_TYPE_ANON);
@@ -447,12 +449,12 @@ void userinit(void) {
     assert(vma_mmap(p->vm, UVMBOTTOM, PGSIZE, flags, NULL, 0, initcode_page) ==
                0,
            "userinit: vma_mmap failed");
-    // myproc() hasn't been set yet, so we can call createstack without holding
+    // current hasn't been set yet, so we can call createstack without holding
     // the vm lock
     assert(vm_createstack(p->vm, ustack_top, USERSTACK * PGSIZE) == 0,
            "userinit: vm_createstack failed");
 
-    // allocate signal actions for the process
+    // allocate signal actions for the thread
     p->sigacts = sigacts_init();
     assert(p->sigacts != NULL, "userinit: sigacts_init failed");
 
@@ -466,9 +468,9 @@ void userinit(void) {
 
     safestrcpy(p->name, "initcode", sizeof(p->name));
 
-    PROC_SET_USER_SPACE(p);
+    THREAD_SET_USER_SPACE(p);
 
-    proc_unlock(p);
+    tcb_unlock(p);
 
     // Set init process scheduling attributes using the new sched_attr API
     struct sched_attr attr;
@@ -476,14 +478,14 @@ void userinit(void) {
     // Use default priority and allow running on all CPUs
     sched_setattr(p->sched_entity, &attr);
 
-    // Don't forget to wake up the process.
+    // Don't forget to wake up the thread.
     // Note: pi_lock no longer needed - rq_lock serializes wakeups
-    __proc_set_pstate(p, PSTATE_UNINTERRUPTIBLE);
+    __thread_state_set(p, THREAD_UNINTERRUPTIBLE);
     scheduler_wakeup(p);
 }
 
 /*
- * install_user_root - Initialize process filesystem state
+ * install_user_root - Initialize thread filesystem state
  *
  * Sets up the initial current working directory for the init process.
  * Uses VFS interfaces instead of legacy namei/idup:
@@ -491,11 +493,11 @@ void userinit(void) {
  *   - vfs_inode_get_ref() to set p->fs->cwd
  *   - vfs_iput() to release lookup reference
  *
- * The process struct now uses p->fs->cwd (vfs_inode_ref) instead of
+ * The thread struct now uses p->fs->cwd (vfs_inode_ref) instead of
  * the legacy p->cwd (struct inode*).
  */
 void install_user_root(void) {
-    struct proc *p = myproc();
+    struct thread *p = current;
 
     // Use VFS to look up the root directory
     struct vfs_inode *root_inode = vfs_namei("/", 1);
@@ -503,11 +505,11 @@ void install_user_root(void) {
         panic("install_user_root: cannot find root directory");
     }
 
-    assert(p->fs != NULL, "install_user_root: process fs_struct is NULL");
+    assert(p->fs != NULL, "install_user_root: thread fs_struct is NULL");
 
-    proc_lock(p);
-    PROC_SET_USER_SPACE(p);
-    proc_unlock(p);
+    tcb_lock(p);
+    THREAD_SET_USER_SPACE(p);
+    tcb_unlock(p);
 
     // Get reference to root inode BEFORE acquiring spinlock
     // (vfs_inode_get_ref may acquire the inode mutex internally)

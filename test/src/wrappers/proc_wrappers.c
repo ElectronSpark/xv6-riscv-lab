@@ -22,7 +22,7 @@
 // Note: pagetable_t is defined in riscv.h, don't redefine it here
 
 #include <smp/percpu_types.h>
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/tq.h"
 #include "spinlock.h"
 #include "proc/sched.h"
@@ -30,7 +30,7 @@
 #include "concurrency_harness.h"
 
 static struct cpu_local g_cpu_stub;
-static struct proc g_proc_stub = {.pid = 1};
+static struct thread g_proc_stub = {.pid = 1};
 
 // Global tracking pointers (NULL if tracking disabled)
 tq_tracking_t *g_tq_tracking = NULL;
@@ -79,7 +79,7 @@ struct cpu_local *__wrap_mycpu(void)
     return &g_cpu_stub;
 }
 
-struct proc *__wrap_myproc(void)
+struct thread *__wrap_myproc(void)
 {
     if (g_proc_tracking && g_proc_tracking->current_proc) {
         return g_proc_tracking->current_proc;
@@ -97,38 +97,38 @@ int __wrap_cpuid(void)
 
 /*
  * Note: When using --wrap=myproc etc., the linker automatically redirects
- * calls to myproc() in other object files to __wrap_myproc().
+ * calls to current in other object files to __wrap_current.
  * We don't define real myproc/mycpu/cpuid here - they're declared in percpu.h
  * for ON_HOST_OS and the wrapper mechanism handles the redirection.
  */
 
-void __wrap_proc_lock(struct proc *p)
+void __wrap_tcb_lock(struct thread *p)
 {
     (void)p;
 }
 
-void __wrap_proc_unlock(struct proc *p)
+void __wrap_tcb_unlock(struct thread *p)
 {
     (void)p;
 }
 
-void __wrap_proc_assert_holding(struct proc *p)
+void __wrap_proc_assert_holding(struct thread *p)
 {
     (void)p;
 }
 
-void __wrap_scheduler_wakeup(struct proc *p)
+void __wrap_scheduler_wakeup(struct thread *p)
 {
     (void)p;
 }
 
-void __wrap_scheduler_sleep(struct spinlock *lk, enum procstate state)
+void __wrap_scheduler_sleep(struct spinlock *lk, enum thread_state state)
 {
     (void)lk;
     (void)state;
 }
 
-int __wrap_kernel_proc_create(const char *name, struct proc **retp, void *entry,
+int __wrap_kthread_create(const char *name, struct thread **retp, void *entry,
                               uint64 arg0, uint64 arg1, uint64 stack_order)
 {
     // Don't use check_expected for parameters - just ignore them in tests
@@ -139,12 +139,12 @@ int __wrap_kernel_proc_create(const char *name, struct proc **retp, void *entry,
     (void)stack_order;
     
     if (retp != NULL) {
-        *retp = mock_ptr_type(struct proc *);
+        *retp = mock_ptr_type(struct thread *);
     }
     return mock_type(int);  // Return value controlled by will_return()
 }
 
-void __wrap_wakeup_proc(struct proc *p)
+void __wrap_wakeup(struct thread *p)
 {
     (void)p;
 }
@@ -232,7 +232,7 @@ int __wrap_tq_wait(tq_t *q, struct spinlock *lock, uint64 *rdata)
     return mock_type(int);
 }
 
-struct proc *__wrap_tq_wakeup(tq_t *q, int error_no, uint64 rdata)
+struct thread *__wrap_tq_wakeup(tq_t *q, int error_no, uint64 rdata)
 {
     if (g_tq_tracking) {
         g_tq_tracking->queue_wakeup_count++;
@@ -245,10 +245,10 @@ struct proc *__wrap_tq_wakeup(tq_t *q, int error_no, uint64 rdata)
             q->counter--;
         }
         
-        return g_tq_tracking->next_wakeup_proc;
+        return g_tq_tracking->next_wakeup;
     }
     
-    return mock_ptr_type(struct proc *);
+    return mock_ptr_type(struct thread *);
 }
 
 int __wrap_tq_wakeup_all(tq_t *q, int error_no, uint64 rdata)

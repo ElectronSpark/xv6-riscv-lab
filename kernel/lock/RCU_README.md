@@ -11,7 +11,7 @@ This implementation includes **Linux-inspired performance enhancements** specifi
 ### Core RCU Semantics
 - **Lock-free reads**: Readers never block or take locks
 - **Scalable**: Per-CPU data structures minimize contention
-- **Preemptible**: Per-process nesting allows safe migration across CPUs
+- **Preemptible**: Per-thread nesting allows safe migration across CPUs
 - **Grace period detection**: Automatic tracking of when all readers have finished
 - **Callback mechanism**: Asynchronous memory reclamation via `call_rcu()`
 - **Synchronous API**: Blocking grace period wait via `synchronize_rcu()`
@@ -42,7 +42,7 @@ This implementation includes **Linux-inspired performance enhancements** specifi
 - **`rcu_state_t`**: Global RCU state tracking grace periods
 - **`rcu_cpu_data_t`**: Per-CPU data for tracking callbacks (cache-line aligned, declared separately as `rcu_cpu_data[NCPU]`)
 - **`rcu_head_t`**: Callback structure for deferred reclamation (includes registration timestamp)
-- **`struct proc`**: Per-process RCU nesting counter (`rcu_read_lock_nesting`) and RCU callback head (`rcu_head`)
+- **`struct thread`**: Per-thread RCU nesting counter (`rcu_read_lock_nesting`) and RCU callback head (`rcu_head`)
 
 ### Grace Period State Machine
 
@@ -86,23 +86,23 @@ This means a callback is safe to invoke when ALL other CPUs have context-switche
 
 A CPU is in a quiescent state when it's NOT in an RCU read-side critical section. The following are quiescent states:
 
-- Context switch (even during RCU read-side critical sections - processes can migrate CPUs)
+- Context switch (even during RCU read-side critical sections - threads can migrate CPUs)
 - Idle loop
 - User mode execution
 - Explicit `rcu_read_unlock()` when nesting reaches 0
 
 ### Preemption and CPU Migration
 
-This RCU implementation supports **preemptible RCU** - processes can safely hold RCU read locks across context switches and CPU migrations:
+This RCU implementation supports **preemptible RCU** - threads can safely hold RCU read locks across context switches and CPU migrations:
 
-- **Per-process nesting**: Each process tracks its own `rcu_read_lock_nesting` counter
+- **Per-thread nesting**: Each thread tracks its own `rcu_read_lock_nesting` counter
 - **Per-CPU tracking**: CPUs track quiescent states independently
-- **Safe migration**: When a process yields while holding an RCU lock on CPU A and resumes on CPU B:
-  1. Process's `rcu_read_lock_nesting` counter remains valid (follows the process)
+- **Safe migration**: When a thread yields while holding an RCU lock on CPU A and resumes on CPU B:
+  1. Thread's `rcu_read_lock_nesting` counter remains valid (follows the thread)
   2. CPU A's nesting counter remains > 0 (preventing premature quiescent state report)
-  3. CPU B's nesting counter is incremented when process resumes
-  4. Both counters are properly decremented when process calls `rcu_read_unlock()`
-- **Fallback mode**: When no process context exists (early boot, scheduler), falls back to per-CPU tracking
+  3. CPU B's nesting counter is incremented when thread resumes
+  4. Both counters are properly decremented when thread calls `rcu_read_unlock()`
+- **Fallback mode**: When no thread context exists (early boot, scheduler), falls back to per-CPU tracking
 
 ## API Reference
 

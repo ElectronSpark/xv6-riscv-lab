@@ -63,33 +63,33 @@ sigacts_t *sigacts_init(void);
 sigacts_t *sigacts_dup(sigacts_t *psa, uint64 clone_flags);
 void sigacts_put(sigacts_t *sa);
 
-void sigpending_init(struct proc *p);
-void sigpending_destroy(struct proc *p);
+void sigpending_init(struct thread *p);
+void sigpending_destroy(struct thread *p);
 ksiginfo_t *ksiginfo_alloc(void);
 void ksiginfo_free(ksiginfo_t *ksi);
-int sigpending_empty(struct proc *p, int signo);
+int sigpending_empty(struct thread *p, int signo);
 
 sig_defact signo_default_action(int signo);
-int __signal_send(struct proc *p, ksiginfo_t *info);
+int __signal_send(struct thread *p, ksiginfo_t *info);
 int signal_send(int pid, ksiginfo_t *info);
-bool signal_pending(struct proc *p);
-int signal_notify(struct proc *p);
+bool signal_pending(struct thread *p);
+int signal_notify(struct thread *p);
 
 // Recalculate and update TIF_SIGPENDING flag for process
 // Call this after any change to signal.sig_pending_mask or sa_sigmask
 void recalc_sigpending(void);
-bool recalc_sigpending_tsk(struct proc *p);
-bool signal_terminated(struct proc *p);
+bool recalc_sigpending_tsk(struct thread *p);
+bool signal_terminated(struct thread *p);
 void handle_signal(void);
 
 int sigaction(int signum, struct sigaction *act, struct sigaction *oldact);
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
-int sigpending(struct proc *p, sigset_t *set);
+int sigpending(struct thread *p, sigset_t *set);
 int sigreturn(void);
 
 int kill(int, int);
-int kill_proc(struct proc *p, int signum);
-int killed(struct proc*);
+int kill_thread(struct thread *p, int signum);
+int killed(struct thread*);
 
 #define SIG_BLOCK   1
 #define SIG_UNBLOCK 2

@@ -20,7 +20,7 @@
 #define KERNEL_INC_BITS_H
 #define __KERNEL_STAT_H
 #define __KERNEL_SPINLOCK_H
-#define __KERNEL_PROC_H
+#define __KERNEL_THREAD_H
 #define __KERNEL_VM_H
 #define __KERNEL_MUTEX_TYPES_H
 #define KERNEL_RWLOCK_H

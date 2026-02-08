@@ -22,7 +22,7 @@ typedef struct {
 
 // Tracking structure for proc/cpu operations
 typedef struct {
-    struct proc *current_proc;      // What myproc() returns
+    struct thread *current_proc;      // What current returns
     struct cpu_local *current_cpu;  // What mycpu() returns
     int current_cpuid;              // What cpuid() returns
 } proc_tracking_t;
@@ -55,7 +55,7 @@ typedef struct {
     // For custom behavior
     void *user_data;
     int (*wait_callback)(struct tq *q, struct spinlock *lock, uint64 *rdata, void *user_data);
-    struct proc *next_wakeup_proc;
+    struct thread *next_wakeup;
 } tq_tracking_t;
 
 // Global tracking instances (can be NULL if tracking not needed)

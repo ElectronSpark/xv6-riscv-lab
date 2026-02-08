@@ -29,7 +29,7 @@ struct trapframe {
     uint64 stvec;
 } __ALIGNED(8);
 
-// per-process data for the trap handling code in trampoline.S.
+// per-thread data for the trap handling code in trampoline.S.
 // sits in a page by itself just under the trampoline page in the
 // user page table. not specially mapped in the kernel page table.
 // uservec in trampoline.S saves user registers in the trapframe,
@@ -60,7 +60,7 @@ struct utrapframe {
     uint64 irq_sp;       // saved interrupt stack pointer
     uint64 irq_entry;    // saved interrupt entry point
     uint64 kernel_satp;   // kernel page table
-    uint64 kernel_sp;     // top of process's kernel stack
+    uint64 kernel_sp;     // top of thread's kernel stack
     uint64 kernel_trap;   // usertrap()
     uint64 tp;
     uint64 kernel_hartid; // saved kernel tp

@@ -15,7 +15,7 @@
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
 #include "lock/rcu.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/workqueue.h"
 #include "vfs_private.h"
 #include "vfs/fs.h"
@@ -122,7 +122,7 @@ static void __vfs_fput_call_rcu(struct vfs_file *file) {
  * Returns: File pointer, or NULL if fd is invalid
  */
 static struct vfs_file *__vfs_argfd(int fd) {
-    struct proc *p = myproc();
+    struct thread *p = current;
     if (fd < 0 || fd >= NOFILE) {
         return NULL;
     }
@@ -133,12 +133,12 @@ static struct vfs_file *__vfs_argfd(int fd) {
  * __vfs_fdalloc - Allocate fd for file in current process
  * @file: The file to allocate an fd for
  *
- * LOCKING: Caller MUST hold myproc()->fdtable->lock
+ * LOCKING: Caller MUST hold current->fdtable->lock
  *
  * Returns: Non-negative fd on success, negative errno on failure
  */
 static int __vfs_fdalloc(struct vfs_file *file) {
-    struct proc *p = myproc();
+    struct thread *p = current;
     return vfs_fdtable_alloc_fd(p->fdtable, file);
 }
 
@@ -146,12 +146,12 @@ static int __vfs_fdalloc(struct vfs_file *file) {
  * __vfs_fdfree - Deallocate fd and return associated file
  * @fd: The file descriptor to free
  *
- * LOCKING: Caller MUST hold myproc()->fdtable->lock
+ * LOCKING: Caller MUST hold current->fdtable->lock
  *
  * Returns: The file that was at fd, or NULL if fd was invalid
  */
 static struct vfs_file *__vfs_fdfree(int fd) {
-    struct proc *p = myproc();
+    struct thread *p = current;
     return vfs_fdtable_dealloc_fd(p->fdtable, fd);
 }
 
@@ -168,9 +168,9 @@ uint64 sys_vfs_dup(void) {
         return -EBADF;
     }
     
-    spin_lock(&myproc()->fdtable->lock);
+    spin_lock(&current->fdtable->lock);
     int newfd = __vfs_fdalloc(f);
-    spin_unlock(&myproc()->fdtable->lock);
+    spin_unlock(&current->fdtable->lock);
 
     vfs_fput(f); // remove the reference from __vfs_argfd 
     return newfd;
@@ -216,13 +216,13 @@ uint64 sys_vfs_close(void) {
     int fd;
     argint(0, &fd);
     
-    spin_lock(&myproc()->fdtable->lock);
+    spin_lock(&current->fdtable->lock);
     struct vfs_file *f = __vfs_fdfree(fd);
     if (f == NULL) {
-        spin_unlock(&myproc()->fdtable->lock);
+        spin_unlock(&current->fdtable->lock);
         return -EBADF;
     }
-    spin_unlock(&myproc()->fdtable->lock);
+    spin_unlock(&current->fdtable->lock);
     
     __vfs_fput_call_rcu(f);
     return 0;
@@ -247,7 +247,7 @@ uint64 sys_vfs_fstat(void) {
         return ret;
     }
     
-    if (vm_copyout(myproc()->vm, st, (char *)&kst, sizeof(kst)) < 0) {
+    if (vm_copyout(current->vm, st, (char *)&kst, sizeof(kst)) < 0) {
         vfs_fput(f); // remove the reference from __vfs_argfd
         return -EFAULT;
     }
@@ -380,9 +380,9 @@ uint64 sys_vfs_open(void) {
         }
     }
     
-    spin_lock(&myproc()->fdtable->lock);
+    spin_lock(&current->fdtable->lock);
     int fd = __vfs_fdalloc(f);
-    spin_unlock(&myproc()->fdtable->lock);
+    spin_unlock(&current->fdtable->lock);
     // When success, the refcount of f will be increased by fdtable, thus we do not put f here.
     // When failure, we need to put f anyway.
     vfs_fput(f);
@@ -560,7 +560,7 @@ static int vfs_make_absolute_path(const char *relpath, int relpath_len, char *ab
     }
     
     // Relative path - need to prepend cwd
-    struct proc *p = myproc();
+    struct thread *p = current;
     vfs_struct_lock(p->fs);
     struct vfs_inode *cwd = vfs_inode_deref(&p->fs->cwd);
     struct vfs_inode *root = vfs_inode_deref(&p->fs->rooti);
@@ -693,7 +693,7 @@ uint64 sys_vfs_chdir(void) {
     }
 
     // Update process cwd (only assignment under spinlock)
-    struct proc *p = myproc();
+    struct thread *p = current;
     vfs_struct_lock(p->fs);
     struct vfs_inode_ref old_cwd = p->fs->cwd;
     p->fs->cwd = new_cwd_ref;
@@ -737,7 +737,7 @@ uint64 sys_getcwd(void) {
     char path[MAXPATH];
     int pathlen = 0;
     
-    struct proc *p = myproc();
+    struct thread *p = current;
     vfs_struct_lock(p->fs);
     struct vfs_inode *cwd = vfs_inode_deref(&p->fs->cwd);
     struct vfs_inode *root = vfs_inode_deref(&p->fs->rooti);
@@ -822,10 +822,10 @@ uint64 sys_vfs_pipe(void) {
         return ret;
     }
     
-    spin_lock(&myproc()->fdtable->lock);
+    spin_lock(&current->fdtable->lock);
     int fd0 = __vfs_fdalloc(rf);
     if (fd0 < 0) {
-        spin_unlock(&myproc()->fdtable->lock);
+        spin_unlock(&current->fdtable->lock);
         // Decrease the refcounts allocated by pipealloc
         vfs_fput(rf);
         vfs_fput(wf);
@@ -835,7 +835,7 @@ uint64 sys_vfs_pipe(void) {
     int fd1 = __vfs_fdalloc(wf);
     if (fd1 < 0) {
         __vfs_fdfree(fd0);
-        spin_unlock(&myproc()->fdtable->lock);
+        spin_unlock(&current->fdtable->lock);
         // Decrease the refcounts allocated by pipealloc
         vfs_fput(rf);
         vfs_fput(wf);
@@ -843,17 +843,17 @@ uint64 sys_vfs_pipe(void) {
         __vfs_fput_call_rcu(rf);
         return fd1;
     }
-    spin_unlock(&myproc()->fdtable->lock);
+    spin_unlock(&current->fdtable->lock);
     
     // vm_copyout may sleep (acquires rwlock), so must be outside spinlock
-    struct proc *p = myproc();
+    struct thread *p = current;
     if (vm_copyout(p->vm, fdarray, (char *)&fd0, sizeof(fd0)) < 0 ||
         vm_copyout(p->vm, fdarray + sizeof(fd0), (char *)&fd1, sizeof(fd1)) < 0) {
         // Re-acquire lock to deallocate fds
-        spin_lock(&myproc()->fdtable->lock);
+        spin_lock(&current->fdtable->lock);
         __vfs_fdfree(fd0);
         __vfs_fdfree(fd1);
-        spin_unlock(&myproc()->fdtable->lock);
+        spin_unlock(&current->fdtable->lock);
 
         // Decrease the refcounts allocated by pipealloc
         vfs_fput(rf);
@@ -889,9 +889,9 @@ uint64 sys_vfs_connect(void) {
         return ret;
     }
     
-    spin_lock(&myproc()->fdtable->lock);
+    spin_lock(&current->fdtable->lock);
     int fd = __vfs_fdalloc(f);
-    spin_unlock(&myproc()->fdtable->lock);
+    spin_unlock(&current->fdtable->lock);
 
     // When success, the refcount of f will be increased by fdtable, thus we do not put f here.
     // When failure, we need to put f anyway.
@@ -1018,7 +1018,7 @@ uint64 sys_getdents(void) {
     
     // Copy to user space
     if (bytes_written > 0) {
-        if (vm_copyout(myproc()->vm, dirp, kbuf, bytes_written) < 0) {
+        if (vm_copyout(current->vm, dirp, kbuf, bytes_written) < 0) {
             kmm_free(kbuf);
             vfs_fput(f); // remove the reference from __vfs_argfd
             return -EFAULT;

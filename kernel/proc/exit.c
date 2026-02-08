@@ -1,4 +1,4 @@
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "defs.h"
 #include "hlist.h"
 #include "list.h"
@@ -23,7 +23,7 @@
 #include "errno.h"
 
 
-// Wake up a parent process that may be sleeping in wait().
+// Wake up a parent thread that may be sleeping in wait().
 // This is called unconditionally when a child exits, regardless of
 // the exit_signal. Matches Linux's __wake_up_parent() which always
 // wakes the wait_chldexit wait queue.
@@ -32,30 +32,30 @@
 // - exit_signal is 0 (threads with CLONE_THREAD)
 // - exit_signal is ignored (SIGCHLD with SIG_IGN)
 // - exit_signal is any other signal
-static void wake_up_parent(struct proc *parent) {
+static void wake_up_parent(struct thread *parent) {
     if (parent == NULL)
         return;
     
-    proc_lock(parent);
-    enum procstate pstate = __proc_get_pstate(parent);
-    if (PSTATE_IS_INTERRUPTIBLE(pstate)) {
-        proc_unlock(parent);
+    tcb_lock(parent);
+    enum thread_state pstate = __thread_state_get(parent);
+    if (THREAD_IS_INTERRUPTIBLE(pstate)) {
+        tcb_unlock(parent);
         scheduler_wakeup_interruptible(parent);
     } else {
-        proc_unlock(parent);
+        tcb_unlock(parent);
     }
 }
 
 // Wake the vfork parent when child exits or execs.
 // The vfork parent is blocked in UNINTERRUPTIBLE state waiting for us.
 // After waking, clear the vfork_parent pointer so we don't wake twice.
-void vfork_done(struct proc *p) {
-    struct proc *vfork_parent;
+void vfork_done(struct thread *p) {
+    struct thread *vfork_parent;
     
-    proc_lock(p);
+    tcb_lock(p);
     vfork_parent = p->vfork_parent;
     p->vfork_parent = NULL;  // Clear so we don't wake again on exit after exec
-    proc_unlock(p);
+    tcb_unlock(p);
     
     if (vfork_parent != NULL) {
         scheduler_wakeup(vfork_parent);
@@ -64,12 +64,12 @@ void vfork_done(struct proc *p) {
 
 // Pass p's abandoned children to init.
 // Caller must not hold p->lock.
-// Uses trylock with backoff to avoid lock convoy when many processes
+// Uses trylock with backoff to avoid lock convoy when many threads
 // exit simultaneously and all compete for initproc's lock.
-void reparent(struct proc *p) {
-    struct proc *initproc = __proctab_get_initproc();
-    struct proc *parent = p->parent;
-    struct proc *child, *tmp;
+void reparent(struct thread *p) {
+    struct thread *initproc = __proctab_get_initproc();
+    struct thread *parent = p->parent;
+    struct thread *child, *tmp;
     bool zombie_found = false;
 
     assert(initproc != NULL, "reparent: initproc is NULL");
@@ -92,34 +92,34 @@ retry:
 
     list_foreach_node_safe(&p->children, child, tmp, siblings) {
         // make sure the child isn't still in exit() or swtch().
-        proc_lock(child);
+        tcb_lock(child);
         child->signal.esignal = SIGCHLD;   // reset to default exit signal
-        if (__proc_get_pstate(child) == PSTATE_ZOMBIE) {
+        if (__thread_state_get(child) == THREAD_ZOMBIE) {
             zombie_found = true;
         }
         detach_child(p, child);
         attach_child(initproc, child);
-        proc_unlock(child);
+        tcb_unlock(child);
     }
 
     
-    proc_unlock(p);
-    proc_unlock(initproc);
+    tcb_unlock(p);
+    tcb_unlock(initproc);
 
     if (zombie_found) {
         wake_up_parent(initproc);
         if (initproc != NULL && initproc != parent && initproc != p && p->signal.esignal > 0) {
-            kill_proc(initproc, p->signal.esignal);
+            kill_thread(initproc, p->signal.esignal);
         }
     }
 }
 
-// Exit the current process.  Does not return.
-// An exited process remains in the zombie state
+// Exit the current thread.  Does not return.
+// An exited thread remains in the zombie state
 // until its parent calls wait().
 void exit(int status) {
-    struct proc *p = myproc();
-    struct proc *parent = p->parent;
+    struct thread *p = current;
+    struct thread *parent = p->parent;
     assert(p != __proctab_get_initproc(), "init exiting");
 
     // Wake vfork parent FIRST - they're sharing our address space
@@ -139,25 +139,25 @@ void exit(int status) {
 
     reparent(p);
 
-    proc_lock(p);
+    tcb_lock(p);
     p->xstate = status;
-    __proc_set_pstate(p, PSTATE_ZOMBIE);
-    proc_unlock(p);
+    __thread_state_set(p, THREAD_ZOMBIE);
+    tcb_unlock(p);
     
     // Wake parent BEFORE we yield - this is the Linux pattern.
     // Always wake parent regardless of exit signal (handles threads with
     // esignal=0 or ignored signals). Then send the exit signal if set.
     wake_up_parent(parent);
     if (parent != NULL && p->signal.esignal > 0) {
-        kill_proc(parent, p->signal.esignal);
+        kill_thread(parent, p->signal.esignal);
     }
     
     scheduler_yield();
     panic("exit: __exit_yield should not return");
 }
 
-// Wait for a child process to exit and return its pid.
-// Return -1 if this process has no children.
+// Wait for a child thread to exit and return its pid.
+// Return -1 if this thread has no children.
 // Return -EINTR if interrupted by a signal other than SIGCHLD.
 //
 // Uses the Linux "set-state-before-check" pattern to avoid lost wakeups:
@@ -173,67 +173,67 @@ void exit(int status) {
 int wait(uint64 addr) {
     int pid = -1;
     int xstate = 0;
-    struct proc *p = myproc();
-    struct proc *child, *tmp;
+    struct thread *p = current;
+    struct thread *child, *tmp;
     sigset_t saved_mask = 0;
     bool mask_saved = false;
 
-    proc_lock(p);
+    tcb_lock(p);
     
     for (;;) {
         // Set INTERRUPTIBLE BEFORE scanning - this is the Linux pattern.
         // Any child that calls wakeup_interruptible() while we're scanning
         // will change our state back to RUNNING (or WAKENING if on_cpu).
-        __proc_set_pstate(p, PSTATE_INTERRUPTIBLE);
+        __thread_state_set(p, THREAD_INTERRUPTIBLE);
         
         // Scan through table looking for exited children.
         list_foreach_node_safe(&p->children, child, tmp, siblings) {
-            proc_lock(child);
-            if (PROC_ZOMBIE(child)) {
+            tcb_lock(child);
+            if (THREAD_ZOMBIE(child)) {
                 // Make sure the zombie child has fully switched out of CPU.
                 // The on_cpu window is very short (just context_switch_finish),
                 // so we spin-wait with cpu_relax() rather than yielding.
-                // This avoids a tight loop that could starve other processes.
+                // This avoids a tight loop that could starve other threads.
                 int spin_count = 0;
                 while (smp_load_acquire(&child->sched_entity->on_cpu)) {
                     cpu_relax();
                     spin_count++;
                     // If spinning too long, yield to let other CPU progress
                     if (spin_count > 1000) {
-                        proc_unlock(child);
-                        __proc_set_pstate(p, PSTATE_RUNNING);
-                        proc_unlock(p);
+                        tcb_unlock(child);
+                        __thread_state_set(p, THREAD_RUNNING);
+                        tcb_unlock(p);
                         scheduler_yield();  // Give other CPUs a chance
-                        proc_lock(p);
-                        __proc_set_pstate(p, PSTATE_INTERRUPTIBLE);
-                        proc_lock(child);
+                        tcb_lock(p);
+                        __thread_state_set(p, THREAD_INTERRUPTIBLE);
+                        tcb_lock(child);
                         spin_count = 0;
                     }
                 }
                 // Found one - set state to RUNNING before returning.
                 // If we were in WAKENING, rq_flush_wake_list will skip us
                 // when it sees our state is no longer WAKENING.
-                __proc_set_pstate(p, PSTATE_RUNNING);
+                __thread_state_set(p, THREAD_RUNNING);
                 xstate = child->xstate;
                 pid = child->pid;
                 detach_child(p, child);
-                proc_unlock(child);
-                freeproc(child);
+                tcb_unlock(child);
+                thread_destroy(child);
                 goto ret;
             }
-            proc_unlock(child);
+            tcb_unlock(child);
         }
 
         // No point waiting if we don't have any children.
         if (p->children_count == 0) {
-            __proc_set_pstate(p, PSTATE_RUNNING);
+            __thread_state_set(p, THREAD_RUNNING);
             pid = -1;
             goto ret;
         }
         
-        proc_unlock(p);
+        tcb_unlock(p);
         scheduler_yield();
-        proc_lock(p);
+        tcb_lock(p);
         // State will be set to INTERRUPTIBLE at the start of next loop iteration
     }
 
@@ -245,7 +245,7 @@ ret:
         recalc_sigpending_tsk(p);
         sigacts_unlock(p->sigacts);
     }
-    proc_unlock(p);
+    tcb_unlock(p);
     if (pid >= 0 && addr != 0) {
         // copy xstate to user.
         if (either_copyout(1, addr, (char *)&xstate, sizeof(xstate)) < 0) {

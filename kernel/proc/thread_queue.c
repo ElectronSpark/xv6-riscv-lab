@@ -5,7 +5,7 @@
 #include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "defs.h"
 #include "printf.h"
@@ -80,7 +80,7 @@ void ttree_set_lock(ttree_t *q, spinlock_t *lock) {
     }
 }
 
-// Initialize a proc node to None type
+// Initialize a thread node to None type
 static void __tnode_to_none(tnode_t *node) {
     if (node == NULL) {
         return;
@@ -88,7 +88,7 @@ static void __tnode_to_none(tnode_t *node) {
     node->type = THREAD_QUEUE_TYPE_NONE;
 }
 
-// Initialize a proc node as a list node
+// Initialize a thread node as a list node
 static void __tnode_to_list(tnode_t *node) {
     if (node == NULL) {
         return;
@@ -98,7 +98,7 @@ static void __tnode_to_list(tnode_t *node) {
     node->list.queue = NULL; // Initialize the queue pointer to NULL
 }
 
-// Initialize a proc node as a tree node
+// Initialize a thread node as a tree node
 static void __tnode_to_tree(tnode_t *node) {
     if (node == NULL) {
         return;
@@ -112,7 +112,7 @@ void tnode_init(tnode_t *node) {
     memset(node, 0, sizeof(tnode_t));
     __tnode_to_none(node);
     node->error_no = 0; // Initialize error_no to 0
-    node->proc = myproc();  // Initialize the process pointer to the current process
+    node->thread = current;  // Initialize the thread pointer to the current thread
 }
 
 int tq_size(tq_t *q) {
@@ -149,11 +149,11 @@ ttree_t *tnode_get_tree(tnode_t *node) {
     return node->tree.queue;
 }
 
-struct proc *tnode_get_proc(tnode_t *node) {
+struct thread *tnode_get_thread(tnode_t *node) {
     if (node == NULL) {
         return NULL; // Error: node is NULL
     }
-    return node->proc;
+    return node->thread;
 }
 
 int tnode_get_errno(tnode_t *node, int *error_no) {
@@ -165,12 +165,12 @@ int tnode_get_errno(tnode_t *node, int *error_no) {
 }
 
 int tq_push(tq_t *q, tnode_t *node) {
-    if (q == NULL || tnode_get_proc(node) == NULL) {
-        return -EINVAL; // Error: queue or process is NULL
+    if (q == NULL || tnode_get_thread(node) == NULL) {
+        return -EINVAL; // Error: queue or thread is NULL
     }
 
     if (tq_enqueued(node)) {
-        return -EINVAL; // Error: process is already in a queue
+        return -EINVAL; // Error: thread is already in a queue
     }
 
     __tnode_to_list(node); // Initialize the node as a list node
@@ -178,7 +178,6 @@ int tq_push(tq_t *q, tnode_t *node) {
     node->list.queue = q;
     q->counter++;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-    // printf("pushing process %d to queue %s\n", p->pid, q->name);
 
     return 0; // Success
 }
@@ -200,12 +199,12 @@ tnode_t *tq_first(tq_t *q) {
 }
 
 int tq_remove(tq_t *q, tnode_t *node) {
-    if (q == NULL || tnode_get_proc(node) == NULL) {
-        return -EINVAL; // Error: queue or process is NULL
+    if (q == NULL || tnode_get_thread(node) == NULL) {
+        return -EINVAL; // Error: queue or thread is NULL
     }
 
     if (tnode_get_queue(node) != q) {
-        return -EINVAL; // Error: process is not in the specified queue
+        return -EINVAL; // Error: thread is not in the specified queue
     }
 
     if (q->counter <= 0) {
@@ -216,8 +215,6 @@ int tq_remove(tq_t *q, tnode_t *node) {
     __tnode_to_none(node);
     q->counter--;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
-
-    // printf("removing process %d from queue %s\n", tnode_get_proc(node)->pid, q->name);
 
     return 0; // Success
 }
@@ -238,9 +235,9 @@ tnode_t *tq_pop(tq_t *q) {
     return ERR_PTR(ret); // Return the error code if failed to remove the node
 }
 
-// Move all process from one queue to another.
-// This is to enconvinience walking up all process in a queue.
-// This will not change the pointer of the processes to their queues.
+// Move all thread from one queue to another.
+// This is to enconvinience walking up all thread in a queue.
+// This will not change the pointer of the threads to their queues.
 // 'to' and 'from' must be different queues.
 int tq_bulk_move(tq_t *to, tq_t *from) {
     if (to == NULL || from == NULL) {
@@ -264,34 +261,34 @@ int tq_bulk_move(tq_t *to, tq_t *from) {
     tnode_t *proc = NULL;
     tnode_t *tmp = NULL;
     list_foreach_node_safe(&to->head, proc, tmp, list.entry) {
-        assert(tnode_get_queue(proc) == from, "Process is not in the expected queue");
-        proc->list.queue = to; // Update the queue pointer for each process
+        assert(tnode_get_queue(proc) == from, "Thread is not in the expected queue");
+        proc->list.queue = to; // Update the queue pointer for each thread
     }
 
     return 0; // Success
 }
 
 int tq_wait_in_state(tq_t *q, struct spinlock *lock, 
-                             uint64 *rdata, enum procstate state) {
+                             uint64 *rdata, enum thread_state state) {
     if (q == NULL) {
         return -EINVAL;
     }
 
-    if (!PSTATE_IS_SLEEPING(state)) {
+    if (!THREAD_IS_SLEEPING(state)) {
         return -EINVAL; // Invalid state for sleeping
     }
 
     tnode_t waiter = { 0 };
     tnode_init(&waiter);
-    // Will be cleared when waking up a process with proc queue APIs
+    // Will be cleared when waking up a thread with thread queue APIs
     waiter.error_no = -EINTR;
     if (tq_push(q, &waiter) != 0) {
-        panic("Failed to push process to sleep queue");
+        panic("Failed to push thread to sleep queue");
     }
 
     scheduler_sleep(lock, state);
     if (tq_enqueued(&waiter)) {
-        // When the process is waken up by the queue leader, the waiter is already detached from the queue.
+        // When the thread is waken up by the queue leader, the waiter is already detached from the queue.
         // If it's waken up asynchronously(e.g by signals), we need to remove it from the queue.
         assert(tq_remove(q, &waiter) == 0, "Failed to remove interrupted waiter from queue");
     }
@@ -303,39 +300,39 @@ int tq_wait_in_state(tq_t *q, struct spinlock *lock,
 }
 
 int tq_wait(tq_t *q, struct spinlock *lock, uint64 *rdata) {
-    return tq_wait_in_state(q, lock, rdata, PSTATE_UNINTERRUPTIBLE);
+    return tq_wait_in_state(q, lock, rdata, THREAD_UNINTERRUPTIBLE);
 }
 
-static struct proc *__do_wakeup(tnode_t *woken, int error_no, uint64 rdata) {
+static struct thread *__do_wakeup(tnode_t *woken, int error_no, uint64 rdata) {
     if (woken == NULL) {
         return ERR_PTR(-EINVAL); // Nothing to wake up
     }
-    if (woken->proc == NULL) {
-        printf("woken process is NULL\n");
+    if (woken->thread == NULL) {
+        printf("woken thread is NULL\n");
         return ERR_PTR(-EINVAL);
     }
-    woken->error_no = error_no; // Set the error number for the woken process
-    woken->data = rdata; // Set the data for the woken process
-    struct proc *p = woken->proc;
+    woken->error_no = error_no; // Set the error number for the woken thread
+    woken->data = rdata; // Set the data for the woken thread
+    struct thread *p = woken->thread;
     // Note: pi_lock is acquired internally by scheduler_wakeup
     scheduler_wakeup(p);
     return p;
 }
 
-static struct proc *__tq_wakeup_one(tq_t *q, int error_no, uint64 rdata) {
+static struct thread *__tq_wakeup_one(tq_t *q, int error_no, uint64 rdata) {
     if (q == NULL) {
         return ERR_PTR(-EINVAL);
     }
 
     tnode_t *woken = tq_pop(q);
     if (IS_ERR_OR_NULL(woken)) {
-        return ERR_CAST(woken); // No process to wake up
+        return ERR_CAST(woken); // No thread to wake up
     }
 
     return __do_wakeup(woken, error_no, rdata);
 }
 
-struct proc *tq_wakeup(tq_t *q, int error_no, uint64 rdata) {
+struct thread *tq_wakeup(tq_t *q, int error_no, uint64 rdata) {
     return __tq_wakeup_one(q, error_no, rdata);
 }
 
@@ -346,7 +343,7 @@ int tq_wakeup_all(tq_t *q, int error_no, uint64 rdata) {
 
     int counter = 0;
     for(;;) {
-        struct proc *p = __tq_wakeup_one(q, error_no, rdata);
+        struct thread *p = __tq_wakeup_one(q, error_no, rdata);
         if (p == NULL) {
             assert(q->counter == 0, "Queue counter is not zero when queue is empty");
             break; // Queue is empty
@@ -357,11 +354,11 @@ int tq_wakeup_all(tq_t *q, int error_no, uint64 rdata) {
         counter++;
     }
 
-    return counter; // Return the number of processes woken up
+    return counter; // Return the number of threads woken up
 }
 
-// RB Tree based proc queue
-// Because there may be more than one process with the same key,
+// RB Tree based thread queue
+// Because there may be more than one thread with the same key,
 // we need to round down the key to find the minimum key node.
 // Since key2 is the node to compare with, and we want to find the first node
 // with key >= key1, we can just return 1 when key1 == key2
@@ -386,7 +383,7 @@ static struct rb_root_opts __q_root_rdown_opts = {
     .get_key_fun = __q_root_get_key_fun,
 };
 
-// Check if a process node is in the tree.
+// Check if a thread node is in the tree.
 // It will only check the node. Will not try to search in the tree.
 static bool __tnode_in_tree(ttree_t *q, tnode_t *node) {
     if (q == NULL || node == NULL) {
@@ -427,12 +424,12 @@ static tnode_t *__ttree_find_key_min(ttree_t *q, uint64 key) {
 }
 
 int ttree_add(ttree_t *q, tnode_t *node) {
-    if (q == NULL || node == NULL || tnode_get_proc(node) == NULL) {
-        return -EINVAL; // Error: queue or process is NULL
+    if (q == NULL || node == NULL || tnode_get_thread(node) == NULL) {
+        return -EINVAL; // Error: queue or thread is NULL
     }
 
     if (tq_enqueued(node)) {
-        return -EINVAL; // Error: process is already in a queue
+        return -EINVAL; // Error: thread is already in a queue
     }
 
     __tnode_to_tree(node); // Initialize the node as a tree node
@@ -482,7 +479,7 @@ static int __ttree_do_remove(ttree_t *q, tnode_t *node) {
     return 0; // Success
 }
 
-// Remove a proc node from a proc tree.
+// Remove a thread node from a thread tree.
 // Will not check if the node is in the tree.
 int ttree_remove(ttree_t *q, tnode_t *node) {
     if (q == NULL || node == NULL) {
@@ -495,28 +492,28 @@ int ttree_remove(ttree_t *q, tnode_t *node) {
 }
 
 int ttree_wait_in_state(ttree_t *q, uint64 key, struct spinlock *lock, 
-                            uint64 *rdata, enum procstate state) {
+                            uint64 *rdata, enum thread_state state) {
     if (q == NULL) {
         return -EINVAL; // Error: queue is NULL
     }
 
-    if (!PSTATE_IS_SLEEPING(state)) {
+    if (!THREAD_IS_SLEEPING(state)) {
         return -EINVAL; // Invalid state for sleeping
     }
 
     tnode_t waiter = { 0 };
     tnode_init(&waiter);
-    // Will be cleared when waking up a process with proc queue APIs
+    // Will be cleared when waking up a thread with thread queue APIs
     waiter.error_no = -EINTR;
     waiter.tree.key = key;
 
     if (ttree_add(q, &waiter) != 0) {
-        panic("Failed to push process to sleep tree");
+        panic("Failed to push thread to sleep tree");
     }
 
     scheduler_sleep(lock, state);
     if (tq_enqueued(&waiter)) {
-        // When the process is waken up by the queue leader, the waiter is already detached from the queue.
+        // When the thread is waken up by the queue leader, the waiter is already detached from the queue.
         // If it's waken up asynchronously(e.g by signals), we need to remove it from the queue.
         assert(ttree_remove(q, &waiter) == 0, "Failed to remove interrupted waiter from tree");
     }
@@ -528,12 +525,12 @@ int ttree_wait_in_state(ttree_t *q, uint64 key, struct spinlock *lock,
 }
 
 int ttree_wait(ttree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata) {
-    return ttree_wait_in_state(q, key, lock, rdata, PSTATE_UNINTERRUPTIBLE);
+    return ttree_wait_in_state(q, key, lock, rdata, THREAD_UNINTERRUPTIBLE);
 }
 
 // Wake up one node with a given key
-// Process Tree will always expect the waiter to detach itself from the tree when woken up.
-struct proc *ttree_wakeup_one(ttree_t *q, uint64 key, int error_no, uint64 rdata) {
+// Thread tree will always expect the waiter to detach itself from the tree when woken up.
+struct thread *ttree_wakeup_one(ttree_t *q, uint64 key, int error_no, uint64 rdata) {
     if (q == NULL) {
         return ERR_PTR(-EINVAL); // Error: queue is NULL
     }
@@ -582,7 +579,7 @@ int ttree_wakeup_all(ttree_t *q, int error_no, uint64 rdata) {
     tnode_t *n = NULL;
 
     rb_foreach_entry_safe(&q->root, pos, n, tree.entry) {
-        assert(__tnode_in_tree(q, pos), "Process node is not in the tree");
+        assert(__tnode_in_tree(q, pos), "Thread node is not in the tree");
         // @TODO: The whole tree will be abandoned, so don't need to adjust its structure.
         if (__ttree_do_remove(q, pos) != 0) {
             printf("warning: Failed to remove node from tree during wakeup all\n");

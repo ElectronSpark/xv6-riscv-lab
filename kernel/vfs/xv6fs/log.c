@@ -190,7 +190,7 @@ void xv6fs_end_op(struct xv6fs_superblock *xv6_sb) {
         __xv6fs_commit(log);
         
         // Collect waiters while holding lock, then wake outside lock
-        // to avoid lock convoy (woken processes try to reacquire log->lock)
+        // to avoid lock convoy (woken threads try to reacquire log->lock)
         tq_t temp_queue;
         tq_init(&temp_queue, "xv6fs_log_temp", NULL);
         

@@ -12,7 +12,8 @@
  *
  * 1. vm rw_lock (rwlock_t) - Protects VMA TREE STRUCTURE
  *    - Read lock: Safe to traverse/lookup VMAs (vm_find_area, etc.)
- *    - Write lock: Required to modify VMA tree (va_alloc, va_free, vma_split, vma_merge)
+ *    - Write lock: Required to modify VMA tree (va_alloc, va_free, vma_split,
+ * vma_merge)
  *    - This is a sleep lock, safe to hold across blocking operations
  *
  * 2. vm spinlock (vm_pgtable_lock) - Protects PAGE TABLE DATA
@@ -21,7 +22,8 @@
  *    - This is a spinlock, must NOT sleep while holding
  *
  * Typical usage patterns:
- * - Page fault: vm_rlock -> vm_find_area -> vma_validate (internally acquires pgtable_lock)
+ * - Page fault: vm_rlock -> vm_find_area -> vma_validate (internally acquires
+ * pgtable_lock)
  * - Allocate VMA: vm_wlock -> va_alloc
  * - Copy memory: vm_rlock -> vm_find_area -> vma_validate -> memcpy
  *
@@ -90,7 +92,7 @@
 #include "param.h"
 #include <smp/percpu.h>
 #include "printf.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "lock/spinlock.h"
 #include "lock/rwlock.h"
 #include <smp/atomic.h>
@@ -110,11 +112,13 @@ static slab_cache_t __vm_pool = {0};
 static void __vm_destroy(vm_t *vm);
 
 static void __vma_pool_init(void) {
-    slab_cache_init(&__vma_pool, "vm area", sizeof(vma_t), SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
+    slab_cache_init(&__vma_pool, "vm area", sizeof(vma_t),
+                    SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
 }
 
 static void __vm_pool_init(void) {
-    slab_cache_init(&__vm_pool, "vm", sizeof(vm_t), SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
+    slab_cache_init(&__vm_pool, "vm", sizeof(vm_t),
+                    SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
 }
 
 /*
@@ -192,7 +196,8 @@ pagetable_t kvmmake(void) {
 
     memset(kpgtbl, 0, PGSIZE);
 
-    // uart registers - page-align the address (UART5 is at 0xd4017100, not page-aligned)
+    // uart registers - page-align the address (UART5 is at 0xd4017100, not
+    // page-aligned)
     uint64 uart_page = PGROUNDDOWN(UART0);
     kvmmap(kpgtbl, uart_page, uart_page, PGSIZE, PTE_R | PTE_W);
 
@@ -214,9 +219,9 @@ pagetable_t kvmmake(void) {
     // PCI-E ECAM (configuration space), for pci.c - only if platform has PCIe
     if (platform.has_pcie && PCIE_ECAM != 0) {
         // Track already-mapped ranges to avoid overlaps
-        uint64 mapped_ranges[PCIE_REG_MAX][2];  // [base, end]
+        uint64 mapped_ranges[PCIE_REG_MAX][2]; // [base, end]
         int num_mapped = 0;
-        
+
         // Map all PCIe regions (round down start, round up end for alignment)
         for (int i = 0; i < platform.pcie_reg_count; i++) {
             uint64 base = platform.pcie_reg[i].base;
@@ -227,22 +232,24 @@ pagetable_t kvmmake(void) {
             // Round down start, round up end
             uint64 aligned_base = PGROUNDDOWN(base);
             uint64 aligned_end = PGROUNDUP(base + size);
-            
+
             // Check for overlap with already-mapped regions
             int overlap = 0;
             for (int j = 0; j < num_mapped; j++) {
-                if (aligned_base < mapped_ranges[j][1] && aligned_end > mapped_ranges[j][0]) {
+                if (aligned_base < mapped_ranges[j][1] &&
+                    aligned_end > mapped_ranges[j][0]) {
                     overlap = 1;
                     break;
                 }
             }
             if (overlap) {
-                continue;  // Skip overlapping regions
+                continue; // Skip overlapping regions
             }
-            
+
             uint64 aligned_size = aligned_end - aligned_base;
-            kvmmap(kpgtbl, aligned_base, aligned_base, aligned_size, PTE_R | PTE_W);
-            
+            kvmmap(kpgtbl, aligned_base, aligned_base, aligned_size,
+                   PTE_R | PTE_W);
+
             // Record this mapped range
             if (num_mapped < PCIE_REG_MAX) {
                 mapped_ranges[num_mapped][0] = aligned_base;
@@ -251,9 +258,11 @@ pagetable_t kvmmake(void) {
             }
         }
         // pci.c maps the e1000's registers here - only on QEMU
-        // (VirtIO presence indicates QEMU; real hardware won't have E1000 at hardcoded addr)
+        // (VirtIO presence indicates QEMU; real hardware won't have E1000 at
+        // hardcoded addr)
         if (platform.has_virtio && E1000_PCI_ADDR != 0) {
-            kvmmap(kpgtbl, E1000_PCI_ADDR, E1000_PCI_ADDR, 0x20000, PTE_R | PTE_W);
+            kvmmap(kpgtbl, E1000_PCI_ADDR, E1000_PCI_ADDR, 0x20000,
+                   PTE_R | PTE_W);
         }
     }
 
@@ -314,7 +323,7 @@ pagetable_t kvmmake(void) {
     if (KERNEL_SYMBOLS_SIZE > 0) {
         kvmmap(kpgtbl, KERNEL_SYMBOLS_START, KERNEL_SYMBOLS_START,
                KERNEL_SYMBOLS_SIZE, PTE_R);
-        printf("kernel symbols 0x%lx - 0x%lx (size: %ld)\n", 
+        printf("kernel symbols 0x%lx - 0x%lx (size: %ld)\n",
                KERNEL_SYMBOLS_START, KERNEL_SYMBOLS_END, KERNEL_SYMBOLS_SIZE);
     }
 
@@ -322,11 +331,9 @@ pagetable_t kvmmake(void) {
     // This is in BSS, so already mapped, but needs to be explicitly accessible
     if (KERNEL_SYMBOLS_IDX_SIZE > 0) {
         printf("kernel symbols index 0x%lx - 0x%lx (size: %ld)\n",
-               KERNEL_SYMBOLS_IDX_START, KERNEL_SYMBOLS_IDX_END, KERNEL_SYMBOLS_IDX_SIZE);
+               KERNEL_SYMBOLS_IDX_START, KERNEL_SYMBOLS_IDX_END,
+               KERNEL_SYMBOLS_IDX_SIZE);
     }
-
-    // allocate and map a kernel stack for each process.
-    // proc_mapstacks(kpgtbl);
 
     return kpgtbl;
 }
@@ -619,7 +626,8 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa,
         panic("mappages: va not aligned, va %p", (void *)va);
 
     if ((size % PGSIZE) != 0)
-        panic("mappages: size not aligned, va %p, size %p", (void *)va, (void *)size);
+        panic("mappages: size not aligned, va %p, size %p", (void *)va,
+              (void *)size);
 
     if (size == 0)
         panic("mappages: size zero, va %p", (void *)va);
@@ -903,7 +911,8 @@ static int __vm_map_trampoline(vm_t *vm) {
     }
 
     // Walk to the first trapframe VA to create intermediate page tables
-    // and get the leaf page table pointer. alloc=1 ensures page tables are created.
+    // and get the leaf page table pointer. alloc=1 ensures page tables are
+    // created.
     pte_t *pte = walk(vm->pagetable, TRAPFRAME, 1, NULL, NULL);
     if (pte == NULL) {
         return -1;
@@ -920,14 +929,16 @@ static int __vm_map_trampoline(vm_t *vm) {
 // Also updates the trapframe PTE for the current CPU.
 // Returns the trapframe base virtual address for this CPU.
 uint64 vm_cpu_online(vm_t *vm, int cpu) {
-    struct proc *p = myproc();
+    struct thread *p = current;
     uint64 trapframe_poffset = TRAPFRAME_POFFSET;
     if (vm->trapframe_pte != NULL && p != NULL && p->trapframe != NULL) {
         // Calculate the PTE index for this CPU's trapframe page
-        // All 64 trapframe pages fit within a single 2MB region, so they share the same leaf page table
+        // All 64 trapframe pages fit within a single 2MB region, so they share
+        // the same leaf page table
         int pte_idx = PX(0, TRAPFRAME + (cpu * PGSIZE));
         uint64 trapframe_pa = PGROUNDDOWN((uint64)p->trapframe);
-        vm->trapframe_pte[pte_idx] = PA2PTE(trapframe_pa) | PTE_R | PTE_W | PTE_V | PTE_A | PTE_D;
+        vm->trapframe_pte[pte_idx] =
+            PA2PTE(trapframe_pa) | PTE_R | PTE_W | PTE_V | PTE_A | PTE_D;
         // Ensure PTE write is visible before page table switch
         smp_wmb();
         // Calculate trapframe offset within the page from p->trapframe
@@ -943,9 +954,7 @@ void vm_cpu_offline(vm_t *vm, int cpu) {
     atomic_and(&vm->cpumask, ~(1ULL << cpu));
 }
 
-cpumask_t vm_get_cpumask(vm_t *vm) {
-    return smp_load_acquire(&vm->cpumask);
-}
+cpumask_t vm_get_cpumask(vm_t *vm) { return smp_load_acquire(&vm->cpumask); }
 
 // Initialize the vm struct of a process.
 // Will destroy vm directly and return NULL on failure.
@@ -997,9 +1006,7 @@ vm_t *vm_init(void) {
  * @note Thread-safe via atomic increment
  * @see vm_put()
  */
-void vm_dup(vm_t *vm) {
-    atomic_inc(&vm->refcount);
-}
+void vm_dup(vm_t *vm) { atomic_inc(&vm->refcount); }
 
 /**
  * @brief Decrement VM reference count and destroy if last reference
@@ -1014,8 +1021,8 @@ void vm_dup(vm_t *vm) {
 void vm_put(vm_t *vm) {
     if (!atomic_dec_unless(&vm->refcount, 1)) {
         // By now, suppose only the processes holding a reference to this VM can
-        // increase the refcount again. Thus, no other processes can access this VM
-        // after we see refcount reach zero.
+        // increase the refcount again. Thus, no other processes can access this
+        // VM after we see refcount reach zero.
         __vm_destroy(vm);
     }
 }
@@ -1025,51 +1032,39 @@ void vm_put(vm_t *vm) {
  * @param vm VM to lock
  * @note Safe to hold across blocking operations (rwlock)
  */
-void vm_rlock(vm_t *vm) {
-    rwlock_acquire_read(&vm->rw_lock);
-}
+void vm_rlock(vm_t *vm) { rwlock_acquire_read(&vm->rw_lock); }
 
 /**
  * @brief Release VM read lock
  * @param vm VM to unlock
  */
-void vm_runlock(vm_t *vm) {
-    rwlock_release(&vm->rw_lock);
-}
+void vm_runlock(vm_t *vm) { rwlock_release(&vm->rw_lock); }
 
 /**
  * @brief Acquire VM write lock for VMA tree modification
  * @param vm VM to lock
  * @note Required for va_alloc(), va_free(), vma_split(), vma_merge()
  */
-void vm_wlock(vm_t *vm) {
-    rwlock_acquire_write(&vm->rw_lock);
-}
+void vm_wlock(vm_t *vm) { rwlock_acquire_write(&vm->rw_lock); }
 
 /**
  * @brief Release VM write lock
  * @param vm VM to unlock
  */
-void vm_wunlock(vm_t *vm) {
-    rwlock_release(&vm->rw_lock);
-}
+void vm_wunlock(vm_t *vm) { rwlock_release(&vm->rw_lock); }
 
 /**
  * @brief Acquire VM page table spinlock for PTE modifications
  * @param vm VM to lock
  * @warning Do not sleep while holding this lock
  */
-void vm_pgtable_lock(vm_t *vm) {
-    spin_lock(&vm->spinlock);
-}
+void vm_pgtable_lock(vm_t *vm) { spin_lock(&vm->spinlock); }
 
 /**
  * @brief Release VM page table spinlock
  * @param vm VM to unlock
  */
-void vm_pgtable_unlock(vm_t *vm) {
-    spin_unlock(&vm->spinlock);
-}
+void vm_pgtable_unlock(vm_t *vm) { spin_unlock(&vm->spinlock); }
 
 // Magic for detecting double-destroy of VM.
 // We deliberately poison vm->pagetable to catch accidental reuse.
@@ -1093,9 +1088,9 @@ static void __vm_destroy(vm_t *vm) {
     list_foreach_node_safe(&vm->vm_list, vma, tmp, list_entry) {
         // Sanity check: verify the VMA is valid before freeing
         if (vma->vm != vm) {
-            printf(
-                "__vm_destroy: vma->vm mismatch! vma=%p vma->vm=%p expected=%p\n",
-                vma, vma->vm, vm);
+            printf("__vm_destroy: vma->vm mismatch! vma=%p vma->vm=%p "
+                   "expected=%p\n",
+                   vma, vma->vm, vm);
             continue;
         }
         if (vma->start == VMA_FREED_MAGIC || vma->end == VMA_FREED_MAGIC) {
@@ -1133,8 +1128,9 @@ vm_t *vm_copy(vm_t *src) {
         return ERR_PTR(-ENOMEM); // Allocation failed
     }
     vm_rlock(src);
-    // In other places, we shouldn't hold both src and dst locks at the same time to avoid
-    // deadlocks. Here it's safe because dst is newly created and not visible to other threads yet.
+    // In other places, we shouldn't hold both src and dst locks at the same
+    // time to avoid deadlocks. Here it's safe because dst is newly created and
+    // not visible to other threads yet.
     vm_wlock(dst);
     vma_t *vma, *tmp;
     list_foreach_node_safe(&src->vm_list, vma, tmp, list_entry) {
@@ -1281,7 +1277,7 @@ vma_t *vma_merge(vma_t *vma1, vma_t *vma2) {
 }
 
 vma_t *va_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags) {
-    assert(myproc() == NULL || rwlock_is_write_holding(&vm->rw_lock),
+    assert(current == NULL || rwlock_is_write_holding(&vm->rw_lock),
            "va_alloc: vm rwlock must be write-held");
     if (vm == NULL) {
         return NULL;
@@ -1492,7 +1488,7 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte) {
      * Note: __vma_validate_pte_rxw already sets PTE_V via "flags |= PTE_V |
      * PTE_W", but this function was missing it for read-only/execute pages.
      */
-    flags |= PTE_V | PTE_A | PTE_D;            // Set the valid bit
+    flags |= PTE_V | PTE_A | PTE_D; // Set the valid bit
     *pte = PA2PTE(pa) | flags; // Update the PTE with the new address and flags
 
     // Flush TLB so faulting hart sees the new private writable mapping (COW
@@ -1735,7 +1731,7 @@ uint64 pte2vm_flags(uint64 pte_flags) {
 }
 
 int vm_createheap(vm_t *vm, uint64 va, uint64 size) {
-    assert(myproc() == NULL || rwlock_is_write_holding(&vm->rw_lock),
+    assert(current == NULL || rwlock_is_write_holding(&vm->rw_lock),
            "vm_createheap: vm rwlock must be write-held");
     size = PGROUNDUP(size);
     if ((va & (PGSIZE - 1)) != 0) {
@@ -1756,7 +1752,7 @@ int vm_createheap(vm_t *vm, uint64 va, uint64 size) {
 }
 
 int vm_createstack(vm_t *vm, uint64 stack_top, uint64 size) {
-    assert(myproc() == NULL || rwlock_is_write_holding(&vm->rw_lock),
+    assert(current == NULL || rwlock_is_write_holding(&vm->rw_lock),
            "vm_createstack: vm rwlock must be write-held");
     size = PGROUNDUP(size);
     if ((stack_top & (PGSIZE - 1)) != 0) {
@@ -1777,7 +1773,7 @@ int vm_createstack(vm_t *vm, uint64 stack_top, uint64 size) {
 }
 
 int vm_growstack(vm_t *vm, int64 change_size) {
-    assert(myproc() == NULL || rwlock_is_write_holding(&vm->rw_lock),
+    assert(current == NULL || rwlock_is_write_holding(&vm->rw_lock),
            "vm_growstack: vm rwlock must be write-held");
     if (vm == NULL || vm->pagetable == NULL) {
         return -1; // Invalid VM
@@ -1889,7 +1885,7 @@ int vm_try_growstack(vm_t *vm, uint64 va) {
 
     // Grow the stack
     ret = vm_growstack(vm, USERSTACK_GROWTH
-                                << PAGE_SHIFT); // Grow the stack by one page
+                               << PAGE_SHIFT); // Grow the stack by one page
 out:
     vm_wunlock(vm);
     return ret;
@@ -1929,7 +1925,7 @@ int vm_growheap(vm_t *vm, int64 change_size) {
     int64 delta = PGROUNDUP(new_size) - VMA_SIZE(vm->heap);
     if (delta == 0) {
         vm->heap_size = new_size; // Update the heap size
-        ret = 0;                 // No change in heap size
+        ret = 0;                  // No change in heap size
         goto ret;
     }
     uint64 new_end = vm->heap->end + delta;
@@ -1977,7 +1973,7 @@ ret:
 int vma_mmap(vm_t *vm, uint64 start, size_t size, uint64 flags, void *file,
              uint64 pgoff, void *pa) {
     int ret = 0;
-    if (myproc() != NULL) {
+    if (current != NULL) {
         vm_wlock(vm);
     }
     if (vm == NULL || vm->pagetable == NULL) {
@@ -2010,13 +2006,13 @@ int vma_mmap(vm_t *vm, uint64 start, size_t size, uint64 flags, void *file,
             assert(va_free(vm, vma) == 0,
                    "vma_mmap: failed to free vma"); // Free the VMA if mapping
                                                     // fails
-            ret = -1;                              // Mapping failed
+            ret = -1;                               // Mapping failed
             goto out;
         }
     }
     ret = 0; // Success
 out:
-    if (myproc() != NULL) {
+    if (current != NULL) {
         vm_wunlock(vm);
     }
     return ret;
@@ -2062,7 +2058,7 @@ out:
 // depending on usr_dst.
 // Returns 0 on success, -1 on error.
 int either_copyout(int user_dst, uint64 dst, void *src, uint64 len) {
-    struct proc *p = myproc();
+    struct thread *p = current;
     if (user_dst) {
         return vm_copyout(p->vm, dst, src, len);
     } else {
@@ -2075,7 +2071,7 @@ int either_copyout(int user_dst, uint64 dst, void *src, uint64 len) {
 // depending on usr_src.
 // Returns 0 on success, -1 on error.
 int either_copyin(void *dst, int user_src, uint64 src, uint64 len) {
-    struct proc *p = myproc();
+    struct thread *p = current;
     if (user_src) {
         return vm_copyin(p->vm, dst, src, len);
     } else {

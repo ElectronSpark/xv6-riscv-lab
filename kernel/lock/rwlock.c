@@ -7,7 +7,7 @@
 #include "lock/spinlock.h"
 #include "lock/rwlock.h"
 #include <smp/percpu.h>
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/tq.h"
 #include "proc/sched.h"
 #include "string.h"
@@ -43,7 +43,7 @@ static void __wake_readers(rwlock_t *lock) {
 }
 
 static void __wake_writer(rwlock_t *lock) {
-    struct proc *next = tq_wakeup(&lock->write_queue, 0, 0);
+    struct thread *next = tq_wakeup(&lock->write_queue, 0, 0);
     assert(!IS_ERR_OR_NULL(next), "rwlock: failed to wake writer");
     lock->holder_pid = next->pid;
 }
@@ -85,7 +85,7 @@ int rwlock_init(rwlock_t *lock, uint64 flags, const char *name) {
 }
 
 int rwlock_acquire_read(rwlock_t *lock) {
-    assert(myproc() != NULL, "rwlock_acquire_read: no current process");
+    assert(current != NULL, "rwlock_acquire_read: no current thread");
     assert(mycpu()->spin_depth == 0, "rwlock_acquire_read called with spinlock held");
     assert(!CPU_IN_ITR(), "rwlock_acquire_read called in interrupt context");
     if (!lock) {
@@ -108,7 +108,7 @@ int rwlock_acquire_read(rwlock_t *lock) {
 }
 
 int rwlock_acquire_write(rwlock_t *lock) {
-    assert(myproc() != NULL, "rwlock_acquire_write: no current process");
+    assert(current != NULL, "rwlock_acquire_write: no current thread");
     assert(mycpu()->spin_depth == 0, "rwlock_acquire_write called with spinlock held");
     assert(!CPU_IN_ITR(), "rwlock_acquire_write called in interrupt context");
     if (!lock) {
@@ -117,12 +117,12 @@ int rwlock_acquire_write(rwlock_t *lock) {
 
     int ret = 0;
     spin_lock(&lock->lock);
-    struct proc *self = myproc();
-    int self_pid = self->pid;  // myproc() != NULL asserted above
-    assert(lock->holder_pid != self_pid, "rwlock_acquire_write: deadlock detected, process already holds the write lock");
+    struct thread *self = current;
+    int self_pid = self->pid;  // current != NULL asserted above
+    assert(lock->holder_pid != self_pid, "rwlock_acquire_write: deadlock detected, thread already holds the write lock");
     // @TODO: signal handling (wait is still uninterruptible for now)
     while (__writer_should_wait(lock, self_pid)) {
-        assert(lock->holder_pid != self_pid, "rwlock_acquire_write: deadlock detected, process already holds the write lock");
+        assert(lock->holder_pid != self_pid, "rwlock_acquire_write: deadlock detected, thread already holds the write lock");
         ret = tq_wait(&lock->write_queue, &lock->lock, NULL);
         if (ret != 0) {
             spin_unlock(&lock->lock);
@@ -140,11 +140,11 @@ void rwlock_release(rwlock_t *lock) {
     }
 
     spin_lock(&lock->lock);
-    struct proc *self = myproc();
+    struct thread *self = current;
     int self_pid = (self != NULL) ? self->pid : -1;
     if (lock->holder_pid == self_pid && self_pid != -1) {
-        // When the current process is the writer holding the lock
-        // Then the current process is holding the write lock
+        // When the current thread is the writer holding the lock
+        // Then the current thread is holding the write lock
         lock->holder_pid = -1; // Clear the holder (-1 = no holder)
         __do_wake_up(lock);
     } else {
@@ -162,9 +162,9 @@ bool rwlock_is_write_holding(rwlock_t *lock) {
     if (!lock) {
         return false; // Invalid lock
     }
-    struct proc *self = myproc();
+    struct thread *self = current;
     if (self == NULL) {
-        return false; // No process context, can't be holding the lock
+        return false; // No thread context, can't be holding the lock
     }
 
     spin_lock(&lock->lock);

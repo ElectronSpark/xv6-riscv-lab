@@ -3,7 +3,7 @@
 #include "param.h"
 #include <mm/memlayout.h>
 #include "riscv.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "defs.h"
 #include "printf.h"
 #include "bintree.h"
@@ -299,13 +299,13 @@ print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end)
     }
 }
 
-// Backtrace a process using its saved context.
-// The process must be in a sleeping/blocked state (not running on any CPU).
-// @param context: pointer to the process's saved context (struct context)
+// Backtrace a thread using its saved context.
+// The thread must be in a sleeping/blocked state (not running on any CPU).
+// @param context: pointer to the thread's saved context (struct context)
 // @param kstack: base address of kernel stack
 // @param kstack_order: order of kernel stack size (size = 1 << (PAGE_SHIFT + order))
 void
-print_proc_backtrace(struct context *ctx, uint64 kstack, int kstack_order)
+print_thread_backtrace(struct context *ctx, uint64 kstack, int kstack_order)
 {
     if (ctx == NULL || kstack == 0) {
         printf("backtrace: invalid context or stack\n");
@@ -320,7 +320,7 @@ print_proc_backtrace(struct context *ctx, uint64 kstack, int kstack_order)
     
     printf("backtrace:\n");
     
-    // First, print the return address from context (where the process will resume)
+    // First, print the return address from context (where the thread will resume)
     char symbuf[64] = { 0 };
     char filebuf[128] = { 0 };
     uint32 line = 0;

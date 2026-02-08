@@ -2,7 +2,7 @@
 #define KERNEL_THREAD_QUEUE_H
 
 #include "proc/tq_type.h"
-#include "proc/proc_types.h"
+#include "proc/thread_types.h"
 #include "list.h"
 #include "errno.h"
 
@@ -21,7 +21,7 @@
 /* ======================== Initialization ======================== */
 
 /**
- * tq_init - initialize a list-based process queue
+ * tq_init - initialize a list-based thread queue
  * @q: queue to initialize
  * @name: human-readable name for debugging (may be NULL)
  * @lock: spinlock that protects this queue (may be NULL)
@@ -36,7 +36,7 @@ void tq_init(tq_t *q, const char *name, spinlock_t *lock);
 void tq_set_lock(tq_t *q, spinlock_t *lock);
 
 /**
- * ttree_init - initialize a red-black-tree-based process queue
+ * ttree_init - initialize a red-black-tree-based thread queue
  * @q: tree to initialize
  * @name: human-readable name for debugging (may be NULL)
  * @lock: spinlock that protects this tree (may be NULL)
@@ -51,11 +51,11 @@ void ttree_init(ttree_t *q, const char *name, spinlock_t *lock);
 void ttree_set_lock(ttree_t *q, spinlock_t *lock);
 
 /**
- * tnode_init - initialize a tnode for the current process
+ * tnode_init - initialize a tnode for the current thread
  * @node: node to initialize
  *
- * Zeroes the node, sets type to NONE, error_no to 0 and proc to myproc().
- * Must be called in process context.
+ * Zeroes the node, sets type to NONE, error_no to 0 and thread to current.
+ * Must be called in thread context.
  */
 void tnode_init(tnode_t *node);
 
@@ -96,12 +96,12 @@ tq_t *tnode_get_queue(tnode_t *node);
 ttree_t *tnode_get_tree(tnode_t *node);
 
 /**
- * tnode_get_proc - get the process associated with a node
+ * tnode_get_thread - get the thread associated with a node
  * @node: node to query
  *
- * Returns the struct proc pointer, or NULL if @node is NULL.
+ * Returns the struct thread pointer, or NULL if @node is NULL.
  */
-struct proc *tnode_get_proc(tnode_t *node);
+struct thread *tnode_get_thread(tnode_t *node);
 
 /**
  * tnode_get_errno - retrieve the error number stored in a node
@@ -223,9 +223,9 @@ int ttree_remove(ttree_t *q, tnode_t *node);
  * @q: queue to wait on
  * @lock: spinlock to release before sleeping (re-acquired on wakeup)
  * @rdata: optional output for data passed by the waker (may be NULL)
- * @state: process sleeping state (must satisfy PSTATE_IS_SLEEPING)
+ * @state: thread sleeping state (must satisfy THREAD_IS_SLEEPING)
  *
- * Pushes the current process onto @q, calls scheduler_sleep(), and on
+ * Pushes the current thread onto @q, calls scheduler_sleep(), and on
  * return self-removes from @q if still enqueued (e.g. async wakeup by
  * signal).
  *
@@ -233,10 +233,10 @@ int ttree_remove(ttree_t *q, tnode_t *node);
  * asynchronously, or the error_no set by the waker.
  */
 int tq_wait_in_state(tq_t *q, struct spinlock *lock, 
-                             uint64 *rdata, enum procstate state);
+                             uint64 *rdata, enum thread_state state);
 
 /**
- * tq_wait - sleep on a list queue (PSTATE_UNINTERRUPTIBLE)
+ * tq_wait - sleep on a list queue (THREAD_UNINTERRUPTIBLE)
  * @q: queue to wait on
  * @lock: spinlock to release before sleeping
  * @rdata: optional output for data passed by the waker (may be NULL)
@@ -252,14 +252,14 @@ int tq_wait(tq_t *q, struct spinlock *lock, uint64 *rdata);
  * @rdata: data delivered to the waiter's tnode.data
  *
  * Pops the head of @q, sets its error_no and data fields, then calls
- * scheduler_wakeup on the associated process.
+ * scheduler_wakeup on the associated thread.
  *
  * Returns:
- *   - pointer to the woken struct proc on success
+ *   - pointer to the woken struct thread on success
  *   - NULL if the queue was empty
  *   - ERR_PTR(-EINVAL) if @q is NULL or internal error
  */
-struct proc *tq_wakeup(tq_t *q, int error_no, uint64 rdata);
+struct thread *tq_wakeup(tq_t *q, int error_no, uint64 rdata);
 
 /**
  * tq_wakeup_all - wake every waiter in a list queue
@@ -269,7 +269,7 @@ struct proc *tq_wakeup(tq_t *q, int error_no, uint64 rdata);
  *
  * Repeatedly pops and wakes waiters until the queue is empty.
  *
- * Returns the number of processes woken (>= 0), -EINVAL if @q is NULL,
+ * Returns the number of threads woken (>= 0), -EINVAL if @q is NULL,
  * or a negative errno if an internal wakeup fails.
  */
 int tq_wakeup_all(tq_t *q, int error_no, uint64 rdata);
@@ -282,18 +282,18 @@ int tq_wakeup_all(tq_t *q, int error_no, uint64 rdata);
  * @key: sort key for the waiter (determines wakeup priority)
  * @lock: spinlock to release before sleeping
  * @rdata: optional output for data passed by the waker (may be NULL)
- * @state: process sleeping state (must satisfy PSTATE_IS_SLEEPING)
+ * @state: thread sleeping state (must satisfy THREAD_IS_SLEEPING)
  *
- * Inserts the current process into @q keyed by @key, sleeps, and on
+ * Inserts the current thread into @q keyed by @key, sleeps, and on
  * return self-removes if still enqueued.
  *
  * Returns the waiter's error_no (see tq_wait_in_state).
  */
 int ttree_wait_in_state(ttree_t *q, uint64 key, struct spinlock *lock, 
-                            uint64 *rdata, enum procstate state);
+                            uint64 *rdata, enum thread_state state);
 
 /**
- * ttree_wait - sleep on a tree queue (PSTATE_UNINTERRUPTIBLE)
+ * ttree_wait - sleep on a tree queue (THREAD_UNINTERRUPTIBLE)
  * @q: tree to wait on
  * @key: sort key for the waiter
  * @lock: spinlock to release before sleeping
@@ -311,14 +311,14 @@ int ttree_wait(ttree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata);
  * @rdata: data delivered to the waiter
  *
  * Finds the minimum-address node whose tree.key == @key, removes it,
- * and wakes its process.
+ * and wakes its thread.
  *
  * Returns:
- *   - pointer to the woken struct proc on success
+ *   - pointer to the woken struct thread on success
  *   - ERR_PTR(-ENOENT) if no node with @key exists
  *   - ERR_PTR(-EINVAL) if @q is NULL
  */
-struct proc *ttree_wakeup_one(ttree_t *q, uint64 key, int error_no, uint64 rdata);
+struct thread *ttree_wakeup_one(ttree_t *q, uint64 key, int error_no, uint64 rdata);
 
 /**
  * ttree_wakeup_key - wake all waiters with a matching key

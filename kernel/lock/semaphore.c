@@ -8,7 +8,7 @@
 #include "lock/spinlock.h"
 #include "lock/semaphore.h"
 #include <smp/percpu.h>
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/tq.h"
 #include "proc/sched.h"
 
@@ -41,20 +41,20 @@ int sem_init(sem_t *sem, const char *name, int value) {
 static int __sem_do_post(sem_t *sem) {
     int val = __sem_value_inc(sem);
     if (val <= 0) {
-        // If the semaphore value was or is negative, wake up one waiting process
-        struct proc *p = tq_wakeup(&sem->wait_queue, 0, 0);
-        if (p == NULL) {
-            return -ENOENT; // No process to wake up
+        // If the semaphore value was or is negative, wake up one waiting thread
+        struct thread *t = tq_wakeup(&sem->wait_queue, 0, 0);
+        if (t == NULL) {
+            return -ENOENT; // No thread to wake up
         }
-        if (IS_ERR(p)) {
-            return PTR_ERR(p);
+        if (IS_ERR(t)) {
+            return PTR_ERR(t);
         }
     }
     return 0;
 }
 
 int sem_wait(sem_t *sem) {
-    assert(myproc() != NULL, "sem_wait called from non-process context");
+    assert(current != NULL, "sem_wait called from non-thread context");
     assert(mycpu()->spin_depth == 0, "sem_wait called with spinlock held");
     assert(!CPU_IN_ITR(), "sem_wait called in interrupt context");
     if (sem == NULL) {
@@ -78,7 +78,7 @@ int sem_wait(sem_t *sem) {
     if (ret != 0) {
         int wake_ret = __sem_do_post(sem);
         if (wake_ret != 0 && wake_ret != -ENOENT) {
-            printf("Failed to post semaphore '%s' when process was interrupted\n", sem->name);
+            printf("Failed to post semaphore '%s' when thread was interrupted\n", sem->name);
         }
     }
 
@@ -113,7 +113,7 @@ int sem_post(sem_t *sem) {
     int ret = __sem_do_post(sem);
     spin_unlock(&sem->lk);
     if (ret == -ENOENT) {
-        // No process to wake up, not an error
+        // No thread to wake up, not an error
         return 0;
     }
     return ret;

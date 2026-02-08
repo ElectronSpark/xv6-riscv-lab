@@ -81,7 +81,7 @@ void synchronize_rcu(void);
  *
  * Registers a callback to be invoked after a grace period has elapsed.
  * This is the non-blocking alternative to synchronize_rcu(). The callback
- * will be invoked in process context (not interrupt context).
+ * will be invoked in thread context (not interrupt context).
  *
  * The callback function will be called with the provided data pointer.
  * It is the callback's responsibility to free any memory or perform
@@ -172,7 +172,7 @@ void rcu_cpu_init(int cpu);
  * These threads wake up when there are ready callbacks to process and
  * handle callback invocation separately from the scheduler path.
  *
- * Must be called after scheduler and process subsystems are initialized.
+ * Must be called after scheduler and thread subsystems are initialized.
  */
 void rcu_kthread_start(void);
 

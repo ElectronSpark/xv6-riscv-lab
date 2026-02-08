@@ -3,7 +3,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "mm/vm.h"
 #include "signal.h"
@@ -76,7 +76,7 @@ uint64 sys_sigpending(void) {
     uint64 set_addr;
     sigset_t set;
     argaddr(0, &set_addr);
-    if (sigpending(myproc(), &set) < 0) {
+    if (sigpending(current, &set) < 0) {
         return -1; // sigpending failed
     }
     if (set_addr != 0) {
@@ -92,22 +92,22 @@ uint64 sys_sigreturn(void) {
         return -1; // sigreturn failed
     }
     
-    struct proc *p = myproc();
-    assert(p != NULL, "sys_sigreturn: myproc returned NULL");
+    struct thread *p = current;
+    assert(p != NULL, "sys_sigreturn: current returned NULL");
 
     return 0;
 }
 
 uint64 sys_pause(void) {
-    struct proc *p = myproc();
-    proc_lock(p);
+    struct thread *p = current;
+    tcb_lock(p);
     // If an unblocked pending signal already exists, return immediately
     if (signal_pending(p)) {
-        proc_unlock(p);
+        tcb_unlock(p);
         return 0;
     }
-    proc_unlock(p);
-    scheduler_sleep(NULL, PSTATE_INTERRUPTIBLE); // Pause the current process
+    tcb_unlock(p);
+    scheduler_sleep(NULL, THREAD_INTERRUPTIBLE); // Pause the current thread
     return 0;
 }
 

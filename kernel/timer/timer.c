@@ -10,7 +10,7 @@
 #include "timer/timer.h"
 #include "list.h"
 #include "rbtree.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "trap.h"
 
@@ -19,7 +19,7 @@ uint64 __timebase_frequency = 10000000UL;
 uint64 __jiff_ticks = 0; // Calculated in timerinit()
 static uint64 ticks;
 
-// The following functions are used to manage the red-black tree of process nodes
+// The following functions are used to manage the red-black tree of thread nodes
 // in insertion procedures.
 static int __timer_root_keys_cmp_fun(uint64 key1, uint64 key2) {
     struct timer_node *node1 = (struct timer_node *)key1;
@@ -115,7 +115,7 @@ void timer_node_init(struct timer_node *node,
 
 // Add a timer_node to a timer_root;
 // After adding the timer_node, timer_remove needs to be called to
-// remove the node from its root (e.g, in callback or the process context after waking up). 
+// remove the node from its root (e.g, in callback or the thread context after waking up). 
 // Otherwise, the timer will keep calling the callback function every time the timer 
 // receives a tick.
 int timer_add(struct timer_root *timer, struct timer_node *node) {
@@ -179,7 +179,7 @@ void timer_remove(struct timer_node *node) {
 // Handle timer tick
 // Each time a timer tick occurs, we need to check if any timers have expired.
 // It will try to execute the callback functions of expired timers.
-// Either the callback function or the process to be woken up should
+// Either the callback function or the thread to be woken up should
 // remove the timer from its timer_root.
 // This function may call the callback functions of the expired timers
 // for at most TIMER_DEFAULT_RETRY_LIMIT times if the timer nodes are still
@@ -221,10 +221,10 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
         }
         node->retry++;
         if (node->retry >= node->retry_limit) {
-            // Because many callback functions is to wake up a process,
-            // and the process will remove the timer node from the timer_root,
+            // Because many callback functions is to wake up a thread,
+            // and the thread will remove the timer node from the timer_root,
             // we will try to call the callback function multiple times until
-            // retry limit is reached or the timer node is removed by the process.
+            // retry limit is reached or the timer node is removed by the thread.
             __timer_remove_unlocked(node->timer, node);
         }
         node->callback(node);

@@ -4,7 +4,7 @@
 #include <mm/memlayout.h>
 #include "riscv.h"
 #include "lock/spinlock.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "proc/rq.h"
 #include "proc_private.h"

@@ -8,8 +8,8 @@ struct proc;
 
 // Per-CPU state.
 struct cpu_local {
-    struct proc *proc;          // The process running on this cpu, or null.
-    struct proc *idle_proc;     // The idle process for this cpu.
+    struct thread *proc;          // The thread running on this cpu, or null.
+    struct thread *idle_thread;     // The idle process for this cpu.
     void **intr_stacks;         // Top of interrupt stack for each hart.
     uint64 intr_sp;             // Saved sp value for interrupt.
     int intr_depth;             // Depth of nested interruption or exception.

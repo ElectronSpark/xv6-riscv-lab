@@ -1,6 +1,6 @@
 // Run Queue Priority Integration Test
 //
-// Tests priority system by modifying the current process's priority
+// Tests priority system by modifying the current thread's priority
 // and verifying the scheduler respects those changes.
 //
 
@@ -11,7 +11,7 @@
 #include "printf.h"
 #include "lock/spinlock.h"
 #include <smp/percpu.h>
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "proc/rq.h"
 #include "proc_private.h"
@@ -67,7 +67,7 @@ static void test_two_layer_mask(void) {
 static void test_priority_change(void) {
     printf("TEST: Priority Change via sched_setattr\n");
     
-    struct proc *p = myproc();
+    struct thread *p = current;
     struct sched_entity *se = p->sched_entity;
     
     // Get current priority
@@ -119,7 +119,7 @@ static void test_priority_change(void) {
 static void test_yield_priority(void) {
     printf("TEST: Yield Respects Priority\n");
     
-    struct proc *p = myproc();
+    struct thread *p = current;
     int my_priority = p->sched_entity->priority;
     
     printf("  Current process '%s' at priority major=%d\n",
@@ -199,7 +199,7 @@ static int verify_priority(struct sched_entity *se, int expected_major, int expe
 static void test_priority_ordering(void) {
     printf("TEST: Priority Ordering (Comprehensive)\n");
     
-    struct proc *p = myproc();
+    struct thread *p = current;
     struct sched_entity *se = p->sched_entity;
     int test_cpu = cpuid();
     
@@ -484,7 +484,7 @@ static void test_priority_ordered_activation(void) {
         activation_order[i] = -1;
     }
     
-    struct proc *test_procs[PRIORITY_TEST_COUNT];
+    struct thread *test_procs[PRIORITY_TEST_COUNT];
     
     // =========================================================================
     // Phase 1: Create processes with preemption disabled
@@ -498,9 +498,9 @@ static void test_priority_ordered_activation(void) {
     cpumask_t cpu_mask = (1ULL << test_cpu);
     
     for (int i = 0; i < PRIORITY_TEST_COUNT; i++) {
-        int ret = kernel_proc_create("prio_test", &test_procs[i], 
+        int ret = kthread_create("prio_test", &test_procs[i], 
                                      priority_test_proc_entry, i, 0, 0);
-        assert(ret >= 0, "rq_test: kernel_proc_create failed for process %d", i);
+        assert(ret >= 0, "rq_test: kthread_create failed for process %d", i);
         
         // Set the priority and pin to current CPU
         // sched_setattr handles its own locking internally
@@ -522,7 +522,7 @@ static void test_priority_ordered_activation(void) {
     printf("  Phase 2: Waking up all processes\n");
     
     for (int i = 0; i < PRIORITY_TEST_COUNT; i++) {
-        wakeup_proc(test_procs[i]);  // wakeup_proc handles locking internally
+        wakeup(test_procs[i]);  // wakeup handles locking internally
     }
     
     // =========================================================================
@@ -590,7 +590,7 @@ static void test_priority_ordered_activation(void) {
 static void test_affinity_change(void) {
     printf("TEST: CPU Affinity Change\n");
     
-    struct proc *p = myproc();
+    struct thread *p = current;
     struct sched_entity *se = p->sched_entity;
     
     // Get current affinity

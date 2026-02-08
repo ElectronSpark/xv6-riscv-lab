@@ -27,7 +27,7 @@
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
 #include "lock/rwlock.h"
-#include "proc/proc.h"
+#include "proc/thread.h"
 #include "proc/sched.h"
 #include "vfs/fs.h"
 #include "vfs_private.h"
@@ -395,7 +395,7 @@ int vfs_sync_inode(struct vfs_inode *inode) {
 static struct vfs_inode *__get_mnt_recursive(struct vfs_inode *rooti) {
     struct vfs_inode *inode = rooti;
     struct vfs_superblock *sb = rooti->sb;
-    struct vfs_inode *proc_rooti = vfs_inode_deref(&myproc()->fs->rooti);
+    struct vfs_inode *proc_rooti = vfs_inode_deref(&current->fs->rooti);
     while (true) {
         if (inode == proc_rooti) {
             // Reached process root
@@ -424,7 +424,7 @@ static struct vfs_inode *__get_mnt_recursive(struct vfs_inode *rooti) {
 // no need to worry about the mountpoint inode being freed here
 static struct vfs_inode *__mountpoint_go_up(struct vfs_inode *dir) {
     struct vfs_inode *inode = dir;
-    struct vfs_inode *proc_rooti = vfs_inode_deref(&myproc()->fs->rooti);
+    struct vfs_inode *proc_rooti = vfs_inode_deref(&current->fs->rooti);
     while (true) {
         if (inode == proc_rooti) {
             // Reached process root
@@ -450,7 +450,7 @@ static struct vfs_inode *__mountpoint_go_up(struct vfs_inode *dir) {
 // - If dir is a local filesystem root, returns the parent across mount boundary
 // - Otherwise returns NULL (caller should use driver lookup for normal "..")
 static struct vfs_inode *__vfs_dotdot_target(struct vfs_inode *dir) {
-    struct vfs_inode *proc_rooti = vfs_inode_deref(&myproc()->fs->rooti);
+    struct vfs_inode *proc_rooti = vfs_inode_deref(&current->fs->rooti);
     if (dir == proc_rooti) {
         return dir;
     }
@@ -613,7 +613,7 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
 
     // For process root or a mounted root, synthesize ".." on the second iteration
     if (iter->index == 1) {
-        struct vfs_inode *proc_rooti = vfs_inode_deref(&myproc()->fs->rooti);
+        struct vfs_inode *proc_rooti = vfs_inode_deref(&current->fs->rooti);
         if (dir == proc_rooti) {
             // Process root: ".." points to self
             ret = __make_iter_parent(iter, ret_dentry);
@@ -1327,7 +1327,7 @@ int vfs_chdir(struct vfs_inode *new_cwd) {
         // not allow to change to the dummy rooti
         return -EINVAL;
     }
-    if (new_cwd == vfs_inode_deref(&myproc()->fs->cwd)) {
+    if (new_cwd == vfs_inode_deref(&current->fs->cwd)) {
         // No change
         return 0;
     }
@@ -1351,10 +1351,10 @@ int vfs_chdir(struct vfs_inode *new_cwd) {
     vfs_superblock_unlock(new_cwd->sb);
 
     // to keep it simple, we don't lock fs struct here
-    vfs_struct_lock(myproc()->fs);
-    old = myproc()->fs->cwd;
-    myproc()->fs->cwd = ref;
-    vfs_struct_unlock(myproc()->fs);
+    vfs_struct_lock(current->fs);
+    old = current->fs->cwd;
+    current->fs->cwd = ref;
+    vfs_struct_unlock(current->fs);
     ret = 0;
     goto out;
 
@@ -1372,7 +1372,7 @@ int vfs_chroot(struct vfs_inode *new_root)  {
         // not allow to change to the dummy rooti
         return -EINVAL;
     }
-    if (new_root == vfs_inode_deref(&myproc()->fs->rooti)) {
+    if (new_root == vfs_inode_deref(&current->fs->rooti)) {
         // No change
         return 0;
     }
@@ -1383,10 +1383,10 @@ int vfs_chroot(struct vfs_inode *new_root)  {
         return ret;
     }
     vfs_idup(new_root);
-    vfs_struct_lock(myproc()->fs);
-    old = myproc()->fs->rooti;
-    myproc()->fs->rooti = ref;
-    vfs_struct_unlock(myproc()->fs);
+    vfs_struct_lock(current->fs);
+    old = current->fs->rooti;
+    current->fs->rooti = ref;
+    vfs_struct_unlock(current->fs);
     vfs_inode_put_ref(&old);
     return 0;
 }
@@ -1396,7 +1396,7 @@ int vfs_chroot(struct vfs_inode *new_root)  {
 struct vfs_inode *vfs_curdir(void) {
     // Since only the current process can change its cwd,
     // we don't need to lock the inode here
-    struct vfs_inode *cwd = vfs_inode_deref(&myproc()->fs->cwd);
+    struct vfs_inode *cwd = vfs_inode_deref(&current->fs->cwd);
     assert(cwd != NULL, "vfs_curdir: current working directory inode is NULL");
     vfs_idup(cwd);
     return cwd;
@@ -1407,7 +1407,7 @@ struct vfs_inode *vfs_curdir(void) {
 struct vfs_inode *vfs_curroot(void) {
     // Since only the current process can change its root,
     // we don't need to lock the inode here
-    struct vfs_inode *rooti = vfs_inode_deref(&myproc()->fs->rooti);
+    struct vfs_inode *rooti = vfs_inode_deref(&current->fs->rooti);
     assert(rooti != NULL, "vfs_curroot: current root directory inode is NULL");
     vfs_idup(rooti);
     return rooti;
