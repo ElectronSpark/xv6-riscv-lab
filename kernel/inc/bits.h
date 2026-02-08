@@ -247,65 +247,132 @@ static inline int bits_popcount_x(uint64 x, int width) {
 #define bits_popcountg(x) bits_popcount_x((uint64)(x), 8 * sizeof(x))
 #endif
 
-// Pointer-based count trailing zeros
-// Returns the index of the least significant set bit (LSB) in the given memory
-// region. Following little endian byte order.
+/**
+ * __bits_ctz_ptr - find first set (or clear) bit in a memory region
+ * @ptr:   pointer to the start of the memory region
+ * @limit: maximum number of bits to scan (need not be byte-aligned)
+ * @inv:   when true, search for the first *clear* bit instead
+ *
+ * Scans the memory region starting at @ptr in little-endian bit order and
+ * returns the absolute bit index of the first set bit (or first clear bit
+ * when @inv is true).  The search is bounded to the first @limit bits;
+ * any matching bit whose index >= @limit is ignored.
+ *
+ * Internally the scan proceeds in three phases for performance:
+ *   1. Byte-by-byte prefix until @ptr is 8-byte aligned.
+ *   2. 8-byte aligned chunk reads for the bulk of the buffer.
+ *   3. Byte-by-byte remainder for the trailing partial chunk.
+ *
+ * Return: bit index (0-based) on success, or -1 if @ptr is NULL or no
+ *         matching bit exists within the first @limit bits.
+ */
 static inline int64 __bits_ctz_ptr(const void *ptr, size_t limit, bool inv) {
-    // if (limit >= (1ULL << (sizeof(size_t)*8 - 16))) {
-    //     return -1;
-    // }
     if (ptr == NULL) {
         return -1;
     }
+    size_t byte_limit = (limit + 7) >> 3; // number of bytes to cover the bit limit
     const uint8 *byte_ptr = (const uint8 *)ptr;
     const uint8 *aligned_start =
         (const uint8 *)(((size_t)byte_ptr + 7) & ~0x7UL);
     // First process trailing bytes to align to 8-byte boundary
     size_t trailing_bytes = aligned_start - byte_ptr;
-    if (trailing_bytes) {
-        for (int i = 0; i < trailing_bytes; i++) {
-            uint8 byte = byte_ptr[i];
-            if (inv) {
-                byte = ~byte;
+    if (trailing_bytes > byte_limit) {
+        trailing_bytes = byte_limit; // Clamp to buffer size
+    }
+    for (size_t i = 0; i < trailing_bytes; i++) {
+        uint8 byte = byte_ptr[i];
+        if (inv) {
+            byte = ~byte;
+        }
+        if (byte) {
+            int64 bit_pos = (i << 3) | bits_ctz8(byte);
+            if (bit_pos >= (int64)limit) {
+                return -1; // Found bit is beyond the limit
             }
-            if (byte) {
-                return (i << 3) | bits_ctz8(byte);
-            }
+            return bit_pos;
         }
     }
 
-    // Process 8-byte chunks
-    int64 index = 0;
-    const uint8 *aligned_end =
-        (const uint8 *)(((size_t)(ptr + limit) + 7) & ~0x7UL);
-    size_t chunk_end_index = aligned_end - byte_ptr;
-    for (index = trailing_bytes; index < (int64)chunk_end_index; index += 8) {
+    // Process 8-byte aligned chunks (only complete chunks within byte_limit)
+    int64 index;
+    for (index = trailing_bytes; (size_t)index + 8 <= byte_limit; index += 8) {
         uint64 chunk = *((const uint64 *)(byte_ptr + index));
         if (inv) {
             chunk = ~chunk;
         }
         if (chunk) {
-            int64 bit_pos = (index << 3) | bits_ctz64(chunk);
-            // Verify found bit is within the limit
-            if (bit_pos < (int64)(limit << 3)) {
-                return bit_pos;
+            int64 bit_pos = (index << 3) + bits_ctz64(chunk);
+            if (bit_pos >= (int64)limit) {
+                return -1; // Found bit is beyond the limit
             }
-            // Bit is beyond limit, fall through to remaining bytes processing
-            break;
+            return bit_pos;
         }
     }
 
     // Process remaining bytes
-    for (; index < (int64)limit; index++) {
+    for (; (size_t)index < byte_limit; index++) {
         uint8 byte = byte_ptr[index];
         if (inv) {
             byte = ~byte;
         }
         if (byte) {
-            return (index << 3) | bits_ctz8(byte);
+            int64 bit_pos = (index << 3) | bits_ctz8(byte);
+            if (bit_pos >= (int64)limit) {
+                return -1; // Found bit is beyond the limit
+            }
+            return bit_pos;
         }
     }
     return -1;
+}
+
+/**
+ * __bits_ctz_ptr_from - find first set (or clear) bit starting from an offset
+ * @ptr:   pointer to the start of the memory region
+ * @from:  bit index at which to begin the search (inclusive)
+ * @limit: maximum bit index (exclusive) — bits at or beyond @limit are ignored
+ * @inv:   when true, search for the first *clear* bit instead
+ *
+ * Behaves like __bits_ctz_ptr() but skips all bits before @from.  The
+ * partial first byte (bits [@from, next byte boundary)) is handled
+ * inline; any remaining whole bytes are delegated to __bits_ctz_ptr().
+ *
+ * Return: absolute bit index (0-based, relative to @ptr) on success,
+ *         or -1 if @ptr is NULL, @from >= @limit, or no matching bit
+ *         exists in [@from, @limit).
+ */
+static inline int64 __bits_ctz_ptr_from(const void *ptr, size_t from, size_t limit, bool inv) {
+    if (ptr == NULL || from >= limit) {
+        return -1;
+    }
+    
+    // Scan partial first byte (bits [from, next_byte_boundary))
+    size_t start_byte_index = from >> 3;
+    uint8 first_byte = ((const uint8 *)ptr)[start_byte_index];
+    if (inv) {
+        first_byte = ~first_byte;
+    }
+    first_byte >>= (from & 0x7);
+    int64 ret = bits_ctz8(first_byte);
+    if (ret >= 0) {
+        int64 bit_pos = (int64)from + ret;
+        return (bit_pos < (int64)limit) ? bit_pos : -1;
+    }
+    start_byte_index++;
+
+    size_t byte_limit = (limit + 7) >> 3;
+    if (start_byte_index >= byte_limit) {
+        return -1;
+    }
+
+    // Delegate remaining whole bytes to __bits_ctz_ptr
+    const uint8 *byte_ptr = (const uint8 *)ptr + start_byte_index;
+    size_t remaining_bits = limit - (start_byte_index << 3);
+    int64 sub_ret = __bits_ctz_ptr(byte_ptr, remaining_bits, inv);
+    if (sub_ret < 0) {
+        return -1;
+    }
+    return (int64)(start_byte_index << 3) + sub_ret;
 }
 
 /**
@@ -359,6 +426,8 @@ static inline int bits_next_bit_set(uint64 bits, int last) {
 
 #define bits_ctz_ptr(ptr, limit) __bits_ctz_ptr((ptr), (limit), !!0)
 #define bits_ctz_ptr_inv(ptr, limit) __bits_ctz_ptr((ptr), (limit), !!1)
+#define bits_ctz_ptr_from(ptr, from, limit) __bits_ctz_ptr_from((ptr), (from), (limit), !!0)
+#define bits_ctz_ptr_from_inv(ptr, from, limit) __bits_ctz_ptr_from((ptr), (from), (limit), !!1)
 
 #define bswap16(x) (typeof(x))((((x) & 0x00FF) << 8) | (((x) & 0xFF00) >> 8))
 #define bswap32(x)                                                             \

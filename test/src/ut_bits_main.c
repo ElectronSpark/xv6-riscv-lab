@@ -373,7 +373,7 @@ test___bits_ctz_ptr_no_match(void **state)
     (void)state;
     // Use 8-byte aligned buffer to avoid read overflow in __bits_ctz_ptr
     uint64 data = 0x0000000000000000ULL;
-    assert_int_equal(bits_ctz_ptr(&data, sizeof(data)), -1);
+    assert_int_equal(bits_ctz_ptr(&data, sizeof(data) * 8), -1);
 }
 
 static void
@@ -383,7 +383,7 @@ test___bits_ctz_ptr_basic(void **state)
     // Use 8-byte aligned buffer to avoid read overflow in __bits_ctz_ptr
     uint64 data = 0x0000000000000400ULL;  // bit 10 set (byte 1, bit 2)
     int64 expected = (1LL << 3) | 2LL;  // byte index 1, bit index 2
-    assert_int_equal(bits_ctz_ptr(&data, sizeof(data)), expected);
+    assert_int_equal(bits_ctz_ptr(&data, sizeof(data) * 8), expected);
 }
 
 static void
@@ -393,7 +393,7 @@ test___bits_ctz_ptr_inverted(void **state)
     // Use 8-byte aligned buffer to avoid read overflow in __bits_ctz_ptr
     uint64 data = 0x000000000000F0FFULL;  // inverted: first 0 at byte 1, bit 4
     int64 expected = (1LL << 3);  // byte index 1, bit index 0
-    assert_int_equal(bits_ctz_ptr_inv(&data, sizeof(data)), expected);
+    assert_int_equal(bits_ctz_ptr_inv(&data, sizeof(data) * 8), expected);
 }
 
 static void
@@ -413,7 +413,7 @@ test___bits_ctz_ptr_long_buffer(void **state)
     uint8 data[32] = {0};
     data[17] = 0x20U;
     int64 expected = (17LL << 3) | 5LL;
-    assert_int_equal(bits_ctz_ptr(data, sizeof(data)), expected);
+    assert_int_equal(bits_ctz_ptr(data, sizeof(data) * 8), expected);
 
     uint8 inverted[32];
     for (size_t i = 0; i < sizeof(inverted); i++) {
@@ -421,7 +421,188 @@ test___bits_ctz_ptr_long_buffer(void **state)
     }
     inverted[24] = 0x7FU;
     int64 expected_inv = (24LL << 3) | 7LL;
-    assert_int_equal(bits_ctz_ptr_inv(inverted, sizeof(inverted)), expected_inv);
+    assert_int_equal(bits_ctz_ptr_inv(inverted, sizeof(inverted) * 8), expected_inv);
+}
+
+/*
+ * __bits_ctz_ptr — unaligned / small buffer tests (bugs #1, #2)
+ */
+
+static void
+test___bits_ctz_ptr_small_unaligned(void **state)
+{
+    (void)state;
+    /*
+     * Bug #1: When ptr is unaligned, trailing_bytes could exceed byte_limit,
+     * causing an OOB read.  Place a 3-byte buffer inside an 8-byte aligned
+     * area so ASAN can catch any over-read.
+     */
+    uint8 __attribute__((aligned(8))) pad[16] = {0};
+    /* Put the 3 bytes at an offset that is NOT 8-byte-aligned. */
+    uint8 *buf = pad + 1;          /* unaligned */
+    buf[0] = 0x00;
+    buf[1] = 0x04;                 /* bit 2 of byte 1 → absolute bit 10 */
+    buf[2] = 0x00;
+
+    /* limit = 24 bits (3 bytes). trailing_bytes = 7, clamped to 3. */
+    assert_int_equal(__bits_ctz_ptr(buf, 24, false), (1 << 3) | 2);
+    /* Same but inverted: first zero bit is bit 0 of byte 0. */
+    buf[0] = 0xFF;
+    buf[1] = 0xFF;
+    buf[2] = 0xFE;                 /* bit 0 of byte 2 is zero */
+    assert_int_equal(__bits_ctz_ptr(buf, 24, true), (2 << 3) | 0);
+}
+
+static void
+test___bits_ctz_ptr_1byte_buffer(void **state)
+{
+    (void)state;
+    /* Edge case: buffer is exactly 1 byte, ptr unaligned. */
+    uint8 __attribute__((aligned(8))) pad[16] = {0};
+    uint8 *buf = pad + 3;          /* unaligned */
+    buf[0] = 0x80;                 /* bit 7 set */
+    assert_int_equal(__bits_ctz_ptr(buf, 8, false), 7);
+    /* Bit 7 set → limit 7 means bit 7 is OUT of range. */
+    assert_int_equal(__bits_ctz_ptr(buf, 7, false), -1);
+}
+
+static void
+test___bits_ctz_ptr_non_8byte_tail(void **state)
+{
+    (void)state;
+    /*
+     * Bug #2: Buffer whose total length is NOT a multiple of 8.
+     * The old code could read a full uint64 past the buffer end.
+     * Use 11 bytes (aligned start) so the remainder phase is exercised.
+     */
+    uint8 __attribute__((aligned(8))) data[16] = {0};
+    /* Set bit in byte 10 — the tail region (after the aligned chunk). */
+    data[10] = 0x01;               /* bit 0 of byte 10 → absolute bit 80 */
+    assert_int_equal(bits_ctz_ptr(data, 11 * 8), (10 << 3) | 0);
+
+    /* All zero in 11 bytes → -1 */
+    data[10] = 0x00;
+    assert_int_equal(bits_ctz_ptr(data, 11 * 8), -1);
+}
+
+static void
+test___bits_ctz_ptr_exact_8byte(void **state)
+{
+    (void)state;
+    /* Exactly 8 bytes aligned — exercises the chunk loop with no remainder. */
+    uint64 __attribute__((aligned(8))) data = 0;
+    /* Set the very last bit (bit 63). */
+    data = 0x8000000000000000ULL;
+    assert_int_equal(bits_ctz_ptr(&data, 64), 63);
+    /* Limit to 63 bits → that bit is out of range. */
+    assert_int_equal(__bits_ctz_ptr(&data, 63, false), -1);
+}
+
+/*
+ * __bits_ctz_ptr_from — partial first byte & offset arithmetic (bugs #3–6)
+ */
+
+static void
+test___bits_ctz_ptr_from_basic(void **state)
+{
+    (void)state;
+    /* Bit 10 set (byte 1 bit 2).  Search from bit 0 → find bit 10. */
+    uint8 __attribute__((aligned(8))) data[8] = {0};
+    data[1] = 0x04;
+    assert_int_equal(bits_ctz_ptr_from(data, 0, 64), (1 << 3) | 2);
+    /* Search from bit 10 → still find 10. */
+    assert_int_equal(bits_ctz_ptr_from(data, 10, 64), 10);
+    /* Search from bit 11 → miss. */
+    assert_int_equal(bits_ctz_ptr_from(data, 11, 64), -1);
+}
+
+static void
+test___bits_ctz_ptr_from_inv(void **state)
+{
+    (void)state;
+    /*
+     * Bug #3: inv flag was not applied to the first partial byte.
+     * All-ones buffer, first zero at bit 10.
+     */
+    uint8 __attribute__((aligned(8))) data[8];
+    for (size_t i = 0; i < 8; i++)
+        data[i] = 0xFF;
+    data[1] = 0xFB;                /* bit 2 of byte 1 is 0 → inv zero at 10 */
+
+    /* inv search from bit 0 → first zero at bit 10. */
+    assert_int_equal(bits_ctz_ptr_from_inv(data, 0, 64), 10);
+    /* inv search from bit 5 → still find bit 10 (different first byte). */
+    assert_int_equal(bits_ctz_ptr_from_inv(data, 5, 64), 10);
+    /* inv search from bit 10 → find bit 10 exactly. */
+    assert_int_equal(bits_ctz_ptr_from_inv(data, 10, 64), 10);
+    /* inv search from bit 11 → no more zeros. */
+    assert_int_equal(bits_ctz_ptr_from_inv(data, 11, 64), -1);
+}
+
+static void
+test___bits_ctz_ptr_from_limit_clips_first_byte(void **state)
+{
+    (void)state;
+    /*
+     * Bug #4: Result in the first byte at/beyond limit was not rejected.
+     * Bit 6 set.  Searching from bit 0 with limit=6 → bit 6 is out of range.
+     */
+    uint8 __attribute__((aligned(8))) data[8] = {0};
+    data[0] = 0x40;                /* bit 6 */
+    assert_int_equal(bits_ctz_ptr_from(data, 0, 6), -1);
+    /* limit=7 → bit 6 is in range. */
+    assert_int_equal(bits_ctz_ptr_from(data, 0, 7), 6);
+    /* From bit 3 with limit=6 → still out of range. */
+    assert_int_equal(bits_ctz_ptr_from(data, 3, 6), -1);
+    /* From bit 3 with limit=7 → in range. */
+    assert_int_equal(bits_ctz_ptr_from(data, 3, 7), 6);
+}
+
+static void
+test___bits_ctz_ptr_from_offset_multi_byte(void **state)
+{
+    (void)state;
+    /*
+     * Bugs #5 & #6: remaining_limit and return-value offset were wrong.
+     * Set bit 42 (byte 5, bit 2).  Search from bit 10.
+     * Delegation should start at byte_ptr + 2 with remaining_bits = limit - 16.
+     */
+    uint8 __attribute__((aligned(8))) data[8] = {0};
+    data[5] = 0x04;                /* bit 2 of byte 5 → absolute bit 42 */
+
+    assert_int_equal(bits_ctz_ptr_from(data, 10, 64), 42);
+    /* From bit 40 (byte-aligned) → still find 42. */
+    assert_int_equal(bits_ctz_ptr_from(data, 40, 64), 42);
+    /* From bit 43 → miss. */
+    assert_int_equal(bits_ctz_ptr_from(data, 43, 64), -1);
+}
+
+static void
+test___bits_ctz_ptr_from_cross_chunk(void **state)
+{
+    (void)state;
+    /*
+     * Search across an 8-byte chunk boundary.
+     * 16 bytes, set bit in second chunk (byte 12, bit 0 → absolute bit 96).
+     */
+    uint8 __attribute__((aligned(8))) data[16] = {0};
+    data[12] = 0x01;
+
+    assert_int_equal(bits_ctz_ptr_from(data, 5, 128), 96);
+    /* Confirm the limit still clips properly. */
+    assert_int_equal(bits_ctz_ptr_from(data, 5, 96), -1);
+    assert_int_equal(bits_ctz_ptr_from(data, 5, 97), 96);
+}
+
+static void
+test___bits_ctz_ptr_from_at_limit_boundary(void **state)
+{
+    (void)state;
+    /* from == limit → always -1. */
+    uint8 __attribute__((aligned(8))) data[8] = {0xFF};
+    assert_int_equal(bits_ctz_ptr_from(data, 5, 5), -1);
+    /* from > limit → -1. */
+    assert_int_equal(bits_ctz_ptr_from(data, 10, 5), -1);
 }
 
 /*
@@ -727,6 +908,16 @@ main(void)
         cmocka_unit_test(test___bits_ctz_ptr_inverted),
         cmocka_unit_test(test___bits_ctz_ptr_limit),
         cmocka_unit_test(test___bits_ctz_ptr_long_buffer),
+        cmocka_unit_test(test___bits_ctz_ptr_small_unaligned),
+        cmocka_unit_test(test___bits_ctz_ptr_1byte_buffer),
+        cmocka_unit_test(test___bits_ctz_ptr_non_8byte_tail),
+        cmocka_unit_test(test___bits_ctz_ptr_exact_8byte),
+        cmocka_unit_test(test___bits_ctz_ptr_from_basic),
+        cmocka_unit_test(test___bits_ctz_ptr_from_inv),
+        cmocka_unit_test(test___bits_ctz_ptr_from_limit_clips_first_byte),
+        cmocka_unit_test(test___bits_ctz_ptr_from_offset_multi_byte),
+        cmocka_unit_test(test___bits_ctz_ptr_from_cross_chunk),
+        cmocka_unit_test(test___bits_ctz_ptr_from_at_limit_boundary),
         cmocka_unit_test(test_bits_foreach_set_bit_zero),
         cmocka_unit_test(test_bits_foreach_set_bit_all_ones),
         cmocka_unit_test(test_bits_foreach_set_bit_single_lsb),
