@@ -232,7 +232,7 @@ int __wrap_proc_queue_wait(proc_queue_t *q, struct spinlock *lock, uint64 *rdata
     return mock_type(int);
 }
 
-int __wrap_proc_queue_wakeup(proc_queue_t *q, int error_no, uint64 rdata, struct proc **retp)
+struct proc *__wrap_proc_queue_wakeup(proc_queue_t *q, int error_no, uint64 rdata)
 {
     if (g_proc_queue_tracking) {
         g_proc_queue_tracking->queue_wakeup_count++;
@@ -240,19 +240,15 @@ int __wrap_proc_queue_wakeup(proc_queue_t *q, int error_no, uint64 rdata, struct
         g_proc_queue_tracking->last_wakeup_errno = error_no;
         g_proc_queue_tracking->last_wakeup_rdata = rdata;
         
-        if (retp != NULL && g_proc_queue_tracking->next_wakeup_proc != NULL) {
-            *retp = g_proc_queue_tracking->next_wakeup_proc;
-        }
-        
         // Decrement counter if queue tracking is enabled
         if (q != NULL && q->counter > 0) {
             q->counter--;
         }
         
-        return g_proc_queue_tracking->wakeup_return;
+        return g_proc_queue_tracking->next_wakeup_proc;
     }
     
-    return mock_type(int);
+    return mock_ptr_type(struct proc *);
 }
 
 int __wrap_proc_queue_wakeup_all(proc_queue_t *q, int error_no, uint64 rdata)
