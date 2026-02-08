@@ -158,10 +158,10 @@ void start_kernel_post_init(void) {
     install_user_root();
 
 #ifdef RWAD_WRITE_TEST
-    // forward decl for rwlock tests
-    void rwlock_launch_tests(void);
-    // launch rwlock tests
-    rwlock_launch_tests();
+    // forward decl for rwsem tests
+    void rwsem_launch_tests(void);
+    // launch rwsem tests
+    rwsem_launch_tests();
 #endif
 #ifdef SEMAPHORE_RUNTIME_TEST
     void semaphore_launch_tests(void);

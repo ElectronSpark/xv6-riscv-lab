@@ -53,7 +53,7 @@
 #include "lock/spinlock.h"
 #include "proc/thread.h"
 #include "lock/mutex_types.h"
-#include "lock/rwlock.h"
+#include "lock/rwsem.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
 #include "vfs_private.h"

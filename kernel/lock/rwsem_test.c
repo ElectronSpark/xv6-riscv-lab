@@ -5,7 +5,7 @@
 #include "param.h"
 #include <mm/memlayout.h>
 #include "lock/spinlock.h"
-#include "lock/rwlock.h"
+#include "lock/rwsem.h"
 #include "lock/mutex_types.h"
 #include "proc/thread.h"
 #include "proc/tq.h"
@@ -19,7 +19,7 @@
  * 4. Data consistency under mixed reader/writer stress.
  */
 
-static rwlock_t test_lock;
+static rwsem_t test_lock;
 
 /* Shared instrumentation */
 static volatile int active_readers = 0;
@@ -63,12 +63,12 @@ static volatile int integrity_log_count = 0;
 
 static void record_integrity_failure(const char *label, const char *reason, long v1, long v2) {
   if (__sync_add_and_fetch(&integrity_log_count, 1) <= 8) {
-    printf("[rwlock][integrity][%s] %s (v1=%ld v2=%ld)\n", label, reason, v1, v2);
+    printf("[rwsem][integrity][%s] %s (v1=%ld v2=%ld)\n", label, reason, v1, v2);
   }
   error_flag = 1;
 }
 
-static void check_rwlock_integrity(const char *label) {
+static void check_rwsem_integrity(const char *label) {
   int read_waiters = tq_size(&test_lock.read_queue);
   int write_waiters = tq_size(&test_lock.write_queue);
   if (read_waiters < 0 || write_waiters < 0) {
@@ -109,8 +109,8 @@ static void check_rwlock_integrity(const char *label) {
 
 /* Reader for Test 1 */
 static void t1_reader(uint64 a1, uint64 a2) {
-  if(rwlock_acquire_read(&test_lock) != 0) { error_flag = 1; return; }
-  check_rwlock_integrity("T1 reader acquired");
+  if(rwsem_acquire_read(&test_lock) != 0) { error_flag = 1; return; }
+  check_rwsem_integrity("T1 reader acquired");
   int ar = __sync_add_and_fetch(&active_readers, 1);
   // atomic max update
   int prev;
@@ -124,53 +124,53 @@ static void t1_reader(uint64 a1, uint64 a2) {
    scheduler_yield();
   }
   __sync_add_and_fetch(&active_readers, -1);
-  rwlock_release(&test_lock);
-  check_rwlock_integrity("T1 reader released");
+  rwsem_release(&test_lock);
+  check_rwsem_integrity("T1 reader released");
   __sync_add_and_fetch(&t1_done_readers, 1);
 }
 
 /* Reader for Test 2 */
 static void t2_reader(uint64 a1, uint64 a2) {
-  if(rwlock_acquire_read(&test_lock) != 0) { error_flag = 1; return; }
-  check_rwlock_integrity("T2 reader acquired");
+  if(rwsem_acquire_read(&test_lock) != 0) { error_flag = 1; return; }
+  check_rwsem_integrity("T2 reader acquired");
   __sync_add_and_fetch(&active_readers, 1);
   // Simulate work by yielding a few times while holding read lock
   for(int i=0;i<5;i++)scheduler_yield();
   __sync_add_and_fetch(&active_readers, -1);
-  rwlock_release(&test_lock);
-  check_rwlock_integrity("T2 reader released");
+  rwsem_release(&test_lock);
+  check_rwsem_integrity("T2 reader released");
   __sync_add_and_fetch(&t2_done_readers, 1);
 }
 
 /* Writer for Test 2 */
 static void t2_writer(uint64 a1, uint64 a2) {
-  if(rwlock_acquire_write(&test_lock) != 0) { error_flag = 1; return; }
-  check_rwlock_integrity("T2 writer acquired");
+  if(rwsem_acquire_write(&test_lock) != 0) { error_flag = 1; return; }
+  check_rwsem_integrity("T2 writer acquired");
   if(active_readers != 0) {
-    printf("[rwlock][T2] writer saw active_readers=%d (expected 0)\n", active_readers);
+    printf("[rwsem][T2] writer saw active_readers=%d (expected 0)\n", active_readers);
     error_flag = 1;
   }
   active_writers = 1;
   t2_writer_acquired = 1;
   for(int i=0;i<5;i++)scheduler_yield();
   active_writers = 0;
-  rwlock_release(&test_lock);
-  check_rwlock_integrity("T2 writer released");
+  rwsem_release(&test_lock);
+  check_rwsem_integrity("T2 writer released");
 }
 
 /* Writer for Test 3 */
 static void t3_writer(uint64 a1, uint64 a2) {
-  if(rwlock_acquire_write(&test_lock) != 0) { error_flag = 1; return; }
-  check_rwlock_integrity("T3 writer acquired");
+  if(rwsem_acquire_write(&test_lock) != 0) { error_flag = 1; return; }
+  check_rwsem_integrity("T3 writer acquired");
   if(active_writers != 0) {
-    printf("[rwlock][T3] mutual exclusion violated (active_writers=%d)\n", active_writers);
+    printf("[rwsem][T3] mutual exclusion violated (active_writers=%d)\n", active_writers);
     error_flag = 1;
   }
   active_writers = 1;
  scheduler_yield();scheduler_yield();scheduler_yield();
   active_writers = 0;
-  rwlock_release(&test_lock);
-  check_rwlock_integrity("T3 writer released");
+  rwsem_release(&test_lock);
+  check_rwsem_integrity("T3 writer released");
   __sync_add_and_fetch(&t3_done_writers, 1);
 }
 
@@ -180,8 +180,8 @@ static void t4_writer(uint64 a1, uint64 a2) {
   if(mutex_lock(&t4_start_lock) != 0) return; // will hold barrier for first writer only
   mutex_unlock(&t4_start_lock); // Immediately release so everyone can proceed after barrier opens
   for(int iter=0; iter < T4_WRITER_ITERS; iter++) {
-    if(rwlock_acquire_write(&test_lock) != 0) { error_flag = 1; return; }
-    check_rwlock_integrity("T4 writer acquired");
+    if(rwsem_acquire_write(&test_lock) != 0) { error_flag = 1; return; }
+    check_rwsem_integrity("T4 writer acquired");
     int new_version = t4_ds.version + 1;
     t4_ds.version = new_version;
     t4_ds.len = T4_DATA_LEN;
@@ -192,8 +192,8 @@ static void t4_writer(uint64 a1, uint64 a2) {
       sum += val;
     }
     t4_ds.checksum = sum;
-    rwlock_release(&test_lock);
-    check_rwlock_integrity("T4 writer released");
+    rwsem_release(&test_lock);
+    check_rwsem_integrity("T4 writer released");
    scheduler_yield(); // allow readers to interleave
   }
   __sync_add_and_fetch(&t4_writers_done, 1);
@@ -204,14 +204,14 @@ static void t4_reader(uint64 a1, uint64 a2) {
   if(mutex_lock(&t4_start_lock) != 0) return; // barrier
   mutex_unlock(&t4_start_lock);
   for(;;) {
-    if(rwlock_acquire_read(&test_lock) != 0) { error_flag = 1; return; }
-    check_rwlock_integrity("T4 reader acquired");
+    if(rwsem_acquire_read(&test_lock) != 0) { error_flag = 1; return; }
+    check_rwsem_integrity("T4 reader acquired");
     int version = t4_ds.version;
     int len = t4_ds.len;
     int checksum = t4_ds.checksum;
     if(len != T4_DATA_LEN) {
       if(__sync_add_and_fetch(&t4_error_logs,1) <= 10)
-        printf("[rwlock][T4] len mismatch %d\n", len);
+        printf("[rwsem][T4] len mismatch %d\n", len);
       error_flag = 1;
     } else if(version > 0) {
       int sum = 0;
@@ -220,7 +220,7 @@ static void t4_reader(uint64 a1, uint64 a2) {
         int got = t4_ds.data[i];
         if(got != expected) {
           if(__sync_add_and_fetch(&t4_error_logs,1) <= 10)
-            printf("[rwlock][T4] data[%d]=%x expected %x (ver=%d)\n", i, got, expected, version);
+            printf("[rwsem][T4] data[%d]=%x expected %x (ver=%d)\n", i, got, expected, version);
           error_flag = 1;
           break;
         }
@@ -228,12 +228,12 @@ static void t4_reader(uint64 a1, uint64 a2) {
       }
       if(sum != checksum) {
         if(__sync_add_and_fetch(&t4_error_logs,1) <= 10)
-          printf("[rwlock][T4] checksum mismatch sum=%x stored=%x ver=%d\n", sum, checksum, version);
+          printf("[rwsem][T4] checksum mismatch sum=%x stored=%x ver=%d\n", sum, checksum, version);
         error_flag = 1;
       }
     }
-    rwlock_release(&test_lock);
-    check_rwlock_integrity("T4 reader released");
+    rwsem_release(&test_lock);
+    check_rwsem_integrity("T4 reader released");
     if(t4_writers_done >= T4_WRITER_THREADS) break;
    scheduler_yield();
   }
@@ -249,7 +249,7 @@ static int wait_for(volatile int *ptr, int expected, int spin_loops) {
 }
 
 static void run_test1(void) {
-  printf("[rwlock][T1] multiple readers... ");
+  printf("[rwsem][T1] multiple readers... ");
   struct thread *np = NULL;
   t1_target_readers = 4;
   t1_done_readers = 0;
@@ -272,12 +272,12 @@ static void run_test1(void) {
     printf("(observed max=%d started=%d expected=%d) ", max_active_readers, t1_started_readers, t1_target_readers);
     error_flag = 1;
   }
-  check_rwlock_integrity("T1 final");
+  check_rwsem_integrity("T1 final");
   printf(error_flag?"FAIL\n":"OK\n");
 }
 
 static void run_test2(void) {
-  printf("[rwlock][T2] writer waits for readers... ");
+  printf("[rwsem][T2] writer waits for readers... ");
   struct thread *np = NULL;
   t2_target_readers = 3;
   t2_done_readers = 0;
@@ -299,12 +299,12 @@ static void run_test2(void) {
   if(wait_for(&t2_writer_acquired, 1, 40000) != 0)
     error_flag = 1;
   if(active_readers != 0) error_flag = 1;
-  check_rwlock_integrity("T2 final");
+  check_rwsem_integrity("T2 final");
   printf(error_flag?"FAIL\n":"OK\n");
 }
 
 static void run_test3(void) {
-  printf("[rwlock][T3] mutual exclusion for writers... ");
+  printf("[rwsem][T3] mutual exclusion for writers... ");
   struct thread *np = NULL;
   t3_done_writers = 0; active_writers = 0; error_flag = 0;
   if(kthread_create("run_test3", &np, t3_writer, 0, 0, KERNEL_STACK_ORDER) < 0)
@@ -316,12 +316,12 @@ static void run_test3(void) {
   else
     wakeup(np);
   if(wait_for(&t3_done_writers, 2, 80000) != 0) error_flag = 1;
-  check_rwlock_integrity("T3 final");
+  check_rwsem_integrity("T3 final");
   printf(error_flag?"FAIL\n":"OK\n");
 }
 
 static void run_test4(void) {
-  printf("[rwlock][T4] data consistency under stress... ");
+  printf("[rwsem][T4] data consistency under stress... ");
   struct thread *np = NULL;
   error_flag = 0;
   t4_ds.version = 0;
@@ -349,31 +349,31 @@ static void run_test4(void) {
   mutex_unlock(&t4_start_lock);
   if(wait_for(&t4_writers_done, T4_WRITER_THREADS, 400000) != 0) error_flag = 1;
   if(wait_for(&t4_reader_done, T4_READER_THREADS, 400000) != 0) error_flag = 1;
-  check_rwlock_integrity("T4 final");
+  check_rwsem_integrity("T4 final");
   printf(error_flag?"FAIL\n":"OK\n");
 }
 
-static void rwlock_test_master(uint64 a1, uint64 a2) {
+static void rwsem_test_master(uint64 a1, uint64 a2) {
   for (int i = 0; i < 10000; i++) {
    scheduler_yield();
   }
-  printf("[rwlock] starting simple rwlock tests\n");
-  if(rwlock_init(&test_lock, 0, "rwlock-test") != 0) {
-    printf("[rwlock] init failed\n");
+  printf("[rwsem] starting simple rwsem tests\n");
+  if(rwsem_init(&test_lock, 0, "rwsem-test") != 0) {
+    printf("[rwsem] init failed\n");
     return;
   }
-  check_rwlock_integrity("init");
+  check_rwsem_integrity("init");
   run_test1();
   run_test2();
   run_test3();
   run_test4();
-  printf("[rwlock] tests finished\n");
+  printf("[rwsem] tests finished\n");
 }
 
-void rwlock_launch_tests(void) {
+void rwsem_launch_tests(void) {
   struct thread *np = NULL;
-  if(kthread_create("rwlock_test_master", &np, rwlock_test_master, 0, 0, KERNEL_STACK_ORDER) < 0) {
-    printf("[rwlock] cannot create test master thread\n");
+  if(kthread_create("rwsem_test_master", &np, rwsem_test_master, 0, 0, KERNEL_STACK_ORDER) < 0) {
+    printf("[rwsem] cannot create test master thread\n");
   } else {
     wakeup(np);
   }

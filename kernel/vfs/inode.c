@@ -3,7 +3,7 @@
  *
  * Locking order (must acquire in this order to avoid deadlock):
  * 1. mount mutex (via vfs_mount_lock)
- * 2. vfs_superblock rwlock (via vfs_superblock_rlock/wlock)
+ * 2. vfs_superblock rwsem (via vfs_superblock_rlock/wlock)
  * 3. vfs_inode mutex (via vfs_ilock)
  * 4. buffer mutex (via bread/brelse)
  * 5. log spinlock (filesystem internal, e.g., xv6fs log->lock)
@@ -26,7 +26,7 @@
 #include "vfs/stat.h"
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
-#include "lock/rwlock.h"
+#include "lock/rwsem.h"
 #include "proc/thread.h"
 #include "proc/sched.h"
 #include "vfs/fs.h"

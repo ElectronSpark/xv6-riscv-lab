@@ -845,7 +845,7 @@ uint64 sys_vfs_pipe(void) {
     }
     spin_unlock(&current->fdtable->lock);
     
-    // vm_copyout may sleep (acquires rwlock), so must be outside spinlock
+    // vm_copyout may sleep (acquires rwsem), so must be outside spinlock
     struct thread *p = current;
     if (vm_copyout(p->vm, fdarray, (char *)&fd0, sizeof(fd0)) < 0 ||
         vm_copyout(p->vm, fdarray + sizeof(fd0), (char *)&fd1, sizeof(fd1)) < 0) {

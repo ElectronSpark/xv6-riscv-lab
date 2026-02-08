@@ -60,7 +60,7 @@ static inline bool vfs_sb_is_unmounting(struct vfs_superblock *sb) {
 
 #define VFS_SUPERBLOCK_ASSERT_WHOLDING(__sb, __fmt, ...) do {                  \
     assert((__sb) != NULL, "VFS_SUPERBLOCK_ASSERT_HOLDING: sb is NULL");   \
-    assert(rwlock_is_write_holding(&(__sb)->lock), __fmt, ##__VA_ARGS__);  \
+    assert(rwsem_is_write_holding(&(__sb)->lock), __fmt, ##__VA_ARGS__);  \
 } while (0) 
 
 static inline void __vfs_i_wait_completion(struct vfs_inode *inode) {

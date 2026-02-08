@@ -160,7 +160,7 @@ int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
 // or kernel address.
 //
 // IMPORTANT: Must not hold spinlock while copying to userspace, because
-// vm_copyout acquires a rwlock and that would violate lock ordering.
+// vm_copyout acquires a rwsem and that would violate lock ordering.
 // We batch characters into a kernel buffer while holding the lock,
 // then copy to userspace after releasing the lock.
 //

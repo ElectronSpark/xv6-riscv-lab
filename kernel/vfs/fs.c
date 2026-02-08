@@ -9,7 +9,7 @@
 #include "vfs/stat.h"
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
-#include "lock/rwlock.h"
+#include "lock/rwsem.h"
 #include "proc/thread.h"
 #include "proc/sched.h"
 #include "proc/workqueue.h"
@@ -180,7 +180,7 @@ static void __vfs_init_superblock_structure(struct vfs_superblock *sb, struct vf
     sb->orphan_count = 0;
     __atomic_store_n(&sb->refcount, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&sb->mount_count, 0, __ATOMIC_SEQ_CST);
-    rwlock_init(&sb->lock, RWLOCK_PRIO_READ, "vfs_superblock_lock");
+    rwsem_init(&sb->lock, RWLOCK_PRIO_READ, "vfs_superblock_lock");
     spin_init(&sb->spinlock, "vfs_superblock_spinlock");
 }
 
@@ -1286,7 +1286,7 @@ int vfs_get_mnt_rooti(struct vfs_inode *mountpoint, struct vfs_inode **ret_rooti
  */
 void vfs_superblock_rlock(struct vfs_superblock *sb) {
     if (sb) {
-        rwlock_acquire_read(&sb->lock);
+        rwsem_acquire_read(&sb->lock);
     }
 }
 
@@ -1298,7 +1298,7 @@ void vfs_superblock_rlock(struct vfs_superblock *sb) {
  */
 void vfs_superblock_wlock(struct vfs_superblock *sb) {
     if (sb) {
-        rwlock_acquire_write(&sb->lock);
+        rwsem_acquire_write(&sb->lock);
     }
 }
 
@@ -1312,7 +1312,7 @@ bool vfs_superblock_wholding(struct vfs_superblock *sb) {
     if (!sb) {
         return false;
     }
-    return rwlock_is_write_holding(&sb->lock);
+    return rwsem_is_write_holding(&sb->lock);
 }
 
 /*
@@ -1323,7 +1323,7 @@ bool vfs_superblock_wholding(struct vfs_superblock *sb) {
  */
 void vfs_superblock_unlock(struct vfs_superblock *sb) {
     if (sb) {
-        rwlock_release(&sb->lock);
+        rwsem_release(&sb->lock);
     }
 }
 

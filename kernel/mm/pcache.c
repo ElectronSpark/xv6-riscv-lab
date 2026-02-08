@@ -4,7 +4,7 @@
 #include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "lock/completion.h"
-#include "lock/rwlock.h"
+#include "lock/rwsem.h"
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"

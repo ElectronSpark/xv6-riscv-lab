@@ -6,7 +6,7 @@
 
 #include "host_test_stubs.h"
 #include "types.h"
-#include "rwlock.h"
+#include "rwsem.h"
 #include "proc/thread.h"
 #include "proc/tq.h"
 #include "spinlock.h"
@@ -29,7 +29,7 @@ static fake_runtime_t g_runtime;
 static struct thread g_self_proc;
 static struct thread g_wait_proc;
 
-static void expect_integrity(const rwlock_t *lock, const char *label) {
+static void expect_integrity(const rwsem_t *lock, const char *label) {
     assert_non_null(lock);
     if (lock->readers < 0) {
         fail_msg("%s: readers negative (%d)", label, lock->readers);
@@ -73,61 +73,61 @@ static int test_setup(void **state) {
     return 0;
 }
 
-static void test_rwlock_init_integrity(void **state) {
+static void test_rwsem_init_integrity(void **state) {
     (void)state;
-    rwlock_t lock;
-    assert_int_equal(rwlock_init(&lock, 0, "ut"), 0);
+    rwsem_t lock;
+    assert_int_equal(rwsem_init(&lock, 0, "ut"), 0);
     expect_integrity(&lock, "after init");
     assert_int_equal(lock.readers, 0);
     assert_int_equal(lock.holder_pid, -1);
 }
 
-static void test_rwlock_read_acquire_release_integrity(void **state) {
+static void test_rwsem_read_acquire_release_integrity(void **state) {
     (void)state;
-    rwlock_t lock;
-    assert_int_equal(rwlock_init(&lock, 0, "ut"), 0);
-    assert_int_equal(rwlock_acquire_read(&lock), 0);
+    rwsem_t lock;
+    assert_int_equal(rwsem_init(&lock, 0, "ut"), 0);
+    assert_int_equal(rwsem_acquire_read(&lock), 0);
     assert_int_equal(lock.readers, 1);
     assert_int_equal(lock.holder_pid, -1);
     expect_integrity(&lock, "after read acquire");
-    rwlock_release(&lock);
+    rwsem_release(&lock);
     assert_int_equal(lock.readers, 0);
     expect_integrity(&lock, "after read release");
 }
 
-static void test_rwlock_write_acquire_release_integrity(void **state) {
+static void test_rwsem_write_acquire_release_integrity(void **state) {
     (void)state;
-    rwlock_t lock;
-    assert_int_equal(rwlock_init(&lock, 0, "ut"), 0);
-    assert_int_equal(rwlock_acquire_write(&lock), 0);
+    rwsem_t lock;
+    assert_int_equal(rwsem_init(&lock, 0, "ut"), 0);
+    assert_int_equal(rwsem_acquire_write(&lock), 0);
     assert_int_equal(lock.holder_pid, g_self_proc.pid);
     expect_integrity(&lock, "after write acquire");
-    rwlock_release(&lock);
+    rwsem_release(&lock);
     assert_true(lock.holder_pid == -1 || lock.holder_pid == g_wait_proc.pid);
     expect_integrity(&lock, "after write release");
 }
 
-static void test_rwlock_release_wakes_writer_integrity(void **state) {
+static void test_rwsem_release_wakes_writer_integrity(void **state) {
     (void)state;
-    rwlock_t lock;
-    assert_int_equal(rwlock_init(&lock, RWLOCK_PRIO_WRITE, "ut"), 0);
-    assert_int_equal(rwlock_acquire_write(&lock), 0);
+    rwsem_t lock;
+    assert_int_equal(rwsem_init(&lock, RWLOCK_PRIO_WRITE, "ut"), 0);
+    assert_int_equal(rwsem_acquire_write(&lock), 0);
     lock.write_queue.counter = 1;
     g_runtime.tq.next_wakeup = &g_wait_proc;
-    rwlock_release(&lock);
+    rwsem_release(&lock);
     assert_int_equal(tq_size(&lock.write_queue), 0);
     assert_int_equal(lock.holder_pid, g_wait_proc.pid);
     expect_integrity(&lock, "writer wake");
     assert_int_equal(g_runtime.tq.queue_wakeup_count, 1);
 }
 
-static void test_rwlock_release_wakes_readers_integrity(void **state) {
+static void test_rwsem_release_wakes_readers_integrity(void **state) {
     (void)state;
-    rwlock_t lock;
-    assert_int_equal(rwlock_init(&lock, 0, "ut"), 0);
-    assert_int_equal(rwlock_acquire_write(&lock), 0);
+    rwsem_t lock;
+    assert_int_equal(rwsem_init(&lock, 0, "ut"), 0);
+    assert_int_equal(rwsem_acquire_write(&lock), 0);
     lock.read_queue.counter = 3;
-    rwlock_release(&lock);
+    rwsem_release(&lock);
     assert_int_equal(tq_size(&lock.read_queue), 0);
     expect_integrity(&lock, "reader wake");
     assert_int_equal(g_runtime.tq.queue_wakeup_all_count, 1);
@@ -135,11 +135,11 @@ static void test_rwlock_release_wakes_readers_integrity(void **state) {
 
 int main(void) {
     const struct CMUnitTest tests[] = {
-        cmocka_unit_test_setup(test_rwlock_init_integrity, test_setup),
-        cmocka_unit_test_setup(test_rwlock_read_acquire_release_integrity, test_setup),
-        cmocka_unit_test_setup(test_rwlock_write_acquire_release_integrity, test_setup),
-        cmocka_unit_test_setup(test_rwlock_release_wakes_writer_integrity, test_setup),
-        cmocka_unit_test_setup(test_rwlock_release_wakes_readers_integrity, test_setup),
+        cmocka_unit_test_setup(test_rwsem_init_integrity, test_setup),
+        cmocka_unit_test_setup(test_rwsem_read_acquire_release_integrity, test_setup),
+        cmocka_unit_test_setup(test_rwsem_write_acquire_release_integrity, test_setup),
+        cmocka_unit_test_setup(test_rwsem_release_wakes_writer_integrity, test_setup),
+        cmocka_unit_test_setup(test_rwsem_release_wakes_readers_integrity, test_setup),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

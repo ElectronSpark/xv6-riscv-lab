@@ -8,7 +8,7 @@
 #include "vfs/stat.h"
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
-#include "lock/rwlock.h"
+#include "lock/rwsem.h"
 #include <mm/vm.h>
 #include <mm/pcache.h>
 #include "vfs/fs.h"

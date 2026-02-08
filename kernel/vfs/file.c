@@ -2,7 +2,7 @@
  * VFS file operations
  *
  * Locking order (must acquire in this order to avoid deadlock):
- * 1. vfs_superblock rwlock (via vfs_superblock_rlock/wlock) - for metadata ops
+ * 1. vfs_superblock rwsem (via vfs_superblock_rlock/wlock) - for metadata ops
  * 2. vfs_inode mutex (via vfs_ilock) - for inode access
  * 3. vfs_file mutex (via __vfs_file_lock) - for file descriptor state
  * 4. buffer mutex (via bread/brelse) - for block cache
@@ -29,7 +29,7 @@
 #include "vfs/stat.h"
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
-#include "lock/rwlock.h"
+#include "lock/rwsem.h"
 #include "proc/thread.h"
 #include "vfs/fs.h"
 #include "printf.h"

@@ -5,7 +5,7 @@
  * and inode synchronization for the xv6 filesystem.
  *
  * Locking order (must acquire in this order to avoid deadlock):
- * 1. vfs_superblock rwlock (held by VFS layer for create/mkdir/unlink/etc)
+ * 1. vfs_superblock rwsem (held by VFS layer for create/mkdir/unlink/etc)
  * 2. vfs_inode mutex (held by VFS layer before calling inode ops)
  * 3. log->lock spinlock (acquired by xv6fs_begin_op/end_op)
  * 4. buffer mutex (acquired by bread/brelse)

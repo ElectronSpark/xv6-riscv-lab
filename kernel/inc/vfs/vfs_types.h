@@ -6,7 +6,7 @@
 #include "list.h"
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
-#include "lock/rwlock_types.h"
+#include "lock/rwsem_types.h"
 #include "hlist_type.h"
 #include "mm/pcache_types.h"
 #include "kobject.h"
@@ -90,7 +90,7 @@ struct vfs_superblock {
     struct vfs_inode *root_inode; // root inode of this superblock
     struct vfs_superblock_ops *ops;
     
-    struct rwlock lock; // protects the superblock
+    struct rwsem lock; // protects the superblock
     void *fs_data; // filesystem-specific data
     int mount_count; // Number of superblocks directly mounted under this superblock
     int refcount; // Reference count for the superblock

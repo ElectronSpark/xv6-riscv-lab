@@ -10,7 +10,7 @@
  * VM LOCKING:
  * Two separate locks protect different aspects of the VM:
  *
- * 1. vm rw_lock (rwlock_t) - Protects VMA TREE STRUCTURE
+ * 1. vm rw_lock (rwsem_t) - Protects VMA TREE STRUCTURE
  *    - Read lock: Safe to traverse/lookup VMAs (vm_find_area, etc.)
  *    - Write lock: Required to modify VMA tree (va_alloc, va_free, vma_split,
  * vma_merge)
@@ -29,7 +29,7 @@
  *
  * LOCKING ORDER:
  * When acquiring multiple locks, always follow this order to prevent deadlocks.
- * Rule: Always acquire sleep locks (mutexes, rwlocks) before spinlocks.
+ * Rule: Always acquire sleep locks (mutexes, rwsems) before spinlocks.
  *
  * Sleep locks (acquire first):
  * 1. mount mutex (vfs_mount_lock)
@@ -94,7 +94,7 @@
 #include "printf.h"
 #include "proc/thread.h"
 #include "lock/spinlock.h"
-#include "lock/rwlock.h"
+#include "lock/rwsem.h"
 #include <smp/atomic.h>
 #include "rbtree.h"
 #include "riscv.h"
@@ -990,7 +990,7 @@ vm_t *vm_init(void) {
         return NULL; // Failed to set up trapframe page table
     }
     spin_init(&vm->spinlock, "vm_pgtable_lock");
-    rwlock_init(&vm->rw_lock, RWLOCK_PRIO_READ, "vm_rw_lock");
+    rwsem_init(&vm->rw_lock, RWLOCK_PRIO_READ, "vm_rw_lock");
     vm->refcount = 1;
 
     return vm;
@@ -1030,28 +1030,28 @@ void vm_put(vm_t *vm) {
 /**
  * @brief Acquire VM read lock for VMA tree traversal
  * @param vm VM to lock
- * @note Safe to hold across blocking operations (rwlock)
+ * @note Safe to hold across blocking operations (rwsem)
  */
-void vm_rlock(vm_t *vm) { rwlock_acquire_read(&vm->rw_lock); }
+void vm_rlock(vm_t *vm) { rwsem_acquire_read(&vm->rw_lock); }
 
 /**
  * @brief Release VM read lock
  * @param vm VM to unlock
  */
-void vm_runlock(vm_t *vm) { rwlock_release(&vm->rw_lock); }
+void vm_runlock(vm_t *vm) { rwsem_release(&vm->rw_lock); }
 
 /**
  * @brief Acquire VM write lock for VMA tree modification
  * @param vm VM to lock
  * @note Required for va_alloc(), va_free(), vma_split(), vma_merge()
  */
-void vm_wlock(vm_t *vm) { rwlock_acquire_write(&vm->rw_lock); }
+void vm_wlock(vm_t *vm) { rwsem_acquire_write(&vm->rw_lock); }
 
 /**
  * @brief Release VM write lock
  * @param vm VM to unlock
  */
-void vm_wunlock(vm_t *vm) { rwlock_release(&vm->rw_lock); }
+void vm_wunlock(vm_t *vm) { rwsem_release(&vm->rw_lock); }
 
 /**
  * @brief Acquire VM page table spinlock for PTE modifications
@@ -1277,8 +1277,8 @@ vma_t *vma_merge(vma_t *vma1, vma_t *vma2) {
 }
 
 vma_t *va_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags) {
-    assert(current == NULL || rwlock_is_write_holding(&vm->rw_lock),
-           "va_alloc: vm rwlock must be write-held");
+    assert(current == NULL || rwsem_is_write_holding(&vm->rw_lock),
+           "va_alloc: vm rwsem must be write-held");
     if (vm == NULL) {
         return NULL;
     }
@@ -1367,8 +1367,8 @@ vma_t *va_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags) {
 }
 
 int va_free(vm_t *vm, vma_t *vma) {
-    assert(rwlock_is_write_holding(&vm->rw_lock),
-           "va_free: vm rwlock must be write-held");
+    assert(rwsem_is_write_holding(&vm->rw_lock),
+           "va_free: vm rwsem must be write-held");
     if (vma == NULL || vma->vm != vm) {
         return -1; // Invalid VMA
     }
@@ -1731,8 +1731,8 @@ uint64 pte2vm_flags(uint64 pte_flags) {
 }
 
 int vm_createheap(vm_t *vm, uint64 va, uint64 size) {
-    assert(current == NULL || rwlock_is_write_holding(&vm->rw_lock),
-           "vm_createheap: vm rwlock must be write-held");
+    assert(current == NULL || rwsem_is_write_holding(&vm->rw_lock),
+           "vm_createheap: vm rwsem must be write-held");
     size = PGROUNDUP(size);
     if ((va & (PGSIZE - 1)) != 0) {
         return -1; // va must be page-aligned
@@ -1752,8 +1752,8 @@ int vm_createheap(vm_t *vm, uint64 va, uint64 size) {
 }
 
 int vm_createstack(vm_t *vm, uint64 stack_top, uint64 size) {
-    assert(current == NULL || rwlock_is_write_holding(&vm->rw_lock),
-           "vm_createstack: vm rwlock must be write-held");
+    assert(current == NULL || rwsem_is_write_holding(&vm->rw_lock),
+           "vm_createstack: vm rwsem must be write-held");
     size = PGROUNDUP(size);
     if ((stack_top & (PGSIZE - 1)) != 0) {
         return -1; // stack_top must be page-aligned
@@ -1773,8 +1773,8 @@ int vm_createstack(vm_t *vm, uint64 stack_top, uint64 size) {
 }
 
 int vm_growstack(vm_t *vm, int64 change_size) {
-    assert(current == NULL || rwlock_is_write_holding(&vm->rw_lock),
-           "vm_growstack: vm rwlock must be write-held");
+    assert(current == NULL || rwsem_is_write_holding(&vm->rw_lock),
+           "vm_growstack: vm rwsem must be write-held");
     if (vm == NULL || vm->pagetable == NULL) {
         return -1; // Invalid VM
     }

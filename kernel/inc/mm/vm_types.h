@@ -6,7 +6,7 @@
 #include <mm/page_type.h>
 #include "list_type.h" 
 #include "bintree_type.h"
-#include "lock/rwlock_types.h"
+#include "lock/rwsem_types.h"
 
 typedef struct vm vm_t;
 struct file;
@@ -39,7 +39,7 @@ typedef struct vma {
 
 // Virtual Memory Management structure
 typedef struct vm {
-    rwlock_t        rw_lock;    // protect the vm tree and vma list
+    rwsem_t        rw_lock;    // protect the vm tree and vma list
     struct rb_root  vm_tree;
     pte_t           *trapframe_pte; // Pointer to the leaf page table for trapframes
     vma_t           *stack;

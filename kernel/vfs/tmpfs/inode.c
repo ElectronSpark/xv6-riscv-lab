@@ -7,7 +7,7 @@
 #include "bits.h"
 #include "vfs/stat.h"
 #include "lock/mutex_types.h"
-#include "lock/rwlock.h"
+#include "lock/rwsem.h"
 #include <mm/vm.h>
 #include "vfs/fs.h"
 #include "../vfs_private.h"

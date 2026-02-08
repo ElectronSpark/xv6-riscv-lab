@@ -10,7 +10,7 @@
  * This ensures atomicity of filesystem operations.
  *
  * Locking order (must acquire in this order to avoid deadlock):
- * 1. vfs_superblock rwlock (if held by caller)
+ * 1. vfs_superblock rwsem (if held by caller)
  * 2. vfs_inode mutex (if held by caller)
  * 3. log->lock spinlock (acquired by begin_op/end_op)
  * 4. buffer mutex (acquired by bread during commit)

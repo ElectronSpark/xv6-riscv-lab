@@ -6,7 +6,7 @@
 #include "list_type.h"
 #include "bintree_type.h"
 #include "lock/mutex_types.h"
-#include "lock/rwlock_types.h"
+#include "lock/rwsem_types.h"
 #include "lock/spinlock.h"
 #include "lock/completion_types.h"
 #include "kobject.h"
