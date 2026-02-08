@@ -39,7 +39,7 @@ static inline int __writer_should_wait(rwlock_t *lock, int pid) {
 
 static void __wake_readers(rwlock_t *lock) {
     int ret = proc_queue_wakeup_all(&lock->read_queue, 0, 0);
-    assert(ret == 0, "rwlock: failed to wake readers");
+    assert(ret >= 0, "rwlock: failed to wake readers");
 }
 
 static void __wake_writer(rwlock_t *lock) {
