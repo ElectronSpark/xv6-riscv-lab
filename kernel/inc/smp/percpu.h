@@ -132,6 +132,9 @@ void push_off(void);
 void pop_off(void);
 int cpuid(void);
 struct thread *myproc(void);
+struct thread *__current_thread(void);
+
+#define current __current_thread()
 
 #endif /* ON_HOST_OS */
 

@@ -87,6 +87,14 @@ struct thread *__wrap_myproc(void)
     return &g_proc_stub;
 }
 
+struct thread *__wrap___current_thread(void)
+{
+    if (g_proc_tracking && g_proc_tracking->current_proc) {
+        return g_proc_tracking->current_proc;
+    }
+    return &g_proc_stub;
+}
+
 int __wrap_cpuid(void)
 {
     if (g_proc_tracking) {

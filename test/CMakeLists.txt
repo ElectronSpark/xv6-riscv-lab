@@ -164,6 +164,7 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     cpuid
     mycpu
     myproc
+    __current_thread
     proc_lock
     proc_unlock
     proc_assert_holding
@@ -181,6 +182,15 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     proc_queue_wait
     proc_queue_wakeup
     proc_queue_wakeup_all
+    # Thread queue functions (tq_*)
+    tq_init
+    tq_size
+    tq_wait
+    tq_wait_in_state
+    tq_wakeup
+    tq_wakeup_all
+    wakeup
+    kthread_create
     # Workqueue functions
     workqueue_create
     queue_work
@@ -269,8 +279,8 @@ target_compile_options(ut_semaphore PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS
 target_link_options(ut_semaphore PRIVATE ${ASAN_LINK_FLAGS}
     -Wl,--wrap=spin_init,--wrap=spin_lock,--wrap=spin_unlock,--wrap=spin_holding
     -Wl,--wrap=push_off,--wrap=pop_off
-    -Wl,--wrap=proc_queue_init,--wrap=proc_queue_wait,--wrap=proc_queue_wakeup
-    -Wl,--wrap=mycpu,--wrap=myproc,--wrap=proc_lock,--wrap=proc_unlock,--wrap=proc_assert_holding
+    -Wl,--wrap=tq_init,--wrap=tq_size,--wrap=tq_wait,--wrap=tq_wait_in_state,--wrap=tq_wakeup,--wrap=tq_wakeup_all
+    -Wl,--wrap=mycpu,--wrap=myproc,--wrap=__current_thread,--wrap=proc_lock,--wrap=proc_unlock,--wrap=proc_assert_holding
     -Wl,--wrap=sched_lock,--wrap=sched_unlock,--wrap=scheduler_wakeup,--wrap=scheduler_sleep
     -Wl,--wrap=__panic_start,--wrap=__panic_end,--wrap=panic_state,--wrap=panic_disable_bt
 )
@@ -282,7 +292,7 @@ target_include_directories(ut_semaphore PRIVATE
 add_executable(ut_rwlock
     ${CMAKE_SOURCE_DIR}/src/ut_rwlock_main.c
     ${CMAKE_SOURCE_DIR}/src/concurrency_harness.c
-    ${CMAKE_SOURCE_DIR}/../kernel/lock/rwlock.c
+    ${CMAKE_SOURCE_DIR}/../kernel/lock/rwsem.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/spinlock_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
@@ -290,12 +300,13 @@ add_executable(ut_rwlock
 )
 target_link_libraries(ut_rwlock PRIVATE cmocka-static pthread)
 target_compile_options(ut_rwlock PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
-target_link_options(ut_rwlock PRIVATE ${ASAN_LINK_FLAGS}    -Wl,--wrap=spin_init,--wrap=spin_lock,--wrap=spin_unlock,--wrap=spin_holding
+target_link_options(ut_rwlock PRIVATE ${ASAN_LINK_FLAGS}
+    -Wl,--wrap=spin_init,--wrap=spin_lock,--wrap=spin_unlock,--wrap=spin_holding
     -Wl,--wrap=push_off,--wrap=pop_off
-    -Wl,--wrap=proc_queue_init,--wrap=proc_queue_size,--wrap=proc_queue_wait
-    -Wl,--wrap=proc_queue_wakeup,--wrap=proc_queue_wakeup_all
-    -Wl,--wrap=mycpu,--wrap=myproc,--wrap=proc_lock,--wrap=proc_unlock,--wrap=proc_assert_holding
-    -Wl,--wrap=sched_lock,--wrap=sched_unlock,--wrap=scheduler_wakeup,--wrap=scheduler_sleep    -Wl,--wrap=__panic_start,--wrap=__panic_end,--wrap=panic_state,--wrap=panic_disable_bt
+    -Wl,--wrap=tq_init,--wrap=tq_size,--wrap=tq_wait,--wrap=tq_wait_in_state,--wrap=tq_wakeup,--wrap=tq_wakeup_all
+    -Wl,--wrap=mycpu,--wrap=myproc,--wrap=__current_thread,--wrap=proc_lock,--wrap=proc_unlock,--wrap=proc_assert_holding
+    -Wl,--wrap=sched_lock,--wrap=sched_unlock,--wrap=scheduler_wakeup,--wrap=scheduler_sleep
+    -Wl,--wrap=__panic_start,--wrap=__panic_end,--wrap=panic_state,--wrap=panic_disable_bt
 )
 target_include_directories(ut_rwlock PRIVATE
     ${UNIT_TEST_INCLUDE_DIRS}
