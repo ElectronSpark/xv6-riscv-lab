@@ -490,8 +490,8 @@ static int __pcache_pick_pending_before(uint64 jiffs, struct pcache **out_pcache
         __pcache_spin_lock(pcache);
         if (pcache->flush_requested) {
             uint64 last_request = pcache->last_request;
-            __pcache_spin_unlock(pcache);
             if (last_request <= jiffs) {
+                __pcache_spin_unlock(pcache);
                 *out_pcache = pcache;
                 return 0;
             }
@@ -500,7 +500,6 @@ static int __pcache_pick_pending_before(uint64 jiffs, struct pcache **out_pcache
     }
 
     return -ENOENT;
-
 }
 
 static void __pcache_wait_for_pending_flushes(void) {
