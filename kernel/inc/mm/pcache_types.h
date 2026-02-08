@@ -6,6 +6,7 @@
 #include "bintree_type.h"
 #include "lock/mutex_types.h"
 #include "lock/spinlock.h"
+#include "lock/rwlock_types.h"
 #include "lock/completion_types.h"
 #include "kobject.h"
 #include "dev/dev_types.h"
@@ -76,14 +77,14 @@ struct pcache {
             uint64 flush_requested : 1;
         };
     };
+    struct rwlock tree_lock; // protect the red-black tree structure
     struct rb_root page_map;
-    struct spinlock spinlock;  // Spinlock to protect the pcache structure
-    struct spinlock tree_lock; // protect the red-black tree structure
     uint64 gfp_flags;
     struct pcache_ops *ops;
     struct work_struct flush_work; // Work structure for flush operation
     int flush_error;
     uint32 wait_refcount; // Reference count for flusher waiter threads
+    struct spinlock spinlock;  // Spinlock to protect the pcache structure
 };
 
 // Extension of page structure for page cache use
