@@ -25,7 +25,7 @@
  *   that has reached the expedite threshold.  When this bit is set, new
  *   non-expediting readers and non-expediting writers voluntarily back off,
  *   giving that writer priority.  The bit may be transiently lost on unlock
- *   (see @ref rwlock_wunlock) — this is acceptable because the waiting writer
+ *   (see @ref rwlock_writer_release) — this is acceptable because the waiting writer
  *   will re-set it on its next CAS-failure iteration.
  * - **Bits 9-63 (reader count):** Each reader adds @c RWLOCK_STATE_READER_BIAS
  *   (1 << 9) when acquiring, allowing up to 2^55 concurrent readers.
@@ -40,15 +40,15 @@
  * @section expedite  Writer Starvation Prevention (Expedite)
  *
  * To avoid indefinite writer starvation under read-heavy workloads the
- * blocking @ref rwlock_wlock path enables *expedite mode* after
+ * blocking @ref rwlock_wacquire path enables *expedite mode* after
  * @c RWLOCK_EXPEDITE_THRESHOLD ticks.  In expedite mode:
  *   -# The failure-hook atomically ORs @c WRITER_WAITING into the state.
  *   -# Subsequent @ref rwlock_can_rlock / @ref rwlock_can_wlock callers
  *      without expedite refuse to acquire, yielding to the waiting writer.
  *
  * Two pre-packaged variants skip the timeout:
- * - @ref rwlock_wlock_expedited — always expedites (low latency, aggressive).
- * - @ref rwlock_graceful_wlock  — never expedites (fair, may starve).
+ * - @ref rwlock_wacquire_expedited — always expedites (low latency, aggressive).
+ * - @ref rwlock_graceful_wacquire  — never expedites (fair, may starve).
  */
 
 #ifndef __KERNEL_READ_WRITE_SPIN_LOCK_H
@@ -71,7 +71,7 @@
  *
  * Set by the expedite failure-hook; cleared implicitly when the writer
  * acquires (CAS replaces state with @c WRITER_HOLDING) or when
- * @ref rwlock_wunlock stores @c UNLOCKED.
+ * @ref rwlock_writer_release stores @c UNLOCKED.
  */
 #define RWLOCK_STATE_WRITER_WAITING (1ULL << 8)
 
@@ -144,7 +144,7 @@
 /** @} */
 
 /**
- * @brief Threshold for expediting writers in rwlock_wlock()
+ * @brief Threshold for expediting writers in rwlock_wacquire()
  * If a writer has been waiting for longer than this threshold, new readers and
  * writers not reaching this threshold will not acquire the lock, allowing the
  * waiting writer to acquire it sooner. This helps prevent writer starvation in
@@ -327,7 +327,7 @@ static inline bool rwlock_can_update(struct rwlock *rw, uint64 state) {
  *         - A WRITER_WAITING hint prevents the upgrade.
  *
  * @note Callers that fail should either release the read lock and fall back to
- *       @ref rwlock_wlock, or accept reading only.
+ *       @ref rwlock_wacquire, or accept reading only.
  */
 static inline bool rwlock_try_update(struct rwlock *rw) {
     bool success = atomic_oper_cond(&rw->state, RWLOCK_STATE_WRITER_HOLDING,
@@ -342,10 +342,10 @@ static inline bool rwlock_try_update(struct rwlock *rw) {
 void rwlock_init(struct rwlock *rw, const char *name);
 
 /** Spin-acquire a read lock (calls @ref rwlock_try_rlock in a loop). */
-void rwlock_rlock(struct rwlock *rw);
+void rwlock_racquire(struct rwlock *rw);
 
 /** Release a read lock (atomically subtracts @c READER_BIAS). */
-void rwlock_runlock(struct rwlock *rw);
+void rwlock_rrelease(struct rwlock *rw);
 
 /**
  * @brief Spin-acquire a write lock with adaptive expedite.
@@ -354,7 +354,7 @@ void rwlock_runlock(struct rwlock *rw);
  * the call switches to expedite, setting WRITER_WAITING to gain soft
  * priority over incoming readers and non-expediting writers.
  */
-void rwlock_wlock(struct rwlock *rw);
+void rwlock_wacquire(struct rwlock *rw);
 
 /**
  * @brief Spin-acquire a write lock, always in expedite mode.
@@ -362,7 +362,7 @@ void rwlock_wlock(struct rwlock *rw);
  * Immediately sets WRITER_WAITING and ignores the hint set by other
  * writers.  Use when write latency is more important than fairness.
  */
-void rwlock_wlock_expedited(struct rwlock *rw);
+void rwlock_wacquire_expedited(struct rwlock *rw);
 
 /**
  * @brief Spin-acquire a write lock, never expediting.
@@ -370,13 +370,7 @@ void rwlock_wlock_expedited(struct rwlock *rw);
  * Will wait behind any WRITER_WAITING hint.  Fair, but may starve if
  * another writer repeatedly claims expedite.
  */
-void rwlock_graceful_wlock(struct rwlock *rw);
-
-/**
- * @brief Try to upgrade a read lock to a write lock (declared in header
- *        as a static inline, repeated here for documentation linkage).
- */
-bool rwlock_try_update(struct rwlock *rw);
+void rwlock_graceful_wacquire(struct rwlock *rw);
 
 /**
  * @brief Release the write lock.
@@ -386,6 +380,26 @@ bool rwlock_try_update(struct rwlock *rw);
  * WRITER_WAITING hint set by a spinning writer — that writer will
  * re-set the hint on its next failure-hook iteration.
  */
+void rwlock_writer_release(struct rwlock *rw);
+
+/** @name push_off / pop_off wrappers — nestable interrupt-safe lock/unlock
+ * @{ */
+void rwlock_rlock(struct rwlock *rw);
+void rwlock_runlock(struct rwlock *rw);
+void rwlock_wlock(struct rwlock *rw);
+void rwlock_wlock_expedited(struct rwlock *rw);
+void rwlock_graceful_wlock(struct rwlock *rw);
 void rwlock_wunlock(struct rwlock *rw);
+/** @} */
+
+/** @name irqsave / irqrestore wrappers — raw interrupt save/restore
+ * @{ */
+int rwlock_rlock_irqsave(struct rwlock *rw);
+void rwlock_runlock_irqrestore(struct rwlock *rw, int state);
+int rwlock_wlock_irqsave(struct rwlock *rw);
+int rwlock_wlock_expedited_irqsave(struct rwlock *rw);
+int rwlock_graceful_wlock_irqsave(struct rwlock *rw);
+void rwlock_wunlock_irqrestore(struct rwlock *rw, int state);
+/** @} */
 
 #endif // __KERNEL_READ_WRITE_SPIN_LOCK_H

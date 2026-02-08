@@ -337,7 +337,8 @@ intr_off_save()
 {
   uint64 x = r_sstatus();
   int enabled = (x & SSTATUS_SIE) != 0;
-  intr_off();
+  if (enabled)
+    intr_off();
   return enabled;
 }
 
