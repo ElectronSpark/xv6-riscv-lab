@@ -357,7 +357,7 @@ static int __tmpfs_smoketest_kthread(uint64 arg1, uint64 arg2) {
     struct vfs_inode *tmp_root = vfs_namei("/tmp", 4);
     if (IS_ERR_OR_NULL(tmp_root)) {
         printf("tmpfs_smoketest: failed to resolve /tmp, errno=%ld\n", 
-               IS_ERR(tmp_root) ? PTR_ERR(tmp_root) : -ENOENT);
+               PTR_ERR_OR(tmp_root, -ENOENT));
         return -1;
     }
     

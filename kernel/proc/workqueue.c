@@ -194,7 +194,7 @@ static void __worker_routine(void) {
 static int __create_worker(struct workqueue *wq) {
     struct thread *worker = kthread_create("worker_thread", __worker_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
     if (IS_ERR_OR_NULL(worker)) {
-        return IS_ERR(worker) ? PTR_ERR(worker) : -ENOMEM;
+        return PTR_ERR_OR(worker, -ENOMEM);
     }
     tcb_lock(worker);
     worker->wq = wq;
@@ -257,7 +257,7 @@ static void __manager_routine(void) {
 static int __create_manager(struct workqueue *wq) {
     struct thread *manager = kthread_create("manager_thread", __manager_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
     if (IS_ERR_OR_NULL(manager)) {
-        return IS_ERR(manager) ? PTR_ERR(manager) : -ENOMEM;
+        return PTR_ERR_OR(manager, -ENOMEM);
     }
     assert(manager != NULL, "Failed to create manager thread");
     tcb_lock(manager);

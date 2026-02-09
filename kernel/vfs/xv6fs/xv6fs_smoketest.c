@@ -127,7 +127,7 @@ void xv6fs_run_inode_smoketest(void) {
     // Create test directory
     testdir = vfs_mkdir(root, 0755, testdir_name, testdir_len);
     if (IS_ERR_OR_NULL(testdir)) {
-        ret = IS_ERR(testdir) ? PTR_ERR(testdir) : -EINVAL;
+        ret = PTR_ERR_OR(testdir, -EINVAL);
         printf("xv6fs_inode_test: " FAIL " mkdir %s errno=%d\n", testdir_name, ret);
         goto out;
     }
@@ -139,7 +139,7 @@ void xv6fs_run_inode_smoketest(void) {
     // Create a regular file
     file_a = vfs_create(testdir, 0644, file_a_name, file_a_len);
     if (IS_ERR_OR_NULL(file_a)) {
-        ret = IS_ERR(file_a) ? PTR_ERR(file_a) : -EINVAL;
+        ret = PTR_ERR_OR(file_a, -EINVAL);
         printf("xv6fs_inode_test: " FAIL " create %s errno=%d\n", file_a_name, ret);
         goto cleanup;
     }
@@ -154,7 +154,7 @@ void xv6fs_run_inode_smoketest(void) {
     // Create a subdirectory
     subdir = vfs_mkdir(testdir, 0755, subdir_name, subdir_len);
     if (IS_ERR_OR_NULL(subdir)) {
-        ret = IS_ERR(subdir) ? PTR_ERR(subdir) : -EINVAL;
+        ret = PTR_ERR_OR(subdir, -EINVAL);
         printf("xv6fs_inode_test: " FAIL " mkdir %s errno=%d\n", subdir_name, ret);
         goto cleanup;
     }
@@ -190,7 +190,7 @@ void xv6fs_run_inode_smoketest(void) {
     // Create a symlink
     sym = vfs_symlink(testdir, 0777, sym_name, sym_len, sym_target, sym_target_len);
     if (IS_ERR_OR_NULL(sym)) {
-        ret = IS_ERR(sym) ? PTR_ERR(sym) : -EINVAL;
+        ret = PTR_ERR_OR(sym, -EINVAL);
         printf("xv6fs_inode_test: " FAIL " symlink %s errno=%d\n", sym_name, ret);
         sym = NULL;
     } else {
@@ -294,7 +294,7 @@ void xv6fs_run_file_ops_smoketest(void) {
     // Create test file
     testfile = vfs_create(root, 0644, filename, filename_len);
     if (IS_ERR_OR_NULL(testfile)) {
-        ret = IS_ERR(testfile) ? PTR_ERR(testfile) : -EINVAL;
+        ret = PTR_ERR_OR(testfile, -EINVAL);
         printf("xv6fs_file_test: " FAIL " create %s errno=%d\n", filename, ret);
         goto out;
     }
@@ -303,7 +303,7 @@ void xv6fs_run_file_ops_smoketest(void) {
     // Open file for writing using VFS API
     file = vfs_fileopen(testfile, O_WRONLY);
     if (IS_ERR_OR_NULL(file)) {
-        ret = IS_ERR(file) ? PTR_ERR(file) : -EINVAL;
+        ret = PTR_ERR_OR(file, -EINVAL);
         printf("xv6fs_file_test: " FAIL " open for write errno=%d\n", ret);
         file = NULL;
         goto cleanup_inode;
@@ -326,7 +326,7 @@ void xv6fs_run_file_ops_smoketest(void) {
     // Open file for reading
     file = vfs_fileopen(testfile, O_RDONLY);
     if (IS_ERR_OR_NULL(file)) {
-        ret = IS_ERR(file) ? PTR_ERR(file) : -EINVAL;
+        ret = PTR_ERR_OR(file, -EINVAL);
         printf("xv6fs_file_test: " FAIL " open for read errno=%d\n", ret);
         file = NULL;
         goto cleanup_inode;
@@ -416,7 +416,7 @@ void xv6fs_run_truncate_smoketest(void) {
     // Create test file
     testfile = vfs_create(root, 0644, filename, filename_len);
     if (IS_ERR_OR_NULL(testfile)) {
-        ret = IS_ERR(testfile) ? PTR_ERR(testfile) : -EINVAL;
+        ret = PTR_ERR_OR(testfile, -EINVAL);
         printf("xv6fs_truncate: " FAIL " create %s errno=%d\n", filename, ret);
         goto out;
     }
@@ -529,21 +529,21 @@ void xv6fs_run_namei_smoketest(void) {
     // Setup: create /namei_dir/nested/target (we're chrooted into xv6fs)
     subdir = vfs_mkdir(root, 0755, subdir_name, subdir_len);
     if (IS_ERR_OR_NULL(subdir)) {
-        ret = IS_ERR(subdir) ? PTR_ERR(subdir) : -EINVAL;
+        ret = PTR_ERR_OR(subdir, -EINVAL);
         printf("xv6fs_namei: " FAIL " setup mkdir %s errno=%d\n", subdir_name, ret);
         goto out;
     }
     
     nested = vfs_mkdir(subdir, 0755, nested_name, nested_len);
     if (IS_ERR_OR_NULL(nested)) {
-        ret = IS_ERR(nested) ? PTR_ERR(nested) : -EINVAL;
+        ret = PTR_ERR_OR(nested, -EINVAL);
         printf("xv6fs_namei: " FAIL " setup mkdir %s errno=%d\n", nested_name, ret);
         goto cleanup_subdir;
     }
     
     file = vfs_create(nested, 0644, file_name, file_len);
     if (IS_ERR_OR_NULL(file)) {
-        ret = IS_ERR(file) ? PTR_ERR(file) : -EINVAL;
+        ret = PTR_ERR_OR(file, -EINVAL);
         printf("xv6fs_namei: " FAIL " setup create %s errno=%d\n", file_name, ret);
         goto cleanup_nested;
     }
@@ -723,7 +723,7 @@ void xv6fs_run_dir_iter_smoketest(void) {
     // Create test directory
     testdir = vfs_mkdir(root, 0755, testdir_name, testdir_len);
     if (IS_ERR_OR_NULL(testdir)) {
-        ret = IS_ERR(testdir) ? PTR_ERR(testdir) : -EINVAL;
+        ret = PTR_ERR_OR(testdir, -EINVAL);
         printf("xv6fs_dir_iter: " FAIL " mkdir %s errno=%d\n", testdir_name, ret);
         goto out;
     }
@@ -779,7 +779,7 @@ void xv6fs_run_dir_iter_smoketest(void) {
     // Add files and subdirectory
     tmp = vfs_create(testdir, 0644, file1_name, file1_len);
     if (IS_ERR_OR_NULL(tmp)) {
-        ret = IS_ERR(tmp) ? PTR_ERR(tmp) : -EINVAL;
+        ret = PTR_ERR_OR(tmp, -EINVAL);
         printf("xv6fs_dir_iter: " FAIL " create %s errno=%d\n", file1_name, ret);
         goto cleanup;
     }
@@ -788,7 +788,7 @@ void xv6fs_run_dir_iter_smoketest(void) {
     
     tmp = vfs_create(testdir, 0644, file2_name, file2_len);
     if (IS_ERR_OR_NULL(tmp)) {
-        ret = IS_ERR(tmp) ? PTR_ERR(tmp) : -EINVAL;
+        ret = PTR_ERR_OR(tmp, -EINVAL);
         printf("xv6fs_dir_iter: " FAIL " create %s errno=%d\n", file2_name, ret);
         goto cleanup;
     }
@@ -797,7 +797,7 @@ void xv6fs_run_dir_iter_smoketest(void) {
     
     tmp = vfs_mkdir(testdir, 0755, subdir_name, subdir_len);
     if (IS_ERR_OR_NULL(tmp)) {
-        ret = IS_ERR(tmp) ? PTR_ERR(tmp) : -EINVAL;
+        ret = PTR_ERR_OR(tmp, -EINVAL);
         printf("xv6fs_dir_iter: " FAIL " mkdir %s errno=%d\n", subdir_name, ret);
         goto cleanup;
     }
@@ -947,7 +947,7 @@ void xv6fs_run_large_file_smoketest(void) {
     // Create test file
     testfile = vfs_create(root, 0644, filename, filename_len);
     if (IS_ERR_OR_NULL(testfile)) {
-        ret = IS_ERR(testfile) ? PTR_ERR(testfile) : -EINVAL;
+        ret = PTR_ERR_OR(testfile, -EINVAL);
         printf("xv6fs_largefile: " FAIL " create %s errno=%d\n", filename, ret);
         goto out;
     }
@@ -956,7 +956,7 @@ void xv6fs_run_large_file_smoketest(void) {
     // Write 10 blocks of data (10KB)
     file = vfs_fileopen(testfile, O_WRONLY);
     if (IS_ERR_OR_NULL(file)) {
-        ret = IS_ERR(file) ? PTR_ERR(file) : -EINVAL;
+        ret = PTR_ERR_OR(file, -EINVAL);
         printf("xv6fs_largefile: " FAIL " open for write errno=%d\n", ret);
         file = NULL;
         goto cleanup_inode;
@@ -996,7 +996,7 @@ void xv6fs_run_large_file_smoketest(void) {
     // Read back and verify
     file = vfs_fileopen(testfile, O_RDONLY);
     if (IS_ERR_OR_NULL(file)) {
-        ret = IS_ERR(file) ? PTR_ERR(file) : -EINVAL;
+        ret = PTR_ERR_OR(file, -EINVAL);
         printf("xv6fs_largefile: " FAIL " open for read errno=%d\n", ret);
         file = NULL;
         goto cleanup_inode;

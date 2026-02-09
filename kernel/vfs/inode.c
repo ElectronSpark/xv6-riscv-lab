@@ -772,15 +772,15 @@ retry:
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
-        ret_ptr = ERR_PTR(ret);
+        ret_ptr = INIT_ERR_PTR(ret);
         goto out;
     }
     if (!S_ISDIR(dir->mode)) {
-        ret_ptr = ERR_PTR(-ENOTDIR); // Inode is not a directory
+        ret_ptr = INIT_ERR_PTR(-ENOTDIR); // Inode is not a directory
         goto out;
     }
     if (dir->ops->create == NULL) {
-        ret_ptr = ERR_PTR(-ENOSYS); // Create operation not supported
+        ret_ptr = INIT_ERR_PTR(-ENOSYS); // Create operation not supported
         goto out;
     }
     ret_ptr = dir->ops->create(dir, mode, name, name_len);
@@ -834,15 +834,15 @@ retry:
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
-        ret_ptr = ERR_PTR(ret);
+        ret_ptr = INIT_ERR_PTR(ret);
         goto out;
     }
     if (!S_ISDIR(dir->mode)) {
-        ret_ptr = ERR_PTR(-ENOTDIR); // Inode is not a directory
+        ret_ptr = INIT_ERR_PTR(-ENOTDIR); // Inode is not a directory
         goto out;
     }
     if (dir->ops->mknod == NULL) {
-        ret_ptr = ERR_PTR(-ENOSYS); // mknod operation not supported
+        ret_ptr = INIT_ERR_PTR(-ENOSYS); // mknod operation not supported
         goto out;
     }
     ret_ptr = dir->ops->mknod(dir, mode, dev, name, name_len);
@@ -1062,15 +1062,15 @@ retry:
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
     if (ret != 0) {
-        ret_ptr = ERR_PTR(ret);
+        ret_ptr = INIT_ERR_PTR(ret);
         goto out;
     }
     if (!S_ISDIR(dir->mode)) {
-        ret_ptr = ERR_PTR(-ENOTDIR); // Inode is not a directory
+        ret_ptr = INIT_ERR_PTR(-ENOTDIR); // Inode is not a directory
         goto out;
     }
     if (dir->ops->mkdir == NULL) {
-        ret_ptr = ERR_PTR(-ENOSYS); // Mkdir operation not supported
+        ret_ptr = INIT_ERR_PTR(-ENOSYS); // Mkdir operation not supported
         goto out;
     }
     ret_ptr = dir->ops->mkdir(dir, mode, name, name_len);
@@ -1178,15 +1178,15 @@ retry:
     vfs_ilock(dir);
     long ret = __vfs_inode_valid(dir);
     if (ret != 0) {
-        ret_ptr = ERR_PTR(ret);
+        ret_ptr = INIT_ERR_PTR(ret);
         goto out;
     }
     if (!S_ISDIR(dir->mode)) {
-        ret_ptr = ERR_PTR(-ENOTDIR); // Inode is not a directory
+        ret_ptr = INIT_ERR_PTR(-ENOTDIR); // Inode is not a directory
         goto out;
     }
     if (dir->ops->symlink == NULL) {
-        ret_ptr = ERR_PTR(-ENOSYS); // Symlink operation not supported
+        ret_ptr = INIT_ERR_PTR(-ENOSYS); // Symlink operation not supported
         goto out;
     }
     ret_ptr = dir->ops->symlink(dir, mode, name, name_len, target, target_len);
@@ -1501,7 +1501,7 @@ static struct vfs_inode *__vfs_namei(const char *path, size_t path_len) {
         if (ret != 0) {
             vfs_iput(pos);
             pos = NULL;
-            ret_inode = ERR_PTR(ret);
+            ret_inode = INIT_ERR_PTR(ret);
             goto out;
         }
 
@@ -1523,7 +1523,7 @@ static struct vfs_inode *__vfs_namei(const char *path, size_t path_len) {
                 // Mount root is dying, need to retry entire lookup
                 vfs_iput(pos);
                 pos = NULL;
-                ret_inode = ERR_PTR(-EAGAIN);
+                ret_inode = INIT_ERR_PTR(-EAGAIN);
                 goto out;
             }
             vfs_iput(pos);

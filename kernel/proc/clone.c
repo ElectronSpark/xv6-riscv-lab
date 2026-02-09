@@ -125,7 +125,7 @@ int thread_clone(struct clone_args *args) {
         ret_ptr->sigacts = sigacts_dup(p->sigacts, args->flags);
         if (ret_ptr->sigacts == NULL) {
             thread_destroy(ret_ptr);
-            ret_ptr = ERR_PTR(-ENOMEM);
+            ret_ptr = INIT_ERR_PTR(-ENOMEM);
             goto out;
         }
     }

@@ -138,10 +138,14 @@
 #define EHWPOISON       133
 
 #define MAX_ERRNO 4095L
+#define IS_ERR_VALUE(x) ((unsigned long)(void *)(x) >= (unsigned long)-(MAX_ERRNO))
 #define ERR_CAST(x) ((void *)(x))
 #define ERR_PTR(err) ((void *)(long)(err))
 #define PTR_ERR(ptr) ((long)(void *)(ptr))
-#define IS_ERR(ptr) ((PTR_ERR(ptr) >= -(MAX_ERRNO)) && (PTR_ERR(ptr) < 0))
-#define IS_ERR_OR_NULL(ptr) ((PTR_ERR(ptr) >= -(MAX_ERRNO)) && (PTR_ERR(ptr) <= 0))
+#define IS_ERR(ptr) IS_ERR_VALUE((unsigned long)(ptr))
+#define IS_ERR_OR_NULL(ptr) (!(ptr) || IS_ERR_VALUE((unsigned long)(ptr)))
+#define INIT_ERR_PTR(err) ERR_PTR(err)
+#define PTR_ERR_OR_ZERO(ptr) (IS_ERR(ptr) ? PTR_ERR(ptr) : 0L)
+#define PTR_ERR_OR(ptr, err) (IS_ERR(ptr) ? PTR_ERR(ptr) : (long)(err))
 
 #endif // __ERRNO_H_

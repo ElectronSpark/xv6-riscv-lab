@@ -537,21 +537,21 @@ void tmpfs_run_namei_smoketest(void) {
     // Setup: create /namei_test_dir/nested/testfile
     subdir = vfs_mkdir(root, 0755, subdir_name, subdir_len);
     if (IS_ERR_OR_NULL(subdir)) {
-        ret = IS_ERR(subdir) ? PTR_ERR(subdir) : -EINVAL;
+        ret = PTR_ERR_OR(subdir, -EINVAL);
         printf("namei_smoketest: " FAIL " setup mkdir %s, errno=%d\n", subdir_name, ret);
         goto out;
     }
 
     nested = vfs_mkdir(subdir, 0755, nested_name, nested_len);
     if (IS_ERR_OR_NULL(nested)) {
-        ret = IS_ERR(nested) ? PTR_ERR(nested) : -EINVAL;
+        ret = PTR_ERR_OR(nested, -EINVAL);
         printf("namei_smoketest: " FAIL " setup mkdir %s, errno=%d\n", nested_name, ret);
         goto cleanup_subdir;
     }
 
     file = vfs_create(nested, 0644, file_name, file_len);
     if (IS_ERR_OR_NULL(file)) {
-        ret = IS_ERR(file) ? PTR_ERR(file) : -EINVAL;
+        ret = PTR_ERR_OR(file, -EINVAL);
         printf("namei_smoketest: " FAIL " setup create %s, errno=%d\n", file_name, ret);
         goto cleanup_nested;
     }
@@ -757,7 +757,7 @@ static void tmpfs_iter_and_fetch_ex(const char *tag, struct vfs_inode *dir,
 
         struct vfs_inode *ent = vfs_get_dentry_inode(&dentry);
         if (IS_ERR_OR_NULL(ent)) {
-            lret = IS_ERR(ent) ? PTR_ERR(ent) : -EINVAL;
+            lret = PTR_ERR_OR(ent, -EINVAL);
             printf("dir_iter_mount: " FAIL " get_inode %s name=%s errno=%d\n",
                    tag, dentry.name ? dentry.name : "(null)", lret);
             ok = false;
@@ -831,7 +831,7 @@ void tmpfs_run_dir_iter_mount_smoketest(void) {
 
     mp = vfs_mkdir(root, 0755, mp_name, mp_len);
     if (IS_ERR_OR_NULL(mp)) {
-        ret = IS_ERR(mp) ? PTR_ERR(mp) : -EINVAL;
+        ret = PTR_ERR_OR(mp, -EINVAL);
         mp = NULL;
         printf("dir_iter_mount: " FAIL " setup mkdir %s errno=%d\n", mp_name, ret);
         goto out;
@@ -904,7 +904,7 @@ void tmpfs_run_dir_iter_mount_smoketest(void) {
 
     mnt_subdir = vfs_mkdir(mnt_root, 0755, subdir_name, subdir_len);
     if (IS_ERR_OR_NULL(mnt_subdir)) {
-        ret = IS_ERR(mnt_subdir) ? PTR_ERR(mnt_subdir) : -EINVAL;
+        ret = PTR_ERR_OR(mnt_subdir, -EINVAL);
         mnt_subdir = NULL;
         printf("dir_iter_mount: " FAIL " mkdir %s errno=%d\n", subdir_name, ret);
         goto cleanup_mount;
@@ -1210,7 +1210,7 @@ void tmpfs_run_lazy_unmount_smoketest(void) {
     
     mp = vfs_mkdir(root, 0755, mp_name, mp_len);
     if (IS_ERR_OR_NULL(mp)) {
-        ret = IS_ERR(mp) ? PTR_ERR(mp) : -EINVAL;
+        ret = PTR_ERR_OR(mp, -EINVAL);
         mp = NULL;
         printf("lazy_unmount: " FAIL " setup mkdir %s errno=%d\n", mp_name, ret);
         goto out;
@@ -1277,7 +1277,7 @@ cleanup_test1_mp:
 
     mp = vfs_mkdir(root, 0755, mp_name, mp_len);
     if (IS_ERR_OR_NULL(mp)) {
-        ret = IS_ERR(mp) ? PTR_ERR(mp) : -EINVAL;
+        ret = PTR_ERR_OR(mp, -EINVAL);
         mp = NULL;
         printf("lazy_unmount: " FAIL " test2 mkdir %s errno=%d\n", mp_name, ret);
         goto out;
@@ -1408,7 +1408,7 @@ cleanup_test2_mp:
 
     mp = vfs_mkdir(root, 0755, mp_name, mp_len);
     if (IS_ERR_OR_NULL(mp)) {
-        ret = IS_ERR(mp) ? PTR_ERR(mp) : -EINVAL;
+        ret = PTR_ERR_OR(mp, -EINVAL);
         mp = NULL;
         printf("lazy_unmount: " FAIL " test3 mkdir %s errno=%d\n", mp_name, ret);
         goto out;
@@ -1437,7 +1437,7 @@ cleanup_test2_mp:
     // Create a subdir and hold a reference
     subdir = vfs_mkdir(mnt_root, 0755, subdir_name, subdir_len);
     if (IS_ERR_OR_NULL(subdir)) {
-        ret = IS_ERR(subdir) ? PTR_ERR(subdir) : -EINVAL;
+        ret = PTR_ERR_OR(subdir, -EINVAL);
         subdir = NULL;
         printf("lazy_unmount: " FAIL " test3 mkdir %s errno=%d\n", subdir_name, ret);
         goto cleanup_test3_mount;
