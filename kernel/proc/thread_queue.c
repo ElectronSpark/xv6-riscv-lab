@@ -13,9 +13,9 @@
 #include "list.h"
 #include "rbtree.h"
 
-#define tq_enqueued(node)   \
-    (((node)->type == THREAD_QUEUE_TYPE_LIST && (node)->list.queue != NULL)   \
-    || ((node)->type == THREAD_QUEUE_TYPE_TREE && (node)->tree.queue != NULL))
+#define tq_enqueued(node)                                                      \
+    (((node)->type == THREAD_QUEUE_TYPE_LIST && (node)->list.queue != NULL) || \
+     ((node)->type == THREAD_QUEUE_TYPE_TREE && (node)->tree.queue != NULL))
 
 void tq_init(tq_t *q, const char *name, spinlock_t *lock) {
     list_entry_init(&q->head);
@@ -112,7 +112,8 @@ void tnode_init(tnode_t *node) {
     memset(node, 0, sizeof(tnode_t));
     __tnode_to_none(node);
     node->error_no = 0; // Initialize error_no to 0
-    node->thread = current;  // Initialize the thread pointer to the current thread
+    node->thread =
+        current; // Initialize the thread pointer to the current thread
 }
 
 int tq_size(tq_t *q) {
@@ -194,7 +195,8 @@ tnode_t *tq_first(tq_t *q) {
     }
 
     tnode_t *first_node = LIST_FIRST_NODE(&q->head, tnode_t, list.entry);
-    assert(first_node != NULL, "tq_first: queue is not empty but failed to get the first node");
+    assert(first_node != NULL,
+           "tq_first: queue is not empty but failed to get the first node");
     return first_node;
 }
 
@@ -227,7 +229,8 @@ tnode_t *tq_pop(tq_t *q) {
     if (IS_ERR_OR_NULL(dequeued_node)) {
         return dequeued_node;
     }
-    assert(tnode_get_queue(dequeued_node) == q, "Dequeued node is not in the expected queue");
+    assert(tnode_get_queue(dequeued_node) == q,
+           "Dequeued node is not in the expected queue");
     int ret = tq_remove(q, dequeued_node);
     if (ret == 0) {
         return dequeued_node; // Return the dequeued node
@@ -261,15 +264,31 @@ int tq_bulk_move(tq_t *to, tq_t *from) {
     tnode_t *proc = NULL;
     tnode_t *tmp = NULL;
     list_foreach_node_safe(&to->head, proc, tmp, list.entry) {
-        assert(tnode_get_queue(proc) == from, "Thread is not in the expected queue");
+        assert(tnode_get_queue(proc) == from,
+               "Thread is not in the expected queue");
         proc->list.queue = to; // Update the queue pointer for each thread
     }
 
     return 0; // Success
 }
 
-int tq_wait_in_state(tq_t *q, struct spinlock *lock, 
-                             uint64 *rdata, enum thread_state state) {
+/**
+ * Core list-queue wait with custom sleep/wakeup callbacks.
+ *
+ * Protocol:
+ *   1. Disable interrupts (prevent timer/signal races during enqueue)
+ *   2. Set thread state to @state
+ *   3. Enqueue waiter onto @q
+ *   4. Invoke sleep_callback (typically releases the caller's lock);
+ *      its return value is forwarded as @c status to wakeup_callback
+ *   5. scheduler_yield() — thread is descheduled
+ *   6. On resume: invoke wakeup_callback with the sleep_callback status
+ *   7. Self-detach from @q if still enqueued (async wakeup by signal)
+ *   8. Restore interrupt state
+ */
+int tq_wait_in_state_cb(tq_t *q, sleep_callback_t sleep_callback,
+                        wakeup_callback_t wakeup_callback, void *callback_data,
+                        uint64 *rdata, enum thread_state state) {
     if (q == NULL) {
         return -EINVAL;
     }
@@ -278,7 +297,10 @@ int tq_wait_in_state(tq_t *q, struct spinlock *lock,
         return -EINVAL; // Invalid state for sleeping
     }
 
-    tnode_t waiter = { 0 };
+    int intr = intr_off_save();
+    struct thread *cur = current;
+    tnode_t waiter = {0};
+    __thread_state_set(cur, state);
     tnode_init(&waiter);
     // Will be cleared when waking up a thread with thread queue APIs
     waiter.error_no = -EINTR;
@@ -286,21 +308,46 @@ int tq_wait_in_state(tq_t *q, struct spinlock *lock,
         panic("Failed to push thread to sleep queue");
     }
 
-    scheduler_sleep(lock, state);
-    if (tq_enqueued(&waiter)) {
-        // When the thread is waken up by the queue leader, the waiter is already detached from the queue.
-        // If it's waken up asynchronously(e.g by signals), we need to remove it from the queue.
-        assert(tq_remove(q, &waiter) == 0, "Failed to remove interrupted waiter from queue");
+    int cb_status = 0;
+    if (sleep_callback != NULL) {
+        cb_status = sleep_callback(callback_data);
     }
-    
+    scheduler_yield();
+    if (wakeup_callback != NULL) {
+        wakeup_callback(callback_data, cb_status);
+    }
+
+    if (tq_enqueued(&waiter)) {
+        // When the thread is waken up by the queue leader, the waiter is
+        // already detached from the queue. If it's waken up asynchronously(e.g
+        // by signals), we need to remove it from the queue.
+        assert(tq_remove(q, &waiter) == 0,
+               "Failed to remove interrupted waiter from queue");
+    }
+    intr_restore(intr);
+
     if (rdata != NULL) {
         *rdata = waiter.data;
     }
     return waiter.error_no;
 }
 
+int tq_wait_in_state(tq_t *q, struct spinlock *lock, uint64 *rdata,
+                     enum thread_state state) {
+    return tq_wait_in_state_cb(q, spin_sleep_cb, spin_wake_cb, lock, rdata,
+                               state);
+}
+
+int tq_wait_cb(tq_t *q, sleep_callback_t sleep_callback,
+               wakeup_callback_t wakeup_callback, void *callback_data,
+               uint64 *rdata) {
+    return tq_wait_in_state_cb(q, sleep_callback, wakeup_callback,
+                               callback_data, rdata, THREAD_UNINTERRUPTIBLE);
+}
+
 int tq_wait(tq_t *q, struct spinlock *lock, uint64 *rdata) {
-    return tq_wait_in_state(q, lock, rdata, THREAD_UNINTERRUPTIBLE);
+    return tq_wait_in_state_cb(q, spin_sleep_cb, spin_wake_cb, lock, rdata,
+                               THREAD_UNINTERRUPTIBLE);
 }
 
 static struct thread *__do_wakeup(tnode_t *woken, int error_no, uint64 rdata) {
@@ -312,7 +359,7 @@ static struct thread *__do_wakeup(tnode_t *woken, int error_no, uint64 rdata) {
         return ERR_PTR(-EINVAL);
     }
     woken->error_no = error_no; // Set the error number for the woken thread
-    woken->data = rdata; // Set the data for the woken thread
+    woken->data = rdata;        // Set the data for the woken thread
     struct thread *p = woken->thread;
     // Note: pi_lock is acquired internally by scheduler_wakeup
     scheduler_wakeup(p);
@@ -342,10 +389,11 @@ int tq_wakeup_all(tq_t *q, int error_no, uint64 rdata) {
     }
 
     int counter = 0;
-    for(;;) {
+    for (;;) {
         struct thread *p = __tq_wakeup_one(q, error_no, rdata);
         if (p == NULL) {
-            assert(q->counter == 0, "Queue counter is not zero when queue is empty");
+            assert(q->counter == 0,
+                   "Queue counter is not zero when queue is empty");
             break; // Queue is empty
         }
         if (IS_ERR(p)) {
@@ -403,16 +451,13 @@ static tnode_t *__ttree_find_key_min(ttree_t *q, uint64 key) {
     if (q == NULL) {
         return NULL;
     }
-    
+
     struct rb_root dummy_root = q->root;
     dummy_root.opts = &__q_root_rdown_opts;
 
-    tnode_t dummy = {
-        .tree.key = key,
-        0
-    };
+    tnode_t dummy = {.tree.key = key, 0};
 
-    struct rb_node *node = rb_find_key_rup(&dummy_root, (uint64)&dummy);   
+    struct rb_node *node = rb_find_key_rup(&dummy_root, (uint64)&dummy);
     if (node == NULL) {
         return NULL; // No node found
     }
@@ -433,9 +478,11 @@ int ttree_add(ttree_t *q, tnode_t *node) {
     }
 
     __tnode_to_tree(node); // Initialize the node as a tree node
-    node->tree.queue = q; // Set the queue pointer
-    struct rb_node *inserted_node = rb_insert_color(&q->root, &node->tree.entry);
-    assert(inserted_node == &node->tree.entry, "Failed to insert node into tree");
+    node->tree.queue = q;  // Set the queue pointer
+    struct rb_node *inserted_node =
+        rb_insert_color(&q->root, &node->tree.entry);
+    assert(inserted_node == &node->tree.entry,
+           "Failed to insert node into tree");
     q->counter++;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 
@@ -467,7 +514,8 @@ int ttree_key_min(ttree_t *q, uint64 *key) {
 }
 
 static int __ttree_do_remove(ttree_t *q, tnode_t *node) {
-    struct rb_node *removed_node = rb_delete_node_color(&q->root, &node->tree.entry);
+    struct rb_node *removed_node =
+        rb_delete_node_color(&q->root, &node->tree.entry);
     if (removed_node == NULL) {
         return -ENOENT; // Error: node not found
     }
@@ -491,8 +539,16 @@ int ttree_remove(ttree_t *q, tnode_t *node) {
     return __ttree_do_remove(q, node);
 }
 
-int ttree_wait_in_state(ttree_t *q, uint64 key, struct spinlock *lock, 
-                            uint64 *rdata, enum thread_state state) {
+/**
+ * Core tree-queue wait with custom sleep/wakeup callbacks.
+ * Same protocol as tq_wait_in_state_cb(), but inserts the waiter
+ * into the red-black tree keyed by @key.
+ */
+int ttree_wait_in_state_cb(ttree_t *q, uint64 key,
+                           sleep_callback_t sleep_callback,
+                           wakeup_callback_t wakeup_callback,
+                           void *callback_data, uint64 *rdata,
+                           enum thread_state state) {
     if (q == NULL) {
         return -EINVAL; // Error: queue is NULL
     }
@@ -501,7 +557,10 @@ int ttree_wait_in_state(ttree_t *q, uint64 key, struct spinlock *lock,
         return -EINVAL; // Invalid state for sleeping
     }
 
-    tnode_t waiter = { 0 };
+    struct thread *cur = current;
+    int intr = intr_off_save();
+    __thread_state_set(cur, state);
+    tnode_t waiter = {0};
     tnode_init(&waiter);
     // Will be cleared when waking up a thread with thread queue APIs
     waiter.error_no = -EINTR;
@@ -511,12 +570,23 @@ int ttree_wait_in_state(ttree_t *q, uint64 key, struct spinlock *lock,
         panic("Failed to push thread to sleep tree");
     }
 
-    scheduler_sleep(lock, state);
-    if (tq_enqueued(&waiter)) {
-        // When the thread is waken up by the queue leader, the waiter is already detached from the queue.
-        // If it's waken up asynchronously(e.g by signals), we need to remove it from the queue.
-        assert(ttree_remove(q, &waiter) == 0, "Failed to remove interrupted waiter from tree");
+    int cb_status = 0;
+    if (sleep_callback != NULL) {
+        cb_status = sleep_callback(callback_data);
     }
+    scheduler_yield();
+    if (wakeup_callback != NULL) {
+        wakeup_callback(callback_data, cb_status);
+    }
+
+    if (tq_enqueued(&waiter)) {
+        // When the thread is waken up by the queue leader, the waiter is
+        // already detached from the queue. If it's waken up asynchronously(e.g
+        // by signals), we need to remove it from the queue.
+        assert(ttree_remove(q, &waiter) == 0,
+               "Failed to remove interrupted waiter from tree");
+    }
+    intr_restore(intr);
 
     if (rdata != NULL) {
         *rdata = waiter.data;
@@ -524,13 +594,29 @@ int ttree_wait_in_state(ttree_t *q, uint64 key, struct spinlock *lock,
     return waiter.error_no;
 }
 
+int ttree_wait_in_state(ttree_t *q, uint64 key, struct spinlock *lock,
+                        uint64 *rdata, enum thread_state state) {
+    return ttree_wait_in_state_cb(q, key, spin_sleep_cb, spin_wake_cb, lock,
+                                  rdata, state);
+}
+
+int ttree_wait_cb(ttree_t *q, uint64 key, sleep_callback_t sleep_callback,
+                  wakeup_callback_t wakeup_callback, void *callback_data,
+                  uint64 *rdata) {
+    return ttree_wait_in_state_cb(q, key, sleep_callback, wakeup_callback,
+                                  callback_data, rdata, THREAD_UNINTERRUPTIBLE);
+}
+
 int ttree_wait(ttree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata) {
-    return ttree_wait_in_state(q, key, lock, rdata, THREAD_UNINTERRUPTIBLE);
+    return ttree_wait_in_state_cb(q, key, spin_sleep_cb, spin_wake_cb, lock,
+                                  rdata, THREAD_UNINTERRUPTIBLE);
 }
 
 // Wake up one node with a given key
-// Thread tree will always expect the waiter to detach itself from the tree when woken up.
-struct thread *ttree_wakeup_one(ttree_t *q, uint64 key, int error_no, uint64 rdata) {
+// Thread tree will always expect the waiter to detach itself from the tree when
+// woken up.
+struct thread *ttree_wakeup_one(ttree_t *q, uint64 key, int error_no,
+                                uint64 rdata) {
     if (q == NULL) {
         return ERR_PTR(-EINVAL); // Error: queue is NULL
     }
@@ -580,9 +666,11 @@ int ttree_wakeup_all(ttree_t *q, int error_no, uint64 rdata) {
 
     rb_foreach_entry_safe(&q->root, pos, n, tree.entry) {
         assert(__tnode_in_tree(q, pos), "Thread node is not in the tree");
-        // @TODO: The whole tree will be abandoned, so don't need to adjust its structure.
+        // @TODO: The whole tree will be abandoned, so don't need to adjust its
+        // structure.
         if (__ttree_do_remove(q, pos) != 0) {
-            printf("warning: Failed to remove node from tree during wakeup all\n");
+            printf(
+                "warning: Failed to remove node from tree during wakeup all\n");
         }
         __do_wakeup(pos, error_no, rdata);
         count++;

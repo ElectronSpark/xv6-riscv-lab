@@ -16,6 +16,7 @@
 
 struct vfs_inode;
 
+// @TODO: stop signal may miss
 enum thread_state {
     THREAD_UNUSED,
     THREAD_USED,

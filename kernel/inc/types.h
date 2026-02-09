@@ -83,4 +83,24 @@ typedef enum {
     (type *)((void *)__mptr - offsetof(type, member)); })
 #endif          /* container_of */
 
+/**
+ * Callback invoked before a thread yields the CPU during a wait.
+ * Typically releases the caller's lock so that a waker can make progress.
+ *
+ * The return value is opaque: its meaning is defined by each
+ * sleep/wakeup callback pair.  It is forwarded as the @c status
+ * argument to the matching wakeup_callback_t.
+ */
+typedef int (*sleep_callback_t)(void *data);
+
+/**
+ * Callback invoked after a thread resumes from a wait.
+ * Typically re-acquires the lock released by the matching sleep_callback_t.
+ *
+ * @param data    The same opaque pointer passed to sleep_callback_t.
+ * @param status  The value returned by the matching sleep_callback_t.
+ *                Its interpretation is defined by the callback pair.
+ */
+typedef void (*wakeup_callback_t)(void *data, int status);
+
 #endif      /* __KERNEL_TYPES_H */

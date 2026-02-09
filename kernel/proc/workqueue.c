@@ -241,8 +241,13 @@ static void __manager_routine(void) {
                 printf("warning: Failed to wake up idle worker\n");
             }
         }
-        scheduler_sleep(&wq->lock, THREAD_INTERRUPTIBLE);
-        // @TODO: handle signals
+        // Mark interruptible and release the lock before yielding so that
+        // workers can acquire wq->lock to dequeue work items.  Re-acquire
+        // on wakeup to re-evaluate the loop condition.
+        __thread_state_set(current, THREAD_INTERRUPTIBLE);
+        spin_unlock(&wq->lock);
+        scheduler_yield();
+        spin_lock(&wq->lock);
     }
     __wq_unlock(wq);
 }

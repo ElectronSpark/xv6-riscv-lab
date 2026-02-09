@@ -119,19 +119,27 @@ void sleep_ms(uint64 ms) {
     assert(p != NULL, "Current thread must not be NULL");
 
     struct timer_node tn = {0};
+    // Disable interrupts for the entire sleep/wake sequence to prevent
+    // the timer callback from racing with our state transitions.
+    int intr = intr_off_save();
 
+    // Set state to INTERRUPTIBLE so scheduler_yield dequeues us.
+    __thread_state_set(p, THREAD_INTERRUPTIBLE);
     uint64 before = get_jiffs();
     int ret = sched_timer_set(&tn, ms);
     if (ret != 0) {
-        printf("thread %s: ", current ? current->name : "unknown");
+        __thread_state_set(p, THREAD_RUNNING);
+        intr_restore(intr);
+        printf("thread %s: ", p ? p->name : "unknown");
         printf("Failed to set timer - ret=%d, before=%lu\n", ret, before);
         return;
     }
 
-    scheduler_sleep(NULL, THREAD_INTERRUPTIBLE);
+    scheduler_yield();
 
     // After waking up, cancel the timer to avoid unnecessary callback
     sched_timer_done(&tn);
+    intr_restore(intr);
 }
 
 void sched_timer_init(void) {

@@ -15,7 +15,7 @@
  * The caller must ensure no concurrent modifications or hold an
  * appropriate lock externally.
  */
-#define proc_list_foreach_unlocked(q, pos, tmp)   \
+#define proc_list_foreach_unlocked(q, pos, tmp)                                \
     list_foreach_node_safe(&(q)->head, pos, tmp, list.entry)
 
 /* ======================== Initialization ======================== */
@@ -219,29 +219,71 @@ int ttree_remove(ttree_t *q, tnode_t *node);
 /* ======================== Wait / Wakeup (List) ======================== */
 
 /**
- * tq_wait_in_state - sleep on a list queue in a given state
+ * tq_wait_in_state_cb - sleep on a list queue with custom lock callbacks
+ * @q: queue to wait on
+ * @sleep_callback: called before yielding to release the caller's lock;
+ *                  receives @callback_data.  Its return value is
+ *                  forwarded as @c status to the wakeup callback.
+ *                  May be NULL.
+ * @wakeup_callback: called after waking; receives @callback_data and the
+ *                   return value of @sleep_callback.  May be NULL.
+ * @callback_data: opaque pointer forwarded to both callbacks (typically
+ *                 a pointer to the lock protecting @q).
+ * @rdata: optional output for data passed by the waker (may be NULL)
+ * @state: thread sleeping state (must satisfy THREAD_IS_SLEEPING)
+ *
+ * Core wait implementation.  Disables interrupts, sets the thread state,
+ * enqueues the current thread onto @q, invokes the sleep callback, calls
+ * scheduler_yield(), then on return invokes the wakeup callback and
+ * self-removes from @q if still enqueued (e.g. async wakeup by signal).
+ *
+ * Returns the waiter's error_no: 0 on normal wakeup, -EINTR if woken
+ * asynchronously, or the error_no set by the waker.
+ */
+int tq_wait_in_state_cb(tq_t *q, sleep_callback_t sleep_callback,
+                        wakeup_callback_t wakeup_callback, void *callback_data,
+                        uint64 *rdata, enum thread_state state);
+
+/**
+ * tq_wait_in_state - sleep on a list queue in a given state (spinlock)
  * @q: queue to wait on
  * @lock: spinlock to release before sleeping (re-acquired on wakeup)
  * @rdata: optional output for data passed by the waker (may be NULL)
  * @state: thread sleeping state (must satisfy THREAD_IS_SLEEPING)
  *
- * Pushes the current thread onto @q, calls scheduler_sleep(), and on
- * return self-removes from @q if still enqueued (e.g. async wakeup by
- * signal).
+ * Convenience wrapper around tq_wait_in_state_cb() using the default
+ * spin_sleep_cb / spin_wake_cb callbacks.
  *
  * Returns the waiter's error_no: 0 on normal wakeup, -EINTR if woken
  * asynchronously, or the error_no set by the waker.
  */
-int tq_wait_in_state(tq_t *q, struct spinlock *lock, 
-                             uint64 *rdata, enum thread_state state);
+int tq_wait_in_state(tq_t *q, struct spinlock *lock, uint64 *rdata,
+                     enum thread_state state);
 
 /**
- * tq_wait - sleep on a list queue (THREAD_UNINTERRUPTIBLE)
+ * tq_wait_cb - sleep on a list queue with custom lock callbacks
+ *              (THREAD_UNINTERRUPTIBLE)
+ * @q: queue to wait on
+ * @sleep_callback: pre-yield callback (see tq_wait_in_state_cb)
+ * @wakeup_callback: post-resume callback
+ * @callback_data: opaque data for both callbacks
+ * @rdata: optional output for data passed by the waker (may be NULL)
+ *
+ * Convenience wrapper around tq_wait_in_state_cb() with
+ * THREAD_UNINTERRUPTIBLE.
+ */
+int tq_wait_cb(tq_t *q, sleep_callback_t sleep_callback,
+               wakeup_callback_t wakeup_callback, void *callback_data,
+               uint64 *rdata);
+
+/**
+ * tq_wait - sleep on a list queue (THREAD_UNINTERRUPTIBLE, spinlock)
  * @q: queue to wait on
  * @lock: spinlock to release before sleeping
  * @rdata: optional output for data passed by the waker (may be NULL)
  *
- * Convenience wrapper around tq_wait_in_state().
+ * Convenience wrapper around tq_wait_in_state_cb() using
+ * spin_sleep_cb / spin_wake_cb and THREAD_UNINTERRUPTIBLE.
  */
 int tq_wait(tq_t *q, struct spinlock *lock, uint64 *rdata);
 
@@ -277,29 +319,68 @@ int tq_wakeup_all(tq_t *q, int error_no, uint64 rdata);
 /* ======================== Wait / Wakeup (Tree) ======================== */
 
 /**
- * ttree_wait_in_state - sleep on a tree queue with a given key
+ * ttree_wait_in_state_cb - sleep on a tree queue with custom lock callbacks
  * @q: tree to wait on
  * @key: sort key for the waiter (determines wakeup priority)
- * @lock: spinlock to release before sleeping
+ * @sleep_callback: pre-yield callback (see tq_wait_in_state_cb)
+ * @wakeup_callback: post-resume callback
+ * @callback_data: opaque data for both callbacks
  * @rdata: optional output for data passed by the waker (may be NULL)
  * @state: thread sleeping state (must satisfy THREAD_IS_SLEEPING)
  *
- * Inserts the current thread into @q keyed by @key, sleeps, and on
- * return self-removes if still enqueued.
+ * Core wait implementation for tree queues.  Same interrupt-disable and
+ * callback protocol as tq_wait_in_state_cb().
  *
- * Returns the waiter's error_no (see tq_wait_in_state).
+ * Returns the waiter's error_no (see tq_wait_in_state_cb).
  */
-int ttree_wait_in_state(ttree_t *q, uint64 key, struct spinlock *lock, 
-                            uint64 *rdata, enum thread_state state);
+int ttree_wait_in_state_cb(ttree_t *q, uint64 key,
+                           sleep_callback_t sleep_callback,
+                           wakeup_callback_t wakeup_callback,
+                           void *callback_data, uint64 *rdata,
+                           enum thread_state state);
 
 /**
- * ttree_wait - sleep on a tree queue (THREAD_UNINTERRUPTIBLE)
+ * ttree_wait_in_state - sleep on a tree queue with a given key (spinlock)
+ * @q: tree to wait on
+ * @key: sort key for the waiter (determines wakeup priority)
+ * @lock: spinlock to release before sleeping (re-acquired on wakeup)
+ * @rdata: optional output for data passed by the waker (may be NULL)
+ * @state: thread sleeping state (must satisfy THREAD_IS_SLEEPING)
+ *
+ * Convenience wrapper around ttree_wait_in_state_cb() using
+ * spin_sleep_cb / spin_wake_cb.
+ *
+ * Returns the waiter's error_no (see tq_wait_in_state_cb).
+ */
+int ttree_wait_in_state(ttree_t *q, uint64 key, struct spinlock *lock,
+                        uint64 *rdata, enum thread_state state);
+
+/**
+ * ttree_wait_cb - sleep on a tree queue with custom lock callbacks
+ *                 (THREAD_UNINTERRUPTIBLE)
+ * @q: tree to wait on
+ * @key: sort key for the waiter
+ * @sleep_callback: pre-yield callback
+ * @wakeup_callback: post-resume callback
+ * @callback_data: opaque data for both callbacks
+ * @rdata: optional output for data passed by the waker (may be NULL)
+ *
+ * Convenience wrapper around ttree_wait_in_state_cb() with
+ * THREAD_UNINTERRUPTIBLE.
+ */
+int ttree_wait_cb(ttree_t *q, uint64 key, sleep_callback_t sleep_callback,
+                  wakeup_callback_t wakeup_callback, void *callback_data,
+                  uint64 *rdata);
+
+/**
+ * ttree_wait - sleep on a tree queue (THREAD_UNINTERRUPTIBLE, spinlock)
  * @q: tree to wait on
  * @key: sort key for the waiter
  * @lock: spinlock to release before sleeping
  * @rdata: optional output for data passed by the waker (may be NULL)
  *
- * Convenience wrapper around ttree_wait_in_state().
+ * Convenience wrapper around ttree_wait_in_state_cb() using
+ * spin_sleep_cb / spin_wake_cb and THREAD_UNINTERRUPTIBLE.
  */
 int ttree_wait(ttree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata);
 
@@ -318,7 +399,8 @@ int ttree_wait(ttree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata);
  *   - ERR_PTR(-ENOENT) if no node with @key exists
  *   - ERR_PTR(-EINVAL) if @q is NULL
  */
-struct thread *ttree_wakeup_one(ttree_t *q, uint64 key, int error_no, uint64 rdata);
+struct thread *ttree_wakeup_one(ttree_t *q, uint64 key, int error_no,
+                                uint64 rdata);
 
 /**
  * ttree_wakeup_key - wake all waiters with a matching key

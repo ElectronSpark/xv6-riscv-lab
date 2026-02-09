@@ -25,8 +25,8 @@
  *   that has reached the expedite threshold.  When this bit is set, new
  *   non-expediting readers and non-expediting writers voluntarily back off,
  *   giving that writer priority.  The bit may be transiently lost on unlock
- *   (see @ref rwlock_writer_release) — this is acceptable because the waiting writer
- *   will re-set it on its next CAS-failure iteration.
+ *   (see @ref rwlock_writer_release) — this is acceptable because the waiting
+ * writer will re-set it on its next CAS-failure iteration.
  * - **Bits 9-63 (reader count):** Each reader adds @c RWLOCK_STATE_READER_BIAS
  *   (1 << 9) when acquiring, allowing up to 2^55 concurrent readers.
  *
@@ -47,7 +47,8 @@
  *      without expedite refuse to acquire, yielding to the waiting writer.
  *
  * Two pre-packaged variants skip the timeout:
- * - @ref rwlock_wacquire_expedited — always expedites (low latency, aggressive).
+ * - @ref rwlock_wacquire_expedited — always expedites (low latency,
+ * aggressive).
  * - @ref rwlock_graceful_wacquire  — never expedites (fair, may starve).
  */
 
@@ -127,7 +128,13 @@
 #define RWLOCK_W_HOLDER(rw) (smp_load_acquire(&(rw)->w_holder))
 
 /** True if the *calling* CPU currently holds the write lock. */
-#define RWLOCK_W_HOLDING(rw) (cpuid() == RWLOCK_W_HOLDER(rw))
+#define RWLOCK_W_HOLDING(rw)                                                   \
+    ({                                                                         \
+        push_off();                                                            \
+        bool ret = cpuid() == RWLOCK_W_HOLDER(rw);                             \
+        pop_off();                                                             \
+        ret;                                                                   \
+    })
 
 /** True if the WRITER_WAITING hint is currently set. */
 #define RWLOCK_W_WAITING(rw) RWLOCK_STATE_W_WAITING(RWLOCK_STATE(rw))
@@ -400,6 +407,30 @@ int rwlock_wlock_irqsave(struct rwlock *rw);
 int rwlock_wlock_expedited_irqsave(struct rwlock *rw);
 int rwlock_graceful_wlock_irqsave(struct rwlock *rw);
 void rwlock_wunlock_irqrestore(struct rwlock *rw, int state);
+/** @} */
+
+/** @name Sleep / wakeup callbacks for rwlock-protected waits
+ *
+ * Two callback pairs are provided for use with tq_wait_in_state_cb() and
+ * ttree_wait_in_state_cb():
+ *
+ * | Pair        | Releases               | Re-acquires            |
+ * |:------------|:-----------------------|:-----------------------|
+ * | @c r_*_cb   | read lock (+ write if held via write→read recursion) | same set |
+ * | @c w_*_cb   | write lock             | write lock             |
+ *
+ * Status convention (opaque to the wait framework):
+ *   - @c RW_CB_STATUS_READER (bit 0): a read lock was released / must be re-acquired.
+ *   - @c RW_CB_STATUS_WRITER (bit 1): a write lock was released / must be re-acquired.
+ *
+ * All callbacks use the push_off / pop_off wrappers (@c rwlock_rlock,
+ * @c rwlock_wlock, etc.) so the interrupt-nesting depth is balanced
+ * across the sleep/wakeup boundary.
+ * @{ */
+int rwlock_r_sleep_cb(void *data);
+void rwlock_r_wake_cb(void *data, int status);
+int rwlock_w_sleep_cb(void *data);
+void rwlock_w_wake_cb(void *data, int status);
 /** @} */
 
 #endif // __KERNEL_READ_WRITE_SPIN_LOCK_H

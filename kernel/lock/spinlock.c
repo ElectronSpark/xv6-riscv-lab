@@ -136,3 +136,46 @@ void spin_unlock_irqrestore(struct spinlock *lk, int intena) {
     spin_release(lk);
     intr_restore(intena);
 }
+
+/**
+ * @brief Sleep callback for spinlock-protected waits.
+ *
+ * Releases @p data (cast to @c spinlock_t *) via spin_unlock() so that
+ * a waker holding the same lock can make progress.
+ *
+ * Status convention: returns 1 when the lock was released, 0 when
+ * @p data is NULL.  The matching spin_wake_cb() uses this value to
+ * decide whether to re-acquire.
+ *
+ * @param data  Pointer to the spinlock, or NULL (no-op).
+ * @return 1 if the lock was released, 0 if @p data is NULL.
+ */
+int spin_sleep_cb(void *data) {
+    if (data == NULL) {
+        return 0;
+    }
+    spinlock_t *lk = (spinlock_t *)data;
+    int status = spin_holding(lk);
+    if (status) {
+        spin_unlock(lk);
+    }
+    return status;
+}
+
+/**
+ * @brief Wakeup callback for spinlock-protected waits.
+ *
+ * Re-acquires @p data (cast to @c spinlock_t *) via spin_lock()
+ * when @p sleep_cb_status is non-zero (i.e. the lock was released by
+ * spin_sleep_cb()).
+ *
+ * @param data             Pointer to the spinlock, or NULL (no-op).
+ * @param sleep_cb_status  Value returned by spin_sleep_cb(); re-acquire
+ *                         is skipped when zero.
+ */
+void spin_wake_cb(void *data, int sleep_cb_status) {
+    if (data && sleep_cb_status) {
+        spinlock_t *lk = (spinlock_t *)data;
+        spin_lock(lk);
+    }
+}

@@ -10,7 +10,7 @@
  * |:-----------------------------|:--------------------------------------------|
  * | @ref rwlock_wacquire            | Adaptive — enables after timeout | | @ref
  * rwlock_wacquire_expedited  | Always expedites                             | |
- * @ref rwlock_graceful_wacquire   | Never expedites                              |
+ * @ref rwlock_graceful_wacquire   | Never expedites |
  */
 
 #include "types.h"
@@ -252,4 +252,102 @@ int rwlock_graceful_wlock_irqsave(struct rwlock *rw) {
 void rwlock_wunlock_irqrestore(struct rwlock *rw, int intena) {
     rwlock_writer_release(rw);
     intr_restore(intena);
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Sleep / wakeup callbacks for rwlock-protected thread-queue waits
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Bit returned when a read lock was released.  */
+#define RW_CB_STATUS_READER 1
+/** Bit returned when a write lock was released. */
+#define RW_CB_STATUS_WRITER 2
+
+/**
+ * @brief Sleep callback for read-lock-protected waits.
+ *
+ * Releases the read lock via @c rwlock_runlock().  If the caller also
+ * holds the write lock (write→read recursion), additionally releases it
+ * via @c rwlock_wunlock().  The returned bitmask records which locks
+ * were released so that rwlock_r_wake_cb() can re-acquire the same set.
+ *
+ * @note  Safe to call @c RWLOCK_W_HOLDING() after the read unlock
+ *        because @c tq_wait_in_state_cb() disables interrupts before
+ *        invoking the sleep callback, preventing CPU migration.
+ *
+ * @param data  Pointer to the @c struct rwlock, or NULL (no-op).
+ * @return Bitmask of @c RW_CB_STATUS_READER and/or @c RW_CB_STATUS_WRITER,
+ *         or 0 if @p data is NULL.
+ */
+int rwlock_r_sleep_cb(void *data) {
+    struct rwlock *rw = (struct rwlock *)data;
+    int status = 0;
+    if (rw) {
+        rwlock_runlock(rw);
+        status = RW_CB_STATUS_READER;
+        if (RWLOCK_W_HOLDING(rw)) {
+            // Because reader may also holding the write lock, we need to check the
+            // writer bit again after releasing the read lock.
+            rwlock_wunlock(rw);
+            status |= RW_CB_STATUS_WRITER;
+        }
+    }
+    return status;
+}
+
+/**
+ * @brief Wakeup callback for read-lock-protected waits.
+ *
+ * Re-acquires the locks released by rwlock_r_sleep_cb() in the
+ * correct order: write lock first (if held), then read lock.
+ * Uses the push_off wrappers so the interrupt-nesting depth is
+ * restored to its pre-sleep level.
+ *
+ * @param data    Pointer to the @c struct rwlock, or NULL (no-op).
+ * @param status  Bitmask returned by rwlock_r_sleep_cb().
+ */
+void rwlock_r_wake_cb(void *data, int status) {
+    struct rwlock *rw = (struct rwlock *)data;
+    if (rw) {
+        if (status & RW_CB_STATUS_WRITER) {
+            rwlock_wlock(rw);
+        }
+        if (status & RW_CB_STATUS_READER) {
+            rwlock_rlock(rw);
+        }
+    }
+}
+
+/**
+ * @brief Sleep callback for write-lock-protected waits.
+ *
+ * Releases the write lock via @c rwlock_wunlock() (writer_release +
+ * pop_off).  Always returns @c RW_CB_STATUS_WRITER.
+ *
+ * @param data  Pointer to the @c struct rwlock, or NULL (no-op).
+ * @return @c RW_CB_STATUS_WRITER, regardless of @p data (the wakeup
+ *         callback checks the bit before re-acquiring).
+ */
+int rwlock_w_sleep_cb(void *data) {
+    struct rwlock *rw = (struct rwlock *)data;
+    if (rw) {
+        rwlock_wunlock(rw);
+    }
+    return RW_CB_STATUS_WRITER;
+}
+
+/**
+ * @brief Wakeup callback for write-lock-protected waits.
+ *
+ * Re-acquires the write lock via @c rwlock_wlock() (push_off +
+ * wacquire) when @c RW_CB_STATUS_WRITER is set in @p status.
+ *
+ * @param data    Pointer to the @c struct rwlock, or NULL (no-op).
+ * @param status  Bitmask returned by rwlock_w_sleep_cb().
+ */
+void rwlock_w_wake_cb(void *data, int status) {
+    struct rwlock *rw = (struct rwlock *)data;
+    if (rw && (status & RW_CB_STATUS_WRITER)) {
+        rwlock_wlock(rw);
+    }
 }
