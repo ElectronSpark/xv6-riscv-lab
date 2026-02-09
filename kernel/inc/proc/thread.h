@@ -173,4 +173,13 @@ void procdump_bt(void);
 void procdump_bt_pid(int pid);
 struct thread *switch_to(struct thread *cur, struct thread *target);
 
+// PID lock will be used to maintain the task heirarchy and protect the
+// proc_table hash table. It should be acquired before acquiring any thread's
+// lock when modifying the proc_table or task heirarchy to maintain lock
+// ordering and avoid deadlocks.
+void pid_wlock(void);
+void pid_wunlock(void);
+void pid_rlock(void);
+void pid_runlock(void);
+
 #endif /* __KERNEL_THREAD_H */

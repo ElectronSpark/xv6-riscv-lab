@@ -7,6 +7,7 @@
 #include "riscv.h"
 #include "lock/spinlock.h"
 #include "lock/rcu.h"
+#include "lock/rwlock.h"
 #include "proc/thread.h"
 #include "proc_private.h"
 #include "defs.h"
@@ -31,7 +32,7 @@ static struct {
     list_node_t procs_list; // List of all threads, for dumping
     struct thread *initproc;
     int nextpid;
-    struct spinlock pid_lock;
+    struct rwlock pid_lock;
 } proc_table;
 
 /* Hash table callback functions for proc table */
@@ -65,7 +66,7 @@ void __proctab_init(void) {
         .cmp_node = __proctab_hash_cmp,
     };
     hlist_init(&proc_table.procs, NR_THREAD_HASH_BUCKETS, &funcs);
-    spin_init(&proc_table.pid_lock, "pid_lock");
+    rwlock_init(&proc_table.pid_lock, "pid_lock");
     list_entry_init(&proc_table.procs_list);
     proc_table.initproc = NULL;
     proc_table.nextpid = 1;
@@ -74,24 +75,26 @@ void __proctab_init(void) {
 /* Lock and unlock proc table
    Required to hold when modifying proc table */
 
-static void __proctab_lock(void) { spin_lock(&proc_table.pid_lock); }
-
-static void __proctab_unlock(void) { spin_unlock(&proc_table.pid_lock); }
+void pid_wlock(void) { rwlock_wlock(&proc_table.pid_lock); }
+void pid_wunlock(void) { rwlock_wunlock(&proc_table.pid_lock); }
+void pid_rlock(void) { rwlock_rlock(&proc_table.pid_lock); }
+void pid_runlock(void) { rwlock_runlock(&proc_table.pid_lock); }
 
 /* The following will assert that the process table is locked */
 void __proctab_set_initproc(struct thread *p) {
-    __proctab_lock();
+    pid_wlock();
     assert(p != NULL, "NULL initproc");
     assert(proc_table.initproc == NULL, "initproc already set");
-    proc_table.initproc = p;
-    __proctab_unlock();
+    // Use atomic store with release semantics
+    rcu_assign_pointer(proc_table.initproc, p);
+    pid_wunlock();
 }
 
 // get the init process.
 // This function won't check locking state
 struct thread *__proctab_get_initproc(void) {
     assert(proc_table.initproc != NULL, "initproc not set");
-    return proc_table.initproc;
+    return rcu_dereference(proc_table.initproc);
 }
 
 // get a PCB by pid.
@@ -115,11 +118,11 @@ static void __nextpid_inc(void) {
 // If thread creation fails after this, the caller must call __free_pid to
 // release it.
 int __alloc_pid(void) {
-    __proctab_lock();
+    pid_wlock();
 
     // Limit the number of allocated PIDs to NR_THREAD
     if (proc_table.allocated_cnt >= NR_THREAD) {
-        __proctab_unlock();
+        pid_wunlock();
         return -1; // No available PIDs
     }
 
@@ -130,7 +133,7 @@ int __alloc_pid(void) {
         __nextpid_inc();
         if (proc_table.nextpid == start) {
             // We've searched the entire range, no free PID
-            __proctab_unlock();
+            pid_wunlock();
             return -1;
         }
     }
@@ -138,15 +141,15 @@ int __alloc_pid(void) {
     int pid = proc_table.nextpid;
     __nextpid_inc();
     proc_table.allocated_cnt++;
-    __proctab_unlock();
+    pid_wunlock();
     return pid;
 }
 
 void __free_pid(int pid) {
     (void)pid;
-    __proctab_lock();
+    pid_wlock();
     proc_table.allocated_cnt--;
-    __proctab_unlock();
+    pid_wunlock();
 }
 
 void __proctab_proc_add_locked(struct thread *p) {
@@ -178,22 +181,22 @@ int get_pid_thread(int pid, struct thread **pp) {
 }
 
 void proctab_proc_add(struct thread *p) {
-    __proctab_lock();
+    pid_wlock();
     __proctab_proc_add_locked(p);
-    __proctab_unlock();
+    pid_wunlock();
 }
 
 void proctab_proc_remove(struct thread *p) {
     // Caller must hold p->lock
     proc_assert_holding(p);
 
-    __proctab_lock();
+    pid_wlock();
     // Use RCU-safe removal for concurrent readers
     struct thread *existing = hlist_pop_rcu(&proc_table.procs, p);
     // Remove from the global list of threads for dumping (RCU-safe).
     list_entry_del_init_rcu(&p->dmp_list_entry);
     proc_table.registered_cnt--;
-    __proctab_unlock();
+    pid_wunlock();
 
     assert(existing == NULL || existing == p,
            "thread_destroy called with a different proc");
@@ -240,18 +243,6 @@ void procdump(void) {
     rcu_read_unlock();
 }
 
-// Check if a thread is currently running on any CPU
-// This is needed because running threads have their context in CPU registers,
-// not in p->context
-static bool __proc_is_on_cpu(struct thread *p) {
-    for (int i = 0; i < NCPU; i++) {
-        if (cpus[i].proc == p) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // Dump backtraces of all blocked (sleeping) threads.
 // This is useful for debugging deadlocks.
 // Uses RCU for lock-free iteration.
@@ -272,7 +263,7 @@ void procdump_bt(void) {
         if (pstate == THREAD_INTERRUPTIBLE ||
             pstate == THREAD_UNINTERRUPTIBLE) {
             // Skip if thread is currently on a CPU (context not saved)
-            if (__proc_is_on_cpu(p)) {
+            if (smp_load_acquire(&p->sched_entity->on_cpu)) {
                 printf(
                     "\n--- Process %d [%s] %s --- (on CPU, cannot backtrace)\n",
                     pid,
@@ -285,7 +276,7 @@ void procdump_bt(void) {
                                                       : "uninterruptible",
                        name);
                 print_thread_backtrace(&p->sched_entity->context, p->kstack,
-                                     p->kstack_order);
+                                       p->kstack_order);
             }
         }
         tcb_unlock(p);
@@ -319,13 +310,16 @@ void procdump_bt_pid(int pid) {
     printf("\n--- Process %d [%s] %s ---\n", pid, thread_state_to_str(pstate),
            name);
 
-    if (__proc_is_on_cpu(p)) {
+    if (smp_load_acquire(&p->sched_entity->on_cpu)) {
         printf("Process is currently on a CPU, context not saved\n");
-    } else if (pstate == THREAD_UNUSED || pstate == THREAD_ZOMBIE) {
-        printf("Process is %s, no valid context\n", thread_state_to_str(pstate));
+    } else if (pstate == THREAD_UNUSED) {
+        // ZOMBIE threads have a valid stack and context for backtracing, but
+        // UNUSED threads do not.
+        printf("Process is %s, no valid context\n",
+               thread_state_to_str(pstate));
     } else {
         print_thread_backtrace(&p->sched_entity->context, p->kstack,
-                             p->kstack_order);
+                               p->kstack_order);
     }
 
     tcb_unlock(p);
@@ -379,23 +373,24 @@ static void __procdump_tree_recursive(struct thread *p, int depth) {
 
 // Print process tree based on parent-child relationships.
 // Shows the hierarchical structure starting from init process.
-// Uses RCU for lock-free access to initproc.
+// Because tree traversal requires locking parent and child threads, this
+// function is not fully lock-free.
 void procdump_tree(void) {
     struct thread *initproc;
     printf("Process Tree:\n");
 
-    rcu_read_lock();
+    pid_rlock();
 
     initproc = __proctab_get_initproc();
     if (initproc == NULL) {
         printf("No init process\n");
-        rcu_read_unlock();
+        pid_runlock();
         return;
     }
 
     __procdump_tree_recursive(initproc, 0);
 
-    rcu_read_unlock();
+    pid_runlock();
 }
 
 uint64 sys_dumpproc(void) {
