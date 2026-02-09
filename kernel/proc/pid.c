@@ -21,6 +21,7 @@
 #include <mm/vm.h>
 #include "vfs/fs.h"
 #include "vfs/file.h"
+#include "errno.h"
 
 static struct {
     struct {
@@ -79,6 +80,11 @@ void pid_wlock(void) { rwlock_wlock(&proc_table.pid_lock); }
 void pid_wunlock(void) { rwlock_wunlock(&proc_table.pid_lock); }
 void pid_rlock(void) { rwlock_rlock(&proc_table.pid_lock); }
 void pid_runlock(void) { rwlock_runlock(&proc_table.pid_lock); }
+bool pid_try_lock_upgrade(void) {
+    return rwlock_try_update(&proc_table.pid_lock);
+}
+bool pid_wholding(void) { return RWLOCK_W_HOLDING(&proc_table.pid_lock); }
+void pid_assert_wholding(void) { assert(pid_wholding(), "pid lock not held"); }
 
 /* The following will assert that the process table is locked */
 void __proctab_set_initproc(struct thread *p) {
@@ -104,58 +110,54 @@ static struct thread *__proctab_get_pid_tcb_locked(int pid) {
     return p;
 }
 
-// Increment nextpid with wraparound.
+// Advance nextpid past the given allocated PID, with wraparound.
 // PID 1 is reserved for init, so valid range is [2, MAXPID).
 // Must be called with proc_table lock held.
-static void __nextpid_inc(void) {
-    proc_table.nextpid++;
+static void __nextpid_inc(int pid) {
+    proc_table.nextpid = pid + 1;
     if (proc_table.nextpid >= MAXPID) {
         proc_table.nextpid = 2;
     }
 }
 
-// allocate a new pid.
-// If thread creation fails after this, the caller must call __free_pid to
-// release it.
+// Reserve a PID slot. Does not assign an actual PID number — that is
+// deferred to proctab_proc_add(). Lock-free: uses atomic_inc_unless so
+// callers need not hold pid_lock.
+// If thread creation fails after this, the caller must call __free_pid()
+// to release the reservation.
+// Returns 0 on success, -EAGAIN if no slots available.
 int __alloc_pid(void) {
-    pid_wlock();
-
-    // Limit the number of allocated PIDs to NR_THREAD
-    if (proc_table.allocated_cnt >= NR_THREAD) {
-        pid_wunlock();
-        return -1; // No available PIDs
+    // Atomically increment allocated_cnt unless it already equals NR_THREAD
+    if (!atomic_inc_unless(&proc_table.allocated_cnt, NR_THREAD)) {
+        return -EAGAIN; // No available PID slots
     }
-
-    int start = proc_table.nextpid;
-
-    // Search for an unused PID, wrapping around if necessary
-    while (__proctab_get_pid_tcb_locked(proc_table.nextpid) != NULL) {
-        __nextpid_inc();
-        if (proc_table.nextpid == start) {
-            // We've searched the entire range, no free PID
-            pid_wunlock();
-            return -1;
-        }
-    }
-
-    int pid = proc_table.nextpid;
-    __nextpid_inc();
-    proc_table.allocated_cnt++;
-    pid_wunlock();
-    return pid;
+    return 0;
 }
 
-void __free_pid(int pid) {
-    (void)pid;
-    pid_wlock();
-    proc_table.allocated_cnt--;
-    pid_wunlock();
+// Release a PID slot reservation. Lock-free.
+void __free_pid(void) {
+    assert(proc_table.allocated_cnt > 0, "__free_pid: allocated_cnt underflow");
+    atomic_sub(&proc_table.allocated_cnt, 1);
 }
 
-void __proctab_proc_add_locked(struct thread *p) {
-    assert(p != NULL, "NULL proc passed to __proctab_proc_add_locked");
+// Add a thread to the proc table, assigning it a real PID.
+// The thread must have a PID slot reserved via __alloc_pid() beforehand.
+// Caller must hold pid_wlock.
+void proctab_proc_add(struct thread *p) {
+    pid_assert_wholding();
+    assert(p != NULL, "NULL proc passed to proctab_proc_add");
     assert(LIST_ENTRY_IS_DETACHED(&p->dmp_list_entry),
-           "Process %d is already in the dump list", p->pid);
+           "Process is already in the dump list");
+
+    // Find an unused PID number
+    int start = proc_table.nextpid;
+    while (__proctab_get_pid_tcb_locked(proc_table.nextpid) != NULL) {
+        __nextpid_inc(proc_table.nextpid);
+        assert(proc_table.nextpid != start,
+               "proctab_proc_add: no free PID (should not happen)");
+    }
+    p->pid = proc_table.nextpid;
+    __nextpid_inc(p->pid);
 
     // Use RCU-safe insertion for concurrent readers
     struct thread *existing = hlist_put_rcu(&proc_table.procs, p, false);
@@ -172,7 +174,7 @@ void __proctab_proc_add_locked(struct thread *p) {
 // The returned pointer is only valid within the RCU critical section.
 int get_pid_thread(int pid, struct thread **pp) {
     if (!pp) {
-        return -1; // Invalid argument
+        return -EINVAL; // Invalid argument
     }
     struct thread dummy = {.pid = pid};
     struct thread *p = hlist_get_rcu(&proc_table.procs, &dummy);
@@ -180,23 +182,13 @@ int get_pid_thread(int pid, struct thread **pp) {
     return 0;
 }
 
-void proctab_proc_add(struct thread *p) {
-    pid_wlock();
-    __proctab_proc_add_locked(p);
-    pid_wunlock();
-}
-
 void proctab_proc_remove(struct thread *p) {
-    // Caller must hold p->lock
-    proc_assert_holding(p);
-
-    pid_wlock();
+    pid_assert_wholding();
     // Use RCU-safe removal for concurrent readers
     struct thread *existing = hlist_pop_rcu(&proc_table.procs, p);
     // Remove from the global list of threads for dumping (RCU-safe).
     list_entry_del_init_rcu(&p->dmp_list_entry);
     proc_table.registered_cnt--;
-    pid_wunlock();
 
     assert(existing == NULL || existing == p,
            "thread_destroy called with a different proc");
@@ -327,10 +319,9 @@ void procdump_bt_pid(int pid) {
     rcu_read_unlock();
 }
 
-// Helper function to recursively print thread tree
-// Locks the parent thread while traversing its children list, following
-// the lock order: parent lock before child lock (see lock order comment at top
-// of file).
+// Helper function to recursively print thread tree.
+// Caller must hold pid_rlock to protect the children list traversal.
+// Individual tcb_lock is taken only to read thread state/name atomically.
 static void __procdump_tree_recursive(struct thread *p, int depth) {
     const char *state;
     struct thread *child, *tmp;

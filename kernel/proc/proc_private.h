@@ -13,7 +13,7 @@ void __proctab_set_initproc(struct thread *p);
 struct thread *__proctab_get_initproc(void);
 struct thread *__get_pid_thread(int pid);
 int __alloc_pid(void);
-void __free_pid(int pid);
+void __free_pid(void);
 
 /**
  * @brief Get a thread by PID using RCU (lock-free)

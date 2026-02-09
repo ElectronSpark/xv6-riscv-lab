@@ -173,13 +173,18 @@ void procdump_bt(void);
 void procdump_bt_pid(int pid);
 struct thread *switch_to(struct thread *cur, struct thread *target);
 
-// PID lock will be used to maintain the task heirarchy and protect the
-// proc_table hash table. It should be acquired before acquiring any thread's
-// lock when modifying the proc_table or task heirarchy to maintain lock
-// ordering and avoid deadlocks.
+// pid_lock (rwlock) protects the parent-child hierarchy, the proc_table
+// hash table, and PID allocation/freeing. It must be acquired before any
+// thread's tcb_lock when both are needed, to maintain lock ordering.
+// Use pid_rlock/pid_runlock for read-only traversal (e.g., wait scanning,
+// procdump). Use pid_wlock/pid_wunlock for mutations (attach/detach child,
+// proc table add/remove, PID alloc/free).
 void pid_wlock(void);
 void pid_wunlock(void);
 void pid_rlock(void);
 void pid_runlock(void);
+bool pid_try_lock_upgrade(void);
+bool pid_wholding(void);
+void pid_assert_wholding(void);
 
 #endif /* __KERNEL_THREAD_H */

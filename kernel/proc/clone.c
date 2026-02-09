@@ -72,6 +72,12 @@ int thread_clone(struct clone_args *args) {
         return -EINVAL;
     }
 
+    // Reserve a PID slot (lock-free). Actual PID number assigned later
+    // by proctab_proc_add() under pid_wlock.
+    if (__alloc_pid() < 0) {
+        return -ENOMEM; // No available PID slots
+    }
+
     // Allocate thread.
     ret_ptr = thread_create(forkret_entry, 0, 0, p->kstack_order);
     if (IS_ERR_OR_NULL(ret_ptr)) {
@@ -88,7 +94,7 @@ int thread_clone(struct clone_args *args) {
         new_vm = vm_copy(p->vm);
         if (IS_ERR_OR_NULL(new_vm)) {
             thread_destroy(ret_ptr);
-            ret_ptr = (void *)new_vm;
+            ret_ptr = ERR_CAST(new_vm);
             goto out;
         }
     }
@@ -98,7 +104,7 @@ int thread_clone(struct clone_args *args) {
     struct fs_struct *fs_clone = vfs_struct_clone(p->fs, args->flags);
     if (IS_ERR_OR_NULL(fs_clone)) {
         thread_destroy(ret_ptr);
-        ret_ptr = (void *)fs_clone;
+        ret_ptr = ERR_CAST(fs_clone);
         goto out;
     }
     ret_ptr->fs = fs_clone;
@@ -109,7 +115,7 @@ int thread_clone(struct clone_args *args) {
         vfs_fdtable_clone(p->fdtable, args->flags);
     if (IS_ERR_OR_NULL(new_fdtable)) {
         thread_destroy(ret_ptr);
-        ret_ptr = (void *)new_fdtable;
+        ret_ptr = ERR_CAST(new_fdtable);
         goto out;
     }
     ret_ptr->fdtable = new_fdtable;
@@ -119,7 +125,8 @@ int thread_clone(struct clone_args *args) {
         ret_ptr->sigacts = sigacts_dup(p->sigacts, args->flags);
         if (ret_ptr->sigacts == NULL) {
             thread_destroy(ret_ptr);
-            return -ENOMEM;
+            ret_ptr = ERR_PTR(-ENOMEM);
+            goto out;
         }
     }
 
@@ -147,9 +154,7 @@ int thread_clone(struct clone_args *args) {
     // VFS cwd and rooti already cloned above
     safestrcpy(ret_ptr->name, p->name, sizeof(p->name));
 
-    tcb_lock(p);
     tcb_lock(ret_ptr);
-    attach_child(p, ret_ptr);
     THREAD_SET_USER_SPACE(ret_ptr);
     __thread_state_set(ret_ptr, THREAD_UNINTERRUPTIBLE);
 
@@ -166,8 +171,14 @@ int thread_clone(struct clone_args *args) {
         ret_ptr->vfork_parent = NULL;
     }
 
-    tcb_unlock(p);
     tcb_unlock(ret_ptr);
+
+    // Attach to parent and add to pid table before waking up the child.
+    // proctab_proc_add assigns the actual PID number.
+    pid_wlock();
+    attach_child(p, ret_ptr);
+    proctab_proc_add(ret_ptr);
+    pid_wunlock();
 
     // Wake up the new child thread
     // Note: pi_lock no longer needed - rq_lock serializes wakeups
@@ -181,8 +192,10 @@ int thread_clone(struct clone_args *args) {
 
 out:
     if (IS_ERR(ret_ptr)) {
+        __free_pid(); // Release the reserved PID slot
         return PTR_ERR(ret_ptr);
     } else if (ret_ptr == NULL) {
+        __free_pid(); // Release the reserved PID slot
         return -ENOMEM;
     }
     return ret_ptr->pid;

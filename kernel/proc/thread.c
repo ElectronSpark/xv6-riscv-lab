@@ -24,11 +24,9 @@
 
 #define NR_THREAD_HASH_BUCKETS 31
 
-// Lock order for thread:
-// 1. process table lock
-// 2. parent thread lock
-// 3. target thread lock
-// 4. children thread lock
+// Lock order:
+// 1. pid_lock (rwlock) — protects parent-child hierarchy and proc table
+// 2. individual thread lock (tcb_lock) — protects thread-local state
 
 extern char trampoline[];     // trampoline.S
 extern char sig_trampoline[]; // sig_trampoline.S
@@ -118,17 +116,16 @@ void proc_assert_holding(struct thread *p) {
 // initialize the proc table.
 void thread_init(void) { __proctab_init(); }
 
-// attach a newly forked thread to the current thread as its child.
-// This function is called by fork() to set up the parent-child relationship.
-// caller must hold the lock of its thread (the parent) and the lock of the new
-// thread (the child).
+// Attach a newly forked thread to the given parent as its child.
+// This function is called by fork/clone to set up the parent-child
+// relationship. Caller must hold pid_wlock.
 void attach_child(struct thread *parent, struct thread *child) {
     assert(parent != NULL, "attach_child: parent is NULL");
     assert(child != NULL, "attach_child: child is NULL");
     assert(child != __proctab_get_initproc(),
            "attach_child: child is init process");
-    proc_assert_holding(parent);
-    proc_assert_holding(child);
+    pid_assert_wholding(); // Must hold pid lock to modify parent-child
+                           // relationship
     assert(LIST_ENTRY_IS_DETACHED(&child->siblings),
            "attach_child: child is attached to a parent");
     assert(child->parent == NULL, "attach_child: child has a parent");
@@ -142,8 +139,8 @@ void attach_child(struct thread *parent, struct thread *child) {
 void detach_child(struct thread *parent, struct thread *child) {
     assert(parent != NULL, "detach_child: parent is NULL");
     assert(child != NULL, "detach_child: child is NULL");
-    proc_assert_holding(parent);
-    proc_assert_holding(child);
+    pid_assert_wholding(); // Must hold pid lock to modify parent-child
+                           // relationship
     assert(parent->children_count > 0, "detach_child: parent has no children");
     assert(!LIST_IS_EMPTY(&child->siblings),
            "detach_child: child is not a sibling of parent");
@@ -161,11 +158,11 @@ void detach_child(struct thread *parent, struct thread *child) {
            "detach_child: parent has no children after detaching child");
 }
 
-// allocate and initialize a new thread structure.
-// The newly created thread will be a kernel thread, which means it will not
-// have user space environment set up. and return without p->lock held. If there
-// are no free pid, or a memory allocation fails, return NULL. Signal actions
-// will not be initialized here.
+// Allocate and initialize a bare thread structure.
+// The newly created thread will be a kernel thread (no user space set up),
+// with pid set to -1. The caller is responsible for allocating a PID,
+// assigning it, and adding the thread to the proc table under pid_wlock.
+// Signal actions will not be initialized here.
 // Return ERR_PTR on failure.
 struct thread *thread_create(void *entry, uint64 arg1, uint64 arg2,
                              int kstack_order) {
@@ -176,15 +173,9 @@ struct thread *thread_create(void *entry, uint64 arg1, uint64 arg2,
         return ERR_PTR(-EINVAL); // Invalid kernel stack order
     }
 
-    int pid = __alloc_pid();
-    if (pid < 0) {
-        return ERR_PTR(-ENOMEM); // Failed to allocate PID
-    }
-
     // Allocate a kernel stack page.
     kstack = page_alloc(kstack_order, PAGE_TYPE_ANON);
     if (kstack == NULL) {
-        __free_pid(pid); // Release the allocated PID
         return ERR_PTR(-ENOMEM);
     }
     size_t kstack_size = (1UL << (PAGE_SHIFT + kstack_order));
@@ -205,11 +196,10 @@ struct thread *thread_create(void *entry, uint64 arg1, uint64 arg2,
     p->kentry = (uint64)entry;
     p->arg[0] = arg1;
     p->arg[1] = arg2;
+    p->pid = -1;
 
     sched_entity_init(p->sched_entity, p);
 
-    p->pid = pid;
-    proctab_proc_add(p);
     return p;
 }
 
@@ -228,25 +218,39 @@ static void __kthread_entry(struct context *prev) {
     exit(ret);
 }
 
-// create a new kernel thread, which runs the function entry.
-// The newly created functions are sleeping.
-// Kernel thread will be attached to the init process as its child.
+// Create a new kernel thread which runs the given entry function.
+// The newly created thread starts in UNINTERRUPTIBLE state.
+// It is attached to the init process as its child.
+// Returns the new thread's PID on success, or -1 on failure.
 int kthread_create(const char *name, struct thread **retp, void *entry,
                    uint64 arg1, uint64 arg2, int stack_order) {
+    rcu_read_lock();
+    struct thread *initproc = __proctab_get_initproc();
+    assert(initproc != NULL, "kthread_create: initproc is NULL");
+
+    // Reserve a PID slot (lock-free)
+    if (__alloc_pid() < 0) {
+        rcu_read_unlock();
+        *retp = NULL;
+        return -1; // No available PID slots
+    }
+
     struct thread *p = thread_create(entry, arg1, arg2, stack_order);
     if (IS_ERR_OR_NULL(p)) {
         *retp = NULL;
+        __free_pid(); // Release the reserved PID slot
+        rcu_read_unlock();
         return -1; // Allocation failed
     }
-    struct thread *initproc = __proctab_get_initproc();
-    assert(initproc != NULL, "kthread_create: initproc is NULL");
 
     // Clone fs_struct from initproc so kernel thread has valid cwd/root
     struct fs_struct *fs_clone = NULL;
     if (initproc->fs != NULL) {
         fs_clone = vfs_struct_clone(initproc->fs, 0);
         if (IS_ERR_OR_NULL(fs_clone)) {
+            __free_pid(); // Release the reserved PID slot
             thread_destroy(p);
+            rcu_read_unlock();
             *retp = NULL;
             return -1; // Failed to clone fs_struct
         }
@@ -257,22 +261,21 @@ int kthread_create(const char *name, struct thread **retp, void *entry,
     p->kentry = (uint64)entry;
     p->arg[0] = arg1;
     p->arg[1] = arg2;
-
-    tcb_lock(initproc);
-    tcb_lock(p);
     p->fs = fs_clone;
-    attach_child(initproc, p);
-    tcb_unlock(initproc);
-    // Newly allocated thread is a kernel thread
-    assert(!THREAD_USER_SPACE(p),
-           "kthread_create: new thread is a user thread");
     safestrcpy(p->name, name ? name : "kthread", sizeof(p->name));
     __thread_state_set(p, THREAD_UNINTERRUPTIBLE);
+
+    // proctab_proc_add assigns the actual PID number
+    pid_wlock();
+    attach_child(initproc, p);
+    proctab_proc_add(p);
+    pid_wunlock();
+
+    rcu_read_unlock();
     if (retp != NULL) {
         *retp = p;
     }
 
-    tcb_unlock(p);
     return p->pid;
 }
 
@@ -343,10 +346,10 @@ static void thread_destroy_rcu_callback(void *data) {
 
 // free a thread structure and the data hanging from it,
 // including user pages.
-// p->lock must not be held on entry.
+// Caller must make sure the thread is detached from the process table and won't
+// be scheduled anymore before calling this function.
 void thread_destroy(struct thread *p) {
     assert(p != NULL, "thread_destroy called with NULL thread");
-    tcb_lock(p);
     assert(!THREAD_AWOKEN(p), "thread_destroy called with a runnable thread");
     assert(!THREAD_SLEEPING(p), "thread_destroy called with a sleeping thread");
     assert(p->kstack_order >= 0 && p->kstack_order <= PAGE_BUDDY_MAX_ORDER,
@@ -376,13 +379,6 @@ void thread_destroy(struct thread *p) {
     // assertions.
     sigpending_empty(p, 0);
     sigpending_destroy(p);
-
-    // Remove from pid table (requires thread lock to be held)
-    proctab_proc_remove(p);
-
-    tcb_unlock(p);
-
-    __free_pid(p->pid); // Mark one PID is freed
 
     // Defer freeing of the kernel stack until after the RCU grace period.
     // This ensures all RCU readers have finished accessing the thread
@@ -419,8 +415,16 @@ static void init_entry(struct context *prev) {
 void userinit(void) {
     struct thread *p;
 
+    assert(__alloc_pid() == 0, "userinit: __alloc_pid failed");
+
     p = thread_create(init_entry, 0, 0, KERNEL_STACK_ORDER);
     assert(!IS_ERR_OR_NULL(p), "userinit: thread_create failed");
+
+    // proctab_proc_add assigns the actual PID number
+    pid_wlock();
+    proctab_proc_add(p);
+    pid_wunlock();
+
     printf("Init process kernel stack size order: %d\n", p->kstack_order);
 
     // Allocate pagetable for the thread.
