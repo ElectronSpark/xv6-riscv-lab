@@ -79,7 +79,8 @@ static void sem_run_test1(void) {
 
   struct thread *np = NULL;
   for(int i = 0; i < SEM_TEST_WAITERS; i++) {
-    if(kthread_create("sem_t1", &np, sem_test1_waiter, 0, 0, KERNEL_STACK_ORDER) < 0) {
+    np = kthread_create("sem_t1", sem_test1_waiter, 0, 0, KERNEL_STACK_ORDER);
+    if(IS_ERR_OR_NULL(np)) {
       sem_error_flag = 1;
     } else {
       wakeup(np);
@@ -272,13 +273,15 @@ static void sem_run_test4(void) {
 
   struct thread *np = NULL;
   for(int i = 0; i < SEM_T4_PRODUCERS; i++) {
-    if(kthread_create("sem_prod", &np, sem_t4_producer, 0, 0, KERNEL_STACK_ORDER) < 0)
+    np = kthread_create("sem_prod", sem_t4_producer, 0, 0, KERNEL_STACK_ORDER);
+    if(IS_ERR_OR_NULL(np))
       sem_error_flag = 1;
     else
       wakeup(np);
   }
   for(int i = 0; i < SEM_T4_CONSUMERS; i++) {
-    if(kthread_create("sem_cons", &np, sem_t4_consumer, 0, 0, KERNEL_STACK_ORDER) < 0)
+    np = kthread_create("sem_cons", sem_t4_consumer, 0, 0, KERNEL_STACK_ORDER);
+    if(IS_ERR_OR_NULL(np))
       sem_error_flag = 1;
     else
       wakeup(np);
@@ -330,7 +333,8 @@ static void semaphore_test_master(uint64 a1, uint64 a2) {
 
 void semaphore_launch_tests(void) {
   struct thread *np = NULL;
-  if(kthread_create("semaphore_test_master", &np, semaphore_test_master, 0, 0, KERNEL_STACK_ORDER) < 0) {
+  np = kthread_create("semaphore_test_master", semaphore_test_master, 0, 0, KERNEL_STACK_ORDER);
+  if(IS_ERR_OR_NULL(np)) {
     printf("[sem] cannot create test master thread\n");
   } else {
     wakeup(np);

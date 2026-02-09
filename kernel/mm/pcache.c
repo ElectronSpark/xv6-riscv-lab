@@ -593,10 +593,9 @@ static void __flusher_thread(uint64 a1, uint64 a2) {
 }
 
 static void __create_flusher_thread(void) {
-    struct thread *np = NULL;
-    int ret = kthread_create("pcache_flusher", &np, __flusher_thread, 0, 0,
-                             KERNEL_STACK_ORDER);
-    assert(ret > 0 && np != NULL, "Failed to create pcache flusher thread");
+    struct thread *np = kthread_create("pcache_flusher", __flusher_thread, 0, 0,
+                                       KERNEL_STACK_ORDER);
+    assert(!IS_ERR_OR_NULL(np), "Failed to create pcache flusher thread");
     __flusher_thread_pcb = np;
     wakeup(np);
 }

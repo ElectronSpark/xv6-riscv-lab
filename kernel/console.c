@@ -382,10 +382,9 @@ void consoledevinit(void) {
 
     // Start SBI polling thread if UART hardware not available
     if (!uart_initialized) {
-        struct thread *p = NULL;
-        int pid =
-            kthread_create("sbi_console", &p, sbi_console_poll_thread, 0, 0, 0);
-        if (pid >= 0 && p != NULL)
+        struct thread *p =
+            kthread_create("sbi_console", sbi_console_poll_thread, 0, 0, 0);
+        if (!IS_ERR_OR_NULL(p))
             wakeup(p);
     }
 }

@@ -221,9 +221,9 @@ static void __kthread_entry(struct context *prev) {
 // Create a new kernel thread which runs the given entry function.
 // The newly created thread starts in UNINTERRUPTIBLE state.
 // It is attached to the init process as its child.
-// Returns the new thread's PID on success, or -1 on failure.
-int kthread_create(const char *name, struct thread **retp, void *entry,
-                   uint64 arg1, uint64 arg2, int stack_order) {
+// Returns the thread pointer on success, or ERR_PTR(-errno) on failure.
+struct thread *kthread_create(const char *name, void *entry, uint64 arg1,
+                              uint64 arg2, int stack_order) {
     rcu_read_lock();
     struct thread *initproc = __proctab_get_initproc();
     assert(initproc != NULL, "kthread_create: initproc is NULL");
@@ -231,16 +231,14 @@ int kthread_create(const char *name, struct thread **retp, void *entry,
     // Reserve a PID slot (lock-free)
     if (__alloc_pid() < 0) {
         rcu_read_unlock();
-        *retp = NULL;
-        return -1; // No available PID slots
+        return ERR_PTR(-EAGAIN);
     }
 
     struct thread *p = thread_create(entry, arg1, arg2, stack_order);
     if (IS_ERR_OR_NULL(p)) {
-        *retp = NULL;
         __free_pid(); // Release the reserved PID slot
         rcu_read_unlock();
-        return -1; // Allocation failed
+        return IS_ERR(p) ? p : ERR_PTR(-ENOMEM);
     }
 
     // Clone fs_struct from initproc so kernel thread has valid cwd/root
@@ -251,8 +249,7 @@ int kthread_create(const char *name, struct thread **retp, void *entry,
             __free_pid(); // Release the reserved PID slot
             thread_destroy(p);
             rcu_read_unlock();
-            *retp = NULL;
-            return -1; // Failed to clone fs_struct
+            return IS_ERR(fs_clone) ? ERR_CAST(fs_clone) : ERR_PTR(-ENOMEM);
         }
     }
 
@@ -272,11 +269,8 @@ int kthread_create(const char *name, struct thread **retp, void *entry,
     pid_wunlock();
 
     rcu_read_unlock();
-    if (retp != NULL) {
-        *retp = p;
-    }
 
-    return p->pid;
+    return p;
 }
 
 // Initialize the current context as an idle process.

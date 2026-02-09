@@ -378,16 +378,15 @@ static int __tmpfs_smoketest_kthread(uint64 arg1, uint64 arg2) {
 
 // Start the tmpfs smoketest kernel thread
 void tmpfs_smoketest_start(void) {
-    struct thread *p = NULL;
-    int pid = kthread_create("tmpfs_test", &p, __tmpfs_smoketest_kthread, 
+    struct thread *p = kthread_create("tmpfs_test", __tmpfs_smoketest_kthread, 
                                   0, 0, KERNEL_STACK_ORDER);
-    if (pid < 0 || p == NULL) {
+    if (IS_ERR_OR_NULL(p)) {
         printf("tmpfs_smoketest: failed to create kernel thread\n");
         return;
     }
     
     wakeup(p);
-    printf("tmpfs_smoketest: kernel thread started (pid=%d)\n", pid);
+    printf("tmpfs_smoketest: kernel thread started (pid=%d)\n", p->pid);
 }
 
 /*

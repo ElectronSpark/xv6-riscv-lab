@@ -989,8 +989,8 @@ void rcu_kthread_start_cpu(int cpu) {
     struct thread *p = NULL;
     const char *name = (cpu < 8) ? rcu_names[cpu] : "rcu_cb";
     
-    int pid = kthread_create(name, &p, rcu_cb_kthread, cpu, 0, KERNEL_STACK_ORDER);
-    if (pid < 0 || p == NULL) {
+    p = kthread_create(name, rcu_cb_kthread, cpu, 0, KERNEL_STACK_ORDER);
+    if (IS_ERR_OR_NULL(p)) {
         printf("Failed to create RCU kthread for CPU %d\n", cpu);
         return;
     }

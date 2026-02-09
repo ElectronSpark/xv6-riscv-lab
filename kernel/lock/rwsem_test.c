@@ -257,7 +257,8 @@ static void run_test1(void) {
   t1_release_readers = 0;
   active_readers = 0; max_active_readers = 0; error_flag = 0;
   for(int i=0;i<t1_target_readers;i++) {
-    if(kthread_create("run_test1", &np, t1_reader, 0, 0, KERNEL_STACK_ORDER) < 0)
+    np = kthread_create("run_test1", t1_reader, 0, 0, KERNEL_STACK_ORDER);
+    if(IS_ERR_OR_NULL(np))
       error_flag = 1;
     else
       wakeup(np);
@@ -284,7 +285,8 @@ static void run_test2(void) {
   t2_writer_acquired = 0;
   active_readers = 0; active_writers = 0; error_flag = 0;
   for(int i=0;i<t2_target_readers;i++) {
-    if(kthread_create("run_test2", &np, t2_reader, 0, 0, KERNEL_STACK_ORDER) < 0)
+    np = kthread_create("run_test2", t2_reader, 0, 0, KERNEL_STACK_ORDER);
+    if(IS_ERR_OR_NULL(np))
       error_flag = 1;
     else
       wakeup(np);
@@ -292,7 +294,8 @@ static void run_test2(void) {
   // Wait until all readers finished
   if(wait_for(&t2_done_readers, t2_target_readers, 80000) != 0)
     error_flag = 1;
-  if(kthread_create("run_test2", &np, t2_writer, 0, 0, KERNEL_STACK_ORDER) < 0)
+  np = kthread_create("run_test2", t2_writer, 0, 0, KERNEL_STACK_ORDER);
+  if(IS_ERR_OR_NULL(np))
     error_flag = 1;
   else
     wakeup(np);
@@ -307,11 +310,13 @@ static void run_test3(void) {
   printf("[rwsem][T3] mutual exclusion for writers... ");
   struct thread *np = NULL;
   t3_done_writers = 0; active_writers = 0; error_flag = 0;
-  if(kthread_create("run_test3", &np, t3_writer, 0, 0, KERNEL_STACK_ORDER) < 0)
+  np = kthread_create("run_test3", t3_writer, 0, 0, KERNEL_STACK_ORDER);
+  if(IS_ERR_OR_NULL(np))
     error_flag = 1;
   else
     wakeup(np);
-  if(kthread_create("run_test3", &np, t3_writer, 0, 0, KERNEL_STACK_ORDER) < 0)
+  np = kthread_create("run_test3", t3_writer, 0, 0, KERNEL_STACK_ORDER);
+  if(IS_ERR_OR_NULL(np))
     error_flag = 1;
   else
     wakeup(np);
@@ -336,12 +341,12 @@ static void run_test4(void) {
   // Acquire barrier sleeplock so spawned threads block when they try to acquire
   if(mutex_lock(&t4_start_lock) != 0) error_flag = 1;
   for(int i=0;i<T4_WRITER_THREADS;i++)
-    if(kthread_create("run_test4", &np, t4_writer, 0, 0, KERNEL_STACK_ORDER) < 0)
+    if(IS_ERR_OR_NULL(np = kthread_create("run_test4", t4_writer, 0, 0, KERNEL_STACK_ORDER)))
       error_flag = 1;
     else
       wakeup(np);
   for(int i=0;i<T4_READER_THREADS;i++)
-    if(kthread_create("run_test4", &np, t4_reader, 0, 0, KERNEL_STACK_ORDER) < 0)
+    if(IS_ERR_OR_NULL(np = kthread_create("run_test4", t4_reader, 0, 0, KERNEL_STACK_ORDER)))
       error_flag = 1;
     else
       wakeup(np);
@@ -372,7 +377,8 @@ static void rwsem_test_master(uint64 a1, uint64 a2) {
 
 void rwsem_launch_tests(void) {
   struct thread *np = NULL;
-  if(kthread_create("rwsem_test_master", &np, rwsem_test_master, 0, 0, KERNEL_STACK_ORDER) < 0) {
+  np = kthread_create("rwsem_test_master", rwsem_test_master, 0, 0, KERNEL_STACK_ORDER);
+  if(IS_ERR_OR_NULL(np)) {
     printf("[rwsem] cannot create test master thread\n");
   } else {
     wakeup(np);

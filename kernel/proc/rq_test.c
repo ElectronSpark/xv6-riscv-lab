@@ -498,9 +498,9 @@ static void test_priority_ordered_activation(void) {
     cpumask_t cpu_mask = (1ULL << test_cpu);
     
     for (int i = 0; i < PRIORITY_TEST_COUNT; i++) {
-        int ret = kthread_create("prio_test", &test_procs[i], 
+        test_procs[i] = kthread_create("prio_test", 
                                      priority_test_proc_entry, i, 0, 0);
-        assert(ret >= 0, "rq_test: kthread_create failed for process %d", i);
+        assert(!IS_ERR_OR_NULL(test_procs[i]), "rq_test: kthread_create failed for process %d", i);
         
         // Set the priority and pin to current CPU
         // sched_setattr handles its own locking internally

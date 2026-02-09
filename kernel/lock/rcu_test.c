@@ -302,7 +302,7 @@ static void test_concurrent_readers(void) {
     // Create multiple reader threads
     struct thread *readers[RCU_TEST_NUM_READERS];
     for (int i = 0; i < RCU_TEST_NUM_READERS; i++) {
-        kthread_create("rcu_reader", &readers[i],
+        readers[i] = kthread_create("rcu_reader",
                           (void *)reader_thread, i, RCU_TEST_ITERATIONS, KERNEL_STACK_ORDER);
         wakeup(readers[i]);
     }
@@ -701,7 +701,7 @@ static void test_list_rcu_concurrent_rw(void) {
     // Start reader threads
     struct thread *readers[2];
     for (int i = 0; i < 2; i++) {
-        kthread_create("list_reader", &readers[i],
+        readers[i] = kthread_create("list_reader",
                           (void *)list_stress_reader, 500, 0, KERNEL_STACK_ORDER);
         wakeup(readers[i]);
     }
@@ -887,7 +887,7 @@ static void test_stress_list_rcu(void) {
     // Start reader threads
     struct thread *readers[STRESS_READERS];
     for (int i = 0; i < STRESS_READERS; i++) {
-        kthread_create("stress_reader", &readers[i],
+        readers[i] = kthread_create("stress_reader",
                           (void *)stress_list_reader, i, 0, KERNEL_STACK_ORDER);
         wakeup(readers[i]);
     }
@@ -1056,7 +1056,7 @@ static void test_stress_mixed_workload(void) {
     // Start reader threads (each does 2000 reads = 8000 total reads)
     struct thread *readers[4];
     for (int i = 0; i < 4; i++) {
-        kthread_create("mixed_reader", &readers[i],
+        readers[i] = kthread_create("mixed_reader",
                           (void *)mixed_reader_thread, i, 2000, KERNEL_STACK_ORDER);
         wakeup(readers[i]);
     }

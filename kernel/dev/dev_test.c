@@ -147,10 +147,10 @@ static void test_concurrent_readers(void) {
     // Start reader threads
     struct thread *readers[NUM_READER_THREADS];
     for (int i = 0; i < NUM_READER_THREADS; i++) {
-        ret = kthread_create("dev_reader", &readers[i], 
+        readers[i] = kthread_create("dev_reader", 
                                   (int (*)(uint64, uint64))reader_thread_fn, 
                                   i, TEST_ITERATIONS, KERNEL_STACK_ORDER);
-        assert(ret > 0, "Failed to create reader thread");
+        assert(!IS_ERR_OR_NULL(readers[i]), "Failed to create reader thread");
         wakeup(readers[i]);
     }
     
@@ -316,20 +316,20 @@ static void test_concurrent_readers_writers(void) {
     // Start reader threads
     struct thread *readers[NUM_READER_THREADS];
     for (int i = 0; i < NUM_READER_THREADS; i++) {
-        int ret = kthread_create("dev_rw_reader", &readers[i], 
+        readers[i] = kthread_create("dev_rw_reader", 
                                       (int (*)(uint64, uint64))rw_reader_thread_fn, 
                                       i, TEST_ITERATIONS * 2, KERNEL_STACK_ORDER);
-        assert(ret > 0, "Failed to create reader thread");
+        assert(!IS_ERR_OR_NULL(readers[i]), "Failed to create reader thread");
         wakeup(readers[i]);
     }
     
     // Start writer threads
     struct thread *writers[NUM_WRITER_THREADS];
     for (int i = 0; i < NUM_WRITER_THREADS; i++) {
-        int ret = kthread_create("dev_rw_writer", &writers[i], 
+        writers[i] = kthread_create("dev_rw_writer", 
                                       (int (*)(uint64, uint64))rw_writer_thread_fn, 
                                       i, TEST_ITERATIONS / 2, KERNEL_STACK_ORDER);
-        assert(ret > 0, "Failed to create writer thread");
+        assert(!IS_ERR_OR_NULL(writers[i]), "Failed to create writer thread");
         wakeup(writers[i]);
     }
     

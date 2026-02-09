@@ -192,12 +192,10 @@ static void __worker_routine(void) {
 
 // This function will only try to acquire the work thread lock
 static int __create_worker(struct workqueue *wq) {
-    struct thread *worker = NULL;
-    int ret = kthread_create("worker_thread", &worker, __worker_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
-    if (ret <= 0) {
-        return ret;
+    struct thread *worker = kthread_create("worker_thread", __worker_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
+    if (IS_ERR_OR_NULL(worker)) {
+        return IS_ERR(worker) ? PTR_ERR(worker) : -ENOMEM;
     }
-    assert(worker != NULL, "Failed to create worker thread");
     tcb_lock(worker);
     worker->wq = wq;
     wq->nr_workers++;
@@ -257,10 +255,9 @@ static void __manager_routine(void) {
 // during which the work queue lock is being hold.
 // Thus, it will only try to hold the manager thread lock
 static int __create_manager(struct workqueue *wq) {
-    struct thread *manager = NULL;
-    int ret = kthread_create("manager_thread", &manager, __manager_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
-    if (ret <= 0) {
-        return ret;
+    struct thread *manager = kthread_create("manager_thread", __manager_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
+    if (IS_ERR_OR_NULL(manager)) {
+        return IS_ERR(manager) ? PTR_ERR(manager) : -ENOMEM;
     }
     assert(manager != NULL, "Failed to create manager thread");
     tcb_lock(manager);
