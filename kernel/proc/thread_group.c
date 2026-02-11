@@ -132,6 +132,8 @@ int thread_group_alloc(struct thread *leader) {
 
     // Link leader into the thread group
     leader->thread_group = tg;
+    leader->tgid = leader->pid;
+    tg->tgid = leader->pid;
     list_entry_init(&leader->tg_entry);
     list_entry_push(&tg->thread_list, &leader->tg_entry);
 
@@ -145,6 +147,7 @@ void thread_group_add(struct thread_group *tg, struct thread *child) {
     pid_assert_wholding();
 
     child->thread_group = tg;
+    child->tgid = tg->tgid;
     list_entry_init(&child->tg_entry);
 
     list_entry_push(&tg->thread_list, &child->tg_entry);
@@ -426,11 +429,7 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
             if (THREAD_STOPPED(t)) {
                 scheduler_wakeup_stopped(t);
             } else {
-                tcb_lock(t);
-                if (__thread_state_get(t) == THREAD_INTERRUPTIBLE) {
-                    __thread_state_set(t, THREAD_RUNNING);
-                }
-                tcb_unlock(t);
+                scheduler_wakeup_interruptible(t);
             }
         }
     } else {
@@ -443,30 +442,22 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
             if (is_term && THREAD_STOPPED(target)) {
                 // Terminal signal → wake stopped thread so it can exit
                 scheduler_wakeup_stopped(target);
-            } else {
-                tcb_lock(target);
-                enum thread_state st = __thread_state_get(target);
-                if (st == THREAD_INTERRUPTIBLE) {
-                    __thread_state_set(target, THREAD_RUNNING);
-                } else if (is_stop && st == THREAD_RUNNING) {
-                    // Stop signal to running thread: send IPI for fast
-                    // processing
-                    tcb_unlock(target);
-                    int target_cpu =
-                        smp_load_acquire(&target->sched_entity->cpu_id);
-                    if (target_cpu != cpuid()) {
-                        ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
-                    } else {
-                        SET_NEEDS_RESCHED();
-                    }
-                    goto out;
+            } else if (THREAD_INTERRUPTIBLE(target)) {
+                scheduler_wakeup_interruptible(target);
+            } else if (is_stop && THREAD_RUNNING(target)) {
+                // Stop signal to running thread: send IPI for fast
+                // processing
+                int target_cpu =
+                    smp_load_acquire(&target->sched_entity->cpu_id);
+                if (target_cpu != cpuid()) {
+                    ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
+                } else {
+                    SET_NEEDS_RESCHED();
                 }
-                tcb_unlock(target);
             }
         }
     }
 
-out:
     pid_runlock();
 
     return 0;
@@ -501,6 +492,22 @@ struct ksiginfo *tg_dequeue_signal(struct thread_group *tg, int signo) {
     }
 
     return ksi;
+}
+
+// Flush all queued entries for a given signal from shared_pending.
+// Caller must hold sigacts lock (which protects shared_pending queues).
+void tg_sigpending_empty(struct thread_group *tg, int signo) {
+    if (tg == NULL || SIGBAD(signo))
+        return;
+
+    sigpending_t *sq = &tg->shared_pending.sig_pending[signo - 1];
+    ksiginfo_t *ksi = NULL;
+    ksiginfo_t *tmp = NULL;
+    list_foreach_node_safe(&sq->queue, ksi, tmp, list_entry) {
+        list_entry_detach(&ksi->list_entry);
+        ksiginfo_free(ksi);
+    }
+    sigdelset(&tg->shared_pending.sig_pending_mask, signo);
 }
 
 // Caller must hold pid_rlock or pid_wlock.

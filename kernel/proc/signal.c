@@ -765,6 +765,10 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
             sigacts_unlock(sa);
             return -1; // Failed to clear pending signals
         }
+        // Also clear from thread group's shared_pending
+        if (p->thread_group != NULL) {
+            tg_sigpending_empty(p->thread_group, signum);
+        }
     }
 
     sigacts_unlock(sa);
@@ -1169,6 +1173,13 @@ void handle_signal(void) {
             break;
         }
     }
+
+    // Recalculate SIGPENDING after delivering/consuming all signals.
+    // recalc_sigpending_tsk (used inside the loop) can only SET the flag;
+    // we need recalc_sigpending (which checks shared_pending too) to CLEAR
+    // it when no unmasked signals remain.
+    recalc_sigpending();
+
     if (THREAD_KILLED(p)) {
         exit(-1);
     }

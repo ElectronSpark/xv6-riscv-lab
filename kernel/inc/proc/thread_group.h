@@ -178,6 +178,18 @@ bool tg_signal_pending(struct thread_group *tg, struct thread *p);
 struct ksiginfo *tg_dequeue_signal(struct thread_group *tg, int signo);
 
 /**
+ * @brief Flush all queued entries for a signal from shared_pending.
+ *
+ * Removes the pending bit and frees all queued ksiginfo entries for the
+ * given signal number. Called when sigaction() changes the handler.
+ * Caller must hold sigacts lock.
+ *
+ * @param tg     The thread group
+ * @param signo  The signal number to flush
+ */
+void tg_sigpending_empty(struct thread_group *tg, int signo);
+
+/**
  * @brief Recalculate SIGPENDING flag for all threads in the group.
  *
  * Called after changes to shared_pending or signal masks.

@@ -68,7 +68,7 @@ int thread_clone(struct clone_args *args) {
         }
         args->flags |=  CLONE_PARENT;
     }
-    
+
     // When CLONE_VM is specified without CLONE_VFORK, stack and entry must be
     // provided. CLONE_VFORK is special: child shares parent's stack temporarily
     // and must exec/exit.
@@ -214,11 +214,11 @@ int thread_clone(struct clone_args *args) {
         // For CLONE_THREAD, the child does not send a signal to the parent
         // on exit (Linux behavior). The exit signal is 0.
         ret_ptr->signal.esignal = 0;
+        ret_ptr->tgid = p->tgid;
     } else {
         // Not CLONE_THREAD: create a new thread group for the child.
         int tg_ret = thread_group_alloc(ret_ptr);
         assert(tg_ret == 0, "clone: thread_group_alloc failed");
-        ret_ptr->thread_group->tgid = ret_ptr->pid;
     }
     pid_wunlock();
 
