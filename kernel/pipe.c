@@ -83,7 +83,7 @@ int pipewrite(struct pipe *pi, uint64 addr, int n) {
             if (buf_len == 0) {
                 goto out;
             }
-            if (vm_copyin(pr->vm, buf, addr + i, buf_len) == -1) {
+            if (vm_copyin(pr->vm, buf, addr + i, buf_len) < 0) {
                 goto out;
             }
         }
@@ -198,7 +198,7 @@ int piperead(struct pipe *pi, uint64 addr, int n) {
 
         // Copy to user space outside the lock
         size_t copy_size = min(buf_len - buf_pos, (size_t)(n - i));
-        if (vm_copyout(pr->vm, addr + i, &buf[buf_pos], copy_size) == -1) {
+        if (vm_copyout(pr->vm, addr + i, &buf[buf_pos], copy_size) < 0) {
             goto out;
         }
         i += copy_size;

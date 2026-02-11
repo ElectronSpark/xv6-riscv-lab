@@ -136,7 +136,7 @@ int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
             batch_size = 64;
 
         for (i = 0; i < batch_size; i++) {
-            if (either_copyin(&kbuf[i], user_src, src + written + i, 1) == -1)
+            if (either_copyin(&kbuf[i], user_src, src + written + i, 1) < 0)
                 return written + i;
         }
 
@@ -186,8 +186,8 @@ int consoleread(cdev_t *cdev, bool user_dst, void *buffer, size_t n) {
                     spin_unlock(&cons.lock);
                     // Copy any pending data before returning
                     if (batch_count > 0) {
-                        if (either_copyout(user_dst, dst, kbuf, batch_count) ==
-                            -1)
+                        if (either_copyout(user_dst, dst, kbuf, batch_count) <
+                            0)
                             return target - n; // return bytes read so far
                         dst += batch_count;
                         n -= batch_count;
@@ -224,7 +224,7 @@ int consoleread(cdev_t *cdev, bool user_dst, void *buffer, size_t n) {
 
         // Copy batch to userspace (without holding spinlock)
         if (batch_count > 0) {
-            if (either_copyout(user_dst, dst, kbuf, batch_count) == -1) {
+            if (either_copyout(user_dst, dst, kbuf, batch_count) < 0) {
                 // Copy failed, return what we've read so far
                 return target - n - batch_count;
             }
