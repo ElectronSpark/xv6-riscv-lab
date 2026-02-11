@@ -16,7 +16,7 @@ struct work_struct {
 };
 
 struct workqueue {
-    struct spinlock lock;
+    spinlock_t lock;
     tq_t idle_queue;
     list_node_t worker_list;
     struct thread *manager;

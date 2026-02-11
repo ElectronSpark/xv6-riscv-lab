@@ -89,6 +89,8 @@ int sigreturn(void);
 
 int kill(int, int);
 int kill_thread(struct thread *p, int signum);
+int tgkill(int tgid, int tid, int signum);
+int tkill(int tid, int signum);
 int killed(struct thread*);
 
 #define SIG_BLOCK   1

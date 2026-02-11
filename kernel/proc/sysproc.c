@@ -6,10 +6,12 @@
 #include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "proc/thread.h"
+#include "proc/thread_group.h"
 #include "proc/sched.h"
 #include "timer/timer.h"
 #include <mm/vm.h>
 #include "clone_flags.h"
+#include "signal.h"
 #include "errno.h"
 
 uint64 sys_exit(void) {
@@ -19,7 +21,32 @@ uint64 sys_exit(void) {
     return 0; // not reached
 }
 
-uint64 sys_getpid(void) { return current->pid; }
+uint64 sys_getpid(void) { return thread_tgid(current); }
+
+// gettid() returns the caller's thread ID (TID), which is the kernel-level
+// unique identifier. In a single-threaded process, TID == TGID == PID.
+// In a multi-threaded process (CLONE_THREAD), TID != TGID.
+uint64 sys_gettid(void) { return current->pid; }
+
+// exit_group() terminates all threads in the calling thread's thread group.
+// This is what C library exit() and _exit() should call.
+uint64 sys_exit_group(void) {
+    int n;
+    argint(0, &n);
+    thread_group_exit(current, n);
+    return 0; // not reached
+}
+
+// tgkill() sends a signal to a specific thread within a thread group.
+// This provides race-free signal delivery by verifying the thread
+// still belongs to the specified thread group.
+uint64 sys_tgkill(void) {
+    int tgid, tid, sig;
+    argint(0, &tgid);
+    argint(1, &tid);
+    argint(2, &sig);
+    return tgkill(tgid, tid, sig);
+}
 
 uint64 sys_clone(void) {
     uint64 uargs;

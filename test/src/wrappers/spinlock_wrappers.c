@@ -23,7 +23,7 @@ void wrapper_tracking_disable_spinlock(void)
     g_spinlock_tracking = NULL;
 }
 
-void __wrap_spin_init(struct spinlock *lock, char *name)
+void __wrap_spin_init(spinlock_t *lock, char *name)
 {
     if (g_spinlock_tracking) {
         g_spinlock_tracking->spin_init_count++;
@@ -39,7 +39,7 @@ void __wrap_spin_init(struct spinlock *lock, char *name)
     lock->cpu = NULL;
 }
 
-void __wrap_spin_lock(struct spinlock *lock)
+void __wrap_spin_lock(spinlock_t *lock)
 {
     if (g_spinlock_tracking) {
         g_spinlock_tracking->spin_lock_count++;
@@ -55,7 +55,7 @@ void __wrap_spin_lock(struct spinlock *lock)
     __atomic_store_n(&lock->locked, 1, __ATOMIC_SEQ_CST);
 }
 
-void __wrap_spin_unlock(struct spinlock *lock)
+void __wrap_spin_unlock(spinlock_t *lock)
 {
     if (g_spinlock_tracking) {
         g_spinlock_tracking->spin_unlock_count++;
@@ -71,7 +71,7 @@ void __wrap_spin_unlock(struct spinlock *lock)
     }
 }
 
-int __wrap_spin_holding(struct spinlock *lock)
+int __wrap_spin_holding(spinlock_t *lock)
 {
     if (lock == NULL) {
         return 0;

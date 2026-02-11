@@ -4,7 +4,7 @@
 #include "types.h"
 
 // Forward declarations to avoid pulling in all headers
-struct spinlock;
+typedef struct spinlock spinlock_t;
 struct tq;
 struct proc;
 struct cpu_local;
@@ -12,12 +12,12 @@ struct cpu_local;
 // Tracking structure for spinlock operations
 typedef struct {
     int spin_init_count;
-    struct spinlock *last_spin_init;
+    spinlock_t *last_spin_init;
     const char *last_spin_name;
     int spin_lock_count;
-    struct spinlock *last_spin_lock;
+    spinlock_t *last_spin_lock;
     int spin_unlock_count;
-    struct spinlock *last_spin_unlock;
+    spinlock_t *last_spin_unlock;
 } spinlock_tracking_t;
 
 // Tracking structure for proc/cpu operations
@@ -32,11 +32,11 @@ typedef struct {
     int queue_init_count;
     struct tq *last_queue_init;
     const char *last_queue_name;
-    struct spinlock *last_queue_lock;
+    spinlock_t *last_queue_lock;
     
     int queue_wait_count;
     struct tq *last_queue_wait;
-    struct spinlock *last_wait_lock;
+    spinlock_t *last_wait_lock;
     
     int queue_wakeup_count;
     struct tq *last_queue_wakeup;
@@ -54,7 +54,7 @@ typedef struct {
     
     // For custom behavior
     void *user_data;
-    int (*wait_callback)(struct tq *q, struct spinlock *lock, uint64 *rdata, void *user_data);
+    int (*wait_callback)(struct tq *q, spinlock_t *lock, uint64 *rdata, void *user_data);
     struct thread *next_wakeup;
 } tq_tracking_t;
 

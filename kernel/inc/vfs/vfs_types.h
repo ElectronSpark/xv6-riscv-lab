@@ -98,7 +98,7 @@ struct vfs_superblock {
     list_node_t orphan_list; // List of orphan inodes
     
     // Filesystem statistics
-    struct spinlock spinlock; // protects the counters below 
+    spinlock_t spinlock; // protects the counters below 
     size_t block_size; // Filesystem block size
     // May be 0 if the filesystem does not track total/used blocks
     // (e.g., tmpfs)

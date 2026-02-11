@@ -73,7 +73,7 @@ static inline void WriteReg(int reg, uint32 v) {
 }
 
 // TX/RX buffers
-struct spinlock uart_tx_lock = SPINLOCK_INITIALIZED("uart_tx_lock");
+spinlock_t uart_tx_lock = SPINLOCK_INITIALIZED("uart_tx_lock");
 #define UART_TX_BUF_SIZE 128
 char uart_tx_buf[UART_TX_BUF_SIZE];
 uint64 uart_tx_w;
@@ -81,7 +81,7 @@ uint64 uart_tx_r;
 
 static uint32 uart_ier = 0;  // Current IER value for dynamic TX interrupt
 
-struct spinlock uart_rx_lock = SPINLOCK_INITIALIZED("uart_rx_lock");
+spinlock_t uart_rx_lock = SPINLOCK_INITIALIZED("uart_rx_lock");
 #define UART_RX_BUF_SIZE 128
 char uart_rx_buf[UART_RX_BUF_SIZE];
 uint64 uart_rx_w;

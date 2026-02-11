@@ -1,4 +1,5 @@
 #include "proc/thread.h"
+#include "proc/thread_group.h"
 #include "clone_flags.h"
 #include "defs.h"
 #include "hlist.h"
@@ -56,6 +57,12 @@ int thread_clone(struct clone_args *args) {
 
     if (!THREAD_USER_SPACE(p)) {
         return -EINVAL;
+    }
+
+    // CLONE_THREAD implies CLONE_VM and CLONE_SIGHAND (POSIX requirement).
+    // If CLONE_THREAD is set, enforce these.
+    if (args->flags & CLONE_THREAD) {
+        args->flags |= CLONE_VM | CLONE_SIGHAND;
     }
 
     // When CLONE_VM is specified without CLONE_VFORK, stack and entry must be
@@ -175,9 +182,32 @@ int thread_clone(struct clone_args *args) {
 
     // Attach to parent and add to pid table before waking up the child.
     // proctab_proc_add assigns the actual PID number.
+    // thread_group_add requires pid_wlock, so handle CLONE_THREAD here too.
     pid_wlock();
-    attach_child(p, ret_ptr);
+    if (!(args->flags & CLONE_THREAD)) {
+        // Not a CLONE_THREAD: child is a new process with its own parent-child
+        // relationship. Attach as a child of the calling thread.
+        attach_child(p, ret_ptr);
+    }
     proctab_proc_add(ret_ptr);
+
+    // Set up thread group membership under pid_wlock.
+    if (args->flags & CLONE_THREAD) {
+        // CLONE_THREAD: join the parent's thread group.
+        // The child shares the parent's TGID.
+        assert(p->thread_group != NULL,
+               "clone: parent has no thread_group for CLONE_THREAD");
+        thread_group_add(p->thread_group, ret_ptr);
+
+        // For CLONE_THREAD, the child does not send a signal to the parent
+        // on exit (Linux behavior). The exit signal is 0.
+        ret_ptr->signal.esignal = 0;
+    } else {
+        // Not CLONE_THREAD: create a new thread group for the child.
+        int tg_ret = thread_group_alloc(ret_ptr);
+        assert(tg_ret == 0, "clone: thread_group_alloc failed");
+        ret_ptr->thread_group->tgid = ret_ptr->pid;
+    }
     pid_wunlock();
 
     // Wake up the new child thread

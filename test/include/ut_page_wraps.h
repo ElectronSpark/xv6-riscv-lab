@@ -22,7 +22,7 @@ int __wrap_page_ref_count(page_t *page);
 int __wrap_page_ref_inc(void *ptr);
 int __wrap_page_ref_dec(void *ptr);
 int __wrap_page_refcnt(void *physical);
-int __wrap_spin_holding(struct spinlock *lock);
+int __wrap_spin_holding(spinlock_t *lock);
 page_t *__wrap___page_alloc(uint64 order, uint64 flags);
 void __wrap___page_free(page_t *page, uint64 order);
 

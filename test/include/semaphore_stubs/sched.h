@@ -3,9 +3,9 @@
 
 #include "proc/thread_types.h"
 
-struct spinlock;
+typedef struct spinlock spinlock_t;
 
 void scheduler_wakeup(struct thread *p);
-void scheduler_sleep(struct spinlock *lk, enum thread_state state);
+void scheduler_sleep(spinlock_t *lk, enum thread_state state);
 
 #endif /* SCHED_H */

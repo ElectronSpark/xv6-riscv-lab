@@ -240,7 +240,7 @@ out:
 
 // Change the thread state to SLEEPING and yield CPU
 // This function will lock both the thread and scheduler locks.
-void scheduler_sleep(struct spinlock *lk, enum thread_state sleep_state) {
+void scheduler_sleep(spinlock_t *lk, enum thread_state sleep_state) {
     int intr = intr_off_save();
     struct thread *proc = current;
     assert(proc != NULL, "PCB is NULL");
@@ -482,7 +482,7 @@ void scheduler_wakeup_stopped(struct thread *p) {
     __do_scheduler_wakeup(p, true);
 }
 
-void sleep_on_chan(void *chan, struct spinlock *lk) {
+void sleep_on_chan(void *chan, spinlock_t *lk) {
     int intr = sleep_lock_irqsave();
     assert(current != NULL, "PCB is NULL");
     assert(chan != NULL, "Cannot sleep on a NULL channel");

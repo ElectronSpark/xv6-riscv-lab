@@ -332,7 +332,7 @@ int tq_wait_in_state_cb(tq_t *q, sleep_callback_t sleep_callback,
     return waiter.error_no;
 }
 
-int tq_wait_in_state(tq_t *q, struct spinlock *lock, uint64 *rdata,
+int tq_wait_in_state(tq_t *q, spinlock_t *lock, uint64 *rdata,
                      enum thread_state state) {
     return tq_wait_in_state_cb(q, spin_sleep_cb, spin_wake_cb, lock, rdata,
                                state);
@@ -345,7 +345,7 @@ int tq_wait_cb(tq_t *q, sleep_callback_t sleep_callback,
                                callback_data, rdata, THREAD_UNINTERRUPTIBLE);
 }
 
-int tq_wait(tq_t *q, struct spinlock *lock, uint64 *rdata) {
+int tq_wait(tq_t *q, spinlock_t *lock, uint64 *rdata) {
     return tq_wait_in_state_cb(q, spin_sleep_cb, spin_wake_cb, lock, rdata,
                                THREAD_UNINTERRUPTIBLE);
 }
@@ -594,7 +594,7 @@ int ttree_wait_in_state_cb(ttree_t *q, uint64 key,
     return waiter.error_no;
 }
 
-int ttree_wait_in_state(ttree_t *q, uint64 key, struct spinlock *lock,
+int ttree_wait_in_state(ttree_t *q, uint64 key, spinlock_t *lock,
                         uint64 *rdata, enum thread_state state) {
     return ttree_wait_in_state_cb(q, key, spin_sleep_cb, spin_wake_cb, lock,
                                   rdata, state);
@@ -607,7 +607,7 @@ int ttree_wait_cb(ttree_t *q, uint64 key, sleep_callback_t sleep_callback,
                                   callback_data, rdata, THREAD_UNINTERRUPTIBLE);
 }
 
-int ttree_wait(ttree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata) {
+int ttree_wait(ttree_t *q, uint64 key, spinlock_t *lock, uint64 *rdata) {
     return ttree_wait_in_state_cb(q, key, spin_sleep_cb, spin_wake_cb, lock,
                                   rdata, THREAD_UNINTERRUPTIBLE);
 }

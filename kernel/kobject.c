@@ -13,7 +13,7 @@
 
 static list_node_t __kobject_list = LIST_ENTRY_INITIALIZED(__kobject_list);
 static int64 __kobject_count = 0;
-static struct spinlock kobject_lock = SPINLOCK_INITIALIZED("kobject_lock");
+static spinlock_t kobject_lock = SPINLOCK_INITIALIZED("kobject_lock");
 
 static void __kobject_attach(struct kobject *obj) {
   spin_lock(&kobject_lock);

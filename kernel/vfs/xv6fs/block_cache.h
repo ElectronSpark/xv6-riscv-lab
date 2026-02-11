@@ -42,7 +42,7 @@ struct xv6fs_block_cache {
     uint32 alloc_cursor;                /* Rotating allocation pointer for wear leveling */
     uint32 free_count;                  /* Total number of free blocks */
     uint32 extent_count;                /* Number of extents in tree */
-    struct spinlock lock;               /* Protect cache operations */
+    spinlock_t lock;               /* Protect cache operations */
     int initialized;                    /* Cache is ready for use */
 };
 

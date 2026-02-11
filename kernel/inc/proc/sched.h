@@ -14,13 +14,13 @@ int sleep_lock_irqsave(void);
 void sleep_unlock_irqrestore(int state);
 void scheduler_run(void);
 void scheduler_yield(void);
-void scheduler_sleep(struct spinlock *lk, enum thread_state sleep_state);
+void scheduler_sleep(spinlock_t *lk, enum thread_state sleep_state);
 void scheduler_wakeup(struct thread *p);
 void scheduler_wakeup_timeout(struct thread *p);
 void scheduler_wakeup_killable(struct thread *p);
 void scheduler_wakeup_interruptible(struct thread *p);
 void scheduler_wakeup_stopped(struct thread *p);
-void sleep_on_chan(void *chan, struct spinlock *lk);
+void sleep_on_chan(void *chan, spinlock_t *lk);
 void wakeup_on_chan(void *chan);
 
 void idle_thread_init(void);

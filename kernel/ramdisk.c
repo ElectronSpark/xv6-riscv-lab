@@ -18,7 +18,7 @@
 #include "dev/fdt.h"
 
 static struct {
-  struct spinlock lock;
+  spinlock_t lock;
   uint64 base;
   uint64 size_bytes;
   uint64 size_blocks;

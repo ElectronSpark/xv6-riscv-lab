@@ -32,9 +32,9 @@ void tq_init(tq_t *q, const char *name, spinlock_t *lock);
 #include "wrapper_tracking.h"
 
 // Forward declarations for wrapped functions (linked via --wrap)
-void spin_init(struct spinlock *lock, char *name);
-void spin_lock(struct spinlock *lock);
-void spin_unlock(struct spinlock *lock);
+void spin_init(spinlock_t *lock, char *name);
+void spin_lock(spinlock_t *lock);
+void spin_unlock(spinlock_t *lock);
 
 extern void pcache_test_run_flusher_round(uint64 round_start, bool force_round);
 extern void pcache_test_set_retry_hook(void (*hook)(struct pcache *, uint64));

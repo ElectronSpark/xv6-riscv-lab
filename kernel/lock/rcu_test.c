@@ -570,7 +570,7 @@ typedef struct list_test_node {
 
 // Global list head and lock for list tests
 static list_node_t rcu_test_list_head;
-static struct spinlock rcu_test_list_lock;
+static spinlock_t rcu_test_list_lock;
 static _Atomic int list_callback_count = 0;
 
 // Callback for freeing list nodes - with ASAN poisoning

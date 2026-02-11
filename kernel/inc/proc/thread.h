@@ -14,6 +14,7 @@
 #include <smp/percpu.h>
 #include "lock/rcu_type.h"
 #include "proc/thread_types.h"
+#include "proc/thread_group.h"
 
 #define THREAD_IS_SLEEPING(state)                                              \
     ({                                                                         \

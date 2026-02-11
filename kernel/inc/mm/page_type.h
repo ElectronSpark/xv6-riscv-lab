@@ -50,6 +50,7 @@ enum page_type {
 #endif
 
 typedef struct page_struct {
+    spinlock_t      lock;
     uint64          physical_address;
     union {
 
@@ -77,7 +78,6 @@ typedef struct page_struct {
 #define PAGE_FLAG_LOCKED            (1U << 26)
 #define PAGE_FLAG_IO_PROGRESSING    (1U << 28)
     int             ref_count;
-    spinlock_t      lock;
     /* choose the section of the union according to the page type */
     union {
         /* Anonymous page

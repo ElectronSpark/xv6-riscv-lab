@@ -11,7 +11,7 @@
 #include "printf.h"
 #include "timer/timer.h"
 
-void spin_init(struct spinlock *lk, char *name) {
+void spin_init(spinlock_t *lk, char *name) {
     lk->name = name;
     lk->locked = 0;
     lk->cpu = 0;
@@ -19,7 +19,7 @@ void spin_init(struct spinlock *lk, char *name) {
 
 // Acquire the lock.
 // Caller must disable interrupts before calling spin_lock.
-void spin_acquire(struct spinlock *lk) {
+void spin_acquire(spinlock_t *lk) {
     assert(lk && !spin_holding(lk), "spin_lock reentry");
 
     // On RISC-V, sync_lock_test_and_set turns into an atomic swap:
@@ -59,7 +59,7 @@ void spin_acquire(struct spinlock *lk) {
 }
 
 // Release the lock.
-void spin_release(struct spinlock *lk) {
+void spin_release(spinlock_t *lk) {
     assert(lk && spin_holding(lk), "spin_unlock");
 
     // Tell the C compiler and the CPU to not move loads or stores
@@ -84,7 +84,7 @@ void spin_release(struct spinlock *lk) {
 // Try to acquire the lock without spinning.
 // Caller needs to record the preempt state. before calling spin_trylock.
 // Returns 1 if the lock was acquired, 0 if not.
-int spin_trylock(struct spinlock *lk) {
+int spin_trylock(spinlock_t *lk) {
     push_off(); // disable interrupts
     if (spin_holding(lk)) {
         pop_off();
@@ -107,7 +107,7 @@ int spin_trylock(struct spinlock *lk) {
 
 // Check whether this cpu is holding the lock.
 // Interrupts must be off.
-int spin_holding(struct spinlock *lk) {
+int spin_holding(spinlock_t *lk) {
     if (__atomic_load_n(&lk->cpu, __ATOMIC_ACQUIRE) != mycpu()) {
         return 0;
     }
@@ -115,24 +115,24 @@ int spin_holding(struct spinlock *lk) {
 }
 
 // Default spin lock - disables interrupts and acquires lock
-void spin_lock(struct spinlock *lk) {
+void spin_lock(spinlock_t *lk) {
     push_off(); // disable interrupts to avoid deadlock
     spin_acquire(lk);
 }
 
 // Default spin unlock - releases lock and restores interrupt state
-void spin_unlock(struct spinlock *lk) {
+void spin_unlock(spinlock_t *lk) {
     spin_release(lk);
     pop_off();
 }
 
-int spin_lock_irqsave(struct spinlock *lk) {
+int spin_lock_irqsave(spinlock_t *lk) {
     int intena = intr_off_save();
     spin_acquire(lk);
     return intena;
 }
 
-void spin_unlock_irqrestore(struct spinlock *lk, int intena) {
+void spin_unlock_irqrestore(spinlock_t *lk, int intena) {
     spin_release(lk);
     intr_restore(intena);
 }

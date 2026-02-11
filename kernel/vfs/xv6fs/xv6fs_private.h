@@ -60,7 +60,7 @@ struct xv6fs_logheader {
  * to reacquire log->lock).
  */
 struct xv6fs_log {
-    struct spinlock lock;
+    spinlock_t lock;
     tq_t wait_queue;  /**< Per-log wait queue for begin_op waiters */
     int start;          // Log start block
     int size;           // Log size in blocks

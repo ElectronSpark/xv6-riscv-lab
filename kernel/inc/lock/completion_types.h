@@ -5,9 +5,9 @@
 #include <proc/tq_type.h>
 
 typedef struct {
+    spinlock_t lock;
     int done;
     tq_t wait_queue;
-    struct spinlock lock;
 } completion_t;
 
 #endif // __KERNEL_COMPLETION_TYPES_H

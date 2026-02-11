@@ -76,7 +76,7 @@ STATIC struct disk {
   // one-for-one with descriptors, for convenience.
   struct virtio_blk_req ops[NUM];
   
-  struct spinlock vdisk_lock;
+  spinlock_t vdisk_lock;
   
   /**
    * Wait queue for processes waiting for free descriptors.

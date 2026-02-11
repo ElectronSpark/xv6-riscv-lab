@@ -5,7 +5,7 @@
 #include "spinlock.h"
 
 typedef struct rwsem {
-    struct spinlock lock; // Spinlock to protect the rwsem structure
+    spinlock_t lock; // Spinlock to protect the rwsem structure
     int readers;          // Number of active readers
     pid_t holder_pid; // Thread holding write lock, if any
     tq_t read_queue;  // Queue for threads waiting to read

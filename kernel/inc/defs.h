@@ -17,7 +17,7 @@ struct file;
 struct inode;
 struct pipe;
 struct thread;
-struct spinlock;
+typedef struct spinlock spinlock_t __ALIGNED_CACHELINE;
 typedef struct mutex mutex_t;
 struct stat;
 struct superblock;
@@ -87,19 +87,19 @@ void __switch_noreturn(uint64 irq_sp, uint64 s0, sw_noret_cb_t addr);
 
 // spinlock.c
 // Initialize a spinlock.
-void            spin_init(struct spinlock*, char*);
+void            spin_init(spinlock_t*, char*);
 // Check if the current CPU is holding the lock.
-int             spin_holding(struct spinlock*);
+int             spin_holding(spinlock_t*);
 // Basic spin lock functions. Will NOT modify preempt counter or disable interrupts.
-void            spin_acquire(struct spinlock*);
-void            spin_release(struct spinlock*);
+void            spin_acquire(spinlock_t*);
+void            spin_release(spinlock_t*);
 // Default spin lock functions. Will modify preempt counter.
-void            spin_lock(struct spinlock*);
-void            spin_unlock(struct spinlock*);
-int             spin_trylock(struct spinlock*);
+void            spin_lock(spinlock_t*);
+void            spin_unlock(spinlock_t*);
+int             spin_trylock(spinlock_t*);
 // Functions to save/restore interrupt state with spinlock.
-int             spin_lock_irqsave(struct spinlock*);
-void            spin_unlock_irqrestore(struct spinlock*, int);
+int             spin_lock_irqsave(spinlock_t*);
+void            spin_unlock_irqrestore(spinlock_t*, int);
 
 // sleeplock.c
 int mutex_lock(mutex_t *);

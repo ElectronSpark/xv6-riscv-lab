@@ -1,4 +1,5 @@
 #include "proc/thread.h"
+#include "proc/thread_group.h"
 #include "defs.h"
 #include "hlist.h"
 #include "list.h"
@@ -77,9 +78,25 @@ void reparent(struct thread *p) {
 // Exit the current thread.  Does not return.
 // An exited thread remains in the zombie state
 // until its parent calls wait().
+//
+// Thread group semantics (CLONE_THREAD):
+// - Non-leader threads: remove from thread group, detach from proc table,
+//   and self-reap (no zombie visible to parent).
+// - Group leader: becomes zombie only when the last thread in the group exits.
+//   While other threads are still alive, the leader stays in ZOMBIE state
+//   but is not yet visible to parent's wait() (the leader's zombie is
+//   "delayed" until the entire group exits).
+// - Single-threaded processes (no CLONE_THREAD): behave as before.
 void exit(int status) {
     struct thread *p = current;
     assert(p != __proctab_get_initproc(), "init exiting");
+
+    // If this thread is in a thread group undergoing group exit,
+    // use the group exit code.
+    struct thread_group *tg = p->thread_group;
+    if (tg != NULL && thread_group_exiting(tg) && tg->group_exit_task != p) {
+        status = tg->group_exit_code;
+    }
 
     // Wake vfork parent FIRST - they're sharing our address space
     // and need to resume before we tear anything down
@@ -96,6 +113,59 @@ void exit(int status) {
         p->fs = NULL;
     }
 
+    // Remove from thread group and (for non-leader CLONE_THREAD) from
+    // proc table, all under pid_wlock to satisfy thread_group_remove's
+    // locking requirement and avoid extra lock/unlock round-trips.
+    bool last_in_group = true;
+    bool is_leader = thread_is_group_leader(p);
+
+    // For CLONE_THREAD non-leader threads: self-reap without becoming
+    // a visible zombie. The parent only sees the group leader.
+    if ((p->clone_flags & CLONE_THREAD) && !is_leader) {
+        // Non-leader thread in a thread group: self-cleanup
+        // Remove from thread group and proc table atomically under pid_wlock.
+        pid_wlock();
+        if (tg != NULL) {
+            last_in_group = thread_group_remove(p);
+        }
+        proctab_proc_remove(p);
+        pid_wunlock();
+        __free_pid();
+
+        tcb_lock(p);
+        p->xstate = status;
+        __thread_state_set(p, THREAD_ZOMBIE);
+        tcb_unlock(p);
+
+        // If we're the last thread and the leader is already zombie,
+        // wake the parent so it can reap the leader.
+        if (last_in_group && tg != NULL && tg->group_leader != NULL) {
+            struct thread *leader = tg->group_leader;
+            leader->xstate = status;
+            pid_rlock();
+            struct thread *parent = leader->parent;
+            pid_runlock();
+            if (parent != NULL) {
+                scheduler_wakeup_interruptible(parent);
+                if (leader->signal.esignal > 0) {
+                    kill_thread(parent, leader->signal.esignal);
+                }
+            }
+        }
+
+        scheduler_yield();
+        panic("exit: non-leader thread should not return");
+    }
+
+    // Leader thread or single-threaded process: remove from thread group
+    // under pid_wlock, then proceed with standard exit path.
+    if (tg != NULL) {
+        pid_wlock();
+        last_in_group = thread_group_remove(p);
+        pid_wunlock();
+    }
+
+    // Leader thread or single-threaded process: standard exit path
     reparent(p);
 
     tcb_lock(p);
@@ -110,13 +180,18 @@ void exit(int status) {
     struct thread *parent = p->parent;
     pid_runlock();
 
-    // Wake parent BEFORE we yield - this is the Linux pattern.
-    // Always wake parent regardless of exit signal (handles threads with
-    // esignal=0 or ignored signals). Then send the exit signal if set.
-    if (parent != NULL) {
-        scheduler_wakeup_interruptible(parent);
-        if (p->signal.esignal > 0) {
-            kill_thread(parent, p->signal.esignal);
+    // For a group leader: only notify parent if this is the last thread
+    // (or if there's no thread group). Non-last leaders stay zombie silently
+    // until the last thread exits and wakes the parent.
+    if (last_in_group || tg == NULL) {
+        // Wake parent BEFORE we yield - this is the Linux pattern.
+        // Always wake parent regardless of exit signal (handles threads with
+        // esignal=0 or ignored signals). Then send the exit signal if set.
+        if (parent != NULL) {
+            scheduler_wakeup_interruptible(parent);
+            if (p->signal.esignal > 0) {
+                kill_thread(parent, p->signal.esignal);
+            }
         }
     }
 

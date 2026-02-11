@@ -55,6 +55,7 @@ struct pcache_ops {
 //      the maximum number of pages allowed in the pcache, default to
 //      PCACHE_DEFAULT_MAX_PAGES
 struct pcache {
+    spinlock_t spinlock;  // Spinlock to protect the pcache structure
     list_node_t list_entry; // Link active pcache in the global list
     list_node_t
         lru; // Local LRU list. Only have clean pages with ref_count == 1
@@ -84,7 +85,6 @@ struct pcache {
     struct work_struct flush_work; // Work structure for flush operation
     int flush_error;
     uint32 wait_refcount; // Reference count for flusher waiter threads
-    struct spinlock spinlock;  // Spinlock to protect the pcache structure
 };
 
 // Extension of page structure for page cache use

@@ -13,10 +13,8 @@
 
 // Generic virtqueue structure that can be used by any virtio device
 struct virtqueue {
-  // Virtio queue structures (from spec)
-  struct virtq_desc *desc;
-  struct virtq_avail *avail;
-  struct virtq_used *used;
+  // Synchronization
+  spinlock_t lock;     // protects this virtqueue
   
   // Resource management
   char free[NUM];           // is descriptor free?
@@ -27,8 +25,10 @@ struct virtqueue {
   uint16 used_idx;          // last processed index in used ring
   uint16 num;               // number of descriptors in queue
   
-  // Synchronization
-  struct spinlock lock;     // protects this virtqueue
+  // Virtio queue structures (from spec)
+  struct virtq_desc *desc;
+  struct virtq_avail *avail;
+  struct virtq_used *used;
 };
 
 // Initialize a virtqueue with allocated memory

@@ -33,12 +33,12 @@
     })
 
 struct pipe {
+    spinlock_t reader_lock;
     uint nread; // number of bytes read
     tq_t nread_queue;
-    struct spinlock reader_lock;
+    spinlock_t writer_lock;
     uint nwrite; // number of bytes written
     tq_t nwrite_queue;
-    struct spinlock writer_lock;
     int flags;
     char data[PIPESIZE];
 };

@@ -33,7 +33,7 @@ static inline void sem_value_store(sem_t *sem, int value) {
 }
 
 // Custom wait callback for semaphore post simulation
-static int sem_wait_callback(tq_t *q, struct spinlock *lock, uint64 *rdata, void *user_data) {
+static int sem_wait_callback(tq_t *q, spinlock_t *lock, uint64 *rdata, void *user_data) {
     (void)q;
     (void)lock;
     (void)rdata;

@@ -7,8 +7,8 @@
 
 // Long-term locks for threads
 typedef struct semaphore {
+  spinlock_t lk; // spinlock protecting this sleep lock
   tq_t wait_queue; // Queue of threads waiting for the lock
-  struct spinlock lk; // spinlock protecting this sleep lock
   int value; // Semaphore value
 
   // For debugging:

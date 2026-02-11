@@ -40,7 +40,7 @@
 #include "hlist.h"
 
 struct {
-    struct spinlock lock;
+    spinlock_t lock;
     struct buf buf[NBUF];
 
     // Free list of unused buffers (refcnt == 0), sorted by LRU order.

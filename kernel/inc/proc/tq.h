@@ -257,7 +257,7 @@ int tq_wait_in_state_cb(tq_t *q, sleep_callback_t sleep_callback,
  * Returns the waiter's error_no: 0 on normal wakeup, -EINTR if woken
  * asynchronously, or the error_no set by the waker.
  */
-int tq_wait_in_state(tq_t *q, struct spinlock *lock, uint64 *rdata,
+int tq_wait_in_state(tq_t *q, spinlock_t *lock, uint64 *rdata,
                      enum thread_state state);
 
 /**
@@ -285,7 +285,7 @@ int tq_wait_cb(tq_t *q, sleep_callback_t sleep_callback,
  * Convenience wrapper around tq_wait_in_state_cb() using
  * spin_sleep_cb / spin_wake_cb and THREAD_UNINTERRUPTIBLE.
  */
-int tq_wait(tq_t *q, struct spinlock *lock, uint64 *rdata);
+int tq_wait(tq_t *q, spinlock_t *lock, uint64 *rdata);
 
 /**
  * tq_wakeup - wake and dequeue the first waiter
@@ -352,7 +352,7 @@ int ttree_wait_in_state_cb(ttree_t *q, uint64 key,
  *
  * Returns the waiter's error_no (see tq_wait_in_state_cb).
  */
-int ttree_wait_in_state(ttree_t *q, uint64 key, struct spinlock *lock,
+int ttree_wait_in_state(ttree_t *q, uint64 key, spinlock_t *lock,
                         uint64 *rdata, enum thread_state state);
 
 /**
@@ -382,7 +382,7 @@ int ttree_wait_cb(ttree_t *q, uint64 key, sleep_callback_t sleep_callback,
  * Convenience wrapper around ttree_wait_in_state_cb() using
  * spin_sleep_cb / spin_wake_cb and THREAD_UNINTERRUPTIBLE.
  */
-int ttree_wait(ttree_t *q, uint64 key, struct spinlock *lock, uint64 *rdata);
+int ttree_wait(ttree_t *q, uint64 key, spinlock_t *lock, uint64 *rdata);
 
 /**
  * ttree_wakeup_one - wake the first waiter with a matching key

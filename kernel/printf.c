@@ -26,7 +26,7 @@ int panic_state(void) {
 
 // lock to avoid interleaving concurrent printf's.
 STATIC struct {
-  struct spinlock lock;
+  spinlock_t lock;
   int locking;
 } pr;
 

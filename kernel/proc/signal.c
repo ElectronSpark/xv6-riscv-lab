@@ -31,6 +31,7 @@
 #include "lock/spinlock.h"
 #include "lock/rcu.h"
 #include "proc/thread.h"
+#include "proc/thread_group.h"
 #include <mm/slab.h>
 #include "proc/sched.h"
 #include "list.h"
@@ -116,6 +117,13 @@ bool recalc_sigpending_tsk(struct thread *p) {
     sigacts_t *sa = p->sigacts;
     sigset_t pending = smp_load_acquire(&p->signal.sig_pending_mask);
     sigset_t blocked = sa->sa_sigmask;
+
+    // Also check thread group shared pending signals
+    if (p->thread_group != NULL) {
+        sigset_t shared = smp_load_acquire(
+            &p->thread_group->shared_pending.sig_pending_mask);
+        pending |= shared;
+    }
     
     if ((pending & ~blocked) != 0) {
         THREAD_SET_SIGPENDING(p);
@@ -524,7 +532,7 @@ int signal_send(int pid, ksiginfo_t *info) {
     rcu_read_lock();
     if (get_pid_thread(pid, &p) != 0) {
         rcu_read_unlock();
-        return -EINVAL; // No thrae found
+        return -EINVAL; // No thread found
     }
     if (p == NULL) {
         rcu_read_unlock();
@@ -532,7 +540,17 @@ int signal_send(int pid, ksiginfo_t *info) {
     }
     assert(p != NULL, "signal_send: thread is NULL");
     
-    int ret = __signal_send(p, info);
+    int ret;
+    // If the target has a thread group and is the group leader (i.e., pid == tgid),
+    // deliver as a process-directed signal to the thread group's shared_pending.
+    // This matches POSIX kill() semantics: kill(pid) sends to the process.
+    struct thread_group *tg = p->thread_group;
+    if (tg != NULL && tg->tgid == pid) {
+        ret = tg_signal_send(tg, info);
+    } else {
+        // Thread-directed signal (pid is a TID, not a TGID)
+        ret = __signal_send(p, info);
+    }
     rcu_read_unlock();
     return ret;
 }
@@ -953,6 +971,7 @@ void handle_signal(void) {
         return; // No signal actions defined
     }
     sigacts_t *sa = p->sigacts;
+    struct thread_group *tg = p->thread_group;
 
     for (;;) {
         // Gather all signal info with sigacts_lock - this protects all signal state
@@ -962,6 +981,15 @@ void handle_signal(void) {
         sigset_t sigstop = sa->sa_sigstop;
         sigset_t sigcont = sa->sa_sigcont;
         sigset_t pending = p->signal.sig_pending_mask;
+
+        // Merge in shared pending signals from thread group
+        sigset_t shared_pending = 0;
+        if (tg != NULL) {
+            shared_pending = smp_load_acquire(
+                &tg->shared_pending.sig_pending_mask);
+            pending |= shared_pending;
+        }
+
         sigset_t masked = pending & ~sigmask;
         
         // Check termination
@@ -976,8 +1004,12 @@ void handle_signal(void) {
         sigset_t pending_stop = masked & sigstop;
         
         if (pending_cont) {
-            // Continue cancels stop - clear stop signals
+            // Continue cancels stop - clear stop signals from both
+            // per-thread and shared pending
             p->signal.sig_pending_mask &= ~sigstop;
+            if (tg != NULL) {
+                tg->shared_pending.sig_pending_mask &= ~sigstop;
+            }
             
             // Check if any pending SIGCONT has a user handler
             bool user_handler = false;
@@ -993,7 +1025,11 @@ void handle_signal(void) {
             
             if (!user_handler) {
                 // Default action: consume the continue signals here
+                // from both per-thread and shared pending
                 p->signal.sig_pending_mask &= ~pending_cont;
+                if (tg != NULL) {
+                    tg->shared_pending.sig_pending_mask &= ~pending_cont;
+                }
                 // Recalc sigpending flag after modifying pending mask
                 recalc_sigpending_tsk(p);
                 sigacts_unlock(sa);
@@ -1003,8 +1039,12 @@ void handle_signal(void) {
             // and fall through to deliver the signal to the user handler
             // (don't call continue - let the delivery code below handle it)
         } else if (pending_stop) {
-            // Clear stop signals and enter stopped state
+            // Clear stop signals from both per-thread and shared pending,
+            // then enter stopped state
             p->signal.sig_pending_mask &= ~pending_stop;
+            if (tg != NULL) {
+                tg->shared_pending.sig_pending_mask &= ~pending_stop;
+            }
             // Recalc sigpending flag after modifying pending mask
             recalc_sigpending_tsk(p);
             sigacts_unlock(sa);
@@ -1034,16 +1074,35 @@ void handle_signal(void) {
         // Copy sigaction and dequeue while holding sigacts_lock
         sigaction_t sa_copy = sa->sa[signo];
         
-        // Re-check if signal is still pending (might have been handled by another path)
-        if (!sigismember(&p->signal.sig_pending_mask, signo)) {
+        // Determine if the signal is from per-thread pending or shared pending,
+        // and dequeue from the appropriate queue.
+        bool from_shared = false;
+        if (sigismember(&p->signal.sig_pending_mask, signo)) {
+            // Per-thread pending — dequeue from per-thread queue
+            from_shared = false;
+        } else if (tg != NULL &&
+                   sigismember(&tg->shared_pending.sig_pending_mask, signo)) {
+            // Shared pending from thread group
+            from_shared = true;
+        } else {
             sigacts_unlock(sa);
             continue; // Signal was consumed elsewhere, try again
         }
         
         bool repeat = false;
-        ksiginfo_t *info = __dequeue_signal_update_pending_nolock(p, signo, &sa_copy);
-    
-        assert(!IS_ERR(info), "handle_signal: __dequeue_signal_update_pending failed");
+        ksiginfo_t *info = NULL;
+        if (from_shared && tg != NULL) {
+            // Dequeue from thread group's shared pending.
+            // sigacts lock is already held (which serializes shared_pending
+            // access since all group threads share the same sigacts via
+            // CLONE_SIGHAND). pid_rlock is NOT needed here because the
+            // shared_pending queues are protected by sigacts->lock.
+            info = tg_dequeue_signal(tg, signo);
+        } else {
+            info = __dequeue_signal_update_pending_nolock(p, signo, &sa_copy);
+            assert(!IS_ERR(info),
+                   "handle_signal: __dequeue_signal_update_pending failed");
+        }
         
         // Recalc sigpending after dequeue modified the pending mask
         recalc_sigpending_tsk(p);
@@ -1060,6 +1119,11 @@ void handle_signal(void) {
             sigacts_lock(sa);
             bool unmasked = sigismember(&sa->sa_sigmask, signo) == 0;
             bool still_pending = sigismember(&p->signal.sig_pending_mask, signo) > 0;
+            // Also check thread group shared_pending for more queued entries
+            if (!still_pending && tg != NULL) {
+                still_pending = sigismember(
+                    &tg->shared_pending.sig_pending_mask, signo) > 0;
+            }
             sigacts_unlock(sa);
             
             if (unmasked && still_pending) {
@@ -1081,27 +1145,76 @@ void handle_signal(void) {
 }
 
 
-// Kill the threads with the given pid.
+// Kill the threads with the given pid (process-directed signal).
+// When the target has a thread group, this sends to the group (POSIX kill()).
 // The victim won't exit until it tries to return
 // to user space (see usertrap() in trap.c).
 int kill(int pid, int signum) {
     ksiginfo_t info = {0};
     info.signo = signum;
     info.sender = current;
-    info.info.si_pid = current->pid;
+    info.info.si_pid = thread_tgid(current);
 
     return signal_send(pid, &info);
 }
 
-// Kill the given thread.
+// Kill the given thread directly (thread-directed signal).
 // Instead of looking up by pid, directly send signal to the given thread.
 int kill_thread(struct thread *p, int signum) {
     ksiginfo_t info = {0};
     info.signo = signum;
     info.sender = current;
-    info.info.si_pid = current->pid;
+    info.info.si_pid = thread_tgid(current);
 
     rcu_read_lock();
+    int ret = __signal_send(p, &info);
+    rcu_read_unlock();
+    return ret;
+}
+
+// Send a signal to a specific thread within a specific thread group (tgkill).
+// This is the POSIX tgkill(tgid, tid, sig) function.
+// Returns 0 on success, negative errno on failure.
+int tgkill(int tgid, int tid, int signum) {
+    if (tgid < 0 || tid < 0 || SIGBAD(signum)) {
+        return -EINVAL;
+    }
+    struct thread *p = NULL;
+    rcu_read_lock();
+    if (get_pid_thread(tid, &p) != 0 || p == NULL) {
+        rcu_read_unlock();
+        return -ESRCH;
+    }
+    // Verify the thread belongs to the specified thread group
+    if (p->thread_group == NULL || p->thread_group->tgid != tgid) {
+        rcu_read_unlock();
+        return -ESRCH;
+    }
+    ksiginfo_t info = {0};
+    info.signo = signum;
+    info.sender = current;
+    info.info.si_pid = thread_tgid(current);
+    int ret = __signal_send(p, &info);
+    rcu_read_unlock();
+    return ret;
+}
+
+// Send a signal to a specific thread by TID (tkill).
+// This is the POSIX tkill(tid, sig) function.
+int tkill(int tid, int signum) {
+    if (tid < 0 || SIGBAD(signum)) {
+        return -EINVAL;
+    }
+    struct thread *p = NULL;
+    rcu_read_lock();
+    if (get_pid_thread(tid, &p) != 0 || p == NULL) {
+        rcu_read_unlock();
+        return -ESRCH;
+    }
+    ksiginfo_t info = {0};
+    info.signo = signum;
+    info.sender = current;
+    info.info.si_pid = thread_tgid(current);
     int ret = __signal_send(p, &info);
     rcu_read_unlock();
     return ret;

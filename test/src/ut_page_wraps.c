@@ -85,40 +85,40 @@ void __wrap_panic(char *str) {
     fail_msg("Panic encountered: %s", str);
 }
 
-void __wrap_spin_lock(struct spinlock *lock) {
+void __wrap_spin_lock(spinlock_t *lock) {
     if (lock == NULL) {
         return;
     }
     lock->locked = 1;
 }
 
-void __wrap_spin_unlock(struct spinlock *lock) {
+void __wrap_spin_unlock(spinlock_t *lock) {
     if (lock == NULL) {
         return;
     }
     lock->locked = 0;
 }
 
-int __wrap_spin_holding(struct spinlock *lock) {
+int __wrap_spin_holding(spinlock_t *lock) {
     if (lock == NULL) {
         return 0;
     }
     return lock->locked != 0;
 }
 
-void __wrap_spin_init(struct spinlock *lock, char *name) {
+void __wrap_spin_init(spinlock_t *lock, char *name) {
     (void)lock;
     (void)name;
 }
 
-void __wrap_spin_lock(struct spinlock *lock) {
+void __wrap_spin_lock(spinlock_t *lock) {
     if (lock == NULL) {
         return;
     }
     lock->locked = 1;
 }
 
-void __wrap_spin_unlock(struct spinlock *lock) {
+void __wrap_spin_unlock(spinlock_t *lock) {
     if (lock == NULL) {
         return;
     }

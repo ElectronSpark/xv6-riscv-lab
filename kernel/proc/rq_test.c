@@ -434,7 +434,7 @@ static void test_priority_ordering(void) {
 static volatile int activation_order[PRIORITY_TEST_COUNT];
 static volatile int activation_index;
 static volatile int processes_done;
-static struct spinlock priority_test_lock;
+static spinlock_t priority_test_lock;
 static tq_t main_wait_queue;
 
 // Priority values for test processes (lower = higher priority)

@@ -6,8 +6,8 @@
 
 // Long-term locks for threads
 typedef struct mutex {
+  spinlock_t lk; // spinlock protecting this sleep lock
   tq_t wait_queue; // Queue of threads waiting for the lock
-  struct spinlock lk; // spinlock protecting this sleep lock
   
   // For debugging:
   char *name;        // Name of lock.

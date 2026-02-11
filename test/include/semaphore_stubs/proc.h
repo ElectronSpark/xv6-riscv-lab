@@ -3,7 +3,7 @@
 
 #include "types.h"
 
-struct spinlock;
+typedef struct spinlock spinlock_t;
 
 struct cpu {
     int dummy;

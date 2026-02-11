@@ -1,4 +1,5 @@
 #include "proc/thread.h"
+#include "proc/thread_group.h"
 #include "defs.h"
 #include "hlist.h"
 #include "list.h"
@@ -42,7 +43,9 @@ static void __pcb_init(struct thread *p, struct vfs_fdtable *fdtable) {
     list_entry_init(&p->siblings);
     list_entry_init(&p->children);
     hlist_entry_init(&p->proctab_entry);
+    list_entry_init(&p->tg_entry);
     spin_init(&p->lock, "thread");
+    p->thread_group = NULL;
     p->fs = NULL;
     p->fdtable = fdtable;
     if (p->sched_entity != NULL) {
@@ -113,8 +116,11 @@ void proc_assert_holding(struct thread *p) {
     assert(spin_holding(&p->lock), "proc_assert_holding: thread lock not held");
 }
 
-// initialize the proc table.
-void thread_init(void) { __proctab_init(); }
+// initialize the proc table and thread group subsystem.
+void thread_init(void) {
+    __proctab_init();
+    thread_group_init();
+}
 
 // Attach a newly forked thread to the given parent as its child.
 // This function is called by fork/clone to set up the parent-child
@@ -268,6 +274,11 @@ struct thread *kthread_create(const char *name, void *entry, uint64 arg1,
     proctab_proc_add(p);
     pid_wunlock();
 
+    // Allocate a thread group for the kernel thread (each kthread is its own group)
+    if (thread_group_alloc(p) == 0) {
+        p->thread_group->tgid = p->pid;
+    }
+
     rcu_read_unlock();
 
     return p;
@@ -374,6 +385,12 @@ void thread_destroy(struct thread *p) {
     sigpending_empty(p, 0);
     sigpending_destroy(p);
 
+    // Release thread_group reference
+    if (p->thread_group != NULL) {
+        thread_group_put(p->thread_group);
+        p->thread_group = NULL;
+    }
+
     // Defer freeing of the kernel stack until after the RCU grace period.
     // This ensures all RCU readers have finished accessing the thread
     // structure.
@@ -418,6 +435,10 @@ void userinit(void) {
     pid_wlock();
     proctab_proc_add(p);
     pid_wunlock();
+
+    // Allocate a thread group for the init process (it is the group leader)
+    assert(thread_group_alloc(p) == 0, "userinit: thread_group_alloc failed");
+    p->thread_group->tgid = p->pid;
 
     printf("Init process kernel stack size order: %d\n", p->kstack_order);
 

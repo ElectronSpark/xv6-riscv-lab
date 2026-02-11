@@ -13,6 +13,7 @@
 #include <smp/atomic.h>
 #include <smp/percpu.h>
 #include "lock/rcu_type.h"
+#include "proc/thread_group_types.h"
 
 struct vfs_inode;
 
@@ -35,78 +36,90 @@ enum thread_state {
 struct workqueue;
 
 // Per-thread state
+//
+// Cache-line-optimized layout: fields are grouped by access frequency and
+// co-access patterns. Each hot group is separated by __STRUCT_CACHELINE_PADDING
+// to prevent false sharing.
+//
+// CL0: lock         — isolated; bounces between CPUs on signal/fork/wait
+// CL1: sched hot    — state, flags, sched_entity, ksp, chan, sched_entry, wq
+// CL2: trap hot     — trapframe, vm, pid, kstack, fs, fdtable, rcu_nesting
+// CL3: family tree  — sigacts, parent, children, siblings, xstate
+// cold: init/debug  — clone_flags, kentry, arg, name, thread_group, proctab...
+// signal (large)    — thread_signal_t (560B, pushed to end)
+// rcu_head          — must be last
 struct thread {
-    struct spinlock lock;
+    // ===== Cache line 0: Lock (isolated to prevent false sharing) =====
+    spinlock_t lock;
+    __STRUCT_CACHELINE_PADDING;
 
-    // both p->lock and the corresponding thread queue lock must be held
-    // when using these.
-    //
-    // If the thread is trying to yield as RUNNABLE, it must hold __sched_lock
-    // after acquiring p->lock, and before switching to the scheduler.
-    //
-    // When the thread is in SLEEPING state, these fields are managed by the
-    // scheduler, and the thread queue it's in.
+    // ===== Cache line 1: Scheduler hot path =====
+    // Accessed on every context switch / wakeup. state and flags use atomics.
+    // p->lock and the corresponding thread queue lock must be held when using
+    // state, chan, and sched_entry.
     enum thread_state state; // Thread state
-    void *chan;              // If non-zero, sleeping on chan
-    list_node_t sched_entry; // entry for ready queue
-    struct workqueue *wq;    // work queue this thread belongs to
-    list_node_t wq_entry;    // link to work queue
     uint64 flags;
 #define THREAD_FLAG_VALID 1
 #define THREAD_FLAG_KILLED 2     // Thread is exiting or exited
 #define THREAD_FLAG_ONCHAN 3     // Thread is sleeping on a channel
 #define THREAD_FLAG_SIGPENDING 4 // Thread has pending deliverable signals
 #define THREAD_FLAG_USER_SPACE 5 // Thread has user space
-    uint64 clone_flags;          // flags used during clone
+    struct sched_entity *sched_entity; // PI lock, on_rq, context, etc.
+    uint64 ksp;
+    void *chan;              // If non-zero, sleeping on chan
+    list_node_t sched_entry; // entry for ready queue
+    struct workqueue *wq;    // work queue this thread belongs to
+    __STRUCT_CACHELINE_PADDING;
 
-    // process table lock must be held before holding p->lock to use this:
-    hlist_entry_t proctab_entry; // Entry to link the pid hash table
+    // ===== Cache line 2: Trap / syscall hot path =====
+    // Accessed on every trap entry/exit and most syscalls.
+    // These are private to the thread or stable read-mostly pointers.
+    struct utrapframe *trapframe; // data page for trampoline.S
+    vm_t *vm;                     // Virtual memory areas and page table
+    int pid;                      // Thread ID
+    int kstack_order;             // Kernel stack order, used for allocation
+    uint64 kstack;                // Virtual address of kernel stack
+    uint64 trapframe_vbase;       // Base virtual address of the trapframe
+    struct fs_struct *fs;         // Filesystem state (on kernel stack below utrapframe)
+    struct vfs_fdtable *fdtable;  // File descriptor table (on kernel stack below fs)
+    int rcu_read_lock_nesting;    // Number of nested rcu_read_lock() calls
+    __STRUCT_CACHELINE_PADDING;
 
-    // p->lock must be held when using these:
-    list_node_t dmp_list_entry; // Entry in the dump list
-    int xstate;                 // Exit status to be returned to parent's wait
-    int pid;                    // Thread ID
-
-    // Signal related fields
-    sigacts_t *sigacts; // Signal actions for this thread
-    // Thread-local signal state
-    thread_signal_t signal; // Per-thread signal state
+    // ===== Cache line 3: Family tree (fork / exit / wait) =====
+    // p->lock must be held when using these.
+    // Both p->lock and p->parent->lock for siblings.
+    sigacts_t *sigacts;    // Signal actions for this thread
+    struct thread *parent; // Parent thread
     struct thread
-        *vfork_parent; // Parent waiting for vfork child (NULL if not vfork)
-
-    // both p->lock and p->parent->lock must be held when using this:
-    list_node_t siblings;  // List of sibling threads
+        *vfork_parent;     // Parent waiting for vfork child (NULL if not vfork)
     list_node_t children;  // List of child threads
     int children_count;    // Number of children
-    struct thread *parent; // Parent thread
+    int xstate;            // Exit status to be returned to parent's wait
+    list_node_t siblings;  // List of sibling threads
+    __STRUCT_CACHELINE_PADDING;
 
-    // these are private to the thread, so p->lock need not be held.
-    uint64 kstack;    // Virtual address of kernel stack
-    int kstack_order; // Kernel stack order, used for allocation
-    uint64 ksp;
-    vm_t *vm;                     // Virtual memory areas and page table
-    struct utrapframe *trapframe; // data page for trampoline.S
-    uint64 trapframe_vbase;       // Base virtual address of the trapframe
+    // ===== Cold: Initialization / rarely changed =====
+    uint64 clone_flags;    // flags used during clone
+    uint64 kentry;         // Entry point for kernel thread
+    uint64 arg[2];         // Argument for kernel thread
+    char name[16];         // Thread name (debugging)
 
-    // Priority Inheritance lock, on_rq, on_cpu, cpu_id, and context are now
-    // stored in sched_entity. Access them via p->sched_entity-><field>.
-    struct sched_entity *sched_entity;
-    uint64 kentry; // Entry point for kernel thread
-    uint64 arg[2]; // Argument for kernel thread
+    // Thread group (POSIX process abstraction).
+    // All threads created with CLONE_THREAD share the same thread_group.
+    // Threads created with fork/clone (no CLONE_THREAD) get their own group.
+    struct thread_group *thread_group; // Thread group this thread belongs to
+    list_node_t tg_entry;             // Link in thread_group->thread_list
+    list_node_t wq_entry;             // link to work queue
 
-    struct fs_struct *fs; // Filesystem state (on kernel stack below utrapframe)
-    struct vfs_fdtable
-        *fdtable;  // File descriptor table (on kernel stack below fs)
-    char name[16]; // Thread name (debugging)
+    // ===== Cold: Registration / debug =====
+    // process table lock must be held before holding p->lock to use this:
+    hlist_entry_t proctab_entry; // Entry to link the pid hash table
+    list_node_t dmp_list_entry;  // Entry in the dump list
 
-    // RCU read-side critical section nesting counter (per-thread)
-    // This counter follows the thread across CPU migrations, enabling
-    // preemptible RCU. It tracks how many times this thread has called
-    // rcu_read_lock() without matching rcu_read_unlock(). The thread can
-    // safely yield and migrate CPUs while this is > 0.
-    int rcu_read_lock_nesting; // Number of nested rcu_read_lock() calls
+    // ===== Signal (warm, large — pushed to end) =====
+    thread_signal_t signal; // Per-thread signal state
 
-    // RCU deferred freeing
+    // ===== RCU deferred freeing (must be last) =====
     rcu_head_t rcu_head; // RCU callback head (must be last)
 };
 

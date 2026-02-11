@@ -47,7 +47,7 @@
 #include "proc/tq.h"
 
 static slab_cache_t __vfs_file_slab = { 0 };
-static struct spinlock __vfs_ftable_lock = { 0 };
+static spinlock_t __vfs_ftable_lock = { 0 };
 static list_node_t __vfs_ftable = { 0 };
 static int __vfs_open_file_count = 0;
 
@@ -638,11 +638,11 @@ struct sock {
   uint32 raddr;      // the remote IPv4 address
   uint16 lport;      // the local UDP port number
   uint16 rport;      // the remote UDP port number
-  struct spinlock lock; // protects the rxq
+  spinlock_t lock; // protects the rxq
   struct mbufq rxq;  // a queue of packets waiting to be received
 };
 
-extern struct spinlock sock_lock;
+extern spinlock_t sock_lock;
 extern struct sock *sockets;
 
 int vfs_sockalloc(struct vfs_file **f, uint32 raddr, uint16 lport, uint16 rport) {

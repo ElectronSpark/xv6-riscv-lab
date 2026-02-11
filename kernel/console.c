@@ -111,7 +111,7 @@ void consputs(const char *s, int n) {
 }
 
 struct {
-    struct spinlock lock;
+    spinlock_t lock;
 
     // input
 #define INPUT_BUF_SIZE 128

@@ -45,6 +45,9 @@
 #define SYS_sigpending 37
 #define SYS_sigprocmask 38
 #define SYS_pause 39
+#define SYS_gettid 40
+#define SYS_exit_group 41
+#define SYS_tgkill 42
 
 #define SYS_memstat 533
 #define SYS_dumpproc 534

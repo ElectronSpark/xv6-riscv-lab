@@ -33,6 +33,7 @@
 #include "proc/thread.h"
 #include "string.h"
 #include "bits.h"
+#include "lock/spinlock.h"
 
 /** @brief Per-CPU state, placed in special linker section for trampoline access
  */

@@ -130,7 +130,7 @@ void __wrap_scheduler_wakeup(struct thread *p)
     (void)p;
 }
 
-void __wrap_scheduler_sleep(struct spinlock *lk, enum thread_state state)
+void __wrap_scheduler_sleep(spinlock_t *lk, enum thread_state state)
 {
     (void)lk;
     (void)state;
@@ -162,7 +162,7 @@ void __wrap_wakeup_on_chan(void *chan)
     (void)chan;
 }
 
-void __wrap_sleep_on_chan(void *chan, struct spinlock *lk)
+void __wrap_sleep_on_chan(void *chan, spinlock_t *lk)
 {
     (void)chan;
     
@@ -209,7 +209,7 @@ int __wrap_tq_size(tq_t *q)
     return q->counter;
 }
 
-int __wrap_tq_wait(tq_t *q, struct spinlock *lock, uint64 *rdata)
+int __wrap_tq_wait(tq_t *q, spinlock_t *lock, uint64 *rdata)
 {
     if (g_concurrency_mode) {
         // Real blocking: release lock atomically and wait on condvar

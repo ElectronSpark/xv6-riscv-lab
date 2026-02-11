@@ -11,7 +11,7 @@ void __wrap_scheduler_wakeup(struct thread *p) {
     // No-op for tests
 }
 
-void __wrap_scheduler_sleep(struct spinlock *lk, enum thread_state state) {
+void __wrap_scheduler_sleep(spinlock_t *lk, enum thread_state state) {
     (void)lk;
     (void)state;
     // No-op for tests
