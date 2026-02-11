@@ -4,7 +4,7 @@
 #include "user/user.h"
 
 #ifndef SIG_BLOCK
-#define SIG_BLOCK   1
+#define SIG_BLOCK 1
 #define SIG_UNBLOCK 2
 #define SIG_SETMASK 3
 #endif
@@ -14,13 +14,14 @@
 #endif
 
 // Global counters for validations
-static volatile int siginfo_count = 0;            // For queue cap test (SIGALRM)
-static volatile int rese_count = 0;               // For SA_RESETHAND test (SIGUSR1)
-static volatile int nodefer_depth_max = 0;        // For SA_NODEFER recursion depth
+static volatile int siginfo_count = 0;     // For queue cap test (SIGALRM)
+static volatile int rese_count = 0;        // For SA_RESETHAND test (SIGUSR1)
+static volatile int nodefer_depth_max = 0; // For SA_NODEFER recursion depth
 static volatile int nodefer_current_depth = 0;
-static volatile int cont_handler_count = 0;       // SIGCONT handler invocations
-static volatile int change_handler_count = 0;     // Post-change handler delivery count (SIGALRM)
-static int test_failures = 0;                     // Track test failures
+static volatile int cont_handler_count = 0; // SIGCONT handler invocations
+static volatile int change_handler_count =
+    0;                        // Post-change handler delivery count (SIGALRM)
+static int test_failures = 0; // Track test failures
 
 /* ---------------- Basic Handlers ---------------- */
 static void simple_handler(int signo) {
@@ -30,7 +31,9 @@ static void simple_handler(int signo) {
 
 static void rese_handler(int signo) {
     rese_count++;
-    printf("SA_RESETHAND first delivery signo=%d rese_count=%d (will reset to default)\n", signo, rese_count);
+    printf("SA_RESETHAND first delivery signo=%d rese_count=%d (will reset to "
+           "default)\n",
+           signo, rese_count);
     sigreturn();
 }
 
@@ -38,9 +41,11 @@ static void nodefer_handler(int signo) {
     nodefer_current_depth++;
     if (nodefer_current_depth > nodefer_depth_max)
         nodefer_depth_max = nodefer_current_depth;
-    printf("SA_NODEFER handler depth=%d signo=%d\n", nodefer_current_depth, signo);
+    printf("SA_NODEFER handler depth=%d signo=%d\n", nodefer_current_depth,
+           signo);
     if (nodefer_current_depth == 1) {
-        // Re-enter by raising again; with SA_NODEFER we should immediately recurse.
+        // Re-enter by raising again; with SA_NODEFER we should immediately
+        // recurse.
         kill(getpid(), signo);
     }
     nodefer_current_depth--;
@@ -51,7 +56,8 @@ static void siginfo_handler(int signo, siginfo_t *info, void *context) {
     siginfo_count++;
     printf("SIGINFO handler signo=%d count=%d ", signo, siginfo_count);
     if (info) {
-        printf("[si_code=%d sival_int=%d pid=%d]", info->si_code, info->si_value.sival_int, info->si_pid);
+        printf("[si_code=%d sival_int=%d pid=%d]", info->si_code,
+               info->si_value.sival_int, info->si_pid);
     }
     printf("\n");
     sigreturn();
@@ -59,13 +65,16 @@ static void siginfo_handler(int signo, siginfo_t *info, void *context) {
 
 static void cont_handler(int signo) {
     cont_handler_count++;
-    printf("SIGCONT handler invoked count=%d signo=%d\n", cont_handler_count, signo);
+    printf("SIGCONT handler invoked count=%d signo=%d\n", cont_handler_count,
+           signo);
     sigreturn();
 }
 
 static void post_change_handler(int signo) {
     change_handler_count++;
-    printf("Post-change handler delivered signo=%d change_handler_count=%d (old pending should be gone)\n", signo, change_handler_count);
+    printf("Post-change handler delivered signo=%d change_handler_count=%d "
+           "(old pending should be gone)\n",
+           signo, change_handler_count);
     sigreturn();
 }
 
@@ -94,16 +103,20 @@ static void test_siginfo_queue_cap(void) {
     }
     sigset_t old;
     block_signal(SIGALRM, &old); // Block SIGALRM so they queue
-    int sends = 12; // exceed kernel cap (8)
+    int sends = 12;              // exceed kernel cap (8)
     for (int i = 0; i < sends; i++) {
         kill(getpid(), SIGALRM);
     }
-    printf("Sent %d SIGALRM while blocked; now unblocking (cap expected 8 deliveries)\n", sends);
+    printf("Sent %d SIGALRM while blocked; now unblocking (cap expected 8 "
+           "deliveries)\n",
+           sends);
     unblock_signal(SIGALRM);
     // Allow deliveries
     for (;;) {
-        if (siginfo_count >= 8) break; // expected
-        if (siginfo_count > 8) break;   // anomaly
+        if (siginfo_count >= 8)
+            break; // expected
+        if (siginfo_count > 8)
+            break; // anomaly
         // pause returns after each signal
         pause();
     }
@@ -111,7 +124,8 @@ static void test_siginfo_queue_cap(void) {
     if (siginfo_count == 8) {
         printf("[Test 1] PASS\n");
     } else {
-        printf("[Test 1] FAIL: Queue cap mismatch (got %d, expected 8)\n", siginfo_count);
+        printf("[Test 1] FAIL: Queue cap mismatch (got %d, expected 8)\n",
+               siginfo_count);
         test_failures++;
     }
 }
@@ -134,7 +148,8 @@ static void test_resehand(void) {
         sleep(100);
         kill(parent, SIGUSR1); // first (handled & resets to SIG_DFL)
         // Note: We do NOT send a second SIGUSR1 because after SA_RESETHAND,
-        // the handler is SIG_DFL, and SIG_DFL for SIGUSR1 terminates the process.
+        // the handler is SIG_DFL, and SIG_DFL for SIGUSR1 terminates the
+        // process.
         exit(0);
     }
     // Parent waits for first (only) handler run.
@@ -145,12 +160,14 @@ static void test_resehand(void) {
     sigaction_t old = {0};
     sigaction(SIGUSR1, 0, &old);
     int handler_was_reset = (old.sa_handler == SIG_DFL);
-    
-    printf("SA_RESETHAND rese_count=%d (expected 1), handler_reset=%d\n", rese_count, handler_was_reset);
+
+    printf("SA_RESETHAND rese_count=%d (expected 1), handler_reset=%d\n",
+           rese_count, handler_was_reset);
     if (rese_count == 1 && handler_was_reset) {
         printf("[Test 2] PASS\n");
     } else {
-        printf("[Test 2] FAIL: rese_count=%d (expected 1), handler_reset=%d (expected 1)\n", 
+        printf("[Test 2] FAIL: rese_count=%d (expected 1), handler_reset=%d "
+               "(expected 1)\n",
                rese_count, handler_was_reset);
         test_failures++;
     }
@@ -181,7 +198,8 @@ static void test_nodefer(void) {
     while (nodefer_depth_max == 0) {
         pause();
     }
-    printf("SA_NODEFER max recursion depth observed=%d (expected 2)\n", nodefer_depth_max);
+    printf("SA_NODEFER max recursion depth observed=%d (expected 2)\n",
+           nodefer_depth_max);
     if (nodefer_depth_max == 2) {
         printf("[Test 3] PASS\n");
     } else {
@@ -195,14 +213,15 @@ static void test_nodefer(void) {
 static void test_stop_continue(void) {
     printf("\n[Test 4] Stop / Continue semantics with SIGCONT handler\n");
     cont_handler_count = 0;
-    
+
     int child = fork();
     if (child < 0) {
         printf("fork failed\n");
         return;
     }
     if (child == 0) {
-        // Child process: install SIGCONT handler, then wait to be stopped/continued.
+        // Child process: install SIGCONT handler, then wait to be
+        // stopped/continued.
         sigaction_t sa = {0};
         sa.sa_handler = cont_handler;
         if (sigaction(SIGCONT, &sa, 0) != 0) {
@@ -210,42 +229,44 @@ static void test_stop_continue(void) {
             exit(-1);
         }
         printf("Child %d ready, entering pause loop...\n", getpid());
-        
+
         // Loop: each SIGCONT should wake us from pause and invoke handler
         // We expect 2 stop/continue cycles
         while (cont_handler_count < 2) {
             pause();
-            printf("Child: woke from pause, cont_handler_count=%d\n", cont_handler_count);
+            printf("Child: woke from pause, cont_handler_count=%d\n",
+                   cont_handler_count);
         }
-        printf("Child %d exiting (cont_handler_count=%d)\n", getpid(), cont_handler_count);
+        printf("Child %d exiting (cont_handler_count=%d)\n", getpid(),
+               cont_handler_count);
         exit(0);
     }
-    
+
     // Parent: allow child to setup and enter pause
     sleep(100);
-    
+
     // First stop/continue cycle
     printf("Parent: sending SIGSTOP to child %d\n", child);
     kill(child, SIGSTOP);
-    sleep(200);  // Give time for child to actually stop
-    
+    sleep(200); // Give time for child to actually stop
+
     printf("Parent: sending SIGCONT to resume child\n");
-    kill(child, SIGCONT);  // Should resume child and invoke handler
-    sleep(200);  // Give time for child to wake and run handler
-    
+    kill(child, SIGCONT); // Should resume child and invoke handler
+    sleep(200);           // Give time for child to wake and run handler
+
     // Second stop/continue cycle
     printf("Parent: sending second SIGSTOP\n");
     kill(child, SIGSTOP);
     sleep(200);
-    
+
     printf("Parent: sending second SIGCONT\n");
     kill(child, SIGCONT);
     sleep(200);
-    
+
     printf("Parent: waiting for child to exit\n");
     int status;
     wait(&status);
-    
+
     // Child sets cont_handler_count=2 before exit; we check exit status.
     if (status == 0) {
         printf("[Test 4] PASS\n");
@@ -271,7 +292,8 @@ static void test_change_handler_clears_pending(void) {
     for (int i = 0; i < 5; i++) {
         kill(getpid(), SIGALRM);
     }
-    // Change handler while still blocked; sigaction() should clear pending queue.
+    // Change handler while still blocked; sigaction() should clear pending
+    // queue.
     sigaction_t sa_new = {0};
     sa_new.sa_handler = post_change_handler;
     if (sigaction(SIGALRM, &sa_new, 0) != 0) {
@@ -288,7 +310,8 @@ static void test_change_handler_clears_pending(void) {
     if (change_handler_count == 1) {
         printf("[Test 5] PASS\n");
     } else {
-        printf("[Test 5] FAIL: change_handler_count=%d, expected 1\n", change_handler_count);
+        printf("[Test 5] FAIL: change_handler_count=%d, expected 1\n",
+               change_handler_count);
         test_failures++;
     }
 }

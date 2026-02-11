@@ -27,6 +27,7 @@ void pcache_test_set_retry_hook(void (*hook)(struct pcache *, uint64));
 #endif
 
 // ssize_t bread(dev_t dev, uint64 blockno, void *data, size_t size, bool user);
-// ssize_t bwrite(dev_t dev, uint64 blockno, const void *data, size_t size, bool user);
+// ssize_t bwrite(dev_t dev, uint64 blockno, const void *data, size_t size, bool
+// user);
 
 #endif /* __KERNEL_PAGE_CACHE_H__ */

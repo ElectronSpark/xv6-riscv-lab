@@ -4,30 +4,30 @@
 #include "compiler.h"
 
 // System call numbers
-#define SYS_clone   1
-#define SYS_exit    2
-#define SYS_wait    3
-#define SYS_pipe    4
-#define SYS_read    5
-#define SYS_kill    6
-#define SYS_exec    7
-#define SYS_fstat   8
-#define SYS_chdir   9
-#define SYS_dup    10
+#define SYS_clone 1
+#define SYS_exit 2
+#define SYS_wait 3
+#define SYS_pipe 4
+#define SYS_read 5
+#define SYS_kill 6
+#define SYS_exec 7
+#define SYS_fstat 8
+#define SYS_chdir 9
+#define SYS_dup 10
 #define SYS_getpid 11
-#define SYS_sbrk   12
-#define SYS_sleep  13
+#define SYS_sbrk 12
+#define SYS_sleep 13
 #define SYS_uptime 14
-#define SYS_open   15
-#define SYS_write  16
-#define SYS_mknod  17
+#define SYS_open 15
+#define SYS_write 16
+#define SYS_mknod 17
 #define SYS_unlink 18
-#define SYS_link   19
-#define SYS_mkdir  20
-#define SYS_close  21
+#define SYS_link 19
+#define SYS_mkdir 20
+#define SYS_close 21
 
 // In the original lab SYS_connect is 29
-#define SYS_connect     22
+#define SYS_connect 22
 // In the original lab SYS_symlink is 26
 // #define SYS_symlink     23
 
@@ -38,8 +38,8 @@
 // #define SYS_munmap    30
 // #define SYS_connect   31
 // #define SYS_pgaccess  32
-#define SYS_symlink   33
-#define SYS_sigalarm  34
+#define SYS_symlink 33
+#define SYS_sigalarm 34
 #define SYS_sigaction 35
 #define SYS_sigreturn 36
 #define SYS_sigpending 37
@@ -60,25 +60,25 @@
 #define SYS_sync 900
 
 // VFS syscalls - these replace the original fs syscalls
-#define SYS_vfs_dup      1000
-#define SYS_vfs_read     1001
-#define SYS_vfs_write    1002
-#define SYS_vfs_close    1003
-#define SYS_vfs_fstat    1004
-#define SYS_vfs_open     1005
-#define SYS_vfs_mkdir    1006
-#define SYS_vfs_mknod    1007
-#define SYS_vfs_unlink   1008
-#define SYS_vfs_link     1010
-#define SYS_vfs_symlink  1011
-#define SYS_vfs_chdir    1012
-#define SYS_vfs_pipe     1013
-#define SYS_vfs_connect  1014
-#define SYS_getdents     1015
-#define SYS_chroot       1016
-#define SYS_mount        1017
-#define SYS_umount       1018
-#define SYS_getcwd       1019
+#define SYS_vfs_dup 1000
+#define SYS_vfs_read 1001
+#define SYS_vfs_write 1002
+#define SYS_vfs_close 1003
+#define SYS_vfs_fstat 1004
+#define SYS_vfs_open 1005
+#define SYS_vfs_mkdir 1006
+#define SYS_vfs_mknod 1007
+#define SYS_vfs_unlink 1008
+#define SYS_vfs_link 1010
+#define SYS_vfs_symlink 1011
+#define SYS_vfs_chdir 1012
+#define SYS_vfs_pipe 1013
+#define SYS_vfs_connect 1014
+#define SYS_getdents 1015
+#define SYS_chroot 1016
+#define SYS_mount 1017
+#define SYS_umount 1018
+#define SYS_getcwd 1019
 // SYS_mknod2 removed - mknod now takes 4 args (path, type, major, minor)
 
-#endif          /* __KERNEL_SYSCALL_H */
+#endif /* __KERNEL_SYSCALL_H */

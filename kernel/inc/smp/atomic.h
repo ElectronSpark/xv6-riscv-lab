@@ -73,7 +73,8 @@
  * Returns true if the CAS succeeded, false if @__COND became false.
  */
 #define atomic_oper_cond(__TGT_PTR, __OPER, __COND)                            \
-    atomic_oper_cond_hook(__TGT_PTR, __OPER, __COND, /* no hook */, /* no hook */)
+    atomic_oper_cond_hook(__TGT_PTR, __OPER, __COND, /* no hook */,            \
+                          /* no hook */)
 
 /**
  * atomic_dec_unless - atomically decrement unless value equals @unless

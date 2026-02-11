@@ -44,15 +44,16 @@ struct {
     struct buf buf[NBUF];
 
     // Free list of unused buffers (refcnt == 0), sorted by LRU order.
-    // Push at head (most recently used), pop from tail (oldest/least recently used).
+    // Push at head (most recently used), pop from tail (oldest/least recently
+    // used).
     list_node_t free_list;
-    
+
     // Dirty list of buffers that need writeback.
     // Buffers are added when marked dirty, removed after writeback.
     list_node_t dirty_list;
-    uint dirty_count;  // number of dirty buffers
-    
-    hlist_t cached;        // Hash list of buffers, sorted by (dev, blockno).
+    uint dirty_count; // number of dirty buffers
+
+    hlist_t cached; // Hash list of buffers, sorted by (dev, blockno).
     hlist_bucket_t
         buckets[BIO_HASH_BUCKETS]; // stores the hash buckets of the hash list
 } bcache;
@@ -146,7 +147,7 @@ void binit(void) {
     list_entry_init(&bcache.free_list);
     list_entry_init(&bcache.dirty_list);
     bcache.dirty_count = 0;
-    
+
     hlist_func_t hlist_func = {.hash = __bcache_hash_func,
                                .get_node = __bcache_hlist_get_node,
                                .get_entry = __bcache_hlist_get_entry,
@@ -190,10 +191,10 @@ STATIC struct buf *bget(uint dev, uint blockno) {
     if (LIST_IS_EMPTY(&bcache.free_list)) {
         panic("bget: no buffers");
     }
-    
+
     // Pop from free list (get oldest free buffer for LRU behavior)
     b = list_node_pop_back(&bcache.free_list, struct buf, free_entry);
-    
+
     // Remove from hash table if it was caching a different block
     b1 = __bcache_hlist_pop(b->dev, b->blockno);
     if (b1 && b1 != b) {
@@ -210,9 +211,10 @@ STATIC struct buf *bget(uint dev, uint blockno) {
             panic("bget: failed to push cached buffer into hash list");
         }
     }
-    
-    __atomic_thread_fence(__ATOMIC_SEQ_CST); // Ensure the buffer is detached before using it
-    
+
+    __atomic_thread_fence(
+        __ATOMIC_SEQ_CST); // Ensure the buffer is detached before using it
+
     b->dev = dev;
     b->blockno = blockno;
     b->valid = 0;
@@ -286,7 +288,7 @@ void bwrite(struct buf *b) {
     assert(!IS_ERR_OR_NULL(bio), "bwrite: bio_alloc failed");
     blkdev_submit_bio(blkdev, bio);
     __buf_bio_cleanup(bio);
-    
+
     // Clear dirty flag after successful write
     spin_lock(&bcache.lock);
     if (b->dirty) {
@@ -297,7 +299,7 @@ void bwrite(struct buf *b) {
         }
     }
     spin_unlock(&bcache.lock);
-    
+
     int ret = blkdev_put(blkdev);
     assert(ret == 0, "bwrite: blkdev_put failed: %d", ret);
 }
@@ -307,7 +309,7 @@ void bwrite(struct buf *b) {
 void bwrite_async(struct buf *b) {
     if (!holding_mutex(&b->lock))
         panic("bwrite_async");
-    
+
     spin_lock(&bcache.lock);
     if (!b->dirty) {
         b->dirty = 1;
@@ -323,31 +325,31 @@ void bwrite_async(struct buf *b) {
 void bsync(void) {
     struct buf *b;
     int flushed = 0;
-    
+
     while (1) {
         spin_lock(&bcache.lock);
-        
+
         if (LIST_IS_EMPTY(&bcache.dirty_list)) {
             spin_unlock(&bcache.lock);
             break;
         }
-        
+
         // Get oldest dirty buffer (FIFO order)
         b = list_node_pop_back(&bcache.dirty_list, struct buf, dirty_entry);
         b->dirty = 0;
         bcache.dirty_count--;
-        
+
         // Increment refcnt to prevent buffer from being recycled
         if (b->refcnt == 0 && !LIST_NODE_IS_DETACHED(b, free_entry)) {
             list_node_detach(b, free_entry);
         }
         b->refcnt++;
-        
+
         spin_unlock(&bcache.lock);
-        
+
         // Lock buffer and write to disk
         assert(mutex_lock(&b->lock) == 0, "bsync: failed to lock buffer");
-        
+
         if (b->valid) {
             blkdev_t *blkdev = blkdev_get(major(b->dev), minor(b->dev));
             if (!IS_ERR(blkdev)) {
@@ -360,9 +362,9 @@ void bsync(void) {
                 blkdev_put(blkdev);
             }
         }
-        
+
         mutex_unlock(&b->lock);
-        
+
         // Release our reference
         spin_lock(&bcache.lock);
         b->refcnt--;
@@ -371,7 +373,7 @@ void bsync(void) {
         }
         spin_unlock(&bcache.lock);
     }
-    
+
     if (flushed > 0) {
         // Could add debug output here if needed
     }

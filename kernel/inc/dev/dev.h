@@ -20,5 +20,4 @@ int device_unregister(device_t *dev);
 // Device table stress tests
 void dev_table_test(void);
 
-
 #endif // __KERNEL_DEV_DEV_H

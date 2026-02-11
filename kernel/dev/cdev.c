@@ -28,9 +28,7 @@ static int __underlying_dev_release(device_t *dev) {
 }
 
 static device_ops_t __cdev_underlying_ops = {
-    .open = __underlying_dev_open,
-    .release = __underlying_dev_release
-};
+    .open = __underlying_dev_open, .release = __underlying_dev_release};
 
 static bool __cdev_opts_validate(cdev_ops_t *ops) {
     if (ops == NULL) {
@@ -49,7 +47,7 @@ cdev_t *cdev_get(int major, int minor) {
         return (cdev_t *)device; // Propagate error from device_get
     }
     if (device->type != DEV_TYPE_CHAR) {
-        device_put(device); // Release the device reference
+        device_put(device);      // Release the device reference
         return ERR_PTR(-ENODEV); // Not a character device
     }
     return (cdev_t *)device;

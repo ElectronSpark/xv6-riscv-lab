@@ -23,11 +23,8 @@ static void __bio_relase_kobj_cb(struct kobject *obj) {
     kmm_free(bio);
 }
 
-struct bio *bio_alloc(blkdev_t *bdev, 
-                      int16 vec_length, 
-                      bool rw, 
-                      void (*end_io)(struct bio *bio), 
-                      void *private_data) {
+struct bio *bio_alloc(blkdev_t *bdev, int16 vec_length, bool rw,
+                      void (*end_io)(struct bio *bio), void *private_data) {
     struct bio *bio = NULL;
     if (bdev == NULL || vec_length <= 0 || vec_length > BIO_MAX_VECS) {
         return ERR_PTR(-EINVAL); // Invalid arguments
@@ -50,7 +47,8 @@ struct bio *bio_alloc(blkdev_t *bdev,
     return bio;
 }
 
-int bio_add_seg(struct bio *bio, page_t *page, int16 idx, uint16 len, uint16 offset) {
+int bio_add_seg(struct bio *bio, page_t *page, int16 idx, uint16 len,
+                uint16 offset) {
     if (bio == NULL || page == NULL || len == 0) {
         return -EINVAL; // Invalid arguments
     }

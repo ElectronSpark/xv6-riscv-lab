@@ -75,9 +75,8 @@ int mutex_lock(mutex_t *lk) {
             // gotten the lock, we need to release the lock and return the error
             // code.
             if (__mutex_holder(lk) == self->pid) {
-                assert(
-                    !IS_ERR_OR_NULL(__do_wakeup(lk)),
-                    "mutex_lock: failed to wake up threads after interrupt");
+                assert(!IS_ERR_OR_NULL(__do_wakeup(lk)),
+                       "mutex_lock: failed to wake up threads after interrupt");
             }
             spin_unlock(&lk->lk);
             return ret;

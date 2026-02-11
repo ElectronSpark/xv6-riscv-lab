@@ -41,7 +41,7 @@ struct tmpfs_inode {
             // is shorter than TMPFS_INODE_EMBEDDED_DATA_LEN. Otherwise,
             // it is allocated separately and pointed to by symlink_target.
             char *symlink_target; // target path (for symlinks)
-            char data[0];        // file data (for regular files)
+            char data[0];         // file data (for regular files)
         } sym;
         union {
             // Non-embedded file data is stored in the per-inode pcache
@@ -62,7 +62,7 @@ struct tmpfs_dentry {
     char __name_start[0];
 };
 
-#define TMPFS_INODE_EMBEDDED_DATA_LEN   \
+#define TMPFS_INODE_EMBEDDED_DATA_LEN                                          \
     (sizeof(struct tmpfs_inode) - offsetof(struct tmpfs_inode, sym.data))
 
 // Get the block index within the file for a given position

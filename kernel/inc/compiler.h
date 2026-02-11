@@ -35,14 +35,16 @@
 /**
  * @brief Create an anonymous struct with specified alignment
  * @param x Alignment in bytes
- * 
+ *
  * Used to add padding in structures to enforce alignment of subsequent fields.
  */
-#define __STRUCT_ALIGNMENT(x) struct {} __attribute__((aligned(x)))
+#define __STRUCT_ALIGNMENT(x)                                                  \
+    struct {                                                                   \
+    } __attribute__((aligned(x)))
 
 /**
  * @brief Add cache line padding in a structure
- * 
+ *
  * Ensures the following field starts on a new cache line to prevent
  * false sharing between CPU cores.
  */
@@ -56,18 +58,19 @@
 /**
  * @brief Compile-time assertion macro
  * @param condition The condition that should be false
- * 
+ *
  * Causes a compile-time error if @p condition evaluates to true.
  * Uses a negative array size trick to trigger the error.
- * 
+ *
  * Example:
  * @code
  * BUILD_BUG_ON(sizeof(struct foo) > 64);  // Error if struct is too large
  * @endcode
  */
-#define BUILD_BUG_ON(condition) static inline void  \
-__BUILD_BUG_ON_PASTE2(__build_bug_on_, __LINE__)(void) { \
-    ((void)sizeof(char[1 - 2*!!(condition)]));      \
-}
+#define BUILD_BUG_ON(condition)                                                \
+    static inline void __BUILD_BUG_ON_PASTE2(__build_bug_on_,                  \
+                                             __LINE__)(void) {                 \
+        ((void)sizeof(char[1 - 2 * !!(condition)]));                           \
+    }
 
 #endif // __KERNEL_COMPILER_H

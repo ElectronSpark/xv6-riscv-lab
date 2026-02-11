@@ -64,7 +64,8 @@ uint64 sys_sigaction(void) {
     }
 
     if (p_oldact != 0) {
-        if (either_copyout(1, oldact_addr, p_oldact, sizeof(struct sigaction)) < 0) {
+        if (either_copyout(1, oldact_addr, p_oldact, sizeof(struct sigaction)) <
+            0) {
             return -1; // Copy failed
         }
     }
@@ -91,7 +92,7 @@ uint64 sys_sigreturn(void) {
     if (sigreturn() < 0) {
         return -1; // sigreturn failed
     }
-    
+
     struct thread *p = current;
     assert(p != NULL, "sys_sigreturn: current returned NULL");
 
@@ -127,4 +128,3 @@ uint64 sys_kill(void) {
 
     return kill(pid, signum);
 }
-

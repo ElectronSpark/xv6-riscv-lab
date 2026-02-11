@@ -110,7 +110,8 @@ static void __vfs_fdtable_free(struct vfs_fdtable *fdtable) {
 }
 
 /**
- * vfs_fdtable_alloc_fd_from - Allocate a file descriptor starting from a minimum fd
+ * vfs_fdtable_alloc_fd_from - Allocate a file descriptor starting from a
+ * minimum fd
  * @fdtable: The file descriptor table
  * @file: The file to associate with the new fd
  * @start_fd: Lowest fd number to consider (0 to NOFILE-1)
@@ -129,7 +130,8 @@ static void __vfs_fdtable_free(struct vfs_fdtable *fdtable) {
  *   -EMFILE: No free fd available (table full or none >= @start_fd)
  *   -ENOMEM: Failed to increment file reference count
  */
-int vfs_fdtable_alloc_fd_from(struct vfs_fdtable *fdtable, struct vfs_file *file, int start_fd) {
+int vfs_fdtable_alloc_fd_from(struct vfs_fdtable *fdtable,
+                              struct vfs_file *file, int start_fd) {
     if (fdtable == NULL || file == NULL) {
         return -EINVAL; // Invalid arguments
     }

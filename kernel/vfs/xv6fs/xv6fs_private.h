@@ -5,7 +5,7 @@
 #include "vfs/vfs_types.h"
 #include "lock/spinlock.h"
 #include "proc/tq.h"
-#include "vfs/xv6fs/ondisk.h"  // xv6 on-disk format definitions
+#include "vfs/xv6fs/ondisk.h" // xv6 on-disk format definitions
 #include <mm/slab.h>
 #include <mm/pcache.h>
 #include "dev/blkdev.h"
@@ -32,11 +32,11 @@
 #define VFS_DENTRY_COOKIE_PARENT ((int64)2)
 
 // xv6 file types to VFS mode conversion
-#define XV6FS_T_DIR     1   // Directory
-#define XV6FS_T_FILE    2   // File
-#define XV6FS_T_CDEVICE  3   // Character device
+#define XV6FS_T_DIR 1       // Directory
+#define XV6FS_T_FILE 2      // File
+#define XV6FS_T_CDEVICE 3   // Character device
 #define XV6FS_T_SYMLINK 4   // Symbolic link
-#define XV6FS_T_BLKDEVICE 5   // Block device
+#define XV6FS_T_BLKDEVICE 5 // Block device
 
 /*
  * xv6fs log header structure
@@ -50,23 +50,23 @@ struct xv6fs_logheader {
 /*
  * xv6fs log structure
  * Per-superblock logging for crash recovery
- * 
+ *
  * The wait_queue is used instead of global sleep_on_chan() to avoid
  * contention on the global sleep_lock. Waiters in begin_op() use the
  * per-log queue, and end_op() wakes them after commit completes.
- * 
+ *
  * Pattern: end_op() uses tq_bulk_move() to a temp queue, then
  * wakes outside the lock to avoid lock convoy (woken threads competing
  * to reacquire log->lock).
  */
 struct xv6fs_log {
     spinlock_t lock;
-    tq_t wait_queue;  /**< Per-log wait queue for begin_op waiters */
-    int start;          // Log start block
-    int size;           // Log size in blocks
-    int outstanding;    // How many FS ops are executing
-    int committing;     // In commit(), please wait
-    int dev;            // Device number
+    tq_t wait_queue; /**< Per-log wait queue for begin_op waiters */
+    int start;       // Log start block
+    int size;        // Log size in blocks
+    int outstanding; // How many FS ops are executing
+    int committing;  // In commit(), please wait
+    int dev;         // Device number
     struct xv6fs_logheader lh;
 };
 
@@ -76,15 +76,15 @@ struct xv6fs_log {
  */
 struct xv6fs_superblock {
     struct vfs_superblock vfs_sb;
-    struct superblock disk_sb;   // Copy of the on-disk superblock
-    blkdev_t *blkdev;             // Block device descriptor reference
-    int dirty;                    // Superblock metadata dirty flag
-    struct xv6fs_log log;         // Per-superblock logging
+    struct superblock disk_sb;            // Copy of the on-disk superblock
+    blkdev_t *blkdev;                     // Block device descriptor reference
+    int dirty;                            // Superblock metadata dirty flag
+    struct xv6fs_log log;                 // Per-superblock logging
     struct xv6fs_block_cache block_cache; // Block allocation cache
 };
 
 // Helper to get device number from xv6fs superblock
-#define xv6fs_sb_dev(xv6_sb) \
+#define xv6fs_sb_dev(xv6_sb)                                                   \
     mkdev((xv6_sb)->blkdev->dev.major, (xv6_sb)->blkdev->dev.minor)
 
 /*
@@ -93,10 +93,11 @@ struct xv6fs_superblock {
  */
 struct xv6fs_inode {
     struct vfs_inode vfs_inode;
-    uint dev;                     // Device number (for lookup)
-    uint addrs[XV6FS_NDIRECT + 2]; // Block addresses (direct + indirect + double indirect)
-    short major;                  // Major device number (for device files)
-    short minor;                  // Minor device number (for device files)
+    uint dev; // Device number (for lookup)
+    uint addrs[XV6FS_NDIRECT +
+               2]; // Block addresses (direct + indirect + double indirect)
+    short major;   // Major device number (for device files)
+    short minor;   // Minor device number (for device files)
 };
 
 // External declarations
@@ -120,7 +121,8 @@ void xv6fs_free(struct vfs_superblock *sb);
 int xv6fs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
                 int flags, const char *data, struct vfs_superblock **ret_sb);
 
-// Per-inode page cache initialization (call for regular files after mode is set)
+// Per-inode page cache initialization (call for regular files after mode is
+// set)
 void xv6fs_inode_pcache_init(struct vfs_inode *inode);
 
 // Inode operations
@@ -130,18 +132,18 @@ int xv6fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
                    struct vfs_dentry *ret_dentry);
 ssize_t xv6fs_readlink(struct vfs_inode *inode, char *buf, size_t buflen);
 struct vfs_inode *xv6fs_create(struct vfs_inode *dir, mode_t mode,
-                                const char *name, size_t name_len);
-struct vfs_inode *xv6fs_mkdir(struct vfs_inode *dir, mode_t mode,
                                const char *name, size_t name_len);
+struct vfs_inode *xv6fs_mkdir(struct vfs_inode *dir, mode_t mode,
+                              const char *name, size_t name_len);
 int xv6fs_unlink(struct vfs_dentry *dentry, struct vfs_inode *target);
 int xv6fs_rmdir(struct vfs_dentry *dentry, struct vfs_inode *target);
-struct vfs_inode *xv6fs_mknod(struct vfs_inode *dir, mode_t mode,
-                               dev_t dev, const char *name, size_t name_len);
+struct vfs_inode *xv6fs_mknod(struct vfs_inode *dir, mode_t mode, dev_t dev,
+                              const char *name, size_t name_len);
 struct vfs_inode *xv6fs_symlink(struct vfs_inode *dir, mode_t mode,
-                                 const char *name, size_t name_len,
-                                 const char *target, size_t target_len);
-int xv6fs_link(struct vfs_inode *old, struct vfs_inode *dir,
-               const char *name, size_t name_len);
+                                const char *name, size_t name_len,
+                                const char *target, size_t target_len);
+int xv6fs_link(struct vfs_inode *old, struct vfs_inode *dir, const char *name,
+               size_t name_len);
 int xv6fs_truncate(struct vfs_inode *inode, loff_t new_size);
 void xv6fs_destroy_inode(struct vfs_inode *inode);
 void xv6fs_free_inode(struct vfs_inode *inode);
@@ -150,8 +152,10 @@ int xv6fs_sync_inode(struct vfs_inode *inode);
 int xv6fs_open(struct vfs_inode *inode, struct vfs_file *file, int f_flags);
 
 // File operations
-ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool user);
-ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, bool user);
+ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
+                        bool user);
+ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count,
+                         bool user);
 loff_t xv6fs_file_llseek(struct vfs_file *file, loff_t offset, int whence);
 int xv6fs_file_stat(struct vfs_file *file, struct stat *stat);
 

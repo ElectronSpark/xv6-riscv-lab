@@ -22,7 +22,8 @@
  *
  * We keep a small pool of mock pages.  pcache_get_page returns a page from
  * the pool (keyed by blkno), pcache_discard_blk marks it free, etc.
- * ============================================================================ */
+ * ============================================================================
+ */
 #define MAX_MOCK_PAGES 64
 
 static struct mock_page {
@@ -35,8 +36,8 @@ static struct mock_page {
 
 static int mock_get_page_call_count = 0;
 static int mock_discard_call_count = 0;
-static bool mock_pcache_init_fail = false;   /* Make pcache_init fail */
-static bool mock_get_page_fail = false;      /* Make pcache_get_page fail */
+static bool mock_pcache_init_fail = false; /* Make pcache_init fail */
+static bool mock_get_page_fail = false;    /* Make pcache_get_page fail */
 
 static void reset_mock_pcache(void) {
     memset(mock_pages, 0, sizeof(mock_pages));
@@ -124,7 +125,7 @@ int pcache_discard_blk(struct pcache *pcache, uint64 blkno) {
             return 0;
         }
     }
-    return 0;  /* Page might not exist; that is fine */
+    return 0; /* Page might not exist; that is fine */
 }
 
 void pcache_teardown(struct pcache *pcache) {
@@ -136,9 +137,10 @@ void pcache_teardown(struct pcache *pcache) {
 
 /* ============================================================================
  * Panic stub (required by truncate.c's assert macro)
- * ============================================================================ */
-__attribute__((noreturn))
-void __panic_impl(const char *type, const char *fmt, ...) {
+ * ============================================================================
+ */
+__attribute__((noreturn)) void __panic_impl(const char *type, const char *fmt,
+                                            ...) {
     va_list args;
     va_start(args, fmt);
     fprintf(stderr, "%s: ", type);
@@ -151,12 +153,14 @@ void __panic_impl(const char *type, const char *fmt, ...) {
 
 /* ============================================================================
  * Include the actual kernel truncate.c source
- * ============================================================================ */
+ * ============================================================================
+ */
 #include "../../kernel/vfs/tmpfs/truncate.c"
 
 /* ============================================================================
  * Test fixtures
- * ============================================================================ */
+ * ============================================================================
+ */
 static struct tmpfs_inode *create_test_inode(void) {
     struct tmpfs_inode *inode = calloc(1, sizeof(struct tmpfs_inode));
     inode->vfs_inode.size = 0;
@@ -166,9 +170,7 @@ static struct tmpfs_inode *create_test_inode(void) {
     return inode;
 }
 
-static void destroy_test_inode(struct tmpfs_inode *inode) {
-    free(inode);
-}
+static void destroy_test_inode(struct tmpfs_inode *inode) { free(inode); }
 
 static int test_setup(void **state) {
     (void)state;
@@ -184,7 +186,8 @@ static int test_teardown(void **state) {
 
 /* ============================================================================
  * Positive tests for __tmpfs_truncate
- * ============================================================================ */
+ * ============================================================================
+ */
 
 /* Test truncate with same size (no-op) */
 static void test_truncate_same_size(void **state) {
@@ -258,8 +261,8 @@ static void test_truncate_grow_to_pcache(void **state) {
     int ret = __tmpfs_truncate(&inode->vfs_inode, new_size);
     assert_int_equal(ret, 0);
     assert_int_equal(inode->vfs_inode.size, new_size);
-    assert_false(inode->embedded);                /* migrated away from embedded */
-    assert_true(inode->vfs_inode.i_data.active);  /* pcache is active */
+    assert_false(inode->embedded); /* migrated away from embedded */
+    assert_true(inode->vfs_inode.i_data.active); /* pcache is active */
 
     /* Verify the first page received the embedded data */
     assert_int_equal(mock_pages_in_use(), 1);
@@ -324,7 +327,8 @@ static void test_truncate_grow_large(void **state) {
 
 /* ============================================================================
  * Negative tests for __tmpfs_truncate
- * ============================================================================ */
+ * ============================================================================
+ */
 
 /* Test truncate to size exceeding maximum */
 static void test_truncate_exceed_max_size(void **state) {
@@ -393,7 +397,8 @@ static void test_truncate_grow_get_page_fail(void **state) {
 
 /* ============================================================================
  * Shrink tests — pcache pages are discarded
- * ============================================================================ */
+ * ============================================================================
+ */
 
 /* Test shrink from pcache to smaller pcache size */
 static void test_truncate_shrink_pcache(void **state) {
@@ -401,7 +406,8 @@ static void test_truncate_shrink_pcache(void **state) {
     struct tmpfs_inode *inode = create_test_inode();
 
     /* Migrate from embedded to pcache */
-    int ret = __tmpfs_truncate(&inode->vfs_inode, TMPFS_INODE_EMBEDDED_DATA_LEN + PAGE_SIZE * 5);
+    int ret = __tmpfs_truncate(&inode->vfs_inode,
+                               TMPFS_INODE_EMBEDDED_DATA_LEN + PAGE_SIZE * 5);
     assert_int_equal(ret, 0);
     assert_false(inode->embedded);
 
@@ -434,7 +440,8 @@ static void test_truncate_shrink_pcache_to_zero(void **state) {
     struct tmpfs_inode *inode = create_test_inode();
 
     /* Migrate to pcache */
-    int ret = __tmpfs_truncate(&inode->vfs_inode, TMPFS_INODE_EMBEDDED_DATA_LEN + PAGE_SIZE * 3);
+    int ret = __tmpfs_truncate(&inode->vfs_inode,
+                               TMPFS_INODE_EMBEDDED_DATA_LEN + PAGE_SIZE * 3);
     assert_int_equal(ret, 0);
     assert_false(inode->embedded);
 
@@ -457,7 +464,8 @@ static void test_truncate_shrink_pcache_to_zero(void **state) {
 
 /* ============================================================================
  * Edge case tests
- * ============================================================================ */
+ * ============================================================================
+ */
 
 /* Test truncate at exact page boundary */
 static void test_truncate_exact_page_boundary(void **state) {
@@ -465,7 +473,8 @@ static void test_truncate_exact_page_boundary(void **state) {
     struct tmpfs_inode *inode = create_test_inode();
 
     /* Migrate to pcache first */
-    int ret = __tmpfs_truncate(&inode->vfs_inode, TMPFS_INODE_EMBEDDED_DATA_LEN + PAGE_SIZE * 3);
+    int ret = __tmpfs_truncate(&inode->vfs_inode,
+                               TMPFS_INODE_EMBEDDED_DATA_LEN + PAGE_SIZE * 3);
     assert_int_equal(ret, 0);
 
     /* Shrink to exactly 1 page */
@@ -489,7 +498,8 @@ static void test_truncate_one_byte_before_page_boundary(void **state) {
     struct tmpfs_inode *inode = create_test_inode();
 
     /* Migrate to pcache */
-    int ret = __tmpfs_truncate(&inode->vfs_inode, TMPFS_INODE_EMBEDDED_DATA_LEN + PAGE_SIZE * 3);
+    int ret = __tmpfs_truncate(&inode->vfs_inode,
+                               TMPFS_INODE_EMBEDDED_DATA_LEN + PAGE_SIZE * 3);
     assert_int_equal(ret, 0);
 
     /* Shrink to one byte before a page boundary */
@@ -508,7 +518,8 @@ static void test_truncate_one_byte_after_page_boundary(void **state) {
     struct tmpfs_inode *inode = create_test_inode();
 
     /* Migrate to pcache */
-    int ret = __tmpfs_truncate(&inode->vfs_inode, TMPFS_INODE_EMBEDDED_DATA_LEN + PAGE_SIZE * 3);
+    int ret = __tmpfs_truncate(&inode->vfs_inode,
+                               TMPFS_INODE_EMBEDDED_DATA_LEN + PAGE_SIZE * 3);
     assert_int_equal(ret, 0);
 
     /* Shrink to one byte past a page boundary */
@@ -531,7 +542,8 @@ static void test_truncate_multiple_cycles(void **state) {
     int ret;
 
     /* Cycle 1: grow past embedded */
-    ret = __tmpfs_truncate(&inode->vfs_inode, TMPFS_INODE_EMBEDDED_DATA_LEN + PAGE_SIZE * 5);
+    ret = __tmpfs_truncate(&inode->vfs_inode,
+                           TMPFS_INODE_EMBEDDED_DATA_LEN + PAGE_SIZE * 5);
     assert_int_equal(ret, 0);
     assert_false(inode->embedded);
 
@@ -600,13 +612,15 @@ static void test_shrink_discard_count(void **state) {
     struct tmpfs_inode *inode = create_test_inode();
 
     /* Migrate to pcache */
-    int ret = __tmpfs_truncate(&inode->vfs_inode, TMPFS_INODE_EMBEDDED_DATA_LEN + PAGE_SIZE * 10);
+    int ret = __tmpfs_truncate(&inode->vfs_inode,
+                               TMPFS_INODE_EMBEDDED_DATA_LEN + PAGE_SIZE * 10);
     assert_int_equal(ret, 0);
     assert_false(inode->embedded);
 
     /* Shrink from ~11 pages to 2 pages.
-     * TMPFS_IBLOCK(old_size) pages exist; first_discard = TMPFS_IBLOCK(new_size rounded up).
-     * Exactly (old_block_cnt - first_discard) discard calls expected. */
+     * TMPFS_IBLOCK(old_size) pages exist; first_discard = TMPFS_IBLOCK(new_size
+     * rounded up). Exactly (old_block_cnt - first_discard) discard calls
+     * expected. */
     loff_t old_size = inode->vfs_inode.size;
     loff_t new_size = PAGE_SIZE * 2;
     loff_t old_block_cnt = TMPFS_IBLOCK(old_size + PAGE_SIZE - 1);
@@ -625,36 +639,59 @@ static void test_shrink_discard_count(void **state) {
 
 /* ============================================================================
  * Main
- * ============================================================================ */
+ * ============================================================================
+ */
 int main(void) {
     const struct CMUnitTest tests[] = {
         /* Positive / basic tests */
-        cmocka_unit_test_setup_teardown(test_truncate_same_size, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_truncate_grow_embedded, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_truncate_shrink_embedded, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_truncate_shrink_to_zero_embedded, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_truncate_grow_to_pcache, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_migrate_preserves_embedded_data, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_truncate_grow_large, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_same_size, test_setup,
+                                        test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_grow_embedded, test_setup,
+                                        test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_shrink_embedded,
+                                        test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_shrink_to_zero_embedded,
+                                        test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_grow_to_pcache,
+                                        test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_migrate_preserves_embedded_data,
+                                        test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_grow_large, test_setup,
+                                        test_teardown),
 
         /* Negative tests */
-        cmocka_unit_test_setup_teardown(test_truncate_exceed_max_size, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_truncate_at_max_size, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_truncate_grow_pcache_init_fail, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_truncate_grow_get_page_fail, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_exceed_max_size,
+                                        test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_at_max_size, test_setup,
+                                        test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_grow_pcache_init_fail,
+                                        test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_grow_get_page_fail,
+                                        test_setup, test_teardown),
 
         /* Shrink tests */
-        cmocka_unit_test_setup_teardown(test_truncate_shrink_pcache, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_truncate_shrink_pcache_to_zero, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_shrink_pcache, test_setup,
+                                        test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_shrink_pcache_to_zero,
+                                        test_setup, test_teardown),
 
         /* Edge cases */
-        cmocka_unit_test_setup_teardown(test_truncate_exact_page_boundary, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_truncate_one_byte_before_page_boundary, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_truncate_one_byte_after_page_boundary, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_truncate_multiple_cycles, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_embedded_grow_zero_fills, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_shrink_inactive_pcache_noop, test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_shrink_discard_count, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_exact_page_boundary,
+                                        test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_truncate_one_byte_before_page_boundary, test_setup,
+            test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_truncate_one_byte_after_page_boundary, test_setup,
+            test_teardown),
+        cmocka_unit_test_setup_teardown(test_truncate_multiple_cycles,
+                                        test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_embedded_grow_zero_fills,
+                                        test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_shrink_inactive_pcache_noop,
+                                        test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_shrink_discard_count, test_setup,
+                                        test_teardown),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

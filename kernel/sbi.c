@@ -375,8 +375,9 @@ void sbi_console_puts(const char *s) {
  * @return Character read, or -1 if no character available
  */
 int sbi_console_getchar(void) {
-    struct sbiret ret = sbi_ecall(SBI_EXT_LEGACY_CONSOLE_GETCHAR, 0, 0, 0, 0, 0, 0, 0);
+    struct sbiret ret =
+        sbi_ecall(SBI_EXT_LEGACY_CONSOLE_GETCHAR, 0, 0, 0, 0, 0, 0, 0);
     if (ret.error < 0)
         return -1;
-    return (int)ret.error;  // Legacy returns char in error field
+    return (int)ret.error; // Legacy returns char in error field
 }

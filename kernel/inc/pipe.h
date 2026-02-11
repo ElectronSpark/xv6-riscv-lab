@@ -15,8 +15,8 @@
     (!!(smp_load_acquire(&(pi)->flags) & (1 << PIPE_FLAGS_WRITABLE)))
 #define PIPE_READABLE(pi)                                                      \
     (!!(smp_load_acquire(&(pi)->flags) & (1 << PIPE_FLAGS_READABLE)))
-// Clear the writable flag; returns true if both readable and writable are cleared
-// after the operation
+// Clear the writable flag; returns true if both readable and writable are
+// cleared after the operation
 #define PIPE_CLEAR_WRITABLE(pi)                                                \
     ({                                                                         \
         uint64 __flags;                                                        \

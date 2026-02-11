@@ -112,8 +112,9 @@ int exec(char *path, char **argv) {
         goto bad;
     }
 
-    // Because by this time no one else can see tmp_vm, we don't need to worry about
-    // lock contention. But we still need to hold write lock to supress assertions.
+    // Because by this time no one else can see tmp_vm, we don't need to worry
+    // about lock contention. But we still need to hold write lock to supress
+    // assertions.
     vm_wlock(tmp_vm);
 
     // Load program into memory.
@@ -205,7 +206,7 @@ int exec(char *path, char **argv) {
     safestrcpy(p->name, last, sizeof(p->name));
 
     // Commit to the user image.
-    vm_put(p->vm);                        // Destroy the old VM
+    vm_put(p->vm); // Destroy the old VM
     p->vm = NULL;
     p->vm = tmp_vm;                           // Set the new VM
     p->trapframe->trapframe.sepc = elf.entry; // initial program counter = main

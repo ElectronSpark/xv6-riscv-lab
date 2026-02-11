@@ -57,17 +57,16 @@ struct utrapframe {
     uint64 s10;
     uint64 s11;
 
-    uint64 irq_sp;       // saved interrupt stack pointer
-    uint64 irq_entry;    // saved interrupt entry point
-    uint64 kernel_satp;   // kernel page table
-    uint64 kernel_sp;     // top of thread's kernel stack
-    uint64 kernel_trap;   // usertrap()
+    uint64 irq_sp;      // saved interrupt stack pointer
+    uint64 irq_entry;   // saved interrupt entry point
+    uint64 kernel_satp; // kernel page table
+    uint64 kernel_sp;   // top of thread's kernel stack
+    uint64 kernel_trap; // usertrap()
     uint64 tp;
     uint64 kernel_hartid; // saved kernel tp
     uint64 gp;
-    uint64 kernel_gp;    // saved kernel gp
+    uint64 kernel_gp; // saved kernel gp
 } __ALIGNED(8);
-
 
 // Saved registers for kernel context switches.
 struct context {

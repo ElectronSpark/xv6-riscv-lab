@@ -7,7 +7,7 @@
 int find(char *path, char *name) {
     char buf[512], *p;
     int fd;
-    int path_length; 
+    int path_length;
     struct dirent de;
     struct stat st;
 
@@ -34,12 +34,12 @@ int find(char *path, char *name) {
     *p++ = '/';
     *p = '\0';
 
-    while(read(fd, &de, sizeof(de)) == sizeof(de)){
-        if(de.inum == 0)
+    while (read(fd, &de, sizeof(de)) == sizeof(de)) {
+        if (de.inum == 0)
             continue;
         memmove(p, de.name, DIRSIZ);
         p[DIRSIZ] = 0;
-        if(stat(buf, &st) < 0){
+        if (stat(buf, &st) < 0) {
             printf("find: cannot stat %s\n", buf);
             continue;
         }
@@ -54,9 +54,7 @@ int find(char *path, char *name) {
     return 0;
 }
 
-int
-main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
     if (argc != 3) {
         printf("usage: find [path] [name]\n");
         exit(1);

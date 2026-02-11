@@ -1,6 +1,6 @@
 /**
  * Flattened Device Tree (FDT) Parser
- * 
+ *
  * Simple parser to extract device addresses from the DTB passed by
  * the bootloader. This allows runtime detection of hardware instead
  * of compile-time constants.
@@ -16,14 +16,14 @@
 #include "list_type.h"
 
 // FDT header magic number
-#define FDT_MAGIC       0xd00dfeed
+#define FDT_MAGIC 0xd00dfeed
 
 // FDT token types
-#define FDT_BEGIN_NODE  0x00000001
-#define FDT_END_NODE    0x00000002
-#define FDT_PROP        0x00000003
-#define FDT_NOP         0x00000004
-#define FDT_END         0x00000009
+#define FDT_BEGIN_NODE 0x00000001
+#define FDT_END_NODE 0x00000002
+#define FDT_PROP 0x00000003
+#define FDT_NOP 0x00000004
+#define FDT_END 0x00000009
 
 // FDT header structure
 struct fdt_header {
@@ -61,69 +61,71 @@ struct fdt_phandle_hash_node;
 // Link node attached to each fdt_node for compatible string indexing
 // Multiple fdt_nodes can share the same compatible string
 struct fdt_compat_link {
-    list_node_t list_entry;                 // Link in fdt_compat_hash_node's nodes list
+    list_node_t list_entry; // Link in fdt_compat_hash_node's nodes list
     struct fdt_compat_hash_node *hash_node; // Back pointer to hash table entry
     struct fdt_node *fdt_node;              // The FDT node this refers to
 };
 
 // Hash table entry for compatible strings
-// One entry per unique compatible string, links to all fdt_nodes with that compat
+// One entry per unique compatible string, links to all fdt_nodes with that
+// compat
 struct fdt_compat_hash_node {
-    hlist_entry_t hash_entry;   // Link in hash table bucket
-    const char *compat;         // The compatible string (points into fdt_node data)
-    size_t compat_len;          // Length of compatible string
-    list_node_t nodes;          // List of fdt_compat_link nodes
-    int count;                  // Number of nodes with this compatible
+    hlist_entry_t hash_entry; // Link in hash table bucket
+    const char *compat; // The compatible string (points into fdt_node data)
+    size_t compat_len;  // Length of compatible string
+    list_node_t nodes;  // List of fdt_compat_link nodes
+    int count;          // Number of nodes with this compatible
 };
 
 // Hash table entry for phandle lookup
 // One entry per phandle, directly points to the fdt_node
 struct fdt_phandle_hash_node {
-    hlist_entry_t hash_entry;   // Link in hash table bucket
-    uint32 phandle;             // The phandle value
-    struct fdt_node *fdt_node;  // The FDT node with this phandle
+    hlist_entry_t hash_entry;  // Link in hash table bucket
+    uint32 phandle;            // The phandle value
+    struct fdt_node *fdt_node; // The FDT node with this phandle
 };
 
 // FDT node structure for internal representation
 // Structure:
 // | fd_node | date[0] ... data[n] | name string |
 struct fdt_node {
-    struct rb_node rb_entry;    // Link to the parent node
-    list_node_t list_entry;     // Link all fdt nodes
+    struct rb_node rb_entry; // Link to the parent node
+    list_node_t list_entry;  // Link all fdt nodes
     struct {
-        uint64 phandle: 32;
-        uint64 data_size: 16;   // Size of property data in bytes
-        uint64 name_size: 16;   // Size of property name in bytes
-        uint64 layer: 8;        // Layer in the tree
-        uint64 fdt_type: 4;
-        uint64 has_addr: 1;
-        uint64 has_phandle: 1;
-        uint64 truncated: 1;
+        uint64 phandle : 32;
+        uint64 data_size : 16; // Size of property data in bytes
+        uint64 name_size : 16; // Size of property name in bytes
+        uint64 layer : 8;      // Layer in the tree
+        uint64 fdt_type : 4;
+        uint64 has_addr : 1;
+        uint64 has_phandle : 1;
+        uint64 truncated : 1;
     };
     ht_hash_t hash;          // Hash of the node name
-    int child_count;    // Number of child nodes
-    struct rb_root children;  // Properties/sub-nodes in this node
-    uint64 addr;        // The unit address (from name@addr)
+    int child_count;         // Number of child nodes
+    struct rb_root children; // Properties/sub-nodes in this node
+    uint64 addr;             // The unit address (from name@addr)
     const char *name;
-    list_node_t compat_links;   // List of fdt_compat_link for this node's compatible strings
-    uint32 data[0];  // Property data follows
+    list_node_t compat_links; // List of fdt_compat_link for this node's
+                              // compatible strings
+    uint32 data[0];           // Property data follows
 };
 
 // parsed and reconstructed FDT blob info
 struct fdt_blob_info {
     struct fdt_header original_header; // Original FDT header
-    struct rb_root root;       // Root node
-    list_node_t all_nodes;     // All nodes list
-    int n_nodes;            // Number of nodes
+    struct rb_root root;               // Root node
+    list_node_t all_nodes;             // All nodes list
+    int n_nodes;                       // Number of nodes
     uint32 boot_cpuid_phys;
 
     // Reserved memory regions (from /memreserve/ and /reserved-memory)
     struct mem_region *reserved;
     int reserved_count;
-    
+
     // Hash tables for fast lookup (pointers because hlist_t has flexible array)
-    hlist_t *compat_table;      // Hash table for compatible string lookup
-    hlist_t *phandle_table;     // Hash table for phandle lookup
+    hlist_t *compat_table;  // Hash table for compatible string lookup
+    hlist_t *phandle_table; // Hash table for phandle lookup
 };
 
 // Probed platform information
@@ -131,54 +133,54 @@ struct platform_info {
     // Memory regions (may have multiple banks)
     struct mem_region mem[MAX_MEM_REGIONS];
     int mem_count;
-    
+
     // Reserved memory regions (from /memreserve/ and /reserved-memory)
     struct mem_region *reserved;
     int reserved_count;
-    
+
     // Ramdisk region (pre-loaded filesystem image)
     uint64 ramdisk_base;
     uint64 ramdisk_size;
     int has_ramdisk;
-    
+
     // Total memory (sum of all regions)
     uint64 total_mem;
-    
+
     // UART
     uint64 uart_base;
     uint32 uart_irq;
-    uint32 uart_clock;  // Clock frequency in Hz (0 = unknown, use default)
-    uint32 uart_baud;   // Desired baud rate (0 = use default 115200)
-    uint32 uart_reg_shift;  // Register spacing shift (0=1-byte, 2=4-byte)
-    uint32 uart_reg_io_width;  // Register I/O width (1=8-bit, 4=32-bit)
-    
+    uint32 uart_clock;     // Clock frequency in Hz (0 = unknown, use default)
+    uint32 uart_baud;      // Desired baud rate (0 = use default 115200)
+    uint32 uart_reg_shift; // Register spacing shift (0=1-byte, 2=4-byte)
+    uint32 uart_reg_io_width; // Register I/O width (1=8-bit, 4=32-bit)
+
     // PLIC
     uint64 plic_base;
     uint64 plic_size;
-    
-    // PCIe regions (if present)
-    // Common regions: dbi (controller), config (ECAM), atu (address translation)
-    #define PCIE_REG_DBI     0  // Controller DBI registers
-    #define PCIE_REG_ATU     1  // Address Translation Unit
-    #define PCIE_REG_CONFIG  2  // Config space (ECAM)
-    #define PCIE_REG_MAX     8  // Maximum number of regions
+
+// PCIe regions (if present)
+// Common regions: dbi (controller), config (ECAM), atu (address translation)
+#define PCIE_REG_DBI 0    // Controller DBI registers
+#define PCIE_REG_ATU 1    // Address Translation Unit
+#define PCIE_REG_CONFIG 2 // Config space (ECAM)
+#define PCIE_REG_MAX 8    // Maximum number of regions
     int has_pcie;
     struct {
         uint64 base;
         uint64 size;
-        const char *name;  // Region name from reg-names (NULL if not available)
+        const char *name; // Region name from reg-names (NULL if not available)
     } pcie_reg[PCIE_REG_MAX];
     int pcie_reg_count;
-    
+
     // VirtIO (if present)
     int has_virtio;
     uint64 virtio_base[8];
     uint32 virtio_irq[8];
     int virtio_count;
-    
+
     // Timebase frequency
     uint64 timebase_freq;
-    
+
     // Number of CPUs
     int ncpu;
 };
@@ -211,18 +213,17 @@ void fdt_walk(void *dtb);
 // Lookup a child node by name and optional unit address
 // If addr is NULL, it will try to parse the unit address from the namestring
 // If addr is provided, it will override any unit address in the namestring
-struct fdt_node *fdt_node_lookup(struct fdt_node *parent,
-                                 const char *name, uint64 *addr);
+struct fdt_node *fdt_node_lookup(struct fdt_node *parent, const char *name,
+                                 uint64 *addr);
 
 // Lookup a node by path (e.g., "/cpus/cpu@0" or "/soc/uart@10000000")
 // Returns the matching fdt_node, or NULL if not found
 // Path must start with '/' for absolute paths
-struct fdt_node *fdt_path_lookup(struct fdt_blob_info *blob,
-                                 const char *path);
+struct fdt_node *fdt_path_lookup(struct fdt_blob_info *blob, const char *path);
 
 // Lookup nodes by compatible string
-// Returns the first fdt_node with the given compatible string, or NULL if not found
-// Use fdt_compat_next() to iterate through all matching nodes
+// Returns the first fdt_node with the given compatible string, or NULL if not
+// found Use fdt_compat_next() to iterate through all matching nodes
 struct fdt_node *fdt_compat_lookup(struct fdt_blob_info *blob,
                                    const char *compat);
 

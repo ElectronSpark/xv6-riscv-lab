@@ -15,7 +15,7 @@
 //
 // when it's the node of a list:
 //   - prev:
-//       points to the next node entry of the list, or to the head entry of 
+//       points to the next node entry of the list, or to the head entry of
 //       the list if it's the last node.
 //       points to itself when not in a list
 //   - next:

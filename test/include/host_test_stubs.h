@@ -15,7 +15,7 @@
 #define NOFILE 64
 #endif
 
-// pagetable_t is now defined in riscv.h (which works on host with ON_HOST_OS guard)
-// No need to duplicate the definition here
+// pagetable_t is now defined in riscv.h (which works on host with ON_HOST_OS
+// guard) No need to duplicate the definition here
 
 #endif // __HOST_TEST_STUBS_H

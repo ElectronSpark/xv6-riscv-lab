@@ -56,11 +56,11 @@ struct thread_group {
     // No per-object lock: all fields are protected by the global pid_lock
     // (rwlock). See file header for locking details.
 
-    int tgid;                       // Thread group ID = leader's PID
-    struct thread *group_leader;    // Thread that created this group (leader)
-    list_node_t thread_list;        // List head for all threads in group
-    _Atomic int live_threads;       // Number of live (non-exited) threads
-    _Atomic int refcount;           // Reference count for lifetime management
+    int tgid;                    // Thread group ID = leader's PID
+    struct thread *group_leader; // Thread that created this group (leader)
+    list_node_t thread_list;     // List head for all threads in group
+    _Atomic int live_threads;    // Number of live (non-exited) threads
+    _Atomic int refcount;        // Reference count for lifetime management
 
     // Shared pending signals (process-directed, from kill())
     struct tg_shared_pending shared_pending;
@@ -71,8 +71,8 @@ struct thread_group {
     struct thread *group_exit_task; // Thread that initiated exit_group()
 
     // Group stop support  (SIGSTOP/SIGTSTP to the process)
-    int group_stop_count;           // Threads still needing to stop
-    int group_stop_signo;           // Signal that caused the group stop
+    int group_stop_count; // Threads still needing to stop
+    int group_stop_signo; // Signal that caused the group stop
 };
 
 #endif /* __KERNEL_THREAD_GROUP_TYPES_H */

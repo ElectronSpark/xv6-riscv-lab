@@ -28,9 +28,7 @@ static int __underlying_dev_release(device_t *dev) {
 }
 
 static device_ops_t __blkdev_underlying_ops = {
-    .open = __underlying_dev_open,
-    .release = __underlying_dev_release
-};
+    .open = __underlying_dev_open, .release = __underlying_dev_release};
 
 static bool __blkdev_ops_validate(blkdev_ops_t *ops) {
     if (ops == NULL) {

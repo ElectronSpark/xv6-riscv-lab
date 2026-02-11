@@ -17,17 +17,19 @@
 #include "tmpfs_private.h"
 
 // Initialize a tmpfs inode as a symlink with embedded target
-static void __tmpfs_make_symlink_target_embedded(struct tmpfs_inode *tmpfs_inode, 
-                                                 const char *target, size_t len) {
+static void
+__tmpfs_make_symlink_target_embedded(struct tmpfs_inode *tmpfs_inode,
+                                     const char *target, size_t len) {
     memmove(tmpfs_inode->sym.data, target, len);
     if (len < TMPFS_INODE_EMBEDDED_DATA_LEN)
-        memset(tmpfs_inode->sym.data + len, 0, TMPFS_INODE_EMBEDDED_DATA_LEN - len);
+        memset(tmpfs_inode->sym.data + len, 0,
+               TMPFS_INODE_EMBEDDED_DATA_LEN - len);
     tmpfs_inode->vfs_inode.size = len;
     tmpfs_inode->vfs_inode.mode = S_IFLNK | 0777;
 }
 
 // Initialize a tmpfs inode as a symlink with allocated target
-static int __tmpfs_make_symlink_target(struct tmpfs_inode *tmpfs_inode, 
+static int __tmpfs_make_symlink_target(struct tmpfs_inode *tmpfs_inode,
                                        const char *target, size_t len) {
     char *allocated = strndup(target, len);
     if (allocated == NULL) {
@@ -92,8 +94,9 @@ static int __tmpfs_dir_name_cmp_func(hlist_t *hlist, void *node, void *key) {
     (void)hlist;
     struct tmpfs_dentry *dentry_node = (struct tmpfs_dentry *)node;
     struct tmpfs_dentry *dentry_key = (struct tmpfs_dentry *)key;
-    size_t min_len = dentry_node->name_len < dentry_key->name_len ? 
-                     dentry_node->name_len : dentry_key->name_len;
+    size_t min_len = dentry_node->name_len < dentry_key->name_len
+                         ? dentry_node->name_len
+                         : dentry_key->name_len;
     int cmp = strncmp(dentry_node->name, dentry_key->name, min_len);
     if (cmp != 0) {
         return cmp;
@@ -134,10 +137,11 @@ static struct hlist_func_struct __tmpfs_dir_hlist_funcs = {
 void tmpfs_make_directory(struct tmpfs_inode *tmpfs_inode) {
     tmpfs_inode->vfs_inode.size = 0;
     tmpfs_inode->vfs_inode.mode = S_IFDIR | 0755;
-    int ret = hlist_init(&tmpfs_inode->dir.children,
-                         TMPFS_HASH_BUCKETS,
+    int ret = hlist_init(&tmpfs_inode->dir.children, TMPFS_HASH_BUCKETS,
                          &__tmpfs_dir_hlist_funcs);
-    assert(ret == 0, "Failed to initialize tmpfs directory children hash list, errno=%d", ret);
+    assert(ret == 0,
+           "Failed to initialize tmpfs directory children hash list, errno=%d",
+           ret);
 }
 
 void tmpfs_make_cdev(struct tmpfs_inode *tmpfs_inode, dev_t cdev) {
@@ -153,19 +157,17 @@ void tmpfs_make_bdev(struct tmpfs_inode *tmpfs_inode, dev_t bdev) {
 }
 
 // Lookup a child inode by name in a tmpfs directory inode
-static struct tmpfs_dentry *__tmpfs_dir_lookup_by_name(struct tmpfs_inode *inode, 
-                                                      const char *name, 
-                                                      size_t name_len) {
-    struct tmpfs_dentry tmp = {
-        .name = (char *)name,
-        .name_len = name_len
-    };
+static struct tmpfs_dentry *
+__tmpfs_dir_lookup_by_name(struct tmpfs_inode *inode, const char *name,
+                           size_t name_len) {
+    struct tmpfs_dentry tmp = {.name = (char *)name, .name_len = name_len};
     return hlist_get(&inode->dir.children, &tmp);
 }
 
-// Allocate a dentry and link a target inode into a tmpfs directory with the given name
-// WIll increase the link count of the target inode
-static int __tmpfs_do_link(struct tmpfs_inode *dir, struct tmpfs_dentry *dentry) {
+// Allocate a dentry and link a target inode into a tmpfs directory with the
+// given name WIll increase the link count of the target inode
+static int __tmpfs_do_link(struct tmpfs_inode *dir,
+                           struct tmpfs_dentry *dentry) {
     struct tmpfs_dentry *ret = hlist_put(&dir->dir.children, dentry, false);
     if (ret == dentry) {
         dentry->inode->vfs_inode.n_links++;
@@ -182,16 +184,18 @@ static int __tmpfs_do_link(struct tmpfs_inode *dir, struct tmpfs_dentry *dentry)
 // Unlink a dentry from its parent tmpfs directory
 // Will decrease the link count of the target inode
 static void __tmpfs_do_unlink(struct tmpfs_dentry *dentry) {
-    struct tmpfs_dentry *popped = hlist_pop(&dentry->parent->dir.children, dentry);
+    struct tmpfs_dentry *popped =
+        hlist_pop(&dentry->parent->dir.children, dentry);
     assert(popped == dentry, "Tmpfs unlink: popped dentry does not match");
 }
 
 // Allocate and link a new inode in the given tmpfs directory
 // Caller should hold the dir inode lock
 // Will not release the lock of the new inode, caller should do it
-static struct tmpfs_inode *__tmpfs_alloc_link_inode(struct tmpfs_inode *dir, mode_t mode,
-                                                    struct tmpfs_dentry **ret_dentry,
-                                                    const char *name, size_t name_len) {
+static struct tmpfs_inode *
+__tmpfs_alloc_link_inode(struct tmpfs_inode *dir, mode_t mode,
+                         struct tmpfs_dentry **ret_dentry, const char *name,
+                         size_t name_len) {
     struct vfs_inode *vfs_inode = NULL;
     struct tmpfs_inode *tmpfs_inode = NULL;
     struct tmpfs_dentry *dentry = NULL;
@@ -217,7 +221,8 @@ static struct tmpfs_inode *__tmpfs_alloc_link_inode(struct tmpfs_inode *dir, mod
     vfs_inode->mode = mode;
     vfs_inode->n_links = 1;
     // vfs_ilock(&tmpfs_inode->vfs_inode);
-    // Backendless inodes are kept alive by n_links > 0, so refcount of 1 suffices
+    // Backendless inodes are kept alive by n_links > 0, so refcount of 1
+    // suffices
     tmpfs_inode->vfs_inode.n_links = 1;
     if (ret_dentry != NULL) {
         *ret_dentry = dentry;
@@ -238,9 +243,10 @@ void tmpfs_free_symlink_target(struct tmpfs_inode *tmpfs_inode) {
  * tmpfs inode callbacks
  *****************************************************************************/
 
-int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry, 
+int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
                    const char *name, size_t name_len) {
-    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
+    struct tmpfs_inode *tmpfs_dir =
+        container_of(dir, struct tmpfs_inode, vfs_inode);
     int ret = 0;
 
     // VFS handles "." and ".." for process root and local root.
@@ -256,8 +262,9 @@ int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         dentry->cookies = VFS_DENTRY_COOKIE_PARENT;
         return 0;
     }
-    
-    struct tmpfs_dentry *child_dentry = __tmpfs_dir_lookup_by_name(tmpfs_dir, name, name_len);
+
+    struct tmpfs_dentry *child_dentry =
+        __tmpfs_dir_lookup_by_name(tmpfs_dir, name, name_len);
     if (child_dentry == NULL) {
         return -ENOENT; // Not found
     }
@@ -275,9 +282,10 @@ int __tmpfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
 
 // VFS synthesizes "." at index 0 and ".." for process/local roots at index 1.
 // Driver handles ".." for ordinary dirs (index 1) and all children (index > 2).
-int __tmpfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter, 
+int __tmpfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
                      struct vfs_dentry *dentry) {
-    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
+    struct tmpfs_inode *tmpfs_dir =
+        container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_dentry *current = NULL;
     char *name = NULL;
 
@@ -300,10 +308,12 @@ int __tmpfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
     // index > 2: iterate over directory children
     if (dentry->cookies == VFS_DENTRY_COOKIE_END ||
         dentry->cookies == VFS_DENTRY_COOKIE_PARENT) {
-        current = HLIST_FIRST_NODE(&tmpfs_dir->dir.children, struct tmpfs_dentry, hash_entry);
+        current = HLIST_FIRST_NODE(&tmpfs_dir->dir.children,
+                                   struct tmpfs_dentry, hash_entry);
     } else {
         current = (struct tmpfs_dentry *)dentry->cookies;
-        current = HLIST_NEXT_NODE(&tmpfs_dir->dir.children, current, hash_entry);
+        current =
+            HLIST_NEXT_NODE(&tmpfs_dir->dir.children, current, hash_entry);
     }
 
     if (current == NULL) {
@@ -342,9 +352,11 @@ ssize_t __tmpfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen) {
 }
 
 struct vfs_inode *__tmpfs_create(struct vfs_inode *dir, mode_t mode,
-                   const char *name, size_t name_len) {
-    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
-    struct tmpfs_inode *tmpfs_inode = __tmpfs_alloc_link_inode(tmpfs_dir, mode, NULL, name, name_len);
+                                 const char *name, size_t name_len) {
+    struct tmpfs_inode *tmpfs_dir =
+        container_of(dir, struct tmpfs_inode, vfs_inode);
+    struct tmpfs_inode *tmpfs_inode =
+        __tmpfs_alloc_link_inode(tmpfs_dir, mode, NULL, name, name_len);
     if (IS_ERR(tmpfs_inode)) {
         return ERR_PTR(PTR_ERR(tmpfs_inode));
     }
@@ -354,10 +366,12 @@ struct vfs_inode *__tmpfs_create(struct vfs_inode *dir, mode_t mode,
 }
 
 int __tmpfs_unlink(struct vfs_dentry *dentry, struct vfs_inode *target) {
-    struct tmpfs_inode *tmpfs_dir = container_of(dentry->parent, struct tmpfs_inode, vfs_inode);
+    struct tmpfs_inode *tmpfs_dir =
+        container_of(dentry->parent, struct tmpfs_inode, vfs_inode);
     struct tmpfs_dentry *tmpfs_dentry = NULL;
     // We need to lookup the dentry again to get the tmpfs_dentry
-    tmpfs_dentry = __tmpfs_dir_lookup_by_name(tmpfs_dir, dentry->name, dentry->name_len);
+    tmpfs_dentry =
+        __tmpfs_dir_lookup_by_name(tmpfs_dir, dentry->name, dentry->name_len);
     if (tmpfs_dentry == NULL) {
         return -ENOENT; // Entry not found
     }
@@ -370,16 +384,19 @@ int __tmpfs_unlink(struct vfs_dentry *dentry, struct vfs_inode *target) {
     target->n_links--;
     __tmpfs_do_unlink(tmpfs_dentry);
     __tmpfs_free_dentry(tmpfs_dentry);
-    
-    assert (target->n_links >= 0, "Tmpfs unlink: negative link count");
+
+    assert(target->n_links >= 0, "Tmpfs unlink: negative link count");
     // VFS layer will call vfs_iput on target after we return
     return 0;
 }
 
 int __tmpfs_link(struct vfs_inode *target, struct vfs_inode *dir,
                  const char *name, size_t name_len) {
-    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
-    struct tmpfs_inode *tmpfs_target = container_of(target, struct tmpfs_inode, vfs_inode);;
+    struct tmpfs_inode *tmpfs_dir =
+        container_of(dir, struct tmpfs_inode, vfs_inode);
+    struct tmpfs_inode *tmpfs_target =
+        container_of(target, struct tmpfs_inode, vfs_inode);
+    ;
     struct tmpfs_dentry *new_entry = NULL;
     int ret = 0;
     target->n_links++;
@@ -396,14 +413,16 @@ int __tmpfs_link(struct vfs_inode *target, struct vfs_inode *dir,
         target->n_links--;
         __tmpfs_free_dentry(new_entry);
     }
-    
+
     return ret;
 }
 
 struct vfs_inode *__tmpfs_mkdir(struct vfs_inode *dir, mode_t mode,
-                  const char *name, size_t name_len) {
-    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
-    struct tmpfs_inode *tmpfs_inode = __tmpfs_alloc_link_inode(tmpfs_dir, mode, NULL, name, name_len);
+                                const char *name, size_t name_len) {
+    struct tmpfs_inode *tmpfs_dir =
+        container_of(dir, struct tmpfs_inode, vfs_inode);
+    struct tmpfs_inode *tmpfs_inode =
+        __tmpfs_alloc_link_inode(tmpfs_dir, mode, NULL, name, name_len);
     if (IS_ERR(tmpfs_inode)) {
         return ERR_PTR(PTR_ERR(tmpfs_inode));
     }
@@ -417,9 +436,11 @@ struct vfs_inode *__tmpfs_mkdir(struct vfs_inode *dir, mode_t mode,
 }
 
 int __tmpfs_rmdir(struct vfs_dentry *dentry, struct vfs_inode *target) {
-    struct tmpfs_inode *tmpfs_dir = container_of(dentry->parent, struct tmpfs_inode, vfs_inode);
+    struct tmpfs_inode *tmpfs_dir =
+        container_of(dentry->parent, struct tmpfs_inode, vfs_inode);
     struct tmpfs_dentry *tmpfs_dentry = NULL;
-    tmpfs_dentry = __tmpfs_dir_lookup_by_name(tmpfs_dir, dentry->name, dentry->name_len);
+    tmpfs_dentry =
+        __tmpfs_dir_lookup_by_name(tmpfs_dir, dentry->name, dentry->name_len);
     if (tmpfs_dentry == NULL) {
         return -ENOENT; // Entry not found
     }
@@ -429,25 +450,28 @@ int __tmpfs_rmdir(struct vfs_dentry *dentry, struct vfs_inode *target) {
     // VFS core already verified directory is empty and not in use
     // Directory n_links should be 2 (for "." and "..") when empty
     assert(target->n_links == 2, "Tmpfs rmdir: directory link count is not 2");
-    target->n_links -= 2;  // Remove both "." and ".." links
+    target->n_links -= 2; // Remove both "." and ".." links
     // Decrement parent's n_links for this subdir's ".." entry
     dentry->parent->n_links--;
     __tmpfs_do_unlink(tmpfs_dentry);
     __tmpfs_free_dentry(tmpfs_dentry);
     // VFS layer will call vfs_iput on target after we return
-    
+
     return 0;
 }
 
-struct vfs_inode *__tmpfs_mknod(struct vfs_inode *dir, mode_t mode,
-                  dev_t dev, const char *name, size_t name_len) {
-    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
+struct vfs_inode *__tmpfs_mknod(struct vfs_inode *dir, mode_t mode, dev_t dev,
+                                const char *name, size_t name_len) {
+    struct tmpfs_inode *tmpfs_dir =
+        container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *tmpfs_inode = NULL;
     if (!S_ISBLK(mode) && !S_ISCHR(mode)) {
         // @TODO: Support FIFO, socket, and other special files
-        return ERR_PTR(-EINVAL); // Mknod can only create character or block device files
+        return ERR_PTR(
+            -EINVAL); // Mknod can only create character or block device files
     }
-    tmpfs_inode = __tmpfs_alloc_link_inode(tmpfs_dir, mode, NULL, name, name_len);
+    tmpfs_inode =
+        __tmpfs_alloc_link_inode(tmpfs_dir, mode, NULL, name, name_len);
     if (IS_ERR(tmpfs_inode)) {
         return ERR_PTR(PTR_ERR(tmpfs_inode));
     }
@@ -460,18 +484,20 @@ struct vfs_inode *__tmpfs_mknod(struct vfs_inode *dir, mode_t mode,
     return &tmpfs_inode->vfs_inode;
 }
 
-
 int __tmpfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
                  struct vfs_inode *new_dir, const char *name, size_t name_len) {
-    struct tmpfs_inode *tmpfs_old_dir = container_of(old_dir, struct tmpfs_inode, vfs_inode);
-    struct tmpfs_inode *tmpfs_new_dir = container_of(new_dir, struct tmpfs_inode, vfs_inode);
+    struct tmpfs_inode *tmpfs_old_dir =
+        container_of(old_dir, struct tmpfs_inode, vfs_inode);
+    struct tmpfs_inode *tmpfs_new_dir =
+        container_of(new_dir, struct tmpfs_inode, vfs_inode);
     struct vfs_inode *target = NULL;
     int ret = 0;
     struct tmpfs_dentry *tmpfs_old_dentry = NULL;
     struct tmpfs_dentry *new_entry = NULL;
 
     // Lookup the old dentry in the old directory
-    tmpfs_old_dentry = __tmpfs_dir_lookup_by_name(tmpfs_old_dir, old_dentry->name, old_dentry->name_len);
+    tmpfs_old_dentry = __tmpfs_dir_lookup_by_name(
+        tmpfs_old_dir, old_dentry->name, old_dentry->name_len);
     if (tmpfs_old_dentry == NULL) {
         return -ENOENT; // Old entry not found
     }
@@ -495,7 +521,7 @@ int __tmpfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
         goto done;
     }
     __tmpfs_do_unlink(tmpfs_old_dentry);
-    
+
 done:
     target->n_links--;
     if (ret != 0 && new_entry != NULL) {
@@ -505,14 +531,16 @@ done:
     }
     return ret;
 }
-            
-struct vfs_inode *__tmpfs_symlink(struct vfs_inode *dir, mode_t mode, 
+
+struct vfs_inode *__tmpfs_symlink(struct vfs_inode *dir, mode_t mode,
                                   const char *name, size_t name_len,
                                   const char *target, size_t target_len) {
-    struct tmpfs_inode *tmpfs_dir = container_of(dir, struct tmpfs_inode, vfs_inode);
+    struct tmpfs_inode *tmpfs_dir =
+        container_of(dir, struct tmpfs_inode, vfs_inode);
     struct tmpfs_inode *new_inode = NULL;
     struct tmpfs_dentry *dentry = NULL;
-    new_inode = __tmpfs_alloc_link_inode(tmpfs_dir, mode, &dentry, name, name_len);
+    new_inode =
+        __tmpfs_alloc_link_inode(tmpfs_dir, mode, &dentry, name, name_len);
     if (IS_ERR(new_inode)) {
         return ERR_PTR(PTR_ERR(new_inode));
     }
@@ -523,7 +551,10 @@ struct vfs_inode *__tmpfs_symlink(struct vfs_inode *dir, mode_t mode,
         if (ret != 0) {
             __tmpfs_do_unlink(dentry);
             int rm_ret = vfs_remove_inode(dir->sb, &new_inode->vfs_inode);
-            assert(rm_ret == 0, "Tmpfs symlink: failed to remove inode after symlink target allocation failure, errno=%d", rm_ret);
+            assert(rm_ret == 0,
+                   "Tmpfs symlink: failed to remove inode after symlink target "
+                   "allocation failure, errno=%d",
+                   rm_ret);
             __tmpfs_free_dentry(dentry);
             // Inode is locked and detached from superblock; directly free it
             vfs_iunlock(&new_inode->vfs_inode);
@@ -539,7 +570,7 @@ struct vfs_inode *__tmpfs_symlink(struct vfs_inode *dir, mode_t mode,
 // Called with inode locked and superblock write-locked
 void __tmpfs_destroy_inode(struct vfs_inode *inode) {
     struct tmpfs_inode *ti = container_of(inode, struct tmpfs_inode, vfs_inode);
-    
+
     if (S_ISREG(inode->mode)) {
         // For regular files, teardown pcache (which frees all cached pages).
         // Embedded files have no pcache, so this is a no-op for them.

@@ -144,19 +144,24 @@ STATIC_INLINE void __page_sanitizer_check(const char *op, page_t *page,
 
 // Debug: verify all tail pages in a compound page point to the correct header
 // and have the correct type. Panics if corruption is detected.
-STATIC_INLINE void __debug_verify_tail_structure(page_t *header, uint64 order, const char *context) {
-    if (order == 0) return;
-    
+STATIC_INLINE void __debug_verify_tail_structure(page_t *header, uint64 order,
+                                                 const char *context) {
+    if (order == 0)
+        return;
+
     uint64 count = 1UL << order;
     for (uint64 i = 1; i < count; i++) {
         uint64 tail_type = PAGE_FLAG_GET_TYPE(header[i].flags);
         if (tail_type != PAGE_TYPE_TAIL) {
-            panic("%s: tail page[%ld] has type %ld, expected TAIL, header=%p, pa=0x%lx",
+            panic("%s: tail page[%ld] has type %ld, expected TAIL, header=%p, "
+                  "pa=0x%lx",
                   context, i, tail_type, header, header->physical_address);
         }
         if (header[i].tail.head_page != header) {
-            panic("%s: tail page[%ld] points to %p, expected header %p, pa=0x%lx",
-                  context, i, header[i].tail.head_page, header, header->physical_address);
+            panic(
+                "%s: tail page[%ld] points to %p, expected header %p, pa=0x%lx",
+                context, i, header[i].tail.head_page, header,
+                header->physical_address);
         }
     }
 }
@@ -268,22 +273,22 @@ STATIC_INLINE bool __page_is_freeable(page_t *page) {
 
 // Check if a page type supports the tail page pattern.
 // Types that support tail pages only need their header initialized during
-// allocation - tail pages keep PAGE_TYPE_TAIL and inherit properties from header.
-// Currently only BUDDY and SLAB types support this optimization.
+// allocation - tail pages keep PAGE_TYPE_TAIL and inherit properties from
+// header. Currently only BUDDY and SLAB types support this optimization.
 STATIC_INLINE bool __page_type_supports_tail(uint64 flags) {
     uint64 type = PAGE_FLAG_GET_TYPE(flags);
     return (type == PAGE_TYPE_BUDDY || type == PAGE_TYPE_SLAB);
 }
 
 // Check if a compound page already has valid tail structure.
-// Returns true if the page type supports tail pages and the stored order matches.
-// This is used to skip tail reinitialization during free when the page
+// Returns true if the page type supports tail pages and the stored order
+// matches. This is used to skip tail reinitialization during free when the page
 // came from a type that supports tail pages (BUDDY/SLAB).
 // Note: We only check the header's order - direct access to buddy tail page
 // descriptors is not allowed.
 STATIC_INLINE bool __page_has_valid_tail_structure(page_t *page, uint64 order) {
     uint64 page_type = PAGE_FLAG_GET_TYPE(page->flags);
-    
+
     // Only BUDDY and SLAB types support tail pages
     // Check order matches for alignment - use the stored order to verify
     // this is a whole compound page being freed
@@ -293,7 +298,7 @@ STATIC_INLINE bool __page_has_valid_tail_structure(page_t *page, uint64 order) {
     if (page_type == PAGE_TYPE_SLAB) {
         return page->slab.order == order;
     }
-    
+
     return false;
 }
 
@@ -325,10 +330,10 @@ STATIC_INLINE void __page_reinit(page_t *page, uint64 physical, int ref_count,
     page->physical_address = physical;
     page->flags = flags;
     page->ref_count = ref_count;
-    // Clear union fields to avoid stale data being interpreted as valid pointers.
-    // For SLAB: slab.slab will be set by __slab_make after allocation.
-    // For BUDDY: buddy fields will be set by buddy functions.
-    // This prevents garbage in lru_entry.prev from being read as slab.slab.
+    // Clear union fields to avoid stale data being interpreted as valid
+    // pointers. For SLAB: slab.slab will be set by __slab_make after
+    // allocation. For BUDDY: buddy fields will be set by buddy functions. This
+    // prevents garbage in lru_entry.prev from being read as slab.slab.
     page->slab.slab = NULL;
     page->slab.order = 0;
     // Note: We do NOT reinitialize the spinlock - it remains valid
@@ -404,7 +409,8 @@ STATIC_INLINE void __page_as_buddy_tail(page_t *page, page_t *buddy_head) {
     page->tail.head_page = buddy_head;
 }
 
-// Initialize a single page descriptor as a buddy page (legacy - for header pages)
+// Initialize a single page descriptor as a buddy page (legacy - for header
+// pages)
 STATIC_INLINE void __page_as_buddy(page_t *page, page_t *buddy_head,
                                    uint64 order, uint32 state) {
     if (page == buddy_head) {
@@ -423,7 +429,8 @@ STATIC_INLINE void __page_as_buddy(page_t *page, page_t *buddy_head,
 // Initialize only the header page before commit.
 // Only sets the essential fields for header identification during merge/split.
 // Tail pages are NOT touched - they will be initialized at commit time.
-STATIC_INLINE void __page_as_buddy_header(page_t *page, uint64 order, uint32 state) {
+STATIC_INLINE void __page_as_buddy_header(page_t *page, uint64 order,
+                                          uint32 state) {
     page->flags = PAGE_TYPE_BUDDY;
     page->ref_count = 0;
     page->buddy.order = order;
@@ -434,7 +441,7 @@ STATIC_INLINE void __page_as_buddy_header(page_t *page, uint64 order, uint32 sta
 // Initialize a single page descriptor as a buddy page
 // including page spinlock
 STATIC_INLINE void __page_as_buddy_init(page_t *page, page_t *buddy_head,
-                                   uint64 order, uint32 state) {
+                                        uint64 order, uint32 state) {
     __page_init(page, page->physical_address, 0, PAGE_TYPE_BUDDY);
     if (page != buddy_head) {
         // Tail page - set as tail
@@ -449,14 +456,15 @@ STATIC_INLINE void __page_as_buddy_init(page_t *page, page_t *buddy_head,
 // Initialize a continuous range of pages as a buddy page in specific order
 // Will not check validity here
 // Uses tail pages for all pages except the header
-STATIC_INLINE void __page_as_buddy_group(page_t *buddy_head, uint64 order, uint32 state) {
+STATIC_INLINE void __page_as_buddy_group(page_t *buddy_head, uint64 order,
+                                         uint32 state) {
     // Initialize header
     buddy_head->flags = PAGE_TYPE_BUDDY;
     buddy_head->ref_count = 0;
     buddy_head->buddy.order = order;
     buddy_head->buddy.state = state;
     list_entry_init(&buddy_head->buddy.lru_entry);
-    
+
     // Initialize tail pages with minimal data
     uint64 count = 1UL << order;
     for (uint64 i = 1; i < count; i++) {
@@ -468,7 +476,9 @@ STATIC_INLINE void __page_as_buddy_group(page_t *buddy_head, uint64 order, uint3
 // Only updates the header page. Use this when the page already has valid
 // tail structure (all tails have PAGE_TYPE_TAIL pointing to header).
 // This avoids O(2^order) tail page updates during free.
-STATIC_INLINE void __page_as_buddy_group_preserve_tails(page_t *buddy_head, uint64 order, uint32 state) {
+STATIC_INLINE void __page_as_buddy_group_preserve_tails(page_t *buddy_head,
+                                                        uint64 order,
+                                                        uint32 state) {
     // Only update the header - tail pages already have valid structure
     buddy_head->flags = PAGE_TYPE_BUDDY;
     buddy_head->ref_count = 0;
@@ -481,19 +491,21 @@ STATIC_INLINE void __page_as_buddy_group_preserve_tails(page_t *buddy_head, uint
 // including page spinlock
 // Will not check validity here
 // Uses tail pages for all pages except the header
-STATIC_INLINE void __page_as_buddy_group_init(page_t *buddy_head, uint64 order, uint32 state) {
+STATIC_INLINE void __page_as_buddy_group_init(page_t *buddy_head, uint64 order,
+                                              uint32 state) {
     // Initialize header with full initialization
     __page_init(buddy_head, buddy_head->physical_address, 0, PAGE_TYPE_BUDDY);
     buddy_head->buddy.order = order;
     buddy_head->buddy.state = state;
     list_entry_init(&buddy_head->buddy.lru_entry);
-    
+
     // Initialize tail pages with minimal data
     uint64 count = 1UL << order;
     for (uint64 i = 1; i < count; i++) {
         // Only set essential fields for tail pages
         spin_init(&buddy_head[i].lock, "page_t");
-        buddy_head[i].physical_address = buddy_head->physical_address + (i << PAGE_SHIFT);
+        buddy_head[i].physical_address =
+            buddy_head->physical_address + (i << PAGE_SHIFT);
         __page_as_buddy_tail(&buddy_head[i], buddy_head);
     }
 }
@@ -607,16 +619,17 @@ STATIC_INLINE page_t *__lock_get_buddy_page(page_t *page) {
 // The header page is assumed to already have the correct order set.
 // This function updates the state to FREE.
 // OPTIMIZATION: Only updates the LATER HALF of the buddy group.
-// The first half's tail pages already point to this header from before the split.
+// The first half's tail pages already point to this header from before the
+// split.
 STATIC_INLINE void __page_order_change_commit(page_t *page) {
     if (!PAGE_IS_BUDDY_GROUP_HEAD(page)) {
         panic("__page_order_change_commit");
     }
-    
+
     // Update header state only (order and buddy_head already correct)
     page->buddy.state = BUDDY_STATE_FREE;
     list_entry_init(&page->buddy.lru_entry);
-    
+
     // Tail pages inherit properties from header - no updates needed.
     // They already have PAGE_TYPE_TAIL and point to a valid header
     // (the original header before split, which is now either this page
@@ -625,13 +638,14 @@ STATIC_INLINE void __page_order_change_commit(page_t *page) {
 
 // Commit for the later half (new buddy) created during split.
 // Only updates the later half's tail pages to point to the new header.
-STATIC_INLINE void __page_split_commit_later_half(page_t *new_header, uint64 order) {
+STATIC_INLINE void __page_split_commit_later_half(page_t *new_header,
+                                                  uint64 order) {
     uint64 count = 1UL << order;
-    
+
     // Initialize header
     new_header->buddy.state = BUDDY_STATE_FREE;
     list_entry_init(&new_header->buddy.lru_entry);
-    
+
     // Only update tail pages of this new buddy (later half)
     // These pages previously pointed to the old (larger) header
     for (uint64 i = 1; i < count; i++) {
@@ -640,11 +654,13 @@ STATIC_INLINE void __page_split_commit_later_half(page_t *new_header, uint64 ord
 }
 
 // Commit for the later half after merging.
-// Updates the later half's tail pages (including the old header) to point to the merged header.
-STATIC_INLINE void __page_merge_commit_later_half(page_t *merged_header, uint64 merged_order) {
+// Updates the later half's tail pages (including the old header) to point to
+// the merged header.
+STATIC_INLINE void __page_merge_commit_later_half(page_t *merged_header,
+                                                  uint64 merged_order) {
     uint64 half_count = 1UL << (merged_order - 1);
     page_t *later_half_start = merged_header + half_count;
-    
+
     // Update all pages in the later half (including its old header) to be tails
     for (uint64 i = 0; i < half_count; i++) {
         __page_as_buddy_tail(&later_half_start[i], merged_header);
@@ -696,7 +712,7 @@ STATIC_INLINE page_t *__buddy_merge(page_t *page1, page_t *page2) {
         header = page2;
     }
     order_after = page1->buddy.order + 1;
-    header->buddy.order = order_after;  // Update order in header
+    header->buddy.order = order_after; // Update order in header
     return header;
 }
 
@@ -727,7 +743,8 @@ STATIC page_t *__pcpu_cache_get(uint64 order, uint64 flags) {
                 page->buddy.state = BUDDY_STATE_INTERMEDIATE;
                 PCPU_CACHE_COUNT_DEC(cache);
                 // Verify tail structure when popping from cache
-                __debug_verify_tail_structure(page, order, "__pcpu_cache_get(order=0)");
+                __debug_verify_tail_structure(page, order,
+                                              "__pcpu_cache_get(order=0)");
             }
         }
         pop_off();
@@ -738,12 +755,13 @@ STATIC page_t *__pcpu_cache_get(uint64 order, uint64 flags) {
             page =
                 list_node_pop_back(&cache->lru_head, page_t, buddy.lru_entry);
             if (page != NULL) {
-                // It is safe to change the state here as we hold the cache lock,
-                // and no other CPU can access this page right now.
+                // It is safe to change the state here as we hold the cache
+                // lock, and no other CPU can access this page right now.
                 page->buddy.state = BUDDY_STATE_INTERMEDIATE;
                 PCPU_CACHE_COUNT_DEC(cache);
                 // Verify tail structure when popping from cache
-                __debug_verify_tail_structure(page, order, "__pcpu_cache_get(order>0)");
+                __debug_verify_tail_structure(page, order,
+                                              "__pcpu_cache_get(order>0)");
             }
         }
         spin_unlock(&cache->lock);
@@ -781,7 +799,7 @@ STATIC int __pcpu_cache_put(page_t *page, uint64 order) {
     uint32 cache_limit =
         (order == 0) ? PCPU_HOT_PAGE_CACHE_SIZE : PCPU_CACHE_SIZE;
     int ret = -1;
-    
+
     // Check if page already has valid tail structure before taking locks.
     // This allows us to skip O(2^order) tail page updates during free.
     // __page_has_valid_tail_structure checks page type and tail validity.
@@ -795,12 +813,14 @@ STATIC int __pcpu_cache_put(page_t *page, uint64 order) {
             // Initialize page as buddy before caching
             page_lock_acquire(page);
             if (preserve_tails) {
-                __page_as_buddy_group_preserve_tails(page, order, BUDDY_STATE_CACHED);
+                __page_as_buddy_group_preserve_tails(page, order,
+                                                     BUDDY_STATE_CACHED);
             } else {
                 __page_as_buddy_group(page, order, BUDDY_STATE_CACHED);
             }
             // Verify tail structure after setup
-            __debug_verify_tail_structure(page, order, "__pcpu_cache_put(order=0)");
+            __debug_verify_tail_structure(page, order,
+                                          "__pcpu_cache_put(order=0)");
             list_node_push_back(&cache->lru_head, page, buddy.lru_entry);
             PCPU_CACHE_COUNT_INC(cache);
             ret = 0;
@@ -816,13 +836,15 @@ STATIC int __pcpu_cache_put(page_t *page, uint64 order) {
             page_lock_acquire(page);
             if (preserve_tails) {
                 // Tail pages already have valid structure, only update header
-                __page_as_buddy_group_preserve_tails(page, order, BUDDY_STATE_CACHED);
+                __page_as_buddy_group_preserve_tails(page, order,
+                                                     BUDDY_STATE_CACHED);
             } else {
                 // Need to reinitialize all pages including tails
                 __page_as_buddy_group(page, order, BUDDY_STATE_CACHED);
             }
             // Verify tail structure after setup
-            __debug_verify_tail_structure(page, order, "__pcpu_cache_put(order>0)");
+            __debug_verify_tail_structure(page, order,
+                                          "__pcpu_cache_put(order>0)");
             list_node_push_back(&cache->lru_head, page, buddy.lru_entry);
             PCPU_CACHE_COUNT_INC(cache);
             ret = 0;
@@ -862,8 +884,7 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
 
     // Need to search higher orders - lock only when taking out
     // Try to find a bigger buddy page to split
-    for (tmp_order = order; tmp_order <= PAGE_BUDDY_MAX_ORDER;
-         tmp_order++) {
+    for (tmp_order = order; tmp_order <= PAGE_BUDDY_MAX_ORDER; tmp_order++) {
         __buddy_pool_lock(tmp_order);
         pool = &__buddy_pools[tmp_order];
         page = __buddy_pop_page(pool);
@@ -872,7 +893,8 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
             // This prevents race with __lock_get_buddy_page
             page->buddy.state = BUDDY_STATE_INTERMEDIATE;
             // Verify tail structure when popping from pool
-            __debug_verify_tail_structure(page, tmp_order, "__buddy_get(pop from pool)");
+            __debug_verify_tail_structure(page, tmp_order,
+                                          "__buddy_get(pop from pool)");
         }
         __buddy_pool_unlock(tmp_order); // Unlock after state is set
 
@@ -902,13 +924,15 @@ STATIC page_t *__buddy_get(uint64 order, uint64 flags) {
         }
 
         // put the later half back - lock only when putting in
-        // Use __page_split_commit_later_half to only update the new buddy's tail pages
+        // Use __page_split_commit_later_half to only update the new buddy's
+        // tail pages
         tmp_order--;
         pool = &__buddy_pools[tmp_order];
         __buddy_pool_lock(tmp_order);
         __page_split_commit_later_half(buddy, tmp_order);
         // Verify tail structure after split
-        __debug_verify_tail_structure(buddy, tmp_order, "__buddy_get(after split)");
+        __debug_verify_tail_structure(buddy, tmp_order,
+                                      "__buddy_get(after split)");
         __buddy_push_page(pool, buddy);
         __buddy_pool_unlock(tmp_order); // Unlock immediately after putting in
     };
@@ -963,13 +987,16 @@ STATIC void __buddy_merge_and_insert(page_t *page, uint64 start_order) {
                 __unlock_two_pages(page, buddy);
                 panic("__buddy_merge_and_insert(): failed to merge buddies");
             }
-            
+
             // Update later half's tail pages to point to merged header
-            // merged->buddy.order is already set to tmp_order + 1 by __buddy_merge
+            // merged->buddy.order is already set to tmp_order + 1 by
+            // __buddy_merge
             __page_merge_commit_later_half(merged, merged->buddy.order);
             // Verify tail structure after merge
-            __debug_verify_tail_structure(merged, merged->buddy.order, "__buddy_merge_and_insert(after merge)");
-            
+            __debug_verify_tail_structure(
+                merged, merged->buddy.order,
+                "__buddy_merge_and_insert(after merge)");
+
             // Now unlock after the order has been updated
             __unlock_two_pages(page, buddy);
             page = merged;
@@ -978,7 +1005,8 @@ STATIC void __buddy_merge_and_insert(page_t *page, uint64 start_order) {
             page_lock_acquire(page);
             __page_order_change_commit(page);
             // Verify tail structure before pushing to pool
-            __debug_verify_tail_structure(page, tmp_order, "__buddy_merge_and_insert(push to pool)");
+            __debug_verify_tail_structure(
+                page, tmp_order, "__buddy_merge_and_insert(push to pool)");
             __buddy_push_page(pool, page);
             page_lock_release(page);
             __buddy_pool_unlock(tmp_order);
@@ -1085,11 +1113,11 @@ static uint64 __page_init_find_current_end(uint64 start_pa, uint64 end_pa) {
 
 static void __page_buddy_init_as_order(uint64 pa_start, int order) {
     page_t *buddy_head = __pa_to_page(pa_start);
-    assert(buddy_head != NULL,
-           "__page_buddy_init_as_order(): get NULL page");
+    assert(buddy_head != NULL, "__page_buddy_init_as_order(): get NULL page");
     __page_as_buddy_group_init(buddy_head, order, BUDDY_STATE_FREE);
     // Verify tail structure after init
-    __debug_verify_tail_structure(buddy_head, order, "__page_buddy_init_as_order");
+    __debug_verify_tail_structure(buddy_head, order,
+                                  "__page_buddy_init_as_order");
 
     buddy_pool_t *pool = &__buddy_pools[order];
     __buddy_push_page(pool, buddy_head);
@@ -1243,11 +1271,12 @@ void __page_free(page_t *page, uint64 order) {
     assert(order <= PAGE_BUDDY_MAX_ORDER, "__page_free(): order too large");
     assert(!(page->physical_address & PAGE_BUDDY_OFFSET_MASK(order)),
            "free pages not aligned to order");
-    
+
     // SLAB pages must be freed as a whole compound page with matching order
     if (PAGE_IS_TYPE(page, PAGE_TYPE_SLAB)) {
         assert(page->slab.order == order,
-               "__page_free(): SLAB page freed with wrong order (expected %d, got %ld)",
+               "__page_free(): SLAB page freed with wrong order (expected %d, "
+               "got %ld)",
                page->slab.order, order);
     }
     // Should never try to free a TAIL page directly - only headers
@@ -1272,7 +1301,7 @@ void __page_free(page_t *page, uint64 order) {
     // Check if page has valid tail structure before entering buddy system.
     // If not, we need to initialize all pages in the group.
     bool has_valid_tails = __page_has_valid_tail_structure(page, order);
-    
+
     page_lock_acquire(page);
     if (has_valid_tails) {
         // Tails are already valid, only update header

@@ -274,7 +274,8 @@ struct thread *kthread_create(const char *name, void *entry, uint64 arg1,
     proctab_proc_add(p);
     pid_wunlock();
 
-    // Allocate a thread group for the kernel thread (each kthread is its own group)
+    // Allocate a thread group for the kernel thread (each kthread is its own
+    // group)
     if (thread_group_alloc(p) == 0) {
         p->thread_group->tgid = p->pid;
     }

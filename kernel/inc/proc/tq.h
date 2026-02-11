@@ -352,8 +352,8 @@ int ttree_wait_in_state_cb(ttree_t *q, uint64 key,
  *
  * Returns the waiter's error_no (see tq_wait_in_state_cb).
  */
-int ttree_wait_in_state(ttree_t *q, uint64 key, spinlock_t *lock,
-                        uint64 *rdata, enum thread_state state);
+int ttree_wait_in_state(ttree_t *q, uint64 key, spinlock_t *lock, uint64 *rdata,
+                        enum thread_state state);
 
 /**
  * ttree_wait_cb - sleep on a tree queue with custom lock callbacks

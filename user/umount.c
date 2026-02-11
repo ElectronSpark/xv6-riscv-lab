@@ -2,9 +2,7 @@
 #include "kernel/inc/vfs/stat.h"
 #include "user/user.h"
 
-int
-main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
     if (argc != 2) {
         fprintf(2, "Usage: umount <target>\n");
         fprintf(2, "  target: mount point to unmount\n");

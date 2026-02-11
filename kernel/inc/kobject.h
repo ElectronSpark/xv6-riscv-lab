@@ -9,19 +9,19 @@
 
 struct kobject;
 struct kobject_ops {
-  // Called after the object is detached and its refcount reaches zero.
-  // The implementation should free the memory associated with the object.
-  // If NULL, the object memory will be freed using kmm_free().
-  void (*release)(struct kobject *obj);
+    // Called after the object is detached and its refcount reaches zero.
+    // The implementation should free the memory associated with the object.
+    // If NULL, the object memory will be freed using kmm_free().
+    void (*release)(struct kobject *obj);
 };
 
 // There's no lock protecting kobject.
 // Users of kobject must ensure proper synchronization.
 struct kobject {
-  list_node_t list_entry;
-  int refcount;
-  const char *name;
-  struct kobject_ops ops;
+    list_node_t list_entry;
+    int refcount;
+    const char *name;
+    struct kobject_ops ops;
 };
 
 void kobject_global_init(void);

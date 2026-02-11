@@ -7,15 +7,15 @@
 
 // Linux-compatible dirent structure for getdents (used by ls)
 struct linux_dirent64 {
-    uint64 d_ino;      // Inode number
-    int64 d_off;       // Offset to next structure
-    uint16 d_reclen;   // Size of this dirent
-    uint8 d_type;      // File type
-    char d_name[];     // Filename (null-terminated)
+    uint64 d_ino;    // Inode number
+    int64 d_off;     // Offset to next structure
+    uint16 d_reclen; // Size of this dirent
+    uint8 d_type;    // File type
+    char d_name[];   // Filename (null-terminated)
 };
 
 #define NAME_MAX 255
-#define LS_FMT_WIDTH 14  // Display width for formatting
+#define LS_FMT_WIDTH 14 // Display width for formatting
 
 // Parsed command representation
 #define EXEC 1
@@ -101,7 +101,7 @@ static void builtin_ls(char *path) {
     char buf[512], *p;
     int fd;
     struct stat st;
-    char dirent_buf[1024];  // Buffer for getdents
+    char dirent_buf[1024]; // Buffer for getdents
     int nread;
 
     if ((fd = open(path, O_RDONLY | O_NOFOLLOW)) < 0) {
@@ -131,7 +131,8 @@ static void builtin_ls(char *path) {
         while ((nread = getdents(fd, dirent_buf, sizeof(dirent_buf))) > 0) {
             int pos = 0;
             while (pos < nread) {
-                struct linux_dirent64 *de = (struct linux_dirent64 *)(dirent_buf + pos);
+                struct linux_dirent64 *de =
+                    (struct linux_dirent64 *)(dirent_buf + pos);
                 if (de->d_ino == 0) {
                     pos += de->d_reclen;
                     continue;
@@ -142,7 +143,8 @@ static void builtin_ls(char *path) {
                     pos += de->d_reclen;
                     continue;
                 }
-                printf("%s %o %ld %ld\n", ls_fmtname(buf), st.mode, st.ino, st.size);
+                printf("%s %o %ld %ld\n", ls_fmtname(buf), st.mode, st.ino,
+                       st.size);
                 pos += de->d_reclen;
             }
         }
@@ -230,21 +232,21 @@ void runcmd(struct cmd *cmd) {
         pcmd = (struct pipecmd *)cmd;
         if (pipe(p) < 0)
             panic("pipe");
-        
+
         // Left side of pipe: stdout -> pipe write end
         pid = vfork();
         if (pid < 0)
             panic("vfork");
         if (pid == 0)
             run_pipe_left(pcmd->left, p);
-        
+
         // Right side of pipe: stdin <- pipe read end
         pid = vfork();
         if (pid < 0)
             panic("vfork");
         if (pid == 0)
             run_pipe_right(pcmd->right, p);
-        
+
         close(p[0]);
         close(p[1]);
         wait(0);
@@ -300,7 +302,8 @@ int main(void) {
             continue;
         }
         // Built-in: ls
-        if (buf[0] == 'l' && buf[1] == 's' && (buf[2] == '\n' || buf[2] == ' ')) {
+        if (buf[0] == 'l' && buf[1] == 's' &&
+            (buf[2] == '\n' || buf[2] == ' ')) {
             buf[strlen(buf) - 1] = 0; // chop \n
             if (buf[2] == 0 || buf[3] == 0) {
                 // ls with no arguments
@@ -311,13 +314,13 @@ int main(void) {
             }
             continue;
         }
-        
+
         // Parse command first (before vfork)
         struct cmd *cmd = parsecmd(buf);
         if (cmd == 0)
-            continue;  // Parse error, try next command
+            continue; // Parse error, try next command
         int pid;
-        
+
         // vfork + runcmd: child calls runcmd which never returns,
         // so parent's call frame stays intact
         pid = vfork();
@@ -466,7 +469,7 @@ struct cmd *parsecmd(char *s) {
     peek(&s, es, "");
     if (s != es) {
         fprintf(2, "syntax error near: %s\n", s);
-        return 0;  // Return NULL instead of panicking
+        return 0; // Return NULL instead of panicking
     }
     nulterminate(cmd);
     return cmd;

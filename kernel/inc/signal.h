@@ -4,11 +4,9 @@
 #include "types.h"
 #include "signal_types.h"
 
-#define SIGBAD(signo) \
-    ((signo) < 1 || (signo) > NSIG)
+#define SIGBAD(signo) ((signo) < 1 || (signo) > NSIG)
 
-#define SIGMASK(signo) \
-    (SIGBAD(signo) ? 0 : (1UL << ((uint64)(signo) - 1)))
+#define SIGMASK(signo) (SIGBAD(signo) ? 0 : (1UL << ((uint64)(signo) - 1)))
 
 // All four return: 0 if OK, −1 on error
 static inline int sigemptyset(sigset_t *set) {
@@ -24,7 +22,7 @@ static inline int sigfillset(sigset_t *set) {
         return -1; // Invalid set pointer
     }
     *set = (1UL << NSIG) - 1; // Set all signals
-    return 0; // Success
+    return 0;                 // Success
 }
 
 static inline int sigaddset(sigset_t *set, int signo) {
@@ -91,14 +89,13 @@ int kill(int, int);
 int kill_thread(struct thread *p, int signum);
 int tgkill(int tgid, int tid, int signum);
 int tkill(int tid, int signum);
-int killed(struct thread*);
+int killed(struct thread *);
 
-#define SIG_BLOCK   1
+#define SIG_BLOCK 1
 #define SIG_UNBLOCK 2
 #define SIG_SETMASK 3
 
 #define MINSIGSTKSZ (1UL << PGSHIFT)
-#define SIGSTKSZ    (1UL << (PGSHIFT + 2))
-
+#define SIGSTKSZ (1UL << (PGSHIFT + 2))
 
 #endif /* __KERNEL_SIGNAL_H */

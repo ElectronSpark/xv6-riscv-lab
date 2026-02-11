@@ -108,7 +108,7 @@ void user_kirq_entrance(uint64 ksp, uint64 s0) {
         __trap_panic(&current->trapframe->trapframe, s0);
     }
     exit_irq();
-    
+
     if (NEEDS_RESCHED()) {
         // If anyone has requested a reschedule, do it now.
         // switch to kernel stack first (so yield() runs on the right stack)
@@ -244,7 +244,8 @@ int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
         if (p->signal.sig_stack.ss_size < MINSIGSTKSZ) {
             return -1; // Stack too small
         }
-        new_sp = (uint64)p->signal.sig_stack.ss_sp + p->signal.sig_stack.ss_size;
+        new_sp =
+            (uint64)p->signal.sig_stack.ss_sp + p->signal.sig_stack.ss_size;
     } else {
         new_sp = p->trapframe->trapframe.sp;
     }
@@ -337,7 +338,7 @@ void usertrapret(void) {
     handle_signal();
 
     if (NEEDS_RESCHED()) {
-       scheduler_yield();
+        scheduler_yield();
     }
 
     // we're about to switch the destination of traps from

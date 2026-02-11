@@ -5,11 +5,10 @@
 
 /**
  * @brief 将红黑树节点染黑。
- * 
+ *
  * @param node 进行染色的红黑树节点。
  */
-static inline void rb_node_dye_black(struct rb_node *node)
-{
+static inline void rb_node_dye_black(struct rb_node *node) {
     if (node == NULL) {
         return;
     }
@@ -18,11 +17,10 @@ static inline void rb_node_dye_black(struct rb_node *node)
 
 /**
  * @brief 将红黑树节点染红。
- * 
+ *
  * @param node 进行染色的红黑树节点。
  */
-static inline void rb_node_dye_red(struct rb_node *node)
-{
+static inline void rb_node_dye_red(struct rb_node *node) {
     if (node == NULL) {
         return;
     }
@@ -31,15 +29,12 @@ static inline void rb_node_dye_red(struct rb_node *node)
 
 /**
  * @brief 将一个红黑树节点的颜色与另一个红黑树节点的颜色同步。
- * 
+ *
  * @param target_node 进行染色的红黑树节点。
  * @param source_node 获取颜色的红黑树节点。
  */
-static inline void rb_node_dye_as(
-    struct rb_node *target_node,
-    struct rb_node *source_node
-)
-{
+static inline void rb_node_dye_as(struct rb_node *target_node,
+                                  struct rb_node *source_node) {
     if (rb_is_node_black(source_node)) {
         rb_node_dye_black(target_node);
     } else {
@@ -47,8 +42,7 @@ static inline void rb_node_dye_as(
     }
 }
 
-struct rb_node *rb_insert_color(struct rb_root *root, struct rb_node *node)
-{
+struct rb_node *rb_insert_color(struct rb_root *root, struct rb_node *node) {
     /// 检测输入是否合法，不合法直接视为插入失败。
     if (root == NULL || node == NULL) {
         return NULL;
@@ -125,16 +119,13 @@ struct rb_node *rb_insert_color(struct rb_root *root, struct rb_node *node)
 
 /**
  * @brief 若真正删除的节点为黑节点，则需要通过该函数重新进行黑平衡。
- * 
+ *
  * 如果用于代替被删除节点，或被删除的节点本身为黑节点，那完成删除操作后红黑树的黑平衡会被打破，
  * 此时就需要让红黑树重新达到黑平衡。
- * 
+ *
  */
-static inline void __rb_delete_color_fixup(
-    struct rb_root *root,
-    struct rb_node *node
-)
-{
+static inline void __rb_delete_color_fixup(struct rb_root *root,
+                                           struct rb_node *node) {
     struct rb_node *brother;
     struct rb_node *parent = rb_parent(node);
     while (node != root->node && rb_is_node_black(node)) {
@@ -148,7 +139,8 @@ static inline void __rb_delete_color_fixup(
                 parent = rb_parent(node);
                 brother = rb_right(parent);
             }
-            if (rb_is_node_black(rb_left(brother)) && rb_is_node_black(rb_right(brother))) {
+            if (rb_is_node_black(rb_left(brother)) &&
+                rb_is_node_black(rb_right(brother))) {
                 /// 兄弟节点拿不出红节点。
                 rb_node_dye_red(brother);
                 node = parent;
@@ -180,7 +172,8 @@ static inline void __rb_delete_color_fixup(
                 parent = rb_parent(node);
                 brother = rb_left(parent);
             }
-            if (rb_is_node_black(rb_left(brother)) && rb_is_node_black(rb_right(brother))) {
+            if (rb_is_node_black(rb_left(brother)) &&
+                rb_is_node_black(rb_right(brother))) {
                 /// 兄弟节点拿不出红节点。
                 rb_node_dye_red(brother);
                 node = parent;
@@ -194,7 +187,7 @@ static inline void __rb_delete_color_fixup(
                     parent = rb_parent(node);
                     brother = rb_left(parent);
                 }
-                
+
                 rb_node_dye_as(brother, parent);
                 rb_node_dye_black(parent);
                 rb_node_dye_black(rb_left(brother));
@@ -209,10 +202,9 @@ static inline void __rb_delete_color_fixup(
     rb_node_dye_black(node);
 }
 
-static void __rb_do_delete_node_color(struct rb_root *root, 
-                                      struct rb_node *parent, 
-                                      struct rb_node **link)
-{
+static void __rb_do_delete_node_color(struct rb_root *root,
+                                      struct rb_node *parent,
+                                      struct rb_node **link) {
     struct rb_node *target;
     struct rb_node *delete_node = *link;
 
@@ -237,7 +229,7 @@ static void __rb_do_delete_node_color(struct rb_root *root,
     } else {
         replacement = target->right;
     }
-    
+
     if (replacement != NULL) {
         __rb_transplant(root, replacement, target);
         rb_set_parent(target, target);
@@ -262,12 +254,13 @@ static void __rb_do_delete_node_color(struct rb_root *root,
 
     /// 用真正被删除的节点替代原有的节点。
     if (target != delete_node) {
-        __rb_replace_node(__rb_node_link(root, delete_node, NULL), target, delete_node);
+        __rb_replace_node(__rb_node_link(root, delete_node, NULL), target,
+                          delete_node);
     }
 }
 
-struct rb_node *rb_delete_node_color(struct rb_root *root, struct rb_node *node)
-{
+struct rb_node *rb_delete_node_color(struct rb_root *root,
+                                     struct rb_node *node) {
     struct rb_node *parent;
     struct rb_node **link = __rb_node_link(root, node, &parent);
     struct rb_node *target;
@@ -279,8 +272,7 @@ struct rb_node *rb_delete_node_color(struct rb_root *root, struct rb_node *node)
     return target;
 }
 
-struct rb_node *rb_delete_key_color(struct rb_root *root, unsigned long key)
-{
+struct rb_node *rb_delete_key_color(struct rb_root *root, unsigned long key) {
     if (!rb_root_is_initialized(root)) {
         return NULL;
     }

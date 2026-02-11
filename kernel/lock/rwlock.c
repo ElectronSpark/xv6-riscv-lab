@@ -286,8 +286,8 @@ int rwlock_r_sleep_cb(void *data) {
         rwlock_runlock(rw);
         status = RW_CB_STATUS_READER;
         if (RWLOCK_W_HOLDING(rw)) {
-            // Because reader may also holding the write lock, we need to check the
-            // writer bit again after releasing the read lock.
+            // Because reader may also holding the write lock, we need to check
+            // the writer bit again after releasing the read lock.
             rwlock_wunlock(rw);
             status |= RW_CB_STATUS_WRITER;
         }

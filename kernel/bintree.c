@@ -2,14 +2,13 @@
 
 /**
  * @brief 获得二叉树节点的兄弟节点的链接指针。
- * 
+ *
  * @param node struct rb_node* 二叉树节点。
- * 
- * @return struct rb_node** 二叉树节点有有兄弟节点时返回其兄弟节点的链接指针，否则返回
- *                          NULL。
+ *
+ * @return struct rb_node**
+ * 二叉树节点有有兄弟节点时返回其兄弟节点的链接指针，否则返回 NULL。
  */
-static inline struct rb_node **__rb_brother_link(struct rb_node *node)
-{
+static inline struct rb_node **__rb_brother_link(struct rb_node *node) {
     struct rb_node *__parent = rb_parent(node);
     if (__parent == NULL || __parent == node) {
         return NULL;
@@ -21,8 +20,7 @@ static inline struct rb_node **__rb_brother_link(struct rb_node *node)
     }
 }
 
-struct rb_node *rb_brother(struct rb_node *node)
-{
+struct rb_node *rb_brother(struct rb_node *node) {
     struct rb_node **__brother_link = __rb_brother_link(node);
     if (__brother_link == NULL) {
         return NULL;
@@ -30,12 +28,8 @@ struct rb_node *rb_brother(struct rb_node *node)
     return *__brother_link;
 }
 
-struct rb_node **__rb_node_link(
-    struct rb_root *root,
-    struct rb_node *node,
-    struct rb_node **ret_parent
-)
-{
+struct rb_node **__rb_node_link(struct rb_root *root, struct rb_node *node,
+                                struct rb_node **ret_parent) {
     struct rb_node *__parent = rb_parent(node);
     if (ret_parent) {
         *ret_parent = __parent;
@@ -53,8 +47,7 @@ struct rb_node **__rb_node_link(
     }
 }
 
-struct rb_node *rb_first_node(struct rb_root *root)
-{
+struct rb_node *rb_first_node(struct rb_root *root) {
     if (root == NULL || root->node == NULL) {
         return NULL;
     }
@@ -65,8 +58,7 @@ struct rb_node *rb_first_node(struct rb_root *root)
     return pos;
 }
 
-struct rb_node *rb_last_node(struct rb_root *root)
-{
+struct rb_node *rb_last_node(struct rb_root *root) {
     if (root == NULL || root->node == NULL) {
         return NULL;
     }
@@ -77,14 +69,13 @@ struct rb_node *rb_last_node(struct rb_root *root)
     return pos;
 }
 
-struct rb_node *rb_next_node(struct rb_node *node)
-{
+struct rb_node *rb_next_node(struct rb_node *node) {
     if (rb_node_is_empty(node)) {
         return NULL;
     }
     struct rb_node *parent = node;
     struct rb_node *pos = parent->right;
-    
+
     if (pos != NULL) {
         while (pos->left != NULL) {
             pos = pos->left;
@@ -100,14 +91,13 @@ struct rb_node *rb_next_node(struct rb_node *node)
     return parent;
 }
 
-struct rb_node *rb_prev_node(struct rb_node *node)
-{
+struct rb_node *rb_prev_node(struct rb_node *node) {
     if (rb_node_is_empty(node)) {
         return NULL;
     }
     struct rb_node *parent = node;
     struct rb_node *pos = parent->left;
-    
+
     if (pos != NULL) {
         while (pos->right != NULL) {
             pos = pos->right;
@@ -123,28 +113,21 @@ struct rb_node *rb_prev_node(struct rb_node *node)
     return parent;
 }
 
-void __rb_replace_node(
-    struct rb_node **link,
-    struct rb_node *new_node,
-    struct rb_node *old_node
-)
-{
+void __rb_replace_node(struct rb_node **link, struct rb_node *new_node,
+                       struct rb_node *old_node) {
     *new_node = *old_node;
     *link = new_node;
     if (old_node->left != NULL) {
         rb_set_parent(old_node->left, new_node);
     }
     if (old_node->right != NULL) {
-         rb_set_parent(old_node->right, new_node);
+        rb_set_parent(old_node->right, new_node);
     }
     rb_node_init(old_node);
 }
 
-void __rb_transplant(
-    struct rb_root *root, 
-    struct rb_node *new_node,
-    struct rb_node *old_node 
-) {
+void __rb_transplant(struct rb_root *root, struct rb_node *new_node,
+                     struct rb_node *old_node) {
     struct rb_node *parent = rb_parent(old_node);
     if (parent == NULL) {
         root->node = new_node;
@@ -158,12 +141,9 @@ void __rb_transplant(
     }
 }
 
-struct rb_node **__rb_find_key_link(
-    struct rb_root *root,
-    struct rb_node **ret_parent,
-    unsigned long key
-)
-{
+struct rb_node **__rb_find_key_link(struct rb_root *root,
+                                    struct rb_node **ret_parent,
+                                    unsigned long key) {
     struct rb_node *pos = root->node;
     struct rb_node *parent = NULL;
     struct rb_node **link = &root->node;
@@ -184,8 +164,7 @@ struct rb_node **__rb_find_key_link(
     return link;
 }
 
-struct rb_node *rb_find_key_rup(struct rb_root *root, uint64 key)
-{
+struct rb_node *rb_find_key_rup(struct rb_root *root, uint64 key) {
     if (!rb_root_is_initialized(root)) {
         return NULL;
     }
@@ -208,8 +187,7 @@ struct rb_node *rb_find_key_rup(struct rb_root *root, uint64 key)
     return rb_next_node(parent);
 }
 
-struct rb_node *rb_find_key_rdown(struct rb_root *root, uint64 key)
-{
+struct rb_node *rb_find_key_rdown(struct rb_root *root, uint64 key) {
     if (!rb_root_is_initialized(root)) {
         return NULL;
     }
@@ -232,8 +210,7 @@ struct rb_node *rb_find_key_rdown(struct rb_root *root, uint64 key)
     return rb_prev_node(parent);
 }
 
-struct rb_node *rb_find_key(struct rb_root *root, unsigned long key)
-{
+struct rb_node *rb_find_key(struct rb_root *root, unsigned long key) {
     if (!rb_root_is_initialized(root)) {
         return NULL;
     }
@@ -245,11 +222,7 @@ struct rb_node *rb_find_key(struct rb_root *root, unsigned long key)
     return *link;
 }
 
-struct rb_node *rb_insert_node(
-    struct rb_root *root,
-    struct rb_node *new_node
-)
-{
+struct rb_node *rb_insert_node(struct rb_root *root, struct rb_node *new_node) {
     if (!rb_root_is_initialized(root) || new_node == NULL) {
         return NULL;
     }
@@ -264,12 +237,10 @@ struct rb_node *rb_insert_node(
     return *link;
 }
 
-static inline struct rb_node **__find_replacement_for_deletion(
-    struct rb_root *root,
-    struct rb_node *delete_node,
-    struct rb_node **ret_parent
-)
-{
+static inline struct rb_node **
+__find_replacement_for_deletion(struct rb_root *root,
+                                struct rb_node *delete_node,
+                                struct rb_node **ret_parent) {
     /// 只有一个子节点的情况下直接用子节点替换当前节点。
     if (delete_node->left == NULL) {
         *ret_parent = delete_node;
@@ -291,8 +262,7 @@ static inline struct rb_node **__find_replacement_for_deletion(
     return leaf_link;
 }
 
-struct rb_node *rb_delete_key(struct rb_root *root, unsigned long key)
-{
+struct rb_node *rb_delete_key(struct rb_root *root, unsigned long key) {
     if (!rb_root_is_initialized(root)) {
         return NULL;
     }
@@ -332,11 +302,7 @@ struct rb_node *rb_delete_key(struct rb_root *root, unsigned long key)
     return delete_node;
 }
 
-struct rb_node *__rb_rotate_left(
-    struct rb_root *root,
-    struct rb_node *node
-)
-{
+struct rb_node *__rb_rotate_left(struct rb_root *root, struct rb_node *node) {
     if (node == NULL) {
         return NULL;
     }
@@ -348,7 +314,7 @@ struct rb_node *__rb_rotate_left(
         return node;
     }
     right_left = right->left;
-    
+
     if (parent == NULL) {
         link = &root->node;
     }
@@ -363,11 +329,7 @@ struct rb_node *__rb_rotate_left(
     return right;
 }
 
-struct rb_node *__rb_rotate_right(
-    struct rb_root *root,
-    struct rb_node *node
-)
-{
+struct rb_node *__rb_rotate_right(struct rb_root *root, struct rb_node *node) {
     if (node == NULL) {
         return NULL;
     }
@@ -379,7 +341,7 @@ struct rb_node *__rb_rotate_right(
         return node;
     }
     left_right = left->right;
-    
+
     if (parent == NULL) {
         link = &root->node;
     }

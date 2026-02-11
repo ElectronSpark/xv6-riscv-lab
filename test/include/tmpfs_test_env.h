@@ -1,6 +1,6 @@
 /*
  * Minimal test environment for tmpfs truncate.c
- * 
+ *
  * This file provides all the types and stubs needed to compile truncate.c
  * for unit testing. It uses guards to prevent the kernel headers from
  * being included.
@@ -11,7 +11,8 @@
 #ifndef TMPFS_TEST_ENV_H
 #define TMPFS_TEST_ENV_H
 
-/* Block all kernel headers that would conflict - use EXACT guard names from kernel */
+/* Block all kernel headers that would conflict - use EXACT guard names from
+ * kernel */
 #define __KERNEL_TYPES_H
 #define __KERNEL_RISCV_H
 #define __KERNEL_DEFS_H
@@ -53,7 +54,8 @@
 
 /* ============================================================================
  * Basic types (matching kernel types.h)
- * ============================================================================ */
+ * ============================================================================
+ */
 typedef unsigned char uint8;
 typedef unsigned long uint64;
 typedef long int64;
@@ -61,7 +63,8 @@ typedef int64 loff_t;
 
 /* ============================================================================
  * Page constants (matching riscv.h/param.h)
- * ============================================================================ */
+ * ============================================================================
+ */
 #ifndef PAGE_SHIFT
 #define PAGE_SHIFT 12
 #endif
@@ -78,7 +81,8 @@ typedef int64 loff_t;
 
 /* ============================================================================
  * Error codes (matching errno.h)
- * ============================================================================ */
+ * ============================================================================
+ */
 #ifndef ENOMEM
 #define ENOMEM 12
 #endif
@@ -88,7 +92,8 @@ typedef int64 loff_t;
 
 /* ============================================================================
  * Mock pcache types — just enough for truncate.c to compile
- * ============================================================================ */
+ * ============================================================================
+ */
 
 /* Forward declarations */
 struct pcache;
@@ -121,14 +126,16 @@ void pcache_teardown(struct pcache *pcache);
 
 /* ============================================================================
  * TMPFS constants (matching kernel tmpfs_private.h — pcache model)
- * ============================================================================ */
+ * ============================================================================
+ */
 #define TMPFS_MAX_FILE_SIZE ((uint64)1 * 1024 * 1024 * 1024)
-#define TMPFS_IBLOCK(pos)        ((pos) >> PAGE_SHIFT)
+#define TMPFS_IBLOCK(pos) ((pos) >> PAGE_SHIFT)
 #define TMPFS_IBLOCK_OFFSET(pos) ((pos) & PAGE_MASK)
 
 /* ============================================================================
  * Minimal structures for testing (matching vfs_types.h and tmpfs_private.h)
- * ============================================================================ */
+ * ============================================================================
+ */
 
 /* Minimal vfs_inode — includes i_data pcache used by truncate.c */
 struct vfs_inode {
@@ -147,7 +154,8 @@ struct tmpfs_inode {
     struct vfs_inode vfs_inode;
     bool embedded;
     union {
-        char _dir_padding[288]; /* same size as kernel dir { hlist_t + buckets[15] } */
+        char _dir_padding[288]; /* same size as kernel dir { hlist_t +
+                                   buckets[15] } */
         union {
             char *symlink_target;
             char data[0];
@@ -158,16 +166,17 @@ struct tmpfs_inode {
     };
 };
 
-#define TMPFS_INODE_EMBEDDED_DATA_LEN   \
+#define TMPFS_INODE_EMBEDDED_DATA_LEN                                          \
     (sizeof(struct tmpfs_inode) - offsetof(struct tmpfs_inode, sym.data))
 
 /* container_of macro */
-#define container_of(ptr, type, member) \
+#define container_of(ptr, type, member)                                        \
     ((type *)((char *)(ptr) - offsetof(type, member)))
 
 /* ============================================================================
  * Function stubs — to be implemented in the test .c file
- * ============================================================================ */
+ * ============================================================================
+ */
 
 /* Panic handling */
 #define ASSERTION_FAILURE "Assertion failure"
@@ -177,11 +186,11 @@ extern void __panic_impl(const char *type, const char *fmt, ...);
 
 #define __panic(type, fmt, ...) __panic_impl(type, fmt, ##__VA_ARGS__)
 #define panic(fmt, ...) __panic(PANIC, fmt, ##__VA_ARGS__)
-#define assert(expr, fmt, ...) \
-    do { \
-        if (!(expr)) { \
-            __panic(ASSERTION_FAILURE, fmt, ##__VA_ARGS__); \
-        } \
+#define assert(expr, fmt, ...)                                                 \
+    do {                                                                       \
+        if (!(expr)) {                                                         \
+            __panic(ASSERTION_FAILURE, fmt, ##__VA_ARGS__);                    \
+        }                                                                      \
     } while (0)
 
 /* tmpfs pcache lifecycle — declared in tmpfs_private.h, mocked in test */

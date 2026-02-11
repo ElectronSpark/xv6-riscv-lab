@@ -22,7 +22,7 @@
 #include "vfs/file.h"
 #include "vfs/fcntl.h"
 #include "vfs/stat.h"
-#include "vfs/xv6fs/ondisk.h"  // for DIRSIZ
+#include "vfs/xv6fs/ondisk.h" // for DIRSIZ
 #include <mm/vm.h>
 #include "printf.h"
 #include "dev/cdev.h"
@@ -81,21 +81,25 @@ static void __vfs_fput_work_func(struct work_struct *work) {
 static void __vfs_fd_rcucb(void *data) {
     struct vfs_file *fd = (struct vfs_file *)data;
     struct workqueue *wq = vfs_get_deferred_iput_wq();
-    
-    // If workqueue not available (early init or shutdown), fall back to direct call
+
+    // If workqueue not available (early init or shutdown), fall back to direct
+    // call
     if (wq == NULL) {
         vfs_fput(fd);
         return;
     }
-    
-    struct work_struct *work = create_work_struct(__vfs_fput_work_func, (uint64)fd);
+
+    struct work_struct *work =
+        create_work_struct(__vfs_fput_work_func, (uint64)fd);
     if (work == NULL) {
-        // Allocation failed, fall back to direct call (risky but better than leak)
-        printf("__vfs_fd_rcucb: failed to allocate work_struct, falling back to direct vfs_fput\n");
+        // Allocation failed, fall back to direct call (risky but better than
+        // leak)
+        printf("__vfs_fd_rcucb: failed to allocate work_struct, falling back "
+               "to direct vfs_fput\n");
         vfs_fput(fd);
         return;
     }
-    
+
     queue_work(wq, work);
 }
 
@@ -162,33 +166,33 @@ static struct vfs_file *__vfs_fdfree(int fd) {
 uint64 sys_vfs_dup(void) {
     int fd;
     argint(0, &fd);
-    
+
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL) {
         return -EBADF;
     }
-    
+
     spin_lock(&current->fdtable->lock);
     int newfd = __vfs_fdalloc(f);
     spin_unlock(&current->fdtable->lock);
 
-    vfs_fput(f); // remove the reference from __vfs_argfd 
+    vfs_fput(f); // remove the reference from __vfs_argfd
     return newfd;
 }
 
 uint64 sys_vfs_read(void) {
     int fd, n;
     uint64 p;
-    
+
     argint(0, &fd);
     argaddr(1, &p);
     argint(2, &n);
-    
+
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL) {
         return -EBADF;
     }
-    
+
     ssize_t ret = vfs_fileread(f, (void *)p, n, true);
     vfs_fput(f);
     return ret;
@@ -197,16 +201,16 @@ uint64 sys_vfs_read(void) {
 uint64 sys_vfs_write(void) {
     int fd, n;
     uint64 p;
-    
+
     argint(0, &fd);
     argaddr(1, &p);
     argint(2, &n);
-    
+
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL) {
         return -EBADF;
     }
-    
+
     ssize_t ret = vfs_filewrite(f, (const void *)p, n, true);
     vfs_fput(f);
     return ret;
@@ -215,7 +219,7 @@ uint64 sys_vfs_write(void) {
 uint64 sys_vfs_close(void) {
     int fd;
     argint(0, &fd);
-    
+
     spin_lock(&current->fdtable->lock);
     struct vfs_file *f = __vfs_fdfree(fd);
     if (f == NULL) {
@@ -223,7 +227,7 @@ uint64 sys_vfs_close(void) {
         return -EBADF;
     }
     spin_unlock(&current->fdtable->lock);
-    
+
     __vfs_fput_call_rcu(f);
     return 0;
 }
@@ -231,27 +235,27 @@ uint64 sys_vfs_close(void) {
 uint64 sys_vfs_fstat(void) {
     int fd;
     uint64 st;
-    
+
     argint(0, &fd);
     argaddr(1, &st);
-    
+
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL) {
         return -EBADF;
     }
-    
+
     struct stat kst;
     int ret = vfs_filestat(f, &kst);
     if (ret != 0) {
         vfs_fput(f); // remove the reference from __vfs_argfd
         return ret;
     }
-    
+
     if (vm_copyout(current->vm, st, (char *)&kst, sizeof(kst)) < 0) {
         vfs_fput(f); // remove the reference from __vfs_argfd
         return -EFAULT;
     }
-    
+
     vfs_fput(f); // remove the reference from __vfs_argfd
     return 0;
 }
@@ -274,15 +278,15 @@ uint64 sys_vfs_open(void) {
     char name[DIRSIZ + 1];
     int omode;
     int n;
-    
+
     argint(1, &omode);
     if ((n = argstr(0, path, MAXPATH)) < 0) {
         return -EFAULT;
     }
-    
+
     struct vfs_inode *inode = NULL;
     int ret = 0;
-    
+
     if (omode & O_CREAT) {
         // Create file if it doesn't exist
         struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
@@ -292,13 +296,13 @@ uint64 sys_vfs_open(void) {
         if (parent == NULL) {
             return -ENOENT;
         }
-        
+
         size_t name_len = strlen(name);
-        
+
         // Try to create
         inode = vfs_create(parent, 0644, name, name_len);
         vfs_iput(parent);
-        
+
         if (IS_ERR(inode)) {
             if (PTR_ERR(inode) == -EEXIST && !(omode & O_EXCL)) {
                 // File exists, try to open it
@@ -315,7 +319,7 @@ uint64 sys_vfs_open(void) {
     } else {
         // Open existing file - follow symlinks unless O_NOFOLLOW
         int symloop_count = 0;
-        
+
         do {
             inode = vfs_namei(path, strlen(path));
             if (IS_ERR(inode)) {
@@ -324,53 +328,53 @@ uint64 sys_vfs_open(void) {
             if (inode == NULL) {
                 return -ENOENT;
             }
-            
+
             // Check if it's a symlink and we should follow it
             if (!S_ISLNK(inode->mode) || (omode & O_NOFOLLOW)) {
-                break;  // Not a symlink or O_NOFOLLOW set
+                break; // Not a symlink or O_NOFOLLOW set
             }
-            
+
             // Read the symlink target
             ssize_t link_len = vfs_readlink(inode, path, MAXPATH - 1);
             vfs_iput(inode);
             inode = NULL;
-            
+
             if (link_len < 0) {
-                return link_len;  // Error reading symlink
+                return link_len; // Error reading symlink
             }
             path[link_len] = '\0';
-            
+
             symloop_count++;
         } while (symloop_count < VFS_SYMLOOP_MAX);
-        
+
         if (symloop_count >= VFS_SYMLOOP_MAX) {
-            return -ELOOP;  // Too many symlink levels
+            return -ELOOP; // Too many symlink levels
         }
     }
-    
+
     if (IS_ERR(inode)) {
         return PTR_ERR(inode);
     }
     if (inode == NULL) {
         return -ENOENT;
     }
-    
+
     // Check if trying to write to a directory
     if (S_ISDIR(inode->mode) && (omode & O_WRONLY || omode & O_RDWR)) {
         vfs_iput(inode);
         return -EISDIR;
     }
-    
+
     // Check for O_TRUNC before releasing inode reference
     int should_truncate = (omode & O_TRUNC) && S_ISREG(inode->mode);
-    
+
     struct vfs_file *f = vfs_fileopen(inode, omode);
-    vfs_iput(inode);  // Release local inode reference (file holds its own ref)
-    
+    vfs_iput(inode); // Release local inode reference (file holds its own ref)
+
     if (IS_ERR(f)) {
         return PTR_ERR(f);
     }
-    
+
     // Handle O_TRUNC - truncate the file to zero length
     if (should_truncate) {
         ret = vfs_itruncate(vfs_inode_deref(&f->inode), 0);
@@ -379,12 +383,12 @@ uint64 sys_vfs_open(void) {
             return ret;
         }
     }
-    
+
     spin_lock(&current->fdtable->lock);
     int fd = __vfs_fdalloc(f);
     spin_unlock(&current->fdtable->lock);
-    // When success, the refcount of f will be increased by fdtable, thus we do not put f here.
-    // When failure, we need to put f anyway.
+    // When success, the refcount of f will be increased by fdtable, thus we do
+    // not put f here. When failure, we need to put f anyway.
     vfs_fput(f);
     return fd;
 }
@@ -393,11 +397,11 @@ uint64 sys_vfs_mkdir(void) {
     char path[MAXPATH];
     char name[DIRSIZ + 1];
     int n;
-    
+
     if ((n = argstr(0, path, MAXPATH)) < 0) {
         return -EFAULT;
     }
-    
+
     struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
     if (IS_ERR(parent)) {
         return PTR_ERR(parent);
@@ -405,16 +409,16 @@ uint64 sys_vfs_mkdir(void) {
     if (parent == NULL) {
         return -ENOENT;
     }
-    
+
     size_t name_len = strlen(name);
-    
+
     struct vfs_inode *dir = vfs_mkdir(parent, 0755, name, name_len);
     vfs_iput(parent);
-    
+
     if (IS_ERR(dir)) {
         return PTR_ERR(dir);
     }
-    
+
     vfs_iput(dir);
     return 0;
 }
@@ -424,14 +428,14 @@ uint64 sys_vfs_mknod(void) {
     char name[DIRSIZ + 1];
     int mode, major, minor;
     int n;
-    
+
     if ((n = argstr(0, path, MAXPATH)) < 0) {
         return -EFAULT;
     }
     argint(1, &mode);
     argint(2, &major);
     argint(3, &minor);
-    
+
     struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
     if (IS_ERR(parent)) {
         return PTR_ERR(parent);
@@ -439,17 +443,18 @@ uint64 sys_vfs_mknod(void) {
     if (parent == NULL) {
         return -ENOENT;
     }
-    
+
     size_t name_len = strlen(name);
-    
+
     dev_t dev = mkdev(major, minor);
-    struct vfs_inode *node = vfs_mknod(parent, (mode_t)mode, dev, name, name_len);
+    struct vfs_inode *node =
+        vfs_mknod(parent, (mode_t)mode, dev, name, name_len);
     vfs_iput(parent);
-    
+
     if (IS_ERR(node)) {
         return PTR_ERR(node);
     }
-    
+
     vfs_iput(node);
     return 0;
 }
@@ -458,11 +463,11 @@ uint64 sys_vfs_unlink(void) {
     char path[MAXPATH];
     char name[DIRSIZ + 1];
     int n;
-    
+
     if ((n = argstr(0, path, MAXPATH)) < 0) {
         return -EFAULT;
     }
-    
+
     struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
     if (IS_ERR(parent)) {
         return PTR_ERR(parent);
@@ -470,12 +475,12 @@ uint64 sys_vfs_unlink(void) {
     if (parent == NULL) {
         return -ENOENT;
     }
-    
+
     size_t name_len = strlen(name);
-    
+
     int ret = vfs_unlink(parent, name, name_len);
     vfs_iput(parent);
-    
+
     return ret;
 }
 
@@ -483,12 +488,12 @@ uint64 sys_vfs_link(void) {
     char old[MAXPATH], new[MAXPATH];
     char name[DIRSIZ + 1];
     int n1, n2;
-    
+
     if ((n1 = argstr(0, old, MAXPATH)) < 0 ||
         (n2 = argstr(1, new, MAXPATH)) < 0) {
         return -EFAULT;
     }
-    
+
     // Get the source inode
     struct vfs_inode *src = vfs_namei(old, n1);
     if (IS_ERR(src)) {
@@ -497,13 +502,13 @@ uint64 sys_vfs_link(void) {
     if (src == NULL) {
         return -ENOENT;
     }
-    
+
     // Cannot link directories
     if (S_ISDIR(src->mode)) {
         vfs_iput(src);
         return -EPERM;
     }
-    
+
     // Get parent directory of new path
     struct vfs_inode *parent = vfs_nameiparent(new, n2, name, DIRSIZ + 1);
     if (IS_ERR(parent)) {
@@ -514,9 +519,9 @@ uint64 sys_vfs_link(void) {
         vfs_iput(src);
         return -ENOENT;
     }
-    
+
     size_t name_len = strlen(name);
-    
+
     // Create a dentry for the source
     struct vfs_dentry old_dentry = {
         .sb = src->sb,
@@ -524,12 +529,12 @@ uint64 sys_vfs_link(void) {
         .name = NULL,
         .name_len = 0,
     };
-    
+
     int ret = vfs_link(&old_dentry, parent, name, name_len);
-    
+
     vfs_iput(src);
     vfs_iput(parent);
-    
+
     return ret;
 }
 
@@ -544,11 +549,12 @@ uint64 sys_vfs_link(void) {
  *
  * Returns: length of the absolute path, or negative errno on error
  */
-static int vfs_make_absolute_path(const char *relpath, int relpath_len, char *abspath) {
+static int vfs_make_absolute_path(const char *relpath, int relpath_len,
+                                  char *abspath) {
     if (relpath_len <= 0) {
         return -EINVAL;
     }
-    
+
     // Already absolute - just copy
     if (relpath[0] == '/') {
         if (relpath_len >= MAXPATH) {
@@ -558,22 +564,22 @@ static int vfs_make_absolute_path(const char *relpath, int relpath_len, char *ab
         abspath[relpath_len] = '\0';
         return relpath_len;
     }
-    
+
     // Relative path - need to prepend cwd
     struct thread *p = current;
     vfs_struct_lock(p->fs);
     struct vfs_inode *cwd = vfs_inode_deref(&p->fs->cwd);
     struct vfs_inode *root = vfs_inode_deref(&p->fs->rooti);
     vfs_struct_unlock(p->fs);
-    
+
     if (cwd == NULL) {
         return -ENOENT;
     }
-    
+
     // Collect names from cwd to root
     char *names[MAXPATH / 2];
     int name_count = 0;
-    
+
     struct vfs_inode *inode = cwd;
     while (inode != root) {
         if (inode->parent == inode) {
@@ -591,7 +597,7 @@ static int vfs_make_absolute_path(const char *relpath, int relpath_len, char *ab
             }
             continue;
         }
-        
+
         if (inode->name != NULL) {
             names[name_count++] = inode->name;
         }
@@ -600,7 +606,7 @@ static int vfs_make_absolute_path(const char *relpath, int relpath_len, char *ab
             break;
         }
     }
-    
+
     // Build absolute path: /cwd/relpath
     int pathlen = 0;
     abspath[pathlen++] = '/';
@@ -620,7 +626,7 @@ static int vfs_make_absolute_path(const char *relpath, int relpath_len, char *ab
     memmove(abspath + pathlen, relpath, relpath_len);
     pathlen += relpath_len;
     abspath[pathlen] = '\0';
-    
+
     return pathlen;
 }
 
@@ -628,19 +634,19 @@ uint64 sys_vfs_symlink(void) {
     char target[MAXPATH], linkpath[MAXPATH];
     char name[DIRSIZ + 1];
     int n1, n2;
-    
+
     if ((n1 = argstr(0, target, MAXPATH)) < 0 ||
         (n2 = argstr(1, linkpath, MAXPATH)) < 0) {
         return -EFAULT;
     }
-    
+
     // Convert target to absolute path if it's relative
     char abs_target[MAXPATH];
     int abs_len = vfs_make_absolute_path(target, n1, abs_target);
     if (abs_len < 0) {
         return abs_len;
     }
-    
+
     struct vfs_inode *parent = vfs_nameiparent(linkpath, n2, name, DIRSIZ + 1);
     if (IS_ERR(parent)) {
         return PTR_ERR(parent);
@@ -648,16 +654,17 @@ uint64 sys_vfs_symlink(void) {
     if (parent == NULL) {
         return -ENOENT;
     }
-    
+
     size_t name_len = strlen(name);
-    
-    struct vfs_inode *sym = vfs_symlink(parent, 0777, name, name_len, abs_target, abs_len);
+
+    struct vfs_inode *sym =
+        vfs_symlink(parent, 0777, name, name_len, abs_target, abs_len);
     vfs_iput(parent);
-    
+
     if (IS_ERR(sym)) {
         return PTR_ERR(sym);
     }
-    
+
     vfs_iput(sym);
     return 0;
 }
@@ -665,11 +672,11 @@ uint64 sys_vfs_symlink(void) {
 uint64 sys_vfs_chdir(void) {
     char path[MAXPATH];
     int n;
-    
+
     if ((n = argstr(0, path, MAXPATH)) < 0) {
         return -EFAULT;
     }
-    
+
     struct vfs_inode *inode = vfs_namei(path, n);
     if (IS_ERR(inode)) {
         return PTR_ERR(inode);
@@ -677,12 +684,12 @@ uint64 sys_vfs_chdir(void) {
     if (inode == NULL) {
         return -ENOENT;
     }
-    
+
     if (!S_ISDIR(inode->mode)) {
         vfs_iput(inode);
         return -ENOTDIR;
     }
-    
+
     // Get reference to new cwd BEFORE acquiring spinlock
     // (vfs_inode_get_ref may acquire the inode mutex internally)
     struct vfs_inode_ref new_cwd_ref;
@@ -698,11 +705,11 @@ uint64 sys_vfs_chdir(void) {
     struct vfs_inode_ref old_cwd = p->fs->cwd;
     p->fs->cwd = new_cwd_ref;
     vfs_struct_unlock(p->fs);
-    
+
     // Release old cwd
     vfs_inode_put_ref(&old_cwd);
     vfs_iput(inode);
-    
+
     return 0;
 }
 
@@ -726,32 +733,32 @@ uint64 sys_vfs_chdir(void) {
 uint64 sys_getcwd(void) {
     uint64 buf_addr;
     int size;
-    
+
     argaddr(0, &buf_addr);
     argint(1, &size);
-    
+
     if (size <= 0) {
         return -EINVAL;
     }
-    
+
     char path[MAXPATH];
     int pathlen = 0;
-    
+
     struct thread *p = current;
     vfs_struct_lock(p->fs);
     struct vfs_inode *cwd = vfs_inode_deref(&p->fs->cwd);
     struct vfs_inode *root = vfs_inode_deref(&p->fs->rooti);
     vfs_struct_unlock(p->fs);
-    
+
     if (cwd == NULL) {
         return -ENOENT;
     }
-    
+
     // Build path from cwd to root by collecting names
     // We build it in reverse, then reverse the result
-    char *names[MAXPATH / 2];  // Stack of name pointers
+    char *names[MAXPATH / 2]; // Stack of name pointers
     int name_count = 0;
-    
+
     struct vfs_inode *inode = cwd;
     while (inode != root) {
         // Check if we're at a local root (mount point)
@@ -772,7 +779,7 @@ uint64 sys_getcwd(void) {
             }
             continue;
         }
-        
+
         if (inode->name != NULL) {
             names[name_count++] = inode->name;
         }
@@ -781,7 +788,7 @@ uint64 sys_getcwd(void) {
             break;
         }
     }
-    
+
     // Build path from names (in reverse order)
     path[pathlen++] = '/';
     for (int i = name_count - 1; i >= 0; i--) {
@@ -796,15 +803,15 @@ uint64 sys_getcwd(void) {
         }
     }
     path[pathlen] = '\0';
-    
+
     if (pathlen + 1 > size) {
         return -ERANGE;
     }
-    
+
     if (vm_copyout(p->vm, buf_addr, path, pathlen + 1) < 0) {
         return -EFAULT;
     }
-    
+
     return buf_addr;
 }
 
@@ -815,13 +822,13 @@ uint64 sys_getcwd(void) {
 uint64 sys_vfs_pipe(void) {
     uint64 fdarray;
     argaddr(0, &fdarray);
-    
+
     struct vfs_file *rf = NULL, *wf = NULL;
     int ret = vfs_pipealloc(&rf, &wf);
     if (ret != 0) {
         return ret;
     }
-    
+
     spin_lock(&current->fdtable->lock);
     int fd0 = __vfs_fdalloc(rf);
     if (fd0 < 0) {
@@ -831,7 +838,7 @@ uint64 sys_vfs_pipe(void) {
         vfs_fput(wf);
         return fd0;
     }
-    
+
     int fd1 = __vfs_fdalloc(wf);
     if (fd1 < 0) {
         __vfs_fdfree(fd0);
@@ -844,11 +851,12 @@ uint64 sys_vfs_pipe(void) {
         return fd1;
     }
     spin_unlock(&current->fdtable->lock);
-    
+
     // vm_copyout may sleep (acquires rwsem), so must be outside spinlock
     struct thread *p = current;
     if (vm_copyout(p->vm, fdarray, (char *)&fd0, sizeof(fd0)) < 0 ||
-        vm_copyout(p->vm, fdarray + sizeof(fd0), (char *)&fd1, sizeof(fd1)) < 0) {
+        vm_copyout(p->vm, fdarray + sizeof(fd0), (char *)&fd1, sizeof(fd1)) <
+            0) {
         // Re-acquire lock to deallocate fds
         spin_lock(&current->fdtable->lock);
         __vfs_fdfree(fd0);
@@ -863,12 +871,13 @@ uint64 sys_vfs_pipe(void) {
         __vfs_fput_call_rcu(wf);
         return -EFAULT;
     }
-    
-    // Release the references from pipealloc - fdtable holds its own references now
-    // (same pattern as sys_vfs_open which calls vfs_fput after __vfs_fdalloc)
+
+    // Release the references from pipealloc - fdtable holds its own references
+    // now (same pattern as sys_vfs_open which calls vfs_fput after
+    // __vfs_fdalloc)
     vfs_fput(rf);
     vfs_fput(wf);
-    
+
     return 0;
 }
 
@@ -878,23 +887,23 @@ uint64 sys_vfs_pipe(void) {
 
 uint64 sys_vfs_connect(void) {
     uint32 raddr, lport, rport;
-    
+
     argint(0, (int *)&raddr);
     argint(1, (int *)&lport);
     argint(2, (int *)&rport);
-    
+
     struct vfs_file *f = NULL;
     int ret = vfs_sockalloc(&f, raddr, (uint16)lport, (uint16)rport);
     if (ret != 0) {
         return ret;
     }
-    
+
     spin_lock(&current->fdtable->lock);
     int fd = __vfs_fdalloc(f);
     spin_unlock(&current->fdtable->lock);
 
-    // When success, the refcount of f will be increased by fdtable, thus we do not put f here.
-    // When failure, we need to put f anyway.
+    // When success, the refcount of f will be increased by fdtable, thus we do
+    // not put f here. When failure, we need to put f anyway.
     vfs_fput(f);
     return fd;
 }
@@ -905,31 +914,38 @@ uint64 sys_vfs_connect(void) {
 
 // Linux-compatible dirent structure
 struct linux_dirent64 {
-    uint64 d_ino;      // Inode number
-    int64 d_off;       // Offset to next structure
-    uint16 d_reclen;   // Size of this dirent
-    uint8 d_type;      // File type
-    char d_name[];     // Filename (null-terminated)
+    uint64 d_ino;    // Inode number
+    int64 d_off;     // Offset to next structure
+    uint16 d_reclen; // Size of this dirent
+    uint8 d_type;    // File type
+    char d_name[];   // Filename (null-terminated)
 };
 
 // File type constants
-#define DT_UNKNOWN  0
-#define DT_FIFO     1
-#define DT_CHR      2
-#define DT_DIR      4
-#define DT_BLK      6
-#define DT_REG      8
-#define DT_LNK      10
-#define DT_SOCK     12
+#define DT_UNKNOWN 0
+#define DT_FIFO 1
+#define DT_CHR 2
+#define DT_DIR 4
+#define DT_BLK 6
+#define DT_REG 8
+#define DT_LNK 10
+#define DT_SOCK 12
 
 static uint8 __mode_to_dtype(mode_t mode) {
-    if (S_ISREG(mode)) return DT_REG;
-    if (S_ISDIR(mode)) return DT_DIR;
-    if (S_ISCHR(mode)) return DT_CHR;
-    if (S_ISBLK(mode)) return DT_BLK;
-    if (S_ISFIFO(mode)) return DT_FIFO;
-    if (S_ISLNK(mode)) return DT_LNK;
-    if (S_ISSOCK(mode)) return DT_SOCK;
+    if (S_ISREG(mode))
+        return DT_REG;
+    if (S_ISDIR(mode))
+        return DT_DIR;
+    if (S_ISCHR(mode))
+        return DT_CHR;
+    if (S_ISBLK(mode))
+        return DT_BLK;
+    if (S_ISFIFO(mode))
+        return DT_FIFO;
+    if (S_ISLNK(mode))
+        return DT_LNK;
+    if (S_ISSOCK(mode))
+        return DT_SOCK;
     return DT_UNKNOWN;
 }
 
@@ -937,55 +953,56 @@ uint64 sys_getdents(void) {
     int fd;
     uint64 dirp;
     int count;
-    
+
     argint(0, &fd);
     argaddr(1, &dirp);
     argint(2, &count);
-    
+
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL) {
         return -EBADF;
     }
-    
+
     struct vfs_inode *inode = vfs_inode_deref(&f->inode);
     if (inode == NULL || !S_ISDIR(inode->mode)) {
         vfs_fput(f); // remove the reference from __vfs_argfd
         return -ENOTDIR;
     }
-    
+
     // Allocate kernel buffer
     char *kbuf = kmm_alloc(count);
     if (kbuf == NULL) {
         vfs_fput(f); // remove the reference from __vfs_argfd
         return -ENOMEM;
     }
-    
+
     int bytes_written = 0;
     struct vfs_dentry dentry = {0};
     int ret;
-    
+
     while (bytes_written < count) {
-        // Save iterator state before calling dir_iter, in case we need to revert
+        // Save iterator state before calling dir_iter, in case we need to
+        // revert
         uint64 saved_cookies = f->dir_iter.cookies;
         uint64 saved_index = f->dir_iter.index;
-        
+
         ret = vfs_dir_iter(inode, &f->dir_iter, &dentry);
         if (ret != 0) {
             kmm_free(kbuf);
             vfs_fput(f); // remove the reference from __vfs_argfd
             return ret;
         }
-        
+
         if (dentry.name == NULL) {
             // End of directory
             break;
         }
-        
+
         // Calculate record length (must be 8-byte aligned)
         size_t name_len = dentry.name_len;
         size_t reclen = sizeof(struct linux_dirent64) + name_len + 1;
         reclen = (reclen + 7) & ~7; // Align to 8 bytes
-        
+
         if (bytes_written + (int)reclen > count) {
             // Not enough space, restore iterator state for next call
             f->dir_iter.cookies = saved_cookies;
@@ -993,7 +1010,7 @@ uint64 sys_getdents(void) {
             vfs_release_dentry(&dentry);
             break;
         }
-        
+
         // Get inode info for d_type
         struct vfs_inode *child = vfs_get_dentry_inode(&dentry);
         uint8 d_type = DT_UNKNOWN;
@@ -1001,21 +1018,22 @@ uint64 sys_getdents(void) {
             d_type = __mode_to_dtype(child->mode);
             vfs_iput(child);
         }
-        
+
         // Fill dirent
-        struct linux_dirent64 *de = (struct linux_dirent64 *)(kbuf + bytes_written);
+        struct linux_dirent64 *de =
+            (struct linux_dirent64 *)(kbuf + bytes_written);
         de->d_ino = dentry.ino;
         de->d_off = f->dir_iter.index;
         de->d_reclen = reclen;
         de->d_type = d_type;
         memmove(de->d_name, dentry.name, name_len);
         de->d_name[name_len] = '\0';
-        
+
         bytes_written += reclen;
         vfs_release_dentry(&dentry);
         memset(&dentry, 0, sizeof(dentry));
     }
-    
+
     // Copy to user space
     if (bytes_written > 0) {
         if (vm_copyout(current->vm, dirp, kbuf, bytes_written) < 0) {
@@ -1024,7 +1042,7 @@ uint64 sys_getdents(void) {
             return -EFAULT;
         }
     }
-    
+
     kmm_free(kbuf);
     vfs_fput(f); // remove the reference from __vfs_argfd
     return bytes_written;
@@ -1037,11 +1055,11 @@ uint64 sys_getdents(void) {
 uint64 sys_chroot(void) {
     char path[MAXPATH];
     int n;
-    
+
     if ((n = argstr(0, path, MAXPATH)) < 0) {
         return -EFAULT;
     }
-    
+
     struct vfs_inode *new_root = vfs_namei(path, n);
     if (IS_ERR(new_root)) {
         return PTR_ERR(new_root);
@@ -1049,22 +1067,22 @@ uint64 sys_chroot(void) {
     if (new_root == NULL) {
         return -ENOENT;
     }
-    
+
     if (!S_ISDIR(new_root->mode)) {
         vfs_iput(new_root);
         return -ENOTDIR;
     }
-    
+
     // Use the VFS helper functions
     int ret = vfs_chroot(new_root);
     if (ret < 0) {
         vfs_iput(new_root);
         return ret;
     }
-    
+
     ret = vfs_chdir(new_root);
     vfs_iput(new_root);
-    
+
     return ret;
 }
 
@@ -1096,12 +1114,12 @@ int vfs_mount_path(const char *fstype, const char *target, int target_len,
     if (target_dir == NULL) {
         return -ENOENT;
     }
-    
+
     if (!S_ISDIR(target_dir->mode)) {
         vfs_iput(target_dir);
         return -ENOTDIR;
     }
-    
+
     // Parse source device (for block-device-based filesystems)
     struct vfs_inode *source_inode = NULL;
     if (source != NULL && source_len > 0) {
@@ -1114,7 +1132,7 @@ int vfs_mount_path(const char *fstype, const char *target, int target_len,
             }
         }
     }
-    
+
     // Acquire required locks for vfs_mount:
     // 1. Mount mutex
     // 2. Superblock write lock
@@ -1122,22 +1140,22 @@ int vfs_mount_path(const char *fstype, const char *target, int target_len,
     vfs_mount_lock();
     vfs_superblock_wlock(target_dir->sb);
     vfs_ilock(target_dir);
-    
+
     // Mount the filesystem
     int ret = vfs_mount(fstype, target_dir, source_inode, 0, NULL);
-    
+
     // On success, release locks. On failure, vfs_mount already released them.
     if (ret == 0) {
         vfs_iunlock(target_dir);
         vfs_superblock_unlock(target_dir->sb);
     }
     vfs_mount_unlock();
-    
+
     if (source_inode) {
         vfs_iput(source_inode);
     }
     vfs_iput(target_dir);
-    
+
     return ret;
 }
 
@@ -1146,13 +1164,12 @@ uint64 sys_mount(void) {
     char target[MAXPATH];
     char fstype[32];
     int n1, n2;
-    
+
     if ((n1 = argstr(0, source, MAXPATH)) < 0 ||
-        (n2 = argstr(1, target, MAXPATH)) < 0 ||
-        argstr(2, fstype, 32) < 0) {
+        (n2 = argstr(1, target, MAXPATH)) < 0 || argstr(2, fstype, 32) < 0) {
         return -EFAULT;
     }
-    
+
     return vfs_mount_path(fstype, target, n2, source, n1);
 }
 
@@ -1181,26 +1198,27 @@ int vfs_umount_path(const char *target, int target_len) {
     if (mounted_root == NULL) {
         return -ENOENT;
     }
-    
-    // Check if this is a mounted filesystem root (parent == self for local root)
+
+    // Check if this is a mounted filesystem root (parent == self for local
+    // root)
     if (!vfs_inode_is_local_root(mounted_root)) {
         vfs_iput(mounted_root);
-        return -EINVAL;  // Not a mounted filesystem root
+        return -EINVAL; // Not a mounted filesystem root
     }
-    
+
     // Get the mountpoint from the superblock
     struct vfs_superblock *child_sb = mounted_root->sb;
     if (child_sb == NULL || child_sb->mountpoint == NULL) {
         vfs_iput(mounted_root);
-        return -EINVAL;  // Not mounted or no mountpoint
+        return -EINVAL; // Not mounted or no mountpoint
     }
-    
+
     struct vfs_inode *target_dir = child_sb->mountpoint;
     if (!target_dir->mount) {
         vfs_iput(mounted_root);
-        return -EINVAL;  // Mountpoint not marked as mount
+        return -EINVAL; // Mountpoint not marked as mount
     }
-    
+
     // Acquire required locks for vfs_unmount:
     // 1. Mount mutex
     // 2. Parent superblock write lock
@@ -1212,9 +1230,9 @@ int vfs_umount_path(const char *target, int target_len) {
     vfs_superblock_wlock(child_sb);
     vfs_ilock(target_dir);
     vfs_ilock(mounted_root);
-    
+
     int ret = vfs_unmount(target_dir);
-    
+
     if (ret != 0) {
         // On failure, release locks in reverse order
         // (vfs_unmount did not free anything)
@@ -1226,7 +1244,7 @@ int vfs_umount_path(const char *target, int target_len) {
         vfs_iput(mounted_root);
         return ret;
     }
-    
+
     // On success, vfs_unmount has already:
     // - Unlocked and freed mounted_root
     // - Unlocked and freed child_sb
@@ -1234,31 +1252,31 @@ int vfs_umount_path(const char *target, int target_len) {
     vfs_iunlock(target_dir);
     vfs_superblock_unlock(target_dir->sb);
     vfs_mount_unlock();
-    
+
     return 0;
 }
 
 uint64 sys_umount(void) {
     char target[MAXPATH];
     int n;
-    
+
     if ((n = argstr(0, target, MAXPATH)) < 0) {
         return -EFAULT;
     }
-    
+
     return vfs_umount_path(target, n);
 }
 
 /******************************************************************************
  * Debug: Dump active inodes
- * If path is provided (non-null arg0), dump only the superblock containing that path.
- * Otherwise, dump all superblocks.
+ * If path is provided (non-null arg0), dump only the superblock containing that
+ * path. Otherwise, dump all superblocks.
  ******************************************************************************/
 
 uint64 sys_dumpinode(void) {
     char path[MAXPATH];
     int n;
-    
+
     // Try to get path argument - if not provided, dump all
     n = argstr(0, path, MAXPATH);
     if (n < 0) {
@@ -1266,22 +1284,22 @@ uint64 sys_dumpinode(void) {
         vfs_dump_inodes();
         return 0;
     }
-    
+
     // Path provided - resolve it to find its superblock
     struct vfs_inode *inode = vfs_namei(path, n);
     if (!inode) {
         printf("dumpinode: cannot find path '%s'\n", path);
         return -ENOENT;
     }
-    
+
     struct vfs_superblock *sb = inode->sb;
     vfs_iput(inode);
-    
+
     if (!sb) {
         printf("dumpinode: inode has no superblock\n");
         return -EINVAL;
     }
-    
+
     vfs_dump_sb_inodes(sb);
     return 0;
 }

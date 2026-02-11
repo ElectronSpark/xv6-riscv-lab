@@ -416,12 +416,14 @@ void rwlock_wunlock_irqrestore(struct rwlock *rw, int state);
  *
  * | Pair        | Releases               | Re-acquires            |
  * |:------------|:-----------------------|:-----------------------|
- * | @c r_*_cb   | read lock (+ write if held via write→read recursion) | same set |
- * | @c w_*_cb   | write lock             | write lock             |
+ * | @c r_*_cb   | read lock (+ write if held via write→read recursion) | same
+ * set | | @c w_*_cb   | write lock             | write lock             |
  *
  * Status convention (opaque to the wait framework):
- *   - @c RW_CB_STATUS_READER (bit 0): a read lock was released / must be re-acquired.
- *   - @c RW_CB_STATUS_WRITER (bit 1): a write lock was released / must be re-acquired.
+ *   - @c RW_CB_STATUS_READER (bit 0): a read lock was released / must be
+ * re-acquired.
+ *   - @c RW_CB_STATUS_WRITER (bit 1): a write lock was released / must be
+ * re-acquired.
  *
  * All callbacks use the push_off / pop_off wrappers (@c rwlock_rlock,
  * @c rwlock_wlock, etc.) so the interrupt-nesting depth is balanced

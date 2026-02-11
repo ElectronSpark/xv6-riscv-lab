@@ -12,7 +12,7 @@ struct timer_root {
     uint64 current_tick;
     uint64 next_tick;
     struct {
-        uint64 valid: 1;
+        uint64 valid : 1;
     };
     spinlock_t lock;
 };
@@ -24,7 +24,7 @@ struct timer_node {
     int retry;
     int retry_limit;
     struct timer_root *timer;
-    void (*callback)(struct timer_node*);
+    void (*callback)(struct timer_node *);
     void *data;
 };
 

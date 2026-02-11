@@ -109,7 +109,9 @@ void test_vfork_ordering(void) {
     if (sequence == 1) {
         printf("PASS: Parent correctly blocked until child finished\n");
     } else {
-        printf("FAIL: sequence should be 1, got %d (parent ran before child finished)\n", sequence);
+        printf("FAIL: sequence should be 1, got %d (parent ran before child "
+               "finished)\n",
+               sequence);
         exit(1);
     }
 

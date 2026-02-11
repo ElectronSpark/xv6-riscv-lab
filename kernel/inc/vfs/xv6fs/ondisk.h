@@ -39,14 +39,14 @@
  * The super block describes the disk layout:
  */
 struct superblock {
-  uint magic;        // Must be FSMAGIC
-  uint size;         // Size of file system image (blocks)
-  uint nblocks;      // Number of data blocks
-  uint ninodes;      // Number of inodes
-  uint nlog;         // Number of log blocks
-  uint logstart;     // Block number of first log block
-  uint inodestart;   // Block number of first inode block
-  uint bmapstart;    // Block number of first free map block
+    uint magic;      // Must be FSMAGIC
+    uint size;       // Size of file system image (blocks)
+    uint nblocks;    // Number of data blocks
+    uint ninodes;    // Number of inodes
+    uint nlog;       // Number of log blocks
+    uint logstart;   // Block number of first log block
+    uint inodestart; // Block number of first inode block
+    uint bmapstart;  // Block number of first free map block
 };
 
 #define FSMAGIC 0x10203040
@@ -68,22 +68,22 @@ struct superblock {
  * For host tools (mkfs, xv6fuse), use XV6_T_* prefix to avoid
  * conflicts with host system's stat.h definitions.
  */
-#define XV6_T_DIR     1   // Directory
-#define XV6_T_FILE    2   // Regular file
-#define XV6_T_DEVICE  3   // Device (character or block)
-#define XV6_T_SYMLINK 4   // Symbolic link
+#define XV6_T_DIR 1     // Directory
+#define XV6_T_FILE 2    // Regular file
+#define XV6_T_DEVICE 3  // Device (character or block)
+#define XV6_T_SYMLINK 4 // Symbolic link
 
 /*
  * On-disk inode structure.
  * The type field indicates file type (XV6_T_DIR, XV6_T_FILE, etc.)
  */
 struct dinode {
-  short type;           // File type
-  short major;          // Major device number (XV6_T_DEVICE only)
-  short minor;          // Minor device number (XV6_T_DEVICE only)
-  short nlink;          // Number of links to inode in file system
-  uint size;            // Size of file (bytes)
-  uint addrs[NDIRECT+2];   // Data block addresses
+    short type;              // File type
+    short major;             // Major device number (XV6_T_DEVICE only)
+    short minor;             // Minor device number (XV6_T_DEVICE only)
+    short nlink;             // Number of links to inode in file system
+    uint size;               // Size of file (bytes)
+    uint addrs[NDIRECT + 2]; // Data block addresses
 };
 
 // Inodes per block
@@ -105,8 +105,8 @@ struct dinode {
 #define DIRSIZ 14
 
 struct dirent {
-  ushort inum;
-  char name[DIRSIZ];
+    ushort inum;
+    char name[DIRSIZ];
 };
 
 #endif /* KERNEL_VFS_XV6FS_ONDISK_H */

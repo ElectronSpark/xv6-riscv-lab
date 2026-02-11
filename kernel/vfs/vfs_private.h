@@ -12,7 +12,6 @@
 
 extern struct vfs_inode vfs_root_inode;
 
-
 struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino);
 struct vfs_inode *vfs_add_inode(struct vfs_superblock *sb,
                                 struct vfs_inode *inode);
@@ -22,8 +21,8 @@ void __vfs_file_init(void);
 void __vfs_fdtable_global_init(void);
 void __vfs_file_shrink_cache(void);
 void __vfs_shrink_caches(void);
-void tmpfs_init(void);           // Initialize tmpfs caches and register fs type
-void tmpfs_mount_root(void);     // Mount tmpfs as root filesystem
+void tmpfs_init(void);       // Initialize tmpfs caches and register fs type
+void tmpfs_mount_root(void); // Mount tmpfs as root filesystem
 void xv6fs_init(void);
 void xv6fs_mount_root(void);
 
@@ -33,10 +32,14 @@ void __vfs_final_unmount_cleanup(struct vfs_superblock *sb);
 
 // Check if superblock is usable for new operations
 static inline int vfs_sb_check_usable(struct vfs_superblock *sb) {
-    if (sb == NULL) return -EINVAL;
-    if (!sb->valid) return -EINVAL;
-    if (sb->unmounting) return -ESHUTDOWN;
-    if (!sb->attached) return -ENOENT;
+    if (sb == NULL)
+        return -EINVAL;
+    if (!sb->valid)
+        return -EINVAL;
+    if (sb->unmounting)
+        return -ESHUTDOWN;
+    if (!sb->attached)
+        return -ENOENT;
     return 0;
 }
 
@@ -53,15 +56,17 @@ static inline bool vfs_sb_is_unmounting(struct vfs_superblock *sb) {
 }
 
 // Assert holding the spinlock of the inode
-#define VFS_INODE_ASSERT_HOLDING(__inode, __fmt, ...) do {                  \
-    assert((__inode) != NULL, "VFS_INODE_ASSERT_HOLDING: inode is NULL");   \
-    assert(holding_mutex(&(__inode)->mutex), __fmt, ##__VA_ARGS__);       \
-} while (0)
+#define VFS_INODE_ASSERT_HOLDING(__inode, __fmt, ...)                          \
+    do {                                                                       \
+        assert((__inode) != NULL, "VFS_INODE_ASSERT_HOLDING: inode is NULL");  \
+        assert(holding_mutex(&(__inode)->mutex), __fmt, ##__VA_ARGS__);        \
+    } while (0)
 
-#define VFS_SUPERBLOCK_ASSERT_WHOLDING(__sb, __fmt, ...) do {                  \
-    assert((__sb) != NULL, "VFS_SUPERBLOCK_ASSERT_HOLDING: sb is NULL");   \
-    assert(rwsem_is_write_holding(&(__sb)->lock), __fmt, ##__VA_ARGS__);  \
-} while (0) 
+#define VFS_SUPERBLOCK_ASSERT_WHOLDING(__sb, __fmt, ...)                       \
+    do {                                                                       \
+        assert((__sb) != NULL, "VFS_SUPERBLOCK_ASSERT_HOLDING: sb is NULL");   \
+        assert(rwsem_is_write_holding(&(__sb)->lock), __fmt, ##__VA_ARGS__);   \
+    } while (0)
 
 static inline void __vfs_i_wait_completion(struct vfs_inode *inode) {
     wait_for_completion(&inode->completion);
@@ -116,6 +121,5 @@ static inline int __vfs_dir_inode_valid_holding(struct vfs_inode *inode) {
     }
     return 0;
 }
-
 
 #endif // KERNEL_VIRTUAL_FILE_SYSTEM_PRIVATE_H

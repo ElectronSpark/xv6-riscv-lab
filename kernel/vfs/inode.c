@@ -37,8 +37,10 @@
 
 // When need to acquire multiple inode locks:
 // - First acquire directory inode lock
-// - When both are non-directory inodes, acquire the one at the lower memory address first
-// - When both inodes are directories and one is ancestor of the other, acquire ancestor first
+// - When both are non-directory inodes, acquire the one at the lower memory
+// address first
+// - When both inodes are directories and one is ancestor of the other, acquire
+// ancestor first
 // - Otherwise, acquire the one at the lower memory address first
 // - Do not acquire inodes cross filesystem at the same time
 // to prevent deadlock.
@@ -47,9 +49,9 @@
  * Inode Private APIs
  *****************************************************************************/
 // Initilize VFS managed inode fields
-// Will be used to initialize a newly allocated inode(returned from get_inode callback)
-// before adding it  to the inode hash list
-// Caller should ensure the inode pointer is valid
+// Will be used to initialize a newly allocated inode(returned from get_inode
+// callback) before adding it  to the inode hash list Caller should ensure the
+// inode pointer is valid
 void __vfs_inode_init(struct vfs_inode *inode) {
     mutex_init(&inode->mutex, "vfs_inode_mutex");
     hlist_entry_init(&inode->hash_entry);
@@ -58,7 +60,7 @@ void __vfs_inode_init(struct vfs_inode *inode) {
     inode->ref_count = 1;
 }
 
- /******************************************************************************
+/******************************************************************************
  * Inode Public APIs
  *****************************************************************************/
 
@@ -81,7 +83,7 @@ void vfs_iunlock(struct vfs_inode *inode) {
 /**
  * Check if an inode is valid for use.
  * Must be called while holding the inode lock.
- * 
+ *
  * @param inode The inode to check
  * @return 0 if valid, negative error code otherwise:
  *         -EINVAL if inode is NULL, invalid, or superblock is not valid
@@ -129,18 +131,20 @@ bool vfs_idup_not_zero(struct vfs_inode *inode) {
 }
 
 // Decrease inode ref count; free the inode when the last reference is dropped.
-// Caller must not hold the inode lock when calling (vfs_iput() will acquire locks internally
-// when it needs to remove/free an inode).
+// Caller must not hold the inode lock when calling (vfs_iput() will acquire
+// locks internally when it needs to remove/free an inode).
 //
 // IMPORTANT: Caller must NOT hold:
 // - superblock read or write lock (we acquire wlock internally)
 // - inode lock (we acquire it internally)
-// The assertion only checks write lock; callers must ensure they don't hold rlock.
+// The assertion only checks write lock; callers must ensure they don't hold
+// rlock.
 void vfs_iput(struct vfs_inode *inode) {
     assert(inode != NULL, "vfs_iput: inode is NULL");
     assert(inode->sb == NULL || !vfs_superblock_wholding(inode->sb),
            "vfs_iput: cannot hold superblock write lock when calling");
-    assert(!holding_mutex(&inode->mutex), "vfs_iput: cannot hold inode lock when calling");
+    assert(!holding_mutex(&inode->mutex),
+           "vfs_iput: cannot hold inode lock when calling");
 
     // tried to cleanup the inode but failed
     bool failed_clean = false;
@@ -169,7 +173,8 @@ retry:
     vfs_superblock_wlock(sb);
     if (!vfs_ilock_trylock(inode)) {
         // Couldn't get inode lock - release superblock and retry
-        // This avoids deadlock with threads holding inode lock waiting for transaction
+        // This avoids deadlock with threads holding inode lock waiting for
+        // transaction
         vfs_superblock_unlock(sb);
         scheduler_yield();
         goto retry;
@@ -194,7 +199,8 @@ retry:
     // from disk. Directory inodes hold a reference to their parent, so evicting
     // a directory will cascade vfs_iput to its parent.
     //
-    // Root inodes and mountpoint inodes must always stay in cache while attached.
+    // Root inodes and mountpoint inodes must always stay in cache while
+    // attached.
     if (sb->attached && (inode->n_links > 0 || inode->mount)) {
         if (sb->backendless || inode == sb->root_inode || inode->mount) {
             // Decrement refcount to 0 but keep inode in cache
@@ -206,19 +212,22 @@ retry:
         }
     }
 
-    assert(!inode->mount, "vfs_iput: refcount of mountpoint inode reached zero");;
+    assert(!inode->mount,
+           "vfs_iput: refcount of mountpoint inode reached zero");
+    ;
 
     // Handle orphan cleanup: remove from orphan list
     if (inode->orphan) {
         list_node_detach(inode, orphan_entry);
         sb->orphan_count--;
         inode->orphan = 0;
-        
+
         // For backend fs: remove from on-disk orphan journal
         if (sb->ops->remove_orphan) {
             ret = sb->ops->remove_orphan(sb, inode);
             if (ret != 0) {
-                printf("vfs_iput: warning: failed to remove orphan inode %lu from journal\n", 
+                printf("vfs_iput: warning: failed to remove orphan inode %lu "
+                       "from journal\n",
                        inode->ino);
             }
         }
@@ -235,7 +244,7 @@ retry:
         goto retry;
     }
 
-    if (S_ISDIR(inode->mode) && inode->parent != NULL && 
+    if (S_ISDIR(inode->mode) && inode->parent != NULL &&
         inode->parent != inode && sb->attached) {
         // For non-root directory inode, decrease parent dir refcount
         // Root directory's parent is itself
@@ -243,20 +252,23 @@ retry:
         parent = inode->parent;
     }
 
-    // If inode has no links left (or fs is detached), destroy its data before freeing
-    if ((inode->n_links == 0 || !sb->attached) && inode->ops->destroy_inode != NULL) {
+    // If inode has no links left (or fs is detached), destroy its data before
+    // freeing
+    if ((inode->n_links == 0 || !sb->attached) &&
+        inode->ops->destroy_inode != NULL) {
         // Mark inode as being destroyed so other threads looking up this inode
         // number will not try to use it while destroy_inode is in progress.
         // The inode stays in the cache until destroy_inode completes.
         inode->destroying = 1;
-        
+
         // Release locks before acquiring transaction.
         // Unlock in standard order (inode first, then superblock).
         // destroy_inode (e.g., xv6fs_itrunc) may do end_op/begin_op cycles
-        // internally for batching, and we cannot hold locks during those cycles.
+        // internally for batching, and we cannot hold locks during those
+        // cycles.
         vfs_iunlock(inode);
         vfs_superblock_unlock(sb);
-        
+
         // Now acquire transaction for destroy_inode
         if (sb->ops->begin_transaction != NULL) {
             int tx_ret = sb->ops->begin_transaction(sb);
@@ -271,23 +283,25 @@ retry:
                 goto skip_destroy;
             }
         }
-        
+
         // destroy_inode expects caller to have an active transaction
         inode->ops->destroy_inode(inode);
-        
+
         // End transaction after destroy_inode
         if (sb->ops->end_transaction != NULL) {
             int end_ret = sb->ops->end_transaction(sb);
             if (end_ret != 0) {
-                printf("vfs_iput: warning: end_transaction failed with error %d\n", end_ret);
+                printf(
+                    "vfs_iput: warning: end_transaction failed with error %d\n",
+                    end_ret);
             }
         }
-        
+
         // Re-acquire locks to remove inode from cache
         // Standard lock order: superblock first, then inode
         vfs_superblock_wlock(sb);
         vfs_ilock(inode);
-        
+
         // After destroy, the inode's on-disk data is freed.
         // Mark it invalid and not dirty so we don't try to sync it.
         inode->valid = 0;
@@ -298,15 +312,16 @@ retry:
 skip_destroy:
 
     ret = vfs_remove_inode(inode->sb, inode);
-    assert(ret == 0, "vfs_iput: failed to remove inode from superblock inode cache");
-    
+    assert(ret == 0,
+           "vfs_iput: failed to remove inode from superblock inode cache");
+
     // Check if this was the last orphan on a detached fs
     should_free_sb = (!sb->attached && sb->orphan_count == 0);
-    
+
     // Unlock in standard order: inode first, then superblock
     vfs_iunlock(inode);
     vfs_superblock_unlock(sb);
-    
+
 out:
     // Free directory name if allocated
     if (inode->name != NULL) {
@@ -324,7 +339,7 @@ out:
     if (parent != NULL) {
         // Due to the limited kernel space stack, we avoid recursive calls here
         inode = parent;
-        sb = inode->sb;  // Update sb for the parent inode
+        sb = inode->sb; // Update sb for the parent inode
         parent = NULL;
         failed_clean = false;
         should_free_sb = false;
@@ -356,7 +371,8 @@ int vfs_sync_inode(struct vfs_inode *inode) {
     struct vfs_superblock *sb = inode->sb;
     int ret = 0;
 
-    // Begin transaction BEFORE acquiring inode lock to avoid sleeping with locks held
+    // Begin transaction BEFORE acquiring inode lock to avoid sleeping with
+    // locks held
     if (sb->ops->begin_transaction != NULL) {
         ret = sb->ops->begin_transaction(sb);
         if (ret != 0) {
@@ -382,7 +398,9 @@ int vfs_sync_inode(struct vfs_inode *inode) {
     if (sb->ops->end_transaction != NULL) {
         int end_ret = sb->ops->end_transaction(sb);
         if (end_ret != 0) {
-            printf("vfs_sync_inode: warning: end_transaction failed with error %d\n", end_ret);
+            printf("vfs_sync_inode: warning: end_transaction failed with error "
+                   "%d\n",
+                   end_ret);
         }
     }
     return ret;
@@ -467,7 +485,7 @@ static struct vfs_inode *__vfs_dotdot_target(struct vfs_inode *dir) {
 
 // Lookup a dentry in a directory inode
 // Will assume the VFS handled "."
-int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry, 
+int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
                 const char *name, size_t name_len) {
     if (dir == NULL || dir->sb == NULL) {
         return -EINVAL; // Invalid argument
@@ -484,7 +502,8 @@ int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
             return -ENOMEM;
         }
         dentry->name_len = 1;
-        dentry->cookies = 0; // cookie values are filesystem-private; opaque to VFS
+        dentry->cookies =
+            0; // cookie values are filesystem-private; opaque to VFS
         return 0;
     }
 
@@ -553,17 +572,17 @@ static int __make_iter_parent(struct vfs_dir_iter *iter,
 }
 
 // Iterate over directory entries in a directory inode
-// Drivers should look at iter->cookies and update new cookies in ret_dentry->cookies
-// Drivers should release the content of ret_dentry before writing new content
-// Drivers only need to fill:
+// Drivers should look at iter->cookies and update new cookies in
+// ret_dentry->cookies Drivers should release the content of ret_dentry before
+// writing new content Drivers only need to fill:
 // - ret_dentry->name
 // - ret_dentry->name_len
 // - ret_dentry->ino
 // - ret_dentry->cookies
 // VFS will fill ret_dentry->sb and ret_dentry->parent as needed
 // When Reaching end of directory, drivers should set ret_dentry->name to NULL
-// Drivers don't need to update iter, it will be updated by VFS after successful return
-// When drivers see iter->index == 2, they should not return the name
+// Drivers don't need to update iter, it will be updated by VFS after successful
+// return When drivers see iter->index == 2, they should not return the name
 int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
                  struct vfs_dentry *ret_dentry) {
     if (dir == NULL || dir->sb == NULL) {
@@ -598,7 +617,8 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         goto out;
     }
 
-    // Synthesize "." on the first iteration to keep cookies opaque at the VFS layer
+    // Synthesize "." on the first iteration to keep cookies opaque at the VFS
+    // layer
     if (iter->index == VFS_DITER_INDEX_START) {
         ret = __make_iter_present(iter, ret_dentry);
         if (ret != 0) {
@@ -611,7 +631,8 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         goto out;
     }
 
-    // For process root or a mounted root, synthesize ".." on the second iteration
+    // For process root or a mounted root, synthesize ".." on the second
+    // iteration
     if (iter->index == 1) {
         struct vfs_inode *proc_rooti = vfs_inode_deref(&current->fs->rooti);
         if (dir == proc_rooti) {
@@ -639,7 +660,7 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         // Ordinary directory: let driver return ".." with correct parent ino
         // Fall through to driver call without modifying iter->index
     }
-    
+
     if (iter->index >= VFS_DITER_INDEX_PARENT) {
         iter->index++;
         ret_dentry->sb = dir->sb;
@@ -659,7 +680,8 @@ out:
 
     if (ret == 0) {
         if (iter->index == VFS_DITER_INDEX_PARENT && need_lookup) {
-            // when synthesizing ".." for a mounted root, fill in the correct parent inode now
+            // when synthesizing ".." for a mounted root, fill in the correct
+            // parent inode now
             struct vfs_inode *target = __vfs_dotdot_target(dir);
             ret_dentry->ino = target->ino;
             ret_dentry->sb = target->sb;
@@ -698,21 +720,22 @@ int vfs_dir_isempty(struct vfs_inode *dir) {
     if (dir->ops->dir_iter == NULL) {
         return 0; // Can't check, assume not empty
     }
-    
+
     struct vfs_dir_iter iter = {0};
     struct vfs_dentry dentry = {0};
     int ret;
-    
-    // Start iteration (index 0 is ".", index 1 is "..", index 2+ are real entries)
+
+    // Start iteration (index 0 is ".", index 1 is "..", index 2+ are real
+    // entries)
     iter.index = VFS_DITER_INDEX_PARENT; // Skip "." and ".."
     iter.cookies = 0;
-    
+
     ret = dir->ops->dir_iter(dir, &iter, &dentry);
     if (ret != 0) {
         vfs_release_dentry(&dentry);
         return 0; // Error, assume not empty
     }
-    
+
     // If name is NULL, we reached end of directory (empty)
     int is_empty = (dentry.name == NULL);
     vfs_release_dentry(&dentry);
@@ -750,7 +773,7 @@ out:
 }
 
 struct vfs_inode *vfs_create(struct vfs_inode *dir, uint32 mode,
-               const char *name, size_t name_len) {
+                             const char *name, size_t name_len) {
     if (dir == NULL || dir->sb == NULL) {
         return ERR_PTR(-EINVAL); // Invalid argument
     }
@@ -758,7 +781,7 @@ struct vfs_inode *vfs_create(struct vfs_inode *dir, uint32 mode,
         return ERR_PTR(-EINVAL); // Invalid argument
     }
     struct vfs_inode *ret_ptr = NULL;
-    
+
 retry:
     // Begin transaction BEFORE acquiring any locks
     if (dir->sb->ops->begin_transaction != NULL) {
@@ -767,7 +790,7 @@ retry:
             return ERR_PTR(ret);
         }
     }
-    
+
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
@@ -784,7 +807,7 @@ retry:
         goto out;
     }
     ret_ptr = dir->ops->create(dir, mode, name, name_len);
-    
+
     // Handle EAGAIN: inode allocation collided with destroying inode.
     // Release all locks and transaction, yield, and retry.
     if (PTR_ERR(ret_ptr) == -EAGAIN) {
@@ -793,26 +816,28 @@ retry:
         if (dir->sb->ops->end_transaction != NULL) {
             dir->sb->ops->end_transaction(dir->sb);
         }
-       scheduler_yield();
+        scheduler_yield();
         goto retry;
     }
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
-    
+
     // End transaction AFTER releasing locks
     if (dir->sb->ops->end_transaction != NULL) {
         int end_ret = dir->sb->ops->end_transaction(dir->sb);
         if (end_ret != 0) {
-            printf("vfs_create: warning: end_transaction failed with error %d\n", end_ret);
+            printf(
+                "vfs_create: warning: end_transaction failed with error %d\n",
+                end_ret);
         }
     }
-    
+
     return ret_ptr;
 }
 
-struct vfs_inode *vfs_mknod(struct vfs_inode *dir, uint32 mode,
-              dev_t dev, const char *name, size_t name_len) {
+struct vfs_inode *vfs_mknod(struct vfs_inode *dir, uint32 mode, dev_t dev,
+                            const char *name, size_t name_len) {
     if (dir == NULL || dir->sb == NULL) {
         return ERR_PTR(-EINVAL); // Invalid argument
     }
@@ -820,7 +845,7 @@ struct vfs_inode *vfs_mknod(struct vfs_inode *dir, uint32 mode,
         return ERR_PTR(-EINVAL); // Invalid argument
     }
     struct vfs_inode *ret_ptr = NULL;
-    
+
 retry:
     // Begin transaction BEFORE acquiring any locks
     if (dir->sb->ops->begin_transaction != NULL) {
@@ -829,7 +854,7 @@ retry:
             return ERR_PTR(ret);
         }
     }
-    
+
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
@@ -846,7 +871,7 @@ retry:
         goto out;
     }
     ret_ptr = dir->ops->mknod(dir, mode, dev, name, name_len);
-    
+
     // Handle EAGAIN: inode allocation collided with destroying inode.
     // Release all locks and transaction, yield, and retry.
     if (PTR_ERR(ret_ptr) == -EAGAIN) {
@@ -855,26 +880,27 @@ retry:
         if (dir->sb->ops->end_transaction != NULL) {
             dir->sb->ops->end_transaction(dir->sb);
         }
-       scheduler_yield();
+        scheduler_yield();
         goto retry;
     }
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
-    
+
     // End transaction AFTER releasing locks
     if (dir->sb->ops->end_transaction != NULL) {
         int end_ret = dir->sb->ops->end_transaction(dir->sb);
         if (end_ret != 0) {
-            printf("vfs_mknod: warning: end_transaction failed with error %d\n", end_ret);
+            printf("vfs_mknod: warning: end_transaction failed with error %d\n",
+                   end_ret);
         }
     }
-    
+
     return ret_ptr;
 }
 
-int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, 
-             const char *name, size_t name_len) {
+int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, const char *name,
+             size_t name_len) {
     if (dir == NULL || dir->sb == NULL) {
         return -EINVAL; // Invalid argument
     }
@@ -891,7 +917,7 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
         vfs_iput(target);
         return -EXDEV; // Cross-device hard link not supported
     }
-    
+
     // Begin transaction BEFORE acquiring any locks
     if (dir->sb->ops->begin_transaction != NULL) {
         ret = dir->sb->ops->begin_transaction(dir->sb);
@@ -900,7 +926,7 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
             return ret;
         }
     }
-    
+
     vfs_superblock_wlock(dir->sb);
     if (S_ISDIR(target->mode)) {
         ret = -EPERM; // Cannot create hard link to a directory
@@ -919,7 +945,7 @@ int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
     if (ret != 0) {
         goto out;
     }
-    
+
     if (dir->ops->link == NULL) {
         ret = -ENOSYS; // Link operation not supported
         goto out;
@@ -929,15 +955,16 @@ out:
     vfs_iunlock_two(target, dir);
 out_unlock_sb:
     vfs_superblock_unlock(dir->sb);
-    
+
     // End transaction AFTER releasing locks
     if (dir->sb->ops->end_transaction != NULL) {
         int end_ret = dir->sb->ops->end_transaction(dir->sb);
         if (end_ret != 0) {
-            printf("vfs_link: warning: end_transaction failed with error %d\n", end_ret);
+            printf("vfs_link: warning: end_transaction failed with error %d\n",
+                   end_ret);
         }
     }
-    
+
     vfs_iput(target);
     return ret;
 }
@@ -969,7 +996,7 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
         vfs_release_dentry(&dentry);
         return ret;
     }
-    
+
     // Begin transaction BEFORE acquiring any locks
     if (dir->sb->ops->begin_transaction != NULL) {
         ret = dir->sb->ops->begin_transaction(dir->sb);
@@ -1002,7 +1029,8 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
             ret = -ENOTEMPTY; // Directory not empty
             goto out;
         }
-        // Check if directory is in use (refcount > 1 means someone else has it open)
+        // Check if directory is in use (refcount > 1 means someone else has it
+        // open)
         if (vfs_inode_refcount(target) > 1) {
             ret = -EBUSY; // Directory is in use
             goto out;
@@ -1016,7 +1044,7 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
         }
         ret = dir->ops->unlink(&dentry, target);
     }
-    
+
     // If unlink succeeded and the inode still has references beyond ours,
     // mark it as orphan. This is checked while we still hold the locks.
     if (target->n_links == 0 && target->ref_count > 1 && !target->orphan) {
@@ -1031,7 +1059,9 @@ out:
     if (dir->sb->ops->end_transaction != NULL) {
         int end_ret = dir->sb->ops->end_transaction(dir->sb);
         if (end_ret != 0) {
-            printf("vfs_unlink: warning: end_transaction failed with error %d\n", end_ret);
+            printf(
+                "vfs_unlink: warning: end_transaction failed with error %d\n",
+                end_ret);
         }
     }
     vfs_iput(target); // Drop our reference from lookup
@@ -1048,7 +1078,7 @@ struct vfs_inode *vfs_mkdir(struct vfs_inode *dir, uint32 mode,
         return ERR_PTR(-EINVAL); // Invalid argument
     }
     struct vfs_inode *ret_ptr = NULL;
-    
+
 retry:
     // Begin transaction BEFORE acquiring any locks
     if (dir->sb->ops->begin_transaction != NULL) {
@@ -1057,7 +1087,7 @@ retry:
             return ERR_PTR(ret);
         }
     }
-    
+
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
     int ret = __vfs_inode_valid(dir);
@@ -1074,7 +1104,7 @@ retry:
         goto out;
     }
     ret_ptr = dir->ops->mkdir(dir, mode, name, name_len);
-    
+
     // Handle EAGAIN: inode allocation collided with destroying inode.
     // Release all locks and transaction, yield, and retry.
     if (PTR_ERR(ret_ptr) == -EAGAIN) {
@@ -1083,10 +1113,10 @@ retry:
         if (dir->sb->ops->end_transaction != NULL) {
             dir->sb->ops->end_transaction(dir->sb);
         }
-       scheduler_yield();
+        scheduler_yield();
         goto retry;
     }
-    
+
     if (!IS_ERR(ret_ptr)) {
         vfs_ilock(ret_ptr);
         ret_ptr->parent = dir;
@@ -1096,22 +1126,23 @@ retry:
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
-    
+
     // End transaction AFTER releasing locks
     if (dir->sb->ops->end_transaction != NULL) {
         int end_ret = dir->sb->ops->end_transaction(dir->sb);
         if (end_ret != 0) {
-            printf("vfs_mkdir: warning: end_transaction failed with error %d\n", end_ret);
+            printf("vfs_mkdir: warning: end_transaction failed with error %d\n",
+                   end_ret);
         }
     }
-    
+
     return ret_ptr;
 }
 
 int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
              struct vfs_inode *new_dir, const char *name, size_t name_len) {
-    if (old_dir == NULL || old_dir->sb == NULL ||
-        new_dir == NULL || new_dir->sb == NULL) {
+    if (old_dir == NULL || old_dir->sb == NULL || new_dir == NULL ||
+        new_dir->sb == NULL) {
         return -EINVAL; // Invalid argument
     }
     if (old_dentry == NULL || name == NULL || name_len == 0) {
@@ -1138,7 +1169,8 @@ int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
         goto out;
     }
     ret = vfs_ilock_two_directories(old_dir, new_dir);
-    if (old_dir->ops->move == NULL || old_dir->ops->move != new_dir->ops->move) {
+    if (old_dir->ops->move == NULL ||
+        old_dir->ops->move != new_dir->ops->move) {
         ret = -ENOSYS; // Move operation not supported
         goto out_iunlock;
     }
@@ -1150,7 +1182,7 @@ out:
     return ret;
 }
 
-struct vfs_inode *vfs_symlink(struct vfs_inode *dir, uint32 mode, 
+struct vfs_inode *vfs_symlink(struct vfs_inode *dir, uint32 mode,
                               const char *name, size_t name_len,
                               const char *target, size_t target_len) {
     if (dir == NULL || dir->sb == NULL) {
@@ -1162,7 +1194,7 @@ struct vfs_inode *vfs_symlink(struct vfs_inode *dir, uint32 mode,
     if (name == NULL || name_len == 0) {
         return ERR_PTR(-EINVAL); // Invalid symlink name
     }
-    
+
     struct vfs_inode *ret_ptr = NULL;
 
 retry:
@@ -1173,7 +1205,7 @@ retry:
             return ERR_PTR(ret);
         }
     }
-    
+
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
     long ret = __vfs_inode_valid(dir);
@@ -1190,7 +1222,7 @@ retry:
         goto out;
     }
     ret_ptr = dir->ops->symlink(dir, mode, name, name_len, target, target_len);
-    
+
     // Handle EAGAIN: inode allocation collided with destroying inode.
     // Release all locks and transaction, yield, and retry.
     if (PTR_ERR(ret_ptr) == -EAGAIN) {
@@ -1199,23 +1231,25 @@ retry:
         if (dir->sb->ops->end_transaction != NULL) {
             dir->sb->ops->end_transaction(dir->sb);
         }
-       scheduler_yield();
+        scheduler_yield();
         goto retry;
     }
-    
+
     // Note: symlinks don't need parent reference (no ".." traversal needed)
 out:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
-    
+
     // End transaction AFTER releasing locks
     if (dir->sb->ops->end_transaction != NULL) {
         int end_ret = dir->sb->ops->end_transaction(dir->sb);
         if (end_ret != 0) {
-            printf("vfs_symlink: warning: end_transaction failed with error %d\n", end_ret);
+            printf(
+                "vfs_symlink: warning: end_transaction failed with error %d\n",
+                end_ret);
         }
     }
-    
+
     return ret_ptr;
 }
 
@@ -1243,8 +1277,10 @@ out:
 }
 
 // Lock two non-directory inodes to prevent deadlock
-void vfs_ilock_two_nondirectories(struct vfs_inode *inode1, struct vfs_inode *inode2) {
-    assert(inode1 != NULL && inode2 != NULL, "vfs_ilock_two_nondirectories: inode is NULL");
+void vfs_ilock_two_nondirectories(struct vfs_inode *inode1,
+                                  struct vfs_inode *inode2) {
+    assert(inode1 != NULL && inode2 != NULL,
+           "vfs_ilock_two_nondirectories: inode is NULL");
     if (inode1 < inode2) {
         vfs_ilock(inode1);
         vfs_ilock(inode2);
@@ -1261,7 +1297,8 @@ void vfs_ilock_two_nondirectories(struct vfs_inode *inode1, struct vfs_inode *in
 // Return 0 on success, negative error code on failure
 // Caller should hold the superblock read lock of the superblock
 // Caller should ensure both inodes are directories
-int vfs_ilock_two_directories(struct vfs_inode *inode1, struct vfs_inode *inode2) {
+int vfs_ilock_two_directories(struct vfs_inode *inode1,
+                              struct vfs_inode *inode2) {
     if (inode1 == inode2) {
         vfs_ilock(inode1);
         return 0;
@@ -1303,7 +1340,7 @@ int vfs_ilock_two_directories(struct vfs_inode *inode1, struct vfs_inode *inode2
         }
         return 0;
     }
-    
+
     // Since we are sure both inodes belong to the same filesystem,
     // thry must have a common ancestor(FS root)
     panic("vfs_ilock_two_directories: unexpected condition");
@@ -1341,8 +1378,8 @@ int vfs_chdir(struct vfs_inode *new_cwd) {
         ret = -ENOTDIR; // Inode is not a directory
         goto out_locked;
     }
-    struct vfs_inode_ref ref ={ 0 };
-    struct vfs_inode_ref old = { 0 };
+    struct vfs_inode_ref ref = {0};
+    struct vfs_inode_ref old = {0};
     ret = vfs_inode_get_ref(new_cwd, &ref);
     if (ret != 0) {
         goto out_locked;
@@ -1366,7 +1403,7 @@ out:
     return ret;
 }
 
-int vfs_chroot(struct vfs_inode *new_root)  {
+int vfs_chroot(struct vfs_inode *new_root) {
     int ret = vfs_chdir(new_root);
     if (new_root == &vfs_root_inode) {
         // not allow to change to the dummy rooti
@@ -1376,8 +1413,8 @@ int vfs_chroot(struct vfs_inode *new_root)  {
         // No change
         return 0;
     }
-    struct vfs_inode_ref ref ={ 0 };
-    struct vfs_inode_ref old = { 0 };
+    struct vfs_inode_ref ref = {0};
+    struct vfs_inode_ref old = {0};
     ret = vfs_inode_get_ref(new_root, &ref);
     if (ret != 0) {
         return ret;
@@ -1578,8 +1615,8 @@ struct vfs_inode *vfs_namei(const char *path, size_t path_len) {
 // vfs_nameiparent resolves the parent directory of a path and copies the final
 // name component into the provided buffer. Returns the parent directory inode
 // with a reference held on success, or ERR_PTR on failure.
-struct vfs_inode *vfs_nameiparent(const char *path, size_t path_len, 
-                                   char *name, size_t name_size) {
+struct vfs_inode *vfs_nameiparent(const char *path, size_t path_len, char *name,
+                                  size_t name_size) {
     if (path == NULL || path_len == 0 || name == NULL || name_size == 0) {
         return ERR_PTR(-EINVAL);
     }
@@ -1589,41 +1626,41 @@ struct vfs_inode *vfs_nameiparent(const char *path, size_t path_len,
 
     // Find the last path component
     size_t end = path_len;
-    
+
     // Skip trailing slashes
     while (end > 0 && path[end - 1] == '/') {
         end--;
     }
-    
+
     if (end == 0) {
         // Path is just "/" or empty after trimming
         return ERR_PTR(-EINVAL);
     }
-    
+
     // Find the start of the last component
     size_t name_start = end;
     while (name_start > 0 && path[name_start - 1] != '/') {
         name_start--;
     }
-    
+
     // Extract the name component, truncating to fit buffer (xv6 compatibility)
     size_t final_name_len = end - name_start;
     if (final_name_len >= name_size) {
         // Truncate to fit buffer (leaves room for null terminator)
         final_name_len = name_size - 1;
     }
-    
+
     memmove(name, path + name_start, final_name_len);
     name[final_name_len] = '\0';
-    
+
     // Now get the parent path
     size_t parent_len = name_start;
-    
+
     // Skip trailing slashes from parent path
     while (parent_len > 0 && path[parent_len - 1] == '/') {
         parent_len--;
     }
-    
+
     if (parent_len == 0) {
         // Parent is root
         if (path[0] == '/') {
@@ -1633,7 +1670,7 @@ struct vfs_inode *vfs_nameiparent(const char *path, size_t path_len,
             return vfs_curdir();
         }
     }
-    
+
     // Resolve the parent path
     return vfs_namei(path, parent_len);
 }

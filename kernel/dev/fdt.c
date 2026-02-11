@@ -55,13 +55,13 @@ int fdt_early_scan_memory(void *dtb, uint64 *base_out, uint64 *size_out) {
         return -1;
     }
 
-    char *struct_start = (char *)dtb + fdt_get_header(dtb, 8);  // off_dt_struct
+    char *struct_start = (char *)dtb + fdt_get_header(dtb, 8); // off_dt_struct
     char *p = struct_start;
     uint32 token;
     int depth = 0;
     int in_memory_node = 0;
-    int root_addr_cells = 2;  // Default
-    int root_size_cells = 1;  // Default
+    int root_addr_cells = 2; // Default
+    int root_size_cells = 1; // Default
 
     while (1) {
         token = fdt32_to_cpu(*(uint32 *)p);
@@ -130,7 +130,7 @@ int fdt_early_scan_memory(void *dtb, uint64 *base_out, uint64 *size_out) {
 
                 *base_out = base;
                 *size_out = size;
-                return 0;  // Success!
+                return 0; // Success!
             }
             break;
         }
@@ -139,10 +139,10 @@ int fdt_early_scan_memory(void *dtb, uint64 *base_out, uint64 *size_out) {
             break;
 
         case FDT_END:
-            return -1;  // Reached end without finding memory
+            return -1; // Reached end without finding memory
 
         default:
-            return -1;  // Unknown token
+            return -1; // Unknown token
         }
     }
 }
@@ -163,7 +163,7 @@ static void fdt_parse_namestring(struct fdt_node *node, const char *namestring,
 
     node->name_size = len;
     node->hash = hlist_hash_str((char *)namestring, len);
-    
+
     if (namestring[len] == '\0' || ignore_addr) {
         node->has_addr = 0;
         node->addr = 0;
@@ -177,20 +177,20 @@ static void fdt_parse_namestring(struct fdt_node *node, const char *namestring,
 
     // Has unit address
     node->has_addr = 1;
-    
+
     // Try to parse as hex number
     char *endptr = NULL;
     node->addr = strtoul(&namestring[len + 1], &endptr, 16);
-    
-    // If parsing failed or didn't consume all chars, hash the address string instead
-    // This handles non-numeric unit addresses like "SPT_PD_VPU"
+
+    // If parsing failed or didn't consume all chars, hash the address string
+    // instead This handles non-numeric unit addresses like "SPT_PD_VPU"
     if (endptr == &namestring[len + 1] || *endptr != '\0') {
-        // Use hash of the unit address string as the numeric addr for comparison
-        // Add a flag or use a different approach - for now, hash it
-        node->addr = hlist_hash_str((char *)&namestring[len + 1], 
-                                     full_len - len - 1);
+        // Use hash of the unit address string as the numeric addr for
+        // comparison Add a flag or use a different approach - for now, hash it
+        node->addr =
+            hlist_hash_str((char *)&namestring[len + 1], full_len - len - 1);
     }
-    
+
     return;
 }
 
@@ -238,8 +238,7 @@ static struct rb_root_opts fdt_rb_opts = {
 
 static struct fdt_node *__fdt_create_node(size_t name_size, size_t data_size) {
     size_t total_size = sizeof(struct fdt_node) + data_size + name_size + 1;
-    struct fdt_node *node =
-        early_alloc_align(total_size, sizeof(uint64));
+    struct fdt_node *node = early_alloc_align(total_size, sizeof(uint64));
     if (node == NULL) {
         return NULL;
     }
@@ -247,15 +246,15 @@ static struct fdt_node *__fdt_create_node(size_t name_size, size_t data_size) {
     node->data_size = data_size;
     node->name_size = name_size;
     node->name = (const char *)node->data + data_size;
-    list_entry_init(&node->compat_links);  // Initialize compat links list
+    list_entry_init(&node->compat_links); // Initialize compat links list
     return node;
 }
 
 // Lookup a child node by name and optional unit address
 // If addr is NULL, it will try to parse the unit address from the namestring
 // If addr is provided, it will override any unit address in the namestring
-struct fdt_node *fdt_node_lookup(struct fdt_node *parent,
-                                 const char *name, uint64 *addr) {
+struct fdt_node *fdt_node_lookup(struct fdt_node *parent, const char *name,
+                                 uint64 *addr) {
     if (parent->child_count == 0) {
         return NULL;
     }
@@ -281,8 +280,8 @@ static struct fdt_node *__fdt_node_first(struct fdt_node *parent,
     }
     // Create a dummy node with no unit address to find the first match
     struct fdt_node dummy = {};
-    fdt_parse_namestring(&dummy, name, false, true);  // ignore addr in name
-    dummy.has_addr = 0;  // Look for nodes without unit address first
+    fdt_parse_namestring(&dummy, name, false, true); // ignore addr in name
+    dummy.has_addr = 0; // Look for nodes without unit address first
 
     // Use rb_find_key_rup to find the first node >= our dummy
     // Since nodes without unit address come before those with unit address,
@@ -306,7 +305,7 @@ static struct fdt_node *__fdt_node_first(struct fdt_node *parent,
 // Find the next sibling node with the same name
 // Returns the next matching fdt_node, or NULL if this is the last one
 static struct fdt_node *__fdt_node_next_same_name(struct fdt_node *parent,
-                                                   struct fdt_node *current) {
+                                                  struct fdt_node *current) {
     if (parent == NULL || current == NULL) {
         return NULL;
     }
@@ -319,7 +318,7 @@ static struct fdt_node *__fdt_node_next_same_name(struct fdt_node *parent,
     // Check if the name matches (same hash and same name string)
     if (next_fdt->hash != current->hash ||
         strcmp(next_fdt->name, current->name) != 0) {
-        return NULL;  // Reached the last node with this name
+        return NULL; // Reached the last node with this name
     }
     return next_fdt;
 }
@@ -327,15 +326,15 @@ static struct fdt_node *__fdt_node_next_same_name(struct fdt_node *parent,
 // Lookup a node by path (e.g., "/cpus/cpu@0" or "/soc/uart@10000000")
 // Returns the matching fdt_node, or NULL if not found
 // Path must start with '/' for absolute paths
-struct fdt_node *fdt_path_lookup(struct fdt_blob_info *blob,
-                                 const char *path) {
+struct fdt_node *fdt_path_lookup(struct fdt_blob_info *blob, const char *path) {
     if (blob == NULL || path == NULL || blob->root.node == NULL) {
         return NULL;
     }
 
     // Get the root node (the empty-named "/" node)
-    struct fdt_node *current = container_of(blob->root.node, struct fdt_node, rb_entry);
-    
+    struct fdt_node *current =
+        container_of(blob->root.node, struct fdt_node, rb_entry);
+
     // Handle root path
     if (path[0] == '/' && path[1] == '\0') {
         return current;
@@ -383,7 +382,8 @@ struct fdt_node *fdt_path_lookup(struct fdt_blob_info *blob,
             dummy.has_addr = 1;
             dummy.addr = addr;
 
-            struct rb_node *node = rb_find_key(&current->children, (uint64)&dummy);
+            struct rb_node *node =
+                rb_find_key(&current->children, (uint64)&dummy);
             if (node != NULL) {
                 child = container_of(node, struct fdt_node, rb_entry);
             }
@@ -399,7 +399,7 @@ struct fdt_node *fdt_path_lookup(struct fdt_blob_info *blob,
         }
 
         if (child == NULL) {
-            return NULL;  // Path component not found
+            return NULL; // Path component not found
         }
 
         current = child;
@@ -408,7 +408,7 @@ struct fdt_node *fdt_path_lookup(struct fdt_blob_info *blob,
         if (*end == '/') {
             p = end + 1;
         } else {
-            break;  // End of path
+            break; // End of path
         }
     }
 
@@ -416,7 +416,8 @@ struct fdt_node *fdt_path_lookup(struct fdt_blob_info *blob,
 }
 
 // Insert a new node into the parent's children rb-tree
-static bool __fdt_insert_node(struct fdt_blob_info *blob, struct fdt_node *parent,
+static bool __fdt_insert_node(struct fdt_blob_info *blob,
+                              struct fdt_node *parent,
                               struct fdt_node *new_node) {
 
     rb_node_init(&new_node->rb_entry);
@@ -440,8 +441,8 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
     }
 
     // Allocate the blob info structure
-    struct fdt_blob_info *blob = early_alloc_align(sizeof(struct fdt_blob_info),
-                                                    sizeof(uint64));
+    struct fdt_blob_info *blob =
+        early_alloc_align(sizeof(struct fdt_blob_info), sizeof(uint64));
     if (blob == NULL) {
         printf("fdt: alloc blob failed\n");
         return NULL;
@@ -450,7 +451,8 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
 
     // Copy original header
     memcpy(&blob->original_header, dtb, sizeof(struct fdt_header));
-    blob->boot_cpuid_phys = fdt32_to_cpu(((struct fdt_header *)dtb)->boot_cpuid_phys);
+    blob->boot_cpuid_phys =
+        fdt32_to_cpu(((struct fdt_header *)dtb)->boot_cpuid_phys);
 
     // Initialize the root rb-tree and all_nodes list
     rb_root_init(&blob->root, &fdt_rb_opts);
@@ -469,8 +471,8 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
     }
 
     if (rsv_count > 0) {
-        blob->reserved = early_alloc_align(rsv_count * sizeof(struct mem_region),
-                                           sizeof(uint64));
+        blob->reserved = early_alloc_align(
+            rsv_count * sizeof(struct mem_region), sizeof(uint64));
         if (blob->reserved == NULL) {
             printf("fdt: alloc reserved failed\n");
             return NULL;
@@ -483,12 +485,12 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
     }
 
     // Parse the FDT structure and build the tree
-    char *struct_start = (char *)dtb + fdt_get_header(dtb, 8);  // off_dt_struct
+    char *struct_start = (char *)dtb + fdt_get_header(dtb, 8); // off_dt_struct
     char *p = struct_start;
     uint32 token;
 
-    // Stack for tracking parent nodes during tree construction
-    #define FDT_MAX_DEPTH 32
+// Stack for tracking parent nodes during tree construction
+#define FDT_MAX_DEPTH 32
     struct fdt_node *node_stack[FDT_MAX_DEPTH];
     int depth = 0;
 
@@ -539,14 +541,14 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
             struct fdt_node *parent = node_stack[depth];
             if (!__fdt_insert_node(blob, parent, new_node)) {
                 printf("fdt: insert node '%s' failed (dup?)\n", name);
-                return NULL;  // Insertion failed (duplicate?)
+                return NULL; // Insertion failed (duplicate?)
             }
 
             // Push this node onto stack as new parent
             depth++;
             if (depth >= FDT_MAX_DEPTH) {
                 printf("fdt: tree too deep\n");
-                return NULL;  // Tree too deep
+                return NULL; // Tree too deep
             }
             node_stack[depth] = new_node;
             break;
@@ -574,7 +576,8 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
                 continue;
             }
 
-            // Check for phandle property - set parent's phandle instead of creating node
+            // Check for phandle property - set parent's phandle instead of
+            // creating node
             if (strcmp(propname, "phandle") == 0 ||
                 strcmp(propname, "linux,phandle") == 0) {
                 if (len >= 4) {
@@ -586,10 +589,12 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
 
             // Use dummy node to parse property name
             struct fdt_node dummy = {};
-            fdt_parse_namestring(&dummy, propname, false, true);  // properties don't have @addr
+            fdt_parse_namestring(&dummy, propname, false,
+                                 true); // properties don't have @addr
 
             // Create new node with space for name and property data
-            struct fdt_node *prop_node = __fdt_create_node(dummy.name_size, len);
+            struct fdt_node *prop_node =
+                __fdt_create_node(dummy.name_size, len);
             if (prop_node == NULL) {
                 printf("fdt: alloc prop '%s' failed\n", propname);
                 return NULL;
@@ -606,16 +611,18 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
 
             // Copy parsed info
             prop_node->hash = dummy.hash;
-            prop_node->has_addr = 0;  // Properties don't have unit addresses
+            prop_node->has_addr = 0; // Properties don't have unit addresses
             prop_node->layer = depth + 1;
 
-            // Initialize children rb-tree (properties typically don't have children)
+            // Initialize children rb-tree (properties typically don't have
+            // children)
             rb_root_init(&prop_node->children, &fdt_rb_opts);
 
             // Insert into parent's children
             if (!__fdt_insert_node(blob, parent, prop_node)) {
-                printf("fdt: insert prop '%s' in '%s' failed\n", propname, parent->name);
-                return NULL;  // Insertion failed
+                printf("fdt: insert prop '%s' in '%s' failed\n", propname,
+                       parent->name);
+                return NULL; // Insertion failed
             }
             break;
         }
@@ -635,11 +642,12 @@ static struct fdt_blob_info *fdt_build_blob_info(void *dtb) {
         }
     }
 
-    #undef FDT_MAX_DEPTH
+#undef FDT_MAX_DEPTH
 }
 
 // Helper to get a property node from a parent node
-static struct fdt_node *__fdt_get_prop(struct fdt_node *node, const char *name) {
+static struct fdt_node *__fdt_get_prop(struct fdt_node *node,
+                                       const char *name) {
     return fdt_node_lookup(node, name, NULL);
 }
 
@@ -667,17 +675,17 @@ static bool __fdt_prop_compat(struct fdt_node *prop, const char *compat) {
     if (prop == NULL || prop->data_size == 0 || compat == NULL) {
         return false;
     }
-    
+
     const char *data = (const char *)prop->data;
     size_t data_len = prop->data_size;
     size_t compat_len = strlen(compat);
     size_t pos = 0;
-    
+
     // Iterate through null-separated strings in the compatible property
     while (pos < data_len) {
         const char *str = data + pos;
         size_t str_len = strnlen(str, data_len - pos);
-        
+
         // Check if this string contains the compat substring
         if (str_len >= compat_len) {
             // Use simple substring search within bounds
@@ -687,14 +695,15 @@ static bool __fdt_prop_compat(struct fdt_node *prop, const char *compat) {
                 }
             }
         }
-        
-        pos += str_len + 1;  // Move past null terminator
+
+        pos += str_len + 1; // Move past null terminator
     }
     return false;
 }
 
 // Helper to check if property matches any string in a NULL-terminated list
-static bool __fdt_prop_compat_list(struct fdt_node *prop, const char **compat_list) {
+static bool __fdt_prop_compat_list(struct fdt_node *prop,
+                                   const char **compat_list) {
     if (prop == NULL || prop->data_size == 0 || compat_list == NULL) {
         return false;
     }
@@ -707,18 +716,19 @@ static bool __fdt_prop_compat_list(struct fdt_node *prop, const char **compat_li
 }
 
 // Parse reg property based on address-cells and size-cells
-static void __fdt_parse_reg_prop(struct fdt_node *prop, int addr_cells, int size_cells,
-                                  uint64 *base_out, uint64 *size_out) {
+static void __fdt_parse_reg_prop(struct fdt_node *prop, int addr_cells,
+                                 int size_cells, uint64 *base_out,
+                                 uint64 *size_out) {
     if (prop == NULL || base_out == NULL) {
         return;
     }
-    
+
     if (addr_cells == 2) {
         *base_out = __fdt_prop_u64(prop, 0);
     } else {
         *base_out = __fdt_prop_u32(prop, 0);
     }
-    
+
     if (size_out != NULL) {
         if (size_cells == 2) {
             uint32 hi = __fdt_prop_u32(prop, addr_cells);
@@ -745,24 +755,31 @@ static ht_hash_t __fdt_compat_hash_func(void *data) {
 // Compare function for compatible string hash table
 static int __fdt_compat_cmp_func(hlist_t *hlist, void *node, void *key) {
     (void)hlist;
-    struct fdt_compat_hash_node *hash_node = (struct fdt_compat_hash_node *)node;
+    struct fdt_compat_hash_node *hash_node =
+        (struct fdt_compat_hash_node *)node;
     struct fdt_compat_hash_node *hash_key = (struct fdt_compat_hash_node *)key;
-    size_t min_len = hash_node->compat_len < hash_key->compat_len ?
-                     hash_node->compat_len : hash_key->compat_len;
+    size_t min_len = hash_node->compat_len < hash_key->compat_len
+                         ? hash_node->compat_len
+                         : hash_key->compat_len;
     int cmp = strncmp(hash_node->compat, hash_key->compat, min_len);
-    if (cmp != 0) return cmp;
-    if (hash_node->compat_len > hash_key->compat_len) return 1;
-    if (hash_node->compat_len < hash_key->compat_len) return -1;
+    if (cmp != 0)
+        return cmp;
+    if (hash_node->compat_len > hash_key->compat_len)
+        return 1;
+    if (hash_node->compat_len < hash_key->compat_len)
+        return -1;
     return 0;
 }
 
 static void *__fdt_compat_get_node_func(hlist_entry_t *entry) {
-    if (entry == NULL) return NULL;
+    if (entry == NULL)
+        return NULL;
     return container_of(entry, struct fdt_compat_hash_node, hash_entry);
 }
 
 static hlist_entry_t *__fdt_compat_get_entry_func(void *node) {
-    if (node == NULL) return NULL;
+    if (node == NULL)
+        return NULL;
     return &((struct fdt_compat_hash_node *)node)->hash_entry;
 }
 
@@ -785,20 +802,26 @@ static ht_hash_t __fdt_phandle_hash_func(void *data) {
 // Compare function for phandle hash table
 static int __fdt_phandle_cmp_func(hlist_t *hlist, void *node, void *key) {
     (void)hlist;
-    struct fdt_phandle_hash_node *hash_node = (struct fdt_phandle_hash_node *)node;
-    struct fdt_phandle_hash_node *hash_key = (struct fdt_phandle_hash_node *)key;
-    if (hash_node->phandle > hash_key->phandle) return 1;
-    if (hash_node->phandle < hash_key->phandle) return -1;
+    struct fdt_phandle_hash_node *hash_node =
+        (struct fdt_phandle_hash_node *)node;
+    struct fdt_phandle_hash_node *hash_key =
+        (struct fdt_phandle_hash_node *)key;
+    if (hash_node->phandle > hash_key->phandle)
+        return 1;
+    if (hash_node->phandle < hash_key->phandle)
+        return -1;
     return 0;
 }
 
 static void *__fdt_phandle_get_node_func(hlist_entry_t *entry) {
-    if (entry == NULL) return NULL;
+    if (entry == NULL)
+        return NULL;
     return container_of(entry, struct fdt_phandle_hash_node, hash_entry);
 }
 
 static hlist_entry_t *__fdt_phandle_get_entry_func(void *node) {
-    if (node == NULL) return NULL;
+    if (node == NULL)
+        return NULL;
     return &((struct fdt_phandle_hash_node *)node)->hash_entry;
 }
 
@@ -810,9 +833,12 @@ static struct hlist_func_struct __fdt_phandle_hlist_funcs = {
 };
 
 // Allocate and initialize a compat hash node
-static struct fdt_compat_hash_node *__fdt_alloc_compat_hash_node(const char *compat, size_t len) {
-    struct fdt_compat_hash_node *node = early_alloc_align(sizeof(*node), sizeof(uint64));
-    if (node == NULL) return NULL;
+static struct fdt_compat_hash_node *
+__fdt_alloc_compat_hash_node(const char *compat, size_t len) {
+    struct fdt_compat_hash_node *node =
+        early_alloc_align(sizeof(*node), sizeof(uint64));
+    if (node == NULL)
+        return NULL;
     memset(node, 0, sizeof(*node));
     node->compat = compat;
     node->compat_len = len;
@@ -822,10 +848,13 @@ static struct fdt_compat_hash_node *__fdt_alloc_compat_hash_node(const char *com
 }
 
 // Allocate a compat link node
-static struct fdt_compat_link *__fdt_alloc_compat_link(struct fdt_node *fdt_node,
-                                                        struct fdt_compat_hash_node *hash_node) {
-    struct fdt_compat_link *link = early_alloc_align(sizeof(*link), sizeof(uint64));
-    if (link == NULL) return NULL;
+static struct fdt_compat_link *
+__fdt_alloc_compat_link(struct fdt_node *fdt_node,
+                        struct fdt_compat_hash_node *hash_node) {
+    struct fdt_compat_link *link =
+        early_alloc_align(sizeof(*link), sizeof(uint64));
+    if (link == NULL)
+        return NULL;
     memset(link, 0, sizeof(*link));
     link->fdt_node = fdt_node;
     link->hash_node = hash_node;
@@ -833,10 +862,12 @@ static struct fdt_compat_link *__fdt_alloc_compat_link(struct fdt_node *fdt_node
 }
 
 // Allocate a phandle hash node
-static struct fdt_phandle_hash_node *__fdt_alloc_phandle_hash_node(uint32 phandle,
-                                                                    struct fdt_node *fdt_node) {
-    struct fdt_phandle_hash_node *node = early_alloc_align(sizeof(*node), sizeof(uint64));
-    if (node == NULL) return NULL;
+static struct fdt_phandle_hash_node *
+__fdt_alloc_phandle_hash_node(uint32 phandle, struct fdt_node *fdt_node) {
+    struct fdt_phandle_hash_node *node =
+        early_alloc_align(sizeof(*node), sizeof(uint64));
+    if (node == NULL)
+        return NULL;
     memset(node, 0, sizeof(*node));
     node->phandle = phandle;
     node->fdt_node = fdt_node;
@@ -846,51 +877,58 @@ static struct fdt_phandle_hash_node *__fdt_alloc_phandle_hash_node(uint32 phandl
 
 // Add a compatible string to the hash table, linking to the given fdt_node
 static int __fdt_index_compat_string(struct fdt_blob_info *blob,
-                                      struct fdt_node *fdt_node,
-                                      const char *compat, size_t len) {
+                                     struct fdt_node *fdt_node,
+                                     const char *compat, size_t len) {
     // Search for existing hash node
-    struct fdt_compat_hash_node key = { .compat = compat, .compat_len = len };
-    struct fdt_compat_hash_node *hash_node = hlist_get(blob->compat_table, &key);
-    
+    struct fdt_compat_hash_node key = {.compat = compat, .compat_len = len};
+    struct fdt_compat_hash_node *hash_node =
+        hlist_get(blob->compat_table, &key);
+
     if (hash_node == NULL) {
         // Create new hash node for this compatible string
         hash_node = __fdt_alloc_compat_hash_node(compat, len);
-        if (hash_node == NULL) return -1;
-        
-        struct fdt_compat_hash_node *ret = hlist_put(blob->compat_table, hash_node, false);
+        if (hash_node == NULL)
+            return -1;
+
+        struct fdt_compat_hash_node *ret =
+            hlist_put(blob->compat_table, hash_node, false);
         if (ret != hash_node && ret != NULL) {
-            // Already exists (race condition, shouldn't happen in single-threaded early boot)
+            // Already exists (race condition, shouldn't happen in
+            // single-threaded early boot)
             hash_node = ret;
         }
     }
-    
+
     // Create link node
     struct fdt_compat_link *link = __fdt_alloc_compat_link(fdt_node, hash_node);
-    if (link == NULL) return -1;
-    
+    if (link == NULL)
+        return -1;
+
     // Add link to hash node's list
     list_entry_push_back(&hash_node->nodes, &link->list_entry);
     hash_node->count++;
-    
+
     // Note: We don't add link to fdt_node's compat_links here because each link
     // can only be in one list. The fdt_node->compat_links is not used for now.
-    
+
     return 0;
 }
 
 // Index all compatible strings from an fdt_node's "compatible" property
-static void __fdt_index_node_compat(struct fdt_blob_info *blob, struct fdt_node *fdt_node) {
+static void __fdt_index_node_compat(struct fdt_blob_info *blob,
+                                    struct fdt_node *fdt_node) {
     // Find "compatible" property
-    struct fdt_node *compat_prop = fdt_node_lookup(fdt_node, "compatible", NULL);
+    struct fdt_node *compat_prop =
+        fdt_node_lookup(fdt_node, "compatible", NULL);
     if (compat_prop == NULL || compat_prop->data_size == 0) {
         return;
     }
-    
+
     // Parse null-separated compatible strings
     const char *data = (const char *)compat_prop->data;
     size_t data_len = compat_prop->data_size;
     size_t pos = 0;
-    
+
     while (pos < data_len) {
         const char *str = data + pos;
         size_t str_len = strnlen(str, data_len - pos);
@@ -902,15 +940,17 @@ static void __fdt_index_node_compat(struct fdt_blob_info *blob, struct fdt_node 
 }
 
 // Index phandle from an fdt_node
-static void __fdt_index_node_phandle(struct fdt_blob_info *blob, struct fdt_node *fdt_node) {
+static void __fdt_index_node_phandle(struct fdt_blob_info *blob,
+                                     struct fdt_node *fdt_node) {
     if (!fdt_node->has_phandle || fdt_node->phandle == 0) {
         return;
     }
-    
-    struct fdt_phandle_hash_node *hash_node = 
+
+    struct fdt_phandle_hash_node *hash_node =
         __fdt_alloc_phandle_hash_node(fdt_node->phandle, fdt_node);
-    if (hash_node == NULL) return;
-    
+    if (hash_node == NULL)
+        return;
+
     hlist_put(blob->phandle_table, hash_node, false);
 }
 
@@ -918,9 +958,10 @@ static void __fdt_index_node_phandle(struct fdt_blob_info *blob, struct fdt_node
 static hlist_t *__fdt_alloc_hlist(uint64 bucket_cnt, hlist_func_t *func) {
     size_t size = sizeof(hlist_t) + bucket_cnt * sizeof(hlist_bucket_t);
     hlist_t *hlist = early_alloc_align(size, sizeof(uint64));
-    if (hlist == NULL) return NULL;
+    if (hlist == NULL)
+        return NULL;
     memset(hlist, 0, size);
-    
+
     int ret = hlist_init(hlist, bucket_cnt, func);
     if (ret != 0) {
         return NULL;
@@ -931,23 +972,25 @@ static hlist_t *__fdt_alloc_hlist(uint64 bucket_cnt, hlist_func_t *func) {
 // Build indexes for all nodes in the FDT
 static void __fdt_build_indexes(struct fdt_blob_info *blob) {
     // Allocate and initialize hash tables
-    blob->compat_table = __fdt_alloc_hlist(FDT_COMPAT_HASH_BUCKETS, &__fdt_compat_hlist_funcs);
+    blob->compat_table =
+        __fdt_alloc_hlist(FDT_COMPAT_HASH_BUCKETS, &__fdt_compat_hlist_funcs);
     if (blob->compat_table == NULL) {
         printf("fdt: failed to alloc compat hash table\n");
         return;
     }
-    
-    blob->phandle_table = __fdt_alloc_hlist(FDT_PHANDLE_HASH_BUCKETS, &__fdt_phandle_hlist_funcs);
+
+    blob->phandle_table =
+        __fdt_alloc_hlist(FDT_PHANDLE_HASH_BUCKETS, &__fdt_phandle_hlist_funcs);
     if (blob->phandle_table == NULL) {
         printf("fdt: failed to alloc phandle hash table\n");
         return;
     }
-    
+
     // Iterate through all nodes and build indexes
     list_node_t *pos;
     list_foreach_entry(&blob->all_nodes, pos) {
         struct fdt_node *node = container_of(pos, struct fdt_node, list_entry);
-        
+
         // Only index device nodes (not properties)
         if (node->fdt_type == FDT_BEGIN_NODE) {
             __fdt_index_node_compat(blob, node);
@@ -961,48 +1004,58 @@ static void __fdt_build_indexes(struct fdt_blob_info *blob) {
  *****************************************************************************/
 
 // Lookup nodes by compatible string
-struct fdt_node *fdt_compat_lookup(struct fdt_blob_info *blob, const char *compat) {
-    if (blob == NULL || compat == NULL || blob->compat_table == NULL) return NULL;
-    
-    struct fdt_compat_hash_node key = { .compat = compat, .compat_len = strlen(compat) };
-    struct fdt_compat_hash_node *hash_node = hlist_get(blob->compat_table, &key);
-    
+struct fdt_node *fdt_compat_lookup(struct fdt_blob_info *blob,
+                                   const char *compat) {
+    if (blob == NULL || compat == NULL || blob->compat_table == NULL)
+        return NULL;
+
+    struct fdt_compat_hash_node key = {.compat = compat,
+                                       .compat_len = strlen(compat)};
+    struct fdt_compat_hash_node *hash_node =
+        hlist_get(blob->compat_table, &key);
+
     if (hash_node == NULL || LIST_IS_EMPTY(&hash_node->nodes)) {
         return NULL;
     }
-    
+
     // Return first node's fdt_node
-    struct fdt_compat_link *link = LIST_FIRST_NODE(&hash_node->nodes, 
-                                                    struct fdt_compat_link, list_entry);
-    if (link == NULL) return NULL;
+    struct fdt_compat_link *link =
+        LIST_FIRST_NODE(&hash_node->nodes, struct fdt_compat_link, list_entry);
+    if (link == NULL)
+        return NULL;
     return link->fdt_node;
 }
 
 // Get next node with the same compatible string
 struct fdt_node *fdt_compat_next(struct fdt_compat_link **link) {
-    if (link == NULL || *link == NULL) return NULL;
-    
+    if (link == NULL || *link == NULL)
+        return NULL;
+
     struct fdt_compat_hash_node *hash_node = (*link)->hash_node;
     list_node_t *next = LIST_NEXT_ENTRY(&(*link)->list_entry);
-    
+
     if (LIST_ENTRY_IS_HEAD(&hash_node->nodes, next)) {
         // End of list
         *link = NULL;
         return NULL;
     }
-    
+
     *link = container_of(next, struct fdt_compat_link, list_entry);
     return (*link)->fdt_node;
 }
 
 // Lookup node by phandle
-struct fdt_node *fdt_phandle_lookup(struct fdt_blob_info *blob, uint32 phandle) {
-    if (blob == NULL || phandle == 0 || blob->phandle_table == NULL) return NULL;
-    
-    struct fdt_phandle_hash_node key = { .phandle = phandle };
-    struct fdt_phandle_hash_node *hash_node = hlist_get(blob->phandle_table, &key);
-    
-    if (hash_node == NULL) return NULL;
+struct fdt_node *fdt_phandle_lookup(struct fdt_blob_info *blob,
+                                    uint32 phandle) {
+    if (blob == NULL || phandle == 0 || blob->phandle_table == NULL)
+        return NULL;
+
+    struct fdt_phandle_hash_node key = {.phandle = phandle};
+    struct fdt_phandle_hash_node *hash_node =
+        hlist_get(blob->phandle_table, &key);
+
+    if (hash_node == NULL)
+        return NULL;
     return hash_node->fdt_node;
 }
 
@@ -1013,9 +1066,11 @@ static struct fdt_blob_info *fdt_blob;
 static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
     // Get root node (the empty-named node "")
     struct fdt_node *root = __fdt_node_first(
-        container_of(blob->root.node, struct fdt_node, rb_entry)->children.node ?
-        container_of(blob->root.node, struct fdt_node, rb_entry) : NULL, "");
-    
+        container_of(blob->root.node, struct fdt_node, rb_entry)->children.node
+            ? container_of(blob->root.node, struct fdt_node, rb_entry)
+            : NULL,
+        "");
+
     // If root lookup failed, try to get the first node directly
     if (root == NULL && blob->root.node != NULL) {
         root = container_of(blob->root.node, struct fdt_node, rb_entry);
@@ -1027,9 +1082,11 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
     // Get root #address-cells and #size-cells (defaults: 2, 1)
     int root_addr_cells = 2, root_size_cells = 1;
     struct fdt_node *prop = __fdt_get_prop(root, "#address-cells");
-    if (prop) root_addr_cells = __fdt_prop_u32(prop, 0);
+    if (prop)
+        root_addr_cells = __fdt_prop_u32(prop, 0);
     prop = __fdt_get_prop(root, "#size-cells");
-    if (prop) root_size_cells = __fdt_prop_u32(prop, 0);
+    if (prop)
+        root_size_cells = __fdt_prop_u32(prop, 0);
 
     // Parse /cpus node
     struct fdt_node *cpus = fdt_node_lookup(root, "cpus", NULL);
@@ -1043,7 +1100,7 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
                 platform.timebase_freq = __fdt_prop_u64(prop, 0);
             }
         }
-        
+
         // Count CPU nodes
         struct fdt_node *cpu = __fdt_node_first(cpus, "cpu");
         while (cpu) {
@@ -1051,7 +1108,8 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
             cpu = __fdt_node_next_same_name(cpus, cpu);
         }
     }
-    if (platform.ncpu == 0) platform.ncpu = 1;
+    if (platform.ncpu == 0)
+        platform.ncpu = 1;
 
     // Parse /memory node(s)
     struct fdt_node *memory = __fdt_node_first(root, "memory");
@@ -1060,25 +1118,28 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
         if (prop) {
             int cells_per_entry = root_addr_cells + root_size_cells;
             int num_entries = (prop->data_size / 4) / cells_per_entry;
-            
-            for (int i = 0; i < num_entries && platform.mem_count < MAX_MEM_REGIONS; i++) {
+
+            for (int i = 0;
+                 i < num_entries && platform.mem_count < MAX_MEM_REGIONS; i++) {
                 uint64 base = 0, size = 0;
                 int offset = i * cells_per_entry;
-                
+
                 if (root_addr_cells == 2) {
                     base = ((uint64)__fdt_prop_u32(prop, offset) << 32) |
                            __fdt_prop_u32(prop, offset + 1);
                 } else {
                     base = __fdt_prop_u32(prop, offset);
                 }
-                
+
                 if (root_size_cells == 2) {
-                    size = ((uint64)__fdt_prop_u32(prop, offset + root_addr_cells) << 32) |
-                           __fdt_prop_u32(prop, offset + root_addr_cells + 1);
+                    size =
+                        ((uint64)__fdt_prop_u32(prop, offset + root_addr_cells)
+                         << 32) |
+                        __fdt_prop_u32(prop, offset + root_addr_cells + 1);
                 } else {
                     size = __fdt_prop_u32(prop, offset + root_addr_cells);
                 }
-                
+
                 platform.mem[platform.mem_count].base = base;
                 platform.mem[platform.mem_count].size = size;
                 platform.mem_count++;
@@ -1093,13 +1154,14 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
     if (chosen) {
         prop = __fdt_get_prop(chosen, "linux,initrd-start");
         if (prop) {
-            platform.ramdisk_base = (prop->data_size == 8) ?
-                __fdt_prop_u64(prop, 0) : __fdt_prop_u32(prop, 0);
+            platform.ramdisk_base = (prop->data_size == 8)
+                                        ? __fdt_prop_u64(prop, 0)
+                                        : __fdt_prop_u32(prop, 0);
         }
         prop = __fdt_get_prop(chosen, "linux,initrd-end");
         if (prop) {
-            uint64 end = (prop->data_size == 8) ?
-                __fdt_prop_u64(prop, 0) : __fdt_prop_u32(prop, 0);
+            uint64 end = (prop->data_size == 8) ? __fdt_prop_u64(prop, 0)
+                                                : __fdt_prop_u32(prop, 0);
             if (platform.ramdisk_base != 0 && end > platform.ramdisk_base) {
                 platform.ramdisk_size = end - platform.ramdisk_base;
                 platform.has_ramdisk = 1;
@@ -1110,35 +1172,32 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
     // Compatible string lists for device detection
     // UART: various 8250/16550 compatible UARTs
     static const char *uart_compat[] = {
-        "ns16550a", "ns16550", "snps,dw-apb-uart", "ti,omap3-uart",
-        "xlnx,xuartps", "ky,pxa-uart", "arm,sbsa-uart", NULL
-    };
+        "ns16550a",     "ns16550",     "snps,dw-apb-uart", "ti,omap3-uart",
+        "xlnx,xuartps", "ky,pxa-uart", "arm,sbsa-uart",    NULL};
     // PLIC: RISC-V platform-level interrupt controller
-    static const char *plic_compat[] = {
-        "riscv,plic0", "sifive,plic-1.0.0", "thead,c900-plic",
-        "andestech,nceplic100", NULL
-    };
+    static const char *plic_compat[] = {"riscv,plic0", "sifive,plic-1.0.0",
+                                        "thead,c900-plic",
+                                        "andestech,nceplic100", NULL};
     // PCIe ECAM: generic ECAM-compliant PCIe host controllers
     static const char *pcie_compat[] = {
-        "pci-host-ecam-generic", "pci-host-cam-generic",
-        "x1,dwc-pcie", "spacemit,k1-pcie",  // Orange Pi / SpacemiT K1
-        NULL
-    };
+        "pci-host-ecam-generic", "pci-host-cam-generic", "x1,dwc-pcie",
+        "spacemit,k1-pcie", // Orange Pi / SpacemiT K1
+        NULL};
     // VirtIO: virtio MMIO devices
-    static const char *virtio_compat[] = {
-        "virtio,mmio", NULL
-    };
+    static const char *virtio_compat[] = {"virtio,mmio", NULL};
 
     // Parse /soc node for devices (common structure)
     struct fdt_node *soc = fdt_node_lookup(root, "soc", NULL);
     struct fdt_node *device_parent = soc ? soc : root;
-    
+
     int soc_addr_cells = root_addr_cells, soc_size_cells = root_size_cells;
     if (soc) {
         prop = __fdt_get_prop(soc, "#address-cells");
-        if (prop) soc_addr_cells = __fdt_prop_u32(prop, 0);
+        if (prop)
+            soc_addr_cells = __fdt_prop_u32(prop, 0);
         prop = __fdt_get_prop(soc, "#size-cells");
-        if (prop) soc_size_cells = __fdt_prop_u32(prop, 0);
+        if (prop)
+            soc_size_cells = __fdt_prop_u32(prop, 0);
     }
 
     // Scan all children for devices
@@ -1146,15 +1205,18 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
     while (rb) {
         struct fdt_node *node = container_of(rb, struct fdt_node, rb_entry);
         rb = rb_next_node(rb);
-        
-        // Skip properties (they don't have children typically, but check by name pattern)
+
+        // Skip properties (they don't have children typically, but check by
+        // name pattern)
         struct fdt_node *compat = __fdt_get_prop(node, "compatible");
         struct fdt_node *reg = __fdt_get_prop(node, "reg");
         struct fdt_node *interrupts = __fdt_get_prop(node, "interrupts");
-        
+
         // UART detection (ns16550a, ns16750, snps,dw-apb-uart)
-        // PXA UART (SpacemiT K1): reg-shift=2, reg-io-width=4, IER_UUE, MCR_OUT2
-        if (platform.uart_base == 0 && __fdt_prop_compat_list(compat, uart_compat)) {
+        // PXA UART (SpacemiT K1): reg-shift=2, reg-io-width=4, IER_UUE,
+        // MCR_OUT2
+        if (platform.uart_base == 0 &&
+            __fdt_prop_compat_list(compat, uart_compat)) {
             uint64 uart_addr = 0;
             if (reg) {
                 __fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells,
@@ -1164,46 +1226,56 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
             if (interrupts) {
                 platform.uart_irq = __fdt_prop_u32(interrupts, 0);
             }
-            struct fdt_node *clock_freq = __fdt_get_prop(node, "clock-frequency");
+            struct fdt_node *clock_freq =
+                __fdt_get_prop(node, "clock-frequency");
             if (clock_freq)
                 platform.uart_clock = __fdt_prop_u32(clock_freq, 0);
             struct fdt_node *baud = __fdt_get_prop(node, "current-speed");
             if (baud)
                 platform.uart_baud = __fdt_prop_u32(baud, 0);
-            // Default to 8-bit, 1-byte spacing (ns16550a). PXA DT will provide reg-shift/reg-io-width.
+            // Default to 8-bit, 1-byte spacing (ns16550a). PXA DT will provide
+            // reg-shift/reg-io-width.
             struct fdt_node *reg_shift = __fdt_get_prop(node, "reg-shift");
-            platform.uart_reg_shift = reg_shift ? __fdt_prop_u32(reg_shift, 0) : 0;
-            struct fdt_node *reg_io_width = __fdt_get_prop(node, "reg-io-width");
-            platform.uart_reg_io_width = reg_io_width ? __fdt_prop_u32(reg_io_width, 0) : 1;
-            printf("fdt: found UART at 0x%lx, IRQ %d, clock %u Hz, baud %u, reg-shift %u, io-width %u\n",
-                   platform.uart_base, platform.uart_irq,
-                   platform.uart_clock, platform.uart_baud, platform.uart_reg_shift,
+            platform.uart_reg_shift =
+                reg_shift ? __fdt_prop_u32(reg_shift, 0) : 0;
+            struct fdt_node *reg_io_width =
+                __fdt_get_prop(node, "reg-io-width");
+            platform.uart_reg_io_width =
+                reg_io_width ? __fdt_prop_u32(reg_io_width, 0) : 1;
+            printf("fdt: found UART at 0x%lx, IRQ %d, clock %u Hz, baud %u, "
+                   "reg-shift %u, io-width %u\n",
+                   platform.uart_base, platform.uart_irq, platform.uart_clock,
+                   platform.uart_baud, platform.uart_reg_shift,
                    platform.uart_reg_io_width);
         }
-        
+
         // PLIC detection
-        if (platform.plic_base == 0 && __fdt_prop_compat_list(compat, plic_compat)) {
+        if (platform.plic_base == 0 &&
+            __fdt_prop_compat_list(compat, plic_compat)) {
             if (reg) {
                 __fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells,
                                      &platform.plic_base, &platform.plic_size);
             }
         }
-        
+
         // PCIe detection - parse all reg entries
         if (!platform.has_pcie && __fdt_prop_compat_list(compat, pcie_compat)) {
             if (reg) {
                 platform.has_pcie = 1;
                 // Calculate number of reg entries
-                int entry_size = (soc_addr_cells + soc_size_cells) * sizeof(uint32);
+                int entry_size =
+                    (soc_addr_cells + soc_size_cells) * sizeof(uint32);
                 int num_entries = reg->data_size / entry_size;
-                if (num_entries > PCIE_REG_MAX) num_entries = PCIE_REG_MAX;
-                
+                if (num_entries > PCIE_REG_MAX)
+                    num_entries = PCIE_REG_MAX;
+
                 // Get reg-names if available
                 struct fdt_node *reg_names = __fdt_get_prop(node, "reg-names");
-                const char *names_data = reg_names ? (const char *)reg_names->data : NULL;
+                const char *names_data =
+                    reg_names ? (const char *)reg_names->data : NULL;
                 size_t names_len = reg_names ? reg_names->data_size : 0;
                 size_t name_pos = 0;
-                
+
                 // Parse each reg entry
                 for (int i = 0; i < num_entries; i++) {
                     int offset = i * (soc_addr_cells + soc_size_cells);
@@ -1213,17 +1285,22 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
                         platform.pcie_reg[i].base = __fdt_prop_u32(reg, offset);
                     }
                     if (soc_size_cells == 2) {
-                        uint32 hi = __fdt_prop_u32(reg, offset + soc_addr_cells);
-                        uint32 lo = __fdt_prop_u32(reg, offset + soc_addr_cells + 1);
+                        uint32 hi =
+                            __fdt_prop_u32(reg, offset + soc_addr_cells);
+                        uint32 lo =
+                            __fdt_prop_u32(reg, offset + soc_addr_cells + 1);
                         platform.pcie_reg[i].size = ((uint64)hi << 32) | lo;
                     } else {
-                        platform.pcie_reg[i].size = __fdt_prop_u32(reg, offset + soc_addr_cells);
+                        platform.pcie_reg[i].size =
+                            __fdt_prop_u32(reg, offset + soc_addr_cells);
                     }
-                    
+
                     // Get corresponding name from reg-names
                     if (names_data && name_pos < names_len) {
                         platform.pcie_reg[i].name = names_data + name_pos;
-                        name_pos += strnlen(names_data + name_pos, names_len - name_pos) + 1;
+                        name_pos += strnlen(names_data + name_pos,
+                                            names_len - name_pos) +
+                                    1;
                     } else {
                         platform.pcie_reg[i].name = NULL;
                     }
@@ -1231,17 +1308,19 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
                 }
             }
         }
-        
+
         // VirtIO detection
         if (__fdt_prop_compat_list(compat, virtio_compat) &&
             platform.virtio_count < 8) {
             platform.has_virtio = 1;
             if (reg) {
-                __fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells,
-                                     &platform.virtio_base[platform.virtio_count], NULL);
+                __fdt_parse_reg_prop(
+                    reg, soc_addr_cells, soc_size_cells,
+                    &platform.virtio_base[platform.virtio_count], NULL);
             }
             if (interrupts) {
-                platform.virtio_irq[platform.virtio_count] = __fdt_prop_u32(interrupts, 0);
+                platform.virtio_irq[platform.virtio_count] =
+                    __fdt_prop_u32(interrupts, 0);
             }
             platform.virtio_count++;
         }
@@ -1257,15 +1336,18 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
         // Get address-cells and size-cells for this node
         int rsv_addr_cells = root_addr_cells, rsv_size_cells = root_size_cells;
         prop = __fdt_get_prop(rsvmem, "#address-cells");
-        if (prop) rsv_addr_cells = __fdt_prop_u32(prop, 0);
+        if (prop)
+            rsv_addr_cells = __fdt_prop_u32(prop, 0);
         prop = __fdt_get_prop(rsvmem, "#size-cells");
-        if (prop) rsv_size_cells = __fdt_prop_u32(prop, 0);
+        if (prop)
+            rsv_size_cells = __fdt_prop_u32(prop, 0);
 
         // Count reserved memory child nodes first
         int rsv_child_count = 0;
         struct rb_node *rsv_rb = rb_first_node(&rsvmem->children);
         while (rsv_rb) {
-            struct fdt_node *rsv_node = container_of(rsv_rb, struct fdt_node, rb_entry);
+            struct fdt_node *rsv_node =
+                container_of(rsv_rb, struct fdt_node, rb_entry);
             rsv_rb = rb_next_node(rsv_rb);
             // Only count nodes with reg property (skip properties and ranges)
             if (__fdt_get_prop(rsv_node, "reg") != NULL) {
@@ -1287,9 +1369,10 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
                 int idx = platform.reserved_count;
                 rsv_rb = rb_first_node(&rsvmem->children);
                 while (rsv_rb && idx < total_count) {
-                    struct fdt_node *rsv_node = container_of(rsv_rb, struct fdt_node, rb_entry);
+                    struct fdt_node *rsv_node =
+                        container_of(rsv_rb, struct fdt_node, rb_entry);
                     rsv_rb = rb_next_node(rsv_rb);
-                    
+
                     prop = __fdt_get_prop(rsv_node, "reg");
                     if (prop) {
                         uint64 base = 0, size = 0;
@@ -1300,7 +1383,8 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
                             base = __fdt_prop_u32(prop, 0);
                         }
                         if (rsv_size_cells == 2) {
-                            size = ((uint64)__fdt_prop_u32(prop, rsv_addr_cells) << 32) |
+                            size = ((uint64)__fdt_prop_u32(prop, rsv_addr_cells)
+                                    << 32) |
                                    __fdt_prop_u32(prop, rsv_addr_cells + 1);
                         } else {
                             size = __fdt_prop_u32(prop, rsv_addr_cells);
@@ -1373,21 +1457,23 @@ int fdt_init(void *dtb) {
                platform.uart_baud ? platform.uart_baud : 115200);
     }
     printf("\n");
-    printf("  PLIC: 0x%lx (size 0x%lx)\n", platform.plic_base, platform.plic_size);
+    printf("  PLIC: 0x%lx (size 0x%lx)\n", platform.plic_base,
+           platform.plic_size);
     if (platform.has_pcie) {
         printf("  PCIe regions: %d\n", platform.pcie_reg_count);
         for (int i = 0; i < platform.pcie_reg_count; i++) {
             if (platform.pcie_reg[i].name) {
                 printf("    [%d] %s: 0x%lx (size 0x%lx)\n", i,
-                       platform.pcie_reg[i].name,
-                       platform.pcie_reg[i].base, platform.pcie_reg[i].size);
+                       platform.pcie_reg[i].name, platform.pcie_reg[i].base,
+                       platform.pcie_reg[i].size);
             } else {
                 printf("    [%d] 0x%lx (size 0x%lx)\n", i,
                        platform.pcie_reg[i].base, platform.pcie_reg[i].size);
             }
         }
     }
-    printf("  CPUs: %d, timebase: %ld Hz\n", platform.ncpu, platform.timebase_freq);
+    printf("  CPUs: %d, timebase: %ld Hz\n", platform.ncpu,
+           platform.timebase_freq);
 
     if (platform.has_virtio) {
         printf("  VirtIO devices: %d\n", platform.virtio_count);
@@ -1498,7 +1584,8 @@ static void __fdt_walk_node(struct fdt_node *node, int depth) {
 
     fdt_print_indent(depth);
 
-    // Check if this is a property (has data) or a node (has children or is a container)
+    // Check if this is a property (has data) or a node (has children or is a
+    // container)
     if (node->data_size > 0) {
         // Property node - print name = value
         printf("%s = ", node->name);
@@ -1522,7 +1609,8 @@ static void __fdt_walk_node(struct fdt_node *node, int depth) {
         // Recursively walk children
         struct rb_node *rb = rb_first_node(&node->children);
         while (rb) {
-            struct fdt_node *child = container_of(rb, struct fdt_node, rb_entry);
+            struct fdt_node *child =
+                container_of(rb, struct fdt_node, rb_entry);
             __fdt_walk_node(child, depth + 1);
             rb = rb_next_node(rb);
         }
@@ -1530,7 +1618,7 @@ static void __fdt_walk_node(struct fdt_node *node, int depth) {
 }
 
 void fdt_walk(void *dtb) {
-    (void)dtb;  // Unused - we walk the parsed tree instead
+    (void)dtb; // Unused - we walk the parsed tree instead
 
     if (fdt_blob == NULL) {
         printf("fdt_walk: no parsed FDT tree available\n");
@@ -1542,8 +1630,8 @@ void fdt_walk(void *dtb) {
 
     // Get the root node and walk it
     if (fdt_blob->root.node != NULL) {
-        struct fdt_node *root = container_of(fdt_blob->root.node, 
-                                              struct fdt_node, rb_entry);
+        struct fdt_node *root =
+            container_of(fdt_blob->root.node, struct fdt_node, rb_entry);
         __fdt_walk_node(root, 0);
     }
 

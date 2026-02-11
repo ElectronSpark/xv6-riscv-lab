@@ -49,20 +49,20 @@ typedef ht_hash_t (*hlist_hash_func_t)(void *);
 //   - node > key: a number > 0
 //   - node == key: 0
 //   - node < key: a number < 0
-typedef int (*hlist_node_id_cmp_func_t)(hlist_t*, void*, void*);
+typedef int (*hlist_node_id_cmp_func_t)(hlist_t *, void *, void *);
 
 // Abstraction function to get the node of a hash list entry
 //
 // Get the address of a node giving its hash list entry.
-// 
-typedef void *(*hlist_get_node_func_t)(hlist_entry_t*);
+//
+typedef void *(*hlist_get_node_func_t)(hlist_entry_t *);
 
 // Abstraction function to get the Hash list entry of a node
 //
 // Get the address of a hash list entry giving the node it's in.
 // This function needs to check if a node is invalid and return NULL if that's
 // the case.
-typedef hlist_entry_t *(*hlist_get_entry_func_t)(void*);
+typedef hlist_entry_t *(*hlist_get_entry_func_t)(void *);
 
 // abstract methods of a hash list
 typedef struct hlist_func_struct {
@@ -80,4 +80,4 @@ typedef struct hlist_struct {
     hlist_bucket_t buckets[0];
 } hlist_t;
 
-#endif      /* __HASH_LIST_TYPE_H__ */
+#endif /* __HASH_LIST_TYPE_H__ */

@@ -56,47 +56,56 @@ int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
 // - Do not access an inode after calling the last vfs_iput() on it.
 
 void vfs_ilock(struct vfs_inode *inode);
-int vfs_ilock_trylock(struct vfs_inode *inode); // Try to lock, returns 1 on success, 0 on failure
+int vfs_ilock_trylock(
+    struct vfs_inode *inode); // Try to lock, returns 1 on success, 0 on failure
 void vfs_iunlock(struct vfs_inode *inode);
-int vfs_inode_check_valid(struct vfs_inode *inode); // Check inode validity (must hold inode lock)
-void vfs_idup(struct vfs_inode *inode);         // Increase ref count (caller must hold a reference)
-bool vfs_idup_not_zero(struct vfs_inode *inode); // Try to increase ref count if not zero (for cache lookups)
-void vfs_iput(struct vfs_inode *inode);         // Decrease ref count. Caller must not hold inode lock when calling
-int vfs_invalidate(struct vfs_inode *inode);    // Decrease ref count and invalidate inode
-int vfs_dirty_inode(struct vfs_inode *inode);   // Mark inode as dirty
-int vfs_sync_inode(struct vfs_inode *inode);    // Write inode to disk
+int vfs_inode_check_valid(
+    struct vfs_inode *inode); // Check inode validity (must hold inode lock)
+void vfs_idup(struct vfs_inode
+                  *inode); // Increase ref count (caller must hold a reference)
+bool vfs_idup_not_zero(struct vfs_inode *inode); // Try to increase ref count if
+                                                 // not zero (for cache lookups)
+void vfs_iput(struct vfs_inode *inode); // Decrease ref count. Caller must not
+                                        // hold inode lock when calling
+int vfs_invalidate(
+    struct vfs_inode *inode); // Decrease ref count and invalidate inode
+int vfs_dirty_inode(struct vfs_inode *inode); // Mark inode as dirty
+int vfs_sync_inode(struct vfs_inode *inode);  // Write inode to disk
 
-int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry, 
+int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
                 const char *name, size_t name_len);
 ssize_t vfs_readlink(struct vfs_inode *inode, char *buf, size_t buflen);
 struct vfs_inode *vfs_create(struct vfs_inode *dir, mode_t mode,
+                             const char *name, size_t name_len);
+struct vfs_inode *vfs_mknod(struct vfs_inode *dir, mode_t mode, dev_t dev,
                             const char *name, size_t name_len);
-struct vfs_inode *vfs_mknod(struct vfs_inode *dir, mode_t mode, 
-                           dev_t dev, const char *name, size_t name_len);
-int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir,
-             const char *name, size_t name_len);
+int vfs_link(struct vfs_dentry *old, struct vfs_inode *dir, const char *name,
+             size_t name_len);
 int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len);
 struct vfs_inode *vfs_mkdir(struct vfs_inode *dir, mode_t mode,
-                           const char *name, size_t name_len);
-int vfs_dir_isempty(struct vfs_inode *dir);  // Check if directory contains only "." and ".."
+                            const char *name, size_t name_len);
+int vfs_dir_isempty(
+    struct vfs_inode *dir); // Check if directory contains only "." and ".."
 int vfs_move(struct vfs_inode *old_dir, struct vfs_dentry *old_dentry,
              struct vfs_inode *new_dir, const char *name, size_t name_len);
 struct vfs_inode *vfs_symlink(struct vfs_inode *dir, mode_t mode,
                               const char *name, size_t name_len,
                               const char *target, size_t target_len);
 int vfs_itruncate(struct vfs_inode *inode, loff_t new_size);
-int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter, 
+int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
                  struct vfs_dentry *ret_dentry);
 
 // Special inode locking operations for deadlock avoidance
-void vfs_ilock_two_nondirectories(struct vfs_inode *inode1, struct vfs_inode *inode2);
-int vfs_ilock_two_directories(struct vfs_inode *inode1, struct vfs_inode *inode2);
+void vfs_ilock_two_nondirectories(struct vfs_inode *inode1,
+                                  struct vfs_inode *inode2);
+int vfs_ilock_two_directories(struct vfs_inode *inode1,
+                              struct vfs_inode *inode2);
 void vfs_iunlock_two(struct vfs_inode *inode1, struct vfs_inode *inode2);
 
 // Public APIs not tied to specific callbacks
 struct vfs_inode *vfs_namei(const char *path, size_t path_len);
-struct vfs_inode *vfs_nameiparent(const char *path, size_t path_len,
-                                   char *name, size_t name_size);
+struct vfs_inode *vfs_nameiparent(const char *path, size_t path_len, char *name,
+                                  size_t name_size);
 struct vfs_inode *vfs_curdir(void);
 struct vfs_inode *vfs_curroot(void);
 int vfs_chroot(struct vfs_inode *new_root);
@@ -116,15 +125,15 @@ static inline void vfs_struct_unlock(struct fs_struct *fs) {
     spin_unlock(&fs->lock);
 }
 
-struct fs_struct *vfs_struct_init(void);    // Create the first fs_struct
-struct fs_struct *vfs_struct_clone(struct fs_struct *old_fs, uint64 clone_flags);
+struct fs_struct *vfs_struct_init(void); // Create the first fs_struct
+struct fs_struct *vfs_struct_clone(struct fs_struct *old_fs,
+                                   uint64 clone_flags);
 void vfs_struct_put(struct fs_struct *fs);
 
 // Inode reference operations
 int vfs_inode_get_ref(struct vfs_inode *inode, struct vfs_inode_ref *ref);
 void vfs_inode_put_ref(struct vfs_inode_ref *ref);
 struct vfs_inode *vfs_inode_deref(struct vfs_inode_ref *ref);
-
 
 // Get the reference count of an inode
 static inline int vfs_inode_refcount(struct vfs_inode *inode) {
@@ -157,7 +166,8 @@ static inline bool vfs_inode_is_local_root(struct vfs_inode *inode) {
     }
 
     if (inode == inode->sb->root_inode) {
-        assert(inode->parent == inode, "vfs_inode_is_local_root: root inode's parent is not itself");
+        assert(inode->parent == inode,
+               "vfs_inode_is_local_root: root inode's parent is not itself");
         return true;
     }
     return false;

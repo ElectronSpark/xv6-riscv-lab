@@ -8,7 +8,8 @@
 #include <lock/rcu_type.h>
 
 #define MAX_MAJOR_DEVICES 256 // Maximum number of major devices
-#define MAX_MINOR_DEVICES 256 // Maximum number of minor devices per major device
+// Maximum number of minor devices per major device
+#define MAX_MINOR_DEVICES 256
 
 typedef struct device_major device_major_t;
 typedef struct device_instance device_t;
@@ -20,9 +21,9 @@ typedef struct blkdev blkdev_t;
 struct bio;
 
 typedef struct device_major {
-    int num_minors;                         // Number of minor devices
-    device_t **minors;                      // Array of pointers to minor device instances
-    rcu_head_t rcu_head;                    // RCU callback head for deferred freeing
+    int num_minors;      // Number of minor devices
+    device_t **minors;   // Array of pointers to minor device instances
+    rcu_head_t rcu_head; // RCU callback head for deferred freeing
 } device_major_t;
 
 typedef struct device_ops {
@@ -30,18 +31,14 @@ typedef struct device_ops {
     int (*release)(device_t *dev);
 } device_ops_t;
 
-typedef enum {
-    DEV_TYPE_UNKNOWN = 0,
-    DEV_TYPE_BLOCK,
-    DEV_TYPE_CHAR
-} dev_type_e;
+typedef enum { DEV_TYPE_UNKNOWN = 0, DEV_TYPE_BLOCK, DEV_TYPE_CHAR } dev_type_e;
 
 typedef struct device_instance {
     struct kobject kobj;
-    int major;              // Major device number
-    int minor;              // Minor device number
-    dev_type_e type;       // Device type (block, char, etc.)
-    int unregistering;     // Set to 1 when device is being unregistered
+    int major;         // Major device number
+    int minor;         // Minor device number
+    dev_type_e type;   // Device type (block, char, etc.)
+    int unregistering; // Set to 1 when device is being unregistered
     device_ops_t ops;
 } device_t;
 
@@ -55,8 +52,8 @@ typedef struct cdev_ops {
 typedef struct cdev {
     device_t dev;
     struct {
-        uint64 readable: 1; // Is the device readable
-        uint64 writable: 1; // Is the device writable
+        uint64 readable : 1; // Is the device readable
+        uint64 writable : 1; // Is the device writable
     };
     cdev_ops_t ops; // File operations for the character device
 } cdev_t;
@@ -70,10 +67,11 @@ typedef struct blkdev_ops {
 typedef struct blkdev {
     device_t dev;
     struct {
-        uint64 readable: 1; // Is the device readable
-        uint64 writable: 1; // Is the device writable
+        uint64 readable : 1; // Is the device readable
+        uint64 writable : 1; // Is the device writable
     };
-    uint16 block_shift; // Block size shift relative to 512 bytes, typically 1(512) or 3(4096)
+    uint16 block_shift; // Block size shift relative to 512 bytes, typically
+                        // 1(512) or 3(4096)
     blkdev_ops_t ops;
 } blkdev_t;
 

@@ -43,13 +43,9 @@ static void __workqueue_struct_init(struct workqueue *wq) {
     tq_init(&wq->idle_queue, "workqueue_idle", &wq->lock);
 }
 
-static void __wq_lock(struct workqueue *wq) {
-    spin_lock(&wq->lock);
-}
+static void __wq_lock(struct workqueue *wq) { spin_lock(&wq->lock); }
 
-static void __wq_unlock(struct workqueue *wq) {
-    spin_unlock(&wq->lock);
-}
+static void __wq_unlock(struct workqueue *wq) { spin_unlock(&wq->lock); }
 
 static struct work_struct *__alloc_work_struct(void) {
     struct work_struct *work = slab_alloc(&__work_struct_cache);
@@ -68,16 +64,16 @@ static void __free_work_struct(struct work_struct *work) {
 }
 
 // Initialize a work item
-void init_work_struct(struct work_struct *work, 
-                      void (*func)(struct work_struct*), 
-                      uint64 data) {
+void init_work_struct(struct work_struct *work,
+                      void (*func)(struct work_struct *), uint64 data) {
     list_entry_init(&work->entry);
     work->func = func;
     work->data = data;
 }
 
-// Dynamically allocate a work struct and initialize it with the given function and data
-struct work_struct *create_work_struct(void (*func)(struct work_struct*), 
+// Dynamically allocate a work struct and initialize it with the given function
+// and data
+struct work_struct *create_work_struct(void (*func)(struct work_struct *),
                                        uint64 data) {
     struct work_struct *work = __alloc_work_struct();
     if (!work) {
@@ -88,7 +84,8 @@ struct work_struct *create_work_struct(void (*func)(struct work_struct*),
 }
 
 // Free a work struct
-// This function can only be used to free work structs allocated by create_work_struct
+// This function can only be used to free work structs allocated by
+// create_work_struct
 void free_work_struct(struct work_struct *work) {
     if (!work) {
         return;
@@ -108,8 +105,8 @@ static void __enqueue_work(struct workqueue *wq, struct work_struct *work) {
 // No validation checks to the parameters
 // Caller should hold the lock of the wq
 static struct work_struct *__dequeue_work(struct workqueue *wq) {
-    struct work_struct *work = list_node_pop(&wq->work_list, 
-                                             struct work_struct, entry);
+    struct work_struct *work =
+        list_node_pop(&wq->work_list, struct work_struct, entry);
     if (work != NULL) {
         wq->pending_works--;
     }
@@ -123,7 +120,8 @@ static void __exit_routine(uint64 exit_code) {
     tcb_unlock(current);
     if (wq != NULL) {
         __wq_lock(wq);
-        assert(wq->manager != current, "Manager thread try to exit using worker exit routine");
+        assert(wq->manager != current,
+               "Manager thread try to exit using worker exit routine");
         tcb_lock(current);
         if (!LIST_NODE_IS_DETACHED(current, wq_entry)) {
             list_node_detach(current, wq_entry);
@@ -134,8 +132,8 @@ static void __exit_routine(uint64 exit_code) {
         __wq_unlock(wq);
     } else {
         tcb_lock(current);
-        assert (LIST_NODE_IS_DETACHED(current, wq_entry),
-                "Worker thread not belong to a workqueue but attached\n");
+        assert(LIST_NODE_IS_DETACHED(current, wq_entry),
+               "Worker thread not belong to a workqueue but attached\n");
         tcb_unlock(current);
     }
     exit((int)exit_code);
@@ -167,12 +165,12 @@ static void __worker_routine(void) {
                 __exit_routine(0);
             }
             // Otherwise wait for work to be assigned
-            int ret = tq_wait(&wq->idle_queue, &wq->lock, (uint64*)&work);
+            int ret = tq_wait(&wq->idle_queue, &wq->lock, (uint64 *)&work);
             if (ret != 0) {
                 __wq_unlock(wq);
                 __exit_routine((uint64)ret);
             }
-            // If a work is assigned to the worker thread, it will be 
+            // If a work is assigned to the worker thread, it will be
             // passed via `work` variable.
             // If the worker thread is waken up but no work is assigned,
             // Then enter the next loop and try to get a work from the queue.
@@ -192,7 +190,8 @@ static void __worker_routine(void) {
 
 // This function will only try to acquire the work thread lock
 static int __create_worker(struct workqueue *wq) {
-    struct thread *worker = kthread_create("worker_thread", __worker_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
+    struct thread *worker = kthread_create("worker_thread", __worker_routine,
+                                           (uint64)wq, 0, KERNEL_STACK_ORDER);
     if (IS_ERR_OR_NULL(worker)) {
         return PTR_ERR_OR(worker, -ENOMEM);
     }
@@ -206,7 +205,8 @@ static int __create_worker(struct workqueue *wq) {
 }
 
 // Manager routine for managing worker threads
-// Each workqueue has a manager thread that is responsible for creating and destroying worker threads
+// Each workqueue has a manager thread that is responsible for creating and
+// destroying worker threads
 static void __manager_routine(void) {
     tcb_lock(current);
     struct workqueue *wq = current->wq;
@@ -223,15 +223,15 @@ static void __manager_routine(void) {
     }
     for (;;) {
         assert(wq->nr_workers >= 0, "Worker thread count is invalid\n");
-        while (wq->nr_workers < wq->min_active || 
-               (wq->pending_works > wq->nr_workers && 
+        while (wq->nr_workers < wq->min_active ||
+               (wq->pending_works > wq->nr_workers &&
                 wq->nr_workers < wq->max_active)) {
             // Need to create more worker threads
             if (__create_worker(wq) != 0) {
                 break;
             }
         }
-        while (tq_size(&wq->idle_queue) && 
+        while (tq_size(&wq->idle_queue) &&
                wq->nr_workers - tq_size(&wq->idle_queue) < wq->pending_works) {
             // Wake up an idle worker if any
             struct thread *p = tq_wakeup(&wq->idle_queue, 0, 0);
@@ -255,7 +255,8 @@ static void __manager_routine(void) {
 // during which the work queue lock is being hold.
 // Thus, it will only try to hold the manager thread lock
 static int __create_manager(struct workqueue *wq) {
-    struct thread *manager = kthread_create("manager_thread", __manager_routine, (uint64)wq, 0, KERNEL_STACK_ORDER);
+    struct thread *manager = kthread_create("manager_thread", __manager_routine,
+                                            (uint64)wq, 0, KERNEL_STACK_ORDER);
     if (IS_ERR_OR_NULL(manager)) {
         return PTR_ERR_OR(manager, -ENOMEM);
     }
@@ -274,13 +275,11 @@ static void __wakeup_manager(struct workqueue *wq) {
 }
 
 void workqueue_init(void) {
-    int ret = slab_cache_init(&__workqueue_cache, "workqueue", 
-                              sizeof(struct workqueue), 
-                              SLAB_FLAG_EMBEDDED);
+    int ret = slab_cache_init(&__workqueue_cache, "workqueue",
+                              sizeof(struct workqueue), SLAB_FLAG_EMBEDDED);
     assert(ret == 0, "Failed to initialize workqueue slab cache");
-    ret = slab_cache_init(&__work_struct_cache, "work_struct", 
-                          sizeof(struct work_struct), 
-                          SLAB_FLAG_EMBEDDED);
+    ret = slab_cache_init(&__work_struct_cache, "work_struct",
+                          sizeof(struct work_struct), SLAB_FLAG_EMBEDDED);
     assert(ret == 0, "Failed to initialize work_struct slab cache");
     printf("workqueue subsystem initialized\n");
 }
@@ -305,7 +304,9 @@ struct workqueue *workqueue_create(const char *name, int max_active) {
     __workqueue_struct_init(wq);
     strncpy(wq->name, name, sizeof(wq->name) - 1);
     wq->max_active = max_active;
-    wq->min_active = max_active < WORKQUEUE_DEFAULT_MIN_ACTIVE ? WORKQUEUE_DEFAULT_MIN_ACTIVE : max_active;
+    wq->min_active = max_active < WORKQUEUE_DEFAULT_MIN_ACTIVE
+                         ? WORKQUEUE_DEFAULT_MIN_ACTIVE
+                         : max_active;
     wq->nr_workers = 0;
     wq->active = 1;
 
@@ -331,7 +332,7 @@ bool queue_work(struct workqueue *wq, struct work_struct *work) {
         __wq_unlock(wq);
         return false;
     }
-    
+
     __enqueue_work(wq, work);
     __wakeup_manager(wq);
     __wq_unlock(wq);

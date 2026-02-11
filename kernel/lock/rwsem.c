@@ -12,10 +12,9 @@
 #include "proc/sched.h"
 #include "string.h"
 
-
 static inline int __reader_should_wait(rwsem_t *lock) {
     if (lock->readers == 0) {
-        return lock->holder_pid != -1;  // -1 = no holder
+        return lock->holder_pid != -1; // -1 = no holder
     }
     if ((lock->flags & RWLOCK_PRIO_WRITE) && tq_size(&lock->write_queue) > 0) {
         return 1;
@@ -28,7 +27,7 @@ static inline int __writer_should_wait(rwsem_t *lock, int pid) {
         // The caller already holds the write lock
         return 0;
     }
-    if (lock->holder_pid != -1) {  // -1 = no holder
+    if (lock->holder_pid != -1) { // -1 = no holder
         return 1;
     }
     if (lock->readers > 0) {
@@ -51,14 +50,16 @@ static void __wake_writer(rwsem_t *lock) {
 // wake up readers or a writer depending on the lock's priority.
 static void __do_wake_up(rwsem_t *lock) {
     if (lock->flags & RWLOCK_PRIO_WRITE) {
-        // If the lock is in write priority mode, first try to wake up the next writer
+        // If the lock is in write priority mode, first try to wake up the next
+        // writer
         if (tq_size(&lock->write_queue) > 0) {
             __wake_writer(lock);
         } else if (tq_size(&lock->read_queue) > 0) {
             __wake_readers(lock);
         }
     } else {
-        // If the lock is in read priority mode, first try to wake up all readers
+        // If the lock is in read priority mode, first try to wake up all
+        // readers
         if (tq_size(&lock->read_queue) > 0) {
             __wake_readers(lock);
         } else if (tq_size(&lock->write_queue) > 0) {
@@ -66,7 +67,6 @@ static void __do_wake_up(rwsem_t *lock) {
         }
     }
 }
-
 
 int rwsem_init(rwsem_t *lock, uint64 flags, const char *name) {
     if (!lock || !name) {
@@ -78,7 +78,7 @@ int rwsem_init(rwsem_t *lock, uint64 flags, const char *name) {
     tq_init(&lock->read_queue, "rwsem read queue", &lock->lock);
     tq_init(&lock->write_queue, "rwsem write queue", &lock->lock);
     lock->name = name;
-    lock->holder_pid = -1;  // -1 = no holder (0 is valid PID for idle)
+    lock->holder_pid = -1; // -1 = no holder (0 is valid PID for idle)
     lock->flags = flags;
 
     return 0; // Success
@@ -86,7 +86,8 @@ int rwsem_init(rwsem_t *lock, uint64 flags, const char *name) {
 
 int rwsem_acquire_read(rwsem_t *lock) {
     assert(current != NULL, "rwsem_acquire_read: no current thread");
-    assert(mycpu()->spin_depth == 0, "rwsem_acquire_read called with spinlock held");
+    assert(mycpu()->spin_depth == 0,
+           "rwsem_acquire_read called with spinlock held");
     assert(!CPU_IN_ITR(), "rwsem_acquire_read called in interrupt context");
     if (!lock) {
         return -1; // Invalid lock
@@ -109,7 +110,8 @@ int rwsem_acquire_read(rwsem_t *lock) {
 
 int rwsem_acquire_write(rwsem_t *lock) {
     assert(current != NULL, "rwsem_acquire_write: no current thread");
-    assert(mycpu()->spin_depth == 0, "rwsem_acquire_write called with spinlock held");
+    assert(mycpu()->spin_depth == 0,
+           "rwsem_acquire_write called with spinlock held");
     assert(!CPU_IN_ITR(), "rwsem_acquire_write called in interrupt context");
     if (!lock) {
         return -1; // Invalid lock
@@ -118,11 +120,15 @@ int rwsem_acquire_write(rwsem_t *lock) {
     int ret = 0;
     spin_lock(&lock->lock);
     struct thread *self = current;
-    int self_pid = self->pid;  // current != NULL asserted above
-    assert(lock->holder_pid != self_pid, "rwsem_acquire_write: deadlock detected, thread already holds the write lock");
+    int self_pid = self->pid; // current != NULL asserted above
+    assert(lock->holder_pid != self_pid,
+           "rwsem_acquire_write: deadlock detected, thread already holds the "
+           "write lock");
     // @TODO: signal handling (wait is still uninterruptible for now)
     while (__writer_should_wait(lock, self_pid)) {
-        assert(lock->holder_pid != self_pid, "rwsem_acquire_write: deadlock detected, thread already holds the write lock");
+        assert(lock->holder_pid != self_pid,
+               "rwsem_acquire_write: deadlock detected, thread already holds "
+               "the write lock");
         ret = tq_wait(&lock->write_queue, &lock->lock, NULL);
         if (ret != 0) {
             spin_unlock(&lock->lock);

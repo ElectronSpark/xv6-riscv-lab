@@ -5,10 +5,8 @@
 #include "kernel/inc/vfs/stat.h"
 #include "user/user.h"
 
-int
-main(void)
-{
-  if(fork() > 0)
-    sleep(500);  // Let child exit before parent.
-  exit(0);
+int main(void) {
+    if (fork() > 0)
+        sleep(500); // Let child exit before parent.
+    exit(0);
 }

@@ -61,7 +61,8 @@ uint64 sys_clone(void) {
         if (vm_copyin(current->vm, &args, uargs, sizeof(args)) < 0) {
             return -EFAULT;
         }
-        // If esignal not explicitly set, extract from low bits of flags (Linux convention)
+        // If esignal not explicitly set, extract from low bits of flags (Linux
+        // convention)
         if (args.esignal == 0) {
             args.esignal = args.flags & 0xFF;
         }

@@ -53,4 +53,4 @@ void *early_alloc_align(size_t size, size_t align);
  */
 void *early_alloc_end_ptr(void);
 
-#endif        /* __KERNEL_EARLY_ALLOCATOR_H */
+#endif /* __KERNEL_EARLY_ALLOCATOR_H */

@@ -270,7 +270,8 @@ static inline int64 __bits_ctz_ptr(const void *ptr, size_t limit, bool inv) {
     if (ptr == NULL) {
         return -1;
     }
-    size_t byte_limit = (limit + 7) >> 3; // number of bytes to cover the bit limit
+    size_t byte_limit =
+        (limit + 7) >> 3; // number of bytes to cover the bit limit
     const uint8 *byte_ptr = (const uint8 *)ptr;
     const uint8 *aligned_start =
         (const uint8 *)(((size_t)byte_ptr + 7) & ~0x7UL);
@@ -341,11 +342,12 @@ static inline int64 __bits_ctz_ptr(const void *ptr, size_t limit, bool inv) {
  *         or -1 if @ptr is NULL, @from >= @limit, or no matching bit
  *         exists in [@from, @limit).
  */
-static inline int64 __bits_ctz_ptr_from(const void *ptr, size_t from, size_t limit, bool inv) {
+static inline int64 __bits_ctz_ptr_from(const void *ptr, size_t from,
+                                        size_t limit, bool inv) {
     if (ptr == NULL || from >= limit) {
         return -1;
     }
-    
+
     // Scan partial first byte (bits [from, next_byte_boundary))
     size_t start_byte_index = from >> 3;
     uint8 first_byte = ((const uint8 *)ptr)[start_byte_index];
@@ -393,7 +395,7 @@ static inline int64 __bits_ctz_ptr_from(const void *ptr, size_t from, size_t lim
 static inline int bits_next_bit_set(uint64 bits, int last) {
     int start = last + 1;
     if (start >= 64) {
-        return -1;  // No more bits to search
+        return -1; // No more bits to search
     }
     int delta = bits_ctz64(bits >> start);
     if (delta < 0) {
@@ -426,8 +428,10 @@ static inline int bits_next_bit_set(uint64 bits, int last) {
 
 #define bits_ctz_ptr(ptr, limit) __bits_ctz_ptr((ptr), (limit), !!0)
 #define bits_ctz_ptr_inv(ptr, limit) __bits_ctz_ptr((ptr), (limit), !!1)
-#define bits_ctz_ptr_from(ptr, from, limit) __bits_ctz_ptr_from((ptr), (from), (limit), !!0)
-#define bits_ctz_ptr_from_inv(ptr, from, limit) __bits_ctz_ptr_from((ptr), (from), (limit), !!1)
+#define bits_ctz_ptr_from(ptr, from, limit)                                    \
+    __bits_ctz_ptr_from((ptr), (from), (limit), !!0)
+#define bits_ctz_ptr_from_inv(ptr, from, limit)                                \
+    __bits_ctz_ptr_from((ptr), (from), (limit), !!1)
 
 #define bswap16(x) (typeof(x))((((x) & 0x00FF) << 8) | (((x) & 0xFF00) >> 8))
 #define bswap32(x)                                                             \

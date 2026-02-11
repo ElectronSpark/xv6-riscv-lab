@@ -594,8 +594,8 @@ int ttree_wait_in_state_cb(ttree_t *q, uint64 key,
     return waiter.error_no;
 }
 
-int ttree_wait_in_state(ttree_t *q, uint64 key, spinlock_t *lock,
-                        uint64 *rdata, enum thread_state state) {
+int ttree_wait_in_state(ttree_t *q, uint64 key, spinlock_t *lock, uint64 *rdata,
+                        enum thread_state state) {
     return ttree_wait_in_state_cb(q, key, spin_sleep_cb, spin_wake_cb, lock,
                                   rdata, state);
 }

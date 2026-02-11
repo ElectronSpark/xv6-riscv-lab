@@ -6,11 +6,13 @@
  * group-level signal delivery following the POSIX/Linux model.
  *
  * Design:
- * - Each thread has a pointer to its thread_group (never NULL for active threads)
+ * - Each thread has a pointer to its thread_group (never NULL for active
+ * threads)
  * - A thread_group is allocated from a slab cache
  * - Refcounted: each member thread holds one reference
  * - Thread group leader is the first thread; its PID is the TGID
- * - Process-directed signals go to shared_pending; any eligible thread handles them
+ * - Process-directed signals go to shared_pending; any eligible thread handles
+ * them
  * - exit_group() sends SIGKILL to all threads in the group
  *
  * Locking:
@@ -18,7 +20,8 @@
  *     - pid_wlock for mutations (add/remove thread, group_exit)
  *     - pid_rlock for read-only traversal (signal delivery, queries)
  *   Shared pending signal state (enqueue/dequeue of ksiginfo) is additionally
- *   serialized by sigacts->lock (shared among all group threads via CLONE_SIGHAND).
+ *   serialized by sigacts->lock (shared among all group threads via
+ * CLONE_SIGHAND).
  *
  *   Lock ordering:  pid_lock > sigacts.lock > tcb_lock
  */
@@ -44,28 +47,28 @@ static int __tg_siginfo_queue_len(sigpending_t *sq) {
     int n = 0;
     ksiginfo_t *pos = NULL;
     ksiginfo_t *tmp = NULL;
-    list_foreach_node_safe(&sq->queue, pos, tmp, list_entry) {
-        n++;
-    }
+    list_foreach_node_safe(&sq->queue, pos, tmp, list_entry) { n++; }
     return n;
 }
 
 // ───── Subsystem initialization ─────
 
 void thread_group_init(void) {
-    slab_cache_init(&__tg_pool, "thread_group",
-                    sizeof(struct thread_group), SLAB_FLAG_STATIC);
+    slab_cache_init(&__tg_pool, "thread_group", sizeof(struct thread_group),
+                    SLAB_FLAG_STATIC);
 }
 
 // ───── Reference counting ─────
 
 void thread_group_get(struct thread_group *tg) {
-    if (tg == NULL) return;
+    if (tg == NULL)
+        return;
     atomic_inc(&tg->refcount);
 }
 
 void thread_group_put(struct thread_group *tg) {
-    if (tg == NULL) return;
+    if (tg == NULL)
+        return;
     if (atomic_dec_unless(&tg->refcount, 1)) {
         // refcount was > 1, decremented; still alive
         return;
@@ -86,13 +89,14 @@ void tg_shared_pending_init(struct thread_group *tg) {
 }
 
 void tg_shared_pending_destroy(struct thread_group *tg) {
-    if (tg == NULL) return;
+    if (tg == NULL)
+        return;
     // Free any queued ksiginfo entries
     for (int i = 0; i < NSIG; i++) {
         ksiginfo_t *ksi = NULL;
         ksiginfo_t *tmp = NULL;
-        list_foreach_node_safe(&tg->shared_pending.sig_pending[i].queue,
-                               ksi, tmp, list_entry) {
+        list_foreach_node_safe(&tg->shared_pending.sig_pending[i].queue, ksi,
+                               tmp, list_entry) {
             list_entry_detach(&ksi->list_entry);
             ksiginfo_free(ksi);
         }
@@ -151,9 +155,11 @@ void thread_group_add(struct thread_group *tg, struct thread *child) {
 
 // Caller must hold pid_wlock.
 bool thread_group_remove(struct thread *p) {
-    if (p == NULL) return true;
+    if (p == NULL)
+        return true;
     struct thread_group *tg = p->thread_group;
-    if (tg == NULL) return true;
+    if (tg == NULL)
+        return true;
 
     pid_assert_wholding();
 
@@ -178,13 +184,16 @@ bool thread_group_remove(struct thread *p) {
 // ───── Queries ─────
 
 bool thread_is_group_leader(struct thread *p) {
-    if (p == NULL || p->thread_group == NULL) return true;
+    if (p == NULL || p->thread_group == NULL)
+        return true;
     return p->thread_group->group_leader == p;
 }
 
 int thread_tgid(struct thread *p) {
-    if (p == NULL) return -1;
-    if (p->thread_group == NULL) return p->pid;
+    if (p == NULL)
+        return -1;
+    if (p->thread_group == NULL)
+        return p->pid;
     int tgid = p->thread_group->tgid;
     return (tgid > 0) ? tgid : p->pid;
 }
@@ -192,7 +201,8 @@ int thread_tgid(struct thread *p) {
 // ───── Group exit ─────
 
 void thread_group_exit(struct thread *p, int code) {
-    if (p == NULL) return;
+    if (p == NULL)
+        return;
     struct thread_group *tg = p->thread_group;
     if (tg == NULL) {
         exit(code);
@@ -201,9 +211,8 @@ void thread_group_exit(struct thread *p, int code) {
 
     // Only the first exit_group caller wins
     int expected = 0;
-    if (!__atomic_compare_exchange_n(&tg->group_exit, &expected, 1,
-                                     false, __ATOMIC_SEQ_CST,
-                                     __ATOMIC_SEQ_CST)) {
+    if (!__atomic_compare_exchange_n(&tg->group_exit, &expected, 1, false,
+                                     __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
         // Another thread already called exit_group
         exit(code);
         return;
@@ -218,7 +227,8 @@ void thread_group_exit(struct thread *p, int code) {
     struct thread *t;
     struct thread *tmp;
     list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
-        if (t == p) continue;
+        if (t == p)
+            continue;
         // Set the killed flag directly — SIGKILL bypasses all signal logic
         THREAD_SET_KILLED(t);
         THREAD_SET_SIGPENDING(t);
@@ -244,7 +254,8 @@ void thread_group_exit(struct thread *p, int code) {
  * Caller must hold pid_rlock or pid_wlock.
  */
 static struct thread *__tg_pick_thread(struct thread_group *tg, int signo) {
-    if (tg == NULL) return NULL;
+    if (tg == NULL)
+        return NULL;
 
     // First try the group leader (common case)
     struct thread *leader = tg->group_leader;
@@ -260,10 +271,13 @@ static struct thread *__tg_pick_thread(struct thread_group *tg, int signo) {
     struct thread *t;
     struct thread *tmp;
     list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
-        if (t == leader) continue;
+        if (t == leader)
+            continue;
         enum thread_state st = __thread_state_get(t);
-        if (st == THREAD_UNUSED || st == THREAD_ZOMBIE) continue;
-        if (t->sigacts == NULL) continue;
+        if (st == THREAD_UNUSED || st == THREAD_ZOMBIE)
+            continue;
+        if (t->sigacts == NULL)
+            continue;
         if (!sigismember(&t->sigacts->sa_sigmask, signo)) {
             return t;
         }
@@ -275,8 +289,10 @@ static struct thread *__tg_pick_thread(struct thread_group *tg, int signo) {
 }
 
 int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
-    if (tg == NULL || info == NULL) return -EINVAL;
-    if (SIGBAD(info->signo)) return -EINVAL;
+    if (tg == NULL || info == NULL)
+        return -EINVAL;
+    if (SIGBAD(info->signo))
+        return -EINVAL;
 
     int signo = info->signo;
 
@@ -361,8 +377,8 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
             int qlen = __tg_siginfo_queue_len(sq);
             if (qlen >= TG_MAX_SIGINFO_PER_SIGNAL) {
                 if (!LIST_IS_EMPTY(&sq->queue)) {
-                    ksiginfo_t *old = LIST_FIRST_NODE(
-                        &sq->queue, ksiginfo_t, list_entry);
+                    ksiginfo_t *old =
+                        LIST_FIRST_NODE(&sq->queue, ksiginfo_t, list_entry);
                     if (old) {
                         list_entry_detach(&old->list_entry);
                         ksiginfo_free(old);
@@ -382,8 +398,8 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
             // Standard (non-SA_SIGINFO) signal: no queue, just the pending bit.
             // If already pending, there's nothing more to do — UNLESS this is
             // SIGCONT, which must always wake stopped threads.
-            if (sigismember(&tg->shared_pending.sig_pending_mask, signo)
-                && !is_cont) {
+            if (sigismember(&tg->shared_pending.sig_pending_mask, signo) &&
+                !is_cont) {
                 sigacts_unlock(leader->sigacts);
                 pid_runlock();
                 return 0;
@@ -392,8 +408,8 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
         sigacts_unlock(leader->sigacts);
     } else {
         // No leader/sigacts — fall back to standard dedup
-        if (sigismember(&tg->shared_pending.sig_pending_mask, signo)
-            && !is_cont) {
+        if (sigismember(&tg->shared_pending.sig_pending_mask, signo) &&
+            !is_cont) {
             pid_runlock();
             return 0;
         }
@@ -433,10 +449,11 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
                 if (st == THREAD_INTERRUPTIBLE) {
                     __thread_state_set(target, THREAD_RUNNING);
                 } else if (is_stop && st == THREAD_RUNNING) {
-                    // Stop signal to running thread: send IPI for fast processing
+                    // Stop signal to running thread: send IPI for fast
+                    // processing
                     tcb_unlock(target);
-                    int target_cpu = smp_load_acquire(
-                        &target->sched_entity->cpu_id);
+                    int target_cpu =
+                        smp_load_acquire(&target->sched_entity->cpu_id);
                     if (target_cpu != cpuid()) {
                         ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
                     } else {
@@ -456,7 +473,8 @@ out:
 }
 
 bool tg_signal_pending(struct thread_group *tg, struct thread *p) {
-    if (tg == NULL || p == NULL || p->sigacts == NULL) return false;
+    if (tg == NULL || p == NULL || p->sigacts == NULL)
+        return false;
     sigset_t shared = smp_load_acquire(&tg->shared_pending.sig_pending_mask);
     sigset_t blocked = p->sigacts->sa_sigmask;
     return (shared & ~blocked) != 0;
@@ -464,7 +482,8 @@ bool tg_signal_pending(struct thread_group *tg, struct thread *p) {
 
 // Caller must hold sigacts lock and pid_rlock (or pid_wlock).
 struct ksiginfo *tg_dequeue_signal(struct thread_group *tg, int signo) {
-    if (tg == NULL || SIGBAD(signo)) return NULL;
+    if (tg == NULL || SIGBAD(signo))
+        return NULL;
 
     sigpending_t *sq = &tg->shared_pending.sig_pending[signo - 1];
     ksiginfo_t *ksi = NULL;
@@ -486,11 +505,13 @@ struct ksiginfo *tg_dequeue_signal(struct thread_group *tg, int signo) {
 
 // Caller must hold pid_rlock or pid_wlock.
 void tg_recalc_sigpending(struct thread_group *tg) {
-    if (tg == NULL) return;
+    if (tg == NULL)
+        return;
     struct thread *t;
     struct thread *tmp;
     list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
-        if (t->sigacts == NULL) continue;
+        if (t->sigacts == NULL)
+            continue;
         // Check both per-thread and shared pending
         sigset_t blocked = t->sigacts->sa_sigmask;
         sigset_t thread_pending = smp_load_acquire(&t->signal.sig_pending_mask);

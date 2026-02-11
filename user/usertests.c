@@ -346,9 +346,10 @@ void truncate2(char *s) {
     unlink("truncfile");
 
     int fd1 = open("truncfile", O_CREAT | O_TRUNC | O_WRONLY);
-    write(fd1, "abcd", 4);  // f_pos=4, size=4
+    write(fd1, "abcd", 4); // f_pos=4, size=4
 
-    int fd2 = open("truncfile", O_TRUNC | O_WRONLY);  // size=0, fd1's f_pos still 4
+    int fd2 =
+        open("truncfile", O_TRUNC | O_WRONLY); // size=0, fd1's f_pos still 4
 
     // Write at offset past EOF - just verify no crash
     (void)write(fd1, "x", 1);
@@ -423,7 +424,8 @@ void iputtest(char *s) {
         printf("%s: chdir iputdir failed\n", s);
         exit(1);
     }
-    // Must chdir out before rmdir - our VFS returns -EBUSY if directory is in use
+    // Must chdir out before rmdir - our VFS returns -EBUSY if directory is in
+    // use
     if (chdir("/") < 0) {
         printf("%s: chdir / failed\n", s);
         exit(1);
@@ -456,7 +458,8 @@ void exitiputtest(char *s) {
             printf("%s: child chdir failed\n", s);
             exit(1);
         }
-        // Must chdir out before rmdir - our VFS returns -EBUSY if directory is in use
+        // Must chdir out before rmdir - our VFS returns -EBUSY if directory is
+        // in use
         if (chdir("/") < 0) {
             printf("%s: chdir / failed\n", s);
             exit(1);
@@ -674,7 +677,8 @@ void vforktest(char *s) {
         exit(1);
     }
     if (pid == 0) {
-        // Child: immediately exec - this is the only safe thing to do after vfork
+        // Child: immediately exec - this is the only safe thing to do after
+        // vfork
         exec("echo", echoargv);
         // If exec fails, exit immediately
         exit(1);
@@ -1425,13 +1429,16 @@ void concreate(char *s) {
     while ((nread = getdents(fd, dirent_buf, sizeof(dirent_buf))) > 0) {
         int bpos = 0;
         while (bpos < nread) {
-            struct linux_dirent64 *de = (struct linux_dirent64 *)(dirent_buf + bpos);
+            struct linux_dirent64 *de =
+                (struct linux_dirent64 *)(dirent_buf + bpos);
             total_entries++;
             // Match files starting with 'C' that are 2 chars long
-            if (de->d_ino != 0 && de->d_name[0] == 'C' && de->d_name[2] == '\0') {
+            if (de->d_ino != 0 && de->d_name[0] == 'C' &&
+                de->d_name[2] == '\0') {
                 i = de->d_name[1] - '0';
                 if (i < 0 || i >= (int)sizeof(fa)) {
-                    printf("%s: concreate weird file %s (i=%d)\n", s, de->d_name, i);
+                    printf("%s: concreate weird file %s (i=%d)\n", s,
+                           de->d_name, i);
                     exit(1);
                 }
                 if (fa[i]) {
@@ -1447,7 +1454,9 @@ void concreate(char *s) {
     close(fd);
 
     if (n != N) {
-        printf("%s: concreate not enough files in directory listing (got %d C-files, %d total entries, expected %d)\n", s, n, total_entries, N);
+        printf("%s: concreate not enough files in directory listing (got %d "
+               "C-files, %d total entries, expected %d)\n",
+               s, n, total_entries, N);
         printf("%s: missing file indices: ", s);
         for (i = 0; i < N; i++) {
             if (!fa[i]) {
@@ -1529,8 +1538,9 @@ void subdir(char *s) {
     int fd, cc;
     struct stat st_dot, st_dotdot;
     int at_root;
-    
-    // Check if we're at a root directory (. and .. are the same inode on the same device)
+
+    // Check if we're at a root directory (. and .. are the same inode on the
+    // same device)
     if (stat(".", &st_dot) != 0 || stat("..", &st_dotdot) != 0) {
         printf("%s: stat . or .. failed\n", s);
         exit(1);
@@ -1984,7 +1994,9 @@ void forktest(char *s) {
     if (n != N) {
         // the new kernel now can handle 10,000 processes with 2GB of memory
         // so the original 64 process limit is no longer relevant.
-        printf("%s: the number of times that fork claimed to work is not 1000!\n", s);
+        printf(
+            "%s: the number of times that fork claimed to work is not 1000!\n",
+            s);
         exit(1);
     }
 
@@ -2622,8 +2634,8 @@ struct test {
     {validatetest, "validatetest"},
     {bsstest, "bsstest"},
     // bigargtest: Not applicable - new VM design uses USERSTACK (32 pages) for
-    // arguments instead of xv6's 1-page limit. This allows larger argument lists.
-    // {bigargtest, "bigargtest"},
+    // arguments instead of xv6's 1-page limit. This allows larger argument
+    // lists. {bigargtest, "bigargtest"},
     {argptest, "argptest"},
     {stacktest, "stacktest"},
     {nowrite, "nowrite"},

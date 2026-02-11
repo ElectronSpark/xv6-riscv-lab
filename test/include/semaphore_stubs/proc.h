@@ -28,11 +28,9 @@ enum thread_state {
     THREAD_ZOMBIE,
 };
 
-#define THREAD_IS_SLEEPING(state)                              \
-    ((state) == THREAD_INTERRUPTIBLE ||                        \
-     (state) == THREAD_UNINTERRUPTIBLE ||                      \
-     (state) == THREAD_KIILABLE ||                              \
-     (state) == THREAD_TIMER ||                                 \
+#define THREAD_IS_SLEEPING(state)                                              \
+    ((state) == THREAD_INTERRUPTIBLE || (state) == THREAD_UNINTERRUPTIBLE ||   \
+     (state) == THREAD_KIILABLE || (state) == THREAD_TIMER ||                  \
      (state) == THREAD_KIILABLE_TIMER)
 
 #endif /* __KERNEL_THREAD_H */

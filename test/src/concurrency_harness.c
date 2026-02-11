@@ -23,7 +23,7 @@
 #define CONC_LOCK_TABLE_SIZE 64
 
 typedef struct {
-    void *key;              /* spinlock_t pointer (NULL = empty slot) */
+    void *key; /* spinlock_t pointer (NULL = empty slot) */
     pthread_mutex_t mutex;
 } conc_lock_entry_t;
 
@@ -77,7 +77,7 @@ static pthread_mutex_t *conc_lock_table_get(conc_lock_table_t *t, void *key) {
 #define CONC_COND_TABLE_SIZE 64
 
 typedef struct {
-    void *key;              /* tq_t pointer (NULL = empty) */
+    void *key; /* tq_t pointer (NULL = empty) */
     pthread_cond_t cond;
 } conc_cond_entry_t;
 
@@ -165,8 +165,8 @@ void conc_spin_unlock(void *lock_ptr) {
  * ========================================================================= */
 
 void conc_tq_wait(void *queue_ptr, void *lock_ptr) {
-    pthread_cond_t  *cv = conc_cond_table_get(&g_conc_cond_table, queue_ptr);
-    pthread_mutex_t *m  = conc_lock_table_get(&g_conc_lock_table, lock_ptr);
+    pthread_cond_t *cv = conc_cond_table_get(&g_conc_cond_table, queue_ptr);
+    pthread_mutex_t *m = conc_lock_table_get(&g_conc_lock_table, lock_ptr);
     /* pthread_cond_wait atomically releases m and blocks on cv,
      * then re-acquires m upon wakeup.  We immediately unlock m to
      * match the kernel tq_wait semantic. */
@@ -205,20 +205,16 @@ int conc_barrier_init(int count) {
     return pthread_barrier_init(&g_barrier, NULL, count);
 }
 
-void conc_barrier_wait(void) {
-    pthread_barrier_wait(&g_barrier);
-}
+void conc_barrier_wait(void) { pthread_barrier_wait(&g_barrier); }
 
-void conc_barrier_destroy(void) {
-    pthread_barrier_destroy(&g_barrier);
-}
+void conc_barrier_destroy(void) { pthread_barrier_destroy(&g_barrier); }
 
 /* =========================================================================
  * Sleep helper
  * ========================================================================= */
 
 void conc_sleep_ms(int ms) {
-    struct timespec ts = { .tv_sec = ms / 1000,
-                           .tv_nsec = (ms % 1000) * 1000000L };
+    struct timespec ts = {.tv_sec = ms / 1000,
+                          .tv_nsec = (ms % 1000) * 1000000L};
     nanosleep(&ts, NULL);
 }

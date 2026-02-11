@@ -3,23 +3,20 @@
 #include "defs.h"
 #include <mm/slab.h>
 
-void *memset(void *dst, int c, size_t n)
-{
-    char *cdst = (char *) dst;
-    for(size_t i = 0; i < n; i++) {
+void *memset(void *dst, int c, size_t n) {
+    char *cdst = (char *)dst;
+    for (size_t i = 0; i < n; i++) {
         cdst[i] = c;
     }
     return dst;
 }
 
-
-int memcmp(const void *v1, const void *v2, size_t n)
-{
+int memcmp(const void *v1, const void *v2, size_t n) {
     const char *s1 = v1;
     const char *s2 = v2;
 
-    while(n-- > 0){
-        if(*s1 != *s2) {
+    while (n-- > 0) {
+        if (*s1 != *s2) {
             return *s1 - *s2;
         }
         s1++, s2++;
@@ -27,92 +24,85 @@ int memcmp(const void *v1, const void *v2, size_t n)
     return 0;
 }
 
-void *memmove(void *dst, const void *src, size_t n)
-{
-    if(n == 0) {
+void *memmove(void *dst, const void *src, size_t n) {
+    if (n == 0) {
         return dst;
     }
     const char *s = src;
     char *d = dst;
 
-    if(s < d && s + n > d){
+    if (s < d && s + n > d) {
         s += n;
         d += n;
-        while(n-- > 0)
-        *--d = *--s;
+        while (n-- > 0)
+            *--d = *--s;
     } else
-        while(n-- > 0)
-        *d++ = *s++;
+        while (n-- > 0)
+            *d++ = *s++;
 
     return dst;
 }
 
-
 // memcpy exists to placate GCC.  Use memmove.
-void *memcpy(void *dst, const void *src, size_t n)
-{
-  return memmove(dst, src, n);
+void *memcpy(void *dst, const void *src, size_t n) {
+    return memmove(dst, src, n);
 }
 
-int strcmp(const char *p, const char *q)
-{
-    while(*p && *p == *q) {
+int strcmp(const char *p, const char *q) {
+    while (*p && *p == *q) {
         p++, q++;
     }
     return *p - *q;
 }
 
-int strncmp(const char *p, const char *q, size_t n)
-{
-    while(n > 0 && *p && *p == *q) {
+int strncmp(const char *p, const char *q, size_t n) {
+    while (n > 0 && *p && *p == *q) {
         n--, p++, q++;
     }
-    if(n == 0) {
+    if (n == 0) {
         return 0;
     }
     return *p - *q;
 }
 
-char* strncpy(char *s, const char *t, size_t n)
-{
+char *strncpy(char *s, const char *t, size_t n) {
     char *os = s;
-    while(n > 0 && (*s++ = *t++) != 0) {
+    while (n > 0 && (*s++ = *t++) != 0) {
         n--;
     }
-    while(n-- > 0) {
+    while (n-- > 0) {
         *s++ = 0;
     }
     return os;
 }
 
 // Like strncpy but guaranteed to NUL-terminate.
-char* safestrcpy(char *s, const char *t, size_t n)
-{
+char *safestrcpy(char *s, const char *t, size_t n) {
     char *os = s;
-    if(n == 0) {
+    if (n == 0) {
         return os;
     }
-    while(--n > 0 && (*s++ = *t++) != 0);
+    while (--n > 0 && (*s++ = *t++) != 0)
+        ;
     *s = 0;
     return os;
 }
 
-size_t strlen(const char *s)
-{
+size_t strlen(const char *s) {
     size_t n;
-    for(n = 0; s[n]; n++);
+    for (n = 0; s[n]; n++)
+        ;
     return n;
 }
 
-size_t strnlen(const char *s, size_t maxlen)
-{
+size_t strnlen(const char *s, size_t maxlen) {
     size_t n;
-    for(n = 0; n < maxlen && s[n]; n++);
+    for (n = 0; n < maxlen && s[n]; n++)
+        ;
     return n;
 }
 
-char *strcat(char *dest, const char *src)
-{
+char *strcat(char *dest, const char *src) {
     size_t n = strlen(dest);
     size_t m = strlen(src);
     strncpy(dest + n, src, m);
@@ -120,8 +110,7 @@ char *strcat(char *dest, const char *src)
     return dest;
 }
 
-char *strtok_r(char *str, const char *delim, char **saveptr)
-{
+char *strtok_r(char *str, const char *delim, char **saveptr) {
     char *token;
 
     // If str is NULL, continue from saved position
@@ -172,14 +161,13 @@ char *strtok_r(char *str, const char *delim, char **saveptr)
     return token;
 }
 
-char *strtok(char *str, const char *delim)
-{
+char *strtok(char *str, const char *delim) {
     static char *saveptr;
     return strtok_r(str, delim, &saveptr);
 }
 
 // Bounded substring search
-char* strstr(char *haystack, const char *needle) {
+char *strstr(char *haystack, const char *needle) {
     size_t needle_len = strlen(needle);
     if (needle_len == 0)
         return haystack;

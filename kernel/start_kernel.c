@@ -32,63 +32,63 @@ uint64 __physical_total_pages;
 
 volatile STATIC int started = 0;
 extern void _entry(); // entry.S
-extern char end[]; // first address after kernel.
-                   // defined by kernel.ld.
+extern char end[];    // first address after kernel.
+                      // defined by kernel.ld.
 
 static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     // Early memory detection from FDT (lightweight scan, no allocations)
-    uint64 mem_base = 0x80000000;  // Default for QEMU
-    uint64 mem_size = 128*1024*1024;
+    uint64 mem_base = 0x80000000; // Default for QEMU
+    uint64 mem_size = 128 * 1024 * 1024;
     if (fdt_early_scan_memory(fdt_base, &mem_base, &mem_size) == 0) {
         // Successfully found memory from FDT
     }
-    
+
     // Set up memory boundaries for early allocator
     __physical_memory_start = mem_base;
     __physical_memory_end = mem_base + mem_size;
     __physical_total_pages = mem_size >> 12;
-    
+
     // Early allocator uses memory after kernel end
-    early_allocator_init((void*)end, (void*)__physical_memory_end);
+    early_allocator_init((void *)end, (void *)__physical_memory_end);
     kobject_global_init();
     printfinit();
     printf("\nxv6 kernel booting (hart %d)\n\n", hartid);
     fdt_init(fdt_base);
     // fdt_walk(fdt_base);
-    
+
     // Apply platform configuration from FDT to kernel globals
     fdt_apply_platform_config();
-    
+
     sbi_probe_extensions();
     ksymbols_init(); // Initialize kernel symbols
     kinit();         // physical page allocator
     kvminit();       // create kernel page table
     printf("page table initialized\n");
-    kvminithart();   // turn on paging
+    kvminithart(); // turn on paging
     printf("paging enabled\n");
-    mycpu_init(hartid, true);  // Change mycpu pointer to use trampoline stack
+    mycpu_init(hartid, true); // Change mycpu pointer to use trampoline stack
     printf("mycpu initialized\n");
-    rcu_init();      // RCU subsystem initialization
+    rcu_init();       // RCU subsystem initialization
     dev_table_init(); // Initialize the device table
-    thread_init();      // process table
+    thread_init();    // process table
     scheduler_init(); // initialize the scheduler
     workqueue_init(); // workqueue subsystem initialization
-    irq_desc_init(); // IRQ descriptor initialization
-    trapinit();      // trap vectors
-    trapinithart();  // install kernel trap vector
-    plicinit();      // set up interrupt controller
-    plicinithart();  // ask PLIC for device interrupts
-    ipi_init();      // inter-processor interrupts
+    irq_desc_init();  // IRQ descriptor initialization
+    trapinit();       // trap vectors
+    trapinithart();   // install kernel trap vector
+    plicinit();       // set up interrupt controller
+    plicinithart();   // ask PLIC for device interrupts
+    ipi_init();       // inter-processor interrupts
     consoleinit();
     pci_init();
-    signal_init();   // signal handling initialization  
-    binit();         // buffer cache
+    signal_init(); // signal handling initialization
+    binit();       // buffer cache
     // Legacy iinit() and fileinit() removed - VFS handles these
-    userinit();      // first user thread
-    // idle_thread_init must be called before sched_timer_init (or any workqueue_create)
-    // because idle_thread_init calls rq_cpu_activate() to mark this CPU as active.
-    // Without an active CPU, rq_select_task_rq() returns NULL and new threads
-    // cannot be enqueued to any run queue.
+    userinit(); // first user thread
+    // idle_thread_init must be called before sched_timer_init (or any
+    // workqueue_create) because idle_thread_init calls rq_cpu_activate() to
+    // mark this CPU as active. Without an active CPU, rq_select_task_rq()
+    // returns NULL and new threads cannot be enqueued to any run queue.
     idle_thread_init();
     sched_timer_init();
     // goldfish_rtc_init();  // Goldfish RTC driver (1-second alarm)
@@ -96,8 +96,9 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
 }
 
 static void __start_kernel_secondary_hart(int hartid) {
-    // Set tp to physical address first. cpus[] was already zeroed by boot hart's
-    // cpus_init(), and intr_sp will be set by trapinit() before we proceed.
+    // Set tp to physical address first. cpus[] was already zeroed by boot
+    // hart's cpus_init(), and intr_sp will be set by trapinit() before we
+    // proceed.
     mycpu_init(hartid, false);
 
     // while(__atomic_load_n(&started, __ATOMIC_ACQUIRE) == 0)
@@ -106,18 +107,18 @@ static void __start_kernel_secondary_hart(int hartid) {
     smp_cond_load_acquire(&started, VAL != 0);
 
     // First turn on paging (still using physical TP)
-    kvminithart();    // turn on paging
+    kvminithart(); // turn on paging
     // Now switch TP to trampoline virtual address (paging is now on)
     mycpu_init(hartid, true);
     idle_thread_init();
-    trapinithart();   // install kernel trap vector
-    plicinithart();   // ask PLIC for device interrupts
+    trapinithart();        // install kernel trap vector
+    plicinithart();        // ask PLIC for device interrupts
     rcu_cpu_init(cpuid()); // Initialize RCU for this CPU
 }
 
 void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
     // Boot hart initializes all cpu structs first, before any hart sets tp
-    if(is_boot_hart){
+    if (is_boot_hart) {
         cpus_init();
         mycpu_init(hartid, false);
         SET_BOOT_HART();
@@ -126,7 +127,8 @@ void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
         __start_kernel_secondary_hart(hartid);
     }
 
-    printf("hart %d initialized. intr_sp: %p\n", hartid, (void*)mycpu()->intr_sp);
+    printf("hart %d initialized. intr_sp: %p\n", hartid,
+           (void *)mycpu()->intr_sp);
 
     // Start the RCU kthread for this CPU before entering idle loop
     rcu_kthread_start_cpu(cpuid());
@@ -137,12 +139,12 @@ void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
         intr_on();
         asm volatile("wfi");
         intr_off();
-    } 
+    }
 }
 
 // Initialization that requires a thread context
 void start_kernel_post_init(void) {
-    consoledevinit(); // Initialize and register the console character device
+    consoledevinit();   // Initialize and register the console character device
     virtio_disk_init(); // emulated hard disk (QEMU)
     ramdisk_init();     // ramdisk from FDT initrd (real hardware)
     sockinit();
@@ -153,7 +155,7 @@ void start_kernel_post_init(void) {
     // be run from main().
     // VFS initialization - mounts xv6fs and sets up root filesystem
     vfs_init();
-    
+
     // Set up root directory for init process (must be after vfs_init)
     install_user_root();
 
@@ -171,19 +173,20 @@ void start_kernel_post_init(void) {
     printf("Releasing secondary harts...\n");
     __atomic_store_n(&started, 1, __ATOMIC_RELEASE);
     // Start secondary harts using SBI HSM extension.
-    // Linux-style: boot hart explicitly starts other harts after initialization.
-    // OpenSBI keeps other harts stopped until we request them via sbi_hart_start().
+    // Linux-style: boot hart explicitly starts other harts after
+    // initialization. OpenSBI keeps other harts stopped until we request them
+    // via sbi_hart_start().
     sbi_start_secondary_harts((unsigned long)_entry);
     sleep_ms(100); // Give secondary harts time to start
     // RCU processing is now done per-CPU in idle loops
     // rcu_run_tests();
-    
+
     // Run device table stress tests
     // dev_table_test();
 
-// #ifdef RQ_RUNTIME_TEST
+    // #ifdef RQ_RUNTIME_TEST
     // Run queue priority tests
     // void rq_test_run(void);
     // rq_test_run();
-// #endif
+    // #endif
 }

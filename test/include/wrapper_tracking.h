@@ -22,9 +22,9 @@ typedef struct {
 
 // Tracking structure for proc/cpu operations
 typedef struct {
-    struct thread *current_proc;      // What current returns
-    struct cpu_local *current_cpu;  // What mycpu() returns
-    int current_cpuid;              // What cpuid() returns
+    struct thread *current_proc;   // What current returns
+    struct cpu_local *current_cpu; // What mycpu() returns
+    int current_cpuid;             // What cpuid() returns
 } proc_tracking_t;
 
 // Tracking structure for tq operations
@@ -33,28 +33,29 @@ typedef struct {
     struct tq *last_queue_init;
     const char *last_queue_name;
     spinlock_t *last_queue_lock;
-    
+
     int queue_wait_count;
     struct tq *last_queue_wait;
     spinlock_t *last_wait_lock;
-    
+
     int queue_wakeup_count;
     struct tq *last_queue_wakeup;
     int last_wakeup_errno;
     uint64 last_wakeup_rdata;
-    
+
     int queue_wakeup_all_count;
     struct tq *last_queue_wakeup_all;
     int last_wakeup_all_errno;
     uint64 last_wakeup_all_rdata;
-    
+
     int wait_return;
     int wakeup_return;
     int wakeup_all_return;
-    
+
     // For custom behavior
     void *user_data;
-    int (*wait_callback)(struct tq *q, spinlock_t *lock, uint64 *rdata, void *user_data);
+    int (*wait_callback)(struct tq *q, spinlock_t *lock, uint64 *rdata,
+                         void *user_data);
     struct thread *next_wakeup;
 } tq_tracking_t;
 

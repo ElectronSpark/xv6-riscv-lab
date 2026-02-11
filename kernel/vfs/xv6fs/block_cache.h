@@ -24,9 +24,9 @@
  * Free extent node - represents a contiguous range of free blocks
  */
 struct free_extent {
-    struct rb_node rb_node;     /* Red-black tree node (keyed by start block) */
-    uint32 start;               /* First block number in this extent */
-    uint32 length;              /* Number of contiguous free blocks */
+    struct rb_node rb_node; /* Red-black tree node (keyed by start block) */
+    uint32 start;           /* First block number in this extent */
+    uint32 length;          /* Number of contiguous free blocks */
 };
 
 /*
@@ -34,16 +34,16 @@ struct free_extent {
  * Embedded in xv6fs_superblock for per-mount caching
  */
 struct xv6fs_block_cache {
-    struct rb_root extent_tree;         /* RB-tree of free extents */
-    struct rb_root_opts tree_opts;      /* Tree comparison functions */
-    slab_cache_t extent_cache;          /* Slab cache for extent nodes */
-    uint32 nblocks;                     /* Total data blocks */
-    uint32 data_start;                  /* First data block number */
-    uint32 alloc_cursor;                /* Rotating allocation pointer for wear leveling */
-    uint32 free_count;                  /* Total number of free blocks */
-    uint32 extent_count;                /* Number of extents in tree */
-    spinlock_t lock;               /* Protect cache operations */
-    int initialized;                    /* Cache is ready for use */
+    struct rb_root extent_tree;    /* RB-tree of free extents */
+    struct rb_root_opts tree_opts; /* Tree comparison functions */
+    slab_cache_t extent_cache;     /* Slab cache for extent nodes */
+    uint32 nblocks;                /* Total data blocks */
+    uint32 data_start;             /* First data block number */
+    uint32 alloc_cursor; /* Rotating allocation pointer for wear leveling */
+    uint32 free_count;   /* Total number of free blocks */
+    uint32 extent_count; /* Number of extents in tree */
+    spinlock_t lock;     /* Protect cache operations */
+    int initialized;     /* Cache is ready for use */
 };
 
 /* Forward declaration */
@@ -73,15 +73,16 @@ void xv6fs_bcache_mark_free(struct xv6fs_superblock *xv6_sb, uint32 blockno);
  * Returns 0 on success with block number in blockno_out
  * Returns -ENOSPC if no free blocks available
  */
-int xv6fs_bcache_find_free_block(struct xv6fs_superblock *xv6_sb, uint32 *blockno_out);
+int xv6fs_bcache_find_free_block(struct xv6fs_superblock *xv6_sb,
+                                 uint32 *blockno_out);
 
 /*
  * Find a free block near a hint block for better locality
  * Searches for extent containing or near the hint first
  * Returns 0 on success, -ENOSPC if no free blocks
  */
-int xv6fs_bcache_find_free_block_near(struct xv6fs_superblock *xv6_sb, 
-                                       uint32 hint, uint32 *blockno_out);
+int xv6fs_bcache_find_free_block_near(struct xv6fs_superblock *xv6_sb,
+                                      uint32 hint, uint32 *blockno_out);
 
 /*
  * Get the number of free blocks

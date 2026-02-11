@@ -53,7 +53,8 @@ static struct rb_root_opts __timer_root_opts = {
 // Update the next tick number according to the node list of the timer
 // This will not validate the timer, also will not try to acquire its locks
 static void __timer_update_next_tick(struct timer_root *timer) {
-    struct timer_node *next = LIST_FIRST_NODE(&timer->list_head, struct timer_node, list_entry);
+    struct timer_node *next =
+        LIST_FIRST_NODE(&timer->list_head, struct timer_node, list_entry);
     if (next != NULL) {
         timer->next_tick = next->expires;
     } else {
@@ -61,20 +62,19 @@ static void __timer_update_next_tick(struct timer_root *timer) {
     }
 }
 
-static void clockintr(int irq, void *data, device_t *dev){
+static void clockintr(int irq, void *data, device_t *dev) {
     // ask for the next timer interrupt. this also clears
     // the interrupt request. 1000000 is about a tenth
     // of a second.
     w_stimecmp(r_time() + JIFF_TICKS);
-    if(IS_BOOT_HART()) {
-        __atomic_fetch_add((uint64*)data, 1, __ATOMIC_SEQ_CST);
+    if (IS_BOOT_HART()) {
+        __atomic_fetch_add((uint64 *)data, 1, __ATOMIC_SEQ_CST);
         sched_timer_tick();
     }
-    if(!sched_holding()) {
+    if (!sched_holding()) {
         SET_NEEDS_RESCHED();
     }
 }
-
 
 void timer_init(struct timer_root *timer) {
     if (timer == NULL) {
@@ -97,10 +97,8 @@ void timer_init(struct timer_root *timer) {
     assert(ret == 0, "timer_init: Failed to register timer IRQ handler");
 }
 
-void timer_node_init(struct timer_node *node,
-                     uint64 expires,
-                     void (*callback)(struct timer_node*),
-                     void *data,
+void timer_node_init(struct timer_node *node, uint64 expires,
+                     void (*callback)(struct timer_node *), void *data,
                      int retry_limit) {
     if (node == NULL) {
         return;
@@ -115,9 +113,9 @@ void timer_node_init(struct timer_node *node,
 
 // Add a timer_node to a timer_root;
 // After adding the timer_node, timer_remove needs to be called to
-// remove the node from its root (e.g, in callback or the thread context after waking up). 
-// Otherwise, the timer will keep calling the callback function every time the timer 
-// receives a tick.
+// remove the node from its root (e.g, in callback or the thread context after
+// waking up). Otherwise, the timer will keep calling the callback function
+// every time the timer receives a tick.
 int timer_add(struct timer_root *timer, struct timer_node *node) {
     // Add timer to the timer_root
     if (timer == NULL || node == NULL) {
@@ -150,7 +148,8 @@ int timer_add(struct timer_root *timer, struct timer_node *node) {
         list_node_push_back(&timer->list_head, node, list_entry);
         timer->next_tick = node->expires;
     } else {
-        struct timer_node *prev_node = container_of(prev, struct timer_node, rb);
+        struct timer_node *prev_node =
+            container_of(prev, struct timer_node, rb);
         list_node_insert(prev_node, node, list_entry);
     }
     node->timer = timer;
@@ -158,7 +157,8 @@ int timer_add(struct timer_root *timer, struct timer_node *node) {
     return 0;
 }
 
-static void __timer_remove_unlocked(struct timer_root *timer, struct timer_node *node) {
+static void __timer_remove_unlocked(struct timer_root *timer,
+                                    struct timer_node *node) {
     rb_delete_node_color(&timer->root, &node->rb);
     list_node_detach(node, list_entry);
     node->timer = NULL;
@@ -224,7 +224,8 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
             // Because many callback functions is to wake up a thread,
             // and the thread will remove the timer node from the timer_root,
             // we will try to call the callback function multiple times until
-            // retry limit is reached or the timer node is removed by the thread.
+            // retry limit is reached or the timer node is removed by the
+            // thread.
             __timer_remove_unlocked(node->timer, node);
         }
         node->callback(node);

@@ -157,8 +157,8 @@ void vfork_done(struct thread *p);
 int thread_clone(struct clone_args *args);
 void attach_child(struct thread *parent, struct thread *child);
 void detach_child(struct thread *parent, struct thread *child);
-struct thread *kthread_create(const char *name, void *entry,
-                              uint64 arg1, uint64 arg2, int stack_order);
+struct thread *kthread_create(const char *name, void *entry, uint64 arg1,
+                              uint64 arg2, int stack_order);
 struct thread *thread_create(void *entry, uint64 arg1, uint64 arg2,
                              int kstack_order);
 void thread_destroy(struct thread *p);

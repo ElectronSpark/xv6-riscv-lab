@@ -2,9 +2,7 @@
 #include "kernel/inc/vfs/stat.h"
 #include "user/user.h"
 
-int
-main(int argc, char *argv[])
-{
+int main(int argc, char *argv[]) {
     if (argc != 4) {
         fprintf(2, "Usage: mount <source> <target> <fstype>\n");
         fprintf(2, "  source: device path (e.g., /dev/disk0)\n");

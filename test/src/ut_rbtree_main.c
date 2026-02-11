@@ -9,12 +9,9 @@
 #include "ut_rbtree.h"
 #include "test_numbers.h"
 
-static void
-insert_bulk_and_validate(struct rb_root *root,
-                         rb_test_node_t *nodes,
-                         const uint64 *keys,
-                         size_t count)
-{
+static void insert_bulk_and_validate(struct rb_root *root,
+                                     rb_test_node_t *nodes, const uint64 *keys,
+                                     size_t count) {
     int previous_black_height = -1;
     for (size_t i = 0; i < count; i++) {
         rb_test_node_init(&nodes[i], keys[i], keys[i] * 10);
@@ -40,19 +37,17 @@ typedef struct {
     size_t expected_count;
 } rb_sequence_case_t;
 
-#define RB_SEQUENCE_CASE(insert_elements, remove_elements, expected_elements) \
-    { \
-        .insert = RBTEST_VALUE_ARRAY insert_elements, \
-        .insert_count = RBTEST_VALUE_COUNT(insert_elements), \
-        .remove = RBTEST_VALUE_ARRAY remove_elements, \
-        .remove_count = RBTEST_VALUE_COUNT(remove_elements), \
-        .expected = RBTEST_VALUE_ARRAY expected_elements, \
-        .expected_count = RBTEST_VALUE_COUNT(expected_elements), \
+#define RB_SEQUENCE_CASE(insert_elements, remove_elements, expected_elements)  \
+    {                                                                          \
+        .insert = RBTEST_VALUE_ARRAY insert_elements,                          \
+        .insert_count = RBTEST_VALUE_COUNT(insert_elements),                   \
+        .remove = RBTEST_VALUE_ARRAY remove_elements,                          \
+        .remove_count = RBTEST_VALUE_COUNT(remove_elements),                   \
+        .expected = RBTEST_VALUE_ARRAY expected_elements,                      \
+        .expected_count = RBTEST_VALUE_COUNT(expected_elements),               \
     }
 
-static void
-run_sequence_case(const rb_sequence_case_t *test_case)
-{
+static void run_sequence_case(const rb_sequence_case_t *test_case) {
     struct rb_root root_storage = {0};
     struct rb_root *root = rb_test_root_init(&root_storage);
 
@@ -60,7 +55,8 @@ run_sequence_case(const rb_sequence_case_t *test_case)
     if (test_case->insert_count > 0) {
         nodes = calloc(test_case->insert_count, sizeof(*nodes));
         assert_non_null(nodes);
-        insert_bulk_and_validate(root, nodes, test_case->insert, test_case->insert_count);
+        insert_bulk_and_validate(root, nodes, test_case->insert,
+                                 test_case->insert_count);
     }
 
     if (test_case->remove_count > 0) {
@@ -100,13 +96,13 @@ run_sequence_case(const rb_sequence_case_t *test_case)
 static const rb_sequence_case_t rb_sequence_cases[] = {
     RB_SEQUENCE_CASE((4, 2, 6, 1, 3, 5, 7), (), (1, 2, 3, 4, 5, 6, 7)),
     RB_SEQUENCE_CASE((10, 5, 1, 7, 40, 50), (7, 10), (1, 5, 40, 50)),
-    RB_SEQUENCE_CASE((8, 4, 12, 2, 6, 10, 14, 1, 3), (2, 14, 8), (1, 3, 4, 6, 10, 12)),
-    RB_SEQUENCE_CASE((30, 15, 60, 7, 22, 45, 75, 17, 27), (45, 22, 75, 7), (15, 17, 27, 30, 60)),
+    RB_SEQUENCE_CASE((8, 4, 12, 2, 6, 10, 14, 1, 3), (2, 14, 8),
+                     (1, 3, 4, 6, 10, 12)),
+    RB_SEQUENCE_CASE((30, 15, 60, 7, 22, 45, 75, 17, 27), (45, 22, 75, 7),
+                     (15, 17, 27, 30, 60)),
 };
 
-static int
-cmp_uint64(const void *lhs, const void *rhs)
-{
+static int cmp_uint64(const void *lhs, const void *rhs) {
     uint64 a = *(const uint64 *)lhs;
     uint64 b = *(const uint64 *)rhs;
     if (a < b) {
@@ -118,21 +114,21 @@ cmp_uint64(const void *lhs, const void *rhs)
     return 0;
 }
 
-static void
-test_rbtree_insert_sequential(void **state)
-{
+static void test_rbtree_insert_sequential(void **state) {
     (void)state;
 
     struct rb_root root_storage = {0};
     struct rb_root *root = rb_test_root_init(&root_storage);
 
-    const uint64 keys[] = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16};
+    const uint64 keys[] = {1, 2,  3,  4,  5,  6,  7,  8,
+                           9, 10, 11, 12, 13, 14, 15, 16};
     rb_test_node_t nodes[RBTEST_ARRAY_SIZE(keys)];
 
     insert_bulk_and_validate(root, nodes, keys, RBTEST_ARRAY_SIZE(keys));
 
     uint64 in_order[RBTEST_ARRAY_SIZE(keys)] = {0};
-    size_t visited = rb_test_collect_keys(root, in_order, RBTEST_ARRAY_SIZE(in_order));
+    size_t visited =
+        rb_test_collect_keys(root, in_order, RBTEST_ARRAY_SIZE(in_order));
     assert_int_equal(visited, RBTEST_ARRAY_SIZE(keys));
     for (size_t i = 0; i < visited; i++) {
         assert_int_equal(in_order[i], keys[i]);
@@ -141,9 +137,7 @@ test_rbtree_insert_sequential(void **state)
     assert_true(rb_test_validate_tree(root));
 }
 
-static void
-test_rbtree_insert_duplicate(void **state)
-{
+static void test_rbtree_insert_duplicate(void **state) {
     (void)state;
 
     struct rb_root root_storage = {0};
@@ -163,14 +157,13 @@ test_rbtree_insert_duplicate(void **state)
     assert_true(rb_test_validate_tree(root));
 
     uint64 inorder[2] = {0};
-    size_t visited = rb_test_collect_keys(root, inorder, RBTEST_ARRAY_SIZE(inorder));
+    size_t visited =
+        rb_test_collect_keys(root, inorder, RBTEST_ARRAY_SIZE(inorder));
     assert_int_equal(visited, 1);
     assert_int_equal(inorder[0], 42);
 }
 
-static void
-test_rbtree_sequence_cases(void **state)
-{
+static void test_rbtree_sequence_cases(void **state) {
     (void)state;
 
     for (size_t i = 0; i < RBTEST_ARRAY_SIZE(rb_sequence_cases); i++) {
@@ -178,15 +171,14 @@ test_rbtree_sequence_cases(void **state)
     }
 }
 
-static void
-test_rbtree_delete_balancing(void **state)
-{
+static void test_rbtree_delete_balancing(void **state) {
     (void)state;
 
     struct rb_root root_storage = {0};
     struct rb_root *root = rb_test_root_init(&root_storage);
 
-    const uint64 keys[] = {41, 38, 31, 12, 19, 8, 4, 1, 2, 5, 64, 50, 80, 90, 70};
+    const uint64 keys[] = {41, 38, 31, 12, 19, 8,  4, 1,
+                           2,  5,  64, 50, 80, 90, 70};
     rb_test_node_t nodes[RBTEST_ARRAY_SIZE(keys)];
     insert_bulk_and_validate(root, nodes, keys, RBTEST_ARRAY_SIZE(keys));
 
@@ -224,9 +216,7 @@ test_rbtree_delete_balancing(void **state)
     assert_true(rb_test_validate_tree(root));
 }
 
-static void
-test_rbtree_iteration_order(void **state)
-{
+static void test_rbtree_iteration_order(void **state) {
     (void)state;
 
     struct rb_root root_storage = {0};
@@ -237,11 +227,12 @@ test_rbtree_iteration_order(void **state)
     insert_bulk_and_validate(root, nodes, keys, RBTEST_ARRAY_SIZE(keys));
 
     uint64 forward[RBTEST_ARRAY_SIZE(keys)];
-    size_t forward_count = rb_test_collect_keys(root, forward, RBTEST_ARRAY_SIZE(forward));
+    size_t forward_count =
+        rb_test_collect_keys(root, forward, RBTEST_ARRAY_SIZE(forward));
     assert_int_equal(forward_count, RBTEST_ARRAY_SIZE(keys));
 
     for (size_t i = 1; i < forward_count; i++) {
-        assert_true(forward[i-1] < forward[i]);
+        assert_true(forward[i - 1] < forward[i]);
     }
 
     struct rb_node *node = rb_last_node(root);
@@ -258,9 +249,7 @@ test_rbtree_iteration_order(void **state)
     assert_true(rb_test_validate_tree(root));
 }
 
-static void
-test_rbtree_delete_missing(void **state)
-{
+static void test_rbtree_delete_missing(void **state) {
     (void)state;
 
     struct rb_root root_storage = {0};
@@ -287,9 +276,7 @@ test_rbtree_delete_missing(void **state)
     assert_true(rb_root_is_empty(root));
 }
 
-static void
-test_rbtree_scale_numbers(void **state)
-{
+static void test_rbtree_scale_numbers(void **state) {
     (void)state;
 
     struct rb_root root_storage = {0};
@@ -300,7 +287,8 @@ test_rbtree_scale_numbers(void **state)
 
     int previous_black_height = -1;
     for (size_t i = 0; i < TEST_NUMBERS_COUNT; i++) {
-        rb_test_node_init(&nodes[i], scale_test_numbers[i], scale_test_numbers[i]);
+        rb_test_node_init(&nodes[i], scale_test_numbers[i],
+                          scale_test_numbers[i]);
         struct rb_node *inserted = rb_insert_color(root, &nodes[i].node);
         assert_ptr_equal(inserted, &nodes[i].node);
         assert_true(rb_test_validate_tree(root));
@@ -314,7 +302,8 @@ test_rbtree_scale_numbers(void **state)
         previous_black_height = current_black_height;
 
         if (((i + 1) % 100) == 0) {
-            printf("[scale] insert %zu: black height %d\n", i + 1, current_black_height);
+            printf("[scale] insert %zu: black height %d\n", i + 1,
+                   current_black_height);
         }
     }
 
@@ -350,14 +339,16 @@ test_rbtree_scale_numbers(void **state)
         assert_null(rb_find_key(root, key));
 
         if ((removed % 100) == 0) {
-            printf("[scale] delete %zu: black height %d\n", removed, current_black_height);
+            printf("[scale] delete %zu: black height %d\n", removed,
+                   current_black_height);
         }
     }
 
     size_t remaining = TEST_NUMBERS_COUNT - removed;
     assert_int_equal(rb_test_tree_size(root), remaining);
 
-    size_t visited_after = rb_test_collect_keys(root, inorder, TEST_NUMBERS_COUNT);
+    size_t visited_after =
+        rb_test_collect_keys(root, inorder, TEST_NUMBERS_COUNT);
     assert_int_equal(visited_after, remaining);
     for (size_t idx = 0, exp = 1; idx < visited_after; idx++, exp += 2) {
         assert_true(exp < TEST_NUMBERS_COUNT);
@@ -375,7 +366,8 @@ test_rbtree_scale_numbers(void **state)
 
         removed++;
         if ((removed % 100) == 0) {
-            printf("[scale] delete %zu: black height %d\n", removed, current_black_height);
+            printf("[scale] delete %zu: black height %d\n", removed,
+                   current_black_height);
         }
     }
 
@@ -387,8 +379,7 @@ test_rbtree_scale_numbers(void **state)
     free(nodes);
 }
 
-int main(void)
-{
+int main(void) {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_rbtree_insert_sequential),
         cmocka_unit_test(test_rbtree_insert_duplicate),

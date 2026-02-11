@@ -13,11 +13,9 @@
 #include "kernel/inc/vfs/stat.h"
 #include "user/user.h"
 
-int
-main(void)
-{
-    int p2c[2];  // parent to child pipe
-    int c2p[2];  // child to parent pipe
+int main(void) {
+    int p2c[2]; // parent to child pipe
+    int c2p[2]; // child to parent pipe
     int pid;
     char buf[16];
 
@@ -33,25 +31,25 @@ main(void)
         exit(1);
     } else if (pid == 0) {
         // Child process
-        close(p2c[1]);  // Close write end of parent-to-child
-        close(c2p[0]);  // Close read end of child-to-parent
-        
-        read(p2c[0], buf, 1);  // Read ping from parent
+        close(p2c[1]); // Close write end of parent-to-child
+        close(c2p[0]); // Close read end of child-to-parent
+
+        read(p2c[0], buf, 1); // Read ping from parent
         printf("%d: received ping\n", getpid());
-        write(c2p[1], " ", 1);  // Send pong to parent
-        
+        write(c2p[1], " ", 1); // Send pong to parent
+
         close(p2c[0]);
         close(c2p[1]);
         exit(0);
     } else {
         // Parent process
-        close(p2c[0]);  // Close read end of parent-to-child
-        close(c2p[1]);  // Close write end of child-to-parent
-        
-        write(p2c[1], " ", 1);  // Send ping to child
-        read(c2p[0], buf, 1);   // Read pong from child
+        close(p2c[0]); // Close read end of parent-to-child
+        close(c2p[1]); // Close write end of child-to-parent
+
+        write(p2c[1], " ", 1); // Send ping to child
+        read(c2p[0], buf, 1);  // Read pong from child
         printf("%d: received pong\n", getpid());
-        
+
         close(p2c[1]);
         close(c2p[0]);
         wait(0);

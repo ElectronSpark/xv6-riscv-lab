@@ -33,9 +33,9 @@ void binit(void);
 struct buf *bread(uint, uint);
 void brelse(struct buf *);
 void bwrite(struct buf *);
-void bwrite_async(struct buf *);  // mark dirty, don't wait for I/O
-void bsync(void);                 // flush all dirty buffers
-uint bdirty_count(void);          // get count of dirty buffers
+void bwrite_async(struct buf *); // mark dirty, don't wait for I/O
+void bsync(void);                // flush all dirty buffers
+uint bdirty_count(void);         // get count of dirty buffers
 void bpin(struct buf *);
 void bunpin(struct buf *);
 
@@ -80,26 +80,26 @@ int piperead_kernel(struct pipe *, char *, int);
 int pipewrite_kernel(struct pipe *, const char *, int);
 
 // swtch.S
-struct context *__swtch_context(struct context *cur,
-                                struct context *target);
+struct context *__swtch_context(struct context *cur, struct context *target);
 typedef void (*sw_noret_cb_t)(uint64, uint64);
 void __switch_noreturn(uint64 irq_sp, uint64 s0, sw_noret_cb_t addr);
 
 // spinlock.c
 // Initialize a spinlock.
-void            spin_init(spinlock_t*, char*);
+void spin_init(spinlock_t *, char *);
 // Check if the current CPU is holding the lock.
-int             spin_holding(spinlock_t*);
-// Basic spin lock functions. Will NOT modify preempt counter or disable interrupts.
-void            spin_acquire(spinlock_t*);
-void            spin_release(spinlock_t*);
+int spin_holding(spinlock_t *);
+// Basic spin lock functions. Will NOT modify preempt counter or disable
+// interrupts.
+void spin_acquire(spinlock_t *);
+void spin_release(spinlock_t *);
 // Default spin lock functions. Will modify preempt counter.
-void            spin_lock(spinlock_t*);
-void            spin_unlock(spinlock_t*);
-int             spin_trylock(spinlock_t*);
+void spin_lock(spinlock_t *);
+void spin_unlock(spinlock_t *);
+int spin_trylock(spinlock_t *);
 // Functions to save/restore interrupt state with spinlock.
-int             spin_lock_irqsave(spinlock_t*);
-void            spin_unlock_irqrestore(spinlock_t*, int);
+int spin_lock_irqsave(spinlock_t *);
+void spin_unlock_irqrestore(spinlock_t *, int);
 
 // sleeplock.c
 int mutex_lock(mutex_t *);
@@ -124,11 +124,12 @@ typedef struct ksiginfo ksiginfo_t;
 typedef struct sigaction sigaction_t;
 typedef struct stack stack_t;
 typedef struct ucontext ucontext_t;
-int push_sigframe(struct thread *p, int signo, sigaction_t *sa, ksiginfo_t *info);
+int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
+                  ksiginfo_t *info);
 int restore_sigframe(struct thread *p, ucontext_t *ret_uc);
 
 // uart.c
-int  uartinit(void);
+int uartinit(void);
 void uartputc(int);
 void uartputs(const char *, int);
 void uartputc_sync(int);
@@ -164,7 +165,8 @@ void ramdisk_init(void);
 
 // backtrace.c
 void print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end);
-void print_thread_backtrace(struct context *ctx, uint64 kstack, int kstack_order);
+void print_thread_backtrace(struct context *ctx, uint64 kstack,
+                            int kstack_order);
 void ksymbols_init(void);
 void db_break(void);
 

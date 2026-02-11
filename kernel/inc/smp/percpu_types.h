@@ -8,8 +8,8 @@ struct proc;
 
 // Per-CPU state.
 struct cpu_local {
-    struct thread *proc;          // The thread running on this cpu, or null.
-    struct thread *idle_thread;     // The idle process for this cpu.
+    struct thread *proc;        // The thread running on this cpu, or null.
+    struct thread *idle_thread; // The idle process for this cpu.
     void **intr_stacks;         // Top of interrupt stack for each hart.
     uint64 intr_sp;             // Saved sp value for interrupt.
     int intr_depth;             // Depth of nested interruption or exception.
@@ -20,5 +20,4 @@ struct cpu_local {
     uint64 rcu_timestamp;       // RCU timestamp - updated before context switch
 } __ALIGNED_CACHELINE;
 
-
-#endif        /* __KERNEL_PERCPU_TYPES_H */
+#endif /* __KERNEL_PERCPU_TYPES_H */

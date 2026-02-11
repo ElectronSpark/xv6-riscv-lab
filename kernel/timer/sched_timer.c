@@ -16,16 +16,17 @@
 struct sched_timer_work {
     struct timer_node tn;
     struct work_struct work;
-    void (*callback)(void*);
+    void (*callback)(void *);
     void *data;
 };
 
 static void __work_callback(struct work_struct *work);
 static void __timer_callback(struct timer_node *tn);
 static void __free_sched_timer_work(struct sched_timer_work *stw);
-static struct sched_timer_work *__alloc_sched_timer_work(uint64 deadline, void (*callback)(void*), void *data);
+static struct sched_timer_work *
+__alloc_sched_timer_work(uint64 deadline, void (*callback)(void *), void *data);
 
-static slab_cache_t __sched_timer_work_slab = { 0 };
+static slab_cache_t __sched_timer_work_slab = {0};
 static struct workqueue *__sched_timer_wq = NULL;
 static struct timer_root __sched_timer;
 static bool __sched_tick_clear;
@@ -49,12 +50,15 @@ static void __timer_callback(struct timer_node *tn) {
     }
     bool ret = queue_work(__sched_timer_wq, &stw->work);
     if (!ret) {
-        printf("warning: __sched_timer_add_timer_callback: Failed to queue work\n");
+        printf("warning: __sched_timer_add_timer_callback: Failed to queue "
+               "work\n");
         __free_sched_timer_work(stw);
     }
 }
 
-static struct sched_timer_work *__alloc_sched_timer_work(uint64 deadline, void (*callback)(void*), void *data) {
+static struct sched_timer_work *
+__alloc_sched_timer_work(uint64 deadline, void (*callback)(void *),
+                         void *data) {
     struct sched_timer_work *stw = slab_alloc(&__sched_timer_work_slab);
     if (stw == NULL) {
         return NULL;
@@ -80,7 +84,8 @@ void sched_timer_tick(void) {
 }
 
 void __do_timer_tick(void) {
-    bool was_cleared = __atomic_test_and_set(&__sched_tick_clear, __ATOMIC_ACQUIRE);
+    bool was_cleared =
+        __atomic_test_and_set(&__sched_tick_clear, __ATOMIC_ACQUIRE);
     if (!was_cleared) {
         timer_tick(&__sched_timer, get_jiffs());
     }
@@ -99,7 +104,8 @@ int sched_timer_set(struct timer_node *tn, uint64 ticks) {
         return -EINVAL; // Invalid timer node
     }
     uint64 expires = get_jiffs() + ticks;
-    timer_node_init(tn, expires, __sched_timer_callback, current, TIMER_DEFAULT_RETRY_LIMIT);
+    timer_node_init(tn, expires, __sched_timer_callback, current,
+                    TIMER_DEFAULT_RETRY_LIMIT);
     int ret = timer_add(&__sched_timer, tn);
     return ret;
 }
@@ -145,20 +151,23 @@ void sleep_ms(uint64 ms) {
 void sched_timer_init(void) {
     timer_init(&__sched_timer);
     __sched_tick_clear = false;
-    __sched_timer_wq = workqueue_create("sched_timer_wq", WORKQUEUE_DEFAULT_MAX_ACTIVE);
-    assert(__sched_timer_wq != NULL, "Failed to create scheduler timer workqueue");
-    int ret = slab_cache_init(  &__sched_timer_work_slab, 
-                                "sched_timer_work_slab", 
-                                sizeof(struct sched_timer_work), 
-                                SLAB_FLAG_EMBEDDED);
+    __sched_timer_wq =
+        workqueue_create("sched_timer_wq", WORKQUEUE_DEFAULT_MAX_ACTIVE);
+    assert(__sched_timer_wq != NULL,
+           "Failed to create scheduler timer workqueue");
+    int ret =
+        slab_cache_init(&__sched_timer_work_slab, "sched_timer_work_slab",
+                        sizeof(struct sched_timer_work), SLAB_FLAG_EMBEDDED);
     assert(ret == 0, "Failed to initialize sched_timer_work_slab");
 }
 
-int sched_timer_add_deadline(void (*callback)(void *), void *data, uint64 deadline) {
+int sched_timer_add_deadline(void (*callback)(void *), void *data,
+                             uint64 deadline) {
     if (callback == NULL) {
         return -EINVAL; // Invalid callback
     }
-    struct sched_timer_work *stw = __alloc_sched_timer_work(deadline, callback, data);
+    struct sched_timer_work *stw =
+        __alloc_sched_timer_work(deadline, callback, data);
     if (stw == NULL) {
         return -ENOMEM; // Memory allocation failed
     }

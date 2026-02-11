@@ -160,9 +160,10 @@ static int pcache_test_setup(void **state) {
     if (!global_initialized) {
         // Setup mock for kthread_create that pcache_global_init will call
         // We'll return a fake proc pointer and a positive PID
-        will_return(__wrap_kthread_create, (void*)0x1000);  // Return fake proc pointer
-        will_return(__wrap_kthread_create, 1);  // Return PID (success)
-        
+        will_return(__wrap_kthread_create,
+                    (void *)0x1000);           // Return fake proc pointer
+        will_return(__wrap_kthread_create, 1); // Return PID (success)
+
         pcache_global_init();
         global_initialized = true;
     }
@@ -217,7 +218,8 @@ static void init_mock_page(page_t *page, uint64 physical) {
     spin_init(&page->lock, "pcache_test_page");
 }
 
-static void init_mock_node(struct pcache_node *node, struct pcache *cache, page_t *page, uint64 blkno) {
+static void init_mock_node(struct pcache_node *node, struct pcache *cache,
+                           page_t *page, uint64 blkno) {
     memset(node, 0, sizeof(*node));
     rb_node_init(&node->tree_entry);
     list_entry_init(&node->lru_entry);
@@ -231,7 +233,8 @@ static void init_mock_node(struct pcache_node *node, struct pcache *cache, page_
     page->pcache.pcache_node = node;
 }
 
-static void make_dirty_page(struct pcache *cache, struct pcache_node *node, page_t *page, uint64 blkno) {
+static void make_dirty_page(struct pcache *cache, struct pcache_node *node,
+                            page_t *page, uint64 blkno) {
     init_mock_page(page, blkno << BLK_SIZE_SHIFT);
     init_mock_node(node, cache, page, blkno);
     tq_init(&node->io_waiters, "pcache_io_test", NULL);
@@ -662,7 +665,8 @@ static void test_pcache_get_page_eviction_failure(void **state) {
     pcache_put_page(cache, resident);
 }
 
-static void test_pcache_get_page_retry_after_invalid_first_lookup(void **state) {
+static void
+test_pcache_get_page_retry_after_invalid_first_lookup(void **state) {
     struct pcache_test_fixture *fixture = *state;
     struct pcache *cache = &fixture->cache;
 
@@ -992,7 +996,8 @@ static void test_pcache_flusher_time_based_flush(void **state) {
 
 static int pcache_conc_test_setup(void **state) {
     int rc = pcache_test_setup(state);
-    if (rc != 0) return rc;
+    if (rc != 0)
+        return rc;
     concurrency_mode_enable();
     return 0;
 }
@@ -1023,8 +1028,10 @@ static void test_conc_get_page_same_block(void **state) {
     struct pcache_test_fixture *fixture = *state;
     struct pcache *cache = &fixture->cache;
 
-    struct conc_get_same_page_ctx ctx1 = { .cache = cache, .blkno = 8, .result = NULL };
-    struct conc_get_same_page_ctx ctx2 = { .cache = cache, .blkno = 8, .result = NULL };
+    struct conc_get_same_page_ctx ctx1 = {
+        .cache = cache, .blkno = 8, .result = NULL};
+    struct conc_get_same_page_ctx ctx2 = {
+        .cache = cache, .blkno = 8, .result = NULL};
 
     conc_thread_create(0, conc_get_same_page_thread, &ctx1);
     conc_thread_create(1, conc_get_same_page_thread, &ctx2);
@@ -1034,7 +1041,8 @@ static void test_conc_get_page_same_block(void **state) {
     // Both threads must get a valid page
     assert_non_null(ctx1.result);
     assert_non_null(ctx2.result);
-    // Both must point to the same physical page (same block number -> same cache entry)
+    // Both must point to the same physical page (same block number -> same
+    // cache entry)
     assert_ptr_equal(ctx1.result, ctx2.result);
 
     pcache_put_page(cache, ctx1.result);
@@ -1051,8 +1059,10 @@ static void test_conc_get_page_different_blocks(void **state) {
     struct pcache *cache = &fixture->cache;
 
     uint64 blks_per_page = (uint64)PGSIZE >> BLK_SIZE_SHIFT;
-    struct conc_get_same_page_ctx ctx1 = { .cache = cache, .blkno = 0, .result = NULL };
-    struct conc_get_same_page_ctx ctx2 = { .cache = cache, .blkno = blks_per_page, .result = NULL };
+    struct conc_get_same_page_ctx ctx1 = {
+        .cache = cache, .blkno = 0, .result = NULL};
+    struct conc_get_same_page_ctx ctx2 = {
+        .cache = cache, .blkno = blks_per_page, .result = NULL};
 
     conc_thread_create(0, conc_get_same_page_thread, &ctx1);
     conc_thread_create(1, conc_get_same_page_thread, &ctx2);
@@ -1112,8 +1122,8 @@ static void test_conc_io_wait_and_complete(void **state) {
     page_t *page = pcache_get_page(cache, 16);
     assert_non_null(page);
 
-    struct conc_io_ctx ctx1 = { .cache = cache, .page = page, .result = -1 };
-    struct conc_io_ctx ctx2 = { .cache = cache, .page = page, .result = -1 };
+    struct conc_io_ctx ctx1 = {.cache = cache, .page = page, .result = -1};
+    struct conc_io_ctx ctx2 = {.cache = cache, .page = page, .result = -1};
 
     // Thread A: first reader, will call read_page callback (sleeps 50ms)
     conc_thread_create(0, conc_read_page_thread, &ctx1);
@@ -1130,7 +1140,8 @@ static void test_conc_io_wait_and_complete(void **state) {
 
     // Only one thread should have actually called the read_page callback
     // (the other should have waited and then seen uptodate=1)
-    assert_int_equal(__atomic_load_n(&g_conc_read_page_calls, __ATOMIC_SEQ_CST), 1);
+    assert_int_equal(__atomic_load_n(&g_conc_read_page_calls, __ATOMIC_SEQ_CST),
+                     1);
 
     pcache_put_page(cache, page);
 }
@@ -1155,7 +1166,9 @@ static void *conc_stress_get_pages_thread(void *arg) {
     uint64 blks_per_page = (uint64)PGSIZE >> BLK_SIZE_SHIFT;
     ctx->success_count = 0;
     for (int i = 0; i < CONC_STRESS_PAGES_PER_THREAD; i++) {
-        uint64 blkno = (uint64)(ctx->thread_id * CONC_STRESS_PAGES_PER_THREAD + i) * blks_per_page;
+        uint64 blkno =
+            (uint64)(ctx->thread_id * CONC_STRESS_PAGES_PER_THREAD + i) *
+            blks_per_page;
         ctx->pages[i] = pcache_get_page(ctx->cache, blkno);
         if (ctx->pages[i] != NULL) {
             ctx->success_count++;
@@ -1169,9 +1182,12 @@ static void test_conc_stress_get_pages(void **state) {
     struct pcache *cache = &fixture->cache;
 
     // Make sure max_pages and blk_count are high enough for all threads
-    cache->max_pages = CONC_STRESS_THREAD_COUNT * CONC_STRESS_PAGES_PER_THREAD + 16;
+    cache->max_pages =
+        CONC_STRESS_THREAD_COUNT * CONC_STRESS_PAGES_PER_THREAD + 16;
     uint64 blks_per_page = (uint64)PGSIZE >> BLK_SIZE_SHIFT;
-    cache->blk_count = (uint64)CONC_STRESS_THREAD_COUNT * CONC_STRESS_PAGES_PER_THREAD * blks_per_page + blks_per_page;
+    cache->blk_count = (uint64)CONC_STRESS_THREAD_COUNT *
+                           CONC_STRESS_PAGES_PER_THREAD * blks_per_page +
+                       blks_per_page;
 
     struct conc_stress_ctx ctxs[CONC_STRESS_THREAD_COUNT];
 
@@ -1193,7 +1209,8 @@ static void test_conc_stress_get_pages(void **state) {
     for (int i = 0; i < CONC_STRESS_THREAD_COUNT; i++) {
         total += ctxs[i].success_count;
     }
-    assert_int_equal(total, CONC_STRESS_THREAD_COUNT * CONC_STRESS_PAGES_PER_THREAD);
+    assert_int_equal(total,
+                     CONC_STRESS_THREAD_COUNT * CONC_STRESS_PAGES_PER_THREAD);
 
     // All pages should be distinct
     page_t *all_pages[CONC_STRESS_THREAD_COUNT * CONC_STRESS_PAGES_PER_THREAD];
@@ -1276,42 +1293,111 @@ static void test_conc_get_and_dirty(void **state) {
 
 int main(void) {
     const struct CMUnitTest tests[] = {
-        cmocka_unit_test_setup_teardown(test_pcache_init_defaults, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_get_page_from_lru, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_mark_page_dirty_tracks_state, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_mark_page_dirty_busy, pcache_test_setup, pcache_test_teardown),
-    cmocka_unit_test_setup_teardown(test_pcache_mark_page_dirty_detaches_lru, pcache_test_setup, pcache_test_teardown),
-    cmocka_unit_test_setup_teardown(test_pcache_mark_page_dirty_idempotent, pcache_test_setup, pcache_test_teardown),
-    cmocka_unit_test_setup_teardown(test_pcache_mark_page_dirty_rejects_invalid_page, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_invalidate_dirty_page, pcache_test_setup, pcache_test_teardown),
-    cmocka_unit_test_setup_teardown(test_pcache_invalidate_clean_lru_page, pcache_test_setup, pcache_test_teardown),
-    cmocka_unit_test_setup_teardown(test_pcache_invalidate_page_io_in_progress, pcache_test_setup, pcache_test_teardown),
-    cmocka_unit_test_setup_teardown(test_pcache_invalidate_page_invalid_page, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_get_page_from_dirty_refcount_one, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_get_page_from_dirty_refcount_many, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_get_page_up_to_date, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_get_page_not_up_to_date, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_get_page_eviction_success, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_get_page_eviction_failure, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_get_page_retry_after_invalid_first_lookup, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_get_page_invalid_block, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_read_page_populates_clean_page, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_read_page_propagates_failure, pcache_test_setup, pcache_test_teardown),
-    cmocka_unit_test_setup_teardown(test_pcache_put_page_requeues_dirty_detached, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_flush_worker_cleans_dirty_page, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_flush_worker_write_begin_failure, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_flush_worker_write_page_failure, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_flush_worker_write_end_error_propagates, pcache_test_setup, pcache_test_teardown),
-    cmocka_unit_test_setup_teardown(test_pcache_flush_queue_failure_returns_new_error, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_flusher_force_round_flushes_dirty_page, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_flusher_respects_dirty_threshold, pcache_test_setup, pcache_test_teardown),
-        cmocka_unit_test_setup_teardown(test_pcache_flusher_time_based_flush, pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_init_defaults, pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_get_page_from_lru,
+                                        pcache_test_setup,
+                                        pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_mark_page_dirty_tracks_state, pcache_test_setup,
+            pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_mark_page_dirty_busy,
+                                        pcache_test_setup,
+                                        pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_mark_page_dirty_detaches_lru, pcache_test_setup,
+            pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_mark_page_dirty_idempotent,
+                                        pcache_test_setup,
+                                        pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_mark_page_dirty_rejects_invalid_page, pcache_test_setup,
+            pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_invalidate_dirty_page,
+                                        pcache_test_setup,
+                                        pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_invalidate_clean_lru_page,
+                                        pcache_test_setup,
+                                        pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_invalidate_page_io_in_progress, pcache_test_setup,
+            pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_invalidate_page_invalid_page, pcache_test_setup,
+            pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_get_page_from_dirty_refcount_one, pcache_test_setup,
+            pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_get_page_from_dirty_refcount_many, pcache_test_setup,
+            pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_get_page_up_to_date,
+                                        pcache_test_setup,
+                                        pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_get_page_not_up_to_date,
+                                        pcache_test_setup,
+                                        pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_get_page_eviction_success,
+                                        pcache_test_setup,
+                                        pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_get_page_eviction_failure,
+                                        pcache_test_setup,
+                                        pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_get_page_retry_after_invalid_first_lookup,
+            pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_get_page_invalid_block,
+                                        pcache_test_setup,
+                                        pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_read_page_populates_clean_page, pcache_test_setup,
+            pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_read_page_propagates_failure, pcache_test_setup,
+            pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_put_page_requeues_dirty_detached, pcache_test_setup,
+            pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_flush_worker_cleans_dirty_page, pcache_test_setup,
+            pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_flush_worker_write_begin_failure, pcache_test_setup,
+            pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_flush_worker_write_page_failure, pcache_test_setup,
+            pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_flush_worker_write_end_error_propagates,
+            pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_flush_queue_failure_returns_new_error,
+            pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_flusher_force_round_flushes_dirty_page,
+            pcache_test_setup, pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(
+            test_pcache_flusher_respects_dirty_threshold, pcache_test_setup,
+            pcache_test_teardown),
+        cmocka_unit_test_setup_teardown(test_pcache_flusher_time_based_flush,
+                                        pcache_test_setup,
+                                        pcache_test_teardown),
         // Concurrency tests
-        cmocka_unit_test_setup_teardown(test_conc_get_page_same_block, pcache_conc_test_setup, pcache_conc_test_teardown),
-        cmocka_unit_test_setup_teardown(test_conc_get_page_different_blocks, pcache_conc_test_setup, pcache_conc_test_teardown),
-        cmocka_unit_test_setup_teardown(test_conc_io_wait_and_complete, pcache_conc_test_setup, pcache_conc_test_teardown),
-        cmocka_unit_test_setup_teardown(test_conc_stress_get_pages, pcache_conc_test_setup, pcache_conc_test_teardown),
-        cmocka_unit_test_setup_teardown(test_conc_get_and_dirty, pcache_conc_test_setup, pcache_conc_test_teardown),
+        cmocka_unit_test_setup_teardown(test_conc_get_page_same_block,
+                                        pcache_conc_test_setup,
+                                        pcache_conc_test_teardown),
+        cmocka_unit_test_setup_teardown(test_conc_get_page_different_blocks,
+                                        pcache_conc_test_setup,
+                                        pcache_conc_test_teardown),
+        cmocka_unit_test_setup_teardown(test_conc_io_wait_and_complete,
+                                        pcache_conc_test_setup,
+                                        pcache_conc_test_teardown),
+        cmocka_unit_test_setup_teardown(test_conc_stress_get_pages,
+                                        pcache_conc_test_setup,
+                                        pcache_conc_test_teardown),
+        cmocka_unit_test_setup_teardown(test_conc_get_and_dirty,
+                                        pcache_conc_test_setup,
+                                        pcache_conc_test_teardown),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);

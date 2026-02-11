@@ -26,7 +26,8 @@
  *   - pid_wlock for mutations: thread_group_add(), thread_group_remove(),
  *     thread_group_exit()
  *   - pid_rlock for reads: tg_signal_send(), tg_signal_pending(), queries
- *   - sigacts->lock for shared_pending enqueue/dequeue (shared via CLONE_SIGHAND)
+ *   - sigacts->lock for shared_pending enqueue/dequeue (shared via
+ * CLONE_SIGHAND)
  *
  * Lock ordering:
  *   pid_lock > sigacts.lock > tcb_lock
@@ -111,7 +112,8 @@ void thread_group_exit(struct thread *p, int code);
  * @return true if exit_group() has been called
  */
 static inline bool thread_group_exiting(struct thread_group *tg) {
-    if (tg == NULL) return false;
+    if (tg == NULL)
+        return false;
     return __atomic_load_n(&tg->group_exit, __ATOMIC_ACQUIRE) != 0;
 }
 

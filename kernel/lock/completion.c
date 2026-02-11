@@ -19,9 +19,7 @@ void completion_init(completion_t *c) {
     tq_init(&c->wait_queue, "completion_queue", &c->lock);
 }
 
-void completion_reinit(completion_t *c) {
-    c->done = 0;
-}
+void completion_reinit(completion_t *c) { c->done = 0; }
 
 static bool __try_wait_for_completion(completion_t *c) {
     if (c->done <= 0) {
@@ -51,7 +49,8 @@ bool try_wait_for_completion(completion_t *c) {
 }
 
 void wait_for_completion(completion_t *c) {
-    assert(current != NULL, "wait_for_completion called from non-thread context");
+    assert(current != NULL,
+           "wait_for_completion called from non-thread context");
     if (c == NULL) {
         return;
     }
@@ -82,19 +81,19 @@ void complete_all(completion_t *c) {
     if (c == NULL) {
         return;
     }
-    
+
     // Use a temporary queue to collect waiters, so we can release
     // the lock before waking them (avoiding lock convoy when woken
     // threads try to re-acquire c->lock in scheduler_sleep).
     tq_t temp_queue;
     tq_init(&temp_queue, "completion_temp", NULL);
-    
+
     spin_lock(&c->lock);
     c->done = MAX_COMPLETIONS;
     // Move all waiters to temp queue
     tq_bulk_move(&temp_queue, &c->wait_queue);
     spin_unlock(&c->lock);
-    
+
     // Wake all waiters outside the lock
     if (temp_queue.counter > 0) {
         tq_wakeup_all(&temp_queue, 0, 0);

@@ -44,11 +44,11 @@ void conc_tq_wakeup_all(void *queue_ptr);
 
 typedef void *(*conc_thread_fn_t)(void *);
 
-int  conc_thread_create(int slot, conc_thread_fn_t fn, void *arg);
-int  conc_thread_join(int slot, void **retval);
+int conc_thread_create(int slot, conc_thread_fn_t fn, void *arg);
+int conc_thread_join(int slot, void **retval);
 
 /* ---- Barrier (wraps pthread_barrier) ---- */
-int  conc_barrier_init(int count);
+int conc_barrier_init(int count);
 void conc_barrier_wait(void);
 void conc_barrier_destroy(void);
 

@@ -59,17 +59,18 @@ static void __ipi_irq_handler(int irq, void *data, device_t *dev) {
     w_sip(r_sip() & ~SIE_SSIE);
 
     int hartid = cpuid();
-    
+
     // Process all pending IPI reasons in a loop
     // Use atomic exchange to grab all pending reasons at once
-    uint64 pending = __atomic_exchange_n(&ipi_pending[hartid], 0, __ATOMIC_ACQ_REL);
-    
+    uint64 pending =
+        __atomic_exchange_n(&ipi_pending[hartid], 0, __ATOMIC_ACQ_REL);
+
     while (pending != 0) {
         int reason = bits_ctz8((uint8)pending);
         if (reason < 0 || reason >= NR_IPI_REASON) {
             break;
         }
-        
+
         // Clear this reason from our local copy
         pending &= ~(1UL << reason);
 
@@ -78,7 +79,8 @@ static void __ipi_irq_handler(int irq, void *data, device_t *dev) {
             // Propagate crash to all other harts
             SET_CPU_CRASHED();
             panic_msg_lock();
-            printf("[Core: %d] Received IPI_REASON_CRASH, crashing...\n", hartid);
+            printf("[Core: %d] Received IPI_REASON_CRASH, crashing...\n",
+                   hartid);
             print_backtrace(r_fp(), KERNBASE, PHYSTOP);
             panic_msg_unlock();
             ipi_send_all_but_self(IPI_REASON_CRASH);

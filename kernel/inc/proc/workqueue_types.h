@@ -11,7 +11,7 @@ struct proc;
 
 struct work_struct {
     list_node_t entry;
-    void (*func)(struct work_struct*);
+    void (*func)(struct work_struct *);
     uint64 data;
 };
 
@@ -24,7 +24,7 @@ struct workqueue {
     list_node_t work_list;
     char name[WORKQUEUE_NAME_MAX + 1];
     struct {
-        uint64 active: 1;
+        uint64 active : 1;
     };
     int nr_workers;
     int min_active;

@@ -9,7 +9,8 @@
  *
  * This design is necessary because:
  * 1. xv6fs_file_write needs to acquire a transaction (begin_op) BEFORE
- *    locking the inode, to match VFS lock ordering: transaction → superblock → inode
+ *    locking the inode, to match VFS lock ordering: transaction → superblock →
+ * inode
  * 2. If VFS held the inode lock when calling write, and write called begin_op,
  *    it would cause deadlock with other paths that do begin_op → ilock.
  *
@@ -44,40 +45,42 @@
  * One pcache page (4KB) covers BSIZE_PER_PAGE xv6fs blocks (BSIZE=1024).
  * Block addresses from bmap are in BSIZE units; pcache uses 512-byte units.
  */
-#define BSIZE_PER_PAGE  (PGSIZE / BSIZE)         /* 4 */
-#define BLK512_PER_BSIZE (BSIZE / 512)           /* 2 */
+#define BSIZE_PER_PAGE (PGSIZE / BSIZE) /* 4 */
+#define BLK512_PER_BSIZE (BSIZE / 512)  /* 2 */
 
 /******************************************************************************
  * File read
  ******************************************************************************/
 
-ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool user) {
+ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
+                        bool user) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     struct pcache *pc = &inode->i_data;
-    
+
     if (!S_ISREG(inode->mode)) {
         return -EINVAL;
     }
-    
+
     if (!pc->active) {
         return -EIO;
     }
-    
-    // Acquire inode lock to safely read size and prevent truncation during read.
-    // Read doesn't need a transaction (no modifications), so we can just lock the inode.
-    // Note: The file reference guarantees the inode remains allocated - no validity
-    // check needed per Linux VFS model (file holds inode reference).
+
+    // Acquire inode lock to safely read size and prevent truncation during
+    // read. Read doesn't need a transaction (no modifications), so we can just
+    // lock the inode. Note: The file reference guarantees the inode remains
+    // allocated - no validity check needed per Linux VFS model (file holds
+    // inode reference).
     vfs_ilock(inode);
-    
+
     loff_t pos = file->f_pos;
     if (pos >= inode->size) {
         vfs_iunlock(inode);
-        return 0;  // EOF
+        return 0; // EOF
     }
     if (pos + count > inode->size) {
         count = inode->size - pos;
     }
-    
+
     size_t bytes_read = 0;
     while (bytes_read < count) {
         uint bn = pos / BSIZE;
@@ -86,7 +89,7 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool use
         if (n > count - bytes_read) {
             n = count - bytes_read;
         }
-        
+
         // Per-inode pcache path (keyed by logical file offset).
         // The read_page callback handles bmap + bio internally, including
         // zero-filling of sparse blocks, so no bmap call is needed here.
@@ -94,35 +97,39 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool use
         page_t *page = pcache_get_page(pc, blkno_512);
         if (page == NULL) {
             vfs_iunlock(inode);
-            if (bytes_read == 0) return -EIO;
+            if (bytes_read == 0)
+                return -EIO;
             return bytes_read;
         }
         int ret = pcache_read_page(pc, page);
         if (ret != 0) {
             pcache_put_page(pc, page);
             vfs_iunlock(inode);
-            if (bytes_read == 0) return -EIO;
+            if (bytes_read == 0)
+                return -EIO;
             return bytes_read;
         }
         struct pcache_node *pcn = page->pcache.pcache_node;
         uint page_off = (bn % BSIZE_PER_PAGE) * BSIZE + off;
         char *data = (char *)pcn->data + page_off;
         if (user) {
-            if (vm_copyout(current->vm, (uint64)(buf + bytes_read), data, n) < 0) {
+            if (vm_copyout(current->vm, (uint64)(buf + bytes_read), data, n) <
+                0) {
                 pcache_put_page(pc, page);
                 vfs_iunlock(inode);
-                if (bytes_read == 0) return -EFAULT;
+                if (bytes_read == 0)
+                    return -EFAULT;
                 return bytes_read;
             }
         } else {
             memmove(buf + bytes_read, data, n);
         }
         pcache_put_page(pc, page);
-        
+
         bytes_read += n;
         pos += n;
     }
-    
+
     vfs_iunlock(inode);
     return bytes_read;
 }
@@ -139,49 +146,52 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count, bool use
  * data blocks are NOT logged.
  ******************************************************************************/
 
-ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, bool user) {
+ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count,
+                         bool user) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
-    struct xv6fs_superblock *xv6_sb = container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
+    struct xv6fs_superblock *xv6_sb =
+        container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
     struct pcache *pc = &inode->i_data;
-    
+
     if (!S_ISREG(inode->mode)) {
         return -EINVAL;
     }
-    
+
     if (!pc->active) {
         return -EIO;
     }
-    
+
     loff_t pos = file->f_pos;
     loff_t end_pos = pos + count;
-    
+
     // Check file size limit
     if (end_pos > XV6FS_MAXFILE * BSIZE) {
         return -EFBIG;
     }
-    
+
     // Write in chunks to avoid exceeding log transaction size.
     // Only metadata (bmap allocations + iupdate) goes through the log now;
     // data blocks are written by the pcache flusher via bio.
     int max = ((MAXOPBLOCKS - 1 - 1 - 2) / 2) * BSIZE;
     size_t bytes_written = 0;
-    
+
     while (bytes_written < count) {
         size_t n = count - bytes_written;
         if (n > max) {
             n = max;
         }
-        
+
         // Acquire transaction BEFORE inode lock to match VFS locking order:
         // transaction → superblock → inode
-        // VFS releases inode lock before calling this function to avoid deadlock.
+        // VFS releases inode lock before calling this function to avoid
+        // deadlock.
         xv6fs_begin_op(xv6_sb);
-        
+
         // Now acquire inode lock to protect inode metadata during write.
         // The file reference guarantees the inode remains allocated.
         vfs_ilock(inode);
-        
+
         size_t chunk_written = 0;
         while (chunk_written < n) {
             uint bn = pos / BSIZE;
@@ -190,7 +200,7 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, b
             if (chunk > n - chunk_written) {
                 chunk = n - chunk_written;
             }
-            
+
             // Ensure the block is allocated (may log indirect-block changes)
             uint addr = xv6fs_bmap(ip, bn);
             if (addr == 0) {
@@ -201,14 +211,15 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, b
                 }
                 goto done;
             }
-            
+
             // Write data through per-inode pcache
             uint64 blkno_512 = (uint64)bn * BLK512_PER_BSIZE;
             page_t *page = pcache_get_page(pc, blkno_512);
             if (page == NULL) {
                 vfs_iunlock(inode);
                 xv6fs_end_op(xv6_sb);
-                if (bytes_written == 0) return -EIO;
+                if (bytes_written == 0)
+                    return -EIO;
                 goto done;
             }
             int ret = pcache_read_page(pc, page);
@@ -216,20 +227,24 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, b
                 pcache_put_page(pc, page);
                 vfs_iunlock(inode);
                 xv6fs_end_op(xv6_sb);
-                if (bytes_written == 0) return -EIO;
+                if (bytes_written == 0)
+                    return -EIO;
                 goto done;
             }
-            
+
             struct pcache_node *pcn = page->pcache.pcache_node;
             uint page_off = (bn % BSIZE_PER_PAGE) * BSIZE + off;
             char *data = (char *)pcn->data + page_off;
-            
+
             if (user) {
-                if (vm_copyin(current->vm, data, (uint64)(buf + bytes_written + chunk_written), chunk) < 0) {
+                if (vm_copyin(current->vm, data,
+                              (uint64)(buf + bytes_written + chunk_written),
+                              chunk) < 0) {
                     pcache_put_page(pc, page);
                     vfs_iunlock(inode);
                     xv6fs_end_op(xv6_sb);
-                    if (bytes_written == 0) return -EFAULT;
+                    if (bytes_written == 0)
+                        return -EFAULT;
                     goto done;
                 }
             } else {
@@ -237,24 +252,24 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count, b
             }
             pcache_mark_page_dirty(pc, page);
             pcache_put_page(pc, page);
-            
+
             chunk_written += chunk;
             pos += chunk;
         }
-        
+
         // Update size if we extended the file
         if (pos > inode->size) {
             inode->size = pos;
         }
         xv6fs_iupdate(ip);
-        
+
         // Release inode lock before ending transaction
         vfs_iunlock(inode);
         xv6fs_end_op(xv6_sb);
-        
+
         bytes_written += chunk_written;
     }
-    
+
 done:
     return bytes_written;
 }
@@ -266,7 +281,7 @@ done:
 loff_t xv6fs_file_llseek(struct vfs_file *file, loff_t offset, int whence) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     loff_t new_pos;
-    
+
     switch (whence) {
     case SEEK_SET:
         new_pos = offset;
@@ -283,11 +298,11 @@ loff_t xv6fs_file_llseek(struct vfs_file *file, loff_t offset, int whence) {
     default:
         return -EINVAL;
     }
-    
+
     if (new_pos < 0) {
         return -EINVAL;
     }
-    
+
     return new_pos;
 }
 
@@ -298,22 +313,22 @@ loff_t xv6fs_file_llseek(struct vfs_file *file, loff_t offset, int whence) {
 int xv6fs_file_stat(struct vfs_file *file, struct stat *stat) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
-    
+
     if (stat == NULL) {
         return -EINVAL;
     }
-    
+
     // Lock inode to get consistent snapshot of inode fields.
     // The file reference guarantees the inode remains allocated.
     vfs_ilock(inode);
-    
+
     memset(stat, 0, sizeof(*stat));
     stat->dev = ip->dev;
     stat->ino = inode->ino;
     stat->mode = inode->mode;
     stat->nlink = inode->n_links;
     stat->size = inode->size;
-    
+
     vfs_iunlock(inode);
     return 0;
 }
@@ -325,7 +340,7 @@ int xv6fs_file_stat(struct vfs_file *file, struct stat *stat) {
 int xv6fs_file_fsync(struct vfs_file *file, loff_t start, loff_t len) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     struct pcache *pc;
-    (void)start;  /* TODO: implement range-based flush */
+    (void)start; /* TODO: implement range-based flush */
     (void)len;
 
     if (inode == NULL)

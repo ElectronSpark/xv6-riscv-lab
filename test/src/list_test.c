@@ -3,22 +3,22 @@
 #include <stdlib.h>
 
 typedef struct test_node {
-    list_node_t     entry;
-    int             val;
-} test_node_t; 
+    list_node_t entry;
+    int val;
+} test_node_t;
 
-#define P99_PROTECT(...) __VA_ARGS__ 
+#define P99_PROTECT(...) __VA_ARGS__
 typedef void (*action_fun_t)(list_node_t *, int, int[]);
 
 typedef struct test_case_struct {
-    const char * case_name;
-    const char * func_name;
+    const char *case_name;
+    const char *func_name;
     int test_length;
-    int * test_case;
+    int *test_case;
     int arguments_length;
-    int * arguments;
+    int *arguments;
     int expected_result_length;
-    int * expected_result;
+    int *expected_result;
     action_fun_t actions;
 } test_case_t;
 
@@ -26,32 +26,31 @@ typedef struct test_case_struct {
 #define __TEST_EXPECTED_NAME(name) __test_case_##name##_expected
 #define __TEST_ARUMENTS_NAME(name) __test_case_##name##_test_args
 
-#define CASE_T_INIT(name, test_function)      \
-{                                                                                   \
-    .func_name = #test_function,                                                    \
-    .case_name = #name,                                                             \
-    .actions = test_function,                                                       \
-    .test_case = __TEST_INPUT_NAME(name),                                           \
-    .test_length = sizeof(typeof(__TEST_INPUT_NAME(name))) / sizeof(int),      \
-    .expected_result = __TEST_EXPECTED_NAME(name),                                        \
-    .expected_result_length = sizeof(typeof(__TEST_EXPECTED_NAME(name))) / sizeof(int),   \
-    .arguments = __TEST_ARUMENTS_NAME(name),                                        \
-    .arguments_length = sizeof(typeof(__TEST_ARUMENTS_NAME(name))) / sizeof(int)         \
-}
+#define CASE_T_INIT(name, test_function)                                       \
+    {.func_name = #test_function,                                              \
+     .case_name = #name,                                                       \
+     .actions = test_function,                                                 \
+     .test_case = __TEST_INPUT_NAME(name),                                     \
+     .test_length = sizeof(typeof(__TEST_INPUT_NAME(name))) / sizeof(int),     \
+     .expected_result = __TEST_EXPECTED_NAME(name),                            \
+     .expected_result_length =                                                 \
+         sizeof(typeof(__TEST_EXPECTED_NAME(name))) / sizeof(int),             \
+     .arguments = __TEST_ARUMENTS_NAME(name),                                  \
+     .arguments_length =                                                       \
+         sizeof(typeof(__TEST_ARUMENTS_NAME(name))) / sizeof(int)}
 
-#define ADD_CASE_INPUT(name, ...)                                                   \
-    int __TEST_INPUT_NAME(name)[] = __VA_ARGS__
+#define ADD_CASE_INPUT(name, ...) int __TEST_INPUT_NAME(name)[] = __VA_ARGS__
 
-#define ADD_CASE_EXPECTED(name, ...)                                            \
+#define ADD_CASE_EXPECTED(name, ...)                                           \
     int __TEST_EXPECTED_NAME(name)[] = __VA_ARGS__
 
-#define ADD_CASE_ARUMENTS(name, ...)                                            \
+#define ADD_CASE_ARUMENTS(name, ...)                                           \
     int __TEST_ARUMENTS_NAME(name)[] = __VA_ARGS__
 
-#define CASE_DATA(name, test_case_input, expected, test_args)                    \
-ADD_CASE_INPUT(name, test_case_input);                                          \
-ADD_CASE_EXPECTED(name, expected);                                              \
-ADD_CASE_ARUMENTS(name, test_args)
+#define CASE_DATA(name, test_case_input, expected, test_args)                  \
+    ADD_CASE_INPUT(name, test_case_input);                                     \
+    ADD_CASE_EXPECTED(name, expected);                                         \
+    ADD_CASE_ARUMENTS(name, test_args)
 
 test_node_t *make_node(int val) {
     test_node_t *ret = malloc(sizeof(test_node_t));
@@ -70,9 +69,7 @@ void destroy_node(test_node_t *node) {
 
 void destroy_list(list_node_t *head) {
     test_node_t *pos, *tmp;
-    list_foreach_node_safe(head, pos, tmp, entry) {
-        destroy_node(pos);
-    }
+    list_foreach_node_safe(head, pos, tmp, entry) { destroy_node(pos); }
     free(head);
 }
 
@@ -116,7 +113,8 @@ void print_list(list_node_t *head) {
         printf(" %d,", pos->val);
         cnt++;
     }
-    if (cnt > 0)    printf("\b ");
+    if (cnt > 0)
+        printf("\b ");
     printf("]\n");
 }
 
@@ -127,7 +125,8 @@ void print_array(const int arr[], int arr_length) {
         printf(" %d,", arr[i]);
         cnt++;
     }
-    if (cnt > 0)    printf("\b ");
+    if (cnt > 0)
+        printf("\b ");
     printf("]\n");
 }
 
@@ -209,7 +208,8 @@ void test_pop(list_node_t *head, int argc, int argv[]) {
 
     for (int i = 0; i < pop_nodes; i++) {
         node = list_node_pop(head, test_node_t, entry);
-        if ((node == NULL && !expect_failure) || (node != NULL && expect_failure)) {
+        if ((node == NULL && !expect_failure) ||
+            (node != NULL && expect_failure)) {
             FAILURE();
             printf("failed to create node\n");
             return;
@@ -247,7 +247,8 @@ void test_pop_back(list_node_t *head, int argc, int argv[]) {
 
     for (int i = 0; i < pop_nodes; i++) {
         node = list_node_pop_back(head, test_node_t, entry);
-        if ((node == NULL && !expect_failure) || (node != NULL && expect_failure)) {
+        if ((node == NULL && !expect_failure) ||
+            (node != NULL && expect_failure)) {
             FAILURE();
             printf("failed to create node\n");
             return;
@@ -278,9 +279,10 @@ void test_find_first_detach(list_node_t *head, int argc, int argv[]) {
     if (argc == 0) {
         return;
     }
-    
+
     for (int i = 0; i < argc; i++) {
-        node = list_find_first(head, test_node_t, entry, node, node->val == argv[i]);
+        node = list_find_first(head, test_node_t, entry, node,
+                               node->val == argv[i]);
         if (node != NULL) {
             list_node_detach(node, entry);
             destroy_node(node);
@@ -321,9 +323,10 @@ void test_find_last_detach(list_node_t *head, int argc, int argv[]) {
     if (argc == 0) {
         return;
     }
-    
+
     for (int i = 0; i < argc; i++) {
-        node = list_find_last(head, test_node_t, entry, node, node->val == argv[i]);
+        node = list_find_last(head, test_node_t, entry, node,
+                              node->val == argv[i]);
         if (node != NULL) {
             list_node_detach(node, entry);
             destroy_node(node);
@@ -365,7 +368,8 @@ void test_find_next_detach(list_node_t *head, int argc, int argv[]) {
         return;
     }
 
-    node = list_find_first(head, test_node_t, entry, node, node->val == argv[0]);
+    node =
+        list_find_first(head, test_node_t, entry, node, node->val == argv[0]);
     if (node == NULL) {
         return;
     }
@@ -486,61 +490,61 @@ ADD_CASE_EXPECTED(test_find_prev_detach_12, {1, 2, 3, 4, 5, 6, 7, 8});
 ADD_CASE_ARUMENTS(test_find_prev_detach_12, {10, 4});
 
 static test_case_t test_cases[] = {
-        CASE_T_INIT(simple_create_1, NULL),
-        CASE_T_INIT(simple_create_2, NULL),
-        CASE_T_INIT(simple_create_3, NULL),
-        CASE_T_INIT(simple_create_4, NULL),
-        CASE_T_INIT(test_push_empty_1, test_push),
-        CASE_T_INIT(test_push_empty_2, test_push),
-        CASE_T_INIT(test_push_empty_3, test_push),
-        CASE_T_INIT(test_push_back_empty_1, test_push_back),
-        CASE_T_INIT(test_push_back_empty_2, test_push_back),
-        CASE_T_INIT(test_push_back_empty_3, test_push_back),
-        CASE_T_INIT(test_pop_empty, test_pop),
-        CASE_T_INIT(test_pop_1, test_pop),
-        CASE_T_INIT(test_pop_2, test_pop),
-        CASE_T_INIT(test_pop_3, test_pop),
-        CASE_T_INIT(test_pop_back_empty, test_pop_back),
-        CASE_T_INIT(test_pop_back_1, test_pop_back),
-        CASE_T_INIT(test_pop_back_2, test_pop_back),
-        CASE_T_INIT(test_pop_back_3, test_pop_back),
-        CASE_T_INIT(test_find_first_detach_1, test_find_first_detach),
-        CASE_T_INIT(test_find_first_detach_2, test_find_first_detach),
-        CASE_T_INIT(test_find_first_detach_3, test_find_first_detach),
-        CASE_T_INIT(test_find_first_detach_4, test_find_first_detach),
-        CASE_T_INIT(test_find_first_detach_5, test_find_first_detach),
-        CASE_T_INIT(test_find_first_detach_6, test_find_first_detach),
-        CASE_T_INIT(test_find_first_detach_7, test_find_first_detach),
-        CASE_T_INIT(test_find_last_detach_1, test_find_last_detach),
-        CASE_T_INIT(test_find_last_detach_2, test_find_last_detach),
-        CASE_T_INIT(test_find_last_detach_3, test_find_last_detach),
-        CASE_T_INIT(test_find_last_detach_4, test_find_last_detach),
-        CASE_T_INIT(test_find_last_detach_5, test_find_last_detach),
-        CASE_T_INIT(test_find_last_detach_6, test_find_last_detach),
-        CASE_T_INIT(test_find_last_detach_7, test_find_last_detach),
-        CASE_T_INIT(test_find_next_detach_1, test_find_next_detach),
-        CASE_T_INIT(test_find_next_detach_2, test_find_next_detach),
-        CASE_T_INIT(test_find_next_detach_3, test_find_next_detach),
-        CASE_T_INIT(test_find_next_detach_4, test_find_next_detach),
-        CASE_T_INIT(test_find_next_detach_5, test_find_next_detach),
-        CASE_T_INIT(test_find_next_detach_6, test_find_next_detach),
-        CASE_T_INIT(test_find_next_detach_7, test_find_next_detach),
-        CASE_T_INIT(test_find_next_detach_8, test_find_next_detach),
-        CASE_T_INIT(test_find_next_detach_9, test_find_next_detach),
-        CASE_T_INIT(test_find_next_detach_10, test_find_next_detach),
-        CASE_T_INIT(test_find_next_detach_11, test_find_next_detach),
-        CASE_T_INIT(test_find_prev_detach_1, test_find_prev_detach),
-        CASE_T_INIT(test_find_prev_detach_2, test_find_prev_detach),
-        CASE_T_INIT(test_find_prev_detach_3, test_find_prev_detach),
-        CASE_T_INIT(test_find_prev_detach_4, test_find_prev_detach),
-        CASE_T_INIT(test_find_prev_detach_5, test_find_prev_detach),
-        CASE_T_INIT(test_find_prev_detach_6, test_find_prev_detach),
-        CASE_T_INIT(test_find_prev_detach_7, test_find_prev_detach),
-        CASE_T_INIT(test_find_prev_detach_8, test_find_prev_detach),
-        CASE_T_INIT(test_find_prev_detach_9, test_find_prev_detach),
-        CASE_T_INIT(test_find_prev_detach_10, test_find_prev_detach),
-        CASE_T_INIT(test_find_prev_detach_11, test_find_prev_detach),
-        CASE_T_INIT(test_find_prev_detach_12, test_find_prev_detach),
+    CASE_T_INIT(simple_create_1, NULL),
+    CASE_T_INIT(simple_create_2, NULL),
+    CASE_T_INIT(simple_create_3, NULL),
+    CASE_T_INIT(simple_create_4, NULL),
+    CASE_T_INIT(test_push_empty_1, test_push),
+    CASE_T_INIT(test_push_empty_2, test_push),
+    CASE_T_INIT(test_push_empty_3, test_push),
+    CASE_T_INIT(test_push_back_empty_1, test_push_back),
+    CASE_T_INIT(test_push_back_empty_2, test_push_back),
+    CASE_T_INIT(test_push_back_empty_3, test_push_back),
+    CASE_T_INIT(test_pop_empty, test_pop),
+    CASE_T_INIT(test_pop_1, test_pop),
+    CASE_T_INIT(test_pop_2, test_pop),
+    CASE_T_INIT(test_pop_3, test_pop),
+    CASE_T_INIT(test_pop_back_empty, test_pop_back),
+    CASE_T_INIT(test_pop_back_1, test_pop_back),
+    CASE_T_INIT(test_pop_back_2, test_pop_back),
+    CASE_T_INIT(test_pop_back_3, test_pop_back),
+    CASE_T_INIT(test_find_first_detach_1, test_find_first_detach),
+    CASE_T_INIT(test_find_first_detach_2, test_find_first_detach),
+    CASE_T_INIT(test_find_first_detach_3, test_find_first_detach),
+    CASE_T_INIT(test_find_first_detach_4, test_find_first_detach),
+    CASE_T_INIT(test_find_first_detach_5, test_find_first_detach),
+    CASE_T_INIT(test_find_first_detach_6, test_find_first_detach),
+    CASE_T_INIT(test_find_first_detach_7, test_find_first_detach),
+    CASE_T_INIT(test_find_last_detach_1, test_find_last_detach),
+    CASE_T_INIT(test_find_last_detach_2, test_find_last_detach),
+    CASE_T_INIT(test_find_last_detach_3, test_find_last_detach),
+    CASE_T_INIT(test_find_last_detach_4, test_find_last_detach),
+    CASE_T_INIT(test_find_last_detach_5, test_find_last_detach),
+    CASE_T_INIT(test_find_last_detach_6, test_find_last_detach),
+    CASE_T_INIT(test_find_last_detach_7, test_find_last_detach),
+    CASE_T_INIT(test_find_next_detach_1, test_find_next_detach),
+    CASE_T_INIT(test_find_next_detach_2, test_find_next_detach),
+    CASE_T_INIT(test_find_next_detach_3, test_find_next_detach),
+    CASE_T_INIT(test_find_next_detach_4, test_find_next_detach),
+    CASE_T_INIT(test_find_next_detach_5, test_find_next_detach),
+    CASE_T_INIT(test_find_next_detach_6, test_find_next_detach),
+    CASE_T_INIT(test_find_next_detach_7, test_find_next_detach),
+    CASE_T_INIT(test_find_next_detach_8, test_find_next_detach),
+    CASE_T_INIT(test_find_next_detach_9, test_find_next_detach),
+    CASE_T_INIT(test_find_next_detach_10, test_find_next_detach),
+    CASE_T_INIT(test_find_next_detach_11, test_find_next_detach),
+    CASE_T_INIT(test_find_prev_detach_1, test_find_prev_detach),
+    CASE_T_INIT(test_find_prev_detach_2, test_find_prev_detach),
+    CASE_T_INIT(test_find_prev_detach_3, test_find_prev_detach),
+    CASE_T_INIT(test_find_prev_detach_4, test_find_prev_detach),
+    CASE_T_INIT(test_find_prev_detach_5, test_find_prev_detach),
+    CASE_T_INIT(test_find_prev_detach_6, test_find_prev_detach),
+    CASE_T_INIT(test_find_prev_detach_7, test_find_prev_detach),
+    CASE_T_INIT(test_find_prev_detach_8, test_find_prev_detach),
+    CASE_T_INIT(test_find_prev_detach_9, test_find_prev_detach),
+    CASE_T_INIT(test_find_prev_detach_10, test_find_prev_detach),
+    CASE_T_INIT(test_find_prev_detach_11, test_find_prev_detach),
+    CASE_T_INIT(test_find_prev_detach_12, test_find_prev_detach),
 };
 
 int main(void) {
@@ -549,23 +553,27 @@ int main(void) {
 
     printf("test case count: %d\n", tests);
     for (int i = 0; i < tests; i++) {
-        printf("\t* %s - %s():\n", test_cases[i].case_name, test_cases[i].func_name);
+        printf("\t* %s - %s():\n", test_cases[i].case_name,
+               test_cases[i].func_name);
 
         head = make_list(test_cases[i].test_case, test_cases[i].test_length);
         if (test_cases[i].actions != NULL) {
-            test_cases[i].actions(head, test_cases[i].arguments_length, test_cases[i].arguments);
+            test_cases[i].actions(head, test_cases[i].arguments_length,
+                                  test_cases[i].arguments);
         }
 
         if (test_cases[i].expected_result == NULL) {
             // ok
-        } else if (compare_list_arr(head, test_cases[i].expected_result, test_cases[i].expected_result_length)) {
+        } else if (compare_list_arr(head, test_cases[i].expected_result,
+                                    test_cases[i].expected_result_length)) {
             SUCCESS();
         } else {
             FAILURE();
             printf("case (%d) input array:     ", i);
             print_array(test_cases[i].test_case, test_cases[i].test_length);
             printf("case (%d) expected output: ", i);
-            print_array(test_cases[i].expected_result, test_cases[i].expected_result_length);
+            print_array(test_cases[i].expected_result,
+                        test_cases[i].expected_result_length);
             printf("The output list is:\n");
             print_list(head);
         }

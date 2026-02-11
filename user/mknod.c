@@ -2,9 +2,7 @@
 #include "kernel/inc/vfs/stat.h"
 #include "user/user.h"
 
-void
-usage(void)
-{
+void usage(void) {
     fprintf(2, "Usage: mknod [-b|-c] <name> <major> <minor>\n");
     fprintf(2, "  -b:    create block device (default: character device)\n");
     fprintf(2, "  -c:    create character device (default)\n");
@@ -14,16 +12,14 @@ usage(void)
     exit(1);
 }
 
-int
-main(int argc, char *argv[])
-{
-    mode_t mode = S_IFCHR | 0666;  // Default to character device
+int main(int argc, char *argv[]) {
+    mode_t mode = S_IFCHR | 0666; // Default to character device
     int argidx = 1;
-    
+
     if (argc < 4) {
         usage();
     }
-    
+
     // Parse optional type flag
     if (argv[1][0] == '-') {
         if (argv[1][1] == 'b') {
@@ -44,7 +40,8 @@ main(int argc, char *argv[])
     int minor = atoi(argv[argidx + 2]);
 
     if (mknod(name, mode, major, minor) < 0) {
-        fprintf(2, "mknod: failed to create %s (mode=0x%x, %d, %d)\n", name, mode, major, minor);
+        fprintf(2, "mknod: failed to create %s (mode=0x%x, %d, %d)\n", name,
+                mode, major, minor);
         exit(1);
     }
 

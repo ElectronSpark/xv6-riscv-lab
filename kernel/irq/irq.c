@@ -16,9 +16,10 @@
 #include "trap.h"
 #include "dev/plic.h"
 
-static struct irq_desc *irq_descs[IRQCNT] = { 0 };
-static slab_cache_t __irq_desc_slab = { 0 };
-static spinlock_t irq_write_lock = SPINLOCK_INITIALIZED("irq_write_lock"); // Protects write operations to irq_descs
+static struct irq_desc *irq_descs[IRQCNT] = {0};
+static slab_cache_t __irq_desc_slab = {0};
+static spinlock_t irq_write_lock = SPINLOCK_INITIALIZED(
+    "irq_write_lock"); // Protects write operations to irq_descs
 
 static struct irq_desc *__alloc_irq_desc(struct irq_desc *in_desc) {
     struct irq_desc *desc = slab_alloc(&__irq_desc_slab);
@@ -43,9 +44,8 @@ static void __free_irq_desc(struct irq_desc *desc) {
 }
 
 void irq_desc_init(void) {
-    int ret = slab_cache_init(&__irq_desc_slab, "irq_desc", 
-                              sizeof(struct irq_desc), 
-                              SLAB_FLAG_EMBEDDED);
+    int ret = slab_cache_init(&__irq_desc_slab, "irq_desc",
+                              sizeof(struct irq_desc), SLAB_FLAG_EMBEDDED);
     assert(ret == 0, "irq_desc_init: Failed to initialize irq_desc slab cache");
 }
 
@@ -89,7 +89,8 @@ int register_irq_handler(int irq_num, struct irq_desc *desc) {
 
     // Enable PLIC interrupt after handler is registered
     // plic_enable_irq sets priority=1 and enables the IRQ on all harts
-    if (irq_num >= PLIC_IRQ_OFFSET && irq_num < PLIC_IRQ_OFFSET + PLIC_IRQ_CNT) {
+    if (irq_num >= PLIC_IRQ_OFFSET &&
+        irq_num < PLIC_IRQ_OFFSET + PLIC_IRQ_CNT) {
         plic_enable_irq(irq_num - PLIC_IRQ_OFFSET);
     }
 
@@ -138,7 +139,7 @@ static int __do_plic_irq(void) {
 
     // Enter RCU read-side critical section
     rcu_read_lock();
-    
+
     // Safely dereference the IRQ descriptor
     struct irq_desc *desc = rcu_dereference(irq_descs[irq]);
     if (desc == NULL) {
@@ -148,14 +149,15 @@ static int __do_plic_irq(void) {
         return -ENODEV;
     }
 
-    // When an IRQ exists, increase its counter no matter whether handler is NULL
+    // When an IRQ exists, increase its counter no matter whether handler is
+    // NULL
     __atomic_add_fetch(&desc->count, 1, __ATOMIC_SEQ_CST);
-    
+
     // Call the handler if it exists
     if (desc->handler != NULL) {
         desc->handler(irq, desc->data, desc->dev);
     }
-    
+
     // Exit RCU read-side critical section
     rcu_read_unlock();
     plic_complete(irq - PLIC_IRQ_OFFSET);
@@ -169,7 +171,7 @@ int do_irq(struct trapframe *tf) {
         printf("do_irq: invalid irq_num %d\n", irq_num);
         return -ENODEV;
     }
-    
+
     if (irq_num == RISCV_S_EXTERNAL_INTERRUPT) {
         // PLIC IRQ
         // Treat separately
@@ -178,7 +180,7 @@ int do_irq(struct trapframe *tf) {
 
     // Enter RCU read-side critical section
     rcu_read_lock();
-    
+
     // Safely dereference the IRQ descriptor
     struct irq_desc *desc = rcu_dereference(irq_descs[irq_num]);
     if (desc == NULL) {
@@ -187,14 +189,15 @@ int do_irq(struct trapframe *tf) {
         return -ENODEV;
     }
 
-    // When an IRQ exists, increase its counter no matter whether handler is NULL
+    // When an IRQ exists, increase its counter no matter whether handler is
+    // NULL
     __atomic_add_fetch(&desc->count, 1, __ATOMIC_SEQ_CST);
-    
+
     // Call the handler if it exists
     if (desc->handler != NULL) {
         desc->handler(irq_num, desc->data, desc->dev);
     }
-    
+
     // Exit RCU read-side critical section
     rcu_read_unlock();
     return irq_num;

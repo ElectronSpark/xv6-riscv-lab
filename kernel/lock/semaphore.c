@@ -78,7 +78,9 @@ int sem_wait(sem_t *sem) {
     if (ret != 0) {
         int wake_ret = __sem_do_post(sem);
         if (wake_ret != 0 && wake_ret != -ENOENT) {
-            printf("Failed to post semaphore '%s' when thread was interrupted\n", sem->name);
+            printf(
+                "Failed to post semaphore '%s' when thread was interrupted\n",
+                sem->name);
         }
     }
 
@@ -108,7 +110,8 @@ int sem_post(sem_t *sem) {
     spin_lock(&sem->lk);
     if (__sem_value_get(sem) == SEM_VALUE_MAX) {
         spin_unlock(&sem->lk);
-        return -EOVERFLOW; // Prevent semaphore value from exceeding SEM_VALUE_MAX
+        return -EOVERFLOW; // Prevent semaphore value from exceeding
+                           // SEM_VALUE_MAX
     }
     int ret = __sem_do_post(sem);
     spin_unlock(&sem->lk);

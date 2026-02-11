@@ -26,7 +26,8 @@
  * new boundary.  Embedded files have no pages to free.
  */
 static int __tmpfs_truncate_shrink(struct vfs_inode *inode, loff_t new_size) {
-    struct tmpfs_inode *tmpfs_inode = container_of(inode, struct tmpfs_inode, vfs_inode);
+    struct tmpfs_inode *tmpfs_inode =
+        container_of(inode, struct tmpfs_inode, vfs_inode);
     if (tmpfs_inode->embedded) {
         /* Embedded data lives inside the inode struct; nothing to free. */
         return 0;
@@ -102,13 +103,15 @@ int __tmpfs_migrate_to_allocated_blocks(struct tmpfs_inode *tmpfs_inode) {
  * For pcache files, nothing to pre-allocate (pages are demand-allocated).
  */
 static int __tmpfs_truncate_grow(struct vfs_inode *inode, loff_t new_size) {
-    struct tmpfs_inode *tmpfs_inode = container_of(inode, struct tmpfs_inode, vfs_inode);
+    struct tmpfs_inode *tmpfs_inode =
+        container_of(inode, struct tmpfs_inode, vfs_inode);
     int ret = 0;
 
     if (tmpfs_inode->embedded) {
         if (new_size <= TMPFS_INODE_EMBEDDED_DATA_LEN) {
             /* Still fits in embedded storage — zero the gap. */
-            memset(&tmpfs_inode->file.data[inode->size], 0, new_size - inode->size);
+            memset(&tmpfs_inode->file.data[inode->size], 0,
+                   new_size - inode->size);
             return 0;
         }
         /* Outgrew embedded; migrate to pcache. */

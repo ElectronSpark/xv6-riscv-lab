@@ -60,10 +60,10 @@ struct thread {
     enum thread_state state; // Thread state
     uint64 flags;
 #define THREAD_FLAG_VALID 1
-#define THREAD_FLAG_KILLED 2     // Thread is exiting or exited
-#define THREAD_FLAG_ONCHAN 3     // Thread is sleeping on a channel
-#define THREAD_FLAG_SIGPENDING 4 // Thread has pending deliverable signals
-#define THREAD_FLAG_USER_SPACE 5 // Thread has user space
+#define THREAD_FLAG_KILLED 2           // Thread is exiting or exited
+#define THREAD_FLAG_ONCHAN 3           // Thread is sleeping on a channel
+#define THREAD_FLAG_SIGPENDING 4       // Thread has pending deliverable signals
+#define THREAD_FLAG_USER_SPACE 5       // Thread has user space
     struct sched_entity *sched_entity; // PI lock, on_rq, context, etc.
     uint64 ksp;
     void *chan;              // If non-zero, sleeping on chan
@@ -76,13 +76,15 @@ struct thread {
     // These are private to the thread or stable read-mostly pointers.
     struct utrapframe *trapframe; // data page for trampoline.S
     vm_t *vm;                     // Virtual memory areas and page table
-    int pid;                      // Thread ID
+    pid_t real_pid;               // Real PID (for fork)
+    pid_t pid;                    // Thread ID
     int kstack_order;             // Kernel stack order, used for allocation
     uint64 kstack;                // Virtual address of kernel stack
     uint64 trapframe_vbase;       // Base virtual address of the trapframe
-    struct fs_struct *fs;         // Filesystem state (on kernel stack below utrapframe)
-    struct vfs_fdtable *fdtable;  // File descriptor table (on kernel stack below fs)
-    int rcu_read_lock_nesting;    // Number of nested rcu_read_lock() calls
+    struct fs_struct *fs; // Filesystem state (on kernel stack below utrapframe)
+    struct vfs_fdtable
+        *fdtable; // File descriptor table (on kernel stack below fs)
+    int rcu_read_lock_nesting; // Number of nested rcu_read_lock() calls
     __STRUCT_CACHELINE_PADDING;
 
     // ===== Cache line 3: Family tree (fork / exit / wait) =====
@@ -91,25 +93,25 @@ struct thread {
     sigacts_t *sigacts;    // Signal actions for this thread
     struct thread *parent; // Parent thread
     struct thread
-        *vfork_parent;     // Parent waiting for vfork child (NULL if not vfork)
-    list_node_t children;  // List of child threads
-    int children_count;    // Number of children
-    int xstate;            // Exit status to be returned to parent's wait
-    list_node_t siblings;  // List of sibling threads
+        *vfork_parent;    // Parent waiting for vfork child (NULL if not vfork)
+    list_node_t children; // List of child threads
+    int children_count;   // Number of children
+    int xstate;           // Exit status to be returned to parent's wait
+    list_node_t siblings; // List of sibling threads
     __STRUCT_CACHELINE_PADDING;
 
     // ===== Cold: Initialization / rarely changed =====
-    uint64 clone_flags;    // flags used during clone
-    uint64 kentry;         // Entry point for kernel thread
-    uint64 arg[2];         // Argument for kernel thread
-    char name[16];         // Thread name (debugging)
+    uint64 clone_flags; // flags used during clone
+    uint64 kentry;      // Entry point for kernel thread
+    uint64 arg[2];      // Argument for kernel thread
+    char name[16];      // Thread name (debugging)
 
     // Thread group (POSIX process abstraction).
     // All threads created with CLONE_THREAD share the same thread_group.
     // Threads created with fork/clone (no CLONE_THREAD) get their own group.
     struct thread_group *thread_group; // Thread group this thread belongs to
-    list_node_t tg_entry;             // Link in thread_group->thread_list
-    list_node_t wq_entry;             // link to work queue
+    list_node_t tg_entry;              // Link in thread_group->thread_list
+    list_node_t wq_entry;              // link to work queue
 
     // ===== Cold: Registration / debug =====
     // process table lock must be held before holding p->lock to use this:

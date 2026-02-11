@@ -35,7 +35,6 @@ int __real_page_refcnt(void *ptr);
 page_t *__real___page_alloc(uint64 order, uint64 flags);
 void __real___page_free(page_t *page, uint64 order);
 
-
 extern bool __wrap___page_alloc_passthrough;
 extern bool __wrap___page_free_passthrough;
 

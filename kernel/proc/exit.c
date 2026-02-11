@@ -227,7 +227,8 @@ int wait(uint64 addr) {
 
         // Scan through table looking for exited children.
         list_foreach_node_safe(&p->children, child, tmp, siblings) {
-            // Thread state will never transition back from ZOMBIE, so no need to lock the child.
+            // Thread state will never transition back from ZOMBIE, so no need
+            // to lock the child.
             if (THREAD_ZOMBIE(child)) {
                 // Make sure the zombie child has fully switched out of CPU.
                 // The on_cpu window is very short (just context_switch_finish),
@@ -254,7 +255,8 @@ int wait(uint64 addr) {
                 xstate = child->xstate;
                 pid = child->pid;
                 if (!pid_try_lock_upgrade()) {
-                    // Failed to upgrade, we need to release and reacquire the lock to avoid deadlock.
+                    // Failed to upgrade, we need to release and reacquire the
+                    // lock to avoid deadlock.
                     pid_runlock();
                     pid_wlock();
                 }

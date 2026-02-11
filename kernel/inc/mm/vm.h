@@ -3,17 +3,15 @@
 #include <mm/vm_types.h>
 
 #define VMA_SIZE(__vma) ((__vma)->end - (__vma)->start)
-#define VMA_PG_ALIGNED(__vma) \
-    (((__vma)->start & PAGE_MASK) == (__vma)->start && \
+#define VMA_PG_ALIGNED(__vma)                                                  \
+    (((__vma)->start & PAGE_MASK) == (__vma)->start &&                         \
      ((__vma)->end & PAGE_MASK) == (__vma)->end)
-#define VMA_IN_RANGE(__vma, __va) \
+#define VMA_IN_RANGE(__vma, __va)                                              \
     ((__vma)->start <= (__va) && (__va) < (__vma)->end)
-#define VMA_OVERLAP(__vma1, __vma2) \
-    ((__vma1)->end > (__vma2)->start && \
-     (__vma2)->end > (__vma1)->start)
-#define VM_ADJACENT(__vma1, __vma2) \
-    ((__vma1)->end == (__vma2)->start || \
-     (__vma2)->end == (__vma1)->start)
+#define VMA_OVERLAP(__vma1, __vma2)                                            \
+    ((__vma1)->end > (__vma2)->start && (__vma2)->end > (__vma1)->start)
+#define VM_ADJACENT(__vma1, __vma2)                                            \
+    ((__vma1)->end == (__vma2)->start || (__vma2)->end == (__vma1)->start)
 
 uint64 vm_cpu_online(vm_t *vm, int cpu);
 void vm_cpu_offline(vm_t *vm, int cpu);
@@ -51,12 +49,12 @@ uint64 vm2pte_flags(uint64 flags);
 uint64 pte2vm_flags(uint64 pte_flags);
 
 // int vma_mprotect(vm_t *vma, uint64 flags);
-int vma_mmap(vm_t *vm, uint64 start, size_t size, uint64 flags, void *file, uint64 pgoff, void *pa);
+int vma_mmap(vm_t *vm, uint64 start, size_t size, uint64 flags, void *file,
+             uint64 pgoff, void *pa);
 int vma_munmap(vm_t *vm, uint64 start, size_t size);
-// int vma_mremap(vm_t *vm, uint64 old_start, uint64 old_end, uint64 new_start, uint64 new_end);
-// int vma_msync(vm_t *vm, uint64 start, uint64 end);
-// int vma_mincore(vm_t *vm, uint64 start, uint64 end, unsigned char *vec);
-// int vma_madvise(vm_t *vm, uint64 start, uint64 end, int advice);
-
+// int vma_mremap(vm_t *vm, uint64 old_start, uint64 old_end, uint64 new_start,
+// uint64 new_end); int vma_msync(vm_t *vm, uint64 start, uint64 end); int
+// vma_mincore(vm_t *vm, uint64 start, uint64 end, unsigned char *vec); int
+// vma_madvise(vm_t *vm, uint64 start, uint64 end, int advice);
 
 #endif // __KERNEL_VM_H

@@ -20,10 +20,10 @@
 #include <mm/page.h>
 
 // Test configuration
-#define TEST_MAJOR_BASE     100     // Starting major number for tests
-#define TEST_ITERATIONS     50      // Number of iterations for stress tests
-#define NUM_READER_THREADS  4       // Number of concurrent reader threads
-#define NUM_WRITER_THREADS  2       // Number of concurrent writer threads
+#define TEST_MAJOR_BASE 100  // Starting major number for tests
+#define TEST_ITERATIONS 50   // Number of iterations for stress tests
+#define NUM_READER_THREADS 4 // Number of concurrent reader threads
+#define NUM_WRITER_THREADS 2 // Number of concurrent writer threads
 
 // Test statistics
 static _Atomic int test_reads_completed = 0;
@@ -67,33 +67,33 @@ static void init_test_device(device_t *dev, int major, int minor) {
 
 static void test_basic_registration(void) {
     printf("TEST: Basic Device Registration and Lookup\n");
-    
+
     device_t *dev = &test_devices[0];
     init_test_device(dev, TEST_MAJOR_BASE, 1);
-    
+
     // Register the device
     int ret = device_register(dev);
     assert(ret == 0, "device_register should succeed");
-    
+
     // Look up the device
     device_t *found = device_get(TEST_MAJOR_BASE, 1);
     assert(!IS_ERR(found), "device_get should succeed");
     assert(found == dev, "device_get should return the registered device");
-    
+
     // Release the reference
     device_put(found);
-    
+
     // Unregister the device
     ret = device_unregister(dev);
     assert(ret == 0, "device_unregister should succeed");
-    
+
     // Wait for RCU grace period
     synchronize_rcu();
-    
+
     // Device should no longer be found
     found = device_get(TEST_MAJOR_BASE, 1);
     assert(IS_ERR(found), "device_get should fail after unregister");
-    
+
     printf("  PASS: Basic registration and lookup works correctly\n");
 }
 
@@ -106,8 +106,10 @@ static device_t *reader_test_device = NULL;
 static void reader_thread_fn(uint64 id, uint64 iterations) {
     __atomic_fetch_add(&readers_running, 1, __ATOMIC_SEQ_CST);
     printf("  Reader %d starting (%d iterations)\n", (int)id, (int)iterations);
-    
-    for (uint64 i = 0; i < iterations && !__atomic_load_n(&test_stop_flag, __ATOMIC_SEQ_CST); i++) {
+
+    for (uint64 i = 0;
+         i < iterations && !__atomic_load_n(&test_stop_flag, __ATOMIC_SEQ_CST);
+         i++) {
         // Look up the device using RCU-protected path
         device_t *dev = device_get(TEST_MAJOR_BASE + 1, 1);
         if (!IS_ERR(dev)) {
@@ -118,66 +120,67 @@ static void reader_thread_fn(uint64 id, uint64 iterations) {
             device_put(dev);
             __atomic_fetch_add(&test_reads_completed, 1, __ATOMIC_SEQ_CST);
         }
-        
+
         // Small delay to allow other threads to run
         if (i % 10 == 0) {
-           scheduler_yield();
+            scheduler_yield();
         }
     }
-    
+
     printf("  Reader %d completed\n", (int)id);
     __atomic_fetch_sub(&readers_running, 1, __ATOMIC_SEQ_CST);
 }
 
 static void test_concurrent_readers(void) {
     printf("TEST: Concurrent Readers\n");
-    
+
     // Reset counters
     __atomic_store_n(&test_reads_completed, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&test_errors, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&readers_running, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&test_stop_flag, 0, __ATOMIC_SEQ_CST);
-    
+
     // Register a device for readers to look up
     reader_test_device = &test_devices[1];
     init_test_device(reader_test_device, TEST_MAJOR_BASE + 1, 1);
     int ret = device_register(reader_test_device);
     assert(ret == 0, "device_register should succeed");
-    
+
     // Start reader threads
     struct thread *readers[NUM_READER_THREADS];
     for (int i = 0; i < NUM_READER_THREADS; i++) {
-        readers[i] = kthread_create("dev_reader", 
-                                  (int (*)(uint64, uint64))reader_thread_fn, 
-                                  i, TEST_ITERATIONS, KERNEL_STACK_ORDER);
+        readers[i] = kthread_create("dev_reader",
+                                    (int (*)(uint64, uint64))reader_thread_fn,
+                                    i, TEST_ITERATIONS, KERNEL_STACK_ORDER);
         assert(!IS_ERR_OR_NULL(readers[i]), "Failed to create reader thread");
         wakeup(readers[i]);
     }
-    
+
     // Wait for readers to complete
     printf("  Waiting for readers to complete...\n");
     int wait_count = 0;
-    while (__atomic_load_n(&readers_running, __ATOMIC_SEQ_CST) > 0 && wait_count < 10000) {
-       scheduler_yield();
+    while (__atomic_load_n(&readers_running, __ATOMIC_SEQ_CST) > 0 &&
+           wait_count < 10000) {
+        scheduler_yield();
         wait_count++;
     }
-    
+
     // Stop any remaining readers
     __atomic_store_n(&test_stop_flag, 1, __ATOMIC_SEQ_CST);
-   scheduler_yield();
-    
+    scheduler_yield();
+
     // Cleanup
     device_unregister(reader_test_device);
     synchronize_rcu();
     reader_test_device = NULL;
-    
+
     int reads = __atomic_load_n(&test_reads_completed, __ATOMIC_SEQ_CST);
     int errors = __atomic_load_n(&test_errors, __ATOMIC_SEQ_CST);
-    
+
     printf("  Completed %d reads with %d errors\n", reads, errors);
     assert(errors == 0, "No errors should occur during concurrent reads");
     assert(reads > 0, "Some reads should have completed");
-    
+
     printf("  PASS: Concurrent readers completed successfully\n");
 }
 
@@ -187,20 +190,22 @@ static void test_concurrent_readers(void) {
 
 static void test_register_unregister_stress(void) {
     printf("TEST: Registration/Unregistration Stress\n");
-    
+
     int success_count = 0;
     int fail_count = 0;
-    
+
     for (int iter = 0; iter < TEST_ITERATIONS; iter++) {
-        int dev_idx = 2 + (iter % 4);  // Use devices 2-5
+        int dev_idx = 2 + (iter % 4); // Use devices 2-5
         device_t *dev = &test_devices[dev_idx];
-        
+
         // Check if already registered
-        if (__atomic_load_n(&test_device_registered[dev_idx], __ATOMIC_SEQ_CST)) {
+        if (__atomic_load_n(&test_device_registered[dev_idx],
+                            __ATOMIC_SEQ_CST)) {
             // Unregister it
             int ret = device_unregister(dev);
             if (ret == 0) {
-                __atomic_store_n(&test_device_registered[dev_idx], 0, __ATOMIC_SEQ_CST);
+                __atomic_store_n(&test_device_registered[dev_idx], 0,
+                                 __ATOMIC_SEQ_CST);
                 success_count++;
             }
             // Wait for grace period before re-registering
@@ -210,7 +215,8 @@ static void test_register_unregister_stress(void) {
             init_test_device(dev, TEST_MAJOR_BASE + 2, dev_idx);
             int ret = device_register(dev);
             if (ret == 0) {
-                __atomic_store_n(&test_device_registered[dev_idx], 1, __ATOMIC_SEQ_CST);
+                __atomic_store_n(&test_device_registered[dev_idx], 1,
+                                 __ATOMIC_SEQ_CST);
                 success_count++;
             } else if (ret == -EBUSY) {
                 // Device already registered - this is okay in stress test
@@ -220,12 +226,12 @@ static void test_register_unregister_stress(void) {
                 fail_count++;
             }
         }
-        
+
         if (iter % 10 == 0) {
-           scheduler_yield();
+            scheduler_yield();
         }
     }
-    
+
     // Cleanup: unregister all test devices
     for (int i = 2; i < 6; i++) {
         if (__atomic_load_n(&test_device_registered[i], __ATOMIC_SEQ_CST)) {
@@ -234,10 +240,11 @@ static void test_register_unregister_stress(void) {
         }
     }
     synchronize_rcu();
-    
-    printf("  Completed %d successful operations, %d expected failures\n", success_count, fail_count);
+
+    printf("  Completed %d successful operations, %d expected failures\n",
+           success_count, fail_count);
     assert(success_count > 0, "Some operations should have succeeded");
-    
+
     printf("  PASS: Registration/unregistration stress completed\n");
 }
 
@@ -249,8 +256,10 @@ static _Atomic int rw_test_major = 0;
 
 static void rw_reader_thread_fn(uint64 id, uint64 iterations) {
     __atomic_fetch_add(&readers_running, 1, __ATOMIC_SEQ_CST);
-    
-    for (uint64 i = 0; i < iterations && !__atomic_load_n(&test_stop_flag, __ATOMIC_SEQ_CST); i++) {
+
+    for (uint64 i = 0;
+         i < iterations && !__atomic_load_n(&test_stop_flag, __ATOMIC_SEQ_CST);
+         i++) {
         int major = __atomic_load_n(&rw_test_major, __ATOMIC_SEQ_CST);
         if (major > 0) {
             device_t *dev = device_get(major, 1);
@@ -259,51 +268,53 @@ static void rw_reader_thread_fn(uint64 id, uint64 iterations) {
                 __atomic_fetch_add(&test_reads_completed, 1, __ATOMIC_SEQ_CST);
             }
         }
-        
+
         if (i % 5 == 0) {
-           scheduler_yield();
+            scheduler_yield();
         }
     }
-    
+
     __atomic_fetch_sub(&readers_running, 1, __ATOMIC_SEQ_CST);
 }
 
 static void rw_writer_thread_fn(uint64 id, uint64 iterations) {
     __atomic_fetch_add(&writers_running, 1, __ATOMIC_SEQ_CST);
-    
-    int dev_idx = 6 + (int)id;  // Use devices 6-7
+
+    int dev_idx = 6 + (int)id; // Use devices 6-7
     device_t *dev = &test_devices[dev_idx];
     int my_major = TEST_MAJOR_BASE + 10 + (int)id;
-    
-    for (uint64 i = 0; i < iterations && !__atomic_load_n(&test_stop_flag, __ATOMIC_SEQ_CST); i++) {
+
+    for (uint64 i = 0;
+         i < iterations && !__atomic_load_n(&test_stop_flag, __ATOMIC_SEQ_CST);
+         i++) {
         // Register
         init_test_device(dev, my_major, 1);
         int ret = device_register(dev);
         if (ret == 0) {
             __atomic_store_n(&rw_test_major, my_major, __ATOMIC_SEQ_CST);
             __atomic_fetch_add(&test_writes_completed, 1, __ATOMIC_SEQ_CST);
-            
+
             // Let readers access it
             for (int j = 0; j < 5; j++) {
-               scheduler_yield();
+                scheduler_yield();
             }
-            
+
             // Unregister
             __atomic_store_n(&rw_test_major, 0, __ATOMIC_SEQ_CST);
             device_unregister(dev);
             synchronize_rcu();
             __atomic_fetch_add(&test_writes_completed, 1, __ATOMIC_SEQ_CST);
         }
-        
-       scheduler_yield();
+
+        scheduler_yield();
     }
-    
+
     __atomic_fetch_sub(&writers_running, 1, __ATOMIC_SEQ_CST);
 }
 
 static void test_concurrent_readers_writers(void) {
     printf("TEST: Concurrent Readers and Writers\n");
-    
+
     // Reset counters
     __atomic_store_n(&test_reads_completed, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&test_writes_completed, 0, __ATOMIC_SEQ_CST);
@@ -312,49 +323,49 @@ static void test_concurrent_readers_writers(void) {
     __atomic_store_n(&writers_running, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&test_stop_flag, 0, __ATOMIC_SEQ_CST);
     __atomic_store_n(&rw_test_major, 0, __ATOMIC_SEQ_CST);
-    
+
     // Start reader threads
     struct thread *readers[NUM_READER_THREADS];
     for (int i = 0; i < NUM_READER_THREADS; i++) {
-        readers[i] = kthread_create("dev_rw_reader", 
-                                      (int (*)(uint64, uint64))rw_reader_thread_fn, 
-                                      i, TEST_ITERATIONS * 2, KERNEL_STACK_ORDER);
+        readers[i] = kthread_create(
+            "dev_rw_reader", (int (*)(uint64, uint64))rw_reader_thread_fn, i,
+            TEST_ITERATIONS * 2, KERNEL_STACK_ORDER);
         assert(!IS_ERR_OR_NULL(readers[i]), "Failed to create reader thread");
         wakeup(readers[i]);
     }
-    
+
     // Start writer threads
     struct thread *writers[NUM_WRITER_THREADS];
     for (int i = 0; i < NUM_WRITER_THREADS; i++) {
-        writers[i] = kthread_create("dev_rw_writer", 
-                                      (int (*)(uint64, uint64))rw_writer_thread_fn, 
-                                      i, TEST_ITERATIONS / 2, KERNEL_STACK_ORDER);
+        writers[i] = kthread_create(
+            "dev_rw_writer", (int (*)(uint64, uint64))rw_writer_thread_fn, i,
+            TEST_ITERATIONS / 2, KERNEL_STACK_ORDER);
         assert(!IS_ERR_OR_NULL(writers[i]), "Failed to create writer thread");
         wakeup(writers[i]);
     }
-    
+
     // Wait for completion
     printf("  Waiting for readers and writers to complete...\n");
     int wait_count = 0;
     while ((__atomic_load_n(&readers_running, __ATOMIC_SEQ_CST) > 0 ||
-            __atomic_load_n(&writers_running, __ATOMIC_SEQ_CST) > 0) && 
+            __atomic_load_n(&writers_running, __ATOMIC_SEQ_CST) > 0) &&
            wait_count < 20000) {
-       scheduler_yield();
+        scheduler_yield();
         wait_count++;
     }
-    
+
     // Stop any remaining threads
     __atomic_store_n(&test_stop_flag, 1, __ATOMIC_SEQ_CST);
     for (int i = 0; i < 10; i++) {
-       scheduler_yield();
+        scheduler_yield();
     }
-    
+
     int reads = __atomic_load_n(&test_reads_completed, __ATOMIC_SEQ_CST);
     int writes = __atomic_load_n(&test_writes_completed, __ATOMIC_SEQ_CST);
-    
+
     printf("  Completed %d reads and %d writes\n", reads, writes);
     assert(writes > 0, "Some writes should have completed");
-    
+
     printf("  PASS: Concurrent readers and writers completed successfully\n");
 }
 
@@ -366,38 +377,40 @@ static _Atomic int gp_test_device_freed = 0;
 
 static void test_rcu_grace_period(void) {
     printf("TEST: RCU Grace Period with Device Unregistration\n");
-    
+
     __atomic_store_n(&gp_test_device_freed, 0, __ATOMIC_SEQ_CST);
-    
+
     // Register a device
     device_t *dev = &test_devices[8];
     init_test_device(dev, TEST_MAJOR_BASE + 20, 1);
     int ret = device_register(dev);
     assert(ret == 0, "device_register should succeed");
-    
+
     // Get a reference while in RCU critical section
     rcu_read_lock();
     device_t *found = device_get(TEST_MAJOR_BASE + 20, 1);
     assert(!IS_ERR(found), "device_get should succeed");
-    
+
     // Unregister the device (but we still hold a reference)
     device_unregister(dev);
-    
+
     // Device should still be accessible via our reference
-    assert(found->major == TEST_MAJOR_BASE + 20, "Device should still be valid");
-    
+    assert(found->major == TEST_MAJOR_BASE + 20,
+           "Device should still be valid");
+
     rcu_read_unlock();
-    
+
     // Release our reference
     device_put(found);
-    
+
     // Wait for grace period
     synchronize_rcu();
-    
+
     // Now device should be fully cleaned up
     found = device_get(TEST_MAJOR_BASE + 20, 1);
-    assert(IS_ERR(found), "device_get should fail after unregister and grace period");
-    
+    assert(IS_ERR(found),
+           "device_get should fail after unregister and grace period");
+
     printf("  PASS: RCU grace period correctly protects device access\n");
 }
 
@@ -407,37 +420,38 @@ static void test_rcu_grace_period(void) {
 
 static void test_rapid_reuse(void) {
     printf("TEST: Rapid Registration/Unregistration (Same Slot)\n");
-    
+
     int success_count = 0;
     device_t *dev = &test_devices[9];
-    
+
     for (int iter = 0; iter < TEST_ITERATIONS / 2; iter++) {
         // Register
         init_test_device(dev, TEST_MAJOR_BASE + 30, 1);
         int ret = device_register(dev);
         if (ret == 0) {
             success_count++;
-            
+
             // Verify lookup
             device_t *found = device_get(TEST_MAJOR_BASE + 30, 1);
             if (!IS_ERR(found)) {
                 device_put(found);
             }
-            
+
             // Unregister
             device_unregister(dev);
-            
+
             // Wait for grace period before re-registering
             synchronize_rcu();
             success_count++;
         }
-        
-       scheduler_yield();
+
+        scheduler_yield();
     }
-    
+
     printf("  Completed %d successful operations\n", success_count);
-    assert(success_count >= TEST_ITERATIONS / 2, "Most operations should succeed");
-    
+    assert(success_count >= TEST_ITERATIONS / 2,
+           "Most operations should succeed");
+
     printf("  PASS: Rapid reuse of device slots works correctly\n");
 }
 
@@ -447,42 +461,47 @@ static void test_rapid_reuse(void) {
 
 void dev_table_test(void) {
     printf("\n");
-    printf("================================================================================\n");
+    printf("==================================================================="
+           "=============\n");
     printf("Device Table Stress Test Suite Starting\n");
-    printf("================================================================================\n");
+    printf("==================================================================="
+           "=============\n");
     printf("  Configuration:\n");
     printf("    - Reader threads: %d\n", NUM_READER_THREADS);
     printf("    - Writer threads: %d\n", NUM_WRITER_THREADS);
     printf("    - Iterations per test: %d\n", TEST_ITERATIONS);
-    printf("================================================================================\n");
+    printf("==================================================================="
+           "=============\n");
     printf("\n");
-    
+
     // Initialize test devices array
     for (int i = 0; i < MAX_TEST_DEVICES; i++) {
         __atomic_store_n(&test_device_registered[i], 0, __ATOMIC_SEQ_CST);
     }
-    
+
     // Run tests
     test_basic_registration();
     printf("\n");
-    
+
     test_concurrent_readers();
     printf("\n");
-    
+
     test_register_unregister_stress();
     printf("\n");
-    
+
     test_concurrent_readers_writers();
     printf("\n");
-    
+
     test_rcu_grace_period();
     printf("\n");
-    
+
     test_rapid_reuse();
     printf("\n");
-    
-    printf("================================================================================\n");
+
+    printf("==================================================================="
+           "=============\n");
     printf("Device Table Stress Test Suite Completed - ALL TESTS PASSED\n");
-    printf("================================================================================\n");
+    printf("==================================================================="
+           "=============\n");
     printf("\n");
 }

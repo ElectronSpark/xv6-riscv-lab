@@ -41,10 +41,10 @@ void rcu_read_unlock(void);
  *
  * Must be called within an RCU read-side critical section.
  */
-#define rcu_dereference(p) \
-    ({ \
-        typeof(p) _p = __atomic_load_n(&(p), __ATOMIC_CONSUME); \
-        _p; \
+#define rcu_dereference(p)                                                     \
+    ({                                                                         \
+        typeof(p) _p = __atomic_load_n(&(p), __ATOMIC_CONSUME);                \
+        _p;                                                                    \
     })
 
 /**
@@ -56,8 +56,7 @@ void rcu_read_unlock(void);
  * ordering to ensure that any initialization of the pointed-to structure
  * is visible before the pointer is updated.
  */
-#define rcu_assign_pointer(p, v) \
-    __atomic_store_n(&(p), (v), __ATOMIC_RELEASE)
+#define rcu_assign_pointer(p, v) __atomic_store_n(&(p), (v), __ATOMIC_RELEASE)
 
 // RCU Synchronization API
 
@@ -212,8 +211,7 @@ void rcu_run_tests(void);
  * Use this when you only need to check if the pointer is NULL or compare it,
  * not dereference it.
  */
-#define rcu_access_pointer(p) \
-    __atomic_load_n(&(p), __ATOMIC_RELAXED)
+#define rcu_access_pointer(p) __atomic_load_n(&(p), __ATOMIC_RELAXED)
 
 /**
  * RCU_INIT_POINTER() - Initialize an RCU-protected pointer
@@ -224,8 +222,10 @@ void rcu_run_tests(void);
  * does not include memory barriers and should only be used during
  * initialization before the pointer is published.
  */
-#define RCU_INIT_POINTER(p, v) \
-    do { (p) = (v); } while (0)
+#define RCU_INIT_POINTER(p, v)                                                 \
+    do {                                                                       \
+        (p) = (v);                                                             \
+    } while (0)
 
 // RCU List Macros (for RCU-protected linked lists)
 
@@ -238,9 +238,11 @@ void rcu_run_tests(void);
  * Iterate over an RCU-protected list. Must be called within an RCU
  * read-side critical section.
  */
-#define list_for_each_entry_rcu(pos, head, member) \
-    for (pos = container_of(rcu_dereference((head)->next), typeof(*pos), member); \
-         &pos->member != (head); \
-         pos = container_of(rcu_dereference(pos->member.next), typeof(*pos), member))
+#define list_for_each_entry_rcu(pos, head, member)                             \
+    for (pos = container_of(rcu_dereference((head)->next), typeof(*pos),       \
+                            member);                                           \
+         &pos->member != (head);                                               \
+         pos = container_of(rcu_dereference(pos->member.next), typeof(*pos),   \
+                            member))
 
 #endif /* __KERNEL_RCU_H */

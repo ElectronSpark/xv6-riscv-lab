@@ -6,18 +6,19 @@
 
 // Mutual exclusion lock.
 typedef struct spinlock {
-  uint locked;       // Is the lock held?
+    uint locked; // Is the lock held?
 
-  // For debugging:
-  char *name;        // Name of lock.
-  struct cpu_local *cpu;   // The cpu holding the lock.
+    // For debugging:
+    char *name;            // Name of lock.
+    struct cpu_local *cpu; // The cpu holding the lock.
 } spinlock_t __ALIGNED_CACHELINE;
 
-#define SPINLOCK_INITIALIZED(lock_name) { \
-  .locked = 0,                            \
-  .cpu    = NULL,                         \
-  .name   = lock_name,                    \
-}
+#define SPINLOCK_INITIALIZED(lock_name)                                        \
+    {                                                                          \
+        .locked = 0,                                                           \
+        .cpu = NULL,                                                           \
+        .name = lock_name,                                                     \
+    }
 
 /**
  * @brief Default sleep/wakeup callbacks for spinlock-protected waits.
@@ -33,4 +34,4 @@ typedef struct spinlock {
 int spin_sleep_cb(void *data);
 void spin_wake_cb(void *data, int sleep_cb_status);
 
-#endif      /* __KERNEL_SPINLOCK_H */
+#endif /* __KERNEL_SPINLOCK_H */
