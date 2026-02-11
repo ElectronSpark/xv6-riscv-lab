@@ -59,6 +59,10 @@ entry("sigpending");
 entry("sigprocmask");
 entry("pause");
 
+# Memory mapping syscalls
+entry("mmap");
+entry("munmap");
+
 # New VFS-specific syscalls
 entry("getdents");
 entry("chroot");

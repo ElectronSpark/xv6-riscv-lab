@@ -105,6 +105,10 @@
 #include "smp/ipi.h"
 #include "sbi.h"
 #include "errno.h"
+#include <vfs/file.h>
+#include <vfs/fs.h>
+#include <mm/pcache.h>
+#include <dev/bio.h>
 
 static slab_cache_t __vma_pool = {0};
 static slab_cache_t __vm_pool = {0};
@@ -815,6 +819,9 @@ static void __vma_set_free(vma_t *vma) {
     }
 
     vma->flags = VM_FLAG_NONE; // Set the VMA as free
+    if (vma->file != NULL) {
+        vfs_fput(vma->file);  // Release file reference
+    }
     vma->file = NULL;          // Clear the file pointer
     vma->pgoff = 0;            // Reset the page offset
     assert(LIST_NODE_IS_DETACHED(vma, free_list_entry),
@@ -822,7 +829,6 @@ static void __vma_set_free(vma_t *vma) {
 }
 
 static int __vma_copy(vma_t *dst, vma_t *src) {
-    // @TODO: need to take care of file and pgoff if they are not NULL
     if (dst == NULL || src == NULL) {
         return -EINVAL; // Invalid parameters
     }
@@ -832,14 +838,21 @@ static int __vma_copy(vma_t *dst, vma_t *src) {
     if (VMA_SIZE(src) != VMA_SIZE(dst)) {
         return -EINVAL; // Source VMA is empty, cannot duplicate
     }
-    // @TODO: ?
     if ((src->flags & VM_FLAG_PROT_MASK) != (dst->flags & VM_FLAG_PROT_MASK)) {
         return -EINVAL; // Destination VMA is not free, cannot duplicate
     }
 
     dst->flags = src->flags;
-    dst->file = src->file; // Shallow copy of file pointer
     dst->pgoff = src->pgoff;
+    // Duplicate the file reference if file-backed
+    if (src->file != NULL) {
+        dst->file = vfs_fdup(src->file);
+        if (dst->file == NULL) {
+            return -EBADF; // File was already closed
+        }
+    } else {
+        dst->file = NULL;
+    }
     if (src->flags != VM_FLAG_NONE) {
         pagetable_t pgtb_src = src->vm->pagetable;
         pagetable_t pgtb_dst = dst->vm->pagetable;
@@ -1220,10 +1233,12 @@ vma_t *vma_split(vma_t *vma, uint64 va) {
 
     new_vma->end = vma->end;
     new_vma->flags = vma->flags;
-    new_vma->file = vma->file;
+    // Duplicate the file reference for file-backed VMAs
     if (vma->file != NULL) {
+        new_vma->file = vfs_fdup(vma->file);
         new_vma->pgoff = vma->pgoff + (va - vma->start);
     } else {
+        new_vma->file = NULL;
         new_vma->pgoff = 0; // Reset page offset for anonymous VMA
     }
 
@@ -1271,6 +1286,11 @@ vma_t *vma_merge(vma_t *vma1, vma_t *vma2) {
            "vma_merge: rb_delete_node_color failed"); // Remove from tree
     list_node_detach(vma2, list_entry);
     list_node_detach(vma2, free_list_entry);
+    // Release the merged VMA's file reference (vma1 keeps its own ref)
+    if (vma2->file != NULL) {
+        vfs_fput(vma2->file);
+        vma2->file = NULL;
+    }
     __vma_free(vma2); // Free the merged VMA
 
     return vma1; // Return the merged VMA
@@ -1400,6 +1420,77 @@ int va_free(vm_t *vm, vma_t *vma) {
     return 0;
 }
 
+/**
+ * __vma_fault_file_page - Load a page from a file-backed mapping
+ * @vma: the file-backed VMA
+ * @va: the faulting virtual address (page-aligned)
+ *
+ * Allocates a new anonymous page and fills it with data from the file's
+ * page cache. This must be called WITHOUT the vm pgtable spinlock held,
+ * since pcache operations may sleep.
+ *
+ * For pages beyond the file's end, the page is zero-filled.
+ * For the last page that partially overlaps the file, the valid portion
+ * is copied and the rest is zeroed.
+ *
+ * Returns: physical address of the new page, or NULL on failure.
+ */
+static void *__vma_fault_file_page(vma_t *vma, uint64 va) {
+    struct vfs_file *file = vma->file;
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (inode == NULL) {
+        return NULL;
+    }
+    struct pcache *pc = &inode->i_data;
+
+    // Calculate file offset for this page
+    uint64 file_off = vma->pgoff + (va - vma->start);
+
+    // Allocate a new anonymous page for the private copy
+    void *pa = page_alloc(0, PAGE_TYPE_ANON);
+    if (pa == NULL) {
+        return NULL;
+    }
+
+    // Check if this page is entirely beyond the file
+    if (file_off >= (uint64)inode->size) {
+        memset(pa, 0, PGSIZE);
+        return pa;
+    }
+
+    // Calculate how many bytes to read from the file for this page
+    uint64 bytes_to_read = PGSIZE;
+    if (file_off + PGSIZE > (uint64)inode->size) {
+        bytes_to_read = (uint64)inode->size - file_off;
+    }
+
+    // Read from page cache: convert file offset to 512-byte block number
+    uint64 blkno_512 = file_off / BLK_SIZE;
+    page_t *pcpage = pcache_get_page(pc, blkno_512);
+    if (pcpage == NULL) {
+        page_free(pa, 0);
+        return NULL;
+    }
+    int ret = pcache_read_page(pc, pcpage);
+    if (ret != 0) {
+        pcache_put_page(pc, pcpage);
+        page_free(pa, 0);
+        return NULL;
+    }
+
+    // Copy file data from pcache page to our anonymous page
+    struct pcache_node *pcn = pcpage->pcache.pcache_node;
+    memmove(pa, pcn->data, bytes_to_read);
+
+    // Zero-fill the remainder if this is a partial page
+    if (bytes_to_read < PGSIZE) {
+        memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
+    }
+
+    pcache_put_page(pc, pcpage);
+    return pa;
+}
+
 static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte) {
     pte_t pte_val = *pte;
 
@@ -1506,9 +1597,10 @@ static int __vma_validate_pte(vma_t *vma, pte_t *pte, uint64 flags) {
         return -EACCES; // User access permissions do not match
     }
 
-    // @TODO: handle file-backed pages in all the three situations
-    assert(vma->file == NULL,
-           "vma_validate_pte: file-backed pages not supported yet");
+    // For file-backed VMAs, unmapped pages are handled by the caller
+    // (vma_validate) which drops the spinlock for I/O. Once a file page
+    // is loaded as a private anonymous copy, all subsequent faults
+    // (COW, permission changes) are handled identically to anonymous pages.
 
     if ((flags & VM_FLAG_WRITE) && __vma_validate_pte_rxw(vma, pte) != 0) {
         return -EFAULT; // PTE validation failed for writable page
@@ -1550,15 +1642,67 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags) {
     if ((flags & vma->flags) != flags) {
         return -EACCES; // Flags do not match
     }
-    if (vma->file != NULL && (flags & VM_FLAG_FWRITE)) {
-        return -EACCES; // File-backed VMA cannot be writable
-    }
 
     // Acquire page table lock for PTE modifications (demand paging, COW)
     vm_pgtable_lock(vma->vm);
     smp_mb(); // Ensure we see the latest PTE updates
     for (uint64 i = va; i < va_end; i += PGSIZE) {
-        pte_t *pte = walk(vma->vm->pagetable, va, 1, NULL, NULL);
+        // For file-backed VMAs with unmapped pages, we must drop the spinlock
+        // since pcache I/O may sleep.
+        if (vma->file != NULL) {
+            pte_t *pte = walk(vma->vm->pagetable, i, 1, NULL, NULL);
+            if (pte == NULL) {
+                vm_pgtable_unlock(vma->vm);
+                return -ENOMEM;
+            }
+            if (*pte == 0) {
+                // Page not yet mapped - need file I/O (may sleep)
+                vm_pgtable_unlock(vma->vm);
+
+                void *pa = __vma_fault_file_page(vma, i);
+                if (pa == NULL) {
+                    return -ENOMEM;
+                }
+
+                // Re-acquire spinlock and re-walk (PTE may have moved)
+                vm_pgtable_lock(vma->vm);
+                pte = walk(vma->vm->pagetable, i, 1, NULL, NULL);
+                if (pte == NULL) {
+                    vm_pgtable_unlock(vma->vm);
+                    page_free(pa, 0);
+                    return -ENOMEM;
+                }
+                if (*pte != 0) {
+                    // Race: another core already mapped this page
+                    page_free(pa, 0);
+                } else {
+                    // Install PTE for the file page (now a private anon copy)
+                    pte_t pte_flags = 0;
+                    if (vma->flags & VM_FLAG_READ)
+                        pte_flags |= PTE_R;
+                    if (vma->flags & VM_FLAG_WRITE)
+                        pte_flags |= PTE_W;
+                    if (vma->flags & VM_FLAG_EXEC)
+                        pte_flags |= PTE_X;
+                    if (vma->flags & VM_FLAG_USERMAP)
+                        pte_flags |= PTE_U;
+                    pte_flags |= PTE_V | PTE_A | PTE_D;
+                    *pte = PA2PTE(pa) | pte_flags;
+                    sfence_vma();
+                }
+                // Page is now mapped; any further COW etc. is handled below
+                continue;
+            }
+            // Page already mapped - fall through to normal validation
+            if (__vma_validate_pte(vma, pte, flags) != 0) {
+                vm_pgtable_unlock(vma->vm);
+                return -EFAULT;
+            }
+            continue;
+        }
+
+        // Anonymous VMA path (existing code)
+        pte_t *pte = walk(vma->vm->pagetable, i, 1, NULL, NULL);
         if (pte == NULL) {
             vm_pgtable_unlock(vma->vm);
             return -ENOMEM; // walk failed
@@ -1989,17 +2133,24 @@ int vma_mmap(vm_t *vm, uint64 start, size_t size, uint64 flags,
     }
     size = va_end - start; // Ensure size is page-aligned
 
-    // @TODO: file no supported
-    if (file != NULL && (flags & VM_FLAG_FWRITE)) {
-        ret = -EACCES; // File-backed VMA cannot be writable
-        goto out;
-    }
-
     vma_t *vma = va_alloc(vm, start, size, flags);
     if (vma == NULL) {
         ret = -ENOMEM; // Allocation failed
         goto out;
     }
+
+    // Set up file-backed mapping
+    if (file != NULL) {
+        vma->file = vfs_fdup(file);
+        if (vma->file == NULL) {
+            va_free(vm, vma);
+            ret = -EBADF; // File was already closed
+            goto out;
+        }
+        vma->pgoff = pgoff;
+        // Pages are loaded on demand via page faults
+    }
+
     if (pa != NULL) {
         pte_t pte_flags = vm2pte_flags(flags);
         if (mappages(vm->pagetable, vma->start, size, (uint64)pa, pte_flags) !=
@@ -2700,29 +2851,67 @@ int vm_free_thread_stack(vm_t *vm, uint64 stack_top, size_t stack_size) {
 }
 
 /**
- * vm_mmap - Map anonymous memory (user-facing mmap wrapper)
+ * vm_mmap - Map memory (user-facing mmap wrapper)
  * @vm: the virtual memory structure
  * @addr: hint address (0 = let kernel choose)
  * @length: size to map
  * @prot: protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
- * @flags: mapping flags (MAP_PRIVATE, MAP_ANONYMOUS, etc.)
+ * @flags: mapping flags (MAP_PRIVATE, MAP_ANONYMOUS, MAP_SHARED, etc.)
  * @fd: file descriptor (-1 for anonymous)
- * @offset: file offset (unused for anonymous)
+ * @offset: file offset (must be page-aligned for file mappings)
  *
- * This is a simplified mmap that only supports anonymous private mappings,
- * which is what pthread needs for thread stacks and TLS.
+ * Supports:
+ * - Anonymous private mappings (MAP_PRIVATE | MAP_ANONYMOUS)
+ * - File-backed private mappings (MAP_PRIVATE with fd >= 0)
+ *
+ * File-backed MAP_PRIVATE mappings use copy-on-demand: pages are read from
+ * the file's page cache on first access and become private anonymous copies.
+ * Writes to these pages do NOT modify the underlying file.
  *
  * Returns: mapped address on success, (uint64)-1 on error.
  */
 uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
                int fd, uint64 offset) {
+    struct vfs_file *file = NULL;
+
     if (vm == NULL || length == 0) {
         return (uint64)-1; // EINVAL
     }
 
-    // Only support anonymous private mappings for now
-    if (fd != -1 || !(flags & MAP_ANONYMOUS) || !(flags & MAP_PRIVATE)) {
+    // Validate flag combinations
+    if (!(flags & MAP_PRIVATE) && !(flags & MAP_SHARED)) {
+        return (uint64)-1; // Must specify MAP_PRIVATE or MAP_SHARED
+    }
+    if ((flags & MAP_PRIVATE) && (flags & MAP_SHARED)) {
+        return (uint64)-1; // Cannot specify both
+    }
+
+    // MAP_SHARED file mappings not yet supported
+    if (flags & MAP_SHARED) {
         return (uint64)-1; // ENOTSUP
+    }
+
+    if (fd != -1) {
+        // File-backed mapping
+        if (flags & MAP_ANONYMOUS) {
+            return (uint64)-1; // Can't have both fd and MAP_ANONYMOUS
+        }
+        if (offset & (PGSIZE - 1)) {
+            return (uint64)-1; // offset must be page-aligned
+        }
+        // Look up the file from the fd table
+        file = vfs_fdtable_get_file(current->fdtable, fd);
+        if (file == NULL) {
+            return (uint64)-1; // EBADF
+        }
+        // Verify the file is a regular file with an inode
+        struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+        if (inode == NULL || !S_ISREG(inode->mode)) {
+            vfs_fput(file);
+            return (uint64)-1; // ENODEV - not a regular file
+        }
+    } else if (!(flags & MAP_ANONYMOUS)) {
+        return (uint64)-1; // fd=-1 requires MAP_ANONYMOUS
     }
 
     length = PGROUNDUP(length);
@@ -2735,6 +2924,8 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
         vm_flags |= VM_FLAG_WRITE;
     if (prot & PROT_EXEC)
         vm_flags |= VM_FLAG_EXEC;
+    if (file != NULL)
+        vm_flags |= VMA_FLAG_FILE;
 
     vm_wlock(vm);
 
@@ -2744,6 +2935,7 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
         map_addr = vm_find_free_range(vm, length, addr);
         if (map_addr == 0) {
             vm_wunlock(vm);
+            if (file != NULL) vfs_fput(file);
             return (uint64)-1; // ENOMEM
         }
     } else {
@@ -2755,7 +2947,14 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
     vma_t *vma = va_alloc(vm, map_addr, length, vm_flags);
     if (vma == NULL) {
         vm_wunlock(vm);
+        if (file != NULL) vfs_fput(file);
         return (uint64)-1; // ENOMEM
+    }
+
+    // Set up file-backed mapping (pages loaded on demand via page faults)
+    if (file != NULL) {
+        vma->file = file; // Transfer our reference (from vfs_fdtable_get_file)
+        vma->pgoff = offset;
     }
 
     vm_wunlock(vm);

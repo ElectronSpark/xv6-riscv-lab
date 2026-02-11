@@ -34,8 +34,8 @@
 // System calls for labs
 // #define SYS_trace     22
 // #define SYS_sysinfo   23
-// #define SYS_mmap      29
-// #define SYS_munmap    30
+#define SYS_mmap 29
+#define SYS_munmap 30
 // #define SYS_connect   31
 // #define SYS_pgaccess  32
 #define SYS_symlink 33

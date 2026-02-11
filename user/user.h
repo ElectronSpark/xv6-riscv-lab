@@ -8,6 +8,20 @@ struct stat;
 #include "kernel/inc/mm/memstat.h"
 #include "kernel/inc/clone_flags.h"
 
+// mmap protection flags (POSIX)
+#define PROT_NONE 0x0
+#define PROT_READ 0x1
+#define PROT_WRITE 0x2
+#define PROT_EXEC 0x4
+
+// mmap mapping flags (POSIX)
+#define MAP_SHARED 0x01
+#define MAP_PRIVATE 0x02
+#define MAP_FIXED 0x10
+#define MAP_ANONYMOUS 0x20
+#define MAP_ANON MAP_ANONYMOUS
+#define MAP_FAILED ((void *)(uint64)-1)
+
 // system calls
 int clone(struct clone_args *);
 int exit(int) __attribute__((noreturn));
@@ -40,6 +54,10 @@ int sigreturn(void);
 int sigpending(sigset_t *set);
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
 void pause(void);
+
+// Memory mapping
+void *mmap(void *addr, int length, int prot, int flags, int fd, int offset);
+int munmap(void *addr, int length);
 
 // ulib wrapper functions
 int fork(void);

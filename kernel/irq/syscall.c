@@ -89,6 +89,8 @@ extern uint64 sys_gettid(void);
 extern uint64 sys_exit_group(void);
 extern uint64 sys_tgkill(void);
 extern uint64 sys_vfork(void);
+extern uint64 sys_mmap(void);
+extern uint64 sys_munmap(void);
 
 extern uint64 sys_memstat(void);
 extern uint64 sys_dumpproc(void);
@@ -168,6 +170,8 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_exit_group] sys_exit_group,
     [SYS_tgkill] sys_tgkill,
     [SYS_vfork] sys_vfork,
+    [SYS_mmap] sys_mmap,
+    [SYS_munmap] sys_munmap,
     [SYS_memstat] sys_memstat,
     [SYS_dumpproc] sys_dumpproc,
     [SYS_dumpchan] sys_dumpchan,
