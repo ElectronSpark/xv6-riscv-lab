@@ -83,10 +83,9 @@ int thread_clone(struct clone_args *args) {
         return -EINVAL;
     }
 
-    // Reserve a PID slot (lock-free). Actual PID number assigned later
-    // by proctab_proc_add() under pid_wlock.
+    // Too many processes are already running
     if (__alloc_pid() < 0) {
-        return -ENOMEM; // No available PID slots
+        return -EAGAIN;
     }
 
     // Allocate thread.
