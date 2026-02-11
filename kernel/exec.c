@@ -1,8 +1,9 @@
 /*
  * exec.c - Program execution
  *
- * Loads and executes ELF binaries using VFS file operations.
- * This replaces the legacy xv6 fs-based implementation with VFS interfaces.
+ * Loads and executes ELF binaries using file-backed mmap for demand paging.
+ * ELF LOAD segment data is loaded lazily from the page cache on first access
+ * rather than being eagerly read into memory at exec time.
  */
 
 #include "types.h"
@@ -21,9 +22,6 @@
 #include "vfs/fs.h"
 #include "vfs/file.h"
 #include "vfs/fcntl.h"
-
-STATIC int loadseg(pagetable_t pagetable, uint64 va, struct vfs_file *file,
-                   uint offset, uint sz, uint64 pteflags);
 
 int flags2perm(int flags) {
     int perm = 0;
@@ -135,11 +133,65 @@ int exec(char *path, char **argv) {
             goto bad_locked;
         if (ph.vaddr % PGSIZE != 0)
             goto bad_locked;
+        if (ph.filesz > 0 && ph.off % PGSIZE != 0)
+            goto bad_locked;
 
-        vma_t *vma = va_alloc(tmp_vm, ph.vaddr, ph.memsz,
-                              flags2vmperm(ph.flags) | VM_FLAG_USERMAP);
-        if (vma == NULL) {
-            goto bad_locked; // Allocation failed
+        uint64 va = ph.vaddr;
+        uint64 filesz = ph.filesz;
+        uint64 memsz = ph.memsz;
+        uint64 vm_flags = flags2vmperm(ph.flags) | VM_FLAG_USERMAP;
+        uint64 total_end = PGROUNDUP(va + memsz);
+        // End of pages entirely covered by file data
+        uint64 file_pg_end = (filesz > 0) ? PGROUNDDOWN(va + filesz) : va;
+
+        // Region 1: file-backed pages, demand-paged from the page cache
+        if (file_pg_end > va) {
+            vma_t *fvma = va_alloc(tmp_vm, va, file_pg_end - va,
+                                   vm_flags | VMA_FLAG_FILE);
+            if (fvma == NULL)
+                goto bad_locked;
+            fvma->file = vfs_fdup(file);
+            if (fvma->file == NULL)
+                goto bad_locked;
+            fvma->pgoff = ph.off;
+        }
+
+        // Region 2: remaining pages (boundary page + anonymous BSS)
+        if (total_end > file_pg_end) {
+            vma_t *avma = va_alloc(tmp_vm, file_pg_end,
+                                   total_end - file_pg_end, vm_flags);
+            if (avma == NULL)
+                goto bad_locked;
+        }
+
+        // Boundary page: if filesz ends mid-page, manually load the
+        // file-data portion and zero-fill the rest (BSS / padding).
+        if (filesz > 0 && (filesz & (PGSIZE - 1)) != 0) {
+            uint64 bnd_va = file_pg_end;
+            uint32 nbytes = (uint32)((va + filesz) - bnd_va);
+
+            void *pa = kalloc();
+            if (pa == NULL)
+                goto bad_locked;
+            memset(pa, 0, PGSIZE);
+
+            loff_t foff = (loff_t)(ph.off + (bnd_va - va));
+            if (vfs_filelseek(file, foff, SEEK_SET) != foff) {
+                kfree(pa);
+                goto bad_locked;
+            }
+            if (vfs_fileread(file, pa, nbytes, false) !=
+                (ssize_t)nbytes) {
+                kfree(pa);
+                goto bad_locked;
+            }
+
+            int pf = flags2perm(ph.flags) | PTE_U;
+            if (mappages(tmp_vm->pagetable, bnd_va, PGSIZE,
+                         (uint64)pa, pf) != 0) {
+                kfree(pa);
+                goto bad_locked;
+            }
         }
 
         // Track the end of loaded segments for heap start
@@ -147,10 +199,6 @@ int exec(char *path, char **argv) {
         if (heap_start < size1) {
             heap_start = size1;
         }
-
-        if (loadseg(tmp_vm->pagetable, ph.vaddr, file, ph.off, ph.filesz,
-                    flags2perm(ph.flags)) < 0)
-            goto bad_locked;
     }
 
     // Done with the file
@@ -226,56 +274,6 @@ bad:
         vfs_fput(file);
     }
     return -1;
-}
-
-/*
- * Load a program segment into pagetable at virtual address va.
- * va must be page-aligned and the pages from va to va+sz must already be
- * mapped. Uses VFS file operations instead of legacy inode readi(). Returns 0
- * on success, -1 on failure.
- */
-STATIC int loadseg(pagetable_t pagetable, uint64 va, struct vfs_file *file,
-                   uint offset, uint sz, uint64 pteflags) {
-    uint i, n;
-    uint64 pa;
-
-    for (i = 0; i < sz; i += PGSIZE) {
-        // Allocate a physical page
-        pa = (uint64)kalloc();
-        if (pa == 0)
-            return -1; // kalloc failed
-
-        // Calculate how many bytes to read for this page
-        if (sz - i < PGSIZE) {
-            n = sz - i;
-            memset((void *)(pa + n), 0,
-                   PGSIZE - n); // Zero the rest of the page
-        } else {
-            n = PGSIZE;
-        }
-
-        // Seek to the file offset for this segment portion
-        if (vfs_filelseek(file, offset + i, SEEK_SET) != (loff_t)(offset + i)) {
-            kfree((void *)pa);
-            return -1;
-        }
-
-        // Read directly into the physical page (kernel address)
-        ssize_t bytes_read = vfs_fileread(file, (void *)pa, n, false);
-        if (bytes_read != (ssize_t)n) {
-            kfree((void *)pa);
-            return -1;
-        }
-
-        // Map the page into the process's page table
-        if (mappages(pagetable, va + i, PGSIZE, pa, pteflags | PTE_U | PTE_V) !=
-            0) {
-            kfree((void *)pa);
-            return -1; // mappages failed
-        }
-    }
-
-    return 0;
 }
 
 /*
