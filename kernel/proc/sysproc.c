@@ -48,6 +48,23 @@ uint64 sys_tgkill(void) {
     return tgkill(tgid, tid, sig);
 }
 
+// vfork() — dedicated syscall so the userspace wrapper is pure assembly
+// (ecall + ret, no stack usage). This avoids corrupting the parent's
+// stack frame, which is shared with the child via CLONE_VM.
+uint64 sys_vfork(void) {
+    struct clone_args args = {
+        .flags = CLONE_VM | CLONE_VFORK,
+        .stack = 0,
+        .stack_size = 0,
+        .entry = 0,
+        .esignal = SIGCHLD,
+        .tls = 0,
+        .ctid = 0,
+        .ptid = 0,
+    };
+    return thread_clone(&args);
+}
+
 uint64 sys_clone(void) {
     uint64 uargs;
     argaddr(0, &uargs);

@@ -43,6 +43,8 @@ void pause(void);
 
 // ulib wrapper functions
 int fork(void);
+
+// syscall (pure asm stub — must not be a C wrapper due to shared user stack)
 int vfork(void);
 
 uint64 memstat(uint64 flags);

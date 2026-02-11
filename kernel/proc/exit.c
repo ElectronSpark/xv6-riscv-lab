@@ -122,7 +122,12 @@ void exit(int status) {
     // For CLONE_THREAD non-leader threads: self-reap without becoming
     // a visible zombie. The parent only sees the group leader.
     if ((p->clone_flags & CLONE_THREAD) && !is_leader) {
-        // Non-leader thread in a thread group: self-cleanup
+        // Non-leader thread in a thread group: self-cleanup.
+
+        // Reparent any children to init (non-leaders can fork).
+        // Must be done before removing from proctab.
+        reparent(p);
+
         // Remove from thread group and proc table atomically under pid_wlock.
         pid_wlock();
         if (tg != NULL) {
@@ -132,13 +137,9 @@ void exit(int status) {
         pid_wunlock();
         __free_pid();
 
-        tcb_lock(p);
-        p->xstate = status;
-        __thread_state_set(p, THREAD_ZOMBIE);
-        tcb_unlock(p);
-
         // If we're the last thread and the leader is already zombie,
         // wake the parent so it can reap the leader.
+        // Must happen before thread_group_put drops our reference.
         if (last_in_group && tg != NULL && tg->group_leader != NULL) {
             struct thread *leader = tg->group_leader;
             leader->xstate = status;
@@ -152,6 +153,35 @@ void exit(int status) {
                 }
             }
         }
+
+        // Self-cleanup: release resources that thread_destroy would
+        // normally handle. We can't free our own kstack (we're running
+        // on it), so that's deferred to context_switch_finish via the
+        // THREAD_FLAG_SELF_REAP flag.
+        if (p->sigacts != NULL) {
+            sigacts_put(p->sigacts);
+            p->sigacts = NULL;
+        }
+        if (p->vm != NULL) {
+            vm_put(p->vm);
+            p->vm = NULL;
+        }
+        // Purge pending signals (sigacts already NULL, lock check skipped)
+        sigpending_empty(p, 0);
+        sigpending_destroy(p);
+        // Release thread_group reference
+        if (p->thread_group != NULL) {
+            thread_group_put(p->thread_group);
+            p->thread_group = NULL;
+        }
+
+        // Mark as zombie requiring self-reap.  context_switch_finish
+        // will free the kstack after switching to the next thread's stack.
+        tcb_lock(p);
+        p->xstate = status;
+        THREAD_SET_SELF_REAP(p);
+        __thread_state_set(p, THREAD_ZOMBIE);
+        tcb_unlock(p);
 
         scheduler_yield();
         panic("exit: non-leader thread should not return");

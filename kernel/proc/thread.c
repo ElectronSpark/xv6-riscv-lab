@@ -44,6 +44,9 @@ static void __pcb_init(struct thread *p, struct vfs_fdtable *fdtable) {
     list_entry_init(&p->children);
     hlist_entry_init(&p->proctab_entry);
     list_entry_init(&p->tg_entry);
+    list_entry_init(&p->pg_entry);
+    list_entry_init(&p->sid_entry);
+    list_entry_init(&p->wq_entry);
     spin_init(&p->lock, "thread");
     p->thread_group = NULL;
     p->fs = NULL;

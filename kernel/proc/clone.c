@@ -59,12 +59,16 @@ int thread_clone(struct clone_args *args) {
         return -EINVAL;
     }
 
-    // CLONE_THREAD implies CLONE_VM and CLONE_SIGHAND (POSIX requirement).
-    // If CLONE_THREAD is set, enforce these.
-    if (args->flags & CLONE_THREAD) {
-        args->flags |= CLONE_VM | CLONE_SIGHAND;
+    // CLONE_THREAD implies CLONE_PARENT
+    // CLONE_VM, CLONE_SIGHAND are required in this case
+    // (POSIX requirement + Linux behavior: "like CLONE_PARENT").
+    if (args->flags & CLONE_THREAD){
+        if ((args->flags & (CLONE_VM | CLONE_SIGHAND)) == (CLONE_VM | CLONE_SIGHAND)) {
+            return -EINVAL;
+        }
+        args->flags |=  CLONE_PARENT;
     }
-
+    
     // When CLONE_VM is specified without CLONE_VFORK, stack and entry must be
     // provided. CLONE_VFORK is special: child shares parent's stack temporarily
     // and must exec/exit.
@@ -184,10 +188,18 @@ int thread_clone(struct clone_args *args) {
     // proctab_proc_add assigns the actual PID number.
     // thread_group_add requires pid_wlock, so handle CLONE_THREAD here too.
     pid_wlock();
-    if (!(args->flags & CLONE_THREAD)) {
-        // Not a CLONE_THREAD: child is a new process with its own parent-child
-        // relationship. Attach as a child of the calling thread.
-        attach_child(p, ret_ptr);
+
+    // Determine the parent. CLONE_PARENT (implied by CLONE_THREAD):
+    // child shares the caller's parent. Otherwise: caller is the parent.
+    struct thread *real_parent = (args->flags & CLONE_PARENT) ? p->parent : p;
+
+    if (args->flags & CLONE_THREAD) {
+        // CLONE_THREAD: not waitable, so not added to any children list.
+        // Just record the parent pointer for getppid().
+        ret_ptr->parent = real_parent;
+    } else {
+        // Waitable child: add to parent's children list.
+        attach_child(real_parent, ret_ptr);
     }
     proctab_proc_add(ret_ptr);
 

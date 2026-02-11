@@ -19,6 +19,7 @@
 #include "timer/sched_timer_private.h"
 #include "timer/timer.h"
 #include "smp/ipi.h"
+#include <mm/page.h>
 
 // Locking order:
 // - sleep_lock
@@ -679,7 +680,27 @@ void context_switch_finish(struct thread *prev, struct thread *next, int intr) {
 
     // Now safe to mark as not on CPU - wakeup path can proceed.
     // Pairs with smp_cond_load_acquire() in __do_scheduler_wakeup().
-    smp_store_release(&prev->sched_entity->on_cpu, 0);
+
+    // Self-reaping thread (non-leader CLONE_THREAD): free kstack now that
+    // we've fully switched to next's stack and all prev accesses are done.
+    // The thread has already released all other resources in exit().
+    // Cannot use RCU here because the quiescent-state checkpoint may fire
+    // before the context switch completes.
+    if (THREAD_SELF_REAP(prev)) {
+        uint64 kstack_addr = prev->kstack;
+        int kstack_order = prev->kstack_order;
+        page_free((void *)kstack_addr, kstack_order);
+        // prev is now dangling — do NOT access it after this point.
+    } else {
+        // Must clear on_cpu after checking if the previous process is
+        // self-reaping, Otherwise, the parent of the previous process may
+        // release the kstack before we finish context switching, which causes
+        // use-after-free when we access prev->sched_entity->on_cpu here.
+        // This is completely rare, but just to be safe, we put the clearing of
+        // on_cpu after the self-reap check.
+        smp_store_release(&prev->sched_entity->on_cpu, 0);
+    }
+    // After this point, we must not access 'prev'
 
     // Release sleep_lock BEFORE rq_lock to avoid deadlock with interrupt
     // handlers. sleep_lock was acquired with sleep_lock_irqsave(), so use
@@ -690,7 +711,4 @@ void context_switch_finish(struct thread *prev, struct thread *next, int intr) {
     }
 
     rq_unlock_current_irqrestore(intr);
-
-    // Note: Parent wakeup for zombie processes is handled in __exit_yield()
-    // BEFORE the zombie calls scheduler_yield(). See the comment block above.
 }

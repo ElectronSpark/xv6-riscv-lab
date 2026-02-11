@@ -27,21 +27,10 @@ int fork(void) {
     return clone(&args);
 }
 
-// vfork() wrapper - calls clone with CLONE_VM | CLONE_VFORK
-// Parent blocks until child execs or exits
-int vfork(void) {
-    struct clone_args args = {
-        .flags = CLONE_VM | CLONE_VFORK,
-        .stack = 0, // use parent's stack
-        .stack_size = 0,
-        .entry = 0,
-        .esignal = SIGCHLD,
-        .tls = 0,
-        .ctid = 0,
-        .ptid = 0,
-    };
-    return clone(&args);
-}
+// vfork() is now a direct syscall (SYS_vfork) with a pure assembly stub
+// in usys.S. This avoids stack corruption: the C wrapper would save
+// callee-saved registers on the shared user stack, which the child would
+// overwrite when calling functions before exec/exit.
 
 char *strcpy(char *s, const char *t) {
     char *os;
