@@ -89,6 +89,7 @@
 #include "dev/plic.h"
 #include <mm/memlayout.h>
 #include <mm/page.h>
+#include <mm/slab.h>
 #include "param.h"
 #include <smp/percpu.h>
 #include "printf.h"
@@ -98,7 +99,6 @@
 #include <smp/atomic.h>
 #include "rbtree.h"
 #include "riscv.h"
-#include <mm/slab.h>
 #include "string.h"
 #include "types.h"
 #include "dev/fdt.h"
@@ -1825,7 +1825,8 @@ int vm_growstack(vm_t *vm, int64 change_size) {
             return -ENOMEM; // No adjacent free VMA to grow the stack
         }
         if (VMA_SIZE(left) < delta) {
-            return -ENOMEM; // Not enough space in the free VMA to grow the stack
+            return -ENOMEM; // Not enough space in the free VMA to grow the
+                            // stack
         }
         vma_t *grows = vma_split(left, new_start);
         if (grows == NULL) {
@@ -1970,8 +1971,8 @@ ret:
     return ret;
 }
 
-int vma_mmap(vm_t *vm, uint64 start, size_t size, uint64 flags, void *file,
-             uint64 pgoff, void *pa) {
+int vma_mmap(vm_t *vm, uint64 start, size_t size, uint64 flags,
+             struct vfs_file *file, uint64 pgoff, void *pa) {
     int ret = 0;
     if (current != NULL) {
         vm_wlock(vm);
@@ -2054,6 +2055,435 @@ out:
     return ret;
 }
 
+/**
+ * vma_mprotect - Change protection flags of a memory region
+ * @vm: the virtual memory structure
+ * @addr: start address (must be page-aligned)
+ * @size: size of the region to change
+ * @prot: new protection flags (PROT_READ, PROT_WRITE, PROT_EXEC, PROT_NONE)
+ * @todo: support changing flags for a portion of a VMA by splitting the VMA if needed
+ *
+ * Changes the access protections for the pages in the specified address range.
+ * The address must be page-aligned and fall within a single VMA.
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+int vma_mprotect(vm_t *vm, uint64 addr, size_t size, int prot) {
+    int ret = 0;
+    vm_wlock(vm);
+
+    if (vm == NULL || vm->pagetable == NULL) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    addr = PGROUNDDOWN(addr);
+    size = PGROUNDUP(size);
+
+    if (addr < UVMBOTTOM || (addr + size) > UVMTOP) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    if (size == 0) {
+        ret = 0;
+        goto out;
+    }
+
+    vma_t *vma = vm_find_area(vm, addr);
+    if (vma == NULL) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // Check if the entire range is within a single VMA
+    if (addr < vma->start || (addr + size) > vma->end) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // Convert PROT_* flags to VMA flags, preserving xv6-specific flags
+    uint64 old_flags = vma->flags;
+    uint64 new_flags = (vma->flags & ~PROT_MASK);
+    new_flags |= prot & PROT_MASK; // Only consider the PROT_* bits
+
+    // Convert to PTE flags
+    uint64 pte_flags = vm2pte_flags(new_flags);
+
+    // Update each page's PTE
+    vm_pgtable_lock(vm);
+    for (uint64 va = addr; va < addr + size; va += PGSIZE) {
+        pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
+        if (pte != NULL && (*pte & PTE_V)) {
+            // Keep the PA and validity, change permissions
+            uint64 pa = PTE2PA(*pte);
+            *pte = PA2PTE(pa) | pte_flags | PTE_V | PTE_A | PTE_D;
+        }
+    }
+    vm_pgtable_unlock(vm);
+
+    // If the range is a portion of the VMA, we may need to split
+    // For simplicity, just update the VMA flags if the entire VMA is covered
+    if (addr == vma->start && (addr + size) == vma->end) {
+        vma->flags = new_flags;
+    }
+    // Otherwise, we'd need to split the VMA - not implemented for simplicity
+
+    // Flush TLB on remote cores only when permissions are downgraded
+    // (bits present in old_flags but removed in new_flags). Upgrades are
+    // safe without a flush because stale TLB entries simply lack the new
+    // permission — the hardware will fault and pick up the updated PTE.
+    uint64 prot_bits = PROT_READ | PROT_WRITE | PROT_EXEC;
+    if ((old_flags & prot_bits) & ~(new_flags & prot_bits)) {
+        vm_remote_sfence(vm);
+    }
+
+    ret = 0;
+out:
+    vm_wunlock(vm);
+    return ret;
+}
+
+/**
+ * vma_mremap - Remap a virtual memory area to a new address or size
+ * @vm: the virtual memory structure
+ * @old_addr: old start address
+ * @old_size: old size
+ * @new_size: new size
+ * @flags: MREMAP_* flags (MREMAP_MAYMOVE, MREMAP_FIXED)
+ * @new_addr: new address (used with MREMAP_FIXED)
+ *
+ * Expands or shrinks an existing memory mapping, optionally moving it.
+ *
+ * Returns: new address on success, (uint64)-1 on error (errno set).
+ */
+uint64 vma_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
+                  int flags, uint64 new_addr) {
+    uint64 ret = (uint64)-1;
+    vm_wlock(vm);
+
+    if (vm == NULL || vm->pagetable == NULL) {
+        goto out;
+    }
+
+    old_addr = PGROUNDDOWN(old_addr);
+    old_size = PGROUNDUP(old_size);
+    new_size = PGROUNDUP(new_size);
+
+    if (old_addr < UVMBOTTOM || (old_addr + old_size) > UVMTOP) {
+        goto out;
+    }
+
+    vma_t *vma = vm_find_area(vm, old_addr);
+    if (vma == NULL || vma->start != old_addr ||
+        vma->end != old_addr + old_size) {
+        goto out;
+    }
+
+    if (new_size == 0) {
+        // Equivalent to munmap
+        if (va_free(vm, vma) != 0) {
+            goto out;
+        }
+        ret = old_addr;
+        goto out;
+    }
+
+    if (new_size == old_size && !(flags & MREMAP_FIXED)) {
+        // No change needed
+        ret = old_addr;
+        goto out;
+    }
+
+    if (new_size < old_size) {
+        // Shrinking: unmap the tail pages
+        uint64 shrink_start = old_addr + new_size;
+        uint64 shrink_size = old_size - new_size;
+
+        // Unmap and free pages in the shrinking region
+        for (uint64 va = shrink_start; va < shrink_start + shrink_size;
+             va += PGSIZE) {
+            pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
+            if (pte != NULL && (*pte & PTE_V)) {
+                uint64 pa = PTE2PA(*pte);
+                if (pa != 0) {
+                    page_ref_dec((void *)pa);
+                }
+                *pte = 0;
+            }
+        }
+        vma->end = old_addr + new_size;
+        vm_remote_sfence(vm);
+        ret = old_addr;
+        goto out;
+    }
+
+    // Expanding: check if we can grow in place
+    uint64 expand_size = new_size - old_size;
+    uint64 expand_start = old_addr + old_size;
+
+    // Check if the space after is free
+    vma_t *next_vma = vm_find_area(vm, expand_start);
+    if (next_vma == NULL || next_vma->start >= expand_start + expand_size) {
+        // Can grow in place
+        vma->end = old_addr + new_size;
+        ret = old_addr;
+        goto out;
+    }
+
+    // Cannot grow in place - need to move if MREMAP_MAYMOVE is set
+    if (!(flags & MREMAP_MAYMOVE)) {
+        goto out;
+    }
+
+    // Find a new location
+    uint64 new_location = vm_find_free_range(vm, new_size, 0);
+    if (new_location == 0) {
+        goto out;
+    }
+
+    // Allocate new VMA
+    vma_t *new_vma = va_alloc(vm, new_location, new_size, vma->flags);
+    if (new_vma == NULL) {
+        goto out;
+    }
+
+    // Copy pages from old to new location
+    for (uint64 offset = 0; offset < old_size; offset += PGSIZE) {
+        pte_t *old_pte = walk(vm->pagetable, old_addr + offset, 0, NULL, NULL);
+        if (old_pte != NULL && (*old_pte & PTE_V)) {
+            uint64 pa = PTE2PA(*old_pte);
+            uint64 pte_flags = *old_pte & (PTE_R | PTE_W | PTE_X | PTE_U);
+
+            // Map the same physical page at the new address
+            pte_t *new_pte =
+                walk(vm->pagetable, new_location + offset, 1, NULL, NULL);
+            if (new_pte == NULL) {
+                // Rollback would be needed here in production code
+                goto out;
+            }
+            *new_pte = PA2PTE(pa) | pte_flags | PTE_V;
+
+            // Increment refcount for the page
+            page_ref_inc((void *)pa);
+
+            // Clear old PTE
+            *old_pte = 0;
+        }
+    }
+
+    // Free old VMA
+    vma->end = vma->start; // Make it empty so va_free just removes it
+    va_free(vm, vma);
+
+    vm_remote_sfence(vm);
+    ret = new_location;
+
+out:
+    vm_wunlock(vm);
+    return ret;
+}
+
+/**
+ * vma_msync - Synchronize a file with a memory map
+ * @vm: the virtual memory structure
+ * @addr: start address
+ * @size: size of region to sync
+ * @flags: MS_ASYNC, MS_SYNC, MS_INVALIDATE
+ *
+ * Flushes changes made to in-memory copy of a file back to the file system.
+ * For xv6, this is a no-op since we don't have file-backed mmap yet.
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+int vma_msync(vm_t *vm, uint64 addr, size_t size, int flags) {
+    int ret = 0;
+    vm_rlock(vm);
+
+    if (vm == NULL || vm->pagetable == NULL) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    addr = PGROUNDDOWN(addr);
+    size = PGROUNDUP(size);
+
+    if (addr < UVMBOTTOM || (addr + size) > UVMTOP) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    vma_t *vma = vm_find_area(vm, addr);
+    if (vma == NULL) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // Check if the range is within the VMA
+    if (addr < vma->start || (addr + size) > vma->end) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // For file-backed mappings, we would write dirty pages back to disk here
+    // Currently xv6 doesn't support file-backed mmap, so this is a no-op
+    if (vma->file != NULL) {
+        // TODO: Implement file sync when file-backed mmap is supported
+        // For now, just ensure data is consistent
+        __sync_synchronize();
+    }
+
+    ret = 0;
+out:
+    vm_runlock(vm);
+    return ret;
+}
+
+/**
+ * vma_mincore - Determine whether pages are resident in memory
+ * @vm: the virtual memory structure
+ * @addr: start address (must be page-aligned)
+ * @size: size of region
+ * @vec: output array (one byte per page, LSB set if page is resident)
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+int vma_mincore(vm_t *vm, uint64 addr, size_t size, unsigned char *vec) {
+    int ret = 0;
+    vm_rlock(vm);
+
+    if (vm == NULL || vm->pagetable == NULL || vec == NULL) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    if ((addr & (PGSIZE - 1)) != 0) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    size = PGROUNDUP(size);
+
+    if (addr < UVMBOTTOM || (addr + size) > UVMTOP) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    vma_t *vma = vm_find_area(vm, addr);
+    if (vma == NULL) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // Check pages and fill vec
+    size_t num_pages = size / PGSIZE;
+    vm_pgtable_lock(vm);
+    for (size_t i = 0; i < num_pages; i++) {
+        uint64 va = addr + (i * PGSIZE);
+        vec[i] = 0;
+
+        // Check if this VA falls within a valid VMA
+        if (va < vma->start || va >= vma->end) {
+            // Try to find the next VMA
+            vma = vm_find_area(vm, va);
+            if (vma == NULL) {
+                continue; // Not mapped
+            }
+        }
+
+        pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
+        if (pte != NULL && (*pte & PTE_V)) {
+            // Page is resident (has a valid mapping)
+            vec[i] = 1;
+        }
+    }
+    vm_pgtable_unlock(vm);
+
+    ret = 0;
+out:
+    vm_runlock(vm);
+    return ret;
+}
+
+/**
+ * vma_madvise - Give advice about use of memory
+ * @vm: the virtual memory structure
+ * @addr: start address
+ * @size: size of region
+ * @advice: advice type (MADV_NORMAL, MADV_DONTNEED, etc.)
+ *
+ * Gives the kernel hints about the use of memory in the range.
+ * Most advice is currently ignored in xv6, but MADV_DONTNEED will
+ * actually free the pages.
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+int vma_madvise(vm_t *vm, uint64 addr, size_t size, int advice) {
+    int ret = 0;
+    vm_wlock(vm);
+
+    if (vm == NULL || vm->pagetable == NULL) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    addr = PGROUNDDOWN(addr);
+    size = PGROUNDUP(size);
+
+    if (addr < UVMBOTTOM || (addr + size) > UVMTOP) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    vma_t *vma = vm_find_area(vm, addr);
+    if (vma == NULL) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // Check if the range is within the VMA
+    if (addr < vma->start || (addr + size) > vma->end) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    switch (advice) {
+    case MADV_NORMAL:
+    case MADV_RANDOM:
+    case MADV_SEQUENTIAL:
+    case MADV_WILLNEED:
+        // These are hints that we ignore for now
+        ret = 0;
+        break;
+
+    case MADV_DONTNEED:
+        // Free the pages but keep the VMA (they'll be demand-faulted back)
+        vm_pgtable_lock(vm);
+        for (uint64 va = addr; va < addr + size; va += PGSIZE) {
+            pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
+            if (pte != NULL && (*pte & PTE_V)) {
+                uint64 pa = PTE2PA(*pte);
+                if (pa != 0) {
+                    page_ref_dec((void *)pa);
+                }
+                *pte = 0;
+            }
+        }
+        vm_pgtable_unlock(vm);
+        vm_remote_sfence(vm);
+        ret = 0;
+        break;
+
+    default:
+        ret = -EINVAL;
+        break;
+    }
+
+out:
+    vm_wunlock(vm);
+    return ret;
+}
+
 // Copy to either a user address, or kernel address,
 // depending on usr_dst.
 // Returns 0 on success, negative errno on error.
@@ -2078,4 +2508,268 @@ int either_copyin(void *dst, int user_src, uint64 src, uint64 len) {
         memmove(dst, (char *)src, len);
         return 0;
     }
+}
+
+/*
+ * ============================================================================
+ * Pthread Support Functions
+ * ============================================================================
+ * These functions provide VM support for pthread thread management:
+ * - Thread stack allocation with guard pages
+ * - Anonymous memory mapping (mmap/munmap)
+ * - Finding free address ranges for stack allocation
+ */
+
+/**
+ * vm_find_free_range - Find a free address range in the virtual address space
+ * @vm: the virtual memory structure
+ * @size: the size of the range to find (must be page-aligned)
+ * @hint: optional hint address to start searching from (0 = auto)
+ *
+ * Searches for a free (unmapped) contiguous address range of at least @size
+ * bytes. Iterates over existing VMAs to find gaps efficiently.
+ *
+ * Returns: the start address of the free range, or 0 if none found.
+ */
+uint64 vm_find_free_range(vm_t *vm, size_t size, uint64 hint) {
+    if (vm == NULL || size == 0) {
+        return 0;
+    }
+
+    size = PGROUNDUP(size);
+
+    // Search area: between heap end and stack bottom
+    // Leave some space below the main stack for thread stacks
+    uint64 stack_bottom = vm->stack ? vm->stack->start : UVMTOP - PGSIZE;
+    uint64 heap_end = vm->heap ? (vm->heap->start + vm->heap_size) : UVMBOTTOM;
+
+    // Leave 16 pages gap below main stack for thread stacks
+    uint64 search_top = stack_bottom - (16 * PGSIZE);
+    uint64 search_bottom = heap_end;
+
+    if (search_top <= search_bottom + size) {
+        return 0; // Not enough space
+    }
+
+    // Search the vm_free_list for a free VMA that can fit the requested size
+    // within the valid search range [search_bottom, search_top]
+    vma_t *free_area, *tmp;
+    list_foreach_node_inv_safe(&vm->vm_free_list, free_area, tmp,
+                               free_list_entry) {
+        // Check if this free area is valid (flags should be VM_FLAG_NONE)
+        if (free_area->flags != VM_FLAG_NONE) {
+            continue;
+        }
+
+        // Calculate usable range within this free area, constrained by search
+        // bounds
+        uint64 usable_start = free_area->start;
+        uint64 usable_end = free_area->end;
+
+        // Clamp to search bounds
+        if (usable_start < search_bottom) {
+            usable_start = search_bottom;
+        }
+        if (usable_end > search_top) {
+            usable_end = search_top;
+        }
+
+        // Check if there's enough space
+        if (usable_end > usable_start && usable_end - usable_start >= size) {
+            // Allocate from the top of the usable range (grows down like stack)
+            uint64 result = PGROUNDDOWN(usable_end - size);
+            if (result >= usable_start) {
+                return result;
+            }
+        }
+    }
+
+    return 0; // No free range found
+}
+
+/**
+ * vm_alloc_thread_stack - Allocate a stack for a pthread with guard page
+ * @vm: the virtual memory structure
+ * @stack_size: the size of the stack (not including guard page)
+ * @stack_top_out: output pointer to receive the top of the stack (SP value)
+ *
+ * Allocates a thread stack with a guard page at the bottom to detect
+ * stack overflow. The layout is:
+ *   [guard page (no access)] [usable stack space]
+ *                            ^                   ^
+ *                        stack_base          stack_top (returned)
+ *
+ * The caller should set the thread's SP to the returned stack_top value.
+ *
+ * Returns: 0 on success, negative errno on error.
+ *          On success, *stack_top_out contains the initial SP value.
+ */
+int vm_alloc_thread_stack(vm_t *vm, size_t stack_size, uint64 *stack_top_out) {
+    if (vm == NULL || stack_top_out == NULL) {
+        return -EINVAL;
+    }
+
+    // Ensure minimum stack size and page alignment
+    if (stack_size < USERSTACK_MINSZ) {
+        stack_size = USERSTACK_MINSZ;
+    }
+    stack_size = PGROUNDUP(stack_size);
+
+    // Total size includes guard page
+    size_t total_size = stack_size + PGSIZE;
+
+    vm_wlock(vm);
+
+    // Find a free address range for the stack
+    uint64 stack_base = vm_find_free_range(vm, total_size, 0);
+    if (stack_base == 0) {
+        vm_wunlock(vm);
+        return -ENOMEM;
+    }
+
+    // Create guard page VMA (no permissions - will fault on access)
+    uint64 guard_page = stack_base;
+    vma_t *guard_vma = va_alloc(vm, guard_page, PGSIZE, VM_FLAG_GROWSDOWN);
+    if (guard_vma == NULL) {
+        vm_wunlock(vm);
+        return -ENOMEM;
+    }
+    // Guard page has no permissions (VM_FLAG_GROWSDOWN marks it as
+    // stack-related) We don't map any physical page - access will cause a page
+    // fault
+
+    // Create usable stack VMA
+    uint64 usable_stack_base = guard_page + PGSIZE;
+    vma_t *stack_vma = va_alloc(vm, usable_stack_base, stack_size,
+                                VM_FLAG_USERMAP | VM_FLAG_READ | VM_FLAG_WRITE |
+                                    VM_FLAG_GROWSDOWN);
+    if (stack_vma == NULL) {
+        va_free(vm, guard_vma);
+        vm_wunlock(vm);
+        return -ENOMEM;
+    }
+
+    // Stack grows down, so stack_top is at the high end
+    uint64 stack_top = usable_stack_base + stack_size;
+
+    vm_wunlock(vm);
+
+    *stack_top_out = stack_top;
+    return 0;
+}
+
+/**
+ * vm_free_thread_stack - Free a pthread stack
+ * @vm: the virtual memory structure
+ * @stack_top: the top of the stack (as returned by vm_alloc_thread_stack)
+ * @stack_size: the size of the stack (not including guard page)
+ *
+ * Frees both the usable stack area and the guard page.
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+int vm_free_thread_stack(vm_t *vm, uint64 stack_top, size_t stack_size) {
+    if (vm == NULL || stack_top == 0) {
+        return -EINVAL;
+    }
+
+    stack_size = PGROUNDUP(stack_size);
+    if (stack_size < USERSTACK_MINSZ) {
+        stack_size = USERSTACK_MINSZ;
+    }
+
+    uint64 usable_stack_base = stack_top - stack_size;
+    uint64 guard_page = usable_stack_base - PGSIZE;
+
+    vm_wlock(vm);
+
+    // Free the usable stack VMA
+    vma_t *stack_vma = vm_find_area(vm, usable_stack_base);
+    if (stack_vma != NULL) {
+        va_free(vm, stack_vma);
+    }
+
+    // Free the guard page VMA
+    vma_t *guard_vma = vm_find_area(vm, guard_page);
+    if (guard_vma != NULL) {
+        va_free(vm, guard_vma);
+    }
+
+    vm_wunlock(vm);
+    return 0;
+}
+
+/**
+ * vm_mmap - Map anonymous memory (user-facing mmap wrapper)
+ * @vm: the virtual memory structure
+ * @addr: hint address (0 = let kernel choose)
+ * @length: size to map
+ * @prot: protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
+ * @flags: mapping flags (MAP_PRIVATE, MAP_ANONYMOUS, etc.)
+ * @fd: file descriptor (-1 for anonymous)
+ * @offset: file offset (unused for anonymous)
+ *
+ * This is a simplified mmap that only supports anonymous private mappings,
+ * which is what pthread needs for thread stacks and TLS.
+ *
+ * Returns: mapped address on success, (uint64)-1 on error.
+ */
+uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
+               int fd, uint64 offset) {
+    if (vm == NULL || length == 0) {
+        return (uint64)-1; // EINVAL
+    }
+
+    // Only support anonymous private mappings for now
+    if (fd != -1 || !(flags & MAP_ANONYMOUS) || !(flags & MAP_PRIVATE)) {
+        return (uint64)-1; // ENOTSUP
+    }
+
+    length = PGROUNDUP(length);
+
+    // Convert PROT_* to VM_FLAG_*
+    uint64 vm_flags = VM_FLAG_USERMAP;
+    if (prot & PROT_READ)
+        vm_flags |= VM_FLAG_READ;
+    if (prot & PROT_WRITE)
+        vm_flags |= VM_FLAG_WRITE;
+    if (prot & PROT_EXEC)
+        vm_flags |= VM_FLAG_EXEC;
+
+    vm_wlock(vm);
+
+    uint64 map_addr;
+    if (addr == 0 || (flags & MAP_FIXED) == 0) {
+        // Find a free range
+        map_addr = vm_find_free_range(vm, length, addr);
+        if (map_addr == 0) {
+            vm_wunlock(vm);
+            return (uint64)-1; // ENOMEM
+        }
+    } else {
+        // MAP_FIXED: use exact address
+        map_addr = PGROUNDDOWN(addr);
+    }
+
+    // Allocate the VMA
+    vma_t *vma = va_alloc(vm, map_addr, length, vm_flags);
+    if (vma == NULL) {
+        vm_wunlock(vm);
+        return (uint64)-1; // ENOMEM
+    }
+
+    vm_wunlock(vm);
+    return map_addr;
+}
+
+/**
+ * vm_munmap - Unmap memory region
+ * @vm: the virtual memory structure
+ * @addr: start address (must be page-aligned)
+ * @length: size to unmap
+ *
+ * Returns: 0 on success, -1 on error.
+ */
+int vm_munmap(vm_t *vm, uint64 addr, size_t length) {
+    return vma_munmap(vm, addr, length);
 }

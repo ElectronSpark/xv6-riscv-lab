@@ -48,13 +48,25 @@ int either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 uint64 vm2pte_flags(uint64 flags);
 uint64 pte2vm_flags(uint64 pte_flags);
 
-// int vma_mprotect(vm_t *vma, uint64 flags);
-int vma_mmap(vm_t *vm, uint64 start, size_t size, uint64 flags, void *file,
-             uint64 pgoff, void *pa);
+// Memory protection and mapping operations (POSIX-compatible)
+int vma_mprotect(vm_t *vm, uint64 addr, size_t size, int prot);
+int vma_mmap(vm_t *vm, uint64 start, size_t size, uint64 flags,
+             struct vfs_file *file, uint64 pgoff, void *pa);
 int vma_munmap(vm_t *vm, uint64 start, size_t size);
-// int vma_mremap(vm_t *vm, uint64 old_start, uint64 old_end, uint64 new_start,
-// uint64 new_end); int vma_msync(vm_t *vm, uint64 start, uint64 end); int
-// vma_mincore(vm_t *vm, uint64 start, uint64 end, unsigned char *vec); int
-// vma_madvise(vm_t *vm, uint64 start, uint64 end, int advice);
+uint64 vma_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
+                  int flags, uint64 new_addr);
+int vma_msync(vm_t *vm, uint64 addr, size_t size, int flags);
+int vma_mincore(vm_t *vm, uint64 addr, size_t size, unsigned char *vec);
+int vma_madvise(vm_t *vm, uint64 addr, size_t size, int advice);
+
+// Pthread support functions
+uint64 vm_find_free_range(vm_t *vm, size_t size, uint64 hint);
+int vm_alloc_thread_stack(vm_t *vm, size_t stack_size, uint64 *stack_top_out);
+int vm_free_thread_stack(vm_t *vm, uint64 stack_top, size_t stack_size);
+uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
+               int fd, uint64 offset);
+int vm_munmap(vm_t *vm, uint64 addr, size_t length);
+
+// Note: PROT_*, MAP_*, and MAP_FAILED are defined in vm_types.h
 
 #endif // __KERNEL_VM_H

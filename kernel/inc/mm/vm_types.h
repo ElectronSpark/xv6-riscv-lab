@@ -7,9 +7,9 @@
 #include "list_type.h"
 #include "bintree_type.h"
 #include "lock/rwsem_types.h"
+#include <vfs/vfs_types.h>
 
 typedef struct vm vm_t;
-struct file;
 
 typedef struct vma {
     struct rb_node rb_entry; // Red-black tree node for managing VM areas
@@ -18,23 +18,78 @@ typedef struct vma {
     vm_t *vm; // Pointer to the VM structure this area belongs to
     uint64 start;
     uint64 end;
-    uint64 flags;      // Flags for the memory area (e.g., read, write, execute)
-    struct file *file; // File associated with this memory area, if any
-    uint64 pgoff;      // Offset in the file for this memory area
+    uint64 flags; // Flags for the memory area (e.g., read, write, execute)
+    struct vfs_file *file; // File associated with this memory area, if any
+    uint64 pgoff;          // Offset in the file for this memory area
 } vma_t;
 
-#define VM_FLAG_NONE 0x0 // not accessible
-#define VM_FLAG_READ 0x1
-#define VM_FLAG_WRITE 0x2
-#define VM_FLAG_EXEC 0x4
-#define VM_FLAG_USERMAP 0x8     // User-mapped page
-#define VM_FLAG_FWRITE 0x20     // File-backed writable
-#define VM_FLAG_GROWSDOWN 0x100 // Grow downwards
-#define VM_FLAG_GROWSUP 0x200   // Grow upwards
+/*
+ * VMA protection flags (POSIX-compatible)
+ * These match the POSIX mmap PROT_* and MAP_* flags for compatibility.
+ */
 
-#define VM_FLAG_PROT_MASK                                                      \
-    (VM_FLAG_READ | VM_FLAG_WRITE | VM_FLAG_EXEC | VM_FLAG_USERMAP |           \
-     VM_FLAG_FWRITE | VM_FLAG_GROWSDOWN | VM_FLAG_GROWSUP)
+// Protection flags (POSIX PROT_*)
+#define PROT_NONE 0x0       // Page cannot be accessed
+#define PROT_READ 0x1       // Page can be read
+#define PROT_WRITE 0x2      // Page can be written
+#define PROT_EXEC 0x4       // Page can be executed
+#define PROT_GROWSUP 0x40   // Heap-like region (grows up)
+#define PROT_GROWSDOWN 0x80 // Stack-like region (grows down)
+#define PROT_MASK                                                              \
+    (PROT_NONE | PROT_READ | PROT_WRITE | PROT_EXEC | PROT_GROWSUP |           \
+     PROT_GROWSDOWN)
+
+// Mapping flags (POSIX MAP_*)
+#define MAP_SHARED 0x01    // Share changes
+#define MAP_PRIVATE 0x02   // Changes are private
+#define MAP_FIXED 0x10     // Interpret addr exactly
+#define MAP_ANONYMOUS 0x20 // Don't use a file
+#define MAP_ANON MAP_ANONYMOUS
+
+// Extended VMA flags (xv6-specific, in higher bits to avoid conflict)
+#define VMA_FLAG_USER 0x08       // User-accessible mapping
+#define VMA_FLAG_STACK 0x100     // Stack region (grows down)
+#define VMA_FLAG_GROWSDOWN 0x100 // Alias for stack
+#define VMA_FLAG_GROWSUP 0x200   // Heap-like region (grows up)
+#define VMA_FLAG_FILE 0x400      // File-backed mapping
+
+// Backward compatibility aliases (deprecated - use PROT_* instead)
+#define VM_FLAG_NONE PROT_NONE
+#define VM_FLAG_READ PROT_READ
+#define VM_FLAG_WRITE PROT_WRITE
+#define VM_FLAG_EXEC PROT_EXEC
+#define VM_FLAG_USERMAP VMA_FLAG_USER
+#define VM_FLAG_FWRITE MAP_SHARED // File writable -> shared mapping
+#define VM_FLAG_GROWSDOWN VMA_FLAG_GROWSDOWN
+#define VM_FLAG_GROWSUP VMA_FLAG_GROWSUP
+
+// Combined mask for all protection/mapping flags
+#define VMA_FLAG_PROT_MASK                                                     \
+    (PROT_READ | PROT_WRITE | PROT_EXEC | PROT_GROWSUP | PROT_GROWSDOWN |      \
+     VMA_FLAG_USER | VMA_FLAG_STACK | VMA_FLAG_FILE)
+
+// Backward compatibility
+#define VM_FLAG_PROT_MASK VMA_FLAG_PROT_MASK
+
+// mmap failure return value
+#define MAP_FAILED ((void *)(uint64) - 1)
+
+// mremap flags (POSIX-compatible)
+#define MREMAP_MAYMOVE 1 // May move the mapping to a new address
+#define MREMAP_FIXED 2 // Use specified new address (must also specify MAYMOVE)
+
+// msync flags (POSIX-compatible)
+#define MS_ASYNC 1      // Schedule sync, return immediately
+#define MS_SYNC 4       // Synchronous sync
+#define MS_INVALIDATE 2 // Invalidate cached data
+
+// madvise advice flags (POSIX-compatible)
+#define MADV_NORMAL 0     // No special treatment
+#define MADV_RANDOM 1     // Expect random page references
+#define MADV_SEQUENTIAL 2 // Expect sequential page references
+#define MADV_WILLNEED 3   // Will need these pages soon
+#define MADV_DONTNEED 4   // Don't need these pages anymore
+#define MADV_FREE 8       // Pages can be freed (if not dirty)
 
 // Virtual Memory Management structure
 typedef struct vm {
