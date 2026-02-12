@@ -27,6 +27,7 @@ struct vfs_dentry;
 struct vfs_dir_iter;
 struct vfs_file;
 struct vfs_file_ops;
+struct vma;
 
 /*
  * Filesystem type structure
@@ -385,6 +386,23 @@ struct vfs_file_ops {
                  loff_t len);             // Sync a range of data
     int (*fflush)(struct vfs_file *file); // Flush all dirty data
     int (*stat)(struct vfs_file *file, struct stat *stat);
+
+    /*
+     * fault - Demand-page a single page for a file-backed mapping
+     * @file:  the file being mapped
+     * @vma:   the faulting VMA (start/end/flags/pgoff already set)
+     * @va:    faulting virtual address (page-aligned)
+     *
+     * Called WITHOUT the vm pgtable spinlock held (may sleep for I/O).
+     * The vm rlock is held by the caller.
+     *
+     * Must allocate a physical page, populate it with file data (or
+     * zeroes for pages beyond the file), and return the physical address.
+     * Returns NULL on failure.
+     *
+     * If this callback is NULL the VM uses its generic page-cache fault path.
+     */
+    void *(*fault)(struct vfs_file *file, struct vma *vma, uint64 va);
 };
 
 struct vfs_fdtable {

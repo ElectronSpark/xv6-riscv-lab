@@ -38,6 +38,7 @@
 #include "vfs/stat.h"
 #include "vfs/fcntl.h"
 #include "../vfs_private.h"
+#include <mm/page.h>
 #include "xv6fs_private.h"
 
 /*
@@ -375,6 +376,9 @@ int xv6fs_file_fflush(struct vfs_file *file) {
  * VFS file operations structure
  ******************************************************************************/
 
+static void *xv6fs_file_fault(struct vfs_file *file, struct vma *vma,
+                              uint64 va);
+
 struct vfs_file_ops xv6fs_file_ops = {
     .read = xv6fs_file_read,
     .write = xv6fs_file_write,
@@ -383,4 +387,88 @@ struct vfs_file_ops xv6fs_file_ops = {
     .fsync = xv6fs_file_fsync,
     .fflush = xv6fs_file_fflush,
     .stat = xv6fs_file_stat,
+    .fault = xv6fs_file_fault,
 };
+
+/******************************************************************************
+ * Page fault handler for file-backed mmap
+ *
+ * Allocates a fresh anonymous page and populates it with file data read
+ * from the per-inode pcache.
+ *
+ * Because the faulting offset is always page-aligned (both vma->pgoff and
+ * va are page-aligned), the logical block number (bn = file_off / BSIZE) is
+ * always a multiple of BSIZE_PER_PAGE.  This means the pcache page starts
+ * at offset 0 within the data, and we can copy a full PGSIZE (or less for
+ * the last partial page) directly from pcn->data.
+ *
+ * The inode lock is held while reading size and pcache data to prevent
+ * races with concurrent truncate or write.
+ *
+ * @file:  the open file backing the mapping
+ * @vma:   the VMA that was faulted in
+ * @va:    faulting virtual address (page-aligned)
+ * Returns: physical address of the populated page, or NULL on failure.
+ ******************************************************************************/
+static void *xv6fs_file_fault(struct vfs_file *file, struct vma *vma,
+                              uint64 va) {
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (inode == NULL)
+        return NULL;
+    struct pcache *pc = &inode->i_data;
+
+    // file_off is always page-aligned (both pgoff and va are page-aligned)
+    uint64 file_off = vma->pgoff + (va - vma->start);
+
+    void *pa = page_alloc(0, PAGE_TYPE_ANON);
+    if (pa == NULL)
+        return NULL;
+
+    vfs_ilock(inode);
+
+    // Entirely beyond EOF — return a zero page
+    if (file_off >= (uint64)inode->size) {
+        vfs_iunlock(inode);
+        memset(pa, 0, PGSIZE);
+        return pa;
+    }
+
+    uint64 bytes_to_read = PGSIZE;
+    if (file_off + PGSIZE > (uint64)inode->size)
+        bytes_to_read = (uint64)inode->size - file_off;
+
+    if (!pc->active) {
+        vfs_iunlock(inode);
+        page_free(pa, 0);
+        return NULL;
+    }
+
+    // Convert file offset to xv6fs pcache key (512-byte units).
+    // Since file_off is page-aligned, bn is a multiple of BSIZE_PER_PAGE,
+    // so the target data begins at offset 0 within the pcache page.
+    uint bn = file_off / BSIZE;
+    uint64 blkno_512 = (uint64)bn * BLK512_PER_BSIZE;
+
+    page_t *pcpage = pcache_get_page(pc, blkno_512);
+    if (pcpage == NULL) {
+        vfs_iunlock(inode);
+        page_free(pa, 0);
+        return NULL;
+    }
+    int ret = pcache_read_page(pc, pcpage);
+    if (ret != 0) {
+        pcache_put_page(pc, pcpage);
+        vfs_iunlock(inode);
+        page_free(pa, 0);
+        return NULL;
+    }
+
+    struct pcache_node *pcn = pcpage->pcache.pcache_node;
+    memmove(pa, pcn->data, bytes_to_read);
+    if (bytes_to_read < PGSIZE)
+        memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
+
+    pcache_put_page(pc, pcpage);
+    vfs_iunlock(inode);
+    return pa;
+}

@@ -35,6 +35,7 @@
 #include <mm/slab.h>
 #include <mm/vm.h>
 #include <mm/pcache.h>
+#include <mm/page.h>
 #include "tmpfs_private.h"
 
 /******************************************************************************
@@ -107,6 +108,9 @@ static loff_t __tmpfs_file_llseek(struct vfs_file *file, loff_t offset,
                                   int whence);
 static int __tmpfs_file_stat(struct vfs_file *file, struct stat *stat);
 
+static void *__tmpfs_file_fault(struct vfs_file *file, struct vma *vma,
+                               uint64 va);
+
 struct vfs_file_ops tmpfs_file_ops = {
     .read = __tmpfs_file_read,
     .write = __tmpfs_file_write,
@@ -114,6 +118,7 @@ struct vfs_file_ops tmpfs_file_ops = {
     .release = NULL,
     .fsync = NULL,
     .stat = __tmpfs_file_stat,
+    .fault = __tmpfs_file_fault,
 };
 
 static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
@@ -412,4 +417,97 @@ int tmpfs_open(struct vfs_inode *inode, struct vfs_file *file, int f_flags) {
     }
 
     return -ENOSYS;
+}
+
+/******************************************************************************
+ * Page fault handler for file-backed mmap
+ *
+ * Allocates a fresh anonymous page and populates it with data from the
+ * tmpfs file at the faulting offset.  Handles both the embedded-data path
+ * (small files stored inline in the inode) and the pcache path.
+ *
+ * The inode lock is held while reading size/data to prevent races with
+ * concurrent truncate or write.
+ *
+ * @file:  the open file backing the mapping
+ * @vma:   the VMA that was faulted in
+ * @va:    faulting virtual address (page-aligned)
+ * Returns: physical address of the populated page, or NULL on failure.
+ ******************************************************************************/
+static void *__tmpfs_file_fault(struct vfs_file *file, struct vma *vma,
+                                uint64 va) {
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (inode == NULL)
+        return NULL;
+    struct tmpfs_inode *ti = container_of(inode, struct tmpfs_inode, vfs_inode);
+    struct pcache *pc = &inode->i_data;
+
+    // file_off is always page-aligned (both pgoff and va are page-aligned)
+    uint64 file_off = vma->pgoff + (va - vma->start);
+
+    void *pa = page_alloc(0, PAGE_TYPE_ANON);
+    if (pa == NULL)
+        return NULL;
+
+    vfs_ilock(inode);
+
+    // Entirely beyond EOF — return a zero page
+    if (file_off >= (uint64)inode->size) {
+        vfs_iunlock(inode);
+        memset(pa, 0, PGSIZE);
+        return pa;
+    }
+
+    uint64 bytes_to_read = PGSIZE;
+    if (file_off + PGSIZE > (uint64)inode->size)
+        bytes_to_read = (uint64)inode->size - file_off;
+
+    /* ---- embedded data path (small files inline in the inode) ---- */
+    if (ti->embedded) {
+        if (file_off < TMPFS_INODE_EMBEDDED_DATA_LEN) {
+            uint64 avail = TMPFS_INODE_EMBEDDED_DATA_LEN - file_off;
+            if (bytes_to_read > avail)
+                bytes_to_read = avail;
+            memmove(pa, ti->file.data + file_off, bytes_to_read);
+        } else {
+            bytes_to_read = 0;
+        }
+        vfs_iunlock(inode);
+        if (bytes_to_read < PGSIZE)
+            memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
+        return pa;
+    }
+
+    /* ---- pcache path ---- */
+    if (!pc->active) {
+        vfs_iunlock(inode);
+        page_free(pa, 0);
+        return NULL;
+    }
+
+    uint64 block_idx = TMPFS_IBLOCK(file_off);
+    uint64 blkno_512 = block_idx * PCACHE_BLKS_PER_PAGE;
+
+    page_t *pcpage = pcache_get_page(pc, blkno_512);
+    if (pcpage == NULL) {
+        vfs_iunlock(inode);
+        page_free(pa, 0);
+        return NULL;
+    }
+    int ret = pcache_read_page(pc, pcpage);
+    if (ret != 0) {
+        pcache_put_page(pc, pcpage);
+        vfs_iunlock(inode);
+        page_free(pa, 0);
+        return NULL;
+    }
+
+    struct pcache_node *pcn = pcpage->pcache.pcache_node;
+    memmove(pa, pcn->data, bytes_to_read);
+    if (bytes_to_read < PGSIZE)
+        memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
+
+    pcache_put_page(pc, pcpage);
+    vfs_iunlock(inode);
+    return pa;
 }

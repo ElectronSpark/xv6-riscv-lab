@@ -159,8 +159,8 @@ void usertrap(void) {
         vm_rlock(current->vm);
         vma = vm_find_area(current->vm, va);
         if (vma != NULL &&
-            vma_validate(vma, va, 1,
-                         VM_FLAG_USERMAP | VM_FLAG_EXEC | VM_FLAG_READ) == 0) {
+            vma_validate(vma, va, 1, VMA_FLAG_USER | PROT_EXEC | PROT_READ) ==
+                0) {
             vm_runlock(current->vm);
             break;
         }
@@ -178,7 +178,7 @@ void usertrap(void) {
         vm_rlock(current->vm);
         vma = vm_find_area(current->vm, va);
         if (vma != NULL &&
-            vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_READ) == 0) {
+            vma_validate(vma, va, 1, VMA_FLAG_USER | PROT_READ) == 0) {
             vm_runlock(current->vm);
             break;
         }
@@ -200,7 +200,7 @@ void usertrap(void) {
         vm_rlock(current->vm);
         vma = vm_find_area(current->vm, va);
         if (vma != NULL &&
-            vma_validate(vma, va, 1, VM_FLAG_USERMAP | VM_FLAG_WRITE) == 0) {
+            vma_validate(vma, va, 1, VMA_FLAG_USER | PROT_WRITE) == 0) {
             vm_runlock(current->vm);
             break;
         }

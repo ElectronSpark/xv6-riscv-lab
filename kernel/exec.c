@@ -23,34 +23,23 @@
 #include "vfs/file.h"
 #include "vfs/fcntl.h"
 
-int flags2perm(int flags) {
-    int perm = 0;
-    if (flags & 0x1)
-        perm = PTE_X;
-    if (flags & 0x2)
-        perm |= PTE_W;
-    if (flags & 0x4)
-        perm |= PTE_R;
-    return perm;
-}
-
 int flags2vmperm(int flags) {
     int perm = 0;
     if (flags & 0x1)
-        perm = VM_FLAG_EXEC;
+        perm = PROT_EXEC;
     if (flags & 0x2)
-        perm |= VM_FLAG_WRITE;
+        perm |= PROT_WRITE;
     if (flags & 0x4)
-        perm |= VM_FLAG_READ;
+        perm |= PROT_READ;
     return perm;
 }
 
 int ustack_alloc(vm_t *vm, uint64 *sp) {
     uint64 ret_sp = USTACKTOP;
     uint64 stackbase = USTACKTOP - USERSTACK * PGSIZE;
-    if (va_alloc(vm, stackbase, USERSTACK * PGSIZE,
-                 VM_FLAG_USERMAP | VM_FLAG_WRITE | VM_FLAG_READ |
-                     VM_FLAG_GROWSDOWN) == NULL) {
+    if (vma_alloc(vm, stackbase, USERSTACK * PGSIZE,
+                  VMA_FLAG_USER | PROT_WRITE | PROT_READ |
+                      VMA_FLAG_GROWSDOWN) == NULL) {
         return -1; // Allocation failed
     }
     *sp = ret_sp; // Set the stack pointer
@@ -111,11 +100,21 @@ int exec(char *path, char **argv) {
     }
 
     // Because by this time no one else can see tmp_vm, we don't need to worry
-    // about lock contention. But we still need to hold write lock to supress
-    // assertions.
+    // about lock contention. But we still need to hold write lock to suppress
+    // assertions in vma_alloc() called by vm_mmap_region_locked().
     vm_wlock(tmp_vm);
 
-    // Load program into memory.
+    // Load program into memory using mmap for lazy demand paging.
+    //
+    // For each LOAD segment we create up to three regions:
+    //   1. File-backed mmap  [vaddr, file_pg_end)       – demand-paged from
+    //   pcache
+    //   2. Boundary page     [file_pg_end, file_pg_end+PGSIZE) – eagerly
+    //   populated
+    //   3. Anonymous mmap    [anon_start, total_end)     – lazy zero-fill (BSS)
+    //
+    // Linux's load_elf_binary() follows the same pattern: elf_map() for the
+    // file portion, padzero() for the partial page, set_brk() for BSS.
     for (i = 0, off = elf.phoff; i < elf.phnum; i++, off += sizeof(ph)) {
         // Seek to program header
         if (vfs_filelseek(file, off, SEEK_SET) != off)
@@ -139,59 +138,62 @@ int exec(char *path, char **argv) {
         uint64 va = ph.vaddr;
         uint64 filesz = ph.filesz;
         uint64 memsz = ph.memsz;
-        uint64 vm_flags = flags2vmperm(ph.flags) | VM_FLAG_USERMAP;
+        uint64 vm_flags = flags2vmperm(ph.flags) | VMA_FLAG_USER;
         uint64 total_end = PGROUNDUP(va + memsz);
-        // End of pages entirely covered by file data
+        // End of full pages entirely covered by file data
         uint64 file_pg_end = (filesz > 0) ? PGROUNDDOWN(va + filesz) : va;
+        int ret;
 
-        // Region 1: file-backed pages, demand-paged from the page cache
+        // Region 1: file-backed mmap – pages are demand-paged from the
+        // file's page cache on the first instruction/load/store fault.
         if (file_pg_end > va) {
-            vma_t *fvma = va_alloc(tmp_vm, va, file_pg_end - va,
-                                   vm_flags | VMA_FLAG_FILE);
-            if (fvma == NULL)
-                goto bad_locked;
-            fvma->file = vfs_fdup(file);
-            if (fvma->file == NULL)
-                goto bad_locked;
-            fvma->pgoff = ph.off;
-        }
-
-        // Region 2: remaining pages (boundary page + anonymous BSS)
-        if (total_end > file_pg_end) {
-            vma_t *avma = va_alloc(tmp_vm, file_pg_end,
-                                   total_end - file_pg_end, vm_flags);
-            if (avma == NULL)
+            ret = vm_mmap_region_locked(tmp_vm, va, file_pg_end - va,
+                                        vm_flags | VMA_FLAG_FILE, file, ph.off,
+                                        NULL);
+            if (ret != 0)
                 goto bad_locked;
         }
 
-        // Boundary page: if filesz ends mid-page, manually load the
-        // file-data portion and zero-fill the rest (BSS / padding).
-        if (filesz > 0 && (filesz & (PGSIZE - 1)) != 0) {
-            uint64 bnd_va = file_pg_end;
-            uint32 nbytes = (uint32)((va + filesz) - bnd_va);
+        // Has a partial (boundary) page at the end of the file data?
+        int has_boundary = (filesz > 0 && (filesz & (PGSIZE - 1)) != 0);
+        uint64 anon_start = has_boundary ? file_pg_end + PGSIZE : file_pg_end;
 
+        // Region 2: boundary page – the single page that straddles the
+        // file-data / BSS boundary.  We allocate it eagerly, copy the
+        // partial file data, and zero-fill the rest (same as Linux padzero).
+        if (has_boundary) {
+            uint32 nbytes = (uint32)((va + filesz) - file_pg_end);
             void *pa = kalloc();
             if (pa == NULL)
                 goto bad_locked;
             memset(pa, 0, PGSIZE);
 
-            loff_t foff = (loff_t)(ph.off + (bnd_va - va));
+            loff_t foff = (loff_t)(ph.off + (file_pg_end - va));
             if (vfs_filelseek(file, foff, SEEK_SET) != foff) {
                 kfree(pa);
                 goto bad_locked;
             }
-            if (vfs_fileread(file, pa, nbytes, false) !=
-                (ssize_t)nbytes) {
+            if (vfs_fileread(file, pa, nbytes, false) != (ssize_t)nbytes) {
                 kfree(pa);
                 goto bad_locked;
             }
 
-            int pf = flags2perm(ph.flags) | PTE_U;
-            if (mappages(tmp_vm->pagetable, bnd_va, PGSIZE,
-                         (uint64)pa, pf) != 0) {
+            ret = vm_mmap_region_locked(tmp_vm, file_pg_end, PGSIZE, vm_flags,
+                                        NULL, 0, pa);
+            if (ret != 0) {
                 kfree(pa);
                 goto bad_locked;
             }
+        }
+
+        // Region 3: anonymous mmap for the remaining BSS pages.
+        // Faulted in lazily as zero-filled pages.
+        if (total_end > anon_start) {
+            ret = vm_mmap_region_locked(tmp_vm, anon_start,
+                                        total_end - anon_start, vm_flags, NULL,
+                                        0, NULL);
+            if (ret != 0)
+                goto bad_locked;
         }
 
         // Track the end of loaded segments for heap start
@@ -207,18 +209,51 @@ int exec(char *path, char **argv) {
 
     p = current;
 
-    // Allocate some pages at the next page boundary.
-    // Make the first inaccessible as a stack guard.
-    // Use the rest as the user stack.
-    // Create heap area and reserve one page for heap space.
-    if (vm_createheap(tmp_vm, heap_start, USERSTACK * PGSIZE) != 0) {
-        goto bad_locked; // Heap allocation failed
+    // Create heap via mmap (grows-up, demand-paged zero-fill).
+    uint64 heap_sz = PGROUNDUP(USERSTACK * PGSIZE);
+    heap_start = PGROUNDUP(heap_start);
+    if (vm_mmap_region_locked(tmp_vm, heap_start, heap_sz,
+                              PROT_READ | PROT_WRITE | VMA_FLAG_USER |
+                                  VMA_FLAG_GROWSUP,
+                              NULL, 0, NULL) != 0) {
+        goto bad_locked;
     }
-    if (vm_createstack(tmp_vm, USTACKTOP, USERSTACK * PGSIZE) != 0) {
-        goto bad_locked; // Stack allocation failed
+    tmp_vm->heap = vm_find_area(tmp_vm, heap_start);
+    tmp_vm->heap_size = heap_sz;
+
+    // Create user stack via mmap (grows-down, demand-paged zero-fill).
+    uint64 stack_sz = PGROUNDUP(USERSTACK * PGSIZE);
+    if (vm_mmap_region_locked(tmp_vm, USTACKTOP - stack_sz, stack_sz,
+                              PROT_READ | PROT_WRITE | VMA_FLAG_USER |
+                                  VMA_FLAG_GROWSDOWN,
+                              NULL, 0, NULL) != 0) {
+        goto bad_locked;
     }
+    tmp_vm->stack = vm_find_area(tmp_vm, USTACKTOP - stack_sz);
+    tmp_vm->stack_size = stack_sz;
+
     vm_wunlock(tmp_vm);
     sp = USTACKTOP;
+
+    // Preload pages near the entry point to avoid initial page faults.
+    // This is similar to Linux's fault-ahead in load_elf_binary().
+    {
+#define EXEC_PRELOAD_PAGES 4
+        uint64 entry_start = PGROUNDDOWN(elf.entry);
+        uint64 preload_size = EXEC_PRELOAD_PAGES * PGSIZE;
+
+        vm_rlock(tmp_vm);
+        vma_t *entry_vma = vm_find_area(tmp_vm, entry_start);
+        if (entry_vma != NULL) {
+            // Clamp to VMA bounds
+            uint64 preload_end = entry_start + preload_size;
+            if (preload_end > entry_vma->end)
+                preload_end = entry_vma->end;
+            vma_validate(entry_vma, entry_start, preload_end - entry_start,
+                         PROT_READ | VMA_FLAG_USER);
+        }
+        vm_runlock(tmp_vm);
+    }
 
     // Push argument strings, prepare rest of stack in ustack.
     for (argc = 0; argv[argc]; argc++) {

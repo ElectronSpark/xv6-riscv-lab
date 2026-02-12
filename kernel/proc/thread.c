@@ -463,15 +463,15 @@ void userinit(void) {
     uint64 ustack_top = USTACKTOP;
     printf("user stack top at 0x%lx\n", ustack_top);
     tcb_lock(p);
-    uint64 flags = VM_FLAG_EXEC | VM_FLAG_READ | VM_FLAG_USERMAP;
+    uint64 flags = PROT_EXEC | PROT_READ | VMA_FLAG_USER;
     assert(sizeof(initcode) <= PGSIZE, "userinit: initcode too large");
     void *initcode_page = page_alloc(0, PAGE_TYPE_ANON);
     assert(initcode_page != NULL, "userinit: page_alloc failed for initcode");
     memset(initcode_page, 0, PGSIZE);
     memmove(initcode_page, initcode, sizeof(initcode));
-    assert(vma_mmap(p->vm, UVMBOTTOM, PGSIZE, flags, NULL, 0, initcode_page) ==
-               0,
-           "userinit: vma_mmap failed");
+    assert(vm_mmap_region(p->vm, UVMBOTTOM, PGSIZE, flags, NULL, 0,
+                          initcode_page) == 0,
+           "userinit: vm_mmap_region failed");
     // current hasn't been set yet, so we can call createstack without holding
     // the vm lock
     assert(vm_createstack(p->vm, ustack_top, USERSTACK * PGSIZE) == 0,

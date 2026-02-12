@@ -19,7 +19,7 @@ typedef struct vma {
     uint64 start;
     uint64 end;
     uint64 flags; // Flags for the memory area (e.g., read, write, execute)
-    struct vfs_file *file; // File associated with this memory area, if any
+    struct vfs_file *file; // File associated with this memory area
     uint64 pgoff;          // Offset in the file for this memory area
 } vma_t;
 
@@ -46,30 +46,17 @@ typedef struct vma {
 #define MAP_ANONYMOUS 0x20 // Don't use a file
 #define MAP_ANON MAP_ANONYMOUS
 
-// Extended VMA flags (xv6-specific, in higher bits to avoid conflict)
+// VMA flags (stored in vma->flags, xv6-specific, high bits avoid PROT_*
+// conflict)
 #define VMA_FLAG_USER 0x08       // User-accessible mapping
-#define VMA_FLAG_STACK 0x100     // Stack region (grows down)
-#define VMA_FLAG_GROWSDOWN 0x100 // Alias for stack
+#define VMA_FLAG_GROWSDOWN 0x100 // Stack-like region (grows down)
 #define VMA_FLAG_GROWSUP 0x200   // Heap-like region (grows up)
 #define VMA_FLAG_FILE 0x400      // File-backed mapping
 
-// Backward compatibility aliases (deprecated - use PROT_* instead)
-#define VM_FLAG_NONE PROT_NONE
-#define VM_FLAG_READ PROT_READ
-#define VM_FLAG_WRITE PROT_WRITE
-#define VM_FLAG_EXEC PROT_EXEC
-#define VM_FLAG_USERMAP VMA_FLAG_USER
-#define VM_FLAG_FWRITE MAP_SHARED // File writable -> shared mapping
-#define VM_FLAG_GROWSDOWN VMA_FLAG_GROWSDOWN
-#define VM_FLAG_GROWSUP VMA_FLAG_GROWSUP
-
-// Combined mask for all protection/mapping flags
+// Combined mask of all bits that may appear in vma->flags
 #define VMA_FLAG_PROT_MASK                                                     \
-    (PROT_READ | PROT_WRITE | PROT_EXEC | PROT_GROWSUP | PROT_GROWSDOWN |      \
-     VMA_FLAG_USER | VMA_FLAG_STACK | VMA_FLAG_FILE)
-
-// Backward compatibility
-#define VM_FLAG_PROT_MASK VMA_FLAG_PROT_MASK
+    (PROT_READ | PROT_WRITE | PROT_EXEC | VMA_FLAG_USER | VMA_FLAG_GROWSDOWN | \
+     VMA_FLAG_GROWSUP | VMA_FLAG_FILE)
 
 // mmap failure return value
 #define MAP_FAILED ((void *)(uint64) - 1)
