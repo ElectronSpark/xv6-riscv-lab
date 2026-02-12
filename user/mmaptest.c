@@ -521,6 +521,284 @@ void test_mmap_file_boundary(void) {
     printf("OK\n");
 }
 
+/******************************************************************************
+ * mprotect tests
+ ******************************************************************************/
+
+/*
+ * test_mprotect_read_write - mmap a region as PROT_READ, write to it after
+ * upgrading to PROT_READ|PROT_WRITE with mprotect.
+ */
+void test_mprotect_read_write(void) {
+    printf("test_mprotect_read_write: ");
+
+    char *p = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        printf("FAIL - mmap\n");
+        exit(1);
+    }
+
+    // Write to prove it's writable
+    p[0] = 'A';
+    if (p[0] != 'A') {
+        printf("FAIL - initial write\n");
+        exit(1);
+    }
+
+    // Downgrade to read-only
+    if (mprotect(p, 4096, PROT_READ) != 0) {
+        printf("FAIL - mprotect to PROT_READ\n");
+        exit(1);
+    }
+
+    // Upgrade back to read-write
+    if (mprotect(p, 4096, PROT_READ | PROT_WRITE) != 0) {
+        printf("FAIL - mprotect to PROT_READ|PROT_WRITE\n");
+        exit(1);
+    }
+
+    // Write again — should work
+    p[0] = 'B';
+    if (p[0] != 'B') {
+        printf("FAIL - write after upgrade\n");
+        exit(1);
+    }
+
+    munmap(p, 4096);
+    printf("OK\n");
+}
+
+/*
+ * test_mprotect_none - downgrade to PROT_NONE and verify a child that
+ * tries to read it gets killed.
+ */
+void test_mprotect_none(void) {
+    printf("test_mprotect_none: ");
+
+    char *p = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        printf("FAIL - mmap\n");
+        exit(1);
+    }
+    p[0] = 'Z';
+
+    if (mprotect(p, 4096, PROT_NONE) != 0) {
+        printf("FAIL - mprotect PROT_NONE\n");
+        exit(1);
+    }
+
+    int pid = fork();
+    if (pid == 0) {
+        // Child: touching PROT_NONE memory should crash
+        volatile char c = p[0];
+        (void)c;
+        // Should not reach here
+        printf("FAIL - child survived PROT_NONE read\n");
+        exit(1);
+    }
+    int status;
+    wait(&status);
+    // Child should have been killed (non-zero / signal exit)
+    if (status == 0) {
+        printf("FAIL - child exited cleanly (expected crash)\n");
+        exit(1);
+    }
+
+    munmap(p, 4096);
+    printf("OK\n");
+}
+
+/******************************************************************************
+ * mremap tests
+ ******************************************************************************/
+
+/*
+ * test_mremap_grow - grow an anonymous mapping in place.
+ */
+void test_mremap_grow(void) {
+    printf("test_mremap_grow: ");
+
+    char *p = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        printf("FAIL - mmap\n");
+        exit(1);
+    }
+
+    // Write a marker
+    p[0] = 'G';
+    p[4095] = 'H';
+
+    // Grow to 2 pages
+    char *q = mremap(p, 4096, 8192, MREMAP_MAYMOVE, 0);
+    if (q == MAP_FAILED) {
+        printf("FAIL - mremap\n");
+        munmap(p, 4096);
+        exit(1);
+    }
+
+    // Original data preserved
+    if (q[0] != 'G' || q[4095] != 'H') {
+        printf("FAIL - data lost after grow (got '%c' '%c')\n", q[0], q[4095]);
+        exit(1);
+    }
+
+    // Write into expanded region
+    q[4096] = 'I';
+    if (q[4096] != 'I') {
+        printf("FAIL - write to expanded region\n");
+        exit(1);
+    }
+
+    munmap(q, 8192);
+    printf("OK\n");
+}
+
+/*
+ * test_mremap_shrink - shrink an anonymous mapping.
+ */
+void test_mremap_shrink(void) {
+    printf("test_mremap_shrink: ");
+
+    char *p = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        printf("FAIL - mmap\n");
+        exit(1);
+    }
+
+    p[0] = 'S';
+
+    // Shrink to 1 page
+    char *q = mremap(p, 8192, 4096, 0, 0);
+    if (q == MAP_FAILED) {
+        printf("FAIL - mremap shrink\n");
+        munmap(p, 8192);
+        exit(1);
+    }
+
+    // Should keep original data in the first page
+    if (q[0] != 'S') {
+        printf("FAIL - data lost\n");
+        exit(1);
+    }
+
+    // q should equal p (shrink in place)
+    if (q != p) {
+        printf("FAIL - shrink moved mapping\n");
+        exit(1);
+    }
+
+    munmap(q, 4096);
+    printf("OK\n");
+}
+
+/******************************************************************************
+ * mincore test
+ ******************************************************************************/
+
+/*
+ * test_mincore - verify that mincore reports page residency correctly.
+ * After mmap+touch page 0 is resident; page 1 (untouched) may not be.
+ */
+void test_mincore(void) {
+    printf("test_mincore: ");
+
+    char *p = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        printf("FAIL - mmap\n");
+        exit(1);
+    }
+
+    // Touch only the first page
+    p[0] = 'T';
+
+    unsigned char vec[2];
+    if (mincore(p, 8192, vec) != 0) {
+        printf("FAIL - mincore returned error\n");
+        munmap(p, 8192);
+        exit(1);
+    }
+
+    // First page was touched, so must be resident
+    if (!(vec[0] & 1)) {
+        printf("FAIL - page 0 not resident after touch\n");
+        munmap(p, 8192);
+        exit(1);
+    }
+
+    munmap(p, 8192);
+    printf("OK\n");
+}
+
+/******************************************************************************
+ * madvise test
+ ******************************************************************************/
+
+/*
+ * test_madvise_dontneed - use MADV_DONTNEED to discard pages, then verify
+ * they are demand-faulted back as zero.
+ */
+void test_madvise_dontneed(void) {
+    printf("test_madvise_dontneed: ");
+
+    char *p = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        printf("FAIL - mmap\n");
+        exit(1);
+    }
+
+    // Write non-zero data
+    memset(p, 0xAB, 4096);
+    if ((unsigned char)p[0] != 0xAB) {
+        printf("FAIL - write\n");
+        exit(1);
+    }
+
+    // Discard pages
+    if (madvise(p, 4096, MADV_DONTNEED) != 0) {
+        printf("FAIL - madvise\n");
+        exit(1);
+    }
+
+    // Pages should be zero-filled on next access (anonymous mapping)
+    if (p[0] != 0 || p[4095] != 0) {
+        printf("FAIL - page not zeroed after MADV_DONTNEED (got 0x%x 0x%x)\n",
+               (unsigned char)p[0], (unsigned char)p[4095]);
+        exit(1);
+    }
+
+    munmap(p, 4096);
+    printf("OK\n");
+}
+
+/******************************************************************************
+ * msync test
+ ******************************************************************************/
+
+/*
+ * test_msync_basic - verify msync returns 0 on a valid anonymous mapping
+ * (no-op but should not error) and -1 on an invalid address.
+ */
+void test_msync_basic(void) {
+    printf("test_msync_basic: ");
+
+    char *p = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        printf("FAIL - mmap\n");
+        exit(1);
+    }
+    p[0] = 'M';
+
+    // msync on valid mapping should succeed
+    if (msync(p, 4096, MS_SYNC) != 0) {
+        printf("FAIL - msync on valid mapping\n");
+        munmap(p, 4096);
+        exit(1);
+    }
+
+    munmap(p, 4096);
+    printf("OK\n");
+}
+
 int main(int argc, char *argv[]) {
     printf("mmaptest starting\n");
 
@@ -533,6 +811,14 @@ int main(int argc, char *argv[]) {
     test_mmap_file_read_after_close();
     test_mmap_file_two_mappings();
     test_mmap_file_boundary();
+
+    test_mprotect_read_write();
+    test_mprotect_none();
+    test_mremap_grow();
+    test_mremap_shrink();
+    test_mincore();
+    test_madvise_dontneed();
+    test_msync_basic();
 
     printf("mmaptest: all tests passed\n");
     exit(0);

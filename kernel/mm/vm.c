@@ -2352,23 +2352,17 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
     }
 
     if (new_size < old_size) {
-        // Shrinking: unmap the tail pages
+        // Shrinking: split off the tail and free it as a proper VMA
         uint64 shrink_start = old_addr + new_size;
-        uint64 shrink_size = old_size - new_size;
-
-        // Unmap and free pages in the shrinking region
-        for (uint64 va = shrink_start; va < shrink_start + shrink_size;
-             va += PGSIZE) {
-            pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
-            if (pte != NULL && (*pte & PTE_V)) {
-                uint64 pa = PTE2PA(*pte);
-                if (pa != 0) {
-                    page_ref_dec((void *)pa);
-                }
-                *pte = 0;
-            }
+        vma_t *tail = vma_split(vma, shrink_start);
+        if (tail == NULL) {
+            goto out;
         }
-        vma->end = old_addr + new_size;
+        // vma_free handles unmapping pages, merging with right neighbor,
+        // and returning the VA range to the free list.
+        if (vma_free(vm, tail) != 0) {
+            goto out;
+        }
         vm_remote_sfence(vm);
         ret = old_addr;
         goto out;
@@ -2428,8 +2422,9 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
         }
     }
 
-    // Free old VMA
-    vma->end = vma->start; // Make it empty so vma_free just removes it
+    // Free old VMA — PTEs were already cleared above, so __vma_set_free
+    // will skip them.  Do NOT zero-size the VMA (vma->end = vma->start)
+    // because that breaks the right-neighbor merge in vma_free.
     vma_free(vm, vma);
 
     vm_remote_sfence(vm);

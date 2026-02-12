@@ -91,6 +91,11 @@ extern uint64 sys_tgkill(void);
 extern uint64 sys_vfork(void);
 extern uint64 sys_mmap(void);
 extern uint64 sys_munmap(void);
+extern uint64 sys_mprotect(void);
+extern uint64 sys_mremap(void);
+extern uint64 sys_msync(void);
+extern uint64 sys_mincore(void);
+extern uint64 sys_madvise(void);
 
 extern uint64 sys_memstat(void);
 extern uint64 sys_dumpproc(void);
@@ -103,7 +108,7 @@ extern uint64 sys_dumpinode(void);
 // 900
 extern uint64 sys_sync(void);
 
-// VFS syscalls
+// VFS syscalls (implementations in vfs_syscall.c)
 extern uint64 sys_vfs_dup(void);
 extern uint64 sys_vfs_read(void);
 extern uint64 sys_vfs_write(void);
@@ -172,6 +177,11 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_vfork] sys_vfork,
     [SYS_mmap] sys_mmap,
     [SYS_munmap] sys_munmap,
+    [SYS_mprotect] sys_mprotect,
+    [SYS_mremap] sys_mremap,
+    [SYS_msync] sys_msync,
+    [SYS_mincore] sys_mincore,
+    [SYS_madvise] sys_madvise,
     [SYS_memstat] sys_memstat,
     [SYS_dumpproc] sys_dumpproc,
     [SYS_dumpchan] sys_dumpchan,
@@ -180,21 +190,6 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_kernbase] sys_kernbase,
     [SYS_dumpinode] sys_dumpinode,
     [SYS_sync] sys_sync,
-    // VFS extended syscalls (1000+)
-    [SYS_vfs_dup] sys_vfs_dup,
-    [SYS_vfs_read] sys_vfs_read,
-    [SYS_vfs_write] sys_vfs_write,
-    [SYS_vfs_close] sys_vfs_close,
-    [SYS_vfs_fstat] sys_vfs_fstat,
-    [SYS_vfs_open] sys_vfs_open,
-    [SYS_vfs_mkdir] sys_vfs_mkdir,
-    [SYS_vfs_mknod] sys_vfs_mknod,
-    [SYS_vfs_unlink] sys_vfs_unlink,
-    [SYS_vfs_link] sys_vfs_link,
-    [SYS_vfs_symlink] sys_vfs_symlink,
-    [SYS_vfs_chdir] sys_vfs_chdir,
-    [SYS_vfs_pipe] sys_vfs_pipe,
-    [SYS_vfs_connect] sys_vfs_connect,
     [SYS_getdents] sys_getdents,
     [SYS_chroot] sys_chroot,
     [SYS_mount] sys_mount,

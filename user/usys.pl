@@ -15,36 +15,25 @@ sub entry {
     print " ret\n";
 }
 
-# Entry with custom syscall name (for aliasing old names to new syscalls)
-sub entry_aliased {
-    my ($name, $syscall) = @_;
-    print ".global $name\n";
-    print "${name}:\n";
-    print " li a7, SYS_${syscall}\n";
-    print " ecall\n";
-    print " ret\n";
-}
-	
 entry("clone");
 entry("vfork");
 entry("exit");
 entry("wait");
-# Use VFS syscalls for file operations
-entry_aliased("pipe", "vfs_pipe");
-entry_aliased("read", "vfs_read");
-entry_aliased("write", "vfs_write");
-entry_aliased("close", "vfs_close");
+entry("pipe");
+entry("read");
+entry("write");
+entry("close");
 entry("kill");
 entry("exec");
-entry_aliased("open", "vfs_open");
+entry("open");
 entry("mknod");
-entry_aliased("unlink", "vfs_unlink");
-entry_aliased("fstat", "vfs_fstat");
-entry_aliased("link", "vfs_link");
-entry_aliased("symlink", "vfs_symlink");
-entry_aliased("mkdir", "vfs_mkdir");
-entry_aliased("chdir", "vfs_chdir");
-entry_aliased("dup", "vfs_dup");
+entry("unlink");
+entry("fstat");
+entry("link");
+entry("symlink");
+entry("mkdir");
+entry("chdir");
+entry("dup");
 entry("getpid");
 entry("gettid");
 entry("exit_group");
@@ -62,8 +51,12 @@ entry("pause");
 # Memory mapping syscalls
 entry("mmap");
 entry("munmap");
+entry("mprotect");
+entry("mremap");
+entry("msync");
+entry("mincore");
+entry("madvise");
 
-# New VFS-specific syscalls
 entry("getdents");
 entry("chroot");
 entry("mount");

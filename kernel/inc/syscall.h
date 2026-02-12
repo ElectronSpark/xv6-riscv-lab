@@ -3,83 +3,82 @@
 
 #include "compiler.h"
 
-// System call numbers
-#define SYS_clone 1
-#define SYS_exit 2
-#define SYS_wait 3
-#define SYS_pipe 4
-#define SYS_read 5
-#define SYS_kill 6
-#define SYS_exec 7
-#define SYS_fstat 8
-#define SYS_chdir 9
-#define SYS_dup 10
-#define SYS_getpid 11
-#define SYS_sbrk 12
-#define SYS_sleep 13
-#define SYS_uptime 14
-#define SYS_open 15
-#define SYS_write 16
-#define SYS_mknod 17
-#define SYS_unlink 18
-#define SYS_link 19
-#define SYS_mkdir 20
-#define SYS_close 21
+/*
+ * System call numbers — grouped by subsystem with gaps for future use.
+ *
+ *   1-19   Process management
+ *  20-49   File system / VFS
+ *  50-69   Memory management
+ *  70-89   Signals
+ *  90-99   Debug / introspection
+ */
 
-// In the original lab SYS_connect is 29
-#define SYS_connect 22
-// In the original lab SYS_symlink is 26
-// #define SYS_symlink     23
+// --- Process management (1-19) ---
+#define SYS_clone         1
+#define SYS_vfork         2
+#define SYS_exit          3
+#define SYS_exit_group    4
+#define SYS_wait          5
+#define SYS_exec          6
+#define SYS_kill          7
+#define SYS_tgkill        8
+#define SYS_getpid        9
+#define SYS_gettid       10
+#define SYS_sleep        11
+#define SYS_pause        12
+#define SYS_uptime       13
+#define SYS_sbrk         14
+// 15-19 reserved
 
-// System calls for labs
-// #define SYS_trace     22
-// #define SYS_sysinfo   23
-#define SYS_mmap 29
-#define SYS_munmap 30
-// #define SYS_connect   31
-// #define SYS_pgaccess  32
-#define SYS_symlink 33
-#define SYS_sigalarm 34
-#define SYS_sigaction 35
-#define SYS_sigreturn 36
-#define SYS_sigpending 37
-#define SYS_sigprocmask 38
-#define SYS_pause 39
-#define SYS_gettid 40
-#define SYS_exit_group 41
-#define SYS_tgkill 42
-#define SYS_vfork 43
+// --- File system / VFS (20-49) ---
+#define SYS_open         20
+#define SYS_close        21
+#define SYS_read         22
+#define SYS_write        23
+#define SYS_dup          24
+#define SYS_pipe         25
+#define SYS_fstat        26
+#define SYS_link         27
+#define SYS_unlink       28
+#define SYS_symlink      29
+#define SYS_mkdir        30
+#define SYS_mknod        31
+#define SYS_chdir        32
+#define SYS_chroot       33
+#define SYS_mount        34
+#define SYS_umount       35
+#define SYS_connect      36
+#define SYS_getdents     37
+#define SYS_getcwd       38
+#define SYS_sync         39
+// 40-49 reserved
 
-#define SYS_memstat 533
-#define SYS_dumpproc 534
-#define SYS_dumpchan 535
-#define SYS_dumppcache 536
-#define SYS_dumprq 537
-#define SYS_kernbase 538
-#define SYS_dumpinode 539
+// --- Memory management (50-69) ---
+#define SYS_mmap         50
+#define SYS_munmap       51
+#define SYS_mprotect     52
+#define SYS_mremap       53
+#define SYS_msync        54
+#define SYS_mincore      55
+#define SYS_madvise      56
+// 57-69 reserved
 
-#define SYS_sync 900
+// --- Signals (70-89) ---
+#define SYS_sigaction    70
+#define SYS_sigreturn    71
+#define SYS_sigpending   72
+#define SYS_sigprocmask  73
+#define SYS_sigalarm     74
+// 75-89 reserved
 
-// VFS syscalls - these replace the original fs syscalls
-#define SYS_vfs_dup 1000
-#define SYS_vfs_read 1001
-#define SYS_vfs_write 1002
-#define SYS_vfs_close 1003
-#define SYS_vfs_fstat 1004
-#define SYS_vfs_open 1005
-#define SYS_vfs_mkdir 1006
-#define SYS_vfs_mknod 1007
-#define SYS_vfs_unlink 1008
-#define SYS_vfs_link 1010
-#define SYS_vfs_symlink 1011
-#define SYS_vfs_chdir 1012
-#define SYS_vfs_pipe 1013
-#define SYS_vfs_connect 1014
-#define SYS_getdents 1015
-#define SYS_chroot 1016
-#define SYS_mount 1017
-#define SYS_umount 1018
-#define SYS_getcwd 1019
-// SYS_mknod2 removed - mknod now takes 4 args (path, type, major, minor)
+// --- Debug / introspection (90-99) ---
+#define SYS_memstat      90
+#define SYS_dumpproc     91
+#define SYS_dumpchan     92
+#define SYS_dumppcache   93
+#define SYS_dumprq       94
+#define SYS_kernbase     95
+#define SYS_dumpinode    96
+// 97-99 reserved
 
 #endif /* __KERNEL_SYSCALL_H */

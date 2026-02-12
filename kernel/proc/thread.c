@@ -401,16 +401,6 @@ void thread_destroy(struct thread *p) {
     call_rcu(&p->rcu_head, thread_destroy_rcu_callback, p);
 }
 
-// a user program that calls exec("/init")
-// assembled from ../user/initcode.S
-// od -t xC ../user/initcode
-uchar initcode[] = {0x17, 0x05, 0x00, 0x00, 0x13, 0x05, 0x45, 0x02, 0x97,
-                    0x05, 0x00, 0x00, 0x93, 0x85, 0x35, 0x02, 0x93, 0x08,
-                    0x70, 0x00, 0x73, 0x00, 0x00, 0x00, 0x93, 0x08, 0x20,
-                    0x00, 0x73, 0x00, 0x00, 0x00, 0xef, 0xf0, 0x9f, 0xff,
-                    0x2f, 0x69, 0x6e, 0x69, 0x74, 0x00, 0x00, 0x24, 0x10,
-                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
-
 static void init_entry(struct context *prev) {
     // When we arrive here from context switch, we hold the rq lock.
     // Finish the context switch first to release the rq lock properly.
@@ -418,10 +408,17 @@ static void init_entry(struct context *prev) {
     mycpu()->noff = 0; // in a new thread, noff should be 0
     intr_on();
 
-    // Now do post-init work without holding any scheduler locks
+    // Now do post-init work without holding any scheduler locks.
+    // This initializes VFS, mounts filesystems, and sets up root.
     start_kernel_post_init();
 
-    // Return to user space via forkret
+    // Load /init directly via exec — no initcode trampoline needed.
+    char *argv[] = {"init", 0};
+    int ret = exec("/init", argv);
+    if (ret < 0)
+        panic("init_entry: exec /init failed");
+
+    // Return to user space running /init
     smp_mb();
     usertrapret();
 }
@@ -451,49 +448,15 @@ void userinit(void) {
     assert(!IS_ERR_OR_NULL(vm), "userinit: vm_init failed");
     p->vm = vm;
 
-    // // printf user pagetable
-    // printf("\nuser pagetable after thread_create:\n");
-    // dump_pagetable(p->vm.pagetable, 2, 0, 0, 0, false);
-    // printf("\n");
-
     __proctab_set_initproc(p);
-
-    // allocate one user page and copy initcode's instructions
-    // and data into it.
-    uint64 ustack_top = USTACKTOP;
-    printf("user stack top at 0x%lx\n", ustack_top);
-    tcb_lock(p);
-    uint64 flags = PROT_EXEC | PROT_READ | VMA_FLAG_USER;
-    assert(sizeof(initcode) <= PGSIZE, "userinit: initcode too large");
-    void *initcode_page = page_alloc(0, PAGE_TYPE_ANON);
-    assert(initcode_page != NULL, "userinit: page_alloc failed for initcode");
-    memset(initcode_page, 0, PGSIZE);
-    memmove(initcode_page, initcode, sizeof(initcode));
-    assert(vm_mmap_region(p->vm, UVMBOTTOM, PGSIZE, flags, NULL, 0,
-                          initcode_page) == 0,
-           "userinit: vm_mmap_region failed");
-    // current hasn't been set yet, so we can call createstack without holding
-    // the vm lock
-    assert(vm_createstack(p->vm, ustack_top, USERSTACK * PGSIZE) == 0,
-           "userinit: vm_createstack failed");
 
     // allocate signal actions for the thread
     p->sigacts = sigacts_init();
     assert(p->sigacts != NULL, "userinit: sigacts_init failed");
 
-    // printf("\nuser pagetable after uvmfirst:\n");
-    // dump_pagetable(p->vm.pagetable, 2, 0, 0, 0, false);
-    // printf("\n");
-
-    // prepare for the very first "return" from kernel to user.
-    p->trapframe->trapframe.sepc = UVMBOTTOM; // user program counter
-    p->trapframe->trapframe.sp = USTACKTOP;   // user stack pointer
-
     safestrcpy(p->name, "initcode", sizeof(p->name));
 
     THREAD_SET_USER_SPACE(p);
-
-    tcb_unlock(p);
 
     // Set init process scheduling attributes using the new sched_attr API
     struct sched_attr attr;

@@ -3,6 +3,7 @@ add_library(mm OBJECT
     page.c
     slab.c
     vm.c
+    sysmm.c
     pcache.c
     early_allocator.c
 )

@@ -126,32 +126,4 @@ uint64 sys_uptime(void) { return get_jiffs(); }
 // for user-space tests that need to verify they can't access kernel memory
 uint64 sys_kernbase(void) { return __physical_memory_start; }
 
-// mmap() - map files or anonymous memory into the process address space
-uint64 sys_mmap(void) {
-    uint64 addr, offset;
-    int length, prot, flags, fd;
-
-    argaddr(0, &addr);
-    argint(1, &length);
-    argint(2, &prot);
-    argint(3, &flags);
-    argint(4, &fd);
-    argaddr(5, &offset);
-
-    return vm_mmap(current->vm, addr, (size_t)length, prot, flags, fd, offset);
-}
-
-// munmap() - unmap memory region
-uint64 sys_munmap(void) {
-    uint64 addr;
-    int length;
-
-    argaddr(0, &addr);
-    argint(1, &length);
-
-    if (length <= 0) {
-        return -EINVAL;
-    }
-
-    return (uint64)vm_munmap(current->vm, addr, (size_t)length);
-}
+// mmap/munmap/mprotect moved to kernel/mm/sysmm.c

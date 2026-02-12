@@ -22,6 +22,23 @@ struct stat;
 #define MAP_ANON MAP_ANONYMOUS
 #define MAP_FAILED ((void *)(uint64)-1)
 
+// mremap flags
+#define MREMAP_MAYMOVE 1
+#define MREMAP_FIXED 2
+
+// msync flags
+#define MS_ASYNC 1
+#define MS_SYNC 4
+#define MS_INVALIDATE 2
+
+// madvise advice
+#define MADV_NORMAL 0
+#define MADV_RANDOM 1
+#define MADV_SEQUENTIAL 2
+#define MADV_WILLNEED 3
+#define MADV_DONTNEED 4
+#define MADV_FREE 8
+
 // system calls
 int clone(struct clone_args *);
 int exit(int) __attribute__((noreturn));
@@ -58,6 +75,11 @@ void pause(void);
 // Memory mapping
 void *mmap(void *addr, int length, int prot, int flags, int fd, int offset);
 int munmap(void *addr, int length);
+int mprotect(void *addr, int length, int prot);
+void *mremap(void *old_addr, int old_size, int new_size, int flags, void *new_addr);
+int msync(void *addr, int length, int flags);
+int mincore(void *addr, int length, unsigned char *vec);
+int madvise(void *addr, int length, int advice);
 
 // ulib wrapper functions
 int fork(void);
