@@ -27,6 +27,17 @@ static int __underlying_dev_release(device_t *dev) {
     return cdev->ops.release(cdev);
 }
 
+static int __vfs_cdev_underlying_ioctl(device_t *dev, uint64 cmd, uint64 arg) {
+    if (dev == NULL) {
+        return -EINVAL; // Invalid device
+    }
+    cdev_t *cdev = (cdev_t *)dev;
+    if (cdev->ops.ioctl == NULL) {
+        return -ENOSYS; // IOCTL not supported
+    }
+    return cdev->ops.ioctl(cdev, cmd, arg);
+}
+
 static device_ops_t __cdev_underlying_ops = {
     .open = __underlying_dev_open, .release = __underlying_dev_release};
 

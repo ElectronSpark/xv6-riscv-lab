@@ -48,6 +48,7 @@ typedef struct cdev_ops {
     int (*write)(cdev_t *cdev, bool user, const void *buf, size_t count);
     int (*open)(cdev_t *cdev);
     int (*release)(cdev_t *cdev);
+    int (*ioctl)(cdev_t *cdev, uint64 cmd, uint64 arg);
 } cdev_ops_t;
 
 typedef struct cdev {
