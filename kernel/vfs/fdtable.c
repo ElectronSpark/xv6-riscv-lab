@@ -154,7 +154,6 @@ int vfs_fdtable_alloc_fd_from(struct vfs_fdtable *fdtable,
     bits_test_and_set_bit64(&fdtable->files_bitmap[fd >> 6], fd & 63);
     rcu_assign_pointer(fdtable->files[fd], file);
     atomic_inc(&fdtable->fd_count);
-    rcu_assign_pointer(file->fd, fd);
     return fd;
 }
 

@@ -360,7 +360,6 @@ struct vfs_dir_iter {
 struct vfs_file {
     list_node_t list_entry; // entry in global open file table
     struct vfs_inode_ref inode;
-    int fd;        // file descriptor number
     int f_flags;   // file access mode
     int ref_count; // reference count
     struct vfs_file_ops *ops;
