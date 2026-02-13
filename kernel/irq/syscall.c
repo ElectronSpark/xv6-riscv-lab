@@ -88,6 +88,9 @@ extern uint64 sys_pause(void);
 extern uint64 sys_gettid(void);
 extern uint64 sys_exit_group(void);
 extern uint64 sys_tgkill(void);
+extern uint64 sys_tkill(void);
+extern uint64 sys_sigsuspend(void);
+extern uint64 sys_sigwait(void);
 extern uint64 sys_vfork(void);
 extern uint64 sys_mmap(void);
 extern uint64 sys_munmap(void);
@@ -171,6 +174,9 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_sigpending] sys_sigpending,
     [SYS_sigprocmask] sys_sigprocmask,
     [SYS_pause] sys_pause,
+    [SYS_sigsuspend] sys_sigsuspend,
+    [SYS_sigwait] sys_sigwait,
+    [SYS_tkill] sys_tkill,
     [SYS_gettid] sys_gettid,
     [SYS_exit_group] sys_exit_group,
     [SYS_tgkill] sys_tgkill,

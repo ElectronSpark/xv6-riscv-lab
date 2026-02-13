@@ -63,7 +63,7 @@ int thread_clone(struct clone_args *args) {
     // CLONE_VM, CLONE_SIGHAND are required in this case
     // (POSIX requirement + Linux behavior: "like CLONE_PARENT").
     if (args->flags & CLONE_THREAD){
-        if ((args->flags & (CLONE_VM | CLONE_SIGHAND)) == (CLONE_VM | CLONE_SIGHAND)) {
+        if ((args->flags & (CLONE_VM | CLONE_SIGHAND)) != (CLONE_VM | CLONE_SIGHAND)) {
             return -EINVAL;
         }
         args->flags |=  CLONE_PARENT;
@@ -140,8 +140,8 @@ int thread_clone(struct clone_args *args) {
         }
     }
 
-    // signal to be sent to parent on exit
-    ret_ptr->signal.esignal = args->esignal;
+    // Copy per-thread signal mask from parent
+    sigpending_clone(&ret_ptr->signal, &p->signal, args->flags, args->esignal);
     ret_ptr->clone_flags = args->flags;
 
     // copy saved user registers.
@@ -209,10 +209,6 @@ int thread_clone(struct clone_args *args) {
         assert(p->thread_group != NULL,
                "clone: parent has no thread_group for CLONE_THREAD");
         thread_group_add(p->thread_group, ret_ptr);
-
-        // For CLONE_THREAD, the child does not send a signal to the parent
-        // on exit (Linux behavior). The exit signal is 0.
-        ret_ptr->signal.esignal = 0;
         ret_ptr->tgid = p->tgid;
     } else {
         // Not CLONE_THREAD: create a new thread group for the child.

@@ -254,7 +254,7 @@ void thread_group_exit(struct thread *p, int code) {
  * Pick an eligible thread from the group to handle a signal.
  * Preference: 1) the group leader, 2) any thread that doesn't block the signal.
  * Returns NULL if no eligible thread found (all block the signal).
- * Caller must hold pid_rlock or pid_wlock.
+ * Caller must hold pid_rlock or pid_wlock, and sigacts->lock for this group.
  */
 static struct thread *__tg_pick_thread(struct thread_group *tg, int signo) {
     if (tg == NULL)
@@ -263,7 +263,7 @@ static struct thread *__tg_pick_thread(struct thread_group *tg, int signo) {
     // First try the group leader (common case)
     struct thread *leader = tg->group_leader;
     if (leader != NULL && leader->sigacts != NULL) {
-        if (!sigismember(&leader->sigacts->sa_sigmask, signo) &&
+        if (!sigismember(&leader->signal.sig_mask, signo) &&
             !THREAD_IS_ZOMBIE(__thread_state_get(leader)) &&
             __thread_state_get(leader) != THREAD_UNUSED) {
             return leader;
@@ -281,7 +281,7 @@ static struct thread *__tg_pick_thread(struct thread_group *tg, int signo) {
             continue;
         if (t->sigacts == NULL)
             continue;
-        if (!sigismember(&t->sigacts->sa_sigmask, signo)) {
+        if (!sigismember(&t->signal.sig_mask, signo)) {
             return t;
         }
     }
@@ -312,23 +312,28 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
         list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
             THREAD_SET_KILLED(t);
             THREAD_SET_SIGPENDING(t);
-            tcb_lock(t);
-            if (THREAD_SLEEPING(t) || THREAD_STOPPED(t)) {
-                __thread_state_set(t, THREAD_RUNNING);
+            if (THREAD_SLEEPING(t)) {
+                scheduler_wakeup_interruptible(t);
+            } else if (THREAD_STOPPED(t)) {
+                scheduler_wakeup_stopped(t);
             }
-            tcb_unlock(t);
         }
-        // Also record in shared pending for completeness
-        sigaddset(&tg->shared_pending.sig_pending_mask, signo);
         pid_runlock();
         return 0;
     }
 
-    // For other signals, add to shared_pending and pick a thread.
-    // Acquire pid_rlock to iterate the thread_list and read sigacts.
+    // For other signals, enqueue in shared_pending and pick a wake target.
+    // Acquire pid_rlock to iterate the thread_list and pin group structure.
     pid_rlock();
 
     struct thread *leader = tg->group_leader;
+    if (leader == NULL || leader->sigacts == NULL) {
+        pid_runlock();
+        return -ESRCH;
+    }
+
+    sigacts_t *sigacts = leader->sigacts;
+    sigacts_lock(sigacts);
 
     // Classify the signal early — we need to know if it's SIGCONT/SIGSTOP
     // before the dedup check, because SIGCONT must always cancel pending
@@ -336,89 +341,89 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
     bool is_cont = false;
     bool is_stop = false;
     bool is_term = false;
-    sigset_t stop_mask = 0;
-    if (leader != NULL && leader->sigacts != NULL) {
-        sigacts_lock(leader->sigacts);
+    sigset_t stop_mask = sigacts->sa_sigstop;
+    sigset_t cont_mask = sigacts->sa_sigcont;
 
-        // Check if signal should be ignored
-        if (sigismember(&leader->sigacts->sa_sigignore, signo)) {
-            sigacts_unlock(leader->sigacts);
-            pid_runlock();
-            return 0;
+    // Check if signal should be ignored
+    if (sigismember(&sigacts->sa_sigignore, signo)) {
+        sigacts_unlock(sigacts);
+        pid_runlock();
+        return 0;
+    }
+
+    is_cont = sigismember(&cont_mask, signo) > 0;
+    is_stop = sigismember(&stop_mask, signo) > 0;
+    is_term = sigismember(&sigacts->sa_sigterm, signo) > 0;
+
+    // SIGCONT side-effects: cancel pending stops in shared and per-thread
+    // pending sets (must happen even if SIGCONT is already pending).
+    if (is_cont) {
+        tg->shared_pending.sig_pending_mask &= ~stop_mask;
+        struct thread *t;
+        struct thread *tmp;
+        list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
+            t->signal.sig_pending_mask &= ~stop_mask;
         }
+    }
 
-        is_cont = sigismember(&leader->sigacts->sa_sigcont, signo) > 0;
-        is_stop = sigismember(&leader->sigacts->sa_sigstop, signo) > 0;
-        is_term = sigismember(&leader->sigacts->sa_sigterm, signo) > 0;
-        if (is_cont) {
-            stop_mask = leader->sigacts->sa_sigstop;
+    // SIGSTOP side-effects: cancel pending continues in shared and per-thread
+    // pending sets.
+    if (is_stop) {
+        tg->shared_pending.sig_pending_mask &= ~cont_mask;
+        struct thread *t;
+        struct thread *tmp;
+        list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
+            t->signal.sig_pending_mask &= ~cont_mask;
         }
+    }
 
-        // SIGCONT side-effects: cancel pending stops and clear per-thread
-        // stop pending bits. This must happen even if SIGCONT is already
-        // pending (a second SIGCONT must still cancel a second SIGSTOP).
-        if (is_cont) {
-            tg->shared_pending.sig_pending_mask &= ~stop_mask;
-            struct thread *t;
-            struct thread *tmp;
-            list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
-                t->signal.sig_pending_mask &= ~stop_mask;
-            }
-        }
+    sigaction_t *act = &sigacts->sa[signo];
+    if (act->sa_flags & SA_SIGINFO) {
+        sigpending_t *sq = &tg->shared_pending.sig_pending[signo - 1];
 
-        // SIGSTOP side-effects: cancel pending SIGCONT from shared pending
-        if (is_stop) {
-            sigset_t cont_mask = leader->sigacts->sa_sigcont;
-            tg->shared_pending.sig_pending_mask &= ~cont_mask;
-        }
-
-        sigaction_t *act = &leader->sigacts->sa[signo];
-        if (act->sa_flags & SA_SIGINFO) {
-            sigpending_t *sq = &tg->shared_pending.sig_pending[signo - 1];
-
-            // Enforce per-signal queue cap: drop oldest if at limit
-            int qlen = __tg_siginfo_queue_len(sq);
-            if (qlen >= TG_MAX_SIGINFO_PER_SIGNAL) {
-                if (!LIST_IS_EMPTY(&sq->queue)) {
-                    ksiginfo_t *old =
-                        LIST_FIRST_NODE(&sq->queue, ksiginfo_t, list_entry);
-                    if (old) {
-                        list_entry_detach(&old->list_entry);
-                        ksiginfo_free(old);
-                    }
+        // Enforce per-signal queue cap: drop oldest if at limit.
+        int qlen = __tg_siginfo_queue_len(sq);
+        if (qlen >= TG_MAX_SIGINFO_PER_SIGNAL) {
+            if (!LIST_IS_EMPTY(&sq->queue)) {
+                ksiginfo_t *old =
+                    LIST_FIRST_NODE(&sq->queue, ksiginfo_t, list_entry);
+                if (old) {
+                    list_entry_detach(&old->list_entry);
+                    ksiginfo_free(old);
                 }
             }
-
-            // Allocate a COPY — the caller's info may be stack-allocated,
-            // so we must never link it directly into the queue.
-            ksiginfo_t *ksi = ksiginfo_alloc();
-            if (ksi != NULL) {
-                *ksi = *info;
-                list_entry_init(&ksi->list_entry);
-                list_entry_push(&sq->queue, &ksi->list_entry);
-            }
-        } else {
-            // Standard (non-SA_SIGINFO) signal: no queue, just the pending bit.
-            // If already pending, there's nothing more to do — UNLESS this is
-            // SIGCONT, which must always wake stopped threads.
-            if (sigismember(&tg->shared_pending.sig_pending_mask, signo) &&
-                !is_cont) {
-                sigacts_unlock(leader->sigacts);
-                pid_runlock();
-                return 0;
-            }
         }
-        sigacts_unlock(leader->sigacts);
+
+        // Allocate a copy; if allocation fails, keep non-RT semantics by
+        // setting pending bit below without queue payload.
+        ksiginfo_t *ksi = ksiginfo_alloc();
+        if (ksi != NULL) {
+            *ksi = *info;
+            list_entry_init(&ksi->list_entry);
+            list_entry_push(&sq->queue, &ksi->list_entry);
+        }
     } else {
-        // No leader/sigacts — fall back to standard dedup
+        // Standard (non-SA_SIGINFO) signal: if already pending, coalesce.
+        // Exception: SIGCONT side-effects and wakeups must still run.
         if (sigismember(&tg->shared_pending.sig_pending_mask, signo) &&
             !is_cont) {
+            sigacts_unlock(sigacts);
             pid_runlock();
             return 0;
         }
     }
 
     sigaddset(&tg->shared_pending.sig_pending_mask, signo);
+
+    struct thread *target = NULL;
+    if (!is_cont) {
+        target = __tg_pick_thread(tg, signo);
+        if (target != NULL) {
+            THREAD_SET_SIGPENDING(target);
+        }
+    }
+
+    sigacts_unlock(sigacts);
 
     if (is_cont) {
         // SIGCONT: wake ALL stopped threads in the group
@@ -428,17 +433,12 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
             THREAD_SET_SIGPENDING(t);
             if (THREAD_STOPPED(t)) {
                 scheduler_wakeup_stopped(t);
-            } else {
+            } else if (THREAD_INTERRUPTIBLE(t)) {
                 scheduler_wakeup_interruptible(t);
             }
         }
     } else {
-        // Pick a single thread to wake up for delivery
-        struct thread *target = __tg_pick_thread(tg, signo);
-
         if (target != NULL) {
-            THREAD_SET_SIGPENDING(target);
-
             if (is_term && THREAD_STOPPED(target)) {
                 // Terminal signal → wake stopped thread so it can exit
                 scheduler_wakeup_stopped(target);
@@ -467,7 +467,7 @@ bool tg_signal_pending(struct thread_group *tg, struct thread *p) {
     if (tg == NULL || p == NULL || p->sigacts == NULL)
         return false;
     sigset_t shared = smp_load_acquire(&tg->shared_pending.sig_pending_mask);
-    sigset_t blocked = p->sigacts->sa_sigmask;
+    sigset_t blocked = p->signal.sig_mask;
     return (shared & ~blocked) != 0;
 }
 
@@ -520,7 +520,7 @@ void tg_recalc_sigpending(struct thread_group *tg) {
         if (t->sigacts == NULL)
             continue;
         // Check both per-thread and shared pending
-        sigset_t blocked = t->sigacts->sa_sigmask;
+        sigset_t blocked = t->signal.sig_mask;
         sigset_t thread_pending = smp_load_acquire(&t->signal.sig_pending_mask);
         sigset_t shared = tg->shared_pending.sig_pending_mask;
         if (((thread_pending | shared) & ~blocked) != 0) {

@@ -5,8 +5,9 @@
  * Signal operations use a unified lock approach (like Linux sighand->siglock).
  * All signal state is protected by sigacts->lock:
  *   - Signal actions (sigacts->sa[])
- *   - Signal masks (sigacts->sa_sigmask, sa_original_mask)
- *   - Per-thread pending signals (proc->signal.sig_pending_mask, sig_pending[])
+ *   - Per-thread signal masks (thread->signal.sig_mask, sig_saved_mask)
+ *   - Per-thread pending signals (thread->signal.sig_pending_mask,
+ * sig_pending[])
  *
  * Key rules:
  * - sigacts->lock must be held when reading/writing any signal state
@@ -18,7 +19,7 @@
  *
  * The THREAD_FLAG_SIGPENDING flag provides O(1) checks for pending signals.
  * recalc_sigpending_tsk() updates this flag and must be called after any
- * change to signal.sig_pending_mask or sa_sigmask.
+ * change to signal.sig_pending_mask or signal.sig_mask.
  */
 
 #include "types.h"
@@ -114,9 +115,8 @@ bool recalc_sigpending_tsk(struct thread *p) {
         return false;
     }
 
-    sigacts_t *sa = p->sigacts;
     sigset_t pending = smp_load_acquire(&p->signal.sig_pending_mask);
-    sigset_t blocked = sa->sa_sigmask;
+    sigset_t blocked = p->signal.sig_mask;
 
     // Also check thread group shared pending signals
     if (p->thread_group != NULL) {
@@ -187,6 +187,24 @@ void sigpending_destroy(struct thread *p) {
     }
     assert(p->signal.sig_pending_mask == 0,
            "sigpending_destroy: pending mask not zero");
+}
+
+// Copy pending signal state from src to dst during fork/clone.
+// Will suppose the caller is holding sigacts lock
+void sigpending_clone(struct thread_signal *dst, struct thread_signal *src,
+                      uint64 clone_flags, int esignal) {
+    // Copy per-thread signal mask from parent
+    dst->sig_mask = src->sig_mask;
+    dst->sig_saved_mask = src->sig_saved_mask;
+
+    if (clone_flags & CLONE_THREAD) {
+        // For CLONE_THREAD, the child does not send a signal to the parent
+        // on exit (Linux behavior). The exit signal is 0.
+        dst->esignal = 0;
+    } else {
+        // signal to be sent to parent on exit
+        dst->esignal = esignal;
+    }
 }
 
 void sigstack_init(stack_t *stack) {
@@ -332,8 +350,6 @@ sigacts_t *sigacts_init(void) {
         return NULL;
     }
     memset(sa, 0, sizeof(sigacts_t));
-    sigemptyset(&sa->sa_sigmask);
-    sigemptyset(&sa->sa_original_mask);
     sigemptyset(&sa->sa_sigterm);
     sigemptyset(&sa->sa_sigstop);
     sigemptyset(&sa->sa_sigcont);
@@ -362,9 +378,6 @@ sigacts_t *sigacts_dup(sigacts_t *psa, uint64 clone_flags) {
     if (sa) {
         sigacts_lock(psa);
         memmove(sa, psa, sizeof(sigacts_t));
-        // Correctly copy process-level masks; do not derive from sa[0].
-        sa->sa_sigmask = psa->sa_sigmask;
-        sa->sa_original_mask = psa->sa_original_mask;
         sigacts_unlock(psa);
 
         // CRITICAL: Reinitialize the lock and refcount after copying!
@@ -403,7 +416,6 @@ static int __siginfo_queue_len(struct thread *p, int signo) {
 }
 
 int __signal_send(struct thread *p, ksiginfo_t *info) {
-    int ret = -EINVAL; // Default to error
     if (p == NULL || info == NULL) {
         return -EINVAL; // No threads available
     }
@@ -415,7 +427,7 @@ int __signal_send(struct thread *p, ksiginfo_t *info) {
     enum thread_state pstate = __thread_state_get(p);
     if (pstate == THREAD_UNUSED || pstate == THREAD_ZOMBIE ||
         THREAD_KILLED(p)) {
-        return -EINVAL; // Thread is not valid or already killed
+        return -ESRCH; // Thread is not valid or already killed
     }
 
     sigacts_t *sa = p->sigacts;
@@ -452,7 +464,8 @@ int __signal_send(struct thread *p, ksiginfo_t *info) {
         }
         ksiginfo_t *ksi = ksiginfo_alloc();
         if (!ksi) {
-            ret = -EINVAL; // Allocation failed (still set pending bit below)
+            // Allocation failed: keep non-RT semantics by setting the pending
+            // bit below, but skip queuing siginfo payload.
             goto after_enqueue; // fall through to set pending bit & notify
         }
         *ksi = *info; // Copy the signal info
@@ -471,11 +484,11 @@ after_enqueue:
     recalc_sigpending_tsk(p);
 
     bool is_stop = sigismember(&sa->sa_sigstop, info->signo) &&
-                   !sigismember(&sa->sa_sigmask, info->signo);
+                   !sigismember(&p->signal.sig_mask, info->signo);
     bool is_cont = sigismember(&sa->sa_sigcont, info->signo) &&
-                   !sigismember(&sa->sa_sigmask, info->signo);
+                   !sigismember(&p->signal.sig_mask, info->signo);
     bool is_term = sigismember(&sa->sa_sigterm, info->signo);
-    sigset_t sigmask = sa->sa_sigmask;
+    sigset_t sigmask = p->signal.sig_mask;
 
     // Release sigacts lock before scheduler operations
     sigacts_unlock(sa);
@@ -512,10 +525,6 @@ after_enqueue:
         scheduler_wakeup_stopped(p);
     }
 
-    ret = (ret == -EINVAL)
-              ? 0
-              : ret; // Treat enqueue allocation failure as soft failure.
-
     // If the action is to terminate the thread, set the killed flag
     if (is_term) {
         THREAD_SET_KILLED(p);
@@ -534,7 +543,7 @@ after_enqueue:
         tcb_unlock(p);
     }
 
-    return ret; // Signal sent successfully
+    return 0; // Signal sent successfully
 }
 
 int signal_send(int pid, ksiginfo_t *info) {
@@ -545,11 +554,11 @@ int signal_send(int pid, ksiginfo_t *info) {
     rcu_read_lock();
     if (get_pid_thread(pid, &p) != 0) {
         rcu_read_unlock();
-        return -EINVAL; // No thread found
+        return -ESRCH; // No thread found
     }
     if (p == NULL) {
         rcu_read_unlock();
-        return -EINVAL; // No thread found
+        return -ESRCH; // No thread found
     }
     assert(p != NULL, "signal_send: thread is NULL");
 
@@ -590,14 +599,14 @@ bool signal_pending_locked(struct thread *p, sigacts_t *sa) {
 
 int signal_notify(struct thread *p) {
     if (!p) {
-        return -1;
+        return -EINVAL;
     }
     proc_assert_holding(p);
     if (THREAD_AWOKEN(p)) {
         return 0;
     }
     if (!THREAD_SLEEPING(p)) {
-        return -1; // Process is not sleeping
+        return -EAGAIN; // Process is not sleeping
     }
     if (__thread_state_get(p) == THREAD_INTERRUPTIBLE) {
         // Must follow wakeup locking protocol:
@@ -609,7 +618,7 @@ int signal_notify(struct thread *p) {
         tcb_lock(p);
         return 0; // Success
     }
-    return -1; // No signals pending or thread not in interruptible state
+    return -EAGAIN; // Thread not in interruptible state
 }
 
 bool signal_terminated(struct thread *p) {
@@ -621,7 +630,7 @@ bool signal_terminated(struct thread *p) {
         return false; // No sigacts means no termination signals
     }
     sigacts_lock(sa);
-    sigset_t masked = p->signal.sig_pending_mask & ~sa->sa_sigmask;
+    sigset_t masked = p->signal.sig_pending_mask & ~p->signal.sig_mask;
     bool terminated = (masked & sa->sa_sigterm) != 0;
     sigacts_unlock(sa);
     return terminated;
@@ -638,7 +647,7 @@ bool signal_test_clear_stopped(struct thread *p) {
     }
 
     sigacts_lock(sa);
-    sigset_t sigmask = sa->sa_sigmask;
+    sigset_t sigmask = p->signal.sig_mask;
     sigset_t sigstop_mask = sa->sa_sigstop;
     sigset_t sigcont_mask = sa->sa_sigcont;
     sigset_t masked = p->signal.sig_pending_mask & ~sigmask;
@@ -689,24 +698,28 @@ bool signal_test_clear_stopped(struct thread *p) {
 
 int signal_restore(struct thread *p, ucontext_t *context) {
     if (p == NULL || context == NULL) {
-        return -1; // Invalid thread or context
+        return -EINVAL; // Invalid thread or context
     }
 
     sigacts_t *sa = p->sigacts;
+    if (!sa) {
+        return -EINVAL;
+    }
     sigacts_lock(sa);
 
     p->signal.sig_stack = context->uc_stack;
     p->signal.sig_ucontext = (uint64)context->uc_link;
 
     if (p->signal.sig_ucontext == 0) {
-        sa->sa_sigmask = sa->sa_original_mask; // Reset to original mask
+        p->signal.sig_mask = p->signal.sig_saved_mask; // Reset to original mask
     } else {
-        sa->sa_sigmask = context->uc_sigmask;
-        sa->sa_sigmask |= sa->sa_original_mask; // Update the signal mask
+        p->signal.sig_mask = context->uc_sigmask;
+        p->signal.sig_mask |=
+            p->signal.sig_saved_mask; // Update the signal mask
     }
 
-    sigdelset(&sa->sa_sigmask, SIGKILL);
-    sigdelset(&sa->sa_sigmask, SIGSTOP);
+    sigdelset(&p->signal.sig_mask, SIGKILL);
+    sigdelset(&p->signal.sig_mask, SIGSTOP);
     sigdelset(&sa->sa_sigignore, SIGKILL);
     sigdelset(&sa->sa_sigignore, SIGSTOP);
     // Recalc sigpending after changing blocked mask
@@ -718,17 +731,17 @@ int signal_restore(struct thread *p, ucontext_t *context) {
 
 int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
     if (signum < 1 || signum > NSIG) {
-        return -1; // Invalid signal number
+        return -EINVAL; // Invalid signal number
     }
     if (signum == SIGKILL || signum == SIGSTOP) {
-        return -1; // SIGKILL and SIGSTOP cannot be caught or ignored
+        return -EINVAL; // SIGKILL and SIGSTOP cannot be caught or ignored
     }
 
     struct thread *p = current;
     assert(p != NULL, "sys_sigaction: current returned NULL");
 
     if (!THREAD_USER_SPACE(p)) {
-        return -1; // sigaction can only be called in user space
+        return -EPERM; // sigaction can only be called in user space
     }
 
     sigacts_t *sa = p->sigacts;
@@ -741,33 +754,47 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
     }
 
     if (act) {
+        bool clear_pending = false;
         __sig_reset_act_mask(sa, signum);
+
         if (act->sa_handler == SIG_IGN) {
             sigaddset(&sa->sa_sigignore, signum);
+            sa->sa[signum] = *act;
+            clear_pending = true;
         } else if (act->sa_handler == SIG_DFL) {
             if (__sig_setdefault(sa, signum) != 0) {
                 sigacts_unlock(sa);
-                return -1; // Failed to set default action
+                return -EINVAL; // Failed to set default action
             }
+
+            // For default-ignored signals, pending instances are discarded.
+            if (sigismember(&sa->sa_sigignore, signum) > 0) {
+                clear_pending = true;
+            }
+
             // After changing to SIG_DFL, check if any pending signals
             // are now termination signals and update THREAD_KILLED accordingly
-            sigset_t pending_term =
-                p->signal.sig_pending_mask & sa->sa_sigterm & ~sa->sa_sigmask;
+            sigset_t pending_term = p->signal.sig_pending_mask &
+                                    sa->sa_sigterm & ~p->signal.sig_mask;
             if (pending_term != 0) {
                 THREAD_SET_KILLED(p);
             }
+        } else {
+            // User-installed handler: preserve user-supplied disposition data.
+            sa->sa[signum] = *act;
+            sigdelset(&sa->sa[signum].sa_mask, SIGKILL); // Cannot be blocked
+            sigdelset(&sa->sa[signum].sa_mask, SIGSTOP); // Cannot be blocked
         }
-        sa->sa[signum] = *act;
-        sigdelset(&sa->sa[signum].sa_mask, SIGKILL); // Unblock the signal
-        sigdelset(&sa->sa[signum].sa_mask, SIGSTOP); // Unblock the signal
-        // Clear pending signals for this signum (already holding sigacts_lock)
-        if (sigpending_empty(p, signum) != 0) {
-            sigacts_unlock(sa);
-            return -1; // Failed to clear pending signals
-        }
-        // Also clear from thread group's shared_pending
-        if (p->thread_group != NULL) {
-            tg_sigpending_empty(p->thread_group, signum);
+
+        if (clear_pending) {
+            // Only ignored dispositions consume pending signals.
+            if (sigpending_empty(p, signum) != 0) {
+                sigacts_unlock(sa);
+                return -EINVAL; // Failed to clear pending signals
+            }
+            if (p->thread_group != NULL) {
+                tg_sigpending_empty(p->thread_group, signum);
+            }
         }
     }
 
@@ -776,11 +803,9 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
 }
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
-    if (!set && how != SIG_SETMASK) {
-        return -1; // Invalid set pointer for non-SIG_SETMASK operations
-    }
-    if (how != SIG_BLOCK && how != SIG_UNBLOCK && how != SIG_SETMASK) {
-        return -1; // Invalid operation
+    if (set != NULL &&
+        how != SIG_BLOCK && how != SIG_UNBLOCK && how != SIG_SETMASK) {
+        return -EINVAL; // Invalid operation
     }
     struct thread *p = current;
     assert(p != NULL, "sigprocmask: current returned NULL");
@@ -791,31 +816,35 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     // Use only sigacts_lock for signal state protection
     sigacts_lock(sa);
     if (oldset) {
-        *oldset = sa->sa_original_mask; // Save the old mask
+        *oldset = p->signal.sig_mask; // Save the old mask
     }
 
-    if (how == SIG_SETMASK) {
-        sa->sa_original_mask = *set; // Set the new mask
-        sa->sa_sigmask = *set;       // Update the signal mask
-    } else if (how == SIG_BLOCK) {
-        sa->sa_original_mask |= *set; // Block the signals in the set
-        sa->sa_sigmask |= *set;       // Update the signal mask
-    } else if (how == SIG_UNBLOCK) {
-        sa->sa_original_mask &= ~(*set); // Unblock the signals in the set
-        sa->sa_sigmask &= ~(*set);       // Update the signal mask
+    // POSIX: if set is NULL, do not change mask (how is ignored).
+    if (set != NULL) {
+        if (how == SIG_SETMASK) {
+            p->signal.sig_saved_mask = *set; // Set the new mask
+            p->signal.sig_mask = *set;       // Update the signal mask
+        } else if (how == SIG_BLOCK) {
+            p->signal.sig_saved_mask |= *set; // Block the signals in the set
+            p->signal.sig_mask |= *set;       // Update the signal mask
+        } else if (how == SIG_UNBLOCK) {
+            p->signal.sig_saved_mask &= ~(*set); // Unblock the signals in set
+            p->signal.sig_mask &= ~(*set);       // Update the signal mask
+        }
     }
 
     // Mandatory signals cannot be blocked
-    sigdelset(&sa->sa_original_mask, SIGKILL);
-    sigdelset(&sa->sa_original_mask, SIGSTOP);
-    sigdelset(&sa->sa_sigmask, SIGKILL);
-    sigdelset(&sa->sa_sigmask, SIGSTOP);
+    sigdelset(&p->signal.sig_saved_mask, SIGKILL);
+    sigdelset(&p->signal.sig_saved_mask, SIGSTOP);
+    sigdelset(&p->signal.sig_mask, SIGKILL);
+    sigdelset(&p->signal.sig_mask, SIGSTOP);
 
     // Recalc sigpending flag after changing blocked mask
     recalc_sigpending_tsk(p);
 
     // Check if newly unmasked signals are pending
-    sigset_t pending_unmasked = p->signal.sig_pending_mask & ~sa->sa_sigmask;
+    sigset_t pending_unmasked =
+        p->signal.sig_pending_mask & ~p->signal.sig_mask;
 
     // If newly unmasked termination signals are pending, set THREAD_KILLED
     sigset_t pending_term = pending_unmasked & sa->sa_sigterm;
@@ -836,7 +865,7 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
 
 int sigpending(struct thread *p, sigset_t *set) {
     if (!set) {
-        return -1; // Invalid set pointer
+        return -EINVAL; // Invalid set pointer
     }
     assert(p != NULL, "sigpending: current returned NULL");
 
@@ -845,7 +874,7 @@ int sigpending(struct thread *p, sigset_t *set) {
 
     // Use only sigacts_lock - it protects both masks
     sigacts_lock(sa);
-    sigset_t mask = sa->sa_sigmask;
+    sigset_t mask = p->signal.sig_mask;
     *set = mask & p->signal.sig_pending_mask; // Get the pending signals
     sigacts_unlock(sa);
 
@@ -857,14 +886,14 @@ int sigreturn(void) {
     assert(p != NULL, "sys_sigreturn: current returned NULL");
 
     if (!THREAD_USER_SPACE(p)) {
-        return -1; // sigreturn can only be called in user space
+        return -EPERM; // sigreturn can only be called in user space
     }
 
     sigacts_t *sa = p->sigacts;
     sigacts_lock(sa);
     if (p->signal.sig_ucontext == 0) {
         sigacts_unlock(sa);
-        return -1; // No signal trap frame to restore
+        return -EINVAL; // No signal trap frame to restore
     }
     sigacts_unlock(sa);
 
@@ -972,12 +1001,12 @@ static int __deliver_signal(struct thread *p, int signo, ksiginfo_t *info,
     sigacts_t *sigacts = p->sigacts;
     sigacts_lock(sigacts);
     if ((sa->sa_flags & SA_NODEFER) == 0) {
-        sigaddset(&sigacts->sa_sigmask, signo);
+        sigaddset(&p->signal.sig_mask, signo);
     }
 
-    sigacts->sa_sigmask |= sa->sa_mask; // Block the signal during delivery
-    sigdelset(&sigacts->sa_sigmask, SIGKILL);
-    sigdelset(&sigacts->sa_sigmask, SIGSTOP);
+    p->signal.sig_mask |= sa->sa_mask; // Block the signal during delivery
+    sigdelset(&p->signal.sig_mask, SIGKILL);
+    sigdelset(&p->signal.sig_mask, SIGSTOP);
 
     // Recalc sigpending flag after blocking signals
     recalc_sigpending_tsk(p);
@@ -1005,7 +1034,7 @@ void handle_signal(void) {
         // Gather all signal info with sigacts_lock - this protects all signal
         // state
         sigacts_lock(sa);
-        sigset_t sigmask = sa->sa_sigmask;
+        sigset_t sigmask = p->signal.sig_mask;
         sigset_t sigterm = sa->sa_sigterm;
         sigset_t sigstop = sa->sa_sigstop;
         sigset_t sigcont = sa->sa_sigcont;
@@ -1149,7 +1178,7 @@ void handle_signal(void) {
         // Check repeat condition with sigacts_lock only
         if (sa_copy.sa_flags & SA_SIGINFO) {
             sigacts_lock(sa);
-            bool unmasked = sigismember(&sa->sa_sigmask, signo) == 0;
+            bool unmasked = sigismember(&p->signal.sig_mask, signo) == 0;
             bool still_pending =
                 sigismember(&p->signal.sig_pending_mask, signo) > 0;
             // Also check thread group shared_pending for more queued entries
@@ -1268,4 +1297,281 @@ int killed(struct thread *p) {
         return 0;
     }
     return THREAD_KILLED(p);
+}
+
+/**
+ * signal_send_to_tgroup - send a process-directed signal to a thread group
+ * @tgid: thread group ID (process ID)
+ * @info: signal information
+ *
+ * Delivers the signal to any suitable thread in the thread group.
+ * Used by kill_from_kernel() when targeting a process ID.
+ *
+ * Returns 0 on success, or negative errno on failure.
+ */
+static int signal_send_to_tgroup(int tgid, ksiginfo_t *info) {
+    struct thread *leader = NULL;
+
+    rcu_read_lock();
+
+    if (get_pid_thread(tgid, &leader) != 0 || leader == NULL) {
+        rcu_read_unlock();
+        return -ESRCH;
+    }
+
+    // If pid doesn't refer to a group leader, find the real one
+    struct thread_group *tg = leader->thread_group;
+    if (tg != NULL && tg->tgid == tgid) {
+        // Good — use tg_signal_send which already handles shared_pending
+        int ret = tg_signal_send(tg, info);
+        rcu_read_unlock();
+        return ret;
+    }
+
+    // Fallback: tgid matched a non-leader TID, or thread has no group.
+    // Navigate to the real leader if possible.
+    if (tg != NULL && tg->group_leader != NULL) {
+        int ret = tg_signal_send(tg, info);
+        rcu_read_unlock();
+        return ret;
+    }
+
+    // No thread group — send directly to the thread
+    int ret = __signal_send(leader, info);
+    rcu_read_unlock();
+    return ret;
+}
+
+/**
+ * kill_from_kernel - send a signal from kernel context (no current thread)
+ * @pid: target process/thread group ID
+ * @signum: signal number to send
+ *
+ * Used by interrupt handlers (e.g., console ^C) where there is no
+ * user-space caller. Sets sender to NULL/pid 0.
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int kill_from_kernel(int pid, int signum) {
+    if (SIGBAD(signum) && signum != 0) {
+        return -EINVAL;
+    }
+
+    ksiginfo_t info = {0};
+    info.signo = signum;
+    info.sender = NULL; // Sent from kernel
+    info.info.si_pid = 0;
+
+    // Signal 0 is used to check if the process exists
+    if (signum == 0) {
+        struct thread *p = NULL;
+        rcu_read_lock();
+        if (get_pid_thread(pid, &p) != 0 || p == NULL) {
+            rcu_read_unlock();
+            return -ESRCH;
+        }
+        rcu_read_unlock();
+        return 0;
+    }
+
+    return signal_send_to_tgroup(pid, &info);
+}
+
+/**
+ * kill_proc - send a signal directly to a thread/thread group
+ * @p: target thread
+ * @signum: signal number to send
+ *
+ * For thread groups, selects a suitable thread to receive the signal.
+ * Used internally (e.g., exit.c sending SIGCHLD to parent).
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int kill_proc(struct thread *p, int signum) {
+    if (!p || SIGBAD(signum)) {
+        return -EINVAL;
+    }
+
+    ksiginfo_t info = {0};
+    info.signo = signum;
+    info.sender = current;
+    info.info.si_pid = current ? thread_tgid(current) : 0;
+
+    rcu_read_lock();
+
+    struct thread_group *tg = p->thread_group;
+    if (tg != NULL) {
+        // Use tg_signal_send for proper shared_pending handling
+        int ret = tg_signal_send(tg, &info);
+        rcu_read_unlock();
+        return ret;
+    }
+
+    // No thread group — send directly
+    int ret = __signal_send(p, &info);
+    rcu_read_unlock();
+    return ret;
+}
+
+/**
+ * sigsuspend - temporarily replace signal mask and wait for a signal
+ * @mask: the temporary signal mask to use while waiting
+ *
+ * Atomically:
+ * 1. Saves the current signal mask
+ * 2. Sets the signal mask to @mask
+ * 3. Suspends until a signal is caught
+ * 4. Restores the original signal mask
+ *
+ * Returns -EINTR when a signal is caught (always returns error).
+ * This is POSIX/pthread-compatible behavior.
+ */
+int sigsuspend(const sigset_t *mask) {
+    struct thread *p = current;
+    if (!p || !mask) {
+        return -EINVAL;
+    }
+
+    sigacts_t *sa = p->sigacts;
+    assert(sa != NULL, "sigsuspend: sigacts is NULL");
+
+    sigacts_lock(sa);
+
+    // Save the current mask and set the temporary one
+    sigset_t saved = p->signal.sig_mask;
+    p->signal.sig_saved_mask = p->signal.sig_mask; // Also save original
+    p->signal.sig_mask = *mask;
+    // SIGKILL and SIGSTOP cannot be blocked
+    sigdelset(&p->signal.sig_mask, SIGKILL);
+    sigdelset(&p->signal.sig_mask, SIGSTOP);
+
+    // Check if there are already pending signals now unblocked
+    sigset_t pending_unmasked =
+        p->signal.sig_pending_mask & ~p->signal.sig_mask;
+    // Also check thread group shared pending
+    struct thread_group *tg = p->thread_group;
+    if (tg != NULL) {
+        pending_unmasked |=
+            tg->shared_pending.sig_pending_mask & ~p->signal.sig_mask;
+    }
+    if (pending_unmasked != 0) {
+        // Signals already pending and unblocked — restore and return
+        p->signal.sig_mask = saved;
+        p->signal.sig_saved_mask = saved;
+        recalc_sigpending_tsk(p);
+        sigacts_unlock(sa);
+        return -EINTR;
+    }
+
+    recalc_sigpending_tsk(p);
+    sigacts_unlock(sa);
+
+    // Sleep until a signal arrives
+    __thread_state_set(p, THREAD_INTERRUPTIBLE);
+    scheduler_yield();
+
+    // Do NOT restore the mask here. The temporary mask stays active so
+    // handle_signal() (called from usertrapret) can deliver the signal.
+    // push_sigframe() saves the current (temporary) mask in uc_sigmask,
+    // and signal_restore() (sigreturn) restores from sig_saved_mask
+    // when the outermost frame is popped.
+
+    return -EINTR; // sigsuspend always returns -EINTR
+}
+
+/**
+ * sigwait - wait for a signal from a specified set
+ * @set: the set of signals to wait for
+ * @sig: pointer to store the signal number that was delivered
+ *
+ * Unlike sigsuspend, sigwait removes the signal from pending and returns
+ * the signal number without invoking the signal handler.
+ *
+ * Returns 0 on success, or negative errno on failure.
+ * This is POSIX/pthread-compatible behavior.
+ */
+int sigwait(const sigset_t *set, int *sig) {
+    struct thread *p = current;
+    if (!p || !set || !sig) {
+        return -EINVAL;
+    }
+
+    sigacts_t *sa = p->sigacts;
+    assert(sa != NULL, "sigwait: sigacts is NULL");
+
+    while (1) {
+        sigacts_lock(sa);
+
+        // Check for pending signals in the wait set (per-thread)
+        sigset_t pending_wanted = p->signal.sig_pending_mask & *set;
+        // Also check thread group shared pending
+        struct thread_group *tg = p->thread_group;
+        if (tg != NULL) {
+            pending_wanted |= tg->shared_pending.sig_pending_mask & *set;
+        }
+
+        if (pending_wanted != 0) {
+            // Find the first pending signal in the set
+            for (int signo = 1; signo <= NSIG; signo++) {
+                if (!sigismember(&pending_wanted, signo)) {
+                    continue;
+                }
+
+                // Try per-thread pending first
+                if (sigismember(&p->signal.sig_pending_mask, signo)) {
+                    sigpending_t *sq = &p->signal.sig_pending[signo - 1];
+                    if (!LIST_IS_EMPTY(&sq->queue)) {
+                        ksiginfo_t *ksi =
+                            LIST_FIRST_NODE(&sq->queue, ksiginfo_t, list_entry);
+                        if (ksi) {
+                            list_entry_detach(&ksi->list_entry);
+                            ksiginfo_free(ksi);
+                        }
+                    }
+                    if (LIST_IS_EMPTY(&sq->queue)) {
+                        sigdelset(&p->signal.sig_pending_mask, signo);
+                    }
+                } else if (tg != NULL &&
+                           sigismember(&tg->shared_pending.sig_pending_mask,
+                                       signo)) {
+                    // Dequeue from shared pending
+                    ksiginfo_t *ksi = tg_dequeue_signal(tg, signo);
+                    if (ksi) {
+                        ksiginfo_free(ksi);
+                    }
+                }
+
+                *sig = signo;
+                recalc_sigpending_tsk(p);
+                sigacts_unlock(sa);
+                return 0;
+            }
+        }
+
+        // No signal yet — temporarily unblock the waited signals so that
+        // __signal_send can see them as unblocked and call signal_notify
+        // to wake us. Without this, blocked signals would not trigger
+        // a wakeup and we'd sleep forever.
+        sigset_t saved_mask = p->signal.sig_mask;
+        p->signal.sig_mask &= ~(*set); // Temporarily unblock waited signals
+        sigdelset(&p->signal.sig_mask, SIGKILL);
+        sigdelset(&p->signal.sig_mask, SIGSTOP);
+        recalc_sigpending_tsk(p);
+        sigacts_unlock(sa);
+
+        // Sleep until one arrives
+        __thread_state_set(p, THREAD_INTERRUPTIBLE);
+        scheduler_yield();
+
+        // Restore the original mask before re-checking
+        sigacts_lock(sa);
+        p->signal.sig_mask = saved_mask;
+        recalc_sigpending_tsk(p);
+        sigacts_unlock(sa);
+
+        // Check if we were killed
+        if (killed(p)) {
+            return -EINTR;
+        }
+    }
 }

@@ -69,7 +69,10 @@
 #define SYS_sigpending   72
 #define SYS_sigprocmask  73
 #define SYS_sigalarm     74
-// 75-89 reserved
+#define SYS_sigsuspend   75
+#define SYS_sigwait      76
+#define SYS_tkill        77
+// 78-89 reserved
 
 // --- Debug / introspection (90-99) ---
 #define SYS_memstat      90

@@ -38,6 +38,7 @@ entry("getpid");
 entry("gettid");
 entry("exit_group");
 entry("tgkill");
+entry("tkill");
 entry("sbrk");
 entry("sleep");
 entry("uptime");
@@ -46,6 +47,8 @@ entry("sigalarm");
 entry("sigreturn");
 entry("sigpending");
 entry("sigprocmask");
+entry("sigsuspend");
+entry("sigwait");
 entry("pause");
 
 # Memory mapping syscalls

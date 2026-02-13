@@ -63,6 +63,8 @@ void sigacts_put(sigacts_t *sa);
 
 void sigpending_init(struct thread *p);
 void sigpending_destroy(struct thread *p);
+void sigpending_clone(struct thread_signal *dst, struct thread_signal *src,
+                      uint64 clone_flags, int esignal);
 ksiginfo_t *ksiginfo_alloc(void);
 void ksiginfo_free(ksiginfo_t *ksi);
 int sigpending_empty(struct thread *p, int signo);
@@ -74,7 +76,7 @@ bool signal_pending(struct thread *p);
 int signal_notify(struct thread *p);
 
 // Recalculate and update TIF_SIGPENDING flag for process
-// Call this after any change to signal.sig_pending_mask or sa_sigmask
+// Call this after any change to signal.sig_pending_mask or signal.sig_mask
 void recalc_sigpending(void);
 bool recalc_sigpending_tsk(struct thread *p);
 bool signal_terminated(struct thread *p);
@@ -87,9 +89,13 @@ int sigreturn(void);
 
 int kill(int, int);
 int kill_thread(struct thread *p, int signum);
+int kill_from_kernel(int pid, int signum);
+int kill_proc(struct thread *p, int signum);
 int tgkill(int tgid, int tid, int signum);
 int tkill(int tid, int signum);
 int killed(struct thread *);
+int sigsuspend(const sigset_t *mask);
+int sigwait(const sigset_t *set, int *sig);
 
 #define SIG_BLOCK 1
 #define SIG_UNBLOCK 2

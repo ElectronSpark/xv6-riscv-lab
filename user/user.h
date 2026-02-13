@@ -61,6 +61,7 @@ int dup(int);
 int getpid(void);
 int gettid(void);
 int tgkill(int tgid, int tid, int sig);
+int tkill(int tid, int sig);
 void exit_group(int) __attribute__((noreturn));
 char *sbrk(int64);
 int sleep(int);
@@ -70,6 +71,8 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact);
 int sigreturn(void);
 int sigpending(sigset_t *set);
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset);
+int sigsuspend(const sigset_t *mask);
+int sigwait(const sigset_t *set, int *sig);
 void pause(void);
 
 // Memory mapping

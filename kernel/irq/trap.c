@@ -278,7 +278,7 @@ int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
     ucontext_t uc = {0};
     uc.uc_link = (ucontext_t *)p->signal.sig_ucontext;
     uc.uc_sigmask =
-        p->sigacts->sa_sigmask; // Save current mask to restore after handler
+        p->signal.sig_mask; // Save current mask to restore after handler
     memmove(&uc.uc_mcontext, p->trapframe, sizeof(mcontext_t));
     memmove(&uc.uc_stack, &p->signal.sig_stack, sizeof(stack_t));
 

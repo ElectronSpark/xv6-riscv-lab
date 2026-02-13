@@ -37,17 +37,6 @@ uint64 sys_exit_group(void) {
     return 0; // not reached
 }
 
-// tgkill() sends a signal to a specific thread within a thread group.
-// This provides race-free signal delivery by verifying the thread
-// still belongs to the specified thread group.
-uint64 sys_tgkill(void) {
-    int tgid, tid, sig;
-    argint(0, &tgid);
-    argint(1, &tid);
-    argint(2, &sig);
-    return tgkill(tgid, tid, sig);
-}
-
 // vfork() — dedicated syscall so the userspace wrapper is pure assembly
 // (ecall + ret, no stack usage). This avoids corrupting the parent's
 // stack frame, which is shared with the child via CLONE_VM.

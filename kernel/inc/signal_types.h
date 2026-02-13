@@ -30,8 +30,8 @@ typedef struct sigaction {
 typedef struct sigacts {
     spinlock_t lock; // protect the sigacts structure
     struct sigaction sa[NSIG + 1];
-    sigset_t sa_sigmask;       // signals currently blocked at the process level
-    sigset_t sa_original_mask; // original signal mask before any changes
+    // NOTE: Signal masks (blocked set) are per-thread, stored in
+    //       thread_signal_t::sig_mask / sig_saved_mask.
     sigset_t sa_sigterm;       // signals that terminate the process
     // sigset_t sa_usercatch;  // user-defined signal handlers
     sigset_t sa_sigstop; // signals that stop the process
@@ -57,6 +57,8 @@ typedef struct sigpending {
 // Thread local signal state
 // Protected by sigacts lock
 typedef struct thread_signal {
+    sigset_t sig_mask;              // signals currently blocked (per-thread)
+    sigset_t sig_saved_mask;        // saved mask (restored after sigsuspend/handler)
     sigset_t sig_pending_mask;      // Mark none empty signal pending queue
     sigpending_t sig_pending[NSIG]; // Queue of pending signals
     // signal trap frames would be put at the user stack.
