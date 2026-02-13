@@ -244,7 +244,7 @@ device_t *device_get(int major, int minor) {
     }
 
     // Check if device is being unregistered
-    if (__atomic_load_n(&device->unregistering, __ATOMIC_SEQ_CST)) {
+    if (smp_load_acquire(&device->unregistering)) {
         rcu_read_unlock();
         return ERR_PTR(-ENODEV);
     }
@@ -267,7 +267,7 @@ int device_dup(device_t *dev) {
         return -EINVAL; // Null pointer for device
     }
     // Check if device is being unregistered
-    if (__atomic_load_n(&dev->unregistering, __ATOMIC_SEQ_CST)) {
+    if (smp_load_acquire(&dev->unregistering)) {
         return -ENODEV; // Device is being unregistered
     }
     // Use try_get to avoid racing with final put
@@ -344,4 +344,17 @@ int device_unregister(device_t *dev) {
     // When refcount reaches 0, __underlying_kobject_release will be called
     kobject_put(&dev->kobj);
     return 0;
+}
+
+int dev_ioctl(device_t *dev, uint64 cmd, uint64 arg) {
+    if (dev == NULL) {
+        return -EINVAL; // Null pointer for device
+    }
+    if (smp_load_acquire(&dev->unregistering)) {
+        return -ENODEV; // Device is being unregistered
+    }
+    if (dev->ops.ioctl == NULL) {
+        return -ENOTTY; // No ioctl support for this device
+    }
+    return dev->ops.ioctl(dev, cmd, arg);
 }

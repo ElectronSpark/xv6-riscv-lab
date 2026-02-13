@@ -29,6 +29,7 @@ typedef struct device_major {
 typedef struct device_ops {
     int (*open)(device_t *dev);
     int (*release)(device_t *dev);
+    int (*ioctl)(device_t *dev, uint64 cmd, uint64 arg);
 } device_ops_t;
 
 typedef enum { DEV_TYPE_UNKNOWN = 0, DEV_TYPE_BLOCK, DEV_TYPE_CHAR } dev_type_e;

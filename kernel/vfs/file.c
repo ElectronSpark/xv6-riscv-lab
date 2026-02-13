@@ -39,6 +39,7 @@
 #include "list.h"
 #include "hlist.h"
 #include <mm/slab.h>
+#include "dev/dev.h"
 #include "dev/cdev.h"
 #include "dev/blkdev.h"
 #include <mm/vm.h>
@@ -331,9 +332,35 @@ struct vfs_file *vfs_fdup(struct vfs_file *file) {
     return file;
 }
 
+int vfs_ioctl(struct vfs_file *file, uint64 cmd, uint64 arg) {
+    if (file == NULL) {
+        return -EBADF; // Invalid file descriptor
+    }
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (inode == NULL) {
+        // Pipes/sockets or files without inode-backed ioctl
+        return -ENOTTY;
+    }
+    if (!(S_ISBLK(inode->mode) || S_ISCHR(inode->mode))) {
+        return -ENOTTY; // Ioctl only supported on character/block devices
+    }
+    // cdev and blkdev are in a union
+    device_t *dev = (device_t *)file->cdev;
+    if (dev == NULL) {
+        return -ENODEV; // No device associated with this file
+    }
+    return dev_ioctl(dev, cmd, arg);
+}
+
 ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
-    if (file == NULL || buf == NULL || n == 0) {
-        return -EINVAL; // Invalid arguments
+    if (file == NULL) {
+        return -EBADF;
+    }
+    if (buf == NULL) {
+        return -EFAULT;
+    }
+    if (n == 0) {
+        return 0; // POSIX: zero-length read succeeds
     }
 
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
@@ -342,7 +369,7 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
     if (inode == NULL) {
         // No inode means this must be a pipe or socket
         if (file->pipe == NULL) {
-            return -EINVAL; // Not a valid file
+            return -EBADF; // Not a readable file object
         }
         __vfs_file_lock(file);
         if ((file->f_flags & O_ACCMODE) == O_WRONLY) {
@@ -387,7 +414,7 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
     // Handle block device read - not directly supported, use buffer cache
     if (S_ISBLK(inode->mode)) {
         __vfs_file_unlock(file);
-        return -ENOSYS; // Direct block device read not implemented
+        return -EOPNOTSUPP; // Operation not supported on this file
     }
 
     // Regular files
@@ -397,11 +424,11 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
     // acquire transactions that conflict with VFS locking order (transaction →
     // superblock → inode).
     if (!S_ISREG(inode->mode)) {
-        ret = -EINVAL; // Inode is not a regular file
+        ret = S_ISDIR(inode->mode) ? -EISDIR : -EINVAL;
         goto out;
     }
     if (file->ops == NULL || file->ops->read == NULL) {
-        ret = -ENOSYS; // Read operation not supported
+        ret = -EOPNOTSUPP; // Read operation not supported
         goto out;
     }
     // Pass requested size to driver; driver handles EOF and size checks
@@ -416,13 +443,16 @@ out:
 }
 
 int vfs_filestat(struct vfs_file *file, struct stat *stat) {
-    if (file == NULL || stat == NULL) {
-        return -EINVAL; // Invalid arguments
+    if (file == NULL) {
+        return -EBADF;
+    }
+    if (stat == NULL) {
+        return -EFAULT;
     }
 
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     if (inode == NULL) {
-        return -EINVAL;
+        return -EBADF;
     }
 
     // For special files without file ops, provide generic stat from inode
@@ -444,8 +474,14 @@ int vfs_filestat(struct vfs_file *file, struct stat *stat) {
 
 ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
                       bool user) {
-    if (file == NULL || buf == NULL || n == 0) {
-        return -EINVAL; // Invalid arguments
+    if (file == NULL) {
+        return -EBADF;
+    }
+    if (buf == NULL) {
+        return -EFAULT;
+    }
+    if (n == 0) {
+        return 0; // POSIX: zero-length write succeeds
     }
 
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
@@ -454,7 +490,7 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
     if (inode == NULL) {
         // No inode means this must be a pipe or socket
         if (file->pipe == NULL) {
-            return -EINVAL; // Not a valid file
+            return -EBADF; // Not a writable file object
         }
         __vfs_file_lock(file);
         if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
@@ -499,7 +535,7 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
     // Handle block device write - not directly supported, use buffer cache
     if (S_ISBLK(inode->mode)) {
         __vfs_file_unlock(file);
-        return -ENOSYS; // Direct block device write not implemented
+        return -EOPNOTSUPP; // Operation not supported on this file
     }
 
     // Regular files
@@ -511,11 +547,11 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
     // transactions. The file lock still protects file position and serializes
     // concurrent writes.
     if (!S_ISREG(inode->mode)) {
-        ret = -EINVAL; // Inode is not a regular file
+        ret = S_ISDIR(inode->mode) ? -EISDIR : -EINVAL;
         goto out;
     }
     if (file->ops == NULL || file->ops->write == NULL) {
-        ret = -ENOSYS; // Write operation not supported
+        ret = -EOPNOTSUPP; // Write operation not supported
         goto out;
     }
     // The driver handles file extension, size updates, and truncation
@@ -531,7 +567,7 @@ out:
 
 loff_t vfs_filelseek(struct vfs_file *file, loff_t offset, int whence) {
     if (file == NULL) {
-        return -EINVAL; // Invalid arguments
+        return -EBADF; // Invalid file descriptor
     }
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     loff_t ret = 0;
@@ -549,7 +585,7 @@ loff_t vfs_filelseek(struct vfs_file *file, loff_t offset, int whence) {
     // needed (e.g., for SEEK_END). This matches the design used for read/write
     // operations.
     if (file->ops == NULL || file->ops->llseek == NULL) {
-        ret = -ENOSYS; // Llseek operation not supported
+        ret = -ESPIPE; // Not seekable
         goto out;
     }
 
@@ -564,7 +600,7 @@ out:
 
 int truncate(struct vfs_file *file, loff_t length) {
     if (file == NULL) {
-        return -EINVAL; // Invalid arguments
+        return -EBADF; // Invalid file descriptor
     }
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     if (inode == NULL) {
@@ -573,7 +609,10 @@ int truncate(struct vfs_file *file, loff_t length) {
 
     // truncate only applies to regular files
     if (!S_ISREG(inode->mode)) {
-        return -EINVAL; // Not a regular file
+        return S_ISDIR(inode->mode) ? -EISDIR : -EINVAL;
+    }
+    if (length < 0) {
+        return -EINVAL;
     }
 
     __vfs_file_lock(file);

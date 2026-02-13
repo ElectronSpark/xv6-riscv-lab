@@ -722,12 +722,12 @@ int vfs_mount(const char *type, struct vfs_inode *mountpoint,
     fs_type = vfs_get_fs_type(type);
     if (fs_type == NULL) {
         printf("vfs_mount: filesystem type '%s' not found\n", type);
-        ret_val = -ENOENT; // Filesystem type not found
+        ret_val = -ENODEV; // Filesystem type not found
         goto ret;
     }
     if (!fs_type->registered) {
         printf("vfs_mount: filesystem type '%s' not registered\n", type);
-        ret_val = -ENOENT; // Filesystem type not registered
+        ret_val = -ENODEV; // Filesystem type not registered
         goto ret;
     }
     // Ask the filesystem type to allocate and initialise a new superblock
@@ -921,7 +921,10 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
         return -EINVAL; // Mountpoint's superblock is not valid
     }
 
-    if (!S_ISDIR(mountpoint->mode) || !mountpoint->mount) {
+    if (!S_ISDIR(mountpoint->mode)) {
+        return -ENOTDIR; // Mountpoint must be a directory
+    }
+    if (!mountpoint->mount) {
         return -EINVAL; // Inode is not a mountpoint
     }
     sb = mountpoint->mnt_sb;
@@ -1160,7 +1163,10 @@ int vfs_unmount_lazy(struct vfs_inode *mountpoint) {
         return ret;
     }
 
-    if (!S_ISDIR(mountpoint->mode) || !mountpoint->mount) {
+    if (!S_ISDIR(mountpoint->mode)) {
+        return -ENOTDIR;
+    }
+    if (!mountpoint->mount) {
         return -EINVAL;
     }
 
@@ -1294,7 +1300,11 @@ int vfs_get_mnt_rooti(struct vfs_inode *mountpoint,
         vfs_iunlock(mountpoint);
         return ret_val; // Mountpoint inode is not valid
     }
-    if (!S_ISDIR(mountpoint->mode) || !mountpoint->mount) {
+    if (!S_ISDIR(mountpoint->mode)) {
+        vfs_iunlock(mountpoint);
+        return -ENOTDIR; // Mountpoint must be a directory
+    }
+    if (!mountpoint->mount) {
         vfs_iunlock(mountpoint);
         return -EINVAL; // Inode is not a mountpoint
     }

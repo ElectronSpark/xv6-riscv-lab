@@ -37,6 +37,7 @@ void vfs_fput(struct vfs_file *file);
  */
 struct vfs_file *vfs_fdup(struct vfs_file *file);
 
+int vfs_ioctl(struct vfs_file *file, uint64 cmd, uint64 arg);
 ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user);
 int vfs_filestat(struct vfs_file *file, struct stat *stat);
 ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,

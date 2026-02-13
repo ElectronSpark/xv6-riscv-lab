@@ -20,4 +20,6 @@ int device_unregister(device_t *dev);
 // Device table stress tests
 void dev_table_test(void);
 
+int dev_ioctl(device_t *dev, uint64 cmd, uint64 arg);
+
 #endif // __KERNEL_DEV_DEV_H
