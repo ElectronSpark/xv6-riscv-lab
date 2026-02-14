@@ -309,6 +309,8 @@ struct vfs_inode_ops {
     int (*dir_iter)(struct vfs_inode *dir, struct vfs_dir_iter *iter,
                     struct vfs_dentry *ret_dentry);
     ssize_t (*readlink)(struct vfs_inode *inode, char *buf, size_t buflen);
+    int (*getattr)(struct vfs_inode *inode, struct stat *stat);
+    int (*setattr)(struct vfs_inode *inode, const struct stat *stat);
     struct vfs_inode *(*create)(struct vfs_inode *dir, mode_t mode,
                                 const char *name,
                                 size_t name_len); // Create a regular file
@@ -384,7 +386,6 @@ struct vfs_file_ops {
     int (*fsync)(struct vfs_file *file, loff_t start,
                  loff_t len);             // Sync a range of data
     int (*fflush)(struct vfs_file *file); // Flush all dirty data
-    int (*stat)(struct vfs_file *file, struct stat *stat);
 
     /*
      * fault - Demand-page a single page for a file-backed mapping

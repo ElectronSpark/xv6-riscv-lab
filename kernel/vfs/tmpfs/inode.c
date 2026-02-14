@@ -583,10 +583,34 @@ void __tmpfs_destroy_inode(struct vfs_inode *inode) {
     // For device nodes/pipes/sockets, no data to free
 }
 
+static int __tmpfs_getattr(struct vfs_inode *inode, struct stat *stat) {
+    if (inode == NULL || stat == NULL) {
+        return -EINVAL;
+    }
+
+    vfs_ilock(inode);
+    memset(stat, 0, sizeof(*stat));
+    stat->dev = inode->sb ? (int)(uint64)inode->sb : 0;
+    stat->ino = inode->ino;
+    stat->mode = inode->mode;
+    stat->nlink = inode->n_links;
+    stat->size = inode->size;
+    vfs_iunlock(inode);
+    return 0;
+}
+
+static int __tmpfs_setattr(struct vfs_inode *inode, const struct stat *stat) {
+    (void)inode;
+    (void)stat;
+    return -EOPNOTSUPP;
+}
+
 struct vfs_inode_ops tmpfs_inode_ops = {
     .lookup = __tmpfs_lookup,
     .dir_iter = __tmpfs_dir_iter,
     .readlink = __tmpfs_readlink,
+    .getattr = __tmpfs_getattr,
+    .setattr = __tmpfs_setattr,
     .create = __tmpfs_create,
     .link = __tmpfs_link,
     .unlink = __tmpfs_unlink,

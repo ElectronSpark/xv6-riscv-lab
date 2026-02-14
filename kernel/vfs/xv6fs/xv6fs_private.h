@@ -157,7 +157,6 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
 ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count,
                          bool user);
 loff_t xv6fs_file_llseek(struct vfs_file *file, loff_t offset, int whence);
-int xv6fs_file_stat(struct vfs_file *file, struct stat *stat);
 
 // Helper functions
 void xv6fs_init(void);

@@ -847,6 +847,29 @@ int xv6fs_open(struct vfs_inode *inode, struct vfs_file *file, int f_flags) {
     return -ENOSYS;
 }
 
+static int xv6fs_getattr(struct vfs_inode *inode, struct stat *stat) {
+    if (inode == NULL || stat == NULL) {
+        return -EINVAL;
+    }
+
+    struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
+    vfs_ilock(inode);
+    memset(stat, 0, sizeof(*stat));
+    stat->dev = ip->dev;
+    stat->ino = inode->ino;
+    stat->mode = inode->mode;
+    stat->nlink = inode->n_links;
+    stat->size = inode->size;
+    vfs_iunlock(inode);
+    return 0;
+}
+
+static int xv6fs_setattr(struct vfs_inode *inode, const struct stat *stat) {
+    (void)inode;
+    (void)stat;
+    return -EOPNOTSUPP;
+}
+
 /******************************************************************************
  * VFS inode operations structure
  ******************************************************************************/
@@ -855,6 +878,8 @@ struct vfs_inode_ops xv6fs_inode_ops = {
     .lookup = xv6fs_lookup,
     .dir_iter = xv6fs_dir_iter,
     .readlink = xv6fs_readlink,
+    .getattr = xv6fs_getattr,
+    .setattr = xv6fs_setattr,
     .create = xv6fs_create,
     .link = xv6fs_link,
     .unlink = xv6fs_unlink,
