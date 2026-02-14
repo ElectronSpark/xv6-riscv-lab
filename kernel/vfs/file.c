@@ -14,7 +14,7 @@
  *
  * BUG FIXES:
  * - Anonymous pipe leak (Dec 2024): Pipes created via pipe() syscall have
- *   pipe != NULL but inode == NULL. vfs_fput() must call pipeclose()
+ *   pipe != NULL but inode == NULL. vfs_fput() must call pipe_close()
  *   for these pipes BEFORE the inode NULL check, otherwise pipe buffers leak.
  */
 
@@ -44,7 +44,7 @@
 #include "dev/blkdev.h"
 #include <mm/vm.h>
 #include "dev/net.h"
-#include "pipe.h"
+#include "vfs/pipe.h"
 #include "proc/tq.h"
 
 static slab_cache_t __vfs_file_slab = {0};
@@ -274,14 +274,9 @@ void vfs_fput(struct vfs_file *file) {
             }
         }
 
-        // Handle pipe cleanup for pipes without inodes (created via pipe()
-        // syscall) Must be done before the inode check since anonymous pipes
-        // have no inode
-        if (file->pipe != NULL && inode == NULL) {
-            pipeclose(file->pipe, (file->f_flags & O_ACCMODE) != O_RDONLY);
-        }
-
         // Handle special file cleanup
+        // Note: anonymous pipe cleanup (pipe != NULL, inode == NULL) is now
+        // handled by pipe_file_ops.release via __vfs_file_free below.
         if (inode != NULL) {
             if (S_ISCHR(inode->mode)) {
                 ret = cdev_put(file->cdev);
@@ -296,7 +291,7 @@ void vfs_fput(struct vfs_file *file) {
                     printf("vfs_fput: blkdev_put failed: %d\n", ret);
                 }
             } else if (S_ISFIFO(inode->mode) && file->pipe != NULL) {
-                pipeclose(file->pipe, (file->f_flags & O_ACCMODE) != O_RDONLY);
+                pipe_close(file->pipe, (file->f_flags & O_ACCMODE) != O_RDONLY);
             }
             // Note: sockets are not opened via inodes, so no cleanup here
         }
@@ -365,10 +360,9 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
 
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
 
-    // Handle pipe read - pipes don't have inodes
+    // Handle pipe/socket read - these don't have inodes
     if (inode == NULL) {
-        // No inode means this must be a pipe or socket
-        if (file->pipe == NULL) {
+        if (file->ops == NULL || file->ops->read == NULL) {
             return -EBADF; // Not a readable file object
         }
         __vfs_file_lock(file);
@@ -376,15 +370,7 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
             __vfs_file_unlock(file);
             return -EBADF; // File not opened for reading
         }
-        struct pipe *pipe = file->pipe;
-        // Use piperead for userspace buffers, piperead_kernel for kernel
-        // buffers
-        ssize_t ret;
-        if (user) {
-            ret = piperead(pipe, (uint64)buf, n);
-        } else {
-            ret = piperead_kernel(pipe, buf, n);
-        }
+        ssize_t ret = file->ops->read(file, buf, n, user);
         __vfs_file_unlock(file);
         return ret;
     }
@@ -486,10 +472,9 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
 
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
 
-    // Handle pipe write - pipes don't have inodes
+    // Handle pipe/socket write - these don't have inodes
     if (inode == NULL) {
-        // No inode means this must be a pipe or socket
-        if (file->pipe == NULL) {
+        if (file->ops == NULL || file->ops->write == NULL) {
             return -EBADF; // Not a writable file object
         }
         __vfs_file_lock(file);
@@ -497,15 +482,7 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
             __vfs_file_unlock(file);
             return -EBADF; // File not opened for writing
         }
-        struct pipe *pipe = file->pipe;
-        // Use pipewrite for userspace buffers, pipewrite_kernel for kernel
-        // buffers
-        ssize_t ret;
-        if (user) {
-            ret = pipewrite(pipe, (uint64)buf, n);
-        } else {
-            ret = pipewrite_kernel(pipe, buf, n);
-        }
+        ssize_t ret = file->ops->write(file, buf, n, user);
         __vfs_file_unlock(file);
         return ret;
     }
@@ -645,35 +622,21 @@ int vfs_pipealloc(struct vfs_file **rf, struct vfs_file **wf) {
         return -ENOMEM;
     }
 
-    // Allocate pipe structure
-    pi = (struct pipe *)kalloc();
-    if (pi == NULL) {
+    pi = pipe_alloc(0);
+    if (IS_ERR(pi)) {
         __vfs_file_free(*rf);
         __vfs_file_free(*wf);
         *rf = NULL;
         *wf = NULL;
-        return -ENOMEM;
+        return PTR_ERR(pi);
     }
 
-    // Initialize pipe
-    smp_store_release(&pi->flags, PIPE_FLAGS_RW);
-    pi->nwrite = 0;
-    pi->nread = 0;
-    spin_init(&pi->reader_lock, "vfs_pipe_reader");
-    spin_init(&pi->writer_lock, "vfs_pipe_writer");
-    tq_init(&pi->nread_queue, "pipe_nread_queue", NULL);
-    tq_init(&pi->nwrite_queue, "pipe_nwrite_queue", NULL);
-
     // Initialize read file
-    (*rf)->f_flags = O_RDONLY;
-    (*rf)->pipe = pi;
-    (*rf)->ops = NULL; // Pipes use direct pipe I/O
+    pipe_open(*rf, pi, O_RDONLY);
     __vfs_ftable_attatch(*rf);
 
     // Initialize write file
-    (*wf)->f_flags = O_WRONLY;
-    (*wf)->pipe = pi;
-    (*wf)->ops = NULL;
+    pipe_open(*wf, pi, O_WRONLY);
     __vfs_ftable_attatch(*wf);
 
     return 0;

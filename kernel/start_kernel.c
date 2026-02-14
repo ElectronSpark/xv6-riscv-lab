@@ -14,6 +14,7 @@
 #include "dev/dev.h"
 #include <mm/pcache.h>
 #include "vfs/fs.h"
+#include "vfs/pipe.h"
 #include "trap.h"
 #include "lock/rcu.h"
 #include "sbi.h"
@@ -66,6 +67,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     printf("page table initialized\n");
     kvminithart(); // turn on paging
     printf("paging enabled\n");
+    pipe_init();               // initialize pipe subsystem
     mycpu_init(hartid, true); // Change mycpu pointer to use trampoline stack
     printf("mycpu initialized\n");
     rcu_init();       // RCU subsystem initialization

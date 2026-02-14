@@ -4,6 +4,7 @@ add_library(vfs_core OBJECT
     file.c
     fdtable.c
     vfs_syscall.c
+    pipe.c
 )
 
 # Pull in filesystem implementations

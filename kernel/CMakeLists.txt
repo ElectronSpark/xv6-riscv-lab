@@ -36,7 +36,6 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/start_kernel.c
     ${KERNEL_DIR}/string.c
     ${KERNEL_DIR}/bio.c
-    ${KERNEL_DIR}/pipe.c
     ${KERNEL_DIR}/exec.c
     ${KERNEL_DIR}/virtio_disk.c
     ${KERNEL_DIR}/ramdisk.c

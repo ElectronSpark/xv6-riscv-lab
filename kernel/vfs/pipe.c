@@ -1,0 +1,330 @@
+/*
+ * pipe.c - Pipe implementation
+ *
+ * Provides pipe read/write/close operations.
+ * Pipe file operations conform to the VFS file_ops interface.
+ */
+
+#include "types.h"
+#include "riscv.h"
+#include "defs.h"
+#include "string.h"
+#include "printf.h"
+#include "param.h"
+#include "errno.h"
+#include "lock/spinlock.h"
+#include "proc/thread.h"
+#include "lock/mutex_types.h"
+#include "lock/rwsem.h"
+#include "vfs/pipe.h"
+#include "vfs/file.h"
+#include "vfs/vfs_types.h"
+#include "vfs/fcntl.h"
+#include <mm/vm.h>
+#include "mm/slab.h"
+#include "proc/sched.h"
+#include "signal.h"
+
+static slab_cache_t __pipe_cache = {0};
+
+void pipe_init(void) {
+    int ret = slab_cache_init(&__pipe_cache, "pipe_cache", sizeof(struct pipe),
+                              SLAB_FLAG_STATIC);
+    assert(ret == 0, "Failed to initialize pipe_cache slab cache, errno=%d",
+           ret);
+}
+
+struct pipe *pipe_alloc(int flags) {
+    struct pipe *pi = slab_alloc(&__pipe_cache);
+    if (pi == NULL) {
+        return ERR_PTR(-ENOMEM);
+    }
+
+    void *data = kalloc();
+    if (data == NULL) {
+        slab_free(pi);
+        return ERR_PTR(-ENOMEM);
+    }
+
+    // Initialize pipe
+    smp_store_release(&pi->flags, PIPE_FLAGS_RW | flags);
+    pi->nwrite = 0;
+    pi->nread = 0;
+    pi->data = data;
+    spin_init(&pi->reader_lock, "vfs_pipe_reader");
+    spin_init(&pi->writer_lock, "vfs_pipe_writer");
+    tq_init(&pi->nread_queue, "pipe_nread_queue", NULL);
+    tq_init(&pi->nwrite_queue, "pipe_nwrite_queue", NULL);
+    return pi;
+}
+
+void pipe_close(struct pipe *pi, int writable) {
+    bool freed = false;
+    if (writable) {
+        spin_lock(&pi->writer_lock);
+        freed = PIPE_CLEAR_WRITABLE(pi);
+        tq_wakeup_all(&pi->nread_queue, -1, 0);
+        spin_unlock(&pi->writer_lock);
+    } else {
+        spin_lock(&pi->reader_lock);
+        freed = PIPE_CLEAR_READABLE(pi);
+        tq_wakeup_all(&pi->nwrite_queue, -1, 0);
+        spin_unlock(&pi->reader_lock);
+    }
+    if (freed) {
+        kfree(pi->data);
+        slab_free(pi);
+    }
+}
+
+void pipe_set_flags(struct pipe *pi, int flags) {
+    int set = flags & PIPE_NONBLOCK_MASK;
+    // Atomically clear both nonblock bits then set the requested ones
+    int old;
+    do {
+        old = smp_load_acquire(&pi->flags);
+    } while (!__atomic_compare_exchange_n(
+        &pi->flags, &old, (old & ~PIPE_NONBLOCK_MASK) | set, false,
+        __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST));
+}
+
+int pipe_get_flags(struct pipe *pi) {
+    return smp_load_acquire(&pi->flags) & PIPE_NONBLOCK_MASK;
+}
+
+#define PIPE_READABLE_SIZE(nwrite, nread) ((nwrite) - (nread))
+#define PIPE_WRITABLE_SIZE(nwrite, nread)                                      \
+    (PIPESIZE - PIPE_READABLE_SIZE(nwrite, nread))
+
+static int __pipe_wait_writer(struct pipe *pi) {
+    spin_lock(&pi->writer_lock);
+    if (!PIPE_WRITABLE(pi) || killed(current)) {
+        spin_unlock(&pi->writer_lock);
+        // Return 0 to let caller re-check and detect EOF properly
+        return 0;
+    }
+    tq_wait(&pi->nread_queue, &pi->writer_lock, NULL);
+    spin_unlock(&pi->writer_lock);
+    // Return 0 to re-check conditions (wakeup may be from close or data)
+    return 0;
+}
+
+static int __pipe_wait_reader(struct pipe *pi) {
+    spin_lock(&pi->reader_lock);
+    if (!PIPE_READABLE(pi) || killed(current)) {
+        spin_unlock(&pi->reader_lock);
+        // Return 0 to let caller re-check and detect broken pipe properly
+        return 0;
+    }
+    tq_wait(&pi->nwrite_queue, &pi->reader_lock, NULL);
+    spin_unlock(&pi->reader_lock);
+    // Return 0 to re-check conditions (wakeup may be from close or space
+    // available)
+    return 0;
+}
+
+/******************************************************************************
+ * Standalone pipe read/write
+ *
+ * These are the core pipe I/O routines.  They operate on a bare
+ * `struct pipe *` and know nothing about VFS file structures.
+ * The `user` flag selects user-space vs kernel-space buffer handling.
+ ******************************************************************************/
+
+ssize_t pipe_read(struct pipe *pi, char *buf, size_t count, bool user) {
+    struct thread *pr = current;
+    ssize_t total = 0;
+    int ret = 0;
+    char tmp[128];
+    size_t tmp_pos = 0;
+    size_t tmp_len = 0;
+    bool nonblock = PIPE_NONBLOCK_RD(pi);
+
+    while ((size_t)total < count) {
+        spin_lock(&pi->reader_lock);
+        while (tmp_len == 0) {
+            uint nwrite = smp_load_acquire(&pi->nwrite);
+            uint nread_old = pi->nread;
+            size_t readable = PIPE_READABLE_SIZE(nwrite, nread_old);
+            if (readable == 0) {
+                if (!PIPE_WRITABLE(pi)) {
+                    // Writer closed and no data left - EOF
+                    spin_unlock(&pi->reader_lock);
+                    goto out;
+                }
+                if (killed(pr)) {
+                    spin_unlock(&pi->reader_lock);
+                    return -1;
+                }
+                if (nonblock) {
+                    spin_unlock(&pi->reader_lock);
+                    if (total > 0)
+                        goto out;
+                    return -EAGAIN;
+                }
+                tq_wakeup_all(&pi->nwrite_queue, 0, 0);
+                spin_unlock(&pi->reader_lock);
+
+                ret = __pipe_wait_writer(pi);
+                if (ret < 0)
+                    goto out;
+                spin_lock(&pi->reader_lock);
+            } else {
+                size_t read_size =
+                    min(min(count - (size_t)total, readable), sizeof(tmp));
+                uint nread = nread_old + read_size;
+                uint nread_idx = nread_old % PIPESIZE;
+
+                if (nread_idx + read_size <= PIPESIZE) {
+                    memmove(tmp, &pi->data[nread_idx], read_size);
+                } else {
+                    size_t first_part = PIPESIZE - nread_idx;
+                    memmove(tmp, &pi->data[nread_idx], first_part);
+                    memmove(&tmp[first_part], &pi->data[0],
+                            read_size - first_part);
+                }
+
+                smp_store_release(&pi->nread, nread);
+                tmp_len = read_size;
+            }
+        }
+        spin_unlock(&pi->reader_lock);
+
+        // Copy data out (user or kernel)
+        size_t copy_size = min(tmp_len - tmp_pos, count - (size_t)total);
+        if (user) {
+            if (vm_copyout(pr->vm, (uint64)(buf + total), &tmp[tmp_pos],
+                           copy_size) < 0)
+                goto out;
+        } else {
+            memmove(buf + total, &tmp[tmp_pos], copy_size);
+        }
+        total += copy_size;
+        tmp_pos += copy_size;
+        if (tmp_pos >= tmp_len) {
+            tmp_pos = 0;
+            tmp_len = 0;
+        }
+    }
+out:
+    spin_lock(&pi->reader_lock);
+    tq_wakeup_all(&pi->nwrite_queue, 0, 0);
+    spin_unlock(&pi->reader_lock);
+    return total;
+}
+
+ssize_t pipe_write(struct pipe *pi, const char *buf, size_t count, bool user) {
+    struct thread *pr = current;
+    ssize_t total = 0;
+    int ret = 0;
+    char tmp[128];
+    size_t tmp_pos = 0;
+    size_t tmp_len = 0;
+    bool nonblock = PIPE_NONBLOCK_WR(pi);
+
+    while ((size_t)total < count) {
+        if (tmp_len == 0) {
+            tmp_len = min(count - (size_t)total, sizeof(tmp));
+            if (tmp_len == 0)
+                goto out;
+            if (user) {
+                if (vm_copyin(pr->vm, tmp, (uint64)(buf + total), tmp_len) < 0)
+                    goto out;
+            } else {
+                memmove(tmp, buf + total, tmp_len);
+            }
+        }
+        total += tmp_len;
+        spin_lock(&pi->writer_lock);
+        while (tmp_len > tmp_pos) {
+            uint nread = smp_load_acquire(&pi->nread);
+            if (!PIPE_READABLE(pi) || killed(pr)) {
+                spin_unlock(&pi->writer_lock);
+                return -1;
+            }
+            uint nwrite_old = pi->nwrite;
+            size_t writable = PIPE_WRITABLE_SIZE(nwrite_old, nread);
+            if (writable == 0) {
+                if (nonblock) {
+                    spin_unlock(&pi->writer_lock);
+                    if (total > (ssize_t)tmp_len)
+                        goto out;
+                    return -EAGAIN;
+                }
+                tq_wakeup_all(&pi->nread_queue, 0, 0);
+                spin_unlock(&pi->writer_lock);
+
+                ret = __pipe_wait_reader(pi);
+                if (ret < 0)
+                    goto out;
+                spin_lock(&pi->writer_lock);
+            } else {
+                size_t write_size = min(tmp_len - tmp_pos, writable);
+                uint nwrite = nwrite_old + write_size;
+                uint nwrite_idx = nwrite_old % PIPESIZE;
+
+                if (nwrite_idx + write_size <= PIPESIZE) {
+                    memmove(&pi->data[nwrite_idx], &tmp[tmp_pos], write_size);
+                } else {
+                    size_t first_part = PIPESIZE - nwrite_idx;
+                    memmove(&pi->data[nwrite_idx], &tmp[tmp_pos], first_part);
+                    memmove(&pi->data[0], &tmp[tmp_pos + first_part],
+                            write_size - first_part);
+                }
+
+                smp_store_release(&pi->nwrite, nwrite);
+                tmp_pos += write_size;
+            }
+        }
+        spin_unlock(&pi->writer_lock);
+        tmp_pos = 0;
+        tmp_len = 0;
+    }
+out:
+    spin_lock(&pi->writer_lock);
+    tq_wakeup_all(&pi->nread_queue, 0, 0);
+    spin_unlock(&pi->writer_lock);
+    return total - (tmp_len - tmp_pos);
+}
+
+/******************************************************************************
+ * VFS file_ops adapters
+ *
+ * Thin wrappers that extract `struct pipe *` from the VFS file and delegate
+ * to the standalone pipe_read / pipe_write above.
+ ******************************************************************************/
+
+static ssize_t __pipe_file_read(struct vfs_file *file, char *buf, size_t count,
+                                bool user) {
+    return pipe_read(file->pipe, buf, count, user);
+}
+
+static ssize_t __pipe_file_write(struct vfs_file *file, const char *buf,
+                                 size_t count, bool user) {
+    return pipe_write(file->pipe, buf, count, user);
+}
+
+static int __pipe_file_release(struct vfs_inode *inode, struct vfs_file *file) {
+    (void)inode; // pipes have no inode
+    if (file->pipe != NULL) {
+        pipe_close(file->pipe, (file->f_flags & O_ACCMODE) != O_RDONLY);
+        file->pipe = NULL;
+    }
+    return 0;
+}
+
+static struct vfs_file_ops pipe_file_ops = {
+    .read = __pipe_file_read,
+    .write = __pipe_file_write,
+    .llseek = NULL,
+    .release = __pipe_file_release,
+    .fsync = NULL,
+    .stat = NULL,
+    .fault = NULL,
+};
+
+void pipe_open(struct vfs_file *file, struct pipe *pi, int f_flags) {
+    file->f_flags = f_flags;
+    file->pipe = pi;
+    file->ops = &pipe_file_ops;
+}

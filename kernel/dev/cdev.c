@@ -39,7 +39,10 @@ static int __vfs_cdev_underlying_ioctl(device_t *dev, uint64 cmd, uint64 arg) {
 }
 
 static device_ops_t __cdev_underlying_ops = {
-    .open = __underlying_dev_open, .release = __underlying_dev_release};
+    .open = __underlying_dev_open,
+    .release = __underlying_dev_release,
+    .ioctl = __vfs_cdev_underlying_ioctl,
+};
 
 static bool __cdev_opts_validate(cdev_ops_t *ops) {
     if (ops == NULL) {

@@ -71,14 +71,6 @@ uint64 get_total_free_pages(void);
 // Legacy log.c removed - logging now handled by VFS xv6fs subsystem
 // See kernel/vfs/xv6fs/log.c for VFS logging interfaces
 
-// pipe.c
-// Legacy pipealloc removed - VFS uses vfs_pipealloc in vfs/file.c
-void pipeclose(struct pipe *, int);
-int piperead(struct pipe *, uint64, int);
-int pipewrite(struct pipe *, uint64, int);
-int piperead_kernel(struct pipe *, char *, int);
-int pipewrite_kernel(struct pipe *, const char *, int);
-
 // swtch.S
 struct context *__swtch_context(struct context *cur, struct context *target);
 typedef void (*sw_noret_cb_t)(uint64, uint64);
