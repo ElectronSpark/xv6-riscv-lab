@@ -51,7 +51,10 @@
 #define SYS_getdents     37
 #define SYS_getcwd       38
 #define SYS_sync         39
-// 40-49 reserved
+#define SYS_ioctl        40
+#define SYS_tcgetattr    41
+#define SYS_tcsetattr    42
+// 43-49 reserved
 
 // --- Memory management (50-69) ---
 #define SYS_mmap         50

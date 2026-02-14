@@ -131,6 +131,9 @@ extern uint64 sys_chroot(void);
 extern uint64 sys_mount(void);
 extern uint64 sys_umount(void);
 extern uint64 sys_getcwd(void);
+extern uint64 sys_vfs_ioctl(void);
+extern uint64 sys_tcgetattr(void);
+extern uint64 sys_tcsetattr(void);
 
 /*
  * Syscall routing table
@@ -196,6 +199,9 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_kernbase] sys_kernbase,
     [SYS_dumpinode] sys_dumpinode,
     [SYS_sync] sys_sync,
+    [SYS_ioctl] sys_vfs_ioctl,
+    [SYS_tcgetattr] sys_tcgetattr,
+    [SYS_tcsetattr] sys_tcsetattr,
     [SYS_getdents] sys_getdents,
     [SYS_chroot] sys_chroot,
     [SYS_mount] sys_mount,

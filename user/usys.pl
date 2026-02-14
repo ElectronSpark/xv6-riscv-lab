@@ -74,4 +74,8 @@ entry("dumprq");
 entry("kernbase");
 entry("dumpinode", 1);
 
+entry("ioctl");
+entry("tcgetattr");
+entry("tcsetattr");
+
 entry("sync");

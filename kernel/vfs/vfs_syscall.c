@@ -26,6 +26,7 @@
 #include <mm/vm.h>
 #include "printf.h"
 #include "dev/cdev.h"
+#include "tty/termios.h"
 
 // Forward declaration for syscall argument helpers
 void argint(int n, int *ip);
@@ -1302,4 +1303,93 @@ uint64 sys_dumpinode(void) {
 
     vfs_dump_sb_inodes(sb);
     return 0;
+}
+
+/******************************************************************************
+ * TTY / ioctl Syscalls
+ ******************************************************************************/
+
+/**
+ * sys_vfs_ioctl - generic ioctl syscall
+ *
+ * Arguments: a0 = fd, a1 = cmd, a2 = arg (pointer)
+ */
+uint64 sys_vfs_ioctl(void) {
+    int fd;
+    uint64 cmd, arg;
+
+    argint(0, &fd);
+    argaddr(1, &cmd);
+    argaddr(2, &arg);
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL)
+        return -EBADF;
+
+    int ret = vfs_ioctl(f, cmd, arg);
+    vfs_fput(f);
+    return ret;
+}
+
+/**
+ * sys_tcgetattr - get terminal attributes
+ *
+ * Arguments: a0 = fd, a1 = termios_p (user pointer)
+ *
+ * Equivalent to ioctl(fd, TCGETS, termios_p).
+ */
+uint64 sys_tcgetattr(void) {
+    int fd;
+    uint64 termios_p;
+
+    argint(0, &fd);
+    argaddr(1, &termios_p);
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL)
+        return -EBADF;
+
+    int ret = vfs_ioctl(f, TCGETS, termios_p);
+    vfs_fput(f);
+    return ret;
+}
+
+/**
+ * sys_tcsetattr - set terminal attributes
+ *
+ * Arguments: a0 = fd, a1 = optional_actions, a2 = termios_p (user pointer)
+ *
+ * optional_actions: TCSANOW (0), TCSADRAIN (1), TCSAFLUSH (2)
+ * Maps to TCSETS / TCSETSW / TCSETSF ioctls respectively.
+ */
+uint64 sys_tcsetattr(void) {
+    int fd, optional_actions;
+    uint64 termios_p;
+
+    argint(0, &fd);
+    argint(1, &optional_actions);
+    argaddr(2, &termios_p);
+
+    uint64 cmd;
+    switch (optional_actions) {
+    case 0: /* TCSANOW */
+        cmd = TCSETS;
+        break;
+    case 1: /* TCSADRAIN */
+        cmd = TCSETSW;
+        break;
+    case 2: /* TCSAFLUSH */
+        cmd = TCSETSF;
+        break;
+    default:
+        return -EINVAL;
+    }
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL)
+        return -EBADF;
+
+    int ret = vfs_ioctl(f, cmd, termios_p);
+    vfs_fput(f);
+    return ret;
 }
