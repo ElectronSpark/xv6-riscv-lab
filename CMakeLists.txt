@@ -221,6 +221,12 @@ set(MKFS_SOURCE_FILES
     ${KERNEL_DIR}/inc/param.h
 )
 
+set(XV6FUSE_SOURCE_FILES
+    ${CMAKE_SOURCE_DIR}/utils/xv6fuse.c
+    ${CMAKE_SOURCE_DIR}/utils/rbtree.c
+    ${CMAKE_SOURCE_DIR}/utils/rbtree.h
+)
+
 #@TODO: add XCFLAGS
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mkfs
@@ -229,15 +235,37 @@ add_custom_command(
     COMMENT "Building mkfs..."
 )
 
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6fuse
+        COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/build_xv6fuse.sh
+                        ${CMAKE_CURRENT_BINARY_DIR}/xv6fuse
+                        ${CMAKE_SOURCE_DIR}/utils/xv6fuse.c
+                        ${CMAKE_SOURCE_DIR}/utils/rbtree.c
+                        ${CMAKE_SOURCE_DIR}/utils
+        DEPENDS ${XV6FUSE_SOURCE_FILES}
+                        ${CMAKE_SOURCE_DIR}/scripts/build_xv6fuse.sh
+    COMMENT "Building xv6fuse..."
+)
+
 # Update USER_PROGRAMS to include the correct path
 list(TRANSFORM USER_PROGRAMS PREPEND "${CMAKE_CURRENT_BINARY_DIR}/user/")
 
 # Update the custom command for fs.img to include the correct path for user executables
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fs.img
-    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/mkfs fs.img ${USER_PROGRAMS} ${CMAKE_SOURCE_DIR}/README.md
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/mkfs fs.img
+    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/populate_fs_with_fuse.sh
+            ${CMAKE_CURRENT_BINARY_DIR}/xv6fuse
+            ${CMAKE_CURRENT_BINARY_DIR}/fs.img
+            ${CMAKE_SOURCE_DIR}/README.md
+            ${USER_PROGRAMS}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mkfs ${CMAKE_SOURCE_DIR}/README.md ${USER_PROGRAMS}
+    DEPENDS user_programs
+            ${CMAKE_CURRENT_BINARY_DIR}/mkfs
+            ${CMAKE_CURRENT_BINARY_DIR}/xv6fuse
+            ${CMAKE_SOURCE_DIR}/scripts/populate_fs_with_fuse.sh
+            ${CMAKE_SOURCE_DIR}/README.md
+            ${USER_PROGRAMS}
     COMMENT "Creating file system image with user programs and README"
 )
 

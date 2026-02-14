@@ -407,12 +407,35 @@ uint64 sys_vfs_stat(void) {
         return -EFAULT;
     }
 
-    struct vfs_inode *inode = vfs_namei(path, n);
-    if (IS_ERR(inode)) {
-        return PTR_ERR(inode);
-    }
-    if (inode == NULL) {
-        return -ENOENT;
+    struct vfs_inode *inode = NULL;
+    int symloop_count = 0;
+    const int symloop_max = 8;
+
+    for (;;) {
+        inode = vfs_namei(path, strlen(path));
+        if (IS_ERR(inode)) {
+            return PTR_ERR(inode);
+        }
+        if (inode == NULL) {
+            return -ENOENT;
+        }
+
+        if (!S_ISLNK(inode->mode)) {
+            break;
+        }
+
+        ssize_t link_len = vfs_readlink(inode, path, MAXPATH - 1);
+        vfs_iput(inode);
+        inode = NULL;
+        if (link_len < 0) {
+            return link_len;
+        }
+        path[link_len] = '\0';
+
+        symloop_count++;
+        if (symloop_count >= symloop_max) {
+            return -ELOOP;
+        }
     }
 
     struct stat kst;
