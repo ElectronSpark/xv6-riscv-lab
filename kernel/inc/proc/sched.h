@@ -35,12 +35,12 @@ void context_switch_finish(struct thread *prev, struct thread *next, int intr);
 // Timer related
 void sched_timer_init(void);
 void sched_timer_tick(void);
-int sched_timer_set(struct timer_node *tn, uint64 ticks);
+int sched_timer_set(struct timer_node *tn, uint64 ms);
 void sched_timer_done(struct timer_node *tn);
 void sleep_ms(uint64 ms);
 int sched_timer_add_deadline(void (*callback)(void *), void *data,
                              uint64 deadline);
-int sched_timer_add(void (*callback)(void *), void *data, uint64 ticks);
+int sched_timer_add(void (*callback)(void *), void *data, uint64 ms);
 
 // Wake up a sleeping threads
 // This function will aquire the locks of the threads and the sched lock
