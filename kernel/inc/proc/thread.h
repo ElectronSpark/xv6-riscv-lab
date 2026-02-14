@@ -126,6 +126,26 @@ static inline const char *thread_state_to_str(enum thread_state state) {
     }
 }
 
+// Short (1-2 char) state abbreviation, Linux-ps style:
+//   R=running, S=interruptible sleep, D=uninterruptible sleep,
+//   T=stopped, Z=zombie, X=exiting, K=killable, W=wakening,
+//   Tm=timer, Kt=killable_timer, ?=unused/used/unknown
+static inline const char *thread_state_short(enum thread_state state) {
+    switch (state) {
+    case THREAD_RUNNING:         return "R";
+    case THREAD_INTERRUPTIBLE:   return "S";
+    case THREAD_UNINTERRUPTIBLE: return "D";
+    case THREAD_STOPPED:         return "T";
+    case THREAD_ZOMBIE:          return "Z";
+    case THREAD_EXITING:         return "X";
+    case THREAD_KIILABLE:        return "K";
+    case THREAD_WAKENING:        return "W";
+    case THREAD_TIMER:           return "Tm";
+    case THREAD_KIILABLE_TIMER:  return "Kt";
+    default:                     return "?";
+    }
+}
+
 static inline enum thread_state __thread_state_get(struct thread *p) {
     if (p == NULL) {
         return THREAD_UNUSED;
@@ -173,6 +193,10 @@ int wait(uint64);
 void procdump(void);
 void procdump_bt(void);
 void procdump_bt_pid(int pid);
+void procdump_tree(void);
+void procdump_tree_pid(int pid);
+void procdump_sessions(void);
+void procdump_sessions_sid(pid_t sid);
 struct thread *switch_to(struct thread *cur, struct thread *target);
 
 // pid_lock (rwlock) protects the parent-child hierarchy, the proc_table
