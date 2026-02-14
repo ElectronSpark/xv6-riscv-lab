@@ -151,6 +151,7 @@ void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
 // Initialization that requires a thread context
 void start_kernel_post_init(void) {
     consoledevinit();   // Initialize and register the console character device
+    nullranddevinit();  // Register /dev/null and /dev/random character devices
     virtio_disk_init(); // emulated hard disk (QEMU)
     ramdisk_init();     // ramdisk from FDT initrd (real hardware)
     sockinit();

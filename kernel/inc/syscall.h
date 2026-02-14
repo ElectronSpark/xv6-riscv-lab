@@ -32,7 +32,7 @@
 #define SYS_getpgid      16
 #define SYS_setsid       17
 #define SYS_getsid       18
-// 19 reserved
+#define SYS_getrandom    19
 
 // --- File system / VFS (20-49) ---
 #define SYS_open         20

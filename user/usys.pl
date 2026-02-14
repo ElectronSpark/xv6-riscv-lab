@@ -36,6 +36,7 @@ entry("chdir");
 entry("dup");
 entry("getpid");
 entry("gettid");
+entry("getrandom");
 entry("exit_group");
 entry("tgkill");
 entry("tkill");

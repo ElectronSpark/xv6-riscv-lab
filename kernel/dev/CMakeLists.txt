@@ -3,6 +3,7 @@ add_library(dev OBJECT
     dev_test.c
     cdev.c
     blkdev.c
+    nullrand.c
     bio.c
     fdt.c
 )
