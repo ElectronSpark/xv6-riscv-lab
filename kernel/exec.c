@@ -59,20 +59,8 @@ int exec(char *path, char **argv) {
 
     // Look up the file using VFS
     struct vfs_inode *inode = vfs_namei(path, strlen(path));
-    if (IS_ERR_OR_NULL(inode) && strncmp(path, "/bin/", 5) != 0) {
-        // In case of failing to find the inode in cwd, try absolute path
-        size_t path_len = strlen(path);
-        char *path1 = kmm_alloc(path_len + 5);
-        if (path1 == NULL) {
-            return -1;
-        }
-        strncpy(path1, "/bin/", 5);
-        memmove(path1 + 5, path, path_len + 1);
-        inode = vfs_namei(path1, path_len + 5);
-        kmm_free(path1);
-        if (IS_ERR_OR_NULL(inode)) {
-            return -1;
-        }
+    if (IS_ERR_OR_NULL(inode)) {
+        return -1;
     }
 
     // Open the file for reading
@@ -130,14 +118,17 @@ int exec(char *path, char **argv) {
             goto bad_locked;
         if (ph.vaddr + ph.memsz < ph.vaddr)
             goto bad_locked;
-        if (ph.vaddr % PGSIZE != 0)
-            goto bad_locked;
-        if (ph.filesz > 0 && ph.off % PGSIZE != 0)
+        // Only require vaddr and file offset are congruent mod page size
+        // (same as Linux ELF loader); handle non-page-aligned segments.
+        if (ph.filesz > 0 && (ph.vaddr % PGSIZE) != (ph.off % PGSIZE))
             goto bad_locked;
 
-        uint64 va = ph.vaddr;
-        uint64 filesz = ph.filesz;
-        uint64 memsz = ph.memsz;
+        // Page-align segment start; adjust sizes and file offset to match
+        uint64 adj = ph.vaddr % PGSIZE;
+        uint64 va = ph.vaddr - adj;
+        uint64 filesz = ph.filesz + adj;
+        uint64 memsz = ph.memsz + adj;
+        uint64 file_off = ph.off - adj;
         uint64 vm_flags = flags2vmperm(ph.flags) | VMA_FLAG_USER;
         uint64 total_end = PGROUNDUP(va + memsz);
         // End of full pages entirely covered by file data
@@ -148,8 +139,8 @@ int exec(char *path, char **argv) {
         // file's page cache on the first instruction/load/store fault.
         if (file_pg_end > va) {
             ret = vm_mmap_region_locked(tmp_vm, va, file_pg_end - va,
-                                        vm_flags | VMA_FLAG_FILE, file, ph.off,
-                                        NULL);
+                                        vm_flags | VMA_FLAG_FILE, file,
+                                        file_off, NULL);
             if (ret != 0)
                 goto bad_locked;
         }
@@ -168,7 +159,7 @@ int exec(char *path, char **argv) {
                 goto bad_locked;
             memset(pa, 0, PGSIZE);
 
-            loff_t foff = (loff_t)(ph.off + (file_pg_end - va));
+            loff_t foff = (loff_t)(file_off + (file_pg_end - va));
             if (vfs_filelseek(file, foff, SEEK_SET) != foff) {
                 kfree(pa);
                 goto bad_locked;
