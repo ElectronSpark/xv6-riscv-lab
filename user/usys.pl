@@ -39,6 +39,7 @@ entry("chdir");
 entry("dup");
 entry("dup2");
 entry("lseek");
+entry("poll");
 entry("fcntl");
 entry("access");
 entry("rename");

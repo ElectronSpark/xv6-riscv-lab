@@ -153,6 +153,7 @@ extern uint64 sys_getcwd(void);
 extern uint64 sys_vfs_ioctl(void);
 extern uint64 sys_tcgetattr(void);
 extern uint64 sys_tcsetattr(void);
+extern uint64 sys_vfs_poll(void);
 
 /*
  * Syscall routing table
@@ -235,6 +236,7 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_readlink] sys_vfs_readlink,
     [SYS_stat] sys_vfs_stat,
     [SYS_lstat] sys_vfs_lstat,
+    [SYS_poll] sys_vfs_poll,
     [SYS_ftruncate] sys_vfs_ftruncate,
     [SYS_gettimeofday] sys_gettimeofday,
     [SYS_waitpid] sys_waitpid,

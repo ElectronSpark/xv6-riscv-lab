@@ -16,10 +16,12 @@
 #include "lock/mutex_types.h"
 #include "lock/rcu.h"
 #include "proc/thread.h"
+#include "proc/sched.h"
 #include "proc/workqueue.h"
 #include "vfs_private.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
+#include "vfs/pipe.h"
 #include "vfs/fcntl.h"
 #include "vfs/stat.h"
 #include "vfs/xv6fs/ondisk.h" // for DIRSIZ
@@ -27,6 +29,7 @@
 #include "printf.h"
 #include "dev/cdev.h"
 #include "tty/termios.h"
+#include "timer/timer.h"
 
 // Forward declaration for syscall argument helpers
 void argint(int n, int *ip);
@@ -1774,4 +1777,168 @@ uint64 sys_tcsetattr(void) {
     int ret = vfs_ioctl(f, cmd, termios_p);
     vfs_fput(f);
     return ret;
+}
+
+/* poll(2) event bits */
+#ifndef POLLIN
+#define POLLIN 0x0001
+#endif
+#ifndef POLLPRI
+#define POLLPRI 0x0002
+#endif
+#ifndef POLLOUT
+#define POLLOUT 0x0004
+#endif
+#ifndef POLLERR
+#define POLLERR 0x0008
+#endif
+#ifndef POLLHUP
+#define POLLHUP 0x0010
+#endif
+#ifndef POLLNVAL
+#define POLLNVAL 0x0020
+#endif
+#ifndef POLLRDNORM
+#define POLLRDNORM 0x0040
+#endif
+#ifndef POLLWRNORM
+#define POLLWRNORM 0x0100
+#endif
+
+struct pollfd_k {
+    int fd;
+    short events;
+    short revents;
+};
+
+static int __vfs_poll_scan(struct pollfd_k *pfds, int nfds) {
+    int ready = 0;
+
+    for (int i = 0; i < nfds; i++) {
+        struct pollfd_k *pfd = &pfds[i];
+        pfd->revents = 0;
+
+        if (pfd->fd < 0) {
+            continue;
+        }
+
+        struct vfs_file *f = __vfs_argfd(pfd->fd);
+        if (f == NULL) {
+            pfd->revents |= POLLNVAL;
+            ready++;
+            continue;
+        }
+
+        if (f->pipe != NULL) {
+            struct pipe *pi = f->pipe;
+            uint nwrite = smp_load_acquire(&pi->nwrite);
+            uint nread = smp_load_acquire(&pi->nread);
+            size_t readable = (size_t)(nwrite - nread);
+            size_t writable = PIPESIZE - readable;
+
+            if (pfd->events & (POLLIN | POLLRDNORM)) {
+                if (readable > 0 || !PIPE_WRITABLE(pi)) {
+                    pfd->revents |= (pfd->events & (POLLIN | POLLRDNORM));
+                }
+            }
+
+            if (pfd->events & (POLLOUT | POLLWRNORM)) {
+                if (writable > 0 && PIPE_READABLE(pi)) {
+                    pfd->revents |= (pfd->events & (POLLOUT | POLLWRNORM));
+                }
+            }
+
+            if (!PIPE_READABLE(pi)) {
+                pfd->revents |= POLLERR;
+            }
+            if (!PIPE_WRITABLE(pi)) {
+                pfd->revents |= POLLHUP;
+            }
+        } else {
+            if ((pfd->events & (POLLIN | POLLRDNORM)) &&
+                ((f->f_flags & O_ACCMODE) != O_WRONLY)) {
+                pfd->revents |= (pfd->events & (POLLIN | POLLRDNORM));
+            }
+            if ((pfd->events & (POLLOUT | POLLWRNORM)) &&
+                ((f->f_flags & O_ACCMODE) != O_RDONLY)) {
+                pfd->revents |= (pfd->events & (POLLOUT | POLLWRNORM));
+            }
+        }
+
+        vfs_fput(f);
+
+        if (pfd->revents != 0) {
+            ready++;
+        }
+    }
+
+    return ready;
+}
+
+/*
+ * sys_vfs_poll - simple event polling over file descriptors
+ *
+ * Arguments:
+ *   a0 = pointer to struct pollfd array
+ *   a1 = nfds
+ *   a2 = timeout_ms (-1: infinite, 0: non-blocking)
+ */
+uint64 sys_vfs_poll(void) {
+    uint64 fds_addr;
+    int nfds;
+    int timeout_ms;
+
+    argaddr(0, &fds_addr);
+    argint(1, &nfds);
+    argint(2, &timeout_ms);
+
+    if (nfds < 0 || nfds > NOFILE) {
+        return -EINVAL;
+    }
+
+    if (nfds == 0) {
+        if (timeout_ms == 0) {
+            return 0;
+        }
+        uint64 start = get_jiffs();
+        while (timeout_ms < 0 || (int)(get_jiffs() - start) < timeout_ms) {
+            scheduler_yield();
+        }
+        return 0;
+    }
+
+    size_t bytes = (size_t)nfds * sizeof(struct pollfd_k);
+    struct pollfd_k *pfds = kmm_alloc(bytes);
+    if (pfds == NULL) {
+        return -ENOMEM;
+    }
+
+    if (either_copyin(pfds, 1, fds_addr, bytes) < 0) {
+        kmm_free(pfds);
+        return -EFAULT;
+    }
+
+    uint64 start = get_jiffs();
+    int ready;
+    for (;;) {
+        ready = __vfs_poll_scan(pfds, nfds);
+        if (ready > 0) {
+            break;
+        }
+        if (timeout_ms == 0) {
+            break;
+        }
+        if (timeout_ms > 0 && (int)(get_jiffs() - start) >= timeout_ms) {
+            break;
+        }
+        scheduler_yield();
+    }
+
+    if (either_copyout(1, fds_addr, pfds, bytes) < 0) {
+        kmm_free(pfds);
+        return -EFAULT;
+    }
+
+    kmm_free(pfds);
+    return ready;
 }

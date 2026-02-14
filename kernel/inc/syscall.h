@@ -81,7 +81,8 @@
 #define SYS_getppid      61
 #define SYS_uname        62
 #define SYS_lstat        63
-// 64-69 reserved
+#define SYS_poll         64
+// 65-69 reserved
 
 // --- Signals (70-89) ---
 #define SYS_sigaction    70

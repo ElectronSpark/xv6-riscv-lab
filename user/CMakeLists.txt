@@ -5,7 +5,7 @@ else()
 endif()
 
 # Optional newlib userland (independent from user/* libc sources)
-option(USE_NEWLIB "Build newlib-based user programs" OFF)
+option(USE_NEWLIB "Build newlib-based user programs" ON)
 option(USE_LOCAL_NEWLIB "Use local newlib source/install under user/v6-newlib" ON)
 set(NEWLIB_XV6_DIR "${USER_DIR}/v6-newlib/newlib/libc/sys/xv6")
 if(USE_NEWLIB)
@@ -287,11 +287,24 @@ if(USE_NEWLIB)
                 COMMAND ${CMAKE_COMMAND} -E copy_if_different
                     ${NEWLIB_XV6_DIR}/sys/ioctl.h
                     ${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include/sys/ioctl.h
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${NEWLIB_XV6_DIR}/sgtty.h
+                    ${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include/sgtty.h
             DEPENDS ${NEWLIB_LOCAL_ROOT}/configure
             COMMENT "Building/installing local newlib libraries"
         )
 
         add_custom_target(local_newlib_install DEPENDS ${NEWLIB_LIBC_A} ${NEWLIB_LIBM_A})
+
+        add_custom_target(newlib_header_compile_check
+            COMMAND ${CMAKE_C_COMPILER}
+                    -Wall -Werror
+                    -isystem ${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include
+                    -fsyntax-only
+                    ${NEWLIB_XV6_DIR}/src/misc/newlib_header_probe.c
+            DEPENDS local_newlib_install
+            COMMENT "Compiling newlib header probe (termios/ioctl/signal)"
+        )
     endif()
 
     # Get the toolchain sysroot for newlib headers/libraries
@@ -380,10 +393,104 @@ if(USE_NEWLIB)
     add_newlib_program(_newlibtest ${NEWLIB_XV6_DIR}/src/misc/newlibtest.c)
     add_newlib_program(_ntypesize ${NEWLIB_XV6_DIR}/src/misc/newlib_typesizes.c)
 
+    set(NCURSES_SRC_DIR "${CMAKE_SOURCE_DIR}/user/ncurses")
+    set(NCURSES_BUILD_DIR "${CMAKE_BINARY_DIR}/ncurses/build-xv6")
+    set(NCURSES_LIB_A "${NCURSES_BUILD_DIR}/lib/libncurses.a")
+    set(NCURSES_INCLUDE_DIR "${NCURSES_BUILD_DIR}/include")
+    set(NCURSES_SMOKE_SRC "${NEWLIB_XV6_DIR}/src/misc/newlib_ncurses_smoke.c")
+    set(NCURSES_SMOKE_OBJ "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_nncurses_smoke.dir/newlib_ncurses_smoke.c.o")
+    set(NCURSES_SMOKE_ELF "${CMAKE_BINARY_DIR}/user/_nncurses_smoke")
+
+    if(EXISTS "${NCURSES_SRC_DIR}/configure")
+        add_custom_command(
+            OUTPUT ${NCURSES_LIB_A}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${NCURSES_BUILD_DIR}
+            COMMAND ${CMAKE_COMMAND} -E chdir ${NCURSES_BUILD_DIR}
+                    env
+                    CC=${CMAKE_C_COMPILER}
+                    AR=${CMAKE_AR}
+                    RANLIB=${CMAKE_RANLIB}
+                    CFLAGS=-O2\ -I${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include
+                    ${NCURSES_SRC_DIR}/configure
+                        --host=riscv64-unknown-elf
+                        --disable-widec
+                        --without-shared
+                        --without-debug
+                        --without-ada
+                        --without-cxx
+                        --without-cxx-binding
+                        --without-manpages
+                        --without-progs
+                        --without-tests
+            COMMAND ${CMAKE_COMMAND} -E chdir ${NCURSES_BUILD_DIR} make -j1
+            DEPENDS local_newlib_install ${NCURSES_SRC_DIR}/configure ${NCURSES_SRC_DIR}/misc/terminfo.src
+            COMMENT "Building local ncurses static library"
+        )
+
+        add_custom_target(local_ncurses_build DEPENDS ${NCURSES_LIB_A})
+
+        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_nncurses_smoke.dir)
+
+        add_custom_command(
+            OUTPUT ${NCURSES_SMOKE_OBJ}
+            COMMAND ${CMAKE_C_COMPILER}
+                    -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
+                    -mcmodel=medany -fno-common -fno-pie -no-pie
+                    -D_LARGEFILE_SOURCE=1
+                    -D_LARGEFILE64_SOURCE=1
+                    -D_FILE_OFFSET_BITS=64
+                    -D__LARGE64_FILES=1
+                    -nostdinc -ffreestanding
+                    -isystem ${NEWLIB_XV6_DIR}
+                    -isystem ${NEWLIB_XV6_DIR}/include
+                    -isystem ${GCC_INCLUDE_DIR}
+                    -isystem ${NEWLIB_TOP_INCLUDE_DIR}
+                    -isystem ${NEWLIB_INCLUDE_DIR}
+                    -isystem ${NCURSES_INCLUDE_DIR}
+                    -MD -MF ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_nncurses_smoke.dir/newlib_ncurses_smoke.c.d
+                    -o ${NCURSES_SMOKE_OBJ}
+                    -c ${NCURSES_SMOKE_SRC}
+            DEPENDS ${NCURSES_SMOKE_SRC}
+            COMMENT "Building newlib ncurses smoke object"
+        )
+
+        add_custom_command(
+            OUTPUT ${NCURSES_SMOKE_ELF}
+            COMMAND ${CMAKE_C_COMPILER}
+                    -nostdlib
+                    -Wl,-z,max-page-size=4096
+                    -T ${USER_DIR}/user.ld
+                    -o ${NCURSES_SMOKE_ELF}
+                    ${NEWLIB_CRT0_OBJ}
+                    ${NCURSES_SMOKE_OBJ}
+                    -Wl,--whole-archive
+                    ${CMAKE_CURRENT_BINARY_DIR}/newlib_shim/libxv6_newlib_syscalls.a
+                    -Wl,--no-whole-archive
+                    ${NCURSES_LIB_A}
+                    $<$<BOOL:${USE_LOCAL_NEWLIB}>:${NEWLIB_LIBC_A}>
+                    $<$<BOOL:${USE_LOCAL_NEWLIB}>:${NEWLIB_LIBM_A}>
+                    $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-L${TOOLCHAIN_SYSROOT}/lib>
+                    $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-lc>
+                    $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-lm>
+                    -lgcc
+            DEPENDS ${NCURSES_SMOKE_OBJ} xv6_newlib_syscalls local_ncurses_build $<$<BOOL:${USE_LOCAL_NEWLIB}>:local_newlib_install>
+            COMMENT "Linking newlib program _nncurses_smoke"
+        )
+
+        add_custom_target(_nncurses_smoke_newlib ALL DEPENDS ${NCURSES_SMOKE_ELF})
+        list(APPEND USER_PROGRAMS _nncurses_smoke)
+        set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
+    else()
+        message(STATUS "Skipping _nncurses_smoke_newlib (missing submodule at ${NCURSES_SRC_DIR})")
+    endif()
+
     if(USE_LOCAL_NEWLIB)
         add_dependencies(user_programs local_newlib_install)
     endif()
     add_dependencies(user_programs _nwclock_newlib _newlibtest_newlib _ntypesize_newlib)
+    if(TARGET _nncurses_smoke_newlib)
+        add_dependencies(user_programs _nncurses_smoke_newlib)
+    endif()
 endif()
 
 # Pass the populated USER_PROGRAMS variable to the parent scope

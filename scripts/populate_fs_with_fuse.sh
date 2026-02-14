@@ -67,6 +67,7 @@ if ! mountpoint -q "$MOUNT_DIR"; then
 fi
 
 mkdir -p "$MOUNT_DIR/bin"
+mkdir -p "$MOUNT_DIR/usr/share"
 cp "$README_PATH" "$MOUNT_DIR/README.md"
 
 for src in "$@"; do
@@ -79,7 +80,11 @@ for src in "$@"; do
   name="${base#_}"
 
   if [[ -d "$src" ]]; then
-    cp -a "$src" "$MOUNT_DIR/bin/$name"
+    if [[ "$name" == "terminfo" ]]; then
+      cp -r "$src" "$MOUNT_DIR/usr/share/terminfo"
+    else
+      cp -r "$src" "$MOUNT_DIR/bin/$name"
+    fi
   else
     cp "$src" "$MOUNT_DIR/bin/$name"
     chmod 0755 "$MOUNT_DIR/bin/$name" || true

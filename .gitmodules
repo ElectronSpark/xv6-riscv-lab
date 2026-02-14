@@ -2,3 +2,6 @@
 	path = user/v6-newlib
 	url = https://github.com/ElectronSpark/v6-newlib.git
 	branch = v6-port
+[submodule "user/ncurses"]
+	path = user/ncurses
+	url = https://github.com/mirror/ncurses.git

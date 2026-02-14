@@ -247,6 +247,17 @@ add_custom_command(
     COMMENT "Building xv6fuse..."
 )
 
+set(TERMINFO_DIR ${CMAKE_CURRENT_BINARY_DIR}/terminfo)
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/terminfo.stamp
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${TERMINFO_DIR}
+    COMMAND tic -x -o ${TERMINFO_DIR} -e xterm,vt100,dumb ${CMAKE_SOURCE_DIR}/user/ncurses/misc/terminfo.src
+    COMMAND ${CMAKE_COMMAND} -E touch ${CMAKE_CURRENT_BINARY_DIR}/terminfo.stamp
+    DEPENDS ${CMAKE_SOURCE_DIR}/user/ncurses/misc/terminfo.src
+    COMMENT "Generating minimal terminfo database (xterm,vt100,dumb)"
+)
+add_custom_target(terminfo_db DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/terminfo.stamp)
+
 # Update USER_PROGRAMS to include the correct path
 list(TRANSFORM USER_PROGRAMS PREPEND "${CMAKE_CURRENT_BINARY_DIR}/user/")
 
@@ -258,9 +269,11 @@ add_custom_command(
             ${CMAKE_CURRENT_BINARY_DIR}/xv6fuse
             ${CMAKE_CURRENT_BINARY_DIR}/fs.img
             ${CMAKE_SOURCE_DIR}/README.md
+            ${TERMINFO_DIR}
             ${USER_PROGRAMS}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS user_programs
+            terminfo_db
             ${CMAKE_CURRENT_BINARY_DIR}/mkfs
             ${CMAKE_CURRENT_BINARY_DIR}/xv6fuse
             ${CMAKE_SOURCE_DIR}/scripts/populate_fs_with_fuse.sh
