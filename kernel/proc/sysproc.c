@@ -13,6 +13,8 @@
 #include "clone_flags.h"
 #include "signal.h"
 #include "errno.h"
+#include "proc/pgroup.h"
+#include "tty/session.h"
 
 uint64 sys_exit(void) {
     int n;
@@ -114,5 +116,30 @@ uint64 sys_uptime(void) { return get_jiffs(); }
 // return the physical memory start address (KERNBASE)
 // for user-space tests that need to verify they can't access kernel memory
 uint64 sys_kernbase(void) { return __physical_memory_start; }
+
+/* ---- Process group / session syscalls ---- */
+
+uint64 sys_setpgid(void) {
+    int pid, pgid;
+    argint(0, &pid);
+    argint(1, &pgid);
+    return pgroup_setpgid((pid_t)pid, (pid_t)pgid);
+}
+
+uint64 sys_getpgid(void) {
+    int pid;
+    argint(0, &pid);
+    return pgroup_getpgid((pid_t)pid);
+}
+
+uint64 sys_setsid(void) {
+    return session_setsid();
+}
+
+uint64 sys_getsid(void) {
+    int pid;
+    argint(0, &pid);
+    return session_getsid((pid_t)pid);
+}
 
 // mmap/munmap/mprotect moved to kernel/mm/sysmm.c

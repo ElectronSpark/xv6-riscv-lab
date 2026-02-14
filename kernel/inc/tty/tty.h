@@ -2,6 +2,7 @@
 #define __KERNEL_TTY_H
 
 #include "tty_types.h"
+#include "tty/session.h"
 
 /* ---- termios.c ---- */
 void termios_init_default(struct termios *t);

@@ -30,33 +30,27 @@
 /*  PTY slave ops                                                     */
 /* ------------------------------------------------------------------ */
 
-static int pty_slave_open(struct tty *tty)
-{
+static int pty_slave_open(struct tty *tty) {
     (void)tty;
     return 0;
 }
 
-static void pty_slave_close(struct tty *tty)
-{
-    (void)tty;
-}
+static void pty_slave_close(struct tty *tty) { (void)tty; }
 
-static ssize_t pty_slave_write(struct tty *tty, const char *buf, size_t nr)
-{
+static ssize_t pty_slave_write(struct tty *tty, const char *buf, size_t nr) {
     /* Slave write → push into output pipe (master can read it) */
     return pipe_write(tty->output_pipe, buf, nr, 0);
 }
 
-static ssize_t pty_slave_read(struct tty *tty, char *buf, size_t nr)
-{
+static ssize_t pty_slave_read(struct tty *tty, char *buf, size_t nr) {
     /* Slave read ← pull from input pipe (fed by master write) */
     return pipe_read(tty->input_pipe, buf, nr, 0);
 }
 
 static struct tty_ops pty_slave_ops = {
-    .open  = pty_slave_open,
+    .open = pty_slave_open,
     .close = pty_slave_close,
-    .read  = pty_slave_read,
+    .read = pty_slave_read,
     .write = pty_slave_write,
 };
 
@@ -68,9 +62,8 @@ static struct tty_ops pty_slave_ops = {
  * pty_master_write - data from the master goes through the slave's
  *                    line-discipline via tty_input().
  */
-ssize_t pty_master_write(struct tty *slave, const char *buf,
-                         size_t count, bool user)
-{
+ssize_t pty_master_write(struct tty *slave, const char *buf, size_t count,
+                         bool user) {
     char kbuf[64];
     size_t written = 0;
 
@@ -101,9 +94,7 @@ ssize_t pty_master_write(struct tty *slave, const char *buf,
  * pty_master_read - read data that the slave has written
  *                   (i.e., the slave's output pipe).
  */
-ssize_t pty_master_read(struct tty *slave, char *buf,
-                        size_t count, bool user)
-{
+ssize_t pty_master_read(struct tty *slave, char *buf, size_t count, bool user) {
     return pipe_read(slave->output_pipe, buf, count, user);
 }
 
@@ -122,8 +113,7 @@ ssize_t pty_master_read(struct tty *slave, char *buf,
  * The caller interacts with the master side through
  * pty_master_read / pty_master_write, passing the slave tty pointer.
  */
-int pty_alloc(struct tty **slave_out, const char *name)
-{
+int pty_alloc(struct tty **slave_out, const char *name) {
     struct tty *slave = tty_alloc(name, &pty_slave_ops);
     if (IS_ERR(slave))
         return PTR_ERR(slave);

@@ -10,6 +10,7 @@ set(PROC_C_SRCS
     clone.c
     exit.c
     pid.c
+    pgroup.c
     rq.c
     sched_idle.c
     sched_fifo.c

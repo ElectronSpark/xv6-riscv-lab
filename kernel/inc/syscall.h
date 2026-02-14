@@ -28,7 +28,11 @@
 #define SYS_pause        12
 #define SYS_uptime       13
 #define SYS_sbrk         14
-// 15-19 reserved
+#define SYS_setpgid      15
+#define SYS_getpgid      16
+#define SYS_setsid       17
+#define SYS_getsid       18
+// 19 reserved
 
 // --- File system / VFS (20-49) ---
 #define SYS_open         20

@@ -27,6 +27,8 @@
 #include "mm/slab.h"
 #include "vfs/pipe.h"
 #include "tty/tty.h"
+#include "tty/session.h"
+#include "proc/pgroup.h"
 #include "signal.h"
 #include "signo.h"
 #include "smp/percpu.h"
@@ -37,20 +39,17 @@
 
 static slab_cache_t __tty_cache = {0};
 
-void tty_init(void)
-{
-    int ret = slab_cache_init(&__tty_cache, "tty_cache",
-                              sizeof(struct tty), SLAB_FLAG_STATIC);
-    assert(ret == 0,
-           "tty_init: failed to init tty_cache slab, errno=%d", ret);
+void tty_init(void) {
+    int ret = slab_cache_init(&__tty_cache, "tty_cache", sizeof(struct tty),
+                              SLAB_FLAG_STATIC);
+    assert(ret == 0, "tty_init: failed to init tty_cache slab, errno=%d", ret);
 }
 
 /* ------------------------------------------------------------------ */
 /*  Allocation / reference counting                                   */
 /* ------------------------------------------------------------------ */
 
-struct tty *tty_alloc(const char *name, struct tty_ops *ops)
-{
+struct tty *tty_alloc(const char *name, struct tty_ops *ops) {
     struct tty *tty = slab_alloc(&__tty_cache);
     if (tty == NULL)
         return ERR_PTR(-ENOMEM);
@@ -59,7 +58,7 @@ struct tty *tty_alloc(const char *name, struct tty_ops *ops)
     struct pipe *inp = pipe_alloc(0);
     if (IS_ERR(inp)) {
         slab_free(tty);
-        return (struct tty *)inp;          /* propagate error */
+        return (struct tty *)inp; /* propagate error */
     }
     struct pipe *outp = pipe_alloc(0);
     if (IS_ERR(outp)) {
@@ -71,22 +70,22 @@ struct tty *tty_alloc(const char *name, struct tty_ops *ops)
 
     spin_init(&tty->lock, "tty");
     termios_init_default(&tty->termios);
-    tty->winsize.ws_row    = DEFAULT_ROWS;
-    tty->winsize.ws_col    = DEFAULT_COLS;
+    tty->winsize.ws_row = DEFAULT_ROWS;
+    tty->winsize.ws_col = DEFAULT_COLS;
     tty->winsize.ws_xpixel = 0;
     tty->winsize.ws_ypixel = 0;
-    tty->ops        = ops;
-    tty->ref_count  = 1;
-    tty->input_pipe  = inp;
+    tty->ops = ops;
+    tty->ref_count = 1;
+    tty->input_pipe = inp;
     tty->output_pipe = outp;
     tty->driver_data = NULL;
+    tty->session = NULL;
     safestrcpy(tty->name, name, sizeof(tty->name));
 
     return tty;
 }
 
-void tty_free(struct tty *tty)
-{
+void tty_free(struct tty *tty) {
     if (tty == NULL)
         return;
 
@@ -103,15 +102,13 @@ void tty_free(struct tty *tty)
     slab_free(tty);
 }
 
-void tty_ref(struct tty *tty)
-{
+void tty_ref(struct tty *tty) {
     spin_lock(&tty->lock);
     tty->ref_count++;
     spin_unlock(&tty->lock);
 }
 
-void tty_unref(struct tty *tty)
-{
+void tty_unref(struct tty *tty) {
     int should_free = 0;
 
     spin_lock(&tty->lock);
@@ -128,61 +125,50 @@ void tty_unref(struct tty *tty)
 /*  Helpers                                                           */
 /* ------------------------------------------------------------------ */
 
-#define C(x) ((x) - '@')   /* Control-x */
+#define C(x) ((x) - '@') /* Control-x */
 #define BACKSPACE 0x100
 
-static inline int L_CANON(struct tty *tty)
-{
+static inline int L_CANON(struct tty *tty) {
     return tty->termios.c_lflag & ICANON;
 }
 
-static inline int L_ECHO(struct tty *tty)
-{
+static inline int L_ECHO(struct tty *tty) {
     return tty->termios.c_lflag & ECHO;
 }
 
-static inline int L_ECHOE(struct tty *tty)
-{
+static inline int L_ECHOE(struct tty *tty) {
     return tty->termios.c_lflag & ECHOE;
 }
 
-static inline int L_ECHOK(struct tty *tty)
-{
+static inline int L_ECHOK(struct tty *tty) {
     return tty->termios.c_lflag & ECHOK;
 }
 
-static inline int L_ISIG(struct tty *tty)
-{
+static inline int L_ISIG(struct tty *tty) {
     return tty->termios.c_lflag & ISIG;
 }
 
-static inline int I_ICRNL(struct tty *tty)
-{
+static inline int I_ICRNL(struct tty *tty) {
     return tty->termios.c_iflag & ICRNL;
 }
 
-static inline int I_IGNCR(struct tty *tty)
-{
+static inline int I_IGNCR(struct tty *tty) {
     return tty->termios.c_iflag & IGNCR;
 }
 
-static inline int I_INLCR(struct tty *tty)
-{
+static inline int I_INLCR(struct tty *tty) {
     return tty->termios.c_iflag & INLCR;
 }
 
-static inline int I_ISTRIP(struct tty *tty)
-{
+static inline int I_ISTRIP(struct tty *tty) {
     return tty->termios.c_iflag & ISTRIP;
 }
 
-static inline int O_OPOST(struct tty *tty)
-{
+static inline int O_OPOST(struct tty *tty) {
     return tty->termios.c_oflag & OPOST;
 }
 
-static inline int O_ONLCR(struct tty *tty)
-{
+static inline int O_ONLCR(struct tty *tty) {
     return tty->termios.c_oflag & ONLCR;
 }
 
@@ -190,15 +176,17 @@ static inline int O_ONLCR(struct tty *tty)
 /*  Echo a character to the output pipe (called under tty->lock)      */
 /* ------------------------------------------------------------------ */
 
-static void tty_echo_char(struct tty *tty, int c)
-{
+static void tty_echo_char(struct tty *tty, int c) {
     char ch;
 
     if (c == BACKSPACE) {
         /* BS SPC BS */
-        ch = '\b'; pipe_write(tty->output_pipe, &ch, 1, 0);
-        ch = ' ';  pipe_write(tty->output_pipe, &ch, 1, 0);
-        ch = '\b'; pipe_write(tty->output_pipe, &ch, 1, 0);
+        ch = '\b';
+        pipe_write(tty->output_pipe, &ch, 1, 0);
+        ch = ' ';
+        pipe_write(tty->output_pipe, &ch, 1, 0);
+        ch = '\b';
+        pipe_write(tty->output_pipe, &ch, 1, 0);
         return;
     }
 
@@ -214,16 +202,26 @@ static void tty_echo_char(struct tty *tty, int c)
 }
 
 /* ------------------------------------------------------------------ */
-/*  Signal generation                                                 */
+/*  Signal generation (foreground process group)                      */
 /* ------------------------------------------------------------------ */
 
-static void tty_send_signal(struct tty *tty, int signum)
-{
-    (void)tty;
-    /*
-     * Send the signal to the current process. In a full implementation
-     * this would target the foreground process group of the TTY.
-     */
+/*
+ * tty_signal_fg_pgroup - send a signal to the foreground process group
+ *
+ * If the TTY has an owning session with a foreground process group,
+ * the signal is sent to every process in that group.  Otherwise,
+ * fall back to signalling the current process.
+ */
+static void tty_signal_fg_pgroup(struct tty *tty, int signum) {
+    struct session *sess = tty->session;
+    if (sess != NULL) {
+        pid_t fg = session_get_fg_pgid(sess);
+        if (fg > 0) {
+            pgroup_kill(fg, signum);
+            return;
+        }
+    }
+    /* Fallback: no session or no fg group — signal current process */
     kill_proc(current, signum);
 }
 
@@ -244,8 +242,7 @@ static void tty_send_signal(struct tty *tty, int signum)
  *
  * Returns the number of characters consumed.
  */
-ssize_t tty_input(struct tty *tty, const char *buf, size_t count)
-{
+ssize_t tty_input(struct tty *tty, const char *buf, size_t count) {
     size_t i;
 
     spin_lock(&tty->lock);
@@ -273,7 +270,7 @@ ssize_t tty_input(struct tty *tty, const char *buf, size_t count)
         if (L_ISIG(tty)) {
             if (c == tty->termios.c_cc[VINTR]) {
                 spin_unlock(&tty->lock);
-                tty_send_signal(tty, SIGINT);
+                tty_signal_fg_pgroup(tty, SIGINT);
                 spin_lock(&tty->lock);
                 if (L_ECHO(tty)) {
                     tty_echo_char(tty, '^');
@@ -284,7 +281,7 @@ ssize_t tty_input(struct tty *tty, const char *buf, size_t count)
             }
             if (c == tty->termios.c_cc[VQUIT]) {
                 spin_unlock(&tty->lock);
-                tty_send_signal(tty, SIGQUIT);
+                tty_signal_fg_pgroup(tty, SIGQUIT);
                 spin_lock(&tty->lock);
                 if (L_ECHO(tty)) {
                     tty_echo_char(tty, '^');
@@ -295,7 +292,7 @@ ssize_t tty_input(struct tty *tty, const char *buf, size_t count)
             }
             if (c == tty->termios.c_cc[VSUSP]) {
                 spin_unlock(&tty->lock);
-                tty_send_signal(tty, SIGTSTP);
+                tty_signal_fg_pgroup(tty, SIGTSTP);
                 spin_lock(&tty->lock);
                 if (L_ECHO(tty)) {
                     tty_echo_char(tty, '^');
@@ -371,8 +368,7 @@ ssize_t tty_input(struct tty *tty, const char *buf, size_t count)
  * or EOF) is available.  In raw mode it returns as soon as VMIN bytes
  * are available (VTIME is not implemented).
  */
-ssize_t tty_read(struct tty *tty, char *buf, size_t count, bool user)
-{
+ssize_t tty_read(struct tty *tty, char *buf, size_t count, bool user) {
     return pipe_read(tty->input_pipe, buf, count, user);
 }
 
@@ -387,8 +383,7 @@ ssize_t tty_read(struct tty *tty, char *buf, size_t count, bool user)
  * result into the output pipe.  The driver drains the output pipe
  * via tty_output() or its own tx callback.
  */
-ssize_t tty_write(struct tty *tty, const char *buf, size_t count, bool user)
-{
+ssize_t tty_write(struct tty *tty, const char *buf, size_t count, bool user) {
     char kbuf[64];
     size_t written = 0;
     int need_opost;
@@ -445,8 +440,7 @@ ssize_t tty_write(struct tty *tty, const char *buf, size_t count, bool user)
  * Drivers call this (or read the output pipe directly) to obtain
  * post-processed output bytes for transmission.
  */
-ssize_t tty_output(struct tty *tty, char *buf, size_t count)
-{
+ssize_t tty_output(struct tty *tty, char *buf, size_t count) {
     return pipe_read(tty->output_pipe, buf, count, 0);
 }
 
@@ -454,12 +448,10 @@ ssize_t tty_output(struct tty *tty, char *buf, size_t count)
 /*  Ioctl                                                             */
 /* ------------------------------------------------------------------ */
 
-int tty_ioctl(struct tty *tty, uint64 cmd, uint64 arg)
-{
+int tty_ioctl(struct tty *tty, uint64 cmd, uint64 arg) {
     switch (cmd) {
     case TCGETS: {
-        if (either_copyout(1, arg, &tty->termios,
-                           sizeof(struct termios)) < 0)
+        if (either_copyout(1, arg, &tty->termios, sizeof(struct termios)) < 0)
             return -EFAULT;
         return 0;
     }
@@ -485,8 +477,7 @@ int tty_ioctl(struct tty *tty, uint64 cmd, uint64 arg)
         return 0;
     }
     case TIOCGWINSZ: {
-        if (either_copyout(1, arg, &tty->winsize,
-                           sizeof(struct winsize)) < 0)
+        if (either_copyout(1, arg, &tty->winsize, sizeof(struct winsize)) < 0)
             return -EFAULT;
         return 0;
     }
@@ -505,14 +496,25 @@ int tty_ioctl(struct tty *tty, uint64 cmd, uint64 arg)
         return 0;
     }
     case TIOCGPGRP: {
-        /* Return the foreground process group (stub: current pgid) */
-        pid_t pgid = current->pgid;
+        /* Return the foreground process group from the session */
+        pid_t pgid = 0;
+        if (tty->session)
+            pgid = session_get_fg_pgid(tty->session);
         if (either_copyout(1, arg, &pgid, sizeof(pid_t)) < 0)
             return -EFAULT;
         return 0;
     }
     case TIOCSPGRP: {
-        /* Set foreground process group (stub: ignored) */
+        /* Set the foreground process group */
+        pid_t pgid;
+        if (either_copyin(&pgid, 1, arg, sizeof(pid_t)) < 0)
+            return -EFAULT;
+        if (pgid <= 0)
+            return -EINVAL;
+        /* Caller must be in the same session as the tty */
+        if (tty->session == NULL || tty->session->sid != current->sid)
+            return -ENOTTY;
+        session_set_fg_pgid(tty->session, pgid);
         return 0;
     }
     default:
@@ -527,16 +529,14 @@ int tty_ioctl(struct tty *tty, uint64 cmd, uint64 arg)
 /*  Open / close via ops                                              */
 /* ------------------------------------------------------------------ */
 
-int tty_open(struct tty *tty)
-{
+int tty_open(struct tty *tty) {
     tty_ref(tty);
     if (tty->ops && tty->ops->open)
         return tty->ops->open(tty);
     return 0;
 }
 
-void tty_close(struct tty *tty)
-{
+void tty_close(struct tty *tty) {
     if (tty->ops && tty->ops->close)
         tty->ops->close(tty);
     tty_unref(tty);
@@ -546,8 +546,7 @@ void tty_close(struct tty *tty)
 /*  Hangup                                                            */
 /* ------------------------------------------------------------------ */
 
-void tty_hangup(struct tty *tty)
-{
+void tty_hangup(struct tty *tty) {
     if (tty->ops && tty->ops->hangup)
         tty->ops->hangup(tty);
 }

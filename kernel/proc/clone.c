@@ -23,6 +23,8 @@
 #include "vfs/fs.h"
 #include <mm/vm.h>
 #include "errno.h"
+#include "proc/pgroup.h"
+#include "tty/session.h"
 
 // Entry wrapper for forked user threads.
 // This is called as the entry point from context switch.
@@ -215,6 +217,10 @@ int thread_clone(struct clone_args *args) {
         int tg_ret = thread_group_alloc(ret_ptr);
         assert(tg_ret == 0, "clone: thread_group_alloc failed");
     }
+
+    // Initialize process group and session membership
+    pgroup_init_thread(ret_ptr, p);
+
     pid_wunlock();
 
     // Wake up the new child thread

@@ -22,6 +22,7 @@
 #include "vfs/fs.h"
 #include <mm/vm.h>
 #include "errno.h"
+#include "tty/session.h"
 
 // Wake the vfork parent when child exits or execs.
 // The vfork parent is blocked in UNINTERRUPTIBLE state waiting for us.
@@ -113,6 +114,12 @@ void exit(int status) {
         p->fs = NULL;
     }
 
+    // Release session reference
+    if (p->session != NULL) {
+        session_unref(p->session);
+        p->session = NULL;
+    }
+
     // Remove from thread group and (for non-leader CLONE_THREAD) from
     // proc table, all under pid_wlock to satisfy thread_group_remove's
     // locking requirement and avoid extra lock/unlock round-trips.
@@ -173,6 +180,11 @@ void exit(int status) {
         if (p->thread_group != NULL) {
             thread_group_put(p->thread_group);
             p->thread_group = NULL;
+        }
+        // Release session reference
+        if (p->session != NULL) {
+            session_unref(p->session);
+            p->session = NULL;
         }
 
         // Mark as zombie requiring self-reap.  context_switch_finish

@@ -110,6 +110,12 @@ int ioctl(int fd, int cmd, void *arg);
 int tcgetattr(int fd, void *termios_p);
 int tcsetattr(int fd, int optional_actions, const void *termios_p);
 
+// Process group / session
+int setpgid(int pid, int pgid);
+int getpgid(int pid);
+int setsid(void);
+int getsid(int pid);
+
 void sync(void);
 
 // ulib.c

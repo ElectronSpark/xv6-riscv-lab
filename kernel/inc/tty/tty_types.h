@@ -7,6 +7,7 @@
 
 struct pipe;
 struct tty;
+struct session;
 
 struct tty_ops {
     int (*open)(struct tty *tty);
@@ -32,12 +33,14 @@ struct tty {
     struct termios termios; // Terminal I/O settings
     struct winsize winsize; // Terminal window size
     struct tty_ops *ops;    // Operations for this terminal
-    int ref_count;         // Reference count for this terminal
+    int ref_count;          // Reference count for this terminal
 
     struct pipe *input_pipe;  // Pipe for incoming data (read by terminal)
     struct pipe *output_pipe; // Pipe for outgoing data (written by terminal)
 
     void *driver_data; // Driver-specific data pointer
+
+    struct session *session; // Owning session (NULL if no session attached)
 
     char name[64]; // Terminal name
 };

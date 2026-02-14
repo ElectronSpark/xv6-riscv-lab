@@ -907,7 +907,311 @@ static void test_sigwait_thread_group(void) {
     }
 }
 
-#define TOTAL_TESTS 13
+/* --------------- Test 14: getpgid / setpgid basics --------------- */
+static void test_pgid_basics(void) {
+    printf("\n[Test 14] getpgid/setpgid: basic process group operations\n");
+
+    int my_pgid = getpgid(0);
+    int my_pid = getpid();
+    printf("pid=%d pgid=%d\n", my_pid, my_pgid);
+
+    if (my_pgid <= 0) {
+        printf("[Test 14] FAIL: getpgid(0) returned %d\n", my_pgid);
+        test_failures++;
+        return;
+    }
+
+    int child = fork();
+    if (child < 0) {
+        printf("fork failed\n");
+        test_failures++;
+        return;
+    }
+    if (child == 0) {
+        int child_pgid = getpgid(0);
+        int child_pid = getpid();
+        printf("Child: pid=%d inherited pgid=%d (parent pgid=%d)\n",
+               child_pid, child_pgid, my_pgid);
+
+        if (child_pgid != my_pgid) {
+            printf("Child: pgid not inherited from parent\n");
+            exit(1);
+        }
+
+        // setpgid(0, 0): create new process group with pgid == own pid
+        int ret = setpgid(0, 0);
+        int new_pgid = getpgid(0);
+        printf("Child: after setpgid(0,0): ret=%d pgid=%d (expected %d)\n",
+               ret, new_pgid, child_pid);
+
+        // Stay alive so parent can query our pgid
+        sleep(500);
+
+        if (ret == 0 && new_pgid == child_pid)
+            exit(0);
+        else
+            exit(1);
+    }
+
+    // Parent: wait for child to setpgid, then query cross-process
+    sleep(200);
+    int child_pgid = getpgid(child);
+    printf("Parent: getpgid(%d) = %d (expected %d)\n",
+           child, child_pgid, child);
+
+    int status;
+    wait(&status);
+
+    if (status == 0 && child_pgid == child) {
+        printf("[Test 14] PASS\n");
+    } else {
+        printf("[Test 14] FAIL: status=%d child_pgid=%d expected=%d\n",
+               status, child_pgid, child);
+        test_failures++;
+    }
+}
+
+/* --------------- Test 15: setsid / getsid basics --------------- */
+static void test_setsid_basics(void) {
+    printf("\n[Test 15] setsid/getsid: basic session operations\n");
+
+    int parent_sid = getsid(0);
+    printf("Parent: sid=%d pid=%d\n", parent_sid, getpid());
+
+    int child = fork();
+    if (child < 0) {
+        printf("fork failed\n");
+        test_failures++;
+        return;
+    }
+    if (child == 0) {
+        int child_pid = getpid();
+        int old_sid = getsid(0);
+        int old_pgid = getpgid(0);
+        printf("Child before setsid: pid=%d sid=%d pgid=%d\n",
+               child_pid, old_sid, old_pgid);
+
+        // setsid: become session leader and process group leader
+        int new_sid = setsid();
+        int after_sid = getsid(0);
+        int after_pgid = getpgid(0);
+        printf("Child after setsid: returned=%d sid=%d pgid=%d "
+               "(expected all=%d)\n",
+               new_sid, after_sid, after_pgid, child_pid);
+
+        if (new_sid != child_pid || after_sid != child_pid ||
+            after_pgid != child_pid) {
+            exit(1);
+        }
+
+        // Verify grandchild inherits the new session and pgid
+        int grandchild = fork();
+        if (grandchild == 0) {
+            int gc_sid = getsid(0);
+            int gc_pgid = getpgid(0);
+            printf("Grandchild: pid=%d sid=%d pgid=%d "
+                   "(expected sid=%d pgid=%d)\n",
+                   getpid(), gc_sid, gc_pgid, child_pid, child_pid);
+            if (gc_sid == child_pid && gc_pgid == child_pid)
+                exit(0);
+            else
+                exit(1);
+        }
+        int gc_status;
+        wait(&gc_status);
+
+        // Stay alive so parent can query our sid
+        sleep(500);
+
+        if (gc_status == 0)
+            exit(0);
+        else
+            exit(2);
+    }
+
+    // Parent: query child's sid cross-process
+    sleep(200);
+    int child_sid = getsid(child);
+    printf("Parent: getsid(%d) = %d (expected %d)\n",
+           child, child_sid, child);
+
+    int status;
+    wait(&status);
+
+    if (status == 0 && child_sid == child) {
+        printf("[Test 15] PASS\n");
+    } else {
+        printf("[Test 15] FAIL: status=%d child_sid=%d expected=%d\n",
+               status, child_sid, child);
+        test_failures++;
+    }
+}
+
+/* --------------- Test 16: Process group / session constraints ------ */
+static void test_pgroup_session_constraints(void) {
+    printf("\n[Test 16] Process group and session constraints\n");
+
+    int child = fork();
+    if (child < 0) {
+        printf("fork failed\n");
+        test_failures++;
+        return;
+    }
+    if (child == 0) {
+        int child_pid = getpid();
+
+        // 1. First setsid succeeds (we are NOT a group leader —
+        //    our pgid == parent's pgid != our pid)
+        int ret1 = setsid();
+        printf("setsid() first: returned %d (expected %d)\n", ret1, child_pid);
+        if (ret1 != child_pid) {
+            printf("FAIL: first setsid did not succeed\n");
+            exit(1);
+        }
+
+        // 2. Second setsid fails: we ARE now a group leader (pgid == pid)
+        int ret2 = setsid();
+        printf("setsid() second: returned %d (expected negative EPERM)\n",
+               ret2);
+        if (ret2 >= 0) {
+            printf("FAIL: second setsid should have failed\n");
+            exit(2);
+        }
+
+        // 3. setpgid on session leader fails
+        //    (we are session leader: sid == pid)
+        int ret3 = setpgid(0, child_pid + 100);
+        printf("setpgid on session leader: returned %d "
+               "(expected negative EPERM)\n", ret3);
+        if (ret3 >= 0) {
+            printf("FAIL: setpgid on session leader should have failed\n");
+            exit(3);
+        }
+
+        // 4. getpgid with nonexistent pid fails
+        int ret4 = getpgid(99999);
+        printf("getpgid(99999): returned %d (expected negative ESRCH)\n",
+               ret4);
+        if (ret4 >= 0) {
+            printf("FAIL: getpgid with invalid pid should have failed\n");
+            exit(4);
+        }
+
+        // 5. getsid with nonexistent pid fails
+        int ret5 = getsid(99999);
+        printf("getsid(99999): returned %d (expected negative ESRCH)\n",
+               ret5);
+        if (ret5 >= 0) {
+            printf("FAIL: getsid with invalid pid should have failed\n");
+            exit(5);
+        }
+
+        exit(0); // all constraints validated
+    }
+
+    int status;
+    wait(&status);
+    if (status == 0) {
+        printf("[Test 16] PASS\n");
+    } else {
+        printf("[Test 16] FAIL: child exited with status %d\n", status);
+        test_failures++;
+    }
+}
+
+/* --------------- Test 17: kill(-pgid) kills entire process group ------ */
+static void test_pgroup_kill(void) {
+    printf("\n[Test 17] kill(-pgid): signal entire process group\n");
+
+    /*
+     * Strategy: fork 3 children, move them all into a new process group,
+     * then kill(-pgid, SIGKILL) from the parent to terminate all of them.
+     * Verify that all children are reaped and none survive.
+     */
+    int child_pids[3];
+    int new_pgid = 0;
+
+    for (int i = 0; i < 3; i++) {
+        int pid = fork();
+        if (pid < 0) {
+            printf("fork failed\n");
+            test_failures++;
+            return;
+        }
+        if (pid == 0) {
+            // Child: spin forever, waiting to be killed
+            for (;;)
+                sleep(100);
+            exit(0);
+        }
+        child_pids[i] = pid;
+        if (i == 0)
+            new_pgid = pid; // Use first child's pid as the new pgid
+    }
+
+    // Parent: move all children into the same new process group
+    for (int i = 0; i < 3; i++) {
+        int ret = setpgid(child_pids[i], new_pgid);
+        printf("setpgid(%d, %d) = %d\n", child_pids[i], new_pgid, ret);
+        if (ret != 0) {
+            printf("[Test 17] FAIL: setpgid failed for child %d\n",
+                   child_pids[i]);
+            // Kill children individually to clean up
+            for (int j = 0; j < 3; j++)
+                kill(child_pids[j], SIGKILL);
+            for (int j = 0; j < 3; j++)
+                wait(0);
+            test_failures++;
+            return;
+        }
+    }
+
+    // Verify all children are in the new group
+    int all_in_group = 1;
+    for (int i = 0; i < 3; i++) {
+        int pgid = getpgid(child_pids[i]);
+        printf("child %d pgid=%d (expected %d)\n",
+               child_pids[i], pgid, new_pgid);
+        if (pgid != new_pgid)
+            all_in_group = 0;
+    }
+
+    if (!all_in_group) {
+        printf("[Test 17] FAIL: not all children in process group\n");
+        for (int i = 0; i < 3; i++)
+            kill(child_pids[i], SIGKILL);
+        for (int i = 0; i < 3; i++)
+            wait(0);
+        test_failures++;
+        return;
+    }
+
+    // Kill the entire process group
+    printf("Sending kill(-%d, SIGKILL) to process group\n", new_pgid);
+    int ret = kill(-new_pgid, SIGKILL);
+    printf("kill(-%d, SIGKILL) returned %d\n", new_pgid, ret);
+
+    // Reap all children and verify they were killed
+    int reaped = 0;
+    for (int i = 0; i < 3; i++) {
+        int status;
+        int w = wait(&status);
+        if (w > 0) {
+            printf("reaped child %d status=%d\n", w, status);
+            reaped++;
+        }
+    }
+
+    printf("Reaped %d children (expected 3)\n", reaped);
+    if (ret == 0 && reaped == 3) {
+        printf("[Test 17] PASS\n");
+    } else {
+        printf("[Test 17] FAIL: ret=%d reaped=%d\n", ret, reaped);
+        test_failures++;
+    }
+}
+
+#define TOTAL_TESTS 17
 
 int main(void) {
     printf("Comprehensive signal tests (pid=%d) start\n", getpid());
@@ -925,6 +1229,12 @@ int main(void) {
     test_sigkill_thread_group();
     test_sigsuspend_thread_group();
     test_sigwait_thread_group();
+
+    test_pgid_basics();
+    test_setsid_basics();
+    test_pgroup_session_constraints();
+
+    test_pgroup_kill();
 
     printf("\n========================================\n");
     if (test_failures == 0) {

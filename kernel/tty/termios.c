@@ -16,8 +16,7 @@
  * NL-to-CRNL output mapping, standard control characters, and
  * 115200 baud.  This matches the typical Linux console defaults.
  */
-void termios_init_default(struct termios *t)
-{
+void termios_init_default(struct termios *t) {
     /* Input: map CR→NL, enable XON/XOFF */
     t->c_iflag = ICRNL | IXON;
 
@@ -31,17 +30,17 @@ void termios_init_default(struct termios *t)
     t->c_lflag = ISIG | ICANON | ECHO | ECHOE | ECHOK;
 
     /* Control characters */
-    t->c_cc[VINTR]  = 0x03; /* ^C  */
-    t->c_cc[VQUIT]  = 0x1C; /* ^\  */
+    t->c_cc[VINTR] = 0x03;  /* ^C  */
+    t->c_cc[VQUIT] = 0x1C;  /* ^\  */
     t->c_cc[VERASE] = 0x7F; /* DEL */
-    t->c_cc[VKILL]  = 0x15; /* ^U  */
-    t->c_cc[VEOF]   = 0x04; /* ^D  */
-    t->c_cc[VTIME]  = 0;
-    t->c_cc[VMIN]   = 1;
+    t->c_cc[VKILL] = 0x15;  /* ^U  */
+    t->c_cc[VEOF] = 0x04;   /* ^D  */
+    t->c_cc[VTIME] = 0;
+    t->c_cc[VMIN] = 1;
     t->c_cc[VSTART] = 0x11; /* ^Q  */
-    t->c_cc[VSTOP]  = 0x13; /* ^S  */
-    t->c_cc[VSUSP]  = 0x1A; /* ^Z  */
-    t->c_cc[VEOL]   = 0x00;
+    t->c_cc[VSTOP] = 0x13;  /* ^S  */
+    t->c_cc[VSUSP] = 0x1A;  /* ^Z  */
+    t->c_cc[VEOL] = 0x00;
 
     /* Default baud rate */
     t->c_ispeed = B115200;

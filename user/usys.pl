@@ -78,4 +78,10 @@ entry("ioctl");
 entry("tcgetattr");
 entry("tcsetattr");
 
+# Process group / session
+entry("setpgid");
+entry("getpgid");
+entry("setsid");
+entry("getsid");
+
 entry("sync");

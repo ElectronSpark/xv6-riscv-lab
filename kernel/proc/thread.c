@@ -1,5 +1,6 @@
 #include "proc/thread.h"
 #include "proc/thread_group.h"
+#include "tty/session.h"
 #include "defs.h"
 #include "hlist.h"
 #include "list.h"
@@ -440,6 +441,9 @@ void userinit(void) {
     // Allocate a thread group for the init process (it is the group leader)
     assert(thread_group_alloc(p) == 0, "userinit: thread_group_alloc failed");
     p->thread_group->tgid = p->pid;
+
+    // Create session 1 for the init process (session leader + pgroup leader)
+    session_init_first(p);
 
     printf("Init process kernel stack size order: %d\n", p->kstack_order);
 

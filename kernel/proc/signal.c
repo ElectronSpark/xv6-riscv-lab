@@ -40,6 +40,7 @@
 #include "smp/ipi.h"
 #include "clone_flags.h"
 #include "errno.h"
+#include "proc/pgroup.h"
 
 static slab_cache_t __sigacts_pool;
 static slab_cache_t __ksiginfo_pool;
@@ -803,8 +804,8 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
 }
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
-    if (set != NULL &&
-        how != SIG_BLOCK && how != SIG_UNBLOCK && how != SIG_SETMASK) {
+    if (set != NULL && how != SIG_BLOCK && how != SIG_UNBLOCK &&
+        how != SIG_SETMASK) {
         return -EINVAL; // Invalid operation
     }
     struct thread *p = current;
@@ -1216,9 +1217,16 @@ void handle_signal(void) {
 
 // Kill the threads with the given pid (process-directed signal).
 // When the target has a thread group, this sends to the group (POSIX kill()).
+// When pid < 0, send signal to every process in process group -pid.
 // The victim won't exit until it tries to return
 // to user space (see usertrap() in trap.c).
 int kill(int pid, int signum) {
+    /* POSIX: kill(-pgid, sig) sends to process group */
+    if (pid < -1)
+        return pgroup_kill(-pid, signum);
+    if (pid == -1)
+        return -EINVAL; /* kill(-1) (all processes) not supported */
+
     ksiginfo_t info = {0};
     info.signo = signum;
     info.sender = current;

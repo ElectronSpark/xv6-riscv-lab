@@ -390,3 +390,15 @@ uint64 sys_dumpproc(void) {
     procdump();
     return 0;
 }
+
+// Iterate all threads under RCU protection.
+// The callback receives each thread and an opaque argument.
+// Acquires and releases rcu_read_lock internally.
+void proctab_for_each_rcu(void (*fn)(struct thread *, void *), void *arg) {
+    struct thread *p;
+    rcu_read_lock();
+    hlist_foreach_node_rcu(&proc_table.procs, p, proctab_entry) {
+        fn(p, arg);
+    }
+    rcu_read_unlock();
+}

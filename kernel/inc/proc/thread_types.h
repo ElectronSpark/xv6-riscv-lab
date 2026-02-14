@@ -16,6 +16,7 @@
 #include "proc/thread_group_types.h"
 
 struct vfs_inode;
+struct session;
 
 // @TODO: stop signal may miss
 enum thread_state {
@@ -102,8 +103,9 @@ struct thread {
     // All threads created with CLONE_THREAD share the same thread_group.
     // Threads created with fork/clone (no CLONE_THREAD) get their own group.
     struct thread_group *thread_group; // Thread group this thread belongs to
-    pid_t sid;            // Session ID (for job control, not implemented)
-    pid_t pgid;           // Process group ID (for job control, not implemented)
+    struct session *session; // Session this thread belongs to
+    pid_t sid;            // Session ID (for job control)
+    pid_t pgid;           // Process group ID (for job control)
     pid_t tgid;           // Thread group ID (process ID)
     pid_t pid;            // Thread ID
     list_node_t tg_entry; // Link in thread_group->thread_list
