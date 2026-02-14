@@ -92,7 +92,8 @@ static int random_read(cdev_t *cdev, bool user, void *buf, size_t count) {
     return done;
 }
 
-static int random_write(cdev_t *cdev, bool user, const void *buf, size_t count) {
+static int random_write(cdev_t *cdev, bool user, const void *buf,
+                        size_t count) {
     (void)cdev;
     (void)user;
     (void)buf;
@@ -140,5 +141,6 @@ void nullranddevinit(void) {
     assert(ret == 0, "nullranddevinit: failed to register null cdev: %d", ret);
 
     ret = cdev_register(&random_cdev);
-    assert(ret == 0, "nullranddevinit: failed to register random cdev: %d", ret);
+    assert(ret == 0, "nullranddevinit: failed to register random cdev: %d",
+           ret);
 }

@@ -8,6 +8,35 @@ struct stat;
 #include "kernel/inc/mm/memstat.h"
 #include "kernel/inc/clone_flags.h"
 
+struct timeval {
+	int64 tv_sec;
+	int64 tv_usec;
+};
+
+struct timespec {
+	int64 tv_sec;
+	int64 tv_nsec;
+};
+
+struct utsname {
+	char sysname[65];
+	char nodename[65];
+	char release[65];
+	char version[65];
+	char machine[65];
+};
+
+#ifndef F_OK
+#define F_OK 0
+#define X_OK 1
+#define W_OK 2
+#define R_OK 4
+#endif
+
+#ifndef WNOHANG
+#define WNOHANG 1
+#endif
+
 // mmap protection flags (POSIX)
 #define PROT_NONE 0x0
 #define PROT_READ 0x1
@@ -53,12 +82,22 @@ int open(const char *, int);
 int mknod(const char *, int mode, int major, int minor);
 int unlink(const char *);
 int fstat(int fd, struct stat *);
+int stat(const char *path, struct stat *st);
+int lstat(const char *path, struct stat *st);
+int readlink(const char *path, char *buf, int bufsiz);
 int link(const char *, const char *);
 int symlink(const char *, const char *);
 int mkdir(const char *);
 int chdir(const char *);
 int dup(int);
+int dup2(int oldfd, int newfd);
+int lseek(int fd, int64 offset, int whence);
+int fcntl(int fd, int cmd, int arg);
+int access(const char *path, int mode);
+int rename(const char *oldpath, const char *newpath);
+int ftruncate(int fd, int64 length);
 int getpid(void);
+int getppid(void);
 int gettid(void);
 int getrandom(void *buf, int len);
 int tgkill(int tgid, int tid, int sig);
@@ -66,7 +105,11 @@ int tkill(int tid, int sig);
 void exit_group(int) __attribute__((noreturn));
 char *sbrk(int64);
 int sleep(int);
+int nanosleep(const struct timespec *req, struct timespec *rem);
 int uptime(void);
+int gettimeofday(struct timeval *tv, void *tz);
+int waitpid(int pid, int *status, int options);
+int uname(struct utsname *buf);
 // int sigalarm(int ticks, void (*handler)());
 int sigaction(int signum, struct sigaction *act, struct sigaction *oldact);
 int sigreturn(void);
@@ -120,7 +163,6 @@ int getsid(int pid);
 void sync(void);
 
 // ulib.c
-int stat(const char *, struct stat *);
 char *strcpy(char *, const char *);
 void *memmove(void *, const void *, int);
 char *strchr(const char *, char c);

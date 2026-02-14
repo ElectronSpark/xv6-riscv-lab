@@ -204,7 +204,8 @@ static int __fmt_int(char *buf, int pos, int bufsz, int val) {
     int i = 0;
     unsigned int uv;
     if (val < 0) {
-        if (pos < bufsz) buf[pos++] = '-';
+        if (pos < bufsz)
+            buf[pos++] = '-';
         uv = (unsigned int)(-val);
     } else {
         uv = (unsigned int)val;
@@ -224,8 +225,8 @@ static int __fmt_int(char *buf, int pos, int bufsz, int val) {
 void procdump(void) {
     struct thread *p;
 
-    printf("%-20s %-5s %-2s %-3s %s\n",
-           "SID:PGID:TGID:TID", "CPU", "ST", "U/K", "COMMAND");
+    printf("%-20s %-5s %-2s %-3s %s\n", "SID:PGID:TGID:TID", "CPU", "ST", "U/K",
+           "COMMAND");
     rcu_read_lock();
 
     // Use RCU-safe iteration for concurrent access
@@ -271,9 +272,9 @@ void procdump(void) {
         cpubuf[ci++] = '0' + cpu_id % 10;
         cpubuf[ci] = '\0';
 
-        printf("%-20s %-5s %-2s [%s] %s/%s\n",
-               idbuf, cpubuf, thread_state_short(pstate),
-               THREAD_USER_SPACE(p) ? "U" : "K", pname, name);
+        printf("%-20s %-5s %-2s [%s] %s/%s\n", idbuf, cpubuf,
+               thread_state_short(pstate), THREAD_USER_SPACE(p) ? "U" : "K",
+               pname, name);
     }
 
     rcu_read_unlock();
@@ -311,8 +312,8 @@ void procdump_bt(void) {
                        " (on CPU, cannot backtrace)\n",
                        sid_val, pgid, tgid, pid, stype, name);
             } else {
-                printf("\n--- %d:%d:%d:%d [%s] %s ---\n",
-                       sid_val, pgid, tgid, pid, stype, name);
+                printf("\n--- %d:%d:%d:%d [%s] %s ---\n", sid_val, pgid, tgid,
+                       pid, stype, name);
                 print_thread_backtrace(&p->sched_entity->context, p->kstack,
                                        p->kstack_order);
             }
@@ -348,8 +349,8 @@ void procdump_bt_pid(int pid) {
     int pgid = p->pgid;
     int sid_val = p->sid;
 
-    printf("\n--- %d:%d:%d:%d [%s] %s ---\n",
-           sid_val, pgid, tgid, pid, thread_state_short(pstate), name);
+    printf("\n--- %d:%d:%d:%d [%s] %s ---\n", sid_val, pgid, tgid, pid,
+           thread_state_short(pstate), name);
 
     if (smp_load_acquire(&p->sched_entity->on_cpu)) {
         printf("Process is currently on a CPU, context not saved\n");
@@ -399,8 +400,7 @@ static void __procdump_tree_recursive(struct thread *p, int depth) {
     int sid_val = p->sid;
 
     state = thread_state_short(pstate);
-    printf("%d:%d:%d:%d %s [%s] %s",
-           sid_val, pgid_val, tgid, pid, state,
+    printf("%d:%d:%d:%d %s [%s] %s", sid_val, pgid_val, tgid, pid, state,
            THREAD_USER_SPACE(p) ? "U" : "K", name);
     if (smp_load_acquire(&p->sched_entity->on_cpu)) {
         printf(" (CPU: %d)\n", p->sched_entity->cpu_id);
@@ -468,7 +468,10 @@ static int __collect_sids(pid_t *sids, int max) {
         pid_t sid = p->sid;
         int found = 0;
         for (int i = 0; i < n; i++) {
-            if (sids[i] == sid) { found = 1; break; }
+            if (sids[i] == sid) {
+                found = 1;
+                break;
+            }
         }
         if (!found && n < max)
             sids[n++] = sid;
@@ -486,7 +489,10 @@ static int __collect_pgids(pid_t sid, pid_t *pgids, int max) {
         pid_t pgid = p->pgid;
         int found = 0;
         for (int i = 0; i < n; i++) {
-            if (pgids[i] == pgid) { found = 1; break; }
+            if (pgids[i] == pgid) {
+                found = 1;
+                break;
+            }
         }
         if (!found && n < max)
             pgids[n++] = pgid;
@@ -504,7 +510,10 @@ static int __collect_tgids(pid_t pgid, pid_t *tgids, int max) {
         pid_t tgid = p->tgid;
         int found = 0;
         for (int i = 0; i < n; i++) {
-            if (tgids[i] == tgid) { found = 1; break; }
+            if (tgids[i] == tgid) {
+                found = 1;
+                break;
+            }
         }
         if (!found && n < max)
             tgids[n++] = tgid;
@@ -528,8 +537,8 @@ static void __sort_pids(pid_t *arr, int n) {
 // Print all threads grouped by session → process group → process.
 // Uses pid_rlock to serialize access to the proc table hierarchy.
 void procdump_sessions(void) {
-    // Enough for typical workloads; larger systems would need dynamic alloc
-    #define DUMP_MAX_IDS 128
+// Enough for typical workloads; larger systems would need dynamic alloc
+#define DUMP_MAX_IDS 128
     pid_t sids[DUMP_MAX_IDS];
     pid_t pgids[DUMP_MAX_IDS];
     pid_t tgids[DUMP_MAX_IDS];
@@ -562,17 +571,15 @@ void procdump_sessions(void) {
                     if (p->tgid != tgids[ti] || p->pgid != pgids[gi])
                         continue;
 
-                    const char *state = thread_state_to_str(
-                        __thread_state_get(p));
-                    int on_cpu =
-                        smp_load_acquire(&p->sched_entity->on_cpu);
+                    const char *state =
+                        thread_state_to_str(__thread_state_get(p));
+                    int on_cpu = smp_load_acquire(&p->sched_entity->on_cpu);
 
                     if (first) {
                         printf("    Process %d [%s] %s", p->tgid,
                                THREAD_USER_SPACE(p) ? "U" : "K", p->name);
                         if (thread_is_group_leader(p)) {
-                            printf(" (leader, tid %d, %s%s)\n", p->pid,
-                                   state,
+                            printf(" (leader, tid %d, %s%s)\n", p->pid, state,
                                    on_cpu ? ", on CPU" : "");
                         } else {
                             printf("\n");
@@ -581,8 +588,7 @@ void procdump_sessions(void) {
                         }
                         first = 0;
                     } else {
-                        printf("      tid %d %s %s%s\n", p->pid, state,
-                               p->name,
+                        printf("      tid %d %s %s%s\n", p->pid, state, p->name,
                                on_cpu ? " (on CPU)" : "");
                     }
                 }
@@ -593,13 +599,13 @@ void procdump_sessions(void) {
     pid_runlock();
 
     printf("\n=== End Hierarchy ===\n");
-    #undef DUMP_MAX_IDS
+#undef DUMP_MAX_IDS
 }
 
 // Print hierarchy for a single session.
 // Uses pid_rlock to serialize access.
 void procdump_sessions_sid(pid_t target_sid) {
-    #define DUMP_MAX_IDS 128
+#define DUMP_MAX_IDS 128
     pid_t pgids[DUMP_MAX_IDS];
     pid_t tgids[DUMP_MAX_IDS];
 
@@ -630,17 +636,15 @@ void procdump_sessions_sid(pid_t target_sid) {
                 if (p->tgid != tgids[ti] || p->pgid != pgids[gi])
                     continue;
 
-                const char *state =
-                    thread_state_to_str(__thread_state_get(p));
-                int on_cpu =
-                    smp_load_acquire(&p->sched_entity->on_cpu);
+                const char *state = thread_state_to_str(__thread_state_get(p));
+                int on_cpu = smp_load_acquire(&p->sched_entity->on_cpu);
 
                 if (first) {
                     printf("    Process %d [%s] %s", p->tgid,
                            THREAD_USER_SPACE(p) ? "U" : "K", p->name);
                     if (thread_is_group_leader(p)) {
-                        printf(" (leader, tid %d, %s%s)\n", p->pid,
-                               state, on_cpu ? ", on CPU" : "");
+                        printf(" (leader, tid %d, %s%s)\n", p->pid, state,
+                               on_cpu ? ", on CPU" : "");
                     } else {
                         printf("\n");
                         printf("      tid %d %s%s\n", p->pid, state,
@@ -648,8 +652,8 @@ void procdump_sessions_sid(pid_t target_sid) {
                     }
                     first = 0;
                 } else {
-                    printf("      tid %d %s %s%s\n", p->pid, state,
-                           p->name, on_cpu ? " (on CPU)" : "");
+                    printf("      tid %d %s %s%s\n", p->pid, state, p->name,
+                           on_cpu ? " (on CPU)" : "");
                 }
             }
         }
@@ -658,7 +662,7 @@ void procdump_sessions_sid(pid_t target_sid) {
     pid_runlock();
 
     printf("\n=== End Hierarchy ===\n");
-    #undef DUMP_MAX_IDS
+#undef DUMP_MAX_IDS
 }
 
 uint64 sys_dumpproc(void) {
@@ -692,7 +696,7 @@ uint64 sys_dumpproc(void) {
         break;
     }
     return 0;
-}   
+}
 
 // Iterate all threads under RCU protection.
 // The callback receives each thread and an opaque argument.
@@ -700,8 +704,6 @@ uint64 sys_dumpproc(void) {
 void proctab_for_each_rcu(void (*fn)(struct thread *, void *), void *arg) {
     struct thread *p;
     rcu_read_lock();
-    hlist_foreach_node_rcu(&proc_table.procs, p, proctab_entry) {
-        fn(p, arg);
-    }
+    hlist_foreach_node_rcu(&proc_table.procs, p, proctab_entry) { fn(p, arg); }
     rcu_read_unlock();
 }

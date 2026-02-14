@@ -132,17 +132,28 @@ static inline const char *thread_state_to_str(enum thread_state state) {
 //   Tm=timer, Kt=killable_timer, ?=unused/used/unknown
 static inline const char *thread_state_short(enum thread_state state) {
     switch (state) {
-    case THREAD_RUNNING:         return "R";
-    case THREAD_INTERRUPTIBLE:   return "S";
-    case THREAD_UNINTERRUPTIBLE: return "D";
-    case THREAD_STOPPED:         return "T";
-    case THREAD_ZOMBIE:          return "Z";
-    case THREAD_EXITING:         return "X";
-    case THREAD_KIILABLE:        return "K";
-    case THREAD_WAKENING:        return "W";
-    case THREAD_TIMER:           return "Tm";
-    case THREAD_KIILABLE_TIMER:  return "Kt";
-    default:                     return "?";
+    case THREAD_RUNNING:
+        return "R";
+    case THREAD_INTERRUPTIBLE:
+        return "S";
+    case THREAD_UNINTERRUPTIBLE:
+        return "D";
+    case THREAD_STOPPED:
+        return "T";
+    case THREAD_ZOMBIE:
+        return "Z";
+    case THREAD_EXITING:
+        return "X";
+    case THREAD_KIILABLE:
+        return "K";
+    case THREAD_WAKENING:
+        return "W";
+    case THREAD_TIMER:
+        return "Tm";
+    case THREAD_KIILABLE_TIMER:
+        return "Kt";
+    default:
+        return "?";
     }
 }
 
@@ -190,6 +201,7 @@ void thread_init(void);
 void userinit(void);
 void install_user_root(void);
 int wait(uint64);
+int waitpid(int target_pid, uint64 addr, int options);
 void procdump(void);
 void procdump_bt(void);
 void procdump_bt_pid(int pid);

@@ -152,6 +152,7 @@ int vfs_fdtable_alloc_fd_from(struct vfs_fdtable *fdtable,
     }
 
     bits_test_and_set_bit64(&fdtable->files_bitmap[fd >> 6], fd & 63);
+    bits_test_and_clear_bit64(&fdtable->cloexec_bitmap[fd >> 6], fd & 63);
     rcu_assign_pointer(fdtable->files[fd], file);
     atomic_inc(&fdtable->fd_count);
     return fd;
@@ -189,6 +190,7 @@ struct vfs_fdtable *vfs_fdtable_init(void) {
     assert(fdtable != NULL, "vfs_fdtable_init: fdtable is NULL\n");
     memset(fdtable->files, 0, sizeof(fdtable->files));
     memset(fdtable->files_bitmap, 0, sizeof(fdtable->files_bitmap));
+    memset(fdtable->cloexec_bitmap, 0, sizeof(fdtable->cloexec_bitmap));
     return fdtable;
 }
 
@@ -227,6 +229,7 @@ struct vfs_fdtable *vfs_fdtable_clone(struct vfs_fdtable *src,
     dest->fd_count = 0;
     memset(dest->files, 0, sizeof(dest->files));
     memset(dest->files_bitmap, 0, sizeof(dest->files_bitmap));
+    memset(dest->cloexec_bitmap, 0, sizeof(dest->cloexec_bitmap));
 
     // Duplicate file references while holding RCU read lock
     // This protects against concurrent close() deallocating files
@@ -238,6 +241,10 @@ struct vfs_fdtable *vfs_fdtable_clone(struct vfs_fdtable *src,
                 dest->files[i] = dst_file;
                 dest->fd_count++;
                 bits_test_and_set_bit64(&dest->files_bitmap[i >> 6], i & 63);
+                if (bits_test_bit64(&src->cloexec_bitmap[i >> 6], i & 63)) {
+                    bits_test_and_set_bit64(&dest->cloexec_bitmap[i >> 6],
+                                            i & 63);
+                }
             } else {
                 dest->files[i] = NULL;
             }
@@ -338,7 +345,75 @@ struct vfs_file *vfs_fdtable_dealloc_fd(struct vfs_fdtable *fdtable, int fd) {
 
     rcu_assign_pointer(fdtable->files[fd], NULL);
     bits_test_and_clear_bit64(&fdtable->files_bitmap[fd >> 6], fd & 63);
+    bits_test_and_clear_bit64(&fdtable->cloexec_bitmap[fd >> 6], fd & 63);
 
     atomic_dec(&fdtable->fd_count);
     return file;
+}
+
+int vfs_fdtable_get_fdflags(struct vfs_fdtable *fdtable, int fd) {
+    if (fdtable == NULL || fd < 0 || fd >= NOFILE) {
+        return -EBADF;
+    }
+
+    assert(spin_holding(&fdtable->lock),
+           "vfs_fdtable_get_fdflags: fdtable lock not held");
+
+    struct vfs_file *file = fdtable->files[fd];
+    if (!IS_FD(file)) {
+        return -EBADF;
+    }
+
+    int flags = 0;
+    if (bits_test_bit64(&fdtable->cloexec_bitmap[fd >> 6], fd & 63)) {
+        flags |= FD_CLOEXEC;
+    }
+    return flags;
+}
+
+int vfs_fdtable_set_fdflags(struct vfs_fdtable *fdtable, int fd, int flags) {
+    if (fdtable == NULL || fd < 0 || fd >= NOFILE) {
+        return -EBADF;
+    }
+
+    assert(spin_holding(&fdtable->lock),
+           "vfs_fdtable_set_fdflags: fdtable lock not held");
+
+    struct vfs_file *file = fdtable->files[fd];
+    if (!IS_FD(file)) {
+        return -EBADF;
+    }
+
+    if (flags & FD_CLOEXEC) {
+        bits_test_and_set_bit64(&fdtable->cloexec_bitmap[fd >> 6], fd & 63);
+    } else {
+        bits_test_and_clear_bit64(&fdtable->cloexec_bitmap[fd >> 6], fd & 63);
+    }
+    return 0;
+}
+
+void vfs_fdtable_close_on_exec(struct vfs_fdtable *fdtable) {
+    if (fdtable == NULL) {
+        return;
+    }
+
+    struct vfs_file *to_close[NOFILE];
+    int close_count = 0;
+
+    spin_lock(&fdtable->lock);
+    for (int fd = 0; fd < NOFILE; fd++) {
+        if (!bits_test_bit64(&fdtable->cloexec_bitmap[fd >> 6], fd & 63)) {
+            continue;
+        }
+
+        struct vfs_file *file = vfs_fdtable_dealloc_fd(fdtable, fd);
+        if (IS_FD(file)) {
+            to_close[close_count++] = file;
+        }
+    }
+    spin_unlock(&fdtable->lock);
+
+    for (int i = 0; i < close_count; i++) {
+        vfs_fput(to_close[i]);
+    }
 }

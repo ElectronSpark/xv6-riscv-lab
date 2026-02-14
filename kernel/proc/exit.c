@@ -336,3 +336,92 @@ ret_unlocked:
     }
     return pid;
 }
+
+// waitpid() with limited POSIX semantics:
+//   pid  > 0 : wait for the specific child pid
+//   pid == -1: wait for any child (same as wait)
+// options:
+//   WNOHANG (1): return 0 immediately if no matching zombie child
+// Any other option bits are rejected with -EINVAL.
+int waitpid(int target_pid, uint64 addr, int options) {
+    const int WNOHANG = 1;
+    if (options & ~WNOHANG) {
+        return -EINVAL;
+    }
+
+    int pid = -1;
+    int xstate = 0;
+    struct thread *p = current;
+    struct thread *child, *tmp;
+
+    pid_rlock();
+
+    for (;;) {
+        bool has_match = false;
+
+        __thread_state_set(p, THREAD_INTERRUPTIBLE);
+
+        list_foreach_node_safe(&p->children, child, tmp, siblings) {
+            if (target_pid > 0 && child->pid != target_pid) {
+                continue;
+            }
+            has_match = true;
+
+            if (THREAD_ZOMBIE(child)) {
+                int spin_count = 0;
+                while (smp_load_acquire(&child->sched_entity->on_cpu)) {
+                    cpu_relax();
+                    spin_count++;
+                    if (spin_count > 1000) {
+                        __thread_state_set(p, THREAD_RUNNING);
+                        pid_runlock();
+                        scheduler_yield();
+                        pid_rlock();
+                        __thread_state_set(p, THREAD_INTERRUPTIBLE);
+                        spin_count = 0;
+                    }
+                }
+
+                __thread_state_set(p, THREAD_RUNNING);
+                xstate = child->xstate;
+                pid = child->pid;
+                if (!pid_try_lock_upgrade()) {
+                    pid_runlock();
+                    pid_wlock();
+                }
+                detach_child(p, child);
+                proctab_proc_remove(child);
+                pid_wunlock();
+                __free_pid();
+                thread_destroy(child);
+                goto ret_unlocked;
+            }
+        }
+
+        if (!has_match) {
+            __thread_state_set(p, THREAD_RUNNING);
+            pid = -1;
+            goto ret;
+        }
+
+        if (options & WNOHANG) {
+            __thread_state_set(p, THREAD_RUNNING);
+            pid = 0;
+            goto ret;
+        }
+
+        pid_runlock();
+        scheduler_yield();
+        pid_rlock();
+    }
+
+ret:
+    pid_runlock();
+ret_unlocked:
+    if (pid > 0 && addr != 0) {
+        if (either_copyout(1, addr, (char *)&xstate, sizeof(xstate)) < 0) {
+            return -EFAULT;
+        }
+    }
+    return pid;
+}

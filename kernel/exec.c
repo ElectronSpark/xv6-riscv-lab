@@ -286,6 +286,9 @@ int exec(char *path, char **argv) {
     p->trapframe->trapframe.sepc = elf.entry; // initial program counter = main
     p->trapframe->trapframe.sp = sp;          // initial stack pointer
 
+    // Close descriptors marked close-on-exec now that exec is committed.
+    vfs_fdtable_close_on_exec(p->fdtable);
+
     // Wake vfork parent - we've replaced our address space so parent can resume
     vfork_done(p);
 

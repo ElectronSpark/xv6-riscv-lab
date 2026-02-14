@@ -1,4 +1,5 @@
 #include "types.h"
+#include "string.h"
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
@@ -15,6 +16,25 @@
 #include "errno.h"
 #include "proc/pgroup.h"
 #include "tty/session.h"
+#include "timer/goldfish_rtc.h"
+
+struct __k_timespec {
+    int64 tv_sec;
+    int64 tv_nsec;
+};
+
+struct __k_timeval {
+    int64 tv_sec;
+    int64 tv_usec;
+};
+
+struct __k_utsname {
+    char sysname[65];
+    char nodename[65];
+    char release[65];
+    char version[65];
+    char machine[65];
+};
 
 uint64 sys_exit(void) {
     int n;
@@ -24,6 +44,13 @@ uint64 sys_exit(void) {
 }
 
 uint64 sys_getpid(void) { return thread_tgid(current); }
+
+uint64 sys_getppid(void) {
+    if (current->parent == NULL) {
+        return 1;
+    }
+    return thread_tgid(current->parent);
+}
 
 // gettid() returns the caller's thread ID (TID), which is the kernel-level
 // unique identifier. In a single-threaded process, TID == TGID == PID.
@@ -84,6 +111,16 @@ uint64 sys_wait(void) {
     return wait(p);
 }
 
+uint64 sys_waitpid(void) {
+    int pid, options;
+    uint64 status_addr;
+
+    argint(0, &pid);
+    argaddr(1, &status_addr);
+    argint(2, &options);
+    return waitpid(pid, status_addr, options);
+}
+
 uint64 sys_sbrk(void) {
     uint64 addr;
     int64 n;
@@ -113,6 +150,84 @@ uint64 sys_sleep(void) {
 // since start.
 uint64 sys_uptime(void) { return get_jiffs(); }
 
+uint64 sys_gettimeofday(void) {
+    uint64 tv_addr;
+    uint64 tz_addr;
+    argaddr(0, &tv_addr);
+    argaddr(1, &tz_addr);
+    (void)tz_addr;
+
+    if (tv_addr == 0) {
+        return -EINVAL;
+    }
+
+    uint64 t = goldfish_rtc_read_ns();
+    struct __k_timeval tv = {
+        .tv_sec = t / NS_PER_SEC,
+        .tv_usec = (int64)((t % NS_PER_SEC) / NS_PER_US),
+    };
+
+    if (either_copyout(1, tv_addr, &tv, sizeof(tv)) < 0) {
+        return -EFAULT;
+    }
+    return 0;
+}
+
+uint64 sys_nanosleep(void) {
+    uint64 req_addr, rem_addr;
+    argaddr(0, &req_addr);
+    argaddr(1, &rem_addr);
+
+    if (req_addr == 0) {
+        return -EINVAL;
+    }
+
+    struct __k_timespec req = {0};
+    if (either_copyin(&req, 1, req_addr, sizeof(req)) < 0) {
+        return -EFAULT;
+    }
+
+    if (req.tv_sec < 0 || req.tv_nsec < 0 || req.tv_nsec >= 1000000000LL) {
+        return -EINVAL;
+    }
+
+    uint64 total_ns = (uint64)req.tv_sec * 1000000000ULL + (uint64)req.tv_nsec;
+    uint64 ms = (total_ns + 999999ULL) / 1000000ULL;
+    if (total_ns > 0 && ms == 0) {
+        ms = 1;
+    }
+    sleep_ms(ms);
+
+    if (rem_addr != 0) {
+        struct __k_timespec rem = {0};
+        if (either_copyout(1, rem_addr, &rem, sizeof(rem)) < 0) {
+            return -EFAULT;
+        }
+    }
+    return 0;
+}
+
+uint64 sys_uname(void) {
+    uint64 addr;
+    argaddr(0, &addr);
+    if (addr == 0) {
+        return -EINVAL;
+    }
+
+    struct __k_utsname u;
+    memset(&u, 0, sizeof(u));
+    safestrcpy(u.sysname, "xv6", sizeof(u.sysname));
+    safestrcpy(u.nodename, "xv6", sizeof(u.nodename));
+    safestrcpy(u.release, "0.1", sizeof(u.release));
+    safestrcpy(u.version, "xv6-tmp", sizeof(u.version));
+    safestrcpy(u.machine, "riscv64", sizeof(u.machine));
+
+    if (either_copyout(1, addr, &u, sizeof(u)) < 0) {
+        return -EFAULT;
+    }
+    return 0;
+}
+
 // return the physical memory start address (KERNBASE)
 // for user-space tests that need to verify they can't access kernel memory
 uint64 sys_kernbase(void) { return __physical_memory_start; }
@@ -132,9 +247,7 @@ uint64 sys_getpgid(void) {
     return pgroup_getpgid((pid_t)pid);
 }
 
-uint64 sys_setsid(void) {
-    return session_setsid();
-}
+uint64 sys_setsid(void) { return session_setsid(); }
 
 uint64 sys_getsid(void) {
     int pid;

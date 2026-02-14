@@ -17,10 +17,18 @@ int main(int argc, char *argv[]) {
     while (i < argc) {
         if (argv[i][0] == '-' && argv[i][1] && !argv[i][2]) {
             switch (argv[i][1]) {
-            case 'l': mode = 0; break;
-            case 't': mode = 1; break;
-            case 's': mode = 2; break;
-            case 'b': mode = 3; break;
+            case 'l':
+                mode = 0;
+                break;
+            case 't':
+                mode = 1;
+                break;
+            case 's':
+                mode = 2;
+                break;
+            case 'b':
+                mode = 3;
+                break;
             default:
                 usage();
                 return 1;

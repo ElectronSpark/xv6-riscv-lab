@@ -27,17 +27,17 @@ static volatile int nodefer_depth_max = 0; // For SA_NODEFER recursion depth
 static volatile int nodefer_current_depth = 0;
 static volatile int cont_handler_count = 0; // SIGCONT handler invocations
 static volatile int change_handler_count =
-    0;                        // Post-change handler delivery count (SIGALRM)
-static volatile int sigsuspend_caught = 0;  // For sigsuspend test
-static volatile int sigwait_ready = 0;      // For sigwait synchronization
-static int test_failures = 0; // Track test failures
+    0; // Post-change handler delivery count (SIGALRM)
+static volatile int sigsuspend_caught = 0; // For sigsuspend test
+static volatile int sigwait_ready = 0;     // For sigwait synchronization
+static int test_failures = 0;              // Track test failures
 
 // Thread-group test globals (shared via CLONE_VM)
-static volatile int tg_child_tid = 0;      // Child thread's TID
-static volatile int tg_child_ready = 0;    // Child thread is ready
-static volatile int tg_child_caught = 0;   // Signal caught count in child
-static volatile int tg_child_signo = 0;    // Signal number caught by child
-static volatile int tg_child_done = 0;     // Child thread finished
+static volatile int tg_child_tid = 0;    // Child thread's TID
+static volatile int tg_child_ready = 0;  // Child thread is ready
+static volatile int tg_child_caught = 0; // Signal caught count in child
+static volatile int tg_child_signo = 0;  // Signal number caught by child
+static volatile int tg_child_done = 0;   // Child thread finished
 
 /* ---------------- Basic Handlers ---------------- */
 static void simple_handler(int signo) {
@@ -300,7 +300,8 @@ static void test_stop_continue(void) {
 
 /* --------------- Test 5: Change handler keeps pending (non-ignored) ---- */
 static void test_change_handler_clears_pending(void) {
-    printf("\n[Test 5] Changing handler preserves pending non-ignored instances\n");
+    printf("\n[Test 5] Changing handler preserves pending non-ignored "
+           "instances\n");
     change_handler_count = 0;
     // Install a blocking simple handler then queue signals, then change.
     sigaction_t sa = {0};
@@ -441,7 +442,7 @@ static void test_tkill(void) {
     printf("\n[Test 8] tkill: send signal to specific thread by TID\n");
     sigsuspend_caught = 0; // reuse counter
 
-    // Install handler for SIGUSR1 
+    // Install handler for SIGUSR1
     sigaction_t sa = {0};
     sa.sa_handler = sigsuspend_handler;
     if (sigaction(SIGUSR1, &sa, 0) != 0) {
@@ -610,8 +611,8 @@ static void test_tgkill_thread_group(void) {
 
         // Send SIGUSR1 to the child thread specifically
         int ret = tgkill(tgid, child_thread_tid, SIGUSR1);
-        printf("tgkill(%d, %d, SIGUSR1) returned %d\n", tgid,
-               child_thread_tid, ret);
+        printf("tgkill(%d, %d, SIGUSR1) returned %d\n", tgid, child_thread_tid,
+               ret);
 
         // Wait for child thread to handle signal
         while (!tg_child_done) {
@@ -690,8 +691,7 @@ static void test_kill_thread_group(void) {
             timeout++;
         }
 
-        printf("Leader caught=%d signo=%d\n", tg_child_caught,
-               tg_child_signo);
+        printf("Leader caught=%d signo=%d\n", tg_child_caught, tg_child_signo);
 
         // Tell child thread to exit
         tg_child_done = 1;
@@ -701,8 +701,8 @@ static void test_kill_thread_group(void) {
             printf("[Test 10] PASS\n");
             exit(0);
         } else {
-            printf("[Test 10] FAIL: caught=%d signo=%d\n",
-                   tg_child_caught, tg_child_signo);
+            printf("[Test 10] FAIL: caught=%d signo=%d\n", tg_child_caught,
+                   tg_child_signo);
             exit(1);
         }
     }
@@ -818,8 +818,8 @@ static void test_sigsuspend_thread_group(void) {
             timeout++;
         }
 
-        printf("Child thread sigsuspend: caught=%d done=%d\n",
-               tg_child_caught, tg_child_done);
+        printf("Child thread sigsuspend: caught=%d done=%d\n", tg_child_caught,
+               tg_child_done);
         if (tg_child_done && tg_child_caught >= 1) {
             printf("[Test 12] PASS\n");
             exit(0);
@@ -930,8 +930,8 @@ static void test_pgid_basics(void) {
     if (child == 0) {
         int child_pgid = getpgid(0);
         int child_pid = getpid();
-        printf("Child: pid=%d inherited pgid=%d (parent pgid=%d)\n",
-               child_pid, child_pgid, my_pgid);
+        printf("Child: pid=%d inherited pgid=%d (parent pgid=%d)\n", child_pid,
+               child_pgid, my_pgid);
 
         if (child_pgid != my_pgid) {
             printf("Child: pgid not inherited from parent\n");
@@ -941,8 +941,8 @@ static void test_pgid_basics(void) {
         // setpgid(0, 0): create new process group with pgid == own pid
         int ret = setpgid(0, 0);
         int new_pgid = getpgid(0);
-        printf("Child: after setpgid(0,0): ret=%d pgid=%d (expected %d)\n",
-               ret, new_pgid, child_pid);
+        printf("Child: after setpgid(0,0): ret=%d pgid=%d (expected %d)\n", ret,
+               new_pgid, child_pid);
 
         // Stay alive so parent can query our pgid
         sleep(500);
@@ -956,8 +956,8 @@ static void test_pgid_basics(void) {
     // Parent: wait for child to setpgid, then query cross-process
     sleep(200);
     int child_pgid = getpgid(child);
-    printf("Parent: getpgid(%d) = %d (expected %d)\n",
-           child, child_pgid, child);
+    printf("Parent: getpgid(%d) = %d (expected %d)\n", child, child_pgid,
+           child);
 
     int status;
     wait(&status);
@@ -965,8 +965,8 @@ static void test_pgid_basics(void) {
     if (status == 0 && child_pgid == child) {
         printf("[Test 14] PASS\n");
     } else {
-        printf("[Test 14] FAIL: status=%d child_pgid=%d expected=%d\n",
-               status, child_pgid, child);
+        printf("[Test 14] FAIL: status=%d child_pgid=%d expected=%d\n", status,
+               child_pgid, child);
         test_failures++;
     }
 }
@@ -988,8 +988,8 @@ static void test_setsid_basics(void) {
         int child_pid = getpid();
         int old_sid = getsid(0);
         int old_pgid = getpgid(0);
-        printf("Child before setsid: pid=%d sid=%d pgid=%d\n",
-               child_pid, old_sid, old_pgid);
+        printf("Child before setsid: pid=%d sid=%d pgid=%d\n", child_pid,
+               old_sid, old_pgid);
 
         // setsid: become session leader and process group leader
         int new_sid = setsid();
@@ -1032,8 +1032,7 @@ static void test_setsid_basics(void) {
     // Parent: query child's sid cross-process
     sleep(200);
     int child_sid = getsid(child);
-    printf("Parent: getsid(%d) = %d (expected %d)\n",
-           child, child_sid, child);
+    printf("Parent: getsid(%d) = %d (expected %d)\n", child, child_sid, child);
 
     int status;
     wait(&status);
@@ -1041,8 +1040,8 @@ static void test_setsid_basics(void) {
     if (status == 0 && child_sid == child) {
         printf("[Test 15] PASS\n");
     } else {
-        printf("[Test 15] FAIL: status=%d child_sid=%d expected=%d\n",
-               status, child_sid, child);
+        printf("[Test 15] FAIL: status=%d child_sid=%d expected=%d\n", status,
+               child_sid, child);
         test_failures++;
     }
 }
@@ -1082,7 +1081,8 @@ static void test_pgroup_session_constraints(void) {
         //    (we are session leader: sid == pid)
         int ret3 = setpgid(0, child_pid + 100);
         printf("setpgid on session leader: returned %d "
-               "(expected negative EPERM)\n", ret3);
+               "(expected negative EPERM)\n",
+               ret3);
         if (ret3 >= 0) {
             printf("FAIL: setpgid on session leader should have failed\n");
             exit(3);
@@ -1090,8 +1090,7 @@ static void test_pgroup_session_constraints(void) {
 
         // 4. getpgid with nonexistent pid fails
         int ret4 = getpgid(99999);
-        printf("getpgid(99999): returned %d (expected negative ESRCH)\n",
-               ret4);
+        printf("getpgid(99999): returned %d (expected negative ESRCH)\n", ret4);
         if (ret4 >= 0) {
             printf("FAIL: getpgid with invalid pid should have failed\n");
             exit(4);
@@ -1099,8 +1098,7 @@ static void test_pgroup_session_constraints(void) {
 
         // 5. getsid with nonexistent pid fails
         int ret5 = getsid(99999);
-        printf("getsid(99999): returned %d (expected negative ESRCH)\n",
-               ret5);
+        printf("getsid(99999): returned %d (expected negative ESRCH)\n", ret5);
         if (ret5 >= 0) {
             printf("FAIL: getsid with invalid pid should have failed\n");
             exit(5);
@@ -1170,8 +1168,8 @@ static void test_pgroup_kill(void) {
     int all_in_group = 1;
     for (int i = 0; i < 3; i++) {
         int pgid = getpgid(child_pids[i]);
-        printf("child %d pgid=%d (expected %d)\n",
-               child_pids[i], pgid, new_pgid);
+        printf("child %d pgid=%d (expected %d)\n", child_pids[i], pgid,
+               new_pgid);
         if (pgid != new_pgid)
             all_in_group = 0;
     }

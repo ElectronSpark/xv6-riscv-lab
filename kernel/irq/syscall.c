@@ -76,9 +76,14 @@ extern uint64 sys_wait(void);
 extern uint64 sys_kill(void);
 extern uint64 sys_exec(void);
 extern uint64 sys_getpid(void);
+extern uint64 sys_getppid(void);
 extern uint64 sys_sbrk(void);
 extern uint64 sys_sleep(void);
 extern uint64 sys_uptime(void);
+extern uint64 sys_gettimeofday(void);
+extern uint64 sys_waitpid(void);
+extern uint64 sys_nanosleep(void);
+extern uint64 sys_uname(void);
 extern uint64 sys_sigaction(void);
 extern uint64 sys_sigpending(void);
 extern uint64 sys_sigprocmask(void);
@@ -123,6 +128,15 @@ extern uint64 sys_vfs_write(void);
 extern uint64 sys_vfs_close(void);
 extern uint64 sys_vfs_fstat(void);
 extern uint64 sys_vfs_open(void);
+extern uint64 sys_vfs_lseek(void);
+extern uint64 sys_vfs_dup2(void);
+extern uint64 sys_vfs_fcntl(void);
+extern uint64 sys_vfs_access(void);
+extern uint64 sys_vfs_rename(void);
+extern uint64 sys_vfs_readlink(void);
+extern uint64 sys_vfs_stat(void);
+extern uint64 sys_vfs_lstat(void);
+extern uint64 sys_vfs_ftruncate(void);
 extern uint64 sys_vfs_mkdir(void);
 extern uint64 sys_vfs_mknod(void);
 extern uint64 sys_vfs_unlink(void);
@@ -164,6 +178,7 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_chdir] sys_vfs_chdir, // VFS
     [SYS_dup] sys_vfs_dup,     // VFS
     [SYS_getpid] sys_getpid,
+    [SYS_getppid] sys_getppid,
     [SYS_sbrk] sys_sbrk,
     [SYS_sleep] sys_sleep,
     [SYS_uptime] sys_uptime,
@@ -212,6 +227,19 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_ioctl] sys_vfs_ioctl,
     [SYS_tcgetattr] sys_tcgetattr,
     [SYS_tcsetattr] sys_tcsetattr,
+    [SYS_lseek] sys_vfs_lseek,
+    [SYS_dup2] sys_vfs_dup2,
+    [SYS_fcntl] sys_vfs_fcntl,
+    [SYS_access] sys_vfs_access,
+    [SYS_rename] sys_vfs_rename,
+    [SYS_readlink] sys_vfs_readlink,
+    [SYS_stat] sys_vfs_stat,
+    [SYS_lstat] sys_vfs_lstat,
+    [SYS_ftruncate] sys_vfs_ftruncate,
+    [SYS_gettimeofday] sys_gettimeofday,
+    [SYS_waitpid] sys_waitpid,
+    [SYS_nanosleep] sys_nanosleep,
+    [SYS_uname] sys_uname,
     [SYS_getdents] sys_getdents,
     [SYS_chroot] sys_chroot,
     [SYS_mount] sys_mount,

@@ -410,6 +410,7 @@ struct vfs_fdtable {
     int fd_count;
     struct vfs_file *files[NOFILE];
     uint64 files_bitmap[1];
+    uint64 cloexec_bitmap[1];
     int ref_count;
 };
 

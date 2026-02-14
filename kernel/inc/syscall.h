@@ -58,7 +58,13 @@
 #define SYS_ioctl        40
 #define SYS_tcgetattr    41
 #define SYS_tcsetattr    42
-// 43-49 reserved
+#define SYS_lseek        43
+#define SYS_dup2         44
+#define SYS_fcntl        45
+#define SYS_access       46
+#define SYS_rename       47
+#define SYS_readlink     48
+#define SYS_stat         49
 
 // --- Memory management (50-69) ---
 #define SYS_mmap         50
@@ -68,7 +74,14 @@
 #define SYS_msync        54
 #define SYS_mincore      55
 #define SYS_madvise      56
-// 57-69 reserved
+#define SYS_gettimeofday 57
+#define SYS_waitpid      58
+#define SYS_nanosleep    59
+#define SYS_ftruncate    60
+#define SYS_getppid      61
+#define SYS_uname        62
+#define SYS_lstat        63
+// 64-69 reserved
 
 // --- Signals (70-89) ---
 #define SYS_sigaction    70

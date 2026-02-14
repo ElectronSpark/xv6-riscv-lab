@@ -64,11 +64,12 @@ int thread_clone(struct clone_args *args) {
     // CLONE_THREAD implies CLONE_PARENT
     // CLONE_VM, CLONE_SIGHAND are required in this case
     // (POSIX requirement + Linux behavior: "like CLONE_PARENT").
-    if (args->flags & CLONE_THREAD){
-        if ((args->flags & (CLONE_VM | CLONE_SIGHAND)) != (CLONE_VM | CLONE_SIGHAND)) {
+    if (args->flags & CLONE_THREAD) {
+        if ((args->flags & (CLONE_VM | CLONE_SIGHAND)) !=
+            (CLONE_VM | CLONE_SIGHAND)) {
             return -EINVAL;
         }
-        args->flags |=  CLONE_PARENT;
+        args->flags |= CLONE_PARENT;
     }
 
     // When CLONE_VM is specified without CLONE_VFORK, stack and entry must be

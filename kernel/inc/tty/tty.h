@@ -26,6 +26,7 @@ void tty_hangup(struct tty *tty);
 /* ---- pty.c ---- */
 int pty_alloc(struct tty **slave_out, const char *name);
 ssize_t pty_master_read(struct tty *slave, char *buf, size_t count, bool user);
-ssize_t pty_master_write(struct tty *slave, const char *buf, size_t count, bool user);
+ssize_t pty_master_write(struct tty *slave, const char *buf, size_t count,
+                         bool user);
 
 #endif /* __KERNEL_TTY_H */
