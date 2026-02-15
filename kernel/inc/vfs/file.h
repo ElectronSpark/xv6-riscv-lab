@@ -45,6 +45,12 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
 loff_t vfs_filelseek(struct vfs_file *file, loff_t offset, int whence);
 int truncate(struct vfs_file *file, loff_t length);
 
+// Allocate a custom vfs_file (with caller-supplied ops + private_data),
+// attach it to the current process's fd table, and return the fd number.
+// Returns negative errno on failure.
+int vfs_custom_fd_alloc(struct vfs_file_ops *ops, void *private_data,
+                        int flags);
+
 // VFS Pipe allocation
 int vfs_pipealloc(struct vfs_file **rf, struct vfs_file **wf);
 

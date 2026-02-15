@@ -56,11 +56,14 @@ void mbufq_init(struct mbufq *q);
 
 // Use these macros to convert network bytes to the native byte order.
 // Note that Risc-V uses little endian while network order is big endian.
+#ifndef USE_LWIP
 #define ntohs bswaps
 #define ntohl bswapl
 #define htons bswaps
 #define htonl bswapl
+#endif /* !USE_LWIP */
 
+#ifndef USE_LWIP
 //
 // useful networking headers
 //
@@ -161,5 +164,7 @@ struct dns_data {
     uint32 ttl;
     uint16 len;
 } __attribute__((packed));
+
+#endif /* !USE_LWIP */
 
 #endif /* __KERNEL_NET_H */

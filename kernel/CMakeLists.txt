@@ -84,6 +84,8 @@ set(KERNEL_S_FILES ${KERNEL_DIR}/entry.S)
 # Generate asm-offsets.h before building anything else
 add_subdirectory(${KERNEL_DIR}/inc)
 
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding -DUSE_LWIP=1 ")
+
 # Pull in subdirectory object libraries.
 add_subdirectory(${KERNEL_DIR}/irq)
 add_subdirectory(${KERNEL_DIR}/dev)
@@ -94,6 +96,7 @@ add_subdirectory(${KERNEL_DIR}/timer)
 add_subdirectory(${KERNEL_DIR}/vfs)
 add_subdirectory(${KERNEL_DIR}/ipi)
 add_subdirectory(${KERNEL_DIR}/tty)
+add_subdirectory(${KERNEL_DIR}/lwip_port)
 
 set_source_files_properties(${KERNEL_C_FILES} PROPERTIES LANGUAGE C)
 set_source_files_properties(${KERNEL_SCAN_OBJS} PROPERTIES LANGUAGE C)
@@ -114,11 +117,10 @@ set(KERNEL_OBJ_LIBS
     $<TARGET_OBJECTS:ipi>
     $<TARGET_OBJECTS:timer>
     $<TARGET_OBJECTS:tty>
+    $<TARGET_OBJECTS:lwip>
 )
 
-set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs tty)
-
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding ")
+set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs tty lwip)
 
 # Generate linker script from template
 set(KERNEL_LD_IN ${KERNEL_DIR}/kernel.ld.in)

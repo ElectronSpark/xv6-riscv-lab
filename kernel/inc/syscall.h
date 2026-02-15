@@ -105,4 +105,19 @@
 #define SYS_dumpinode    96
 // 97-99 reserved
 
+// --- Network / sockets (100-119) ---
+#define SYS_socket       100
+#define SYS_bind         101
+#define SYS_listen       102
+#define SYS_accept       103
+#define SYS_sconnect     104   // "sconnect" to avoid clash with legacy SYS_connect
+#define SYS_sendto       105
+#define SYS_recvfrom     106
+#define SYS_setsockopt   107
+#define SYS_getsockopt   108
+#define SYS_shutdown     109
+#define SYS_getpeername  110
+#define SYS_getsockname  111
+// 112-119 reserved
+
 #endif /* __KERNEL_SYSCALL_H */

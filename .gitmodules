@@ -12,3 +12,6 @@
 [submodule "user/readline"]
 	path = user/readline
 	url = https://git.savannah.gnu.org/git/readline.git
+[submodule "kernel/lwip"]
+	path = kernel/lwip
+	url = https://github.com/ElectronSpark/v6-lwip.git

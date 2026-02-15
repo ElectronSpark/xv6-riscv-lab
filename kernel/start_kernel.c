@@ -155,6 +155,9 @@ void start_kernel_post_init(void) {
     virtio_disk_init(); // emulated hard disk (QEMU)
     ramdisk_init();     // ramdisk from FDT initrd (real hardware)
     sockinit();
+#ifdef USE_LWIP
+    lwip_net_init();    // lwIP TCP/IP stack initialization
+#endif
     pcache_global_init(); // page cache subsystem initialization
 
     // File system initialization must be run in the context of a

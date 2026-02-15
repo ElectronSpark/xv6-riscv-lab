@@ -658,6 +658,35 @@ struct sock {
 extern spinlock_t sock_lock;
 extern struct sock *sockets;
 
+/**
+ * Allocate a vfs_file with caller-supplied ops and private_data, attach it
+ * to the global file table, install it into the current process's fd table,
+ * and return the fd number.  Returns negative errno on failure.
+ */
+int vfs_custom_fd_alloc(struct vfs_file_ops *ops, void *private_data,
+                        int flags)
+{
+    struct vfs_file *f = __vfs_file_alloc();
+    if (f == NULL)
+        return -ENOMEM;
+
+    f->f_flags      = flags;
+    f->ops          = ops;
+    f->private_data = private_data;
+    __vfs_ftable_attatch(f);
+
+    spin_lock(&current->fdtable->lock);
+    int fd = vfs_fdtable_alloc_fd(current->fdtable, f);
+    spin_unlock(&current->fdtable->lock);
+    vfs_fput(f);          /* drop our ref; fdtable now owns it */
+
+    if (fd < 0) {
+        return -EMFILE;
+    }
+
+    return fd;
+}
+
 int vfs_sockalloc(struct vfs_file **f, uint32 raddr, uint16 lport,
                   uint16 rport) {
     struct sock *si = NULL;

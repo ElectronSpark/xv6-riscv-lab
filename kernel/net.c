@@ -11,10 +11,12 @@
 #include "defs.h"
 #include "printf.h"
 
+#ifndef USE_LWIP
 STATIC uint32 local_ip =
     MAKE_IP_ADDR(10, 0, 2, 15); // qemu's idea of the guest IP
 STATIC uint8 local_mac[ETHADDR_LEN] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
 STATIC uint8 broadcast_mac[ETHADDR_LEN] = {0xFF, 0XFF, 0XFF, 0XFF, 0XFF, 0XFF};
+#endif /* !USE_LWIP */
 
 // Strips data from the start of the buffer and returns a pointer to it.
 // Returns 0 if less than the full requested length is available.
@@ -98,6 +100,11 @@ int mbufq_empty(struct mbufq *q) { return q->head == 0; }
 
 // Intializes a queue of mbufs.
 void mbufq_init(struct mbufq *q) { q->head = 0; }
+
+#ifndef USE_LWIP
+/* ========================================================================== */
+/* Legacy protocol stack (replaced by lwIP when USE_LWIP is defined)          */
+/* ========================================================================== */
 
 // This code is lifted from FreeBSD's ping.c, and is copyright by the Regents
 // of the University of California.
@@ -327,3 +334,5 @@ void net_rx(struct mbuf *m) {
     else
         mbuffree(m);
 }
+
+#endif /* USE_LWIP */

@@ -399,6 +399,7 @@ if(USE_NEWLIB)
     add_newlib_program(_newlibtest ${NEWLIB_XV6_DIR}/src/misc/newlibtest.c)
     add_newlib_program(_ntypesize ${NEWLIB_XV6_DIR}/src/misc/newlib_typesizes.c)
     add_newlib_program(_nmalloc ${NEWLIB_XV6_DIR}/src/misc/newlib_malloc_smoke.c)
+    add_newlib_program(_nettest ${NEWLIB_XV6_DIR}/src/misc/nettest.c)
 
     set(NCURSES_SRC_DIR "${CMAKE_SOURCE_DIR}/user/ncurses")
     set(NCURSES_BUILD_DIR "${CMAKE_BINARY_DIR}/ncurses/build-xv6")
@@ -430,6 +431,7 @@ if(USE_NEWLIB)
                     AR=${CMAKE_AR}
                     RANLIB=${CMAKE_RANLIB}
                     READELF=${CMAKE_READELF}
+                    PKG_CONFIG=false
                     CPPFLAGS=-I${NEWLIB_XV6_DIR}/include\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
                     CFLAGS=-I${NEWLIB_XV6_DIR}/include\ -I${NEWLIB_INCLUDE_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
                     LDFLAGS=-Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -Wl,-T,${USER_DIR}/python_pagealign.ld\ -L${NCURSES_BUILD_DIR}/lib\ -L${READLINE_BUILD_DIR}
@@ -532,7 +534,7 @@ if(USE_NEWLIB)
                         --without-manpages
                         --without-progs
                         --without-tests
-                        cf_cv_func_tcgetattr=yes
+                        cf_cv_have_tcgetattr=yes
             COMMAND ${CMAKE_COMMAND} -E chdir ${NCURSES_BUILD_DIR} make -j1
             # Create ncurses.h symlink expected by CPython's py_curses.h
             COMMAND ${CMAKE_COMMAND} -E create_symlink curses.h ${NCURSES_INCLUDE_DIR}/ncurses.h
@@ -692,7 +694,7 @@ if(USE_NEWLIB)
     if(USE_LOCAL_NEWLIB)
         add_dependencies(user_programs local_newlib_install)
     endif()
-    add_dependencies(user_programs _nwclock_newlib _newlibtest_newlib _ntypesize_newlib _nmalloc_newlib)
+    add_dependencies(user_programs _nwclock_newlib _newlibtest_newlib _ntypesize_newlib _nmalloc_newlib _nettest_newlib)
     if(TARGET _sh_newlib)
         add_dependencies(user_programs _sh_newlib)
     endif()

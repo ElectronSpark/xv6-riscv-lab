@@ -118,6 +118,22 @@ extern uint64 sys_dumprq(void);
 extern uint64 sys_kernbase(void);
 extern uint64 sys_dumpinode(void);
 
+// Network / socket syscalls (lwip_port/sys_socket.c)
+#ifdef USE_LWIP
+extern uint64 sys_socket(void);
+extern uint64 sys_bind(void);
+extern uint64 sys_listen(void);
+extern uint64 sys_accept(void);
+extern uint64 sys_sconnect(void);
+extern uint64 sys_sendto(void);
+extern uint64 sys_recvfrom(void);
+extern uint64 sys_setsockopt(void);
+extern uint64 sys_getsockopt(void);
+extern uint64 sys_shutdown(void);
+extern uint64 sys_getpeername(void);
+extern uint64 sys_getsockname(void);
+#endif
+
 // 900
 extern uint64 sys_sync(void);
 
@@ -247,6 +263,20 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_mount] sys_mount,
     [SYS_umount] sys_umount,
     [SYS_getcwd] sys_getcwd,
+#ifdef USE_LWIP
+    [SYS_socket] sys_socket,
+    [SYS_bind] sys_bind,
+    [SYS_listen] sys_listen,
+    [SYS_accept] sys_accept,
+    [SYS_sconnect] sys_sconnect,
+    [SYS_sendto] sys_sendto,
+    [SYS_recvfrom] sys_recvfrom,
+    [SYS_setsockopt] sys_setsockopt,
+    [SYS_getsockopt] sys_getsockopt,
+    [SYS_shutdown] sys_shutdown,
+    [SYS_getpeername] sys_getpeername,
+    [SYS_getsockname] sys_getsockname,
+#endif
 };
 
 void syscall(void) {

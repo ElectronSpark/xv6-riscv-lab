@@ -174,9 +174,17 @@ void pci_init();
 void e1000_init(uint32 *);
 int e1000_transmit(struct mbuf *);
 
-// net.c
+// net.c / lwip_glue.c
 void net_rx(struct mbuf *);
+#ifndef USE_LWIP
 void net_tx_udp(struct mbuf *, uint32, uint16, uint16);
+#endif
+
+// lwip_port/lwip_glue.c
+#ifdef USE_LWIP
+void lwip_net_init(void);
+// lwip_port/sys_socket.c — syscall handlers registered in irq/syscall.c
+#endif
 
 // sysnet.c
 void sockinit(void);
