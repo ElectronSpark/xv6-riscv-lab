@@ -262,21 +262,17 @@ add_custom_target(terminfo_db DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/terminfo.stamp
 list(TRANSFORM USER_PROGRAMS PREPEND "${CMAKE_CURRENT_BINARY_DIR}/user/")
 
 # Update the custom command for fs.img to include the correct path for user executables
+# Use mkfs directly to embed user programs (xv6fuse has a write-corruption bug
+# with large files in double-indirect blocks).  mkfs already strips the leading
+# underscore and places executables into /bin.
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fs.img
     COMMAND ${CMAKE_CURRENT_BINARY_DIR}/mkfs fs.img
-    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/populate_fs_with_fuse.sh
-            ${CMAKE_CURRENT_BINARY_DIR}/xv6fuse
-            ${CMAKE_CURRENT_BINARY_DIR}/fs.img
             ${CMAKE_SOURCE_DIR}/README.md
-            ${TERMINFO_DIR}
             ${USER_PROGRAMS}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS user_programs
-            terminfo_db
             ${CMAKE_CURRENT_BINARY_DIR}/mkfs
-            ${CMAKE_CURRENT_BINARY_DIR}/xv6fuse
-            ${CMAKE_SOURCE_DIR}/scripts/populate_fs_with_fuse.sh
             ${CMAKE_SOURCE_DIR}/README.md
             ${USER_PROGRAMS}
     COMMENT "Creating file system image with user programs and README"

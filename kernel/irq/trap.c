@@ -9,6 +9,7 @@
 #include "printf.h"
 #include "proc/sched.h"
 #include "signal.h"
+#include "syscall.h"
 #include <mm/page.h>
 #include <mm/vm.h>
 #include "trap.h"
@@ -165,6 +166,10 @@ void usertrap(void) {
             break;
         }
         vm_runlock(current->vm);
+        printf("pid %d %s: fatal instruction page fault sepc=0x%lx stval=0x%lx\n",
+               current->pid, current->name,
+               current->trapframe->trapframe.sepc,
+               current->trapframe->trapframe.stval);
         assert(current->pid != 1, "init exiting");
         kill(current->pid, SIGSEGV);
         break;
@@ -183,10 +188,10 @@ void usertrap(void) {
             break;
         }
         vm_runlock(current->vm);
-        // printf("usertrap(): page fault on read 0x%lx pid=%d\n", r_scause(),
-        // p->pid); printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(),
-        // r_stval()); printf("            pgtbl=0x%lx\n",
-        // (uint64)current->vm->pagetable);
+        printf("pid %d %s: fatal load page fault sepc=0x%lx stval=0x%lx\n",
+               current->pid, current->name,
+               current->trapframe->trapframe.sepc,
+               current->trapframe->trapframe.stval);
         assert(current->pid != 1, "init exiting");
         kill(current->pid, SIGSEGV);
         break;
@@ -205,19 +210,20 @@ void usertrap(void) {
             break;
         }
         vm_runlock(current->vm);
-        // printf("usertrap(): page fault on write 0x%lx pid=%d\n", r_scause(),
-        // p->pid); printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(),
-        // r_stval()); printf("            pgtbl=0x%lx\n",
-        // (uint64)current->vm->pagetable);
+        printf("pid %d %s: fatal store page fault sepc=0x%lx stval=0x%lx\n",
+               current->pid, current->name,
+               current->trapframe->trapframe.sepc,
+               current->trapframe->trapframe.stval);
         assert(current->pid != 1, "init exiting");
         kill(current->pid, SIGSEGV);
         break;
     default:
         assert(current->trapframe->trapframe.scause >> 63 == 0,
                "unexpected interrupt");
-        // printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(),
-        // current->pid); printf("            sepc=0x%lx stval=0x%lx\n",
-        // r_sepc(), r_stval());
+        printf("pid %d %s: unexpected scause=0x%lx sepc=0x%lx stval=0x%lx\n",
+               current->pid, current->name, scause,
+               current->trapframe->trapframe.sepc,
+               current->trapframe->trapframe.stval);
         assert(current->pid != 1, "init exiting");
         kill(current->pid, SIGSEGV);
         break;

@@ -49,7 +49,7 @@ int ustack_alloc(vm_t *vm, uint64 *sp) {
 int exec(char *path, char **argv) {
     char *s, *last;
     int i, off;
-    uint64 argc, heap_start = 0, sp, ustack[MAXARG];
+    uint64 argc, heap_start = 0, sp, ustack[MAXARG + 3];
     uint64 stackbase = USTACKTOP - USERSTACK * PGSIZE;
     struct elfhdr elf;
     struct vfs_file *file = NULL;
@@ -118,17 +118,15 @@ int exec(char *path, char **argv) {
             goto bad_locked;
         if (ph.vaddr + ph.memsz < ph.vaddr)
             goto bad_locked;
-        // Only require vaddr and file offset are congruent mod page size
-        // (same as Linux ELF loader); handle non-page-aligned segments.
-        if (ph.filesz > 0 && (ph.vaddr % PGSIZE) != (ph.off % PGSIZE))
+        // This kernel assumes page-aligned LOAD segments.
+        // Non-page-aligned ELF segments are not supported.
+        if ((ph.vaddr & (PGSIZE - 1)) != 0 || (ph.off & (PGSIZE - 1)) != 0)
             goto bad_locked;
 
-        // Page-align segment start; adjust sizes and file offset to match
-        uint64 adj = ph.vaddr % PGSIZE;
-        uint64 va = ph.vaddr - adj;
-        uint64 filesz = ph.filesz + adj;
-        uint64 memsz = ph.memsz + adj;
-        uint64 file_off = ph.off - adj;
+        uint64 va = ph.vaddr;
+        uint64 filesz = ph.filesz;
+        uint64 memsz = ph.memsz;
+        uint64 file_off = ph.off;
         uint64 vm_flags = flags2vmperm(ph.flags) | VMA_FLAG_USER;
         uint64 total_end = PGROUNDUP(va + memsz);
         // End of full pages entirely covered by file data
@@ -258,20 +256,30 @@ int exec(char *path, char **argv) {
             goto bad;
         ustack[argc] = sp;
     }
-    ustack[argc] = 0;
+    // Build startup stack frame expected by newlib/crt0:
+    //   sp[0] = argc
+    //   sp[1..argc] = argv pointers
+    //   sp[argc+1] = NULL        (argv terminator)
+    //   sp[argc+2] = NULL        (envp[0] = NULL)
+    for (i = (int)argc - 1; i >= 0; i--) {
+        ustack[i + 1] = ustack[i];
+    }
+    ustack[0] = argc;
+    ustack[argc + 1] = 0;
+    ustack[argc + 2] = 0;
 
-    // push the array of argv[] pointers.
-    sp -= (argc + 1) * sizeof(uint64);
+    // Push argc + argv[] (+ NULL + envp NULL) onto user stack.
+    sp -= (argc + 3) * sizeof(uint64);
     sp -= sp % 16;
     if (sp < stackbase)
         goto bad;
-    if (vm_copyout(tmp_vm, sp, (char *)ustack, (argc + 1) * sizeof(uint64)) < 0)
+    if (vm_copyout(tmp_vm, sp, (char *)ustack, (argc + 3) * sizeof(uint64)) < 0)
         goto bad;
 
     // arguments to user main(argc, argv)
     // argc is returned via the system call return
     // value, which goes in a0.
-    p->trapframe->trapframe.a1 = sp;
+    p->trapframe->trapframe.a1 = sp + sizeof(uint64);
 
     // Save program name for debugging.
     for (last = s = path; *s; s++)

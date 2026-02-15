@@ -5,3 +5,10 @@
 [submodule "user/ncurses"]
 	path = user/ncurses
 	url = https://github.com/mirror/ncurses.git
+[submodule "user/v6-cpython"]
+	path = user/v6-cpython
+	url = https://github.com/ElectronSpark/v6-cpython.git
+	branch = 3.12
+[submodule "user/readline"]
+	path = user/readline
+	url = https://git.savannah.gnu.org/git/readline.git

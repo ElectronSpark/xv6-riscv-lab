@@ -398,6 +398,7 @@ if(USE_NEWLIB)
     add_newlib_program(_nwclock ${NEWLIB_XV6_DIR}/src/misc/newlib_wallclock.c)
     add_newlib_program(_newlibtest ${NEWLIB_XV6_DIR}/src/misc/newlibtest.c)
     add_newlib_program(_ntypesize ${NEWLIB_XV6_DIR}/src/misc/newlib_typesizes.c)
+    add_newlib_program(_nmalloc ${NEWLIB_XV6_DIR}/src/misc/newlib_malloc_smoke.c)
 
     set(NCURSES_SRC_DIR "${CMAKE_SOURCE_DIR}/user/ncurses")
     set(NCURSES_BUILD_DIR "${CMAKE_BINARY_DIR}/ncurses/build-xv6")
@@ -406,6 +407,109 @@ if(USE_NEWLIB)
     set(NCURSES_SMOKE_SRC "${NEWLIB_XV6_DIR}/src/misc/newlib_ncurses_smoke.c")
     set(NCURSES_SMOKE_OBJ "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_nncurses_smoke.dir/newlib_ncurses_smoke.c.o")
     set(NCURSES_SMOKE_ELF "${CMAKE_BINARY_DIR}/user/_nncurses_smoke")
+
+    set(READLINE_SRC_DIR "${CMAKE_SOURCE_DIR}/user/readline")
+    set(READLINE_BUILD_DIR "${CMAKE_BINARY_DIR}/readline/build-xv6")
+    set(READLINE_LIB_A "${READLINE_BUILD_DIR}/libreadline.a")
+    set(READLINE_INCLUDE_DIR "${READLINE_BUILD_DIR}")
+
+    # CPython source is a submodule under user/, while build artifacts go under
+    # top-level build/ to keep the submodule tree clean.
+    set(CPYTHON_SRC_DIR "${CMAKE_SOURCE_DIR}/user/v6-cpython" CACHE PATH "CPython source directory")
+    set(CPYTHON_BUILD_DIR "${CMAKE_BINARY_DIR}/cpython/build-3.12" CACHE PATH "CPython out-of-tree build directory")
+    set(CPYTHON_BIN "${CPYTHON_BUILD_DIR}/python" CACHE FILEPATH "CPython interpreter binary path")
+    set(CPYTHON_FS_BIN "${CMAKE_BINARY_DIR}/user/_python")
+
+    if(EXISTS "${CPYTHON_SRC_DIR}/configure")
+        add_custom_command(
+            OUTPUT ${CPYTHON_BUILD_DIR}/Makefile
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CPYTHON_BUILD_DIR}
+            COMMAND ${CMAKE_COMMAND} -E chdir ${CPYTHON_BUILD_DIR}
+                    env
+                    CC=${CMAKE_C_COMPILER}
+                    AR=${CMAKE_AR}
+                    RANLIB=${CMAKE_RANLIB}
+                    READELF=${CMAKE_READELF}
+                    CPPFLAGS=-I${NEWLIB_XV6_DIR}/include\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
+                    CFLAGS=-I${NEWLIB_XV6_DIR}/include\ -I${NEWLIB_INCLUDE_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
+                    LDFLAGS=-Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -Wl,-T,${USER_DIR}/python_pagealign.ld\ -L${NCURSES_BUILD_DIR}/lib\ -L${READLINE_BUILD_DIR}
+                    LIBS=-L${CMAKE_CURRENT_BINARY_DIR}/newlib_shim\ -lxv6_newlib_syscalls\ -lpthread
+                    ${CPYTHON_SRC_DIR}/configure
+                        --host=riscv64-unknown-linux-gnu
+                        --build=x86_64-pc-linux-gnu
+                        --with-build-python=python3
+                        # --without-pymalloc
+                        --disable-shared
+                        --without-ensurepip
+                        ac_cv_file__dev_ptmx=no
+                        ac_cv_file__dev_ptc=no
+                        ac_cv_header_curses_h=yes
+                        ac_cv_header_ncurses_h=yes
+                        ac_cv_header_term_h=yes
+                        ac_cv_lib_ncurses_initscr=yes
+                        ac_cv_lib_curses_filter=yes
+                        ac_cv_lib_curses_has_key=yes
+                        ac_cv_lib_curses_immedok=yes
+                        ac_cv_lib_curses_is_pad=yes
+                        ac_cv_lib_curses_is_term_resized=yes
+                        ac_cv_lib_curses_resizeterm=yes
+                        ac_cv_lib_curses_resize_term=yes
+                        ac_cv_lib_curses_syncok=yes
+                        ac_cv_lib_curses_typeahead=yes
+                        ac_cv_lib_curses_use_env=yes
+                        ac_cv_lib_curses_wchgat=yes
+                        ac_cv_lib_ncursesw_initscr=no
+                        ac_cv_header_readline_readline_h=yes
+                        ac_cv_lib_readline_readline=yes
+                        ac_cv_readline_append_history=yes
+                        ac_cv_readline_rl_completion_display_matches_hook=yes
+                        ac_cv_readline_rl_completion_matches=yes
+                        ac_cv_readline_rl_pre_input_hook=yes
+                        ac_cv_readline_rl_resize_terminal=yes
+            DEPENDS ${CPYTHON_SRC_DIR}/configure ${USER_DIR}/python_pagealign.ld xv6_newlib_syscalls xv6_pthread local_ncurses_build local_readline_build
+            COMMENT "Configuring CPython cross build in ${CPYTHON_BUILD_DIR}"
+        )
+
+        # After configure, write Modules/Setup.local to enable _curses and
+        # readline as statically-linked built-in modules.
+        set(CPYTHON_SETUP_LOCAL "${CPYTHON_BUILD_DIR}/Modules/Setup.local")
+        add_custom_command(
+            OUTPUT ${CPYTHON_BUILD_DIR}/Makefile
+            COMMAND ${CMAKE_COMMAND} -E echo
+                    "_curses _cursesmodule.c -I${NCURSES_INCLUDE_DIR} -L${NCURSES_BUILD_DIR}/lib -lncurses"
+                    > ${CPYTHON_SETUP_LOCAL}
+            COMMAND ${CMAKE_COMMAND} -E echo
+                    "readline readline.c -I${CMAKE_SOURCE_DIR}/user -L${READLINE_BUILD_DIR} -lreadline -L${NCURSES_BUILD_DIR}/lib -lncurses"
+                    >> ${CPYTHON_SETUP_LOCAL}
+            APPEND
+        )
+
+        add_custom_target(cpython_configure DEPENDS ${CPYTHON_BUILD_DIR}/Makefile)
+
+        add_custom_command(
+            OUTPUT ${CPYTHON_BIN}
+            COMMAND ${CMAKE_COMMAND} -E chdir ${CPYTHON_BUILD_DIR} make -j16 python
+            DEPENDS cpython_configure
+            COMMENT "Building CPython interpreter"
+        )
+
+        add_custom_target(cpython_build DEPENDS ${CPYTHON_BIN})
+
+        add_custom_command(
+            OUTPUT ${CPYTHON_FS_BIN}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
+            COMMAND ${CMAKE_COMMAND} -E copy ${CPYTHON_BIN} ${CPYTHON_FS_BIN}
+            COMMAND ${CMAKE_STRIP} --strip-debug ${CPYTHON_FS_BIN}
+            DEPENDS ${CPYTHON_BIN}
+            COMMENT "Staging CPython interpreter as _python for fs image"
+        )
+
+        add_custom_target(_python_newlib ALL DEPENDS ${CPYTHON_FS_BIN})
+        list(APPEND USER_PROGRAMS _python)
+        set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
+    else()
+        message(STATUS "Skipping CPython configure/build targets (missing submodule at ${CPYTHON_SRC_DIR})")
+    endif()
 
     if(EXISTS "${NCURSES_SRC_DIR}/configure")
         add_custom_command(
@@ -428,12 +532,50 @@ if(USE_NEWLIB)
                         --without-manpages
                         --without-progs
                         --without-tests
+                        cf_cv_func_tcgetattr=yes
             COMMAND ${CMAKE_COMMAND} -E chdir ${NCURSES_BUILD_DIR} make -j1
+            # Create ncurses.h symlink expected by CPython's py_curses.h
+            COMMAND ${CMAKE_COMMAND} -E create_symlink curses.h ${NCURSES_INCLUDE_DIR}/ncurses.h
             DEPENDS local_newlib_install ${NCURSES_SRC_DIR}/configure ${NCURSES_SRC_DIR}/misc/terminfo.src
             COMMENT "Building local ncurses static library"
         )
 
         add_custom_target(local_ncurses_build DEPENDS ${NCURSES_LIB_A})
+
+    if(EXISTS "${READLINE_SRC_DIR}/configure")
+        add_custom_command(
+            OUTPUT ${READLINE_LIB_A}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${READLINE_BUILD_DIR}
+            COMMAND ${CMAKE_COMMAND} -E chdir ${READLINE_BUILD_DIR}
+                    env
+                    CC=${CMAKE_C_COMPILER}
+                    AR=${CMAKE_AR}
+                    RANLIB=${CMAKE_RANLIB}
+                    CFLAGS=-O2\ -D_POSIX_VERSION=200809L\ -I${NEWLIB_XV6_DIR}/include\ -I${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include\ -I${NCURSES_INCLUDE_DIR}
+                    LDFLAGS=-L${NCURSES_BUILD_DIR}/lib
+                    ${READLINE_SRC_DIR}/configure
+                        --host=riscv64-unknown-elf
+                        --disable-shared
+                        --with-curses
+                        --without-install
+                        bash_cv_termcap_lib=libncurses
+                        bash_cv_wcwidth_broken=no
+                        bash_cv_func_sigsetjmp=missing
+                        bash_cv_signal_vintage=posix
+                        bash_cv_posix_signals=yes
+                        bash_cv_func_strcoll_broken=no
+                        ac_cv_header_termios_h=yes
+                        ac_cv_func_tcgetattr=yes
+                        ac_cv_func_pselect=yes
+            COMMAND ${CMAKE_COMMAND} -E chdir ${READLINE_BUILD_DIR} make -j4
+            DEPENDS local_ncurses_build ${READLINE_SRC_DIR}/configure
+            COMMENT "Building local readline static library"
+        )
+
+        add_custom_target(local_readline_build DEPENDS ${READLINE_LIB_A})
+    else()
+        message(STATUS "Skipping readline build (missing submodule at ${READLINE_SRC_DIR})")
+    endif()
 
     set(NCURSES_SH_SRC "${USER_DIR}/sh.c")
     set(NCURSES_SH_OBJ "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_sh_newlib.dir/sh.c.o")
@@ -550,12 +692,15 @@ if(USE_NEWLIB)
     if(USE_LOCAL_NEWLIB)
         add_dependencies(user_programs local_newlib_install)
     endif()
-    add_dependencies(user_programs _nwclock_newlib _newlibtest_newlib _ntypesize_newlib)
+    add_dependencies(user_programs _nwclock_newlib _newlibtest_newlib _ntypesize_newlib _nmalloc_newlib)
     if(TARGET _sh_newlib)
         add_dependencies(user_programs _sh_newlib)
     endif()
     if(TARGET _nncurses_smoke_newlib)
         add_dependencies(user_programs _nncurses_smoke_newlib)
+    endif()
+    if(TARGET _python_newlib)
+        add_dependencies(user_programs _python_newlib)
     endif()
 endif()
 
