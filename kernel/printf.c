@@ -110,6 +110,20 @@ int printf(char *fmt, ...) {
             continue;
         }
         i++;
+
+        // Parse optional '-' flag (left-align) and field width
+        int left_align = 0;
+        int field_width = 0;
+        if ((fmt[i] & 0xff) == '-') {
+            left_align = 1;
+            i++;
+        }
+        while ((fmt[i] & 0xff) >= '0' && (fmt[i] & 0xff) <= '9') {
+            field_width = field_width * 10 + ((fmt[i] & 0xff) - '0');
+            i++;
+        }
+        int start_pos = outlen;
+
         c0 = fmt[i + 0] & 0xff;
         c1 = c2 = 0;
         if (c0)
@@ -168,6 +182,15 @@ int printf(char *fmt, ...) {
             // Print unknown % sequence to draw attention.
             outbuf[outlen++] = '%';
             outbuf[outlen++] = c0;
+        }
+
+        // Apply left-aligned field width padding
+        if (left_align && field_width > 0) {
+            int written = outlen - start_pos;
+            while (written < field_width) {
+                outbuf[outlen++] = ' ';
+                written++;
+            }
         }
         // Flush if buffer is nearly full
         if (outlen >= 500) {
