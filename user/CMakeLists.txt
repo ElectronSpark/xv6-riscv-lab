@@ -111,7 +111,7 @@ set(USER_PROGRAMS_C_FILES
 	${USER_DIR}/ln.c
 	${USER_DIR}/mkdir.c
 	${USER_DIR}/rm.c
-	${USER_DIR}/sh.c
+    ${USER_DIR}/sh.c
 	${USER_DIR}/stressfs.c
 	${USER_DIR}/usertests.c
 	${USER_DIR}/grind.c
@@ -217,6 +217,11 @@ if($ENV{LAB} STREQUAL "net")
         ${USER_PROGRAMS_C_FILES}
         ${USER_DIR}/nettest.c
     )
+endif()
+
+# Build shell with newlib+ncurses when available.
+if(USE_NEWLIB AND EXISTS "${CMAKE_SOURCE_DIR}/user/ncurses/configure")
+    list(REMOVE_ITEM USER_PROGRAMS_C_FILES ${USER_DIR}/sh.c)
 endif()
 
 # Modify user program output to match the .c file name without a suffix
@@ -347,6 +352,7 @@ if(USE_NEWLIB)
                     -D_FILE_OFFSET_BITS=64
                     -D__LARGE64_FILES=1
                     -nostdinc -ffreestanding
+                    -isystem ${CMAKE_SOURCE_DIR}
                     -isystem ${NEWLIB_XV6_DIR}
                     -isystem ${NEWLIB_XV6_DIR}/include
                     -isystem ${GCC_INCLUDE_DIR}
@@ -429,6 +435,63 @@ if(USE_NEWLIB)
 
         add_custom_target(local_ncurses_build DEPENDS ${NCURSES_LIB_A})
 
+    set(NCURSES_SH_SRC "${USER_DIR}/sh.c")
+    set(NCURSES_SH_OBJ "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_sh_newlib.dir/sh.c.o")
+    set(NCURSES_SH_ELF "${CMAKE_BINARY_DIR}/user/_sh")
+
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_sh_newlib.dir)
+
+    add_custom_command(
+        OUTPUT ${NCURSES_SH_OBJ}
+        COMMAND ${CMAKE_C_COMPILER}
+            -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
+            -mcmodel=medany -fno-common -fno-pie -no-pie
+            -D_LARGEFILE_SOURCE=1
+            -D_LARGEFILE64_SOURCE=1
+            -D_FILE_OFFSET_BITS=64
+            -D__LARGE64_FILES=1
+            -DUSE_NCURSES_SHELL=1
+            -nostdinc -ffreestanding
+            -isystem ${NEWLIB_XV6_DIR}
+            -isystem ${NEWLIB_XV6_DIR}/include
+            -isystem ${GCC_INCLUDE_DIR}
+            -isystem ${NEWLIB_TOP_INCLUDE_DIR}
+            -isystem ${NEWLIB_INCLUDE_DIR}
+            -isystem ${NCURSES_INCLUDE_DIR}
+            -MD -MF ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_sh_newlib.dir/sh.c.d
+            -o ${NCURSES_SH_OBJ}
+            -c ${NCURSES_SH_SRC}
+        DEPENDS ${NCURSES_SH_SRC}
+        COMMENT "Building ncurses shell object"
+    )
+
+    add_custom_command(
+        OUTPUT ${NCURSES_SH_ELF}
+        COMMAND ${CMAKE_C_COMPILER}
+            -nostdlib
+            -Wl,-z,max-page-size=4096
+            -T ${USER_DIR}/user.ld
+            -o ${NCURSES_SH_ELF}
+            ${NEWLIB_CRT0_OBJ}
+            ${NCURSES_SH_OBJ}
+            -Wl,--whole-archive
+            ${CMAKE_CURRENT_BINARY_DIR}/newlib_shim/libxv6_newlib_syscalls.a
+            -Wl,--no-whole-archive
+            ${NCURSES_LIB_A}
+            $<$<BOOL:${USE_LOCAL_NEWLIB}>:${NEWLIB_LIBC_A}>
+            $<$<BOOL:${USE_LOCAL_NEWLIB}>:${NEWLIB_LIBM_A}>
+            $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-L${TOOLCHAIN_SYSROOT}/lib>
+            $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-lc>
+            $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-lm>
+            -lgcc
+        DEPENDS ${NCURSES_SH_OBJ} xv6_newlib_syscalls local_ncurses_build $<$<BOOL:${USE_LOCAL_NEWLIB}>:local_newlib_install>
+        COMMENT "Linking ncurses shell program _sh"
+    )
+
+    add_custom_target(_sh_newlib ALL DEPENDS ${NCURSES_SH_ELF})
+    list(APPEND USER_PROGRAMS _sh)
+    set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
+
         file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_nncurses_smoke.dir)
 
         add_custom_command(
@@ -488,6 +551,9 @@ if(USE_NEWLIB)
         add_dependencies(user_programs local_newlib_install)
     endif()
     add_dependencies(user_programs _nwclock_newlib _newlibtest_newlib _ntypesize_newlib)
+    if(TARGET _sh_newlib)
+        add_dependencies(user_programs _sh_newlib)
+    endif()
     if(TARGET _nncurses_smoke_newlib)
         add_dependencies(user_programs _nncurses_smoke_newlib)
     endif()

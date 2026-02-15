@@ -11,18 +11,43 @@
 // - Foreground process group management (TIOCSPGRP)
 // - Enhanced ls with permissions, types, sizes
 
-#include "kernel/inc/types.h"
-#include "user/user.h"
+#ifdef USE_NCURSES_SHELL
+#include <stdint.h>
+#include <stddef.h>
+#include <stdarg.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/termios.h>
+#include <sys/ioctl.h>
+#include <sys/wait.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <curses.h>
+extern int getdents(int fd, void *dirp, int count);
+static int exec(const char *path, char **argv) { return execve(path, argv, 0); }
+#else
+#include "user.h"
 #include "kernel/inc/vfs/fcntl.h"
 #include "kernel/inc/vfs/stat.h"
 #include "kernel/inc/tty/termios.h"
+#endif
 
 // Linux-compatible dirent structure for getdents
 struct linux_dirent64 {
+#ifdef USE_NCURSES_SHELL
+    uint64_t d_ino;
+    int64_t d_off;
+    uint16_t d_reclen;
+    uint8_t d_type;
+#else
     uint64 d_ino;
     int64 d_off;
     uint16 d_reclen;
     uint8 d_type;
+#endif
     char d_name[];
 };
 
@@ -107,12 +132,12 @@ static char *strcat_local(char *dest, const char *src) {
 }
 
 // Simple itoa into caller buffer, returns length written.
-static int itoa(int val, char *buf, int bufsz) {
+static int itoa_local(int val, char *buf, int bufsz) {
     if (bufsz < 2)
         return 0;
     if (val < 0) {
         buf[0] = '-';
-        int n = itoa(-val, buf + 1, bufsz - 1);
+        int n = itoa_local(-val, buf + 1, bufsz - 1);
         return n + 1;
     }
     if (val == 0) {
@@ -155,9 +180,27 @@ static int history_start; // oldest entry position in ring
 // Terminal state
 static struct termios orig_termios;
 static int raw_mode;
+#ifdef USE_NCURSES_SHELL
+static int ncurses_active;
+static int ncurses_initialized;
+#endif
 
 // Current working directory (for prompt)
 static char cwd_path[512] = "/";
+
+#ifdef USE_NCURSES_SHELL
+#define errprintf(...) fprintf(stderr, __VA_ARGS__)
+#define ST_MODE(x) ((x).st_mode)
+#define ST_MODE_P(x) ((x)->st_mode)
+#define ST_NLINK_P(x) ((x)->st_nlink)
+#define ST_SIZE_P(x) ((x)->st_size)
+#else
+#define errprintf(...) fprintf(2, __VA_ARGS__)
+#define ST_MODE(x) ((x).mode)
+#define ST_MODE_P(x) ((x)->mode)
+#define ST_NLINK_P(x) ((x)->nlink)
+#define ST_SIZE_P(x) ((x)->size)
+#endif
 
 // =====================================================================
 // Environment variables
@@ -276,7 +319,7 @@ static char *expand_env_vars(const char *input) {
                 // $$ = PID
                 p++;
                 char pidbuf[16];
-                int n = itoa(getpid(), pidbuf, sizeof(pidbuf));
+                int n = itoa_local(getpid(), pidbuf, sizeof(pidbuf));
                 for (int j = 0; j < n && out < out_end; j++)
                     *out++ = pidbuf[j];
             } else if (*p == '?') {
@@ -321,6 +364,7 @@ static char *expand_env_vars(const char *input) {
 static void enable_raw_mode(void) {
     if (raw_mode)
         return;
+#ifdef USE_NCURSES_SHELL
     struct termios raw;
     if (tcgetattr(0, &orig_termios) < 0)
         return;
@@ -332,32 +376,131 @@ static void enable_raw_mode(void) {
     if (tcsetattr(0, TCSAFLUSH, &raw) < 0)
         return;
     raw_mode = 1;
+    return;
+#else
+    struct termios raw;
+    if (tcgetattr(0, &orig_termios) < 0)
+        return;
+    raw = orig_termios;
+    raw.c_lflag &= ~(ICANON | ECHO | ECHOE | ECHOK | ISIG);
+    raw.c_iflag &= ~(ICRNL | IXON);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    if (tcsetattr(0, TCSAFLUSH, &raw) < 0)
+        return;
+    raw_mode = 1;
+#endif
 }
 
 static void disable_raw_mode(void) {
     if (!raw_mode)
         return;
+#ifdef USE_NCURSES_SHELL
     tcsetattr(0, TCSAFLUSH, &orig_termios);
     raw_mode = 0;
+    return;
+#else
+    tcsetattr(0, TCSAFLUSH, &orig_termios);
+    raw_mode = 0;
+#endif
 }
 
-static void term_write(const char *s, int n) { write(1, s, n); }
+static void term_write(const char *s, int n) {
+#ifdef USE_NCURSES_SHELL
+    if (ncurses_active) {
+        for (int i = 0; i < n; i++) {
+            char ch = s[i];
+            if (ch == '\r') {
+                int y, x;
+                getyx(stdscr, y, x);
+                move(y, 0);
+            } else if (ch == '\b') {
+                int y, x;
+                getyx(stdscr, y, x);
+                if (x > 0)
+                    move(y, x - 1);
+            } else {
+                addch(ch);
+            }
+        }
+        refresh();
+        return;
+    }
+#endif
+    write(1, s, n);
+}
 
-static void term_putc(char c) { write(1, &c, 1); }
+static void term_putc(char c) { term_write(&c, 1); }
 
 static void term_cursor_left(int n) {
+#ifdef USE_NCURSES_SHELL
+    if (ncurses_active) {
+        int y, x;
+        getyx(stdscr, y, x);
+        x -= n;
+        if (x < 0)
+            x = 0;
+        move(y, x);
+        refresh();
+        return;
+    }
+#endif
     while (n-- > 0)
         term_write("\x1b[D", 3);
 }
 
 static void term_cursor_right(int n) {
+#ifdef USE_NCURSES_SHELL
+    if (ncurses_active) {
+        int y, x;
+        getyx(stdscr, y, x);
+        x += n;
+        move(y, x);
+        refresh();
+        return;
+    }
+#endif
     while (n-- > 0)
         term_write("\x1b[C", 3);
 }
 
-static void term_clear_to_eol(void) { term_write("\x1b[K", 3); }
+static void term_clear_to_eol(void) {
+#ifdef USE_NCURSES_SHELL
+    if (ncurses_active) {
+        clrtoeol();
+        refresh();
+        return;
+    }
+#endif
+    term_write("\x1b[K", 3);
+}
 
-static void term_bell(void) { term_putc('\x07'); }
+static void term_bell(void) {
+#ifdef USE_NCURSES_SHELL
+    if (ncurses_active) {
+        beep();
+        return;
+    }
+#endif
+    term_putc('\x07');
+}
+
+static void term_clear_screen(void) {
+#ifdef USE_NCURSES_SHELL
+    if (ncurses_active) {
+        clear();
+        move(0, 0);
+        refresh();
+        return;
+    }
+#endif
+    term_write("\x1b[2J\x1b[H", 7);
+}
+
+static void term_show_prompt(void) {
+    term_write(cwd_path, strlen(cwd_path));
+    term_write(" $ ", 3);
+}
 
 // =====================================================================
 // Line buffer operations
@@ -634,7 +777,7 @@ static void add_matches_from_dir(const char *dir, const char *prefix,
                                 path[dlen++] = '/';
                             strcpy(path + dlen, de->d_name);
                             struct stat st;
-                            if (stat(path, &st) == 0 && S_ISREG(st.mode))
+                            if (stat(path, &st) == 0 && S_ISREG(ST_MODE(st)))
                                 strcpy(matches[match_count++], de->d_name);
                         } else {
                             strcpy(matches[match_count++], de->d_name);
@@ -754,7 +897,7 @@ static void do_tab_completion(void) {
                 strcat_local(path, matches[0]);
             }
             struct stat st;
-            if (stat(path, &st) == 0 && S_ISDIR(st.mode))
+            if (stat(path, &st) == 0 && S_ISDIR(ST_MODE(st)))
                 line_insert_char('/');
             else
                 line_insert_char(' ');
@@ -788,7 +931,7 @@ static void do_tab_completion(void) {
         }
 
         // Re-display prompt + current line
-        fprintf(2, "%s $ ", cwd_path);
+        term_show_prompt();
         term_write(line_buf, line_len);
         if (cursor_pos < line_len)
             term_cursor_left(line_len - cursor_pos);
@@ -801,70 +944,110 @@ static void do_tab_completion(void) {
 
 static int read_char(void) {
     char c;
-    if (read(0, &c, 1) != 1)
-        return -1;
-    return (unsigned char)c;
+    for (;;) {
+        int n = read(0, &c, 1);
+        if (n == 1)
+            return (unsigned char)c;
+        // On xv6 console, raw reads can transiently return 0 (or <0) during
+        // mode transitions; keep waiting instead of treating as EOF.
+    }
 }
 
-static void handle_escape_sequence(void) {
-    int c = read_char();
-    if (c < 0)
-        return;
+#define KEY_EXT_BASE 0x100
+#define KEY_EXT_UP (KEY_EXT_BASE + 1)
+#define KEY_EXT_DOWN (KEY_EXT_BASE + 2)
+#define KEY_EXT_LEFT (KEY_EXT_BASE + 3)
+#define KEY_EXT_RIGHT (KEY_EXT_BASE + 4)
+#define KEY_EXT_HOME (KEY_EXT_BASE + 5)
+#define KEY_EXT_END (KEY_EXT_BASE + 6)
+#define KEY_EXT_DELETE (KEY_EXT_BASE + 7)
 
-    if (c == '[') {
-        c = read_char();
-        if (c < 0)
-            return;
+static int read_key(void) {
+#ifdef USE_NCURSES_SHELL
+    if (ncurses_active) {
+        int c = getch();
         switch (c) {
+        case KEY_UP:
+            return KEY_EXT_UP;
+        case KEY_DOWN:
+            return KEY_EXT_DOWN;
+        case KEY_LEFT:
+            return KEY_EXT_LEFT;
+        case KEY_RIGHT:
+            return KEY_EXT_RIGHT;
+        case KEY_HOME:
+            return KEY_EXT_HOME;
+        case KEY_END:
+            return KEY_EXT_END;
+        case KEY_DC:
+            return KEY_EXT_DELETE;
+        case KEY_BACKSPACE:
+            return 0x7f;
+        case KEY_ENTER:
+            return '\n';
+        default:
+            return c;
+        }
+    }
+#endif
+
+    int c = read_char();
+    if (c != 0x1b)
+        return c;
+
+    int c1 = read_char();
+    if (c1 < 0)
+        return 0x1b;
+    if (c1 == '[') {
+        int c2 = read_char();
+        if (c2 < 0)
+            return 0x1b;
+        switch (c2) {
         case 'A':
-            history_prev();
-            break; // Up
+            return KEY_EXT_UP;
         case 'B':
-            history_next();
-            break; // Down
+            return KEY_EXT_DOWN;
         case 'C':
-            line_move_right();
-            break; // Right
+            return KEY_EXT_RIGHT;
         case 'D':
-            line_move_left();
-            break; // Left
+            return KEY_EXT_LEFT;
         case 'H':
-            line_move_home();
-            break; // Home
+            return KEY_EXT_HOME;
         case 'F':
-            line_move_end();
-            break; // End
+            return KEY_EXT_END;
         case '3':
-            c = read_char();
-            if (c == '~')
-                line_delete_forward(); // Delete
+            if (read_char() == '~')
+                return KEY_EXT_DELETE;
             break;
         case '1':
         case '7':
-            c = read_char();
-            if (c == '~')
-                line_move_home();
+            if (read_char() == '~')
+                return KEY_EXT_HOME;
             break;
         case '4':
         case '8':
-            c = read_char();
-            if (c == '~')
-                line_move_end();
+            if (read_char() == '~')
+                return KEY_EXT_END;
             break;
         }
-    } else if (c == 'O') {
-        c = read_char();
-        if (c < 0)
-            return;
-        switch (c) {
-        case 'H':
-            line_move_home();
-            break;
-        case 'F':
-            line_move_end();
-            break;
-        }
+        return 0x1b;
     }
+    if (c1 == 'O') {
+        int c2 = read_char();
+        if (c2 == 'A')
+            return KEY_EXT_UP;
+        if (c2 == 'B')
+            return KEY_EXT_DOWN;
+        if (c2 == 'C')
+            return KEY_EXT_RIGHT;
+        if (c2 == 'D')
+            return KEY_EXT_LEFT;
+        if (c2 == 'H')
+            return KEY_EXT_HOME;
+        if (c2 == 'F')
+            return KEY_EXT_END;
+    }
+    return 0x1b;
 }
 
 // =====================================================================
@@ -875,9 +1058,10 @@ static int do_readline(char *buf, int nbuf) {
     line_clear();
     history_reset();
     enable_raw_mode();
+    term_show_prompt();
 
     while (1) {
-        int c = read_char();
+        int c = read_key();
         if (c < 0) {
             disable_raw_mode();
             return -1;
@@ -910,8 +1094,8 @@ static int do_readline(char *buf, int nbuf) {
             term_write("^C\r\n", 4);
             line_clear();
             disable_raw_mode();
-            fprintf(2, "%s $ ", cwd_path);
             enable_raw_mode();
+            term_show_prompt();
             break;
 
         case 0x15: // Ctrl+U
@@ -939,13 +1123,37 @@ static int do_readline(char *buf, int nbuf) {
             do_tab_completion();
             break;
 
-        case 0x1b: // ESC
-            handle_escape_sequence();
+        case KEY_EXT_UP:
+            history_prev();
+            break;
+
+        case KEY_EXT_DOWN:
+            history_next();
+            break;
+
+        case KEY_EXT_LEFT:
+            line_move_left();
+            break;
+
+        case KEY_EXT_RIGHT:
+            line_move_right();
+            break;
+
+        case KEY_EXT_HOME:
+            line_move_home();
+            break;
+
+        case KEY_EXT_END:
+            line_move_end();
+            break;
+
+        case KEY_EXT_DELETE:
+            line_delete_forward();
             break;
 
         case 0x0c: // Ctrl+L – clear screen
-            term_write("\x1b[2J\x1b[H", 7);
-            fprintf(2, "%s $ ", cwd_path);
+            term_clear_screen();
+            term_show_prompt();
             term_write(line_buf, line_len);
             if (cursor_pos < line_len)
                 term_cursor_left(line_len - cursor_pos);
@@ -1015,7 +1223,7 @@ static char name_indicator(mode_t m) {
 
 static void ls_print_entry(char *path, struct stat *st) {
     char perms[10];
-    format_permissions(st->mode, perms);
+    format_permissions(ST_MODE_P(st), perms);
 
     // Extract basename
     char *name;
@@ -1023,14 +1231,14 @@ static void ls_print_entry(char *path, struct stat *st) {
         ;
     name++;
 
-    char ind = name_indicator(st->mode);
+    char ind = name_indicator(ST_MODE_P(st));
 
     if (ind)
-        printf("%c%s %3u %7lu %s%c\n", mode_type_char(st->mode), perms,
-               st->nlink, st->size, name, ind);
+         printf("%c%s %3u %7lu %s%c\n", mode_type_char(ST_MODE_P(st)), perms,
+             ST_NLINK_P(st), ST_SIZE_P(st), name, ind);
     else
-        printf("%c%s %3u %7lu %s\n", mode_type_char(st->mode), perms, st->nlink,
-               st->size, name);
+         printf("%c%s %3u %7lu %s\n", mode_type_char(ST_MODE_P(st)), perms,
+             ST_NLINK_P(st), ST_SIZE_P(st), name);
 }
 
 static void builtin_ls(char *path) {
@@ -1038,16 +1246,16 @@ static void builtin_ls(char *path) {
     struct stat st;
 
     if ((fd = open(path, O_RDONLY)) < 0) {
-        fprintf(2, "ls: cannot open %s\n", path);
+        errprintf("ls: cannot open %s\n", path);
         return;
     }
     if (fstat(fd, &st) < 0) {
-        fprintf(2, "ls: cannot stat %s\n", path);
+        errprintf("ls: cannot stat %s\n", path);
         close(fd);
         return;
     }
 
-    if (!S_ISDIR(st.mode)) {
+    if (!S_ISDIR(ST_MODE(st))) {
         // Single file
         ls_print_entry(path, &st);
         close(fd);
@@ -1191,14 +1399,14 @@ void runcmd(struct cmd *cmd) {
         if (ecmd->argv[0] == 0)
             exit(1);
         exec_with_path(ecmd->argv[0], ecmd->argv);
-        fprintf(2, "exec %s failed\n", ecmd->argv[0]);
-        break;
+        errprintf("exec %s failed\n", ecmd->argv[0]);
+        exit(127);
 
     case REDIR:
         rcmd = (struct redircmd *)cmd;
         close(rcmd->fd);
         if (open(rcmd->file, rcmd->mode) < 0) {
-            fprintf(2, "open %s failed\n", rcmd->file);
+            errprintf("open %s failed\n", rcmd->file);
             exit(1);
         }
         runcmd(rcmd->cmd);
@@ -1252,7 +1460,6 @@ void runcmd(struct cmd *cmd) {
 // =====================================================================
 
 int getcmd(char *buf, int nbuf) {
-    fprintf(2, "%s $ ", cwd_path);
     memset(buf, 0, nbuf);
     int n = do_readline(buf, nbuf);
     if (n < 0)
@@ -1280,14 +1487,22 @@ int main(void) {
     env_init();
     update_cwd();
 
-    while (getcmd(buf, sizeof(buf)) >= 0) {
+#ifdef USE_NCURSES_SHELL
+    setenv("TERMINFO", "/usr/share/terminfo", 1);
+    if (getenv("TERM") == 0)
+        setenv("TERM", "xterm", 1);
+#endif
+
+    for (;;) {
+        if (getcmd(buf, sizeof(buf)) < 0)
+            continue;
         // ---- Built-in: cd ----
         if (buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' ') {
             buf[strlen(buf) - 1] = 0; // chop \n
             char *path = buf + 3;
             char *expanded = expand_env_vars(path);
             if (chdir(expanded) < 0)
-                fprintf(2, "cannot cd %s\n", expanded);
+                errprintf("cannot cd %s\n", expanded);
             else
                 update_cwd();
             continue;
@@ -1337,9 +1552,9 @@ int main(void) {
                     value++;
                 }
                 if (env_set(name, value) < 0)
-                    fprintf(2, "export: too many variables\n");
+                    errprintf("export: too many variables\n");
             } else {
-                fprintf(2, "export: usage: export VAR=value\n");
+                errprintf("export: usage: export VAR=value\n");
             }
             continue;
         }
@@ -1380,7 +1595,12 @@ int main(void) {
         if (cmd == 0)
             continue;
 
-        int pid = fork();
+        int pid;
+    #ifdef USE_NCURSES_SHELL
+        pid = vfork();
+    #else
+        pid = fork();
+    #endif
         if (pid < 0)
             panic("fork");
         if (pid == 0) {
@@ -1388,16 +1608,23 @@ int main(void) {
             runcmd(cmd);
         }
 
+    #ifndef USE_NCURSES_SHELL
         // Also set from parent side to avoid race
-        setpgid(pid, pid);
+        int pgid_ready = (setpgid(pid, pid) == 0);
 
         // Set child's process group as foreground
-        ioctl(0, TIOCSPGRP, &pid);
+        if (pgid_ready)
+            ioctl(0, TIOCSPGRP, &pid);
+    #else
+        setpgid(pid, pid);
+#endif
         wait(0);
 
+#ifndef USE_NCURSES_SHELL
         // Restore shell as foreground
         int shell_pgid = getpgid(0);
         ioctl(0, TIOCSPGRP, &shell_pgid);
+#endif
     }
 
     disable_raw_mode();
@@ -1405,7 +1632,7 @@ int main(void) {
 }
 
 void panic(char *s) {
-    fprintf(2, "%s\n", s);
+    errprintf("%s\n", s);
     exit(1);
 }
 
@@ -1536,7 +1763,7 @@ struct cmd *parsecmd(char *s) {
     cmd = parseline(&s, es);
     peek(&s, es, "");
     if (s != es) {
-        fprintf(2, "syntax error near: %s\n", s);
+        errprintf("syntax error near: %s\n", s);
         return 0;
     }
     nulterminate(cmd);
