@@ -6,6 +6,10 @@
 // Console device major and minor numbers
 #define CONSOLE_MAJOR 1
 #define CONSOLE_MINOR 1
+#define NULL_MAJOR 1
+#define NULL_MINOR 2
+#define RANDOM_MAJOR 1
+#define RANDOM_MINOR 3
 
 #define MAXPID 0x7FFFFFF0 // maximum process ID
 #define NR_THREAD 10000   // maximum number of threads

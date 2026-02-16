@@ -101,6 +101,7 @@ extern uint64 sys_setpgid(void);
 extern uint64 sys_getpgid(void);
 extern uint64 sys_setsid(void);
 extern uint64 sys_getsid(void);
+extern uint64 sys_getrandom(void);
 extern uint64 sys_mmap(void);
 extern uint64 sys_munmap(void);
 extern uint64 sys_mprotect(void);
@@ -196,6 +197,7 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_getpgid] sys_getpgid,
     [SYS_setsid] sys_setsid,
     [SYS_getsid] sys_getsid,
+    [SYS_getrandom] sys_getrandom,
     [SYS_mmap] sys_mmap,
     [SYS_munmap] sys_munmap,
     [SYS_mprotect] sys_mprotect,

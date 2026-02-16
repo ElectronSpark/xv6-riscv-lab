@@ -5,4 +5,5 @@ add_library(dev OBJECT
     blkdev.c
     bio.c
     fdt.c
+    nullrand.c
 )

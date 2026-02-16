@@ -42,6 +42,8 @@ void bunpin(struct buf *);
 // console.c
 void consoleinit(void);
 void consoledevinit(void);
+void nullranddevinit(void);
+void random_fill_bytes(void *buf, size_t count);
 void consoleintr(int);
 void consputc(int);
 void consputs(const char *, int);

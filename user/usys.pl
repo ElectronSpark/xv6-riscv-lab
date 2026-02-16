@@ -35,6 +35,7 @@ entry("mkdir");
 entry("chdir");
 entry("dup");
 entry("getpid");
+entry("getrandom");
 entry("getppid");
 entry("gettid");
 entry("exit_group");

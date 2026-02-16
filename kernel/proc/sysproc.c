@@ -254,3 +254,35 @@ uint64 sys_getsid(void) {
     argint(0, &pid);
     return session_getsid((pid_t)pid);
 }
+
+uint64 sys_getrandom(void) {
+    uint64 ubuf;
+    int len;
+
+    argaddr(0, &ubuf);
+    argint(1, &len);
+
+    if (len < 0) {
+        return -EINVAL;
+    }
+    if (len == 0) {
+        return 0;
+    }
+
+    uint8 kbuf[64];
+    int done = 0;
+    while (done < len) {
+        int chunk = len - done;
+        if (chunk > (int)sizeof(kbuf)) {
+            chunk = sizeof(kbuf);
+        }
+
+        random_fill_bytes(kbuf, chunk);
+        if (either_copyout(1, ubuf + done, kbuf, chunk) < 0) {
+            return done ? done : -EFAULT;
+        }
+        done += chunk;
+    }
+
+    return done;
+}

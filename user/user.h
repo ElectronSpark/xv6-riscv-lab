@@ -90,6 +90,7 @@ int dup(int);
 int getpid(void);
 int getppid(void);
 int gettid(void);
+int getrandom(void *buf, int len);
 int tgkill(int tgid, int tid, int sig);
 int tkill(int tid, int sig);
 void exit_group(int) __attribute__((noreturn));
