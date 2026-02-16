@@ -9,8 +9,7 @@
  *   - Parent writes to p2c[1], child reads from p2c[0]
  *   - Child writes to c2p[1], parent reads from c2p[0]
  */
-#include "kernel/inc/types.h"
-#include "kernel/inc/vfs/stat.h"
+#include "kernel/inc/uabi/stat.h"
 #include "user/user.h"
 
 int main(void) {

@@ -3,6 +3,7 @@
 #ifndef __ASSEMBLER__
 
 #include "compiler.h"
+#include "types.h"
 
 /*
  * The following inline assembly functions are RISC-V specific and should

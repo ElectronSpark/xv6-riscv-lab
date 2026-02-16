@@ -1,11 +1,7 @@
 #include "kernel/inc/param.h"
-#include "kernel/inc/types.h"
-#include "kernel/inc/vfs/stat.h"
+#include "kernel/inc/uabi/stat.h"
 #include "kernel/inc/riscv.h"
-#include "kernel/inc/vfs/fcntl.h"
-#include "kernel/inc/lock/spinlock.h"
-#include "kernel/inc/lock/mutex_types.h"
-#include "kernel/inc/vfs/xv6fs/ondisk.h"
+#include "kernel/inc/uabi/fcntl.h"
 #include "user/user.h"
 
 #define fail(msg)                                                              \

@@ -1,6 +1,5 @@
 // Test program for clone() syscall with shared resources (thread-like behavior)
-#include "kernel/inc/types.h"
-#include "kernel/inc/clone_flags.h"
+#include "kernel/inc/uabi/clone_flags.h"
 #include "user/user.h"
 
 #define STACK_SIZE (4096 * 4) // 16KB - must be >= USERSTACK_MINSZ

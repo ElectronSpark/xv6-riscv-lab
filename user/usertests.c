@@ -1,13 +1,12 @@
 #include "kernel/inc/param.h"
-#include "kernel/inc/types.h"
-#include "kernel/inc/vfs/stat.h"
+#include "kernel/inc/uabi/stat.h"
 #include "user/user.h"
 #include "kernel/inc/vfs/xv6fs/ondisk.h"
-#include "kernel/inc/vfs/fcntl.h"
+#include "kernel/inc/uabi/fcntl.h"
 #include "kernel/inc/syscall.h"
 #include "kernel/inc/mm/memlayout.h"
-#include "kernel/inc/riscv.h"
-#include "kernel/inc/signo.h"
+#include "kernel/inc/uabi/signo.h"
+#include "kernel/inc/uabi/linux_dirent64.h"
 
 //
 // Tests xv6 system calls.  usertests without arguments runs them all
@@ -1379,14 +1378,6 @@ void concreate(char *s) {
     char file[3];
     int i, pid, n, fd;
     char fa[N];
-    // Use linux_dirent64 for getdents
-    struct linux_dirent64 {
-        uint64 d_ino;
-        int64 d_off;
-        uint16 d_reclen;
-        uint8 d_type;
-        char d_name[];
-    };
     char dirent_buf[1024];
 
     file[0] = 'C';

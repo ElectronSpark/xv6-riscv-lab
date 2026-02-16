@@ -1,7 +1,6 @@
 // mmaptest.c - Test file-backed mmap
-#include "kernel/inc/types.h"
-#include "kernel/inc/vfs/stat.h"
-#include "kernel/inc/vfs/fcntl.h"
+#include "kernel/inc/uabi/stat.h"
+#include "kernel/inc/uabi/fcntl.h"
 #include "user/user.h"
 
 static char buf[512];

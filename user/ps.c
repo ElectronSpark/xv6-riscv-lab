@@ -1,4 +1,3 @@
-#include "kernel/inc/types.h"
 #include "user/user.h"
 
 static void usage(void) {

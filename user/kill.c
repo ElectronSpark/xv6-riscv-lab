@@ -1,6 +1,5 @@
-#include "kernel/inc/types.h"
-#include "kernel/inc/vfs/stat.h"
-#include "kernel/inc/signo.h"
+#include "kernel/inc/uabi/stat.h"
+#include "kernel/inc/uabi/signo.h"
 #include "user/user.h"
 
 int main(int argc, char **argv) {

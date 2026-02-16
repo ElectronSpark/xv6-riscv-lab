@@ -7,11 +7,9 @@
 //    for (i = 0; i < 40000; i++)
 //      asm volatile("");
 
-#include "kernel/inc/types.h"
-#include "kernel/inc/vfs/stat.h"
+#include "kernel/inc/uabi/stat.h"
 #include "user/user.h"
-#include "kernel/inc/vfs/xv6fs/ondisk.h"
-#include "kernel/inc/vfs/fcntl.h"
+#include "kernel/inc/uabi/fcntl.h"
 
 int main(int argc, char *argv[]) {
     int fd, i;

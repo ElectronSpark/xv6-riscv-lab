@@ -1,14 +1,14 @@
-#include "kernel/inc/types.h"
-#include "kernel/inc/vfs/stat.h"
+#include "kernel/inc/uabi/stat.h"
 #include "user/user.h"
-#include "kernel/inc/vfs/xv6fs/ondisk.h"
-#include "kernel/inc/vfs/fcntl.h"
+#include "kernel/inc/uabi/linux_dirent64.h"
+#include "kernel/inc/uabi/fcntl.h"
 
 int find(char *path, char *name) {
     char buf[512], *p;
     int fd;
     int path_length;
-    struct dirent de;
+    char dirent_buf[1024];
+    int nread;
     struct stat st;
 
     if ((fd = open(path, O_RDONLY)) < 0) {
@@ -29,27 +29,43 @@ int find(char *path, char *name) {
     }
 
     path_length = strlen(path);
+    if (path_length + 1 + NAME_MAX + 1 > sizeof(buf)) {
+        fprintf(2, "find: path too long\n");
+        close(fd);
+        return -1;
+    }
     memcpy(buf, path, path_length);
     p = buf + path_length;
     *p++ = '/';
     *p = '\0';
 
-    while (read(fd, &de, sizeof(de)) == sizeof(de)) {
-        if (de.inum == 0)
-            continue;
-        memmove(p, de.name, DIRSIZ);
-        p[DIRSIZ] = 0;
-        if (stat(buf, &st) < 0) {
-            printf("find: cannot stat %s\n", buf);
-            continue;
-        }
-        if (strcmp(p, name) == 0) {
-            printf("%s\n", buf);
-        }
-        if (S_ISDIR(st.mode) && strcmp(p, ".") && strcmp(p, "..")) {
-            find(buf, name);
+    while ((nread = getdents(fd, dirent_buf, sizeof(dirent_buf))) > 0) {
+        int pos = 0;
+        while (pos < nread) {
+            struct linux_dirent64 *de =
+                (struct linux_dirent64 *)(dirent_buf + pos);
+            if (de->d_ino == 0) {
+                pos += de->d_reclen;
+                continue;
+            }
+            strcpy(p, de->d_name);
+            if (stat(buf, &st) < 0) {
+                printf("find: cannot stat %s\n", buf);
+                pos += de->d_reclen;
+                continue;
+            }
+            if (strcmp(de->d_name, name) == 0) {
+                printf("%s\n", buf);
+            }
+            if (S_ISDIR(st.mode) && strcmp(de->d_name, ".") != 0 &&
+                strcmp(de->d_name, "..") != 0) {
+                find(buf, name);
+            }
+            pos += de->d_reclen;
         }
     }
+
+    close(fd);
 
     return 0;
 }

@@ -30,6 +30,7 @@
 #include "dev/cdev.h"
 #include "timer/timer.h"
 #include "signal.h"
+#include "uabi/linux_dirent64.h"
 
 // Forward declaration for syscall argument helpers
 void argint(int n, int *ip);
@@ -1297,25 +1298,6 @@ uint64 sys_vfs_connect(void) {
 /******************************************************************************
  * Directory Operations - getdents
  ******************************************************************************/
-
-// Linux-compatible dirent structure
-struct linux_dirent64 {
-    uint64 d_ino;    // Inode number
-    int64 d_off;     // Offset to next structure
-    uint16 d_reclen; // Size of this dirent
-    uint8 d_type;    // File type
-    char d_name[];   // Filename (null-terminated)
-};
-
-// File type constants
-#define DT_UNKNOWN 0
-#define DT_FIFO 1
-#define DT_CHR 2
-#define DT_DIR 4
-#define DT_BLK 6
-#define DT_REG 8
-#define DT_LNK 10
-#define DT_SOCK 12
 
 static uint8 __mode_to_dtype(mode_t mode) {
     if (S_ISREG(mode))

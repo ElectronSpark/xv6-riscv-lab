@@ -2,7 +2,6 @@
 // tests for copy-on-write fork() assignment.
 //
 
-#include "kernel/inc/types.h"
 #include "kernel/inc/mm/memlayout.h"
 #include "user/user.h"
 

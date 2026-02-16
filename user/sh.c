@@ -4,17 +4,8 @@
 #include "user/user.h"
 #include "kernel/inc/vfs/fcntl.h"
 #include "kernel/inc/vfs/stat.h"
+#include "kernel/inc/uabi/linux_dirent64.h"
 
-// Linux-compatible dirent structure for getdents (used by ls)
-struct linux_dirent64 {
-    uint64 d_ino;    // Inode number
-    int64 d_off;     // Offset to next structure
-    uint16 d_reclen; // Size of this dirent
-    uint8 d_type;    // File type
-    char d_name[];   // Filename (null-terminated)
-};
-
-#define NAME_MAX 255
 #define LS_FMT_WIDTH 14 // Display width for formatting
 
 // Parsed command representation
