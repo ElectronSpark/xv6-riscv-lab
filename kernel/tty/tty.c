@@ -27,6 +27,7 @@
 #include "mm/vm.h"
 #include "mm/slab.h"
 #include "vfs/pipe.h"
+#include "vfs/poll.h"
 #include "tty/tty.h"
 #include "tty/session.h"
 #include "proc/pgroup.h"
@@ -432,6 +433,49 @@ ssize_t tty_read(struct tty *tty, char *buf, size_t count, bool user) {
     spin_unlock(&tty->lock);
 
     return total;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Poll (check readiness without blocking)                           */
+/* ------------------------------------------------------------------ */
+
+/*
+ * tty_poll - check whether the terminal has data available
+ *
+ * In canonical mode, checks the input pipe for buffered line data.
+ * In raw mode, checks the direct ring buffer.
+ * Output (POLLOUT) is always reported as ready since UART writes
+ * never block the caller.
+ *
+ * Returns the subset of @events that are currently ready.
+ */
+int tty_poll(struct tty *tty, short events) {
+    short revents = 0;
+
+    spin_lock(&tty->lock);
+
+    if (events & (POLLIN | POLLRDNORM)) {
+        if (L_CANON(tty)) {
+            /* Canonical mode: data ready if input pipe has bytes */
+            struct pipe *pi = tty->input_pipe;
+            uint nwrite = smp_load_acquire(&pi->nwrite);
+            uint nread  = smp_load_acquire(&pi->nread);
+            if ((nwrite - nread) > 0)
+                revents |= (events & (POLLIN | POLLRDNORM));
+        } else {
+            /* Raw mode: data ready if ring buffer is non-empty */
+            if (tty->raw_r != tty->raw_w)
+                revents |= (events & (POLLIN | POLLRDNORM));
+        }
+    }
+
+    if (events & (POLLOUT | POLLWRNORM)) {
+        /* Output to UART is always accepted */
+        revents |= (events & (POLLOUT | POLLWRNORM));
+    }
+
+    spin_unlock(&tty->lock);
+    return revents;
 }
 
 /* ------------------------------------------------------------------ */

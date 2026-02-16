@@ -20,6 +20,7 @@
 #include "vfs/file.h"
 #include "vfs/vfs_types.h"
 #include "vfs/fcntl.h"
+#include "vfs/poll.h"
 #include <mm/vm.h>
 #include "mm/slab.h"
 #include "proc/sched.h"
@@ -334,12 +335,49 @@ static int __pipe_file_release(struct vfs_inode *inode, struct vfs_file *file) {
     return 0;
 }
 
+/*
+ * __pipe_file_poll - check pipe readiness for I/O
+ *
+ * Checks the pipe's nread/nwrite counters and end-of-pipe flags
+ * without blocking.  Returns the subset of @events that are ready.
+ */
+static int __pipe_file_poll(struct vfs_file *file, short events) {
+    struct pipe *pi = file->pipe;
+    short revents = 0;
+
+    if (pi == NULL)
+        return POLLNVAL;
+
+    uint nwrite = smp_load_acquire(&pi->nwrite);
+    uint nread  = smp_load_acquire(&pi->nread);
+    size_t readable = (size_t)(nwrite - nread);
+    size_t writable = PIPESIZE - readable;
+
+    if (events & (POLLIN | POLLRDNORM)) {
+        if (readable > 0 || !PIPE_WRITABLE(pi))
+            revents |= (events & (POLLIN | POLLRDNORM));
+    }
+
+    if (events & (POLLOUT | POLLWRNORM)) {
+        if (writable > 0 && PIPE_READABLE(pi))
+            revents |= (events & (POLLOUT | POLLWRNORM));
+    }
+
+    if (!PIPE_READABLE(pi))
+        revents |= POLLERR;
+    if (!PIPE_WRITABLE(pi))
+        revents |= POLLHUP;
+
+    return revents;
+}
+
 static struct vfs_file_ops pipe_file_ops = {
     .read = __pipe_file_read,
     .write = __pipe_file_write,
     .llseek = NULL,
     .release = __pipe_file_release,
     .fsync = NULL,
+    .poll = __pipe_file_poll,
     .fault = NULL,
 };
 

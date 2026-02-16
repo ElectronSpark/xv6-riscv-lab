@@ -288,12 +288,24 @@ static int console_dev_ioctl(device_t *dev, uint64 cmd, uint64 arg) {
     return tty_ioctl(console_tty, cmd, arg);
 }
 
+//
+// Console poll - check whether console has data ready for reading / writing.
+// Delegates to tty_poll which inspects raw_buf (raw mode) or input_pipe
+// (canonical mode).
+//
+static int consolepoll(cdev_t *cdev, short events) {
+    if (console_tty == NULL)
+        return 0;
+    return tty_poll(console_tty, events);
+}
+
 static cdev_ops_t console_cdev_ops = {
     .read = consoleread,
     .write = consolewrite,
     .open = consoleopen,
     .release = consoleclose,
     .ioctl = consoleioctl,
+    .poll = consolepoll,
 };
 
 static cdev_t console_cdev = {

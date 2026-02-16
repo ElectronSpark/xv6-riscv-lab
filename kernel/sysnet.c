@@ -110,6 +110,28 @@ int sockwrite(struct sock *si, uint64 addr, int n) {
     return n;
 }
 
+/*
+ * sockpoll - check whether a legacy UDP socket has data ready
+ *
+ * Returns the subset of @events that are currently satisfied.
+ */
+int sockpoll(struct sock *si, short events) {
+    short revents = 0;
+
+    spin_lock(&si->lock);
+    if ((events & (0x0001 | 0x0040)) && !mbufq_empty(&si->rxq)) {
+        revents |= (events & (0x0001 | 0x0040)); /* POLLIN | POLLRDNORM */
+    }
+    spin_unlock(&si->lock);
+
+    /* UDP write is always possible (fire and forget) */
+    if (events & (0x0004 | 0x0100)) {
+        revents |= (events & (0x0004 | 0x0100)); /* POLLOUT | POLLWRNORM */
+    }
+
+    return revents;
+}
+
 // called by protocol handler layer to deliver UDP packets
 void sockrecvudp(struct mbuf *m, uint32 raddr, uint16 lport, uint16 rport) {
     //

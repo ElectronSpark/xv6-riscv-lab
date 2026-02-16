@@ -191,6 +191,7 @@ void sockinit(void);
 void sockclose(struct sock *);
 int sockread(struct sock *, uint64, int);
 int sockwrite(struct sock *, uint64, int);
+int sockpoll(struct sock *, short);
 void sockrecvudp(struct mbuf *, uint32, uint16, uint16);
 
 #endif /* __KERNEL_DEFS_H */

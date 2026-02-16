@@ -28,6 +28,7 @@
 #include <vfs/vfs_types.h>
 #include <vfs/file.h>
 #include <vfs/fcntl.h>
+#include <vfs/poll.h>
 
 #include "lwip/opt.h"
 #include "lwip/api.h"
@@ -35,6 +36,8 @@
 #include "lwip/ip_addr.h"
 #include "lwip/tcp.h"
 #include "lwip/err.h"
+#include "lwip/sys.h"
+#include "arch/sys_arch.h"
 
 /* From irq/syscall.c — argument fetching */
 extern void argint(int n, int *ip);
@@ -320,6 +323,59 @@ static int sock_file_release(struct vfs_inode *inode, struct vfs_file *file)
     return 0;
 }
 
+/*
+ * sock_file_poll - check whether a lwIP socket is ready for I/O
+ *
+ * Checks for buffered data (lastbuf) and the netconn receive mailbox
+ * to determine POLLIN readiness.  For TCP listening sockets, checks
+ * the accept mailbox.  POLLOUT is always reported as ready (lwIP
+ * netconn_write / netconn_send will handle back-pressure internally).
+ */
+static int sock_file_poll(struct vfs_file *file, short events)
+{
+    struct lwip_sock *sk = (struct lwip_sock *)file->private_data;
+    short revents = 0;
+
+    if (sk == NULL || sk->conn == NULL)
+        return POLLNVAL;
+
+    struct netconn *conn = sk->conn;
+
+    if (events & (POLLIN | POLLRDNORM)) {
+        /* Buffered data from a partial previous read? */
+        if (sk->lastbuf != NULL) {
+            revents |= (events & (POLLIN | POLLRDNORM));
+        } else if (conn->state == NETCONN_LISTEN) {
+#if LWIP_TCP
+            /* Listening socket: check acceptmbox */
+            if (sys_mbox_valid(&conn->acceptmbox) &&
+                conn->acceptmbox.count > 0)
+                revents |= (events & (POLLIN | POLLRDNORM));
+#endif
+        } else {
+            /* Data socket: check recvmbox */
+            if (sys_mbox_valid(&conn->recvmbox) &&
+                conn->recvmbox.count > 0)
+                revents |= (events & (POLLIN | POLLRDNORM));
+        }
+
+        /* Connection closed / error on the receive side */
+        if (conn->pending_err != ERR_OK) {
+            revents |= POLLERR;
+        }
+        if (conn->flags & NETCONN_FLAG_MBOXCLOSED) {
+            revents |= POLLHUP;
+        }
+    }
+
+    if (events & (POLLOUT | POLLWRNORM)) {
+        /* Writing is generally always possible (lwIP buffers internally) */
+        revents |= (events & (POLLOUT | POLLWRNORM));
+    }
+
+    return revents;
+}
+
 static struct vfs_file_ops lwip_socket_file_ops = {
     .read    = sock_file_read,
     .write   = sock_file_write,
@@ -327,6 +383,7 @@ static struct vfs_file_ops lwip_socket_file_ops = {
     .release = sock_file_release,
     .fsync   = NULL,
     .fflush  = NULL,
+    .poll    = sock_file_poll,
     .fault   = NULL,
 };
 

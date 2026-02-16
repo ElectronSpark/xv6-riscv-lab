@@ -388,6 +388,16 @@ struct vfs_file_ops {
     int (*fflush)(struct vfs_file *file); // Flush all dirty data
 
     /*
+     * poll - check whether the file is ready for I/O
+     * @file:   the open file
+     * @events: requested poll events (POLLIN, POLLOUT, ...)
+     *
+     * Returns the subset of @events that are currently satisfied.
+     * If NULL, the VFS poll code falls back to "always ready".
+     */
+    int (*poll)(struct vfs_file *file, short events);
+
+    /*
      * fault - Demand-page a single page for a file-backed mapping
      * @file:  the file being mapped
      * @vma:   the faulting VMA (start/end/flags/pgoff already set)

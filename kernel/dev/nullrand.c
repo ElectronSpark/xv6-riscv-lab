@@ -115,6 +115,7 @@ static cdev_t null_cdev = {
             .open = null_open,
             .release = null_release,
             .ioctl = NULL,
+            .poll = NULL, /* /dev/null is always ready — handled by fallback */
         },
 };
 
@@ -133,6 +134,7 @@ static cdev_t random_cdev = {
             .open = random_open,
             .release = random_release,
             .ioctl = NULL,
+            .poll = NULL, /* /dev/random is always ready — handled by fallback */
         },
 };
 

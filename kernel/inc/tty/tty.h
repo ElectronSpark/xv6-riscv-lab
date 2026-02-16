@@ -16,6 +16,7 @@ void tty_unref(struct tty *tty);
 
 ssize_t tty_input(struct tty *tty, const char *buf, size_t count);
 ssize_t tty_read(struct tty *tty, char *buf, size_t count, bool user);
+int tty_poll(struct tty *tty, short events);
 ssize_t tty_write(struct tty *tty, const char *buf, size_t count, bool user);
 ssize_t tty_output(struct tty *tty, char *buf, size_t count);
 int tty_ioctl(struct tty *tty, uint64 cmd, uint64 arg);

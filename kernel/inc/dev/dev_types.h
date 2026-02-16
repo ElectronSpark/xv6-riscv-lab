@@ -49,6 +49,7 @@ typedef struct cdev_ops {
     int (*open)(cdev_t *cdev);
     int (*release)(cdev_t *cdev);
     int (*ioctl)(cdev_t *cdev, uint64 cmd, uint64 arg);
+    int (*poll)(cdev_t *cdev, short events); // returns revents bitmask
 } cdev_ops_t;
 
 typedef struct cdev {
