@@ -49,7 +49,7 @@ int ustack_alloc(vm_t *vm, uint64 *sp) {
 int exec(char *path, char **argv) {
     char *s, *last;
     int i, off;
-    uint64 argc, heap_start = 0, sp, ustack[MAXARG];
+    uint64 argc, heap_start = 0, sp, ustack[MAXARG + 3];
     uint64 stackbase = USTACKTOP - USERSTACK * PGSIZE;
     struct elfhdr elf;
     struct vfs_file *file = NULL;
@@ -130,14 +130,15 @@ int exec(char *path, char **argv) {
             goto bad_locked;
         if (ph.vaddr + ph.memsz < ph.vaddr)
             goto bad_locked;
-        if (ph.vaddr % PGSIZE != 0)
-            goto bad_locked;
-        if (ph.filesz > 0 && ph.off % PGSIZE != 0)
+        // This kernel assumes page-aligned LOAD segments.
+        // Non-page-aligned ELF segments are not supported.
+        if ((ph.vaddr & (PGSIZE - 1)) != 0 || (ph.off & (PGSIZE - 1)) != 0)
             goto bad_locked;
 
         uint64 va = ph.vaddr;
         uint64 filesz = ph.filesz;
         uint64 memsz = ph.memsz;
+        uint64 file_off = ph.off;
         uint64 vm_flags = flags2vmperm(ph.flags) | VMA_FLAG_USER;
         uint64 total_end = PGROUNDUP(va + memsz);
         // End of full pages entirely covered by file data
@@ -148,8 +149,8 @@ int exec(char *path, char **argv) {
         // file's page cache on the first instruction/load/store fault.
         if (file_pg_end > va) {
             ret = vm_mmap_region_locked(tmp_vm, va, file_pg_end - va,
-                                        vm_flags | VMA_FLAG_FILE, file, ph.off,
-                                        NULL);
+                                        vm_flags | VMA_FLAG_FILE, file,
+                                        file_off, NULL);
             if (ret != 0)
                 goto bad_locked;
         }
@@ -168,7 +169,7 @@ int exec(char *path, char **argv) {
                 goto bad_locked;
             memset(pa, 0, PGSIZE);
 
-            loff_t foff = (loff_t)(ph.off + (file_pg_end - va));
+            loff_t foff = (loff_t)(file_off + (file_pg_end - va));
             if (vfs_filelseek(file, foff, SEEK_SET) != foff) {
                 kfree(pa);
                 goto bad_locked;
@@ -267,20 +268,30 @@ int exec(char *path, char **argv) {
             goto bad;
         ustack[argc] = sp;
     }
-    ustack[argc] = 0;
+    // Build startup stack frame expected by newlib/crt0:
+    //   sp[0] = argc
+    //   sp[1..argc] = argv pointers
+    //   sp[argc+1] = NULL        (argv terminator)
+    //   sp[argc+2] = NULL        (envp[0] = NULL)
+    for (i = (int)argc - 1; i >= 0; i--) {
+        ustack[i + 1] = ustack[i];
+    }
+    ustack[0] = argc;
+    ustack[argc + 1] = 0;
+    ustack[argc + 2] = 0;
 
-    // push the array of argv[] pointers.
-    sp -= (argc + 1) * sizeof(uint64);
+    // Push argc + argv[] (+ NULL + envp NULL) onto user stack.
+    sp -= (argc + 3) * sizeof(uint64);
     sp -= sp % 16;
     if (sp < stackbase)
         goto bad;
-    if (vm_copyout(tmp_vm, sp, (char *)ustack, (argc + 1) * sizeof(uint64)) < 0)
+    if (vm_copyout(tmp_vm, sp, (char *)ustack, (argc + 3) * sizeof(uint64)) < 0)
         goto bad;
 
     // arguments to user main(argc, argv)
     // argc is returned via the system call return
     // value, which goes in a0.
-    p->trapframe->trapframe.a1 = sp;
+    p->trapframe->trapframe.a1 = sp + sizeof(uint64);
 
     // Save program name for debugging.
     for (last = s = path; *s; s++)
@@ -294,6 +305,9 @@ int exec(char *path, char **argv) {
     p->vm = tmp_vm;                           // Set the new VM
     p->trapframe->trapframe.sepc = elf.entry; // initial program counter = main
     p->trapframe->trapframe.sp = sp;          // initial stack pointer
+
+    // Close descriptors marked close-on-exec now that exec is committed.
+    vfs_fdtable_close_on_exec(p->fdtable);
 
     // Wake vfork parent - we've replaced our address space so parent can resume
     vfork_done(p);

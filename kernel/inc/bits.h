@@ -532,19 +532,18 @@ static inline int bits_next_bit_set(uint64 bits, int last) {
  */
 #define __bits_bitmap_helpers(__NAME, __BITS, __SHIFT, __SETTER, __CLEARER,    \
                               __TESTER)                                        \
-    __bits_bitmap_action(__NAME, test_and_set, __BITS, __SHIFT, __SETTER)      \
-        __bits_bitmap_action(__NAME, test_and_clear, __BITS, __SHIFT,          \
-                             __CLEARER)                                        \
-            __bits_bitmap_action(__NAME, test, __BITS, __SHIFT, __TESTER)
+    __bits_bitmap_action(__NAME, test_and_set, __BITS, __SHIFT, __SETTER);     \
+    __bits_bitmap_action(__NAME, test_and_clear, __BITS, __SHIFT, __CLEARER);  \
+    __bits_bitmap_action(__NAME, test, __BITS, __SHIFT, __TESTER);
 
 /* Instantiate bitmap helpers for 8, 16, 32, and 64-bit storage units */
 __bits_bitmap_helpers(bit8, 8, 3, __bit_bitmap_setter, __bit_bitmap_clearer,
-                      __bit_bitmap_tester)
-    __bits_bitmap_helpers(bit16, 16, 4, __bit_bitmap_setter,
-                          __bit_bitmap_clearer, __bit_bitmap_tester)
-        __bits_bitmap_helpers(bit32, 32, 5, __bit_bitmap_setter,
-                              __bit_bitmap_clearer, __bit_bitmap_tester)
-            __bits_bitmap_helpers(bit64, 64, 6, __bit_bitmap_setter,
-                                  __bit_bitmap_clearer, __bit_bitmap_tester)
+                      __bit_bitmap_tester);
+__bits_bitmap_helpers(bit16, 16, 4, __bit_bitmap_setter, __bit_bitmap_clearer,
+                      __bit_bitmap_tester);
+__bits_bitmap_helpers(bit32, 32, 5, __bit_bitmap_setter, __bit_bitmap_clearer,
+                      __bit_bitmap_tester);
+__bits_bitmap_helpers(bit64, 64, 6, __bit_bitmap_setter, __bit_bitmap_clearer,
+                      __bit_bitmap_tester);
 
 #endif // KERNEL_INC_BITS_H

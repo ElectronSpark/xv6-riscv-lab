@@ -45,6 +45,12 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
 loff_t vfs_filelseek(struct vfs_file *file, loff_t offset, int whence);
 int truncate(struct vfs_file *file, loff_t length);
 
+// Allocate a custom vfs_file (with caller-supplied ops + private_data),
+// attach it to the current process's fd table, and return the fd number.
+// Returns negative errno on failure.
+int vfs_custom_fd_alloc(struct vfs_file_ops *ops, void *private_data,
+                        int flags);
+
 // VFS Pipe allocation
 int vfs_pipealloc(struct vfs_file **rf, struct vfs_file **wf);
 
@@ -60,7 +66,12 @@ struct vfs_fdtable *vfs_fdtable_init(void);
 struct vfs_fdtable *vfs_fdtable_clone(struct vfs_fdtable *src, int clone_flags);
 void vfs_fdtable_put(struct vfs_fdtable *fdtable);
 int vfs_fdtable_alloc_fd(struct vfs_fdtable *fdtable, struct vfs_file *file);
+int vfs_fdtable_alloc_fd_from(struct vfs_fdtable *fdtable,
+                              struct vfs_file *file, int start_fd);
 struct vfs_file *vfs_fdtable_get_file(struct vfs_fdtable *fdtable, int fd);
 struct vfs_file *vfs_fdtable_dealloc_fd(struct vfs_fdtable *fdtable, int fd);
+int vfs_fdtable_get_fdflags(struct vfs_fdtable *fdtable, int fd);
+int vfs_fdtable_set_fdflags(struct vfs_fdtable *fdtable, int fd, int flags);
+void vfs_fdtable_close_on_exec(struct vfs_fdtable *fdtable);
 
 #endif // KERNEL_VIRTUAL_FILE_SYSTEM_FILE_H
