@@ -87,7 +87,7 @@ void __do_timer_tick(void) {
     bool was_cleared =
         __atomic_test_and_set(&__sched_tick_clear, __ATOMIC_ACQUIRE);
     if (!was_cleared) {
-        timer_tick(&__sched_timer, get_jiffs());
+        timer_tick(&__sched_timer, r_time());
     }
 }
 
@@ -99,11 +99,11 @@ static void __sched_timer_callback(struct timer_node *tn) {
     }
 }
 
-int sched_timer_set(struct timer_node *tn, uint64 ticks) {
+int sched_timer_set(struct timer_node *tn, uint64 ms) {
     if (tn == NULL) {
         return -EINVAL; // Invalid timer node
     }
-    uint64 expires = get_jiffs() + ticks;
+    uint64 expires = r_time() + MS_TO_RAWTICKS(ms);
     timer_node_init(tn, expires, __sched_timer_callback, current,
                     TIMER_DEFAULT_RETRY_LIMIT);
     int ret = timer_add(&__sched_timer, tn);
@@ -131,13 +131,14 @@ void sleep_ms(uint64 ms) {
 
     // Set state to INTERRUPTIBLE so scheduler_yield dequeues us.
     __thread_state_set(p, THREAD_INTERRUPTIBLE);
-    uint64 before = get_jiffs();
     int ret = sched_timer_set(&tn, ms);
     if (ret != 0) {
+        // Timer already expired or other transient failure — just yield
+        // the CPU once instead of sleeping, which is the best approximation
+        // for a very short sleep.
         __thread_state_set(p, THREAD_RUNNING);
         intr_restore(intr);
-        printf("thread %s: ", p ? p->name : "unknown");
-        printf("Failed to set timer - ret=%d, before=%lu\n", ret, before);
+        scheduler_yield();
         return;
     }
 
@@ -179,10 +180,10 @@ int sched_timer_add_deadline(void (*callback)(void *), void *data,
     return 0;
 }
 
-int sched_timer_add(void (*callback)(void *), void *data, uint64 ticks) {
+int sched_timer_add(void (*callback)(void *), void *data, uint64 ms) {
     if (callback == NULL) {
         return -EINVAL; // Invalid callback
     }
-    uint64 deadline = get_jiffs() + ticks;
+    uint64 deadline = r_time() + MS_TO_RAWTICKS(ms);
     return sched_timer_add_deadline(callback, data, deadline);
 }

@@ -121,6 +121,7 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/mount.c
     ${USER_DIR}/umount.c
     ${USER_DIR}/mknod.c
+    ${USER_DIR}/wallclock.c
 )
 
 set(USER_PROGRAMS_C_FILES 
