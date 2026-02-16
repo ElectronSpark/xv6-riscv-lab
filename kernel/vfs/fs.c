@@ -461,6 +461,7 @@ void vfs_init(void) {
     // Initialize filesystem types (registers them with VFS)
     tmpfs_init();
     xv6fs_init();
+    ext4fs_init();
 
     // Mount filesystems
     tmpfs_mount_root();

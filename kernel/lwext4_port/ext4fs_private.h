@@ -126,6 +126,16 @@ static inline int vfs_mode_to_ext4_filetype(mode_t mode)
 
 void ext4fs_init(void);
 
+/*
+ * Filesystem-wide lock.  Serialises all lwext4 operations on this mount.
+ * Must be held around every sequence of ext4_block_get / ext4_bcache / etc.
+ * calls.  This replaces the per-operation EXT4_MP_LOCK used in vanilla lwext4.
+ *
+ * Lock ordering:  VFS inode lock  →  ext4fs_lock  →  xv6 buffer cache
+ */
+static inline void ext4fs_lock(struct ext4fs_superblock *esb)   { mutex_lock(&esb->lock); }
+static inline void ext4fs_unlock(struct ext4fs_superblock *esb) { mutex_unlock(&esb->lock); }
+
 /* Set up the lwext4 blockdev interface for a mounted filesystem */
 void ext4fs_blockdev_setup(struct ext4fs_superblock *esb);
 

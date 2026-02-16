@@ -98,16 +98,20 @@ struct vfs_inode *ext4fs_alloc_inode(struct vfs_superblock *sb)
     struct ext4fs_superblock *esb = ext4fs_get_esb(sb);
     struct ext4_fs *fs = &esb->ext4fs;
 
+    ext4fs_lock(esb);
     struct ext4_inode_ref ref;
     int r = ext4_fs_alloc_inode(fs, &ref, EXT4_DE_REG_FILE);
-    if (r != EOK)
+    if (r != EOK) {
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
+    }
 
     /* Allocate VFS in-memory wrapper */
     struct ext4fs_inode *ei = slab_alloc(&ext4fs_inode_cache);
     if (ei == NULL) {
         ext4_fs_free_inode(&ref);
         ext4_fs_put_inode_ref(&ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-ENOMEM);
     }
     memset(ei, 0, sizeof(*ei));
@@ -117,6 +121,7 @@ struct vfs_inode *ext4fs_alloc_inode(struct vfs_superblock *sb)
     ei->vfs_inode.ref_count = 1;
 
     ext4_fs_put_inode_ref(&ref);
+    ext4fs_unlock(esb);
     return &ei->vfs_inode;
 }
 
@@ -131,21 +136,26 @@ struct vfs_inode *ext4fs_get_inode(struct vfs_superblock *sb, uint64 ino)
     struct ext4fs_superblock *esb = ext4fs_get_esb(sb);
     struct ext4_fs *fs = &esb->ext4fs;
 
+    ext4fs_lock(esb);
     struct ext4_inode_ref ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)ino, &ref);
-    if (r != EOK)
+    if (r != EOK) {
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
+    }
 
     /* Check the inode is allocated (links > 0 or mode != 0) */
     uint32_t mode = ext4_inode_get_mode(&fs->sb, ref.inode);
     if (mode == 0) {
         ext4_fs_put_inode_ref(&ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-ENOENT);
     }
 
     struct ext4fs_inode *ei = slab_alloc(&ext4fs_inode_cache);
     if (ei == NULL) {
         ext4_fs_put_inode_ref(&ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-ENOMEM);
     }
     memset(ei, 0, sizeof(*ei));
@@ -154,6 +164,7 @@ struct vfs_inode *ext4fs_get_inode(struct vfs_superblock *sb, uint64 ino)
     ext4fs_fill_vfs_inode(&ei->vfs_inode, &ref, &fs->sb);
 
     ext4_fs_put_inode_ref(&ref);
+    ext4fs_unlock(esb);
     return &ei->vfs_inode;
 }
 
@@ -168,17 +179,23 @@ static int ext4fs_sync_fs(struct vfs_superblock *sb, int wait)
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(sb);
 
+    ext4fs_lock(esb);
     /* Flush the ext4 block cache to disk */
     int r = ext4_block_cache_flush(&esb->bdev);
-    if (r != EOK)
+    if (r != EOK) {
+        ext4fs_unlock(esb);
         return -r;
+    }
 
     /* Write the superblock if dirty */
     if (esb->ext4fs.sb.magic == EXT4_SUPERBLOCK_MAGIC) {
         r = ext4_sb_write(&esb->bdev, &esb->ext4fs.sb);
-        if (r != EOK)
+        if (r != EOK) {
+            ext4fs_unlock(esb);
             return -r;
+        }
     }
+    ext4fs_unlock(esb);
 
     sb->dirty = 0;
     return 0;
@@ -218,7 +235,9 @@ static int ext4fs_begin_transaction(struct vfs_superblock *sb)
 {
     struct ext4fs_superblock *esb = ext4fs_get_esb(sb);
     /* Enable write-back mode for batch of metadata changes */
+    ext4fs_lock(esb);
     ext4_block_cache_write_back(&esb->bdev, 1);
+    ext4fs_unlock(esb);
     return 0;
 }
 
@@ -226,7 +245,9 @@ static int ext4fs_end_transaction(struct vfs_superblock *sb)
 {
     struct ext4fs_superblock *esb = ext4fs_get_esb(sb);
     /* Disable write-back mode → triggers flush of dirty blocks */
+    ext4fs_lock(esb);
     ext4_block_cache_write_back(&esb->bdev, 0);
+    ext4fs_unlock(esb);
     return 0;
 }
 

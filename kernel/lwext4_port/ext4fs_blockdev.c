@@ -104,25 +104,12 @@ static int ext4fs_blockdev_bwrite(struct ext4_blockdev *bdev, const void *buf,
 }
 
 /*
- * Lock/unlock callbacks protect the ext4 block cache (RB-tree, LRU list)
- * which has no internal synchronisation.  Must be a sleeping lock because
- * bread() acquires buffer mutexes internally.
+ * Lock/unlock callbacks: disabled.  Serialisation is now done at the VFS
+ * operation level via ext4fs_lock()/ext4fs_unlock(), which brackets entire
+ * operation sequences rather than individual bread/bwrite calls.
+ * The bdif-level lock only bracketed bread/bwrite but did NOT protect the
+ * bcache RB-tree, so concurrent callers could corrupt it.
  */
-static int ext4fs_blockdev_lock(struct ext4_blockdev *bdev)
-{
-    struct ext4fs_superblock *esb =
-        container_of(bdev, struct ext4fs_superblock, bdev);
-    mutex_lock(&esb->lock);
-    return EOK;
-}
-
-static int ext4fs_blockdev_unlock(struct ext4_blockdev *bdev)
-{
-    struct ext4fs_superblock *esb =
-        container_of(bdev, struct ext4fs_superblock, bdev);
-    mutex_unlock(&esb->lock);
-    return EOK;
-}
 
 /******************************************************************************
  * Initialise the ext4_blockdev / ext4_blockdev_iface for a mount
@@ -144,8 +131,8 @@ void ext4fs_blockdev_setup(struct ext4fs_superblock *esb)
     iface->bread  = ext4fs_blockdev_bread;
     iface->bwrite = ext4fs_blockdev_bwrite;
     iface->close  = ext4fs_blockdev_close;
-    iface->lock   = ext4fs_blockdev_lock;
-    iface->unlock = ext4fs_blockdev_unlock;
+    iface->lock   = NULL;
+    iface->unlock = NULL;
 
     iface->ph_bsize  = PH_BSIZE;
     iface->ph_bcnt   = EXT4FS_DEFAULT_PH_BCNT;

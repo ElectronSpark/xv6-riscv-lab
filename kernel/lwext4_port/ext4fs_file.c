@@ -50,9 +50,11 @@ ssize_t ext4fs_file_read(struct vfs_file *file, char *buf, size_t count,
 
     /* Lock inode to read size safely and prevent truncation during read */
     vfs_ilock(inode);
+    ext4fs_lock(esb);
 
     loff_t pos = file->f_pos;
     if (pos >= inode->size) {
+        ext4fs_unlock(esb);
         vfs_iunlock(inode);
         return 0; /* EOF */
     }
@@ -62,6 +64,7 @@ ssize_t ext4fs_file_read(struct vfs_file *file, char *buf, size_t count,
     struct ext4_inode_ref ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
     if (r != EOK) {
+        ext4fs_unlock(esb);
         vfs_iunlock(inode);
         return -r;
     }
@@ -132,6 +135,7 @@ ssize_t ext4fs_file_read(struct vfs_file *file, char *buf, size_t count,
 
 out:
     ext4_fs_put_inode_ref(&ref);
+    ext4fs_unlock(esb);
     vfs_iunlock(inode);
     return (ssize_t)bytes_read;
 }
@@ -152,18 +156,25 @@ ssize_t ext4fs_file_write(struct vfs_file *file, const char *buf, size_t count,
     uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
 
     vfs_ilock(inode);
+    ext4fs_lock(esb);
 
     loff_t pos = file->f_pos;
 
     struct ext4_inode_ref ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
     if (r != EOK) {
+        ext4fs_unlock(esb);
         vfs_iunlock(inode);
         return -r;
     }
 
     /* Enable write-back caching for the duration of the write */
     ext4_block_cache_write_back(&esb->bdev, 1);
+
+    /* Compute the number of existing file blocks (for allocation decision) */
+    uint32_t ifile_blocks =
+        (uint32_t)((ext4_inode_get_size(&fs->sb, ref.inode) + block_size - 1) /
+                   block_size);
 
     size_t bytes_written = 0;
     while (bytes_written < count) {
@@ -173,9 +184,23 @@ ssize_t ext4fs_file_write(struct vfs_file *file, const char *buf, size_t count,
         if (n > count - bytes_written)
             n = (uint)(count - bytes_written);
 
-        /* Ensure block is allocated */
+        /*
+         * Block allocation: follow the same pattern as lwext4's ext4_fwrite.
+         * - For blocks within the current file size, use init_inode_dblk_idx
+         *   (lookup only — works for both extent and indirect-block).
+         * - For blocks beyond the current file size, use append_inode_dblk
+         *   which allocates a physical block, sets the mapping, AND updates
+         *   the on-disk inode size.
+         */
         ext4_fsblk_t fblock;
-        r = ext4_fs_init_inode_dblk_idx(&ref, iblock, &fblock);
+        if (iblock < ifile_blocks) {
+            r = ext4_fs_init_inode_dblk_idx(&ref, iblock, &fblock);
+        } else {
+            ext4_lblk_t appended_iblock;
+            r = ext4_fs_append_inode_dblk(&ref, &fblock, &appended_iblock);
+            if (r == EOK)
+                ifile_blocks++;  /* track newly allocated block */
+        }
         if (r != EOK) {
             if (bytes_written == 0)
                 bytes_written = (size_t)(-r);
@@ -213,19 +238,25 @@ ssize_t ext4fs_file_write(struct vfs_file *file, const char *buf, size_t count,
         bytes_written += n;
     }
 
-    /* Update file size if we extended it */
+    /* Update file size if we extended it.
+     * ext4_fs_append_inode_dblk already bumps the on-disk inode size by
+     * whole blocks, so we just need to ensure the final size reflects the
+     * actual number of bytes written (not rounded up to block boundary). */
     uint64_t new_pos = (uint64_t)pos + bytes_written;
-    if (new_pos > (uint64_t)inode->size) {
-        inode->size = (loff_t)new_pos;
+    uint64_t ondisk_size = ext4_inode_get_size(&fs->sb, ref.inode);
+    if (new_pos > ondisk_size) {
         ext4_inode_set_size(ref.inode, new_pos);
         ref.dirty = true;
     }
+    if ((loff_t)new_pos > inode->size)
+        inode->size = (loff_t)new_pos;
 
     ext4_fs_put_inode_ref(&ref);
 
     /* Flush write-back cache */
     ext4_block_cache_write_back(&esb->bdev, 0);
 
+    ext4fs_unlock(esb);
     vfs_iunlock(inode);
     return (ssize_t)bytes_written;
 }
@@ -275,7 +306,10 @@ static int ext4fs_file_fsync(struct vfs_file *file, loff_t start, loff_t len)
         return 0;
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
-    return ext4_block_cache_flush(&esb->bdev) == EOK ? 0 : -EIO;
+    ext4fs_lock(esb);
+    int r = ext4_block_cache_flush(&esb->bdev) == EOK ? 0 : -EIO;
+    ext4fs_unlock(esb);
+    return r;
 }
 
 static int ext4fs_file_fflush(struct vfs_file *file)

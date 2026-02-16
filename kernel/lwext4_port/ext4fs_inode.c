@@ -10,8 +10,8 @@
  *
  * All ext4 operations that access on-disk structures acquire ext4_inode_ref
  * on the stack.  This is lightweight — the underlying ext4 block cache
- * keeps the storage cached and the blockdev lock serialises concurrent
- * access.
+ * keeps the storage cached.  The filesystem-wide ext4fs_lock() serialises
+ * concurrent access (lwext4 is not internally thread-safe).
  */
 
 #include "types.h"
@@ -60,11 +60,16 @@ static int ext4fs_sync_inode(struct vfs_inode *inode)
     if (inode == NULL)
         return -EINVAL;
 
-    struct ext4_fs *fs = inode_ext4fs(inode);
+    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+
+    ext4fs_lock(esb);
     struct ext4_inode_ref ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
-    if (r != EOK)
+    if (r != EOK) {
+        ext4fs_unlock(esb);
         return -r;
+    }
 
     /* Push VFS fields back to the on-disk inode */
     ext4_inode_set_mode(&fs->sb, ref.inode,
@@ -76,6 +81,7 @@ static int ext4fs_sync_inode(struct vfs_inode *inode)
     ref.dirty = true;
 
     ext4_fs_put_inode_ref(&ref);
+    ext4fs_unlock(esb);
     inode->dirty = 0;
     return 0;
 }
@@ -92,23 +98,29 @@ static int ext4fs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     if (!S_ISDIR(dir->mode))
         return -ENOTDIR;
 
-    struct ext4_fs *fs = inode_ext4fs(dir);
+    struct ext4fs_superblock *esb = ext4fs_get_esb(dir->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
 
+    ext4fs_lock(esb);
     struct ext4_inode_ref parent_ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)dir->ino, &parent_ref);
-    if (r != EOK)
+    if (r != EOK) {
+        ext4fs_unlock(esb);
         return -r;
+    }
 
     struct ext4_dir_search_result result;
     r = ext4_dir_find_entry(&result, &parent_ref, name, (uint32_t)name_len);
     if (r != EOK) {
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return -r;
     }
 
     uint32_t child_ino = ext4_dir_en_get_inode(result.dentry);
     ext4_dir_destroy_result(&parent_ref, &result);
     ext4_fs_put_inode_ref(&parent_ref);
+    ext4fs_unlock(esb);
 
     /* Fill the VFS dentry */
     dentry->ino      = child_ino;
@@ -134,12 +146,16 @@ static int ext4fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
     if (!S_ISDIR(dir->mode))
         return -ENOTDIR;
 
-    struct ext4_fs *fs = inode_ext4fs(dir);
+    struct ext4fs_superblock *esb = ext4fs_get_esb(dir->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
 
+    ext4fs_lock(esb);
     struct ext4_inode_ref dir_ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)dir->ino, &dir_ref);
-    if (r != EOK)
+    if (r != EOK) {
+        ext4fs_unlock(esb);
         return -r;
+    }
 
     /* index == 1: VFS wants ".." */
     if (iter->index == 1) {
@@ -148,6 +164,7 @@ static int ext4fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         r = ext4_dir_find_entry(&result, &dir_ref, "..", 2);
         if (r != EOK) {
             ext4_fs_put_inode_ref(&dir_ref);
+            ext4fs_unlock(esb);
             return -r;
         }
 
@@ -156,6 +173,7 @@ static int ext4fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         if (ret_dentry->name == NULL) {
             ext4_dir_destroy_result(&dir_ref, &result);
             ext4_fs_put_inode_ref(&dir_ref);
+            ext4fs_unlock(esb);
             return -ENOMEM;
         }
         ret_dentry->name_len = 2;
@@ -164,6 +182,7 @@ static int ext4fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
 
         ext4_dir_destroy_result(&dir_ref, &result);
         ext4_fs_put_inode_ref(&dir_ref);
+        ext4fs_unlock(esb);
         return 0;
     }
 
@@ -174,6 +193,7 @@ static int ext4fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
     r = ext4_dir_iterator_init(&dit, &dir_ref, start_off);
     if (r != EOK) {
         ext4_fs_put_inode_ref(&dir_ref);
+        ext4fs_unlock(esb);
         return -r;
     }
 
@@ -205,6 +225,7 @@ static int ext4fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         if (ret_dentry->name == NULL) {
             ext4_dir_iterator_fini(&dit);
             ext4_fs_put_inode_ref(&dir_ref);
+            ext4fs_unlock(esb);
             return -ENOMEM;
         }
         ret_dentry->name_len = nlen;
@@ -217,12 +238,14 @@ static int ext4fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
 
         ext4_dir_iterator_fini(&dit);
         ext4_fs_put_inode_ref(&dir_ref);
+        ext4fs_unlock(esb);
         return 0;
     }
 
     /* End of directory */
     ext4_dir_iterator_fini(&dit);
     ext4_fs_put_inode_ref(&dir_ref);
+    ext4fs_unlock(esb);
 
     vfs_release_dentry(ret_dentry);
     ret_dentry->name     = NULL;
@@ -245,9 +268,12 @@ static struct vfs_inode *ext4fs_create(struct vfs_inode *dir, mode_t mode,
     struct ext4_fs *fs = &esb->ext4fs;
 
     struct ext4_inode_ref parent_ref;
+    ext4fs_lock(esb);
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)dir->ino, &parent_ref);
-    if (r != EOK)
+    if (r != EOK) {
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
+    }
 
     /* Check if name already exists */
     struct ext4_dir_search_result check;
@@ -255,6 +281,7 @@ static struct vfs_inode *ext4fs_create(struct vfs_inode *dir, mode_t mode,
     if (r == EOK) {
         ext4_dir_destroy_result(&parent_ref, &check);
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-EEXIST);
     }
 
@@ -263,6 +290,7 @@ static struct vfs_inode *ext4fs_create(struct vfs_inode *dir, mode_t mode,
     r = ext4_fs_alloc_inode(fs, &child_ref, EXT4_DE_REG_FILE);
     if (r != EOK) {
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
     }
 
@@ -279,12 +307,14 @@ static struct vfs_inode *ext4fs_create(struct vfs_inode *dir, mode_t mode,
         ext4_fs_free_inode(&child_ref);
         ext4_fs_put_inode_ref(&child_ref);
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
     }
 
     uint32_t new_ino = child_ref.index;
     ext4_fs_put_inode_ref(&child_ref);
     ext4_fs_put_inode_ref(&parent_ref);
+    ext4fs_unlock(esb);
 
     /* Allocate VFS inode through the standard path */
     struct vfs_inode *new_inode = vfs_alloc_inode(dir->sb);
@@ -329,9 +359,12 @@ static struct vfs_inode *ext4fs_mkdir(struct vfs_inode *dir, mode_t mode,
     struct ext4_fs *fs = &esb->ext4fs;
 
     struct ext4_inode_ref parent_ref;
+    ext4fs_lock(esb);
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)dir->ino, &parent_ref);
-    if (r != EOK)
+    if (r != EOK) {
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
+    }
 
     /* Check if name already exists */
     struct ext4_dir_search_result check;
@@ -339,6 +372,7 @@ static struct vfs_inode *ext4fs_mkdir(struct vfs_inode *dir, mode_t mode,
     if (r == EOK) {
         ext4_dir_destroy_result(&parent_ref, &check);
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-EEXIST);
     }
 
@@ -347,6 +381,7 @@ static struct vfs_inode *ext4fs_mkdir(struct vfs_inode *dir, mode_t mode,
     r = ext4_fs_alloc_inode(fs, &child_ref, EXT4_DE_DIR);
     if (r != EOK) {
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
     }
 
@@ -365,6 +400,7 @@ static struct vfs_inode *ext4fs_mkdir(struct vfs_inode *dir, mode_t mode,
         ext4_fs_free_inode(&child_ref);
         ext4_fs_put_inode_ref(&child_ref);
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
     }
 
@@ -373,6 +409,7 @@ static struct vfs_inode *ext4fs_mkdir(struct vfs_inode *dir, mode_t mode,
         ext4_fs_free_inode(&child_ref);
         ext4_fs_put_inode_ref(&child_ref);
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
     }
 
@@ -388,12 +425,14 @@ static struct vfs_inode *ext4fs_mkdir(struct vfs_inode *dir, mode_t mode,
         ext4_fs_free_inode(&child_ref);
         ext4_fs_put_inode_ref(&child_ref);
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
     }
 
     uint32_t new_ino = child_ref.index;
     ext4_fs_put_inode_ref(&child_ref);
     ext4_fs_put_inode_ref(&parent_ref);
+    ext4fs_unlock(esb);
 
     /* Allocate VFS inode — same caveat as in ext4fs_create */
     struct vfs_inode *new_inode = vfs_alloc_inode(dir->sb);
@@ -416,15 +455,10 @@ static struct vfs_inode *ext4fs_mkdir(struct vfs_inode *dir, mode_t mode,
 /* Unlink / rmdir                                                              */
 /* ──────────────────────────────────────────────────────────────────────────── */
 
-static int ext4fs_unlink(struct vfs_dentry *dentry, struct vfs_inode *target)
+/* Inner helper — must be called with esb->lock held */
+static int do_ext4fs_unlink(struct ext4_fs *fs, struct vfs_dentry *dentry,
+                            struct vfs_inode *target)
 {
-    if (dentry == NULL || target == NULL)
-        return -EINVAL;
-    if (dentry->sb == NULL || dentry->sb != target->sb)
-        return -EINVAL;
-
-    struct ext4_fs *fs = ext4fs_get_fs(dentry->sb);
-
     struct ext4_inode_ref parent_ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)dentry->parent->ino,
                                   &parent_ref);
@@ -456,14 +490,38 @@ static int ext4fs_unlink(struct vfs_dentry *dentry, struct vfs_inode *target)
     return 0;
 }
 
+static int ext4fs_unlink(struct vfs_dentry *dentry, struct vfs_inode *target)
+{
+    if (dentry == NULL || target == NULL)
+        return -EINVAL;
+    if (dentry->sb == NULL || dentry->sb != target->sb)
+        return -EINVAL;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(dentry->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+
+    ext4fs_lock(esb);
+    int r = do_ext4fs_unlink(fs, dentry, target);
+    ext4fs_unlock(esb);
+    return r;
+}
+
 static int ext4fs_rmdir(struct vfs_dentry *dentry, struct vfs_inode *target)
 {
-    int r = ext4fs_unlink(dentry, target);
+    if (dentry == NULL || target == NULL)
+        return -EINVAL;
+    if (dentry->sb == NULL || dentry->sb != target->sb)
+        return -EINVAL;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(dentry->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+
+    ext4fs_lock(esb);
+    int r = do_ext4fs_unlink(fs, dentry, target);
     if (r == 0 && dentry->parent != NULL) {
         dentry->parent->n_links--;
 
         /* Update parent link count on disk */
-        struct ext4_fs *fs = ext4fs_get_fs(dentry->sb);
         struct ext4_inode_ref parent_ref;
         int r2 = ext4_fs_get_inode_ref(
             fs, (uint32_t)dentry->parent->ino, &parent_ref);
@@ -473,6 +531,7 @@ static int ext4fs_rmdir(struct vfs_dentry *dentry, struct vfs_inode *target)
             ext4_fs_put_inode_ref(&parent_ref);
         }
     }
+    ext4fs_unlock(esb);
     return r;
 }
 
@@ -488,16 +547,21 @@ static int ext4fs_link(struct vfs_inode *old, struct vfs_inode *dir,
     if (S_ISDIR(old->mode))
         return -EPERM;
 
-    struct ext4_fs *fs = inode_ext4fs(dir);
+    struct ext4fs_superblock *esb = ext4fs_get_esb(dir->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
 
+    ext4fs_lock(esb);
     struct ext4_inode_ref parent_ref, child_ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)dir->ino, &parent_ref);
-    if (r != EOK)
+    if (r != EOK) {
+        ext4fs_unlock(esb);
         return -r;
+    }
 
     r = ext4_fs_get_inode_ref(fs, (uint32_t)old->ino, &child_ref);
     if (r != EOK) {
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return -r;
     }
 
@@ -508,6 +572,7 @@ static int ext4fs_link(struct vfs_inode *old, struct vfs_inode *dir,
         ext4_dir_destroy_result(&parent_ref, &check);
         ext4_fs_put_inode_ref(&child_ref);
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return -EEXIST;
     }
 
@@ -526,6 +591,7 @@ static int ext4fs_link(struct vfs_inode *old, struct vfs_inode *dir,
 
     ext4_fs_put_inode_ref(&child_ref);
     ext4_fs_put_inode_ref(&parent_ref);
+    ext4fs_unlock(esb);
     return r == EOK ? 0 : -r;
 }
 
@@ -538,12 +604,16 @@ static int ext4fs_truncate(struct vfs_inode *inode, loff_t new_size)
     if (inode == NULL)
         return -EINVAL;
 
-    struct ext4_fs *fs = inode_ext4fs(inode);
+    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
 
+    ext4fs_lock(esb);
     struct ext4_inode_ref ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
-    if (r != EOK)
+    if (r != EOK) {
+        ext4fs_unlock(esb);
         return -r;
+    }
 
     r = ext4_fs_truncate_inode(&ref, (uint64_t)new_size);
     if (r == EOK) {
@@ -553,6 +623,7 @@ static int ext4fs_truncate(struct vfs_inode *inode, loff_t new_size)
     }
 
     ext4_fs_put_inode_ref(&ref);
+    ext4fs_unlock(esb);
     return r == EOK ? 0 : -r;
 }
 
@@ -572,14 +643,18 @@ static ssize_t ext4fs_readlink(struct vfs_inode *inode, char *buf,
     struct ext4_fs *fs = &esb->ext4fs;
     uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
 
+    ext4fs_lock(esb);
     struct ext4_inode_ref ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
-    if (r != EOK)
+    if (r != EOK) {
+        ext4fs_unlock(esb);
         return -r;
+    }
 
     uint64_t link_len = ext4_inode_get_size(&fs->sb, ref.inode);
     if (link_len + 1 > buflen) {
         ext4_fs_put_inode_ref(&ref);
+        ext4fs_unlock(esb);
         return -ENAMETOOLONG;
     }
 
@@ -604,6 +679,7 @@ static ssize_t ext4fs_readlink(struct vfs_inode *inode, char *buf,
             r = ext4_fs_get_inode_dblk_idx(&ref, iblock, &fblock, false);
             if (r != EOK || fblock == 0) {
                 ext4_fs_put_inode_ref(&ref);
+                ext4fs_unlock(esb);
                 return -EIO;
             }
 
@@ -611,6 +687,7 @@ static ssize_t ext4fs_readlink(struct vfs_inode *inode, char *buf,
             r = ext4_block_get(&esb->bdev, &blk, fblock);
             if (r != EOK) {
                 ext4_fs_put_inode_ref(&ref);
+                ext4fs_unlock(esb);
                 return -EIO;
             }
 
@@ -622,6 +699,7 @@ static ssize_t ext4fs_readlink(struct vfs_inode *inode, char *buf,
     }
 
     ext4_fs_put_inode_ref(&ref);
+    ext4fs_unlock(esb);
     buf[link_len] = '\0';
     return (ssize_t)link_len;
 }
@@ -638,10 +716,13 @@ static struct vfs_inode *ext4fs_symlink(struct vfs_inode *dir, mode_t mode,
     struct ext4_fs *fs = &esb->ext4fs;
     uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
 
+    ext4fs_lock(esb);
     struct ext4_inode_ref parent_ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)dir->ino, &parent_ref);
-    if (r != EOK)
+    if (r != EOK) {
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
+    }
 
     /* Check for existing name */
     struct ext4_dir_search_result check;
@@ -649,6 +730,7 @@ static struct vfs_inode *ext4fs_symlink(struct vfs_inode *dir, mode_t mode,
     if (r == EOK) {
         ext4_dir_destroy_result(&parent_ref, &check);
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-EEXIST);
     }
 
@@ -657,6 +739,7 @@ static struct vfs_inode *ext4fs_symlink(struct vfs_inode *dir, mode_t mode,
     r = ext4_fs_alloc_inode(fs, &child_ref, EXT4_DE_SYMLINK);
     if (r != EOK) {
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
     }
 
@@ -683,6 +766,7 @@ static struct vfs_inode *ext4fs_symlink(struct vfs_inode *dir, mode_t mode,
                 ext4_fs_free_inode(&child_ref);
                 ext4_fs_put_inode_ref(&child_ref);
                 ext4_fs_put_inode_ref(&parent_ref);
+                ext4fs_unlock(esb);
                 return ERR_PTR(-r);
             }
 
@@ -692,6 +776,7 @@ static struct vfs_inode *ext4fs_symlink(struct vfs_inode *dir, mode_t mode,
                 ext4_fs_free_inode(&child_ref);
                 ext4_fs_put_inode_ref(&child_ref);
                 ext4_fs_put_inode_ref(&parent_ref);
+                ext4fs_unlock(esb);
                 return ERR_PTR(-EIO);
             }
 
@@ -716,12 +801,14 @@ static struct vfs_inode *ext4fs_symlink(struct vfs_inode *dir, mode_t mode,
         ext4_fs_free_inode(&child_ref);
         ext4_fs_put_inode_ref(&child_ref);
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
     }
 
     uint32_t new_ino = child_ref.index;
     ext4_fs_put_inode_ref(&child_ref);
     ext4_fs_put_inode_ref(&parent_ref);
+    ext4fs_unlock(esb);
 
     /* Build VFS inode */
     struct vfs_inode *new_inode = vfs_alloc_inode(dir->sb);
@@ -753,16 +840,20 @@ static struct vfs_inode *ext4fs_mknod(struct vfs_inode *dir, mode_t mode,
     struct ext4fs_superblock *esb = ext4fs_get_esb(dir->sb);
     struct ext4_fs *fs = &esb->ext4fs;
 
+    ext4fs_lock(esb);
     struct ext4_inode_ref parent_ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)dir->ino, &parent_ref);
-    if (r != EOK)
+    if (r != EOK) {
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
+    }
 
     int de_type = S_ISCHR(mode) ? EXT4_DE_CHRDEV : EXT4_DE_BLKDEV;
     struct ext4_inode_ref child_ref;
     r = ext4_fs_alloc_inode(fs, &child_ref, de_type);
     if (r != EOK) {
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
     }
 
@@ -777,12 +868,14 @@ static struct vfs_inode *ext4fs_mknod(struct vfs_inode *dir, mode_t mode,
         ext4_fs_free_inode(&child_ref);
         ext4_fs_put_inode_ref(&child_ref);
         ext4_fs_put_inode_ref(&parent_ref);
+        ext4fs_unlock(esb);
         return ERR_PTR(-r);
     }
 
     uint32_t new_ino = child_ref.index;
     ext4_fs_put_inode_ref(&child_ref);
     ext4_fs_put_inode_ref(&parent_ref);
+    ext4fs_unlock(esb);
 
     struct vfs_inode *new_inode = vfs_alloc_inode(dir->sb);
     if (IS_ERR_OR_NULL(new_inode))
@@ -810,17 +903,22 @@ static void ext4fs_destroy_inode(struct vfs_inode *inode)
     if (inode == NULL)
         return;
 
-    struct ext4_fs *fs = inode_ext4fs(inode);
+    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
 
+    ext4fs_lock(esb);
     struct ext4_inode_ref ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
-    if (r != EOK)
+    if (r != EOK) {
+        ext4fs_unlock(esb);
         return;
+    }
 
     /* Truncate all data and free the inode on disk */
     ext4_fs_truncate_inode(&ref, 0);
     ext4_fs_free_inode(&ref);
     ext4_fs_put_inode_ref(&ref);
+    ext4fs_unlock(esb);
 }
 
 static void ext4fs_free_inode(struct vfs_inode *inode)

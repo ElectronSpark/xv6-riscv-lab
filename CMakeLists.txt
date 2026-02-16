@@ -278,13 +278,20 @@ add_custom_command(
     COMMENT "Creating file system image with user programs and README"
 )
 
-# Create a second empty xv6fs disk image for the second virtio device
+# Create an ext4 disk image containing the Python standard library.
+# When mounted at /usr inside xv6, Python finds its stdlib at
+# /usr/local/lib/python3.12/ (matching its compiled prefix=/usr/local).
+set(CPYTHON_SRC_DIR_FOR_FS "${CMAKE_SOURCE_DIR}/user/v6-cpython")
+set(MKEXT4_SCRIPT "${CMAKE_SOURCE_DIR}/scripts/mkext4_pylib.sh")
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fs0.img
-    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/mkfs fs0.img
+    COMMAND bash ${MKEXT4_SCRIPT}
+            ${CMAKE_CURRENT_BINARY_DIR}/fs0.img
+            ${CPYTHON_SRC_DIR_FOR_FS}
+            32
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mkfs
-    COMMENT "Creating empty xv6fs disk image fs0.img"
+    DEPENDS ${MKEXT4_SCRIPT}
+    COMMENT "Creating ext4 fs0.img with Python standard library"
 )
 
 # Compressed filesystem image

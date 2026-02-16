@@ -27,6 +27,14 @@
 #define RANDOM_MINOR 3
 #endif
 
+// Second virtio disk: major=2, minor=2
+#ifndef DISK1_MAJOR
+#define DISK1_MAJOR 2
+#endif
+#ifndef DISK1_MINOR
+#define DISK1_MINOR 2
+#endif
+
 char *argv[] = {"sh", 0};
 
 int main(void) {
@@ -42,6 +50,16 @@ int main(void) {
     if (open("/dev/random", O_RDWR) < 0) {
         mknod("/dev/random", S_IFCHR | 0666, RANDOM_MAJOR, RANDOM_MINOR);
     }
+
+    // Mount ext4 filesystem (disk1) at /usr for Python standard library
+    mkdir("/usr");
+    mknod("/dev/disk1", S_IFBLK | 0600, DISK1_MAJOR, DISK1_MINOR);
+    if (mount("/dev/disk1", "/usr", "ext4") < 0) {
+        printf("init: mount ext4 at /usr failed\n");
+    } else {
+        printf("init: ext4 mounted at /usr\n");
+    }
+
     dup(0); // stdout
     dup(0); // stderr
 
