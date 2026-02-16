@@ -65,4 +65,13 @@ pid_t session_getsid(pid_t pid);
  */
 struct session *get_session(pid_t sid);
 
+/*
+ * Global session list — protected by pid_lock.
+ * Use session_for_each / session_for_each_safe to iterate.
+ */
+extern list_node_t session_list;
+
+#define session_for_each(pos, tmp) \
+    list_foreach_node_safe(&session_list, pos, tmp, global_entry)
+
 #endif /* __KERNEL_SESSION_H */

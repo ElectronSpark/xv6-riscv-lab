@@ -125,7 +125,7 @@ int fork(void);
 int vfork(void);
 
 uint64 memstat(uint64 flags);
-int dumpproc(void);
+int dumpproc(int mode, int id);
 int dumpchan(void);
 int dumppcache(void);
 int dumprq(void);

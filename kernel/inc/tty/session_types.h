@@ -6,6 +6,9 @@ struct pgroup;
 struct tty;
 
 struct session {
+    /* link in the global session list */
+    list_node_t global_entry;
+
     pid_t sid;   /* session ID */
     int ref_cnt; /* reference count for this session */
 

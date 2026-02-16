@@ -30,7 +30,6 @@
 #include "proc/thread_group.h"
 #include "proc/pgroup.h"
 #include "tty/session.h"
-#include "tty/tty.h"
 #include "signal.h"
 #include "smp/percpu.h"
 
@@ -39,8 +38,10 @@
 /* ------------------------------------------------------------------ */
 
 static slab_cache_t __session_cache = {0};
+list_node_t session_list = {0};
 
 void session_init(struct thread *initproc) {
+    list_entry_init(&session_list);
     int ret = slab_cache_init(&__session_cache, "session_cache",
                               sizeof(struct session), SLAB_FLAG_STATIC);
     assert(ret == 0, "session_init: failed to init session_cache, errno=%d",
@@ -68,6 +69,7 @@ static struct session *__session_alloc(void) {
         return NULL;
 
     memset(s, 0, sizeof(*s));
+    list_entry_init(&s->global_entry);
     list_entry_init(&s->threads);
     list_entry_init(&s->pgrps);
     return s;
@@ -88,6 +90,7 @@ struct session *session_alloc(pid_t sid) {
     s->ref_cnt = 1;
     s->t_cnt = 0;
     s->pg_cnt = 0;
+    list_node_push(&session_list, s, global_entry);
     return s;
 }
 
@@ -104,6 +107,8 @@ void session_unref(struct session *s) {
     assert(new_val >= 0, "Session reference count went negative");
     if (new_val == 0) {
         s->exited = 1;
+        if (!LIST_ENTRY_IS_DETACHED(&s->global_entry))
+            list_node_detach(s, global_entry);
         slab_free(s);
     }
 }
