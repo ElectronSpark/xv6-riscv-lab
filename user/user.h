@@ -3,10 +3,9 @@
 
 struct stat;
 
-#include "kernel/inc/types.h"
 #include "kernel/inc/signal_types.h"
-#include "kernel/inc/mm/memstat.h"
-#include "kernel/inc/clone_flags.h"
+#include "kernel/inc/uabi/memstat.h"
+#include "kernel/inc/uabi/clone_flags.h"
 
 struct timeval {
 	int64 tv_sec;

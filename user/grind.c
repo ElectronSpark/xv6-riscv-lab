@@ -3,14 +3,11 @@
 //
 
 #include "kernel/inc/param.h"
-#include "kernel/inc/types.h"
-#include "kernel/inc/vfs/stat.h"
+#include "kernel/inc/uabi/stat.h"
 #include "user/user.h"
-#include "kernel/inc/vfs/fcntl.h"
-#include "kernel/inc/syscall.h"
-#include "kernel/inc/mm/memlayout.h"
-#include "kernel/inc/riscv.h"
-#include "kernel/inc/signo.h"
+#include "kernel/inc/uabi/fcntl.h"
+#include "kernel/inc/uabi/syscall.h"
+#include "kernel/inc/uabi/signo.h"
 
 // from FreeBSD.
 int do_rand(unsigned long *ctx) {

@@ -1,6 +1,5 @@
 #include "kernel/inc/param.h"
 #include "kernel/inc/uabi/stat.h"
-#include "kernel/inc/riscv.h"
 #include "kernel/inc/uabi/fcntl.h"
 #include "user/user.h"
 

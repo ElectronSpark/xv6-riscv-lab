@@ -1,9 +1,8 @@
 // Shell.
 
-#include "kernel/inc/types.h"
 #include "user/user.h"
-#include "kernel/inc/vfs/fcntl.h"
-#include "kernel/inc/vfs/stat.h"
+#include "kernel/inc/uabi/fcntl.h"
+#include "kernel/inc/uabi/stat.h"
 #include "kernel/inc/uabi/linux_dirent64.h"
 
 #define LS_FMT_WIDTH 14 // Display width for formatting

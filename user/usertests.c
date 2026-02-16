@@ -2,7 +2,7 @@
 #include "kernel/inc/uabi/stat.h"
 #include "user/user.h"
 #include "kernel/inc/uabi/fcntl.h"
-#include "kernel/inc/syscall.h"
+#include "kernel/inc/uabi/syscall.h"
 #include "kernel/inc/uabi/signo.h"
 #include "kernel/inc/uabi/linux_dirent64.h"
 #include "kernel/inc/uabi/statfs.h"
