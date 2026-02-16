@@ -116,8 +116,11 @@ static int __pipe_wait_writer(struct pipe *pi) {
         spin_unlock(&pi->writer_lock);
         return 0; /* data available, caller will re-check under reader_lock */
     }
-    tq_wait(&pi->nread_queue, &pi->writer_lock, NULL);
+    tq_wait_in_state(&pi->nread_queue, &pi->writer_lock, NULL,
+                     THREAD_INTERRUPTIBLE);
     spin_unlock(&pi->writer_lock);
+    if (signal_pending(current))
+        return -EINTR;
     // Return 0 to re-check conditions (wakeup may be from close or data)
     return 0;
 }
@@ -138,8 +141,11 @@ static int __pipe_wait_reader(struct pipe *pi) {
         spin_unlock(&pi->reader_lock);
         return 0; /* space available, caller will re-check under writer_lock */
     }
-    tq_wait(&pi->nwrite_queue, &pi->reader_lock, NULL);
+    tq_wait_in_state(&pi->nwrite_queue, &pi->reader_lock, NULL,
+                     THREAD_INTERRUPTIBLE);
     spin_unlock(&pi->reader_lock);
+    if (signal_pending(current))
+        return -EINTR;
     // Return 0 to re-check conditions (wakeup may be from close or space
     // available)
     return 0;
@@ -188,8 +194,11 @@ ssize_t pipe_read(struct pipe *pi, char *buf, size_t count, bool user) {
                 spin_unlock(&pi->reader_lock);
 
                 ret = __pipe_wait_writer(pi);
-                if (ret < 0)
-                    goto out;
+                if (ret < 0) {
+                    if (total > 0)
+                        goto out;
+                    return ret;
+                }
                 spin_lock(&pi->reader_lock);
             } else {
                 size_t read_size =
@@ -277,8 +286,11 @@ ssize_t pipe_write(struct pipe *pi, const char *buf, size_t count, bool user) {
                 spin_unlock(&pi->writer_lock);
 
                 ret = __pipe_wait_reader(pi);
-                if (ret < 0)
-                    goto out;
+                if (ret < 0) {
+                    if (total > (ssize_t)tmp_len)
+                        goto out;
+                    return ret;
+                }
                 spin_lock(&pi->writer_lock);
             } else {
                 size_t write_size = min(tmp_len - tmp_pos, writable);

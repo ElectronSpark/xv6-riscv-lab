@@ -1599,6 +1599,10 @@ int main(void) {
         if (cmd == 0)
             continue;
 
+        // Skip empty commands (e.g. bare Enter)
+        if (cmd->type == EXEC && ((struct execcmd *)cmd)->argv[0] == 0)
+            continue;
+
         int pid;
     #ifdef USE_NCURSES_SHELL
         pid = vfork();
@@ -1612,23 +1616,32 @@ int main(void) {
             runcmd(cmd);
         }
 
-    #ifndef USE_NCURSES_SHELL
         // Also set from parent side to avoid race
         int pgid_ready = (setpgid(pid, pid) == 0);
 
         // Set child's process group as foreground
         if (pgid_ready)
             ioctl(0, TIOCSPGRP, &pid);
-    #else
-        setpgid(pid, pid);
-#endif
-        wait(0);
 
-#ifndef USE_NCURSES_SHELL
+        // Save shell's terminal settings before child may modify them
+        struct termios shell_termios;
+        tcgetattr(0, &shell_termios);
+
+        int status = 0;
+        waitpid(pid, &status, WUNTRACED);
+
         // Restore shell as foreground
-        int shell_pgid = getpgid(0);
-        ioctl(0, TIOCSPGRP, &shell_pgid);
-#endif
+        {
+            int shell_pgid = getpgid(0);
+            ioctl(0, TIOCSPGRP, &shell_pgid);
+        }
+
+        // Restore shell's terminal settings (child may have changed them)
+        tcsetattr(0, TCSANOW, &shell_termios);
+
+        if (WIFSTOPPED(status)) {
+            printf("[suspended] pid %d\n", pid);
+        }
     }
 
     disable_raw_mode();

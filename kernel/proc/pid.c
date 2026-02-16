@@ -23,6 +23,7 @@
 #include "vfs/fs.h"
 #include "vfs/file.h"
 #include "errno.h"
+#include "tty/session.h"
 
 static struct {
     struct {
@@ -552,7 +553,18 @@ void procdump_sessions(void) {
     __sort_pids(sids, nsid);
 
     for (int si = 0; si < nsid; si++) {
-        printf("\nSession %d\n", sids[si]);
+        // Find fg_pgid for this session by locating a thread with matching SID
+        pid_t fg_pgid = -1;
+        {
+            struct thread *sp;
+            hlist_foreach_node_rcu(&proc_table.procs, sp, proctab_entry) {
+                if (sp->sid == sids[si] && sp->session != NULL) {
+                    fg_pgid = session_get_fg_pgid(sp->session);
+                    break;
+                }
+            }
+        }
+        printf("\nSession %d  (fg_pgid=%d)\n", sids[si], fg_pgid);
 
         int npg = __collect_pgids(sids[si], pgids, DUMP_MAX_IDS);
         __sort_pids(pgids, npg);
@@ -622,7 +634,18 @@ void procdump_sessions_sid(pid_t target_sid) {
     }
     __sort_pids(pgids, npg);
 
-    printf("\nSession %d\n", target_sid);
+    // Find fg_pgid for this session
+    pid_t fg_pgid = -1;
+    {
+        struct thread *sp;
+        hlist_foreach_node_rcu(&proc_table.procs, sp, proctab_entry) {
+            if (sp->sid == target_sid && sp->session != NULL) {
+                fg_pgid = session_get_fg_pgid(sp->session);
+                break;
+            }
+        }
+    }
+    printf("\nSession %d  (fg_pgid=%d)\n", target_sid, fg_pgid);
     for (int gi = 0; gi < npg; gi++) {
         printf("  PGroup %d\n", pgids[gi]);
 

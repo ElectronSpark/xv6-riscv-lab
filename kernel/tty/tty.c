@@ -222,9 +222,20 @@ static void tty_signal_fg_pgroup(struct tty *tty, int signum) {
     if (sess != NULL) {
         pid_t fg = session_get_fg_pgid(sess);
         if (fg > 0) {
+            printf("tty: sig %d -> fg_pgrp %d (session %d)\n",
+                   signum, fg, sess->sid);
             pgroup_kill(fg, signum);
             return;
         }
+        printf("tty: sig %d but fg_pgid=%d (session %d), fallback to current pid %d (%s)\n",
+               signum, fg, sess->sid,
+               current ? current->pid : -1,
+               current ? current->name : "?");
+    } else {
+        printf("tty: sig %d but no session, fallback to current pid %d (%s)\n",
+               signum,
+               current ? current->pid : -1,
+               current ? current->name : "?");
     }
     /* Fallback: no session or no fg group — signal current process */
     kill_proc(current, signum);
@@ -406,8 +417,13 @@ ssize_t tty_read(struct tty *tty, char *buf, size_t count, bool user) {
     while ((size_t)total < count) {
         /* Wait for at least one character */
         while (tty->raw_r == tty->raw_w) {
-            /* tq_wait releases lock, sleeps, re-acquires on wake */
-            tq_wait(&tty->raw_wait, &tty->lock, NULL);
+            /* tq_wait_in_state releases lock, sleeps, re-acquires on wake */
+            tq_wait_in_state(&tty->raw_wait, &tty->lock, NULL,
+                             THREAD_INTERRUPTIBLE);
+            if (signal_pending(current)) {
+                spin_unlock(&tty->lock);
+                return total > 0 ? total : -EINTR;
+            }
         }
 
         /* Drain available characters, up to count */
@@ -569,7 +585,12 @@ int tty_ioctl(struct tty *tty, uint64 cmd, uint64 arg) {
             return -EFAULT;
 
         spin_lock(&tty->lock);
+        tcflag_t old_lflag = tty->termios.c_lflag;
         tty->termios = new_t;
+        if ((old_lflag & ISIG) && !(new_t.c_lflag & ISIG)) {
+            printf("tty: ISIG cleared by pid %d (lflag 0x%x -> 0x%x)\n",
+                   current->pid, old_lflag, new_t.c_lflag);
+        }
         spin_unlock(&tty->lock);
 
         /* Notify driver if it cares */

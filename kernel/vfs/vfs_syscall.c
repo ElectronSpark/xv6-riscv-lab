@@ -31,6 +31,7 @@
 #include "vfs/poll.h"
 #include "tty/termios.h"
 #include "timer/timer.h"
+#include "signal.h"
 
 // Forward declaration for syscall argument helpers
 void argint(int n, int *ip);
@@ -1924,6 +1925,8 @@ uint64 sys_vfs_poll(void) {
         uint64 start = get_jiffs();
         while (timeout_ms < 0 || (int)(get_jiffs() - start) < timeout_ms) {
             sleep_ms(1);
+            if (signal_pending(current))
+                return -EINTR;
         }
         return 0;
     }
@@ -1953,6 +1956,15 @@ uint64 sys_vfs_poll(void) {
             break;
         }
         sleep_ms(1);
+        if (signal_pending(current)) {
+            ready = -EINTR;
+            break;
+        }
+    }
+
+    if (ready == -EINTR) {
+        kmm_free(pfds);
+        return -EINTR;
     }
 
     if (either_copyout(1, fds_addr, pfds, bytes) < 0) {

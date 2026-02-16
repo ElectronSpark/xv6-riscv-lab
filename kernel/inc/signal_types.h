@@ -66,6 +66,7 @@ typedef struct thread_signal {
     uint64 sig_ucontext; // Address of the signal user context
     stack_t sig_stack;   // Alternate signal stack
     uint64 esignal;      // Signal to be sent to parent on exit
+    int stop_signal;     // Signal number that caused THREAD_STOPPED
 } thread_signal_t;
 
 typedef enum {

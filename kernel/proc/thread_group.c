@@ -444,9 +444,12 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
                 scheduler_wakeup_stopped(target);
             } else if (THREAD_INTERRUPTIBLE(target)) {
                 scheduler_wakeup_interruptible(target);
-            } else if (is_stop && THREAD_RUNNING(target)) {
-                // Stop signal to running thread: send IPI for fast
-                // processing
+            } else if (THREAD_RUNNING(target)) {
+                // Any signal to a running thread: send IPI so it
+                // reschedules through usertrapret → handle_signal.
+                // Without this, signals with user handlers (e.g. SIGINT
+                // in Python) would not be processed until the thread
+                // voluntarily enters a signal-checking point.
                 int target_cpu =
                     smp_load_acquire(&target->sched_entity->cpu_id);
                 if (target_cpu != cpuid()) {
