@@ -179,7 +179,7 @@ void copyinstr2(char *s) {
             big[i] = 'x';
         big[PGSIZE] = '\0';
         char *args2[] = {big, big, big, 0};
-        ret = exec("echo", args2);
+        ret = exec("/bin/echo", args2);
         if (ret >= 0) {
             printf("exec(echo, BIG) returned %d, not -1\n", fd);
             exit(1);
@@ -669,7 +669,7 @@ void dirtest(char *s) {
 // Test vfork() - child immediately execs, following vfork contract
 void vforktest(char *s) {
     int pid, xstatus;
-    char *echoargv[] = {"echo", "vfork-ok", 0};
+    char *echoargv[] = {"/bin/echo", "vfork-ok", 0};
 
     pid = vfork();
     if (pid < 0) {
@@ -679,7 +679,7 @@ void vforktest(char *s) {
     if (pid == 0) {
         // Child: immediately exec - this is the only safe thing to do after
         // vfork
-        exec("echo", echoargv);
+        exec("/bin/echo", echoargv);
         // If exec fails, exit immediately
         exit(1);
     }
@@ -696,7 +696,7 @@ void vforktest(char *s) {
 
 void exectest(char *s) {
     int fd, xstatus, pid;
-    char *echoargv[] = {"echo", "OK", 0};
+    char *echoargv[] = {"/bin/echo", "OK", 0};
     char buf[3];
 
     unlink("echo-ok");
@@ -716,7 +716,7 @@ void exectest(char *s) {
             printf("%s: wrong fd\n", s);
             exit(1);
         }
-        if (exec("echo", echoargv) < 0) {
+        if (exec("/bin/echo", echoargv) < 0) {
             printf("%s: exec echo failed\n", s);
             exit(1);
         }
@@ -2323,7 +2323,7 @@ void bigargtest(char *s) {
         args[MAXARG - 1] = 0;
         // this exec() should fail (and return) because the
         // arguments are too large.
-        exec("echo", args);
+        exec("/bin/echo", args);
         fd = open("bigarg-ok", O_CREAT);
         close(fd);
         exit(0);
@@ -2569,7 +2569,7 @@ void badarg(char *s) {
         char *argv[2];
         argv[0] = (char *)0xffffffff;
         argv[1] = 0;
-        exec("echo", argv);
+        exec("/bin/echo", argv);
     }
 
     exit(0);
@@ -2802,8 +2802,8 @@ void execout(char *s) {
                 sbrk(-4096);
 
             close(1);
-            char *args[] = {"echo", "x", 0};
-            exec("echo", args);
+            char *args[] = {"/bin/echo", "x", 0};
+            exec("/bin/echo", args);
             exit(0);
         } else {
             wait((int *)0);
