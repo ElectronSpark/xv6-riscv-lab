@@ -20,6 +20,7 @@
 #include "vfs/file.h"
 #include "vfs/vfs_types.h"
 #include "vfs/fcntl.h"
+#include "vfs/poll.h"
 #include <mm/vm.h>
 #include "mm/slab.h"
 #include "proc/sched.h"
@@ -103,8 +104,23 @@ static int __pipe_wait_writer(struct pipe *pi) {
         // Return 0 to let caller re-check and detect EOF properly
         return 0;
     }
-    tq_wait(&pi->nread_queue, &pi->writer_lock, NULL);
+    /*
+     * Re-check data availability after the reader→writer lock transition.
+     *
+     * pipe_read releases reader_lock before calling us.  A writer may
+     * sneak in during that gap: write data, wake nread_queue (nobody on
+     * it yet), and leave.  Without this re-check the reader would sleep
+     * even though data is already in the pipe — a classic lost-wakeup.
+     */
+    if (smp_load_acquire(&pi->nwrite) != smp_load_acquire(&pi->nread)) {
+        spin_unlock(&pi->writer_lock);
+        return 0; /* data available, caller will re-check under reader_lock */
+    }
+    tq_wait_in_state(&pi->nread_queue, &pi->writer_lock, NULL,
+                     THREAD_INTERRUPTIBLE);
     spin_unlock(&pi->writer_lock);
+    if (signal_pending(current))
+        return -EINTR;
     // Return 0 to re-check conditions (wakeup may be from close or data)
     return 0;
 }
@@ -116,8 +132,20 @@ static int __pipe_wait_reader(struct pipe *pi) {
         // Return 0 to let caller re-check and detect broken pipe properly
         return 0;
     }
-    tq_wait(&pi->nwrite_queue, &pi->reader_lock, NULL);
+    /*
+     * Re-check space availability after the writer→reader lock transition.
+     * Same lost-wakeup avoidance as __pipe_wait_writer (see comment there).
+     */
+    if (PIPE_WRITABLE_SIZE(smp_load_acquire(&pi->nwrite),
+                           smp_load_acquire(&pi->nread)) > 0) {
+        spin_unlock(&pi->reader_lock);
+        return 0; /* space available, caller will re-check under writer_lock */
+    }
+    tq_wait_in_state(&pi->nwrite_queue, &pi->reader_lock, NULL,
+                     THREAD_INTERRUPTIBLE);
     spin_unlock(&pi->reader_lock);
+    if (signal_pending(current))
+        return -EINTR;
     // Return 0 to re-check conditions (wakeup may be from close or space
     // available)
     return 0;
@@ -166,8 +194,11 @@ ssize_t pipe_read(struct pipe *pi, char *buf, size_t count, bool user) {
                 spin_unlock(&pi->reader_lock);
 
                 ret = __pipe_wait_writer(pi);
-                if (ret < 0)
-                    goto out;
+                if (ret < 0) {
+                    if (total > 0)
+                        goto out;
+                    return ret;
+                }
                 spin_lock(&pi->reader_lock);
             } else {
                 size_t read_size =
@@ -255,8 +286,11 @@ ssize_t pipe_write(struct pipe *pi, const char *buf, size_t count, bool user) {
                 spin_unlock(&pi->writer_lock);
 
                 ret = __pipe_wait_reader(pi);
-                if (ret < 0)
-                    goto out;
+                if (ret < 0) {
+                    if (total > (ssize_t)tmp_len)
+                        goto out;
+                    return ret;
+                }
                 spin_lock(&pi->writer_lock);
             } else {
                 size_t write_size = min(tmp_len - tmp_pos, writable);
@@ -313,12 +347,49 @@ static int __pipe_file_release(struct vfs_inode *inode, struct vfs_file *file) {
     return 0;
 }
 
+/*
+ * __pipe_file_poll - check pipe readiness for I/O
+ *
+ * Checks the pipe's nread/nwrite counters and end-of-pipe flags
+ * without blocking.  Returns the subset of @events that are ready.
+ */
+static int __pipe_file_poll(struct vfs_file *file, short events) {
+    struct pipe *pi = file->pipe;
+    short revents = 0;
+
+    if (pi == NULL)
+        return POLLNVAL;
+
+    uint nwrite = smp_load_acquire(&pi->nwrite);
+    uint nread  = smp_load_acquire(&pi->nread);
+    size_t readable = (size_t)(nwrite - nread);
+    size_t writable = PIPESIZE - readable;
+
+    if (events & (POLLIN | POLLRDNORM)) {
+        if (readable > 0 || !PIPE_WRITABLE(pi))
+            revents |= (events & (POLLIN | POLLRDNORM));
+    }
+
+    if (events & (POLLOUT | POLLWRNORM)) {
+        if (writable > 0 && PIPE_READABLE(pi))
+            revents |= (events & (POLLOUT | POLLWRNORM));
+    }
+
+    if (!PIPE_READABLE(pi))
+        revents |= POLLERR;
+    if (!PIPE_WRITABLE(pi))
+        revents |= POLLHUP;
+
+    return revents;
+}
+
 static struct vfs_file_ops pipe_file_ops = {
     .read = __pipe_file_read,
     .write = __pipe_file_write,
     .llseek = NULL,
     .release = __pipe_file_release,
     .fsync = NULL,
+    .poll = __pipe_file_poll,
     .fault = NULL,
 };
 

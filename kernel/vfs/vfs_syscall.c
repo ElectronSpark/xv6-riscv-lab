@@ -28,6 +28,7 @@
 #include <mm/vm.h>
 #include "printf.h"
 #include "dev/cdev.h"
+#include "vfs/poll.h"
 #include "timer/timer.h"
 #include "signal.h"
 #include "uabi/linux_dirent64.h"
@@ -1754,4 +1755,199 @@ uint64 sys_statfs(void) {
         return -EFAULT;
     }
     return 0;
+}
+
+struct pollfd_k {
+    int fd;
+    short events;
+    short revents;
+};
+
+/*
+ * __vfs_poll_always_ready - report requested events as ready based on
+ * file access mode.  Used as fallback when no specific poll callback
+ * is available (regular files, block devices, /dev/null, etc.).
+ */
+static inline short __vfs_poll_always_ready(short events, int f_flags) {
+    short revents = 0;
+    if ((events & (POLLIN | POLLRDNORM)) &&
+        ((f_flags & O_ACCMODE) != O_WRONLY))
+        revents |= (events & (POLLIN | POLLRDNORM));
+    if ((events & (POLLOUT | POLLWRNORM)) &&
+        ((f_flags & O_ACCMODE) != O_RDONLY))
+        revents |= (events & (POLLOUT | POLLWRNORM));
+    return revents;
+}
+
+/*
+ * __vfs_poll_scan - check readiness of a set of file descriptors
+ *
+ * Dispatches poll queries based on file type:
+ *
+ *   1. f->ops->poll != NULL           → delegate to VFS file_ops poll
+ *      (covers pipes, lwIP sockets, and any future pollable file type)
+ *
+ *   2. inode == NULL && f->ops == NULL → legacy socket (struct sock)
+ *      → call sockpoll()
+ *
+ *   3. S_ISCHR(inode->mode)           → character device
+ *      → call cdev->ops.poll() if present, else always ready
+ *
+ *   4. everything else                → always ready
+ *      (regular files, directories, block devices)
+ */
+static int __vfs_poll_scan(struct pollfd_k *pfds, int nfds) {
+    int ready = 0;
+
+    for (int i = 0; i < nfds; i++) {
+        struct pollfd_k *pfd = &pfds[i];
+        pfd->revents = 0;
+
+        if (pfd->fd < 0)
+            continue;
+
+        struct vfs_file *f = __vfs_argfd(pfd->fd);
+        if (f == NULL) {
+            pfd->revents |= POLLNVAL;
+            ready++;
+            continue;
+        }
+
+        /*
+         * Priority 1: if the file has vfs_file_ops with a poll callback,
+         * use it.  This is the primary dispatch path for pipes, lwIP
+         * sockets, and any file type that defines file_ops->poll.
+         */
+        if (f->ops != NULL && f->ops->poll != NULL) {
+            pfd->revents = f->ops->poll(f, pfd->events);
+            goto done;
+        }
+
+        struct vfs_inode *inode = f->inode.inode;
+
+        if (inode == NULL) {
+            /*
+             * No inode AND no file_ops (or no poll callback in ops).
+             *
+             * If f->ops == NULL entirely, this is a legacy socket
+             * created via vfs_sockalloc() — poll its rxq.
+             *
+             * If f->ops != NULL but ops->poll == NULL, treat as
+             * always ready (shouldn't normally happen).
+             */
+            if (f->ops == NULL && f->sock != NULL) {
+                // pfd->revents = sockpoll(f->sock, pfd->events);
+            } else {
+                pfd->revents = __vfs_poll_always_ready(pfd->events,
+                                                       f->f_flags);
+            }
+        } else if (S_ISCHR(inode->mode)) {
+            /*
+             * Character device — delegate to the device's poll callback
+             * if one is registered.  Otherwise fall back to always ready.
+             */
+            cdev_t *cdev = f->cdev;
+            if (cdev != NULL && cdev->ops.poll != NULL) {
+                pfd->revents = cdev->ops.poll(cdev, pfd->events);
+            } else {
+                pfd->revents = __vfs_poll_always_ready(pfd->events,
+                                                       f->f_flags);
+            }
+        } else {
+            /*
+             * Regular files, directories, block devices.
+             * If file_ops provides a poll callback, use it; otherwise
+             * report always ready (standard POSIX behaviour for
+             * regular files).
+             */
+            pfd->revents = __vfs_poll_always_ready(pfd->events, f->f_flags);
+        }
+
+done:
+        vfs_fput(f);
+
+        if (pfd->revents != 0)
+            ready++;
+    }
+
+    return ready;
+}
+
+/*
+ * sys_vfs_poll - simple event polling over file descriptors
+ *
+ * Arguments:
+ *   a0 = pointer to struct pollfd array
+ *   a1 = nfds
+ *   a2 = timeout_ms (-1: infinite, 0: non-blocking)
+ */
+uint64 sys_vfs_poll(void) {
+    uint64 fds_addr;
+    int nfds;
+    int timeout_ms;
+
+    argaddr(0, &fds_addr);
+    argint(1, &nfds);
+    argint(2, &timeout_ms);
+
+    if (nfds < 0 || nfds > NOFILE) {
+        return -EINVAL;
+    }
+
+    if (nfds == 0) {
+        if (timeout_ms == 0) {
+            return 0;
+        }
+        uint64 start = get_jiffs();
+        while (timeout_ms < 0 || (int)(get_jiffs() - start) < timeout_ms) {
+            sleep_ms(1);
+            if (signal_pending(current))
+                return -EINTR;
+        }
+        return 0;
+    }
+
+    size_t bytes = (size_t)nfds * sizeof(struct pollfd_k);
+    struct pollfd_k *pfds = kmm_alloc(bytes);
+    if (pfds == NULL) {
+        return -ENOMEM;
+    }
+
+    if (either_copyin(pfds, 1, fds_addr, bytes) < 0) {
+        kmm_free(pfds);
+        return -EFAULT;
+    }
+
+    uint64 start = get_jiffs();
+    int ready;
+    for (;;) {
+        ready = __vfs_poll_scan(pfds, nfds);
+        if (ready > 0) {
+            break;
+        }
+        if (timeout_ms == 0) {
+            break;
+        }
+        if (timeout_ms > 0 && (int)(get_jiffs() - start) >= timeout_ms) {
+            break;
+        }
+        sleep_ms(1);
+        if (signal_pending(current)) {
+            ready = -EINTR;
+            break;
+        }
+    }
+
+    if (ready == -EINTR) {
+        kmm_free(pfds);
+        return -EINTR;
+    }
+
+    if (either_copyout(1, fds_addr, pfds, bytes) < 0) {
+        kmm_free(pfds);
+        return -EFAULT;
+    }
+
+    kmm_free(pfds);
+    return ready;
 }
