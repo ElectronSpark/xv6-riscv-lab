@@ -27,16 +27,34 @@ struct tty_ops {
     int (*ioctl)(struct tty *tty, uint64 cmd, uint64 arg);
 };
 
+/*
+ * Raw-mode ring buffer size.  Must be a power of two for fast
+ * modulo via bitmask.
+ */
+#define TTY_RAW_BUF_SIZE 256
+
 struct tty {
-    spinlock_t lock; // Protects termios and winsize
+    spinlock_t lock; // Protects termios, winsize, and raw buffer
 
     struct termios termios; // Terminal I/O settings
     struct winsize winsize; // Terminal window size
     struct tty_ops *ops;    // Operations for this terminal
     int ref_count;          // Reference count for this terminal
 
-    struct pipe *input_pipe;  // Pipe for incoming data (read by terminal)
+    struct pipe *input_pipe;  // Pipe for incoming data (canonical mode)
     struct pipe *output_pipe; // Pipe for outgoing data (written by terminal)
+
+    /*
+     * Raw-mode (non-canonical) character buffer.
+     *
+     * When ICANON is off, incoming characters bypass the input pipe
+     * and are stored here.  tty_read drains this buffer directly,
+     * giving single-character latency without pipe overhead.
+     */
+    char   raw_buf[TTY_RAW_BUF_SIZE];
+    uint   raw_r; // read index  (consumer: tty_read)
+    uint   raw_w; // write index (producer: tty_input)
+    tq_t   raw_wait; // readers sleep here when buffer empty
 
     void *driver_data; // Driver-specific data pointer
 

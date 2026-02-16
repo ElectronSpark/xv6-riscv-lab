@@ -133,11 +133,26 @@ struct {
 //
 // user write()s to the console go here.
 //
+// When the TTY is active, output post-processing (OPOST/ONLCR) is
+// controlled by the TTY's termios flags.  Bytes are sent directly to
+// the UART via interrupt-driven uartputc — the same approach Linux
+// uses (user writes go straight to the driver, only echo goes through
+// the TTY output pipe / drain thread).
+//
 int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
     int i;
     uint64 src = (uint64)buffer;
     char kbuf[64];
     int written = 0;
+
+    /* Check OPOST flags from the TTY (if active) */
+    int do_onlcr = 1; /* default: convert \n → \r\n */
+    if (console_tty != NULL) {
+        spin_lock(&console_tty->lock);
+        do_onlcr = (console_tty->termios.c_oflag & OPOST) &&
+                    (console_tty->termios.c_oflag & ONLCR);
+        spin_unlock(&console_tty->lock);
+    }
 
     while (written < n) {
         int batch_size = n - written;
@@ -149,10 +164,8 @@ int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
                 return written + i;
         }
 
-        // Output with \n -> \r\n conversion for proper terminal display
-        // Use interrupt-driven uartputc for efficiency
         for (i = 0; i < batch_size; i++) {
-            if (kbuf[i] == '\n')
+            if (do_onlcr && kbuf[i] == '\n')
                 uartputc('\r');
             uartputc(kbuf[i]);
         }
@@ -464,9 +477,13 @@ static void console_tty_input_thread(uint64 arg1, uint64 arg2) {
 /*
  * TTY output drain thread.
  *
- * The TTY line discipline writes echo output (^C, backspace sequences,
- * etc.) into the TTY output pipe. This thread drains that pipe and
- * sends bytes to the actual UART/SBI console.
+ * Drains the TTY output pipe and sends bytes to the UART/SBI console.
+ * Only echo output (from tty_echo_char in the line discipline) flows
+ * through this pipe.  User writes go directly to UART via consolewrite.
+ *
+ * Data arriving from the pipe has already been post-processed by
+ * tty_echo_char (OPOST/ONLCR), so bytes are output verbatim — no
+ * additional \n → \r\n conversion is performed.
  */
 static void console_tty_drain_thread(uint64 arg1, uint64 arg2) {
     (void)arg1;
@@ -481,7 +498,10 @@ static void console_tty_drain_thread(uint64 arg1, uint64 arg2) {
             continue;
         }
         for (ssize_t i = 0; i < n; i++) {
-            consputc((unsigned char)buf[i]);
+            if (!uart_initialized)
+                sbi_console_putchar((unsigned char)buf[i]);
+            else
+                uartputc_sync((unsigned char)buf[i]);
         }
     }
 }

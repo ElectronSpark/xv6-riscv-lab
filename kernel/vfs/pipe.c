@@ -103,6 +103,18 @@ static int __pipe_wait_writer(struct pipe *pi) {
         // Return 0 to let caller re-check and detect EOF properly
         return 0;
     }
+    /*
+     * Re-check data availability after the reader→writer lock transition.
+     *
+     * pipe_read releases reader_lock before calling us.  A writer may
+     * sneak in during that gap: write data, wake nread_queue (nobody on
+     * it yet), and leave.  Without this re-check the reader would sleep
+     * even though data is already in the pipe — a classic lost-wakeup.
+     */
+    if (smp_load_acquire(&pi->nwrite) != smp_load_acquire(&pi->nread)) {
+        spin_unlock(&pi->writer_lock);
+        return 0; /* data available, caller will re-check under reader_lock */
+    }
     tq_wait(&pi->nread_queue, &pi->writer_lock, NULL);
     spin_unlock(&pi->writer_lock);
     // Return 0 to re-check conditions (wakeup may be from close or data)
@@ -115,6 +127,15 @@ static int __pipe_wait_reader(struct pipe *pi) {
         spin_unlock(&pi->reader_lock);
         // Return 0 to let caller re-check and detect broken pipe properly
         return 0;
+    }
+    /*
+     * Re-check space availability after the writer→reader lock transition.
+     * Same lost-wakeup avoidance as __pipe_wait_writer (see comment there).
+     */
+    if (PIPE_WRITABLE_SIZE(smp_load_acquire(&pi->nwrite),
+                           smp_load_acquire(&pi->nread)) > 0) {
+        spin_unlock(&pi->reader_lock);
+        return 0; /* space available, caller will re-check under writer_lock */
     }
     tq_wait(&pi->nwrite_queue, &pi->reader_lock, NULL);
     spin_unlock(&pi->reader_lock);

@@ -27,7 +27,8 @@
 #include <stdio.h>
 #include <curses.h>
 extern int getdents(int fd, void *dirp, int count);
-static int exec(const char *path, char **argv) { return execve(path, argv, 0); }
+extern char **environ;
+static int exec(const char *path, char **argv) { return execve(path, argv, environ); }
 #else
 #include "user.h"
 #include "kernel/inc/vfs/fcntl.h"
@@ -236,6 +237,8 @@ static char *env_get(const char *name) {
 }
 
 static int env_set(const char *name, const char *value) {
+    // Keep standard environ in sync so exec'd children inherit env
+    setenv(name, value, 1);
     // Update existing
     for (int i = 0; i < MAX_ENV_VARS; i++) {
         if (env_vars[i].used && strcmp(env_vars[i].name, name) == 0) {
@@ -268,6 +271,7 @@ static int env_set(const char *name, const char *value) {
 }
 
 static int env_unset(const char *name) {
+    unsetenv(name);
     for (int i = 0; i < MAX_ENV_VARS; i++) {
         if (env_vars[i].used && strcmp(env_vars[i].name, name) == 0) {
             env_vars[i].used = 0;

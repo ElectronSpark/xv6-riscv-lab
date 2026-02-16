@@ -23,6 +23,7 @@
 #include "lock/spinlock.h"
 #include "proc/thread.h"
 #include "proc/sched.h"
+#include "proc/tq.h"
 #include "mm/vm.h"
 #include "mm/slab.h"
 #include "vfs/pipe.h"
@@ -78,6 +79,9 @@ struct tty *tty_alloc(const char *name, struct tty_ops *ops) {
     tty->ref_count = 1;
     tty->input_pipe = inp;
     tty->output_pipe = outp;
+    tty->raw_r = 0;
+    tty->raw_w = 0;
+    tq_init(&tty->raw_wait, "tty_raw", NULL);
     tty->driver_data = NULL;
     tty->session = NULL;
     safestrcpy(tty->name, name, sizeof(tty->name));
@@ -345,12 +349,29 @@ ssize_t tty_input(struct tty *tty, const char *buf, size_t count) {
         if (L_ECHO(tty))
             tty_echo_char(tty, c);
 
-        /* ---------- push into input pipe ---------- */
+        /* ---------- push character to consumer ---------- */
 
-        char ch = (char)c;
-        spin_unlock(&tty->lock);
-        pipe_write(tty->input_pipe, &ch, 1, 0);
-        spin_lock(&tty->lock);
+        if (!L_CANON(tty)) {
+            /*
+             * Raw mode: store in the direct ring buffer and wake
+             * any reader immediately.  This avoids the pipe's
+             * multi-lock wakeup path, giving single-character
+             * latency for applications like readline.
+             */
+            uint next = (tty->raw_w + 1) & (TTY_RAW_BUF_SIZE - 1);
+            if (next != (tty->raw_r & (TTY_RAW_BUF_SIZE - 1))) {
+                tty->raw_buf[tty->raw_w & (TTY_RAW_BUF_SIZE - 1)] = (char)c;
+                tty->raw_w++;
+            }
+            /* Wake readers — tq_wakeup_all is safe under spinlock */
+            tq_wakeup_all(&tty->raw_wait, 0, 0);
+        } else {
+            /* Canonical mode: push into input pipe */
+            char ch = (char)c;
+            spin_unlock(&tty->lock);
+            pipe_write(tty->input_pipe, &ch, 1, 0);
+            spin_lock(&tty->lock);
+        }
     }
 
     spin_unlock(&tty->lock);
@@ -364,12 +385,53 @@ ssize_t tty_input(struct tty *tty, const char *buf, size_t count) {
 /*
  * tty_read - read data from the terminal
  *
- * In canonical mode this blocks until a full line (terminated by '\n'
- * or EOF) is available.  In raw mode it returns as soon as VMIN bytes
- * are available (VTIME is not implemented).
+ * In canonical mode, reads go through the input pipe (blocks until a
+ * full line is available).  In raw mode, reads drain the tty's direct
+ * ring buffer — each character is available as soon as it arrives,
+ * with no pipe overhead.
  */
 ssize_t tty_read(struct tty *tty, char *buf, size_t count, bool user) {
-    return pipe_read(tty->input_pipe, buf, count, user);
+    spin_lock(&tty->lock);
+    int canon = L_CANON(tty);
+    spin_unlock(&tty->lock);
+
+    if (canon)
+        return pipe_read(tty->input_pipe, buf, count, user);
+
+    /* ---- Raw mode: read from direct ring buffer ---- */
+    ssize_t total = 0;
+
+    spin_lock(&tty->lock);
+    while ((size_t)total < count) {
+        /* Wait for at least one character */
+        while (tty->raw_r == tty->raw_w) {
+            /* tq_wait releases lock, sleeps, re-acquires on wake */
+            tq_wait(&tty->raw_wait, &tty->lock, NULL);
+        }
+
+        /* Drain available characters, up to count */
+        while ((size_t)total < count && tty->raw_r != tty->raw_w) {
+            char ch = tty->raw_buf[tty->raw_r & (TTY_RAW_BUF_SIZE - 1)];
+            tty->raw_r++;
+            spin_unlock(&tty->lock);
+
+            if (user) {
+                if (either_copyout(1, (uint64)buf + total, &ch, 1) < 0) {
+                    return total > 0 ? total : -EFAULT;
+                }
+            } else {
+                buf[total] = ch;
+            }
+            total++;
+            spin_lock(&tty->lock);
+        }
+
+        /* Return after first batch (like read(2) semantics) */
+        break;
+    }
+    spin_unlock(&tty->lock);
+
+    return total;
 }
 
 /* ------------------------------------------------------------------ */

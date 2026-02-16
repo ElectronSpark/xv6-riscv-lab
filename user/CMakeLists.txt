@@ -400,6 +400,7 @@ if(USE_NEWLIB)
     add_newlib_program(_ntypesize ${NEWLIB_XV6_DIR}/src/misc/newlib_typesizes.c)
     add_newlib_program(_nmalloc ${NEWLIB_XV6_DIR}/src/misc/newlib_malloc_smoke.c)
     add_newlib_program(_nettest ${NEWLIB_XV6_DIR}/src/misc/nettest.c)
+    add_newlib_program(_rawecho ${NEWLIB_XV6_DIR}/src/misc/rawecho_test.c)
 
     set(NCURSES_SRC_DIR "${CMAKE_SOURCE_DIR}/user/ncurses")
     set(NCURSES_BUILD_DIR "${CMAKE_BINARY_DIR}/ncurses/build-xv6")
@@ -445,21 +446,21 @@ if(USE_NEWLIB)
                         --without-ensurepip
                         ac_cv_file__dev_ptmx=no
                         ac_cv_file__dev_ptc=no
-                        ac_cv_header_curses_h=yes
-                        ac_cv_header_ncurses_h=yes
-                        ac_cv_header_term_h=yes
-                        ac_cv_lib_ncurses_initscr=yes
-                        ac_cv_lib_curses_filter=yes
-                        ac_cv_lib_curses_has_key=yes
-                        ac_cv_lib_curses_immedok=yes
-                        ac_cv_lib_curses_is_pad=yes
-                        ac_cv_lib_curses_is_term_resized=yes
-                        ac_cv_lib_curses_resizeterm=yes
-                        ac_cv_lib_curses_resize_term=yes
-                        ac_cv_lib_curses_syncok=yes
-                        ac_cv_lib_curses_typeahead=yes
-                        ac_cv_lib_curses_use_env=yes
-                        ac_cv_lib_curses_wchgat=yes
+                        ac_cv_header_curses_h=no
+                        ac_cv_header_ncurses_h=no
+                        ac_cv_header_term_h=no
+                        ac_cv_lib_ncurses_initscr=no
+                        ac_cv_lib_curses_filter=no
+                        ac_cv_lib_curses_has_key=no
+                        ac_cv_lib_curses_immedok=no
+                        ac_cv_lib_curses_is_pad=no
+                        ac_cv_lib_curses_is_term_resized=no
+                        ac_cv_lib_curses_resizeterm=no
+                        ac_cv_lib_curses_resize_term=no
+                        ac_cv_lib_curses_syncok=no
+                        ac_cv_lib_curses_typeahead=no
+                        ac_cv_lib_curses_use_env=no
+                        ac_cv_lib_curses_wchgat=no
                         ac_cv_lib_ncursesw_initscr=no
                         ac_cv_header_readline_readline_h=yes
                         ac_cv_lib_readline_readline=yes
@@ -472,17 +473,14 @@ if(USE_NEWLIB)
             COMMENT "Configuring CPython cross build in ${CPYTHON_BUILD_DIR}"
         )
 
-        # After configure, write Modules/Setup.local to enable _curses and
-        # readline as statically-linked built-in modules.
+        # After configure, write Modules/Setup.local to enable
+        # readline as a statically-linked built-in module.
         set(CPYTHON_SETUP_LOCAL "${CPYTHON_BUILD_DIR}/Modules/Setup.local")
         add_custom_command(
             OUTPUT ${CPYTHON_BUILD_DIR}/Makefile
             COMMAND ${CMAKE_COMMAND} -E echo
-                    "_curses _cursesmodule.c -I${NCURSES_INCLUDE_DIR} -L${NCURSES_BUILD_DIR}/lib -lncurses"
-                    > ${CPYTHON_SETUP_LOCAL}
-            COMMAND ${CMAKE_COMMAND} -E echo
                     "readline readline.c -I${CMAKE_SOURCE_DIR}/user -L${READLINE_BUILD_DIR} -lreadline -L${NCURSES_BUILD_DIR}/lib -lncurses"
-                    >> ${CPYTHON_SETUP_LOCAL}
+                    > ${CPYTHON_SETUP_LOCAL}
             APPEND
         )
 
@@ -534,6 +532,7 @@ if(USE_NEWLIB)
                         --without-manpages
                         --without-progs
                         --without-tests
+                        --with-fallbacks=xterm,xterm-256color,vt100,dumb
                         cf_cv_have_tcgetattr=yes
             COMMAND ${CMAKE_COMMAND} -E chdir ${NCURSES_BUILD_DIR} make -j1
             # Create ncurses.h symlink expected by CPython's py_curses.h
@@ -694,7 +693,7 @@ if(USE_NEWLIB)
     if(USE_LOCAL_NEWLIB)
         add_dependencies(user_programs local_newlib_install)
     endif()
-    add_dependencies(user_programs _nwclock_newlib _newlibtest_newlib _ntypesize_newlib _nmalloc_newlib _nettest_newlib)
+    add_dependencies(user_programs _nwclock_newlib _newlibtest_newlib _ntypesize_newlib _nmalloc_newlib _nettest_newlib _rawecho_newlib)
     if(TARGET _sh_newlib)
         add_dependencies(user_programs _sh_newlib)
     endif()
