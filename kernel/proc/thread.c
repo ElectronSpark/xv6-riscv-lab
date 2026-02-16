@@ -415,13 +415,12 @@ static void init_entry(struct context *prev) {
     // This initializes VFS, mounts filesystems, and sets up root.
     start_kernel_post_init();
 
-    // Load /init directly via exec — no initcode trampoline needed.
+    // Load /bin/init directly via exec — no initcode trampoline needed.
     char *argv[] = {"init", 0};
-    int ret = exec("/init", argv);
-    if (ret < 0)
-        panic("init_entry: exec /init failed");
+    int ret = exec("/bin/init", argv);
+    assert(ret >= 0, "init_entry: exec /bin/init failed");
 
-    // Return to user space running /init
+    // Return to user space running /bin/init
     smp_mb();
     usertrapret();
 }

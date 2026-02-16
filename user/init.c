@@ -14,6 +14,18 @@
 #ifndef CONSOLE_MINOR
 #define CONSOLE_MINOR 1
 #endif
+#ifndef NULL_MAJOR
+#define NULL_MAJOR 1
+#endif
+#ifndef NULL_MINOR
+#define NULL_MINOR 2
+#endif
+#ifndef RANDOM_MAJOR
+#define RANDOM_MAJOR 1
+#endif
+#ifndef RANDOM_MINOR
+#define RANDOM_MINOR 3
+#endif
 
 char *argv[] = {"sh", 0};
 
@@ -23,6 +35,12 @@ int main(void) {
     if (open("/dev/console", O_RDWR) < 0) {
         mknod("/dev/console", S_IFCHR | 0666, CONSOLE_MAJOR, CONSOLE_MINOR);
         open("/dev/console", O_RDWR);
+    }
+    if (open("/dev/null", O_RDWR) < 0) {
+        mknod("/dev/null", S_IFCHR | 0666, NULL_MAJOR, NULL_MINOR);
+    }
+    if (open("/dev/random", O_RDWR) < 0) {
+        mknod("/dev/random", S_IFCHR | 0666, RANDOM_MAJOR, RANDOM_MINOR);
     }
     dup(0); // stdout
     dup(0); // stderr
@@ -35,7 +53,7 @@ int main(void) {
             exit(1);
         }
         if (pid == 0) {
-            exec("sh", argv);
+            exec("/bin/sh", argv);
             printf("init: exec sh failed\n");
             exit(1);
         }
