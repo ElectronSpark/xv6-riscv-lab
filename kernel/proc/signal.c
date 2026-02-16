@@ -28,6 +28,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
+#include "proc_private.h"
 #include "signal.h"
 #include "lock/spinlock.h"
 #include "lock/rcu.h"
@@ -1054,6 +1055,20 @@ void handle_signal(void) {
 
         // Check termination
         if ((masked & sigterm) || THREAD_KILLED(p)) {
+            /* Protect init (PID 1): force-terminate signals that lack
+             * a user handler are silently dropped, matching Linux
+             * kernel_init_free_pages / do_signal behaviour.  Only
+             * explicit SIGKILL from the kernel can kill init. */
+            if (p == __proctab_get_initproc() && !THREAD_KILLED(p)) {
+                /* Consume the termination signals so they don't
+                 * re-trigger on the next return to userspace. */
+                p->signal.sig_pending_mask &= ~sigterm;
+                if (tg != NULL)
+                    tg->shared_pending.sig_pending_mask &= ~sigterm;
+                recalc_sigpending_tsk(p);
+                sigacts_unlock(sa);
+                continue;  /* re-check for other deliverable signals */
+            }
             THREAD_SET_KILLED(p);
             sigacts_unlock(sa);
             break;
@@ -1107,6 +1122,8 @@ void handle_signal(void) {
             if (tg != NULL) {
                 tg->shared_pending.sig_pending_mask &= ~pending_stop;
             }
+            // Record which signal caused the stop
+            p->signal.stop_signal = bits_ffsg(pending_stop);
             // Recalc sigpending flag after modifying pending mask
             recalc_sigpending_tsk(p);
             sigacts_unlock(sa);
@@ -1115,6 +1132,16 @@ void handle_signal(void) {
             tcb_lock(p);
             __thread_state_set(p, THREAD_STOPPED);
             tcb_unlock(p);
+            
+            // Notify parent that child has stopped (SIGCHLD + wakeup)
+            pid_rlock();
+            struct thread *parent = p->parent;
+            pid_runlock();
+            if (parent != NULL) {
+                scheduler_wakeup_interruptible(parent);
+                kill_proc(parent, SIGCHLD);
+            }
+
             scheduler_yield();
             continue; // Re-check after wakeup
         }

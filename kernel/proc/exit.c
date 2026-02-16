@@ -264,7 +264,8 @@ static int __reap_zombie(struct thread *parent, struct thread *child,
     }
 
     __thread_state_set(parent, THREAD_RUNNING);
-    *xstate_out = child->xstate;
+    // Encode exited status: (exit_code << 8) | 0x00
+    *xstate_out = (child->xstate & 0xff) << 8;
     int pid = child->pid;
 
     if (!pid_try_lock_upgrade()) {
@@ -325,12 +326,17 @@ ret_unlocked:
 //   pid  > 0 : wait for the specific child pid (direct lookup, no traversal)
 //   pid == -1: wait for any child (scan children list)
 // options:
-//   WNOHANG (1): return 0 immediately if no matching zombie child
-// Any other option bits are rejected with -EINVAL.
+//   WNOHANG   (1): return 0 immediately if no matching zombie/stopped child
+//   WUNTRACED (2): also return when a child has stopped
+// Status encoding (POSIX):
+//   exited:  (exit_code << 8) | 0x00
+//   stopped: (stop_sig  << 8) | 0x7f
 int waitpid(int target_pid, uint64 addr, int options) {
-    const int WNOHANG = 1;
-    if (options & ~WNOHANG)
+    const int WNOHANG   = 1;
+    const int WUNTRACED = 2;
+    if (options & ~(WNOHANG | WUNTRACED)) {
         return -EINVAL;
+    }
 
     int pid = -1;
     int xstate = 0;
@@ -359,6 +365,17 @@ int waitpid(int target_pid, uint64 addr, int options) {
             bool has_match = false;
             list_foreach_node_safe(&p->children, child, tmp, siblings) {
                 has_match = true;
+                
+                // Check for stopped child (WUNTRACED)
+                if ((options & WUNTRACED) && THREAD_STOPPED(child)) {
+                    __thread_state_set(p, THREAD_RUNNING);
+                    pid = child->pid;
+                    // Encode stopped status: (signal << 8) | 0x7f
+                    int stopsig = child->signal.stop_signal;
+                    xstate = (stopsig << 8) | 0x7f;
+                    goto ret;
+                }
+
                 if (THREAD_ZOMBIE(child)) {
                     pid = __reap_zombie(p, child, &xstate);
                     goto ret_unlocked;
