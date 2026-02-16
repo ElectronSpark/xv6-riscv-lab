@@ -15,3 +15,6 @@
 [submodule "kernel/lwip"]
 	path = kernel/lwip
 	url = https://github.com/ElectronSpark/v6-lwip.git
+[submodule "kernel/lwext4"]
+	path = kernel/lwext4
+	url = https://github.com/ElectronSpark/v6-lwext4.git
