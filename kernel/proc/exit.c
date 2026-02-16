@@ -1,5 +1,7 @@
 #include "proc/thread.h"
 #include "proc/thread_group.h"
+#include "proc/pgroup.h"
+#include "tty/session.h"
 #include "defs.h"
 #include "hlist.h"
 #include "list.h"
@@ -130,6 +132,11 @@ void exit(int status) {
 
         // Remove from thread group and proc table atomically under pid_wlock.
         pid_wlock();
+        // Remove from pgroup and session first
+        pgroup_remove_thread(p);
+        if (p->session != NULL) {
+            session_remove_thread(p->session, p);
+        }
         if (tg != NULL) {
             last_in_group = thread_group_remove(p);
         }
@@ -191,6 +198,10 @@ void exit(int status) {
     // under pid_wlock, then proceed with standard exit path.
     if (tg != NULL) {
         pid_wlock();
+        pgroup_remove_thread(p);
+        if (p->session != NULL) {
+            session_remove_thread(p->session, p);
+        }
         last_in_group = thread_group_remove(p);
         pid_wunlock();
     }
@@ -229,18 +240,47 @@ void exit(int status) {
     panic("exit: __exit_yield should not return");
 }
 
+/*
+ * Spin-wait for a zombie child to leave CPU, then detach and destroy it.
+ *
+ * Caller must hold pid_rlock with parent state == THREAD_INTERRUPTIBLE.
+ * On return the caller holds NO lock; the child has been freed.
+ * Returns the child's pid and writes its exit status to *xstate_out.
+ */
+static int __reap_zombie(struct thread *parent, struct thread *child,
+                         int *xstate_out) {
+    int spin_count = 0;
+    while (smp_load_acquire(&child->sched_entity->on_cpu)) {
+        cpu_relax();
+        spin_count++;
+        if (spin_count > 1000) {
+            __thread_state_set(parent, THREAD_RUNNING);
+            pid_runlock();
+            scheduler_yield();
+            pid_rlock();
+            __thread_state_set(parent, THREAD_INTERRUPTIBLE);
+            spin_count = 0;
+        }
+    }
+
+    __thread_state_set(parent, THREAD_RUNNING);
+    *xstate_out = child->xstate;
+    int pid = child->pid;
+
+    if (!pid_try_lock_upgrade()) {
+        pid_runlock();
+        pid_wlock();
+    }
+    detach_child(parent, child);
+    proctab_proc_remove(child);
+    pid_wunlock();
+    __free_pid();
+    thread_destroy(child);
+    return pid;
+}
+
 // Wait for a child thread to exit and return its pid.
 // Return -1 if this thread has no children.
-//
-// Uses the Linux "set-state-before-check" pattern to avoid lost wakeups:
-// 1. Set state to INTERRUPTIBLE before scanning children
-// 2. Scan for zombies - if found, restore RUNNING and return
-// 3. If not found, yield (scheduler_yield will abort if we were woken)
-// 4. Loop back to step 1
-//
-// Locking: holds pid_rlock while scanning the children list.
-// Upgrades to pid_wlock (via try_upgrade or runlock+wlock) to detach
-// a zombie child, remove it from the proc table, and free its PID.
 int wait(uint64 addr) {
     int pid = -1;
     int xstate = 0;
@@ -250,56 +290,15 @@ int wait(uint64 addr) {
     pid_rlock();
 
     for (;;) {
-        // Set INTERRUPTIBLE BEFORE scanning - this is the Linux pattern.
-        // Any child that calls wakeup_interruptible() while we're scanning
-        // will change our state back to RUNNING (or WAKENING if on_cpu).
         __thread_state_set(p, THREAD_INTERRUPTIBLE);
 
-        // Scan through table looking for exited children.
         list_foreach_node_safe(&p->children, child, tmp, siblings) {
-            // Thread state will never transition back from ZOMBIE, so no need
-            // to lock the child.
             if (THREAD_ZOMBIE(child)) {
-                // Make sure the zombie child has fully switched out of CPU.
-                // The on_cpu window is very short (just context_switch_finish),
-                // so we spin-wait with cpu_relax() rather than yielding.
-                // This avoids a tight loop that could starve other threads.
-                int spin_count = 0;
-                while (smp_load_acquire(&child->sched_entity->on_cpu)) {
-                    cpu_relax();
-                    spin_count++;
-                    // If spinning too long, yield to let other CPU progress
-                    if (spin_count > 1000) {
-                        __thread_state_set(p, THREAD_RUNNING);
-                        pid_runlock();
-                        scheduler_yield(); // Give other CPUs a chance
-                        pid_rlock();
-                        __thread_state_set(p, THREAD_INTERRUPTIBLE);
-                        spin_count = 0;
-                    }
-                }
-                // Found one - set state to RUNNING before returning.
-                // If we were in WAKENING, rq_flush_wake_list will skip us
-                // when it sees our state is no longer WAKENING.
-                __thread_state_set(p, THREAD_RUNNING);
-                xstate = child->xstate;
-                pid = child->pid;
-                if (!pid_try_lock_upgrade()) {
-                    // Failed to upgrade, we need to release and reacquire the
-                    // lock to avoid deadlock.
-                    pid_runlock();
-                    pid_wlock();
-                }
-                detach_child(p, child);
-                proctab_proc_remove(child);
-                pid_wunlock();
-                __free_pid(); // Release the PID slot (lock-free)
-                thread_destroy(child);
+                pid = __reap_zombie(p, child, &xstate);
                 goto ret_unlocked;
             }
         }
 
-        // No point waiting if we don't have any children.
         if (p->children_count == 0) {
             __thread_state_set(p, THREAD_RUNNING);
             pid = -1;
@@ -309,18 +308,86 @@ int wait(uint64 addr) {
         pid_runlock();
         scheduler_yield();
         pid_rlock();
-        // State will be set to INTERRUPTIBLE at the start of next loop
-        // iteration
     }
 
 ret:
     pid_runlock();
 ret_unlocked:
     if (pid >= 0 && addr != 0) {
-        // copy xstate to user.
         if (either_copyout(1, addr, (char *)&xstate, sizeof(xstate)) < 0) {
             return -EFAULT;
         }
+    }
+    return pid;
+}
+
+// waitpid() with limited POSIX semantics:
+//   pid  > 0 : wait for the specific child pid (direct lookup, no traversal)
+//   pid == -1: wait for any child (scan children list)
+// options:
+//   WNOHANG (1): return 0 immediately if no matching zombie child
+// Any other option bits are rejected with -EINVAL.
+int waitpid(int target_pid, uint64 addr, int options) {
+    const int WNOHANG = 1;
+    if (options & ~WNOHANG)
+        return -EINVAL;
+
+    int pid = -1;
+    int xstate = 0;
+    struct thread *p = current;
+
+    pid_rlock();
+
+    for (;;) {
+        __thread_state_set(p, THREAD_INTERRUPTIBLE);
+
+        if (target_pid > 0) {
+            /* Direct lookup — O(1) instead of scanning children. */
+            struct thread *child = get_pid_thread(target_pid);
+            if (IS_ERR(child) || child->parent != p) {
+                __thread_state_set(p, THREAD_RUNNING);
+                pid = -1;
+                goto ret;
+            }
+            if (THREAD_ZOMBIE(child)) {
+                pid = __reap_zombie(p, child, &xstate);
+                goto ret_unlocked;
+            }
+        } else {
+            /* target_pid == -1: scan all children. */
+            struct thread *child, *tmp;
+            bool has_match = false;
+            list_foreach_node_safe(&p->children, child, tmp, siblings) {
+                has_match = true;
+                if (THREAD_ZOMBIE(child)) {
+                    pid = __reap_zombie(p, child, &xstate);
+                    goto ret_unlocked;
+                }
+            }
+            if (!has_match) {
+                __thread_state_set(p, THREAD_RUNNING);
+                pid = -1;
+                goto ret;
+            }
+        }
+
+        if (options & WNOHANG) {
+            __thread_state_set(p, THREAD_RUNNING);
+            pid = 0;
+            goto ret;
+        }
+
+        pid_runlock();
+        scheduler_yield();
+        pid_rlock();
+    }
+
+ret:
+    pid_runlock();
+ret_unlocked:
+    if (pid > 0 && addr != 0) {
+        if (either_copyout(1, addr, (char *)&xstate, sizeof(xstate)) < 0)
+            return -EFAULT;
     }
     return pid;
 }

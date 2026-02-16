@@ -28,7 +28,11 @@
 #define SYS_pause        12
 #define SYS_uptime       13
 #define SYS_sbrk         14
-// 15-19 reserved
+#define SYS_setpgid      15
+#define SYS_getpgid      16
+#define SYS_setsid       17
+#define SYS_getsid       18
+#define SYS_getrandom    19
 
 // --- File system / VFS (20-49) ---
 #define SYS_open         20
@@ -51,7 +55,16 @@
 #define SYS_getdents     37
 #define SYS_getcwd       38
 #define SYS_sync         39
-// 40-49 reserved
+#define SYS_ioctl        40
+#define SYS_tcgetattr    41
+#define SYS_tcsetattr    42
+#define SYS_lseek        43
+#define SYS_dup2         44
+#define SYS_fcntl        45
+#define SYS_access       46
+#define SYS_rename       47
+#define SYS_readlink     48
+#define SYS_stat         49
 
 // --- Memory management (50-69) ---
 #define SYS_mmap         50
@@ -61,7 +74,15 @@
 #define SYS_msync        54
 #define SYS_mincore      55
 #define SYS_madvise      56
-// 57-69 reserved
+#define SYS_gettimeofday 57
+#define SYS_waitpid      58
+#define SYS_nanosleep    59
+#define SYS_ftruncate    60
+#define SYS_getppid      61
+#define SYS_uname        62
+#define SYS_lstat        63
+#define SYS_poll         64
+// 65-69 reserved
 
 // --- Signals (70-89) ---
 #define SYS_sigaction    70

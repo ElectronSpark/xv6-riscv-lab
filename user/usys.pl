@@ -35,13 +35,18 @@ entry("mkdir");
 entry("chdir");
 entry("dup");
 entry("getpid");
+entry("getppid");
 entry("gettid");
 entry("exit_group");
 entry("tgkill");
 entry("tkill");
 entry("sbrk");
+entry("nanosleep");
 entry("sleep");
 entry("uptime");
+entry("gettimeofday");
+entry("waitpid");
+entry("uname");
 entry("sigaction");
 entry("sigalarm");
 entry("sigreturn");
@@ -73,5 +78,11 @@ entry("dumppcache");
 entry("dumprq");
 entry("kernbase");
 entry("dumpinode", 1);
+
+# Process group / session
+entry("setpgid");
+entry("getpgid");
+entry("setsid");
+entry("getsid");
 
 entry("sync");

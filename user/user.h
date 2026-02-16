@@ -8,6 +8,35 @@ struct stat;
 #include "kernel/inc/mm/memstat.h"
 #include "kernel/inc/clone_flags.h"
 
+struct timeval {
+	int64 tv_sec;
+	int64 tv_usec;
+};
+
+struct timespec {
+	int64 tv_sec;
+	int64 tv_nsec;
+};
+
+struct utsname {
+	char sysname[65];
+	char nodename[65];
+	char release[65];
+	char version[65];
+	char machine[65];
+};
+
+#ifndef F_OK
+#define F_OK 0
+#define X_OK 1
+#define W_OK 2
+#define R_OK 4
+#endif
+
+#ifndef WNOHANG
+#define WNOHANG 1
+#endif
+
 // mmap protection flags (POSIX)
 #define PROT_NONE 0x0
 #define PROT_READ 0x1
@@ -59,13 +88,18 @@ int mkdir(const char *);
 int chdir(const char *);
 int dup(int);
 int getpid(void);
+int getppid(void);
 int gettid(void);
 int tgkill(int tgid, int tid, int sig);
 int tkill(int tid, int sig);
 void exit_group(int) __attribute__((noreturn));
 char *sbrk(int64);
 int sleep(int);
+int nanosleep(const struct timespec *req, struct timespec *rem);
 int uptime(void);
+int gettimeofday(struct timeval *tv, void *tz);
+int waitpid(int pid, int *status, int options);
+int uname(struct utsname *buf);
 // int sigalarm(int ticks, void (*handler)());
 int sigaction(int signum, struct sigaction *act, struct sigaction *oldact);
 int sigreturn(void);
@@ -104,6 +138,12 @@ int chroot(const char *path);
 int mount(const char *source, const char *target, const char *fstype);
 int umount(const char *target);
 char *getcwd(char *buf, int size);
+
+// Process group / session
+int setpgid(int pid, int pgid);
+int getpgid(int pid);
+int setsid(void);
+int getsid(int pid);
 
 void sync(void);
 

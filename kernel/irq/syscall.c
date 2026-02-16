@@ -76,9 +76,14 @@ extern uint64 sys_wait(void);
 extern uint64 sys_kill(void);
 extern uint64 sys_exec(void);
 extern uint64 sys_getpid(void);
+extern uint64 sys_getppid(void);
 extern uint64 sys_sbrk(void);
 extern uint64 sys_sleep(void);
 extern uint64 sys_uptime(void);
+extern uint64 sys_gettimeofday(void);
+extern uint64 sys_waitpid(void);
+extern uint64 sys_nanosleep(void);
+extern uint64 sys_uname(void);
 extern uint64 sys_sigaction(void);
 extern uint64 sys_sigpending(void);
 extern uint64 sys_sigprocmask(void);
@@ -92,6 +97,10 @@ extern uint64 sys_tkill(void);
 extern uint64 sys_sigsuspend(void);
 extern uint64 sys_sigwait(void);
 extern uint64 sys_vfork(void);
+extern uint64 sys_setpgid(void);
+extern uint64 sys_getpgid(void);
+extern uint64 sys_setsid(void);
+extern uint64 sys_getsid(void);
 extern uint64 sys_mmap(void);
 extern uint64 sys_munmap(void);
 extern uint64 sys_mprotect(void);
@@ -131,6 +140,7 @@ extern uint64 sys_chroot(void);
 extern uint64 sys_mount(void);
 extern uint64 sys_umount(void);
 extern uint64 sys_getcwd(void);
+extern uint64 sys_uname(void);
 
 /*
  * Syscall routing table
@@ -156,6 +166,7 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_chdir] sys_vfs_chdir, // VFS
     [SYS_dup] sys_vfs_dup,     // VFS
     [SYS_getpid] sys_getpid,
+    [SYS_getppid] sys_getppid,
     [SYS_sbrk] sys_sbrk,
     [SYS_sleep] sys_sleep,
     [SYS_uptime] sys_uptime,
@@ -181,6 +192,10 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_exit_group] sys_exit_group,
     [SYS_tgkill] sys_tgkill,
     [SYS_vfork] sys_vfork,
+    [SYS_setpgid] sys_setpgid,
+    [SYS_getpgid] sys_getpgid,
+    [SYS_setsid] sys_setsid,
+    [SYS_getsid] sys_getsid,
     [SYS_mmap] sys_mmap,
     [SYS_munmap] sys_munmap,
     [SYS_mprotect] sys_mprotect,
@@ -196,6 +211,10 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_kernbase] sys_kernbase,
     [SYS_dumpinode] sys_dumpinode,
     [SYS_sync] sys_sync,
+    [SYS_gettimeofday] sys_gettimeofday,
+    [SYS_waitpid] sys_waitpid,
+    [SYS_nanosleep] sys_nanosleep,
+    [SYS_uname] sys_uname,
     [SYS_getdents] sys_getdents,
     [SYS_chroot] sys_chroot,
     [SYS_mount] sys_mount,

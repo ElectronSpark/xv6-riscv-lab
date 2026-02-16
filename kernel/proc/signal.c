@@ -40,6 +40,7 @@
 #include "smp/ipi.h"
 #include "clone_flags.h"
 #include "errno.h"
+#include "proc/pgroup.h"
 
 static slab_cache_t __sigacts_pool;
 static slab_cache_t __ksiginfo_pool;
@@ -552,7 +553,8 @@ int signal_send(int pid, ksiginfo_t *info) {
         return -EINVAL; // Invalid PID or signal number
     }
     rcu_read_lock();
-    if (get_pid_thread(pid, &p) != 0) {
+    p = get_pid_thread(pid);
+    if (IS_ERR(p)) {
         rcu_read_unlock();
         return -ESRCH; // No thread found
     }
@@ -803,8 +805,8 @@ int sigaction(int signum, struct sigaction *act, struct sigaction *oldact) {
 }
 
 int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
-    if (set != NULL &&
-        how != SIG_BLOCK && how != SIG_UNBLOCK && how != SIG_SETMASK) {
+    if (set != NULL && how != SIG_BLOCK && how != SIG_UNBLOCK &&
+        how != SIG_SETMASK) {
         return -EINVAL; // Invalid operation
     }
     struct thread *p = current;
@@ -1216,9 +1218,16 @@ void handle_signal(void) {
 
 // Kill the threads with the given pid (process-directed signal).
 // When the target has a thread group, this sends to the group (POSIX kill()).
+// When pid < 0, send signal to every process in process group -pid.
 // The victim won't exit until it tries to return
 // to user space (see usertrap() in trap.c).
 int kill(int pid, int signum) {
+    /* POSIX: kill(-pgid, sig) sends to process group */
+    if (pid < -1)
+        return pgroup_kill(-pid, signum);
+    if (pid == -1)
+        return -EINVAL; /* kill(-1) (all processes) not supported */
+
     ksiginfo_t info = {0};
     info.signo = signum;
     info.sender = current;
@@ -1250,7 +1259,8 @@ int tgkill(int tgid, int tid, int signum) {
     }
     struct thread *p = NULL;
     rcu_read_lock();
-    if (get_pid_thread(tid, &p) != 0 || p == NULL) {
+    p = get_pid_thread(tid);
+    if (IS_ERR(p)) {
         rcu_read_unlock();
         return -ESRCH;
     }
@@ -1276,7 +1286,8 @@ int tkill(int tid, int signum) {
     }
     struct thread *p = NULL;
     rcu_read_lock();
-    if (get_pid_thread(tid, &p) != 0 || p == NULL) {
+    p = get_pid_thread(tid);
+    if (IS_ERR(p)) {
         rcu_read_unlock();
         return -ESRCH;
     }
@@ -1314,7 +1325,8 @@ static int signal_send_to_tgroup(int tgid, ksiginfo_t *info) {
 
     rcu_read_lock();
 
-    if (get_pid_thread(tgid, &leader) != 0 || leader == NULL) {
+    leader = get_pid_thread(tgid);
+    if (IS_ERR(leader)) {
         rcu_read_unlock();
         return -ESRCH;
     }
@@ -1366,7 +1378,8 @@ int kill_from_kernel(int pid, int signum) {
     if (signum == 0) {
         struct thread *p = NULL;
         rcu_read_lock();
-        if (get_pid_thread(pid, &p) != 0 || p == NULL) {
+        p = get_pid_thread(pid);
+        if (IS_ERR(p)) {
             rcu_read_unlock();
             return -ESRCH;
         }

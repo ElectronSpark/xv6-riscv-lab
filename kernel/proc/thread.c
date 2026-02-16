@@ -1,5 +1,7 @@
 #include "proc/thread.h"
 #include "proc/thread_group.h"
+#include "proc/pgroup.h"
+#include "tty/session.h"
 #include "defs.h"
 #include "hlist.h"
 #include "list.h"
@@ -119,11 +121,8 @@ void proc_assert_holding(struct thread *p) {
     assert(spin_holding(&p->lock), "proc_assert_holding: thread lock not held");
 }
 
-// initialize the proc table and thread group subsystem.
-void thread_init(void) {
-    __proctab_init();
-    thread_group_init();
-}
+// initialize the proc table.
+void thread_init(void) { __proctab_init(); }
 
 // Attach a newly forked thread to the given parent as its child.
 // This function is called by fork/clone to set up the parent-child
@@ -206,6 +205,9 @@ struct thread *thread_create(void *entry, uint64 arg1, uint64 arg2,
     p->arg[0] = arg1;
     p->arg[1] = arg2;
     p->pid = -1;
+    p->tgid = -1;
+    p->pgid = -1;
+    p->sid = -1;
 
     sched_entity_init(p->sched_entity, p);
 
@@ -275,13 +277,14 @@ struct thread *kthread_create(const char *name, void *entry, uint64 arg1,
     pid_wlock();
     attach_child(initproc, p);
     proctab_proc_add(p);
-    pid_wunlock();
 
     // Allocate a thread group for the kernel thread (each kthread is its own
-    // group)
-    if (thread_group_alloc(p) == 0) {
-        p->thread_group->tgid = p->pid;
-    }
+    // group). Kernel threads don't get pgroup/session — they are not POSIX
+    // processes visible to user-space job control.
+    int tg_ret = thread_group_alloc(p);
+    assert(tg_ret == 0, "kthread_create: thread_group_alloc failed");
+
+    pid_wunlock();
 
     rcu_read_unlock();
 
@@ -435,11 +438,14 @@ void userinit(void) {
     // proctab_proc_add assigns the actual PID number
     pid_wlock();
     proctab_proc_add(p);
-    pid_wunlock();
 
-    // Allocate a thread group for the init process (it is the group leader)
-    assert(thread_group_alloc(p) == 0, "userinit: thread_group_alloc failed");
-    p->thread_group->tgid = p->pid;
+    // Initialize subsystems and create the first task hierarchy:
+    //   session 1 → pgroup 1 → thread_group(init) → init thread
+    thread_group_init(p);
+    pgroup_init(p);
+    session_init(p);
+
+    pid_wunlock();
 
     printf("Init process kernel stack size order: %d\n", p->kstack_order);
 

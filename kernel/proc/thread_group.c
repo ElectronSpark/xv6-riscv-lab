@@ -7,13 +7,17 @@
  *
  * Design:
  * - Each thread has a pointer to its thread_group (never NULL for active
- * threads)
+ *   threads)
  * - A thread_group is allocated from a slab cache
  * - Refcounted: each member thread holds one reference
  * - Thread group leader is the first thread; its PID is the TGID
  * - Process-directed signals go to shared_pending; any eligible thread handles
- * them
+ *   them
  * - exit_group() sends SIGKILL to all threads in the group
+ *
+ * Hierarchy:
+ *   session → pgroup → thread_group → thread
+ *   All hierarchy pointers are protected by pid_lock (rwlock).
  *
  * Locking:
  *   All thread_group fields are protected by the global pid_lock (rwlock):
@@ -21,13 +25,15 @@
  *     - pid_rlock for read-only traversal (signal delivery, queries)
  *   Shared pending signal state (enqueue/dequeue of ksiginfo) is additionally
  *   serialized by sigacts->lock (shared among all group threads via
- * CLONE_SIGHAND).
+ *   CLONE_SIGHAND).
  *
  *   Lock ordering:  pid_lock > sigacts.lock > tcb_lock
  */
 
 #include "proc/thread_group.h"
 #include "proc/thread.h"
+#include "proc/pgroup.h"
+#include "tty/session.h"
 #include "signal.h"
 #include "defs.h"
 #include "printf.h"
@@ -43,6 +49,8 @@ static slab_cache_t __tg_pool;
 
 #define TG_MAX_SIGINFO_PER_SIGNAL 8
 
+static void __tg_sigkill_all(struct thread_group *tg, struct thread *skip);
+
 static int __tg_siginfo_queue_len(sigpending_t *sq) {
     int n = 0;
     ksiginfo_t *pos = NULL;
@@ -53,9 +61,13 @@ static int __tg_siginfo_queue_len(sigpending_t *sq) {
 
 // ───── Subsystem initialization ─────
 
-void thread_group_init(void) {
+void thread_group_init(struct thread *initproc) {
     slab_cache_init(&__tg_pool, "thread_group", sizeof(struct thread_group),
                     SLAB_FLAG_STATIC);
+
+    /* Create the first thread group for the init process */
+    int ret = thread_group_alloc(initproc);
+    assert(ret == 0, "thread_group_init: thread_group_alloc failed");
 }
 
 // ───── Reference counting ─────
@@ -76,6 +88,33 @@ void thread_group_put(struct thread_group *tg) {
     // refcount was 1 → 0: free the thread group
     tg_shared_pending_destroy(tg);
     slab_free(tg);
+}
+
+void thread_group_live_dec(struct thread_group *tg) {
+    if (tg == NULL)
+        return;
+    assert(atomic_dec(&tg->live_threads),
+           "Thread group live thread count went negative");
+}
+
+/*
+ * Look up a thread group by its TGID.
+ *
+ * Finds the thread whose pid == tgid (the group leader) using
+ * get_pid_thread(), then returns its thread_group pointer.
+ *
+ * Returns the thread_group pointer, or ERR_PTR(-ESRCH) if not found.
+ * The caller must be inside an rcu_read_lock() section; the returned
+ * pointer is only stable while RCU read-side is held or pid_lock is held.
+ */
+struct thread_group *get_thread_group(pid_t tgid) {
+    struct thread *t = get_pid_thread(tgid);
+    if (IS_ERR(t))
+        return ERR_PTR(-ESRCH);
+    struct thread_group *tg = t->thread_group;
+    if (tg == NULL)
+        return ERR_PTR(-ESRCH);
+    return tg;
 }
 
 // ───── Shared pending signal helpers ─────
@@ -106,6 +145,12 @@ void tg_shared_pending_destroy(struct thread_group *tg) {
 
 // ───── Thread group lifecycle ─────
 
+/**
+ * Allocate and initialize a new thread group.
+ * The leader is linked into the group with live_threads=1, refcount=1.
+ * The tgid is set to the leader's pid (must already be assigned).
+ * Caller must hold pid_wlock for hierarchy mutations.
+ */
 int thread_group_alloc(struct thread *leader) {
     assert(leader != NULL, "thread_group_alloc: NULL leader");
 
@@ -116,10 +161,9 @@ int thread_group_alloc(struct thread *leader) {
 
     memset(tg, 0, sizeof(*tg));
     list_entry_init(&tg->thread_list);
+    list_entry_init(&tg->list_entry);
     tg->group_leader = leader;
-    // TGID will be set after the leader gets a PID assigned
-    // (in proctab_proc_add). For now set to -1.
-    tg->tgid = -1;
+    tg->tgid = leader->pid;
     __atomic_store_n(&tg->live_threads, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&tg->refcount, 1, __ATOMIC_SEQ_CST);
     __atomic_store_n(&tg->group_exit, 0, __ATOMIC_SEQ_CST);
@@ -127,13 +171,13 @@ int thread_group_alloc(struct thread *leader) {
     tg->group_exit_task = NULL;
     tg->group_stop_count = 0;
     tg->group_stop_signo = 0;
+    tg->pgroup = NULL;
 
     tg_shared_pending_init(tg);
 
     // Link leader into the thread group
     leader->thread_group = tg;
     leader->tgid = leader->pid;
-    tg->tgid = leader->pid;
     list_entry_init(&leader->tg_entry);
     list_entry_push(&tg->thread_list, &leader->tg_entry);
 
@@ -144,16 +188,18 @@ int thread_group_alloc(struct thread *leader) {
 void thread_group_add(struct thread_group *tg, struct thread *child) {
     assert(tg != NULL, "thread_group_add: NULL tg");
     assert(child != NULL, "thread_group_add: NULL child");
+    assert(child->thread_group == NULL,
+           "thread_group_add: child already in a group");
     pid_assert_wholding();
 
     child->thread_group = tg;
     child->tgid = tg->tgid;
     list_entry_init(&child->tg_entry);
-
     list_entry_push(&tg->thread_list, &child->tg_entry);
-    atomic_inc(&tg->live_threads);
-
     thread_group_get(tg); // One ref per member thread
+    if (!THREAD_ZOMBIE(child)) {
+        atomic_inc(&tg->live_threads);
+    }
 }
 
 // Caller must hold pid_wlock.
@@ -171,10 +217,15 @@ bool thread_group_remove(struct thread *p) {
     if (!LIST_ENTRY_IS_DETACHED(&p->tg_entry)) {
         list_entry_detach(&p->tg_entry);
     }
-    int remaining = atomic_sub(&tg->live_threads, 1);
     // atomic_sub returns the *previous* value, so remaining-1 == new count
-    if (remaining <= 1) {
+    if (atomic_sub(&tg->live_threads, 1) <= 1) {
         last = true;
+    }
+
+    // When the last thread exits, remove the thread_group from its
+    // process group (which may cascade to session cleanup).
+    if (last) {
+        pgroup_remove_tg(tg);
     }
 
     // Don't clear p->thread_group here — the leader's zombie state
@@ -213,9 +264,7 @@ void thread_group_exit(struct thread *p, int code) {
     }
 
     // Only the first exit_group caller wins
-    int expected = 0;
-    if (!__atomic_compare_exchange_n(&tg->group_exit, &expected, 1, false,
-                                     __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+    if (!atomic_cas_ptr(&tg->group_exit_task, NULL, p)) {
         // Another thread already called exit_group
         exit(code);
         return;
@@ -225,30 +274,42 @@ void thread_group_exit(struct thread *p, int code) {
     tg->group_exit_task = p;
 
     // Send SIGKILL to all other threads in the group.
-    // Acquire pid_rlock to safely iterate the thread list.
-    pid_rlock();
-    struct thread *t;
-    struct thread *tmp;
-    list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
-        if (t == p)
-            continue;
-        // Set the killed flag directly — SIGKILL bypasses all signal logic
-        THREAD_SET_KILLED(t);
-        THREAD_SET_SIGPENDING(t);
-        // If thread is sleeping, wake it up
-        tcb_lock(t);
-        if (THREAD_SLEEPING(t) || THREAD_STOPPED(t)) {
-            __thread_state_set(t, THREAD_RUNNING);
-        }
-        tcb_unlock(t);
-    }
-    pid_runlock();
+    __tg_sigkill_all(tg, p);
 
     // Caller should call exit(code) after this
     exit(code);
 }
 
 // ───── Thread group signal delivery ─────
+
+/*
+ * Broadcast SIGKILL to all threads in a thread group.
+ *
+ * Sets KILLED and SIGPENDING flags on every thread, and wakes any
+ * sleeping or stopped threads so they process the kill promptly.
+ * If @skip is non-NULL, that thread is excluded (used by exit_group
+ * so the caller doesn't kill itself before it can call exit()).
+ *
+ * Caller does not need to hold any lock; pid_rlock is acquired internally\n *
+ * (and is reentrant, so safe to call while already holding pid_rlock).
+ */
+static void __tg_sigkill_all(struct thread_group *tg, struct thread *skip) {
+    pid_rlock();
+    struct thread *t;
+    struct thread *tmp;
+    list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
+        if (t == skip)
+            continue;
+        THREAD_SET_KILLED(t);
+        THREAD_SET_SIGPENDING(t);
+        if (THREAD_SLEEPING(t)) {
+            scheduler_wakeup_interruptible(t);
+        } else if (THREAD_STOPPED(t)) {
+            scheduler_wakeup_stopped(t);
+        }
+    }
+    pid_runlock();
+}
 
 /**
  * Pick an eligible thread from the group to handle a signal.
@@ -300,25 +361,13 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
     int signo = info->signo;
 
     // Check if the group is already dead
-    if (__atomic_load_n(&tg->live_threads, __ATOMIC_ACQUIRE) <= 0) {
+    if (smp_load_acquire(&tg->live_threads) <= 0) {
         return -ESRCH;
     }
 
     // For SIGKILL, bypass shared_pending and send directly to all threads
     if (signo == SIGKILL) {
-        pid_rlock();
-        struct thread *t;
-        struct thread *tmp;
-        list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
-            THREAD_SET_KILLED(t);
-            THREAD_SET_SIGPENDING(t);
-            if (THREAD_SLEEPING(t)) {
-                scheduler_wakeup_interruptible(t);
-            } else if (THREAD_STOPPED(t)) {
-                scheduler_wakeup_stopped(t);
-            }
-        }
-        pid_runlock();
+        __tg_sigkill_all(tg, NULL);
         return 0;
     }
 

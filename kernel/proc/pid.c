@@ -172,14 +172,13 @@ void proctab_proc_add(struct thread *p) {
 // RCU-safe version: get a PCB by pid without holding locks.
 // Caller MUST be within rcu_read_lock()/rcu_read_unlock() critical section.
 // The returned pointer is only valid within the RCU critical section.
-int get_pid_thread(int pid, struct thread **pp) {
-    if (!pp) {
-        return -EINVAL; // Invalid argument
-    }
+struct thread *get_pid_thread(int pid) {
     struct thread dummy = {.pid = pid};
     struct thread *p = hlist_get_rcu(&proc_table.procs, &dummy);
-    *pp = p;
-    return 0;
+    if (p == NULL) {
+        return ERR_PTR(-ESRCH); // No thread found
+    }
+    return p;
 }
 
 void proctab_proc_remove(struct thread *p) {

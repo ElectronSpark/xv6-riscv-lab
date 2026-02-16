@@ -14,6 +14,7 @@ set(PROC_C_SRCS
     sched_idle.c
     sched_fifo.c
     rq_test.c
+    pgroup.c
 )
 
 set(PROC_S_SRCS

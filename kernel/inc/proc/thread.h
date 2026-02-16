@@ -152,7 +152,17 @@ static inline void __thread_state_set(struct thread *p,
 
 struct clone_args;
 
-int get_pid_thread(int pid, struct thread **pp);
+/**
+ * @brief Get a thread by PID using RCU (lock-free)
+ * @param pid The PID to look up
+ * @return ERR_PTR(-ESRCH) if not found, otherwise a pointer to the thread with
+ * the given PID
+ *
+ * This function uses RCU for lock-free lookup. The caller MUST be
+ * within an rcu_read_lock()/rcu_read_unlock() critical section.
+ * The returned pointer is only valid within the RCU critical section.
+ */
+struct thread *get_pid_thread(int pid);
 void exit(int);
 void vfork_done(struct thread *p);
 int thread_clone(struct clone_args *args);
@@ -170,6 +180,7 @@ void thread_init(void);
 void userinit(void);
 void install_user_root(void);
 int wait(uint64);
+int waitpid(int target_pid, uint64 addr, int options);
 void procdump(void);
 void procdump_bt(void);
 void procdump_bt_pid(int pid);

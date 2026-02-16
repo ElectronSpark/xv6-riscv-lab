@@ -36,8 +36,6 @@
 #include "proc/thread_group_types.h"
 
 struct thread;
-struct thread_group;
-struct ksiginfo;
 
 /**
  * @brief Allocate and initialize a new thread group.
@@ -90,9 +88,22 @@ void thread_group_put(struct thread_group *tg);
 void thread_group_get(struct thread_group *tg);
 
 /**
- * @brief Initialize the thread group subsystem (slab cache, etc.).
+ * @brief Initialize the thread group subsystem and create the first
+ *        thread group for the init process.
  */
-void thread_group_init(void);
+void thread_group_init(struct thread *initproc);
+
+void thread_group_live_dec(struct thread_group *tg);
+
+/**
+ * @brief Look up a thread group by TGID.
+ *
+ * Caller must be inside rcu_read_lock() or hold pid_lock.
+ *
+ * @param tgid  The thread group ID to look up
+ * @return thread_group pointer, or ERR_PTR(-ESRCH) if not found
+ */
+struct thread_group *get_thread_group(pid_t tgid);
 
 /**
  * @brief Initiate group-wide exit.

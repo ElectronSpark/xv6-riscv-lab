@@ -33,6 +33,10 @@
 #include "signal_types.h"
 #include <smp/atomic.h>
 
+struct thread;
+struct pgroup;
+struct ksiginfo;
+
 /**
  * @brief Shared signal state for a thread group (process-directed signals)
  *
@@ -53,10 +57,11 @@ struct tg_shared_pending {
  * with a single thread.
  */
 struct thread_group {
-    // No per-object lock: all fields are protected by the global pid_lock
-    // (rwlock). See file header for locking details.
+    // link all thread groups in a process group
+    list_node_t list_entry;
+    struct pgroup *pgroup; // Process group this thread group belongs to
 
-    int tgid;                    // Thread group ID = leader's PID
+    pid_t tgid;                  // Thread group ID = leader's PID
     struct thread *group_leader; // Thread that created this group (leader)
     list_node_t thread_list;     // List head for all threads in group
     _Atomic int live_threads;    // Number of live (non-exited) threads

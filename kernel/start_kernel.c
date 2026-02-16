@@ -10,6 +10,9 @@
 #include "proc/sched.h"
 #include "proc/workqueue.h"
 #include "proc/thread.h"
+#include "proc/thread_group.h"
+#include "proc/pgroup.h"
+#include "tty/session.h"
 #include "kobject.h"
 #include "dev/dev.h"
 #include <mm/pcache.h>
@@ -67,7 +70,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     printf("page table initialized\n");
     kvminithart(); // turn on paging
     printf("paging enabled\n");
-    pipe_init();               // initialize pipe subsystem
+    pipe_init();              // initialize pipe subsystem
     mycpu_init(hartid, true); // Change mycpu pointer to use trampoline stack
     printf("mycpu initialized\n");
     rcu_init();       // RCU subsystem initialization
@@ -103,9 +106,6 @@ static void __start_kernel_secondary_hart(int hartid) {
     // proceed.
     mycpu_init(hartid, false);
 
-    // while(__atomic_load_n(&started, __ATOMIC_ACQUIRE) == 0)
-    //   ;
-    // __atomic_thread_fence(__ATOMIC_SEQ_CST);
     smp_cond_load_acquire(&started, VAL != 0);
 
     // First turn on paging (still using physical TP)

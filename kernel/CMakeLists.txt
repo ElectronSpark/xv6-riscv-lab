@@ -93,6 +93,7 @@ add_subdirectory(${KERNEL_DIR}/proc)
 add_subdirectory(${KERNEL_DIR}/timer)
 add_subdirectory(${KERNEL_DIR}/vfs)
 add_subdirectory(${KERNEL_DIR}/ipi)
+add_subdirectory(${KERNEL_DIR}/tty)
 
 set_source_files_properties(${KERNEL_C_FILES} PROPERTIES LANGUAGE C)
 set_source_files_properties(${KERNEL_SCAN_OBJS} PROPERTIES LANGUAGE C)
@@ -112,9 +113,10 @@ set(KERNEL_OBJ_LIBS
     $<TARGET_OBJECTS:vfs_xv6fs>
     $<TARGET_OBJECTS:ipi>
     $<TARGET_OBJECTS:timer>
+    $<TARGET_OBJECTS:tty>
 )
 
-set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs)
+set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs tty)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding ")
 

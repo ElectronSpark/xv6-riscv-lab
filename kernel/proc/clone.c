@@ -1,5 +1,7 @@
 #include "proc/thread.h"
 #include "proc/thread_group.h"
+#include "proc/pgroup.h"
+#include "tty/session.h"
 #include "clone_flags.h"
 #include "defs.h"
 #include "hlist.h"
@@ -62,11 +64,12 @@ int thread_clone(struct clone_args *args) {
     // CLONE_THREAD implies CLONE_PARENT
     // CLONE_VM, CLONE_SIGHAND are required in this case
     // (POSIX requirement + Linux behavior: "like CLONE_PARENT").
-    if (args->flags & CLONE_THREAD){
-        if ((args->flags & (CLONE_VM | CLONE_SIGHAND)) != (CLONE_VM | CLONE_SIGHAND)) {
+    if (args->flags & CLONE_THREAD) {
+        if ((args->flags & (CLONE_VM | CLONE_SIGHAND)) !=
+            (CLONE_VM | CLONE_SIGHAND)) {
             return -EINVAL;
         }
-        args->flags |=  CLONE_PARENT;
+        args->flags |= CLONE_PARENT;
     }
 
     // When CLONE_VM is specified without CLONE_VFORK, stack and entry must be
@@ -215,6 +218,24 @@ int thread_clone(struct clone_args *args) {
         int tg_ret = thread_group_alloc(ret_ptr);
         assert(tg_ret == 0, "clone: thread_group_alloc failed");
     }
+
+    // Inherit pgroup and session from parent (POSIX: fork inherits these).
+    // For CLONE_THREAD the child joins the parent's existing groups.
+    // For fork, the child's new thread_group joins the parent's pgroup.
+    struct pgroup *parent_pg = p->pgroup;
+    struct session *parent_sess = p->session;
+
+    if (parent_pg != NULL) {
+        if (!(args->flags & CLONE_THREAD)) {
+            // New thread group joins parent's process group
+            pgroup_add_tg(parent_pg, ret_ptr->thread_group);
+        }
+        pgroup_add_thread(parent_pg, ret_ptr);
+    }
+    if (parent_sess != NULL) {
+        session_add_thread(parent_sess, ret_ptr);
+    }
+
     pid_wunlock();
 
     // Wake up the new child thread
