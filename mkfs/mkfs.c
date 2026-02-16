@@ -273,14 +273,17 @@ void balloc(int used) {
     uchar buf[BSIZE];
     int i;
 
-    printf("balloc: first %d blocks have been allocated\n", used);
-    assert(used < BPB);
-    bzero(buf, BSIZE);
-    for (i = 0; i < used; i++) {
-        buf[i / 8] = buf[i / 8] | (0x1 << (i % 8));
+    // printf("balloc: first %d blocks have been allocated\n", used);
+    assert(used >= 0 && used <= FSSIZE);
+    for (int b = 0; b < nbitmap; b++) {
+        bzero(buf, BSIZE);
+        int base = b * BPB;
+        for (i = base; i < base + BPB && i < used; i++) {
+            buf[(i - base) / 8] |= (0x1 << ((i - base) % 8));
+        }
+        // printf("balloc: write bitmap block at sector %d\n", sb.bmapstart + b);
+        wsect(sb.bmapstart + b, buf);
     }
-    printf("balloc: write bitmap block at sector %d\n", sb.bmapstart);
-    wsect(sb.bmapstart, buf);
 }
 
 #define min(a, b) ((a) < (b) ? (a) : (b))
@@ -291,6 +294,7 @@ void iappend(uint inum, void *xp, int n) {
     struct dinode din;
     char buf[BSIZE];
     uint indirect[NINDIRECT];
+    uint dindirect[NINDIRECT];
     uint x;
 
     rinode(inum, &din);
@@ -304,7 +308,7 @@ void iappend(uint inum, void *xp, int n) {
                 din.addrs[fbn] = xint(freeblock++);
             }
             x = xint(din.addrs[fbn]);
-        } else {
+        } else if (fbn < NDIRECT + NINDIRECT) {
             if (xint(din.addrs[NDIRECT]) == 0) {
                 din.addrs[NDIRECT] = xint(freeblock++);
             }
@@ -314,6 +318,29 @@ void iappend(uint inum, void *xp, int n) {
                 wsect(xint(din.addrs[NDIRECT]), (char *)indirect);
             }
             x = xint(indirect[fbn - NDIRECT]);
+        } else {
+            uint d_fbn = fbn - NDIRECT - NINDIRECT;
+            uint outer = d_fbn / NINDIRECT;
+            uint inner = d_fbn % NINDIRECT;
+
+            assert(d_fbn < NDINDIRECT);
+
+            if (xint(din.addrs[NDIRECT + 1]) == 0) {
+                din.addrs[NDIRECT + 1] = xint(freeblock++);
+            }
+
+            rsect(xint(din.addrs[NDIRECT + 1]), (char *)dindirect);
+            if (dindirect[outer] == 0) {
+                dindirect[outer] = xint(freeblock++);
+                wsect(xint(din.addrs[NDIRECT + 1]), (char *)dindirect);
+            }
+
+            rsect(xint(dindirect[outer]), (char *)indirect);
+            if (indirect[inner] == 0) {
+                indirect[inner] = xint(freeblock++);
+                wsect(xint(dindirect[outer]), (char *)indirect);
+            }
+            x = xint(indirect[inner]);
         }
         n1 = min(n, (fbn + 1) * BSIZE - off);
         rsect(x, buf);
