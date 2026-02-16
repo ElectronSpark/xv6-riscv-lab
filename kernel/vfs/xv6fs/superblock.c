@@ -23,6 +23,7 @@
 #include "xv6fs_private.h"
 #include "block_cache.h"
 #include "xv6fs_smoketest.h"
+#include "uabi/statfs.h"
 
 // Slab caches for xv6fs structures
 slab_cache_t __xv6fs_inode_cache;
@@ -365,6 +366,27 @@ void xv6fs_unmount_begin(struct vfs_superblock *sb) {
     xv6fs_sync_fs(sb, 1);
 }
 
+static int xv6fs_statfs(struct vfs_superblock *sb, struct statfs *buf) {
+    struct xv6fs_superblock *xv6_sb =
+        container_of(sb, struct xv6fs_superblock, vfs_sb);
+    struct superblock *disk_sb = &xv6_sb->disk_sb;
+
+    buf->f_type = FSMAGIC;
+    buf->f_bsize = XV6FS_BSIZE;
+    buf->f_frsize = XV6FS_BSIZE;
+    buf->f_blocks = disk_sb->size;
+    buf->f_namelen = DIRSIZ;
+    buf->f_files = disk_sb->ninodes;
+
+    // Free block count from the block cache if available
+    if (xv6_sb->block_cache.initialized) {
+        buf->f_bfree = xv6_sb->block_cache.free_count;
+        buf->f_bavail = buf->f_bfree;
+    }
+
+    return 0;
+}
+
 /******************************************************************************
  * Mount/Free operations
  ******************************************************************************/
@@ -577,6 +599,7 @@ struct vfs_superblock_ops xv6fs_superblock_ops = {
     .add_orphan = xv6fs_add_orphan,
     .remove_orphan = xv6fs_remove_orphan,
     .recover_orphans = xv6fs_recover_orphans,
+    .statfs = xv6fs_statfs,
     .begin_transaction = xv6fs_begin_transaction_op,
     .end_transaction = xv6fs_end_transaction_op,
 };

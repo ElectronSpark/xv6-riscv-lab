@@ -17,6 +17,8 @@
 #include <mm/page.h>
 #include "tmpfs_private.h"
 #include "tmpfs_smoketest.h"
+#include "uabi/statfs.h"
+#include "uabi/linux_dirent64.h"
 
 static slab_cache_t __tmpfs_sb_cache = {0};
 static slab_cache_t __tmpfs_inode_cache = {0};
@@ -187,11 +189,19 @@ void tmpfs_unmount_begin(struct vfs_superblock *sb) {
     }
 }
 
+static int tmpfs_statfs(struct vfs_superblock *sb, struct statfs *buf) {
+    buf->f_bsize = PAGE_SIZE;
+    buf->f_frsize = PAGE_SIZE;
+    buf->f_namelen = NAME_MAX;
+    return 0;
+}
+
 struct vfs_superblock_ops tmpfs_superblock_ops = {
     .alloc_inode = tmpfs_alloc_inode,
     .get_inode = tmpfs_get_inode,
     .sync_fs = tmpfs_sync_fs,
     .unmount_begin = tmpfs_unmount_begin,
+    .statfs = tmpfs_statfs,
 };
 
 /******************************************************************************

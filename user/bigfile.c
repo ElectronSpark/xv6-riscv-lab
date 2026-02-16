@@ -1,10 +1,24 @@
 #include "kernel/inc/uabi/stat.h"
 #include "user/user.h"
 #include "kernel/inc/uabi/fcntl.h"
-#include "kernel/inc/vfs/xv6fs/ondisk.h"
+#include "kernel/inc/uabi/statfs.h"
 
 int main() {
-    char buf[BSIZE];
+    struct statfs fs;
+    if (statfs("/", &fs) < 0) {
+        printf("bigfile: statfs failed\n");
+        exit(-1);
+    }
+    int bsize = fs.f_bsize;
+    if (bsize == 0 || bsize > 4096) {
+        printf("bigfile: bad block size %d\n", bsize);
+        exit(-1);
+    }
+
+    int nindirect = bsize / sizeof(uint);
+    int expected_blocks = 11 + nindirect + nindirect * nindirect;
+
+    char buf[4096]; // large enough for any block size
     int fd, i, blocks, readblocks;
 
     fd = open("big.file", O_CREAT | O_WRONLY);
@@ -16,7 +30,7 @@ int main() {
     blocks = 0;
     while (1) {
         *(int *)buf = blocks;
-        int cc = write(fd, buf, sizeof(buf));
+        int cc = write(fd, buf, bsize);
         if (cc <= 0)
             break;
         blocks++;
@@ -25,8 +39,9 @@ int main() {
     }
 
     printf("\nwrote %d blocks\n", blocks);
-    if (blocks != 65803) {
-        printf("bigfile: file is too small\n");
+    if (blocks != expected_blocks) {
+        printf("bigfile: file is too small (expected %d, got %d)\n",
+               expected_blocks, blocks);
         exit(-1);
     }
 
@@ -39,7 +54,7 @@ int main() {
     }
     readblocks = 0;
     for (i = 0; i < blocks; i++) {
-        int cc = read(fd, buf, sizeof(buf));
+        int cc = read(fd, buf, bsize);
         if (cc <= 0) {
             printf("bigfile: read error at block %d\n", i);
             exit(-1);

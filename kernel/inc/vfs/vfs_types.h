@@ -12,6 +12,8 @@
 #include "kobject.h"
 #include "vfs/stat.h"
 
+struct statfs;
+
 struct pcache;
 typedef struct cdev cdev_t;
 typedef struct blkdev blkdev_t;
@@ -174,6 +176,7 @@ struct vfs_superblock_ops {
     int (*add_orphan)(struct vfs_superblock *sb, struct vfs_inode *inode);
     int (*remove_orphan)(struct vfs_superblock *sb, struct vfs_inode *inode);
     int (*recover_orphans)(struct vfs_superblock *sb);
+    int (*statfs)(struct vfs_superblock *sb, struct statfs *buf);
 
     /*
      * Transaction/journaling support (optional)

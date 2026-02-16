@@ -1,12 +1,11 @@
 #include "kernel/inc/param.h"
 #include "kernel/inc/uabi/stat.h"
 #include "user/user.h"
-#include "kernel/inc/vfs/xv6fs/ondisk.h"
 #include "kernel/inc/uabi/fcntl.h"
 #include "kernel/inc/syscall.h"
-#include "kernel/inc/mm/memlayout.h"
 #include "kernel/inc/uabi/signo.h"
 #include "kernel/inc/uabi/linux_dirent64.h"
+#include "kernel/inc/uabi/statfs.h"
 
 //
 // Tests xv6 system calls.  usertests without arguments runs them all
@@ -17,9 +16,15 @@
 // prints "OK".
 //
 
+// Filesystem parameters obtained at runtime via statfs
+static int BSIZE;
+static int MAXFILE;
+
+#define MAXVA (1L << 38) // SV39 maximum user virtual address
+
 #define BUFSZ ((MAXOPBLOCKS + 2) * BSIZE)
 
-char buf[BUFSZ];
+char buf[(MAXOPBLOCKS + 2) * 4096]; // statically sized to max possible BUFSZ
 
 //
 // Section with tests that run fairly quickly.  Use -q if you want to
@@ -173,10 +178,10 @@ void copyinstr2(char *s) {
         exit(1);
     }
     if (pid == 0) {
-        static char big[PGSIZE + 1];
-        for (int i = 0; i < PGSIZE; i++)
+        static char big[PAGE_SIZE + 1];
+        for (int i = 0; i < PAGE_SIZE; i++)
             big[i] = 'x';
-        big[PGSIZE] = '\0';
+        big[PAGE_SIZE] = '\0';
         char *args2[] = {big, big, big, 0};
         ret = exec("/bin/echo", args2);
         if (ret >= 0) {
@@ -198,11 +203,11 @@ void copyinstr2(char *s) {
 void copyinstr3(char *s) {
     sbrk(8192);
     uint64 top = (uint64)sbrk(0);
-    if ((top % PGSIZE) != 0) {
-        sbrk(PGSIZE - (top % PGSIZE));
+    if ((top % PAGE_SIZE) != 0) {
+        sbrk(PAGE_SIZE - (top % PAGE_SIZE));
     }
     top = (uint64)sbrk(0);
-    if (top % PGSIZE) {
+    if (top % PAGE_SIZE) {
         printf("oops\n");
         exit(1);
     }
@@ -2094,13 +2099,13 @@ void sbrkmuch(char *s) {
 
     // can one de-allocate?
     a = sbrk(0);
-    c = sbrk(-PGSIZE);
+    c = sbrk(-PAGE_SIZE);
     if (c == (char *)0xffffffffffffffffL) {
         printf("%s: sbrk could not deallocate\n", s);
         exit(1);
     }
     c = sbrk(0);
-    if (c != a - PGSIZE) {
+    if (c != a - PAGE_SIZE) {
         printf("%s: sbrk deallocation produced wrong address, a %p c %p\n", s,
                a, c);
         exit(1);
@@ -2108,8 +2113,8 @@ void sbrkmuch(char *s) {
 
     // can one re-allocate that page?
     a = sbrk(0);
-    c = sbrk(PGSIZE);
-    if (c != a || sbrk(0) != a + PGSIZE) {
+    c = sbrk(PAGE_SIZE);
+    if (c != a || sbrk(0) != a + PAGE_SIZE) {
         printf("%s: sbrk re-allocation failed, a %p c %p\n", s, a, c);
         exit(1);
     }
@@ -2204,7 +2209,7 @@ void sbrkfail(char *s) {
 
     // if those failed allocations freed up the pages they did allocate,
     // we'll be able to allocate here
-    c = sbrk(PGSIZE);
+    c = sbrk(PAGE_SIZE);
     for (i = 0; i < sizeof(pids) / sizeof(pids[0]); i++) {
         if (pids[i] == -1)
             continue;
@@ -2229,7 +2234,7 @@ void sbrkfail(char *s) {
         a = sbrk(0);
         sbrk(10 * BIG);
         int n = 0;
-        for (i = 0; i < 10 * BIG; i += PGSIZE) {
+        for (i = 0; i < 10 * BIG; i += PAGE_SIZE) {
             n += *(a + i);
         }
         // print n so the compiler doesn't optimize away
@@ -2247,21 +2252,21 @@ void sbrkarg(char *s) {
     char *a;
     int fd, n;
 
-    a = sbrk(PGSIZE);
+    a = sbrk(PAGE_SIZE);
     fd = open("sbrk", O_CREAT | O_WRONLY);
     unlink("sbrk");
     if (fd < 0) {
         printf("%s: open sbrk failed\n", s);
         exit(1);
     }
-    if ((n = write(fd, a, PGSIZE)) < 0) {
+    if ((n = write(fd, a, PAGE_SIZE)) < 0) {
         printf("%s: write sbrk failed\n", s);
         exit(1);
     }
     close(fd);
 
     // test writes to allocated memory
-    a = sbrk(PGSIZE);
+    a = sbrk(PAGE_SIZE);
     if (pipe((int *)a) != 0) {
         printf("%s: pipe() failed\n", s);
         exit(1);
@@ -2273,7 +2278,7 @@ void validatetest(char *s) {
     uint64 p;
 
     hi = 1100 * 1024;
-    for (p = 0; p <= (uint)hi; p += PGSIZE) {
+    for (p = 0; p <= (uint)hi; p += PAGE_SIZE) {
         // try to crash the kernel by passing in a bad string pointer
         if (link("nosuchfile", (char *)p) >= 0) {
             printf("%s: link should not succeed\n", s);
@@ -2404,8 +2409,9 @@ void stacktest(char *s) {
 
     pid = fork();
     if (pid == 0) {
-        char *sp = (char *)r_sp();
-        sp -= USERSTACK * PGSIZE;
+        char *sp = NULL;
+        __asm__ __volatile__("mv %0, sp" : "=r"(sp));
+        sp -= USERSTACK * PAGE_SIZE;
         // the *sp should cause a trap.
         printf("%s: stacktest: read below stack %d\n", s, *sp);
         exit(1);
@@ -2968,7 +2974,7 @@ int runtests(struct test *tests, char *justone, int continuous) {
 int drivetests(int quick, int continuous, char *justone) {
     do {
         printf("usertests starting\n");
-        int free0 = memstat(MEMSTAT_ADD_FREE) / PGSIZE;
+        int free0 = memstat(MEMSTAT_ADD_FREE) / PAGE_SIZE;
         int free1 = 0;
         if (runtests(quicktests, justone, continuous)) {
             if (continuous != 2) {
@@ -2984,7 +2990,7 @@ int drivetests(int quick, int continuous, char *justone) {
                 }
             }
         }
-        if ((free1 = memstat(MEMSTAT_ADD_FREE) / PGSIZE) < free0) {
+        if ((free1 = memstat(MEMSTAT_ADD_FREE) / PAGE_SIZE) < free0) {
             printf("FAILED -- lost some free pages %d (out of %d)\n", free1,
                    free0);
             if (continuous != 2) {
@@ -2999,6 +3005,18 @@ int main(int argc, char *argv[]) {
     int continuous = 0;
     int quick = 0;
     char *justone = 0;
+
+    // Query filesystem parameters at runtime
+    struct statfs fs;
+    if (statfs("/", &fs) < 0) {
+        printf("usertests: statfs failed\n");
+        exit(1);
+    }
+    BSIZE = fs.f_bsize;
+    if (BSIZE == 0)
+        BSIZE = 1024; // fallback
+    int nindirect = BSIZE / (int)sizeof(uint);
+    MAXFILE = 11 + nindirect + nindirect * nindirect;
 
     if (argc == 2 && strcmp(argv[1], "-q") == 0) {
         quick = 1;

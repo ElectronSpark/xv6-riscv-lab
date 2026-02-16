@@ -170,6 +170,7 @@ int setsid(void);
 int getsid(int pid);
 
 void sync(void);
+int statfs(const char *path, void *buf);
 
 // ulib.c
 char *strcpy(char *, const char *);

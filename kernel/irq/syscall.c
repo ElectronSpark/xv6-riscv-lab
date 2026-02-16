@@ -146,6 +146,7 @@ extern uint64 sys_vfs_chdir(void);
 extern uint64 sys_vfs_pipe(void);
 extern uint64 sys_vfs_connect(void);
 extern uint64 sys_getdents(void);
+extern uint64 sys_statfs(void);
 extern uint64 sys_chroot(void);
 extern uint64 sys_mount(void);
 extern uint64 sys_umount(void);
@@ -237,6 +238,7 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_nanosleep] sys_nanosleep,
     [SYS_uname] sys_uname,
     [SYS_getdents] sys_getdents,
+    [SYS_statfs] sys_statfs,
     [SYS_chroot] sys_chroot,
     [SYS_mount] sys_mount,
     [SYS_umount] sys_umount,

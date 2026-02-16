@@ -98,3 +98,4 @@ entry("setsid");
 entry("getsid");
 
 entry("sync");
+entry("statfs");

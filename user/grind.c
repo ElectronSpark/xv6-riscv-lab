@@ -6,7 +6,6 @@
 #include "kernel/inc/types.h"
 #include "kernel/inc/vfs/stat.h"
 #include "user/user.h"
-#include "kernel/inc/vfs/xv6fs/ondisk.h"
 #include "kernel/inc/vfs/fcntl.h"
 #include "kernel/inc/syscall.h"
 #include "kernel/inc/mm/memlayout.h"

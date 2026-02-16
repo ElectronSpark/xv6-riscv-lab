@@ -31,6 +31,7 @@
 #include "timer/timer.h"
 #include "signal.h"
 #include "uabi/linux_dirent64.h"
+#include "uabi/statfs.h"
 
 // Forward declaration for syscall argument helpers
 void argint(int n, int *ip);
@@ -1696,4 +1697,61 @@ uint64 sys_vfs_ioctl(void) {
     int ret = vfs_ioctl(f, cmd, arg);
     vfs_fput(f);
     return ret;
+}
+
+/*
+ * sys_statfs - get filesystem statistics
+ *
+ * Arguments: a0 = path (user pointer), a1 = buf (user pointer to struct statfs)
+ */
+uint64 sys_statfs(void) {
+    char path[MAXPATH];
+    uint64 buf_addr;
+    int n = argstr(0, path, MAXPATH);
+    argaddr(1, &buf_addr);
+    if (n < 0) {
+        return -EFAULT;
+    }
+
+    struct vfs_inode *inode = vfs_namei(path, strlen(path));
+    if (IS_ERR(inode)) {
+        return PTR_ERR(inode);
+    }
+    if (inode == NULL) {
+        return -ENOENT;
+    }
+
+    struct vfs_superblock *sb = inode->sb;
+    if (sb == NULL) {
+        vfs_iput(inode);
+        return -ENOSYS;
+    }
+
+    struct statfs kbuf;
+    memset(&kbuf, 0, sizeof(kbuf));
+
+    kbuf.f_bsize = sb->block_size;
+    kbuf.f_frsize = sb->block_size;
+    kbuf.f_blocks = sb->total_blocks;
+    kbuf.f_bfree = sb->total_blocks > sb->used_blocks
+                       ? sb->total_blocks - sb->used_blocks
+                       : 0;
+    kbuf.f_bavail = kbuf.f_bfree;
+    kbuf.f_namelen = DIRSIZ;
+
+    // Let the filesystem fill in additional details if it implements statfs
+    if (sb->ops && sb->ops->statfs) {
+        int ret = sb->ops->statfs(sb, &kbuf);
+        if (ret < 0) {
+            vfs_iput(inode);
+            return ret;
+        }
+    }
+
+    vfs_iput(inode);
+
+    if (either_copyout(1, buf_addr, &kbuf, sizeof(kbuf)) < 0) {
+        return -EFAULT;
+    }
+    return 0;
 }
