@@ -108,5 +108,9 @@
         "lock/completion.h": "c",
         "lock/completion_types.h": "c",
         "future": "c"
+    },
+    "chat.tools.terminal.autoApprove": {
+        "readelf": true,
+        "objdump": true
     }
 }

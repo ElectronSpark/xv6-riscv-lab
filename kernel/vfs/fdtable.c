@@ -402,7 +402,7 @@ void vfs_fdtable_close_on_exec(struct vfs_fdtable *fdtable) {
 
     spin_lock(&fdtable->lock);
     for (int fd = 0; fd < NOFILE; fd++) {
-        if (!bits_test_bit64(&fdtable->cloexec_bitmap[fd >> 6], fd & 63)) {
+        if (!bits_test_and_clear_bit64(&fdtable->cloexec_bitmap[fd >> 6], fd & 63)) {
             continue;
         }
 

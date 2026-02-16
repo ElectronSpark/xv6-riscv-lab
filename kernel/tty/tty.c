@@ -222,20 +222,9 @@ static void tty_signal_fg_pgroup(struct tty *tty, int signum) {
     if (sess != NULL) {
         pid_t fg = session_get_fg_pgid(sess);
         if (fg > 0) {
-            printf("tty: sig %d -> fg_pgrp %d (session %d)\n",
-                   signum, fg, sess->sid);
             pgroup_kill(fg, signum);
             return;
         }
-        printf("tty: sig %d but fg_pgid=%d (session %d), fallback to current pid %d (%s)\n",
-               signum, fg, sess->sid,
-               current ? current->pid : -1,
-               current ? current->name : "?");
-    } else {
-        printf("tty: sig %d but no session, fallback to current pid %d (%s)\n",
-               signum,
-               current ? current->pid : -1,
-               current ? current->name : "?");
     }
     /* Fallback: no session or no fg group — signal current process */
     kill_proc(current, signum);
@@ -585,12 +574,7 @@ int tty_ioctl(struct tty *tty, uint64 cmd, uint64 arg) {
             return -EFAULT;
 
         spin_lock(&tty->lock);
-        tcflag_t old_lflag = tty->termios.c_lflag;
         tty->termios = new_t;
-        if ((old_lflag & ISIG) && !(new_t.c_lflag & ISIG)) {
-            printf("tty: ISIG cleared by pid %d (lflag 0x%x -> 0x%x)\n",
-                   current->pid, old_lflag, new_t.c_lflag);
-        }
         spin_unlock(&tty->lock);
 
         /* Notify driver if it cares */
