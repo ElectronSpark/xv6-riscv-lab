@@ -16,19 +16,24 @@
 #include "lock/mutex_types.h"
 #include "lock/rcu.h"
 #include "proc/thread.h"
+#include "proc/sched.h"
 #include "proc/workqueue.h"
 #include "vfs_private.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
+#include "vfs/pipe.h"
 #include "vfs/fcntl.h"
 #include "vfs/stat.h"
 #include "vfs/xv6fs/ondisk.h" // for DIRSIZ
 #include <mm/vm.h>
 #include "printf.h"
 #include "dev/cdev.h"
+#include "timer/timer.h"
+#include "signal.h"
 
 // Forward declaration for syscall argument helpers
 void argint(int n, int *ip);
+void argint64(int n, int64 *ip);
 void argaddr(int n, uint64 *ip);
 int argstr(int n, char *buf, int max);
 
@@ -180,6 +185,37 @@ uint64 sys_vfs_dup(void) {
     return newfd;
 }
 
+uint64 sys_vfs_dup2(void) {
+    int oldfd, newfd;
+    argint(0, &oldfd);
+    argint(1, &newfd);
+
+    if (newfd < 0 || newfd >= NOFILE) {
+        return -EBADF;
+    }
+
+    struct vfs_file *f = __vfs_argfd(oldfd);
+    if (f == NULL) {
+        return -EBADF;
+    }
+
+    if (oldfd == newfd) {
+        vfs_fput(f);
+        return newfd;
+    }
+
+    spin_lock(&current->fdtable->lock);
+    struct vfs_file *old_newfd = __vfs_fdfree(newfd);
+    int ret = vfs_fdtable_alloc_fd_from(current->fdtable, f, newfd);
+    spin_unlock(&current->fdtable->lock);
+
+    if (old_newfd) {
+        __vfs_fput_call_rcu(old_newfd);
+    }
+    vfs_fput(f);
+    return ret;
+}
+
 uint64 sys_vfs_read(void) {
     int fd, n;
     uint64 p;
@@ -258,6 +294,353 @@ uint64 sys_vfs_fstat(void) {
 
     vfs_fput(f); // remove the reference from __vfs_argfd
     return 0;
+}
+
+uint64 sys_vfs_lseek(void) {
+    int fd, whence;
+    int64 offset;
+    argint(0, &fd);
+    argint64(1, &offset);
+    argint(2, &whence);
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL) {
+        return -EBADF;
+    }
+
+    loff_t ret = vfs_filelseek(f, offset, whence);
+    vfs_fput(f);
+    return ret;
+}
+
+uint64 sys_vfs_ftruncate(void) {
+    int fd;
+    int64 length;
+    argint(0, &fd);
+    argint64(1, &length);
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL) {
+        return -EBADF;
+    }
+
+    int ret = truncate(f, length);
+    vfs_fput(f);
+    return ret;
+}
+
+uint64 sys_vfs_fcntl(void) {
+    int fd, cmd, arg;
+    argint(0, &fd);
+    argint(1, &cmd);
+    argint(2, &arg);
+
+    if (fd < 0 || fd >= NOFILE) {
+        return -EBADF;
+    }
+
+    if (cmd == F_GETFD || cmd == F_SETFD) {
+        spin_lock(&current->fdtable->lock);
+        int ret = (cmd == F_GETFD)
+                      ? vfs_fdtable_get_fdflags(current->fdtable, fd)
+                      : vfs_fdtable_set_fdflags(current->fdtable, fd,
+                                               arg & FD_CLOEXEC);
+        spin_unlock(&current->fdtable->lock);
+        return ret;
+    }
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL) {
+        return -EBADF;
+    }
+
+    int ret = -EINVAL;
+    switch (cmd) {
+    case F_GETFL:
+        ret = f->f_flags & ~O_CLOEXEC;
+        break;
+    case F_SETFL:
+        f->f_flags = (f->f_flags & O_ACCMODE) | (arg & ~(O_ACCMODE | O_CLOEXEC));
+        ret = 0;
+        break;
+    case F_DUPFD:
+    case F_DUPFD_CLOEXEC:
+        if (arg < 0 || arg >= NOFILE) {
+            ret = -EINVAL;
+            break;
+        }
+        spin_lock(&current->fdtable->lock);
+        ret = vfs_fdtable_alloc_fd_from(current->fdtable, f, arg);
+        if (ret >= 0 && cmd == F_DUPFD_CLOEXEC) {
+            (void)vfs_fdtable_set_fdflags(current->fdtable, ret, FD_CLOEXEC);
+        }
+        spin_unlock(&current->fdtable->lock);
+        break;
+    default:
+        ret = -EINVAL;
+        break;
+    }
+
+    vfs_fput(f);
+    return ret;
+}
+
+static int __vfs_inode_stat(struct vfs_inode *inode, struct stat *kst) {
+    if (inode->ops && inode->ops->getattr) {
+        return inode->ops->getattr(inode, kst);
+    }
+
+    vfs_ilock(inode);
+    memset(kst, 0, sizeof(*kst));
+    kst->dev = inode->sb ? (int)(uint64)inode->sb : 0;
+    kst->ino = inode->ino;
+    kst->mode = inode->mode;
+    kst->nlink = inode->n_links;
+    kst->size = inode->size;
+    vfs_iunlock(inode);
+    return 0;
+}
+
+uint64 sys_vfs_stat(void) {
+    char path[MAXPATH];
+    uint64 st_addr;
+    int n = argstr(0, path, MAXPATH);
+    argaddr(1, &st_addr);
+    if (n < 0) {
+        return -EFAULT;
+    }
+
+    struct vfs_inode *inode = NULL;
+    int symloop_count = 0;
+    const int symloop_max = 8;
+
+    for (;;) {
+        inode = vfs_namei(path, strlen(path));
+        if (IS_ERR(inode)) {
+            return PTR_ERR(inode);
+        }
+        if (inode == NULL) {
+            return -ENOENT;
+        }
+
+        if (!S_ISLNK(inode->mode)) {
+            break;
+        }
+
+        ssize_t link_len = vfs_readlink(inode, path, MAXPATH - 1);
+        vfs_iput(inode);
+        inode = NULL;
+        if (link_len < 0) {
+            return link_len;
+        }
+        path[link_len] = '\0';
+
+        symloop_count++;
+        if (symloop_count >= symloop_max) {
+            return -ELOOP;
+        }
+    }
+
+    struct stat kst;
+    int ret = __vfs_inode_stat(inode, &kst);
+    vfs_iput(inode);
+    if (ret != 0) {
+        return ret;
+    }
+    if (either_copyout(1, st_addr, &kst, sizeof(kst)) < 0) {
+        return -EFAULT;
+    }
+    return 0;
+}
+
+uint64 sys_vfs_lstat(void) {
+    char path[MAXPATH];
+    char name[DIRSIZ + 1];
+    uint64 st_addr;
+    int n = argstr(0, path, MAXPATH);
+    argaddr(1, &st_addr);
+    if (n < 0) {
+        return -EFAULT;
+    }
+
+    struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
+    if (IS_ERR(parent)) {
+        return PTR_ERR(parent);
+    }
+    if (parent == NULL) {
+        return -ENOENT;
+    }
+
+    struct vfs_dentry dentry = {.sb = parent->sb, .parent = parent};
+    int ret = vfs_ilookup(parent, &dentry, name, strlen(name));
+    if (ret != 0) {
+        vfs_iput(parent);
+        return ret;
+    }
+
+    struct vfs_inode *inode = vfs_get_dentry_inode(&dentry);
+    vfs_release_dentry(&dentry);
+    vfs_iput(parent);
+    if (IS_ERR(inode)) {
+        return PTR_ERR(inode);
+    }
+    if (inode == NULL) {
+        return -ENOENT;
+    }
+
+    struct stat kst;
+    ret = __vfs_inode_stat(inode, &kst);
+    vfs_iput(inode);
+    if (ret != 0) {
+        return ret;
+    }
+    if (either_copyout(1, st_addr, &kst, sizeof(kst)) < 0) {
+        return -EFAULT;
+    }
+    return 0;
+}
+
+uint64 sys_vfs_access(void) {
+    char path[MAXPATH];
+    int mode;
+    int n = argstr(0, path, MAXPATH);
+    argint(1, &mode);
+    if (n < 0) {
+        return -EFAULT;
+    }
+
+    struct vfs_inode *inode = vfs_namei(path, n);
+    if (IS_ERR(inode)) {
+        return PTR_ERR(inode);
+    }
+    if (inode == NULL) {
+        return -ENOENT;
+    }
+
+    if (mode != 0) {
+        mode_t perm = inode->mode;
+        if ((mode & 4) && !(perm & (S_IRUSR | S_IRGRP | S_IROTH))) {
+            vfs_iput(inode);
+            return -EACCES;
+        }
+        if ((mode & 2) && !(perm & (S_IWUSR | S_IWGRP | S_IWOTH))) {
+            vfs_iput(inode);
+            return -EACCES;
+        }
+        if ((mode & 1) && !(perm & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+            vfs_iput(inode);
+            return -EACCES;
+        }
+    }
+
+    vfs_iput(inode);
+    return 0;
+}
+
+uint64 sys_vfs_readlink(void) {
+    char path[MAXPATH];
+    char name[DIRSIZ + 1];
+    uint64 buf_addr;
+    int bufsz;
+
+    int n = argstr(0, path, MAXPATH);
+    argaddr(1, &buf_addr);
+    argint(2, &bufsz);
+    if (n < 0) {
+        return -EFAULT;
+    }
+    if (bufsz <= 0) {
+        return -EINVAL;
+    }
+
+    struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
+    if (IS_ERR(parent)) {
+        return PTR_ERR(parent);
+    }
+    if (parent == NULL) {
+        return -ENOENT;
+    }
+
+    struct vfs_dentry dentry = {.sb = parent->sb, .parent = parent};
+    int ret = vfs_ilookup(parent, &dentry, name, strlen(name));
+    if (ret != 0) {
+        vfs_iput(parent);
+        return ret;
+    }
+
+    struct vfs_inode *inode = vfs_get_dentry_inode(&dentry);
+    vfs_release_dentry(&dentry);
+    vfs_iput(parent);
+    if (IS_ERR(inode)) {
+        return PTR_ERR(inode);
+    }
+    if (inode == NULL) {
+        return -ENOENT;
+    }
+
+    char *kbuf = kmm_alloc(bufsz);
+    if (kbuf == NULL) {
+        vfs_iput(inode);
+        return -ENOMEM;
+    }
+
+    ssize_t len = vfs_readlink(inode, kbuf, bufsz);
+    vfs_iput(inode);
+    if (len < 0) {
+        kmm_free(kbuf);
+        return len;
+    }
+
+    if (either_copyout(1, buf_addr, kbuf, len) < 0) {
+        kmm_free(kbuf);
+        return -EFAULT;
+    }
+    kmm_free(kbuf);
+    return len;
+}
+
+uint64 sys_vfs_rename(void) {
+    char oldpath[MAXPATH], newpath[MAXPATH];
+    char oldname[DIRSIZ + 1], newname[DIRSIZ + 1];
+    int n1 = argstr(0, oldpath, MAXPATH);
+    int n2 = argstr(1, newpath, MAXPATH);
+    if (n1 < 0 || n2 < 0) {
+        return -EFAULT;
+    }
+
+    struct vfs_inode *old_parent =
+        vfs_nameiparent(oldpath, n1, oldname, DIRSIZ + 1);
+    if (IS_ERR(old_parent)) {
+        return PTR_ERR(old_parent);
+    }
+    if (old_parent == NULL) {
+        return -ENOENT;
+    }
+
+    struct vfs_inode *new_parent =
+        vfs_nameiparent(newpath, n2, newname, DIRSIZ + 1);
+    if (IS_ERR(new_parent)) {
+        vfs_iput(old_parent);
+        return PTR_ERR(new_parent);
+    }
+    if (new_parent == NULL) {
+        vfs_iput(old_parent);
+        return -ENOENT;
+    }
+
+    struct vfs_dentry old_dentry = {.sb = old_parent->sb, .parent = old_parent};
+    int ret = vfs_ilookup(old_parent, &old_dentry, oldname, strlen(oldname));
+    if (ret != 0) {
+        vfs_iput(old_parent);
+        vfs_iput(new_parent);
+        return ret;
+    }
+
+    ret = vfs_move(old_parent, &old_dentry, new_parent, newname, strlen(newname));
+    vfs_release_dentry(&old_dentry);
+    vfs_iput(old_parent);
+    vfs_iput(new_parent);
+    return ret;
 }
 
 /******************************************************************************
@@ -386,6 +769,9 @@ uint64 sys_vfs_open(void) {
 
     spin_lock(&current->fdtable->lock);
     int fd = __vfs_fdalloc(f);
+    if (fd >= 0 && (omode & O_CLOEXEC)) {
+        (void)vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
+    }
     spin_unlock(&current->fdtable->lock);
     // When success, the refcount of f will be increased by fdtable, thus we do
     // not put f here. When failure, we need to put f anyway.
@@ -1302,4 +1688,30 @@ uint64 sys_dumpinode(void) {
 
     vfs_dump_sb_inodes(sb);
     return 0;
+}
+
+/******************************************************************************
+ * TTY / ioctl Syscalls
+ ******************************************************************************/
+
+/**
+ * sys_vfs_ioctl - generic ioctl syscall
+ *
+ * Arguments: a0 = fd, a1 = cmd, a2 = arg (pointer)
+ */
+uint64 sys_vfs_ioctl(void) {
+    int fd;
+    uint64 cmd, arg;
+
+    argint(0, &fd);
+    argaddr(1, &cmd);
+    argaddr(2, &arg);
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL)
+        return -EBADF;
+
+    int ret = vfs_ioctl(f, cmd, arg);
+    vfs_fput(f);
+    return ret;
 }

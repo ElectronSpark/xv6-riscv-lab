@@ -106,7 +106,6 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf,
                                   size_t count, bool user);
 static loff_t __tmpfs_file_llseek(struct vfs_file *file, loff_t offset,
                                   int whence);
-static int __tmpfs_file_stat(struct vfs_file *file, struct stat *stat);
 
 static void *__tmpfs_file_fault(struct vfs_file *file, struct vma *vma,
                                uint64 va);
@@ -117,7 +116,6 @@ struct vfs_file_ops tmpfs_file_ops = {
     .llseek = __tmpfs_file_llseek,
     .release = NULL,
     .fsync = NULL,
-    .stat = __tmpfs_file_stat,
     .fault = __tmpfs_file_fault,
 };
 
@@ -361,24 +359,6 @@ static loff_t __tmpfs_file_llseek(struct vfs_file *file, loff_t offset,
     }
 
     return new_pos;
-}
-
-static int __tmpfs_file_stat(struct vfs_file *file, struct stat *stat) {
-    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
-
-    // Lock inode to get consistent snapshot of inode fields.
-    // The file reference guarantees the inode remains allocated.
-    vfs_ilock(inode);
-
-    memset(stat, 0, sizeof(*stat));
-    stat->dev = inode->sb ? (int)(uint64)inode->sb : 0;
-    stat->ino = inode->ino;
-    stat->mode = inode->mode;
-    stat->nlink = inode->n_links;
-    stat->size = inode->size;
-
-    vfs_iunlock(inode);
-    return 0;
 }
 
 // Open callback for tmpfs inodes

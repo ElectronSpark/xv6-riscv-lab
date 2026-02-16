@@ -441,21 +441,20 @@ int vfs_filestat(struct vfs_file *file, struct stat *stat) {
         return -EBADF;
     }
 
-    // For special files without file ops, provide generic stat from inode
-    if (file->ops == NULL || file->ops->stat == NULL) {
-        if (S_ISCHR(inode->mode) || S_ISBLK(inode->mode) ||
-            S_ISFIFO(inode->mode) || S_ISSOCK(inode->mode)) {
-            memset(stat, 0, sizeof(*stat));
-            stat->dev = inode->sb ? (int)(uint64)inode->sb : 0;
-            stat->ino = inode->ino;
-            stat->mode = inode->mode;
-            stat->nlink = inode->n_links;
-            stat->size = inode->size;
-            return 0;
-        }
-        return -ENOSYS; // Stat operation not supported
+    if (inode->ops && inode->ops->getattr) {
+        return inode->ops->getattr(inode, stat);
     }
-    return file->ops->stat(file, stat);
+
+    // Generic fallback when filesystem doesn't implement inode getattr yet.
+    vfs_ilock(inode);
+    memset(stat, 0, sizeof(*stat));
+    stat->dev = inode->sb ? (int)(uint64)inode->sb : 0;
+    stat->ino = inode->ino;
+    stat->mode = inode->mode;
+    stat->nlink = inode->n_links;
+    stat->size = inode->size;
+    vfs_iunlock(inode);
+    return 0;
 }
 
 ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,

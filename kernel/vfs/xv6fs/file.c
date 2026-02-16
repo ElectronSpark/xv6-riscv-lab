@@ -308,33 +308,6 @@ loff_t xv6fs_file_llseek(struct vfs_file *file, loff_t offset, int whence) {
 }
 
 /******************************************************************************
- * File stat
- ******************************************************************************/
-
-int xv6fs_file_stat(struct vfs_file *file, struct stat *stat) {
-    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
-    struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
-
-    if (stat == NULL) {
-        return -EINVAL;
-    }
-
-    // Lock inode to get consistent snapshot of inode fields.
-    // The file reference guarantees the inode remains allocated.
-    vfs_ilock(inode);
-
-    memset(stat, 0, sizeof(*stat));
-    stat->dev = ip->dev;
-    stat->ino = inode->ino;
-    stat->mode = inode->mode;
-    stat->nlink = inode->n_links;
-    stat->size = inode->size;
-
-    vfs_iunlock(inode);
-    return 0;
-}
-
-/******************************************************************************
  * File fsync - flush a range of dirty pcache pages to disk
  ******************************************************************************/
 
@@ -386,7 +359,6 @@ struct vfs_file_ops xv6fs_file_ops = {
     .release = NULL,
     .fsync = xv6fs_file_fsync,
     .fflush = xv6fs_file_fflush,
-    .stat = xv6fs_file_stat,
     .fault = xv6fs_file_fault,
 };
 

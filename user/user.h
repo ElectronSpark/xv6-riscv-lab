@@ -93,11 +93,20 @@ int open(const char *, int);
 int mknod(const char *, int mode, int major, int minor);
 int unlink(const char *);
 int fstat(int fd, struct stat *);
+int stat(const char *path, struct stat *st);
+int lstat(const char *path, struct stat *st);
+int readlink(const char *path, char *buf, int bufsiz);
 int link(const char *, const char *);
 int symlink(const char *, const char *);
 int mkdir(const char *);
 int chdir(const char *);
 int dup(int);
+int dup2(int oldfd, int newfd);
+int lseek(int fd, int64 offset, int whence);
+int fcntl(int fd, int cmd, int arg);
+int access(const char *path, int mode);
+int rename(const char *oldpath, const char *newpath);
+int ftruncate(int fd, int64 length);
 int getpid(void);
 int getppid(void);
 int gettid(void);
@@ -151,6 +160,9 @@ int mount(const char *source, const char *target, const char *fstype);
 int umount(const char *target);
 char *getcwd(char *buf, int size);
 
+// Terminal I/O
+int ioctl(int fd, int cmd, void *arg);
+
 // Process group / session
 int setpgid(int pid, int pgid);
 int getpgid(int pid);
@@ -160,7 +172,6 @@ int getsid(int pid);
 void sync(void);
 
 // ulib.c
-int stat(const char *, struct stat *);
 char *strcpy(char *, const char *);
 void *memmove(void *, const void *, int);
 char *strchr(const char *, char c);

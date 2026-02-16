@@ -319,7 +319,6 @@ static struct vfs_file_ops pipe_file_ops = {
     .llseek = NULL,
     .release = __pipe_file_release,
     .fsync = NULL,
-    .stat = NULL,
     .fault = NULL,
 };
 
