@@ -279,8 +279,44 @@ int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
     uc.uc_link = (ucontext_t *)p->signal.sig_ucontext;
     uc.uc_sigmask =
         p->signal.sig_mask; // Save current mask to restore after handler
-    memmove(&uc.uc_mcontext, p->trapframe, sizeof(mcontext_t));
     memmove(&uc.uc_stack, &p->signal.sig_stack, sizeof(stack_t));
+
+    // Copy user-visible registers from trapframe into mcontext
+    __riscv_mc_gp_state *gregs = &uc.uc_mcontext.sc_regs;
+    struct utrapframe *tf = p->trapframe;
+    gregs->pc  = tf->trapframe.sepc;
+    gregs->ra  = tf->trapframe.ra;
+    gregs->sp  = tf->trapframe.sp;
+    gregs->gp  = tf->gp;
+    gregs->tp  = tf->tp;
+    gregs->t0  = tf->trapframe.t0;
+    gregs->t1  = tf->trapframe.t1;
+    gregs->t2  = tf->trapframe.t2;
+    gregs->s0  = tf->trapframe.s0;
+    gregs->s1  = tf->s1;
+    gregs->a0  = tf->trapframe.a0;
+    gregs->a1  = tf->trapframe.a1;
+    gregs->a2  = tf->trapframe.a2;
+    gregs->a3  = tf->trapframe.a3;
+    gregs->a4  = tf->trapframe.a4;
+    gregs->a5  = tf->trapframe.a5;
+    gregs->a6  = tf->trapframe.a6;
+    gregs->a7  = tf->trapframe.a7;
+    gregs->s2  = tf->s2;
+    gregs->s3  = tf->s3;
+    gregs->s4  = tf->s4;
+    gregs->s5  = tf->s5;
+    gregs->s6  = tf->s6;
+    gregs->s7  = tf->s7;
+    gregs->s8  = tf->s8;
+    gregs->s9  = tf->s9;
+    gregs->s10 = tf->s10;
+    gregs->s11 = tf->s11;
+    gregs->t3  = tf->trapframe.t3;
+    gregs->t4  = tf->trapframe.t4;
+    gregs->t5  = tf->trapframe.t5;
+    gregs->t6  = tf->trapframe.t6;
+    // TODO: save FP state into uc.uc_mcontext.sc_fpregs when FPU is enabled
 
     // Copy the trap frame to the signal trap frame.
     if (vm_copyout(p->vm, new_ucontext, (void *)&uc, sizeof(ucontext_t)) != 0) {
@@ -320,7 +356,44 @@ int restore_sigframe(struct thread *p, ucontext_t *ret_uc) {
     }
 
     p->signal.sig_ucontext = (uint64)ret_uc->uc_link;
-    memmove(p->trapframe, &ret_uc->uc_mcontext, sizeof(mcontext_t));
+
+    // Restore user-visible registers from mcontext into trapframe
+    const __riscv_mc_gp_state *gregs = &ret_uc->uc_mcontext.sc_regs;
+    struct utrapframe *tf = p->trapframe;
+    tf->trapframe.sepc = gregs->pc;
+    tf->trapframe.ra   = gregs->ra;
+    tf->trapframe.sp   = gregs->sp;
+    tf->gp             = gregs->gp;
+    tf->tp             = gregs->tp;
+    tf->trapframe.t0   = gregs->t0;
+    tf->trapframe.t1   = gregs->t1;
+    tf->trapframe.t2   = gregs->t2;
+    tf->trapframe.s0   = gregs->s0;
+    tf->s1             = gregs->s1;
+    tf->trapframe.a0   = gregs->a0;
+    tf->trapframe.a1   = gregs->a1;
+    tf->trapframe.a2   = gregs->a2;
+    tf->trapframe.a3   = gregs->a3;
+    tf->trapframe.a4   = gregs->a4;
+    tf->trapframe.a5   = gregs->a5;
+    tf->trapframe.a6   = gregs->a6;
+    tf->trapframe.a7   = gregs->a7;
+    tf->s2             = gregs->s2;
+    tf->s3             = gregs->s3;
+    tf->s4             = gregs->s4;
+    tf->s5             = gregs->s5;
+    tf->s6             = gregs->s6;
+    tf->s7             = gregs->s7;
+    tf->s8             = gregs->s8;
+    tf->s9             = gregs->s9;
+    tf->s10            = gregs->s10;
+    tf->s11            = gregs->s11;
+    tf->trapframe.t3   = gregs->t3;
+    tf->trapframe.t4   = gregs->t4;
+    tf->trapframe.t5   = gregs->t5;
+    tf->trapframe.t6   = gregs->t6;
+    // TODO: restore FP state from ret_uc->uc_mcontext.sc_fpregs when FPU is
+    // enabled
 
     return 0; // Success
 }

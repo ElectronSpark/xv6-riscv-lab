@@ -4,54 +4,6 @@
 #include "types.h"
 #include "signal_types.h"
 
-#define SIGBAD(signo) ((signo) < 1 || (signo) > NSIG)
-
-#define SIGMASK(signo) (SIGBAD(signo) ? 0 : (1UL << ((uint64)(signo) - 1)))
-
-// All four return: 0 if OK, −1 on error
-static inline int sigemptyset(sigset_t *set) {
-    if (!set) {
-        return -1; // Invalid set pointer
-    }
-    *set = 0; // Clear the signal set
-    return 0; // Success
-}
-
-static inline int sigfillset(sigset_t *set) {
-    if (!set) {
-        return -1; // Invalid set pointer
-    }
-    *set = (1UL << NSIG) - 1; // Set all signals
-    return 0;                 // Success
-}
-
-static inline int sigaddset(sigset_t *set, int signo) {
-    sigset_t mask = SIGMASK(signo);
-    if (mask == 0) {
-        return -1; // Invalid set pointer or signal number
-    }
-    *set |= mask;
-    return 0; // Success
-}
-
-static inline int sigdelset(sigset_t *set, int signo) {
-    sigset_t mask = SIGMASK(signo);
-    if (mask == 0) {
-        return -1; // Invalid set pointer or signal number
-    }
-    *set &= ~mask;
-    return 0; // Success
-}
-
-// Returns: 1 if true, 0 if false, −1 on error
-static inline int sigismember(const sigset_t *set, int signo) {
-    sigset_t mask = SIGMASK(signo);
-    if (mask == 0) {
-        return -1; // Invalid set pointer or signal number
-    }
-    return (*set & mask) != 0; // Return 1 if member, 0 otherwise
-}
-
 void signal_init(void);
 void sigstack_init(stack_t *stack);
 void sigacts_lock(sigacts_t *sa);
@@ -96,12 +48,5 @@ int tkill(int tid, int signum);
 int killed(struct thread *);
 int sigsuspend(const sigset_t *mask);
 int sigwait(const sigset_t *set, int *sig);
-
-#define SIG_BLOCK 1
-#define SIG_UNBLOCK 2
-#define SIG_SETMASK 3
-
-#define MINSIGSTKSZ (1UL << PGSHIFT)
-#define SIGSTKSZ (1UL << (PGSHIFT + 2))
 
 #endif /* __KERNEL_SIGNAL_H */

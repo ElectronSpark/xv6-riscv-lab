@@ -3,7 +3,7 @@
 
 struct stat;
 
-#include "kernel/inc/signal_types.h"
+#include "kernel/inc/uabi/signal.h"
 #include "kernel/inc/uabi/memstat.h"
 #include "kernel/inc/uabi/clone_flags.h"
 
