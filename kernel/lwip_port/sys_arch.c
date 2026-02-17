@@ -439,3 +439,90 @@ sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread,
     return t;
 }
 
+/* ========================================================================== */
+/* Per-thread semaphore (LWIP_NETCONN_SEM_PER_THREAD)                         */
+/*                                                                            */
+/* LWIP_NETCONN_FULLDUPLEX requires each thread that uses the netconn API     */
+/* to have its own op_completed semaphore.  We keep a small static table      */
+/* keyed by the thread pointer.  Entries are allocated on first use (lazy)    */
+/* and freed when the thread shuts down its lwIP usage.                       */
+/* ========================================================================== */
+
+#define MAX_LWIP_THREAD_SEMS 32
+
+static struct {
+    struct thread *owner;
+    sys_sem_t      sem;
+    int            valid;
+} lwip_thread_sems[MAX_LWIP_THREAD_SEMS];
+
+static spinlock_t lwip_thread_sem_lock;
+static int lwip_thread_sem_init_done;
+
+static void lwip_thread_sem_ensure_init(void)
+{
+    if (!lwip_thread_sem_init_done) {
+        spin_init(&lwip_thread_sem_lock, "lwip_tsem");
+        lwip_thread_sem_init_done = 1;
+    }
+}
+
+void sys_arch_netconn_sem_alloc(void)
+{
+    struct thread *t = current;
+    lwip_thread_sem_ensure_init();
+    spin_lock(&lwip_thread_sem_lock);
+    /* Already allocated? */
+    for (int i = 0; i < MAX_LWIP_THREAD_SEMS; i++) {
+        if (lwip_thread_sems[i].valid && lwip_thread_sems[i].owner == t) {
+            spin_unlock(&lwip_thread_sem_lock);
+            return;
+        }
+    }
+    /* Find a free slot */
+    for (int i = 0; i < MAX_LWIP_THREAD_SEMS; i++) {
+        if (!lwip_thread_sems[i].valid) {
+            lwip_thread_sems[i].owner = t;
+            sys_sem_new(&lwip_thread_sems[i].sem, 0);
+            lwip_thread_sems[i].valid = 1;
+            spin_unlock(&lwip_thread_sem_lock);
+            return;
+        }
+    }
+    spin_unlock(&lwip_thread_sem_lock);
+    panic("lwip: too many threads using netconn API");
+}
+
+void sys_arch_netconn_sem_free(void)
+{
+    struct thread *t = current;
+    spin_lock(&lwip_thread_sem_lock);
+    for (int i = 0; i < MAX_LWIP_THREAD_SEMS; i++) {
+        if (lwip_thread_sems[i].valid && lwip_thread_sems[i].owner == t) {
+            sys_sem_free(&lwip_thread_sems[i].sem);
+            lwip_thread_sems[i].valid = 0;
+            lwip_thread_sems[i].owner = NULL;
+            break;
+        }
+    }
+    spin_unlock(&lwip_thread_sem_lock);
+}
+
+sys_sem_t *sys_arch_netconn_sem_get(void)
+{
+    struct thread *t = current;
+    /* Fast path: scan without lock (valid+owner are stable once set) */
+    for (int i = 0; i < MAX_LWIP_THREAD_SEMS; i++) {
+        if (lwip_thread_sems[i].valid && lwip_thread_sems[i].owner == t)
+            return &lwip_thread_sems[i].sem;
+    }
+    /* Not found — alloc lazily */
+    sys_arch_netconn_sem_alloc();
+    for (int i = 0; i < MAX_LWIP_THREAD_SEMS; i++) {
+        if (lwip_thread_sems[i].valid && lwip_thread_sems[i].owner == t)
+            return &lwip_thread_sems[i].sem;
+    }
+    panic("lwip: netconn_sem_get failed after alloc");
+    return NULL; /* unreachable */
+}
+

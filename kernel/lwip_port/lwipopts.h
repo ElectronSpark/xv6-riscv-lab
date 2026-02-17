@@ -110,6 +110,12 @@
  * Sequential / Socket API
  * -------------------------------------------------------------------------- */
 #define LWIP_NETCONN                    1
+#define LWIP_NETCONN_FULLDUPLEX         1    /* Allow concurrent read+write
+                                                from different threads on the
+                                                same netconn.  Required by
+                                                telnetd (RX thread does recv,
+                                                TX thread does write/close). */
+#define LWIP_NETCONN_SEM_PER_THREAD     1    /* Required by FULLDUPLEX */
 #define LWIP_SOCKET                     0    /* No BSD socket API (we use
                                                 xv6's own socket layer) */
 #define LWIP_DNS                        1

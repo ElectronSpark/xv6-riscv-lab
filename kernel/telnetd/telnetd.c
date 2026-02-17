@@ -228,18 +228,31 @@ static ssize_t telnet_feed_pty(struct telnet_session *sess,
                                const unsigned char *data, int datalen)
 {
     ssize_t total = 0;
+    char outbuf[TELNET_BUF_SIZE];
+    int outpos = 0;
+
+    /* Flush helper — send accumulated bytes to PTY master in one call */
+    #define FEED_FLUSH() do {                                          \
+        if (outpos > 0) {                                              \
+            pty_master_write(sess->slave_tty, outbuf, outpos, false);  \
+            total += outpos;                                           \
+            outpos = 0;                                                \
+        }                                                              \
+    } while (0)
 
     while (datalen > 0) {
         if (*data == IAC) {
             if (datalen >= 2 && data[1] == IAC) {
                 /* Escaped IAC → literal 0xFF byte */
-                unsigned char ff = 0xff;
-                pty_master_write(sess->slave_tty, (char *)&ff, 1, false);
+                outbuf[outpos++] = (char)0xff;
+                if (outpos >= (int)sizeof(outbuf))
+                    FEED_FLUSH();
                 data += 2;
                 datalen -= 2;
-                total++;
                 continue;
             }
+            /* Flush before processing IAC command (may change tty state) */
+            FEED_FLUSH();
             int consumed = telnet_process_iac(sess, data, datalen);
             if (consumed == 0)
                 break; /* Incomplete command at end of buffer */
@@ -270,13 +283,17 @@ static ssize_t telnet_feed_pty(struct telnet_session *sess,
                         ch = '\n';
                     }
                 }
-                pty_master_write(sess->slave_tty, &ch, 1, false);
-                total++;
+                outbuf[outpos++] = ch;
+                if (outpos >= (int)sizeof(outbuf))
+                    FEED_FLUSH();
             }
             data += span;
             datalen -= span;
         }
     }
+
+    FEED_FLUSH();
+    #undef FEED_FLUSH
 
     return total;
 }
@@ -391,6 +408,12 @@ static void telnet_tx_thread(uint64 arg1, uint64 arg2)
             break;
         }
 
+        /* Re-check closing flag after the (possibly long) blocking read
+         * to avoid calling netconn_write on a connection that the RX
+         * thread is about to tear down. */
+        if (sess->closing)
+            break;
+
         /* Escape IAC bytes and convert bare LF → CR LF for telnet */
         int tlen = 0;
         for (int i = 0; i < n; i++) {
@@ -413,6 +436,22 @@ static void telnet_tx_thread(uint64 arg1, uint64 arg2)
             break;
         }
     }
+
+    /*
+     * The TX thread is the ONLY thread that calls netconn_write, so it
+     * must also be the one to call netconn_close.  The lwIP netconn API
+     * is NOT safe for concurrent use from multiple threads on the same
+     * connection — both netconn_write() and netconn_close() use
+     * conn->current_msg and conn->op_completed, and calling them from
+     * different threads corrupts lwIP's internal message pool.
+     *
+     * After this, the RX thread (which is waiting on tx_done) will call
+     * netconn_delete() to free the connection resources.
+     */
+    netconn_close(sess->conn);
+
+    /* Release the per-thread lwIP semaphore so the slot can be reused. */
+    LWIP_NETCONN_THREAD_SEM_FREE();
 
     smp_store_release(&sess->tx_done, 1);
 }
@@ -553,7 +592,8 @@ static void telnet_session_handler(uint64 arg1, uint64 arg2)
 
     /* Unblock the TX thread: closing the write end of output_pipe
      * causes pipe_read to return 0 (EOF) because PIPE_WRITABLE becomes
-     * false and there is no remaining data. */
+     * false and there is no remaining data.  This unblocks the TX thread
+     * if it is currently inside pty_master_read(). */
     if (slave_tty->output_pipe)
         pipe_close(slave_tty->output_pipe, 1);
 
@@ -562,15 +602,34 @@ static void telnet_session_handler(uint64 arg1, uint64 arg2)
     if (slave_tty->input_pipe)
         pipe_close(slave_tty->input_pipe, 1);
 
-    /* Wait for the TX thread to exit (up to 2 seconds) */
-    for (int i = 0; i < 200 && !smp_load_acquire(&sess->tx_done); i++)
+    /*
+     * Wait for the TX thread to exit.
+     *
+     * The TX thread handles netconn_close() itself — see the comment
+     * at the end of telnet_tx_thread().  We do NOT call any netconn
+     * functions here because the lwIP netconn API is NOT thread-safe
+     * for the same connection.  Calling netconn_close() from this
+     * thread while the TX thread is inside netconn_write() would
+     * corrupt conn->current_msg / conn->op_completed and crash the
+     * tcpip thread.
+     *
+     * The TX thread will be unblocked by one of:
+     *   a) pipe_close above → pty_master_read returns EOF
+     *   b) Remote disconnect → TCP RST/FIN processed by lwIP →
+     *      err_tcp callback signals conn->op_completed →
+     *      netconn_write returns ERR_RST/ERR_CLSD
+     */
+    for (int i = 0; i < 500 && !smp_load_acquire(&sess->tx_done); i++)
         sleep_ms(10);
 
     if (!smp_load_acquire(&sess->tx_done))
         printf("telnetd: WARNING: TX thread did not exit in time\n");
 
-    netconn_close(conn);
+    /* TX thread has called netconn_close — safe to free the conn */
     netconn_delete(conn);
+
+    /* Release the per-thread lwIP semaphore so the slot can be reused. */
+    LWIP_NETCONN_THREAD_SEM_FREE();
 
     tty_hangup(slave_tty);
 

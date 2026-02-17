@@ -1033,6 +1033,8 @@ void vm_dup(vm_t *vm) { atomic_inc(&vm->refcount); }
  * @see vm_dup()
  */
 void vm_put(vm_t *vm) {
+    if (vm == NULL)
+        return;
     if (!atomic_dec_unless(&vm->refcount, 1)) {
         // By now, suppose only the processes holding a reference to this VM can
         // increase the refcount again. Thus, no other processes can access this

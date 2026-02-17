@@ -63,6 +63,18 @@ typedef struct sys_mbox {
 typedef struct thread *sys_thread_t;
 
 /* --------------------------------------------------------------------------
+ * Per-thread semaphore for LWIP_NETCONN_SEM_PER_THREAD
+ * -------------------------------------------------------------------------- */
+#if LWIP_NETCONN_SEM_PER_THREAD
+sys_sem_t *sys_arch_netconn_sem_get(void);
+void sys_arch_netconn_sem_alloc(void);
+void sys_arch_netconn_sem_free(void);
+#define LWIP_NETCONN_THREAD_SEM_GET()   sys_arch_netconn_sem_get()
+#define LWIP_NETCONN_THREAD_SEM_ALLOC() sys_arch_netconn_sem_alloc()
+#define LWIP_NETCONN_THREAD_SEM_FREE()  sys_arch_netconn_sem_free()
+#endif /* LWIP_NETCONN_SEM_PER_THREAD */
+
+/* --------------------------------------------------------------------------
  * Validity macros — lwIP uses these to check if a primitive is initialised
  * -------------------------------------------------------------------------- */
 #define sys_sem_valid(sem)          ((sem) != NULL && (sem)->valid)
