@@ -1,13 +1,24 @@
-// Shell.
+// Enhanced Shell with line editing, history, tab completion, and job control
+//
+// Features:
+// - Command history (up/down arrows, ring buffer)
+// - Tab completion for commands (PATH) and files
+// - Cursor movement (left/right) and mid-line editing
+// - Ctrl+C/D/U/K/A/E/L key bindings
+// - Raw terminal mode for character-by-character input
+// - PATH-based command lookup
+// - Foreground process group management (TIOCSPGRP)
+// - Enhanced ls with permissions, types, sizes
 
-#include "user/user.h"
+#include "user.h"
 #include "kernel/inc/uabi/fcntl.h"
 #include "kernel/inc/uabi/stat.h"
+#include "kernel/inc/uabi/termios.h"
 #include "kernel/inc/uabi/linux_dirent64.h"
 
-#define LS_FMT_WIDTH 14 // Display width for formatting
-
-// Parsed command representation
+// =====================================================================
+// Parsed command representation (same as original xv6 shell)
+// =====================================================================
 #define EXEC 1
 #define REDIR 2
 #define PIPE 3
@@ -52,98 +63,1140 @@ struct backcmd {
     struct cmd *cmd;
 };
 
+// Forward declarations
 void panic(char *);
 struct cmd *parsecmd(char *);
 void runcmd(struct cmd *) __attribute__((noreturn));
 
-// Current working directory path buffer
+// =====================================================================
+// Utility helpers
+// =====================================================================
+
+static int strncmp_local(const char *a, const char *b, int n) {
+    while (n > 0) {
+        if (*a != *b)
+            return (unsigned char)*a - (unsigned char)*b;
+        if (*a == 0)
+            return 0;
+        a++;
+        b++;
+        n--;
+    }
+    return 0;
+}
+
+static char *strcat_local(char *dest, const char *src) {
+    char *d = dest;
+    while (*d)
+        d++;
+    while ((*d++ = *src++))
+        ;
+    return dest;
+}
+
+// Simple itoa into caller buffer, returns length written.
+static int itoa_local(int val, char *buf, int bufsz) {
+    if (bufsz < 2)
+        return 0;
+    if (val < 0) {
+        buf[0] = '-';
+        int n = itoa_local(-val, buf + 1, bufsz - 1);
+        return n + 1;
+    }
+    if (val == 0) {
+        buf[0] = '0';
+        buf[1] = 0;
+        return 1;
+    }
+    char tmp[16];
+    int i = 0;
+    while (val && i < 15) {
+        tmp[i++] = '0' + (val % 10);
+        val /= 10;
+    }
+    int len = i;
+    if (len >= bufsz)
+        len = bufsz - 1;
+    for (int j = 0; j < len; j++)
+        buf[j] = tmp[len - 1 - j];
+    buf[len] = 0;
+    return len;
+}
+
+// =====================================================================
+// Line editing state
+// =====================================================================
+
+#define LINE_BUF_SIZE 256
+#define HISTORY_SIZE 32
+
+static char line_buf[LINE_BUF_SIZE];
+static int line_len;
+static int cursor_pos;
+
+// History ring buffer
+static char history[HISTORY_SIZE][LINE_BUF_SIZE];
+static int history_count; // total entries stored
+static int history_idx;   // browsing index
+static int history_start; // oldest entry position in ring
+
+// Terminal state
+static struct termios orig_termios;
+static int raw_mode;
+
+// Current working directory (for prompt)
 static char cwd_path[512] = "/";
 
-// Update cwd_path using getcwd syscall
-static void update_cwd(void) {
-    if (getcwd(cwd_path, sizeof(cwd_path)) == 0) {
-        // On failure, keep previous value or set to "?"
-        strcpy(cwd_path, "?");
+#define errprintf(...) fprintf(2, __VA_ARGS__)
+#define ST_MODE(x) ((x).mode)
+#define ST_MODE_P(x) ((x)->mode)
+#define ST_NLINK_P(x) ((x)->nlink)
+#define ST_SIZE_P(x) ((x)->size)
+
+// =====================================================================
+// Environment variables
+// =====================================================================
+
+#define MAX_ENV_VARS 64
+#define MAX_ENV_NAME 64
+#define MAX_ENV_VALUE 256
+
+struct env_var {
+    char name[MAX_ENV_NAME];
+    char value[MAX_ENV_VALUE];
+    int used;
+};
+
+static struct env_var env_vars[MAX_ENV_VARS];
+
+static int env_set(const char *name, const char *value);
+
+static void env_init(void) {
+    for (int i = 0; i < MAX_ENV_VARS; i++)
+        env_vars[i].used = 0;
+    env_set("PATH", "/:/bin");
+    env_set("HOME", "/");
+    env_set("PYTHONHOME", "/usr/local");
+    env_set("PYTHONPATH", "/usr/local/lib/python3.12");
+    env_set("PYTHONDONTWRITEBYTECODE", "1");
+}
+
+static char *env_get(const char *name) {
+    for (int i = 0; i < MAX_ENV_VARS; i++) {
+        if (env_vars[i].used && strcmp(env_vars[i].name, name) == 0)
+            return env_vars[i].value;
+    }
+    return 0;
+}
+
+static int env_set(const char *name, const char *value) {
+    // Update existing
+    for (int i = 0; i < MAX_ENV_VARS; i++) {
+        if (env_vars[i].used && strcmp(env_vars[i].name, name) == 0) {
+            int vlen = strlen(value);
+            if (vlen >= MAX_ENV_VALUE)
+                vlen = MAX_ENV_VALUE - 1;
+            memcpy(env_vars[i].value, value, vlen);
+            env_vars[i].value[vlen] = 0;
+            return 0;
+        }
+    }
+    // Find empty slot
+    for (int i = 0; i < MAX_ENV_VARS; i++) {
+        if (!env_vars[i].used) {
+            int nlen = strlen(name);
+            int vlen = strlen(value);
+            if (nlen >= MAX_ENV_NAME)
+                nlen = MAX_ENV_NAME - 1;
+            if (vlen >= MAX_ENV_VALUE)
+                vlen = MAX_ENV_VALUE - 1;
+            memcpy(env_vars[i].name, name, nlen);
+            env_vars[i].name[nlen] = 0;
+            memcpy(env_vars[i].value, value, vlen);
+            env_vars[i].value[vlen] = 0;
+            env_vars[i].used = 1;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static int env_unset(const char *name) {
+    for (int i = 0; i < MAX_ENV_VARS; i++) {
+        if (env_vars[i].used && strcmp(env_vars[i].name, name) == 0) {
+            env_vars[i].used = 0;
+            return 0;
+        }
+    }
+    return -1;
+}
+
+static void env_list(void) {
+    for (int i = 0; i < MAX_ENV_VARS; i++) {
+        if (env_vars[i].used)
+            printf("%s=%s\n", env_vars[i].name, env_vars[i].value);
     }
 }
 
-// Built-in ls command implementation
-static char *ls_fmtname(char *path) {
-    static char buf[LS_FMT_WIDTH + 1];
-    char *p;
+// Expand $VAR, ${VAR}, $$, $? in a string.
+// Returns pointer to a static buffer.
+static char expand_buf[LINE_BUF_SIZE * 2];
 
-    // Find first character after last slash.
-    for (p = path + strlen(path); p >= path && *p != '/'; p--)
-        ;
-    p++;
+static char *expand_env_vars(const char *input) {
+    char *out = expand_buf;
+    char *out_end = expand_buf + sizeof(expand_buf) - 1;
+    const char *p = input;
 
-    // Return blank-padded name.
-    int len = strlen(p);
-    if (len >= LS_FMT_WIDTH)
-        return p;
-    memmove(buf, p, len);
-    memset(buf + len, ' ', LS_FMT_WIDTH - len);
-    buf[LS_FMT_WIDTH] = 0;
-    return buf;
+    while (*p && out < out_end) {
+        if (*p == '$') {
+            p++;
+            if (*p == '{') {
+                // ${VAR}
+                p++;
+                const char *start = p;
+                while (*p && *p != '}')
+                    p++;
+                int len = p - start;
+                if (*p == '}')
+                    p++;
+                char varname[MAX_ENV_NAME];
+                if (len >= MAX_ENV_NAME)
+                    len = MAX_ENV_NAME - 1;
+                memcpy(varname, start, len);
+                varname[len] = 0;
+                char *val = env_get(varname);
+                if (val) {
+                    while (*val && out < out_end)
+                        *out++ = *val++;
+                }
+            } else if (*p == '$') {
+                // $$ = PID
+                p++;
+                char pidbuf[16];
+                int n = itoa_local(getpid(), pidbuf, sizeof(pidbuf));
+                for (int j = 0; j < n && out < out_end; j++)
+                    *out++ = pidbuf[j];
+            } else if (*p == '?') {
+                // $? – not tracked, just emit '0'
+                p++;
+                if (out < out_end)
+                    *out++ = '0';
+            } else if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                       *p == '_') {
+                // $VAR
+                const char *start = p;
+                while ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') ||
+                       (*p >= '0' && *p <= '9') || *p == '_')
+                    p++;
+                int len = p - start;
+                char varname[MAX_ENV_NAME];
+                if (len >= MAX_ENV_NAME)
+                    len = MAX_ENV_NAME - 1;
+                memcpy(varname, start, len);
+                varname[len] = 0;
+                char *val = env_get(varname);
+                if (val) {
+                    while (*val && out < out_end)
+                        *out++ = *val++;
+                }
+            } else {
+                // Lone $
+                *out++ = '$';
+            }
+        } else {
+            *out++ = *p++;
+        }
+    }
+    *out = 0;
+    return expand_buf;
 }
 
-static void builtin_ls(char *path) {
-    char buf[512], *p;
-    int fd;
-    struct stat st;
-    char dirent_buf[1024]; // Buffer for getdents
+// =====================================================================
+// Terminal control
+// =====================================================================
+
+static void enable_raw_mode(void) {
+    if (raw_mode)
+        return;
+    struct termios raw;
+    if (tcgetattr(0, &orig_termios) < 0)
+        return;
+    raw = orig_termios;
+    raw.c_lflag &= ~(ICANON | ECHO | ECHOE | ECHOK | ISIG);
+    raw.c_iflag &= ~(ICRNL | IXON);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+    if (tcsetattr(0, TCSAFLUSH, &raw) < 0)
+        return;
+    raw_mode = 1;
+}
+
+static void disable_raw_mode(void) {
+    if (!raw_mode)
+        return;
+    tcsetattr(0, TCSAFLUSH, &orig_termios);
+    raw_mode = 0;
+}
+
+static void term_write(const char *s, int n) {
+    write(1, s, n);
+}
+
+static void term_putc(char c) { term_write(&c, 1); }
+
+static void term_cursor_left(int n) {
+    while (n-- > 0)
+        term_write("\x1b[D", 3);
+}
+
+static void term_cursor_right(int n) {
+    while (n-- > 0)
+        term_write("\x1b[C", 3);
+}
+
+static void term_clear_to_eol(void) {
+    term_write("\x1b[K", 3);
+}
+
+static void term_bell(void) {
+    term_putc('\x07');
+}
+
+static void term_clear_screen(void) {
+    term_write("\x1b[2J\x1b[H", 7);
+}
+
+static void term_show_prompt(void) {
+    term_write(cwd_path, strlen(cwd_path));
+    term_write(" $ ", 3);
+}
+
+// =====================================================================
+// Line buffer operations
+// =====================================================================
+
+static void line_clear(void) {
+    line_buf[0] = 0;
+    line_len = 0;
+    cursor_pos = 0;
+}
+
+static void line_insert_char(char c) {
+    if (line_len >= LINE_BUF_SIZE - 1) {
+        term_bell();
+        return;
+    }
+    // Shift right
+    for (int i = line_len; i > cursor_pos; i--)
+        line_buf[i] = line_buf[i - 1];
+    line_buf[cursor_pos] = c;
+    line_len++;
+    line_buf[line_len] = 0;
+
+    // Write from cursor to end
+    term_write(&line_buf[cursor_pos], line_len - cursor_pos);
+    cursor_pos++;
+    // Move cursor back
+    if (cursor_pos < line_len)
+        term_cursor_left(line_len - cursor_pos);
+}
+
+static void line_delete_char(void) {
+    if (cursor_pos == 0) {
+        term_bell();
+        return;
+    }
+    cursor_pos--;
+    for (int i = cursor_pos; i < line_len - 1; i++)
+        line_buf[i] = line_buf[i + 1];
+    line_len--;
+    line_buf[line_len] = 0;
+
+    term_write("\x08", 1);
+    term_write(&line_buf[cursor_pos], line_len - cursor_pos);
+    term_clear_to_eol();
+    if (cursor_pos < line_len)
+        term_cursor_left(line_len - cursor_pos);
+}
+
+static void line_delete_forward(void) {
+    if (cursor_pos >= line_len) {
+        term_bell();
+        return;
+    }
+    for (int i = cursor_pos; i < line_len - 1; i++)
+        line_buf[i] = line_buf[i + 1];
+    line_len--;
+    line_buf[line_len] = 0;
+
+    term_write(&line_buf[cursor_pos], line_len - cursor_pos);
+    term_clear_to_eol();
+    if (cursor_pos < line_len)
+        term_cursor_left(line_len - cursor_pos);
+}
+
+static void line_move_left(void) {
+    if (cursor_pos > 0) {
+        cursor_pos--;
+        term_cursor_left(1);
+    }
+}
+
+static void line_move_right(void) {
+    if (cursor_pos < line_len) {
+        cursor_pos++;
+        term_cursor_right(1);
+    }
+}
+
+static void line_move_home(void) {
+    if (cursor_pos > 0) {
+        term_cursor_left(cursor_pos);
+        cursor_pos = 0;
+    }
+}
+
+static void line_move_end(void) {
+    if (cursor_pos < line_len) {
+        term_cursor_right(line_len - cursor_pos);
+        cursor_pos = line_len;
+    }
+}
+
+static void line_kill_to_end(void) {
+    term_clear_to_eol();
+    line_len = cursor_pos;
+    line_buf[line_len] = 0;
+}
+
+static void line_kill_all(void) {
+    if (cursor_pos > 0)
+        term_cursor_left(cursor_pos);
+    term_clear_to_eol();
+    line_clear();
+}
+
+static void line_set(const char *s) {
+    if (cursor_pos > 0)
+        term_cursor_left(cursor_pos);
+    term_clear_to_eol();
+
+    int n = strlen(s);
+    if (n >= LINE_BUF_SIZE)
+        n = LINE_BUF_SIZE - 1;
+    memcpy(line_buf, s, n);
+    line_buf[n] = 0;
+    line_len = n;
+    cursor_pos = n;
+    term_write(line_buf, line_len);
+}
+
+// =====================================================================
+// History management
+// =====================================================================
+
+static void history_add(const char *line) {
+    if (line[0] == 0)
+        return;
+    // Skip duplicate of last entry
+    if (history_count > 0) {
+        int last = (history_start + history_count - 1) % HISTORY_SIZE;
+        if (strcmp(history[last], line) == 0)
+            return;
+    }
+    int idx;
+    if (history_count < HISTORY_SIZE) {
+        idx = history_count;
+        history_count++;
+    } else {
+        idx = history_start;
+        history_start = (history_start + 1) % HISTORY_SIZE;
+    }
+    int n = strlen(line);
+    if (n >= LINE_BUF_SIZE)
+        n = LINE_BUF_SIZE - 1;
+    memcpy(history[idx], line, n);
+    history[idx][n] = 0;
+}
+
+static void history_prev(void) {
+    if (history_count == 0 || history_idx <= 0) {
+        term_bell();
+        return;
+    }
+    history_idx--;
+    int idx = (history_start + history_idx) % HISTORY_SIZE;
+    line_set(history[idx]);
+}
+
+static void history_next(void) {
+    if (history_idx < history_count - 1) {
+        history_idx++;
+        int idx = (history_start + history_idx) % HISTORY_SIZE;
+        line_set(history[idx]);
+    } else if (history_idx == history_count - 1) {
+        history_idx = history_count;
+        line_set("");
+    } else {
+        term_bell();
+    }
+}
+
+static void history_reset(void) { history_idx = history_count; }
+
+// =====================================================================
+// Tab completion
+// =====================================================================
+
+#define MAX_MATCHES 64
+static char matches[MAX_MATCHES][NAME_MAX + 1];
+static int match_count;
+
+static int match_exists(const char *name) {
+    for (int i = 0; i < match_count; i++) {
+        if (strcmp(matches[i], name) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+// Return non-zero if c is a shell word-boundary character.
+static int is_word_boundary(char c) {
+    return c == ' ' || c == '\t' || c == '|' || c == ';' || c == '&' ||
+           c == '>' || c == '<' || c == '(' || c == ')';
+}
+
+// Determine word at cursor and whether it is a command position.
+static int get_completion_word(char *word, int maxlen, int *is_first_word) {
+    int start = cursor_pos;
+    while (start > 0 && !is_word_boundary(line_buf[start - 1]))
+        start--;
+
+    // Walk everything before start to decide whether this is a command
+    // (first-word) position.  Pipe, semicolon, and ampersand reset to
+    // command position; redirection operators and normal characters
+    // indicate argument position.
+    int first = 1;
+    for (int i = 0; i < start; i++) {
+        char c = line_buf[i];
+        if (c == ' ' || c == '\t')
+            continue;
+        if (c == '|' || c == ';' || c == '&')
+            first = 1; // next word is a command
+        else
+            first = 0; // next word is an argument / filename
+    }
+    if (is_first_word)
+        *is_first_word = first;
+
+    int len = cursor_pos - start;
+    if (len >= maxlen)
+        len = maxlen - 1;
+    memcpy(word, &line_buf[start], len);
+    word[len] = 0;
+    return start;
+}
+
+static void get_completion_dir(const char *word, char *dir, char *prefix,
+                               int maxdir) {
+    const char *slash = 0;
+    for (const char *p = word; *p; p++) {
+        if (*p == '/')
+            slash = p;
+    }
+    if (slash) {
+        int dlen = slash - word + 1;
+        if (dlen >= maxdir)
+            dlen = maxdir - 1;
+        memcpy(dir, word, dlen);
+        dir[dlen] = 0;
+        strcpy(prefix, slash + 1);
+    } else {
+        strcpy(dir, ".");
+        strcpy(prefix, word);
+    }
+}
+
+static void add_matches_from_dir(const char *dir, const char *prefix,
+                                 int executables_only) {
+    int prefix_len = strlen(prefix);
+    int fd = open(dir, O_RDONLY);
+    if (fd < 0)
+        return;
+
+    char dirent_buf[1024];
     int nread;
 
-    if ((fd = open(path, O_RDONLY | O_NOFOLLOW)) < 0) {
-        fprintf(2, "ls: cannot open %s\n", path);
-        return;
-    }
-
-    if (fstat(fd, &st) < 0) {
-        fprintf(2, "ls: cannot stat %s\n", path);
-        close(fd);
-        return;
-    }
-
-    if (S_ISREG(st.mode) || S_ISCHR(st.mode) || S_ISBLK(st.mode)) {
-        printf("%s %o %ld %ld\n", ls_fmtname(path), st.mode, st.ino, st.size);
-    } else if (S_ISDIR(st.mode)) {
-        if (strlen(path) + 1 + NAME_MAX + 1 > sizeof buf) {
-            printf("ls: path too long\n");
-            close(fd);
-            return;
-        }
-        strcpy(buf, path);
-        p = buf + strlen(buf);
-        *p++ = '/';
-
-        // Use getdents to read directory entries
-        while ((nread = getdents(fd, dirent_buf, sizeof(dirent_buf))) > 0) {
-            int pos = 0;
-            while (pos < nread) {
-                struct linux_dirent64 *de =
-                    (struct linux_dirent64 *)(dirent_buf + pos);
-                if (de->d_ino == 0) {
-                    pos += de->d_reclen;
-                    continue;
+    while ((nread = getdents(fd, dirent_buf, sizeof(dirent_buf))) > 0) {
+        int pos = 0;
+        while (pos < nread && match_count < MAX_MATCHES) {
+            struct linux_dirent64 *de =
+                (struct linux_dirent64 *)(dirent_buf + pos);
+            if (de->d_ino != 0) {
+                if (prefix_len == 0 ||
+                    strncmp_local(de->d_name, prefix, prefix_len) == 0) {
+                    if (strcmp(de->d_name, ".") != 0 &&
+                        strcmp(de->d_name, "..") != 0 &&
+                        !match_exists(de->d_name)) {
+                        if (executables_only) {
+                            char path[512];
+                            int dlen = strlen(dir);
+                            memcpy(path, dir, dlen);
+                            if (dlen > 0 && dir[dlen - 1] != '/')
+                                path[dlen++] = '/';
+                            strcpy(path + dlen, de->d_name);
+                            struct stat st;
+                            if (stat(path, &st) == 0 && S_ISREG(ST_MODE(st)))
+                                strcpy(matches[match_count++], de->d_name);
+                        } else {
+                            strcpy(matches[match_count++], de->d_name);
+                        }
+                    }
                 }
-                strcpy(p, de->d_name);
-                if (stat(buf, &st) < 0) {
-                    printf("ls: cannot stat %s\n", buf);
-                    pos += de->d_reclen;
-                    continue;
-                }
-                printf("%s %o %ld %ld\n", ls_fmtname(buf), st.mode, st.ino,
-                       st.size);
-                pos += de->d_reclen;
             }
+            pos += de->d_reclen;
         }
     }
     close(fd);
 }
 
-// Helper for pipe left side: redirect stdout to pipe write end, then run cmd
-// Never returns - safe to call after vfork
+static void collect_path_matches(const char *prefix) {
+    match_count = 0;
+
+    // Files in current directory
+    add_matches_from_dir(".", prefix, 0);
+
+    // Executables from PATH
+    char *path = env_get("PATH");
+    if (path) {
+        char pathcopy[MAX_ENV_VALUE];
+        int plen = strlen(path);
+        if (plen >= MAX_ENV_VALUE)
+            plen = MAX_ENV_VALUE - 1;
+        memcpy(pathcopy, path, plen);
+        pathcopy[plen] = 0;
+
+        char *p = pathcopy;
+        while (*p && match_count < MAX_MATCHES) {
+            char *start = p;
+            while (*p && *p != ':')
+                p++;
+            int dlen = p - start;
+            if (dlen > 0 && dlen < 256) {
+                char dir[256];
+                memcpy(dir, start, dlen);
+                dir[dlen] = 0;
+                add_matches_from_dir(dir, prefix, 1);
+            }
+            if (*p == ':')
+                p++;
+        }
+    }
+
+    // Built-in commands
+    static const char *builtins[] = {
+        "cd", "ls", "echo", "exit", "export", "unset", "env", "history", 0};
+    int prefix_len = strlen(prefix);
+    for (int i = 0; builtins[i] && match_count < MAX_MATCHES; i++) {
+        if (prefix_len == 0 ||
+            strncmp_local(builtins[i], prefix, prefix_len) == 0) {
+            if (!match_exists(builtins[i]))
+                strcpy(matches[match_count++], builtins[i]);
+        }
+    }
+}
+
+static int common_prefix_len(void) {
+    if (match_count <= 1)
+        return match_count ? (int)strlen(matches[0]) : 0;
+    int len = 0;
+    while (1) {
+        char c = matches[0][len];
+        if (c == 0)
+            break;
+        int ok = 1;
+        for (int i = 1; i < match_count; i++) {
+            if (matches[i][len] != c) {
+                ok = 0;
+                break;
+            }
+        }
+        if (!ok)
+            break;
+        len++;
+    }
+    return len;
+}
+
+static void do_tab_completion(void) {
+    char word[NAME_MAX + 1];
+    char dir[256];
+    char prefix[NAME_MAX + 1];
+    int is_first_word = 0;
+
+    (void)get_completion_word(word, sizeof(word), &is_first_word);
+    get_completion_dir(word, dir, prefix, sizeof(dir));
+
+    if (is_first_word && strcmp(dir, ".") == 0)
+        collect_path_matches(prefix);
+    else {
+        match_count = 0;
+        add_matches_from_dir(dir, prefix, 0);
+    }
+
+    if (match_count == 0) {
+        term_bell();
+        return;
+    }
+
+    int prefix_len = strlen(prefix);
+    int common = common_prefix_len();
+
+    if (common > prefix_len) {
+        for (int i = prefix_len; i < common; i++)
+            line_insert_char(matches[0][i]);
+
+        if (match_count == 1) {
+            // Append / for dirs, space otherwise
+            char path[512];
+            if (strcmp(dir, ".") == 0)
+                strcpy(path, matches[0]);
+            else {
+                strcpy(path, dir);
+                strcat_local(path, matches[0]);
+            }
+            struct stat st;
+            if (stat(path, &st) == 0 && S_ISDIR(ST_MODE(st)))
+                line_insert_char('/');
+            else
+                line_insert_char(' ');
+        }
+    } else if (match_count > 1) {
+        // Show candidates
+        term_write("\r\n", 2);
+
+        int maxlen = 0;
+        for (int i = 0; i < match_count; i++) {
+            int len = strlen(matches[i]);
+            if (len > maxlen)
+                maxlen = len;
+        }
+        int colwidth = maxlen + 2;
+        if (colwidth < 8)
+            colwidth = 8;
+        int cols = 80 / colwidth;
+        if (cols < 1)
+            cols = 1;
+
+        for (int i = 0; i < match_count; i++) {
+            int len = strlen(matches[i]);
+            term_write(matches[i], len);
+            if ((i + 1) % cols == 0 || i == match_count - 1) {
+                term_write("\r\n", 2);
+            } else {
+                for (int j = len; j < colwidth; j++)
+                    term_putc(' ');
+            }
+        }
+
+        // Re-display prompt + current line
+        term_show_prompt();
+        term_write(line_buf, line_len);
+        if (cursor_pos < line_len)
+            term_cursor_left(line_len - cursor_pos);
+    }
+}
+
+// =====================================================================
+// Escape sequence parsing
+// =====================================================================
+
+static int read_char(void) {
+    char c;
+    for (;;) {
+        int n = read(0, &c, 1);
+        if (n == 1)
+            return (unsigned char)c;
+        // On xv6 console, raw reads can transiently return 0 (or <0) during
+        // mode transitions; keep waiting instead of treating as EOF.
+    }
+}
+
+#define KEY_EXT_BASE 0x100
+#define KEY_EXT_UP (KEY_EXT_BASE + 1)
+#define KEY_EXT_DOWN (KEY_EXT_BASE + 2)
+#define KEY_EXT_LEFT (KEY_EXT_BASE + 3)
+#define KEY_EXT_RIGHT (KEY_EXT_BASE + 4)
+#define KEY_EXT_HOME (KEY_EXT_BASE + 5)
+#define KEY_EXT_END (KEY_EXT_BASE + 6)
+#define KEY_EXT_DELETE (KEY_EXT_BASE + 7)
+
+static int read_key(void) {
+    int c = read_char();
+    if (c != 0x1b)
+        return c;
+
+    int c1 = read_char();
+    if (c1 < 0)
+        return 0x1b;
+    if (c1 == '[') {
+        int c2 = read_char();
+        if (c2 < 0)
+            return 0x1b;
+        switch (c2) {
+        case 'A':
+            return KEY_EXT_UP;
+        case 'B':
+            return KEY_EXT_DOWN;
+        case 'C':
+            return KEY_EXT_RIGHT;
+        case 'D':
+            return KEY_EXT_LEFT;
+        case 'H':
+            return KEY_EXT_HOME;
+        case 'F':
+            return KEY_EXT_END;
+        case '3':
+            if (read_char() == '~')
+                return KEY_EXT_DELETE;
+            break;
+        case '1':
+        case '7':
+            if (read_char() == '~')
+                return KEY_EXT_HOME;
+            break;
+        case '4':
+        case '8':
+            if (read_char() == '~')
+                return KEY_EXT_END;
+            break;
+        }
+        return 0x1b;
+    }
+    if (c1 == 'O') {
+        int c2 = read_char();
+        if (c2 == 'A')
+            return KEY_EXT_UP;
+        if (c2 == 'B')
+            return KEY_EXT_DOWN;
+        if (c2 == 'C')
+            return KEY_EXT_RIGHT;
+        if (c2 == 'D')
+            return KEY_EXT_LEFT;
+        if (c2 == 'H')
+            return KEY_EXT_HOME;
+        if (c2 == 'F')
+            return KEY_EXT_END;
+    }
+    return 0x1b;
+}
+
+// =====================================================================
+// readline – main line reading loop
+// =====================================================================
+
+static int do_readline(char *buf, int nbuf) {
+    line_clear();
+    history_reset();
+    enable_raw_mode();
+    term_show_prompt();
+
+    while (1) {
+        int c = read_key();
+        if (c < 0) {
+            disable_raw_mode();
+            return -1;
+        }
+
+        switch (c) {
+        case '\r':
+        case '\n':
+            term_write("\r\n", 2);
+            disable_raw_mode();
+            if (line_len > 0)
+                history_add(line_buf);
+            if (line_len >= nbuf)
+                line_len = nbuf - 1;
+            memcpy(buf, line_buf, line_len);
+            buf[line_len] = '\n';
+            buf[line_len + 1] = 0;
+            return line_len + 1;
+
+        case 0x04: // Ctrl+D
+            if (line_len == 0) {
+                term_write("\r\n", 2);
+                disable_raw_mode();
+                return -1;
+            }
+            line_delete_forward();
+            break;
+
+        case 0x03: // Ctrl+C
+            term_write("^C\r\n", 4);
+            line_clear();
+            disable_raw_mode();
+            enable_raw_mode();
+            term_show_prompt();
+            break;
+
+        case 0x15: // Ctrl+U
+            line_kill_all();
+            break;
+
+        case 0x0b: // Ctrl+K
+            line_kill_to_end();
+            break;
+
+        case 0x01: // Ctrl+A
+            line_move_home();
+            break;
+
+        case 0x05: // Ctrl+E
+            line_move_end();
+            break;
+
+        case 0x08: // Ctrl+H / backspace
+        case 0x7f: // DEL
+            line_delete_char();
+            break;
+
+        case '\t':
+            do_tab_completion();
+            break;
+
+        case KEY_EXT_UP:
+            history_prev();
+            break;
+
+        case KEY_EXT_DOWN:
+            history_next();
+            break;
+
+        case KEY_EXT_LEFT:
+            line_move_left();
+            break;
+
+        case KEY_EXT_RIGHT:
+            line_move_right();
+            break;
+
+        case KEY_EXT_HOME:
+            line_move_home();
+            break;
+
+        case KEY_EXT_END:
+            line_move_end();
+            break;
+
+        case KEY_EXT_DELETE:
+            line_delete_forward();
+            break;
+
+        case 0x0c: // Ctrl+L – clear screen
+            term_clear_screen();
+            term_show_prompt();
+            term_write(line_buf, line_len);
+            if (cursor_pos < line_len)
+                term_cursor_left(line_len - cursor_pos);
+            break;
+
+        default:
+            if (c >= 32 && c < 127)
+                line_insert_char(c);
+            break;
+        }
+    }
+}
+
+// =====================================================================
+// Built-in commands
+// =====================================================================
+
+static void update_cwd(void) {
+    if (getcwd(cwd_path, sizeof(cwd_path)) == 0)
+        strcpy(cwd_path, "?");
+}
+
+// ---- Enhanced ls ----
+
+static char mode_type_char(mode_t m) {
+    if (S_ISDIR(m))
+        return 'd';
+    if (S_ISLNK(m))
+        return 'l';
+    if (S_ISCHR(m))
+        return 'c';
+    if (S_ISBLK(m))
+        return 'b';
+    if (S_ISFIFO(m))
+        return 'p';
+    if (S_ISSOCK(m))
+        return 's';
+    return '-';
+}
+
+static void format_permissions(mode_t m, char *buf) {
+    buf[0] = (m & S_IRUSR) ? 'r' : '-';
+    buf[1] = (m & S_IWUSR) ? 'w' : '-';
+    buf[2] = (m & S_IXUSR) ? 'x' : '-';
+    buf[3] = (m & S_IRGRP) ? 'r' : '-';
+    buf[4] = (m & S_IWGRP) ? 'w' : '-';
+    buf[5] = (m & S_IXGRP) ? 'x' : '-';
+    buf[6] = (m & S_IROTH) ? 'r' : '-';
+    buf[7] = (m & S_IWOTH) ? 'w' : '-';
+    buf[8] = (m & S_IXOTH) ? 'x' : '-';
+    buf[9] = 0;
+}
+
+static char name_indicator(mode_t m) {
+    if (S_ISDIR(m))
+        return '/';
+    if (S_ISLNK(m))
+        return '@';
+    if (S_ISSOCK(m))
+        return '=';
+    if (S_ISFIFO(m))
+        return '|';
+    if (m & (S_IXUSR | S_IXGRP | S_IXOTH))
+        return '*';
+    return 0;
+}
+
+static void ls_print_entry(char *path, struct stat *st) {
+    char perms[10];
+    format_permissions(ST_MODE_P(st), perms);
+
+    // Extract basename
+    char *name;
+    for (name = path + strlen(path); name >= path && *name != '/'; name--)
+        ;
+    name++;
+
+    char ind = name_indicator(ST_MODE_P(st));
+
+    if (ind)
+        printf("%c%s %3u %7lu %s%c\n", mode_type_char(ST_MODE_P(st)), perms,
+               ST_NLINK_P(st), ST_SIZE_P(st), name, ind);
+    else
+        printf("%c%s %3u %7lu %s\n", mode_type_char(ST_MODE_P(st)), perms,
+               ST_NLINK_P(st), ST_SIZE_P(st), name);
+}
+
+static void builtin_ls(char *path) {
+    int fd;
+    struct stat st;
+
+    if ((fd = open(path, O_RDONLY)) < 0) {
+        errprintf("ls: cannot open %s\n", path);
+        return;
+    }
+    if (fstat(fd, &st) < 0) {
+        errprintf("ls: cannot stat %s\n", path);
+        close(fd);
+        return;
+    }
+
+    if (!S_ISDIR(ST_MODE(st))) {
+        // Single file
+        ls_print_entry(path, &st);
+        close(fd);
+        return;
+    }
+
+    // Directory listing
+    char buf[512], *p;
+    if (strlen(path) + 1 + NAME_MAX + 1 > sizeof(buf)) {
+        printf("ls: path too long\n");
+        close(fd);
+        return;
+    }
+    strcpy(buf, path);
+    p = buf + strlen(buf);
+    *p++ = '/';
+
+    char dirent_buf[1024];
+    int nread;
+
+    while ((nread = getdents(fd, dirent_buf, sizeof(dirent_buf))) > 0) {
+        int pos = 0;
+        while (pos < nread) {
+            struct linux_dirent64 *de =
+                (struct linux_dirent64 *)(dirent_buf + pos);
+            if (de->d_ino == 0) {
+                pos += de->d_reclen;
+                continue;
+            }
+            strcpy(p, de->d_name);
+            if (stat(buf, &st) < 0) {
+                printf("ls: cannot stat %s\n", buf);
+                pos += de->d_reclen;
+                continue;
+            }
+            ls_print_entry(buf, &st);
+            pos += de->d_reclen;
+        }
+    }
+    close(fd);
+}
+
+static void builtin_history(void) {
+    for (int i = 0; i < history_count; i++) {
+        int idx = (history_start + i) % HISTORY_SIZE;
+        printf("%3d  %s\n", i + 1, history[idx]);
+    }
+}
+
+// =====================================================================
+// PATH-based exec
+// =====================================================================
+
+static void exec_with_path(char *cmd, char **argv) {
+    // If contains '/', use directly
+    for (char *p = cmd; *p; p++) {
+        if (*p == '/') {
+            exec(cmd, argv);
+            return;
+        }
+    }
+
+    // Try as-is (current dir)
+    exec(cmd, argv);
+
+    // Search PATH
+    char *path = env_get("PATH");
+    if (!path)
+        return;
+
+    char pathcopy[MAX_ENV_VALUE];
+    int plen = strlen(path);
+    if (plen >= MAX_ENV_VALUE)
+        plen = MAX_ENV_VALUE - 1;
+    memcpy(pathcopy, path, plen);
+    pathcopy[plen] = 0;
+
+    char *p = pathcopy;
+    while (*p) {
+        char *start = p;
+        while (*p && *p != ':')
+            p++;
+        int dlen = p - start;
+        if (dlen > 0) {
+            char fullpath[512];
+            memcpy(fullpath, start, dlen);
+            if (fullpath[dlen - 1] != '/')
+                fullpath[dlen++] = '/';
+            strcpy(fullpath + dlen, cmd);
+            exec(fullpath, argv);
+        }
+        if (*p == ':')
+            p++;
+    }
+}
+
+// =====================================================================
+// Pipe helpers (vfork-safe wrappers)
+// =====================================================================
+
 static void run_pipe_left(struct cmd *cmd, int *p) __attribute__((noreturn));
 static void run_pipe_left(struct cmd *cmd, int *p) {
     close(1);
@@ -153,8 +1206,6 @@ static void run_pipe_left(struct cmd *cmd, int *p) {
     runcmd(cmd);
 }
 
-// Helper for pipe right side: redirect stdin to pipe read end, then run cmd
-// Never returns - safe to call after vfork
 static void run_pipe_right(struct cmd *cmd, int *p) __attribute__((noreturn));
 static void run_pipe_right(struct cmd *cmd, int *p) {
     close(0);
@@ -164,7 +1215,10 @@ static void run_pipe_right(struct cmd *cmd, int *p) {
     runcmd(cmd);
 }
 
-// Execute cmd.  Never returns.
+// =====================================================================
+// Command execution (recursive walk of the parse tree)
+// =====================================================================
+
 void runcmd(struct cmd *cmd) {
     int p[2];
     struct backcmd *bcmd;
@@ -185,21 +1239,15 @@ void runcmd(struct cmd *cmd) {
         ecmd = (struct execcmd *)cmd;
         if (ecmd->argv[0] == 0)
             exit(1);
-        exec(ecmd->argv[0], ecmd->argv);
-        size_t len = strlen(ecmd->argv[0]);
-        for (int i = 0; i < len; i++) {
-            if (ecmd->argv[0][i] == '\x1b') {
-                ecmd->argv[0][i] = '[';
-            }
-        }
-        fprintf(2, "exec %s failed\n", ecmd->argv[0]);
-        break;
+        exec_with_path(ecmd->argv[0], ecmd->argv);
+        errprintf("exec %s failed\n", ecmd->argv[0]);
+        exit(127);
 
     case REDIR:
         rcmd = (struct redircmd *)cmd;
         close(rcmd->fd);
         if (open(rcmd->file, rcmd->mode) < 0) {
-            fprintf(2, "open %s failed\n", rcmd->file);
+            errprintf("open %s failed\n", rcmd->file);
             exit(1);
         }
         runcmd(rcmd->cmd);
@@ -207,8 +1255,6 @@ void runcmd(struct cmd *cmd) {
 
     case LIST:
         lcmd = (struct listcmd *)cmd;
-        // vfork child calls runcmd which never returns - safe because
-        // child uses stack space above parent's frame
         pid = vfork();
         if (pid < 0)
             panic("vfork");
@@ -222,21 +1268,16 @@ void runcmd(struct cmd *cmd) {
         pcmd = (struct pipecmd *)cmd;
         if (pipe(p) < 0)
             panic("pipe");
-
-        // Left side of pipe: stdout -> pipe write end
         pid = vfork();
         if (pid < 0)
             panic("vfork");
         if (pid == 0)
             run_pipe_left(pcmd->left, p);
-
-        // Right side of pipe: stdin <- pipe read end
         pid = vfork();
         if (pid < 0)
             panic("vfork");
         if (pid == 0)
             run_pipe_right(pcmd->right, p);
-
         close(p[0]);
         close(p[1]);
         wait(0);
@@ -250,26 +1291,33 @@ void runcmd(struct cmd *cmd) {
             panic("vfork");
         if (pid == 0)
             runcmd(bcmd->cmd);
-        // Don't wait - that's the point of &
         break;
     }
     exit(0);
 }
 
+// =====================================================================
+// getcmd – prompt + readline
+// =====================================================================
+
 int getcmd(char *buf, int nbuf) {
-    fprintf(2, "%s $ ", cwd_path);
     memset(buf, 0, nbuf);
-    gets(buf, nbuf);
-    if (buf[0] == 0) // EOF
+    int n = do_readline(buf, nbuf);
+    if (n < 0)
         return -1;
     return 0;
 }
 
+// =====================================================================
+// main
+// =====================================================================
+
 int main(void) {
-    static char buf[100];
+    static char buf[256];
+    static char expanded_buf[512];
     int fd;
 
-    // Ensure that three file descriptors are open.
+    // Ensure three file descriptors are open.
     while ((fd = open("/dev/console", O_RDWR)) >= 0) {
         if (fd >= 3) {
             close(fd);
@@ -277,63 +1325,167 @@ int main(void) {
         }
     }
 
-    // Initialize cwd path
+    env_init();
     update_cwd();
-    // Read and run input commands.
-    while (getcmd(buf, sizeof(buf)) >= 0) {
-        // Built-in: cd
+
+    for (;;) {
+        if (getcmd(buf, sizeof(buf)) < 0)
+            continue;
+        // ---- Built-in: cd ----
         if (buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' ') {
-            // Chdir must be called by the parent, not the child.
             buf[strlen(buf) - 1] = 0; // chop \n
-            if (chdir(buf + 3) < 0)
-                fprintf(2, "cannot cd %s\n", buf + 3);
+            char *path = buf + 3;
+            char *expanded = expand_env_vars(path);
+            if (chdir(expanded) < 0)
+                errprintf("cannot cd %s\n", expanded);
             else
                 update_cwd();
             continue;
         }
-        // Built-in: ls
+
+        // ---- Built-in: ls ----
         if (buf[0] == 'l' && buf[1] == 's' &&
             (buf[2] == '\n' || buf[2] == ' ')) {
-            buf[strlen(buf) - 1] = 0; // chop \n
-            if (buf[2] == 0 || buf[3] == 0) {
-                // ls with no arguments
+            buf[strlen(buf) - 1] = 0;
+            if (buf[2] == 0 || buf[3] == 0)
                 builtin_ls(".");
-            } else {
-                // ls with path argument
+            else
                 builtin_ls(buf + 3);
+            continue;
+        }
+
+        // ---- Built-in: history ----
+        if (strncmp_local(buf, "history", 7) == 0 &&
+            (buf[7] == '\n' || buf[7] == 0)) {
+            builtin_history();
+            continue;
+        }
+
+        // ---- Built-in: env ----
+        if (strncmp_local(buf, "env", 3) == 0 &&
+            (buf[3] == '\n' || buf[3] == 0)) {
+            env_list();
+            continue;
+        }
+
+        // ---- Built-in: export VAR=value ----
+        if (strncmp_local(buf, "export ", 7) == 0) {
+            buf[strlen(buf) - 1] = 0;
+            char *arg = buf + 7;
+            while (*arg == ' ')
+                arg++;
+            char *eq = strchr(arg, '=');
+            if (eq) {
+                *eq = 0;
+                char *name = arg;
+                char *value = eq + 1;
+                int vlen = strlen(value);
+                if (vlen >= 2 &&
+                    ((value[0] == '"' && value[vlen - 1] == '"') ||
+                     (value[0] == '\'' && value[vlen - 1] == '\''))) {
+                    value[vlen - 1] = 0;
+                    value++;
+                }
+                if (env_set(name, value) < 0)
+                    errprintf("export: too many variables\n");
+            } else {
+                errprintf("export: usage: export VAR=value\n");
             }
             continue;
         }
 
-        // Parse command first (before vfork)
-        struct cmd *cmd = parsecmd(buf);
-        if (cmd == 0)
-            continue; // Parse error, try next command
-        int pid;
+        // ---- Built-in: unset ----
+        if (strncmp_local(buf, "unset ", 6) == 0) {
+            buf[strlen(buf) - 1] = 0;
+            char *name = buf + 6;
+            while (*name == ' ')
+                name++;
+            env_unset(name);
+            continue;
+        }
 
-        // vfork + runcmd: child calls runcmd which never returns,
-        // so parent's call frame stays intact
-        pid = vfork();
+        // ---- Built-in: echo (with expansion) ----
+        if (strncmp_local(buf, "echo ", 5) == 0) {
+            buf[strlen(buf) - 1] = 0;
+            char *expanded = expand_env_vars(buf + 5);
+            printf("%s\n", expanded);
+            continue;
+        }
+
+        // ---- Built-in: exit ----
+        if (strncmp_local(buf, "exit", 4) == 0 &&
+            (buf[4] == '\n' || buf[4] == 0))
+            break;
+
+        // ---- External command ----
+        // Expand env vars
+        char *expanded = expand_env_vars(buf);
+        int elen = strlen(expanded);
+        if (elen >= (int)sizeof(expanded_buf))
+            elen = sizeof(expanded_buf) - 1;
+        memcpy(expanded_buf, expanded, elen);
+        expanded_buf[elen] = 0;
+
+        struct cmd *cmd = parsecmd(expanded_buf);
+        if (cmd == 0)
+            continue;
+
+        // Skip empty commands (e.g. bare Enter)
+        if (cmd->type == EXEC && ((struct execcmd *)cmd)->argv[0] == 0)
+            continue;
+
+        int pid;
+        pid = fork();
         if (pid < 0)
-            panic("vfork");
-        if (pid == 0)
+            panic("fork");
+        if (pid == 0) {
+            setpgid(0, 0); // New process group (pgid = own pid)
             runcmd(cmd);
-        wait(0);
+        }
+
+        // Also set from parent side to avoid race
+        int pgid_ready = (setpgid(pid, pid) == 0);
+
+        // Set child's process group as foreground
+        if (pgid_ready)
+            ioctl(0, TIOCSPGRP, &pid);
+
+        // Save shell's terminal settings before child may modify them
+        struct termios shell_termios;
+        tcgetattr(0, &shell_termios);
+
+        int status = 0;
+        waitpid(pid, &status, WUNTRACED);
+
+        // Restore shell as foreground
+        {
+            int shell_pgid = getpgid(0);
+            ioctl(0, TIOCSPGRP, &shell_pgid);
+        }
+
+        // Restore shell's terminal settings (child may have changed them)
+        tcsetattr(0, TCSANOW, &shell_termios);
+
+        if (WIFSTOPPED(status)) {
+            printf("[suspended] pid %d\n", pid);
+        }
     }
+
+    disable_raw_mode();
     exit(0);
 }
 
 void panic(char *s) {
-    fprintf(2, "%s\n", s);
+    errprintf("%s\n", s);
     exit(1);
 }
 
-// PAGEBREAK!
-//  Constructors
+// =====================================================================
+// Command constructors
+// =====================================================================
 
 struct cmd *execcmd(void) {
     struct execcmd *cmd;
-
     cmd = malloc(sizeof(*cmd));
     memset(cmd, 0, sizeof(*cmd));
     cmd->type = EXEC;
@@ -343,7 +1495,6 @@ struct cmd *execcmd(void) {
 struct cmd *redircmd(struct cmd *subcmd, char *file, char *efile, int mode,
                      int fd) {
     struct redircmd *cmd;
-
     cmd = malloc(sizeof(*cmd));
     memset(cmd, 0, sizeof(*cmd));
     cmd->type = REDIR;
@@ -357,7 +1508,6 @@ struct cmd *redircmd(struct cmd *subcmd, char *file, char *efile, int mode,
 
 struct cmd *pipecmd(struct cmd *left, struct cmd *right) {
     struct pipecmd *cmd;
-
     cmd = malloc(sizeof(*cmd));
     memset(cmd, 0, sizeof(*cmd));
     cmd->type = PIPE;
@@ -368,7 +1518,6 @@ struct cmd *pipecmd(struct cmd *left, struct cmd *right) {
 
 struct cmd *listcmd(struct cmd *left, struct cmd *right) {
     struct listcmd *cmd;
-
     cmd = malloc(sizeof(*cmd));
     memset(cmd, 0, sizeof(*cmd));
     cmd->type = LIST;
@@ -379,15 +1528,16 @@ struct cmd *listcmd(struct cmd *left, struct cmd *right) {
 
 struct cmd *backcmd(struct cmd *subcmd) {
     struct backcmd *cmd;
-
     cmd = malloc(sizeof(*cmd));
     memset(cmd, 0, sizeof(*cmd));
     cmd->type = BACK;
     cmd->cmd = subcmd;
     return (struct cmd *)cmd;
 }
-// PAGEBREAK!
-//  Parsing
+
+// =====================================================================
+// Tokeniser & parser (standard xv6 parser)
+// =====================================================================
 
 char whitespace[] = " \t\r\n\v";
 char symbols[] = "<|>&;()";
@@ -437,7 +1587,6 @@ int gettoken(char **ps, char *es, char **q, char **eq) {
 
 int peek(char **ps, char *es, char *toks) {
     char *s;
-
     s = *ps;
     while (s < es && strchr(whitespace, *s))
         s++;
@@ -458,8 +1607,8 @@ struct cmd *parsecmd(char *s) {
     cmd = parseline(&s, es);
     peek(&s, es, "");
     if (s != es) {
-        fprintf(2, "syntax error near: %s\n", s);
-        return 0; // Return NULL instead of panicking
+        errprintf("syntax error near: %s\n", s);
+        return 0;
     }
     nulterminate(cmd);
     return cmd;
@@ -467,13 +1616,10 @@ struct cmd *parsecmd(char *s) {
 
 struct cmd *parseline(char **ps, char *es) {
     struct cmd *cmd;
-
     cmd = parsepipe(ps, es);
     while (peek(ps, es, "&")) {
         gettoken(ps, es, 0, 0);
         cmd = backcmd(cmd);
-        // After &, if there's more input, parse it as a continuation
-        // This allows "cmd1 & cmd2" syntax (implicit ; after &)
         if (*ps < es && !peek(ps, es, ";&")) {
             cmd = listcmd(cmd, parseline(ps, es));
             return cmd;
@@ -488,7 +1634,6 @@ struct cmd *parseline(char **ps, char *es) {
 
 struct cmd *parsepipe(char **ps, char *es) {
     struct cmd *cmd;
-
     cmd = parseexec(ps, es);
     if (peek(ps, es, "|")) {
         gettoken(ps, es, 0, 0);
@@ -512,7 +1657,7 @@ struct cmd *parseredirs(struct cmd *cmd, char **ps, char *es) {
         case '>':
             cmd = redircmd(cmd, q, eq, O_WRONLY | O_CREAT | O_TRUNC, 1);
             break;
-        case '+': // >>
+        case '+':
             cmd = redircmd(cmd, q, eq, O_WRONLY | O_CREAT, 1);
             break;
         }
@@ -565,7 +1710,6 @@ struct cmd *parseexec(char **ps, char *es) {
     return ret;
 }
 
-// NUL-terminate all the counted strings.
 struct cmd *nulterminate(struct cmd *cmd) {
     int i;
     struct backcmd *bcmd;
@@ -583,25 +1727,21 @@ struct cmd *nulterminate(struct cmd *cmd) {
         for (i = 0; ecmd->argv[i]; i++)
             *ecmd->eargv[i] = 0;
         break;
-
     case REDIR:
         rcmd = (struct redircmd *)cmd;
         nulterminate(rcmd->cmd);
         *rcmd->efile = 0;
         break;
-
     case PIPE:
         pcmd = (struct pipecmd *)cmd;
         nulterminate(pcmd->left);
         nulterminate(pcmd->right);
         break;
-
     case LIST:
         lcmd = (struct listcmd *)cmd;
         nulterminate(lcmd->left);
         nulterminate(lcmd->right);
         break;
-
     case BACK:
         bcmd = (struct backcmd *)cmd;
         nulterminate(bcmd->cmd);
