@@ -342,7 +342,7 @@ static void telnet_shell_entry(uint64 arg1, uint64 arg2)
      * 6. Exec the shell.
      */
     char *argv[] = {"sh", 0};
-    int ret = exec("/bin/sh", argv);
+    int ret = exec("/bin/sh", argv, 0);
     if (ret < 0) {
         printf("telnetd: exec /bin/sh FAILED: %d\n", ret);
         return;

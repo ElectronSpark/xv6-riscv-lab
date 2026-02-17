@@ -22,6 +22,7 @@
 #define ROOTDEV mkdev(2, 1) // device number of file system root disk (virtio)
 #define RAMDISK_DEV mkdev(3, 1)   // device number of ramdisk
 #define MAXARG 32                 // max exec arguments
+#define MAXENV 64                 // max exec environment variables
 #define MAXOPBLOCKS 80            // max # of blocks any FS op writes
 #define LOGSIZE (MAXOPBLOCKS * 3) // max data blocks in on-disk log
 #define NBUF (MAXOPBLOCKS * 300)  // size of disk block cache
