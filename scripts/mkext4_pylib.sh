@@ -38,26 +38,15 @@ EXCLUDES=(
 )
 
 MOUNTPOINT=$(mktemp -d)
+STAGING=$(mktemp -d)
 cleanup() {
-    # Ensure unmounted even on error
-    sudo umount "$MOUNTPOINT" 2>/dev/null || true
+    rm -rf "$STAGING"
     rmdir "$MOUNTPOINT" 2>/dev/null || true
 }
 trap cleanup EXIT
 
-# Create a sparse image file
-dd if=/dev/zero of="$OUTPUT" bs=1M count=0 seek="$SIZE_MB" 2>/dev/null
-
-# Format as ext2 (no journal, no metadata_csum, no dir_index/htree, no extents)
-# This is the most compatible format for lwext4. Features like metadata_csum
-# require >128-byte inodes, and dir_index can confuse linear directory iteration.
-mke2fs -F -t ext2 -O ^dir_index -b 1024 "$OUTPUT" >/dev/null 2>&1
-
-# Mount and populate
-sudo mount -o loop "$OUTPUT" "$MOUNTPOINT"
-
-# Create the target directory hierarchy
-sudo mkdir -p "$MOUNTPOINT/local/lib/python3.12"
+# Create the target directory hierarchy in a staging dir
+mkdir -p "$STAGING/local/lib/python3.12"
 
 # Build rsync exclude arguments
 RSYNC_EXCLUDES=()
@@ -65,21 +54,36 @@ for exc in "${EXCLUDES[@]}"; do
     RSYNC_EXCLUDES+=(--exclude="$exc")
 done
 
+# Create lib-dynload directory (Python's getpath needs it to resolve exec_prefix)
+mkdir -p "$STAGING/local/lib/python3.12/lib-dynload"
+
 # Copy Python stdlib (only .py files and essential data)
-sudo rsync -a "${RSYNC_EXCLUDES[@]}" \
+rsync -a "${RSYNC_EXCLUDES[@]}" \
     --include='*/' \
     --include='*.py' \
     --include='*.pem' \
     --include='*.txt' \
     --include='*.cfg' \
     --exclude='*.pyc' \
-    "$PYLIB_SRC/" "$MOUNTPOINT/local/lib/python3.12/"
+    "$PYLIB_SRC/" "$STAGING/local/lib/python3.12/"
+
+# Disable readline interactive hook at startup — the import chain
+# (rlcompleter → inspect → ast → re → enum) is too slow on virtio ext4
+# and tab completion doesn't work on the telnet PTY anyway.
+cat > "$STAGING/local/lib/python3.12/sitecustomize.py" <<'PYEOF'
+import sys
+sys.__interactivehook__ = lambda: None
+PYEOF
 
 # Report
-FILE_COUNT=$(find "$MOUNTPOINT/local/lib/python3.12/" -type f | wc -l)
-USED=$(du -sh "$MOUNTPOINT/local/lib/python3.12/" | cut -f1)
-echo "Packed ${FILE_COUNT} files (${USED}) into ${OUTPUT} (${SIZE_MB} MB ext4)"
+FILE_COUNT=$(find "$STAGING/local/lib/python3.12/" -type f | wc -l)
+USED=$(du -sh "$STAGING/local/lib/python3.12/" | cut -f1)
 
-sudo umount "$MOUNTPOINT"
+# Create the ext2 image populated from the staging directory (no root required)
+# Use mke2fs -d to populate directly without mounting.
+mke2fs -F -t ext2 -O ^dir_index -b 1024 -d "$STAGING" "$OUTPUT" "${SIZE_MB}m" >/dev/null 2>&1
+
+echo "Packed ${FILE_COUNT} files (${USED}) into ${OUTPUT} (${SIZE_MB} MB ext2)"
+
+cleanup
 trap - EXIT
-rmdir "$MOUNTPOINT"

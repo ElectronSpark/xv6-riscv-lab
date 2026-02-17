@@ -435,13 +435,12 @@ if(USE_NEWLIB)
                     PKG_CONFIG=false
                     CPPFLAGS=-I${NEWLIB_XV6_DIR}/include\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
                     CFLAGS=-I${NEWLIB_XV6_DIR}/include\ -I${NEWLIB_INCLUDE_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
-                    LDFLAGS=-Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -Wl,-T,${USER_DIR}/python_pagealign.ld\ -L${NCURSES_BUILD_DIR}/lib\ -L${READLINE_BUILD_DIR}
+                    LDFLAGS=-nostartfiles\ ${NEWLIB_CRT0_OBJ}\ -Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -Wl,-T,${USER_DIR}/python_pagealign.ld\ -L${NCURSES_BUILD_DIR}/lib\ -L${READLINE_BUILD_DIR}
                     LIBS=-L${CMAKE_CURRENT_BINARY_DIR}/newlib_shim\ -lxv6_newlib_syscalls\ -lpthread
                     ${CPYTHON_SRC_DIR}/configure
                         --host=riscv64-unknown-linux-gnu
                         --build=x86_64-pc-linux-gnu
                         --with-build-python=python3
-                        # --without-pymalloc
                         --disable-shared
                         --without-ensurepip
                         ac_cv_file__dev_ptmx=no
@@ -469,18 +468,66 @@ if(USE_NEWLIB)
                         ac_cv_readline_rl_completion_matches=yes
                         ac_cv_readline_rl_pre_input_hook=yes
                         ac_cv_readline_rl_resize_terminal=yes
+                        ac_cv_header_netinet_in_h=yes
+                        ac_cv_header_netinet_tcp_h=yes
+                        ac_cv_header_arpa_inet_h=yes
+                        ac_cv_header_netdb_h=yes
+                        ac_cv_func_inet_aton=yes
+                        ac_cv_func_inet_pton=yes
+                        ac_cv_func_inet_ntop=yes
+                        ac_cv_func_getaddrinfo=yes
+                        ac_cv_func_getnameinfo=yes
+                        ac_cv_func_gethostbyname=yes
+                        --disable-ipv6
             DEPENDS ${CPYTHON_SRC_DIR}/configure ${USER_DIR}/python_pagealign.ld xv6_newlib_syscalls xv6_pthread local_ncurses_build local_readline_build
             COMMENT "Configuring CPython cross build in ${CPYTHON_BUILD_DIR}"
         )
 
-        # After configure, write Modules/Setup.local to enable
-        # readline as a statically-linked built-in module.
+        # After configure, write Modules/Setup.local to force all useful
+        # C extension modules as statically-linked built-ins.  xv6 has no
+        # dlopen, so anything left as *shared* in Setup.stdlib is unusable.
         set(CPYTHON_SETUP_LOCAL "${CPYTHON_BUILD_DIR}/Modules/Setup.local")
+        set(SETUP_LOCAL_CONTENT [==[
+*static*
+readline readline.c -I@CMAKE_SOURCE_DIR@/user -L@READLINE_BUILD_DIR@ -lreadline -L@NCURSES_BUILD_DIR@/lib -lncurses
+_socket socketmodule.c
+select selectmodule.c
+_struct _struct.c
+math mathmodule.c
+_json _json.c
+array arraymodule.c
+binascii binascii.c
+fcntl fcntlmodule.c
+_random _randommodule.c
+_bisect _bisectmodule.c
+_heapq _heapqmodule.c
+_csv _csv.c
+_pickle _pickle.c
+_queue _queuemodule.c
+_asyncio _asynciomodule.c
+_contextvars _contextvarsmodule.c
+_opcode _opcode.c
+_datetime _datetimemodule.c
+unicodedata unicodedata.c
+pyexpat pyexpat.c
+_elementtree _elementtree.c
+_decimal _decimal/_decimal.c
+_md5 md5module.c -I$(srcdir)/Modules/_hacl/include _hacl/Hacl_Hash_MD5.c -D_BSD_SOURCE -D_DEFAULT_SOURCE
+_sha1 sha1module.c -I$(srcdir)/Modules/_hacl/include _hacl/Hacl_Hash_SHA1.c -D_BSD_SOURCE -D_DEFAULT_SOURCE
+_sha2 sha2module.c -I$(srcdir)/Modules/_hacl/include Modules/_hacl/libHacl_Hash_SHA2.a
+_sha3 sha3module.c -I$(srcdir)/Modules/_hacl/include _hacl/Hacl_Hash_SHA3.c -D_BSD_SOURCE -D_DEFAULT_SOURCE
+_blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
+]==])
+        # Replace @VAR@ placeholders with actual values
+        string(REPLACE "@CMAKE_SOURCE_DIR@" "${CMAKE_SOURCE_DIR}" SETUP_LOCAL_CONTENT "${SETUP_LOCAL_CONTENT}")
+        string(REPLACE "@READLINE_BUILD_DIR@" "${READLINE_BUILD_DIR}" SETUP_LOCAL_CONTENT "${SETUP_LOCAL_CONTENT}")
+        string(REPLACE "@NCURSES_BUILD_DIR@" "${NCURSES_BUILD_DIR}" SETUP_LOCAL_CONTENT "${SETUP_LOCAL_CONTENT}")
+        file(WRITE "${CMAKE_BINARY_DIR}/cpython_setup_local.txt" "${SETUP_LOCAL_CONTENT}")
         add_custom_command(
             OUTPUT ${CPYTHON_BUILD_DIR}/Makefile
-            COMMAND ${CMAKE_COMMAND} -E echo
-                    "readline readline.c -I${CMAKE_SOURCE_DIR}/user -L${READLINE_BUILD_DIR} -lreadline -L${NCURSES_BUILD_DIR}/lib -lncurses"
-                    > ${CPYTHON_SETUP_LOCAL}
+            COMMAND ${CMAKE_COMMAND} -E copy
+                    "${CMAKE_BINARY_DIR}/cpython_setup_local.txt"
+                    ${CPYTHON_SETUP_LOCAL}
             APPEND
         )
 
