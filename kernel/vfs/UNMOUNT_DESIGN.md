@@ -569,7 +569,7 @@ If `remove_orphan()` fails during iput:
 - [x] Add `add_orphan`, `remove_orphan`, `recover_orphans` to `vfs_superblock_ops`
 - [x] Modify `vfs_unlink()` and `vfs_rmdir()` to create orphans
 - [x] Add usability checks (`vfs_sb_check_usable()`) to inode operations
-- [x] Implement orphan stubs in xv6fs (persistent journal TODO)
+- [x] Implement orphan stubs in xv6fs (persistent orphan journal remains planned)
 - [x] Add unmount smoketest (tmpfs strict/lazy unmount passes all tests)
 
 ---

@@ -41,7 +41,7 @@ Some wrappers support optional tracking for test instrumentation. The tracking i
 - `last_queue_init`, `last_queue_wait`, `last_queue_wakeup`, `last_queue_wakeup_all`
 - `wait_return`, `wakeup_return`, `wakeup_all_return` - Control return values
 - `wait_callback` - Custom callback for test-specific behavior
-- `next_wakeup_proc` - Control which process is woken
+- `next_wakeup_proc` - Control which task/thread is woken
 
 ### Usage in Tests
 
@@ -142,18 +142,18 @@ Tracking is completely optional - wrappers work without it. When tracking is dis
 **Used by:** ut_pcache
 
 ### 8. proc_wrappers.c
-**Purpose:** Process management, scheduling, and proc_queue operations with optional tracking
+**Purpose:** Task/process-context management, scheduling, and proc_queue operations with optional tracking
 **Functions:**
-- `__wrap_mycpu/myproc()` - Get current CPU/process
-- `__wrap_proc_lock/unlock()` - Process locking
+- `__wrap_mycpu/myproc()` - Get current CPU/execution context
+- `__wrap_proc_lock/unlock()` - Context locking helpers (proc API)
 - `__wrap_proc_assert_holding()` - Assert lock held
-- `__wrap_kernel_proc_create()` - Create kernel process
-- `__wrap_wakeup_proc/wakeup_on_chan()` - Wake up processes
+- `__wrap_kernel_proc_create()` - Create kernel thread/process context
+- `__wrap_wakeup_proc/wakeup_on_chan()` - Wake up tasks/threads
 - `__wrap_sleep_on_chan()` - Sleep on channel
 - `__wrap_proc_queue_init()` - Initialize proc_queue
 - `__wrap_proc_queue_wait()` - Wait on proc_queue
-- `__wrap_proc_queue_wakeup()` - Wake one process from queue
-- `__wrap_proc_queue_wakeup_all()` - Wake all processes from queue
+- `__wrap_proc_queue_wakeup()` - Wake one task/thread from queue
+- `__wrap_proc_queue_wakeup_all()` - Wake all tasks/threads from queue
 
 **Tracking Support:**
 - `wrapper_tracking_enable_proc_queue()` - Enable operation tracking
@@ -192,48 +192,18 @@ Tracking is completely optional - wrappers work without it. When tracking is dis
 
 ## Usage in Tests
 
-### Example: ut_page
-Uses the following wrapper modules:
-- panic_wrappers.c
-- spinlock_wrappers.c (via ut_page_wraps.c)
-- page_wrappers.c (via ut_page_wraps.c)
-- cpu_wrappers.c (via ut_page_wraps.c)
-- slab_wrappers.c
-- workqueue_wrappers.c
-- completion_wrappers.c
-- timer_wrappers.c
-- kmm_wrappers.c
+Typical wrapper sets:
 
-### Example: ut_semaphore
-Uses the following wrapper modules:
-- panic_wrappers.c
-- spinlock_wrappers.c (with tracking enabled)
-- proc_wrappers.c (with tracking enabled)
+- `ut_page`: panic, spinlock/page/cpu helpers, slab/workqueue/completion/timer/kmm
+- `ut_semaphore`: panic + spinlock/proc wrappers (tracking enabled)
+- `ut_rwlock`: panic + spinlock/proc wrappers (tracking enabled)
+- `ut_pcache`: panic + spinlock/page/slab/workqueue/completion/timer/proc
 
-Tracking enabled for test instrumentation and assertion verification.
-
-### Example: ut_rwlock
-Uses the following wrapper modules:
-- panic_wrappers.c
-- spinlock_wrappers.c (with tracking enabled)
-- proc_wrappers.c (with tracking enabled)
-
-Tracking enabled for test instrumentation and assertion verification.
-
-### Example: ut_pcache
-Uses the following wrapper modules:
-- panic_wrappers.c
-- spinlock_wrappers.c
-- page_wrappers.c
-- slab_wrappers.c
-- workqueue_wrappers.c
-- completion_wrappers.c
-- timer_wrappers.c
-- proc_wrappers.c
+Tracking is enabled only for tests that need call-count and callback assertions.
 
 ## CMakeLists.txt Integration
 
-Wrappers are defined in CMakeLists.txt as:
+Wrappers are listed in CMake and linked per-test (only required modules are included).
 
 ```cmake
 set(WRAPPER_SRC
@@ -249,25 +219,7 @@ set(WRAPPER_SRC
 )
 ```
 
-Tests include only the wrapper modules they need. For example:
-
-```cmake
-add_executable(ut_semaphore
-    ${CMAKE_SOURCE_DIR}/src/ut_semaphore_main.c
-    ${CMAKE_SOURCE_DIR}/../kernel/lock/semaphore.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/spinlock_wrappers.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
-)
-
-add_executable(ut_rwlock
-    ${CMAKE_SOURCE_DIR}/src/ut_rwlock_main.c
-    ${CMAKE_SOURCE_DIR}/../kernel/lock/rwlock.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/spinlock_wrappers.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
-    ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
-)
-```
+Refer to `test/CMakeLists.txt` for concrete per-target lists.
 
 ## Linker Wrap Options
 

@@ -27,7 +27,7 @@ This enhanced version has been substantially extended with production-grade feat
 - **Advanced Synchronization**: Reader-writer locks, completions, RCU, and fine-grained locking
 - **Device Management**: Character and block device framework with proper abstraction
 - **Network Stack**: Basic networking capabilities with E1000 driver support
-- **Enhanced Process Management**: Improved scheduling with pluggable scheduling classes and CPU affinity
+- **Enhanced Process and Thread Management**: Process lifecycle plus thread-centric scheduling with pluggable classes and CPU affinity
 - **Separate Interrupt Stacks**: Dedicated interrupt stacks per CPU for better interrupt handling and nested interrupt support
 - **Linux-style Scheduler Infrastructure**: Per-CPU run queues, scheduling entities, and sched_class abstraction
 - **Multi-Platform Support**: QEMU virt machine and Orange Pi RV2 hardware support
@@ -60,11 +60,11 @@ This enhanced version has been substantially extended with production-grade feat
 - **Atomic Operations**: Lock-free primitive operations
 - **RCU (Read-Copy-Update)**: Full Linux-style RCU implementation with:
   - Lock-free read-side critical sections
-  - Segmented callback lists for efficient batching
+   - Timestamp-based callback readiness for grace-period tracking
   - Lazy grace period start with configurable thresholds
   - Expedited grace periods for low-latency operations
   - Background kernel thread for automatic grace period management
-  - Support for preemptible processes and CPU migration
+   - Support for preemptible threads and CPU migration
   - Comprehensive test suite with 6 test categories
 
 ### Device Support
@@ -83,20 +83,20 @@ This enhanced version has been substantially extended with production-grade feat
 - **Process Management**: Fork, exec, wait, exit
 - **Signals**: Basic signal handling (SIGKILL, etc.)
 - **Pipes**: Anonymous and named pipes (FIFOs)
-- **File Descriptor Table**: Per-process fd management
-- **Working Directory**: Per-process current and root directories (chroot support)
+- **File Descriptor Table**: Per-thread execution context with shared fdtable support (`CLONE_FILES`)
+- **Working Directory**: Per-thread execution context with shared filesystem state (`CLONE_FS`, chroot support)
 
 ### Scheduler Features
 - **Linux-style Scheduler**: Modular scheduler infrastructure inspired by Linux kernel
-- **Scheduling Entity (`sched_entity`)**: Separate scheduling state from process structure
+- **Scheduling Entity (`sched_entity`)**: Separate scheduling state from thread structure
 - **Per-CPU Run Queues**: Independent run queues per CPU with per-CPU locking
 - **Pluggable Scheduling Classes**: `sched_class` interface for different policies
-- **CPU Affinity**: Process-level CPU affinity with `cpumask_t` support
+- **CPU Affinity**: Thread-level CPU affinity with `cpumask_t` support
 - **O(1) Priority Lookup**: Two-layer ready mask (8-bit top + 64-bit secondary)
 - **256 Priority Levels**: 64 major priorities × 4 minor subqueue levels
 - **Implemented Policies**:
   - FIFO scheduling class with minor priority subqueues and load balancing
-  - IDLE scheduling class for idle processes
+   - IDLE scheduling class for idle threads
 
 ### Multi-Platform Support
 - **QEMU virt Machine**: Default development and testing platform (kernel base: 0x80200000)
@@ -236,7 +236,7 @@ The LAB environment variable controls which features are included.
 - `fs`: File system features with VFS (single core) - **Recommended**
 - `util`: Basic utilities (6 cores)
 
-**Note**: Due to substantial architectural changes during enhancement, other LAB configurations (syscall, pgtbl, traps, lazy, lock, mmap, net) are currently not functional and are being updated.
+**Status (Feb 2026)**: LAB `fs` and `util` are the active, maintained configurations in this branch. Other legacy LAB configurations (`syscall`, `pgtbl`, `traps`, `lazy`, `lock`, `mmap`, `net`) are currently unavailable here.
 
 **Important**: The root directory `Makefile` is obsolete and will fail. Use CMake as shown below.
 
@@ -383,7 +383,7 @@ Hello, World!
 
 ### Process Management
 
-The `ps` command shows all running processes with their states:
+The `ps` command shows runnable entities and their scheduler states:
 
 ```bash
 $ ps
@@ -412,8 +412,8 @@ $ ps
 [53920468] 23 running [U] ps
 ```
 
-Process states: `running`, `interruptible`, `uninterruptible`  
-Process types: `[U]` user process, `[K]` kernel thread
+Scheduler states: `running`, `interruptible`, `uninterruptible`  
+Entity types: `[U]` user process context, `[K]` kernel thread
 
 ### Memory Management
 
@@ -463,7 +463,7 @@ $ dumppcache
 
 ### File System Features
 
-**Note**: The VFS layer supports mounting file systems via system calls (`sys_mount`, `sys_umount`), but a user-space `mount` command is not yet implemented. Mount operations are currently only available to programs that directly invoke the syscalls.
+**Status (Feb 2026)**: The VFS layer supports mounting via syscalls (`sys_mount`, `sys_umount`), but there is no standalone user-space `mount` command in-tree. Mount operations are available to user programs that invoke these syscalls directly.
 
 To use mount functionality, you would need to create a user program that calls:
 ```c
@@ -483,16 +483,7 @@ The LAB environment variable determines which kernel features are compiled.
 - `fs`: File system features with VFS layer (single core) - **Recommended for general use**
 - `util`: Basic utilities and core functionality (6 cores)
 
-**Configurations Under Development:**
-
-Due to the extensive architectural changes (VFS implementation, new memory management, etc.), the following LAB configurations are currently being updated to work with the enhanced kernel:
-- `syscall`: System call lab features (not functional)
-- `pgtbl`: Page table management features (not functional)
-- `traps`: Trap handling features (not functional)
-- `lazy`: Lazy allocation features (not functional)
-- `lock`: Lock optimization features (not functional)
-- `mmap`: Memory mapping features (not functional)
-- `net`: Network stack (not functional)
+**Legacy LAB configurations (inactive in this branch, Feb 2026):** `syscall`, `pgtbl`, `traps`, `lazy`, `lock`, `mmap`, `net`.
 
 **Recommendation**: Use `LAB=fs` for accessing all enhanced features including the complete VFS implementation.
 
@@ -500,7 +491,7 @@ Due to the extensive architectural changes (VFS implementation, new memory manag
 
 Edit `kernel/param.h` to configure:
 - `NPROC`: Maximum number of processes (default: 10000)
-- `NOFILE`: Maximum open files per process (default: 64)
+- `NOFILE`: Maximum open files per task/process context (default: 64)
 - `MAXOPBLOCKS`: Maximum file system operations per transaction
 - `NBUF`: Number of buffer cache entries
 
@@ -576,7 +567,7 @@ The project includes an automated tool for generating C structure offset definit
 ./scripts/gen_asm_offsets.py \
   -I kernel/inc \
   --struct trapframe:trapframe.h:all \
-  --struct proc:proc.h:state,trapframe,context \
+   --struct thread:proc/thread.h:state,trapframe,context \
   -o offsets.h
 ```
 
@@ -650,38 +641,13 @@ Common GDB commands:
 
 ## Development Roadmap
 
-### 🎯 Near-Term Goals (System Completeness)
+Status snapshot (Feb 2026):
 
-Building a complete, stable Unix-like operating system:
+- **Implemented core infrastructure**: dynamic memory probing, interrupt-stack split, Orange Pi support, VM locking, scheduler infrastructure, kernel-thread workqueues/RCU kthreads.
+- **Active subsystem expansion**: TTY/terminal ([kernel/tty/TTY_DESIGN.md](kernel/tty/TTY_DESIGN.md)), block layer, pseudo-filesystems, async VFS, network and filesystem features.
+- **Planned platform milestones**: multi-user model, expanded libc, self-hosting toolchain, web serving capability.
 
-1. **✅ Dynamic Memory Probing & Device Config** *(PARTIAL)* - FDT-based memory detection, runtime device addresses
-2. **✅ Interrupt Handling** *(COMPLETED)* - Separate interrupt/kernel stacks (16KB per CPU), nested interrupt support
-3. **✅ Orange Pi RV2 Hardware Support** *(COMPLETED)* - Real hardware support with U-Boot integration
-4. **✅ VM Locking** *(COMPLETED)* - Two-level locking (rwlock + spinlock), reference counting
-5. **✅ Scheduler Infrastructure** *(COMPLETED)* - Per-CPU run queues, sched_class, 256 priority levels, CPU affinity
-6. **✅ Enhanced Kernel Threads** *(PARTIAL)* - Work queues, RCU kthreads; thread pools planned
-7. **Multi-User Support** - User/group IDs, permission checking, setuid/setgid
-8. **Standard LibC** - POSIX-compliant file I/O, strings, time, math functions
-9. **TTY/Terminal** - Line discipline, job control, PTY support
-10. **Block Device Layer** - Generic block I/O, I/O scheduler, partition support
-11. **Pseudo-Filesystems** - devfs, basic procfs (/proc/<pid>/status, /proc/meminfo)
-12. **Async VFS** - Non-blocking I/O, aio_read/aio_write, epoll/select
-13. **Network Enhancements** - TCP improvements, UDP, UNIX sockets
-14. **FS Features** - EXT2 support, journaling, xattrs, file locking
-
-### 🚀 Long-Term Goals (Ambitious)
-
-Transforming xv6 into a self-sufficient development platform:
-
-- **⭐ Self-Hosting** (TOP PRIORITY) - Port GCC/Clang, achieve full self-compilation
-- **⭐ Web Server Hosting** - Host simple websites with static + dynamic content
-- **Dynamic Linking** - Shared libraries (.so), dlopen/dlsym
-- **Advanced Pseudo-FS** - Complete procfs/sysfs, /dev/pts
-- **Kernel Modules** - Loadable modules, insmod/rmmod
-- **GUI Framework** (exploratory) - Framebuffer console, simple window system
-- **MicroPython** (for fun) - Kernel-space Python interpreter
-
-**For detailed implementation order and dependencies**, see [ROADMAP.md](ROADMAP.md).
+For full priorities, dependencies, and phased sequencing, see [ROADMAP.md](ROADMAP.md).
 
 ---
 
@@ -742,4 +708,4 @@ This enhanced version includes significant new implementations:
 **Target Platform**: RISC-V 64-bit (RV64GC)  
 **Supported Hardware**: QEMU virt machine, Orange Pi RV2  
 **Build System**: CMake 3.10+  
-**Last Updated**: January 2026
+**Last Updated**: February 2026

@@ -100,6 +100,10 @@ struct vfs_inode {
 
 ### Scheduler Structure Documentation
 
+Use thread-centric wording for scheduler internals in this codebase:
+- `thread` / `task`: scheduler execution entity
+- `process`: user-visible lifecycle container when discussing fork/exec/wait
+
 For scheduler-related structures:
 
 ```c
@@ -634,7 +638,7 @@ Doxygen supports Markdown:
 
 ```c
 /**
- * @brief Process a file operation
+ * @brief Handle a file operation
  * 
  * The function follows these steps:
  * 1. Validate parameters

@@ -110,7 +110,7 @@ Lookup algorithm:
   3. Find lowest set bit in that group -> cls_id = top_id*8 + bit_position
 ```
 
-Currently implemented scheduling classes:
+Implemented scheduling classes (as of Feb 2026):
 
 - **FIFO** (`fifo_rq`): FIFO scheduling for major priorities 1-62, with 4 minor priority subqueues per level
 - **IDLE** (`idle_rq`): Idle thread scheduling (major priority 63)
@@ -139,7 +139,7 @@ struct fifo_rq {
 2. If current CPU's subqueue is empty, use it immediately
 3. Otherwise, find the CPU with the lowest task count in the relevant subqueue
 
-### Thread States
+### Task/Thread States
 
 | State | Meaning |
 |-------|---------||

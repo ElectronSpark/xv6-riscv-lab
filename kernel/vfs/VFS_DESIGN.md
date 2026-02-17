@@ -74,7 +74,7 @@ The VFS layer provides a unified interface for different file system implementat
 2. **Superblock (`vfs_superblock`)**: Represents a mounted instance of a file system
 3. **Inode (`vfs_inode`)**: Represents a file, directory, or special file
 4. **File (`vfs_file`)**: Represents an open file descriptor
-5. **File Descriptor Table (`vfs_fdtable`)**: Per-process table of open files
+5. **File Descriptor Table (`vfs_fdtable`)**: Per-task execution-context table of open files (shareable via clone flags)
 6. **Dentry (`vfs_dentry`)**: Temporary structure for directory entry lookup results
 
 ---
@@ -569,7 +569,7 @@ vfs_root_inode (VFS root)
 
 ### File Descriptor Management
 
-#### Process File State
+#### Task/Process File State
 ```c
 struct proc {
     struct vfs_struct *fs;       // VFS state (cwd, root) - may be shared
@@ -586,7 +586,7 @@ struct vfs_struct {
 
 **Note on Inode References:**
 
-The process structure uses `vfs_inode_ref` instead of direct `vfs_inode*` pointers to handle potential inode invalidation across mount/unmount operations. This ensures safe access to the process's root and current working directories even if the underlying filesystem is unmounted.
+The task execution context uses `vfs_inode_ref` instead of direct `vfs_inode*` pointers to handle potential inode invalidation across mount/unmount operations. This ensures safe access to root and current working directories even if the underlying filesystem is unmounted.
 
 See `vfs_inode_get_ref()`, `vfs_inode_put_ref()`, and `vfs_inode_deref()` for reference management operations.
 
@@ -681,7 +681,7 @@ vfs_unmount(mountpoint);
    - Verify caller has permissions
    
 2. **Check Busy**
-   - No processes have cwd in this filesystem
+    - No tasks/threads hold cwd references in this filesystem
    - No open files from this filesystem
    - No orphan inodes
    - No child mounts
@@ -746,8 +746,8 @@ Resolve to parent directory, return last component in `name`.
 
 ```
 1. Determine starting point:
-   - Absolute path: start from process root
-   - Relative path: start from process cwd
+    - Absolute path: start from task/process context root
+    - Relative path: start from task/process context cwd
 
 2. Split path into components (separated by '/')
 
@@ -786,8 +786,8 @@ Resolve to parent directory, return last component in `name`.
 - **Normal directory**: Let driver handle it
 
 #### Root Isolation (chroot)
-- Each process has `fs.root` inode
-- ".." at process root returns process root
+- Each task/process context has `fs.root` inode
+- ".." at context root returns that context root
 - Path resolution never escapes chroot jail
 
 ---
@@ -808,7 +808,7 @@ Resolve to parent directory, return last component in `name`.
 - **Parent directory**: Implicit reference (parent is cached → child can be looked up)
 - **Mount tree**: Mountpoint inodes have extra reference
 - **Open files**: Each open file holds inode reference
-- **Current directory**: Process cwd holds reference
+- **Current directory**: Task/process context cwd holds reference
 - **Active operations**: Code actively using inode holds reference
 
 #### Example
@@ -883,10 +883,10 @@ vfs_fput(file);  // Release our lookup reference
 ### File Descriptor Table Reference Counting
 
 #### Rules
-1. Each process holds a reference to its fdtable
+1. Each task/process context holds a reference to its fdtable
 2. `CLONE_FILES` flag shares fdtable (increments refcount)
 3. Use `vfs_fdtable_clone()` during fork/clone
-4. Use `vfs_fdtable_put()` on process exit
+4. Use `vfs_fdtable_put()` on context exit
 
 #### Example (clone with CLONE_FILES)
 ```c

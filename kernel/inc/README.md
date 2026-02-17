@@ -56,6 +56,8 @@ The system currently generates offsets for:
 - `THREAD_CONTEXT`, `THREAD_VM`
 - `THREAD_SIZE`
 
+In this codebase, `struct thread` is the scheduler execution context (task/thread carrier).
+
 ## Adding New Offsets
 
 To add offsets for new structures:

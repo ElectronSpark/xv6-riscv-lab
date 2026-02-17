@@ -27,8 +27,8 @@ Mock spinlock operations:
 - `spin_init`, `spin_holding`
 - `push_off`, `pop_off`
 
-### Process/Scheduler Wrappers (`proc_wrappers.c`)
-Mock process management and scheduling:
+### Task/Scheduler Wrappers (`proc_wrappers.c`)
+Mock task/process-context management and scheduling:
 - `cpuid`, `mycpu`, `myproc`
 - `proc_lock`, `proc_unlock`, `proc_assert_holding`
 - `sched_lock`, `sched_unlock`
@@ -211,18 +211,10 @@ void __wrap_platform_specific(int value)
 
 ## Changelog
 
-### 2024-12-30: Page Wrapper Consolidation
-- **Merged**: `ut_page_wraps.c` functionality into `page_wrappers.c`
-- **Added**: Conditional compilation via `UT_PAGE_TEST_BUILD`
-- **Removed**: Duplicate spinlock, CPU, and memory management functions from page_wrappers.c
-- **Updated**: ut_page build to use modular wrapper architecture
-- **Result**: Single unified page wrapper with test-specific behavior
+Recent notable updates:
 
-### 2024-12-30: Workqueue/Completion Synchronization Fix
-- **Changed**: Workqueue no longer executes work immediately in `queue_work()`
-- **Changed**: `wait_for_completion()` now triggers work execution via `pcache_test_run_pending_work()`
-- **Fixed**: Timing issue where `completion_reinit()` was resetting state after work completed
-- **Result**: All 30 ut_pcache tests passing, including previously hanging flusher tests
+- Page wrapper consolidation into `page_wrappers.c` with `UT_PAGE_TEST_BUILD` conditional paths.
+- Workqueue/completion synchronization fix: deferred work executes via completion wait path (`pcache_test_run_pending_work()`).
 
 ## See Also
 

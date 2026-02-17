@@ -227,7 +227,7 @@ Each per-CPU RCU kthread:
 4. **Separates callbacks**: Ready (timestamp <= min) vs not-ready based on timestamps
 5. **Invokes ready callbacks**: With preemption enabled (callbacks may sleep/yield)
 6. **Returns not-ready callbacks**: Back to pending list with preemption disabled
-7. **Wakes synchronize_rcu() waiters**: Signals completion to waiting processes
+7. **Wakes synchronize_rcu() waiters**: Signals completion to waiting tasks/threads
 8. **Sleeps when idle**: Waits for `rcu_kthread_wakeup()` when no pending callbacks
 
 ### Per-CPU List Synchronization
@@ -887,50 +887,11 @@ Located in `kernel/lock/rcu.c`:
 #define RCU_LAZY_GP_DELAY   100   // Balanced
 ```
 
-## Limitations
-
-- **Per-CPU exclusivity via push_off()**: List manipulation requires preemption disabled to prevent races
-- **CPU limit**: Optimized for ≤64 CPUs (bitmap-based quiescent state tracking)
-- **No CPU hotplug**: Assumes fixed number of CPUs
-- **Simulated expedited GPs**: No true IPI support, uses aggressive polling
-- **Kthread dependency**: Full callback processing requires RCU kthreads to be running
-
-## Future Enhancements
-
-Potential Linux RCU features that could be added:
-
-1. **SRCU (Sleepable RCU)**: Allow sleeping in read-side critical sections
-2. **Hierarchical Grace Period Tracking**: For scaling beyond 64 CPUs
-3. **RCU Stall Detection**: Detect CPUs that fail to report quiescent states
-4. **CPU Hotplug Support**: Dynamic CPU addition/removal
-5. **Offloadable Callbacks**: Move callback processing to dedicated offload threads
-6. **True IPI Support**: For genuine expedited grace periods
-7. **RCU Tasks**: For tracing hooks that may sleep
-
-## Files
-
-- **kernel/inc/lock/rcu.h**: Public RCU API with kthread declarations
-- **kernel/inc/lock/rcu_type.h**: RCU data structure definitions (`rcu_cpu_data_t` with pending list, `rcu_state_t`)
-- **kernel/lock/rcu.c**: Core RCU implementation with per-CPU kthreads (~1000 lines)
-- **kernel/lock/rcu_test.c**: Comprehensive test suite with ASAN (~800 lines)
-- **kernel/lock/RCU_README.md**: Complete documentation (this file)
-- **kernel/inc/list.h**: RCU-safe list operations
-- **kernel/inc/hlist.h**: RCU-safe hash list inline operations
-- **kernel/hlist.c**: RCU-safe hash list functions (`hlist_get_rcu`, `hlist_put_rcu`, `hlist_pop_rcu`)
-- **kernel/inc/smp/percpu.h**: Per-CPU macros including `rcu_timestamp` access
-- **kernel/proc/sched.c**: Scheduler integration for quiescent states
-- **kernel/start_kernel.c**: RCU initialization and kthread startup
-
-## References
-
-- Linux kernel RCU implementation: `kernel/rcu/tree.c`
-- "What is RCU, Fundamentally?" by Paul E. McKenney
-- "A Tour Through RCU's Requirements" by Paul E. McKenney
-- "Is Parallel Programming Hard, And, If So, What Can You Do About It?"
-- Linux kernel documentation: `Documentation/RCU/`
-- "Expedited RCU Grace Periods" - LWN article
+_Implementation details are documented in the canonical section above; this duplicate section was intentionally removed for brevity._
 
 ## Version History
+
+Current implementation status (as of Feb 2026): v2.2 is the active design in this repository.
 
 ### v1.0 - Initial Implementation
 - Basic RCU with grace period tracking

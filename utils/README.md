@@ -37,4 +37,4 @@ Limitations:
 
 - Directory removal and renaming remain unsupported.
 - Extending files via `truncate` to lengths larger than their current size is
-    not yet implemented.
+    unsupported as of Feb 2026.

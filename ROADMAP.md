@@ -1,6 +1,6 @@
 # xv6-RISCV Enhanced: Development Roadmap
 
-This document outlines the planned enhancements to the xv6-RISCV operating system, organized into **near-term** (system completeness) and **long-term** (ambitious) goals.
+This document outlines the planned enhancements to xv6-RISCV, organized into **near-term** (system completeness) and **long-term** (ambitious) goals, with emphasis on current status (Feb 2026).
 
 ---
 
@@ -11,7 +11,7 @@ These features focus on building a complete, functional Unix-like system with mo
 ### 1. Dynamic Memory Probing and Page Frame Management
 **Dependencies**: None (foundational improvement)  
 **Priority**: Critical  
-**Status**: 🔄 Partially Completed (January 2026)
+**Status**: 🔄 In progress with core runtime support in place (as of Feb 2026)
 
 - ✅ Dynamic memory detection via FDT (Flattened Device Tree)
 - ✅ Runtime-configurable physical memory boundaries
@@ -34,7 +34,7 @@ These features focus on building a complete, functional Unix-like system with mo
 
 **Memory Architecture**:
 ```
-Current (Partially Implemented):
+Current State:
   FDT probe → Dynamic page array allocation → Buddy allocator → Page allocation
   Device addresses: Runtime configurable via extern variables
 
@@ -87,7 +87,7 @@ Target:
 
 **Stack Architecture** (Implemented):
 ```
-Process → Kernel Stack (syscalls)
+Thread → Kernel Stack (syscalls)
 Interrupt → Per-CPU Interrupt Stack (16KB) → Top-half processing
           → RCU quiescent state via rcu_check_callbacks()
           → Deferred work via per-CPU RCU kthreads
@@ -95,7 +95,7 @@ Interrupt → Per-CPU Interrupt Stack (16KB) → Top-half processing
 
 ---
 
-### 3. Process Scheduling Improvements ✅ **PARTIALLY COMPLETED**
+### 3. Thread Scheduling Improvements ✅ **SUBSTANTIALLY COMPLETED**
 **Dependencies**: Interrupt handling improvements (completed)  
 **Priority**: High  
 **Status**: 🔄 Scheduler infrastructure completed, policies in progress
@@ -107,7 +107,7 @@ Interrupt → Per-CPU Interrupt Stack (16KB) → Top-half processing
 - ✅ 64 major priority levels with two-layer O(1) bitmask lookup
 - ✅ 4 minor priority subqueues within each major priority (256 total levels)
 - ✅ FIFO scheduling class with load balancing (`sched_fifo.c`)
-- ✅ IDLE scheduling class for idle processes
+- ✅ IDLE scheduling class for idle threads
 - ✅ Comprehensive scheduler test suite (`rq_test.c`)
 - ✅ Linux-style `on_rq`/`on_cpu` semantics with lock-based wakeup synchronization
 - ⏳ CFS-like fair scheduler - planned
@@ -116,7 +116,7 @@ Interrupt → Per-CPU Interrupt Stack (16KB) → Top-half processing
 
 **Implementation Notes**:
 - Completed: Linux-style `sched_class` with callbacks (enqueue/dequeue/pick_next/put_prev)
-- Completed: `sched_entity` separates scheduling state from process structure
+- Completed: `sched_entity` separates scheduling state from thread structure
 - Completed: Task switch flow: pick_next_task → set_next_task → context_switch → put_prev_task
 - Completed: Run queue selection with CPU affinity (`rq_select_task_rq()`)
 - Completed: Two-layer ready mask (8-bit top + 64-bit secondary) for O(1) priority lookup
@@ -126,7 +126,7 @@ Interrupt → Per-CPU Interrupt Stack (16KB) → Top-half processing
 
 **Scheduling Architecture** (Implemented):
 ```
-struct proc → struct sched_entity → struct rq (per-CPU)
+struct thread → struct sched_entity → struct rq (per-CPU)
                                   → struct sched_class (FIFO/IDLE/future CFS)
 
 Priority System (256 levels):
@@ -142,7 +142,7 @@ Task Switch:
 
 ---
 
-### 4. Enhanced Kernel Thread Support ✅ **PARTIALLY COMPLETED**
+### 4. Enhanced Kernel Thread Support ✅ **CORE IMPLEMENTED**
 **Dependencies**: Interrupt handling (completed)  
 **Priority**: High  
 **Status**: 🔄 Core infrastructure completed, advanced features in progress
@@ -150,13 +150,13 @@ Task Switch:
 - ✅ Kernel thread creation and management (`kthread_create()`)
 - ✅ Work queues for deferred work (`kernel/proc/workqueue.c`)
 - ✅ Per-CPU RCU callback kthreads
-- ✅ Per-CPU worker threads (manager and worker processes)
+- ✅ Per-CPU worker threads (manager and worker threads)
 - ✅ Kernel thread scheduling via `sched_entity`
 - ⏳ Thread pools for async operations - planned
 - ⏳ Thread-local storage - planned
 
 **Implementation Notes**:
-- Completed: Work queues with manager and worker processes
+- Completed: Work queues with manager and worker threads
 - Completed: Per-CPU RCU kthreads (`rcu_kthread_start_cpu()` called per-CPU in `start_kernel()`)
 - Completed: Kernel threads use `sched_entity` for scheduling
 - RCU callbacks processed by dedicated per-CPU kthreads, not in scheduler path
@@ -191,7 +191,11 @@ Per-CPU RCU kthread → rcu_process_callbacks_for_cpu()
 - `vm->refcount`: Reference counting for shared VMs
 - Locking order: Sleep locks (VFS, VM rwlock) before spinlocks (pgtable, proc)
 - Files: `kernel/mm/vm.c`, `kernel/inc/mm/vm.h`, `kernel/inc/mm/vm_types.h`, `kernel/vfs/file.c`, `kernel/vfs/fs.c`
-**Dependencies**: VFS enhancements (partially complete)  
+
+---
+
+### 6. Multi-User and Permission Model
+**Dependencies**: VFS enhancements (in progress)  
 **Priority**: High
 
 - User and group ID management
@@ -201,7 +205,7 @@ Per-CPU RCU kthread → rcu_process_callbacks_for_cpu()
 - File ownership and permission bits
 
 **Implementation Notes**:
-- Current: Single-user system (all processes run as root)
+- Current: Single-user system (all tasks run as root credentials)
 - Target: Full Unix permission model
 - Files: `kernel/proc/proc.h`, `kernel/vfs/vfs_ops.c`, `user/login.c` (new)
 
@@ -229,7 +233,7 @@ Per-CPU RCU kthread → rcu_process_callbacks_for_cpu()
 **Priority**: Medium
 
 - Line discipline (cooked/raw mode)
-- Job control (foreground/background processes)
+- Job control (foreground/background process groups)
 - Terminal control sequences (ANSI escape codes)
 - Pseudo-terminals (PTY) for terminal emulation
 - Signal generation from terminal (Ctrl-C, Ctrl-Z)
@@ -237,12 +241,12 @@ Per-CPU RCU kthread → rcu_process_callbacks_for_cpu()
 **Implementation Notes**:
 - Current: Basic console I/O
 - Target: Full TTY subsystem with job control
-- Files: `kernel/dev/tty.c` (new), `kernel/dev/pty.c` (new)
+- Files: `kernel/tty/` (current subsystem), `kernel/tty/TTY_DESIGN.md` (design/status), `kernel/dev/pty.c` (planned)
 
 ---
 
 ### 9. Block Device Layer
-**Dependencies**: Device driver framework (partially exists)  
+**Dependencies**: Device driver framework (core pieces available)  
 **Priority**: Medium
 
 - Generic block device interface
@@ -333,28 +337,16 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 **Dependencies**: Most near-term goals, especially LibC and filesystems  
 **Priority**: Highest long-term goal
 
-**Phase A: Toolchain Bootstrap**
-- Port GCC or Clang to run under xv6
-- Assembler (GNU as or custom)
-- Linker (GNU ld or lld)
-- Make and build utilities
-
-**Phase B: System Development Tools**
-- Text editors (vi/nano port)
-- Shell scripting improvements (bash-like features)
-- Core utilities (grep, sed, awk ports)
-- Debugger (gdb stub or simple debugger)
-
-**Phase C: Self-Compilation**
-- Compile xv6 kernel under xv6
-- Build all userspace tools under xv6
-- Package management (simple)
+Milestones:
+- Toolchain bootstrap (compiler, assembler, linker, build tools)
+- Core development userspace (editor, shell improvements, core utils, debugger path)
+- Self-compilation of kernel and userspace inside xv6
 
 **Implementation Notes**:
-- **MAJOR MILESTONE**: Achieve full self-hosting
-- Requires: Stable FS, complete LibC, sufficient memory management
-- Estimated effort: 6-12 months of development
-- Files: Entire system recompilation, `user/gcc/` port, `user/binutils/` port
+- **Major milestone**: full self-hosting
+- Requires stable FS, expanded LibC, and mature memory management
+- Estimated effort: 6-12 months
+- Files: system-wide toolchain/userland integration (including `user/gcc/`, `user/binutils/`)
 
 ---
 
@@ -362,21 +354,15 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 **Dependencies**: Network stack, threading, filesystem stability  
 **Priority**: High long-term goal
 
-- Stable TCP/IP stack with multiple connections
-- HTTP/1.1 server implementation
-- CGI or FastCGI support for dynamic content
-- Static file serving
-- Virtual hosting support
+- Stable multi-connection TCP/IP stack
+- HTTP/1.1 server path (static + dynamic content)
+- CGI/FastCGI-style execution support
+- Optional virtual-hosting support
 
 **Implementation Notes**:
-- Goal: Host a simple website (static pages + basic CGI)
-- Demonstrates OS maturity and network stack reliability
+- Goal: host a simple website (static pages + basic CGI)
+- Demonstrates network and userspace maturity
 - Files: `user/httpd/` (new), CGI runtime
-
-**Example Use Cases**:
-- Personal blog or documentation site
-- OS status dashboard
-- Simple REST API for system monitoring
 
 ---
 
@@ -436,15 +422,13 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 **Dependencies**: Framebuffer driver, window system  
 **Priority**: Low (mention only)
 
-**Potential Approaches**:
-- Simple framebuffer console (80x25 text or basic graphics)
-- Minimalist window system (inspired by Plan 9 or X11 basics)
-- GUI toolkit (simple widget library)
+- Framebuffer console baseline
+- Minimal window-system prototype
+- Lightweight widget/toolkit experiments
 
 **Implementation Notes**:
-- **No concrete plan yet** - exploratory only
-- Significant effort required
-- Alternative: VNC/X11 client to remote display
+- Exploratory only (no fixed implementation schedule)
+- Significant effort; remote-display approach remains a fallback
 - Files: `kernel/dev/fb.c` (framebuffer), `user/wm/` (window manager)
 
 ---
@@ -459,8 +443,8 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 - Educational/experimental purposes only
 
 **Implementation Notes**:
-- **Purely for fun** - not a practical goal
-- Useful for rapid kernel prototyping
+- Experimental only (non-critical)
+- Potentially useful for rapid kernel prototyping
 - Files: `kernel/micropython/` (new)
 
 ---
@@ -468,42 +452,33 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 ## Dependency Diagram
 
 **Near-Term Goals:**
-1. **Memory Management** (dynamic probing, zones) - Foundational
-   - Feeds into → Interrupt Handling, Scheduling, all memory-intensive features
-2. **Interrupt Handling** ✅ COMPLETED (separate stacks, per-CPU state)
-   - Depends on → Memory Management
-   - Feeds into → Kernel Threads (work queues), Network Stack
-3. **Scheduling** ✅ INFRASTRUCTURE COMPLETE (sched_class, per-CPU rq, sched_entity)
-   - Benefits from → Interrupt improvements ✅
-   - Remaining: CFS policy, nice values
-4. **Kernel Threads** ✅ PARTIALLY COMPLETE (work queues, RCU kthreads)
-   - Depends on → Interrupt Handling ✅
-5. Multi-User Support (depends on VFS - done)
-6. LibC Expansion → Feeds into Async VFS, Self-hosting
-7. TTY/Terminal → Block Device Layer → Pseudo-FS → Async VFS
-8. Network Stack (benefits from Interrupt ✅ + Memory improvements)
-9. FS Features (ext2, xattrs)
+1. **Memory Management** → foundational for interrupt, scheduler, and high-load subsystems
+2. **Interrupt Handling** ✅ completed → enables robust kernel-thread and network paths
+3. **Scheduling** ✅ infrastructure complete → pending additional policies (CFS/nice/RT)
+4. **Kernel Threads** ✅ core complete → enables async subsystems and callback pipelines
+5. Multi-user model depends on VFS/process credential expansion
+6. LibC expansion feeds async I/O and self-hosting
+7. TTY → block layer → pseudo-FS → async VFS remains the main I/O chain
+8. Network and FS feature expansion build on the above
 
 **Long-Term Goals:**
-- ALL NEAR-TERM → **14. Self-Hosting** ⭐ (TOP PRIORITY)  
-- Network + Threading ✅ + FS → **15. Web Server Hosting** ⭐ (MAJOR GOAL)
-- 16. Dynamic Linking → 18. Kernel Modules  
-- 17. Advanced Pseudo-FS  
-- 19. GUI (exploratory)  
-- 20. MicroPython (for fun)
+- Near-term completion gates **14. Self-Hosting** ⭐
+- Network + threading + FS maturity enable **15. Web Server Hosting** ⭐
+- 16 → 18 dependency: dynamic linking precedes kernel modules
+- 17, 19, and 20 remain non-blocking exploratory/extension tracks
 
 ---
 
 ## Recommended Implementation Order
 
-### Phase 1: Core Infrastructure (3-6 months) ✅ **MOSTLY COMPLETE**
+### Phase 1: Core Infrastructure (3-6 months) ✅ **MOSTLY COMPLETE (as of Feb 2026)**
 1. **Dynamic memory probing and page frame management** - In progress
 2. ✅ **Interrupt handling architecture** (separate stacks, per-CPU state) - COMPLETED
-3. ✅ **Process scheduling infrastructure** (sched_class, per-CPU rq, sched_entity) - COMPLETED
+3. ✅ **Thread scheduling infrastructure** (sched_class, per-CPU rq, sched_entity) - COMPLETED
 4. ✅ **Enhanced kernel threads** (work queues, RCU kthreads) - COMPLETED
 5. Multi-user support - Pending
 
-### Phase 2: I/O Infrastructure (3-6 months) ⚡ **CURRENT PHASE**
+### Phase 2: I/O Infrastructure (3-6 months) ⚡ **ACTIVE PHASE (as of Feb 2026)**
 6. TTY/terminal subsystem
 7. Block device layer
 8. File system features (ext2)
@@ -535,9 +510,9 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 
 ## Success Metrics
 
-### Near-Term Success:
-- [x] **Dynamic memory probing via FDT** ✅ (partially - runtime device config)
-- [x] **Interrupt handling separated from process context** ✅
+### Near-Term Success (as of Feb 2026):
+- [x] **Dynamic memory probing via FDT** ✅ (runtime probing and device config active)
+- [x] **Interrupt handling separated from thread context** ✅
 - [x] **Per-CPU interrupt stacks (16KB)** ✅
 - [x] **Pluggable scheduler infrastructure with sched_class** ✅
 - [x] **Per-CPU run queues with CPU affinity support** ✅
@@ -581,6 +556,6 @@ When implementing features from this roadmap:
 - **Self-Hosting is Key**: The ability to compile xv6 under xv6 validates OS maturity and completeness.
 - **Web Hosting Milestone**: Demonstrates network stack reliability and real-world utility.
 - **Hardware Support**: Orange Pi RV2 support demonstrates portability to real hardware.
-- **Experimental Features**: GUI and kernel MicroPython are low priority - mention only for future exploration.
+- **Experimental Features**: GUI and kernel MicroPython remain low-priority exploratory tracks.
 
-Last Updated: January 29, 2026
+Last Updated: February 2026
