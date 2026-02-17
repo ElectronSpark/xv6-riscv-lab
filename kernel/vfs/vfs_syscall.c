@@ -1699,7 +1699,10 @@ uint64 sys_dumpinode(void) {
 /**
  * sys_vfs_ioctl - generic ioctl syscall
  *
- * Arguments: a0 = fd, a1 = cmd, a2 = arg (pointer)
+ * Arguments: a0 = fd, a1 = cmd, a2 = arg (user-space pointer)
+ *
+ * Copies data in/out of user space based on the ioctl command,
+ * then calls vfs_ioctl with a kernel pointer.
  */
 uint64 sys_vfs_ioctl(void) {
     int fd;
@@ -1713,7 +1716,77 @@ uint64 sys_vfs_ioctl(void) {
     if (f == NULL)
         return -EBADF;
 
-    int ret = vfs_ioctl(f, cmd, arg);
+    int ret;
+
+    /*
+     * For known TTY ioctls, copy the data in/out of user space here,
+     * then pass the kernel buffer to vfs_ioctl.  For unknown commands,
+     * pass the raw arg through as an opaque void* (the handler is
+     * responsible for interpreting it).
+     */
+    switch (cmd) {
+    case TCGETS: {
+        struct termios kt;
+        ret = vfs_ioctl(f, cmd, &kt);
+        if (ret == 0) {
+            if (either_copyout(1, arg, &kt, sizeof(kt)) < 0)
+                ret = -EFAULT;
+        }
+        break;
+    }
+    case TCSETS:
+    case TCSETSW:
+    case TCSETSF: {
+        struct termios kt;
+        if (either_copyin(&kt, 1, arg, sizeof(kt)) < 0) {
+            ret = -EFAULT;
+        } else {
+            ret = vfs_ioctl(f, cmd, &kt);
+        }
+        break;
+    }
+    case TIOCGWINSZ: {
+        struct winsize kws;
+        ret = vfs_ioctl(f, cmd, &kws);
+        if (ret == 0) {
+            if (either_copyout(1, arg, &kws, sizeof(kws)) < 0)
+                ret = -EFAULT;
+        }
+        break;
+    }
+    case TIOCSWINSZ: {
+        struct winsize kws;
+        if (either_copyin(&kws, 1, arg, sizeof(kws)) < 0) {
+            ret = -EFAULT;
+        } else {
+            ret = vfs_ioctl(f, cmd, &kws);
+        }
+        break;
+    }
+    case TIOCGPGRP: {
+        pid_t kpgid;
+        ret = vfs_ioctl(f, cmd, &kpgid);
+        if (ret == 0) {
+            if (either_copyout(1, arg, &kpgid, sizeof(kpgid)) < 0)
+                ret = -EFAULT;
+        }
+        break;
+    }
+    case TIOCSPGRP: {
+        pid_t kpgid;
+        if (either_copyin(&kpgid, 1, arg, sizeof(kpgid)) < 0) {
+            ret = -EFAULT;
+        } else {
+            ret = vfs_ioctl(f, cmd, &kpgid);
+        }
+        break;
+    }
+    default:
+        /* Unknown ioctl — pass arg through as opaque pointer */
+        ret = vfs_ioctl(f, cmd, (void *)arg);
+        break;
+    }
+
     vfs_fput(f);
     return ret;
 }
@@ -1736,7 +1809,12 @@ uint64 sys_tcgetattr(void) {
     if (f == NULL)
         return -EBADF;
 
-    int ret = vfs_ioctl(f, TCGETS, termios_p);
+    struct termios kt;
+    int ret = vfs_ioctl(f, TCGETS, &kt);
+    if (ret == 0) {
+        if (either_copyout(1, termios_p, &kt, sizeof(kt)) < 0)
+            ret = -EFAULT;
+    }
     vfs_fput(f);
     return ret;
 }
@@ -1776,7 +1854,13 @@ uint64 sys_tcsetattr(void) {
     if (f == NULL)
         return -EBADF;
 
-    int ret = vfs_ioctl(f, cmd, termios_p);
+    struct termios kt;
+    if (either_copyin(&kt, 1, termios_p, sizeof(kt)) < 0) {
+        vfs_fput(f);
+        return -EFAULT;
+    }
+
+    int ret = vfs_ioctl(f, cmd, &kt);
     vfs_fput(f);
     return ret;
 }

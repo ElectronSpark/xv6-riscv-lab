@@ -272,7 +272,7 @@ static int consoleclose(cdev_t *cdev) { return 0; }
 //
 // Console ioctl - delegates to the TTY layer for termios/TIOCSPGRP/etc.
 //
-static int consoleioctl(cdev_t *cdev, uint64 cmd, uint64 arg) {
+static int consoleioctl(cdev_t *cdev, uint64 cmd, void *arg) {
     if (console_tty == NULL)
         return -ENOTTY;
     return tty_ioctl(console_tty, cmd, arg);
@@ -282,7 +282,7 @@ static int consoleioctl(cdev_t *cdev, uint64 cmd, uint64 arg) {
 // Console device_t ioctl - same, but takes device_t* (called from
 // dev_ioctl via vfs_ioctl).
 //
-static int console_dev_ioctl(device_t *dev, uint64 cmd, uint64 arg) {
+static int console_dev_ioctl(device_t *dev, uint64 cmd, void *arg) {
     if (console_tty == NULL)
         return -ENOTTY;
     return tty_ioctl(console_tty, cmd, arg);

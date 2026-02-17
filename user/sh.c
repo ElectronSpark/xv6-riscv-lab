@@ -226,6 +226,7 @@ static void env_init(void) {
         env_vars[i].used = 0;
     env_set("PATH", "/:/bin");
     env_set("HOME", "/");
+    env_set("PYTHONPATH", "/usr/local/lib/python3.12");
 }
 
 static char *env_get(const char *name) {

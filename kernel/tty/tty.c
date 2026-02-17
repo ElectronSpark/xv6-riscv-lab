@@ -559,27 +559,27 @@ ssize_t tty_output(struct tty *tty, char *buf, size_t count) {
 /*  Ioctl                                                             */
 /* ------------------------------------------------------------------ */
 
-int tty_ioctl(struct tty *tty, uint64 cmd, uint64 arg) {
+int tty_ioctl(struct tty *tty, uint64 cmd, void *arg) {
     switch (cmd) {
     case TCGETS: {
-        if (either_copyout(1, arg, &tty->termios, sizeof(struct termios)) < 0)
-            return -EFAULT;
+        struct termios *tp = (struct termios *)arg;
+        spin_lock(&tty->lock);
+        *tp = tty->termios;
+        spin_unlock(&tty->lock);
         return 0;
     }
     case TCSETS:
     case TCSETSW:
     case TCSETSF: {
-        struct termios new_t;
-        if (either_copyin(&new_t, 1, arg, sizeof(struct termios)) < 0)
-            return -EFAULT;
+        struct termios *tp = (struct termios *)arg;
 
         spin_lock(&tty->lock);
-        tty->termios = new_t;
+        tty->termios = *tp;
         spin_unlock(&tty->lock);
 
         /* Notify driver if it cares */
         if (tty->ops && tty->ops->set_termios)
-            tty->ops->set_termios(tty, &new_t);
+            tty->ops->set_termios(tty, tp);
 
         /* TCSETSF: also discard pending input */
         if (cmd == TCSETSF && tty->ops && tty->ops->discard_input)
@@ -588,38 +588,35 @@ int tty_ioctl(struct tty *tty, uint64 cmd, uint64 arg) {
         return 0;
     }
     case TIOCGWINSZ: {
-        if (either_copyout(1, arg, &tty->winsize, sizeof(struct winsize)) < 0)
-            return -EFAULT;
+        struct winsize *wsp = (struct winsize *)arg;
+        spin_lock(&tty->lock);
+        *wsp = tty->winsize;
+        spin_unlock(&tty->lock);
         return 0;
     }
     case TIOCSWINSZ: {
-        struct winsize ws;
-        if (either_copyin(&ws, 1, arg, sizeof(struct winsize)) < 0)
-            return -EFAULT;
+        struct winsize *wsp = (struct winsize *)arg;
 
         spin_lock(&tty->lock);
-        tty->winsize = ws;
+        tty->winsize = *wsp;
         spin_unlock(&tty->lock);
 
         if (tty->ops && tty->ops->set_winsize)
-            tty->ops->set_winsize(tty, &ws);
+            tty->ops->set_winsize(tty, wsp);
 
         return 0;
     }
     case TIOCGPGRP: {
         /* Return the foreground process group from the session */
-        pid_t pgid = 0;
+        pid_t *pgidp = (pid_t *)arg;
+        *pgidp = 0;
         if (tty->session)
-            pgid = session_get_fg_pgid(tty->session);
-        if (either_copyout(1, arg, &pgid, sizeof(pid_t)) < 0)
-            return -EFAULT;
+            *pgidp = session_get_fg_pgid(tty->session);
         return 0;
     }
     case TIOCSPGRP: {
         /* Set the foreground process group */
-        pid_t pgid;
-        if (either_copyin(&pgid, 1, arg, sizeof(pid_t)) < 0)
-            return -EFAULT;
+        pid_t pgid = *(pid_t *)arg;
         if (pgid <= 0)
             return -EINVAL;
         /* Caller must be in the same session as the tty */

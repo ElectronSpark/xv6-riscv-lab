@@ -98,6 +98,7 @@ add_subdirectory(${KERNEL_DIR}/ipi)
 add_subdirectory(${KERNEL_DIR}/tty)
 add_subdirectory(${KERNEL_DIR}/lwip_port)
 add_subdirectory(${KERNEL_DIR}/lwext4_port)
+add_subdirectory(${KERNEL_DIR}/telnetd)
 
 set_source_files_properties(${KERNEL_C_FILES} PROPERTIES LANGUAGE C)
 set_source_files_properties(${KERNEL_SCAN_OBJS} PROPERTIES LANGUAGE C)
@@ -120,9 +121,10 @@ set(KERNEL_OBJ_LIBS
     $<TARGET_OBJECTS:tty>
     $<TARGET_OBJECTS:lwip>
     $<TARGET_OBJECTS:ext4fs>
+    $<TARGET_OBJECTS:telnetd>
 )
 
-set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs tty lwip ext4fs)
+set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs tty lwip ext4fs telnetd)
 
 # Generate linker script from template
 set(KERNEL_LD_IN ${KERNEL_DIR}/kernel.ld.in)

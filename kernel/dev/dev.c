@@ -346,7 +346,7 @@ int device_unregister(device_t *dev) {
     return 0;
 }
 
-int dev_ioctl(device_t *dev, uint64 cmd, uint64 arg) {
+int dev_ioctl(device_t *dev, uint64 cmd, void *arg) {
     if (dev == NULL) {
         return -EINVAL; // Null pointer for device
     }

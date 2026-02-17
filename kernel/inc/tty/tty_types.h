@@ -24,7 +24,7 @@ struct tty_ops {
     ssize_t (*tx)(struct tty *tty, char *buf, size_t nr);
     void (*set_termios)(struct tty *tty, struct termios *new_termios);
     void (*set_winsize)(struct tty *tty, struct winsize *new_winsize);
-    int (*ioctl)(struct tty *tty, uint64 cmd, uint64 arg);
+    int (*ioctl)(struct tty *tty, uint64 cmd, void *arg);
 };
 
 /*

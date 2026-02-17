@@ -184,10 +184,18 @@ ssize_t pipe_read(struct pipe *pi, char *buf, size_t count, bool user) {
                     spin_unlock(&pi->reader_lock);
                     return -1;
                 }
+                /*
+                 * POSIX short-read: if we already copied some data to
+                 * the caller, return it now instead of blocking for
+                 * more.  This is essential for interactive / streaming
+                 * consumers (terminals, telnet, etc.).
+                 */
+                if (total > 0) {
+                    spin_unlock(&pi->reader_lock);
+                    goto out;
+                }
                 if (nonblock) {
                     spin_unlock(&pi->reader_lock);
-                    if (total > 0)
-                        goto out;
                     return -EAGAIN;
                 }
                 tq_wakeup_all(&pi->nwrite_queue, 0, 0);

@@ -19,7 +19,7 @@ ssize_t tty_read(struct tty *tty, char *buf, size_t count, bool user);
 int tty_poll(struct tty *tty, short events);
 ssize_t tty_write(struct tty *tty, const char *buf, size_t count, bool user);
 ssize_t tty_output(struct tty *tty, char *buf, size_t count);
-int tty_ioctl(struct tty *tty, uint64 cmd, uint64 arg);
+int tty_ioctl(struct tty *tty, uint64 cmd, void *arg);
 int tty_open(struct tty *tty);
 void tty_close(struct tty *tty);
 void tty_hangup(struct tty *tty);
