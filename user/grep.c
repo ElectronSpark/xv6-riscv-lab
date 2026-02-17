@@ -1,7 +1,7 @@
 // Simple grep.  Only supports ^ . * $ operators.
 
-#include "kernel/inc/uabi/stat.h"
-#include "kernel/inc/uabi/fcntl.h"
+#include "uabi/stat.h"
+#include "uabi/fcntl.h"
 #include "user/user.h"
 
 char buf[1024];

@@ -1,11 +1,11 @@
 #include "kernel/inc/param.h"
-#include "kernel/inc/uabi/stat.h"
+#include "uabi/stat.h"
 #include "user/user.h"
-#include "kernel/inc/uabi/fcntl.h"
-#include "kernel/inc/uabi/syscall.h"
-#include "kernel/inc/uabi/signo.h"
-#include "kernel/inc/uabi/linux_dirent64.h"
-#include "kernel/inc/uabi/statfs.h"
+#include "uabi/fcntl.h"
+#include "uabi/syscall.h"
+#include "uabi/signo.h"
+#include "uabi/linux_dirent64.h"
+#include "uabi/statfs.h"
 
 //
 // Tests xv6 system calls.  usertests without arguments runs them all

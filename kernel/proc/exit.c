@@ -24,6 +24,7 @@
 #include "vfs/fs.h"
 #include <mm/vm.h>
 #include "errno.h"
+#include <uabi/wait.h>
 
 // Wake the vfork parent when child exits or execs.
 // The vfork parent is blocked in UNINTERRUPTIBLE state waiting for us.
@@ -332,8 +333,6 @@ ret_unlocked:
 //   exited:  (exit_code << 8) | 0x00
 //   stopped: (stop_sig  << 8) | 0x7f
 int waitpid(int target_pid, uint64 addr, int options) {
-    const int WNOHANG   = 1;
-    const int WUNTRACED = 2;
     if (options & ~(WNOHANG | WUNTRACED)) {
         return -EINVAL;
     }

@@ -1,7 +1,7 @@
 // Create a zombie process that
 // must be reparented at exit.
 
-#include "kernel/inc/uabi/stat.h"
+#include "uabi/stat.h"
 #include "user/user.h"
 
 int main(void) {

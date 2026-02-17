@@ -1,8 +1,8 @@
 // init: The initial user-level program
 
-#include "kernel/inc/uabi/stat.h"
+#include "uabi/stat.h"
 #include "user/user.h"
-#include "kernel/inc/uabi/fcntl.h"
+#include "uabi/fcntl.h"
 
 #ifndef CONSOLE_MAJOR
 #define CONSOLE_MAJOR 1

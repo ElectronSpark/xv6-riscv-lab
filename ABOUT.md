@@ -23,6 +23,7 @@ This repository contains an **extensively modified and enhanced version** of xv6
 - **Multi-platform support**: QEMU virt machine and Orange Pi RV2 (Allwinner D1)
 - **Runtime device discovery**: Dynamic MMIO addresses instead of compile-time constants
 - **SBI console**: Early boot output via OpenSBI before UART initialization
+- **User-kernel ABI boundary**: Shared syscall definitions centralized under `kernel/inc/uabi/`; userspace includes use `#include "uabi/..."`
 
 **These enhancements were developed independently and are not part of the original xv6 project.**
 

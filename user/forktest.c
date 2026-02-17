@@ -1,7 +1,7 @@
 // Test that fork fails gracefully.
 // Tiny executable so that the limit can be filling the proc table.
 
-#include "kernel/inc/uabi/stat.h"
+#include "uabi/stat.h"
 #include "user/user.h"
 
 #define N 1000

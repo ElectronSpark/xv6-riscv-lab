@@ -1,5 +1,5 @@
-#include "kernel/inc/uabi/stat.h"
-#include "kernel/inc/uabi/signo.h"
+#include "uabi/stat.h"
+#include "uabi/signo.h"
 #include "user/user.h"
 
 int main(int argc, char **argv) {

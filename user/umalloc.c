@@ -1,4 +1,4 @@
-#include "kernel/inc/uabi/stat.h"
+#include "uabi/stat.h"
 #include "user/user.h"
 #include "kernel/inc/param.h"
 

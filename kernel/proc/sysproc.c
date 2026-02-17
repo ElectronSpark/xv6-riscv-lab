@@ -17,24 +17,8 @@
 #include "proc/pgroup.h"
 #include "tty/session.h"
 #include "timer/goldfish_rtc.h"
-
-struct __k_timespec {
-    int64 tv_sec;
-    int64 tv_nsec;
-};
-
-struct __k_timeval {
-    int64 tv_sec;
-    int64 tv_usec;
-};
-
-struct __k_utsname {
-    char sysname[65];
-    char nodename[65];
-    char release[65];
-    char version[65];
-    char machine[65];
-};
+#include <uabi/time.h>
+#include <uabi/utsname.h>
 
 uint64 sys_exit(void) {
     int n;
@@ -162,7 +146,7 @@ uint64 sys_gettimeofday(void) {
     }
 
     uint64 t = goldfish_rtc_read_ns();
-    struct __k_timeval tv = {
+    struct timeval tv = {
         .tv_sec = t / NS_PER_SEC,
         .tv_usec = (int64)((t % NS_PER_SEC) / NS_PER_US),
     };
@@ -182,7 +166,7 @@ uint64 sys_nanosleep(void) {
         return -EINVAL;
     }
 
-    struct __k_timespec req = {0};
+    struct timespec req = {0};
     if (either_copyin(&req, 1, req_addr, sizeof(req)) < 0) {
         return -EFAULT;
     }
@@ -199,7 +183,7 @@ uint64 sys_nanosleep(void) {
     sleep_ms(ms);
 
     if (rem_addr != 0) {
-        struct __k_timespec rem = {0};
+        struct timespec rem = {0};
         if (either_copyout(1, rem_addr, &rem, sizeof(rem)) < 0) {
             return -EFAULT;
         }
@@ -214,7 +198,7 @@ uint64 sys_uname(void) {
         return -EINVAL;
     }
 
-    struct __k_utsname u;
+    struct utsname u;
     memset(&u, 0, sizeof(u));
     safestrcpy(u.sysname, "xv6", sizeof(u.sysname));
     safestrcpy(u.nodename, "xv6", sizeof(u.nodename));

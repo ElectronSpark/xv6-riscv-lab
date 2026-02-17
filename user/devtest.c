@@ -3,8 +3,8 @@
 // Tests concurrent fork/exit with device file descriptors.
 //
 
-#include "kernel/inc/uabi/stat.h"
-#include "kernel/inc/uabi/fcntl.h"
+#include "uabi/stat.h"
+#include "uabi/fcntl.h"
 #include "user/user.h"
 
 #define NR_THREAD 10

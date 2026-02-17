@@ -7,9 +7,9 @@
 //    for (i = 0; i < 40000; i++)
 //      asm volatile("");
 
-#include "kernel/inc/uabi/stat.h"
+#include "uabi/stat.h"
 #include "user/user.h"
-#include "kernel/inc/uabi/fcntl.h"
+#include "uabi/fcntl.h"
 
 int main(int argc, char *argv[]) {
     int fd, i;

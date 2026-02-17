@@ -8,6 +8,7 @@
 #include "bintree_type.h"
 #include "lock/rwsem_types.h"
 #include <vfs/vfs_types.h>
+#include <uabi/mman.h>
 
 typedef struct vm vm_t;
 
@@ -24,27 +25,16 @@ typedef struct vma {
 } vma_t;
 
 /*
- * VMA protection flags (POSIX-compatible)
- * These match the POSIX mmap PROT_* and MAP_* flags for compatibility.
+ * VMA protection flags
+ * Base POSIX-compatible PROT_* and MAP_* flags are defined in uabi/mman.h.
  */
 
-// Protection flags (POSIX PROT_*)
-#define PROT_NONE 0x0       // Page cannot be accessed
-#define PROT_READ 0x1       // Page can be read
-#define PROT_WRITE 0x2      // Page can be written
-#define PROT_EXEC 0x4       // Page can be executed
+// Kernel-only protection extensions
 #define PROT_GROWSUP 0x40   // Heap-like region (grows up)
 #define PROT_GROWSDOWN 0x80 // Stack-like region (grows down)
 #define PROT_MASK                                                              \
     (PROT_NONE | PROT_READ | PROT_WRITE | PROT_EXEC | PROT_GROWSUP |           \
      PROT_GROWSDOWN)
-
-// Mapping flags (POSIX MAP_*)
-#define MAP_SHARED 0x01    // Share changes
-#define MAP_PRIVATE 0x02   // Changes are private
-#define MAP_FIXED 0x10     // Interpret addr exactly
-#define MAP_ANONYMOUS 0x20 // Don't use a file
-#define MAP_ANON MAP_ANONYMOUS
 
 // VMA flags (stored in vma->flags, xv6-specific, high bits avoid PROT_*
 // conflict)
@@ -58,25 +48,6 @@ typedef struct vma {
     (PROT_READ | PROT_WRITE | PROT_EXEC | VMA_FLAG_USER | VMA_FLAG_GROWSDOWN | \
      VMA_FLAG_GROWSUP | VMA_FLAG_FILE)
 
-// mmap failure return value
-#define MAP_FAILED ((void *)(uint64) - 1)
-
-// mremap flags (POSIX-compatible)
-#define MREMAP_MAYMOVE 1 // May move the mapping to a new address
-#define MREMAP_FIXED 2 // Use specified new address (must also specify MAYMOVE)
-
-// msync flags (POSIX-compatible)
-#define MS_ASYNC 1      // Schedule sync, return immediately
-#define MS_SYNC 4       // Synchronous sync
-#define MS_INVALIDATE 2 // Invalidate cached data
-
-// madvise advice flags (POSIX-compatible)
-#define MADV_NORMAL 0     // No special treatment
-#define MADV_RANDOM 1     // Expect random page references
-#define MADV_SEQUENTIAL 2 // Expect sequential page references
-#define MADV_WILLNEED 3   // Will need these pages soon
-#define MADV_DONTNEED 4   // Don't need these pages anymore
-#define MADV_FREE 8       // Pages can be freed (if not dirty)
 
 // Virtual Memory Management structure
 typedef struct vm {

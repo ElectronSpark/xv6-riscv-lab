@@ -3,80 +3,14 @@
 
 struct stat;
 
-#include "kernel/inc/uabi/signal.h"
-#include "kernel/inc/uabi/memstat.h"
-#include "kernel/inc/uabi/clone_flags.h"
-
-struct timeval {
-	int64 tv_sec;
-	int64 tv_usec;
-};
-
-struct timespec {
-	int64 tv_sec;
-	int64 tv_nsec;
-};
-
-struct utsname {
-	char sysname[65];
-	char nodename[65];
-	char release[65];
-	char version[65];
-	char machine[65];
-};
-
-#ifndef F_OK
-#define F_OK 0
-#define X_OK 1
-#define W_OK 2
-#define R_OK 4
-#endif
-
-#ifndef WNOHANG
-#define WNOHANG 1
-#endif
-#ifndef WUNTRACED
-#define WUNTRACED 2
-#endif
-
-// Wait status macros (POSIX)
-#define WIFEXITED(w)    (((w) & 0xff) == 0)
-#define WIFSTOPPED(w)   (((w) & 0xff) == 0x7f)
-#define WIFSIGNALED(w)  (((w) & 0x7f) > 0 && ((w) & 0x7f) < 0x7f)
-#define WEXITSTATUS(w)  (((w) >> 8) & 0xff)
-#define WTERMSIG(w)     ((w) & 0x7f)
-#define WSTOPSIG(w)     (((w) >> 8) & 0xff)
-
-// mmap protection flags (POSIX)
-#define PROT_NONE 0x0
-#define PROT_READ 0x1
-#define PROT_WRITE 0x2
-#define PROT_EXEC 0x4
-
-// mmap mapping flags (POSIX)
-#define MAP_SHARED 0x01
-#define MAP_PRIVATE 0x02
-#define MAP_FIXED 0x10
-#define MAP_ANONYMOUS 0x20
-#define MAP_ANON MAP_ANONYMOUS
-#define MAP_FAILED ((void *)(uint64)-1)
-
-// mremap flags
-#define MREMAP_MAYMOVE 1
-#define MREMAP_FIXED 2
-
-// msync flags
-#define MS_ASYNC 1
-#define MS_SYNC 4
-#define MS_INVALIDATE 2
-
-// madvise advice
-#define MADV_NORMAL 0
-#define MADV_RANDOM 1
-#define MADV_SEQUENTIAL 2
-#define MADV_WILLNEED 3
-#define MADV_DONTNEED 4
-#define MADV_FREE 8
+#include "uabi/signal.h"
+#include "uabi/memstat.h"
+#include "uabi/clone_flags.h"
+#include "uabi/time.h"
+#include "uabi/utsname.h"
+#include "uabi/wait.h"
+#include "uabi/mman.h"
+#include "uabi/access.h"
 
 // system calls
 int clone(struct clone_args *);

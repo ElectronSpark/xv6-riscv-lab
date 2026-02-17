@@ -1,7 +1,7 @@
-#include "kernel/inc/uabi/stat.h"
+#include "uabi/stat.h"
 #include "user/user.h"
-#include "kernel/inc/uabi/fcntl.h"
-#include "kernel/inc/uabi/statfs.h"
+#include "uabi/fcntl.h"
+#include "uabi/statfs.h"
 
 int main() {
     struct statfs fs;

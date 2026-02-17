@@ -129,6 +129,7 @@ xv6-riscv/
 │   │   ├── proc/      # Process management headers
 │   │   ├── smp/       # SMP and per-CPU headers
 │   │   ├── timer/     # Timer subsystem headers
+│   │   ├── uabi/      # User-kernel shared syscall ABI headers
 │   │   └── vfs/       # VFS headers
 │   ├── vfs/           # Virtual File System implementation
 │   ├── mm/            # Memory management subsystem
@@ -160,6 +161,7 @@ xv6-riscv/
 - **Locking** (`kernel/lock/`): Mutexes, spinlocks, rwlocks, RCU
 - **Devices** (`kernel/dev/`): Device driver framework
 - **Interrupt Handling** (`kernel/irq/`): Trap handling, syscalls, PLIC
+- **User ABI** (`kernel/inc/uabi/`): Shared syscall numbers, structs, and flags; userspace includes use `#include "uabi/..."`
 
 ## Building and Running
 

@@ -1,4 +1,4 @@
-#include "kernel/inc/uabi/fcntl.h"
+#include "uabi/fcntl.h"
 #include "user/user.h"
 
 char buf[512];

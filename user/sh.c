@@ -11,10 +11,10 @@
 // - Enhanced ls with permissions, types, sizes
 
 #include "user.h"
-#include "kernel/inc/uabi/fcntl.h"
-#include "kernel/inc/uabi/stat.h"
-#include "kernel/inc/uabi/termios.h"
-#include "kernel/inc/uabi/linux_dirent64.h"
+#include "uabi/fcntl.h"
+#include "uabi/stat.h"
+#include "uabi/termios.h"
+#include "uabi/linux_dirent64.h"
 
 // =====================================================================
 // Parsed command representation (same as original xv6 shell)
