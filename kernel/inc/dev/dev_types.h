@@ -29,7 +29,7 @@ typedef struct device_major {
 typedef struct device_ops {
     int (*open)(device_t *dev);
     int (*release)(device_t *dev);
-    int (*ioctl)(device_t *dev, uint64 cmd, uint64 arg);
+    int (*ioctl)(device_t *dev, uint64 cmd, void *arg);
 } device_ops_t;
 
 typedef enum { DEV_TYPE_UNKNOWN = 0, DEV_TYPE_BLOCK, DEV_TYPE_CHAR } dev_type_e;
@@ -48,7 +48,7 @@ typedef struct cdev_ops {
     int (*write)(cdev_t *cdev, bool user, const void *buf, size_t count);
     int (*open)(cdev_t *cdev);
     int (*release)(cdev_t *cdev);
-    int (*ioctl)(cdev_t *cdev, uint64 cmd, uint64 arg);
+    int (*ioctl)(cdev_t *cdev, uint64 cmd, void *arg);
     int (*poll)(cdev_t *cdev, short events); // returns revents bitmask
 } cdev_ops_t;
 

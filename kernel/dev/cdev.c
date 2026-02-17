@@ -27,7 +27,7 @@ static int __underlying_dev_release(device_t *dev) {
     return cdev->ops.release(cdev);
 }
 
-static int __vfs_cdev_underlying_ioctl(device_t *dev, uint64 cmd, uint64 arg) {
+static int __vfs_cdev_underlying_ioctl(device_t *dev, uint64 cmd, void *arg) {
     if (dev == NULL) {
         return -EINVAL; // Invalid device
     }

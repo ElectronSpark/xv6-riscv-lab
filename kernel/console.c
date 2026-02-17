@@ -1,6 +1,7 @@
 //
-// Console input and output to UART. Reads are line-buffered.
-// Special keys: ^H=backspace, ^U=kill line, ^D=EOF, ^P=process list
+// Console input and output to UART.
+// Routes through the TTY layer for line discipline, signal generation
+// (Ctrl+C → SIGINT), and termios support.
 // Uses SBI for early boot output before UART init.
 // Converts \n to \r\n for proper terminal display.
 //
@@ -17,12 +18,16 @@
 #include "printf.h"
 #include "proc/thread.h"
 #include "proc/sched.h"
+#include "proc/proc_private.h"
 #include "mm/vm.h"
 #include "dev/cdev.h"
 #include "trap.h"
 #include "dev/uart.h"
 #include "sbi.h"
 #include "signal.h"
+#include "tty/tty.h"
+#include "tty/session.h"
+#include "vfs/pipe.h"
 
 #ifndef CONSOLE_MAJOR
 #define CONSOLE_MAJOR 1
@@ -37,6 +42,10 @@
 // Flag to track if UART has been initialized
 // Before UART init, we use SBI for console output
 static volatile int uart_initialized = 0;
+
+// The console TTY — allocated during consoledevinit()
+// Before this is set, consoleintr() falls back to the raw buffer.
+struct tty *console_tty = NULL;
 
 //
 // send one character to the uart.
@@ -124,11 +133,26 @@ struct {
 //
 // user write()s to the console go here.
 //
+// When the TTY is active, output post-processing (OPOST/ONLCR) is
+// controlled by the TTY's termios flags.  Bytes are sent directly to
+// the UART via interrupt-driven uartputc — the same approach Linux
+// uses (user writes go straight to the driver, only echo goes through
+// the TTY output pipe / drain thread).
+//
 int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
     int i;
     uint64 src = (uint64)buffer;
     char kbuf[64];
     int written = 0;
+
+    /* Check OPOST flags from the TTY (if active) */
+    int do_onlcr = 1; /* default: convert \n → \r\n */
+    if (console_tty != NULL) {
+        spin_lock(&console_tty->lock);
+        do_onlcr = (console_tty->termios.c_oflag & OPOST) &&
+                    (console_tty->termios.c_oflag & ONLCR);
+        spin_unlock(&console_tty->lock);
+    }
 
     while (written < n) {
         int batch_size = n - written;
@@ -140,10 +164,8 @@ int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
                 return written + i;
         }
 
-        // Output with \n -> \r\n conversion for proper terminal display
-        // Use interrupt-driven uartputc for efficiency
         for (i = 0; i < batch_size; i++) {
-            if (kbuf[i] == '\n')
+            if (do_onlcr && kbuf[i] == '\n')
                 uartputc('\r');
             uartputc(kbuf[i]);
         }
@@ -155,20 +177,18 @@ int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
 
 //
 // user read()s from the console go here.
-// copy (up to) a whole input line to dst.
-// user_dst indicates whether dst is a user
-// or kernel address.
-//
-// IMPORTANT: Must not hold spinlock while copying to userspace, because
-// vm_copyout acquires a rwsem and that would violate lock ordering.
-// We batch characters into a kernel buffer while holding the lock,
-// then copy to userspace after releasing the lock.
+// When the TTY is active, reads go through the TTY line discipline.
+// Before TTY init, falls back to the raw console buffer.
 //
 int consoleread(cdev_t *cdev, bool user_dst, void *buffer, size_t n) {
+    if (console_tty != NULL)
+        return tty_read(console_tty, (char *)buffer, n, user_dst);
+
+    /* --- Early boot fallback (before TTY is allocated) --- */
     uint target;
     int c;
-    char kbuf[64];   // kernel buffer for batching characters
-    int batch_count; // number of chars in current batch
+    char kbuf[64];
+    int batch_count;
     uint64 dst = (uint64)buffer;
     int got_newline = 0;
     int got_eof = 0;
@@ -249,11 +269,43 @@ static int consoleopen(cdev_t *cdev) { return 0; }
 
 static int consoleclose(cdev_t *cdev) { return 0; }
 
+//
+// Console ioctl - delegates to the TTY layer for termios/TIOCSPGRP/etc.
+//
+static int consoleioctl(cdev_t *cdev, uint64 cmd, void *arg) {
+    if (console_tty == NULL)
+        return -ENOTTY;
+    return tty_ioctl(console_tty, cmd, arg);
+}
+
+//
+// Console device_t ioctl - same, but takes device_t* (called from
+// dev_ioctl via vfs_ioctl).
+//
+static int console_dev_ioctl(device_t *dev, uint64 cmd, void *arg) {
+    if (console_tty == NULL)
+        return -ENOTTY;
+    return tty_ioctl(console_tty, cmd, arg);
+}
+
+//
+// Console poll - check whether console has data ready for reading / writing.
+// Delegates to tty_poll which inspects raw_buf (raw mode) or input_pipe
+// (canonical mode).
+//
+static int consolepoll(cdev_t *cdev, short events) {
+    if (console_tty == NULL)
+        return 0;
+    return tty_poll(console_tty, events);
+}
+
 static cdev_ops_t console_cdev_ops = {
     .read = consoleread,
     .write = consolewrite,
     .open = consoleopen,
     .release = consoleclose,
+    .ioctl = consoleioctl,
+    .poll = consolepoll,
 };
 
 static cdev_t console_cdev = {
@@ -268,13 +320,47 @@ static cdev_t console_cdev = {
 
 extern void uartintr(int irq, void *data, device_t *dev);
 
+/*
+ * TTY input staging buffer.
+ *
+ * consoleintr() runs in interrupt context and cannot call tty_input()
+ * directly because the TTY line discipline may sleep (pipe_write).
+ * Instead, we put raw characters into this lock-free ring buffer and
+ * a kernel thread (console_tty_input_thread) drains it into tty_input().
+ */
+#define TTY_INBUF_SIZE 256
+static volatile char tty_inbuf[TTY_INBUF_SIZE];
+static volatile uint tty_inbuf_w = 0; /* write index (interrupt) */
+static volatile uint tty_inbuf_r = 0; /* read index  (thread)   */
+
 //
 // the console input interrupt handler.
 // uartintr() calls this for input character.
-// do erase/kill processing, append to cons.buf,
-// wake up consoleread() if a whole line has arrived.
+//
+// When the TTY layer is active, characters are staged in tty_inbuf
+// and a kernel thread feeds them to tty_input().
+//
+// Before TTY init, falls back to the raw console buffer with
+// basic editing.
 //
 void consoleintr(int c) {
+    /* ---- TTY path: stage in ring buffer for deferred processing ---- */
+    if (console_tty != NULL) {
+        /* ^P still handled here for kernel debugging */
+        if (c == C('P')) {
+            procdump();
+            return;
+        }
+        uint w = tty_inbuf_w;
+        uint next = (w + 1) % TTY_INBUF_SIZE;
+        if (next != tty_inbuf_r) { /* drop if full */
+            tty_inbuf[w] = (char)c;
+            __atomic_store_n(&tty_inbuf_w, next, __ATOMIC_RELEASE);
+        }
+        return;
+    }
+
+    /* ---- Early boot fallback (raw buffer) ---- */
     spin_lock(&cons.lock);
 
     switch (c) {
@@ -366,10 +452,80 @@ static void sbi_console_poll_thread(uint64 arg1, uint64 arg2) {
     }
 }
 
+/*
+ * TTY input feeder thread.
+ *
+ * Drains the tty_inbuf ring buffer (filled by consoleintr in interrupt
+ * context) and feeds characters to tty_input() which can safely sleep.
+ */
+static void console_tty_input_thread(uint64 arg1, uint64 arg2) {
+    (void)arg1;
+    (void)arg2;
+
+    for (;;) {
+        uint r = __atomic_load_n(&tty_inbuf_r, __ATOMIC_ACQUIRE);
+        uint w = __atomic_load_n(&tty_inbuf_w, __ATOMIC_ACQUIRE);
+
+        if (r == w) {
+            /* Nothing to process — poll every 1 ms */
+            sleep_ms(1);
+            continue;
+        }
+
+        /* Drain available characters into the TTY line discipline */
+        while (r != w) {
+            char ch = tty_inbuf[r];
+            r = (r + 1) % TTY_INBUF_SIZE;
+            __atomic_store_n(&tty_inbuf_r, r, __ATOMIC_RELEASE);
+
+            tty_input(console_tty, &ch, 1);
+
+            /* Re-read w in case more arrived */
+            w = __atomic_load_n(&tty_inbuf_w, __ATOMIC_ACQUIRE);
+        }
+    }
+}
+
+/*
+ * TTY output drain thread.
+ *
+ * Drains the TTY output pipe and sends bytes to the UART/SBI console.
+ * Only echo output (from tty_echo_char in the line discipline) flows
+ * through this pipe.  User writes go directly to UART via consolewrite.
+ *
+ * Data arriving from the pipe has already been post-processed by
+ * tty_echo_char (OPOST/ONLCR), so bytes are output verbatim — no
+ * additional \n → \r\n conversion is performed.
+ */
+static void console_tty_drain_thread(uint64 arg1, uint64 arg2) {
+    (void)arg1;
+    (void)arg2;
+    char buf[64];
+
+    for (;;) {
+        /* tty_output blocks if no data is available */
+        ssize_t n = tty_output(console_tty, buf, sizeof(buf));
+        if (n <= 0) {
+            sleep_ms(1);
+            continue;
+        }
+        for (ssize_t i = 0; i < n; i++) {
+            if (!uart_initialized)
+                sbi_console_putchar((unsigned char)buf[i]);
+            else
+                uartputc_sync((unsigned char)buf[i]);
+        }
+    }
+}
+
 void consoledevinit(void) {
     console_cdev.ops = console_cdev_ops;
     int errno = cdev_register(&console_cdev);
     assert(errno == 0, "consoleinit: cdev_register failed: %d\n", errno);
+
+    /* Install ioctl on the device_t level (used by vfs_ioctl → dev_ioctl) */
+    console_cdev.dev.ops.ioctl = console_dev_ioctl;
+
     struct irq_desc uart_irq_desc = {
         .handler = uartintr,
         .data = NULL,
@@ -379,6 +535,38 @@ void consoledevinit(void) {
     assert(errno == 0,
            "consoledevinit: register_irq_handler failed, error code: %d\n",
            errno);
+
+    /* ---- Allocate the console TTY ---- */
+    console_tty = tty_alloc("console", NULL);
+    assert(!IS_ERR_OR_NULL(console_tty), "consoledevinit: tty_alloc failed");
+
+    /*
+     * Make both TTY pipes non-blocking for writes so that tty_input()
+     * (called from the feeder thread) and tty_echo_char() never sleep
+     * when the pipe is full — characters are silently discarded instead.
+     */
+    pipe_set_flags(console_tty->input_pipe, (1 << PIPE_FLAGS_NONBLOCK_WR));
+    pipe_set_flags(console_tty->output_pipe, (1 << PIPE_FLAGS_NONBLOCK_WR));
+
+    /* Attach the console TTY to init's session as the controlling terminal */
+    struct thread *initproc = __proctab_get_initproc();
+    if (initproc != NULL && initproc->session != NULL) {
+        pid_wlock();
+        session_set_ctrl_tty(initproc->session, console_tty);
+        pid_wunlock();
+    }
+
+    /* Start the input feeder thread (intr ring buf → tty_input) */
+    struct thread *feeder =
+        kthread_create("tty_input", console_tty_input_thread, 0, 0, 0);
+    if (!IS_ERR_OR_NULL(feeder))
+        wakeup(feeder);
+
+    /* Start the output drain thread (echo → UART) */
+    struct thread *drain =
+        kthread_create("tty_drain", console_tty_drain_thread, 0, 0, 0);
+    if (!IS_ERR_OR_NULL(drain))
+        wakeup(drain);
 
     // Start SBI polling thread if UART hardware not available
     if (!uart_initialized) {

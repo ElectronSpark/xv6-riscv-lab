@@ -211,12 +211,14 @@ int session_remove_pg(struct session *s, struct pgroup *pg) {
 /* ------------------------------------------------------------------ */
 
 void session_set_ctrl_tty(struct session *s, struct tty *tty) {
+    pid_assert_wholding();
     if (s == NULL || s->exited)
         return;
     s->ctrl_tty = tty;
 }
 
 struct tty *session_get_ctrl_tty(struct session *s) {
+    pid_assert_wholding();
     if (s == NULL)
         return NULL;
     return s->ctrl_tty;

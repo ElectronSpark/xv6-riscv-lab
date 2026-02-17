@@ -46,33 +46,22 @@ int ustack_alloc(vm_t *vm, uint64 *sp) {
     return 0;     // Success
 }
 
-int exec(char *path, char **argv) {
+int exec(char *path, char **argv, char **envp) {
     char *s, *last;
     int i, off;
-    uint64 argc, heap_start = 0, sp, ustack[MAXARG + 3];
+    uint64 argc, envc, sp, ustack[MAXARG + MAXENV + 4];
     uint64 stackbase = USTACKTOP - USERSTACK * PGSIZE;
     struct elfhdr elf;
     struct vfs_file *file = NULL;
     struct proghdr ph;
     vm_t *tmp_vm = NULL;
     struct thread *p = current;
+    uint64 heap_start = 0;
 
     // Look up the file using VFS
     struct vfs_inode *inode = vfs_namei(path, strlen(path));
-    if (IS_ERR_OR_NULL(inode) && strncmp(path, "/bin/", 5) != 0) {
-        // In case of failing to find the inode in cwd, try absolute path
-        size_t path_len = strlen(path);
-        char *path1 = kmm_alloc(path_len + 5);
-        if (path1 == NULL) {
-            return -1;
-        }
-        strncpy(path1, "/bin/", 5);
-        memmove(path1 + 5, path, path_len + 1);
-        inode = vfs_namei(path1, path_len + 5);
-        kmm_free(path1);
-        if (IS_ERR_OR_NULL(inode)) {
-            return -1;
-        }
+    if (IS_ERR_OR_NULL(inode)) {
+        return -1;
     }
 
     // Open the file for reading
@@ -268,24 +257,43 @@ int exec(char *path, char **argv) {
             goto bad;
         ustack[argc] = sp;
     }
+
+    // Push environment strings.
+    envc = 0;
+    if (envp) {
+        for (envc = 0; envp[envc]; envc++) {
+            if (envc >= MAXENV)
+                goto bad;
+            sp -= strlen(envp[envc]) + 1;
+            sp -= sp % 16;
+            if (sp < stackbase)
+                goto bad;
+            if (vm_copyout(tmp_vm, sp, envp[envc], strlen(envp[envc]) + 1) < 0)
+                goto bad;
+            ustack[argc + 2 + envc] = sp;
+        }
+    }
+
     // Build startup stack frame expected by newlib/crt0:
     //   sp[0] = argc
     //   sp[1..argc] = argv pointers
     //   sp[argc+1] = NULL        (argv terminator)
-    //   sp[argc+2] = NULL        (envp[0] = NULL)
+    //   sp[argc+2..argc+1+envc] = envp pointers
+    //   sp[argc+2+envc] = NULL   (envp terminator)
     for (i = (int)argc - 1; i >= 0; i--) {
         ustack[i + 1] = ustack[i];
     }
     ustack[0] = argc;
     ustack[argc + 1] = 0;
-    ustack[argc + 2] = 0;
+    // envp pointers are already at ustack[argc+2 .. argc+1+envc]
+    ustack[argc + 2 + envc] = 0;
 
-    // Push argc + argv[] (+ NULL + envp NULL) onto user stack.
-    sp -= (argc + 3) * sizeof(uint64);
+    uint64 nslots = argc + envc + 3; // argc + argv[] + NULL + envp[] + NULL
+    sp -= nslots * sizeof(uint64);
     sp -= sp % 16;
     if (sp < stackbase)
         goto bad;
-    if (vm_copyout(tmp_vm, sp, (char *)ustack, (argc + 3) * sizeof(uint64)) < 0)
+    if (vm_copyout(tmp_vm, sp, (char *)ustack, nslots * sizeof(uint64)) < 0)
         goto bad;
 
     // arguments to user main(argc, argv)
@@ -330,15 +338,17 @@ bad:
  * Parses user arguments and calls exec().
  */
 uint64 sys_exec(void) {
-    char path[MAXPATH], *argv[MAXARG];
+    char path[MAXPATH], *argv[MAXARG], *envp[MAXENV];
     int i;
-    uint64 uargv, uarg;
+    uint64 uargv, uarg, uenvp, uenv;
 
     argaddr(1, &uargv);
+    argaddr(2, &uenvp);
     if (argstr(0, path, MAXPATH) < 0) {
         return -1;
     }
     memset(argv, 0, sizeof(argv));
+    memset(envp, 0, sizeof(envp));
     for (i = 0;; i++) {
         if (i >= NELEM(argv)) {
             goto bad;
@@ -357,15 +367,45 @@ uint64 sys_exec(void) {
             goto bad;
     }
 
-    int ret = exec(path, argv);
+    // Parse envp from userspace (may be NULL or garbage from old 2-arg exec)
+    int envc = 0;
+    if (uenvp != 0) {
+        for (i = 0;; i++) {
+            if (i >= NELEM(envp)) {
+                break; // too many env vars, just truncate
+            }
+            if (fetchaddr(uenvp + sizeof(uint64) * i, (uint64 *)&uenv) < 0) {
+                break; // invalid pointer, treat as no envp
+            }
+            if (uenv == 0) {
+                envp[i] = 0;
+                break;
+            }
+            envp[i] = kalloc();
+            if (envp[i] == 0)
+                goto bad;
+            if (fetchstr(uenv, envp[i], PGSIZE) < 0) {
+                kfree(envp[i]);
+                envp[i] = 0;
+                break; // invalid string, stop here
+            }
+            envc++;
+        }
+    }
+
+    int ret = exec(path, argv, envp);
 
     for (i = 0; i < NELEM(argv) && argv[i] != 0; i++)
         kfree(argv[i]);
+    for (i = 0; i < NELEM(envp) && envp[i] != 0; i++)
+        kfree(envp[i]);
 
     return ret;
 
 bad:
     for (i = 0; i < NELEM(argv) && argv[i] != 0; i++)
         kfree(argv[i]);
+    for (i = 0; i < NELEM(envp) && envp[i] != 0; i++)
+        kfree(envp[i]);
     return -1;
 }

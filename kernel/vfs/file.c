@@ -327,24 +327,25 @@ struct vfs_file *vfs_fdup(struct vfs_file *file) {
     return file;
 }
 
-int vfs_ioctl(struct vfs_file *file, uint64 cmd, uint64 arg) {
+int vfs_ioctl(struct vfs_file *file, uint64 cmd, void *arg) {
     if (file == NULL) {
-        return -EBADF; // Invalid file descriptor
+        return -EBADF;
     }
+
+    /* Fast path: character / block device files — dispatch to device layer */
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
-    if (inode == NULL) {
-        // Pipes/sockets or files without inode-backed ioctl
-        return -ENOTTY;
+    if (inode != NULL && (S_ISBLK(inode->mode) || S_ISCHR(inode->mode))) {
+        device_t *dev = (device_t *)file->cdev;
+        if (dev != NULL)
+            return dev_ioctl(dev, cmd, arg);
+        return -ENODEV;
     }
-    if (!(S_ISBLK(inode->mode) || S_ISCHR(inode->mode))) {
-        return -ENOTTY; // Ioctl only supported on character/block devices
-    }
-    // cdev and blkdev are in a union
-    device_t *dev = (device_t *)file->cdev;
-    if (dev == NULL) {
-        return -ENODEV; // No device associated with this file
-    }
-    return dev_ioctl(dev, cmd, arg);
+
+    /* Fallback: custom file descriptors (PTY slaves, etc.) */
+    if (file->ops != NULL && file->ops->ioctl != NULL)
+        return file->ops->ioctl(file, cmd, arg);
+
+    return -ENOTTY;
 }
 
 ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
@@ -438,6 +439,16 @@ int vfs_filestat(struct vfs_file *file, struct stat *stat) {
 
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     if (inode == NULL) {
+        /*
+         * Custom file descriptors (PTY slaves, etc.) have no backing inode.
+         * Return a synthetic stat indicating a character device so that
+         * isatty() works correctly.
+         */
+        if (file->ops != NULL) {
+            memset(stat, 0, sizeof(*stat));
+            stat->mode = S_IFCHR | 0666;
+            return 0;
+        }
         return -EBADF;
     }
 

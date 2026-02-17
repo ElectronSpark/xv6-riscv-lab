@@ -49,7 +49,7 @@ void consputc(int);
 void consputs(const char *, int);
 
 // exec.c
-int exec(char *, char **);
+int exec(char *, char **, char **);
 
 // Legacy file.c removed - now using VFS exclusively (vfs/file.c)
 

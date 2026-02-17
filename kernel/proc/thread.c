@@ -417,7 +417,7 @@ static void init_entry(struct context *prev) {
 
     // Load /bin/init directly via exec — no initcode trampoline needed.
     char *argv[] = {"init", 0};
-    int ret = exec("/bin/init", argv);
+    int ret = exec("/bin/init", argv, 0);
     assert(ret >= 0, "init_entry: exec /bin/init failed");
 
     // Return to user space running /bin/init

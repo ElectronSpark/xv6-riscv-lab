@@ -39,6 +39,7 @@ entry("chdir");
 entry("dup");
 entry("dup2");
 entry("lseek");
+entry("poll");
 entry("fcntl");
 entry("access");
 entry("rename");
@@ -90,6 +91,8 @@ entry("kernbase");
 entry("dumpinode", 1);
 
 entry("ioctl");
+entry("tcgetattr");
+entry("tcsetattr");
 
 # Process group / session
 entry("setpgid");

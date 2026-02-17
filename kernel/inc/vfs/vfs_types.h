@@ -671,6 +671,18 @@ struct vfs_file_ops {
     int (*poll)(struct vfs_file *file, short events);
 
     /*
+     * ioctl - device control on a custom (non-cdev) file descriptor
+     * @file:  the open file
+     * @cmd:   ioctl command number
+     * @arg:   command-specific argument (often a user-space pointer)
+     *
+     * This callback is checked as a fallback when the file is not backed
+     * by a character or block device inode.  PTY slave fds, for example,
+     * use this to support TCGETS/TCSETS.
+     */
+    int (*ioctl)(struct vfs_file *file, uint64 cmd, void *arg);
+    
+    /*
      * fault - Demand-page a single page for a file-backed mapping
      * @file:  the file being mapped
      * @vma:   the faulting VMA (start/end/flags/pgoff already set)

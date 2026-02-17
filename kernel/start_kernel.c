@@ -18,6 +18,7 @@
 #include <mm/pcache.h>
 #include "vfs/fs.h"
 #include "vfs/pipe.h"
+#include "tty/tty.h"
 #include "trap.h"
 #include "lock/rcu.h"
 #include "sbi.h"
@@ -76,6 +77,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     rcu_init();       // RCU subsystem initialization
     dev_table_init(); // Initialize the device table
     thread_init();    // process table
+    tty_init();       // Initialize TTY subsystem
     scheduler_init(); // initialize the scheduler
     workqueue_init(); // workqueue subsystem initialization
     irq_desc_init();  // IRQ descriptor initialization
