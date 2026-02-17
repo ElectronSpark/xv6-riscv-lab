@@ -24,6 +24,9 @@
 #include "mm/slab.h"
 #include "mm/vm.h"
 #include "vfs/pipe.h"
+#include "vfs/stat.h"
+#include "defs.h"
+#include "devtmpfs.h"
 #include "tty/tty.h"
 
 /* ------------------------------------------------------------------ */
@@ -102,6 +105,9 @@ ssize_t pty_master_read(struct tty *slave, char *buf, size_t count, bool user) {
 /*  Allocation                                                        */
 /* ------------------------------------------------------------------ */
 
+/* Monotonically increasing PTY index for devtmpfs naming */
+static int __pty_next_index = 0;
+
 /*
  * pty_alloc - create a PTY master/slave pair
  *
@@ -118,6 +124,29 @@ int pty_alloc(struct tty **slave_out, const char *name) {
     if (IS_ERR(slave))
         return PTR_ERR(slave);
 
+    /* Register a devtmpfs entry for this PTY slave (e.g. /dev/pts/0) */
+    int idx = __atomic_fetch_add(&__pty_next_index, 1, __ATOMIC_SEQ_CST);
+    dev_t dev = mkdev(PTY_MAJOR, PTY_MINOR_BASE + idx);
+    devtmpfs_create_node(name, S_IFCHR | 0620, dev);
+
     *slave_out = slave;
     return 0;
+}
+
+/*
+ * pty_dealloc - clean up the devtmpfs entry for a PTY pair
+ *
+ * Call this when the PTY master is being closed and the slave should
+ * no longer be accessible via /dev.  The tty struct itself is freed
+ * separately via tty_unref().
+ *
+ * @slave: the slave tty (used for its name field)
+ */
+void pty_dealloc(struct tty *slave) {
+    if (slave == NULL)
+        return;
+
+    /* Remove /dev/<name> where name is e.g. "pts/0" */
+    if (slave->name[0] != '\0')
+        devtmpfs_remove_node(slave->name);
 }

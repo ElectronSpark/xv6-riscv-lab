@@ -636,6 +636,9 @@ static void telnet_session_handler(uint64 arg1, uint64 arg2)
     /* Give the shell a moment to fully exit and release its fds */
     sleep_ms(100);
 
+    /* Remove /dev/pts/N before releasing the tty */
+    pty_dealloc(slave_tty);
+
     tty_unref(slave_tty);
 
     printf("telnetd: session %d ended\n", sess->id);

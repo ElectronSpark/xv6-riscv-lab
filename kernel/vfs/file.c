@@ -126,6 +126,27 @@ static int __vfs_open_cdev(struct vfs_inode *inode, struct vfs_file *file) {
     if (cdev == NULL) {
         return -ENODEV;
     }
+
+    /*
+     * If the cdev provides open_file, let it customise the file
+     * (e.g. install file->ops / private_data for /dev/ptmx).
+     * The cdev is responsible for managing its own refcount in
+     * that case — the VFS will NOT store file->cdev.
+     */
+    if (cdev->ops.open_file != NULL) {
+        int ret = cdev->ops.open_file(cdev, file);
+        if (ret != 0) {
+            cdev_put(cdev);
+            return ret;
+        }
+        /* open_file must have set file->ops; if it didn't, fall
+         * through to the normal cdev path. */
+        if (file->ops != NULL) {
+            cdev_put(cdev); /* file no longer holds a cdev ref */
+            return 0;
+        }
+    }
+
     file->cdev = cdev;
     file->ops = NULL; // Device files use direct device I/O
     return 0;

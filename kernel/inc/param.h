@@ -10,6 +10,16 @@
 #define NULL_MINOR 2
 #define RANDOM_MAJOR 1
 #define RANDOM_MINOR 3
+#define ZERO_MAJOR 1
+#define ZERO_MINOR 4
+
+// TTY / PTY device major and minor numbers
+#define TTY_DEV_MAJOR 5
+#define TTY_DEV_MINOR 0
+#define PTMX_MAJOR    5
+#define PTMX_MINOR    2
+#define PTY_MAJOR 136
+#define PTY_MINOR_BASE 0
 
 #define MAXPID 0x7FFFFFF0 // maximum process ID
 #define NR_THREAD 10000   // maximum number of threads

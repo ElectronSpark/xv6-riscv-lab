@@ -106,6 +106,7 @@ struct termios {
 #define TIOCSWINSZ 0x5414 /* Set window size */
 #define TIOCGPGRP 0x540F  /* Get foreground process group */
 #define TIOCSPGRP 0x5410  /* Set foreground process group */
+#define TIOCGPTN  0x80045430 /* Get PTY slave number */
 
 /* Window size structure */
 struct winsize {

@@ -43,6 +43,8 @@ typedef struct device_instance {
     device_ops_t ops;
 } device_t;
 
+struct vfs_file; /* forward declaration for open_file callback */
+
 typedef struct cdev_ops {
     int (*read)(cdev_t *cdev, bool user, void *buf, size_t count);
     int (*write)(cdev_t *cdev, bool user, const void *buf, size_t count);
@@ -50,6 +52,18 @@ typedef struct cdev_ops {
     int (*release)(cdev_t *cdev);
     int (*ioctl)(cdev_t *cdev, uint64 cmd, void *arg);
     int (*poll)(cdev_t *cdev, short events); // returns revents bitmask
+
+    /*
+     * open_file - optional file-level open callback (like Linux's fops->open).
+     *
+     * When non-NULL, __vfs_open_cdev calls this INSTEAD of the plain open().
+     * The callback receives the vfs_file being opened so it can install
+     * custom file->ops and file->private_data.  This is used by /dev/ptmx
+     * to transform the opened file into a PTY master.
+     *
+     * Return 0 on success, negative errno on failure.
+     */
+    int (*open_file)(cdev_t *cdev, struct vfs_file *file);
 } cdev_ops_t;
 
 typedef struct cdev {

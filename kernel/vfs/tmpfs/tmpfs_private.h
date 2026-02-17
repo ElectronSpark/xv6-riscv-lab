@@ -92,6 +92,11 @@ int __tmpfs_migrate_to_allocated_blocks(struct tmpfs_inode *tmpfs_inode);
 extern struct vfs_file_ops tmpfs_file_ops;
 int tmpfs_open(struct vfs_inode *inode, struct vfs_file *file, int f_flags);
 
+// Superblock allocation and free
+struct tmpfs_superblock *tmpfs_alloc_superblock(void);
+void tmpfs_free(struct vfs_superblock *sb);
+extern struct vfs_superblock_ops tmpfs_superblock_ops;
+
 // pcache operations for tmpfs regular files
 void tmpfs_inode_pcache_init(struct vfs_inode *inode);
 void tmpfs_inode_pcache_teardown(struct vfs_inode *inode);
