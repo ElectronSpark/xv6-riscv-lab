@@ -99,6 +99,7 @@ add_subdirectory(${KERNEL_DIR}/tty)
 add_subdirectory(${KERNEL_DIR}/lwip_port)
 add_subdirectory(${KERNEL_DIR}/lwext4_port)
 add_subdirectory(${KERNEL_DIR}/telnetd)
+add_subdirectory(${KERNEL_DIR}/gdbstub)
 
 set_source_files_properties(${KERNEL_C_FILES} PROPERTIES LANGUAGE C)
 set_source_files_properties(${KERNEL_SCAN_OBJS} PROPERTIES LANGUAGE C)
@@ -122,9 +123,10 @@ set(KERNEL_OBJ_LIBS
     $<TARGET_OBJECTS:lwip>
     $<TARGET_OBJECTS:ext4fs>
     $<TARGET_OBJECTS:telnetd>
+    $<TARGET_OBJECTS:gdbstub>
 )
 
-set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs tty lwip ext4fs telnetd)
+set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs tty lwip ext4fs telnetd gdbstub)
 
 # Generate linker script from template
 set(KERNEL_LD_IN ${KERNEL_DIR}/kernel.ld.in)
@@ -167,7 +169,7 @@ add_custom_target(${KERNEL_SYMBOLS}
 # ==============================================================================
 # Kernel with embedded symbols (two-phase build)
 # ==============================================================================
-set(KSYM_PLACEHOLDER_SIZE "0x100000")
+set(KSYM_PLACEHOLDER_SIZE "0x200000")
 set(KSYM_PLACEHOLDER_ASM ${CMAKE_CURRENT_BINARY_DIR}/ksymbols_placeholder.S)
 
 add_custom_command(

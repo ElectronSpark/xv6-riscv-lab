@@ -320,6 +320,13 @@ int exec(char *path, char **argv, char **envp) {
     // Wake vfork parent - we've replaced our address space so parent can resume
     vfork_done(p);
 
+    // If the process is being debugged, stop it so GDB sees the new
+    // address space and can set breakpoints in the loaded binary.
+    {
+        extern void gdbstub_exec_stop(struct thread *);
+        gdbstub_exec_stop(p);
+    }
+
     return argc; // this ends up in a0, the first argument to main(argc, argv)
 
 bad_locked:

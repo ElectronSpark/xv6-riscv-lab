@@ -173,6 +173,12 @@ int getsid(int pid);
 
 void sync(void);
 
+// gdb support — execute EBREAK to pause and wait for a debugger.
+// The kernel prints the PID and connection instructions.
+static inline void waitgdb(void) {
+    asm volatile("ebreak");
+}
+
 // ulib.c
 char *strcpy(char *, const char *);
 void *memmove(void *, const void *, int);

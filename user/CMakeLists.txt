@@ -140,6 +140,7 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/randtest.c
     ${USER_DIR}/wallclock.c
     ${USER_DIR}/cloexectest.c
+    ${USER_DIR}/waitgdb.c
 )
 
 set(USER_PROGRAMS_C_FILES 

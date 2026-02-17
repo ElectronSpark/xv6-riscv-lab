@@ -159,6 +159,8 @@ void start_kernel_post_init(void) {
     lwip_net_init();    // lwIP TCP/IP stack initialization
     extern void telnetd_init(void);
     telnetd_init();     // Telnet server (port 23)
+    extern void gdbstub_init(void);
+    gdbstub_init();     // GDB remote stub (port 1234)
 #endif
     pcache_global_init(); // page cache subsystem initialization
 

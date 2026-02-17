@@ -29,6 +29,7 @@
 extern int getdents(int fd, void *dirp, int count);
 extern char **environ;
 static int exec(const char *path, char **argv) { return execve(path, argv, environ); }
+static inline void waitgdb(void) { asm volatile("ebreak"); }
 #else
 #include "user.h"
 #include "kernel/inc/vfs/fcntl.h"
@@ -833,7 +834,8 @@ static void collect_path_matches(const char *prefix) {
 
     // Built-in commands
     static const char *builtins[] = {
-        "cd", "ls", "echo", "exit", "export", "unset", "env", "history", 0};
+        "cd", "ls", "echo", "exit", "export", "unset", "env", "history",
+        "waitgdb", 0};
     int prefix_len = strlen(prefix);
     for (int i = 0; builtins[i] && match_count < MAX_MATCHES; i++) {
         if (prefix_len == 0 ||
@@ -1405,6 +1407,17 @@ void runcmd(struct cmd *cmd) {
         ecmd = (struct execcmd *)cmd;
         if (ecmd->argv[0] == 0)
             exit(1);
+        // waitgdb: pause for debugger, then exec the real command
+        if (strcmp(ecmd->argv[0], "waitgdb") == 0) {
+            if (ecmd->argv[1] == 0) {
+                errprintf("usage: waitgdb <command> [args...]\n");
+                exit(1);
+            }
+            waitgdb();
+            exec_with_path(ecmd->argv[1], &ecmd->argv[1]);
+            errprintf("waitgdb: exec %s failed\n", ecmd->argv[1]);
+            exit(127);
+        }
         exec_with_path(ecmd->argv[0], ecmd->argv);
         errprintf("exec %s failed\n", ecmd->argv[0]);
         exit(127);

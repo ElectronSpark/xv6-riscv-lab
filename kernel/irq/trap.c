@@ -139,6 +139,19 @@ void usertrap(void) {
     trapinithart();
 
     switch (scause) {
+    case RISCV_BREAKPOINT_TRAP: {
+        // Software breakpoint (EBREAK instruction).
+        // Hand off to the GDB stub if it is attached to this process.
+        extern int gdbstub_trap(struct thread *);
+        if (gdbstub_trap(current) != 0) {
+            // GDB stub didn't handle it — treat as fatal.
+            printf("pid %d %s: breakpoint trap sepc=0x%lx\n",
+                   current->pid, current->name,
+                   current->trapframe->trapframe.sepc);
+            kill(current->pid, SIGTRAP);
+        }
+        break;
+    }
     case RISCV_ENV_CALL_FROM_U_MODE:
         // system call
 
@@ -343,6 +356,12 @@ void usertrapret(void) {
     }
 
     handle_signal();
+
+    /* Check if GDB wants to interrupt this process (Ctrl-C). */
+    {
+        extern int gdbstub_check_interrupt(struct thread *);
+        gdbstub_check_interrupt(p);
+    }
 
     if (NEEDS_RESCHED()) {
         scheduler_yield();
