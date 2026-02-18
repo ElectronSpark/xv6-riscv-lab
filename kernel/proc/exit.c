@@ -307,6 +307,12 @@ int wait(uint64 addr) {
             goto ret;
         }
 
+        if (signal_pending(p)) {
+            __thread_state_set(p, THREAD_RUNNING);
+            pid = -EINTR;
+            goto ret;
+        }
+
         pid_runlock();
         scheduler_yield();
         pid_rlock();
@@ -354,6 +360,17 @@ int waitpid(int target_pid, uint64 addr, int options) {
                 pid = -1;
                 goto ret;
             }
+
+            // Check for stopped child (WUNTRACED)
+            if ((options & WUNTRACED) && THREAD_STOPPED(child)) {
+                __thread_state_set(p, THREAD_RUNNING);
+                pid = child->pid;
+                // Encode stopped status: (signal << 8) | 0x7f
+                int stopsig = child->signal.stop_signal;
+                xstate = (stopsig << 8) | 0x7f;
+                goto ret;
+            }
+
             if (THREAD_ZOMBIE(child)) {
                 pid = __reap_zombie(p, child, &xstate);
                 goto ret_unlocked;
@@ -364,7 +381,7 @@ int waitpid(int target_pid, uint64 addr, int options) {
             bool has_match = false;
             list_foreach_node_safe(&p->children, child, tmp, siblings) {
                 has_match = true;
-                
+
                 // Check for stopped child (WUNTRACED)
                 if ((options & WUNTRACED) && THREAD_STOPPED(child)) {
                     __thread_state_set(p, THREAD_RUNNING);
@@ -390,6 +407,12 @@ int waitpid(int target_pid, uint64 addr, int options) {
         if (options & WNOHANG) {
             __thread_state_set(p, THREAD_RUNNING);
             pid = 0;
+            goto ret;
+        }
+
+        if (signal_pending(p)) {
+            __thread_state_set(p, THREAD_RUNNING);
+            pid = -EINTR;
             goto ret;
         }
 

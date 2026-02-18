@@ -109,22 +109,19 @@ uint64 sys_sigreturn(void) {
 
 uint64 sys_pause(void) {
     struct thread *p = current;
-    // Mark interruptible before checking signals to close the race where
-    // a signal arrives between the check and the yield.
-    // Note: a tiny window remains where a wakeup can transition the state
-    // back to RUNNING before scheduler_yield runs, causing the signal to
-    // be missed.  See @TODO in thread_types.h ("stop signal may miss").
-    __thread_state_set(p, THREAD_INTERRUPTIBLE);
-    tcb_lock(p);
-    // If an unblocked pending signal already exists, return immediately
-    if (signal_pending(p)) {
-        __thread_state_set(p, THREAD_RUNNING);
-        tcb_unlock(p);
-        return 0;
+    for (;;) {
+        // Mark interruptible before checking signals to close the race where
+        // a signal arrives between the check and the yield.
+        __thread_state_set(p, THREAD_INTERRUPTIBLE);
+
+        // pause() returns only when interrupted by a signal.
+        if (signal_pending(p)) {
+            __thread_state_set(p, THREAD_RUNNING);
+            return -EINTR;
+        }
+
+        scheduler_yield();
     }
-    tcb_unlock(p);
-    scheduler_yield();
-    return 0;
 }
 
 uint64 sys_kill(void) {

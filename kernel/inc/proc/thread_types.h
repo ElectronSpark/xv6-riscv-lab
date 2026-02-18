@@ -106,20 +106,20 @@ struct thread {
     // All threads created with CLONE_THREAD share the same thread_group.
     // Threads created with fork/clone (no CLONE_THREAD) get their own group.
     struct thread_group *thread_group; // Thread group this thread belongs to
-    struct pgroup *pgroup; // Process group (for job control)
-    struct session *session; // Session (for job control)
-    pid_t sid;            // Session ID (for job control)
-    pid_t pgid;           // Process group ID (for job control)
-    pid_t tgid;           // Thread group ID (process ID)
-    pid_t pid;            // Thread ID
-    list_node_t tg_entry; // Link in thread_group->thread_list
-    list_node_t pg_entry; // Link in process group list
-    list_node_t sid_entry; // Link in session list
-    list_node_t siblings;  // List of sibling threads
-    list_node_t children;  // List of child threads
-    int children_count;    // Number of children
-    int xstate;            // Exit status to be returned to parent's wait
-    list_node_t wq_entry;  // link to work queue
+    struct pgroup *pgroup;             // Process group (for job control)
+    struct session *session;           // Session (for job control)
+    pid_t sid;                         // Session ID (for job control)
+    pid_t pgid;                        // Process group ID (for job control)
+    pid_t tgid;                        // Thread group ID (process ID)
+    pid_t pid;                         // Thread ID
+    list_node_t tg_entry;              // Link in thread_group->thread_list
+    list_node_t pg_entry;              // Link in process group list
+    list_node_t sid_entry;             // Link in session list
+    list_node_t siblings;              // List of sibling threads
+    list_node_t children;              // List of child threads
+    int children_count;                // Number of children
+    int xstate;           // Exit status to be returned to parent's wait
+    list_node_t wq_entry; // link to work queue
     __STRUCT_CACHELINE_PADDING;
 
     // ===== Cold: Registration / debug =====

@@ -150,7 +150,7 @@ int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
     if (console_tty != NULL) {
         spin_lock(&console_tty->lock);
         do_onlcr = (console_tty->termios.c_oflag & OPOST) &&
-                    (console_tty->termios.c_oflag & ONLCR);
+                   (console_tty->termios.c_oflag & ONLCR);
         spin_unlock(&console_tty->lock);
     }
 

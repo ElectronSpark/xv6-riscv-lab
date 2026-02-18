@@ -585,19 +585,70 @@ bool signal_pending(struct thread *p) {
     if (!p) {
         return false;
     }
-    // Fast path: just check the flag
-    return THREAD_SIGPENDING(p);
+    // Fast path: if the hint bit is clear, there is no pending signal work.
+    if (!THREAD_SIGPENDING(p)) {
+        return false;
+    }
+
+    // Slow-path validation for current only: the hint bit may be stale
+    // because recalc_sigpending_tsk() only sets and does not clear.
+    if (p != current || p->sigacts == NULL) {
+        return true;
+    }
+
+    sigacts_t *sa = p->sigacts;
+    sigacts_lock(sa);
+    bool has_pending = recalc_sigpending_tsk(p);
+    if (!has_pending) {
+        THREAD_CLEAR_SIGPENDING(p);
+    }
+    sigacts_unlock(sa);
+    return has_pending;
 }
 
-// Version that takes sigacts as parameter when caller already holds
-// sigacts_lock Caller must hold tcb_lock but NOT sigacts_lock (we acquire it
-// here)
+// Version that checks pending state while caller already holds sigacts_lock.
+// This function does not acquire sigacts_lock.
 bool signal_pending_locked(struct thread *p, sigacts_t *sa) {
     if (!p || !sa) {
         return false;
     }
-    // Fast path: just check the flag
-    return THREAD_SIGPENDING(p);
+    if (!THREAD_SIGPENDING(p)) {
+        return false;
+    }
+
+    sigset_t pending = smp_load_acquire(&p->signal.sig_pending_mask);
+    sigset_t blocked = p->signal.sig_mask;
+    if (p->thread_group != NULL) {
+        pending |=
+            smp_load_acquire(&p->thread_group->shared_pending.sig_pending_mask);
+    }
+    return (pending & ~blocked) != 0;
+}
+
+// Notify parent that child has stopped:
+// - always wake parent waiter
+// - send SIGCHLD only if parent didn't set SA_NOCLDSTOP
+static void __notify_parent_child_stopped(struct thread *p) {
+    bool notify_sigchld = true;
+
+    pid_rlock();
+    struct thread *parent = p->parent;
+    if (parent != NULL && parent->sigacts != NULL) {
+        sigacts_t *psa = parent->sigacts;
+        sigacts_lock(psa);
+        if (psa->sa[SIGCHLD].sa_flags & SA_NOCLDSTOP) {
+            notify_sigchld = false;
+        }
+        sigacts_unlock(psa);
+    }
+    pid_runlock();
+
+    if (parent != NULL) {
+        scheduler_wakeup_interruptible(parent);
+        if (notify_sigchld) {
+            kill_proc(parent, SIGCHLD);
+        }
+    }
 }
 
 int signal_notify(struct thread *p) {
@@ -845,9 +896,12 @@ int sigprocmask(int how, const sigset_t *set, sigset_t *oldset) {
     // Recalc sigpending flag after changing blocked mask
     recalc_sigpending_tsk(p);
 
-    // Check if newly unmasked signals are pending
-    sigset_t pending_unmasked =
-        p->signal.sig_pending_mask & ~p->signal.sig_mask;
+    // Check if newly unmasked signals are pending (per-thread + shared)
+    sigset_t pending = p->signal.sig_pending_mask;
+    if (p->thread_group != NULL) {
+        pending |= p->thread_group->shared_pending.sig_pending_mask;
+    }
+    sigset_t pending_unmasked = pending & ~p->signal.sig_mask;
 
     // If newly unmasked termination signals are pending, set THREAD_KILLED
     sigset_t pending_term = pending_unmasked & sa->sa_sigterm;
@@ -878,7 +932,11 @@ int sigpending(struct thread *p, sigset_t *set) {
     // Use only sigacts_lock - it protects both masks
     sigacts_lock(sa);
     sigset_t mask = p->signal.sig_mask;
-    *set = mask & p->signal.sig_pending_mask; // Get the pending signals
+    sigset_t pending = p->signal.sig_pending_mask;
+    if (p->thread_group != NULL) {
+        pending |= p->thread_group->shared_pending.sig_pending_mask;
+    }
+    *set = mask & pending; // Return blocked-and-pending signals
     sigacts_unlock(sa);
 
     return 0; // Success
@@ -1067,7 +1125,7 @@ void handle_signal(void) {
                     tg->shared_pending.sig_pending_mask &= ~sigterm;
                 recalc_sigpending_tsk(p);
                 sigacts_unlock(sa);
-                continue;  /* re-check for other deliverable signals */
+                continue; /* re-check for other deliverable signals */
             }
             THREAD_SET_KILLED(p);
             sigacts_unlock(sa);
@@ -1132,15 +1190,9 @@ void handle_signal(void) {
             tcb_lock(p);
             __thread_state_set(p, THREAD_STOPPED);
             tcb_unlock(p);
-            
-            // Notify parent that child has stopped (SIGCHLD + wakeup)
-            pid_rlock();
-            struct thread *parent = p->parent;
-            pid_runlock();
-            if (parent != NULL) {
-                scheduler_wakeup_interruptible(parent);
-                kill_proc(parent, SIGCHLD);
-            }
+
+            // Notify parent that child has stopped.
+            __notify_parent_child_stopped(p);
 
             scheduler_yield();
             continue; // Re-check after wakeup

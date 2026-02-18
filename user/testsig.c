@@ -30,6 +30,9 @@ static volatile int change_handler_count =
 static volatile int sigsuspend_caught = 0; // For sigsuspend test
 static volatile int sigwait_ready = 0;     // For sigwait synchronization
 static int test_failures = 0;              // Track test failures
+static volatile int sigchld_count = 0;     // SIGCHLD handler count
+static volatile int wait_intr_count = 0;   // interruption handler count
+static volatile int usr1_count = 0;        // SIGUSR1 handler count
 
 // Thread-group test globals (shared via CLONE_VM)
 static volatile int tg_child_tid = 0;    // Child thread's TID
@@ -96,6 +99,24 @@ static void post_change_handler(int signo) {
 static void sigsuspend_handler(int signo) {
     sigsuspend_caught++;
     printf("sigsuspend_handler signo=%d caught=%d\n", signo, sigsuspend_caught);
+    sigreturn();
+}
+
+static void sigchld_handler(int signo) {
+    sigchld_count++;
+    printf("sigchld_handler signo=%d count=%d\n", signo, sigchld_count);
+    sigreturn();
+}
+
+static void wait_intr_handler(int signo) {
+    wait_intr_count++;
+    printf("wait_intr_handler signo=%d count=%d\n", signo, wait_intr_count);
+    sigreturn();
+}
+
+static void usr1_count_handler(int signo) {
+    usr1_count++;
+    printf("usr1_count_handler signo=%d count=%d\n", signo, usr1_count);
     sigreturn();
 }
 
@@ -1208,7 +1229,215 @@ static void test_pgroup_kill(void) {
     }
 }
 
-#define TOTAL_TESTS 17
+/* --------------- Test 18: SA_NOCLDSTOP suppresses SIGCHLD on stop ------- */
+static void test_nocldstop(void) {
+    printf("\n[Test 18] SA_NOCLDSTOP: no SIGCHLD on child stop\n");
+
+    sigchld_count = 0;
+    sigaction_t sa = {0};
+    sa.sa_handler = sigchld_handler;
+    sa.sa_flags = SA_NOCLDSTOP;
+    if (sigaction(SIGCHLD, &sa, 0) != 0) {
+        printf("Failed to install SIGCHLD handler with SA_NOCLDSTOP\n");
+        test_failures++;
+        return;
+    }
+
+    int child = fork();
+    if (child < 0) {
+        printf("fork failed\n");
+        test_failures++;
+        return;
+    }
+
+    if (child == 0) {
+        for (;;)
+            sleep(100);
+        exit(0);
+    }
+
+    sleep(100);
+    kill(child, SIGSTOP);
+    sleep(100);
+
+    int status = 0;
+    int w = waitpid(child, &status, WUNTRACED);
+    int stopped = (w == child) && WIFSTOPPED(status);
+    int sigchld_after_stop = sigchld_count;
+    printf("waitpid stopped: w=%d status=%d stopped=%d sigchld_count=%d\n", w,
+           status, stopped, sigchld_count);
+
+    kill(child, SIGKILL);
+    waitpid(child, &status, 0);
+
+    // SA_NOCLDSTOP suppresses stop/continue notifications only; exit
+    // notification SIGCHLD is still expected.
+    int sigchld_after_exit = sigchld_count;
+
+    if (stopped && sigchld_after_stop == 0 && sigchld_after_exit >= 1) {
+        printf("[Test 18] PASS\n");
+    } else {
+        printf("[Test 18] FAIL: stopped=%d sigchld_after_stop=%d "
+               "sigchld_after_exit=%d\n",
+               stopped, sigchld_after_stop, sigchld_after_exit);
+        test_failures++;
+    }
+}
+
+/* --------------- Test 19: wait() interrupted by caught signal ----------- */
+static void test_wait_eintr(void) {
+    printf("\n[Test 19] wait: interrupted by signal returns -EINTR\n");
+
+    wait_intr_count = 0;
+    sigaction_t sa = {0};
+    sa.sa_handler = wait_intr_handler;
+    if (sigaction(SIGUSR1, &sa, 0) != 0) {
+        printf("Failed to install wait interruption handler\n");
+        test_failures++;
+        return;
+    }
+
+    int target = fork();
+    if (target < 0) {
+        printf("fork failed (target)\n");
+        test_failures++;
+        return;
+    }
+    if (target == 0) {
+        sleep(1000);
+        exit(7);
+    }
+
+    int waker = fork();
+    if (waker < 0) {
+        printf("fork failed (waker)\n");
+        kill(target, SIGKILL);
+        wait(0);
+        test_failures++;
+        return;
+    }
+    if (waker == 0) {
+        sleep(100);
+        kill(getppid(), SIGUSR1);
+        sleep(500);
+        exit(0);
+    }
+
+    int st = 0;
+    int ret = wait(&st);
+    printf("wait returned %d (expected -EINTR=%d), handler_count=%d\n", ret,
+           -EINTR, wait_intr_count);
+
+    kill(target, SIGKILL);
+    waitpid(target, &st, 0);
+    waitpid(waker, &st, 0);
+
+    if (ret == -EINTR && wait_intr_count >= 1) {
+        printf("[Test 19] PASS\n");
+    } else {
+        printf("[Test 19] FAIL: ret=%d handler_count=%d\n", ret,
+               wait_intr_count);
+        test_failures++;
+    }
+}
+
+/* --------------- Test 20: waitpid() interrupted by caught signal -------- */
+static void test_waitpid_eintr(void) {
+    printf("\n[Test 20] waitpid: interrupted by signal returns -EINTR\n");
+
+    wait_intr_count = 0;
+    sigaction_t sa = {0};
+    sa.sa_handler = wait_intr_handler;
+    if (sigaction(SIGUSR1, &sa, 0) != 0) {
+        printf("Failed to install waitpid interruption handler\n");
+        test_failures++;
+        return;
+    }
+
+    int child = fork();
+    if (child < 0) {
+        printf("fork failed (child)\n");
+        test_failures++;
+        return;
+    }
+    if (child == 0) {
+        sleep(1000);
+        exit(9);
+    }
+
+    int waker = fork();
+    if (waker < 0) {
+        printf("fork failed (waker)\n");
+        kill(child, SIGKILL);
+        wait(0);
+        test_failures++;
+        return;
+    }
+    if (waker == 0) {
+        sleep(100);
+        kill(getppid(), SIGUSR1);
+        sleep(500);
+        exit(0);
+    }
+
+    int st = 0;
+    int ret = waitpid(child, &st, 0);
+    printf("waitpid returned %d (expected -EINTR=%d), handler_count=%d\n", ret,
+           -EINTR, wait_intr_count);
+
+    kill(child, SIGKILL);
+    waitpid(child, &st, 0);
+    waitpid(waker, &st, 0);
+
+    if (ret == -EINTR && wait_intr_count >= 1) {
+        printf("[Test 20] PASS\n");
+    } else {
+        printf("[Test 20] FAIL: ret=%d handler_count=%d\n", ret,
+               wait_intr_count);
+        test_failures++;
+    }
+}
+
+/* --------------- Test 21: sigpending reports blocked pending set -------- */
+static void test_sigpending_blocked_semantics(void) {
+    printf("\n[Test 21] sigpending: blocked pending semantics\n");
+
+    usr1_count = 0;
+    sigaction_t sa = {0};
+    sa.sa_handler = usr1_count_handler;
+    if (sigaction(SIGUSR1, &sa, 0) != 0) {
+        printf("Failed to install SIGUSR1 count handler\n");
+        test_failures++;
+        return;
+    }
+
+    sigset_t old = 0;
+    block_signal(SIGUSR1, &old);
+
+    kill(getpid(), SIGUSR1);
+    sleep(50);
+
+    sigset_t pending = 0;
+    sigpending(&pending);
+    int bit_set = (pending & SIGMASK(SIGUSR1)) != 0;
+    printf("SIGUSR1 pending while blocked=%d (expected 1)\n", bit_set);
+
+    unblock_signal(SIGUSR1);
+    for (int i = 0; i < 50 && usr1_count == 0; i++) {
+        sleep(10);
+    }
+    sigprocmask(SIG_SETMASK, &old, 0);
+
+    if (bit_set && usr1_count >= 1) {
+        printf("[Test 21] PASS\n");
+    } else {
+        printf("[Test 21] FAIL: bit_set=%d usr1_count=%d\n", bit_set,
+               usr1_count);
+        test_failures++;
+    }
+}
+
+#define TOTAL_TESTS 21
 
 int main(void) {
     printf("Comprehensive signal tests (pid=%d) start\n", getpid());
@@ -1232,6 +1461,10 @@ int main(void) {
     test_pgroup_session_constraints();
 
     test_pgroup_kill();
+    test_nocldstop();
+    test_wait_eintr();
+    test_waitpid_eintr();
+    test_sigpending_blocked_semantics();
 
     printf("\n========================================\n");
     if (test_failures == 0) {

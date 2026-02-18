@@ -466,34 +466,28 @@ void procdump_tree_pid(int target_pid) {
 // Print a single session's hierarchy by walking its embedded lists.
 // Caller must hold pid_rlock.
 static void __dump_session(struct session *s) {
-    printf("\nSession %d  (threads=%d, pgroups=%d%s)\n",
-           s->sid, s->t_cnt, s->pg_cnt,
-           s->fg_pgrp ? "" : ", no fg");
+    printf("\nSession %d  (threads=%d, pgroups=%d%s)\n", s->sid, s->t_cnt,
+           s->pg_cnt, s->fg_pgrp ? "" : ", no fg");
 
     struct pgroup *pg, *pg_tmp;
     list_foreach_node_safe(&s->pgrps, pg, pg_tmp, list_entry) {
         const char *fg = (s->fg_pgrp == pg) ? " [fg]" : "";
-        printf("  PGroup %d%s  (threads=%d, tgroups=%d%s)\n",
-               pg->pgid, fg, pg->t_cnt, pg->p_cnt,
-               pg->exited ? ", exited" : "");
+        printf("  PGroup %d%s  (threads=%d, tgroups=%d%s)\n", pg->pgid, fg,
+               pg->t_cnt, pg->p_cnt, pg->exited ? ", exited" : "");
 
         struct thread_group *tg, *tg_tmp;
         list_foreach_node_safe(&pg->thread_groups, tg, tg_tmp, list_entry) {
-            printf("    Process %d  (live=%d, refs=%d%s)\n",
-                   tg->tgid,
+            printf("    Process %d  (live=%d, refs=%d%s)\n", tg->tgid,
                    smp_load_acquire(&tg->live_threads),
                    smp_load_acquire(&tg->refcount),
                    smp_load_acquire(&tg->group_exit) ? ", exiting" : "");
 
             struct thread *t, *t_tmp;
             list_foreach_node_safe(&tg->thread_list, t, t_tmp, tg_entry) {
-                const char *state =
-                    thread_state_to_str(__thread_state_get(t));
+                const char *state = thread_state_to_str(__thread_state_get(t));
                 int on_cpu = smp_load_acquire(&t->sched_entity->on_cpu);
-                printf("      tid %-4d [%s] %-2s %s%s%s\n",
-                       t->pid,
-                       THREAD_USER_SPACE(t) ? "U" : "K",
-                       state, t->name,
+                printf("      tid %-4d [%s] %-2s %s%s%s\n", t->pid,
+                       THREAD_USER_SPACE(t) ? "U" : "K", state, t->name,
                        thread_is_group_leader(t) ? " (leader)" : "",
                        on_cpu ? " *cpu" : "");
             }
@@ -509,8 +503,7 @@ void procdump_sessions(void) {
     pid_rlock();
 
     struct session *s, *s_tmp;
-    session_for_each(s, s_tmp)
-        __dump_session(s);
+    session_for_each(s, s_tmp) __dump_session(s);
 
     pid_runlock();
 
