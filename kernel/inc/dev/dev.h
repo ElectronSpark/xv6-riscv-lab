@@ -22,4 +22,13 @@ void dev_table_test(void);
 
 int dev_ioctl(device_t *dev, uint64 cmd, void *arg);
 
+/*
+ * Iterate all registered devices.
+ * The callback receives each device_t* with a held kobject ref.
+ * Returning non-zero from the callback stops iteration early.
+ * The caller must NOT hold the device table lock.
+ */
+typedef int (*dev_iter_cb_t)(device_t *dev, void *ctx);
+int dev_for_each_device(dev_iter_cb_t cb, void *ctx);
+
 #endif // __KERNEL_DEV_DEV_H

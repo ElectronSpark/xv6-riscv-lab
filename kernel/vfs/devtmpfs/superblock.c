@@ -33,6 +33,7 @@
 #include "../tmpfs/tmpfs_private.h"
 #include "devtmpfs_private.h"
 #include "printf.h"
+#include <dev/dev.h>
 
 /* ------------------------------------------------------------------ */
 /*  Global device-node registry                                       */
@@ -46,6 +47,10 @@ static bool __devtmpfs_initialized = false;
  * mounted instances via fs_type->superblocks. */
 static struct vfs_fs_type *__devtmpfs_fs_type = NULL;
 
+/* The mounted devtmpfs superblock.  Set by devtmpfs_mount, cleared by
+ * devtmpfs_umount_free.  Protected by __devtmpfs_lock. */
+static struct vfs_superblock *__devtmpfs_sb = NULL;
+
 static void __devtmpfs_ensure_init(void) {
     if (!__devtmpfs_initialized) {
         list_entry_init(&__devtmpfs_nodes);
@@ -54,15 +59,155 @@ static void __devtmpfs_ensure_init(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/*  Mount-point-agnostic helpers (use root inode, not "/dev/")        */
+/* ------------------------------------------------------------------ */
+
+/*
+ * __devtmpfs_get_root — return the devtmpfs root inode (no extra ref).
+ * Caller must hold __devtmpfs_lock OR otherwise guarantee __devtmpfs_sb
+ * stays alive.  Returns NULL if devtmpfs is not mounted.
+ */
+static struct vfs_inode *__devtmpfs_get_root(void) {
+    if (__devtmpfs_sb == NULL)
+        return NULL;
+    return __devtmpfs_sb->root_inode;
+}
+
+/*
+ * __devtmpfs_walk_parent — given a relative path like "pts/0", walk from
+ * root_inode through intermediate directories, creating them if needed.
+ * Returns the parent directory inode (with an extra iref) and writes the
+ * leaf name into *leaf / *leaf_len.
+ *
+ * On failure returns NULL.
+ */
+static struct vfs_inode *__devtmpfs_walk_parent(
+    struct vfs_inode *root, const char *name, size_t name_len,
+    const char **leaf, size_t *leaf_len) {
+
+    /* Find the last '/' — everything before it is a directory path */
+    int last_slash = -1;
+    for (int i = (int)name_len - 1; i >= 0; i--) {
+        if (name[i] == '/') {
+            last_slash = i;
+            break;
+        }
+    }
+
+    struct vfs_inode *dir = root;
+    vfs_idup(dir); /* take a ref so caller can always iput the result */
+
+    if (last_slash > 0) {
+        /* Walk / create intermediate directory components */
+        int start = 0;
+        while (start < last_slash) {
+            int end = start;
+            while (end < last_slash && name[end] != '/')
+                end++;
+            if (end == start) {
+                start++;
+                continue;
+            }
+
+            /* Try to look up this component */
+            struct vfs_dentry dentry = {0};
+            int ret = vfs_ilookup(dir, &dentry, name + start,
+                                  (size_t)(end - start));
+            if (ret == 0 && dentry.ino != 0) {
+                /* Found — get the inode */
+                struct vfs_inode *child =
+                    dir->sb->ops->get_inode(dir->sb, dentry.ino);
+                vfs_iput(dir);
+                if (IS_ERR_OR_NULL(child))
+                    return NULL;
+                dir = child;
+            } else {
+                /* Not found — create the directory */
+                struct vfs_inode *sub =
+                    vfs_mkdir(dir, 0755, name + start,
+                              (size_t)(end - start));
+                vfs_iput(dir);
+                if (IS_ERR_OR_NULL(sub))
+                    return NULL;
+                dir = sub;
+            }
+            start = end + 1;
+        }
+    }
+
+    /* Leaf is the part after the last '/' (or the whole name) */
+    if (last_slash >= 0) {
+        *leaf = name + last_slash + 1;
+        *leaf_len = name_len - (size_t)(last_slash + 1);
+    } else {
+        *leaf = name;
+        *leaf_len = name_len;
+    }
+    return dir; /* caller must vfs_iput() */
+}
+
+/*
+ * __devtmpfs_mknod_relative — create a device node under the devtmpfs
+ * root inode using the relative name (e.g. "console", "pts/0").
+ * Creates intermediate directories as needed.
+ */
+static int __devtmpfs_mknod_relative(struct vfs_inode *root,
+                                     const char *name, size_t name_len,
+                                     mode_t mode, dev_t dev) {
+    const char *leaf;
+    size_t leaf_len;
+    struct vfs_inode *parent =
+        __devtmpfs_walk_parent(root, name, name_len, &leaf, &leaf_len);
+    if (parent == NULL)
+        return -ENOENT;
+
+    struct vfs_inode *inode = vfs_mknod(parent, mode, dev, leaf, leaf_len);
+    int ret = 0;
+    if (IS_ERR(inode)) {
+        ret = (int)PTR_ERR(inode);
+        if (ret == -EEXIST)
+            ret = 0; /* idempotent */
+    } else {
+        vfs_iput(inode);
+    }
+    vfs_iput(parent);
+    return ret;
+}
+
+/*
+ * __devtmpfs_unlink_relative — remove a device node from under the
+ * devtmpfs root inode using the relative name (e.g. "pts/0").
+ */
+static int __devtmpfs_unlink_relative(struct vfs_inode *root,
+                                      const char *name, size_t name_len) {
+    const char *leaf;
+    size_t leaf_len;
+    struct vfs_inode *parent =
+        __devtmpfs_walk_parent(root, name, name_len, &leaf, &leaf_len);
+    if (parent == NULL)
+        return -ENOENT;
+
+    int ret = vfs_unlink(parent, leaf, leaf_len);
+    vfs_iput(parent);
+    return ret;
+}
+
+/* ------------------------------------------------------------------ */
 /*  Populate a mounted devtmpfs with registered device nodes          */
 /* ------------------------------------------------------------------ */
 
 /*
- * Called AFTER vfs_mount_path("/dev") succeeds, so the superblock and
- * all inodes are fully VFS-initialised.  Uses VFS-level vfs_mknod /
- * vfs_mkdir which handle their own locking.
+ * Called AFTER vfs_mount_path() succeeds, so the superblock and
+ * all inodes are fully VFS-initialised.  Uses the stored __devtmpfs_sb
+ * root inode so that the code is independent of the mount path.
  */
 int devtmpfs_post_mount_populate(void) {
+    struct vfs_inode *root = __devtmpfs_get_root();
+    if (root == NULL) {
+        printf("devtmpfs: post_mount_populate called but no sb\n");
+        return -ENODEV;
+    }
+
     struct devtmpfs_node *node;
     struct devtmpfs_node *tmp;
 
@@ -75,77 +220,9 @@ int devtmpfs_post_mount_populate(void) {
         dev_t d = node->dev;
         spin_unlock(&__devtmpfs_lock);
 
-        /* Build "/dev/<name>" full path for namei helpers */
-        char fullpath[128];
-        const char *prefix = "/dev/";
-        size_t plen = 5; /* strlen("/dev/") */
-        if (plen + nl + 1 > sizeof(fullpath)) {
-            printf("devtmpfs: name '%s' too long\n", n);
-            spin_lock(&__devtmpfs_lock);
-            continue;
-        }
-        memmove(fullpath, prefix, plen);
-        memmove(fullpath + plen, n, nl);
-        fullpath[plen + nl] = '\0';
-        int pathlen = (int)(plen + nl);
-
-        /* If there are intermediate directories (e.g. "pts/0"),
-         * create each component.  Find the last '/'. */
-        for (int i = pathlen - 1; i > 4 /* past "/dev/" */; i--) {
-            if (fullpath[i] == '/') {
-                /* Need to ensure parent directory exists.
-                 * E.g. for "/dev/pts/0", ensure "/dev/pts". */
-                char dirpath[128];
-                memmove(dirpath, fullpath, i);
-                dirpath[i] = '\0';
-
-                struct vfs_inode *parent_dir =
-                    vfs_namei(dirpath, i);
-                if (IS_ERR_OR_NULL(parent_dir)) {
-                    /* Parent of dir doesn't exist either — just use
-                     * a simple split to create the leaf dir under
-                     * /dev.  (We only support 1-level subdirs.) */
-                    struct vfs_inode *dev_root =
-                        vfs_namei("/dev", 4);
-                    if (!IS_ERR_OR_NULL(dev_root)) {
-                        /* Extract the directory component name */
-                        const char *dname = dirpath + 5; /* skip "/dev/" */
-                        size_t dname_len = i - 5;
-                        struct vfs_inode *sub =
-                            vfs_mkdir(dev_root, 0755, dname, dname_len);
-                        if (!IS_ERR(sub))
-                            vfs_iput(sub);
-                        vfs_iput(dev_root);
-                    }
-                } else {
-                    /* Parent dir already exists */
-                    vfs_iput(parent_dir);
-                }
-                break; /* only handle the deepest split */
-            }
-        }
-
-        /* Now create the device node.  Use vfs_nameiparent to get the
-         * parent directory and leaf name. */
-        char leaf[64];
-        struct vfs_inode *parent =
-            vfs_nameiparent(fullpath, pathlen, leaf, sizeof(leaf));
-        if (IS_ERR_OR_NULL(parent)) {
-            printf("devtmpfs: cannot find parent for '%s'\n", n);
-            spin_lock(&__devtmpfs_lock);
-            continue;
-        }
-
-        struct vfs_inode *inode =
-            vfs_mknod(parent, m, d, leaf, strlen(leaf));
-        if (IS_ERR(inode)) {
-            if (PTR_ERR(inode) != -EEXIST)
-                printf("devtmpfs: mknod '%s' failed: %ld\n",
-                       n, PTR_ERR(inode));
-        } else {
-            vfs_iput(inode);
-        }
-        vfs_iput(parent);
+        int ret = __devtmpfs_mknod_relative(root, n, nl, m, d);
+        if (ret != 0 && ret != -EEXIST)
+            printf("devtmpfs: mknod '%s' failed: %d\n", n, ret);
 
         spin_lock(&__devtmpfs_lock);
     }
@@ -213,6 +290,10 @@ static int devtmpfs_mount(struct vfs_inode *mountpoint,
 
     *ret_sb = &sb->vfs_sb;
 
+    /* Save the superblock so create_node/remove_node can find the root
+     * inode without relying on the mount path (e.g. "/dev"). */
+    __devtmpfs_sb = &sb->vfs_sb;
+
     /* NOTE: Do NOT populate here.  The superblock / root inode are not
      * yet initialised by VFS (rwsem, mutex, inode hash, sb->valid are
      * all set up by __vfs_init_superblock_structure / __vfs_init_sb_rooti
@@ -223,6 +304,8 @@ static int devtmpfs_mount(struct vfs_inode *mountpoint,
 }
 
 static void devtmpfs_umount_free(struct vfs_superblock *sb) {
+    if (__devtmpfs_sb == sb)
+        __devtmpfs_sb = NULL;
     tmpfs_free(sb);
 }
 
@@ -236,6 +319,8 @@ struct vfs_fs_type_ops devtmpfs_fs_type_ops = {
 /* ------------------------------------------------------------------ */
 
 int devtmpfs_create_node(const char *name, mode_t mode, dev_t dev) {
+    __devtmpfs_ensure_init();
+
     if (name == NULL)
         return -EINVAL;
 
@@ -262,65 +347,20 @@ int devtmpfs_create_node(const char *name, mode_t mode, dev_t dev) {
     spin_unlock(&__devtmpfs_lock);
 
     /*
-     * If devtmpfs is already mounted at /dev, create the node live.
+     * If devtmpfs is already mounted, create the node live using the
+     * stored superblock root inode (mount-point independent).
      * This is needed for devices registered after boot (e.g. PTYs).
-     * Guard: during early boot (devtmpfs_init), no root filesystem
-     * is mounted yet, so vfs_namei would panic in vfs_curroot().
      */
-    if (current == NULL || current->fs == NULL ||
-        vfs_inode_deref(&current->fs->rooti) == NULL)
-        return 0;
-
-    struct vfs_inode *dev_root = vfs_namei("/dev", 4);
-    if (!IS_ERR_OR_NULL(dev_root)) {
-        /* Build full path /dev/<name> */
-        char fullpath[128];
-        const char *prefix = "/dev/";
-        size_t plen = 5;
-        if (plen + name_len + 1 <= sizeof(fullpath)) {
-            memmove(fullpath, prefix, plen);
-            memmove(fullpath + plen, name, name_len);
-            fullpath[plen + name_len] = '\0';
-            int pathlen = (int)(plen + name_len);
-
-            /* Create intermediate directories if needed */
-            for (int i = pathlen - 1; i > 4; i--) {
-                if (fullpath[i] == '/') {
-                    char dircomp[64];
-                    size_t dlen = i - 5; /* skip "/dev/" */
-                    if (dlen > 0 && dlen < sizeof(dircomp)) {
-                        memmove(dircomp, fullpath + 5, dlen);
-                        dircomp[dlen] = '\0';
-                        struct vfs_inode *sub =
-                            vfs_mkdir(dev_root, 0755, dircomp, dlen);
-                        if (!IS_ERR(sub))
-                            vfs_iput(sub);
-                        /* Ignore EEXIST */
-                    }
-                    break;
-                }
-            }
-
-            /* Use vfs_nameiparent + vfs_mknod for the leaf */
-            char leaf[64];
-            struct vfs_inode *parent =
-                vfs_nameiparent(fullpath, pathlen, leaf, sizeof(leaf));
-            if (!IS_ERR_OR_NULL(parent)) {
-                struct vfs_inode *inode =
-                    vfs_mknod(parent, mode, dev, leaf, strlen(leaf));
-                if (!IS_ERR(inode))
-                    vfs_iput(inode);
-                /* Ignore EEXIST for idempotency */
-                vfs_iput(parent);
-            }
-        }
-        vfs_iput(dev_root);
-    }
+    struct vfs_inode *root = __devtmpfs_get_root();
+    if (root != NULL)
+        __devtmpfs_mknod_relative(root, name, name_len, mode, dev);
 
     return 0;
 }
 
 int devtmpfs_remove_node(const char *name) {
+    __devtmpfs_ensure_init();
+
     if (name == NULL)
         return -EINVAL;
 
@@ -349,32 +389,68 @@ int devtmpfs_remove_node(const char *name) {
 
     /*
      * Also unlink the live filesystem node if devtmpfs is mounted.
-     * We do this regardless of whether we found a registry entry,
-     * because the node could have been created live and already
-     * removed from the registry.
+     * Uses the stored root inode so we don't depend on mount path.
      */
-    if (current != NULL && current->fs != NULL &&
-        vfs_inode_deref(&current->fs->rooti) != NULL) {
-        char fullpath[128];
-        const char *prefix = "/dev/";
-        size_t plen = 5;
-        if (plen + name_len + 1 <= sizeof(fullpath)) {
-            memmove(fullpath, prefix, plen);
-            memmove(fullpath + plen, name, name_len);
-            fullpath[plen + name_len] = '\0';
-            int pathlen = (int)(plen + name_len);
-
-            char leaf[64];
-            struct vfs_inode *parent =
-                vfs_nameiparent(fullpath, pathlen, leaf, sizeof(leaf));
-            if (!IS_ERR_OR_NULL(parent)) {
-                vfs_unlink(parent, leaf, strlen(leaf));
-                vfs_iput(parent);
-            }
-        }
-    }
+    struct vfs_inode *root = __devtmpfs_get_root();
+    if (root != NULL)
+        __devtmpfs_unlink_relative(root, name, name_len);
 
     return found ? 0 : -ENOENT;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Retroactive population from device table                          */
+/* ------------------------------------------------------------------ */
+
+/*
+ * Callback for dev_for_each_device(): create a devtmpfs registry entry
+ * for each device that has a devname set but hasn't been registered yet.
+ */
+static int __devtmpfs_register_one_device(device_t *dev, void *ctx) {
+    (void)ctx;
+    if (dev->devname == NULL)
+        return 0; /* device has no devtmpfs binding — skip */
+
+    /* Check if a node already exists in the registry (e.g. because
+     * device_register already called devtmpfs_create_node after the
+     * registry list was initialised).  Avoid duplicates. */
+    spin_lock(&__devtmpfs_lock);
+    struct devtmpfs_node *node;
+    struct devtmpfs_node *tmp;
+    size_t name_len = strlen(dev->devname);
+    int found = 0;
+    list_foreach_node_safe(&__devtmpfs_nodes, node, tmp, list_entry) {
+        if (node->name_len == name_len &&
+            strncmp(node->name, dev->devname, name_len) == 0) {
+            found = 1;
+            break;
+        }
+    }
+    spin_unlock(&__devtmpfs_lock);
+
+    if (!found)
+        devtmpfs_create_node(dev->devname, dev->devmode,
+                             mkdev(dev->major, dev->minor));
+    return 0;
+}
+
+void devtmpfs_populate_devices(void) {
+    __devtmpfs_ensure_init();
+    int count = 0;
+
+    /* Use the dev_for_each_device iterator to find all devices
+     * that were registered before devtmpfs was initialised. */
+    dev_for_each_device(__devtmpfs_register_one_device, NULL);
+
+    /* Count how many nodes are now in the registry */
+    spin_lock(&__devtmpfs_lock);
+    struct devtmpfs_node *node;
+    struct devtmpfs_node *tmp;
+    list_foreach_node_safe(&__devtmpfs_nodes, node, tmp, list_entry)
+        count++;
+    spin_unlock(&__devtmpfs_lock);
+
+    printf("devtmpfs: populated %d device nodes from device table\n", count);
 }
 
 /* ------------------------------------------------------------------ */
@@ -399,24 +475,14 @@ void devtmpfs_init(void) {
 
     printf("devtmpfs: filesystem type registered\n");
 
-    /* ---- Character devices ---- */
-    devtmpfs_create_node("console", S_IFCHR | 0666,
-                         mkdev(CONSOLE_MAJOR, CONSOLE_MINOR));
-    devtmpfs_create_node("null", S_IFCHR | 0666,
-                         mkdev(NULL_MAJOR, NULL_MINOR));
-    devtmpfs_create_node("random", S_IFCHR | 0666,
-                         mkdev(RANDOM_MAJOR, RANDOM_MINOR));
-    devtmpfs_create_node("zero", S_IFCHR | 0666,
-                         mkdev(ZERO_MAJOR, ZERO_MINOR));
-    devtmpfs_create_node("tty", S_IFCHR | 0666,
-                         mkdev(TTY_DEV_MAJOR, TTY_DEV_MINOR));
-    devtmpfs_create_node("ptmx", S_IFCHR | 0666,
-                         mkdev(PTMX_MAJOR, PTMX_MINOR));
-
-    /* ---- Block devices ---- */
-    devtmpfs_create_node("disk0", S_IFBLK | 0600, mkdev(2, 1));
-    devtmpfs_create_node("disk1", S_IFBLK | 0600, mkdev(2, 2));
-    devtmpfs_create_node("ramdisk", S_IFBLK | 0600, mkdev(3, 1));
-
-    printf("devtmpfs: pre-registered %d built-in device nodes\n", 9);
+    /*
+     * Retroactively create devtmpfs entries for all devices that were
+     * registered before devtmpfs became available.  device_register()
+     * calls devtmpfs_create_node() which buffers entries into the
+     * registry list even when devtmpfs is not yet mounted.  However,
+     * for devices that were registered before this subsystem was
+     * initialised (i.e. before __devtmpfs_ensure_init ran), we now
+     * iterate them and add any that carry a devname.
+     */
+    devtmpfs_populate_devices();
 }

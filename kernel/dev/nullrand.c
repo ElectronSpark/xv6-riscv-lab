@@ -106,6 +106,8 @@ static cdev_t null_cdev = {
         {
             .major = NULL_MAJOR,
             .minor = NULL_MINOR,
+            .devname = "null",
+            .devmode = S_IFCHR | 0666,
         },
     .readable = 1,
     .writable = 1,
@@ -125,6 +127,8 @@ static cdev_t random_cdev = {
         {
             .major = RANDOM_MAJOR,
             .minor = RANDOM_MINOR,
+            .devname = "random",
+            .devmode = S_IFCHR | 0666,
         },
     .readable = 1,
     .writable = 1,
@@ -185,6 +189,8 @@ static cdev_t zero_cdev = {
         {
             .major = ZERO_MAJOR,
             .minor = ZERO_MINOR,
+            .devname = "zero",
+            .devmode = S_IFCHR | 0666,
         },
     .readable = 1,
     .writable = 1,

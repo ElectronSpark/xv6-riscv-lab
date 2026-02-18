@@ -26,7 +26,6 @@
 #include "vfs/pipe.h"
 #include "vfs/stat.h"
 #include "defs.h"
-#include "devtmpfs.h"
 #include "tty/tty.h"
 
 /* ------------------------------------------------------------------ */
@@ -105,9 +104,6 @@ ssize_t pty_master_read(struct tty *slave, char *buf, size_t count, bool user) {
 /*  Allocation                                                        */
 /* ------------------------------------------------------------------ */
 
-/* Monotonically increasing PTY index for devtmpfs naming */
-static int __pty_next_index = 0;
-
 /*
  * pty_alloc - create a PTY master/slave pair
  *
@@ -125,33 +121,25 @@ int pty_alloc(struct tty **slave_out, const char *name, int minor) {
     if (IS_ERR(slave))
         return PTR_ERR(slave);
 
-    /* Register a devtmpfs entry for this PTY slave (e.g. /dev/pts/0) */
-    int idx;
-    if (minor >= 0)
-        idx = minor;
-    else
-        idx = __atomic_fetch_add(&__pty_next_index, 1, __ATOMIC_SEQ_CST);
-    dev_t dev = mkdev(PTY_MAJOR, PTY_MINOR_BASE + idx);
-    devtmpfs_create_node(name, S_IFCHR | 0620, dev);
+    /* devtmpfs node is now created automatically by device_register()
+     * when the slave cdev is registered in ptmx_open_file(). */
+    (void)minor;
 
     *slave_out = slave;
     return 0;
 }
 
 /*
- * pty_dealloc - clean up the devtmpfs entry for a PTY pair
+ * pty_dealloc - clean up for a PTY pair
  *
- * Call this when the PTY master is being closed and the slave should
- * no longer be accessible via /dev.  The tty struct itself is freed
- * separately via tty_unref().
+ * The devtmpfs node is now removed automatically by device_unregister()
+ * when the slave cdev is unregistered (via dev->devname).
+ * This function is retained for any future non-devtmpfs cleanup.
  *
  * @slave: the slave tty (used for its name field)
  */
 void pty_dealloc(struct tty *slave) {
     if (slave == NULL)
         return;
-
-    /* Remove /dev/<name> where name is e.g. "pts/0" */
-    if (slave->name[0] != '\0')
-        devtmpfs_remove_node(slave->name);
+    /* devtmpfs removal is handled by cdev_unregister → device_unregister */
 }

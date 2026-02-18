@@ -32,4 +32,11 @@ int devtmpfs_create_node(const char *name, mode_t mode, dev_t dev);
  */
 int devtmpfs_remove_node(const char *name);
 
+/*
+ * Retroactively create devtmpfs nodes for all devices that were
+ * registered before devtmpfs became available.  Called once by
+ * devtmpfs_init() after the filesystem type is registered.
+ */
+void devtmpfs_populate_devices(void);
+
 #endif /* __KERNEL_DEVTMPFS_H */

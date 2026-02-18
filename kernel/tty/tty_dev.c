@@ -90,6 +90,8 @@ static cdev_t tty_cdev = {
         {
             .major = TTY_DEV_MAJOR,
             .minor = TTY_DEV_MINOR,
+            .devname = "tty",
+            .devmode = S_IFCHR | 0666,
         },
     .readable = 1,
     .writable = 1,

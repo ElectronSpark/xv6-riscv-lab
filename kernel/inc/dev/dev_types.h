@@ -6,6 +6,7 @@
 #include <types.h>
 #include <kobject.h>
 #include <lock/rcu_type.h>
+#include <vfs/stat.h>
 
 #define MAX_MAJOR_DEVICES 256 // Maximum number of major devices
 // Maximum number of minor devices per major device
@@ -41,6 +42,16 @@ typedef struct device_instance {
     dev_type_e type;   // Device type (block, char, etc.)
     int unregistering; // Set to 1 when device is being unregistered
     device_ops_t ops;
+
+    /*
+     * devtmpfs integration — optional.
+     * When devname is non-NULL, device_register() automatically calls
+     * devtmpfs_create_node() and device_unregister() removes it.
+     * Safe to set before registration even if devtmpfs is not yet mounted;
+     * nodes are buffered and materialised on first mount.
+     */
+    const char *devname; // devtmpfs path relative to /dev (e.g. "console")
+    mode_t      devmode; // file type + perms (e.g. S_IFCHR | 0666)
 } device_t;
 
 struct vfs_file; /* forward declaration for open_file callback */

@@ -259,14 +259,9 @@ static int ptmx_fops_release(struct vfs_inode *inode, struct vfs_file *file) {
     if (pair->slave != NULL)
         tty_hangup(pair->slave);
 
-    /* Remove /dev/pts/N from devtmpfs so no NEW opens succeed */
-    {
-        char name[32];
-        pts_name(name, pair->index);
-        devtmpfs_remove_node(name);
-    }
-
-    /* Unregister the slave cdev.  Since all slave fds use open_file
+    /* Unregister the slave cdev.  device_unregister() will also
+     * remove /dev/pts/N from devtmpfs via dev->devname.  Since all
+     * slave fds use open_file
      * (no file holds a kobject ref), the kobject drops to 0 immediately
      * and pts_cdev_release fires (which is a no-op).  Existing slave
      * fds continue to work because they use vfs_file_ops directly. */
@@ -400,6 +395,10 @@ static int ptmx_open_file(cdev_t *cdev, struct vfs_file *file) {
     pair->slave_cdev.ops.release   = pts_cdev_release;
     pair->slave_cdev.ops.open_file = pts_open_file;
 
+    /* devname/devmode so device_register() auto-creates the devtmpfs node */
+    pair->slave_cdev.dev.devname = pair->slave->name;  /* e.g. "pts/0" */
+    pair->slave_cdev.dev.devmode = S_IFCHR | 0620;
+
     ret = cdev_register(&pair->slave_cdev);
     if (ret != 0) {
         printf("ptmx: failed to register pts/%d cdev: %d\n", idx, ret);
@@ -432,6 +431,8 @@ static cdev_t ptmx_cdev = {
     .dev = {
         .major = PTMX_MAJOR,
         .minor = PTMX_MINOR,
+        .devname = "ptmx",
+        .devmode = S_IFCHR | 0666,
     },
     .readable = 1,
     .writable = 1,
