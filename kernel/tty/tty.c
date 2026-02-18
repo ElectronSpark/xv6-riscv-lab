@@ -178,32 +178,33 @@ static inline int O_ONLCR(struct tty *tty) {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Echo a character to the output pipe (called under tty->lock)      */
+/*  Echo a character to the output pipe                               */
+/*                                                                    */
+/*  IMPORTANT: tty->lock must be held on entry and will be held on    */
+/*  return, but this function temporarily drops it while calling      */
+/*  pipe_write() which may sleep when the pipe is full.               */
 /* ------------------------------------------------------------------ */
 
 static void tty_echo_char(struct tty *tty, int c) {
-    char ch;
+    char echobuf[4];
+    int n = 0;
 
     if (c == BACKSPACE) {
         /* BS SPC BS */
-        ch = '\b';
-        pipe_write(tty->output_pipe, &ch, 1, 0);
-        ch = ' ';
-        pipe_write(tty->output_pipe, &ch, 1, 0);
-        ch = '\b';
-        pipe_write(tty->output_pipe, &ch, 1, 0);
-        return;
+        echobuf[n++] = '\b';
+        echobuf[n++] = ' ';
+        echobuf[n++] = '\b';
+    } else {
+        /* Output post-processing for echoed characters */
+        if (O_OPOST(tty) && O_ONLCR(tty) && c == '\n')
+            echobuf[n++] = '\r';
+        echobuf[n++] = (char)c;
     }
 
-    ch = (char)c;
-
-    /* Output post-processing for echoed characters */
-    if (O_OPOST(tty) && O_ONLCR(tty) && ch == '\n') {
-        char cr = '\r';
-        pipe_write(tty->output_pipe, &cr, 1, 0);
-    }
-
-    pipe_write(tty->output_pipe, &ch, 1, 0);
+    /* Drop the spinlock before calling pipe_write — it can sleep. */
+    spin_unlock(&tty->lock);
+    pipe_write(tty->output_pipe, echobuf, n, 0);
+    spin_lock(&tty->lock);
 }
 
 /* ------------------------------------------------------------------ */
@@ -623,6 +624,14 @@ int tty_ioctl(struct tty *tty, uint64 cmd, void *arg) {
         if (tty->session == NULL || tty->session->sid != current->sid)
             return -ENOTTY;
         session_set_fg_pgid(tty->session, pgid);
+        return 0;
+    }
+    case TIOCSCTTY: {
+        /* Set controlling terminal: the calling process must be a session
+         * leader and must not already have a controlling terminal. */
+        if (current->session == NULL)
+            return -EPERM;
+        session_set_ctrl_tty(current->session, tty);
         return 0;
     }
     default:
