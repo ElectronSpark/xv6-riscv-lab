@@ -2046,8 +2046,9 @@ uint64 sys_vfs_poll(void) {
         if (timeout_ms == 0) {
             return 0;
         }
-        uint64 start = get_jiffs();
-        while (timeout_ms < 0 || (int)(get_jiffs() - start) < timeout_ms) {
+        uint64 timeout_ticks = (timeout_ms > 0) ? MS_TO_RAWTICKS(timeout_ms) : 0;
+        uint64 start = r_time();
+        while (timeout_ms < 0 || (r_time() - start) < timeout_ticks) {
             sleep_ms(1);
             if (signal_pending(current))
                 return -EINTR;
@@ -2066,7 +2067,8 @@ uint64 sys_vfs_poll(void) {
         return -EFAULT;
     }
 
-    uint64 start = get_jiffs();
+    uint64 timeout_ticks = (timeout_ms > 0) ? MS_TO_RAWTICKS(timeout_ms) : 0;
+    uint64 start = r_time();
     int ready;
     for (;;) {
         ready = __vfs_poll_scan(pfds, nfds);
@@ -2076,7 +2078,7 @@ uint64 sys_vfs_poll(void) {
         if (timeout_ms == 0) {
             break;
         }
-        if (timeout_ms > 0 && (int)(get_jiffs() - start) >= timeout_ms) {
+        if (timeout_ms > 0 && (r_time() - start) >= timeout_ticks) {
             break;
         }
         sleep_ms(1);

@@ -11,8 +11,51 @@
 #include "lock/mutex_types.h"
 #include "proc/tq.h"
 #include "proc/sched.h"
+#include "signal.h"
+#include "timer/timer.h"
 #include "errno.h"
 #include "smp/atomic.h"
+
+struct mutex_timed_wait_ctx {
+    mutex_t *lock;
+    struct timer_node timer;
+    uint64 timeout_ms;
+    bool timer_armed;
+};
+
+static int __mutex_timed_sleep_cb(void *data) {
+    struct mutex_timed_wait_ctx *ctx = (struct mutex_timed_wait_ctx *)data;
+    if (ctx == NULL || ctx->lock == NULL) {
+        return 0;
+    }
+
+    ctx->timer_armed = false;
+    if (ctx->timeout_ms > 0 && sched_timer_set(&ctx->timer, ctx->timeout_ms) == 0) {
+        ctx->timer_armed = true;
+    }
+
+    int status = spin_holding(&ctx->lock->lk);
+    if (status) {
+        spin_unlock(&ctx->lock->lk);
+    }
+    return status;
+}
+
+static void __mutex_timed_wake_cb(void *data, int sleep_cb_status) {
+    struct mutex_timed_wait_ctx *ctx = (struct mutex_timed_wait_ctx *)data;
+    if (ctx == NULL || ctx->lock == NULL) {
+        return;
+    }
+
+    if (ctx->timer_armed) {
+        sched_timer_done(&ctx->timer);
+        ctx->timer_armed = false;
+    }
+
+    if (sleep_cb_status) {
+        spin_lock(&ctx->lock->lk);
+    }
+}
 
 #define __mutex_set_holder(lk, pid)                                            \
     smp_store_release(                                                         \
@@ -123,4 +166,112 @@ int mutex_trylock(mutex_t *lk) {
         return 1; // Successfully acquired
     }
     return 0; // Failed to acquire
+}
+
+int mutex_lock_interruptible(mutex_t *lk) {
+    assert(current != NULL,
+           "mutex_lock_interruptible: no current thread context");
+    assert(mycpu()->spin_depth == 0,
+           "mutex_lock_interruptible called with spinlock held");
+    assert(!CPU_IN_ITR(), "mutex_lock_interruptible called in interrupt context");
+
+    if (lk == NULL) {
+        return -EINVAL;
+    }
+
+    struct thread *self = current;
+
+    if (__mutex_try_set_holder(lk, self->pid)) {
+        return 0;
+    }
+
+    spin_lock(&lk->lk);
+    if (__mutex_try_set_holder(lk, self->pid)) {
+        spin_unlock(&lk->lk);
+        return 0;
+    }
+
+    assert(__mutex_holder(lk) != self->pid,
+           "mutex_lock_interruptible: deadlock detected, thread already holds the lock");
+
+    while (__mutex_holder(lk) != self->pid) {
+        if (signal_pending(current)) {
+            spin_unlock(&lk->lk);
+            return -EINTR;
+        }
+
+        __thread_state_set(current, THREAD_INTERRUPTIBLE);
+        int ret = tq_wait(&lk->wait_queue, &lk->lk, NULL);
+        if (ret != 0 && signal_pending(current) && __mutex_holder(lk) != self->pid) {
+            spin_unlock(&lk->lk);
+            return -EINTR;
+        }
+    }
+
+    spin_unlock(&lk->lk);
+    return 0;
+}
+
+int mutex_lock_timed(mutex_t *lk, uint64 timeout_ms) {
+    assert(current != NULL, "mutex_lock_timed: no current thread context");
+    assert(mycpu()->spin_depth == 0,
+           "mutex_lock_timed called with spinlock held");
+    assert(!CPU_IN_ITR(), "mutex_lock_timed called in interrupt context");
+
+    if (lk == NULL) {
+        return -EINVAL;
+    }
+
+    struct thread *self = current;
+
+    if (__mutex_try_set_holder(lk, self->pid)) {
+        return 0;
+    }
+
+    if (timeout_ms == 0) {
+        return -ETIMEDOUT;
+    }
+
+    spin_lock(&lk->lk);
+    if (__mutex_try_set_holder(lk, self->pid)) {
+        spin_unlock(&lk->lk);
+        return 0;
+    }
+
+    assert(__mutex_holder(lk) != self->pid,
+           "mutex_lock_timed: deadlock detected, thread already holds the lock");
+
+    uint64 timeout_ticks = MS_TO_RAWTICKS(timeout_ms);
+    uint64 start = r_time();
+
+    while (__mutex_holder(lk) != self->pid) {
+        uint64 elapsed = r_time() - start;
+        if (elapsed >= timeout_ticks) {
+            spin_unlock(&lk->lk);
+            return -ETIMEDOUT;
+        }
+
+        uint64 remaining_ticks = timeout_ticks - elapsed;
+        uint64 remaining_ms = (remaining_ticks + TICK_MS - 1) / TICK_MS;
+        if (remaining_ms == 0) {
+            remaining_ms = 1;
+        }
+
+        struct mutex_timed_wait_ctx ctx = {
+            .lock = lk,
+            .timeout_ms = remaining_ms,
+            .timer_armed = false,
+        };
+
+        __thread_state_set(current, THREAD_INTERRUPTIBLE);
+        int ret = tq_wait_cb(&lk->wait_queue, __mutex_timed_sleep_cb,
+                             __mutex_timed_wake_cb, &ctx, NULL);
+        if (ret != 0 && signal_pending(current) && __mutex_holder(lk) != self->pid) {
+            spin_unlock(&lk->lk);
+            return -EINTR;
+        }
+    }
+
+    spin_unlock(&lk->lk);
+    return 0;
 }

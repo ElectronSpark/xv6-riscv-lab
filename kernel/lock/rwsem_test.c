@@ -6,6 +6,7 @@
 #include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "lock/rwsem.h"
+#include "lock/mutex.h"
 #include "lock/mutex_types.h"
 #include "proc/thread.h"
 #include "proc/tq.h"

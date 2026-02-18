@@ -28,7 +28,7 @@
 #include "param.h"
 #include "errno.h"
 #include "lock/spinlock.h"
-#include "lock/mutex_types.h"
+#include "lock/mutex.h"
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"

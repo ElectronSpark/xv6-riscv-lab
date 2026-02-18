@@ -11,6 +11,51 @@
 #include "proc/thread.h"
 #include "proc/tq.h"
 #include "proc/sched.h"
+#include "signal.h"
+#include "timer/timer.h"
+
+struct sem_timed_wait_ctx {
+    sem_t *sem;
+    struct timer_node timer;
+    uint64 timeout_ms;
+    bool timer_armed;
+};
+
+static int __sem_timed_sleep_cb(void *data) {
+    struct sem_timed_wait_ctx *ctx = (struct sem_timed_wait_ctx *)data;
+    if (ctx == NULL || ctx->sem == NULL) {
+        return 0;
+    }
+
+    ctx->timer_armed = false;
+    if (ctx->timeout_ms > 0) {
+        if (sched_timer_set(&ctx->timer, ctx->timeout_ms) == 0) {
+            ctx->timer_armed = true;
+        }
+    }
+
+    int status = spin_holding(&ctx->sem->lk);
+    if (status) {
+        spin_unlock(&ctx->sem->lk);
+    }
+    return status;
+}
+
+static void __sem_timed_wake_cb(void *data, int sleep_cb_status) {
+    struct sem_timed_wait_ctx *ctx = (struct sem_timed_wait_ctx *)data;
+    if (ctx == NULL || ctx->sem == NULL) {
+        return;
+    }
+
+    if (ctx->timer_armed) {
+        sched_timer_done(&ctx->timer);
+        ctx->timer_armed = false;
+    }
+
+    if (sleep_cb_status) {
+        spin_lock(&ctx->sem->lk);
+    }
+}
 
 static int __sem_value_inc(sem_t *sem) {
     return __atomic_add_fetch(&sem->value, 1, __ATOMIC_SEQ_CST);
@@ -82,6 +127,89 @@ int sem_wait(sem_t *sem) {
             printf(
                 "Failed to post semaphore '%s' when thread was interrupted\n",
                 sem->name);
+        }
+    }
+
+    spin_unlock(&sem->lk);
+    return ret;
+}
+
+int sem_wait_interruptible(sem_t *sem) {
+    assert(current != NULL,
+           "sem_wait_interruptible called from non-thread context");
+    assert(mycpu()->spin_depth == 0,
+           "sem_wait_interruptible called with spinlock held");
+    assert(!CPU_IN_ITR(), "sem_wait_interruptible called in interrupt context");
+    if (sem == NULL) {
+        return -EINVAL;
+    }
+
+    while (1) {
+        int ret = sem_trywait(sem);
+        if (ret == 0) {
+            return 0;
+        }
+        if (ret != -EAGAIN) {
+            return ret;
+        }
+        if (signal_pending(current)) {
+            return -EINTR;
+        }
+        sleep_ms(1);
+    }
+}
+
+int sem_timedwait(sem_t *sem, uint64 timeout_ms) {
+    assert(current != NULL, "sem_timedwait called from non-thread context");
+    assert(mycpu()->spin_depth == 0,
+           "sem_timedwait called with spinlock held");
+    assert(!CPU_IN_ITR(), "sem_timedwait called in interrupt context");
+    if (sem == NULL) {
+        return -EINVAL;
+    }
+
+    if (timeout_ms == 0) {
+        return sem_trywait(sem) == 0 ? 0 : -ETIMEDOUT;
+    }
+
+    spin_lock(&sem->lk);
+    int val = __sem_value_dec(sem);
+    if (val < -SEM_VALUE_MAX) {
+        __sem_value_inc(sem);
+        spin_unlock(&sem->lk);
+        return -EOVERFLOW;
+    }
+    if (val >= 0) {
+        spin_unlock(&sem->lk);
+        return 0;
+    }
+
+    uint64 timeout_ticks = MS_TO_RAWTICKS(timeout_ms);
+    uint64 start = r_time();
+    struct sem_timed_wait_ctx ctx = {
+        .sem = sem,
+        .timeout_ms = timeout_ms,
+        .timer_armed = false,
+    };
+
+    __thread_state_set(current, THREAD_INTERRUPTIBLE);
+    int ret = tq_wait_cb(&sem->wait_queue, __sem_timed_sleep_cb,
+                         __sem_timed_wake_cb, &ctx, NULL);
+
+    if (ret != 0) {
+        int wake_ret = __sem_do_post(sem);
+        if (wake_ret != 0 && wake_ret != -ENOENT) {
+            printf("Failed to post semaphore '%s' after timed wait wakeup\n",
+                   sem->name);
+        }
+
+        if (signal_pending(current)) {
+            spin_unlock(&sem->lk);
+            return -EINTR;
+        }
+        if ((r_time() - start) >= timeout_ticks) {
+            spin_unlock(&sem->lk);
+            return -ETIMEDOUT;
         }
     }
 

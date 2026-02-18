@@ -6,6 +6,8 @@
 void completion_init(completion_t *c);
 void completion_reinit(completion_t *c);
 void wait_for_completion(completion_t *c);
+int wait_for_completion_interruptible(completion_t *c);
+int wait_for_completion_timed(completion_t *c, uint64 timeout_ms);
 bool try_wait_for_completion(completion_t *c);
 void complete(completion_t *c);
 void complete_all(completion_t *c);

@@ -95,13 +95,6 @@ int spin_trylock(spinlock_t *);
 int spin_lock_irqsave(spinlock_t *);
 void spin_unlock_irqrestore(spinlock_t *, int);
 
-// sleeplock.c
-int mutex_lock(mutex_t *);
-int mutex_trylock(mutex_t *);
-void mutex_unlock(mutex_t *);
-int holding_mutex(mutex_t *);
-void mutex_init(mutex_t *, char *);
-
 // syscall.c
 uint64 argraw(int n);
 void argint(int, int *);

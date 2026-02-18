@@ -4,6 +4,7 @@
 #include "vfs/vfs_types.h"
 #include "printf.h"
 #include "lock/completion.h"
+#include "lock/mutex.h"
 
 #define VFS_DITER_INDEX_END (-1LL)
 #define VFS_DITER_INDEX_START (0LL)

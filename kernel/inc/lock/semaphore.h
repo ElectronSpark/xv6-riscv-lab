@@ -8,6 +8,8 @@
 
 int sem_init(sem_t *sem, const char *name, int value);
 int sem_wait(sem_t *sem);
+int sem_wait_interruptible(sem_t *sem);
+int sem_timedwait(sem_t *sem, uint64 timeout_ms);
 int sem_trywait(sem_t *sem);
 int sem_post(sem_t *sem);
 int sem_getvalue(sem_t *sem, int *value);

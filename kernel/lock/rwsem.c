@@ -11,6 +11,49 @@
 #include "proc/tq.h"
 #include "proc/sched.h"
 #include "string.h"
+#include "signal.h"
+#include "timer/timer.h"
+
+struct rwsem_timed_wait_ctx {
+    rwsem_t *lock;
+    struct timer_node timer;
+    uint64 timeout_ms;
+    bool timer_armed;
+};
+
+static int __rwsem_timed_sleep_cb(void *data) {
+    struct rwsem_timed_wait_ctx *ctx = (struct rwsem_timed_wait_ctx *)data;
+    if (ctx == NULL || ctx->lock == NULL) {
+        return 0;
+    }
+
+    ctx->timer_armed = false;
+    if (ctx->timeout_ms > 0 && sched_timer_set(&ctx->timer, ctx->timeout_ms) == 0) {
+        ctx->timer_armed = true;
+    }
+
+    int status = spin_holding(&ctx->lock->lock);
+    if (status) {
+        spin_unlock(&ctx->lock->lock);
+    }
+    return status;
+}
+
+static void __rwsem_timed_wake_cb(void *data, int sleep_cb_status) {
+    struct rwsem_timed_wait_ctx *ctx = (struct rwsem_timed_wait_ctx *)data;
+    if (ctx == NULL || ctx->lock == NULL) {
+        return;
+    }
+
+    if (ctx->timer_armed) {
+        sched_timer_done(&ctx->timer);
+        ctx->timer_armed = false;
+    }
+
+    if (sleep_cb_status) {
+        spin_lock(&ctx->lock->lock);
+    }
+}
 
 static inline int __reader_should_wait(rwsem_t *lock) {
     if (lock->readers == 0) {
@@ -109,6 +152,111 @@ int rwsem_acquire_read(rwsem_t *lock) {
     return ret;
 }
 
+int rwsem_try_acquire_read(rwsem_t *lock) {
+    assert(current != NULL, "rwsem_try_acquire_read: no current thread");
+    assert(mycpu()->spin_depth == 0,
+           "rwsem_try_acquire_read called with spinlock held");
+    assert(!CPU_IN_ITR(),
+           "rwsem_try_acquire_read called in interrupt context");
+    if (!lock) {
+        return -EINVAL;
+    }
+
+    int ret = -EAGAIN;
+    spin_lock(&lock->lock);
+    if (!__reader_should_wait(lock)) {
+        lock->readers++;
+        ret = 0;
+    }
+    spin_unlock(&lock->lock);
+    return ret;
+}
+
+int rwsem_acquire_read_interruptible(rwsem_t *lock) {
+    assert(current != NULL, "rwsem_acquire_read_interruptible: no current thread");
+    assert(mycpu()->spin_depth == 0,
+           "rwsem_acquire_read_interruptible called with spinlock held");
+    assert(!CPU_IN_ITR(),
+           "rwsem_acquire_read_interruptible called in interrupt context");
+    if (!lock) {
+        return -EINVAL;
+    }
+
+    spin_lock(&lock->lock);
+    while (__reader_should_wait(lock)) {
+        if (signal_pending(current)) {
+            spin_unlock(&lock->lock);
+            return -EINTR;
+        }
+        __thread_state_set(current, THREAD_INTERRUPTIBLE);
+        int ret = tq_wait(&lock->read_queue, &lock->lock, NULL);
+        if (ret != 0 && signal_pending(current)) {
+            spin_unlock(&lock->lock);
+            return -EINTR;
+        }
+    }
+
+    lock->readers++;
+    spin_unlock(&lock->lock);
+    return 0;
+}
+
+int rwsem_acquire_read_timed(rwsem_t *lock, uint64 timeout_ms) {
+    assert(current != NULL, "rwsem_acquire_read_timed: no current thread");
+    assert(mycpu()->spin_depth == 0,
+           "rwsem_acquire_read_timed called with spinlock held");
+    assert(!CPU_IN_ITR(), "rwsem_acquire_read_timed called in interrupt context");
+    if (!lock) {
+        return -EINVAL;
+    }
+
+    if (timeout_ms == 0) {
+        int ret = rwsem_try_acquire_read(lock);
+        return ret == 0 ? 0 : -ETIMEDOUT;
+    }
+
+    uint64 start = r_time();
+    uint64 timeout_ticks = MS_TO_RAWTICKS(timeout_ms);
+    spin_lock(&lock->lock);
+
+    while (__reader_should_wait(lock)) {
+        if (signal_pending(current)) {
+            spin_unlock(&lock->lock);
+            return -EINTR;
+        }
+
+        uint64 elapsed = r_time() - start;
+        if (elapsed >= timeout_ticks) {
+            spin_unlock(&lock->lock);
+            return -ETIMEDOUT;
+        }
+
+        uint64 remaining_ticks = timeout_ticks - elapsed;
+        uint64 remaining_ms = (remaining_ticks + TICK_MS - 1) / TICK_MS;
+        if (remaining_ms == 0) {
+            remaining_ms = 1;
+        }
+
+        struct rwsem_timed_wait_ctx ctx = {
+            .lock = lock,
+            .timeout_ms = remaining_ms,
+            .timer_armed = false,
+        };
+
+        __thread_state_set(current, THREAD_INTERRUPTIBLE);
+        int ret = tq_wait_cb(&lock->read_queue, __rwsem_timed_sleep_cb,
+                             __rwsem_timed_wake_cb, &ctx, NULL);
+        if (ret != 0 && signal_pending(current)) {
+            spin_unlock(&lock->lock);
+            return -EINTR;
+        }
+    }
+
+    lock->readers++;
+    spin_unlock(&lock->lock);
+    return 0;
+}
+
 int rwsem_acquire_write(rwsem_t *lock) {
     assert(current != NULL, "rwsem_acquire_write: no current thread");
     assert(mycpu()->spin_depth == 0,
@@ -140,6 +288,132 @@ int rwsem_acquire_write(rwsem_t *lock) {
     lock->holder_pid = self_pid;
     spin_unlock(&lock->lock);
     return ret; // Success
+}
+
+int rwsem_try_acquire_write(rwsem_t *lock) {
+    assert(current != NULL, "rwsem_try_acquire_write: no current thread");
+    assert(mycpu()->spin_depth == 0,
+           "rwsem_try_acquire_write called with spinlock held");
+    assert(!CPU_IN_ITR(),
+           "rwsem_try_acquire_write called in interrupt context");
+    if (!lock) {
+        return -EINVAL;
+    }
+
+    int ret = -EAGAIN;
+    spin_lock(&lock->lock);
+    int self_pid = current->pid;
+    if (lock->holder_pid == self_pid) {
+        spin_unlock(&lock->lock);
+        return -EDEADLK;
+    }
+    if (!__writer_should_wait(lock, self_pid)) {
+        lock->holder_pid = self_pid;
+        ret = 0;
+    }
+    spin_unlock(&lock->lock);
+    return ret;
+}
+
+int rwsem_acquire_write_interruptible(rwsem_t *lock) {
+    assert(current != NULL,
+           "rwsem_acquire_write_interruptible: no current thread");
+    assert(mycpu()->spin_depth == 0,
+           "rwsem_acquire_write_interruptible called with spinlock held");
+    assert(!CPU_IN_ITR(),
+           "rwsem_acquire_write_interruptible called in interrupt context");
+    if (!lock) {
+        return -EINVAL;
+    }
+
+    spin_lock(&lock->lock);
+    int self_pid = current->pid;
+    if (lock->holder_pid == self_pid) {
+        spin_unlock(&lock->lock);
+        return -EDEADLK;
+    }
+
+    while (__writer_should_wait(lock, self_pid)) {
+        if (signal_pending(current)) {
+            spin_unlock(&lock->lock);
+            return -EINTR;
+        }
+        __thread_state_set(current, THREAD_INTERRUPTIBLE);
+        int ret = tq_wait(&lock->write_queue, &lock->lock, NULL);
+        if (ret != 0 && signal_pending(current)) {
+            spin_unlock(&lock->lock);
+            return -EINTR;
+        }
+        assert(lock->holder_pid != self_pid,
+               "rwsem_acquire_write_interruptible: deadlock detected");
+    }
+
+    lock->holder_pid = self_pid;
+    spin_unlock(&lock->lock);
+    return 0;
+}
+
+int rwsem_acquire_write_timed(rwsem_t *lock, uint64 timeout_ms) {
+    assert(current != NULL, "rwsem_acquire_write_timed: no current thread");
+    assert(mycpu()->spin_depth == 0,
+           "rwsem_acquire_write_timed called with spinlock held");
+    assert(!CPU_IN_ITR(), "rwsem_acquire_write_timed called in interrupt context");
+    if (!lock) {
+        return -EINVAL;
+    }
+
+    if (timeout_ms == 0) {
+        int ret = rwsem_try_acquire_write(lock);
+        return ret == 0 ? 0 : -ETIMEDOUT;
+    }
+
+    uint64 start = r_time();
+    uint64 timeout_ticks = MS_TO_RAWTICKS(timeout_ms);
+    spin_lock(&lock->lock);
+    int self_pid = current->pid;
+    if (lock->holder_pid == self_pid) {
+        spin_unlock(&lock->lock);
+        return -EDEADLK;
+    }
+
+    while (__writer_should_wait(lock, self_pid)) {
+        if (signal_pending(current)) {
+            spin_unlock(&lock->lock);
+            return -EINTR;
+        }
+
+        uint64 elapsed = r_time() - start;
+        if (elapsed >= timeout_ticks) {
+            spin_unlock(&lock->lock);
+            return -ETIMEDOUT;
+        }
+
+        uint64 remaining_ticks = timeout_ticks - elapsed;
+        uint64 remaining_ms = (remaining_ticks + TICK_MS - 1) / TICK_MS;
+        if (remaining_ms == 0) {
+            remaining_ms = 1;
+        }
+
+        struct rwsem_timed_wait_ctx ctx = {
+            .lock = lock,
+            .timeout_ms = remaining_ms,
+            .timer_armed = false,
+        };
+
+        __thread_state_set(current, THREAD_INTERRUPTIBLE);
+        int ret = tq_wait_cb(&lock->write_queue, __rwsem_timed_sleep_cb,
+                             __rwsem_timed_wake_cb, &ctx, NULL);
+        if (ret != 0 && signal_pending(current)) {
+            spin_unlock(&lock->lock);
+            return -EINTR;
+        }
+        assert(lock->holder_pid != self_pid,
+               "rwsem_acquire_write_timed: deadlock detected");
+    }
+
+    lock->holder_pid = self_pid;
+    spin_unlock(&lock->lock);
+    return 0;
 }
 
 void rwsem_release(rwsem_t *lock) {
