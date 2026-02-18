@@ -465,7 +465,7 @@ int tty_poll(struct tty *tty, short events) {
             /* Canonical mode: data ready if input pipe has bytes */
             struct pipe *pi = tty->input_pipe;
             uint nwrite = smp_load_acquire(&pi->nwrite);
-            uint nread  = smp_load_acquire(&pi->nread);
+            uint nread = smp_load_acquire(&pi->nread);
             if ((nwrite - nread) > 0)
                 revents |= (events & (POLLIN | POLLRDNORM));
         } else {

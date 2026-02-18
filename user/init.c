@@ -62,21 +62,19 @@ int main(void) {
         printf("init: ext4 mounted at /usr\n");
     }
 
-    // Launch userspace telnet daemon in the background.
-    // Sleep briefly to let lwIP finish initialisation before utelnetd
-    // tries to create sockets.
-    sleep(10);
-    pid = fork();
-    if (pid == 0) {
-        char *telnetd_argv[] = {"utelnetd", 0};
-        exec("/bin/utelnetd", telnetd_argv);
-        printf("init: exec utelnetd failed\n");
-        exit(1);
-    } else if (pid < 0) {
-        printf("init: fork for utelnetd failed\n");
-    } else {
-        printf("init: utelnetd started (pid %d)\n", pid);
-    }
+    // Userspace telnet daemon disabled — using kernel telnetd instead.
+    // sleep(10);
+    // pid = fork();
+    // if (pid == 0) {
+    //     char *telnetd_argv[] = {"utelnetd", 0};
+    //     exec("/bin/utelnetd", telnetd_argv);
+    //     printf("init: exec utelnetd failed\n");
+    //     exit(1);
+    // } else if (pid < 0) {
+    //     printf("init: fork for utelnetd failed\n");
+    // } else {
+    //     printf("init: utelnetd started (pid %d)\n", pid);
+    // }
 
     for (;;) {
         printf("init: starting sh\n");

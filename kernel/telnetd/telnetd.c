@@ -12,8 +12,8 @@
  *     │  netconn_accept()
  *     ▼
  *   telnet_session (kthread, per-connection)
- *     ├── pty_alloc() → slave_tty
- *     ├── spawn_shell_on_pty(slave_tty)   [kthread → exec /bin/sh]
+ *     ├── open /dev/ptmx → master vfs_file, /dev/pts/N
+ *     ├── spawn_shell_on_pty(pty_idx)     [kthread → exec /bin/sh]
  *     ├── telnet_tx_thread (kthread)      [PTY master → TCP]
  *     └── (inline) TCP → PTY master loop
  *
@@ -40,14 +40,18 @@
 #include <vfs/file.h>
 #include <vfs/fcntl.h>
 #include "tty/tty.h"
+#include "tty/termios.h"
 #include "tty/session.h"
 #include "vfs/pipe.h"
+#include "vfs/fs.h"
+#include "vfs/stat.h"
 
 #include "lwip/opt.h"
 #include "lwip/api.h"
 #include "lwip/pbuf.h"
 #include "lwip/ip_addr.h"
 #include "lwip/err.h"
+#include "lwip/tcp.h"
 
 /* ──────────────────────────────────────────────────────────────────────────── */
 /* Configuration                                                               */
@@ -82,66 +86,42 @@
 /* ──────────────────────────────────────────────────────────────────────────── */
 
 struct telnet_session {
-    struct netconn  *conn;      /* TCP connection (accepted socket) */
-    struct tty      *slave_tty; /* PTY slave (shell attached here) */
-    volatile int     closing;   /* Shutdown flag */
-    volatile int     tx_done;   /* TX thread has exited */
-    int              shell_pid; /* PID of the shell process */
-    int              id;        /* Session index */
+    struct netconn    *conn;        /* TCP connection (accepted socket) */
+    struct tty        *slave_tty;   /* PTY slave (shell attached here) */
+    struct vfs_file   *master_file; /* VFS file from /dev/ptmx open */
+    volatile int       closing;     /* Shutdown flag */
+    volatile int       tx_done;     /* TX thread has exited */
+    int                shell_pid;   /* PID of the shell process */
+    int                pty_idx;     /* PTY index (N in /dev/pts/N) */
+    int                id;          /* Session index */
 };
 
 static int session_count;
 
 /* ──────────────────────────────────────────────────────────────────────────── */
-/* PTY slave VFS file ops                                                      */
+/* Kernel-internal VFS open helper                                             */
 /*                                                                             */
-/* These wrap the kernel TTY API so that the shell process sees fd 0/1/2 as    */
-/* a proper terminal (with ioctl support for termios, window size, etc.).      */
-/* The struct tty* is stored in file->private_data.                            */
+/* Opens a path through the full VFS/cdev stack and installs the resulting     */
+/* vfs_file into the current thread's fdtable (or just returns the file).      */
 /* ──────────────────────────────────────────────────────────────────────────── */
 
-static ssize_t pty_slave_fops_read(struct vfs_file *file, char *buf,
-                                   size_t count, bool user)
+static int kern_open(const char *path, int flags)
 {
-    struct tty *tty = (struct tty *)file->private_data;
-    return tty_read(tty, buf, count, user);
-}
+    struct vfs_inode *inode = vfs_namei(path, strlen(path));
+    if (IS_ERR_OR_NULL(inode))
+        return IS_ERR(inode) ? (int)PTR_ERR(inode) : -ENOENT;
 
-static ssize_t pty_slave_fops_write(struct vfs_file *file, const char *buf,
-                                    size_t count, bool user)
-{
-    struct tty *tty = (struct tty *)file->private_data;
-    return tty_write(tty, buf, count, user);
-}
+    struct vfs_file *f = vfs_fileopen(inode, flags);
+    vfs_iput(inode);
+    if (IS_ERR(f))
+        return (int)PTR_ERR(f);
 
-static int pty_slave_fops_release(struct vfs_inode *inode, struct vfs_file *file)
-{
-    (void)inode;
-    struct tty *tty = (struct tty *)file->private_data;
-    if (tty)
-        tty_close(tty);
-    return 0;
+    spin_lock(&current->fdtable->lock);
+    int fd = vfs_fdtable_alloc_fd(current->fdtable, f);
+    spin_unlock(&current->fdtable->lock);
+    vfs_fput(f); /* fdtable_alloc_fd added a ref; drop ours */
+    return fd;
 }
-
-static int pty_slave_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
-{
-    struct tty *tty = (struct tty *)file->private_data;
-    return tty_ioctl(tty, cmd, arg);
-}
-
-static int pty_slave_fops_poll(struct vfs_file *file, short events)
-{
-    struct tty *tty = (struct tty *)file->private_data;
-    return tty_poll(tty, events);
-}
-
-static struct vfs_file_ops pty_slave_file_ops = {
-    .read    = pty_slave_fops_read,
-    .write   = pty_slave_fops_write,
-    .release = pty_slave_fops_release,
-    .ioctl   = pty_slave_fops_ioctl,
-    .poll    = pty_slave_fops_poll,
-};
 
 /* ──────────────────────────────────────────────────────────────────────────── */
 /* Telnet protocol helpers                                                     */
@@ -307,8 +287,8 @@ static ssize_t telnet_feed_pty(struct telnet_session *sess,
 
 static void telnet_shell_entry(uint64 arg1, uint64 arg2)
 {
-    struct tty *slave_tty = (struct tty *)arg1;
-    (void)arg2;
+    int pty_idx = (int)arg1;
+    struct tty *slave_tty = (struct tty *)arg2;
 
     /*
      * 1. Replace fdtable with a fresh empty one.
@@ -319,19 +299,42 @@ static void telnet_shell_entry(uint64 arg1, uint64 arg2)
         vfs_fdtable_put(old_fdt);
 
     /*
-     * 2. Open PTY slave for fd 0 (stdin), 1 (stdout), 2 (stderr).
+     * 2. Open /dev/pts/N three times via VFS for fd 0/1/2.
+     *    This goes through cdev → pts_open_file → vfs_file_ops path.
      */
-    tty_open(slave_tty);
-    int fd0 = vfs_custom_fd_alloc(&pty_slave_file_ops, slave_tty, O_RDWR);
+    char pts_path[32];
+    {
+        /* Build "/dev/pts/<idx>" manually (no snprintf in kernel) */
+        const char *prefix = "/dev/pts/";
+        int pi = 0;
+        while (prefix[pi]) {
+            pts_path[pi] = prefix[pi];
+            pi++;
+        }
+        /* Convert pty_idx to string */
+        char tmp[8];
+        int ti = 0;
+        int v = pty_idx;
+        if (v == 0) {
+            tmp[ti++] = '0';
+        } else {
+            while (v > 0) {
+                tmp[ti++] = '0' + (v % 10);
+                v /= 10;
+            }
+        }
+        for (int i = ti - 1; i >= 0; i--)
+            pts_path[pi++] = tmp[i];
+        pts_path[pi] = '\0';
+    }
 
-    tty_open(slave_tty);
-    int fd1 = vfs_custom_fd_alloc(&pty_slave_file_ops, slave_tty, O_RDWR);
-
-    tty_open(slave_tty);
-    int fd2 = vfs_custom_fd_alloc(&pty_slave_file_ops, slave_tty, O_RDWR);
+    int fd0 = kern_open(pts_path, O_RDWR);
+    int fd1 = kern_open(pts_path, O_RDWR);
+    int fd2 = kern_open(pts_path, O_RDWR);
 
     if (fd0 < 0 || fd1 < 0 || fd2 < 0) {
-        printf("telnetd-sh: FAILED to allocate fds for PTY slave\n");
+        printf("telnetd-sh: FAILED to open %s fds: %d %d %d\n",
+               pts_path, fd0, fd1, fd2);
         return;
     }
 
@@ -339,7 +342,7 @@ static void telnet_shell_entry(uint64 arg1, uint64 arg2)
      * 3. Set up session and controlling terminal.
      */
     session_setsid();
-    if (current->session)
+    if (current->session && slave_tty)
         session_set_ctrl_tty(current->session, slave_tty);
 
     /*
@@ -370,11 +373,12 @@ static void telnet_shell_entry(uint64 arg1, uint64 arg2)
     usertrapret();
 }
 
-static struct thread *spawn_shell_on_pty(struct tty *slave_tty)
+static struct thread *spawn_shell_on_pty(int pty_idx, struct tty *slave_tty)
 {
     struct thread *t = kthread_create("telnet-sh",
                                       telnet_shell_entry,
-                                      (uint64)slave_tty, 0,
+                                      (uint64)pty_idx,
+                                      (uint64)slave_tty,
                                       KERNEL_STACK_ORDER);
     if (IS_ERR_OR_NULL(t)) {
         printf("telnetd: kthread_create for shell FAILED\n");
@@ -469,21 +473,67 @@ static void telnet_session_handler(uint64 arg1, uint64 arg2)
     struct netconn *conn = (struct netconn *)arg1;
     (void)arg2;
 
-    /* Allocate PTY pair */
-    struct tty *slave_tty = NULL;
     int sess_id = __atomic_fetch_add(&session_count, 1, __ATOMIC_RELAXED);
 
-    char pty_name[32];
-    safestrcpy(pty_name, "pts/0", sizeof(pty_name));
-    pty_name[4] = '0' + (sess_id % 10);
-
-    int r = pty_alloc(&slave_tty, pty_name, -1);
-    if (r != 0) {
-        printf("telnetd: pty_alloc failed: %d\n", r);
+    /*
+     * Allocate PTY pair via /dev/ptmx device wrapper.
+     * This goes through the full VFS → cdev → ptmx_open_file path,
+     * which registers /dev/pts/N and creates the slave cdev.
+     */
+    struct vfs_inode *ptmx_inode = vfs_namei("/dev/ptmx", 9);
+    if (IS_ERR_OR_NULL(ptmx_inode)) {
+        printf("telnetd: vfs_namei /dev/ptmx failed\n");
         netconn_close(conn);
         netconn_delete(conn);
         return;
     }
+
+    struct vfs_file *master_file = vfs_fileopen(ptmx_inode, O_RDWR);
+    vfs_iput(ptmx_inode);
+    if (IS_ERR(master_file)) {
+        printf("telnetd: vfs_fileopen /dev/ptmx failed: %ld\n",
+               PTR_ERR(master_file));
+        netconn_close(conn);
+        netconn_delete(conn);
+        return;
+    }
+
+    /* Extract the pty_pair and slave tty from the master file */
+    struct tty *slave_tty = NULL;
+    int pty_idx = -1;
+    {
+        /* master_file->private_data is a struct pty_pair* (set by ptmx_open_file) */
+        /* We need the pty index for /dev/pts/N and the slave tty for I/O */
+        int idx_val = 0;
+        if (master_file->ops && master_file->ops->ioctl) {
+            int ret = master_file->ops->ioctl(master_file, TIOCGPTN, &idx_val);
+            if (ret == 0)
+                pty_idx = idx_val;
+        }
+
+        /* Get slave_tty: the private_data is pty_pair, and pty_pair->slave
+         * is the tty. We access it via pty_master_read/write which take
+         * slave_tty. We need a way to get it. Use the ptmx_fops_read
+         * path: file->private_data is struct pty_pair*, ->slave is the tty.
+         * Since struct pty_pair is defined in ptmx.c, we cast carefully. */
+        struct {
+            struct tty *slave;
+        } *pair_hdr = master_file->private_data;
+        if (pair_hdr)
+            slave_tty = pair_hdr->slave;
+    }
+
+    if (slave_tty == NULL || pty_idx < 0) {
+        printf("telnetd: failed to get PTY pair from /dev/ptmx (idx=%d)\n",
+               pty_idx);
+        vfs_fput(master_file);
+        netconn_close(conn);
+        netconn_delete(conn);
+        return;
+    }
+
+    printf("telnetd: opened /dev/ptmx → /dev/pts/%d for session %d\n",
+           pty_idx, sess_id);
 
     /* Set PTY slave termios to reasonable defaults for telnet */
     struct termios *tp = &slave_tty->termios;
@@ -503,18 +553,20 @@ static void telnet_session_handler(uint64 arg1, uint64 arg2)
     struct telnet_session *sess = (struct telnet_session *)kalloc();
     if (sess == NULL) {
         printf("telnetd: kalloc failed for session\n");
-        tty_unref(slave_tty);
+        vfs_fput(master_file); /* triggers ptmx_fops_release → cleanup */
         netconn_close(conn);
         netconn_delete(conn);
         return;
     }
     memset(sess, 0, sizeof(*sess));
-    sess->conn      = conn;
-    sess->slave_tty = slave_tty;
-    sess->closing   = 0;
-    sess->tx_done   = 0;
-    sess->shell_pid = -1;
-    sess->id        = sess_id;
+    sess->conn        = conn;
+    sess->slave_tty   = slave_tty;
+    sess->master_file = master_file;
+    sess->closing     = 0;
+    sess->tx_done     = 0;
+    sess->shell_pid   = -1;
+    sess->pty_idx     = pty_idx;
+    sess->id          = -1; /* updated to shell PID after spawn */
 
     /* Send telnet negotiations */
     telnet_send_initial_negotiation(conn);
@@ -525,15 +577,18 @@ static void telnet_session_handler(uint64 arg1, uint64 arg2)
     netconn_write(conn, banner, sizeof(banner) - 1, NETCONN_COPY);
 
     /* Spawn the shell on the slave side of the PTY */
-    struct thread *shell_thread = spawn_shell_on_pty(slave_tty);
+    struct thread *shell_thread = spawn_shell_on_pty(pty_idx, slave_tty);
     if (shell_thread == NULL) {
         kfree(sess);
-        tty_unref(slave_tty);
+        vfs_fput(master_file);
         netconn_close(conn);
         netconn_delete(conn);
         return;
     }
     sess->shell_pid = shell_thread->pid;
+    sess->id        = shell_thread->pid; /* shell PID = kernel session ID */
+
+    printf("telnetd: session %d started (pts/%d)\n", sess->id, pty_idx);
 
     /* Start the TX bridge (PTY → TCP) in a separate kthread */
     struct thread *tx = kthread_create("telnet-tx",
@@ -636,10 +691,15 @@ static void telnet_session_handler(uint64 arg1, uint64 arg2)
     /* Give the shell a moment to fully exit and release its fds */
     sleep_ms(100);
 
-    /* Remove /dev/pts/N before releasing the tty */
-    pty_dealloc(slave_tty);
-
-    tty_unref(slave_tty);
+    /*
+     * Release the master VFS file.  This triggers ptmx_fops_release()
+     * which removes /dev/pts/N from devtmpfs, unregisters the slave
+     * cdev, and (if no user fds remain) frees the pty_pair + tty.
+     *
+     * We must NOT call pty_dealloc / tty_unref manually — the device
+     * wrapper owns the PTY lifecycle now.
+     */
+    vfs_fput(sess->master_file);
 
     printf("telnetd: session %d ended\n", sess->id);
     kfree(sess);
@@ -694,6 +754,9 @@ static void telnetd_listener(uint64 arg1, uint64 arg2)
             sleep_ms(100);
             continue;
         }
+
+        /* Disable Nagle for interactive echo */
+        tcp_nagle_disable(client->pcb.tcp);
 
         ip_addr_t raddr;
         u16_t rport;

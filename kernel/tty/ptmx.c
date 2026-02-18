@@ -1,20 +1,24 @@
 /*
- * ptmx.c - /dev/ptmx and /dev/pts/N character devices
+ * ptmx.c — /dev/ptmx and /dev/pts/N   (VFS-integrated lifecycle)
  *
- * Implements the Linux-style PTY multiplexer interface:
+ * Every open fd — master or slave — holds one reference on the shared
+ * pty_pair.  When the last fd is closed the tty and pair are freed.
  *
  *   /dev/ptmx  (major 5, minor 2)
- *     Opening this device allocates a new PTY pair.  The returned fd is
- *     the master side.  The slave index can be obtained via TIOCGPTN
- *     ioctl, and the corresponding slave is at /dev/pts/<index>.
+ *     Opening allocates a new PTY pair.  The returned fd is the master
+ *     side.  The slave index is obtained via TIOCGPTN ioctl; the slave
+ *     device appears at /dev/pts/<index>.
  *
- *   /dev/pts/N (major 136, minor N)
- *     Each slave is a character device that wraps a struct tty with
- *     the PTY slave ops.  Opening /dev/pts/N gives the slave side
- *     of PTY pair N.
+ *   /dev/pts/N (major 136, minor N+1)
+ *     A character device whose open_file callback installs vfs_file_ops
+ *     that forward to the PTY slave tty.  Each open fd holds a pair ref.
  *
- * The ptmx cdev uses the open_file callback to transform the opened
- * vfs_file into a master PTY file descriptor with custom file ops.
+ * Lifecycle:
+ *
+ *   ptmx open   → pty_pair_alloc(), pair->refcount = 1
+ *   pts  open   → pair->refcount++
+ *   any  close  → pair->refcount--; if 0 → pty_pair_destroy()
+ *   master close → also: tty_hangup, remove devtmpfs, cdev_unregister
  */
 
 #include "types.h"
@@ -47,84 +51,173 @@
 /* ---- Per-PTY state ---- */
 
 struct pty_pair {
-    struct tty *slave;      /* The slave tty (allocated by pty_alloc) */
-    cdev_t      slave_cdev; /* Registered cdev for /dev/pts/N */
-    int         index;      /* PTY index (= minor number) */
-    int         master_open;/* Whether a master fd is still open */
+    struct tty  *slave;         /* The slave tty (allocated by pty_alloc) */
+    cdev_t       slave_cdev;    /* Registered cdev for /dev/pts/N */
+    int          index;         /* PTY index (N in /dev/pts/N) */
+    int          refcount;      /* Open master + slave fds */
+    int          master_open;   /* Master side still alive? */
+    int          cdev_live;     /* Slave cdev still registered? */
+    spinlock_t   lock;          /* Protects refcount / flags */
 };
 
 static spinlock_t ptmx_lock = SPINLOCK_INITIALIZED("ptmx");
-static struct pty_pair *pty_table[MAX_PTYS]; /* indexed by minor */
+static struct pty_pair *pty_table[MAX_PTYS];
 
-/* ================================================================== */
-/*  /dev/pts/N — slave character device                               */
-/* ================================================================== */
+/* ---- refcount helpers ---- */
 
-static int pts_cdev_open(cdev_t *cdev) {
-    struct pty_pair *pair = container_of(cdev, struct pty_pair, slave_cdev);
-    if (pair->slave == NULL)
-        return -ENXIO;
-    return tty_open(pair->slave);
+/*
+ * Drop one reference.  Returns true if this was the LAST reference
+ * and the caller must call pty_pair_destroy().
+ */
+static int pty_pair_put(struct pty_pair *pair)
+{
+    spin_lock(&pair->lock);
+    int last = (--pair->refcount <= 0);
+    spin_unlock(&pair->lock);
+    return last;
 }
 
-static int pts_cdev_release(cdev_t *cdev) {
-    struct pty_pair *pair = container_of(cdev, struct pty_pair, slave_cdev);
-
-    /*
-     * This callback fires when the device kobject refcount reaches 0,
-     * i.e. after device_unregister + all user cdev_put calls.
-     * It is safe to tear down the pair and free everything here.
-     */
-
-    /* Close the slave tty (drops the "register-open" tty ref) */
-    if (pair->slave != NULL)
-        tty_close(pair->slave);
-
-    /* Drop the initial allocation tty ref (from pty_alloc/tty_alloc) */
-    if (pair->slave != NULL) {
-        tty_unref(pair->slave);
-        pair->slave = NULL;
-    }
-
-    /* Clear pty_table slot */
+static void pty_pair_destroy(struct pty_pair *pair)
+{
+    /* Clear table slot so the index can be reused */
     spin_lock(&ptmx_lock);
     if (pty_table[pair->index] == pair)
         pty_table[pair->index] = NULL;
     spin_unlock(&ptmx_lock);
 
-    /* Free the pair (slave_cdev is embedded, so this is the last use) */
+    /* Free the tty (closes pipe ends, releases slab) */
+    if (pair->slave) {
+        tty_unref(pair->slave);
+        pair->slave = NULL;
+    }
+
     kmm_free(pair);
-    return 0;
 }
 
-static int pts_cdev_read(cdev_t *cdev, bool user, void *buf, size_t count) {
-    struct pty_pair *pair = container_of(cdev, struct pty_pair, slave_cdev);
-    if (pair->slave == NULL)
-        return -ENXIO;
-    return tty_read(pair->slave, (char *)buf, count, user);
+/* Build the devtmpfs name "pts/<idx>" into buf (must be >= 16 bytes) */
+static void pts_name(char *buf, int idx)
+{
+    const char *prefix = "pts/";
+    int n = 0;
+    while (*prefix)
+        buf[n++] = *prefix++;
+    char tmp[8];
+    int ti = 0;
+    int v = idx;
+    if (v == 0) {
+        tmp[ti++] = '0';
+    } else {
+        while (v > 0) { tmp[ti++] = '0' + (v % 10); v /= 10; }
+    }
+    for (int i = ti - 1; i >= 0; i--)
+        buf[n++] = tmp[i];
+    buf[n] = '\0';
 }
 
-static int pts_cdev_write(cdev_t *cdev, bool user, const void *buf,
-                          size_t count) {
-    struct pty_pair *pair = container_of(cdev, struct pty_pair, slave_cdev);
-    if (pair->slave == NULL)
-        return -ENXIO;
+/* ================================================================== */
+/*  /dev/pts/N — slave vfs_file_ops (installed by open_file callback) */
+/* ================================================================== */
+
+static ssize_t pts_fops_read(struct vfs_file *file, char *buf,
+                             size_t count, bool user)
+{
+    struct pty_pair *pair = (struct pty_pair *)file->private_data;
+    if (pair == NULL || pair->slave == NULL)
+        return -EIO;
+    return tty_read(pair->slave, buf, count, user);
+}
+
+static ssize_t pts_fops_write(struct vfs_file *file, const char *buf,
+                              size_t count, bool user)
+{
+    struct pty_pair *pair = (struct pty_pair *)file->private_data;
+    if (pair == NULL || pair->slave == NULL)
+        return -EIO;
     return tty_write(pair->slave, (const char *)buf, count, user);
 }
 
-static int pts_cdev_ioctl(cdev_t *cdev, uint64 cmd, void *arg) {
-    struct pty_pair *pair = container_of(cdev, struct pty_pair, slave_cdev);
-    if (pair->slave == NULL)
-        return -ENXIO;
+static int pts_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
+{
+    struct pty_pair *pair = (struct pty_pair *)file->private_data;
+    if (pair == NULL || pair->slave == NULL)
+        return -EIO;
     return tty_ioctl(pair->slave, cmd, arg);
 }
 
-static int pts_cdev_poll(cdev_t *cdev, short events) {
-    struct pty_pair *pair = container_of(cdev, struct pty_pair, slave_cdev);
-    if (pair->slave == NULL)
+static int pts_fops_poll(struct vfs_file *file, short events)
+{
+    struct pty_pair *pair = (struct pty_pair *)file->private_data;
+    if (pair == NULL || pair->slave == NULL)
         return 0;
     return tty_poll(pair->slave, events);
 }
+
+static int pts_fops_release(struct vfs_inode *inode, struct vfs_file *file)
+{
+    (void)inode;
+    struct pty_pair *pair = (struct pty_pair *)file->private_data;
+    if (pair == NULL)
+        return 0;
+
+    file->private_data = NULL;
+
+    /* Drop the tty-level "open" ref taken in pts_open_file */
+    tty_close(pair->slave);
+
+    /* Drop the pair ref — may destroy */
+    if (pty_pair_put(pair))
+        pty_pair_destroy(pair);
+
+    return 0;
+}
+
+static struct vfs_file_ops pts_slave_file_ops = {
+    .read    = pts_fops_read,
+    .write   = pts_fops_write,
+    .release = pts_fops_release,
+    .ioctl   = pts_fops_ioctl,
+    .poll    = pts_fops_poll,
+};
+
+/* ================================================================== */
+/*  /dev/pts/N — cdev (open_file installs vfs_file_ops above)         */
+/* ================================================================== */
+
+/*
+ * pts_open_file is called by __vfs_open_cdev.  It installs the slave
+ * file ops on the vfs_file so that the VFS manages the fd lifecycle.
+ * The cdev kobject ref is released by __vfs_open_cdev immediately
+ * after this returns (because we set file->ops).
+ */
+static int pts_open_file(cdev_t *cdev, struct vfs_file *file)
+{
+    struct pty_pair *pair = container_of(cdev, struct pty_pair, slave_cdev);
+
+    /* Reject open after master closed (device is being torn down) */
+    spin_lock(&pair->lock);
+    if (!pair->master_open) {
+        spin_unlock(&pair->lock);
+        return -ENXIO;
+    }
+    pair->refcount++;
+    spin_unlock(&pair->lock);
+
+    /* tty-level open (bumps tty refcount) */
+    int ret = tty_open(pair->slave);
+    if (ret != 0) {
+        if (pty_pair_put(pair))
+            pty_pair_destroy(pair);
+        return ret;
+    }
+
+    file->ops = &pts_slave_file_ops;
+    file->private_data = pair;
+    return 0;
+}
+
+/* cdev open/release are no-ops; lifecycle is via vfs_file_ops */
+static int pts_cdev_open(cdev_t *cdev)    { (void)cdev; return 0; }
+static int pts_cdev_release(cdev_t *cdev) { (void)cdev; return 0; }
 
 /* ================================================================== */
 /*  PTY master — vfs_file_ops (installed by ptmx open_file)           */
@@ -152,7 +245,15 @@ static int ptmx_fops_release(struct vfs_inode *inode, struct vfs_file *file) {
     if (pair == NULL)
         return 0;
 
-    int idx = pair->index;
+    file->private_data = NULL;
+
+    /* ---- master-specific teardown ---- */
+
+    spin_lock(&pair->lock);
+    pair->master_open = 0;
+    int do_unregister = pair->cdev_live;
+    pair->cdev_live = 0;
+    spin_unlock(&pair->lock);
 
     /* Hang up the slave tty so any blocked readers/writers unblock */
     if (pair->slave != NULL)
@@ -161,41 +262,20 @@ static int ptmx_fops_release(struct vfs_inode *inode, struct vfs_file *file) {
     /* Remove /dev/pts/N from devtmpfs so no NEW opens succeed */
     {
         char name[32];
-        char tmp[16];
-        int ti = 0;
-        int v = idx;
-        if (v == 0) {
-            tmp[ti++] = '0';
-        } else {
-            while (v > 0) {
-                tmp[ti++] = '0' + (v % 10);
-                v /= 10;
-            }
-        }
-        const char *prefix = "pts/";
-        int nlen = 0;
-        int pi = 0;
-        while (prefix[pi])
-            name[nlen++] = prefix[pi++];
-        for (int i = ti - 1; i >= 0; i--)
-            name[nlen++] = tmp[i];
-        name[nlen] = '\0';
+        pts_name(name, pair->index);
         devtmpfs_remove_node(name);
     }
 
-    pair->master_open = 0;
-    file->private_data = NULL;
+    /* Unregister the slave cdev.  Since all slave fds use open_file
+     * (no file holds a kobject ref), the kobject drops to 0 immediately
+     * and pts_cdev_release fires (which is a no-op).  Existing slave
+     * fds continue to work because they use vfs_file_ops directly. */
+    if (do_unregister)
+        cdev_unregister(&pair->slave_cdev);
 
-    /*
-     * Unregister the slave cdev.  This drops the initial kobject ref.
-     * If user processes still have open fds to /dev/pts/N, the kobject
-     * refcount stays > 0 and pts_cdev_release runs later (when the
-     * last user closes the slave fd).  If no user fds remain, the
-     * kobject reaches 0 synchronously and pts_cdev_release fires
-     * HERE — freeing pair.  After this call, pair may be INVALID.
-     */
-    cdev_unregister(&pair->slave_cdev);
-    /* pair is potentially freed — do NOT touch it after this point */
+    /* Drop the pair ref — may destroy */
+    if (pty_pair_put(pair))
+        pty_pair_destroy(pair);
 
     return 0;
 }
@@ -279,70 +359,58 @@ static int ptmx_open_file(cdev_t *cdev, struct vfs_file *file) {
 
     /* Allocate the pair structure */
     struct pty_pair *pair = kmm_alloc(sizeof(*pair));
-    if (pair == NULL)
+    if (pair == NULL) {
+        spin_lock(&ptmx_lock);
+        pty_table[idx] = NULL;
+        spin_unlock(&ptmx_lock);
         return -ENOMEM;
+    }
     memset(pair, 0, sizeof(*pair));
+    spin_init(&pair->lock, "pty_pair");
 
-    pair->index = idx;
+    pair->index       = idx;
+    pair->refcount    = 1;          /* master fd */
     pair->master_open = 1;
+    pair->cdev_live   = 0;
 
     /* Build slave name "pts/N" */
     char name[32];
-    int nlen = 0;
-    /* Manual int-to-string for the index */
-    {
-        char tmp[16];
-        int ti = 0;
-        int v = idx;
-        if (v == 0) {
-            tmp[ti++] = '0';
-        } else {
-            while (v > 0) {
-                tmp[ti++] = '0' + (v % 10);
-                v /= 10;
-            }
-        }
-        const char *prefix = "pts/";
-        int pi = 0;
-        while (prefix[pi]) {
-            name[nlen++] = prefix[pi++];
-        }
-        for (int i = ti - 1; i >= 0; i--) {
-            name[nlen++] = tmp[i];
-        }
-        name[nlen] = '\0';
-    }
+    pts_name(name, idx);
 
     /* Allocate the slave tty */
     struct tty *slave = NULL;
     int dev_minor = idx + 1; /* device framework rejects minor 0 */
     int ret = pty_alloc(&slave, name, dev_minor);
     if (ret != 0) {
+        spin_lock(&ptmx_lock);
+        pty_table[idx] = NULL;
+        spin_unlock(&ptmx_lock);
         kmm_free(pair);
         return ret;
     }
     pair->slave = slave;
 
-    /* Set up the slave cdev at (PTS_MAJOR, dev_minor) */
+    /* Set up the slave cdev with open_file so slave fds get file ops */
     memset(&pair->slave_cdev, 0, sizeof(pair->slave_cdev));
     pair->slave_cdev.dev.major = PTS_MAJOR;
     pair->slave_cdev.dev.minor = dev_minor;
     pair->slave_cdev.readable = 1;
     pair->slave_cdev.writable = 1;
-    pair->slave_cdev.ops.open    = pts_cdev_open;
-    pair->slave_cdev.ops.release = pts_cdev_release;
-    pair->slave_cdev.ops.read    = pts_cdev_read;
-    pair->slave_cdev.ops.write   = pts_cdev_write;
-    pair->slave_cdev.ops.ioctl   = pts_cdev_ioctl;
-    pair->slave_cdev.ops.poll    = pts_cdev_poll;
+    pair->slave_cdev.ops.open      = pts_cdev_open;
+    pair->slave_cdev.ops.release   = pts_cdev_release;
+    pair->slave_cdev.ops.open_file = pts_open_file;
 
     ret = cdev_register(&pair->slave_cdev);
     if (ret != 0) {
         printf("ptmx: failed to register pts/%d cdev: %d\n", idx, ret);
         tty_unref(slave);
+        spin_lock(&ptmx_lock);
+        pty_table[idx] = NULL;
+        spin_unlock(&ptmx_lock);
         kmm_free(pair);
         return ret;
     }
+    pair->cdev_live = 1;
 
     /* Record in global table */
     spin_lock(&ptmx_lock);
