@@ -299,7 +299,7 @@ void vfs_fput(struct vfs_file *file) {
         // Note: anonymous pipe cleanup (pipe != NULL, inode == NULL) is now
         // handled by pipe_file_ops.release via __vfs_file_free below.
         if (inode != NULL) {
-            if (S_ISCHR(inode->mode)) {
+            if (S_ISCHR(inode->mode) && file->cdev != NULL) {
                 ret = cdev_put(file->cdev);
                 file->cdev = NULL;
                 if (ret != 0) {
@@ -356,13 +356,16 @@ int vfs_ioctl(struct vfs_file *file, uint64 cmd, void *arg) {
     /* Fast path: character / block device files — dispatch to device layer */
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     if (inode != NULL && (S_ISBLK(inode->mode) || S_ISCHR(inode->mode))) {
+        /* Prefer custom file ops (installed by cdev open_file, e.g. PTY master) */
+        if (file->ops != NULL && file->ops->ioctl != NULL)
+            return file->ops->ioctl(file, cmd, arg);
         device_t *dev = (device_t *)file->cdev;
         if (dev != NULL)
             return dev_ioctl(dev, cmd, arg);
         return -ENODEV;
     }
 
-    /* Fallback: custom file descriptors (PTY slaves, etc.) */
+    /* Fallback: custom file descriptors (pipes, sockets, etc.) */
     if (file->ops != NULL && file->ops->ioctl != NULL)
         return file->ops->ioctl(file, cmd, arg);
 
@@ -405,8 +408,14 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
             __vfs_file_unlock(file);
             return -EBADF;
         }
-        struct cdev *cdev = file->cdev;
-        int ret = cdev_read(cdev, user, buf, n);
+        ssize_t ret;
+        if (file->ops != NULL && file->ops->read != NULL) {
+            /* Custom file ops installed by cdev open_file (e.g. PTY master) */
+            ret = file->ops->read(file, buf, n, user);
+        } else {
+            struct cdev *cdev = file->cdev;
+            ret = cdev_read(cdev, user, buf, n);
+        }
         __vfs_file_unlock(file);
         return ret;
     }
@@ -526,8 +535,14 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
             __vfs_file_unlock(file);
             return -EBADF;
         }
-        struct cdev *cdev = file->cdev;
-        int ret = cdev_write(cdev, user, buf, n);
+        ssize_t ret;
+        if (file->ops != NULL && file->ops->write != NULL) {
+            /* Custom file ops installed by cdev open_file (e.g. PTY master) */
+            ret = file->ops->write(file, buf, n, user);
+        } else {
+            struct cdev *cdev = file->cdev;
+            ret = cdev_write(cdev, user, buf, n);
+        }
         __vfs_file_unlock(file);
         return ret;
     }

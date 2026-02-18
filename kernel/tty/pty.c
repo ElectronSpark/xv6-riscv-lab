@@ -113,19 +113,24 @@ static int __pty_next_index = 0;
  *
  * @slave_out: on success, receives a pointer to the slave tty
  * @name:      base name for the slave (e.g. "pts/0")
+ * @minor:     minor device number for /dev/pts/N (if < 0, auto-assign)
  *
  * Returns 0 on success, negative errno on failure.
  *
  * The caller interacts with the master side through
  * pty_master_read / pty_master_write, passing the slave tty pointer.
  */
-int pty_alloc(struct tty **slave_out, const char *name) {
+int pty_alloc(struct tty **slave_out, const char *name, int minor) {
     struct tty *slave = tty_alloc(name, &pty_slave_ops);
     if (IS_ERR(slave))
         return PTR_ERR(slave);
 
     /* Register a devtmpfs entry for this PTY slave (e.g. /dev/pts/0) */
-    int idx = __atomic_fetch_add(&__pty_next_index, 1, __ATOMIC_SEQ_CST);
+    int idx;
+    if (minor >= 0)
+        idx = minor;
+    else
+        idx = __atomic_fetch_add(&__pty_next_index, 1, __ATOMIC_SEQ_CST);
     dev_t dev = mkdev(PTY_MAJOR, PTY_MINOR_BASE + idx);
     devtmpfs_create_node(name, S_IFCHR | 0620, dev);
 

@@ -391,6 +391,7 @@ if(USE_NEWLIB)
         )
 
         add_custom_target(${PROGRAM_NAME}_newlib ALL DEPENDS ${PROGRAM_ELF})
+        add_dependencies(user_programs ${PROGRAM_NAME}_newlib)
 
         list(APPEND USER_PROGRAMS ${PROGRAM_NAME})
         set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
@@ -402,6 +403,7 @@ if(USE_NEWLIB)
     add_newlib_program(_nmalloc ${NEWLIB_XV6_DIR}/src/misc/newlib_malloc_smoke.c)
     add_newlib_program(_nettest ${NEWLIB_XV6_DIR}/src/misc/nettest.c)
     add_newlib_program(_rawecho ${NEWLIB_XV6_DIR}/src/misc/rawecho_test.c)
+    add_newlib_program(_utelnetd ${NEWLIB_XV6_DIR}/src/misc/utelnetd.c)
 
     set(NCURSES_SRC_DIR "${CMAKE_SOURCE_DIR}/user/ncurses")
     set(NCURSES_BUILD_DIR "${CMAKE_BINARY_DIR}/ncurses/build-xv6")

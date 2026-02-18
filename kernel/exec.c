@@ -22,6 +22,7 @@
 #include "vfs/fs.h"
 #include "vfs/file.h"
 #include "vfs/fcntl.h"
+#include "signal.h"
 
 int flags2vmperm(int flags) {
     int perm = 0;
@@ -313,6 +314,10 @@ int exec(char *path, char **argv, char **envp) {
     p->vm = tmp_vm;                           // Set the new VM
     p->trapframe->trapframe.sepc = elf.entry; // initial program counter = main
     p->trapframe->trapframe.sp = sp;          // initial stack pointer
+
+    // Reset caught signal handlers to SIG_DFL (POSIX: the old handler
+    // addresses are meaningless in the new address space).
+    sigacts_exec(p->sigacts);
 
     // Close descriptors marked close-on-exec now that exec is committed.
     vfs_fdtable_close_on_exec(p->fdtable);

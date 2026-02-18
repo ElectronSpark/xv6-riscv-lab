@@ -1781,6 +1781,20 @@ uint64 sys_vfs_ioctl(void) {
         }
         break;
     }
+    case TIOCGPTN: {
+        int kptn;
+        ret = vfs_ioctl(f, cmd, &kptn);
+        if (ret == 0) {
+            if (either_copyout(1, arg, &kptn, sizeof(kptn)) < 0)
+                ret = -EFAULT;
+        }
+        break;
+    }
+    case TIOCSCTTY: {
+        /* arg is an integer flag (usually 0), pass through */
+        ret = vfs_ioctl(f, cmd, (void *)arg);
+        break;
+    }
     default:
         /* Unknown ioctl — pass arg through as opaque pointer */
         ret = vfs_ioctl(f, cmd, (void *)arg);

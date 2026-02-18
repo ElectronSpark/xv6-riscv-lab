@@ -58,6 +58,7 @@ void sigacts_lock(sigacts_t *sa);
 void sigacts_unlock(sigacts_t *sa);
 int sigacts_holding(sigacts_t *sa);
 sigacts_t *sigacts_init(void);
+void sigacts_exec(sigacts_t *sa);
 sigacts_t *sigacts_dup(sigacts_t *psa, uint64 clone_flags);
 void sigacts_put(sigacts_t *sa);
 

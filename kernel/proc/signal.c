@@ -366,6 +366,30 @@ sigacts_t *sigacts_init(void) {
     return sa;
 }
 
+/*
+ * Reset signal dispositions for exec (POSIX compliance).
+ *
+ * After exec, caught signals (sa_handler != SIG_DFL && sa_handler != SIG_IGN)
+ * must be reset to SIG_DFL because the old handler function no longer exists
+ * in the new address space.  Ignored signals remain ignored.  Default signals
+ * remain default.
+ */
+void sigacts_exec(sigacts_t *sa) {
+    if (!sa)
+        return;
+    sigacts_lock(sa);
+    for (int i = 1; i <= NSIG; i++) {
+        if (sa->sa[i].sa_handler != SIG_DFL &&
+            sa->sa[i].sa_handler != SIG_IGN) {
+            __sig_setdefault(sa, i);
+        }
+        /* Also clear SA_NOCLDWAIT on exec (Linux behaviour) */
+        sa->sa[i].sa_flags = 0;
+        sigemptyset(&sa->sa[i].sa_mask);
+    }
+    sigacts_unlock(sa);
+}
+
 sigacts_t *sigacts_dup(sigacts_t *psa, uint64 clone_flags) {
     if (!psa) {
         return NULL;

@@ -477,7 +477,7 @@ static void telnet_session_handler(uint64 arg1, uint64 arg2)
     safestrcpy(pty_name, "pts/0", sizeof(pty_name));
     pty_name[4] = '0' + (sess_id % 10);
 
-    int r = pty_alloc(&slave_tty, pty_name);
+    int r = pty_alloc(&slave_tty, pty_name, -1);
     if (r != 0) {
         printf("telnetd: pty_alloc failed: %d\n", r);
         netconn_close(conn);

@@ -159,8 +159,9 @@ void start_kernel_post_init(void) {
     sockinit();
 #ifdef USE_LWIP
     lwip_net_init();    // lwIP TCP/IP stack initialization
-    extern void telnetd_init(void);
-    telnetd_init();     // Telnet server (port 23)
+    // Kernel telnetd disabled — userspace utelnetd launched from init.c
+    // extern void telnetd_init(void);
+    // telnetd_init();     // Telnet server (port 23)
     extern void gdbstub_init(void);
     gdbstub_init();     // GDB remote stub (port 1234)
 #endif

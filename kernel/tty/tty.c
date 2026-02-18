@@ -583,8 +583,13 @@ int tty_ioctl(struct tty *tty, uint64 cmd, void *arg) {
             tty->ops->set_termios(tty, tp);
 
         /* TCSETSF: also discard pending input */
-        if (cmd == TCSETSF && tty->ops && tty->ops->discard_input)
-            tty->ops->discard_input(tty);
+        if (cmd == TCSETSF) {
+            spin_lock(&tty->lock);
+            tty->raw_r = tty->raw_w; /* flush raw ring buffer */
+            spin_unlock(&tty->lock);
+            if (tty->ops && tty->ops->discard_input)
+                tty->ops->discard_input(tty);
+        }
 
         return 0;
     }
@@ -624,6 +629,14 @@ int tty_ioctl(struct tty *tty, uint64 cmd, void *arg) {
         if (tty->session == NULL || tty->session->sid != current->sid)
             return -ENOTTY;
         session_set_fg_pgid(tty->session, pgid);
+        return 0;
+    }
+    case TIOCSCTTY: {
+        /* Set controlling terminal: the calling process must be a session
+         * leader and must not already have a controlling terminal. */
+        if (current->session == NULL)
+            return -EPERM;
+        session_set_ctrl_tty(current->session, tty);
         return 0;
     }
     default:

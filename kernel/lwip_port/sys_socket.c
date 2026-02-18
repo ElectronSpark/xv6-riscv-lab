@@ -841,7 +841,28 @@ uint64 sys_setsockopt(void)
             return 0; /* silently accept unknown options */
         }
     }
-    /* Non-SOL_SOCKET levels: silently accept */
+    if (level == IPPROTO_TCP) {
+        switch (optname) {
+        case 1: /* TCP_NODELAY */ {
+            if (sk->type != SOCK_STREAM || sk->conn->pcb.tcp == NULL)
+                return (uint64)-EINVAL;
+            if (optlen >= (int)sizeof(int)) {
+                int val;
+                if (vm_copyin(current->vm, &val, uoptval, sizeof(val)) < 0)
+                    return (uint64)-EFAULT;
+                if (val)
+                    tcp_nagle_disable(sk->conn->pcb.tcp);
+                else
+                    tcp_nagle_enable(sk->conn->pcb.tcp);
+            }
+            return 0;
+        }
+        default:
+            return 0;
+        }
+    }
+
+    /* Other levels: silently accept */
     return 0;
 }
 
