@@ -24,8 +24,8 @@ typedef struct spinlock {
  * @brief Default sleep/wakeup callbacks for spinlock-protected waits.
  *
  * spin_sleep_cb releases the spinlock before yielding; spin_wake_cb
- * re-acquires it after wakeup.  Used by tq_wait_in_state() and
- * ttree_wait_in_state() as the default callbacks.
+ * re-acquires it after wakeup. Used by tq_wait() / tq_wait_cb() and
+ * ttree_wait() / ttree_wait_cb() as the default callbacks.
  *
  * Status convention: spin_sleep_cb returns 1 (lock released) or
  * 0 (data was NULL, no-op).  spin_wake_cb only re-acquires when

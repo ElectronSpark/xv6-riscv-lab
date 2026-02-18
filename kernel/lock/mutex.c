@@ -69,6 +69,7 @@ int mutex_lock(mutex_t *lk) {
            "mutex_lock: deadlock detected, thread already holds the lock");
 
     while (__mutex_holder(lk) != self->pid) {
+        __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
         int ret = tq_wait(&lk->wait_queue, &lk->lk, NULL);
         if (ret != 0) {
             // If tq_wait returns an error, and the thread has already

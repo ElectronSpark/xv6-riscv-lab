@@ -165,6 +165,7 @@ static void __worker_routine(void) {
                 __exit_routine(0);
             }
             // Otherwise wait for work to be assigned
+            __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
             int ret = tq_wait(&wq->idle_queue, &wq->lock, (uint64 *)&work);
             if (ret != 0) {
                 __wq_unlock(wq);

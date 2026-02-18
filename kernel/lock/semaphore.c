@@ -74,6 +74,7 @@ int sem_wait(sem_t *sem) {
         return 0; // Semaphore acquired successfully
     }
 
+    __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
     int ret = tq_wait(&sem->wait_queue, &sem->lk, NULL);
     if (ret != 0) {
         int wake_ret = __sem_do_post(sem);

@@ -904,6 +904,7 @@ static int __pcache_node_io_wait(struct pcache *pcache, page_t *page) {
     __pcache_tree_rlock(pcache);
     struct pcache_node *node = page->pcache.pcache_node;
     while (node->io_in_progress) {
+        __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
         tq_wait_cb(&node->io_waiters, rwlock_r_sleep_cb, rwlock_r_wake_cb,
                    &pcache->tree_lock, NULL);
     }

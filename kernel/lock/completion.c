@@ -56,6 +56,7 @@ void wait_for_completion(completion_t *c) {
     }
     spin_lock(&c->lock);
     while (!__try_wait_for_completion(c)) {
+        __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
         int ret = tq_wait(&c->wait_queue, &c->lock, NULL);
         (void)ret; // @TODO: ignore interrupt by now
     }

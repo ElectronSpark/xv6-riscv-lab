@@ -538,6 +538,7 @@ make doc
 - **VFS Design**: [kernel/vfs/VFS_DESIGN.md](kernel/vfs/VFS_DESIGN.md) - Comprehensive VFS architecture documentation
 - **Unmount Design**: [kernel/vfs/UNMOUNT_DESIGN.md](kernel/vfs/UNMOUNT_DESIGN.md) - Mount/unmount implementation details
 - **Scheduler Design**: [kernel/proc/SCHEDULER_DESIGN.md](kernel/proc/SCHEDULER_DESIGN.md) - Linux-style scheduler architecture and wakeup synchronization
+- **Thread Queue Design**: [kernel/proc/THREAD_QUEUE_DESIGN.md](kernel/proc/THREAD_QUEUE_DESIGN.md) - List/tree wait-queue API, invariants, and wakeup protocol
 
 ### Original xv6 Documentation
 

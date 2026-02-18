@@ -406,9 +406,9 @@ ssize_t tty_read(struct tty *tty, char *buf, size_t count, bool user) {
     while ((size_t)total < count) {
         /* Wait for at least one character */
         while (tty->raw_r == tty->raw_w) {
-            /* tq_wait_in_state releases lock, sleeps, re-acquires on wake */
-            tq_wait_in_state(&tty->raw_wait, &tty->lock, NULL,
-                             THREAD_INTERRUPTIBLE);
+            /* tq_wait releases lock, sleeps, and re-acquires on wake */
+            __thread_state_set(current, THREAD_INTERRUPTIBLE);
+            tq_wait(&tty->raw_wait, &tty->lock, NULL);
             if (signal_pending(current)) {
                 spin_unlock(&tty->lock);
                 return total > 0 ? total : -EINTR;

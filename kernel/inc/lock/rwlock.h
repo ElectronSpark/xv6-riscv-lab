@@ -411,8 +411,8 @@ void rwlock_wunlock_irqrestore(struct rwlock *rw, int state);
 
 /** @name Sleep / wakeup callbacks for rwlock-protected waits
  *
- * Two callback pairs are provided for use with tq_wait_in_state_cb() and
- * ttree_wait_in_state_cb():
+ * Two callback pairs are provided for use with tq_wait_cb() and
+ * ttree_wait_cb() (and their default wrappers):
  *
  * | Pair        | Releases               | Re-acquires            |
  * |:------------|:-----------------------|:-----------------------|

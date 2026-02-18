@@ -272,7 +272,7 @@ void rwlock_wunlock_irqrestore(struct rwlock *rw, int intena) {
  * were released so that rwlock_r_wake_cb() can re-acquire the same set.
  *
  * @note  Safe to call @c RWLOCK_W_HOLDING() after the read unlock
- *        because @c tq_wait_in_state_cb() disables interrupts before
+ *        because @c tq_wait_cb() disables interrupts before
  *        invoking the sleep callback, preventing CPU migration.
  *
  * @param data  Pointer to the @c struct rwlock, or NULL (no-op).

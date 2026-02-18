@@ -490,6 +490,7 @@ void sleep_on_chan(void *chan, spinlock_t *lk) {
 
     current->chan = chan;
     THREAD_SET_ONCHAN(current);
+    __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
 
     // Release caller's lock if held (we'll reacquire after waking)
     int lk_holding = (lk != NULL && spin_holding(lk));

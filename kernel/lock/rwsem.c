@@ -97,6 +97,7 @@ int rwsem_acquire_read(rwsem_t *lock) {
     spin_lock(&lock->lock);
     // @TODO: signal handling (wait is still uninterruptible for now)
     while (__reader_should_wait(lock)) {
+        __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
         ret = tq_wait(&lock->read_queue, &lock->lock, NULL);
         if (ret != 0) {
             spin_unlock(&lock->lock);
@@ -126,6 +127,7 @@ int rwsem_acquire_write(rwsem_t *lock) {
            "write lock");
     // @TODO: signal handling (wait is still uninterruptible for now)
     while (__writer_should_wait(lock, self_pid)) {
+        __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
         assert(lock->holder_pid != self_pid,
                "rwsem_acquire_write: deadlock detected, thread already holds "
                "the write lock");

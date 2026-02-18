@@ -116,8 +116,8 @@ static int __pipe_wait_writer(struct pipe *pi) {
         spin_unlock(&pi->writer_lock);
         return 0; /* data available, caller will re-check under reader_lock */
     }
-    tq_wait_in_state(&pi->nread_queue, &pi->writer_lock, NULL,
-                     THREAD_INTERRUPTIBLE);
+    __thread_state_set(current, THREAD_INTERRUPTIBLE);
+    tq_wait(&pi->nread_queue, &pi->writer_lock, NULL);
     spin_unlock(&pi->writer_lock);
     if (signal_pending(current))
         return -EINTR;
@@ -141,8 +141,8 @@ static int __pipe_wait_reader(struct pipe *pi) {
         spin_unlock(&pi->reader_lock);
         return 0; /* space available, caller will re-check under writer_lock */
     }
-    tq_wait_in_state(&pi->nwrite_queue, &pi->reader_lock, NULL,
-                     THREAD_INTERRUPTIBLE);
+    __thread_state_set(current, THREAD_INTERRUPTIBLE);
+    tq_wait(&pi->nwrite_queue, &pi->reader_lock, NULL);
     spin_unlock(&pi->reader_lock);
     if (signal_pending(current))
         return -EINTR;

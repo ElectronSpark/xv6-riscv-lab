@@ -160,10 +160,12 @@ void xv6fs_begin_op(struct xv6fs_superblock *xv6_sb) {
     spin_lock(&log->lock);
     while (1) {
         if (log->committing) {
+            __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
             tq_wait(&log->wait_queue, &log->lock, NULL);
         } else if (log->lh.n + (log->outstanding + 1) * MAXOPBLOCKS >
                    XV6FS_LOGSIZE) {
             // this op might exhaust log space; wait for commit.
+            __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
             tq_wait(&log->wait_queue, &log->lock, NULL);
         } else {
             log->outstanding += 1;
