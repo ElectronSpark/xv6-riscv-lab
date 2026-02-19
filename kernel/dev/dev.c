@@ -12,6 +12,7 @@
 #include <errno.h>
 #include <smp/atomic.h>
 #include "lock/rcu.h"
+#include <devtmpfs.h>
 
 // RCU-protected device table
 // Readers use rcu_read_lock/unlock + rcu_dereference
@@ -158,15 +159,9 @@ static int __dev_slot_get(int major, int minor, device_major_t ***ret_major,
     return 0;
 }
 
-// Helper functions to call device ops
+// Helper function to call device release op
 // Because only ops of valid device will be called
 // Their validity is asserted to be true
-// Open and release are called with the device table lock held
-static int __dev_call_open(device_t *dev) {
-    assert(dev && dev->ops.open, "Invalid device or open operation");
-    return dev->ops.open(dev);
-}
-
 static int __dev_call_release(device_t *dev) {
     assert(dev && dev->ops.release, "Invalid device or release operation");
     return dev->ops.release(dev);
@@ -323,7 +318,15 @@ int device_register(device_t *dev) {
     // Use RCU-safe pointer assignment to publish the device
     rcu_assign_pointer(*dev_slot, dev);
     __dev_tab_unlock();
-    return __dev_call_open(dev);
+
+    /* Create devtmpfs node if the device carries a name.
+     * devtmpfs_create_node() is safe to call before devtmpfs is mounted —
+     * it buffers the entry and materialises it on first mount. */
+    if (dev->devname != NULL)
+        devtmpfs_create_node(dev->devname, dev->devmode,
+                             mkdev(dev->major, dev->minor));
+
+    return 0;
 }
 
 // Mark a device as unregistering.
@@ -338,6 +341,12 @@ int device_unregister(device_t *dev) {
     if (!atomic_cas(&dev->unregistering, 0, 1)) {
         return -EALREADY; // Already unregistering
     }
+
+    /* Remove devtmpfs node before the device becomes unreachable.
+     * devtmpfs_remove_node() is safe even if devtmpfs is not mounted. */
+    if (dev->devname != NULL)
+        devtmpfs_remove_node(dev->devname);
+
     // Remove from device table immediately so no new lookups find it
     __device_unregister(dev);
     // Drop the initial reference from registration
@@ -357,4 +366,42 @@ int dev_ioctl(device_t *dev, uint64 cmd, void *arg) {
         return -ENOTTY; // No ioctl support for this device
     }
     return dev->ops.ioctl(dev, cmd, arg);
+}
+
+/*
+ * dev_for_each_device — iterate all registered devices.
+ *
+ * Calls @cb for every live (non-unregistering) device with a held
+ * kobject reference.  The callback may inspect the device but must NOT
+ * call device_unregister (that would deadlock on the device-table lock).
+ * Returning non-zero from @cb stops the iteration early.
+ *
+ * Uses RCU for safe traversal of the sparse device table without
+ * holding the writer spinlock.
+ */
+int dev_for_each_device(dev_iter_cb_t cb, void *ctx) {
+    int ret = 0;
+
+    rcu_read_lock();
+    for (int maj = 1; maj < MAX_MAJOR_DEVICES && ret == 0; maj++) {
+        device_major_t *dmajor = rcu_dereference(__dev_table[maj]);
+        if (dmajor == NULL)
+            continue;
+        for (int min = 1; min < MAX_MINOR_DEVICES && ret == 0; min++) {
+            device_t *dev = rcu_dereference(dmajor->minors[min]);
+            if (dev == NULL)
+                continue;
+            if (smp_load_acquire(&dev->unregistering))
+                continue;
+            if (!kobject_try_get(&dev->kobj))
+                continue;
+            /* Release RCU so the callback can sleep if needed */
+            rcu_read_unlock();
+            ret = cb(dev, ctx);
+            kobject_put(&dev->kobj);
+            rcu_read_lock();
+        }
+    }
+    rcu_read_unlock();
+    return ret;
 }

@@ -6,6 +6,7 @@
 #include <types.h>
 #include <kobject.h>
 #include <lock/rcu_type.h>
+#include <vfs/stat.h>
 
 #define MAX_MAJOR_DEVICES 256 // Maximum number of major devices
 // Maximum number of minor devices per major device
@@ -41,7 +42,19 @@ typedef struct device_instance {
     dev_type_e type;   // Device type (block, char, etc.)
     int unregistering; // Set to 1 when device is being unregistered
     device_ops_t ops;
+
+    /*
+     * devtmpfs integration — optional.
+     * When devname is non-NULL, device_register() automatically calls
+     * devtmpfs_create_node() and device_unregister() removes it.
+     * Safe to set before registration even if devtmpfs is not yet mounted;
+     * nodes are buffered and materialised on first mount.
+     */
+    const char *devname; // devtmpfs path relative to /dev (e.g. "console")
+    mode_t      devmode; // file type + perms (e.g. S_IFCHR | 0666)
 } device_t;
+
+struct vfs_file; /* forward declaration for open_file callback */
 
 typedef struct cdev_ops {
     int (*read)(cdev_t *cdev, bool user, void *buf, size_t count);
@@ -50,6 +63,18 @@ typedef struct cdev_ops {
     int (*release)(cdev_t *cdev);
     int (*ioctl)(cdev_t *cdev, uint64 cmd, void *arg);
     int (*poll)(cdev_t *cdev, short events); // returns revents bitmask
+
+    /*
+     * open_file - optional file-level open callback (like Linux's fops->open).
+     *
+     * When non-NULL, __vfs_open_cdev calls this INSTEAD of the plain open().
+     * The callback receives the vfs_file being opened so it can install
+     * custom file->ops and file->private_data.  This is used by /dev/ptmx
+     * to transform the opened file into a PTY master.
+     *
+     * Return 0 on success, negative errno on failure.
+     */
+    int (*open_file)(cdev_t *cdev, struct vfs_file *file);
 } cdev_ops_t;
 
 typedef struct cdev {

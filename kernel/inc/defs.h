@@ -48,6 +48,12 @@ void consoleintr(int);
 void consputc(int);
 void consputs(const char *, int);
 
+// tty/tty_dev.c
+void ttydevinit(void);
+
+// tty/ptmx.c
+void ptmxinit(void);
+
 // exec.c
 int exec(char *, char **, char **);
 

@@ -583,8 +583,13 @@ int tty_ioctl(struct tty *tty, uint64 cmd, void *arg) {
             tty->ops->set_termios(tty, tp);
 
         /* TCSETSF: also discard pending input */
-        if (cmd == TCSETSF && tty->ops && tty->ops->discard_input)
-            tty->ops->discard_input(tty);
+        if (cmd == TCSETSF) {
+            spin_lock(&tty->lock);
+            tty->raw_r = tty->raw_w; /* flush raw ring buffer */
+            spin_unlock(&tty->lock);
+            if (tty->ops && tty->ops->discard_input)
+                tty->ops->discard_input(tty);
+        }
 
         return 0;
     }

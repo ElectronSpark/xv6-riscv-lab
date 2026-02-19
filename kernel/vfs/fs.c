@@ -461,6 +461,7 @@ void vfs_init(void) {
     // Initialize filesystem types (registers them with VFS)
     tmpfs_init();
     xv6fs_init();
+    devtmpfs_init();
 
     // Mount filesystems
     tmpfs_mount_root();
@@ -474,6 +475,43 @@ void vfs_init(void) {
         printf("tmpfs: /tmp directory not found\n");
     } else {
         printf("tmpfs: failed to mount at /tmp, errno=%d\n", ret);
+    }
+
+    // Mount devtmpfs at /dev (auto-populated with device nodes)
+    // Ensure /dev directory exists (create it if not present on root fs)
+    struct vfs_inode *dev_dir = vfs_namei("/dev", 4);
+    if (IS_ERR_OR_NULL(dev_dir)) {
+        struct vfs_inode *root = vfs_namei("/", 1);
+        if (!IS_ERR_OR_NULL(root)) {
+            // vfs_mkdir handles its own locking — do NOT lock root first
+            dev_dir = vfs_mkdir(root, 0755, "dev", 3);
+            vfs_iput(root);
+            if (!IS_ERR_OR_NULL(dev_dir))
+                vfs_iput(dev_dir);
+        }
+    } else {
+        vfs_iput(dev_dir);
+    }
+    ret = vfs_mount_path("devtmpfs", "/dev", 4, NULL, 0);
+    if (ret == 0) {
+        printf("devtmpfs: mounted at /dev\n");
+        /* Now that the superblock & root inode are fully VFS-initialised,
+         * populate the registered device nodes using VFS-level APIs. */
+        devtmpfs_post_mount_populate();
+
+        /* Pre-create /dev/pts directory for PTY slaves */
+        struct vfs_inode *dev_inode = vfs_namei("/dev", 4);
+        if (!IS_ERR_OR_NULL(dev_inode)) {
+            struct vfs_inode *pts_dir =
+                vfs_mkdir(dev_inode, 0755, "pts", 3);
+            if (!IS_ERR_OR_NULL(pts_dir))
+                vfs_iput(pts_dir);
+            vfs_iput(dev_inode);
+        }
+    } else if (ret == -ENOENT) {
+        printf("devtmpfs: /dev directory not found\n");
+    } else {
+        printf("devtmpfs: failed to mount at /dev, errno=%d\n", ret);
     }
 
     // Optional: run smoke tests in a separate kernel thread with chroot to /tmp

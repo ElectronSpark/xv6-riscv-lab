@@ -98,6 +98,8 @@ static blkdev_t ramdisk_dev = {
         {
             .major = 3,
             .minor = 1,
+            .devname = "ramdisk",
+            .devmode = S_IFBLK | 0600,
         },
     .readable = 1,
     .writable = 1,

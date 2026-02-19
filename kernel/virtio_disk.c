@@ -129,6 +129,8 @@ static blkdev_t virtio_disk_devs[N_VIRTIO_DISK] = {
             {
                 .major = 2,
                 .minor = 1,
+                .devname = "disk0",
+                .devmode = S_IFBLK | 0600,
             },
         .readable = 1,
         .writable = 1,
@@ -139,6 +141,8 @@ static blkdev_t virtio_disk_devs[N_VIRTIO_DISK] = {
             {
                 .major = 2,
                 .minor = 2,
+                .devname = "disk1",
+                .devmode = S_IFBLK | 0600,
             },
         .readable = 1,
         .writable = 1,

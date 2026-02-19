@@ -313,6 +313,8 @@ static cdev_t console_cdev = {
         {
             .major = CONSOLE_MAJOR,
             .minor = CONSOLE_MINOR,
+            .devname = "console",
+            .devmode = S_IFCHR | 0666,
         },
     .readable = 1,
     .writable = 1,

@@ -28,18 +28,18 @@ char *argv[] = {"sh", 0};
 int main(void) {
     int pid, wpid;
 
+    // Open console as stdin (fd 0), stdout (fd 1), stderr (fd 2)
     if (open("/dev/console", O_RDWR) < 0) {
         mknod("/dev/console", S_IFCHR | 0666, CONSOLE_MAJOR, CONSOLE_MINOR);
         open("/dev/console", O_RDWR);
     }
-    if (open("/dev/null", O_RDWR) < 0) {
-        mknod("/dev/null", S_IFCHR | 0666, NULL_MAJOR, NULL_MINOR);
-    }
-    if (open("/dev/random", O_RDWR) < 0) {
-        mknod("/dev/random", S_IFCHR | 0666, RANDOM_MAJOR, RANDOM_MINOR);
-    }
-    dup(0); // stdout
-    dup(0); // stderr
+    dup(0); // stdout (fd 1)
+    dup(0); // stderr (fd 2)
+
+    // Ensure device nodes exist (devtmpfs may have created them already,
+    // so mknod errors are ignored)
+    mknod("/dev/null", S_IFCHR | 0666, NULL_MAJOR, NULL_MINOR);
+    mknod("/dev/random", S_IFCHR | 0666, RANDOM_MAJOR, RANDOM_MINOR);
 
     for (;;) {
         printf("init: starting sh\n");

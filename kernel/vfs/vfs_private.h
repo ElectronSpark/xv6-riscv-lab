@@ -26,6 +26,8 @@ void tmpfs_init(void);       // Initialize tmpfs caches and register fs type
 void tmpfs_mount_root(void); // Mount tmpfs as root filesystem
 void xv6fs_init(void);
 void xv6fs_mount_root(void);
+void devtmpfs_init(void);    // Initialize devtmpfs and register fs type
+int devtmpfs_post_mount_populate(void); // Populate /dev after mount
 
 // Orphan management
 int vfs_make_orphan(struct vfs_inode *inode);
