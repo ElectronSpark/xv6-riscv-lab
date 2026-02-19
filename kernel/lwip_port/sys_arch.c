@@ -33,8 +33,9 @@
 /* ========================================================================== */
 
 /**
- * Minimal vsnprintf: supports %s, %d, %u, %x, %c, %p, %%.
- * No width/precision/flags — just enough for lwIP sanity-check messages.
+ * vsnprintf: supports %s, %d, %u, %x, %X, %c, %p, %%, %ld, %lu, %lx, %lX,
+ * %lld, %llu, %llx, %llX, %zd, %zu, %zx.
+ * Also supports flags: '0', '-', '+', ' ',  field width, and precision.
  */
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
 {
@@ -43,85 +44,227 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
         return 0;
     size_t max = size - 1;
 
-    for (; *fmt && pos < max; fmt++) {
+    static const char hex_lower[] = "0123456789abcdef";
+    static const char hex_upper[] = "0123456789ABCDEF";
+
+#define PUTC(c) do { if (pos < max) buf[pos] = (c); pos++; } while (0)
+
+    for (; *fmt; fmt++) {
         if (*fmt != '%') {
-            buf[pos++] = *fmt;
+            PUTC(*fmt);
             continue;
         }
         fmt++;
+
+        /* ── Parse flags ── */
+        int flag_zero  = 0;   /* '0' — pad with zeros */
+        int flag_minus = 0;   /* '-' — left-justify */
+        int flag_plus  = 0;   /* '+' — show sign for positive */
+        int flag_space = 0;   /* ' ' — space before positive */
+        int flag_hash  = 0;   /* '#' — alternate form */
+        for (;;) {
+            if      (*fmt == '0') flag_zero  = 1;
+            else if (*fmt == '-') flag_minus = 1;
+            else if (*fmt == '+') flag_plus  = 1;
+            else if (*fmt == ' ') flag_space = 1;
+            else if (*fmt == '#') flag_hash  = 1;
+            else break;
+            fmt++;
+        }
+        if (flag_minus) flag_zero = 0; /* '-' overrides '0' */
+
+        /* ── Parse width ── */
+        int width = 0;
+        if (*fmt == '*') {
+            width = va_arg(ap, int);
+            if (width < 0) { flag_minus = 1; width = -width; }
+            fmt++;
+        } else {
+            while (*fmt >= '0' && *fmt <= '9')
+                width = width * 10 + (*fmt++ - '0');
+        }
+
+        /* ── Parse precision ── */
+        int prec = -1;
+        if (*fmt == '.') {
+            fmt++;
+            prec = 0;
+            if (*fmt == '*') {
+                prec = va_arg(ap, int);
+                if (prec < 0) prec = -1;
+                fmt++;
+            } else {
+                while (*fmt >= '0' && *fmt <= '9')
+                    prec = prec * 10 + (*fmt++ - '0');
+            }
+        }
+
+        /* ── Parse length modifier ── */
+        enum { LEN_NONE, LEN_L, LEN_LL, LEN_Z } lenmod = LEN_NONE;
+        if (*fmt == 'l') {
+            fmt++;
+            if (*fmt == 'l') { lenmod = LEN_LL; fmt++; }
+            else              lenmod = LEN_L;
+        } else if (*fmt == 'z') {
+            lenmod = LEN_Z;
+            fmt++;
+        }
+
+        /* ── Conversion ── */
         switch (*fmt) {
+
         case 's': {
             const char *s = va_arg(ap, const char *);
             if (!s) s = "(null)";
-            while (*s && pos < max)
-                buf[pos++] = *s++;
+            int slen = 0;
+            while (s[slen]) slen++;
+            if (prec >= 0 && slen > prec) slen = prec;
+            int pad = (width > slen) ? width - slen : 0;
+            if (!flag_minus)
+                for (int i = 0; i < pad; i++) PUTC(' ');
+            for (int i = 0; i < slen; i++) PUTC(s[i]);
+            if (flag_minus)
+                for (int i = 0; i < pad; i++) PUTC(' ');
             break;
         }
-        case 'd': {
-            int v = va_arg(ap, int);
+
+        case 'd':
+        case 'i': {
+            int64 v;
+            if      (lenmod == LEN_LL) v = va_arg(ap, long long);
+            else if (lenmod == LEN_L)  v = va_arg(ap, long);
+            else if (lenmod == LEN_Z)  v = (int64)va_arg(ap, size_t);
+            else                       v = va_arg(ap, int);
+
             char tmp[24];
             int ti = 0;
-            unsigned uv;
-            if (v < 0) {
-                if (pos < max) buf[pos++] = '-';
-                uv = (unsigned)(-(v + 1)) + 1u;
-            } else {
-                uv = (unsigned)v;
+            int negative = 0;
+            uint64 uv;
+            if (v < 0) { negative = 1; uv = (uint64)(-(v + 1)) + 1u; }
+            else        uv = (uint64)v;
+
+            do { tmp[ti++] = '0' + (int)(uv % 10); } while ((uv /= 10));
+            /* Apply precision: minimum digits */
+            if (prec >= 0) {
+                while (ti < prec && ti < (int)sizeof(tmp)) tmp[ti++] = '0';
+                flag_zero = 0;  /* precision overrides '0' flag */
             }
-            do { tmp[ti++] = '0' + (uv % 10); } while ((uv /= 10));
-            while (ti > 0 && pos < max)
-                buf[pos++] = tmp[--ti];
+
+            char sign = 0;
+            if (negative)       sign = '-';
+            else if (flag_plus) sign = '+';
+            else if (flag_space) sign = ' ';
+
+            int numlen = ti + (sign ? 1 : 0);
+            int pad = (width > numlen) ? width - numlen : 0;
+            if (!flag_minus && !flag_zero)
+                for (int i = 0; i < pad; i++) PUTC(' ');
+            if (sign) PUTC(sign);
+            if (!flag_minus && flag_zero)
+                for (int i = 0; i < pad; i++) PUTC('0');
+            while (ti > 0) PUTC(tmp[--ti]);
+            if (flag_minus)
+                for (int i = 0; i < pad; i++) PUTC(' ');
             break;
         }
+
         case 'u': {
-            unsigned uv = va_arg(ap, unsigned);
+            uint64 uv;
+            if      (lenmod == LEN_LL) uv = va_arg(ap, unsigned long long);
+            else if (lenmod == LEN_L)  uv = va_arg(ap, unsigned long);
+            else if (lenmod == LEN_Z)  uv = va_arg(ap, size_t);
+            else                       uv = va_arg(ap, unsigned);
+
             char tmp[24];
             int ti = 0;
-            do { tmp[ti++] = '0' + (uv % 10); } while ((uv /= 10));
-            while (ti > 0 && pos < max)
-                buf[pos++] = tmp[--ti];
+            do { tmp[ti++] = '0' + (int)(uv % 10); } while ((uv /= 10));
+            if (prec >= 0) {
+                while (ti < prec && ti < (int)sizeof(tmp)) tmp[ti++] = '0';
+                flag_zero = 0;
+            }
+
+            int pad = (width > ti) ? width - ti : 0;
+            if (!flag_minus && !flag_zero)
+                for (int i = 0; i < pad; i++) PUTC(' ');
+            if (!flag_minus && flag_zero)
+                for (int i = 0; i < pad; i++) PUTC('0');
+            while (ti > 0) PUTC(tmp[--ti]);
+            if (flag_minus)
+                for (int i = 0; i < pad; i++) PUTC(' ');
             break;
         }
-        case 'x': {
-            unsigned uv = va_arg(ap, unsigned);
+
+        case 'x':
+        case 'X': {
+            const char *hexd = (*fmt == 'X') ? hex_upper : hex_lower;
+            uint64 uv;
+            if      (lenmod == LEN_LL) uv = va_arg(ap, unsigned long long);
+            else if (lenmod == LEN_L)  uv = va_arg(ap, unsigned long);
+            else if (lenmod == LEN_Z)  uv = va_arg(ap, size_t);
+            else                       uv = va_arg(ap, unsigned);
+
             char tmp[24];
             int ti = 0;
-            static const char hex[] = "0123456789abcdef";
-            do { tmp[ti++] = hex[uv & 0xf]; } while ((uv >>= 4));
-            while (ti > 0 && pos < max)
-                buf[pos++] = tmp[--ti];
+            do { tmp[ti++] = hexd[uv & 0xf]; } while ((uv >>= 4));
+            if (prec >= 0) {
+                while (ti < prec && ti < (int)sizeof(tmp)) tmp[ti++] = '0';
+                flag_zero = 0;
+            }
+
+            int prefix = (flag_hash && uv != 0) ? 2 : 0;
+            int numlen = ti + prefix;
+            int pad = (width > numlen) ? width - numlen : 0;
+
+            if (!flag_minus && !flag_zero)
+                for (int i = 0; i < pad; i++) PUTC(' ');
+            if (prefix) { PUTC('0'); PUTC(*fmt == 'X' ? 'X' : 'x'); }
+            if (!flag_minus && flag_zero)
+                for (int i = 0; i < pad; i++) PUTC('0');
+            while (ti > 0) PUTC(tmp[--ti]);
+            if (flag_minus)
+                for (int i = 0; i < pad; i++) PUTC(' ');
             break;
         }
+
         case 'p': {
             uint64 pv = (uint64)va_arg(ap, void *);
-            if (pos < max) buf[pos++] = '0';
-            if (pos < max) buf[pos++] = 'x';
+            PUTC('0'); PUTC('x');
             char tmp[20];
             int ti = 0;
-            static const char hex[] = "0123456789abcdef";
-            do { tmp[ti++] = hex[pv & 0xf]; } while ((pv >>= 4));
-            while (ti > 0 && pos < max)
-                buf[pos++] = tmp[--ti];
+            do { tmp[ti++] = hex_lower[pv & 0xf]; } while ((pv >>= 4));
+            int pad = (width > ti + 2) ? width - ti - 2 : 0;
+            if (!flag_minus)
+                for (int i = 0; i < pad; i++) PUTC('0');
+            while (ti > 0) PUTC(tmp[--ti]);
+            if (flag_minus)
+                for (int i = 0; i < pad; i++) PUTC(' ');
             break;
         }
+
         case 'c':
-            buf[pos++] = (char)va_arg(ap, int);
+            PUTC((char)va_arg(ap, int));
             break;
+
         case '%':
-            buf[pos++] = '%';
+            PUTC('%');
             break;
+
         case '\0':
             goto out;
+
         default:
-            /* Unknown specifier, output as-is */
-            buf[pos++] = '%';
-            if (pos < max) buf[pos++] = *fmt;
+            /* Unknown specifier — output literal */
+            PUTC('%');
+            PUTC(*fmt);
             break;
         }
     }
 out:
-    buf[pos] = '\0';
+    if (size > 0)
+        buf[pos < max ? pos : max] = '\0';
     return (int)pos;
+
+#undef PUTC
 }
 
 int snprintf(char *buf, size_t size, const char *fmt, ...)

@@ -18,10 +18,11 @@
  *   m / M        — read / write memory
  *   c / s        — continue / single-step  (step = temp bp at PC+4)
  *   Z0 / z0      — insert / remove software breakpoint
- *   H / qC       — thread-id operations (stub is single-threaded)
- *   qSupported   — feature negotiation
+ *   H / qC       — thread-id operations (multi-threaded, thread groups)
+ *   qSupported   — feature negotiation (multiprocess+, qXfer:threads:read+)
  *   qAttached    — always "1" (attached, not spawned)
- *   qfThreadInfo — list the attached PID
+ *   qfThreadInfo — list all threads in the attached process (thread group)
+ *   qXfer:threads:read — XML thread listing with core affinity
  *   qRcmd        — monitor commands (attach <pid>)
  *   D            — detach
  *   k            — kill target process
@@ -35,6 +36,7 @@
 #include "trapframe.h"
 #include "trap.h"
 #include "proc/thread.h"
+#include "proc/thread_group.h"
 #include "proc/sched.h"
 #include "mm/vm.h"
 #include "lock/spinlock.h"
@@ -128,9 +130,17 @@ struct gdb_breakpoint {
 
 static struct {
     /* Target process */
-    int              target_pid;
-    struct thread   *target;          /* valid only while stopped */
+    int              target_pid;      /* TGID of the debugged process */
+    struct thread   *target;          /* thread that stopped (trap ctx) */
     int              attached;        /* 1 if GDB is attached to a process */
+
+    /* Thread selection (Hg / Hc packets).
+     * g_tid  — TID selected for register/memory reads (Hg).
+     * c_tid  — TID selected for continue/step (Hc).
+     * Value of 0  means "any thread" (use target that last stopped).
+     * Value of -1 means "all threads". */
+    int              g_tid;
+    int              c_tid;
 
     /* Synchronization: target stops on breakpoint, GDB resumes it */
     sem_t            target_stopped;  /* posted when target hits a bp */
@@ -138,6 +148,7 @@ static struct {
 
     /* Stop reason communicated from trap handler to GDB thread */
     int              stop_signal;     /* e.g. 5 = SIGTRAP */
+    int              stop_tid;        /* TID of thread that stopped */
 
     /* Single-step state */
     int              stepping;        /* 1 if single-stepping */
@@ -855,6 +866,91 @@ static int gdb_resolve_target(void)
     return 0;
 }
 
+/*
+ * Resolve the thread selected by Hg (for register / memory reads).
+ * Falls back to gdb.target (the thread that last stopped).
+ */
+static struct thread *gdb_selected_thread(void)
+{
+    int tid = gdb.g_tid;
+    if (tid <= 0) {
+        /* 0 = "any", -1 = "all" — just use last-stopped thread */
+        return gdb.target;
+    }
+    struct thread *p = NULL;
+    rcu_read_lock();
+    get_pid_thread(tid, &p);
+    rcu_read_unlock();
+    if (p && thread_tgid(p) == gdb.target_pid)
+        return p;
+    /* TID not in our thread group — fall back */
+    return gdb.target;
+}
+
+/*
+ * Send a T-stop reply:  T05thread:p<tgid>.<tid>;
+ * This is the multi-process-aware stop reply that includes the
+ * thread that stopped.
+ */
+static void gdb_send_stop_reply(int signal, int tid)
+{
+    char buf[64];
+    int n = snprintf(buf, sizeof(buf), "T%02xthread:p%x.%x;",
+                     signal & 0xff,
+                     gdb.target_pid > 0 ? gdb.target_pid : 1,
+                     tid > 0 ? tid : 1);
+    gdb_send_packet(buf, n);
+}
+
+/*
+ * Parse a GDB thread-id token.  Handles:
+ *   0        -> *pid_out = 0, *tid_out = 0   ("any")
+ *  -1        -> *pid_out = -1, *tid_out = -1 ("all")
+ *  <tid>     -> *pid_out = 0, *tid_out = tid
+ *  p<pid>.<tid> -> both filled in
+ * Returns pointer past consumed chars.
+ */
+static const char *gdb_parse_thread_id(const char *p, int *pid_out, int *tid_out)
+{
+    *pid_out = 0;
+    *tid_out = 0;
+    if (*p == '0') {
+        *tid_out = 0;
+        return p + 1;
+    }
+    if (*p == '-' && *(p + 1) == '1') {
+        *pid_out = -1;
+        *tid_out = -1;
+        return p + 2;
+    }
+    if (*p == 'p') {
+        p++;
+        /* Parse pid (hex) up to '.' */
+        const char *dot = p;
+        while (*dot && *dot != '.') dot++;
+        *pid_out = (int)hex2u64(p, (int)(dot - p));
+        if (*dot == '.') {
+            dot++;
+            if (*dot == '-' && *(dot + 1) == '1') {
+                *tid_out = -1;
+                return dot + 2;
+            }
+            const char *end = dot;
+            while (*end && *end != ';' && *end != '#') end++;
+            *tid_out = (int)hex2u64(dot, (int)(end - dot));
+            return end;
+        }
+        return dot;
+    }
+    /* Plain hex TID */
+    {
+        const char *end = p;
+        while (*end && *end != ';' && *end != '#') end++;
+        *tid_out = (int)hex2u64(p, (int)(end - p));
+        return end;
+    }
+}
+
 /* Detach from the target process (remove all BPs, unblock if stopped). */
 static void gdb_detach(void)
 {
@@ -922,16 +1018,19 @@ static void gdb_handle_monitor(const char *hex_cmd, int hex_len)
             gdb_send_packet(hexout, n);
             return;
         }
+        /* Canonicalize to TGID */
+        gdb.target_pid = thread_tgid(gdb.target);
         gdb.attached = 1;
 
         /* Wake pending process if it was waiting for a debugger */
-        if (gdb.pending_pid == pid) {
+        if (gdb.pending_pid == pid || gdb.pending_pid == gdb.target_pid) {
             gdb.pending_pid = 0;
             sem_post(&gdb.debugger_attached);
         }
 
         char msg[64];
-        int mlen = snprintf(msg, sizeof(msg), "Attached to pid %d\n", pid);
+        int mlen = snprintf(msg, sizeof(msg), "Attached to pid %d (tgid %d)\n",
+                            pid, gdb.target_pid);
         char hexout[128];
         int n = encode_hex_str(hexout, msg, mlen);
         gdb_send_packet(hexout, n);
@@ -973,14 +1072,21 @@ static void gdb_handle_vattach(const char *args)
         return;
     }
 
+    /*
+     * Resolve the thread.  The user may supply either a TID or a TGID.
+     * We always store the TGID as target_pid so that all threads in the
+     * process are recognized by the debugger.
+     */
     gdb.target_pid = pid;
     if (gdb_resolve_target() != 0) {
         gdb_error(1);
         return;
     }
+    /* Canonicalize to TGID */
+    gdb.target_pid = thread_tgid(gdb.target);
     gdb.attached = 1;
 
-    printf("gdbstub: attached to pid %d\n", pid);
+    printf("gdbstub: attached to pid %d (tgid %d)\n", pid, gdb.target_pid);
 
     /*
      * If this PID was waiting for a debugger (waitgdb()), wake it up.
@@ -995,7 +1101,8 @@ static void gdb_handle_vattach(const char *args)
         /* Now wait for the target to actually report stopped */
         sem_wait(&gdb.target_stopped);
         gdb.stop_signal = SIGTRAP;
-        gdb_send("S05");
+        gdb.stop_tid = gdb.target ? gdb.target->pid : pid;
+        gdb_send_stop_reply(SIGTRAP, gdb.stop_tid);
         return;
     }
 
@@ -1009,7 +1116,8 @@ static void gdb_handle_vattach(const char *args)
      * the process run and wait for a breakpoint.
      */
     gdb.stop_signal = SIGTRAP;
-    gdb_send("S05");
+    gdb.stop_tid = gdb.target ? gdb.target->pid : pid;
+    gdb_send_stop_reply(SIGTRAP, gdb.stop_tid);
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
@@ -1041,29 +1149,28 @@ static void gdb_handle_packet(const char *pkt, int len)
                 printf("gdbstub: auto-attached to pid %d\n", pid);
                 sem_post(&gdb.debugger_attached);
                 sem_wait(&gdb.target_stopped);
-                gdb_send("S05");
+                gdb.stop_tid = gdb.target ? gdb.target->pid : pid;
+                gdb_send_stop_reply(SIGTRAP, gdb.stop_tid);
                 break;
             }
         }
         int sig = gdb.stop_signal ? gdb.stop_signal : SIGTRAP;
-        char buf[4];
-        buf[0] = 'S';
-        buf[1] = hexchars[(sig >> 4) & 0xf];
-        buf[2] = hexchars[sig & 0xf];
-        buf[3] = '\0';
-        gdb_send(buf);
+        int tid = gdb.stop_tid > 0 ? gdb.stop_tid
+                : gdb.target_pid > 0 ? gdb.target_pid : 1;
+        gdb_send_stop_reply(sig, tid);
         break;
     }
 
     /* ── g — Read all registers ── */
     case 'g': {
         char *p = out;
-        if (!gdb.attached || gdb_resolve_target() != 0) {
+        struct thread *sel = gdb_selected_thread();
+        if (!gdb.attached || !sel) {
             /* No target yet — return all zeroes so GDB can connect */
             for (int i = 0; i < GDB_NUM_REGS; i++)
                 p = hex_le64(p, 0);
         } else {
-            struct utrapframe *tf = gdb.target->trapframe;
+            struct utrapframe *tf = sel->trapframe;
             for (int i = 0; i < GDB_NUM_REGS; i++)
                 p = hex_le64(p, gdb_get_reg(tf, i));
         }
@@ -1073,12 +1180,13 @@ static void gdb_handle_packet(const char *pkt, int len)
 
     /* ── G — Write all registers ── */
     case 'G': {
-        if (!gdb.attached || gdb_resolve_target() != 0) {
+        struct thread *sel = gdb_selected_thread();
+        if (!gdb.attached || !sel) {
             gdb_error(1);
             break;
         }
         const char *hex = pkt + 1;
-        struct utrapframe *tf = gdb.target->trapframe;
+        struct utrapframe *tf = sel->trapframe;
         for (int i = 0; i < GDB_NUM_REGS; i++) {
             if (strlen(hex) < 16) break;
             gdb_set_reg(tf, i, hexle2u64(hex));
@@ -1096,17 +1204,19 @@ static void gdb_handle_packet(const char *pkt, int len)
             break;
         }
         char *p = out;
-        if (!gdb.attached || gdb_resolve_target() != 0)
+        struct thread *sel = gdb_selected_thread();
+        if (!gdb.attached || !sel)
             p = hex_le64(p, 0);
         else
-            p = hex_le64(p, gdb_get_reg(gdb.target->trapframe, regnum));
+            p = hex_le64(p, gdb_get_reg(sel->trapframe, regnum));
         gdb_send_packet(out, (int)(p - out));
         break;
     }
 
     /* ── P N=V — Write single register ── */
     case 'P': {
-        if (!gdb.attached || gdb_resolve_target() != 0) {
+        struct thread *sel = gdb_selected_thread();
+        if (!gdb.attached || !sel) {
             gdb_error(1);
             break;
         }
@@ -1118,7 +1228,7 @@ static void gdb_handle_packet(const char *pkt, int len)
         int regnum = (int)hex2u64(pkt + 1, (int)(eq - pkt - 1));
         uint64 val = hexle2u64(eq + 1);
         if (regnum >= 0 && regnum < GDB_NUM_REGS)
-            gdb_set_reg(gdb.target->trapframe, regnum, val);
+            gdb_set_reg(sel->trapframe, regnum, val);
         gdb_ok();
         break;
     }
@@ -1298,11 +1408,23 @@ static void gdb_handle_packet(const char *pkt, int len)
         break;
     }
 
-    /* ── H op thread-id — Set thread ── */
-    case 'H':
-        /* We only support one thread (the target PID). Just ACK. */
+    /* ── H op thread-id — Set thread for subsequent operations ── */
+    case 'H': {
+        if (len < 2) { gdb_ok(); break; }
+        char op = pkt[1];       /* 'g' = register ops, 'c' = continue/step */
+        int pid_parsed, tid_parsed;
+        gdb_parse_thread_id(pkt + 2, &pid_parsed, &tid_parsed);
+
+        GDB_DBG("H%c pid=%d tid=%d", op, pid_parsed, tid_parsed);
+
+        if (op == 'g') {
+            gdb.g_tid = tid_parsed;
+        } else if (op == 'c') {
+            gdb.c_tid = tid_parsed;
+        }
         gdb_ok();
         break;
+    }
 
     /* ── D — Detach ── */
     case 'D':
@@ -1328,30 +1450,108 @@ static void gdb_handle_packet(const char *pkt, int len)
     /* ── q — Query packets ── */
     case 'q': {
         if (strncmp(pkt, "qSupported", 10) == 0) {
-            gdb_send("PacketSize=1000;swbreak+;vContSupported+");
+            gdb_send("PacketSize=1000;swbreak+;vContSupported+"
+                     ";multiprocess+;qXfer:threads:read+");
         } else if (strcmp(pkt, "qAttached") == 0) {
             gdb_send("1");  /* always "attached" */
         } else if (strcmp(pkt, "qC") == 0) {
-            /* Current thread = target PID */
+            /* Current thread — use the thread that last stopped. */
+            int tid = gdb.stop_tid > 0 ? gdb.stop_tid
+                    : gdb.target_pid > 0 ? gdb.target_pid : 1;
+            int pid = gdb.target_pid > 0 ? gdb.target_pid : 1;
             char buf[32];
-            int n = snprintf(buf, sizeof(buf), "QCp%x.%x",
-                             gdb.target_pid > 0 ? gdb.target_pid : 1,
-                             gdb.target_pid > 0 ? gdb.target_pid : 1);
+            int n = snprintf(buf, sizeof(buf), "QCp%x.%x", pid, tid);
             gdb_send_packet(buf, n);
         } else if (strcmp(pkt, "qfThreadInfo") == 0) {
-            char buf[32];
-            int n = snprintf(buf, sizeof(buf), "mp%x.%x",
-                             gdb.target_pid > 0 ? gdb.target_pid : 1,
-                             gdb.target_pid > 0 ? gdb.target_pid : 1);
-            gdb_send_packet(buf, n);
+            /*
+             * List all threads in the attached process's thread group.
+             * Format: m p<pid>.<tid1>,p<pid>.<tid2>,...
+             */
+            char buf[GDB_BUF_SIZE];
+            int pos = 0;
+            buf[pos++] = 'm';
+            int tgid = gdb.target_pid > 0 ? gdb.target_pid : 1;
+
+            if (gdb.attached && gdb.target) {
+                struct thread_group *tg = gdb.target->thread_group;
+                if (tg) {
+                    pid_rlock();
+                    struct thread *t, *tmp;
+                    int first = 1;
+                    list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
+                        if (THREAD_ZOMBIE(t))
+                            continue;
+                        if (!first && pos < (int)sizeof(buf) - 20)
+                            buf[pos++] = ',';
+                        first = 0;
+                        pos += snprintf(buf + pos, sizeof(buf) - pos,
+                                        "p%x.%x", tgid, t->pid);
+                    }
+                    pid_runlock();
+                } else {
+                    /* No thread group — single thread */
+                    pos += snprintf(buf + pos, sizeof(buf) - pos,
+                                    "p%x.%x", tgid, gdb.target->pid);
+                }
+            } else {
+                /* Not attached — report a placeholder */
+                pos += snprintf(buf + pos, sizeof(buf) - pos,
+                                "p%x.%x", tgid, tgid);
+            }
+            gdb_send_packet(buf, pos);
         } else if (strcmp(pkt, "qsThreadInfo") == 0) {
             gdb_send("l");  /* end of thread list */
         } else if (strncmp(pkt, "qRcmd,", 6) == 0) {
             gdb_handle_monitor(pkt + 6, len - 6);
         } else if (strcmp(pkt, "qTStatus") == 0) {
             gdb_send("T0");  /* no trace running */
+        } else if (strncmp(pkt, "qXfer:threads:read:", 19) == 0) {
+            /*
+             * qXfer:threads:read::<offset>,<length>
+             * Return an XML document listing threads & thread groups.
+             */
+            char xml[GDB_BUF_SIZE];
+            int xpos = 0;
+            xpos += snprintf(xml + xpos, sizeof(xml) - xpos,
+                             "l<?xml version=\"1.0\"?>\n"
+                             "<threads>\n");
+
+            if (gdb.attached && gdb.target) {
+                int tgid = gdb.target_pid;
+                struct thread_group *tg = gdb.target->thread_group;
+                if (tg) {
+                    pid_rlock();
+                    struct thread *t, *tmp;
+                    list_foreach_node_safe(&tg->thread_list, t, tmp, tg_entry) {
+                        if (THREAD_ZOMBIE(t))
+                            continue;
+                        const char *core = "";
+                        char corebuf[32] = "";
+                        if (t->sched_entity && smp_load_acquire(&t->sched_entity->on_cpu))
+                            snprintf(corebuf, sizeof(corebuf),
+                                     " core=\"%d\"",
+                                     smp_load_acquire(&t->sched_entity->cpu_id));
+                        core = corebuf;
+                        xpos += snprintf(xml + xpos, sizeof(xml) - xpos,
+                                         "  <thread id=\"p%x.%x\" name=\"%s\"%s/>"
+                                         "\n",
+                                         tgid, t->pid, t->name, core);
+                    }
+                    pid_runlock();
+                } else {
+                    xpos += snprintf(xml + xpos, sizeof(xml) - xpos,
+                                     "  <thread id=\"p%x.%x\" name=\"%s\"/>"
+                                     "\n",
+                                     tgid, gdb.target->pid,
+                                     gdb.target->name);
+                }
+            }
+
+            xpos += snprintf(xml + xpos, sizeof(xml) - xpos,
+                             "</threads>\n");
+            gdb_send_packet(xml, xpos);
         } else if (strncmp(pkt, "qXfer", 5) == 0) {
-            gdb_empty(); /* not supported */
+            gdb_empty(); /* other qXfer not supported */
         } else {
             gdb_empty();
         }
@@ -1363,16 +1563,30 @@ static void gdb_handle_packet(const char *pkt, int len)
         if (strncmp(pkt, "vAttach;", 8) == 0) {
             gdb_handle_vattach(pkt + 8);
         } else if (strncmp(pkt, "vCont?", 6) == 0) {
-            gdb_send("vCont;c;s");
+            gdb_send("vCont;c;s;t");
         } else if (strncmp(pkt, "vCont;", 6) == 0) {
-            /* Parse vCont;c or vCont;s */
+            /*
+             * Parse vCont actions.  Format:
+             *   vCont;action[:thread-id][;action[:thread-id]...]
+             *
+             * We scan for 's' (step) first; if none, default to 'c'.
+             * Thread IDs in p<pid>.<tid> form are parsed but we
+             * currently apply the action to the whole process.
+             */
             const char *act = pkt + 6;
-            if (act[0] == 's') {
-                /* Reuse 's' handler */
+            int do_step = 0;
+            /* Scan for any 's' action */
+            const char *scan = act;
+            while (*scan) {
+                if (*scan == 's') { do_step = 1; break; }
+                /* Skip to next ';' */
+                while (*scan && *scan != ';') scan++;
+                if (*scan == ';') scan++;
+            }
+            if (do_step) {
                 char fake[2] = {'s', '\0'};
                 gdb_handle_packet(fake, 1);
             } else {
-                /* Default: continue */
                 char fake[2] = {'c', '\0'};
                 gdb_handle_packet(fake, 1);
             }
@@ -1407,10 +1621,11 @@ static void gdb_handle_packet(const char *pkt, int len)
  */
 int gdbstub_trap(struct thread *t)
 {
-    GDB_LOG("trap: pid=%d pc=0x%lx attached=%d target_pid=%d",
-              t->pid, t->trapframe->trapframe.sepc, gdb.attached, gdb.target_pid);
-    /* Is this the process we're debugging? */
-    if (!gdb.attached || t->pid != gdb.target_pid) {
+    int tgid = thread_tgid(t);
+    GDB_LOG("trap: tid=%d tgid=%d pc=0x%lx attached=%d target_pid=%d",
+              t->pid, tgid, t->trapframe->trapframe.sepc, gdb.attached, gdb.target_pid);
+    /* Is this a thread in the process we're debugging? */
+    if (!gdb.attached || tgid != gdb.target_pid) {
         /*
          * No debugger attached for this PID.  If no other process is
          * already waiting, block here until a GDB client connects and
@@ -1421,12 +1636,12 @@ int gdbstub_trap(struct thread *t)
             return -1;
         }
 
-        gdb.pending_pid = t->pid;
+        gdb.pending_pid = tgid;
         printf("gdbstub: pid %d (%s) waiting for debugger on port %d\n"
                "  (gdb) target remote <host>:%d\n"
                "  (gdb) attach %d\n",
-               t->pid, t->name, GDBSTUB_PORT,
-               GDBSTUB_PORT, t->pid);
+               tgid, t->name, GDBSTUB_PORT,
+               GDBSTUB_PORT, tgid);
 
         /* Block until GDB attaches to us */
         sem_wait(&gdb.debugger_attached);
@@ -1472,6 +1687,7 @@ int gdbstub_trap(struct thread *t)
     /* Update state for the GDB thread */
     gdb.target = t;
     gdb.stop_signal = SIGTRAP;
+    gdb.stop_tid = t->pid;
 
     /* Notify the GDB thread that the target has stopped */
     sem_post(&gdb.target_stopped);
@@ -1501,7 +1717,7 @@ int gdbstub_trap(struct thread *t)
  */
 void gdbstub_exec_stop(struct thread *t)
 {
-    if (!gdb.attached || t->pid != gdb.target_pid)
+    if (!gdb.attached || thread_tgid(t) != gdb.target_pid)
         return;
 
     /* Remove any stale breakpoints from the old address space */
@@ -1511,6 +1727,7 @@ void gdbstub_exec_stop(struct thread *t)
 
     gdb.target = t;
     gdb.stop_signal = SIGTRAP;
+    gdb.stop_tid = t->pid;
 
     printf("gdbstub: pid %d exec -> %s, stopped for debugger\n",
            t->pid, t->name);
@@ -1535,7 +1752,7 @@ void gdbstub_exec_stop(struct thread *t)
  */
 int gdbstub_check_interrupt(struct thread *t)
 {
-    if (!gdb.attached || t->pid != gdb.target_pid)
+    if (!gdb.attached || thread_tgid(t) != gdb.target_pid)
         return 0;
 
     if (!gdb.interrupt_pending)
@@ -1544,10 +1761,11 @@ int gdbstub_check_interrupt(struct thread *t)
     gdb.interrupt_pending = 0;
     __sync_synchronize();
 
-    GDB_LOG("check_interrupt: stopping pid %d", t->pid);
+    GDB_LOG("check_interrupt: stopping pid %d tid %d", gdb.target_pid, t->pid);
 
     gdb.target = t;
     gdb.stop_signal = SIGINT;
+    gdb.stop_tid = t->pid;
 
     /* Notify the GDB thread that the target has stopped */
     sem_post(&gdb.target_stopped);
@@ -1572,6 +1790,9 @@ static void gdb_session(struct netconn *conn)
     gdb.target_pid = 0;
     gdb.target = NULL;
     gdb.stop_signal = 0;
+    gdb.stop_tid = 0;
+    gdb.g_tid = 0;
+    gdb.c_tid = 0;
     gdb.stepping = 0;
     gdb.nbps = 0;
     gdb.interrupt_pending = 0;
@@ -1609,13 +1830,7 @@ static void gdb_session(struct netconn *conn)
                 gdb_send("X09");
                 gdb.attached = 0;
             } else {
-                int sig = gdb.stop_signal;
-                char buf[4];
-                buf[0] = 'S';
-                buf[1] = hexchars[(sig >> 4) & 0xf];
-                buf[2] = hexchars[sig & 0xf];
-                buf[3] = '\0';
-                gdb_send(buf);
+                gdb_send_stop_reply(gdb.stop_signal, gdb.stop_tid);
             }
             continue;
         }
