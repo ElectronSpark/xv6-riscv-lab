@@ -114,9 +114,12 @@ static struct vfs_inode *__devtmpfs_walk_parent(
             int ret = vfs_ilookup(dir, &dentry, name + start,
                                   (size_t)(end - start));
             if (ret == 0 && dentry.ino != 0) {
-                /* Found — get the inode */
+                /* Found — resolve through VFS cache (not the raw
+                 * driver get_inode which fails for tmpfs/backendless
+                 * filesystems). */
                 struct vfs_inode *child =
-                    dir->sb->ops->get_inode(dir->sb, dentry.ino);
+                    vfs_get_dentry_inode(&dentry);
+                vfs_release_dentry(&dentry);
                 vfs_iput(dir);
                 if (IS_ERR_OR_NULL(child))
                     return NULL;
