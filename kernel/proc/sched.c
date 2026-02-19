@@ -692,12 +692,6 @@ void context_switch_finish(struct thread *prev, struct thread *next, int intr) {
         page_free((void *)kstack_addr, kstack_order);
         // prev is now dangling — do NOT access it after this point.
     } else {
-        // Must clear on_cpu after checking if the previous process is
-        // self-reaping, Otherwise, the parent of the previous process may
-        // release the kstack before we finish context switching, which causes
-        // use-after-free when we access prev->sched_entity->on_cpu here.
-        // This is completely rare, but just to be safe, we put the clearing of
-        // on_cpu after the self-reap check.
         smp_store_release(&prev->sched_entity->on_cpu, 0);
     }
     // After this point, we must not access 'prev'

@@ -405,6 +405,89 @@ if(USE_NEWLIB)
     add_newlib_program(_rawecho ${NEWLIB_XV6_DIR}/src/misc/rawecho_test.c)
     add_newlib_program(_utelnetd ${NEWLIB_XV6_DIR}/src/misc/utelnetd.c)
     add_newlib_program(_kqueuetest ${NEWLIB_XV6_DIR}/src/misc/kqueuetest.c)
+    add_newlib_program(_ls ${NEWLIB_XV6_DIR}/src/misc/ls.c)
+
+    # =========================================================================
+    # dash — Debian Almquist Shell (git submodule under user/dash)
+    # =========================================================================
+    set(DASH_SRC_DIR "${CMAKE_SOURCE_DIR}/user/dash")
+    set(DASH_BUILD_DIR "${CMAKE_BINARY_DIR}/dash/build-xv6")
+    set(DASH_BIN "${DASH_BUILD_DIR}/src/dash")
+    set(DASH_FS_BIN "${CMAKE_BINARY_DIR}/user/_dash")
+
+    if(EXISTS "${DASH_SRC_DIR}/configure")
+        add_custom_command(
+            OUTPUT ${DASH_BUILD_DIR}/Makefile
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${DASH_BUILD_DIR}
+            COMMAND ${CMAKE_COMMAND} -E chdir ${DASH_BUILD_DIR}
+                    env
+                    CC=${CMAKE_C_COMPILER}
+                    AR=${CMAKE_AR}
+                    RANLIB=${CMAKE_RANLIB}
+                    CC_FOR_BUILD=cc
+                    CFLAGS=-O2\ -nostdinc\ -ffreestanding\ -fno-common\ -fno-pie\ -no-pie\ -mcmodel=medany\ -isystem\ ${NEWLIB_XV6_DIR}\ -isystem\ ${NEWLIB_XV6_DIR}/include\ -isystem\ ${GCC_INCLUDE_DIR}\ -isystem\ ${NEWLIB_TOP_INCLUDE_DIR}\ -isystem\ ${NEWLIB_INCLUDE_DIR}
+                    LDFLAGS=-static\ -nostartfiles\ -nostdlib\ ${NEWLIB_CRT0_OBJ}\ -Wl,-z,max-page-size=0x1000\ -T\ ${USER_DIR}/user.ld\ -L${CMAKE_CURRENT_BINARY_DIR}/newlib_shim
+                    LIBS=-Wl,--whole-archive\ -lxv6_newlib_syscalls\ -Wl,--no-whole-archive\ ${NEWLIB_LIBC_A}\ ${NEWLIB_LIBM_A}\ -lgcc
+                    ${DASH_SRC_DIR}/configure
+                        --host=riscv64-unknown-elf
+                        --disable-lineno
+                        --without-libedit
+                        ac_cv_func_bsearch=yes
+                        ac_cv_func_faccessat=yes
+                        ac_cv_func_getpwnam=yes
+                        ac_cv_func_getrlimit=yes
+                        ac_cv_func_isalpha=yes
+                        ac_cv_func_killpg=yes
+                        ac_cv_func_memfd_create=no
+                        ac_cv_func_memrchr=yes
+                        ac_cv_func_mempcpy=yes
+                        ac_cv_func_sigsetmask=no
+                        ac_cv_func_stpcpy=yes
+                        ac_cv_func_strchrnul=yes
+                        ac_cv_func_strsignal=yes
+                        ac_cv_func_strtod=yes
+                        ac_cv_func_strtoimax=yes
+                        ac_cv_func_strtoumax=yes
+                        ac_cv_func_sysconf=yes
+                        ac_cv_func_tee=no
+                        ac_cv_func_wait3=yes
+                        ac_cv_func_signal=yes
+                        ac_cv_header_alloca_h=yes
+                        ac_cv_header_paths_h=no
+                        ac_cv_header_sys_wait_h=yes
+                        ac_cv_sizeof_intmax_t=8
+                        ac_cv_sizeof_long_long_int=8
+                        dash_cv_have_attribute_alias=yes
+            DEPENDS ${DASH_SRC_DIR}/configure xv6_newlib_syscalls $<$<BOOL:${USE_LOCAL_NEWLIB}>:local_newlib_install>
+            COMMENT "Configuring dash cross build in ${DASH_BUILD_DIR}"
+        )
+
+        add_custom_target(dash_configure DEPENDS ${DASH_BUILD_DIR}/Makefile)
+
+        add_custom_command(
+            OUTPUT ${DASH_BIN}
+            COMMAND ${CMAKE_COMMAND} -E chdir ${DASH_BUILD_DIR} make -j16 V=1
+            DEPENDS dash_configure
+            COMMENT "Building dash shell"
+        )
+
+        add_custom_target(dash_build DEPENDS ${DASH_BIN})
+
+        add_custom_command(
+            OUTPUT ${DASH_FS_BIN}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
+            COMMAND ${CMAKE_COMMAND} -E copy ${DASH_BIN} ${DASH_FS_BIN}
+            COMMAND ${CMAKE_STRIP} --strip-debug ${DASH_FS_BIN}
+            DEPENDS ${DASH_BIN}
+            COMMENT "Staging dash shell as _dash for fs image"
+        )
+
+        add_custom_target(_dash_newlib ALL DEPENDS ${DASH_FS_BIN})
+        list(APPEND USER_PROGRAMS _dash)
+        set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
+    else()
+        message(STATUS "Skipping dash build (missing submodule at ${DASH_SRC_DIR})")
+    endif()
 
     set(NCURSES_SRC_DIR "${CMAKE_SOURCE_DIR}/user/ncurses")
     set(NCURSES_BUILD_DIR "${CMAKE_BINARY_DIR}/ncurses/build-xv6")
@@ -755,6 +838,9 @@ _blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
     endif()
     if(TARGET _python_newlib)
         add_dependencies(user_programs _python_newlib)
+    endif()
+    if(TARGET _dash_newlib)
+        add_dependencies(user_programs _dash_newlib)
     endif()
 endif()
 

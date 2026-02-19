@@ -272,6 +272,7 @@ add_custom_command(
             ${USER_PROGRAMS}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS user_programs
+            ${USER_PROGRAMS}
             ${CMAKE_CURRENT_BINARY_DIR}/mkfs
             ${CMAKE_SOURCE_DIR}/README.md
     COMMENT "Creating file system image with user programs and README"

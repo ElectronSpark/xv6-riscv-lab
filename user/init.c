@@ -8,6 +8,10 @@
 #include "user/user.h"
 #include "kernel/inc/vfs/fcntl.h"
 
+#ifndef TIOCSCTTY
+#define TIOCSCTTY 0x540E
+#endif
+
 #ifndef CONSOLE_MAJOR
 #define CONSOLE_MAJOR 1
 #endif
@@ -25,6 +29,12 @@
 #endif
 #ifndef RANDOM_MINOR
 #define RANDOM_MINOR 3
+#endif
+#ifndef TTY_DEV_MAJOR
+#define TTY_DEV_MAJOR 5
+#endif
+#ifndef TTY_DEV_MINOR
+#define TTY_DEV_MINOR 1
 #endif
 
 // Second virtio disk: major=2, minor=2
@@ -48,10 +58,18 @@ int main(void) {
     dup(0); // stdout (fd 1)
     dup(0); // stderr (fd 2)
 
+    // Set the console as the controlling terminal for this session.
+    // The kernel already created session 1 for init during boot
+    // (session_init_first), but the console tty is not yet attached.
+    // This enables job control (tcgetpgrp/tcsetpgrp) for shells like dash.
+    if (ioctl(0, TIOCSCTTY, (void *)0) < 0)
+        printf("init: warning: TIOCSCTTY failed\n");
+
     // Ensure device nodes exist (devtmpfs may have created them already,
     // so mknod errors are ignored)
     mknod("/dev/null", S_IFCHR | 0666, NULL_MAJOR, NULL_MINOR);
     mknod("/dev/random", S_IFCHR | 0666, RANDOM_MAJOR, RANDOM_MINOR);
+    mknod("/dev/tty", S_IFCHR | 0666, TTY_DEV_MAJOR, TTY_DEV_MINOR);
 
     // Mount ext4 filesystem (disk1) at /usr for Python standard library
     mkdir("/usr");

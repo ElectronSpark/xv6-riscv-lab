@@ -357,7 +357,11 @@ uint64 sys_vfs_fcntl(void) {
     }
 
     int ret = -EINVAL;
-    switch (cmd) {
+    int normalized_cmd = cmd;
+    if (cmd == 14) { /* newlib F_DUPFD_CLOEXEC */
+        normalized_cmd = F_DUPFD_CLOEXEC;
+    }
+    switch (normalized_cmd) {
     case F_GETFL:
         ret = f->f_flags & ~O_CLOEXEC;
         break;
@@ -373,7 +377,7 @@ uint64 sys_vfs_fcntl(void) {
         }
         spin_lock(&current->fdtable->lock);
         ret = vfs_fdtable_alloc_fd_from(current->fdtable, f, arg);
-        if (ret >= 0 && cmd == F_DUPFD_CLOEXEC) {
+        if (ret >= 0 && normalized_cmd == F_DUPFD_CLOEXEC) {
             (void)vfs_fdtable_set_fdflags(current->fdtable, ret, FD_CLOEXEC);
         }
         spin_unlock(&current->fdtable->lock);
@@ -775,6 +779,7 @@ uint64 sys_vfs_open(void) {
         (void)vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
     }
     spin_unlock(&current->fdtable->lock);
+
     // When success, the refcount of f will be increased by fdtable, thus we do
     // not put f here. When failure, we need to put f anyway.
     vfs_fput(f);

@@ -69,11 +69,11 @@ void reparent(struct thread *p) {
     rcu_read_unlock();
 
     if (zombie_found) {
-        scheduler_wakeup_interruptible(initproc);
         if (initproc != NULL && initproc != parent && initproc != p &&
             p->signal.esignal > 0) {
             kill_thread(initproc, p->signal.esignal);
         }
+        scheduler_wakeup_interruptible(initproc);
     }
 }
 
@@ -155,10 +155,10 @@ void exit(int status) {
             struct thread *parent = leader->parent;
             pid_runlock();
             if (parent != NULL) {
-                scheduler_wakeup_interruptible(parent);
                 if (leader->signal.esignal > 0) {
                     kill_thread(parent, leader->signal.esignal);
                 }
+                scheduler_wakeup_interruptible(parent);
             }
         }
 
@@ -230,14 +230,26 @@ void exit(int status) {
     // (or if there's no thread group). Non-last leaders stay zombie silently
     // until the last thread exits and wakes the parent.
     if (last_in_group || tg == NULL) {
-        // Wake parent BEFORE we yield - this is the Linux pattern.
-        // Always wake parent regardless of exit signal (handles threads with
-        // esignal=0 or ignored signals). Then send the exit signal if set.
+        // Notify parent: send exit signal first, then wake.
+        //
+        // Order matters: kill_thread → scheduler_wakeup_interruptible.
+        // If we wake the parent first, it re-enters waitpid and toggles
+        // between RUNNING and INTERRUPTIBLE in the on_cpu spin loop.
+        // When kill_thread's signal_notify then catches the parent in
+        // INTERRUPTIBLE, __do_scheduler_wakeup's retry loop can livelock
+        // against the state toggling, preventing the zombie from ever
+        // yielding and clearing on_cpu.
+        //
+        // By sending the signal first (while the parent is still genuinely
+        // sleeping), signal_notify's wakeup succeeds cleanly.  The
+        // subsequent scheduler_wakeup_interruptible is then either a no-op
+        // (parent already woken by signal_notify) or the primary wake
+        // (when the exit signal is 0 or ignored).
         if (parent != NULL) {
-            scheduler_wakeup_interruptible(parent);
             if (p->signal.esignal > 0) {
                 kill_thread(parent, p->signal.esignal);
             }
+            scheduler_wakeup_interruptible(parent);
         }
     }
 
@@ -276,28 +288,26 @@ int wait(uint64 addr) {
             // Thread state will never transition back from ZOMBIE, so no need
             // to lock the child.
             if (THREAD_ZOMBIE(child)) {
-                // Make sure the zombie child has fully switched out of CPU.
-                // The on_cpu window is very short (just context_switch_finish),
-                // so we spin-wait with cpu_relax() rather than yielding.
-                // This avoids a tight loop that could starve other threads.
+                // Transition to RUNNING immediately — we've found a zombie
+                // and must NOT be in INTERRUPTIBLE during the on_cpu spin.
+                // Staying INTERRUPTIBLE would allow concurrent wakeup calls
+                // (e.g. from the child's kill_thread in exit()) to enter
+                // __do_scheduler_wakeup's retry loop, which can livelock
+                // against our state toggling.
+                __thread_state_set(p, THREAD_RUNNING);
+                // Spin-wait for the zombie to finish context_switch_finish
+                // which clears on_cpu.
                 int spin_count = 0;
                 while (smp_load_acquire(&child->sched_entity->on_cpu)) {
                     cpu_relax();
                     spin_count++;
-                    // If spinning too long, yield to let other CPU progress
                     if (spin_count > 1000) {
-                        __thread_state_set(p, THREAD_RUNNING);
                         pid_runlock();
                         scheduler_yield(); // Give other CPUs a chance
                         pid_rlock();
-                        __thread_state_set(p, THREAD_INTERRUPTIBLE);
                         spin_count = 0;
                     }
                 }
-                // Found one - set state to RUNNING before returning.
-                // If we were in WAKENING, rq_flush_wake_list will skip us
-                // when it sees our state is no longer WAKENING.
-                __thread_state_set(p, THREAD_RUNNING);
                 xstate = child->xstate;
                 pid = child->pid;
                 if (!pid_try_lock_upgrade()) {
@@ -357,9 +367,10 @@ int waitpid(int target_pid, uint64 addr, int options) {
         return -EINVAL;
     }
 
+    struct thread *p = current;
+
     int pid = -1;
     int xstate = 0;
-    struct thread *p = current;
     struct thread *child, *tmp;
 
     pid_rlock();
@@ -386,21 +397,21 @@ int waitpid(int target_pid, uint64 addr, int options) {
             }
 
             if (THREAD_ZOMBIE(child)) {
+                // Transition to RUNNING immediately — we've found a zombie
+                // and must NOT be in INTERRUPTIBLE during the on_cpu spin.
+                // See comment in wait() for full rationale.
+                __thread_state_set(p, THREAD_RUNNING);
                 int spin_count = 0;
                 while (smp_load_acquire(&child->sched_entity->on_cpu)) {
                     cpu_relax();
                     spin_count++;
                     if (spin_count > 1000) {
-                        __thread_state_set(p, THREAD_RUNNING);
                         pid_runlock();
                         scheduler_yield();
                         pid_rlock();
-                        __thread_state_set(p, THREAD_INTERRUPTIBLE);
                         spin_count = 0;
                     }
                 }
-
-                __thread_state_set(p, THREAD_RUNNING);
                 // Encode exited status: (exit_code << 8) | 0x00
                 xstate = (child->xstate & 0xff) << 8;
                 pid = child->pid;

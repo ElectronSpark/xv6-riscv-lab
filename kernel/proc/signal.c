@@ -418,6 +418,15 @@ sigacts_t *sigacts_dup(sigacts_t *psa, uint64 clone_flags) {
         // the new sigacts appear to be locked by someone else.
         spin_init(&sa->lock, "sigacts_lock");
         sa->refcount = 1;
+
+        // CRITICAL: Reinitialize kqueue state after copying!
+        // memmove copies the parent's kqueue_signal_lock (possibly locked)
+        // and kqueue_signal_knotes list heads (pointing into parent's lists).
+        // The child must start with its own unlocked lock and empty lists.
+        spin_init(&sa->kqueue_signal_lock, "kqueue_sig_lock");
+        for (int i = 0; i < NSIG; i++) {
+            list_entry_init(&sa->kqueue_signal_knotes[i]);
+        }
     }
     return sa;
 }

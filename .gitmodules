@@ -18,3 +18,6 @@
 [submodule "kernel/lwext4"]
 	path = kernel/lwext4
 	url = https://github.com/ElectronSpark/v6-lwext4.git
+[submodule "user/dash"]
+	path = user/dash
+	url = https://git.kernel.org/pub/scm/utils/dash/dash.git

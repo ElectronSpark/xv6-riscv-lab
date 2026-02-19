@@ -6,7 +6,8 @@
  * controlling terminal.  If the process has no controlling terminal,
  * operations return -ENXIO.
  *
- * This is analogous to Linux's /dev/tty (major 5, minor 0).
+ * This is analogous to Linux's /dev/tty; in this kernel, minor 1 is used
+ * because minor 0 is reserved by the device table allocator.
  */
 
 #include "types.h"
@@ -22,7 +23,7 @@
 
 /* Major/minor for /dev/tty */
 #define TTY_DEV_MAJOR 5
-#define TTY_DEV_MINOR 0
+#define TTY_DEV_MINOR 1
 
 /*
  * Get the current process's controlling terminal.

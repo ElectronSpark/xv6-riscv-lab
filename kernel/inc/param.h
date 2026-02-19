@@ -15,7 +15,7 @@
 
 // TTY / PTY device major and minor numbers
 #define TTY_DEV_MAJOR 5
-#define TTY_DEV_MINOR 0
+#define TTY_DEV_MINOR 1
 #define PTMX_MAJOR    5
 #define PTMX_MINOR    2
 #define PTY_MAJOR 136
