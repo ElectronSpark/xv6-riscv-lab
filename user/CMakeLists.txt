@@ -482,6 +482,8 @@ if(USE_NEWLIB)
                         ac_cv_func_getaddrinfo=yes
                         ac_cv_func_getnameinfo=yes
                         ac_cv_func_gethostbyname=yes
+                        ac_cv_header_sys_event_h=yes
+                        ac_cv_func_kqueue=yes
                         --disable-ipv6
             DEPENDS ${CPYTHON_SRC_DIR}/configure ${USER_DIR}/python_pagealign.ld xv6_newlib_syscalls xv6_pthread local_ncurses_build local_readline_build
             COMMENT "Configuring CPython cross build in ${CPYTHON_BUILD_DIR}"
