@@ -122,6 +122,9 @@ struct thread {
     // process table lock must be held before holding p->lock to use this:
     hlist_entry_t proctab_entry; // Entry to link the pid hash table
     list_node_t dmp_list_entry;  // Entry in the dump list
+    /* kqueue: knotes registered for EVFILT_PROC on this thread */
+    spinlock_t kqueue_proc_lock;
+    list_node_t kqueue_proc_knotes;
 
     // ===== Signal (warm, large — pushed to end) =====
     thread_signal_t signal; // Per-thread signal state

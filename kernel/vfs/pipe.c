@@ -18,6 +18,7 @@
 #include "lock/rwsem.h"
 #include "vfs/pipe.h"
 #include "vfs/file.h"
+#include "kqueue_types.h"
 #include "vfs/vfs_types.h"
 #include "vfs/fcntl.h"
 #include "vfs/poll.h"
@@ -56,17 +57,29 @@ struct pipe *pipe_alloc(int flags) {
     spin_init(&pi->writer_lock, "vfs_pipe_writer");
     tq_init(&pi->nread_queue, "pipe_nread_queue", NULL);
     tq_init(&pi->nwrite_queue, "pipe_nwrite_queue", NULL);
+    pi->read_file = NULL;
+    pi->write_file = NULL;
     return pi;
 }
 
 void pipe_close(struct pipe *pi, int writable) {
     bool freed = false;
     if (writable) {
+        /* kqueue: notify read-end knotes before clearing back-pointer */
+        struct vfs_file *rf = pi->read_file;
+        if (rf)
+            vfs_file_knote_notify(rf, EVFILT_READ, 0);
+        pi->write_file = NULL;  /* kqueue: clear back-reference */
         spin_lock(&pi->writer_lock);
         freed = PIPE_CLEAR_WRITABLE(pi);
         tq_wakeup_all(&pi->nread_queue, -1, 0);
         spin_unlock(&pi->writer_lock);
     } else {
+        /* kqueue: notify write-end knotes before clearing back-pointer */
+        struct vfs_file *wf = pi->write_file;
+        if (wf)
+            vfs_file_knote_notify(wf, EVFILT_WRITE, 0);
+        pi->read_file = NULL;  /* kqueue: clear back-reference */
         spin_lock(&pi->reader_lock);
         freed = PIPE_CLEAR_READABLE(pi);
         tq_wakeup_all(&pi->nwrite_queue, -1, 0);
@@ -338,12 +351,22 @@ out:
 
 static ssize_t __pipe_file_read(struct vfs_file *file, char *buf, size_t count,
                                 bool user) {
-    return pipe_read(file->pipe, buf, count, user);
+    struct pipe *pi = file->pipe;
+    ssize_t ret = pipe_read(pi, buf, count, user);
+    /* kqueue: after consuming data, the write-side becomes writable */
+    if (ret > 0 && pi->write_file != NULL)
+        vfs_file_knote_notify(pi->write_file, EVFILT_WRITE, 0);
+    return ret;
 }
 
 static ssize_t __pipe_file_write(struct vfs_file *file, const char *buf,
                                  size_t count, bool user) {
-    return pipe_write(file->pipe, buf, count, user);
+    struct pipe *pi = file->pipe;
+    ssize_t ret = pipe_write(pi, buf, count, user);
+    /* kqueue: after producing data, the read-side becomes readable */
+    if (ret > 0 && pi->read_file != NULL)
+        vfs_file_knote_notify(pi->read_file, EVFILT_READ, 0);
+    return ret;
 }
 
 static int __pipe_file_release(struct vfs_inode *inode, struct vfs_file *file) {
@@ -405,4 +428,9 @@ void pipe_open(struct vfs_file *file, struct pipe *pi, int f_flags) {
     file->f_flags = f_flags;
     file->pipe = pi;
     file->ops = &pipe_file_ops;
+    /* kqueue: record file endpoint for cross-notification */
+    if ((f_flags & O_ACCMODE) == O_RDONLY)
+        pi->read_file = file;
+    else
+        pi->write_file = file;
 }

@@ -171,6 +171,11 @@ extern uint64 sys_tcgetattr(void);
 extern uint64 sys_tcsetattr(void);
 extern uint64 sys_vfs_poll(void);
 
+// kqueue syscalls
+extern uint64 sys_kqueue(void);
+extern uint64 sys_kevent_register(void);
+extern uint64 sys_kevent_wait(void);
+
 /*
  * Syscall routing table
  *
@@ -253,6 +258,9 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_stat] sys_vfs_stat,
     [SYS_lstat] sys_vfs_lstat,
     [SYS_poll] sys_vfs_poll,
+    [SYS_kqueue] sys_kqueue,
+    [SYS_kevent_register] sys_kevent_register,
+    [SYS_kevent_wait] sys_kevent_wait,
     [SYS_ftruncate] sys_vfs_ftruncate,
     [SYS_gettimeofday] sys_gettimeofday,
     [SYS_waitpid] sys_waitpid,

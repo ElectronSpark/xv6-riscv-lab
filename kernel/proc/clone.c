@@ -2,6 +2,7 @@
 #include "proc/thread_group.h"
 #include "clone_flags.h"
 #include "defs.h"
+#include "kqueue_types.h"
 #include "hlist.h"
 #include "list.h"
 #include <mm/memlayout.h>
@@ -227,6 +228,9 @@ int thread_clone(struct clone_args *args) {
     // Wake up the new child thread
     // Note: pi_lock no longer needed - rq_lock serializes wakeups
     scheduler_wakeup(ret_ptr);
+
+    /* kqueue: notify EVFILT_PROC watchers of fork */
+    kqueue_proc_notify(p, NOTE_FORK, ret_ptr->pid);
 
     // For vfork, parent blocks until child exits or execs
     if (args->flags & CLONE_VFORK) {

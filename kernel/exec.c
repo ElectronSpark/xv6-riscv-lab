@@ -23,6 +23,7 @@
 #include "vfs/file.h"
 #include "vfs/fcntl.h"
 #include "signal.h"
+#include "kqueue_types.h"
 
 int flags2vmperm(int flags) {
     int perm = 0;
@@ -307,6 +308,9 @@ int exec(char *path, char **argv, char **envp) {
         if (*s == '/')
             last = s + 1;
     safestrcpy(p->name, last, sizeof(p->name));
+
+    /* kqueue: notify EVFILT_PROC watchers of exec */
+    kqueue_proc_notify(p, NOTE_EXEC, 0);
 
     // Commit to the user image.
     vm_put(p->vm); // Destroy the old VM

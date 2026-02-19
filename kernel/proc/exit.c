@@ -1,6 +1,7 @@
 #include "proc/thread.h"
 #include "proc/thread_group.h"
 #include "defs.h"
+#include "kqueue_types.h"
 #include "hlist.h"
 #include "list.h"
 #include <mm/memlayout.h>
@@ -209,6 +210,9 @@ void exit(int status) {
 
     // Leader thread or single-threaded process: standard exit path
     reparent(p);
+
+    /* kqueue: notify EVFILT_PROC watchers of exit */
+    kqueue_proc_notify(p, NOTE_EXIT, status);
 
     tcb_lock(p);
     p->xstate = status;

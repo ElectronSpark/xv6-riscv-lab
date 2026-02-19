@@ -173,6 +173,12 @@ int getsid(int pid);
 
 void sync(void);
 
+// kqueue
+struct kevent; // forward declaration
+int kqueue(void);
+int kevent_register(int kqfd, struct kevent *changelist, int nchanges);
+int kevent_wait(int kqfd, struct kevent *eventlist, int nevents, int timeout_ms);
+
 // gdb support — execute EBREAK to pause and wait for a debugger.
 // The kernel prints the PID and connection instructions.
 static inline void waitgdb(void) {

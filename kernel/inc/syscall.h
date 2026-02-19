@@ -82,7 +82,10 @@
 #define SYS_uname        62
 #define SYS_lstat        63
 #define SYS_poll         64
-// 65-69 reserved
+#define SYS_kqueue       65
+#define SYS_kevent_register 66
+#define SYS_kevent_wait  67
+// 68-69 reserved
 
 // --- Signals (70-89) ---
 #define SYS_sigaction    70

@@ -283,6 +283,9 @@ struct vfs_inode {
         };
     };
     completion_t completion;
+    /* kqueue: list of knotes registered on this inode (EVFILT_VNODE) */
+    list_node_t knote_list;
+    spinlock_t knote_lock;
 };
 
 /*
@@ -367,6 +370,9 @@ struct vfs_file {
     struct vfs_file_ops *ops;
     void *private_data; // filesystem-specific data
     mutex_t lock;       // protects f_pos
+    /* kqueue: list of knotes registered on this file */
+    list_node_t knote_list;
+    spinlock_t knote_lock;
     union {
         loff_t f_pos;                 // file position(regular files)
         struct vfs_dir_iter dir_iter; // directory iterator state (directories)

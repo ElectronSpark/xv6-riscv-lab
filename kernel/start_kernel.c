@@ -15,6 +15,7 @@
 #include <mm/pcache.h>
 #include "vfs/fs.h"
 #include "vfs/pipe.h"
+#include "kqueue_types.h"
 #include "tty/tty.h"
 #include "tty/session.h"
 #include "trap.h"
@@ -70,6 +71,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     kvminithart(); // turn on paging
     printf("paging enabled\n");
     pipe_init();               // initialize pipe subsystem
+    kqueue_init();             // initialize kqueue subsystem
     tty_init();                // TTY slab cache
     session_init();            // session slab cache
     mycpu_init(hartid, true); // Change mycpu pointer to use trampoline stack

@@ -39,6 +39,9 @@ typedef struct sigacts {
     // sigset_t sa_sigcore;    // signals that generate a core dump (not used)
     sigset_t sa_sigignore; // signals ignored by this process
     _Atomic int refcount;  // reference count for shared usage
+    /* kqueue: per-signal knote lists for EVFILT_SIGNAL */
+    spinlock_t kqueue_signal_lock;
+    list_node_t kqueue_signal_knotes[NSIG];
 } sigacts_t;
 
 typedef struct stack {

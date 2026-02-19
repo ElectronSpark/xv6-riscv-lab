@@ -101,3 +101,8 @@ entry("setsid");
 entry("getsid");
 
 entry("sync");
+
+# kqueue syscalls
+entry("kqueue");
+entry("kevent_register");
+entry("kevent_wait");

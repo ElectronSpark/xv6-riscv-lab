@@ -404,6 +404,7 @@ if(USE_NEWLIB)
     add_newlib_program(_nettest ${NEWLIB_XV6_DIR}/src/misc/nettest.c)
     add_newlib_program(_rawecho ${NEWLIB_XV6_DIR}/src/misc/rawecho_test.c)
     add_newlib_program(_utelnetd ${NEWLIB_XV6_DIR}/src/misc/utelnetd.c)
+    add_newlib_program(_kqueuetest ${NEWLIB_XV6_DIR}/src/misc/kqueuetest.c)
 
     set(NCURSES_SRC_DIR "${CMAKE_SOURCE_DIR}/user/ncurses")
     set(NCURSES_BUILD_DIR "${CMAKE_BINARY_DIR}/ncurses/build-xv6")

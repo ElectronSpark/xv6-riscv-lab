@@ -100,6 +100,7 @@ add_subdirectory(${KERNEL_DIR}/lwip_port)
 add_subdirectory(${KERNEL_DIR}/lwext4_port)
 add_subdirectory(${KERNEL_DIR}/telnetd)
 add_subdirectory(${KERNEL_DIR}/gdbstub)
+add_subdirectory(${KERNEL_DIR}/kqueue)
 
 set_source_files_properties(${KERNEL_C_FILES} PROPERTIES LANGUAGE C)
 set_source_files_properties(${KERNEL_SCAN_OBJS} PROPERTIES LANGUAGE C)
@@ -125,9 +126,10 @@ set(KERNEL_OBJ_LIBS
     $<TARGET_OBJECTS:ext4fs>
     $<TARGET_OBJECTS:telnetd>
     $<TARGET_OBJECTS:gdbstub>
+    $<TARGET_OBJECTS:kqueue_core>
 )
 
-set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs tty lwip ext4fs telnetd gdbstub)
+set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs tty lwip ext4fs telnetd gdbstub kqueue_core)
 
 # Generate linker script from template
 set(KERNEL_LD_IN ${KERNEL_DIR}/kernel.ld.in)

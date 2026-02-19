@@ -23,6 +23,7 @@
  */
 
 #include "types.h"
+#include "kqueue_types.h"
 #include "string.h"
 #include "param.h"
 #include "riscv.h"
@@ -359,6 +360,12 @@ sigacts_t *sigacts_init(void) {
     spin_init(&sa->lock, "sigacts_lock");
     sa->refcount = 1;
 
+    /* kqueue: initialize per-signal knote lists */
+    spin_init(&sa->kqueue_signal_lock, "kqueue_sig_lock");
+    for (int i = 0; i < NSIG; i++) {
+        list_entry_init(&sa->kqueue_signal_knotes[i]);
+    }
+
     for (int i = 1; i <= NSIG; i++) {
         assert(__sig_setdefault(sa, i) == 0,
                "sigacts_init: failed to set default action for signal %d", i);
@@ -568,6 +575,9 @@ after_enqueue:
         signal_notify(p);
         tcb_unlock(p);
     }
+
+    /* kqueue: notify EVFILT_SIGNAL watchers */
+    kqueue_signal_notify(p, info->signo);
 
     return 0; // Signal sent successfully
 }

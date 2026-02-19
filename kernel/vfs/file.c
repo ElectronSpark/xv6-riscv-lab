@@ -23,6 +23,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include <smp/atomic.h>
+#include "kqueue_types.h"
 #include "param.h"
 #include "errno.h"
 #include "bits.h"
@@ -85,6 +86,8 @@ static struct vfs_file *__vfs_file_alloc(void) {
     memset(file, 0, sizeof(*file));
     mutex_init(&file->lock, "vfs_file_lock");
     file->ref_count = 1;
+    spin_init(&file->knote_lock, "vfs_file_knote");
+    list_entry_init(&file->knote_list);
     return file;
 }
 
@@ -582,6 +585,10 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
     ret = file->ops->write(file, buf, n, user);
     if (ret > 0) {
         file->f_pos += ret;
+        /* kqueue: notify EVFILT_VNODE watchers of write to file */
+        struct vfs_inode *ino = vfs_inode_deref(&file->inode);
+        if (ino != NULL)
+            vfs_inode_knote_notify(ino, NOTE_WRITE);
     }
 out:
     __vfs_file_unlock(file);

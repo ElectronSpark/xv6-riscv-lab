@@ -23,6 +23,7 @@
 #include "param.h"
 #include "errno.h"
 #include "bits.h"
+#include "kqueue_types.h"
 #include "vfs/stat.h"
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
@@ -58,6 +59,8 @@ void __vfs_inode_init(struct vfs_inode *inode) {
     list_entry_init(&inode->orphan_entry);
     inode->orphan = 0;
     inode->ref_count = 1;
+    spin_init(&inode->knote_lock, "vfs_inode_knote");
+    list_entry_init(&inode->knote_list);
 }
 
 /******************************************************************************
@@ -966,6 +969,9 @@ out_unlock_sb:
     }
 
     vfs_iput(target);
+    /* kqueue: notify EVFILT_VNODE watchers of new link */
+    if (ret == 0)
+        vfs_inode_knote_notify(target, NOTE_LINK);
     return ret;
 }
 
@@ -1066,6 +1072,9 @@ out:
     }
     vfs_iput(target); // Drop our reference from lookup
     vfs_release_dentry(&dentry);
+    /* kqueue: notify EVFILT_VNODE watchers of unlink/delete */
+    if (ret == 0)
+        vfs_inode_knote_notify(target, NOTE_DELETE);
     return ret;
 }
 
