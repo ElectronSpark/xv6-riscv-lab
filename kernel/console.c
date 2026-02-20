@@ -16,6 +16,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
+#include "errno.h"
 #include "proc/thread.h"
 #include "proc/sched.h"
 #include "proc/proc_private.h"
@@ -143,6 +144,7 @@ int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
     int i;
     uint64 src = (uint64)buffer;
     char kbuf[64];
+    char outbuf[128]; // room for ONLCR expansion (worst case 2x)
     int written = 0;
 
     /* Check OPOST flags from the TTY (if active) */
@@ -154,20 +156,38 @@ int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
         spin_unlock(&console_tty->lock);
     }
 
-    while (written < n) {
+    while (written < (int)n) {
         int batch_size = n - written;
         if (batch_size > 64)
             batch_size = 64;
 
         for (i = 0; i < batch_size; i++) {
             if (either_copyin(&kbuf[i], user_src, src + written + i, 1) < 0)
-                return written + i;
+                return written > 0 ? written : -EFAULT;
         }
 
+        // Expand into output buffer
+        int olen = 0;
         for (i = 0; i < batch_size; i++) {
             if (do_onlcr && kbuf[i] == '\n')
-                uartputc('\r');
-            uartputc(kbuf[i]);
+                outbuf[olen++] = '\r';
+            outbuf[olen++] = kbuf[i];
+        }
+
+        // Submit output, waiting interruptibly when the TX buffer is full
+        int sent = 0;
+        while (sent < olen) {
+            int accepted = uartputs_nb(outbuf + sent, olen - sent);
+            sent += accepted;
+            if (sent < olen) {
+                int ret = uart_tx_wait();
+                if (ret != 0) {
+                    // Interrupted by signal — return partial write count.
+                    // We consumed this batch from userspace, so count it.
+                    written += batch_size;
+                    return written > 0 ? written : -EINTR;
+                }
+            }
         }
         written += batch_size;
     }

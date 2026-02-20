@@ -125,6 +125,8 @@ int restore_sigframe(struct thread *p, ucontext_t *ret_uc);
 int uartinit(void);
 void uartputc(int);
 void uartputs(const char *, int);
+int uartputs_nb(const char *, int);
+int uart_tx_wait(void);
 void uartputc_sync(int);
 int uartgetc(void);
 
