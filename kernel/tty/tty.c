@@ -83,6 +83,7 @@ struct tty *tty_alloc(const char *name, struct tty_ops *ops) {
     tty->raw_r = 0;
     tty->raw_w = 0;
     tq_init(&tty->raw_wait, "tty_raw", NULL);
+    tty->canon_len = 0;
     tty->driver_data = NULL;
     tty->session = NULL;
     safestrcpy(tty->name, name, sizeof(tty->name));
@@ -312,36 +313,45 @@ ssize_t tty_input(struct tty *tty, const char *buf, size_t count) {
         /* ---------- canonical mode editing ---------- */
 
         if (L_CANON(tty)) {
-            /* Erase (backspace / DEL) */
+            /* Erase (backspace / DEL) — remove last char from line buffer */
             if (c == tty->termios.c_cc[VERASE] || c == '\b') {
-                /* Delete one character by writing a NUL into the pipe
-                 * is not feasible—we rely on the pipe already being
-                 * consumed line-by-line.  For simplicity, echo the
-                 * visual backspace only; the pipe will never see the
-                 * erased character because we don't push it. Instead
-                 * we keep a small edit buffer. */
-                if (L_ECHOE(tty))
-                    tty_echo_char(tty, BACKSPACE);
+                if (tty->canon_len > 0) {
+                    tty->canon_len--;
+                    if (L_ECHOE(tty))
+                        tty_echo_char(tty, BACKSPACE);
+                }
                 continue;
             }
 
-            /* Kill line (^U) */
+            /* Kill line (^U) — clear entire line buffer */
             if (c == tty->termios.c_cc[VKILL]) {
-                if (L_ECHOK(tty))
-                    tty_echo_char(tty, '\n');
+                /* Echo backspaces for each character removed */
+                if (L_ECHOE(tty)) {
+                    while (tty->canon_len > 0) {
+                        tty->canon_len--;
+                        tty_echo_char(tty, BACKSPACE);
+                    }
+                } else {
+                    tty->canon_len = 0;
+                    if (L_ECHOK(tty))
+                        tty_echo_char(tty, '\n');
+                }
                 continue;
             }
 
-            /* EOF (^D) — push a zero-length "line" to unblock readers */
+            /* EOF (^D) — flush current buffer (if any), deliver
+             * zero-length read if buffer was empty */
             if (c == tty->termios.c_cc[VEOF]) {
-                /* Don't push the ^D itself. Just echo if needed and
-                 * let the pipe's existing data be delivered as a
-                 * complete line. */
                 spin_unlock(&tty->lock);
-                /* Write a sentinel NUL so the reader sees zero-length */
-                char nul = 0;
-                pipe_write(tty->input_pipe, &nul, 0, 0);
+                if (tty->canon_len > 0) {
+                    pipe_write(tty->input_pipe, tty->canon_buf,
+                               tty->canon_len, 0);
+                } else {
+                    /* Zero-length write signals EOF to reader */
+                    pipe_write(tty->input_pipe, "", 0, 0);
+                }
                 spin_lock(&tty->lock);
+                tty->canon_len = 0;
                 continue;
             }
         }
@@ -368,11 +378,24 @@ ssize_t tty_input(struct tty *tty, const char *buf, size_t count) {
             /* Wake readers — tq_wakeup_all is safe under spinlock */
             tq_wakeup_all(&tty->raw_wait, 0, 0);
         } else {
-            /* Canonical mode: push into input pipe */
-            char ch = (char)c;
-            spin_unlock(&tty->lock);
-            pipe_write(tty->input_pipe, &ch, 1, 0);
-            spin_lock(&tty->lock);
+            /*
+             * Canonical mode: accumulate characters in the line
+             * buffer.  When a line terminator (newline or VEOL)
+             * arrives, flush the complete line into the input pipe
+             * so that read() returns the whole line at once.
+             */
+            if (tty->canon_len < TTY_CANON_BUF_SIZE)
+                tty->canon_buf[tty->canon_len++] = (char)c;
+
+            /* Flush on newline or EOL */
+            if (c == '\n' ||
+                c == (unsigned char)tty->termios.c_cc[VEOL]) {
+                spin_unlock(&tty->lock);
+                pipe_write(tty->input_pipe, tty->canon_buf,
+                           tty->canon_len, 0);
+                spin_lock(&tty->lock);
+                tty->canon_len = 0;
+            }
         }
     }
 
@@ -575,6 +598,17 @@ int tty_ioctl(struct tty *tty, uint64 cmd, void *arg) {
         struct termios *tp = (struct termios *)arg;
 
         spin_lock(&tty->lock);
+        /* Flush any partial canonical line buffer before changing modes.
+         * If switching from canonical → raw, leftover chars would be lost. */
+        if (tty->canon_len > 0) {
+            char tmpbuf[TTY_CANON_BUF_SIZE];
+            uint tmplen = tty->canon_len;
+            __builtin_memcpy(tmpbuf, tty->canon_buf, tmplen);
+            tty->canon_len = 0;
+            spin_unlock(&tty->lock);
+            pipe_write(tty->input_pipe, tmpbuf, tmplen, 0);
+            spin_lock(&tty->lock);
+        }
         tty->termios = *tp;
         spin_unlock(&tty->lock);
 
@@ -586,6 +620,7 @@ int tty_ioctl(struct tty *tty, uint64 cmd, void *arg) {
         if (cmd == TCSETSF) {
             spin_lock(&tty->lock);
             tty->raw_r = tty->raw_w; /* flush raw ring buffer */
+            tty->canon_len = 0;      /* flush canonical line buffer */
             spin_unlock(&tty->lock);
             if (tty->ops && tty->ops->discard_input)
                 tty->ops->discard_input(tty);

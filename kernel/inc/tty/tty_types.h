@@ -33,6 +33,18 @@ struct tty_ops {
  */
 #define TTY_RAW_BUF_SIZE 256
 
+/*
+ * Canonical-mode line editing buffer.  Characters are accumulated here
+ * until a line-terminating character (newline, VEOL, or VEOF) arrives,
+ * at which point the complete line is flushed into the input pipe.
+ * This is how POSIX canonical mode is supposed to work: read() blocks
+ * until a full line is available.
+ *
+ * MAX_CANON is the traditional limit (typically 255).  The buffer
+ * holds up to MAX_CANON characters plus the terminating newline.
+ */
+#define TTY_CANON_BUF_SIZE 256
+
 struct tty {
     spinlock_t lock; // Protects termios, winsize, and raw buffer
 
@@ -55,6 +67,10 @@ struct tty {
     uint   raw_r; // read index  (consumer: tty_read)
     uint   raw_w; // write index (producer: tty_input)
     tq_t   raw_wait; // readers sleep here when buffer empty
+
+    /* Canonical-mode line editing buffer */
+    char   canon_buf[TTY_CANON_BUF_SIZE];
+    uint   canon_len; // number of characters in canon_buf
 
     void *driver_data; // Driver-specific data pointer
 

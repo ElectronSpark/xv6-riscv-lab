@@ -31,5 +31,6 @@ cmake_install.cmake
 CMakeFiles/
 
 # Doxygen generated documentation
-docs/
+docs/html/
+docs/latex/
 *.doxyfile.bak

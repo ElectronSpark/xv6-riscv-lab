@@ -176,7 +176,7 @@ static inline mode_t xv6fs_type_to_mode(short type) {
     case XV6FS_T_DIR:
         return S_IFDIR | 0755;
     case XV6FS_T_FILE:
-        return S_IFREG | 0644;
+        return S_IFREG | 0755;
     case XV6FS_T_CDEVICE:
         return S_IFCHR | 0666;
     case XV6FS_T_BLKDEVICE:

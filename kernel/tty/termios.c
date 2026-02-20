@@ -37,10 +37,15 @@ void termios_init_default(struct termios *t) {
     t->c_cc[VEOF] = 0x04;   /* ^D  */
     t->c_cc[VTIME] = 0;
     t->c_cc[VMIN] = 1;
+    t->c_cc[VSWTC] = 0x00;  /* disabled */
     t->c_cc[VSTART] = 0x11; /* ^Q  */
     t->c_cc[VSTOP] = 0x13;  /* ^S  */
     t->c_cc[VSUSP] = 0x1A;  /* ^Z  */
     t->c_cc[VEOL] = 0x00;
+    t->c_cc[VREPRINT] = 0x12; /* ^R */
+    t->c_cc[VDISCARD] = 0x0F; /* ^O */
+    t->c_cc[VWERASE] = 0x17;  /* ^W */
+    t->c_cc[VLNEXT] = 0x16;   /* ^V */
 
     /* Default baud rate */
     t->c_ispeed = B115200;

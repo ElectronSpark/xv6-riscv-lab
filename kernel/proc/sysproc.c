@@ -106,8 +106,11 @@ uint64 sys_clone(void) {
     argaddr(0, &uargs);
 
     struct clone_args args = {0};
-    if (uargs == 0) {
-        // No args provided - default to fork behavior
+    if (uargs < PAGE_SIZE) {
+        // No args, or Linux-style clone(flags, stack) where a0 is a small
+        // flags value rather than a pointer.  musl's _Fork() calls
+        // __syscall(SYS_clone, SIGCHLD, 0) — SIGCHLD (17) ends up here.
+        // Treat as plain fork.
         args.flags = SIGCHLD;
         args.esignal = SIGCHLD;
     } else {

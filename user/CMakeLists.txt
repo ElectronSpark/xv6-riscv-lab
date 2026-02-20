@@ -376,7 +376,42 @@ set(DASH_BUILD_DIR "${CMAKE_BINARY_DIR}/dash/build-xv6")
 set(DASH_BIN "${DASH_BUILD_DIR}/src/dash")
 set(DASH_FS_BIN "${CMAKE_BINARY_DIR}/user/_dash")
 
+# libedit shim: maps BSD editline API → GNU readline for dash
+set(HISTEDIT_SHIM_SRC "${CMAKE_SOURCE_DIR}/user/musl-xv6/compat/histedit_shim.c")
+set(HISTEDIT_SHIM_DIR "${CMAKE_BINARY_DIR}/dash/libedit-shim")
+set(HISTEDIT_SHIM_OBJ "${HISTEDIT_SHIM_DIR}/histedit_shim.o")
+set(HISTEDIT_SHIM_A   "${HISTEDIT_SHIM_DIR}/libedit.a")
+
 if(EXISTS "${DASH_SRC_DIR}/configure")
+
+    # Build the libedit shim (depends on readline + ncurses builds)
+    add_custom_command(
+        OUTPUT ${HISTEDIT_SHIM_OBJ}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${HISTEDIT_SHIM_DIR}
+        COMMAND ${CMAKE_C_COMPILER}
+            -c -o ${HISTEDIT_SHIM_OBJ}
+            -O2 -nostdinc -ffreestanding -fno-common -fno-pie -no-pie
+            -mcmodel=medany -march=rv64gc -mabi=lp64d
+            -isystem ${MUSL_INCLUDE_DIR}
+            -isystem ${GCC_INCLUDE_DIR_MUSL}
+            -isystem ${MUSL_COMPAT_DIR}
+            -I${CMAKE_SOURCE_DIR}/user
+            -I${NCURSES_INCLUDE_DIR}
+            ${HISTEDIT_SHIM_SRC}
+        DEPENDS ${HISTEDIT_SHIM_SRC} musl_sysroot local_readline_build local_ncurses_build
+        COMMENT "Compiling libedit→readline shim for dash"
+    )
+
+    add_custom_command(
+        OUTPUT ${HISTEDIT_SHIM_A}
+        COMMAND ${CMAKE_AR} rcs ${HISTEDIT_SHIM_A} ${HISTEDIT_SHIM_OBJ}
+        DEPENDS ${HISTEDIT_SHIM_OBJ}
+        COMMENT "Creating libedit.a shim archive"
+    )
+
+    add_custom_target(libedit_shim DEPENDS ${HISTEDIT_SHIM_A})
+
+    # Configure dash with libedit support (backed by our readline shim)
     add_custom_command(
         OUTPUT ${DASH_BUILD_DIR}/Makefile
         COMMAND ${CMAKE_COMMAND} -E make_directory ${DASH_BUILD_DIR}
@@ -386,13 +421,13 @@ if(EXISTS "${DASH_SRC_DIR}/configure")
                 AR=${CMAKE_AR}
                 RANLIB=${CMAKE_RANLIB}
                 CC_FOR_BUILD=cc
-                CFLAGS=-O2\ -nostdinc\ -ffreestanding\ -fno-common\ -fno-pie\ -no-pie\ -mcmodel=medany\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}
-                LDFLAGS=-static\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,-z,max-page-size=0x1000\ -T\ ${MUSL_LINKER_SCRIPT}
-                LIBS=${MUSL_LIBC_A}\ ${LIBGCC_PATH}\ ${MUSL_CRTN_O}
+                CFLAGS=-O2\ -nostdinc\ -ffreestanding\ -fno-common\ -fno-pie\ -no-pie\ -mcmodel=medany\ -DFLUSHERR=1\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -I${NCURSES_INCLUDE_DIR}
+                LDFLAGS=-static\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,-z,max-page-size=0x1000\ -T\ ${MUSL_LINKER_SCRIPT}\ -L${HISTEDIT_SHIM_DIR}\ -L${READLINE_BUILD_DIR}\ -L${NCURSES_BUILD_DIR}/lib
+                LIBS=${HISTEDIT_SHIM_A}\ ${READLINE_LIB_A}\ ${NCURSES_LIB_A}\ ${MUSL_LIBC_A}\ ${LIBGCC_PATH}\ ${MUSL_CRTN_O}
                 ${DASH_SRC_DIR}/configure
                     --host=riscv64-unknown-elf
                     --disable-lineno
-                    --without-libedit
+                    --with-libedit
                     ac_cv_func_bsearch=yes
                     ac_cv_func_faccessat=yes
                     ac_cv_func_getpwnam=yes
@@ -414,22 +449,25 @@ if(EXISTS "${DASH_SRC_DIR}/configure")
                     ac_cv_func_wait3=yes
                     ac_cv_func_signal=yes
                     ac_cv_header_alloca_h=yes
-                    ac_cv_header_paths_h=no
+                    ac_cv_header_paths_h=yes
+                    ac_cv_header_histedit_h=yes
                     ac_cv_header_sys_wait_h=yes
+                    ac_cv_lib_edit_history_init=yes
                     ac_cv_sizeof_intmax_t=8
                     ac_cv_sizeof_long_long_int=8
                     dash_cv_have_attribute_alias=yes
-        DEPENDS ${DASH_SRC_DIR}/configure musl_sysroot
-        COMMENT "Configuring dash cross build (musl)"
+        DEPENDS ${DASH_SRC_DIR}/configure musl_sysroot ${HISTEDIT_SHIM_A}
+        COMMENT "Configuring dash cross build (musl, with readline-based libedit)"
     )
 
     add_custom_target(dash_configure DEPENDS ${DASH_BUILD_DIR}/Makefile)
+    add_dependencies(dash_configure libedit_shim)
 
     add_custom_command(
         OUTPUT ${DASH_BIN}
         COMMAND ${CMAKE_COMMAND} -E chdir ${DASH_BUILD_DIR} make -j16 V=1
-        DEPENDS dash_configure
-        COMMENT "Building dash shell (musl)"
+        DEPENDS dash_configure ${HISTEDIT_SHIM_A}
+        COMMENT "Building dash shell (musl, with readline)"
     )
 
     add_custom_target(dash_build DEPENDS ${DASH_BIN})
