@@ -12,6 +12,7 @@
 # (a7=syscall#, a0-a5=args, a0=return, negative=negated errno).
 # We only need to change:
 #   - bits/syscall.h.in (xv6 uses different syscall numbers than Linux)
+#   - kstat.h (xv6 stat layout differs from Linux kstat)
 #   - src/thread/riscv64/__clone.s (xv6 clone takes a struct pointer)
 # All other arch files use upstream musl defaults.
 #
@@ -89,11 +90,14 @@ ARCH_DIR="${MUSL_SRC}/arch/riscv64"
 # 1. Override syscall numbers (the ONLY bits/ override needed)
 cp "${SCRIPT_DIR}/arch/riscv64/bits/syscall.h.in" "${ARCH_DIR}/bits/syscall.h.in"
 
+# 1.5 Override kstat layout (xv6 struct stat is compact, not Linux kstat)
+cp "${SCRIPT_DIR}/arch/riscv64/kstat.h" "${ARCH_DIR}/kstat.h"
+
 # 2. Override __clone.s (xv6 clone takes a struct pointer, not individual regs)
 mkdir -p "${MUSL_SRC}/src/thread/riscv64"
 cp "${SCRIPT_DIR}/arch/riscv64/__clone.s" "${MUSL_SRC}/src/thread/riscv64/__clone.s"
 
-echo "Overlay applied (2 files)."
+echo "Overlay applied (3 files)."
 
 # 3. Disable brk — xv6 heap growth is unreliable when mmap regions are
 #    placed adjacent to the heap VMA.  Force mallocng to use mmap exclusively.

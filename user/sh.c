@@ -37,6 +37,7 @@ static inline void waitgdb_stopentry(void) {
 }
 #else
 #include "user.h"
+#include "kernel/inc/syscall.h"
 #include "kernel/inc/vfs/fcntl.h"
 #include "kernel/inc/vfs/stat.h"
 #include "kernel/inc/tty/termios.h"
@@ -49,6 +50,18 @@ static int setenv(const char *name, const char *value, int overwrite) {
 static int unsetenv(const char *name) {
     (void)name;
     return 0;
+}
+
+static int exec_with_env(const char *path, char **argv, char **envp) {
+    register uint64 arg0 asm("a0") = (uint64)path;
+    register uint64 arg1 asm("a1") = (uint64)argv;
+    register uint64 arg2 asm("a2") = (uint64)envp;
+    register uint64 syscall_num asm("a7") = SYS_exec;
+    asm volatile("ecall"
+                 : "+r"(arg0)
+                 : "r"(arg1), "r"(arg2), "r"(syscall_num)
+                 : "memory");
+    return (int)arg0;
 }
 #endif
 
@@ -1329,6 +1342,44 @@ static void builtin_history(void) {
     }
 }
 
+static char **build_exec_envp(void) {
+#ifdef USE_NCURSES_SHELL
+    return environ;
+#else
+    static char env_storage[MAX_ENV_VARS][MAX_ENV_NAME + MAX_ENV_VALUE + 2];
+    static char *envp[MAX_ENV_VARS + 1];
+    int out = 0;
+
+    for (int i = 0; i < MAX_ENV_VARS && out < MAX_ENV_VARS; i++) {
+        if (!env_vars[i].used)
+            continue;
+        int nlen = strlen(env_vars[i].name);
+        int vlen = strlen(env_vars[i].value);
+        if (nlen >= MAX_ENV_NAME)
+            nlen = MAX_ENV_NAME - 1;
+        if (vlen >= MAX_ENV_VALUE)
+            vlen = MAX_ENV_VALUE - 1;
+
+        memcpy(env_storage[out], env_vars[i].name, nlen);
+        env_storage[out][nlen] = '=';
+        memcpy(env_storage[out] + nlen + 1, env_vars[i].value, vlen);
+        env_storage[out][nlen + 1 + vlen] = 0;
+        envp[out] = env_storage[out];
+        out++;
+    }
+    envp[out] = 0;
+    return envp;
+#endif
+}
+
+static int shell_exec(char *path, char **argv) {
+#ifdef USE_NCURSES_SHELL
+    return exec(path, argv);
+#else
+    return exec_with_env(path, argv, build_exec_envp());
+#endif
+}
+
 // =====================================================================
 // PATH-based exec
 // =====================================================================
@@ -1337,13 +1388,13 @@ static void exec_with_path(char *cmd, char **argv) {
     // If contains '/', use directly
     for (char *p = cmd; *p; p++) {
         if (*p == '/') {
-            exec(cmd, argv);
+            shell_exec(cmd, argv);
             return;
         }
     }
 
     // Try as-is (current dir)
-    exec(cmd, argv);
+    shell_exec(cmd, argv);
 
     // Search PATH
     char *path = env_get("PATH");
@@ -1369,7 +1420,7 @@ static void exec_with_path(char *cmd, char **argv) {
             if (fullpath[dlen - 1] != '/')
                 fullpath[dlen++] = '/';
             strcpy(fullpath + dlen, cmd);
-            exec(fullpath, argv);
+            shell_exec(fullpath, argv);
         }
         if (*p == ':')
             p++;
@@ -1645,6 +1696,10 @@ int main(void) {
             continue;
 
         int pid;
+
+        // Snapshot shell terminal settings before child can mutate tty state.
+        struct termios shell_termios;
+        tcgetattr(0, &shell_termios);
     #ifdef USE_NCURSES_SHELL
         pid = vfork();
     #else
@@ -1654,19 +1709,32 @@ int main(void) {
             panic("fork");
         if (pid == 0) {
             setpgid(0, 0); // New process group (pgid = own pid)
+
+            // Child side: ensure we own foreground tty and restore sane mode
+            // before launching interactive programs like python.
+            int child_pgid = getpgid(0);
+            ioctl(0, TIOCSPGRP, &child_pgid);
+
+            struct termios child_termios;
+            if (tcgetattr(0, &child_termios) == 0) {
+                child_termios.c_lflag |= (ICANON | ECHO | ISIG | ECHOE | ECHOK);
+                child_termios.c_iflag |= (ICRNL | IXON);
+                child_termios.c_cc[VMIN] = 1;
+                child_termios.c_cc[VTIME] = 0;
+                tcsetattr(0, TCSANOW, &child_termios);
+            }
+
             runcmd(cmd);
         }
 
-        // Also set from parent side to avoid race
-        int pgid_ready = (setpgid(pid, pid) == 0);
+        // Also set from parent side to avoid race. This may fail if child
+        // already changed groups, which is fine.
+        (void)setpgid(pid, pid);
 
-        // Set child's process group as foreground
-        if (pgid_ready)
-            ioctl(0, TIOCSPGRP, &pid);
-
-        // Save shell's terminal settings before child may modify them
-        struct termios shell_termios;
-        tcgetattr(0, &shell_termios);
+        // Always hand terminal foreground to child's process group.
+        // Gating this on setpgid() success can lose input due to races.
+        int child_pgid = pid;
+        ioctl(0, TIOCSPGRP, &child_pgid);
 
         int status = 0;
         waitpid(pid, &status, WUNTRACED);

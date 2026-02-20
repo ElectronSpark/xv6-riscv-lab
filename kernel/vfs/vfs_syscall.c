@@ -33,52 +33,6 @@
 #include "timer/timer.h"
 #include "signal.h"
 
-/*
- * Linux-compatible stat struct for musl programs.
- * musl expects this layout when calling SYS_fstatat/SYS_fstat.
- * Must match musl arch/riscv64/bits/stat.h exactly.
- */
-struct linux_stat {
-    uint64 st_dev;          // dev_t
-    uint64 st_ino;          // ino_t
-    uint32 st_mode;         // mode_t
-    uint32 st_nlink;        // nlink_t
-    uint32 st_uid;          // uid_t
-    uint32 st_gid;          // gid_t
-    uint64 st_rdev;         // dev_t
-    uint64 __pad;           // unsigned long
-    int64  st_size;         // off_t
-    int32  st_blksize;      // blksize_t
-    int32  __pad2;
-    int64  st_blocks;       // blkcnt_t
-    int64  st_atime_sec;    // struct timespec
-    int64  st_atime_nsec;
-    int64  st_mtime_sec;    // struct timespec
-    int64  st_mtime_nsec;
-    int64  st_ctime_sec;    // struct timespec
-    int64  st_ctime_nsec;
-    uint32 __unused[2];
-};
-
-/*
- * Convert xv6 struct stat -> Linux struct stat (for musl programs).
- */
-static void stat_to_linux(const struct stat *xst, struct linux_stat *lst)
-{
-    memset(lst, 0, sizeof(*lst));
-    lst->st_dev    = (uint64)xst->dev;
-    lst->st_ino    = xst->ino;
-    lst->st_mode   = xst->mode;
-    lst->st_nlink  = xst->nlink;
-    lst->st_uid    = 0;     // xv6 has no UID/GID
-    lst->st_gid    = 0;
-    lst->st_rdev   = 0;
-    lst->st_size   = (int64)xst->size;
-    lst->st_blksize = 512;
-    lst->st_blocks  = ((int64)xst->size + 511) / 512;
-    // xv6 doesn't track timestamps, leave at 0
-}
-
 // Forward declaration for syscall argument helpers
 void argint(int n, int *ip);
 void argint64(int n, int64 *ip);
@@ -439,6 +393,7 @@ uint64 sys_vfs_fcntl(void) {
 
 static int __vfs_inode_stat(struct vfs_inode *inode, struct stat *kst) {
     if (inode->ops && inode->ops->getattr) {
+        memset(kst, 0, sizeof(*kst));
         return inode->ops->getattr(inode, kst);
     }
 
@@ -2503,11 +2458,9 @@ uint64 sys_vfs_fstatat(void) {
     if (ret != 0)
         return ret;
 
-    // fstatat is used by musl programs — provide Linux-compatible struct stat
-    struct linux_stat lst;
-    stat_to_linux(&st, &lst);
-
-    if (either_copyout(1, stat_addr, &lst, sizeof(lst)) < 0)
+    // Keep ABI consistent with SYS_stat/SYS_fstat: return xv6 struct stat.
+    // musl converts this via arch/riscv64/kstat.h overlay.
+    if (either_copyout(1, stat_addr, &st, sizeof(st)) < 0)
         return -EFAULT;
 
     return 0;

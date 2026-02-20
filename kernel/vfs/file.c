@@ -486,6 +486,7 @@ int vfs_filestat(struct vfs_file *file, struct stat *stat) {
     }
 
     if (inode->ops && inode->ops->getattr) {
+        memset(stat, 0, sizeof(*stat));
         return inode->ops->getattr(inode, stat);
     }
 

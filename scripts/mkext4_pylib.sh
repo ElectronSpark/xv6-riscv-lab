@@ -67,14 +67,6 @@ rsync -a "${RSYNC_EXCLUDES[@]}" \
     --exclude='*.pyc' \
     "$PYLIB_SRC/" "$STAGING/local/lib/python3.12/"
 
-# Disable readline interactive hook at startup — the import chain
-# (rlcompleter → inspect → ast → re → enum) is too slow on virtio ext4
-# and tab completion doesn't work on the telnet PTY anyway.
-cat > "$STAGING/local/lib/python3.12/sitecustomize.py" <<'PYEOF'
-import sys
-sys.__interactivehook__ = lambda: None
-PYEOF
-
 # Report
 FILE_COUNT=$(find "$STAGING/local/lib/python3.12/" -type f | wc -l)
 USED=$(du -sh "$STAGING/local/lib/python3.12/" | cut -f1)
