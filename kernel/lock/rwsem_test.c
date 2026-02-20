@@ -204,8 +204,7 @@ static void t3_writer(uint64 a1, uint64 a2) {
 static void t4_writer(uint64 a1, uint64 a2) {
     // Wait on sleeplock barrier: master holds it initially; writers block in
     // mutex_lock
-    if (mutex_lock(&t4_start_lock) != 0)
-        return;                   // will hold barrier for first writer only
+    mutex_lock(&t4_start_lock);   // will hold barrier for first writer only
     mutex_unlock(&t4_start_lock); // Immediately release so everyone can proceed
                                   // after barrier opens
     for (int iter = 0; iter < T4_WRITER_ITERS; iter++) {
@@ -233,8 +232,7 @@ static void t4_writer(uint64 a1, uint64 a2) {
 
 /* Reader for Test 4 */
 static void t4_reader(uint64 a1, uint64 a2) {
-    if (mutex_lock(&t4_start_lock) != 0)
-        return; // barrier
+    mutex_lock(&t4_start_lock); // barrier
     mutex_unlock(&t4_start_lock);
     for (;;) {
         if (rwsem_acquire_read(&test_lock) != 0) {
@@ -391,8 +389,7 @@ static void run_test4(void) {
     mutex_init(&t4_start_lock, "t4start");
     // Acquire barrier sleeplock so spawned threads block when they try to
     // acquire
-    if (mutex_lock(&t4_start_lock) != 0)
-        error_flag = 1;
+    mutex_lock(&t4_start_lock);
     for (int i = 0; i < T4_WRITER_THREADS; i++)
         if (IS_ERR_OR_NULL(np = kthread_create("run_test4", t4_writer, 0, 0,
                                                KERNEL_STACK_ORDER)))

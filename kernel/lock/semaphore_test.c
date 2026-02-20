@@ -169,12 +169,7 @@ static void sem_t4_producer(uint64 a1, uint64 a2) {
             sem_error_flag = 1;
             return;
         }
-        if (mutex_lock(&sem_t4_lock) != 0) {
-            if (__sync_add_and_fetch(&sem_t4_log_budget, 1) <= 8)
-                printf("[sem][T4][prod] mutex_lock failed\n");
-            sem_error_flag = 1;
-            return;
-        }
+        mutex_lock(&sem_t4_lock);
         int head = sem_t4_head;
         sem_t4_buffer[head] = ticket;
         sem_t4_head = (head + 1) % SEM_T4_BUFFER_CAP;
@@ -207,12 +202,7 @@ static void sem_t4_consumer(uint64 a1, uint64 a2) {
             return;
         }
 
-        if (mutex_lock(&sem_t4_lock) != 0) {
-            if (__sync_add_and_fetch(&sem_t4_log_budget, 1) <= 8)
-                printf("[sem][T4][cons] mutex_lock failed\n");
-            sem_error_flag = 1;
-            return;
-        }
+        mutex_lock(&sem_t4_lock);
 
         if (sem_t4_items_consumed >= SEM_T4_TOTAL_ITEMS) {
             mutex_unlock(&sem_t4_lock);

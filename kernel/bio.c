@@ -182,7 +182,7 @@ STATIC struct buf *bget(uint dev, uint blockno) {
         }
         b->refcnt++;
         spin_unlock(&bcache.lock);
-        assert(mutex_lock(&b->lock) == 0, "bget: failed to lock buffer");
+        mutex_lock(&b->lock);
         return b;
     }
 
@@ -224,7 +224,7 @@ STATIC struct buf *bget(uint dev, uint blockno) {
         panic("bget: failed to push recycled buffer into hash list");
     }
     spin_unlock(&bcache.lock);
-    assert(mutex_lock(&b->lock) == 0, "bget: failed to lock buffer");
+    mutex_lock(&b->lock);
     return b;
 }
 
@@ -348,7 +348,7 @@ void bsync(void) {
         spin_unlock(&bcache.lock);
 
         // Lock buffer and write to disk
-        assert(mutex_lock(&b->lock) == 0, "bsync: failed to lock buffer");
+        mutex_lock(&b->lock);
 
         if (b->valid) {
             blkdev_t *blkdev = blkdev_get(major(b->dev), minor(b->dev));

@@ -3,7 +3,7 @@
 
 #include "lock/mutex_types.h"
 
-int mutex_lock(mutex_t *);
+void mutex_lock(mutex_t *);
 int mutex_lock_interruptible(mutex_t *);
 int mutex_lock_timed(mutex_t *, uint64 timeout_ms);
 int mutex_trylock(mutex_t *);
