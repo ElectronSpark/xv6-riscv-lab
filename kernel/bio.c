@@ -253,7 +253,8 @@ static void __buf_bio_cleanup(struct bio *bio) {
 }
 
 // Return a locked buf with the contents of the indicated block.
-// Returns NULL if memory allocation fails (e.g., during OOM conditions).
+// Returns NULL if memory allocation fails (e.g., during OOM conditions)
+// or if the calling thread was interrupted by a signal.
 struct buf *bread(uint dev, uint blockno) {
     struct buf *b;
 
@@ -270,12 +271,18 @@ struct buf *bread(uint dev, uint blockno) {
             brelse(b);
             return NULL;
         }
-        blkdev_submit_bio(blkdev, bio);
-        bio_await(bio);
-        b->valid = 1;
+        int err = blkdev_submit_bio(blkdev, bio);
+        if (err == 0)
+            err = bio_await(bio);
         __buf_bio_cleanup(bio);
         int ret = blkdev_put(blkdev);
         assert(ret == 0, "bread: blkdev_put failed: %d", ret);
+        if (err) {
+            // I/O error or interrupted — don't mark valid, release buffer
+            brelse(b);
+            return NULL;
+        }
+        b->valid = 1;
     }
     return b;
 }

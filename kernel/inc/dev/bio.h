@@ -3,6 +3,7 @@
 
 #include <dev/bio_types.h>
 #include <lock/completion.h>
+#include "errno.h"
 
 #define BLK_SIZE_SHIFT 9 // Number of bits to represent block size (2^9 = 512)
 #define BLK_SIZE (1UL << BLK_SIZE_SHIFT) // Block size in bytes, 512 bytes
@@ -88,11 +89,25 @@ static inline void bio_complete(struct bio *bio) {
     complete_all(&bio->io_completion);
 }
 
-// bio_await - wait for a bio's I/O to finish.
+// bio_await - wait for a bio's I/O to finish, with signal awareness.
 // The caller must have previously submitted the bio via blkdev_submit_bio().
-// Returns the bio's error field (0 on success, negative errno on failure).
+//
+// Because the device is already transferring data into (or from) the
+// bio's pages, we cannot abandon the I/O mid-flight.  If a signal
+// arrives while we are sleeping, we fall back to an uninterruptible
+// wait (typically sub-millisecond) to let the device finish, then
+// report -EINTR so the caller can short-circuit its work.
+//
+// Returns 0 on success, -EINTR if interrupted, or a negative errno
+// from the device on I/O error.
 static inline int bio_await(struct bio *bio) {
-    wait_for_completion(&bio->io_completion);
+    int ret = wait_for_completion_interruptible(&bio->io_completion);
+    if (ret == -EINTR) {
+        // Signal received but I/O is in flight — must let it finish
+        // so the bio/buffer resources are safe to release.
+        wait_for_completion(&bio->io_completion);
+        return bio->error ? bio->error : -EINTR;
+    }
     return bio->error;
 }
 

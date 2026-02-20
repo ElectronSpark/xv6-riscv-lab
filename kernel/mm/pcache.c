@@ -1316,8 +1316,16 @@ retry_lookup:
                 __pcache_queue_work(pcache);
             }
             page_lock_release(new_page);
-            sleep_on_chan(pcache, &pcache->spinlock);
+            int ret = sleep_on_chan_interruptible(pcache, &pcache->spinlock);
             page_lock_acquire(new_page);
+
+            if (ret == -EINTR) {
+                // Signal received — abort page allocation.
+                page_lock_release(new_page);
+                __pcache_spin_unlock(pcache);
+                __pcache_page_discard(new_page);
+                return NULL;
+            }
 
             if (!__pcache_is_active(pcache)) {
                 page_lock_release(new_page);
