@@ -1753,10 +1753,25 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len) {
         vma_t *vma = vm_find_area(vm, va0);
         if (vma == NULL ||
             vma_validate(vma, va0, PGSIZE, VMA_FLAG_USER | PROT_WRITE) != 0) {
-            printf("vma_copyout: invalid vma for va %lx\n", va0);
+            // Try stack growth: release rlock, grow, re-acquire and retry
+            if (va0 >= USTACK_MAX_BOTTOM && va0 < USTACKTOP) {
+                vm_runlock(vm);
+                if (vm_try_growstack(vm, va0) == 0) {
+                    // Stack might have grown — retry
+                    vm_rlock(vm);
+                    vma = vm_find_area(vm, va0);
+                    if (vma != NULL &&
+                        vma_validate(vma, va0, PGSIZE,
+                                     VMA_FLAG_USER | PROT_WRITE) == 0)
+                        goto copyout_ok;
+                }
+                // Growth failed or address still invalid
+                return -EFAULT;
+            }
             ret = -EFAULT;
             goto out;
         }
+copyout_ok:
 
         pte = walk(vm->pagetable, va0, 0, NULL, NULL);
         assert(pte != NULL, "vma_copyout: pte should not be null");
@@ -1786,9 +1801,23 @@ int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len) {
         vma_t *vma = vm_find_area(vm, va0);
         if (vma == NULL ||
             vma_validate(vma, va0, PGSIZE, VMA_FLAG_USER | PROT_READ) != 0) {
+            // Try stack growth: release rlock, grow, re-acquire and retry
+            if (va0 >= USTACK_MAX_BOTTOM && va0 < USTACKTOP) {
+                vm_runlock(vm);
+                if (vm_try_growstack(vm, va0) == 0) {
+                    vm_rlock(vm);
+                    vma = vm_find_area(vm, va0);
+                    if (vma != NULL &&
+                        vma_validate(vma, va0, PGSIZE,
+                                     VMA_FLAG_USER | PROT_READ) == 0)
+                        goto copyin_ok;
+                }
+                return -EFAULT;
+            }
             ret = -EFAULT;
             goto out;
         }
+copyin_ok:
         pa0 = walkaddr(vm->pagetable, va0);
         if (pa0 == 0) {
             ret = -EFAULT;

@@ -43,7 +43,7 @@ typedef int pid_t;
 
 #if !defined(ON_HOST_OS)
 #if !defined(ssize_t)
-typedef typeof(-sizeof(int)) ssize_t;
+typedef long ssize_t;
 #endif /* ssize_t */
 #if !defined(loff_t)
 typedef long long loff_t;

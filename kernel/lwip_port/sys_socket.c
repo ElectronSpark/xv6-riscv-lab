@@ -88,6 +88,9 @@ struct lwip_sock {
 #define SOCK_STREAM    1
 #define SOCK_DGRAM     2
 #define SOCK_RAW       3
+#define SOCK_NONBLOCK  0x800
+#define SOCK_CLOEXEC   0x80000
+#define SOCK_TYPE_MASK 0xF
 
 /* Address family constants */
 #define AF_INET        2
@@ -454,6 +457,10 @@ uint64 sys_socket(void)
     argint(1, &type);
     argint(2, &protocol);
 
+    /* Strip Linux-style flags from type field */
+    int flags = type & ~SOCK_TYPE_MASK;
+    type &= SOCK_TYPE_MASK;
+
     if (domain != AF_INET)
         return (uint64)-EAFNOSUPPORT;
 
@@ -469,6 +476,12 @@ uint64 sys_socket(void)
     if (fd < 0) {
         netconn_delete(conn);
         return (uint64)fd;
+    }
+
+    if (flags & SOCK_CLOEXEC) {
+        spin_lock(&current->fdtable->lock);
+        vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
+        spin_unlock(&current->fdtable->lock);
     }
 
     return (uint64)fd;

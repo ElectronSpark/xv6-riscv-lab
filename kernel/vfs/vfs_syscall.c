@@ -553,6 +553,7 @@ uint64 sys_vfs_readlink(void) {
     int n = argstr(0, path, MAXPATH);
     argaddr(1, &buf_addr);
     argint(2, &bufsz);
+
     if (n < 0) {
         return -EFAULT;
     }
@@ -593,6 +594,7 @@ uint64 sys_vfs_readlink(void) {
 
     ssize_t len = vfs_readlink(inode, kbuf, bufsz);
     vfs_iput(inode);
+
     if (len < 0) {
         kmm_free(kbuf);
         return len;
