@@ -26,6 +26,8 @@ void tmpfs_mount_root(void); // Mount tmpfs as root filesystem
 void xv6fs_init(void);
 void xv6fs_mount_root(void);
 void ext4fs_init(void);
+void ext4fs_mount_root(void);
+void ext4fs_mount_root(void);
 void devtmpfs_init(void);    // Initialize devtmpfs and register fs type
 int devtmpfs_post_mount_populate(void); // Populate /dev after mount
 

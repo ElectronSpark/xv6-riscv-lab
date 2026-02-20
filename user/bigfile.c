@@ -26,8 +26,10 @@ int main() {
     }
 
     printf("\nwrote %d blocks\n", blocks);
-    if (blocks != 65803) {
-        printf("bigfile: file is too small\n");
+    // Accept any count >= 65803 (xv6fs triple-indirect limit).
+    // On larger filesystems (ext4) the count may exceed this.
+    if (blocks < 65803) {
+        printf("bigfile: file is too small (got %d, need >= 65803)\n", blocks);
         exit(-1);
     }
 

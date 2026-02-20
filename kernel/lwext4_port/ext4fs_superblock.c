@@ -18,6 +18,7 @@
 #include "dev/blkdev.h"
 #include "vfs/fs.h"
 #include <mm/slab.h>
+#include "kernel/vfs/vfs_private.h"
 #include "ext4fs_private.h"
 
 #include <ext4_errno.h>
@@ -456,4 +457,77 @@ void ext4fs_init(void)
     ext4_dmask_clr(DEBUG_ALL);
 
     printf("ext4fs: filesystem type registered\n");
+}
+
+/**
+ * Mount ext4 at /root and chroot into it.
+ * Requires: tmpfs already mounted as initial root (vfs_root_inode.mnt_rooti
+ * set).
+ *
+ * Prefers ramdisk (major 3) if available, falls back to virtio disk (major 2).
+ */
+void ext4fs_mount_root(void)
+{
+    struct vfs_inode *tmpfs_root = vfs_root_inode.mnt_rooti;
+    if (tmpfs_root == NULL) {
+        printf("ext4fs: no root filesystem to mount onto\n");
+        return;
+    }
+
+    /* Create /root directory in tmpfs root */
+    struct vfs_inode *root_dir = vfs_mkdir(tmpfs_root, 0755, "root", 4);
+    if (IS_ERR_OR_NULL(root_dir)) {
+        printf("ext4fs: failed to create /root directory\n");
+        return;
+    }
+
+    /* Select root device: prefer ramdisk if available */
+    dev_t root_dev;
+    blkdev_t *ramdisk = blkdev_get(major(RAMDISK_DEV), minor(RAMDISK_DEV));
+    if (ramdisk != NULL && !IS_ERR(ramdisk)) {
+        root_dev = RAMDISK_DEV;
+    } else {
+        root_dev = ROOTDEV;
+    }
+
+    /* Create a block device inode for root device */
+    struct vfs_inode *dev_inode =
+        vfs_mknod(tmpfs_root, S_IFBLK | 0600, root_dev, "rootdev", 7);
+    if (IS_ERR_OR_NULL(dev_inode)) {
+        printf("ext4fs: failed to create device inode, errno=%ld\n",
+               dev_inode ? PTR_ERR(dev_inode) : -ENOMEM);
+        vfs_iput(root_dir);
+        return;
+    }
+
+    /* Mount ext4 at /root */
+    vfs_mount_lock();
+    vfs_superblock_wlock(root_dir->sb);
+    vfs_ilock(root_dir);
+    int ret = vfs_mount("ext4", root_dir, dev_inode, 0, NULL);
+    if (ret == 0) {
+        vfs_iunlock(root_dir);
+        vfs_superblock_unlock(root_dir->sb);
+    }
+    vfs_mount_unlock();
+
+    vfs_iput(dev_inode);
+
+    if (ret == 0) {
+        printf("ext4fs: mounted at /root\n");
+
+        /* Chroot into the ext4 root */
+        struct vfs_inode *ext4_root = root_dir->mnt_rooti;
+        if (ext4_root != NULL) {
+            ret = vfs_chroot(ext4_root);
+            if (ret == 0) {
+                printf("ext4fs: chroot to /root successful\n");
+            } else {
+                printf("ext4fs: chroot to /root failed, errno=%d\n", ret);
+            }
+        }
+    } else {
+        printf("ext4fs: failed to mount at /root, errno=%d\n", ret);
+    }
+    vfs_iput(root_dir);
 }

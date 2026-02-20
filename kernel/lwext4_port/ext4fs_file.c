@@ -21,6 +21,7 @@
 #include "proc/thread.h"
 #include "lock/mutex_types.h"
 #include <mm/vm.h>
+#include <mm/page.h>
 #include "vfs/fs.h"
 #include "vfs/stat.h"
 #include "vfs/fcntl.h"
@@ -318,6 +319,111 @@ static int ext4fs_file_fflush(struct vfs_file *file)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
+/* File-backed mmap fault handler                                              */
+/* ──────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * ext4fs_file_fault - demand-page a single page for a file-backed mapping
+ *
+ * Called from the page-fault path (vm rlock held, pgtable spinlock NOT held).
+ * Reads up to PGSIZE bytes from the ext4 file at the faulting offset using
+ * lwext4 block APIs, copies the data into a freshly allocated anonymous page,
+ * and returns its physical address.  Returns NULL on failure.
+ */
+static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
+                               uint64 va)
+{
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (inode == NULL)
+        return NULL;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+    uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+
+    /* file_off is page-aligned (both pgoff and va are page-aligned) */
+    uint64 file_off = vma->pgoff + (va - vma->start);
+
+    void *pa = page_alloc(0, PAGE_TYPE_ANON);
+    if (pa == NULL)
+        return NULL;
+
+    vfs_ilock(inode);
+
+    /* Entirely beyond EOF — return a zero page */
+    if (file_off >= (uint64)inode->size) {
+        vfs_iunlock(inode);
+        memset(pa, 0, PGSIZE);
+        return pa;
+    }
+
+    uint64 bytes_to_read = PGSIZE;
+    if (file_off + PGSIZE > (uint64)inode->size)
+        bytes_to_read = (uint64)inode->size - file_off;
+
+    ext4fs_lock(esb);
+
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        vfs_iunlock(inode);
+        page_free(pa, 0);
+        return NULL;
+    }
+
+    uint64 done = 0;
+    while (done < bytes_to_read) {
+        ext4_lblk_t iblock =
+            (ext4_lblk_t)((file_off + done) / block_size);
+        uint off = (uint)((file_off + done) % block_size);
+        uint n = block_size - off;
+        if (n > bytes_to_read - done)
+            n = (uint)(bytes_to_read - done);
+
+        ext4_fsblk_t fblock;
+        r = ext4_fs_get_inode_dblk_idx(&ref, iblock, &fblock, false);
+        if (r != EOK) {
+            /* I/O error — give up */
+            ext4_fs_put_inode_ref(&ref);
+            ext4fs_unlock(esb);
+            vfs_iunlock(inode);
+            page_free(pa, 0);
+            return NULL;
+        }
+
+        if (fblock == 0) {
+            /* Sparse block — zero-fill this chunk */
+            memset((char *)pa + done, 0, n);
+        } else {
+            struct ext4_block blk;
+            r = ext4_block_get(&esb->bdev, &blk, fblock);
+            if (r != EOK) {
+                ext4_fs_put_inode_ref(&ref);
+                ext4fs_unlock(esb);
+                vfs_iunlock(inode);
+                page_free(pa, 0);
+                return NULL;
+            }
+            memcpy((char *)pa + done, (char *)blk.data + off, n);
+            ext4_block_set(&esb->bdev, &blk);
+        }
+
+        done += n;
+    }
+
+    ext4_fs_put_inode_ref(&ref);
+    ext4fs_unlock(esb);
+    vfs_iunlock(inode);
+
+    /* Zero-fill remainder if partial page */
+    if (bytes_to_read < PGSIZE)
+        memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
+
+    return pa;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────── */
 /* VFS file operations table                                                   */
 /* ──────────────────────────────────────────────────────────────────────────── */
 
@@ -328,5 +434,5 @@ struct vfs_file_ops ext4fs_file_ops = {
     .release = NULL,
     .fsync   = ext4fs_file_fsync,
     .fflush  = ext4fs_file_fflush,
-    .fault   = NULL,
+    .fault   = ext4fs_file_fault,
 };

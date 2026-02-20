@@ -261,37 +261,28 @@ add_custom_target(terminfo_db DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/terminfo.stamp
 # Update USER_PROGRAMS to include the correct path
 list(TRANSFORM USER_PROGRAMS PREPEND "${CMAKE_CURRENT_BINARY_DIR}/user/")
 
-# Update the custom command for fs.img to include the correct path for user executables
-# Use mkfs directly to embed user programs (xv6fuse has a write-corruption bug
-# with large files in double-indirect blocks).  mkfs already strips the leading
-# underscore and places executables into /bin.
+# Create a unified ext4 root filesystem image containing user programs,
+# Python standard library, and terminfo database.  This replaces both
+# the old xv6fs fs.img (for the rootfs ramdisk) and the separate ext4
+# fs0.img (for /usr).  The kernel mounts this ext4 image as root via
+# ext4fs_mount_root().
+set(CPYTHON_SRC_DIR_FOR_FS "${CMAKE_SOURCE_DIR}/user/v6-cpython")
+set(MKEXT4_ROOTFS_SCRIPT "${CMAKE_SOURCE_DIR}/scripts/mkext4_rootfs.sh")
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fs.img
-    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/mkfs fs.img
+    COMMAND bash ${MKEXT4_ROOTFS_SCRIPT}
+            ${CMAKE_CURRENT_BINARY_DIR}/fs.img
             ${CMAKE_SOURCE_DIR}/README.md
+            ${CPYTHON_SRC_DIR_FOR_FS}
+            128
+            ${TERMINFO_DIR}
             ${USER_PROGRAMS}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS user_programs
             ${USER_PROGRAMS}
-            ${CMAKE_CURRENT_BINARY_DIR}/mkfs
+            ${MKEXT4_ROOTFS_SCRIPT}
             ${CMAKE_SOURCE_DIR}/README.md
-    COMMENT "Creating file system image with user programs and README"
-)
-
-# Create an ext4 disk image containing the Python standard library.
-# When mounted at /usr inside xv6, Python finds its stdlib at
-# /usr/local/lib/python3.12/ (matching its compiled prefix=/usr/local).
-set(CPYTHON_SRC_DIR_FOR_FS "${CMAKE_SOURCE_DIR}/user/v6-cpython")
-set(MKEXT4_SCRIPT "${CMAKE_SOURCE_DIR}/scripts/mkext4_pylib.sh")
-add_custom_command(
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fs0.img
-    COMMAND bash ${MKEXT4_SCRIPT}
-            ${CMAKE_CURRENT_BINARY_DIR}/fs0.img
-            ${CPYTHON_SRC_DIR_FOR_FS}
-            32
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    DEPENDS ${MKEXT4_SCRIPT}
-    COMMENT "Creating ext4 fs0.img with Python standard library"
+    COMMENT "Creating ext4 rootfs image (programs + Python stdlib + terminfo)"
 )
 
 # Compressed filesystem image
@@ -307,7 +298,7 @@ if(ENABLE_COMPRESSION)
 endif()
 
 add_custom_target(fs_img ALL
-    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/fs.img ${CMAKE_CURRENT_BINARY_DIR}/fs0.img
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/fs.img
             $<$<BOOL:${ENABLE_COMPRESSION}>:${FS_IMG_COMPRESSED}>
     COMMENT "Creating file system images"
 )

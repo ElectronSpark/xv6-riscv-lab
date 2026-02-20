@@ -466,7 +466,7 @@ void vfs_init(void) {
 
     // Mount filesystems
     tmpfs_mount_root();
-    xv6fs_mount_root();
+    ext4fs_mount_root();
 
     // Mount tmpfs at /tmp (after chroot to xv6fs)
     ret = vfs_mount_path("tmpfs", "/tmp", 4, NULL, 0);

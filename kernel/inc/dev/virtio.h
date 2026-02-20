@@ -12,7 +12,7 @@
 #include "compiler.h"
 
 // virtio mmio interface
-#define N_VIRTIO_DISK 2 // number of virtio disks
+#define N_VIRTIO_DISK 1 // number of virtio disks
 #define N_VIRTIO 3      // number of virtio devices
 extern uint64 __virtio_mmio_base[N_VIRTIO];
 extern uint64 __virtio_irqno[N_VIRTIO];

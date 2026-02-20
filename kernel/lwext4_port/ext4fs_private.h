@@ -125,6 +125,7 @@ static inline int vfs_mode_to_ext4_filetype(mode_t mode)
 /* ──────────────────────────────────────────────────────────────────────────── */
 
 void ext4fs_init(void);
+void ext4fs_mount_root(void);
 
 /*
  * Filesystem-wide lock.  Serialises all lwext4 operations on this mount.

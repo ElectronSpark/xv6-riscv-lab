@@ -71,14 +71,8 @@ int main(void) {
     mknod("/dev/random", S_IFCHR | 0666, RANDOM_MAJOR, RANDOM_MINOR);
     mknod("/dev/tty", S_IFCHR | 0666, TTY_DEV_MAJOR, TTY_DEV_MINOR);
 
-    // Mount ext4 filesystem (disk1) at /usr for Python standard library
-    mkdir("/usr");
-    mknod("/dev/disk1", S_IFBLK | 0600, DISK1_MAJOR, DISK1_MINOR);
-    if (mount("/dev/disk1", "/usr", "ext4") < 0) {
-        printf("init: mount ext4 at /usr failed\n");
-    } else {
-        printf("init: ext4 mounted at /usr\n");
-    }
+    // The ext4 rootfs already contains /usr with Python stdlib.
+    // No separate disk mount needed.
 
     // Userspace telnet daemon disabled — using kernel telnetd instead.
     // sleep(10);
