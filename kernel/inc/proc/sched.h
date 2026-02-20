@@ -21,6 +21,7 @@ void scheduler_wakeup_killable(struct thread *p);
 void scheduler_wakeup_interruptible(struct thread *p);
 void scheduler_wakeup_stopped(struct thread *p);
 void sleep_on_chan(void *chan, spinlock_t *lk);
+int sleep_on_chan_interruptible(void *chan, spinlock_t *lk);
 void wakeup_on_chan(void *chan);
 
 void idle_thread_init(void);

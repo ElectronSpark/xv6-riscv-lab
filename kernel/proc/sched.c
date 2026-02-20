@@ -483,14 +483,15 @@ void scheduler_wakeup_stopped(struct thread *p) {
     __do_scheduler_wakeup(p, true);
 }
 
-void sleep_on_chan(void *chan, spinlock_t *lk) {
+static int __sleep_on_chan_common(void *chan, spinlock_t *lk,
+                                  enum thread_state state) {
     int intr = sleep_lock_irqsave();
     assert(current != NULL, "PCB is NULL");
     assert(chan != NULL, "Cannot sleep on a NULL channel");
 
     current->chan = chan;
     THREAD_SET_ONCHAN(current);
-    __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
+    __thread_state_set(current, state);
 
     // Release caller's lock if held (we'll reacquire after waking)
     int lk_holding = (lk != NULL && spin_holding(lk));
@@ -514,8 +515,21 @@ void sleep_on_chan(void *chan, spinlock_t *lk) {
     if (lk_holding) {
         spin_lock(lk);
     }
-    // @TODO: process return value
+
+    return ret;
+}
+
+void sleep_on_chan(void *chan, spinlock_t *lk) {
+    int ret = __sleep_on_chan_common(chan, lk, THREAD_UNINTERRUPTIBLE);
     (void)ret;
+}
+
+int sleep_on_chan_interruptible(void *chan, spinlock_t *lk) {
+    int ret = __sleep_on_chan_common(chan, lk, THREAD_INTERRUPTIBLE);
+    if (ret != 0) {
+        return -EINTR;
+    }
+    return 0;
 }
 
 void wakeup_on_chan(void *chan) {
