@@ -69,8 +69,7 @@ void __vfs_inode_init(struct vfs_inode *inode) {
 
 void vfs_ilock(struct vfs_inode *inode) {
     assert(inode != NULL, "vfs_ilock: inode is NULL");
-    assert(mutex_lock(&inode->mutex) == 0,
-           "vfs_ilock: failed to lock inode mutex");
+    mutex_lock(&inode->mutex);
 }
 
 int vfs_ilock_trylock(struct vfs_inode *inode) {

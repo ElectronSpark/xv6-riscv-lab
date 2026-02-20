@@ -2,6 +2,8 @@
 #define __KERNEL_BLOCK_IO_H
 
 #include <dev/bio_types.h>
+#include <lock/completion.h>
+#include "errno.h"
 
 #define BLK_SIZE_SHIFT 9 // Number of bits to represent block size (2^9 = 512)
 #define BLK_SIZE (1UL << BLK_SIZE_SHIFT) // Block size in bytes, 512 bytes
@@ -61,6 +63,7 @@ static inline void bio_start_io_acct(struct bio *bio) {
     bio->done = 0;
     bio->done_size = 0;
     bio->error = 0;
+    completion_reinit(&bio->io_completion);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
 
@@ -75,6 +78,37 @@ static inline void bio_endio(struct bio *bio) {
     if (bio->end_io) {
         bio->end_io(bio);
     }
+}
+
+// bio_complete - signal that a bio's I/O has finished.
+// Called from the block driver (interrupt handler or synchronous completion)
+// after the data transfer is done.  Wakes any thread blocked in bio_await().
+static inline void bio_complete(struct bio *bio) {
+    bio_end_io_acct(bio);
+    bio_endio(bio);
+    complete_all(&bio->io_completion);
+}
+
+// bio_await - wait for a bio's I/O to finish, with signal awareness.
+// The caller must have previously submitted the bio via blkdev_submit_bio().
+//
+// Because the device is already transferring data into (or from) the
+// bio's pages, we cannot abandon the I/O mid-flight.  If a signal
+// arrives while we are sleeping, we fall back to an uninterruptible
+// wait (typically sub-millisecond) to let the device finish, then
+// report -EINTR so the caller can short-circuit its work.
+//
+// Returns 0 on success, -EINTR if interrupted, or a negative errno
+// from the device on I/O error.
+static inline int bio_await(struct bio *bio) {
+    int ret = wait_for_completion_interruptible(&bio->io_completion);
+    if (ret == -EINTR) {
+        // Signal received but I/O is in flight — must let it finish
+        // so the bio/buffer resources are safe to release.
+        wait_for_completion(&bio->io_completion);
+        return bio->error ? bio->error : -EINTR;
+    }
+    return bio->error;
 }
 
 // Return a newly allocated bio when successful, or ERR_PTR on error

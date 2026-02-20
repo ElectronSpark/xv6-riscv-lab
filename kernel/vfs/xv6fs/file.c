@@ -37,6 +37,7 @@
 #include "vfs/fs.h"
 #include "vfs/stat.h"
 #include "vfs/fcntl.h"
+#include "signal.h"
 #include "../vfs_private.h"
 #include <mm/page.h>
 #include "xv6fs_private.h"
@@ -98,17 +99,17 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
         page_t *page = pcache_get_page(pc, blkno_512);
         if (page == NULL) {
             vfs_iunlock(inode);
-            if (bytes_read == 0)
-                return -EIO;
-            return bytes_read;
+            if (bytes_read > 0)
+                return bytes_read;
+            return signal_pending(current) ? -EINTR : -EIO;
         }
         int ret = pcache_read_page(pc, page);
         if (ret != 0) {
             pcache_put_page(pc, page);
             vfs_iunlock(inode);
-            if (bytes_read == 0)
-                return -EIO;
-            return bytes_read;
+            if (bytes_read > 0)
+                return bytes_read;
+            return (ret == -EINTR) ? -EINTR : -EIO;
         }
         struct pcache_node *pcn = page->pcache.pcache_node;
         uint page_off = (bn % BSIZE_PER_PAGE) * BSIZE + off;
@@ -187,7 +188,12 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count,
         // transaction → superblock → inode
         // VFS releases inode lock before calling this function to avoid
         // deadlock.
-        xv6fs_begin_op(xv6_sb);
+        int begin_ret = xv6fs_begin_op(xv6_sb);
+        if (begin_ret != 0) {
+            if (bytes_written == 0)
+                return begin_ret;
+            goto done;
+        }
 
         // Now acquire inode lock to protect inode metadata during write.
         // The file reference guarantees the inode remains allocated.
@@ -219,18 +225,18 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count,
             if (page == NULL) {
                 vfs_iunlock(inode);
                 xv6fs_end_op(xv6_sb);
-                if (bytes_written == 0)
-                    return -EIO;
-                goto done;
+                if (bytes_written > 0)
+                    goto done;
+                return signal_pending(current) ? -EINTR : -EIO;
             }
             int ret = pcache_read_page(pc, page);
             if (ret != 0) {
                 pcache_put_page(pc, page);
                 vfs_iunlock(inode);
                 xv6fs_end_op(xv6_sb);
-                if (bytes_written == 0)
-                    return -EIO;
-                goto done;
+                if (bytes_written > 0)
+                    goto done;
+                return (ret == -EINTR) ? -EINTR : -EIO;
             }
 
             struct pcache_node *pcn = page->pcache.pcache_node;

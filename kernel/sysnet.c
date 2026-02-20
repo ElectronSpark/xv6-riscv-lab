@@ -19,6 +19,7 @@
 #include <mm/vm.h>
 #include "signal.h"
 #include "proc/sched.h"
+#include "errno.h"
 
 struct sock {
     struct sock *next; // the next socket in the list
@@ -68,11 +69,14 @@ int sockread(struct sock *si, uint64 addr, int n) {
 
     spin_lock(&si->lock);
     while (mbufq_empty(&si->rxq) && !killed(pr)) {
-        sleep_on_chan(&si->rxq, &si->lock);
+        if (sleep_on_chan_interruptible(&si->rxq, &si->lock) != 0) {
+            spin_unlock(&si->lock);
+            return -EINTR;
+        }
     }
     if (killed(pr)) {
         spin_unlock(&si->lock);
-        return -1;
+        return -EINTR;
     }
     m = mbufq_pophead(&si->rxq);
     spin_unlock(&si->lock);
@@ -82,7 +86,7 @@ int sockread(struct sock *si, uint64 addr, int n) {
         len = n;
     if (vm_copyout(pr->vm, addr, m->head, len) < 0) {
         mbuffree(m);
-        return -1;
+        return -EFAULT;
     }
     mbuffree(m);
     return len;
@@ -94,11 +98,11 @@ int sockwrite(struct sock *si, uint64 addr, int n) {
 
     m = mbufalloc(MBUF_DEFAULT_HEADROOM);
     if (!m)
-        return -1;
+        return -ENOMEM;
 
     if (vm_copyin(pr->vm, mbufput(m, n), addr, n) < 0) {
         mbuffree(m);
-        return -1;
+        return -EFAULT;
     }
 #ifdef USE_LWIP
     /* TODO: implement lwIP-based UDP send */

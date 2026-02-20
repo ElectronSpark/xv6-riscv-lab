@@ -17,6 +17,9 @@
  * 115200 baud.  This matches the typical Linux console defaults.
  */
 void termios_init_default(struct termios *t) {
+    /* Zero-fill first (important: c_line and unused c_cc slots) */
+    __builtin_memset(t, 0, sizeof(*t));
+
     /* Input: map CR→NL, enable XON/XOFF */
     t->c_iflag = ICRNL | IXON;
 

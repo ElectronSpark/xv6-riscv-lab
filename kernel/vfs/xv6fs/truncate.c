@@ -353,7 +353,7 @@ void xv6fs_itrunc(struct xv6fs_inode *ip) {
                 // Commit current batch and start new transaction
                 xv6fs_iupdate(ip);
                 xv6fs_end_op(xv6_sb);
-                xv6fs_begin_op(xv6_sb);
+                xv6fs_begin_op_nointr(xv6_sb);
                 freed_this_batch = 0;
             }
         }
@@ -375,7 +375,7 @@ void xv6fs_itrunc(struct xv6fs_inode *ip) {
                     brelse(bp);
                     xv6fs_iupdate(ip);
                     xv6fs_end_op(xv6_sb);
-                    xv6fs_begin_op(xv6_sb);
+                    xv6fs_begin_op_nointr(xv6_sb);
                     freed_this_batch = 0;
                     bp = bread(dev, ip->addrs[XV6FS_NDIRECT]);
                     a = (uint *)bp->data;
@@ -391,7 +391,7 @@ void xv6fs_itrunc(struct xv6fs_inode *ip) {
         if (freed_this_batch >= ITRUNC_BATCH_SIZE) {
             xv6fs_iupdate(ip);
             xv6fs_end_op(xv6_sb);
-            xv6fs_begin_op(xv6_sb);
+            xv6fs_begin_op_nointr(xv6_sb);
             freed_this_batch = 0;
         }
     }
@@ -419,7 +419,7 @@ void xv6fs_itrunc(struct xv6fs_inode *ip) {
                             brelse(dbp);
                             xv6fs_iupdate(ip);
                             xv6fs_end_op(xv6_sb);
-                            xv6fs_begin_op(xv6_sb);
+                            xv6fs_begin_op_nointr(xv6_sb);
                             freed_this_batch = 0;
                             dbp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
                             da = (uint *)dbp->data;
@@ -439,7 +439,7 @@ void xv6fs_itrunc(struct xv6fs_inode *ip) {
                     brelse(dbp);
                     xv6fs_iupdate(ip);
                     xv6fs_end_op(xv6_sb);
-                    xv6fs_begin_op(xv6_sb);
+                    xv6fs_begin_op_nointr(xv6_sb);
                     freed_this_batch = 0;
                     dbp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
                     da = (uint *)dbp->data;
@@ -575,7 +575,9 @@ int xv6fs_truncate(struct vfs_inode *inode, loff_t new_size) {
 
     if (new_size == 0) {
         // Full truncation - use the optimized path
-        xv6fs_begin_op(xv6_sb);
+        int ret = xv6fs_begin_op(xv6_sb);
+        if (ret != 0)
+            return ret;
         xv6fs_itrunc(ip);
         xv6fs_end_op(xv6_sb);
         return 0;
@@ -588,7 +590,9 @@ int xv6fs_truncate(struct vfs_inode *inode, loff_t new_size) {
         // Otherwise, keep the partial block and free from next block
         uint first_block = (new_size + BSIZE - 1) / BSIZE;
 
-        xv6fs_begin_op(xv6_sb);
+        int ret = xv6fs_begin_op(xv6_sb);
+        if (ret != 0)
+            return ret;
         __xv6fs_truncate_partial(ip, first_block);
         inode->size = new_size;
         xv6fs_iupdate(ip);
@@ -600,7 +604,9 @@ int xv6fs_truncate(struct vfs_inode *inode, loff_t new_size) {
     uint old_blocks = (old_size + BSIZE - 1) / BSIZE;
     uint new_blocks = (new_size + BSIZE - 1) / BSIZE;
 
-    xv6fs_begin_op(xv6_sb);
+    int ret = xv6fs_begin_op(xv6_sb);
+    if (ret != 0)
+        return ret;
     for (uint bn = old_blocks; bn < new_blocks; bn++) {
         if (xv6fs_bmap(ip, bn) == 0) {
             xv6fs_end_op(xv6_sb);

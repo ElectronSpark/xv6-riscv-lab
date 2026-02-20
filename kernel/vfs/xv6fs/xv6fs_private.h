@@ -108,7 +108,8 @@ extern struct vfs_fs_type_ops xv6fs_fs_type_ops;
 
 // Log operations
 void xv6fs_initlog(struct xv6fs_superblock *xv6_sb);
-void xv6fs_begin_op(struct xv6fs_superblock *xv6_sb);
+int xv6fs_begin_op(struct xv6fs_superblock *xv6_sb);
+void xv6fs_begin_op_nointr(struct xv6fs_superblock *xv6_sb);
 void xv6fs_end_op(struct xv6fs_superblock *xv6_sb);
 void xv6fs_log_write(struct xv6fs_superblock *xv6_sb, struct buf *b);
 

@@ -18,7 +18,7 @@
 // Locking order:
 // 1. bcache.lock (spinlock) - protects LRU list and hash table
 // 2. buf->lock (mutex) - protects individual buffer contents
-// 3. disk I/O completion (via wait_for_completion)
+// 3. disk I/O completion (via bio_await)
 //
 // bread() acquires buf->lock and may block waiting for disk I/O.
 // Callers should not hold other sleeping locks while holding buffer locks
@@ -34,6 +34,7 @@
 #include "printf.h"
 #include "vfs/xv6fs/ondisk.h" // for BSIZE
 #include "dev/buf.h"
+#include "dev/bio.h"
 #include <mm/page.h>
 #include "dev/blkdev.h"
 #include "list.h"
@@ -182,7 +183,7 @@ STATIC struct buf *bget(uint dev, uint blockno) {
         }
         b->refcnt++;
         spin_unlock(&bcache.lock);
-        assert(mutex_lock(&b->lock) == 0, "bget: failed to lock buffer");
+        mutex_lock(&b->lock);
         return b;
     }
 
@@ -224,7 +225,7 @@ STATIC struct buf *bget(uint dev, uint blockno) {
         panic("bget: failed to push recycled buffer into hash list");
     }
     spin_unlock(&bcache.lock);
-    assert(mutex_lock(&b->lock) == 0, "bget: failed to lock buffer");
+    mutex_lock(&b->lock);
     return b;
 }
 
@@ -252,7 +253,8 @@ static void __buf_bio_cleanup(struct bio *bio) {
 }
 
 // Return a locked buf with the contents of the indicated block.
-// Returns NULL if memory allocation fails (e.g., during OOM conditions).
+// Returns NULL if memory allocation fails (e.g., during OOM conditions)
+// or if the calling thread was interrupted by a signal.
 struct buf *bread(uint dev, uint blockno) {
     struct buf *b;
 
@@ -269,11 +271,18 @@ struct buf *bread(uint dev, uint blockno) {
             brelse(b);
             return NULL;
         }
-        blkdev_submit_bio(blkdev, bio);
-        b->valid = 1;
+        int err = blkdev_submit_bio(blkdev, bio);
+        if (err == 0)
+            err = bio_await(bio);
         __buf_bio_cleanup(bio);
         int ret = blkdev_put(blkdev);
         assert(ret == 0, "bread: blkdev_put failed: %d", ret);
+        if (err) {
+            // I/O error or interrupted — don't mark valid, release buffer
+            brelse(b);
+            return NULL;
+        }
+        b->valid = 1;
     }
     return b;
 }
@@ -287,6 +296,7 @@ void bwrite(struct buf *b) {
     struct bio *bio = __buf_alloc_bio(b, blkdev, true);
     assert(!IS_ERR_OR_NULL(bio), "bwrite: bio_alloc failed");
     blkdev_submit_bio(blkdev, bio);
+    bio_await(bio);
     __buf_bio_cleanup(bio);
 
     // Clear dirty flag after successful write
@@ -348,7 +358,7 @@ void bsync(void) {
         spin_unlock(&bcache.lock);
 
         // Lock buffer and write to disk
-        assert(mutex_lock(&b->lock) == 0, "bsync: failed to lock buffer");
+        mutex_lock(&b->lock);
 
         if (b->valid) {
             blkdev_t *blkdev = blkdev_get(major(b->dev), minor(b->dev));
@@ -356,6 +366,7 @@ void bsync(void) {
                 struct bio *bio = __buf_alloc_bio(b, blkdev, true);
                 if (!IS_ERR_OR_NULL(bio)) {
                     blkdev_submit_bio(blkdev, bio);
+                    bio_await(bio);
                     __buf_bio_cleanup(bio);
                     flushed++;
                 }

@@ -12,6 +12,7 @@
 #include "lock/spinlock.h"
 #include "vfs/xv6fs/ondisk.h"
 #include "dev/buf.h"
+#include "dev/bio.h"
 #include "dev/blkdev.h"
 #include <mm/page.h>
 #include "errno.h"
@@ -41,8 +42,8 @@ static int ramdisk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
 
         if (page == NULL) {
             spin_unlock(&ramdisk.lock);
-            bio_end_io_acct(bio);
-            bio_endio(bio);
+            bio->error = -EINVAL;
+            bio_complete(bio);
             return -EINVAL;
         }
 
@@ -55,16 +56,16 @@ static int ramdisk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
                    "size=%lx)\n",
                    offset, bvec.len, ramdisk.size_bytes);
             spin_unlock(&ramdisk.lock);
-            bio_end_io_acct(bio);
-            bio_endio(bio);
+            bio->error = -EINVAL;
+            bio_complete(bio);
             return -EINVAL;
         }
 
         void *pa = (void *)__page_to_pa(page);
         if (pa == NULL) {
             spin_unlock(&ramdisk.lock);
-            bio_end_io_acct(bio);
-            bio_endio(bio);
+            bio->error = -EINVAL;
+            bio_complete(bio);
             return -EINVAL;
         }
 
@@ -84,8 +85,8 @@ static int ramdisk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
 
     spin_unlock(&ramdisk.lock);
 
-    bio_end_io_acct(bio);
-    bio_endio(bio);
+    bio->error = 0;
+    bio_complete(bio);
     return 0;
 }
 

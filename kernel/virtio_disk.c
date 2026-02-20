@@ -18,6 +18,7 @@
 #include "proc/tq.h"
 #include "vfs/xv6fs/ondisk.h" // for BSIZE
 #include "dev/buf.h"
+#include "dev/bio.h"
 #include "dev/virtio.h"
 #include "dev/blkdev.h"
 #include <mm/page.h>
@@ -68,7 +69,6 @@ STATIC struct disk {
     // indexed by first descriptor index of chain.
     struct {
         struct bio *bio;
-        completion_t *comp;
         bool done;
         char status;
     } info[NUM];
@@ -112,8 +112,9 @@ static int __virtio_disk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
         iter.size_done += bvec.len;
     }
 
-    bio_end_io_acct(bio);
-    bio_endio(bio);
+    // I/O has been submitted to the device.  Completion (bio_complete)
+    // is signalled by virtio_disk_intr when the device finishes.
+    // Callers wait via bio_await().
     return 0;
 }
 
@@ -329,8 +330,6 @@ static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
     assert(buf != NULL, "virtio_disk_rw: buf is NULL");
     // assert((uint64)buf % PGSIZE == 0, "virtio_disk_rw: buf must be
     // page-aligned");
-    completion_t comp;
-    completion_init(&comp);
 
     spin_lock(&disk->vdisk_lock);
 
@@ -397,20 +396,10 @@ static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
     assert(!intr_get(), "virtio_disk_rw: interrupts enabled");
     *R(diskno, VIRTIO_MMIO_QUEUE_NOTIFY) = 0; // value is queue number
 
-    // Wait for virtio_disk_intr() to say request has finished.
-    // @TODO: not allow interrupt here
+    // Submit only — completion is handled by virtio_disk_intr() which
+    // frees the descriptor chain and signals the bio via bio_complete().
+    // Callers wait for I/O via bio_await().
     disk->info[idx[0]].done = false;
-    disk->info[idx[0]].comp = &comp;
-    spin_unlock(&disk->vdisk_lock);
-
-    wait_for_completion(&comp);
-
-    spin_lock(&disk->vdisk_lock);
-    assert(disk->info[idx[0]].done == true, "virtio_disk_rw: not done");
-    disk->info[idx[0]].comp = NULL;
-    disk->info[idx[0]].bio = NULL;
-    free_chain(disk, idx[0]);
-
     spin_unlock(&disk->vdisk_lock);
 }
 
@@ -439,20 +428,26 @@ static void virtio_disk_intr(int irq, void *data, device_t *dev) {
 
         char status = disk->info[id].status;
 
+        struct bio *bio = disk->info[id].bio;
+
         if (status != 0) {
-            struct bio *bio = disk->info[id].bio;
             printf("ERROR: id=%d status=%d buf=%p blockno=0x%lx\n", id, status,
                    bio, bio ? bio->blkno : 0);
             panic("virtio_disk_intr status: %d", status);
         }
 
-        completion_t *comp = disk->info[id].comp;
-        assert(comp != NULL, "virtio_disk_intr: comp is NULL");
         assert(disk->info[id].done == false, "virtio_disk_intr: already done");
-        // Mark the bio as done
         disk->info[id].done = true;
-        // Wake up the waiting thread
-        complete_all(disk->info[id].comp);
+
+        // Clean up descriptor chain and info slot
+        disk->info[id].bio = NULL;
+        free_chain(disk, id);
+
+        // Signal bio completion — wakes any thread in bio_await()
+        if (bio != NULL) {
+            bio->error = (status != 0) ? -EIO : 0;
+            bio_complete(bio);
+        }
 
         disk->used_idx += 1;
         __atomic_thread_fence(__ATOMIC_SEQ_CST);

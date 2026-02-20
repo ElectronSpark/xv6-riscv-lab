@@ -65,6 +65,28 @@ void wait_for_completion(completion_t *c) {
     spin_unlock(&c->lock);
 }
 
+int wait_for_completion_interruptible(completion_t *c) {
+    assert(current != NULL,
+           "wait_for_completion_interruptible called from non-thread context");
+    if (c == NULL) {
+        return -EINTR;
+    }
+    spin_lock(&c->lock);
+    while (!__try_wait_for_completion(c)) {
+        int ret = tq_wait_in_state(&c->wait_queue, &c->lock, NULL,
+                                    THREAD_INTERRUPTIBLE);
+        if (ret != 0) {
+            spin_unlock(&c->lock);
+            return -EINTR;
+        }
+    }
+    if (c->done > 0) {
+        __completion_do_wake(c);
+    }
+    spin_unlock(&c->lock);
+    return 0;
+}
+
 void complete(completion_t *c) {
     if (c == NULL) {
         return;

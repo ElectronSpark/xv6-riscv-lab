@@ -1183,8 +1183,10 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
         "pci-host-ecam-generic", "pci-host-cam-generic", "x1,dwc-pcie",
         "spacemit,k1-pcie", // Orange Pi / SpacemiT K1
         NULL};
-    // VirtIO: virtio MMIO devices
+    // VirtIO detection
     static const char *virtio_compat[] = {"virtio,mmio", NULL};
+    // EMAC (SpacemiT X1 Ethernet MAC)
+    static const char *emac_compat[] = {"ky,x1-emac", "spacemit,k1-emac", NULL};
 
     // Parse /soc node for devices (common structure)
     struct fdt_node *soc = fdt_node_lookup(root, "soc", NULL);
@@ -1323,6 +1325,45 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
                     __fdt_prop_u32(interrupts, 0);
             }
             platform.virtio_count++;
+        }
+
+        // EMAC detection (SpacemiT X1 Ethernet MAC)
+        if (__fdt_prop_compat_list(compat, emac_compat) &&
+            platform.emac_count < EMAC_MAX) {
+            int idx = platform.emac_count;
+            platform.has_emac = 1;
+            if (reg) {
+                __fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells,
+                                     &platform.emac[idx].base,
+                                     &platform.emac[idx].size);
+            }
+            if (interrupts) {
+                platform.emac[idx].irq = __fdt_prop_u32(interrupts, 0);
+            }
+            // Parse EMAC-specific properties
+            struct fdt_node *p;
+            p = __fdt_get_prop(node, "x1,apmu-base-reg");
+            platform.emac[idx].apmu_base = p ? __fdt_prop_u32(p, 0) : 0xD4282800;
+            p = __fdt_get_prop(node, "ctrl-reg");
+            platform.emac[idx].ctrl_reg = p ? __fdt_prop_u32(p, 0) : 0;
+            p = __fdt_get_prop(node, "dline-reg");
+            platform.emac[idx].dline_reg = p ? __fdt_prop_u32(p, 0) : 0;
+            p = __fdt_get_prop(node, "tx-phase");
+            platform.emac[idx].tx_phase = p ? __fdt_prop_u32(p, 0) : 0;
+            p = __fdt_get_prop(node, "rx-phase");
+            platform.emac[idx].rx_phase = p ? __fdt_prop_u32(p, 0) : 0;
+            // Parse reset GPIO from emac,reset-gpio = <&gpio PIN FLAGS>
+            p = __fdt_get_prop(node, "emac,reset-gpio");
+            if (p && p->data_size >= 8) {
+                // Second cell is the GPIO pin number
+                platform.emac[idx].reset_gpio = __fdt_prop_u32(p, 1);
+            }
+            printf("fdt: found EMAC%d at 0x%lx size 0x%lx IRQ %d "
+                   "gpio %d tx-phase %d rx-phase %d\n",
+                   idx, platform.emac[idx].base, platform.emac[idx].size,
+                   platform.emac[idx].irq, platform.emac[idx].reset_gpio,
+                   platform.emac[idx].tx_phase, platform.emac[idx].rx_phase);
+            platform.emac_count++;
         }
     }
 

@@ -16,6 +16,8 @@
 #include "defs.h"
 #include "printf.h"
 #include "proc/sched.h"
+#include "proc/thread.h"
+#include "signal.h"
 #include "trap.h"
 #include "dev/uart.h"
 
@@ -191,6 +193,41 @@ void uartputs(const char *s, int n) {
 
     uartstart();
     spin_unlock(&uart_tx_lock);
+}
+
+// Non-blocking batch enqueue: copy up to @n bytes from @s into the
+// UART TX software buffer.  Returns the number of characters accepted
+// (may be 0 if the buffer is full).  Kicks uartstart() so the
+// interrupt handler will drain the buffer.
+int uartputs_nb(const char *s, int n) {
+    int enqueued = 0;
+    spin_lock(&uart_tx_lock);
+    for (int i = 0; i < n; i++) {
+        if (uart_tx_w == uart_tx_r + UART_TX_BUF_SIZE)
+            break; // buffer full
+        uart_tx_buf[uart_tx_w % UART_TX_BUF_SIZE] = s[i];
+        uart_tx_w += 1;
+        enqueued++;
+    }
+    if (enqueued > 0)
+        uartstart();
+    spin_unlock(&uart_tx_lock);
+    return enqueued;
+}
+
+// Wait interruptibly for space in the UART TX buffer.
+// Returns 0 when space is available, -EINTR on pending signal.
+int uart_tx_wait(void) {
+    spin_lock(&uart_tx_lock);
+    while (uart_tx_w == uart_tx_r + UART_TX_BUF_SIZE) {
+        int ret = sleep_on_chan_interruptible(&uart_tx_r, &uart_tx_lock);
+        if (ret != 0) {
+            spin_unlock(&uart_tx_lock);
+            return -EINTR;
+        }
+    }
+    spin_unlock(&uart_tx_lock);
+    return 0;
 }
 
 // alternate version of uartputc() that doesn't

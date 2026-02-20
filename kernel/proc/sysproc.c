@@ -163,7 +163,9 @@ uint64 sys_sleep(void) {
     argint(0, &n);
     if (n < 0)
         n = 0;
-    sleep_ms(n);
+    uint64 remaining = sleep_ms_interruptible((uint64)n);
+    if (remaining > 0 && signal_pending(current))
+        return -EINTR;
     return 0;
 }
 
@@ -217,7 +219,22 @@ uint64 sys_nanosleep(void) {
     if (total_ns > 0 && ms == 0) {
         ms = 1;
     }
-    sleep_ms(ms);
+
+    uint64 remaining_ms = sleep_ms_interruptible(ms);
+
+    if (remaining_ms > 0 && signal_pending(current)) {
+        // Write remaining time to user if address provided
+        if (rem_addr != 0) {
+            uint64 rem_ns = remaining_ms * 1000000ULL;
+            struct __k_timespec rem = {
+                .tv_sec = (int64)(rem_ns / 1000000000ULL),
+                .tv_nsec = (int64)(rem_ns % 1000000000ULL),
+            };
+            // Best-effort write; ignore copyout failure per POSIX
+            either_copyout(1, rem_addr, &rem, sizeof(rem));
+        }
+        return -EINTR;
+    }
 
     if (rem_addr != 0) {
         struct __k_timespec rem = {0};

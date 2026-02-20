@@ -41,7 +41,7 @@ void mutex_init(mutex_t *lk, char *name) {
     __mutex_set_holder(lk, -1); // -1 = no holder (0 is valid PID for idle)
 }
 
-int mutex_lock(mutex_t *lk) {
+void mutex_lock(mutex_t *lk) {
     struct thread *self = current;
     assert(self != NULL, "mutex_lock: no current thread");
     assert(mycpu()->spin_depth == 0, "mutex_lock called with spinlock held");
@@ -49,7 +49,7 @@ int mutex_lock(mutex_t *lk) {
 
     // If the lock is not held, acquire it and return success.
     if (__mutex_try_set_holder(lk, self->pid)) {
-        return 0;
+        return;
     }
 
     // Slow path
@@ -59,7 +59,7 @@ int mutex_lock(mutex_t *lk) {
         // current thread tried to acquire the mutex without holding spinlock.
         // In that case, we just need to claim the mutex and return.
         spin_unlock(&lk->lk);
-        return 0;
+        return;
     }
 
     // Deadlock detection: If we failed to acquire the lock AND we're already
@@ -69,22 +69,13 @@ int mutex_lock(mutex_t *lk) {
            "mutex_lock: deadlock detected, thread already holds the lock");
 
     while (__mutex_holder(lk) != self->pid) {
+        __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
         int ret = tq_wait(&lk->wait_queue, &lk->lk, NULL);
-        if (ret != 0) {
-            // If tq_wait returns an error, and the thread has already
-            // gotten the lock, we need to release the lock and return the error
-            // code.
-            if (__mutex_holder(lk) == self->pid) {
-                assert(!IS_ERR_OR_NULL(__do_wakeup(lk)),
-                       "mutex_lock: failed to wake up threads after interrupt");
-            }
-            spin_unlock(&lk->lk);
-            return ret;
+        if (ret != 0 && __mutex_holder(lk) != self->pid) {
+            continue;
         }
     }
     spin_unlock(&lk->lk);
-
-    return 0;
 }
 
 // @TODO: signal handling

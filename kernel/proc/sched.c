@@ -483,7 +483,8 @@ void scheduler_wakeup_stopped(struct thread *p) {
     __do_scheduler_wakeup(p, true);
 }
 
-void sleep_on_chan(void *chan, spinlock_t *lk) {
+static int __sleep_on_chan_common(void *chan, spinlock_t *lk,
+                                  enum thread_state state) {
     int intr = sleep_lock_irqsave();
     assert(current != NULL, "PCB is NULL");
     assert(chan != NULL, "Cannot sleep on a NULL channel");
@@ -497,10 +498,11 @@ void sleep_on_chan(void *chan, spinlock_t *lk) {
         spin_unlock(lk);
     }
 
-    // ttree_wait will release sleep_lock via scheduler_sleep,
-    // keeping the tree protected during add operation.
+    // ttree_wait_in_state will set the thread state and release
+    // sleep_lock via scheduler_sleep, keeping the tree protected
+    // during add operation.
     // After waking, scheduler_sleep will reacquire sleep_lock.
-    int ret = ttree_wait(&__chan_queue_root, (uint64)chan, NULL, NULL);
+    int ret = ttree_wait_in_state(&__chan_queue_root, (uint64)chan, NULL, NULL, state);
 
     // Re-acqiore sleep lock.
     // Discard saved interrupt state because it was saved before sleeping.
@@ -513,8 +515,21 @@ void sleep_on_chan(void *chan, spinlock_t *lk) {
     if (lk_holding) {
         spin_lock(lk);
     }
-    // @TODO: process return value
+
+    return ret;
+}
+
+void sleep_on_chan(void *chan, spinlock_t *lk) {
+    int ret = __sleep_on_chan_common(chan, lk, THREAD_UNINTERRUPTIBLE);
     (void)ret;
+}
+
+int sleep_on_chan_interruptible(void *chan, spinlock_t *lk) {
+    int ret = __sleep_on_chan_common(chan, lk, THREAD_INTERRUPTIBLE);
+    if (ret != 0) {
+        return -EINTR;
+    }
+    return 0;
 }
 
 void wakeup_on_chan(void *chan) {

@@ -107,7 +107,7 @@ int spin_lock_irqsave(spinlock_t *);
 void spin_unlock_irqrestore(spinlock_t *, int);
 
 // sleeplock.c
-int mutex_lock(mutex_t *);
+void mutex_lock(mutex_t *);
 int mutex_trylock(mutex_t *);
 void mutex_unlock(mutex_t *);
 int holding_mutex(mutex_t *);
@@ -137,6 +137,8 @@ int restore_sigframe(struct thread *p, ucontext_t *ret_uc);
 int uartinit(void);
 void uartputc(int);
 void uartputs(const char *, int);
+int uartputs_nb(const char *, int);
+int uart_tx_wait(void);
 void uartputc_sync(int);
 int uartgetc(void);
 
@@ -184,6 +186,12 @@ void pci_init();
 // e1000.c
 void e1000_init(uint32 *);
 int e1000_transmit(struct mbuf *);
+
+// netdev.c
+void netdev_init(void);
+
+// x1_emac.c
+void x1_emac_init(void);
 
 // net.c / lwip_glue.c
 void net_rx(struct mbuf *);

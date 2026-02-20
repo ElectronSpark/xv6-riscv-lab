@@ -28,6 +28,8 @@
 #include "errno.h"
 #include "lock/spinlock.h"
 #include "proc/sched.h"
+#include "proc/thread.h"
+#include "signal.h"
 #include "proc/tq.h"
 #include "dev/buf.h"
 #include "printf.h"
@@ -150,27 +152,66 @@ void xv6fs_initlog(struct xv6fs_superblock *xv6_sb) {
     __xv6fs_recover_from_log(log);
 }
 
-// Called at the start of each FS operation
-// CRITICAL: Must be called BEFORE acquiring any VFS-layer locks (superblock,
-// inode) to avoid deadlock, since this function may sleep waiting for log
-// space.
-void xv6fs_begin_op(struct xv6fs_superblock *xv6_sb) {
+// Common implementation for begin_op with configurable sleep state.
+// @state: THREAD_INTERRUPTIBLE (returns -EINTR on signal) or
+//         THREAD_UNINTERRUPTIBLE (never interrupted, always returns 0).
+static int __xv6fs_begin_op(struct xv6fs_superblock *xv6_sb,
+                            enum thread_state state) {
     struct xv6fs_log *log = &xv6_sb->log;
+    bool interruptible = (state == THREAD_INTERRUPTIBLE);
 
     spin_lock(&log->lock);
     while (1) {
         if (log->committing) {
-            tq_wait(&log->wait_queue, &log->lock, NULL);
+            if (interruptible && signal_pending(current)) {
+                spin_unlock(&log->lock);
+                return -EINTR;
+            }
+            int ret = tq_wait_in_state(&log->wait_queue, &log->lock, NULL,
+                                        state);
+            if (interruptible && ret != 0 && signal_pending(current)) {
+                spin_unlock(&log->lock);
+                return -EINTR;
+            }
         } else if (log->lh.n + (log->outstanding + 1) * MAXOPBLOCKS >
                    XV6FS_LOGSIZE) {
             // this op might exhaust log space; wait for commit.
-            tq_wait(&log->wait_queue, &log->lock, NULL);
+            if (interruptible && signal_pending(current)) {
+                spin_unlock(&log->lock);
+                return -EINTR;
+            }
+            int ret = tq_wait_in_state(&log->wait_queue, &log->lock, NULL,
+                                        state);
+            if (interruptible && ret != 0 && signal_pending(current)) {
+                spin_unlock(&log->lock);
+                return -EINTR;
+            }
         } else {
             log->outstanding += 1;
             spin_unlock(&log->lock);
             break;
         }
     }
+    return 0;
+}
+
+// Called at the start of each FS operation (interruptible).
+// Returns -EINTR if a signal is pending; the caller has NOT entered
+// the transaction and may propagate the error or return a short count.
+// CRITICAL: Must be called BEFORE acquiring any VFS-layer locks (superblock,
+// inode) to avoid deadlock, since this function may sleep waiting for log
+// space.
+int xv6fs_begin_op(struct xv6fs_superblock *xv6_sb) {
+    return __xv6fs_begin_op(xv6_sb, THREAD_INTERRUPTIBLE);
+}
+
+// Uninterruptible variant for mid-operation batch boundaries.
+// Use this when a multi-batch operation (e.g., itrunc) has already committed
+// partial work and MUST re-enter a transaction to continue — abandonment
+// would leave the filesystem in an inconsistent state.
+// This variant ignores signals and never fails.
+void xv6fs_begin_op_nointr(struct xv6fs_superblock *xv6_sb) {
+    __xv6fs_begin_op(xv6_sb, THREAD_UNINTERRUPTIBLE);
 }
 
 // Called at the end of each FS operation.

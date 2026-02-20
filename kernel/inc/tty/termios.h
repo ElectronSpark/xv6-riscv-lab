@@ -27,51 +27,67 @@
 #define VDISCARD 13 /* Discard character */
 #define VWERASE 14  /* Word erase */
 #define VLNEXT 15   /* Literal next */
-#define NCCS 16   /* Size of c_cc array */
+#define VEOL2 16    /* Second end of line */
+#define NCCS 32   /* Size of c_cc array — must match musl */
 
-/* c_iflag bits */
-#define IGNBRK 0x0001 /* Ignore break condition */
-#define BRKINT 0x0002 /* Signal interrupt on break */
-#define IGNPAR 0x0004 /* Ignore parity errors */
-#define PARMRK 0x0008 /* Mark parity errors */
-#define INPCK 0x0010  /* Enable input parity check */
-#define ISTRIP 0x0020 /* Strip 8th bit */
-#define INLCR 0x0040  /* Translate NL to CR */
-#define IGNCR 0x0080  /* Ignore CR */
-#define ICRNL 0x0100  /* Translate CR to NL */
-#define IXON 0x0200   /* Enable start/stop output control */
-#define IXOFF 0x0400  /* Enable start/stop input control */
+/*
+ * All flag values below are in OCTAL, matching musl/Linux generic arch.
+ * The musl headers define them as octal literals (e.g. 0000010 = 8 decimal).
+ * We use hex equivalents for clarity but the numeric values MUST match.
+ */
 
-/* c_oflag bits */
-#define OPOST 0x0001 /* Post-process output */
-#define ONLCR 0x0002 /* Map NL to CR-NL */
+/* c_iflag bits — musl generic values */
+#define IGNBRK  0x0001 /* 0000001 Ignore break condition */
+#define BRKINT  0x0002 /* 0000002 Signal interrupt on break */
+#define IGNPAR  0x0004 /* 0000004 Ignore parity errors */
+#define PARMRK  0x0008 /* 0000010 Mark parity errors */
+#define INPCK   0x0010 /* 0000020 Enable input parity check */
+#define ISTRIP  0x0020 /* 0000040 Strip 8th bit */
+#define INLCR   0x0040 /* 0000100 Translate NL to CR */
+#define IGNCR   0x0080 /* 0000200 Ignore CR */
+#define ICRNL   0x0100 /* 0000400 Translate CR to NL */
+#define IUCLC   0x0200 /* 0001000 Map upper to lower on input */
+#define IXON    0x0400 /* 0002000 Enable start/stop output control */
+#define IXANY   0x0800 /* 0004000 Any char restarts output */
+#define IXOFF   0x1000 /* 0010000 Enable start/stop input control */
+#define IMAXBEL 0x2000 /* 0020000 Ring bell on input queue full */
+#define IUTF8   0x4000 /* 0040000 Input is UTF-8 */
 
-/* c_cflag bits — must match musl/Linux values */
-#define CSIZE  0x0060 /* Character size mask */
-#define CS5    0x0000 /* 5 bits */
-#define CS6    0x0020 /* 6 bits */
-#define CS7    0x0040 /* 7 bits */
-#define CS8    0x0060 /* 8 bits */
-#define CSTOPB 0x0080 /* Send two stop bits */
-#define CREAD  0x0100 /* Enable receiver */
-#define PARENB 0x0200 /* Parity enable */
-#define PARODD 0x0400 /* Odd parity */
-#define HUPCL  0x0800 /* Hang up on last close */
-#define CLOCAL 0x1000 /* Ignore modem status lines */
+/* c_oflag bits — musl generic values */
+#define OPOST  0x0001 /* 0000001 Post-process output */
+#define OLCUC  0x0002 /* 0000002 Map lower to upper on output */
+#define ONLCR  0x0004 /* 0000004 Map NL to CR-NL */
+#define OCRNL  0x0008 /* 0000010 Map CR to NL */
+#define ONOCR  0x0010 /* 0000020 No CR output at column 0 */
+#define ONLRET 0x0020 /* 0000040 NL performs CR function */
 
-/* c_lflag bits — must match musl/Linux values */
-#define ISIG   0x0001 /* Enable signals (INTR, QUIT, SUSP) */
-#define ICANON 0x0002 /* Canonical mode (line buffering) */
-#define ECHO   0x0004 /* Echo input characters */
-#define ECHOE  0x0008 /* Echo ERASE as backspace-space-backspace */
-#define ECHOK  0x0010 /* Echo NL after KILL */
-#define ECHONL 0x0020 /* Echo NL even if ECHO is off */
-#define NOFLSH 0x0040 /* Disable flush after INTR/QUIT/SUSP */
-#define TOSTOP 0x0080 /* Send SIGTTOU for bg output */
-#define IEXTEN 0x0100 /* Enable extended input processing */
-#define ECHOCTL 0x0200 /* Echo control chars as ^X */
-#define ECHOPRT 0x0400 /* Echo erased chars between \ and / */
-#define ECHOKE 0x0800 /* Visual erase for KILL */
+/* c_cflag bits — musl generic values */
+#define CSIZE  0x0030 /* 0000060 Character size mask */
+#define CS5    0x0000 /* 0000000 5 bits */
+#define CS6    0x0010 /* 0000020 6 bits */
+#define CS7    0x0020 /* 0000040 7 bits */
+#define CS8    0x0030 /* 0000060 8 bits */
+#define CSTOPB 0x0040 /* 0000100 Send two stop bits */
+#define CREAD  0x0080 /* 0000200 Enable receiver */
+#define PARENB 0x0100 /* 0000400 Parity enable */
+#define PARODD 0x0200 /* 0001000 Odd parity */
+#define HUPCL  0x0400 /* 0002000 Hang up on last close */
+#define CLOCAL 0x0800 /* 0004000 Ignore modem status lines */
+
+/* c_lflag bits — musl generic values */
+#define ISIG    0x0001 /* 0000001 Enable signals (INTR, QUIT, SUSP) */
+#define ICANON  0x0002 /* 0000002 Canonical mode (line buffering) */
+#define XCASE   0x0004 /* 0000004 Canonical upper/lower (obsolete) */
+#define ECHO    0x0008 /* 0000010 Echo input characters */
+#define ECHOE   0x0010 /* 0000020 Echo ERASE as backspace-space-backspace */
+#define ECHOK   0x0020 /* 0000040 Echo NL after KILL */
+#define ECHONL  0x0040 /* 0000100 Echo NL even if ECHO is off */
+#define NOFLSH  0x0080 /* 0000200 Disable flush after INTR/QUIT/SUSP */
+#define TOSTOP  0x0100 /* 0000400 Send SIGTTOU for bg output */
+#define ECHOCTL 0x0200 /* 0001000 Echo control chars as ^X */
+#define ECHOPRT 0x0400 /* 0002000 Echo erased chars between \ and / */
+#define ECHOKE  0x0800 /* 0004000 Visual erase for KILL */
+#define IEXTEN  0x8000 /* 0100000 Enable extended input processing */
 
 /* tcsetattr optional_actions */
 #define TCSANOW 0   /* Change immediately */
@@ -89,25 +105,25 @@
 #define TCIOFF 2 /* Transmit STOP character */
 #define TCION 3  /* Transmit START character */
 
-/* Speed values (baud rates) — must match musl/Linux enumeration */
-#define B0      0
-#define B50     1
-#define B75     2
-#define B110    3
-#define B134    4
-#define B150    5
-#define B200    6
-#define B300    7
-#define B600    8
-#define B1200   9
-#define B1800   10
-#define B2400   11
-#define B4800   12
-#define B9600   13
-#define B19200  14
-#define B38400  15
-#define B57600  16
-#define B115200 17
+/* Speed values (baud rates) — must match musl/Linux enumeration (octal) */
+#define B0      0x0000 /* 0000000 */
+#define B50     0x0001 /* 0000001 */
+#define B75     0x0002 /* 0000002 */
+#define B110    0x0003 /* 0000003 */
+#define B134    0x0004 /* 0000004 */
+#define B150    0x0005 /* 0000005 */
+#define B200    0x0006 /* 0000006 */
+#define B300    0x0007 /* 0000007 */
+#define B600    0x0008 /* 0000010 */
+#define B1200   0x0009 /* 0000011 */
+#define B1800   0x000A /* 0000012 */
+#define B2400   0x000B /* 0000013 */
+#define B4800   0x000C /* 0000014 */
+#define B9600   0x000D /* 0000015 */
+#define B19200  0x000E /* 0000016 */
+#define B38400  0x000F /* 0000017 */
+#define B57600  0x1001 /* 0010001 */
+#define B115200 0x1002 /* 0010002 */
 
 typedef uint32 tcflag_t;
 typedef uint8 cc_t;
@@ -118,6 +134,7 @@ struct termios {
     tcflag_t c_oflag; /* Output mode flags */
     tcflag_t c_cflag; /* Control mode flags */
     tcflag_t c_lflag; /* Local mode flags */
+    cc_t c_line;      /* Line discipline — must match musl layout */
     cc_t c_cc[NCCS];  /* Control characters */
     speed_t c_ispeed; /* Input speed */
     speed_t c_ospeed; /* Output speed */

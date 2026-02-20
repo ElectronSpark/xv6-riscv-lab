@@ -23,6 +23,7 @@
 #include "proc/sched.h"
 #include "dev/e1000_dev.h"
 #include "dev/net.h"
+#include "dev/netdev.h"
 
 #include "lwip/opt.h"
 #include "lwip/init.h"
@@ -41,19 +42,23 @@
 
 static struct netif e1000_netif;
 
-/* MAC address (must match what e1000_init programs into the HW filter) */
-static const uint8 e1000_mac[6] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
+/* Fallback MAC address (matches QEMU E1000 default) */
+static const uint8 fallback_mac[6] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
 
 /* --------------------------------------------------------------------------
- * TX path: lwIP → E1000 hardware
+ * TX path: lwIP → network device
  * Called from the lwIP stack when a packet needs to be transmitted.
- * Converts a pbuf chain into an mbuf and calls e1000_transmit().
+ * Converts a pbuf chain into an mbuf and sends via the netdev abstraction.
  * -------------------------------------------------------------------------- */
 static err_t
 e1000_netif_linkoutput(struct netif *netif, struct pbuf *p)
 {
     (void)netif;
     struct mbuf *m;
+
+    struct netdev *ndev = netdev_get_default();
+    if (ndev == NULL)
+        return ERR_IF;
 
     if (p->tot_len > MBUF_SIZE) {
         printf("lwip: packet too large (%d > %d)\n", p->tot_len, MBUF_SIZE);
@@ -67,7 +72,7 @@ e1000_netif_linkoutput(struct netif *netif, struct pbuf *p)
     /* Copy (possibly chained) pbuf into contiguous mbuf */
     pbuf_copy_partial(p, mbufput(m, p->tot_len), p->tot_len, 0);
 
-    if (e1000_transmit(m) != 0) {
+    if (ndev->ops->transmit(ndev, m) != 0) {
         mbuffree(m);
         return ERR_IF;
     }
@@ -87,7 +92,12 @@ e1000_netif_init(struct netif *netif)
     netif->output     = etharp_output;
     netif->mtu        = 1500;
     netif->hwaddr_len = 6;
-    memmove(netif->hwaddr, e1000_mac, 6);
+    /* Use MAC from registered netdev, fall back to hardcoded default */
+    struct netdev *ndev = netdev_get_default();
+    if (ndev)
+        memmove(netif->hwaddr, ndev->mac, 6);
+    else
+        memmove(netif->hwaddr, fallback_mac, 6);
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP |
                    NETIF_FLAG_ETHERNET | NETIF_FLAG_LINK_UP;
     return ERR_OK;

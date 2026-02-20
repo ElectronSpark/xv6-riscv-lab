@@ -89,7 +89,9 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     plicinithart();   // ask PLIC for device interrupts
     ipi_init();       // inter-processor interrupts
     consoleinit();
+    netdev_init();
     pci_init();
+    x1_emac_init();   // SpacemiT X1 EMAC (probes via FDT)
     signal_init(); // signal handling initialization
     binit();       // buffer cache
     // Legacy iinit() and fileinit() removed - VFS handles these

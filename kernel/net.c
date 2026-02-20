@@ -8,6 +8,7 @@
 #include <mm/memlayout.h>
 #include "riscv.h"
 #include "dev/net.h"
+#include "dev/netdev.h"
 #include "defs.h"
 #include "printf.h"
 
@@ -144,13 +145,17 @@ STATIC void net_tx_eth(struct mbuf *m, uint16 ethtype) {
     struct eth *ethhdr;
 
     ethhdr = mbufpushhdr(m, *ethhdr);
-    memmove(ethhdr->shost, local_mac, ETHADDR_LEN);
+    struct netdev *ndev = netdev_get_default();
+    if (ndev)
+        memmove(ethhdr->shost, ndev->mac, ETHADDR_LEN);
+    else
+        memmove(ethhdr->shost, local_mac, ETHADDR_LEN);
     // In a real networking stack, dhost would be set to the address discovered
     // through ARP. Because we don't support enough of the ARP protocol, set it
     // to broadcast instead.
     memmove(ethhdr->dhost, broadcast_mac, ETHADDR_LEN);
     ethhdr->type = htons(ethtype);
-    if (e1000_transmit(m)) {
+    if (!ndev || ndev->ops->transmit(ndev, m)) {
         mbuffree(m);
     }
 }
@@ -207,7 +212,11 @@ STATIC int net_tx_arp(uint16 op, uint8 dmac[ETHADDR_LEN], uint32 dip) {
     arphdr->op = htons(op);
 
     // ethernet + IP part of ARP header
-    memmove(arphdr->sha, local_mac, ETHADDR_LEN);
+    struct netdev *ndev = netdev_get_default();
+    if (ndev)
+        memmove(arphdr->sha, ndev->mac, ETHADDR_LEN);
+    else
+        memmove(arphdr->sha, local_mac, ETHADDR_LEN);
     arphdr->sip = htonl(local_ip);
     memmove(arphdr->tha, dmac, ETHADDR_LEN);
     arphdr->tip = htonl(dip);

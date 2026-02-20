@@ -54,8 +54,7 @@ static list_node_t __vfs_ftable = {0};
 static int __vfs_open_file_count = 0;
 
 static void __vfs_file_lock(struct vfs_file *file) {
-    assert(mutex_lock(&file->lock) == 0,
-           "__vfs_file_lock: failed to lock file mutex");
+    mutex_lock(&file->lock);
 }
 
 static void __vfs_file_unlock(struct vfs_file *file) {
