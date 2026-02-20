@@ -149,6 +149,47 @@ void sleep_ms(uint64 ms) {
     intr_restore(intr);
 }
 
+/**
+ * sleep_ms_interruptible - sleep for up to @ms milliseconds, interruptible
+ *                          by pending signals.
+ * @ms: requested sleep duration in milliseconds
+ *
+ * Returns the remaining time in milliseconds (0 if the full duration elapsed,
+ * >0 if woken early by a signal).
+ */
+uint64 sleep_ms_interruptible(uint64 ms) {
+    if (ms == 0) {
+        return 0;
+    }
+    struct thread *p = current;
+    assert(p != NULL, "Current thread must not be NULL");
+
+    struct timer_node tn = {0};
+    int intr = intr_off_save();
+
+    __thread_state_set(p, THREAD_INTERRUPTIBLE);
+    int ret = sched_timer_set(&tn, ms);
+    if (ret != 0) {
+        __thread_state_set(p, THREAD_RUNNING);
+        intr_restore(intr);
+        scheduler_yield();
+        return 0;
+    }
+
+    scheduler_yield();
+
+    // Compute remaining time before cancelling the timer
+    uint64 remaining_ms = 0;
+    uint64 now = r_time();
+    if (tn.expires > now) {
+        remaining_ms = RAWTICKS_TO_MS(tn.expires - now);
+    }
+
+    sched_timer_done(&tn);
+    intr_restore(intr);
+    return remaining_ms;
+}
+
 void sched_timer_init(void) {
     timer_init(&__sched_timer);
     __sched_tick_clear = false;

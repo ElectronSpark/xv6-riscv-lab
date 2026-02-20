@@ -39,6 +39,7 @@ void sched_timer_tick(void);
 int sched_timer_set(struct timer_node *tn, uint64 ticks);
 void sched_timer_done(struct timer_node *tn);
 void sleep_ms(uint64 ms);
+uint64 sleep_ms_interruptible(uint64 ms);
 int sched_timer_add_deadline(void (*callback)(void *), void *data,
                              uint64 deadline);
 int sched_timer_add(void (*callback)(void *), void *data, uint64 ticks);

@@ -13,6 +13,7 @@ extern uint64 __jiff_ticks;
 #define TICK_MS (TIMEBASE_FREQUENCY / HZ)
 #define TICK_S TIMEBASE_FREQUENCY
 #define MS_TO_RAWTICKS(ms) ((uint64)(ms) * TICK_MS)
+#define RAWTICKS_TO_MS(ticks) ((ticks) / TICK_MS)
 
 extern uint64 __clint_timer_irqno;
 #define CLINT_TIMER_IRQ __clint_timer_irqno
