@@ -255,6 +255,10 @@ static void env_init(void) {
         env_vars[i].used = 0;
     env_set("PATH", "/:/bin");
     env_set("HOME", "/");
+    env_set("LANG", "C.UTF-8");
+    env_set("LC_ALL", "C.UTF-8");
+    env_set("PYTHONUTF8", "1");
+    env_set("PYTHONIOENCODING", "utf-8");
     env_set("PYTHONHOME", "/usr/local");
     env_set("PYTHONPATH", "/usr/local/lib/python3.12");
     env_set("PYTHONDONTWRITEBYTECODE", "1");
