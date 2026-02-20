@@ -26,6 +26,50 @@
 #include "errno.h"
 
 #define NR_THREAD_HASH_BUCKETS 31
+#define KERNEL_HIERARCHY_ID 0
+
+static struct thread_group *__kernel_tg = NULL;
+static struct pgroup *__kernel_pg = NULL;
+static struct session *__kernel_session = NULL;
+
+static void __kthread_hierarchy_init_locked(void) {
+    pid_assert_wholding();
+    if (__kernel_tg != NULL) {
+        return;
+    }
+
+    int ret = thread_group_alloc_kernel(&__kernel_tg, KERNEL_HIERARCHY_ID);
+    assert(ret == 0 && __kernel_tg != NULL,
+           "kthread hierarchy: thread_group_alloc_kernel failed");
+
+    __kernel_pg = pgroup_alloc(KERNEL_HIERARCHY_ID, NULL);
+    assert(__kernel_pg != NULL, "kthread hierarchy: pgroup_alloc failed");
+    __kernel_pg->is_kernel = 1;
+
+    __kernel_session = session_alloc(KERNEL_HIERARCHY_ID);
+    assert(__kernel_session != NULL,
+           "kthread hierarchy: session_alloc failed");
+    __kernel_session->is_kernel = 1;
+
+    ret = session_add_pg(__kernel_session, __kernel_pg);
+    assert(ret == 0, "kthread hierarchy: session_add_pg failed");
+
+    ret = pgroup_add_tg(__kernel_pg, __kernel_tg);
+    assert(ret == 0, "kthread hierarchy: pgroup_add_tg failed");
+}
+
+static void __kthread_join_hierarchy_locked(struct thread *p) {
+    pid_assert_wholding();
+    assert(p != NULL, "kthread hierarchy: thread is NULL");
+
+    __kthread_hierarchy_init_locked();
+
+    thread_group_add(__kernel_tg, p);
+    int ret = pgroup_add_thread(__kernel_pg, p);
+    assert(ret == 0, "kthread hierarchy: pgroup_add_thread failed");
+    ret = session_add_thread(__kernel_session, p);
+    assert(ret == 0, "kthread hierarchy: session_add_thread failed");
+}
 
 // Lock order:
 // 1. pid_lock (rwlock) — protects parent-child hierarchy and proc table
@@ -278,11 +322,7 @@ struct thread *kthread_create(const char *name, void *entry, uint64 arg1,
     attach_child(initproc, p);
     proctab_proc_add(p);
 
-    // Allocate a thread group for the kernel thread (each kthread is its own
-    // group). Kernel threads don't get pgroup/session — they are not POSIX
-    // processes visible to user-space job control.
-    int tg_ret = thread_group_alloc(p);
-    assert(tg_ret == 0, "kthread_create: thread_group_alloc failed");
+    __kthread_join_hierarchy_locked(p);
 
     pid_wunlock();
 

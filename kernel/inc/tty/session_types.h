@@ -14,6 +14,7 @@ struct session {
 
     struct {
         uint64 exited : 1; /* whether the session has exited */
+        uint64 is_kernel : 1;
     };
 
     /* list of threads in this session */

@@ -143,6 +143,11 @@ if(DEFINED ENV{SEMAPHORE_TEST})
     target_compile_definitions(${KERNEL_BINARY} PRIVATE SEMAPHORE_RUNTIME_TEST=1)
 endif()
 
+if(DEFINED ENV{WORKQUEUE_RUNTIME_SMOKE_TEST})
+    message(STATUS "WORKQUEUE_RUNTIME_SMOKE_TEST enabled")
+    target_compile_definitions(${KERNEL_BINARY} PRIVATE WORKQUEUE_RUNTIME_SMOKE_TEST=1)
+endif()
+
 # Decompile the kernel binary
 add_custom_target(${KERNEL_DECOMPILED}
     COMMAND ${CMAKE_OBJDUMP} -S ${KERNEL_BINARY} > ${KERNEL_DECOMPILED}
@@ -190,6 +195,10 @@ endif()
 
 if(DEFINED ENV{SEMAPHORE_TEST})
     target_compile_definitions(kernel_with_symbols_elf PRIVATE SEMAPHORE_RUNTIME_TEST=1)
+endif()
+
+if(DEFINED ENV{WORKQUEUE_RUNTIME_SMOKE_TEST})
+    target_compile_definitions(kernel_with_symbols_elf PRIVATE WORKQUEUE_RUNTIME_SMOKE_TEST=1)
 endif()
 
 # Generate symbols from kernel with placeholder

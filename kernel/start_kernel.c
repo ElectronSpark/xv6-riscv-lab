@@ -185,6 +185,9 @@ void start_kernel_post_init(void) {
     // via sbi_hart_start().
     sbi_start_secondary_harts((unsigned long)_entry);
     sleep_ms(100); // Give secondary harts time to start
+#ifdef WORKQUEUE_RUNTIME_SMOKE_TEST
+    workqueue_runtime_smoke_test();
+#endif
     // RCU processing is now done per-CPU in idle loops
     // rcu_run_tests();
 

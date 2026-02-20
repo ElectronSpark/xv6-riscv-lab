@@ -172,6 +172,7 @@ int thread_group_alloc(struct thread *leader) {
     tg->group_stop_count = 0;
     tg->group_stop_signo = 0;
     tg->pgroup = NULL;
+    tg->is_kernel = 0;
 
     tg_shared_pending_init(tg);
 
@@ -181,6 +182,36 @@ int thread_group_alloc(struct thread *leader) {
     list_entry_init(&leader->tg_entry);
     list_entry_push(&tg->thread_list, &leader->tg_entry);
 
+    return 0;
+}
+
+int thread_group_alloc_kernel(struct thread_group **out_tg, pid_t tgid) {
+    if (out_tg == NULL) {
+        return -EINVAL;
+    }
+
+    struct thread_group *tg = slab_alloc(&__tg_pool);
+    if (tg == NULL) {
+        return -ENOMEM;
+    }
+
+    memset(tg, 0, sizeof(*tg));
+    list_entry_init(&tg->thread_list);
+    list_entry_init(&tg->list_entry);
+    tg->group_leader = NULL;
+    tg->tgid = tgid;
+    __atomic_store_n(&tg->live_threads, 0, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&tg->refcount, 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&tg->group_exit, 0, __ATOMIC_SEQ_CST);
+    tg->group_exit_code = 0;
+    tg->group_exit_task = NULL;
+    tg->group_stop_count = 0;
+    tg->group_stop_signo = 0;
+    tg->pgroup = NULL;
+    tg->is_kernel = 1;
+
+    tg_shared_pending_init(tg);
+    *out_tg = tg;
     return 0;
 }
 
@@ -357,6 +388,8 @@ int tg_signal_send(struct thread_group *tg, struct ksiginfo *info) {
         return -EINVAL;
     if (SIGBAD(info->signo))
         return -EINVAL;
+    if (tg->is_kernel)
+        return -EPERM;
 
     int signo = info->signo;
 

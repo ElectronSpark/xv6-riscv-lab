@@ -48,6 +48,7 @@ struct thread;
  * @return 0 on success, negative errno on failure
  */
 int thread_group_alloc(struct thread *leader);
+int thread_group_alloc_kernel(struct thread_group **out_tg, pid_t tgid);
 
 /**
  * @brief Add a thread to an existing thread group.
@@ -134,6 +135,10 @@ static inline bool thread_group_exiting(struct thread_group *tg) {
  * @return true if p is its thread group's leader
  */
 bool thread_is_group_leader(struct thread *p);
+
+static inline bool thread_group_is_kernel(struct thread_group *tg) {
+    return tg != NULL && tg->is_kernel;
+}
 
 /**
  * @brief Get the TGID (process ID) for user-space getpid().

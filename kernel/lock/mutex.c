@@ -30,7 +30,8 @@ static int __mutex_timed_sleep_cb(void *data) {
     }
 
     ctx->timer_armed = false;
-    if (ctx->timeout_ms > 0 && sched_timer_set(&ctx->timer, ctx->timeout_ms) == 0) {
+    if (ctx->timeout_ms > 0 &&
+        sched_timer_set(&ctx->timer, ctx->timeout_ms) == 0) {
         ctx->timer_armed = true;
     }
 
@@ -173,7 +174,8 @@ int mutex_lock_interruptible(mutex_t *lk) {
            "mutex_lock_interruptible: no current thread context");
     assert(mycpu()->spin_depth == 0,
            "mutex_lock_interruptible called with spinlock held");
-    assert(!CPU_IN_ITR(), "mutex_lock_interruptible called in interrupt context");
+    assert(!CPU_IN_ITR(),
+           "mutex_lock_interruptible called in interrupt context");
 
     if (lk == NULL) {
         return -EINVAL;
@@ -192,7 +194,8 @@ int mutex_lock_interruptible(mutex_t *lk) {
     }
 
     assert(__mutex_holder(lk) != self->pid,
-           "mutex_lock_interruptible: deadlock detected, thread already holds the lock");
+           "mutex_lock_interruptible: deadlock detected, thread already holds "
+           "the lock");
 
     while (__mutex_holder(lk) != self->pid) {
         if (signal_pending(current)) {
@@ -202,7 +205,8 @@ int mutex_lock_interruptible(mutex_t *lk) {
 
         __thread_state_set(current, THREAD_INTERRUPTIBLE);
         int ret = tq_wait(&lk->wait_queue, &lk->lk, NULL);
-        if (ret != 0 && signal_pending(current) && __mutex_holder(lk) != self->pid) {
+        if (ret != 0 && signal_pending(current) &&
+            __mutex_holder(lk) != self->pid) {
             spin_unlock(&lk->lk);
             return -EINTR;
         }
@@ -238,8 +242,9 @@ int mutex_lock_timed(mutex_t *lk, uint64 timeout_ms) {
         return 0;
     }
 
-    assert(__mutex_holder(lk) != self->pid,
-           "mutex_lock_timed: deadlock detected, thread already holds the lock");
+    assert(
+        __mutex_holder(lk) != self->pid,
+        "mutex_lock_timed: deadlock detected, thread already holds the lock");
 
     uint64 timeout_ticks = MS_TO_RAWTICKS(timeout_ms);
     uint64 start = r_time();
@@ -266,7 +271,8 @@ int mutex_lock_timed(mutex_t *lk, uint64 timeout_ms) {
         __thread_state_set(current, THREAD_INTERRUPTIBLE);
         int ret = tq_wait_cb(&lk->wait_queue, __mutex_timed_sleep_cb,
                              __mutex_timed_wake_cb, &ctx, NULL);
-        if (ret != 0 && signal_pending(current) && __mutex_holder(lk) != self->pid) {
+        if (ret != 0 && signal_pending(current) &&
+            __mutex_holder(lk) != self->pid) {
             spin_unlock(&lk->lk);
             return -EINTR;
         }

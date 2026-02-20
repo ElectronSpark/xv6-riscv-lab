@@ -595,7 +595,9 @@ int signal_send(int pid, ksiginfo_t *info) {
     // shared_pending. This matches POSIX kill() semantics: kill(pid) sends to
     // the process.
     struct thread_group *tg = p->thread_group;
-    if (tg != NULL && tg->tgid == pid) {
+    if (tg != NULL && tg->is_kernel) {
+        ret = __signal_send(p, info);
+    } else if (tg != NULL && tg->tgid == pid) {
         ret = tg_signal_send(tg, info);
     } else {
         // Thread-directed signal (pid is a TID, not a TGID)

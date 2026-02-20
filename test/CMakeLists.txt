@@ -354,6 +354,19 @@ target_compile_options(ut_early_allocator PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE
 target_link_options(ut_early_allocator PRIVATE ${ASAN_LINK_FLAGS})
 target_include_directories(ut_early_allocator PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
 
+add_executable(ut_workqueue
+    ${CMAKE_SOURCE_DIR}/src/ut_workqueue_main.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/workqueue_wrappers.c
+)
+target_link_libraries(ut_workqueue PRIVATE cmocka-static)
+target_compile_options(ut_workqueue PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
+target_link_options(ut_workqueue PRIVATE ${ASAN_LINK_FLAGS}
+    -Wl,--wrap=workqueue_create,--wrap=workqueue_create_with_callbacks,--wrap=workqueue_kill,--wrap=queue_work
+    -Wl,--wrap=init_work_struct,--wrap=init_work_struct_flags,--wrap=init_work_struct_ex
+    -Wl,--wrap=create_work_struct,--wrap=create_work_struct_flags,--wrap=create_work_struct_ex,--wrap=free_work_struct
+)
+target_include_directories(ut_workqueue PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+
 enable_testing()
 # ut_mock_test disabled - ut_page needs API updates
 # add_test(NAME ut_mock_test
@@ -394,5 +407,9 @@ add_test(NAME ut_tmpfs_truncate
 )
 add_test(NAME ut_early_allocator
     COMMAND ut_early_allocator
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+)
+add_test(NAME ut_workqueue
+    COMMAND ut_workqueue
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
 )

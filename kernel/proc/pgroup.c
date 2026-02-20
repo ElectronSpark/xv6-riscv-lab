@@ -48,6 +48,8 @@ static void __pgroup_cleanup(struct pgroup *pg) {
         return;
     if (pg->p_cnt > 0)
         return; // Still has thread groups — keep alive
+    if (pg->is_kernel)
+        return;
 
     pg->exited = 1;
 
@@ -403,6 +405,10 @@ int pgroup_kill(pid_t pgid, int signum) {
     if (IS_ERR(pg) || pg->exited) {
         pid_runlock();
         return -ESRCH;
+    }
+    if (pg->is_kernel) {
+        pid_runlock();
+        return -EPERM;
     }
 
     /* Signal each thread group in the process group */

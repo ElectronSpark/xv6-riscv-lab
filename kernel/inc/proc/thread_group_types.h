@@ -78,6 +78,10 @@ struct thread_group {
     // Group stop support  (SIGSTOP/SIGTSTP to the process)
     int group_stop_count; // Threads still needing to stop
     int group_stop_signo; // Signal that caused the group stop
+
+    struct {
+        uint64 is_kernel : 1;
+    };
 };
 
 #endif /* __KERNEL_THREAD_GROUP_TYPES_H */

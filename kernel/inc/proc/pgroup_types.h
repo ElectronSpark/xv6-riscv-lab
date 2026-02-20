@@ -16,6 +16,7 @@ struct pgroup {
 
     struct {
         uint64 exited : 1; /* whether the process group has exited */
+        uint64 is_kernel : 1;
     };
 
     /* list of threads in this group */
