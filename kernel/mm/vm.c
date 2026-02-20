@@ -194,6 +194,20 @@ void vm_remote_sfence(vm_t *vm) {
     pop_off();
 }
 
+// Like kvmmap, but silently skip pages that are already mapped.
+// Prevents remap panics when MMIO regions from different subsystems
+// (e.g. PCIe and EMAC) share the same physical page.
+// va, pa, and sz must be page-aligned.
+static void kvmmap_safe(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz,
+                        int perm) {
+    for (uint64 off = 0; off < sz; off += PGSIZE) {
+        pte_t *pte = walk(kpgtbl, va + off, 0, NULL, NULL);
+        if (pte && (*pte & PTE_V))
+            continue; // already mapped by another subsystem
+        kvmmap(kpgtbl, va + off, pa + off, PGSIZE, perm);
+    }
+}
+
 // Make a direct-map page table for the kernel.
 pagetable_t kvmmake(void) {
     pagetable_t kpgtbl = (void *)_data_ktlb;
@@ -222,44 +236,16 @@ pagetable_t kvmmake(void) {
 
     // PCI-E ECAM (configuration space), for pci.c - only if platform has PCIe
     if (platform.has_pcie && PCIE_ECAM != 0) {
-        // Track already-mapped ranges to avoid overlaps
-        uint64 mapped_ranges[PCIE_REG_MAX][2]; // [base, end]
-        int num_mapped = 0;
-
-        // Map all PCIe regions (round down start, round up end for alignment)
+        // Map all PCIe regions, skipping pages already mapped
         for (int i = 0; i < platform.pcie_reg_count; i++) {
             uint64 base = platform.pcie_reg[i].base;
             uint64 size = platform.pcie_reg[i].size;
-            if (base == 0 || size == 0) {
+            if (base == 0 || size == 0)
                 continue;
-            }
-            // Round down start, round up end
             uint64 aligned_base = PGROUNDDOWN(base);
-            uint64 aligned_end = PGROUNDUP(base + size);
-
-            // Check for overlap with already-mapped regions
-            int overlap = 0;
-            for (int j = 0; j < num_mapped; j++) {
-                if (aligned_base < mapped_ranges[j][1] &&
-                    aligned_end > mapped_ranges[j][0]) {
-                    overlap = 1;
-                    break;
-                }
-            }
-            if (overlap) {
-                continue; // Skip overlapping regions
-            }
-
-            uint64 aligned_size = aligned_end - aligned_base;
-            kvmmap(kpgtbl, aligned_base, aligned_base, aligned_size,
-                   PTE_R | PTE_W);
-
-            // Record this mapped range
-            if (num_mapped < PCIE_REG_MAX) {
-                mapped_ranges[num_mapped][0] = aligned_base;
-                mapped_ranges[num_mapped][1] = aligned_end;
-                num_mapped++;
-            }
+            uint64 aligned_size = PGROUNDUP(base + size) - aligned_base;
+            kvmmap_safe(kpgtbl, aligned_base, aligned_base, aligned_size,
+                        PTE_R | PTE_W);
         }
         // pci.c maps the e1000's registers here - only on QEMU
         // (VirtIO presence indicates QEMU; real hardware won't have E1000 at
@@ -273,6 +259,35 @@ pagetable_t kvmmake(void) {
     // PLIC
     if (platform.plic_base != 0 && platform.plic_size != 0) {
         kvmmap(kpgtbl, PLIC, PLIC, platform.plic_size, PTE_R | PTE_W);
+    }
+
+    // EMAC MMIO regions (SpacemiT X1 Ethernet MAC)
+    if (platform.has_emac) {
+        for (int i = 0; i < platform.emac_count && i < EMAC_MAX; i++) {
+            // Map EMAC register region
+            if (platform.emac[i].base != 0 && platform.emac[i].size != 0) {
+                uint64 base = PGROUNDDOWN(platform.emac[i].base);
+                uint64 size = PGROUNDUP(platform.emac[i].base +
+                                        platform.emac[i].size) - base;
+                kvmmap_safe(kpgtbl, base, base, size, PTE_R | PTE_W);
+            }
+            // Map the APMU ctrl register page
+            if (platform.emac[i].apmu_base != 0 &&
+                platform.emac[i].ctrl_reg != 0) {
+                uint64 pg = PGROUNDDOWN(
+                    (uint64)platform.emac[i].apmu_base +
+                    platform.emac[i].ctrl_reg);
+                kvmmap_safe(kpgtbl, pg, pg, PGSIZE, PTE_R | PTE_W);
+            }
+            // Map the APMU dline register page
+            if (platform.emac[i].apmu_base != 0 &&
+                platform.emac[i].dline_reg != 0) {
+                uint64 pg = PGROUNDDOWN(
+                    (uint64)platform.emac[i].apmu_base +
+                    platform.emac[i].dline_reg);
+                kvmmap_safe(kpgtbl, pg, pg, PGSIZE, PTE_R | PTE_W);
+            }
+        }
     }
 
     // map kernel text executable and read-only.

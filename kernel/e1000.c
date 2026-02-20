@@ -9,7 +9,19 @@
 #include "printf.h"
 #include "dev/e1000_dev.h"
 #include "dev/net.h"
+#include "dev/netdev.h"
 #include "trap.h"
+
+/* Netdev wrapper for e1000_transmit */
+static int e1000_netdev_transmit(struct netdev *ndev, struct mbuf *m) {
+    return e1000_transmit(m);
+}
+
+static struct netdev_ops e1000_netdev_ops = {
+    .transmit = e1000_netdev_transmit,
+};
+
+static struct netdev e1000_ndev;
 
 uint64 __e1000_pci_mmio_base = 0x40000000L;
 uint64 __e1000_pci_irqno = 33;
@@ -243,6 +255,17 @@ void e1000_init(uint32 *xregs) {
     regs[E1000_RDTR] = 0; // interrupt after every received packet (no timer)
     regs[E1000_RADV] = 0; // interrupt after every packet (no timer)
     regs[E1000_IMS] = (1 << 7); // RXDW -- Receiver Descriptor Write Back
+
+    // Register with the netdev abstraction layer
+    strncpy(e1000_ndev.name, "e1000", NETDEV_NAME_MAX);
+    memmove(e1000_ndev.mac, default_mac_address, 6);
+    e1000_ndev.mtu = 1500;
+    e1000_ndev.link_up = 1;
+    e1000_ndev.speed = 1000;
+    e1000_ndev.full_duplex = 1;
+    e1000_ndev.ops = &e1000_netdev_ops;
+    e1000_ndev.priv = (void *)regs;
+    netdev_register(&e1000_ndev);
 }
 
 int e1000_transmit(struct mbuf *m) {

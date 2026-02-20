@@ -183,6 +183,22 @@ struct platform_info {
 
     // Number of CPUs
     int ncpu;
+
+    // Ethernet EMAC (MMIO-based, e.g. SpacemiT X1 EMAC)
+#define EMAC_MAX 2
+    int has_emac;
+    struct {
+        uint64 base;        /* MMIO register base */
+        uint64 size;        /* MMIO region size */
+        uint32 irq;         /* interrupt number */
+        uint32 apmu_base;   /* APMU register base (for ctrl/dline regs) */
+        uint32 ctrl_reg;    /* ctrl register offset from apmu_base */
+        uint32 dline_reg;   /* delay-line register offset from apmu_base */
+        uint32 reset_gpio;  /* GPIO pin for PHY reset */
+        uint32 tx_phase;    /* RGMII TX clock phase */
+        uint32 rx_phase;    /* RGMII RX clock phase */
+    } emac[EMAC_MAX];
+    int emac_count;
 };
 
 // Global platform info (populated by fdt_init)
