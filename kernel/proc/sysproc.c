@@ -45,6 +45,24 @@ uint64 sys_exit(void) {
 
 uint64 sys_getpid(void) { return thread_tgid(current); }
 
+uint64 sys_getuid(void)  { return 0; }  /* always root */
+uint64 sys_geteuid(void) { return 0; }
+uint64 sys_getgid(void)  { return 0; }
+uint64 sys_getegid(void) { return 0; }
+uint64 sys_setuid(void)  { return 0; }  /* silently succeed */
+uint64 sys_setgid(void)  { return 0; }
+uint64 sys_setreuid(void){ return 0; }
+uint64 sys_setregid(void){ return 0; }
+
+uint64 sys_getgroups(void) {
+    /* a0 = size, a1 = list[]; if size==0 return count */
+    int size;
+    argint(0, &size);
+    return 0;  /* root has 0 supplementary groups */
+}
+
+uint64 sys_setgroups(void) { return 0; }
+
 uint64 sys_getppid(void) {
     if (current->parent == NULL) {
         return 1;
@@ -288,3 +306,110 @@ uint64 sys_getrandom(void) {
 }
 
 // mmap/munmap/mprotect moved to kernel/mm/sysmm.c
+
+/*
+ * brk(addr) — set the program break (end of heap).
+ *
+ * If addr == 0, return the current break.
+ * Otherwise, grow or shrink the heap to reach addr.
+ * Returns the new break on success, or the old break on failure.
+ */
+uint64 sys_brk(void) {
+    uint64 addr;
+    argaddr(0, &addr);
+
+    vm_t *vm = current->vm;
+    vma_t *heap = vm->heap;
+    if (heap == NULL)
+        return (uint64)-ENOMEM;
+
+    uint64 cur_brk = heap->start + vm->heap_size;
+
+    if (addr == 0) {
+        return cur_brk;
+    }
+
+    if (addr < heap->start)
+        return cur_brk; // Cannot shrink below heap start
+
+    int64 delta = (int64)(addr - cur_brk);
+    if (delta == 0)
+        return cur_brk;
+
+    if (vm_growheap(vm, delta) < 0) {
+        printf("sys_brk: FAIL pid=%d addr=0x%lx cur_brk=0x%lx delta=%ld\n",
+               current->pid, addr, cur_brk, delta);
+        return cur_brk; // Return old break on failure
+    }
+
+    return heap->start + vm->heap_size;
+}
+
+/*
+ * set_tid_address(tidptr) — store the clear_child_tid pointer.
+ *
+ * When this thread exits, the kernel will:
+ *   1. Write 0 to *tidptr
+ *   2. futex_wake(tidptr, 1) to wake pthread_join waiters
+ *
+ * Returns the caller's TID.
+ */
+uint64 sys_set_tid_address(void) {
+    uint64 tidptr;
+    argaddr(0, &tidptr);
+    current->clear_child_tid = tidptr;
+    return current->pid;
+}
+
+/*
+ * clock_gettime(clockid, tp) — get time from specified clock.
+ */
+uint64 sys_clock_gettime(void) {
+    int clockid;
+    uint64 tp_addr;
+    argint(0, &clockid);
+    argaddr(1, &tp_addr);
+
+    if (tp_addr == 0)
+        return -EINVAL;
+
+    struct __k_timespec ts = {0};
+
+    switch (clockid) {
+    case 0: // CLOCK_REALTIME
+    case 1: // CLOCK_MONOTONIC (treat same as realtime for now)
+    {
+        uint64 ns = goldfish_rtc_read_ns();
+        ts.tv_sec = ns / 1000000000ULL;
+        ts.tv_nsec = ns % 1000000000ULL;
+        break;
+    }
+    default:
+        return -EINVAL;
+    }
+
+    if (either_copyout(1, tp_addr, &ts, sizeof(ts)) < 0)
+        return -EFAULT;
+
+    return 0;
+}
+
+/*
+ * clock_getres(clockid, res) — get resolution of specified clock.
+ */
+uint64 sys_clock_getres(void) {
+    int clockid;
+    uint64 res_addr;
+    argint(0, &clockid);
+    argaddr(1, &res_addr);
+
+    if (clockid != 0 && clockid != 1)
+        return -EINVAL;
+
+    if (res_addr != 0) {
+        struct __k_timespec res = {.tv_sec = 0, .tv_nsec = 1000}; // 1µs
+        if (either_copyout(1, res_addr, &res, sizeof(res)) < 0)
+            return -EFAULT;
+    }
+    return 0;
+}

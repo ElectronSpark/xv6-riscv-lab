@@ -16,28 +16,41 @@
 
 // mmap(addr, length, prot, flags, fd, offset)
 uint64 sys_mmap(void) {
-    uint64 addr, offset;
-    int length, prot, flags, fd;
+    uint64 addr, offset, length;
+    int prot, flags, fd;
 
     argaddr(0, &addr);
-    argint(1, &length);
+    argaddr(1, &length);  // size_t is 64-bit on rv64
     argint(2, &prot);
     argint(3, &flags);
     argint(4, &fd);
     argaddr(5, &offset);
 
-    return vm_mmap(current->vm, addr, (size_t)length, prot, flags, fd, offset);
+    if (length > (1UL << 30)) {
+        uint64 sepc = current->trapframe ? current->trapframe->trapframe.sepc : 0UL;
+        uint64 ra = current->trapframe ? current->trapframe->trapframe.ra : 0UL;
+        uint64 sp = current->trapframe ? current->trapframe->trapframe.sp : 0UL;
+        printf("sys_mmap: suspicious large request pid=%d len=0x%lx addr=0x%lx prot=%d flags=0x%x fd=%d off=0x%lx sepc=0x%lx ra=0x%lx sp=0x%lx\n",
+               current->pid, length, addr, prot, flags, fd, offset,
+               sepc, ra, sp);
+    }
+
+    uint64 ret = vm_mmap(current->vm, addr, (size_t)length, prot, flags, fd, offset);
+    if (ret == (uint64)-1) {
+        printf("sys_mmap: FAIL pid=%d addr=0x%lx len=0x%lx prot=%d flags=0x%x fd=%d\n",
+               current->pid, addr, length, prot, flags, fd);
+    }
+    return ret;
 }
 
 // munmap(addr, length)
 uint64 sys_munmap(void) {
-    uint64 addr;
-    int length;
+    uint64 addr, length;
 
     argaddr(0, &addr);
-    argint(1, &length);
+    argaddr(1, &length);
 
-    if (length <= 0)
+    if (length == 0)
         return -EINVAL;
 
     return (uint64)vm_munmap(current->vm, addr, (size_t)length);
@@ -45,14 +58,14 @@ uint64 sys_munmap(void) {
 
 // mprotect(addr, length, prot)
 uint64 sys_mprotect(void) {
-    uint64 addr;
-    int length, prot;
+    uint64 addr, length;
+    int prot;
 
     argaddr(0, &addr);
-    argint(1, &length);
+    argaddr(1, &length);
     argint(2, &prot);
 
-    if (length <= 0)
+    if (length == 0)
         return -EINVAL;
 
     return (uint64)vm_mprotect(current->vm, addr, (size_t)length, prot);
@@ -60,17 +73,26 @@ uint64 sys_mprotect(void) {
 
 // mremap(old_addr, old_size, new_size, flags, new_addr)
 uint64 sys_mremap(void) {
-    uint64 old_addr, new_addr;
-    int old_size, new_size, flags;
+    uint64 old_addr, new_addr, old_size, new_size;
+    int flags;
 
     argaddr(0, &old_addr);
-    argint(1, &old_size);
-    argint(2, &new_size);
+    argaddr(1, &old_size);
+    argaddr(2, &new_size);
     argint(3, &flags);
     argaddr(4, &new_addr);
 
-    if (old_size < 0 || new_size <= 0)
+    if (new_size == 0)
         return -EINVAL;
+
+    if (old_size > (1UL << 30) || new_size > (1UL << 30)) {
+        uint64 sepc = current->trapframe ? current->trapframe->trapframe.sepc : 0UL;
+        uint64 ra = current->trapframe ? current->trapframe->trapframe.ra : 0UL;
+        uint64 sp = current->trapframe ? current->trapframe->trapframe.sp : 0UL;
+        printf("sys_mremap: suspicious large request pid=%d old=0x%lx old_sz=0x%lx new_sz=0x%lx flags=0x%x new_addr=0x%lx sepc=0x%lx ra=0x%lx sp=0x%lx\n",
+               current->pid, old_addr, old_size, new_size, flags, new_addr,
+               sepc, ra, sp);
+    }
 
     return vm_mremap(current->vm, old_addr, (size_t)old_size,
                      (size_t)new_size, flags, new_addr);
@@ -78,14 +100,14 @@ uint64 sys_mremap(void) {
 
 // msync(addr, length, flags)
 uint64 sys_msync(void) {
-    uint64 addr;
-    int length, flags;
+    uint64 addr, length;
+    int flags;
 
     argaddr(0, &addr);
-    argint(1, &length);
+    argaddr(1, &length);
     argint(2, &flags);
 
-    if (length <= 0)
+    if (length == 0)
         return -EINVAL;
 
     return (uint64)vm_msync(current->vm, addr, (size_t)length, flags);

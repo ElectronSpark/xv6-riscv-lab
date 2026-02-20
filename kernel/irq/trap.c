@@ -127,6 +127,7 @@ void usertrap(void) {
     uint64 va;
     vma_t *vma = NULL;
     uint64 scause = current->trapframe->trapframe.scause;
+    extern int gdbstub_signal_stop(struct thread *, int);
 
     if ((current->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
         panic("usertrap: not from user mode");
@@ -184,6 +185,7 @@ void usertrap(void) {
                current->trapframe->trapframe.sepc,
                current->trapframe->trapframe.stval);
         assert(current->pid != 1, "init exiting");
+        gdbstub_signal_stop(current, SIGSEGV);
         kill(current->pid, SIGSEGV);
         break;
     case RISCV_LOAD_PAGE_FAULT:
@@ -206,6 +208,7 @@ void usertrap(void) {
                current->trapframe->trapframe.sepc,
                current->trapframe->trapframe.stval);
         assert(current->pid != 1, "init exiting");
+        gdbstub_signal_stop(current, SIGSEGV);
         kill(current->pid, SIGSEGV);
         break;
     case RISCV_STORE_PAGE_FAULT:
@@ -228,6 +231,7 @@ void usertrap(void) {
                current->trapframe->trapframe.sepc,
                current->trapframe->trapframe.stval);
         assert(current->pid != 1, "init exiting");
+        gdbstub_signal_stop(current, SIGSEGV);
         kill(current->pid, SIGSEGV);
         break;
     default:
@@ -238,6 +242,7 @@ void usertrap(void) {
                current->trapframe->trapframe.sepc,
                current->trapframe->trapframe.stval);
         assert(current->pid != 1, "init exiting");
+        gdbstub_signal_stop(current, SIGSEGV);
         kill(current->pid, SIGSEGV);
         break;
     }

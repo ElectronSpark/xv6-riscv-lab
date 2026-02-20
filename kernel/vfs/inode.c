@@ -157,8 +157,16 @@ void vfs_iput(struct vfs_inode *inode) {
     int ret = 0;
 
 retry:
-    // If refcount is greater than 1, just decrease and return
-    if (atomic_dec_unless(&inode->ref_count, 1)) {
+    // If refcount is greater than 1, just decrease and return.
+    // IMPORTANT: do NOT decrement when refcount is 0.
+    if (atomic_oper_cond(&inode->ref_count, (VAL - 1), (VAL > 1))) {
+        return;
+    }
+
+    // Defensive: duplicate iput on an already released inode reference.
+    if (READ_ONCE(inode->ref_count) <= 0) {
+        printf("vfs_iput: warning: inode %lu iput with ref_count=%d (ignored)\n",
+               inode->ino, READ_ONCE(inode->ref_count));
         return;
     }
 
@@ -183,14 +191,21 @@ retry:
         goto retry;
     }
 
-    // Retry decreasing refcount again, as it may have changed meanwhile
-    if (atomic_dec_unless(&inode->ref_count, 1)) {
+    // Retry decreasing refcount again, as it may have changed meanwhile.
+    // Again, only decrement if refcount > 1.
+    if (atomic_oper_cond(&inode->ref_count, (VAL - 1), (VAL > 1))) {
         // Someone else grabbed a reference while we were acquiring locks,
         // and we just decremented it. The inode is still in use, don't free.
         vfs_iunlock(inode);
         vfs_superblock_unlock(sb);
         return;
     }
+
+        // We are handling the last reference (refcount == 1). Consume it now so
+        // any concurrent stale iput cannot re-enter free path and double-free.
+    assert(inode->ref_count == 1,
+           "vfs_iput: expected last refcount == 1, got %d", inode->ref_count);
+    __atomic_store_n(&inode->ref_count, 0, __ATOMIC_SEQ_CST);
 
     // For backendless filesystems (e.g., tmpfs), keep inodes alive as long as
     // they have positive link count AND the superblock is still attached.
@@ -206,9 +221,7 @@ retry:
     // attached.
     if (sb->attached && (inode->n_links > 0 || inode->mount)) {
         if (sb->backendless || inode == sb->root_inode || inode->mount) {
-            // Decrement refcount to 0 but keep inode in cache
-            atomic_dec(&inode->ref_count);
-            assert(inode->ref_count >= 0, "vfs_iput: inode refcount underflow");
+            // Keep inode cached with refcount already consumed to 0.
             vfs_iunlock(inode);
             vfs_superblock_unlock(sb);
             return;
@@ -278,11 +291,24 @@ retry:
             if (tx_ret != 0) {
                 // Transaction failed - inode's on-disk data remains
                 // Will be cleaned on next mount via orphan recovery
-                inode->destroying = 0;
                 // Still need to remove from cache - re-acquire locks
                 // Standard lock order: superblock first, then inode
                 vfs_superblock_wlock(sb);
                 vfs_ilock(inode);
+
+                // Wait for in-flight references to drain.
+                // Other threads may have called vfs_idup_not_zero during
+                // the lock gap (while destroying=1) and queued deferred
+                // iputs.  Keep destroying=1 so new lookups via
+                // vfs_get_inode_cached continue to fail immediately.
+                while (inode->ref_count != 0) {
+                    vfs_iunlock(inode);
+                    vfs_superblock_unlock(sb);
+                    scheduler_yield();
+                    vfs_superblock_wlock(sb);
+                    vfs_ilock(inode);
+                }
+                inode->destroying = 0;
                 goto skip_destroy;
             }
         }
@@ -305,6 +331,24 @@ retry:
         vfs_superblock_wlock(sb);
         vfs_ilock(inode);
 
+        // Wait for in-flight references to drain.
+        // While locks were released for destroy_inode, other threads may
+        // have found this inode in the hash via vfs_get_inode_cached,
+        // bumped refcount with vfs_idup_not_zero, discovered
+        // destroying==1, and queued deferred iputs.  Those deferred iputs
+        // use the atomic_dec_unless fast-path (no locks required), so
+        // they can complete while we hold locks.  We must wait for all
+        // of them to finish before freeing the inode, otherwise the
+        // deferred iput would access freed memory (use-after-free).
+        // Keep destroying=1 during the wait so no NEW lookups succeed.
+        while (inode->ref_count != 0) {
+            vfs_iunlock(inode);
+            vfs_superblock_unlock(sb);
+            scheduler_yield();
+            vfs_superblock_wlock(sb);
+            vfs_ilock(inode);
+        }
+
         // After destroy, the inode's on-disk data is freed.
         // Mark it invalid and not dirty so we don't try to sync it.
         inode->valid = 0;
@@ -315,8 +359,23 @@ retry:
 skip_destroy:
 
     ret = vfs_remove_inode(inode->sb, inode);
-    assert(ret == 0,
-           "vfs_iput: failed to remove inode from superblock inode cache");
+    if (ret != 0) {
+        // Inode was already removed from the hash table by a concurrent
+        // eviction or destroy path.  This can happen when a deferred workqueue
+        // iput races with a direct iput during the lock gap around
+        // destroy_inode / dirty sync.
+        //
+        // Another path may already be freeing (or have freed) this inode,
+        // so we must NOT free it again here.
+        printf("vfs_iput: warning: inode %lu already removed from cache "
+               "(ret=%d)\n", inode->ino, ret);
+
+        // Unlock in standard order and return without freeing to avoid
+        // double-free on races.
+        vfs_iunlock(inode);
+        vfs_superblock_unlock(sb);
+        return;
+    }
 
     // Check if this was the last orphan on a detached fs
     should_free_sb = (!sb->attached && sb->orphan_count == 0);

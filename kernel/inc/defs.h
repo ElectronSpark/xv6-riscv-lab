@@ -57,6 +57,11 @@ void ptmxinit(void);
 // exec.c
 int exec(char *, char **, char **);
 
+// futex.c
+typedef struct vm vm_t;
+void futex_init(void);
+int futex_wake_addr(vm_t *vm, uint64 uaddr, int val);
+
 // Legacy file.c removed - now using VFS exclusively (vfs/file.c)
 
 // Legacy fs.c removed - now using VFS exclusively

@@ -29,12 +29,27 @@
 extern int getdents(int fd, void *dirp, int count);
 extern char **environ;
 static int exec(const char *path, char **argv) { return execve(path, argv, environ); }
-static inline void waitgdb(void) { asm volatile("ebreak"); }
+static inline void waitgdb(void) {
+    asm volatile("li a0, 0\n\tebreak" ::: "a0", "memory");
+}
+static inline void waitgdb_stopentry(void) {
+    asm volatile("li a0, 1\n\tebreak" ::: "a0", "memory");
+}
 #else
 #include "user.h"
 #include "kernel/inc/vfs/fcntl.h"
 #include "kernel/inc/vfs/stat.h"
 #include "kernel/inc/tty/termios.h"
+// Stubs — xv6 userlib has no real environ; the shell's internal
+// env_vars[] table is the authoritative store.
+static int setenv(const char *name, const char *value, int overwrite) {
+    (void)name; (void)value; (void)overwrite;
+    return 0;
+}
+static int unsetenv(const char *name) {
+    (void)name;
+    return 0;
+}
 #endif
 
 // Linux-compatible dirent structure for getdents
@@ -1408,14 +1423,24 @@ void runcmd(struct cmd *cmd) {
         if (ecmd->argv[0] == 0)
             exit(1);
         // waitgdb: pause for debugger, then exec the real command
+        // waitgdb -e <cmd>: also stop at entry point after exec
         if (strcmp(ecmd->argv[0], "waitgdb") == 0) {
-            if (ecmd->argv[1] == 0) {
-                errprintf("usage: waitgdb <command> [args...]\n");
+            int stop_entry = 0;
+            int cmd_idx = 1;
+            if (ecmd->argv[1] && strcmp(ecmd->argv[1], "-e") == 0) {
+                stop_entry = 1;
+                cmd_idx = 2;
+            }
+            if (ecmd->argv[cmd_idx] == 0) {
+                errprintf("usage: waitgdb [-e] <command> [args...]\n");
                 exit(1);
             }
-            waitgdb();
-            exec_with_path(ecmd->argv[1], &ecmd->argv[1]);
-            errprintf("waitgdb: exec %s failed\n", ecmd->argv[1]);
+            if (stop_entry)
+                waitgdb_stopentry();
+            else
+                waitgdb();
+            exec_with_path(ecmd->argv[cmd_idx], &ecmd->argv[cmd_idx]);
+            errprintf("waitgdb: exec %s failed\n", ecmd->argv[cmd_idx]);
             exit(127);
         }
         exec_with_path(ecmd->argv[0], ecmd->argv);

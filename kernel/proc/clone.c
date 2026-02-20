@@ -165,6 +165,16 @@ int thread_clone(struct clone_args *args) {
     // Cause fork to return 0 in the child.
     ret_ptr->trapframe->trapframe.a0 = 0;
 
+    // CLONE_SETTLS: set the thread pointer (tp) register in the child
+    if (args->flags & CLONE_SETTLS) {
+        ret_ptr->trapframe->tp = args->tls;
+    }
+
+    // CLONE_CHILD_CLEARTID: store the address to zero+futex_wake on thread exit
+    if (args->flags & CLONE_CHILD_CLEARTID) {
+        ret_ptr->clear_child_tid = args->ctid;
+    }
+
     // VFS cwd and rooti already cloned above
     safestrcpy(ret_ptr->name, p->name, sizeof(p->name));
 
@@ -224,6 +234,25 @@ int thread_clone(struct clone_args *args) {
     pgroup_init_thread(ret_ptr, p);
 
     pid_wunlock();
+
+    // CLONE_CHILD_SETTID: write child's TID into the ctid address in child's
+    // memory. Done after PID assignment so we have the actual TID.
+    if (args->flags & CLONE_CHILD_SETTID) {
+        int tid = ret_ptr->pid;
+        if (vm_copyout(ret_ptr->vm, args->ctid, (char *)&tid, sizeof(tid)) <
+            0) {
+            // Non-fatal: child was already created, just skip the write
+        }
+    }
+
+    // CLONE_PARENT_SETTID: write child's TID into the ptid address in parent's
+    // memory.
+    if (args->flags & CLONE_PARENT_SETTID) {
+        int tid = ret_ptr->pid;
+        if (vm_copyout(p->vm, args->ptid, (char *)&tid, sizeof(tid)) < 0) {
+            // Non-fatal
+        }
+    }
 
     // Wake up the new child thread
     // Note: pi_lock no longer needed - rq_lock serializes wakeups

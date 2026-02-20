@@ -9,6 +9,9 @@
 #include "defs.h"
 #include "printf.h"
 #include <mm/vm.h>
+#include "errno.h"
+
+static uint64 sys_ni_enosys(void) { return (uint64)-ENOSYS; }
 
 // Fetch the uint64 at addr from the current thread.
 int fetchaddr(uint64 addr, uint64 *ip) {
@@ -77,6 +80,16 @@ extern uint64 sys_kill(void);
 extern uint64 sys_exec(void);
 extern uint64 sys_getpid(void);
 extern uint64 sys_getppid(void);
+extern uint64 sys_getuid(void);
+extern uint64 sys_geteuid(void);
+extern uint64 sys_getgid(void);
+extern uint64 sys_getegid(void);
+extern uint64 sys_setuid(void);
+extern uint64 sys_setgid(void);
+extern uint64 sys_setreuid(void);
+extern uint64 sys_setregid(void);
+extern uint64 sys_getgroups(void);
+extern uint64 sys_setgroups(void);
 extern uint64 sys_sbrk(void);
 extern uint64 sys_sleep(void);
 extern uint64 sys_uptime(void);
@@ -109,6 +122,20 @@ extern uint64 sys_mremap(void);
 extern uint64 sys_msync(void);
 extern uint64 sys_mincore(void);
 extern uint64 sys_madvise(void);
+
+// Extended syscalls for musl support
+extern uint64 sys_brk(void);
+extern uint64 sys_futex(void);
+extern uint64 sys_vfs_openat(void);
+extern uint64 sys_vfs_writev(void);
+extern uint64 sys_vfs_readv(void);
+extern uint64 sys_set_tid_address(void);
+extern uint64 sys_clock_gettime(void);
+extern uint64 sys_clock_getres(void);
+extern uint64 sys_vfs_pread64(void);
+extern uint64 sys_vfs_pwrite64(void);
+extern uint64 sys_vfs_fstatat(void);
+extern uint64 sys_vfs_pipe2(void);
 
 extern uint64 sys_memstat(void);
 extern uint64 sys_dumpproc(void);
@@ -170,6 +197,17 @@ extern uint64 sys_vfs_ioctl(void);
 extern uint64 sys_tcgetattr(void);
 extern uint64 sys_tcsetattr(void);
 extern uint64 sys_vfs_poll(void);
+
+// *at() variants for musl libc compatibility
+extern uint64 sys_vfs_mkdirat(void);
+extern uint64 sys_vfs_mknodat(void);
+extern uint64 sys_vfs_unlinkat(void);
+extern uint64 sys_vfs_linkat(void);
+extern uint64 sys_vfs_symlinkat(void);
+extern uint64 sys_vfs_readlinkat(void);
+extern uint64 sys_vfs_renameat(void);
+extern uint64 sys_vfs_faccessat(void);
+extern uint64 sys_vfs_dup3(void);
 
 // kqueue syscalls
 extern uint64 sys_kqueue(void);
@@ -238,6 +276,8 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_msync] sys_msync,
     [SYS_mincore] sys_mincore,
     [SYS_madvise] sys_madvise,
+    [SYS_brk] sys_brk,
+    [SYS_futex] sys_futex,
     [SYS_memstat] sys_memstat,
     [SYS_dumpproc] sys_dumpproc,
     [SYS_dumpchan] sys_dumpchan,
@@ -271,6 +311,35 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_mount] sys_mount,
     [SYS_umount] sys_umount,
     [SYS_getcwd] sys_getcwd,
+    [SYS_openat] sys_vfs_openat,
+    [SYS_writev] sys_vfs_writev,
+    [SYS_readv] sys_vfs_readv,
+    [SYS_set_tid_address] sys_set_tid_address,
+    [SYS_clock_gettime] sys_clock_gettime,
+    [SYS_clock_getres] sys_clock_getres,
+    [SYS_pread64] sys_vfs_pread64,
+    [SYS_pwrite64] sys_vfs_pwrite64,
+    [SYS_fstatat] sys_vfs_fstatat,
+    [SYS_pipe2] sys_vfs_pipe2,
+    [SYS_mkdirat] sys_vfs_mkdirat,
+    [SYS_mknodat] sys_vfs_mknodat,
+    [SYS_unlinkat] sys_vfs_unlinkat,
+    [SYS_linkat] sys_vfs_linkat,
+    [SYS_symlinkat] sys_vfs_symlinkat,
+    [SYS_readlinkat] sys_vfs_readlinkat,
+    [SYS_renameat] sys_vfs_renameat,
+    [SYS_faccessat] sys_vfs_faccessat,
+    [SYS_dup3] sys_vfs_dup3,
+    [SYS_getuid] sys_getuid,
+    [SYS_geteuid] sys_geteuid,
+    [SYS_getgid] sys_getgid,
+    [SYS_getegid] sys_getegid,
+    [SYS_setuid] sys_setuid,
+    [SYS_setgid] sys_setgid,
+    [SYS_setreuid] sys_setreuid,
+    [SYS_setregid] sys_setregid,
+    [SYS_getgroups] sys_getgroups,
+    [SYS_setgroups] sys_setgroups,
 #ifdef USE_LWIP
     [SYS_socket] sys_socket,
     [SYS_bind] sys_bind,
@@ -285,6 +354,11 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_getpeername] sys_getpeername,
     [SYS_getsockname] sys_getsockname,
 #endif
+    [SYS_sched_rr_get_interval_time64] sys_ni_enosys,
+    [SYS_recvmmsg_time64] sys_ni_enosys,
+    [SYS_pselect6_time64] sys_ni_enosys,
+    [SYS_mq_timedsend_time64] sys_ni_enosys,
+    [SYS_mq_timedreceive_time64] sys_ni_enosys,
 };
 
 void syscall(void) {
@@ -296,7 +370,6 @@ void syscall(void) {
     if (num > 0 && num < NELEM(syscalls) && syscalls[num]) {
         p->trapframe->trapframe.a0 = syscalls[num]();
     } else {
-        printf("%d %s: unknown sys call %d\n", p->pid, p->name, num);
-        p->trapframe->trapframe.a0 = -1;
+        p->trapframe->trapframe.a0 = (uint64)-ENOSYS;
     }
 }

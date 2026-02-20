@@ -4,16 +4,8 @@ else()
     message(STATUS "Building user programs for lab: $ENV{LAB}")
 endif()
 
-# Optional newlib userland (independent from user/* libc sources)
-option(USE_NEWLIB "Build newlib-based user programs" ON)
-option(USE_LOCAL_NEWLIB "Use local newlib source/install under user/v6-newlib" ON)
-set(NEWLIB_XV6_DIR "${USER_DIR}/v6-newlib/newlib/libc/sys/xv6")
-if(USE_NEWLIB)
-    message(STATUS "Building with newlib libc support")
-    if(USE_LOCAL_NEWLIB)
-        message(STATUS "Using local newlib source/install")
-    endif()
-endif()
+# musl libc — the standard C library for xv6 user programs
+include(${CMAKE_SOURCE_DIR}/cmake/musl.cmake)
 
 set(USER_INITCODE_BIN initcode)
 set(USER_INITCODE_OBJ ${USER_INITCODE_BIN}.out)
@@ -89,10 +81,7 @@ add_library(${LIB_USERLIB} STATIC
 )
 add_dependencies(${LIB_USERLIB} generate_usys)
 
-if(USE_NEWLIB)
-    # Build xv6 newlib shim from local newlib tree
-    add_subdirectory(v6-newlib/newlib/libc/sys/xv6 ${CMAKE_CURRENT_BINARY_DIR}/newlib_shim)
-endif()
+
 
 # Ensure proper linking and include directories for userlib
 target_link_options(${LIB_USERLIB} PRIVATE
@@ -220,10 +209,7 @@ if($ENV{LAB} STREQUAL "net")
     )
 endif()
 
-# Build shell with newlib+ncurses when available.
-if(USE_NEWLIB AND EXISTS "${CMAKE_SOURCE_DIR}/user/ncurses/configure")
-    list(REMOVE_ITEM USER_PROGRAMS_C_FILES ${USER_DIR}/sh.c)
-endif()
+
 
 # Modify user program output to match the .c file name without a suffix
 foreach(PROGRAM ${USER_PROGRAMS_C_FILES})
@@ -244,339 +230,321 @@ add_custom_target(user_programs ALL
     COMMENT "Building all user programs"
 )
 
-if(USE_NEWLIB)
-    if(USE_LOCAL_NEWLIB)
-        set(NEWLIB_LOCAL_ROOT "${CMAKE_SOURCE_DIR}/user/v6-newlib" CACHE PATH "Local newlib source root")
-        set(NEWLIB_OUTPUT_ROOT "${CMAKE_BINARY_DIR}/newlib" CACHE PATH "Output root for local newlib artifacts" FORCE)
-        set(NEWLIB_LOCAL_INSTALL "${NEWLIB_OUTPUT_ROOT}/install" CACHE PATH "Local newlib install prefix" FORCE)
-        set(NEWLIB_LOCAL_BUILD "${NEWLIB_OUTPUT_ROOT}/build-local" CACHE PATH "Local newlib build directory" FORCE)
-        set(NEWLIB_LOCAL_ARCH "rv64gc" CACHE STRING "Local newlib --with-arch")
-        set(NEWLIB_LOCAL_ABI "lp64d" CACHE STRING "Local newlib --with-abi")
 
-        set(NEWLIB_INCLUDE_DIR "${NEWLIB_LOCAL_ROOT}/newlib/libc/include")
-        set(NEWLIB_TOP_INCLUDE_DIR "${NEWLIB_LOCAL_ROOT}/include")
-        set(NEWLIB_LIB_DIR "${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/lib")
-        set(NEWLIB_LIBC_A "${NEWLIB_LIB_DIR}/libc.a")
-        set(NEWLIB_LIBM_A "${NEWLIB_LIB_DIR}/libm.a")
+# ==============================================================================
+# musl libc programs
+# ==============================================================================
+# Build musl-linked versions of core programs.
+# These use standard POSIX headers from musl instead of kernel/inc/*.
+# Source files are in user/musl-xv6/programs/ — adapted copies of the
+# originals in user/ with kernel header references replaced by POSIX.
+set(MUSL_PROG_DIR "${CMAKE_SOURCE_DIR}/user/musl-xv6/programs")
 
-        if(NOT EXISTS "${NEWLIB_INCLUDE_DIR}/sys/stat.h")
-            message(FATAL_ERROR "USE_LOCAL_NEWLIB is ON but local headers are missing: ${NEWLIB_INCLUDE_DIR}/sys/stat.h")
-        endif()
+if(EXISTS "${MUSL_PROG_DIR}/cat.c")
+    add_musl_program(mcat "${MUSL_PROG_DIR}/cat.c")
+endif()
+if(EXISTS "${MUSL_PROG_DIR}/echo.c")
+    add_musl_program(mecho "${MUSL_PROG_DIR}/echo.c")
+endif()
+if(EXISTS "${MUSL_PROG_DIR}/grep.c")
+    add_musl_program(mgrep "${MUSL_PROG_DIR}/grep.c")
+endif()
+if(EXISTS "${MUSL_PROG_DIR}/ls.c")
+    add_musl_program(mls "${MUSL_PROG_DIR}/ls.c")
+endif()
+if(EXISTS "${MUSL_PROG_DIR}/wc.c")
+    add_musl_program(mwc "${MUSL_PROG_DIR}/wc.c")
+endif()
+if(EXISTS "${MUSL_PROG_DIR}/mkdir.c")
+    add_musl_program(mmkdir "${MUSL_PROG_DIR}/mkdir.c")
+endif()
+if(EXISTS "${MUSL_PROG_DIR}/rm.c")
+    add_musl_program(mrm "${MUSL_PROG_DIR}/rm.c")
+endif()
+if(EXISTS "${MUSL_PROG_DIR}/ln.c")
+    add_musl_program(mln "${MUSL_PROG_DIR}/ln.c")
+endif()
+if(EXISTS "${MUSL_PROG_DIR}/kill.c")
+    add_musl_program(mkill "${MUSL_PROG_DIR}/kill.c")
+endif()
+if(EXISTS "${MUSL_PROG_DIR}/sleep.c")
+    add_musl_program(msleep "${MUSL_PROG_DIR}/sleep.c")
+endif()
+if(EXISTS "${MUSL_PROG_DIR}/init.c")
+    add_musl_program(minit "${MUSL_PROG_DIR}/init.c")
+endif()
+if(EXISTS "${MUSL_PROG_DIR}/sh.c")
+    add_musl_program(msh "${MUSL_PROG_DIR}/sh.c")
+endif()
+if(EXISTS "${MUSL_PROG_DIR}/hello.c")
+    add_musl_program(mhello "${MUSL_PROG_DIR}/hello.c")
+endif()
 
-        add_custom_command(
-            OUTPUT ${NEWLIB_LIBC_A} ${NEWLIB_LIBM_A}
-            COMMAND ${CMAKE_COMMAND} -E make_directory ${NEWLIB_LOCAL_BUILD}
-            COMMAND ${CMAKE_COMMAND} -E chdir ${NEWLIB_LOCAL_BUILD}
-                    ${NEWLIB_LOCAL_ROOT}/configure
-                    --target=riscv64-unknown-elf
-                    --prefix=${NEWLIB_LOCAL_INSTALL}
-                --disable-multilib
-                --with-arch=${NEWLIB_LOCAL_ARCH}
-                --with-abi=${NEWLIB_LOCAL_ABI}
-                    --disable-nls
-                    --disable-werror
-            COMMAND ${CMAKE_COMMAND} -E chdir ${NEWLIB_LOCAL_BUILD} make -j1 all-target-newlib
-            COMMAND ${CMAKE_COMMAND} -E chdir ${NEWLIB_LOCAL_BUILD} make install-target-newlib
-                COMMAND ${CMAKE_COMMAND} -E make_directory ${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include/sys
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    ${NEWLIB_XV6_DIR}/sys/dirent.h
-                    ${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include/sys/dirent.h
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    ${NEWLIB_XV6_DIR}/sys/random.h
-                    ${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include/sys/random.h
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    ${NEWLIB_XV6_DIR}/sys/utsname.h
-                    ${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include/sys/utsname.h
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    ${NEWLIB_XV6_DIR}/sys/termios.h
-                    ${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include/sys/termios.h
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    ${NEWLIB_XV6_DIR}/sys/ioctl.h
-                    ${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include/sys/ioctl.h
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                    ${NEWLIB_XV6_DIR}/sgtty.h
-                    ${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include/sgtty.h
-            DEPENDS ${NEWLIB_LOCAL_ROOT}/configure
-            COMMENT "Building/installing local newlib libraries"
-        )
+# ==============================================================================
+# ncurses — Terminal UI library (static, built against musl)
+# ==============================================================================
+set(NCURSES_SRC_DIR "${CMAKE_SOURCE_DIR}/user/ncurses")
+set(NCURSES_BUILD_DIR "${CMAKE_BINARY_DIR}/ncurses/build-xv6")
+set(NCURSES_LIB_A "${NCURSES_BUILD_DIR}/lib/libncurses.a")
+set(NCURSES_INCLUDE_DIR "${NCURSES_BUILD_DIR}/include")
+set(MUSL_COMPAT_DIR "${CMAKE_SOURCE_DIR}/user/musl-xv6/compat")
 
-        add_custom_target(local_newlib_install DEPENDS ${NEWLIB_LIBC_A} ${NEWLIB_LIBM_A})
-
-        add_custom_target(newlib_header_compile_check
-            COMMAND ${CMAKE_C_COMPILER}
-                    -Wall -Werror
-                    -isystem ${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include
-                    -fsyntax-only
-                    ${NEWLIB_XV6_DIR}/src/misc/newlib_header_probe.c
-            DEPENDS local_newlib_install
-            COMMENT "Compiling newlib header probe (termios/ioctl/signal)"
-        )
-    endif()
-
-    # Get the toolchain sysroot for newlib headers/libraries
-    execute_process(
-        COMMAND ${CMAKE_C_COMPILER} -print-sysroot
-        OUTPUT_VARIABLE TOOLCHAIN_SYSROOT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
+if(EXISTS "${NCURSES_SRC_DIR}/configure")
+    add_custom_command(
+        OUTPUT ${NCURSES_LIB_A}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${NCURSES_BUILD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${NCURSES_BUILD_DIR}
+                env
+                CC=${CMAKE_C_COMPILER}
+                AR=${CMAKE_AR}
+                RANLIB=${CMAKE_RANLIB}
+                CFLAGS=-O2\ -nostdinc\ -ffreestanding\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}
+                ${NCURSES_SRC_DIR}/configure
+                    --host=riscv64-unknown-elf
+                    --disable-widec
+                    --without-shared
+                    --without-debug
+                    --without-ada
+                    --without-cxx
+                    --without-cxx-binding
+                    --without-manpages
+                    --without-progs
+                    --without-tests
+                    --with-fallbacks=xterm,xterm-256color,vt100,dumb
+                    cf_cv_have_tcgetattr=yes
+                    ac_cv_header_termios_h=yes
+        COMMAND ${CMAKE_COMMAND} -E chdir ${NCURSES_BUILD_DIR} make -j1
+        # Create ncurses.h symlink expected by CPython's py_curses.h
+        COMMAND ${CMAKE_COMMAND} -E create_symlink curses.h ${NCURSES_INCLUDE_DIR}/ncurses.h
+        DEPENDS musl_sysroot ${NCURSES_SRC_DIR}/configure ${NCURSES_SRC_DIR}/misc/terminfo.src
+        COMMENT "Building ncurses static library (musl)"
     )
-    if(NOT TOOLCHAIN_SYSROOT)
-        get_filename_component(TOOLCHAIN_BIN_DIR ${CMAKE_C_COMPILER} DIRECTORY)
-        get_filename_component(TOOLCHAIN_DIR ${TOOLCHAIN_BIN_DIR} DIRECTORY)
-        set(TOOLCHAIN_SYSROOT "${TOOLCHAIN_DIR}/riscv64-unknown-elf")
-    endif()
 
-    execute_process(
-        COMMAND ${CMAKE_C_COMPILER} -print-file-name=include
-        OUTPUT_VARIABLE GCC_INCLUDE_DIR
-        OUTPUT_STRIP_TRAILING_WHITESPACE
+    add_custom_target(local_ncurses_build DEPENDS ${NCURSES_LIB_A})
+else()
+    message(STATUS "Skipping ncurses build (missing submodule at ${NCURSES_SRC_DIR})")
+endif()
+
+# ==============================================================================
+# readline — Line editor library (static, built against musl + ncurses)
+# ==============================================================================
+set(READLINE_SRC_DIR "${CMAKE_SOURCE_DIR}/user/readline")
+set(READLINE_BUILD_DIR "${CMAKE_BINARY_DIR}/readline/build-xv6")
+set(READLINE_LIB_A "${READLINE_BUILD_DIR}/libreadline.a")
+set(READLINE_INCLUDE_DIR "${READLINE_BUILD_DIR}")
+
+if(EXISTS "${READLINE_SRC_DIR}/configure")
+    add_custom_command(
+        OUTPUT ${READLINE_LIB_A}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${READLINE_BUILD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${READLINE_BUILD_DIR}
+                env
+                CC=${CMAKE_C_COMPILER}
+                AR=${CMAKE_AR}
+                RANLIB=${CMAKE_RANLIB}
+                CFLAGS=-O2\ -nostdinc\ -ffreestanding\ -D_POSIX_VERSION=200809L\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}
+                LDFLAGS=-L${NCURSES_BUILD_DIR}/lib
+                ${READLINE_SRC_DIR}/configure
+                    --host=riscv64-unknown-elf
+                    --disable-shared
+                    --with-curses
+                    --without-install
+                    bash_cv_termcap_lib=libncurses
+                    bash_cv_wcwidth_broken=no
+                    bash_cv_func_sigsetjmp=missing
+                    bash_cv_signal_vintage=posix
+                    bash_cv_posix_signals=yes
+                    bash_cv_func_strcoll_broken=no
+                    ac_cv_header_termios_h=yes
+                    ac_cv_func_tcgetattr=yes
+                    ac_cv_func_pselect=yes
+        COMMAND ${CMAKE_COMMAND} -E chdir ${READLINE_BUILD_DIR} make -j4
+        DEPENDS local_ncurses_build ${READLINE_SRC_DIR}/configure
+        COMMENT "Building readline static library (musl)"
     )
 
-    if(NOT USE_LOCAL_NEWLIB)
-        set(NEWLIB_INCLUDE_DIR "${TOOLCHAIN_SYSROOT}/include")
-        set(NEWLIB_TOP_INCLUDE_DIR "${TOOLCHAIN_SYSROOT}/include")
-    endif()
+    add_custom_target(local_readline_build DEPENDS ${READLINE_LIB_A})
+else()
+    message(STATUS "Skipping readline build (missing submodule at ${READLINE_SRC_DIR})")
+endif()
 
-    set(NEWLIB_CRT0_OBJ ${CMAKE_CURRENT_BINARY_DIR}/newlib_shim/crt0.o)
+# ==============================================================================
+# dash — Debian Almquist Shell (built against musl)
+# ==============================================================================
+set(DASH_SRC_DIR "${CMAKE_SOURCE_DIR}/user/dash")
+set(DASH_BUILD_DIR "${CMAKE_BINARY_DIR}/dash/build-xv6")
+set(DASH_BIN "${DASH_BUILD_DIR}/src/dash")
+set(DASH_FS_BIN "${CMAKE_BINARY_DIR}/user/_dash")
 
-    function(add_newlib_program PROGRAM_NAME SOURCE_FILE)
-        get_filename_component(SOURCE_BASENAME ${SOURCE_FILE} NAME_WE)
-        set(OBJ_FILE ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${PROGRAM_NAME}.dir/${SOURCE_BASENAME}.c.o)
-        set(PROGRAM_ELF ${CMAKE_BINARY_DIR}/user/${PROGRAM_NAME})
+if(EXISTS "${DASH_SRC_DIR}/configure")
+    add_custom_command(
+        OUTPUT ${DASH_BUILD_DIR}/Makefile
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${DASH_BUILD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${DASH_BUILD_DIR}
+                env
+                CC=${CMAKE_C_COMPILER}
+                AR=${CMAKE_AR}
+                RANLIB=${CMAKE_RANLIB}
+                CC_FOR_BUILD=cc
+                CFLAGS=-O2\ -nostdinc\ -ffreestanding\ -fno-common\ -fno-pie\ -no-pie\ -mcmodel=medany\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}
+                LDFLAGS=-static\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,-z,max-page-size=0x1000\ -T\ ${MUSL_LINKER_SCRIPT}
+                LIBS=${MUSL_LIBC_A}\ ${LIBGCC_PATH}\ ${MUSL_CRTN_O}
+                ${DASH_SRC_DIR}/configure
+                    --host=riscv64-unknown-elf
+                    --disable-lineno
+                    --without-libedit
+                    ac_cv_func_bsearch=yes
+                    ac_cv_func_faccessat=yes
+                    ac_cv_func_getpwnam=yes
+                    ac_cv_func_getrlimit=yes
+                    ac_cv_func_isalpha=yes
+                    ac_cv_func_killpg=yes
+                    ac_cv_func_memfd_create=yes
+                    ac_cv_func_memrchr=yes
+                    ac_cv_func_mempcpy=yes
+                    ac_cv_func_sigsetmask=no
+                    ac_cv_func_stpcpy=yes
+                    ac_cv_func_strchrnul=yes
+                    ac_cv_func_strsignal=yes
+                    ac_cv_func_strtod=yes
+                    ac_cv_func_strtoimax=yes
+                    ac_cv_func_strtoumax=yes
+                    ac_cv_func_sysconf=yes
+                    ac_cv_func_tee=yes
+                    ac_cv_func_wait3=yes
+                    ac_cv_func_signal=yes
+                    ac_cv_header_alloca_h=yes
+                    ac_cv_header_paths_h=no
+                    ac_cv_header_sys_wait_h=yes
+                    ac_cv_sizeof_intmax_t=8
+                    ac_cv_sizeof_long_long_int=8
+                    dash_cv_have_attribute_alias=yes
+        DEPENDS ${DASH_SRC_DIR}/configure musl_sysroot
+        COMMENT "Configuring dash cross build (musl)"
+    )
 
-        add_custom_command(
-            OUTPUT ${OBJ_FILE}
-            COMMAND ${CMAKE_C_COMPILER}
-                    -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
-                    -mcmodel=medany -fno-common -fno-pie -no-pie
-                    -D_LARGEFILE_SOURCE=1
-                    -D_LARGEFILE64_SOURCE=1
-                    -D_FILE_OFFSET_BITS=64
-                    -D__LARGE64_FILES=1
-                    -nostdinc -ffreestanding
-                    -isystem ${CMAKE_SOURCE_DIR}
-                    -isystem ${NEWLIB_XV6_DIR}
-                    -isystem ${NEWLIB_XV6_DIR}/include
-                    -isystem ${GCC_INCLUDE_DIR}
-                    -isystem ${NEWLIB_TOP_INCLUDE_DIR}
-                    -isystem ${NEWLIB_INCLUDE_DIR}
-                    -MD -MF ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${PROGRAM_NAME}.dir/${SOURCE_BASENAME}.c.d
-                    -o ${OBJ_FILE}
-                    -c ${SOURCE_FILE}
-            DEPENDS ${SOURCE_FILE}
-            COMMENT "Building newlib C object ${SOURCE_BASENAME}.c"
-        )
+    add_custom_target(dash_configure DEPENDS ${DASH_BUILD_DIR}/Makefile)
 
-        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${PROGRAM_NAME}.dir)
+    add_custom_command(
+        OUTPUT ${DASH_BIN}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${DASH_BUILD_DIR} make -j16 V=1
+        DEPENDS dash_configure
+        COMMENT "Building dash shell (musl)"
+    )
 
-        add_custom_command(
-            OUTPUT ${PROGRAM_ELF}
-            COMMAND ${CMAKE_C_COMPILER}
-                    -nostdlib
-                    -Wl,-z,max-page-size=4096
-                    -T ${USER_DIR}/user.ld
-                    -o ${PROGRAM_ELF}
-                    ${NEWLIB_CRT0_OBJ}
-                    ${OBJ_FILE}
-                    -Wl,--whole-archive
-                    ${CMAKE_CURRENT_BINARY_DIR}/newlib_shim/libxv6_newlib_syscalls.a
-                    -Wl,--no-whole-archive
-                    $<$<BOOL:${USE_LOCAL_NEWLIB}>:${NEWLIB_LIBC_A}>
-                    $<$<BOOL:${USE_LOCAL_NEWLIB}>:${NEWLIB_LIBM_A}>
-                    $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-L${TOOLCHAIN_SYSROOT}/lib>
-                    $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-lc>
-                    $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-lm>
-                    -lgcc
-                    DEPENDS ${OBJ_FILE} xv6_newlib_syscalls $<$<BOOL:${USE_LOCAL_NEWLIB}>:local_newlib_install>
-            COMMENT "Linking newlib program ${PROGRAM_NAME}"
-        )
+    add_custom_target(dash_build DEPENDS ${DASH_BIN})
 
-        add_custom_target(${PROGRAM_NAME}_newlib ALL DEPENDS ${PROGRAM_ELF})
-        add_dependencies(user_programs ${PROGRAM_NAME}_newlib)
+    add_custom_command(
+        OUTPUT ${DASH_FS_BIN}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
+        COMMAND ${CMAKE_COMMAND} -E copy ${DASH_BIN} ${DASH_FS_BIN}
+        COMMAND ${CMAKE_STRIP} --strip-debug ${DASH_FS_BIN}
+        DEPENDS ${DASH_BIN}
+        COMMENT "Staging dash shell as _dash for fs image"
+    )
 
-        list(APPEND USER_PROGRAMS ${PROGRAM_NAME})
-        set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
-    endfunction()
+    add_custom_target(_dash_musl ALL DEPENDS ${DASH_FS_BIN})
+    add_dependencies(user_programs _dash_musl)
+    list(APPEND USER_PROGRAMS _dash)
+    set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
+else()
+    message(STATUS "Skipping dash build (missing submodule at ${DASH_SRC_DIR})")
+endif()
 
-    add_newlib_program(_nwclock ${NEWLIB_XV6_DIR}/src/misc/newlib_wallclock.c)
-    add_newlib_program(_newlibtest ${NEWLIB_XV6_DIR}/src/misc/newlibtest.c)
-    add_newlib_program(_ntypesize ${NEWLIB_XV6_DIR}/src/misc/newlib_typesizes.c)
-    add_newlib_program(_nmalloc ${NEWLIB_XV6_DIR}/src/misc/newlib_malloc_smoke.c)
-    add_newlib_program(_nettest ${NEWLIB_XV6_DIR}/src/misc/nettest.c)
-    add_newlib_program(_rawecho ${NEWLIB_XV6_DIR}/src/misc/rawecho_test.c)
-    add_newlib_program(_utelnetd ${NEWLIB_XV6_DIR}/src/misc/utelnetd.c)
-    add_newlib_program(_kqueuetest ${NEWLIB_XV6_DIR}/src/misc/kqueuetest.c)
-    add_newlib_program(_ls ${NEWLIB_XV6_DIR}/src/misc/ls.c)
+# ==============================================================================
+# kqueue compat library for musl (provides kqueue/kevent/kevent_register/kevent_wait)
+# ==============================================================================
+set(KQUEUE_COMPAT_SRC "${CMAKE_SOURCE_DIR}/user/musl-xv6/compat/kqueue.c")
+set(KQUEUE_COMPAT_OBJ "${CMAKE_BINARY_DIR}/user/kqueue_compat.o")
+add_custom_command(
+    OUTPUT ${KQUEUE_COMPAT_OBJ}
+    COMMAND ${CMAKE_C_COMPILER}
+            -c -o ${KQUEUE_COMPAT_OBJ}
+            -isystem ${MUSL_INCLUDE_DIR}
+            -isystem ${GCC_INCLUDE_DIR_MUSL}
+            -isystem ${MUSL_COMPAT_DIR}
+            -nostdinc -O2
+            ${KQUEUE_COMPAT_SRC}
+    DEPENDS ${KQUEUE_COMPAT_SRC}
+    COMMENT "Compiling kqueue compat object for musl"
+)
+add_custom_target(kqueue_compat DEPENDS ${KQUEUE_COMPAT_OBJ})
 
-    # =========================================================================
-    # dash — Debian Almquist Shell (git submodule under user/dash)
-    # =========================================================================
-    set(DASH_SRC_DIR "${CMAKE_SOURCE_DIR}/user/dash")
-    set(DASH_BUILD_DIR "${CMAKE_BINARY_DIR}/dash/build-xv6")
-    set(DASH_BIN "${DASH_BUILD_DIR}/src/dash")
-    set(DASH_FS_BIN "${CMAKE_BINARY_DIR}/user/_dash")
+# CPython — Python 3.12 interpreter (built against musl + ncurses + readline)
+# ==============================================================================
+set(CPYTHON_SRC_DIR "${CMAKE_SOURCE_DIR}/user/v6-cpython" CACHE PATH "CPython source directory")
+set(CPYTHON_BUILD_DIR "${CMAKE_BINARY_DIR}/cpython/build-3.12" CACHE PATH "CPython out-of-tree build directory")
+set(CPYTHON_BIN "${CPYTHON_BUILD_DIR}/python" CACHE FILEPATH "CPython interpreter binary path")
+set(CPYTHON_FS_BIN "${CMAKE_BINARY_DIR}/user/_python")
 
-    if(EXISTS "${DASH_SRC_DIR}/configure")
-        add_custom_command(
-            OUTPUT ${DASH_BUILD_DIR}/Makefile
-            COMMAND ${CMAKE_COMMAND} -E make_directory ${DASH_BUILD_DIR}
-            COMMAND ${CMAKE_COMMAND} -E chdir ${DASH_BUILD_DIR}
-                    env
-                    CC=${CMAKE_C_COMPILER}
-                    AR=${CMAKE_AR}
-                    RANLIB=${CMAKE_RANLIB}
-                    CC_FOR_BUILD=cc
-                    CFLAGS=-O2\ -nostdinc\ -ffreestanding\ -fno-common\ -fno-pie\ -no-pie\ -mcmodel=medany\ -isystem\ ${NEWLIB_XV6_DIR}\ -isystem\ ${NEWLIB_XV6_DIR}/include\ -isystem\ ${GCC_INCLUDE_DIR}\ -isystem\ ${NEWLIB_TOP_INCLUDE_DIR}\ -isystem\ ${NEWLIB_INCLUDE_DIR}
-                    LDFLAGS=-static\ -nostartfiles\ -nostdlib\ ${NEWLIB_CRT0_OBJ}\ -Wl,-z,max-page-size=0x1000\ -T\ ${USER_DIR}/user.ld\ -L${CMAKE_CURRENT_BINARY_DIR}/newlib_shim
-                    LIBS=-Wl,--whole-archive\ -lxv6_newlib_syscalls\ -Wl,--no-whole-archive\ ${NEWLIB_LIBC_A}\ ${NEWLIB_LIBM_A}\ -lgcc
-                    ${DASH_SRC_DIR}/configure
-                        --host=riscv64-unknown-elf
-                        --disable-lineno
-                        --without-libedit
-                        ac_cv_func_bsearch=yes
-                        ac_cv_func_faccessat=yes
-                        ac_cv_func_getpwnam=yes
-                        ac_cv_func_getrlimit=yes
-                        ac_cv_func_isalpha=yes
-                        ac_cv_func_killpg=yes
-                        ac_cv_func_memfd_create=no
-                        ac_cv_func_memrchr=yes
-                        ac_cv_func_mempcpy=yes
-                        ac_cv_func_sigsetmask=no
-                        ac_cv_func_stpcpy=yes
-                        ac_cv_func_strchrnul=yes
-                        ac_cv_func_strsignal=yes
-                        ac_cv_func_strtod=yes
-                        ac_cv_func_strtoimax=yes
-                        ac_cv_func_strtoumax=yes
-                        ac_cv_func_sysconf=yes
-                        ac_cv_func_tee=no
-                        ac_cv_func_wait3=yes
-                        ac_cv_func_signal=yes
-                        ac_cv_header_alloca_h=yes
-                        ac_cv_header_paths_h=no
-                        ac_cv_header_sys_wait_h=yes
-                        ac_cv_sizeof_intmax_t=8
-                        ac_cv_sizeof_long_long_int=8
-                        dash_cv_have_attribute_alias=yes
-            DEPENDS ${DASH_SRC_DIR}/configure xv6_newlib_syscalls $<$<BOOL:${USE_LOCAL_NEWLIB}>:local_newlib_install>
-            COMMENT "Configuring dash cross build in ${DASH_BUILD_DIR}"
-        )
+if(EXISTS "${CPYTHON_SRC_DIR}/configure")
+    add_custom_command(
+        OUTPUT ${CPYTHON_BUILD_DIR}/Makefile
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CPYTHON_BUILD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CPYTHON_BUILD_DIR}
+                env
+                CC=${CMAKE_C_COMPILER}
+                AR=${CMAKE_AR}
+                RANLIB=${CMAKE_RANLIB}
+                READELF=${CMAKE_READELF}
+                PKG_CONFIG=false
+                CPPFLAGS=-isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
+                CFLAGS=-isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
+                LDFLAGS=-static\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -Wl,-T,${MUSL_LINKER_SCRIPT}\ -L${NCURSES_BUILD_DIR}/lib\ -L${READLINE_BUILD_DIR}\ -L${MUSL_SYSROOT}/lib
+                LIBS=${MUSL_LIBC_A}\ ${LIBGCC_PATH}
+                ${CPYTHON_SRC_DIR}/configure
+                    --host=riscv64-unknown-linux-gnu
+                    --build=x86_64-pc-linux-gnu
+                    --with-build-python=python3
+                    --disable-shared
+                    --without-ensurepip
+                    ac_cv_file__dev_ptmx=no
+                    ac_cv_file__dev_ptc=no
+                    ac_cv_header_curses_h=no
+                    ac_cv_header_ncurses_h=no
+                    ac_cv_header_term_h=no
+                    ac_cv_lib_ncurses_initscr=no
+                    ac_cv_lib_curses_filter=no
+                    ac_cv_lib_curses_has_key=no
+                    ac_cv_lib_curses_immedok=no
+                    ac_cv_lib_curses_is_pad=no
+                    ac_cv_lib_curses_is_term_resized=no
+                    ac_cv_lib_curses_resizeterm=no
+                    ac_cv_lib_curses_resize_term=no
+                    ac_cv_lib_curses_syncok=no
+                    ac_cv_lib_curses_typeahead=no
+                    ac_cv_lib_curses_use_env=no
+                    ac_cv_lib_curses_wchgat=no
+                    ac_cv_lib_ncursesw_initscr=no
+                    ac_cv_header_readline_readline_h=yes
+                    ac_cv_lib_readline_readline=yes
+                    ac_cv_readline_append_history=yes
+                    ac_cv_readline_rl_completion_display_matches_hook=yes
+                    ac_cv_readline_rl_completion_matches=yes
+                    ac_cv_readline_rl_pre_input_hook=yes
+                    ac_cv_readline_rl_resize_terminal=yes
+                    ac_cv_header_netinet_in_h=yes
+                    ac_cv_header_netinet_tcp_h=yes
+                    ac_cv_header_arpa_inet_h=yes
+                    ac_cv_header_netdb_h=yes
+                    ac_cv_func_inet_aton=yes
+                    ac_cv_func_inet_pton=yes
+                    ac_cv_func_inet_ntop=yes
+                    ac_cv_func_getaddrinfo=yes
+                    ac_cv_func_getnameinfo=yes
+                    ac_cv_func_gethostbyname=yes
+                    ac_cv_header_sys_event_h=yes
+                    ac_cv_func_kqueue=yes
+                    --disable-ipv6
+        DEPENDS ${CPYTHON_SRC_DIR}/configure ${MUSL_LINKER_SCRIPT} musl_sysroot local_ncurses_build local_readline_build
+        COMMENT "Configuring CPython cross build (musl)"
+    )
 
-        add_custom_target(dash_configure DEPENDS ${DASH_BUILD_DIR}/Makefile)
-
-        add_custom_command(
-            OUTPUT ${DASH_BIN}
-            COMMAND ${CMAKE_COMMAND} -E chdir ${DASH_BUILD_DIR} make -j16 V=1
-            DEPENDS dash_configure
-            COMMENT "Building dash shell"
-        )
-
-        add_custom_target(dash_build DEPENDS ${DASH_BIN})
-
-        add_custom_command(
-            OUTPUT ${DASH_FS_BIN}
-            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
-            COMMAND ${CMAKE_COMMAND} -E copy ${DASH_BIN} ${DASH_FS_BIN}
-            COMMAND ${CMAKE_STRIP} --strip-debug ${DASH_FS_BIN}
-            DEPENDS ${DASH_BIN}
-            COMMENT "Staging dash shell as _dash for fs image"
-        )
-
-        add_custom_target(_dash_newlib ALL DEPENDS ${DASH_FS_BIN})
-        list(APPEND USER_PROGRAMS _dash)
-        set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
-    else()
-        message(STATUS "Skipping dash build (missing submodule at ${DASH_SRC_DIR})")
-    endif()
-
-    set(NCURSES_SRC_DIR "${CMAKE_SOURCE_DIR}/user/ncurses")
-    set(NCURSES_BUILD_DIR "${CMAKE_BINARY_DIR}/ncurses/build-xv6")
-    set(NCURSES_LIB_A "${NCURSES_BUILD_DIR}/lib/libncurses.a")
-    set(NCURSES_INCLUDE_DIR "${NCURSES_BUILD_DIR}/include")
-    set(NCURSES_SMOKE_SRC "${NEWLIB_XV6_DIR}/src/misc/newlib_ncurses_smoke.c")
-    set(NCURSES_SMOKE_OBJ "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_nncurses_smoke.dir/newlib_ncurses_smoke.c.o")
-    set(NCURSES_SMOKE_ELF "${CMAKE_BINARY_DIR}/user/_nncurses_smoke")
-
-    set(READLINE_SRC_DIR "${CMAKE_SOURCE_DIR}/user/readline")
-    set(READLINE_BUILD_DIR "${CMAKE_BINARY_DIR}/readline/build-xv6")
-    set(READLINE_LIB_A "${READLINE_BUILD_DIR}/libreadline.a")
-    set(READLINE_INCLUDE_DIR "${READLINE_BUILD_DIR}")
-
-    # CPython source is a submodule under user/, while build artifacts go under
-    # top-level build/ to keep the submodule tree clean.
-    set(CPYTHON_SRC_DIR "${CMAKE_SOURCE_DIR}/user/v6-cpython" CACHE PATH "CPython source directory")
-    set(CPYTHON_BUILD_DIR "${CMAKE_BINARY_DIR}/cpython/build-3.12" CACHE PATH "CPython out-of-tree build directory")
-    set(CPYTHON_BIN "${CPYTHON_BUILD_DIR}/python" CACHE FILEPATH "CPython interpreter binary path")
-    set(CPYTHON_FS_BIN "${CMAKE_BINARY_DIR}/user/_python")
-
-    if(EXISTS "${CPYTHON_SRC_DIR}/configure")
-        add_custom_command(
-            OUTPUT ${CPYTHON_BUILD_DIR}/Makefile
-            COMMAND ${CMAKE_COMMAND} -E make_directory ${CPYTHON_BUILD_DIR}
-            COMMAND ${CMAKE_COMMAND} -E chdir ${CPYTHON_BUILD_DIR}
-                    env
-                    CC=${CMAKE_C_COMPILER}
-                    AR=${CMAKE_AR}
-                    RANLIB=${CMAKE_RANLIB}
-                    READELF=${CMAKE_READELF}
-                    PKG_CONFIG=false
-                    CPPFLAGS=-I${NEWLIB_XV6_DIR}/include\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
-                    CFLAGS=-I${NEWLIB_XV6_DIR}/include\ -I${NEWLIB_INCLUDE_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
-                    LDFLAGS=-nostartfiles\ ${NEWLIB_CRT0_OBJ}\ -Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -Wl,-T,${USER_DIR}/python_pagealign.ld\ -L${NCURSES_BUILD_DIR}/lib\ -L${READLINE_BUILD_DIR}
-                    LIBS=-L${CMAKE_CURRENT_BINARY_DIR}/newlib_shim\ -lxv6_newlib_syscalls\ -lpthread
-                    ${CPYTHON_SRC_DIR}/configure
-                        --host=riscv64-unknown-linux-gnu
-                        --build=x86_64-pc-linux-gnu
-                        --with-build-python=python3
-                        --disable-shared
-                        --without-ensurepip
-                        ac_cv_file__dev_ptmx=no
-                        ac_cv_file__dev_ptc=no
-                        ac_cv_header_curses_h=no
-                        ac_cv_header_ncurses_h=no
-                        ac_cv_header_term_h=no
-                        ac_cv_lib_ncurses_initscr=no
-                        ac_cv_lib_curses_filter=no
-                        ac_cv_lib_curses_has_key=no
-                        ac_cv_lib_curses_immedok=no
-                        ac_cv_lib_curses_is_pad=no
-                        ac_cv_lib_curses_is_term_resized=no
-                        ac_cv_lib_curses_resizeterm=no
-                        ac_cv_lib_curses_resize_term=no
-                        ac_cv_lib_curses_syncok=no
-                        ac_cv_lib_curses_typeahead=no
-                        ac_cv_lib_curses_use_env=no
-                        ac_cv_lib_curses_wchgat=no
-                        ac_cv_lib_ncursesw_initscr=no
-                        ac_cv_header_readline_readline_h=yes
-                        ac_cv_lib_readline_readline=yes
-                        ac_cv_readline_append_history=yes
-                        ac_cv_readline_rl_completion_display_matches_hook=yes
-                        ac_cv_readline_rl_completion_matches=yes
-                        ac_cv_readline_rl_pre_input_hook=yes
-                        ac_cv_readline_rl_resize_terminal=yes
-                        ac_cv_header_netinet_in_h=yes
-                        ac_cv_header_netinet_tcp_h=yes
-                        ac_cv_header_arpa_inet_h=yes
-                        ac_cv_header_netdb_h=yes
-                        ac_cv_func_inet_aton=yes
-                        ac_cv_func_inet_pton=yes
-                        ac_cv_func_inet_ntop=yes
-                        ac_cv_func_getaddrinfo=yes
-                        ac_cv_func_getnameinfo=yes
-                        ac_cv_func_gethostbyname=yes
-                        ac_cv_header_sys_event_h=yes
-                        ac_cv_func_kqueue=yes
-                        --disable-ipv6
-            DEPENDS ${CPYTHON_SRC_DIR}/configure ${USER_DIR}/python_pagealign.ld xv6_newlib_syscalls xv6_pthread local_ncurses_build local_readline_build
-            COMMENT "Configuring CPython cross build in ${CPYTHON_BUILD_DIR}"
-        )
-
-        # After configure, write Modules/Setup.local to force all useful
-        # C extension modules as statically-linked built-ins.  xv6 has no
-        # dlopen, so anything left as *shared* in Setup.stdlib is unusable.
-        set(CPYTHON_SETUP_LOCAL "${CPYTHON_BUILD_DIR}/Modules/Setup.local")
-        set(SETUP_LOCAL_CONTENT [==[
+    # After configure, write Modules/Setup.local to force all useful
+    # C extension modules as statically-linked built-ins.  xv6 has no
+    # dlopen, so anything left as *shared* in Setup.stdlib is unusable.
+    set(CPYTHON_SETUP_LOCAL "${CPYTHON_BUILD_DIR}/Modules/Setup.local")
+    set(SETUP_LOCAL_CONTENT [==[
 *static*
 readline readline.c -I@CMAKE_SOURCE_DIR@/user -L@READLINE_BUILD_DIR@ -lreadline -L@NCURSES_BUILD_DIR@/lib -lncurses
 _socket socketmodule.c
@@ -607,241 +575,100 @@ _sha2 sha2module.c -I$(srcdir)/Modules/_hacl/include Modules/_hacl/libHacl_Hash_
 _sha3 sha3module.c -I$(srcdir)/Modules/_hacl/include _hacl/Hacl_Hash_SHA3.c -D_BSD_SOURCE -D_DEFAULT_SOURCE
 _blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
 ]==])
-        # Replace @VAR@ placeholders with actual values
-        string(REPLACE "@CMAKE_SOURCE_DIR@" "${CMAKE_SOURCE_DIR}" SETUP_LOCAL_CONTENT "${SETUP_LOCAL_CONTENT}")
-        string(REPLACE "@READLINE_BUILD_DIR@" "${READLINE_BUILD_DIR}" SETUP_LOCAL_CONTENT "${SETUP_LOCAL_CONTENT}")
-        string(REPLACE "@NCURSES_BUILD_DIR@" "${NCURSES_BUILD_DIR}" SETUP_LOCAL_CONTENT "${SETUP_LOCAL_CONTENT}")
-        file(WRITE "${CMAKE_BINARY_DIR}/cpython_setup_local.txt" "${SETUP_LOCAL_CONTENT}")
-        add_custom_command(
-            OUTPUT ${CPYTHON_BUILD_DIR}/Makefile
-            COMMAND ${CMAKE_COMMAND} -E copy
-                    "${CMAKE_BINARY_DIR}/cpython_setup_local.txt"
-                    ${CPYTHON_SETUP_LOCAL}
-            APPEND
-        )
+    # Replace @VAR@ placeholders with actual values
+    string(REPLACE "@CMAKE_SOURCE_DIR@" "${CMAKE_SOURCE_DIR}" SETUP_LOCAL_CONTENT "${SETUP_LOCAL_CONTENT}")
+    string(REPLACE "@READLINE_BUILD_DIR@" "${READLINE_BUILD_DIR}" SETUP_LOCAL_CONTENT "${SETUP_LOCAL_CONTENT}")
+    string(REPLACE "@NCURSES_BUILD_DIR@" "${NCURSES_BUILD_DIR}" SETUP_LOCAL_CONTENT "${SETUP_LOCAL_CONTENT}")
+    file(WRITE "${CMAKE_BINARY_DIR}/cpython_setup_local.txt" "${SETUP_LOCAL_CONTENT}")
+    add_custom_command(
+        OUTPUT ${CPYTHON_BUILD_DIR}/Makefile
+        COMMAND ${CMAKE_COMMAND} -E copy
+                "${CMAKE_BINARY_DIR}/cpython_setup_local.txt"
+                ${CPYTHON_SETUP_LOCAL}
+        APPEND
+    )
 
-        add_custom_target(cpython_configure DEPENDS ${CPYTHON_BUILD_DIR}/Makefile)
+    add_custom_target(cpython_configure DEPENDS ${CPYTHON_BUILD_DIR}/Makefile)
 
-        add_custom_command(
-            OUTPUT ${CPYTHON_BIN}
-            COMMAND ${CMAKE_COMMAND} -E chdir ${CPYTHON_BUILD_DIR} make -j16 python
-            DEPENDS cpython_configure
-            COMMENT "Building CPython interpreter"
-        )
+    add_custom_command(
+        OUTPUT ${CPYTHON_BIN}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CPYTHON_BUILD_DIR} make -j16 python
+                "SYSLIBS=${KQUEUE_COMPAT_OBJ} ${MUSL_LIBC_A} ${LIBGCC_PATH} ${MUSL_CRTN_O}"
+        DEPENDS cpython_configure kqueue_compat
+        COMMENT "Building CPython interpreter (musl)"
+    )
 
-        add_custom_target(cpython_build DEPENDS ${CPYTHON_BIN})
+    add_custom_target(cpython_build DEPENDS ${CPYTHON_BIN})
 
-        add_custom_command(
-            OUTPUT ${CPYTHON_FS_BIN}
-            COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
-            COMMAND ${CMAKE_COMMAND} -E copy ${CPYTHON_BIN} ${CPYTHON_FS_BIN}
-            COMMAND ${CMAKE_STRIP} --strip-debug ${CPYTHON_FS_BIN}
-            DEPENDS ${CPYTHON_BIN}
-            COMMENT "Staging CPython interpreter as _python for fs image"
-        )
+    add_custom_command(
+        OUTPUT ${CPYTHON_FS_BIN}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
+        COMMAND ${CMAKE_COMMAND} -E copy ${CPYTHON_BIN} ${CPYTHON_FS_BIN}
+        COMMAND ${CMAKE_STRIP} --strip-debug ${CPYTHON_FS_BIN}
+        DEPENDS ${CPYTHON_BIN}
+        COMMENT "Staging CPython interpreter as _python for fs image"
+    )
 
-        add_custom_target(_python_newlib ALL DEPENDS ${CPYTHON_FS_BIN})
-        list(APPEND USER_PROGRAMS _python)
-        set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
-    else()
-        message(STATUS "Skipping CPython configure/build targets (missing submodule at ${CPYTHON_SRC_DIR})")
-    endif()
+    add_custom_target(_python_musl ALL DEPENDS ${CPYTHON_FS_BIN})
+    add_dependencies(user_programs _python_musl)
+    list(APPEND USER_PROGRAMS _python)
+    set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
+else()
+    message(STATUS "Skipping CPython configure/build targets (missing submodule at ${CPYTHON_SRC_DIR})")
+endif()
 
-    if(EXISTS "${NCURSES_SRC_DIR}/configure")
-        add_custom_command(
-            OUTPUT ${NCURSES_LIB_A}
-            COMMAND ${CMAKE_COMMAND} -E make_directory ${NCURSES_BUILD_DIR}
-            COMMAND ${CMAKE_COMMAND} -E chdir ${NCURSES_BUILD_DIR}
-                    env
-                    CC=${CMAKE_C_COMPILER}
-                    AR=${CMAKE_AR}
-                    RANLIB=${CMAKE_RANLIB}
-                    CFLAGS=-O2\ -I${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include
-                    ${NCURSES_SRC_DIR}/configure
-                        --host=riscv64-unknown-elf
-                        --disable-widec
-                        --without-shared
-                        --without-debug
-                        --without-ada
-                        --without-cxx
-                        --without-cxx-binding
-                        --without-manpages
-                        --without-progs
-                        --without-tests
-                        --with-fallbacks=xterm,xterm-256color,vt100,dumb
-                        cf_cv_have_tcgetattr=yes
-            COMMAND ${CMAKE_COMMAND} -E chdir ${NCURSES_BUILD_DIR} make -j1
-            # Create ncurses.h symlink expected by CPython's py_curses.h
-            COMMAND ${CMAKE_COMMAND} -E create_symlink curses.h ${NCURSES_INCLUDE_DIR}/ncurses.h
-            DEPENDS local_newlib_install ${NCURSES_SRC_DIR}/configure ${NCURSES_SRC_DIR}/misc/terminfo.src
-            COMMENT "Building local ncurses static library"
-        )
-
-        add_custom_target(local_ncurses_build DEPENDS ${NCURSES_LIB_A})
-
-    if(EXISTS "${READLINE_SRC_DIR}/configure")
-        add_custom_command(
-            OUTPUT ${READLINE_LIB_A}
-            COMMAND ${CMAKE_COMMAND} -E make_directory ${READLINE_BUILD_DIR}
-            COMMAND ${CMAKE_COMMAND} -E chdir ${READLINE_BUILD_DIR}
-                    env
-                    CC=${CMAKE_C_COMPILER}
-                    AR=${CMAKE_AR}
-                    RANLIB=${CMAKE_RANLIB}
-                    CFLAGS=-O2\ -D_POSIX_VERSION=200809L\ -I${NEWLIB_XV6_DIR}/include\ -I${NEWLIB_LOCAL_INSTALL}/riscv64-unknown-elf/include\ -I${NCURSES_INCLUDE_DIR}
-                    LDFLAGS=-L${NCURSES_BUILD_DIR}/lib
-                    ${READLINE_SRC_DIR}/configure
-                        --host=riscv64-unknown-elf
-                        --disable-shared
-                        --with-curses
-                        --without-install
-                        bash_cv_termcap_lib=libncurses
-                        bash_cv_wcwidth_broken=no
-                        bash_cv_func_sigsetjmp=missing
-                        bash_cv_signal_vintage=posix
-                        bash_cv_posix_signals=yes
-                        bash_cv_func_strcoll_broken=no
-                        ac_cv_header_termios_h=yes
-                        ac_cv_func_tcgetattr=yes
-                        ac_cv_func_pselect=yes
-            COMMAND ${CMAKE_COMMAND} -E chdir ${READLINE_BUILD_DIR} make -j4
-            DEPENDS local_ncurses_build ${READLINE_SRC_DIR}/configure
-            COMMENT "Building local readline static library"
-        )
-
-        add_custom_target(local_readline_build DEPENDS ${READLINE_LIB_A})
-    else()
-        message(STATUS "Skipping readline build (missing submodule at ${READLINE_SRC_DIR})")
-    endif()
-
+# ==============================================================================
+# ncurses-enhanced shell (sh.c compiled with USE_NCURSES_SHELL against musl)
+# ==============================================================================
+if(EXISTS "${NCURSES_SRC_DIR}/configure")
     set(NCURSES_SH_SRC "${USER_DIR}/sh.c")
-    set(NCURSES_SH_OBJ "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_sh_newlib.dir/sh.c.o")
+    set(NCURSES_SH_OBJ "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_sh_musl.dir/sh.c.o")
     set(NCURSES_SH_ELF "${CMAKE_BINARY_DIR}/user/_sh")
 
-    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_sh_newlib.dir)
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_sh_musl.dir)
 
     add_custom_command(
         OUTPUT ${NCURSES_SH_OBJ}
         COMMAND ${CMAKE_C_COMPILER}
             -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
+            -march=rv64gc -mabi=lp64d
             -mcmodel=medany -fno-common -fno-pie -no-pie
-            -D_LARGEFILE_SOURCE=1
-            -D_LARGEFILE64_SOURCE=1
-            -D_FILE_OFFSET_BITS=64
-            -D__LARGE64_FILES=1
             -DUSE_NCURSES_SHELL=1
             -nostdinc -ffreestanding
-            -isystem ${NEWLIB_XV6_DIR}
-            -isystem ${NEWLIB_XV6_DIR}/include
-            -isystem ${GCC_INCLUDE_DIR}
-            -isystem ${NEWLIB_TOP_INCLUDE_DIR}
-            -isystem ${NEWLIB_INCLUDE_DIR}
+            -isystem ${MUSL_INCLUDE_DIR}
+            -isystem ${GCC_INCLUDE_DIR_MUSL}
             -isystem ${NCURSES_INCLUDE_DIR}
-            -MD -MF ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_sh_newlib.dir/sh.c.d
+            -MD -MF ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_sh_musl.dir/sh.c.d
             -o ${NCURSES_SH_OBJ}
             -c ${NCURSES_SH_SRC}
-        DEPENDS ${NCURSES_SH_SRC}
-        COMMENT "Building ncurses shell object"
+        DEPENDS ${NCURSES_SH_SRC} musl_sysroot local_ncurses_build
+        COMMENT "Building ncurses shell object (musl)"
     )
 
     add_custom_command(
         OUTPUT ${NCURSES_SH_ELF}
         COMMAND ${CMAKE_C_COMPILER}
-            -nostdlib
+            -nostdlib -static
             -Wl,-z,max-page-size=4096
-            -T ${USER_DIR}/user.ld
+            -T ${MUSL_LINKER_SCRIPT}
             -o ${NCURSES_SH_ELF}
-            ${NEWLIB_CRT0_OBJ}
+            ${MUSL_CRT1_O}
+            ${MUSL_CRTI_O}
             ${NCURSES_SH_OBJ}
-            -Wl,--whole-archive
-            ${CMAKE_CURRENT_BINARY_DIR}/newlib_shim/libxv6_newlib_syscalls.a
-            -Wl,--no-whole-archive
             ${NCURSES_LIB_A}
-            $<$<BOOL:${USE_LOCAL_NEWLIB}>:${NEWLIB_LIBC_A}>
-            $<$<BOOL:${USE_LOCAL_NEWLIB}>:${NEWLIB_LIBM_A}>
-            $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-L${TOOLCHAIN_SYSROOT}/lib>
-            $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-lc>
-            $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-lm>
-            -lgcc
-        DEPENDS ${NCURSES_SH_OBJ} xv6_newlib_syscalls local_ncurses_build $<$<BOOL:${USE_LOCAL_NEWLIB}>:local_newlib_install>
-        COMMENT "Linking ncurses shell program _sh"
+            ${MUSL_LIBC_A}
+            ${LIBGCC_PATH}
+            ${MUSL_CRTN_O}
+        DEPENDS ${NCURSES_SH_OBJ} musl_sysroot local_ncurses_build ${MUSL_LINKER_SCRIPT}
+        COMMENT "Linking ncurses shell program _sh (musl)"
     )
 
-    add_custom_target(_sh_newlib ALL DEPENDS ${NCURSES_SH_ELF})
+    add_custom_target(_sh_musl ALL DEPENDS ${NCURSES_SH_ELF})
+    add_dependencies(user_programs _sh_musl)
+    # Override the userlib-based _sh with the ncurses+musl version
+    list(REMOVE_ITEM USER_PROGRAMS _sh)
     list(APPEND USER_PROGRAMS _sh)
     set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
-
-        file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_nncurses_smoke.dir)
-
-        add_custom_command(
-            OUTPUT ${NCURSES_SMOKE_OBJ}
-            COMMAND ${CMAKE_C_COMPILER}
-                    -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
-                    -mcmodel=medany -fno-common -fno-pie -no-pie
-                    -D_LARGEFILE_SOURCE=1
-                    -D_LARGEFILE64_SOURCE=1
-                    -D_FILE_OFFSET_BITS=64
-                    -D__LARGE64_FILES=1
-                    -nostdinc -ffreestanding
-                    -isystem ${NEWLIB_XV6_DIR}
-                    -isystem ${NEWLIB_XV6_DIR}/include
-                    -isystem ${GCC_INCLUDE_DIR}
-                    -isystem ${NEWLIB_TOP_INCLUDE_DIR}
-                    -isystem ${NEWLIB_INCLUDE_DIR}
-                    -isystem ${NCURSES_INCLUDE_DIR}
-                    -MD -MF ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/_nncurses_smoke.dir/newlib_ncurses_smoke.c.d
-                    -o ${NCURSES_SMOKE_OBJ}
-                    -c ${NCURSES_SMOKE_SRC}
-            DEPENDS ${NCURSES_SMOKE_SRC}
-            COMMENT "Building newlib ncurses smoke object"
-        )
-
-        add_custom_command(
-            OUTPUT ${NCURSES_SMOKE_ELF}
-            COMMAND ${CMAKE_C_COMPILER}
-                    -nostdlib
-                    -Wl,-z,max-page-size=4096
-                    -T ${USER_DIR}/user.ld
-                    -o ${NCURSES_SMOKE_ELF}
-                    ${NEWLIB_CRT0_OBJ}
-                    ${NCURSES_SMOKE_OBJ}
-                    -Wl,--whole-archive
-                    ${CMAKE_CURRENT_BINARY_DIR}/newlib_shim/libxv6_newlib_syscalls.a
-                    -Wl,--no-whole-archive
-                    ${NCURSES_LIB_A}
-                    $<$<BOOL:${USE_LOCAL_NEWLIB}>:${NEWLIB_LIBC_A}>
-                    $<$<BOOL:${USE_LOCAL_NEWLIB}>:${NEWLIB_LIBM_A}>
-                    $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-L${TOOLCHAIN_SYSROOT}/lib>
-                    $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-lc>
-                    $<$<NOT:$<BOOL:${USE_LOCAL_NEWLIB}>>:-lm>
-                    -lgcc
-            DEPENDS ${NCURSES_SMOKE_OBJ} xv6_newlib_syscalls local_ncurses_build $<$<BOOL:${USE_LOCAL_NEWLIB}>:local_newlib_install>
-            COMMENT "Linking newlib program _nncurses_smoke"
-        )
-
-        add_custom_target(_nncurses_smoke_newlib ALL DEPENDS ${NCURSES_SMOKE_ELF})
-        list(APPEND USER_PROGRAMS _nncurses_smoke)
-        set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
-    else()
-        message(STATUS "Skipping _nncurses_smoke_newlib (missing submodule at ${NCURSES_SRC_DIR})")
-    endif()
-
-    if(USE_LOCAL_NEWLIB)
-        add_dependencies(user_programs local_newlib_install)
-    endif()
-    add_dependencies(user_programs _nwclock_newlib _newlibtest_newlib _ntypesize_newlib _nmalloc_newlib _nettest_newlib _rawecho_newlib)
-    if(TARGET _sh_newlib)
-        add_dependencies(user_programs _sh_newlib)
-    endif()
-    if(TARGET _nncurses_smoke_newlib)
-        add_dependencies(user_programs _nncurses_smoke_newlib)
-    endif()
-    if(TARGET _python_newlib)
-        add_dependencies(user_programs _python_newlib)
-    endif()
-    if(TARGET _dash_newlib)
-        add_dependencies(user_programs _dash_newlib)
-    endif()
 endif()
 
 # Pass the populated USER_PROGRAMS variable to the parent scope

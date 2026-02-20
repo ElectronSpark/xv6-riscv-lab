@@ -66,7 +66,7 @@
 #define SYS_readlink     48
 #define SYS_stat         49
 
-// --- Memory management (50-69) ---
+// --- File system / VFS continued (50-69, mixed with memory) ---
 #define SYS_mmap         50
 #define SYS_munmap       51
 #define SYS_mprotect     52
@@ -85,7 +85,8 @@
 #define SYS_kqueue       65
 #define SYS_kevent_register 66
 #define SYS_kevent_wait  67
-// 68-69 reserved
+#define SYS_brk          68
+#define SYS_futex        69
 
 // --- Signals (70-89) ---
 #define SYS_sigaction    70
@@ -122,5 +123,48 @@
 #define SYS_getpeername  110
 #define SYS_getsockname  111
 // 112-119 reserved
+
+// --- Extended syscalls (120-139) ---
+#define SYS_openat         120
+#define SYS_writev         121
+#define SYS_readv          122
+#define SYS_set_tid_address 123
+#define SYS_clock_gettime  124
+#define SYS_clock_getres   125
+#define SYS_pread64        126
+#define SYS_pwrite64       127
+#define SYS_fstatat        128
+#define SYS_pipe2          129
+#define SYS_mkdirat        130
+#define SYS_mknodat        131
+#define SYS_unlinkat       132
+#define SYS_linkat         133
+#define SYS_symlinkat      134
+#define SYS_readlinkat     135
+#define SYS_renameat       136
+#define SYS_faccessat      137
+#define SYS_dup3           138
+#define SYS_getuid         139
+#define SYS_geteuid        140
+#define SYS_getgid         141
+#define SYS_getegid        142
+#define SYS_setuid         143
+#define SYS_setgid         144
+#define SYS_setreuid       145
+#define SYS_setregid       146
+#define SYS_getgroups      147
+#define SYS_setgroups      148
+
+// Max syscall number (update when adding new syscalls)
+#define SYS_MAXNUM         148
+
+// --- Linux time64 compatibility stubs used by musl on rv64 ---
+// These are intentionally unsupported in xv6 and return -ENOSYS via
+// dispatcher stubs to avoid unknown-syscall log spam.
+#define SYS_sched_rr_get_interval_time64 868
+#define SYS_recvmmsg_time64              872
+#define SYS_pselect6_time64              878
+#define SYS_mq_timedsend_time64          887
+#define SYS_mq_timedreceive_time64       888
 
 #endif /* __KERNEL_SYSCALL_H */

@@ -40,10 +40,15 @@
 #define MAXPATH 128               // maximum file path name
 
 #define USERSTACK_MINSZ (PAGE_SIZE << 2) // minimum user stack size
-#define USERSTACK 32                     // user stack pages
-#define USERSTACK_GROWTH 8               // user stack growth pages
-#define MAXUSTACK (1UL << 9) // maximum number of pages in user stack
+#define USERSTACK 128                    // user stack pages (512 KiB)
+#define USERSTACK_GROWTH 32              // user stack growth pages
+#define MAXUSTACK (1UL << 11) // maximum number of pages in user stack (8 MiB)
 #define MAXUHEAP (1UL << 24) // maximum number of pages in user heap
+
+// Number of pages reserved above heap start for brk/sbrk growth.
+// mmap(addr=0) will not allocate within this range.
+// Each process gets its own reservation based on heap_start.
+#define HEAP_RESERVE_PAGES (1UL << 16)  // 64K pages = 256 MiB
 
 // The base(2) order of the size of a page in bytes
 #ifndef PAGE_SHIFT

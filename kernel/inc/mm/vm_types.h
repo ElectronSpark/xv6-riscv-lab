@@ -52,11 +52,12 @@ typedef struct vma {
 #define VMA_FLAG_GROWSDOWN 0x100 // Stack-like region (grows down)
 #define VMA_FLAG_GROWSUP 0x200   // Heap-like region (grows up)
 #define VMA_FLAG_FILE 0x400      // File-backed mapping
+#define VMA_FLAG_SHARED 0x800    // Shared mapping (MAP_SHARED)
 
 // Combined mask of all bits that may appear in vma->flags
 #define VMA_FLAG_PROT_MASK                                                     \
     (PROT_READ | PROT_WRITE | PROT_EXEC | VMA_FLAG_USER | VMA_FLAG_GROWSDOWN | \
-     VMA_FLAG_GROWSUP | VMA_FLAG_FILE)
+     VMA_FLAG_GROWSUP | VMA_FLAG_FILE | VMA_FLAG_SHARED)
 
 // mmap failure return value
 #define MAP_FAILED ((void *)(uint64) - 1)
@@ -87,6 +88,7 @@ typedef struct vm {
     size_t stack_size; // Size of the stack area
     vma_t *heap;
     size_t heap_size;         // Size of the heap area
+    uint64 heap_reserve_end;  // Upper bound of heap reservation (mmap avoids)
     list_node_t vm_list;      // List of VM areas
     list_node_t vm_free_list; // List of free VM areas
     cpumask_t cpumask;        // CPUs using this VM

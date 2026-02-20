@@ -857,6 +857,7 @@ static int __vma_copy(vma_t *dst, vma_t *src) {
     if (src->flags != PROT_NONE) {
         pagetable_t pgtb_src = src->vm->pagetable;
         pagetable_t pgtb_dst = dst->vm->pagetable;
+        int is_shared = (src->flags & VMA_FLAG_SHARED) != 0;
         for (uint64 a = src->start; a < src->end; a += PGSIZE) {
             pte_t *src_pte = walk(pgtb_src, a, 0, NULL, NULL);
             if (src_pte == NULL || *src_pte == 0)
@@ -870,9 +871,15 @@ static int __vma_copy(vma_t *dst, vma_t *src) {
                 __vma_set_free(dst);
                 return -ENOMEM; // Failed to allocate new PTE
             }
-            *src_pte |= PTE_RSW_w; // Set COW flag
-            *src_pte &= ~PTE_W;    // Clear write flag
-            *new_pte = *src_pte;   // Copy the PTE
+            if (is_shared) {
+                // MAP_SHARED: share the same physical page without COW.
+                // Both parent and child can read/write the same page.
+                *new_pte = *src_pte;
+            } else {
+                *src_pte |= PTE_RSW_w; // Set COW flag
+                *src_pte &= ~PTE_W;    // Clear write flag
+                *new_pte = *src_pte;   // Copy the PTE
+            }
             uint64 pa = PTE2PA(*src_pte);
             assert(page_ref_inc((void *)pa) > 0,
                    "__vma_copy: page refcnt should be greater than 0");
@@ -1166,6 +1173,7 @@ vm_t *vm_copy(vm_t *src) {
         } else if (vma == src->heap) {
             dst->heap = new_vma;
             dst->heap_size = src->heap_size;
+            dst->heap_reserve_end = src->heap_reserve_end;
         }
         if (vma->flags != PROT_NONE && __vma_copy(new_vma, vma) != 0) {
             // new_vma is still linked into dst; vm_put will clean it up.
@@ -2027,8 +2035,7 @@ int vm_try_growstack(vm_t *vm, uint64 va) {
     uint64 ustack_bottom_after =
         vm->stack->start - (USERSTACK_GROWTH << PAGE_SHIFT);
     if (ustack_bottom_after < USTACK_MAX_BOTTOM) {
-        ret = -ENOMEM; // Cannot grow the stack below the minimum stack size
-        goto out;
+        ustack_bottom_after = USTACK_MAX_BOTTOM;
     }
     if (ustack_bottom_after > va) {
         // Too far below the stack to grow
@@ -2036,9 +2043,16 @@ int vm_try_growstack(vm_t *vm, uint64 va) {
         goto out;
     }
 
+    // Grow the stack enough to cover the faulting address, rounded up to
+    // USERSTACK_GROWTH pages for alignment.
+    uint64 needed = vm->stack->start - PGROUNDDOWN(va);
+    uint64 growth = PGROUNDUP(needed);
+    // Round up to USERSTACK_GROWTH page boundary
+    uint64 growth_unit = USERSTACK_GROWTH << PAGE_SHIFT;
+    growth = ((growth + growth_unit - 1) / growth_unit) * growth_unit;
+
     // Grow the stack
-    ret = vm_growstack(vm, USERSTACK_GROWTH
-                               << PAGE_SHIFT); // Grow the stack by one page
+    ret = vm_growstack(vm, growth);
 out:
     vm_wunlock(vm);
     return ret;
@@ -2098,6 +2112,10 @@ int vm_growheap(vm_t *vm, int64 change_size) {
         }
     } else {
         if (right == NULL || right->flags != PROT_NONE) {
+            printf("vm_growheap: FAIL no free right neighbor for heap "
+                   "[0x%lx,0x%lx) right=%p right_flags=0x%lx delta=%ld\n",
+                   vm->heap->start, vm->heap->end,
+                   right, right ? right->flags : 0xdead, delta);
             ret = -ENOMEM; // No adjacent free VMA to grow the heap
             goto ret;
         }
@@ -2260,6 +2278,28 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot) {
         goto out;
     }
 
+    /*
+     * mprotect on a sub-range must update VMA metadata so future demand
+     * faults validate against the new protection. Split the original VMA into:
+     *   [left (optional)] [target range] [right (optional)]
+     * and apply the new flags to the middle VMA.
+     */
+    if (addr > vma->start) {
+        vma = vma_split(vma, addr);
+        if (vma == NULL) {
+            ret = -ENOMEM;
+            goto out;
+        }
+    }
+
+    uint64 end = addr + size;
+    if (end < vma->end) {
+        if (vma_split(vma, end) == NULL) {
+            ret = -ENOMEM;
+            goto out;
+        }
+    }
+
     // Convert PROT_* flags to VMA flags, preserving xv6-specific flags
     uint64 old_flags = vma->flags;
     uint64 new_flags = (vma->flags & ~PROT_MASK);
@@ -2280,12 +2320,8 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot) {
     }
     vm_pgtable_unlock(vm);
 
-    // If the range is a portion of the VMA, we may need to split
-    // For simplicity, just update the VMA flags if the entire VMA is covered
-    if (addr == vma->start && (addr + size) == vma->end) {
-        vma->flags = new_flags;
-    }
-    // Otherwise, we'd need to split the VMA - not implemented for simplicity
+    // Update target VMA flags (this VMA now exactly matches [addr, addr+size)).
+    vma->flags = new_flags;
 
     // Flush TLB on remote cores only when permissions are downgraded
     // (bits present in old_flags but removed in new_flags). Upgrades are
@@ -2327,6 +2363,14 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
     old_addr = PGROUNDDOWN(old_addr);
     old_size = PGROUNDUP(old_size);
     new_size = PGROUNDUP(new_size);
+
+    /* Reject overflow and impossible sizes early. */
+    if (old_size > (UVMTOP - UVMBOTTOM) || new_size > (UVMTOP - UVMBOTTOM)) {
+        goto out;
+    }
+    if (old_addr + old_size < old_addr) {
+        goto out;
+    }
 
     if (old_addr < UVMBOTTOM || (old_addr + old_size) > UVMTOP) {
         goto out;
@@ -2691,14 +2735,17 @@ uint64 vm_find_free_range(vm_t *vm, size_t size, uint64 hint) {
 
     size = PGROUNDUP(size);
 
-    // Search area: between heap end and stack bottom
-    // Leave some space below the main stack for thread stacks
+    // Search area: between heap reservation end and stack bottom.
+    // The heap reservation keeps mmap(addr=0) away from the heap so
+    // that brk/sbrk can grow without being blocked by adjacent VMAs.
     uint64 stack_bottom = vm->stack ? vm->stack->start : UVMTOP - PGSIZE;
     uint64 heap_end = vm->heap ? (vm->heap->start + vm->heap_size) : UVMBOTTOM;
+    uint64 reserve_end = vm->heap_reserve_end;
+    uint64 effective_bottom = (reserve_end > heap_end) ? reserve_end : heap_end;
 
     // Leave 16 pages gap below main stack for thread stacks
     uint64 search_top = stack_bottom - (16 * PGSIZE);
-    uint64 search_bottom = heap_end;
+    uint64 search_bottom = effective_bottom;
 
     if (search_top <= search_bottom + size) {
         return 0; // Not enough space
@@ -2853,6 +2900,59 @@ int vm_free_thread_stack(vm_t *vm, uint64 stack_top, size_t stack_size) {
 }
 
 /**
+ * __vm_unmap_range_locked - Unmap all VMAs (or portions) overlapping [start, end)
+ * @vm: the virtual memory structure (caller holds vm_wlock)
+ * @start: start of range to unmap (page-aligned)
+ * @end: end of range to unmap (page-aligned)
+ *
+ * Used by MAP_FIXED to clear existing mappings before creating new ones.
+ * Splits VMAs at boundaries if the overlap is partial.
+ * Updates vm->heap / vm->stack pointers if the heap or stack VMA is affected.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+static int __vm_unmap_range_locked(vm_t *vm, uint64 start, uint64 end) {
+    while (start < end) {
+        vma_t *vma = vm_find_area(vm, start);
+        if (vma == NULL)
+            break; // No VMA at this address
+
+        if (vma->flags == PROT_NONE) {
+            // Already a free area, skip
+            start = vma->end;
+            continue;
+        }
+
+        // Split if VMA starts before our range
+        if (vma->start < start) {
+            vma_t *right = vma_split(vma, start);
+            if (right == NULL)
+                return -ENOMEM;
+            vma = right;
+        }
+
+        // Split if VMA extends past our range
+        if (vma->end > end) {
+            if (vma_split(vma, end) == NULL)
+                return -ENOMEM;
+            // vma now covers [start, end) only
+        }
+
+        uint64 next = vma->end;
+
+        // Update heap/stack tracking if this VMA is being destroyed
+        if (vma == vm->heap)
+            vm->heap = NULL;
+        if (vma == vm->stack)
+            vm->stack = NULL;
+
+        vma_free(vm, vma);
+        start = next;
+    }
+    return 0;
+}
+
+/**
  * vm_mmap - Map memory (user-facing mmap wrapper)
  * @vm: the virtual memory structure
  * @addr: hint address (0 = let kernel choose)
@@ -2880,17 +2980,20 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
         return (uint64)-1; // EINVAL
     }
 
+    /* Reject overflow/oversized requests before rounding. */
+    if (length > (UVMTOP - UVMBOTTOM)) {
+        return (uint64)-1;
+    }
+    if (length > ((size_t)-1) - (PGSIZE - 1)) {
+        return (uint64)-1;
+    }
+
     // Validate flag combinations
     if (!(flags & MAP_PRIVATE) && !(flags & MAP_SHARED)) {
         return (uint64)-1; // Must specify MAP_PRIVATE or MAP_SHARED
     }
     if ((flags & MAP_PRIVATE) && (flags & MAP_SHARED)) {
         return (uint64)-1; // Cannot specify both
-    }
-
-    // MAP_SHARED file mappings not yet supported
-    if (flags & MAP_SHARED) {
-        return (uint64)-1; // ENOTSUP
     }
 
     if (fd != -1) {
@@ -2923,6 +3026,8 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
         VMA_FLAG_USER | (prot & (PROT_READ | PROT_WRITE | PROT_EXEC));
     if (file != NULL)
         vm_flags |= VMA_FLAG_FILE;
+    if (flags & MAP_SHARED)
+        vm_flags |= VMA_FLAG_SHARED;
 
     vm_wlock(vm);
 
@@ -2937,8 +3042,15 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
             return (uint64)-1; // ENOMEM
         }
     } else {
-        // MAP_FIXED: use exact address
+        // MAP_FIXED: use exact address, unmap any existing mappings first
         map_addr = PGROUNDDOWN(addr);
+        uint64 map_end = map_addr + length;
+        if (__vm_unmap_range_locked(vm, map_addr, map_end) != 0) {
+            vm_wunlock(vm);
+            if (file != NULL)
+                vfs_fput(file);
+            return (uint64)-1; // Failed to unmap existing range
+        }
     }
 
     // Allocate the VMA

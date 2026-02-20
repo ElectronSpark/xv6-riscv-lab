@@ -1,0 +1,77 @@
+/*
+ * bits/alltypes.h.in — xv6 RISC-V type definitions for musl
+ *
+ * This file provides architecture-specific type definitions that musl's
+ * sed-based build process transforms into bits/alltypes.h.
+ *
+ * Format: TYPEDEF <type> <name>;
+ * The musl build system picks these up and generates the final header.
+ */
+
+#define _Addr long
+#define _Int64 long
+#define _Reg long
+
+TYPEDEF unsigned _Addr size_t;
+TYPEDEF signed _Addr ssize_t;
+TYPEDEF signed _Addr ptrdiff_t;
+
+TYPEDEF __builtin_va_list va_list;
+TYPEDEF __builtin_va_list __isoc_va_list;
+
+#ifndef __cplusplus
+TYPEDEF unsigned wchar_t;
+#endif
+
+TYPEDEF unsigned wint_t;
+
+TYPEDEF int blksize_t;
+TYPEDEF unsigned int nlink_t;
+TYPEDEF long dev_t;
+TYPEDEF long blkcnt_t;
+TYPEDEF long ino_t;
+TYPEDEF long off_t;
+TYPEDEF int pid_t;
+TYPEDEF unsigned gid_t;
+TYPEDEF unsigned uid_t;
+TYPEDEF unsigned id_t;
+TYPEDEF unsigned mode_t;
+TYPEDEF unsigned _Int64 rlim_t;
+TYPEDEF long clock_t;
+TYPEDEF int clockid_t;
+TYPEDEF long time_t;
+TYPEDEF long suseconds_t;
+TYPEDEF unsigned useconds_t;
+
+TYPEDEF struct { union { int __i[sizeof(long)==8?14:18]; volatile int __vi[sizeof(long)==8?14:18]; long __s[sizeof(long)==8?7:9]; } __u; } pthread_attr_t;
+TYPEDEF struct { union { int __i[sizeof(long)==8?10:6]; volatile int __vi[sizeof(long)==8?10:6]; volatile void *volatile __p[sizeof(long)==8?5:6]; } __u; } pthread_mutex_t;
+TYPEDEF struct { union { int __i[sizeof(long)==8?10:6]; volatile int __vi[sizeof(long)==8?10:6]; volatile void *volatile __p[sizeof(long)==8?5:6]; } __u; } mtx_t;
+TYPEDEF struct { union { int __i[12]; volatile int __vi[12]; void *__p[12*sizeof(int)/sizeof(void*)]; } __u; } pthread_cond_t;
+TYPEDEF struct { union { int __i[12]; volatile int __vi[12]; void *__p[12*sizeof(int)/sizeof(void*)]; } __u; } cnd_t;
+TYPEDEF struct { union { int __i[sizeof(long)==8?14:8]; volatile int __vi[sizeof(long)==8?14:8]; void *__p[sizeof(long)==8?7:8]; } __u; } pthread_rwlock_t;
+TYPEDEF struct { union { int __i[8]; volatile int __vi[8]; void *__p[8*sizeof(int)/sizeof(void*)]; } __u; } pthread_barrier_t;
+
+TYPEDEF struct { unsigned __attr; } pthread_mutexattr_t;
+TYPEDEF struct { unsigned __attr; } pthread_condattr_t;
+TYPEDEF struct { unsigned __attr; } pthread_rwlockattr_t;
+TYPEDEF struct { unsigned __attr; } pthread_barrierattr_t;
+TYPEDEF struct { unsigned __attr[2]; } pthread_key_t;
+TYPEDEF int pthread_once_t;
+TYPEDEF unsigned pthread_spinlock_t;
+TYPEDEF int pthread_t;
+
+TYPEDEF int locale_t;
+
+TYPEDEF struct { unsigned long __bits[128/sizeof(long)]; } sigset_t;
+
+TYPEDEF struct __siginfo siginfo_t;
+
+TYPEDEF struct { long long __ll; long double __ld; } max_align_t;
+
+TYPEDEF struct __mbstate_t { unsigned __opaque1, __opaque2; } mbstate_t;
+
+TYPEDEF struct __FILE_s FILE;
+
+TYPEDEF long regoff_t;
+TYPEDEF long register_t;
+TYPEDEF _Addr jmp_buf[sizeof(long)==8?22:64];

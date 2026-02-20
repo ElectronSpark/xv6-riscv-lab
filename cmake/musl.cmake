@@ -1,0 +1,139 @@
+# ==============================================================================
+# cmake/musl.cmake — Build musl libc for xv6 RISC-V user programs
+# ==============================================================================
+#
+# This module:
+#   1. Builds musl from source with xv6 arch overlay
+#   2. Provides add_musl_program() function to compile programs against musl
+#   3. Creates musl_sysroot target as a dependency
+#
+# Usage in CMakeLists.txt:
+#   include(${CMAKE_SOURCE_DIR}/cmake/musl.cmake)
+#
+
+set(MUSL_XV6_DIR "${CMAKE_SOURCE_DIR}/user/musl-xv6")
+set(MUSL_BUILD_SCRIPT "${MUSL_XV6_DIR}/build_musl.sh")
+set(MUSL_SYSROOT "${MUSL_XV6_DIR}/musl-sysroot")
+set(MUSL_LIBC_A "${MUSL_SYSROOT}/lib/libc.a")
+set(MUSL_CRT1_O "${MUSL_SYSROOT}/lib/crt1.o")
+set(MUSL_CRTI_O "${MUSL_SYSROOT}/lib/crti.o")
+set(MUSL_CRTN_O "${MUSL_SYSROOT}/lib/crtn.o")
+set(MUSL_RCRT1_O "${MUSL_SYSROOT}/lib/rcrt1.o")
+set(MUSL_SCRT1_O "${MUSL_SYSROOT}/lib/Scrt1.o")
+set(MUSL_INCLUDE_DIR "${MUSL_SYSROOT}/include")
+set(MUSL_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/user/musl.ld")
+
+# Get GCC include dir for stdarg.h etc
+execute_process(
+    COMMAND ${CMAKE_C_COMPILER} -print-file-name=include
+    OUTPUT_VARIABLE GCC_INCLUDE_DIR_MUSL
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+# Get libgcc.a path
+execute_process(
+    COMMAND ${CMAKE_C_COMPILER} -print-libgcc-file-name
+    OUTPUT_VARIABLE LIBGCC_PATH
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+
+message(STATUS "musl libc: sysroot = ${MUSL_SYSROOT}")
+message(STATUS "musl libc: GCC includes = ${GCC_INCLUDE_DIR_MUSL}")
+message(STATUS "musl libc: libgcc = ${LIBGCC_PATH}")
+
+# ==============================================================================
+# Build musl from source
+# ==============================================================================
+add_custom_command(
+    OUTPUT ${MUSL_LIBC_A} ${MUSL_CRT1_O} ${MUSL_CRTI_O} ${MUSL_CRTN_O}
+    COMMAND bash ${MUSL_BUILD_SCRIPT} --prefix=${MUSL_SYSROOT}
+    DEPENDS
+        ${MUSL_BUILD_SCRIPT}
+        ${MUSL_XV6_DIR}/arch/riscv64/__clone.s
+        ${MUSL_XV6_DIR}/arch/riscv64/bits/syscall.h.in
+    COMMENT "Building musl libc for xv6 RISC-V (this may take a few minutes)..."
+)
+
+add_custom_target(musl_sysroot DEPENDS ${MUSL_LIBC_A} ${MUSL_CRT1_O})
+
+# ==============================================================================
+# add_musl_program(name source_file [EXTRA_SOURCES src1 src2 ...])
+#
+# Compile and link a user program against musl libc.
+# The resulting executable is placed in ${CMAKE_BINARY_DIR}/user/_${name}
+# ==============================================================================
+function(add_musl_program PROGRAM_NAME SOURCE_FILE)
+    cmake_parse_arguments(MUSL_PROG "" "" "EXTRA_SOURCES" ${ARGN})
+
+    set(ALL_SOURCES ${SOURCE_FILE} ${MUSL_PROG_EXTRA_SOURCES})
+    set(ALL_OBJECTS "")
+    set(TARGET_NAME _${PROGRAM_NAME})
+    set(PROGRAM_ELF ${CMAKE_BINARY_DIR}/user/${TARGET_NAME})
+
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${TARGET_NAME}_musl.dir)
+
+    foreach(SRC ${ALL_SOURCES})
+        get_filename_component(SRC_BASENAME ${SRC} NAME_WE)
+        get_filename_component(SRC_EXT ${SRC} EXT)
+        set(OBJ_FILE ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${TARGET_NAME}_musl.dir/${SRC_BASENAME}${SRC_EXT}.o)
+        list(APPEND ALL_OBJECTS ${OBJ_FILE})
+
+        # Determine if this is assembly
+        if(SRC_EXT STREQUAL ".S" OR SRC_EXT STREQUAL ".s")
+            add_custom_command(
+                OUTPUT ${OBJ_FILE}
+                COMMAND ${CMAKE_C_COMPILER}
+                        -march=rv64gc -mabi=lp64d
+                        -mcmodel=medany -fno-pie -no-pie
+                        -nostdinc
+                        -isystem ${MUSL_INCLUDE_DIR}
+                        -isystem ${GCC_INCLUDE_DIR_MUSL}
+                        -o ${OBJ_FILE}
+                        -c ${SRC}
+                DEPENDS ${SRC} musl_sysroot
+                COMMENT "Building musl ASM object ${SRC_BASENAME}${SRC_EXT}"
+            )
+        else()
+            add_custom_command(
+                OUTPUT ${OBJ_FILE}
+                COMMAND ${CMAKE_C_COMPILER}
+                        -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
+                        -march=rv64gc -mabi=lp64d
+                        -mcmodel=medany -fno-common -fno-pie -no-pie
+                        -nostdinc -ffreestanding
+                        -isystem ${MUSL_INCLUDE_DIR}
+                        -isystem ${GCC_INCLUDE_DIR_MUSL}
+                        -MD -MF ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${TARGET_NAME}_musl.dir/${SRC_BASENAME}${SRC_EXT}.d
+                        -o ${OBJ_FILE}
+                        -c ${SRC}
+                DEPENDS ${SRC} musl_sysroot
+                COMMENT "Building musl C object ${SRC_BASENAME}${SRC_EXT}"
+            )
+        endif()
+    endforeach()
+
+    # Link the program
+    add_custom_command(
+        OUTPUT ${PROGRAM_ELF}
+        COMMAND ${CMAKE_C_COMPILER}
+                -nostdlib -static
+                -Wl,-z,max-page-size=4096
+                -T ${MUSL_LINKER_SCRIPT}
+                -o ${PROGRAM_ELF}
+                ${MUSL_CRT1_O}
+                ${MUSL_CRTI_O}
+                ${ALL_OBJECTS}
+                ${MUSL_LIBC_A}
+                ${LIBGCC_PATH}
+                ${MUSL_CRTN_O}
+        DEPENDS ${ALL_OBJECTS} musl_sysroot ${MUSL_LINKER_SCRIPT}
+        COMMENT "Linking musl program ${TARGET_NAME}"
+    )
+
+    add_custom_target(${TARGET_NAME}_musl ALL DEPENDS ${PROGRAM_ELF})
+    add_dependencies(user_programs ${TARGET_NAME}_musl)
+
+    # Add to USER_PROGRAMS list in parent scope
+    list(APPEND USER_PROGRAMS ${TARGET_NAME})
+    set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
+endfunction()

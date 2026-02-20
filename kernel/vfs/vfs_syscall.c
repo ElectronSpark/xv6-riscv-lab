@@ -33,6 +33,52 @@
 #include "timer/timer.h"
 #include "signal.h"
 
+/*
+ * Linux-compatible stat struct for musl programs.
+ * musl expects this layout when calling SYS_fstatat/SYS_fstat.
+ * Must match musl arch/riscv64/bits/stat.h exactly.
+ */
+struct linux_stat {
+    uint64 st_dev;          // dev_t
+    uint64 st_ino;          // ino_t
+    uint32 st_mode;         // mode_t
+    uint32 st_nlink;        // nlink_t
+    uint32 st_uid;          // uid_t
+    uint32 st_gid;          // gid_t
+    uint64 st_rdev;         // dev_t
+    uint64 __pad;           // unsigned long
+    int64  st_size;         // off_t
+    int32  st_blksize;      // blksize_t
+    int32  __pad2;
+    int64  st_blocks;       // blkcnt_t
+    int64  st_atime_sec;    // struct timespec
+    int64  st_atime_nsec;
+    int64  st_mtime_sec;    // struct timespec
+    int64  st_mtime_nsec;
+    int64  st_ctime_sec;    // struct timespec
+    int64  st_ctime_nsec;
+    uint32 __unused[2];
+};
+
+/*
+ * Convert xv6 struct stat -> Linux struct stat (for musl programs).
+ */
+static void stat_to_linux(const struct stat *xst, struct linux_stat *lst)
+{
+    memset(lst, 0, sizeof(*lst));
+    lst->st_dev    = (uint64)xst->dev;
+    lst->st_ino    = xst->ino;
+    lst->st_mode   = xst->mode;
+    lst->st_nlink  = xst->nlink;
+    lst->st_uid    = 0;     // xv6 has no UID/GID
+    lst->st_gid    = 0;
+    lst->st_rdev   = 0;
+    lst->st_size   = (int64)xst->size;
+    lst->st_blksize = 512;
+    lst->st_blocks  = ((int64)xst->size + 511) / 512;
+    // xv6 doesn't track timestamps, leave at 0
+}
+
 // Forward declaration for syscall argument helpers
 void argint(int n, int *ip);
 void argint64(int n, int64 *ip);
@@ -2077,4 +2123,859 @@ uint64 sys_vfs_poll(void) {
 
     kmm_free(pfds);
     return ready;
+}
+
+/******************************************************************************
+ * Extended Syscalls for musl libc compatibility
+ ******************************************************************************/
+
+/*
+ * openat(dirfd, path, flags, mode) — open relative to directory fd.
+ *
+ * When dirfd == AT_FDCWD (-100), behaves like open(path, flags, mode).
+ * Other dirfd values are not yet supported (returns -ENOSYS).
+ */
+uint64 sys_vfs_openat(void) {
+    int dirfd;
+    argint(0, &dirfd);
+
+    // Shift arguments: openat(dirfd, path, flags, mode)
+    // Rewrite a0-a3 so we can reuse sys_vfs_open logic on a1, a2
+    // For now, only support AT_FDCWD
+    if (dirfd != -100) { // AT_FDCWD = -100
+        return -ENOSYS; // TODO: support real dirfd
+    }
+
+    // path is in a1, flags in a2, mode in a3
+    char path[MAXPATH];
+    char name[DIRSIZ + 1];
+    int omode;
+    int n;
+
+    if (argstr(1, path, MAXPATH) < 0)
+        return -EFAULT;
+    argint(2, &omode);
+
+    struct vfs_inode *inode = NULL;
+
+    if (omode & O_CREAT) {
+        struct vfs_inode *parent = vfs_nameiparent(path, strlen(path), name, DIRSIZ + 1);
+        if (IS_ERR(parent))
+            return PTR_ERR(parent);
+        if (parent == NULL)
+            return -ENOENT;
+
+        size_t name_len = strlen(name);
+        inode = vfs_create(parent, 0644, name, name_len);
+        vfs_iput(parent);
+
+        if (IS_ERR(inode)) {
+            if (PTR_ERR(inode) == -EEXIST && !(omode & O_EXCL)) {
+                inode = vfs_namei(path, strlen(path));
+                if (!IS_ERR_OR_NULL(inode) && S_ISDIR(inode->mode)) {
+                    vfs_iput(inode);
+                    return -EISDIR;
+                }
+            } else {
+                return PTR_ERR(inode);
+            }
+        }
+    } else {
+        int symloop_count = 0;
+        do {
+            inode = vfs_namei(path, strlen(path));
+            if (IS_ERR(inode))
+                return PTR_ERR(inode);
+            if (inode == NULL)
+                return -ENOENT;
+            if (!S_ISLNK(inode->mode) || (omode & O_NOFOLLOW))
+                break;
+            ssize_t link_len = vfs_readlink(inode, path, MAXPATH - 1);
+            vfs_iput(inode);
+            inode = NULL;
+            if (link_len < 0)
+                return link_len;
+            path[link_len] = '\0';
+            symloop_count++;
+        } while (symloop_count < 8);
+        if (symloop_count >= 8)
+            return -ELOOP;
+    }
+
+    if (IS_ERR(inode))
+        return PTR_ERR(inode);
+    if (inode == NULL)
+        return -ENOENT;
+
+    if (S_ISDIR(inode->mode) && (omode & (O_WRONLY | O_RDWR))) {
+        vfs_iput(inode);
+        return -EISDIR;
+    }
+
+    struct vfs_file *f = vfs_fileopen(inode, omode);
+    vfs_iput(inode);
+    if (IS_ERR(f))
+        return PTR_ERR(f);
+    if (f == NULL)
+        return -ENOMEM;
+
+    if (omode & O_TRUNC) {
+        truncate(f, 0);
+    }
+
+    spin_lock(&current->fdtable->lock);
+    n = __vfs_fdalloc(f);
+    spin_unlock(&current->fdtable->lock);
+    vfs_fput(f);
+
+    if (n < 0)
+        return n;
+
+    if (omode & O_CLOEXEC) {
+        vfs_fdtable_set_fdflags(current->fdtable, n, FD_CLOEXEC);
+    }
+
+    return n;
+}
+
+/*
+ * User-space iovec structure (matches Linux / musl).
+ */
+struct __k_iovec {
+    uint64 iov_base; // void * in user space
+    uint64 iov_len;  // size_t
+};
+
+#define UIO_MAXIOV 1024
+
+/*
+ * writev(fd, iov, iovcnt) — scatter-gather write.
+ */
+uint64 sys_vfs_writev(void) {
+    int fd, iovcnt;
+    uint64 iov_addr;
+
+    argint(0, &fd);
+    argaddr(1, &iov_addr);
+    argint(2, &iovcnt);
+
+    if (iovcnt <= 0 || iovcnt > UIO_MAXIOV)
+        return -EINVAL;
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL)
+        return -EBADF;
+
+    struct __k_iovec iovs[8]; // stack-allocated for small iovcnt
+    struct __k_iovec *iov = iovs;
+    struct __k_iovec *heap_iov = NULL;
+
+    if (iovcnt > 8) {
+        heap_iov = kmm_alloc(iovcnt * sizeof(struct __k_iovec));
+        if (heap_iov == NULL) {
+            vfs_fput(f);
+            return -ENOMEM;
+        }
+        iov = heap_iov;
+    }
+
+    if (either_copyin(iov, 1, iov_addr, iovcnt * sizeof(struct __k_iovec)) < 0) {
+        vfs_fput(f);
+        if (heap_iov) kmm_free(heap_iov);
+        return -EFAULT;
+    }
+
+    ssize_t total = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        if (iov[i].iov_len == 0)
+            continue;
+        ssize_t n = vfs_filewrite(f, (const void *)iov[i].iov_base, iov[i].iov_len, true);
+        if (n < 0) {
+            if (total > 0) break;
+            total = n;
+            break;
+        }
+        total += n;
+        if ((uint64)n < iov[i].iov_len)
+            break; // Short write
+    }
+
+    vfs_fput(f);
+    if (heap_iov) kmm_free(heap_iov);
+    return total;
+}
+
+/*
+ * readv(fd, iov, iovcnt) — scatter-gather read.
+ */
+uint64 sys_vfs_readv(void) {
+    int fd, iovcnt;
+    uint64 iov_addr;
+
+    argint(0, &fd);
+    argaddr(1, &iov_addr);
+    argint(2, &iovcnt);
+
+    if (iovcnt <= 0 || iovcnt > UIO_MAXIOV)
+        return -EINVAL;
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL)
+        return -EBADF;
+
+    struct __k_iovec iovs[8];
+    struct __k_iovec *iov = iovs;
+    struct __k_iovec *heap_iov = NULL;
+
+    if (iovcnt > 8) {
+        heap_iov = kmm_alloc(iovcnt * sizeof(struct __k_iovec));
+        if (heap_iov == NULL) {
+            vfs_fput(f);
+            return -ENOMEM;
+        }
+        iov = heap_iov;
+    }
+
+    if (either_copyin(iov, 1, iov_addr, iovcnt * sizeof(struct __k_iovec)) < 0) {
+        vfs_fput(f);
+        if (heap_iov) kmm_free(heap_iov);
+        return -EFAULT;
+    }
+
+    ssize_t total = 0;
+    for (int i = 0; i < iovcnt; i++) {
+        if (iov[i].iov_len == 0)
+            continue;
+        ssize_t n = vfs_fileread(f, (void *)iov[i].iov_base, iov[i].iov_len, true);
+        if (n < 0) {
+            if (total > 0) break;
+            total = n;
+            break;
+        }
+        total += n;
+        if ((uint64)n < iov[i].iov_len)
+            break; // Short read
+    }
+
+    vfs_fput(f);
+    if (heap_iov) kmm_free(heap_iov);
+    return total;
+}
+
+/*
+ * pread64(fd, buf, count, offset) — read at position without changing file offset.
+ */
+uint64 sys_vfs_pread64(void) {
+    int fd, count;
+    uint64 buf_addr;
+    int64 offset;
+
+    argint(0, &fd);
+    argaddr(1, &buf_addr);
+    argint(2, &count);
+    argint64(3, &offset);
+
+    if (offset < 0)
+        return -EINVAL;
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL)
+        return -EBADF;
+
+    // Save and restore file position
+    loff_t saved = vfs_filelseek(f, 0, 1); // SEEK_CUR
+    if (saved < 0) {
+        vfs_fput(f);
+        return -ESPIPE;
+    }
+    vfs_filelseek(f, offset, 0); // SEEK_SET
+    ssize_t ret = vfs_fileread(f, (void *)buf_addr, count, true);
+    vfs_filelseek(f, saved, 0); // Restore
+
+    vfs_fput(f);
+    return ret;
+}
+
+/*
+ * pwrite64(fd, buf, count, offset) — write at position without changing file offset.
+ */
+uint64 sys_vfs_pwrite64(void) {
+    int fd, count;
+    uint64 buf_addr;
+    int64 offset;
+
+    argint(0, &fd);
+    argaddr(1, &buf_addr);
+    argint(2, &count);
+    argint64(3, &offset);
+
+    if (offset < 0)
+        return -EINVAL;
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL)
+        return -EBADF;
+
+    loff_t saved = vfs_filelseek(f, 0, 1);
+    if (saved < 0) {
+        vfs_fput(f);
+        return -ESPIPE;
+    }
+    vfs_filelseek(f, offset, 0);
+    ssize_t ret = vfs_filewrite(f, (const void *)buf_addr, count, true);
+    vfs_filelseek(f, saved, 0);
+
+    vfs_fput(f);
+    return ret;
+}
+
+/*
+ * fstatat(dirfd, path, statbuf, flags) — stat relative to directory fd.
+ *
+ * For now, only AT_FDCWD is supported for dirfd.
+ * flags: AT_SYMLINK_NOFOLLOW (0x100) — use lstat instead of stat.
+ */
+uint64 sys_vfs_fstatat(void) {
+    int dirfd, flags;
+    uint64 stat_addr;
+    char path[MAXPATH];
+
+    argint(0, &dirfd);
+    if (argstr(1, path, MAXPATH) < 0)
+        return -EFAULT;
+    argaddr(2, &stat_addr);
+    argint(3, &flags);
+
+    if (dirfd != -100) // AT_FDCWD
+        return -ENOSYS;
+
+    struct vfs_inode *inode = NULL;
+
+    if (flags & 0x100) { // AT_SYMLINK_NOFOLLOW — don't follow symlinks
+        // Use the lstat approach: look up the final component directly
+        char name[DIRSIZ + 1];
+        int n = strlen(path);
+        struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
+        if (IS_ERR(parent))
+            return PTR_ERR(parent);
+        if (parent == NULL)
+            return -ENOENT;
+
+        struct vfs_dentry dentry = {.sb = parent->sb, .parent = parent};
+        int ret = vfs_ilookup(parent, &dentry, name, strlen(name));
+        if (ret != 0) {
+            vfs_iput(parent);
+            return ret;
+        }
+        inode = vfs_get_dentry_inode(&dentry);
+        vfs_release_dentry(&dentry);
+        vfs_iput(parent);
+    } else {
+        // Follow symlinks (stat behavior)
+        int symloop_count = 0;
+        for (;;) {
+            inode = vfs_namei(path, strlen(path));
+            if (IS_ERR(inode))
+                return PTR_ERR(inode);
+            if (inode == NULL)
+                return -ENOENT;
+            if (!S_ISLNK(inode->mode))
+                break;
+            ssize_t link_len = vfs_readlink(inode, path, MAXPATH - 1);
+            vfs_iput(inode);
+            inode = NULL;
+            if (link_len < 0)
+                return link_len;
+            path[link_len] = '\0';
+            if (++symloop_count >= 8)
+                return -ELOOP;
+        }
+    }
+
+    if (IS_ERR(inode))
+        return PTR_ERR(inode);
+    if (inode == NULL)
+        return -ENOENT;
+
+    struct stat st;
+    int ret = __vfs_inode_stat(inode, &st);
+    vfs_iput(inode);
+    if (ret != 0)
+        return ret;
+
+    // fstatat is used by musl programs — provide Linux-compatible struct stat
+    struct linux_stat lst;
+    stat_to_linux(&st, &lst);
+
+    if (either_copyout(1, stat_addr, &lst, sizeof(lst)) < 0)
+        return -EFAULT;
+
+    return 0;
+}
+
+/*
+ * pipe2(pipefd[2], flags) — create pipe with flags (O_CLOEXEC, O_NONBLOCK).
+ */
+uint64 sys_vfs_pipe2(void) {
+    uint64 fdarray;
+    int flags;
+    argaddr(0, &fdarray);
+    argint(1, &flags);
+
+    struct vfs_file *rf = NULL, *wf = NULL;
+    int ret = vfs_pipealloc(&rf, &wf);
+    if (ret != 0)
+        return ret;
+
+    spin_lock(&current->fdtable->lock);
+    int fd0 = __vfs_fdalloc(rf);
+    if (fd0 < 0) {
+        spin_unlock(&current->fdtable->lock);
+        vfs_fput(rf);
+        vfs_fput(wf);
+        return fd0;
+    }
+
+    int fd1 = __vfs_fdalloc(wf);
+    if (fd1 < 0) {
+        __vfs_fdfree(fd0);
+        spin_unlock(&current->fdtable->lock);
+        vfs_fput(rf);
+        vfs_fput(wf);
+        __vfs_fput_call_rcu(rf);
+        return fd1;
+    }
+    spin_unlock(&current->fdtable->lock);
+
+    struct thread *p = current;
+    if (vm_copyout(p->vm, fdarray, (char *)&fd0, sizeof(fd0)) < 0 ||
+        vm_copyout(p->vm, fdarray + sizeof(fd0), (char *)&fd1, sizeof(fd1)) < 0) {
+        spin_lock(&current->fdtable->lock);
+        __vfs_fdfree(fd0);
+        __vfs_fdfree(fd1);
+        spin_unlock(&current->fdtable->lock);
+        vfs_fput(rf);
+        vfs_fput(wf);
+        __vfs_fput_call_rcu(rf);
+        __vfs_fput_call_rcu(wf);
+        return -EFAULT;
+    }
+
+    vfs_fput(rf);
+    vfs_fput(wf);
+
+    if (flags & O_CLOEXEC) {
+        vfs_fdtable_set_fdflags(current->fdtable, fd0, FD_CLOEXEC);
+        vfs_fdtable_set_fdflags(current->fdtable, fd1, FD_CLOEXEC);
+    }
+
+    return 0;
+}
+
+/* ===========================================================================
+ * Linux-compatible *at() syscall variants for musl libc
+ *
+ * These accept a dirfd as the first argument. Currently only AT_FDCWD (-100)
+ * is supported for dirfd; other values return -EBADF.
+ * ===========================================================================
+ */
+
+#ifndef AT_FDCWD
+#define AT_FDCWD (-100)
+#endif
+#ifndef AT_REMOVEDIR
+#define AT_REMOVEDIR 0x200
+#endif
+
+/**
+ * sys_vfs_mkdirat - Create a directory (AT_FDCWD-only)
+ * Args: a0=dirfd, a1=path, a2=mode
+ */
+uint64 sys_vfs_mkdirat(void) {
+    int dirfd;
+    char path[MAXPATH];
+    char name[DIRSIZ + 1];
+    int mode;
+
+    argint(0, &dirfd);
+    if (dirfd != AT_FDCWD)
+        return -EBADF;
+
+    int n = argstr(1, path, MAXPATH);
+    argint(2, &mode);
+    if (n < 0)
+        return -EFAULT;
+
+    struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
+    if (IS_ERR(parent))
+        return PTR_ERR(parent);
+    if (parent == NULL)
+        return -ENOENT;
+
+    struct vfs_inode *dir = vfs_mkdir(parent, (mode_t)mode, name, strlen(name));
+    vfs_iput(parent);
+    if (IS_ERR(dir))
+        return PTR_ERR(dir);
+    vfs_iput(dir);
+    return 0;
+}
+
+/**
+ * sys_vfs_mknodat - Create a special file (AT_FDCWD-only)
+ * Args: a0=dirfd, a1=path, a2=mode, a3=dev
+ *
+ * musl packs major/minor into a single dev_t. xv6 also uses mkdev().
+ */
+uint64 sys_vfs_mknodat(void) {
+    int dirfd;
+    char path[MAXPATH];
+    char name[DIRSIZ + 1];
+    int mode;
+    uint64 dev;
+
+    argint(0, &dirfd);
+    if (dirfd != AT_FDCWD)
+        return -EBADF;
+
+    int n = argstr(1, path, MAXPATH);
+    argint(2, &mode);
+    argaddr(3, &dev);
+    if (n < 0)
+        return -EFAULT;
+
+    struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
+    if (IS_ERR(parent))
+        return PTR_ERR(parent);
+    if (parent == NULL)
+        return -ENOENT;
+
+    struct vfs_inode *node =
+        vfs_mknod(parent, (mode_t)mode, (dev_t)dev, name, strlen(name));
+    vfs_iput(parent);
+    if (IS_ERR(node))
+        return PTR_ERR(node);
+    vfs_iput(node);
+    return 0;
+}
+
+/**
+ * sys_vfs_unlinkat - Remove a file or directory (AT_FDCWD-only)
+ * Args: a0=dirfd, a1=path, a2=flags (AT_REMOVEDIR for rmdir)
+ */
+uint64 sys_vfs_unlinkat(void) {
+    int dirfd, flags;
+    char path[MAXPATH];
+    char name[DIRSIZ + 1];
+
+    argint(0, &dirfd);
+    if (dirfd != AT_FDCWD)
+        return -EBADF;
+
+    int n = argstr(1, path, MAXPATH);
+    argint(2, &flags);
+    if (n < 0)
+        return -EFAULT;
+
+    struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
+    if (IS_ERR(parent))
+        return PTR_ERR(parent);
+    if (parent == NULL)
+        return -ENOENT;
+
+    /* vfs_unlink handles both files and directories internally.
+     * AT_REMOVEDIR is a hint that we expect a directory, but
+     * vfs_unlink checks the type and calls rmdir when appropriate. */
+    (void)flags;  /* AT_REMOVEDIR handled by vfs_unlink */
+    int ret = vfs_unlink(parent, name, strlen(name));
+    vfs_iput(parent);
+    return ret;
+}
+
+/**
+ * sys_vfs_linkat - Create a hard link (AT_FDCWD-only)
+ * Args: a0=olddirfd, a1=oldpath, a2=newdirfd, a3=newpath, a4=flags
+ */
+uint64 sys_vfs_linkat(void) {
+    int olddirfd, newdirfd, flags;
+    char old[MAXPATH], new[MAXPATH];
+    char name[DIRSIZ + 1];
+
+    argint(0, &olddirfd);
+    argint(2, &newdirfd);
+    argint(4, &flags);
+    if (olddirfd != AT_FDCWD || newdirfd != AT_FDCWD)
+        return -EBADF;
+
+    int n1 = argstr(1, old, MAXPATH);
+    int n2 = argstr(3, new, MAXPATH);
+    if (n1 < 0 || n2 < 0)
+        return -EFAULT;
+
+    struct vfs_inode *src = vfs_namei(old, n1);
+    if (IS_ERR(src))
+        return PTR_ERR(src);
+    if (src == NULL)
+        return -ENOENT;
+    if (S_ISDIR(src->mode)) {
+        vfs_iput(src);
+        return -EPERM;
+    }
+
+    struct vfs_inode *parent = vfs_nameiparent(new, n2, name, DIRSIZ + 1);
+    if (IS_ERR(parent)) {
+        vfs_iput(src);
+        return PTR_ERR(parent);
+    }
+    if (parent == NULL) {
+        vfs_iput(src);
+        return -ENOENT;
+    }
+
+    struct vfs_dentry old_dentry = {
+        .sb = src->sb,
+        .ino = src->ino,
+        .name = NULL,
+        .name_len = 0,
+    };
+
+    int ret = vfs_link(&old_dentry, parent, name, strlen(name));
+    vfs_iput(src);
+    vfs_iput(parent);
+    return ret;
+}
+
+/**
+ * sys_vfs_symlinkat - Create a symbolic link (AT_FDCWD-only)
+ * Args: a0=target, a1=newdirfd, a2=linkpath
+ *
+ * Note: Linux symlinkat has (target, newdirfd, linkpath) ordering.
+ */
+uint64 sys_vfs_symlinkat(void) {
+    int newdirfd;
+    char target[MAXPATH], linkpath[MAXPATH];
+    char name[DIRSIZ + 1];
+
+    argint(1, &newdirfd);
+    if (newdirfd != AT_FDCWD)
+        return -EBADF;
+
+    int n1 = argstr(0, target, MAXPATH);
+    int n2 = argstr(2, linkpath, MAXPATH);
+    if (n1 < 0 || n2 < 0)
+        return -EFAULT;
+
+    /* Convert target to absolute path if relative */
+    char abs_target[MAXPATH];
+    int abs_len = vfs_make_absolute_path(target, n1, abs_target);
+    if (abs_len < 0)
+        return abs_len;
+
+    struct vfs_inode *parent = vfs_nameiparent(linkpath, n2, name, DIRSIZ + 1);
+    if (IS_ERR(parent))
+        return PTR_ERR(parent);
+    if (parent == NULL)
+        return -ENOENT;
+
+    struct vfs_inode *sym =
+        vfs_symlink(parent, 0777, name, strlen(name), abs_target, abs_len);
+    vfs_iput(parent);
+    if (IS_ERR(sym))
+        return PTR_ERR(sym);
+    vfs_iput(sym);
+    return 0;
+}
+
+/**
+ * sys_vfs_readlinkat - Read a symbolic link (AT_FDCWD-only)
+ * Args: a0=dirfd, a1=path, a2=buf, a3=bufsiz
+ */
+uint64 sys_vfs_readlinkat(void) {
+    int dirfd;
+    char path[MAXPATH];
+    char name[DIRSIZ + 1];
+    uint64 buf_addr;
+    int bufsz;
+
+    argint(0, &dirfd);
+    if (dirfd != AT_FDCWD)
+        return -EBADF;
+
+    int n = argstr(1, path, MAXPATH);
+    argaddr(2, &buf_addr);
+    argint(3, &bufsz);
+    if (n < 0)
+        return -EFAULT;
+    if (bufsz <= 0)
+        return -EINVAL;
+
+    struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
+    if (IS_ERR(parent))
+        return PTR_ERR(parent);
+    if (parent == NULL)
+        return -ENOENT;
+
+    struct vfs_dentry dentry = {.sb = parent->sb, .parent = parent};
+    int ret = vfs_ilookup(parent, &dentry, name, strlen(name));
+    if (ret != 0) {
+        vfs_iput(parent);
+        return ret;
+    }
+
+    struct vfs_inode *inode = vfs_get_dentry_inode(&dentry);
+    vfs_release_dentry(&dentry);
+    vfs_iput(parent);
+    if (IS_ERR(inode))
+        return PTR_ERR(inode);
+    if (inode == NULL)
+        return -ENOENT;
+
+    char *kbuf = kmm_alloc(bufsz);
+    if (kbuf == NULL) {
+        vfs_iput(inode);
+        return -ENOMEM;
+    }
+
+    ssize_t len = vfs_readlink(inode, kbuf, bufsz);
+    vfs_iput(inode);
+    if (len < 0) {
+        kmm_free(kbuf);
+        return len;
+    }
+
+    if (either_copyout(1, buf_addr, kbuf, len) < 0) {
+        kmm_free(kbuf);
+        return -EFAULT;
+    }
+    kmm_free(kbuf);
+    return len;
+}
+
+/**
+ * sys_vfs_renameat - Rename a file (AT_FDCWD-only)
+ * Args: a0=olddirfd, a1=oldpath, a2=newdirfd, a3=newpath
+ */
+uint64 sys_vfs_renameat(void) {
+    int olddirfd, newdirfd;
+    char oldpath[MAXPATH], newpath[MAXPATH];
+    char oldname[DIRSIZ + 1], newname[DIRSIZ + 1];
+
+    argint(0, &olddirfd);
+    argint(2, &newdirfd);
+    if (olddirfd != AT_FDCWD || newdirfd != AT_FDCWD)
+        return -EBADF;
+
+    int n1 = argstr(1, oldpath, MAXPATH);
+    int n2 = argstr(3, newpath, MAXPATH);
+    if (n1 < 0 || n2 < 0)
+        return -EFAULT;
+
+    struct vfs_inode *old_parent =
+        vfs_nameiparent(oldpath, n1, oldname, DIRSIZ + 1);
+    if (IS_ERR(old_parent))
+        return PTR_ERR(old_parent);
+    if (old_parent == NULL)
+        return -ENOENT;
+
+    struct vfs_inode *new_parent =
+        vfs_nameiparent(newpath, n2, newname, DIRSIZ + 1);
+    if (IS_ERR(new_parent)) {
+        vfs_iput(old_parent);
+        return PTR_ERR(new_parent);
+    }
+    if (new_parent == NULL) {
+        vfs_iput(old_parent);
+        return -ENOENT;
+    }
+
+    struct vfs_dentry old_dentry = {.sb = old_parent->sb, .parent = old_parent};
+    int ret = vfs_ilookup(old_parent, &old_dentry, oldname, strlen(oldname));
+    if (ret != 0) {
+        vfs_iput(old_parent);
+        vfs_iput(new_parent);
+        return ret;
+    }
+
+    ret = vfs_move(old_parent, &old_dentry, new_parent, newname, strlen(newname));
+    vfs_release_dentry(&old_dentry);
+    vfs_iput(old_parent);
+    vfs_iput(new_parent);
+    return ret;
+}
+
+/**
+ * sys_vfs_faccessat - Check file accessibility (AT_FDCWD-only)
+ * Args: a0=dirfd, a1=path, a2=mode, a3=flags
+ */
+uint64 sys_vfs_faccessat(void) {
+    int dirfd, mode, flags;
+    char path[MAXPATH];
+
+    argint(0, &dirfd);
+    if (dirfd != AT_FDCWD)
+        return -EBADF;
+
+    int n = argstr(1, path, MAXPATH);
+    argint(2, &mode);
+    argint(3, &flags);
+    if (n < 0)
+        return -EFAULT;
+
+    struct vfs_inode *inode = vfs_namei(path, n);
+    if (IS_ERR(inode))
+        return PTR_ERR(inode);
+    if (inode == NULL)
+        return -ENOENT;
+
+    if (mode != 0) {
+        mode_t perm = inode->mode;
+        if ((mode & 4) && !(perm & (S_IRUSR | S_IRGRP | S_IROTH))) {
+            vfs_iput(inode);
+            return -EACCES;
+        }
+        if ((mode & 2) && !(perm & (S_IWUSR | S_IWGRP | S_IWOTH))) {
+            vfs_iput(inode);
+            return -EACCES;
+        }
+        if ((mode & 1) && !(perm & (S_IXUSR | S_IXGRP | S_IXOTH))) {
+            vfs_iput(inode);
+            return -EACCES;
+        }
+    }
+
+    vfs_iput(inode);
+    return 0;
+}
+
+/**
+ * sys_vfs_dup3 - dup2 with flags (O_CLOEXEC)
+ * Args: a0=oldfd, a1=newfd, a2=flags
+ */
+uint64 sys_vfs_dup3(void) {
+    int oldfd, newfd, flags;
+    argint(0, &oldfd);
+    argint(1, &newfd);
+    argint(2, &flags);
+
+    if (oldfd == newfd)
+        return -EINVAL;  /* Linux dup3 behavior: EINVAL if oldfd == newfd */
+    if (newfd < 0 || newfd >= NOFILE)
+        return -EBADF;
+
+    struct vfs_file *f = __vfs_argfd(oldfd);
+    if (f == NULL)
+        return -EBADF;
+
+    spin_lock(&current->fdtable->lock);
+    struct vfs_file *old_newfd = __vfs_fdfree(newfd);
+    int ret = vfs_fdtable_alloc_fd_from(current->fdtable, f, newfd);
+    spin_unlock(&current->fdtable->lock);
+
+    if (old_newfd)
+        __vfs_fput_call_rcu(old_newfd);
+    vfs_fput(f);
+
+    if (ret >= 0 && (flags & O_CLOEXEC))
+        vfs_fdtable_set_fdflags(current->fdtable, ret, FD_CLOEXEC);
+
+    return ret;
 }

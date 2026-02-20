@@ -1513,9 +1513,18 @@ struct vfs_inode *vfs_alloc_inode(struct vfs_superblock *sb) {
     if (!sb->valid) {
         return ERR_PTR(-EINVAL); // Superblock is not valid
     }
+    if (sb->ops == NULL || sb->ops->alloc_inode == NULL) {
+        return ERR_PTR(-EINVAL);
+    }
     struct vfs_inode *inode = sb->ops->alloc_inode(sb);
+    if (inode == NULL) {
+        return ERR_PTR(-ENOMEM);
+    }
     if (IS_ERR(inode)) {
         return inode;
+    }
+    if (inode->ops == NULL || inode->ops->free_inode == NULL) {
+        return ERR_PTR(-EINVAL);
     }
     __vfs_inode_init(inode);
     struct vfs_inode *existing = vfs_add_inode(sb, inode);
@@ -1569,9 +1578,18 @@ struct vfs_inode *vfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
     if (!sb->valid) {
         return ERR_PTR(-EINVAL); // Superblock is not valid
     }
+    if (sb->ops == NULL || sb->ops->get_inode == NULL) {
+        return ERR_PTR(-EINVAL);
+    }
     struct vfs_inode *inode = sb->ops->get_inode(sb, ino);
+    if (inode == NULL) {
+        return ERR_PTR(-ENOENT);
+    }
     if (IS_ERR(inode)) {
         return inode;
+    }
+    if (inode->ops == NULL || inode->ops->free_inode == NULL) {
+        return ERR_PTR(-EINVAL);
     }
     __vfs_inode_init(inode);
     struct vfs_inode *existing = vfs_add_inode(sb, inode);

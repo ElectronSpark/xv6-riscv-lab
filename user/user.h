@@ -181,8 +181,12 @@ int kevent_wait(int kqfd, struct kevent *eventlist, int nevents, int timeout_ms)
 
 // gdb support — execute EBREAK to pause and wait for a debugger.
 // The kernel prints the PID and connection instructions.
+// a0 flag: 0 = don't stop on exec, 1 = stop at entry point after exec.
 static inline void waitgdb(void) {
-    asm volatile("ebreak");
+	asm volatile("li a0, 0\n\tebreak" ::: "a0", "memory");
+}
+static inline void waitgdb_stopentry(void) {
+	asm volatile("li a0, 1\n\tebreak" ::: "a0", "memory");
 }
 
 // ulib.c

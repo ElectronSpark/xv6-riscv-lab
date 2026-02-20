@@ -86,6 +86,7 @@ struct thread {
     int kstack_order;       // Kernel stack order, used for allocation
     uint64 kstack;          // Virtual address of kernel stack
     uint64 trapframe_vbase; // Base virtual address of the trapframe
+    uint64 clear_child_tid; // CLONE_CHILD_CLEARTID: address to zero + futex_wake on exit
     struct fs_struct *fs; // Filesystem state (on kernel stack below utrapframe)
     struct vfs_fdtable
         *fdtable; // File descriptor table (on kernel stack below fs)

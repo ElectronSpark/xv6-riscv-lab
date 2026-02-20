@@ -182,6 +182,31 @@ static struct {
      * network data (Ctrl-C) and target_stopped notifications. */
     int              target_running;
 
+    /* Set by gdbstub_exit_stop() when a debugged thread/process exits.
+     * The GDB session loop checks this after target_stopped fires. */
+    volatile int     target_exited;    /* 1 = process exited */
+    int              exit_code;        /* exit status (for W packet) */
+    int              exit_tid;         /* TID of thread that exited */
+    volatile int     thread_exited;    /* 1 = individual thread exit */
+    int              thread_exit_tid;  /* TID of exited thread */
+    int              thread_exit_code; /* exit code for thread */
+    volatile int     process_killed;   /* 1 = killed by signal */
+    int              kill_signal;      /* signal that killed it */
+
+    /* When set, gdbstub_exec_stop() will stop the process at the
+     * entry point of the new program after exec().  Defaults to 1
+     * on attach; waitgdb() clears it (a0==0), waitgdb -e keeps it
+     * (a0==1).  This avoids an unwanted extra stop when the user
+     * only wants to set breakpoints and continue past exec. */
+    int              stop_on_exec;
+
+    /* Set by gdbstub_signal_stop() when the debugger already inspected
+     * the process at the fault point.  gdbstub_exit_stop() checks this
+     * to skip its own Phase-1 inspection stop (the trapframe has been
+     * modified by signal delivery by then, so stopping again would
+     * show the wrong PC). */
+    volatile int     signal_stopped;
+
     /* Saved pbuf from last recv — may contain unconsumed bytes from
      * a TCP segment that carried multiple GDB packets. */
     struct pbuf     *rxpbuf;
@@ -1021,6 +1046,7 @@ static void gdb_handle_monitor(const char *hex_cmd, int hex_len)
         /* Canonicalize to TGID */
         gdb.target_pid = thread_tgid(gdb.target);
         gdb.attached = 1;
+        gdb.stop_on_exec = 1;
 
         /* Wake pending process if it was waiting for a debugger */
         if (gdb.pending_pid == pid || gdb.pending_pid == gdb.target_pid) {
@@ -1085,6 +1111,7 @@ static void gdb_handle_vattach(const char *args)
     /* Canonicalize to TGID */
     gdb.target_pid = thread_tgid(gdb.target);
     gdb.attached = 1;
+    gdb.stop_on_exec = 1;
 
     printf("gdbstub: attached to pid %d (tgid %d)\n", pid, gdb.target_pid);
 
@@ -1145,6 +1172,7 @@ static void gdb_handle_packet(const char *pkt, int len)
             gdb.target_pid = pid;
             if (gdb_resolve_target() == 0) {
                 gdb.attached = 1;
+                gdb.stop_on_exec = 1;
                 gdb.pending_pid = 0;
                 printf("gdbstub: auto-attached to pid %d\n", pid);
                 sem_post(&gdb.debugger_attached);
@@ -1451,7 +1479,8 @@ static void gdb_handle_packet(const char *pkt, int len)
     case 'q': {
         if (strncmp(pkt, "qSupported", 10) == 0) {
             gdb_send("PacketSize=1000;swbreak+;vContSupported+"
-                     ";multiprocess+;qXfer:threads:read+");
+                     ";multiprocess+;qXfer:threads:read+"
+                     ";ThreadEvents+");
         } else if (strcmp(pkt, "qAttached") == 0) {
             gdb_send("1");  /* always "attached" */
         } else if (strcmp(pkt, "qC") == 0) {
@@ -1598,6 +1627,18 @@ static void gdb_handle_packet(const char *pkt, int len)
         break;
     }
 
+    /* ── Q — Set packets ── */
+    case 'Q': {
+        if (strncmp(pkt, "QThreadEvents:", 14) == 0) {
+            /* QThreadEvents:1 — enable thread exit events
+             * QThreadEvents:0 — disable */
+            gdb_ok();
+        } else {
+            gdb_empty();
+        }
+        break;
+    }
+
     default:
         gdb_empty();
         break;
@@ -1610,6 +1651,56 @@ static void gdb_handle_packet(const char *pkt, int len)
 /* Runs in the context of the target process's thread.  We signal the GDB      */
 /* network thread, then block until it says "continue" or "step".              */
 /* ──────────────────────────────────────────────────────────────────────────── */
+
+/*
+ * gdbstub_signal_stop() — called from usertrap() when a fatal signal
+ * (SIGSEGV, SIGBUS, SIGFPE, SIGILL, etc.) is about to be delivered to
+ * a debugged process.
+ *
+ * This stops the process BEFORE signal delivery so GDB can inspect the
+ * exact state at the point of the fault (registers, backtrace, memory).
+ * The trapframe still contains the faulting PC and all registers at the
+ * time of the fault.
+ *
+ * @param t     The faulting thread
+ * @param signo The signal number (e.g., SIGSEGV)
+ *
+ * Returns:
+ *   0  — process was stopped and GDB resumed it; caller should proceed
+ *         with signal delivery / kill.
+ *  -1  — process is not being debugged; caller should handle normally.
+ */
+int gdbstub_signal_stop(struct thread *t, int signo)
+{
+    int tgid = thread_tgid(t);
+    if (!gdb.attached || tgid != gdb.target_pid)
+        return -1;
+
+    GDB_LOG("signal_stop: tid=%d tgid=%d signo=%d pc=0x%lx stval=0x%lx",
+              t->pid, tgid, signo,
+              t->trapframe->trapframe.sepc,
+              t->trapframe->trapframe.stval);
+
+    gdb.target      = t;
+    gdb.stop_signal = signo;
+    gdb.stop_tid    = t->pid;
+
+    /* Notify the GDB thread that the target has stopped */
+    sem_post(&gdb.target_stopped);
+
+    /* Block until GDB says continue or step */
+    sem_wait(&gdb.target_resume);
+
+    /* Mark that the debugger already inspected at the fault point.
+     * gdbstub_exit_stop() will skip its Phase-1 stop. */
+    gdb.signal_stopped = 1;
+    __sync_synchronize();
+
+    /* Flush I-cache in case GDB modified code */
+    asm volatile("fence.i");
+
+    return 0;
+}
 
 /*
  * gdbstub_trap() — called from usertrap() when scause == RISCV_BREAKPOINT_TRAP.
@@ -1646,7 +1737,10 @@ int gdbstub_trap(struct thread *t)
         /* Block until GDB attaches to us */
         sem_wait(&gdb.debugger_attached);
 
-        /* GDB has attached — fall through to normal stop handling. */
+        /* GDB has attached — fall through to normal stop handling.
+         * Check a0: waitgdb() sets a0=0 (don't stop on exec),
+         * waitgdb -e sets a0=1 (stop at entry point after exec). */
+        gdb.stop_on_exec = (t->trapframe->trapframe.a0 != 0) ? 1 : 0;
     }
 
     uint64 pc = t->trapframe->trapframe.sepc;
@@ -1725,11 +1819,20 @@ void gdbstub_exec_stop(struct thread *t)
     memset(gdb.bps, 0, sizeof(gdb.bps));
     gdb_clean_step_bp();
 
+    /*
+     * Only stop at the entry point if stop_on_exec was requested
+     * (e.g. via `waitgdb -e`).  Otherwise just clear stale breakpoints
+     * and let the process continue into the new binary.
+     */
+    if (!gdb.stop_on_exec)
+        return;
+    gdb.stop_on_exec = 0; /* one-shot */
+
     gdb.target = t;
     gdb.stop_signal = SIGTRAP;
     gdb.stop_tid = t->pid;
 
-    printf("gdbstub: pid %d exec -> %s, stopped for debugger\n",
+    printf("gdbstub: pid %d exec -> %s, stopped at entry point\n",
            t->pid, t->name);
 
     /* Notify the GDB thread that the target has stopped */
@@ -1740,6 +1843,92 @@ void gdbstub_exec_stop(struct thread *t)
 
     /* Flush I-cache — GDB may have inserted breakpoints from another hart. */
     asm volatile("fence.i");
+}
+
+/*
+ * gdbstub_exit_stop() — called from exit() when a debugged thread/process
+ * is about to exit.
+ *
+ * For the last thread (or single-threaded process) this sends a W (exited)
+ * notification so the remote GDB client sees a clean exit.  For individual
+ * thread exits in a multi-threaded process we send a thread-exit event.
+ *
+ * Must be called while the thread's VM is still valid (before resource
+ * teardown).
+ *
+ * @param t       The exiting thread
+ * @param status  The exit code
+ * @param last    true if this is the last thread in the process (or
+ *                single-threaded)
+ */
+void gdbstub_exit_stop(struct thread *t, int status, int last)
+{
+    if (!gdb.attached || thread_tgid(t) != gdb.target_pid)
+        return;
+
+    GDB_LOG("exit_stop: tid=%d tgid=%d status=%d last=%d",
+              t->pid, thread_tgid(t), status, last);
+
+    if (last) {
+        /*
+         * Whole process is about to exit.
+         *
+         * If gdbstub_signal_stop() already stopped the process at the
+         * fault point (SIGSEGV, etc.), the debugger has had its chance
+         * to inspect.  Skip Phase 1 — the trapframe has been modified
+         * by signal delivery by now, so stopping again would show the
+         * wrong PC (e.g. _start instead of the faulting instruction).
+         *
+         * If signal_stopped is NOT set (e.g. normal exit()), do the
+         * Phase-1 inspection stop so GDB can look around.
+         */
+        if (!gdb.signal_stopped) {
+            /* Phase 1: stop for inspection */
+            gdb.target       = t;
+            gdb.stop_signal  = SIGTRAP;
+            gdb.stop_tid     = t->pid;
+
+            sem_post(&gdb.target_stopped);
+            sem_wait(&gdb.target_resume);
+        }
+        gdb.signal_stopped = 0;
+
+        /*
+         * Phase 2: GDB said "continue" — now send the exit event.
+         *          Clean up breakpoints while the VM is still live.
+         */
+        gdb_clean_step_bp();
+        gdb_remove_all_bps();
+
+        gdb.target        = t;
+        gdb.exit_code     = status;
+        gdb.exit_tid      = t->pid;
+        gdb.target_exited = 1;
+        __sync_synchronize();
+
+        sem_post(&gdb.target_stopped);
+
+        /*
+         * Do NOT block again — the session loop will send the W
+         * packet and detach.  The process proceeds to tear down.
+         */
+    } else {
+        /*
+         * Individual thread exit in a multi-threaded process.
+         * Notify GDB so it can update its thread list.
+         * This is a non-blocking notification — the thread is going
+         * away, we just inform GDB.
+         */
+        gdb.thread_exit_tid  = t->pid;
+        gdb.thread_exit_code = status;
+        gdb.thread_exited    = 1;
+        __sync_synchronize();
+
+        /* Wake the GDB session loop */
+        sem_post(&gdb.target_stopped);
+
+        /* Don't block — this thread is self-reaping. */
+    }
 }
 
 /*
@@ -1797,6 +1986,14 @@ static void gdb_session(struct netconn *conn)
     gdb.nbps = 0;
     gdb.interrupt_pending = 0;
     gdb.target_running = 0;
+    gdb.target_exited = 0;
+    gdb.exit_code = 0;
+    gdb.exit_tid = 0;
+    gdb.thread_exited = 0;
+    gdb.thread_exit_tid = 0;
+    gdb.thread_exit_code = 0;
+    gdb.process_killed = 0;
+    gdb.kill_signal = 0;
     gdb.rxpbuf = NULL;
     gdb.rxpoff = 0;
     memset(gdb.bps, 0, sizeof(gdb.bps));
@@ -1820,6 +2017,49 @@ static void gdb_session(struct netconn *conn)
         /* ── Check for target stop ─────────────────────────────── */
         if (gdb.target_running && sem_trywait(&gdb.target_stopped) == 0) {
             gdb.target_running = 0;
+
+            /* ── Process exit ──────────────────────────────────── */
+            if (gdb.target_exited) {
+                int code = (gdb.exit_code >> 8) & 0xff;  /* W uses raw byte */
+                char buf[16];
+                int n = snprintf(buf, sizeof(buf), "W%02x", code);
+                GDB_LOG("target exited (pid=%d code=%d)", gdb.target_pid, gdb.exit_code);
+                gdb_send_packet(buf, n);
+                gdb.target_exited = 0;
+                gdb.attached = 0;
+                gdb.target = NULL;
+                gdb.target_pid = 0;
+                continue;
+            }
+
+            /* ── Process killed by signal ──────────────────────── */
+            if (gdb.process_killed) {
+                char buf[16];
+                int n = snprintf(buf, sizeof(buf), "X%02x", gdb.kill_signal & 0xff);
+                GDB_LOG("target killed by signal %d (pid=%d)", gdb.kill_signal, gdb.target_pid);
+                gdb_send_packet(buf, n);
+                gdb.process_killed = 0;
+                gdb.attached = 0;
+                gdb.target = NULL;
+                gdb.target_pid = 0;
+                continue;
+            }
+
+            /* ── Individual thread exit ────────────────────────── */
+            if (gdb.thread_exited) {
+                char buf[64];
+                int teid = gdb.thread_exit_tid;
+                int tecode = (gdb.thread_exit_code >> 8) & 0xff;
+                int n = snprintf(buf, sizeof(buf), "w%02x;p%x.%x",
+                                 tecode, gdb.target_pid, teid);
+                GDB_LOG("thread exited (tid=%d code=%d)", teid, gdb.thread_exit_code);
+                gdb_send_packet(buf, n);
+                gdb.thread_exited = 0;
+                /* Stay attached — other threads still running */
+                continue;
+            }
+
+            /* ── Normal stop (breakpoint / signal) ─────────────── */
             GDB_LOG("target stopped (sig=%d)", gdb.stop_signal);
             gdb_clean_step_bp();
             if (gdb.target && gdb.target->sched_entity) {

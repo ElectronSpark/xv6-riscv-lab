@@ -100,9 +100,31 @@ void exit(int status) {
         status = tg->group_exit_code;
     }
 
+    // Notify GDB stub before tearing down resources (VM, fds, etc.).
+    // For single-threaded or group leader: this is a process exit.
+    // For non-leader clone threads: this is a thread exit.
+    {
+        extern void gdbstub_exit_stop(struct thread *, int, int);
+        int is_leader = thread_is_group_leader(p) || tg == NULL;
+        int is_last = is_leader || (tg != NULL &&
+                      __atomic_load_n(&tg->live_threads,
+                                      __ATOMIC_RELAXED) <= 1);
+        gdbstub_exit_stop(p, status, is_last);
+    }
+
     // Wake vfork parent FIRST - they're sharing our address space
     // and need to resume before we tear anything down
     vfork_done(p);
+
+    // CLONE_CHILD_CLEARTID: zero the TID word at the stored address and
+    // issue a futex wake so pthread_join can detect thread exit.
+    // Must be done while VM is still valid.
+    if (p->clear_child_tid != 0) {
+        int zero = 0;
+        vm_copyout(p->vm, p->clear_child_tid, (char *)&zero, sizeof(zero));
+        futex_wake_addr(p->vm, p->clear_child_tid, 1);
+        p->clear_child_tid = 0;
+    }
 
     // VFS file descriptor table cleanup (closes all VFS files)
     if (p->fdtable != NULL) {

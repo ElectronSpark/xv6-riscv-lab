@@ -1,0 +1,315 @@
+/*
+ * bits/syscall.h.in — xv6 syscall number definitions for musl
+ *
+ * These map musl's SYS_* names to xv6's syscall numbers.
+ * xv6 uses CUSTOM numbering (not Linux).
+ *
+ * musl internally uses Linux SYS_* names like SYS_openat, SYS_read, etc.
+ * We #define each to the corresponding xv6 number.
+ */
+
+/* ---- Process management (1-19) ---- */
+#define SYS_clone           1
+#define SYS_vfork           2
+#define SYS_exit            3
+#define SYS_exit_group      4
+#define SYS_wait4           58   /* map to xv6 SYS_waitpid (pid, status, options) */
+#define SYS_execve          6   /* xv6 SYS_exec */
+#define SYS_kill            7
+#define SYS_tgkill          8
+#define SYS_getpid          9
+#define SYS_gettid          10
+/* SYS_sleep = 11 (no musl equivalent; musl uses nanosleep) */
+/* SYS_pause = 12 (handled separately) */
+/* SYS_uptime = 13 (xv6-specific) */
+#define SYS_brk             68
+#define SYS_setpgid         15
+#define SYS_getpgid         16
+#define SYS_setsid          17
+#define SYS_getsid          18
+#define SYS_getrandom       19
+
+/* ---- File system / VFS (20-49) ---- */
+#define SYS_open            20
+#define SYS_close           21
+#define SYS_read            22
+#define SYS_write           23
+#define SYS_dup             24
+#define SYS_pipe            25   /* also SYS_pipe2 = 129 */
+#define SYS_fstat           26
+#define SYS_link            27   /* also used for linkat */
+#define SYS_unlink          28   /* also used for unlinkat */
+#define SYS_symlink         29   /* also used for symlinkat */
+#define SYS_mkdir           30   /* also used for mkdirat */
+#define SYS_mknod           31   /* also used for mknodat */
+#define SYS_chdir           32
+#define SYS_chroot          33
+#define SYS_mount           34
+#define SYS_umount2         35   /* xv6 SYS_umount */
+#define SYS_connect         36
+#define SYS_getdents64      37   /* xv6 SYS_getdents */
+#define SYS_getcwd          38
+#define SYS_sync            39   /* xv6: sync is 900, but we use 39 */
+#define SYS_ioctl           40
+/* SYS_tcgetattr = 41 (xv6-specific, musl uses ioctl) */
+/* SYS_tcsetattr = 42 (xv6-specific, musl uses ioctl) */
+#define SYS_lseek           43
+#define SYS_dup2            44   /* musl may also use dup3 */
+/* SYS_dup3 = 138, defined below in extended syscalls */
+#define SYS_fcntl           45
+/* SYS_faccessat = 137, defined below in extended syscalls */
+/* SYS_renameat  = 136, defined below in extended syscalls */
+#define SYS_readlink        48
+/* SYS_readlinkat = 135, defined below in extended syscalls */
+#define SYS_stat            49
+
+/* ---- Memory management (50-69) ---- */
+#define SYS_mmap            50
+#define SYS_munmap          51
+#define SYS_mprotect        52
+#define SYS_mremap          53
+#define SYS_msync           54
+#define SYS_mincore         55
+#define SYS_madvise         56
+#define SYS_gettimeofday    57
+#define SYS_wait            58   /* xv6 SYS_waitpid */
+#define SYS_waitpid         58
+#define SYS_nanosleep       59
+#define SYS_ftruncate       60
+#define SYS_getppid         61
+#define SYS_uname           62
+#define SYS_lstat           63
+/* #define SYS_poll         64 */
+#define SYS_ppoll           64   /* map ppoll to xv6 poll */
+#define SYS_futex           69
+
+/* ---- Signals (70-89) ---- */
+#define SYS_rt_sigaction    70   /* xv6 SYS_sigaction */
+#define SYS_rt_sigreturn    71   /* xv6 SYS_sigreturn */
+#define SYS_rt_sigpending   72
+#define SYS_rt_sigprocmask  73
+#define SYS_rt_sigsuspend   75
+#define SYS_rt_sigtimedwait 76   /* map to xv6 SYS_sigwait */
+#define SYS_tkill           77
+#define SYS_rt_sigqueueinfo 936  /* stub — musl AIO uses it */
+
+/* ---- Network / sockets (100-119) ---- */
+#define SYS_socket          100
+#define SYS_bind            101
+#define SYS_listen          102
+#define SYS_accept          103
+/* SYS_sconnect = 104 (xv6-specific) */
+#define SYS_sendto          105
+#define SYS_recvfrom        106
+#define SYS_setsockopt      107
+#define SYS_getsockopt      108
+#define SYS_shutdown        109
+#define SYS_getpeername     110
+#define SYS_getsockname     111
+
+/* ---- Extended syscalls for musl (120-139) ---- */
+#define SYS_openat          120
+#define SYS_writev          121
+#define SYS_readv           122
+#define SYS_set_tid_address 123
+#define SYS_clock_gettime   124
+#define SYS_clock_getres    125
+#define SYS_clock_settime   935  /* stub — xv6 doesn't support setting time */
+#define SYS_pread64         126
+#define SYS_preadv          126  /* map to pread64 */
+#define SYS_pwrite64        127
+#define SYS_pwritev         127  /* map to pwrite64 */
+#define SYS_fstatat         128
+#define SYS_newfstatat      128  /* musl name */
+#define SYS_pipe2           129
+#define SYS_mkdirat         130
+#define SYS_mknodat         131
+#define SYS_unlinkat        132
+#define SYS_linkat          133
+#define SYS_symlinkat       134
+#define SYS_readlinkat      135
+#define SYS_renameat        136
+#define SYS_renameat2       136  /* musl alias */
+#define SYS_faccessat       137
+#define SYS_faccessat2      137  /* musl alias */
+#define SYS_dup3            138
+
+/* ---- Mappings for musl internal use ---- */
+/* musl uses these names internally; map to xv6 equivalents */
+#define SYS_sbrk            14
+#define SYS_mmap2           50   /* same as mmap on 64-bit */
+#define SYS_access          46
+#define SYS_rename          47
+
+/* Note: *at() variants now have their own proper kernel handlers.
+ * Do NOT map them to the non-*at() numbers — the argument order differs. */
+
+#define SYS_fchdir          32   /* map to SYS_chdir */
+#define SYS_umount          35
+
+/* ---- Stubs for syscalls musl references but xv6 lacks ---- */
+/* These return -ENOSYS at runtime, which musl handles gracefully */
+#define SYS_membarrier      998   /* unused high number */
+#define SYS_rseq            997
+#define SYS_prlimit64       996
+#define SYS_statx           995
+#define SYS_copy_file_range 994
+#define SYS_sendfile        993
+#define SYS_splice          992
+#define SYS_tee             991
+#define SYS_fallocate       990
+#define SYS_fadvise64       989
+#define SYS_epoll_create1   988
+#define SYS_epoll_ctl       987
+#define SYS_epoll_pwait     986
+#define SYS_eventfd2        985
+#define SYS_signalfd4       984
+#define SYS_timerfd_create  983
+#define SYS_timerfd_settime 982
+#define SYS_timerfd_gettime 981
+#define SYS_inotify_init1   980
+#define SYS_inotify_add_watch 979
+#define SYS_inotify_rm_watch  978
+#define SYS_accept4         977
+#define SYS_recvmsg         976
+#define SYS_sendmsg         975
+#define SYS_socketpair      974
+#define SYS_getuid          139
+#define SYS_geteuid         140
+#define SYS_getgid          141
+#define SYS_getegid         142
+#define SYS_setuid          143
+#define SYS_setgid          144
+#define SYS_setreuid        145
+#define SYS_setregid        146
+#define SYS_getgroups       147
+#define SYS_setgroups       148
+#define SYS_sched_getaffinity  963
+#define SYS_sched_setaffinity  962
+#define SYS_sched_getscheduler 961
+#define SYS_sched_setscheduler 960
+#define SYS_sched_yield     959
+#define SYS_sched_get_priority_max 958
+#define SYS_sched_get_priority_min 957
+#define SYS_clock_nanosleep 956
+#define SYS_timer_create    955
+#define SYS_timer_settime   954
+#define SYS_timer_gettime   953
+#define SYS_timer_delete    952
+#define SYS_timer_getoverrun 951
+#define SYS_prctl           950
+#define SYS_arch_prctl      949
+#define SYS_capget          948
+#define SYS_capset          947
+#define SYS_personality     946
+#define SYS_pivot_root      945
+#define SYS_setitimer       944
+#define SYS_getitimer       943
+#define SYS_fchmod          942
+#define SYS_fchmodat        941
+#define SYS_fchown          940
+#define SYS_fchownat        939
+#define SYS_utimensat       938
+#define SYS_clone3          937
+#define SYS_rt_sigqueueinfo 936
+#define SYS_clock_settime   935
+
+/* IPC stubs — xv6 doesn't support System V IPC */
+#define SYS_msgctl          934
+#define SYS_msgget          933
+#define SYS_msgrcv          932
+#define SYS_msgsnd          931
+#define SYS_semctl          930
+#define SYS_semget          929
+#define SYS_semop           928
+#define SYS_shmat           927
+#define SYS_shmctl          926
+#define SYS_shmdt           925
+#define SYS_shmget          924
+#define SYS_semtimedop      923
+
+/* Additional stubs — all return -ENOSYS at runtime */
+#define SYS_acct                            922
+#define SYS_clock_adjtime64                 921
+#define SYS_delete_module                   920
+#define SYS_execveat                        919
+#define SYS_fanotify_init                   918
+#define SYS_fanotify_mark                   917
+#define SYS_fchmodat2                       916
+#define SYS_fdatasync                       915
+#define SYS_fgetxattr                       914
+#define SYS_flistxattr                      913
+#define SYS_flock                           912
+#define SYS_fremovexattr                    911
+#define SYS_fsetxattr                       910
+#define SYS_fstatfs                         909
+#define SYS_fsync                           908
+#define SYS_get_robust_list                 907
+#define SYS_getcpu                          906
+#define SYS_getpriority                     905
+#define SYS_getresgid                       904
+#define SYS_getresuid                       903
+#define SYS_getrusage                       902
+#define SYS_getxattr                        901
+#define SYS_init_module                     900
+#define SYS_lgetxattr                       899
+#define SYS_listxattr                       898
+#define SYS_llistxattr                      897
+#define SYS_lremovexattr                    896
+#define SYS_lsetxattr                       895
+#define SYS_memfd_create                    894
+#define SYS_mlock2                          893
+#define SYS_mlockall                        892
+#define SYS_mq_getsetattr                   891
+#define SYS_mq_notify                       890
+#define SYS_mq_open                         889
+#define SYS_mq_timedreceive_time64          888
+#define SYS_mq_timedsend_time64             887
+#define SYS_mq_unlink                       886
+#define SYS_munlock                         885
+#define SYS_munlockall                      884
+#define SYS_name_to_handle_at               883
+#define SYS_open_by_handle_at               882
+#define SYS_preadv2                         881
+#define SYS_process_vm_readv                880
+#define SYS_process_vm_writev               879
+#define SYS_pselect6_time64                 878
+#define SYS_ptrace                          877
+#define SYS_pwritev2                        876
+#define SYS_quotactl                        875
+#define SYS_readahead                       874
+#define SYS_reboot                          873
+#define SYS_recvmmsg_time64                 872
+#define SYS_remap_file_pages                871
+#define SYS_removexattr                     870
+#define SYS_sched_getparam                  869
+#define SYS_sched_rr_get_interval_time64    868
+#define SYS_sched_setparam                  867
+#define SYS_set_robust_list                 866
+#define SYS_setdomainname                   865
+#define SYS_setfsgid                        864
+#define SYS_setfsuid                        863
+#define SYS_sethostname                     862
+#define SYS_setns                           861
+#define SYS_setpriority                     860
+#define SYS_setresgid                       859
+#define SYS_setresuid                       858
+#define SYS_setxattr                        857
+#define SYS_sigaltstack                     856
+#define SYS_statfs                          855
+#define SYS_swapoff                         854
+#define SYS_swapon                          853
+#define SYS_syncfs                          852
+#define SYS_sysinfo                         851
+#define SYS_syslog                          850
+#define SYS_times                           849
+#define SYS_truncate                        848
+#define SYS_umask                           847
+#define SYS_unshare                         846
+#define SYS_vhangup                         845
+#define SYS_vmsplice                        844
+#define SYS_waitid                          843
+#define SYS_sendmmsg                        842
+#define SYS_setrlimit                       841
+#define SYS_getrlimit                       840
+#define SYS_settimeofday                    839
