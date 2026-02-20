@@ -148,8 +148,21 @@ static void lwip_sock_free(struct lwip_sock *sk)
         return;
     if (sk->lastbuf != NULL)
         netbuf_delete(sk->lastbuf);
-    if (sk->conn != NULL)
+    if (sk->conn != NULL) {
+        /*
+         * Follow lwIP reference (lwip_close in sockets.c):
+         * 1. netconn_prepare_delete() — synchronous TCP close, sets pcb=NULL
+         *    and MBOXINVALID
+         * 2. netconn_delete() — sees MBOXINVALID, goes to netconn_free()
+         *
+         * Calling netconn_delete() alone would also call prepare_delete
+         * internally, but only if MBOXINVALID is not yet set. Calling
+         * prepare_delete explicitly first is safer and matches the
+         * reference lwIP socket layer.
+         */
+        netconn_prepare_delete(sk->conn);
         netconn_delete(sk->conn);
+    }
     kfree((void *)sk);
 }
 
