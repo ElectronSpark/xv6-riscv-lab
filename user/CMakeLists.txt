@@ -493,7 +493,7 @@ if(EXISTS "${CPYTHON_SRC_DIR}/configure")
                 LDFLAGS=-static\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -Wl,-T,${MUSL_LINKER_SCRIPT}\ -L${NCURSES_BUILD_DIR}/lib\ -L${READLINE_BUILD_DIR}\ -L${MUSL_SYSROOT}/lib
                 LIBS=${MUSL_LIBC_A}\ ${LIBGCC_PATH}
                 ${CPYTHON_SRC_DIR}/configure
-                    --host=riscv64-unknown-linux-gnu
+                    --host=riscv64-unknown-xv6
                     --build=x86_64-pc-linux-gnu
                     --with-build-python=python3
                     --disable-shared
