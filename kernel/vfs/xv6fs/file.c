@@ -187,7 +187,12 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count,
         // transaction → superblock → inode
         // VFS releases inode lock before calling this function to avoid
         // deadlock.
-        xv6fs_begin_op(xv6_sb);
+        int begin_ret = xv6fs_begin_op(xv6_sb);
+        if (begin_ret != 0) {
+            if (bytes_written == 0)
+                return begin_ret;
+            goto done;
+        }
 
         // Now acquire inode lock to protect inode metadata during write.
         // The file reference guarantees the inode remains allocated.
