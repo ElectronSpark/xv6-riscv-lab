@@ -90,6 +90,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     netdev_init();
     pci_init();
     x1_emac_init();   // SpacemiT X1 EMAC (probes via FDT)
+    x1_sdhci_init();  // SpacemiT X1 SDHCI SD/eMMC (probes via FDT)
     signal_init(); // signal handling initialization
     binit();       // buffer cache
     // Legacy iinit() and fileinit() removed - VFS handles these

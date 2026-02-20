@@ -181,6 +181,9 @@ void netdev_init(void);
 // x1_emac.c
 void x1_emac_init(void);
 
+// x1_sdhci.c
+void x1_sdhci_init(void);
+
 // net.c
 void net_rx(struct mbuf *);
 void net_tx_udp(struct mbuf *, uint32, uint16, uint16);
