@@ -72,6 +72,11 @@ static int xv6fs_pcache_read_page(struct pcache *pcache, page_t *page) {
         }
 
         ret = blkdev_submit_bio(xv6_sb->blkdev, bio);
+        if (ret != 0) {
+            bio_release(bio);
+            return ret;
+        }
+        ret = bio_await(bio);
         bio_release(bio);
         if (ret != 0)
             return ret;
@@ -117,6 +122,11 @@ static int xv6fs_pcache_write_page(struct pcache *pcache, page_t *page) {
         }
 
         ret = blkdev_submit_bio(xv6_sb->blkdev, bio);
+        if (ret != 0) {
+            bio_release(bio);
+            return ret;
+        }
+        ret = bio_await(bio);
         bio_release(bio);
         if (ret != 0)
             return ret;

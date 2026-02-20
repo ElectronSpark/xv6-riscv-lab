@@ -6,6 +6,7 @@
 #include <types.h>
 #include <list_type.h>
 #include <kobject.h>
+#include <lock/completion_types.h>
 
 typedef struct blkdev blkdev_t;
 typedef struct page_struct page_t;
@@ -44,6 +45,7 @@ struct bio {
     void *private_data; // Private data for the bio, used by the completion
                         // callback
     int error;          // Error code if any error happens during I/O
+    completion_t io_completion; // For callers to await I/O completion
     struct bio_vec bvecs[0];
 };
 

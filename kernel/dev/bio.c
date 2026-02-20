@@ -44,6 +44,7 @@ struct bio *bio_alloc(blkdev_t *bdev, int16 vec_length, bool rw,
     bio->kobj.name = "bio";
     bio->kobj.ops.release = __bio_relase_kobj_cb;
     kobject_init(&bio->kobj);
+    completion_init(&bio->io_completion);
     return bio;
 }
 

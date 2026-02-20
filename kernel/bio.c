@@ -18,7 +18,7 @@
 // Locking order:
 // 1. bcache.lock (spinlock) - protects LRU list and hash table
 // 2. buf->lock (mutex) - protects individual buffer contents
-// 3. disk I/O completion (via wait_for_completion)
+// 3. disk I/O completion (via bio_await)
 //
 // bread() acquires buf->lock and may block waiting for disk I/O.
 // Callers should not hold other sleeping locks while holding buffer locks
@@ -34,6 +34,7 @@
 #include "printf.h"
 #include "vfs/xv6fs/ondisk.h" // for BSIZE
 #include "dev/buf.h"
+#include "dev/bio.h"
 #include <mm/page.h>
 #include "dev/blkdev.h"
 #include "list.h"
@@ -270,6 +271,7 @@ struct buf *bread(uint dev, uint blockno) {
             return NULL;
         }
         blkdev_submit_bio(blkdev, bio);
+        bio_await(bio);
         b->valid = 1;
         __buf_bio_cleanup(bio);
         int ret = blkdev_put(blkdev);
@@ -287,6 +289,7 @@ void bwrite(struct buf *b) {
     struct bio *bio = __buf_alloc_bio(b, blkdev, true);
     assert(!IS_ERR_OR_NULL(bio), "bwrite: bio_alloc failed");
     blkdev_submit_bio(blkdev, bio);
+    bio_await(bio);
     __buf_bio_cleanup(bio);
 
     // Clear dirty flag after successful write
@@ -356,6 +359,7 @@ void bsync(void) {
                 struct bio *bio = __buf_alloc_bio(b, blkdev, true);
                 if (!IS_ERR_OR_NULL(bio)) {
                     blkdev_submit_bio(blkdev, bio);
+                    bio_await(bio);
                     __buf_bio_cleanup(bio);
                     flushed++;
                 }
