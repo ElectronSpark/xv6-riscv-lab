@@ -32,6 +32,8 @@
 #include "errno.h"
 #include <mm/page.h>
 #include <uabi/stat.h>
+#include "proc/sched.h"
+#include "proc/thread.h"
 
 /* ======================================================================
  * Per-instance driver state
@@ -109,23 +111,6 @@ static inline void sdhci_writel(struct sdhci_softc *sc, uint32 off, uint32 val)
 }
 
 /* ======================================================================
- * Timing helpers
- * ====================================================================== */
-
-static void delay_us(uint64 us)
-{
-    uint64 ticks = (uint64)TIMEBASE_FREQUENCY * us / 1000000ULL;
-    uint64 start = r_time();
-    while (r_time() - start < ticks)
-        ;
-}
-
-static void delay_ms(uint64 ms)
-{
-    delay_us(ms * 1000);
-}
-
-/* ======================================================================
  * APMU Clock / Reset Configuration
  * ====================================================================== */
 
@@ -140,7 +125,7 @@ static int sdhci_apmu_wait_fc(volatile uint32 *reg, int timeout_us)
     while (r_time() < deadline) {
         if (!(*reg & SDH_APMU_CLK_FC))
             return 0;
-        delay_us(1);
+        scheduler_yield();
     }
     return -1;
 }
@@ -262,7 +247,7 @@ static void sdhci_apmu_enable(struct sdhci_softc *sc)
     *sc->apmu_reg = val;
     __sync_synchronize();
 
-    delay_ms(1);  /* let clocks and reset stabilize */
+    sleep_ms(1);  /* let clocks and reset stabilize */
 
     printf("x1_sdhci%d: APMU enabled (reg=0x%x, axi=0x%x)\n",
            sc->index, *sc->apmu_reg,
@@ -288,7 +273,7 @@ static int sdhci_wait_bit(struct sdhci_softc *sc, uint32 reg, uint32 mask,
         } else {
             if (!(val & mask)) return 0;
         }
-        delay_us(10);
+        scheduler_yield();
     }
     return -1;
 }
@@ -310,7 +295,7 @@ static int sdhci_reset(struct sdhci_softc *sc, uint8 mask)
     while (r_time() < deadline) {
         if (!(sdhci_readb(sc, SDHCI_SOFTWARE_RESET) & mask))
             return 0;
-        delay_us(10);
+        scheduler_yield();
     }
     printf("x1_sdhci%d: reset timeout (mask=0x%x)\n", sc->index, mask);
     return -1;
@@ -366,7 +351,7 @@ static void sdhci_set_clock(struct sdhci_softc *sc, uint32 target_hz)
     clk |= SDHCI_CLOCK_CARD_EN;
     sdhci_writew(sc, SDHCI_CLOCK_CONTROL, clk);
 
-    delay_us(100);
+    scheduler_yield(); /* brief settling time after clock enable */
 }
 
 /**
@@ -375,7 +360,7 @@ static void sdhci_set_clock(struct sdhci_softc *sc, uint32 target_hz)
 static void sdhci_set_power(struct sdhci_softc *sc)
 {
     sdhci_writeb(sc, SDHCI_POWER_CONTROL, SDHCI_POWER_330 | SDHCI_POWER_ON);
-    delay_ms(10);
+    sleep_ms(10);
 }
 
 /**
@@ -758,7 +743,7 @@ static int sdhci_enumerate_sd(struct sdhci_softc *sc)
 
     /* CMD0: Go idle */
     sdhci_send_cmd(sc, MMC_GO_IDLE_STATE, 0, SDHCI_CMD_RESP_NONE, NULL);
-    delay_ms(10);
+    sleep_ms(10);
 
     /* CMD8: Send IF Condition (voltage check for SD 2.0+) */
     ret = sdhci_send_cmd(sc, SD_SEND_IF_COND, 0x1AA,
@@ -787,7 +772,7 @@ static int sdhci_enumerate_sd(struct sdhci_softc *sc)
             printf("x1_sdhci%d: ACMD41 timeout — card not ready\n", sc->index);
             return -ETIMEDOUT;
         }
-        delay_ms(10);
+        sleep_ms(10);
     } while (!(resp[0] & MMC_OCR_BUSY));
 
     /* Check if card is SDHC/SDXC */
@@ -908,7 +893,7 @@ static int sdhci_enumerate_emmc(struct sdhci_softc *sc)
 
     /* CMD0: Go idle */
     sdhci_send_cmd(sc, MMC_GO_IDLE_STATE, 0, SDHCI_CMD_RESP_NONE, NULL);
-    delay_ms(10);
+    sleep_ms(10);
 
     /* CMD1: SEND_OP_COND — negotiate operating conditions.
      * Request sector addressing mode + 3.3V.
@@ -932,7 +917,7 @@ static int sdhci_enumerate_emmc(struct sdhci_softc *sc)
                    "eMMC not present or not powered\n", sc->index, tries);
             return -ETIMEDOUT;
         }
-        delay_ms(10);
+        sleep_ms(10);
     } while (1);
 
     if (!cmd1_ok) {
@@ -1037,7 +1022,7 @@ static int sdhci_enumerate_emmc(struct sdhci_softc *sc)
         ctrl |= SDHCI_CTRL_8BITBUS;
         sdhci_writeb(sc, SDHCI_HOST_CONTROL, ctrl);
         sc->bus_width = 8;
-        delay_ms(1);
+        sleep_ms(1);
     } else {
         sc->bus_width = 1;
         printf("x1_sdhci%d: 8-bit bus switch failed, using 1-bit\n", sc->index);
@@ -1242,20 +1227,19 @@ static int sdhci_init_one(int idx, int is_emmc)
 }
 
 /* ======================================================================
- * Top-level init — called from start_kernel
+ * Top-level init — spawns a kthread for post-init probing
  * ====================================================================== */
 
 /**
- * x1_sdhci_init — Probe and initialise all SDHCI instances found by FDT.
+ * Kernel thread entry point: probes and initialises all SDHCI instances.
  *
- * Called during kernel boot after FDT parsing and MMIO mapping.
+ * Running in kthread context allows us to use sleep_ms() (scheduler-
+ * based timer sleep) instead of busy-waiting, which is friendlier to
+ * the system during the potentially slow SD/eMMC enumeration.
  */
-void x1_sdhci_init(void)
+static void x1_sdhci_kthread(uint64 arg1 __attribute__((unused)),
+                             uint64 arg2 __attribute__((unused)))
 {
-    if (!platform.has_sdhci) {
-        return;
-    }
-
     printf("x1_sdhci: found %d SDHCI instance(s)\n", platform.sdhci_count);
 
     for (int i = 0; i < platform.sdhci_count && i < MAX_SDH_INSTANCES; i++) {
@@ -1274,4 +1258,28 @@ void x1_sdhci_init(void)
             printf("x1_sdhci%d: init failed, skipping\n", i);
         }
     }
+
+    /* kthread exits cleanly after probing */
+}
+
+/**
+ * x1_sdhci_init — schedule SDHCI probing as a post-init kthread.
+ *
+ * Called from start_kernel.  The actual hardware probing and card
+ * enumeration run in a dedicated kernel thread so that:
+ *  1. The scheduler is already running → sleep_ms() works.
+ *  2. Boot proceeds without blocking on slow card init.
+ */
+void x1_sdhci_init(void)
+{
+    if (!platform.has_sdhci)
+        return;
+
+    struct thread *t = kthread_create("x1_sdhci", x1_sdhci_kthread,
+                                      0, 0, KERNEL_STACK_ORDER);
+    if (IS_ERR_OR_NULL(t)) {
+        printf("x1_sdhci: failed to create init kthread\n");
+        return;
+    }
+    wakeup(t);
 }

@@ -10,12 +10,14 @@
  */
 
 #include "types.h"
+#include "param.h"
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
 #include "dev/x1_emac.h"
 #include "dev/yt8531.h"
 #include "timer/timer.h"
+#include "proc/sched.h"
 
 /* ======================================================================
  * Low-level helpers
@@ -31,23 +33,6 @@ static inline uint32 emac_rd(volatile uint32 *base, uint32 off)
 static inline void emac_wr(volatile uint32 *base, uint32 off, uint32 val)
 {
     *(volatile uint32 *)((char *)base + off) = val;
-}
-
-/**
- * delay_us - busy-wait for approximately @us microseconds using the
- * RISC-V 'time' CSR (which ticks at TIMEBASE_FREQUENCY Hz).
- */
-static void delay_us(uint64 us)
-{
-    uint64 ticks = (uint64)TIMEBASE_FREQUENCY * us / 1000000ULL;
-    uint64 start = r_time();
-    while (r_time() - start < ticks)
-        ;
-}
-
-static void delay_ms(uint64 ms)
-{
-    delay_us(ms * 1000);
 }
 
 /* ======================================================================
@@ -66,7 +51,7 @@ int mdio_read(volatile uint32 *base, int phy_addr, int reg)
 
     /* Poll until START_TRANS clears (bit 15) */
     for (int i = 0; i < MDIO_TIMEOUT_US / MDIO_POLL_INTERVAL_US; i++) {
-        delay_us(MDIO_POLL_INTERVAL_US);
+        scheduler_yield();
         uint32 val = emac_rd(base, MAC_MDIO_CONTROL);
         if (!(val & MDIO_START_TRANS)) {
             return (int)(emac_rd(base, MAC_MDIO_DATA) & 0xFFFF);
@@ -91,7 +76,7 @@ int mdio_write(volatile uint32 *base, int phy_addr, int reg, uint16 val)
 
     /* Poll until START_TRANS clears */
     for (int i = 0; i < MDIO_TIMEOUT_US / MDIO_POLL_INTERVAL_US; i++) {
-        delay_us(MDIO_POLL_INTERVAL_US);
+        scheduler_yield();
         uint32 v = emac_rd(base, MAC_MDIO_CONTROL);
         if (!(v & MDIO_START_TRANS))
             return 0;
@@ -167,7 +152,7 @@ int yt8531_init(volatile uint32 *base, int phy_addr)
 
     /* Wait for reset to complete (BMCR_RESET self-clears) */
     for (int i = 0; i < 50; i++) {
-        delay_ms(10);
+        sleep_ms(10);
         int bmcr = mdio_read(base, phy_addr, MII_BMCR);
         if (bmcr >= 0 && !(bmcr & BMCR_RESET))
             goto reset_done;
@@ -280,7 +265,7 @@ int yt8531_wait_autoneg(volatile uint32 *base, int phy_addr,
             printf("yt8531: auto-negotiation complete (%dms)\n", elapsed);
             return yt8531_poll_link(base, phy_addr, state);
         }
-        delay_ms(interval);
+        sleep_ms(interval);
         elapsed += interval;
     }
 
