@@ -7,11 +7,12 @@
  *   SDH1 — SDIO (WiFi, skipped for now)
  *   SDH2 — eMMC (8-bit bus, HS400 capable)
  *
- * This driver uses PIO (programmed I/O) for data transfers — simple, no
- * DMA descriptor setup required.  Adequate for an educational OS.
+ * This driver supports SDMA (Simple DMA) for data transfers when the
+ * controller advertises the SDMA capability.  Falls back to PIO
+ * (programmed I/O) otherwise.
  *
  * Key data flow:
- *   bio (file system) → blkdev → submit_bio → sdhci_rw_blocks → PIO
+ *   bio (file system) → blkdev → submit_bio → sdhci_rw_blocks → SDMA/PIO
  */
 
 #include "compiler.h"
@@ -20,6 +21,7 @@
 #include "param.h"
 #include "riscv.h"
 #include "lock/spinlock.h"
+#include "lock/mutex.h"
 #include "defs.h"
 #include "printf.h"
 #include "dev/net.h"
@@ -31,7 +33,8 @@
 #include "timer/timer.h"
 #include "errno.h"
 #include <mm/page.h>
-#include <uabi/stat.h>
+#include <vfs/stat.h>
+#include "cache.h"
 #include "proc/sched.h"
 #include "proc/thread.h"
 
@@ -55,8 +58,11 @@ struct sdhci_softc {
     int bus_width;                  /* 1, 4, or 8 */
     uint64 capacity_blocks;         /* total 512-byte sectors */
 
-    /* Lock */
-    spinlock_t lock;
+    /* Lock (mutex — DMA/PIO path needs to sleep/yield) */
+    mutex_t lock;
+
+    /* DMA */
+    int use_dma;                    /* 1 if SDMA is available */
 
     /* Netdev-style IRQ */
     int irq;
@@ -419,6 +425,23 @@ static int sdhci_hw_init(struct sdhci_softc *sc)
     sdhci_writew(sc, SDHCI_SIGNAL_ENABLE, 0);
     sdhci_writew(sc, SDHCI_ERR_SIGNAL_ENABLE, 0);
 
+    /* Check SDMA capability and configure host control */
+    {
+        uint32 caps = sdhci_readl(sc, SDHCI_CAPABILITIES);
+        if (caps & SDHCI_CAP_SDMA) {
+            sc->use_dma = 1;
+            /* Select SDMA mode in Host Control register (bits [4:3] = 00) */
+            uint8 ctrl = sdhci_readb(sc, SDHCI_HOST_CONTROL);
+            ctrl &= ~SDHCI_CTRL_DMA_MASK;
+            ctrl |= SDHCI_CTRL_SDMA;
+            sdhci_writeb(sc, SDHCI_HOST_CONTROL, ctrl);
+            printf("x1_sdhci%d: SDMA enabled\n", sc->index);
+        } else {
+            sc->use_dma = 0;
+            printf("x1_sdhci%d: no SDMA capability, using PIO\n", sc->index);
+        }
+    }
+
     return 0;
 }
 
@@ -538,6 +561,71 @@ static int sdhci_send_acmd(struct sdhci_softc *sc, uint32 cmd_idx, uint32 arg,
 }
 
 /* ======================================================================
+ * SDMA Data Transfer
+ * ====================================================================== */
+
+/* SDMA boundary size: encoding 7 in SDHCI_MAKE_BLKSZ = 512 KB */
+#define SDHCI_SDMA_BOUNDARY     (512 * 1024)
+
+/**
+ * Wait for an SDMA transfer to complete, handling boundary interrupts.
+ *
+ * SDMA transfers in fixed-size chunks (512 KB boundary).  When the
+ * controller reaches a boundary, it pauses and sets SDHCI_INT_DMA_END.
+ * We must re-program SDHCI_DMA_ADDRESS with the next boundary-aligned
+ * address to resume, until SDHCI_INT_DATA_END signals completion.
+ *
+ * @sc:        softc
+ * @dma_addr:  starting physical address of the DMA buffer
+ * @total:     total bytes being transferred
+ * @is_write:  1 for write, 0 for read
+ *
+ * Returns 0 on success, negative errno on error.
+ */
+static int sdhci_sdma_wait(struct sdhci_softc *sc, uint64 dma_addr,
+                           uint32 total, int is_write)
+{
+    uint64 deadline = r_time() +
+                      (uint64)TIMEBASE_FREQUENCY * SDHCI_TIMEOUT_MS / 1000;
+
+    while (r_time() < deadline) {
+        uint16 int_st = sdhci_readw(sc, SDHCI_INT_STATUS);
+
+        /* Check for errors */
+        if (int_st & SDHCI_INT_ERROR) {
+            uint16 err = sdhci_readw(sc, SDHCI_ERR_INT_STATUS);
+            printf("x1_sdhci%d: DMA %s error (int=0x%x, err=0x%x)\n",
+                   sc->index, is_write ? "write" : "read", int_st, err);
+            sdhci_writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
+            sdhci_reset(sc, SDHCI_RESET_DATA);
+            return -EIO;
+        }
+
+        /* Transfer complete — all data moved */
+        if (int_st & SDHCI_INT_DATA_END) {
+            sdhci_writew(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_END);
+            return 0;
+        }
+
+        /* SDMA boundary reached — reprogram address and continue */
+        if (int_st & SDHCI_INT_DMA_END) {
+            sdhci_writew(sc, SDHCI_INT_STATUS, SDHCI_INT_DMA_END);
+            /* Advance to next boundary */
+            dma_addr &= ~((uint64)SDHCI_SDMA_BOUNDARY - 1);
+            dma_addr += SDHCI_SDMA_BOUNDARY;
+            sdhci_writel(sc, SDHCI_DMA_ADDRESS, (uint32)dma_addr);
+        }
+
+        scheduler_yield();
+    }
+
+    printf("x1_sdhci%d: DMA %s timeout\n", sc->index,
+           is_write ? "write" : "read");
+    sdhci_reset(sc, SDHCI_RESET_DATA);
+    return -ETIMEDOUT;
+}
+
+/* ======================================================================
  * PIO Data Transfer
  * ====================================================================== */
 
@@ -622,6 +710,10 @@ static int sdhci_wait_xfer_done(struct sdhci_softc *sc)
 
 /**
  * Read @nblocks 512-byte blocks starting at @lba into @buf.
+ * Uses SDMA if available, otherwise falls back to PIO.
+ *
+ * @buf must point to a physically-contiguous buffer (physical address
+ *      usable as both VA and PA due to identity mapping).
  */
 static int sdhci_read_blocks(struct sdhci_softc *sc, uint32 lba, uint32 nblocks,
                              void *buf)
@@ -630,10 +722,11 @@ static int sdhci_read_blocks(struct sdhci_softc *sc, uint32 lba, uint32 nblocks,
     uint16 mode;
     uint32 cmd_idx;
     uint16 cmd_flags;
-    uint32 addr;
+    uint32 card_addr;
+    uint32 total = nblocks * SDHCI_BLOCK_SIZE_VAL;
 
     /* SDHC/SDXC/eMMC uses block addressing; SD uses byte addressing */
-    addr = (sc->card_type == CARD_TYPE_SD) ? (lba * 512) : lba;
+    card_addr = (sc->card_type == CARD_TYPE_SD) ? (lba * 512) : lba;
 
     /* Set block size and count */
     sdhci_writew(sc, SDHCI_BLOCK_SIZE,
@@ -644,33 +737,54 @@ static int sdhci_read_blocks(struct sdhci_softc *sc, uint32 lba, uint32 nblocks,
     mode = SDHCI_TRNS_READ | SDHCI_TRNS_BLK_CNT_EN;
     if (nblocks > 1)
         mode |= SDHCI_TRNS_MULTI | SDHCI_TRNS_AUTO_CMD12;
+
+    if (sc->use_dma) {
+        uint64 dma_addr = (uint64)buf;
+
+        /* Invalidate cache before device writes to memory */
+        dma_cache_inval(buf, total);
+
+        /* Program SDMA system address */
+        sdhci_writel(sc, SDHCI_DMA_ADDRESS, (uint32)dma_addr);
+        mode |= SDHCI_TRNS_DMA;
+    }
+
     sdhci_writew(sc, SDHCI_TRANSFER_MODE, mode);
 
     /* Command */
-    if (nblocks == 1) {
-        cmd_idx = MMC_READ_SINGLE_BLOCK;
-    } else {
-        cmd_idx = MMC_READ_MULTIPLE_BLOCK;
-    }
+    cmd_idx = (nblocks == 1) ? MMC_READ_SINGLE_BLOCK
+                             : MMC_READ_MULTIPLE_BLOCK;
     cmd_flags = SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX |
                 SDHCI_CMD_DATA;
 
-    ret = sdhci_send_cmd(sc, cmd_idx, addr, cmd_flags, NULL);
+    ret = sdhci_send_cmd(sc, cmd_idx, card_addr, cmd_flags, NULL);
     if (ret < 0)
         return ret;
 
-    /* Read blocks via PIO */
-    for (uint32 i = 0; i < nblocks; i++) {
-        ret = sdhci_pio_read_block(sc, (uint8 *)buf + i * SDHCI_BLOCK_SIZE_VAL);
+    if (sc->use_dma) {
+        ret = sdhci_sdma_wait(sc, (uint64)buf, total, 0);
         if (ret < 0)
             return ret;
+        /* Invalidate again to ensure CPU sees DMA-written data */
+        dma_cache_inval(buf, total);
+    } else {
+        printf("sdhci_read_blocks: fallback to bio.\n");
+        /* Read blocks via PIO */
+        for (uint32 i = 0; i < nblocks; i++) {
+            ret = sdhci_pio_read_block(sc,
+                      (uint8 *)buf + i * SDHCI_BLOCK_SIZE_VAL);
+            if (ret < 0)
+                return ret;
+        }
+        ret = sdhci_wait_xfer_done(sc);
     }
 
-    return sdhci_wait_xfer_done(sc);
+    return ret;
 }
 
 /**
  * Write @nblocks 512-byte blocks starting at @lba from @buf.
+ * Uses SDMA if available, otherwise falls back to PIO.
  */
 static int sdhci_write_blocks(struct sdhci_softc *sc, uint32 lba,
                               uint32 nblocks, const void *buf)
@@ -679,9 +793,10 @@ static int sdhci_write_blocks(struct sdhci_softc *sc, uint32 lba,
     uint16 mode;
     uint32 cmd_idx;
     uint16 cmd_flags;
-    uint32 addr;
+    uint32 card_addr;
+    uint32 total = nblocks * SDHCI_BLOCK_SIZE_VAL;
 
-    addr = (sc->card_type == CARD_TYPE_SD) ? (lba * 512) : lba;
+    card_addr = (sc->card_type == CARD_TYPE_SD) ? (lba * 512) : lba;
 
     sdhci_writew(sc, SDHCI_BLOCK_SIZE,
                  SDHCI_MAKE_BLKSZ(7, SDHCI_BLOCK_SIZE_VAL));
@@ -691,29 +806,44 @@ static int sdhci_write_blocks(struct sdhci_softc *sc, uint32 lba,
     mode = SDHCI_TRNS_BLK_CNT_EN; /* no SDHCI_TRNS_READ = write */
     if (nblocks > 1)
         mode |= SDHCI_TRNS_MULTI | SDHCI_TRNS_AUTO_CMD12;
+
+    if (sc->use_dma) {
+        uint64 dma_addr = (uint64)buf;
+
+        /* Clean cache so device reads CPU's latest data */
+        dma_cache_clean((void *)buf, total);
+
+        /* Program SDMA system address */
+        sdhci_writel(sc, SDHCI_DMA_ADDRESS, (uint32)dma_addr);
+        mode |= SDHCI_TRNS_DMA;
+    }
+
     sdhci_writew(sc, SDHCI_TRANSFER_MODE, mode);
 
-    if (nblocks == 1) {
-        cmd_idx = MMC_WRITE_BLOCK;
-    } else {
-        cmd_idx = MMC_WRITE_MULTIPLE_BLOCK;
-    }
+    cmd_idx = (nblocks == 1) ? MMC_WRITE_BLOCK
+                             : MMC_WRITE_MULTIPLE_BLOCK;
     cmd_flags = SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC | SDHCI_CMD_INDEX |
                 SDHCI_CMD_DATA;
 
-    ret = sdhci_send_cmd(sc, cmd_idx, addr, cmd_flags, NULL);
+    ret = sdhci_send_cmd(sc, cmd_idx, card_addr, cmd_flags, NULL);
     if (ret < 0)
         return ret;
 
-    /* Write blocks via PIO */
-    for (uint32 i = 0; i < nblocks; i++) {
-        ret = sdhci_pio_write_block(sc,
-                (const uint8 *)buf + i * SDHCI_BLOCK_SIZE_VAL);
-        if (ret < 0)
-            return ret;
+    if (sc->use_dma) {
+        ret = sdhci_sdma_wait(sc, (uint64)buf, total, 1);
+    } else {
+        printf("sdhci_write_blocks: fallback to bio.\n");
+        /* Write blocks via PIO */
+        for (uint32 i = 0; i < nblocks; i++) {
+            ret = sdhci_pio_write_block(sc,
+                      (const uint8 *)buf + i * SDHCI_BLOCK_SIZE_VAL);
+            if (ret < 0)
+                return ret;
+        }
+        ret = sdhci_wait_xfer_done(sc);
     }
 
-    return sdhci_wait_xfer_done(sc);
+    return ret;
 }
 
 /* ======================================================================
@@ -1052,7 +1182,7 @@ static int sdhci_submit_bio(blkdev_t *blkdev, struct bio *bio)
     struct bio_iter iter;
     int ret = 0;
 
-    spin_lock(&sc->lock);
+    mutex_lock(&sc->lock);
     bio_start_io_acct(bio);
 
     bio_for_each_segment(&bvec, bio, &iter) {
@@ -1090,7 +1220,7 @@ static int sdhci_submit_bio(blkdev_t *blkdev, struct bio *bio)
         iter.size_done += bvec.len;
     }
 
-    spin_unlock(&sc->lock);
+    mutex_unlock(&sc->lock);
 
     bio->error = ret;
     bio_complete(bio);
@@ -1116,11 +1246,11 @@ static blkdev_ops_t sdhci_blk_ops = {
  */
 static int sdhci_init_one(int idx, int is_emmc)
 {
-    struct sdhci_softc *sc = &sdhci_sc[sdhci_count];
+    struct sdhci_softc *sc = &sdhci_sc[idx];
     int ret;
 
     memset(sc, 0, sizeof(*sc));
-    spin_init(&sc->lock, "x1_sdhci");
+    mutex_init(&sc->lock, "x1_sdhci");
     sc->index = idx;
     sc->irq = platform.sdhci[idx].irq;
 
@@ -1197,7 +1327,7 @@ static int sdhci_init_one(int idx, int is_emmc)
 
     /* Register as a block device */
     sc->bdev.dev.major = 4;  /* new major for SD/eMMC */
-    sc->bdev.dev.minor = sdhci_count + 1;
+    sc->bdev.dev.minor = idx + 1;
     sc->bdev.dev.devmode = S_IFBLK | 0600;
     sc->bdev.readable = 1;
     sc->bdev.writable = 1;
@@ -1206,10 +1336,10 @@ static int sdhci_init_one(int idx, int is_emmc)
 
     if (is_emmc) {
         static const char *emmc_names[] = {"mmc0", "mmc1", "mmc2"};
-        sc->bdev.dev.devname = emmc_names[sdhci_count];
+        sc->bdev.dev.devname = emmc_names[idx];
     } else {
         static const char *sd_names[] = {"sd0", "sd1", "sd2"};
-        sc->bdev.dev.devname = sd_names[sdhci_count];
+        sc->bdev.dev.devname = sd_names[idx];
     }
 
     ret = blkdev_register(&sc->bdev);
@@ -1222,7 +1352,7 @@ static int sdhci_init_one(int idx, int is_emmc)
            idx, sc->bdev.dev.devname,
            sc->capacity_blocks / 2048, sc->bus_width);
 
-    sdhci_count++;
+    __atomic_fetch_add(&sdhci_count, 1, __ATOMIC_SEQ_CST);
     return 0;
 }
 
@@ -1231,7 +1361,30 @@ static int sdhci_init_one(int idx, int is_emmc)
  * ====================================================================== */
 
 /**
- * Kernel thread entry point: probes and initialises all SDHCI instances.
+ * Per-instance init kthread: initialises one SDHCI slot.
+ */
+static void x1_sdhci_init_one_kthread(uint64 idx,
+                                      uint64 arg2 __attribute__((unused)))
+{
+    int i = (int)idx;
+
+    if (platform.sdhci[i].base == 0)
+        return;
+
+    /* Skip SDIO (sdhci1) — WiFi, not a block device */
+    if (platform.sdhci[i].is_sdio) {
+        printf("x1_sdhci%d: SDIO instance, skipping\n", i);
+        return;
+    }
+
+    int is_emmc = platform.sdhci[i].is_emmc;
+    if (sdhci_init_one(i, is_emmc) < 0)
+        printf("x1_sdhci%d: init failed, skipping\n", i);
+}
+
+/**
+ * Kernel thread entry point: spawns per-instance init kthreads so that
+ * all SDHCI slots probe in parallel.
  *
  * Running in kthread context allows us to use sleep_ms() (scheduler-
  * based timer sleep) instead of busy-waiting, which is friendlier to
@@ -1240,26 +1393,26 @@ static int sdhci_init_one(int idx, int is_emmc)
 static void x1_sdhci_kthread(uint64 arg1 __attribute__((unused)),
                              uint64 arg2 __attribute__((unused)))
 {
-    printf("x1_sdhci: found %d SDHCI instance(s)\n", platform.sdhci_count);
+    int n = platform.sdhci_count;
+    if (n > MAX_SDH_INSTANCES)
+        n = MAX_SDH_INSTANCES;
 
-    for (int i = 0; i < platform.sdhci_count && i < MAX_SDH_INSTANCES; i++) {
-        if (platform.sdhci[i].base == 0)
-            continue;
+    printf("x1_sdhci: found %d SDHCI instance(s)\n", n);
 
-        int is_emmc = platform.sdhci[i].is_emmc;
-
-        /* Skip SDIO (sdhci1) — WiFi, not a block device */
-        if (platform.sdhci[i].is_sdio) {
-            printf("x1_sdhci%d: SDIO instance, skipping\n", i);
-            continue;
-        }
-
-        if (sdhci_init_one(i, is_emmc) < 0) {
-            printf("x1_sdhci%d: init failed, skipping\n", i);
+    for (int i = 0; i < n; i++) {
+        char name[16];
+        name[0] = 's'; name[1] = 'd'; name[2] = 'h';
+        name[3] = '0' + i; name[4] = '\0';
+        struct thread *t = kthread_create(name, x1_sdhci_init_one_kthread,
+                                          (uint64)i, 0, KERNEL_STACK_ORDER);
+        if (IS_ERR_OR_NULL(t)) {
+            printf("x1_sdhci%d: failed to create init kthread\n", i);
+        } else {
+            wakeup(t);
         }
     }
 
-    /* kthread exits cleanly after probing */
+    /* kthread exits — per-instance threads run independently */
 }
 
 /**

@@ -68,6 +68,7 @@
 #define DMA_CFG_BURST_16WORD        (1 << 5)
 #define DMA_CFG_BURST_32WORD        (1 << 6)
 #define DMA_CFG_BURST_64WORD        (1 << 7)
+#define DMA_CFG_WAIT_FOR_DONE       (1 << 16)
 #define DMA_CFG_STRICT_BURST        (1 << 17)
 #define DMA_CFG_64BIT_MODE          (1 << 18)
 
@@ -169,11 +170,25 @@
                                      RX_FRAME_JABBER_ERR | RX_FRAME_LENGTH_ERR)
 
 /* ======================================================================
- * DMA Descriptor Structures (16 bytes each, 4 x uint32)
+ * DMA Descriptor Structures
+ *
+ * Each hardware descriptor is 4 x uint32 = 16 bytes.  However, on
+ * non-coherent DMA platforms the Zicbom cache management instructions
+ * (cbo.clean, cbo.inval) operate on full 64-byte cache lines.  When
+ * multiple 16-byte descriptors share a cache line, writing back one
+ * descriptor clobbers DMA's updates to its neighbours, causing lost
+ * packets.
+ *
+ * Fix: pad each descriptor to 64 bytes (== CBOM_BLOCK_SIZE) so every
+ * descriptor occupies its own cache line.  We use chained descriptor
+ * mode (SecondAddressChained bit) so that buf_addr2 points to the next
+ * descriptor, allowing the DMA engine to stride 64 bytes between them.
  * ====================================================================== */
 
+#define DESC_CHAINED            (1U << 25)  /* SecondAddressChained in word1 */
+
 /**
- * Receive Descriptor (4 words = 16 bytes)
+ * Receive Descriptor — padded to 64 bytes (one cache line).
  *
  * Word 0: FramePacketLength[13:0] | ApplicationStatus[28:14] |
  *         LastDescriptor[29] | FirstDescriptor[30] | OWN[31]
@@ -181,13 +196,15 @@
  *         SecondAddressChained[25] | EndRing[26] | rsvd[29:27] |
  *         rx_timestamp[30] | ptp_pkt[31]
  * Word 2: BufferAddr1[31:0]
- * Word 3: BufferAddr2[31:0]
+ * Word 3: BufferAddr2[31:0]  (next descriptor address in chained mode)
+ * Words 4-15: padding to fill 64-byte cache line
  */
 struct x1_rx_desc {
-    uint32 word0;   /* frame length + status + OWN */
-    uint32 word1;   /* buffer size + flags */
-    uint32 buf_addr; /* buffer physical address (32-bit) */
-    uint32 buf_addr2; /* second buffer / next descriptor (unused) */
+    uint32 word0;     /* frame length + status + OWN */
+    uint32 word1;     /* buffer size + flags (incl. DESC_CHAINED) */
+    uint32 buf_addr;  /* buffer physical address (32-bit) */
+    uint32 buf_addr2; /* next descriptor address (chained mode) */
+    uint32 __pad[12]; /* pad to 64 bytes */
 };
 
 /* RX descriptor word0 field accessors */
@@ -202,7 +219,7 @@ struct x1_rx_desc {
 #define RX_DESC_END_RING            (1U << 26)
 
 /**
- * Transmit Descriptor (4 words = 16 bytes)
+ * Transmit Descriptor — padded to 64 bytes (one cache line).
  *
  * Word 0: FramePacketStatus[29:0] | tx_timestamp[30] | OWN[31]
  * Word 1: BufferSize1[11:0] | BufferSize2[23:12] |
@@ -210,13 +227,15 @@ struct x1_rx_desc {
  *         DisablePadding[27] | AddCRCDisable[28] |
  *         FirstSegment[29] | LastSegment[30] | InterruptOnCompletion[31]
  * Word 2: BufferAddr1[31:0]
- * Word 3: BufferAddr2[31:0]
+ * Word 3: BufferAddr2[31:0]  (next descriptor address in chained mode)
+ * Words 4-15: padding to fill 64-byte cache line
  */
 struct x1_tx_desc {
-    uint32 word0;    /* status + OWN */
-    uint32 word1;    /* size + flags */
-    uint32 buf_addr; /* buffer physical address */
-    uint32 buf_addr2;
+    uint32 word0;     /* status + OWN */
+    uint32 word1;     /* size + flags (incl. DESC_CHAINED) */
+    uint32 buf_addr;  /* buffer physical address */
+    uint32 buf_addr2; /* next descriptor address (chained mode) */
+    uint32 __pad[12]; /* pad to 64 bytes */
 };
 
 /* TX descriptor word0 */
@@ -234,9 +253,13 @@ struct x1_tx_desc {
  * ====================================================================== */
 
 #define X1_EMAC_DEFAULT_BUF_SIZE    2048
-#define X1_EMAC_TX_RING_SIZE        256
-#define X1_EMAC_RX_RING_SIZE        256
-#define X1_EMAC_DEFAULT_TX_THRESH   1518
+/*
+ * Ring sizes: 64 entries × 64 bytes/descriptor = 4096 bytes = 1 page.
+ * (Previously 256 × 16 = 4096.)  64 entries is still plenty for GbE.
+ */
+#define X1_EMAC_TX_RING_SIZE        64
+#define X1_EMAC_RX_RING_SIZE        64
+#define X1_EMAC_DEFAULT_TX_THRESH   0x5EE  /* store-forward mode (matches U-Boot) */
 #define X1_EMAC_DEFAULT_RX_THRESH   12
 #define X1_EMAC_MAX_FRAME_SIZE      1518
 #define X1_EMAC_FCS_SIZE            4

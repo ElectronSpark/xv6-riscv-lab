@@ -33,6 +33,20 @@
 #include "proc/thread.h"
 #include "errno.h"
 
+/* Debug logging — set to 1 to enable verbose network packet tracing */
+#define EMAC_DEBUG 0
+
+#if EMAC_DEBUG
+static uint64 emac_tx_count = 0;
+static uint64 emac_rx_count = 0;
+static uint64 emac_rx_err_count = 0;
+static uint64 emac_tx_full_count = 0;
+static uint64 emac_isr_count = 0;
+#define EMAC_DBG(fmt, ...) printf("emac: " fmt, ##__VA_ARGS__)
+#else
+#define EMAC_DBG(fmt, ...) do {} while(0)
+#endif
+
 /* ======================================================================
  * Per-instance driver state
  * ====================================================================== */
@@ -81,6 +95,7 @@ struct x1_emac_softc {
 
 #define MAX_EMAC_INSTANCES 2
 static struct x1_emac_softc emac_sc[MAX_EMAC_INSTANCES];
+static volatile int emac_init_done[MAX_EMAC_INSTANCES]; /* 1 = ok, -1 = fail */
 static int emac_count = 0;
 
 /* Forward declarations */
@@ -211,6 +226,10 @@ static void x1_emac_init_hw(struct x1_emac_softc *sc)
     sc_wr(sc, MAC_RECEIVE_CONTROL, 0);
     sc_wr(sc, MAC_TRANSMIT_CONTROL, 0);
 
+    /* Reset MAC + statistic counters (matches U-Boot emac_reset_hw) */
+    sc_wr(sc, MAC_GLOBAL_CONTROL, MAC_GC_RESET_RX_STATS | MAC_GC_RESET_TX_STATS);
+    sc_wr(sc, MAC_GLOBAL_CONTROL, 0);
+
     /* Enable MAC address 1 filtering */
     sc_wr(sc, MAC_ADDRESS_CONTROL, MAC_AC_ADDR1_ENABLE);
 
@@ -235,8 +254,10 @@ static void x1_emac_init_hw(struct x1_emac_softc *sc)
     /* DMA reset */
     x1_emac_dma_reset(sc);
 
-    /* DMA configuration: strict burst + 64-bit mode + burst length */
-    val = DMA_CFG_STRICT_BURST | DMA_CFG_64BIT_MODE | DMA_CFG_BURST_8WORD;
+    /* DMA configuration: strict burst + 64-bit + 16-word burst length.
+     * Matches the vendor Linux driver's register value (0x00060020).
+     * dma-burst-len=5 in DT → bit 5 → BURST_16WORD. */
+    val = DMA_CFG_STRICT_BURST | DMA_CFG_64BIT_MODE | DMA_CFG_BURST_16WORD;
     sc_wr(sc, DMA_CONFIGURATION, val);
 
     /* Disable all interrupts initially */
@@ -279,26 +300,29 @@ static void x1_emac_adjust_link(struct x1_emac_softc *sc)
 
 static int x1_emac_tx_ring_init(struct x1_emac_softc *sc)
 {
-    /* Allocate descriptor ring (needs to be page-aligned for DMA) */
+    /* Allocate descriptor ring (needs to be page-aligned for DMA)
+     * 64 entries × 64 bytes = 4096 = exactly 1 page */
     uint32 ring_size = X1_EMAC_TX_RING_SIZE * sizeof(struct x1_tx_desc);
 
     /* Use kalloc pages — identity mapped, so VA == PA */
-    int npages = (ring_size + PGSIZE - 1) / PGSIZE;
     sc->tx_ring = kalloc();
     if (!sc->tx_ring)
         return -1;
-    /* If we need more than one page, allocate contiguous (simplified:
-     * 256 * 16 = 4096 = exactly 1 page) */
-    if (npages > 1)
-        panic("x1_emac: tx ring > 1 page");
 
     memset(sc->tx_ring, 0, ring_size);
     memset(sc->tx_mbufs, 0, sizeof(sc->tx_mbufs));
     sc->tx_head = 0;
     sc->tx_tail = 0;
 
-    /* Mark the last descriptor with EndRing to form a ring */
-    sc->tx_ring[X1_EMAC_TX_RING_SIZE - 1].word1 = TX_DESC_END_RING;
+    /* Set up chained descriptor pointers.
+     * Each descriptor's buf_addr2 points to the next descriptor;
+     * the last wraps back to the first. */
+    for (int i = 0; i < X1_EMAC_TX_RING_SIZE; i++) {
+        struct x1_tx_desc *d = &sc->tx_ring[i];
+        int next = (i + 1) % X1_EMAC_TX_RING_SIZE;
+        d->buf_addr2 = (uint32)(uint64)&sc->tx_ring[next];
+        d->word1 = DESC_CHAINED;  /* SecondAddressChained */
+    }
 
     /* Flush descriptors to memory */
     dma_cache_clean(sc->tx_ring, ring_size);
@@ -312,20 +336,18 @@ static int x1_emac_tx_ring_init(struct x1_emac_softc *sc)
 
 static int x1_emac_rx_ring_init(struct x1_emac_softc *sc)
 {
+    /* 64 entries × 64 bytes = 4096 = exactly 1 page */
     uint32 ring_size = X1_EMAC_RX_RING_SIZE * sizeof(struct x1_rx_desc);
 
-    int npages = (ring_size + PGSIZE - 1) / PGSIZE;
     sc->rx_ring = kalloc();
     if (!sc->rx_ring)
         return -1;
-    if (npages > 1)
-        panic("x1_emac: rx ring > 1 page");
 
     memset(sc->rx_ring, 0, ring_size);
     memset(sc->rx_mbufs, 0, sizeof(sc->rx_mbufs));
     sc->rx_head = 0;
 
-    /* Allocate mbufs and set up each descriptor */
+    /* Allocate mbufs and set up each descriptor in chained mode */
     for (int i = 0; i < X1_EMAC_RX_RING_SIZE; i++) {
         struct mbuf *m = mbufalloc(0);
         if (!m) {
@@ -335,10 +357,10 @@ static int x1_emac_rx_ring_init(struct x1_emac_softc *sc)
         sc->rx_mbufs[i] = m;
 
         struct x1_rx_desc *d = &sc->rx_ring[i];
+        int next = (i + 1) % X1_EMAC_RX_RING_SIZE;
         d->buf_addr = (uint32)(uint64)m->head;
-        d->word1 = RX_DESC_BUF1_SIZE(MBUF_SIZE);
-        if (i == X1_EMAC_RX_RING_SIZE - 1)
-            d->word1 |= RX_DESC_END_RING;
+        d->buf_addr2 = (uint32)(uint64)&sc->rx_ring[next];
+        d->word1 = RX_DESC_BUF1_SIZE(MBUF_SIZE) | DESC_CHAINED;
         d->word0 = RX_DESC_OWN;  /* give to DMA */
 
         /* Flush the mbuf buffer so DMA can write into it */
@@ -367,6 +389,12 @@ static int x1_emac_transmit(struct x1_emac_softc *sc, struct mbuf *m)
 
     /* Check if descriptor is still owned by DMA */
     if (d->word0 & TX_DESC_OWN) {
+#if EMAC_DEBUG
+        emac_tx_full_count++;
+        if (emac_tx_full_count <= 5 || (emac_tx_full_count % 100) == 0)
+            EMAC_DBG("TX ring full (idx=%d, total_full=%lu)\n",
+                     idx, emac_tx_full_count);
+#endif
         spin_unlock(&sc->lock);
         return -1;  /* ring full */
     }
@@ -377,12 +405,12 @@ static int x1_emac_transmit(struct x1_emac_softc *sc, struct mbuf *m)
         sc->tx_mbufs[idx] = 0;
     }
 
-    /* Set up the descriptor */
+    /* Set up the descriptor — chained mode: buf_addr2 already points
+     * to the next descriptor (set during ring init, preserved here). */
     d->buf_addr = (uint32)(uint64)m->head;
     d->word1 = TX_DESC_BUF1_SIZE(m->len) |
-               TX_DESC_FIRST_SEG | TX_DESC_LAST_SEG | TX_DESC_IOC;
-    if (idx == X1_EMAC_TX_RING_SIZE - 1)
-        d->word1 |= TX_DESC_END_RING;
+               TX_DESC_FIRST_SEG | TX_DESC_LAST_SEG | TX_DESC_IOC |
+               DESC_CHAINED;
 
     sc->tx_mbufs[idx] = m;
 
@@ -402,6 +430,13 @@ static int x1_emac_transmit(struct x1_emac_softc *sc, struct mbuf *m)
     /* Kick DMA transmit poll */
     sc_wr(sc, DMA_TRANSMIT_POLL_DEMAND, 0xFF);
 
+#if EMAC_DEBUG
+    emac_tx_count++;
+    if (emac_tx_count <= 10 || (emac_tx_count % 500) == 0)
+        EMAC_DBG("TX pkt #%lu len=%d idx=%d head=%d tail=%d\n",
+                 emac_tx_count, m->len, idx, sc->tx_head, sc->tx_tail);
+#endif
+
     spin_unlock(&sc->lock);
     return 0;
 }
@@ -419,9 +454,21 @@ static int x1_emac_transmit_op(struct netdev *ndev, struct mbuf *m)
  * Receive
  * ====================================================================== */
 
+/*
+ * RX budget: limit how many packets we process per interrupt to avoid
+ * holding the CPU in ISR context for too long and consuming too many
+ * pbufs before the tcpip thread gets a chance to process them.
+ */
+#define X1_EMAC_RX_BUDGET 32
+
 static void x1_emac_recv(struct x1_emac_softc *sc)
 {
-    while (1) {
+    int budget = X1_EMAC_RX_BUDGET;
+#if EMAC_DEBUG
+    int rx_this_burst = 0;
+#endif
+
+    while (budget-- > 0) {
         uint32 idx = sc->rx_head;
         struct x1_rx_desc *d = &sc->rx_ring[idx];
 
@@ -435,6 +482,12 @@ static void x1_emac_recv(struct x1_emac_softc *sc)
         /* Check for errors */
         uint32 app_status = RX_DESC_APP_STATUS(d->word0);
         if (app_status & RX_FRAME_ERROR_MASK) {
+#if EMAC_DEBUG
+            emac_rx_err_count++;
+            if (emac_rx_err_count <= 10 || (emac_rx_err_count % 100) == 0)
+                EMAC_DBG("RX err idx=%d status=0x%x word0=0x%x (total=%lu)\n",
+                         idx, app_status, d->word0, emac_rx_err_count);
+#endif
             /* Error frame — recycle the buffer */
             goto recycle;
         }
@@ -455,6 +508,14 @@ static void x1_emac_recv(struct x1_emac_softc *sc)
         /* Set the mbuf length */
         m->len = frame_len;
 
+#if EMAC_DEBUG
+        rx_this_burst++;
+        emac_rx_count++;
+        if (emac_rx_count <= 10 || (emac_rx_count % 500) == 0)
+            EMAC_DBG("RX pkt #%lu len=%d idx=%d\n",
+                     emac_rx_count, frame_len, idx);
+#endif
+
         /* Deliver to network stack */
         net_rx(m);
 
@@ -472,12 +533,10 @@ static void x1_emac_recv(struct x1_emac_softc *sc)
         sc->rx_mbufs[idx] = newm;
         dma_cache_clean(newm->head, MBUF_SIZE);
 
-        /* Set up descriptor with new buffer */
+        /* Set up descriptor with new buffer — chained mode preserved */
         d->buf_addr = (uint32)(uint64)newm->head;
-        d->word1 = RX_DESC_BUF1_SIZE(MBUF_SIZE);
-        if (idx == X1_EMAC_RX_RING_SIZE - 1)
-            d->word1 |= RX_DESC_END_RING;
-        d->buf_addr2 = 0;
+        d->word1 = RX_DESC_BUF1_SIZE(MBUF_SIZE) | DESC_CHAINED;
+        /* buf_addr2 already contains next-descriptor pointer from init */
         __sync_synchronize();
         d->word0 = RX_DESC_OWN;
         dma_cache_clean(d, sizeof(*d));
@@ -486,14 +545,27 @@ static void x1_emac_recv(struct x1_emac_softc *sc)
         continue;
 
 recycle:
-        /* Give descriptor back to DMA with existing buffer */
-        d->word1 = RX_DESC_BUF1_SIZE(MBUF_SIZE);
-        if (idx == X1_EMAC_RX_RING_SIZE - 1)
-            d->word1 |= RX_DESC_END_RING;
+        /* Give descriptor back to DMA with existing buffer — chained */
+        d->word1 = RX_DESC_BUF1_SIZE(MBUF_SIZE) | DESC_CHAINED;
+        /* buf_addr2 (next-desc ptr) already set from init */
         __sync_synchronize();
         d->word0 = RX_DESC_OWN;
         dma_cache_clean(d, sizeof(*d));
         sc->rx_head = (idx + 1) % X1_EMAC_RX_RING_SIZE;
+    }
+
+#if EMAC_DEBUG
+    if (rx_this_burst > 0 && (emac_rx_count <= 20 || (emac_rx_count % 500) == 0))
+        EMAC_DBG("RX burst: %d pkts (total=%lu)\n", rx_this_burst, emac_rx_count);
+#endif
+
+    /*
+     * If we hit the budget limit, there may be more packets pending.
+     * Kick DMA poll to trigger another interrupt so we process the rest.
+     */
+    if (budget < 0) {
+        EMAC_DBG("RX budget exhausted, re-polling\n");
+        sc_wr(sc, DMA_RECEIVE_POLL_DEMAND, 0xFF);
     }
 }
 
@@ -534,6 +606,19 @@ static void x1_emac_intr(int irq, void *data, device_t *dev)
     /* Acknowledge all bits by writing them back */
     sc_wr(sc, DMA_STATUS_IRQ, status);
 
+#if EMAC_DEBUG
+    emac_isr_count++;
+    /* Log every ISR for the first 20, then every 500th */
+    if (emac_isr_count <= 20 || (emac_isr_count % 500) == 0)
+        EMAC_DBG("ISR #%lu status=0x%x%s%s%s%s%s\n",
+                 emac_isr_count, status,
+                 (status & DMA_IRQ_RX_DONE)         ? " RX" : "",
+                 (status & DMA_IRQ_TX_DONE)         ? " TX" : "",
+                 (status & DMA_IRQ_RX_DESC_UNAVAIL) ? " RX_UNAVAIL" : "",
+                 (status & DMA_IRQ_TX_STOPPED)      ? " TX_STOP" : "",
+                 (status & DMA_IRQ_RX_STOPPED)      ? " RX_STOP" : "");
+#endif
+
     if (status & DMA_IRQ_RX_DONE)
         x1_emac_recv(sc);
 
@@ -542,6 +627,7 @@ static void x1_emac_intr(int irq, void *data, device_t *dev)
 
     if (status & DMA_IRQ_RX_DESC_UNAVAIL) {
         /* RX ring ran out of descriptors.  Kick RX DMA to resume. */
+        EMAC_DBG("RX desc unavail, re-polling\n");
         sc_wr(sc, DMA_RECEIVE_POLL_DEMAND, 0xFF);
     }
 
@@ -605,7 +691,7 @@ static void x1_emac_start(struct x1_emac_softc *sc)
  */
 static int x1_emac_init_one(int idx)
 {
-    struct x1_emac_softc *sc = &emac_sc[emac_count];
+    struct x1_emac_softc *sc = &emac_sc[idx];
 
     memset(sc, 0, sizeof(*sc));
     spin_init(&sc->lock, "x1_emac");
@@ -651,7 +737,7 @@ static int x1_emac_init_one(int idx)
         printf("x1_emac%d: PHY init failed\n", idx);
         return -1;
     }
-    sc->phy_addr = 0; /* after yt8531_init the PHY addr is known */
+    sc->phy_addr = phy; /* use the auto-detected PHY address */
 
     /* Wait for auto-negotiation (up to 5 seconds) */
     if (yt8531_wait_autoneg(sc->regs, sc->phy_addr, &sc->phy, 5000) == 0) {
@@ -718,7 +804,7 @@ static int x1_emac_init_one(int idx)
     printf("x1_emac%d: initialised as %s (MAC %x:%x:%x:%x:%x:%x)\n",
            idx, sc->ndev.name, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
-    emac_count++;
+    __atomic_fetch_add(&emac_count, 1, __ATOMIC_SEQ_CST);
     return 0;
 }
 
@@ -727,22 +813,91 @@ static int x1_emac_init_one(int idx)
  * ====================================================================== */
 
 /**
- * Kernel thread entry point: probes and initialises all EMAC instances.
- *
- * Running in kthread context allows sleep_ms() / scheduler_yield()
- * instead of busy-waiting during PHY reset and auto-negotiation.
+ * Per-instance init kthread: initialises one EMAC and signals completion.
+ */
+static void x1_emac_init_kthread(uint64 idx, uint64 arg2 __attribute__((unused)))
+{
+    int ret = x1_emac_init_one((int)idx);
+    __atomic_store_n(&emac_init_done[idx], ret < 0 ? -1 : 1, __ATOMIC_RELEASE);
+    if (ret < 0)
+        printf("x1_emac%d: init failed, skipping\n", (int)idx);
+}
+
+/**
+ * Main EMAC kthread: spawns per-instance init threads in parallel,
+ * waits for all to complete, then enters the link-polling loop.
  */
 static void x1_emac_kthread(uint64 arg1 __attribute__((unused)),
                             uint64 arg2 __attribute__((unused)))
 {
-    printf("x1_emac: found %d EMAC instance(s)\n", platform.emac_count);
+    int n = platform.emac_count;
+    if (n > MAX_EMAC_INSTANCES)
+        n = MAX_EMAC_INSTANCES;
 
-    for (int i = 0; i < platform.emac_count && i < MAX_EMAC_INSTANCES; i++) {
-        if (x1_emac_init_one(i) < 0)
-            printf("x1_emac%d: init failed, skipping\n", i);
+    printf("x1_emac: found %d EMAC instance(s)\n", n);
+
+    /* Spawn one init kthread per instance so they probe in parallel */
+    for (int i = 0; i < n; i++) {
+        char name[16];
+        name[0] = 'e'; name[1] = 'm'; name[2] = 'a'; name[3] = 'c';
+        name[4] = '0' + i; name[5] = '\0';
+        struct thread *t = kthread_create(name, x1_emac_init_kthread,
+                                          (uint64)i, 0, KERNEL_STACK_ORDER);
+        if (IS_ERR_OR_NULL(t)) {
+            printf("x1_emac%d: failed to create init kthread\n", i);
+            __atomic_store_n(&emac_init_done[i], -1, __ATOMIC_RELEASE);
+        } else {
+            wakeup(t);
+        }
     }
 
-    /* kthread exits cleanly after probing */
+    /* Wait for all init threads to finish */
+    for (int i = 0; i < n; i++) {
+        while (__atomic_load_n(&emac_init_done[i], __ATOMIC_ACQUIRE) == 0)
+            sleep_ms(50);
+    }
+
+    /* ---- Link-state polling loop ----
+     * PHY link-change interrupts are unreliable on many SoCs, so we
+     * poll the PHY status register every 2 seconds.  When the link
+     * state changes we update the netdev and notify upper layers
+     * (e.g. lwIP) via the link-change callback.
+     */
+    for (;;) {
+        sleep_ms(2000);
+
+        for (int i = 0; i < n; i++) {
+            if (__atomic_load_n(&emac_init_done[i], __ATOMIC_ACQUIRE) != 1)
+                continue; /* init failed or incomplete */
+            struct x1_emac_softc *sc = &emac_sc[i];
+            if (sc->phy_addr < 0)
+                continue; /* PHY init failed for this instance */
+
+            struct phy_state ps;
+            if (yt8531_poll_link(sc->regs, sc->phy_addr, &ps) != 0)
+                continue;
+
+            int old_link = sc->ndev.link_up;
+            int new_link = ps.link_up;
+
+            if (old_link != new_link) {
+                sc->phy = ps;
+                sc->ndev.speed = ps.speed;
+                sc->ndev.full_duplex = ps.full_duplex;
+
+                if (new_link) {
+                    x1_emac_adjust_link(sc);
+                    printf("x1_emac%d: link up %dMbps %s-duplex\n",
+                           sc->index, ps.speed,
+                           ps.full_duplex ? "full" : "half");
+                } else {
+                    printf("x1_emac%d: link down\n", sc->index);
+                }
+
+                netdev_set_link(&sc->ndev, new_link);
+            }
+        }
+    }
 }
 
 /**

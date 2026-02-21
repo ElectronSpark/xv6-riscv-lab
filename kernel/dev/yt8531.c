@@ -187,7 +187,7 @@ reset_done:
         return -1;
 
     printf("yt8531: auto-negotiation started\n");
-    return 0;
+    return phy_addr;
 }
 
 /* ======================================================================

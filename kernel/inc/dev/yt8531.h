@@ -122,11 +122,11 @@ int mdio_write(volatile uint32 *base, int phy_addr, int reg, uint16 val);
 /**
  * yt8531_init - Initialise the YT8531 PHY
  * @base:     EMAC base address
- * @phy_addr: PHY address on MDIO bus
+ * @phy_addr: PHY address on MDIO bus (< 0 for auto-detect)
  *
  * Performs soft reset, verifies PHY ID, configures LEDs,
  * advertises all speeds, and restarts auto-negotiation.
- * Returns 0 on success, -1 on failure.
+ * Returns the PHY address (>= 0) on success, -1 on failure.
  */
 int yt8531_init(volatile uint32 *base, int phy_addr);
 

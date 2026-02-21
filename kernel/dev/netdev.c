@@ -66,3 +66,17 @@ struct netdev *netdev_get_by_name(const char *name) {
     }
     return 0;
 }
+
+void netdev_set_link(struct netdev *dev, int link_up) {
+    if (!dev)
+        return;
+    int old = dev->link_up;
+    dev->link_up = link_up;
+    if (old != link_up && dev->link_cb)
+        dev->link_cb(dev, link_up);
+}
+
+void netdev_set_link_callback(struct netdev *dev, netdev_link_cb_t cb) {
+    if (dev)
+        dev->link_cb = cb;
+}

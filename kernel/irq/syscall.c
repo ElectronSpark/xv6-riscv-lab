@@ -9,6 +9,7 @@
 #include "defs.h"
 #include "printf.h"
 #include <mm/vm.h>
+#include "errno.h"
 
 // Fetch the uint64 at addr from the current thread.
 int fetchaddr(uint64 addr, uint64 *ip) {
@@ -261,6 +262,6 @@ void syscall(void) {
         p->trapframe->trapframe.a0 = syscalls[num]();
     } else {
         printf("%d %s: unknown sys call %d\n", p->pid, p->name, num);
-        p->trapframe->trapframe.a0 = -1;
+        p->trapframe->trapframe.a0 = (uint64)-ENOSYS;
     }
 }

@@ -26,6 +26,13 @@ struct netdev_ops {
 };
 
 /**
+ * Link-change callback type.
+ * @dev:     the netdev whose link state changed
+ * @link_up: 1 = link came up, 0 = link went down
+ */
+typedef void (*netdev_link_cb_t)(struct netdev *dev, int link_up);
+
+/**
  * Network device instance – represents one Ethernet interface.
  */
 struct netdev {
@@ -40,6 +47,7 @@ struct netdev {
     struct netdev_ops *ops;     /* driver callbacks */
     void *priv;                 /* driver private data */
     struct netdev *next;        /* linked list */
+    netdev_link_cb_t link_cb;   /* optional link-change callback */
 };
 
 /* Registration / lookup */
@@ -48,5 +56,18 @@ int netdev_register(struct netdev *dev);
 struct netdev *netdev_get_default(void);
 struct netdev *netdev_get_by_index(int index);
 struct netdev *netdev_get_by_name(const char *name);
+
+/**
+ * netdev_set_link — Update link state and notify upper layers.
+ * Call from NIC drivers when physical link state changes.
+ */
+void netdev_set_link(struct netdev *dev, int link_up);
+
+/**
+ * netdev_set_link_callback — Register a link-change callback.
+ * Called by upper-layer code (e.g. lwIP glue) to be notified of
+ * link up/down events.
+ */
+void netdev_set_link_callback(struct netdev *dev, netdev_link_cb_t cb);
 
 #endif /* __KERNEL_DEV_NETDEV_H */
