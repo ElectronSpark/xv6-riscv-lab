@@ -30,6 +30,10 @@ CMakeCache.txt
 cmake_install.cmake
 CMakeFiles/
 
+# musl build artifacts (downloaded/extracted at build time)
+user/musl-xv6/musl-build/
+user/musl-xv6/musl-sysroot/
+
 # Doxygen generated documentation
 docs/html/
 docs/latex/

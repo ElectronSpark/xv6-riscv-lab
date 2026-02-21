@@ -503,7 +503,7 @@ add_custom_command(
             -isystem ${MUSL_COMPAT_DIR}
             -nostdinc -O2
             ${KQUEUE_COMPAT_SRC}
-    DEPENDS ${KQUEUE_COMPAT_SRC}
+    DEPENDS ${KQUEUE_COMPAT_SRC} musl_sysroot
     COMMENT "Compiling kqueue compat object for musl"
 )
 add_custom_target(kqueue_compat DEPENDS ${KQUEUE_COMPAT_OBJ})
@@ -516,20 +516,41 @@ set(CPYTHON_BIN "${CPYTHON_BUILD_DIR}/python" CACHE FILEPATH "CPython interprete
 set(CPYTHON_FS_BIN "${CMAKE_BINARY_DIR}/user/_python")
 
 if(EXISTS "${CPYTHON_SRC_DIR}/configure")
+    # Use the linux-gnu cross-compiler for CPython because it supports
+    # -shared (needed for building libpython3.12.so and .so extension modules).
+    # The bare-metal riscv64-unknown-elf-gcc linker cannot produce shared objects.
+    set(CPYTHON_CC "riscv64-linux-gnu-gcc")
+    set(CPYTHON_AR "riscv64-linux-gnu-ar")
+    set(CPYTHON_RANLIB "riscv64-linux-gnu-ranlib")
+    set(CPYTHON_READELF "riscv64-linux-gnu-readelf")
+    set(CPYTHON_STRIP "riscv64-linux-gnu-strip")
+    # GCC include dir for the linux-gnu toolchain (stdarg.h, etc.)
+    execute_process(
+        COMMAND riscv64-linux-gnu-gcc -print-file-name=include
+        OUTPUT_VARIABLE CPYTHON_GCC_INCLUDE_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    # libgcc.a path for the linux-gnu toolchain
+    execute_process(
+        COMMAND riscv64-linux-gnu-gcc -print-libgcc-file-name
+        OUTPUT_VARIABLE CPYTHON_LIBGCC_PATH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+
     add_custom_command(
         OUTPUT ${CPYTHON_BUILD_DIR}/Makefile
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CPYTHON_BUILD_DIR}
         COMMAND ${CMAKE_COMMAND} -E chdir ${CPYTHON_BUILD_DIR}
                 env
-                CC=${CMAKE_C_COMPILER}
-                AR=${CMAKE_AR}
-                RANLIB=${CMAKE_RANLIB}
-                READELF=${CMAKE_READELF}
+                CC=${CPYTHON_CC}
+                AR=${CPYTHON_AR}
+                RANLIB=${CPYTHON_RANLIB}
+                READELF=${CPYTHON_READELF}
                 PKG_CONFIG=false
                 CPPFLAGS=-isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
-                CFLAGS=-isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
-                LDFLAGS=-static\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -Wl,-T,${MUSL_LINKER_SCRIPT}\ -L${NCURSES_BUILD_DIR}/lib\ -L${READLINE_BUILD_DIR}\ -L${MUSL_SYSROOT}/lib
-                LIBS=${MUSL_LIBC_A}\ ${LIBGCC_PATH}
+                CFLAGS=-isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${CPYTHON_GCC_INCLUDE_DIR}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
+                LDFLAGS=-no-pie\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,--export-dynamic\ -Wl,--dynamic-linker=/lib/ld-musl-riscv64.so.1\ -Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -L${NCURSES_BUILD_DIR}/lib\ -L${READLINE_BUILD_DIR}\ -L${MUSL_SYSROOT}/lib
+                LIBS=-lc\ ${CPYTHON_LIBGCC_PATH}
                 ${CPYTHON_SRC_DIR}/configure
                     --host=riscv64-unknown-xv6
                     --build=x86_64-pc-linux-gnu
@@ -573,6 +594,8 @@ if(EXISTS "${CPYTHON_SRC_DIR}/configure")
                     ac_cv_func_gethostbyname=yes
                     ac_cv_header_sys_event_h=yes
                     ac_cv_func_kqueue=yes
+                    ac_cv_header_dlfcn_h=yes
+                    ac_cv_search_dlopen=none\ required
                     --disable-ipv6
         DEPENDS ${CPYTHON_SRC_DIR}/configure ${MUSL_LINKER_SCRIPT} musl_sysroot local_ncurses_build local_readline_build
         COMMENT "Configuring CPython cross build (musl)"
@@ -628,23 +651,27 @@ _blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
 
     add_custom_target(cpython_configure DEPENDS ${CPYTHON_BUILD_DIR}/Makefile)
 
+    # Build python interpreter. With --disable-shared, libpython is static  
+    # but the binary is dynamically linked to libc.so (enabling dlopen).
+    # --export-dynamic exports Python C API symbols for extension .so modules.
     add_custom_command(
         OUTPUT ${CPYTHON_BIN}
         COMMAND ${CMAKE_COMMAND} -E chdir ${CPYTHON_BUILD_DIR} make -j16 python
-                "SYSLIBS=${KQUEUE_COMPAT_OBJ} ${MUSL_LIBC_A} ${LIBGCC_PATH} ${MUSL_CRTN_O}"
+                "SYSLIBS=${KQUEUE_COMPAT_OBJ} -lc ${CPYTHON_LIBGCC_PATH} ${MUSL_CRTN_O}"
         DEPENDS cpython_configure kqueue_compat
-        COMMENT "Building CPython interpreter (musl)"
+        COMMENT "Building CPython interpreter (musl, dynamic libc)"
     )
 
     add_custom_target(cpython_build DEPENDS ${CPYTHON_BIN})
 
+    # Stage the python binary for the rootfs image
     add_custom_command(
         OUTPUT ${CPYTHON_FS_BIN}
         COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
         COMMAND ${CMAKE_COMMAND} -E copy ${CPYTHON_BIN} ${CPYTHON_FS_BIN}
-        COMMAND ${CMAKE_STRIP} --strip-debug ${CPYTHON_FS_BIN}
+        COMMAND ${CPYTHON_STRIP} --strip-debug ${CPYTHON_FS_BIN}
         DEPENDS ${CPYTHON_BIN}
-        COMMENT "Staging CPython interpreter as _python for fs image"
+        COMMENT "Staging CPython interpreter for fs image"
     )
 
     add_custom_target(_python_musl ALL DEPENDS ${CPYTHON_FS_BIN})

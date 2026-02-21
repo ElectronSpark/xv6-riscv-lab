@@ -1518,90 +1518,110 @@ struct vfs_inode *vfs_curroot(void) {
 }
 
 /*
+ * Symlink following depth limit.  POSIX suggests SYMLOOP_MAX >= 8;
+ * Linux uses 40.  We use 8 for simplicity.
+ */
+#define NAMEI_SYMLOOP_MAX 8
+
+/*
  * __vfs_namei - Internal path lookup implementation.
  *
+ * Follows symlinks at every path component (both intermediate and final).
  * Returns -EAGAIN if a transient race condition is detected (e.g., inode
  * being freed during mount traversal). Caller should retry.
+ * Returns -ELOOP if the symlink depth exceeds NAMEI_SYMLOOP_MAX.
  */
 static struct vfs_inode *__vfs_namei(const char *path, size_t path_len) {
     if (path == NULL || path_len == 0) {
-        return ERR_PTR(-EINVAL); // Invalid argument
+        return ERR_PTR(-EINVAL);
     }
     if (path_len > VFS_PATH_MAX) {
-        return ERR_PTR(-ENAMETOOLONG); // Path too long
+        return ERR_PTR(-ENAMETOOLONG);
     }
 
     struct vfs_inode *pos = NULL;
     struct vfs_inode *rooti = NULL;
     char *pathbuf = NULL;
-    int ret = 0;
     struct vfs_inode *ret_inode = NULL;
+    int symlink_depth = 0;
 
-    pathbuf = kmm_alloc(path_len + 1);
-    if (pathbuf == NULL) {
+    /* Allocate a working buffer large enough for symlink expansion */
+    pathbuf = kmm_alloc(MAXPATH + 1);
+    if (pathbuf == NULL)
         return ERR_PTR(-ENOMEM);
-    }
 
-    // Get current root for ".." at root handling
+    /* Get current root for ".." at root handling */
     rooti = vfs_curroot();
     if (IS_ERR_OR_NULL(rooti)) {
         kmm_free(pathbuf);
-        if (rooti == NULL) {
-            return ERR_PTR(-EINVAL);
-        }
-        return rooti;
+        return rooti ? rooti : ERR_PTR(-EINVAL);
     }
     if (rooti->mount) {
         if (rooti->mnt_rooti == NULL) {
             vfs_iput(rooti);
             kmm_free(pathbuf);
-            return ERR_PTR(-EINVAL); // Mounted root inode has no mounted root
+            return ERR_PTR(-EINVAL);
         }
         struct vfs_inode *mnt_root = rooti->mnt_rooti;
         if (!vfs_idup_not_zero(mnt_root)) {
             vfs_iput(rooti);
             kmm_free(pathbuf);
-            return ERR_PTR(-EAGAIN); // Mounted root is dying, retry
+            return ERR_PTR(-EAGAIN);
         }
         vfs_iput(rooti);
         rooti = mnt_root;
     }
 
-    if (path[0] == '/') {
-        // Absolute path, start from root
+    /* Copy path into the working buffer */
+    if (path_len >= MAXPATH) {
+        /* Truncate to MAXPATH — callers generally use MAXPATH-sized buffers */
+        path_len = MAXPATH - 1;
+    }
+    memmove(pathbuf, path, path_len);
+    pathbuf[path_len] = '\0';
+
+    /* Determine starting inode */
+    if (pathbuf[0] == '/') {
         pos = rooti;
         vfs_idup(pos);
-        path++; // skip leading '/'
-        path_len--;
     } else {
-        // Relative path, start from cwd
         pos = vfs_curdir();
         if (IS_ERR(pos)) {
             vfs_iput(rooti);
             kmm_free(pathbuf);
-            if (pos == NULL) {
-                return ERR_PTR(-EINVAL);
-            }
-            return pos;
+            return pos ? pos : ERR_PTR(-EINVAL);
         }
     }
 
-    // Make a copy of path since strtok_r modifies the string
-    if (path_len > 0) {
-        memmove(pathbuf, path, path_len);
-    }
-    pathbuf[path_len] = '\0';
+    /*
+     * Walk the path using manual scanning (not strtok_r) so we can
+     * reconstruct the remaining path when a symlink is encountered.
+     */
+    const char *p = pathbuf;
+    if (*p == '/')
+        p++;
 
-    char *token, *saveptr;
-    struct vfs_dentry dentry = {0};
-    struct vfs_inode *next = NULL;
+    while (*p) {
+        /* Skip consecutive slashes */
+        while (*p == '/')
+            p++;
+        if (*p == '\0')
+            break;
 
-    token = strtok_r(pathbuf, "/", &saveptr);
-    while (token != 0) {
-        size_t token_len = strlen(token);
+        /* Find end of current component */
+        const char *comp_end = p;
+        while (*comp_end != '\0' && *comp_end != '/')
+            comp_end++;
+        size_t comp_len = (size_t)(comp_end - p);
 
-        memset(&dentry, 0, sizeof(dentry));
-        ret = vfs_ilookup(pos, &dentry, token, token_len);
+        /* Determine remainder (path after this component) */
+        const char *rest = comp_end;
+        while (*rest == '/')
+            rest++;
+
+        /* Look up this component in the current directory */
+        struct vfs_dentry dentry = {0};
+        int ret = vfs_ilookup(pos, &dentry, p, comp_len);
         if (ret != 0) {
             vfs_iput(pos);
             pos = NULL;
@@ -1609,7 +1629,7 @@ static struct vfs_inode *__vfs_namei(const char *path, size_t path_len) {
             goto out;
         }
 
-        next = vfs_get_dentry_inode(&dentry);
+        struct vfs_inode *next = vfs_get_dentry_inode(&dentry);
         vfs_release_dentry(&dentry);
         if (IS_ERR(next)) {
             vfs_iput(pos);
@@ -1618,13 +1638,77 @@ static struct vfs_inode *__vfs_namei(const char *path, size_t path_len) {
             goto out;
         }
 
+        /* ── Symlink following ────────────────────────────────── */
+        if (S_ISLNK(next->mode)) {
+            if (++symlink_depth > NAMEI_SYMLOOP_MAX) {
+                vfs_iput(next);
+                vfs_iput(pos);
+                pos = NULL;
+                ret_inode = INIT_ERR_PTR(-ELOOP);
+                goto out;
+            }
+
+            /* Read the symlink target */
+            char target[MAXPATH];
+            ssize_t tlen = vfs_readlink(next, target, MAXPATH - 1);
+            vfs_iput(next);
+            if (tlen < 0) {
+                vfs_iput(pos);
+                pos = NULL;
+                ret_inode = INIT_ERR_PTR((int)tlen);
+                goto out;
+            }
+            target[tlen] = '\0';
+
+            /*
+             * Build a new working path:  target + "/" + rest
+             * For an absolute target we restart from root.
+             * For a relative target we continue from pos (the parent dir).
+             */
+            size_t rest_len = strlen(rest);
+            size_t new_len = (size_t)tlen + (rest_len ? 1 + rest_len : 0);
+            if (new_len >= MAXPATH) {
+                vfs_iput(pos);
+                pos = NULL;
+                ret_inode = INIT_ERR_PTR(-ENAMETOOLONG);
+                goto out;
+            }
+
+            /* Save rest before overwriting pathbuf */
+            char saved_rest[MAXPATH];
+            if (rest_len > 0)
+                memmove(saved_rest, rest, rest_len + 1);
+
+            /* Construct new path in pathbuf */
+            memmove(pathbuf, target, (size_t)tlen);
+            if (rest_len > 0) {
+                pathbuf[tlen] = '/';
+                memmove(pathbuf + tlen + 1, saved_rest, rest_len);
+            }
+            pathbuf[new_len] = '\0';
+
+            /* Reset scan pointer */
+            p = pathbuf;
+            if (*p == '/') {
+                /* Absolute symlink — restart from root */
+                vfs_iput(pos);
+                pos = rooti;
+                vfs_idup(pos);
+                p++;
+            }
+            /* else: relative symlink — pos is already the parent dir */
+
+            continue;
+        }
+        /* ── End symlink following ────────────────────────────── */
+
         vfs_iput(pos);
         pos = next;
 
+        /* Cross mount points */
         while (pos->mount && pos->mnt_rooti != NULL) {
             struct vfs_inode *mnt_root = pos->mnt_rooti;
             if (!vfs_idup_not_zero(mnt_root)) {
-                // Mount root is dying, need to retry entire lookup
                 vfs_iput(pos);
                 pos = NULL;
                 ret_inode = INIT_ERR_PTR(-EAGAIN);
@@ -1634,16 +1718,15 @@ static struct vfs_inode *__vfs_namei(const char *path, size_t path_len) {
             pos = mnt_root;
         }
 
-        token = strtok_r(0, "/", &saveptr);
+        p = comp_end;
     }
 
     ret_inode = pos;
 out:
     vfs_iput(rooti);
     kmm_free(pathbuf);
-    if (pos == NULL && !IS_ERR(ret_inode)) {
+    if (pos == NULL && !IS_ERR(ret_inode))
         return ERR_PTR(-ENOENT);
-    }
     return ret_inode;
 }
 

@@ -417,35 +417,13 @@ uint64 sys_vfs_stat(void) {
         return -EFAULT;
     }
 
-    struct vfs_inode *inode = NULL;
-    int symloop_count = 0;
-    const int symloop_max = 8;
-
-    for (;;) {
-        inode = vfs_namei(path, strlen(path));
-        if (IS_ERR(inode)) {
-            return PTR_ERR(inode);
-        }
-        if (inode == NULL) {
-            return -ENOENT;
-        }
-
-        if (!S_ISLNK(inode->mode)) {
-            break;
-        }
-
-        ssize_t link_len = vfs_readlink(inode, path, MAXPATH - 1);
-        vfs_iput(inode);
-        inode = NULL;
-        if (link_len < 0) {
-            return link_len;
-        }
-        path[link_len] = '\0';
-
-        symloop_count++;
-        if (symloop_count >= symloop_max) {
-            return -ELOOP;
-        }
+    /* vfs_namei now follows all symlinks automatically */
+    struct vfs_inode *inode = vfs_namei(path, strlen(path));
+    if (IS_ERR(inode)) {
+        return PTR_ERR(inode);
+    }
+    if (inode == NULL) {
+        return -ENOENT;
     }
 
     struct stat kst;
@@ -656,15 +634,6 @@ uint64 sys_vfs_rename(void) {
  * File System Namespace Syscalls
  ******************************************************************************/
 
-/*
- * FIX: Maximum symlink depth during path resolution.
- * POSIX systems typically limit symlink following to prevent infinite loops
- * from circular symlinks (e.g., a -> b -> a). Without this limit, such
- * loops would cause the kernel to hang or stack overflow.
- * Linux uses SYMLOOP_MAX=40, we use 8 for simplicity.
- */
-#define VFS_SYMLOOP_MAX 8
-
 uint64 sys_vfs_open(void) {
     char path[MAXPATH];
     char name[DIRSIZ + 1];
@@ -709,38 +678,45 @@ uint64 sys_vfs_open(void) {
             }
         }
     } else {
-        // Open existing file - follow symlinks unless O_NOFOLLOW
-        int symloop_count = 0;
-
-        do {
-            inode = vfs_namei(path, strlen(path));
-            if (IS_ERR(inode)) {
-                return PTR_ERR(inode);
-            }
-            if (inode == NULL) {
+        /*
+         * Open existing file.
+         * vfs_namei now follows all symlinks automatically.
+         * For O_NOFOLLOW, use nameiparent+ilookup to avoid resolving
+         * the final symlink.
+         */
+        if (omode & O_NOFOLLOW) {
+            char oname[DIRSIZ + 1];
+            struct vfs_inode *parent =
+                vfs_nameiparent(path, strlen(path), oname, DIRSIZ + 1);
+            if (IS_ERR(parent))
+                return PTR_ERR(parent);
+            if (parent == NULL)
                 return -ENOENT;
+
+            struct vfs_dentry dentry = {.sb = parent->sb, .parent = parent};
+            int lr = vfs_ilookup(parent, &dentry, oname, strlen(oname));
+            if (lr != 0) {
+                vfs_iput(parent);
+                return lr;
             }
-
-            // Check if it's a symlink and we should follow it
-            if (!S_ISLNK(inode->mode) || (omode & O_NOFOLLOW)) {
-                break; // Not a symlink or O_NOFOLLOW set
+            inode = vfs_get_dentry_inode(&dentry);
+            vfs_release_dentry(&dentry);
+            vfs_iput(parent);
+            if (IS_ERR(inode))
+                return PTR_ERR(inode);
+            if (inode == NULL)
+                return -ENOENT;
+            /* O_NOFOLLOW + symlink → ELOOP */
+            if (S_ISLNK(inode->mode)) {
+                vfs_iput(inode);
+                return -ELOOP;
             }
-
-            // Read the symlink target
-            ssize_t link_len = vfs_readlink(inode, path, MAXPATH - 1);
-            vfs_iput(inode);
-            inode = NULL;
-
-            if (link_len < 0) {
-                return link_len; // Error reading symlink
-            }
-            path[link_len] = '\0';
-
-            symloop_count++;
-        } while (symloop_count < VFS_SYMLOOP_MAX);
-
-        if (symloop_count >= VFS_SYMLOOP_MAX) {
-            return -ELOOP; // Too many symlink levels
+        } else {
+            inode = vfs_namei(path, strlen(path));
+            if (IS_ERR(inode))
+                return PTR_ERR(inode);
+            if (inode == NULL)
+                return -ENOENT;
         }
     }
 
@@ -2428,25 +2404,8 @@ uint64 sys_vfs_fstatat(void) {
         vfs_release_dentry(&dentry);
         vfs_iput(parent);
     } else {
-        // Follow symlinks (stat behavior)
-        int symloop_count = 0;
-        for (;;) {
-            inode = vfs_namei(path, strlen(path));
-            if (IS_ERR(inode))
-                return PTR_ERR(inode);
-            if (inode == NULL)
-                return -ENOENT;
-            if (!S_ISLNK(inode->mode))
-                break;
-            ssize_t link_len = vfs_readlink(inode, path, MAXPATH - 1);
-            vfs_iput(inode);
-            inode = NULL;
-            if (link_len < 0)
-                return link_len;
-            path[link_len] = '\0';
-            if (++symloop_count >= 8)
-                return -ELOOP;
-        }
+        /* vfs_namei follows all symlinks automatically */
+        inode = vfs_namei(path, strlen(path));
     }
 
     if (IS_ERR(inode))

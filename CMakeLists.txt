@@ -267,10 +267,13 @@ list(TRANSFORM USER_PROGRAMS PREPEND "${CMAKE_CURRENT_BINARY_DIR}/user/")
 # fs0.img (for /usr).  The kernel mounts this ext4 image as root via
 # ext4fs_mount_root().
 set(CPYTHON_SRC_DIR_FOR_FS "${CMAKE_SOURCE_DIR}/user/v6-cpython")
+set(MUSL_LIB_DIR_FOR_FS "${CMAKE_BINARY_DIR}/musl-sysroot/lib")
 set(MKEXT4_ROOTFS_SCRIPT "${CMAKE_SOURCE_DIR}/scripts/mkext4_rootfs.sh")
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fs.img
-    COMMAND bash ${MKEXT4_ROOTFS_SCRIPT}
+    COMMAND ${CMAKE_COMMAND} -E env
+            MUSL_LIB_DIR=${MUSL_LIB_DIR_FOR_FS}
+            bash ${MKEXT4_ROOTFS_SCRIPT}
             ${CMAKE_CURRENT_BINARY_DIR}/fs.img
             ${CMAKE_SOURCE_DIR}/README.md
             ${CPYTHON_SRC_DIR_FOR_FS}

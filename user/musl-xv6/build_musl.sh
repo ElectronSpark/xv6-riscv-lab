@@ -5,7 +5,7 @@
 # This script:
 #   1. Downloads musl source (if not already present)
 #   2. Overlays MINIMAL xv6-specific arch files (only syscall numbers + clone)
-#   3. Configures and builds musl (static only)
+#   3. Configures and builds musl (static + shared, with dynamic linker)
 #   4. Installs to a sysroot directory
 #
 # The key insight: musl's RISC-V ecall convention is identical to xv6's
@@ -13,7 +13,9 @@
 # We only need to change:
 #   - bits/syscall.h.in (xv6 uses different syscall numbers than Linux)
 #   - kstat.h (xv6 stat layout differs from Linux kstat)
-#   - src/thread/riscv64/__clone.s (xv6 clone takes a struct pointer)
+#   - src/thread/riscv64/clone.s (xv6 clone takes a struct pointer)
+#   - src/process/riscv64/vfork.s (use clone with CLONE_VM|CLONE_VFORK)
+#   - src/stat/fstatat.c (remove zero-initialiser on kstat — xv6 compat)
 # All other arch files use upstream musl defaults.
 #
 # Usage:
@@ -25,9 +27,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 MUSL_VERSION="1.2.5"
 MUSL_URL="https://musl.libc.org/releases/musl-${MUSL_VERSION}.tar.gz"
-BUILD_DIR="${SCRIPT_DIR}/musl-build"
-MUSL_SRC="${BUILD_DIR}/musl-${MUSL_VERSION}"
-PREFIX="${SCRIPT_DIR}/musl-sysroot"
+BUILD_DIR=""
+PREFIX=""
 CLEAN=0
 
 # Parse arguments
@@ -41,6 +42,10 @@ while [[ $# -gt 0 ]]; do
             PREFIX="${1#--prefix=}"
             shift
             ;;
+        --build-dir=*)
+            BUILD_DIR="${1#--build-dir=}"
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
             exit 1
@@ -48,11 +53,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+# Default build dir and prefix if not specified
+BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/musl-build}"
+PREFIX="${PREFIX:-${SCRIPT_DIR}/musl-sysroot}"
+MUSL_SRC="${BUILD_DIR}/musl-${MUSL_VERSION}"
+
 # Detect cross-compiler
-if command -v riscv64-unknown-elf-gcc &>/dev/null; then
-    CROSS_COMPILE="riscv64-unknown-elf-"
-elif command -v riscv64-linux-gnu-gcc &>/dev/null; then
+# Prefer riscv64-linux-gnu- because its linker supports -shared (needed for
+# libc.so and ld-musl dynamic linker).  riscv64-unknown-elf-ld does NOT
+# support -shared so musl's shared build fails with the bare-metal toolchain.
+if command -v riscv64-linux-gnu-gcc &>/dev/null; then
     CROSS_COMPILE="riscv64-linux-gnu-"
+elif command -v riscv64-unknown-elf-gcc &>/dev/null; then
+    CROSS_COMPILE="riscv64-unknown-elf-"
 else
     echo "ERROR: No RISC-V cross compiler found."
     exit 1
@@ -93,11 +106,22 @@ cp "${SCRIPT_DIR}/arch/riscv64/bits/syscall.h.in" "${ARCH_DIR}/bits/syscall.h.in
 # 1.5 Override kstat layout (xv6 struct stat is compact, not Linux kstat)
 cp "${SCRIPT_DIR}/arch/riscv64/kstat.h" "${ARCH_DIR}/kstat.h"
 
-# 2. Override __clone.s (xv6 clone takes a struct pointer, not individual regs)
+# 2. Override clone.s (xv6 clone takes a struct pointer, not individual regs)
+#    musl's upstream clone.s defines __clone; we replace it with our xv6 version.
+#    NOTE: the file must be named clone.s (not __clone.s) because musl's makefile
+#    compiles clone.s via REPLACED_OBJS to produce __clone.lo.
 mkdir -p "${MUSL_SRC}/src/thread/riscv64"
-cp "${SCRIPT_DIR}/arch/riscv64/__clone.s" "${MUSL_SRC}/src/thread/riscv64/__clone.s"
+cp "${SCRIPT_DIR}/arch/riscv64/clone.s" "${MUSL_SRC}/src/thread/riscv64/clone.s"
 
-echo "Overlay applied (3 files)."
+# 3. Override vfork.s (use clone with CLONE_VM|CLONE_VFORK|SIGCHLD instead
+#    of the non-existent SYS_vfork on riscv64)
+mkdir -p "${MUSL_SRC}/src/process/riscv64"
+cp "${SCRIPT_DIR}/arch/riscv64/vfork.s" "${MUSL_SRC}/src/process/riscv64/vfork.s"
+
+# 4. Override fstatat.c (remove zero-initialiser on struct kstat for xv6 compat)
+cp "${SCRIPT_DIR}/arch/riscv64/fstatat.c" "${MUSL_SRC}/src/stat/fstatat.c"
+
+echo "Overlay applied (5 files)."
 
 # 3. Disable brk — xv6 heap growth is unreliable when mmap regions are
 #    placed adjacent to the heap VMA.  Force mallocng to use mmap exclusively.
@@ -117,7 +141,7 @@ CFLAGS="-march=rv64gc -mabi=lp64d -mcmodel=medany -fPIC -O2 -fno-stack-protector
     --target=riscv64 \
     --prefix="${PREFIX}" \
     --syslibdir="${PREFIX}/lib" \
-    --disable-shared \
+    --enable-shared \
     --enable-static \
     --disable-wrapper
 
@@ -135,5 +159,7 @@ echo "Installation complete."
 
 echo ""
 echo "=== musl libc for xv6 built successfully ==="
-echo "Static library: ${PREFIX}/lib/libc.a"
-echo "Headers:        ${PREFIX}/include/"
+echo "Static library:  ${PREFIX}/lib/libc.a"
+echo "Shared library:  ${PREFIX}/lib/libc.so"
+echo "Dynamic linker:  ${PREFIX}/lib/ld-musl-riscv64.so.1"
+echo "Headers:         ${PREFIX}/include/"

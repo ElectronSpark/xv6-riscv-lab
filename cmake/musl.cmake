@@ -13,7 +13,8 @@
 
 set(MUSL_XV6_DIR "${CMAKE_SOURCE_DIR}/user/musl-xv6")
 set(MUSL_BUILD_SCRIPT "${MUSL_XV6_DIR}/build_musl.sh")
-set(MUSL_SYSROOT "${MUSL_XV6_DIR}/musl-sysroot")
+set(MUSL_SYSROOT "${CMAKE_BINARY_DIR}/musl-sysroot")
+set(MUSL_BUILD_DIR "${CMAKE_BINARY_DIR}/musl-build")
 set(MUSL_LIBC_A "${MUSL_SYSROOT}/lib/libc.a")
 set(MUSL_CRT1_O "${MUSL_SYSROOT}/lib/crt1.o")
 set(MUSL_CRTI_O "${MUSL_SYSROOT}/lib/crti.o")
@@ -46,10 +47,10 @@ message(STATUS "musl libc: libgcc = ${LIBGCC_PATH}")
 # ==============================================================================
 add_custom_command(
     OUTPUT ${MUSL_LIBC_A} ${MUSL_CRT1_O} ${MUSL_CRTI_O} ${MUSL_CRTN_O}
-    COMMAND bash ${MUSL_BUILD_SCRIPT} --prefix=${MUSL_SYSROOT}
+    COMMAND bash ${MUSL_BUILD_SCRIPT} --prefix=${MUSL_SYSROOT} --build-dir=${MUSL_BUILD_DIR}
     DEPENDS
         ${MUSL_BUILD_SCRIPT}
-        ${MUSL_XV6_DIR}/arch/riscv64/__clone.s
+        ${MUSL_XV6_DIR}/arch/riscv64/clone.s
         ${MUSL_XV6_DIR}/arch/riscv64/bits/syscall.h.in
     COMMENT "Building musl libc for xv6 RISC-V (this may take a few minutes)..."
 )

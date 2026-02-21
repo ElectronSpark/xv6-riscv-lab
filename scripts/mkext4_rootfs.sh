@@ -38,6 +38,7 @@ echo "mkext4_rootfs: staging directory: $STAGING"
 # Create standard directory structure
 mkdir -p "$STAGING/bin"
 mkdir -p "$STAGING/dev"
+mkdir -p "$STAGING/lib"
 mkdir -p "$STAGING/proc"
 mkdir -p "$STAGING/tmp"
 mkdir -p "$STAGING/sys"
@@ -97,6 +98,26 @@ fi
 if [ -n "$TERMINFO_DIR" ] && [ -d "$TERMINFO_DIR" ]; then
     cp -r "$TERMINFO_DIR" "$STAGING/usr/share/terminfo"
     echo "mkext4_rootfs: terminfo database included"
+fi
+
+# Install shared libraries for dynamic linking
+# MUSL_LIB_DIR: path to musl sysroot lib (contains libc.so)
+# CPYTHON_LIBPYTHON: path to libpython3.12.so (if built with --enable-shared)
+if [ -n "$MUSL_LIB_DIR" ] && [ -f "$MUSL_LIB_DIR/libc.so" ]; then
+    cp "$MUSL_LIB_DIR/libc.so" "$STAGING/lib/libc.so"
+    # ld-musl-riscv64.so.1 is a symlink to libc.so (musl IS the dynamic linker)
+    ln -sf libc.so "$STAGING/lib/ld-musl-riscv64.so.1"
+    echo "mkext4_rootfs: installed libc.so + ld-musl-riscv64.so.1"
+else
+    echo "mkext4_rootfs: warning: MUSL_LIB_DIR not set or libc.so not found" >&2
+fi
+
+if [ -n "$CPYTHON_LIBPYTHON" ] && [ -f "$CPYTHON_LIBPYTHON" ]; then
+    cp "$CPYTHON_LIBPYTHON" "$STAGING/lib/$(basename "$CPYTHON_LIBPYTHON")"
+    # Create soname symlink (libpython3.12.so.1.0 -> libpython3.12.so)
+    # CPython typically uses versioned sonames
+    local_name="$(basename "$CPYTHON_LIBPYTHON")"
+    echo "mkext4_rootfs: installed ${local_name} in /lib/"
 fi
 
 BIN_COUNT=$(find "$STAGING/bin/" -type f | wc -l)
