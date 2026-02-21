@@ -149,6 +149,7 @@ static struct {
     /* Stop reason communicated from trap handler to GDB thread */
     int              stop_signal;     /* e.g. 5 = SIGTRAP */
     int              stop_tid;        /* TID of thread that stopped */
+    int              stop_is_swbreak; /* 1 if stopped at our sw bp */
 
     /* Single-step state */
     int              stepping;        /* 1 if single-stepping */
@@ -199,6 +200,12 @@ static struct {
      * (a0==1).  This avoids an unwanted extra stop when the user
      * only wants to set breakpoints and continue past exec. */
     int              stop_on_exec;
+
+    /* Exec event: set by gdbstub_exec_stop() with the new binary name.
+     * The session loop includes exec:<hexpath> in the stop reply so
+     * GDB reloads symbols and discards stale breakpoints. */
+    volatile int     exec_event;       /* 1 = exec happened */
+    char             exec_name[128];   /* name of the new binary */
 
     /* Set by gdbstub_signal_stop() when the debugger already inspected
      * the process at the fault point.  gdbstub_exit_stop() checks this
@@ -595,8 +602,15 @@ static int gdb_write_user_mem(uint64 addr, const void *src, int len)
     }
     vm_runlock(vm);
 
-    /* Flush I-cache so the CPU fetches the updated instruction */
-    asm volatile("fence.i");
+    /*
+     * Flush I-cache on ALL harts that may run this process.
+     * The target thread could be scheduled on any hart after
+     * resuming, and gdb_write_user_mem runs on the gdbstub hart.
+     * RISC-V fence.i is local — we need SBI remote fence.i to
+     * cover all harts.  The target also does fence.i before
+     * resuming (belt-and-suspenders).
+     */
+    vm_remote_fence_i(vm);
     return 0;
 }
 
@@ -866,6 +880,88 @@ static int gdb_place_step_bp(uint64 addr, int len)
     return 0;
 }
 
+/*
+ * gdb_step_over_bp() — Step over a software breakpoint at the current PC.
+ *
+ * When `swbreak+` is advertised, the stub is responsible for transparently
+ * stepping past a breakpoint on continue/step.  GDB does NOT send z0/Z0
+ * packets around continues.
+ *
+ * If the target's sepc matches an active breakpoint, this function:
+ *   1. Restores the original instruction at the breakpoint address
+ *   2. Places a step breakpoint at the next instruction
+ *   3. Resumes the target for one instruction
+ *   4. Waits for the target to stop at the step breakpoint
+ *   5. Cleans up the step breakpoint
+ *   6. Re-inserts the EBREAK at the original breakpoint address
+ *
+ * After return the target is stopped (waiting on target_resume) at the
+ * instruction after the breakpoint.
+ *
+ * Returns:
+ *   1 — step-over was performed
+ *   0 — no step-over needed (PC not at a breakpoint)
+ *  -1 — target exited/died during the step-over
+ */
+static int gdb_step_over_bp(void)
+{
+    if (!gdb.target || !gdb.target->trapframe)
+        return 0;
+
+    uint64 pc = gdb.target->trapframe->trapframe.sepc;
+
+    /* Find the breakpoint at the current PC */
+    struct gdb_breakpoint *bp_at_pc = NULL;
+    for (int i = 0; i < gdb.nbps; i++) {
+        if (gdb.bps[i].active && gdb.bps[i].addr == pc) {
+            bp_at_pc = &gdb.bps[i];
+            break;
+        }
+    }
+    if (!bp_at_pc)
+        return 0;  /* PC is not at a breakpoint — nothing to do */
+
+    GDB_DBG("step-over bp at 0x%lx (len=%d)", pc, bp_at_pc->len);
+
+    /* 1. Restore the original instruction */
+    gdb_write_user_mem(pc, &bp_at_pc->orig_insn, bp_at_pc->len);
+
+    /* 2. Decode next PC and place a step breakpoint there */
+    int insn_len = 4, is_branch = 0;
+    uint64 next_pc = gdb_decode_next_pc(gdb.target->trapframe, pc,
+                                         &insn_len, &is_branch);
+    uint16 lo16 = 0;
+    if (gdb_read_user_mem(&lo16, next_pc, 2) == 0 && is_compressed(lo16))
+        gdb_place_step_bp(next_pc, 2);
+    else
+        gdb_place_step_bp(next_pc, 4);
+
+    /* 3. Resume the target for one instruction */
+    sem_post(&gdb.target_resume);
+
+    /* 4. Wait for the target to stop at the step breakpoint */
+    sem_wait(&gdb.target_stopped);
+
+    /* Check for abnormal stops (exit / kill / thread exit) */
+    if (gdb.target_exited || gdb.process_killed || gdb.thread_exited) {
+        gdb_clean_step_bp();
+        /* Re-post so the main loop can handle the event */
+        sem_post(&gdb.target_stopped);
+        return -1;
+    }
+
+    /* 5. Clean up the step breakpoint */
+    gdb_clean_step_bp();
+
+    /* 6. Re-insert the EBREAK at the original breakpoint address */
+    uint32 brk = (bp_at_pc->len == 2) ? RV_C_EBREAK : RV_EBREAK;
+    gdb_write_user_mem(bp_at_pc->addr, &brk, bp_at_pc->len);
+
+    GDB_DBG("step-over complete, target now at 0x%lx",
+              gdb.target->trapframe->trapframe.sepc);
+    return 1;
+}
+
 /* ──────────────────────────────────────────────────────────────────────────── */
 /* Target process management                                                   */
 /* ──────────────────────────────────────────────────────────────────────────── */
@@ -913,17 +1009,26 @@ static struct thread *gdb_selected_thread(void)
 }
 
 /*
- * Send a T-stop reply:  T05thread:p<tgid>.<tid>;
+ * Send a T-stop reply:  T05thread:p<tgid>.<tid>;[swbreak:;]
  * This is the multi-process-aware stop reply that includes the
- * thread that stopped.
+ * thread that stopped and the stop reason.
  */
 static void gdb_send_stop_reply(int signal, int tid)
 {
-    char buf[64];
-    int n = snprintf(buf, sizeof(buf), "T%02xthread:p%x.%x;",
-                     signal & 0xff,
-                     gdb.target_pid > 0 ? gdb.target_pid : 1,
-                     tid > 0 ? tid : 1);
+    char buf[128];
+    int n = snprintf(buf, sizeof(buf), "T%02x",
+                     signal & 0xff);
+
+    /* Include swbreak reason when we stopped at our software breakpoint.
+     * Required by the RSP when swbreak+ is advertised in qSupported. */
+    if (gdb.stop_is_swbreak) {
+        n += snprintf(buf + n, sizeof(buf) - n, "swbreak:;");
+        gdb.stop_is_swbreak = 0;
+    }
+
+    n += snprintf(buf + n, sizeof(buf) - n, "thread:p%x.%x;",
+                  gdb.target_pid > 0 ? gdb.target_pid : 1,
+                  tid > 0 ? tid : 1);
     gdb_send_packet(buf, n);
 }
 
@@ -1339,6 +1444,22 @@ static void gdb_handle_packet(const char *pkt, int len)
             gdb.target->trapframe->trapframe.sepc = addr;
         }
 
+        /*
+         * Step-over-breakpoint: if the current PC sits on one of our
+         * software breakpoints, we must transparently single-step past
+         * the original instruction before resuming.  This is required
+         * when swbreak+ is advertised — GDB does NOT send z0/Z0 around
+         * continues.
+         */
+        if (gdb_resolve_target() == 0) {
+            int so = gdb_step_over_bp();
+            if (so < 0) {
+                /* Target exited during step-over; main loop handles */
+                gdb.target_running = 0;
+                break;
+            }
+        }
+
         /* Resume the target.  Do NOT block — return to the recv loop
          * so we can handle Ctrl-C while the target runs.  The stop
          * reply will be sent when target_stopped is posted. */
@@ -1360,6 +1481,28 @@ static void gdb_handle_packet(const char *pkt, int len)
         if (len > 1) {
             uint64 addr = hex2u64(pkt + 1, len - 1);
             gdb.target->trapframe->trapframe.sepc = addr;
+        }
+
+        /*
+         * If PC is at an active breakpoint, step over it first.
+         * gdb_step_over_bp() transparently executes the original
+         * instruction and re-arms the breakpoint.  Since one
+         * instruction was executed, this counts as the single step.
+         */
+        {
+            int so = gdb_step_over_bp();
+            if (so < 0) {
+                /* Target exited during step-over */
+                gdb.target_running = 0;
+                break;
+            }
+            if (so == 1) {
+                /* Step-over completed — one instruction was executed.
+                 * Report the stop directly; target is still waiting
+                 * on target_resume. */
+                gdb_send_stop_reply(SIGTRAP, gdb.stop_tid);
+                break;
+            }
         }
 
         uint64 pc = gdb.target->trapframe->trapframe.sepc;
@@ -1457,7 +1600,14 @@ static void gdb_handle_packet(const char *pkt, int len)
     /* ── D — Detach ── */
     case 'D':
         GDB_LOG("detach");
-        gdb_detach();
+        if (gdb.attached && !gdb.target_running) {
+            /* Target is stopped (waiting on target_resume) — let it go */
+            gdb_detach();
+            sem_post(&gdb.target_resume);
+        } else {
+            gdb_detach();
+        }
+        gdb.target_running = 0;
         gdb_ok();
         break;
 
@@ -1480,7 +1630,7 @@ static void gdb_handle_packet(const char *pkt, int len)
         if (strncmp(pkt, "qSupported", 10) == 0) {
             gdb_send("PacketSize=1000;swbreak+;vContSupported+"
                      ";multiprocess+;qXfer:threads:read+"
-                     ";ThreadEvents+");
+                     ";ThreadEvents+;exec-events+");
         } else if (strcmp(pkt, "qAttached") == 0) {
             gdb_send("1");  /* always "attached" */
         } else if (strcmp(pkt, "qC") == 0) {
@@ -1633,6 +1783,10 @@ static void gdb_handle_packet(const char *pkt, int len)
             /* QThreadEvents:1 — enable thread exit events
              * QThreadEvents:0 — disable */
             gdb_ok();
+        } else if (strncmp(pkt, "QCatchExec:", 11) == 0) {
+            /* QCatchExec:1 — enable exec stop events
+             * Always succeed — we always report exec events. */
+            gdb_ok();
         } else {
             gdb_empty();
         }
@@ -1782,6 +1936,9 @@ int gdbstub_trap(struct thread *t)
     gdb.target = t;
     gdb.stop_signal = SIGTRAP;
     gdb.stop_tid = t->pid;
+    /* Mark swbreak reason when stopped at one of our software breakpoints
+     * (not a step bp and not a user EBREAK). */
+    gdb.stop_is_swbreak = (is_our_bp && !gdb.stepping) ? 1 : 0;
 
     /* Notify the GDB thread that the target has stopped */
     sem_post(&gdb.target_stopped);
@@ -1831,6 +1988,13 @@ void gdbstub_exec_stop(struct thread *t)
     gdb.target = t;
     gdb.stop_signal = SIGTRAP;
     gdb.stop_tid = t->pid;
+
+    /* Record exec event so the session loop includes exec:<path> in
+     * the stop reply.  GDB uses this to reload symbols and discard
+     * stale breakpoints from the old address space. */
+    gdb.exec_event = 1;
+    snprintf(gdb.exec_name, sizeof(gdb.exec_name), "%s", t->name);
+    __sync_synchronize();
 
     printf("gdbstub: pid %d exec -> %s, stopped at entry point\n",
            t->pid, t->name);
@@ -1980,6 +2144,7 @@ static void gdb_session(struct netconn *conn)
     gdb.target = NULL;
     gdb.stop_signal = 0;
     gdb.stop_tid = 0;
+    gdb.stop_is_swbreak = 0;
     gdb.g_tid = 0;
     gdb.c_tid = 0;
     gdb.stepping = 0;
@@ -1994,9 +2159,23 @@ static void gdb_session(struct netconn *conn)
     gdb.thread_exit_code = 0;
     gdb.process_killed = 0;
     gdb.kill_signal = 0;
+    gdb.exec_event = 0;
+    gdb.exec_name[0] = '\0';
+    gdb.signal_stopped = 0;
     gdb.rxpbuf = NULL;
     gdb.rxpoff = 0;
     memset(gdb.bps, 0, sizeof(gdb.bps));
+
+    /*
+     * Drain stale semaphore counts from previous sessions.
+     * If the previous session disconnected while a target_stopped was
+     * pending (e.g. breakpoint hit during cleanup), or if target_resume
+     * leaked an extra post, those stale counts would confuse this session.
+     */
+    while (sem_trywait(&gdb.target_stopped) == 0)
+        ;
+    while (sem_trywait(&gdb.target_resume) == 0)
+        ;
 
     /* Disable Nagle's algorithm so small packets are sent immediately. */
     tcp_nagle_disable(conn->pcb.tcp);
@@ -2060,7 +2239,7 @@ static void gdb_session(struct netconn *conn)
             }
 
             /* ── Normal stop (breakpoint / signal) ─────────────── */
-            GDB_LOG("target stopped (sig=%d)", gdb.stop_signal);
+            GDB_LOG("target stopped (sig=%d exec=%d)", gdb.stop_signal, gdb.exec_event);
             gdb_clean_step_bp();
             if (gdb.target && gdb.target->sched_entity) {
                 while (smp_load_acquire(&gdb.target->sched_entity->on_cpu))
@@ -2069,6 +2248,26 @@ static void gdb_session(struct netconn *conn)
             if (gdb_resolve_target() != 0) {
                 gdb_send("X09");
                 gdb.attached = 0;
+            } else if (gdb.exec_event) {
+                /*
+                 * Exec event: send T05exec:<hex-pathname>;thread:...;
+                 * so GDB discards stale breakpoints and reloads symbols
+                 * for the new binary.
+                 */
+                gdb.exec_event = 0;
+                char buf[512];
+                int n = snprintf(buf, sizeof(buf), "T%02x", SIGTRAP);
+                /* Hex-encode the exec pathname */
+                n += snprintf(buf + n, sizeof(buf) - n, "exec:");
+                const char *name = gdb.exec_name;
+                for (int i = 0; name[i] && n + 2 < (int)sizeof(buf); i++) {
+                    buf[n++] = hexchars[((uint8)name[i]) >> 4];
+                    buf[n++] = hexchars[((uint8)name[i]) & 0xf];
+                }
+                n += snprintf(buf + n, sizeof(buf) - n, ";thread:p%x.%x;",
+                              gdb.target_pid > 0 ? gdb.target_pid : 1,
+                              gdb.stop_tid > 0 ? gdb.stop_tid : 1);
+                gdb_send_packet(buf, n);
             } else {
                 gdb_send_stop_reply(gdb.stop_signal, gdb.stop_tid);
             }
@@ -2107,13 +2306,34 @@ static void gdb_session(struct netconn *conn)
                 gdb.interrupt_pending = 1;
                 __sync_synchronize();
 
+                /*
+                 * Wake the target thread so it reaches usertrapret()
+                 * where gdbstub_check_interrupt() will stop it.
+                 *
+                 * If the thread is currently running on a CPU, send an
+                 * IPI to force a trip through the trap handler.
+                 *
+                 * If the thread is sleeping (in any sleep state),
+                 * unconditionally wake it.  The syscall will return
+                 * with -EINTR (interruptible) or see the pending
+                 * interrupt on its next traversal through usertrapret().
+                 */
                 struct thread *t = NULL;
+                rcu_read_lock();
                 get_pid_thread(gdb.target_pid, &t);
                 if (t && t->sched_entity) {
-                    int target_cpu = smp_load_acquire(&t->sched_entity->cpu_id);
-                    if (smp_load_acquire(&t->sched_entity->on_cpu))
+                    if (smp_load_acquire(&t->sched_entity->on_cpu)) {
+                        int target_cpu = smp_load_acquire(
+                            &t->sched_entity->cpu_id);
                         ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
+                    } else {
+                        /* Thread is off-cpu — unconditionally wake it
+                         * from any sleep state so it eventually passes
+                         * through usertrapret(). */
+                        scheduler_wakeup(t);
+                    }
                 }
+                rcu_read_unlock();
             }
             continue;
         }
