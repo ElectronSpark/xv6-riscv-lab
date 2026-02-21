@@ -58,10 +58,10 @@
 #define SA_RESETHAND  0x80000000
 #define SA_RESTORER   0x04000000
 
-/* SIG_BLOCK etc. — match xv6 kernel */
-#define SIG_BLOCK   1
-#define SIG_UNBLOCK 2
-#define SIG_SETMASK 3
+/* SIG_BLOCK etc. — match Linux kernel ABI */
+#define SIG_BLOCK   0
+#define SIG_UNBLOCK 1
+#define SIG_SETMASK 2
 
 #endif
 

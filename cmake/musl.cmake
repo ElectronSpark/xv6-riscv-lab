@@ -138,3 +138,62 @@ function(add_musl_program PROGRAM_NAME SOURCE_FILE)
     list(APPEND USER_PROGRAMS ${TARGET_NAME})
     set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
 endfunction()
+
+# ==============================================================================
+# add_musl_dynamic_program(name source_file)
+#
+# Like add_musl_program() but links DYNAMICALLY against musl libc.so.
+# The resulting executable uses /lib/ld-musl-riscv64.so.1 as interpreter,
+# the same as CPython. Useful for testing dynamic linking on the target.
+# ==============================================================================
+function(add_musl_dynamic_program PROGRAM_NAME SOURCE_FILE)
+    set(TARGET_NAME _${PROGRAM_NAME})
+    set(PROGRAM_ELF ${CMAKE_BINARY_DIR}/user/${TARGET_NAME})
+
+    file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${TARGET_NAME}_dymusl.dir)
+
+    get_filename_component(SRC_BASENAME ${SOURCE_FILE} NAME_WE)
+    get_filename_component(SRC_EXT ${SOURCE_FILE} EXT)
+    set(OBJ_FILE ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${TARGET_NAME}_dymusl.dir/${SRC_BASENAME}${SRC_EXT}.o)
+
+    add_custom_command(
+        OUTPUT ${OBJ_FILE}
+        COMMAND ${CMAKE_C_COMPILER}
+                -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
+                -march=rv64gc -mabi=lp64d
+                -mcmodel=medany -fno-common -fno-pie -no-pie
+                -nostdinc -ffreestanding
+                -isystem ${MUSL_INCLUDE_DIR}
+                -isystem ${GCC_INCLUDE_DIR_MUSL}
+                -o ${OBJ_FILE}
+                -c ${SOURCE_FILE}
+        DEPENDS ${SOURCE_FILE} musl_sysroot
+        COMMENT "Building dynamic musl C object ${SRC_BASENAME}${SRC_EXT}"
+    )
+
+    # Link dynamically — use crt1.o + libc.so (not libc.a), with dynamic linker
+    add_custom_command(
+        OUTPUT ${PROGRAM_ELF}
+        COMMAND ${CMAKE_C_COMPILER}
+                -no-pie -nostartfiles -nostdlib
+                ${MUSL_CRT1_O}
+                ${MUSL_CRTI_O}
+                -Wl,--dynamic-linker=/lib/ld-musl-riscv64.so.1
+                -Wl,-z,max-page-size=0x1000
+                -Wl,-z,common-page-size=0x1000
+                -L${MUSL_SYSROOT}/lib
+                -o ${PROGRAM_ELF}
+                ${OBJ_FILE}
+                -lc
+                ${LIBGCC_PATH}
+                ${MUSL_CRTN_O}
+        DEPENDS ${OBJ_FILE} musl_sysroot
+        COMMENT "Linking dynamic musl program ${TARGET_NAME}"
+    )
+
+    add_custom_target(${TARGET_NAME}_dymusl ALL DEPENDS ${PROGRAM_ELF})
+    add_dependencies(user_programs ${TARGET_NAME}_dymusl)
+
+    list(APPEND USER_PROGRAMS ${TARGET_NAME})
+    set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
+endfunction()

@@ -11,6 +11,154 @@
 #include <mm/vm.h>
 #include "errno.h"
 
+/* ============================================================
+ * Syscall tracing — set STRACE_ENABLED to 1 to log every
+ * syscall for processes matching STRACE_PROC_NAME.
+ * Set STRACE_PROC_NAME to NULL to trace ALL processes.
+ * ============================================================ */
+#define STRACE_ENABLED   0
+#define STRACE_PROC_NAME "python"   /* NULL = trace all */
+
+#if STRACE_ENABLED
+static const char *syscall_name(int num) {
+    switch (num) {
+    case 1: return "clone";
+    case 2: return "vfork";
+    case 3: return "exit";
+    case 4: return "exit_group";
+    case 5: return "wait";
+    case 6: return "exec";
+    case 7: return "kill";
+    case 8: return "tgkill";
+    case 9: return "getpid";
+    case 10: return "gettid";
+    case 11: return "sleep";
+    case 12: return "pause";
+    case 13: return "uptime";
+    case 14: return "sbrk";
+    case 15: return "setpgid";
+    case 16: return "getpgid";
+    case 17: return "setsid";
+    case 18: return "getsid";
+    case 19: return "getrandom";
+    case 20: return "open";
+    case 21: return "close";
+    case 22: return "read";
+    case 23: return "write";
+    case 24: return "dup";
+    case 25: return "pipe";
+    case 26: return "fstat";
+    case 27: return "link";
+    case 28: return "unlink";
+    case 29: return "symlink";
+    case 30: return "mkdir";
+    case 31: return "mknod";
+    case 32: return "chdir";
+    case 33: return "chroot";
+    case 34: return "mount";
+    case 35: return "umount";
+    case 36: return "connect";
+    case 37: return "getdents";
+    case 38: return "getcwd";
+    case 39: return "sync";
+    case 40: return "ioctl";
+    case 41: return "tcgetattr";
+    case 42: return "tcsetattr";
+    case 43: return "lseek";
+    case 44: return "dup2";
+    case 45: return "fcntl";
+    case 46: return "access";
+    case 47: return "rename";
+    case 48: return "readlink";
+    case 49: return "stat";
+    case 50: return "mmap";
+    case 51: return "munmap";
+    case 52: return "mprotect";
+    case 53: return "mremap";
+    case 54: return "msync";
+    case 55: return "mincore";
+    case 56: return "madvise";
+    case 57: return "gettimeofday";
+    case 58: return "waitpid";
+    case 59: return "nanosleep";
+    case 60: return "ftruncate";
+    case 61: return "getppid";
+    case 62: return "uname";
+    case 63: return "lstat";
+    case 64: return "poll";
+    case 65: return "kqueue";
+    case 66: return "kevent_register";
+    case 67: return "kevent_wait";
+    case 68: return "brk";
+    case 69: return "futex";
+    case 70: return "sigaction";
+    case 71: return "sigreturn";
+    case 72: return "sigpending";
+    case 73: return "sigprocmask";
+    case 74: return "sigalarm";
+    case 75: return "sigsuspend";
+    case 76: return "sigwait";
+    case 77: return "tkill";
+    case 90: return "memstat";
+    case 91: return "dumpproc";
+    case 92: return "dumpchan";
+    case 93: return "dumppcache";
+    case 94: return "dumprq";
+    case 95: return "kernbase";
+    case 96: return "dumpinode";
+    case 100: return "socket";
+    case 101: return "bind";
+    case 102: return "listen";
+    case 103: return "accept";
+    case 104: return "sconnect";
+    case 105: return "sendto";
+    case 106: return "recvfrom";
+    case 107: return "setsockopt";
+    case 108: return "getsockopt";
+    case 109: return "shutdown";
+    case 110: return "getpeername";
+    case 111: return "getsockname";
+    case 120: return "openat";
+    case 121: return "writev";
+    case 122: return "readv";
+    case 123: return "set_tid_address";
+    case 124: return "clock_gettime";
+    case 125: return "clock_getres";
+    case 126: return "pread64";
+    case 127: return "pwrite64";
+    case 128: return "fstatat";
+    case 129: return "pipe2";
+    case 130: return "mkdirat";
+    case 131: return "mknodat";
+    case 132: return "unlinkat";
+    case 133: return "linkat";
+    case 134: return "symlinkat";
+    case 135: return "readlinkat";
+    case 136: return "renameat";
+    case 137: return "faccessat";
+    case 138: return "dup3";
+    case 139: return "getuid";
+    case 140: return "geteuid";
+    case 141: return "getgid";
+    case 142: return "getegid";
+    case 143: return "setuid";
+    case 144: return "setgid";
+    case 145: return "setreuid";
+    case 146: return "setregid";
+    case 147: return "getgroups";
+    case 148: return "setgroups";
+    default: return "???";
+    }
+}
+
+static inline int strace_match(struct thread *p) {
+    const char *filter = STRACE_PROC_NAME;
+    if (filter == NULL)
+        return 1;
+    return (strncmp(p->name, filter, strlen(filter)) == 0);
+}
+#endif /* STRACE_ENABLED */
+
 static uint64 sys_ni_enosys(void) { return (uint64)-ENOSYS; }
 
 // Fetch the uint64 at addr from the current thread.
@@ -368,8 +516,28 @@ void syscall(void) {
     num = p->trapframe->trapframe.a7;
 
     if (num > 0 && num < NELEM(syscalls) && syscalls[num]) {
+#if STRACE_ENABLED
+        if (strace_match(p)) {
+            uint64 a0 = p->trapframe->trapframe.a0;
+            uint64 a1 = p->trapframe->trapframe.a1;
+            uint64 a2 = p->trapframe->trapframe.a2;
+            printf("strace: pid %d %s %s(%d) a0=0x%lx a1=0x%lx a2=0x%lx\n",
+                   p->pid, p->name, syscall_name(num), num, a0, a1, a2);
+        }
+#endif
         p->trapframe->trapframe.a0 = syscalls[num]();
+#if STRACE_ENABLED
+        if (strace_match(p)) {
+            printf("strace: pid %d %s %s(%d) -> 0x%lx\n",
+                   p->pid, p->name, syscall_name(num), num,
+                   p->trapframe->trapframe.a0);
+        }
+#endif
     } else {
+#if STRACE_ENABLED
+        printf("strace: pid %d %s UNKNOWN syscall %d -> ENOSYS\n",
+               p->pid, p->name, num);
+#endif
         p->trapframe->trapframe.a0 = (uint64)-ENOSYS;
     }
 }

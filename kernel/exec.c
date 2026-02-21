@@ -31,6 +31,15 @@
 #include "signal.h"
 #include "kqueue_types.h"
 
+/* Enable verbose exec debugging — set to 1 to trace ELF loading steps */
+#define EXEC_DEBUG 0
+
+#if EXEC_DEBUG
+#define exec_dbg(fmt, ...) printf("exec: " fmt, ##__VA_ARGS__)
+#else
+#define exec_dbg(fmt, ...) ((void)0)
+#endif
+
 /*
  * Base address for loading ET_DYN executables (PIE).
  * Chosen to be well above typical text addresses but below the stack.
@@ -226,9 +235,12 @@ int exec(char *path, char **argv, char **envp) {
     uint64 interp_base = 0;   /* load bias of interpreter */
     uint64 interp_entry = 0;  /* entry point of interpreter */
 
+    exec_dbg("pid %d: exec(\"%s\")\n", current->pid, path);
+
     // Look up the file using VFS
     struct vfs_inode *inode = vfs_namei(path, strlen(path));
     if (IS_ERR_OR_NULL(inode)) {
+        exec_dbg("  FAIL: vfs_namei(\"%s\") failed\n", path);
         return -1;
     }
 
@@ -238,23 +250,34 @@ int exec(char *path, char **argv, char **envp) {
     inode = NULL;
 
     if (IS_ERR(file)) {
+        exec_dbg("  FAIL: vfs_fileopen IS_ERR\n");
         return -1;
     }
     if (file == NULL) {
+        exec_dbg("  FAIL: vfs_fileopen returned NULL\n");
         return -1;
     }
 
     // Read ELF header
     ssize_t n = vfs_fileread(file, &elf, sizeof(elf), false);
-    if (n != sizeof(elf))
+    if (n != sizeof(elf)) {
+        exec_dbg("  FAIL: read ELF header: got %ld bytes\n", n);
         goto bad;
+    }
 
-    if (elf.magic != ELF_MAGIC)
+    if (elf.magic != ELF_MAGIC) {
+        exec_dbg("  FAIL: bad ELF magic 0x%x\n", elf.magic);
         goto bad;
+    }
 
     /* Only ET_EXEC and ET_DYN are loadable */
-    if (elf.type != ET_EXEC && elf.type != ET_DYN)
+    if (elf.type != ET_EXEC && elf.type != ET_DYN) {
+        exec_dbg("  FAIL: unsupported ELF type %d\n", elf.type);
         goto bad;
+    }
+    exec_dbg("  ELF type=%s entry=0x%lx phnum=%d phoff=0x%lx\n",
+             elf.type == ET_EXEC ? "EXEC" : "DYN",
+             (uint64)elf.entry, (int)elf.phnum, (uint64)elf.phoff);
 
     /*
      * Scan program headers for PT_INTERP first (before creating VM).
@@ -267,8 +290,10 @@ int exec(char *path, char **argv, char **envp) {
         if (vfs_fileread(file, &ph, sizeof(ph), false) != sizeof(ph))
             goto bad;
         if (ph.type == ELF_PROG_INTERP) {
-            if (ph.filesz >= ELF_INTERP_MAXLEN || ph.filesz < 2)
+            if (ph.filesz >= ELF_INTERP_MAXLEN || ph.filesz < 2) {
+                exec_dbg("  FAIL: PT_INTERP filesz=%ld out of range\n", (long)ph.filesz);
                 goto bad;
+            }
             if (vfs_filelseek(file, ph.off, SEEK_SET) != (loff_t)ph.off)
                 goto bad;
             if (vfs_fileread(file, interp_path, ph.filesz, false) !=
@@ -279,6 +304,7 @@ int exec(char *path, char **argv, char **envp) {
             if (interp_path[ph.filesz - 1] == '\n')
                 interp_path[ph.filesz - 1] = '\0';
             has_interp = 1;
+            exec_dbg("  PT_INTERP: \"%s\"\n", interp_path);
             break;
         }
     }
@@ -301,10 +327,15 @@ int exec(char *path, char **argv, char **envp) {
     }
 
     /* Load the main executable's PT_LOAD segments */
+    exec_dbg("  loading main ELF segments (bias=0x%lx)\n", load_bias);
     int ret = load_elf_segments(tmp_vm, file, &elf, load_bias, &heap_start,
                                 &phdr_addr);
-    if (ret != 0)
+    if (ret != 0) {
+        exec_dbg("  FAIL: load_elf_segments(main) returned %d\n", ret);
         goto bad_locked;
+    }
+    exec_dbg("  main segments loaded: brk=0x%lx phdr_addr=0x%lx\n",
+             heap_start, phdr_addr);
 
     /*
      * Load the interpreter (dynamic linker) if PT_INTERP was found.
@@ -314,35 +345,48 @@ int exec(char *path, char **argv, char **envp) {
     if (has_interp) {
         struct elfhdr interp_elf;
 
+        exec_dbg("  loading interpreter \"%s\"\n", interp_path);
         struct vfs_inode *interp_inode =
             vfs_namei(interp_path, strlen(interp_path));
-        if (IS_ERR_OR_NULL(interp_inode))
+        if (IS_ERR_OR_NULL(interp_inode)) {
+            exec_dbg("  FAIL: interpreter vfs_namei(\"%s\") failed\n", interp_path);
             goto bad_locked;
+        }
 
         interp_file = vfs_fileopen(interp_inode, O_RDONLY);
         vfs_iput(interp_inode);
 
-        if (IS_ERR_OR_NULL(interp_file))
+        if (IS_ERR_OR_NULL(interp_file)) {
+            exec_dbg("  FAIL: interpreter vfs_fileopen failed\n");
             goto bad_locked;
+        }
 
         n = vfs_fileread(interp_file, &interp_elf, sizeof(interp_elf), false);
         if (n != sizeof(interp_elf) || interp_elf.magic != ELF_MAGIC ||
             interp_elf.type != ET_DYN) {
+            exec_dbg("  FAIL: interpreter ELF validation failed "
+                     "(n=%ld magic=0x%x type=%d)\n",
+                     n, interp_elf.magic, interp_elf.type);
             vfs_fput(interp_file);
             goto bad_locked;
         }
 
         interp_base = ELF_INTERP_BASE;
         uint64 interp_brk = 0;
+        exec_dbg("  loading interpreter segments at base=0x%lx\n", interp_base);
         ret = load_elf_segments(tmp_vm, interp_file, &interp_elf, interp_base,
                                 &interp_brk, NULL);
         vfs_fput(interp_file);
         interp_file = NULL;
 
-        if (ret != 0)
+        if (ret != 0) {
+            exec_dbg("  FAIL: load_elf_segments(interp) returned %d\n", ret);
             goto bad_locked;
+        }
 
         interp_entry = interp_elf.entry + interp_base;
+        exec_dbg("  interpreter loaded: entry=0x%lx brk=0x%lx\n",
+                 interp_entry, interp_brk);
     }
 
     // Done with the file
@@ -516,6 +560,11 @@ int exec(char *path, char **argv, char **envp) {
         p->trapframe->trapframe.sepc = elf.entry + load_bias;
     }
     p->trapframe->trapframe.sp = sp;
+    exec_dbg("  entry=0x%lx sp=0x%lx heap=0x%lx has_interp=%d\n",
+             p->trapframe->trapframe.sepc, sp, heap_start, has_interp);
+    exec_dbg("  auxv: AT_ENTRY=0x%lx AT_BASE=0x%lx AT_PHDR=0x%lx AT_PHNUM=%d\n",
+             elf.entry + load_bias, has_interp ? interp_base : 0UL,
+             phdr_addr, (int)elf.phnum);
 
     // Reset caught signal handlers to SIG_DFL.
     sigacts_exec(p->sigacts);
@@ -532,11 +581,21 @@ int exec(char *path, char **argv, char **envp) {
         gdbstub_exec_stop(p);
     }
 
+    /*
+     * Flush the I-cache on ALL harts.  exec() has loaded new executable
+     * code (including eagerly-preloaded pages near the entry point).  On
+     * real RISC-V hardware the I-cache may contain stale entries from the
+     * previous process at the same virtual addresses.  Use SBI remote
+     * fence.i so every hart sees fresh code when this process is scheduled.
+     */
+    vm_remote_fence_i(p->vm);
+
     return argc; // this ends up in a0, the first argument to main(argc, argv)
 
 bad_locked:
     vm_wunlock(tmp_vm);
 bad:
+    exec_dbg("  FAILED for \"%s\"\n", path);
     vm_put(tmp_vm);
     tmp_vm = NULL;
     if (file) {

@@ -280,6 +280,11 @@ if(EXISTS "${MUSL_PROG_DIR}/hello.c")
     add_musl_program(mhello "${MUSL_PROG_DIR}/hello.c")
 endif()
 
+# Dynamic linking test (linked against libc.so, same as Python)
+if(EXISTS "${MUSL_PROG_DIR}/dyntest.c")
+    add_musl_dynamic_program(dyntest "${MUSL_PROG_DIR}/dyntest.c")
+endif()
+
 # ==============================================================================
 # ncurses — Terminal UI library (static, built against musl)
 # ==============================================================================

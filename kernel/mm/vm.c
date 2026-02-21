@@ -194,6 +194,27 @@ void vm_remote_sfence(vm_t *vm) {
     pop_off();
 }
 
+/**
+ * vm_remote_fence_i - Flush I-cache on all harts that may run this VM.
+ *
+ * Unlike vm_remote_sfence() which only flushes the TLB, this flushes the
+ * instruction cache via the SBI RFENCE extension.  Must be called after
+ * mapping new executable pages (demand paging, exec, mremap) so that all
+ * harts see the updated code.  The local hart is always included because
+ * fence.i via SBI may not implicitly cover the caller on all platforms.
+ */
+void vm_remote_fence_i(vm_t *vm) {
+    push_off();
+    smp_mb();
+
+    cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
+    cpumask |= (1ULL << cpuid()); // Include self
+
+    sbi_remote_hfence_i(cpumask, 0);
+
+    pop_off();
+}
+
 // Like kvmmap, but silently skip pages that are already mapped.
 // Prevents remap panics when MMIO regions from different subsystems
 // (e.g. PCIe and EMAC) share the same physical page.
@@ -1547,8 +1568,18 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va) {
 static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte) {
     pte_t pte_val = *pte;
 
-    if (pte_val & PTE_W) {
-        return 0; // Page is already writable
+    /*
+     * Only short-circuit when PTE_W **and** PTE_A+PTE_D are all set.
+     * On RISC-V implementations without the Svadu extension the hardware
+     * does NOT manage Accessed/Dirty bits automatically; instead it raises
+     * a page fault when those bits are clear.  If we returned early when
+     * only PTE_W was set, a store page fault caused by a missing PTE_D
+     * would never be resolved, creating an infinite fault loop (the exact
+     * symptom seen on Orange Pi / Ky X1 hardware but not on QEMU, which
+     * manages A/D bits in its emulated MMU).
+     */
+    if ((pte_val & (PTE_W | PTE_A | PTE_D)) == (PTE_W | PTE_A | PTE_D)) {
+        return 0; // Page is already writable with A/D bits set
     }
 
     pte_t flags = PTE_FLAGS(pte_val);
@@ -1573,11 +1604,11 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte) {
             assert(page_ref_dec(addr) >= 0,
                    "vma_validate_pte_w: page_ref_dec failed for addr %p", addr);
         } else {
-            // Else, just change the page to writable
+            // Else, just change the page to writable (or fix A/D bits)
             pa = addr;
         }
     } else {
-        return -EFAULT; // Page is already present and writable
+        return -EFAULT; // Page is not valid
     }
 
     flags |= PTE_V | PTE_W | PTE_A | PTE_D; // Set the flags for writable page
@@ -1591,6 +1622,9 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte) {
         flags |= PTE_U; // Set the user permission if VMA_FLAG_USER is set
     }
     *pte = PA2PTE(pa) | flags; // Update the PTE with the new address and flags
+
+    // Flush TLB so the faulting hart sees the updated PTE (writable + A/D).
+    sfence_vma();
 
     return 0;
 }
@@ -2520,9 +2554,13 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
         pte_t *old_pte = walk(vm->pagetable, old_addr + offset, 0, NULL, NULL);
         if (old_pte != NULL && (*old_pte & PTE_V)) {
             uint64 pa = PTE2PA(*old_pte);
-            uint64 pte_flags = *old_pte & (PTE_R | PTE_W | PTE_X | PTE_U);
+            uint64 pte_flags =
+                *old_pte & (PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D);
 
-            // Map the same physical page at the new address
+            // Map the same physical page at the new address.
+            // Preserve PTE_A and PTE_D from the source PTE so that
+            // hardware without Svadu (no automatic A/D bit management)
+            // does not raise spurious page faults on the moved pages.
             pte_t *new_pte =
                 walk(vm->pagetable, new_location + offset, 1, NULL, NULL);
             if (new_pte == NULL) {
@@ -2545,6 +2583,15 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
     vma_free(vm, vma);
 
     vm_remote_sfence(vm);
+
+    /*
+     * If the moved region is executable, flush the I-cache on all harts.
+     * The new virtual addresses may alias stale I-cache entries from
+     * prior mappings.  sfence.vma only handles the TLB.
+     */
+    if (new_vma->flags & PROT_EXEC)
+        vm_remote_fence_i(vm);
+
     ret = new_location;
 
 out:

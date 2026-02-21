@@ -152,6 +152,7 @@ userret:
         sfence.vma zero, zero
         csrw satp, a1
         sfence.vma zero, zero
+        fence.i
 
         # set stvec to uservec
         ld t0, trampoline_uservec

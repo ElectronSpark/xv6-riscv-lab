@@ -177,6 +177,7 @@ void usertrap(void) {
             vma_validate(vma, va, 1, VMA_FLAG_USER | PROT_EXEC | PROT_READ) ==
                 0) {
             vm_runlock(current->vm);
+            // fence.i will be invoked in trampoline return
             break;
         }
         vm_runlock(current->vm);
