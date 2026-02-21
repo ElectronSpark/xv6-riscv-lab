@@ -95,6 +95,7 @@ struct x1_emac_softc {
 
 #define MAX_EMAC_INSTANCES 2
 static struct x1_emac_softc emac_sc[MAX_EMAC_INSTANCES];
+static volatile int emac_init_done[MAX_EMAC_INSTANCES]; /* 1 = ok, -1 = fail */
 static int emac_count = 0;
 
 /* Forward declarations */
@@ -690,7 +691,7 @@ static void x1_emac_start(struct x1_emac_softc *sc)
  */
 static int x1_emac_init_one(int idx)
 {
-    struct x1_emac_softc *sc = &emac_sc[emac_count];
+    struct x1_emac_softc *sc = &emac_sc[idx];
 
     memset(sc, 0, sizeof(*sc));
     spin_init(&sc->lock, "x1_emac");
@@ -803,7 +804,7 @@ static int x1_emac_init_one(int idx)
     printf("x1_emac%d: initialised as %s (MAC %x:%x:%x:%x:%x:%x)\n",
            idx, sc->ndev.name, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
 
-    emac_count++;
+    __atomic_fetch_add(&emac_count, 1, __ATOMIC_SEQ_CST);
     return 0;
 }
 
@@ -812,20 +813,48 @@ static int x1_emac_init_one(int idx)
  * ====================================================================== */
 
 /**
- * Kernel thread entry point: probes and initialises all EMAC instances,
- * then enters a link-polling loop that runs for the lifetime of the system.
- *
- * Running in kthread context allows sleep_ms() / scheduler_yield()
- * instead of busy-waiting during PHY reset and auto-negotiation.
+ * Per-instance init kthread: initialises one EMAC and signals completion.
+ */
+static void x1_emac_init_kthread(uint64 idx, uint64 arg2 __attribute__((unused)))
+{
+    int ret = x1_emac_init_one((int)idx);
+    __atomic_store_n(&emac_init_done[idx], ret < 0 ? -1 : 1, __ATOMIC_RELEASE);
+    if (ret < 0)
+        printf("x1_emac%d: init failed, skipping\n", (int)idx);
+}
+
+/**
+ * Main EMAC kthread: spawns per-instance init threads in parallel,
+ * waits for all to complete, then enters the link-polling loop.
  */
 static void x1_emac_kthread(uint64 arg1 __attribute__((unused)),
                             uint64 arg2 __attribute__((unused)))
 {
-    printf("x1_emac: found %d EMAC instance(s)\n", platform.emac_count);
+    int n = platform.emac_count;
+    if (n > MAX_EMAC_INSTANCES)
+        n = MAX_EMAC_INSTANCES;
 
-    for (int i = 0; i < platform.emac_count && i < MAX_EMAC_INSTANCES; i++) {
-        if (x1_emac_init_one(i) < 0)
-            printf("x1_emac%d: init failed, skipping\n", i);
+    printf("x1_emac: found %d EMAC instance(s)\n", n);
+
+    /* Spawn one init kthread per instance so they probe in parallel */
+    for (int i = 0; i < n; i++) {
+        char name[16];
+        name[0] = 'e'; name[1] = 'm'; name[2] = 'a'; name[3] = 'c';
+        name[4] = '0' + i; name[5] = '\0';
+        struct thread *t = kthread_create(name, x1_emac_init_kthread,
+                                          (uint64)i, 0, KERNEL_STACK_ORDER);
+        if (IS_ERR_OR_NULL(t)) {
+            printf("x1_emac%d: failed to create init kthread\n", i);
+            __atomic_store_n(&emac_init_done[i], -1, __ATOMIC_RELEASE);
+        } else {
+            wakeup(t);
+        }
+    }
+
+    /* Wait for all init threads to finish */
+    for (int i = 0; i < n; i++) {
+        while (__atomic_load_n(&emac_init_done[i], __ATOMIC_ACQUIRE) == 0)
+            sleep_ms(50);
     }
 
     /* ---- Link-state polling loop ----
@@ -837,7 +866,9 @@ static void x1_emac_kthread(uint64 arg1 __attribute__((unused)),
     for (;;) {
         sleep_ms(2000);
 
-        for (int i = 0; i < emac_count; i++) {
+        for (int i = 0; i < n; i++) {
+            if (__atomic_load_n(&emac_init_done[i], __ATOMIC_ACQUIRE) != 1)
+                continue; /* init failed or incomplete */
             struct x1_emac_softc *sc = &emac_sc[i];
             if (sc->phy_addr < 0)
                 continue; /* PHY init failed for this instance */

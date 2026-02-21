@@ -1116,7 +1116,7 @@ static blkdev_ops_t sdhci_blk_ops = {
  */
 static int sdhci_init_one(int idx, int is_emmc)
 {
-    struct sdhci_softc *sc = &sdhci_sc[sdhci_count];
+    struct sdhci_softc *sc = &sdhci_sc[idx];
     int ret;
 
     memset(sc, 0, sizeof(*sc));
@@ -1197,7 +1197,7 @@ static int sdhci_init_one(int idx, int is_emmc)
 
     /* Register as a block device */
     sc->bdev.dev.major = 4;  /* new major for SD/eMMC */
-    sc->bdev.dev.minor = sdhci_count + 1;
+    sc->bdev.dev.minor = idx + 1;
     sc->bdev.dev.devmode = S_IFBLK | 0600;
     sc->bdev.readable = 1;
     sc->bdev.writable = 1;
@@ -1206,10 +1206,10 @@ static int sdhci_init_one(int idx, int is_emmc)
 
     if (is_emmc) {
         static const char *emmc_names[] = {"mmc0", "mmc1", "mmc2"};
-        sc->bdev.dev.devname = emmc_names[sdhci_count];
+        sc->bdev.dev.devname = emmc_names[idx];
     } else {
         static const char *sd_names[] = {"sd0", "sd1", "sd2"};
-        sc->bdev.dev.devname = sd_names[sdhci_count];
+        sc->bdev.dev.devname = sd_names[idx];
     }
 
     ret = blkdev_register(&sc->bdev);
@@ -1222,7 +1222,7 @@ static int sdhci_init_one(int idx, int is_emmc)
            idx, sc->bdev.dev.devname,
            sc->capacity_blocks / 2048, sc->bus_width);
 
-    sdhci_count++;
+    __atomic_fetch_add(&sdhci_count, 1, __ATOMIC_SEQ_CST);
     return 0;
 }
 
@@ -1231,7 +1231,30 @@ static int sdhci_init_one(int idx, int is_emmc)
  * ====================================================================== */
 
 /**
- * Kernel thread entry point: probes and initialises all SDHCI instances.
+ * Per-instance init kthread: initialises one SDHCI slot.
+ */
+static void x1_sdhci_init_one_kthread(uint64 idx,
+                                      uint64 arg2 __attribute__((unused)))
+{
+    int i = (int)idx;
+
+    if (platform.sdhci[i].base == 0)
+        return;
+
+    /* Skip SDIO (sdhci1) — WiFi, not a block device */
+    if (platform.sdhci[i].is_sdio) {
+        printf("x1_sdhci%d: SDIO instance, skipping\n", i);
+        return;
+    }
+
+    int is_emmc = platform.sdhci[i].is_emmc;
+    if (sdhci_init_one(i, is_emmc) < 0)
+        printf("x1_sdhci%d: init failed, skipping\n", i);
+}
+
+/**
+ * Kernel thread entry point: spawns per-instance init kthreads so that
+ * all SDHCI slots probe in parallel.
  *
  * Running in kthread context allows us to use sleep_ms() (scheduler-
  * based timer sleep) instead of busy-waiting, which is friendlier to
@@ -1240,26 +1263,26 @@ static int sdhci_init_one(int idx, int is_emmc)
 static void x1_sdhci_kthread(uint64 arg1 __attribute__((unused)),
                              uint64 arg2 __attribute__((unused)))
 {
-    printf("x1_sdhci: found %d SDHCI instance(s)\n", platform.sdhci_count);
+    int n = platform.sdhci_count;
+    if (n > MAX_SDH_INSTANCES)
+        n = MAX_SDH_INSTANCES;
 
-    for (int i = 0; i < platform.sdhci_count && i < MAX_SDH_INSTANCES; i++) {
-        if (platform.sdhci[i].base == 0)
-            continue;
+    printf("x1_sdhci: found %d SDHCI instance(s)\n", n);
 
-        int is_emmc = platform.sdhci[i].is_emmc;
-
-        /* Skip SDIO (sdhci1) — WiFi, not a block device */
-        if (platform.sdhci[i].is_sdio) {
-            printf("x1_sdhci%d: SDIO instance, skipping\n", i);
-            continue;
-        }
-
-        if (sdhci_init_one(i, is_emmc) < 0) {
-            printf("x1_sdhci%d: init failed, skipping\n", i);
+    for (int i = 0; i < n; i++) {
+        char name[16];
+        name[0] = 's'; name[1] = 'd'; name[2] = 'h';
+        name[3] = '0' + i; name[4] = '\0';
+        struct thread *t = kthread_create(name, x1_sdhci_init_one_kthread,
+                                          (uint64)i, 0, KERNEL_STACK_ORDER);
+        if (IS_ERR_OR_NULL(t)) {
+            printf("x1_sdhci%d: failed to create init kthread\n", i);
+        } else {
+            wakeup(t);
         }
     }
 
-    /* kthread exits cleanly after probing */
+    /* kthread exits — per-instance threads run independently */
 }
 
 /**
