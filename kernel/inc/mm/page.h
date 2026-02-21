@@ -12,6 +12,12 @@ void page_lock_release(page_t *page);
 void page_lock_assert_holding(page_t *page);
 void page_lock_assert_unholding(page_t *page);
 int page_buddy_init(void);
+
+// Allocate pages of order 2^order.
+// flags: page type (PAGE_TYPE_*) OR'd with optional GFP flags:
+//   - Default (no GFP_HIGHMEM): allocates from low memory (DMA-safe)
+//   - GFP_HIGHMEM: allows allocation from high memory zone (prefers highmem,
+//     falls back to lowmem). High memory pages are NOT suitable for DMA.
 page_t *__page_alloc(uint64 order, uint64 flags);
 void __page_free(page_t *page, uint64 order);
 void *page_alloc(uint64 order, uint64 flags);

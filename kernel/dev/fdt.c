@@ -1795,8 +1795,20 @@ void fdt_apply_platform_config(void) {
     // Refine memory info from full FDT parse (may have multiple regions)
     if (platform.mem_count > 0 && platform.mem[0].size > 0) {
         __physical_memory_start = platform.mem[0].base;
-        __physical_memory_end = platform.mem[0].base + platform.mem[0].size;
-        __physical_total_pages = platform.mem[0].size >> 12;
+        // Find the highest memory end across all regions.
+        // The page array will cover the entire range from first region's base
+        // to the last region's end (including any gaps between regions).
+        // Gap pages will be marked as LOCKED during buddy init.
+        uint64 highest_end = platform.mem[0].base + platform.mem[0].size;
+        for (int i = 1; i < platform.mem_count; i++) {
+            uint64 region_end = platform.mem[i].base + platform.mem[i].size;
+            if (region_end > highest_end) {
+                highest_end = region_end;
+            }
+        }
+        __physical_memory_end = highest_end;
+        __physical_total_pages =
+            (highest_end - __physical_memory_start) >> 12;
     }
 
     // Set device addresses from FDT

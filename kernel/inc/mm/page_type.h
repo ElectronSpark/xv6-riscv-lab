@@ -73,8 +73,17 @@ typedef struct page_struct {
 // #define PAGE_FLAG_OFFLINE           (1U << 23)
 // #define PAGE_FLAG_ZERO_PAGE         (1U << 24)
 // #define PAGE_FLAG_IDLE              (1U << 25)
+// Page property flags (stored in page->flags)
+#define PAGE_FLAG_HIGHMEM (1U << 8) // Page is in high memory zone (not DMA-safe)
 #define PAGE_FLAG_LOCKED (1U << 26)
 #define PAGE_FLAG_IO_PROGRESSING (1U << 28)
+
+// GFP (Get Free Pages) allocation flags - used in allocation requests only,
+// NOT stored in page->flags. These occupy the upper bits to avoid collision.
+#define GFP_HIGHMEM (1UL << 32) // Allow allocating from high memory zone
+#define GFP_FLAG_MASK (GFP_HIGHMEM) // Mask for all GFP flags
+// Strip GFP flags to get page flags for storage
+#define PAGE_FLAGS_FROM_GFP(gfp) ((gfp) & ~GFP_FLAG_MASK)
     int ref_count;
     /* choose the section of the union according to the page type */
     union {

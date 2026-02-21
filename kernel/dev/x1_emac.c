@@ -812,7 +812,8 @@ static int x1_emac_init_one(int idx)
  * ====================================================================== */
 
 /**
- * Kernel thread entry point: probes and initialises all EMAC instances.
+ * Kernel thread entry point: probes and initialises all EMAC instances,
+ * then enters a link-polling loop that runs for the lifetime of the system.
  *
  * Running in kthread context allows sleep_ms() / scheduler_yield()
  * instead of busy-waiting during PHY reset and auto-negotiation.
@@ -827,7 +828,45 @@ static void x1_emac_kthread(uint64 arg1 __attribute__((unused)),
             printf("x1_emac%d: init failed, skipping\n", i);
     }
 
-    /* kthread exits cleanly after probing */
+    /* ---- Link-state polling loop ----
+     * PHY link-change interrupts are unreliable on many SoCs, so we
+     * poll the PHY status register every 2 seconds.  When the link
+     * state changes we update the netdev and notify upper layers
+     * (e.g. lwIP) via the link-change callback.
+     */
+    for (;;) {
+        sleep_ms(2000);
+
+        for (int i = 0; i < emac_count; i++) {
+            struct x1_emac_softc *sc = &emac_sc[i];
+            if (sc->phy_addr < 0)
+                continue; /* PHY init failed for this instance */
+
+            struct phy_state ps;
+            if (yt8531_poll_link(sc->regs, sc->phy_addr, &ps) != 0)
+                continue;
+
+            int old_link = sc->ndev.link_up;
+            int new_link = ps.link_up;
+
+            if (old_link != new_link) {
+                sc->phy = ps;
+                sc->ndev.speed = ps.speed;
+                sc->ndev.full_duplex = ps.full_duplex;
+
+                if (new_link) {
+                    x1_emac_adjust_link(sc);
+                    printf("x1_emac%d: link up %dMbps %s-duplex\n",
+                           sc->index, ps.speed,
+                           ps.full_duplex ? "full" : "half");
+                } else {
+                    printf("x1_emac%d: link down\n", sc->index);
+                }
+
+                netdev_set_link(&sc->ndev, new_link);
+            }
+        }
+    }
 }
 
 /**

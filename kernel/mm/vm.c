@@ -382,8 +382,33 @@ pagetable_t kvmmake(void) {
            PTE_R | PTE_W);
 
     // map kernel data and the physical RAM we'll make use of.
-    kvmmap(kpgtbl, (uint64)_bss_end, (uint64)_bss_end,
-           PHYSTOP - (uint64)_bss_end, PTE_R | PTE_W);
+    // For the first memory region, map from _bss_end to the end of region 0.
+    // Additional memory regions (high memory) are mapped separately to skip
+    // gaps between non-contiguous physical memory regions.
+    {
+        uint64 first_region_end = platform.mem[0].base + platform.mem[0].size;
+        if (first_region_end > PHYSTOP) {
+            first_region_end = PHYSTOP;
+        }
+        kvmmap(kpgtbl, (uint64)_bss_end, (uint64)_bss_end,
+               first_region_end - (uint64)_bss_end, PTE_R | PTE_W);
+
+        // Map additional memory regions (high memory) with identity mapping
+        for (int i = 1; i < platform.mem_count; i++) {
+            uint64 region_base = platform.mem[i].base;
+            uint64 region_end = region_base + platform.mem[i].size;
+            if (region_end > PHYSTOP) {
+                region_end = PHYSTOP;
+            }
+            if (region_base < region_end) {
+                printf("mapping highmem region [%d]: 0x%lx - 0x%lx (%ld MB)\n",
+                       i, region_base, region_end,
+                       (region_end - region_base) / (1024 * 1024));
+                kvmmap(kpgtbl, region_base, region_base,
+                       region_end - region_base, PTE_R | PTE_W);
+            }
+        }
+    }
 
     // map embedded kernel symbols (read-only, part of kernel image)
     // The .ksymbols section is between .data and .bss in the linker script
@@ -1521,7 +1546,7 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va) {
     uint64 file_off = vma->pgoff + (va - vma->start);
 
     // Allocate a new anonymous page for the private copy
-    void *pa = page_alloc(0, PAGE_TYPE_ANON);
+    void *pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
     if (pa == NULL) {
         return NULL;
     }
@@ -1587,7 +1612,7 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte) {
     void *pa = NULL;
     if (pte_val == 0) {
         // if the pte is not mapped, just map a new page
-        pa = page_alloc(0, PAGE_TYPE_ANON);
+        pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
         if (pa == NULL) {
             return -ENOMEM; // Page allocation failed
         }
@@ -1595,7 +1620,7 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte) {
     } else if (pte_val & PTE_V) {
         if (pte_val & PTE_RSW_w) {
             // if the page is marked as COW, we need to handle it
-            pa = page_alloc(0, PAGE_TYPE_ANON);
+            pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
             if (pa == NULL) {
                 return -ENOMEM; // Page allocation failed
             }
@@ -1635,7 +1660,7 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte) {
     pte_t flags = PTE_FLAGS(pte_val);
 
     if (pte_val == 0) {
-        pa = page_alloc(0, PAGE_TYPE_ANON);
+        pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
         if (pa == NULL) {
             return -ENOMEM; // Page allocation failed
         }

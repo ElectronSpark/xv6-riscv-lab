@@ -24,6 +24,7 @@
 #include <mm/page.h>
 #include "errno.h"
 #include "proc/sched.h"
+#include "proc/thread.h"
 #include "trap.h"
 #include "freelist.h"
 #include "dev/fdt.h"
@@ -334,6 +335,7 @@ static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
             break;
         }
         // No free descriptors, wait on per-disk queue
+        __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
         tq_wait(&disk->desc_wait_queue, &disk->vdisk_lock, NULL);
     }
 

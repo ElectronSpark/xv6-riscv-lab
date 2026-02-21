@@ -3,14 +3,14 @@
  * @brief lwIP ↔ xv6 kernel integration
  *
  * Provides:
- *  1. A lwIP netif driver that bridges the xv6 E1000 NIC with lwIP's
- *     pbuf-based packet processing (replacing the old net.c ethernet/IP/ARP).
+ *  1. A lwIP netif driver that bridges the xv6 netdev abstraction with
+ *     lwIP’s pbuf-based packet processing.
  *  2. lwip_init_all() — top-level function to initialise the lwIP stack,
- *     register the E1000 network interface, configure IP, and start
+ *     register the network interface, configure IP, and start
  *     the tcpip thread.
  *
- * The e1000 HW transmit/receive functions (e1000_transmit, e1000_recv) remain
- * in e1000.c. This file replaces net.c's protocol processing with lwIP.
+ * The NIC-specific TX/RX functions live in the driver (e1000.c, x1_emac.c,
+ * etc.).  This file is driver-agnostic and uses the netdev API.
  */
 
 #include "types.h"
@@ -53,10 +53,10 @@ static uint64 lwip_tx_err_count = 0;
 #endif
 
 /* ========================================================================== */
-/* E1000 netif for lwIP                                                       */
+/* Generic netif for lwIP (works with any NIC via the netdev abstraction)      */
 /* ========================================================================== */
 
-static struct netif e1000_netif;
+static struct netif xv6_netif;
 
 /* Fallback MAC address (matches QEMU E1000 default) */
 static const uint8 fallback_mac[6] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
@@ -67,7 +67,7 @@ static const uint8 fallback_mac[6] = {0x52, 0x54, 0x00, 0x12, 0x34, 0x56};
  * Converts a pbuf chain into an mbuf and sends via the netdev abstraction.
  * -------------------------------------------------------------------------- */
 static err_t
-e1000_netif_linkoutput(struct netif *netif, struct pbuf *p)
+xv6_netif_linkoutput(struct netif *netif, struct pbuf *p)
 {
     (void)netif;
     struct mbuf *m;
@@ -115,11 +115,11 @@ e1000_netif_linkoutput(struct netif *netif, struct pbuf *p)
  * netif init callback
  * -------------------------------------------------------------------------- */
 static err_t
-e1000_netif_init(struct netif *netif)
+xv6_netif_init(struct netif *netif)
 {
     netif->name[0] = 'e';
     netif->name[1] = 'n';
-    netif->linkoutput = e1000_netif_linkoutput;
+    netif->linkoutput = xv6_netif_linkoutput;
     netif->output     = etharp_output;
     netif->mtu        = 1500;
     netif->hwaddr_len = 6;
@@ -130,17 +130,15 @@ e1000_netif_init(struct netif *netif)
     else
         memmove(netif->hwaddr, fallback_mac, 6);
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP |
-                   NETIF_FLAG_ETHERNET | NETIF_FLAG_LINK_UP;
+                   NETIF_FLAG_ETHERNET;
     return ERR_OK;
 }
 
 /* --------------------------------------------------------------------------
- * RX path: E1000 hardware → lwIP
- * Called from e1000_recv() (ISR context via e1000_intr) for each received
- * packet. Replaces the old net_rx() entry point.
- *
- * We allocate a pbuf, copy the mbuf payload into it, free the mbuf, and
- * feed the pbuf into the lwIP stack.
+ * RX path: NIC driver → lwIP
+ * Called from the NIC driver ISR (e1000_recv / x1_emac_recv) for each
+ * received packet. Allocates a pbuf, copies the mbuf payload, and feeds
+ * the pbuf into the lwIP stack.
  * -------------------------------------------------------------------------- */
 void net_rx(struct mbuf *m)
 {
@@ -178,7 +176,7 @@ void net_rx(struct mbuf *m)
 #endif
 
     /* Feed to lwIP — ethernet_input() handles ARP / IP demux */
-    err_t err = e1000_netif.input(p, &e1000_netif);
+    err_t err = xv6_netif.input(p, &xv6_netif);
     if (err != ERR_OK) {
 #if LWIP_NET_DEBUG
         lwip_rx_input_err++;
@@ -199,6 +197,34 @@ static void __tcpip_init_done(void *arg)
     (void)arg;
     __atomic_store_n(&__lwip_tcpip_ready, 1, __ATOMIC_RELEASE);
     printf("lwip: tcpip thread started\n");
+}
+
+/* --------------------------------------------------------------------------
+ * Link-change callback: called by netdev_set_link() when the driver
+ * detects a physical link state change.
+ * -------------------------------------------------------------------------- */
+
+#define GARP_COUNT       3   /* number of gratuitous ARPs on link-up */
+#define GARP_INTERVAL_MS 500 /* ms between gratuitous ARPs */
+
+static void __netdev_link_change(struct netdev *dev, int link_up)
+{
+    (void)dev;
+    if (link_up) {
+        netif_set_link_up(&xv6_netif);
+        printf("lwip: link up (%s)\n", dev->name);
+
+        /* Send a burst of gratuitous ARPs so that all neighbours learn
+         * our MAC immediately, even if they missed the first one.      */
+        for (int i = 0; i < GARP_COUNT; i++) {
+            etharp_gratuitous(&xv6_netif);
+            if (i < GARP_COUNT - 1)
+                sleep_ms(GARP_INTERVAL_MS);
+        }
+    } else {
+        netif_set_link_down(&xv6_netif);
+        printf("lwip: link down (%s)\n", dev->name);
+    }
 }
 
 /* ========================================================================== */
@@ -255,23 +281,37 @@ static void __lwip_kthread(uint64 arg1, uint64 arg2)
         IP4_ADDR(&gw,      10, 0, 2, 2);
     }
 
-    netif_add(&e1000_netif,
+    netif_add(&xv6_netif,
 #if LWIP_IPV4
               &ipaddr, &netmask, &gw,
 #endif
               NULL,                  /* state */
-              e1000_netif_init,      /* init callback */
+              xv6_netif_init,        /* init callback */
               tcpip_input);          /* input function */
 
-    netif_set_default(&e1000_netif);
-    netif_set_up(&e1000_netif);
-    netif_set_link_up(&e1000_netif);
+    netif_set_default(&xv6_netif);
+    netif_set_up(&xv6_netif);
+
+    /* Set initial link state from the driver and register for changes */
+    struct netdev *ndev = netdev_get_default();
+    if (ndev) {
+        netdev_set_link_callback(ndev, __netdev_link_change);
+        if (ndev->link_up) {
+            netif_set_link_up(&xv6_netif);
+            /* Announce our IP on the network */
+            for (int i = 0; i < GARP_COUNT; i++) {
+                etharp_gratuitous(&xv6_netif);
+                if (i < GARP_COUNT - 1)
+                    sleep_ms(GARP_INTERVAL_MS);
+            }
+        }
+    }
 
     printf("lwip: netif up — IP %d.%d.%d.%d\n",
-           ip4_addr1_16(netif_ip4_addr(&e1000_netif)),
-           ip4_addr2_16(netif_ip4_addr(&e1000_netif)),
-           ip4_addr3_16(netif_ip4_addr(&e1000_netif)),
-           ip4_addr4_16(netif_ip4_addr(&e1000_netif)));
+           ip4_addr1_16(netif_ip4_addr(&xv6_netif)),
+           ip4_addr2_16(netif_ip4_addr(&xv6_netif)),
+           ip4_addr3_16(netif_ip4_addr(&xv6_netif)),
+           ip4_addr4_16(netif_ip4_addr(&xv6_netif)));
 
     /* Start services that depend on the network stack */
     extern void telnetd_init(void);
