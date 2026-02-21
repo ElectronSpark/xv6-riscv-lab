@@ -1187,6 +1187,9 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
     static const char *virtio_compat[] = {"virtio,mmio", NULL};
     // EMAC (SpacemiT X1 Ethernet MAC)
     static const char *emac_compat[] = {"ky,x1-emac", "spacemit,k1-emac", NULL};
+    // SDHCI (SpacemiT X1 SD/eMMC host controller)
+    static const char *sdhci_compat[] = {"ky,x1-sdhci", "spacemit,k1-sdhci",
+                                          "marvell,sdhci-pxa1928", NULL};
 
     // Parse /soc node for devices (common structure)
     struct fdt_node *soc = fdt_node_lookup(root, "soc", NULL);
@@ -1364,6 +1367,109 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
                    platform.emac[idx].irq, platform.emac[idx].reset_gpio,
                    platform.emac[idx].tx_phase, platform.emac[idx].rx_phase);
             platform.emac_count++;
+        }
+
+        // SDHCI detection (SpacemiT X1 SD/eMMC host controller)
+        if (__fdt_prop_compat_list(compat, sdhci_compat) &&
+            platform.sdhci_count < SDHCI_MAX) {
+            int idx = platform.sdhci_count;
+            platform.has_sdhci = 1;
+            if (reg) {
+                __fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells,
+                                     &platform.sdhci[idx].base,
+                                     &platform.sdhci[idx].size);
+            }
+            if (interrupts) {
+                platform.sdhci[idx].irq = __fdt_prop_u32(interrupts, 0);
+            }
+
+            // Resolve clock-controller via phandle to get APMU/APBC bases.
+            // The "clocks" property format: <phandle clock-id> ... with
+            // #clock-cells=1, so the first uint32 is the clock-controller
+            // phandle. We resolve it to find the clock-controller node,
+            // then parse its "reg" + "reg-names" to extract the "apmu"
+            // and "apbc" register region base addresses.
+            struct fdt_node *clks = __fdt_get_prop(node, "clocks");
+            if (clks && clks->data_size >= 4) {
+                uint32 clk_phandle = __fdt_prop_u32(clks, 0);
+                struct fdt_node *clk_ctrl =
+                    fdt_phandle_lookup(blob, clk_phandle);
+                if (clk_ctrl) {
+                    // Get the clock-controller's parent for addr/size cells
+                    // (it lives under /soc, so use soc_addr_cells/soc_size_cells)
+                    struct fdt_node *cc_reg =
+                        __fdt_get_prop(clk_ctrl, "reg");
+                    struct fdt_node *cc_names =
+                        __fdt_get_prop(clk_ctrl, "reg-names");
+                    if (cc_reg && cc_names) {
+                        int entry_cells = soc_addr_cells + soc_size_cells;
+                        int n_entries = cc_reg->data_size /
+                                        (entry_cells * sizeof(uint32));
+                        const char *ndata =
+                            (const char *)cc_names->data;
+                        size_t nlen = cc_names->data_size;
+                        size_t npos = 0;
+                        for (int e = 0; e < n_entries; e++) {
+                            const char *rn =
+                                (npos < nlen) ? ndata + npos : NULL;
+                            int off = e * entry_cells;
+                            uint64 rbase = 0;
+                            if (soc_addr_cells == 2)
+                                rbase = ((uint64)__fdt_prop_u32(cc_reg, off) << 32) |
+                                        __fdt_prop_u32(cc_reg, off + 1);
+                            else
+                                rbase = __fdt_prop_u32(cc_reg, off);
+
+                            if (rn && strncmp(rn, "apmu", 5) == 0)
+                                platform.sdhci[idx].apmu_base = (uint32)rbase;
+                            else if (rn && strncmp(rn, "apbc", 5) == 0)
+                                platform.sdhci[idx].apbc_base = (uint32)rbase;
+
+                            if (npos < nlen)
+                                npos += strnlen(ndata + npos, nlen - npos) + 1;
+                        }
+                    }
+                }
+            }
+
+            // Determine APMU per-instance offset from SDH base address.
+            // These offsets are fixed hardware register assignments within
+            // the APMU register space and not encoded in the device tree.
+            // SDH0 @ 0xD4280000 → APMU offset 0x54
+            // SDH1 @ 0xD4280800 → APMU offset 0x58
+            // SDH2 @ 0xD4281000 → APMU offset 0xE0
+            if (platform.sdhci[idx].base == 0xD4280000)
+                platform.sdhci[idx].apmu_offset = 0x54;
+            else if (platform.sdhci[idx].base == 0xD4280800)
+                platform.sdhci[idx].apmu_offset = 0x58;
+            else if (platform.sdhci[idx].base == 0xD4281000)
+                platform.sdhci[idx].apmu_offset = 0xE0;
+            // Shared AXI clock/reset is always in the SDH0 APMU register
+            // (offset 0x54). This is a hardware constant — all SDH instances
+            // share the AXI bus whose clock gate lives in SDH0's register.
+            platform.sdhci[idx].apmu_axi_offset = 0x54;
+            // Parse bus-width property
+            struct fdt_node *bw = __fdt_get_prop(node, "bus-width");
+            platform.sdhci[idx].bus_width = bw ? __fdt_prop_u32(bw, 0) : 4;
+            // Detect eMMC (8-bit bus or mmc-hs400-1_8v property)
+            struct fdt_node *hs400 = __fdt_get_prop(node, "mmc-hs400-1_8v");
+            if (hs400 || platform.sdhci[idx].bus_width == 8)
+                platform.sdhci[idx].is_emmc = 1;
+            // Detect SDIO (non-removable + no mmc-hs* = WiFi/BT)
+            struct fdt_node *nr = __fdt_get_prop(node, "non-removable");
+            if (nr && !platform.sdhci[idx].is_emmc &&
+                platform.sdhci[idx].bus_width == 4)
+                platform.sdhci[idx].is_sdio = 1;
+            printf("fdt: found SDHCI%d at 0x%lx size 0x%lx IRQ %d "
+                   "bus-width %d apmu 0x%x+0x%x apbc 0x%x %s%s\n",
+                   idx, platform.sdhci[idx].base, platform.sdhci[idx].size,
+                   platform.sdhci[idx].irq, platform.sdhci[idx].bus_width,
+                   platform.sdhci[idx].apmu_base,
+                   platform.sdhci[idx].apmu_offset,
+                   platform.sdhci[idx].apbc_base,
+                   platform.sdhci[idx].is_emmc ? "(eMMC)" : "",
+                   platform.sdhci[idx].is_sdio ? "(SDIO)" : "");
+            platform.sdhci_count++;
         }
     }
 

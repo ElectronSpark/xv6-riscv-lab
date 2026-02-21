@@ -21,9 +21,11 @@
 #include "printf.h"
 #include "string.h"
 #include "proc/sched.h"
+#include "proc/thread.h"
 #include "dev/e1000_dev.h"
 #include "dev/net.h"
 #include "dev/netdev.h"
+#include "dev/fdt.h"
 
 #include "lwip/opt.h"
 #include "lwip/init.h"
@@ -154,23 +156,30 @@ static void __tcpip_init_done(void *arg)
 /* ========================================================================== */
 
 /**
- * lwip_net_init — Initialise the entire lwIP network stack.
+ * __lwip_kthread — Kernel thread that initialises the lwIP network stack.
  *
- * Must be called from a kernel thread context (not from ISR or early boot
- * before the scheduler is running). Typically called from
- * start_kernel_post_init().
+ * Waits for a network device to be registered (the NIC driver kthread may
+ * still be running PHY autonegotiation), then brings up the lwIP stack with
+ * a platform-appropriate static IP:
  *
- * Sets up:
- *  - lwIP internal state (memp, pbuf, etc.)
- *  - The tcpip thread (runs lwIP timers and processes incoming packets)
- *  - The E1000 netif with a static IP matching QEMU's SLIRP gateway:
- *      IP  = 10.0.2.15
- *      GW  = 10.0.2.2
- *      Mask = 255.255.255.0
+ *   Orange Pi (has_emac):  192.168.0.201 / 255.255.255.0 / 192.168.0.1
+ *   QEMU SLIRP (default):  10.0.2.15    / 255.255.255.0 / 10.0.2.2
+ *
+ * After the netif is up, starts services that depend on lwIP (telnetd,
+ * gdbstub).
  */
-void lwip_net_init(void)
+static void __lwip_kthread(uint64 arg1, uint64 arg2)
 {
+    (void)arg1;
+    (void)arg2;
     ip4_addr_t ipaddr, netmask, gw;
+
+    /* ---- Wait for a NIC to be registered ---- */
+    printf("lwip: waiting for network device...\n");
+    while (netdev_get_default() == NULL) {
+        sleep_ms(100);
+    }
+    printf("lwip: network device detected\n");
 
     printf("lwip: initialising network stack (lwIP %s)\n", LWIP_VERSION_STRING);
 
@@ -183,10 +192,18 @@ void lwip_net_init(void)
         scheduler_yield();
     }
 
-    /* Configure static IP suitable for QEMU user-mode networking (SLIRP) */
-    IP4_ADDR(&ipaddr,  10, 0, 2, 15);
-    IP4_ADDR(&netmask, 255, 255, 255, 0);
-    IP4_ADDR(&gw,      10, 0, 2, 2);
+    /* Configure static IP based on platform */
+    if (platform.has_emac) {
+        /* Orange Pi / SpacemiT X1 — local network */
+        IP4_ADDR(&ipaddr,  192, 168, 0, 201);
+        IP4_ADDR(&netmask, 255, 255, 255, 0);
+        IP4_ADDR(&gw,      192, 168, 0, 1);
+    } else {
+        /* QEMU user-mode networking (SLIRP) */
+        IP4_ADDR(&ipaddr,  10, 0, 2, 15);
+        IP4_ADDR(&netmask, 255, 255, 255, 0);
+        IP4_ADDR(&gw,      10, 0, 2, 2);
+    }
 
     netif_add(&e1000_netif,
 #if LWIP_IPV4
@@ -200,9 +217,33 @@ void lwip_net_init(void)
     netif_set_up(&e1000_netif);
     netif_set_link_up(&e1000_netif);
 
-    printf("lwip: E1000 netif up — IP %d.%d.%d.%d\n",
+    printf("lwip: netif up — IP %d.%d.%d.%d\n",
            ip4_addr1_16(netif_ip4_addr(&e1000_netif)),
            ip4_addr2_16(netif_ip4_addr(&e1000_netif)),
            ip4_addr3_16(netif_ip4_addr(&e1000_netif)),
            ip4_addr4_16(netif_ip4_addr(&e1000_netif)));
+
+    /* Start services that depend on the network stack */
+    extern void telnetd_init(void);
+    telnetd_init();
+    extern void gdbstub_init(void);
+    gdbstub_init();
+}
+
+/**
+ * lwip_net_init — Spawn the lwIP initialisation kthread.
+ *
+ * Called from start_kernel_post_init(). The actual initialisation happens
+ * asynchronously in __lwip_kthread so it can wait for the NIC driver
+ * (which may itself be running as a kthread doing PHY bring-up).
+ */
+void lwip_net_init(void)
+{
+    struct thread *t = kthread_create("lwip", __lwip_kthread, 0, 0,
+                                      KERNEL_STACK_ORDER);
+    if (IS_ERR_OR_NULL(t)) {
+        printf("lwip: failed to create init kthread\n");
+        return;
+    }
+    wakeup(t);
 }

@@ -290,6 +290,33 @@ pagetable_t kvmmake(void) {
         }
     }
 
+    // SDHCI MMIO regions (SpacemiT X1 SD/eMMC host controller)
+    if (platform.has_sdhci) {
+        for (int i = 0; i < platform.sdhci_count && i < SDHCI_MAX; i++) {
+            // Map SDHCI register region
+            if (platform.sdhci[i].base != 0 && platform.sdhci[i].size != 0) {
+                uint64 base = PGROUNDDOWN(platform.sdhci[i].base);
+                uint64 size = PGROUNDUP(platform.sdhci[i].base +
+                                        platform.sdhci[i].size) - base;
+                kvmmap_safe(kpgtbl, base, base, size, PTE_R | PTE_W);
+            }
+            // Map the APMU register page for this SDHCI instance
+            if (platform.sdhci[i].apmu_base != 0 &&
+                platform.sdhci[i].apmu_offset != 0) {
+                uint64 pg = PGROUNDDOWN(
+                    (uint64)platform.sdhci[i].apmu_base +
+                    platform.sdhci[i].apmu_offset);
+                kvmmap_safe(kpgtbl, pg, pg, PGSIZE, PTE_R | PTE_W);
+            }
+        }
+        // Map APBC page for AIB clock register (base from FDT clock-controller)
+        if (platform.sdhci_count > 0 && platform.sdhci[0].apbc_base != 0) {
+            uint64 apbc_aib = (uint64)platform.sdhci[0].apbc_base + 0x3C;
+            kvmmap_safe(kpgtbl, PGROUNDDOWN(apbc_aib),
+                        PGROUNDDOWN(apbc_aib), PGSIZE, PTE_R | PTE_W);
+        }
+    }
+
     // map kernel text executable and read-only.
     kvmmap(kpgtbl, (uint64)_entry, (uint64)_entry,
            (uint64)etext - (uint64)_entry, PTE_R | PTE_X);

@@ -199,6 +199,23 @@ struct platform_info {
         uint32 rx_phase;    /* RGMII RX clock phase */
     } emac[EMAC_MAX];
     int emac_count;
+
+    // SDHCI SD/eMMC controllers (SpacemiT X1)
+#define SDHCI_MAX 3
+    int has_sdhci;
+    struct {
+        uint64 base;           /* MMIO register base */
+        uint64 size;           /* MMIO region size */
+        uint32 irq;            /* interrupt number */
+        uint32 apmu_base;      /* APMU base address (from clock-controller DT) */
+        uint32 apmu_offset;    /* APMU register offset for this instance */
+        uint32 apmu_axi_offset;/* APMU shared AXI register offset (SDH0's) */
+        uint32 apbc_base;      /* APBC base address (from clock-controller DT) */
+        int is_emmc;           /* 1 if eMMC instance */
+        int is_sdio;           /* 1 if SDIO instance (WiFi, skip) */
+        int bus_width;         /* max bus width (1, 4, or 8) */
+    } sdhci[SDHCI_MAX];
+    int sdhci_count;
 };
 
 // Global platform info (populated by fdt_init)

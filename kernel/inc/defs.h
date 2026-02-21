@@ -193,6 +193,9 @@ void netdev_init(void);
 // x1_emac.c
 void x1_emac_init(void);
 
+// x1_sdhci.c
+void x1_sdhci_init(void);
+
 // net.c / lwip_glue.c
 void net_rx(struct mbuf *);
 #ifndef USE_LWIP

@@ -29,6 +29,9 @@
 #include "cache.h"
 #include "trap.h"
 #include "timer/timer.h"
+#include "proc/sched.h"
+#include "proc/thread.h"
+#include "errno.h"
 
 /* ======================================================================
  * Per-instance driver state
@@ -102,22 +105,6 @@ static inline void sc_wr(struct x1_emac_softc *sc, uint32 off, uint32 val)
     *(volatile uint32 *)((char *)sc->regs + off) = val;
 }
 
-/**
- * delay_us - busy-wait for approximately @us microseconds
- */
-static void delay_us(uint64 us)
-{
-    uint64 ticks = (uint64)TIMEBASE_FREQUENCY * us / 1000000ULL;
-    uint64 start = r_time();
-    while (r_time() - start < ticks)
-        ;
-}
-
-static void delay_ms(uint64 ms)
-{
-    delay_us(ms * 1000);
-}
-
 /* ======================================================================
  * APMU / Clock / Delay-Line Configuration
  * ====================================================================== */
@@ -145,7 +132,7 @@ static void x1_emac_apmu_config(struct x1_emac_softc *sc)
     val |= EMAC_RESET_DEASSERT;
     *sc->ctrl_reg = val;
     __sync_synchronize();
-    delay_us(10); /* allow reset to propagate */
+    scheduler_yield(); /* allow reset to propagate */
 
     /* Set RGMII interface mode + AXI single ID */
     val |= PHY_INTF_RGMII;
@@ -198,9 +185,9 @@ static int x1_emac_dma_reset(struct x1_emac_softc *sc)
 
     /* Assert software reset */
     sc_wr(sc, DMA_CONFIGURATION, DMA_CFG_SW_RESET);
-    delay_ms(10);
+    sleep_ms(10);
     sc_wr(sc, DMA_CONFIGURATION, 0);
-    delay_ms(10);
+    sleep_ms(10);
 
     return 0;
 }
@@ -736,25 +723,46 @@ static int x1_emac_init_one(int idx)
 }
 
 /* ======================================================================
- * Top-level init — called from start_kernel
+ * Top-level init — spawns a kthread for post-init probing
  * ====================================================================== */
 
 /**
- * x1_emac_init - Probe and initialise all EMAC instances found by FDT.
+ * Kernel thread entry point: probes and initialises all EMAC instances.
  *
- * Called during kernel boot after FDT parsing and MMIO mapping.
+ * Running in kthread context allows sleep_ms() / scheduler_yield()
+ * instead of busy-waiting during PHY reset and auto-negotiation.
  */
-void x1_emac_init(void)
+static void x1_emac_kthread(uint64 arg1 __attribute__((unused)),
+                            uint64 arg2 __attribute__((unused)))
 {
-    if (!platform.has_emac) {
-        /* No EMAC found in FDT — nothing to do */
-        return;
-    }
-
     printf("x1_emac: found %d EMAC instance(s)\n", platform.emac_count);
 
     for (int i = 0; i < platform.emac_count && i < MAX_EMAC_INSTANCES; i++) {
         if (x1_emac_init_one(i) < 0)
             printf("x1_emac%d: init failed, skipping\n", i);
     }
+
+    /* kthread exits cleanly after probing */
+}
+
+/**
+ * x1_emac_init — schedule EMAC probing as a post-init kthread.
+ *
+ * Called from start_kernel.  The actual hardware probing, PHY init,
+ * and auto-negotiation run in a dedicated kernel thread so that:
+ *  1. The scheduler is already running → sleep_ms() works.
+ *  2. Boot proceeds without blocking on slow PHY negotiation.
+ */
+void x1_emac_init(void)
+{
+    if (!platform.has_emac)
+        return;
+
+    struct thread *t = kthread_create("x1_emac", x1_emac_kthread,
+                                      0, 0, KERNEL_STACK_ORDER);
+    if (IS_ERR_OR_NULL(t)) {
+        printf("x1_emac: failed to create init kthread\n");
+        return;
+    }
+    wakeup(t);
 }

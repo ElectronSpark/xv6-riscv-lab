@@ -91,7 +91,6 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     consoleinit();
     netdev_init();
     pci_init();
-    x1_emac_init();   // SpacemiT X1 EMAC (probes via FDT)
     signal_init(); // signal handling initialization
     binit();       // buffer cache
     // Legacy iinit() and fileinit() removed - VFS handles these
@@ -102,6 +101,10 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     // returns NULL and new threads cannot be enqueued to any run queue.
     idle_thread_init();
     sched_timer_init();
+    // Post-init device drivers: spawned as kthreads so they run with
+    // the scheduler active and can use sleep_ms() / scheduler_yield().
+    x1_emac_init();   // SpacemiT X1 EMAC (probes via FDT)
+    x1_sdhci_init();  // SpacemiT X1 SDHCI SD/eMMC (probes via FDT)
     // goldfish_rtc_init();  // Goldfish RTC driver (1-second alarm)
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
@@ -163,11 +166,7 @@ void start_kernel_post_init(void) {
     ramdisk_init();     // ramdisk from FDT initrd (real hardware)
     sockinit();
 #ifdef USE_LWIP
-    lwip_net_init();    // lwIP TCP/IP stack initialization
-    extern void telnetd_init(void);
-    telnetd_init();     // Telnet server (port 23)
-    extern void gdbstub_init(void);
-    gdbstub_init();     // GDB remote stub (port 1234)
+    lwip_net_init();    // lwIP TCP/IP stack initialization (kthread)
 #endif
     pcache_global_init(); // page cache subsystem initialization
 

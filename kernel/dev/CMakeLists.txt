@@ -9,4 +9,5 @@ add_library(dev OBJECT
     netdev.c
     yt8531.c
     x1_emac.c
+    x1_sdhci.c
 )
