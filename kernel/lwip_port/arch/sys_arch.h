@@ -5,10 +5,10 @@
  * Defines the types for semaphores, mutexes, mailboxes, and threads
  * that lwIP uses for its OS abstraction layer.
  *
- * We use xv6's sleep_on_chan/wakeup_on_chan for blocking, which takes
- * any pointer as a "channel" key. Each struct contains a spinlock and
- * dedicated channel addresses (struct fields whose addresses serve as
- * unique channel identifiers).
+ * - Semaphores wrap the kernel's native sem_t (tq-based).  Timed waits
+ *   combine sched_timer_set() with tq_wait() so lwIP TCP timers fire.
+ * - Mutexes wrap the kernel's native mutex_t (tq-based, owner-tracked).
+ * - Mailboxes use a circular buffer with two sem_t (not-empty / not-full).
  */
 
 #ifndef LWIP_ARCH_SYS_ARCH_H
@@ -16,6 +16,8 @@
 
 #include "types.h"
 #include "lock/spinlock.h"
+#include "lock/semaphore_types.h"
+#include "lock/mutex_types.h"
 
 /* --------------------------------------------------------------------------
  * Protection level (for SYS_LIGHTWEIGHT_PROT)
@@ -24,32 +26,31 @@
 typedef int sys_prot_t;
 
 /* --------------------------------------------------------------------------
- * Semaphore: spinlock + count; sleep on &count
+ * Semaphore: wraps kernel sem_t
  * -------------------------------------------------------------------------- */
 typedef struct sys_sem {
-    spinlock_t lock;
-    int count;
-    int valid;
+    sem_t    sem;
+    int      valid;
 } sys_sem_t;
 
 /* --------------------------------------------------------------------------
- * Mutex: spinlock + held flag; sleep on &held
+ * Mutex: wraps kernel mutex_t
  * -------------------------------------------------------------------------- */
 typedef struct sys_mutex {
-    spinlock_t lock;
-    int held;
-    int valid;
+    mutex_t  mutex;
+    int      valid;
 } sys_mutex_t;
 
 /* --------------------------------------------------------------------------
- * Mailbox: fixed-size circular buffer with spinlock
+ * Mailbox: fixed-size circular buffer guarded by a spinlock,
+ *          with two kernel semaphores for blocking.
  * -------------------------------------------------------------------------- */
 #define SYS_MBOX_SIZE 128
 
 typedef struct sys_mbox {
-    spinlock_t lock;
-    int not_empty_chan;  /* address used as sleep channel for readers */
-    int not_full_chan;   /* address used as sleep channel for writers */
+    spinlock_t lock;       /* protects the circular buffer fields */
+    sem_t not_empty;       /* readers block here when count == 0  */
+    sem_t not_full;        /* writers block here when count == max */
     void *msgs[SYS_MBOX_SIZE];
     int head;
     int tail;

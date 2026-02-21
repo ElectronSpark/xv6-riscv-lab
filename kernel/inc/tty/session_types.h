@@ -25,6 +25,10 @@ struct session {
     pid_t fg_pgid;        /* Foreground process group ID        */
     int ref_count;        /* Reference count                    */
     spinlock_t lock;      /* Protects ctrl_tty and fg_pgid      */
+
+    struct {
+        uint64 is_kernel : 1; /* set for kernel-internal sessions */
+    };
 };
 
 #endif /* __KERNEL_SESSION_TYPES_H */

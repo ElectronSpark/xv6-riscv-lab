@@ -5,18 +5,22 @@
  * Implements semaphores, mutexes, mailboxes, thread creation, time functions,
  * and critical section protection using xv6 kernel primitives.
  *
- * Uses xv6's sleep_on_chan/wakeup_on_chan for synchronisation as it provides
- * a simple and correct blocking primitive that works with spinlocks.
+ * Uses xv6 kernel semaphores, mutexes, and thread queues for
+ * wait/wakeup.  Timed waits delegate to sem_wait_timed() which
+ * uses sched_timer_set() internally to guarantee lwIP TCP timers
+ * always fire on schedule.
  */
 
 #include "types.h"
 #include "param.h"
 #include "riscv.h"
 #include "lock/spinlock.h"
+#include "lock/semaphore.h"
 #include "defs.h"
 #include "printf.h"
 #include "proc/thread.h"
 #include "proc/sched.h"
+#include "signal.h"
 #include "timer/timer.h"
 #include "timer/goldfish_rtc.h"
 #include "string.h"
@@ -28,13 +32,29 @@
 #include "lwip/err.h"
 #include "arch/sys_arch.h"
 
+/* Debug logging — set to 1 to enable verbose mbox/sem tracing */
+#define SYS_ARCH_DEBUG 0
+
+#if SYS_ARCH_DEBUG
+static uint64 mbox_fetch_count = 0;
+static uint64 mbox_timeout_count = 0;
+static uint64 mbox_post_count = 0;
+static uint64 mbox_trypost_count = 0;
+static uint64 mbox_trypost_fail_count = 0;
+static uint64 sem_wait_count = 0;
+static uint64 sem_timeout_count = 0;
+#define SYS_DBG(fmt, ...) printf("sys_arch: " fmt, ##__VA_ARGS__)
+#else
+#define SYS_DBG(fmt, ...) do {} while(0)
+#endif
+
 /* ========================================================================== */
 /* Minimal snprintf / vsnprintf for lwIP (kernel has no libc)                 */
 /* ========================================================================== */
 
 /**
  * vsnprintf: supports %s, %d, %u, %x, %X, %c, %p, %%, %ld, %lu, %lx, %lX,
- * %lld, %llu, %llx, %llX, %zd, %zu, %zx.
+ * %lld, %lu, %llx, %llX, %zd, %zu, %zx.
  * Also supports flags: '0', '-', '+', ' ',  field width, and precision.
  */
 int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap)
@@ -280,22 +300,29 @@ int snprintf(char *buf, size_t size, const char *fmt, ...)
 /* Initialisation                                                             */
 /* ========================================================================== */
 
-static uint64 sys_start_ns; /* timestamp at sys_init() */
+static uint64 sys_start_ticks; /* r_time() snapshot at sys_init() */
 
 void sys_init(void)
 {
-    sys_start_ns = goldfish_rtc_read_ns();
+    sys_start_ticks = r_time();
 }
 
 /* ========================================================================== */
 /* Time                                                                       */
 /* ========================================================================== */
 
+/*
+ * sys_now - return milliseconds elapsed since sys_init().
+ *
+ * Uses r_time() (RDTIME CSR) / TICK_MS — the same clock used by
+ * sem_wait_timed() and sched_timer_set(), so elapsed-ms measurements
+ * in the debug logging match the actual sleep durations.
+ * goldfish_rtc_read_ns() is NOT used here because on some boards (e.g.
+ * SpacemiT X1) it returns 0 and would always yield 0 ms elapsed.
+ */
 u32_t sys_now(void)
 {
-    uint64 now_ns = goldfish_rtc_read_ns();
-    /* Return ms since sys_init(). Wrap at 32 bits is fine for lwIP. */
-    return (u32_t)((now_ns - sys_start_ns) / NS_PER_MS);
+    return (u32_t)((r_time() - sys_start_ticks) / TICK_MS);
 }
 
 u32_t sys_jiffies(void)
@@ -347,8 +374,7 @@ err_t sys_sem_new(sys_sem_t *sem, u8_t count)
 {
     if (sem == NULL)
         return ERR_ARG;
-    spin_init(&sem->lock, "lwip_sem");
-    sem->count = count;
+    sem_init(&sem->sem, "lwip_sem", (int)count);
     sem->valid = 1;
     return ERR_OK;
 }
@@ -362,33 +388,42 @@ void sys_sem_free(sys_sem_t *sem)
 
 void sys_sem_signal(sys_sem_t *sem)
 {
-    spin_lock(&sem->lock);
-    sem->count++;
-    wakeup_on_chan(&sem->count);
-    spin_unlock(&sem->lock);
+    sem_post(&sem->sem);
 }
 
+/**
+ * Timed semaphore wait for lwIP.
+ *
+ * For untimed waits uses the native kernel sem_wait().
+ * For timed waits delegates to sem_wait_timed() which handles the
+ * decrement-before-sleep protocol internally.
+ */
 u32_t sys_arch_sem_wait(sys_sem_t *sem, u32_t timeout)
 {
-    uint64 start_ms = sys_now();
-
-    spin_lock(&sem->lock);
-    while (sem->count <= 0) {
-        if (timeout != 0) {
-            uint64 elapsed = sys_now() - start_ms;
-            if (elapsed >= timeout) {
-                spin_unlock(&sem->lock);
-                return SYS_ARCH_TIMEOUT;
-            }
-        }
-        /* sleep_on_chan releases sem->lock and reacquires it on wakeup */
-        sleep_on_chan(&sem->count, &sem->lock);
+    /* Fast path: non-timed wait — use the native kernel sem_wait */
+    if (timeout == 0) {
+        uint64 start_ms = sys_now();
+#if SYS_ARCH_DEBUG
+        sem_wait_count++;
+        if (sem_wait_count <= 10 || (sem_wait_count % 1000) == 0)
+            SYS_DBG("sem_wait(forever) #%lu\n", sem_wait_count);
+#endif
+        sem_wait(&sem->sem);
+        return (u32_t)(sys_now() - start_ms);
     }
-    sem->count--;
-    spin_unlock(&sem->lock);
 
-    uint64 elapsed = sys_now() - start_ms;
-    return (u32_t)elapsed;
+    uint64 start_ms = sys_now();
+    int ret = sem_wait_timed(&sem->sem, (uint64)timeout);
+    if (ret != 0) {
+#if SYS_ARCH_DEBUG
+        sem_timeout_count++;
+        if (sem_timeout_count <= 10 || (sem_timeout_count % 500) == 0)
+            SYS_DBG("sem_wait TIMEOUT after %lu ms (total=%lu)\n",
+                    (unsigned long)(sys_now() - start_ms), sem_timeout_count);
+#endif
+        return SYS_ARCH_TIMEOUT;
+    }
+    return (u32_t)(sys_now() - start_ms);
 }
 
 /* ========================================================================== */
@@ -399,28 +434,19 @@ err_t sys_mutex_new(sys_mutex_t *mutex)
 {
     if (mutex == NULL)
         return ERR_ARG;
-    spin_init(&mutex->lock, "lwip_mtx");
-    mutex->held = 0;
+    mutex_init(&mutex->mutex, "lwip_mtx");
     mutex->valid = 1;
     return ERR_OK;
 }
 
 void sys_mutex_lock(sys_mutex_t *mutex)
 {
-    spin_lock(&mutex->lock);
-    while (mutex->held) {
-        sleep_on_chan(&mutex->held, &mutex->lock);
-    }
-    mutex->held = 1;
-    spin_unlock(&mutex->lock);
+    mutex_lock(&mutex->mutex);
 }
 
 void sys_mutex_unlock(sys_mutex_t *mutex)
 {
-    spin_lock(&mutex->lock);
-    mutex->held = 0;
-    wakeup_on_chan(&mutex->held);
-    spin_unlock(&mutex->lock);
+    mutex_unlock(&mutex->mutex);
 }
 
 void sys_mutex_free(sys_mutex_t *mutex)
@@ -440,8 +466,8 @@ err_t sys_mbox_new(sys_mbox_t *mbox, int size)
     if (mbox == NULL)
         return ERR_ARG;
     spin_init(&mbox->lock, "lwip_mbox");
-    mbox->not_empty_chan = 0;
-    mbox->not_full_chan = 0;
+    sem_init(&mbox->not_empty, "lwip_mbox_rd", 0);
+    sem_init(&mbox->not_full,  "lwip_mbox_wr", SYS_MBOX_SIZE);
     mbox->head = 0;
     mbox->tail = 0;
     mbox->count = 0;
@@ -458,29 +484,56 @@ void sys_mbox_free(sys_mbox_t *mbox)
 
 void sys_mbox_post(sys_mbox_t *mbox, void *msg)
 {
+    sem_wait(&mbox->not_full);          /* block until slot available */
+
     spin_lock(&mbox->lock);
-    while (mbox->count >= SYS_MBOX_SIZE) {
-        sleep_on_chan(&mbox->not_full_chan, &mbox->lock);
-    }
     mbox->msgs[mbox->tail] = msg;
     mbox->tail = (mbox->tail + 1) % SYS_MBOX_SIZE;
     mbox->count++;
-    wakeup_on_chan(&mbox->not_empty_chan);
+#if SYS_ARCH_DEBUG
+    mbox_post_count++;
+    int cnt = mbox->count;
+#endif
     spin_unlock(&mbox->lock);
+
+    sem_post(&mbox->not_empty);         /* signal reader */
+
+#if SYS_ARCH_DEBUG
+    if (mbox_post_count <= 10 || (mbox_post_count % 500) == 0)
+        SYS_DBG("mbox_post #%lu msg=%p depth=%d\n",
+                mbox_post_count, msg, cnt);
+#endif
 }
 
 err_t sys_mbox_trypost(sys_mbox_t *mbox, void *msg)
 {
-    spin_lock(&mbox->lock);
-    if (mbox->count >= SYS_MBOX_SIZE) {
-        spin_unlock(&mbox->lock);
+    if (sem_trywait(&mbox->not_full) != 0) {
+#if SYS_ARCH_DEBUG
+        mbox_trypost_fail_count++;
+        if (mbox_trypost_fail_count <= 5 || (mbox_trypost_fail_count % 100) == 0)
+            SYS_DBG("mbox_trypost FULL (total_fail=%lu)\n",
+                    mbox_trypost_fail_count);
+#endif
         return ERR_MEM;
     }
+
+    spin_lock(&mbox->lock);
     mbox->msgs[mbox->tail] = msg;
     mbox->tail = (mbox->tail + 1) % SYS_MBOX_SIZE;
     mbox->count++;
-    wakeup_on_chan(&mbox->not_empty_chan);
+#if SYS_ARCH_DEBUG
+    mbox_trypost_count++;
+    int cnt = mbox->count;
+#endif
     spin_unlock(&mbox->lock);
+
+    sem_post(&mbox->not_empty);
+
+#if SYS_ARCH_DEBUG
+    if (mbox_trypost_count <= 10 || (mbox_trypost_count % 500) == 0)
+        SYS_DBG("mbox_trypost #%lu msg=%p depth=%d\n",
+                mbox_trypost_count, msg, cnt);
+#endif
     return ERR_OK;
 }
 
@@ -490,47 +543,89 @@ err_t sys_mbox_trypost_fromisr(sys_mbox_t *mbox, void *msg)
     return sys_mbox_trypost(mbox, msg);
 }
 
+/**
+ * Timed mailbox fetch for lwIP.
+ *
+ * For untimed waits we use kernel sem_wait() directly.
+ * For timed waits we use sem_wait_timed() on the not_empty semaphore.
+ */
 u32_t sys_arch_mbox_fetch(sys_mbox_t *mbox, void **msg, u32_t timeout)
 {
     uint64 start_ms = sys_now();
+    sem_t *ne = &mbox->not_empty;
+
+    if (timeout == 0) {
+        /* Wait forever for a message.
+         * For user-space threads, use interruptible wait so that
+         * signals (e.g. SIGINT from Ctrl-C) can break out of blocking
+         * accept()/recv() calls.  Kernel threads (e.g. tcpip thread)
+         * use the normal uninterruptible sem_wait(). */
+#if SYS_ARCH_DEBUG
+        mbox_fetch_count++;
+        if (mbox_fetch_count <= 10 || (mbox_fetch_count % 1000) == 0)
+            SYS_DBG("mbox_fetch(forever) #%lu depth=%d\n",
+                    mbox_fetch_count, mbox->count);
+#endif
+        if (current != NULL && THREAD_USER_SPACE(current)) {
+            int ret = sem_wait_interruptible(ne);
+            if (ret == -EINTR)
+                return SYS_ARCH_TIMEOUT;
+        } else {
+            sem_wait(ne);
+        }
+    } else {
+        int ret = sem_wait_timed(ne, (uint64)timeout);
+        if (ret != 0) {
+#if SYS_ARCH_DEBUG
+            mbox_timeout_count++;
+            if (mbox_timeout_count <= 10 || (mbox_timeout_count % 500) == 0)
+                SYS_DBG("mbox_fetch TIMEOUT after %lu/%lu ms (total=%lu)\n",
+                        (unsigned long)(sys_now() - start_ms),
+                        (unsigned long)timeout, mbox_timeout_count);
+#endif
+            return SYS_ARCH_TIMEOUT;
+        }
+    }
 
     spin_lock(&mbox->lock);
-    while (mbox->count == 0) {
-        if (timeout != 0) {
-            uint64 elapsed = sys_now() - start_ms;
-            if (elapsed >= timeout) {
-                spin_unlock(&mbox->lock);
-                return SYS_ARCH_TIMEOUT;
-            }
-        }
-        sleep_on_chan(&mbox->not_empty_chan, &mbox->lock);
-    }
-    if (msg != NULL) {
+    if (msg != NULL)
         *msg = mbox->msgs[mbox->head];
-    }
     mbox->head = (mbox->head + 1) % SYS_MBOX_SIZE;
     mbox->count--;
-    wakeup_on_chan(&mbox->not_full_chan);
+#if SYS_ARCH_DEBUG
+    mbox_fetch_count++;
+    int cnt2 = mbox->count;
+#endif
     spin_unlock(&mbox->lock);
 
-    uint64 elapsed = sys_now() - start_ms;
-    return (u32_t)elapsed;
+    sem_post(&mbox->not_full);          /* signal writer */
+
+#if SYS_ARCH_DEBUG
+    {
+        u32_t elapsed_final = (u32_t)(sys_now() - start_ms);
+        if (mbox_fetch_count <= 10 || (mbox_fetch_count % 500) == 0)
+            SYS_DBG("mbox_fetch #%lu got msg=%p wait=%lu ms depth=%d\n",
+                    mbox_fetch_count, msg ? *msg : 0,
+                    (unsigned long)elapsed_final, cnt2);
+    }
+#endif
+
+    return (u32_t)(sys_now() - start_ms);
 }
 
 u32_t sys_arch_mbox_tryfetch(sys_mbox_t *mbox, void **msg)
 {
-    spin_lock(&mbox->lock);
-    if (mbox->count == 0) {
-        spin_unlock(&mbox->lock);
+    if (sem_trywait(&mbox->not_empty) != 0)
         return SYS_MBOX_EMPTY;
-    }
-    if (msg != NULL) {
+
+    spin_lock(&mbox->lock);
+    if (msg != NULL)
         *msg = mbox->msgs[mbox->head];
-    }
     mbox->head = (mbox->head + 1) % SYS_MBOX_SIZE;
     mbox->count--;
-    wakeup_on_chan(&mbox->not_full_chan);
     spin_unlock(&mbox->lock);
+
+    sem_post(&mbox->not_full);
     return 0;
 }
 

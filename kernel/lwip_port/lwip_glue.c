@@ -38,6 +38,20 @@
 #include "lwip/ip4_addr.h"
 #include "netif/ethernet.h"
 
+/* Debug logging — set to 1 to enable verbose network tracing */
+#define LWIP_NET_DEBUG 0
+
+#if LWIP_NET_DEBUG
+static uint64 lwip_rx_count = 0;
+static uint64 lwip_rx_drop_count = 0;
+static uint64 lwip_rx_input_err = 0;
+static uint64 lwip_tx_count = 0;
+static uint64 lwip_tx_err_count = 0;
+#define LWIP_NET_DBG(fmt, ...) printf("lwip_net: " fmt, ##__VA_ARGS__)
+#else
+#define LWIP_NET_DBG(fmt, ...) do {} while(0)
+#endif
+
 /* ========================================================================== */
 /* E1000 netif for lwIP                                                       */
 /* ========================================================================== */
@@ -59,8 +73,10 @@ e1000_netif_linkoutput(struct netif *netif, struct pbuf *p)
     struct mbuf *m;
 
     struct netdev *ndev = netdev_get_default();
-    if (ndev == NULL)
+    if (ndev == NULL) {
+        LWIP_NET_DBG("TX: no netdev!\n");
         return ERR_IF;
+    }
 
     if (p->tot_len > MBUF_SIZE) {
         printf("lwip: packet too large (%d > %d)\n", p->tot_len, MBUF_SIZE);
@@ -68,17 +84,30 @@ e1000_netif_linkoutput(struct netif *netif, struct pbuf *p)
     }
 
     m = mbufalloc(0);
-    if (m == NULL)
+    if (m == NULL) {
+        LWIP_NET_DBG("TX: mbuf alloc failed\n");
         return ERR_MEM;
+    }
 
     /* Copy (possibly chained) pbuf into contiguous mbuf */
     pbuf_copy_partial(p, mbufput(m, p->tot_len), p->tot_len, 0);
 
     if (ndev->ops->transmit(ndev, m) != 0) {
+#if LWIP_NET_DEBUG
+        lwip_tx_err_count++;
+        if (lwip_tx_err_count <= 10 || (lwip_tx_err_count % 100) == 0)
+            LWIP_NET_DBG("TX FAILED len=%d (total_err=%lu)\n",
+                         p->tot_len, lwip_tx_err_count);
+#endif
         mbuffree(m);
         return ERR_IF;
     }
 
+#if LWIP_NET_DEBUG
+    lwip_tx_count++;
+    if (lwip_tx_count <= 10 || (lwip_tx_count % 500) == 0)
+        LWIP_NET_DBG("TX ok #%lu len=%d\n", lwip_tx_count, p->tot_len);
+#endif
     return ERR_OK;
 }
 
@@ -116,6 +145,7 @@ e1000_netif_init(struct netif *netif)
 void net_rx(struct mbuf *m)
 {
     struct pbuf *p;
+    static int drop_count = 0;
 
     if (m == NULL || m->len == 0) {
         if (m)
@@ -126,6 +156,13 @@ void net_rx(struct mbuf *m)
     p = pbuf_alloc(PBUF_RAW, m->len, PBUF_POOL);
     if (p == NULL) {
         mbuffree(m);
+        drop_count++;
+#if LWIP_NET_DEBUG
+        lwip_rx_drop_count++;
+#endif
+        if (drop_count % 100 == 1)
+            printf("net_rx: pbuf pool exhausted, dropped %d packets\n",
+                   drop_count);
         return;
     }
 
@@ -133,8 +170,21 @@ void net_rx(struct mbuf *m)
     pbuf_take(p, m->head, m->len);
     mbuffree(m);
 
+#if LWIP_NET_DEBUG
+    lwip_rx_count++;
+    if (lwip_rx_count <= 10 || (lwip_rx_count % 500) == 0)
+        LWIP_NET_DBG("RX #%lu len=%d -> tcpip_input\n",
+                     lwip_rx_count, p->tot_len);
+#endif
+
     /* Feed to lwIP — ethernet_input() handles ARP / IP demux */
-    if (e1000_netif.input(p, &e1000_netif) != ERR_OK) {
+    err_t err = e1000_netif.input(p, &e1000_netif);
+    if (err != ERR_OK) {
+#if LWIP_NET_DEBUG
+        lwip_rx_input_err++;
+        LWIP_NET_DBG("RX input error %d (total=%lu) — likely mbox full\n",
+                     err, lwip_rx_input_err);
+#endif
         pbuf_free(p);
     }
 }

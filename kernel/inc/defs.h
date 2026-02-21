@@ -112,6 +112,8 @@ int mutex_trylock(mutex_t *);
 void mutex_unlock(mutex_t *);
 int holding_mutex(mutex_t *);
 void mutex_init(mutex_t *, char *);
+int mutex_lock_interruptible(mutex_t *);
+int mutex_lock_timed(mutex_t *, uint64);
 
 // syscall.c
 uint64 argraw(int n);

@@ -11,6 +11,7 @@
 #include "proc/tq.h"
 #include "proc/sched.h"
 #include "string.h"
+#include "signal.h"
 
 static inline int __reader_should_wait(rwsem_t *lock) {
     if (lock->readers == 0) {
@@ -177,4 +178,78 @@ bool rwsem_is_write_holding(rwsem_t *lock) {
     bool is_locked = (lock->holder_pid == self->pid);
     spin_unlock(&lock->lock);
     return is_locked;
+}
+
+/*
+ * rwsem_acquire_read_interruptible - acquire read lock, interruptible by signals.
+ *
+ * Returns 0 on success, -EINTR if a signal is pending before or during sleep.
+ */
+int rwsem_acquire_read_interruptible(rwsem_t *lock) {
+    assert(current != NULL, "rwsem_acquire_read_interruptible: no current thread");
+    assert(mycpu()->spin_depth == 0,
+           "rwsem_acquire_read_interruptible called with spinlock held");
+    assert(!CPU_IN_ITR(),
+           "rwsem_acquire_read_interruptible called in interrupt context");
+    if (!lock) {
+        return -EINVAL;
+    }
+
+    spin_lock(&lock->lock);
+    while (__reader_should_wait(lock)) {
+        if (signal_pending(current)) {
+            spin_unlock(&lock->lock);
+            return -EINTR;
+        }
+        int ret = tq_wait_in_state(&lock->read_queue, &lock->lock, NULL,
+                                   THREAD_INTERRUPTIBLE);
+        if (ret != 0) {
+            spin_unlock(&lock->lock);
+            return -EINTR;
+        }
+    }
+    lock->readers++;
+    spin_unlock(&lock->lock);
+    return 0;
+}
+
+/*
+ * rwsem_acquire_write_interruptible - acquire write lock, interruptible by signals.
+ *
+ * Returns 0 on success, -EINTR if a signal is pending before or during sleep.
+ */
+int rwsem_acquire_write_interruptible(rwsem_t *lock) {
+    assert(current != NULL, "rwsem_acquire_write_interruptible: no current thread");
+    assert(mycpu()->spin_depth == 0,
+           "rwsem_acquire_write_interruptible called with spinlock held");
+    assert(!CPU_IN_ITR(),
+           "rwsem_acquire_write_interruptible called in interrupt context");
+    if (!lock) {
+        return -EINVAL;
+    }
+
+    spin_lock(&lock->lock);
+    struct thread *self = current;
+    int self_pid = self->pid;
+    assert(lock->holder_pid != self_pid,
+           "rwsem_acquire_write_interruptible: deadlock detected, thread already "
+           "holds the write lock");
+
+    while (__writer_should_wait(lock, self_pid)) {
+        assert(lock->holder_pid != self_pid,
+               "rwsem_acquire_write_interruptible: deadlock detected");
+        if (signal_pending(current)) {
+            spin_unlock(&lock->lock);
+            return -EINTR;
+        }
+        int ret = tq_wait_in_state(&lock->write_queue, &lock->lock, NULL,
+                                   THREAD_INTERRUPTIBLE);
+        if (ret != 0) {
+            spin_unlock(&lock->lock);
+            return -EINTR;
+        }
+    }
+    lock->holder_pid = self_pid;
+    spin_unlock(&lock->lock);
+    return 0;
 }

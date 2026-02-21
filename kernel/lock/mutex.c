@@ -13,6 +13,8 @@
 #include "proc/sched.h"
 #include "errno.h"
 #include "smp/atomic.h"
+#include "signal.h"
+#include "timer/timer.h"
 
 #define __mutex_set_holder(lk, pid)                                            \
     smp_store_release(                                                         \
@@ -21,6 +23,47 @@
 #define __mutex_holder(lk) smp_load_acquire(&lk->holder)
 #define __mutex_try_set_holder(lk, pid)                                        \
     atomic_cas(&lk->holder, -1, pid) // -1 = no holder
+
+/* ---------------------------------------------------------------
+ * Timed mutex sleep/wake callbacks used by mutex_lock_timed().
+ * --------------------------------------------------------------- */
+
+struct __mutex_timed_ctx {
+    mutex_t *lk;          /* the mutex being acquired */
+    uint64 timeout_ms;    /* remaining timeout for this iteration (ms) */
+    bool timer_armed;     /* whether the deadline timer is active */
+    struct timer_node timer;
+};
+
+/*
+ * Called by tq_wait_in_state_cb just before scheduler_yield().
+ * Releases the mutex spinlock and arms the deadline timer.
+ */
+static int __mutex_timed_sleep_cb(void *data) {
+    struct __mutex_timed_ctx *ctx = (struct __mutex_timed_ctx *)data;
+    spin_unlock(&ctx->lk->lk);
+
+    ctx->timer_armed = false;
+    if (ctx->timeout_ms > 0 &&
+        sched_timer_set(&ctx->timer, ctx->timeout_ms) == 0) {
+        ctx->timer_armed = true;
+    }
+
+    return 0;
+}
+
+/*
+ * Called by tq_wait_in_state_cb after the thread is rescheduled.
+ * Cancels the deadline timer and reacquires the mutex spinlock.
+ */
+static void __mutex_timed_wake_cb(void *data, int status) {
+    struct __mutex_timed_ctx *ctx = (struct __mutex_timed_ctx *)data;
+    if (ctx->timer_armed) {
+        sched_timer_done(&ctx->timer);
+        ctx->timer_armed = false;
+    }
+    spin_lock(&ctx->lk->lk);
+}
 
 static struct thread *__do_wakeup(mutex_t *lk) {
     struct thread *next = tq_wakeup(&lk->wait_queue, 0, 0);
@@ -113,4 +156,126 @@ int mutex_trylock(mutex_t *lk) {
         return 1; // Successfully acquired
     }
     return 0; // Failed to acquire
+}
+
+/*
+ * mutex_lock_interruptible - acquire a mutex, interruptible by signals.
+ *
+ * Returns 0 on success, -EINTR if a signal is pending.
+ */
+int mutex_lock_interruptible(mutex_t *lk) {
+    struct thread *self = current;
+    assert(self != NULL,
+           "mutex_lock_interruptible: no current thread context");
+    assert(mycpu()->spin_depth == 0,
+           "mutex_lock_interruptible called with spinlock held");
+    assert(!CPU_IN_ITR(),
+           "mutex_lock_interruptible called in interrupt context");
+
+    if (lk == NULL) {
+        return -EINVAL;
+    }
+
+    // Fast path: try to acquire without sleeping
+    if (__mutex_try_set_holder(lk, self->pid)) {
+        return 0;
+    }
+
+    spin_lock(&lk->lk);
+    if (__mutex_try_set_holder(lk, self->pid)) {
+        spin_unlock(&lk->lk);
+        return 0;
+    }
+
+    assert(__mutex_holder(lk) != self->pid,
+           "mutex_lock_interruptible: deadlock detected, thread already holds "
+           "the lock");
+
+    while (__mutex_holder(lk) != self->pid) {
+        if (signal_pending(current)) {
+            spin_unlock(&lk->lk);
+            return -EINTR;
+        }
+
+        __thread_state_set(current, THREAD_INTERRUPTIBLE);
+        int ret = tq_wait(&lk->wait_queue, &lk->lk, NULL);
+        if (ret != 0 && signal_pending(current) &&
+            __mutex_holder(lk) != self->pid) {
+            spin_unlock(&lk->lk);
+            return -EINTR;
+        }
+    }
+    spin_unlock(&lk->lk);
+    return 0;
+}
+
+/*
+ * mutex_lock_timed - acquire a mutex with a millisecond deadline.
+ *
+ * Returns  0         on success,
+ *         -ETIMEDOUT if the deadline expired before acquisition,
+ *         -EINTR     if a signal arrived before acquisition.
+ */
+int mutex_lock_timed(mutex_t *lk, uint64 timeout_ms) {
+    struct thread *self = current;
+    assert(self != NULL, "mutex_lock_timed: no current thread");
+    assert(mycpu()->spin_depth == 0,
+           "mutex_lock_timed called with spinlock held");
+    assert(!CPU_IN_ITR(), "mutex_lock_timed called in interrupt context");
+
+    if (lk == NULL) {
+        return -EINVAL;
+    }
+
+    // Fast path
+    if (__mutex_try_set_holder(lk, self->pid)) {
+        return 0;
+    }
+
+    spin_lock(&lk->lk);
+    if (__mutex_try_set_holder(lk, self->pid)) {
+        spin_unlock(&lk->lk);
+        return 0;
+    }
+
+    assert(
+        __mutex_holder(lk) != self->pid,
+        "mutex_lock_timed: deadlock detected, thread already holds the lock");
+
+    uint64 timeout_ticks = MS_TO_RAWTICKS(timeout_ms);
+    uint64 start = r_time();
+
+    while (__mutex_holder(lk) != self->pid) {
+        uint64 elapsed = r_time() - start;
+        if (elapsed >= timeout_ticks) {
+            spin_unlock(&lk->lk);
+            return -ETIMEDOUT;
+        }
+
+        uint64 remaining_ms = RAWTICKS_TO_MS(timeout_ticks - elapsed);
+        if (remaining_ms == 0)
+            remaining_ms = 1; /* at least 1 ms to arm timer */
+
+        if (signal_pending(current)) {
+            spin_unlock(&lk->lk);
+            return -EINTR;
+        }
+
+        struct __mutex_timed_ctx ctx = {
+            .lk = lk,
+            .timeout_ms = remaining_ms,
+            .timer_armed = false,
+        };
+
+        __thread_state_set(current, THREAD_INTERRUPTIBLE);
+        int ret = tq_wait_cb(&lk->wait_queue, __mutex_timed_sleep_cb,
+                             __mutex_timed_wake_cb, &ctx, NULL);
+        if (ret != 0 && signal_pending(current) &&
+            __mutex_holder(lk) != self->pid) {
+            spin_unlock(&lk->lk);
+            return -EINTR;
+        }
+    }
+    spin_unlock(&lk->lk);
+    return 0;
 }

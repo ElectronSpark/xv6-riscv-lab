@@ -279,13 +279,17 @@ struct thread *kthread_create(const char *name, void *entry, uint64 arg1,
     pid_wlock();
     attach_child(initproc, p);
     proctab_proc_add(p);
-    pid_wunlock();
 
-    // Allocate a thread group for the kernel thread (each kthread is its own
-    // group)
-    if (thread_group_alloc(p) == 0) {
-        p->thread_group->tgid = p->pid;
+    // Allocate a kernel-flagged thread group so signals cannot be routed
+    // through tg_signal_send (which is forbidden for kernel threads).
+    // Must be done inside pid_wlock so the TG is visible atomically.
+    struct thread_group *ktg = NULL;
+    if (thread_group_alloc_kernel(&ktg, p->pid) == 0) {
+        ktg->group_leader = p;
+        thread_group_add(ktg, p);
+        thread_group_put(ktg); // add took a ref; balance the alloc ref
     }
+    pid_wunlock();
 
     rcu_read_unlock();
 

@@ -27,25 +27,32 @@
 #define MEM_LIBC_MALLOC                 0
 #define MEMP_MEM_MALLOC                 0
 #define MEM_ALIGNMENT                   8
-#define MEM_SIZE                        (256 * 1024)   /* 256KB heap */
+#define MEM_SIZE                        (2 * 1024 * 1024) /* 2MB heap */
 
-/* Pool sizes */
-#define MEMP_NUM_PBUF                   64
-#define MEMP_NUM_UDP_PCB                8
-#define MEMP_NUM_TCP_PCB                16
-#define MEMP_NUM_TCP_PCB_LISTEN         8
-#define MEMP_NUM_TCP_SEG                64
-#define MEMP_NUM_NETBUF                 16
-#define MEMP_NUM_NETCONN                16
-#define MEMP_NUM_TCPIP_MSG_API          32
-#define MEMP_NUM_TCPIP_MSG_INPKT        32
-#define MEMP_NUM_ARP_QUEUE              16
-#define MEMP_NUM_SYS_TIMEOUT            16
+/* Pool sizes
+ *
+ * PBUF_POOL_SIZE and MEMP_NUM_PBUF must be large enough to cover:
+ *   - pbufs held in TCP recv buffers (TCP_WND/MSS per connection)
+ *   - pbufs in-flight from ISR to tcpip thread (MEMP_NUM_TCPIP_MSG_INPKT)
+ *   - pbufs for ARP, ICMP, UDP, etc.
+ * If pbufs exhaust, ALL networking dies — even ping and ARP stop working.
+ */
+#define MEMP_NUM_PBUF                   512
+#define MEMP_NUM_UDP_PCB                16
+#define MEMP_NUM_TCP_PCB                32
+#define MEMP_NUM_TCP_PCB_LISTEN         16
+#define MEMP_NUM_TCP_SEG                256
+#define MEMP_NUM_NETBUF                 32
+#define MEMP_NUM_NETCONN                32
+#define MEMP_NUM_TCPIP_MSG_API          64
+#define MEMP_NUM_TCPIP_MSG_INPKT        128
+#define MEMP_NUM_ARP_QUEUE              32
+#define MEMP_NUM_SYS_TIMEOUT            32
 
 /* --------------------------------------------------------------------------
  * Pbuf options
  * -------------------------------------------------------------------------- */
-#define PBUF_POOL_SIZE                  64
+#define PBUF_POOL_SIZE                  1024
 #define PBUF_POOL_BUFSIZE               1536
 
 /* --------------------------------------------------------------------------
@@ -90,9 +97,9 @@
 #define LWIP_TCP                        1
 #define TCP_TTL                         64
 #define TCP_MSS                         1460
-#define TCP_SND_BUF                     (8 * TCP_MSS)
+#define TCP_SND_BUF                     (16 * TCP_MSS)
 #define TCP_SND_QUEUELEN                ((4 * (TCP_SND_BUF) + (TCP_MSS - 1))/(TCP_MSS))
-#define TCP_WND                         (8 * TCP_MSS)
+#define TCP_WND                         (16 * TCP_MSS)
 #define LWIP_TCP_KEEPALIVE              1
 #define LWIP_WND_SCALE                  0
 #define TCP_QUEUE_OOSEQ                 1

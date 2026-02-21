@@ -10,6 +10,8 @@
 #include "proc/tq.h"
 #include "proc/sched.h"
 #include "lock/completion.h"
+#include "signal.h"
+#include "timer/timer.h"
 
 #define MAX_COMPLETIONS 65535
 
@@ -130,4 +132,102 @@ bool completion_done(completion_t *c) {
     bool done = tq_size(&c->wait_queue) == 0;
     spin_unlock(&c->lock);
     return done;
+}
+
+/*
+ * wait_for_completion_timeout - wait for completion with a millisecond deadline.
+ *
+ * Returns the remaining time in ms if the completion was signalled before the
+ * deadline, or 0 on timeout.  Like Linux's wait_for_completion_timeout().
+ */
+uint64 wait_for_completion_timeout(completion_t *c, uint64 timeout_ms) {
+    assert(current != NULL,
+           "wait_for_completion_timeout called from non-thread context");
+    if (c == NULL) {
+        return 0;
+    }
+
+    uint64 timeout_ticks = MS_TO_RAWTICKS(timeout_ms);
+    uint64 start = r_time();
+
+    spin_lock(&c->lock);
+    while (!__try_wait_for_completion(c)) {
+        uint64 elapsed = r_time() - start;
+        if (elapsed >= timeout_ticks) {
+            spin_unlock(&c->lock);
+            return 0; // timed out
+        }
+        uint64 remaining_ms = RAWTICKS_TO_MS(timeout_ticks - elapsed);
+        if (remaining_ms == 0)
+            remaining_ms = 1;
+
+        struct timer_node tn = {0};
+        sched_timer_set(&tn, remaining_ms);
+        __thread_state_set(current, THREAD_INTERRUPTIBLE);
+        tq_wait(&c->wait_queue, &c->lock, NULL);
+        sched_timer_done(&tn);
+    }
+    if (c->done > 0) {
+        __completion_do_wake(c);
+    }
+    spin_unlock(&c->lock);
+
+    uint64 elapsed = r_time() - start;
+    if (elapsed >= timeout_ticks)
+        return 1; /* completed but at the boundary — return minimum 1 */
+    return RAWTICKS_TO_MS(timeout_ticks - elapsed);
+}
+
+/*
+ * wait_for_completion_interruptible_timeout - wait for completion, interruptible
+ *                                             by signals, with a ms deadline.
+ *
+ * Returns remaining ms (>0) if completed, 0 on timeout, -EINTR on signal.
+ */
+int64 wait_for_completion_interruptible_timeout(completion_t *c,
+                                                uint64 timeout_ms) {
+    assert(current != NULL,
+           "wait_for_completion_interruptible_timeout called from non-thread "
+           "context");
+    if (c == NULL) {
+        return -EINTR;
+    }
+
+    uint64 timeout_ticks = MS_TO_RAWTICKS(timeout_ms);
+    uint64 start = r_time();
+
+    spin_lock(&c->lock);
+    while (!__try_wait_for_completion(c)) {
+        if (signal_pending(current)) {
+            spin_unlock(&c->lock);
+            return -EINTR;
+        }
+        uint64 elapsed = r_time() - start;
+        if (elapsed >= timeout_ticks) {
+            spin_unlock(&c->lock);
+            return 0; // timed out
+        }
+        uint64 remaining_ms = RAWTICKS_TO_MS(timeout_ticks - elapsed);
+        if (remaining_ms == 0)
+            remaining_ms = 1;
+
+        struct timer_node tn = {0};
+        sched_timer_set(&tn, remaining_ms);
+        int ret = tq_wait_in_state(&c->wait_queue, &c->lock, NULL,
+                                   THREAD_INTERRUPTIBLE);
+        sched_timer_done(&tn);
+        if (ret != 0) {
+            spin_unlock(&c->lock);
+            return -EINTR;
+        }
+    }
+    if (c->done > 0) {
+        __completion_do_wake(c);
+    }
+    spin_unlock(&c->lock);
+
+    uint64 elapsed = r_time() - start;
+    if (elapsed >= timeout_ticks)
+        return 1;
+    return (int64)RAWTICKS_TO_MS(timeout_ticks - elapsed);
 }

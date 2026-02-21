@@ -38,6 +38,7 @@
 #include "lwip/err.h"
 #include "lwip/sys.h"
 #include "arch/sys_arch.h"
+#include "signal.h"
 
 /* From irq/syscall.c — argument fetching */
 extern void argint(int n, int *ip);
@@ -576,8 +577,12 @@ uint64 sys_accept(void)
 
     struct netconn *newconn = NULL;
     err_t err = netconn_accept(sk->conn, &newconn);
-    if (err != ERR_OK)
+    if (err != ERR_OK) {
+        /* If lwIP returned timeout due to signal interruption, report EINTR */
+        if (err == ERR_TIMEOUT && signal_pending(current))
+            return (uint64)-EINTR;
         return (uint64)-lwip_err_to_errno(err);
+    }
 
     int newfd = sock_fd_alloc(newconn, SOCK_STREAM, sk->protocol);
     if (newfd < 0) {
@@ -751,6 +756,8 @@ uint64 sys_recvfrom(void)
         if (err != ERR_OK) {
             if (err == ERR_CLSD)
                 return 0; /* EOF */
+            if (err == ERR_TIMEOUT && signal_pending(current))
+                return (uint64)-EINTR;
             return (uint64)-lwip_err_to_errno(err);
         }
 
@@ -770,8 +777,11 @@ uint64 sys_recvfrom(void)
         /* UDP/RAW: use netconn_recv → netbuf */
         struct netbuf *nb = NULL;
         err_t err = netconn_recv(sk->conn, &nb);
-        if (err != ERR_OK)
+        if (err != ERR_OK) {
+            if (err == ERR_TIMEOUT && signal_pending(current))
+                return (uint64)-EINTR;
             return (uint64)-lwip_err_to_errno(err);
+        }
 
         void *data;
         u16_t dlen;
