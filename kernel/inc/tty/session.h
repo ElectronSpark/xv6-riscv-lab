@@ -1,24 +1,57 @@
 #ifndef __KERNEL_SESSION_H
 #define __KERNEL_SESSION_H
 
+/**
+ * @file session.h
+ * @brief Terminal session management — API
+ *
+ * Hierarchy:  session → pgroup → thread_group → thread
+ *
+ * Session membership (thread->session, pgroup->session) is protected
+ * by the global pid_lock (rwlock):
+ *   - pid_wlock for mutations (setsid, add/remove thread/pg)
+ *   - pid_rlock for read-only access
+ *
+ * Lock ordering:  pid_lock > sigacts.lock > tcb_lock
+ */
+
 #include "tty/session_types.h"
 
 struct tty;
 struct thread;
+struct pgroup;
 
 /* Lifecycle */
-void session_init(void);
+void session_cache_init(void);
+void session_init(struct thread *initproc);
 struct session *session_alloc(pid_t sid);
 void session_ref(struct session *s);
 void session_unref(struct session *s);
 
-/* Controlling terminal */
+/* Thread membership (caller must hold pid_wlock) */
+int session_add_thread(struct session *s, struct thread *t);
+int session_remove_thread(struct session *s, struct thread *t);
+
+/* Process group membership (caller must hold pid_wlock) */
+int session_add_pg(struct session *s, struct pgroup *pg);
+int session_remove_pg(struct session *s, struct pgroup *pg);
+
+/* Controlling terminal (caller must hold pid_wlock) */
 void session_set_ctrl_tty(struct session *s, struct tty *tty);
 struct tty *session_get_ctrl_tty(struct session *s);
 
 /* Foreground process group */
 void session_set_fg_pgid(struct session *s, pid_t pgid);
 pid_t session_get_fg_pgid(struct session *s);
+
+/**
+ * session_hangup - mark session as exited and signal all members
+ *
+ * Sends SIGHUP + SIGCONT to the foreground process group, marks the
+ * session as exited, and clears the controlling terminal.
+ * Caller must hold pid_wlock.
+ */
+void session_hangup(struct session *s);
 
 /*
  * setsid - create a new session (POSIX setsid)
@@ -41,11 +74,21 @@ pid_t session_setsid(void);
  */
 pid_t session_getsid(pid_t pid);
 
-/*
- * session_init_first - create the initial session for init
+/**
+ * Look up a session by SID.
  *
- * Called once during boot to give the init process (pid 1) a session.
+ * Caller must be inside rcu_read_lock() or hold pid_lock.
+ * Returns session pointer, or NULL if not found.
  */
-void session_init_first(struct thread *initproc);
+struct session *get_session(pid_t sid);
+
+/*
+ * Global session list — protected by pid_lock.
+ * Use session_for_each / session_for_each_safe to iterate.
+ */
+extern list_node_t session_list;
+
+#define session_for_each(pos, tmp) \
+    list_foreach_node_safe(&session_list, pos, tmp, global_entry)
 
 #endif /* __KERNEL_SESSION_H */

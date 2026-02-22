@@ -24,6 +24,7 @@
 #include "vfs/file.h"
 #include "errno.h"
 #include "tty/session.h"
+#include "proc/pgroup.h"
 
 static struct {
     struct {
@@ -459,149 +460,51 @@ void procdump_tree_pid(int target_pid) {
 // =====================================================================
 // Session / process-group / process / thread hierarchy dump
 // =====================================================================
-
-// Collect unique session IDs from the proc table.
-// Returns number of unique SIDs found.
-static int __collect_sids(pid_t *sids, int max) {
-    int n = 0;
-    struct thread *p;
-    hlist_foreach_node_rcu(&proc_table.procs, p, proctab_entry) {
-        pid_t sid = p->sid;
-        int found = 0;
-        for (int i = 0; i < n; i++) {
-            if (sids[i] == sid) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found && n < max)
-            sids[n++] = sid;
-    }
-    return n;
-}
-
-// Collect unique PGIDs within a given session.
-static int __collect_pgids(pid_t sid, pid_t *pgids, int max) {
-    int n = 0;
-    struct thread *p;
-    hlist_foreach_node_rcu(&proc_table.procs, p, proctab_entry) {
-        if (p->sid != sid)
-            continue;
-        pid_t pgid = p->pgid;
-        int found = 0;
-        for (int i = 0; i < n; i++) {
-            if (pgids[i] == pgid) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found && n < max)
-            pgids[n++] = pgid;
-    }
-    return n;
-}
-
-// Collect unique TGIDs within a given process group.
-static int __collect_tgids(pid_t pgid, pid_t *tgids, int max) {
-    int n = 0;
-    struct thread *p;
-    hlist_foreach_node_rcu(&proc_table.procs, p, proctab_entry) {
-        if (p->pgid != pgid)
-            continue;
-        pid_t tgid = p->tgid;
-        int found = 0;
-        for (int i = 0; i < n; i++) {
-            if (tgids[i] == tgid) {
-                found = 1;
-                break;
-            }
-        }
-        if (!found && n < max)
-            tgids[n++] = tgid;
-    }
-    return n;
-}
-
-// Simple insertion sort for a small pid array.
-static void __sort_pids(pid_t *arr, int n) {
-    for (int i = 1; i < n; i++) {
-        pid_t key = arr[i];
-        int j = i - 1;
-        while (j >= 0 && arr[j] > key) {
-            arr[j + 1] = arr[j];
-            j--;
-        }
-        arr[j + 1] = key;
-    }
-}
+// Now uses the intrusive lists (session_list→pgrps→thread_groups→thread_list)
+// directly, instead of scanning the flat proc hash table O(n²).
 
 // Print all threads grouped by session → process group → process.
-// Uses pid_rlock to serialize access to the proc table hierarchy.
+// Uses pid_rlock to serialize access to the hierarchy.
 void procdump_sessions(void) {
-// Enough for typical workloads; larger systems would need dynamic alloc
-#define DUMP_MAX_IDS 128
-    pid_t sids[DUMP_MAX_IDS];
-    pid_t pgids[DUMP_MAX_IDS];
-    pid_t tgids[DUMP_MAX_IDS];
-
     printf("\n=== Process Hierarchy (Session / PGroup / Process / Thread) "
            "===\n");
 
     pid_rlock();
 
-    int nsid = __collect_sids(sids, DUMP_MAX_IDS);
-    __sort_pids(sids, nsid);
+    struct session *s, *s_tmp;
+    session_for_each(s, s_tmp) {
+        pid_t fg_pgid = session_get_fg_pgid(s);
+        printf("\nSession %d  (fg_pgid=%d)\n", s->sid, fg_pgid);
 
-    for (int si = 0; si < nsid; si++) {
-        // Find fg_pgid for this session by locating a thread with matching SID
-        pid_t fg_pgid = -1;
-        {
-            struct thread *sp;
-            hlist_foreach_node_rcu(&proc_table.procs, sp, proctab_entry) {
-                if (sp->sid == sids[si] && sp->session != NULL) {
-                    fg_pgid = session_get_fg_pgid(sp->session);
-                    break;
-                }
-            }
-        }
-        printf("\nSession %d  (fg_pgid=%d)\n", sids[si], fg_pgid);
+        struct pgroup *pg, *pg_tmp;
+        list_foreach_node_safe(&s->pgrps, pg, pg_tmp, list_entry) {
+            printf("  PGroup %d\n", pg->pgid);
 
-        int npg = __collect_pgids(sids[si], pgids, DUMP_MAX_IDS);
-        __sort_pids(pgids, npg);
-
-        for (int gi = 0; gi < npg; gi++) {
-            printf("  PGroup %d\n", pgids[gi]);
-
-            int ntg = __collect_tgids(pgids[gi], tgids, DUMP_MAX_IDS);
-            __sort_pids(tgids, ntg);
-
-            for (int ti = 0; ti < ntg; ti++) {
-                // Print all threads in this tgid
-                struct thread *p;
+            struct thread_group *tg, *tg_tmp;
+            list_foreach_node_safe(&pg->thread_groups, tg, tg_tmp,
+                                   list_entry) {
+                struct thread *t, *t_tmp2;
                 int first = 1;
-                hlist_foreach_node_rcu(&proc_table.procs, p, proctab_entry) {
-                    if (p->tgid != tgids[ti] || p->pgid != pgids[gi])
-                        continue;
-
+                list_foreach_node_safe(&tg->thread_list, t, t_tmp2, tg_entry) {
                     const char *state =
-                        thread_state_to_str(__thread_state_get(p));
-                    int on_cpu = smp_load_acquire(&p->sched_entity->on_cpu);
+                        thread_state_to_str(__thread_state_get(t));
+                    int on_cpu = smp_load_acquire(&t->sched_entity->on_cpu);
 
                     if (first) {
-                        printf("    Process %d [%s] %s", p->tgid,
-                               THREAD_USER_SPACE(p) ? "U" : "K", p->name);
-                        if (thread_is_group_leader(p)) {
-                            printf(" (leader, tid %d, %s%s)\n", p->pid, state,
+                        printf("    Process %d [%s] %s", t->tgid,
+                               THREAD_USER_SPACE(t) ? "U" : "K", t->name);
+                        if (thread_is_group_leader(t)) {
+                            printf(" (leader, tid %d, %s%s)\n", t->pid, state,
                                    on_cpu ? ", on CPU" : "");
                         } else {
                             printf("\n");
-                            printf("      tid %d %s%s\n", p->pid, state,
+                            printf("      tid %d %s%s\n", t->pid, state,
                                    on_cpu ? " (on CPU)" : "");
                         }
                         first = 0;
                     } else {
-                        printf("      tid %d %s %s%s\n", p->pid, state, p->name,
-                               on_cpu ? " (on CPU)" : "");
+                        printf("      tid %d %s %s%s\n", t->pid, state,
+                               t->name, on_cpu ? " (on CPU)" : "");
                     }
                 }
             }
@@ -611,71 +514,53 @@ void procdump_sessions(void) {
     pid_runlock();
 
     printf("\n=== End Hierarchy ===\n");
-#undef DUMP_MAX_IDS
 }
 
 // Print hierarchy for a single session.
 // Uses pid_rlock to serialize access.
 void procdump_sessions_sid(pid_t target_sid) {
-#define DUMP_MAX_IDS 128
-    pid_t pgids[DUMP_MAX_IDS];
-    pid_t tgids[DUMP_MAX_IDS];
-
     printf("\n=== Session %d Hierarchy ===\n", target_sid);
 
     pid_rlock();
 
-    int npg = __collect_pgids(target_sid, pgids, DUMP_MAX_IDS);
-    if (npg == 0) {
+    struct session *s = get_session(target_sid);
+    if (s == NULL) {
         printf("Session %d not found\n", target_sid);
         pid_runlock();
         printf("\n=== End Hierarchy ===\n");
         return;
     }
-    __sort_pids(pgids, npg);
 
-    // Find fg_pgid for this session
-    pid_t fg_pgid = -1;
-    {
-        struct thread *sp;
-        hlist_foreach_node_rcu(&proc_table.procs, sp, proctab_entry) {
-            if (sp->sid == target_sid && sp->session != NULL) {
-                fg_pgid = session_get_fg_pgid(sp->session);
-                break;
-            }
-        }
-    }
-    printf("\nSession %d  (fg_pgid=%d)\n", target_sid, fg_pgid);
-    for (int gi = 0; gi < npg; gi++) {
-        printf("  PGroup %d\n", pgids[gi]);
+    pid_t fg_pgid = session_get_fg_pgid(s);
+    printf("\nSession %d  (fg_pgid=%d)\n", s->sid, fg_pgid);
 
-        int ntg = __collect_tgids(pgids[gi], tgids, DUMP_MAX_IDS);
-        __sort_pids(tgids, ntg);
+    struct pgroup *pg, *pg_tmp;
+    list_foreach_node_safe(&s->pgrps, pg, pg_tmp, list_entry) {
+        printf("  PGroup %d\n", pg->pgid);
 
-        for (int ti = 0; ti < ntg; ti++) {
-            struct thread *p;
+        struct thread_group *tg, *tg_tmp;
+        list_foreach_node_safe(&pg->thread_groups, tg, tg_tmp, list_entry) {
+            struct thread *t, *t_tmp2;
             int first = 1;
-            hlist_foreach_node_rcu(&proc_table.procs, p, proctab_entry) {
-                if (p->tgid != tgids[ti] || p->pgid != pgids[gi])
-                    continue;
-
-                const char *state = thread_state_to_str(__thread_state_get(p));
-                int on_cpu = smp_load_acquire(&p->sched_entity->on_cpu);
+            list_foreach_node_safe(&tg->thread_list, t, t_tmp2, tg_entry) {
+                const char *state =
+                    thread_state_to_str(__thread_state_get(t));
+                int on_cpu = smp_load_acquire(&t->sched_entity->on_cpu);
 
                 if (first) {
-                    printf("    Process %d [%s] %s", p->tgid,
-                           THREAD_USER_SPACE(p) ? "U" : "K", p->name);
-                    if (thread_is_group_leader(p)) {
-                        printf(" (leader, tid %d, %s%s)\n", p->pid, state,
+                    printf("    Process %d [%s] %s", t->tgid,
+                           THREAD_USER_SPACE(t) ? "U" : "K", t->name);
+                    if (thread_is_group_leader(t)) {
+                        printf(" (leader, tid %d, %s%s)\n", t->pid, state,
                                on_cpu ? ", on CPU" : "");
                     } else {
                         printf("\n");
-                        printf("      tid %d %s%s\n", p->pid, state,
+                        printf("      tid %d %s%s\n", t->pid, state,
                                on_cpu ? " (on CPU)" : "");
                     }
                     first = 0;
                 } else {
-                    printf("      tid %d %s %s%s\n", p->pid, state, p->name,
+                    printf("      tid %d %s %s%s\n", t->pid, state, t->name,
                            on_cpu ? " (on CPU)" : "");
                 }
             }
@@ -685,7 +570,6 @@ void procdump_sessions_sid(pid_t target_sid) {
     pid_runlock();
 
     printf("\n=== End Hierarchy ===\n");
-#undef DUMP_MAX_IDS
 }
 
 uint64 sys_dumpproc(void) {

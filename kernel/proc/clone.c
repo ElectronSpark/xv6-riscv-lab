@@ -230,8 +230,23 @@ int thread_clone(struct clone_args *args) {
         assert(tg_ret == 0, "clone: thread_group_alloc failed");
     }
 
-    // Initialize process group and session membership
-    pgroup_init_thread(ret_ptr, p);
+    // Initialize process group and session membership.
+    // The child joins the parent's pgroup and session.
+    {
+        struct pgroup *pg = p->pgroup;
+        struct session *s = p->session;
+        assert(pg != NULL, "clone: parent has no pgroup");
+        assert(s != NULL, "clone: parent has no session");
+
+        pgroup_add_thread(pg, ret_ptr);
+        session_add_thread(s, ret_ptr);
+
+        // If this is a new thread group (not CLONE_THREAD), also add
+        // the TG to the parent's pgroup.
+        if (!(args->flags & CLONE_THREAD)) {
+            pgroup_add_tg(pg, ret_ptr->thread_group);
+        }
+    }
 
     pid_wunlock();
 

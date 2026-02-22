@@ -91,9 +91,26 @@ void thread_group_put(struct thread_group *tg);
 void thread_group_get(struct thread_group *tg);
 
 /**
- * @brief Initialize the thread group subsystem (slab cache, etc.).
+ * @brief Initialize the thread group subsystem (slab cache).
+ *        Called once during boot, before any processes exist.
  */
 void thread_group_init(void);
+
+/**
+ * @brief Decrement live_threads count.
+ * @param tg  The thread group
+ */
+void thread_group_live_dec(struct thread_group *tg);
+
+/**
+ * @brief Look up a thread group by TGID.
+ *
+ * Caller must be inside rcu_read_lock() or hold pid_lock.
+ *
+ * @param tgid  The thread group ID to look up
+ * @return thread_group pointer, or NULL if not found
+ */
+struct thread_group *get_thread_group(pid_t tgid);
 
 /**
  * @brief Initiate group-wide exit.

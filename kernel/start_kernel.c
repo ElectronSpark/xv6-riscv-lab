@@ -74,7 +74,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     kqueue_init();             // initialize kqueue subsystem
     futex_init();              // initialize futex subsystem
     tty_init();                // TTY slab cache
-    session_init();            // session slab cache
+    session_cache_init();     // session slab cache
     mycpu_init(hartid, true); // Change mycpu pointer to use trampoline stack
     printf("mycpu initialized\n");
     rcu_init();       // RCU subsystem initialization

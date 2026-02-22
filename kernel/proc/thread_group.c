@@ -28,6 +28,7 @@
 
 #include "proc/thread_group.h"
 #include "proc/thread.h"
+#include "proc/pgroup.h"
 #include "signal.h"
 #include "defs.h"
 #include "printf.h"
@@ -116,6 +117,8 @@ int thread_group_alloc(struct thread *leader) {
 
     memset(tg, 0, sizeof(*tg));
     list_entry_init(&tg->thread_list);
+    list_entry_init(&tg->list_entry);
+    tg->pgroup = NULL;
     tg->group_leader = leader;
     tg->is_kernel = 0;
     // TGID will be set after the leader gets a PID assigned
@@ -151,6 +154,8 @@ int thread_group_alloc_kernel(struct thread_group **out_tg, pid_t tgid) {
 
     memset(tg, 0, sizeof(*tg));
     list_entry_init(&tg->thread_list);
+    list_entry_init(&tg->list_entry);
+    tg->pgroup = NULL;
     tg->group_leader = NULL;
     tg->tgid = tgid;
     __atomic_store_n(&tg->live_threads, 0, __ATOMIC_SEQ_CST);
@@ -202,6 +207,8 @@ bool thread_group_remove(struct thread *p) {
     // atomic_sub returns the *previous* value, so remaining-1 == new count
     if (remaining <= 1) {
         last = true;
+        /* Last thread in the group — detach from pgroup hierarchy */
+        pgroup_remove_tg(tg);
     }
 
     // Don't clear p->thread_group here — the leader's zombie state
@@ -209,6 +216,21 @@ bool thread_group_remove(struct thread *p) {
     // in thread_destroy.
 
     return last;
+}
+
+/*
+ * Look up a thread group by TGID.
+ * Finds the group leader thread via get_pid_thread(), then returns
+ * its thread_group pointer.
+ * Returns the thread_group pointer, or NULL if not found.
+ * Caller must be in an rcu_read_lock() section or hold pid_lock.
+ */
+struct thread_group *get_thread_group(pid_t tgid) {
+    struct thread *leader = NULL;
+    int err = get_pid_thread(tgid, &leader);
+    if (err < 0 || leader == NULL)
+        return NULL;
+    return leader->thread_group;
 }
 
 // ───── Queries ─────

@@ -33,6 +33,8 @@
 #include "signal_types.h"
 #include <smp/atomic.h>
 
+struct pgroup;
+
 /**
  * @brief Shared signal state for a thread group (process-directed signals)
  *
@@ -55,6 +57,10 @@ struct tg_shared_pending {
 struct thread_group {
     // No per-object lock: all fields are protected by the global pid_lock
     // (rwlock). See file header for locking details.
+
+    // Link in pgroup->thread_groups list
+    list_node_t list_entry;
+    struct pgroup *pgroup; // Process group this thread group belongs to
 
     int tgid;                    // Thread group ID = leader's PID
     struct thread *group_leader; // Thread that created this group (leader)

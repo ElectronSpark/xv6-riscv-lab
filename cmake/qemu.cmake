@@ -78,7 +78,7 @@ set(QEMUOPTS_PARAM
     ${QEMU_BIOS_OPT}
     -kernel ${QEMU_KERNEL_IMG}
     -initrd ${QEMU_INITRD_IMG}
-    -m 1024M
+    -m 4G
     -smp ${CPUS}
     -nographic
     -global virtio-mmio.force-legacy=false

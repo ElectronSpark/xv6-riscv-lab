@@ -1,5 +1,6 @@
 #include "proc/thread.h"
 #include "proc/thread_group.h"
+#include "proc/pgroup.h"
 #include "tty/session.h"
 #include "defs.h"
 #include "hlist.h"
@@ -289,6 +290,16 @@ struct thread *kthread_create(const char *name, void *entry, uint64 arg1,
         thread_group_add(ktg, p);
         thread_group_put(ktg); // add took a ref; balance the alloc ref
     }
+
+    // Join initproc's pgroup and session so the hierarchy is complete.
+    if (initproc->pgroup != NULL) {
+        pgroup_add_thread(initproc->pgroup, p);
+        if (ktg != NULL)
+            pgroup_add_tg(initproc->pgroup, ktg);
+    }
+    if (initproc->session != NULL) {
+        session_add_thread(initproc->session, p);
+    }
     pid_wunlock();
 
     rcu_read_unlock();
@@ -443,14 +454,19 @@ void userinit(void) {
     // proctab_proc_add assigns the actual PID number
     pid_wlock();
     proctab_proc_add(p);
-    pid_wunlock();
 
     // Allocate a thread group for the init process (it is the group leader)
     assert(thread_group_alloc(p) == 0, "userinit: thread_group_alloc failed");
     p->thread_group->tgid = p->pid;
 
-    // Create session 1 for the init process (session leader + pgroup leader)
-    session_init_first(p);
+    // Initialize the full hierarchy: session 1 → pgroup 1 → TG(init) → init
+    // pgroup_init creates the pgroup slab and pgroup 1 for initproc.
+    // session_init creates the session slab, session 1, and links
+    // pgroup 1 and initproc into session 1.
+    pgroup_init(p);
+    session_init(p);
+
+    pid_wunlock();
 
     printf("Init process kernel stack size order: %d\n", p->kstack_order);
 

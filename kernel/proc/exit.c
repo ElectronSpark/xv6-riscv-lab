@@ -24,6 +24,7 @@
 #include <mm/vm.h>
 #include "errno.h"
 #include "tty/session.h"
+#include "proc/pgroup.h"
 
 // Wake the vfork parent when child exits or execs.
 // The vfork parent is blocked in UNINTERRUPTIBLE state waiting for us.
@@ -138,14 +139,8 @@ void exit(int status) {
     }
 
     // Release session reference
-    if (p->session != NULL) {
-        session_unref(p->session);
-        p->session = NULL;
-    }
-
-    // Remove from thread group and (for non-leader CLONE_THREAD) from
-    // proc table, all under pid_wlock to satisfy thread_group_remove's
-    // locking requirement and avoid extra lock/unlock round-trips.
+    // (deferred to inside pid_wlock below, where we also call
+    //  pgroup_remove_thread and session_remove_thread)
     bool last_in_group = true;
     bool is_leader = thread_is_group_leader(p);
 
@@ -160,6 +155,8 @@ void exit(int status) {
 
         // Remove from thread group and proc table atomically under pid_wlock.
         pid_wlock();
+        pgroup_remove_thread(p);
+        session_remove_thread(p->session, p);
         if (tg != NULL) {
             last_in_group = thread_group_remove(p);
         }
@@ -204,11 +201,7 @@ void exit(int status) {
             thread_group_put(p->thread_group);
             p->thread_group = NULL;
         }
-        // Release session reference
-        if (p->session != NULL) {
-            session_unref(p->session);
-            p->session = NULL;
-        }
+        // (session/pgroup references already released above under pid_wlock)
 
         // Mark as zombie requiring self-reap.  context_switch_finish
         // will free the kstack after switching to the next thread's stack.
@@ -226,6 +219,8 @@ void exit(int status) {
     // under pid_wlock, then proceed with standard exit path.
     if (tg != NULL) {
         pid_wlock();
+        pgroup_remove_thread(p);
+        session_remove_thread(p->session, p);
         last_in_group = thread_group_remove(p);
         pid_wunlock();
     }

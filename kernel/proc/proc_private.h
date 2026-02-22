@@ -30,6 +30,9 @@ int get_pid_thread(int pid, struct thread **pp);
 void proctab_proc_add(struct thread *p);
 void proctab_proc_remove(struct thread *p);
 
+// Iterate all threads under RCU protection.
+void proctab_for_each_rcu(void (*fn)(struct thread *, void *), void *arg);
+
 // Register the given thread as the idle process for the current CPU.
 void register_idle_threadess(struct thread *p);
 
