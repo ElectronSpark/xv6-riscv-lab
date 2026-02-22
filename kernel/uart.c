@@ -258,6 +258,12 @@ int uart_tx_wait(void) {
 void uartputc_sync(int c) {
     // IRQ-safe, spin-waits on hardware THR empty; used by early printf/echo
     push_off();
+
+#ifdef __x86_64__
+    // Also mirror to debugcon (port 0xE9) since QEMU runs with -serial none
+    asm volatile("outb %0, %1" : : "a"((uint8)c), "Nd"((uint16)0xE9));
+#endif
+
     // wait for Transmit Holding Empty to be set in LSR.
     while ((ReadReg(LSR) & LSR_TX_IDLE) == 0)
         ;

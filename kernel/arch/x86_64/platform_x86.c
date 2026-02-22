@@ -12,6 +12,7 @@
 #include "printf.h"
 #include "string.h"
 #include "dev/fdt.h"
+#include "proc/sched.h"
 
 /* Global platform info structure (RISC-V defines this in fdt.c) */
 struct platform_info platform;
@@ -133,6 +134,16 @@ static void x86_debug_boot_mem_summary(void)
         x86_debug_put_hex_compact(end);
         x86_debug_puts(") ");
         x86_debug_put_size(platform.reserved[i].size);
+        x86_debug_puts("\n");
+    }
+
+    if (platform.has_ramdisk) {
+        x86_debug_puts("[xv6 x86_64] ramdisk [0x");
+        x86_debug_put_hex_compact(platform.ramdisk_base);
+        x86_debug_puts("-0x");
+        x86_debug_put_hex_compact(platform.ramdisk_base + platform.ramdisk_size);
+        x86_debug_puts(") ");
+        x86_debug_put_size(platform.ramdisk_size);
         x86_debug_puts("\n");
     }
 }
@@ -264,6 +275,13 @@ static int x86_parse_pvh_memory(void *boot_params, uint64 *base_out,
                 platform.reserved_count++;
             }
         }
+
+        /* First PVH module is the initrd / ramdisk (fs.img) */
+        if (si->nr_modules > 0 && mods[0].size != 0) {
+            platform.ramdisk_base = mods[0].paddr;
+            platform.ramdisk_size = mods[0].size;
+            platform.has_ramdisk = 1;
+        }
     }
 
     if (platform.mem_count == 0 || chosen_size == 0)
@@ -347,6 +365,14 @@ static int x86_parse_bootloader_memory(void *boot_params, uint64 *base_out,
                 platform.reserved_count++;
             }
         }
+
+        /* First module is the initrd / ramdisk (fs.img) */
+        if (mods[0].mod_end > mods[0].mod_start) {
+            platform.ramdisk_base = (uint64)mods[0].mod_start;
+            platform.ramdisk_size =
+                (uint64)mods[0].mod_end - (uint64)mods[0].mod_start;
+            platform.has_ramdisk = 1;
+        }
     }
 
     if (platform.mem_count == 0 || chosen_size == 0)
@@ -391,6 +417,14 @@ int platform_init(void *boot_data)
            "first=[0x%lx-0x%lx)\n",
            platform.mem_count, platform.reserved_count,
            platform.total_mem / (1024 * 1024), first_base, first_end);
+
+    if (platform.has_ramdisk) {
+        printf("x86 ramdisk: 0x%lx - 0x%lx (%ld KB)\n",
+               platform.ramdisk_base,
+               platform.ramdisk_base + platform.ramdisk_size,
+               platform.ramdisk_size / 1024);
+    }
+
     return 0;
 }
 
@@ -433,7 +467,7 @@ void platform_start_per_cpu_services(int cpu)
 
 void platform_late_device_init(void)
 {
-    /* No-op — no FDT-probed devices on x86. */
+    sched_timer_init();
 }
 
 void platform_boot_mark(const char *msg)

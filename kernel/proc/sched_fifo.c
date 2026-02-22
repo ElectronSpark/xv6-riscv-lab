@@ -44,7 +44,8 @@ static struct sched_entity *__fifo_pick_next_task(struct rq *rq) {
     // Find highest priority (lowest index) non-empty subqueue
     int idx = bits_ctz8(fifo_rq->ready_mask);
     struct fifo_subqueue *sq = __fifo_get_subqueue(fifo_rq, idx);
-    return LIST_FIRST_NODE(&sq->head, struct sched_entity, list_entry);
+    struct sched_entity *se = LIST_FIRST_NODE(&sq->head, struct sched_entity, list_entry);
+    return se;
 }
 
 static void __fifo_enqueue_task(struct rq *rq, struct sched_entity *se) {
@@ -76,7 +77,6 @@ static void __fifo_put_prev_task(struct rq *rq, struct sched_entity *se) {
     struct fifo_rq *fifo_rq = container_of(rq, struct fifo_rq, rq);
     int idx = __fifo_minor_prio(se);
     struct fifo_subqueue *sq = __fifo_get_subqueue(fifo_rq, idx);
-
     list_node_push(&sq->head, se, list_entry);
 
     // Set the subqueue ready bit (subqueue now has at least one task in list)
@@ -94,7 +94,6 @@ static void __fifo_set_next_task(struct rq *rq, struct sched_entity *se) {
     struct fifo_rq *fifo_rq = container_of(rq, struct fifo_rq, rq);
     int idx = __fifo_minor_prio(se);
     struct fifo_subqueue *sq = __fifo_get_subqueue(fifo_rq, idx);
-
     list_node_detach(se, list_entry);
 
     // If this was the last task in the subqueue list, clear the subqueue ready

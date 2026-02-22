@@ -511,10 +511,11 @@ void rq_dequeue_task(struct rq *rq, struct sched_entity *se) {
 
 struct sched_entity *rq_pick_next_task(struct rq *rq) {
     assert(__rq_lock_held(rq->cpu_id), "rq_pick_next_task: rq lock not held");
+    struct sched_entity *se = NULL;
     if (rq->sched_class->pick_next_task) {
-        return rq->sched_class->pick_next_task(rq);
+        se = rq->sched_class->pick_next_task(rq);
     }
-    return NULL;
+    return se;
 }
 
 void rq_put_prev_task(struct sched_entity *se) {

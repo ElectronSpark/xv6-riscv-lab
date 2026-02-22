@@ -207,9 +207,9 @@ pd_kernel_table:
 boot_params_ptr:
     .long 0
 
-.align 16
-boot_stack:
-    .space 16384
+.align 16384                    /* must be KERNEL_STACK_SIZE-aligned    */
+boot_stack:                     /* so idle_thread_init's               */
+    .space 16384                /* r_sp() & ~(kstack_size-1) == here   */
 boot_stack_top:
 
 .section .rodata

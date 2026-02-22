@@ -72,47 +72,19 @@ static void __pcb_init(struct thread *p, struct vfs_fdtable *fdtable) {
     }
 }
 
-// Arrange thread, utrapframe, thread_fs, and vfs_fdtable on the kernel stack.
-// Memory layout (from high to low addresses):
-//   - struct thread (at top of stack)
-//   - struct utrapframe (below thread, with 16-byte gap)
-//   - struct vfs_fdtable (below thread_fs)
-//   - kernel stack pointer (aligned, with 16-byte gap)
-// Returns the initialized thread structure.
-#define KSTACK_ARRANGE_FLAGS_TF 0x1 // place utrapframe
-#define KSTACK_ARRANGE_FLAGS_ALL (KSTACK_ARRANGE_FLAGS_TF)
+// Arrange thread, utrapframe, and sched_entity on the kernel stack.
+// Delegates layout computation to arch_kstack_arrange(), then
+// initialises the thread structure with __pcb_init().
 static struct thread *__kstack_arrange(void *kstack, size_t kstack_size,
                                        uint64 flags) {
-    // Place PCB at the top of the kernel stack
-    struct thread *p =
-        (struct thread *)(kstack + kstack_size - sizeof(struct thread));
-    uint64 next_addr = (uint64)p;
+    struct kstack_layout lay = arch_kstack_arrange(kstack, kstack_size, flags);
+    struct thread *p = lay.thread;
+    p->sched_entity = lay.sched_entity;
 
-    struct utrapframe *trapframe = NULL;
-    struct vfs_fdtable *fdtable = NULL;
+    __pcb_init(p, NULL);
 
-    if (flags & KSTACK_ARRANGE_FLAGS_TF) {
-        // Place utrapframe below struct thread (matching original layout)
-        next_addr = (uint64)p - sizeof(struct utrapframe) - 16;
-        next_addr &= ~0x7UL; // align to 8 bytes
-        trapframe = (struct utrapframe *)next_addr;
-    }
-
-    // Allocate space for sched_entity
-    next_addr = next_addr - sizeof(struct sched_entity);
-    next_addr &= ~CACHELINE_MASK; // align to cache line size
-    p->sched_entity = (struct sched_entity *)next_addr;
-
-    // Initialize the thread structure
-    __pcb_init(p, fdtable);
-
-    // Set trapframe pointer
-    p->trapframe = trapframe;
-
-    // Set kernel stack pointer below the last allocated structure
-    uint64 ksp = next_addr - 16;
-    ksp &= ARCH_KSP_ALIGN_MASK;
-    p->ksp = ksp;
+    p->trapframe = lay.trapframe;
+    p->ksp = lay.ksp;
 
     return p;
 }

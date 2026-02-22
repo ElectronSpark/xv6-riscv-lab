@@ -80,7 +80,13 @@ static inline uint64 r_gp(void) { return 0; }
 static inline void w_gp(uint64 value) { (void)value; }
 static inline uint64 r_ra(void) { return 0; }
 
-static inline uint64 r_time(void) { return 0; }
+static inline uint64 r_time(void) {
+	/* Return monotonic raw ticks at __timebase_frequency (10 MHz).
+	 * PIT fires at 100 Hz, so each jiffie = TIMEBASE_FREQ / PIT_HZ
+	 * = 10000000 / 100 = 100000 raw ticks. */
+	extern uint64 get_jiffs(void);
+	return get_jiffs() * 100000UL;
+}
 
 static inline void arch_wait_for_interrupt(void) {
 	asm volatile("hlt" ::: "memory");

@@ -45,6 +45,62 @@ static inline void arch_context_set_entry(struct context *ctx,
     ctx->ra = entry;
 }
 
+/* ── Kernel stack layout ── */
+
+#include "compiler.h"   /* CACHELINE_MASK */
+
+/**
+ * Flags for arch_kstack_arrange().
+ */
+#define KSTACK_ARRANGE_FLAGS_TF  0x1  /* place utrapframe */
+#define KSTACK_ARRANGE_FLAGS_ALL (KSTACK_ARRANGE_FLAGS_TF)
+
+/**
+ * struct kstack_layout - result of laying out PCB structures on
+ *                        a kernel stack.
+ */
+struct kstack_layout {
+    struct thread       *thread;
+    struct utrapframe   *trapframe;
+    struct sched_entity *sched_entity;
+    uint64               ksp;
+};
+
+/**
+ * arch_kstack_arrange - Compute the layout of PCB structures at the
+ *                       top of a kernel stack (architecture-specific).
+ *
+ * On RISC-V the structures are placed directly at the top of the
+ * stack with 8-byte alignment.
+ */
+static inline struct kstack_layout
+arch_kstack_arrange(void *kstack, size_t kstack_size, uint64 flags) {
+    struct kstack_layout lay;
+
+    /* struct thread at the very top */
+    lay.thread = (struct thread *)(
+        (char *)kstack + kstack_size - sizeof(struct thread));
+    uint64 next = (uint64)lay.thread;
+
+    /* Optional utrapframe below thread */
+    lay.trapframe = NULL;
+    if (flags & KSTACK_ARRANGE_FLAGS_TF) {
+        next = (uint64)lay.thread - sizeof(struct utrapframe) - 16;
+        next &= ~0x7UL;
+        lay.trapframe = (struct utrapframe *)next;
+    }
+
+    /* sched_entity — cache-line aligned */
+    next = next - sizeof(struct sched_entity);
+    next &= ~CACHELINE_MASK;
+    lay.sched_entity = (struct sched_entity *)next;
+
+    /* Kernel stack pointer below everything */
+    lay.ksp = (next - 16) & ARCH_KSP_ALIGN_MASK;
+
+    return lay;
+}
+
 /* ── Child register adjustments for clone/fork ── */
 
 /**

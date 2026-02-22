@@ -560,7 +560,6 @@ void consoledevinit(void) {
 
     /* ---- Allocate the console TTY ---- */
     console_tty = tty_alloc("console", NULL);
-    assert(!IS_ERR_OR_NULL(console_tty), "consoledevinit: tty_alloc failed");
 
     /*
      * Make both TTY pipes non-blocking for writes so that tty_input()

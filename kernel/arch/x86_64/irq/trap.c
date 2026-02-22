@@ -26,7 +26,76 @@ char trampoline[4096];
 char _trampoline_data[4096];
 
 void sig_trampoline(void) {}
-void usertrapret(void) {}
+
+/*
+ * usertrapret — return to user mode via iretq.
+ *
+ * Builds the iret frame on the kernel stack from the thread's utrapframe
+ * and restores all GPRs before executing iretq.
+ *
+ * iretq pops: RIP, CS, RFLAGS, RSP, SS  (in that order from the stack).
+ */
+void usertrapret(void) {
+    struct thread *p = current;
+    struct trapframe *tf = &p->trapframe->trapframe;
+
+    /* Disable interrupts — we're manually building the iret frame. */
+    intr_off();
+
+    /* Save kernel stack pointer for next trap entry.
+     * The TSS RSP0 will be used by the CPU when transitioning
+     * from ring 3 → ring 0. */
+    p->trapframe->kernel_sp = p->ksp;
+
+    /*
+     * Use inline assembly to:
+     * 1. Load all GPRs from the trapframe
+     * 2. Push the 5-element iret frame (SS, RSP, RFLAGS, CS, RIP)
+     * 3. Execute iretq
+     *
+     * We pass the trapframe pointer in a register and do everything
+     * from assembly to avoid the compiler clobbering state.
+     */
+    asm volatile(
+        /* Push iret frame: SS, RSP, RFLAGS, CS, RIP */
+        "pushq %[ss]\n\t"
+        "pushq %[rsp]\n\t"
+        "pushq %[rflags]\n\t"
+        "pushq %[cs]\n\t"
+        "pushq %[rip]\n\t"
+
+        /* Load GPRs from trapframe.
+         * rdi holds tf pointer; we load it last since we need it. */
+        "movq 0x00(%[tf]), %%r15\n\t"
+        "movq 0x08(%[tf]), %%r14\n\t"
+        "movq 0x10(%[tf]), %%r13\n\t"
+        "movq 0x18(%[tf]), %%r12\n\t"
+        "movq 0x20(%[tf]), %%r11\n\t"
+        "movq 0x28(%[tf]), %%r10\n\t"
+        "movq 0x30(%[tf]), %%r9\n\t"
+        "movq 0x38(%[tf]), %%r8\n\t"
+        "movq 0x40(%[tf]), %%rbp\n\t"
+        /* skip rdi (0x48) — load last */
+        "movq 0x50(%[tf]), %%rsi\n\t"
+        "movq 0x58(%[tf]), %%rdx\n\t"
+        "movq 0x60(%[tf]), %%rcx\n\t"
+        "movq 0x68(%[tf]), %%rbx\n\t"
+        "movq 0x70(%[tf]), %%rax\n\t"
+        "movq 0x48(%[tf]), %%rdi\n\t"
+
+        "iretq\n\t"
+        :
+        : [tf]     "D" (tf),
+          [ss]     "r" ((uint64)(SEG_UDATA | DPL_USER)),
+          [rsp]    "r" (tf->rsp),
+          [rflags] "r" (tf->rflags | 0x200),  /* ensure IF set */
+          [cs]     "r" ((uint64)(SEG_UCODE | DPL_USER)),
+          [rip]    "r" (tf->rip)
+        : "memory"
+    );
+
+    __builtin_unreachable();
+}
 
 int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
                   ksiginfo_t *info) {
@@ -128,8 +197,12 @@ void arch_trap_init_hart(void) {
 
 /* ── Interrupt controller init ── */
 
+/* Defined in timer/timer.c */
+extern void arch_timer_init(void);
+
 void arch_irq_init(void) {
     pic_init();
+    arch_timer_init();        /* program PIT channel 0 for 100 Hz */
     /* Unmask IRQ 0 (PIT timer) */
     pic_unmask(0);
     printf("[x86] PIC 8259A initialized, IRQ 0 (timer) unmasked\n");
@@ -246,8 +319,15 @@ void x86_trap_handler(struct trapframe *tf) {
         printf("  rsp=0x%lx  rbp=0x%lx  rflags=0x%lx\n",
                tf->rsp, tf->rbp, tf->rflags);
 
-        for (;;)
-            asm volatile("cli; hlt");
+        /* Fix up trapframe so GDB can unwind to the faulting code.
+         * Same technique as RISC-V __trap_panic:
+         *   - Write faulting RIP just below the trapframe so the
+         *     backtrace walker finds it as a return address.
+         *   - Then call panic() which halts with a full backtrace.
+         */
+        *(uint64 *)((uint64)tf - 8) = tf->rip;
+        panic_disable_bt();
+        panic("exception");
 
     } else if (vec >= 32 && vec < 48) {
         /* Hardware IRQ (PIC) */
