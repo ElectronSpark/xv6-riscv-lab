@@ -32,7 +32,7 @@ CMakeFiles/
 
 # musl build artifacts (downloaded/extracted at build time)
 user/musl-xv6/musl-build/
-user/musl-xv6/musl-sysroot/
+user/musl-xv6/sysroot/
 
 # Doxygen generated documentation
 docs/html/

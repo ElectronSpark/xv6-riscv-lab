@@ -13,7 +13,7 @@
 
 set(MUSL_XV6_DIR "${CMAKE_SOURCE_DIR}/user/musl-xv6")
 set(MUSL_BUILD_SCRIPT "${MUSL_XV6_DIR}/build_musl.sh")
-set(MUSL_SYSROOT "${CMAKE_BINARY_DIR}/musl-sysroot")
+set(MUSL_SYSROOT "${CMAKE_BINARY_DIR}/sysroot")
 set(MUSL_BUILD_DIR "${CMAKE_BINARY_DIR}/musl-build")
 set(MUSL_LIBC_A "${MUSL_SYSROOT}/lib/libc.a")
 set(MUSL_CRT1_O "${MUSL_SYSROOT}/lib/crt1.o")
@@ -84,6 +84,7 @@ function(add_musl_program PROGRAM_NAME SOURCE_FILE)
             add_custom_command(
                 OUTPUT ${OBJ_FILE}
                 COMMAND ${CMAKE_C_COMPILER}
+                        --sysroot=${MUSL_SYSROOT}
                         -march=rv64gc -mabi=lp64d
                         -mcmodel=medany -fno-pie -no-pie
                         -nostdinc
@@ -98,6 +99,7 @@ function(add_musl_program PROGRAM_NAME SOURCE_FILE)
             add_custom_command(
                 OUTPUT ${OBJ_FILE}
                 COMMAND ${CMAKE_C_COMPILER}
+                        --sysroot=${MUSL_SYSROOT}
                         -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
                         -march=rv64gc -mabi=lp64d
                         -mcmodel=medany -fno-common -fno-pie -no-pie
@@ -159,6 +161,7 @@ function(add_musl_dynamic_program PROGRAM_NAME SOURCE_FILE)
     add_custom_command(
         OUTPUT ${OBJ_FILE}
         COMMAND ${CMAKE_C_COMPILER}
+                --sysroot=${MUSL_SYSROOT}
                 -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
                 -march=rv64gc -mabi=lp64d
                 -mcmodel=medany -fno-common -fno-pie -no-pie

@@ -183,6 +183,12 @@ static struct {
      * network data (Ctrl-C) and target_stopped notifications. */
     int              target_running;
 
+    /* Non-zero when the target was stopped directly by the gdbstub
+     * thread (e.g. Ctrl-C while the thread was sleeping in a syscall).
+     * In this state the target thread never blocked on target_resume,
+     * so 'c'/'s' must NOT post target_resume. */
+    int              direct_stop;
+
     /* Set by gdbstub_exit_stop() when a debugged thread/process exits.
      * The GDB session loop checks this after target_stopped fires. */
     volatile int     target_exited;    /* 1 = process exited */
@@ -206,6 +212,13 @@ static struct {
      * GDB reloads symbols and discards stale breakpoints. */
     volatile int     exec_event;       /* 1 = exec happened */
     char             exec_name[128];   /* name of the new binary */
+
+    /* Auto-inserted entry-point breakpoint after exec.  GDB auto-
+     * continues after receiving an exec event, so we insert a one-shot
+     * breakpoint at the program's actual entry point (_start) to force
+     * a stop.  gdbstub_trap() auto-removes it when hit. */
+    int              exec_entry_bp_active;
+    uint64           exec_entry_bp_addr;
 
     /* Set by gdbstub_signal_stop() when the debugger already inspected
      * the process at the fault point.  gdbstub_exit_stop() checks this
@@ -616,25 +629,44 @@ static int gdb_write_user_mem(uint64 addr, const void *src, int len)
 
 static int gdb_insert_bp(uint64 addr, int len)
 {
-    GDB_DBG("insert bp addr=0x%lx len=%d", addr, len);
+    GDB_LOG("insert bp addr=0x%lx len=%d", addr, len);
     if (gdb.nbps >= GDB_MAX_BREAKPOINTS)
         return -1;
 
     /* Check for duplicates */
     for (int i = 0; i < gdb.nbps; i++) {
-        if (gdb.bps[i].addr == addr && gdb.bps[i].active)
+        if (gdb.bps[i].addr == addr && gdb.bps[i].active) {
+            GDB_LOG("  -> duplicate (slot %d)", i);
             return 0;  /* already there */
+        }
     }
 
     /* Read original instruction */
     uint32 orig = 0;
-    if (gdb_read_user_mem(&orig, addr, len) != 0)
+    if (gdb_read_user_mem(&orig, addr, len) != 0) {
+        GDB_LOG("  -> read orig FAILED");
         return -1;
+    }
 
     /* Write EBREAK */
     uint32 brk = (len == 2) ? RV_C_EBREAK : RV_EBREAK;
-    if (gdb_write_user_mem(addr, &brk, len) != 0)
+    if (gdb_write_user_mem(addr, &brk, len) != 0) {
+        GDB_LOG("  -> write EBREAK FAILED");
         return -1;
+    }
+
+    /* Read-back verification: ensure EBREAK was actually written */
+    uint32 verify = 0;
+    if (gdb_read_user_mem(&verify, addr, len) != 0) {
+        GDB_LOG("  -> verify read-back FAILED");
+        return -1;
+    }
+    uint32 mask = (len == 2) ? 0xFFFFU : 0xFFFFFFFFU;
+    if ((verify & mask) != (brk & mask)) {
+        GDB_LOG("  -> VERIFY MISMATCH at 0x%lx: wrote 0x%x read 0x%x",
+                addr, brk & mask, verify & mask);
+        return -1;
+    }
 
     /* Record it */
     int slot = -1;
@@ -652,12 +684,13 @@ static int gdb_insert_bp(uint64 addr, int len)
     gdb.bps[slot].active   = 1;
     if (slot >= gdb.nbps) gdb.nbps = slot + 1;
 
+    GDB_LOG("  -> ok slot=%d orig=0x%x", slot, orig);
     return 0;
 }
 
 static int gdb_remove_bp(uint64 addr, int len)
 {
-    GDB_DBG("remove bp addr=0x%lx len=%d", addr, len);
+    GDB_LOG("remove bp addr=0x%lx len=%d", addr, len);
     for (int i = 0; i < gdb.nbps; i++) {
         if (gdb.bps[i].addr == addr && gdb.bps[i].active) {
             /* Restore original instruction */
@@ -1217,6 +1250,7 @@ static void gdb_handle_vattach(const char *args)
     gdb.target_pid = thread_tgid(gdb.target);
     gdb.attached = 1;
     gdb.stop_on_exec = 1;
+    safestrcpy(gdb.exec_name, gdb.target->name, sizeof(gdb.exec_name));
 
     printf("gdbstub: attached to pid %d (tgid %d)\n", pid, gdb.target_pid);
 
@@ -1279,6 +1313,8 @@ static void gdb_handle_packet(const char *pkt, int len)
                 gdb.attached = 1;
                 gdb.stop_on_exec = 1;
                 gdb.pending_pid = 0;
+                safestrcpy(gdb.exec_name, gdb.target->name,
+                           sizeof(gdb.exec_name));
                 printf("gdbstub: auto-attached to pid %d\n", pid);
                 sem_post(&gdb.debugger_attached);
                 sem_wait(&gdb.target_stopped);
@@ -1430,18 +1466,53 @@ static void gdb_handle_packet(const char *pkt, int len)
             break;
         }
 
-#if GDB_LOG_LEVEL >= 2
         for (int i = 0; i < gdb.nbps; i++) {
             if (gdb.bps[i].active)
-                GDB_DBG("  bp[%d] addr=0x%lx len=%d",
-                          i, gdb.bps[i].addr, gdb.bps[i].len);
+                GDB_LOG("  bp[%d] addr=0x%lx len=%d orig=0x%x",
+                          i, gdb.bps[i].addr, gdb.bps[i].len,
+                          gdb.bps[i].orig_insn);
         }
-#endif
 
         /* Optional resume address */
         if (len > 1 && gdb_resolve_target() == 0) {
             uint64 addr = hex2u64(pkt + 1, len - 1);
             gdb.target->trapframe->trapframe.sepc = addr;
+        }
+
+        /*
+         * Direct-stop resume: the target was stopped while sleeping
+         * in a kernel syscall — it never blocked on target_resume.
+         *
+         * However, the thread might have naturally woken up since
+         * the direct-stop (e.g. UART data arrived) and reached
+         * gdbstub_check_interrupt() or hit a breakpoint.  In that
+         * case target_stopped was posted and the thread is blocked
+         * on target_resume.  Drain that and unblock it.
+         *
+         * Then force-wake the thread so it can process any buffered
+         * input that arrived while GDB had it "stopped."
+         */
+        if (gdb.direct_stop) {
+            /*
+             * Clear gdb_stopped on all threads and release
+             * direct_stop so any threads spin-waiting in
+             * gdbstub_check_interrupt() can proceed.
+             */
+            if (gdb.target && gdb.target->thread_group) {
+                struct thread_group *tg = gdb.target->thread_group;
+                pid_rlock();
+                struct thread *th, *tmp;
+                list_foreach_node_safe(&tg->thread_list, th, tmp, tg_entry) {
+                    __atomic_store_n(&th->gdb_stopped, 0, __ATOMIC_RELEASE);
+                }
+                pid_runlock();
+            } else if (gdb.target) {
+                __atomic_store_n(&gdb.target->gdb_stopped, 0, __ATOMIC_RELEASE);
+            }
+            __atomic_store_n(&gdb.direct_stop, 0, __ATOMIC_RELEASE);
+            GDB_LOG("-> resuming from direct-stop, pid %d", gdb.target_pid);
+            gdb.target_running = 1;
+            break;
         }
 
         /*
@@ -1481,6 +1552,40 @@ static void gdb_handle_packet(const char *pkt, int len)
         if (len > 1) {
             uint64 addr = hex2u64(pkt + 1, len - 1);
             gdb.target->trapframe->trapframe.sepc = addr;
+        }
+
+        /*
+         * Direct-stop step: the target is sleeping in a syscall.
+         * Place a step breakpoint at the user PC so the thread stops
+         * on its first instruction when the syscall eventually returns.
+         */
+        if (gdb.direct_stop) {
+            uint64 pc = gdb.target->trapframe->trapframe.sepc;
+            int insn_len = 4, is_branch = 0;
+            uint64 next_pc = gdb_decode_next_pc(gdb.target->trapframe, pc,
+                                                 &insn_len, &is_branch);
+            uint16 lo16 = 0;
+            if (gdb_read_user_mem(&lo16, next_pc, 2) == 0 && is_compressed(lo16))
+                gdb_place_step_bp(next_pc, 2);
+            else
+                gdb_place_step_bp(next_pc, 4);
+            /* Clear gdb_stopped on all threads and release direct_stop */
+            if (gdb.target->thread_group) {
+                struct thread_group *tg = gdb.target->thread_group;
+                pid_rlock();
+                struct thread *th, *tmp;
+                list_foreach_node_safe(&tg->thread_list, th, tmp, tg_entry) {
+                    __atomic_store_n(&th->gdb_stopped, 0, __ATOMIC_RELEASE);
+                }
+                pid_runlock();
+            } else {
+                __atomic_store_n(&gdb.target->gdb_stopped, 0, __ATOMIC_RELEASE);
+            }
+            __atomic_store_n(&gdb.direct_stop, 0, __ATOMIC_RELEASE);
+            GDB_DBG("-> stepping from direct-stop, pid %d, next_pc=0x%lx",
+                      gdb.target_pid, next_pc);
+            gdb.target_running = 1;
+            break;
         }
 
         /*
@@ -1600,7 +1705,22 @@ static void gdb_handle_packet(const char *pkt, int len)
     /* ── D — Detach ── */
     case 'D':
         GDB_LOG("detach");
-        if (gdb.attached && !gdb.target_running) {
+        if (gdb.attached && gdb.direct_stop) {
+            /* Thread was direct-stopped — clear all threads and release */
+            if (gdb.target && gdb.target->thread_group) {
+                struct thread_group *tg = gdb.target->thread_group;
+                pid_rlock();
+                struct thread *th, *tmp;
+                list_foreach_node_safe(&tg->thread_list, th, tmp, tg_entry) {
+                    __atomic_store_n(&th->gdb_stopped, 0, __ATOMIC_RELEASE);
+                }
+                pid_runlock();
+            } else if (gdb.target) {
+                __atomic_store_n(&gdb.target->gdb_stopped, 0, __ATOMIC_RELEASE);
+            }
+            __atomic_store_n(&gdb.direct_stop, 0, __ATOMIC_RELEASE);
+            gdb_detach();
+        } else if (gdb.attached && !gdb.target_running) {
             /* Target is stopped (waiting on target_resume) — let it go */
             gdb_detach();
             sem_post(&gdb.target_resume);
@@ -1608,6 +1728,7 @@ static void gdb_handle_packet(const char *pkt, int len)
             gdb_detach();
         }
         gdb.target_running = 0;
+        gdb.direct_stop = 0;
         gdb_ok();
         break;
 
@@ -1630,6 +1751,8 @@ static void gdb_handle_packet(const char *pkt, int len)
         if (strncmp(pkt, "qSupported", 10) == 0) {
             gdb_send("PacketSize=1000;swbreak+;vContSupported+"
                      ";multiprocess+;qXfer:threads:read+"
+                     ";qXfer:exec-file:read+"
+                     ";qXfer:libraries-svr4:read+"
                      ";ThreadEvents+;exec-events+");
         } else if (strcmp(pkt, "qAttached") == 0) {
             gdb_send("1");  /* always "attached" */
@@ -1728,6 +1851,141 @@ static void gdb_handle_packet(const char *pkt, int len)
 
             xpos += snprintf(xml + xpos, sizeof(xml) - xpos,
                              "</threads>\n");
+            gdb_send_packet(xml, xpos);
+        } else if (strncmp(pkt, "qXfer:exec-file:read:", 21) == 0) {
+            /*
+             * qXfer:exec-file:read:annex:offset,length
+             * Return the executable pathname for the target process.
+             * annex is the PID in hex (or empty for the current target).
+             */
+            const char *name = gdb.exec_name;
+            if (name[0] == '\0' && gdb.target &&
+                gdb.target->thread_group &&
+                gdb.target->thread_group->exec_path[0] != '\0')
+                name = gdb.target->thread_group->exec_path;
+            if (name[0] == '\0' && gdb.target)
+                name = gdb.target->name;
+            if (name[0] == '\0')
+                name = "unknown";
+            char buf[256];
+            int n = snprintf(buf, sizeof(buf), "l%s", name);
+            gdb_send_packet(buf, n);
+        } else if (strncmp(pkt, "qXfer:libraries-svr4:read:", 25) == 0) {
+            /*
+             * qXfer:libraries-svr4:read::offset,length
+             * Return XML listing shared libraries and their load addresses.
+             * GDB uses l_addr (load bias) to offset symbols from the
+             * library's ELF, enabling source-level debugging of dynamically
+             * linked programs.
+             */
+            char xml[GDB_BUF_SIZE];
+            int xpos = 0;
+            xpos += snprintf(xml + xpos, sizeof(xml) - xpos,
+                             "l<?xml version=\"1.0\"?>\n"
+                             "<library-list-svr4 version=\"1.0\">");
+
+            if (gdb.attached && gdb.target) {
+                struct thread_group *tg = gdb.target->thread_group;
+                /* Report the interpreter (dynamic linker / libc) if present */
+                if (tg && tg->interp_base != 0 && tg->interp_path[0] != '\0') {
+                    xpos += snprintf(xml + xpos, sizeof(xml) - xpos,
+                                     "\n  <library name=\"%s\""
+                                     " lm=\"0x%lx\""
+                                     " l_addr=\"0x%lx\""
+                                     " l_ld=\"0x%lx\" lmid=\"0x0\"/>",
+                                     tg->interp_path,
+                                     tg->interp_base,
+                                     tg->interp_base,
+                                     tg->interp_ld);
+                }
+
+                /* Scan VMAs for additional file-backed executable mappings
+                 * that aren't the main executable or interpreter. */
+                vm_t *vm = gdb.target->vm;
+                if (vm) {
+                    vm_rlock(vm);
+                    vma_t *vma, *tmp;
+                    /* Track files we've already reported (simple dedup) */
+                    struct vfs_file *seen[16];
+                    int nseen = 0;
+                    /* Mark the interpreter file as already seen */
+                    list_foreach_node_safe(&vm->vm_list, vma, tmp, list_entry) {
+                        if (!(vma->flags & VMA_FLAG_FILE) || !vma->file)
+                            continue;
+                        if (!(vma->flags & PROT_EXEC))
+                            continue;
+                        /* Skip if we've already reported this file */
+                        int dup = 0;
+                        for (int j = 0; j < nseen; j++) {
+                            if (seen[j] == vma->file) { dup = 1; break; }
+                        }
+                        if (dup)
+                            continue;
+                        if (nseen < 16)
+                            seen[nseen++] = vma->file;
+
+                        /* Build path from inode parent chain */
+                        struct vfs_inode *ip = vma->file->inode.inode;
+                        if (!ip || !ip->name)
+                            continue;
+
+                        char pathbuf[256];
+                        pathbuf[0] = '\0';
+                        /* Walk up the parent chain to build the path */
+                        struct vfs_inode *chain[32];
+                        int depth = 0;
+                        for (struct vfs_inode *p = ip;
+                             p && p->name && depth < 32;
+                             p = p->parent) {
+                            chain[depth++] = p;
+                            if (p->parent == p) break; /* root */
+                        }
+                        int ppos = 0;
+                        for (int k = depth - 1; k >= 0; k--) {
+                            ppos += snprintf(pathbuf + ppos,
+                                             sizeof(pathbuf) - ppos,
+                                             "/%s", chain[k]->name);
+                        }
+                        if (pathbuf[0] == '\0')
+                            continue;
+
+                        /* Skip the main executable */
+                        const char *leaf = pathbuf;
+                        const char *s;
+                        for (s = pathbuf; *s; s++)
+                            if (*s == '/') leaf = s + 1;
+                        if (gdb.exec_name[0] != '\0') {
+                            const char *exec_leaf = gdb.exec_name;
+                            for (s = gdb.exec_name; *s; s++)
+                                if (*s == '/') exec_leaf = s + 1;
+                            if (strcmp(leaf, exec_leaf) == 0)
+                                continue;
+                        }
+
+                        /* Skip if it matches the interpreter path */
+                        if (tg && tg->interp_path[0] != '\0') {
+                            const char *interp_leaf = tg->interp_path;
+                            for (s = tg->interp_path; *s; s++)
+                                if (*s == '/') interp_leaf = s + 1;
+                            if (strcmp(leaf, interp_leaf) == 0)
+                                continue;
+                        }
+
+                        xpos += snprintf(xml + xpos, sizeof(xml) - xpos,
+                                         "\n  <library name=\"%s\""
+                                         " lm=\"0x%lx\""
+                                         " l_addr=\"0x%lx\""
+                                         " l_ld=\"0\" lmid=\"0x0\"/>",
+                                         pathbuf,
+                                         vma->start,
+                                         vma->start);
+                    }
+                    vm_runlock(vm);
+                }
+            }
+
+            xpos += snprintf(xml + xpos, sizeof(xml) - xpos,
+                             "\n</library-list-svr4>\n");
             gdb_send_packet(xml, xpos);
         } else if (strncmp(pkt, "qXfer", 5) == 0) {
             gdb_empty(); /* other qXfer not supported */
@@ -1901,6 +2159,7 @@ int gdbstub_trap(struct thread *t)
 
     /* Check if this is one of our breakpoints or a step bp. */
     int is_our_bp = 0;
+    int is_entry_bp = 0;
     if (gdb.stepping && pc == gdb.step_bp_addr) {
         is_our_bp = 1;
     } else {
@@ -1910,6 +2169,19 @@ int gdbstub_trap(struct thread *t)
                 break;
             }
         }
+    }
+
+    /*
+     * Check for auto-inserted exec entry-point breakpoint.
+     * This is a one-shot breakpoint: remove it now so the user can
+     * proceed normally.  Don't report swbreak — GDB didn't set it.
+     */
+    if (gdb.exec_entry_bp_active && pc == gdb.exec_entry_bp_addr) {
+        is_entry_bp = 1;
+        is_our_bp = 1;  /* it IS in bps[] */
+        gdb_remove_bp(pc, 0);
+        gdb.exec_entry_bp_active = 0;
+        GDB_LOG("trap: auto entry bp at 0x%lx removed (one-shot)", pc);
     }
 
     /*
@@ -1929,7 +2201,7 @@ int gdbstub_trap(struct thread *t)
             t->trapframe->trapframe.sepc += 4;
         }
     } else {
-        GDB_DBG("trap: our bp at 0x%lx (step=%d)", pc, gdb.stepping);
+        GDB_DBG("trap: our bp at 0x%lx (step=%d entry=%d)", pc, gdb.stepping, is_entry_bp);
     }
 
     /* Update state for the GDB thread */
@@ -1937,8 +2209,8 @@ int gdbstub_trap(struct thread *t)
     gdb.stop_signal = SIGTRAP;
     gdb.stop_tid = t->pid;
     /* Mark swbreak reason when stopped at one of our software breakpoints
-     * (not a step bp and not a user EBREAK). */
-    gdb.stop_is_swbreak = (is_our_bp && !gdb.stepping) ? 1 : 0;
+     * (not a step bp, not an entry bp, and not a user EBREAK). */
+    gdb.stop_is_swbreak = (is_our_bp && !gdb.stepping && !is_entry_bp) ? 1 : 0;
 
     /* Notify the GDB thread that the target has stopped */
     sem_post(&gdb.target_stopped);
@@ -1966,7 +2238,7 @@ int gdbstub_trap(struct thread *t)
  *
  * This runs in syscall (exec) context, not trap context.
  */
-void gdbstub_exec_stop(struct thread *t)
+void gdbstub_exec_stop(struct thread *t, uint64 entry_pc, const char *path)
 {
     if (!gdb.attached || thread_tgid(t) != gdb.target_pid)
         return;
@@ -1993,17 +2265,40 @@ void gdbstub_exec_stop(struct thread *t)
      * the stop reply.  GDB uses this to reload symbols and discard
      * stale breakpoints from the old address space. */
     gdb.exec_event = 1;
-    snprintf(gdb.exec_name, sizeof(gdb.exec_name), "%s", t->name);
+    snprintf(gdb.exec_name, sizeof(gdb.exec_name), "%s", path);
     __sync_synchronize();
 
     printf("gdbstub: pid %d exec -> %s, stopped at entry point\n",
-           t->pid, t->name);
+           t->pid, path);
 
     /* Notify the GDB thread that the target has stopped */
     sem_post(&gdb.target_stopped);
 
     /* Block until GDB says continue or step */
     sem_wait(&gdb.target_resume);
+
+    /*
+     * Insert a one-shot breakpoint at the program's actual entry point.
+     * GDB auto-continues after processing an exec event (unless the
+     * user has 'catch exec' set), so without this the process would
+     * run unimpeded.  The breakpoint ensures the process stops at
+     * _start, giving the user a chance to set breakpoints.
+     *
+     * gdbstub_trap() auto-removes this when hit (exec_entry_bp_active).
+     */
+    if (entry_pc != 0) {
+        uint16 lo16 = 0;
+        int bp_len = 4;
+        if (gdb_read_user_mem(&lo16, entry_pc, 2) == 0 && is_compressed(lo16))
+            bp_len = 2;
+        if (gdb_insert_bp(entry_pc, bp_len) == 0) {
+            gdb.exec_entry_bp_active = 1;
+            gdb.exec_entry_bp_addr = entry_pc;
+            GDB_LOG("exec: auto entry bp at 0x%lx (len=%d)", entry_pc, bp_len);
+        } else {
+            GDB_LOG("exec: FAILED to insert entry bp at 0x%lx", entry_pc);
+        }
+    }
 
     /* Flush I-cache — GDB may have inserted breakpoints from another hart. */
     asm volatile("fence.i");
@@ -2108,11 +2403,35 @@ int gdbstub_check_interrupt(struct thread *t)
     if (!gdb.attached || thread_tgid(t) != gdb.target_pid)
         return 0;
 
-    if (!gdb.interrupt_pending)
-        return 0;
+    /*
+     * Direct-stop: the gdbstub thread already sent the stop reply
+     * to GDB while one or more threads were sleeping in syscalls.
+     * The per-thread gdb_stopped flag is set on ALL threads of the
+     * process.  Each thread that wakes up atomically clears its own
+     * flag (1→0).  If it succeeds, it must wait here.
+     *
+     * Only the "reporting" thread (gdb.stop_tid) interacts with
+     * the target_resume semaphore.  Other threads simply spin‐wait
+     * until gdb.direct_stop is cleared by the GDB 'c'/'s' handler.
+     * This avoids semaphore count mismatches.
+     */
+    if (__atomic_exchange_n(&t->gdb_stopped, 0, __ATOMIC_ACQ_REL)) {
+        GDB_LOG("check_interrupt: direct-stop hold pid %d tid %d",
+                  gdb.target_pid, t->pid);
+        while (__atomic_load_n(&gdb.direct_stop, __ATOMIC_ACQUIRE))
+            sleep_ms(1);
+        asm volatile("fence.i");
+        return 1;
+    }
 
-    gdb.interrupt_pending = 0;
-    __sync_synchronize();
+    /*
+     * Normal Ctrl-C: interrupt_pending was set and an IPI sent to
+     * the target CPU.  Use atomic exchange so that only ONE thread
+     * wins the clear — prevents duplicate sem_post(&target_stopped)
+     * in multi-threaded processes.
+     */
+    if (!__atomic_exchange_n(&gdb.interrupt_pending, 0, __ATOMIC_ACQ_REL))
+        return 0;
 
     GDB_LOG("check_interrupt: stopping pid %d tid %d", gdb.target_pid, t->pid);
 
@@ -2151,6 +2470,7 @@ static void gdb_session(struct netconn *conn)
     gdb.nbps = 0;
     gdb.interrupt_pending = 0;
     gdb.target_running = 0;
+    gdb.direct_stop = 0;
     gdb.target_exited = 0;
     gdb.exit_code = 0;
     gdb.exit_tid = 0;
@@ -2303,37 +2623,63 @@ static void gdb_session(struct netconn *conn)
             GDB_LOG("Ctrl-C received (attached=%d running=%d)",
                       gdb.attached, gdb.target_running);
             if (gdb.attached && gdb.target_running) {
-                gdb.interrupt_pending = 1;
-                __sync_synchronize();
-
-                /*
-                 * Wake the target thread so it reaches usertrapret()
-                 * where gdbstub_check_interrupt() will stop it.
-                 *
-                 * If the thread is currently running on a CPU, send an
-                 * IPI to force a trip through the trap handler.
-                 *
-                 * If the thread is sleeping (in any sleep state),
-                 * unconditionally wake it.  The syscall will return
-                 * with -EINTR (interruptible) or see the pending
-                 * interrupt on its next traversal through usertrapret().
-                 */
                 struct thread *t = NULL;
                 rcu_read_lock();
                 get_pid_thread(gdb.target_pid, &t);
                 if (t && t->sched_entity) {
                     if (smp_load_acquire(&t->sched_entity->on_cpu)) {
+                        /*
+                         * Thread is running on a CPU — set the
+                         * interrupt_pending flag and send an IPI to
+                         * force a trap.  The thread will stop in
+                         * gdbstub_check_interrupt() on its way back
+                         * to user space.
+                         */
+                        gdb.interrupt_pending = 1;
+                        __sync_synchronize();
                         int target_cpu = smp_load_acquire(
                             &t->sched_entity->cpu_id);
                         ipi_send_single(target_cpu, IPI_REASON_RESCHEDULE);
                     } else {
-                        /* Thread is off-cpu — unconditionally wake it
-                         * from any sleep state so it eventually passes
-                         * through usertrapret(). */
-                        scheduler_wakeup(t);
+                        /*
+                         * Thread is off-cpu (sleeping in a syscall).
+                         * It may never reach usertrapret() until the
+                         * blocking condition is satisfied (e.g. console
+                         * data for read()).  Stop it directly: report
+                         * the stop to GDB now using the trapframe state
+                         * saved at syscall entry.  The target thread
+                         * stays asleep — when GDB continues, we just
+                         * mark target_running again.
+                         */
+                        gdb.target = t;
+                        gdb.stop_signal = SIGINT;
+                        gdb.stop_tid = t->pid;
+                        gdb.direct_stop = 1;
+                        gdb.target_running = 0;
+                        /* Mark ALL threads in the process so they
+                         * block in gdbstub_check_interrupt() if they
+                         * wake before GDB continues. */
+                        __atomic_store_n(&t->gdb_stopped, 1,
+                                         __ATOMIC_RELEASE);
+                        struct thread_group *tg = t->thread_group;
+                        if (tg) {
+                            pid_rlock();
+                            struct thread *th, *tmp;
+                            list_foreach_node_safe(&tg->thread_list, th, tmp, tg_entry) {
+                                if (th != t && !THREAD_ZOMBIE(th))
+                                    __atomic_store_n(&th->gdb_stopped, 1,
+                                                     __ATOMIC_RELEASE);
+                            }
+                            pid_runlock();
+                        }
                     }
                 }
                 rcu_read_unlock();
+                if (gdb.direct_stop) {
+                    GDB_LOG("direct stop: pid %d tid %d (off-cpu)",
+                              gdb.target_pid, gdb.stop_tid);
+                    gdb_send_stop_reply(SIGINT, gdb.stop_tid);
+                }
             }
             continue;
         }
@@ -2348,9 +2694,26 @@ static void gdb_session(struct netconn *conn)
     }
 
     if (gdb.attached) {
-        gdb_detach();
-        /* Resume the target if it was stopped */
-        sem_post(&gdb.target_resume);
+        if (gdb.direct_stop) {
+            /* Thread was direct-stopped — clear all threads and release */
+            if (gdb.target && gdb.target->thread_group) {
+                struct thread_group *tg = gdb.target->thread_group;
+                pid_rlock();
+                struct thread *th, *tmp;
+                list_foreach_node_safe(&tg->thread_list, th, tmp, tg_entry) {
+                    __atomic_store_n(&th->gdb_stopped, 0, __ATOMIC_RELEASE);
+                }
+                pid_runlock();
+            } else if (gdb.target) {
+                __atomic_store_n(&gdb.target->gdb_stopped, 0, __ATOMIC_RELEASE);
+            }
+            __atomic_store_n(&gdb.direct_stop, 0, __ATOMIC_RELEASE);
+            gdb_detach();
+        } else {
+            gdb_detach();
+            /* Resume the target if it was stopped */
+            sem_post(&gdb.target_resume);
+        }
     }
 
     printf("gdbstub: client disconnected\n");

@@ -303,9 +303,10 @@ if(EXISTS "${NCURSES_SRC_DIR}/configure")
                 CC=${CMAKE_C_COMPILER}
                 AR=${CMAKE_AR}
                 RANLIB=${CMAKE_RANLIB}
-                CFLAGS=-O2\ -nostdinc\ -ffreestanding\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}
+                CFLAGS=--sysroot=${MUSL_SYSROOT}\ -O2\ -nostdinc\ -ffreestanding\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}
                 ${NCURSES_SRC_DIR}/configure
                     --host=riscv64-unknown-elf
+                    --prefix=/
                     --disable-widec
                     --without-shared
                     --without-debug
@@ -319,8 +320,10 @@ if(EXISTS "${NCURSES_SRC_DIR}/configure")
                     cf_cv_have_tcgetattr=yes
                     ac_cv_header_termios_h=yes
         COMMAND ${CMAKE_COMMAND} -E chdir ${NCURSES_BUILD_DIR} make -j1
+        COMMAND ${CMAKE_COMMAND} -E chdir ${NCURSES_BUILD_DIR} make install DESTDIR=${MUSL_SYSROOT}
         # Create ncurses.h symlink expected by CPython's py_curses.h
         COMMAND ${CMAKE_COMMAND} -E create_symlink curses.h ${NCURSES_INCLUDE_DIR}/ncurses.h
+        COMMAND ${CMAKE_COMMAND} -E create_symlink curses.h ${MUSL_SYSROOT}/include/ncurses.h
         DEPENDS musl_sysroot ${NCURSES_SRC_DIR}/configure ${NCURSES_SRC_DIR}/misc/terminfo.src
         COMMENT "Building ncurses static library (musl)"
     )
@@ -347,13 +350,13 @@ if(EXISTS "${READLINE_SRC_DIR}/configure")
                 CC=${CMAKE_C_COMPILER}
                 AR=${CMAKE_AR}
                 RANLIB=${CMAKE_RANLIB}
-                CFLAGS=-O2\ -nostdinc\ -ffreestanding\ -D_POSIX_VERSION=200809L\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}
+                CFLAGS=--sysroot=${MUSL_SYSROOT}\ -O2\ -nostdinc\ -ffreestanding\ -D_POSIX_VERSION=200809L\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}
                 LDFLAGS=-L${NCURSES_BUILD_DIR}/lib
                 ${READLINE_SRC_DIR}/configure
                     --host=riscv64-unknown-elf
+                    --prefix=/
                     --disable-shared
                     --with-curses
-                    --without-install
                     bash_cv_termcap_lib=libncurses
                     bash_cv_wcwidth_broken=no
                     bash_cv_func_sigsetjmp=missing
@@ -364,8 +367,9 @@ if(EXISTS "${READLINE_SRC_DIR}/configure")
                     ac_cv_func_tcgetattr=yes
                     ac_cv_func_pselect=yes
         COMMAND ${CMAKE_COMMAND} -E chdir ${READLINE_BUILD_DIR} make -j4
+        COMMAND ${CMAKE_COMMAND} -E chdir ${READLINE_BUILD_DIR} make install DESTDIR=${MUSL_SYSROOT}
         DEPENDS local_ncurses_build ${READLINE_SRC_DIR}/configure
-        COMMENT "Building readline static library (musl)"
+        COMMENT "Building and installing readline (musl)"
     )
 
     add_custom_target(local_readline_build DEPENDS ${READLINE_LIB_A})
@@ -395,6 +399,7 @@ if(EXISTS "${DASH_SRC_DIR}/configure")
         COMMAND ${CMAKE_COMMAND} -E make_directory ${HISTEDIT_SHIM_DIR}
         COMMAND ${CMAKE_C_COMPILER}
             -c -o ${HISTEDIT_SHIM_OBJ}
+            --sysroot=${MUSL_SYSROOT}
             -O2 -nostdinc -ffreestanding -fno-common -fno-pie -no-pie
             -mcmodel=medany -march=rv64gc -mabi=lp64d
             -isystem ${MUSL_INCLUDE_DIR}
@@ -426,11 +431,12 @@ if(EXISTS "${DASH_SRC_DIR}/configure")
                 AR=${CMAKE_AR}
                 RANLIB=${CMAKE_RANLIB}
                 CC_FOR_BUILD=cc
-                CFLAGS=-O2\ -nostdinc\ -ffreestanding\ -fno-common\ -fno-pie\ -no-pie\ -mcmodel=medany\ -DFLUSHERR=1\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -I${NCURSES_INCLUDE_DIR}
+                CFLAGS=--sysroot=${MUSL_SYSROOT}\ -O2\ -nostdinc\ -ffreestanding\ -fno-common\ -fno-pie\ -no-pie\ -mcmodel=medany\ -DFLUSHERR=1\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -I${NCURSES_INCLUDE_DIR}
                 LDFLAGS=-static\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,-z,max-page-size=0x1000\ -T\ ${MUSL_LINKER_SCRIPT}\ -L${HISTEDIT_SHIM_DIR}\ -L${READLINE_BUILD_DIR}\ -L${NCURSES_BUILD_DIR}/lib
                 LIBS=${HISTEDIT_SHIM_A}\ ${READLINE_LIB_A}\ ${NCURSES_LIB_A}\ ${MUSL_LIBC_A}\ ${LIBGCC_PATH}\ ${MUSL_CRTN_O}
                 ${DASH_SRC_DIR}/configure
                     --host=riscv64-unknown-elf
+                    --prefix=${MUSL_SYSROOT}
                     --disable-lineno
                     --with-libedit
                     ac_cv_func_bsearch=yes
@@ -471,25 +477,14 @@ if(EXISTS "${DASH_SRC_DIR}/configure")
     add_custom_command(
         OUTPUT ${DASH_BIN}
         COMMAND ${CMAKE_COMMAND} -E chdir ${DASH_BUILD_DIR} make -j16 V=1
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${MUSL_SYSROOT}/bin
+        COMMAND ${CMAKE_COMMAND} -E chdir ${DASH_BUILD_DIR} make install-exec DESTDIR=${MUSL_SYSROOT}
         DEPENDS dash_configure ${HISTEDIT_SHIM_A}
-        COMMENT "Building dash shell (musl, with readline)"
+        COMMENT "Building and installing dash shell (musl, with readline)"
     )
 
     add_custom_target(dash_build DEPENDS ${DASH_BIN})
-
-    add_custom_command(
-        OUTPUT ${DASH_FS_BIN}
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
-        COMMAND ${CMAKE_COMMAND} -E copy ${DASH_BIN} ${DASH_FS_BIN}
-        COMMAND ${CMAKE_STRIP} --strip-debug ${DASH_FS_BIN}
-        DEPENDS ${DASH_BIN}
-        COMMENT "Staging dash shell as _dash for fs image"
-    )
-
-    add_custom_target(_dash_musl ALL DEPENDS ${DASH_FS_BIN})
-    add_dependencies(user_programs _dash_musl)
-    list(APPEND USER_PROGRAMS _dash)
-    set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
+    add_dependencies(user_programs dash_build)
 else()
     message(STATUS "Skipping dash build (missing submodule at ${DASH_SRC_DIR})")
 endif()
@@ -503,6 +498,7 @@ add_custom_command(
     OUTPUT ${KQUEUE_COMPAT_OBJ}
     COMMAND ${CMAKE_C_COMPILER}
             -c -o ${KQUEUE_COMPAT_OBJ}
+            --sysroot=${MUSL_SYSROOT}
             -isystem ${MUSL_INCLUDE_DIR}
             -isystem ${GCC_INCLUDE_DIR_MUSL}
             -isystem ${MUSL_COMPAT_DIR}
@@ -552,15 +548,17 @@ if(EXISTS "${CPYTHON_SRC_DIR}/configure")
                 RANLIB=${CPYTHON_RANLIB}
                 READELF=${CPYTHON_READELF}
                 PKG_CONFIG=false
-                CPPFLAGS=-isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
-                CFLAGS=-isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${CPYTHON_GCC_INCLUDE_DIR}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
+                CPPFLAGS=--sysroot=${MUSL_SYSROOT}\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
+                CFLAGS=--sysroot=${MUSL_SYSROOT}\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${CPYTHON_GCC_INCLUDE_DIR}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0\ -DPY_NO_THREAD_LOCAL=1
                 LDFLAGS=-no-pie\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,--export-dynamic\ -Wl,--dynamic-linker=/lib/ld-musl-riscv64.so.1\ -Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -L${NCURSES_BUILD_DIR}/lib\ -L${READLINE_BUILD_DIR}\ -L${MUSL_SYSROOT}/lib
                 LIBS=-lc\ ${CPYTHON_LIBGCC_PATH}
                 ${CPYTHON_SRC_DIR}/configure
                     --host=riscv64-unknown-xv6
                     --build=x86_64-pc-linux-gnu
+                    --prefix=/
                     --with-build-python=python3
-                    --disable-shared
+                    # --disable-shared
+                    --with-pydebug
                     --without-ensurepip
                     ac_cv_file__dev_ptmx=no
                     ac_cv_file__dev_ptc=no
@@ -663,26 +661,16 @@ _blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
         OUTPUT ${CPYTHON_BIN}
         COMMAND ${CMAKE_COMMAND} -E chdir ${CPYTHON_BUILD_DIR} make -j16 python
                 "SYSLIBS=${KQUEUE_COMPAT_OBJ} -lc ${CPYTHON_LIBGCC_PATH} ${MUSL_CRTN_O}"
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${MUSL_SYSROOT}/bin
+        COMMAND ${CMAKE_COMMAND} -E chdir ${CPYTHON_BUILD_DIR} make altbininstall DESTDIR=${MUSL_SYSROOT}
+                "SYSLIBS=${KQUEUE_COMPAT_OBJ} -lc ${CPYTHON_LIBGCC_PATH} ${MUSL_CRTN_O}"
+        COMMAND ${CMAKE_COMMAND} -E create_symlink python3.12 ${MUSL_SYSROOT}/bin/python
         DEPENDS cpython_configure kqueue_compat
-        COMMENT "Building CPython interpreter (musl, dynamic libc)"
+        COMMENT "Building and installing CPython interpreter (musl)"
     )
 
     add_custom_target(cpython_build DEPENDS ${CPYTHON_BIN})
-
-    # Stage the python binary for the rootfs image
-    add_custom_command(
-        OUTPUT ${CPYTHON_FS_BIN}
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
-        COMMAND ${CMAKE_COMMAND} -E copy ${CPYTHON_BIN} ${CPYTHON_FS_BIN}
-        COMMAND ${CPYTHON_STRIP} --strip-debug ${CPYTHON_FS_BIN}
-        DEPENDS ${CPYTHON_BIN}
-        COMMENT "Staging CPython interpreter for fs image"
-    )
-
-    add_custom_target(_python_musl ALL DEPENDS ${CPYTHON_FS_BIN})
-    add_dependencies(user_programs _python_musl)
-    list(APPEND USER_PROGRAMS _python)
-    set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
+    add_dependencies(user_programs cpython_build)
 else()
     message(STATUS "Skipping CPython configure/build targets (missing submodule at ${CPYTHON_SRC_DIR})")
 endif()
@@ -704,6 +692,7 @@ if(EXISTS "${NCURSES_SRC_DIR}/configure")
             -march=rv64gc -mabi=lp64d
             -mcmodel=medany -fno-common -fno-pie -no-pie
             -DUSE_NCURSES_SHELL=1
+            --sysroot=${MUSL_SYSROOT}
             -nostdinc -ffreestanding
             -isystem ${MUSL_INCLUDE_DIR}
             -isystem ${GCC_INCLUDE_DIR_MUSL}
@@ -743,3 +732,93 @@ endif()
 
 # Pass the populated USER_PROGRAMS variable to the parent scope
 set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
+
+# ==============================================================================
+# Populate sysroot/bin/ with xv6 user programs for GDB debugging.
+#
+# Third-party components install directly via their native install targets:
+#   musl       → --prefix=sysroot  (lib/ + include/)
+#   ncurses    → make install       (lib/ + include/)
+#   readline   → make install       (lib/ + include/readline/)
+#   dash       → make install-exec  (bin/dash)
+#   CPython    → make altbininstall  (bin/python3.12 + symlink bin/python)
+#
+# This section handles the remaining xv6-specific programs:
+#   userlib programs  → sysroot/bin/<name>
+#   musl programs     → sysroot/bin/<name>  (drop the 'm' prefix)
+#   ncurses shell     → sysroot/bin/sh
+# ==============================================================================
+set(SYSROOT_BIN_DIR "${MUSL_SYSROOT}/bin")
+set(SYSROOT_TARGETS "")
+
+# Helper: copy a program to sysroot/bin/, tracking it as an output
+function(sysroot_install SRC_PATH DEST_PATH)
+    get_filename_component(DEST_DIR ${DEST_PATH} DIRECTORY)
+    add_custom_command(
+        OUTPUT ${DEST_PATH}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${DEST_DIR}
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC_PATH} ${DEST_PATH}
+        DEPENDS ${SRC_PATH}
+        COMMENT "sysroot: ${DEST_PATH}"
+    )
+    set(SYSROOT_TARGETS ${SYSROOT_TARGETS} ${DEST_PATH} PARENT_SCOPE)
+endfunction()
+
+# Userlib-only programs (no musl equivalent)
+set(USERLIB_ONLY_PROGS
+    bigfile cloexectest clonetest cowtest devtest dumpchan dumpinode
+    dumppcache dumprq find free grind mknod mmaptest mount pingpong
+    primes ps randtest stressfs symlinktest sync testsig umount
+    usertests vforktest waitgdb wallclock xargs zombie
+)
+foreach(PROG ${USERLIB_ONLY_PROGS})
+    set(SRC "${CMAKE_BINARY_DIR}/user/_${PROG}")
+    if(TARGET _${PROG})
+        sysroot_install(${SRC} "${SYSROOT_BIN_DIR}/${PROG}")
+    endif()
+endforeach()
+
+# Musl static programs: _m<name> → bin/<name>  (replaces any userlib version)
+set(MUSL_PROG_MAP
+    mcat:cat   mecho:echo   mgrep:grep   mls:ls   mwc:wc
+    mmkdir:mkdir  mrm:rm  mln:ln  mkill:kill  msleep:sleep
+    minit:init  mhello:hello
+)
+foreach(MAPPING ${MUSL_PROG_MAP})
+    string(REPLACE ":" ";" PARTS ${MAPPING})
+    list(GET PARTS 0 BUILD_NAME)
+    list(GET PARTS 1 FRIENDLY_NAME)
+    set(SRC "${CMAKE_BINARY_DIR}/user/_${BUILD_NAME}")
+    if(TARGET _${BUILD_NAME}_musl)
+        sysroot_install(${SRC} "${SYSROOT_BIN_DIR}/${FRIENDLY_NAME}")
+    endif()
+endforeach()
+
+# ncurses shell (musl) — the primary "sh"
+if(TARGET _sh_musl)
+    sysroot_install("${CMAKE_BINARY_DIR}/user/_sh" "${SYSROOT_BIN_DIR}/sh")
+endif()
+
+# msh — basic musl shell (keep alongside ncurses sh for reference)
+if(TARGET _msh_musl)
+    sysroot_install("${CMAKE_BINARY_DIR}/user/_msh" "${SYSROOT_BIN_DIR}/msh")
+endif()
+
+# dyntest (dynamic linking test)
+if(TARGET _dyntest_dymusl)
+    sysroot_install("${CMAKE_BINARY_DIR}/user/_dyntest" "${SYSROOT_BIN_DIR}/dyntest")
+endif()
+
+# Aggregate target
+if(SYSROOT_TARGETS)
+    add_custom_target(sysroot_populate ALL DEPENDS ${SYSROOT_TARGETS})
+    add_dependencies(sysroot_populate user_programs)
+endif()
+
+# Generate .gdbinit for remote debugging inside sysroot/.
+# Placed here (at the end) so CPYTHON_BIN, DASH_BIN etc. are defined.
+configure_file(
+    ${CMAKE_SOURCE_DIR}/cmake/gdbinit.in
+    ${MUSL_SYSROOT}/.gdbinit
+    @ONLY
+)

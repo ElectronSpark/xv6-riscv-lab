@@ -1,0 +1,31 @@
+# xv6 remote debugging via gdbstub (TCP port 2159)
+#
+# Usage:
+#   cd @CMAKE_BINARY_DIR@/sysroot
+#   gdb-multiarch -x .gdbinit bin/<program>
+#
+# The argument is the user program to load symbols from.
+# All programs are available under bin/ (unstripped, with debug info).
+# Common choices:
+#   bin/sh       — xv6 shell
+#   bin/python   — CPython interpreter
+#   bin/dash     — dash shell
+#   bin/cat      — cat (or any other program)
+#
+# Then on the xv6 shell:
+#   waitgdb -e python        (or any other program)
+
+set architecture riscv:rv64
+set sysroot .
+
+# Disable debuginfod — it downloads wrong source files from Ubuntu servers
+# based on BuildID, overriding our local debug info.
+set debuginfod enabled off
+
+# musl doesn't expose _dl_debug_state — suppress the warning
+set auto-solib-add off
+
+# After exec, GDB will auto-reload symbols via the exec event.
+# If it can't find the binary automatically, load it manually:
+#   file bin/python
+#   file bin/dash

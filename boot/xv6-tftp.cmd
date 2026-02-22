@@ -35,8 +35,15 @@ if test -e ${devtype} ${devnum} ${prefix}orangepiEnv.txt; then
 	env import -t 0x9000000 ${filesize}
 fi
 
-# Kernel load address - must match linker script KERNEL_BASE
+# Memory layout (addresses chosen to avoid overlap with 512MB ramdisk):
+#
+#   0x00200000              xv6_addr           Decompressed kernel (~5MB)
+#   0x21000000              ramdisk_addr_r     Decompressed ramdisk (512MB)
+#   0x41000000              fdt_addr_r         Device tree blob
+#
 setenv xv6_addr 0x200000
+setenv ramdisk_addr_r 0x21000000
+setenv fdt_addr_r 0x41000000
 
 echo "Loading xv6 kernel from TFTP to ${xv6_addr}..."
 

@@ -55,7 +55,7 @@ done
 
 # Default build dir and prefix if not specified
 BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/musl-build}"
-PREFIX="${PREFIX:-${SCRIPT_DIR}/musl-sysroot}"
+PREFIX="${PREFIX:-${SCRIPT_DIR}/sysroot}"
 MUSL_SRC="${BUILD_DIR}/musl-${MUSL_VERSION}"
 
 # Detect cross-compiler
@@ -155,6 +155,13 @@ echo "Build complete."
 # Install
 echo "Installing to ${PREFIX}..."
 make install
+# musl's make install creates an absolute symlink for the dynamic linker,
+# e.g. ld-musl-riscv64.so.1 -> /abs/path/to/sysroot/lib/libc.so
+# Fix it to be relative so it works inside the target rootfs.
+if [ -L "${PREFIX}/lib/ld-musl-riscv64.so.1" ]; then
+    ln -sf libc.so "${PREFIX}/lib/ld-musl-riscv64.so.1"
+    echo "Fixed ld-musl-riscv64.so.1 symlink to relative (libc.so)"
+fi
 echo "Installation complete."
 
 echo ""

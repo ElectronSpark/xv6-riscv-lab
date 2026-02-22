@@ -77,6 +77,14 @@ struct thread_group {
     struct {
         uint64 is_kernel : 1; /* set for kernel-internal thread groups */
     };
+
+    /* Dynamic linker (interpreter) info — set by exec() for dynamically
+     * linked binaries.  Used by the gdbstub to report shared libraries
+     * via qXfer:libraries-svr4:read so GDB can resolve symbols. */
+    uint64 interp_base;          /* Load bias of interpreter (0 = none) */
+    uint64 interp_ld;            /* Loaded address of interpreter's .dynamic section */
+    char   interp_path[128];     /* Path from PT_INTERP (e.g. /lib/ld-musl-riscv64.so.1) */
+    char   exec_path[128];      /* Full path of the executable (e.g. /bin/python) */
 };
 
 #endif /* __KERNEL_THREAD_GROUP_TYPES_H */

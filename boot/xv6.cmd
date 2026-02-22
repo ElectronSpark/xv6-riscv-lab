@@ -20,12 +20,18 @@ if test -e ${devtype} ${devnum} ${prefix}orangepiEnv.txt; then
 	env import -t 0x9000000 ${filesize}
 fi
 
-# Kernel addresses:
-#   xv6_addr: Final kernel address (must match linker script KERNEL_BASE)
-#   kernel_load_addr: Temporary address to load compressed kernel
-# For compressed kernels, we load to a temp address and booti decompresses to xv6_addr
+# Memory layout (addresses chosen to avoid overlap with 512MB ramdisk):
+#
+#   0x00200000              xv6_addr           Decompressed kernel (~5MB)
+#   0x10000000              kernel_load_addr   Compressed kernel (temp)
+#   0x21000000              ramdisk_addr_r     Decompressed ramdisk (512MB)
+#   0x41000000              fdt_addr_r         Device tree blob
+#   0x42000000              ramdisk_load_addr  Compressed ramdisk (temp)
+#
 setenv xv6_addr 0x200000
 setenv kernel_load_addr 0x10000000
+setenv ramdisk_addr_r 0x21000000
+setenv fdt_addr_r 0x41000000
 
 # Try compressed kernel first, fall back to uncompressed
 echo "Loading xv6 kernel..."
@@ -55,7 +61,7 @@ fi
 # Try compressed version first, fall back to uncompressed
 # NOTE: Unlike the kernel, booti does NOT decompress the initrd/ramdisk.
 # We must manually decompress using U-Boot's unzip command.
-setenv ramdisk_load_addr 0x30000000
+setenv ramdisk_load_addr 0x42000000
 echo "Loading filesystem image to ${ramdisk_addr_r}..."
 if load ${devtype} ${devnum} ${ramdisk_load_addr} ${prefix}fs.img.gz; then
 	setenv compressed_size ${filesize}

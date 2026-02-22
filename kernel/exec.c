@@ -234,6 +234,7 @@ int exec(char *path, char **argv, char **envp) {
     int has_interp = 0;
     uint64 interp_base = 0;   /* load bias of interpreter */
     uint64 interp_entry = 0;  /* entry point of interpreter */
+    uint64 interp_ld = 0;     /* loaded address of interpreter's .dynamic */
 
     exec_dbg("pid %d: exec(\"%s\")\n", current->pid, path);
 
@@ -376,10 +377,9 @@ int exec(char *path, char **argv, char **envp) {
         exec_dbg("  loading interpreter segments at base=0x%lx\n", interp_base);
         ret = load_elf_segments(tmp_vm, interp_file, &interp_elf, interp_base,
                                 &interp_brk, NULL);
-        vfs_fput(interp_file);
-        interp_file = NULL;
 
         if (ret != 0) {
+            vfs_fput(interp_file);
             exec_dbg("  FAIL: load_elf_segments(interp) returned %d\n", ret);
             goto bad_locked;
         }
@@ -387,6 +387,24 @@ int exec(char *path, char **argv, char **envp) {
         interp_entry = interp_elf.entry + interp_base;
         exec_dbg("  interpreter loaded: entry=0x%lx brk=0x%lx\n",
                  interp_entry, interp_brk);
+
+        /* Find PT_DYNAMIC in the interpreter so GDB can locate .dynamic */
+        interp_ld = 0;
+        for (i = 0; i < interp_elf.phnum; i++) {
+            int off = interp_elf.phoff + i * sizeof(ph);
+            if (vfs_filelseek(interp_file, off, SEEK_SET) != off)
+                break;
+            if (vfs_fileread(interp_file, &ph, sizeof(ph), false) != sizeof(ph))
+                break;
+            if (ph.type == ELF_PROG_DYNAMIC) {
+                interp_ld = interp_base + ph.vaddr;
+                exec_dbg("  interpreter PT_DYNAMIC at 0x%lx\n", interp_ld);
+                break;
+            }
+        }
+
+        vfs_fput(interp_file);
+        interp_file = NULL;
     }
 
     // Done with the file
@@ -547,6 +565,22 @@ int exec(char *path, char **argv, char **envp) {
     p->vm = NULL;
     p->vm = tmp_vm;
 
+    /* Store interpreter info in thread_group for the gdbstub.
+     * This lets qXfer:libraries-svr4:read report the dynamic
+     * linker/libc to GDB so it can resolve shared library symbols. */
+    if (has_interp) {
+        p->thread_group->interp_base = interp_base;
+        p->thread_group->interp_ld = interp_ld;
+        safestrcpy(p->thread_group->interp_path, interp_path,
+                   sizeof(p->thread_group->interp_path));
+    } else {
+        p->thread_group->interp_base = 0;
+        p->thread_group->interp_ld = 0;
+        p->thread_group->interp_path[0] = '\0';
+    }
+    safestrcpy(p->thread_group->exec_path, path,
+               sizeof(p->thread_group->exec_path));
+
     /*
      * Entry point:
      *   - If we have an interpreter, jump to the interpreter's entry.
@@ -577,8 +611,8 @@ int exec(char *path, char **argv, char **envp) {
 
     // Stop for GDB if being debugged.
     {
-        extern void gdbstub_exec_stop(struct thread *);
-        gdbstub_exec_stop(p);
+        extern void gdbstub_exec_stop(struct thread *, uint64, const char *);
+        gdbstub_exec_stop(p, elf.entry + load_bias, path);
     }
 
     /*

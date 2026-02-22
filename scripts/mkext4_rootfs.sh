@@ -1,17 +1,11 @@
 #!/bin/bash
-# mkext4_rootfs.sh - Create an ext4 root filesystem image
+# mkext4_rootfs.sh - Create an ext4 root filesystem image from sysroot
 #
-# Usage: mkext4_rootfs.sh <output.img> <readme> <cpython_src_dir> [size_mb] [terminfo_dir] [files...]
+# Usage: mkext4_rootfs.sh <output.img> <readme> <cpython_src_dir> <size_mb> <sysroot_dir>
 #
-# Creates an ext4 image containing:
-#   /              - root directory with README.md
-#   /bin/          - user programs (leading '_' stripped from filenames)
-#   /dev/          - empty (populated at runtime)
-#   /proc/         - empty (populated at runtime)
-#   /tmp/          - empty
-#   /sys/          - empty
-#   /usr/local/lib/python3.12/ - Python standard library
-#   /usr/share/terminfo/       - terminfo database (if provided)
+# The entire sysroot tree is copied as the filesystem base.
+# Additional runtime directories (dev, proc, tmp, sys) are created.
+# Python standard library is copied from the cpython source tree.
 
 set -e
 
@@ -19,11 +13,10 @@ OUTPUT="$1"
 README="$2"
 CPYTHON_SRC="$3"
 SIZE_MB="${4:-64}"
-TERMINFO_DIR="$5"
-shift 5 || true  # remaining args are user program binaries
+SYSROOT_DIR="$5"
 
-if [ -z "$OUTPUT" ] || [ -z "$README" ] || [ -z "$CPYTHON_SRC" ]; then
-    echo "Usage: $0 <output.img> <readme> <cpython_src_dir> [size_mb] [terminfo_dir] [files...]" >&2
+if [ -z "$OUTPUT" ] || [ -z "$README" ] || [ -z "$CPYTHON_SRC" ] || [ -z "$SYSROOT_DIR" ]; then
+    echo "Usage: $0 <output.img> <readme> <cpython_src_dir> <size_mb> <sysroot_dir>" >&2
     exit 1
 fi
 
@@ -35,36 +28,37 @@ trap cleanup EXIT
 
 echo "mkext4_rootfs: staging directory: $STAGING"
 
-# Create standard directory structure
-mkdir -p "$STAGING/bin"
+# Copy the entire sysroot as the filesystem base, excluding static libraries
+# and development headers (not needed at runtime, saves ~240MB)
+echo "mkext4_rootfs: copying sysroot from $SYSROOT_DIR ..."
+rsync -a --exclude='*.a' --exclude='*.o' --exclude='*.old' \
+         --exclude='include/' --exclude='pkgconfig/' \
+    "$SYSROOT_DIR/" "$STAGING/"
+SYSROOT_SIZE=$(du -sh "$SYSROOT_DIR" | cut -f1)
+STAGING_SIZE=$(du -sh "$STAGING" | cut -f1)
+echo "mkext4_rootfs: sysroot: ${SYSROOT_SIZE} -> staging: ${STAGING_SIZE} (excludes .a/.o/include)"
+
+# Ensure runtime directories exist (not part of sysroot)
 mkdir -p "$STAGING/dev"
-mkdir -p "$STAGING/lib"
 mkdir -p "$STAGING/proc"
 mkdir -p "$STAGING/tmp"
 mkdir -p "$STAGING/sys"
-mkdir -p "$STAGING/usr/local/lib/python3.12/lib-dynload"
-mkdir -p "$STAGING/usr/share"
 
-# Copy README
+# Copy README to root
 if [ -f "$README" ]; then
     cp "$README" "$STAGING/README.md"
 fi
 
-# Copy user programs (strip leading '_' from names)
-for src in "$@"; do
-    if [ ! -e "$src" ]; then
-        echo "mkext4_rootfs: skipping missing: $src" >&2
-        continue
-    fi
-
-    base="$(basename "$src")"
-    name="${base#_}"
-
-    cp "$src" "$STAGING/bin/$name"
-    chmod 0755 "$STAGING/bin/$name" 2>/dev/null || true
-done
+# Ensure ld-musl dynamic linker symlink is a *relative* link to libc.so.
+# The sysroot may contain an absolute symlink (pointing to the host build path)
+# which won't resolve inside the target rootfs.
+if [ -f "$STAGING/lib/libc.so" ]; then
+    ln -sf libc.so "$STAGING/lib/ld-musl-riscv64.so.1"
+    echo "mkext4_rootfs: ensured ld-musl-riscv64.so.1 -> libc.so (relative)"
+fi
 
 # Copy Python standard library
+mkdir -p "$STAGING/usr/local/lib/python3.12/lib-dynload"
 PYLIB_SRC="${CPYTHON_SRC}/Lib"
 if [ -d "$PYLIB_SRC" ]; then
     # Directories to exclude (saves ~35 MB)
@@ -94,33 +88,7 @@ else
     echo "mkext4_rootfs: warning: Python Lib not found at ${PYLIB_SRC}" >&2
 fi
 
-# Copy terminfo database if provided
-if [ -n "$TERMINFO_DIR" ] && [ -d "$TERMINFO_DIR" ]; then
-    cp -r "$TERMINFO_DIR" "$STAGING/usr/share/terminfo"
-    echo "mkext4_rootfs: terminfo database included"
-fi
-
-# Install shared libraries for dynamic linking
-# MUSL_LIB_DIR: path to musl sysroot lib (contains libc.so)
-# CPYTHON_LIBPYTHON: path to libpython3.12.so (if built with --enable-shared)
-if [ -n "$MUSL_LIB_DIR" ] && [ -f "$MUSL_LIB_DIR/libc.so" ]; then
-    cp "$MUSL_LIB_DIR/libc.so" "$STAGING/lib/libc.so"
-    # ld-musl-riscv64.so.1 is a symlink to libc.so (musl IS the dynamic linker)
-    ln -sf libc.so "$STAGING/lib/ld-musl-riscv64.so.1"
-    echo "mkext4_rootfs: installed libc.so + ld-musl-riscv64.so.1"
-else
-    echo "mkext4_rootfs: warning: MUSL_LIB_DIR not set or libc.so not found" >&2
-fi
-
-if [ -n "$CPYTHON_LIBPYTHON" ] && [ -f "$CPYTHON_LIBPYTHON" ]; then
-    cp "$CPYTHON_LIBPYTHON" "$STAGING/lib/$(basename "$CPYTHON_LIBPYTHON")"
-    # Create soname symlink (libpython3.12.so.1.0 -> libpython3.12.so)
-    # CPython typically uses versioned sonames
-    local_name="$(basename "$CPYTHON_LIBPYTHON")"
-    echo "mkext4_rootfs: installed ${local_name} in /lib/"
-fi
-
-BIN_COUNT=$(find "$STAGING/bin/" -type f | wc -l)
+BIN_COUNT=$(find "$STAGING/bin/" -type f 2>/dev/null | wc -l)
 TOTAL_USED=$(du -sh "$STAGING" | cut -f1)
 echo "mkext4_rootfs: ${BIN_COUNT} programs, total ${TOTAL_USED}"
 

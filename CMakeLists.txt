@@ -258,34 +258,26 @@ add_custom_command(
 )
 add_custom_target(terminfo_db DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/terminfo.stamp)
 
-# Update USER_PROGRAMS to include the correct path
-list(TRANSFORM USER_PROGRAMS PREPEND "${CMAKE_CURRENT_BINARY_DIR}/user/")
-
-# Create a unified ext4 root filesystem image containing user programs,
-# Python standard library, and terminfo database.  This replaces both
-# the old xv6fs fs.img (for the rootfs ramdisk) and the separate ext4
-# fs0.img (for /usr).  The kernel mounts this ext4 image as root via
-# ext4fs_mount_root().
+# Create a unified ext4 root filesystem image from the entire sysroot.
+# All user programs (userlib + musl), libraries, and third-party components
+# (dash, CPython, ncurses, readline) are installed into sysroot/ by their
+# respective build targets.  The entire sysroot tree is copied into the image.
+set(SYSROOT_DIR "${CMAKE_BINARY_DIR}/sysroot")
 set(CPYTHON_SRC_DIR_FOR_FS "${CMAKE_SOURCE_DIR}/user/v6-cpython")
-set(MUSL_LIB_DIR_FOR_FS "${CMAKE_BINARY_DIR}/musl-sysroot/lib")
 set(MKEXT4_ROOTFS_SCRIPT "${CMAKE_SOURCE_DIR}/scripts/mkext4_rootfs.sh")
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/fs.img
-    COMMAND ${CMAKE_COMMAND} -E env
-            MUSL_LIB_DIR=${MUSL_LIB_DIR_FOR_FS}
-            bash ${MKEXT4_ROOTFS_SCRIPT}
+    COMMAND bash ${MKEXT4_ROOTFS_SCRIPT}
             ${CMAKE_CURRENT_BINARY_DIR}/fs.img
             ${CMAKE_SOURCE_DIR}/README.md
             ${CPYTHON_SRC_DIR_FOR_FS}
-            128
-            ${TERMINFO_DIR}
-            ${USER_PROGRAMS}
+            512
+            ${SYSROOT_DIR}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    DEPENDS user_programs
-            ${USER_PROGRAMS}
+    DEPENDS sysroot_populate
             ${MKEXT4_ROOTFS_SCRIPT}
             ${CMAKE_SOURCE_DIR}/README.md
-    COMMENT "Creating ext4 rootfs image (programs + Python stdlib + terminfo)"
+    COMMENT "Creating ext4 rootfs image from sysroot"
 )
 
 # Compressed filesystem image
