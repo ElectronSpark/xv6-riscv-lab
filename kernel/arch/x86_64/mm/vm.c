@@ -119,6 +119,11 @@ static void kvm_build(void)
             kvm_map_2m_range(base, end, flags_rw);
         }
     }
+
+    /* Map APIC MMIO region (I/O APIC at 0xFEC00000, LAPIC at 0xFEE00000).
+     * Use uncacheable semantics (no PTE_G) for device MMIO. */
+    uint64 flags_mmio = X86_PTE_P | X86_PTE_W;
+    kvm_map_2m_range(0xFEC00000ULL, 0xFF000000ULL, flags_mmio);
 }
 
 static void kvm_load(void)

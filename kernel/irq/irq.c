@@ -202,3 +202,40 @@ int do_irq(struct trapframe *tf) {
     rcu_read_unlock();
     return irq_num;
 }
+
+/**
+ * do_device_irq - Dispatch a hardware device IRQ by number.
+ *
+ * Called from architecture-specific trap handlers (x86 IOAPIC path)
+ * when a device interrupt arrives.  The hw_irq is the ISA/device IRQ
+ * number (e.g. 4 for COM1).  This looks up the handler registered via
+ * register_irq_handler(PLIC_IRQ(hw_irq), ...) and invokes it.
+ *
+ * @param hw_irq  Hardware IRQ number (0-based, before PLIC_IRQ_OFFSET).
+ * @return        The internal irq index on success, 0 if no handler.
+ */
+int do_device_irq(int hw_irq) {
+    if (hw_irq < 0 || hw_irq >= PLIC_IRQ_CNT) {
+        printf("do_device_irq: invalid hw_irq %d\n", hw_irq);
+        return 0;
+    }
+
+    int irq = hw_irq + PLIC_IRQ_OFFSET;
+
+    rcu_read_lock();
+
+    struct irq_desc *desc = rcu_dereference(irq_descs[irq]);
+    if (desc == NULL) {
+        rcu_read_unlock();
+        return 0;
+    }
+
+    __atomic_add_fetch(&desc->count, 1, __ATOMIC_SEQ_CST);
+
+    if (desc->handler != NULL) {
+        desc->handler(irq, desc->data, desc->dev);
+    }
+
+    rcu_read_unlock();
+    return irq;
+}

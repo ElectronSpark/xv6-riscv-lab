@@ -202,7 +202,7 @@ void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
     for (;;) {
         scheduler_yield();
         intr_on();
-            arch_wait_for_interrupt();
+        arch_wait_for_interrupt();
         intr_off();
     }
 }

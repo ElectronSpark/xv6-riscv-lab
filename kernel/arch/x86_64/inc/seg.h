@@ -125,6 +125,9 @@ struct tss_desc {
 
 #define EFER_SCE        (1 << 0)    /* SYSCALL Enable */
 
+/* ── APIC MSR ── */
+#define MSR_APIC_BASE   0x0000001B
+
 /* MSR helpers */
 static inline void wrmsr(uint32 msr, uint64 value)
 {

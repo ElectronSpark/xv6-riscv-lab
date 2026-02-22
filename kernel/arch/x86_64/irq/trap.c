@@ -16,6 +16,8 @@
 #include "signal.h"
 #include "seg.h"
 #include "trapframe.h"
+#include "lapic.h"
+#include "ioapic.h"
 
 /* ── Provided by trapvec.S — table of 256 stub addresses ── */
 extern uint64 vectors[];
@@ -149,25 +151,9 @@ static void pic_init(void) {
     outb(PIC1_DATA, 0x01);
     outb(PIC2_DATA, 0x01);
 
-    /* Mask all IRQs initially */
+    /* Mask ALL IRQs — we use the I/O APIC now */
     outb(PIC1_DATA, 0xFF);
     outb(PIC2_DATA, 0xFF);
-}
-
-static void pic_unmask(int irq) {
-    if (irq < 8) {
-        outb(PIC1_DATA, inb(PIC1_DATA) & ~(1 << irq));
-    } else {
-        outb(PIC2_DATA, inb(PIC2_DATA) & ~(1 << (irq - 8)));
-        /* Also unmask cascade line (IRQ 2) on master */
-        outb(PIC1_DATA, inb(PIC1_DATA) & ~(1 << 2));
-    }
-}
-
-static void pic_eoi(int irq) {
-    if (irq >= 8)
-        outb(PIC2_CMD, PIC_EOI);
-    outb(PIC1_CMD, PIC_EOI);
 }
 
 /* ── IDT ── */
@@ -200,21 +186,66 @@ void arch_trap_init_hart(void) {
 /* Defined in timer/timer.c */
 extern void arch_timer_init(void);
 
+/* Forward declarations for debugcon helpers defined later */
+static inline void dbg_outb(uint16 port, uint8 val);
+static void dbg_puts(const char *s);
+static void dbg_hex(uint64 v);
+
 void arch_irq_init(void) {
+    dbg_puts("[x86] arch_irq_init: begin\n");
+
+    /* Remap and mask the legacy PIC so it doesn't interfere */
     pic_init();
-    arch_timer_init();        /* program PIT channel 0 for 100 Hz */
-    /* Unmask IRQ 0 (PIT timer) */
-    pic_unmask(0);
-    printf("[x86] PIC 8259A initialized, IRQ 0 (timer) unmasked\n");
+    dbg_puts("[x86] arch_irq_init: PIC masked\n");
+
+    /* Initialize the Local APIC on this CPU */
+    lapic_init();
+    dbg_puts("[x86] arch_irq_init: LAPIC done\n");
+
+    /* Initialize the I/O APIC — masks all redirection entries */
+    ioapic_init();
+    dbg_puts("[x86] arch_irq_init: IOAPIC done\n");
+
+    /* Select and start the tick timer (LAPIC/HPET/PIT) */
+    arch_timer_init();
+
+    /* If the chosen timer uses IRQ 0 (PIT or HPET), route it via IOAPIC */
+    extern int arch_timer_needs_ioapic_irq0(void);
+    int bsp_id = lapic_id();
+    if (arch_timer_needs_ioapic_irq0())
+        ioapic_enable(0, T_IRQ0 + 0, bsp_id);  /* IRQ 0 → vector 32 → BSP */
+
+    dbg_puts("[x86] arch_irq_init: APIC initialized, bsp_id=");
+    dbg_hex((uint64)bsp_id);
+    dbg_puts("\n");
 }
 
 void arch_irq_init_hart(void) {
-    /* Per-CPU LAPIC init would go here (SMP) */
+    /* Per-CPU LAPIC init for secondary CPUs.
+     * Skip for BSP — arch_irq_init() already set up the LAPIC and timer.
+     * Calling lapic_init() again would re-mask the LVT timer entry. */
+    static int bsp_done = 0;
+    if (!bsp_done) {
+        bsp_done = 1;
+        return;     /* BSP: already initialized in arch_irq_init() */
+    }
+    lapic_init();
 }
 
+/*
+ * plic_enable_irq — called by register_irq_handler() for device IRQs.
+ *
+ * On x86, this programs the I/O APIC to route the given ISA IRQ
+ * to the BSP's LAPIC at vector T_IRQ0 + irq.
+ */
+void plic_enable_irq(int irq) {
+    ioapic_enable(irq, T_IRQ0 + irq, 0 /* BSP LAPIC ID */);
+}
+
+/* These are only used on RISC-V; on x86 the trap handler dispatches
+ * directly and sends LAPIC EOI. */
 int plic_claim(void)          { return 0; }
 void plic_complete(int irq)   { (void)irq; }
-void plic_enable_irq(int irq) { (void)irq; }
 
 /* ── Exception name table ── */
 
@@ -271,10 +302,15 @@ static inline uint64 read_cr2(void) {
 /* ── Timer tick advance (defined in timer.c) ── */
 extern void timer_tick_advance(void);
 
+/* ── Device IRQ dispatch (defined in kernel/irq/irq.c) ── */
+extern int do_device_irq(int hw_irq);
+
 /* ── x86_trap_handler ── */
 
 void x86_trap_handler(struct trapframe *tf) {
     uint64 vec = tf->trapno;
+
+
 
     if (vec < 32) {
         /* CPU exception */
@@ -319,34 +355,41 @@ void x86_trap_handler(struct trapframe *tf) {
         printf("  rsp=0x%lx  rbp=0x%lx  rflags=0x%lx\n",
                tf->rsp, tf->rbp, tf->rflags);
 
-        /* Fix up trapframe so GDB can unwind to the faulting code.
-         * Same technique as RISC-V __trap_panic:
-         *   - Write faulting RIP just below the trapframe so the
-         *     backtrace walker finds it as a return address.
-         *   - Then call panic() which halts with a full backtrace.
-         */
         *(uint64 *)((uint64)tf - 8) = tf->rip;
         panic_disable_bt();
         panic("exception");
 
-    } else if (vec >= 32 && vec < 48) {
-        /* Hardware IRQ (PIC) */
-        int irq = vec - 32;
+    } else if (vec >= T_IRQ0 && vec < T_IRQ0 + 24) {
+        /* Hardware IRQ via I/O APIC (ISA IRQ 0-23) */
+        int irq = vec - T_IRQ0;
 
         if (irq == 0) {
             /* PIT timer tick */
             timer_tick_advance();
         } else {
-            /* Other IRQs — log but otherwise ignore */
-            dbg_puts("[x86] IRQ ");
-            dbg_hex(irq);
-            dbg_puts(" (unhandled)\n");
+            /* Dispatch through irq_descs[] for registered device handlers */
+            do_device_irq(irq);
         }
 
-        pic_eoi(irq);
+        lapic_eoi();
+
+    } else if (vec == LAPIC_TIMER_VEC) {
+        /* LAPIC timer interrupt (periodic or TSC-deadline) */
+        timer_tick_advance();
+        extern void lapic_timer_rearm(void);
+        lapic_timer_rearm();  /* no-op for periodic mode */
+        lapic_eoi();
+
+    } else if (vec == LAPIC_ERROR_VEC) {
+        /* LAPIC error interrupt */
+        printf("[x86] LAPIC error: ESR=0x%x\n", lapic_read(LAPIC_ESR));
+        lapic_eoi();
+
+    } else if (vec == LAPIC_SPURIOUS_VEC) {
+        /* Spurious interrupt — do NOT send EOI */
 
     } else if (vec == 0x80) {
         dbg_puts("[x86] INT 0x80 syscall (stub)\n");
     }
-    /* Spurious / unknown vectors: silently ignored */
+    /* Unknown vectors: silently ignored */
 }

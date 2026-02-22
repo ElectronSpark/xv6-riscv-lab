@@ -2,6 +2,8 @@ set(ARCH_C_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/start.c
     ${CMAKE_CURRENT_SOURCE_DIR}/seg.c
     ${CMAKE_CURRENT_SOURCE_DIR}/irq/trap.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/irq/lapic.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/irq/ioapic.c
     ${CMAKE_CURRENT_SOURCE_DIR}/irq/syscall.c
     ${CMAKE_CURRENT_SOURCE_DIR}/ipi/ipi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/timer/timer.c
