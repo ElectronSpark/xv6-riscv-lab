@@ -17,13 +17,13 @@
 
 uint64 __plic_mmio_base = 0x0c000000L;
 
-void plicinit(void) {
+void arch_irq_init(void) {
     // Core PLIC initialization
     // Device-specific IRQ priorities are set by each device's init function
     // using plic_enable_irq()
 }
 
-void plicinithart(void) {
+void arch_irq_init_hart(void) {
     int hart = cpuid();
 
     // Set this hart's S-mode priority threshold to 0.

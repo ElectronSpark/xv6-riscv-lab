@@ -122,8 +122,8 @@ static inline const char *__scause_to_str(uint64 scause) {
     }
 }
 
-void trapinit(void);
-void trapinithart(void);
+void arch_trap_init(void);
+void arch_trap_init_hart(void);
 
 void irq_desc_init(void);
 int register_irq_handler(int irq_num, struct irq_desc *desc);

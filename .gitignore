@@ -21,6 +21,10 @@ compile_commands.json
 .cache
 kernel/lwip
 build
+build-x86
+build-x86_64
+build-riscv64
+build-aarch64
 *.dSYM
 packets.pcap
 .gdbinit.tmpl-riscv

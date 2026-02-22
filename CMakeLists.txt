@@ -6,6 +6,22 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_BINARY_DIR)
 endif()
 
 # ==============================================================================
+# Architecture Configuration
+# ==============================================================================
+if(NOT DEFINED ARCH)
+    if(DEFINED ENV{ARCH})
+        set(ARCH "$ENV{ARCH}")
+    else()
+        set(ARCH "riscv")
+    endif()
+endif()
+
+# Validate architecture
+if(NOT ARCH MATCHES "^(riscv|x86_64)$")
+    message(FATAL_ERROR "Invalid ARCH: ${ARCH}. Must be 'riscv' or 'x86_64'")
+endif()
+
+# ==============================================================================
 # Platform Configuration
 # ==============================================================================
 # PLATFORM can be set via cmake -DPLATFORM=orangepi or environment variable
@@ -94,9 +110,19 @@ find_package(Perl REQUIRED)
 # standard C libraries (libc, crt0.o, etc.) so linking a test executable fails.
 set(CMAKE_TRY_COMPILE_TARGET_TYPE STATIC_LIBRARY)
 
-# Set the RISC-V toolchain BEFORE project() so CMake uses the correct compilers
+# Set the toolchain BEFORE project() so CMake uses the correct compilers
 # CMake detects compilers during project() - setting them afterward has no effect
-if(DEFINED ENV{TOOLPREFIX})
+set(USE_ENV_TOOLPREFIX OFF)
+if(DEFINED ENV{TOOLPREFIX} AND NOT "$ENV{TOOLPREFIX}" STREQUAL "")
+    if((ARCH STREQUAL "riscv" AND "$ENV{TOOLPREFIX}" MATCHES "riscv") OR
+       (ARCH STREQUAL "x86_64" AND "$ENV{TOOLPREFIX}" MATCHES "x86_64"))
+        set(USE_ENV_TOOLPREFIX ON)
+    else()
+        message(WARNING "Ignoring TOOLPREFIX=$ENV{TOOLPREFIX} for ARCH=${ARCH} (architecture mismatch)")
+    endif()
+endif()
+
+if(USE_ENV_TOOLPREFIX)
     set(CMAKE_C_COMPILER $ENV{TOOLPREFIX}gcc CACHE STRING "C compiler" FORCE)
     set(CMAKE_ASM_COMPILER $ENV{TOOLPREFIX}gcc CACHE STRING "ASM compiler" FORCE)
     set(CMAKE_LINKER $ENV{TOOLPREFIX}ld CACHE FILEPATH "Linker" FORCE)
@@ -104,30 +130,63 @@ if(DEFINED ENV{TOOLPREFIX})
     set(CMAKE_OBJDUMP $ENV{TOOLPREFIX}objdump)
     set(CMAKE_C_LINK_EXECUTABLE "$ENV{TOOLPREFIX}ld <LINK_FLAGS> -o <TARGET> <LINK_LIBRARIES> <OBJECTS>")
 else()
-    # Try to find riscv64-unknown-elf tools automatically
-    message(STATUS "TOOLPREFIX environment variable not set, searching for riscv64-unknown-elf tools...")
-    find_program(RISCV_GCC riscv64-unknown-elf-gcc PATHS /opt/riscv/bin PATH_SUFFIXES bin NO_DEFAULT_PATH)
-    if(NOT RISCV_GCC)
-        find_program(RISCV_GCC riscv64-unknown-elf-gcc)
-    endif()
-    
-    if(RISCV_GCC)
-        get_filename_component(TOOLPREFIX ${RISCV_GCC} DIRECTORY)
-        set(TOOLPREFIX "${TOOLPREFIX}/riscv64-unknown-elf-")
-        set(CMAKE_C_COMPILER ${TOOLPREFIX}gcc CACHE STRING "C compiler" FORCE)
-        set(CMAKE_ASM_COMPILER ${TOOLPREFIX}gcc CACHE STRING "ASM compiler" FORCE)
-        set(CMAKE_LINKER ${TOOLPREFIX}ld CACHE FILEPATH "Linker" FORCE)
-        set(CMAKE_OBJCOPY ${TOOLPREFIX}objcopy)
-        set(CMAKE_OBJDUMP ${TOOLPREFIX}objdump)
-        set(CMAKE_C_LINK_EXECUTABLE "${TOOLPREFIX}ld <LINK_FLAGS> -o <TARGET> <LINK_LIBRARIES> <OBJECTS>")
-        message(STATUS "Found RISC-V toolchain: ${TOOLPREFIX}")
-    else()
-        message(FATAL_ERROR "TOOLPREFIX environment variable not set and riscv64-unknown-elf tools not found in PATH or /opt/riscv/bin")
+    if(ARCH STREQUAL "riscv")
+        # Try to find riscv64-unknown-elf tools automatically
+        message(STATUS "TOOLPREFIX environment variable not set, searching for riscv64-unknown-elf tools...")
+        find_program(RISCV_GCC riscv64-unknown-elf-gcc PATHS /opt/riscv/bin PATH_SUFFIXES bin NO_DEFAULT_PATH)
+        if(NOT RISCV_GCC)
+            find_program(RISCV_GCC riscv64-unknown-elf-gcc)
+        endif()
+        
+        if(RISCV_GCC)
+            get_filename_component(TOOLPREFIX ${RISCV_GCC} DIRECTORY)
+            set(TOOLPREFIX "${TOOLPREFIX}/riscv64-unknown-elf-")
+            set(CMAKE_C_COMPILER ${TOOLPREFIX}gcc CACHE STRING "C compiler" FORCE)
+            set(CMAKE_ASM_COMPILER ${TOOLPREFIX}gcc CACHE STRING "ASM compiler" FORCE)
+            set(CMAKE_LINKER ${TOOLPREFIX}ld CACHE FILEPATH "Linker" FORCE)
+            set(CMAKE_OBJCOPY ${TOOLPREFIX}objcopy)
+            set(CMAKE_OBJDUMP ${TOOLPREFIX}objdump)
+            set(CMAKE_C_LINK_EXECUTABLE "${TOOLPREFIX}ld <LINK_FLAGS> -o <TARGET> <LINK_LIBRARIES> <OBJECTS>")
+            message(STATUS "Found RISC-V toolchain: ${TOOLPREFIX}")
+        else()
+            message(FATAL_ERROR "TOOLPREFIX environment variable not set and riscv64-unknown-elf tools not found in PATH or /opt/riscv/bin")
+        endif()
+    elseif(ARCH STREQUAL "x86_64")
+        # Try to find x86_64-elf tools automatically, then host x86_64-linux-gnu tools
+        message(STATUS "Searching for x86_64 toolchain...")
+        find_program(X86_GCC x86_64-elf-gcc)
+        if(NOT X86_GCC)
+            find_program(X86_GCC x86_64-linux-gnu-gcc)
+        endif()
+        
+        if(X86_GCC)
+            get_filename_component(TOOLPREFIX ${X86_GCC} DIRECTORY)
+            if(X86_GCC MATCHES "x86_64-linux-gnu-gcc$")
+                set(TOOLPREFIX "${TOOLPREFIX}/x86_64-linux-gnu-")
+            else()
+                set(TOOLPREFIX "${TOOLPREFIX}/x86_64-elf-")
+            endif()
+            set(CMAKE_C_COMPILER ${TOOLPREFIX}gcc CACHE STRING "C compiler" FORCE)
+            set(CMAKE_ASM_COMPILER ${TOOLPREFIX}gcc CACHE STRING "ASM compiler" FORCE)
+            set(CMAKE_LINKER ${TOOLPREFIX}ld CACHE FILEPATH "Linker" FORCE)
+            set(CMAKE_OBJCOPY ${TOOLPREFIX}objcopy)
+            set(CMAKE_OBJDUMP ${TOOLPREFIX}objdump)
+            set(CMAKE_C_LINK_EXECUTABLE "${TOOLPREFIX}ld <LINK_FLAGS> -o <TARGET> <LINK_LIBRARIES> <OBJECTS>")
+            message(STATUS "Found x86_64 toolchain: ${TOOLPREFIX}")
+        else()
+            message(FATAL_ERROR "No x86_64 toolchain found (tried x86_64-elf-gcc and x86_64-linux-gnu-gcc)")
+        endif()
     endif()
 endif()
 
 # Project name
-project(xv6-riscv LANGUAGES C ASM)
+project(xv6-${ARCH} LANGUAGES C ASM)
+
+if(ARCH STREQUAL "riscv")
+    add_compile_definitions(CONFIG_ARCH_RISCV=1)
+elseif(ARCH STREQUAL "x86_64")
+    add_compile_definitions(CONFIG_ARCH_X86_64=1)
+endif()
 
 # Specify the C standard
 # set(CMAKE_C_STANDARD 17)
@@ -142,7 +201,6 @@ set(USER_DIR ${CMAKE_SOURCE_DIR}/user)
 # ==============================================================================
 string(CONCAT CMAKE_C_FLAGS "${CMAKE_C_FLAGS}"
     " -Wall -Werror -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2"
-    " -mcmodel=medany"
     " -fno-common -nostdlib"
     # Disable all built-in function assumptions — we provide our own libc
     " -fno-builtin-strncpy -fno-builtin-strncmp -fno-builtin-strlen"
@@ -157,6 +215,12 @@ string(CONCAT CMAKE_C_FLAGS "${CMAKE_C_FLAGS}"
     " -I${KERNEL_DIR}/inc"
     " -DUSE_SOFTWARE_FFS=1"
 )
+
+if(ARCH STREQUAL "riscv")
+    string(APPEND CMAKE_C_FLAGS " -mcmodel=medany")
+elseif(ARCH STREQUAL "x86_64")
+    string(APPEND CMAKE_C_FLAGS " -mno-red-zone")
+endif()
 
 # check whether it needs to turn off stack protector
 execute_process(

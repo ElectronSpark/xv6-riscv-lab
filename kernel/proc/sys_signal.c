@@ -101,10 +101,15 @@ uint64 sys_sigreturn(void) {
     struct thread *p = current;
     assert(p != NULL, "sys_sigreturn: current returned NULL");
 
-    // Return the restored a0 from the sigframe so the syscall dispatcher
-    // doesn't overwrite it. This preserves the original return value
-    // (e.g. -EINTR from sigsuspend) across signal handler execution.
+    // Return the restored return-value register from the sigframe so the
+    // syscall dispatcher doesn't overwrite it.  This preserves the original
+    // return value (e.g. -EINTR from sigsuspend) across signal handler
+    // execution.
+#ifdef __x86_64__
+    return p->trapframe->trapframe.rax;
+#else
     return p->trapframe->trapframe.a0;
+#endif
 }
 
 uint64 sys_pause(void) {

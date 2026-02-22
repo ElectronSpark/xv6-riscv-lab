@@ -144,7 +144,7 @@ struct thread *switch_to(struct thread *cur, struct thread *target) {
     __atomic_store_n(&mycpu()->rcu_timestamp, now, __ATOMIC_RELEASE);
 
     mycpu()->proc = target;
-    struct context *prev_context = __swtch_context(
+    struct context *prev_context = arch_context_switch(
         &cur->sched_entity->context, &target->sched_entity->context);
     return thread_from_context(prev_context);
 }
@@ -251,7 +251,7 @@ void scheduler_sleep(spinlock_t *lk, enum thread_state sleep_state) {
     int lk_holding = (lk != NULL && spin_holding(lk));
 
     if (lk_holding) {
-        spin_unlock(lk); // Release the lock returned by __swtch_context
+        spin_unlock(lk); // Release the lock returned by arch_context_switch
     }
     scheduler_yield(); // Switch to the scheduler
 

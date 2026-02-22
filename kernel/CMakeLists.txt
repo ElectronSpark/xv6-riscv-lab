@@ -9,7 +9,9 @@ set(KERNEL_SYMBOLS kernel.sym)
 #   - qemu (default): KERNEL_BASE=0x80200000
 #   - orangepi:       KERNEL_BASE=0x00200000
 # ==============================================================================
-if(PLATFORM STREQUAL "orangepi")
+if(ARCH STREQUAL "x86_64")
+    set(KERNEL_BASE "0x00100000")
+elseif(PLATFORM STREQUAL "orangepi")
     set(KERNEL_BASE "0x00200000")
 else()
     set(KERNEL_BASE "0x80200000")
@@ -26,7 +28,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/exec.c
     ${KERNEL_DIR}/virtio_disk.c
     ${KERNEL_DIR}/ramdisk.c
-    ${KERNEL_DIR}/backtrace.c
+    ${KERNEL_DIR}/ksymbols.c
     ${KERNEL_DIR}/e1000.c
     ${KERNEL_DIR}/net.c
     ${KERNEL_DIR}/pci.c
@@ -36,7 +38,6 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/rbtree.c
     ${KERNEL_DIR}/kobject.c
     ${KERNEL_DIR}/bits.c
-    ${KERNEL_DIR}/sbi.c
 )
 
 if(DEFINED ENV{RWLOCK_TEST})
@@ -48,7 +49,6 @@ if(DEFINED ENV{SEMAPHORE_TEST})
 endif()
 
 set(KERNEL_SCAN_OBJS
-    ${KERNEL_DIR}/start.c
     ${KERNEL_DIR}/console.c
     ${KERNEL_DIR}/printf.c
     ${KERNEL_DIR}/uart.c
@@ -62,14 +62,16 @@ if($ENV{LAB} STREQUAL "lock")
     list(APPEND KERNEL_C_FILES ${KERNEL_DIR}/stats.c ${KERNEL_DIR}/sprintf.c)
 endif()
 
-set(KERNEL_S_FILES ${KERNEL_DIR}/entry.S)
+set(KERNEL_S_FILES)
 
 # Generate asm-offsets.h before building anything else
 add_subdirectory(${KERNEL_DIR}/inc)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding -DUSE_LWIP=1 ")
+include_directories(${KERNEL_DIR}/arch/${ARCH}/inc)
 
 # Pull in subdirectory object libraries.
+add_subdirectory(${KERNEL_DIR}/arch/${ARCH})
 add_subdirectory(${KERNEL_DIR}/irq)
 add_subdirectory(${KERNEL_DIR}/dev)
 add_subdirectory(${KERNEL_DIR}/lock)
@@ -93,6 +95,7 @@ set(KERNEL_OBJS ${KERNEL_S_FILES} ${KERNEL_C_FILES} ${KERNEL_SCAN_OBJS})
 
 # Object libraries to link
 set(KERNEL_OBJ_LIBS
+    $<TARGET_OBJECTS:arch_${ARCH}>
     $<TARGET_OBJECTS:irq>
     $<TARGET_OBJECTS:dev>
     $<TARGET_OBJECTS:lock>
@@ -112,7 +115,7 @@ set(KERNEL_OBJ_LIBS
     $<TARGET_OBJECTS:kqueue_core>
 )
 
-set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs tty lwip ext4fs daemons gdbstub kqueue_core)
+set(KERNEL_LINK_LIBS arch_${ARCH} irq dev lock mm proc timer vfs tty lwip ext4fs daemons gdbstub kqueue_core)
 
 # ==============================================================================
 # Linker scripts (generated from kernel.ld.in template)
@@ -126,7 +129,11 @@ set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs tty lwip ext4fs daemons gdbs
 # Its size is computed at build time by scripts/gen_kernel_ld.py, which counts
 # DWARF decoded-line entries and multiplies by sizeof(__ksymbols_t).
 # ==============================================================================
-set(KERNEL_LD_IN ${KERNEL_DIR}/kernel.ld.in)
+if(ARCH STREQUAL "x86_64")
+    set(KERNEL_LD_IN ${KERNEL_DIR}/kernel_x86_64.ld.in)
+else()
+    set(KERNEL_LD_IN ${KERNEL_DIR}/kernel.ld.in)
+endif()
 
 # Plain kernel linker script (no symbol index needed)
 set(KERNEL_SYMBOLS_IDX_SIZE "0")
@@ -253,14 +260,28 @@ add_custom_target(kernel_with_symbols
 # ==============================================================================
 # Final outputs: xv6.bin and xv6.sym
 # ==============================================================================
-add_custom_command(
-    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin
-    COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:kernel_with_symbols_elf> xv6.bin
-    COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/patch_image_size.py xv6.bin
-    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-    COMMENT "Generating xv6.bin (${PLATFORM})"
-    DEPENDS kernel_with_symbols $<TARGET_FILE:kernel_with_symbols_elf>
-)
+if(ARCH STREQUAL "x86_64")
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin
+        COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:kernel_with_symbols_elf> xv6.payload.bin
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/make_linux_x86_image.py xv6.payload.bin xv6.bin
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/verify_linux_x86_boot_header.py xv6.bin
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+        COMMENT "Generating xv6.bin (${PLATFORM})"
+        DEPENDS kernel_with_symbols $<TARGET_FILE:kernel_with_symbols_elf>
+                ${CMAKE_SOURCE_DIR}/scripts/make_linux_x86_image.py
+                ${CMAKE_SOURCE_DIR}/scripts/verify_linux_x86_boot_header.py
+    )
+else()
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin
+        COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:kernel_with_symbols_elf> xv6.bin
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/patch_image_size.py xv6.bin
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+        COMMENT "Generating xv6.bin (${PLATFORM})"
+        DEPENDS kernel_with_symbols $<TARGET_FILE:kernel_with_symbols_elf>
+    )
+endif()
 
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6.sym

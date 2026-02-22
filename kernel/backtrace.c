@@ -313,8 +313,12 @@ void print_thread_backtrace(struct context *ctx, uint64 kstack,
         return;
     }
 
-    // s0 is the frame pointer in RISC-V
+    // s0 is the frame pointer in RISC-V; rbp on x86
+#ifdef __x86_64__
+    uint64 fp = ctx->rbp;
+#else
     uint64 fp = ctx->s0;
+#endif
     uint64 stack_size = (1UL << (PAGE_SHIFT + kstack_order));
     uint64 stack_start = kstack;
     uint64 stack_end = kstack + stack_size;

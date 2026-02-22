@@ -58,6 +58,22 @@
 #include "dev/fdt.h"
 #include <mm/memstat.h>
 
+#ifdef __x86_64__
+static inline void x86_page_dbg_outb(uint16 port, uint8 value) {
+    asm volatile("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static void x86_page_dbg_puts(const char *s) {
+    while (*s) {
+        x86_page_dbg_outb(0xE9, (uint8)*s++);
+    }
+}
+
+#define X86_PAGE_MARK(msg) x86_page_dbg_puts(msg)
+#else
+#define X86_PAGE_MARK(msg) ((void)0)
+#endif
+
 // ============================================================================
 // SECTION 1: Global Data & Configuration
 // ============================================================================
@@ -1386,11 +1402,14 @@ static void __page_buddy_init_region(uint64 region_start, uint64 region_end,
 
 // Init buddy system and add the given range of pages into it
 int page_buddy_init(void) {
+    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: begin\n");
     size_t page_arr_size = sizeof(page_t) * TOTALPAGES;
     __pages = (page_t *)early_alloc_align(page_arr_size, PGSIZE);
+    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after early_alloc_align\n");
     assert(__pages != NULL, "page_buddy_init(): failed to allocate page array");
     __managed_start = PGROUNDUP((uint64)early_alloc_end_ptr());
     __managed_end = PHYSTOP;
+    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after managed range set\n");
     printf("page_buddy_init(): page array at 0x%lx, size 0x%lx\n",
            (uint64)__pages, page_arr_size);
     printf("__managed_start: 0x%lx, __managed_end: 0x%lx\n", __managed_start,
@@ -1407,9 +1426,11 @@ int page_buddy_init(void) {
            __managed_start, __managed_end);
 
     // Initialize kernel text/data pages as locked
+    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: before lower lock init\n");
     assert(__init_range_flags(KERNBASE, __managed_start, PAGE_FLAG_LOCKED) == 0,
            "page_buddy_init(): lower locked memory: 0x%lx to 0x%lx", KERNBASE,
            __managed_start);
+    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after lower lock init\n");
 
     // Initialize pages for each memory region and gaps between them
     // First pass: mark all pages. Gaps between regions are LOCKED.
@@ -1494,6 +1515,8 @@ int page_buddy_init(void) {
     }
 
     __buddy_pool_init();
+    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after buddy_pool_init\n");
+    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: before second pass\n");
 
     // Second pass: initialize buddy pools for each region
     for (int i = 0; i < platform.mem_count; i++) {
@@ -1531,12 +1554,19 @@ int page_buddy_init(void) {
                label, i, region_start, region_end,
                (region_end - region_start) / (1024 * 1024));
 
+        X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: init region\n");
+
         __page_buddy_init_region(region_start, region_end, pools, label);
+        X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: region done\n");
     }
 
-#ifndef HOST_TEST
+    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after second pass\n");
+
+#if !defined(HOST_TEST) && !defined(__x86_64__)
     print_buddy_system_stat(1);
 #endif
+
+    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: done\n");
 
     return 0;
 }

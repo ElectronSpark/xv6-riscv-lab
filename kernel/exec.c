@@ -547,9 +547,13 @@ int exec(char *path, char **argv, char **envp) {
         goto bad;
 
     // arguments to user main(argc, argv)
-    // argc is returned via the system call return
-    // value, which goes in a0.
-    p->trapframe->trapframe.a1 = sp + sizeof(uint64);
+    // argc is returned via the system call return value.
+    // argv goes in the second argument register.
+#ifdef __x86_64__
+    p->trapframe->trapframe.rsi = sp + sizeof(uint64);  /* argv in RSI */
+#else
+    p->trapframe->trapframe.a1 = sp + sizeof(uint64);    /* argv in a1 */
+#endif
 
     // Save program name for debugging.
     for (last = s = path; *s; s++)

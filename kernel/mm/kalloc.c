@@ -15,6 +15,22 @@
 #include "bits.h"
 #include <smp/percpu.h>
 
+#ifdef __x86_64__
+static inline void x86_kinit_dbg_outb(uint16 port, uint8 value) {
+    asm volatile("outb %0, %1" : : "a"(value), "Nd"(port));
+}
+
+static void x86_kinit_dbg_puts(const char *s) {
+    while (*s) {
+        x86_kinit_dbg_outb(0xE9, (uint8)*s++);
+    }
+}
+
+#define X86_KINIT_MARK(msg) x86_kinit_dbg_puts(msg)
+#else
+#define X86_KINIT_MARK(msg) ((void)0)
+#endif
+
 STATIC slab_cache_t __kmm_slab_cache[SLAB_CACHE_NUMS][1];
 STATIC char __kmm_slab_names[SLAB_CACHE_NUMS][32] = {0};
 static slab_cache_t __slab_t_pool = {
@@ -38,30 +54,38 @@ STATIC_INLINE void __init_kmm_slab_name(int idx, size_t bytes) {
 void kinit() {
     size_t obj_size = SLAB_OBJ_MIN_SIZE;
 
+    X86_KINIT_MARK("[xv6 x86_64] kinit: begin\n");
     page_buddy_init();
+    X86_KINIT_MARK("[xv6 x86_64] kinit: after page_buddy_init\n");
 
     int ret = slab_cache_init(&__slab_t_pool, "slab_t_pool", sizeof(slab_t),
                               SLAB_FLAG_STATIC | SLAB_FLAG_EMBEDDED);
+    X86_KINIT_MARK("[xv6 x86_64] kinit: after slab_t_pool\n");
     assert(ret == 0,
            "__slab_t_pool_init: failed to initialize slab_t pool, errno=%d",
            ret);
     ret = slab_cache_init(&__slab_cache_t_pool, "slab_cache_t_pool",
                           sizeof(slab_cache_t),
                           SLAB_FLAG_STATIC | SLAB_FLAG_EMBEDDED);
+    X86_KINIT_MARK("[xv6 x86_64] kinit: after slab_cache_t_pool\n");
     assert(ret == 0,
            "__slab_cache_t_pool_init: failed to initialize slab_cache_t pool, "
            "errno=%d",
            ret);
 
     for (int i = 0; i < SLAB_CACHE_NUMS; i++) {
+        X86_KINIT_MARK("[xv6 x86_64] kinit: slab loop iter\n");
         __init_kmm_slab_name(i, obj_size);
         if (slab_cache_init(__kmm_slab_cache[i], __kmm_slab_names[i], obj_size,
                             SLAB_FLAG_EMBEDDED | SLAB_FLAG_STATIC) != 0) {
             printf("failed to initialize kmm slab: %s\n", __kmm_slab_names[i]);
             panic("kinit");
         }
+        X86_KINIT_MARK("[xv6 x86_64] kinit: slab loop iter done\n");
         obj_size *= 2;
     }
+
+    X86_KINIT_MARK("[xv6 x86_64] kinit: done\n");
 }
 
 slab_t *slab_t_desc_alloc(void) {

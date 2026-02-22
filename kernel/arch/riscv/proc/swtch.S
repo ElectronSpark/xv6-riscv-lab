@@ -1,16 +1,17 @@
 # Context switch
 #
-#   void swtch(struct context *old, struct context *new);
+#   struct context *arch_context_switch(struct context *current, struct context *target);
 # 
-# Save current registers in old. Load from new.	
-
-# struct context *__swtch_context(struct context *current, struct context *target);
+# Save current registers in current. Load from target.
+# Returns current (a0) as the switched-out context.
+#
+# struct context *arch_context_switch(struct context *current, struct context *target);
 # The return value is the last context switched out (i.e., current).
 # 
 # Save current registers in old. Load from new.
 # The pcb_arg passed in a2 is returned to the target context in a0.
-.globl __swtch_context
-__swtch_context:
+.globl arch_context_switch
+arch_context_switch:
         sd ra, 0(a0)
         sd sp, 8(a0)
         sd s0, 16(a0)

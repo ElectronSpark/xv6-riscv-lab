@@ -1,0 +1,75 @@
+OUTPUT_ARCH("i386:x86-64")
+ENTRY(_entry)
+
+SECTIONS
+{
+  . = @KERNEL_BASE@;
+
+  .text.entry : {
+    _entry = .;
+    KEEP(*(.text.entry))
+  }
+
+  .text : {
+    . = ALIGN(16);
+    *(.text .text.*)
+    . = ALIGN(0x1000);
+    PROVIDE(etext = .);
+  }
+
+  .rodata : {
+    . = ALIGN(4096);
+    _rodata = .;
+    *(.srodata .srodata.*)
+    . = ALIGN(16);
+    *(.rodata .rodata.*)
+    . = ALIGN(4096);
+    _rodata_end = .;
+  }
+
+  .data.ktlb : {
+    . = ALIGN(4096);
+    PROVIDE(_data_ktlb = .);
+    . += 4096;
+    _data_ktlb_end = .;
+  }
+
+  .data : {
+    . = ALIGN(4096);
+    _data = .;
+    *(.sdata .sdata.*)
+    . = ALIGN(16);
+    *(.data .data.*)
+    . = ALIGN(4096);
+    _data_end = .;
+  }
+
+  .ksymbols : {
+    . = ALIGN(4096);
+    _ksymbols_start = .;
+    KEEP(*(.ksymbols))
+    . = ALIGN(4096);
+    _ksymbols_end = .;
+  }
+
+  _kernel_image_end = .;
+
+  .bss : {
+    . = ALIGN(16);
+    _bss = .;
+    *(.sbss .sbss.*)
+    . = ALIGN(16);
+    *(.bss .bss.*)
+    . = ALIGN(4096);
+    _bss_end = .;
+  }
+
+  .ksymbols_idx (NOLOAD) : {
+    . = ALIGN(4096);
+    _ksymbols_idx_start = .;
+    . += @KERNEL_SYMBOLS_IDX_SIZE@;
+    _ksymbols_idx_end = .;
+  }
+
+  PROVIDE(end = .);
+}

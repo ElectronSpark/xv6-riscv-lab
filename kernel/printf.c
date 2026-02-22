@@ -258,7 +258,7 @@ void trigger_panic(void) {
     intr_on();
 
     for (;;)
-        asm volatile("wfi");
+        arch_wait_for_interrupt();
 }
 
 void __panic_end() {

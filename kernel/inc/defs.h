@@ -85,7 +85,7 @@ uint64 get_total_free_pages(void);
 // See kernel/vfs/xv6fs/log.c for VFS logging interfaces
 
 // swtch.S
-struct context *__swtch_context(struct context *cur, struct context *target);
+struct context *arch_context_switch(struct context *cur, struct context *target);
 typedef void (*sw_noret_cb_t)(uint64, uint64);
 void __switch_noreturn(uint64 irq_sp, uint64 s0, sw_noret_cb_t addr);
 
@@ -145,23 +145,20 @@ void uartputc_sync(int);
 int uartgetc(void);
 
 // vm.c
-void kvminit(void);
-void kvminithart(void);
+void arch_vm_init(void);
+void arch_vm_init_hart(void);
 void kvmmap(pagetable_t, uint64, uint64, uint64, int);
 int mappages(pagetable_t, uint64, uint64, uint64, int);
-pagetable_t uvmcreate(void);
 void uvmunmap(pagetable_t, uint64, uint64, int);
 pte_t *walk(pagetable_t, uint64, int, pte_t **, pte_t **);
 uint64 walkaddr(pagetable_t, uint64);
-int copyout(pagetable_t, uint64, char *, uint64);
-int copyin(pagetable_t, char *, uint64, uint64);
-int copyinstr(pagetable_t, char *, uint64, uint64);
-void dump_pagetable(pagetable_t pagetable, int level, int indent,
-                    uint64 va_base, uint64 va_end, bool omit_pa);
+pde_t *pgtab_alloc(void);
+void pgtab_free(void *);
+void vm_slab_init(void);
 
 // plic.c
-void plicinit(void);
-void plicinithart(void);
+void arch_irq_init(void);
+void arch_irq_init_hart(void);
 int plic_claim(void);
 void plic_complete(int);
 void plic_enable_irq(int);
@@ -172,12 +169,14 @@ void virtio_disk_init(void);
 // ramdisk.c
 void ramdisk_init(void);
 
-// backtrace.c
+// ksymbols.c
+void ksymbols_init(void);
+void db_break(void);
+
+// arch backtrace.c
 void print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end);
 void print_thread_backtrace(struct context *ctx, uint64 kstack,
                             int kstack_order);
-void ksymbols_init(void);
-void db_break(void);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x) / sizeof((x)[0]))

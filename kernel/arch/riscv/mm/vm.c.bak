@@ -1,0 +1,3243 @@
+#include "types.h"
+#include "param.h"
+#include <mm/memlayout.h>
+#include "riscv.h"
+#include "defs.h"
+#include "arch/vm.h"
+
+/*
+ * Virtual Memory Management for xv6
+ *
+ * This file implements the virtual memory area (VMA) management system.
+ * Each process has a vm_t structure containing:
+ * - vm_tree: Red-black tree for efficient VMA lookup by address
+ * - vm_list: Linked list of all VMAs (using list_entry member)
+ * - vm_free_list: Linked list of free VMAs (using free_list_entry member)
+ *
+ * VM LOCKING:
+ * Two separate locks protect different aspects of the VM:
+ *
+ * 1. vm rw_lock (rwsem_t) - Protects VMA TREE STRUCTURE
+ *    - Read lock: Safe to traverse/lookup VMAs (vm_find_area, etc.)
+ *    - Write lock: Required to modify VMA tree (vma_alloc, vma_free, vma_split,
+ * vma_merge)
+ *    - This is a sleep lock, safe to hold across blocking operations
+ *
+ * 2. vm spinlock (vm_pgtable_lock) - Protects PAGE TABLE DATA
+ *    - Required for PTE modifications (demand paging, COW handling)
+ *    - Acquired internally by vma_validate() around PTE operations
+ *    - This is a spinlock, must NOT sleep while holding
+ *
+ * Typical usage patterns:
+ * - Page fault: vm_rlock -> vm_find_area -> vma_validate (internally acquires
+ * pgtable_lock)
+ * - Allocate VMA: vm_wlock -> vma_alloc
+ * - Copy memory: vm_rlock -> vm_find_area -> vma_validate -> memcpy
+ *
+ * LOCKING ORDER:
+ * When acquiring multiple locks, always follow this order to prevent deadlocks.
+ * Rule: Always acquire sleep locks (mutexes, rwsems) before spinlocks.
+ *
+ * Sleep locks (acquire first):
+ * 1. mount mutex (vfs_mount_lock)
+ * 2. vfs_superblock lock
+ * 3. vfs_inode lock
+ * 4. vm rw_lock (read or write)
+ *
+ * Spinlocks (acquire after all sleep locks):
+ * 5. vm pgtable spinlock (vm->spinlock)
+ * 6. proc table lock (pid_lock)
+ * 7. pcb locks (parent -> target -> children)
+ * 8. pcache_global_spinlock
+ * 9. pcache spinlock (per-cache)
+ * 10. page lock
+ * 11. pcache tree_lock
+ *
+ * Notes:
+ * - Never acquire a sleep lock while holding a spinlock
+ * - When holding vm rw_lock, do NOT attempt to acquire VFS sleep locks
+ * - VFS inode lock must be acquired before vm locks during mmap/file operations
+ * - When crossing filesystems, release inode lock before acquiring another
+ * - Always acquire directory inode lock before child inode lock
+ *
+ * BUG FIXES:
+ * - List entry mismatch (Dec 2024): vm_free_list operations must use
+ *   free_list_entry, not list_entry. Using the wrong member caused list
+ *   corruption and crashes in rb_insert_color with NULL grand_parent.
+ * - Use-after-free in vm_copy (Dec 2024): When vm_copy fails, don't free
+ *   new_vma before calling __vm_destroy(dst) - let __vm_destroy handle cleanup.
+ * - OOM handling (Dec 2024): Changed asserts to return -1 for OOM conditions
+ *   in vma_alloc, vm_growstack, vm_growheap for graceful degradation.
+ *
+ * FILE ORGANIZATION (high-level):
+ *  1) Kernel page table setup (kvmmake/arch_vm_init/arch_vm_init_hart)
+ *  2) Debugging helpers (dump_pagetable + dump_vm)
+ *  3) Generic Sv39 page-table helpers (walk/walkaddr/mappages/uvm*)
+ *  4) Process VM subsystem:
+ *     - VMA allocator + lifetime helpers (slab-backed)
+ *     - VM creation/dup/destroy (vm_init/vm_copy/__vm_destroy)
+ *     - VMA tree/list operations
+ * (vm_find_area/vma_split/vma_merge/vma_alloc/vma_free)
+ *     - Demand paging + COW handling (vma_validate + vm_copy*)
+ *     - Heap/stack growth and mmap-style helpers
+ */
+
+#include <mm/vm.h>
+
+#include "defs.h"
+#include "elf.h"
+#include "list.h"
+#include "trap.h"
+#include "dev/uart.h"
+#include "dev/virtio.h"
+#include "dev/pci.h"
+#include "timer/goldfish_rtc.h"
+#include "dev/e1000_dev.h"
+#include "dev/plic.h"
+#include <mm/memlayout.h>
+#include <mm/page.h>
+#include <mm/slab.h>
+#include "param.h"
+#include <smp/percpu.h>
+#include "printf.h"
+#include "proc/thread.h"
+#include "lock/spinlock.h"
+#include "lock/rwsem.h"
+#include <smp/atomic.h>
+#include "rbtree.h"
+#include "riscv.h"
+#include "string.h"
+#include "types.h"
+#include "dev/fdt.h"
+#include "smp/ipi.h"
+#include "sbi.h"
+#include "errno.h"
+#include <vfs/file.h>
+#include <vfs/fs.h>
+#include <mm/pcache.h>
+#include <dev/bio.h>
+
+static slab_cache_t __vma_pool = {0};
+static slab_cache_t __vm_pool = {0};
+
+static void __vm_destroy(vm_t *vm);
+
+static void __vma_pool_init(void) {
+    slab_cache_init(&__vma_pool, "vm area", sizeof(vma_t),
+                    SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
+}
+
+static void __vm_pool_init(void) {
+    slab_cache_init(&__vm_pool, "vm", sizeof(vm_t),
+                    SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);
+}
+
+/*
+ * the kernel's page table.
+ */
+pagetable_t kernel_pagetable;
+
+extern char etext[], _entry[]; // kernel.ld sets this to end of kernel code.
+extern char _rodata[],
+    _rodata_end[]; // kernel.ld sets these to boundaries of rodata
+extern char _data[], _data_end[]; // kernel.ld sets these to boundaries of data
+extern char _bss[], _bss_end[];   // kernel.ld sets these to boundaries of bss
+extern char trampoline[], _trampoline_data[]; // trampoline.S
+extern char sig_trampoline[];                 // sig_trampoline.S
+extern char _data_ktlb[];
+
+extern uint64 trampoline_ksatp;
+
+/*
+ * ============================
+ *  Kernel/Page-table Helpers
+ * ============================
+ *
+ * Start here if you're debugging kernel mappings/boot:
+ *  - `kvmmake()` builds the kernel direct-map pagetable.
+ *  - `arch_vm_init()` installs it as `kernel_pagetable`.
+ *  - `arch_vm_init_hart()` switches a hart to it.
+ *
+ * These helpers implement Sv39 walking/mapping plus kernel pagetable setup.
+ * They are used by both the kernel direct-map and the per-process `vm_t`.
+ */
+
+static void *__pgtab_alloc(void) {
+    void *pa = page_alloc(0, PAGE_TYPE_PGTABLE);
+    if (pa) {
+        memset(pa, 0, PGSIZE);
+    }
+    return pa;
+}
+
+static void __pgtab_free(void *pa) {
+    page_t *page = __pa_to_page((uint64)pa);
+    if (page == NULL) {
+        panic("__pgtab_free: invalid page table address");
+    }
+    page_lock_acquire(page);
+    if (!PAGE_IS_TYPE(page, PAGE_TYPE_PGTABLE)) {
+        panic("__pgtab_free: trying to free a non-pagetable page");
+    }
+    page_lock_release(page);
+    page_free(pa, 0);
+}
+
+// Send remote sfence.vma to all CPUs using this vm
+// Since kernel space and user space are separated, we only need to
+// invalidate user space mappings.
+void vm_remote_sfence(vm_t *vm) {
+    push_off();
+    smp_mb();
+
+    cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
+    cpumask &= ~(1ULL << cpuid()); // Exclude self
+
+    // Send IPI to other CPUs to perform hfence.vma
+    if (cpumask) {
+        sbi_remote_hfence_vma(cpumask, 0, 0, 0);
+    }
+
+    pop_off();
+}
+
+/**
+ * vm_remote_fence_i - Flush I-cache on all harts that may run this VM.
+ *
+ * Unlike vm_remote_sfence() which only flushes the TLB, this flushes the
+ * instruction cache via the SBI RFENCE extension.  Must be called after
+ * mapping new executable pages (demand paging, exec, mremap) so that all
+ * harts see the updated code.  The local hart is always included because
+ * fence.i via SBI may not implicitly cover the caller on all platforms.
+ */
+void vm_remote_fence_i(vm_t *vm) {
+    push_off();
+    smp_mb();
+
+    cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
+    cpumask |= (1ULL << cpuid()); // Include self
+
+    sbi_remote_hfence_i(cpumask, 0);
+
+    pop_off();
+}
+
+// Like kvmmap, but silently skip pages that are already mapped.
+// Prevents remap panics when MMIO regions from different subsystems
+// (e.g. PCIe and EMAC) share the same physical page.
+// va, pa, and sz must be page-aligned.
+static void kvmmap_safe(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz,
+                        int perm) {
+    for (uint64 off = 0; off < sz; off += PGSIZE) {
+        pte_t *pte = walk(kpgtbl, va + off, 0, NULL, NULL);
+        if (pte && (*pte & PTE_V))
+            continue; // already mapped by another subsystem
+        kvmmap(kpgtbl, va + off, pa + off, PGSIZE, perm);
+    }
+}
+
+// Make a direct-map page table for the kernel.
+pagetable_t kvmmake(void) {
+    pagetable_t kpgtbl = (void *)_data_ktlb;
+
+    memset(kpgtbl, 0, PGSIZE);
+
+    // uart registers - page-align the address (UART5 is at 0xd4017100, not
+    // page-aligned)
+    uint64 uart_page = PGROUNDDOWN(UART0);
+    kvmmap(kpgtbl, uart_page, uart_page, PGSIZE, PTE_R | PTE_W);
+
+    // Goldfish RTC (Real Time Clock) - only on QEMU
+    if (GOLDFISH_RTC != 0) {
+        kvmmap(kpgtbl, GOLDFISH_RTC, GOLDFISH_RTC, PGSIZE, PTE_R | PTE_W);
+    }
+
+    // virtio mmio disk interface - only if platform has VirtIO devices
+    if (platform.has_virtio && platform.virtio_count > 0) {
+        for (int i = 0; i < platform.virtio_count && i < N_VIRTIO; i++) {
+            if (platform.virtio_base[i] != 0) {
+                kvmmap(kpgtbl, platform.virtio_base[i], platform.virtio_base[i],
+                       PGSIZE, PTE_R | PTE_W);
+            }
+        }
+    }
+
+    // PCI-E ECAM (configuration space), for pci.c - only if platform has PCIe
+    if (platform.has_pcie && PCIE_ECAM != 0) {
+        // Map all PCIe regions, skipping pages already mapped
+        for (int i = 0; i < platform.pcie_reg_count; i++) {
+            uint64 base = platform.pcie_reg[i].base;
+            uint64 size = platform.pcie_reg[i].size;
+            if (base == 0 || size == 0)
+                continue;
+            uint64 aligned_base = PGROUNDDOWN(base);
+            uint64 aligned_size = PGROUNDUP(base + size) - aligned_base;
+            kvmmap_safe(kpgtbl, aligned_base, aligned_base, aligned_size,
+                        PTE_R | PTE_W);
+        }
+        // pci.c maps the e1000's registers here - only on QEMU
+        // (VirtIO presence indicates QEMU; real hardware won't have E1000 at
+        // hardcoded addr)
+        if (platform.has_virtio && E1000_PCI_ADDR != 0) {
+            kvmmap(kpgtbl, E1000_PCI_ADDR, E1000_PCI_ADDR, 0x20000,
+                   PTE_R | PTE_W);
+        }
+    }
+
+    // PLIC
+    if (platform.plic_base != 0 && platform.plic_size != 0) {
+        kvmmap(kpgtbl, PLIC, PLIC, platform.plic_size, PTE_R | PTE_W);
+    }
+
+    // EMAC MMIO regions (SpacemiT X1 Ethernet MAC)
+    if (platform.has_emac) {
+        for (int i = 0; i < platform.emac_count && i < EMAC_MAX; i++) {
+            // Map EMAC register region
+            if (platform.emac[i].base != 0 && platform.emac[i].size != 0) {
+                uint64 base = PGROUNDDOWN(platform.emac[i].base);
+                uint64 size = PGROUNDUP(platform.emac[i].base +
+                                        platform.emac[i].size) - base;
+                kvmmap_safe(kpgtbl, base, base, size, PTE_R | PTE_W);
+            }
+            // Map the APMU ctrl register page
+            if (platform.emac[i].apmu_base != 0 &&
+                platform.emac[i].ctrl_reg != 0) {
+                uint64 pg = PGROUNDDOWN(
+                    (uint64)platform.emac[i].apmu_base +
+                    platform.emac[i].ctrl_reg);
+                kvmmap_safe(kpgtbl, pg, pg, PGSIZE, PTE_R | PTE_W);
+            }
+            // Map the APMU dline register page
+            if (platform.emac[i].apmu_base != 0 &&
+                platform.emac[i].dline_reg != 0) {
+                uint64 pg = PGROUNDDOWN(
+                    (uint64)platform.emac[i].apmu_base +
+                    platform.emac[i].dline_reg);
+                kvmmap_safe(kpgtbl, pg, pg, PGSIZE, PTE_R | PTE_W);
+            }
+        }
+    }
+
+    // SDHCI MMIO regions (SpacemiT X1 SD/eMMC host controller)
+    if (platform.has_sdhci) {
+        for (int i = 0; i < platform.sdhci_count && i < SDHCI_MAX; i++) {
+            // Map SDHCI register region
+            if (platform.sdhci[i].base != 0 && platform.sdhci[i].size != 0) {
+                uint64 base = PGROUNDDOWN(platform.sdhci[i].base);
+                uint64 size = PGROUNDUP(platform.sdhci[i].base +
+                                        platform.sdhci[i].size) - base;
+                kvmmap_safe(kpgtbl, base, base, size, PTE_R | PTE_W);
+            }
+            // Map the APMU register page for this SDHCI instance
+            if (platform.sdhci[i].apmu_base != 0 &&
+                platform.sdhci[i].apmu_offset != 0) {
+                uint64 pg = PGROUNDDOWN(
+                    (uint64)platform.sdhci[i].apmu_base +
+                    platform.sdhci[i].apmu_offset);
+                kvmmap_safe(kpgtbl, pg, pg, PGSIZE, PTE_R | PTE_W);
+            }
+        }
+        // Map APBC page for AIB clock register (base from FDT clock-controller)
+        if (platform.sdhci_count > 0 && platform.sdhci[0].apbc_base != 0) {
+            uint64 apbc_aib = (uint64)platform.sdhci[0].apbc_base + 0x3C;
+            kvmmap_safe(kpgtbl, PGROUNDDOWN(apbc_aib),
+                        PGROUNDDOWN(apbc_aib), PGSIZE, PTE_R | PTE_W);
+        }
+    }
+
+    // map kernel text executable and read-only.
+    kvmmap(kpgtbl, (uint64)_entry, (uint64)_entry,
+           (uint64)etext - (uint64)_entry, PTE_R | PTE_X);
+
+    // map the trampoline for trap entry/exit to
+    // the highest virtual address in the kernel.
+    kvmmap(kpgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+    // trampoline data used by both trampoline.S and the kernel.
+    kvmmap(kpgtbl, TRAMPOLINE_DATA, (uint64)_trampoline_data, PGSIZE, PTE_R);
+    kvmmap(kpgtbl, (uint64)_trampoline_data, (uint64)_trampoline_data, PGSIZE,
+           PTE_R | PTE_W);
+
+    // percpu data for trampoline and kernel.
+    kvmmap(kpgtbl, TRAMPOLINE_CPULOCAL, (uint64)cpus, PGSIZE, PTE_R | PTE_W);
+    kvmmap(kpgtbl, (uint64)cpus, (uint64)cpus, PGSIZE, PTE_R | PTE_W);
+
+    // map the signal trampoline for user space signal handling.
+    // PTE_U is required so user mode can execute the trampoline code.
+    kvmmap(kpgtbl, SIG_TRAMPOLINE, (uint64)sig_trampoline, PGSIZE,
+           PTE_R | PTE_X | PTE_U);
+
+    printf("trampoline 0x%lx -> %p\n", TRAMPOLINE, trampoline);
+    printf("trampoline data 0x%lx -> %p\n", TRAMPOLINE_DATA, _trampoline_data);
+    printf("trampoline cpu local 0x%lx -> %p\n", TRAMPOLINE_CPULOCAL, cpus);
+    printf("signal trampoline 0x%lx -> %p\n", SIG_TRAMPOLINE, sig_trampoline);
+
+    // map read-only data and the physical RAM we'll make use of.
+    kvmmap(kpgtbl, (uint64)_rodata, (uint64)_rodata,
+           (uint64)_rodata_end - (uint64)_rodata, PTE_R);
+
+    // map kernel top-level page table (needs to be writable)
+    kvmmap(kpgtbl, (uint64)_data_ktlb, (uint64)_data_ktlb, PGSIZE,
+           PTE_R | PTE_W);
+
+    // map data and the physical RAM we'll make use of.
+    kvmmap(kpgtbl, (uint64)_data, (uint64)_data,
+           (uint64)_data_end - (uint64)_data, PTE_R | PTE_W);
+
+    // map bss data and the physical RAM we'll make use of.
+    kvmmap(kpgtbl, (uint64)_bss, (uint64)_bss, (uint64)_bss_end - (uint64)_bss,
+           PTE_R | PTE_W);
+
+    // map kernel data and the physical RAM we'll make use of.
+    // For the first memory region, map from _bss_end to the end of region 0.
+    // Additional memory regions (high memory) are mapped separately to skip
+    // gaps between non-contiguous physical memory regions.
+    {
+        uint64 first_region_end = platform.mem[0].base + platform.mem[0].size;
+        if (first_region_end > PHYSTOP) {
+            first_region_end = PHYSTOP;
+        }
+        kvmmap(kpgtbl, (uint64)_bss_end, (uint64)_bss_end,
+               first_region_end - (uint64)_bss_end, PTE_R | PTE_W);
+
+        // Map additional memory regions (high memory) with identity mapping
+        for (int i = 1; i < platform.mem_count; i++) {
+            uint64 region_base = platform.mem[i].base;
+            uint64 region_end = region_base + platform.mem[i].size;
+            if (region_end > PHYSTOP) {
+                region_end = PHYSTOP;
+            }
+            if (region_base < region_end) {
+                printf("mapping highmem region [%d]: 0x%lx - 0x%lx (%ld MB)\n",
+                       i, region_base, region_end,
+                       (region_end - region_base) / (1024 * 1024));
+                kvmmap(kpgtbl, region_base, region_base,
+                       region_end - region_base, PTE_R | PTE_W);
+            }
+        }
+    }
+
+    // map embedded kernel symbols (read-only, part of kernel image)
+    // The .ksymbols section is between .data and .bss in the linker script
+    if (KERNEL_SYMBOLS_SIZE > 0) {
+        kvmmap(kpgtbl, KERNEL_SYMBOLS_START, KERNEL_SYMBOLS_START,
+               KERNEL_SYMBOLS_SIZE, PTE_R);
+        printf("kernel symbols 0x%lx - 0x%lx (size: %ld)\n",
+               KERNEL_SYMBOLS_START, KERNEL_SYMBOLS_END, KERNEL_SYMBOLS_SIZE);
+    }
+
+    // map kernel symbols index (writable, for rb-tree nodes)
+    // This is in BSS, so already mapped, but needs to be explicitly accessible
+    if (KERNEL_SYMBOLS_IDX_SIZE > 0) {
+        printf("kernel symbols index 0x%lx - 0x%lx (size: %ld)\n",
+               KERNEL_SYMBOLS_IDX_START, KERNEL_SYMBOLS_IDX_END,
+               KERNEL_SYMBOLS_IDX_SIZE);
+    }
+
+    return kpgtbl;
+}
+
+// Initialize the one kernel_pagetable
+void arch_vm_init(void) {
+    __vma_pool_init(); // Initialize the VMA pool
+    __vm_pool_init();  // Initialize the VM pool
+    kernel_pagetable = kvmmake();
+
+    smp_store_release(&trampoline_ksatp, MAKE_SATP(kernel_pagetable));
+    smp_mb();
+}
+
+// Switch h/w page table register to the kernel's page table,
+// and enable paging.
+void arch_vm_init_hart() {
+    // wait for any previous writes to the page table memory to finish.
+    sfence_vma();
+
+    w_satp(trampoline_ksatp);
+
+    // flush stale entries from the TLB.
+    sfence_vma();
+    printf("hart %ld switched to kernel page table, satp: %lx\n", cpuid(),
+           trampoline_ksatp);
+}
+
+void arch_tlb_flush(void) {
+    sfence_vma();
+}
+
+int arch_vm_map(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm) {
+    return mappages(pagetable, va, size, pa, perm);
+}
+
+/*
+ * ============================
+ *  Debugging / Introspection
+ * ============================
+ *
+ * Start here if you're inspecting mappings:
+ *  - `dump_pagetable()` prints the raw PTE tree.
+ *  - `dump_vm()` prints the process VMA layout.
+ */
+
+void dump_pagetable(pagetable_t pagetable, int level, int indent,
+                    uint64 va_base, uint64 va_end, bool omit_pa) {
+    if (level < 0 || level > 2) {
+        printf("Invalid level %d for pagetable dump\n", level);
+        return;
+    }
+
+    int idx_start = 0;
+    int idx_end = 512;
+    idx_start = PX(2, va_base);
+    if (level == 2 && va_end != 0) {
+        idx_end = PX(2, va_end);
+    }
+
+    if (level == 0) {
+        // Leaf level - print in chunks
+        int chunk_start = -1;
+        uint64 chunk_va_start = 0;
+        uint64 chunk_pa_start = 0;
+        uint32 chunk_flags = 0;
+        int chunk_count = 0;
+
+        for (int i = idx_start; i <= idx_end; i++) {
+            pte_t pte = (i < idx_end) ? pagetable[i] : 0;
+            uint64 va = va_base | (((uint64)i) << 12);
+            uint64 pa = PTE2PA(pte);
+            uint32 flags = PTE_FLAGS(pte) | ((pte & PTE_RSW_w) ? PTE_V : 0);
+
+            bool valid_entry = (i < idx_end) && (pte & (PTE_V | PTE_RSW_w)) &&
+                               !(omit_pa && va >= KERNBASE && va < PHYSTOP);
+
+            if (valid_entry && chunk_start == -1) {
+                // Start new chunk
+                chunk_start = i;
+                chunk_va_start = va;
+                chunk_pa_start = pa;
+                chunk_flags = flags;
+                chunk_count = 1;
+            } else if (valid_entry && chunk_start != -1 &&
+                       pa == chunk_pa_start + (chunk_count * PGSIZE) &&
+                       flags == chunk_flags) {
+                // Continue chunk
+                chunk_count++;
+            } else {
+                // End current chunk and print it
+                if (chunk_start != -1) {
+                    const char *str_v = (chunk_flags & PTE_V) ? "V" : " ";
+                    const char *str_u = (chunk_flags & PTE_U) ? "U" : " ";
+                    const char *str_w = (chunk_flags & PTE_W) ? "W" : " ";
+                    const char *str_x = (chunk_flags & PTE_X) ? "X" : " ";
+                    const char *str_r = (chunk_flags & PTE_R) ? "R" : " ";
+                    const char *str_rsw = (chunk_flags & PTE_RSW_w) ? "C" : " ";
+
+                    if (chunk_count == 1) {
+                        printf("%*sPTE[%d](%p): %lx(%s%s%s%s%s%s), (va, pa): "
+                               "(%p, %p)\n",
+                               indent, "", chunk_start, &pagetable[i],
+                               chunk_flags & ~PTE_V, str_v, str_u, str_w, str_x,
+                               str_r, str_rsw, (void *)chunk_va_start,
+                               (void *)chunk_pa_start);
+                    } else {
+                        printf("%*sPTE[%d-%d]: %lx(%s%s%s%s%s%s), (va, pa): "
+                               "(%p-%p, %p-%p) "
+                               "[%d pages]\n",
+                               indent, "", chunk_start,
+                               chunk_start + chunk_count - 1,
+                               chunk_flags & ~PTE_V, str_v, str_u, str_w, str_x,
+                               str_r, str_rsw, (void *)chunk_va_start,
+                               (void *)(chunk_va_start +
+                                        (chunk_count - 1) * PGSIZE),
+                               (void *)chunk_pa_start,
+                               (void *)(chunk_pa_start +
+                                        (chunk_count - 1) * PGSIZE),
+                               chunk_count);
+                    }
+                }
+
+                // Start new chunk if current entry is valid
+                if (valid_entry) {
+                    chunk_start = i;
+                    chunk_va_start = va;
+                    chunk_pa_start = pa;
+                    chunk_flags = flags;
+                    chunk_count = 1;
+                } else {
+                    chunk_start = -1;
+                }
+            }
+        }
+    } else {
+        // Non-leaf level - recurse normally
+        for (int i = idx_start; i < idx_end; i++) {
+            pte_t pte = pagetable[i];
+            if (pte & (PTE_V | PTE_RSW_w)) {
+                uint64 va = va_base | (((uint64)i) << (12 + 9 * level));
+                if (omit_pa && va >= KERNBASE && va < PHYSTOP) {
+                    continue;
+                }
+                void *pa = (void *)PTE2PA(pte);
+                const char *str_v = (pte & PTE_V) ? "V" : " ";
+                const char *str_u = (pte & PTE_U) ? "U" : " ";
+                const char *str_w = (pte & PTE_W) ? "W" : " ";
+                const char *str_x = (pte & PTE_X) ? "X" : " ";
+                const char *str_r = (pte & PTE_R) ? "R" : " ";
+                const char *str_rsw = (pte & PTE_RSW_w) ? "C" : " ";
+                printf("%*sPTE[%d](%p): %x(%s%s%s%s%s%s), (va, pa): (%p, %p)",
+                       indent, "", i, &pagetable[i], (uint32)PTE_FLAGS(pte),
+                       str_v, str_u, str_w, str_x, str_r, str_rsw, (void *)va,
+                       pa);
+                if (level > 0 && PTE_FLAGS(pte) == PTE_V) {
+                    // This is a page table pointer.
+                    printf(":\n");
+                    dump_pagetable((pagetable_t)pa, level - 1, indent + 2, va,
+                                   0, omit_pa);
+                } else {
+                    printf("\n");
+                }
+            }
+        }
+    }
+}
+
+int vm_dump_flags(uint64 flags, char *buf, size_t buf_size) {
+    if (buf == NULL) {
+        return -EINVAL; // Invalid buffer
+    }
+    if (buf_size < 5) {
+        return -ERANGE; // Buffer too small to hold any flags
+    }
+    size_t len = 0;
+    if (flags & PROT_READ) {
+        buf[len++] = 'R';
+    } else {
+        buf[len++] = ' '; // Use '-' for no read permission
+    }
+    if (flags & PROT_WRITE) {
+        buf[len++] = 'W';
+    } else {
+        buf[len++] = ' '; // Use '-' for no write permission
+    }
+    if (flags & PROT_EXEC) {
+        buf[len++] = 'X';
+    } else {
+        buf[len++] = ' '; // Use '-' for no execute permission
+    }
+    if (flags & VMA_FLAG_USER) {
+        buf[len++] = 'U';
+    } else {
+        buf[len++] = ' '; // Use '-' for no user map permission
+    }
+    buf[len] = '\0'; // Null-terminate the string
+    return len;      // Return the length of the flags string
+}
+
+void dump_vm(vm_t *vm) {
+    if (vm == NULL) {
+        return; // Nothing to dump
+    }
+    printf("VM dump:\n");
+    printf("Pagetable: %p\n", vm->pagetable);
+    printf("VMAs:\n");
+    vma_t *vma, *tmp;
+    list_foreach_node_safe(&vm->vm_list, vma, tmp, list_entry) {
+        char flags_buf[10] = {0};
+        vm_dump_flags(vma->flags, flags_buf, sizeof(flags_buf));
+        printf("VMA: start=%lx, end=%lx, flags=%s, file=%p, pgoff=%lx\n",
+               vma->start, vma->end, flags_buf, vma->file, vma->pgoff);
+    }
+}
+
+// Return the address of the PTE in page table pagetable
+// that corresponds to virtual address va.  If alloc!=0,
+// create any required page-table pages.
+//
+// The risc-v Sv39 scheme has three levels of page-table
+// pages. A page-table page contains 512 64-bit PTEs.
+// A 64-bit virtual address is split into five fields:
+//   39..63 -- must be zero.
+//   30..38 -- 9 bits of level-2 index.
+//   21..29 -- 9 bits of level-1 index.
+//   12..20 -- 9 bits of level-0 index.
+//    0..11 -- 12 bits of byte offset within the page.
+pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
+            pte_t **retl1) { // TODO: print out page table
+    assert(va < MAXVA, "walk: va out of range");
+    assert(pagetable != NULL, "walk: pagetable is null");
+
+    pte_t *ret_pte[3] = {NULL, NULL, NULL};
+
+    for (int level = 2; level > 0; level--) {
+        pte_t *pte = &pagetable[PX(level, va)];
+        ret_pte[level] = pte;
+        assert(pte != NULL, "walk: pte is null");
+        if (*pte & PTE_V) {
+            pagetable = (pagetable_t)PTE2PA(*pte);
+        } else {
+            if (!alloc || (pagetable = (pde_t *)__pgtab_alloc()) == 0)
+                return NULL;
+            memset(pagetable, 0, PGSIZE);
+            *pte = PA2PTE(pagetable) | PTE_V;
+        }
+    }
+    if (retl2) {
+        *retl2 = ret_pte[2];
+    }
+    if (retl1) {
+        *retl1 = ret_pte[1];
+    }
+    return &pagetable[PX(0, va)];
+}
+
+// Look up a virtual address, return the physical address,
+// or 0 if not mapped.
+// Can only be used to look up user pages.
+uint64 walkaddr(pagetable_t pagetable, uint64 va) {
+    pte_t *pte;
+    uint64 pa;
+
+    if (va >= MAXVA)
+        return 0;
+
+    pte = walk(pagetable, va, 0, NULL, NULL);
+    if (pte == 0)
+        return 0;
+    if ((*pte & PTE_V) == 0)
+        return 0;
+    if ((*pte & PTE_U) == 0)
+        return 0;
+    pa = PTE2PA(*pte);
+    return pa;
+}
+
+// add a mapping to the kernel page table.
+// only used when booting.
+// does not flush TLB or enable paging.
+void kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm) {
+    if (mappages(kpgtbl, va, sz, pa, perm) != 0)
+        panic("kvmmap");
+}
+
+// Create PTEs for virtual addresses starting at va that refer to
+// physical addresses starting at pa.
+// va and size MUST be page-aligned.
+// Returns 0 on success, -1 if walk() couldn't
+// allocate a needed page-table page.
+int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa,
+             int perm) {
+    uint64 a, last;
+    pte_t *pte;
+
+    if ((va % PGSIZE) != 0)
+        panic("mappages: va not aligned, va %p", (void *)va);
+
+    if ((size % PGSIZE) != 0)
+        panic("mappages: size not aligned, va %p, size %p", (void *)va,
+              (void *)size);
+
+    if (size == 0)
+        panic("mappages: size zero, va %p", (void *)va);
+
+    a = va;
+    last = va + size - PGSIZE;
+    for (;;) {
+        if ((pte = walk(pagetable, a, 1, NULL, NULL)) == 0)
+            return -ENOMEM;
+        if (*pte & PTE_V)
+            panic("mappages: remap, %p", (void *)a);
+        *pte = PA2PTE(pa) | perm | PTE_V | PTE_A | PTE_D;
+        if (a == last)
+            break;
+        a += PGSIZE;
+        pa += PGSIZE;
+    }
+    return 0;
+}
+
+// Remove npages of mappings starting from va. va must be
+// page-aligned. The mappings must exist.
+// Optionally free the physical memory.
+void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free) {
+    uint64 a;
+    pte_t *pte;
+
+    if ((va % PGSIZE) != 0)
+        panic("uvmunmap: not aligned");
+
+    for (a = va; a < va + npages * PGSIZE; a += PGSIZE) {
+        if ((pte = walk(pagetable, a, 0, NULL, NULL)) == 0)
+            panic("uvmunmap: walk");
+        if ((*pte & PTE_V) == 0)
+            panic("uvmunmap: not mapped, va=%p, pa=%p, flags: %lx", (void *)a,
+                  (void *)PTE2PA(*pte), PTE_FLAGS(*pte));
+        if (PTE_FLAGS(*pte) == PTE_V)
+            panic("uvmunmap: not a leaf");
+        uint64 pa = PTE2PA(*pte);
+        *pte = 0;
+        if (do_free) {
+            __pgtab_free((void *)pa);
+        }
+    }
+}
+
+// Top-level PTE index for trampoline region
+// PX(2, TRAMPOLINE) = (TRAMPOLINE >> 30) & 0x1FF = 255 for MAXVA=256GiB
+#define TRAMPOLINE_PTE_IDX ((TRAMPOLINE >> 30) & 0x1FF)
+
+// create an empty user page table.
+// returns 0 if out of memory.
+// The top-level PTE containing trampoline is shared with the kernel page table
+// so that trampoline mappings are available in all address spaces.
+pagetable_t uvmcreate() {
+    pagetable_t pagetable;
+    pagetable_t kpgtbl = (pagetable_t)_data_ktlb;
+    pagetable = (pagetable_t)__pgtab_alloc();
+    if (pagetable == 0)
+        return 0;
+    memset(pagetable, 0, PGSIZE);
+    // Copy the trampoline PTE from kernel page table
+    pagetable[TRAMPOLINE_PTE_IDX] = kpgtbl[TRAMPOLINE_PTE_IDX];
+    return pagetable;
+}
+
+// Recursively free page-table pages.
+// All leaf mappings must already have been removed.
+// skip_idx: if >= 0, skip that entry (shared with kernel).
+static void __freewalk(pagetable_t pagetable, int skip_idx) {
+    // there are 2^9 = 512 PTEs in a page table.
+    for (int i = 0; i < 512; i++) {
+        if (i == skip_idx)
+            continue; // Skip the shared entry
+        pte_t pte = pagetable[i];
+        if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_RSW_w | PTE_X)) == 0) {
+            // this PTE points to a lower-level page table.
+            uint64 child = PTE2PA(pte);
+            __freewalk((pagetable_t)child, -1);
+            pagetable[i] = 0;
+        } else if (pte & PTE_V) {
+            panic("freewalk: leaf");
+        }
+    }
+    __pgtab_free((void *)pagetable);
+}
+
+void freewalk(pagetable_t pagetable) {
+    // Skip the trampoline PTE which is shared with kernel page table
+    __freewalk(pagetable, TRAMPOLINE_PTE_IDX);
+}
+
+// Free user memory pages,
+// then free page-table pages.
+void uvmfree(pagetable_t pagetable, uint64 sz) { freewalk(pagetable); }
+
+/*
+ * ============================
+ *  Process VM + VMA subsystem
+ * ============================
+ *
+ * Start here for process address-space logic:
+ *  - Creation/teardown: `vm_init()`, `__vm_destroy()`, `vm_copy()`
+ *  - Reserving VA ranges: `vma_alloc()`, `vma_free()`, `vm_find_area()`
+ *  - Fault handling: `vma_validate()` (demand paging + COW)
+ *  - Safe user copies: `vm_copyin/out/instr()` (call `vma_validate()` first)
+ *
+ * Each process owns a `vm_t`:
+ *  - `vm_tree`  : rb-tree keyed by vma->start (fast lookup by VA)
+ *  - `vm_list`  : all VMAs in address order
+ *  - `vm_free_list`: subset of VMAs with flags==PROT_NONE
+ *
+ * Invariants worth remembering:
+ *  - VMAs in `vm_tree` never overlap.
+ *  - Free VMAs must be linked using `free_list_entry` (not `list_entry`).
+ */
+
+// Magic value to detect double-free
+#define VMA_FREED_MAGIC 0xDEAD0BADDEAD0BADULL
+
+static vma_t *__vma_alloc(vm_t *vm) {
+    vma_t *vma = slab_alloc(&__vma_pool);
+    if (vma == NULL) {
+        return NULL;
+    }
+    memset(vma, 0, sizeof(vma_t));
+    rb_node_init(&vma->rb_entry);
+    list_entry_init(&vma->list_entry);
+    list_entry_init(&vma->free_list_entry);
+    vma->vm = vm;
+    return vma;
+}
+
+static void __vma_free(vma_t *vma) {
+    if (vma) {
+        // Check for double-free using magic value
+        if (vma->start == VMA_FREED_MAGIC && vma->end == VMA_FREED_MAGIC) {
+            printf("__vma_free: DOUBLE FREE detected for vma=%p\n", vma);
+            return; // Don't free again
+        }
+        // Sanity check: make sure this VMA was allocated from our slab
+        if (vma->vm == NULL) {
+            printf("__vma_free: vma->vm is NULL for vma=%p (possible "
+                   "double-free or "
+                   "corruption)\n",
+                   vma);
+            return; // Don't free a potentially already-freed VMA
+        }
+        // Poison the VMA to detect double-free and use-after-free
+        vma->vm = NULL;
+        vma->start = VMA_FREED_MAGIC;
+        vma->end = VMA_FREED_MAGIC;
+        // Use regular slab_free - let automatic shrinking handle memory
+        // reclamation
+        slab_free((void *)vma);
+    }
+}
+
+// free the pages and ptes in a vm area, and set the VMA as free.
+static void __vma_set_free(vma_t *vma) {
+    if (vma == NULL || vma->vm == NULL) {
+        return;
+    }
+    if (vma->flags == PROT_NONE) {
+        return; // Already free
+    }
+    assert((vma->start & (PGSIZE - 1)) == 0,
+           "__vma_set_free: vma start not aligned");
+    if (vma->vm->pagetable != NULL) {
+        pagetable_t pagetable = vma->vm->pagetable;
+        for (uint64 a = vma->start; a < vma->end; a += PGSIZE) {
+            pte_t *pte = walk(pagetable, a, 0, NULL, NULL);
+            if (pte == 0)
+                continue; // Not mapped, skip
+            if (PTE_FLAGS(*pte) == PTE_V)
+                panic("__vma_set_free: not a leaf");
+            if ((*pte & PTE_V) == 0)
+                continue;
+            uint64 pa = PTE2PA(*pte);
+            *pte = 0;
+            // Notify any remote core that's using this page
+            vm_remote_sfence(vma->vm);
+            page_ref_dec((void *)pa);
+        }
+    }
+
+    vma->flags = PROT_NONE; // Set the VMA as free
+    if (vma->file != NULL) {
+        vfs_fput(vma->file); // Release file reference
+    }
+    vma->file = NULL; // Clear the file pointer
+    vma->pgoff = 0;   // Reset the page offset
+    assert(LIST_NODE_IS_DETACHED(vma, free_list_entry),
+           "__vma_set_free: vma already in free list");
+}
+
+static int __vma_copy(vma_t *dst, vma_t *src) {
+    if (dst == NULL || src == NULL) {
+        return -EINVAL; // Invalid parameters
+    }
+    if (src->vm == NULL || dst->vm == NULL) {
+        return -EINVAL; // Source or destination VM is NULL
+    }
+    if (VMA_SIZE(src) != VMA_SIZE(dst)) {
+        return -EINVAL; // Source VMA is empty, cannot duplicate
+    }
+    if ((src->flags & VMA_FLAG_PROT_MASK) !=
+        (dst->flags & VMA_FLAG_PROT_MASK)) {
+        return -EINVAL; // Destination VMA is not free, cannot duplicate
+    }
+
+    dst->flags = src->flags;
+    dst->pgoff = src->pgoff;
+    // Duplicate the file reference if file-backed
+    if (src->file != NULL) {
+        dst->file = vfs_fdup(src->file);
+        if (dst->file == NULL) {
+            return -EBADF; // File was already closed
+        }
+    } else {
+        dst->file = NULL;
+    }
+    if (src->flags != PROT_NONE) {
+        pagetable_t pgtb_src = src->vm->pagetable;
+        pagetable_t pgtb_dst = dst->vm->pagetable;
+        int is_shared = (src->flags & VMA_FLAG_SHARED) != 0;
+        for (uint64 a = src->start; a < src->end; a += PGSIZE) {
+            pte_t *src_pte = walk(pgtb_src, a, 0, NULL, NULL);
+            if (src_pte == NULL || *src_pte == 0)
+                continue; // Not mapped, skip
+            if (PTE_FLAGS(*src_pte) == PTE_V)
+                panic("__vma_copy: not a leaf");
+            if ((PTE_FLAGS(*src_pte) & PTE_V) == 0)
+                continue;
+            pte_t *new_pte = walk(pgtb_dst, a, 1, NULL, NULL);
+            if (new_pte == NULL) {
+                __vma_set_free(dst);
+                return -ENOMEM; // Failed to allocate new PTE
+            }
+            if (is_shared) {
+                // MAP_SHARED: share the same physical page without COW.
+                // Both parent and child can read/write the same page.
+                *new_pte = *src_pte;
+            } else {
+                *src_pte |= PTE_RSW_w; // Set COW flag
+                *src_pte &= ~PTE_W;    // Clear write flag
+                *new_pte = *src_pte;   // Copy the PTE
+            }
+            uint64 pa = PTE2PA(*src_pte);
+            assert(page_ref_inc((void *)pa) > 0,
+                   "__vma_copy: page refcnt should be greater than 0");
+        }
+        // Notify any remote core that's using this page
+        vm_remote_sfence(src->vm);
+    }
+    return 0;
+}
+
+static int __vma_cmp(uint64 a, uint64 b) {
+    if (a == b) {
+        return 0; // Equal
+    }
+    if (a < b) {
+        return -1; // a is less than b
+    }
+    return 1;
+}
+
+static uint64 __cma_get_key(struct rb_node *node) {
+    vma_t *vma = container_of(node, vma_t, rb_entry);
+    return vma->start;
+}
+
+static struct rb_root_opts __vm_tree_opts = {
+    .keys_cmp_fun = __vma_cmp,
+    .get_key_fun = __cma_get_key,
+};
+
+static void __vm_unmap_trapframe(vm_t *vm) {
+    if (vm == NULL || vm->pagetable == NULL || vm->trapframe_pte == NULL) {
+        return; // Invalid VM or pagetable
+    }
+    // Clear all trapframe PTEs but don't free the physical pages
+    // (they belong to kernel stacks, not to this VM)
+    for (int i = 0; i < NCPU; i++) {
+        int pte_idx = PX(0, TRAPFRAME + (i * PGSIZE));
+        vm->trapframe_pte[pte_idx] = 0;
+    }
+}
+
+// Initialize trapframe page table for user processes.
+// Trampoline pages are shared via the last PTE from the kernel page table.
+// TRAPFRAME is mapped below UVMTOP (outside the shared region) so it's
+// per-process. Each CPU has its own trapframe page.
+static int __vm_map_trampoline(vm_t *vm) {
+    if (vm == NULL || vm->pagetable == NULL) {
+        return -EINVAL; // Invalid VM or pagetable
+    }
+
+    // Walk to the first trapframe VA to create intermediate page tables
+    // and get the leaf page table pointer. alloc=1 ensures page tables are
+    // created.
+    pte_t *pte = walk(vm->pagetable, TRAPFRAME, 1, NULL, NULL);
+    if (pte == NULL) {
+        return -ENOMEM;
+    }
+
+    // Store the leaf page table base (the page containing this PTE)
+    // The leaf page table covers 512 consecutive 4KB pages
+    vm->trapframe_pte = (pte_t *)PGROUNDDOWN((uint64)pte);
+    return 0;
+}
+
+// Mark a CPU is using this VM (for TLB shootdown tracking).
+// Called when returning to user mode.
+// Also updates the trapframe PTE for the current CPU.
+// Returns the trapframe base virtual address for this CPU.
+uint64 vm_cpu_online(vm_t *vm, int cpu) {
+    struct thread *p = current;
+    uint64 trapframe_poffset = TRAPFRAME_POFFSET;
+    if (vm->trapframe_pte != NULL && p != NULL && p->trapframe != NULL) {
+        // Calculate the PTE index for this CPU's trapframe page
+        // All 64 trapframe pages fit within a single 2MB region, so they share
+        // the same leaf page table
+        int pte_idx = PX(0, TRAPFRAME + (cpu * PGSIZE));
+        uint64 trapframe_pa = PGROUNDDOWN((uint64)p->trapframe);
+        vm->trapframe_pte[pte_idx] =
+            PA2PTE(trapframe_pa) | PTE_R | PTE_W | PTE_V | PTE_A | PTE_D;
+        // Ensure PTE write is visible before page table switch
+        smp_wmb();
+        // Calculate trapframe offset within the page from p->trapframe
+        trapframe_poffset = (uint64)p->trapframe & (PGSIZE - 1);
+    }
+    atomic_or(&vm->cpumask, (1ULL << cpu));
+    return TRAPFRAME + (cpu * PGSIZE) + trapframe_poffset;
+}
+
+// Mark a CPU is no longer using this VM (for TLB shootdown tracking).
+// Called when entering kernel mode.
+void vm_cpu_offline(vm_t *vm, int cpu) {
+    atomic_and(&vm->cpumask, ~(1ULL << cpu));
+}
+
+cpumask_t vm_get_cpumask(vm_t *vm) { return smp_load_acquire(&vm->cpumask); }
+
+// Initialize the vm struct of a process.
+// Will destroy vm directly and return NULL on failure.
+vm_t *vm_init(void) {
+    vm_t *vm = slab_alloc(&__vm_pool);
+    if (vm == NULL) {
+        return NULL; // Out of memory
+    }
+    memset(vm, 0, sizeof(vm_t));
+    rb_root_init(&vm->vm_tree, &__vm_tree_opts);
+    list_entry_init(&vm->vm_list);
+    list_entry_init(&vm->vm_free_list);
+    vma_t *vma = __vma_alloc(vm);
+    if (vma == NULL) {
+        __vm_destroy(vm);
+        return NULL;
+    }
+
+    // Set up the initial VMA early so __vm_destroy can free it on error paths
+    vma->start = UVMBOTTOM; // Start of user virtual memory
+    vma->end = UVMTOP;      // End of user virtual memory
+    rb_insert_color(&vm->vm_tree, &vma->rb_entry);
+    list_node_push(&vm->vm_free_list, vma, free_list_entry);
+    list_node_push(&vm->vm_list, vma, list_entry);
+
+    vm->pagetable = uvmcreate();
+    if (vm->pagetable == NULL) {
+        __vm_destroy(vm);
+        return NULL;
+    }
+    if (__vm_map_trampoline(vm) != 0) {
+        __vm_destroy(vm);
+        return NULL; // Failed to set up trapframe page table
+    }
+    spin_init(&vm->spinlock, "vm_pgtable_lock");
+    rwsem_init(&vm->rw_lock, RWLOCK_PRIO_READ, "vm_rw_lock");
+    vm->refcount = 1;
+
+    return vm;
+}
+
+/**
+ * @brief Increment VM reference count
+ *
+ * Used when sharing a VM between processes (e.g., threads).
+ * The VM will not be destroyed until all references are released.
+ *
+ * @param vm VM to duplicate reference to
+ * @note Thread-safe via atomic increment
+ * @see vm_put()
+ */
+void vm_dup(vm_t *vm) { atomic_inc(&vm->refcount); }
+
+/**
+ * @brief Decrement VM reference count and destroy if last reference
+ *
+ * Releases one reference to the VM. When the reference count reaches zero,
+ * the VM and all its VMAs are destroyed.
+ *
+ * @param vm VM to release
+ * @note Thread-safe via atomic decrement
+ * @see vm_dup()
+ */
+void vm_put(vm_t *vm) {
+    if (vm == NULL)
+        return;
+    if (!atomic_dec_unless(&vm->refcount, 1)) {
+        // By now, suppose only the processes holding a reference to this VM can
+        // increase the refcount again. Thus, no other processes can access this
+        // VM after we see refcount reach zero.
+        __vm_destroy(vm);
+    }
+}
+
+/**
+ * @brief Acquire VM read lock for VMA tree traversal
+ * @param vm VM to lock
+ * @note Safe to hold across blocking operations (rwsem)
+ */
+void vm_rlock(vm_t *vm) { rwsem_acquire_read(&vm->rw_lock); }
+
+/**
+ * @brief Release VM read lock
+ * @param vm VM to unlock
+ */
+void vm_runlock(vm_t *vm) { rwsem_release(&vm->rw_lock); }
+
+/**
+ * @brief Acquire VM write lock for VMA tree modification
+ * @param vm VM to lock
+ * @note Required for vma_alloc(), vma_free(), vma_split(), vma_merge()
+ */
+void vm_wlock(vm_t *vm) { rwsem_acquire_write(&vm->rw_lock); }
+
+/**
+ * @brief Release VM write lock
+ * @param vm VM to unlock
+ */
+void vm_wunlock(vm_t *vm) { rwsem_release(&vm->rw_lock); }
+
+/**
+ * @brief Acquire VM page table spinlock for PTE modifications
+ * @param vm VM to lock
+ * @warning Do not sleep while holding this lock
+ */
+void vm_pgtable_lock(vm_t *vm) { spin_lock(&vm->spinlock); }
+
+/**
+ * @brief Release VM page table spinlock
+ * @param vm VM to unlock
+ */
+void vm_pgtable_unlock(vm_t *vm) { spin_unlock(&vm->spinlock); }
+
+// Magic for detecting double-destroy of VM.
+// We deliberately poison vm->pagetable to catch accidental reuse.
+#define VM_DESTROYED_MAGIC ((pagetable_t)0xDEAD0BADULL)
+
+static void __vm_destroy(vm_t *vm) {
+    if (vm == NULL) {
+        return; // Nothing to destroy
+    }
+
+    // Check for double-destroy
+    if (vm->pagetable == VM_DESTROYED_MAGIC) {
+        printf("__vm_destroy: DOUBLE DESTROY detected for vm=%p\n", vm);
+        return;
+    }
+
+    // Free all VMAs.
+    // Note: VMAs are slab-backed; __vma_set_free handles page
+    // unmapping/refcounts.
+    vma_t *vma, *tmp;
+    list_foreach_node_safe(&vm->vm_list, vma, tmp, list_entry) {
+        // Sanity check: verify the VMA is valid before freeing
+        if (vma->vm != vm) {
+            printf("__vm_destroy: vma->vm mismatch! vma=%p vma->vm=%p "
+                   "expected=%p\n",
+                   vma, vma->vm, vm);
+            continue;
+        }
+        if (vma->start == VMA_FREED_MAGIC || vma->end == VMA_FREED_MAGIC) {
+            printf("__vm_destroy: vma already freed! vma=%p\n", vma);
+            continue;
+        }
+        __vma_set_free(vma);
+        __vma_free(vma);
+    }
+
+    list_entry_init(&vm->vm_list);
+    list_entry_init(&vm->vm_free_list);
+    rb_root_init(&vm->vm_tree, &__vm_tree_opts);
+    if (vm->trapframe_pte != NULL) {
+        __vm_unmap_trapframe(vm); // Unmap the trapframe and trampolines
+    }
+    if (vm->pagetable != NULL) {
+        uvmfree(vm->pagetable, 0); // Free the pagetable
+    }
+    // Mark as destroyed before freeing to detect double-destroy
+    vm->pagetable = VM_DESTROYED_MAGIC;
+    // Use regular slab_free - let automatic shrinking handle memory reclamation
+    slab_free((void *)vm);
+}
+
+// Duplicate a process address space.
+// The new VM starts with an empty VMA layout, then we re-create+duplicate VMAs.
+// return ERR_PTR on failure.
+vm_t *vm_copy(vm_t *src) {
+    if (src == NULL) {
+        return ERR_PTR(-EINVAL); // Invalid parameters
+    }
+    vm_t *dst = vm_init();
+    if (dst == NULL) {
+        return ERR_PTR(-ENOMEM); // Allocation failed
+    }
+    vm_rlock(src);
+    // In other places, we shouldn't hold both src and dst locks at the same
+    // time to avoid deadlocks. Here it's safe because dst is newly created and
+    // not visible to other threads yet.
+    vm_wlock(dst);
+    vma_t *vma, *tmp;
+    list_foreach_node_safe(&src->vm_list, vma, tmp, list_entry) {
+        if (vma->flags == PROT_NONE) {
+            continue;
+        }
+        vma_t *new_vma = vma_alloc(dst, vma->start, VMA_SIZE(vma), vma->flags);
+        if (new_vma == NULL) {
+            vm_runlock(src);
+            vm_wunlock(dst);
+            vm_put(dst);
+            return ERR_PTR(-ENOMEM); // Allocation failed
+        }
+        if (vma == src->stack) {
+            dst->stack = new_vma;
+            dst->stack_size = src->stack_size;
+        } else if (vma == src->heap) {
+            dst->heap = new_vma;
+            dst->heap_size = src->heap_size;
+            dst->heap_reserve_end = src->heap_reserve_end;
+        }
+        if (vma->flags != PROT_NONE && __vma_copy(new_vma, vma) != 0) {
+            // new_vma is still linked into dst; vm_put will clean it up.
+            vm_runlock(src);
+            vm_wunlock(dst);
+            vm_put(dst);
+            return ERR_PTR(-ENOMEM);
+        }
+    }
+    vm_runlock(src);
+    vm_wunlock(dst);
+    return dst;
+}
+
+static inline vma_t *__get_vma_left(vma_t *vma) {
+    if (vma == NULL || vma->vm == NULL) {
+        return NULL;
+    }
+    return rb_prev_entry_safe(vma, rb_entry);
+}
+
+static inline vma_t *__get_vma_right(vma_t *vma) {
+    if (vma == NULL || vma->vm == NULL) {
+        return NULL;
+    }
+    return rb_next_entry_safe(vma, rb_entry);
+}
+
+vma_t *vm_find_area(vm_t *vm, uint64 va) {
+    if (va >= UVMTOP || va < UVMBOTTOM) {
+        return NULL; // Virtual address out of bounds
+    }
+    struct rb_node *node = rb_find_key_rdown(&vm->vm_tree, va);
+    if (node != NULL) {
+        vma_t *vma = container_of(node, vma_t, rb_entry);
+        assert(VMA_IN_RANGE(vma, va),
+               "vm_find_area: va %lx not in range [%lx, %lx)", va, vma->start,
+               vma->end);
+        return vma; // Found the VMA that contains the virtual address
+    }
+    return NULL;
+}
+
+// Split a VMA at the given virtual address.
+// Return the later half of the split VMA if successful,
+// or NULL if the split fails (e.g., if the VMA cannot be split).
+vma_t *vma_split(vma_t *vma, uint64 va) {
+    if (vma == NULL || vma->vm == NULL) {
+        return NULL;
+    }
+    if (va < vma->start || va >= vma->end) {
+        return NULL; // Cannot split outside the VMA range
+    }
+
+    if (va == vma->start) {
+        return vma;
+    }
+
+    vma_t *new_vma = __vma_alloc(vma->vm);
+    if (new_vma == NULL) {
+        return NULL; // Allocation failed
+    }
+
+    new_vma->start = va;
+    assert(rb_insert_color(&vma->vm->vm_tree, &new_vma->rb_entry) ==
+               &new_vma->rb_entry,
+           "vma_split: rb_insert_color failed");
+
+    new_vma->end = vma->end;
+    new_vma->flags = vma->flags;
+    // Duplicate the file reference for file-backed VMAs
+    if (vma->file != NULL) {
+        new_vma->file = vfs_fdup(vma->file);
+        new_vma->pgoff = vma->pgoff + (va - vma->start);
+    } else {
+        new_vma->file = NULL;
+        new_vma->pgoff = 0; // Reset page offset for anonymous VMA
+    }
+
+    vma->end = va; // Adjust the original VMA to the new end
+
+    // Insert the new VMA into the tree and free list
+    list_node_insert(vma, new_vma, list_entry);
+    if (vma->flags == PROT_NONE) {
+        list_node_insert(vma, new_vma, free_list_entry);
+    }
+
+    return new_vma;
+}
+
+vma_t *vma_merge(vma_t *vma1, vma_t *vma2) {
+    if (vma1 == NULL || vma2 == NULL || vma1->vm != vma2->vm) {
+        return NULL; // Cannot merge VMA from different vm or null VMA
+    }
+    if (!VMA_ADJACENT(vma1, vma2)) {
+        return NULL; // VMA do not touch each other
+    }
+    if ((vma1->flags & VMA_FLAG_PROT_MASK) !=
+        (vma2->flags & VMA_FLAG_PROT_MASK)) {
+        return NULL; // Cannot merge VMA with different protection flags
+    }
+    // Merge the two VMAs
+    if (vma1->start > vma2->start) {
+        // Ensure vma1 is always the left one
+        vma_t *tmp = vma1;
+        vma1 = vma2;
+        vma2 = tmp;
+    }
+    if (vma1->file != vma2->file) {
+        return NULL; // Cannot merge VMA with different files or offsets
+    }
+    if (vma1->file != NULL &&
+        (vma2->pgoff - vma1->pgoff) != (vma2->start - vma1->start)) {
+        return NULL; // Cannot merge VMA with different page offsets
+    }
+
+    // Now vma1 starts before or at the same point as vma2
+    vma1->end = vma2->end; // Extend the end of vma1 to include vma2
+    assert(rb_delete_node_color(&vma2->vm->vm_tree, &vma2->rb_entry) ==
+               &vma2->rb_entry,
+           "vma_merge: rb_delete_node_color failed"); // Remove from tree
+    list_node_detach(vma2, list_entry);
+    list_node_detach(vma2, free_list_entry);
+    // Release the merged VMA's file reference
+    if (vma2->file != NULL) {
+        vfs_fput(vma2->file);
+        vma2->file = NULL;
+    }
+    __vma_free(vma2); // Free the merged VMA
+
+    return vma1; // Return the merged VMA
+}
+
+vma_t *vma_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags) {
+    assert(current == NULL || rwsem_is_write_holding(&vm->rw_lock),
+           "vma_alloc: vm rwsem must be write-held");
+    if (vm == NULL) {
+        return NULL;
+    }
+    if (size == 0 || (size & (PGSIZE - 1)) != 0) {
+        return NULL;
+    }
+    if ((va & (PGSIZE - 1)) != 0) {
+        return NULL; // va must be page-aligned
+    }
+    if ((flags & VMA_FLAG_PROT_MASK) == 0) {
+        return NULL; // Invalid protection flags
+    }
+    // Don't strip non-protection flags like VMA_FLAG_USER
+
+    vma_t *free_area = NULL;
+    if (va == 0) {
+        vma_t *tmp = NULL;
+        // If va is 0, then find the last free area with enough size.
+        list_foreach_node_inv_safe(&vm->vm_free_list, free_area, tmp,
+                                   free_list_entry) {
+            if (VMA_SIZE(free_area) >= size) {
+                break;
+            }
+        }
+    } else {
+        free_area = vm_find_area(vm, va);
+    }
+
+    if (free_area == NULL) {
+        return NULL; // No free area found
+    }
+
+    if (free_area->flags != PROT_NONE) {
+        return NULL; // The free area is not empty
+    }
+
+    uint64 va_end = 0;
+    if (va == 0) {
+        if (VMA_SIZE(free_area) < size) {
+            return NULL; // Not enough space in the free area
+        }
+        va = free_area->start; // Use the start of the free area
+    } else {
+        if (free_area->end - va < size) {
+            return NULL; // Not enough space in the free area
+        }
+    }
+    va_end = va + size;
+
+    vma_t *vma2 = NULL;
+    vma_t *vma3 = NULL;
+    vma_t *original_left = NULL;
+
+    if (va > free_area->start) {
+        // Split the free area if va is not at the start
+        // free_area becomes [free_area->start, va), vma2 becomes [va,
+        // free_area->end)
+        original_left = free_area;
+        vma2 = vma_split(free_area, va);
+        if (vma2 == NULL) {
+            // Allocation failed - no state change yet, just return NULL
+            return NULL;
+        }
+    } else {
+        vma2 = free_area; // Use the whole free area
+    }
+
+    if (va_end < vma2->end) {
+        // Split vma2 at va_end
+        // vma2 becomes [va, va_end), vma3 becomes [va_end, vma2->end)
+        vma3 = vma_split(vma2, va_end);
+        if (vma3 == NULL) {
+            // Allocation failed - need to restore the first split
+            if (original_left != NULL) {
+                // Merge vma2 back into original_left to undo the first split
+                vma_merge(original_left, vma2);
+            }
+            return NULL;
+        }
+    }
+
+    list_node_detach(vma2, free_list_entry);
+    vma2->flags = flags; // Set the flags for the new VMA
+
+    return vma2;
+}
+
+int vma_free(vm_t *vm, vma_t *vma) {
+    assert(rwsem_is_write_holding(&vm->rw_lock),
+           "vma_free: vm rwsem must be write-held");
+    if (vma == NULL || vma->vm != vm) {
+        return -EINVAL; // Invalid VMA
+    }
+    if (vma->flags == PROT_NONE) {
+        return -EINVAL; // Cannot free an empty VMA
+    }
+
+    vma_t *left = __get_vma_left(vma);
+    vma_t *right = __get_vma_right(vma);
+
+    if (left == NULL && right == NULL) {
+        return -EINVAL; // No adjacent VMAs to merge with
+    }
+
+    __vma_set_free(vma); // Set the VMA as free
+    list_node_push_back(&vm->vm_free_list, vma, free_list_entry);
+    if (left != NULL && left->flags == PROT_NONE) {
+        // Merge with the left VMA
+        vma = vma_merge(left, vma);
+        assert(vma == left, "vma_free: vma_merge failed with left VMA");
+    }
+
+    if (right != NULL && right->flags == PROT_NONE) {
+        // Merge with the right VMA
+        left = vma_merge(vma, right);
+        assert(left == vma, "vma_free: vma_merge failed with right VMA");
+    }
+
+    return 0;
+}
+
+/**
+ * __vma_fault_file_page - Load a page from a file-backed mapping
+ * @vma: the file-backed VMA
+ * @va: the faulting virtual address (page-aligned)
+ *
+ * Allocates a new anonymous page and fills it with data from the file's
+ * page cache. This must be called WITHOUT the vm pgtable spinlock held,
+ * since pcache operations may sleep.
+ *
+ * For pages beyond the file's end, the page is zero-filled.
+ * For the last page that partially overlaps the file, the valid portion
+ * is copied and the rest is zeroed.
+ *
+ * Returns: physical address of the new page, or NULL on failure.
+ */
+static void *__vma_fault_file_page(vma_t *vma, uint64 va) {
+    struct vfs_file *file = vma->file;
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (inode == NULL) {
+        return NULL;
+    }
+    struct pcache *pc = &inode->i_data;
+
+    // Calculate file offset for this page
+    uint64 file_off = vma->pgoff + (va - vma->start);
+
+    // Allocate a new anonymous page for the private copy
+    void *pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+    if (pa == NULL) {
+        return NULL;
+    }
+
+    // Check if this page is entirely beyond the file
+    if (file_off >= (uint64)inode->size) {
+        memset(pa, 0, PGSIZE);
+        return pa;
+    }
+
+    // Calculate how many bytes to read from the file for this page
+    uint64 bytes_to_read = PGSIZE;
+    if (file_off + PGSIZE > (uint64)inode->size) {
+        bytes_to_read = (uint64)inode->size - file_off;
+    }
+
+    // Read from page cache: convert file offset to 512-byte block number
+    uint64 blkno_512 = file_off / BLK_SIZE;
+    page_t *pcpage = pcache_get_page(pc, blkno_512);
+    if (pcpage == NULL) {
+        page_free(pa, 0);
+        return NULL;
+    }
+    int ret = pcache_read_page(pc, pcpage);
+    if (ret != 0) {
+        pcache_put_page(pc, pcpage);
+        page_free(pa, 0);
+        return NULL;
+    }
+
+    // Copy file data from pcache page to our anonymous page
+    struct pcache_node *pcn = pcpage->pcache.pcache_node;
+    memmove(pa, pcn->data, bytes_to_read);
+
+    // Zero-fill the remainder if this is a partial page
+    if (bytes_to_read < PGSIZE) {
+        memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
+    }
+
+    pcache_put_page(pc, pcpage);
+    return pa;
+}
+
+static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte) {
+    pte_t pte_val = *pte;
+
+    /*
+     * Only short-circuit when PTE_W **and** PTE_A+PTE_D are all set.
+     * On RISC-V implementations without the Svadu extension the hardware
+     * does NOT manage Accessed/Dirty bits automatically; instead it raises
+     * a page fault when those bits are clear.  If we returned early when
+     * only PTE_W was set, a store page fault caused by a missing PTE_D
+     * would never be resolved, creating an infinite fault loop (the exact
+     * symptom seen on Orange Pi / Ky X1 hardware but not on QEMU, which
+     * manages A/D bits in its emulated MMU).
+     */
+    if ((pte_val & (PTE_W | PTE_A | PTE_D)) == (PTE_W | PTE_A | PTE_D)) {
+        return 0; // Page is already writable with A/D bits set
+    }
+
+    pte_t flags = PTE_FLAGS(pte_val);
+    void *addr = (void *)PTE2PA(pte_val);
+    void *pa = NULL;
+    if (pte_val == 0) {
+        // if the pte is not mapped, just map a new page
+        pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+        if (pa == NULL) {
+            return -ENOMEM; // Page allocation failed
+        }
+        memset(pa, 0, PGSIZE);
+    } else if (pte_val & PTE_V) {
+        if (pte_val & PTE_RSW_w) {
+            // if the page is marked as COW, we need to handle it
+            pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+            if (pa == NULL) {
+                return -ENOMEM; // Page allocation failed
+            }
+            memmove(pa, addr, PGSIZE); // Copy the page content
+            flags &= ~PTE_RSW_w;       // Clear the COW flag
+            assert(page_ref_dec(addr) >= 0,
+                   "vma_validate_pte_w: page_ref_dec failed for addr %p", addr);
+        } else {
+            // Else, just change the page to writable (or fix A/D bits)
+            pa = addr;
+        }
+    } else {
+        return -EFAULT; // Page is not valid
+    }
+
+    flags |= PTE_V | PTE_W | PTE_A | PTE_D; // Set the flags for writable page
+    if (vma->flags & PROT_READ) {
+        flags |= PTE_R; // Set the read permission if PROT_READ is set
+    }
+    if (vma->flags & PROT_EXEC) {
+        flags |= PTE_X; // Set the execute permission if PROT_EXEC is set
+    }
+    if (vma->flags & VMA_FLAG_USER) {
+        flags |= PTE_U; // Set the user permission if VMA_FLAG_USER is set
+    }
+    *pte = PA2PTE(pa) | flags; // Update the PTE with the new address and flags
+
+    // Flush TLB so the faulting hart sees the updated PTE (writable + A/D).
+    sfence_vma();
+
+    return 0;
+}
+
+static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte) {
+    pte_t pte_val = *pte;
+    void *pa = (void *)PTE2PA(pte_val);
+    pte_t flags = PTE_FLAGS(pte_val);
+
+    if (pte_val == 0) {
+        pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+        if (pa == NULL) {
+            return -ENOMEM; // Page allocation failed
+        }
+        memset(pa, 0, PGSIZE); // Initialize the page
+        if (vma->flags & PROT_WRITE) {
+            flags |= PTE_W; // Set the write permission if PROT_WRITE is set
+        }
+    } else if (!(pte_val & PTE_V)) {
+        return -EFAULT;
+    }
+
+    if (vma->flags & PROT_READ) {
+        flags |= PTE_R; // Set the read permission if PROT_READ is set
+    }
+    if (vma->flags & PROT_EXEC) {
+        flags |= PTE_X; // Set the execute permission if PROT_EXEC is set
+    }
+    if (vma->flags & VMA_FLAG_USER) {
+        flags |= PTE_U; // Set the user permission if VMA_FLAG_USER is set
+    }
+    /*
+     * FIX: Must set PTE_V (valid bit) when allocating new pages for demand
+     * paging. Without this, the hardware considers the PTE invalid even though
+     * we allocated a physical page and set other permission bits. This caused
+     * repeated page faults on BSS section access (e.g., static variables)
+     * because the MMU would not recognize the mapping as valid.
+     *
+     * Note: __vma_validate_pte_rxw already sets PTE_V via "flags |= PTE_V |
+     * PTE_W", but this function was missing it for read-only/execute pages.
+     */
+    flags |= PTE_V | PTE_A | PTE_D; // Set the valid bit
+    *pte = PA2PTE(pa) | flags; // Update the PTE with the new address and flags
+
+    // Flush TLB so faulting hart sees the new private writable mapping (COW
+    // fix).
+    sfence_vma();
+
+    return 0;
+}
+
+static int __vma_validate_pte(vma_t *vma, pte_t *pte, uint64 flags) {
+    bool pte_user = (*pte & PTE_U) != 0;
+    bool vma_user = (flags & VMA_FLAG_USER) != 0;
+
+    if (*pte != 0 && (pte_user ^ vma_user)) {
+        return -EACCES; // User access permissions do not match
+    }
+
+    // For file-backed VMAs, unmapped pages are handled by the caller
+    // (vma_validate) which drops the spinlock for I/O. Once a file page
+    // is loaded as a private anonymous copy, all subsequent faults
+    // (COW, permission changes) are handled identically to anonymous pages.
+
+    if ((flags & PROT_WRITE) && __vma_validate_pte_rxw(vma, pte) != 0) {
+        return -EFAULT; // PTE validation failed for writable page
+    } else if ((flags & (PROT_READ | PROT_EXEC)) &&
+               __vma_validate_pte_rx(vma, pte) != 0) {
+        return -EFAULT; // PTE validation failed for readable page
+    }
+    return 0;
+}
+
+int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags) {
+    if (flags == PROT_NONE) {
+        return -EINVAL;
+    }
+    if (vma == NULL || vma->vm == NULL || vma->vm->pagetable == NULL) {
+        return -EINVAL; // Invalid vm
+    }
+    if (flags & ~VMA_FLAG_PROT_MASK) {
+        return -EINVAL; // Invalid flags
+    }
+    if ((flags & PROT_EXEC)) {
+        if ((flags & PROT_READ) == 0) {
+            return -EINVAL; // If executable, must also be readable
+        }
+        if ((flags & PROT_WRITE) != 0 && (flags & VMA_FLAG_USER) != 0) {
+            return -EACCES; // User executable pages cannot be writable
+        }
+    }
+    uint64 va_end = va + size;
+    va = PGROUNDDOWN(va);
+    if (size == 0) {
+        va_end = vma->end; // If size is 0, use the end of the VMA
+    } else {
+        va_end = PGROUNDUP(va_end);
+    }
+    if (va < vma->start || va_end > vma->end) {
+        return -EFAULT; // va is not in the range of the VMA
+    }
+    if ((flags & vma->flags) != flags) {
+        return -EACCES; // Flags do not match
+    }
+
+    // Acquire page table lock for PTE modifications (demand paging, COW)
+    vm_pgtable_lock(vma->vm);
+    smp_mb(); // Ensure we see the latest PTE updates
+    for (uint64 i = va; i < va_end; i += PGSIZE) {
+        // For file-backed VMAs with unmapped pages, we must drop the spinlock
+        // since pcache I/O may sleep.
+        if (vma->file != NULL) {
+            pte_t *pte = walk(vma->vm->pagetable, i, 1, NULL, NULL);
+            if (pte == NULL) {
+                vm_pgtable_unlock(vma->vm);
+                return -ENOMEM;
+            }
+            if (*pte == 0) {
+                // Page not yet mapped - need file I/O (may sleep)
+                vm_pgtable_unlock(vma->vm);
+
+                void *pa;
+                if (vma->file->ops != NULL && vma->file->ops->fault != NULL) {
+                    pa = vma->file->ops->fault(vma->file, vma, i);
+                } else {
+                    pa = __vma_fault_file_page(vma, i);
+                }
+                if (pa == NULL) {
+                    return -ENOMEM;
+                }
+
+                // Re-acquire spinlock and re-walk (PTE may have moved)
+                vm_pgtable_lock(vma->vm);
+                pte = walk(vma->vm->pagetable, i, 1, NULL, NULL);
+                if (pte == NULL) {
+                    vm_pgtable_unlock(vma->vm);
+                    page_free(pa, 0);
+                    return -ENOMEM;
+                }
+                if (*pte != 0) {
+                    // Race: another core already mapped this page
+                    page_free(pa, 0);
+                } else {
+                    // Install PTE for the file page (now a private anon copy)
+                    pte_t pte_flags = 0;
+                    if (vma->flags & PROT_READ)
+                        pte_flags |= PTE_R;
+                    if (vma->flags & PROT_WRITE)
+                        pte_flags |= PTE_W;
+                    if (vma->flags & PROT_EXEC)
+                        pte_flags |= PTE_X;
+                    if (vma->flags & VMA_FLAG_USER)
+                        pte_flags |= PTE_U;
+                    pte_flags |= PTE_V | PTE_A | PTE_D;
+                    *pte = PA2PTE(pa) | pte_flags;
+                    sfence_vma();
+                }
+                // Page is now mapped; any further COW etc. is handled below
+                continue;
+            }
+            // Page already mapped - fall through to normal validation
+            if (__vma_validate_pte(vma, pte, flags) != 0) {
+                vm_pgtable_unlock(vma->vm);
+                return -EFAULT;
+            }
+            continue;
+        }
+
+        // Anonymous VMA path (existing code)
+        pte_t *pte = walk(vma->vm->pagetable, i, 1, NULL, NULL);
+        if (pte == NULL) {
+            vm_pgtable_unlock(vma->vm);
+            return -ENOMEM; // walk failed
+        }
+        if (__vma_validate_pte(vma, pte, flags) != 0) {
+            vm_pgtable_unlock(vma->vm);
+            return -EFAULT; // PTE validation failed
+        }
+    }
+    vm_pgtable_unlock(vma->vm);
+
+    return 0;
+}
+
+/*
+ * User memory accessors.
+ * These are the "safe" copy routines that validate the VMA permissions
+ * before touching user pages.
+ */
+int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len) {
+    uint64 n, va0, pa0;
+    pte_t *pte;
+    int ret = 0;
+
+    vm_rlock(vm);
+    while (len > 0) {
+        va0 = PGROUNDDOWN(dstva);
+        if (va0 >= MAXVA) {
+            ret = -EFAULT;
+            goto out;
+        }
+        vma_t *vma = vm_find_area(vm, va0);
+        if (vma == NULL ||
+            vma_validate(vma, va0, PGSIZE, VMA_FLAG_USER | PROT_WRITE) != 0) {
+            // Try stack growth: release rlock, grow, re-acquire and retry
+            if (va0 >= USTACK_MAX_BOTTOM && va0 < USTACKTOP) {
+                vm_runlock(vm);
+                if (vm_try_growstack(vm, va0) == 0) {
+                    // Stack might have grown — retry
+                    vm_rlock(vm);
+                    vma = vm_find_area(vm, va0);
+                    if (vma != NULL &&
+                        vma_validate(vma, va0, PGSIZE,
+                                     VMA_FLAG_USER | PROT_WRITE) == 0)
+                        goto copyout_ok;
+                }
+                // Growth failed or address still invalid
+                return -EFAULT;
+            }
+            ret = -EFAULT;
+            goto out;
+        }
+copyout_ok:
+
+        pte = walk(vm->pagetable, va0, 0, NULL, NULL);
+        assert(pte != NULL, "vma_copyout: pte should not be null");
+
+        pa0 = PTE2PA(*pte);
+        n = PGSIZE - (dstva - va0);
+        if (n > len)
+            n = len;
+        memmove((void *)(pa0 + (dstva - va0)), src, n);
+
+        len -= n;
+        src += n;
+        dstva = va0 + PGSIZE;
+    }
+out:
+    vm_runlock(vm);
+    return ret;
+}
+
+int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len) {
+    uint64 n, va0, pa0;
+    int ret = 0;
+    vm_rlock(vm);
+
+    while (len > 0) {
+        va0 = PGROUNDDOWN(srcva);
+        vma_t *vma = vm_find_area(vm, va0);
+        if (vma == NULL ||
+            vma_validate(vma, va0, PGSIZE, VMA_FLAG_USER | PROT_READ) != 0) {
+            // Try stack growth: release rlock, grow, re-acquire and retry
+            if (va0 >= USTACK_MAX_BOTTOM && va0 < USTACKTOP) {
+                vm_runlock(vm);
+                if (vm_try_growstack(vm, va0) == 0) {
+                    vm_rlock(vm);
+                    vma = vm_find_area(vm, va0);
+                    if (vma != NULL &&
+                        vma_validate(vma, va0, PGSIZE,
+                                     VMA_FLAG_USER | PROT_READ) == 0)
+                        goto copyin_ok;
+                }
+                return -EFAULT;
+            }
+            ret = -EFAULT;
+            goto out;
+        }
+copyin_ok:
+        pa0 = walkaddr(vm->pagetable, va0);
+        if (pa0 == 0) {
+            ret = -EFAULT;
+            goto out;
+        }
+        n = PGSIZE - (srcva - va0);
+        if (n > len)
+            n = len;
+        memmove(dst, (void *)(pa0 + (srcva - va0)), n);
+
+        len -= n;
+        dst += n;
+        srcva = va0 + PGSIZE;
+    }
+out:
+    vm_runlock(vm);
+    return ret;
+}
+
+int vm_copyinstr(vm_t *vm, char *dst, uint64 srcva, uint64 max) {
+    uint64 n, va0, pa0;
+    int got_null = 0;
+    int ret = 0;
+
+    vm_rlock(vm);
+    while (got_null == 0 && max > 0) {
+        va0 = PGROUNDDOWN(srcva);
+        vma_t *vma = vm_find_area(vm, va0);
+        if (vma == NULL ||
+            vma_validate(vma, va0, PGSIZE, VMA_FLAG_USER | PROT_READ) != 0) {
+            ret = -EFAULT;
+            goto out;
+        }
+        pa0 = walkaddr(vm->pagetable, va0);
+        if (pa0 == 0) {
+            ret = -EFAULT;
+            goto out;
+        }
+        n = PGSIZE - (srcva - va0);
+        if (n > max)
+            n = max;
+
+        char *p = (char *)(pa0 + (srcva - va0));
+        while (n > 0) {
+            if (*p == '\0') {
+                *dst = '\0';
+                got_null = 1;
+                break;
+            } else {
+                *dst = *p;
+            }
+            --n;
+            --max;
+            p++;
+            dst++;
+        }
+
+        srcva = va0 + PGSIZE;
+    }
+    if (!got_null) {
+        ret = -ENAMETOOLONG;
+    }
+out:
+    vm_runlock(vm);
+    return ret;
+}
+
+uint64 vma2pte_flags(uint64 flags) {
+    uint64 pte_flags = 0;
+    if (flags & PROT_READ) {
+        pte_flags |= PTE_R;
+    }
+    if (flags & PROT_WRITE) {
+        pte_flags |= PTE_W;
+    }
+    if (flags & PROT_EXEC) {
+        pte_flags |= PTE_X;
+    }
+    if (flags & VMA_FLAG_USER) {
+        pte_flags |= PTE_U;
+    }
+    return pte_flags;
+}
+
+uint64 pte2vma_flags(uint64 pte_flags) {
+    uint64 flags = 0;
+    if (pte_flags & PTE_R) {
+        flags |= PROT_READ;
+    }
+    if (pte_flags & PTE_W) {
+        flags |= PROT_WRITE;
+    }
+    if (pte_flags & PTE_X) {
+        flags |= PROT_EXEC;
+    }
+    if (pte_flags & PTE_U) {
+        flags |= VMA_FLAG_USER;
+    }
+    return flags;
+}
+
+int vm_createheap(vm_t *vm, uint64 va, uint64 size) {
+    assert(current == NULL || rwsem_is_write_holding(&vm->rw_lock),
+           "vm_createheap: vm rwsem must be write-held");
+    size = PGROUNDUP(size);
+    if ((va & (PGSIZE - 1)) != 0) {
+        return -EINVAL; // va must be page-aligned
+    }
+    if (va >= UVMTOP || va + size > UVMTOP) {
+        return -EINVAL; // Invalid heap address
+    }
+    vma_t *vma =
+        vma_alloc(vm, va, size,
+                  PROT_READ | PROT_WRITE | VMA_FLAG_USER | VMA_FLAG_GROWSUP);
+    if (vma == NULL) {
+        return -ENOMEM; // Allocation failed
+    }
+    vm->heap = vma;       // Set the heap VMA
+    vm->heap_size = size; // Set the heap size
+    return 0;             // Success
+}
+
+int vm_createstack(vm_t *vm, uint64 stack_top, uint64 size) {
+    assert(current == NULL || rwsem_is_write_holding(&vm->rw_lock),
+           "vm_createstack: vm rwsem must be write-held");
+    size = PGROUNDUP(size);
+    if ((stack_top & (PGSIZE - 1)) != 0) {
+        return -EINVAL; // stack_top must be page-aligned
+    }
+    if (stack_top < size || stack_top > UVMTOP) {
+        return -EINVAL; // Invalid stack address
+    }
+    vma_t *vma =
+        vma_alloc(vm, stack_top - size, size,
+                  PROT_READ | PROT_WRITE | VMA_FLAG_USER | VMA_FLAG_GROWSDOWN);
+    if (vma == NULL) {
+        return -ENOMEM; // Allocation failed
+    }
+    vm->stack = vma;       // Set the stack VMA
+    vm->stack_size = size; // Set the stack size
+    return 0;              // Success
+}
+
+int vm_growstack(vm_t *vm, int64 change_size) {
+    assert(current == NULL || rwsem_is_write_holding(&vm->rw_lock),
+           "vm_growstack: vm rwsem must be write-held");
+    if (vm == NULL || vm->pagetable == NULL) {
+        return -EINVAL; // Invalid VM
+    }
+    if (vm->stack == NULL || vm->stack_size < PGSIZE) {
+        return -EINVAL; // No stack VMA found
+    }
+    if ((vm->stack->flags & VMA_FLAG_GROWSDOWN) == 0) {
+        return -EINVAL; // Stack VMA is not growable
+    }
+    if (change_size == 0) {
+        return 0; // No change in stack size
+    }
+
+    if (change_size < 0 && -change_size > vm->stack_size - PGSIZE) {
+        return -EINVAL; // Cannot shrink stack beyond current size
+    } else if ((uint64)change_size > (MAXUSTACK << PGSHIFT) - vm->stack_size) {
+        return -ENOMEM; // Cannot grow stack beyond maximum size
+    }
+
+    uint64 new_size = vm->stack_size + change_size;
+    if (new_size < PGSIZE || new_size > (MAXUSTACK << PGSHIFT)) {
+        return -EINVAL; // Invalid new stack size
+    }
+
+    int64 delta = PGROUNDUP(new_size) - PGROUNDUP(vm->stack_size);
+    if (delta == 0) {
+        vm->stack_size = new_size; // Update the stack size
+        return 0;                  // No change in stack size
+    }
+    vma_t *left = __get_vma_left(vm->stack);
+    uint64 new_start = vm->stack->start - delta;
+
+    if (delta < 0) {
+        // Shrinking the stack
+        vma_t *splitted = vm->stack;
+        vma_t *right = vma_split(vm->stack, new_start);
+        if (right == NULL) {
+            return -ENOMEM; // Failed to split - out of memory
+        }
+        vm->stack = right;        // Update the stack VMA
+        __vma_set_free(splitted); // Set the VMA as free
+        if (left != NULL && left->flags == PROT_NONE) {
+            // Merge will always succeed - it doesn't allocate memory
+            vma_merge(splitted, left);
+        }
+    } else {
+        if (left == NULL || left->flags != PROT_NONE) {
+            return -ENOMEM; // No adjacent free VMA to grow the stack
+        }
+        if (VMA_SIZE(left) < delta) {
+            return -ENOMEM; // Not enough space in the free VMA to grow the
+                            // stack
+        }
+        vma_t *grows = vma_split(left, new_start);
+        if (grows == NULL) {
+            return -ENOMEM; // Failed to split the free VMA
+        }
+        list_entry_detach(&grows->free_list_entry);
+        grows->flags = vm->stack->flags; // Set the flags for the new VMA
+        vma_t *new_stack = vma_merge(grows, vm->stack);
+        // vma_merge doesn't allocate, it returns grows since grows is left of
+        // stack
+        vm->stack = new_stack; // Update the stack VMA
+    }
+    vm->stack_size = new_size; // Update the stack size
+
+    return 0; // Success
+}
+
+// Heuristic stack growth helper used by the page fault handler.
+// If `va` is plausibly a stack access just below the current stack,
+// try growing by one page.
+int vm_try_growstack(vm_t *vm, uint64 va) {
+    int ret = 0;
+    vm_wlock(vm);
+    if (vm == NULL || vm->pagetable == NULL) {
+        ret = -EINVAL; // Invalid VM
+        goto out;
+    }
+    if (va < USTACK_MAX_BOTTOM || va >= USTACKTOP) {
+        // Probably not a stack address, do regular validation
+        ret = 0;
+        goto out;
+    }
+
+    // Check if the stack can be grown
+    if (vm->stack == NULL) {
+        ret = -EINVAL; // No stack VMA found
+        goto out;
+    }
+
+    if (vm->stack->start <= va) {
+        ret = 0; // Stack already covers the address, no need to grow
+        goto out;
+    }
+
+    // @TODO: potentially overflow
+    uint64 ustack_bottom_after =
+        vm->stack->start - (USERSTACK_GROWTH << PAGE_SHIFT);
+    if (ustack_bottom_after < USTACK_MAX_BOTTOM) {
+        ustack_bottom_after = USTACK_MAX_BOTTOM;
+    }
+    if (ustack_bottom_after > va) {
+        // Too far below the stack to grow
+        ret = -EFAULT; // Cannot grow the stack to cover the address
+        goto out;
+    }
+
+    // Grow the stack enough to cover the faulting address, rounded up to
+    // USERSTACK_GROWTH pages for alignment.
+    uint64 needed = vm->stack->start - PGROUNDDOWN(va);
+    uint64 growth = PGROUNDUP(needed);
+    // Round up to USERSTACK_GROWTH page boundary
+    uint64 growth_unit = USERSTACK_GROWTH << PAGE_SHIFT;
+    growth = ((growth + growth_unit - 1) / growth_unit) * growth_unit;
+
+    // Grow the stack
+    ret = vm_growstack(vm, growth);
+out:
+    vm_wunlock(vm);
+    return ret;
+}
+
+int vm_growheap(vm_t *vm, int64 change_size) {
+    int ret = 0;
+    vm_wlock(vm);
+    if (vm == NULL || vm->pagetable == NULL) {
+        ret = -EINVAL; // Invalid VM
+        goto ret;
+    }
+    if (vm->heap == NULL || vm->heap_size < PGSIZE) {
+        ret = -EINVAL; // No heap VMA found
+        goto ret;
+    }
+    if ((vm->heap->flags & VMA_FLAG_GROWSUP) == 0) {
+        ret = -EINVAL; // Heap VMA is not growable
+        goto ret;
+    }
+    if (change_size == 0) {
+        ret = 0; // No change in heap size
+        goto ret;
+    }
+
+    if (change_size < 0) {
+        if (-change_size > vm->heap_size - PGSIZE) {
+            ret = -EINVAL; // Cannot shrink heap beyond current size
+            goto ret;
+        }
+    } else if (change_size > UHEAP_MAX_TOP - vm->heap->end) {
+        ret = -ENOMEM; // Cannot grow heap beyond maximum size
+        goto ret;
+    }
+
+    uint64 new_size = vm->heap_size + change_size;
+    int64 delta = PGROUNDUP(new_size) - VMA_SIZE(vm->heap);
+    if (delta == 0) {
+        vm->heap_size = new_size; // Update the heap size
+        ret = 0;                  // No change in heap size
+        goto ret;
+    }
+    uint64 new_end = vm->heap->end + delta;
+    vma_t *right = __get_vma_right(vm->heap);
+
+    if (delta < 0) {
+        // Shrinking the heap
+        vma_t *splitted = vma_split(vm->heap, new_end);
+        if (splitted == NULL) {
+            ret = -ENOMEM; // Failed to split - out of memory
+            goto ret;
+        }
+        __vma_set_free(splitted); // Set the VMA as free
+        if (right != NULL && right->flags == PROT_NONE) {
+            // Merge will always succeed - it doesn't allocate memory
+            vma_merge(splitted, right);
+        }
+    } else {
+        if (right == NULL || right->flags != PROT_NONE) {
+            printf("vm_growheap: FAIL no free right neighbor for heap "
+                   "[0x%lx,0x%lx) right=%p right_flags=0x%lx delta=%ld\n",
+                   vm->heap->start, vm->heap->end,
+                   right, right ? right->flags : 0xdead, delta);
+            ret = -ENOMEM; // No adjacent free VMA to grow the heap
+            goto ret;
+        }
+        if (VMA_SIZE(right) < delta) {
+            ret = -ENOMEM; // Not enough space in the free VMA to grow the heap
+            goto ret;
+        }
+        if (vma_split(right, new_end) == NULL) {
+            ret = -ENOMEM; // Failed to split the free VMA
+            goto ret;
+        }
+        list_entry_detach(&right->free_list_entry);
+        right->flags = vm->heap->flags; // Set the flags for the new VMA
+        vma_t *new_heap = vma_merge(right, vm->heap);
+        // vma_merge doesn't allocate, so this should always succeed
+        // The merge returns vm->heap since right is to the right of heap
+        vm->heap = new_heap; // Update the heap VMA
+    }
+
+    vm->heap_size = new_size; // Update the heap size
+ret:
+    vm_wunlock(vm);
+    return ret;
+}
+
+/*
+ * vm_mmap_region_locked - mmap with wlock already held
+ * Caller MUST hold vm wlock.  Does NOT acquire/release the lock itself.
+ */
+int vm_mmap_region_locked(vm_t *vm, uint64 start, size_t size, uint64 flags,
+                          struct vfs_file *file, uint64 pgoff, void *pa) {
+    if (vm == NULL || vm->pagetable == NULL)
+        return -EINVAL;
+
+    uint64 va_end = PGROUNDUP(start + size);
+    start = PGROUNDDOWN(start);
+    if (va_end <= start || start < UVMBOTTOM || va_end > UVMTOP)
+        return -EINVAL;
+    size = va_end - start;
+
+    vma_t *vma = vma_alloc(vm, start, size, flags);
+    if (vma == NULL)
+        return -ENOMEM;
+
+    if (file != NULL) {
+        vma->file = vfs_fdup(file);
+        if (vma->file == NULL) {
+            vma_free(vm, vma);
+            return -EBADF;
+        }
+        vma->pgoff = pgoff;
+    }
+
+    if (pa != NULL) {
+        pte_t pte_flags = vma2pte_flags(flags);
+        if (mappages(vm->pagetable, vma->start, size, (uint64)pa, pte_flags) !=
+            0) {
+            assert(vma_free(vm, vma) == 0,
+                   "vm_mmap_region_locked: failed to free vma");
+            return -ENOMEM;
+        }
+    }
+    return 0;
+}
+
+int vm_mmap_region(vm_t *vm, uint64 start, size_t size, uint64 flags,
+                   struct vfs_file *file, uint64 pgoff, void *pa) {
+    int ret = 0;
+    if (current != NULL) {
+        vm_wlock(vm);
+    }
+    ret = vm_mmap_region_locked(vm, start, size, flags, file, pgoff, pa);
+    if (current != NULL) {
+        vm_wunlock(vm);
+    }
+    return ret;
+}
+
+int vm_munmap_region(vm_t *vm, uint64 start, size_t size) {
+    int ret = 0;
+    vm_wlock(vm);
+    if (vm == NULL || vm->pagetable == NULL) {
+        ret = -EINVAL; // Invalid VM
+        goto out;
+    }
+    if (start < UVMBOTTOM || (start + size) > UVMTOP) {
+        ret = -EINVAL; // Invalid address range
+        goto out;
+    }
+    if ((size & (PGSIZE - 1)) != 0 || (start & (PGSIZE - 1)) != 0) {
+        ret = -EINVAL; // Size and va must be page-aligned and non-zero
+        goto out;
+    }
+    if (size == 0) {
+        ret = 0; // Nothing to unmap
+        goto out;
+    }
+
+    vma_t *vma = vm_find_area(vm, start);
+    if (vma == NULL || vma->start != start || vma->end < start + size) {
+        ret = -EINVAL; // No VMA found or VMA does not cover the range
+        goto out;
+    }
+
+    if (vma_free(vm, vma) != 0) {
+        ret = -EINVAL; // Failed to free the VMA
+        goto out;
+    }
+    ret = 0; // Success
+out:
+    vm_wunlock(vm);
+    return ret;
+}
+
+/**
+ * vm_mprotect - Change protection flags of a memory region
+ * @vm: the virtual memory structure
+ * @addr: start address (must be page-aligned)
+ * @size: size of the region to change
+ * @prot: new protection flags (PROT_READ, PROT_WRITE, PROT_EXEC, PROT_NONE)
+ * @todo: support changing flags for a portion of a VMA by splitting the VMA if
+ * needed
+ *
+ * Changes the access protections for the pages in the specified address range.
+ * The address must be page-aligned and fall within a single VMA.
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot) {
+    int ret = 0;
+    vm_wlock(vm);
+
+    if (vm == NULL || vm->pagetable == NULL) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    addr = PGROUNDDOWN(addr);
+    size = PGROUNDUP(size);
+
+    if (addr < UVMBOTTOM || (addr + size) > UVMTOP) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    if (size == 0) {
+        ret = 0;
+        goto out;
+    }
+
+    vma_t *vma = vm_find_area(vm, addr);
+    if (vma == NULL) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // Check if the entire range is within a single VMA
+    if (addr < vma->start || (addr + size) > vma->end) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    /*
+     * mprotect on a sub-range must update VMA metadata so future demand
+     * faults validate against the new protection. Split the original VMA into:
+     *   [left (optional)] [target range] [right (optional)]
+     * and apply the new flags to the middle VMA.
+     */
+    if (addr > vma->start) {
+        vma = vma_split(vma, addr);
+        if (vma == NULL) {
+            ret = -ENOMEM;
+            goto out;
+        }
+    }
+
+    uint64 end = addr + size;
+    if (end < vma->end) {
+        if (vma_split(vma, end) == NULL) {
+            ret = -ENOMEM;
+            goto out;
+        }
+    }
+
+    // Convert PROT_* flags to VMA flags, preserving xv6-specific flags
+    uint64 old_flags = vma->flags;
+    uint64 new_flags = (vma->flags & ~PROT_MASK);
+    new_flags |= prot & PROT_MASK; // Only consider the PROT_* bits
+
+    // Convert to PTE flags
+    uint64 pte_flags = vma2pte_flags(new_flags);
+
+    // Update each page's PTE
+    vm_pgtable_lock(vm);
+    for (uint64 va = addr; va < addr + size; va += PGSIZE) {
+        pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
+        if (pte != NULL && (*pte & PTE_V)) {
+            // Keep the PA and validity, change permissions
+            uint64 pa = PTE2PA(*pte);
+            *pte = PA2PTE(pa) | pte_flags | PTE_V | PTE_A | PTE_D;
+        }
+    }
+    vm_pgtable_unlock(vm);
+
+    // Update target VMA flags (this VMA now exactly matches [addr, addr+size)).
+    vma->flags = new_flags;
+
+    // Flush TLB on remote cores only when permissions are downgraded
+    // (bits present in old_flags but removed in new_flags). Upgrades are
+    // safe without a flush because stale TLB entries simply lack the new
+    // permission — the hardware will fault and pick up the updated PTE.
+    uint64 prot_bits = PROT_READ | PROT_WRITE | PROT_EXEC;
+    if ((old_flags & prot_bits) & ~(new_flags & prot_bits)) {
+        vm_remote_sfence(vm);
+    }
+
+    ret = 0;
+out:
+    vm_wunlock(vm);
+    return ret;
+}
+
+/**
+ * vm_mremap - Remap a virtual memory area to a new address or size
+ * @vm: the virtual memory structure
+ * @old_addr: old start address
+ * @old_size: old size
+ * @new_size: new size
+ * @flags: MREMAP_* flags (MREMAP_MAYMOVE, MREMAP_FIXED)
+ * @new_addr: new address (used with MREMAP_FIXED)
+ *
+ * Expands or shrinks an existing memory mapping, optionally moving it.
+ *
+ * Returns: new address on success, (uint64)-1 on error (errno set).
+ */
+uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
+                 int flags, uint64 new_addr) {
+    uint64 ret = (uint64)-1;
+    vm_wlock(vm);
+
+    if (vm == NULL || vm->pagetable == NULL) {
+        goto out;
+    }
+
+    old_addr = PGROUNDDOWN(old_addr);
+    old_size = PGROUNDUP(old_size);
+    new_size = PGROUNDUP(new_size);
+
+    /* Reject overflow and impossible sizes early. */
+    if (old_size > (UVMTOP - UVMBOTTOM) || new_size > (UVMTOP - UVMBOTTOM)) {
+        goto out;
+    }
+    if (old_addr + old_size < old_addr) {
+        goto out;
+    }
+
+    if (old_addr < UVMBOTTOM || (old_addr + old_size) > UVMTOP) {
+        goto out;
+    }
+
+    vma_t *vma = vm_find_area(vm, old_addr);
+    if (vma == NULL || vma->start != old_addr ||
+        vma->end != old_addr + old_size) {
+        goto out;
+    }
+
+    if (new_size == 0) {
+        // Equivalent to munmap
+        if (vma_free(vm, vma) != 0) {
+            goto out;
+        }
+        ret = old_addr;
+        goto out;
+    }
+
+    if (new_size == old_size && !(flags & MREMAP_FIXED)) {
+        // No change needed
+        ret = old_addr;
+        goto out;
+    }
+
+    if (new_size < old_size) {
+        // Shrinking: split off the tail and free it as a proper VMA
+        uint64 shrink_start = old_addr + new_size;
+        vma_t *tail = vma_split(vma, shrink_start);
+        if (tail == NULL) {
+            goto out;
+        }
+        // vma_free handles unmapping pages, merging with right neighbor,
+        // and returning the VA range to the free list.
+        if (vma_free(vm, tail) != 0) {
+            goto out;
+        }
+        vm_remote_sfence(vm);
+        ret = old_addr;
+        goto out;
+    }
+
+    // Expanding: check if we can grow in place
+    uint64 expand_size = new_size - old_size;
+    uint64 expand_start = old_addr + old_size;
+
+    // Check if the space after is free
+    vma_t *next_vma = vm_find_area(vm, expand_start);
+    if (next_vma == NULL || next_vma->start >= expand_start + expand_size) {
+        // Can grow in place
+        vma->end = old_addr + new_size;
+        ret = old_addr;
+        goto out;
+    }
+
+    // Cannot grow in place - need to move if MREMAP_MAYMOVE is set
+    if (!(flags & MREMAP_MAYMOVE)) {
+        goto out;
+    }
+
+    // Find a new location
+    uint64 new_location = vm_find_free_range(vm, new_size, 0);
+    if (new_location == 0) {
+        goto out;
+    }
+
+    // Allocate new VMA
+    vma_t *new_vma = vma_alloc(vm, new_location, new_size, vma->flags);
+    if (new_vma == NULL) {
+        goto out;
+    }
+
+    // Copy pages from old to new location
+    for (uint64 offset = 0; offset < old_size; offset += PGSIZE) {
+        pte_t *old_pte = walk(vm->pagetable, old_addr + offset, 0, NULL, NULL);
+        if (old_pte != NULL && (*old_pte & PTE_V)) {
+            uint64 pa = PTE2PA(*old_pte);
+            uint64 pte_flags =
+                *old_pte & (PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D);
+
+            // Map the same physical page at the new address.
+            // Preserve PTE_A and PTE_D from the source PTE so that
+            // hardware without Svadu (no automatic A/D bit management)
+            // does not raise spurious page faults on the moved pages.
+            pte_t *new_pte =
+                walk(vm->pagetable, new_location + offset, 1, NULL, NULL);
+            if (new_pte == NULL) {
+                // Rollback would be needed here in production code
+                goto out;
+            }
+            *new_pte = PA2PTE(pa) | pte_flags | PTE_V;
+
+            // Increment refcount for the page
+            page_ref_inc((void *)pa);
+
+            // Clear old PTE
+            *old_pte = 0;
+        }
+    }
+
+    // Free old VMA — PTEs were already cleared above, so __vma_set_free
+    // will skip them.  Do NOT zero-size the VMA (vma->end = vma->start)
+    // because that breaks the right-neighbor merge in vma_free.
+    vma_free(vm, vma);
+
+    vm_remote_sfence(vm);
+
+    /*
+     * If the moved region is executable, flush the I-cache on all harts.
+     * The new virtual addresses may alias stale I-cache entries from
+     * prior mappings.  sfence.vma only handles the TLB.
+     */
+    if (new_vma->flags & PROT_EXEC)
+        vm_remote_fence_i(vm);
+
+    ret = new_location;
+
+out:
+    vm_wunlock(vm);
+    return ret;
+}
+
+/**
+ * vm_msync - Synchronize a file with a memory map
+ * @vm: the virtual memory structure
+ * @addr: start address
+ * @size: size of region to sync
+ * @flags: MS_ASYNC, MS_SYNC, MS_INVALIDATE
+ *
+ * Flushes changes made to in-memory copy of a file back to the file system.
+ * For xv6, this is a no-op since we don't have file-backed mmap yet.
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+int vm_msync(vm_t *vm, uint64 addr, size_t size, int flags) {
+    int ret = 0;
+    vm_rlock(vm);
+
+    if (vm == NULL || vm->pagetable == NULL) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    addr = PGROUNDDOWN(addr);
+    size = PGROUNDUP(size);
+
+    if (addr < UVMBOTTOM || (addr + size) > UVMTOP) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    vma_t *vma = vm_find_area(vm, addr);
+    if (vma == NULL) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // Check if the range is within the VMA
+    if (addr < vma->start || (addr + size) > vma->end) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // For file-backed mappings, we would write dirty pages back to disk here
+    // Currently xv6 doesn't support file-backed mmap, so this is a no-op
+    if (vma->file != NULL) {
+        // TODO: Implement file sync when file-backed mmap is supported
+        // For now, just ensure data is consistent
+        __sync_synchronize();
+    }
+
+    ret = 0;
+out:
+    vm_runlock(vm);
+    return ret;
+}
+
+/**
+ * vm_mincore - Determine whether pages are resident in memory
+ * @vm: the virtual memory structure
+ * @addr: start address (must be page-aligned)
+ * @size: size of region
+ * @vec: output array (one byte per page, LSB set if page is resident)
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+int vm_mincore(vm_t *vm, uint64 addr, size_t size, unsigned char *vec) {
+    int ret = 0;
+    vm_rlock(vm);
+
+    if (vm == NULL || vm->pagetable == NULL || vec == NULL) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    if ((addr & (PGSIZE - 1)) != 0) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    size = PGROUNDUP(size);
+
+    if (addr < UVMBOTTOM || (addr + size) > UVMTOP) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    vma_t *vma = vm_find_area(vm, addr);
+    if (vma == NULL) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // Check pages and fill vec
+    size_t num_pages = size / PGSIZE;
+    vm_pgtable_lock(vm);
+    for (size_t i = 0; i < num_pages; i++) {
+        uint64 va = addr + (i * PGSIZE);
+        vec[i] = 0;
+
+        // Check if this VA falls within a valid VMA
+        if (va < vma->start || va >= vma->end) {
+            // Try to find the next VMA
+            vma = vm_find_area(vm, va);
+            if (vma == NULL) {
+                continue; // Not mapped
+            }
+        }
+
+        pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
+        if (pte != NULL && (*pte & PTE_V)) {
+            // Page is resident (has a valid mapping)
+            vec[i] = 1;
+        }
+    }
+    vm_pgtable_unlock(vm);
+
+    ret = 0;
+out:
+    vm_runlock(vm);
+    return ret;
+}
+
+/**
+ * vm_madvise - Give advice about use of memory
+ * @vm: the virtual memory structure
+ * @addr: start address
+ * @size: size of region
+ * @advice: advice type (MADV_NORMAL, MADV_DONTNEED, etc.)
+ *
+ * Gives the kernel hints about the use of memory in the range.
+ * Most advice is currently ignored in xv6, but MADV_DONTNEED will
+ * actually free the pages.
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+int vm_madvise(vm_t *vm, uint64 addr, size_t size, int advice) {
+    int ret = 0;
+    vm_wlock(vm);
+
+    if (vm == NULL || vm->pagetable == NULL) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    addr = PGROUNDDOWN(addr);
+    size = PGROUNDUP(size);
+
+    if (addr < UVMBOTTOM || (addr + size) > UVMTOP) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    vma_t *vma = vm_find_area(vm, addr);
+    if (vma == NULL) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    // Check if the range is within the VMA
+    if (addr < vma->start || (addr + size) > vma->end) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    switch (advice) {
+    case MADV_NORMAL:
+    case MADV_RANDOM:
+    case MADV_SEQUENTIAL:
+    case MADV_WILLNEED:
+        // These are hints that we ignore for now
+        ret = 0;
+        break;
+
+    case MADV_DONTNEED:
+        // Free the pages but keep the VMA (they'll be demand-faulted back)
+        vm_pgtable_lock(vm);
+        for (uint64 va = addr; va < addr + size; va += PGSIZE) {
+            pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
+            if (pte != NULL && (*pte & PTE_V)) {
+                uint64 pa = PTE2PA(*pte);
+                if (pa != 0) {
+                    page_ref_dec((void *)pa);
+                }
+                *pte = 0;
+            }
+        }
+        vm_pgtable_unlock(vm);
+        vm_remote_sfence(vm);
+        ret = 0;
+        break;
+
+    default:
+        ret = -EINVAL;
+        break;
+    }
+
+out:
+    vm_wunlock(vm);
+    return ret;
+}
+
+// Copy to either a user address, or kernel address,
+// depending on usr_dst.
+// Returns 0 on success, negative errno on error.
+int either_copyout(int user_dst, uint64 dst, void *src, uint64 len) {
+    struct thread *p = current;
+    if (user_dst) {
+        return vm_copyout(p->vm, dst, src, len);
+    } else {
+        memmove((char *)dst, src, len);
+        return 0;
+    }
+}
+
+// Copy from either a user address, or kernel address,
+// depending on usr_src.
+// Returns 0 on success, negative errno on error.
+int either_copyin(void *dst, int user_src, uint64 src, uint64 len) {
+    struct thread *p = current;
+    if (user_src) {
+        return vm_copyin(p->vm, dst, src, len);
+    } else {
+        memmove(dst, (char *)src, len);
+        return 0;
+    }
+}
+
+/*
+ * ============================================================================
+ * Pthread Support Functions
+ * ============================================================================
+ * These functions provide VM support for pthread thread management:
+ * - Thread stack allocation with guard pages
+ * - Anonymous memory mapping (mmap/munmap)
+ * - Finding free address ranges for stack allocation
+ */
+
+/**
+ * vm_find_free_range - Find a free address range in the virtual address space
+ * @vm: the virtual memory structure
+ * @size: the size of the range to find (must be page-aligned)
+ * @hint: optional hint address to start searching from (0 = auto)
+ *
+ * Searches for a free (unmapped) contiguous address range of at least @size
+ * bytes. Iterates over existing VMAs to find gaps efficiently.
+ *
+ * Returns: the start address of the free range, or 0 if none found.
+ */
+uint64 vm_find_free_range(vm_t *vm, size_t size, uint64 hint) {
+    if (vm == NULL || size == 0) {
+        return 0;
+    }
+
+    size = PGROUNDUP(size);
+
+    // Search area: between heap reservation end and stack bottom.
+    // The heap reservation keeps mmap(addr=0) away from the heap so
+    // that brk/sbrk can grow without being blocked by adjacent VMAs.
+    uint64 stack_bottom = vm->stack ? vm->stack->start : UVMTOP - PGSIZE;
+    uint64 heap_end = vm->heap ? (vm->heap->start + vm->heap_size) : UVMBOTTOM;
+    uint64 reserve_end = vm->heap_reserve_end;
+    uint64 effective_bottom = (reserve_end > heap_end) ? reserve_end : heap_end;
+
+    // Leave 16 pages gap below main stack for thread stacks
+    uint64 search_top = stack_bottom - (16 * PGSIZE);
+    uint64 search_bottom = effective_bottom;
+
+    if (search_top <= search_bottom + size) {
+        return 0; // Not enough space
+    }
+
+    // Search the vm_free_list for a free VMA that can fit the requested size
+    // within the valid search range [search_bottom, search_top]
+    vma_t *free_area, *tmp;
+    list_foreach_node_inv_safe(&vm->vm_free_list, free_area, tmp,
+                               free_list_entry) {
+        // Check if this free area is valid (flags should be PROT_NONE)
+        if (free_area->flags != PROT_NONE) {
+            continue;
+        }
+
+        // Calculate usable range within this free area, constrained by search
+        // bounds
+        uint64 usable_start = free_area->start;
+        uint64 usable_end = free_area->end;
+
+        // Clamp to search bounds
+        if (usable_start < search_bottom) {
+            usable_start = search_bottom;
+        }
+        if (usable_end > search_top) {
+            usable_end = search_top;
+        }
+
+        // Check if there's enough space
+        if (usable_end > usable_start && usable_end - usable_start >= size) {
+            // Allocate from the top of the usable range (grows down like stack)
+            uint64 result = PGROUNDDOWN(usable_end - size);
+            if (result >= usable_start) {
+                return result;
+            }
+        }
+    }
+
+    return 0; // No free range found
+}
+
+/**
+ * vm_alloc_thread_stack - Allocate a stack for a pthread with guard page
+ * @vm: the virtual memory structure
+ * @stack_size: the size of the stack (not including guard page)
+ * @stack_top_out: output pointer to receive the top of the stack (SP value)
+ *
+ * Allocates a thread stack with a guard page at the bottom to detect
+ * stack overflow. The layout is:
+ *   [guard page (no access)] [usable stack space]
+ *                            ^                   ^
+ *                        stack_base          stack_top (returned)
+ *
+ * The caller should set the thread's SP to the returned stack_top value.
+ *
+ * Returns: 0 on success, negative errno on error.
+ *          On success, *stack_top_out contains the initial SP value.
+ */
+int vm_alloc_thread_stack(vm_t *vm, size_t stack_size, uint64 *stack_top_out) {
+    if (vm == NULL || stack_top_out == NULL) {
+        return -EINVAL;
+    }
+
+    // Ensure minimum stack size and page alignment
+    if (stack_size < USERSTACK_MINSZ) {
+        stack_size = USERSTACK_MINSZ;
+    }
+    stack_size = PGROUNDUP(stack_size);
+
+    // Total size includes guard page
+    size_t total_size = stack_size + PGSIZE;
+
+    vm_wlock(vm);
+
+    // Find a free address range for the stack
+    uint64 stack_base = vm_find_free_range(vm, total_size, 0);
+    if (stack_base == 0) {
+        vm_wunlock(vm);
+        return -ENOMEM;
+    }
+
+    // Create guard page VMA (no permissions - will fault on access)
+    uint64 guard_page = stack_base;
+    vma_t *guard_vma = vma_alloc(vm, guard_page, PGSIZE, VMA_FLAG_GROWSDOWN);
+    if (guard_vma == NULL) {
+        vm_wunlock(vm);
+        return -ENOMEM;
+    }
+    // Guard page has no permissions (VMA_FLAG_GROWSDOWN marks it as
+    // stack-related) We don't map any physical page - access will cause a page
+    // fault
+
+    // Create usable stack VMA
+    uint64 usable_stack_base = guard_page + PGSIZE;
+    vma_t *stack_vma =
+        vma_alloc(vm, usable_stack_base, stack_size,
+                  VMA_FLAG_USER | PROT_READ | PROT_WRITE | VMA_FLAG_GROWSDOWN);
+    if (stack_vma == NULL) {
+        vma_free(vm, guard_vma);
+        vm_wunlock(vm);
+        return -ENOMEM;
+    }
+
+    // Stack grows down, so stack_top is at the high end
+    uint64 stack_top = usable_stack_base + stack_size;
+
+    vm_wunlock(vm);
+
+    *stack_top_out = stack_top;
+    return 0;
+}
+
+/**
+ * vm_free_thread_stack - Free a pthread stack
+ * @vm: the virtual memory structure
+ * @stack_top: the top of the stack (as returned by vm_alloc_thread_stack)
+ * @stack_size: the size of the stack (not including guard page)
+ *
+ * Frees both the usable stack area and the guard page.
+ *
+ * Returns: 0 on success, negative errno on error.
+ */
+int vm_free_thread_stack(vm_t *vm, uint64 stack_top, size_t stack_size) {
+    if (vm == NULL || stack_top == 0) {
+        return -EINVAL;
+    }
+
+    stack_size = PGROUNDUP(stack_size);
+    if (stack_size < USERSTACK_MINSZ) {
+        stack_size = USERSTACK_MINSZ;
+    }
+
+    uint64 usable_stack_base = stack_top - stack_size;
+    uint64 guard_page = usable_stack_base - PGSIZE;
+
+    vm_wlock(vm);
+
+    // Free the usable stack VMA
+    vma_t *stack_vma = vm_find_area(vm, usable_stack_base);
+    if (stack_vma != NULL) {
+        vma_free(vm, stack_vma);
+    }
+
+    // Free the guard page VMA
+    vma_t *guard_vma = vm_find_area(vm, guard_page);
+    if (guard_vma != NULL) {
+        vma_free(vm, guard_vma);
+    }
+
+    vm_wunlock(vm);
+    return 0;
+}
+
+/**
+ * __vm_unmap_range_locked - Unmap all VMAs (or portions) overlapping [start, end)
+ * @vm: the virtual memory structure (caller holds vm_wlock)
+ * @start: start of range to unmap (page-aligned)
+ * @end: end of range to unmap (page-aligned)
+ *
+ * Used by MAP_FIXED to clear existing mappings before creating new ones.
+ * Splits VMAs at boundaries if the overlap is partial.
+ * Updates vm->heap / vm->stack pointers if the heap or stack VMA is affected.
+ *
+ * Returns: 0 on success, negative errno on failure.
+ */
+static int __vm_unmap_range_locked(vm_t *vm, uint64 start, uint64 end) {
+    while (start < end) {
+        vma_t *vma = vm_find_area(vm, start);
+        if (vma == NULL)
+            break; // No VMA at this address
+
+        if (vma->flags == PROT_NONE) {
+            // Already a free area, skip
+            start = vma->end;
+            continue;
+        }
+
+        // Split if VMA starts before our range
+        if (vma->start < start) {
+            vma_t *right = vma_split(vma, start);
+            if (right == NULL)
+                return -ENOMEM;
+            vma = right;
+        }
+
+        // Split if VMA extends past our range
+        if (vma->end > end) {
+            if (vma_split(vma, end) == NULL)
+                return -ENOMEM;
+            // vma now covers [start, end) only
+        }
+
+        uint64 next = vma->end;
+
+        // Update heap/stack tracking if this VMA is being destroyed
+        if (vma == vm->heap)
+            vm->heap = NULL;
+        if (vma == vm->stack)
+            vm->stack = NULL;
+
+        vma_free(vm, vma);
+        start = next;
+    }
+    return 0;
+}
+
+/**
+ * vm_mmap - Map memory (user-facing mmap wrapper)
+ * @vm: the virtual memory structure
+ * @addr: hint address (0 = let kernel choose)
+ * @length: size to map
+ * @prot: protection flags (PROT_READ, PROT_WRITE, PROT_EXEC)
+ * @flags: mapping flags (MAP_PRIVATE, MAP_ANONYMOUS, MAP_SHARED, etc.)
+ * @fd: file descriptor (-1 for anonymous)
+ * @offset: file offset (must be page-aligned for file mappings)
+ *
+ * Supports:
+ * - Anonymous private mappings (MAP_PRIVATE | MAP_ANONYMOUS)
+ * - File-backed private mappings (MAP_PRIVATE with fd >= 0)
+ *
+ * File-backed MAP_PRIVATE mappings use copy-on-demand: pages are read from
+ * the file's page cache on first access and become private anonymous copies.
+ * Writes to these pages do NOT modify the underlying file.
+ *
+ * Returns: mapped address on success, (uint64)-1 on error.
+ */
+uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
+               int fd, uint64 offset) {
+    struct vfs_file *file = NULL;
+
+    if (vm == NULL || length == 0) {
+        return (uint64)-1; // EINVAL
+    }
+
+    /* Reject overflow/oversized requests before rounding. */
+    if (length > (UVMTOP - UVMBOTTOM)) {
+        return (uint64)-1;
+    }
+    if (length > ((size_t)-1) - (PGSIZE - 1)) {
+        return (uint64)-1;
+    }
+
+    // Validate flag combinations
+    if (!(flags & MAP_PRIVATE) && !(flags & MAP_SHARED)) {
+        return (uint64)-1; // Must specify MAP_PRIVATE or MAP_SHARED
+    }
+    if ((flags & MAP_PRIVATE) && (flags & MAP_SHARED)) {
+        return (uint64)-1; // Cannot specify both
+    }
+
+    if (fd != -1) {
+        // File-backed mapping
+        if (flags & MAP_ANONYMOUS) {
+            return (uint64)-1; // Can't have both fd and MAP_ANONYMOUS
+        }
+        if (offset & (PGSIZE - 1)) {
+            return (uint64)-1; // offset must be page-aligned
+        }
+        // Look up the file from the fd table
+        file = vfs_fdtable_get_file(current->fdtable, fd);
+        if (file == NULL) {
+            return (uint64)-1; // EBADF
+        }
+        // Verify the file is a regular file with an inode
+        struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+        if (inode == NULL || !S_ISREG(inode->mode)) {
+            vfs_fput(file);
+            return (uint64)-1; // ENODEV - not a regular file
+        }
+    } else if (!(flags & MAP_ANONYMOUS)) {
+        return (uint64)-1; // fd=-1 requires MAP_ANONYMOUS
+    }
+
+    length = PGROUNDUP(length);
+
+    // Build VMA flags: prot bits pass through, add VMA-specific bits
+    uint64 vm_flags =
+        VMA_FLAG_USER | (prot & (PROT_READ | PROT_WRITE | PROT_EXEC));
+    if (file != NULL)
+        vm_flags |= VMA_FLAG_FILE;
+    if (flags & MAP_SHARED)
+        vm_flags |= VMA_FLAG_SHARED;
+
+    vm_wlock(vm);
+
+    uint64 map_addr;
+    if (addr == 0 || (flags & MAP_FIXED) == 0) {
+        // Find a free range
+        map_addr = vm_find_free_range(vm, length, addr);
+        if (map_addr == 0) {
+            vm_wunlock(vm);
+            if (file != NULL)
+                vfs_fput(file);
+            return (uint64)-1; // ENOMEM
+        }
+    } else {
+        // MAP_FIXED: use exact address, unmap any existing mappings first
+        map_addr = PGROUNDDOWN(addr);
+        uint64 map_end = map_addr + length;
+        if (__vm_unmap_range_locked(vm, map_addr, map_end) != 0) {
+            vm_wunlock(vm);
+            if (file != NULL)
+                vfs_fput(file);
+            return (uint64)-1; // Failed to unmap existing range
+        }
+    }
+
+    // Allocate the VMA
+    vma_t *vma = vma_alloc(vm, map_addr, length, vm_flags);
+    if (vma == NULL) {
+        vm_wunlock(vm);
+        if (file != NULL)
+            vfs_fput(file);
+        return (uint64)-1; // ENOMEM
+    }
+
+    // Set up file-backed mapping (pages loaded on demand via page faults)
+    if (file != NULL) {
+        vma->file = file; // Transfer our reference (from vfs_fdtable_get_file)
+        vma->pgoff = offset;
+    }
+
+    vm_wunlock(vm);
+    return map_addr;
+}
+
+/**
+ * vm_munmap - Unmap memory region
+ * @vm: the virtual memory structure
+ * @addr: start address (must be page-aligned)
+ * @length: size to unmap
+ *
+ * Returns: 0 on success, -1 on error.
+ */
+int vm_munmap(vm_t *vm, uint64 addr, size_t length) {
+    return vm_munmap_region(vm, addr, length);
+}

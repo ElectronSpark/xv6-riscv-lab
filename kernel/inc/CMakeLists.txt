@@ -14,9 +14,9 @@ endif()
 # Define structures to generate offsets for
 # Format: --struct name:header for auto-detection of all fields
 set(ASM_OFFSET_STRUCTS
-    trapframe:trapframe.h
-    utrapframe:trapframe.h
-    context:trapframe.h
+    trapframe:../arch/riscv/inc/trapframe.h
+    utrapframe:../arch/riscv/inc/trapframe.h
+    context:../arch/riscv/inc/trapframe.h
     cpu_local:smp/percpu_types.h
     thread:proc/thread_types.h
 )
@@ -25,7 +25,7 @@ set(ASM_OFFSET_STRUCTS
 set(ASM_OFFSET_HEADERS
     types.h
     param.h
-    riscv.h
+    ../arch/riscv/inc/riscv.h
 )
 
 # Build the command line arguments for headers
@@ -60,6 +60,7 @@ add_custom_command(
     COMMAND ${GEN_ASM_OFFSETS_SCRIPT}
         --compiler ${ASM_OFFSETS_COMPILER}
         --include ${CMAKE_SOURCE_DIR}/kernel/inc
+        --include ${CMAKE_SOURCE_DIR}/kernel/arch/riscv/inc
         ${HEADER_ARGS}
         ${STRUCT_ARGS}
         --output ${ASM_OFFSETS_H}

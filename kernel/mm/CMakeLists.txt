@@ -1,9 +1,11 @@
-add_library(mm OBJECT
+set(MM_SOURCES
     kalloc.c
     page.c
     slab.c
-    vm.c
     sysmm.c
     pcache.c
     early_allocator.c
+    vm.c
 )
+
+add_library(mm OBJECT ${MM_SOURCES})

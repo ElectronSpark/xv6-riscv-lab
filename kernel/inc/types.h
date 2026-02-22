@@ -26,6 +26,8 @@ typedef signed int int32;
 typedef signed long int64;
 
 typedef uint64 pde_t;
+typedef uint64 pte_t;
+typedef uint64 *pagetable_t;
 
 typedef uint64 cpumask_t;
 

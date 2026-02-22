@@ -1,3 +1,3 @@
 add_library(ipi OBJECT
-    ipi.c
+	ipi_stub.c
 )

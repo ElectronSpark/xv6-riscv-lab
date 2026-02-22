@@ -24,7 +24,7 @@ static void (*trampoline_userret)(uint64, uint64) = NULL;
 // skip getting sscratch.
 void kernelvec();
 
-void trapinit(void) {
+void arch_trap_init(void) {
     trampoline_userret =
         (void *)(TRAMPOLINE + ((uint64)userret - (uint64)trampoline));
     printf("trapinit: trampoline_userret at %p\n", trampoline_userret);
@@ -49,7 +49,7 @@ void trapinit(void) {
 }
 
 // set up to take exceptions and traps while in the kernel.
-void trapinithart(void) {
+void arch_trap_init_hart(void) {
     w_sscratch(mycpu()->intr_sp);
     w_stvec((uint64)kernelvec);
 }
@@ -104,7 +104,7 @@ void user_kirq_entrance(uint64 ksp, uint64 s0) {
 
     // redirect traps to kerneltrap()
     // Since we are on kernel stack
-    trapinithart();
+    arch_trap_init_hart();
     if (do_irq(&current->trapframe->trapframe) < 0) {
         __trap_panic(&current->trapframe->trapframe, s0);
     }
@@ -137,7 +137,7 @@ void usertrap(void) {
 
     // redirect traps to kerneltrap()
     // Since we are on kernel stack
-    trapinithart();
+    arch_trap_init_hart();
 
     switch (scause) {
     case RISCV_BREAKPOINT_TRAP: {

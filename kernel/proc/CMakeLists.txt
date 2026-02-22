@@ -1,5 +1,4 @@
 set(PROC_C_SRCS
-    thread.c
     thread_group.c
     thread_queue.c
     sched.c
@@ -7,7 +6,6 @@ set(PROC_C_SRCS
     sys_signal.c
     sysproc.c
     workqueue.c
-    clone.c
     exit.c
     pid.c
     pgroup.c
@@ -19,8 +17,6 @@ set(PROC_C_SRCS
 )
 
 set(PROC_S_SRCS
-    swtch.S
-    sig_trampoline.S
 )
 
 add_library(proc OBJECT

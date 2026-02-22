@@ -57,7 +57,7 @@ void reparent(struct thread *p) {
     pid_wlock();
 
     list_foreach_node_safe(&p->children, child, tmp, siblings) {
-        // make sure the child isn't still in exit() or swtch().
+        // make sure the child isn't still in exit() or arch_context_switch().
         child->signal.esignal = SIGCHLD; // reset to default exit signal
         if (__thread_state_get(child) == THREAD_ZOMBIE) {
             zombie_found = true;

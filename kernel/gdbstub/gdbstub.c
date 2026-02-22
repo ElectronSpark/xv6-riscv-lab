@@ -461,6 +461,32 @@ static int gdb_recv_packet(void)
 
 static uint64 gdb_get_reg(struct utrapframe *tf, int regnum)
 {
+#ifdef __x86_64__
+    struct trapframe *t = &tf->trapframe;
+    switch (regnum) {
+    case 0:  return t->rax;
+    case 1:  return t->rbx;
+    case 2:  return t->rcx;
+    case 3:  return t->rdx;
+    case 4:  return t->rsi;
+    case 5:  return t->rdi;
+    case 6:  return t->rbp;
+    case 7:  return t->rsp;
+    case 8:  return t->r8;
+    case 9:  return t->r9;
+    case 10: return t->r10;
+    case 11: return t->r11;
+    case 12: return t->r12;
+    case 13: return t->r13;
+    case 14: return t->r14;
+    case 15: return t->r15;
+    case 16: return t->rip;            /* pc */
+    case 17: return t->rflags;         /* eflags */
+    case 18: return t->cs;
+    case 19: return t->ss;
+    default: return 0;
+    }
+#else
     struct trapframe *t = &tf->trapframe;
     switch (regnum) {
     case 0:  return 0;                 /* x0 = zero */
@@ -498,10 +524,36 @@ static uint64 gdb_get_reg(struct utrapframe *tf, int regnum)
     case 32: return t->sepc;           /* pc  */
     default: return 0;
     }
+#endif
 }
 
 static void gdb_set_reg(struct utrapframe *tf, int regnum, uint64 val)
 {
+#ifdef __x86_64__
+    struct trapframe *t = &tf->trapframe;
+    switch (regnum) {
+    case 0:  t->rax    = val; break;
+    case 1:  t->rbx    = val; break;
+    case 2:  t->rcx    = val; break;
+    case 3:  t->rdx    = val; break;
+    case 4:  t->rsi    = val; break;
+    case 5:  t->rdi    = val; break;
+    case 6:  t->rbp    = val; break;
+    case 7:  t->rsp    = val; break;
+    case 8:  t->r8     = val; break;
+    case 9:  t->r9     = val; break;
+    case 10: t->r10    = val; break;
+    case 11: t->r11    = val; break;
+    case 12: t->r12    = val; break;
+    case 13: t->r13    = val; break;
+    case 14: t->r14    = val; break;
+    case 15: t->r15    = val; break;
+    case 16: t->rip    = val; break;   /* pc */
+    case 17: t->rflags = val; break;   /* eflags */
+    case 18: t->cs     = val; break;
+    case 19: t->ss     = val; break;
+    }
+#else
     struct trapframe *t = &tf->trapframe;
     switch (regnum) {
     case 0:  break;                    /* x0 is hardwired */
@@ -538,6 +590,7 @@ static void gdb_set_reg(struct utrapframe *tf, int regnum, uint64 val)
     case 31: t->t6   = val; break;
     case 32: t->sepc = val; break;
     }
+#endif
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
@@ -594,13 +647,12 @@ static int gdb_write_user_mem(uint64 addr, const void *src, int len)
             return -1;
         }
 
-        /* Page is now mapped. Walk to get the PA. */
-        pte_t *pte = walk(vm->pagetable, va0, 0, NULL, NULL);
-        if (pte == NULL || !(*pte & PTE_V)) {
-            GDB_DBG("write_mem: walk failed for va %lx pte=%p", va0, pte);
+        /* Page is now mapped. Resolve VA->PA through arch VM helpers. */
+        uint64 pa0 = walkaddr(vm->pagetable, va0);
+        if (pa0 == 0) {
+            GDB_DBG("write_mem: walkaddr failed for va %lx", va0);
             return -1;
         }
-        uint64 pa0 = PTE2PA(*pte);
 
         uint64 off = dstva - va0;
         uint64 n = PGSIZE - off;
@@ -2109,7 +2161,8 @@ int gdbstub_signal_stop(struct thread *t, int signo)
     __sync_synchronize();
 
     /* Flush I-cache in case GDB modified code */
-    asm volatile("fence.i");
+    if (t->vm)
+        vm_remote_fence_i(t->vm);
 
     return 0;
 }
@@ -2152,7 +2205,11 @@ int gdbstub_trap(struct thread *t)
         /* GDB has attached — fall through to normal stop handling.
          * Check a0: waitgdb() sets a0=0 (don't stop on exec),
          * waitgdb -e sets a0=1 (stop at entry point after exec). */
+#ifdef __x86_64__
+        gdb.stop_on_exec = (t->trapframe->trapframe.rdi != 0) ? 1 : 0;
+#else
         gdb.stop_on_exec = (t->trapframe->trapframe.a0 != 0) ? 1 : 0;
+#endif
     }
 
     uint64 pc = t->trapframe->trapframe.sepc;
@@ -2225,7 +2282,8 @@ int gdbstub_trap(struct thread *t)
      * local, so we must execute it here — on the hart that will
      * actually fetch the (possibly modified) instructions.
      */
-    asm volatile("fence.i");
+    if (t->vm)
+        vm_remote_fence_i(t->vm);
 
     return 0;
 }
@@ -2301,7 +2359,8 @@ void gdbstub_exec_stop(struct thread *t, uint64 entry_pc, const char *path)
     }
 
     /* Flush I-cache — GDB may have inserted breakpoints from another hart. */
-    asm volatile("fence.i");
+    if (t->vm)
+        vm_remote_fence_i(t->vm);
 }
 
 /*
@@ -2420,7 +2479,8 @@ int gdbstub_check_interrupt(struct thread *t)
                   gdb.target_pid, t->pid);
         while (__atomic_load_n(&gdb.direct_stop, __ATOMIC_ACQUIRE))
             sleep_ms(1);
-        asm volatile("fence.i");
+        if (t->vm)
+            vm_remote_fence_i(t->vm);
         return 1;
     }
 
@@ -2446,7 +2506,8 @@ int gdbstub_check_interrupt(struct thread *t)
     sem_wait(&gdb.target_resume);
 
     /* Flush I-cache — GDB may have inserted breakpoints from another hart. */
-    asm volatile("fence.i");
+    if (t->vm)
+        vm_remote_fence_i(t->vm);
 
     return 1;
 }

@@ -6,9 +6,9 @@
 #include "printf.h"
 #include <smp/atomic.h>
 #include "timer/timer.h"
+#include "arch/timer.h"
 
 void start_kernel(int hartid, void *fdt_base, bool is_boot_hart);
-void timerinit();
 
 // entry.S needs one stack per CPU.
 // Must be aligned to KERNEL_STACK_SIZE so that idle_thread_init can find
@@ -36,7 +36,7 @@ void start(int hartid, void *fdt_base) {
     w_sie(r_sie() | SIE_SEIE | SIE_STIE | SIE_SSIE);
 
     // ask for clock interrupts.
-    timerinit();
+    arch_timer_init();
 
     // jump to main().
     start_kernel(hartid, fdt_base, is_boot_hart);
@@ -47,11 +47,16 @@ void start(int hartid, void *fdt_base) {
 //   - menvcfg STCE bit for sstc extension
 //   - mcounteren for stimecmp and time access
 // We just need to set up the first timer interrupt.
-void timerinit() {
+void arch_timer_init() {
     // calculate jiff ticks.
     // One time calculation, thus no optimization needed.
     __jiff_ticks = TIMEBASE_FREQUENCY / HZ;
 
+    // ask for the very first timer interrupt.
+    w_stimecmp(r_time() + JIFF_TICKS);
+}
+
+void arch_timer_init_hart() {
     // ask for the very first timer interrupt.
     w_stimecmp(r_time() + JIFF_TICKS);
 }

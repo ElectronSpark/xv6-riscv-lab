@@ -43,7 +43,7 @@ void spin_acquire(spinlock_t *lk) {
             intr_on();
             // Spin waiting for crash IPI
             for (;;)
-                asm volatile("wfi");
+                arch_wait_for_interrupt();
         }
         if (__debug_count >= TICK_S * 100) {
             if (!CPU_CRASHED()) {

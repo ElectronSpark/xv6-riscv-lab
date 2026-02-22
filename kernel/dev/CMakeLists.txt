@@ -5,7 +5,6 @@ add_library(dev OBJECT
     blkdev.c
     nullrand.c
     bio.c
-    fdt.c
     netdev.c
     yt8531.c
     x1_emac.c
