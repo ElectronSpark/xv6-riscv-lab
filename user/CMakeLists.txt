@@ -728,7 +728,18 @@ endif()
 
 # Aggregate target
 if(SYSROOT_TARGETS)
-    add_custom_target(sysroot_populate ALL DEPENDS ${SYSROOT_TARGETS})
+    # Write a stamp file whenever sysroot is (re)populated so that
+    # downstream add_custom_command rules (fs.img) can depend on an
+    # actual file rather than only a target name.
+    set(SYSROOT_STAMP "${MUSL_SYSROOT}/.sysroot_stamp")
+    set(SYSROOT_STAMP "${SYSROOT_STAMP}" PARENT_SCOPE)
+    add_custom_command(
+        OUTPUT ${SYSROOT_STAMP}
+        COMMAND ${CMAKE_COMMAND} -E touch ${SYSROOT_STAMP}
+        DEPENDS ${SYSROOT_TARGETS}
+        COMMENT "sysroot: stamp"
+    )
+    add_custom_target(sysroot_populate ALL DEPENDS ${SYSROOT_STAMP})
     add_dependencies(sysroot_populate user_programs)
     if(TARGET dash_build)
         add_dependencies(sysroot_populate dash_build)

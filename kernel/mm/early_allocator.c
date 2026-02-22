@@ -374,3 +374,9 @@ void *early_alloc(size_t size) {
 }
 
 void *early_alloc_end_ptr(void) { return earalloc_params.current; }
+
+void early_allocator_extend(void *new_end) {
+    if ((uint64)new_end > (uint64)earalloc_params.end) {
+        earalloc_params.end = new_end;
+    }
+}

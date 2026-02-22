@@ -267,6 +267,7 @@ add_custom_command(
             ${SYSROOT_DIR}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS sysroot_populate
+            ${SYSROOT_STAMP}
             ${MKEXT4_ROOTFS_SCRIPT}
             ${CMAKE_SOURCE_DIR}/README.md
     COMMENT "Creating ext4 rootfs image from sysroot"

@@ -1792,6 +1792,35 @@ void fdt_apply_platform_config(void) {
     extern uint64 __physical_memory_end;
     extern uint64 __physical_total_pages;
 
+    // Split any memory region that crosses the 4 GB physical boundary into
+    // two entries: the portion below 4 GB stays as low memory (region 0) and
+    // the portion above becomes a separate highmem region.  This keeps the
+    // page array manageable and matches the early allocator's cap done in
+    // start_kernel.c.
+    #define PHYS_4GB 0x100000000ULL
+    for (int i = 0; i < platform.mem_count; i++) {
+        uint64 base = platform.mem[i].base;
+        uint64 end  = base + platform.mem[i].size;
+        if (base < PHYS_4GB && end > PHYS_4GB &&
+            platform.mem_count < MAX_MEM_REGIONS) {
+            // Shrink this entry to below-4GB portion
+            uint64 low_size  = PHYS_4GB - base;
+            uint64 high_size = end - PHYS_4GB;
+            platform.mem[i].size = low_size;
+
+            // Shift subsequent entries to make room
+            for (int j = platform.mem_count; j > i + 1; j--) {
+                platform.mem[j] = platform.mem[j - 1];
+            }
+            // Insert above-4GB portion right after
+            platform.mem[i + 1].base = PHYS_4GB;
+            platform.mem[i + 1].size = high_size;
+            platform.mem_count++;
+            i++; // skip the newly inserted entry
+        }
+    }
+    #undef PHYS_4GB
+
     // Refine memory info from full FDT parse (may have multiple regions)
     if (platform.mem_count > 0 && platform.mem[0].size > 0) {
         __physical_memory_start = platform.mem[0].base;
@@ -1809,6 +1838,13 @@ void fdt_apply_platform_config(void) {
         __physical_memory_end = highest_end;
         __physical_total_pages =
             (highest_end - __physical_memory_start) >> 12;
+
+        // Extend the early allocator ceiling to match the new physical
+        // memory end.  The early allocator was initially capped at 4 GB
+        // in start_kernel; now that the full FDT parse has determined
+        // all memory regions, allow it to use the full range so the
+        // page array can cover all physical memory.
+        early_allocator_extend((void *)highest_end);
     }
 
     // Set device addresses from FDT

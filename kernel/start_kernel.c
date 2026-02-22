@@ -47,6 +47,17 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
         // Successfully found memory from FDT
     }
 
+    // Cap the first memory region at 4 GB for the early allocator.
+    // If the FDT-reported region crosses the 4 GB boundary, limit it here
+    // so the page array stays manageable.  fdt_apply_platform_config() will
+    // later split any cross-boundary regions and expose the remainder as
+    // highmem.
+    #define EARLY_MEM_LIMIT 0x100000000ULL
+    if (mem_base + mem_size > EARLY_MEM_LIMIT) {
+        mem_size = EARLY_MEM_LIMIT - mem_base;
+    }
+    #undef EARLY_MEM_LIMIT
+
     // Set up memory boundaries for early allocator
     __physical_memory_start = mem_base;
     __physical_memory_end = mem_base + mem_size;

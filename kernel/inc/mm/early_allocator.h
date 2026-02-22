@@ -53,4 +53,13 @@ void *early_alloc_align(size_t size, size_t align);
  */
 void *early_alloc_end_ptr(void);
 
+/**
+ * @brief Extend the early allocator ceiling
+ * @param new_end New upper bound (must be >= current ceiling)
+ *
+ * Used after the full FDT parse when additional memory regions above
+ * the initial conservative limit are discovered.
+ */
+void early_allocator_extend(void *new_end);
+
 #endif /* __KERNEL_EARLY_ALLOCATOR_H */
