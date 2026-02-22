@@ -2,33 +2,20 @@ set(KERNEL_BINARY kernel)
 set(KERNEL_DECOMPILED kernel.asm)
 set(KERNEL_SYMBOLS kernel.sym)
 
-if(NOT DEFINED ENV{LAB})
-    message(FATAL_ERROR "Environment variable LAB is not set")
-else()
-    message(STATUS "Building kernel for lab: $ENV{LAB}")
-endif()
-
 # ==============================================================================
 # Platform configuration
 # ==============================================================================
-# Set PLATFORM to select target:
+# PLATFORM is set by the top-level CMakeLists.txt:
 #   - qemu (default): KERNEL_BASE=0x80200000
-#   - orangepi: KERNEL_BASE=0x00200000
+#   - orangepi:       KERNEL_BASE=0x00200000
 # ==============================================================================
-if(NOT DEFINED PLATFORM)
-    set(PLATFORM "qemu")
-endif()
-
 if(PLATFORM STREQUAL "orangepi")
     set(KERNEL_BASE "0x00200000")
 else()
     set(KERNEL_BASE "0x80200000")
 endif()
 
-# Size of parsed symbol index (for rb-tree nodes)
-# ~39000 entries @ 80 bytes each = ~3MB
-set(KERNEL_SYMBOLS_IDX_SIZE "0x300000")
-
+message(STATUS "Building kernel for lab: $ENV{LAB}")
 message(STATUS "Platform: ${PLATFORM}, kernel base: ${KERNEL_BASE}")
 
 # Core kernel sources in this directory (excluding subdirectories).
@@ -73,10 +60,6 @@ endif()
 
 if($ENV{LAB} STREQUAL "lock")
     list(APPEND KERNEL_C_FILES ${KERNEL_DIR}/stats.c ${KERNEL_DIR}/sprintf.c)
-endif()
-
-if($ENV{LAB} STREQUAL "net")
-    list(APPEND KERNEL_C_FILES ${KERNEL_DIR}/e1000.c ${KERNEL_DIR}/net.c ${KERNEL_DIR}/pci.c)
 endif()
 
 set(KERNEL_S_FILES ${KERNEL_DIR}/entry.S)
@@ -131,26 +114,49 @@ set(KERNEL_OBJ_LIBS
 
 set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs tty lwip ext4fs telnetd gdbstub kqueue_core)
 
-# Generate linker script from template
+# ==============================================================================
+# Linker scripts (generated from kernel.ld.in template)
+# ==============================================================================
+# Two linker scripts are generated:
+#   kernel_plain.ld  — for the plain kernel (no symbol index, idx size = 0)
+#   kernel_sym.ld    — for kernel_with_symbols_elf (idx size computed from
+#                      DWARF line entries in the plain kernel)
+#
+# The .ksymbols_idx section reserves BSS space for __ksymbols_t rb-tree nodes.
+# Its size is computed at build time by scripts/gen_kernel_ld.py, which counts
+# DWARF decoded-line entries and multiplies by sizeof(__ksymbols_t).
+# ==============================================================================
 set(KERNEL_LD_IN ${KERNEL_DIR}/kernel.ld.in)
-set(KERNEL_LD ${CMAKE_CURRENT_BINARY_DIR}/kernel.ld)
-configure_file(${KERNEL_LD_IN} ${KERNEL_LD} @ONLY)
+
+# Plain kernel linker script (no symbol index needed)
+set(KERNEL_SYMBOLS_IDX_SIZE "0")
+set(KERNEL_LD_PLAIN ${CMAKE_CURRENT_BINARY_DIR}/kernel_plain.ld)
+configure_file(${KERNEL_LD_IN} ${KERNEL_LD_PLAIN} @ONLY)
+
+# Computed linker script (generated at build time after plain kernel is linked)
+set(GEN_KERNEL_LD_SCRIPT ${CMAKE_SOURCE_DIR}/scripts/gen_kernel_ld.py)
+set(KERNEL_LD_SYM ${CMAKE_CURRENT_BINARY_DIR}/kernel_sym.ld)
 
 # ==============================================================================
 # Plain kernel (without embedded symbols)
 # ==============================================================================
+
+# Common compile definitions for optional kernel tests
+set(KERNEL_OPTIONAL_COMPILE_DEFS "")
+if(DEFINED ENV{RWLOCK_TEST})
+    list(APPEND KERNEL_OPTIONAL_COMPILE_DEFS RWAD_WRITE_TEST=1)
+endif()
+if(DEFINED ENV{SEMAPHORE_TEST})
+    list(APPEND KERNEL_OPTIONAL_COMPILE_DEFS SEMAPHORE_RUNTIME_TEST=1)
+endif()
+
 add_executable(${KERNEL_BINARY} ${KERNEL_OBJS})
 add_dependencies(${KERNEL_BINARY} generate_asm_offsets)
 target_sources(${KERNEL_BINARY} PRIVATE ${KERNEL_OBJ_LIBS})
-target_link_options(${KERNEL_BINARY} PRIVATE -z max-page-size=4096 -T ${KERNEL_LD})
+target_link_options(${KERNEL_BINARY} PRIVATE -z max-page-size=4096 -T ${KERNEL_LD_PLAIN})
 target_link_libraries(${KERNEL_BINARY} PRIVATE ${KERNEL_LINK_LIBS})
-
-if(DEFINED ENV{RWLOCK_TEST})
-    target_compile_definitions(${KERNEL_BINARY} PRIVATE RWAD_WRITE_TEST=1)
-endif()
-
-if(DEFINED ENV{SEMAPHORE_TEST})
-    target_compile_definitions(${KERNEL_BINARY} PRIVATE SEMAPHORE_RUNTIME_TEST=1)
+if(KERNEL_OPTIONAL_COMPILE_DEFS)
+    target_compile_definitions(${KERNEL_BINARY} PRIVATE ${KERNEL_OPTIONAL_COMPILE_DEFS})
 endif()
 
 # Decompile the kernel binary
@@ -172,34 +178,55 @@ add_custom_target(${KERNEL_SYMBOLS}
 # ==============================================================================
 # Kernel with embedded symbols (two-phase build)
 # ==============================================================================
-set(KSYM_PLACEHOLDER_SIZE "0x200000")
+# Phase 1: Build kernel with a placeholder .ksymbols section
+# Phase 2: Generate symbols from the placeholder kernel and embed them
+#
+# Both .ksymbols placeholder size and .ksymbols_idx size are computed from
+# DWARF decoded-line entries in the plain kernel via estimate_symbol_size.py.
+# ==============================================================================
+set(ESTIMATE_SCRIPT ${CMAKE_SOURCE_DIR}/scripts/estimate_symbol_size.py)
 set(KSYM_PLACEHOLDER_ASM ${CMAKE_CURRENT_BINARY_DIR}/ksymbols_placeholder.S)
 
+# Compute .ksymbols size from plain kernel DWARF data and generate placeholder
 add_custom_command(
     OUTPUT ${KSYM_PLACEHOLDER_ASM}
     COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/gen_ksymbols_placeholder.py
-            ${KSYM_PLACEHOLDER_SIZE} ${KSYM_PLACEHOLDER_ASM}
-    COMMENT "Generating ${KSYM_PLACEHOLDER_SIZE} byte .ksymbols placeholder"
-    DEPENDS ${CMAKE_SOURCE_DIR}/scripts/gen_ksymbols_placeholder.py
+            auto ${CMAKE_OBJDUMP} $<TARGET_FILE:${KERNEL_BINARY}>
+            ${KSYM_PLACEHOLDER_ASM}
+    COMMENT "Computing .ksymbols size and generating placeholder"
+    DEPENDS ${KERNEL_BINARY}
+            ${CMAKE_SOURCE_DIR}/scripts/gen_ksymbols_placeholder.py
+            ${ESTIMATE_SCRIPT}
 )
 
 add_library(ksymbols_placeholder OBJECT EXCLUDE_FROM_ALL ${KSYM_PLACEHOLDER_ASM})
 add_dependencies(ksymbols_placeholder generate_asm_offsets)
 set_source_files_properties(${KSYM_PLACEHOLDER_ASM} PROPERTIES GENERATED TRUE)
 
-# Kernel with placeholder
+# Compute .ksymbols_idx size from plain kernel's DWARF data, then generate
+# the final linker script for the symbols kernel.
+add_custom_command(
+    OUTPUT ${KERNEL_LD_SYM}
+    COMMAND python3 ${GEN_KERNEL_LD_SCRIPT}
+            ${KERNEL_LD_IN}
+            ${KERNEL_LD_SYM}
+            ${CMAKE_OBJDUMP}
+            $<TARGET_FILE:${KERNEL_BINARY}>
+            ${KERNEL_BASE}
+    WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+    DEPENDS ${KERNEL_BINARY} ${GEN_KERNEL_LD_SCRIPT} ${KERNEL_LD_IN} ${ESTIMATE_SCRIPT}
+    COMMENT "Computing .ksymbols_idx size and generating kernel_sym.ld"
+)
+add_custom_target(kernel_sym_ld DEPENDS ${KERNEL_LD_SYM})
+
+# Phase 1: Kernel with placeholder (uses computed linker script)
 add_executable(kernel_with_symbols_elf EXCLUDE_FROM_ALL ${KERNEL_OBJS})
-add_dependencies(kernel_with_symbols_elf generate_asm_offsets ksymbols_placeholder)
+add_dependencies(kernel_with_symbols_elf generate_asm_offsets ksymbols_placeholder kernel_sym_ld)
 target_sources(kernel_with_symbols_elf PRIVATE ${KERNEL_OBJ_LIBS} $<TARGET_OBJECTS:ksymbols_placeholder>)
-target_link_options(kernel_with_symbols_elf PRIVATE -z max-page-size=4096 -T ${KERNEL_LD})
+target_link_options(kernel_with_symbols_elf PRIVATE -z max-page-size=4096 -T ${KERNEL_LD_SYM})
 target_link_libraries(kernel_with_symbols_elf PRIVATE ${KERNEL_LINK_LIBS})
-
-if(DEFINED ENV{RWLOCK_TEST})
-    target_compile_definitions(kernel_with_symbols_elf PRIVATE RWAD_WRITE_TEST=1)
-endif()
-
-if(DEFINED ENV{SEMAPHORE_TEST})
-    target_compile_definitions(kernel_with_symbols_elf PRIVATE SEMAPHORE_RUNTIME_TEST=1)
+if(KERNEL_OPTIONAL_COMPILE_DEFS)
+    target_compile_definitions(kernel_with_symbols_elf PRIVATE ${KERNEL_OPTIONAL_COMPILE_DEFS})
 endif()
 
 # Generate symbols from kernel with placeholder
@@ -244,23 +271,17 @@ add_custom_command(
 )
 
 # ==============================================================================
-# Compressed kernel image (optional)
+# Compressed kernel image (optional, for U-Boot deployment)
 # ==============================================================================
-# Both QEMU and U-Boot (booti) support gzip-compressed kernel images.
-# The compressed image is named xv6.bin.gz
-# ==============================================================================
-if(ENABLE_COMPRESSION)
-    find_program(GZIP gzip)
-    if(GZIP)
-        add_custom_command(
-            OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin.gz
-            COMMAND ${GZIP} -9 -k -f xv6.bin
-            WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-            COMMENT "Compressing xv6.bin -> xv6.bin.gz"
-            DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin
-        )
-        set(KERNEL_BIN_COMPRESSED ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin.gz)
-    endif()
+if(ENABLE_COMPRESSION AND GZIP)
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin.gz
+        COMMAND ${GZIP} -9 -k -f xv6.bin
+        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+        COMMENT "Compressing xv6.bin -> xv6.bin.gz"
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin
+    )
+    set(KERNEL_BIN_COMPRESSED ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin.gz)
 endif()
 
 add_custom_target(kernel_all ALL

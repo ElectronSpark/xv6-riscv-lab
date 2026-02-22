@@ -137,20 +137,26 @@ set(CMAKE_C_STANDARD_REQUIRED OFF)
 set(KERNEL_DIR ${CMAKE_SOURCE_DIR}/kernel)
 set(USER_DIR ${CMAKE_SOURCE_DIR}/user)
 
-# Add global compiler options
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mcmodel=medany")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-common -nostdlib")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-strncpy -fno-builtin-strncmp -fno-builtin-strlen -fno-builtin-memset")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-memmove -fno-builtin-memcmp -fno-builtin-log -fno-builtin-bzero")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-strchr -fno-builtin-exit -fno-builtin-malloc -fno-builtin-putc")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-free")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-memcpy -Wno-main")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fno-pie -no-pie")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -I${CMAKE_SOURCE_DIR}")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -I${KERNEL_DIR}/inc")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DUSE_SOFTWARE_FFS=1")
+# ==============================================================================
+# Global Compiler Flags
+# ==============================================================================
+string(CONCAT CMAKE_C_FLAGS "${CMAKE_C_FLAGS}"
+    " -Wall -Werror -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2"
+    " -mcmodel=medany"
+    " -fno-common -nostdlib"
+    # Disable all built-in function assumptions — we provide our own libc
+    " -fno-builtin-strncpy -fno-builtin-strncmp -fno-builtin-strlen"
+    " -fno-builtin-memset -fno-builtin-memmove -fno-builtin-memcmp"
+    " -fno-builtin-memcpy -fno-builtin-log -fno-builtin-bzero"
+    " -fno-builtin-strchr -fno-builtin-exit -fno-builtin-malloc"
+    " -fno-builtin-putc -fno-builtin-free"
+    " -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf"
+    " -fno-pie -no-pie"
+    " -Wno-main"
+    " -I${CMAKE_SOURCE_DIR}"
+    " -I${KERNEL_DIR}/inc"
+    " -DUSE_SOFTWARE_FFS=1"
+)
 
 # check whether it needs to turn off stack protector
 execute_process(
@@ -160,24 +166,17 @@ execute_process(
 )
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${FNO_STACK_PROTECTOR}")
 
-if(NOT $ENV{KMM_SANITIZE_CHECK} STREQUAL "")
+if(NOT "$ENV{KMM_SANITIZE_CHECK}" STREQUAL "")
     message(STATUS "KMM_SANITIZE_CHECK is set to: $ENV{KMM_SANITIZE_CHECK}")
-    set(XCFLAGS "${XCFLAGS} -DKERNEL_PAGE_SANITIZER=1")
+    list(APPEND XCFLAGS -DKERNEL_PAGE_SANITIZER=1)
 endif()
 
+# LAB configuration — uppercase the lab name for preprocessor defines
+string(TOUPPER "${LAB_NAME}" LABUPPER)
+list(APPEND XCFLAGS -DSOL_${LABUPPER} -DLAB_${LABUPPER})
 
-if(NOT $ENV{LAB} STREQUAL "")
-    execute_process(
-        COMMAND bash -c "echo $ENV{LAB} | tr a-z A-Z"
-        OUTPUT_VARIABLE LABUPPER
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    set(XCFLAGS "${XCFLAGS} -DSOL_${LABUPPER} -DLAB_${LABUPPER}")
-else()
-    message(FATAL_ERROR "Environment variable LAB is not set")
-endif()
-
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${XCFLAGS}")
+string(REPLACE ";" " " XCFLAGS_STR "${XCFLAGS}")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${XCFLAGS_STR}")
 
 # ==============================================================================
 # Compression Support (defined before subdirectories for propagation)
@@ -206,15 +205,6 @@ if(MKIMAGE_FOUND AND PLATFORM STREQUAL "orangepi")
     add_dependencies(kernel_all uboot-scripts)
 endif()
 
-# @TODO:
-# set(UEXTRA_FILES "")
-# if($ENV{LAB} AND $ENV{LAB} STREQUAL "util")
-#     set(UEXTRA_FILES 
-#         ${USER_DIR}/xargstest.sh
-#     )
-# endif()
-# FILE(UEXTRA ${UEXTRA_FILES})
-
 set(MKFS_SOURCE_FILES
     ${CMAKE_SOURCE_DIR}/mkfs/mkfs.c 
     ${KERNEL_DIR}/inc/vfs/xv6fs/ondisk.h 
@@ -227,7 +217,6 @@ set(XV6FUSE_SOURCE_FILES
     ${CMAKE_SOURCE_DIR}/utils/rbtree.h
 )
 
-#@TODO: add XCFLAGS
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/mkfs
     COMMAND gcc ${CMAKE_SOURCE_DIR}/mkfs/mkfs.c -DSOL_${LABUPPER} -DLAB_${LABUPPER} -Werror -Wall -I${CMAKE_SOURCE_DIR} -o ${CMAKE_CURRENT_BINARY_DIR}/mkfs
@@ -237,14 +226,14 @@ add_custom_command(
 
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6fuse
-        COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/build_xv6fuse.sh
-                        ${CMAKE_CURRENT_BINARY_DIR}/xv6fuse
-                        ${CMAKE_SOURCE_DIR}/utils/xv6fuse.c
-                        ${CMAKE_SOURCE_DIR}/utils/rbtree.c
-                        ${CMAKE_SOURCE_DIR}/utils
-        DEPENDS ${XV6FUSE_SOURCE_FILES}
-                        ${CMAKE_SOURCE_DIR}/scripts/build_xv6fuse.sh
-    COMMENT "Building xv6fuse..."
+    COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/build_xv6fuse.sh
+            ${CMAKE_CURRENT_BINARY_DIR}/xv6fuse
+            ${CMAKE_SOURCE_DIR}/utils/xv6fuse.c
+            ${CMAKE_SOURCE_DIR}/utils/rbtree.c
+            ${CMAKE_SOURCE_DIR}/utils
+    DEPENDS ${XV6FUSE_SOURCE_FILES}
+            ${CMAKE_SOURCE_DIR}/scripts/build_xv6fuse.sh
+    COMMENT "Building xv6fuse"
 )
 
 set(TERMINFO_DIR ${CMAKE_CURRENT_BINARY_DIR}/terminfo)
@@ -258,10 +247,13 @@ add_custom_command(
 )
 add_custom_target(terminfo_db DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/terminfo.stamp)
 
-# Create a unified ext4 root filesystem image from the entire sysroot.
-# All user programs (userlib + musl), libraries, and third-party components
-# (dash, CPython, ncurses, readline) are installed into sysroot/ by their
-# respective build targets.  The entire sysroot tree is copied into the image.
+# ==============================================================================
+# Ext4 Root Filesystem Image
+# ==============================================================================
+# Build a unified ext4 image from the entire sysroot/ directory.
+# All user programs, libraries, and third-party components (dash, CPython,
+# ncurses, readline) are installed into sysroot/ by their build targets.
+# ==============================================================================
 set(SYSROOT_DIR "${CMAKE_BINARY_DIR}/sysroot")
 set(CPYTHON_SRC_DIR_FOR_FS "${CMAKE_SOURCE_DIR}/user/v6-cpython")
 set(MKEXT4_ROOTFS_SCRIPT "${CMAKE_SOURCE_DIR}/scripts/mkext4_rootfs.sh")
@@ -297,9 +289,6 @@ add_custom_target(fs_img ALL
             $<$<BOOL:${ENABLE_COMPRESSION}>:${FS_IMG_COMPRESSED}>
     COMMENT "Creating file system images"
 )
-
-
-# @TODO: run etags on kernel and _init
 
 # QEMU, GDB, and debug targets
 include(${CMAKE_SOURCE_DIR}/cmake/qemu.cmake)

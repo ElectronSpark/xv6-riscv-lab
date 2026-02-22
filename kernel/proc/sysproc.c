@@ -106,13 +106,27 @@ uint64 sys_clone(void) {
     argaddr(0, &uargs);
 
     struct clone_args args = {0};
-    if (uargs < PAGE_SIZE) {
-        // No args, or Linux-style clone(flags, stack) where a0 is a small
-        // flags value rather than a pointer.  musl's _Fork() calls
-        // __syscall(SYS_clone, SIGCHLD, 0) — SIGCHLD (17) ends up here.
-        // Treat as plain fork.
-        args.flags = SIGCHLD;
-        args.esignal = SIGCHLD;
+    if (uargs < 0x100000) {
+        // Linux-style clone(flags, stack, ...) where a0 is a flags bitmask.
+        // This covers:
+        //   - _Fork(): clone(SIGCHLD, 0)             — uargs = 17
+        //   - vfork(): clone(CLONE_VM|CLONE_VFORK|SIGCHLD, sp) — uargs = 0x4111
+        // Valid clone_args pointers are always > 0x100000 (user heap/stack).
+        uint64 stack;
+        argaddr(1, &stack);
+
+        args.flags = uargs & ~0xFF;  // strip exit signal from flags
+        args.esignal = uargs & 0xFF; // low 8 bits = exit signal
+        args.stack = 0;              // 0 = inherit parent's stack (fork)
+        args.stack_size = 0;
+
+        // If CLONE_VM is set (vfork), pass the stack pointer
+        if ((args.flags & CLONE_VM) && stack != 0) {
+            // For vfork, the child shares parent's VM and stack.
+            // Don't set args.stack — let child inherit parent's sp via
+            // trapframe copy. The kernel's CLONE_VFORK handling will
+            // block the parent until child execs/exits.
+        }
     } else {
         if (vm_copyin(current->vm, &args, uargs, sizeof(args)) < 0) {
             return -EFAULT;
@@ -123,7 +137,11 @@ uint64 sys_clone(void) {
             args.esignal = args.flags & 0xFF;
         }
     }
-    return thread_clone(&args);
+    int ret = thread_clone(&args);
+    if (ret < 0)
+        printf("sys_clone: '%s' (pid %d) failed, uargs=%lx ret=%d\n",
+               current->name, current->pid, uargs, ret);
+    return ret;
 }
 
 uint64 sys_wait(void) {

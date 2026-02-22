@@ -12,12 +12,13 @@ endif()
 
 set(QEMU ${QEMU_EXECUTABLE})
 
-# Generate a unique GDB port based on user id
+# Generate a unique GDB port based on user id to avoid conflicts
 execute_process(
-    COMMAND bash -c "expr \$(id -u) % 5000 + 25000"
-    OUTPUT_VARIABLE GDBPORT
+    COMMAND id -u
+    OUTPUT_VARIABLE USER_ID
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
+math(EXPR GDBPORT "${USER_ID} % 5000 + 25000")
 
 # Generate QEMU GDB stub options
 # Check if QEMU supports the '-gdb' option
@@ -26,30 +27,24 @@ execute_process(
     OUTPUT_VARIABLE QEMU_HELP
     OUTPUT_STRIP_TRAILING_WHITESPACE
 )
+# GDB stub connection: prefer -gdb flag, fall back to deprecated -s/-p
 if(QEMU_HELP MATCHES "-gdb")
     set(QEMUGDB -gdb tcp::${GDBPORT})
 else()
     set(QEMUGDB -s -p ${GDBPORT})
 endif()
 
-# Set default CPUS
+# Default CPU count (overridden by CPUS env var)
 if(NOT DEFINED ENV{CPUS} OR "$ENV{CPUS}" STREQUAL "")
     set(CPUS 6)
 else()
     set(CPUS $ENV{CPUS})
 endif()
-
-# If LAB is fs, set CPUS to 1
-if(DEFINED ENV{LAB} AND "$ENV{LAB}" STREQUAL "fs")
+if("$ENV{LAB}" STREQUAL "fs")
     set(CPUS 1)
 endif()
 
-# Generate unique FWDPORT1 and FWDPORT2 using CMake math and user id
-execute_process(
-    COMMAND id -u
-    OUTPUT_VARIABLE USER_ID
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-)
+# Network port forwarding (unique per user)
 math(EXPR FWDPORT1 "${USER_ID} % 5000 + 25999")
 math(EXPR FWDPORT2 "${USER_ID} % 5000 + 30999")
 
@@ -169,25 +164,14 @@ endif()
 # ==============================================================================
 # Utility Targets
 # ==============================================================================
-
-# If LAB is net, generate SERVERPORT
-if(DEFINED ENV{LAB} AND "$ENV{LAB}" STREQUAL "net")
-    execute_process(
-        COMMAND bash -c "expr \$(id -u) % 5000 + 25099"
-        OUTPUT_VARIABLE SERVERPORT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-endif()
-
 add_custom_target(print-gdbport
     COMMAND ${CMAKE_COMMAND} -E echo "[GDBPORT NUMBER]: ${GDBPORT}"
 )
 
 add_custom_target(grade
-    COMMAND ${CMAKE_COMMAND} -E env 
+    COMMAND ${CMAKE_COMMAND} -E env
             LAB=$ENV{LAB}
-            python3 "grade-lab-util"
+            python3 "grade-lab-$ENV{LAB}"
     WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
-    COMMAND_EXPAND_LISTS
-    COMMENT "run grad-lab-util"
+    COMMENT "Running grade-lab-$ENV{LAB}"
 )

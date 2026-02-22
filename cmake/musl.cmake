@@ -4,13 +4,17 @@
 #
 # This module:
 #   1. Builds musl from source with xv6 arch overlay
-#   2. Provides add_musl_program() function to compile programs against musl
-#   3. Creates musl_sysroot target as a dependency
+#   2. Provides add_musl_program() to compile/link a static musl program
+#   3. Provides add_musl_dynamic_program() to compile/link a dynamic musl program
+#   4. Creates musl_sysroot target as a dependency for all musl-based builds
 #
-# Usage in CMakeLists.txt:
+# Usage:
 #   include(${CMAKE_SOURCE_DIR}/cmake/musl.cmake)
 #
 
+# ==============================================================================
+# Paths and toolchain discovery
+# ==============================================================================
 set(MUSL_XV6_DIR "${CMAKE_SOURCE_DIR}/user/musl-xv6")
 set(MUSL_BUILD_SCRIPT "${MUSL_XV6_DIR}/build_musl.sh")
 set(MUSL_SYSROOT "${CMAKE_BINARY_DIR}/sysroot")
@@ -58,6 +62,23 @@ add_custom_command(
 add_custom_target(musl_sysroot DEPENDS ${MUSL_LIBC_A} ${MUSL_CRT1_O})
 
 # ==============================================================================
+# Common compiler flags for musl-linked programs
+# ==============================================================================
+set(MUSL_COMMON_CFLAGS
+    --sysroot=${MUSL_SYSROOT}
+    -march=rv64gc -mabi=lp64d
+    -mcmodel=medany -fno-pie -no-pie
+    -nostdinc
+    -isystem ${MUSL_INCLUDE_DIR}
+    -isystem ${GCC_INCLUDE_DIR_MUSL}
+)
+set(MUSL_C_CFLAGS
+    ${MUSL_COMMON_CFLAGS}
+    -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
+    -fno-common -ffreestanding
+)
+
+# ==============================================================================
 # add_musl_program(name source_file [EXTRA_SOURCES src1 src2 ...])
 #
 # Compile and link a user program against musl libc.
@@ -81,31 +102,22 @@ function(add_musl_program PROGRAM_NAME SOURCE_FILE)
 
         # Determine if this is assembly
         if(SRC_EXT STREQUAL ".S" OR SRC_EXT STREQUAL ".s")
+        # Assembly source — minimal flags
             add_custom_command(
                 OUTPUT ${OBJ_FILE}
                 COMMAND ${CMAKE_C_COMPILER}
-                        --sysroot=${MUSL_SYSROOT}
-                        -march=rv64gc -mabi=lp64d
-                        -mcmodel=medany -fno-pie -no-pie
-                        -nostdinc
-                        -isystem ${MUSL_INCLUDE_DIR}
-                        -isystem ${GCC_INCLUDE_DIR_MUSL}
+                        ${MUSL_COMMON_CFLAGS}
                         -o ${OBJ_FILE}
                         -c ${SRC}
                 DEPENDS ${SRC} musl_sysroot
                 COMMENT "Building musl ASM object ${SRC_BASENAME}${SRC_EXT}"
             )
         else()
+            # C source — full debug + dependency tracking
             add_custom_command(
                 OUTPUT ${OBJ_FILE}
                 COMMAND ${CMAKE_C_COMPILER}
-                        --sysroot=${MUSL_SYSROOT}
-                        -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
-                        -march=rv64gc -mabi=lp64d
-                        -mcmodel=medany -fno-common -fno-pie -no-pie
-                        -nostdinc -ffreestanding
-                        -isystem ${MUSL_INCLUDE_DIR}
-                        -isystem ${GCC_INCLUDE_DIR_MUSL}
+                        ${MUSL_C_CFLAGS}
                         -MD -MF ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/${TARGET_NAME}_musl.dir/${SRC_BASENAME}${SRC_EXT}.d
                         -o ${OBJ_FILE}
                         -c ${SRC}
@@ -161,13 +173,7 @@ function(add_musl_dynamic_program PROGRAM_NAME SOURCE_FILE)
     add_custom_command(
         OUTPUT ${OBJ_FILE}
         COMMAND ${CMAKE_C_COMPILER}
-                --sysroot=${MUSL_SYSROOT}
-                -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
-                -march=rv64gc -mabi=lp64d
-                -mcmodel=medany -fno-common -fno-pie -no-pie
-                -nostdinc -ffreestanding
-                -isystem ${MUSL_INCLUDE_DIR}
-                -isystem ${GCC_INCLUDE_DIR_MUSL}
+                ${MUSL_C_CFLAGS}
                 -o ${OBJ_FILE}
                 -c ${SOURCE_FILE}
         DEPENDS ${SOURCE_FILE} musl_sysroot
