@@ -32,11 +32,6 @@ uint32 __uart0_reg_io_width =
 
 void uartintr(int irq, void *data, device_t *dev);
 
-// Register access macros with configurable spacing and width
-#define Reg8(reg)                                                              \
-    ((volatile unsigned char *)(UART0 + ((reg) << __uart0_reg_shift)))
-#define Reg32(reg) ((volatile uint32 *)(UART0 + ((reg) << __uart0_reg_shift)))
-
 // 16550A/PXA UART registers
 #define RHR 0 // receive holding register
 #define THR 0 // transmit holding register
@@ -64,6 +59,30 @@ void uartintr(int irq, void *data, device_t *dev);
 #define LSR_TX_IDLE (1 << 5)
 #define MSR 6
 
+#ifdef __x86_64__
+/*
+ * x86_64: UART uses port I/O at 0x3F8 (COM1).
+ */
+#define UART_PIO_BASE 0x3F8
+#define UART_FIFO_SIZE 16  /* Standard 16550 */
+
+static inline uint32 ReadReg(int reg) {
+    uint8 val;
+    asm volatile("inb %1, %0" : "=a"(val) : "Nd"((uint16)(UART_PIO_BASE + reg)));
+    return val;
+}
+
+static inline void WriteReg(int reg, uint32 v) {
+    asm volatile("outb %0, %1" : : "a"((uint8)v), "Nd"((uint16)(UART_PIO_BASE + reg)));
+}
+
+#else /* RISC-V / MMIO path */
+
+// Register access macros with configurable spacing and width
+#define Reg8(reg)                                                              \
+    ((volatile unsigned char *)(UART0 + ((reg) << __uart0_reg_shift)))
+#define Reg32(reg) ((volatile uint32 *)(UART0 + ((reg) << __uart0_reg_shift)))
+
 #define UART_FIFO_SIZE ((__uart0_reg_io_width == 4) ? 64 : 16)
 
 static inline uint32 ReadReg(int reg) {
@@ -76,6 +95,8 @@ static inline void WriteReg(int reg, uint32 v) {
     else
         *Reg8(reg) = (unsigned char)v;
 }
+
+#endif /* __x86_64__ */
 
 // TX/RX buffers
 spinlock_t uart_tx_lock = SPINLOCK_INITIALIZED("uart_tx_lock");

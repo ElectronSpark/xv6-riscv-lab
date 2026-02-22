@@ -219,7 +219,7 @@ string(CONCAT CMAKE_C_FLAGS "${CMAKE_C_FLAGS}"
 if(ARCH STREQUAL "riscv")
     string(APPEND CMAKE_C_FLAGS " -mcmodel=medany")
 elseif(ARCH STREQUAL "x86_64")
-    string(APPEND CMAKE_C_FLAGS " -mno-red-zone")
+    string(APPEND CMAKE_C_FLAGS " -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-avx -mgeneral-regs-only")
 endif()
 
 # check whether it needs to turn off stack protector

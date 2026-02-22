@@ -1,3 +1,14 @@
+/**
+ * @file thread.c
+ * @brief Architecture-independent thread management.
+ *
+ * Provides thread_init, idle_thread_init, userinit, kthread_create,
+ * thread_create, thread_destroy, and related helpers.
+ *
+ * Architecture-specific differences (stack alignment, context register
+ * names) are abstracted via <arch_thread.h>.
+ */
+
 #include "proc/thread.h"
 #include "proc/thread_group.h"
 #include "proc/pgroup.h"
@@ -24,8 +35,7 @@
 #include "vfs/fs.h"
 #include <mm/vm.h>
 #include "errno.h"
-
-#define NR_THREAD_HASH_BUCKETS 31
+#include "arch_thread.h"
 
 // Lock order:
 // 1. pid_lock (rwlock) — protects parent-child hierarchy and proc table
@@ -83,8 +93,6 @@ static struct thread *__kstack_arrange(void *kstack, size_t kstack_size,
 
     if (flags & KSTACK_ARRANGE_FLAGS_TF) {
         // Place utrapframe below struct thread (matching original layout)
-        // Original: p->ksp = ((uint64)p - sizeof(struct utrapframe) - 16);
-        //           p->trapframe = (void *)p->ksp;
         next_addr = (uint64)p - sizeof(struct utrapframe) - 16;
         next_addr &= ~0x7UL; // align to 8 bytes
         trapframe = (struct utrapframe *)next_addr;
@@ -103,7 +111,7 @@ static struct thread *__kstack_arrange(void *kstack, size_t kstack_size,
 
     // Set kernel stack pointer below the last allocated structure
     uint64 ksp = next_addr - 16;
-    ksp &= ~0x7UL; // align to 8 bytes
+    ksp &= ARCH_KSP_ALIGN_MASK;
     p->ksp = ksp;
 
     return p;
@@ -204,9 +212,7 @@ struct thread *thread_create(void *entry, uint64 arg1, uint64 arg2,
     p->kstack_order = kstack_order;
     p->kstack = (uint64)kstack;
     memset(&p->sched_entity->context, 0, sizeof(p->sched_entity->context));
-    p->sched_entity->context.ra = (uint64)entry;
-    p->sched_entity->context.sp = p->ksp;
-    p->sched_entity->context.s0 = 0;
+    arch_context_init(&p->sched_entity->context, (uint64)entry, p->ksp);
     p->kentry = (uint64)entry;
     p->arg[0] = arg1;
     p->arg[1] = arg2;
@@ -268,7 +274,7 @@ struct thread *kthread_create(const char *name, void *entry, uint64 arg1,
     }
 
     // Set up the context BEFORE making the thread visible to scheduler
-    p->sched_entity->context.ra = (uint64)__kthread_entry;
+    arch_context_set_entry(&p->sched_entity->context, (uint64)__kthread_entry);
     p->kentry = (uint64)entry;
     p->arg[0] = arg1;
     p->arg[1] = arg2;

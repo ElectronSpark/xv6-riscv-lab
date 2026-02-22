@@ -1,4 +1,6 @@
 set(PROC_C_SRCS
+    thread.c
+    clone.c
     thread_group.c
     thread_queue.c
     sched.c

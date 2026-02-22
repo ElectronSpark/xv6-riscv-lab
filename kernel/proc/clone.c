@@ -1,3 +1,12 @@
+/**
+ * @file clone.c
+ * @brief Architecture-independent thread cloning (fork/clone).
+ *
+ * Implements thread_clone() and its fork-return wrapper.
+ * Architecture-specific child register adjustments are handled
+ * by arch_clone_child_regs() from <arch_thread.h>.
+ */
+
 #include "proc/thread.h"
 #include "proc/thread_group.h"
 #include "clone_flags.h"
@@ -26,6 +35,7 @@
 #include "errno.h"
 #include "proc/pgroup.h"
 #include "tty/session.h"
+#include "arch_thread.h"
 
 // Entry wrapper for forked user threads.
 // This is called as the entry point from context switch.
@@ -151,24 +161,11 @@ int thread_clone(struct clone_args *args) {
     // copy saved user registers.
     *(ret_ptr->trapframe) = *(p->trapframe);
 
-    if (args->entry != 0) {
-        // If entry point specified, set child's sepc to it
-        ret_ptr->trapframe->trapframe.sepc = args->entry;
-    }
-
-    if (args->stack != 0) {
-        // If stack specified, set child's sp to top of the stack
-        uint64 stack_top = (args->stack + args->stack_size) & ~0xFUL;
-        ret_ptr->trapframe->trapframe.sp = stack_top;
-    }
-
-    // Cause fork to return 0 in the child.
-    ret_ptr->trapframe->trapframe.a0 = 0;
-
-    // CLONE_SETTLS: set the thread pointer (tp) register in the child
-    if (args->flags & CLONE_SETTLS) {
-        ret_ptr->trapframe->tp = args->tls;
-    }
+    // Apply architecture-specific child register adjustments:
+    // sets entry point, stack pointer, return value = 0, and TLS.
+    arch_clone_child_regs(ret_ptr->trapframe, args->flags,
+                          args->entry, args->stack, args->stack_size,
+                          args->tls);
 
     // CLONE_CHILD_CLEARTID: store the address to zero+futex_wake on thread exit
     if (args->flags & CLONE_CHILD_CLEARTID) {

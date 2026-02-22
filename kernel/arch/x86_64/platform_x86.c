@@ -13,6 +13,9 @@
 #include "string.h"
 #include "dev/fdt.h"
 
+/* Global platform info structure (RISC-V defines this in fdt.c) */
+struct platform_info platform;
+
 /* ------------------------------------------------------------------ */
 /*  Debugcon helpers (port 0xE9 — QEMU ISA debug console)             */
 /* ------------------------------------------------------------------ */

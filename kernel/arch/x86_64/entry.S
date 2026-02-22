@@ -95,6 +95,7 @@ long_mode_entry:
     movw %ax, %ss
 
     movl $boot_stack_top, %esp
+    subl $4096, %esp            /* reserve top 4 KiB for PCB */
     xorq %rbp, %rbp
 
     call serial_init64

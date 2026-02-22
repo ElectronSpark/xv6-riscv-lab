@@ -3,8 +3,6 @@ set(ARCH_C_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/sbi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/irq/trap.c
     ${CMAKE_CURRENT_SOURCE_DIR}/irq/syscall.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/proc/thread.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/proc/clone.c
     ${CMAKE_CURRENT_SOURCE_DIR}/mm/vm.c
     ${CMAKE_CURRENT_SOURCE_DIR}/timer/timer.c
     ${CMAKE_CURRENT_SOURCE_DIR}/timer/goldfish_rtc.c

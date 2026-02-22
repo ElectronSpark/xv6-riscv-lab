@@ -1,10 +1,10 @@
 /**
  * @file trap.c
- * @brief x86_64 IDT setup, interrupt controller stubs, and trap handler.
+ * @brief x86_64 IDT setup, PIC 8259A, and trap handler.
  *
- * arch_trap_init()  — builds the 256-entry IDT, loads it, installs the GDT
- *                     and sets up SYSCALL/SYSRET MSRs.
- * x86_trap_handler — C-level handler called from assembly (trapvec.S).
+ * arch_trap_init()  — builds IDT, loads GDT, sets SYSCALL MSRs.
+ * arch_irq_init()   — initializes PIC 8259A, masks all IRQs except timer.
+ * x86_trap_handler  — C-level handler called from trapvec.S.
  */
 
 #include "types.h"
@@ -39,65 +39,111 @@ int restore_sigframe(struct thread *p, ucontext_t *ret_uc) {
     return -1;
 }
 
+/* ─────────────────── I/O helpers ─────────────────── */
+
+static inline void outb(uint16 port, uint8 val) {
+    asm volatile("outb %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static inline uint8 inb(uint16 port) {
+    uint8 val;
+    asm volatile("inb %1, %0" : "=a"(val) : "Nd"(port));
+    return val;
+}
+
+/* ─────────────────── PIC 8259A ─────────────────── */
+
+#define PIC1_CMD   0x20
+#define PIC1_DATA  0x21
+#define PIC2_CMD   0xA0
+#define PIC2_DATA  0xA1
+
+#define PIC_EOI    0x20
+
+/* IRQ vector base: IRQ 0 → vector 32 */
+#define IRQ_BASE   32
+
+static void pic_init(void) {
+    /* ICW1: begin init + ICW4 needed */
+    outb(PIC1_CMD, 0x11);
+    outb(PIC2_CMD, 0x11);
+
+    /* ICW2: vector offsets */
+    outb(PIC1_DATA, IRQ_BASE);       /* master: IRQ 0-7  → vectors 32-39 */
+    outb(PIC2_DATA, IRQ_BASE + 8);   /* slave:  IRQ 8-15 → vectors 40-47 */
+
+    /* ICW3: cascade wiring */
+    outb(PIC1_DATA, 0x04);           /* master: slave on IRQ 2 */
+    outb(PIC2_DATA, 0x02);           /* slave:  cascade identity 2 */
+
+    /* ICW4: 8086 mode */
+    outb(PIC1_DATA, 0x01);
+    outb(PIC2_DATA, 0x01);
+
+    /* Mask all IRQs initially */
+    outb(PIC1_DATA, 0xFF);
+    outb(PIC2_DATA, 0xFF);
+}
+
+static void pic_unmask(int irq) {
+    if (irq < 8) {
+        outb(PIC1_DATA, inb(PIC1_DATA) & ~(1 << irq));
+    } else {
+        outb(PIC2_DATA, inb(PIC2_DATA) & ~(1 << (irq - 8)));
+        /* Also unmask cascade line (IRQ 2) on master */
+        outb(PIC1_DATA, inb(PIC1_DATA) & ~(1 << 2));
+    }
+}
+
+static void pic_eoi(int irq) {
+    if (irq >= 8)
+        outb(PIC2_CMD, PIC_EOI);
+    outb(PIC1_CMD, PIC_EOI);
+}
+
 /* ── IDT ── */
 static struct idt_gate idt[IDT_ENTRIES] __attribute__((aligned(16)));
 static struct x86_desc_ptr idtr;
 
-/**
- * x86_idt_init — populate all 256 entries and register the IDT.
- *
- * All vectors use GATE_INTERRUPT (clears IF on entry) with IST 0
- * (use the current RSP0 from TSS on ring transitions, or the kernel
- * stack if already in ring 0).
- */
-void x86_idt_init(void)
-{
-    for (int i = 0; i < IDT_ENTRIES; i++) {
-        idt_set_gate(&idt[i], vectors[i], SEG_KCODE,
-                     GATE_INTERRUPT, 0);
-    }
+void x86_idt_init(void) {
+    for (int i = 0; i < IDT_ENTRIES; i++)
+        idt_set_gate(&idt[i], vectors[i], SEG_KCODE, GATE_INTERRUPT, 0);
 
     idtr.limit = sizeof(idt) - 1;
     idtr.base  = (uint64)idt;
-
     asm volatile("lidt %0" : : "m"(idtr));
 }
 
-/* ──────────────────────────────────────────────────────────────
- *  arch_trap_init / arch_trap_init_hart  (called from start_kernel)
- * ────────────────────────────────────────────────────────────── */
+/* ── arch_trap_init / arch_trap_init_hart ── */
 
-void arch_trap_init(void)
-{
-    /* GDT + TSS */
+void arch_trap_init(void) {
     x86_gdt_init();
-
-    /* IDT — depends on the GDT being loaded (CS selector) */
     x86_idt_init();
-
-    /* SYSCALL/SYSRET MSRs */
     x86_syscall_init();
 }
 
-void arch_trap_init_hart(void)
-{
-    /* Secondary CPUs: reload IDT (shared for now) */
+void arch_trap_init_hart(void) {
     asm volatile("lidt %0" : : "m"(idtr));
 }
 
-/* ──────────────────────────────────────────────────────────────
- *  Interrupt-controller stubs (APIC not yet wired)
- * ────────────────────────────────────────────────────────────── */
+/* ── Interrupt controller init ── */
 
-void arch_irq_init(void)      { /* TODO: PIC mask-all + I/O APIC init */ }
-void arch_irq_init_hart(void) { /* TODO: LAPIC init */ }
-int  plic_claim(void)         { return 0; }
+void arch_irq_init(void) {
+    pic_init();
+    /* Unmask IRQ 0 (PIT timer) */
+    pic_unmask(0);
+    printf("[x86] PIC 8259A initialized, IRQ 0 (timer) unmasked\n");
+}
+
+void arch_irq_init_hart(void) {
+    /* Per-CPU LAPIC init would go here (SMP) */
+}
+
+int plic_claim(void)          { return 0; }
 void plic_complete(int irq)   { (void)irq; }
 void plic_enable_irq(int irq) { (void)irq; }
 
-/* ──────────────────────────────────────────────────────────────
- *  Exception name table (vectors 0-31)
- * ────────────────────────────────────────────────────────────── */
+/* ── Exception name table ── */
 
 static const char *exception_names[32] = {
     [0]  = "#DE Divide Error",
@@ -122,19 +168,15 @@ static const char *exception_names[32] = {
     [19] = "#XM SIMD FP Exception",
     [20] = "#VE Virtualization",
     [21] = "#CP Control Protection",
-    [22] = "(reserved)",
-    [23] = "(reserved)",
-    [24] = "(reserved)",
-    [25] = "(reserved)",
-    [26] = "(reserved)",
-    [27] = "(reserved)",
+    [22] = "(reserved)", [23] = "(reserved)", [24] = "(reserved)",
+    [25] = "(reserved)", [26] = "(reserved)", [27] = "(reserved)",
     [28] = "(reserved)",
     [29] = "#SX Security Exception",
     [30] = "#HV VMM Communication",
     [31] = "(reserved)",
 };
 
-/* ── Debugcon helper (port 0xE9) for pre-printf diagnostics ── */
+/* ── Debugcon helpers ── */
 static inline void dbg_outb(uint16 port, uint8 val) {
     asm volatile("outb %0, %1" : : "a"(val), "Nd"(port));
 }
@@ -147,30 +189,24 @@ static void dbg_hex(uint64 v) {
         dbg_outb(0xE9, (uint8)h[(v >> (i * 4)) & 0xF]);
 }
 
-static inline uint64 read_cr2(void)
-{
+static inline uint64 read_cr2(void) {
     uint64 v;
     asm volatile("movq %%cr2, %0" : "=r"(v));
     return v;
 }
 
-/* ──────────────────────────────────────────────────────────────
- *  x86_trap_handler — called from alltraps (trapvec.S)
- * ────────────────────────────────────────────────────────────── */
+/* ── Timer tick advance (defined in timer.c) ── */
+extern void timer_tick_advance(void);
 
-void x86_trap_handler(struct trapframe *tf)
-{
+/* ── x86_trap_handler ── */
+
+void x86_trap_handler(struct trapframe *tf) {
     uint64 vec = tf->trapno;
 
     if (vec < 32) {
-        /*
-         * CPU exception.  For now, print diagnostics and halt.
-         * When we have a scheduler, page-fault handling etc. will
-         * go here.
-         */
+        /* CPU exception */
         const char *name = exception_names[vec];
 
-        /* Debugcon output (always available, even before printf) */
         dbg_puts("\n*** EXCEPTION: ");
         dbg_puts(name ? name : "???");
         dbg_puts("\n  vector=0x"); dbg_hex(vec);
@@ -198,45 +234,39 @@ void x86_trap_handler(struct trapframe *tf)
 
         if (vec == 14) {
             uint64 cr2 = read_cr2();
-            dbg_puts("\n  cr2=0x");
-            dbg_hex(cr2);
+            dbg_puts("\n  cr2=0x"); dbg_hex(cr2);
             printf("\n*** PAGE FAULT: cr2=0x%lx err=0x%lx rip=0x%lx\n",
                    cr2, tf->err, tf->rip);
         }
 
         dbg_puts("\n");
-
-        /* Also print via printf if console is up */
         printf("\n*** EXCEPTION %ld: %s\n", vec, name ? name : "???");
         printf("  err=0x%lx  rip=0x%lx  cs=0x%lx\n",
                tf->err, tf->rip, tf->cs);
         printf("  rsp=0x%lx  rbp=0x%lx  rflags=0x%lx\n",
                tf->rsp, tf->rbp, tf->rflags);
 
-        /* Halt — in the future we may kill the current process instead */
         for (;;)
             asm volatile("cli; hlt");
 
     } else if (vec >= 32 && vec < 48) {
-        /*
-         * Hardware IRQ (vector 32-47 = legacy ISA IRQ 0-15).
-         * When APIC is wired, this will dispatch through the IRQ
-         * descriptor table.  For now just acknowledge and return.
-         */
-        dbg_puts("[x86] IRQ ");
-        dbg_hex(vec - 32);
-        dbg_puts(" (unhandled)\n");
+        /* Hardware IRQ (PIC) */
+        int irq = vec - 32;
 
-        /* TODO: send EOI to LAPIC */
+        if (irq == 0) {
+            /* PIT timer tick */
+            timer_tick_advance();
+        } else {
+            /* Other IRQs — log but otherwise ignore */
+            dbg_puts("[x86] IRQ ");
+            dbg_hex(irq);
+            dbg_puts(" (unhandled)\n");
+        }
+
+        pic_eoi(irq);
 
     } else if (vec == 0x80) {
-        /*
-         * INT 0x80 — legacy syscall vector (placeholder).
-         * Real syscalls go through SYSCALL/SYSRET.
-         */
         dbg_puts("[x86] INT 0x80 syscall (stub)\n");
-
-    } else {
-        /* Spurious or unknown vector — just ignore */
     }
+    /* Spurious / unknown vectors: silently ignored */
 }
