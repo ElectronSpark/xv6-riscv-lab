@@ -81,7 +81,7 @@ add_subdirectory(${KERNEL_DIR}/ipi)
 add_subdirectory(${KERNEL_DIR}/tty)
 add_subdirectory(${KERNEL_DIR}/lwip_port)
 add_subdirectory(${KERNEL_DIR}/lwext4_port)
-add_subdirectory(${KERNEL_DIR}/telnetd)
+add_subdirectory(${KERNEL_DIR}/daemons)
 add_subdirectory(${KERNEL_DIR}/gdbstub)
 add_subdirectory(${KERNEL_DIR}/kqueue)
 
@@ -107,12 +107,12 @@ set(KERNEL_OBJ_LIBS
     $<TARGET_OBJECTS:tty>
     $<TARGET_OBJECTS:lwip>
     $<TARGET_OBJECTS:ext4fs>
-    $<TARGET_OBJECTS:telnetd>
+    $<TARGET_OBJECTS:daemons>
     $<TARGET_OBJECTS:gdbstub>
     $<TARGET_OBJECTS:kqueue_core>
 )
 
-set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs tty lwip ext4fs telnetd gdbstub kqueue_core)
+set(KERNEL_LINK_LIBS irq dev lock mm proc timer vfs tty lwip ext4fs daemons gdbstub kqueue_core)
 
 # ==============================================================================
 # Linker scripts (generated from kernel.ld.in template)

@@ -191,6 +191,10 @@ uint64 sys_sleep(void) {
 // since start.
 uint64 sys_uptime(void) { return get_jiffs(); }
 
+/* Defined in kernel/daemons/sntpd.c \u2014 NTP\u2212RTC offset in nanoseconds */
+extern volatile int64 sntp_offset_ns;
+extern volatile int   sntp_synced;
+
 uint64 sys_gettimeofday(void) {
     uint64 tv_addr;
     uint64 tz_addr;
@@ -202,7 +206,9 @@ uint64 sys_gettimeofday(void) {
         return -EINVAL;
     }
 
-    uint64 t = goldfish_rtc_read_ns();
+    uint64 rtc = goldfish_rtc_read_ns();
+    /* Apply NTP offset when available for more accurate wall-clock time */
+    uint64 t = sntp_synced ? (uint64)((int64)rtc + sntp_offset_ns) : rtc;
     struct __k_timeval tv = {
         .tv_sec = t / NS_PER_SEC,
         .tv_usec = (int64)((t % NS_PER_SEC) / NS_PER_US),

@@ -181,6 +181,27 @@ char *strstr(char *haystack, const char *needle) {
     return 0;
 }
 
+char *strchr(const char *s, int c)
+{
+    for (; *s; s++) {
+        if (*s == (char)c)
+            return (char *)s;
+    }
+    return (c == '\0') ? (char *)s : NULL;
+}
+
+char *strrchr(const char *s, int c)
+{
+    const char *last = NULL;
+    for (; *s; s++) {
+        if (*s == (char)c)
+            last = s;
+    }
+    if (c == '\0')
+        return (char *)s;
+    return (char *)last;
+}
+
 char *strndup(const char *s, size_t n) {
     size_t len = strnlen(s, n);
     char *new_str = kmm_alloc(len + 1);

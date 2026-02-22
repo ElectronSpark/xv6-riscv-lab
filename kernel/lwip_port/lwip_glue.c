@@ -130,7 +130,7 @@ xv6_netif_init(struct netif *netif)
     else
         memmove(netif->hwaddr, fallback_mac, 6);
     netif->flags = NETIF_FLAG_BROADCAST | NETIF_FLAG_ETHARP |
-                   NETIF_FLAG_ETHERNET;
+                   NETIF_FLAG_ETHERNET | NETIF_FLAG_IGMP;
     return ERR_OK;
 }
 
@@ -316,6 +316,18 @@ static void __lwip_kthread(uint64 arg1, uint64 arg2)
     /* Start services that depend on the network stack */
     extern void telnetd_init(void);
     telnetd_init();
+    extern void tftpd_init(void);
+    tftpd_init();
+    extern void httpd_daemon_init(void);
+    httpd_daemon_init();
+    extern void iperfd_init(void);
+    iperfd_init();
+    extern void sntpd_init(void);
+    sntpd_init();
+    extern void netbiosd_init(void);
+    netbiosd_init();
+    extern void mdnsd_init(void);
+    mdnsd_init();
     extern void gdbstub_init(void);
     gdbstub_init();
 }

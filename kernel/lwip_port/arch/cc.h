@@ -17,6 +17,9 @@
 #include "printf.h"
 #include "string.h"
 
+/* C99 fixed-width types — some lwIP apps (mdns.h) use uint32_t directly */
+#include "stdint.h"
+
 /* --------------------------------------------------------------------------
  * Block ALL standard library header includes — we are in kernel space.
  * The kernel provides its own types, string functions, etc.

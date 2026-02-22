@@ -222,4 +222,36 @@
 /* snprintf / vsnprintf — xv6 doesn't have these, use lwIP defaults */
 #define LWIP_NO_CTYPE_H                 1
 
+/* --------------------------------------------------------------------------
+ * IGMP (required by mDNS multicast)
+ * -------------------------------------------------------------------------- */
+#define LWIP_IGMP                       1
+
+/* --------------------------------------------------------------------------
+ * Netif client data (required by mDNS per-netif storage)
+ * -------------------------------------------------------------------------- */
+#define LWIP_NUM_NETIF_CLIENT_DATA      1
+
+/* --------------------------------------------------------------------------
+ * Application options
+ * -------------------------------------------------------------------------- */
+
+/* TFTP server */
+#define TFTP_MAX_FILENAME_LEN           128
+
+/* HTTP server — serve files from xv6 VFS with embedded fallback */
+#define LWIP_HTTPD_CUSTOM_FILES         1
+#define LWIP_HTTPD_DYNAMIC_FILE_READ    1
+#define LWIP_HTTPD_DYNAMIC_HEADERS      1
+#define LWIP_HTTPD_FILE_EXTENSION       1
+
+/* SNTP client — time synchronisation */
+#define SNTP_SERVER_DNS                 1
+void sntp_set_system_time_us(unsigned int sec, unsigned int us);
+#define SNTP_SET_SYSTEM_TIME_US(sec, us) sntp_set_system_time_us((sec), (us))
+
+/* mDNS responder */
+#define LWIP_MDNS_RESPONDER             1
+#define MDNS_MAX_SERVICES               4
+
 #endif /* LWIP_LWIPOPTS_H */

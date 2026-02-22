@@ -77,11 +77,24 @@ set(LWIP_PORT_SRCS
 # Combine all sources
 # --------------------------------------------------------------------------
 
+set(LWIP_APP_SRCS
+    ${LWIP_DIR}/src/apps/tftp/tftp.c
+    ${LWIP_DIR}/src/apps/http/httpd.c
+    ${LWIP_DIR}/src/apps/http/fs.c
+    ${LWIP_DIR}/src/apps/lwiperf/lwiperf.c
+    ${LWIP_DIR}/src/apps/sntp/sntp.c
+    ${LWIP_DIR}/src/apps/netbiosns/netbiosns.c
+    ${LWIP_DIR}/src/apps/mdns/mdns.c
+    ${LWIP_DIR}/src/apps/mdns/mdns_domain.c
+    ${LWIP_DIR}/src/apps/mdns/mdns_out.c
+)
+
 set(LWIP_ALL_SRCS
     ${LWIP_CORE_SRCS}
     ${LWIP_CORE4_SRCS}
     ${LWIP_API_SRCS}
     ${LWIP_NETIF_SRCS}
+    ${LWIP_APP_SRCS}
     ${LWIP_PORT_SRCS}
 )
 
