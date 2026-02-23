@@ -78,14 +78,8 @@ int main(void)
     mknod("/dev/random", S_IFCHR | 0666, makedev(RANDOM_MAJOR, RANDOM_MINOR));
     mknod("/dev/tty",    S_IFCHR | 0666, makedev(TTY_DEV_MAJOR, TTY_DEV_MINOR));
 
-    /* Mount ext4 filesystem (disk1) at /usr for Python standard library */
-    mkdir("/usr", 0755);
-    mknod("/dev/disk1", S_IFBLK | 0600, makedev(DISK1_MAJOR, DISK1_MINOR));
-    if (xv6_mount("/dev/disk1", "/usr", "ext4") < 0) {
-        printf("init: mount ext4 at /usr failed\n");
-    } else {
-        printf("init: ext4 mounted at /usr\n");
-    }
+    /* The ext4 rootfs already contains /usr with Python stdlib.
+     * No separate disk mount needed. */
 
     for (;;) {
         printf("init: starting sh\n");

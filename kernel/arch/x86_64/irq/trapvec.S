@@ -261,21 +261,12 @@ syscall_entry:
      */
     movq %rsp, %gs:0               /* save user RSP to scratch      */
     movq %gs:8, %rsp               /* rsp = utrapframe VA (temp)    */
-    movq %rax, 0x70(%rsp)          /* save user RAX (syscall no.)   */
 
     /*
-     * Step 3: switch to kernel CR3 using trampoline_ksatp (RIP-relative).
-     * The variable is in the same pages as this code, so the
-     * RIP-relative offset works from the high alias.
-     */
-    leaq trampoline_ksatp(%rip), %rax
-    movq (%rax), %rax
-    movq %rax, %cr3
-
-    /*
-     * Step 4: save all user registers into utrapframe.
-     * rsp now points to the utrapframe mapped in user page table.
-     * Since we're in ring 0, we can write to non-PTE_U pages.
+     * Step 3: save all user registers into utrapframe.
+     * rsp points to the utrapframe mapped in the USER page table.
+     * We must finish all reads/writes to this user VA BEFORE
+     * switching CR3 to the kernel page table.
      */
     movq %r15, 0x00(%rsp)
     movq %r14, 0x08(%rsp)
@@ -291,7 +282,7 @@ syscall_entry:
     movq %rdx, 0x58(%rsp)
     movq %rcx, 0x60(%rsp)          /* rcx = user RIP                */
     movq %rbx, 0x68(%rsp)
-    /* rax already saved before CR3 switch */
+    movq %rax, 0x70(%rsp)          /* rax = syscall number          */
 
     /* Metadata fields */
     movq $256, 0x78(%rsp)           /* trapno = 256 (syscall marker) */
@@ -306,10 +297,21 @@ syscall_entry:
     movq $(0x20 | 3), 0xA8(%rsp)    /* ss  = SEG_UDATA | DPL_USER    */
 
     /*
-     * Step 5: load kernel stack and jump to C handler.
-     * kernel_sp is at offset 0x120 in the utrapframe.
+     * Step 4: read kernel_sp from trapframe, then switch CR3.
+     * kernel_sp is at offset 0x120 — must read it while still
+     * under user CR3 (the trapframe is at a user VA).
      */
-    movq 0x120(%rsp), %rsp          /* switch to kernel stack        */
+    movq 0x120(%rsp), %r15          /* r15 = kernel_sp (user VA ok)  */
+
+    leaq trampoline_ksatp(%rip), %rax
+    movq (%rax), %rax
+    movq %rax, %cr3                 /* switch to kernel page table   */
+
+    /*
+     * Step 5: switch to kernel stack and jump to C handler.
+     * r15 was already saved to trapframe[0x00] above.
+     */
+    movq %r15, %rsp                 /* switch to kernel stack        */
 
     cld
     movabsq $usertrap_syscall, %rax

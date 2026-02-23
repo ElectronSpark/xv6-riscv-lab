@@ -129,6 +129,9 @@ struct tss_desc {
 #define MSR_GS_BASE         0xC0000101
 #define MSR_KERNEL_GS_BASE  0xC0000102
 
+/* ── FS base MSR (for TLS — set by arch_prctl ARCH_SET_FS) ── */
+#define MSR_FS_BASE         0xC0000100
+
 /* ── APIC MSR ── */
 #define MSR_APIC_BASE   0x0000001B
 

@@ -58,7 +58,7 @@ if(ARCH STREQUAL "x86_64")
     set(X86_INITRD_IMG ${CMAKE_BINARY_DIR}/fs.img)
 
     add_custom_target(qemu
-        COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -m 1G -nographic -monitor none -serial none -debugcon stdio -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG}
+        COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -m 1G -nographic -monitor none -serial stdio -debugcon file:debugcon.log -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG}
         DEPENDS kernel
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running x86_64 QEMU full kernel"
@@ -90,7 +90,7 @@ if(ARCH STREQUAL "x86_64")
     )
 
     add_custom_target(qemu-gdb
-        COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -m 1G -nographic -monitor none -serial none -debugcon stdio -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} -S -gdb tcp::1234
+        COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -m 1G -nographic -monitor none -serial stdio -debugcon file:debugcon.log -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} -S -gdb tcp::1234
         DEPENDS kernel gdbinit
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running x86_64 QEMU full kernel with GDB stub on :1234"

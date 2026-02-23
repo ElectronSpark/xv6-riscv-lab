@@ -98,6 +98,20 @@ long_mode_entry:
     subl $4096, %esp            /* reserve top 4 KiB for PCB */
     xorq %rbp, %rbp
 
+    /*
+     * Enable SSE (required for x86_64 ABI — musl/compiler may emit SSE).
+     *   CR0: clear EM (bit 2), set MP (bit 1)
+     *   CR4: set OSFXSR (bit 9), OSXMMEXCPT (bit 10)
+     */
+    movq %cr0, %rax
+    andq $~(1 << 2), %rax       /* clear CR0.EM */
+    orq  $(1 << 1), %rax        /* set   CR0.MP */
+    movq %rax, %cr0
+
+    movq %cr4, %rax
+    orq  $((1 << 9) | (1 << 10)), %rax  /* set CR4.OSFXSR | CR4.OSXMMEXCPT */
+    movq %rax, %cr4
+
     call serial_init64
     leaq banner_msg(%rip), %rsi
     call debug_puts64

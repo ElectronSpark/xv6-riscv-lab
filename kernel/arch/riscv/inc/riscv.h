@@ -331,6 +331,12 @@ static inline void sfence_vma() {
 #define PTE_D (1L << 7)    // dirty
 #define PTE_RSW_w (1 << 8) // can perform cow operation
 
+/*
+ * On RISC-V, non-leaf PTEs (R=W=X=0) ignore permission bits,
+ * so no extra flags are needed in intermediate walk() entries.
+ */
+#define WALK_INTERMEDIATE_FLAGS 0
+
 #if defined(LAB_MMAP) || defined(LAB_PGTBL)
 #define PTE_LEAF(pte) (((pte) & PTE_R) | ((pte) & PTE_W) | ((pte) & PTE_X))
 #endif

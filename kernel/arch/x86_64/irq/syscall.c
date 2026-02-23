@@ -16,6 +16,7 @@
 #include "syscall.h"
 #include "errno.h"
 #include "param.h"
+#include "seg.h"    /* wrmsr, rdmsr, MSR_FS_BASE */
 
 int fetchaddr(uint64 addr, uint64 *ip) {
     struct thread *p = current;
@@ -59,6 +60,42 @@ int argstr(int n, char *buf, int max) {
 
 /* ── Syscall return value helpers ── */
 static uint64 sys_ni_enosys(void) { return (uint64)-ENOSYS; }
+
+/*
+ * sys_arch_prctl — x86_64-specific: set/get FS/GS base.
+ * Used by musl's __set_thread_area to set FS base for TLS.
+ *
+ * Arguments: code (RDI), addr (RSI).
+ */
+#define ARCH_SET_GS  0x1001
+#define ARCH_SET_FS  0x1002
+#define ARCH_GET_FS  0x1003
+#define ARCH_GET_GS  0x1004
+
+static uint64 sys_arch_prctl(void)
+{
+    int code;
+    uint64 addr;
+    argint(0, &code);
+    argaddr(1, &addr);
+
+    switch (code) {
+    case ARCH_SET_FS:
+        wrmsr(MSR_FS_BASE, addr);
+        return 0;
+    case ARCH_SET_GS:
+        /* Don't allow user to set GS — it's used for per-CPU data */
+        return (uint64)-EPERM;
+    case ARCH_GET_FS:
+        if (vm_copyout(current->vm, addr, (char *)&(uint64){rdmsr(MSR_FS_BASE)}, sizeof(uint64)) < 0)
+            return (uint64)-EFAULT;
+        return 0;
+    case ARCH_GET_GS:
+        return (uint64)-EPERM;
+    default:
+        return (uint64)-EINVAL;
+    }
+}
 
 /* ── Syscall handler prototypes ── */
 extern uint64 sys_clone(void);
@@ -302,6 +339,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_setregid] sys_setregid,
     [SYS_getgroups] sys_getgroups,
     [SYS_setgroups] sys_setgroups,
+    [SYS_arch_prctl] sys_arch_prctl,
 #ifdef USE_LWIP
     [SYS_socket] sys_socket,
     [SYS_bind] sys_bind,

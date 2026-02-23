@@ -118,7 +118,13 @@ pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
             if (!alloc || (pagetable = (pde_t *)pgtab_alloc()) == 0)
                 return NULL;
             memset(pagetable, 0, PGSIZE);
-            *pte = PA2PTE(pagetable) | PTE_V;
+            /*
+             * On x86_64, intermediate page-table entries (PML4E, PDPTE, PDE)
+             * must carry U and W bits for user pages beneath them to be
+             * accessible.  WALK_INTERMEDIATE_FLAGS provides these arch-specific
+             * bits.  On RISC-V this is 0 (non-leaf PTEs have R=W=X=0).
+             */
+            *pte = PA2PTE(pagetable) | PTE_V | WALK_INTERMEDIATE_FLAGS;
         }
     }
 

@@ -154,9 +154,14 @@
 #define SYS_setregid       146
 #define SYS_getgroups      147
 #define SYS_setgroups      148
+// 149-157 reserved
+
+// --- x86_64-specific syscalls ---
+// musl's __set_thread_area hardcodes Linux's __NR_arch_prctl (158)
+#define SYS_arch_prctl     158
 
 // Max syscall number (update when adding new syscalls)
-#define SYS_MAXNUM         148
+#define SYS_MAXNUM         158
 
 // --- Linux time64 compatibility stubs used by musl on rv64 ---
 // These are intentionally unsupported in xv6 and return -ENOSYS via

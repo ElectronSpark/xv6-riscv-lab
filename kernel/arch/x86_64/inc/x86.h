@@ -38,6 +38,14 @@
 #define PTE_RSW_w (1ULL << 9)       /* Software: COW marker (AVL bit 9) */
 #define PTE_NX (1ULL << 63)         /* No Execute */
 
+/*
+ * Flags for non-leaf (intermediate) page table entries created by walk().
+ * On x86_64, PML4E/PDPTE/PDE must carry U and W to permit user access
+ * and writes to the leaf pages beneath them.  The actual permission
+ * enforcement is at the leaf PTE level.
+ */
+#define WALK_INTERMEDIATE_FLAGS (PTE_U | PTE_W)
+
 #define PA2PTE(pa) ((uint64)(pa) & 0x000FFFFFFFFFF000ULL)
 #define PTE2PA(pte) ((uint64)(pte) & 0x000FFFFFFFFFF000ULL)
 #define PTE_FLAGS(pte) ((uint64)(pte) & ~0x000FFFFFFFFFF000ULL)
