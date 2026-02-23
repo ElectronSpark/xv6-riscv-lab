@@ -126,9 +126,9 @@ static int load_elf_segments(vm_t *vm, struct vfs_file *file,
         uint64 file_off = ph.off;
         uint64 vm_flags = flags2vmperm(ph.flags) | VMA_FLAG_USER;
 
-        printf("exec: LOAD[%d] va=%p filesz=%p memsz=%p off=%p flags=%x\n",
-               i, (void *)va, (void *)filesz, (void *)memsz,
-               (void *)file_off, ph.flags);
+        exec_dbg("LOAD[%d] va=%p filesz=%p memsz=%p off=%p flags=%x\n",
+                 i, (void *)va, (void *)filesz, (void *)memsz,
+                 (void *)file_off, ph.flags);
         int ret;
 
         /*
@@ -146,15 +146,15 @@ static int load_elf_segments(vm_t *vm, struct vfs_file *file,
         uint64 file_pg_end =
             (filesz_adj > 0) ? PGROUNDDOWN(va_page + filesz_adj) : va_page;
 
-        printf("exec:   va_page=%p file_pg_end=%p total_end=%p anon_start(pre)=%p\n",
-               (void *)va_page, (void *)file_pg_end, (void *)total_end,
-               (void *)(((filesz_adj > 0 && (filesz_adj & (PGSIZE - 1)) != 0)
-                         ? file_pg_end + PGSIZE : file_pg_end)));
+        exec_dbg("va_page=%p file_pg_end=%p total_end=%p anon_start(pre)=%p\n",
+                 (void *)va_page, (void *)file_pg_end, (void *)total_end,
+                 (void *)(((filesz_adj > 0 && (filesz_adj & (PGSIZE - 1)) != 0)
+                           ? file_pg_end + PGSIZE : file_pg_end)));
 
         /* Region 1: file-backed mmap */
         if (file_pg_end > va_page) {
-            printf("exec:   R1 file-backed [%p, %p)\n",
-                   (void *)va_page, (void *)file_pg_end);
+            exec_dbg("R1 file-backed [%p, %p)\n",
+                     (void *)va_page, (void *)file_pg_end);
             ret = vm_mmap_region_locked(vm, va_page, file_pg_end - va_page,
                                         vm_flags | VMA_FLAG_FILE, file,
                                         file_off_page, NULL);
@@ -168,8 +168,8 @@ static int load_elf_segments(vm_t *vm, struct vfs_file *file,
         uint64 anon_start = has_boundary ? file_pg_end + PGSIZE : file_pg_end;
 
         if (has_boundary) {
-            printf("exec:   R2 boundary  [%p, %p)\n",
-                   (void *)file_pg_end, (void *)(file_pg_end + PGSIZE));
+            exec_dbg("R2 boundary  [%p, %p)\n",
+                     (void *)file_pg_end, (void *)(file_pg_end + PGSIZE));
             uint32 nbytes = (uint32)((va_page + filesz_adj) - file_pg_end);
             void *pa = kalloc();
             if (pa == NULL)
@@ -196,8 +196,8 @@ static int load_elf_segments(vm_t *vm, struct vfs_file *file,
 
         /* Region 3: anonymous BSS pages */
         if (total_end > anon_start) {
-            printf("exec:   R3 anon BSS  [%p, %p)\n",
-                   (void *)anon_start, (void *)total_end);
+            exec_dbg("R3 anon BSS  [%p, %p)\n",
+                     (void *)anon_start, (void *)total_end);
             ret = vm_mmap_region_locked(vm, anon_start,
                                         total_end - anon_start, vm_flags, NULL,
                                         0, NULL);

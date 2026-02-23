@@ -269,15 +269,14 @@ struct thread *kthread_create(const char *name, void *entry, uint64 arg1,
         thread_group_put(ktg); // add took a ref; balance the alloc ref
     }
 
-    // Join initproc's pgroup and session so the hierarchy is complete.
-    if (initproc->pgroup != NULL) {
-        pgroup_add_thread(initproc->pgroup, p);
-        if (ktg != NULL)
-            pgroup_add_tg(initproc->pgroup, ktg);
+    // Kernel threads belong to session 0 (no controlling tty).
+    // Do NOT join initproc's session/pgroup so that they stay out
+    // of the user-visible session hierarchy.
+    struct session *ksess = session_get_kernel();
+    if (ksess != NULL) {
+        session_add_thread(ksess, p);
     }
-    if (initproc->session != NULL) {
-        session_add_thread(initproc->session, p);
-    }
+    p->pgid = 0;
     pid_wunlock();
 
     rcu_read_unlock();

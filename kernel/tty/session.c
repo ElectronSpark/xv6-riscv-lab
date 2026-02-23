@@ -49,7 +49,20 @@ void session_cache_init(void) {
            ret);
 }
 
+/* Session 0: kernel-thread session (no controlling tty). */
+static struct session *__kernel_session;
+
+struct session *session_get_kernel(void) {
+    return __kernel_session;
+}
+
 void session_init(struct thread *initproc) {
+    /* Create session 0 for kernel threads (no controlling tty,
+     * no foreground process group). */
+    __kernel_session = session_alloc(0);
+    assert(__kernel_session != NULL,
+           "session_init: failed to allocate kernel session 0");
+
     /* Create session 1 for the init process:
      * session 1 → pgroup 1 → thread_group(init) → init thread */
     struct thread_group *tg = initproc->thread_group;

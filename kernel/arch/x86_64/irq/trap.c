@@ -20,6 +20,7 @@
 #include "ioapic.h"
 #include <mm/vm.h>
 #include <smp/percpu.h>
+#include <proc/sched.h>
 #include "memlayout.h"
 
 extern pagetable_t kernel_pagetable;
@@ -47,6 +48,18 @@ void usertrapret(void) {
 
     if (killed(p))
         exit(-1);
+
+    handle_signal();
+
+    /* Check if GDB wants to interrupt this process (Ctrl-C). */
+    {
+        extern int gdbstub_check_interrupt(struct thread *);
+        gdbstub_check_interrupt(p);
+    }
+
+    if (NEEDS_RESCHED()) {
+        scheduler_yield();
+    }
 
     /* Disable interrupts while setting up the return path. */
     intr_off();

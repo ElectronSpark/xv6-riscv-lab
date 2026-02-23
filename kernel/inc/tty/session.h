@@ -25,6 +25,7 @@ struct pgroup;
 void session_cache_init(void);
 void session_init(struct thread *initproc);
 struct session *session_alloc(pid_t sid);
+struct session *session_get_kernel(void);
 void session_ref(struct session *s);
 void session_unref(struct session *s);
 
