@@ -12,6 +12,7 @@
 #include "printf.h"
 #include "string.h"
 #include "dev/fdt.h"
+#include "dev/uart.h"
 #include "proc/sched.h"
 
 /* Global platform info structure (RISC-V defines this in fdt.c) */
@@ -400,6 +401,9 @@ int platform_early_memory(void *boot_data, uint64 *base_out, uint64 *size_out)
 
 int platform_init(void *boot_data)
 {
+    /* x86_64 COM1 = ISA IRQ 4 (not the RISC-V default of 10) */
+    __uart0_irqno = 4;
+
     /* PVH / multiboot parsing already populated platform in
      * platform_early_memory().  Install a fallback region if nothing was
      * found (shouldn't happen, but be safe). */
