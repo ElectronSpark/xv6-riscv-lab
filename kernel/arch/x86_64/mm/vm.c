@@ -184,35 +184,15 @@ void arch_vm_init(void)
          */
         trampoline_ksatp = (uint64)kpml4;
 
+        /*
+         * Signal trampoline in PML4[510] — a separate shared PML4 entry.
+         * walk() sets WALK_INTERMEDIATE_FLAGS (PTE_U|PTE_W) on intermediates,
+         * so no manual PTE_U patching is needed.
+         */
         if (mappages((pagetable_t)kpml4, SIG_TRAMPOLINE, PGSIZE,
                      PGROUNDDOWN((uint64)sig_trampoline),
                      PTE_R | PTE_U) != 0)
             panic("arch_vm_init: sig trampoline map failed");
-
-        {
-            pte_t *pml4e = &kpml4[PX(3, SIG_TRAMPOLINE)];
-            if ((*pml4e & PTE_V) == 0)
-                panic("arch_vm_init: sig trampoline missing pml4e");
-            *pml4e |= PTE_U;
-
-            pagetable_t pdpt = (pagetable_t)PTE2PA(*pml4e);
-            pte_t *pdpte = &pdpt[PX(2, SIG_TRAMPOLINE)];
-            if ((*pdpte & PTE_V) == 0)
-                panic("arch_vm_init: sig trampoline missing pdpte");
-            *pdpte |= PTE_U;
-
-            pagetable_t pd = (pagetable_t)PTE2PA(*pdpte);
-            pte_t *pde = &pd[PX(1, SIG_TRAMPOLINE)];
-            if ((*pde & PTE_V) == 0)
-                panic("arch_vm_init: sig trampoline missing pde");
-            *pde |= PTE_U;
-
-            pagetable_t pt = (pagetable_t)PTE2PA(*pde);
-            pte_t *pte = &pt[PX(0, SIG_TRAMPOLINE)];
-            if ((*pte & PTE_V) == 0)
-                panic("arch_vm_init: sig trampoline missing pte");
-            *pte |= PTE_U;
-        }
 
         uint64 cpus_base = PGROUNDDOWN((uint64)cpus);
         if (PGROUNDUP((uint64)cpus + sizeof(cpus)) - cpus_base > PGSIZE)
@@ -307,13 +287,15 @@ pagetable_t uvmcreate(void)
     __builtin_memset(pagetable, 0, PGSIZE);
 
     /*
-     * Copy only the PML4 entry that contains the high canonical
-     * trampoline/trapframe window (TRAMPOLINE*, KIRQSTACK*).
+     * Share the PML4 entries that contain high-canonical mappings:
+     *   PML4[511] — TRAMPOLINE, TRAMPOLINE_DATA, CPU_ENTRY_AREA, etc.
+     *   PML4[510] — SIG_TRAMPOLINE (signal return trampoline, PTE_U).
      *
      * Do not copy PML4[0] (kernel identity map), so user page tables
      * never reach identity-mapped kernel low addresses.
      */
-    pagetable[PX(3, TRAMPOLINE)] = kpml4[PX(3, TRAMPOLINE)];
+    pagetable[PX(3, TRAMPOLINE)]     = kpml4[PX(3, TRAMPOLINE)];
+    pagetable[PX(3, SIG_TRAMPOLINE)] = kpml4[PX(3, SIG_TRAMPOLINE)];
 
     return pagetable;
 }
@@ -360,9 +342,10 @@ void uvmfree(pagetable_t pagetable, uint64 sz)
 {
     (void)sz;
     if (pagetable != 0) {
-        /* Clear the shared kernel PML4 entry before freewalk so the
+        /* Clear shared kernel PML4 entries before freewalk so the
          * kernel page tables are not accidentally freed. */
         pagetable[PX(3, TRAMPOLINE)] = 0;
+        pagetable[PX(3, SIG_TRAMPOLINE)] = 0;
     }
     freewalk(pagetable);
 }

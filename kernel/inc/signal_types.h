@@ -23,8 +23,14 @@ typedef struct sigaction {
         void (*sa_handler)(int);
         void (*sa_sigaction)(int, siginfo_t *, void *);
     };
+    unsigned long sa_flags;
+#ifdef __x86_64__
+    void (*sa_restorer)(void);
+#endif
     sigset_t sa_mask;
-    int sa_flags;
+#ifndef __x86_64__
+    void *_sa_unused;
+#endif
 } sigaction_t;
 
 typedef struct sigacts {

@@ -6,6 +6,7 @@
 #include "lock/spinlock.h"
 #include "defs.h"
 #include "proc/thread.h"
+#include "arch_thread.h"
 #include "printf.h"
 #include "proc/sched.h"
 #include "signal.h"
@@ -321,9 +322,9 @@ int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
     p->trapframe->trapframe.sp = new_sp;
     p->trapframe->trapframe.sepc =
         (uint64)SIG_TRAMPOLINE;         // Set the epc to the signal trampoline
-    p->trapframe->trapframe.a0 = signo; // Set the first argument
-    p->trapframe->trapframe.a1 = user_siginfo; // Set the second argument
-    p->trapframe->trapframe.a2 = new_ucontext; // Set the third argument
+    arch_tf_set_arg0(p->trapframe, signo);          // signal number
+    arch_tf_set_arg1(p->trapframe, user_siginfo);   // siginfo_t *
+    arch_tf_set_arg2(p->trapframe, new_ucontext);   // ucontext_t *
     p->trapframe->trapframe.t0 =
         (uint64)sa->sa_handler; // Set the handler address
     p->signal.sig_ucontext = new_ucontext;
@@ -362,6 +363,10 @@ void usertrapret(void) {
     }
 
     handle_signal();
+
+    /* handle_signal() may have marked us killed (e.g. unhandled SIGSEGV). */
+    if (killed(p))
+        exit(-1);
 
     /* Check if GDB wants to interrupt this process (Ctrl-C). */
     {

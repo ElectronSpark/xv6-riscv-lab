@@ -56,12 +56,11 @@
 
 #define SA_NOCLDSTOP 0x00000001 // Don't receive SIGCHLD when children stop.
 #define SA_NOCLDWAIT 0x00000002 // Don't create zombie processes on child exit.
-#define SA_SIGINFO 0x00000004   // Use sa_sigaction instead of sa_handler.
-#define SA_ONSTACK 0x00000008   // Use alternate signal stack.
-// #define SA_RESTART   0x00000010 // Restart system calls if interrupted by
-// handler
-#define SA_NODEFER 0x00000020 // Don't block the signal in the handler.
-#define SA_RESETHAND                                                           \
-    0x00000040 // Reset the signal handler to SIG_DFL after the first delivery.
+#define SA_SIGINFO   0x00000004 // Use sa_sigaction instead of sa_handler.
+#define SA_RESTORER  0x04000000 // sa_restorer field contains a valid function pointer.
+#define SA_ONSTACK   0x08000000 // Use alternate signal stack.
+#define SA_RESTART   0x10000000 // Restart system calls if interrupted by handler.
+#define SA_NODEFER   0x40000000 // Don't block the signal in the handler.
+#define SA_RESETHAND 0x80000000 // Reset the signal handler to SIG_DFL after the first delivery.
 
 #endif /* __SIGNO_H */

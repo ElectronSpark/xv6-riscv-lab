@@ -11,8 +11,10 @@
 #include "printf.h"
 #include "x86.h"
 #include "defs.h"
+#include "string.h"
 #include "arch/trap.h"
 #include "proc/thread.h"
+#include "arch_thread.h"
 #include "signal.h"
 #include "seg.h"
 #include "trapframe.h"
@@ -31,7 +33,7 @@ extern uint64 vectors[];
 /* ── Trampoline stubs (linker compatibility) ── */
 extern uint64 trampoline_ksatp;  /* defined in trapvec.S */
 extern char trampoline[];
-void sig_trampoline(void) {}
+extern void sig_trampoline(void);  /* defined in sig_trampoline.S */
 
 extern char userret[];
 static void (*trampoline_userret)(uint64 tf, uint64 user_cr3) = NULL;
@@ -51,6 +53,10 @@ void usertrapret(void) {
 
     handle_signal();
 
+    /* handle_signal() may have marked us killed (e.g. unhandled SIGSEGV). */
+    if (killed(p))
+        exit(-1);
+
     /* Check if GDB wants to interrupt this process (Ctrl-C). */
     {
         extern int gdbstub_check_interrupt(struct thread *);
@@ -63,6 +69,9 @@ void usertrapret(void) {
 
     /* Disable interrupts while setting up the return path. */
     intr_off();
+
+    /* Restore user FS base (TLS) for user-space threads. */
+    wrmsr(MSR_FS_BASE, p->trapframe->tp);
 
     /* Store kernel state in utrapframe for next trap entry. */
     p->trapframe->kernel_sp = p->ksp;
@@ -77,6 +86,25 @@ void usertrapret(void) {
     /* Map this CPU's trapframe page into the user page table
      * and get the utrapframe virtual address. */
     int cpu = cpuid();
+
+    /* Guard: if vm was freed (process being torn down), don't proceed. */
+    if (p->vm == NULL || p->vm->pagetable == NULL) {
+        printf("usertrapret: pid %d '%s' has no VM, exiting\n",
+               p->pid, p->name);
+        intr_on();
+        exit(-1);
+    }
+
+    /* Validate trapframe_pte before vm_cpu_online */
+    if (p->vm->trapframe_pte) {
+        uint64 pte_val = (uint64)p->vm->trapframe_pte;
+        if (pte_val > 0x40000000UL || pte_val < 0x100000UL) {
+            printf("usertrapret: BAD trapframe_pte=%p pid=%d name=%s\n",
+                   p->vm->trapframe_pte, p->pid, p->name);
+            intr_on();
+            exit(-1);
+        }
+    }
     uint64 trapframe_base = vm_cpu_online(p->vm, cpu);
 
     /* Set up per-CPU scratch for the next SYSCALL entry.
@@ -115,8 +143,14 @@ void usertrapret(void) {
     if (trampoline_userret == NULL)
         panic("usertrapret: trampoline_userret not initialized");
 
-    if (p->vm == NULL || p->vm->pagetable == NULL)
-        panic("usertrapret: missing user pagetable");
+    /* Final sanity check — should not happen after the earlier guard,
+     * but if it does, kill the process instead of panicking. */
+    if (p->vm == NULL || p->vm->pagetable == NULL) {
+        printf("usertrapret: pid %d '%s' lost VM before iretq\n",
+               p->pid, p->name);
+        intr_on();
+        exit(-1);
+    }
 
     trampoline_userret(trapframe_base, (uint64)p->vm->pagetable);
 
@@ -125,13 +159,114 @@ void usertrapret(void) {
 
 int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
                   ksiginfo_t *info) {
-    (void)p; (void)signo; (void)sa; (void)info;
-    return -1;
+    if (sa == NULL || sa->sa_handler == NULL || p == NULL)
+        return -1;
+
+    /*
+     * Determine the user stack to push the signal frame onto.
+     * SA_ONSTACK: use the alternate signal stack if available.
+     */
+    uint64 new_sp;
+    if ((sa->sa_flags & SA_ONSTACK) != 0 &&
+        (p->signal.sig_stack.ss_flags & (SS_ONSTACK | SS_DISABLE)) == 0) {
+        if (p->signal.sig_stack.ss_size < MINSIGSTKSZ)
+            return -1;
+        new_sp = (uint64)p->signal.sig_stack.ss_sp +
+                 p->signal.sig_stack.ss_size;
+    } else {
+        new_sp = p->trapframe->trapframe.rsp;
+    }
+
+    /* 128-byte red zone — the System V AMD64 ABI reserves 128 bytes
+     * below RSP that must not be clobbered by signal delivery. */
+    new_sp -= 128;
+    new_sp &= ~0xFUL;
+
+    /* Reserve space for ucontext_t on the user stack. */
+    uint64 uc_addr = (new_sp - sizeof(ucontext_t)) & ~0xFUL;
+
+    /* Reserve space for siginfo_t if SA_SIGINFO. */
+    uint64 si_addr = 0;
+    if (sa->sa_flags & SA_SIGINFO) {
+        assert(info != NULL,
+               "push_sigframe: info is NULL when SA_SIGINFO is set");
+        si_addr = (uc_addr - sizeof(siginfo_t)) & ~0xFUL;
+        new_sp = si_addr;
+    } else {
+        new_sp = uc_addr;
+    }
+
+    /*
+     * Push the return address (SIG_TRAMPOLINE) so that when the
+     * signal handler executes RET it lands in the trampoline which
+     * calls sys_sigreturn.
+     *
+     * System V AMD64 ABI requires RSP to be 16-byte aligned BEFORE
+     * the CALL instruction, i.e. RSP % 16 == 0 *before* the 8-byte
+     * return address is pushed, so RSP % 16 == 8 on function entry.
+     */
+    new_sp = (new_sp & ~0xFUL) - 8;
+    uint64 ret_addr = SIG_TRAMPOLINE;
+
+    /* Grow the stack VMA if necessary. */
+    if ((sa->sa_flags & SA_ONSTACK) == 0) {
+        if (p->vm == NULL)
+            exit(-1);
+        if (vm_try_growstack(p->vm, new_sp) != 0)
+            exit(-1);
+    }
+
+    /* Build the ucontext. */
+    ucontext_t uc = {0};
+    uc.uc_link = (ucontext_t *)p->signal.sig_ucontext;
+    uc.uc_sigmask = p->signal.sig_mask;
+    memmove(&uc.uc_mcontext, p->trapframe, sizeof(mcontext_t));
+    memmove(&uc.uc_stack, &p->signal.sig_stack, sizeof(stack_t));
+
+    /* Copy ucontext to user stack. */
+    if (vm_copyout(p->vm, uc_addr, (void *)&uc, sizeof(ucontext_t)) != 0)
+        return -1;
+
+    /* Copy siginfo to user stack. */
+    if (sa->sa_flags & SA_SIGINFO) {
+        if (vm_copyout(p->vm, si_addr, &info->info, sizeof(siginfo_t)) != 0)
+            return -1;
+    }
+
+    /* Write the return address (trampoline) below the frame. */
+    if (vm_copyout(p->vm, new_sp, (void *)&ret_addr, sizeof(ret_addr)) != 0)
+        return -1;
+
+    /*
+     * Redirect execution to the signal handler.
+     * x86_64 System V calling convention: RDI, RSI, RDX, …
+     */
+    p->trapframe->trapframe.rip = (uint64)sa->sa_handler;
+    p->trapframe->trapframe.rsp = new_sp;
+    arch_tf_set_arg0(p->trapframe, (uint64)signo);  /* arg1: signal number  */
+    arch_tf_set_arg1(p->trapframe, si_addr);         /* arg2: siginfo_t *    */
+    arch_tf_set_arg2(p->trapframe, uc_addr);         /* arg3: ucontext_t *   */
+
+    p->signal.sig_ucontext = uc_addr;
+
+    return 0;
 }
 
 int restore_sigframe(struct thread *p, ucontext_t *ret_uc) {
-    (void)p; (void)ret_uc;
-    return -1;
+    uint64 sig_ucontext = p->signal.sig_ucontext;
+
+    if (sig_ucontext == 0 || ret_uc == NULL)
+        return -1;
+
+    /* Copy the saved ucontext back from user memory. */
+    if (vm_copyin(p->vm, (void *)ret_uc, sig_ucontext,
+                  sizeof(ucontext_t)) != 0)
+        return -1;
+
+    p->signal.sig_ucontext = (uint64)ret_uc->uc_link;
+    memmove(p->trapframe, &ret_uc->uc_mcontext, sizeof(mcontext_t));
+
+    return 0;
 }
 
 /* ─────────────────── I/O helpers ─────────────────── */
@@ -408,6 +543,21 @@ void x86_trap_handler(struct trapframe *tf) {
             printf("pid %d %s: fatal page fault cr2=0x%lx err=0x%lx rip=0x%lx\n",
                    current->pid, current->name, cr2, tf->err, tf->rip);
             assert(current->pid != 1, "init exiting");
+            {
+                extern int gdbstub_signal_stop(struct thread *, int);
+                gdbstub_signal_stop(current, SIGSEGV);
+            }
+            kill(current->pid, SIGSEGV);
+            return;
+        }
+
+        if (from_user && current) {
+            /* User-mode page fault but VM is NULL — process is being
+             * torn down.  Just kill it; don't fall through to kernel
+             * panic. */
+            printf("pid %d %s: page fault with NULL vm cr2=0x%lx rip=0x%lx\n",
+                   current->pid, current->name, cr2, tf->rip);
+            assert(current->pid != 1, "init exiting");
             kill(current->pid, SIGSEGV);
             return;
         }
@@ -435,6 +585,10 @@ void x86_trap_handler(struct trapframe *tf) {
                    current->pid, current->name, vec,
                    name ? name : "???", tf->rip, tf->err);
             assert(current->pid != 1, "init exiting");
+            {
+                extern int gdbstub_signal_stop(struct thread *, int);
+                gdbstub_signal_stop(current, SIGSEGV);
+            }
             kill(current->pid, SIGSEGV);
             return;
         }

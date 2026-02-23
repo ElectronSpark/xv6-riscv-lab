@@ -84,12 +84,14 @@ uint64 sys_exit_group(void) {
     return 0; // not reached
 }
 
-// vfork() — dedicated syscall so the userspace wrapper is pure assembly
-// (ecall + ret, no stack usage). This avoids corrupting the parent's
-// stack frame, which is shared with the child via CLONE_VM.
+// vfork() — implemented as fork + CLONE_VFORK (parent blocks until
+// child execs/exits).  We do NOT use CLONE_VM because musl/dash cannot
+// safely operate in a shared-VM child: musl's internal locks, dash's
+// longjmp-based error handling, and the shared stack all cause corruption.
+// POSIX explicitly allows vfork to behave identically to fork.
 uint64 sys_vfork(void) {
     struct clone_args args = {
-        .flags = CLONE_VM | CLONE_VFORK,
+        .flags = CLONE_VFORK,
         .stack = 0,
         .stack_size = 0,
         .entry = 0,
@@ -138,9 +140,6 @@ uint64 sys_clone(void) {
         }
     }
     int ret = thread_clone(&args);
-    if (ret < 0)
-        printf("sys_clone: '%s' (pid %d) failed, uargs=%lx ret=%d\n",
-               current->name, current->pid, uargs, ret);
     return ret;
 }
 

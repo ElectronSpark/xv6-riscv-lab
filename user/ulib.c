@@ -5,10 +5,14 @@
 
 //
 // wrapper so that it's OK if main() does not call exit().
+// On RISC-V a0 serves as both the exec return (argc) and the first function
+// argument, so main() automatically receives argc.  On x86_64 the exec return
+// is in RAX while the first function argument is in RDI — exec now sets both
+// RDI=argc and RSI=argv in the trap frame, so start() must forward them.
 //
-void start() {
-    extern int main();
-    main();
+void start(int argc, char *argv[]) {
+    extern int main(int, char **);
+    main(argc, argv);
     exit(0);
 }
 

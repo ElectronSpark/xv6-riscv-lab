@@ -82,6 +82,7 @@ static uint64 sys_arch_prctl(void)
     switch (code) {
     case ARCH_SET_FS:
         wrmsr(MSR_FS_BASE, addr);
+        current->trapframe->tp = addr;  /* persist for context switch */
         return 0;
     case ARCH_SET_GS:
         /* Don't allow user to set GS — it's used for per-CPU data */

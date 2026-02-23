@@ -131,4 +131,66 @@ static inline void arch_clone_child_regs(struct utrapframe *tf,
         tf->tp = tls;
 }
 
+/* ── Trapframe return-value accessors (RISC-V calling convention) ── */
+
+static inline void arch_tf_set_ret(struct utrapframe *tf, uint64 v) {
+    tf->trapframe.a0 = v;
+}
+static inline uint64 arch_tf_get_ret(struct utrapframe *tf) {
+    return tf->trapframe.a0;
+}
+
+/* ── Trapframe function-argument accessors (RISC-V calling convention) ── */
+
+static inline void arch_tf_set_arg0(struct utrapframe *tf, uint64 v) {
+    tf->trapframe.a0 = v;
+}
+static inline void arch_tf_set_arg1(struct utrapframe *tf, uint64 v) {
+    tf->trapframe.a1 = v;
+}
+static inline void arch_tf_set_arg2(struct utrapframe *tf, uint64 v) {
+    tf->trapframe.a2 = v;
+}
+static inline void arch_tf_set_arg3(struct utrapframe *tf, uint64 v) {
+    tf->trapframe.a3 = v;
+}
+static inline void arch_tf_set_arg4(struct utrapframe *tf, uint64 v) {
+    tf->trapframe.a4 = v;
+}
+static inline void arch_tf_set_arg5(struct utrapframe *tf, uint64 v) {
+    tf->trapframe.a5 = v;
+}
+
+static inline uint64 arch_tf_get_arg0(struct utrapframe *tf) {
+    return tf->trapframe.a0;
+}
+static inline uint64 arch_tf_get_arg1(struct utrapframe *tf) {
+    return tf->trapframe.a1;
+}
+static inline uint64 arch_tf_get_arg2(struct utrapframe *tf) {
+    return tf->trapframe.a2;
+}
+static inline uint64 arch_tf_get_arg3(struct utrapframe *tf) {
+    return tf->trapframe.a3;
+}
+static inline uint64 arch_tf_get_arg4(struct utrapframe *tf) {
+    return tf->trapframe.a4;
+}
+static inline uint64 arch_tf_get_arg5(struct utrapframe *tf) {
+    return tf->trapframe.a5;
+}
+
+/**
+ * arch_tf_set_exec_args - Set up the trapframe registers for exec.
+ *
+ * On RISC-V a0 serves as both the ecall return register and the first
+ * function argument, so exec's `return argc` already places argc into
+ * a0.  We only need to set a1 = argv here.
+ */
+static inline void arch_tf_set_exec_args(struct utrapframe *tf,
+                                         uint64 argc, uint64 argv) {
+    (void)argc; /* a0 is set by the syscall return path */
+    arch_tf_set_arg1(tf, argv);
+}
+
 #endif /* __KERNEL_RISCV_ARCH_THREAD_H */

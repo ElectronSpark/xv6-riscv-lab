@@ -225,6 +225,10 @@ else()
     set(USER_HOST_TRIPLE "riscv64-unknown-elf")
 endif()
 
+# List form of USER_ARCH_CFLAGS for add_custom_command COMMAND arguments
+# (the string form is kept for env-var CFLAGS= lines where \ -joining works).
+separate_arguments(USER_ARCH_CFLAGS_CMD NATIVE_COMMAND "${USER_ARCH_CFLAGS}")
+
 if(EXISTS "${NCURSES_SRC_DIR}/configure")
     add_custom_command(
         OUTPUT ${NCURSES_LIB_A}
@@ -332,7 +336,7 @@ if(EXISTS "${DASH_SRC_DIR}/configure")
             -c -o ${HISTEDIT_SHIM_OBJ}
             --sysroot=${MUSL_SYSROOT}
             -O2 -nostdinc -ffreestanding -fno-common -fno-pie -no-pie
-            ${USER_ARCH_CFLAGS}
+            ${USER_ARCH_CFLAGS_CMD}
             -isystem ${MUSL_INCLUDE_DIR}
             -isystem ${GCC_INCLUDE_DIR_MUSL}
             -isystem ${MUSL_COMPAT_DIR}
@@ -639,7 +643,7 @@ if(EXISTS "${NCURSES_SRC_DIR}/configure")
         OUTPUT ${NCURSES_SH_OBJ}
         COMMAND ${CMAKE_C_COMPILER}
             -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
-            ${USER_ARCH_CFLAGS}
+            ${USER_ARCH_CFLAGS_CMD}
             -fno-common -fno-pie -no-pie
             -DUSE_NCURSES_SHELL=1
             --sysroot=${MUSL_SYSROOT}

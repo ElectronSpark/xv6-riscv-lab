@@ -141,4 +141,66 @@ static inline void arch_clone_child_regs(struct utrapframe *tf,
         tf->tp = tls;
 }
 
+/* ── Trapframe return-value accessors (x86_64 System V ABI) ── */
+
+static inline void arch_tf_set_ret(struct utrapframe *tf, uint64 v) {
+    tf->trapframe.rax = v;
+}
+static inline uint64 arch_tf_get_ret(struct utrapframe *tf) {
+    return tf->trapframe.rax;
+}
+
+/* ── Trapframe function-argument accessors (x86_64 System V ABI) ── */
+
+static inline void arch_tf_set_arg0(struct utrapframe *tf, uint64 v) {
+    tf->trapframe.rdi = v;
+}
+static inline void arch_tf_set_arg1(struct utrapframe *tf, uint64 v) {
+    tf->trapframe.rsi = v;
+}
+static inline void arch_tf_set_arg2(struct utrapframe *tf, uint64 v) {
+    tf->trapframe.rdx = v;
+}
+static inline void arch_tf_set_arg3(struct utrapframe *tf, uint64 v) {
+    tf->trapframe.rcx = v;
+}
+static inline void arch_tf_set_arg4(struct utrapframe *tf, uint64 v) {
+    tf->trapframe.r8 = v;
+}
+static inline void arch_tf_set_arg5(struct utrapframe *tf, uint64 v) {
+    tf->trapframe.r9 = v;
+}
+
+static inline uint64 arch_tf_get_arg0(struct utrapframe *tf) {
+    return tf->trapframe.rdi;
+}
+static inline uint64 arch_tf_get_arg1(struct utrapframe *tf) {
+    return tf->trapframe.rsi;
+}
+static inline uint64 arch_tf_get_arg2(struct utrapframe *tf) {
+    return tf->trapframe.rdx;
+}
+static inline uint64 arch_tf_get_arg3(struct utrapframe *tf) {
+    return tf->trapframe.rcx;
+}
+static inline uint64 arch_tf_get_arg4(struct utrapframe *tf) {
+    return tf->trapframe.r8;
+}
+static inline uint64 arch_tf_get_arg5(struct utrapframe *tf) {
+    return tf->trapframe.r9;
+}
+
+/**
+ * arch_tf_set_exec_args - Set up the trapframe registers for exec.
+ *
+ * On x86_64 the syscall return value is in RAX but the first function
+ * argument is in RDI (a different register), so we must explicitly
+ * place argc into RDI and argv into RSI.
+ */
+static inline void arch_tf_set_exec_args(struct utrapframe *tf,
+                                         uint64 argc, uint64 argv) {
+    arch_tf_set_arg0(tf, argc);
+    arch_tf_set_arg1(tf, argv);
+}
+
 #endif /* __KERNEL_X86_64_ARCH_THREAD_H */

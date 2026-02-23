@@ -36,6 +36,7 @@
 #include "trapframe.h"
 #include "trap.h"
 #include "proc/thread.h"
+#include "arch_thread.h"
 #include "proc/thread_group.h"
 #include "proc/sched.h"
 #include "mm/vm.h"
@@ -2205,11 +2206,7 @@ int gdbstub_trap(struct thread *t)
         /* GDB has attached — fall through to normal stop handling.
          * Check a0: waitgdb() sets a0=0 (don't stop on exec),
          * waitgdb -e sets a0=1 (stop at entry point after exec). */
-#ifdef __x86_64__
-        gdb.stop_on_exec = (t->trapframe->trapframe.rdi != 0) ? 1 : 0;
-#else
-        gdb.stop_on_exec = (t->trapframe->trapframe.a0 != 0) ? 1 : 0;
-#endif
+        gdb.stop_on_exec = (arch_tf_get_arg0(t->trapframe) != 0) ? 1 : 0;
     }
 
     uint64 pc = t->trapframe->trapframe.sepc;

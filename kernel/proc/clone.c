@@ -282,8 +282,8 @@ int thread_clone(struct clone_args *args) {
 out:
     if (IS_ERR(ret_ptr)) {
         __free_pid(); // Release the reserved PID slot
-        printf("thread_clone: failed for '%s' (pid %d), err=%ld\n",
-               p->name, p->pid, PTR_ERR(ret_ptr));
+        printf("thread_clone: failed for '%s' (pid %d), flags=0x%lx err=%ld\n",
+               p->name, p->pid, args->flags, PTR_ERR(ret_ptr));
         return PTR_ERR(ret_ptr);
     } else if (ret_ptr == NULL) {
         __free_pid(); // Release the reserved PID slot

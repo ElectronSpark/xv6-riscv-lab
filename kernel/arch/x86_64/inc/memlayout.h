@@ -38,7 +38,13 @@ extern uint64 __physical_total_pages;
 #define TRAMPOLINE (MAXVA & ~(PGSIZE - 1))
 #define TRAMPOLINE_DATA (TRAMPOLINE - PGSIZE)
 #define TRAMPOLINE_CPULOCAL (TRAMPOLINE - (PGSIZE * 2))
-#define SIG_TRAMPOLINE (TRAMPOLINE - (PGSIZE * 3))
+
+/*
+ * Signal trampoline: mapped at PML4[510] so it has its own shared
+ * PML4 entry (separate from PML4[511] which holds TRAMPOLINE etc.).
+ * PML4[510] covers VA 0xFFFFFF0000000000 .. 0xFFFFFF7FFFFFFFFF.
+ */
+#define SIG_TRAMPOLINE 0xFFFFFF0000000000UL
 
 /*
  * CPU entry area: GDT+TSS (page 0) and IDT (page 1) mapped at
@@ -46,7 +52,7 @@ extern uint64 __physical_total_pages;
  * This is needed because iretq must read the GDT to validate CS/SS,
  * and the IDT/TSS must be reachable for fault delivery.
  */
-#define TRAPVEC_ALIAS_BASE (SIG_TRAMPOLINE - (2 * PGSIZE))
+#define TRAPVEC_ALIAS_BASE (TRAMPOLINE_CPULOCAL - (2 * PGSIZE))
 #define CPU_ENTRY_AREA     (TRAPVEC_ALIAS_BASE - (2 * PGSIZE))
 #define CPU_ENTRY_GDT      CPU_ENTRY_AREA
 #define CPU_ENTRY_IDT      (CPU_ENTRY_AREA + PGSIZE)
@@ -62,8 +68,8 @@ extern uint64 __physical_total_pages;
 /*
  * x86_64 user virtual address space ends at the top of low canonical range.
  * With 4-level paging (48-bit VA): user space is 0 .. 0x00007FFFFFFFFFFF.
- * TRAMPOLINE, SIG_TRAMPOLINE, etc. live in the high canonical range and
- * are shared via PML4[511] — they are NOT part of the user VA region.
+ * TRAMPOLINE etc. live in the high canonical range (shared via PML4[511]).
+ * SIG_TRAMPOLINE lives in PML4[510].  Neither is part of user VA.
  */
 #define UVMTOP 0x0000800000000000UL
 #define TRAPFRAME (UVMTOP - (PGSIZE << 6))

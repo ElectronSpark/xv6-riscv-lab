@@ -20,6 +20,7 @@
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
 #include "proc/thread.h"
+#include "arch_thread.h"
 #include "defs.h"
 #include "printf.h"
 #include "elf.h"
@@ -561,14 +562,12 @@ int exec(char *path, char **argv, char **envp) {
     if (vm_copyout(tmp_vm, sp, (char *)ustack, nslots * sizeof(uint64)) < 0)
         goto bad;
 
-    // arguments to user main(argc, argv)
-    // argc is returned via the system call return value.
-    // argv goes in the second argument register.
-#ifdef __x86_64__
-    p->trapframe->trapframe.rsi = sp + sizeof(uint64);  /* argv in RSI */
-#else
-    p->trapframe->trapframe.a1 = sp + sizeof(uint64);    /* argv in a1 */
-#endif
+    // Set up the user registers for main(argc, argv).
+    // Architecture-specific: on RISC-V a0 doubles as both syscall return
+    // and first argument, so only argv (a1) needs explicit setup.
+    // On x86_64 the syscall return (RAX) differs from the first argument
+    // register (RDI), so both argc and argv must be set explicitly.
+    arch_tf_set_exec_args(p->trapframe, argc, sp + sizeof(uint64));
 
     // Save program name for debugging.
     for (last = s = path; *s; s++)
