@@ -136,8 +136,9 @@ void __wrap_scheduler_sleep(spinlock_t *lk, enum thread_state state)
     (void)state;
 }
 
-int __wrap_kthread_create(const char *name, struct thread **retp, void *entry,
-                              uint64 arg0, uint64 arg1, uint64 stack_order)
+struct thread *__wrap_kthread_create(const char *name, void *entry,
+                                     uint64 arg0, uint64 arg1,
+                                     int stack_order)
 {
     // Don't use check_expected for parameters - just ignore them in tests
     (void)name;
@@ -145,11 +146,8 @@ int __wrap_kthread_create(const char *name, struct thread **retp, void *entry,
     (void)arg0;
     (void)arg1;
     (void)stack_order;
-    
-    if (retp != NULL) {
-        *retp = mock_ptr_type(struct thread *);
-    }
-    return mock_type(int);  // Return value controlled by will_return()
+
+    return mock_ptr_type(struct thread *);
 }
 
 void __wrap_wakeup(struct thread *p)
@@ -212,9 +210,14 @@ int __wrap_tq_size(tq_t *q)
 int __wrap_tq_wait(tq_t *q, spinlock_t *lock, uint64 *rdata)
 {
     if (g_concurrency_mode) {
-        // Real blocking: release lock atomically and wait on condvar
-        __atomic_store_n(&lock->locked, 0, __ATOMIC_SEQ_CST);
-        conc_tq_wait(q, lock);
+        // Real blocking: release lock atomically and wait on condvar.
+        // Some queues (e.g., io_waiters) have no spinlock; use queue address
+        // as mutex key in that case.
+        void *wait_lock_key = (lock != NULL) ? (void *)lock : (void *)q;
+        if (lock != NULL) {
+            __atomic_store_n(&lock->locked, 0, __ATOMIC_SEQ_CST);
+        }
+        conc_tq_wait(q, wait_lock_key);
         // Caller re-acquires the lock explicitly
         return 0;
     }
@@ -257,6 +260,36 @@ struct thread *__wrap_tq_wakeup(tq_t *q, int error_no, uint64 rdata)
     }
     
     return mock_ptr_type(struct thread *);
+}
+
+int __wrap_tq_wait_cb(tq_t *q, sleep_callback_t sleep_callback,
+                      wakeup_callback_t wakeup_callback, void *callback_data,
+                      uint64 *rdata)
+{
+    int sleep_status = 0;
+    if (sleep_callback) {
+        sleep_status = sleep_callback(callback_data);
+    }
+
+    int ret = __wrap_tq_wait(q, q ? q->lock : NULL, rdata);
+
+    if (wakeup_callback) {
+        wakeup_callback(callback_data, sleep_status);
+    }
+
+    return ret;
+}
+
+bool __wrap_signal_pending(struct thread *p)
+{
+    (void)p;
+    return false;
+}
+
+int sleep_on_chan_interruptible(void *chan, spinlock_t *lk)
+{
+    __wrap_sleep_on_chan(chan, lk);
+    return 0;
 }
 
 int __wrap_tq_wakeup_all(tq_t *q, int error_no, uint64 rdata)

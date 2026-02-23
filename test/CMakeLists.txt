@@ -37,7 +37,6 @@ set(UNIT_TEST_INCLUDE_DIRS
     ${CMAKE_SOURCE_DIR}/include
     ${CMAKE_SOURCE_DIR}/../kernel/inc
     ${CMAKE_SOURCE_DIR}/../kernel/inc/lock
-    ${CMAKE_SOURCE_DIR}/../kernel/inc/proc
     ${CMAKE_SOURCE_DIR}/../kernel
 )
 
@@ -98,6 +97,7 @@ set(MOCK_TEST_KERNEL_SRC
 set(WRAPPER_SRC
     ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/spinlock_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/rwlock_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/page_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/slab_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
@@ -186,11 +186,20 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     tq_init
     tq_size
     tq_wait
+    tq_wait_cb
     tq_wait_in_state
     tq_wakeup
     tq_wakeup_all
+    signal_pending
     wakeup
     kthread_create
+    rwlock_init
+    rwlock_rlock
+    rwlock_runlock
+    rwlock_wlock
+    rwlock_wunlock
+    rwlock_r_sleep_cb
+    rwlock_r_wake_cb
     # Workqueue functions
     workqueue_create
     queue_work
@@ -273,20 +282,22 @@ add_executable(ut_semaphore
     ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/cpu_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/timer_wrappers.c
 )
 target_link_libraries(ut_semaphore PRIVATE cmocka-static pthread)
 target_compile_options(ut_semaphore PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
 target_link_options(ut_semaphore PRIVATE ${ASAN_LINK_FLAGS}
     -Wl,--wrap=spin_init,--wrap=spin_lock,--wrap=spin_unlock,--wrap=spin_holding
     -Wl,--wrap=push_off,--wrap=pop_off
-    -Wl,--wrap=tq_init,--wrap=tq_size,--wrap=tq_wait,--wrap=tq_wait_in_state,--wrap=tq_wakeup,--wrap=tq_wakeup_all
+    -Wl,--wrap=tq_init,--wrap=tq_size,--wrap=tq_wait,--wrap=tq_wait_cb,--wrap=tq_wait_in_state,--wrap=tq_wakeup,--wrap=tq_wakeup_all
+    -Wl,--wrap=signal_pending
     -Wl,--wrap=mycpu,--wrap=myproc,--wrap=__current_thread,--wrap=proc_lock,--wrap=proc_unlock,--wrap=proc_assert_holding
     -Wl,--wrap=sched_lock,--wrap=sched_unlock,--wrap=scheduler_wakeup,--wrap=scheduler_sleep
     -Wl,--wrap=__panic_start,--wrap=__panic_end,--wrap=panic_state,--wrap=panic_disable_bt
 )
 target_include_directories(ut_semaphore PRIVATE
-    ${UNIT_TEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
+    ${UNIT_TEST_INCLUDE_DIRS}
 )
 
 add_executable(ut_rwlock
@@ -297,20 +308,22 @@ add_executable(ut_rwlock
     ${CMAKE_SOURCE_DIR}/src/wrappers/proc_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/panic_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/cpu_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/timer_wrappers.c
 )
 target_link_libraries(ut_rwlock PRIVATE cmocka-static pthread)
 target_compile_options(ut_rwlock PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
 target_link_options(ut_rwlock PRIVATE ${ASAN_LINK_FLAGS}
     -Wl,--wrap=spin_init,--wrap=spin_lock,--wrap=spin_unlock,--wrap=spin_holding
     -Wl,--wrap=push_off,--wrap=pop_off
-    -Wl,--wrap=tq_init,--wrap=tq_size,--wrap=tq_wait,--wrap=tq_wait_in_state,--wrap=tq_wakeup,--wrap=tq_wakeup_all
+    -Wl,--wrap=tq_init,--wrap=tq_size,--wrap=tq_wait,--wrap=tq_wait_cb,--wrap=tq_wait_in_state,--wrap=tq_wakeup,--wrap=tq_wakeup_all
+    -Wl,--wrap=signal_pending
     -Wl,--wrap=mycpu,--wrap=myproc,--wrap=__current_thread,--wrap=proc_lock,--wrap=proc_unlock,--wrap=proc_assert_holding
     -Wl,--wrap=sched_lock,--wrap=sched_unlock,--wrap=scheduler_wakeup,--wrap=scheduler_sleep
     -Wl,--wrap=__panic_start,--wrap=__panic_end,--wrap=panic_state,--wrap=panic_disable_bt
 )
 target_include_directories(ut_rwlock PRIVATE
-    ${UNIT_TEST_INCLUDE_DIRS}
     ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
+    ${UNIT_TEST_INCLUDE_DIRS}
 )
 
 add_executable(ut_bits
@@ -333,7 +346,10 @@ add_executable(ut_pcache
 target_link_libraries(ut_pcache PRIVATE cmocka-static pthread)
 target_compile_options(ut_pcache PRIVATE ${TEST_C_FLAGS} ${ASAN_COMPILE_FLAGS})
 target_link_options(ut_pcache PRIVATE ${MOCK_COMPILE_OPTIONS} ${ASAN_LINK_FLAGS})
-target_include_directories(ut_pcache PRIVATE ${UNIT_TEST_INCLUDE_DIRS})
+target_include_directories(ut_pcache PRIVATE
+    ${CMAKE_SOURCE_DIR}/include/semaphore_stubs
+    ${UNIT_TEST_INCLUDE_DIRS}
+)
 
 # Tmpfs truncate test (linked version)
 # This test links directly to kernel/vfs/tmpfs/truncate.c using header guards

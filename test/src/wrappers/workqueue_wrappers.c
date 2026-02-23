@@ -14,15 +14,55 @@ struct queued_work_entry {
     struct work_struct *work;
 };
 
+struct wq_node {
+    struct workqueue *wq;
+    struct wq_node *next;
+};
+
 static struct queued_work_entry g_pending_work = {0};
 static bool g_fail_next_queue_work = false;
+static struct wq_node *g_wq_head = NULL;
+
+static void register_wq(struct workqueue *wq) {
+    struct wq_node *node = calloc(1, sizeof(*node));
+    if (node == NULL) {
+        return;
+    }
+    node->wq = wq;
+    node->next = g_wq_head;
+    g_wq_head = node;
+}
+
+static void free_all_wq(void) {
+    while (g_wq_head != NULL) {
+        struct wq_node *node = g_wq_head;
+        g_wq_head = node->next;
+        free(node->wq);
+        free(node);
+    }
+}
+
+__attribute__((destructor)) static void workqueue_wrapper_cleanup(void) {
+    free_all_wq();
+}
 
 void __wrap_init_work_struct_flags(struct work_struct *work,
                                    void (*func)(struct work_struct *),
                                    uint64 data, uint32 flags);
+void __wrap_init_work_struct_ex(struct work_struct *work,
+                                void (*func)(struct work_struct *),
+                                void (*fault)(struct work_struct *),
+                                uint64 data, uint32 flags);
 struct work_struct *
 __wrap_create_work_struct_flags(void (*func)(struct work_struct *), uint64 data,
                                 uint32 flags);
+struct work_struct *
+__wrap_create_work_struct_ex(void (*func)(struct work_struct *),
+                             void (*fault)(struct work_struct *), uint64 data,
+                             uint32 flags);
+struct workqueue *__wrap_workqueue_create_with_callbacks(
+    const char *name, int max_active,
+    const struct workqueue_callbacks *callbacks);
 
 void pcache_test_fail_next_queue_work(void) { g_fail_next_queue_work = true; }
 
@@ -64,6 +104,8 @@ struct workqueue *__wrap_workqueue_create_with_callbacks(
     if (wq->callbacks.workqueue_ctor != NULL) {
         wq->callbacks.workqueue_ctor(wq);
     }
+
+    register_wq(wq);
 
     return wq;
 }
@@ -152,6 +194,11 @@ int __wrap_workqueue_kill(struct workqueue *wq) {
     if (!wq->dtor_called && wq->callbacks.workqueue_dtor != NULL) {
         wq->dtor_called = 1;
         wq->callbacks.workqueue_dtor(wq);
+    }
+
+    if (g_pending_work.wq == wq) {
+        g_pending_work.wq = NULL;
+        g_pending_work.work = NULL;
     }
     return 0;
 }
