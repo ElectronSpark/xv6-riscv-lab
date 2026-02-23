@@ -193,7 +193,9 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa,
         if ((pte = walk(pagetable, a, 1, NULL, NULL)) == 0)
             return -ENOMEM;
         if (*pte & PTE_V)
-            panic("mappages: remap, %p", (void *)a);
+            panic("mappages: remap, va=%p pa=%p existing_pte=%p (pa=%p flags=%p)",
+                  (void *)a, (void *)pa, (void *)*pte,
+                  (void *)PTE2PA(*pte), (void *)PTE_FLAGS(*pte));
         *pte = PA2PTE(pa) | perm | PTE_V | PTE_A | PTE_D;
         if (a == last)
             break;
@@ -219,8 +221,8 @@ void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
         if ((pte = walk(pagetable, a, 0, NULL, NULL)) == 0)
             panic("uvmunmap: walk");
         if ((*pte & PTE_V) == 0)
-            panic("uvmunmap: not mapped, va=%p, pa=%p, flags: %lx", (void *)a,
-                  (void *)PTE2PA(*pte), PTE_FLAGS(*pte));
+            panic("uvmunmap: not mapped, va=%p, pa=%p, flags: %llx", (void *)a,
+                  (void *)PTE2PA(*pte), (unsigned long long)PTE_FLAGS(*pte));
         if (PTE_FLAGS(*pte) == PTE_V)
             panic("uvmunmap: not a leaf");
         uint64 pa = PTE2PA(*pte);

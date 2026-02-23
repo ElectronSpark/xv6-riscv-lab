@@ -1,25 +1,14 @@
 /*
- * musl.ld — Linker script for musl-linked xv6 user programs
+ * musl.ld — Linker script for musl-linked x86_64 xv6 user programs
  *
- * Differences from user.ld:
- *   - Has ENTRY(_start) for musl CRT
- *   - Includes .init/.fini sections
- *   - Includes .tdata/.tbss for TLS
- *   - Includes .init_array/.fini_array for constructors/destructors
- *   - Includes .dynamic/.got/.got.plt for dynamic linking support
- *   - Provides __bss_start and _end symbols musl expects
+ * Page-aligned segments to avoid mappages remap panics.
+ * Uses x86_64 SYSCALL convention (rax=nr, rdi/rsi/rdx/r10/r8/r9=args).
  */
 
-OUTPUT_ARCH( "riscv" )
+OUTPUT_FORMAT("elf64-x86-64")
+OUTPUT_ARCH(i386:x86-64)
 ENTRY(_start)
 
-/*
- * Standard ELF program headers.
- * FILEHDR tells the linker to include the ELF file header in the segment.
- * PHDRS tells the linker to include the program headers in the segment.
- * This ensures the ELF header + program headers are mapped into memory
- * as part of the first PT_LOAD, so the kernel can set AT_PHDR correctly.
- */
 PHDRS
 {
   text PT_LOAD FILEHDR PHDRS FLAGS(5);   /* R E — includes ELF + phdr */
@@ -29,13 +18,6 @@ PHDRS
 
 SECTIONS
 {
-  /*
-   * Base address 0x1000 = UVMBOTTOM (lowest valid user address in xv6).
-   * With FILEHDR PHDRS, the first LOAD segment extends back to include
-   * the ELF header and program headers at the segment start.
-   * The segment maps: vaddr 0x1000 = file offset 0 (ELF header).
-   * Actual code starts at 0x1000 + SIZEOF_HEADERS.
-   */
   . = 0x1000 + SIZEOF_HEADERS;
 
   .text : {
@@ -57,8 +39,6 @@ SECTIONS
   } :text
 
   .rodata : {
-    . = ALIGN(16);
-    *(.srodata .srodata.*)
     . = ALIGN(16);
     *(.rodata .rodata.*)
     *(.gnu.linkonce.r.*)
@@ -105,8 +85,6 @@ SECTIONS
   . = ALIGN(0x1000);
   .data : {
     . = ALIGN(16);
-    *(.sdata .sdata.*)
-    . = ALIGN(16);
     *(.data .data.*)
     *(.gnu.linkonce.d.*)
   } :data
@@ -130,8 +108,6 @@ SECTIONS
   . = ALIGN(0x1000);
   PROVIDE_HIDDEN (__bss_start = .);
   .bss : {
-    . = ALIGN(16);
-    *(.sbss .sbss.*)
     . = ALIGN(16);
     *(.bss .bss.*)
     *(.gnu.linkonce.b.*)

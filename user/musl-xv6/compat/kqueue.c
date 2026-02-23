@@ -15,7 +15,37 @@
 #include <errno.h>
 #include <limits.h>
 
-/* ---- raw syscall helpers via ecall ---- */
+/* ---- raw syscall helpers via syscall ---- */
+
+#if defined(__x86_64__)
+
+static inline long __syscall0(long n)
+{
+    long ret;
+    __asm__ volatile ("syscall" : "=a"(ret) : "a"(n) : "rcx", "r11", "memory");
+    return ret;
+}
+
+static inline long __syscall3(long n, long a, long b, long c)
+{
+    long ret;
+    __asm__ volatile ("syscall" : "=a"(ret)
+        : "a"(n), "D"(a), "S"(b), "d"(c)
+        : "rcx", "r11", "memory");
+    return ret;
+}
+
+static inline long __syscall4(long n, long a, long b, long c, long d)
+{
+    long ret;
+    register long r10 __asm__("r10") = d;
+    __asm__ volatile ("syscall" : "=a"(ret)
+        : "a"(n), "D"(a), "S"(b), "d"(c), "r"(r10)
+        : "rcx", "r11", "memory");
+    return ret;
+}
+
+#elif defined(__riscv)
 
 static inline long __syscall0(long n)
 {
@@ -51,6 +81,10 @@ static inline long __syscall4(long n, long a, long b, long c, long d)
         : "memory");
     return a0;
 }
+
+#else
+#error "Unsupported architecture"
+#endif
 
 #define SYS_kqueue          65
 #define SYS_kevent_register 66

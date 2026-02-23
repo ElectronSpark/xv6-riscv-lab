@@ -113,10 +113,10 @@ static const char *parse_flags(const char *fmt, int *flags) {
 }
 
 // Parse width/precision number
-static const char *parse_number(const char *fmt, int *num, va_list *ap) {
+static const char *parse_number(const char *fmt, int *num, va_list ap) {
     *num = 0;
     if (*fmt == '*') {
-        *num = va_arg(*ap, int);
+        *num = va_arg(ap, int);
         return fmt + 1;
     }
     while (*fmt >= '0' && *fmt <= '9') {
@@ -155,13 +155,13 @@ void vprintf(int fd, const char *fmt, va_list ap) {
 
         // Parse width
         int width = 0;
-        fmt = parse_number(fmt, &width, &ap);
+        fmt = parse_number(fmt, &width, ap);
 
         // Parse precision
         int precision = -1;
         if (*fmt == '.') {
             fmt++;
-            fmt = parse_number(fmt, &precision, &ap);
+            fmt = parse_number(fmt, &precision, ap);
             if (precision < 0)
                 precision = 0;
         }
@@ -393,13 +393,13 @@ int vsnprintf(char *buf, size_t size, const char *fmt, va_list ap) {
 
         // Parse width
         int width = 0;
-        fmt = parse_number(fmt, &width, &ap);
+        fmt = parse_number(fmt, &width, ap);
 
         // Parse precision
         int precision = -1;
         if (*fmt == '.') {
             fmt++;
-            fmt = parse_number(fmt, &precision, &ap);
+            fmt = parse_number(fmt, &precision, ap);
             if (precision < 0)
                 precision = 0;
         }

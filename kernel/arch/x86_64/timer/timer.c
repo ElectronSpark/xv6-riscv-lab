@@ -170,6 +170,8 @@ static void dbg_hex(uint64 v) {
  * ══════════════════════════════════════════════════════════════ */
 void timer_tick_advance(void) {
     uint64 j = __atomic_fetch_add(&jiffies_count, 1, __ATOMIC_RELAXED);
+    if ((j % 100) == 0)
+        dbg_putc('!');
     /* Print '.' every 1 second */
     if ((j % tick_hz) == 0)
         dbg_putc('.');

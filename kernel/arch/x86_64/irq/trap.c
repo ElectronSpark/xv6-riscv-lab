@@ -18,83 +18,94 @@
 #include "trapframe.h"
 #include "lapic.h"
 #include "ioapic.h"
+#include <mm/vm.h>
+#include <smp/percpu.h>
+#include "memlayout.h"
+
+extern pagetable_t kernel_pagetable;
 
 /* ── Provided by trapvec.S — table of 256 stub addresses ── */
 extern uint64 vectors[];
 
-/* ── Trampoline / signal stubs (needed by the linker; still stubs) ── */
-uint64 trampoline_ksatp = 0;
-char trampoline[4096];
-char _trampoline_data[4096];
-
+/* ── Trampoline stubs (linker compatibility) ── */
+extern uint64 trampoline_ksatp;  /* defined in trapvec.S */
+extern char trampoline[];
 void sig_trampoline(void) {}
 
+extern char userret[];
+static void (*trampoline_userret)(uint64 tf, uint64 user_cr3) = NULL;
+
 /*
- * usertrapret — return to user mode via iretq.
+ * usertrapret — return to user mode.
  *
- * Builds the iret frame on the kernel stack from the thread's utrapframe
- * and restores all GPRs before executing iretq.
- *
- * iretq pops: RIP, CS, RFLAGS, RSP, SS  (in that order from the stack).
+ * Sets up kernel state in the utrapframe, maps the trapframe page,
+ * configures per-CPU GS scratch, and returns via swapgs + iretq.
  */
 void usertrapret(void) {
     struct thread *p = current;
     struct trapframe *tf = &p->trapframe->trapframe;
 
-    /* Disable interrupts — we're manually building the iret frame. */
+    if (killed(p))
+        exit(-1);
+
+    /* Disable interrupts while setting up the return path. */
     intr_off();
 
-    /* Save kernel stack pointer for next trap entry.
-     * The TSS RSP0 will be used by the CPU when transitioning
-     * from ring 3 → ring 0. */
+    /* Store kernel state in utrapframe for next trap entry. */
     p->trapframe->kernel_sp = p->ksp;
+    p->trapframe->kernel_satp = (uint64)kernel_pagetable; /* RISC-V compat */
 
-    /*
-     * Use inline assembly to:
-     * 1. Load all GPRs from the trapframe
-     * 2. Push the 5-element iret frame (SS, RSP, RFLAGS, CS, RIP)
-     * 3. Execute iretq
+    /* Set TSS RSP0 so the CPU switches to the kernel stack on ring 3→0
+     * for IDT-based traps (exceptions, interrupts).
+     * Note: alltraps no longer uses SWAPGS — it reads the kernel CR3
+     * from trampoline_ksatp (RIP-relative in trapvec.S) instead. */
+    x86_tss_set_rsp0(p->ksp);
+
+    /* Map this CPU's trapframe page into the user page table
+     * and get the utrapframe virtual address. */
+    int cpu = cpuid();
+    uint64 trapframe_base = vm_cpu_online(p->vm, cpu);
+
+    /* Set up per-CPU scratch for the next SYSCALL entry.
+     * When SYSCALL fires, swapgs will load GS base from KERNEL_GS_BASE,
+     * giving the entry code access to trapframe_va and scratch space. */
+    uint64 cpu_local_base =
+        TRAMPOLINE_CPULOCAL + ((uint64)cpu * (uint64)sizeof(struct cpu_local));
+    uint64 *syscall_scratch_va =
+        (uint64 *)(cpu_local_base + __builtin_offsetof(struct cpu_local,
+                                                       syscall_scratch));
+    uint64 *syscall_tf_va =
+        (uint64 *)(cpu_local_base + __builtin_offsetof(struct cpu_local,
+                                                       syscall_trapframe_va));
+    *syscall_tf_va = trapframe_base;
+
+    /* Seed SWAPGS state for SYSCALL entry path.
      *
-     * We pass the trapframe pointer in a register and do everything
-     * from assembly to avoid the compiler clobbering state.
+     * The trampoline (userret) executes SWAPGS before IRETQ:
+     *   - KERNEL_GS_BASE → GS_BASE (user gets 0)
+     *   - GS_BASE → KERNEL_GS_BASE (kernel gets scratch pointer)
+     *
+     * So on next SYSCALL entry, swapgs loads GS_BASE from
+     * KERNEL_GS_BASE, giving access to per-CPU scratch/trapframe.
+     *
+     * IDT-based traps (alltraps) do NOT use SWAPGS — they read the
+     * kernel CR3 from trampoline_ksatp (RIP-relative in trapvec.S).
      */
-    asm volatile(
-        /* Push iret frame: SS, RSP, RFLAGS, CS, RIP */
-        "pushq %[ss]\n\t"
-        "pushq %[rsp]\n\t"
-        "pushq %[rflags]\n\t"
-        "pushq %[cs]\n\t"
-        "pushq %[rip]\n\t"
+    wrmsr(MSR_KERNEL_GS_BASE, 0);
+    wrmsr(MSR_GS_BASE, (uint64)syscall_scratch_va);
 
-        /* Load GPRs from trapframe.
-         * rdi holds tf pointer; we load it last since we need it. */
-        "movq 0x00(%[tf]), %%r15\n\t"
-        "movq 0x08(%[tf]), %%r14\n\t"
-        "movq 0x10(%[tf]), %%r13\n\t"
-        "movq 0x18(%[tf]), %%r12\n\t"
-        "movq 0x20(%[tf]), %%r11\n\t"
-        "movq 0x28(%[tf]), %%r10\n\t"
-        "movq 0x30(%[tf]), %%r9\n\t"
-        "movq 0x38(%[tf]), %%r8\n\t"
-        "movq 0x40(%[tf]), %%rbp\n\t"
-        /* skip rdi (0x48) — load last */
-        "movq 0x50(%[tf]), %%rsi\n\t"
-        "movq 0x58(%[tf]), %%rdx\n\t"
-        "movq 0x60(%[tf]), %%rcx\n\t"
-        "movq 0x68(%[tf]), %%rbx\n\t"
-        "movq 0x70(%[tf]), %%rax\n\t"
-        "movq 0x48(%[tf]), %%rdi\n\t"
+    /* Ensure user RFLAGS is valid and has IF set.
+     * Bit 1 in RFLAGS is architecturally fixed to 1.
+     */
+    tf->rflags |= (0x200 | 0x2);
 
-        "iretq\n\t"
-        :
-        : [tf]     "D" (tf),
-          [ss]     "r" ((uint64)(SEG_UDATA | DPL_USER)),
-          [rsp]    "r" (tf->rsp),
-          [rflags] "r" (tf->rflags | 0x200),  /* ensure IF set */
-          [cs]     "r" ((uint64)(SEG_UCODE | DPL_USER)),
-          [rip]    "r" (tf->rip)
-        : "memory"
-    );
+    if (trampoline_userret == NULL)
+        panic("usertrapret: trampoline_userret not initialized");
+
+    if (p->vm == NULL || p->vm->pagetable == NULL)
+        panic("usertrapret: missing user pagetable");
+
+    trampoline_userret(trapframe_base, (uint64)p->vm->pagetable);
 
     __builtin_unreachable();
 }
@@ -157,27 +168,55 @@ static void pic_init(void) {
 }
 
 /* ── IDT ── */
-static struct idt_gate idt[IDT_ENTRIES] __attribute__((aligned(16)));
+static struct idt_gate idt[IDT_ENTRIES] __attribute__((aligned(4096)));
 static struct x86_desc_ptr idtr;
 
 void x86_idt_init(void) {
+    extern void vector0(void);
+    uint64 trapvec_page0 = PGROUNDDOWN((uint64)vector0);
     for (int i = 0; i < IDT_ENTRIES; i++)
-        idt_set_gate(&idt[i], vectors[i], SEG_KCODE, GATE_INTERRUPT, 0);
+        idt_set_gate(&idt[i],
+                     TRAPVEC_ALIAS_BASE + (vectors[i] - trapvec_page0),
+                     SEG_KCODE, GATE_INTERRUPT, 1);
 
     idtr.limit = sizeof(idt) - 1;
     idtr.base  = (uint64)idt;
     asm volatile("lidt %0" : : "m"(idtr));
 }
 
+void x86_idt_remap(uint64 idt_va)
+{
+    idtr.base = idt_va;
+    asm volatile("lidt %0" : : "m"(idtr));
+}
+
+uint64 x86_idt_page_pa(void)
+{
+    return (uint64)idt;
+}
+
 /* ── arch_trap_init / arch_trap_init_hart ── */
 
 void arch_trap_init(void) {
+    trampoline_userret =
+        (void *)(TRAMPOLINE + ((uint64)userret - (uint64)trampoline));
     x86_gdt_init();
     x86_idt_init();
     x86_syscall_init();
+
+    /*
+     * Remap GDT+TSS and IDT to high-canonical addresses (CPU_ENTRY_AREA)
+     * so they are accessible when running under user CR3.
+     * iretq reads the GDT to validate CS/SS, and the IDT/TSS must be
+     * reachable for fault delivery during ring transitions.
+     * The physical pages were already mapped in arch_vm_init().
+     */
+    x86_gdt_remap(CPU_ENTRY_GDT);
+    x86_idt_remap(CPU_ENTRY_IDT);
 }
 
 void arch_trap_init_hart(void) {
+    x86_tss_set_ist1(mycpu()->intr_sp);
     asm volatile("lidt %0" : : "m"(idtr));
 }
 
@@ -309,13 +348,85 @@ extern int do_device_irq(int hw_irq);
 
 void x86_trap_handler(struct trapframe *tf) {
     uint64 vec = tf->trapno;
+    int from_user = ((tf->cs & 3) == 3);
+    static int user_trap_marked = 0;
 
+    if (from_user && !user_trap_marked) {
+        asm volatile("outb %0, %1" : : "a"((uint8)'U'), "Nd"(0xE9));
+        user_trap_marked = 1;
+    }
 
+    /*
+     * For user-mode traps, copy the stack-based trapframe into the thread's
+     * utrapframe so that syscall arg fetching and other code that reads
+     * p->trapframe->trapframe works correctly.
+     */
+    if (from_user && current && current->trapframe) {
+        current->trapframe->trapframe = *tf;
+    }
+
+    /*
+     * Page fault (#PF): demand paging for user-mode faults.
+     * Error code bits: [0]=P (present), [1]=W (write), [2]=U (user).
+     */
+    if (vec == 14) {
+        uint64 cr2 = read_cr2();
+
+        if (from_user && current && current->vm) {
+            /*
+             * User-mode page fault — attempt demand paging.
+             * x86 PF error code bit 1 = write fault.
+             */
+            int is_write = (tf->err & 0x2);
+            uint64 prot = VMA_FLAG_USER | (is_write ? PROT_WRITE : PROT_READ);
+
+            /* Try growing the stack first */
+            vm_try_growstack(current->vm, cr2);
+
+            vm_rlock(current->vm);
+            vma_t *vma = vm_find_area(current->vm, cr2);
+            if (vma != NULL && vma_validate(vma, cr2, 1, prot) == 0) {
+                vm_runlock(current->vm);
+                return; /* fault resolved */
+            }
+            vm_runlock(current->vm);
+
+            /* Could not resolve — kill the process */
+            printf("pid %d %s: fatal page fault cr2=0x%lx err=0x%lx rip=0x%lx\n",
+                   current->pid, current->name, cr2, tf->err, tf->rip);
+            assert(current->pid != 1, "init exiting");
+            kill(current->pid, SIGSEGV);
+            return;
+        }
+
+        /* Kernel-mode page fault — unrecoverable */
+        dbg_puts("\n*** KERNEL PAGE FAULT\n");
+        dbg_puts("  cr2=0x"); dbg_hex(cr2);
+        dbg_puts(" err=0x"); dbg_hex(tf->err);
+        dbg_puts(" rip=0x"); dbg_hex(tf->rip);
+        dbg_puts("\n");
+        printf("\n*** KERNEL PAGE FAULT: cr2=0x%lx err=0x%lx rip=0x%lx\n",
+               cr2, tf->err, tf->rip);
+        *(uint64 *)((uint64)tf - 8) = tf->rip;
+        panic_disable_bt();
+        panic("kernel page fault");
+    }
 
     if (vec < 32) {
-        /* CPU exception */
+        /* CPU exception (not #PF) */
         const char *name = exception_names[vec];
 
+        if (from_user && current) {
+            /* User-mode exception — deliver SIGSEGV / SIGFPE / etc. */
+            printf("pid %d %s: exception %ld (%s) rip=0x%lx err=0x%lx\n",
+                   current->pid, current->name, vec,
+                   name ? name : "???", tf->rip, tf->err);
+            assert(current->pid != 1, "init exiting");
+            kill(current->pid, SIGSEGV);
+            return;
+        }
+
+        /* Kernel exception */
         dbg_puts("\n*** EXCEPTION: ");
         dbg_puts(name ? name : "???");
         dbg_puts("\n  vector=0x"); dbg_hex(vec);
@@ -340,14 +451,6 @@ void x86_trap_handler(struct trapframe *tf) {
         dbg_puts(" r13=0x");      dbg_hex(tf->r13);
         dbg_puts(" r14=0x");      dbg_hex(tf->r14);
         dbg_puts(" r15=0x");      dbg_hex(tf->r15);
-
-        if (vec == 14) {
-            uint64 cr2 = read_cr2();
-            dbg_puts("\n  cr2=0x"); dbg_hex(cr2);
-            printf("\n*** PAGE FAULT: cr2=0x%lx err=0x%lx rip=0x%lx\n",
-                   cr2, tf->err, tf->rip);
-        }
-
         dbg_puts("\n");
         printf("\n*** EXCEPTION %ld: %s\n", vec, name ? name : "???");
         printf("  err=0x%lx  rip=0x%lx  cs=0x%lx\n",
@@ -388,8 +491,38 @@ void x86_trap_handler(struct trapframe *tf) {
     } else if (vec == LAPIC_SPURIOUS_VEC) {
         /* Spurious interrupt — do NOT send EOI */
 
-    } else if (vec == 0x80) {
-        dbg_puts("[x86] INT 0x80 syscall (stub)\n");
     }
-    /* Unknown vectors: silently ignored */
+
+    /*
+     * User-mode traps: return through usertrapret so that
+     * the trapframe page, GS scratch, and TSS are set up
+     * for the next entry.
+     */
+    if (from_user && current) {
+        usertrapret();  /* noreturn */
+    }
+    /* Kernel traps return here and fall back to trapret/iretq. */
+}
+
+/*
+ * usertrap_syscall — C-level SYSCALL handler.
+ *
+ * Called from syscall_entry (trapvec.S) after registers have been
+ * saved into the trapframe page.  Because the trapframe page IS
+ * the physical page containing p->trapframe, the saved registers
+ * are already in p->trapframe->trapframe.
+ */
+void usertrap_syscall(void) {
+    struct thread *p = current;
+    (void)p;
+    static int usertrap_syscall_marked = 0;
+
+    if (!usertrap_syscall_marked) {
+        asm volatile("outb %0, %1" : : "a"((uint8)'S'), "Nd"(0xE9));
+        usertrap_syscall_marked = 1;
+    }
+
+    intr_on();
+    syscall();
+    usertrapret();  /* noreturn */
 }

@@ -35,12 +35,23 @@ extern uint64 __physical_total_pages;
 
 #define UVMBOTTOM 0x1000L
 
-#define TRAMPOLINE (MAXVA - PGSIZE)
+#define TRAMPOLINE (MAXVA & ~(PGSIZE - 1))
 #define TRAMPOLINE_DATA (TRAMPOLINE - PGSIZE)
 #define TRAMPOLINE_CPULOCAL (TRAMPOLINE - (PGSIZE * 2))
 #define SIG_TRAMPOLINE (TRAMPOLINE - (PGSIZE * 3))
 
-#define KIRQSTACKTOP (MAXVA - (PGSIZE << 6))
+/*
+ * CPU entry area: GDT+TSS (page 0) and IDT (page 1) mapped at
+ * high-canonical addresses accessible under user CR3 (via PML4[511]).
+ * This is needed because iretq must read the GDT to validate CS/SS,
+ * and the IDT/TSS must be reachable for fault delivery.
+ */
+#define TRAPVEC_ALIAS_BASE (SIG_TRAMPOLINE - (2 * PGSIZE))
+#define CPU_ENTRY_AREA     (TRAPVEC_ALIAS_BASE - (2 * PGSIZE))
+#define CPU_ENTRY_GDT      CPU_ENTRY_AREA
+#define CPU_ENTRY_IDT      (CPU_ENTRY_AREA + PGSIZE)
+
+#define KIRQSTACKTOP (CPU_ENTRY_AREA - ((PGSIZE << 6) - PGSIZE))
 #define KIRQSTACK(hartid)                                                      \
 	(KIRQSTACKTOP - ((hartid) + 1) * (INTR_STACK_SIZE << 1))
 
@@ -48,7 +59,13 @@ extern uint64 __physical_total_pages;
 #error "NCPU too large"
 #endif
 
-#define UVMTOP (TRAMPOLINE & ~((1UL << 30) - 1))
+/*
+ * x86_64 user virtual address space ends at the top of low canonical range.
+ * With 4-level paging (48-bit VA): user space is 0 .. 0x00007FFFFFFFFFFF.
+ * TRAMPOLINE, SIG_TRAMPOLINE, etc. live in the high canonical range and
+ * are shared via PML4[511] — they are NOT part of the user VA region.
+ */
+#define UVMTOP 0x0000800000000000UL
 #define TRAPFRAME (UVMTOP - (PGSIZE << 6))
 #define TRAPFRAME_POFFSET                                                      \
 	((PAGE_SIZE - sizeof(struct thread) - sizeof(struct utrapframe) - 16) &    \

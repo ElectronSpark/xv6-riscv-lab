@@ -53,6 +53,14 @@ static int unsetenv(const char *name) {
 }
 
 static int exec_with_env(const char *path, char **argv, char **envp) {
+#if defined(__x86_64__)
+    long ret;
+    __asm__ volatile("syscall"
+                 : "=a"(ret)
+                 : "a"((long)SYS_exec), "D"(path), "S"(argv), "d"(envp)
+                 : "rcx", "r11", "memory");
+    return (int)ret;
+#elif defined(__riscv)
     register uint64 arg0 asm("a0") = (uint64)path;
     register uint64 arg1 asm("a1") = (uint64)argv;
     register uint64 arg2 asm("a2") = (uint64)envp;
@@ -62,6 +70,7 @@ static int exec_with_env(const char *path, char **argv, char **envp) {
                  : "r"(arg1), "r"(arg2), "r"(syscall_num)
                  : "memory");
     return (int)arg0;
+#endif
 }
 #endif
 

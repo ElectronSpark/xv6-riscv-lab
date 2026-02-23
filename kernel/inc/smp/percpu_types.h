@@ -18,6 +18,8 @@ struct cpu_local {
     int intena;                 // Were interrupts enabled before push_off()?
     uint64 flags;               // CPU flags
     uint64 rcu_timestamp;       // RCU timestamp - updated before context switch
+    uint64 syscall_scratch;     // SWAPGS scratch (gs:0 on SYSCALL entry)
+    uint64 syscall_trapframe_va;// trapframe VA for SYSCALL entry (gs:8)
 } __ALIGNED_CACHELINE;
 
 #endif /* __KERNEL_PERCPU_TYPES_H */

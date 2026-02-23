@@ -179,15 +179,24 @@ int kqueue(void);
 int kevent_register(int kqfd, struct kevent *changelist, int nchanges);
 int kevent_wait(int kqfd, struct kevent *eventlist, int nevents, int timeout_ms);
 
-// gdb support — execute EBREAK to pause and wait for a debugger.
+// gdb support — execute breakpoint to pause and wait for a debugger.
 // The kernel prints the PID and connection instructions.
-// a0 flag: 0 = don't stop on exec, 1 = stop at entry point after exec.
+// arg0 flag: 0 = don't stop on exec, 1 = stop at entry point after exec.
+#if defined(__x86_64__)
+static inline void waitgdb(void) {
+	asm volatile("xorl %%edi, %%edi\n\tint3" ::: "rdi", "memory");
+}
+static inline void waitgdb_stopentry(void) {
+	asm volatile("movl $1, %%edi\n\tint3" ::: "rdi", "memory");
+}
+#elif defined(__riscv)
 static inline void waitgdb(void) {
 	asm volatile("li a0, 0\n\tebreak" ::: "a0", "memory");
 }
 static inline void waitgdb_stopentry(void) {
 	asm volatile("li a0, 1\n\tebreak" ::: "a0", "memory");
 }
+#endif
 
 // ulib.c
 char *strcpy(char *, const char *);

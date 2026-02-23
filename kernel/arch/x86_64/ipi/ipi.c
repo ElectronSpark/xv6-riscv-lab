@@ -1,6 +1,8 @@
 #include "types.h"
 #include "param.h"
 #include "string.h"
+#include "x86.h"
+#include "memlayout.h"
 #include "smp/percpu.h"
 #include "smp/ipi.h"
 
@@ -40,11 +42,23 @@ int ipi_send_all(int reason) {
 void cpus_init(void) { memset(cpus, 0, sizeof(cpus)); }
 
 void mycpu_init(uint64 hartid, bool trampoline) {
-    (void)trampoline;
     if (hartid >= NCPU) {
         hartid = 0;
     }
-    __x86_tp = (uint64)&cpus[hartid];
+
+    if (!trampoline) {
+        /* Early boot: before high shared mappings, use identity VA. */
+        __x86_tp = (uint64)&cpus[hartid];
+    } else {
+        /*
+         * After arch_vm_init(), switch to high shared alias so mycpu()
+         * remains valid in both kernel and user page tables.
+         */
+        uint64 cpus_base = PGROUNDDOWN((uint64)cpus);
+        uint64 cpu_off = (uint64)&cpus[hartid] - cpus_base;
+        __x86_tp = TRAMPOLINE_CPULOCAL + cpu_off;
+    }
+
     cpu_active_mask |= (1UL << hartid);
 }
 

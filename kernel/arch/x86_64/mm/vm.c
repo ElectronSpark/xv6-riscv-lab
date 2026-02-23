@@ -13,9 +13,13 @@
 
 #include "types.h"
 #include "arch/vm.h"
+#include "x86.h"
 #include "dev/fdt.h"     /* platform_info */
 #include "defs.h"
 #include "printf.h"
+#include "memlayout.h"
+#include "seg.h"
+#include <smp/percpu_types.h>
 
 /* ── x86_64 page table entry bit definitions ── */
 #define X86_PTE_P       (1ULL << 0)     /* Present */
@@ -46,6 +50,21 @@ static uint64 kpml4[X86_PTE_PER_TABLE] __attribute__((aligned(X86_PAGE_SIZE)));
 static uint64 kpdpt[X86_PTE_PER_TABLE] __attribute__((aligned(X86_PAGE_SIZE)));
 static uint64 kpds[MAX_PDS][X86_PTE_PER_TABLE] __attribute__((aligned(X86_PAGE_SIZE)));
 static int n_pds_used;
+
+/*
+ * Trap-entry aliases: keep separate from TRAMPOLINE_CPULOCAL so that
+ * TRAMPOLINE_CPULOCAL can be dedicated to shared per-CPU data (mycpu).
+ */
+
+extern void vector0(void);
+extern void syscall_entry(void);
+extern char trampoline[];
+extern void sig_trampoline(void);
+extern struct cpu_local cpus[NCPU];
+extern pagetable_t kernel_pagetable;
+extern uint64 trampoline_ksatp;  /* defined in trapvec.S */
+
+static uint8 irq_stacks[NCPU][INTR_STACK_SIZE] __attribute__((aligned(PGSIZE)));
 
 /* ── debugcon helpers ── */
 static inline void vm_outb(uint16 port, uint8 val) {
@@ -136,6 +155,96 @@ void arch_vm_init(void)
     vm_slab_init();
     vm_debug_puts("[xv6 x86_64] arch_vm_init: building kernel page tables\n");
     kvm_build();
+    kernel_pagetable = (pagetable_t)kpml4;
+
+    /*
+    * Map trap-entry text (vector stubs + alltraps + syscall_entry)
+    * into the shared high virtual window under PX(3, TRAMPOLINE).
+     *
+     * We currently need two pages to cover vector0..syscall_entry.
+     */
+    {
+        uint64 trapvec_page0 = PGROUNDDOWN((uint64)vector0);
+        uint64 trapvec_page1 = trapvec_page0 + PGSIZE;
+        if (mappages((pagetable_t)kpml4, TRAPVEC_ALIAS_BASE, PGSIZE,
+                     trapvec_page0, PTE_R) != 0)
+            panic("arch_vm_init: trapvec alias map page0 failed");
+        if (mappages((pagetable_t)kpml4, TRAPVEC_ALIAS_BASE + PGSIZE, PGSIZE,
+                     trapvec_page1, PTE_R) != 0)
+            panic("arch_vm_init: trapvec alias map page1 failed");
+
+        if (mappages((pagetable_t)kpml4, TRAMPOLINE, PGSIZE,
+                 PGROUNDDOWN((uint64)trampoline), PTE_R) != 0)
+            panic("arch_vm_init: trampoline map failed");
+
+        /*
+         * Store kernel CR3 in trampoline_ksatp (defined in trapvec.S).
+         * Assembly accesses it RIP-relative from the high alias;
+         * C code accesses through the identity-mapped address.
+         */
+        trampoline_ksatp = (uint64)kpml4;
+
+        if (mappages((pagetable_t)kpml4, SIG_TRAMPOLINE, PGSIZE,
+                     PGROUNDDOWN((uint64)sig_trampoline),
+                     PTE_R | PTE_U) != 0)
+            panic("arch_vm_init: sig trampoline map failed");
+
+        {
+            pte_t *pml4e = &kpml4[PX(3, SIG_TRAMPOLINE)];
+            if ((*pml4e & PTE_V) == 0)
+                panic("arch_vm_init: sig trampoline missing pml4e");
+            *pml4e |= PTE_U;
+
+            pagetable_t pdpt = (pagetable_t)PTE2PA(*pml4e);
+            pte_t *pdpte = &pdpt[PX(2, SIG_TRAMPOLINE)];
+            if ((*pdpte & PTE_V) == 0)
+                panic("arch_vm_init: sig trampoline missing pdpte");
+            *pdpte |= PTE_U;
+
+            pagetable_t pd = (pagetable_t)PTE2PA(*pdpte);
+            pte_t *pde = &pd[PX(1, SIG_TRAMPOLINE)];
+            if ((*pde & PTE_V) == 0)
+                panic("arch_vm_init: sig trampoline missing pde");
+            *pde |= PTE_U;
+
+            pagetable_t pt = (pagetable_t)PTE2PA(*pde);
+            pte_t *pte = &pt[PX(0, SIG_TRAMPOLINE)];
+            if ((*pte & PTE_V) == 0)
+                panic("arch_vm_init: sig trampoline missing pte");
+            *pte |= PTE_U;
+        }
+
+        uint64 cpus_base = PGROUNDDOWN((uint64)cpus);
+        if (PGROUNDUP((uint64)cpus + sizeof(cpus)) - cpus_base > PGSIZE)
+            panic("arch_vm_init: cpus[] exceeds one page");
+        if (mappages((pagetable_t)kpml4, TRAMPOLINE_CPULOCAL, PGSIZE,
+                     cpus_base, PTE_R | PTE_W) != 0)
+            panic("arch_vm_init: cpu-local map failed");
+
+        for (int i = 0; i < NCPU; i++) {
+            uint64 stack_pa = (uint64)&irq_stacks[i][0];
+            uint64 stack_va = KIRQSTACK(i);
+            if (mappages((pagetable_t)kpml4, stack_va, INTR_STACK_SIZE,
+                         stack_pa, PTE_R | PTE_W) != 0)
+                panic("arch_vm_init: irq stack map failed");
+
+            cpus[i].intr_stacks = (void **)stack_va;
+            cpus[i].intr_sp = stack_va + INTR_STACK_SIZE;
+        }
+
+        /*
+         * CPU entry area: map GDT+TSS and IDT at high-canonical addresses
+         * so they are accessible when running under user CR3.
+         * iretq reads the GDT to validate CS/SS; the IDT/TSS must be
+         * reachable for fault delivery during the transition.
+         */
+        if (mappages((pagetable_t)kpml4, CPU_ENTRY_GDT, PGSIZE,
+                     x86_gdt_page_pa(), PTE_R | PTE_W) != 0)
+            panic("arch_vm_init: gdt page map failed");
+        if (mappages((pagetable_t)kpml4, CPU_ENTRY_IDT, PGSIZE,
+                     x86_idt_page_pa(), PTE_R) != 0)
+            panic("arch_vm_init: idt page map failed");
+    }
 
     vm_debug_puts("[xv6 x86_64] arch_vm_init: PDs used=");
     vm_debug_hex((uint64)n_pds_used);
@@ -154,8 +263,7 @@ void arch_vm_init_hart(void)
 
 int arch_vm_map(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
 {
-    (void)pagetable; (void)va; (void)size; (void)pa; (void)perm;
-    return 0;
+    return mappages(pagetable, va, size, pa, perm);
 }
 
 void arch_tlb_flush(void)
@@ -176,8 +284,11 @@ void arch_tlb_flush(void)
 #include <mm/vm.h>
 #include <mm/page.h>
 #include <smp/atomic.h>
+#include <smp/percpu.h>
 #include "string.h"
 #include "errno.h"
+#include "proc/thread.h"
+#include <mm/memlayout.h>
 
 pagetable_t kernel_pagetable;
 
@@ -194,57 +305,142 @@ pagetable_t uvmcreate(void)
     if (pagetable == 0)
         return 0;
     __builtin_memset(pagetable, 0, PGSIZE);
+
+    /*
+     * Copy only the PML4 entry that contains the high canonical
+     * trampoline/trapframe window (TRAMPOLINE*, KIRQSTACK*).
+     *
+     * Do not copy PML4[0] (kernel identity map), so user page tables
+     * never reach identity-mapped kernel low addresses.
+     */
+    pagetable[PX(3, TRAMPOLINE)] = kpml4[PX(3, TRAMPOLINE)];
+
     return pagetable;
 }
 
-void freewalk(pagetable_t pagetable)
+/*
+ * Recursively free page-table pages.
+ * All leaf mappings must already have been removed.
+ *
+ * On x86_64, PTE_V == PTE_R (both are bit 0), so we cannot distinguish
+ * leaf from non-leaf entries using R/W/X flags as RISC-V does.
+ * Instead we track the page-table level:
+ *   level 3 = PML4, 2 = PDPT, 1 = PD — entries are non-leaf (ignoring large pages)
+ *   level 0 = PT — entries are leaf
+ *
+ * skip_idx: PML4 index to skip (shared kernel mapping, e.g. PML4[511]).
+ */
+static void __freewalk(pagetable_t pagetable, int level, int skip_idx)
 {
     for (int i = 0; i < 512; i++) {
+        if (i == skip_idx)
+            continue;
         pte_t pte = pagetable[i];
-        if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+        if (!(pte & PTE_V))
+            continue;
+        if (level > 0) {
+            /* Non-leaf: recurse into next level page table. */
             uint64 child = PTE2PA(pte);
-            freewalk((pagetable_t)child);
+            __freewalk((pagetable_t)child, level - 1, -1);
             pagetable[i] = 0;
-        } else if (pte & PTE_V) {
+        } else {
+            /* Level 0 (PT): this is a leaf — should have been cleared. */
             panic("freewalk: leaf");
         }
     }
     pgtab_free((void *)pagetable);
 }
 
+void freewalk(pagetable_t pagetable)
+{
+    __freewalk(pagetable, 3, PX(3, TRAMPOLINE));
+}
+
 void uvmfree(pagetable_t pagetable, uint64 sz)
 {
     (void)sz;
+    if (pagetable != 0) {
+        /* Clear the shared kernel PML4 entry before freewalk so the
+         * kernel page tables are not accidentally freed. */
+        pagetable[PX(3, TRAMPOLINE)] = 0;
+    }
     freewalk(pagetable);
 }
 
-/* ── Trampoline / trapframe (not yet implemented on x86_64) ── */
+/* ── Trampoline / trapframe mapping ── */
 
+/*
+ * arch_vm_setup_trampoline — set up the trapframe PTE tracking
+ * for a new process VM.
+ *
+ * Walks to the first TRAPFRAME VA to create intermediate page tables,
+ * then stores the leaf page table pointer in vm->trapframe_pte.
+ * All 64 per-CPU trapframe pages share the same leaf page table
+ * (they're within a single 2MB region).
+ */
 int arch_vm_setup_trampoline(vm_t *vm)
 {
-    (void)vm;
+    if (vm == NULL || vm->pagetable == NULL)
+        return -1;
+
+    /* Walk to TRAPFRAME VA, alloc=1 to create intermediate page tables. */
+    pte_t *pte = walk(vm->pagetable, TRAPFRAME, 1, NULL, NULL);
+    if (pte == NULL)
+        return -1;
+
+    /* Store the leaf page table base (the page containing this PTE). */
+    vm->trapframe_pte = (pte_t *)PGROUNDDOWN((uint64)pte);
     return 0;
 }
 
-void arch_vm_teardown_trampoline(vm_t *vm) { (void)vm; }
+void arch_vm_teardown_trampoline(vm_t *vm)
+{
+    if (vm == NULL || vm->pagetable == NULL || vm->trapframe_pte == NULL)
+        return;
+    /* Clear all trapframe PTEs (don't free phys pages — they belong
+     * to kernel stacks, not to this VM). */
+    for (int i = 0; i < NCPU; i++) {
+        int pte_idx = PX(0, TRAPFRAME + (i * PGSIZE));
+        vm->trapframe_pte[pte_idx] = 0;
+    }
+}
 
-/* ── Per-CPU trapframe PTE management (stub) ── */
+/* ── Per-CPU trapframe PTE management ── */
 
+/*
+ * vm_cpu_online — mark a CPU as using this VM and map the current
+ *                 thread's trapframe page into the user page table.
+ *
+ * Called from usertrapret() before returning to user mode.
+ * Returns the utrapframe virtual address (user VA) for this CPU.
+ */
 uint64 vm_cpu_online(vm_t *vm, int cpu)
 {
-    (void)vm; (void)cpu;
-    return 0;
+    struct thread *p = current;
+    uint64 trapframe_poffset = TRAPFRAME_POFFSET;
+
+    if (vm->trapframe_pte != NULL && p != NULL && p->trapframe != NULL) {
+        int pte_idx = PX(0, TRAPFRAME + (cpu * PGSIZE));
+        uint64 trapframe_pa = PGROUNDDOWN((uint64)p->trapframe);
+        vm->trapframe_pte[pte_idx] =
+            PA2PTE(trapframe_pa) | PTE_R | PTE_W | PTE_V | PTE_A | PTE_D;
+        /* Ensure PTE write is visible before page table switch. */
+        asm volatile("" ::: "memory");
+        /* Compute actual offset of utrapframe within the page. */
+        trapframe_poffset = (uint64)p->trapframe & (PGSIZE - 1);
+    }
+    atomic_or(&vm->cpumask, (1ULL << cpu));
+    return TRAPFRAME + (cpu * PGSIZE) + trapframe_poffset;
 }
 
 void vm_cpu_offline(vm_t *vm, int cpu)
 {
-    (void)vm; (void)cpu;
+    atomic_and(&vm->cpumask, ~(1ULL << cpu));
 }
 
 cpumask_t vm_get_cpumask(vm_t *vm)
 {
-    (void)vm;
-    return 0;
+    return vm->cpumask;
 }
 
 /* ── Page-table dump (x86_64 4-level format — minimal stub) ── */

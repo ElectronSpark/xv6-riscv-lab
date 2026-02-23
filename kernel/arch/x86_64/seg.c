@@ -8,12 +8,21 @@
 
 #include "types.h"
 #include "seg.h"
+#include "x86.h"
+#include "memlayout.h"
 
-/* ── Per-CPU TSS ── */
-static struct tss64 cpu_tss __attribute__((aligned(16)));
+/*
+ * GDT + TSS are co-located in a single page-aligned page so that
+ * the whole page can be mapped at a high-canonical VA (CPU_ENTRY_GDT)
+ * accessible under both kernel and user CR3.
+ */
+static struct {
+    uint64          gdt[NSEGS];
+    struct tss64    tss;
+} __attribute__((aligned(4096))) cpu_entry_gdt_page;
 
-/* ── GDT (8 entries: null, kcode, kdata, ucode32, udata, ucode64, tss_lo, tss_hi) ── */
-static uint64 gdt[NSEGS] __attribute__((aligned(16)));
+#define gdt       (cpu_entry_gdt_page.gdt)
+#define cpu_tss   (cpu_entry_gdt_page.tss)
 
 /* ── GDTR pseudo-descriptor ── */
 static struct x86_desc_ptr gdtr;
@@ -108,9 +117,62 @@ void x86_gdt_init(void)
     asm volatile("ltr %w0" : : "r"((uint16)SEG_TSS));
 }
 
+void x86_gdt_remap(uint64 gdt_va)
+{
+    /* Compute offset of TSS within the page */
+    uint64 tss_offset = (uint64)&cpu_tss - (uint64)&gdt[0];
+    uint64 tss_va = gdt_va + tss_offset;
+
+    /* Reinstall TSS descriptor with the high-canonical TSS VA */
+    struct tss_desc *td = (struct tss_desc *)&gdt[6];
+    td->base_lo   = (uint16)(tss_va & 0xFFFF);
+    td->base_mid  = (uint8)((tss_va >> 16) & 0xFF);
+    td->base_mid2 = (uint8)((tss_va >> 24) & 0xFF);
+    td->base_hi   = (uint32)(tss_va >> 32);
+
+    /* Update GDTR to use the high-canonical VA */
+    gdtr.base = gdt_va;
+    asm volatile("lgdt %0" : : "m"(gdtr));
+
+    /* Reload CS via far return */
+    asm volatile(
+        "pushq %[kcs]\n\t"
+        "leaq 1f(%%rip), %%rax\n\t"
+        "pushq %%rax\n\t"
+        "lretq\n\t"
+        "1:\n\t"
+        : : [kcs] "i"((uint64)SEG_KCODE) : "rax", "memory"
+    );
+
+    /* Reload data segments */
+    asm volatile(
+        "movw %w[kds], %%ds\n\t"
+        "movw %w[kds], %%es\n\t"
+        "movw %w[kds], %%ss\n\t"
+        "movw %w[null], %%fs\n\t"
+        "movw %w[null], %%gs\n\t"
+        : : [kds] "r"((uint16)SEG_KDATA), [null] "r"((uint16)SEG_NULL)
+        : "memory"
+    );
+
+    /* Reload TSS (clear busy bit first by reinstalling as available) */
+    td->access = SEG_P | SEG_DPL(DPL_KERNEL) | TSS_TYPE_AVAIL;
+    asm volatile("ltr %w0" : : "r"((uint16)SEG_TSS));
+}
+
+uint64 x86_gdt_page_pa(void)
+{
+    return (uint64)&cpu_entry_gdt_page;
+}
+
 void x86_tss_set_rsp0(uint64 rsp0)
 {
     cpu_tss.rsp0 = rsp0;
+}
+
+void x86_tss_set_ist1(uint64 ist1)
+{
+    cpu_tss.ist1 = ist1;
 }
 
 void x86_syscall_init(void)
@@ -131,10 +193,13 @@ void x86_syscall_init(void)
 
     /*
      * LSTAR = kernel entry point for SYSCALL.
-     * Will be set to the actual syscall handler later; for now point to a
-     * placeholder that just does SYSRETQ (we haven't built the handler yet).
      */
-    /* wrmsr(MSR_LSTAR, (uint64)syscall_entry); */
+    extern void vector0(void);
+    extern void syscall_entry(void);
+    uint64 trapvec_page0 = PGROUNDDOWN((uint64)vector0);
+    uint64 syscall_lstar =
+        TRAPVEC_ALIAS_BASE + ((uint64)syscall_entry - trapvec_page0);
+    wrmsr(MSR_LSTAR, syscall_lstar);
 
     /*
      * SFMASK = RFLAGS bits to clear on SYSCALL.

@@ -11,12 +11,29 @@ set(USER_INITCODE_OBJ ${USER_INITCODE_BIN}.out)
 set(USER_INITCODE_DECOMPILED ${USER_INITCODE_BIN}.asm)
 set(LIB_USERLIB userlib)
 
-set_source_files_properties(${USER_DIR}/initcode.S PROPERTIES LANGUAGE C)
-add_executable(${USER_INITCODE_OBJ} ${USER_DIR}/initcode.S)
-target_compile_options(${USER_INITCODE_OBJ} PRIVATE
-    -march=rv64g -nostdinc -I${CMAKE_SOURCE_DIR} -I${KERNEL_DIR})
-set_target_properties(${USER_INITCODE_OBJ} PROPERTIES LINK_FLAGS
-    "-N -e start -Ttext 0x1000")
+if(ARCH STREQUAL "x86_64")
+    set(USER_LINKER_SCRIPT ${USER_DIR}/x86_64/user.ld)
+    set(USER_INITCODE_SRC ${USER_DIR}/x86_64/initcode.S)
+    set(USER_USYS_PL ${USER_DIR}/x86_64/usys_x86_64.pl)
+else()
+    set(USER_LINKER_SCRIPT ${USER_DIR}/user.ld)
+    set(USER_INITCODE_SRC ${USER_DIR}/initcode.S)
+    set(USER_USYS_PL ${USER_DIR}/usys.pl)
+endif()
+
+set_source_files_properties(${USER_INITCODE_SRC} PROPERTIES LANGUAGE C)
+add_executable(${USER_INITCODE_OBJ} ${USER_INITCODE_SRC})
+if(ARCH STREQUAL "x86_64")
+    target_compile_options(${USER_INITCODE_OBJ} PRIVATE
+        -nostdinc -I${CMAKE_SOURCE_DIR} -I${KERNEL_DIR})
+    set_target_properties(${USER_INITCODE_OBJ} PROPERTIES LINK_FLAGS
+        "-N -e start -Ttext 0x1000")
+else()
+    target_compile_options(${USER_INITCODE_OBJ} PRIVATE
+        -march=rv64g -nostdinc -I${CMAKE_SOURCE_DIR} -I${KERNEL_DIR})
+    set_target_properties(${USER_INITCODE_OBJ} PROPERTIES LINK_FLAGS
+        "-N -e start -Ttext 0x1000")
+endif()
 
 add_custom_target(${USER_INITCODE_BIN}
     COMMAND ${CMAKE_OBJCOPY} -S -O binary ${USER_INITCODE_OBJ} ${USER_INITCODE_BIN}
@@ -46,12 +63,12 @@ endif()
 
 set_source_files_properties(${USER_LIB_C_SRC} PROPERTIES LANGUAGE C)
 
-# Generate syscall stubs (usys.S) from usys.pl
+# Generate syscall stubs (usys.S) from usys.pl (arch-specific)
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/usys.S
-    COMMAND perl ${USER_DIR}/usys.pl > ${CMAKE_CURRENT_BINARY_DIR}/usys.S
-    DEPENDS ${USER_DIR}/usys.pl
-    COMMENT "Generating usys.S from usys.pl"
+    COMMAND perl ${USER_USYS_PL} > ${CMAKE_CURRENT_BINARY_DIR}/usys.S
+    DEPENDS ${USER_USYS_PL}
+    COMMENT "Generating usys.S from ${USER_USYS_PL}"
 )
 add_custom_target(generate_usys ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/usys.S)
 
@@ -62,7 +79,7 @@ add_library(${LIB_USERLIB} STATIC
     ${CMAKE_CURRENT_BINARY_DIR}/usys.S
 )
 add_dependencies(${LIB_USERLIB} generate_usys)
-target_link_options(${LIB_USERLIB} PRIVATE "-z max-page-size=4096 -T ${USER_DIR}/user.ld")
+target_link_options(${LIB_USERLIB} PRIVATE "-z max-page-size=4096 -T ${USER_LINKER_SCRIPT}")
 target_include_directories(${LIB_USERLIB} PRIVATE ${USER_DIR})
 
 # ==============================================================================
@@ -145,7 +162,11 @@ foreach(PROGRAM ${USER_PROGRAMS_C_FILES})
     get_filename_component(PROGRAM_NAME ${PROGRAM} NAME_WE)
     list(APPEND USER_PROGRAMS _${PROGRAM_NAME})
     add_executable(_${PROGRAM_NAME} ${PROGRAM})
-    target_link_options(_${PROGRAM_NAME} PRIVATE -z max-page-size=4096 -T ${USER_DIR}/user.ld)
+    target_link_options(_${PROGRAM_NAME} PRIVATE
+        "SHELL:-z max-page-size=4096"
+        "SHELL:-z common-page-size=4096"
+        --build-id=none
+        -T ${USER_LINKER_SCRIPT})
     target_link_libraries(_${PROGRAM_NAME} PRIVATE
         "--whole-archive" ${LIB_USERLIB} "--no-whole-archive")
     set_target_properties(_${PROGRAM_NAME} PROPERTIES OUTPUT_NAME _${PROGRAM_NAME})
@@ -194,6 +215,16 @@ set(NCURSES_LIB_A "${NCURSES_BUILD_DIR}/lib/libncurses.a")
 set(NCURSES_INCLUDE_DIR "${NCURSES_BUILD_DIR}/include")
 set(MUSL_COMPAT_DIR "${CMAKE_SOURCE_DIR}/user/musl-xv6/compat")
 
+if(ARCH STREQUAL "x86_64")
+    set(NCURSES_HOST_TRIPLE "x86_64-linux-gnu")
+    set(USER_ARCH_CFLAGS "")
+    set(USER_HOST_TRIPLE "x86_64-linux-gnu")
+else()
+    set(NCURSES_HOST_TRIPLE "riscv64-unknown-elf")
+    set(USER_ARCH_CFLAGS "-march=rv64gc -mabi=lp64d -mcmodel=medany")
+    set(USER_HOST_TRIPLE "riscv64-unknown-elf")
+endif()
+
 if(EXISTS "${NCURSES_SRC_DIR}/configure")
     add_custom_command(
         OUTPUT ${NCURSES_LIB_A}
@@ -205,7 +236,7 @@ if(EXISTS "${NCURSES_SRC_DIR}/configure")
                 RANLIB=${CMAKE_RANLIB}
                 CFLAGS=--sysroot=${MUSL_SYSROOT}\ -O2\ -nostdinc\ -ffreestanding\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}
                 ${NCURSES_SRC_DIR}/configure
-                    --host=riscv64-unknown-elf
+                    --host=${NCURSES_HOST_TRIPLE}
                     --prefix=/
                     --disable-widec
                     --without-shared
@@ -253,7 +284,7 @@ if(EXISTS "${READLINE_SRC_DIR}/configure")
                 CFLAGS=--sysroot=${MUSL_SYSROOT}\ -O2\ -nostdinc\ -ffreestanding\ -D_POSIX_VERSION=200809L\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}
                 LDFLAGS=-L${NCURSES_BUILD_DIR}/lib
                 ${READLINE_SRC_DIR}/configure
-                    --host=riscv64-unknown-elf
+                    --host=${USER_HOST_TRIPLE}
                     --prefix=/
                     --disable-shared
                     --with-curses
@@ -301,7 +332,7 @@ if(EXISTS "${DASH_SRC_DIR}/configure")
             -c -o ${HISTEDIT_SHIM_OBJ}
             --sysroot=${MUSL_SYSROOT}
             -O2 -nostdinc -ffreestanding -fno-common -fno-pie -no-pie
-            -mcmodel=medany -march=rv64gc -mabi=lp64d
+            ${USER_ARCH_CFLAGS}
             -isystem ${MUSL_INCLUDE_DIR}
             -isystem ${GCC_INCLUDE_DIR_MUSL}
             -isystem ${MUSL_COMPAT_DIR}
@@ -331,11 +362,11 @@ if(EXISTS "${DASH_SRC_DIR}/configure")
                 AR=${CMAKE_AR}
                 RANLIB=${CMAKE_RANLIB}
                 CC_FOR_BUILD=cc
-                CFLAGS=--sysroot=${MUSL_SYSROOT}\ -O2\ -nostdinc\ -ffreestanding\ -fno-common\ -fno-pie\ -no-pie\ -mcmodel=medany\ -DFLUSHERR=1\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -I${NCURSES_INCLUDE_DIR}
-                LDFLAGS=-static\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,-z,max-page-size=0x1000\ -T\ ${MUSL_LINKER_SCRIPT}\ -L${HISTEDIT_SHIM_DIR}\ -L${READLINE_BUILD_DIR}\ -L${NCURSES_BUILD_DIR}/lib
+                CFLAGS=--sysroot=${MUSL_SYSROOT}\ -O2\ -nostdinc\ -ffreestanding\ -fno-common\ -fno-pie\ -no-pie\ ${USER_ARCH_CFLAGS}\ -DFLUSHERR=1\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -I${NCURSES_INCLUDE_DIR}
+                LDFLAGS=-static\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -Wl,--build-id=none\ -T\ ${MUSL_LINKER_SCRIPT}\ -L${HISTEDIT_SHIM_DIR}\ -L${READLINE_BUILD_DIR}\ -L${NCURSES_BUILD_DIR}/lib
                 LIBS=${HISTEDIT_SHIM_A}\ ${READLINE_LIB_A}\ ${NCURSES_LIB_A}\ ${MUSL_LIBC_A}\ ${LIBGCC_PATH}\ ${MUSL_CRTN_O}
                 ${DASH_SRC_DIR}/configure
-                    --host=riscv64-unknown-elf
+                    --host=${USER_HOST_TRIPLE}
                     --prefix=/
                     --disable-lineno
                     --with-libedit
@@ -419,24 +450,44 @@ set(CPYTHON_FS_BIN "${CMAKE_BINARY_DIR}/user/_python")
 if(EXISTS "${CPYTHON_SRC_DIR}/configure")
     # Use the linux-gnu cross-compiler for CPython because it supports
     # -shared (needed for building libpython3.12.so and .so extension modules).
-    # The bare-metal riscv64-unknown-elf-gcc linker cannot produce shared objects.
-    set(CPYTHON_CC "riscv64-linux-gnu-gcc")
-    set(CPYTHON_AR "riscv64-linux-gnu-ar")
-    set(CPYTHON_RANLIB "riscv64-linux-gnu-ranlib")
-    set(CPYTHON_READELF "riscv64-linux-gnu-readelf")
-    set(CPYTHON_STRIP "riscv64-linux-gnu-strip")
-    # GCC include dir for the linux-gnu toolchain (stdarg.h, etc.)
-    execute_process(
-        COMMAND riscv64-linux-gnu-gcc -print-file-name=include
-        OUTPUT_VARIABLE CPYTHON_GCC_INCLUDE_DIR
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    # libgcc.a path for the linux-gnu toolchain
-    execute_process(
-        COMMAND riscv64-linux-gnu-gcc -print-libgcc-file-name
-        OUTPUT_VARIABLE CPYTHON_LIBGCC_PATH
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
+    # The bare-metal *-unknown-elf-gcc linker cannot produce shared objects.
+    if(ARCH STREQUAL "x86_64")
+        set(CPYTHON_CC "x86_64-linux-gnu-gcc")
+        set(CPYTHON_AR "x86_64-linux-gnu-ar")
+        set(CPYTHON_RANLIB "x86_64-linux-gnu-ranlib")
+        set(CPYTHON_READELF "x86_64-linux-gnu-readelf")
+        set(CPYTHON_STRIP "x86_64-linux-gnu-strip")
+        set(CPYTHON_HOST_TRIPLE "x86_64-unknown-xv6")
+        set(CPYTHON_DYNAMIC_LINKER "/lib/ld-musl-x86_64.so.1")
+        execute_process(
+            COMMAND x86_64-linux-gnu-gcc -print-file-name=include
+            OUTPUT_VARIABLE CPYTHON_GCC_INCLUDE_DIR
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        execute_process(
+            COMMAND x86_64-linux-gnu-gcc -print-libgcc-file-name
+            OUTPUT_VARIABLE CPYTHON_LIBGCC_PATH
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    else()
+        set(CPYTHON_CC "riscv64-linux-gnu-gcc")
+        set(CPYTHON_AR "riscv64-linux-gnu-ar")
+        set(CPYTHON_RANLIB "riscv64-linux-gnu-ranlib")
+        set(CPYTHON_READELF "riscv64-linux-gnu-readelf")
+        set(CPYTHON_STRIP "riscv64-linux-gnu-strip")
+        set(CPYTHON_HOST_TRIPLE "riscv64-unknown-xv6")
+        set(CPYTHON_DYNAMIC_LINKER "/lib/ld-musl-riscv64.so.1")
+        execute_process(
+            COMMAND riscv64-linux-gnu-gcc -print-file-name=include
+            OUTPUT_VARIABLE CPYTHON_GCC_INCLUDE_DIR
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        execute_process(
+            COMMAND riscv64-linux-gnu-gcc -print-libgcc-file-name
+            OUTPUT_VARIABLE CPYTHON_LIBGCC_PATH
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+    endif()
 
     add_custom_command(
         OUTPUT ${CPYTHON_BUILD_DIR}/Makefile
@@ -450,10 +501,10 @@ if(EXISTS "${CPYTHON_SRC_DIR}/configure")
                 PKG_CONFIG=false
                 CPPFLAGS=--sysroot=${MUSL_SYSROOT}\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0
                 CFLAGS=--sysroot=${MUSL_SYSROOT}\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${CPYTHON_GCC_INCLUDE_DIR}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0
-                LDFLAGS=-no-pie\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,--export-dynamic\ -Wl,--dynamic-linker=/lib/ld-musl-riscv64.so.1\ -Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -L${NCURSES_BUILD_DIR}/lib\ -L${READLINE_BUILD_DIR}\ -L${MUSL_SYSROOT}/lib
+                LDFLAGS=-no-pie\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,--export-dynamic\ -Wl,--dynamic-linker=${CPYTHON_DYNAMIC_LINKER}\ -Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -Wl,--build-id=none\ -L${NCURSES_BUILD_DIR}/lib\ -L${READLINE_BUILD_DIR}\ -L${MUSL_SYSROOT}/lib
                 LIBS=-lc\ ${CPYTHON_LIBGCC_PATH}
                 ${CPYTHON_SRC_DIR}/configure
-                    --host=riscv64-unknown-xv6
+                    --host=${CPYTHON_HOST_TRIPLE}
                     --build=x86_64-pc-linux-gnu
                     --prefix=/
                     --with-build-python=python3
@@ -588,8 +639,8 @@ if(EXISTS "${NCURSES_SRC_DIR}/configure")
         OUTPUT ${NCURSES_SH_OBJ}
         COMMAND ${CMAKE_C_COMPILER}
             -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
-            -march=rv64gc -mabi=lp64d
-            -mcmodel=medany -fno-common -fno-pie -no-pie
+            ${USER_ARCH_CFLAGS}
+            -fno-common -fno-pie -no-pie
             -DUSE_NCURSES_SHELL=1
             --sysroot=${MUSL_SYSROOT}
             -nostdinc -ffreestanding
@@ -608,6 +659,8 @@ if(EXISTS "${NCURSES_SRC_DIR}/configure")
         COMMAND ${CMAKE_C_COMPILER}
             -nostdlib -static
             -Wl,-z,max-page-size=4096
+            -Wl,-z,common-page-size=4096
+            -Wl,--build-id=none
             -T ${MUSL_LINKER_SCRIPT}
             -o ${NCURSES_SH_ELF}
             ${MUSL_CRT1_O}

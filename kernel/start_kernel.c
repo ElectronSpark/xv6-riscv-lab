@@ -139,15 +139,14 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     platform_boot_mark("[xv6] sk: after signal_init\n");
     binit();       // buffer cache
     platform_boot_mark("[xv6] sk: after binit\n");
+    // idle_thread_init must run before userinit because it calls
+    // rq_cpu_activate() to mark this CPU active; otherwise scheduler_wakeup()
+    // for init may fail to enqueue on any run queue.
+    idle_thread_init();
+    platform_boot_mark("[xv6] sk: after idle_thread_init\n");
     // Legacy iinit() and fileinit() removed - VFS handles these
     userinit(); // first user thread
     platform_boot_mark("[xv6] sk: after userinit\n");
-    // idle_thread_init must be called before platform_late_device_init
-    // because idle_thread_init calls rq_cpu_activate() to mark this CPU
-    // as active.  Without an active CPU, rq_select_task_rq() returns NULL
-    // and new threads cannot be enqueued to any run queue.
-    idle_thread_init();
-    platform_boot_mark("[xv6] sk: after idle_thread_init\n");
     // Post-init device drivers & timer: spawned as kthreads so they run
     // with the scheduler active and can use sleep_ms() / scheduler_yield().
     platform_late_device_init();

@@ -125,6 +125,10 @@ struct tss_desc {
 
 #define EFER_SCE        (1 << 0)    /* SYSCALL Enable */
 
+/* ── GS base MSRs (for SWAPGS per-CPU data) ── */
+#define MSR_GS_BASE         0xC0000101
+#define MSR_KERNEL_GS_BASE  0xC0000102
+
 /* ── APIC MSR ── */
 #define MSR_APIC_BASE   0x0000001B
 
@@ -150,6 +154,9 @@ void x86_gdt_init(void);
 
 /** Set the RSP0 (kernel stack) field in the TSS. */
 void x86_tss_set_rsp0(uint64 rsp0);
+
+/** Set the IST1 stack pointer in the TSS. */
+void x86_tss_set_ist1(uint64 ist1);
 
 /** Set up SYSCALL/SYSRET MSRs (STAR, LSTAR, SFMASK). */
 void x86_syscall_init(void);
@@ -197,5 +204,30 @@ static inline void idt_set_gate(struct idt_gate *gate, uint64 handler,
 
 /** Initialize the IDT with all 256 entries and load it via LIDT. */
 void x86_idt_init(void);
+
+/**
+ * Remap GDT+TSS to a high-canonical virtual address.
+ * Updates GDTR and TSS descriptor to use the new VA, then reloads.
+ * @param gdt_va  high-canonical VA where the GDT page is mapped
+ */
+void x86_gdt_remap(uint64 gdt_va);
+
+/**
+ * Remap IDT to a high-canonical virtual address.
+ * Updates IDTR to use the new VA and reloads.
+ * @param idt_va  high-canonical VA where the IDT page is mapped
+ */
+void x86_idt_remap(uint64 idt_va);
+
+/**
+ * Return physical address of the page containing the GDT.
+ * The TSS is co-located in the same page.
+ */
+uint64 x86_gdt_page_pa(void);
+
+/**
+ * Return physical address of the page containing the IDT.
+ */
+uint64 x86_idt_page_pa(void);
 
 #endif /* _X86_64_SEG_H */

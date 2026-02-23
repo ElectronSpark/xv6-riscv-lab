@@ -34,9 +34,10 @@
  */
 static inline void arch_context_init(struct context *ctx,
                                      uint64 entry, uint64 ksp) {
-    ksp -= 8;
-    *(uint64 *)ksp = entry;   /* fake return address for ret */
-    ctx->rsp = ksp;
+    uint64 rsp0 = ksp - 16;
+    *(uint64 *)rsp0 = entry;         /* ret target for first switch */
+    *(uint64 *)(rsp0 + 8) = 0;       /* dummy return address if entry returns */
+    ctx->rsp = rsp0;
     ctx->rbp = 0;             /* frame pointer */
 }
 
