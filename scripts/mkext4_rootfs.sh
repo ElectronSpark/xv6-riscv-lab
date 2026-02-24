@@ -52,9 +52,15 @@ fi
 # Ensure ld-musl dynamic linker symlink is a *relative* link to libc.so.
 # The sysroot may contain an absolute symlink (pointing to the host build path)
 # which won't resolve inside the target rootfs.
+# Handle both RISC-V and x86_64 architectures.
 if [ -f "$STAGING/lib/libc.so" ]; then
-    ln -sf libc.so "$STAGING/lib/ld-musl-riscv64.so.1"
-    echo "mkext4_rootfs: ensured ld-musl-riscv64.so.1 -> libc.so (relative)"
+    for LDMUSL in "$STAGING"/lib/ld-musl-*.so.1; do
+        if [ -e "$LDMUSL" ] || [ -L "$LDMUSL" ]; then
+            LDNAME=$(basename "$LDMUSL")
+            ln -sf libc.so "$STAGING/lib/$LDNAME"
+            echo "mkext4_rootfs: ensured $LDNAME -> libc.so (relative)"
+        fi
+    done
 fi
 
 # Copy Python standard library

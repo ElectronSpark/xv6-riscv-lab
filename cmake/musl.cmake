@@ -192,10 +192,16 @@ endfunction()
 # add_musl_dynamic_program(name source_file)
 #
 # Like add_musl_program() but links DYNAMICALLY against musl libc.so.
-# The resulting executable uses /lib/ld-musl-riscv64.so.1 as interpreter,
+# The resulting executable uses /lib/ld-musl-<arch>.so.1 as interpreter,
 # the same as CPython. Useful for testing dynamic linking on the target.
 # ==============================================================================
 function(add_musl_dynamic_program PROGRAM_NAME SOURCE_FILE)
+    # Map project ARCH to musl's arch name for the dynamic linker path
+    if(ARCH STREQUAL "riscv")
+        set(MUSL_ARCH "riscv64")
+    else()
+        set(MUSL_ARCH "${ARCH}")
+    endif()
     set(TARGET_NAME _${PROGRAM_NAME})
     set(PROGRAM_ELF ${CMAKE_BINARY_DIR}/user/${TARGET_NAME})
 
@@ -222,7 +228,7 @@ function(add_musl_dynamic_program PROGRAM_NAME SOURCE_FILE)
                 -no-pie -nostartfiles -nostdlib
                 ${MUSL_CRT1_O}
                 ${MUSL_CRTI_O}
-                -Wl,--dynamic-linker=/lib/ld-musl-${ARCH}.so.1
+                -Wl,--dynamic-linker=/lib/ld-musl-${MUSL_ARCH}.so.1
                 -Wl,-z,max-page-size=0x1000
                 -Wl,-z,common-page-size=0x1000
                 -Wl,--build-id=none

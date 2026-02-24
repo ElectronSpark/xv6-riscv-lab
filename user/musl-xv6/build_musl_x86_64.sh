@@ -77,12 +77,15 @@ cp "${SCRIPT_DIR}/arch/x86_64/syscall_arch.h" "${ARCH_DIR}/syscall_arch.h"
 # Override crt_arch.h
 cp "${SCRIPT_DIR}/arch/x86_64/crt_arch.h" "${ARCH_DIR}/crt_arch.h"
 
-# Override clone.s — overwrite upstream __clone.s
+# Override clone — replace with xv6 version.
+# IMPORTANT: the file MUST be named clone.s (not __clone.s) because musl's
+# Makefile uses REPLACED_OBJS to suppress the generic src/thread/clone.c;
+# the replacement only works when the arch file has the same basename.
 mkdir -p "${MUSL_SRC}/src/thread/x86_64"
-cp "${SCRIPT_DIR}/arch/x86_64/clone.s" "${MUSL_SRC}/src/thread/x86_64/__clone.s"
+cp "${SCRIPT_DIR}/arch/x86_64/clone.s" "${MUSL_SRC}/src/thread/x86_64/clone.s"
 
-# Remove any leftover clone.s that might conflict
-rm -f "${MUSL_SRC}/src/thread/x86_64/clone.s"
+# Remove upstream __clone.s so only our clone.s defines __clone
+rm -f "${MUSL_SRC}/src/thread/x86_64/__clone.s"
 
 # Override vfork.s
 mkdir -p "${MUSL_SRC}/src/process/x86_64"
@@ -109,7 +112,7 @@ CFLAGS="-fPIC -O2 -fno-stack-protector -mno-red-zone" \
     --target=x86_64 \
     --prefix="${PREFIX}" \
     --syslibdir="${PREFIX}/lib" \
-    --disable-shared \
+    --enable-shared \
     --enable-static \
     --disable-wrapper
 
@@ -121,9 +124,17 @@ echo "Build complete."
 
 echo "Installing to ${PREFIX}..."
 make install
+# musl's make install creates an absolute symlink for the dynamic linker,
+# e.g. ld-musl-x86_64.so.1 -> /abs/path/to/sysroot/lib/libc.so
+# Fix it to be relative so it works inside the target rootfs.
+if [ -L "${PREFIX}/lib/ld-musl-x86_64.so.1" ]; then
+    ln -sf libc.so "${PREFIX}/lib/ld-musl-x86_64.so.1"
+    echo "Fixed ld-musl-x86_64.so.1 symlink to relative (libc.so)"
+fi
 echo "Installation complete."
 
 echo ""
 echo "=== musl libc for xv6 x86_64 built successfully ==="
 echo "Static library:  ${PREFIX}/lib/libc.a"
+echo "Shared library:  ${PREFIX}/lib/libc.so"
 echo "Headers:         ${PREFIX}/include/"

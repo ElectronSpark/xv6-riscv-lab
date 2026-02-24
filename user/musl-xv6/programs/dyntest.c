@@ -169,11 +169,15 @@ static int test_fileio(void)
 
     /* Check if ld-musl symlink exists */
     struct stat st;
-    if (stat("/lib/ld-musl-riscv64.so.1", &st) == 0) {
-        printf("[dyntest] /lib/ld-musl-riscv64.so.1: size=%ld\n",
-               (long)st.st_size);
+#ifdef __x86_64__
+    const char *ldmusl = "/lib/ld-musl-x86_64.so.1";
+#else
+    const char *ldmusl = "/lib/ld-musl-riscv64.so.1";
+#endif
+    if (stat(ldmusl, &st) == 0) {
+        printf("[dyntest] %s: size=%ld\n", ldmusl, (long)st.st_size);
     } else {
-        direct_write("[dyntest] WARN: stat(/lib/ld-musl-riscv64.so.1) failed\n");
+        printf("[dyntest] WARN: stat(%s) failed\n", ldmusl);
     }
 
     /* Check if python binary exists */
