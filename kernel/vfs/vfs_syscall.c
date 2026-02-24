@@ -2010,7 +2010,7 @@ done:
  */
 uint64 sys_vfs_poll(void) {
     return -ENOSYS;
-#if 0 /* poll disabled for debugging */
+// #if 0 /* poll disabled for debugging */
     uint64 fds_addr;
     int nfds;
     int timeout_ms;
@@ -2210,7 +2210,7 @@ copyout:
 
     kmm_free(pfds);
     return ready;
-#endif /* poll disabled */
+// #endif /* poll disabled */
 }
 
 /******************************************************************************
