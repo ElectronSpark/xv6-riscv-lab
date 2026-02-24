@@ -16,6 +16,7 @@
 #include "syscall.h"
 #include "errno.h"
 #include "param.h"
+#include "string.h"
 #include "seg.h"    /* wrmsr, rdmsr, MSR_FS_BASE */
 
 int fetchaddr(uint64 addr, uint64 *ip) {
@@ -29,7 +30,9 @@ int fetchstr(uint64 addr, char *buf, int max) {
     struct thread *p = current;
     if (!p || !p->vm)
         return -1;
-    return vm_copyinstr(p->vm, buf, addr, max) < 0 ? -1 : 0;
+    if (vm_copyinstr(p->vm, buf, addr, max) < 0)
+        return -1;
+    return strlen(buf);
 }
 
 uint64 argraw(int n) {
