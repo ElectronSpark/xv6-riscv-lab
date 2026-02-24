@@ -72,6 +72,23 @@ void ioapic_enable(int irq, int vector, int dest)
     ioapic_write(IOAPIC_REG_REDTBL(irq),     lo);
 }
 
+/**
+ * Enable an IRQ with level-triggered, active-low semantics.
+ * Required for PCI device interrupts routed through the PIIX3.
+ */
+void ioapic_enable_level(int irq, int vector, int dest)
+{
+    if (irq < 0 || irq >= ioapic_max_redir)
+        return;
+
+    /* PCI interrupts: level-triggered, active-low */
+    uint32 lo = (uint32)vector | IOAPIC_TRIGGER_LEVEL | IOAPIC_ACTIVE_LOW;
+    uint32 hi = ((uint32)dest) << 24;
+
+    ioapic_write(IOAPIC_REG_REDTBL(irq) + 1, hi);
+    ioapic_write(IOAPIC_REG_REDTBL(irq),     lo);
+}
+
 void ioapic_disable(int irq)
 {
     if (irq < 0 || irq >= ioapic_max_redir)

@@ -103,4 +103,162 @@ struct pci_common_confspace_header {
 #define PCIE_INTR_PIN_INTC 0x03 // legacy interrupt Message INTC
 #define PCIE_INTR_PIN_INTD 0x04 // legacy interrupt Message INTD
 
+// PCI Vendor/Device IDs
+#define PCI_VENDOR_INTEL    0x8086
+#define PCI_DEVICE_E1000    0x100e
+#define PCI_VENDOR_VIRTIO   0x1AF4
+#define PCI_DEVICE_VIRTIO_BLK_TRANSITIONAL 0x1001 // virtio block (transitional)
+#define PCI_DEVICE_VIRTIO_NET_TRANSITIONAL 0x1000 // virtio net (transitional)
+#define PCI_DEVICE_VIRTIO_BLK_MODERN       0x1042 // virtio block (modern only)
+
+// PCI Capability IDs
+#define PCI_CAP_ID_VENDOR   0x09   // Vendor-specific capability (used by virtio)
+
+// Virtio PCI capability types (within vendor cap)
+#define VIRTIO_PCI_CAP_COMMON_CFG  1
+#define VIRTIO_PCI_CAP_NOTIFY_CFG  2
+#define VIRTIO_PCI_CAP_ISR_CFG     3
+#define VIRTIO_PCI_CAP_DEVICE_CFG  4
+#define VIRTIO_PCI_CAP_PCI_CFG     5
+
+// Virtio PCI capability structure
+struct virtio_pci_cap {
+    uint8	cap_vndr;       // Generic PCI field: PCI_CAP_ID_VENDOR
+    uint8	cap_next;       // Generic PCI field: next ptr
+    uint8	cap_len;        // Generic PCI field: capability length
+    uint8	cfg_type;       // Identifies the structure (VIRTIO_PCI_CAP_*)
+    uint8	bar;            // BAR index [0..5]
+    uint8	padding[3];     // Padding
+    uint32	offset;         // Offset within bar
+    uint32	length;         // Length of the structure, in bytes
+};
+
+// Virtio PCI notify capability (extends virtio_pci_cap)
+struct virtio_pci_notify_cap {
+    struct virtio_pci_cap cap;
+    uint32 notify_off_multiplier; // Multiplier for queue_notify_off
+};
+
+// Virtio PCI common configuration structure (mapped from BAR)
+struct virtio_pci_common_cfg {
+    uint32 device_feature_select;  // 0x00 - RW
+    uint32 device_feature;         // 0x04 - RO
+    uint32 driver_feature_select;  // 0x08 - RW
+    uint32 driver_feature;         // 0x0C - RW
+    uint16 msix_config;            // 0x10 - RW
+    uint16 num_queues;             // 0x12 - RO
+    uint8  device_status;          // 0x14 - RW
+    uint8  config_generation;      // 0x15 - RO
+    uint16 queue_select;           // 0x16 - RW
+    uint16 queue_size;             // 0x18 - RW
+    uint16 queue_msix_vector;      // 0x1A - RW
+    uint16 queue_enable;           // 0x1C - RW
+    uint16 queue_notify_off;       // 0x1E - RO
+    uint64 queue_desc;             // 0x20 - RW
+    uint64 queue_driver;           // 0x28 - RW (avail)
+    uint64 queue_device;           // 0x30 - RW (used)
+};
+
+// x86 PCI configuration space access via I/O ports 0xCF8/0xCFC
+#if defined(__x86_64__) || defined(__i386__)
+
+#define PCI_CONFIG_ADDR  0xCF8
+#define PCI_CONFIG_DATA  0xCFC
+
+static inline void pci_outl(uint16 port, uint32 val)
+{
+    asm volatile("outl %0, %1" : : "a"(val), "Nd"(port));
+}
+
+static inline uint32 pci_inl(uint16 port)
+{
+    uint32 val;
+    asm volatile("inl %1, %0" : "=a"(val) : "Nd"(port));
+    return val;
+}
+
+static inline uint32 pci_config_read32(uint8 bus, uint8 dev, uint8 func,
+                                       uint8 offset)
+{
+    uint32 addr = (1U << 31) | ((uint32)bus << 16) | ((uint32)dev << 11) |
+                  ((uint32)func << 8) | (offset & 0xFC);
+    pci_outl(PCI_CONFIG_ADDR, addr);
+    return pci_inl(PCI_CONFIG_DATA);
+}
+
+static inline void pci_config_write32(uint8 bus, uint8 dev, uint8 func,
+                                      uint8 offset, uint32 val)
+{
+    uint32 addr = (1U << 31) | ((uint32)bus << 16) | ((uint32)dev << 11) |
+                  ((uint32)func << 8) | (offset & 0xFC);
+    pci_outl(PCI_CONFIG_ADDR, addr);
+    pci_outl(PCI_CONFIG_DATA, val);
+}
+
+static inline uint16 pci_config_read16(uint8 bus, uint8 dev, uint8 func,
+                                       uint8 offset)
+{
+    uint32 val = pci_config_read32(bus, dev, func, offset & 0xFC);
+    return (val >> ((offset & 2) * 8)) & 0xFFFF;
+}
+
+static inline uint8 pci_config_read8(uint8 bus, uint8 dev, uint8 func,
+                                     uint8 offset)
+{
+    uint32 val = pci_config_read32(bus, dev, func, offset & 0xFC);
+    return (val >> ((offset & 3) * 8)) & 0xFF;
+}
+
+static inline void pci_config_write16(uint8 bus, uint8 dev, uint8 func,
+                                      uint8 offset, uint16 newval)
+{
+    uint32 old = pci_config_read32(bus, dev, func, offset & 0xFC);
+    int shift = (offset & 2) * 8;
+    old &= ~(0xFFFFU << shift);
+    old |= ((uint32)newval << shift);
+    pci_config_write32(bus, dev, func, offset & 0xFC, old);
+}
+
+static inline void pci_config_write8(uint8 bus, uint8 dev, uint8 func,
+                                     uint8 offset, uint8 newval)
+{
+    uint32 old = pci_config_read32(bus, dev, func, offset & 0xFC);
+    int shift = (offset & 3) * 8;
+    old &= ~(0xFFU << shift);
+    old |= ((uint32)newval << shift);
+    pci_config_write32(bus, dev, func, offset & 0xFC, old);
+}
+
+#endif /* __x86_64__ || __i386__ */
+
+// PCI device info passed to drivers during init
+struct pci_device_info {
+    uint16 vendor_id;
+    uint16 device_id;
+    uint8  bus;
+    uint8  dev;
+    uint8  func;
+    uint8  irq_line;  // interrupt line from PCI config
+    uint32 bar[6];    // base address registers
+};
+
+// Stored info about discovered virtio PCI device
+struct virtio_pci_discovery {
+    int found;
+    uint8 bus, dev, func;
+    uint8 irq_line;
+    uint32 bar[6];
+    // Offsets of virtio PCI caps in config space
+    uint8 common_cfg_cap;
+    uint8 notify_cfg_cap;
+    uint8 isr_cfg_cap;
+    uint8 device_cfg_cap;
+};
+
+// Get discovered virtio-blk PCI device info by index
+struct virtio_pci_discovery *pci_get_virtio_blk(int index);
+
+// Prototype
+void pci_init(void);
+
 #endif

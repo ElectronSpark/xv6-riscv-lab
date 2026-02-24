@@ -57,4 +57,10 @@ void ioapic_enable(int irq, int vector, int dest);
  */
 void ioapic_disable(int irq);
 
+/**
+ * Enable an IRQ with level-triggered, active-low polarity.
+ * Required for PCI device interrupts routed through the PIIX3.
+ */
+void ioapic_enable_level(int irq, int vector, int dest);
+
 #endif /* _X86_64_IOAPIC_H */

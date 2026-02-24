@@ -114,4 +114,13 @@ struct virtio_blk_req {
     uint64 sector;
 };
 
+// Per-disk PCI transport state (used on x86 when virtio-pci is detected)
+struct virtio_pci_state {
+    int use_pci;                           // 1 if PCI transport, 0 if MMIO
+    volatile struct virtio_pci_common_cfg *common_cfg;  // mapped BAR region
+    volatile uint16 *notify_base;          // mapped notify BAR region
+    uint32 notify_off_multiplier;          // from notify cap
+    volatile uint8 *isr;                   // mapped ISR BAR region
+};
+
 #endif /* __KERNEL_VIRTIO_H */

@@ -139,10 +139,12 @@ static void kvm_build(void)
         }
     }
 
-    /* Map APIC MMIO region (I/O APIC at 0xFEC00000, LAPIC at 0xFEE00000).
+    /* Map APIC & PCI device MMIO region.
+     * I/O APIC at 0xFEC00000, LAPIC at 0xFEE00000, HPET at 0xFED00000.
+     * PCI device BARs typically assigned in 0xFEB00000-0xFEBFFFFF range.
      * Use uncacheable semantics (no PTE_G) for device MMIO. */
     uint64 flags_mmio = X86_PTE_P | X86_PTE_W;
-    kvm_map_2m_range(0xFEC00000ULL, 0xFF000000ULL, flags_mmio);
+    kvm_map_2m_range(0xFE000000ULL, 0xFF000000ULL, flags_mmio);
 }
 
 static void kvm_load(void)

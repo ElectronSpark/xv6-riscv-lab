@@ -444,6 +444,16 @@ void plic_enable_irq(int irq) {
     ioapic_enable(irq, T_IRQ0 + irq, 0 /* BSP LAPIC ID */);
 }
 
+/*
+ * plic_enable_irq_level - enable a PCI device IRQ with level-trigger.
+ *
+ * PCI interrupts are level-triggered, active-low.  Call this after
+ * register_irq_handler() for PCI devices to reprogram the IOAPIC entry.
+ */
+void plic_enable_irq_level(int irq) {
+    ioapic_enable_level(irq, T_IRQ0 + irq, 0 /* BSP LAPIC ID */);
+}
+
 /* These are only used on RISC-V; on x86 the trap handler dispatches
  * directly and sends LAPIC EOI. */
 int plic_claim(void)          { return 0; }

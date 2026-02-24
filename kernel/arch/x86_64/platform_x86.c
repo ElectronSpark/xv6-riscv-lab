@@ -472,6 +472,11 @@ void platform_start_per_cpu_services(int cpu)
 void platform_late_device_init(void)
 {
     sched_timer_init();
+
+    /* Enumerate PCI bus: discovers e1000 NIC and virtio-blk-pci devices.
+     * Sets platform.has_virtio if virtio devices are found. */
+    extern void pci_init(void);
+    pci_init();
 }
 
 void platform_boot_mark(const char *msg)

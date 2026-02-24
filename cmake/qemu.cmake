@@ -57,22 +57,26 @@ if(ARCH STREQUAL "x86_64")
 
     set(X86_INITRD_IMG ${CMAKE_BINARY_DIR}/fs.img)
 
+    # x86 PCI devices: virtio-blk-pci disk + e1000 NIC
+    set(X86_DISK_OPTS -drive file=${X86_INITRD_IMG},if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0)
+    set(X86_NET_OPTS -netdev user,id=net0,hostfwd=tcp::2323-:23,hostfwd=tcp::8080-:80 -object filter-dump,id=net0,netdev=net0,file=packets.pcap -device e1000,netdev=net0)
+
     add_custom_target(qemu
-        COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -m 1G -nographic -monitor none -chardev stdio,id=char0,signal=off -serial chardev:char0 -debugcon file:debugcon.log -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG}
+        COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -m 1G -nographic -monitor none -chardev stdio,id=char0,signal=off -serial chardev:char0 -debugcon file:debugcon.log -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS}
         DEPENDS kernel_all fs_img
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running x86_64 QEMU full kernel"
     )
 
     add_custom_target(qemu-serial
-        COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -m 1G -nographic -monitor none -chardev stdio,id=char0,signal=off -serial chardev:char0 -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG}
+        COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -m 1G -nographic -monitor none -chardev stdio,id=char0,signal=off -serial chardev:char0 -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS}
         DEPENDS kernel_all fs_img
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running x86_64 QEMU full kernel with COM1 on stdio"
     )
 
     add_custom_target(qemu-debugcon
-        COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -m 1G -nographic -monitor none -serial none -debugcon stdio -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG}
+        COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -m 1G -nographic -monitor none -serial none -debugcon stdio -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS}
         DEPENDS kernel_all fs_img
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running x86_64 QEMU full kernel with debugcon output"
@@ -90,7 +94,7 @@ if(ARCH STREQUAL "x86_64")
     )
 
     add_custom_target(qemu-gdb
-        COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -m 1G -nographic -monitor none -chardev stdio,id=char0,signal=off -serial chardev:char0 -debugcon file:debugcon.log -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} -S -gdb tcp::1234
+        COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -m 1G -nographic -monitor none -chardev stdio,id=char0,signal=off -serial chardev:char0 -debugcon file:debugcon.log -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS} -S -gdb tcp::1234
         DEPENDS kernel_all fs_img gdbinit
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         COMMENT "Running x86_64 QEMU full kernel with GDB stub on :1234"
