@@ -83,6 +83,21 @@ void usertrapret(void) {
      * from trampoline_ksatp (RIP-relative in trapvec.S) instead. */
     x86_tss_set_rsp0(p->ksp);
 
+    /*
+     * Tell alltraps where to pivot RSP for user→kernel transitions.
+     * All IDT vectors use IST=1 so the CPU initially pushes onto the
+     * per-CPU IST stack (mapped in all page tables).  After CR3 swap,
+     * alltraps copies the 7-qword interrupt frame from IST to this
+     * per-thread kernel stack and switches RSP, so that all subsequent
+     * C code — including scheduler context switches — runs on a
+     * per-thread stack instead of the shared IST stack.
+     *
+     * Single-CPU only: a single global suffices.  For SMP, this would
+     * need to be per-CPU (e.g. in the cpu_local / TRAMPOLINE_CPULOCAL).
+     */
+    extern uint64 trampoline_kstack;
+    trampoline_kstack = p->ksp;
+
     /* Map this CPU's trapframe page into the user page table
      * and get the utrapframe virtual address. */
     int cpu = cpuid();

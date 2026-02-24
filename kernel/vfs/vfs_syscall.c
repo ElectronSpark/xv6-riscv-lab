@@ -32,6 +32,8 @@
 #include "tty/termios.h"
 #include "timer/timer.h"
 #include "signal.h"
+#include "kqueue.h"
+#include "kqueue_types.h"
 
 // Forward declaration for syscall argument helpers
 void argint(int n, int *ip);
@@ -164,6 +166,21 @@ static int __vfs_fdalloc(struct vfs_file *file) {
 static struct vfs_file *__vfs_fdfree(int fd) {
     struct thread *p = current;
     return vfs_fdtable_dealloc_fd(p->fdtable, fd);
+}
+
+/**
+ * __vfs_close_fd - Close a file descriptor internally (for kernel use)
+ * @fd: The file descriptor to close
+ *
+ * Equivalent to sys_vfs_close but callable from within the kernel without
+ * going through the syscall argument layer.
+ */
+static void __vfs_close_fd(int fd) {
+    spin_lock(&current->fdtable->lock);
+    struct vfs_file *f = __vfs_fdfree(fd);
+    spin_unlock(&current->fdtable->lock);
+    if (f != NULL)
+        __vfs_fput_call_rcu(f);
 }
 
 /******************************************************************************
@@ -1980,12 +1997,16 @@ done:
 }
 
 /*
- * sys_vfs_poll - simple event polling over file descriptors
+ * sys_vfs_poll - event polling over file descriptors using kqueue
  *
  * Arguments:
  *   a0 = pointer to struct pollfd array
  *   a1 = nfds
  *   a2 = timeout_ms (-1: infinite, 0: non-blocking)
+ *
+ * Uses the kqueue subsystem for proper event-driven waiting instead of
+ * spin-polling.  For non-blocking polls (timeout_ms=0), a direct scan
+ * is performed without kqueue overhead.
  */
 uint64 sys_vfs_poll(void) {
     uint64 fds_addr;
@@ -2000,10 +2021,10 @@ uint64 sys_vfs_poll(void) {
         return -EINVAL;
     }
 
+    /* Empty fd set: just sleep for timeout */
     if (nfds == 0) {
-        if (timeout_ms == 0) {
+        if (timeout_ms == 0)
             return 0;
-        }
         uint64 start = get_jiffs();
         while (timeout_ms < 0 || (int)(get_jiffs() - start) < timeout_ms) {
             sleep_ms(1);
@@ -2015,40 +2036,170 @@ uint64 sys_vfs_poll(void) {
 
     size_t bytes = (size_t)nfds * sizeof(struct pollfd_k);
     struct pollfd_k *pfds = kmm_alloc(bytes);
-    if (pfds == NULL) {
+    if (pfds == NULL)
         return -ENOMEM;
-    }
 
     if (either_copyin(pfds, 1, fds_addr, bytes) < 0) {
         kmm_free(pfds);
         return -EFAULT;
     }
 
-    uint64 start = get_jiffs();
-    int ready;
+    /* --- First pass: non-blocking scan --- */
+    int ready = __vfs_poll_scan(pfds, nfds);
+    if (ready > 0 || timeout_ms == 0)
+        goto copyout;
+
+    /* --- Blocking path: use kqueue for event-driven wait --- */
+
+    /*
+     * Determine whether all polled fds support kqueue notification.
+     * Chardev files (f->ops == NULL, dispatched through cdev->ops.poll)
+     * don't fire vfs_file_knote_notify, so we must periodically re-scan.
+     */
+    int has_unnotified_fds = 0;
+    for (int i = 0; i < nfds; i++) {
+        if (pfds[i].fd < 0)
+            continue;
+        struct vfs_file *tf = __vfs_argfd(pfds[i].fd);
+        if (tf == NULL)
+            continue;
+        if (tf->ops == NULL || tf->ops->poll == NULL)
+            has_unnotified_fds = 1;
+        vfs_fput(tf);
+        if (has_unnotified_fds)
+            break;
+    }
+
+    int kqfd = kqueue_create();
+    if (kqfd < 0) {
+        /* If kqueue_create fails, fall back to a single scan */
+        goto copyout;
+    }
+
+    /* Resolve kqueue from fd */
+    struct vfs_file *kqfile = __vfs_argfd(kqfd);
+    struct kqueue *kq = kqfile ? (struct kqueue *)kqfile->private_data : NULL;
+    if (kq == NULL) {
+        if (kqfile)
+            vfs_fput(kqfile);
+        __vfs_close_fd(kqfd);
+        goto copyout;
+    }
+    vfs_fput(kqfile);
+
+    /*
+     * Register EVFILT_READ and/or EVFILT_WRITE for each polled fd.
+     * Knotes stay registered (no EV_ONESHOT) so they can re-trigger
+     * across loop iterations.  kqueue_close cleans them up.
+     * Store the pollfd index in udata for result mapping.
+     */
+    int max_changes = nfds * 2; /* worst case: READ+WRITE per fd */
+    struct kevent *changes = kmm_alloc(max_changes * sizeof(struct kevent));
+    if (changes == NULL) {
+        __vfs_close_fd(kqfd);
+        goto copyout;
+    }
+    int nchanges = 0;
+
+    for (int i = 0; i < nfds; i++) {
+        if (pfds[i].fd < 0)
+            continue;
+        if (pfds[i].events & (POLLIN | POLLRDNORM)) {
+            changes[nchanges].ident = pfds[i].fd;
+            changes[nchanges].filter = EVFILT_READ;
+            changes[nchanges].flags = EV_ADD;
+            changes[nchanges].fflags = 0;
+            changes[nchanges].data = 0;
+            changes[nchanges].udata = (uint64)i;
+            nchanges++;
+        }
+        if (pfds[i].events & (POLLOUT | POLLWRNORM)) {
+            changes[nchanges].ident = pfds[i].fd;
+            changes[nchanges].filter = EVFILT_WRITE;
+            changes[nchanges].flags = EV_ADD;
+            changes[nchanges].fflags = 0;
+            changes[nchanges].data = 0;
+            changes[nchanges].udata = (uint64)i;
+            nchanges++;
+        }
+    }
+
+    if (nchanges > 0)
+        kqueue_register(kq, changes, nchanges);
+
+    /*
+     * Wait for events.  If any polled fd lacks kqueue notification
+     * support (e.g. chardevs), cap each kqueue_wait and re-scan.
+     * For fds with full kqueue support (pipes, sockets), wakeup is
+     * instant via vfs_file_knote_notify.
+     */
+    #define POLL_RESCAN_MS 10
+
+    struct kevent *events = kmm_alloc(nfds * sizeof(struct kevent));
+    if (events == NULL) {
+        kmm_free(changes);
+        __vfs_close_fd(kqfd);
+        goto copyout;
+    }
+
+    uint64 poll_start = get_jiffs();
     for (;;) {
+        /* Compute kqueue_wait timeout for this iteration */
+        int kq_tmo;
+        if (has_unnotified_fds) {
+            if (timeout_ms < 0) {
+                kq_tmo = POLL_RESCAN_MS;
+            } else {
+                int remaining = timeout_ms - (int)(get_jiffs() - poll_start);
+                if (remaining <= 0)
+                    break;
+                kq_tmo = remaining < POLL_RESCAN_MS ?
+                         remaining : POLL_RESCAN_MS;
+            }
+        } else {
+            /* All fds support kqueue notification — full timeout */
+            if (timeout_ms < 0) {
+                kq_tmo = -1;
+            } else {
+                int remaining = timeout_ms - (int)(get_jiffs() - poll_start);
+                if (remaining <= 0)
+                    break;
+                kq_tmo = remaining;
+            }
+        }
+
+        int nevents = kqueue_wait(kq, events, nfds, kq_tmo);
+
+        if (nevents < 0 && nevents == -EINTR) {
+            ready = -EINTR;
+            break;
+        }
+
+        /* Always re-scan: catches chardev events and ensures
+         * revents is correctly populated for copyout. */
         ready = __vfs_poll_scan(pfds, nfds);
-        if (ready > 0) {
+        if (ready > 0)
             break;
-        }
-        if (timeout_ms == 0) {
-            break;
-        }
-        if (timeout_ms > 0 && (int)(get_jiffs() - start) >= timeout_ms) {
-            break;
-        }
-        sleep_ms(1);
+
         if (signal_pending(current)) {
             ready = -EINTR;
             break;
         }
     }
 
+    #undef POLL_RESCAN_MS
+
+    /* Close the temporary kqueue fd (detaches all knotes) */
+    __vfs_close_fd(kqfd);
+    kmm_free(changes);
+    kmm_free(events);
+
     if (ready == -EINTR) {
         kmm_free(pfds);
         return -EINTR;
     }
 
+copyout:
     if (either_copyout(1, fds_addr, pfds, bytes) < 0) {
         kmm_free(pfds);
         return -EFAULT;

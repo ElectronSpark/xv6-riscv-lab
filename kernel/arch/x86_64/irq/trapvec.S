@@ -106,17 +106,19 @@ TRAP_NOERR 31       /* (reserved) */
 .globl alltraps
 alltraps:
     /*
-     * At this point the stack (IST1 or RSP0) looks like:
-     *   [RSP+0x10]  RIP / CS / RFLAGS / RSP / SS  (pushed by CPU)
-     *   [RSP+0x08]  error code                     (pushed by CPU or stub)
-     *   [RSP+0x00]  vector number                  (pushed by stub)
+     * At this point the IST1 stack looks like:
+     *   [RSP+0x30]  SS
+     *   [RSP+0x28]  RSP (user)
+     *   [RSP+0x20]  RFLAGS
+     *   [RSP+0x18]  CS
+     *   [RSP+0x10]  RIP
+     *   [RSP+0x08]  error code     (pushed by CPU or stub)
+     *   [RSP+0x00]  vector number  (pushed by stub)
      *
-     * Step 1: ensure we are on the kernel page table.
-     * Compare current CR3 with the kernel CR3 stored in trampoline_ksatp.
-     * If they differ (user CR3), switch.  This handles:
-     *   - Normal user→kernel traps (user CR3 → kernel CR3)
-     *   - Faults during userret trampoline (user CR3, kernel CS)
-     *   - Normal kernel traps (already kernel CR3 → skip)
+     * All IDT vectors use IST=1, so the CPU always loads RSP from
+     * TSS.IST1 (a per-CPU stack mapped in every page table).
+     *
+     * Step 1: switch to the kernel page table (same as before).
      */
     pushq %rax
     pushq %rbx
@@ -130,7 +132,74 @@ alltraps:
     popq  %rbx
     popq  %rax
 
-    /* Step 2: push all 15 GPRs to build a full struct trapframe. */
+    /*
+     * Step 2: for user-mode traps, pivot RSP from the shared IST
+     * stack to the per-thread kernel stack (kstack).
+     *
+     * WHY: with IST=1 every interrupt lands on the same per-CPU IST
+     * stack.  If two threads context-switch while their call frames
+     * are on the IST stack, the second thread's frames overwrite the
+     * first's, corrupting saved state.  By moving to a per-thread
+     * stack immediately after CR3 swap (while interrupts are still
+     * disabled by GATE_INTERRUPT), all subsequent C code — including
+     * scheduler context switches — runs on a private stack.
+     *
+     * Kernel-mode traps skip the pivot and stay on the current stack
+     * (which is either the IST for brief ISR handling, or the
+     * already-private kstack of the running kernel thread).
+     */
+    testq $3, 24(%rsp)            /* CS & 3 → RPL                  */
+    jz    .Lkstack_done           /* kernel mode → no switch needed */
+
+    /* ── FROM USER MODE ── copy interrupt frame to kstack ──
+     *
+     * IST layout at this point (RSP-relative):
+     *   +0  vec   +8  err   +16 rip   +24 cs
+     *   +32 rflags   +40 user_rsp   +48 ss
+     *
+     * Save rax & rbx as scratch on the IST stack, then copy the
+     * 7 qwords into the per-thread kernel stack whose top is stored
+     * in the RIP-relative variable trampoline_kstack (set by
+     * usertrapret before every user return).
+     */
+    pushq %rax                    /* save rax on IST               */
+    pushq %rbx                    /* save rbx on IST               */
+    /* IST: rbx(+0) rax(+8) vec(+16) err(+24) rip(+32) cs(+40)
+     *       rflags(+48) user_rsp(+56) ss(+64)                     */
+
+    leaq  trampoline_kstack(%rip), %rax
+    movq  (%rax), %rax            /* rax = kstack top (= p->ksp)   */
+
+    /* Copy 7 values from IST to kstack[-56 .. kstack-8].          */
+    movq  64(%rsp), %rbx
+    movq  %rbx, -8(%rax)          /* ss                            */
+    movq  56(%rsp), %rbx
+    movq  %rbx, -16(%rax)         /* user rsp                      */
+    movq  48(%rsp), %rbx
+    movq  %rbx, -24(%rax)         /* rflags                        */
+    movq  40(%rsp), %rbx
+    movq  %rbx, -32(%rax)         /* cs                            */
+    movq  32(%rsp), %rbx
+    movq  %rbx, -40(%rax)         /* rip                           */
+    movq  24(%rsp), %rbx
+    movq  %rbx, -48(%rax)         /* err                           */
+    movq  16(%rsp), %rbx
+    movq  %rbx, -56(%rax)         /* vec                           */
+
+    subq  $56, %rax               /* rax = kstack - 56             */
+
+    /* Restore rbx, then atomically swap rax (kstack-56) with the
+     * saved original rax on the IST stack, and finally load RSP
+     * from that IST slot to complete the pivot.                    */
+    popq  %rbx                    /* restore original rbx          */
+    xchgq %rax, (%rsp)           /* rax ← orig rax; (%rsp) ← kstack-56 */
+    movq  (%rsp), %rsp           /* RSP = kstack - 56  (PIVOT!)   */
+
+    /* RSP now points into the per-thread kstack with the 7-qword
+     * interrupt frame.  rax/rbx hold their original user values.  */
+
+.Lkstack_done:
+    /* Step 3: push all 15 GPRs to build a full struct trapframe.  */
     pushq %rax
     pushq %rbx
     pushq %rcx
@@ -330,4 +399,20 @@ syscall_entry:
 .align 8
 .globl trampoline_ksatp
 trampoline_ksatp:
+    .quad 0
+
+/*
+ * trampoline_kstack — per-thread kernel stack top (p->ksp).
+ *
+ * Written by usertrapret() (C code, identity-mapped address) before
+ * every return to user mode.  Read by alltraps (RIP-relative from
+ * the high alias) on user→kernel transitions to pivot RSP from the
+ * shared IST stack to the per-thread kernel stack.
+ *
+ * NOTE: single-CPU only.  For SMP, replace with a per-CPU slot
+ *       (e.g. in struct cpu_local at TRAMPOLINE_CPULOCAL).
+ */
+.align 8
+.globl trampoline_kstack
+trampoline_kstack:
     .quad 0

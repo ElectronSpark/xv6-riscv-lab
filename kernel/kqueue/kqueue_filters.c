@@ -18,6 +18,7 @@
 #include "vfs/vfs_types.h"
 #include "vfs/fs.h"
 #include "vfs/poll.h"
+#include "dev/cdev.h"
 #include "kqueue.h"
 #include "kqueue_types.h"
 #include "list.h"
@@ -60,6 +61,13 @@ static int knote_read_event(struct knote *kn, long hint) {
         return 0;
     if (f->ops && f->ops->poll) {
         int revents = f->ops->poll(f, POLLIN | POLLRDNORM);
+        if (revents & (POLLIN | POLLRDNORM | POLLHUP | POLLERR))
+            return 1;
+    }
+    /* Chardev files (e.g. /dev/console) have f->ops == NULL;
+     * dispatch through the device's poll callback instead. */
+    if (f->cdev != NULL && f->cdev->ops.poll != NULL) {
+        int revents = f->cdev->ops.poll(f->cdev, POLLIN | POLLRDNORM);
         if (revents & (POLLIN | POLLRDNORM | POLLHUP | POLLERR))
             return 1;
     }
@@ -108,6 +116,12 @@ static int knote_write_event(struct knote *kn, long hint) {
         return 0;
     if (f->ops && f->ops->poll) {
         int revents = f->ops->poll(f, POLLOUT | POLLWRNORM);
+        if (revents & (POLLOUT | POLLWRNORM | POLLERR))
+            return 1;
+    }
+    /* Chardev fallback */
+    if (f->cdev != NULL && f->cdev->ops.poll != NULL) {
+        int revents = f->cdev->ops.poll(f->cdev, POLLOUT | POLLWRNORM);
         if (revents & (POLLOUT | POLLWRNORM | POLLERR))
             return 1;
     }
