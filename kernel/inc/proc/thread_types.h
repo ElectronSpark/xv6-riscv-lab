@@ -67,6 +67,7 @@ struct thread {
 #define THREAD_FLAG_SIGPENDING 4       // Thread has pending deliverable signals
 #define THREAD_FLAG_USER_SPACE 5       // Thread has user space
 #define THREAD_FLAG_SELF_REAP 6        // Non-leader CLONE_THREAD: self-cleanup on exit
+#define THREAD_FLAG_FPU_USED 7        // Thread has used FPU (valid fpu_state)
     struct sched_entity *sched_entity; // PI lock, on_rq, context, etc.
     uint64 ksp;
     void *chan;              // If non-zero, sleeping on chan
@@ -132,6 +133,9 @@ struct thread {
     /* kqueue: knotes registered for EVFILT_PROC on this thread */
     spinlock_t kqueue_proc_lock;
     list_node_t kqueue_proc_knotes;
+
+    // ===== FPU state (lazy save/restore, only for threads that use FP) =====
+    struct fpu_state *fpu_state; // FP save area (NULL until first FP use)
 
     // ===== Signal (warm, large — pushed to end) =====
     thread_signal_t signal; // Per-thread signal state

@@ -13,6 +13,7 @@
 #include "syscall.h"
 #include <mm/page.h>
 #include <mm/vm.h>
+#include "trapframe.h"
 #include "trap.h"
 
 extern char trampoline[], uservec[], userret[], _data_ktlb[];
@@ -152,6 +153,62 @@ void usertrap(void) {
                    current->trapframe->trapframe.sepc);
             kill(current->pid, SIGTRAP);
         }
+        break;
+    }
+    case RISCV_ILLEGAL_INSTRUCTION: {
+        /*
+         * Lazy FPU switching: if sstatus.FS == Off, the user tried to
+         * execute an FP instruction.  Enable FP for this thread and
+         * retry the instruction.  If FS was not Off, it's a genuinely
+         * illegal instruction — kill the process.
+         */
+        uint64 saved_sstatus = current->trapframe->trapframe.sstatus;
+        if ((saved_sstatus & SSTATUS_FS_MASK) == SSTATUS_FS_OFF) {
+            /* Enable kernel FP access so we can save/restore FP regs */
+            unsigned long s = r_sstatus();
+            s &= ~SSTATUS_FS_MASK;
+            s |= SSTATUS_FS_DIRTY;
+            w_sstatus(s);
+
+            struct thread *old_owner = mycpu()->fpu_owner;
+
+            /* Save previous owner's FP state if someone else owns the FPU */
+            if (old_owner != NULL && old_owner != current) {
+                if (old_owner->fpu_state != NULL)
+                    fpu_save_state(old_owner->fpu_state);
+            }
+
+            /* First time this thread uses FP — allocate fpu_state */
+            if (!THREAD_FPU_USED(current)) {
+                if (current->fpu_state == NULL) {
+                    current->fpu_state = kmm_alloc(sizeof(struct fpu_state));
+                    if (current->fpu_state == NULL) {
+                        printf("pid %d: failed to allocate fpu_state\n",
+                               current->pid);
+                        kill(current->pid, SIGKILL);
+                        break;
+                    }
+                    memset(current->fpu_state, 0, sizeof(struct fpu_state));
+                }
+                fpu_init_state();
+                THREAD_SET_FPU_USED(current);
+            } else {
+                /* Restore previously saved FP state */
+                fpu_restore_state(current->fpu_state);
+            }
+
+            mycpu()->fpu_owner = current;
+            break;
+        }
+        /* Genuine illegal instruction */
+        printf("pid %d %s: illegal instruction sepc=0x%lx stval=0x%lx\n",
+               current->pid, current->name,
+               current->trapframe->trapframe.sepc,
+               current->trapframe->trapframe.stval);
+        assert(current->pid != 1, "init exiting");
+        extern int gdbstub_signal_stop(struct thread *, int);
+        gdbstub_signal_stop(current, SIGILL);
+        kill(current->pid, SIGILL);
         break;
     }
     case RISCV_ENV_CALL_FROM_U_MODE:
@@ -308,6 +365,20 @@ int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
     memmove(&uc.uc_mcontext, p->trapframe, sizeof(mcontext_t));
     memmove(&uc.uc_stack, &p->signal.sig_stack, sizeof(stack_t));
 
+    // Save FP state into the signal frame if this thread has used FP.
+    if (THREAD_FPU_USED(p) && p->fpu_state != NULL) {
+        if (mycpu()->fpu_owner == p) {
+            // FP regs are live in hardware — save them first.
+            unsigned long s = r_sstatus();
+            s &= ~SSTATUS_FS_MASK;
+            s |= SSTATUS_FS_DIRTY;
+            w_sstatus(s);
+            fpu_save_state(p->fpu_state);
+        }
+        memmove(&uc.uc_fpstate, p->fpu_state, sizeof(struct fpu_state));
+        uc.uc_fpflags = 1; // FP state is valid
+    }
+
     // Copy the trap frame to the signal trap frame.
     if (vm_copyout(p->vm, new_ucontext, (void *)&uc, sizeof(ucontext_t)) != 0) {
         return -1; // Copy failed
@@ -347,6 +418,14 @@ int restore_sigframe(struct thread *p, ucontext_t *ret_uc) {
 
     p->signal.sig_ucontext = (uint64)ret_uc->uc_link;
     memmove(p->trapframe, &ret_uc->uc_mcontext, sizeof(mcontext_t));
+
+    // Restore FP state from the signal frame if it was saved.
+    if (ret_uc->uc_fpflags && p->fpu_state != NULL) {
+        memmove(p->fpu_state, &ret_uc->uc_fpstate, sizeof(struct fpu_state));
+        // Invalidate fpu_owner so the next FP use triggers a lazy reload.
+        if (mycpu()->fpu_owner == p)
+            mycpu()->fpu_owner = NULL;
+    }
 
     return 0; // Success
 }
@@ -396,6 +475,16 @@ void usertrapret(void) {
     unsigned long x = r_sstatus();
     x &= ~SSTATUS_SPP; // clear SPP to 0 for user mode
     x |= SSTATUS_SPIE; // enable interrupts in user mode
+
+    // Lazy FPU: set FS field for user mode.
+    // If this thread owns the FPU on this CPU, allow FP access (Clean).
+    // Otherwise set FS=Off so first FP use triggers a trap.
+    x &= ~SSTATUS_FS_MASK;
+    if (THREAD_FPU_USED(p) && mycpu()->fpu_owner == p)
+        x |= SSTATUS_FS_CLEAN;
+    else
+        x |= SSTATUS_FS_OFF;
+
     w_sstatus(x);
 
     // printf("user pagetable before usertrapret:\n");

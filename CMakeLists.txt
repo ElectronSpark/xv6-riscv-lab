@@ -217,7 +217,7 @@ string(CONCAT CMAKE_C_FLAGS "${CMAKE_C_FLAGS}"
 )
 
 if(ARCH STREQUAL "riscv")
-    string(APPEND CMAKE_C_FLAGS " -mcmodel=medany")
+    string(APPEND CMAKE_C_FLAGS " -mcmodel=medany -march=rv64imac_zicsr_zifencei -mabi=lp64")
 elseif(ARCH STREQUAL "x86_64")
     string(APPEND CMAKE_C_FLAGS " -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-avx -mgeneral-regs-only")
 endif()

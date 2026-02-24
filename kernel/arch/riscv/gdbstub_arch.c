@@ -1,14 +1,22 @@
 /*
  * gdbstub_arch.c — RISC-V architecture support for the in-kernel GDB stub.
  *
- * Provides register access (GDB RISC-V register order: x0..x31, pc = 33 regs),
- * software breakpoint encoding (EBREAK / C.EBREAK), and software single-step
- * via instruction decoding and temporary breakpoints.
+ * Provides register access (GDB RISC-V register order):
+ *   0..31  — x0..x31 (GP integer registers)
+ *   32     — pc (sepc)
+ *   33..64 — f0..f31 (double-precision FP registers)
+ *   65     — fflags (bits 4:0 of fcsr)
+ *   66     — frm (bits 7:5 of fcsr)
+ *   67     — fcsr (full FP CSR)
+ *
+ * Also: software breakpoint encoding (EBREAK / C.EBREAK) and software
+ * single-step via instruction decoding and temporary breakpoints.
  */
 
 #include "types.h"
 #include "trapframe.h"
 #include "gdbstub_arch.h"
+#include "string.h"
 
 /* ──────────────────────────────────────────────────────────────────────────── */
 /* Constants                                                                   */
@@ -18,14 +26,17 @@
 #define RV_EBREAK       0x00100073U   /* 32-bit EBREAK */
 #define RV_C_EBREAK     0x9002U       /* 16-bit compressed EBREAK */
 
-/* GDB expects 33 registers for RISC-V: x0..x31 + pc */
-const int gdb_arch_num_regs = 33;
+/* GDB expects 68 registers for RISC-V: x0..x31, pc, f0..f31, fflags, frm, fcsr */
+const int gdb_arch_num_regs = 68;
 
-/* All RISC-V registers are 64-bit. */
+/* Register sizes:
+ *   0..32  — 8 bytes (64-bit GP + pc)
+ *   33..64 — 8 bytes (64-bit FP double)
+ *   65..67 — 4 bytes (fflags, frm, fcsr) */
 int gdb_arch_reg_size(int regnum)
 {
-    (void)regnum;
-    return 8;
+    if (regnum <= 64) return 8;
+    return 4;   /* fflags, frm, fcsr */
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
@@ -343,6 +354,77 @@ uint64 gdb_arch_decode_next_pc(struct utrapframe *tf, uint64 pc,
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
+/* Byte-level register access (GP + FP)                                        */
+/* ──────────────────────────────────────────────────────────────────────────── */
+
+int gdb_arch_read_reg_bytes(struct utrapframe *tf, struct fpu_state *fps,
+                            int regnum, void *buf)
+{
+    int sz = gdb_arch_reg_size(regnum);
+    memset(buf, 0, sz);
+
+    if (regnum <= 32) {
+        /* GP register or pc — delegate to existing accessor */
+        uint64 val = gdb_arch_get_reg(tf, regnum);
+        memcpy(buf, &val, sz);
+    } else if (regnum <= 64) {
+        /* f0..f31 — read from fpu_state */
+        if (fps != NULL) {
+            uint64 val = fps->f[regnum - 33];
+            memcpy(buf, &val, 8);
+        }
+    } else if (regnum == 65) {
+        /* fflags — bits 4:0 of fcsr */
+        if (fps != NULL) {
+            uint32 val = fps->fcsr & 0x1F;
+            memcpy(buf, &val, 4);
+        }
+    } else if (regnum == 66) {
+        /* frm — bits 7:5 of fcsr */
+        if (fps != NULL) {
+            uint32 val = (fps->fcsr >> 5) & 0x7;
+            memcpy(buf, &val, 4);
+        }
+    } else if (regnum == 67) {
+        /* fcsr — full register */
+        if (fps != NULL) {
+            uint32 val = fps->fcsr;
+            memcpy(buf, &val, 4);
+        }
+    }
+    return sz;
+}
+
+int gdb_arch_write_reg_bytes(struct utrapframe *tf, struct fpu_state *fps,
+                             int regnum, const void *buf)
+{
+    int sz = gdb_arch_reg_size(regnum);
+
+    if (regnum <= 32) {
+        uint64 val = 0;
+        memcpy(&val, buf, sz);
+        gdb_arch_set_reg(tf, regnum, val);
+    } else if (regnum <= 64 && fps != NULL) {
+        uint64 val = 0;
+        memcpy(&val, buf, 8);
+        fps->f[regnum - 33] = val;
+    } else if (regnum == 65 && fps != NULL) {
+        uint32 val = 0;
+        memcpy(&val, buf, 4);
+        fps->fcsr = (fps->fcsr & ~0x1FU) | (val & 0x1F);
+    } else if (regnum == 66 && fps != NULL) {
+        uint32 val = 0;
+        memcpy(&val, buf, 4);
+        fps->fcsr = (fps->fcsr & ~0xE0U) | ((val & 0x7) << 5);
+    } else if (regnum == 67 && fps != NULL) {
+        uint32 val = 0;
+        memcpy(&val, buf, 4);
+        fps->fcsr = val;
+    }
+    return sz;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────── */
 /* Target description XML                                                      */
 /*                                                                             */
 /* Tells GDB exactly which registers we provide.  Without this, GDB            */
@@ -389,6 +471,43 @@ static const char riscv_target_xml[] =
     "    <reg name=\"t5\" bitsize=\"64\" type=\"int64\"/>\n"
     "    <reg name=\"t6\" bitsize=\"64\" type=\"int64\"/>\n"
     "    <reg name=\"pc\" bitsize=\"64\" type=\"code_ptr\"/>\n"
+    "  </feature>\n"
+    "  <feature name=\"org.gnu.gdb.riscv.fpu\">\n"
+    "    <reg name=\"ft0\" bitsize=\"64\" type=\"ieee_double\" regnum=\"33\"/>\n"
+    "    <reg name=\"ft1\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft2\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft3\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft4\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft5\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft6\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft7\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs0\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs1\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa0\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa1\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa2\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa3\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa4\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa5\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa6\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fa7\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs2\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs3\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs4\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs5\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs6\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs7\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs8\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs9\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs10\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fs11\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft8\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft9\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft10\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"ft11\" bitsize=\"64\" type=\"ieee_double\"/>\n"
+    "    <reg name=\"fflags\" bitsize=\"32\" type=\"int\" group=\"float\"/>\n"
+    "    <reg name=\"frm\" bitsize=\"32\" type=\"int\" group=\"float\"/>\n"
+    "    <reg name=\"fcsr\" bitsize=\"32\" type=\"int\" group=\"float\"/>\n"
     "  </feature>\n"
     "</target>\n";
 

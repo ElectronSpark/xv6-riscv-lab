@@ -161,6 +161,28 @@ int thread_clone(struct clone_args *args) {
     // copy saved user registers.
     *(ret_ptr->trapframe) = *(p->trapframe);
 
+    // Copy FPU state if the parent has used FP.
+    if (THREAD_FPU_USED(p) && p->fpu_state != NULL) {
+        ret_ptr->fpu_state = kmm_alloc(sizeof(struct fpu_state));
+        if (ret_ptr->fpu_state != NULL) {
+            // If parent owns the hardware FPU, force-save first.
+            if (mycpu()->fpu_owner == p) {
+#ifdef __riscv
+                unsigned long s = r_sstatus();
+                s &= ~SSTATUS_FS_MASK;
+                s |= SSTATUS_FS_DIRTY;
+                w_sstatus(s);
+#else
+                asm volatile("clts");
+#endif
+                fpu_save_state(p->fpu_state);
+            }
+            memmove(ret_ptr->fpu_state, p->fpu_state,
+                    sizeof(struct fpu_state));
+            THREAD_SET_FPU_USED(ret_ptr);
+        }
+    }
+
     // Apply architecture-specific child register adjustments:
     // sets entry point, stack pointer, return value = 0, and TLS.
     arch_clone_child_regs(ret_ptr->trapframe, args->flags,

@@ -66,6 +66,7 @@ static void __pcb_init(struct thread *p, struct vfs_fdtable *fdtable) {
     p->thread_group = NULL;
     p->fs = NULL;
     p->fdtable = fdtable;
+    p->fpu_state = NULL;  /* FPU state allocated on first FP use (lazy) */
     if (p->sched_entity != NULL) {
         memset(p->sched_entity, 0, sizeof(*(p->sched_entity)));
         sched_entity_init(p->sched_entity, p);
@@ -378,6 +379,11 @@ void thread_destroy(struct thread *p) {
     if (p->fs != NULL) {
         vfs_struct_put(p->fs);
         p->fs = NULL;
+    }
+
+    if (p->fpu_state != NULL) {
+        kmm_free(p->fpu_state);
+        p->fpu_state = NULL;
     }
 
     // Purge any remaining pending signals (e.g., SIGKILL) before destroy

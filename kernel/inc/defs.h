@@ -89,6 +89,12 @@ struct context *arch_context_switch(struct context *cur, struct context *target)
 typedef void (*sw_noret_cb_t)(uint64, uint64);
 void __switch_noreturn(uint64 irq_sp, uint64 s0, sw_noret_cb_t addr);
 
+// fpu.S — lazy FPU switching
+struct fpu_state;
+void fpu_save_state(struct fpu_state *state);
+void fpu_restore_state(struct fpu_state *state);
+void fpu_init_state(void);
+
 // spinlock.c
 // Initialize a spinlock.
 void spin_init(spinlock_t *, char *);

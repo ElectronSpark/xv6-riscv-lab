@@ -94,6 +94,15 @@ void exit(int status) {
     struct thread *p = current;
     assert(p != __proctab_get_initproc(), "init exiting");
 
+    // Release per-CPU FPU ownership early — this thread will never
+    // return to user space, so no point keeping it as the HW FP owner.
+    // Save HW FP state first so gdbstub_exit_stop() can read FP registers.
+    if (mycpu()->fpu_owner == p) {
+        if (THREAD_FPU_USED(p) && p->fpu_state != NULL)
+            fpu_save_state(p->fpu_state);
+        mycpu()->fpu_owner = NULL;
+    }
+
     // If this thread is in a thread group undergoing group exit,
     // use the group exit code.
     struct thread_group *tg = p->thread_group;
@@ -192,6 +201,11 @@ void exit(int status) {
         if (p->vm != NULL) {
             vm_put(p->vm);
             p->vm = NULL;
+        }
+        // Release FPU state
+        if (p->fpu_state != NULL) {
+            kmm_free(p->fpu_state);
+            p->fpu_state = NULL;
         }
         // Purge pending signals (sigacts already NULL, lock check skipped)
         sigpending_empty(p, 0);

@@ -158,6 +158,19 @@ void usertrapret(void) {
     if (trampoline_userret == NULL)
         panic("usertrapret: trampoline_userret not initialized");
 
+    /* Lazy FPU: if this thread owns the FPU on this CPU, clear TS so
+     * FP/SSE works in user mode.  Otherwise set TS so the first FP
+     * instruction triggers #NM for lazy switching. */
+    {
+        uint64 cr0;
+        asm volatile("movq %%cr0, %0" : "=r"(cr0));
+        if (THREAD_FPU_USED(p) && mycpu()->fpu_owner == p)
+            cr0 &= ~(1ULL << 3);   /* clear CR0.TS */
+        else
+            cr0 |= (1ULL << 3);    /* set CR0.TS   */
+        asm volatile("movq %0, %%cr0" : : "r"(cr0));
+    }
+
     /* Final sanity check — should not happen after the earlier guard,
      * but if it does, kill the process instead of panicking. */
     if (p->vm == NULL || p->vm->pagetable == NULL) {
@@ -238,6 +251,17 @@ int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
     memmove(&uc.uc_mcontext, p->trapframe, sizeof(mcontext_t));
     memmove(&uc.uc_stack, &p->signal.sig_stack, sizeof(stack_t));
 
+    /* Save FP state into the signal frame if this thread has used FP. */
+    if (THREAD_FPU_USED(p) && p->fpu_state != NULL) {
+        if (mycpu()->fpu_owner == p) {
+            /* FP regs are live in hardware — clear TS and save them. */
+            asm volatile("clts");
+            fpu_save_state(p->fpu_state);
+        }
+        memmove(&uc.uc_fpstate, p->fpu_state, sizeof(struct fpu_state));
+        uc.uc_fpflags = 1; /* FP state is valid */
+    }
+
     /* Copy ucontext to user stack. */
     if (vm_copyout(p->vm, uc_addr, (void *)&uc, sizeof(ucontext_t)) != 0)
         return -1;
@@ -280,6 +304,14 @@ int restore_sigframe(struct thread *p, ucontext_t *ret_uc) {
 
     p->signal.sig_ucontext = (uint64)ret_uc->uc_link;
     memmove(p->trapframe, &ret_uc->uc_mcontext, sizeof(mcontext_t));
+
+    /* Restore FP state from the signal frame if it was saved. */
+    if (ret_uc->uc_fpflags && p->fpu_state != NULL) {
+        memmove(p->fpu_state, &ret_uc->uc_fpstate, sizeof(struct fpu_state));
+        /* Invalidate fpu_owner so the next FP use triggers a lazy reload. */
+        if (mycpu()->fpu_owner == p)
+            mycpu()->fpu_owner = NULL;
+    }
 
     return 0;
 }
@@ -651,7 +683,45 @@ void x86_trap_handler(struct trapframe *tf) {
     }
 
     if (vec < 32) {
-        /* CPU exception (not #PF, not #BP) */
+        /* #NM (Device Not Available, vector 7) — lazy FPU switching.
+         * CR0.TS was set, user code executed an FP/SSE instruction. */
+        if (vec == 7 && from_user && current) {
+            /* Clear TS so kernel FP save/restore routines work. */
+            asm volatile("clts");
+
+            struct thread *old_owner = mycpu()->fpu_owner;
+
+            /* Save previous owner's FP state if someone else owns it */
+            if (old_owner != NULL && old_owner != current) {
+                if (old_owner->fpu_state != NULL)
+                    fpu_save_state(old_owner->fpu_state);
+            }
+
+            /* First time this thread uses FP — allocate fpu_state */
+            if (!THREAD_FPU_USED(current)) {
+                if (current->fpu_state == NULL) {
+                    current->fpu_state = kmm_alloc(sizeof(struct fpu_state));
+                    if (current->fpu_state == NULL) {
+                        printf("pid %d: failed to allocate fpu_state\n",
+                               current->pid);
+                        kill(current->pid, SIGKILL);
+                        return;
+                    }
+                    memset(current->fpu_state, 0, sizeof(struct fpu_state));
+                }
+                fpu_init_state();
+                THREAD_SET_FPU_USED(current);
+            } else {
+                /* Restore previously saved FP state */
+                fpu_restore_state(current->fpu_state);
+            }
+
+            mycpu()->fpu_owner = current;
+            /* TS is clear — FP/SSE will work when we return to user */
+            return;
+        }
+
+        /* CPU exception (not #PF, not #BP, not #NM) */
         const char *name = exception_names[vec];
 
         if (from_user && current) {

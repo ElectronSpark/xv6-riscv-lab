@@ -118,6 +118,30 @@ uint64 gdb_arch_decode_next_pc(struct utrapframe *tf, uint64 pc,
                                 gdb_read_mem_fn read_mem);
 
 /* ──────────────────────────────────────────────────────────────────────────── */
+/* Byte-level register access (supports FP registers > 8 bytes)                */
+/* ──────────────────────────────────────────────────────────────────────────── */
+
+struct fpu_state;
+
+/*
+ * Read register 'regnum' into raw byte buffer 'buf'.
+ * For GP registers, reads from the trapframe.
+ * For FP registers, reads from the fpu_state buffer (NULL → zeroes).
+ * Returns the number of bytes written to buf (== gdb_arch_reg_size(regnum)).
+ */
+int gdb_arch_read_reg_bytes(struct utrapframe *tf, struct fpu_state *fps,
+                            int regnum, void *buf);
+
+/*
+ * Write register 'regnum' from raw byte buffer 'buf'.
+ * For GP registers, writes to the trapframe.
+ * For FP registers, writes to the fpu_state buffer.
+ * Returns the number of bytes consumed from buf (== gdb_arch_reg_size(regnum)).
+ */
+int gdb_arch_write_reg_bytes(struct utrapframe *tf, struct fpu_state *fps,
+                             int regnum, const void *buf);
+
+/* ──────────────────────────────────────────────────────────────────────────── */
 /* Target description                                                          */
 /* ──────────────────────────────────────────────────────────────────────────── */
 

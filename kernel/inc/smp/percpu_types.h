@@ -5,6 +5,7 @@
 #include "types.h"
 
 struct proc;
+struct thread;
 
 // Per-CPU state.
 struct cpu_local {
@@ -20,6 +21,7 @@ struct cpu_local {
     uint64 rcu_timestamp;       // RCU timestamp - updated before context switch
     uint64 syscall_scratch;     // SWAPGS scratch (gs:0 on SYSCALL entry)
     uint64 syscall_trapframe_va;// trapframe VA for SYSCALL entry (gs:8)
+    struct thread *fpu_owner;   // Thread whose FP state is currently in hardware
 } __ALIGNED_CACHELINE;
 
 #endif /* __KERNEL_PERCPU_TYPES_H */

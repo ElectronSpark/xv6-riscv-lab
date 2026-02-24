@@ -275,7 +275,7 @@ static uint64 hex2u64(const char *p, int nchars)
 
 /* Parse a little-endian hex-encoded value with variable byte width.
  * For nbytes > 8, only the first 8 bytes are decoded into the uint64. */
-static uint64 hexle2val(const char *p, int nbytes)
+static uint64 __attribute__((unused)) hexle2val(const char *p, int nbytes)
 {
     uint64 val = 0;
     int max = nbytes < 8 ? nbytes : 8;
@@ -1118,9 +1118,12 @@ static void gdb_handle_packet(const char *pkt, int len)
             for (int i = 0; i < gdb_arch_num_regs; i++)
                 p = hex_le(p, 0, gdb_arch_reg_size(i));
         } else {
-            struct utrapframe *tf = sel->trapframe;
-            for (int i = 0; i < gdb_arch_num_regs; i++)
-                p = hex_le(p, gdb_arch_get_reg(tf, i), gdb_arch_reg_size(i));
+            uint8 regbuf[16]; /* max reg size: 10 bytes (x87 st0-st7) */
+            for (int i = 0; i < gdb_arch_num_regs; i++) {
+                int sz = gdb_arch_read_reg_bytes(sel->trapframe,
+                             sel->fpu_state, i, regbuf);
+                p += mem2hex(p, regbuf, sz);
+            }
         }
         gdb_send_packet(out, (int)(p - out));
         break;
@@ -1134,11 +1137,13 @@ static void gdb_handle_packet(const char *pkt, int len)
             break;
         }
         const char *hex = pkt + 1;
-        struct utrapframe *tf = sel->trapframe;
+        uint8 regbuf[16];
         for (int i = 0; i < gdb_arch_num_regs; i++) {
             int sz = gdb_arch_reg_size(i);
             if (strlen(hex) < (unsigned)(sz * 2)) break;
-            gdb_arch_set_reg(tf, i, hexle2val(hex, sz));
+            hex2mem(regbuf, hex, sz);
+            gdb_arch_write_reg_bytes(sel->trapframe,
+                                    sel->fpu_state, i, regbuf);
             hex += sz * 2;
         }
         gdb_ok();
@@ -1155,10 +1160,14 @@ static void gdb_handle_packet(const char *pkt, int len)
         char *p = out;
         int sz = gdb_arch_reg_size(regnum);
         struct thread *sel = gdb_selected_thread();
-        if (!gdb.attached || !sel)
+        if (!gdb.attached || !sel) {
             p = hex_le(p, 0, sz);
-        else
-            p = hex_le(p, gdb_arch_get_reg(sel->trapframe, regnum), sz);
+        } else {
+            uint8 regbuf[16];
+            gdb_arch_read_reg_bytes(sel->trapframe,
+                                   sel->fpu_state, regnum, regbuf);
+            p += mem2hex(p, regbuf, sz);
+        }
         gdb_send_packet(out, (int)(p - out));
         break;
     }
@@ -1178,8 +1187,10 @@ static void gdb_handle_packet(const char *pkt, int len)
         int regnum = (int)hex2u64(pkt + 1, (int)(eq - pkt - 1));
         if (regnum >= 0 && regnum < gdb_arch_num_regs) {
             int sz = gdb_arch_reg_size(regnum);
-            uint64 val = hexle2val(eq + 1, sz);
-            gdb_arch_set_reg(sel->trapframe, regnum, val);
+            uint8 regbuf[16];
+            hex2mem(regbuf, eq + 1, sz);
+            gdb_arch_write_reg_bytes(sel->trapframe,
+                                    sel->fpu_state, regnum, regbuf);
         }
         gdb_ok();
         break;
@@ -1912,6 +1923,26 @@ static void gdb_handle_packet(const char *pkt, int len)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
+/* FP state save helper                                                        */
+/*                                                                             */
+/* Must be called from TARGET thread context (same CPU as the HW FP owner)     */
+/* before posting target_stopped — the GDB daemon runs on a different CPU      */
+/* and cannot access our hardware FP registers.                                */
+/*                                                                             */
+/* After saving, fpu_owner is cleared so that returning to userspace via        */
+/* usertrapret will trigger a lazy FP reload.  This ensures correctness if     */
+/* GDB modifies FP registers while the thread is stopped.                      */
+/* ──────────────────────────────────────────────────────────────────────────── */
+static void gdbstub_ensure_fp_saved(struct thread *t)
+{
+    if (THREAD_FPU_USED(t) && t->fpu_state != NULL &&
+        mycpu()->fpu_owner == t) {
+        fpu_save_state(t->fpu_state);
+        mycpu()->fpu_owner = NULL;
+    }
+}
+
+/* ──────────────────────────────────────────────────────────────────────────── */
 /* Trap hook — called from usertrap() on EBREAK                                */
 /*                                                                             */
 /* Runs in the context of the target process's thread.  We signal the GDB      */
@@ -1950,6 +1981,9 @@ int gdbstub_signal_stop(struct thread *t, int signo)
     gdb.target      = t;
     gdb.stop_signal = signo;
     gdb.stop_tid    = t->pid;
+
+    /* Save HW FP state so GDB can read FP registers */
+    gdbstub_ensure_fp_saved(t);
 
     /* Notify the GDB thread that the target has stopped */
     sem_post(&gdb.target_stopped);
@@ -2075,6 +2109,9 @@ int gdbstub_trap(struct thread *t)
      * (not a step bp, not an entry bp, and not a user EBREAK). */
     gdb.stop_is_swbreak = (is_our_bp && !gdb.stepping && !is_entry_bp) ? 1 : 0;
 
+    /* Save HW FP state so GDB can read FP registers */
+    gdbstub_ensure_fp_saved(t);
+
     /* Notify the GDB thread that the target has stopped */
     sem_post(&gdb.target_stopped);
 
@@ -2134,6 +2171,9 @@ void gdbstub_exec_stop(struct thread *t, uint64 entry_pc, const char *path)
 
     printf("gdbstub: pid %d exec -> %s, stopped at entry point\n",
            t->pid, path);
+
+    /* Save HW FP state so GDB can read FP registers */
+    gdbstub_ensure_fp_saved(t);
 
     /* Notify the GDB thread that the target has stopped */
     sem_post(&gdb.target_stopped);
@@ -2210,6 +2250,9 @@ void gdbstub_exit_stop(struct thread *t, int status, int last)
             gdb.target       = t;
             gdb.stop_signal  = SIGTRAP;
             gdb.stop_tid     = t->pid;
+
+            /* Save HW FP state so GDB can read FP registers */
+            gdbstub_ensure_fp_saved(t);
 
             sem_post(&gdb.target_stopped);
             sem_wait(&gdb.target_resume);
@@ -2303,6 +2346,9 @@ int gdbstub_check_interrupt(struct thread *t)
     gdb.target = t;
     gdb.stop_signal = SIGINT;
     gdb.stop_tid = t->pid;
+
+    /* Save HW FP state so GDB can read FP registers */
+    gdbstub_ensure_fp_saved(t);
 
     /* Notify the GDB thread that the target has stopped */
     sem_post(&gdb.target_stopped);

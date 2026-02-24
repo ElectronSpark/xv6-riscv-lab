@@ -192,7 +192,7 @@ set(MUSL_PROG_DIR "${CMAKE_SOURCE_DIR}/user/musl-xv6/programs")
 set(MUSL_STATIC_PROGRAMS
     mcat:cat    mecho:echo   mgrep:grep   mls:ls      mwc:wc
     mmkdir:mkdir  mrm:rm     mln:ln       mkill:kill  msleep:sleep
-    minit:init    msh:sh     mhello:hello
+    minit:init    msh:sh     mhello:hello mfptest:fptest
 )
 foreach(MAPPING ${MUSL_STATIC_PROGRAMS})
     string(REPLACE ":" ";" PARTS ${MAPPING})
@@ -740,7 +740,7 @@ endforeach()
 set(MUSL_PROG_MAP
     mcat:cat   mecho:echo   mgrep:grep   mls:ls   mwc:wc
     mmkdir:mkdir  mrm:rm  mln:ln  mkill:kill  msleep:sleep
-    minit:init  mhello:hello
+    minit:init  mhello:hello  mfptest:fptest
 )
 foreach(MAPPING ${MUSL_PROG_MAP})
     string(REPLACE ":" ";" PARTS ${MAPPING})

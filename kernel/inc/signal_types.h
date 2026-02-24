@@ -112,6 +112,8 @@ typedef struct ucontext {
     stack_t uc_stack;       /* stack used by this context */
     mcontext_t uc_mcontext; /* machine-specific representation of */
                             /* saved context */
+    struct fpu_state uc_fpstate; /* FP register state (lazy FPU switching) */
+    uint32 uc_fpflags;           /* 0 = no FP state, 1 = uc_fpstate valid */
 } ucontext_t;
 
 typedef struct ksiginfo {

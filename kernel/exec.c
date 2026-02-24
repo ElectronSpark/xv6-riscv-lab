@@ -621,6 +621,15 @@ int exec(char *path, char **argv, char **envp) {
     // Reset caught signal handlers to SIG_DFL.
     sigacts_exec(p->sigacts);
 
+    // Reset FPU state — new program starts with no FP context.
+    THREAD_CLEAR_FPU_USED(p);
+    if (mycpu()->fpu_owner == p)
+        mycpu()->fpu_owner = NULL;
+    if (p->fpu_state != NULL) {
+        kmm_free(p->fpu_state);
+        p->fpu_state = NULL;
+    }
+
     // Close descriptors marked close-on-exec.
     vfs_fdtable_close_on_exec(p->fdtable);
 

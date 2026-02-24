@@ -4,6 +4,14 @@
 #include "types.h"
 
 /**
+ * FPU/SSE state save area for x86_64 (FXSAVE format).
+ * Must be 16-byte aligned.
+ */
+struct fpu_state {
+    uint8 fxsave_area[512];
+} __ALIGNED(16);
+
+/**
  * @brief x86_64 kernel-mode trap frame.
  *
  * Layout must match what trapvec.S pushes.  The CPU pushes SS, RSP,

@@ -3,6 +3,15 @@
 
 #include "types.h"
 
+/**
+ * FPU state save area for RISC-V (F+D extensions).
+ * 32 double-precision FP registers (f0-f31) + fcsr.
+ */
+struct fpu_state {
+    uint64 f[32];    /* f0-f31:  64-bit each (double-precision) */
+    uint32 fcsr;     /* floating-point control and status register */
+} __ALIGNED(16);
+
 struct trapframe {
     uint64 ra;
     uint64 sp;

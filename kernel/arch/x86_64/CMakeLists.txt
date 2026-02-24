@@ -17,6 +17,7 @@ set(ARCH_S_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/entry.S
     ${CMAKE_CURRENT_SOURCE_DIR}/proc/swtch.S
     ${CMAKE_CURRENT_SOURCE_DIR}/proc/sig_trampoline.S
+    ${CMAKE_CURRENT_SOURCE_DIR}/proc/fpu.S
     ${CMAKE_CURRENT_SOURCE_DIR}/irq/trapvec.S
     ${CMAKE_CURRENT_SOURCE_DIR}/irq/trampoline.S
 )

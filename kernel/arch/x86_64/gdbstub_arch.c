@@ -16,8 +16,8 @@
  *   32 fctrl  33 fstat  34 ftag   35 fiseg (32-bit FPU control registers)
  *   36 fioff  37 foseg  38 fooff  39 fop
  *
- * We report 40 registers.  The FPU registers (24-39) are always zero
- * because xv6 does not save/restore FPU state.  GDB's org.gnu.gdb.i386.core
+ * We report 40 registers.  FPU registers (24-39) are read from the
+ * thread's fpu_state (FXSAVE format).  GDB's org.gnu.gdb.i386.core
  * feature REQUIRES these registers — without them GDB rejects the target
  * description with "Architecture rejected target-supplied description".
  */
@@ -25,6 +25,7 @@
 #include "types.h"
 #include "trapframe.h"
 #include "gdbstub_arch.h"
+#include "string.h"
 
 /* ──────────────────────────────────────────────────────────────────────────── */
 /* Constants                                                                   */
@@ -88,7 +89,7 @@ uint64 gdb_arch_get_reg(struct utrapframe *tf, int regnum)
     case 21: return 0;                 /* es — not saved */
     case 22: return 0;                 /* fs — not saved */
     case 23: return 0;                 /* gs — not saved */
-    /* FPU registers 24-39: xv6 doesn't save FPU state, return 0 */
+    /* FPU registers 24-39: use gdb_arch_read_reg_bytes for byte-level access */
     default: return 0;
     }
 }
@@ -118,7 +119,7 @@ void gdb_arch_set_reg(struct utrapframe *tf, int regnum, uint64 val)
     case 18: t->cs     = val; break;
     case 19: t->ss     = val; break;
     /* ds, es, fs, gs (20-23): silently ignore writes */
-    /* FPU registers (24-39): silently ignore writes — xv6 has no FPU state */
+    /* FPU registers (24-39): use gdb_arch_write_reg_bytes for byte-level access */
     }
 }
 
@@ -178,6 +179,86 @@ void gdb_arch_set_hw_step(struct utrapframe *tf, int enable)
         tf->trapframe.rflags |= RFLAGS_TF;
     else
         tf->trapframe.rflags &= ~RFLAGS_TF;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────── */
+/* Byte-level register access (GP + FP via FXSAVE area)                        */
+/*                                                                             */
+/* FXSAVE layout (64-bit mode):                                                */
+/*   Offset 0:  FCW   (2 bytes)  — fctrl                                      */
+/*   Offset 2:  FSW   (2 bytes)  — fstat                                      */
+/*   Offset 4:  FTW   (1 byte)   — ftag (abridged)                            */
+/*   Offset 6:  FOP   (2 bytes)  — fop                                        */
+/*   Offset 8:  FIP   (8 bytes)  — fioff (lower 4 bytes)                      */
+/*   Offset 16: FDP   (8 bytes)  — fooff (lower 4 bytes)                      */
+/*   Offset 24: MXCSR (4 bytes)                                               */
+/*   Offset 32: ST0/MM0 (16 bytes, 10 significant) .. ST7/MM7                 */
+/* ──────────────────────────────────────────────────────────────────────────── */
+
+int gdb_arch_read_reg_bytes(struct utrapframe *tf, struct fpu_state *fps,
+                            int regnum, void *buf)
+{
+    int sz = gdb_arch_reg_size(regnum);
+    memset(buf, 0, sz);
+
+    if (regnum <= 23) {
+        /* GP register, rip, eflags, or segment — delegate to uint64 accessor */
+        uint64 val = gdb_arch_get_reg(tf, regnum);
+        memcpy(buf, &val, sz);
+    } else if (regnum <= 31) {
+        /* st0-st7 (80-bit = 10 bytes) from FXSAVE area offset 32+i*16 */
+        if (fps != NULL) {
+            int idx = regnum - 24;
+            memcpy(buf, &fps->fxsave_area[32 + idx * 16], 10);
+        }
+    } else if (fps != NULL) {
+        /* FPU control registers (32-39), 4 bytes each */
+        const uint8 *fx = fps->fxsave_area;
+        uint32 val = 0;
+        switch (regnum) {
+        case 32: val = *(const uint16 *)(fx + 0);  break; /* fctrl (FCW) */
+        case 33: val = *(const uint16 *)(fx + 2);  break; /* fstat (FSW) */
+        case 34: val = *(const uint8  *)(fx + 4);  break; /* ftag  (FTW abridged) */
+        case 35: val = 0;                          break; /* fiseg (N/A in 64-bit) */
+        case 36: val = *(const uint32 *)(fx + 8);  break; /* fioff (FIP low 4) */
+        case 37: val = 0;                          break; /* foseg (N/A in 64-bit) */
+        case 38: val = *(const uint32 *)(fx + 16); break; /* fooff (FDP low 4) */
+        case 39: val = *(const uint16 *)(fx + 6);  break; /* fop */
+        }
+        memcpy(buf, &val, 4);
+    }
+    return sz;
+}
+
+int gdb_arch_write_reg_bytes(struct utrapframe *tf, struct fpu_state *fps,
+                             int regnum, const void *buf)
+{
+    int sz = gdb_arch_reg_size(regnum);
+
+    if (regnum <= 23) {
+        uint64 val = 0;
+        memcpy(&val, buf, sz);
+        gdb_arch_set_reg(tf, regnum, val);
+    } else if (regnum <= 31 && fps != NULL) {
+        /* st0-st7: write 10 bytes to FXSAVE area */
+        int idx = regnum - 24;
+        memcpy(&fps->fxsave_area[32 + idx * 16], buf, 10);
+    } else if (fps != NULL) {
+        uint32 val = 0;
+        memcpy(&val, buf, 4);
+        uint8 *fx = fps->fxsave_area;
+        switch (regnum) {
+        case 32: *(uint16 *)(fx + 0)  = (uint16)val; break; /* fctrl */
+        case 33: *(uint16 *)(fx + 2)  = (uint16)val; break; /* fstat */
+        case 34: *(uint8  *)(fx + 4)  = (uint8)val;  break; /* ftag */
+        case 35: break;                                     /* fiseg: ignore */
+        case 36: *(uint32 *)(fx + 8)  = val;         break; /* fioff */
+        case 37: break;                                     /* foseg: ignore */
+        case 38: *(uint32 *)(fx + 16) = val;         break; /* fooff */
+        case 39: *(uint16 *)(fx + 6)  = (uint16)val; break; /* fop */
+        }
+    }
+    return sz;
 }
 
 /*

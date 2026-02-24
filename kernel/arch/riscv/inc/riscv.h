@@ -51,6 +51,14 @@ static inline void w_mepc(uint64 x) {
 #define SSTATUS_SIE (1L << 1)  // Supervisor Interrupt Enable
 #define SSTATUS_UIE (1L << 0)  // User Interrupt Enable
 
+// Floating-point unit status in sstatus (bits 14:13)
+#define SSTATUS_FS_SHIFT  13
+#define SSTATUS_FS_MASK   (3L << SSTATUS_FS_SHIFT)
+#define SSTATUS_FS_OFF    (0L << SSTATUS_FS_SHIFT)  // FP disabled; FP insns trap
+#define SSTATUS_FS_INITIAL (1L << SSTATUS_FS_SHIFT) // FP state is initial
+#define SSTATUS_FS_CLEAN  (2L << SSTATUS_FS_SHIFT)  // FP state not modified
+#define SSTATUS_FS_DIRTY  (3L << SSTATUS_FS_SHIFT)  // FP state modified
+
 static inline uint64 r_sstatus() {
     uint64 x;
     asm volatile("csrr %0, sstatus" : "=r"(x));

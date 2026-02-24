@@ -208,7 +208,7 @@ add_custom_command(
 
 add_library(ksymbols_placeholder OBJECT EXCLUDE_FROM_ALL ${KSYM_PLACEHOLDER_ASM})
 add_dependencies(ksymbols_placeholder generate_asm_offsets)
-set_source_files_properties(${KSYM_PLACEHOLDER_ASM} PROPERTIES GENERATED TRUE)
+set_source_files_properties(${KSYM_PLACEHOLDER_ASM} PROPERTIES GENERATED TRUE LANGUAGE C)
 
 # Compute .ksymbols_idx size from plain kernel's DWARF data, then generate
 # the final linker script for the symbols kernel.
