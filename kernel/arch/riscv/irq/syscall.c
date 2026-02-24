@@ -16,7 +16,7 @@
  * syscall for processes matching STRACE_PROC_NAME.
  * Set STRACE_PROC_NAME to NULL to trace ALL processes.
  * ============================================================ */
-#define STRACE_ENABLED   1
+#define STRACE_ENABLED   0
 #define STRACE_PROC_NAME "python"   /* NULL = trace all */
 
 #if STRACE_ENABLED

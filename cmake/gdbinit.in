@@ -2,7 +2,7 @@
 #
 # Usage:
 #   cd @CMAKE_BINARY_DIR@/sysroot
-#   gdb-multiarch -x .gdbinit bin/<program>
+#   @GDB_COMMAND@
 #
 # The argument is the user program to load symbols from.
 # All programs are available under bin/ (unstripped, with debug info).
@@ -15,7 +15,7 @@
 # Then on the xv6 shell:
 #   waitgdb -e python        (or any other program)
 
-set architecture riscv:rv64
+set architecture @GDB_ARCH@
 set sysroot .
 
 # Disable debuginfod — it downloads wrong source files from Ubuntu servers

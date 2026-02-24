@@ -342,6 +342,12 @@ void x86_idt_init(void) {
                      TRAPVEC_ALIAS_BASE + (vectors[i] - trapvec_page0),
                      SEG_KCODE, GATE_INTERRUPT, 1);
 
+    /* Vector 3 (INT3 / breakpoint) must be DPL=3 so user-mode
+     * processes can trigger it for GDB breakpoints / waitgdb. */
+    idt_set_gate(&idt[3],
+                 TRAPVEC_ALIAS_BASE + (vectors[3] - trapvec_page0),
+                 SEG_KCODE, GATE_USER_INT, 1);
+
     idtr.limit = sizeof(idt) - 1;
     idtr.base  = (uint64)idt;
     asm volatile("lidt %0" : : "m"(idtr));
@@ -600,21 +606,68 @@ void x86_trap_handler(struct trapframe *tf) {
         panic("kernel page fault");
     }
 
+    if (vec == 3 && from_user && current) {
+        /* INT3 breakpoint from user mode — hand off to gdbstub.
+         * Used by waitgdb() and GDB software breakpoints.
+         *
+         * x86 INT3 pushes the address AFTER the 1-byte 0xCC onto the
+         * stack, so RIP in the trapframe points one byte past the INT3.
+         * Adjust it back so RIP points AT the INT3, matching RISC-V
+         * behavior (sepc points at EBREAK).  This lets gdbstub_trap()
+         * match breakpoints by address uniformly on both architectures.
+         *
+         * IMPORTANT: modify the utrapframe (not the stack tf), because
+         * gdbstub_trap reads/writes p->trapframe->trapframe, and we
+         * return via usertrapret() which also uses the utrapframe.
+         * The stack-based tf is NOT used on the return path. */
+        current->trapframe->trapframe.rip -= 1;
+        extern int gdbstub_trap(struct thread *);
+        if (gdbstub_trap(current) != 0) {
+            /* GDB stub didn't handle it — deliver SIGTRAP */
+            printf("pid %d %s: breakpoint trap rip=0x%lx\n",
+                   current->pid, current->name,
+                   current->trapframe->trapframe.rip);
+            kill(current->pid, SIGTRAP);
+        }
+        usertrapret();  /* noreturn — returns via utrapframe */
+    }
+
+    if (vec == 1 && from_user && current) {
+        /* #DB (Debug exception) from user mode — triggered by RFLAGS.TF
+         * hardware single-step.  Hand off to gdbstub.
+         *
+         * Modify the utrapframe (not stack tf) because gdbstub_trap
+         * reads/writes the utrapframe, and usertrapret uses it too. */
+        current->trapframe->trapframe.rflags &= ~(1ULL << 8);
+        extern int gdbstub_trap(struct thread *);
+        if (gdbstub_trap(current) != 0) {
+            /* GDB stub didn't handle it — deliver SIGTRAP */
+            printf("pid %d %s: debug trap rip=0x%lx\n",
+                   current->pid, current->name,
+                   current->trapframe->trapframe.rip);
+            kill(current->pid, SIGTRAP);
+        }
+        usertrapret();  /* noreturn — returns via utrapframe */
+    }
+
     if (vec < 32) {
-        /* CPU exception (not #PF) */
+        /* CPU exception (not #PF, not #BP) */
         const char *name = exception_names[vec];
 
         if (from_user && current) {
-            /* User-mode exception — deliver SIGSEGV / SIGFPE / etc. */
+            /* User-mode exception — deliver appropriate signal */
+            int sig = SIGSEGV;
+            if (vec == 0 || vec == 16 || vec == 19) sig = SIGFPE;  /* #DE, #MF, #XM */
+            if (vec == 6) sig = SIGILL;                            /* #UD */
             printf("pid %d %s: exception %ld (%s) rip=0x%lx err=0x%lx\n",
                    current->pid, current->name, vec,
                    name ? name : "???", tf->rip, tf->err);
             assert(current->pid != 1, "init exiting");
             {
                 extern int gdbstub_signal_stop(struct thread *, int);
-                gdbstub_signal_stop(current, SIGSEGV);
+                gdbstub_signal_stop(current, sig);
             }
-            kill(current->pid, SIGSEGV);
+            kill(current->pid, sig);
             return;
         }
 

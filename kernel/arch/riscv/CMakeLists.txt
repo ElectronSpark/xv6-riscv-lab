@@ -11,6 +11,7 @@ set(ARCH_C_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/dev/fdt.c
     ${CMAKE_CURRENT_SOURCE_DIR}/platform_riscv.c
     ${CMAKE_CURRENT_SOURCE_DIR}/backtrace.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/gdbstub_arch.c
 )
 
 set(ARCH_S_FILES

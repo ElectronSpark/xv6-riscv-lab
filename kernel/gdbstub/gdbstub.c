@@ -34,6 +34,7 @@
 #include "printf.h"
 #include "string.h"
 #include "trapframe.h"
+#include "gdbstub_arch.h"
 #include "trap.h"
 #include "proc/thread.h"
 #include "arch_thread.h"
@@ -106,13 +107,8 @@ static inline void gdb_trace_pkt(const char *dir, const char *data, int len)
 { (void)dir; (void)data; (void)len; }
 #endif
 
-/* RISC-V EBREAK encoding */
-#define RV_EBREAK           0x00100073U   /* 32-bit EBREAK */
-#define RV_C_EBREAK         0x9002U       /* 16-bit compressed EBREAK */
-
-/* Number of GP registers GDB expects for RISC-V (x0-x31 + pc = 33) */
-#define GDB_NUM_REGS        33
-#define GDB_REG_BYTES       (GDB_NUM_REGS * 8)
+/* Number of GP registers is architecture-dependent (see gdbstub_arch.h).
+ * gdb_arch_num_regs is defined in the per-arch gdbstub_arch.c. */
 
 /* ──────────────────────────────────────────────────────────────────────────── */
 /* Software-breakpoint table                                                   */
@@ -153,7 +149,8 @@ static struct {
     int              stop_is_swbreak; /* 1 if stopped at our sw bp */
 
     /* Single-step state */
-    int              stepping;        /* 1 if single-stepping */
+    int              stepping;        /* 1 if sw single-stepping */
+    int              hw_stepping;     /* 1 if hw single-stepping (x86 TF) */
     uint64           step_bp_addr;    /* address of temporary step bp */
     uint32           step_bp_orig;    /* saved insn at step_bp_addr */
     uint8            step_bp_len;     /* 2 or 4 */
@@ -252,10 +249,12 @@ static int hex2nib(char c)
 }
 
 /* Write a 64-bit value as 16 hex chars (little-endian byte order). */
-static char *hex_le64(char *p, uint64 val)
+/* Encode a value as little-endian hex with variable byte width.
+ * For nbytes > 8, bytes beyond the uint64 range are emitted as 0x00. */
+static char *hex_le(char *p, uint64 val, int nbytes)
 {
-    for (int i = 0; i < 8; i++) {
-        uint8 b = (uint8)(val >> (i * 8));
+    for (int i = 0; i < nbytes; i++) {
+        uint8 b = (i < 8) ? (uint8)(val >> (i * 8)) : 0;
         *p++ = hexchars[b >> 4];
         *p++ = hexchars[b & 0xf];
     }
@@ -274,11 +273,13 @@ static uint64 hex2u64(const char *p, int nchars)
     return val;
 }
 
-/* Parse a little-endian hex-encoded 64-bit value (16 hex chars). */
-static uint64 hexle2u64(const char *p)
+/* Parse a little-endian hex-encoded value with variable byte width.
+ * For nbytes > 8, only the first 8 bytes are decoded into the uint64. */
+static uint64 hexle2val(const char *p, int nbytes)
 {
     uint64 val = 0;
-    for (int i = 0; i < 8; i++) {
+    int max = nbytes < 8 ? nbytes : 8;
+    for (int i = 0; i < max; i++) {
         int hi = hex2nib(p[i * 2]);
         int lo = hex2nib(p[i * 2 + 1]);
         if (hi < 0 || lo < 0) break;
@@ -454,145 +455,10 @@ static int gdb_recv_packet(void)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
-/* Register access                                                             */
+/* Register access — delegated to arch-specific gdbstub_arch.c                 */
 /*                                                                             */
-/* GDB RISC-V register order: x0..x31, pc                                      */
-/* Map from utrapframe fields.                                                 */
+/* gdb_arch_get_reg() / gdb_arch_set_reg() in gdbstub_arch.h                   */
 /* ──────────────────────────────────────────────────────────────────────────── */
-
-static uint64 gdb_get_reg(struct utrapframe *tf, int regnum)
-{
-#ifdef __x86_64__
-    struct trapframe *t = &tf->trapframe;
-    switch (regnum) {
-    case 0:  return t->rax;
-    case 1:  return t->rbx;
-    case 2:  return t->rcx;
-    case 3:  return t->rdx;
-    case 4:  return t->rsi;
-    case 5:  return t->rdi;
-    case 6:  return t->rbp;
-    case 7:  return t->rsp;
-    case 8:  return t->r8;
-    case 9:  return t->r9;
-    case 10: return t->r10;
-    case 11: return t->r11;
-    case 12: return t->r12;
-    case 13: return t->r13;
-    case 14: return t->r14;
-    case 15: return t->r15;
-    case 16: return t->rip;            /* pc */
-    case 17: return t->rflags;         /* eflags */
-    case 18: return t->cs;
-    case 19: return t->ss;
-    default: return 0;
-    }
-#else
-    struct trapframe *t = &tf->trapframe;
-    switch (regnum) {
-    case 0:  return 0;                 /* x0 = zero */
-    case 1:  return t->ra;             /* x1 */
-    case 2:  return t->sp;             /* x2 */
-    case 3:  return tf->gp;            /* x3 */
-    case 4:  return tf->tp;            /* x4 */
-    case 5:  return t->t0;             /* x5 */
-    case 6:  return t->t1;             /* x6 */
-    case 7:  return t->t2;             /* x7 */
-    case 8:  return t->s0;             /* x8 / fp */
-    case 9:  return tf->s1;            /* x9 */
-    case 10: return t->a0;             /* x10 */
-    case 11: return t->a1;             /* x11 */
-    case 12: return t->a2;             /* x12 */
-    case 13: return t->a3;             /* x13 */
-    case 14: return t->a4;             /* x14 */
-    case 15: return t->a5;             /* x15 */
-    case 16: return t->a6;             /* x16 */
-    case 17: return t->a7;             /* x17 */
-    case 18: return tf->s2;            /* x18 */
-    case 19: return tf->s3;            /* x19 */
-    case 20: return tf->s4;            /* x20 */
-    case 21: return tf->s5;            /* x21 */
-    case 22: return tf->s6;            /* x22 */
-    case 23: return tf->s7;            /* x23 */
-    case 24: return tf->s8;            /* x24 */
-    case 25: return tf->s9;            /* x25 */
-    case 26: return tf->s10;           /* x26 */
-    case 27: return tf->s11;           /* x27 */
-    case 28: return t->t3;             /* x28 */
-    case 29: return t->t4;             /* x29 */
-    case 30: return t->t5;             /* x30 */
-    case 31: return t->t6;             /* x31 */
-    case 32: return t->sepc;           /* pc  */
-    default: return 0;
-    }
-#endif
-}
-
-static void gdb_set_reg(struct utrapframe *tf, int regnum, uint64 val)
-{
-#ifdef __x86_64__
-    struct trapframe *t = &tf->trapframe;
-    switch (regnum) {
-    case 0:  t->rax    = val; break;
-    case 1:  t->rbx    = val; break;
-    case 2:  t->rcx    = val; break;
-    case 3:  t->rdx    = val; break;
-    case 4:  t->rsi    = val; break;
-    case 5:  t->rdi    = val; break;
-    case 6:  t->rbp    = val; break;
-    case 7:  t->rsp    = val; break;
-    case 8:  t->r8     = val; break;
-    case 9:  t->r9     = val; break;
-    case 10: t->r10    = val; break;
-    case 11: t->r11    = val; break;
-    case 12: t->r12    = val; break;
-    case 13: t->r13    = val; break;
-    case 14: t->r14    = val; break;
-    case 15: t->r15    = val; break;
-    case 16: t->rip    = val; break;   /* pc */
-    case 17: t->rflags = val; break;   /* eflags */
-    case 18: t->cs     = val; break;
-    case 19: t->ss     = val; break;
-    }
-#else
-    struct trapframe *t = &tf->trapframe;
-    switch (regnum) {
-    case 0:  break;                    /* x0 is hardwired */
-    case 1:  t->ra   = val; break;
-    case 2:  t->sp   = val; break;
-    case 3:  tf->gp  = val; break;
-    case 4:  tf->tp  = val; break;
-    case 5:  t->t0   = val; break;
-    case 6:  t->t1   = val; break;
-    case 7:  t->t2   = val; break;
-    case 8:  t->s0   = val; break;
-    case 9:  tf->s1  = val; break;
-    case 10: t->a0   = val; break;
-    case 11: t->a1   = val; break;
-    case 12: t->a2   = val; break;
-    case 13: t->a3   = val; break;
-    case 14: t->a4   = val; break;
-    case 15: t->a5   = val; break;
-    case 16: t->a6   = val; break;
-    case 17: t->a7   = val; break;
-    case 18: tf->s2  = val; break;
-    case 19: tf->s3  = val; break;
-    case 20: tf->s4  = val; break;
-    case 21: tf->s5  = val; break;
-    case 22: tf->s6  = val; break;
-    case 23: tf->s7  = val; break;
-    case 24: tf->s8  = val; break;
-    case 25: tf->s9  = val; break;
-    case 26: tf->s10 = val; break;
-    case 27: tf->s11 = val; break;
-    case 28: t->t3   = val; break;
-    case 29: t->t4   = val; break;
-    case 30: t->t5   = val; break;
-    case 31: t->t6   = val; break;
-    case 32: t->sepc = val; break;
-    }
-#endif
-}
 
 /* ──────────────────────────────────────────────────────────────────────────── */
 /* Software breakpoint management                                              */
@@ -701,20 +567,22 @@ static int gdb_insert_bp(uint64 addr, int len)
         return -1;
     }
 
-    /* Write EBREAK */
-    uint32 brk = (len == 2) ? RV_C_EBREAK : RV_EBREAK;
-    if (gdb_write_user_mem(addr, &brk, len) != 0) {
-        GDB_LOG("  -> write EBREAK FAILED");
+    /* Write breakpoint instruction */
+    uint32 brk = 0;
+    int brk_len = gdb_arch_brk_encode(&brk, len);
+    if (gdb_write_user_mem(addr, &brk, brk_len) != 0) {
+        GDB_LOG("  -> write breakpoint FAILED");
         return -1;
     }
 
-    /* Read-back verification: ensure EBREAK was actually written */
+    /* Read-back verification: ensure breakpoint was actually written */
     uint32 verify = 0;
-    if (gdb_read_user_mem(&verify, addr, len) != 0) {
+    if (gdb_read_user_mem(&verify, addr, brk_len) != 0) {
         GDB_LOG("  -> verify read-back FAILED");
         return -1;
     }
-    uint32 mask = (len == 2) ? 0xFFFFU : 0xFFFFFFFFU;
+    uint32 mask = (brk_len == 1) ? 0xFFU
+               : (brk_len == 2) ? 0xFFFFU : 0xFFFFFFFFU;
     if ((verify & mask) != (brk & mask)) {
         GDB_LOG("  -> VERIFY MISMATCH at 0x%lx: wrote 0x%x read 0x%x",
                 addr, brk & mask, verify & mask);
@@ -781,172 +649,16 @@ static void gdb_clean_step_bp(void)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
-/* Instruction decoding for single-step                                        */
+/* Instruction decoding for single-step — delegated to arch-specific code.     */
 /*                                                                             */
-/* We decode branches/jumps to find the possible next PC(s) and insert         */
-/* temporary breakpoints there.  For non-branches we simply bp at PC+insn_len. */
+/* gdb_arch_decode_next_pc() in gdbstub_arch.h / gdbstub_arch.c.               */
+/* On x86_64, hardware single-step (RFLAGS.TF) is used instead.               */
 /* ──────────────────────────────────────────────────────────────────────────── */
 
-/* Sign-extend a value from bit 'bit' (0-indexed) */
-static inline int64 sign_extend(uint64 val, int bit)
-{
-    uint64 mask = 1ULL << bit;
-    return (int64)((val ^ mask) - mask);
-}
-
-/* Is a 16-bit value a compressed instruction? (bottom 2 bits != 0b11) */
-static inline int is_compressed(uint16 insn)
-{
-    return (insn & 0x3) != 0x3;
-}
-
 /*
- * Decode the instruction at 'pc' and return the next PC.
- * For conditional branches, returns the branch-taken target
- * (we will also place a bp at pc + insn_len for the fall-through).
- * Returns 0 if we can't decode — caller should bp at pc + 4 as fallback.
- *
- * Sets *insn_len_out to the length of the current instruction (2 or 4).
- * Sets *is_branch_out to 1 if the instruction is a conditional branch
- * (meaning we need breakpoints at BOTH next_pc AND pc + insn_len).
- */
-static uint64 gdb_decode_next_pc(struct utrapframe *tf, uint64 pc,
-                                 int *insn_len_out, int *is_branch_out)
-{
-    uint32 insn = 0;
-    *is_branch_out = 0;
-
-    if (gdb_read_user_mem(&insn, pc, 4) != 0) {
-        /* Can't read — assume 4-byte, step to pc+4 */
-        *insn_len_out = 4;
-        return pc + 4;
-    }
-
-    uint16 lo16 = (uint16)(insn & 0xFFFF);
-
-    if (is_compressed(lo16)) {
-        /* ── Compressed instruction (2 bytes) ── */
-        *insn_len_out = 2;
-        uint16 ci = lo16;
-        uint16 op = ci & 0x3;
-        uint16 funct3 = (ci >> 13) & 0x7;
-
-        if (op == 1) {
-            if (funct3 == 5) {
-                /* C.J: offset in bits [12:2], target = pc + sext(offset) */
-                int32 imm = 0;
-                imm |= ((ci >> 3) & 0x7) << 1;   /* [3:1] */
-                imm |= ((ci >> 11) & 0x1) << 4;   /* [4] */
-                imm |= ((ci >> 2) & 0x1) << 5;    /* [5] */
-                imm |= ((ci >> 7) & 0x1) << 6;    /* [6] */
-                imm |= ((ci >> 6) & 0x1) << 7;    /* [7] */
-                imm |= ((ci >> 9) & 0x3) << 8;    /* [9:8] */
-                imm |= ((ci >> 8) & 0x1) << 10;   /* [10] */
-                imm |= ((ci >> 12) & 0x1) << 11;  /* [11] sign */
-                imm = (int32)sign_extend(imm, 11);
-                return pc + imm;
-            }
-            if (funct3 == 6 || funct3 == 7) {
-                /* C.BEQZ / C.BNEZ */
-                int32 imm = 0;
-                imm |= ((ci >> 3) & 0x3) << 1;    /* [2:1] */
-                imm |= ((ci >> 10) & 0x3) << 3;   /* [4:3] */
-                imm |= ((ci >> 2) & 0x1) << 5;    /* [5] */
-                imm |= ((ci >> 5) & 0x3) << 6;    /* [7:6] */
-                imm |= ((ci >> 12) & 0x1) << 8;   /* [8] sign */
-                imm = (int32)sign_extend(imm, 8);
-                *is_branch_out = 1;
-                /* Evaluate condition */
-                int rs1_idx = 8 + ((ci >> 7) & 0x7);  /* s0..s7  = x8..x15 */
-                uint64 rs1_val = gdb_get_reg(tf, rs1_idx);
-                if (funct3 == 6) {
-                    /* C.BEQZ: branch if rs1 == 0 */
-                    return (rs1_val == 0) ? pc + imm : pc + 2;
-                } else {
-                    /* C.BNEZ: branch if rs1 != 0 */
-                    return (rs1_val != 0) ? pc + imm : pc + 2;
-                }
-            }
-        }
-        if (op == 2) {
-            if (funct3 == 4) {
-                uint16 bit12 = (ci >> 12) & 1;
-                uint16 rs1 = (ci >> 7) & 0x1f;
-                uint16 rs2 = (ci >> 2) & 0x1f;
-                if (bit12 == 0 && rs2 == 0 && rs1 != 0) {
-                    /* C.JR: jalr x0, rs1, 0 */
-                    return gdb_get_reg(tf, rs1) & ~1ULL;
-                }
-                if (bit12 == 1 && rs2 == 0 && rs1 != 0) {
-                    /* C.JALR: jalr ra, rs1, 0 */
-                    return gdb_get_reg(tf, rs1) & ~1ULL;
-                }
-            }
-        }
-        /* Other compressed instructions: fall through to pc+2 */
-        return pc + 2;
-    }
-
-    /* ── 32-bit instruction ── */
-    *insn_len_out = 4;
-    uint32 opcode = insn & 0x7f;
-
-    switch (opcode) {
-    case 0x6F: {
-        /* JAL: J-type */
-        int32 imm = 0;
-        imm |= ((insn >> 21) & 0x3FF) << 1;    /* [10:1] */
-        imm |= ((insn >> 20) & 0x1) << 11;      /* [11] */
-        imm |= ((insn >> 12) & 0xFF) << 12;     /* [19:12] */
-        imm |= ((insn >> 31) & 0x1) << 20;      /* [20] sign */
-        imm = (int32)sign_extend(imm, 20);
-        return pc + imm;
-    }
-    case 0x67: {
-        /* JALR: I-type  (opcode=1100111) */
-        int rs1 = (insn >> 15) & 0x1f;
-        int32 imm = (int32)(insn >> 20);
-        imm = (int32)sign_extend(imm, 11);
-        uint64 base = gdb_get_reg(tf, rs1);
-        return (base + imm) & ~1ULL;
-    }
-    case 0x63: {
-        /* Branch: B-type */
-        int funct3 = (insn >> 12) & 0x7;
-        int rs1 = (insn >> 15) & 0x1f;
-        int rs2 = (insn >> 20) & 0x1f;
-        int32 imm = 0;
-        imm |= ((insn >> 8) & 0xF) << 1;       /* [4:1] */
-        imm |= ((insn >> 25) & 0x3F) << 5;      /* [10:5] */
-        imm |= ((insn >> 7) & 0x1) << 11;       /* [11] */
-        imm |= ((insn >> 31) & 0x1) << 12;      /* [12] sign */
-        imm = (int32)sign_extend(imm, 12);
-
-        uint64 v1 = gdb_get_reg(tf, rs1);
-        uint64 v2 = gdb_get_reg(tf, rs2);
-        int taken = 0;
-
-        switch (funct3) {
-        case 0: taken = (v1 == v2);                break; /* BEQ  */
-        case 1: taken = (v1 != v2);                break; /* BNE  */
-        case 4: taken = ((int64)v1 < (int64)v2);  break; /* BLT  */
-        case 5: taken = ((int64)v1 >= (int64)v2); break; /* BGE  */
-        case 6: taken = (v1 < v2);                 break; /* BLTU */
-        case 7: taken = (v1 >= v2);                break; /* BGEU */
-        default: break;
-        }
-
-        *is_branch_out = 1;
-        return taken ? (pc + imm) : (pc + 4);
-    }
-    default:
-        return pc + 4;
-    }
-}
-
-/*
- * Insert a temporary breakpoint for single-stepping.
- * The instruction at 'addr' is saved and replaced with EBREAK.
+ * Insert a temporary breakpoint for single-stepping (software step).
+ * The instruction at 'addr' is saved and replaced with a breakpoint.
+ * Only used when gdb_arch_has_hw_step() returns 0.
  */
 static int gdb_place_step_bp(uint64 addr, int len)
 {
@@ -958,7 +670,8 @@ static int gdb_place_step_bp(uint64 addr, int len)
     gdb.step_bp_orig = orig;
     gdb.step_bp_len  = (uint8)len;
 
-    uint32 brk = (len == 2) ? RV_C_EBREAK : RV_EBREAK;
+    uint32 brk = 0;
+    gdb_arch_brk_encode(&brk, len);
     if (gdb_write_user_mem(addr, &brk, len) != 0)
         return -1;
 
@@ -973,13 +686,11 @@ static int gdb_place_step_bp(uint64 addr, int len)
  * stepping past a breakpoint on continue/step.  GDB does NOT send z0/Z0
  * packets around continues.
  *
- * If the target's sepc matches an active breakpoint, this function:
+ * If the target's PC matches an active breakpoint, this function:
  *   1. Restores the original instruction at the breakpoint address
- *   2. Places a step breakpoint at the next instruction
- *   3. Resumes the target for one instruction
- *   4. Waits for the target to stop at the step breakpoint
- *   5. Cleans up the step breakpoint
- *   6. Re-inserts the EBREAK at the original breakpoint address
+ *   2. Single-steps one instruction (hw TF or software decode+bp)
+ *   3. Waits for the target to stop
+ *   4. Re-inserts the breakpoint at the original address
  *
  * After return the target is stopped (waiting on target_resume) at the
  * instruction after the breakpoint.
@@ -994,7 +705,7 @@ static int gdb_step_over_bp(void)
     if (!gdb.target || !gdb.target->trapframe)
         return 0;
 
-    uint64 pc = gdb.target->trapframe->trapframe.sepc;
+    uint64 pc = gdb_arch_get_pc(gdb.target->trapframe);
 
     /* Find the breakpoint at the current PC */
     struct gdb_breakpoint *bp_at_pc = NULL;
@@ -1012,39 +723,54 @@ static int gdb_step_over_bp(void)
     /* 1. Restore the original instruction */
     gdb_write_user_mem(pc, &bp_at_pc->orig_insn, bp_at_pc->len);
 
-    /* 2. Decode next PC and place a step breakpoint there */
-    int insn_len = 4, is_branch = 0;
-    uint64 next_pc = gdb_decode_next_pc(gdb.target->trapframe, pc,
-                                         &insn_len, &is_branch);
-    uint16 lo16 = 0;
-    if (gdb_read_user_mem(&lo16, next_pc, 2) == 0 && is_compressed(lo16))
-        gdb_place_step_bp(next_pc, 2);
-    else
-        gdb_place_step_bp(next_pc, 4);
+    /* 2. Set up single-step: hardware TF or software decode+bp */
+    if (gdb_arch_has_hw_step()) {
+        gdb.hw_stepping = 1;
+        gdb_arch_set_hw_step(gdb.target->trapframe, 1);
+    } else {
+        int insn_len = 4, is_branch = 0;
+        uint64 next_pc = gdb_arch_decode_next_pc(gdb.target->trapframe, pc,
+                                                  &insn_len, &is_branch,
+                                                  gdb_read_user_mem);
+        uint16 lo16 = 0;
+        int bp_len = 4;
+        if (gdb_read_user_mem(&lo16, next_pc, 2) == 0)
+            bp_len = gdb_arch_brk_len(next_pc, &lo16, 2);
+        gdb_place_step_bp(next_pc, bp_len);
+    }
 
     /* 3. Resume the target for one instruction */
     sem_post(&gdb.target_resume);
 
-    /* 4. Wait for the target to stop at the step breakpoint */
+    /* 4. Wait for the target to stop */
     sem_wait(&gdb.target_stopped);
 
     /* Check for abnormal stops (exit / kill / thread exit) */
     if (gdb.target_exited || gdb.process_killed || gdb.thread_exited) {
-        gdb_clean_step_bp();
+        if (gdb_arch_has_hw_step()) {
+            gdb_arch_set_hw_step(gdb.target->trapframe, 0);
+            gdb.hw_stepping = 0;
+        } else
+            gdb_clean_step_bp();
         /* Re-post so the main loop can handle the event */
         sem_post(&gdb.target_stopped);
         return -1;
     }
 
-    /* 5. Clean up the step breakpoint */
-    gdb_clean_step_bp();
+    /* 5. Clean up single-step state */
+    if (gdb_arch_has_hw_step()) {
+        gdb_arch_set_hw_step(gdb.target->trapframe, 0);
+        gdb.hw_stepping = 0;
+    } else
+        gdb_clean_step_bp();
 
-    /* 6. Re-insert the EBREAK at the original breakpoint address */
-    uint32 brk = (bp_at_pc->len == 2) ? RV_C_EBREAK : RV_EBREAK;
-    gdb_write_user_mem(bp_at_pc->addr, &brk, bp_at_pc->len);
+    /* 6. Re-insert breakpoint at the original address */
+    uint32 brk = 0;
+    int brk_len = gdb_arch_brk_encode(&brk, bp_at_pc->len);
+    gdb_write_user_mem(bp_at_pc->addr, &brk, brk_len);
 
     GDB_DBG("step-over complete, target now at 0x%lx",
-              gdb.target->trapframe->trapframe.sepc);
+              gdb_arch_get_pc(gdb.target->trapframe));
     return 1;
 }
 
@@ -1389,12 +1115,12 @@ static void gdb_handle_packet(const char *pkt, int len)
         struct thread *sel = gdb_selected_thread();
         if (!gdb.attached || !sel) {
             /* No target yet — return all zeroes so GDB can connect */
-            for (int i = 0; i < GDB_NUM_REGS; i++)
-                p = hex_le64(p, 0);
+            for (int i = 0; i < gdb_arch_num_regs; i++)
+                p = hex_le(p, 0, gdb_arch_reg_size(i));
         } else {
             struct utrapframe *tf = sel->trapframe;
-            for (int i = 0; i < GDB_NUM_REGS; i++)
-                p = hex_le64(p, gdb_get_reg(tf, i));
+            for (int i = 0; i < gdb_arch_num_regs; i++)
+                p = hex_le(p, gdb_arch_get_reg(tf, i), gdb_arch_reg_size(i));
         }
         gdb_send_packet(out, (int)(p - out));
         break;
@@ -1409,10 +1135,11 @@ static void gdb_handle_packet(const char *pkt, int len)
         }
         const char *hex = pkt + 1;
         struct utrapframe *tf = sel->trapframe;
-        for (int i = 0; i < GDB_NUM_REGS; i++) {
-            if (strlen(hex) < 16) break;
-            gdb_set_reg(tf, i, hexle2u64(hex));
-            hex += 16;
+        for (int i = 0; i < gdb_arch_num_regs; i++) {
+            int sz = gdb_arch_reg_size(i);
+            if (strlen(hex) < (unsigned)(sz * 2)) break;
+            gdb_arch_set_reg(tf, i, hexle2val(hex, sz));
+            hex += sz * 2;
         }
         gdb_ok();
         break;
@@ -1421,16 +1148,17 @@ static void gdb_handle_packet(const char *pkt, int len)
     /* ── p N — Read single register ── */
     case 'p': {
         int regnum = (int)hex2u64(pkt + 1, strlen(pkt + 1));
-        if (regnum < 0 || regnum >= GDB_NUM_REGS) {
+        if (regnum < 0 || regnum >= gdb_arch_num_regs) {
             gdb_error(0);
             break;
         }
         char *p = out;
+        int sz = gdb_arch_reg_size(regnum);
         struct thread *sel = gdb_selected_thread();
         if (!gdb.attached || !sel)
-            p = hex_le64(p, 0);
+            p = hex_le(p, 0, sz);
         else
-            p = hex_le64(p, gdb_get_reg(sel->trapframe, regnum));
+            p = hex_le(p, gdb_arch_get_reg(sel->trapframe, regnum), sz);
         gdb_send_packet(out, (int)(p - out));
         break;
     }
@@ -1448,9 +1176,11 @@ static void gdb_handle_packet(const char *pkt, int len)
         }
         if (!eq) { gdb_error(0); break; }
         int regnum = (int)hex2u64(pkt + 1, (int)(eq - pkt - 1));
-        uint64 val = hexle2u64(eq + 1);
-        if (regnum >= 0 && regnum < GDB_NUM_REGS)
-            gdb_set_reg(sel->trapframe, regnum, val);
+        if (regnum >= 0 && regnum < gdb_arch_num_regs) {
+            int sz = gdb_arch_reg_size(regnum);
+            uint64 val = hexle2val(eq + 1, sz);
+            gdb_arch_set_reg(sel->trapframe, regnum, val);
+        }
         gdb_ok();
         break;
     }
@@ -1529,7 +1259,7 @@ static void gdb_handle_packet(const char *pkt, int len)
         /* Optional resume address */
         if (len > 1 && gdb_resolve_target() == 0) {
             uint64 addr = hex2u64(pkt + 1, len - 1);
-            gdb.target->trapframe->trapframe.sepc = addr;
+            gdb_arch_set_pc(gdb.target->trapframe, addr);
         }
 
         /*
@@ -1604,24 +1334,30 @@ static void gdb_handle_packet(const char *pkt, int len)
         /* Optional resume address */
         if (len > 1) {
             uint64 addr = hex2u64(pkt + 1, len - 1);
-            gdb.target->trapframe->trapframe.sepc = addr;
+            gdb_arch_set_pc(gdb.target->trapframe, addr);
         }
 
         /*
          * Direct-stop step: the target is sleeping in a syscall.
-         * Place a step breakpoint at the user PC so the thread stops
-         * on its first instruction when the syscall eventually returns.
+         * Set up single-step so the thread stops on its first
+         * instruction when the syscall eventually returns.
          */
         if (gdb.direct_stop) {
-            uint64 pc = gdb.target->trapframe->trapframe.sepc;
-            int insn_len = 4, is_branch = 0;
-            uint64 next_pc = gdb_decode_next_pc(gdb.target->trapframe, pc,
-                                                 &insn_len, &is_branch);
-            uint16 lo16 = 0;
-            if (gdb_read_user_mem(&lo16, next_pc, 2) == 0 && is_compressed(lo16))
-                gdb_place_step_bp(next_pc, 2);
-            else
-                gdb_place_step_bp(next_pc, 4);
+            if (gdb_arch_has_hw_step()) {
+                gdb.hw_stepping = 1;
+                gdb_arch_set_hw_step(gdb.target->trapframe, 1);
+            } else {
+                uint64 pc = gdb_arch_get_pc(gdb.target->trapframe);
+                int insn_len = 4, is_branch = 0;
+                uint64 next_pc = gdb_arch_decode_next_pc(gdb.target->trapframe, pc,
+                                                          &insn_len, &is_branch,
+                                                          gdb_read_user_mem);
+                uint16 lo16 = 0;
+                int bp_len = 4;
+                if (gdb_read_user_mem(&lo16, next_pc, 2) == 0)
+                    bp_len = gdb_arch_brk_len(next_pc, &lo16, 2);
+                gdb_place_step_bp(next_pc, bp_len);
+            }
             /* Clear gdb_stopped on all threads and release direct_stop */
             if (gdb.target->thread_group) {
                 struct thread_group *tg = gdb.target->thread_group;
@@ -1635,8 +1371,8 @@ static void gdb_handle_packet(const char *pkt, int len)
                 __atomic_store_n(&gdb.target->gdb_stopped, 0, __ATOMIC_RELEASE);
             }
             __atomic_store_n(&gdb.direct_stop, 0, __ATOMIC_RELEASE);
-            GDB_DBG("-> stepping from direct-stop, pid %d, next_pc=0x%lx",
-                      gdb.target_pid, next_pc);
+            GDB_DBG("-> stepping from direct-stop, pid %d",
+                      gdb.target_pid);
             gdb.target_running = 1;
             break;
         }
@@ -1663,21 +1399,27 @@ static void gdb_handle_packet(const char *pkt, int len)
             }
         }
 
-        uint64 pc = gdb.target->trapframe->trapframe.sepc;
-        int insn_len = 4, is_branch = 0;
-        uint64 next_pc = gdb_decode_next_pc(gdb.target->trapframe, pc,
-                                             &insn_len, &is_branch);
-
-        /* For branches, we know the direction based on register values.
-         * Place step bp at the computed next_pc. */
-        uint16 lo16 = 0;
-        if (gdb_read_user_mem(&lo16, next_pc, 2) == 0 && is_compressed(lo16))
-            gdb_place_step_bp(next_pc, 2);
-        else
-            gdb_place_step_bp(next_pc, 4);
+        /* Normal single-step: hardware TF or software decode+bp */
+        if (gdb_arch_has_hw_step()) {
+            gdb.hw_stepping = 1;
+            gdb_arch_set_hw_step(gdb.target->trapframe, 1);
+            GDB_DBG("-> hw-stepping target pid %d", gdb.target_pid);
+        } else {
+            uint64 pc = gdb_arch_get_pc(gdb.target->trapframe);
+            int insn_len = 4, is_branch = 0;
+            uint64 next_pc = gdb_arch_decode_next_pc(gdb.target->trapframe, pc,
+                                                      &insn_len, &is_branch,
+                                                      gdb_read_user_mem);
+            uint16 lo16 = 0;
+            int bp_len = 4;
+            if (gdb_read_user_mem(&lo16, next_pc, 2) == 0)
+                bp_len = gdb_arch_brk_len(next_pc, &lo16, 2);
+            gdb_place_step_bp(next_pc, bp_len);
+            GDB_DBG("-> sw-stepping target pid %d, next_pc=0x%lx",
+                      gdb.target_pid, next_pc);
+        }
 
         /* Resume the target.  Non-blocking, like 'c'. */
-        GDB_DBG("-> stepping target pid %d, next_pc=0x%lx", gdb.target_pid, next_pc);
         gdb.target_running = 1;
         sem_post(&gdb.target_resume);
         break;
@@ -1701,7 +1443,9 @@ static void gdb_handle_packet(const char *pkt, int len)
 
         uint64 addr = hex2u64(comma1 + 1, (int)(comma2 - comma1 - 1));
         int bplen = (int)hex2u64(comma2 + 1, strlen(comma2 + 1));
-        if (bplen != 2 && bplen != 4) bplen = 4;
+        /* Use arch-specific breakpoint length if GDB's 'kind' doesn't
+         * match what the architecture expects. */
+        if (bplen <= 0) bplen = gdb_arch_brk_len(addr, NULL, 0);
 
         if (gdb_insert_bp(addr, bplen) == 0)
             gdb_ok();
@@ -1728,7 +1472,7 @@ static void gdb_handle_packet(const char *pkt, int len)
 
         uint64 addr = hex2u64(comma1 + 1, (int)(comma2 - comma1 - 1));
         int bplen = (int)hex2u64(comma2 + 1, strlen(comma2 + 1));
-        if (bplen != 2 && bplen != 4) bplen = 4;
+        if (bplen <= 0) bplen = gdb_arch_brk_len(addr, NULL, 0);
 
         if (gdb_remove_bp(addr, bplen) == 0)
             gdb_ok();
@@ -1804,6 +1548,7 @@ static void gdb_handle_packet(const char *pkt, int len)
         if (strncmp(pkt, "qSupported", 10) == 0) {
             gdb_send("PacketSize=1000;swbreak+;vContSupported+"
                      ";multiprocess+;qXfer:threads:read+"
+                     ";qXfer:features:read+"
                      ";qXfer:exec-file:read+"
                      ";qXfer:libraries-svr4:read+"
                      ";ThreadEvents+;exec-events+");
@@ -1860,6 +1605,62 @@ static void gdb_handle_packet(const char *pkt, int len)
             gdb_handle_monitor(pkt + 6, len - 6);
         } else if (strcmp(pkt, "qTStatus") == 0) {
             gdb_send("T0");  /* no trace running */
+        } else if (strncmp(pkt, "qXfer:features:read:", 20) == 0) {
+            /*
+             * qXfer:features:read:annex:offset,length
+             * Return the target description XML so GDB knows our
+             * register set (avoids "Truncated register" errors on
+             * architectures where the default includes FPU/SSE).
+             */
+            const char *annex_start = pkt + 20;
+            const char *colon = NULL;
+            for (const char *s = annex_start; *s; s++) {
+                if (*s == ':') { colon = s; break; }
+            }
+            if (!colon) { gdb_error(0); break; }
+
+            /* Parse offset,length after the annex */
+            const char *params = colon + 1;
+            const char *comma = NULL;
+            for (const char *s = params; *s; s++) {
+                if (*s == ',') { comma = s; break; }
+            }
+            if (!comma) { gdb_error(0); break; }
+
+            uint64 offset = hex2u64(params, (int)(comma - params));
+            uint64 length = hex2u64(comma + 1, strlen(comma + 1));
+
+            /* We only support "target.xml" */
+            int annex_len = (int)(colon - annex_start);
+            if (annex_len != 10 ||
+                strncmp(annex_start, "target.xml", 10) != 0) {
+                gdb_error(0);
+                break;
+            }
+
+            int xml_len = 0;
+            const char *xml = gdb_arch_target_xml(&xml_len);
+
+            if ((int)offset >= xml_len) {
+                gdb_send("l");  /* done, no more data */
+                break;
+            }
+
+            int remaining = xml_len - (int)offset;
+            int chunk = remaining;
+            if (chunk > (int)length)
+                chunk = (int)length;
+            if (chunk > GDB_BUF_SIZE - 2)
+                chunk = GDB_BUF_SIZE - 2;
+
+            char *p = out;
+            if ((int)offset + chunk >= xml_len)
+                *p++ = 'l';  /* last chunk */
+            else
+                *p++ = 'm';  /* more data follows */
+            memcpy(p, xml + offset, chunk);
+            p += chunk;
+            gdb_send_packet(out, (int)(p - out));
         } else if (strncmp(pkt, "qXfer:threads:read:", 19) == 0) {
             /*
              * qXfer:threads:read::<offset>,<length>
@@ -2143,7 +1944,7 @@ int gdbstub_signal_stop(struct thread *t, int signo)
 
     GDB_LOG("signal_stop: tid=%d tgid=%d signo=%d pc=0x%lx stval=0x%lx",
               t->pid, tgid, signo,
-              t->trapframe->trapframe.sepc,
+              gdb_arch_get_pc(t->trapframe),
               t->trapframe->trapframe.stval);
 
     gdb.target      = t;
@@ -2180,7 +1981,7 @@ int gdbstub_trap(struct thread *t)
 {
     int tgid = thread_tgid(t);
     GDB_LOG("trap: tid=%d tgid=%d pc=0x%lx attached=%d target_pid=%d",
-              t->pid, tgid, t->trapframe->trapframe.sepc, gdb.attached, gdb.target_pid);
+              t->pid, tgid, gdb_arch_get_pc(t->trapframe), gdb.attached, gdb.target_pid);
     /* Is this a thread in the process we're debugging? */
     if (!gdb.attached || tgid != gdb.target_pid) {
         /*
@@ -2209,12 +2010,23 @@ int gdbstub_trap(struct thread *t)
         gdb.stop_on_exec = (arch_tf_get_arg0(t->trapframe) != 0) ? 1 : 0;
     }
 
-    uint64 pc = t->trapframe->trapframe.sepc;
+    uint64 pc = gdb_arch_get_pc(t->trapframe);
+
+    /* Hardware single-step completion (#DB on x86).  The PC is already
+     * past the stepped instruction — treat it as a step hit. */
+    int is_hw_step = 0;
+    if (gdb.hw_stepping) {
+        is_hw_step = 1;
+        gdb.hw_stepping = 0;
+    }
 
     /* Check if this is one of our breakpoints or a step bp. */
     int is_our_bp = 0;
     int is_entry_bp = 0;
-    if (gdb.stepping && pc == gdb.step_bp_addr) {
+    if (is_hw_step) {
+        /* Hardware step: always ours, PC is at the next instruction */
+        is_our_bp = 1;
+    } else if (gdb.stepping && pc == gdb.step_bp_addr) {
         is_our_bp = 1;
     } else {
         for (int i = 0; i < gdb.nbps; i++) {
@@ -2247,13 +2059,10 @@ int gdbstub_trap(struct thread *t)
      */
     if (!is_our_bp) {
         uint16 lo16 = 0;
-        if (gdb_read_user_mem(&lo16, pc, 2) == 0 && is_compressed(lo16)) {
-            GDB_DBG("trap: user EBREAK (compressed) at 0x%lx, advancing sepc +2", pc);
-            t->trapframe->trapframe.sepc += 2;
-        } else {
-            GDB_DBG("trap: user EBREAK at 0x%lx, advancing sepc +4", pc);
-            t->trapframe->trapframe.sepc += 4;
-        }
+        gdb_read_user_mem(&lo16, pc, 2);
+        int advance = gdb_arch_user_brk_len(pc, &lo16, 2);
+        GDB_DBG("trap: user breakpoint at 0x%lx, advancing pc +%d", pc, advance);
+        gdb_arch_set_pc(t->trapframe, pc + advance);
     } else {
         GDB_DBG("trap: our bp at 0x%lx (step=%d entry=%d)", pc, gdb.stepping, is_entry_bp);
     }
@@ -2343,9 +2152,8 @@ void gdbstub_exec_stop(struct thread *t, uint64 entry_pc, const char *path)
      */
     if (entry_pc != 0) {
         uint16 lo16 = 0;
-        int bp_len = 4;
-        if (gdb_read_user_mem(&lo16, entry_pc, 2) == 0 && is_compressed(lo16))
-            bp_len = 2;
+        gdb_read_user_mem(&lo16, entry_pc, 2);
+        int bp_len = gdb_arch_brk_len(entry_pc, &lo16, 2);
         if (gdb_insert_bp(entry_pc, bp_len) == 0) {
             gdb.exec_entry_bp_active = 1;
             gdb.exec_entry_bp_addr = entry_pc;

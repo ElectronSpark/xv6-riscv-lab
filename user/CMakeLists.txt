@@ -810,6 +810,13 @@ endif()
 
 # Generate .gdbinit for remote debugging inside sysroot/.
 # Placed here (at the end) so CPYTHON_BIN, DASH_BIN etc. are defined.
+if(ARCH STREQUAL "x86_64")
+    set(GDB_ARCH "i386:x86-64")
+    set(GDB_COMMAND "gdb bin/<program>")
+else()
+    set(GDB_ARCH "riscv:rv64")
+    set(GDB_COMMAND "gdb-multiarch bin/<program>")
+endif()
 configure_file(
     ${CMAKE_SOURCE_DIR}/cmake/gdbinit.in
     ${MUSL_SYSROOT}/.gdbinit
