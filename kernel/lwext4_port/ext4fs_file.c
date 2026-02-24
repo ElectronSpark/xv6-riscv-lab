@@ -172,9 +172,14 @@ ssize_t ext4fs_file_write(struct vfs_file *file, const char *buf, size_t count,
     /* Enable write-back caching for the duration of the write */
     ext4_block_cache_write_back(&esb->bdev, 1);
 
-    /* Compute the number of existing file blocks (for allocation decision) */
+    /* Compute the number of existing file blocks (for allocation decision).
+     * Save the original on-disk size BEFORE the write loop because
+     * ext4_fs_append_inode_dblk inflates the on-disk inode size to
+     * block-aligned values.  We need the original size to decide whether
+     * the write extended the file. */
+    uint64_t orig_ondisk_size = ext4_inode_get_size(&fs->sb, ref.inode);
     uint32_t ifile_blocks =
-        (uint32_t)((ext4_inode_get_size(&fs->sb, ref.inode) + block_size - 1) /
+        (uint32_t)((orig_ondisk_size + block_size - 1) /
                    block_size);
 
     size_t bytes_written = 0;
@@ -243,12 +248,12 @@ ssize_t ext4fs_file_write(struct vfs_file *file, const char *buf, size_t count,
     }
 
     /* Update file size if we extended it.
-     * ext4_fs_append_inode_dblk already bumps the on-disk inode size by
-     * whole blocks, so we just need to ensure the final size reflects the
-     * actual number of bytes written (not rounded up to block boundary). */
+     * ext4_fs_append_inode_dblk inflates the on-disk inode size by whole
+     * blocks.  Compare against orig_ondisk_size (saved before the loop)
+     * to detect extension, then set the exact byte count so the file
+     * doesn't appear larger than what was actually written. */
     uint64_t new_pos = (uint64_t)pos + bytes_written;
-    uint64_t ondisk_size = ext4_inode_get_size(&fs->sb, ref.inode);
-    if (new_pos > ondisk_size) {
+    if (new_pos > orig_ondisk_size) {
         ext4_inode_set_size(ref.inode, new_pos);
         ref.dirty = true;
     }
