@@ -14,6 +14,7 @@
 #include "dev/fdt.h"
 #include "dev/uart.h"
 #include "proc/sched.h"
+#include "lock/rcu.h"
 
 /* Global platform info structure (RISC-V defines this in fdt.c) */
 struct platform_info platform;
@@ -465,8 +466,7 @@ void platform_secondary_cpu_init(void)
 
 void platform_start_per_cpu_services(int cpu)
 {
-    /* Stub — APIC timer, RCU will go here. */
-    (void)cpu;
+    rcu_kthread_start_cpu(cpu);
 }
 
 void platform_late_device_init(void)

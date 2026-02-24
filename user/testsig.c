@@ -4,9 +4,9 @@
 #include "user/user.h"
 
 #ifndef SIG_BLOCK
-#define SIG_BLOCK 1
-#define SIG_UNBLOCK 2
-#define SIG_SETMASK 3
+#define SIG_BLOCK 0
+#define SIG_UNBLOCK 1
+#define SIG_SETMASK 2
 #endif
 
 #ifndef SIGMASK

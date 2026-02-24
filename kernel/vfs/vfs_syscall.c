@@ -175,7 +175,7 @@ static struct vfs_file *__vfs_fdfree(int fd) {
  * Equivalent to sys_vfs_close but callable from within the kernel without
  * going through the syscall argument layer.
  */
-static void __vfs_close_fd(int fd) {
+static void __attribute__((unused)) __vfs_close_fd(int fd) {
     spin_lock(&current->fdtable->lock);
     struct vfs_file *f = __vfs_fdfree(fd);
     spin_unlock(&current->fdtable->lock);
@@ -1919,7 +1919,7 @@ static inline short __vfs_poll_always_ready(short events, int f_flags) {
  *   4. everything else                → always ready
  *      (regular files, directories, block devices)
  */
-static int __vfs_poll_scan(struct pollfd_k *pfds, int nfds) {
+static int __attribute__((unused)) __vfs_poll_scan(struct pollfd_k *pfds, int nfds) {
     int ready = 0;
 
     for (int i = 0; i < nfds; i++) {
@@ -2009,6 +2009,8 @@ done:
  * is performed without kqueue overhead.
  */
 uint64 sys_vfs_poll(void) {
+    return -ENOSYS;
+#if 0 /* poll disabled for debugging */
     uint64 fds_addr;
     int nfds;
     int timeout_ms;
@@ -2044,9 +2046,10 @@ uint64 sys_vfs_poll(void) {
         return -EFAULT;
     }
 
-    /* --- First pass: non-blocking scan --- */
+    /* --- poll disabled: always non-blocking scan --- */
     int ready = __vfs_poll_scan(pfds, nfds);
-    if (ready > 0 || timeout_ms == 0)
+    (void)timeout_ms; /* ignore timeout — poll disabled */
+    if (1) /* always take non-blocking path */
         goto copyout;
 
     /* --- Blocking path: use kqueue for event-driven wait --- */
@@ -2207,6 +2210,7 @@ copyout:
 
     kmm_free(pfds);
     return ready;
+#endif /* poll disabled */
 }
 
 /******************************************************************************

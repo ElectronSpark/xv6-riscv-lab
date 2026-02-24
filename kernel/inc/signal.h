@@ -98,10 +98,10 @@ int killed(struct thread *);
 int sigsuspend(const sigset_t *mask);
 int sigwait(const sigset_t *set, int *sig);
 
-/* POSIX / newlib-compatible values */
-#define SIG_BLOCK   1
-#define SIG_UNBLOCK 2
-#define SIG_SETMASK 3
+/* Linux convention — matches musl */
+#define SIG_BLOCK   0
+#define SIG_UNBLOCK 1
+#define SIG_SETMASK 2
 
 #define MINSIGSTKSZ (1UL << PGSHIFT)
 #define SIGSTKSZ (1UL << (PGSHIFT + 2))
