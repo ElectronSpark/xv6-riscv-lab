@@ -21,15 +21,15 @@
 
 int fetchaddr(uint64 addr, uint64 *ip) {
     struct thread *p = current;
-    if (!p || !p->vm)
-        return -1;
+    // if (!p || !p->vm)
+    //     return -1;
     return vm_copyin(p->vm, (char *)ip, addr, sizeof(*ip));
 }
 
 int fetchstr(uint64 addr, char *buf, int max) {
     struct thread *p = current;
-    if (!p || !p->vm)
-        return -1;
+    // if (!p || !p->vm)
+    //     return -1;
     if (vm_copyinstr(p->vm, buf, addr, max) < 0)
         return -1;
     return strlen(buf);

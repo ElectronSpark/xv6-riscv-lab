@@ -1569,6 +1569,15 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
 
     uint64 pte_flags = vma2pte_flags(new_flags);
 
+    /*
+     * On x86, PTE_R == PTE_V (Present), so a Present+User page is always
+     * readable.  For PROT_NONE, strip PTE_U so user-mode access faults
+     * (supervisor-only page).  The PTE remains valid (PTE_V set) so that
+     * __vma_set_free / __vma_copy still handle it correctly.
+     */
+    if ((prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0)
+        pte_flags &= ~PTE_U;
+
     vm_pgtable_lock(vm);
     for (uint64 va = addr; va < addr + size; va += PGSIZE) {
         pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);

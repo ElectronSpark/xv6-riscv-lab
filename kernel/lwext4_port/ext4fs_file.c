@@ -233,8 +233,11 @@ ssize_t ext4fs_file_write(struct vfs_file *file, const char *buf, size_t count,
             memcpy((char *)blk.data + off, buf + bytes_written, n);
         }
 
-        /* Mark block dirty */
-        blk.buf->flags |= 0x02; /* BC_DIRTY */
+        /* Mark block dirty and up-to-date.
+         * ext4_bcache_set_dirty sets both BC_UPTODATE and BC_DIRTY.
+         * BC_UPTODATE is required so ext4_bcache_free will flush
+         * (or insert into the dirty list) rather than drop the buffer. */
+        ext4_bcache_set_dirty(blk.buf);
         ext4_block_set(&esb->bdev, &blk);
         bytes_written += n;
     }
