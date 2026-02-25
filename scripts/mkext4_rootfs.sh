@@ -87,9 +87,16 @@ if [ -d "$PYLIB_SRC" ]; then
         --exclude='*.pyc' \
         "$PYLIB_SRC/" "$STAGING/usr/local/lib/python3.12/"
 
+    # Pre-compile .py -> .pyc to avoid expensive on-target compilation.
+    # This dramatically speeds up Python startup because each import no
+    # longer needs to parse source and write .pyc through ext2.
+    echo "mkext4_rootfs: pre-compiling Python bytecode..."
+    python3 -m compileall -q -j0 -b "$STAGING/usr/local/lib/python3.12/" 2>/dev/null || true
+
     PYFILE_COUNT=$(find "$STAGING/usr/local/lib/python3.12/" -type f | wc -l)
+    PYC_COUNT=$(find "$STAGING/usr/local/lib/python3.12/" -name '*.pyc' | wc -l)
     PYUSED=$(du -sh "$STAGING/usr/local/lib/python3.12/" | cut -f1)
-    echo "mkext4_rootfs: Python stdlib: ${PYFILE_COUNT} files (${PYUSED})"
+    echo "mkext4_rootfs: Python stdlib: ${PYFILE_COUNT} files (${PYC_COUNT} .pyc) (${PYUSED})"
 else
     echo "mkext4_rootfs: warning: Python Lib not found at ${PYLIB_SRC}" >&2
 fi

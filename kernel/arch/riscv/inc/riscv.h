@@ -313,6 +313,11 @@ static inline void sfence_vma() {
     asm volatile("sfence.vma zero, zero");
 }
 
+// flush a single page from the TLB.
+static inline void sfence_vma_page(uint64 va) {
+    asm volatile("sfence.vma %0, zero" : : "r"(va) : "memory");
+}
+
 #endif /* !defined(ON_HOST_OS) */
 
 

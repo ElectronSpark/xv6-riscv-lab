@@ -96,6 +96,13 @@ int sockwrite(struct sock *si, uint64 addr, int n) {
     struct thread *pr = current;
     struct mbuf *m;
 
+    if (n < 0)
+        return -EINVAL;
+    /* Clamp to maximum mbuf payload to avoid panic in mbufput */
+    int max_payload = MBUF_SIZE - MBUF_DEFAULT_HEADROOM;
+    if (n > max_payload)
+        return -EMSGSIZE;
+
     m = mbufalloc(MBUF_DEFAULT_HEADROOM);
     if (!m)
         return -ENOMEM;

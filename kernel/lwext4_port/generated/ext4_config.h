@@ -31,8 +31,10 @@
 #define CONFIG_DEBUG_PRINTF       1
 #define CONFIG_DEBUG_ASSERT       1
 
-/* Block-device cache: 32 entries for better performance. */
-#define CONFIG_BLOCK_DEV_CACHE_SIZE  32
+/* Block-device cache: 256 entries for better performance.
+ * Python startup reads hundreds of directory entries and inodes;
+ * a larger cache avoids re-reading the same blocks repeatedly. */
+#define CONFIG_BLOCK_DEV_CACHE_SIZE  256
 
 /* Disable block-device statistics counters (saves a few cycles). */
 #define CONFIG_BLOCK_DEV_ENABLE_STATS 0

@@ -1026,10 +1026,10 @@ out_unlock_sb:
         }
     }
 
-    vfs_iput(target);
-    /* kqueue: notify EVFILT_VNODE watchers of new link */
+    /* kqueue: notify EVFILT_VNODE watchers of new link.\n     * Must happen BEFORE iput to avoid use-after-free. */
     if (ret == 0)
         vfs_inode_knote_notify(target, NOTE_LINK);
+    vfs_iput(target);
     return ret;
 }
 
@@ -1128,11 +1128,12 @@ out:
                 end_ret);
         }
     }
-    vfs_iput(target); // Drop our reference from lookup
-    vfs_release_dentry(&dentry);
-    /* kqueue: notify EVFILT_VNODE watchers of unlink/delete */
+    /* kqueue: notify EVFILT_VNODE watchers of unlink/delete.
+     * Must happen BEFORE iput — iput may free the inode. */
     if (ret == 0)
         vfs_inode_knote_notify(target, NOTE_DELETE);
+    vfs_iput(target); // Drop our reference from lookup
+    vfs_release_dentry(&dentry);
     return ret;
 }
 

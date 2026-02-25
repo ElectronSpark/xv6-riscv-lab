@@ -852,7 +852,7 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va)
     return pa;
 }
 
-static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte)
+static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
 {
     pte_t pte_val = *pte;
 
@@ -893,11 +893,11 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte)
         flags |= PTE_U;
     *pte = PA2PTE(pa) | flags;
 
-    sfence_vma();
+    sfence_vma_page(fault_va);
     return 0;
 }
 
-static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte)
+static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte, uint64 fault_va)
 {
     pte_t pte_val = *pte;
     void *pa = (void *)PTE2PA(pte_val);
@@ -924,11 +924,11 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte)
     flags |= PTE_V | PTE_A | PTE_D;
     *pte = PA2PTE(pa) | flags;
 
-    sfence_vma();
+    sfence_vma_page(fault_va);
     return 0;
 }
 
-static int __vma_validate_pte(vma_t *vma, pte_t *pte, uint64 flags)
+static int __vma_validate_pte(vma_t *vma, pte_t *pte, uint64 flags, uint64 fault_va)
 {
     bool pte_user = (*pte & PTE_U) != 0;
     bool vma_user = (flags & VMA_FLAG_USER) != 0;
@@ -936,10 +936,10 @@ static int __vma_validate_pte(vma_t *vma, pte_t *pte, uint64 flags)
     if (*pte != 0 && (pte_user ^ vma_user))
         return -EACCES;
 
-    if ((flags & PROT_WRITE) && __vma_validate_pte_rxw(vma, pte) != 0)
+    if ((flags & PROT_WRITE) && __vma_validate_pte_rxw(vma, pte, fault_va) != 0)
         return -EFAULT;
     else if ((flags & (PROT_READ | PROT_EXEC)) &&
-             __vma_validate_pte_rx(vma, pte) != 0)
+             __vma_validate_pte_rx(vma, pte, fault_va) != 0)
         return -EFAULT;
     return 0;
 }
@@ -1013,11 +1013,11 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                         pte_flags |= PTE_U;
                     pte_flags |= PTE_V | PTE_A | PTE_D;
                     *pte = PA2PTE(pa) | pte_flags;
-                    sfence_vma();
+                    sfence_vma_page(i);
                 }
                 continue;
             }
-            if (__vma_validate_pte(vma, pte, flags) != 0) {
+            if (__vma_validate_pte(vma, pte, flags, i) != 0) {
                 vm_pgtable_unlock(vma->vm);
                 return -EFAULT;
             }
@@ -1030,7 +1030,7 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
             vm_pgtable_unlock(vma->vm);
             return -ENOMEM;
         }
-        if (__vma_validate_pte(vma, pte, flags) != 0) {
+        if (__vma_validate_pte(vma, pte, flags, i) != 0) {
             vm_pgtable_unlock(vma->vm);
             return -EFAULT;
         }
@@ -1583,7 +1583,14 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
         pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
         if (pte != NULL && (*pte & PTE_V)) {
             uint64 pa = PTE2PA(*pte);
-            *pte = PA2PTE(pa) | pte_flags | PTE_V | PTE_A | PTE_D;
+            pte_t new_flags = pte_flags | PTE_V | PTE_A | PTE_D;
+            /* Preserve COW marker: if the page has PTE_RSW_w (COW-shared),
+             * do NOT grant PTE_W directly — keep PTE_RSW_w so the
+             * write-fault handler triggers a COW copy first. */
+            if ((*pte & PTE_RSW_w) && (new_flags & PTE_W)) {
+                new_flags = (new_flags & ~PTE_W) | PTE_RSW_w;
+            }
+            *pte = PA2PTE(pa) | new_flags;
         }
     }
     vm_pgtable_unlock(vm);

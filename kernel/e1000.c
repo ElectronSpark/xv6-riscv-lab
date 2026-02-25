@@ -279,7 +279,7 @@ int e1000_transmit(struct mbuf *m) {
     spin_lock(&e1000_lock);
     // get the current tail pointer of the transmission ring buffer
     uint32 index = regs[E1000_TDT];
-    if (index > TX_RING_SIZE) {
+    if (index >= TX_RING_SIZE) {
         panic("e1000 transmit: ring overflow");
     }
     struct tx_desc *desc = tx_ring + index;
@@ -328,6 +328,14 @@ STATIC void e1000_recv(void) {
         net_rx(buf);
         // allocate a new buffer
         struct mbuf *newbuf = mbufalloc(0);
+        if (newbuf == NULL) {
+            // Re-use old slot by resetting status; packet is already consumed.
+            // No new buffer available — hardware will drop the next packet
+            // into this slot and we'll lose it, but at least we don't crash.
+            desc->status = 0;
+            regs[E1000_RDT] = index;
+            return;
+        }
         // let the current descriptor point to the newly allocated buffer
         rx_mbufs[index] = newbuf;
         desc->addr = (uint64)newbuf->head;

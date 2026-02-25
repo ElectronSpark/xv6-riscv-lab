@@ -1919,7 +1919,7 @@ static inline short __vfs_poll_always_ready(short events, int f_flags) {
  *   4. everything else                → always ready
  *      (regular files, directories, block devices)
  */
-static int __attribute__((unused)) __vfs_poll_scan(struct pollfd_k *pfds, int nfds) {
+static int __vfs_poll_scan(struct pollfd_k *pfds, int nfds) {
     int ready = 0;
 
     for (int i = 0; i < nfds; i++) {
@@ -2009,8 +2009,6 @@ done:
  * is performed without kqueue overhead.
  */
 uint64 sys_vfs_poll(void) {
-    return -ENOSYS;
-// #if 0 /* poll disabled for debugging */
     uint64 fds_addr;
     int nfds;
     int timeout_ms;
@@ -2046,10 +2044,9 @@ uint64 sys_vfs_poll(void) {
         return -EFAULT;
     }
 
-    /* --- poll disabled: always non-blocking scan --- */
+    /* --- Non-blocking fast path (timeout_ms == 0) --- */
     int ready = __vfs_poll_scan(pfds, nfds);
-    (void)timeout_ms; /* ignore timeout — poll disabled */
-    if (1) /* always take non-blocking path */
+    if (timeout_ms == 0 || ready > 0)
         goto copyout;
 
     /* --- Blocking path: use kqueue for event-driven wait --- */
@@ -2210,7 +2207,242 @@ copyout:
 
     kmm_free(pfds);
     return ready;
-// #endif /* poll disabled */
+}
+
+/*
+ * sys_pselect6 — pselect6_time64 syscall for musl libc
+ *
+ * Implements the select/pselect interface by converting fd_set bitmaps
+ * into pollfd arrays and reusing the poll infrastructure.
+ *
+ * Arguments (Linux pselect6_time64 ABI):
+ *   a0 = nfds
+ *   a1 = readfds   (fd_set __user *, or NULL)
+ *   a2 = writefds   (fd_set __user *, or NULL)
+ *   a3 = exceptfds  (fd_set __user *, or NULL)
+ *   a4 = timeout    (struct __kernel_timespec __user *, or NULL)
+ *          { int64 tv_sec; int64 tv_nsec; }
+ *   a5 = sig_data   (struct { sigset_t *ss; size_t ss_len; } __user *, or NULL)
+ *          — signal mask argument (ignored — xv6 has limited signal support)
+ *
+ * Returns:
+ *   >= 0  number of ready file descriptors
+ *   < 0   -errno on error
+ */
+uint64 sys_pselect6(void) {
+    int nfds;
+    uint64 readfds_addr, writefds_addr, exceptfds_addr;
+    uint64 timeout_addr, sig_addr;
+
+    argint(0, &nfds);
+    argaddr(1, &readfds_addr);
+    argaddr(2, &writefds_addr);
+    argaddr(3, &exceptfds_addr);
+    argaddr(4, &timeout_addr);
+    argaddr(5, &sig_addr);
+
+    if (nfds < 0 || nfds > NOFILE)
+        return -EINVAL;
+
+    /* Parse timeout: NULL means block indefinitely */
+    int timeout_ms = -1;
+    if (timeout_addr != 0) {
+        int64 ts[2]; /* { tv_sec, tv_nsec } */
+        if (either_copyin(ts, 1, timeout_addr, sizeof(ts)) < 0)
+            return -EFAULT;
+        if (ts[0] < 0 || ts[1] < 0)
+            return -EINVAL;
+        /* Convert to milliseconds, clamping to INT_MAX */
+        int64 ms = ts[0] * 1000 + ts[1] / 1000000;
+        if (ms > 0x7fffffff)
+            ms = 0x7fffffff;
+        timeout_ms = (int)ms;
+    }
+
+    /* No fds to watch — just sleep */
+    if (nfds == 0) {
+        if (timeout_ms == 0)
+            return 0;
+        uint64 start = get_jiffs();
+        while (timeout_ms < 0 || (int)(get_jiffs() - start) < timeout_ms) {
+            sleep_ms(1);
+            if (signal_pending(current))
+                return -EINTR;
+        }
+        return 0;
+    }
+
+    /*
+     * Copy in the fd_set bitmaps.
+     * fd_set is an array of unsigned long (64-bit on riscv64/x86_64).
+     * We copy ceil(nfds / 8) bytes = the bits that matter.
+     */
+    int set_bytes = ((nfds + 7) / 8);
+    /* Align to 8-byte boundary for clean word access */
+    int set_words = (nfds + 63) / 64;
+    int alloc_bytes = set_words * 8;
+
+    uint64 *rfds = NULL, *wfds = NULL, *efds = NULL;
+
+    if (readfds_addr) {
+        rfds = kmm_alloc(alloc_bytes);
+        if (!rfds) return -ENOMEM;
+        memset(rfds, 0, alloc_bytes);
+        if (either_copyin(rfds, 1, readfds_addr, set_bytes) < 0) {
+            kmm_free(rfds);
+            return -EFAULT;
+        }
+    }
+    if (writefds_addr) {
+        wfds = kmm_alloc(alloc_bytes);
+        if (!wfds) { if (rfds) kmm_free(rfds); return -ENOMEM; }
+        memset(wfds, 0, alloc_bytes);
+        if (either_copyin(wfds, 1, writefds_addr, set_bytes) < 0) {
+            if (rfds) kmm_free(rfds);
+            kmm_free(wfds);
+            return -EFAULT;
+        }
+    }
+    if (exceptfds_addr) {
+        efds = kmm_alloc(alloc_bytes);
+        if (!efds) { if (rfds) kmm_free(rfds); if (wfds) kmm_free(wfds); return -ENOMEM; }
+        memset(efds, 0, alloc_bytes);
+        if (either_copyin(efds, 1, exceptfds_addr, set_bytes) < 0) {
+            if (rfds) kmm_free(rfds);
+            if (wfds) kmm_free(wfds);
+            kmm_free(efds);
+            return -EFAULT;
+        }
+    }
+
+    /*
+     * Build a pollfd array from the fd_set bitmaps.
+     * Each set fd gets an entry with the appropriate events mask.
+     * We need at most 'nfds' entries.
+     */
+    struct pollfd_k *pfds = kmm_alloc(nfds * sizeof(struct pollfd_k));
+    if (!pfds) {
+        if (rfds) kmm_free(rfds);
+        if (wfds) kmm_free(wfds);
+        if (efds) kmm_free(efds);
+        return -ENOMEM;
+    }
+
+    int npfds = 0;
+    /* For each fd in [0, nfds), check if any fd_set has it set.
+     * Track which pollfd index maps to which fd for result conversion. */
+    int *fd_map = kmm_alloc(nfds * sizeof(int)); /* fd_map[i] = original fd */
+    if (!fd_map) {
+        kmm_free(pfds);
+        if (rfds) kmm_free(rfds);
+        if (wfds) kmm_free(wfds);
+        if (efds) kmm_free(efds);
+        return -ENOMEM;
+    }
+
+    for (int fd = 0; fd < nfds; fd++) {
+        int word = fd / 64;
+        uint64 bit = 1ULL << (fd % 64);
+        short events = 0;
+
+        if (rfds && (rfds[word] & bit))
+            events |= (POLLIN | POLLRDNORM);
+        if (wfds && (wfds[word] & bit))
+            events |= (POLLOUT | POLLWRNORM);
+        if (efds && (efds[word] & bit))
+            events |= POLLPRI;
+
+        if (events) {
+            pfds[npfds].fd = fd;
+            pfds[npfds].events = events;
+            pfds[npfds].revents = 0;
+            fd_map[npfds] = fd;
+            npfds++;
+        }
+    }
+
+    /* Perform the actual poll */
+    int ready;
+    if (npfds == 0) {
+        ready = 0;
+    } else {
+        /* Non-blocking fast path */
+        ready = __vfs_poll_scan(pfds, npfds);
+        if (ready == 0 && timeout_ms != 0) {
+            /* Blocking path: simple sleep+rescan loop */
+            uint64 poll_start = get_jiffs();
+            for (;;) {
+                int sleep_chunk = 10; /* ms */
+                if (timeout_ms > 0) {
+                    int remaining = timeout_ms - (int)(get_jiffs() - poll_start);
+                    if (remaining <= 0)
+                        break;
+                    if (sleep_chunk > remaining)
+                        sleep_chunk = remaining;
+                }
+                sleep_ms(sleep_chunk);
+                if (signal_pending(current)) {
+                    ready = -EINTR;
+                    break;
+                }
+                ready = __vfs_poll_scan(pfds, npfds);
+                if (ready > 0)
+                    break;
+            }
+        }
+    }
+
+    /*
+     * Convert poll results back to fd_set bitmaps.
+     * Clear all sets first, then set bits for ready fds.
+     */
+    if (ready >= 0) {
+        if (rfds) memset(rfds, 0, alloc_bytes);
+        if (wfds) memset(wfds, 0, alloc_bytes);
+        if (efds) memset(efds, 0, alloc_bytes);
+
+        int count = 0;
+        for (int i = 0; i < npfds; i++) {
+            if (pfds[i].revents == 0)
+                continue;
+            int fd = fd_map[i];
+            int word = fd / 64;
+            uint64 bit = 1ULL << (fd % 64);
+            int got = 0;
+
+            if (rfds && (pfds[i].revents & (POLLIN | POLLRDNORM | POLLHUP | POLLERR))) {
+                rfds[word] |= bit;
+                got = 1;
+            }
+            if (wfds && (pfds[i].revents & (POLLOUT | POLLWRNORM | POLLERR))) {
+                wfds[word] |= bit;
+                got = 1;
+            }
+            if (efds && (pfds[i].revents & (POLLPRI | POLLNVAL))) {
+                efds[word] |= bit;
+                got = 1;
+            }
+            if (got)
+                count++;
+        }
+        ready = count;
+
+        /* Copy results back to user space */
+        if (rfds && either_copyout(1, readfds_addr, rfds, set_bytes) < 0)
+            ready = -EFAULT;
+        if (ready >= 0 && wfds && either_copyout(1, writefds_addr, wfds, set_bytes) < 0)
+            ready = -EFAULT;
+        if (ready >= 0 && efds && either_copyout(1, exceptfds_addr, efds, set_bytes) < 0)
+            ready = -EFAULT;
+    }
+
+    kmm_free(fd_map);
+    kmm_free(pfds);
+    if (rfds) kmm_free(rfds);
+    if (wfds) kmm_free(wfds);
+    if (efds) kmm_free(efds);
+
+    return ready;
 }
 
 /******************************************************************************
@@ -2452,6 +2684,9 @@ uint64 sys_vfs_readv(void) {
 
 /*
  * pread64(fd, buf, count, offset) — read at position without changing file offset.
+ *
+ * Atomically: save f_pos, seek to offset, read, restore f_pos — all under
+ * the file lock so concurrent read/write/lseek can't interleave.
  */
 uint64 sys_vfs_pread64(void) {
     int fd, count;
@@ -2470,15 +2705,25 @@ uint64 sys_vfs_pread64(void) {
     if (f == NULL)
         return -EBADF;
 
-    // Save and restore file position
-    loff_t saved = vfs_filelseek(f, 0, 1); // SEEK_CUR
-    if (saved < 0) {
+    struct vfs_inode *inode = vfs_inode_deref(&f->inode);
+    if (inode == NULL || !S_ISREG(inode->mode)) {
         vfs_fput(f);
         return -ESPIPE;
     }
-    vfs_filelseek(f, offset, 0); // SEEK_SET
-    ssize_t ret = vfs_fileread(f, (void *)buf_addr, count, true);
-    vfs_filelseek(f, saved, 0); // Restore
+
+    mutex_lock(&f->lock);
+    loff_t saved = f->f_pos;
+    f->f_pos = offset;
+
+    ssize_t ret;
+    if (f->ops == NULL || f->ops->read == NULL)
+        ret = -EOPNOTSUPP;
+    else
+        ret = f->ops->read(f, (void *)buf_addr, count, true);
+
+    /* Restore original position (don't advance f_pos) */
+    f->f_pos = saved;
+    mutex_unlock(&f->lock);
 
     vfs_fput(f);
     return ret;
@@ -2486,6 +2731,8 @@ uint64 sys_vfs_pread64(void) {
 
 /*
  * pwrite64(fd, buf, count, offset) — write at position without changing file offset.
+ *
+ * Atomic: save/set/restore f_pos under single file lock.
  */
 uint64 sys_vfs_pwrite64(void) {
     int fd, count;
@@ -2504,14 +2751,25 @@ uint64 sys_vfs_pwrite64(void) {
     if (f == NULL)
         return -EBADF;
 
-    loff_t saved = vfs_filelseek(f, 0, 1);
-    if (saved < 0) {
+    struct vfs_inode *inode = vfs_inode_deref(&f->inode);
+    if (inode == NULL || !S_ISREG(inode->mode)) {
         vfs_fput(f);
         return -ESPIPE;
     }
-    vfs_filelseek(f, offset, 0);
-    ssize_t ret = vfs_filewrite(f, (const void *)buf_addr, count, true);
-    vfs_filelseek(f, saved, 0);
+
+    mutex_lock(&f->lock);
+    loff_t saved = f->f_pos;
+    f->f_pos = offset;
+
+    ssize_t ret;
+    if (f->ops == NULL || f->ops->write == NULL)
+        ret = -EOPNOTSUPP;
+    else
+        ret = f->ops->write(f, (const void *)buf_addr, count, true);
+
+    /* Restore original position (don't advance f_pos) */
+    f->f_pos = saved;
+    mutex_unlock(&f->lock);
 
     vfs_fput(f);
     return ret;

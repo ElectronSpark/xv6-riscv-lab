@@ -81,8 +81,10 @@ struct lwip_sock {
     struct netconn *conn;        /* lwIP netconn handle */
     int            type;         /* SOCK_STREAM / SOCK_DGRAM / SOCK_RAW */
     int            protocol;     /* protocol number */
-    struct netbuf  *lastbuf;     /* partially consumed recv buffer (TCP/UDP) */
+    struct netbuf  *lastbuf;     /* partially consumed recv buffer (UDP) */
     uint16         lastoffset;   /* offset into lastbuf */
+    struct pbuf    *lastpbuf;    /* partially consumed TCP recv pbuf */
+    uint16         lastpbuf_off; /* bytes already consumed from lastpbuf */
 };
 
 /* Socket type constants (matching POSIX) */
@@ -149,6 +151,8 @@ static void lwip_sock_free(struct lwip_sock *sk)
         return;
     if (sk->lastbuf != NULL)
         netbuf_delete(sk->lastbuf);
+    if (sk->lastpbuf != NULL)
+        pbuf_free(sk->lastpbuf);
     if (sk->conn != NULL) {
         /*
          * Follow lwIP reference (lwip_close in sockets.c):
@@ -183,7 +187,33 @@ static ssize_t sock_file_read(struct vfs_file *file, char *buf, size_t count,
         struct pbuf *p = NULL;
         err_t err;
 
-        /* Check for leftover data from previous recv */
+        /* Check for leftover pbuf data from previous partial TCP read */
+        if (sk->lastpbuf != NULL) {
+            p = sk->lastpbuf;
+            uint16 avail = p->tot_len - sk->lastpbuf_off;
+            uint16 tocopy = (count < avail) ? (uint16)count : avail;
+
+            if (user) {
+                char tmpbuf[1500];
+                uint16 clen = (tocopy > sizeof(tmpbuf)) ? sizeof(tmpbuf) : tocopy;
+                pbuf_copy_partial(p, tmpbuf, clen, sk->lastpbuf_off);
+                if (vm_copyout(current->vm, (uint64)buf, tmpbuf, clen) < 0)
+                    return -EFAULT;
+                tocopy = clen;
+            } else {
+                pbuf_copy_partial(p, buf, tocopy, sk->lastpbuf_off);
+            }
+
+            sk->lastpbuf_off += tocopy;
+            if (sk->lastpbuf_off >= p->tot_len) {
+                pbuf_free(p);
+                sk->lastpbuf = NULL;
+                sk->lastpbuf_off = 0;
+            }
+            return tocopy;
+        }
+
+        /* Check for leftover netbuf data from previous recv (UDP-style) */
         if (sk->lastbuf != NULL) {
             struct netbuf *nb = sk->lastbuf;
             uint16 avail = netbuf_len(nb) - sk->lastoffset;
@@ -234,10 +264,12 @@ static ssize_t sock_file_read(struct vfs_file *file, char *buf, size_t count,
         }
 
         if (tocopy < p->tot_len) {
-            /* Save remainder — wrap in netbuf for consistency */
-            /* For TCP we just free and accept short read (standard POSIX) */
+            /* Save remainder for future reads — prevents TCP data loss */
+            sk->lastpbuf = p;
+            sk->lastpbuf_off = tocopy;
+        } else {
+            pbuf_free(p);
         }
-        pbuf_free(p);
         return tocopy;
 
     } else {
@@ -303,6 +335,11 @@ static ssize_t sock_file_write(struct vfs_file *file, const char *buf,
         return (ssize_t)written;
 
     } else {
+        /* Clamp to uint16 max to avoid truncation in netbuf_alloc */
+        if (count > 65535) {
+            return -EMSGSIZE;
+        }
+
         /* UDP: use netconn_send with netbuf */
         struct netbuf *nb = netbuf_new();
         if (nb == NULL)

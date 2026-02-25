@@ -553,6 +553,8 @@ if(EXISTS "${CPYTHON_SRC_DIR}/configure")
                     ac_cv_func_gethostbyname=yes
                     ac_cv_header_sys_event_h=yes
                     ac_cv_func_kqueue=yes
+                    ac_cv_func_select=yes
+                    ac_cv_func_pselect=yes
                     ac_cv_header_dlfcn_h=yes
                     ac_cv_search_dlopen=none\ required
                     --disable-ipv6

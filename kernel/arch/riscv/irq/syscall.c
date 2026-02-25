@@ -345,6 +345,7 @@ extern uint64 sys_vfs_ioctl(void);
 extern uint64 sys_tcgetattr(void);
 extern uint64 sys_tcsetattr(void);
 extern uint64 sys_vfs_poll(void);
+extern uint64 sys_pselect6(void);
 
 // *at() variants for musl libc compatibility
 extern uint64 sys_vfs_mkdirat(void);
@@ -504,7 +505,7 @@ STATIC uint64 (*syscalls[])(void) = {
 #endif
     [SYS_sched_rr_get_interval_time64] sys_ni_enosys,
     [SYS_recvmmsg_time64] sys_ni_enosys,
-    [SYS_pselect6_time64] sys_ni_enosys,
+    [SYS_pselect6_time64] sys_pselect6,
     [SYS_mq_timedsend_time64] sys_ni_enosys,
     [SYS_mq_timedreceive_time64] sys_ni_enosys,
 };

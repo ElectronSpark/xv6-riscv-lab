@@ -89,6 +89,11 @@ static inline void sfence_vma(void) {
 	asm volatile("movq %0, %%cr3" : : "r"(cr3) : "memory");
 }
 
+static inline void sfence_vma_page(uint64 va) {
+	/* Single-page TLB invalidation: much cheaper than full CR3 reload */
+	asm volatile("invlpg (%0)" : : "r"(va) : "memory");
+}
+
 #define MAKE_SATP(pagetable) ((uint64)(pagetable))
 static inline uint64 r_satp(void) {
 	uint64 val;
