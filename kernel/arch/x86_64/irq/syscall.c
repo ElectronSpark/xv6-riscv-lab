@@ -35,13 +35,27 @@ int fetchstr(uint64 addr, char *buf, int max) {
     return strlen(buf);
 }
 
+/*
+ * argraw — fetch raw syscall argument N from the trapframe.
+ *
+ * Linux x86-64 syscall convention:
+ *   arg0 = rdi,  arg1 = rsi,  arg2 = rdx,
+ *   arg3 = r10,  arg4 = r8,   arg5 = r9
+ *
+ * Note: r10 replaces rcx for the 4th argument because the SYSCALL
+ * instruction clobbers rcx (loads user RIP into it).  The userspace
+ * stub copies the C-convention rcx → r10 before issuing SYSCALL.
+ *
+ * rcx and r11 are "transaction registers" — clobbered by SYSCALL
+ * hardware.  They are NOT used for argument passing.
+ */
 uint64 argraw(int n) {
     struct thread *p = current;
     switch (n) {
     case 0: return p->trapframe->trapframe.rdi;
     case 1: return p->trapframe->trapframe.rsi;
     case 2: return p->trapframe->trapframe.rdx;
-    case 3: return p->trapframe->trapframe.r10;
+    case 3: return p->trapframe->trapframe.r10;   /* r10, not rcx (clobbered) */
     case 4: return p->trapframe->trapframe.r8;
     case 5: return p->trapframe->trapframe.r9;
     }

@@ -16,6 +16,11 @@
 #include <limits.h>
 
 /* ---- raw syscall helpers via syscall ---- */
+/*
+ * Linux x86-64 syscall convention:
+ *   rcx and r11 are clobbered by SYSCALL (transaction registers).
+ *   Arguments in rdi, rsi, rdx, r10, r8, r9.  Number in rax, return in rax.
+ */
 
 #if defined(__x86_64__)
 

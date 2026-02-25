@@ -42,7 +42,8 @@ static void (*trampoline_userret)(uint64 tf, uint64 user_cr3) = NULL;
  * usertrapret — return to user mode.
  *
  * Sets up kernel state in the utrapframe, maps the trapframe page,
- * configures per-CPU GS scratch, and returns via swapgs + iretq.
+ * stores the trapframe VA and kernel stack in RIP-relative variables
+ * (read by syscall_entry and alltraps), and returns via iretq.
  */
 void usertrapret(void) {
     struct thread *p = current;
@@ -96,6 +97,7 @@ void usertrapret(void) {
      * need to be per-CPU (e.g. in the cpu_local / TRAMPOLINE_CPULOCAL).
      */
     extern uint64 trampoline_kstack;
+    extern uint64 trampoline_trapframe_va;
     trampoline_kstack = p->ksp;
 
     /* Map this CPU's trapframe page into the user page table
@@ -122,33 +124,12 @@ void usertrapret(void) {
     }
     uint64 trapframe_base = vm_cpu_online(p->vm, cpu);
 
-    /* Set up per-CPU scratch for the next SYSCALL entry.
-     * When SYSCALL fires, swapgs will load GS base from KERNEL_GS_BASE,
-     * giving the entry code access to trapframe_va and scratch space. */
-    uint64 cpu_local_base =
-        TRAMPOLINE_CPULOCAL + ((uint64)cpu * (uint64)sizeof(struct cpu_local));
-    uint64 *syscall_scratch_va =
-        (uint64 *)(cpu_local_base + __builtin_offsetof(struct cpu_local,
-                                                       syscall_scratch));
-    uint64 *syscall_tf_va =
-        (uint64 *)(cpu_local_base + __builtin_offsetof(struct cpu_local,
-                                                       syscall_trapframe_va));
-    *syscall_tf_va = trapframe_base;
-
-    /* Seed SWAPGS state for SYSCALL entry path.
-     *
-     * The trampoline (userret) executes SWAPGS before IRETQ:
-     *   - KERNEL_GS_BASE → GS_BASE (user gets 0)
-     *   - GS_BASE → KERNEL_GS_BASE (kernel gets scratch pointer)
-     *
-     * So on next SYSCALL entry, swapgs loads GS_BASE from
-     * KERNEL_GS_BASE, giving access to per-CPU scratch/trapframe.
-     *
-     * IDT-based traps (alltraps) do NOT use SWAPGS — they read the
-     * kernel CR3 from trampoline_ksatp (RIP-relative in trapvec.S).
+    /*
+     * Store the trapframe VA for the next SYSCALL entry.
+     * syscall_entry reads this RIP-relative (same approach as alltraps
+     * uses for trampoline_kstack and trampoline_ksatp — no SWAPGS needed).
      */
-    wrmsr(MSR_KERNEL_GS_BASE, 0);
-    wrmsr(MSR_GS_BASE, (uint64)syscall_scratch_va);
+    trampoline_trapframe_va = trapframe_base;
 
     /* Ensure user RFLAGS is valid and has IF set.
      * Bit 1 in RFLAGS is architecturally fixed to 1.

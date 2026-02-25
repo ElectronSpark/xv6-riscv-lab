@@ -16,6 +16,13 @@
  *   offset 40: tls     (uint64)
  *   offset 48: ctid    (uint64)
  *   offset 56: ptid    (uint64)
+ *
+ * Linux x86-64 syscall convention:
+ *   rcx and r11 are clobbered by SYSCALL (transaction registers).
+ *   After the syscall instruction, rcx/r11 no longer hold their
+ *   pre-syscall values.  This is fine because this function consumes
+ *   rcx (=arg) before issuing syscall, and rcx/r11 are caller-saved
+ *   in the C ABI.
  */
 
 .global __clone

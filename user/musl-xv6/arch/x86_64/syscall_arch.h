@@ -1,11 +1,16 @@
 /*
  * syscall_arch.h — xv6 x86_64 syscall interface for musl
  *
- * xv6 uses x86_64 Linux convention:
- *   SYSCALL instruction, number in rax, args in rdi/rsi/rdx/r10/r8/r9
- *   Return in rax. Negative return = negated errno.
+ * Linux x86-64 syscall calling convention:
+ *   Syscall number : rax
+ *   Arguments      : rdi, rsi, rdx, r10, r8, r9  (up to 6)
+ *   Return value   : rax
+ *   Preserved      : rdi, rsi, rdx, r10, r8, r9, rbx, rbp, r12–r15, rsp
+ *   Clobbered      : rcx, r11  ("transaction registers")
  *
- * SYSCALL clobbers rcx (saves rip) and r11 (saves rflags).
+ * The SYSCALL instruction saves user RIP → rcx, user RFLAGS → r11.
+ * Callers must save rcx/r11 before SYSCALL if they need them.
+ * The 4th argument uses r10 (not rcx) because of this clobbering.
  */
 
 #define __SYSCALL_LL_E(x) (x)

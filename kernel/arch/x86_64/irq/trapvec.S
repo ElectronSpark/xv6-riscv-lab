@@ -283,22 +283,35 @@ vectors:
 /* ──────────────────────────────────────────────────────────────
  *  syscall_entry — SYSCALL instruction entry point (MSR_LSTAR).
  *
- *  On SYSCALL entry the CPU has:
+ *  Linux x86-64 syscall calling convention:
+ *    Syscall number : rax
+ *    Arguments      : rdi, rsi, rdx, r10, r8, r9  (up to 6)
+ *    Return value   : rax
+ *    Preserved      : rdi, rsi, rdx, r10, r8, r9, rbx, rbp, r12–r15
+ *    Clobbered      : rcx, r11  ("transaction registers")
+ *
+ *  The SYSCALL instruction itself sets:
  *    RCX = user RIP (return address)
  *    R11 = user RFLAGS
  *    CS/SS = kernel selectors from MSR_STAR
  *    Interrupts disabled (IF cleared by SFMASK)
  *    RSP = still user RSP (CPU does NOT switch stacks)
  *
- *  Strategy (SWAPGS for per-CPU scratch + fixed-address CR3):
- *    1. swapgs to get per-CPU scratch in GS base
- *       (SYSCALL always comes from user mode, so swapgs is unambiguous)
- *    2. Save user RSP to gs:0 (scratch)
- *    3. Load trapframe VA from gs:8
- *    4. Switch to kernel CR3 via trampoline_ksatp (RIP-relative)
- *    5. Save all user GPRs + metadata into utrapframe
- *    6. Load kernel stack from utrapframe.kernel_sp
- *    7. Call usertrap_syscall() in C
+ *  rcx and r11 are designated "transaction registers": the CPU
+ *  hardware overwrites them on SYSCALL entry, so user code must
+ *  save them before invoking SYSCALL if their values are needed.
+ *  After recording their CPU-set transition values (user RIP and
+ *  user RFLAGS) into the trapframe, the kernel freely reuses rcx
+ *  and r11 as scratch registers.
+ *
+ *  Strategy (RIP-relative variables, NO SWAPGS — same as alltraps):
+ *    1. Stash user RSP in trampoline_scratch (RIP-relative)
+ *    2. Load trapframe VA from trampoline_trapframe_va (RIP-relative)
+ *    3. Save all GPRs + metadata into utrapframe
+ *       (rcx and r11 hold CPU-set transition values, not user originals)
+ *    4. Use rcx/r11 as scratch to finish metadata (user RSP, etc.)
+ *    5. Read kernel_sp from trapframe, switch CR3 to kernel page table
+ *    6. Switch to kernel stack and call usertrap_syscall() in C
  *
  *  Utrapframe field offsets (struct trapframe then extra fields):
  *    0x00 r15,  0x08 r14,  0x10 r13,  0x18 r12
@@ -315,33 +328,29 @@ vectors:
 .globl syscall_entry
 syscall_entry:
     /*
-     * Step 1: swap GS base to get per-CPU scratch area.
-     * SYSCALL always comes from user-mode ring 3, so the swapgs
-     * direction is unambiguous (unlike IDT traps).
-     *
-     * Before: GS_BASE = user gs (0), KERNEL_GS_BASE = &cpu_scratch[cpu]
-     * After:  GS_BASE = &cpu_scratch[cpu], KERNEL_GS_BASE = user gs (0)
+     * Step 1: stash user RSP in RIP-relative scratch, load trapframe VA.
+     * trampoline_scratch      = temporary slot for user RSP
+     * trampoline_trapframe_va = trapframe VA (set by usertrapret)
      */
-    swapgs
+    movq %rsp, trampoline_scratch(%rip)   /* save user RSP to scratch      */
+    movq trampoline_trapframe_va(%rip), %rsp /* rsp = utrapframe VA (temp) */
 
     /*
-     * Step 2: save user RSP, load trapframe VA.
-     * gs:0 = scratch (for user RSP), gs:8 = trapframe VA
-     */
-    movq %rsp, %gs:0               /* save user RSP to scratch      */
-    movq %gs:8, %rsp               /* rsp = utrapframe VA (temp)    */
-
-    /*
-     * Step 3: save all user registers into utrapframe.
+     * Step 2: save all GPRs into utrapframe.
      * rsp points to the utrapframe mapped in the USER page table.
      * We must finish all reads/writes to this user VA BEFORE
      * switching CR3 to the kernel page table.
+     *
+     * note: rcx and r11 hold CPU-set transition values (user RIP and
+     * user RFLAGS respectively), NOT the caller’s original values.
+     * Per the Linux syscall convention they are "clobbered" — the
+     * caller must save them before SYSCALL if it needs them.
      */
     movq %r15, 0x00(%rsp)
     movq %r14, 0x08(%rsp)
     movq %r13, 0x10(%rsp)
     movq %r12, 0x18(%rsp)
-    movq %r11, 0x20(%rsp)          /* r11 = user RFLAGS             */
+    movq %r11, 0x20(%rsp)          /* r11 = user RFLAGS (clobbered)  */
     movq %r10, 0x28(%rsp)
     movq %r9,  0x30(%rsp)
     movq %r8,  0x38(%rsp)
@@ -349,42 +358,47 @@ syscall_entry:
     movq %rdi, 0x48(%rsp)
     movq %rsi, 0x50(%rsp)
     movq %rdx, 0x58(%rsp)
-    movq %rcx, 0x60(%rsp)          /* rcx = user RIP                */
+    movq %rcx, 0x60(%rsp)          /* rcx = user RIP (clobbered)     */
     movq %rbx, 0x68(%rsp)
-    movq %rax, 0x70(%rsp)          /* rax = syscall number          */
+    movq %rax, 0x70(%rsp)          /* rax = syscall number           */
 
-    /* Metadata fields */
-    movq $256, 0x78(%rsp)           /* trapno = 256 (syscall marker) */
-    movq $0,   0x80(%rsp)           /* err = 0                       */
-    movq %rcx, 0x88(%rsp)           /* rip = user RIP (from RCX)     */
-    movq $(0x28 | 3), 0x90(%rsp)    /* cs  = SEG_UCODE | DPL_USER    */
-    movq %r11, 0x98(%rsp)           /* rflags = user RFLAGS (from R11) */
+    /*
+     * Step 3: fill trapframe metadata fields.
+     * rcx and r11 are now "transaction registers" — their transition
+     * values have been saved above, so they are free as scratch.
+     */
+    movq $256, 0x78(%rsp)           /* trapno = 256 (syscall marker)  */
+    movq $0,   0x80(%rsp)           /* err = 0                        */
+    movq %rcx, 0x88(%rsp)           /* rip = user RIP (from RCX)      */
+    movq $(0x28 | 3), 0x90(%rsp)    /* cs  = SEG_UCODE | DPL_USER     */
+    movq %r11, 0x98(%rsp)           /* rflags = user RFLAGS (from R11)*/
 
-    /* Retrieve user RSP from scratch and store in trapframe */
-    movq %gs:0, %rax
-    movq %rax, 0xA0(%rsp)           /* rsp = user RSP                */
-    movq $(0x20 | 3), 0xA8(%rsp)    /* ss  = SEG_UDATA | DPL_USER    */
+    /* Use rcx (transaction reg) to retrieve user RSP from scratch */
+    movq trampoline_scratch(%rip), %rcx
+    movq %rcx, 0xA0(%rsp)           /* rsp = user RSP                 */
+    movq $(0x20 | 3), 0xA8(%rsp)    /* ss  = SEG_UDATA | DPL_USER     */
 
     /*
      * Step 4: read kernel_sp from trapframe, then switch CR3.
      * kernel_sp is at offset 0x120 — must read it while still
      * under user CR3 (the trapframe is at a user VA).
+     * Use r11 (transaction reg) for the CR3 load.
      */
-    movq 0x120(%rsp), %r15          /* r15 = kernel_sp (user VA ok)  */
+    movq 0x120(%rsp), %rcx          /* rcx = kernel_sp (user VA ok)   */
 
-    leaq trampoline_ksatp(%rip), %rax
-    movq (%rax), %rax
-    movq %rax, %cr3                 /* switch to kernel page table   */
+    leaq trampoline_ksatp(%rip), %r11
+    movq (%r11), %r11
+    movq %r11, %cr3                 /* switch to kernel page table    */
 
     /*
      * Step 5: switch to kernel stack and jump to C handler.
      * r15 was already saved to trapframe[0x00] above.
      */
-    movq %r15, %rsp                 /* switch to kernel stack        */
+    movq %rcx, %rsp                 /* switch to kernel stack         */
 
     cld
-    movabsq $usertrap_syscall, %rax
-    call *%rax
+    movabsq $usertrap_syscall, %r11
+    call *%r11
     /* usertrap_syscall calls usertrapret() and never returns */
     ud2
 
@@ -415,4 +429,30 @@ trampoline_ksatp:
 .align 8
 .globl trampoline_kstack
 trampoline_kstack:
+    .quad 0
+
+/*
+ * trampoline_scratch — temporary slot to save user RSP on SYSCALL entry.
+ *
+ * SYSCALL does not switch RSP, so we need a known location to stash
+ * the user RSP before loading the trapframe VA.  Accessed RIP-relative
+ * from the high alias.  Same single-CPU constraint as trampoline_kstack.
+ */
+.align 8
+.globl trampoline_scratch
+trampoline_scratch:
+    .quad 0
+
+/*
+ * trampoline_trapframe_va — utrapframe virtual address for SYSCALL entry.
+ *
+ * Written by usertrapret() (C code, identity-mapped address) before
+ * every return to user mode.  Read by syscall_entry (RIP-relative from
+ * the high alias) to locate the trapframe page in user address space.
+ *
+ * NOTE: single-CPU only.  For SMP, replace with a per-CPU slot.
+ */
+.align 8
+.globl trampoline_trapframe_va
+trampoline_trapframe_va:
     .quad 0

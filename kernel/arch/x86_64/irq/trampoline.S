@@ -41,22 +41,30 @@ userret:
     pushq $0x2b                   /* SEG_UCODE | DPL_USER */
     pushq 0x88(%rdi)              /* tf->rip */
 
-    /* Restore GPRs from trapframe. */
+    /*
+     * Restore GPRs from trapframe.
+     *
+     * For SYSCALL returns: rcx and r11 are "clobbered" per the Linux
+     * syscall convention.  Callers must save them before SYSCALL.
+     * We still restore them here so the IDT trap path (which shares
+     * this code) preserves the original user rcx/r11 correctly.
+     * On the SYSCALL path the restored values are the CPU-set
+     * transition state (user RIP / user RFLAGS), not originals.
+     */
     movq 0x00(%rdi), %r15
     movq 0x08(%rdi), %r14
     movq 0x10(%rdi), %r13
     movq 0x18(%rdi), %r12
-    movq 0x20(%rdi), %r11
+    movq 0x20(%rdi), %r11          /* clobbered on SYSCALL path      */
     movq 0x28(%rdi), %r10
     movq 0x30(%rdi), %r9
     movq 0x38(%rdi), %r8
     movq 0x40(%rdi), %rbp
     movq 0x50(%rdi), %rsi
     movq 0x58(%rdi), %rdx
-    movq 0x60(%rdi), %rcx
+    movq 0x60(%rdi), %rcx          /* clobbered on SYSCALL path      */
     movq 0x68(%rdi), %rbx
     movq 0x70(%rdi), %rax
     movq 0x48(%rdi), %rdi
 
-    swapgs
     iretq
