@@ -3,6 +3,7 @@
 #include "string.h"
 #include "x86.h"
 #include "memlayout.h"
+#include "seg.h"
 #include "smp/percpu.h"
 #include "smp/ipi.h"
 
@@ -46,9 +47,10 @@ void mycpu_init(uint64 hartid, bool trampoline) {
         hartid = 0;
     }
 
+    uint64 tp;
     if (!trampoline) {
         /* Early boot: before high shared mappings, use identity VA. */
-        __x86_tp = (uint64)&cpus[hartid];
+        tp = (uint64)&cpus[hartid];
     } else {
         /*
          * After arch_vm_init(), switch to high shared alias so mycpu()
@@ -56,10 +58,22 @@ void mycpu_init(uint64 hartid, bool trampoline) {
          */
         uint64 cpus_base = PGROUNDDOWN((uint64)cpus);
         uint64 cpu_off = (uint64)&cpus[hartid] - cpus_base;
-        __x86_tp = TRAMPOLINE_CPULOCAL + cpu_off;
+        tp = TRAMPOLINE_CPULOCAL + cpu_off;
     }
 
-    cpu_active_mask |= (1UL << hartid);
+    /* Keep the global in sync (for legacy code), but the authoritative
+     * per-CPU value is in MSR_GS_BASE (read by r_tp()). */
+    __x86_tp = tp;
+
+    /*
+     * Set kernel GS base to the per-CPU struct so that:
+     *   - Kernel code can use GS-relative accesses for per-CPU data
+     *   - swapgs on user→kernel transitions restores this value
+     */
+    wrmsr(MSR_GS_BASE, tp);
+    wrmsr(MSR_KERNEL_GS_BASE, 0);  /* user GS starts at 0 */
+
+    __atomic_fetch_or(&cpu_active_mask, (1UL << hartid), __ATOMIC_RELAXED);
 }
 
 cpumask_t get_cpu_active_mask(void) { return cpu_active_mask; }

@@ -67,7 +67,8 @@ struct trapframe {
 struct utrapframe {
     struct trapframe trapframe;
 
-    uint64 _spare[11]; /* placeholder: s1-s11 equivalent space */
+    uint64 user_gs_base; /* 0xB0: user GS base (saved/restored on trap) */
+    uint64 _spare[10];   /* placeholder: remaining spare space */
 
     uint64 irq_sp;
     uint64 irq_entry;

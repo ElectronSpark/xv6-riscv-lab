@@ -15,6 +15,10 @@
 #include "dev/uart.h"
 #include "proc/sched.h"
 #include "lock/rcu.h"
+#include "lapic.h"
+#include "param.h"
+#include "mm/page.h"
+#include "smp/percpu.h"
 
 /* Global platform info structure (RISC-V defines this in fdt.c) */
 struct platform_info platform;
@@ -455,8 +459,108 @@ void platform_post_vm_init(void)
 
 void platform_start_secondary_cpus(uint64 entry)
 {
-    /* Stub — APIC INIT/SIPI will go here. */
     (void)entry;
+
+    /*
+     * AP boot trampoline — copy to low memory and send INIT-SIPI-SIPI.
+     *
+     * The trampoline code (ap_trampoline.S) is linked into .rodata and
+     * copied to AP_BOOT_PA.  Before copying we patch the data area with
+     * the kernel CR3, per-CPU boot stack tops, and start_kernel address.
+     *
+     * Stacks are pre-reserved for ALL secondary cores before SIPI is sent.
+     * Each AP atomically increments ap_boot_next_cpu to claim a unique
+     * hartid, then uses that to index into ap_boot_stacks[].
+     */
+    #define AP_BOOT_PA  0x8000
+
+    extern uint8 ap_trampoline_start[];
+    extern uint8 ap_trampoline_end[];
+    extern uint64 ap_boot_cr3;
+    extern uint64 ap_boot_target;
+    extern uint64 ap_boot_cpus_base;
+    extern uint32 ap_boot_cpu_stride;
+    extern uint64 ap_boot_stacks_base;
+    extern uint32 ap_boot_next_cpu;
+
+    extern void start_kernel(int, void *, bool);
+    extern uint64 kernel_pagetable;
+    extern struct cpu_local cpus[];
+    extern char boot_stacks[];          /* entry.S: KERNEL_STACK_SIZE * NCPU */
+
+    uint64 tramp_size = (uint64)ap_trampoline_end - (uint64)ap_trampoline_start;
+    if (tramp_size > 4096)
+        panic("AP trampoline too large");
+
+    /* Patch data area in the source copy (rodata is identity-mapped, writable
+     * in kernel pagetable) */
+    ap_boot_cr3 = (uint64)kernel_pagetable;
+    ap_boot_target = (uint64)start_kernel;
+    ap_boot_cpus_base = (uint64)&cpus[0];
+    ap_boot_cpu_stride = (uint32)sizeof(struct cpu_local);
+    ap_boot_stacks_base = (uint64)boot_stacks; /* static array from entry.S */
+    ap_boot_next_cpu = 1;           /* BSP is 0; APs atomically claim 1,2,3... */
+
+    /* Stacks are pre-reserved in the static boot_stacks array (entry.S).
+     * Each AP computes its stack from boot_stacks + (hartid+1) * KERNEL_STACK_SIZE.
+     * No runtime allocation needed. */
+
+    /* Copy trampoline to low memory */
+    memmove((void *)(uint64)AP_BOOT_PA, ap_trampoline_start, tramp_size);
+
+    printf("[SMP] Starting secondary CPUs (trampoline at 0x%x, size %d)\n",
+           AP_BOOT_PA, (int)tramp_size);
+
+    /*
+     * INIT-SIPI-SIPI sequence (broadcast to all APs):
+     *
+     * 1. Send INIT IPI to all-except-self
+     * 2. Wait 10 ms
+     * 3. Send STARTUP IPI (vector = AP_BOOT_PA >> 12) to all-except-self
+     * 4. Wait 200 us
+     * 5. Send second STARTUP IPI (for reliability)
+     * 6. Wait 200 us
+     */
+
+    /* Wait for LAPIC ICR to be idle */
+    while (lapic_read(LAPIC_ICR_LO) & LAPIC_ICR_STATUS)
+        ;
+
+    /* INIT IPI: all-except-self, level assert */
+    lapic_write(LAPIC_ICR_HI, 0);
+    lapic_write(LAPIC_ICR_LO,
+                LAPIC_ICR_INIT | LAPIC_ICR_LEVEL |
+                (3 << 18));  /* destination shorthand: all-excl-self */
+
+    /* Wait ~10 ms (busy-loop using port 0x80 delay, ~1us each) */
+    for (volatile int i = 0; i < 10000; i++)
+        asm volatile("outb %%al, $0x80" : : "a"(0));
+
+    /* Send STARTUP IPI twice */
+    for (int sipi = 0; sipi < 2; sipi++) {
+        while (lapic_read(LAPIC_ICR_LO) & LAPIC_ICR_STATUS)
+            ;
+
+        lapic_write(LAPIC_ICR_HI, 0);
+        lapic_write(LAPIC_ICR_LO,
+                    LAPIC_ICR_STARTUP |
+                    (AP_BOOT_PA >> 12) |       /* vector = page number */
+                    (3 << 18));                 /* all-excl-self */
+
+        /* Wait ~200 us */
+        for (volatile int i = 0; i < 200; i++)
+            asm volatile("outb %%al, $0x80" : : "a"(0));
+    }
+
+    /* Wait a bit for APs to increment ap_boot_next_cpu */
+    for (volatile int i = 0; i < 50000; i++)
+        asm volatile("outb %%al, $0x80" : : "a"(0));
+
+    /* ap_boot_next_cpu started at 1 (BSP=0). After APs boot it equals
+     * the total number of CPUs (BSP + APs). */
+    uint32 total_cpus = __atomic_load_n(&ap_boot_next_cpu, __ATOMIC_ACQUIRE);
+    platform.ncpu = total_cpus;
+    printf("[SMP] %d CPUs online (1 BSP + %d APs)\n", total_cpus, total_cpus - 1);
 }
 
 void platform_secondary_cpu_init(void)

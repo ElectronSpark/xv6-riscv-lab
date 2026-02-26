@@ -92,10 +92,20 @@ TRAP_NOERR 31       /* (reserved) */
  *  alltraps — common entry.  Saves all GPRs, calls C handler,
  *  restores state and returns via IRETQ.
  *
- *  NO SWAPGS.  Instead, the kernel page table (CR3) is stored in
- *  trampoline_ksatp below (analogous to RISC-V trampoline_ksatp).
- *  It is accessed RIP-relative, which works from the high alias
- *  because the data lives in the same pages as the code.
+ *  Kernel mode: GS_BASE = per-CPU struct cpu_local.
+ *  User mode:   GS_BASE = user GS, KERNEL_GS_BASE = per-CPU.
+ *
+ *  On IDT entry from user mode, we swapgs after checking CPL so
+ *  the kernel gets per-CPU GS.  The user GS value (now in
+ *  KERNEL_GS_BASE) is read by the C handler via rdmsr and stored
+ *  in the utrapframe.  On return to user, usertrapret explicitly
+ *  sets MSR_GS_BASE = user_gs_base and MSR_KERNEL_GS_BASE = mycpu()
+ *  (Linux strategy: no swapgs chain, both MSRs set directly).
+ *
+ *  Kernel-mode traps skip swapgs (GS is already per-CPU).
+ *
+ *  The kernel page table (CR3) is stored in trampoline_ksatp
+ *  (RIP-relative), analogous to RISC-V trampoline_ksatp.
  *
  *  On IDT entry the CPU has already switched RSP to TSS.RSP0 or
  *  IST, so we are on a known kernel stack.  We only need to load
@@ -151,6 +161,15 @@ alltraps:
     testq $3, 24(%rsp)            /* CS & 3 → RPL                  */
     jz    .Lkstack_done           /* kernel mode → no switch needed */
 
+    /*
+     * User-mode entry: swap GS base so kernel sees per-CPU data.
+     * Before: GS_BASE = user GS, KERNEL_GS_BASE = per-CPU
+     * After:  GS_BASE = per-CPU,  KERNEL_GS_BASE = user GS
+     * The user GS value (now in KERNEL_GS_BASE) is saved to the
+     * trapframe later in the C handler via rdmsr.
+     */
+    swapgs
+
     /* ── FROM USER MODE ── copy interrupt frame to kstack ──
      *
      * IST layout at this point (RSP-relative):
@@ -167,8 +186,7 @@ alltraps:
     /* IST: rbx(+0) rax(+8) vec(+16) err(+24) rip(+32) cs(+40)
      *       rflags(+48) user_rsp(+56) ss(+64)                     */
 
-    leaq  trampoline_kstack(%rip), %rax
-    movq  (%rax), %rax            /* rax = kstack top (= p->ksp)   */
+    movq  %gs:88, %rax            /* rax = kstack top (= per-CPU intr_kstack_top) */
 
     /* Copy 7 values from IST to kstack[-56 .. kstack-8].          */
     movq  64(%rsp), %rbx
@@ -254,10 +272,9 @@ trapret:
     /*
      * Return via IRETQ.
      *
-     * No SWAPGS here.  User-mode returns never reach this point —
-     * they go through usertrapret() → trampoline (which handles
-     * SWAPGS + CR3 switch to user page table).
-     * Kernel-mode traps did not SWAPGS on entry, so no SWAPGS on exit.
+     * This path is only for kernel-mode traps.  User-mode returns
+     * go through usertrapret() → userret (which does swapgs).
+     * Kernel-mode traps did not swapgs on entry, so none on exit.
      */
     iretq
 
@@ -283,6 +300,18 @@ vectors:
 /* ──────────────────────────────────────────────────────────────
  *  syscall_entry — SYSCALL instruction entry point (MSR_LSTAR).
  *
+ *  Follows the Linux entry_64.S strategy:
+ *    0. swapgs: GS_BASE = KERNEL_GS_BASE = mycpu() (set by usertrapret)
+ *    1. Save user RSP to per-CPU scratch (%gs:64)
+ *    2. Switch CR3 to kernel page table immediately (RSP as scratch)
+ *    3. Load kernel stack from per-CPU (%gs:72)
+ *    4. Build struct trapframe on the kernel stack via pushq
+ *    5. Call usertrap_syscall(struct trapframe *tf)
+ *
+ *  GS state on entry: usertrapret always writes KERNEL_GS_BASE = mycpu()
+ *  before returning to user mode (Linux strategy), so swapgs reliably
+ *  yields GS_BASE = per-CPU regardless of prior swapgs chain state.
+ *
  *  Linux x86-64 syscall calling convention:
  *    Syscall number : rax
  *    Arguments      : rdi, rsi, rdx, r10, r8, r9  (up to 6)
@@ -297,108 +326,84 @@ vectors:
  *    Interrupts disabled (IF cleared by SFMASK)
  *    RSP = still user RSP (CPU does NOT switch stacks)
  *
- *  rcx and r11 are designated "transaction registers": the CPU
- *  hardware overwrites them on SYSCALL entry, so user code must
- *  save them before invoking SYSCALL if their values are needed.
- *  After recording their CPU-set transition values (user RIP and
- *  user RFLAGS) into the trapframe, the kernel freely reuses rcx
- *  and r11 as scratch registers.
- *
- *  Strategy (RIP-relative variables, NO SWAPGS — same as alltraps):
- *    1. Stash user RSP in trampoline_scratch (RIP-relative)
- *    2. Load trapframe VA from trampoline_trapframe_va (RIP-relative)
- *    3. Save all GPRs + metadata into utrapframe
- *       (rcx and r11 hold CPU-set transition values, not user originals)
- *    4. Use rcx/r11 as scratch to finish metadata (user RSP, etc.)
- *    5. Read kernel_sp from trapframe, switch CR3 to kernel page table
- *    6. Switch to kernel stack and call usertrap_syscall() in C
- *
- *  Utrapframe field offsets (struct trapframe then extra fields):
- *    0x00 r15,  0x08 r14,  0x10 r13,  0x18 r12
- *    0x20 r11,  0x28 r10,  0x30 r9,   0x38 r8
- *    0x40 rbp,  0x48 rdi,  0x50 rsi,  0x58 rdx
- *    0x60 rcx,  0x68 rbx,  0x70 rax
- *    0x78 trapno, 0x80 err, 0x88 rip, 0x90 cs
- *    0x98 rflags, 0xA0 rsp, 0xA8 ss
- *    ... _spare[11] ...
- *    0x120 kernel_sp
+ *  Per-CPU offsets (GS_BASE = struct cpu_local after swapgs):
+ *    %gs:64  syscall_scratch    (CPU_LOCAL_SYSCALL_SCRATCH)
+ *    %gs:72  syscall_kstack_top (CPU_LOCAL_SYSCALL_KSTACK_TOP)
  * ────────────────────────────────────────────────────────────── */
 .text
 .align 16
 .globl syscall_entry
 syscall_entry:
     /*
-     * Step 1: stash user RSP in RIP-relative scratch, load trapframe VA.
-     * trampoline_scratch      = temporary slot for user RSP
-     * trampoline_trapframe_va = trapframe VA (set by usertrapret)
+     * Step 0: swap GS base.  SYSCALL always comes from user mode.
+     * Before: GS_BASE = user GS, KERNEL_GS_BASE = per-CPU
+     * After:  GS_BASE = per-CPU,  KERNEL_GS_BASE = user GS
      */
-    movq %rsp, trampoline_scratch(%rip)   /* save user RSP to scratch      */
-    movq trampoline_trapframe_va(%rip), %rsp /* rsp = utrapframe VA (temp) */
+    swapgs
 
     /*
-     * Step 2: save all GPRs into utrapframe.
-     * rsp points to the utrapframe mapped in the USER page table.
-     * We must finish all reads/writes to this user VA BEFORE
-     * switching CR3 to the kernel page table.
+     * Step 1: save user RSP to per-CPU scratch.
+     * After this, RSP is free to use as a scratch register.
+     */
+    movq %rsp, %gs:64
+
+    /*
+     * Step 2: switch to kernel page table.
+     * Use RSP as scratch (user RSP safely saved in %gs:64).
+     * trampoline_ksatp is RIP-relative, accessible from both
+     * user and kernel page tables (TRAPVEC pages in PML4[511]).
+     */
+    leaq trampoline_ksatp(%rip), %rsp
+    movq (%rsp), %rsp
+    movq %rsp, %cr3
+
+    /*
+     * Step 3: load kernel stack from per-CPU.
+     * GS still works because TRAMPOLINE_CPULOCAL is mapped in
+     * the kernel page table too (PML4[511]).
+     */
+    movq %gs:72, %rsp
+
+    /*
+     * Step 4: build struct trapframe on the kernel stack.
+     * Match the alltraps layout exactly:
+     *   SS, RSP, RFLAGS, CS, RIP, err, trapno, then 15 GPRs.
      *
-     * note: rcx and r11 hold CPU-set transition values (user RIP and
-     * user RFLAGS respectively), NOT the caller’s original values.
-     * Per the Linux syscall convention they are "clobbered" — the
-     * caller must save them before SYSCALL if it needs them.
+     * rcx = user RIP, r11 = user RFLAGS (set by SYSCALL HW).
      */
-    movq %r15, 0x00(%rsp)
-    movq %r14, 0x08(%rsp)
-    movq %r13, 0x10(%rsp)
-    movq %r12, 0x18(%rsp)
-    movq %r11, 0x20(%rsp)          /* r11 = user RFLAGS (clobbered)  */
-    movq %r10, 0x28(%rsp)
-    movq %r9,  0x30(%rsp)
-    movq %r8,  0x38(%rsp)
-    movq %rbp, 0x40(%rsp)
-    movq %rdi, 0x48(%rsp)
-    movq %rsi, 0x50(%rsp)
-    movq %rdx, 0x58(%rsp)
-    movq %rcx, 0x60(%rsp)          /* rcx = user RIP (clobbered)     */
-    movq %rbx, 0x68(%rsp)
-    movq %rax, 0x70(%rsp)          /* rax = syscall number           */
+    pushq $(0x20 | 3)             /* ss  = SEG_UDATA | DPL_USER    */
+    pushq %gs:64                  /* rsp = user RSP (from per-CPU)  */
+    pushq %r11                    /* rflags = user RFLAGS (from R11)*/
+    pushq $(0x28 | 3)             /* cs  = SEG_UCODE | DPL_USER    */
+    pushq %rcx                    /* rip = user RIP (from RCX)      */
+    pushq $0                      /* err = 0                        */
+    pushq $256                    /* trapno = 256 (syscall marker)  */
+
+    /* 15 GPRs in struct trapframe order (rax..r15, high→low addr) */
+    pushq %rax                    /* rax = syscall number           */
+    pushq %rbx
+    pushq %rcx                    /* clobbered (user RIP) — saved   */
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11                    /* clobbered (user RFLAGS) — saved*/
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
 
     /*
-     * Step 3: fill trapframe metadata fields.
-     * rcx and r11 are now "transaction registers" — their transition
-     * values have been saved above, so they are free as scratch.
+     * Step 5: call C handler.
+     * RDI = pointer to struct trapframe on the kernel stack.
      */
-    movq $256, 0x78(%rsp)           /* trapno = 256 (syscall marker)  */
-    movq $0,   0x80(%rsp)           /* err = 0                        */
-    movq %rcx, 0x88(%rsp)           /* rip = user RIP (from RCX)      */
-    movq $(0x28 | 3), 0x90(%rsp)    /* cs  = SEG_UCODE | DPL_USER     */
-    movq %r11, 0x98(%rsp)           /* rflags = user RFLAGS (from R11)*/
-
-    /* Use rcx (transaction reg) to retrieve user RSP from scratch */
-    movq trampoline_scratch(%rip), %rcx
-    movq %rcx, 0xA0(%rsp)           /* rsp = user RSP                 */
-    movq $(0x20 | 3), 0xA8(%rsp)    /* ss  = SEG_UDATA | DPL_USER     */
-
-    /*
-     * Step 4: read kernel_sp from trapframe, then switch CR3.
-     * kernel_sp is at offset 0x120 — must read it while still
-     * under user CR3 (the trapframe is at a user VA).
-     * Use r11 (transaction reg) for the CR3 load.
-     */
-    movq 0x120(%rsp), %rcx          /* rcx = kernel_sp (user VA ok)   */
-
-    leaq trampoline_ksatp(%rip), %r11
-    movq (%r11), %r11
-    movq %r11, %cr3                 /* switch to kernel page table    */
-
-    /*
-     * Step 5: switch to kernel stack and jump to C handler.
-     * r15 was already saved to trapframe[0x00] above.
-     */
-    movq %rcx, %rsp                 /* switch to kernel stack         */
-
+    movq %rsp, %rdi
     cld
-    movabsq $usertrap_syscall, %r11
-    call *%r11
+    movabsq $usertrap_syscall, %rax
+    call *%rax
     /* usertrap_syscall calls usertrapret() and never returns */
     ud2
 
@@ -432,27 +437,8 @@ trampoline_kstack:
     .quad 0
 
 /*
- * trampoline_scratch — temporary slot to save user RSP on SYSCALL entry.
- *
- * SYSCALL does not switch RSP, so we need a known location to stash
- * the user RSP before loading the trapframe VA.  Accessed RIP-relative
- * from the high alias.  Same single-CPU constraint as trampoline_kstack.
+ * syscall_entry uses GS-based per-CPU fields (Linux strategy):
+ *   %gs:64  cpu_local.syscall_scratch     — stash user RSP
+ *   %gs:72  cpu_local.syscall_kstack_top  — kernel stack top
+ * Written by usertrapret() via mycpu()->syscall_kstack_top.
  */
-.align 8
-.globl trampoline_scratch
-trampoline_scratch:
-    .quad 0
-
-/*
- * trampoline_trapframe_va — utrapframe virtual address for SYSCALL entry.
- *
- * Written by usertrapret() (C code, identity-mapped address) before
- * every return to user mode.  Read by syscall_entry (RIP-relative from
- * the high alias) to locate the trapframe page in user address space.
- *
- * NOTE: single-CPU only.  For SMP, replace with a per-CPU slot.
- */
-.align 8
-.globl trampoline_trapframe_va
-trampoline_trapframe_va:
-    .quad 0

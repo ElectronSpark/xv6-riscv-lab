@@ -19,9 +19,10 @@ struct cpu_local {
     int intena;                 // Were interrupts enabled before push_off()?
     uint64 flags;               // CPU flags
     uint64 rcu_timestamp;       // RCU timestamp - updated before context switch
-    uint64 syscall_scratch;     // SWAPGS scratch (gs:0 on SYSCALL entry)
-    uint64 syscall_trapframe_va;// trapframe VA for SYSCALL entry (gs:8)
+    uint64 syscall_scratch;     // SWAPGS scratch (%gs:64 on SYSCALL entry)
+    uint64 syscall_kstack_top;  // kernel stack top for SYSCALL entry (%gs:72)
     struct thread *fpu_owner;   // Thread whose FP state is currently in hardware
+    uint64 intr_kstack_top;     // kernel stack top for IDT entry (%gs:88)
 } __ALIGNED_CACHELINE;
 
 #endif /* __KERNEL_PERCPU_TYPES_H */

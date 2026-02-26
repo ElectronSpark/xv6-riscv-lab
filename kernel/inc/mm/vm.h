@@ -13,7 +13,7 @@
 #define VMA_ADJACENT(__vma1, __vma2)                                           \
     ((__vma1)->end == (__vma2)->start || (__vma2)->end == (__vma1)->start)
 
-uint64 vm_cpu_online(vm_t *vm, int cpu);
+uint64 vm_cpu_online(vm_t *vm, int cpu, struct thread *p);
 void vm_cpu_offline(vm_t *vm, int cpu);
 cpumask_t vm_get_cpumask(vm_t *vm);
 void vm_remote_sfence(vm_t *vm);

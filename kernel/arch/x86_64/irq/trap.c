@@ -42,8 +42,9 @@ static void (*trampoline_userret)(uint64 tf, uint64 user_cr3) = NULL;
  * usertrapret — return to user mode.
  *
  * Sets up kernel state in the utrapframe, maps the trapframe page,
- * stores the trapframe VA and kernel stack in RIP-relative variables
- * (read by syscall_entry and alltraps), and returns via iretq.
+ * restores the user GS base into KERNEL_GS_BASE (so userret's swapgs
+ * loads it into GS_BASE for user code), stores the trapframe VA and
+ * kernel stack in RIP-relative variables, and returns via iretq.
  */
 void usertrapret(void) {
     struct thread *p = current;
@@ -74,35 +75,50 @@ void usertrapret(void) {
     /* Restore user FS base (TLS) for user-space threads. */
     wrmsr(MSR_FS_BASE, p->trapframe->tp);
 
+    /*
+     * Set up GS MSRs explicitly — Linux strategy:
+     *   MSR_GS_BASE      = user's GS base  (what user code sees after iretq)
+     *   MSR_KERNEL_GS_BASE = per-CPU addr  (what kernel sees after swapgs on
+     *                                       the next SYSCALL/trap entry)
+     *
+     * Setting both explicitly avoids relying on the swapgs chain being in
+     * exactly the right state on every possible entry path (e.g. the very
+     * first entry to user mode before any swapgs has ever run).
+     * userret no longer needs to execute swapgs; GS is already correct.
+     *
+     * IMPORTANT: Capture per-CPU pointer and CPU id BEFORE writing user GS
+     * to MSR_GS_BASE, because mycpu()/cpuid() read from MSR_GS_BASE.
+     */
+    struct cpu_local *my_cpu = mycpu();
+    int cpu = cpuid();
+
+    wrmsr(MSR_GS_BASE, p->trapframe->user_gs_base);
+    wrmsr(MSR_KERNEL_GS_BASE, (uint64)my_cpu);
+
     /* Store kernel state in utrapframe for next trap entry. */
     p->trapframe->kernel_sp = p->ksp;
     p->trapframe->kernel_satp = (uint64)kernel_pagetable; /* RISC-V compat */
 
     /* Set TSS RSP0 so the CPU switches to the kernel stack on ring 3→0
      * for IDT-based traps (exceptions, interrupts).
-     * Note: alltraps no longer uses SWAPGS — it reads the kernel CR3
-     * from trampoline_ksatp (RIP-relative in trapvec.S) instead. */
+     * GS MSRs are explicitly set above (Linux strategy): usertrapret writes
+     * both MSR_GS_BASE and MSR_KERNEL_GS_BASE directly so the next
+     * alltraps/syscall_entry swapgs reliably yields the per-CPU GS. */
     x86_tss_set_rsp0(p->ksp);
 
     /*
-     * Tell alltraps where to pivot RSP for user→kernel transitions.
+     * Tell alltraps where to pivot RSP for user->kernel transitions.
      * All IDT vectors use IST=1 so the CPU initially pushes onto the
      * per-CPU IST stack (mapped in all page tables).  After CR3 swap,
      * alltraps copies the 7-qword interrupt frame from IST to this
      * per-thread kernel stack and switches RSP, so that all subsequent
-     * C code — including scheduler context switches — runs on a
+     * C code -- including scheduler context switches -- runs on a
      * per-thread stack instead of the shared IST stack.
      *
-     * Single-CPU only: a single global suffices.  For SMP, this would
-     * need to be per-CPU (e.g. in the cpu_local / TRAMPOLINE_CPULOCAL).
+     * SMP-safe: stored in per-CPU struct via saved my_cpu pointer
+     * (GS_BASE already points to user value at this point).
      */
-    extern uint64 trampoline_kstack;
-    extern uint64 trampoline_trapframe_va;
-    trampoline_kstack = p->ksp;
-
-    /* Map this CPU's trapframe page into the user page table
-     * and get the utrapframe virtual address. */
-    int cpu = cpuid();
+    my_cpu->intr_kstack_top = p->ksp;
 
     /* Guard: if vm was freed (process being torn down), don't proceed. */
     if (p->vm == NULL || p->vm->pagetable == NULL) {
@@ -122,14 +138,14 @@ void usertrapret(void) {
             exit(-1);
         }
     }
-    uint64 trapframe_base = vm_cpu_online(p->vm, cpu);
+    uint64 trapframe_base = vm_cpu_online(p->vm, cpu, p);
 
     /*
-     * Store the trapframe VA for the next SYSCALL entry.
-     * syscall_entry reads this RIP-relative (same approach as alltraps
-     * uses for trampoline_kstack and trampoline_ksatp — no SWAPGS needed).
+     * Store the kernel stack top for the next SYSCALL entry.
+     * syscall_entry reads this from per-CPU via %gs:72 after swapgs
+     * (Linux strategy: switch CR3 first, then load kernel stack).
      */
-    trampoline_trapframe_va = trapframe_base;
+    my_cpu->syscall_kstack_top = p->ksp;
 
     /* Ensure user RFLAGS is valid and has IF set.
      * Bit 1 in RFLAGS is architecturally fixed to 1.
@@ -145,7 +161,7 @@ void usertrapret(void) {
     {
         uint64 cr0;
         asm volatile("movq %%cr0, %0" : "=r"(cr0));
-        if (THREAD_FPU_USED(p) && mycpu()->fpu_owner == p)
+        if (THREAD_FPU_USED(p) && my_cpu->fpu_owner == p)
             cr0 &= ~(1ULL << 3);   /* clear CR0.TS */
         else
             cr0 |= (1ULL << 3);    /* set CR0.TS   */
@@ -398,6 +414,14 @@ void arch_trap_init(void) {
 }
 
 void arch_trap_init_hart(void) {
+    static int bsp_trap_done = 0;
+    if (!bsp_trap_done) {
+        /* BSP: GDT/TSS/SYSCALL already set up by arch_trap_init() */
+        bsp_trap_done = 1;
+    } else {
+        /* AP: load GDT, TSS, and SYSCALL MSRs */
+        x86_gdt_init_ap();
+    }
     x86_tss_set_ist1(mycpu()->intr_sp);
     asm volatile("lidt %0" : : "m"(idtr));
 }
@@ -451,6 +475,8 @@ void arch_irq_init_hart(void) {
         return;     /* BSP: already initialized in arch_irq_init() */
     }
     lapic_init();
+    extern void arch_timer_init_hart(void);
+    arch_timer_init_hart();
 }
 
 /*
@@ -541,20 +567,18 @@ extern int do_device_irq(int hw_irq);
 void x86_trap_handler(struct trapframe *tf) {
     uint64 vec = tf->trapno;
     int from_user = ((tf->cs & 3) == 3);
-    static int user_trap_marked = 0;
-
-    if (from_user && !user_trap_marked) {
-        asm volatile("outb %0, %1" : : "a"((uint8)'U'), "Nd"(0xE9));
-        user_trap_marked = 1;
-    }
 
     /*
      * For user-mode traps, copy the stack-based trapframe into the thread's
      * utrapframe so that syscall arg fetching and other code that reads
      * p->trapframe->trapframe works correctly.
+     *
+     * Also save the user GS base (now in KERNEL_GS_BASE after swapgs)
+     * into the utrapframe so it can be restored on return to user mode.
      */
     if (from_user && current && current->trapframe) {
         current->trapframe->trapframe = *tf;
+        current->trapframe->user_gs_base = rdmsr(MSR_KERNEL_GS_BASE);
     }
 
     /*
@@ -579,7 +603,7 @@ void x86_trap_handler(struct trapframe *tf) {
             vma_t *vma = vm_find_area(current->vm, cr2);
             if (vma != NULL && vma_validate(vma, cr2, 1, prot) == 0) {
                 vm_runlock(current->vm);
-                return; /* fault resolved */
+                goto user_return; /* fault resolved */
             }
             vm_runlock(current->vm);
 
@@ -592,7 +616,7 @@ void x86_trap_handler(struct trapframe *tf) {
                 gdbstub_signal_stop(current, SIGSEGV);
             }
             kill(current->pid, SIGSEGV);
-            return;
+            goto user_return;
         }
 
         if (from_user && current) {
@@ -603,7 +627,7 @@ void x86_trap_handler(struct trapframe *tf) {
                    current->pid, current->name, cr2, tf->rip);
             assert(current->pid != 1, "init exiting");
             kill(current->pid, SIGSEGV);
-            return;
+            goto user_return;
         }
 
         /* Kernel-mode page fault — unrecoverable */
@@ -686,7 +710,7 @@ void x86_trap_handler(struct trapframe *tf) {
                         printf("pid %d: failed to allocate fpu_state\n",
                                current->pid);
                         kill(current->pid, SIGKILL);
-                        return;
+                        goto user_return;
                     }
                     memset(current->fpu_state, 0, sizeof(struct fpu_state));
                 }
@@ -699,7 +723,7 @@ void x86_trap_handler(struct trapframe *tf) {
 
             mycpu()->fpu_owner = current;
             /* TS is clear — FP/SSE will work when we return to user */
-            return;
+            goto user_return;
         }
 
         /* CPU exception (not #PF, not #BP, not #NM) */
@@ -719,7 +743,7 @@ void x86_trap_handler(struct trapframe *tf) {
                 gdbstub_signal_stop(current, sig);
             }
             kill(current->pid, sig);
-            return;
+            goto user_return;
         }
 
         /* Kernel exception */
@@ -792,8 +816,12 @@ void x86_trap_handler(struct trapframe *tf) {
     /*
      * User-mode traps: return through usertrapret so that
      * the trapframe page, GS scratch, and TSS are set up
-     * for the next entry.
+     * for the next entry.  All user-mode code paths above
+     * must reach here (via goto user_return) rather than
+     * using plain return, because alltraps did swapgs on
+     * entry and trapret does NOT swapgs on exit.
      */
+user_return:
     if (from_user && current) {
         usertrapret();  /* noreturn */
     }
@@ -803,19 +831,23 @@ void x86_trap_handler(struct trapframe *tf) {
 /*
  * usertrap_syscall — C-level SYSCALL handler.
  *
- * Called from syscall_entry (trapvec.S) after registers have been
- * saved into the trapframe page.  Because the trapframe page IS
- * the physical page containing p->trapframe, the saved registers
- * are already in p->trapframe->trapframe.
+ * Called from syscall_entry (trapvec.S) with RDI = pointer to
+ * struct trapframe built on the kernel stack (Linux strategy).
+ * We copy it into the per-process utrapframe, just like
+ * x86_trap_handler does for IDT-based user traps.
  */
-void usertrap_syscall(void) {
+void usertrap_syscall(struct trapframe *tf) {
     struct thread *p = current;
     (void)p;
-    static int usertrap_syscall_marked = 0;
 
-    if (!usertrap_syscall_marked) {
-        asm volatile("outb %0, %1" : : "a"((uint8)'S'), "Nd"(0xE9));
-        usertrap_syscall_marked = 1;
+    /*
+     * Copy the stack-based trapframe into the per-process utrapframe.
+     * This mirrors what x86_trap_handler does for IDT traps.
+     */
+    if (p && p->trapframe) {
+        p->trapframe->trapframe = *tf;
+        /* Save user GS base (now in KERNEL_GS_BASE after swapgs) */
+        p->trapframe->user_gs_base = rdmsr(MSR_KERNEL_GS_BASE);
     }
 
     intr_on();

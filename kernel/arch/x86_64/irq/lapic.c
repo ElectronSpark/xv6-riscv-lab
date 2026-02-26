@@ -44,6 +44,12 @@ int lapic_id(void)
     return (int)(lapic_read(LAPIC_ID) >> 24);
 }
 
+/* debugcon single-character output for early tracing */
+static inline void lapic_dbg(char c)
+{
+    asm volatile("outb %0, %1" : : "a"((uint8)c), "Nd"((uint16)0xE9));
+}
+
 void lapic_init(void)
 {
     /* Read the APIC base address from MSR */

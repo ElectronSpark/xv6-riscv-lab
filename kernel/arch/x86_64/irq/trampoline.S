@@ -67,4 +67,10 @@ userret:
     movq 0x70(%rdi), %rax
     movq 0x48(%rdi), %rdi
 
+    /*
+     * No swapgs needed here: usertrapret already set both MSRs explicitly:
+     *   MSR_GS_BASE      = user's GS base  (already correct for user code)
+     *   MSR_KERNEL_GS_BASE = per-CPU addr  (ready for next SYSCALL/trap)
+     * (Linux strategy: manage GS MSRs directly, don't rely on swapgs chain)
+     */
     iretq

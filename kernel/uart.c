@@ -255,19 +255,23 @@ int uart_tx_wait(void) {
 // use interrupts, for use by kernel printf() and
 // to echo characters. it spins waiting for the uart's
 // output register to be empty.
+//
+// Serialized with uart_tx_lock on SMP to prevent interleaving with
+// interrupt-driven TX from uartstart().
 void uartputc_sync(int c) {
-    // IRQ-safe, spin-waits on hardware THR empty; used by early printf/echo
     push_off();
 
 #ifdef __x86_64__
-    // Also mirror to debugcon (port 0xE9) since QEMU runs with -serial none
+    // Also mirror to debugcon (port 0xE9)
     asm volatile("outb %0, %1" : : "a"((uint8)c), "Nd"((uint16)0xE9));
 #endif
 
+    spin_lock(&uart_tx_lock);
     // wait for Transmit Holding Empty to be set in LSR.
     while ((ReadReg(LSR) & LSR_TX_IDLE) == 0)
         ;
     WriteReg(THR, c);
+    spin_unlock(&uart_tx_lock);
 
     pop_off();
 }

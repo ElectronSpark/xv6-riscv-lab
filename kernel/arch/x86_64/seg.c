@@ -3,29 +3,49 @@
  * @brief x86_64 GDT, TSS, and SYSCALL/SYSRET initialization.
  *
  * Sets up the Global Descriptor Table with a SYSCALL/SYSRET-compatible
- * segment layout and a 64-bit Task State Segment.
+ * segment layout and per-CPU 64-bit Task State Segments.
  */
 
 #include "types.h"
 #include "seg.h"
 #include "x86.h"
 #include "memlayout.h"
+#include "smp/percpu.h"
 
 /*
- * GDT + TSS are co-located in a single page-aligned page so that
- * the whole page can be mapped at a high-canonical VA (CPU_ENTRY_GDT)
+ * GDT + per-CPU TSS structs are co-located in a single page-aligned page
+ * so the whole page can be mapped at a high-canonical VA (CPU_ENTRY_GDT)
  * accessible under both kernel and user CR3.
+ *
+ * GDT layout:
+ *   [0]           null
+ *   [1]           kernel code 64  (0x08)
+ *   [2]           kernel data     (0x10)
+ *   [3]           user code 32    (0x18)
+ *   [4]           user data       (0x20)
+ *   [5]           user code 64    (0x28)
+ *   [6+2*i, 7+2*i]  TSS for CPU i  (selector = 0x30 + i*16)
  */
 static struct {
     uint64          gdt[NSEGS];
-    struct tss64    tss;
+    struct tss64    tss[NCPU];
 } __attribute__((aligned(4096))) cpu_entry_gdt_page;
 
 #define gdt       (cpu_entry_gdt_page.gdt)
-#define cpu_tss   (cpu_entry_gdt_page.tss)
 
 /* ── GDTR pseudo-descriptor ── */
 static struct x86_desc_ptr gdtr;
+
+/* Helpers for per-CPU TSS */
+static inline struct tss64 *cpu_tss(int cpu)
+{
+    return &cpu_entry_gdt_page.tss[cpu];
+}
+
+static inline int tss_gdt_slot(int cpu)
+{
+    return GDT_BASE_SEGS + cpu * 2;
+}
 
 /*
  * Helper to install a 16-byte TSS descriptor at gdt[slot] and gdt[slot+1].
@@ -81,10 +101,12 @@ void x86_gdt_init(void)
         SEG_L | SEG_G
     );
 
-    /* TSS descriptor (occupies slots 6 and 7) */
-    __builtin_memset(&cpu_tss, 0, sizeof(cpu_tss));
-    cpu_tss.iomap_base = sizeof(struct tss64);  /* no I/O bitmap */
-    gdt_install_tss(6, &cpu_tss);
+    /* TSS descriptors for all CPUs (each occupies 2 GDT slots) */
+    for (int i = 0; i < NCPU; i++) {
+        __builtin_memset(cpu_tss(i), 0, sizeof(struct tss64));
+        cpu_tss(i)->iomap_base = sizeof(struct tss64);  /* no I/O bitmap */
+        gdt_install_tss(tss_gdt_slot(i), cpu_tss(i));
+    }
 
     /* Load the GDT */
     gdtr.limit = sizeof(gdt) - 1;
@@ -113,22 +135,31 @@ void x86_gdt_init(void)
         : "memory"
     );
 
+    /*
+     * Intel clears the GS base hidden register when a null selector is
+     * loaded.  Restore MSR_GS_BASE from the saved __x86_tp value so
+     * that mycpu() / r_tp() keeps working.
+     */
+    if (__x86_tp)
+        wrmsr(MSR_GS_BASE, __x86_tp);
+
     /* Load the TSS */
     asm volatile("ltr %w0" : : "r"((uint16)SEG_TSS));
 }
 
 void x86_gdt_remap(uint64 gdt_va)
 {
-    /* Compute offset of TSS within the page */
-    uint64 tss_offset = (uint64)&cpu_tss - (uint64)&gdt[0];
-    uint64 tss_va = gdt_va + tss_offset;
+    /* Update ALL per-CPU TSS descriptors to point to high-canonical VA */
+    for (int i = 0; i < NCPU; i++) {
+        uint64 tss_offset = (uint64)cpu_tss(i) - (uint64)&gdt[0];
+        uint64 tss_va = gdt_va + tss_offset;
 
-    /* Reinstall TSS descriptor with the high-canonical TSS VA */
-    struct tss_desc *td = (struct tss_desc *)&gdt[6];
-    td->base_lo   = (uint16)(tss_va & 0xFFFF);
-    td->base_mid  = (uint8)((tss_va >> 16) & 0xFF);
-    td->base_mid2 = (uint8)((tss_va >> 24) & 0xFF);
-    td->base_hi   = (uint32)(tss_va >> 32);
+        struct tss_desc *td = (struct tss_desc *)&gdt[tss_gdt_slot(i)];
+        td->base_lo   = (uint16)(tss_va & 0xFFFF);
+        td->base_mid  = (uint8)((tss_va >> 16) & 0xFF);
+        td->base_mid2 = (uint8)((tss_va >> 24) & 0xFF);
+        td->base_hi   = (uint32)(tss_va >> 32);
+    }
 
     /* Update GDTR to use the high-canonical VA */
     gdtr.base = gdt_va;
@@ -155,7 +186,12 @@ void x86_gdt_remap(uint64 gdt_va)
         : "memory"
     );
 
+    /* Intel clears GS base on null selector load — restore it. */
+    if (__x86_tp)
+        wrmsr(MSR_GS_BASE, __x86_tp);
+
     /* Reload TSS (clear busy bit first by reinstalling as available) */
+    struct tss_desc *td = (struct tss_desc *)&gdt[tss_gdt_slot(0)];
     td->access = SEG_P | SEG_DPL(DPL_KERNEL) | TSS_TYPE_AVAIL;
     asm volatile("ltr %w0" : : "r"((uint16)SEG_TSS));
 }
@@ -167,12 +203,60 @@ uint64 x86_gdt_page_pa(void)
 
 void x86_tss_set_rsp0(uint64 rsp0)
 {
-    cpu_tss.rsp0 = rsp0;
+    cpu_tss(cpuid())->rsp0 = rsp0;
 }
 
 void x86_tss_set_ist1(uint64 ist1)
 {
-    cpu_tss.ist1 = ist1;
+    cpu_tss(cpuid())->ist1 = ist1;
+}
+
+void x86_gdt_init_ap(void)
+{
+    int cpu = cpuid();
+
+    /*
+     * Save MSR_GS_BASE to a LOCAL variable before reloading segments.
+     * __x86_tp is a global and is racy when multiple APs run concurrently.
+     * r_tp() reads the per-CPU MSR_GS_BASE which is always correct here.
+     */
+    uint64 saved_gs_base = r_tp();
+
+    /* Load the shared GDT (already set up and remapped by BSP) */
+    asm volatile("lgdt %0" : : "m"(gdtr));
+
+    /* Reload CS via a far return */
+    asm volatile(
+        "pushq %[kcs]\n\t"
+        "leaq 1f(%%rip), %%rax\n\t"
+        "pushq %%rax\n\t"
+        "lretq\n\t"
+        "1:\n\t"
+        : : [kcs] "i"((uint64)SEG_KCODE) : "rax", "memory"
+    );
+
+    /* Reload data segment registers */
+    asm volatile(
+        "movw %w[kds], %%ds\n\t"
+        "movw %w[kds], %%es\n\t"
+        "movw %w[kds], %%ss\n\t"
+        "movw %w[null], %%fs\n\t"
+        "movw %w[null], %%gs\n\t"
+        : : [kds] "r"((uint16)SEG_KDATA), [null] "r"((uint16)SEG_NULL)
+        : "memory"
+    );
+
+    /* Intel clears GS base on null selector load — restore from LOCAL copy. */
+    if (saved_gs_base)
+        wrmsr(MSR_GS_BASE, saved_gs_base);
+
+    /* Clear TSS busy bit and load this CPU's TSS */
+    struct tss_desc *td = (struct tss_desc *)&gdt[tss_gdt_slot(cpu)];
+    td->access = SEG_P | SEG_DPL(DPL_KERNEL) | TSS_TYPE_AVAIL;
+    asm volatile("ltr %w0" : : "r"((uint16)SEG_TSS_CPU(cpu)));
+
+    /* Set up SYSCALL/SYSRET MSRs for this CPU */
+    x86_syscall_init();
 }
 
 void x86_syscall_init(void)

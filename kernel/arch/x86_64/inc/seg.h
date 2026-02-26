@@ -24,6 +24,7 @@
 #define _X86_64_SEG_H
 
 #include "types.h"
+#include "param.h"
 
 /* ── GDT selectors ── */
 #define SEG_NULL        0x00
@@ -32,9 +33,11 @@
 #define SEG_UCODE32     0x18    /* user code compat (ring 3)    */
 #define SEG_UDATA       0x20    /* user data (ring 3)           */
 #define SEG_UCODE       0x28    /* user code 64-bit (ring 3)    */
-#define SEG_TSS         0x30    /* TSS descriptor (16 bytes)    */
+#define SEG_TSS         0x30    /* TSS descriptor for CPU 0     */
+#define SEG_TSS_CPU(n)  (SEG_TSS + (n) * 16)  /* TSS selector for CPU n */
 
-#define NSEGS           8       /* total GDT entries (TSS uses 2) */
+#define GDT_BASE_SEGS  6       /* non-TSS GDT entries          */
+#define NSEGS           (GDT_BASE_SEGS + 2 * NCPU) /* + 2 per CPU for TSS */
 
 /* RPL (Requested Privilege Level) helpers */
 #define SEG_RPL_MASK    0x03
@@ -152,13 +155,16 @@ static inline uint64 rdmsr(uint32 msr)
 
 /* ── Public API ── */
 
-/** Initialize the GDT with all segments and TSS, then load it. */
+/** Initialize the GDT with all segments and per-CPU TSS, then load it. */
 void x86_gdt_init(void);
 
-/** Set the RSP0 (kernel stack) field in the TSS. */
+/** Load GDT + TSS + SYSCALL MSRs for an AP (secondary CPU). */
+void x86_gdt_init_ap(void);
+
+/** Set the RSP0 (kernel stack) field in this CPU's TSS. */
 void x86_tss_set_rsp0(uint64 rsp0);
 
-/** Set the IST1 stack pointer in the TSS. */
+/** Set the IST1 stack pointer in this CPU's TSS. */
 void x86_tss_set_ist1(uint64 ist1);
 
 /** Set up SYSCALL/SYSRET MSRs (STAR, LSTAR, SFMASK). */

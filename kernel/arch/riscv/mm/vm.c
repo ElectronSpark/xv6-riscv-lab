@@ -385,9 +385,8 @@ void arch_vm_teardown_trampoline(vm_t *vm)
 /*  Per-CPU trapframe PTE management                                          */
 /* ========================================================================== */
 
-uint64 vm_cpu_online(vm_t *vm, int cpu)
+uint64 vm_cpu_online(vm_t *vm, int cpu, struct thread *p)
 {
-    struct thread *p = current;
     uint64 trapframe_poffset = TRAPFRAME_POFFSET;
     if (vm->trapframe_pte != NULL && p != NULL && p->trapframe != NULL) {
         int pte_idx = PX(0, TRAPFRAME + (cpu * PGSIZE));

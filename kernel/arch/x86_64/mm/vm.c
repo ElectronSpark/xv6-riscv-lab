@@ -399,9 +399,8 @@ void arch_vm_teardown_trampoline(vm_t *vm)
  * Called from usertrapret() before returning to user mode.
  * Returns the utrapframe virtual address (user VA) for this CPU.
  */
-uint64 vm_cpu_online(vm_t *vm, int cpu)
+uint64 vm_cpu_online(vm_t *vm, int cpu, struct thread *p)
 {
-    struct thread *p = current;
     uint64 trapframe_poffset = TRAPFRAME_POFFSET;
 
     if (vm->trapframe_pte != NULL && p != NULL && p->trapframe != NULL) {

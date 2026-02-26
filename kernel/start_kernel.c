@@ -41,15 +41,12 @@ extern char end[];    // first address after kernel.
                       // defined by kernel.ld.
 
 static void __start_kernel_main_hart(int hartid, void *fdt_base) {
-    platform_boot_mark("[xv6] sk: main_hart begin\n");
     // Early memory detection (lightweight scan, no allocations)
     uint64 mem_base = platform_default_mem_base();
     uint64 mem_size = 128 * 1024 * 1024;
-    platform_boot_mark("[xv6] sk: before early memory scan\n");
     if (platform_early_memory(fdt_base, &mem_base, &mem_size) == 0) {
-        platform_boot_mark("[xv6] sk: memory map parsed\n");
+        // memory map parsed
     }
-    platform_boot_mark("[xv6] sk: after early memory scan\n");
 
     // Cap the first memory region at 4 GB for the early allocator.
     // If the FDT-reported region crosses the 4 GB boundary, limit it here
@@ -66,92 +63,55 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     __physical_memory_start = mem_base;
     __physical_memory_end = mem_base + mem_size;
     __physical_total_pages = mem_size >> 12;
-    platform_boot_mark("[xv6] sk: before early_allocator_init\n");
 
     // Early allocator uses memory after kernel end
     early_allocator_init((void *)end, (void *)__physical_memory_end);
-    platform_boot_mark("[xv6] sk: after early_allocator_init\n");
     kobject_global_init();
-    platform_boot_mark("[xv6] sk: after kobject_global_init\n");
     printfinit();
-    platform_boot_mark("[xv6] sk: after printfinit\n");
     printf("\nxv6 kernel booting (hart %d)\n\n", hartid);
     platform_init(fdt_base);
-    platform_boot_mark("[xv6] sk: after platform_init\n");
     platform_print_mem_summary();
-    // fdt_walk(fdt_base);
 
     // Apply platform configuration to kernel globals
     platform_apply_config();
-    platform_boot_mark("[xv6] sk: after platform_apply_config\n");
 
     platform_probe_extensions();
-    platform_boot_mark("[xv6] sk: after probe_extensions\n");
     ksymbols_init(); // Initialize kernel symbols
-    platform_boot_mark("[xv6] sk: after ksymbols_init\n");
     kinit();         // physical page allocator
-    platform_boot_mark("[xv6] sk: after kinit\n");
     arch_vm_init();       // create kernel page table
-    platform_boot_mark("[xv6] sk: after arch_vm_init\n");
     printf("page table initialized\n");
     platform_post_vm_init();
-    platform_boot_mark("[xv6] sk: after post_vm_init\n");
     pipe_init();               // initialize pipe subsystem
-    platform_boot_mark("[xv6] sk: after pipe_init\n");
     kqueue_init();             // initialize kqueue subsystem
-    platform_boot_mark("[xv6] sk: after kqueue_init\n");
     futex_init();              // initialize futex subsystem
-    platform_boot_mark("[xv6] sk: after futex_init\n");
     tty_init();                // TTY slab cache
-    platform_boot_mark("[xv6] sk: after tty_init\n");
     session_cache_init();     // session slab cache
-    platform_boot_mark("[xv6] sk: after session_cache_init\n");
     mycpu_init(hartid, true); // Change mycpu pointer to use trampoline stack
-    platform_boot_mark("[xv6] sk: after mycpu_init(true)\n");
     printf("mycpu initialized\n");
     rcu_init();       // RCU subsystem initialization
-    platform_boot_mark("[xv6] sk: after rcu_init\n");
     dev_table_init(); // Initialize the device table
-    platform_boot_mark("[xv6] sk: after dev_table_init\n");
     thread_init();    // process table
-    platform_boot_mark("[xv6] sk: after thread_init\n");
     scheduler_init(); // initialize the scheduler
-    platform_boot_mark("[xv6] sk: after scheduler_init\n");
     workqueue_init(); // workqueue subsystem initialization
-    platform_boot_mark("[xv6] sk: after workqueue_init\n");
     irq_desc_init();  // IRQ descriptor initialization
-    platform_boot_mark("[xv6] sk: after irq_desc_init\n");
     arch_trap_init();       // trap vectors
-    platform_boot_mark("[xv6] sk: after arch_trap_init\n");
     arch_trap_init_hart();   // install kernel trap vector
-    platform_boot_mark("[xv6] sk: after arch_trap_init_hart\n");
     arch_irq_init();       // set up interrupt controller
-    platform_boot_mark("[xv6] sk: after arch_irq_init\n");
     arch_irq_init_hart();   // ask PLIC for device interrupts
-    platform_boot_mark("[xv6] sk: after arch_irq_init_hart\n");
     ipi_init();       // inter-processor interrupts
-    platform_boot_mark("[xv6] sk: after ipi_init\n");
     consoleinit();
-    platform_boot_mark("[xv6] sk: after consoleinit\n");
     netdev_init();
-    platform_boot_mark("[xv6] sk: after netdev_init\n");
     signal_init(); // signal handling initialization
-    platform_boot_mark("[xv6] sk: after signal_init\n");
     binit();       // buffer cache
-    platform_boot_mark("[xv6] sk: after binit\n");
     // idle_thread_init must run before userinit because it calls
     // rq_cpu_activate() to mark this CPU active; otherwise scheduler_wakeup()
     // for init may fail to enqueue on any run queue.
     idle_thread_init();
-    platform_boot_mark("[xv6] sk: after idle_thread_init\n");
     // Legacy iinit() and fileinit() removed - VFS handles these
     userinit(); // first user thread
-    platform_boot_mark("[xv6] sk: after userinit\n");
     // Post-init device drivers & timer: spawned as kthreads so they run
     // with the scheduler active and can use sleep_ms() / scheduler_yield().
     platform_late_device_init();
-    platform_boot_mark("[xv6] sk: after late_device_init\n");
-    // goldfish_rtc_init();  // Goldfish RTC driver (1-second alarm)
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
 }
 
@@ -174,30 +134,20 @@ static void __start_kernel_secondary_hart(int hartid) {
 }
 
 void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
-    platform_boot_mark("[xv6] sk: enter\n");
     // Boot hart initializes all cpu structs first, before any hart sets tp
     if (is_boot_hart) {
-        platform_boot_mark("[xv6] sk: before cpus_init\n");
         cpus_init();
-        platform_boot_mark("[xv6] sk: after cpus_init\n");
         mycpu_init(hartid, false);
-        platform_boot_mark("[xv6] sk: after mycpu_init(false)\n");
         SET_BOOT_HART();
-        platform_boot_mark("[xv6] sk: before main_hart\n");
         __start_kernel_main_hart(hartid, fdt_base);
-        platform_boot_mark("[xv6] sk: after main_hart\n");
     } else {
         __start_kernel_secondary_hart(hartid);
-        platform_boot_mark("[xv6] sk: after secondary_hart\n");
     }
 
     // Per-CPU platform services (timer, RCU kthread, etc.)
-    platform_boot_mark("[xv6] sk: before per_cpu_services\n");
     platform_start_per_cpu_services(cpuid());
-    platform_boot_mark("[xv6] sk: after per_cpu_services\n");
 
     // Idle loop
-    platform_boot_mark("[xv6] sk: entering idle loop\n");
     for (;;) {
         scheduler_yield();
         intr_on();

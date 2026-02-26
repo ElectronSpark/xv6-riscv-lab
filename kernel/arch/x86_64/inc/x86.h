@@ -116,8 +116,17 @@ static inline uint64 r_fp(void) {
 	return value;
 }
 
-static inline uint64 r_tp(void) { return __x86_tp; }
-static inline void w_tp(uint64 value) { __x86_tp = value; }
+static inline uint64 r_tp(void) {
+	/* Read per-CPU GS_BASE MSR (SMP-safe, no global race) */
+	uint32 lo, hi;
+	asm volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xC0000101u));
+	return ((uint64)hi << 32) | lo;
+}
+static inline void w_tp(uint64 value) {
+	__x86_tp = value;
+	asm volatile("wrmsr" : : "c"(0xC0000101u),
+	             "a"((uint32)value), "d"((uint32)(value >> 32)));
+}
 static inline uint64 r_gp(void) { return 0; }
 static inline void w_gp(uint64 value) { (void)value; }
 static inline uint64 r_ra(void) { return 0; }

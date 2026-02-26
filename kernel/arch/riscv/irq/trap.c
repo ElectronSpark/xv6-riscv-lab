@@ -493,7 +493,7 @@ void usertrapret(void) {
 
     // Before returning, mark the current CPU as online for this process's VM
     // and get the trapframe base virtual address for this CPU
-    uint64 trapframe_base = vm_cpu_online(p->vm, cpuid());
+    uint64 trapframe_base = vm_cpu_online(p->vm, cpuid(), p);
 
     // jump to userret in trampoline.S at the top of memory, which
     // switches to the user page table, restores user registers,

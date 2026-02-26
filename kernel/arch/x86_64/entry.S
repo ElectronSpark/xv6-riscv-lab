@@ -27,7 +27,8 @@ _entry:
     outb %al, %dx
 
     movl %ebx, boot_params_ptr
-    movl $boot_stack_top, %esp
+    /* BSP (hartid 0): stack top = boot_stacks + 1 * KERNEL_STACK_SIZE */
+    movl $(boot_stacks + 16384), %esp
 
     call setup_page_tables
 
@@ -94,8 +95,8 @@ long_mode_entry:
     movw %ax, %es
     movw %ax, %ss
 
-    movl $boot_stack_top, %esp
-    subl $4096, %esp            /* reserve top 4 KiB for PCB */
+    /* BSP (hartid 0): sp = boot_stacks + 1 * KERNEL_STACK_SIZE - 4096 (PCB) */
+    movl $(boot_stacks + 16384 - 4096), %esp
     xorq %rbp, %rbp
 
     /*
@@ -111,6 +112,18 @@ long_mode_entry:
     movq %cr4, %rax
     orq  $((1 << 9) | (1 << 10)), %rax  /* set CR4.OSFXSR | CR4.OSXMMEXCPT */
     movq %rax, %cr4
+
+    /*
+     * Two-stage mycpu initialisation (RISC-V style).
+     * Set MSR_GS_BASE = &cpus[0] so that r_tp() / mycpu() return a
+     * valid (zeroed) pointer from the very first instruction in C.
+     * mycpu_init(0, false) will overwrite it with the real value.
+     */
+    movl    $0xC0000101, %ecx       /* MSR_GS_BASE */
+    leaq    cpus(%rip), %rax
+    movq    %rax, %rdx
+    shrq    $32, %rdx
+    wrmsr
 
     call serial_init64
     leaq banner_msg(%rip), %rsi
@@ -221,10 +234,18 @@ pd_kernel_table:
 boot_params_ptr:
     .long 0
 
-.align 16384                    /* must be KERNEL_STACK_SIZE-aligned    */
-boot_stack:                     /* so idle_thread_init's               */
-    .space 16384                /* r_sp() & ~(kstack_size-1) == here   */
-boot_stack_top:
+/*
+ * Per-CPU boot stacks for ALL harts (BSP + APs), RISC-V style.
+ * Must be aligned to KERNEL_STACK_SIZE (16KB) so idle_thread_init()
+ * can find the stack base by masking SP.
+ * Layout: boot_stacks[0..KERNEL_STACK_SIZE-1]  = hart 0 (BSP)
+ *         boot_stacks[KERNEL_STACK_SIZE..2*KSS-1] = hart 1
+ *         ...
+ */
+.globl boot_stacks
+.align 16384                    /* KERNEL_STACK_SIZE alignment         */
+boot_stacks:
+    .space 16384 * 8            /* KERNEL_STACK_SIZE * NCPU             */
 
 .section .rodata
 banner_msg:
