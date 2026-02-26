@@ -49,6 +49,9 @@ int either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 uint64 vma2pte_flags(uint64 flags);
 uint64 pte2vma_flags(uint64 pte_flags);
 
+pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
+            pte_t **retl1);
+
 // Memory protection and mapping operations (POSIX-compatible)
 int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot);
 int vm_mmap_region(vm_t *vm, uint64 start, size_t size, uint64 flags,

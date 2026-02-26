@@ -19,6 +19,7 @@
 typedef struct slab_struct slab_t;
 struct pcache;
 struct pcache_node;
+struct anon_vma;
 
 enum page_type {
     PAGE_TYPE_ANON = 0UL, // Anonymous page
@@ -91,7 +92,8 @@ typedef struct page_struct {
             Can be mapped into virtual memory, but doesn't belong to any
             entity, and can be referenced many times  */
         struct {
-            //
+            int mapcount;              // number of PTEs mapping this page
+            struct anon_vma *anon_vma; // reverse-map root for this page
         } anon;
         /* Buddy pages
             Pages managed by buddy system are free pages*/

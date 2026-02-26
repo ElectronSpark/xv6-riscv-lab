@@ -35,7 +35,6 @@
 #define PTE_G (1ULL << 8)           /* Global */
 #define PTE_A (1ULL << 5)           /* Accessed */
 #define PTE_D (1ULL << 6)           /* Dirty */
-#define PTE_RSW_w (1ULL << 9)       /* Software: COW marker (AVL bit 9) */
 #define PTE_NX (1ULL << 63)         /* No Execute */
 
 /*

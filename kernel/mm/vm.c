@@ -33,6 +33,7 @@
 #include <mm/page.h>
 #include <mm/slab.h>
 #include <mm/pcache.h>
+#include <mm/rmap.h>
 #include <smp/percpu.h>
 #include <smp/atomic.h>
 #include "list.h"
@@ -69,6 +70,7 @@ static void __vm_pool_init(void) {
 void vm_slab_init(void) {
     __vma_pool_init();
     __vm_pool_init();
+    rmap_init();
 }
 
 /* ========================================================================== */
@@ -321,6 +323,8 @@ static vma_t *__vma_alloc(vm_t *vm)
     rb_node_init(&vma->rb_entry);
     list_entry_init(&vma->list_entry);
     list_entry_init(&vma->free_list_entry);
+    list_entry_init(&vma->anon_vma_chain);
+    vma->anon_vma = NULL;
     vma->vm = vm;
     return vma;
 }
@@ -337,6 +341,7 @@ static void __vma_free(vma_t *vma)
                    "double-free or corruption)\n", vma);
             return;
         }
+        anon_vma_unlink(vma);
         vma->vm = NULL;
         vma->start = VMA_FREED_MAGIC;
         vma->end = VMA_FREED_MAGIC;
@@ -368,6 +373,9 @@ static void __vma_set_free(vma_t *vma)
             uint64 pa = PTE2PA(*pte);
             *pte = 0;
             vm_remote_sfence(vma->vm);
+            page_t *pg = __pa_to_page(pa);
+            if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
+                page_remove_rmap(pg);
             page_ref_dec((void *)pa);
         }
     }
@@ -403,10 +411,11 @@ static int __vma_copy(vma_t *dst, vma_t *src)
         dst->file = NULL;
     }
 
+    int is_shared = (src->flags & VMA_FLAG_SHARED) != 0;
+
     if (src->flags != PROT_NONE) {
         pagetable_t pgtb_src = src->vm->pagetable;
         pagetable_t pgtb_dst = dst->vm->pagetable;
-        int is_shared = (src->flags & VMA_FLAG_SHARED) != 0;
         for (uint64 a = src->start; a < src->end; a += PGSIZE) {
             pte_t *src_pte = walk(pgtb_src, a, 0, NULL, NULL);
             if (src_pte == NULL || *src_pte == 0)
@@ -423,16 +432,31 @@ static int __vma_copy(vma_t *dst, vma_t *src)
             if (is_shared) {
                 *new_pte = *src_pte;
             } else {
-                *src_pte |= PTE_RSW_w;
+                /* COW: clear write on both, no PTE_RSW_w needed —
+                 * COW is detected via mapcount > 1 at fault time. */
                 *src_pte &= ~PTE_W;
                 *new_pte = *src_pte;
             }
             uint64 pa = PTE2PA(*src_pte);
             assert(page_ref_inc((void *)pa) > 0,
                    "__vma_copy: page refcnt should be greater than 0");
+            /* Bump mapcount for the child mapping. */
+            page_t *pg = __pa_to_page(pa);
+            if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
+                page_add_anon_rmap(pg, dst, a);
         }
         vm_remote_sfence(src->vm);
     }
+
+    /* Set up anon_vma chain for the child VMA. */
+    if (src->anon_vma != NULL && !is_shared) {
+        int ret = anon_vma_fork(dst, src);
+        if (ret != 0) {
+            __vma_set_free(dst);
+            return ret;
+        }
+    }
+
     return 0;
 }
 
@@ -864,20 +888,38 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
     void *pa = NULL;
 
     if (pte_val == 0) {
+        /* Demand-zero: allocate a fresh anonymous page. */
+        if (anon_vma_prepare(vma) != 0)
+            return -ENOMEM;
         pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
         if (pa == NULL)
             return -ENOMEM;
         memset(pa, 0, PGSIZE);
+        page_t *pg = __pa_to_page((uint64)pa);
+        page_add_anon_rmap(pg, vma, fault_va);
     } else if (pte_val & PTE_V) {
-        if (pte_val & PTE_RSW_w) {
+        /* Page present but not writable — check COW via mapcount. */
+        page_t *old_page = __pa_to_page((uint64)addr);
+        if (old_page != NULL && PAGE_IS_TYPE(old_page, PAGE_TYPE_ANON) &&
+            page_mapcount(old_page) > 1) {
+            /* COW: multiple mappers — must copy. */
+            if (anon_vma_prepare(vma) != 0)
+                return -ENOMEM;
             pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
             if (pa == NULL)
                 return -ENOMEM;
             memmove(pa, addr, PGSIZE);
-            flags &= ~PTE_RSW_w;
+            page_remove_rmap(old_page);
             assert(page_ref_dec(addr) >= 0,
                    "vma_validate_pte_w: page_ref_dec failed for addr %p", addr);
+            page_t *new_page = __pa_to_page((uint64)pa);
+            page_add_anon_rmap(new_page, vma, fault_va);
+        } else if (old_page != NULL && PAGE_IS_TYPE(old_page, PAGE_TYPE_ANON) &&
+                   page_mapcount(old_page) == 1) {
+            /* Single mapper fast path — just re-grant write, no copy. */
+            pa = addr;
         } else {
+            /* Non-anonymous or unmapped — just re-grant write. */
             pa = addr;
         }
     } else {
@@ -904,10 +946,14 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte, uint64 fault_va)
     pte_t flags = PTE_FLAGS(pte_val);
 
     if (pte_val == 0) {
+        if (anon_vma_prepare(vma) != 0)
+            return -ENOMEM;
         pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
         if (pa == NULL)
             return -ENOMEM;
         memset(pa, 0, PGSIZE);
+        page_t *pg = __pa_to_page((uint64)pa);
+        page_add_anon_rmap(pg, vma, fault_va);
         if (vma->flags & PROT_WRITE)
             flags |= PTE_W;
     } else if (!(pte_val & PTE_V)) {
@@ -969,6 +1015,15 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
         return -EFAULT;
     if ((flags & vma->flags) != flags)
         return -EACCES;
+
+    /* Pre-allocate anon_vma outside spinlock — rwsem cannot be acquired
+     * while a spinlock is held.  For anonymous VMAs (demand-zero) and
+     * writable file-backed VMAs (potential COW), prepare the anon_vma now
+     * so that __vma_validate_pte_rxw / _rx find it already set (no-op). */
+    if (vma->anon_vma == NULL && (vma->file == NULL || (flags & PROT_WRITE))) {
+        if (anon_vma_prepare(vma) != 0)
+            return -ENOMEM;
+    }
 
     vm_pgtable_lock(vma->vm);
     smp_mb();
@@ -1584,11 +1639,15 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
         if (pte != NULL && (*pte & PTE_V)) {
             uint64 pa = PTE2PA(*pte);
             pte_t new_flags = pte_flags | PTE_V | PTE_A | PTE_D;
-            /* Preserve COW marker: if the page has PTE_RSW_w (COW-shared),
-             * do NOT grant PTE_W directly — keep PTE_RSW_w so the
-             * write-fault handler triggers a COW copy first. */
-            if ((*pte & PTE_RSW_w) && (new_flags & PTE_W)) {
-                new_flags = (new_flags & ~PTE_W) | PTE_RSW_w;
+            /* rmap-based COW: if page has mapcount > 1 and we're trying
+             * to grant write, suppress PTE_W — the write-fault handler
+             * will resolve it via COW when the page is actually written. */
+            if (new_flags & PTE_W) {
+                page_t *pg = __pa_to_page(pa);
+                if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
+                    page_mapcount(pg) > 1) {
+                    new_flags &= ~PTE_W;
+                }
             }
             *pte = PA2PTE(pa) | new_flags;
         }
@@ -1689,6 +1748,10 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
                 goto out;
             *new_pte = PA2PTE(pa) | pte_flags | PTE_V;
             page_ref_inc((void *)pa);
+            /* Transfer rmap: add mapping for new VMA before old is freed. */
+            page_t *pg = __pa_to_page(pa);
+            if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
+                page_add_anon_rmap(pg, new_vma, new_location + offset);
             *old_pte = 0;
         }
     }
@@ -1833,8 +1896,12 @@ int vm_madvise(vm_t *vm, uint64 addr, size_t size, int advice)
             pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
             if (pte != NULL && (*pte & PTE_V)) {
                 uint64 pa = PTE2PA(*pte);
-                if (pa != 0)
+                if (pa != 0) {
+                    page_t *pg = __pa_to_page(pa);
+                    if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
+                        page_remove_rmap(pg);
                     page_ref_dec((void *)pa);
+                }
                 *pte = 0;
             }
         }

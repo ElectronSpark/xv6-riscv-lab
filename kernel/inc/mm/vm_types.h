@@ -9,6 +9,8 @@
 #include "lock/rwsem_types.h"
 #include <vfs/vfs_types.h>
 
+struct anon_vma;
+
 typedef struct vm vm_t;
 
 typedef struct vma {
@@ -21,6 +23,8 @@ typedef struct vma {
     uint64 flags; // Flags for the memory area (e.g., read, write, execute)
     struct vfs_file *file; // File associated with this memory area
     uint64 pgoff;          // Offset in the file for this memory area
+    struct anon_vma *anon_vma;   // rmap: this VMA's own anon_vma
+    list_node_t anon_vma_chain;  // rmap: list of anon_vma_chain nodes
 } vma_t;
 
 /*

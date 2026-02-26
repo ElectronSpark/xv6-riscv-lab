@@ -342,8 +342,6 @@ static inline void sfence_vma_page(uint64 va) {
 #define PTE_G (1L << 5)    // global
 #define PTE_A (1L << 6)    // accessed
 #define PTE_D (1L << 7)    // dirty
-#define PTE_RSW_w (1 << 8) // can perform cow operation
-
 /*
  * On RISC-V, non-leaf PTEs (R=W=X=0) ignore permission bits,
  * so no extra flags are needed in intermediate walk() entries.

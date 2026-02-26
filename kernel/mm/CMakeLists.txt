@@ -6,6 +6,7 @@ set(MM_SOURCES
     pcache.c
     early_allocator.c
     vm.c
+    rmap.c
 )
 
 add_library(mm OBJECT ${MM_SOURCES})
