@@ -46,11 +46,10 @@ int vm_copyinstr(vm_t *vm, char *dst, uint64 srcva, uint64 max);
 int either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 
-uint64 vma2pte_flags(uint64 flags);
-uint64 pte2vma_flags(uint64 pte_flags);
-
-pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
-            pte_t **retl1);
+/*
+ * Page-table walking, mapping, and PTE flag conversion are declared in
+ * <mm/pgtable.h>.   Include that header instead of duplicating decls here.
+ */
 
 // Memory protection and mapping operations (POSIX-compatible)
 int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot);

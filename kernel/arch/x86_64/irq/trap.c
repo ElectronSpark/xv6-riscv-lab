@@ -803,6 +803,12 @@ void x86_trap_handler(struct trapframe *tf) {
         lapic_timer_rearm();  /* no-op for periodic mode */
         lapic_eoi();
 
+    } else if (vec == LAPIC_IPI_VEC) {
+        /* Inter-processor interrupt */
+        extern void x86_ipi_handler(void);
+        lapic_eoi();    /* EOI before handler so nested IPIs can arrive */
+        x86_ipi_handler();
+
     } else if (vec == LAPIC_ERROR_VEC) {
         /* LAPIC error interrupt */
         printf("[x86] LAPIC error: ESR=0x%x\n", lapic_read(LAPIC_ESR));

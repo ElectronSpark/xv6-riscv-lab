@@ -48,14 +48,16 @@ void print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end)
             break;
         }
 
-        int idx = ksym_lookup(return_addr_val, symbuf, sizeof(symbuf),
+        /* return_addr is the insn after the call; -1 to land in the caller */
+        uint64 lookup_addr = return_addr_val - 1;
+        int idx = ksym_lookup(lookup_addr, symbuf, sizeof(symbuf),
                               &sym_addr);
         if (idx < 0) {
             printf("  * %p: unknown\n", (void *)return_addr_val);
         } else {
-            ksymbols_t *sym = ksym_search(return_addr_val);
+            ksymbols_t *sym = ksym_search(lookup_addr);
             ksym_get_location(sym, filebuf, sizeof(filebuf), &line);
-            int offset = ksym_get_offset(sym, return_addr_val);
+            int offset = ksym_get_offset(sym, lookup_addr);
             printf("  * %s:%d: %s+%d\n", filebuf, line, symbuf, offset);
         }
     }
@@ -128,7 +130,9 @@ void print_thread_backtrace(struct context *ctx, uint64 kstack,
             last_return_addr = return_addr_val;
         }
 
-        sym = ksym_search(return_addr_val);
+        /* return_addr is the insn after the call; -1 to land in the caller */
+        uint64 lookup_addr_val = return_addr_val - 1;
+        sym = ksym_search(lookup_addr_val);
         if (sym == NULL) {
             printf("  * %p: unknown\n", (void *)return_addr_val);
         } else {
@@ -142,7 +146,7 @@ void print_thread_backtrace(struct context *ctx, uint64 kstack,
                 symbuf[0] = '\0';
             }
             ksym_get_location(sym, filebuf, sizeof(filebuf), &line);
-            int offset = ksym_get_offset(sym, return_addr_val);
+            int offset = ksym_get_offset(sym, lookup_addr_val);
             printf("  * %s:%d: %s+%d [%p]\n", filebuf, line, symbuf, offset,
                    (void *)return_addr_val);
         }

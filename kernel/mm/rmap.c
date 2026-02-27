@@ -7,9 +7,9 @@
 
 #include "types.h"
 #include "param.h"
-#include "riscv.h"
 #include "defs.h"
 #include <mm/rmap.h>
+#include <mm/pgtable.h>
 #include <mm/vm.h>
 #include <mm/vm_types.h>
 #include <mm/page.h>
@@ -283,29 +283,11 @@ int try_to_unmap(page_t *page)
             continue;
 
         vm_t *vm = vma->vm;
-        pagetable_t pgtable = vm->pagetable;
-        if (pgtable == NULL)
-            continue;
 
-        /* Scan the VMA's address range for PTEs pointing to this page. */
-        for (uint64 va = vma->start; va < vma->end; va += PGSIZE) {
-            pte_t *pte = walk(pgtable, va, 0, NULL, NULL);
-            if (pte == NULL || (*pte & PTE_V) == 0)
-                continue;
-            if (PTE2PA(*pte) != target_pa)
-                continue;
-
-            /* Found a mapping — clear it. */
-            vm_pgtable_lock(vm);
-            /* Re-check under lock. */
-            if ((*pte & PTE_V) && PTE2PA(*pte) == target_pa) {
-                *pte = 0;
-                sfence_vma_page(va);
-                page_remove_rmap(page);
-            }
-            vm_pgtable_unlock(vm);
-            vm_remote_sfence(vm);
-        }
+        /* Delegate all page-table work to the arch-aware vm layer. */
+        int zapped = vm_zap_pte(vm, vma, target_pa);
+        for (int i = 0; i < zapped; i++)
+            page_remove_rmap(page);
     }
 
     rwsem_release(&av->rwsem);

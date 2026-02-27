@@ -267,6 +267,7 @@ void arch_tlb_flush(void)
 #include <mm/page.h>
 #include <smp/atomic.h>
 #include <smp/percpu.h>
+#include <smp/ipi.h>
 #include "string.h"
 #include "errno.h"
 #include "proc/thread.h"
@@ -274,10 +275,27 @@ void arch_tlb_flush(void)
 
 pagetable_t kernel_pagetable;
 
-/* ── TLB management (x86_64: no remote fences yet) ── */
+/* ── TLB management (x86_64: IPI-based TLB shootdown) ── */
 
-void vm_remote_sfence(vm_t *vm)  { (void)vm; }
-void vm_remote_fence_i(vm_t *vm) { (void)vm; }
+void vm_remote_sfence(vm_t *vm)
+{
+    push_off();
+    smp_mb();
+
+    cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
+    cpumask &= ~(1ULL << cpuid());
+
+    if (cpumask)
+        ipi_send_mask(cpumask, 0, IPI_REASON_TLB_FLUSH);
+
+    pop_off();
+}
+
+void vm_remote_fence_i(vm_t *vm)
+{
+    /* x86 has coherent I-caches; a TLB flush suffices. */
+    vm_remote_sfence(vm);
+}
 
 /* ── User page-table creation / destruction ── */
 

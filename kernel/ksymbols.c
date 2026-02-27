@@ -48,25 +48,8 @@ static struct rb_root_opts __ksym_rb_opts = {
     .get_key_fun  = ksym_get_key,
 };
 
-/* "round-down" comparison: find the first node with start_addr >= target */
-static int ksym_keys_cmp_rdown(uint64 a, uint64 b)
-{
-    ksymbols_t *sym_a = (ksymbols_t *)a;
-    ksymbols_t *sym_b = (ksymbols_t *)b;
-
-    if ((uint64)sym_a->start_addr < (uint64)sym_b->start_addr)
-        return -1;
-    if ((uint64)sym_a->start_addr > (uint64)sym_b->start_addr)
-        return 1;
-    if (a == 0)
-        return 0;            /* dummy node */
-    return 1;                /* equal start_addr → search left */
-}
-
-static struct rb_root_opts __ksym_rb_rdown_opts = {
-    .keys_cmp_fun = ksym_keys_cmp_rdown,
-    .get_key_fun  = ksym_get_key,
-};
+/* No separate rdown comparison needed — ksym_search walks the tree
+ * manually using only the start_addr field for round-down lookup. */
 
 static struct rb_root __ksym_rb_root = {
     .node = NULL,
@@ -149,25 +132,42 @@ void ksymbols_init(void)
 
 /* ── Lookup helpers ──────────────────────────────────────────────────── */
 
+/**
+ * ksym_search — round-down lookup: largest start_addr ≤ addr.
+ *
+ * Walk the rb-tree directly, comparing only start_addr.  This avoids
+ * the pitfall of using rb_find_key_rdown with a comparison function
+ * that differs from the one used during insertion (the tree is keyed
+ * by (start_addr, pointer) but we only care about start_addr here).
+ */
 ksymbols_t *ksym_search(uint64 addr)
 {
     if (__ksymbol_count <= 0)
         return NULL;
 
-    ksymbols_t dummy = { .start_addr = (void *)addr };
+    struct rb_node *n = __ksym_rb_root.node;
+    ksymbols_t *best = NULL;
 
-    struct rb_root search_root = __ksym_rb_root;
-    search_root.opts = &__ksym_rb_rdown_opts;
+    while (n != NULL) {
+        ksymbols_t *sym = container_of(n, ksymbols_t, rb);
+        uint64 sym_addr = (uint64)sym->start_addr;
 
-    struct rb_node *node = rb_find_key_rdown(&search_root, (uint64)&dummy);
-    if (node == NULL)
+        if (sym_addr <= addr) {
+            /* Candidate — remember it and look for a closer (higher) one. */
+            if (best == NULL ||
+                sym_addr > (uint64)best->start_addr ||
+                (sym_addr == (uint64)best->start_addr && sym->line != 0))
+                best = sym;
+            n = n->right;
+        } else {
+            n = n->left;
+        }
+    }
+
+    if (best == NULL || best->line == 0)
         return NULL;
 
-    ksymbols_t *sym = container_of(node, ksymbols_t, rb);
-    if (sym->line == 0)        /* guard entry */
-        return NULL;
-
-    return sym;
+    return best;
 }
 
 int ksym_lookup(uint64 addr, char *buf, size_t buflen, void **return_addr)

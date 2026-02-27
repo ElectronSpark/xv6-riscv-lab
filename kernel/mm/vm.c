@@ -3,8 +3,6 @@
  * @brief Shared virtual memory management.
  *
  * Architecture-independent process VM subsystem.  Contains:
- *  - Generic page-table walking primitives (walk / walkaddr / mappages)
- *    parameterised by PAGETABLE_LEVELS (3 for RISC-V Sv39, 4 for x86-64).
  *  - VMA allocator & lifetime (slab-backed vma_t / vm_t pools).
  *  - Process address-space management (vm_init / vm_copy / vm_destroy).
  *  - Demand paging, COW handling (vma_validate).
@@ -12,6 +10,9 @@
  *  - POSIX-style mmap / munmap / mprotect / mremap / msync / mincore / madvise.
  *  - Heap & stack growth helpers.
  *  - Thread-stack allocation for pthreads.
+ *
+ * Page-table walking, mapping, and raw PTE flag manipulation live in
+ * kernel/mm/pgtable.c behind the abstract API declared in <mm/pgtable.h>.
  *
  * Architecture-specific pieces live in kernel/arch/<arch>/mm/vm.c:
  *  - Kernel page-table setup (kvmmake / kvm_build).
@@ -25,9 +26,9 @@
 
 #include "types.h"
 #include "param.h"
-#include "riscv.h"       /* PTE_*, PA2PTE, PTE2PA, PX, PGSIZE, PAGETABLE_LEVELS */
 #include "defs.h"
 #include "arch/vm.h"
+#include <mm/pgtable.h>
 #include <mm/vm.h>
 #include <mm/memlayout.h>
 #include <mm/page.h>
@@ -71,206 +72,6 @@ void vm_slab_init(void) {
     __vma_pool_init();
     __vm_pool_init();
     rmap_init();
-}
-
-/* ========================================================================== */
-/*  Page-table page allocator                                                 */
-/* ========================================================================== */
-
-pde_t *pgtab_alloc(void) {
-    void *pa = page_alloc(0, PAGE_TYPE_PGTABLE);
-    if (pa) {
-        memset(pa, 0, PGSIZE);
-    }
-    return (pde_t *)pa;
-}
-
-void pgtab_free(void *pa) { page_free(pa, 0); }
-
-/* ========================================================================== */
-/*  Generic page-table walking (parameterised by PAGETABLE_LEVELS)            */
-/* ========================================================================== */
-
-/*
- * Walk the multi-level page table and return a pointer to the leaf PTE
- * for virtual address @va.  If @alloc is set, intermediate page-table
- * pages are allocated as needed.
- *
- * The number of levels is determined by PAGETABLE_LEVELS:
- *   RISC-V Sv39 = 3 (levels 2 -> 1 -> 0)
- *   x86-64      = 4 (levels 3 -> 2 -> 1 -> 0)
- */
-pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
-            pte_t **retl1)
-{
-    assert(va < MAXVA, "walk: va out of range");
-    assert(pagetable != NULL, "walk: pagetable is null");
-
-    pte_t *ret_pte[PAGETABLE_LEVELS];
-    for (int i = 0; i < PAGETABLE_LEVELS; i++)
-        ret_pte[i] = NULL;
-
-    for (int level = PAGETABLE_LEVELS - 1; level > 0; level--) {
-        pte_t *pte = &pagetable[PX(level, va)];
-        ret_pte[level] = pte;
-        assert(pte != NULL, "walk: pte is null");
-        if (*pte & PTE_V) {
-            pagetable = (pagetable_t)PTE2PA(*pte);
-        } else {
-            if (!alloc || (pagetable = (pde_t *)pgtab_alloc()) == 0)
-                return NULL;
-            memset(pagetable, 0, PGSIZE);
-            /*
-             * On x86_64, intermediate page-table entries (PML4E, PDPTE, PDE)
-             * must carry U and W bits for user pages beneath them to be
-             * accessible.  WALK_INTERMEDIATE_FLAGS provides these arch-specific
-             * bits.  On RISC-V this is 0 (non-leaf PTEs have R=W=X=0).
-             */
-            *pte = PA2PTE(pagetable) | PTE_V | WALK_INTERMEDIATE_FLAGS;
-        }
-    }
-
-    /* Return arch-specific intermediate PTE pointers when requested.
-     * On Sv39 level 2 is the root, level 1 is the middle.
-     * On x86-64 these indices are shifted but callers always pass NULL. */
-    if (retl2 && PAGETABLE_LEVELS > 2)
-        *retl2 = ret_pte[PAGETABLE_LEVELS > 3 ? 3 : 2];
-    if (retl1 && PAGETABLE_LEVELS > 1)
-        *retl1 = ret_pte[PAGETABLE_LEVELS > 3 ? 2 : 1];
-
-    return &pagetable[PX(0, va)];
-}
-
-/*
- * Look up a user virtual address and return its physical address,
- * or 0 if not mapped or not user-accessible.
- */
-uint64 walkaddr(pagetable_t pagetable, uint64 va)
-{
-    pte_t *pte;
-    uint64 pa;
-
-    if (va >= MAXVA)
-        return 0;
-
-    pte = walk(pagetable, va, 0, NULL, NULL);
-    if (pte == 0)
-        return 0;
-    if ((*pte & PTE_V) == 0)
-        return 0;
-    if ((*pte & PTE_U) == 0)
-        return 0;
-    pa = PTE2PA(*pte);
-    return pa;
-}
-
-/*
- * Add a mapping to a kernel page table.
- * Only used when booting; does not flush TLB or enable paging.
- */
-void kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
-{
-    if (mappages(kpgtbl, va, sz, pa, perm) != 0)
-        panic("kvmmap");
-}
-
-/*
- * Create PTEs for virtual addresses starting at @va that refer to
- * physical addresses starting at @pa.  Both @va and @size MUST be
- * page-aligned.
- * Returns 0 on success, negative errno if a page-table page could not
- * be allocated.
- */
-int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa,
-             int perm)
-{
-    uint64 a, last;
-    pte_t *pte;
-
-    if ((va % PGSIZE) != 0)
-        panic("mappages: va not aligned, va %p", (void *)va);
-    if ((size % PGSIZE) != 0)
-        panic("mappages: size not aligned, va %p, size %p", (void *)va,
-              (void *)size);
-    if (size == 0)
-        panic("mappages: size zero, va %p", (void *)va);
-
-    a = va;
-    last = va + size - PGSIZE;
-    for (;;) {
-        if ((pte = walk(pagetable, a, 1, NULL, NULL)) == 0)
-            return -ENOMEM;
-        if (*pte & PTE_V)
-            panic("mappages: remap, va=%p pa=%p existing_pte=%p (pa=%p flags=%p)",
-                  (void *)a, (void *)pa, (void *)*pte,
-                  (void *)PTE2PA(*pte), (void *)PTE_FLAGS(*pte));
-        *pte = PA2PTE(pa) | perm | PTE_V | PTE_A | PTE_D;
-        if (a == last)
-            break;
-        a += PGSIZE;
-        pa += PGSIZE;
-    }
-    return 0;
-}
-
-/*
- * Remove @npages of mappings starting from @va.  @va must be page-aligned.
- * The mappings must exist.  If @do_free, the physical pages are freed.
- */
-void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
-{
-    uint64 a;
-    pte_t *pte;
-
-    if ((va % PGSIZE) != 0)
-        panic("uvmunmap: not aligned");
-
-    for (a = va; a < va + npages * PGSIZE; a += PGSIZE) {
-        if ((pte = walk(pagetable, a, 0, NULL, NULL)) == 0)
-            panic("uvmunmap: walk");
-        if ((*pte & PTE_V) == 0)
-            panic("uvmunmap: not mapped, va=%p, pa=%p, flags: %llx", (void *)a,
-                  (void *)PTE2PA(*pte), (unsigned long long)PTE_FLAGS(*pte));
-        if (PTE_FLAGS(*pte) == PTE_V)
-            panic("uvmunmap: not a leaf");
-        uint64 pa = PTE2PA(*pte);
-        *pte = 0;
-        if (do_free) {
-            pgtab_free((void *)pa);
-        }
-    }
-}
-
-/* ========================================================================== */
-/*  PTE ↔ VMA flag conversion                                                */
-/* ========================================================================== */
-
-uint64 vma2pte_flags(uint64 flags)
-{
-    uint64 pte_flags = 0;
-    if (flags & PROT_READ)
-        pte_flags |= PTE_R;
-    if (flags & PROT_WRITE)
-        pte_flags |= PTE_W;
-    if (flags & PROT_EXEC)
-        pte_flags |= PTE_X;
-    if (flags & VMA_FLAG_USER)
-        pte_flags |= PTE_U;
-    return pte_flags;
-}
-
-uint64 pte2vma_flags(uint64 pte_flags)
-{
-    uint64 flags = 0;
-    if (pte_flags & PTE_R)
-        flags |= PROT_READ;
-    if (pte_flags & PTE_W)
-        flags |= PROT_WRITE;
-    if (pte_flags & PTE_X)
-        flags |= PROT_EXEC;
-    if (pte_flags & PTE_U)
-        flags |= VMA_FLAG_USER;
-    return flags;
 }
 
 /* ========================================================================== */
@@ -366,12 +167,12 @@ static void __vma_set_free(vma_t *vma)
             pte_t *pte = walk(pagetable, a, 0, NULL, NULL);
             if (pte == 0)
                 continue;
-            if (PTE_FLAGS(*pte) == PTE_V)
+            if (pte_nonleaf(pte))
                 panic("__vma_set_free: not a leaf");
-            if ((*pte & PTE_V) == 0)
+            if (!pte_present(pte))
                 continue;
-            uint64 pa = PTE2PA(*pte);
-            *pte = 0;
+            uint64 pa = pte_pa(pte);
+            pte_clear(pte);
             vm_remote_sfence(vma->vm);
             page_t *pg = __pa_to_page(pa);
             if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
@@ -413,6 +214,18 @@ static int __vma_copy(vma_t *dst, vma_t *src)
 
     int is_shared = (src->flags & VMA_FLAG_SHARED) != 0;
 
+    /* For non-shared (COW) VMAs, ensure the parent has an anon_vma before
+     * we enter the PTE loop.  This is required so that:
+     *  (a) page_add_anon_rmap can record the anon_vma on each page, and
+     *  (b) the anon_vma_fork call below links the child to the parent's
+     *      anon_vma chain (which requires src->anon_vma != NULL).
+     * Must be done outside any spinlock — anon_vma_prepare acquires rwsem. */
+    if (!is_shared && src->anon_vma == NULL) {
+        int ret = anon_vma_prepare(src);
+        if (ret != 0)
+            return ret;
+    }
+
     if (src->flags != PROT_NONE) {
         pagetable_t pgtb_src = src->vm->pagetable;
         pagetable_t pgtb_dst = dst->vm->pagetable;
@@ -420,9 +233,9 @@ static int __vma_copy(vma_t *dst, vma_t *src)
             pte_t *src_pte = walk(pgtb_src, a, 0, NULL, NULL);
             if (src_pte == NULL || *src_pte == 0)
                 continue;
-            if (PTE_FLAGS(*src_pte) == PTE_V)
+            if (pte_nonleaf(src_pte))
                 panic("__vma_copy: not a leaf");
-            if ((PTE_FLAGS(*src_pte) & PTE_V) == 0)
+            if (!pte_present(src_pte))
                 continue;
             pte_t *new_pte = walk(pgtb_dst, a, 1, NULL, NULL);
             if (new_pte == NULL) {
@@ -434,16 +247,24 @@ static int __vma_copy(vma_t *dst, vma_t *src)
             } else {
                 /* COW: clear write on both, no PTE_RSW_w needed —
                  * COW is detected via mapcount > 1 at fault time. */
-                *src_pte &= ~PTE_W;
+                pte_wrprotect(src_pte);
                 *new_pte = *src_pte;
             }
-            uint64 pa = PTE2PA(*src_pte);
+            uint64 pa = pte_pa(src_pte);
             assert(page_ref_inc((void *)pa) > 0,
                    "__vma_copy: page refcnt should be greater than 0");
-            /* Bump mapcount for the child mapping. */
             page_t *pg = __pa_to_page(pa);
-            if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
+            if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) && !is_shared) {
+                /* Bump mapcount for BOTH parent and child mappings.
+                 * The parent's pages (e.g. from exec→mappages) may
+                 * never have had page_add_anon_rmap called, so their
+                 * mapcount could still be 0.  We must account for both
+                 * so that the COW check (mapcount > 1) fires correctly
+                 * when either process writes. */
+                if (page_mapcount(pg) == 0)
+                    page_add_anon_rmap(pg, src, a);
                 page_add_anon_rmap(pg, dst, a);
+            }
         }
         vm_remote_sfence(src->vm);
     }
@@ -878,16 +699,13 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va)
 
 static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
 {
-    pte_t pte_val = *pte;
-
-    if ((pte_val & (PTE_W | PTE_A | PTE_D)) == (PTE_W | PTE_A | PTE_D))
+    if (pte_write_ready(pte))
         return 0;
 
-    pte_t flags = PTE_FLAGS(pte_val);
-    void *addr = (void *)PTE2PA(pte_val);
+    void *addr = (void *)pte_pa(pte);
     void *pa = NULL;
 
-    if (pte_val == 0) {
+    if (*pte == 0) {
         /* Demand-zero: allocate a fresh anonymous page. */
         if (anon_vma_prepare(vma) != 0)
             return -ENOMEM;
@@ -897,7 +715,7 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
         memset(pa, 0, PGSIZE);
         page_t *pg = __pa_to_page((uint64)pa);
         page_add_anon_rmap(pg, vma, fault_va);
-    } else if (pte_val & PTE_V) {
+    } else if (pte_present(pte)) {
         /* Page present but not writable — check COW via mapcount. */
         page_t *old_page = __pa_to_page((uint64)addr);
         if (old_page != NULL && PAGE_IS_TYPE(old_page, PAGE_TYPE_ANON) &&
@@ -926,26 +744,17 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
         return -EFAULT;
     }
 
-    flags |= PTE_V | PTE_W | PTE_A | PTE_D;
-    if (vma->flags & PROT_READ)
-        flags |= PTE_R;
-    if (vma->flags & PROT_EXEC)
-        flags |= PTE_X;
-    if (vma->flags & VMA_FLAG_USER)
-        flags |= PTE_U;
-    *pte = PA2PTE(pa) | flags;
-
+    *pte = mk_pte((uint64)pa, vma->flags);
     sfence_vma_page(fault_va);
     return 0;
 }
 
 static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte, uint64 fault_va)
 {
-    pte_t pte_val = *pte;
-    void *pa = (void *)PTE2PA(pte_val);
-    pte_t flags = PTE_FLAGS(pte_val);
+    void *pa;
 
-    if (pte_val == 0) {
+    if (*pte == 0) {
+        /* Demand-zero: allocate with full VMA permissions. */
         if (anon_vma_prepare(vma) != 0)
             return -ENOMEM;
         pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
@@ -954,21 +763,18 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte, uint64 fault_va)
         memset(pa, 0, PGSIZE);
         page_t *pg = __pa_to_page((uint64)pa);
         page_add_anon_rmap(pg, vma, fault_va);
-        if (vma->flags & PROT_WRITE)
-            flags |= PTE_W;
-    } else if (!(pte_val & PTE_V)) {
+        *pte = mk_pte((uint64)pa, vma->flags);
+    } else if (!pte_present(pte)) {
         return -EFAULT;
+    } else {
+        /* Present page, read/exec fault — rebuild PTE with VMA flags
+         * but preserve the existing write-permission state (don't
+         * re-grant write on a COW-shared page). */
+        uint64 mflags = vma->flags;
+        if (!pte_write(pte))
+            mflags &= ~PROT_WRITE;
+        pte_modify(pte, mflags);
     }
-
-    if (vma->flags & PROT_READ)
-        flags |= PTE_R;
-    if (vma->flags & PROT_EXEC)
-        flags |= PTE_X;
-    if (vma->flags & VMA_FLAG_USER)
-        flags |= PTE_U;
-
-    flags |= PTE_V | PTE_A | PTE_D;
-    *pte = PA2PTE(pa) | flags;
 
     sfence_vma_page(fault_va);
     return 0;
@@ -976,10 +782,10 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte, uint64 fault_va)
 
 static int __vma_validate_pte(vma_t *vma, pte_t *pte, uint64 flags, uint64 fault_va)
 {
-    bool pte_user = (*pte & PTE_U) != 0;
-    bool vma_user = (flags & VMA_FLAG_USER) != 0;
+    bool is_pte_user = pte_user(pte) != 0;
+    bool is_vma_user = (flags & VMA_FLAG_USER) != 0;
 
-    if (*pte != 0 && (pte_user ^ vma_user))
+    if (*pte != 0 && (is_pte_user ^ is_vma_user))
         return -EACCES;
 
     if ((flags & PROT_WRITE) && __vma_validate_pte_rxw(vma, pte, fault_va) != 0)
@@ -1057,17 +863,7 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                 if (*pte != 0) {
                     page_free(pa, 0);
                 } else {
-                    pte_t pte_flags = 0;
-                    if (vma->flags & PROT_READ)
-                        pte_flags |= PTE_R;
-                    if (vma->flags & PROT_WRITE)
-                        pte_flags |= PTE_W;
-                    if (vma->flags & PROT_EXEC)
-                        pte_flags |= PTE_X;
-                    if (vma->flags & VMA_FLAG_USER)
-                        pte_flags |= PTE_U;
-                    pte_flags |= PTE_V | PTE_A | PTE_D;
-                    *pte = PA2PTE(pa) | pte_flags;
+                    *pte = mk_pte((uint64)pa, vma->flags);
                     sfence_vma_page(i);
                 }
                 continue;
@@ -1134,7 +930,7 @@ copyout_ok:
         pte = walk(vm->pagetable, va0, 0, NULL, NULL);
         assert(pte != NULL, "vma_copyout: pte should not be null");
 
-        pa0 = PTE2PA(*pte);
+        pa0 = pte_pa(pte);
         n = PGSIZE - (dstva - va0);
         if (n > len)
             n = len;
@@ -1622,34 +1418,34 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
     uint64 new_flags = (vma->flags & ~PROT_MASK);
     new_flags |= prot & PROT_MASK;
 
-    uint64 pte_flags = vma2pte_flags(new_flags);
-
     /*
+     * Compute effective VMA-level flags for PTE construction.
      * On x86, PTE_R == PTE_V (Present), so a Present+User page is always
-     * readable.  For PROT_NONE, strip PTE_U so user-mode access faults
-     * (supervisor-only page).  The PTE remains valid (PTE_V set) so that
+     * readable.  For PROT_NONE, strip VMA_FLAG_USER so user-mode access
+     * faults (supervisor-only page).  The PTE remains valid so that
      * __vma_set_free / __vma_copy still handle it correctly.
      */
+    uint64 effective_flags = new_flags;
     if ((prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0)
-        pte_flags &= ~PTE_U;
+        effective_flags &= ~VMA_FLAG_USER;
 
     vm_pgtable_lock(vm);
     for (uint64 va = addr; va < addr + size; va += PGSIZE) {
         pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
-        if (pte != NULL && (*pte & PTE_V)) {
-            uint64 pa = PTE2PA(*pte);
-            pte_t new_flags = pte_flags | PTE_V | PTE_A | PTE_D;
+        if (pte != NULL && pte_present(pte)) {
+            uint64 mflags = effective_flags;
             /* rmap-based COW: if page has mapcount > 1 and we're trying
-             * to grant write, suppress PTE_W — the write-fault handler
+             * to grant write, suppress write — the write-fault handler
              * will resolve it via COW when the page is actually written. */
-            if (new_flags & PTE_W) {
+            if (mflags & PROT_WRITE) {
+                uint64 pa = pte_pa(pte);
                 page_t *pg = __pa_to_page(pa);
                 if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
                     page_mapcount(pg) > 1) {
-                    new_flags &= ~PTE_W;
+                    mflags &= ~PROT_WRITE;
                 }
             }
-            *pte = PA2PTE(pa) | new_flags;
+            pte_modify(pte, mflags);
         }
     }
     vm_pgtable_unlock(vm);
@@ -1737,22 +1533,21 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
 
     for (uint64 offset = 0; offset < old_size; offset += PGSIZE) {
         pte_t *old_pte = walk(vm->pagetable, old_addr + offset, 0, NULL, NULL);
-        if (old_pte != NULL && (*old_pte & PTE_V)) {
-            uint64 pa = PTE2PA(*old_pte);
-            uint64 pte_flags =
-                *old_pte & (PTE_R | PTE_W | PTE_X | PTE_U | PTE_A | PTE_D);
+        if (old_pte != NULL && pte_present(old_pte)) {
+            uint64 pa = pte_pa(old_pte);
 
             pte_t *new_pte =
                 walk(vm->pagetable, new_location + offset, 1, NULL, NULL);
             if (new_pte == NULL)
                 goto out;
-            *new_pte = PA2PTE(pa) | pte_flags | PTE_V;
+            /* Move the PTE: copy full value, then clear old. */
+            *new_pte = *old_pte;
             page_ref_inc((void *)pa);
             /* Transfer rmap: add mapping for new VMA before old is freed. */
             page_t *pg = __pa_to_page(pa);
             if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
                 page_add_anon_rmap(pg, new_vma, new_location + offset);
-            *old_pte = 0;
+            pte_clear(old_pte);
         }
     }
 
@@ -1843,7 +1638,7 @@ int vm_mincore(vm_t *vm, uint64 addr, size_t size, unsigned char *vec)
                 continue;
         }
         pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
-        if (pte != NULL && (*pte & PTE_V))
+        if (pte != NULL && pte_present(pte))
             vec[i] = 1;
     }
     vm_pgtable_unlock(vm);
@@ -1894,15 +1689,15 @@ int vm_madvise(vm_t *vm, uint64 addr, size_t size, int advice)
         vm_pgtable_lock(vm);
         for (uint64 va = addr; va < addr + size; va += PGSIZE) {
             pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
-            if (pte != NULL && (*pte & PTE_V)) {
-                uint64 pa = PTE2PA(*pte);
+            if (pte != NULL && pte_present(pte)) {
+                uint64 pa = pte_pa(pte);
                 if (pa != 0) {
                     page_t *pg = __pa_to_page(pa);
                     if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
                         page_remove_rmap(pg);
                     page_ref_dec((void *)pa);
                 }
-                *pte = 0;
+                pte_clear(pte);
             }
         }
         vm_pgtable_unlock(vm);

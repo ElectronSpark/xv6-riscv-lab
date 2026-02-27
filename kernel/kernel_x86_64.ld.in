@@ -44,8 +44,8 @@ SECTIONS
     _data_end = .;
   }
 
+  . = ALIGN(4096);
   .ksymbols : {
-    . = ALIGN(4096);
     _ksymbols_start = .;
     KEEP(*(.ksymbols))
     . = ALIGN(4096);

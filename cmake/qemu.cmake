@@ -27,7 +27,7 @@ if(ARCH STREQUAL "x86_64")
     set(X86_BANNER_ELF ${X86_BANNER_DIR}/xv6_x86_banner.elf)
     set(X86_BANNER_PAYLOAD ${X86_BANNER_DIR}/xv6_x86_banner.payload.bin)
     set(X86_BANNER_IMAGE ${X86_BANNER_DIR}/xv6_banner.bin)
-    set(X86_FULL_IMAGE ${CMAKE_BINARY_DIR}/kernel/kernel)
+    set(X86_FULL_IMAGE ${CMAKE_BINARY_DIR}/kernel/kernel_with_symbols_elf)
 
     add_custom_command(
         OUTPUT ${X86_BANNER_IMAGE}

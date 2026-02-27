@@ -40,18 +40,22 @@ void print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end)
             break;
         }
 
+        /* return_addr points to the instruction AFTER the call;
+         * subtract 1 so we look up an address inside the call insn. */
+        uint64 lookup_addr = return_addr - 1;
+
         char symbuf[64]   = {0};
         char filebuf[128] = {0};
         uint32 line = 0;
         void *sym_addr = NULL;
 
-        int idx = ksym_lookup(return_addr, symbuf, sizeof(symbuf), &sym_addr);
+        int idx = ksym_lookup(lookup_addr, symbuf, sizeof(symbuf), &sym_addr);
         if (idx < 0) {
             printf("  * %p: unknown\n", (void *)return_addr);
         } else {
-            ksymbols_t *sym = ksym_search(return_addr);
+            ksymbols_t *sym = ksym_search(lookup_addr);
             ksym_get_location(sym, filebuf, sizeof(filebuf), &line);
-            int offset = ksym_get_offset(sym, return_addr);
+            int offset = ksym_get_offset(sym, lookup_addr);
             printf("  * %s:%d: %s+%d\n", filebuf, line, symbuf, offset);
         }
     }
@@ -123,7 +127,9 @@ void print_thread_backtrace(struct context *ctx, uint64 kstack,
             last_return_addr = return_addr;
         }
 
-        sym = ksym_search(return_addr);
+        /* return_addr is the insn after the call; -1 to land in the caller */
+        uint64 lookup_addr = return_addr - 1;
+        sym = ksym_search(lookup_addr);
         if (sym == NULL) {
             printf("  * %p: unknown\n", (void *)return_addr);
         } else {
@@ -137,7 +143,7 @@ void print_thread_backtrace(struct context *ctx, uint64 kstack,
                 symbuf[0] = '\0';
             }
             ksym_get_location(sym, filebuf, sizeof(filebuf), &line);
-            int offset = ksym_get_offset(sym, return_addr);
+            int offset = ksym_get_offset(sym, lookup_addr);
             printf("  * %s:%d: %s+%d [%p]\n", filebuf, line, symbuf, offset,
                    (void *)return_addr);
         }

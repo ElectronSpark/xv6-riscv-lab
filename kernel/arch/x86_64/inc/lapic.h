@@ -67,9 +67,16 @@
 
 /* ── Vector assignments ── */
 #define T_IRQ0              32      /* I/O APIC IRQ 0 starts at vector 32 */
+#define LAPIC_IPI_VEC       0xEE    /* IPI (inter-processor interrupt) (238) */
 #define LAPIC_TIMER_VEC     0xEF    /* LAPIC timer (239) */
 #define LAPIC_ERROR_VEC     0xF0    /* LAPIC error (240) */
 #define LAPIC_SPURIOUS_VEC  0xFF    /* Spurious interrupt (255) */
+
+/* ── ICR destination shorthand (bits [19:18]) ── */
+#define LAPIC_ICR_DEST_NONE         (0 << 18)   /* use destination field */
+#define LAPIC_ICR_DEST_SELF         (1 << 18)
+#define LAPIC_ICR_DEST_ALL          (2 << 18)   /* all including self */
+#define LAPIC_ICR_DEST_ALLBUTSELF   (3 << 18)   /* all excluding self */
 
 /* ── Public API ── */
 

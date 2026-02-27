@@ -85,8 +85,8 @@ SECTIONS
    * It's placed after .data but before .bss so it's included in the flat binary.
    * The build system generates this from the first-pass kernel.
    */
+  . = ALIGN(4096);
   .ksymbols : {
-    . = ALIGN(4096);
     _ksymbols_start = .;
     KEEP(*(.ksymbols))
     . = ALIGN(4096);

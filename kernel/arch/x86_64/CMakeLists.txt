@@ -8,6 +8,7 @@ set(ARCH_C_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/ipi/ipi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/timer/timer.c
     ${CMAKE_CURRENT_SOURCE_DIR}/mm/vm.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/mm/pgtable.c
     ${CMAKE_CURRENT_SOURCE_DIR}/platform_x86.c
     ${CMAKE_CURRENT_SOURCE_DIR}/backtrace.c
     ${CMAKE_CURRENT_SOURCE_DIR}/gdbstub_arch.c
