@@ -31,9 +31,9 @@ extern pagetable_t kernel_pagetable;
 extern uint64 vectors[];
 
 /* ── Trampoline stubs (linker compatibility) ── */
-extern uint64 trampoline_ksatp;  /* defined in trapvec.S */
+extern uint64 trampoline_ksatp; /* defined in trapvec.S */
 extern char trampoline[];
-extern void sig_trampoline(void);  /* defined in sig_trampoline.S */
+extern void sig_trampoline(void); /* defined in sig_trampoline.S */
 
 extern char userret[];
 static void (*trampoline_userret)(uint64 tf, uint64 user_cr3) = NULL;
@@ -122,8 +122,8 @@ void usertrapret(void) {
 
     /* Guard: if vm was freed (process being torn down), don't proceed. */
     if (p->vm == NULL || p->vm->pagetable == NULL) {
-        printf("usertrapret: pid %d '%s' has no VM, exiting\n",
-               p->pid, p->name);
+        printf("usertrapret: pid %d '%s' has no VM, exiting\n", p->pid,
+               p->name);
         intr_on();
         exit(-1);
     }
@@ -162,17 +162,17 @@ void usertrapret(void) {
         uint64 cr0;
         asm volatile("movq %%cr0, %0" : "=r"(cr0));
         if (THREAD_FPU_USED(p) && my_cpu->fpu_owner == p)
-            cr0 &= ~(1ULL << 3);   /* clear CR0.TS */
+            cr0 &= ~(1ULL << 3); /* clear CR0.TS */
         else
-            cr0 |= (1ULL << 3);    /* set CR0.TS   */
+            cr0 |= (1ULL << 3); /* set CR0.TS   */
         asm volatile("movq %0, %%cr0" : : "r"(cr0));
     }
 
     /* Final sanity check — should not happen after the earlier guard,
      * but if it does, kill the process instead of panicking. */
     if (p->vm == NULL || p->vm->pagetable == NULL) {
-        printf("usertrapret: pid %d '%s' lost VM before iretq\n",
-               p->pid, p->name);
+        printf("usertrapret: pid %d '%s' lost VM before iretq\n", p->pid,
+               p->name);
         intr_on();
         exit(-1);
     }
@@ -196,8 +196,8 @@ int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
         (p->signal.sig_stack.ss_flags & (SS_ONSTACK | SS_DISABLE)) == 0) {
         if (p->signal.sig_stack.ss_size < MINSIGSTKSZ)
             return -1;
-        new_sp = (uint64)p->signal.sig_stack.ss_sp +
-                 p->signal.sig_stack.ss_size;
+        new_sp =
+            (uint64)p->signal.sig_stack.ss_sp + p->signal.sig_stack.ss_size;
     } else {
         new_sp = p->trapframe->trapframe.rsp;
     }
@@ -279,9 +279,9 @@ int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
      */
     p->trapframe->trapframe.rip = (uint64)sa->sa_handler;
     p->trapframe->trapframe.rsp = new_sp;
-    arch_tf_set_arg0(p->trapframe, (uint64)signo);  /* arg1: signal number  */
-    arch_tf_set_arg1(p->trapframe, si_addr);         /* arg2: siginfo_t *    */
-    arch_tf_set_arg2(p->trapframe, uc_addr);         /* arg3: ucontext_t *   */
+    arch_tf_set_arg0(p->trapframe, (uint64)signo); /* arg1: signal number  */
+    arch_tf_set_arg1(p->trapframe, si_addr);       /* arg2: siginfo_t *    */
+    arch_tf_set_arg2(p->trapframe, uc_addr);       /* arg3: ucontext_t *   */
 
     p->signal.sig_ucontext = uc_addr;
 
@@ -295,8 +295,7 @@ int restore_sigframe(struct thread *p, ucontext_t *ret_uc) {
         return -1;
 
     /* Copy the saved ucontext back from user memory. */
-    if (vm_copyin(p->vm, (void *)ret_uc, sig_ucontext,
-                  sizeof(ucontext_t)) != 0)
+    if (vm_copyin(p->vm, (void *)ret_uc, sig_ucontext, sizeof(ucontext_t)) != 0)
         return -1;
 
     p->signal.sig_ucontext = (uint64)ret_uc->uc_link;
@@ -327,15 +326,15 @@ static inline uint8 inb(uint16 port) {
 
 /* ─────────────────── PIC 8259A ─────────────────── */
 
-#define PIC1_CMD   0x20
-#define PIC1_DATA  0x21
-#define PIC2_CMD   0xA0
-#define PIC2_DATA  0xA1
+#define PIC1_CMD 0x20
+#define PIC1_DATA 0x21
+#define PIC2_CMD 0xA0
+#define PIC2_DATA 0xA1
 
-#define PIC_EOI    0x20
+#define PIC_EOI 0x20
 
 /* IRQ vector base: IRQ 0 → vector 32 */
-#define IRQ_BASE   32
+#define IRQ_BASE 32
 
 static void pic_init(void) {
     /* ICW1: begin init + ICW4 needed */
@@ -343,12 +342,12 @@ static void pic_init(void) {
     outb(PIC2_CMD, 0x11);
 
     /* ICW2: vector offsets */
-    outb(PIC1_DATA, IRQ_BASE);       /* master: IRQ 0-7  → vectors 32-39 */
-    outb(PIC2_DATA, IRQ_BASE + 8);   /* slave:  IRQ 8-15 → vectors 40-47 */
+    outb(PIC1_DATA, IRQ_BASE);     /* master: IRQ 0-7  → vectors 32-39 */
+    outb(PIC2_DATA, IRQ_BASE + 8); /* slave:  IRQ 8-15 → vectors 40-47 */
 
     /* ICW3: cascade wiring */
-    outb(PIC1_DATA, 0x04);           /* master: slave on IRQ 2 */
-    outb(PIC2_DATA, 0x02);           /* slave:  cascade identity 2 */
+    outb(PIC1_DATA, 0x04); /* master: slave on IRQ 2 */
+    outb(PIC2_DATA, 0x02); /* slave:  cascade identity 2 */
 
     /* ICW4: 8086 mode */
     outb(PIC1_DATA, 0x01);
@@ -367,31 +366,25 @@ void x86_idt_init(void) {
     extern void vector0(void);
     uint64 trapvec_page0 = PGROUNDDOWN((uint64)vector0);
     for (int i = 0; i < IDT_ENTRIES; i++)
-        idt_set_gate(&idt[i],
-                     TRAPVEC_ALIAS_BASE + (vectors[i] - trapvec_page0),
+        idt_set_gate(&idt[i], TRAPVEC_ALIAS_BASE + (vectors[i] - trapvec_page0),
                      SEG_KCODE, GATE_INTERRUPT, 1);
 
     /* Vector 3 (INT3 / breakpoint) must be DPL=3 so user-mode
      * processes can trigger it for GDB breakpoints / waitgdb. */
-    idt_set_gate(&idt[3],
-                 TRAPVEC_ALIAS_BASE + (vectors[3] - trapvec_page0),
+    idt_set_gate(&idt[3], TRAPVEC_ALIAS_BASE + (vectors[3] - trapvec_page0),
                  SEG_KCODE, GATE_USER_INT, 1);
 
     idtr.limit = sizeof(idt) - 1;
-    idtr.base  = (uint64)idt;
+    idtr.base = (uint64)idt;
     asm volatile("lidt %0" : : "m"(idtr));
 }
 
-void x86_idt_remap(uint64 idt_va)
-{
+void x86_idt_remap(uint64 idt_va) {
     idtr.base = idt_va;
     asm volatile("lidt %0" : : "m"(idtr));
 }
 
-uint64 x86_idt_page_pa(void)
-{
-    return (uint64)idt;
-}
+uint64 x86_idt_page_pa(void) { return (uint64)idt; }
 
 /* ── arch_trap_init / arch_trap_init_hart ── */
 
@@ -458,7 +451,7 @@ void arch_irq_init(void) {
     extern int arch_timer_needs_ioapic_irq0(void);
     int bsp_id = lapic_id();
     if (arch_timer_needs_ioapic_irq0())
-        ioapic_enable(0, T_IRQ0 + 0, bsp_id);  /* IRQ 0 → vector 32 → BSP */
+        ioapic_enable(0, T_IRQ0 + 0, bsp_id); /* IRQ 0 → vector 32 → BSP */
 
     dbg_puts("[x86] arch_irq_init: APIC initialized, bsp_id=");
     dbg_hex((uint64)bsp_id);
@@ -472,7 +465,7 @@ void arch_irq_init_hart(void) {
     static int bsp_done = 0;
     if (!bsp_done) {
         bsp_done = 1;
-        return;     /* BSP: already initialized in arch_irq_init() */
+        return; /* BSP: already initialized in arch_irq_init() */
     }
     lapic_init();
     extern void arch_timer_init_hart(void);
@@ -501,22 +494,22 @@ void plic_enable_irq_level(int irq) {
 
 /* These are only used on RISC-V; on x86 the trap handler dispatches
  * directly and sends LAPIC EOI. */
-int plic_claim(void)          { return 0; }
-void plic_complete(int irq)   { (void)irq; }
+int plic_claim(void) { return 0; }
+void plic_complete(int irq) { (void)irq; }
 
 /* ── Exception name table ── */
 
 static const char *exception_names[32] = {
-    [0]  = "#DE Divide Error",
-    [1]  = "#DB Debug",
-    [2]  = "NMI",
-    [3]  = "#BP Breakpoint",
-    [4]  = "#OF Overflow",
-    [5]  = "#BR Bound Range",
-    [6]  = "#UD Invalid Opcode",
-    [7]  = "#NM Device Not Available",
-    [8]  = "#DF Double Fault",
-    [9]  = "(reserved)",
+    [0] = "#DE Divide Error",
+    [1] = "#DB Debug",
+    [2] = "NMI",
+    [3] = "#BP Breakpoint",
+    [4] = "#OF Overflow",
+    [5] = "#BR Bound Range",
+    [6] = "#UD Invalid Opcode",
+    [7] = "#NM Device Not Available",
+    [8] = "#DF Double Fault",
+    [9] = "(reserved)",
     [10] = "#TS Invalid TSS",
     [11] = "#NP Segment Not Present",
     [12] = "#SS Stack-Segment Fault",
@@ -529,8 +522,12 @@ static const char *exception_names[32] = {
     [19] = "#XM SIMD FP Exception",
     [20] = "#VE Virtualization",
     [21] = "#CP Control Protection",
-    [22] = "(reserved)", [23] = "(reserved)", [24] = "(reserved)",
-    [25] = "(reserved)", [26] = "(reserved)", [27] = "(reserved)",
+    [22] = "(reserved)",
+    [23] = "(reserved)",
+    [24] = "(reserved)",
+    [25] = "(reserved)",
+    [26] = "(reserved)",
+    [27] = "(reserved)",
     [28] = "(reserved)",
     [29] = "#SX Security Exception",
     [30] = "#HV VMM Communication",
@@ -542,7 +539,8 @@ static inline void dbg_outb(uint16 port, uint8 val) {
     asm volatile("outb %0, %1" : : "a"(val), "Nd"(port));
 }
 static void dbg_puts(const char *s) {
-    while (*s) dbg_outb(0xE9, (uint8)*s++);
+    while (*s)
+        dbg_outb(0xE9, (uint8)*s++);
 }
 static void dbg_hex(uint64 v) {
     static const char h[] = "0123456789abcdef";
@@ -608,8 +606,9 @@ void x86_trap_handler(struct trapframe *tf) {
             vm_runlock(current->vm);
 
             /* Could not resolve — kill the process */
-            printf("pid %d %s: fatal page fault cr2=0x%lx err=0x%lx rip=0x%lx\n",
-                   current->pid, current->name, cr2, tf->err, tf->rip);
+            printf(
+                "pid %d %s: fatal page fault cr2=0x%lx err=0x%lx rip=0x%lx\n",
+                current->pid, current->name, cr2, tf->err, tf->rip);
             assert(current->pid != 1, "init exiting");
             {
                 extern int gdbstub_signal_stop(struct thread *, int);
@@ -632,12 +631,15 @@ void x86_trap_handler(struct trapframe *tf) {
 
         /* Kernel-mode page fault — unrecoverable */
         dbg_puts("\n*** KERNEL PAGE FAULT\n");
-        dbg_puts("  cr2=0x"); dbg_hex(cr2);
-        dbg_puts(" err=0x"); dbg_hex(tf->err);
-        dbg_puts(" rip=0x"); dbg_hex(tf->rip);
+        dbg_puts("  cr2=0x");
+        dbg_hex(cr2);
+        dbg_puts(" err=0x");
+        dbg_hex(tf->err);
+        dbg_puts(" rip=0x");
+        dbg_hex(tf->rip);
         dbg_puts("\n");
-        printf("\n*** KERNEL PAGE FAULT: cr2=0x%lx err=0x%lx rip=0x%lx\n",
-               cr2, tf->err, tf->rip);
+        printf("\n*** KERNEL PAGE FAULT: cr2=0x%lx err=0x%lx rip=0x%lx\n", cr2,
+               tf->err, tf->rip);
         *(uint64 *)((uint64)tf - 8) = tf->rip;
         panic_disable_bt();
         panic("kernel page fault");
@@ -661,12 +663,11 @@ void x86_trap_handler(struct trapframe *tf) {
         extern int gdbstub_trap(struct thread *);
         if (gdbstub_trap(current) != 0) {
             /* GDB stub didn't handle it — deliver SIGTRAP */
-            printf("pid %d %s: breakpoint trap rip=0x%lx\n",
-                   current->pid, current->name,
-                   current->trapframe->trapframe.rip);
+            printf("pid %d %s: breakpoint trap rip=0x%lx\n", current->pid,
+                   current->name, current->trapframe->trapframe.rip);
             kill(current->pid, SIGTRAP);
         }
-        usertrapret();  /* noreturn — returns via utrapframe */
+        usertrapret(); /* noreturn — returns via utrapframe */
     }
 
     if (vec == 1 && from_user && current) {
@@ -679,12 +680,11 @@ void x86_trap_handler(struct trapframe *tf) {
         extern int gdbstub_trap(struct thread *);
         if (gdbstub_trap(current) != 0) {
             /* GDB stub didn't handle it — deliver SIGTRAP */
-            printf("pid %d %s: debug trap rip=0x%lx\n",
-                   current->pid, current->name,
-                   current->trapframe->trapframe.rip);
+            printf("pid %d %s: debug trap rip=0x%lx\n", current->pid,
+                   current->name, current->trapframe->trapframe.rip);
             kill(current->pid, SIGTRAP);
         }
-        usertrapret();  /* noreturn — returns via utrapframe */
+        usertrapret(); /* noreturn — returns via utrapframe */
     }
 
     if (vec < 32) {
@@ -732,11 +732,13 @@ void x86_trap_handler(struct trapframe *tf) {
         if (from_user && current) {
             /* User-mode exception — deliver appropriate signal */
             int sig = SIGSEGV;
-            if (vec == 0 || vec == 16 || vec == 19) sig = SIGFPE;  /* #DE, #MF, #XM */
-            if (vec == 6) sig = SIGILL;                            /* #UD */
+            if (vec == 0 || vec == 16 || vec == 19)
+                sig = SIGFPE; /* #DE, #MF, #XM */
+            if (vec == 6)
+                sig = SIGILL; /* #UD */
             printf("pid %d %s: exception %ld (%s) rip=0x%lx err=0x%lx\n",
-                   current->pid, current->name, vec,
-                   name ? name : "???", tf->rip, tf->err);
+                   current->pid, current->name, vec, name ? name : "???",
+                   tf->rip, tf->err);
             assert(current->pid != 1, "init exiting");
             {
                 extern int gdbstub_signal_stop(struct thread *, int);
@@ -749,34 +751,55 @@ void x86_trap_handler(struct trapframe *tf) {
         /* Kernel exception */
         dbg_puts("\n*** EXCEPTION: ");
         dbg_puts(name ? name : "???");
-        dbg_puts("\n  vector=0x"); dbg_hex(vec);
-        dbg_puts(" err=0x");      dbg_hex(tf->err);
-        dbg_puts("\n  rip=0x");   dbg_hex(tf->rip);
-        dbg_puts(" cs=0x");       dbg_hex(tf->cs);
-        dbg_puts("\n  rflags=0x");dbg_hex(tf->rflags);
-        dbg_puts(" rsp=0x");      dbg_hex(tf->rsp);
-        dbg_puts(" ss=0x");       dbg_hex(tf->ss);
-        dbg_puts("\n  rax=0x");   dbg_hex(tf->rax);
-        dbg_puts(" rbx=0x");      dbg_hex(tf->rbx);
-        dbg_puts(" rcx=0x");      dbg_hex(tf->rcx);
-        dbg_puts(" rdx=0x");      dbg_hex(tf->rdx);
-        dbg_puts("\n  rdi=0x");   dbg_hex(tf->rdi);
-        dbg_puts(" rsi=0x");      dbg_hex(tf->rsi);
-        dbg_puts(" rbp=0x");      dbg_hex(tf->rbp);
-        dbg_puts("\n  r8 =0x");   dbg_hex(tf->r8);
-        dbg_puts(" r9 =0x");      dbg_hex(tf->r9);
-        dbg_puts(" r10=0x");      dbg_hex(tf->r10);
-        dbg_puts(" r11=0x");      dbg_hex(tf->r11);
-        dbg_puts("\n  r12=0x");   dbg_hex(tf->r12);
-        dbg_puts(" r13=0x");      dbg_hex(tf->r13);
-        dbg_puts(" r14=0x");      dbg_hex(tf->r14);
-        dbg_puts(" r15=0x");      dbg_hex(tf->r15);
+        dbg_puts("\n  vector=0x");
+        dbg_hex(vec);
+        dbg_puts(" err=0x");
+        dbg_hex(tf->err);
+        dbg_puts("\n  rip=0x");
+        dbg_hex(tf->rip);
+        dbg_puts(" cs=0x");
+        dbg_hex(tf->cs);
+        dbg_puts("\n  rflags=0x");
+        dbg_hex(tf->rflags);
+        dbg_puts(" rsp=0x");
+        dbg_hex(tf->rsp);
+        dbg_puts(" ss=0x");
+        dbg_hex(tf->ss);
+        dbg_puts("\n  rax=0x");
+        dbg_hex(tf->rax);
+        dbg_puts(" rbx=0x");
+        dbg_hex(tf->rbx);
+        dbg_puts(" rcx=0x");
+        dbg_hex(tf->rcx);
+        dbg_puts(" rdx=0x");
+        dbg_hex(tf->rdx);
+        dbg_puts("\n  rdi=0x");
+        dbg_hex(tf->rdi);
+        dbg_puts(" rsi=0x");
+        dbg_hex(tf->rsi);
+        dbg_puts(" rbp=0x");
+        dbg_hex(tf->rbp);
+        dbg_puts("\n  r8 =0x");
+        dbg_hex(tf->r8);
+        dbg_puts(" r9 =0x");
+        dbg_hex(tf->r9);
+        dbg_puts(" r10=0x");
+        dbg_hex(tf->r10);
+        dbg_puts(" r11=0x");
+        dbg_hex(tf->r11);
+        dbg_puts("\n  r12=0x");
+        dbg_hex(tf->r12);
+        dbg_puts(" r13=0x");
+        dbg_hex(tf->r13);
+        dbg_puts(" r14=0x");
+        dbg_hex(tf->r14);
+        dbg_puts(" r15=0x");
+        dbg_hex(tf->r15);
         dbg_puts("\n");
         printf("\n*** EXCEPTION %ld: %s\n", vec, name ? name : "???");
-        printf("  err=0x%lx  rip=0x%lx  cs=0x%lx\n",
-               tf->err, tf->rip, tf->cs);
-        printf("  rsp=0x%lx  rbp=0x%lx  rflags=0x%lx\n",
-               tf->rsp, tf->rbp, tf->rflags);
+        printf("  err=0x%lx  rip=0x%lx  cs=0x%lx\n", tf->err, tf->rip, tf->cs);
+        printf("  rsp=0x%lx  rbp=0x%lx  rflags=0x%lx\n", tf->rsp, tf->rbp,
+               tf->rflags);
 
         *(uint64 *)((uint64)tf - 8) = tf->rip;
         panic_disable_bt();
@@ -800,13 +823,13 @@ void x86_trap_handler(struct trapframe *tf) {
         /* LAPIC timer interrupt (periodic or TSC-deadline) */
         timer_tick_advance();
         extern void lapic_timer_rearm(void);
-        lapic_timer_rearm();  /* no-op for periodic mode */
+        lapic_timer_rearm(); /* no-op for periodic mode */
         lapic_eoi();
 
     } else if (vec == LAPIC_IPI_VEC) {
         /* Inter-processor interrupt */
         extern void x86_ipi_handler(void);
-        lapic_eoi();    /* EOI before handler so nested IPIs can arrive */
+        lapic_eoi(); /* EOI before handler so nested IPIs can arrive */
         x86_ipi_handler();
 
     } else if (vec == LAPIC_ERROR_VEC) {
@@ -816,7 +839,6 @@ void x86_trap_handler(struct trapframe *tf) {
 
     } else if (vec == LAPIC_SPURIOUS_VEC) {
         /* Spurious interrupt — do NOT send EOI */
-
     }
 
     /*
@@ -829,7 +851,7 @@ void x86_trap_handler(struct trapframe *tf) {
      */
 user_return:
     if (from_user && current) {
-        usertrapret();  /* noreturn */
+        usertrapret(); /* noreturn */
     }
     /* Kernel traps return here and fall back to trapret/iretq. */
 }
@@ -858,5 +880,5 @@ void usertrap_syscall(struct trapframe *tf) {
 
     intr_on();
     syscall();
-    usertrapret();  /* noreturn */
+    usertrapret(); /* noreturn */
 }

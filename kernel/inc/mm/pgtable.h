@@ -21,7 +21,7 @@
 #include "types.h"
 
 /* ========================================================================== */
-/*  Architecture-specific inline PTE helpers                                   */
+/*  Architecture-specific inline PTE helpers */
 /* ========================================================================== */
 /*
  * Each arch header defines:
@@ -62,14 +62,14 @@
 #endif
 
 /* ========================================================================== */
-/*  Page-table page allocator                                                  */
+/*  Page-table page allocator */
 /* ========================================================================== */
 
 pde_t *pgtab_alloc(void);
-void   pgtab_free(void *pa);
+void pgtab_free(void *pa);
 
 /* ========================================================================== */
-/*  Page-table walking                                                         */
+/*  Page-table walking */
 /* ========================================================================== */
 
 /**
@@ -82,8 +82,8 @@ void   pgtab_free(void *pa);
  *
  * Returns NULL if the mapping does not exist and @alloc is 0.
  */
-pte_t *walk(pagetable_t pagetable, uint64 va, int alloc,
-            pte_t **retl2, pte_t **retl1);
+pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
+            pte_t **retl1);
 
 /**
  * walkaddr - Look up a user virtual address and return its physical address,
@@ -92,7 +92,7 @@ pte_t *walk(pagetable_t pagetable, uint64 va, int alloc,
 uint64 walkaddr(pagetable_t pagetable, uint64 va);
 
 /* ========================================================================== */
-/*  Page-table bulk mapping / unmapping                                        */
+/*  Page-table bulk mapping / unmapping */
 /* ========================================================================== */
 
 /**
@@ -141,7 +141,7 @@ uint64 vma2pte_flags(uint64 vma_flags);
 uint64 pte2vma_flags(pte_t *pte);
 
 /* ========================================================================== */
-/*  PTE zapping (used by rmap)                                                 */
+/*  PTE zapping (used by rmap) */
 /* ========================================================================== */
 
 /**

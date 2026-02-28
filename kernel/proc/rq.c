@@ -432,11 +432,12 @@ struct rq *rq_select_task_rq(struct sched_entity *se, cpumask_t cpumask) {
     }
 
     // Mask out inactive CPUs
-    cpumask_t effective_mask = cpumask & rq_global.active_cpu_mask;
+    cpumask_t effective_mask =
+        cpumask & smp_load_acquire(&rq_global.active_cpu_mask);
     if (effective_mask == 0) {
         // If no active CPUs match the requested mask, fall back to all active
         // CPUs
-        effective_mask = rq_global.active_cpu_mask;
+        effective_mask = smp_load_acquire(&rq_global.active_cpu_mask);
     }
 
     if (__sched_class_of_id(major_prio)->select_task_rq) {
@@ -622,7 +623,7 @@ bool rq_cpu_is_idle(int cpu_id) {
     if (cpu_id < 0 || cpu_id >= NCPU) {
         return false;
     }
-    if (!(rq_global.active_cpu_mask & (1ULL << cpu_id))) {
+    if (!(smp_load_acquire(&rq_global.active_cpu_mask) & (1ULL << cpu_id))) {
         return true; // Inactive CPU is considered idle
     }
     struct sched_entity *current_se =
@@ -691,7 +692,8 @@ void rq_flush_wake_list(int cpu_id) {
 
     // Process each entry - either enqueue or re-add to wake list for later
     struct sched_entity *se;
-    struct sched_entity *retry_list = NULL; // Entries to retry later
+    struct sched_entity *retry_list = NULL;   // Entries to retry later
+    struct sched_entity *forward_list = NULL; // Entries for other CPUs
 
     while (wake_list != NULL) {
         // Pop one entry from wake_list
@@ -715,7 +717,16 @@ void rq_flush_wake_list(int cpu_id) {
             continue;
         }
 
-        // Task is not on_rq - need to enqueue it
+        // Task is not on_rq - need to enqueue it.
+        // Respect CPU affinity: if this CPU is not in the task's
+        // affinity mask, collect it for forwarding after releasing our lock
+        // (to avoid nested rq_percpu locks which could deadlock).
+        cpumask_t aff = se->affinity_mask;
+        if (aff != 0 && !(aff & (1ULL << cpu_id))) {
+            LLIST_PUSH(forward_list, se, wake_next);
+            continue;
+        }
+
         int major_prio = se->priority >> PRIORITY_MAINLEVEL_SHIFT;
         struct rq *rq = rq_pc->rqs[major_prio];
 
@@ -738,6 +749,36 @@ void rq_flush_wake_list(int cpu_id) {
     }
 
     rq_percpu_put_unlock(rq_pc);
+
+    // Forward affinity-mismatched threads to their target CPU's wake list.
+    // Done after releasing our rq_pc lock to avoid nested lock deadlocks.
+    while (forward_list != NULL) {
+        se = forward_list;
+        forward_list = se->wake_next;
+        se->wake_next = NULL;
+
+        cpumask_t aff = se->affinity_mask;
+        int forwarded = 0;
+        for (int c = 0; c < NCPU; c++) {
+            if (aff & (1ULL << c)) {
+                struct rq_percpu *dst = rq_percpu_lock_get(c);
+                if (dst != NULL) {
+                    LLIST_PUSH(dst->wake_list_head, se, wake_next);
+                    rq_percpu_put_unlock(dst);
+                    forwarded = 1;
+                }
+                break;
+            }
+        }
+        if (!forwarded) {
+            // Fallback: re-add to our own wake list for retry
+            struct rq_percpu *self_rq = rq_percpu_lock_get(cpu_id);
+            if (self_rq != NULL) {
+                LLIST_PUSH(self_rq->wake_list_head, se, wake_next);
+                rq_percpu_put_unlock(self_rq);
+            }
+        }
+    }
 }
 
 // Default time slice value (placeholder - not yet enforced by scheduler)
@@ -815,15 +856,21 @@ int sched_setattr(struct sched_entity *se, const struct sched_attr *attr) {
     return 0;
 }
 
-// Mark a CPU as active in the rq subsystem
+// Mark a CPU as active in the rq subsystem.
+// Uses atomic fetch-or because multiple secondary CPUs call this
+// concurrently during boot; a plain |= is a non-atomic RMW that can
+// lose updates (one CPU's store overwrites another's).
 void rq_cpu_activate(int cpu) {
     if (cpu >= 0 && cpu < NCPU) {
-        rq_global.active_cpu_mask |= (1ULL << cpu);
+        __atomic_fetch_or(&rq_global.active_cpu_mask, (1ULL << cpu),
+                          __ATOMIC_RELEASE);
     }
 }
 
 // Get the bitmask of active CPUs
-uint64 rq_get_active_cpu_mask(void) { return rq_global.active_cpu_mask; }
+uint64 rq_get_active_cpu_mask(void) {
+    return smp_load_acquire(&rq_global.active_cpu_mask);
+}
 
 // Dump run queue info: shows task count per priority per CPU
 void rq_dump(void) {

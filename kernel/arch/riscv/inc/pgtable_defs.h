@@ -24,7 +24,7 @@
 #define __ARCH_RISCV_PGTABLE_DEFS_H
 
 #include "types.h"
-#include <mm/vm_types.h>    /* PROT_READ, PROT_WRITE, PROT_EXEC, VMA_FLAG_USER */
+#include <mm/vm_types.h> /* PROT_READ, PROT_WRITE, PROT_EXEC, VMA_FLAG_USER */
 
 /* ── Raw PTE bit definitions (private to this header + pgtable.c) ───────── */
 
@@ -36,36 +36,26 @@
 #define __PTE_A (1L << 6)
 #define __PTE_D (1L << 7)
 
-#define __PA2PTE(pa)   ((((uint64)(pa)) >> 12) << 10)
-#define __PTE2PA(pte)  (((pte) >> 10) << 12)
+#define __PA2PTE(pa) ((((uint64)(pa)) >> 12) << 10)
+#define __PTE2PA(pte) (((pte) >> 10) << 12)
 #define __PTE_FLAGS(pte) ((pte) & 0x3FF & (~(__PTE_A | __PTE_D)))
 
 /* ── PTE queries ────────────────────────────────────────────────────────── */
 
 /** Is the PTE valid/present? */
-static inline int pte_present(pte_t *pte)
-{
-    return (*pte & __PTE_V) != 0;
-}
+static inline int pte_present(pte_t *pte) { return (*pte & __PTE_V) != 0; }
 
 /** Does the PTE grant write permission? */
-static inline int pte_write(pte_t *pte)
-{
-    return (*pte & __PTE_W) != 0;
-}
+static inline int pte_write(pte_t *pte) { return (*pte & __PTE_W) != 0; }
 
 /** Is the PTE user-accessible? */
-static inline int pte_user(pte_t *pte)
-{
-    return (*pte & __PTE_U) != 0;
-}
+static inline int pte_user(pte_t *pte) { return (*pte & __PTE_U) != 0; }
 
 /**
  * Is the PTE a non-leaf (directory/intermediate) entry?
  * On RISC-V Sv39 a non-leaf PTE has V=1 but R=W=X=0.
  */
-static inline int pte_nonleaf(pte_t *pte)
-{
+static inline int pte_nonleaf(pte_t *pte) {
     return __PTE_FLAGS(*pte) == __PTE_V;
 }
 
@@ -73,17 +63,13 @@ static inline int pte_nonleaf(pte_t *pte)
  * Is the PTE fully write-ready (writable, accessed, dirty)?
  * If all three are set the page can be written without a fault.
  */
-static inline int pte_write_ready(pte_t *pte)
-{
+static inline int pte_write_ready(pte_t *pte) {
     return (*pte & (__PTE_W | __PTE_A | __PTE_D)) ==
            (__PTE_W | __PTE_A | __PTE_D);
 }
 
 /** Extract the physical address stored in a PTE. */
-static inline uint64 pte_pa(pte_t *pte)
-{
-    return __PTE2PA(*pte);
-}
+static inline uint64 pte_pa(pte_t *pte) { return __PTE2PA(*pte); }
 
 /* ── PTE construction ───────────────────────────────────────────────────── */
 
@@ -95,8 +81,7 @@ static inline uint64 pte_pa(pte_t *pte)
  *
  * Sets V, A, D automatically so the page is immediately usable.
  */
-static inline pte_t mk_pte(uint64 pa, uint64 vma_flags)
-{
+static inline pte_t mk_pte(uint64 pa, uint64 vma_flags) {
     pte_t pte = __PA2PTE(pa) | __PTE_V | __PTE_A | __PTE_D;
     if (vma_flags & PROT_READ)
         pte |= __PTE_R;
@@ -112,23 +97,16 @@ static inline pte_t mk_pte(uint64 pa, uint64 vma_flags)
 /* ── PTE modification ──────────────────────────────────────────────────── */
 
 /** Clear the write-permission bit (COW write-protect). */
-static inline void pte_wrprotect(pte_t *pte)
-{
-    *pte &= ~__PTE_W;
-}
+static inline void pte_wrprotect(pte_t *pte) { *pte &= ~__PTE_W; }
 
 /** Zero the PTE entirely. */
-static inline void pte_clear(pte_t *pte)
-{
-    *pte = 0;
-}
+static inline void pte_clear(pte_t *pte) { *pte = 0; }
 
 /**
  * pte_modify - Rewrite a PTE keeping the same PA but applying new
  *              VMA-level permission flags.
  */
-static inline void pte_modify(pte_t *pte, uint64 vma_flags)
-{
+static inline void pte_modify(pte_t *pte, uint64 vma_flags) {
     uint64 pa = __PTE2PA(*pte);
     *pte = mk_pte(pa, vma_flags);
 }

@@ -892,7 +892,8 @@ void synchronize_rcu_expedited(void) {
 static int rcu_cb_kthread(uint64 cpu_id, uint64 arg2) {
     (void)arg2;
 
-    // RCU kthreads should never migrate - affinity is set at creation
+    // Affinity is set by rcu_kthread_start_cpu() before wakeup, and
+    // rq_flush_wake_list() respects affinity, so we must be on the right CPU.
     assert(cpuid() == (int)cpu_id, "RCU kthread started on wrong CPU");
 
     printf("RCU callback kthread started on CPU %lu\n", cpu_id);

@@ -344,14 +344,16 @@ ssize_t tty_input(struct tty *tty, const char *buf, size_t count) {
             if (c == tty->termios.c_cc[VEOF]) {
                 spin_unlock(&tty->lock);
                 if (tty->canon_len > 0) {
-                    pipe_write(tty->input_pipe, tty->canon_buf,
-                               tty->canon_len, 0);
+                    pipe_write(tty->input_pipe, tty->canon_buf, tty->canon_len,
+                               0);
                 } else {
                     /* Zero-length write signals EOF to reader */
                     pipe_write(tty->input_pipe, "", 0, 0);
                 }
                 spin_lock(&tty->lock);
                 tty->canon_len = 0;
+                /* Wake tty_read which sleeps on raw_wait in all modes */
+                tq_wakeup_all(&tty->raw_wait, 0, 0);
                 continue;
             }
         }
@@ -388,13 +390,13 @@ ssize_t tty_input(struct tty *tty, const char *buf, size_t count) {
                 tty->canon_buf[tty->canon_len++] = (char)c;
 
             /* Flush on newline or EOL */
-            if (c == '\n' ||
-                c == (unsigned char)tty->termios.c_cc[VEOL]) {
+            if (c == '\n' || c == (unsigned char)tty->termios.c_cc[VEOL]) {
                 spin_unlock(&tty->lock);
-                pipe_write(tty->input_pipe, tty->canon_buf,
-                           tty->canon_len, 0);
+                pipe_write(tty->input_pipe, tty->canon_buf, tty->canon_len, 0);
                 spin_lock(&tty->lock);
                 tty->canon_len = 0;
+                /* Wake tty_read which sleeps on raw_wait in all modes */
+                tq_wakeup_all(&tty->raw_wait, 0, 0);
             }
         }
     }
@@ -410,54 +412,70 @@ ssize_t tty_input(struct tty *tty, const char *buf, size_t count) {
 /*
  * tty_read - read data from the terminal
  *
- * In canonical mode, reads go through the input pipe (blocks until a
- * full line is available).  In raw mode, reads drain the tty's direct
- * ring buffer — each character is available as soon as it arrives,
- * with no pipe overhead.
+ * Both canonical and raw modes sleep on tty->raw_wait so that a
+ * concurrent TCSETS (mode switch) can wake the reader and let it
+ * re-check which buffer to drain.  Without this, a reader blocked
+ * in the wrong path (pipe vs raw ring) after a mode switch would
+ * never receive new input — the classic "keyboard goes dead" bug.
+ *
+ * Canonical mode: completed lines are read from the input pipe.
+ *                 tty_input() wakes raw_wait after each pipe_write.
+ * Raw mode:       characters are read from the direct ring buffer.
+ *                 tty_input() wakes raw_wait after each store.
  */
 ssize_t tty_read(struct tty *tty, char *buf, size_t count, bool user) {
-    spin_lock(&tty->lock);
-    int canon = L_CANON(tty);
-    spin_unlock(&tty->lock);
-
-    if (canon)
-        return pipe_read(tty->input_pipe, buf, count, user);
-
-    /* ---- Raw mode: read from direct ring buffer ---- */
     ssize_t total = 0;
 
     spin_lock(&tty->lock);
     while ((size_t)total < count) {
-        /* Wait for at least one character */
-        while (tty->raw_r == tty->raw_w) {
-            /* tq_wait_in_state releases lock, sleeps, re-acquires on wake */
-            tq_wait_in_state(&tty->raw_wait, &tty->lock, NULL,
-                             THREAD_INTERRUPTIBLE);
-            if (signal_pending(current)) {
+        if (!L_CANON(tty)) {
+            /* ---- Raw mode: drain direct ring buffer ---- */
+            while ((size_t)total < count && tty->raw_r != tty->raw_w) {
+                char ch = tty->raw_buf[tty->raw_r & (TTY_RAW_BUF_SIZE - 1)];
+                tty->raw_r++;
                 spin_unlock(&tty->lock);
-                return total > 0 ? total : -EINTR;
-            }
-        }
 
-        /* Drain available characters, up to count */
-        while ((size_t)total < count && tty->raw_r != tty->raw_w) {
-            char ch = tty->raw_buf[tty->raw_r & (TTY_RAW_BUF_SIZE - 1)];
-            tty->raw_r++;
-            spin_unlock(&tty->lock);
-
-            if (user) {
-                if (either_copyout(1, (uint64)buf + total, &ch, 1) < 0) {
-                    return total > 0 ? total : -EFAULT;
+                if (user) {
+                    if (either_copyout(1, (uint64)buf + total, &ch, 1) < 0)
+                        return total > 0 ? total : -EFAULT;
+                } else {
+                    buf[total] = ch;
                 }
-            } else {
-                buf[total] = ch;
+                total++;
+                spin_lock(&tty->lock);
             }
-            total++;
-            spin_lock(&tty->lock);
+            if (total > 0)
+                break; /* short-read semantics */
+        } else {
+            /* ---- Canonical mode: read from input pipe ---- */
+            struct pipe *pi = tty->input_pipe;
+            uint nw = smp_load_acquire(&pi->nwrite);
+            uint nr = smp_load_acquire(&pi->nread);
+            if (nw != nr) {
+                /*
+                 * Data available.  Drop the tty lock and perform a
+                 * pipe_read.  We are the sole reader of this pipe,
+                 * so the data we observed will still be present.
+                 */
+                spin_unlock(&tty->lock);
+                ssize_t n = pipe_read(pi, buf + total, count - total, user);
+                if (n > 0)
+                    return total + n;
+                return total > 0 ? total : n;
+            }
         }
 
-        /* Return after first batch (like read(2) semantics) */
-        break;
+        /*
+         * No data in either buffer — sleep on raw_wait.
+         * tty_input() and TCSETS both wake this queue, so we
+         * will re-check the (possibly changed) mode on wakeup.
+         */
+        tq_wait_in_state(&tty->raw_wait, &tty->lock, NULL,
+                         THREAD_INTERRUPTIBLE);
+        if (signal_pending(current)) {
+            spin_unlock(&tty->lock);
+            return total > 0 ? total : -EINTR;
+        }
     }
     spin_unlock(&tty->lock);
 
@@ -610,6 +628,13 @@ int tty_ioctl(struct tty *tty, uint64 cmd, void *arg) {
             spin_lock(&tty->lock);
         }
         tty->termios = *tp;
+        /*
+         * Wake any reader sleeping on raw_wait so it re-checks the
+         * (possibly changed) ICANON mode.  Without this, a reader
+         * blocked on the wrong wait channel after a mode switch
+         * would never receive new input.
+         */
+        tq_wakeup_all(&tty->raw_wait, 0, 0);
         spin_unlock(&tty->lock);
 
         /* Notify driver if it cares */

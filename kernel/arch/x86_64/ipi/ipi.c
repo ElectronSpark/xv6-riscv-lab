@@ -16,8 +16,7 @@
 #include "errno.h"
 
 __attribute__((section("cpu_local_sec")))
-__attribute__((aligned(4096)))
-struct cpu_local cpus[NCPU] = {0};
+__attribute__((aligned(4096))) struct cpu_local cpus[NCPU] = {0};
 
 static cpumask_t cpu_active_mask = 0;
 uint64 __x86_tp = 0;
@@ -26,15 +25,13 @@ uint64 __x86_tp = 0;
 static volatile uint64 ipi_pending[NCPU];
 
 /* ── Internal: wait for LAPIC ICR idle ── */
-static inline void lapic_icr_wait(void)
-{
+static inline void lapic_icr_wait(void) {
     while (lapic_read(LAPIC_ICR_LO) & LAPIC_ICR_STATUS)
         asm volatile("pause");
 }
 
 /* ── Internal: fire IPI to a single LAPIC ── */
-static void lapic_send_ipi_single(int dest_apicid)
-{
+static void lapic_send_ipi_single(int dest_apicid) {
     lapic_icr_wait();
     lapic_write(LAPIC_ICR_HI, (uint32)dest_apicid << 24);
     lapic_write(LAPIC_ICR_LO,
@@ -42,8 +39,7 @@ static void lapic_send_ipi_single(int dest_apicid)
 }
 
 /* ── Internal: broadcast IPI to all-except-self ── */
-static void lapic_send_ipi_allbutself(void)
-{
+static void lapic_send_ipi_allbutself(void) {
     lapic_icr_wait();
     lapic_write(LAPIC_ICR_HI, 0);
     lapic_write(LAPIC_ICR_LO,
@@ -51,8 +47,7 @@ static void lapic_send_ipi_allbutself(void)
 }
 
 /* ── Internal: broadcast IPI to all (including self) ── */
-static void lapic_send_ipi_all(void)
-{
+static void lapic_send_ipi_all(void) {
     lapic_icr_wait();
     lapic_write(LAPIC_ICR_HI, 0);
     lapic_write(LAPIC_ICR_LO,
@@ -60,7 +55,7 @@ static void lapic_send_ipi_all(void)
 }
 
 /* ========================================================================== */
-/*  IPI handler — called from trap.c on vector LAPIC_IPI_VEC                   */
+/*  IPI handler — called from trap.c on vector LAPIC_IPI_VEC */
 /* ========================================================================== */
 
 /**
@@ -69,8 +64,7 @@ static void lapic_send_ipi_all(void)
  * Called from x86_trap_handler() when vector == LAPIC_IPI_VEC.
  * Must be called with interrupts disabled (as is standard for ISR context).
  */
-void x86_ipi_handler(void)
-{
+void x86_ipi_handler(void) {
     int cpu = cpuid();
     uint64 pending =
         __atomic_exchange_n(&ipi_pending[cpu], 0, __ATOMIC_ACQ_REL);
@@ -103,7 +97,7 @@ void x86_ipi_handler(void)
         case IPI_REASON_TLB_FLUSH:
             /* Full TLB flush by reloading CR3. */
             // Since User space and Kernel space use different page tables,
-            // the flushing operation will always be done when returning to 
+            // the flushing operation will always be done when returning to
             // the user space.
             // asm volatile(
             //     "movq %%cr3, %%rax\n\t"
@@ -120,19 +114,17 @@ void x86_ipi_handler(void)
 }
 
 /* ========================================================================== */
-/*  Public IPI API                                                              */
+/*  Public IPI API */
 /* ========================================================================== */
 
-void ipi_init(void)
-{
+void ipi_init(void) {
     for (int i = 0; i < NCPU; i++)
         __atomic_store_n(&ipi_pending[i], 0, __ATOMIC_RELEASE);
     printf("ipi_init: IPI subsystem initialized (vector 0x%x)\n",
            LAPIC_IPI_VEC);
 }
 
-int ipi_send_single(int hartid, int reason)
-{
+int ipi_send_single(int hartid, int reason) {
     if (hartid < 0 || hartid >= NCPU)
         return -EINVAL;
     if (reason < 0 || reason >= NR_IPI_REASON)
@@ -149,8 +141,7 @@ int ipi_send_single(int hartid, int reason)
 }
 
 int ipi_send_mask(unsigned long hart_mask, unsigned long hart_mask_base,
-                  int reason)
-{
+                  int reason) {
     if (reason < 0 || reason >= NR_IPI_REASON)
         return -EINVAL;
 
@@ -173,8 +164,7 @@ int ipi_send_mask(unsigned long hart_mask, unsigned long hart_mask_base,
     return 0;
 }
 
-int ipi_send_all_but_self(int reason)
-{
+int ipi_send_all_but_self(int reason) {
     if (reason < 0 || reason >= NR_IPI_REASON)
         return -EINVAL;
 
@@ -188,8 +178,7 @@ int ipi_send_all_but_self(int reason)
     return 0;
 }
 
-int ipi_send_all(int reason)
-{
+int ipi_send_all(int reason) {
     if (reason < 0 || reason >= NR_IPI_REASON)
         return -EINVAL;
 
@@ -230,7 +219,7 @@ void mycpu_init(uint64 hartid, bool trampoline) {
      *   - swapgs on user→kernel transitions restores this value
      */
     wrmsr(MSR_GS_BASE, tp);
-    wrmsr(MSR_KERNEL_GS_BASE, 0);  /* user GS starts at 0 */
+    wrmsr(MSR_KERNEL_GS_BASE, 0); /* user GS starts at 0 */
 
     __atomic_fetch_or(&cpu_active_mask, (1UL << hartid), __ATOMIC_RELAXED);
 }
