@@ -2,6 +2,7 @@
 #include "riscv.h"
 #include "defs.h"
 #include <mm/slab.h>
+#include <mm/vm.h>
 
 void *memset(void *dst, int c, size_t n) {
     char *cdst = (char *)dst;
@@ -204,7 +205,7 @@ char *strrchr(const char *s, int c)
 
 char *strndup(const char *s, size_t n) {
     size_t len = strnlen(s, n);
-    char *new_str = kmm_alloc(len + 1);
+    char *new_str = kvmalloc(len + 1);
     if (new_str == NULL) {
         return NULL; // Memory allocation failed
     }
@@ -215,7 +216,7 @@ char *strndup(const char *s, size_t n) {
 
 char *strdup(const char *s) {
     size_t len = strlen(s);
-    char *new_str = kmm_alloc(len + 1);
+    char *new_str = kvmalloc(len + 1);
     if (new_str == NULL) {
         return NULL; // Memory allocation failed
     }

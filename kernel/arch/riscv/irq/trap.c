@@ -103,6 +103,8 @@ void user_kirq_entrance(uint64 ksp, uint64 s0) {
 
     // Mark the current CPU as offline for this process's VM
     vm_cpu_offline(current->vm, cpuid());
+    // Mark the current CPU as online for the kernel VM (reverse of user VM)
+    vm_cpu_online(kernel_vm, cpuid(), current);
 
     // redirect traps to kerneltrap()
     // Since we are on kernel stack
@@ -136,6 +138,8 @@ void usertrap(void) {
 
     // Mark the current CPU as offline for this process's VM
     vm_cpu_offline(current->vm, cpuid());
+    // Mark the current CPU as online for the kernel VM (reverse of user VM)
+    vm_cpu_online(kernel_vm, cpuid(), current);
 
     // redirect traps to kerneltrap()
     // Since we are on kernel stack
@@ -181,7 +185,7 @@ void usertrap(void) {
             /* First time this thread uses FP — allocate fpu_state */
             if (!THREAD_FPU_USED(current)) {
                 if (current->fpu_state == NULL) {
-                    current->fpu_state = kmm_alloc(sizeof(struct fpu_state));
+                    current->fpu_state = kvmalloc(sizeof(struct fpu_state));
                     if (current->fpu_state == NULL) {
                         printf("pid %d: failed to allocate fpu_state\n",
                                current->pid);
@@ -490,6 +494,9 @@ void usertrapret(void) {
     // printf("user pagetable before usertrapret:\n");
     // dump_pagetable(p->vm.pagetable, 2, 0, 0, 0, false);
     // printf("\n");
+
+    // Mark the current CPU as offline for the kernel VM (reverse of user VM)
+    vm_cpu_offline(kernel_vm, cpuid());
 
     // Before returning, mark the current CPU as online for this process's VM
     // and get the trapframe base virtual address for this CPU

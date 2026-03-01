@@ -53,7 +53,7 @@ static void __tmpfs_make_regfile(struct tmpfs_inode *tmpfs_inode) {
  * Tmpfs Dir Entry helpers
  ******************************************************************************/
 static struct tmpfs_dentry *__tmpfs_alloc_dentry(size_t name_len) {
-    struct tmpfs_dentry *dentry = kmm_alloc(sizeof(*dentry) + name_len + 1);
+    struct tmpfs_dentry *dentry = kvmalloc(sizeof(*dentry) + name_len + 1);
     if (dentry == NULL) {
         return NULL;
     }
@@ -66,7 +66,7 @@ static struct tmpfs_dentry *__tmpfs_alloc_dentry(size_t name_len) {
 
 static void __tmpfs_free_dentry(struct tmpfs_dentry *dentry) {
     if (dentry != NULL) {
-        kmm_free(dentry);
+        kvfree(dentry);
     }
 }
 
@@ -233,7 +233,7 @@ __tmpfs_alloc_link_inode(struct tmpfs_inode *dir, mode_t mode,
 void tmpfs_free_symlink_target(struct tmpfs_inode *tmpfs_inode) {
     if (tmpfs_inode->vfs_inode.size >= TMPFS_INODE_EMBEDDED_DATA_LEN &&
         tmpfs_inode->sym.symlink_target != NULL) {
-        kmm_free(tmpfs_inode->sym.symlink_target);
+        kvfree(tmpfs_inode->sym.symlink_target);
         tmpfs_inode->sym.symlink_target = NULL;
         tmpfs_inode->vfs_inode.size = 0;
     }

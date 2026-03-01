@@ -13,6 +13,7 @@
 #include "list.h"
 #include <mm/slab.h>
 #include <mm/page.h>
+#include <mm/vm.h>
 
 static struct idle_rq *__idle_rqs; // Array of idle_rq structures, one per CPU
 
@@ -52,7 +53,7 @@ static struct sched_class __idle_sched_class = {
 
 static void __alloc_idle_rqs(void) {
     size_t idle_rq_size = sizeof(struct idle_rq) * NCPU;
-    __idle_rqs = (struct idle_rq *)kmm_alloc(idle_rq_size);
+    __idle_rqs = (struct idle_rq *)kvmalloc(idle_rq_size);
     if (!__idle_rqs) {
         panic("alloc_idle_rqs: failed to allocate idle_rqs\n");
     }

@@ -13,6 +13,7 @@
 #include "kobject.h"
 #include "dev/dev.h"
 #include <mm/pcache.h>
+#include <mm/vm.h>
 #include "vfs/fs.h"
 #include "vfs/pipe.h"
 #include "kqueue_types.h"
@@ -79,6 +80,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     ksymbols_init(); // Initialize kernel symbols
     kinit();         // physical page allocator
     arch_vm_init();       // create kernel page table
+    kernel_vm_init();     // create kernel VM singleton (shared by all CPUs)
     printf("page table initialized\n");
     platform_post_vm_init();
     pipe_init();               // initialize pipe subsystem
@@ -107,6 +109,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     // rq_cpu_activate() to mark this CPU active; otherwise scheduler_wakeup()
     // for init may fail to enqueue on any run queue.
     idle_thread_init();
+    vm_cpu_online(kernel_vm, cpuid(), current); // CPU starts in kernel mode
     // Legacy iinit() and fileinit() removed - VFS handles these
     userinit(); // first user thread
     // Post-init device drivers & timer: spawned as kthreads so they run
@@ -128,6 +131,7 @@ static void __start_kernel_secondary_hart(int hartid) {
     // Now switch TP to trampoline virtual address (paging is now on)
     mycpu_init(hartid, true);
     idle_thread_init();
+    vm_cpu_online(kernel_vm, cpuid(), current); // CPU starts in kernel mode
     arch_trap_init_hart();        // install kernel trap vector
     arch_irq_init_hart();        // ask PLIC for device interrupts
     rcu_cpu_init(cpuid()); // Initialize RCU for this CPU

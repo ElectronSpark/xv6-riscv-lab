@@ -204,7 +204,7 @@ void exit(int status) {
         }
         // Release FPU state
         if (p->fpu_state != NULL) {
-            kmm_free(p->fpu_state);
+            kvfree(p->fpu_state);
             p->fpu_state = NULL;
         }
         // Purge pending signals (sigacts already NULL, lock check skipped)

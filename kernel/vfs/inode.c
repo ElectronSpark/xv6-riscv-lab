@@ -35,6 +35,7 @@
 #include "list.h"
 #include "hlist.h"
 #include <mm/slab.h>
+#include <mm/vm.h>
 
 // When need to acquire multiple inode locks:
 // - First acquire directory inode lock
@@ -386,7 +387,7 @@ skip_destroy:
 out:
     // Free directory name if allocated
     if (inode->name != NULL) {
-        kmm_free(inode->name);
+        kvfree(inode->name);
         inode->name = NULL;
     }
     inode->ops->free_inode(inode);
@@ -1547,26 +1548,26 @@ static struct vfs_inode *__vfs_namei(const char *path, size_t path_len) {
     int symlink_depth = 0;
 
     /* Allocate a working buffer large enough for symlink expansion */
-    pathbuf = kmm_alloc(MAXPATH + 1);
+    pathbuf = kvmalloc(MAXPATH + 1);
     if (pathbuf == NULL)
         return ERR_PTR(-ENOMEM);
 
     /* Get current root for ".." at root handling */
     rooti = vfs_curroot();
     if (IS_ERR_OR_NULL(rooti)) {
-        kmm_free(pathbuf);
+        kvfree(pathbuf);
         return rooti ? rooti : ERR_PTR(-EINVAL);
     }
     if (rooti->mount) {
         if (rooti->mnt_rooti == NULL) {
             vfs_iput(rooti);
-            kmm_free(pathbuf);
+            kvfree(pathbuf);
             return ERR_PTR(-EINVAL);
         }
         struct vfs_inode *mnt_root = rooti->mnt_rooti;
         if (!vfs_idup_not_zero(mnt_root)) {
             vfs_iput(rooti);
-            kmm_free(pathbuf);
+            kvfree(pathbuf);
             return ERR_PTR(-EAGAIN);
         }
         vfs_iput(rooti);
@@ -1589,7 +1590,7 @@ static struct vfs_inode *__vfs_namei(const char *path, size_t path_len) {
         pos = vfs_curdir();
         if (IS_ERR(pos)) {
             vfs_iput(rooti);
-            kmm_free(pathbuf);
+            kvfree(pathbuf);
             return pos ? pos : ERR_PTR(-EINVAL);
         }
     }
@@ -1725,7 +1726,7 @@ static struct vfs_inode *__vfs_namei(const char *path, size_t path_len) {
     ret_inode = pos;
 out:
     vfs_iput(rooti);
-    kmm_free(pathbuf);
+    kvfree(pathbuf);
     if (pos == NULL && !IS_ERR(ret_inode))
         return ERR_PTR(-ENOENT);
     return ret_inode;

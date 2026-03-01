@@ -138,6 +138,9 @@ void usertrapret(void) {
             exit(-1);
         }
     }
+    /* Mark the current CPU offline for the kernel VM (reverse of user VM) */
+    vm_cpu_offline(kernel_vm, cpu);
+
     uint64 trapframe_base = vm_cpu_online(p->vm, cpu, p);
 
     /*
@@ -579,6 +582,12 @@ void x86_trap_handler(struct trapframe *tf) {
         current->trapframe->user_gs_base = rdmsr(MSR_KERNEL_GS_BASE);
     }
 
+    /* Mark the current CPU offline for the user VM, online for the kernel VM */
+    if (from_user && current && current->vm) {
+        vm_cpu_offline(current->vm, cpuid());
+        vm_cpu_online(kernel_vm, cpuid(), current);
+    }
+
     /*
      * Page fault (#PF): demand paging for user-mode faults.
      * Error code bits: [0]=P (present), [1]=W (write), [2]=U (user).
@@ -705,7 +714,7 @@ void x86_trap_handler(struct trapframe *tf) {
             /* First time this thread uses FP — allocate fpu_state */
             if (!THREAD_FPU_USED(current)) {
                 if (current->fpu_state == NULL) {
-                    current->fpu_state = kmm_alloc(sizeof(struct fpu_state));
+                    current->fpu_state = kvmalloc(sizeof(struct fpu_state));
                     if (current->fpu_state == NULL) {
                         printf("pid %d: failed to allocate fpu_state\n",
                                current->pid);
@@ -876,6 +885,12 @@ void usertrap_syscall(struct trapframe *tf) {
         p->trapframe->trapframe = *tf;
         /* Save user GS base (now in KERNEL_GS_BASE after swapgs) */
         p->trapframe->user_gs_base = rdmsr(MSR_KERNEL_GS_BASE);
+    }
+
+    /* Mark the current CPU offline for the user VM, online for the kernel VM */
+    if (p && p->vm) {
+        vm_cpu_offline(p->vm, cpuid());
+        vm_cpu_online(kernel_vm, cpuid(), p);
     }
 
     intr_on();

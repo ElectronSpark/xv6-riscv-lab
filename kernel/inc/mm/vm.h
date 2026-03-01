@@ -22,6 +22,7 @@ void vm_rlock(vm_t *vm);
 void vm_runlock(vm_t *vm);
 void vm_wlock(vm_t *vm);
 void vm_wunlock(vm_t *vm);
+int  vm_is_wlocked(vm_t *vm);
 void vm_pgtable_lock(vm_t *vm);
 void vm_pgtable_unlock(vm_t *vm);
 vm_t *vm_init(void);
@@ -73,5 +74,73 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
 int vm_munmap(vm_t *vm, uint64 addr, size_t length);
 
 // Note: PROT_*, MAP_*, and MAP_FAILED are defined in vm_types.h
+
+/* ========================================================================== */
+/*  Kernel VM management                                                      */
+/* ========================================================================== */
+/*
+ * The kernel VM is a singleton vm_t shared by all CPUs and kernel threads.
+ * It tracks the kernel address space using the same VMA / RB-tree machinery
+ * as user VMs, but:
+ *   - Uses the boot-time kernel_pagetable (no new page table is created).
+ *   - Pages are always eagerly allocated and mapped — no lazy allocation,
+ *     no COW, no demand paging.
+ *   - The linear-mapped area and trampoline area remain intact.
+ *   - All kernel threads share this single vm_t (p->vm = kernel_vm).
+ */
+
+/* Global kernel VM instance (set during boot by kernel_vm_init). */
+extern vm_t *kernel_vm;
+
+/* Initialise the kernel VM singleton.  Must be called after arch_vm_init()
+ * and vm_slab_init() so that the slab pools and kernel_pagetable exist. */
+void kernel_vm_init(void);
+
+/* Register a pre-existing identity-mapped kernel region as a VMA.
+ * Called during boot to record text, rodata, data, BSS, physical-RAM
+ * and device-MMIO mappings that were already installed by kvmmake/kvm_build.
+ * @start  virtual (== physical) start address  (page-aligned)
+ * @size   region size in bytes  (page-aligned, > 0)
+ * @flags  PROT_READ | PROT_WRITE | PROT_EXEC as appropriate
+ * Returns 0 on success, negative errno on failure.
+ */
+int kvm_register_region(uint64 start, uint64 size, uint64 flags);
+
+/* Allocate @size bytes of kernel virtual memory backed by freshly allocated
+ * physical pages.  The pages are identity-mapped into kernel_pagetable.
+ * @addr  requested VA (0 = let the allocator choose)
+ * @size  bytes to allocate (rounded up to PGSIZE)
+ * @flags PROT_READ | PROT_WRITE | PROT_EXEC (VMA_FLAG_KERNEL is added
+ *        internally)
+ * Returns the base VA on success, 0 on failure.
+ */
+uint64 kvm_mmap(uint64 addr, size_t size, uint64 flags);
+
+/* Release a previously kvm_mmap'd region.
+ * Unmaps the pages from kernel_pagetable and frees the physical pages.
+ * Returns 0 on success, negative errno on failure.
+ */
+int kvm_munmap(uint64 addr, size_t size);
+
+/* Convenience wrappers: allocate / free @npages contiguous kernel pages. */
+void *kvm_alloc(size_t npages);
+void  kvm_free(void *addr, size_t npages);
+
+/* Check whether @addr was allocated from the kernel VM (kvm_alloc/kvm_mmap)
+ * rather than the slab allocator (kmm_alloc). */
+int is_kvm_addr(const void *addr);
+
+/* Allocate @size bytes of kernel memory.
+ * Small allocations (<= PAGE_SIZE) are served from the slab allocator
+ * (kmm_alloc).  Larger allocations are backed by kernel-VM pages
+ * (kvm_alloc).  Returns NULL on failure. */
+void *kvmalloc(size_t size);
+
+/* Free memory obtained from kvmalloc().  The allocator that originally
+ * provided the memory is determined automatically from the pointer. */
+void  kvfree(void *ptr);
+
+/* Dump the kernel VM's VMA list (debugging). */
+void dump_kernel_vm(void);
 
 #endif // __KERNEL_VM_H

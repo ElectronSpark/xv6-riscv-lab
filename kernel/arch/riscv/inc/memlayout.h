@@ -117,6 +117,14 @@ extern uint64 __physical_total_pages;
 #error "Not enough space for kernel stacks"
 #endif
 
+// Kernel VM address range.
+// The kernel VM covers the entire identity-mapped physical address range
+// up to (but not including) UVMTOP. Trampoline and per-CPU areas live
+// above UVMTOP and are left intact — they are shared with every user
+// page table via the top-level PTE.
+#define KVMBASE PGSIZE          // Skip page 0 (NULL guard)
+#define KVMTOP  MAXVA           // Up to the top of the address space
+
 // User memory layout.
 // Address zero first:
 //   text

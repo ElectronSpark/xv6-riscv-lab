@@ -15,6 +15,7 @@
 #include "proc/sched.h"
 #include "timer/timer.h"
 #include "string.h"
+#include <mm/vm.h>
 
 // Test configuration
 #define RCU_TEST_NUM_READERS 4 // Number of concurrent reader threads
@@ -118,9 +119,9 @@ static void test_rcu_read_lock(void) {
 static void test_rcu_pointers(void) {
     printf("TEST: RCU Pointer Operations\n");
 
-    test_node_t *node = (test_node_t *)kmm_alloc(sizeof(test_node_t));
+    test_node_t *node = (test_node_t *)kvmalloc(sizeof(test_node_t));
     if (node == NULL) {
-        panic("test_rcu_pointers: kmm_alloc failed");
+        panic("test_rcu_pointers: kvmalloc failed");
     }
     node->value = 42;
     node->next = NULL;
@@ -143,7 +144,7 @@ static void test_rcu_pointers(void) {
     printf("  PASS: RCU pointer operations work correctly\n");
 
     // Cleanup
-    kmm_free(node);
+    kvfree(node);
     test_list = NULL;
 }
 
@@ -154,9 +155,9 @@ static void test_rcu_pointers(void) {
 static void test_synchronize_rcu(void) {
     printf("TEST: synchronize_rcu()\n");
 
-    test_node_t *old_node = (test_node_t *)kmm_alloc(sizeof(test_node_t));
+    test_node_t *old_node = (test_node_t *)kvmalloc(sizeof(test_node_t));
     if (old_node == NULL) {
-        panic("test_synchronize_rcu: kmm_alloc failed for old_node");
+        panic("test_synchronize_rcu: kvmalloc failed for old_node");
     }
     old_node->value = 100;
     old_node->next = NULL;
@@ -164,9 +165,9 @@ static void test_synchronize_rcu(void) {
     rcu_assign_pointer(test_list, old_node);
 
     // Create new node
-    test_node_t *new_node = (test_node_t *)kmm_alloc(sizeof(test_node_t));
+    test_node_t *new_node = (test_node_t *)kvmalloc(sizeof(test_node_t));
     if (new_node == NULL) {
-        panic("test_synchronize_rcu: kmm_alloc failed for new_node");
+        panic("test_synchronize_rcu: kvmalloc failed for new_node");
     }
     new_node->value = 200;
     new_node->next = NULL;
@@ -180,7 +181,7 @@ static void test_synchronize_rcu(void) {
     printf("  Grace period completed\n");
 
     // Now safe to free old node
-    kmm_free(old_node);
+    kvfree(old_node);
 
     // Verify new node is accessible
     rcu_read_lock();
@@ -192,7 +193,7 @@ static void test_synchronize_rcu(void) {
     printf("  PASS: synchronize_rcu() allows safe reclamation\n");
 
     // Cleanup
-    kmm_free(new_node);
+    kvfree(new_node);
     test_list = NULL;
 }
 
@@ -204,7 +205,7 @@ static void test_callback(void *data) {
     int *value = (int *)data;
     printf("  Callback invoked with value: %d\n", *value);
     __atomic_fetch_add(&callback_invoked, 1, __ATOMIC_RELEASE);
-    kmm_free(data);
+    kvfree(data);
 }
 
 static void test_call_rcu(void) {
@@ -213,16 +214,16 @@ static void test_call_rcu(void) {
     __atomic_store_n(&callback_invoked, 0, __ATOMIC_RELEASE);
 
     // Allocate callback data
-    int *data = (int *)kmm_alloc(sizeof(int));
+    int *data = (int *)kvmalloc(sizeof(int));
     if (data == NULL) {
-        panic("test_call_rcu: kmm_alloc failed for data");
+        panic("test_call_rcu: kvmalloc failed for data");
     }
     *data = 42;
 
     // Allocate RCU head
-    rcu_head_t *head = (rcu_head_t *)kmm_alloc(sizeof(rcu_head_t));
+    rcu_head_t *head = (rcu_head_t *)kvmalloc(sizeof(rcu_head_t));
     if (head == NULL) {
-        panic("test_call_rcu: kmm_alloc failed for head");
+        panic("test_call_rcu: kvmalloc failed for head");
     }
 
     // Register callback
@@ -254,7 +255,7 @@ static void test_call_rcu(void) {
     printf("  PASS: call_rcu() callback executed successfully\n");
 
     // Note: callback frees the data, we just need to free the head
-    kmm_free(head);
+    kvfree(head);
 }
 
 // ============================================================================
@@ -295,9 +296,9 @@ static void test_concurrent_readers(void) {
     __atomic_store_n(&concurrent_readers_done, 0, __ATOMIC_RELEASE);
 
     // Setup test list
-    test_node_t *node = (test_node_t *)kmm_alloc(sizeof(test_node_t));
+    test_node_t *node = (test_node_t *)kvmalloc(sizeof(test_node_t));
     if (node == NULL) {
-        panic("test_concurrent_readers: kmm_alloc failed");
+        panic("test_concurrent_readers: kvmalloc failed");
     }
     node->value = 777;
     node->next = NULL;
@@ -323,7 +324,7 @@ static void test_concurrent_readers(void) {
 
     // Cleanup
     synchronize_rcu();
-    kmm_free(node);
+    kvfree(node);
     test_list = NULL;
 }
 
@@ -368,7 +369,7 @@ static _Atomic int negative_callback_count = 0;
 
 static void negative_callback(void *data) {
     __atomic_fetch_add(&negative_callback_count, 1, __ATOMIC_RELEASE);
-    kmm_free(data);
+    kvfree(data);
 }
 
 static void test_callback_not_invoked_early(void) {
@@ -377,16 +378,16 @@ static void test_callback_not_invoked_early(void) {
     __atomic_store_n(&negative_callback_count, 0, __ATOMIC_RELEASE);
 
     // Allocate callback data
-    int *data = (int *)kmm_alloc(sizeof(int));
+    int *data = (int *)kvmalloc(sizeof(int));
     if (data == NULL) {
-        panic("test_callback_not_invoked_early: kmm_alloc failed for data");
+        panic("test_callback_not_invoked_early: kvmalloc failed for data");
     }
     *data = 123;
 
     // Allocate RCU head
-    rcu_head_t *head = (rcu_head_t *)kmm_alloc(sizeof(rcu_head_t));
+    rcu_head_t *head = (rcu_head_t *)kvmalloc(sizeof(rcu_head_t));
     if (head == NULL) {
-        panic("test_callback_not_invoked_early: kmm_alloc failed for head");
+        panic("test_callback_not_invoked_early: kvmalloc failed for head");
     }
 
     // Register callback - check IMMEDIATELY after call_rcu returns
@@ -414,7 +415,7 @@ static void test_callback_not_invoked_early(void) {
 
     printf("  PASS: Callback invoked after grace period\n");
 
-    kmm_free(head);
+    kvfree(head);
 }
 
 // ============================================================================
@@ -599,7 +600,7 @@ static void list_node_free_callback(void *data) {
     __atomic_fetch_add(&asan_nodes_poisoned, 1, __ATOMIC_RELEASE);
 
     __atomic_fetch_add(&list_callback_count, 1, __ATOMIC_RELEASE);
-    kmm_free(node);
+    kvfree(node);
 }
 
 // ============================================================================
@@ -616,9 +617,9 @@ static void test_list_rcu_basic(void) {
     // Add nodes to the list
     for (int i = 0; i < 10; i++) {
         list_test_node_t *node =
-            (list_test_node_t *)kmm_alloc(sizeof(list_test_node_t));
+            (list_test_node_t *)kvmalloc(sizeof(list_test_node_t));
         if (node == NULL) {
-            panic("test_list_rcu_basic: kmm_alloc failed");
+            panic("test_list_rcu_basic: kvmalloc failed");
         }
         node->id = i;
         node->value = i * 100;
@@ -734,9 +735,9 @@ static void test_list_rcu_concurrent_rw(void) {
         // Add 5 nodes
         for (int i = 0; i < 5; i++) {
             list_test_node_t *node =
-                (list_test_node_t *)kmm_alloc(sizeof(list_test_node_t));
+                (list_test_node_t *)kvmalloc(sizeof(list_test_node_t));
             if (node == NULL) {
-                panic("test_list_rcu_concurrent_rw: kmm_alloc failed");
+                panic("test_list_rcu_concurrent_rw: kvmalloc failed");
             }
             node->id = next_id++;
             node->value = node->id * 100;
@@ -805,7 +806,7 @@ static _Atomic int stress_readers_done = 0;
 
 static void stress_node_free_callback(void *data) {
     __atomic_fetch_add(&stress_callbacks_invoked, 1, __ATOMIC_RELEASE);
-    kmm_free(data);
+    kvfree(data);
 }
 
 // ============================================================================
@@ -828,13 +829,13 @@ static void test_stress_call_rcu(void) {
             } stress_data_t;
 
             stress_data_t *data =
-                (stress_data_t *)kmm_alloc(sizeof(stress_data_t));
+                (stress_data_t *)kvmalloc(sizeof(stress_data_t));
             if (data == NULL) {
                 // Out of memory - wait for grace period and let kthreads
                 // process callbacks
                 synchronize_rcu();
                 scheduler_yield();
-                data = (stress_data_t *)kmm_alloc(sizeof(stress_data_t));
+                data = (stress_data_t *)kvmalloc(sizeof(stress_data_t));
                 if (data == NULL) {
                     panic("stress: out of memory even after processing "
                           "callbacks");
@@ -943,13 +944,13 @@ static void test_stress_list_rcu(void) {
         if (op % 3 != 0 || total_added <= total_removed) {
             // Add a node
             list_test_node_t *node =
-                (list_test_node_t *)kmm_alloc(sizeof(list_test_node_t));
+                (list_test_node_t *)kvmalloc(sizeof(list_test_node_t));
             if (node == NULL) {
                 // Out of memory - process callbacks to free some
                 synchronize_rcu();
                 rcu_process_callbacks();
                 scheduler_yield();
-                node = (list_test_node_t *)kmm_alloc(sizeof(list_test_node_t));
+                node = (list_test_node_t *)kvmalloc(sizeof(list_test_node_t));
                 if (node == NULL) {
                     // Still no memory - skip this add
                     continue;
@@ -1122,9 +1123,9 @@ static void test_stress_mixed_workload(void) {
         if (op % 2 == 0) {
             // Add
             list_test_node_t *node =
-                (list_test_node_t *)kmm_alloc(sizeof(list_test_node_t));
+                (list_test_node_t *)kvmalloc(sizeof(list_test_node_t));
             if (node == NULL) {
-                panic("test_stress_mixed_workload: kmm_alloc failed");
+                panic("test_stress_mixed_workload: kvmalloc failed");
             }
             node->id = next_id++;
             node->value = node->id * 10;

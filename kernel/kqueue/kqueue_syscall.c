@@ -67,7 +67,7 @@ uint64 sys_kevent_register(void) {
 
     /* Copy changelist from user space */
     size_t bytes = (size_t)nchanges * sizeof(struct kevent);
-    struct kevent *changelist = kmm_alloc(bytes);
+    struct kevent *changelist = kvmalloc(bytes);
     if (changelist == NULL) {
         vfs_fput(f);
         return (uint64)-ENOMEM;
@@ -75,7 +75,7 @@ uint64 sys_kevent_register(void) {
 
     if (vm_copyin(current->vm, (char *)changelist, changelist_addr, bytes) !=
         0) {
-        kmm_free(changelist);
+        kvfree(changelist);
         vfs_fput(f);
         return (uint64)-EFAULT;
     }
@@ -87,7 +87,7 @@ uint64 sys_kevent_register(void) {
         vm_copyout(current->vm, changelist_addr, (char *)changelist, bytes);
     }
 
-    kmm_free(changelist);
+    kvfree(changelist);
     vfs_fput(f);
     return (uint64)ret;
 }
@@ -128,7 +128,7 @@ uint64 sys_kevent_wait(void) {
 
     /* Allocate kernel buffer for events */
     size_t bytes = (size_t)nevents * sizeof(struct kevent);
-    struct kevent *eventlist = kmm_alloc(bytes);
+    struct kevent *eventlist = kvmalloc(bytes);
     if (eventlist == NULL) {
         vfs_fput(f);
         return (uint64)-ENOMEM;
@@ -145,7 +145,7 @@ uint64 sys_kevent_wait(void) {
         }
     }
 
-    kmm_free(eventlist);
+    kvfree(eventlist);
     vfs_fput(f);
     return (uint64)ret;
 }

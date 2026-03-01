@@ -31,6 +31,7 @@
 #include "lwip/sys.h"
 #include "lwip/err.h"
 #include "arch/sys_arch.h"
+#include <mm/vm.h>
 
 /* Debug logging — set to 1 to enable verbose mbox/sem tracing */
 #define SYS_ARCH_DEBUG 0
@@ -644,8 +645,8 @@ static int __lwip_thread_entry(uint64 arg1, uint64 arg2)
     struct lwip_thread_arg *ta = (struct lwip_thread_arg *)arg1;
     lwip_thread_fn func = ta->func;
     void *arg = ta->arg;
-    /* Free the argument struct (allocated via kmm_alloc) */
-    kmm_free(ta);
+    /* Free the argument struct (allocated via kvmalloc) */
+    kvfree(ta);
     /* Run the lwIP thread function — it never returns */
     func(arg);
     return 0;
@@ -657,7 +658,7 @@ sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread,
     (void)stacksize;
     (void)prio;
 
-    struct lwip_thread_arg *ta = kmm_alloc(sizeof(*ta));
+    struct lwip_thread_arg *ta = kvmalloc(sizeof(*ta));
     if (ta == NULL) {
         panic("lwip: failed to allocate thread arg");
     }
@@ -667,7 +668,7 @@ sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread,
     struct thread *t = kthread_create(name, __lwip_thread_entry,
                                       (uint64)ta, 0, KERNEL_STACK_ORDER);
     if (IS_ERR_OR_NULL(t)) {
-        kmm_free(ta);
+        kvfree(ta);
         panic("lwip: failed to create thread");
     }
 

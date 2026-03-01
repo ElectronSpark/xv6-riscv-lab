@@ -163,7 +163,7 @@ int thread_clone(struct clone_args *args) {
 
     // Copy FPU state if the parent has used FP.
     if (THREAD_FPU_USED(p) && p->fpu_state != NULL) {
-        ret_ptr->fpu_state = kmm_alloc(sizeof(struct fpu_state));
+        ret_ptr->fpu_state = kvmalloc(sizeof(struct fpu_state));
         if (ret_ptr->fpu_state != NULL) {
             // If parent owns the hardware FPU, force-save first.
             if (mycpu()->fpu_owner == p) {

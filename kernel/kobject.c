@@ -10,6 +10,7 @@
 #include "list.h"
 #include "kobject.h"
 #include <smp/atomic.h>
+#include <mm/vm.h>
 
 static list_node_t __kobject_list = LIST_ENTRY_INITIALIZED(__kobject_list);
 static int64 __kobject_count = 0;
@@ -66,7 +67,7 @@ void kobject_put(struct kobject *obj) {
     if (count == 0) {
         __kobject_detach(obj);
         if (!obj->ops.release) {
-            kmm_free(obj);
+            kvfree(obj);
         } else {
             obj->ops.release(obj);
         }

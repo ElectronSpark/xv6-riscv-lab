@@ -81,4 +81,13 @@ extern uint64 __physical_total_pages;
 #define USTACK_MAX_BOTTOM (USTACKTOP - (MAXUSTACK << PAGE_SHIFT))
 #define UHEAP_MAX_TOP (UVMBOTTOM + (MAXUHEAP << PAGE_SHIFT))
 
+// Kernel VM address range.
+// On x86_64 the kernel identity-maps all physical memory starting at PA 0.
+// The kernel VM covers from PGSIZE (skipping the NULL guard page) up to the
+// end of the low canonical half. The trampoline / CPU-entry areas in the
+// high canonical half remain managed separately — they are shared with
+// every user page table via the top-level PML4 entry.
+#define KVMBASE PGSIZE
+#define KVMTOP  UVMTOP
+
 #endif /* __KERNEL_X86_64_MEMORY_LAYOUT_H */

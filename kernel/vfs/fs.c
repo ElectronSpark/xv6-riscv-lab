@@ -21,6 +21,7 @@
 #include <mm/slab.h>
 #include "tmpfs/tmpfs_smoketest.h"
 #include "xv6fs/xv6fs_smoketest.h"
+#include <mm/vm.h>
 
 // Locking order
 // 1. mount mutex acquired via vfs_mount_lock()
@@ -2104,7 +2105,7 @@ void vfs_release_dentry(struct vfs_dentry *dentry) {
         return;
     }
     if (dentry->name) {
-        kmm_free(dentry->name);
+        kvfree(dentry->name);
         dentry->name = NULL;
         dentry->name_len = 0;
     }

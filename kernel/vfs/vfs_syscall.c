@@ -581,7 +581,7 @@ uint64 sys_vfs_readlink(void) {
         return -ENOENT;
     }
 
-    char *kbuf = kmm_alloc(bufsz);
+    char *kbuf = kvmalloc(bufsz);
     if (kbuf == NULL) {
         vfs_iput(inode);
         return -ENOMEM;
@@ -591,15 +591,15 @@ uint64 sys_vfs_readlink(void) {
     vfs_iput(inode);
 
     if (len < 0) {
-        kmm_free(kbuf);
+        kvfree(kbuf);
         return len;
     }
 
     if (either_copyout(1, buf_addr, kbuf, len) < 0) {
-        kmm_free(kbuf);
+        kvfree(kbuf);
         return -EFAULT;
     }
-    kmm_free(kbuf);
+    kvfree(kbuf);
     return len;
 }
 
@@ -1359,7 +1359,7 @@ uint64 sys_getdents(void) {
     }
 
     // Allocate kernel buffer
-    char *kbuf = kmm_alloc(count);
+    char *kbuf = kvmalloc(count);
     if (kbuf == NULL) {
         vfs_fput(f); // remove the reference from __vfs_argfd
         return -ENOMEM;
@@ -1377,7 +1377,7 @@ uint64 sys_getdents(void) {
 
         ret = vfs_dir_iter(inode, &f->dir_iter, &dentry);
         if (ret != 0) {
-            kmm_free(kbuf);
+            kvfree(kbuf);
             vfs_fput(f); // remove the reference from __vfs_argfd
             return ret;
         }
@@ -1426,13 +1426,13 @@ uint64 sys_getdents(void) {
     // Copy to user space
     if (bytes_written > 0) {
         if (vm_copyout(current->vm, dirp, kbuf, bytes_written) < 0) {
-            kmm_free(kbuf);
+            kvfree(kbuf);
             vfs_fput(f); // remove the reference from __vfs_argfd
             return -EFAULT;
         }
     }
 
-    kmm_free(kbuf);
+    kvfree(kbuf);
     vfs_fput(f); // remove the reference from __vfs_argfd
     return bytes_written;
 }
@@ -2035,12 +2035,12 @@ uint64 sys_vfs_poll(void) {
     }
 
     size_t bytes = (size_t)nfds * sizeof(struct pollfd_k);
-    struct pollfd_k *pfds = kmm_alloc(bytes);
+    struct pollfd_k *pfds = kvmalloc(bytes);
     if (pfds == NULL)
         return -ENOMEM;
 
     if (either_copyin(pfds, 1, fds_addr, bytes) < 0) {
-        kmm_free(pfds);
+        kvfree(pfds);
         return -EFAULT;
     }
 
@@ -2094,7 +2094,7 @@ uint64 sys_vfs_poll(void) {
      * Store the pollfd index in udata for result mapping.
      */
     int max_changes = nfds * 2; /* worst case: READ+WRITE per fd */
-    struct kevent *changes = kmm_alloc(max_changes * sizeof(struct kevent));
+    struct kevent *changes = kvmalloc(max_changes * sizeof(struct kevent));
     if (changes == NULL) {
         __vfs_close_fd(kqfd);
         goto copyout;
@@ -2135,9 +2135,9 @@ uint64 sys_vfs_poll(void) {
      */
     #define POLL_RESCAN_MS 10
 
-    struct kevent *events = kmm_alloc(nfds * sizeof(struct kevent));
+    struct kevent *events = kvmalloc(nfds * sizeof(struct kevent));
     if (events == NULL) {
-        kmm_free(changes);
+        kvfree(changes);
         __vfs_close_fd(kqfd);
         goto copyout;
     }
@@ -2191,21 +2191,21 @@ uint64 sys_vfs_poll(void) {
 
     /* Close the temporary kqueue fd (detaches all knotes) */
     __vfs_close_fd(kqfd);
-    kmm_free(changes);
-    kmm_free(events);
+    kvfree(changes);
+    kvfree(events);
 
     if (ready == -EINTR) {
-        kmm_free(pfds);
+        kvfree(pfds);
         return -EINTR;
     }
 
 copyout:
     if (either_copyout(1, fds_addr, pfds, bytes) < 0) {
-        kmm_free(pfds);
+        kvfree(pfds);
         return -EFAULT;
     }
 
-    kmm_free(pfds);
+    kvfree(pfds);
     return ready;
 }
 
@@ -2285,32 +2285,32 @@ uint64 sys_pselect6(void) {
     uint64 *rfds = NULL, *wfds = NULL, *efds = NULL;
 
     if (readfds_addr) {
-        rfds = kmm_alloc(alloc_bytes);
+        rfds = kvmalloc(alloc_bytes);
         if (!rfds) return -ENOMEM;
         memset(rfds, 0, alloc_bytes);
         if (either_copyin(rfds, 1, readfds_addr, set_bytes) < 0) {
-            kmm_free(rfds);
+            kvfree(rfds);
             return -EFAULT;
         }
     }
     if (writefds_addr) {
-        wfds = kmm_alloc(alloc_bytes);
-        if (!wfds) { if (rfds) kmm_free(rfds); return -ENOMEM; }
+        wfds = kvmalloc(alloc_bytes);
+        if (!wfds) { if (rfds) kvfree(rfds); return -ENOMEM; }
         memset(wfds, 0, alloc_bytes);
         if (either_copyin(wfds, 1, writefds_addr, set_bytes) < 0) {
-            if (rfds) kmm_free(rfds);
-            kmm_free(wfds);
+            if (rfds) kvfree(rfds);
+            kvfree(wfds);
             return -EFAULT;
         }
     }
     if (exceptfds_addr) {
-        efds = kmm_alloc(alloc_bytes);
-        if (!efds) { if (rfds) kmm_free(rfds); if (wfds) kmm_free(wfds); return -ENOMEM; }
+        efds = kvmalloc(alloc_bytes);
+        if (!efds) { if (rfds) kvfree(rfds); if (wfds) kvfree(wfds); return -ENOMEM; }
         memset(efds, 0, alloc_bytes);
         if (either_copyin(efds, 1, exceptfds_addr, set_bytes) < 0) {
-            if (rfds) kmm_free(rfds);
-            if (wfds) kmm_free(wfds);
-            kmm_free(efds);
+            if (rfds) kvfree(rfds);
+            if (wfds) kvfree(wfds);
+            kvfree(efds);
             return -EFAULT;
         }
     }
@@ -2320,23 +2320,23 @@ uint64 sys_pselect6(void) {
      * Each set fd gets an entry with the appropriate events mask.
      * We need at most 'nfds' entries.
      */
-    struct pollfd_k *pfds = kmm_alloc(nfds * sizeof(struct pollfd_k));
+    struct pollfd_k *pfds = kvmalloc(nfds * sizeof(struct pollfd_k));
     if (!pfds) {
-        if (rfds) kmm_free(rfds);
-        if (wfds) kmm_free(wfds);
-        if (efds) kmm_free(efds);
+        if (rfds) kvfree(rfds);
+        if (wfds) kvfree(wfds);
+        if (efds) kvfree(efds);
         return -ENOMEM;
     }
 
     int npfds = 0;
     /* For each fd in [0, nfds), check if any fd_set has it set.
      * Track which pollfd index maps to which fd for result conversion. */
-    int *fd_map = kmm_alloc(nfds * sizeof(int)); /* fd_map[i] = original fd */
+    int *fd_map = kvmalloc(nfds * sizeof(int)); /* fd_map[i] = original fd */
     if (!fd_map) {
-        kmm_free(pfds);
-        if (rfds) kmm_free(rfds);
-        if (wfds) kmm_free(wfds);
-        if (efds) kmm_free(efds);
+        kvfree(pfds);
+        if (rfds) kvfree(rfds);
+        if (wfds) kvfree(wfds);
+        if (efds) kvfree(efds);
         return -ENOMEM;
     }
 
@@ -2436,11 +2436,11 @@ uint64 sys_pselect6(void) {
             ready = -EFAULT;
     }
 
-    kmm_free(fd_map);
-    kmm_free(pfds);
-    if (rfds) kmm_free(rfds);
-    if (wfds) kmm_free(wfds);
-    if (efds) kmm_free(efds);
+    kvfree(fd_map);
+    kvfree(pfds);
+    if (rfds) kvfree(rfds);
+    if (wfds) kvfree(wfds);
+    if (efds) kvfree(efds);
 
     return ready;
 }
@@ -2591,7 +2591,7 @@ uint64 sys_vfs_writev(void) {
     struct __k_iovec *heap_iov = NULL;
 
     if (iovcnt > 8) {
-        heap_iov = kmm_alloc(iovcnt * sizeof(struct __k_iovec));
+        heap_iov = kvmalloc(iovcnt * sizeof(struct __k_iovec));
         if (heap_iov == NULL) {
             vfs_fput(f);
             return -ENOMEM;
@@ -2601,7 +2601,7 @@ uint64 sys_vfs_writev(void) {
 
     if (either_copyin(iov, 1, iov_addr, iovcnt * sizeof(struct __k_iovec)) < 0) {
         vfs_fput(f);
-        if (heap_iov) kmm_free(heap_iov);
+        if (heap_iov) kvfree(heap_iov);
         return -EFAULT;
     }
 
@@ -2621,7 +2621,7 @@ uint64 sys_vfs_writev(void) {
     }
 
     vfs_fput(f);
-    if (heap_iov) kmm_free(heap_iov);
+    if (heap_iov) kvfree(heap_iov);
     return total;
 }
 
@@ -2648,7 +2648,7 @@ uint64 sys_vfs_readv(void) {
     struct __k_iovec *heap_iov = NULL;
 
     if (iovcnt > 8) {
-        heap_iov = kmm_alloc(iovcnt * sizeof(struct __k_iovec));
+        heap_iov = kvmalloc(iovcnt * sizeof(struct __k_iovec));
         if (heap_iov == NULL) {
             vfs_fput(f);
             return -ENOMEM;
@@ -2658,7 +2658,7 @@ uint64 sys_vfs_readv(void) {
 
     if (either_copyin(iov, 1, iov_addr, iovcnt * sizeof(struct __k_iovec)) < 0) {
         vfs_fput(f);
-        if (heap_iov) kmm_free(heap_iov);
+        if (heap_iov) kvfree(heap_iov);
         return -EFAULT;
     }
 
@@ -2678,7 +2678,7 @@ uint64 sys_vfs_readv(void) {
     }
 
     vfs_fput(f);
-    if (heap_iov) kmm_free(heap_iov);
+    if (heap_iov) kvfree(heap_iov);
     return total;
 }
 
@@ -3156,7 +3156,7 @@ uint64 sys_vfs_readlinkat(void) {
     if (inode == NULL)
         return -ENOENT;
 
-    char *kbuf = kmm_alloc(bufsz);
+    char *kbuf = kvmalloc(bufsz);
     if (kbuf == NULL) {
         vfs_iput(inode);
         return -ENOMEM;
@@ -3165,15 +3165,15 @@ uint64 sys_vfs_readlinkat(void) {
     ssize_t len = vfs_readlink(inode, kbuf, bufsz);
     vfs_iput(inode);
     if (len < 0) {
-        kmm_free(kbuf);
+        kvfree(kbuf);
         return len;
     }
 
     if (either_copyout(1, buf_addr, kbuf, len) < 0) {
-        kmm_free(kbuf);
+        kvfree(kbuf);
         return -EFAULT;
     }
-    kmm_free(kbuf);
+    kvfree(kbuf);
     return len;
 }
 

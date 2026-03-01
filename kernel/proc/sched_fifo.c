@@ -16,6 +16,7 @@
 #include "bits.h"
 #include "errno.h"
 #include <smp/percpu.h>
+#include <mm/vm.h>
 
 #ifndef INT_MAX
 #define INT_MAX 0x7FFFFFFF
@@ -205,7 +206,7 @@ static void __fifo_rq_init(struct fifo_rq *fifo_rq, int cls_id, int cpu_id) {
 // Allocate and register FIFO rqs for a single major priority level
 static void __alloc_fifo_rqs_for_cls(int cls_id) {
     size_t fifo_rq_size = sizeof(struct fifo_rq) * NCPU;
-    __fifo_rqs[cls_id] = (struct fifo_rq *)kmm_alloc(fifo_rq_size);
+    __fifo_rqs[cls_id] = (struct fifo_rq *)kvmalloc(fifo_rq_size);
     if (!__fifo_rqs[cls_id]) {
         panic("alloc_fifo_rqs: failed to allocate fifo_rqs for cls_id %d\n",
               cls_id);

@@ -382,7 +382,7 @@ void thread_destroy(struct thread *p) {
     }
 
     if (p->fpu_state != NULL) {
-        kmm_free(p->fpu_state);
+        kvfree(p->fpu_state);
         p->fpu_state = NULL;
     }
 

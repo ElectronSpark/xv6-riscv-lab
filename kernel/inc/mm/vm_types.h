@@ -57,11 +57,12 @@ typedef struct vma {
 #define VMA_FLAG_GROWSUP 0x200   // Heap-like region (grows up)
 #define VMA_FLAG_FILE 0x400      // File-backed mapping
 #define VMA_FLAG_SHARED 0x800    // Shared mapping (MAP_SHARED)
+#define VMA_FLAG_KERNEL 0x1000   // Kernel-space mapping (no lazy alloc, no COW)
 
 // Combined mask of all bits that may appear in vma->flags
 #define VMA_FLAG_PROT_MASK                                                     \
     (PROT_READ | PROT_WRITE | PROT_EXEC | VMA_FLAG_USER | VMA_FLAG_GROWSDOWN | \
-     VMA_FLAG_GROWSUP | VMA_FLAG_FILE | VMA_FLAG_SHARED)
+     VMA_FLAG_GROWSUP | VMA_FLAG_FILE | VMA_FLAG_SHARED | VMA_FLAG_KERNEL)
 
 // mmap failure return value
 #define MAP_FAILED ((void *)(uint64) - 1)
@@ -100,6 +101,9 @@ typedef struct vm {
     spinlock_t spinlock; // Spinlock for protecting the pagetable
     pagetable_t pagetable;
     int refcount; // Reference count
+    uint64 vm_bottom;    // Lowest VA managed by this VM
+    uint64 vm_top;       // Highest VA (exclusive) managed by this VM
+    int is_kernel;       // Non-zero if this is the kernel VM singleton
 } vm_t;
 
 #endif // __KERNEL_VM_TYPES_H

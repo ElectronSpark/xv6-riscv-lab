@@ -347,6 +347,9 @@ vm_t *vm_init(void)
     spin_init(&vm->spinlock, "vm_pgtable_lock");
     rwsem_init(&vm->rw_lock, RWLOCK_PRIO_READ, "vm_rw_lock");
     vm->refcount = 1;
+    vm->vm_bottom = UVMBOTTOM;
+    vm->vm_top = UVMTOP;
+    vm->is_kernel = 0;
     return vm;
 }
 
@@ -355,6 +358,9 @@ void vm_dup(vm_t *vm) { atomic_inc(&vm->refcount); }
 void vm_put(vm_t *vm)
 {
     if (vm == NULL)
+        return;
+    /* The kernel VM singleton must never be destroyed. */
+    if (vm->is_kernel)
         return;
     if (!atomic_dec_unless(&vm->refcount, 1))
         __vm_destroy(vm);
@@ -443,10 +449,35 @@ vm_t *vm_copy(vm_t *src)
 /*  VM locking                                                                */
 /* ========================================================================== */
 
-void vm_rlock(vm_t *vm)          { rwsem_acquire_read(&vm->rw_lock); }
-void vm_runlock(vm_t *vm)        { rwsem_release(&vm->rw_lock); }
-void vm_wlock(vm_t *vm)          { rwsem_acquire_write(&vm->rw_lock); }
-void vm_wunlock(vm_t *vm)        { rwsem_release(&vm->rw_lock); }
+void vm_rlock(vm_t *vm) {
+    if (vm->is_kernel)
+        spin_lock(&vm->spinlock);
+    else
+        rwsem_acquire_read(&vm->rw_lock);
+}
+void vm_runlock(vm_t *vm) {
+    if (vm->is_kernel)
+        spin_unlock(&vm->spinlock);
+    else
+        rwsem_release(&vm->rw_lock);
+}
+void vm_wlock(vm_t *vm) {
+    if (vm->is_kernel)
+        spin_lock(&vm->spinlock);
+    else
+        rwsem_acquire_write(&vm->rw_lock);
+}
+void vm_wunlock(vm_t *vm) {
+    if (vm->is_kernel)
+        spin_unlock(&vm->spinlock);
+    else
+        rwsem_release(&vm->rw_lock);
+}
+int vm_is_wlocked(vm_t *vm) {
+    if (vm->is_kernel)
+        return spin_holding(&vm->spinlock);
+    return rwsem_is_write_holding(&vm->rw_lock);
+}
 void vm_pgtable_lock(vm_t *vm)   { spin_lock(&vm->spinlock); }
 void vm_pgtable_unlock(vm_t *vm) { spin_unlock(&vm->spinlock); }
 
@@ -470,7 +501,7 @@ static inline vma_t *__get_vma_right(vma_t *vma)
 
 vma_t *vm_find_area(vm_t *vm, uint64 va)
 {
-    if (va >= UVMTOP || va < UVMBOTTOM)
+    if (va >= vm->vm_top || va < vm->vm_bottom)
         return NULL;
     struct rb_node *node = rb_find_key_rdown(&vm->vm_tree, va);
     if (node != NULL) {
@@ -556,8 +587,8 @@ vma_t *vma_merge(vma_t *vma1, vma_t *vma2)
 
 vma_t *vma_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags)
 {
-    assert(current == NULL || rwsem_is_write_holding(&vm->rw_lock),
-           "vma_alloc: vm rwsem must be write-held");
+    assert(current == NULL || vm_is_wlocked(vm),
+           "vma_alloc: vm must be write-locked");
     if (vm == NULL)
         return NULL;
     if (size == 0 || (size & (PGSIZE - 1)) != 0)
@@ -624,8 +655,8 @@ vma_t *vma_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags)
 
 int vma_free(vm_t *vm, vma_t *vma)
 {
-    assert(rwsem_is_write_holding(&vm->rw_lock),
-           "vma_free: vm rwsem must be write-held");
+    assert(vm_is_wlocked(vm),
+           "vma_free: vm must be write-locked");
     if (vma == NULL || vma->vm != vm)
         return -EINVAL;
     if (vma->flags == PROT_NONE)
@@ -1067,12 +1098,12 @@ int either_copyin(void *dst, int user_src, uint64 src, uint64 len)
 
 int vm_createheap(vm_t *vm, uint64 va, uint64 size)
 {
-    assert(current == NULL || rwsem_is_write_holding(&vm->rw_lock),
-           "vm_createheap: vm rwsem must be write-held");
+    assert(current == NULL || vm_is_wlocked(vm),
+           "vm_createheap: vm must be write-locked");
     size = PGROUNDUP(size);
     if ((va & (PGSIZE - 1)) != 0)
         return -EINVAL;
-    if (va >= UVMTOP || va + size > UVMTOP)
+    if (va >= vm->vm_top || va + size > vm->vm_top)
         return -EINVAL;
     vma_t *vma = vma_alloc(vm, va, size,
                   PROT_READ | PROT_WRITE | VMA_FLAG_USER | VMA_FLAG_GROWSUP);
@@ -1085,12 +1116,12 @@ int vm_createheap(vm_t *vm, uint64 va, uint64 size)
 
 int vm_createstack(vm_t *vm, uint64 stack_top, uint64 size)
 {
-    assert(current == NULL || rwsem_is_write_holding(&vm->rw_lock),
-           "vm_createstack: vm rwsem must be write-held");
+    assert(current == NULL || vm_is_wlocked(vm),
+           "vm_createstack: vm must be write-locked");
     size = PGROUNDUP(size);
     if ((stack_top & (PGSIZE - 1)) != 0)
         return -EINVAL;
-    if (stack_top < size || stack_top > UVMTOP)
+    if (stack_top < size || stack_top > vm->vm_top)
         return -EINVAL;
     vma_t *vma = vma_alloc(vm, stack_top - size, size,
                   PROT_READ | PROT_WRITE | VMA_FLAG_USER | VMA_FLAG_GROWSDOWN);
@@ -1103,8 +1134,8 @@ int vm_createstack(vm_t *vm, uint64 stack_top, uint64 size)
 
 int vm_growstack(vm_t *vm, int64 change_size)
 {
-    assert(current == NULL || rwsem_is_write_holding(&vm->rw_lock),
-           "vm_growstack: vm rwsem must be write-held");
+    assert(current == NULL || vm_is_wlocked(vm),
+           "vm_growstack: vm must be write-locked");
     if (vm == NULL || vm->pagetable == NULL)
         return -EINVAL;
     if (vm->stack == NULL || vm->stack_size < PGSIZE)
@@ -1289,7 +1320,7 @@ int vm_mmap_region_locked(vm_t *vm, uint64 start, size_t size, uint64 flags,
 
     uint64 va_end = PGROUNDUP(start + size);
     start = PGROUNDDOWN(start);
-    if (va_end <= start || start < UVMBOTTOM || va_end > UVMTOP)
+    if (va_end <= start || start < vm->vm_bottom || va_end > vm->vm_top)
         return -EINVAL;
     size = va_end - start;
 
@@ -1338,7 +1369,7 @@ int vm_munmap_region(vm_t *vm, uint64 start, size_t size)
         ret = -EINVAL;
         goto out;
     }
-    if (start < UVMBOTTOM || (start + size) > UVMTOP) {
+    if (start < vm->vm_bottom || (start + size) > vm->vm_top) {
         ret = -EINVAL;
         goto out;
     }
@@ -1379,7 +1410,7 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
     addr = PGROUNDDOWN(addr);
     size = PGROUNDUP(size);
 
-    if (addr < UVMBOTTOM || (addr + size) > UVMTOP) {
+    if (addr < vm->vm_bottom || (addr + size) > vm->vm_top) {
         ret = -ENOMEM;
         goto out;
     }
@@ -1475,11 +1506,11 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
     old_size = PGROUNDUP(old_size);
     new_size = PGROUNDUP(new_size);
 
-    if (old_size > (UVMTOP - UVMBOTTOM) || new_size > (UVMTOP - UVMBOTTOM))
+    if (old_size > (vm->vm_top - vm->vm_bottom) || new_size > (vm->vm_top - vm->vm_bottom))
         goto out;
     if (old_addr + old_size < old_addr)
         goto out;
-    if (old_addr < UVMBOTTOM || (old_addr + old_size) > UVMTOP)
+    if (old_addr < vm->vm_bottom || (old_addr + old_size) > vm->vm_top)
         goto out;
 
     vma_t *vma = vm_find_area(vm, old_addr);
@@ -1576,7 +1607,7 @@ int vm_msync(vm_t *vm, uint64 addr, size_t size, int flags)
     addr = PGROUNDDOWN(addr);
     size = PGROUNDUP(size);
 
-    if (addr < UVMBOTTOM || (addr + size) > UVMTOP) {
+    if (addr < vm->vm_bottom || (addr + size) > vm->vm_top) {
         ret = -ENOMEM;
         goto out;
     }
@@ -1616,7 +1647,7 @@ int vm_mincore(vm_t *vm, uint64 addr, size_t size, unsigned char *vec)
 
     size = PGROUNDUP(size);
 
-    if (addr < UVMBOTTOM || (addr + size) > UVMTOP) {
+    if (addr < vm->vm_bottom || (addr + size) > vm->vm_top) {
         ret = -ENOMEM;
         goto out;
     }
@@ -1662,7 +1693,7 @@ int vm_madvise(vm_t *vm, uint64 addr, size_t size, int advice)
     addr = PGROUNDDOWN(addr);
     size = PGROUNDUP(size);
 
-    if (addr < UVMBOTTOM || (addr + size) > UVMTOP) {
+    if (addr < vm->vm_bottom || (addr + size) > vm->vm_top) {
         ret = -ENOMEM;
         goto out;
     }
@@ -1726,8 +1757,8 @@ uint64 vm_find_free_range(vm_t *vm, size_t size, uint64 hint)
 
     size = PGROUNDUP(size);
 
-    uint64 stack_bottom = vm->stack ? vm->stack->start : UVMTOP - PGSIZE;
-    uint64 heap_end = vm->heap ? (vm->heap->start + vm->heap_size) : UVMBOTTOM;
+    uint64 stack_bottom = vm->stack ? vm->stack->start : vm->vm_top - PGSIZE;
+    uint64 heap_end = vm->heap ? (vm->heap->start + vm->heap_size) : vm->vm_bottom;
     uint64 reserve_end = vm->heap_reserve_end;
     uint64 effective_bottom = (reserve_end > heap_end) ? reserve_end : heap_end;
 
@@ -1871,7 +1902,7 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
 
     if (vm == NULL || length == 0)
         return (uint64)-1;
-    if (length > (UVMTOP - UVMBOTTOM))
+    if (length > (vm->vm_top - vm->vm_bottom))
         return (uint64)-1;
     if (length > ((size_t)-1) - (PGSIZE - 1))
         return (uint64)-1;
@@ -1949,4 +1980,304 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
 int vm_munmap(vm_t *vm, uint64 addr, size_t length)
 {
     return vm_munmap_region(vm, addr, length);
+}
+
+/* ========================================================================== */
+/*  Kernel VM singleton                                                       */
+/* ========================================================================== */
+/*
+ * The kernel VM is a single vm_t shared by all CPUs and kernel threads.
+ * It uses the boot-time kernel_pagetable and tracks kernel-land VMAs with
+ * the same RB-tree / list infrastructure as user VMs.
+ *
+ * Key differences from user VMs:
+ *   - Pages are ALWAYS eagerly allocated and mapped — no lazy faults, no COW.
+ *   - The kernel VM is never destroyed (refcount is never decremented to 0).
+ *   - Linear-mapped areas and the trampoline area remain intact; they are
+ *     registered as fixed VMAs during boot so the VMA tree is aware of them.
+ */
+
+vm_t *kernel_vm = NULL;
+
+/*
+ * Static storage for the kernel vm_t so we can initialise it before the
+ * slab allocator is ready to serve dynamic allocations.
+ */
+static vm_t __kernel_vm_storage;
+
+void kernel_vm_init(void)
+{
+    extern pagetable_t kernel_pagetable;
+
+    vm_t *vm = &__kernel_vm_storage;
+    memset(vm, 0, sizeof(vm_t));
+
+    rb_root_init(&vm->vm_tree, &__vm_tree_opts);
+    list_entry_init(&vm->vm_list);
+    list_entry_init(&vm->vm_free_list);
+
+    /* Initial free VMA covering the kernel virtual address space. */
+    vma_t *vma = __vma_alloc(vm);
+    if (vma == NULL)
+        panic("kernel_vm_init: cannot allocate initial VMA");
+
+    vma->start = KVMBASE;
+    vma->end = KVMTOP;
+    rb_insert_color(&vm->vm_tree, &vma->rb_entry);
+    list_node_push(&vm->vm_free_list, vma, free_list_entry);
+    list_node_push(&vm->vm_list, vma, list_entry);
+
+    vm->pagetable = kernel_pagetable;
+    vm->trapframe_pte = NULL;     /* no per-process trapframes */
+    vm->stack = NULL;
+    vm->heap = NULL;
+
+    spin_init(&vm->spinlock, "kernel_vm_pgtable_lock");
+    rwsem_init(&vm->rw_lock, RWLOCK_PRIO_READ, "kernel_vm_rw_lock");
+    vm->refcount = 1;             /* immortal */
+    vm->vm_bottom = KVMBASE;
+    vm->vm_top = KVMTOP;
+    vm->is_kernel = 1;
+
+    kernel_vm = vm;
+    printf("kernel_vm_init: kernel VM at %p [%lx, %lx)\n",
+           vm, vm->vm_bottom, vm->vm_top);
+}
+
+int kvm_register_region(uint64 start, uint64 size, uint64 flags)
+{
+    vm_t *vm = kernel_vm;
+    if (vm == NULL)
+        return -EINVAL;
+
+    start = PGROUNDDOWN(start);
+    size = PGROUNDUP(size);
+    if (size == 0)
+        return -EINVAL;
+
+    /* Clamp to the kernel VM address range. */
+    if (start < vm->vm_bottom)
+        start = vm->vm_bottom;
+    uint64 end = start + size;
+    if (end > vm->vm_top)
+        end = vm->vm_top;
+    size = end - start;
+    if (size == 0)
+        return 0; /* entirely outside range, nothing to register */
+
+    flags |= VMA_FLAG_KERNEL;
+    flags &= ~VMA_FLAG_USER;
+
+    vm_wlock(vm);
+    vma_t *vma = vma_alloc(vm, start, size, flags);
+    vm_wunlock(vm);
+
+    if (vma == NULL) {
+        printf("kvm_register_region: failed to register [%lx, %lx)\n",
+               start, start + size);
+        return -ENOMEM;
+    }
+    return 0;
+}
+
+uint64 kvm_mmap(uint64 addr, size_t size, uint64 flags)
+{
+    vm_t *vm = kernel_vm;
+    if (vm == NULL)
+        return 0;
+
+    size = PGROUNDUP(size);
+    if (size == 0)
+        return 0;
+
+    flags |= VMA_FLAG_KERNEL;
+    flags &= ~VMA_FLAG_USER;
+
+    vm_wlock(vm);
+
+    /* Find or place the VMA. */
+    uint64 map_addr;
+    if (addr == 0) {
+        map_addr = vm_find_free_range(vm, size, 0);
+        if (map_addr == 0) {
+            vm_wunlock(vm);
+            return 0;
+        }
+    } else {
+        map_addr = PGROUNDDOWN(addr);
+    }
+
+    vma_t *vma = vma_alloc(vm, map_addr, size, flags);
+    if (vma == NULL) {
+        vm_wunlock(vm);
+        return 0;
+    }
+
+    /* Eagerly allocate and map every page — no lazy allocation, no COW. */
+    for (uint64 a = map_addr; a < map_addr + size; a += PGSIZE) {
+        void *pa = page_alloc(0, PAGE_TYPE_ANON);
+        if (pa == NULL) {
+            /* Roll back: unmap and free pages we already mapped. */
+            for (uint64 b = map_addr; b < a; b += PGSIZE) {
+                pte_t *pte = walk(vm->pagetable, b, 0, NULL, NULL);
+                if (pte && pte_present(pte)) {
+                    uint64 old_pa = pte_pa(pte);
+                    pte_clear(pte);
+                    page_free((void *)old_pa, 0);
+                }
+            }
+            vma_free(vm, vma);
+            vm_wunlock(vm);
+            return 0;
+        }
+        memset(pa, 0, PGSIZE);
+        pte_t pte_flags = vma2pte_flags(flags);
+        if (mappages(vm->pagetable, a, PGSIZE, (uint64)pa, pte_flags) != 0) {
+            page_free(pa, 0);
+            /* Roll back everything mapped so far. */
+            for (uint64 b = map_addr; b < a; b += PGSIZE) {
+                pte_t *pte = walk(vm->pagetable, b, 0, NULL, NULL);
+                if (pte && pte_present(pte)) {
+                    uint64 old_pa = pte_pa(pte);
+                    pte_clear(pte);
+                    page_free((void *)old_pa, 0);
+                }
+            }
+            vma_free(vm, vma);
+            vm_wunlock(vm);
+            return 0;
+        }
+    }
+
+    vm_wunlock(vm);
+    return map_addr;
+}
+
+int kvm_munmap(uint64 addr, size_t size)
+{
+    vm_t *vm = kernel_vm;
+    if (vm == NULL)
+        return -EINVAL;
+
+    addr = PGROUNDDOWN(addr);
+    size = PGROUNDUP(size);
+    if (size == 0)
+        return -EINVAL;
+
+    vm_wlock(vm);
+
+    vma_t *vma = vm_find_area(vm, addr);
+    if (vma == NULL || vma->start != addr || vma->end != addr + size) {
+        vm_wunlock(vm);
+        return -EINVAL;
+    }
+
+    /* Free the physical pages and clear PTEs. */
+    for (uint64 a = addr; a < addr + size; a += PGSIZE) {
+        pte_t *pte = walk(vm->pagetable, a, 0, NULL, NULL);
+        if (pte == NULL || !pte_present(pte))
+            continue;
+        uint64 pa = pte_pa(pte);
+        pte_clear(pte);
+        page_free((void *)pa, 0);
+    }
+
+    vma_free(vm, vma);
+    vm_wunlock(vm);
+
+    /* Flush TLB on local CPU and send IPI to remote CPUs in cpumask. */
+    arch_tlb_flush();
+    vm_remote_sfence(kernel_vm);
+    return 0;
+}
+
+void *kvm_alloc(size_t npages)
+{
+    if (npages == 0)
+        return NULL;
+    uint64 va = kvm_mmap(0, npages * PGSIZE, PROT_READ | PROT_WRITE);
+    if (va == 0)
+        return NULL;
+    return (void *)va;
+}
+
+void kvm_free(void *addr, size_t npages)
+{
+    if (addr == NULL || npages == 0)
+        return;
+    kvm_munmap((uint64)addr, npages * PGSIZE);
+}
+
+/* ------------------------------------------------------------------ */
+/*  kvmalloc / kvfree                                                  */
+/* ------------------------------------------------------------------ */
+
+/* Addresses in the identity-mapped physical-memory range [KERNBASE, PHYSTOP)
+ * come from the slab/buddy allocator; everything else is from the kernel VM. */
+int is_kvm_addr(const void *addr)
+{
+    uint64 a = (uint64)addr;
+    return a < KERNBASE || a >= PHYSTOP;
+}
+
+void *kvmalloc(size_t size)
+{
+    if (size == 0)
+        return NULL;
+
+    /* Small allocation: use the slab allocator. */
+    if (size <= SLAB_OBJ_MAX_SIZE) {
+        void *p = kmm_alloc(size);
+        if (p != NULL)
+            return p;
+        /* slab OOM — fall through to page-granular path */
+    }
+
+    /* Large (or slab-failed) allocation: round up to pages. */
+    size_t npages = (size + PGSIZE - 1) / PGSIZE;
+    return kvm_alloc(npages);
+}
+
+void kvfree(void *ptr)
+{
+    if (ptr == NULL)
+        return;
+
+    if (!is_kvm_addr(ptr)) {
+        /* Address is in the identity-mapped physical-memory range
+         * → it was allocated by kmm_alloc (slab). */
+        kmm_free(ptr);
+        return;
+    }
+
+    /* Address is outside identity-mapped RAM → allocated by kvm_alloc.
+     * Look up the covering VMA to determine the size. */
+    vm_t *vm = kernel_vm;
+    if (vm == NULL) {
+        printf("kvfree: kernel_vm not initialised\n");
+        return;
+    }
+
+    vm_wlock(vm);
+    vma_t *vma = vm_find_area(vm, (uint64)ptr);
+    if (vma == NULL || vma->start != (uint64)ptr) {
+        vm_wunlock(vm);
+        printf("kvfree: no VMA for %p\n", ptr);
+        return;
+    }
+    size_t size = vma->end - vma->start;
+    vm_wunlock(vm);
+
+    kvm_munmap((uint64)ptr, size);
+}
+
+void dump_kernel_vm(void)
+{
+    if (kernel_vm == NULL) {
+        printf("kernel_vm: not initialized\n");
+        return;
+    }
+    printf("=== Kernel VM dump ===\n");
+    dump_vm(kernel_vm);
+    printf("=== End kernel VM dump ===\n");
 }

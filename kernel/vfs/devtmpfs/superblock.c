@@ -34,6 +34,7 @@
 #include "devtmpfs_private.h"
 #include "printf.h"
 #include <dev/dev.h>
+#include <mm/vm.h>
 
 /* ------------------------------------------------------------------ */
 /*  Global device-node registry                                       */
@@ -332,7 +333,7 @@ int devtmpfs_create_node(const char *name, mode_t mode, dev_t dev) {
         return -EINVAL;
 
     /* Allocate a registry entry (node struct + name string in one block) */
-    struct devtmpfs_node *node = kmm_alloc(sizeof(*node) + name_len + 1);
+    struct devtmpfs_node *node = kvmalloc(sizeof(*node) + name_len + 1);
     if (node == NULL)
         return -ENOMEM;
 
@@ -388,7 +389,7 @@ int devtmpfs_remove_node(const char *name) {
     spin_unlock(&__devtmpfs_lock);
 
     if (found)
-        kmm_free(node);
+        kvfree(node);
 
     /*
      * Also unlink the live filesystem node if devtmpfs is mounted.

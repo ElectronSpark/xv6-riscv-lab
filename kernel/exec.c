@@ -626,7 +626,7 @@ int exec(char *path, char **argv, char **envp) {
     if (mycpu()->fpu_owner == p)
         mycpu()->fpu_owner = NULL;
     if (p->fpu_state != NULL) {
-        kmm_free(p->fpu_state);
+        kvfree(p->fpu_state);
         p->fpu_state = NULL;
     }
 

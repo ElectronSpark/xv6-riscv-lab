@@ -8,6 +8,7 @@
 #include <dev/bio.h>
 #include <mm/page.h>
 #include <errno.h>
+#include <mm/vm.h>
 
 static void __bio_relase_kobj_cb(struct kobject *obj) {
     struct bio *bio = container_of(obj, struct bio, kobj);
@@ -20,7 +21,7 @@ static void __bio_relase_kobj_cb(struct kobject *obj) {
     //         }
     //     }
     // }
-    kmm_free(bio);
+    kvfree(bio);
 }
 
 struct bio *bio_alloc(blkdev_t *bdev, int16 vec_length, bool rw,
@@ -30,7 +31,7 @@ struct bio *bio_alloc(blkdev_t *bdev, int16 vec_length, bool rw,
         return ERR_PTR(-EINVAL); // Invalid arguments
     }
     size_t bio_size = sizeof(struct bio) + vec_length * sizeof(struct bio_vec);
-    bio = (struct bio *)kmm_alloc(bio_size);
+    bio = (struct bio *)kvmalloc(bio_size);
     if (bio == NULL) {
         return ERR_PTR(-ENOMEM); // Memory allocation failed
     }

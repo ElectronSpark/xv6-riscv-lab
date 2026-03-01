@@ -91,7 +91,7 @@ static void pty_pair_destroy(struct pty_pair *pair)
         pair->slave = NULL;
     }
 
-    kmm_free(pair);
+    kvfree(pair);
 }
 
 /* Build the devtmpfs name "pts/<idx>" into buf (must be >= 16 bytes) */
@@ -353,7 +353,7 @@ static int ptmx_open_file(cdev_t *cdev, struct vfs_file *file) {
     spin_unlock(&ptmx_lock);
 
     /* Allocate the pair structure */
-    struct pty_pair *pair = kmm_alloc(sizeof(*pair));
+    struct pty_pair *pair = kvmalloc(sizeof(*pair));
     if (pair == NULL) {
         spin_lock(&ptmx_lock);
         pty_table[idx] = NULL;
@@ -380,7 +380,7 @@ static int ptmx_open_file(cdev_t *cdev, struct vfs_file *file) {
         spin_lock(&ptmx_lock);
         pty_table[idx] = NULL;
         spin_unlock(&ptmx_lock);
-        kmm_free(pair);
+        kvfree(pair);
         return ret;
     }
     pair->slave = slave;
@@ -406,7 +406,7 @@ static int ptmx_open_file(cdev_t *cdev, struct vfs_file *file) {
         spin_lock(&ptmx_lock);
         pty_table[idx] = NULL;
         spin_unlock(&ptmx_lock);
-        kmm_free(pair);
+        kvfree(pair);
         return ret;
     }
     pair->cdev_live = 1;
