@@ -34,11 +34,15 @@
 #include "lwip/api.h"
 #include "lwip/netbuf.h"
 #include "lwip/ip_addr.h"
+#include "lwip/ip.h"
+#include "lwip/netif.h"
 #include "lwip/tcp.h"
 #include "lwip/err.h"
 #include "lwip/sys.h"
 #include "arch/sys_arch.h"
 #include "signal.h"
+#include "kqueue.h"
+#include "kqueue_types.h"
 
 /* From irq/syscall.c — argument fetching */
 extern void argint(int n, int *ip);
@@ -109,6 +113,11 @@ struct lwip_sock {
 #define SHUT_WR        1
 #define SHUT_RDWR      2
 
+/* Message flags */
+#define MSG_TRUNC      0x20
+#define MSG_DONTWAIT   0x40
+#define MSG_NOSIGNAL   0x4000
+
 /* Socket option levels */
 #define SOL_SOCKET     1
 
@@ -175,6 +184,48 @@ static void lwip_sock_free(struct lwip_sock *sk)
 /* VFS file_ops for sockets — allows read()/write()/close() on socket fds     */
 /* ========================================================================== */
 
+/*
+ * sock_poll_ready - quick non-blocking readiness check for a netconn
+ *
+ * @sk: socket
+ * @events: POLLIN or POLLOUT
+ * Returns: non-zero if ready (or error/HUP), 0 if would block.
+ */
+static int sock_poll_ready(struct lwip_sock *sk, short events)
+{
+    struct netconn *conn = sk->conn;
+    if (conn == NULL)
+        return POLLNVAL;
+
+    short revents = 0;
+
+    if (events & POLLIN) {
+        if (sk->lastbuf != NULL || sk->lastpbuf != NULL) {
+            revents |= POLLIN;
+        } else if (conn->state == NETCONN_LISTEN) {
+#if LWIP_TCP
+            if (sys_mbox_valid(&conn->acceptmbox) &&
+                conn->acceptmbox.count > 0)
+                revents |= POLLIN;
+#endif
+        } else {
+            if (sys_mbox_valid(&conn->recvmbox) &&
+                conn->recvmbox.count > 0)
+                revents |= POLLIN;
+        }
+        if (conn->pending_err != ERR_OK)
+            revents |= POLLERR;
+        if (conn->flags & NETCONN_FLAG_MBOXCLOSED)
+            revents |= POLLHUP;
+    }
+
+    if (events & POLLOUT) {
+        revents |= POLLOUT;
+    }
+
+    return revents;
+}
+
 static ssize_t sock_file_read(struct vfs_file *file, char *buf, size_t count,
                               bool user)
 {
@@ -240,6 +291,13 @@ static ssize_t sock_file_read(struct vfs_file *file, char *buf, size_t count,
             return tocopy;
         }
 
+        /* O_NONBLOCK: check readiness before blocking */
+        if (file->f_flags & O_NONBLOCK) {
+            int ready = sock_poll_ready(sk, POLLIN);
+            if (!(ready & (POLLIN | POLLHUP | POLLERR)))
+                return -EAGAIN;
+        }
+
         err = netconn_recv_tcp_pbuf(sk->conn, &p);
         if (err != ERR_OK) {
             if (err == ERR_CLSD)
@@ -275,6 +333,14 @@ static ssize_t sock_file_read(struct vfs_file *file, char *buf, size_t count,
     } else {
         /* UDP/RAW: use netconn_recv → netbuf */
         struct netbuf *nb = NULL;
+
+        /* O_NONBLOCK: check readiness before blocking */
+        if (file->f_flags & O_NONBLOCK) {
+            int ready = sock_poll_ready(sk, POLLIN);
+            if (!(ready & (POLLIN | POLLHUP | POLLERR)))
+                return -EAGAIN;
+        }
+
         err_t err = netconn_recv(sk->conn, &nb);
         if (err != ERR_OK)
             return -lwip_err_to_errno(err);
@@ -372,6 +438,12 @@ static int sock_file_release(struct vfs_inode *inode, struct vfs_file *file)
 {
     (void)inode;
     struct lwip_sock *sk = (struct lwip_sock *)file->private_data;
+    if (sk != NULL && sk->conn != NULL) {
+        /* Disconnect callback before delete to prevent the tcpip thread
+         * from calling sock_netconn_callback with a stale vfs_file ptr. */
+        sk->conn->callback = NULL;
+        sk->conn->callback_arg.ptr = NULL;
+    }
     lwip_sock_free(sk);
     file->private_data = NULL;
     return 0;
@@ -408,8 +480,9 @@ static int sock_file_poll(struct vfs_file *file, short events)
 #endif
         } else {
             /* Data socket: check recvmbox */
-            if (sys_mbox_valid(&conn->recvmbox) &&
-                conn->recvmbox.count > 0)
+            int mbox_valid = sys_mbox_valid(&conn->recvmbox);
+            int mbox_count = mbox_valid ? (int)conn->recvmbox.count : -1;
+            if (mbox_valid && mbox_count > 0)
                 revents |= (events & (POLLIN | POLLRDNORM));
         }
 
@@ -442,10 +515,47 @@ static struct vfs_file_ops lwip_socket_file_ops = {
 };
 
 /* ========================================================================== */
+/* lwIP netconn callback → kqueue push notification                           */
+/* ========================================================================== */
+
+/*
+ * sock_netconn_callback - called by lwIP core (tcpip thread) when an event
+ * occurs on a netconn.  We translate these into kqueue knote notifications
+ * on the owning vfs_file so that epoll_wait / kevent callers are woken up
+ * immediately.
+ *
+ * The vfs_file pointer is stashed in conn->callback_arg.ptr by
+ * sock_fd_alloc() at socket-creation time.
+ */
+static void sock_netconn_callback(struct netconn *conn,
+                                  enum netconn_evt evt, u16_t len)
+{
+    struct vfs_file *file = (struct vfs_file *)conn->callback_arg.ptr;
+    if (file == NULL)
+        return;
+
+    switch (evt) {
+    case NETCONN_EVT_RCVPLUS:
+        vfs_file_knote_notify(file, EVFILT_READ, (int64)len);
+        break;
+    case NETCONN_EVT_SENDPLUS:
+        vfs_file_knote_notify(file, EVFILT_WRITE, (int64)len);
+        break;
+    case NETCONN_EVT_ERROR:
+        vfs_file_knote_notify(file, EVFILT_READ, 0);
+        vfs_file_knote_notify(file, EVFILT_WRITE, 0);
+        break;
+    default:
+        break;
+    }
+}
+
+/* ========================================================================== */
 /* Helper: create a socket fd from a netconn                                  */
 /* ========================================================================== */
 
-static int sock_fd_alloc(struct netconn *conn, int type, int protocol)
+static int sock_fd_alloc(struct netconn *conn, int type, int protocol,
+                         int file_flags)
 {
     struct lwip_sock *sk = lwip_sock_alloc();
     if (sk == NULL)
@@ -455,11 +565,18 @@ static int sock_fd_alloc(struct netconn *conn, int type, int protocol)
     sk->type = type;
     sk->protocol = protocol;
 
-    int fd = vfs_custom_fd_alloc(&lwip_socket_file_ops, sk, O_RDWR);
+    int fd = vfs_custom_fd_alloc(&lwip_socket_file_ops, sk, file_flags);
     if (fd < 0) {
         lwip_sock_free(sk);
         return fd;
     }
+
+    /* Wire up kqueue push notification: store the vfs_file pointer
+     * so sock_netconn_callback() can call vfs_file_knote_notify(). */
+    struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, fd);
+    conn->callback_arg.ptr = f;
+    conn->callback = sock_netconn_callback;
+    vfs_fput(f);  /* drop lookup ref — fd table owns the real ref */
 
     return fd;
 }
@@ -478,6 +595,26 @@ static struct lwip_sock *sock_from_fd(int fd)
         return NULL;
 
     return (struct lwip_sock *)f->private_data;
+}
+
+/*
+ * sock_is_nonblock - check if a socket fd should use non-blocking I/O
+ *
+ * Returns true if the file has O_NONBLOCK set or if MSG_DONTWAIT is
+ * in the flags argument.
+ */
+static int sock_is_nonblock(int fd, int msg_flags)
+{
+    if (msg_flags & MSG_DONTWAIT)
+        return 1;
+
+    spin_lock(&current->fdtable->lock);
+    struct vfs_file *f = current->fdtable->files[fd];
+    spin_unlock(&current->fdtable->lock);
+
+    if (f == NULL)
+        return 0;
+    return (f->f_flags & O_NONBLOCK) != 0;
 }
 
 /* ========================================================================== */
@@ -523,7 +660,11 @@ uint64 sys_socket(void)
     if (conn == NULL)
         return (uint64)-ENOMEM;
 
-    int fd = sock_fd_alloc(conn, type, protocol);
+    int file_flags = O_RDWR;
+    if (flags & SOCK_NONBLOCK)
+        file_flags |= O_NONBLOCK;
+
+    int fd = sock_fd_alloc(conn, type, protocol, file_flags);
     if (fd < 0) {
         netconn_delete(conn);
         return (uint64)fd;
@@ -612,6 +753,13 @@ uint64 sys_accept(void)
     if (sk == NULL)
         return (uint64)-EBADF;
 
+    /* O_NONBLOCK: check if connections are pending */
+    if (sock_is_nonblock(fd, 0)) {
+        int ready = sock_poll_ready(sk, POLLIN);
+        if (!(ready & (POLLIN | POLLHUP | POLLERR)))
+            return (uint64)-EAGAIN;
+    }
+
     struct netconn *newconn = NULL;
     err_t err = netconn_accept(sk->conn, &newconn);
     if (err != ERR_OK) {
@@ -621,7 +769,7 @@ uint64 sys_accept(void)
         return (uint64)-lwip_err_to_errno(err);
     }
 
-    int newfd = sock_fd_alloc(newconn, SOCK_STREAM, sk->protocol);
+    int newfd = sock_fd_alloc(newconn, SOCK_STREAM, sk->protocol, O_RDWR);
     if (newfd < 0) {
         netconn_delete(newconn);
         return (uint64)newfd;
@@ -697,14 +845,19 @@ uint64 sys_sendto(void)
     argaddr(4, &uaddr);
     argint(5, &addrlen);
 
-    (void)flags; /* flags not supported for now */
-
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
         return (uint64)-EBADF;
 
     if (len <= 0)
         return 0;
+
+    /* MSG_DONTWAIT / O_NONBLOCK: check send readiness */
+    if (sock_is_nonblock(fd, flags)) {
+        int ready = sock_poll_ready(sk, POLLOUT);
+        if (!(ready & POLLOUT))
+            return (uint64)-EAGAIN;
+    }
 
     if (sk->type == SOCK_STREAM) {
         /* TCP: ignore dest_addr, use netconn_write */
@@ -777,14 +930,19 @@ uint64 sys_recvfrom(void)
     argaddr(4, &uaddr);
     argaddr(5, &uaddrlen);
 
-    (void)flags; /* flags not supported for now */
-
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
         return (uint64)-EBADF;
 
     if (len <= 0)
         return 0;
+
+    /* MSG_DONTWAIT / O_NONBLOCK: check recv readiness */
+    if (sock_is_nonblock(fd, flags)) {
+        int ready = sock_poll_ready(sk, POLLIN);
+        if (!(ready & (POLLIN | POLLHUP | POLLERR)))
+            return (uint64)-EAGAIN;
+    }
 
     if (sk->type == SOCK_STREAM) {
         /* TCP: use netconn_recv_tcp_pbuf */
@@ -1049,6 +1207,21 @@ uint64 sys_getsockname(void)
     if (err != ERR_OK)
         return (uint64)-lwip_err_to_errno(err);
 
+    /* Linux resolves INADDR_ANY to the actual source IP for connected
+     * sockets.  lwIP doesn't do this automatically, so resolve it here
+     * by routing to the remote address. */
+    if (ip_addr_isany(&laddr) && sk->conn->pcb.ip != NULL) {
+        ip_addr_t raddr;
+        u16_t rport;
+        err_t re = netconn_getaddr(sk->conn, &raddr, &rport, 0 /* remote */);
+        if (re == ERR_OK && !ip_addr_isany(&raddr)) {
+            const struct netif *nif = (const struct netif *)ip_route(&laddr, &raddr);
+            if (nif != NULL) {
+                ip_addr_copy(laddr, nif->ip_addr);
+            }
+        }
+    }
+
     struct k_sockaddr_in sa;
     memset(&sa, 0, sizeof(sa));
     sa.sin_family = AF_INET;
@@ -1084,6 +1257,13 @@ uint64 sys_accept4(void)
     if (sk == NULL)
         return (uint64)-EBADF;
 
+    /* O_NONBLOCK on listening socket: check if connections are pending */
+    if (sock_is_nonblock(fd, 0)) {
+        int ready = sock_poll_ready(sk, POLLIN);
+        if (!(ready & (POLLIN | POLLHUP | POLLERR)))
+            return (uint64)-EAGAIN;
+    }
+
     struct netconn *newconn = NULL;
     err_t err = netconn_accept(sk->conn, &newconn);
     if (err != ERR_OK) {
@@ -1111,6 +1291,12 @@ uint64 sys_accept4(void)
         lwip_sock_free(newsk);
         return (uint64)newfd;
     }
+
+    /* Wire up kqueue push notification for the accepted connection */
+    struct vfs_file *newf = vfs_fdtable_get_file(current->fdtable, newfd);
+    newconn->callback_arg.ptr = newf;
+    newconn->callback = sock_netconn_callback;
+    vfs_fput(newf);  /* drop lookup ref — fd table owns the real ref */
 
     /* Set close-on-exec if requested */
     if (flags & SOCK_CLOEXEC) {
@@ -1163,10 +1349,6 @@ struct k_iovec {
     uint64 iov_len;         /* size_t  */
 };
 
-#define MSG_TRUNC    0x20
-#define MSG_DONTWAIT 0x40
-#define MSG_NOSIGNAL 0x4000
-
 #define SENDMSG_MAX_IOV 16
 
 /*
@@ -1188,6 +1370,13 @@ uint64 sys_sendmsg(void)
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
         return (uint64)-EBADF;
+
+    /* MSG_DONTWAIT / O_NONBLOCK: check send readiness */
+    if (sock_is_nonblock(fd, flags)) {
+        int ready = sock_poll_ready(sk, POLLOUT);
+        if (!(ready & POLLOUT))
+            return (uint64)-EAGAIN;
+    }
 
     /* Copy the msghdr from user space */
     struct k_msghdr mh;
@@ -1303,6 +1492,13 @@ uint64 sys_recvmsg(void)
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
         return (uint64)-EBADF;
+
+    /* MSG_DONTWAIT / O_NONBLOCK: check recv readiness */
+    if (sock_is_nonblock(fd, flags)) {
+        int ready = sock_poll_ready(sk, POLLIN);
+        if (!(ready & (POLLIN | POLLHUP | POLLERR)))
+            return (uint64)-EAGAIN;
+    }
 
     /* Copy the msghdr from user space */
     struct k_msghdr mh;

@@ -367,6 +367,11 @@ extern uint64 sys_kqueue(void);
 extern uint64 sys_kevent_register(void);
 extern uint64 sys_kevent_wait(void);
 
+// epoll syscalls (wrappers over kqueue)
+extern uint64 sys_epoll_create1(void);
+extern uint64 sys_epoll_ctl(void);
+extern uint64 sys_epoll_pwait(void);
+
 /*
  * Syscall routing table
  *
@@ -516,6 +521,9 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_pselect6_time64] sys_pselect6,
     [SYS_mq_timedsend_time64] sys_ni_enosys,
     [SYS_mq_timedreceive_time64] sys_ni_enosys,
+    [SYS_epoll_pwait] sys_epoll_pwait,
+    [SYS_epoll_ctl] sys_epoll_ctl,
+    [SYS_epoll_create1] sys_epoll_create1,
 };
 
 void syscall(void) {

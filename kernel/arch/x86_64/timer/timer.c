@@ -684,11 +684,144 @@ void timer_tick(struct timer_root *timer, uint64 ticks) {
 }
 
 /* ══════════════════════════════════════════════════════════════
- *  Goldfish RTC stubs (RISC-V compatibility)
+ *  Wall-clock time via CMOS RTC + r_time()
+ *
+ *  goldfish_rtc_read_ns/sec are called by sys_clock_gettime
+ *  (CLOCK_REALTIME and CLOCK_MONOTONIC) and sys_gettimeofday.
+ *  On x86 we read the CMOS RTC at boot to seed the wall clock,
+ *  then track elapsed time via r_time() (TSC or jiffies-based).
  * ══════════════════════════════════════════════════════════════ */
-void   goldfish_rtc_init(void) {}
-uint64 goldfish_rtc_read_ns(void)  { return 0; }
-uint64 goldfish_rtc_read_sec(void) { return 0; }
+
+/* CMOS RTC I/O ports */
+#define CMOS_ADDR   0x70
+#define CMOS_DATA   0x71
+
+/* CMOS register indices */
+#define CMOS_SEC    0x00
+#define CMOS_MIN    0x02
+#define CMOS_HOUR   0x04
+#define CMOS_DAY    0x07
+#define CMOS_MON    0x08
+#define CMOS_YEAR   0x09
+#define CMOS_STATUS_A   0x0A
+#define CMOS_STATUS_B   0x0B
+
+static uint64 boot_epoch_ns;           /* CMOS time at boot (nanoseconds) */
+static uint64 boot_ticks;              /* r_time() snapshot at boot time  */
+static int    rtc_seeded;
+
+static uint8 cmos_read(uint8 reg)
+{
+    outb(CMOS_ADDR, reg);
+    return inb(CMOS_DATA);
+}
+
+static uint8 bcd_to_bin(uint8 val)
+{
+    return (val & 0x0F) + ((val >> 4) * 10);
+}
+
+/* Days in each month (non-leap year) */
+static int days_in_month(int month, int year)
+{
+    static const int dm[] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    if (month == 2 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0))
+        return 29;
+    return dm[month - 1];
+}
+
+/* Convert broken-down UTC time to seconds since Unix epoch */
+static uint64 mktime_utc(int year, int mon, int day, int hour, int min, int sec)
+{
+    uint64 days = 0;
+    for (int y = 1970; y < year; y++) {
+        days += 365;
+        if ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)
+            days++;
+    }
+    for (int m = 1; m < mon; m++)
+        days += days_in_month(m, year);
+    days += day - 1;
+    return days * 86400ULL + hour * 3600ULL + min * 60ULL + sec;
+}
+
+/*
+ * cmos_read_epoch_ns — read the CMOS RTC and convert to nanoseconds
+ * since Unix epoch.  Waits for the UIP (Update In Progress) bit to
+ * clear, then reads a consistent set of date/time registers.
+ */
+static uint64 cmos_read_epoch_ns(void)
+{
+    /* Wait until RTC is not updating */
+    while (cmos_read(CMOS_STATUS_A) & 0x80)
+        ;
+
+    uint8 sec  = cmos_read(CMOS_SEC);
+    uint8 min  = cmos_read(CMOS_MIN);
+    uint8 hour = cmos_read(CMOS_HOUR);
+    uint8 day  = cmos_read(CMOS_DAY);
+    uint8 mon  = cmos_read(CMOS_MON);
+    uint8 year = cmos_read(CMOS_YEAR);
+    uint8 status_b = cmos_read(CMOS_STATUS_B);
+
+    /* Convert BCD → binary if needed (bit 2 of status B = binary mode) */
+    if (!(status_b & 0x04)) {
+        sec  = bcd_to_bin(sec);
+        min  = bcd_to_bin(min);
+        hour = bcd_to_bin(hour);
+        day  = bcd_to_bin(day);
+        mon  = bcd_to_bin(mon);
+        year = bcd_to_bin(year);
+    }
+
+    /* CMOS only stores 2-digit year; assume 2000+ */
+    int full_year = 2000 + year;
+
+    return mktime_utc(full_year, mon, day, hour, min, sec) * 1000000000ULL;
+}
+
+/*
+ * ticks_to_ns — convert r_time() delta to nanoseconds.
+ *
+ * r_time() returns ticks at __timebase_frequency Hz.
+ * To avoid overflow on large tick counts we split the conversion:
+ *   ns = ticks / freq * 1e9  +  (ticks % freq) * 1e9 / freq
+ */
+static uint64 ticks_to_ns(uint64 ticks)
+{
+    uint64 freq = __timebase_frequency;
+    uint64 whole_sec = ticks / freq;
+    uint64 frac_ticks = ticks % freq;
+    return whole_sec * 1000000000ULL + frac_ticks * 1000000000ULL / freq;
+}
+
+static void rtc_seed(void)
+{
+    if (rtc_seeded)
+        return;
+    boot_epoch_ns = cmos_read_epoch_ns();
+    boot_ticks = x86_r_time();
+    rtc_seeded = 1;
+}
+
+void goldfish_rtc_init(void)
+{
+    rtc_seed();
+}
+
+uint64 goldfish_rtc_read_ns(void)
+{
+    if (!rtc_seeded)
+        rtc_seed();
+    uint64 elapsed = x86_r_time() - boot_ticks;
+    return boot_epoch_ns + ticks_to_ns(elapsed);
+}
+
+uint64 goldfish_rtc_read_sec(void)
+{
+    return goldfish_rtc_read_ns() / 1000000000ULL;
+}
+
 void   goldfish_rtc_set_alarm_ns(uint64 ns)    { (void)ns; }
 void   goldfish_rtc_set_alarm_sec(uint64 sec)   { (void)sec; }
 void   goldfish_rtc_clear_alarm(void) {}

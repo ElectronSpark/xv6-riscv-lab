@@ -111,7 +111,8 @@
 #define LWIP_NETIF_STATUS_CALLBACK      1
 #define LWIP_NETIF_LINK_CALLBACK        1
 #define LWIP_NETIF_HOSTNAME             1
-#define LWIP_NETIF_LOOPBACK             0
+#define LWIP_NETIF_LOOPBACK             1
+#define LWIP_LOOPBACK_MAX_PBUFS         16
 
 /* --------------------------------------------------------------------------
  * Sequential / Socket API

@@ -181,4 +181,11 @@
 // We keep the kernel using compact numbers (112-115) and remap the musl
 // stubs in musl-xv6/arch/*/bits/syscall.h.in to match.
 
+// --- epoll compatibility (mapped from musl stub numbers) ---
+// musl's epoll_create1(), epoll_ctl(), epoll_pwait() issue these numbers.
+// The kernel implements them as thin wrappers over kqueue.
+#define SYS_epoll_pwait     986
+#define SYS_epoll_ctl       987
+#define SYS_epoll_create1   988
+
 #endif /* __KERNEL_SYSCALL_H */

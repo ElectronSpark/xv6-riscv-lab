@@ -229,6 +229,9 @@ extern uint64 sys_vfs_dup3(void);
 extern uint64 sys_kqueue(void);
 extern uint64 sys_kevent_register(void);
 extern uint64 sys_kevent_wait(void);
+extern uint64 sys_epoll_create1(void);
+extern uint64 sys_epoll_ctl(void);
+extern uint64 sys_epoll_pwait(void);
 #ifdef USE_LWIP
 extern uint64 sys_socket(void);
 extern uint64 sys_bind(void);
@@ -386,6 +389,9 @@ static uint64 (*syscalls[])(void) = {
     [SYS_pselect6_time64] sys_pselect6,
     [SYS_mq_timedsend_time64] sys_ni_enosys,
     [SYS_mq_timedreceive_time64] sys_ni_enosys,
+    [SYS_epoll_pwait] sys_epoll_pwait,
+    [SYS_epoll_ctl] sys_epoll_ctl,
+    [SYS_epoll_create1] sys_epoll_create1,
 };
 
 /*

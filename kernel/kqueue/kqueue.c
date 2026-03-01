@@ -538,12 +538,11 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
             }
             tq_wait_in_state(&kq->waitq, &kq->lock, NULL,
                              THREAD_INTERRUPTIBLE);
-            /* After wakeup, timeout or event or signal — break out */
-            if (LIST_IS_EMPTY(&kq->ready)) {
-                /* Timeout expired with no events */
+            /* After wakeup, timeout or event or signal — drain the
+             * ready list on the next iteration.  If it's still empty
+             * (pure timeout), exit the loop. */
+            if (LIST_IS_EMPTY(&kq->ready))
                 break;
-            }
-            /* else: events available, loop again to drain */
         } else {
             /* timeout_ms == -1: block indefinitely */
             tq_wait_in_state(&kq->waitq, &kq->lock, NULL,
