@@ -176,6 +176,10 @@
 #define SYS_mq_timedsend_time64          887
 #define SYS_mq_timedreceive_time64       888
 
+// --- Additional socket stubs (high musl numbers) ---
+#define SYS_sendmmsg        842
+#define SYS_socketpair      974
+
 // --- Aliases for musl stub numbers (mapped to real kernel numbers) ---
 // musl defines these at high numbers (975-993) as stubs.
 // We keep the kernel using compact numbers (112-115) and remap the musl

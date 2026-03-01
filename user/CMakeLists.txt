@@ -194,6 +194,7 @@ set(MUSL_STATIC_PROGRAMS
     mmkdir:mkdir  mrm:rm     mln:ln       mkill:kill  msleep:sleep
     minit:init    msh:sh     mhello:hello mfptest:fptest
     mnslookup:nslookup  mepolltest:epolltest
+    msocktest:socktest
 )
 foreach(MAPPING ${MUSL_STATIC_PROGRAMS})
     string(REPLACE ":" ";" PARTS ${MAPPING})
@@ -745,6 +746,7 @@ set(MUSL_PROG_MAP
     mmkdir:mkdir  mrm:rm  mln:ln  mkill:kill  msleep:sleep
     minit:init  mhello:hello  mfptest:fptest
     mnslookup:nslookup  mepolltest:epolltest
+    msocktest:socktest
 )
 foreach(MAPPING ${MUSL_PROG_MAP})
     string(REPLACE ":" ";" PARTS ${MAPPING})

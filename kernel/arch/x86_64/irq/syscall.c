@@ -249,6 +249,8 @@ extern uint64 sys_sendmsg(void);
 extern uint64 sys_recvmsg(void);
 extern uint64 sys_accept4(void);
 extern uint64 sys_sendfile(void);
+extern uint64 sys_socketpair(void);
+extern uint64 sys_sendmmsg(void);
 #endif
 
 /* ── Syscall routing table (same as RISC-V, shared syscall numbers) ── */
@@ -383,6 +385,8 @@ static uint64 (*syscalls[])(void) = {
     [SYS_recvmsg] sys_recvmsg,
     [SYS_accept4] sys_accept4,
     [SYS_sendfile] sys_sendfile,
+    [SYS_socketpair] sys_socketpair,
+    [SYS_sendmmsg] sys_sendmmsg,
 #endif
     [SYS_sched_rr_get_interval_time64] sys_ni_enosys,
     [SYS_recvmmsg_time64] sys_ni_enosys,

@@ -37,6 +37,8 @@
 #include "lwip/ip.h"
 #include "lwip/netif.h"
 #include "lwip/tcp.h"
+#include "lwip/udp.h"
+#include "lwip/igmp.h"
 #include "lwip/err.h"
 #include "lwip/sys.h"
 #include "arch/sys_arch.h"
@@ -114,21 +116,58 @@ struct lwip_sock {
 #define SHUT_RDWR      2
 
 /* Message flags */
+#define MSG_PEEK       0x02
 #define MSG_TRUNC      0x20
 #define MSG_DONTWAIT   0x40
+#define MSG_WAITALL    0x100
 #define MSG_NOSIGNAL   0x4000
 
 /* Socket option levels */
 #define SOL_SOCKET     1
 
-/* Socket options */
+/* Socket options (SOL_SOCKET level) */
 #define SO_REUSEADDR   2
+#define SO_TYPE        3
+#define SO_ERROR       4
+#define SO_BROADCAST   6
+#define SO_SNDBUF      7
+#define SO_RCVBUF      8
 #define SO_KEEPALIVE   9
+#define SO_LINGER      13
 #define SO_RCVTIMEO    20
 #define SO_SNDTIMEO    21
-#define SO_RCVBUF      8
-#define SO_SNDBUF      7
-#define SO_ERROR       4
+#define SO_ACCEPTCONN  30
+
+/* IPPROTO_IP options */
+#define IP_TOS              1
+#define IP_TTL              2
+#define IP_ADD_MEMBERSHIP   35
+#define IP_DROP_MEMBERSHIP  36
+#define IP_MULTICAST_IF     32
+#define IP_MULTICAST_TTL    33
+#define IP_MULTICAST_LOOP   34
+
+/* IPPROTO_TCP options (beyond TCP_NODELAY=1) */
+#define TCP_NODELAY    1
+#define TCP_KEEPIDLE   4
+#define TCP_KEEPINTVL  5
+#define TCP_KEEPCNT    6
+
+/* ioctl commands for sockets */
+#define FIONREAD       0x541B
+#define FIONBIO        0x5421
+
+/* Multicast group request (IP_ADD_MEMBERSHIP / IP_DROP_MEMBERSHIP) */
+struct ip_mreq {
+    uint32 imr_multiaddr;   /* IP multicast group address (network order) */
+    uint32 imr_interface;   /* local interface address (network order) */
+};
+
+/* SO_LINGER structure */
+struct k_linger {
+    int l_onoff;    /* linger active */
+    int l_linger;   /* how many seconds to linger for */
+};
 
 /* User-space sockaddr_in layout (must match newlib header) */
 struct k_sockaddr_in {
@@ -503,6 +542,58 @@ static int sock_file_poll(struct vfs_file *file, short events)
     return revents;
 }
 
+/*
+ * sock_file_ioctl - handle ioctl commands on socket file descriptors
+ *
+ * Supports FIONREAD (bytes available to read) and FIONBIO (set nonblock).
+ * The arg pointer comes from sys_vfs_ioctl's default case, which passes
+ * the raw user-space arg value as an opaque void*.
+ */
+static int sock_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
+{
+    struct lwip_sock *sk = (struct lwip_sock *)file->private_data;
+    if (sk == NULL || sk->conn == NULL)
+        return -EBADF;
+
+    switch (cmd) {
+    case FIONREAD: {
+        /* Return bytes available in the receive buffer */
+        int count = 0;
+
+        /* Check for buffered data from partial reads */
+        if (sk->lastpbuf != NULL) {
+            count = (int)(sk->lastpbuf->tot_len - sk->lastpbuf_off);
+        } else if (sk->lastbuf != NULL) {
+            count = (int)(netbuf_len(sk->lastbuf) - sk->lastoffset);
+        }
+
+        /* Also check the netconn recvmbox (approximate) */
+        if (count == 0 && sk->conn->state != NETCONN_LISTEN) {
+            if (sys_mbox_valid(&sk->conn->recvmbox))
+                count = (int)sk->conn->recvmbox.count;
+        }
+
+        /* arg is a user-space pointer to int */
+        if (vm_copyout(current->vm, (uint64)arg, &count, sizeof(count)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+    case FIONBIO: {
+        /* Set or clear O_NONBLOCK on this file descriptor */
+        int val;
+        if (vm_copyin(current->vm, &val, (uint64)arg, sizeof(val)) < 0)
+            return -EFAULT;
+        if (val)
+            file->f_flags |= O_NONBLOCK;
+        else
+            file->f_flags &= ~O_NONBLOCK;
+        return 0;
+    }
+    default:
+        return -ENOTTY;
+    }
+}
+
 static struct vfs_file_ops lwip_socket_file_ops = {
     .read    = sock_file_read,
     .write   = sock_file_write,
@@ -511,6 +602,7 @@ static struct vfs_file_ops lwip_socket_file_ops = {
     .fsync   = NULL,
     .fflush  = NULL,
     .poll    = sock_file_poll,
+    .ioctl   = sock_file_ioctl,
     .fault   = NULL,
 };
 
@@ -947,6 +1039,30 @@ uint64 sys_recvfrom(void)
     if (sk->type == SOCK_STREAM) {
         /* TCP: use netconn_recv_tcp_pbuf */
         struct pbuf *p = NULL;
+
+        /* Check for buffered partial pbuf from a previous peek/partial read */
+        if (sk->lastpbuf != NULL) {
+            p = sk->lastpbuf;
+            uint16 avail = p->tot_len - sk->lastpbuf_off;
+            uint16 tocopy = (len < (int)avail) ? (uint16)len : avail;
+            char tmpbuf[1500];
+            uint16 clen = (tocopy > sizeof(tmpbuf)) ? sizeof(tmpbuf) : tocopy;
+            pbuf_copy_partial(p, tmpbuf, clen, sk->lastpbuf_off);
+
+            if (vm_copyout(current->vm, ubuf, tmpbuf, clen) < 0)
+                return (uint64)-EFAULT;
+
+            if (!(flags & MSG_PEEK)) {
+                sk->lastpbuf_off += clen;
+                if (sk->lastpbuf_off >= p->tot_len) {
+                    pbuf_free(p);
+                    sk->lastpbuf = NULL;
+                    sk->lastpbuf_off = 0;
+                }
+            }
+            return (uint64)clen;
+        }
+
         err_t err = netconn_recv_tcp_pbuf(sk->conn, &p);
         if (err != ERR_OK) {
             if (err == ERR_CLSD)
@@ -965,17 +1081,30 @@ uint64 sys_recvfrom(void)
             pbuf_free(p);
             return (uint64)-EFAULT;
         }
-        pbuf_free(p);
+
+        if (flags & MSG_PEEK) {
+            /* Save pbuf for next recv call to consume */
+            sk->lastpbuf = p;
+            sk->lastpbuf_off = 0;
+        } else {
+            pbuf_free(p);
+        }
         return (uint64)clen;
 
     } else {
         /* UDP/RAW: use netconn_recv → netbuf */
         struct netbuf *nb = NULL;
-        err_t err = netconn_recv(sk->conn, &nb);
-        if (err != ERR_OK) {
-            if (err == ERR_TIMEOUT && signal_pending(current))
-                return (uint64)-EINTR;
-            return (uint64)-lwip_err_to_errno(err);
+
+        /* Check for buffered netbuf from a previous peek/partial read */
+        if (sk->lastbuf != NULL) {
+            nb = sk->lastbuf;
+        } else {
+            err_t err = netconn_recv(sk->conn, &nb);
+            if (err != ERR_OK) {
+                if (err == ERR_TIMEOUT && signal_pending(current))
+                    return (uint64)-EINTR;
+                return (uint64)-lwip_err_to_errno(err);
+            }
         }
 
         void *data;
@@ -985,7 +1114,8 @@ uint64 sys_recvfrom(void)
         uint16 tocopy = (len < (int)dlen) ? (uint16)len : dlen;
 
         if (vm_copyout(current->vm, ubuf, data, tocopy) < 0) {
-            netbuf_delete(nb);
+            if (sk->lastbuf == NULL)
+                netbuf_delete(nb);
             return (uint64)-EFAULT;
         }
 
@@ -1005,7 +1135,15 @@ uint64 sys_recvfrom(void)
             vm_copyout(current->vm, uaddr, &sa, sizeof(sa));
         }
 
-        netbuf_delete(nb);
+        if (flags & MSG_PEEK) {
+            /* Save netbuf for next recv call to consume */
+            sk->lastbuf = nb;
+            sk->lastoffset = 0;
+        } else {
+            sk->lastbuf = NULL;
+            sk->lastoffset = 0;
+            netbuf_delete(nb);
+        }
         return (uint64)tocopy;
     }
 }
@@ -1026,71 +1164,173 @@ uint64 sys_setsockopt(void)
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
         return (uint64)-EBADF;
+    if (sk->conn == NULL || sk->conn->pcb.ip == NULL)
+        return (uint64)-EINVAL;
 
-    /* Minimal implementation — accept common options silently */
+    /* Helper: read an int option from user space */
+    int val = 0;
+    if (optlen >= (int)sizeof(int) && uoptval != 0) {
+        if (vm_copyin(current->vm, &val, uoptval, sizeof(val)) < 0)
+            return (uint64)-EFAULT;
+    }
+
     if (level == SOL_SOCKET) {
         switch (optname) {
         case SO_REUSEADDR:
-            if (optlen >= (int)sizeof(int)) {
-                int val;
-                if (vm_copyin(current->vm, &val, uoptval, sizeof(val)) < 0)
-                    return (uint64)-EFAULT;
-                if (val)
-                    ip_set_option(sk->conn->pcb.ip, SOF_REUSEADDR);
-                else
-                    ip_reset_option(sk->conn->pcb.ip, SOF_REUSEADDR);
-            }
+            if (val)
+                ip_set_option(sk->conn->pcb.ip, SOF_REUSEADDR);
+            else
+                ip_reset_option(sk->conn->pcb.ip, SOF_REUSEADDR);
             return 0;
         case SO_KEEPALIVE:
-            if (optlen >= (int)sizeof(int) && sk->type == SOCK_STREAM) {
-                int val;
-                if (vm_copyin(current->vm, &val, uoptval, sizeof(val)) < 0)
-                    return (uint64)-EFAULT;
+            if (sk->type == SOCK_STREAM) {
                 if (val)
                     ip_set_option(sk->conn->pcb.ip, SOF_KEEPALIVE);
                 else
                     ip_reset_option(sk->conn->pcb.ip, SOF_KEEPALIVE);
             }
             return 0;
+        case SO_BROADCAST:
+            if (val)
+                ip_set_option(sk->conn->pcb.ip, SOF_BROADCAST);
+            else
+                ip_reset_option(sk->conn->pcb.ip, SOF_BROADCAST);
+            return 0;
         case SO_RCVTIMEO:
-            if (optlen >= (int)sizeof(int)) {
-                int val;
-                if (vm_copyin(current->vm, &val, uoptval, sizeof(val)) < 0)
-                    return (uint64)-EFAULT;
+            /* Accept both int (ms) and struct timeval */
+            if (optlen >= (int)sizeof(int))
                 netconn_set_recvtimeout(sk->conn, val);
-            }
             return 0;
         case SO_SNDTIMEO:
-            if (optlen >= (int)sizeof(int)) {
-                int val;
-                if (vm_copyin(current->vm, &val, uoptval, sizeof(val)) < 0)
-                    return (uint64)-EFAULT;
+            if (optlen >= (int)sizeof(int))
                 netconn_set_sendtimeout(sk->conn, val);
+            return 0;
+        case SO_RCVBUF:
+            /* lwIP: netconn_set_recvbufsize expects bytes */
+            if (val > 0)
+                netconn_set_recvbufsize(sk->conn, (int)val);
+            return 0;
+        case SO_SNDBUF:
+            /* lwIP doesn't have per-socket send buffer control for netconn.
+             * Accept silently for compatibility. */
+            return 0;
+        case SO_LINGER: {
+            if (optlen < (int)sizeof(struct k_linger))
+                return (uint64)-EINVAL;
+            struct k_linger lg;
+            if (vm_copyin(current->vm, &lg, uoptval, sizeof(lg)) < 0)
+                return (uint64)-EFAULT;
+            if (lg.l_onoff) {
+                int lingersec = lg.l_linger;
+                if (lingersec < 0)
+                    return (uint64)-EINVAL;
+                if (lingersec > 0x7FFF)
+                    lingersec = 0x7FFF;
+                sk->conn->linger = (s16_t)lingersec;
+            } else {
+                sk->conn->linger = -1;
             }
             return 0;
+        }
         default:
-            return 0; /* silently accept unknown options */
+            return 0; /* silently accept unknown SOL_SOCKET options */
         }
     }
+
     if (level == IPPROTO_TCP) {
+        if (sk->type != SOCK_STREAM || sk->conn->pcb.tcp == NULL)
+            return (uint64)-EINVAL;
+
+        struct tcp_pcb *pcb = sk->conn->pcb.tcp;
         switch (optname) {
-        case 1: /* TCP_NODELAY */ {
-            if (sk->type != SOCK_STREAM || sk->conn->pcb.tcp == NULL)
-                return (uint64)-EINVAL;
-            if (optlen >= (int)sizeof(int)) {
-                int val;
-                if (vm_copyin(current->vm, &val, uoptval, sizeof(val)) < 0)
-                    return (uint64)-EFAULT;
-                if (val)
-                    tcp_nagle_disable(sk->conn->pcb.tcp);
-                else
-                    tcp_nagle_enable(sk->conn->pcb.tcp);
-            }
+        case TCP_NODELAY:
+            if (val)
+                tcp_nagle_disable(pcb);
+            else
+                tcp_nagle_enable(pcb);
             return 0;
-        }
+#if LWIP_TCP_KEEPALIVE
+        case TCP_KEEPIDLE:
+            /* User passes seconds, lwIP stores milliseconds */
+            pcb->keep_idle = (uint32)val * 1000;
+            return 0;
+        case TCP_KEEPINTVL:
+            pcb->keep_intvl = (uint32)val * 1000;
+            return 0;
+        case TCP_KEEPCNT:
+            pcb->keep_cnt = (uint32)val;
+            return 0;
+#endif
         default:
             return 0;
         }
+    }
+
+    if (level == IPPROTO_IP) {
+        switch (optname) {
+        case IP_TTL:
+            sk->conn->pcb.ip->ttl = (uint8)val;
+            return 0;
+        case IP_TOS:
+            sk->conn->pcb.ip->tos = (uint8)val;
+            return 0;
+#if LWIP_IGMP
+        case IP_ADD_MEMBERSHIP:
+        case IP_DROP_MEMBERSHIP: {
+            if (optlen < (int)sizeof(struct ip_mreq))
+                return (uint64)-EINVAL;
+            struct ip_mreq mreq;
+            if (vm_copyin(current->vm, &mreq, uoptval, sizeof(mreq)) < 0)
+                return (uint64)-EFAULT;
+
+            ip4_addr_t groupaddr, ifaddr;
+            groupaddr.addr = mreq.imr_multiaddr;
+            ifaddr.addr = mreq.imr_interface;
+
+            err_t err;
+            if (optname == IP_ADD_MEMBERSHIP)
+                err = igmp_joingroup(&ifaddr, &groupaddr);
+            else
+                err = igmp_leavegroup(&ifaddr, &groupaddr);
+
+            if (err != ERR_OK)
+                return (uint64)-lwip_err_to_errno(err);
+            return 0;
+        }
+        case IP_MULTICAST_TTL:
+            if (sk->type == SOCK_DGRAM && sk->conn->pcb.udp != NULL)
+                udp_set_multicast_ttl(sk->conn->pcb.udp, (uint8)val);
+            return 0;
+        case IP_MULTICAST_LOOP:
+            if (sk->type == SOCK_DGRAM && sk->conn->pcb.udp != NULL) {
+                if (val)
+                    udp_set_flags(sk->conn->pcb.udp, UDP_FLAGS_MULTICAST_LOOP);
+                else
+                    udp_clear_flags(sk->conn->pcb.udp, UDP_FLAGS_MULTICAST_LOOP);
+            }
+            return 0;
+        case IP_MULTICAST_IF: {
+            if (optlen < (int)sizeof(uint32))
+                return (uint64)-EINVAL;
+            uint32 addr;
+            if (vm_copyin(current->vm, &addr, uoptval, sizeof(addr)) < 0)
+                return (uint64)-EFAULT;
+            if (sk->type == SOCK_DGRAM && sk->conn->pcb.udp != NULL) {
+                ip4_addr_t ifaddr;
+                ifaddr.addr = addr;
+                udp_set_multicast_netif_addr(sk->conn->pcb.udp, &ifaddr);
+            }
+            return 0;
+        }
+#endif /* LWIP_IGMP */
+        default:
+            return 0;
+        }
+    }
+
+    if (level == IPPROTO_UDP || level == IPPROTO_ICMP) {
+        /* Accept silently */
+        return 0;
     }
 
     /* Other levels: silently accept */
@@ -1113,19 +1353,113 @@ uint64 sys_getsockopt(void)
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
         return (uint64)-EBADF;
+    if (sk->conn == NULL)
+        return (uint64)-EINVAL;
 
-    if (level == SOL_SOCKET && optname == SO_ERROR) {
-        int sockerr = 0;
-        int olen = sizeof(int);
-        vm_copyout(current->vm, uoptval, &sockerr, sizeof(sockerr));
-        vm_copyout(current->vm, uoptlen, &olen, sizeof(olen));
-        return 0;
-    }
-
-    /* For unsupported options, return 0 */
+    /* Most options return a single int */
     int val = 0;
     int olen = sizeof(int);
-    vm_copyout(current->vm, uoptval, &val, sizeof(val));
+    int is_linger = 0;
+    struct k_linger lg = {0, 0};
+
+    if (level == SOL_SOCKET) {
+        switch (optname) {
+        case SO_ERROR: {
+            /* Read and clear pending error */
+            val = lwip_err_to_errno(sk->conn->pending_err);
+            sk->conn->pending_err = ERR_OK;
+            break;
+        }
+        case SO_TYPE:
+            val = sk->type;
+            break;
+        case SO_REUSEADDR:
+            val = ip_get_option(sk->conn->pcb.ip, SOF_REUSEADDR) ? 1 : 0;
+            break;
+        case SO_KEEPALIVE:
+            val = ip_get_option(sk->conn->pcb.ip, SOF_KEEPALIVE) ? 1 : 0;
+            break;
+        case SO_BROADCAST:
+            val = ip_get_option(sk->conn->pcb.ip, SOF_BROADCAST) ? 1 : 0;
+            break;
+        case SO_RCVTIMEO:
+            val = netconn_get_recvtimeout(sk->conn);
+            break;
+        case SO_SNDTIMEO:
+            val = netconn_get_sendtimeout(sk->conn);
+            break;
+        case SO_RCVBUF:
+            val = netconn_get_recvbufsize(sk->conn);
+            break;
+        case SO_SNDBUF:
+            /* lwIP doesn't track per-socket send buffer; return TCP_SND_BUF */
+            val = (sk->type == SOCK_STREAM) ? TCP_SND_BUF : 65535;
+            break;
+        case SO_ACCEPTCONN:
+            val = (sk->conn->state == NETCONN_LISTEN) ? 1 : 0;
+            break;
+        case SO_LINGER:
+            is_linger = 1;
+            if (sk->conn->linger >= 0) {
+                lg.l_onoff = 1;
+                lg.l_linger = (int)sk->conn->linger;
+            } else {
+                lg.l_onoff = 0;
+                lg.l_linger = 0;
+            }
+            olen = sizeof(struct k_linger);
+            break;
+        default:
+            val = 0; /* unknown option: return 0 */
+            break;
+        }
+    } else if (level == IPPROTO_TCP) {
+        if (sk->type != SOCK_STREAM || sk->conn->pcb.tcp == NULL) {
+            val = 0;
+        } else {
+            struct tcp_pcb *pcb = sk->conn->pcb.tcp;
+            switch (optname) {
+            case TCP_NODELAY:
+                val = tcp_nagle_disabled(pcb) ? 1 : 0;
+                break;
+#if LWIP_TCP_KEEPALIVE
+            case TCP_KEEPIDLE:
+                val = (int)(pcb->keep_idle / 1000); /* ms → sec */
+                break;
+            case TCP_KEEPINTVL:
+                val = (int)(pcb->keep_intvl / 1000);
+                break;
+            case TCP_KEEPCNT:
+                val = (int)pcb->keep_cnt;
+                break;
+#endif
+            default:
+                val = 0;
+                break;
+            }
+        }
+    } else if (level == IPPROTO_IP) {
+        switch (optname) {
+        case IP_TTL:
+            val = sk->conn->pcb.ip->ttl;
+            break;
+        case IP_TOS:
+            val = sk->conn->pcb.ip->tos;
+            break;
+        default:
+            val = 0;
+            break;
+        }
+    } else {
+        val = 0;
+    }
+
+    /* Copy result to user space */
+    if (is_linger) {
+        vm_copyout(current->vm, uoptval, &lg, sizeof(lg));
+    } else {
+        vm_copyout(current->vm, uoptval, &val, sizeof(val));
+    }
     vm_copyout(current->vm, uoptlen, &olen, sizeof(olen));
     return 0;
 }
@@ -1636,4 +1970,25 @@ uint64 sys_recvmsg(void)
                 &zero, sizeof(zero));
 
     return (uint64)total;
+}
+
+/*
+ * sys_socketpair(domain, type, protocol, sv[2]) → 0 / -errno
+ *
+ * lwIP does not support AF_UNIX, so socketpair is not available.
+ * Return -EAFNOSUPPORT so callers can fall back gracefully.
+ */
+uint64 sys_socketpair(void)
+{
+    return (uint64)-EAFNOSUPPORT;
+}
+
+/*
+ * sys_sendmmsg(sockfd, msgvec, vlen, flags) → count / -errno
+ *
+ * Stub: not implemented.  Returns -ENOSYS.
+ */
+uint64 sys_sendmmsg(void)
+{
+    return (uint64)-ENOSYS;
 }
