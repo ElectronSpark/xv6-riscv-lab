@@ -2091,6 +2091,56 @@ void check_buddy_system_integrity(void) {
     __buddy_pool_unlock_range(0, PAGE_BUDDY_MAX_ORDER);
 }
 
+/*
+ * Scan all page_t descriptors and tally counts per page type.
+ * Since PAGE_TYPE_ANON == 0, uninitialized page descriptors appear as "Anon".
+ * We split anon pages by refcount to distinguish actually-in-use pages from
+ * uninitialized slots.
+ */
+static void __page_type_breakdown(int verbose) {
+    uint64 counts[__PAGE_TYPE_MAX] = {0};
+    uint64 total = TOTALPAGES;
+    uint64 anon_ref0 = 0;     /* type==ANON, refcount==0 (uninit/freed) */
+    uint64 anon_ref1 = 0;     /* type==ANON, refcount==1 (single user) */
+    uint64 anon_refn = 0;     /* type==ANON, refcount>1  (COW shared)  */
+    uint64 anon_refsum = 0;
+    uint64 pgtab_ref0 = 0;
+    uint64 pcache_cnt = 0;
+
+    for (uint64 i = 0; i < total; i++) {
+        uint64 f = __atomic_load_n(&__pages[i].flags, __ATOMIC_RELAXED);
+        uint64 t = PAGE_FLAG_GET_TYPE(f);
+        int rc = __atomic_load_n(&__pages[i].ref_count, __ATOMIC_RELAXED);
+        if (t < __PAGE_TYPE_MAX)
+            counts[t]++;
+        if (t == PAGE_TYPE_ANON) {
+            if (rc == 0)      anon_ref0++;
+            else if (rc == 1) anon_ref1++;
+            else              anon_refn++;
+            if (rc > 0)       anon_refsum += (uint64)rc;
+        } else if (t == PAGE_TYPE_PGTABLE && rc == 0) {
+            pgtab_ref0++;
+        } else if (t == PAGE_TYPE_PCACHE) {
+            pcache_cnt++;
+        }
+    }
+
+    uint64 anon_active = anon_ref1 + anon_refn;
+
+    printf("Pages: Anon=%ld(active=%ld,cow=%ld,idle=%ld), "
+           "Buddy=%ld, Slab=%ld, PgTable=%ld, PCache=%ld, Tail=%ld\n",
+           counts[PAGE_TYPE_ANON], anon_active, anon_refn, anon_ref0,
+           counts[PAGE_TYPE_BUDDY], counts[PAGE_TYPE_SLAB],
+           counts[PAGE_TYPE_PGTABLE], pcache_cnt, counts[PAGE_TYPE_TAIL]);
+
+    if (verbose) {
+        printf("  Anon refcount sum: %ld  (ref==1: %ld, ref>1: %ld)\n",
+               anon_refsum, anon_ref1, anon_refn);
+        if (pgtab_ref0 > 0)
+            printf("  PgTable with ref==0: %ld (possible leak)\n", pgtab_ref0);
+    }
+}
+
 uint64 sys_memstat(void) {
     int flags_arg;
     argint(0, &flags_arg);
@@ -2117,6 +2167,11 @@ uint64 sys_memstat(void) {
         } else if (flags & MEMSTAT_VERBOSE) {
             slab_dump_all(1);
         }
+    }
+
+    /* Page type breakdown — always shown when verbose or detailed */
+    if (flags & (MEMSTAT_VERBOSE | MEMSTAT_DETAILED)) {
+        __page_type_breakdown(flags & MEMSTAT_DETAILED);
     }
 
     __buddy_stat_totals(&total_free_pages, &total_cached_pages, ret_arr,

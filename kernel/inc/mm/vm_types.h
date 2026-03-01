@@ -6,6 +6,7 @@
 #include <mm/page_type.h>
 #include "list_type.h"
 #include "bintree_type.h"
+#include "maple_tree_type.h"
 #include "lock/rwsem_types.h"
 #include <vfs/vfs_types.h>
 
@@ -14,9 +15,6 @@ struct anon_vma;
 typedef struct vm vm_t;
 
 typedef struct vma {
-    struct rb_node rb_entry; // Red-black tree node for managing VM areas
-    list_node_t list_entry;
-    list_node_t free_list_entry; // For managing free VM areas
     vm_t *vm; // Pointer to the VM structure this area belongs to
     uint64 start;
     uint64 end;
@@ -86,16 +84,14 @@ typedef struct vma {
 
 // Virtual Memory Management structure
 typedef struct vm {
-    rwsem_t rw_lock; // protect the vm tree and vma list
-    struct rb_root vm_tree;
+    rwsem_t rw_lock; // protect the vm maple tree
+    struct maple_tree vm_mt; // Maple tree of VM areas (keyed by [start, end-1])
     pte_t *trapframe_pte; // Pointer to the leaf page table for trapframes
     vma_t *stack;
     size_t stack_size; // Size of the stack area
     vma_t *heap;
     size_t heap_size;         // Size of the heap area
     uint64 heap_reserve_end;  // Upper bound of heap reservation (mmap avoids)
-    list_node_t vm_list;      // List of VM areas
-    list_node_t vm_free_list; // List of free VM areas
     cpumask_t cpumask;        // CPUs using this VM
 
     spinlock_t spinlock; // Spinlock for protecting the pagetable

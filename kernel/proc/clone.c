@@ -166,7 +166,8 @@ int thread_clone(struct clone_args *args) {
         ret_ptr->fpu_state = kvmalloc(sizeof(struct fpu_state));
         if (ret_ptr->fpu_state != NULL) {
             // If parent owns the hardware FPU, force-save first.
-            if (mycpu()->fpu_owner == p) {
+            if (mycpu()->fpu_owner_tid == p->pid &&
+                p->fpu_seq == mycpu()->fpu_seq) {
 #ifdef __riscv
                 unsigned long s = r_sstatus();
                 s &= ~SSTATUS_FS_MASK;

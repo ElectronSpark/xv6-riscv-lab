@@ -646,6 +646,23 @@ void context_switch_prepare(struct thread *prev, struct thread *next) {
     assert(next != NULL, "Next process is NULL");
     __sched_assert_holding();
 
+    // Eager FPU save: if prev owns the hardware FPU on this CPU,
+    // save its FP registers now so the FPU trap handler never needs
+    // to dereference a (possibly stale) thread pointer.
+    if (THREAD_FPU_USED(prev) && prev->fpu_state != NULL &&
+        mycpu()->fpu_owner_tid == prev->pid &&
+        prev->fpu_seq == mycpu()->fpu_seq) {
+#ifdef __riscv
+        unsigned long s = r_sstatus();
+        s &= ~SSTATUS_FS_MASK;
+        s |= SSTATUS_FS_DIRTY;
+        w_sstatus(s);
+#else
+        asm volatile("clts");
+#endif
+        fpu_save_state(prev->fpu_state);
+    }
+
     // Mark the next process as on the CPU
     smp_store_release(&next->sched_entity->on_cpu, 1);
     next->sched_entity->cpu_id = cpuid();

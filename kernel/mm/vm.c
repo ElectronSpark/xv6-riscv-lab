@@ -40,7 +40,7 @@
 #include "list.h"
 #include "lock/spinlock.h"
 #include "lock/rwsem.h"
-#include "rbtree.h"
+#include "maple_tree.h"
 #include "string.h"
 #include "printf.h"
 #include "proc/thread.h"
@@ -69,6 +69,7 @@ static void __vm_pool_init(void) {
 }
 
 void vm_slab_init(void) {
+    maple_tree_init();
     __vma_pool_init();
     __vm_pool_init();
     rmap_init();
@@ -100,8 +101,10 @@ void dump_vm(vm_t *vm)
     printf("VM dump:\n");
     printf("Pagetable: %p\n", vm->pagetable);
     printf("VMAs:\n");
-    vma_t *vma, *tmp;
-    list_foreach_node_safe(&vm->vm_list, vma, tmp, list_entry) {
+    uint64 idx = 0;
+    void *entry;
+    mt_for_each(&vm->vm_mt, entry, idx, MAPLE_MAX) {
+        vma_t *vma = (vma_t *)entry;
         char flags_buf[10] = {0};
         vm_dump_flags(vma->flags, flags_buf, sizeof(flags_buf));
         printf("VMA: start=%lx, end=%lx, flags=%s, file=%p, pgoff=%lx\n",
@@ -121,9 +124,6 @@ static vma_t *__vma_alloc(vm_t *vm)
     if (vma == NULL)
         return NULL;
     memset(vma, 0, sizeof(vma_t));
-    rb_node_init(&vma->rb_entry);
-    list_entry_init(&vma->list_entry);
-    list_entry_init(&vma->free_list_entry);
     list_entry_init(&vma->anon_vma_chain);
     vma->anon_vma = NULL;
     vma->vm = vm;
@@ -186,8 +186,6 @@ static void __vma_set_free(vma_t *vma)
         vfs_fput(vma->file);
     vma->file = NULL;
     vma->pgoff = 0;
-    assert(LIST_NODE_IS_DETACHED(vma, free_list_entry),
-           "__vma_set_free: vma already in free list");
 }
 
 static int __vma_copy(vma_t *dst, vma_t *src)
@@ -282,26 +280,31 @@ static int __vma_copy(vma_t *dst, vma_t *src)
 }
 
 /* ========================================================================== */
-/*  RB-tree helpers for VMA tree                                              */
+/*  Maple tree helpers for VMA tree                                           */
 /* ========================================================================== */
 
-static int __vma_cmp(uint64 a, uint64 b)
+/**
+ * __mt_store_vma() - Insert or replace a VMA in the maple tree.
+ *
+ * Stores @vma for the range [vma->start, vma->end - 1] (inclusive).
+ * Returns 0 on success, negative errno on error.
+ */
+static inline int __mt_store_vma(vm_t *vm, vma_t *vma)
 {
-    if (a == b) return 0;
-    if (a < b) return -1;
-    return 1;
+    int ret = mtree_store_range(&vm->vm_mt, vma->start, vma->end - 1, vma);
+    return ret;
 }
 
-static uint64 __cma_get_key(struct rb_node *node)
+/**
+ * __mt_erase_vma() - Remove a VMA from the maple tree.
+ *
+ * Erases (sets to NULL) the range [vma->start, vma->end - 1].
+ */
+static inline void __mt_erase_vma(vm_t *vm, vma_t *vma)
 {
-    vma_t *vma = container_of(node, vma_t, rb_entry);
-    return vma->start;
+    /* Store NULL over the VMA's range to erase it. */
+    mtree_store_range(&vm->vm_mt, vma->start, vma->end - 1, NULL);
 }
-
-static struct rb_root_opts __vm_tree_opts = {
-    .keys_cmp_fun = __vma_cmp,
-    .get_key_fun = __cma_get_key,
-};
 
 /* ========================================================================== */
 /*  VM lifecycle                                                              */
@@ -316,9 +319,7 @@ vm_t *vm_init(void)
     if (vm == NULL)
         return NULL;
     memset(vm, 0, sizeof(vm_t));
-    rb_root_init(&vm->vm_tree, &__vm_tree_opts);
-    list_entry_init(&vm->vm_list);
-    list_entry_init(&vm->vm_free_list);
+    mt_init(&vm->vm_mt);
 
     vma_t *vma = __vma_alloc(vm);
     if (vma == NULL) {
@@ -329,9 +330,7 @@ vm_t *vm_init(void)
     /* Initial free VMA covering the entire user address space. */
     vma->start = UVMBOTTOM;
     vma->end = UVMTOP;
-    rb_insert_color(&vm->vm_tree, &vma->rb_entry);
-    list_node_push(&vm->vm_free_list, vma, free_list_entry);
-    list_node_push(&vm->vm_list, vma, list_entry);
+    __mt_store_vma(vm, vma);
 
     vm->pagetable = uvmcreate();
     if (vm->pagetable == NULL) {
@@ -371,28 +370,23 @@ static void __vm_destroy(vm_t *vm)
     if (vm == NULL)
         return;
     if (vm->pagetable == VM_DESTROYED_MAGIC) {
-        printf("__vm_destroy: DOUBLE DESTROY detected for vm=%p\n", vm);
         return;
     }
 
-    vma_t *vma, *tmp;
-    list_foreach_node_safe(&vm->vm_list, vma, tmp, list_entry) {
-        if (vma->vm != vm) {
-            printf("__vm_destroy: vma->vm mismatch! vma=%p vma->vm=%p "
-                   "expected=%p\n", vma, vma->vm, vm);
+    /* Iterate all VMAs via the maple tree and free them. */
+    uint64 idx = 0;
+    void *entry;
+    mt_for_each(&vm->vm_mt, entry, idx, MAPLE_MAX) {
+        vma_t *vma = (vma_t *)entry;
+        if (vma->vm != vm)
             continue;
-        }
-        if (vma->start == VMA_FREED_MAGIC || vma->end == VMA_FREED_MAGIC) {
-            printf("__vm_destroy: vma already freed! vma=%p\n", vma);
+        if (vma->start == VMA_FREED_MAGIC || vma->end == VMA_FREED_MAGIC)
             continue;
-        }
         __vma_set_free(vma);
         __vma_free(vma);
     }
 
-    list_entry_init(&vm->vm_list);
-    list_entry_init(&vm->vm_free_list);
-    rb_root_init(&vm->vm_tree, &__vm_tree_opts);
+    mtree_destroy(&vm->vm_mt);
 
     arch_vm_teardown_trampoline(vm);
 
@@ -412,9 +406,10 @@ vm_t *vm_copy(vm_t *src)
         return ERR_PTR(-ENOMEM);
     vm_rlock(src);
     vm_wlock(dst);
-
-    vma_t *vma, *tmp;
-    list_foreach_node_safe(&src->vm_list, vma, tmp, list_entry) {
+    uint64 idx = 0;
+    void *mt_entry;
+    mt_for_each(&src->vm_mt, mt_entry, idx, MAPLE_MAX) {
+        vma_t *vma = (vma_t *)mt_entry;
         if (vma->flags == PROT_NONE)
             continue;
         vma_t *new_vma = vma_alloc(dst, vma->start, VMA_SIZE(vma), vma->flags);
@@ -489,29 +484,27 @@ static inline vma_t *__get_vma_left(vma_t *vma)
 {
     if (vma == NULL || vma->vm == NULL)
         return NULL;
-    return rb_prev_entry_safe(vma, rb_entry);
+    return (vma_t *)mt_prev(&vma->vm->vm_mt, vma->start, 0);
 }
 
 static inline vma_t *__get_vma_right(vma_t *vma)
 {
     if (vma == NULL || vma->vm == NULL)
         return NULL;
-    return rb_next_entry_safe(vma, rb_entry);
+    return (vma_t *)mt_next(&vma->vm->vm_mt, vma->end - 1, MAPLE_MAX);
 }
 
 vma_t *vm_find_area(vm_t *vm, uint64 va)
 {
     if (va >= vm->vm_top || va < vm->vm_bottom)
         return NULL;
-    struct rb_node *node = rb_find_key_rdown(&vm->vm_tree, va);
-    if (node != NULL) {
-        vma_t *vma = container_of(node, vma_t, rb_entry);
+    vma_t *vma = (vma_t *)mtree_load(&vm->vm_mt, va);
+    if (vma != NULL) {
         assert(VMA_IN_RANGE(vma, va),
                "vm_find_area: va %lx not in range [%lx, %lx)", va, vma->start,
                vma->end);
-        return vma;
     }
-    return NULL;
+    return vma;
 }
 
 vma_t *vma_split(vma_t *vma, uint64 va)
@@ -528,10 +521,6 @@ vma_t *vma_split(vma_t *vma, uint64 va)
         return NULL;
 
     new_vma->start = va;
-    assert(rb_insert_color(&vma->vm->vm_tree, &new_vma->rb_entry) ==
-               &new_vma->rb_entry,
-           "vma_split: rb_insert_color failed");
-
     new_vma->end = vma->end;
     new_vma->flags = vma->flags;
     if (vma->file != NULL) {
@@ -544,9 +533,9 @@ vma_t *vma_split(vma_t *vma, uint64 va)
 
     vma->end = va;
 
-    list_node_insert(vma, new_vma, list_entry);
-    if (vma->flags == PROT_NONE)
-        list_node_insert(vma, new_vma, free_list_entry);
+    /* Update the maple tree: shrink old VMA, insert new VMA. */
+    __mt_store_vma(vma->vm, vma);
+    __mt_store_vma(vma->vm, new_vma);
 
     return new_vma;
 }
@@ -571,12 +560,15 @@ vma_t *vma_merge(vma_t *vma1, vma_t *vma2)
         (vma2->pgoff - vma1->pgoff) != (vma2->start - vma1->start))
         return NULL;
 
+    /* Erase vma2 from the tree first. */
+    __mt_erase_vma(vma1->vm, vma2);
+
+    /* Extend vma1 to cover vma2's range. */
     vma1->end = vma2->end;
-    assert(rb_delete_node_color(&vma2->vm->vm_tree, &vma2->rb_entry) ==
-               &vma2->rb_entry,
-           "vma_merge: rb_delete_node_color failed");
-    list_node_detach(vma2, list_entry);
-    list_node_detach(vma2, free_list_entry);
+
+    /* Update the tree with vma1's new range. */
+    __mt_store_vma(vma1->vm, vma1);
+
     if (vma2->file != NULL) {
         vfs_fput(vma2->file);
         vma2->file = NULL;
@@ -600,11 +592,15 @@ vma_t *vma_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags)
 
     vma_t *free_area = NULL;
     if (va == 0) {
-        vma_t *tmp = NULL;
-        list_foreach_node_inv_safe(&vm->vm_free_list, free_area, tmp,
-                                   free_list_entry) {
-            if (VMA_SIZE(free_area) >= size)
+        /* Find a free (PROT_NONE) area large enough using maple tree scan. */
+        MA_STATE(mas, &vm->vm_mt, vm->vm_bottom, vm->vm_bottom);
+        void *entry;
+        mas_for_each(&mas, entry, vm->vm_top - 1) {
+            vma_t *v = (vma_t *)entry;
+            if (v->flags == PROT_NONE && VMA_SIZE(v) >= size) {
+                free_area = v;
                 break;
+            }
         }
     } else {
         free_area = vm_find_area(vm, va);
@@ -648,8 +644,9 @@ vma_t *vma_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags)
         }
     }
 
-    list_node_detach(vma2, free_list_entry);
     vma2->flags = flags;
+    /* Update the tree with the new flags. */
+    __mt_store_vma(vm, vma2);
     return vma2;
 }
 
@@ -669,7 +666,7 @@ int vma_free(vm_t *vm, vma_t *vma)
         return -EINVAL;
 
     __vma_set_free(vma);
-    list_node_push_back(&vm->vm_free_list, vma, free_list_entry);
+    /* vma->flags is now PROT_NONE; tree entry is unchanged (same pointer). */
     if (left != NULL && left->flags == PROT_NONE)
         vma = vma_merge(left, vma);
     if (right != NULL && right->flags == PROT_NONE)
@@ -1180,8 +1177,8 @@ int vm_growstack(vm_t *vm, int64 change_size)
         vma_t *grows = vma_split(left, new_start);
         if (grows == NULL)
             return -ENOMEM;
-        list_entry_detach(&grows->free_list_entry);
         grows->flags = vm->stack->flags;
+        __mt_store_vma(vm, grows);
         vma_t *new_stack = vma_merge(grows, vm->stack);
         vm->stack = new_stack;
     }
@@ -1297,8 +1294,8 @@ int vm_growheap(vm_t *vm, int64 change_size)
             ret = -ENOMEM;
             goto ret;
         }
-        list_entry_detach(&right->free_list_entry);
         right->flags = vm->heap->flags;
+        __mt_store_vma(vm, right);
         vma_t *new_heap = vma_merge(right, vm->heap);
         vm->heap = new_heap;
     }
@@ -1571,13 +1568,21 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
                 walk(vm->pagetable, new_location + offset, 1, NULL, NULL);
             if (new_pte == NULL)
                 goto out;
-            /* Move the PTE: copy full value, then clear old. */
+            /* Move the PTE: copy full value, then clear old.
+             * This is a MOVE, not a copy — the page reference count
+             * stays the same because we clear the old PTE (preventing
+             * vma_free from decrementing it) and install the new PTE
+             * (which will be decremented when the new VMA is freed).
+             * We must NOT call page_ref_inc here — doing so would leak
+             * a reference because vma_free(old) finds the PTE already
+             * cleared and skips cleanup.
+             * Transfer rmap: remove from old VMA, add to new. */
             *new_pte = *old_pte;
-            page_ref_inc((void *)pa);
-            /* Transfer rmap: add mapping for new VMA before old is freed. */
             page_t *pg = __pa_to_page(pa);
-            if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
+            if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON)) {
+                page_remove_rmap(pg);
                 page_add_anon_rmap(pg, new_vma, new_location + offset);
+            }
             pte_clear(old_pte);
         }
     }
@@ -1768,25 +1773,35 @@ uint64 vm_find_free_range(vm_t *vm, size_t size, uint64 hint)
     if (search_top <= search_bottom + size)
         return 0;
 
-    vma_t *free_area, *tmp;
-    list_foreach_node_inv_safe(&vm->vm_free_list, free_area, tmp,
-                               free_list_entry) {
-        if (free_area->flags != PROT_NONE)
+    /* Scan all VMAs in reverse looking for a PROT_NONE area large enough. */
+    unsigned long idx = search_top - 1;
+    void *entry;
+    MA_STATE(mas, &vm->vm_mt, idx, idx);
+    entry = mas_walk(&mas);
+    /* Walk backwards through the tree. */
+    while (entry != NULL || mas.min > 0) {
+        if (entry == NULL) {
+            entry = mas_prev(&mas, 0);
             continue;
-
-        uint64 usable_start = free_area->start;
-        uint64 usable_end = free_area->end;
-
-        if (usable_start < search_bottom)
-            usable_start = search_bottom;
-        if (usable_end > search_top)
-            usable_end = search_top;
-
-        if (usable_end > usable_start && usable_end - usable_start >= size) {
-            uint64 result = PGROUNDDOWN(usable_end - size);
-            if (result >= usable_start)
-                return result;
         }
+        vma_t *free_area = (vma_t *)entry;
+        if (free_area->flags == PROT_NONE) {
+            uint64 usable_start = free_area->start;
+            uint64 usable_end = free_area->end;
+
+            if (usable_start < search_bottom)
+                usable_start = search_bottom;
+            if (usable_end > search_top)
+                usable_end = search_top;
+
+            if (usable_end > usable_start &&
+                usable_end - usable_start >= size) {
+                uint64 result = PGROUNDDOWN(usable_end - size);
+                if (result >= usable_start)
+                    return result;
+            }
+        }
+        entry = mas_prev(&mas, 0);
     }
     return 0;
 }
@@ -2012,9 +2027,7 @@ void kernel_vm_init(void)
     vm_t *vm = &__kernel_vm_storage;
     memset(vm, 0, sizeof(vm_t));
 
-    rb_root_init(&vm->vm_tree, &__vm_tree_opts);
-    list_entry_init(&vm->vm_list);
-    list_entry_init(&vm->vm_free_list);
+    mt_init(&vm->vm_mt);
 
     /* Initial free VMA covering the kernel virtual address space. */
     vma_t *vma = __vma_alloc(vm);
@@ -2023,9 +2036,7 @@ void kernel_vm_init(void)
 
     vma->start = KVMBASE;
     vma->end = KVMTOP;
-    rb_insert_color(&vm->vm_tree, &vma->rb_entry);
-    list_node_push(&vm->vm_free_list, vma, free_list_entry);
-    list_node_push(&vm->vm_list, vma, list_entry);
+    __mt_store_vma(vm, vma);
 
     vm->pagetable = kernel_pagetable;
     vm->trapframe_pte = NULL;     /* no per-process trapframes */

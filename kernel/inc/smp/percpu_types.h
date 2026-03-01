@@ -21,8 +21,10 @@ struct cpu_local {
     uint64 rcu_timestamp;       // RCU timestamp - updated before context switch
     uint64 syscall_scratch;     // SWAPGS scratch (%gs:64 on SYSCALL entry)
     uint64 syscall_kstack_top;  // kernel stack top for SYSCALL entry (%gs:72)
-    struct thread *fpu_owner;   // Thread whose FP state is currently in hardware
+    int fpu_owner_tid;          // TID of thread whose FP state is in HW (0 = none)
+    int __pad0;                 // padding to keep intr_kstack_top at offset 88
     uint64 intr_kstack_top;     // kernel stack top for IDT entry (%gs:88)
+    uint64 fpu_seq;             // FPU ownership sequence number
 } __ALIGNED_CACHELINE;
 
 #endif /* __KERNEL_PERCPU_TYPES_H */

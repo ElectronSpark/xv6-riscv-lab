@@ -41,6 +41,7 @@
 #include "proc/thread_group.h"
 #include "proc/sched.h"
 #include "mm/vm.h"
+#include "maple_tree.h"
 #include "lock/spinlock.h"
 #include "defs.h"
 #include "lock/semaphore.h"
@@ -1769,12 +1770,15 @@ static void gdb_handle_packet(const char *pkt, int len)
                 vm_t *vm = gdb.target->vm;
                 if (vm) {
                     vm_rlock(vm);
-                    vma_t *vma, *tmp;
+                    vma_t *vma;
                     /* Track files we've already reported (simple dedup) */
                     struct vfs_file *seen[16];
                     int nseen = 0;
                     /* Mark the interpreter file as already seen */
-                    list_foreach_node_safe(&vm->vm_list, vma, tmp, list_entry) {
+                    unsigned long __mt_idx = 0;
+                    void *__mt_entry;
+                    mt_for_each(&vm->vm_mt, __mt_entry, __mt_idx, MAPLE_MAX) {
+                        vma = (vma_t *)__mt_entry;
                         if (!(vma->flags & VMA_FLAG_FILE) || !vma->file)
                             continue;
                         if (!(vma->flags & PROT_EXEC))
@@ -1936,9 +1940,10 @@ static void gdb_handle_packet(const char *pkt, int len)
 static void gdbstub_ensure_fp_saved(struct thread *t)
 {
     if (THREAD_FPU_USED(t) && t->fpu_state != NULL &&
-        mycpu()->fpu_owner == t) {
+        mycpu()->fpu_owner_tid == t->pid &&
+        t->fpu_seq == mycpu()->fpu_seq) {
         fpu_save_state(t->fpu_state);
-        mycpu()->fpu_owner = NULL;
+        mycpu()->fpu_owner_tid = 0;
     }
 }
 

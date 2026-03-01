@@ -97,10 +97,14 @@ void exit(int status) {
     // Release per-CPU FPU ownership early — this thread will never
     // return to user space, so no point keeping it as the HW FP owner.
     // Save HW FP state first so gdbstub_exit_stop() can read FP registers.
-    if (mycpu()->fpu_owner == p) {
+    // No need to scan all CPUs — seq-based ownership means stale entries
+    // on other CPUs are harmless (a new thread with the same TID will
+    // get a fresh fpu_seq that won't match the stale per-CPU seq).
+    if (mycpu()->fpu_owner_tid == p->pid &&
+        p->fpu_seq == mycpu()->fpu_seq) {
         if (THREAD_FPU_USED(p) && p->fpu_state != NULL)
             fpu_save_state(p->fpu_state);
-        mycpu()->fpu_owner = NULL;
+        mycpu()->fpu_owner_tid = 0;
     }
 
     // If this thread is in a thread group undergoing group exit,
@@ -202,7 +206,8 @@ void exit(int status) {
             vm_put(p->vm);
             p->vm = NULL;
         }
-        // Release FPU state
+        // Release FPU state.  Seq-based ownership means stale
+        // per-CPU entries are harmless — no need to scan all CPUs.
         if (p->fpu_state != NULL) {
             kvfree(p->fpu_state);
             p->fpu_state = NULL;

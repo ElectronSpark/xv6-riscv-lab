@@ -136,6 +136,7 @@ struct thread {
 
     // ===== FPU state (lazy save/restore, only for threads that use FP) =====
     struct fpu_state *fpu_state; // FP save area (NULL until first FP use)
+    uint64 fpu_seq;              // FPU ownership seq when this thread last took ownership
 
     // ===== Signal (warm, large — pushed to end) =====
     thread_signal_t signal; // Per-thread signal state

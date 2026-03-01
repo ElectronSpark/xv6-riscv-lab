@@ -381,6 +381,8 @@ void thread_destroy(struct thread *p) {
         p->fs = NULL;
     }
 
+    // Seq-based FPU ownership means stale per-CPU entries are harmless
+    // (a reused TID will get a new fpu_seq that won't match).
     if (p->fpu_state != NULL) {
         kvfree(p->fpu_state);
         p->fpu_state = NULL;

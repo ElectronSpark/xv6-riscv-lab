@@ -164,7 +164,9 @@ void usertrapret(void) {
     {
         uint64 cr0;
         asm volatile("movq %%cr0, %0" : "=r"(cr0));
-        if (THREAD_FPU_USED(p) && my_cpu->fpu_owner == p)
+        if (THREAD_FPU_USED(p) &&
+            my_cpu->fpu_owner_tid == p->pid &&
+            p->fpu_seq == my_cpu->fpu_seq)
             cr0 &= ~(1ULL << 3); /* clear CR0.TS */
         else
             cr0 |= (1ULL << 3); /* set CR0.TS   */
@@ -253,7 +255,8 @@ int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
 
     /* Save FP state into the signal frame if this thread has used FP. */
     if (THREAD_FPU_USED(p) && p->fpu_state != NULL) {
-        if (mycpu()->fpu_owner == p) {
+        if (mycpu()->fpu_owner_tid == p->pid &&
+            p->fpu_seq == mycpu()->fpu_seq) {
             /* FP regs are live in hardware — clear TS and save them. */
             asm volatile("clts");
             fpu_save_state(p->fpu_state);
@@ -308,8 +311,8 @@ int restore_sigframe(struct thread *p, ucontext_t *ret_uc) {
     if (ret_uc->uc_fpflags && p->fpu_state != NULL) {
         memmove(p->fpu_state, &ret_uc->uc_fpstate, sizeof(struct fpu_state));
         /* Invalidate fpu_owner so the next FP use triggers a lazy reload. */
-        if (mycpu()->fpu_owner == p)
-            mycpu()->fpu_owner = NULL;
+        if (mycpu()->fpu_owner_tid == p->pid)
+            mycpu()->fpu_owner_tid = 0;
     }
 
     return 0;
@@ -703,13 +706,7 @@ void x86_trap_handler(struct trapframe *tf) {
             /* Clear TS so kernel FP save/restore routines work. */
             asm volatile("clts");
 
-            struct thread *old_owner = mycpu()->fpu_owner;
-
-            /* Save previous owner's FP state if someone else owns it */
-            if (old_owner != NULL && old_owner != current) {
-                if (old_owner->fpu_state != NULL)
-                    fpu_save_state(old_owner->fpu_state);
-            }
+            struct cpu_local *c = mycpu();
 
             /* First time this thread uses FP — allocate fpu_state */
             if (!THREAD_FPU_USED(current)) {
@@ -725,12 +722,18 @@ void x86_trap_handler(struct trapframe *tf) {
                 }
                 fpu_init_state();
                 THREAD_SET_FPU_USED(current);
-            } else {
-                /* Restore previously saved FP state */
+            } else if (c->fpu_owner_tid != current->pid ||
+                       current->fpu_seq != c->fpu_seq) {
+                /*
+                 * Different owner or mismatched seq — restore our
+                 * saved FP state and take ownership.  Bump seq so
+                 * stale per-CPU entries from other CPUs won't match.
+                 */
                 fpu_restore_state(current->fpu_state);
+                current->fpu_seq++;
             }
-
-            mycpu()->fpu_owner = current;
+            c->fpu_owner_tid = current->pid;
+            c->fpu_seq = current->fpu_seq;
             /* TS is clear — FP/SSE will work when we return to user */
             goto user_return;
         }

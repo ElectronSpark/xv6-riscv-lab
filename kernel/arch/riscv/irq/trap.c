@@ -174,13 +174,7 @@ void usertrap(void) {
             s |= SSTATUS_FS_DIRTY;
             w_sstatus(s);
 
-            struct thread *old_owner = mycpu()->fpu_owner;
-
-            /* Save previous owner's FP state if someone else owns the FPU */
-            if (old_owner != NULL && old_owner != current) {
-                if (old_owner->fpu_state != NULL)
-                    fpu_save_state(old_owner->fpu_state);
-            }
+            struct cpu_local *c = mycpu();
 
             /* First time this thread uses FP — allocate fpu_state */
             if (!THREAD_FPU_USED(current)) {
@@ -196,12 +190,18 @@ void usertrap(void) {
                 }
                 fpu_init_state();
                 THREAD_SET_FPU_USED(current);
-            } else {
-                /* Restore previously saved FP state */
+            } else if (c->fpu_owner_tid != current->pid ||
+                       current->fpu_seq != c->fpu_seq) {
+                /*
+                 * Different owner or mismatched seq — restore our
+                 * saved FP state and take ownership.  Bump seq so
+                 * stale per-CPU entries from other CPUs won't match.
+                 */
                 fpu_restore_state(current->fpu_state);
+                current->fpu_seq++;
             }
-
-            mycpu()->fpu_owner = current;
+            c->fpu_owner_tid = current->pid;
+            c->fpu_seq = current->fpu_seq;
             break;
         }
         /* Genuine illegal instruction */
@@ -371,7 +371,8 @@ int push_sigframe(struct thread *p, int signo, sigaction_t *sa,
 
     // Save FP state into the signal frame if this thread has used FP.
     if (THREAD_FPU_USED(p) && p->fpu_state != NULL) {
-        if (mycpu()->fpu_owner == p) {
+        if (mycpu()->fpu_owner_tid == p->pid &&
+            p->fpu_seq == mycpu()->fpu_seq) {
             // FP regs are live in hardware — save them first.
             unsigned long s = r_sstatus();
             s &= ~SSTATUS_FS_MASK;
@@ -427,8 +428,8 @@ int restore_sigframe(struct thread *p, ucontext_t *ret_uc) {
     if (ret_uc->uc_fpflags && p->fpu_state != NULL) {
         memmove(p->fpu_state, &ret_uc->uc_fpstate, sizeof(struct fpu_state));
         // Invalidate fpu_owner so the next FP use triggers a lazy reload.
-        if (mycpu()->fpu_owner == p)
-            mycpu()->fpu_owner = NULL;
+        if (mycpu()->fpu_owner_tid == p->pid)
+            mycpu()->fpu_owner_tid = 0;
     }
 
     return 0; // Success
@@ -481,10 +482,13 @@ void usertrapret(void) {
     x |= SSTATUS_SPIE; // enable interrupts in user mode
 
     // Lazy FPU: set FS field for user mode.
-    // If this thread owns the FPU on this CPU, allow FP access (Clean).
-    // Otherwise set FS=Off so first FP use triggers a trap.
+    // If this thread owns the FPU on this CPU (matching TID and seq),
+    // allow FP access (Clean).  Otherwise set FS=Off so first FP use
+    // triggers a trap.
     x &= ~SSTATUS_FS_MASK;
-    if (THREAD_FPU_USED(p) && mycpu()->fpu_owner == p)
+    if (THREAD_FPU_USED(p) &&
+        mycpu()->fpu_owner_tid == p->pid &&
+        p->fpu_seq == mycpu()->fpu_seq)
         x |= SSTATUS_FS_CLEAN;
     else
         x |= SSTATUS_FS_OFF;

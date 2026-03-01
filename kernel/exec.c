@@ -623,8 +623,8 @@ int exec(char *path, char **argv, char **envp) {
 
     // Reset FPU state — new program starts with no FP context.
     THREAD_CLEAR_FPU_USED(p);
-    if (mycpu()->fpu_owner == p)
-        mycpu()->fpu_owner = NULL;
+    if (mycpu()->fpu_owner_tid == p->pid)
+        mycpu()->fpu_owner_tid = 0;
     if (p->fpu_state != NULL) {
         kvfree(p->fpu_state);
         p->fpu_state = NULL;

@@ -36,6 +36,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/hlist.c
     ${KERNEL_DIR}/bintree.c
     ${KERNEL_DIR}/rbtree.c
+    ${KERNEL_DIR}/maple_tree.c
     ${KERNEL_DIR}/kobject.c
     ${KERNEL_DIR}/bits.c
 )
