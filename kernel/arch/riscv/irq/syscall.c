@@ -409,7 +409,7 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_link] sys_vfs_link,       // VFS
     [SYS_mkdir] sys_vfs_mkdir,     // VFS
     [SYS_close] sys_vfs_close,     // VFS
-    [SYS_connect] sys_vfs_connect, // VFS
+    [SYS_connect] sys_sconnect,    // socket connect (musl sends SYS_connect=36)
     [SYS_symlink] sys_vfs_symlink, // VFS
     // [SYS_sigalarm] sys_sigalarm,
     [SYS_sigaction] sys_sigaction,

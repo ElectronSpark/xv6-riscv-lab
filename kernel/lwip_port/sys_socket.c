@@ -45,6 +45,8 @@
 #include "signal.h"
 #include "kqueue.h"
 #include "kqueue_types.h"
+#include "vfs/unix_socket.h"
+#include "netlink.h"
 
 /* From irq/syscall.c — argument fetching */
 extern void argint(int n, int *ip);
@@ -93,10 +95,12 @@ struct lwip_sock {
     uint16         lastpbuf_off; /* bytes already consumed from lastpbuf */
 };
 
-/* Socket type constants (matching POSIX) */
+/* Socket type constants (matching POSIX) — also defined in vfs/unix_socket.h */
+#ifndef SOCK_STREAM
 #define SOCK_STREAM    1
 #define SOCK_DGRAM     2
 #define SOCK_RAW       3
+#endif
 #define SOCK_NONBLOCK  0x800
 #define SOCK_CLOEXEC   0x80000
 #define SOCK_TYPE_MASK 0xF
@@ -690,6 +694,30 @@ static struct lwip_sock *sock_from_fd(int fd)
 }
 
 /*
+ * sock_domain_from_fd - detect domain of a socket fd
+ * Returns AF_INET (2), AF_UNIX (1), AF_NETLINK (16), or 0 if not a socket.
+ */
+static int sock_domain_from_fd(int fd)
+{
+    if (fd < 0 || fd >= NOFILE)
+        return 0;
+
+    spin_lock(&current->fdtable->lock);
+    struct vfs_file *f = current->fdtable->files[fd];
+    spin_unlock(&current->fdtable->lock);
+
+    if (f == NULL)
+        return 0;
+    if (f->ops == &lwip_socket_file_ops)
+        return AF_INET;
+    if (f->ops == &unix_socket_file_ops)
+        return AF_UNIX;
+    if (f->ops == &netlink_socket_file_ops)
+        return AF_NETLINK;
+    return 0;
+}
+
+/*
  * sock_is_nonblock - check if a socket fd should use non-blocking I/O
  *
  * Returns true if the file has O_NONBLOCK set or if MSG_DONTWAIT is
@@ -741,6 +769,37 @@ uint64 sys_socket(void)
     int flags = type & ~SOCK_TYPE_MASK;
     type &= SOCK_TYPE_MASK;
 
+    int file_flags = O_RDWR;
+    if (flags & SOCK_NONBLOCK)
+        file_flags |= O_NONBLOCK;
+
+    /* ---- AF_UNIX dispatch ---- */
+    if (domain == AF_UNIX) {
+        int fd = unix_sock_create(type, protocol, file_flags);
+        if (fd < 0)
+            return (uint64)fd;
+        if (flags & SOCK_CLOEXEC) {
+            spin_lock(&current->fdtable->lock);
+            vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
+            spin_unlock(&current->fdtable->lock);
+        }
+        return (uint64)fd;
+    }
+
+    /* ---- AF_NETLINK dispatch ---- */
+    if (domain == AF_NETLINK) {
+        int fd = netlink_sock_create(type, protocol, file_flags);
+        if (fd < 0)
+            return (uint64)fd;
+        if (flags & SOCK_CLOEXEC) {
+            spin_lock(&current->fdtable->lock);
+            vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
+            spin_unlock(&current->fdtable->lock);
+        }
+        return (uint64)fd;
+    }
+
+    /* ---- AF_INET (lwIP) ---- */
     if (domain != AF_INET)
         return (uint64)-EAFNOSUPPORT;
 
@@ -751,10 +810,6 @@ uint64 sys_socket(void)
     struct netconn *conn = netconn_new(ntype);
     if (conn == NULL)
         return (uint64)-ENOMEM;
-
-    int file_flags = O_RDWR;
-    if (flags & SOCK_NONBLOCK)
-        file_flags |= O_NONBLOCK;
 
     int fd = sock_fd_alloc(conn, type, protocol, file_flags);
     if (fd < 0) {
@@ -781,6 +836,13 @@ uint64 sys_bind(void)
     argint(0, &fd);
     argaddr(1, &uaddr);
     argint(2, &addrlen);
+
+    /* Domain dispatch */
+    int domain = sock_domain_from_fd(fd);
+    if (domain == AF_UNIX)
+        return (uint64)unix_sock_bind(fd, uaddr, addrlen);
+    if (domain == AF_NETLINK)
+        return (uint64)netlink_sock_bind(fd, uaddr, addrlen);
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
@@ -815,6 +877,13 @@ uint64 sys_listen(void)
     argint(0, &fd);
     argint(1, &backlog);
 
+    /* Domain dispatch */
+    int domain = sock_domain_from_fd(fd);
+    if (domain == AF_UNIX)
+        return (uint64)unix_sock_listen(fd, backlog);
+    if (domain == AF_NETLINK)
+        return (uint64)-EOPNOTSUPP;
+
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
         return (uint64)-EBADF;
@@ -840,6 +909,13 @@ uint64 sys_accept(void)
     argint(0, &fd);
     argaddr(1, &uaddr);
     argaddr(2, &uaddrlen);
+
+    /* Domain dispatch */
+    int domain = sock_domain_from_fd(fd);
+    if (domain == AF_UNIX)
+        return (uint64)unix_sock_accept(fd, uaddr, uaddrlen, 0);
+    if (domain == AF_NETLINK)
+        return (uint64)-EOPNOTSUPP;
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
@@ -899,6 +975,13 @@ uint64 sys_sconnect(void)
     argaddr(1, &uaddr);
     argint(2, &addrlen);
 
+    /* Domain dispatch */
+    int domain = sock_domain_from_fd(fd);
+    if (domain == AF_UNIX)
+        return (uint64)unix_sock_connect(fd, uaddr, addrlen);
+    if (domain == AF_NETLINK)
+        return (uint64)-EOPNOTSUPP;
+
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
         return (uint64)-EBADF;
@@ -936,6 +1019,15 @@ uint64 sys_sendto(void)
     argint(3, &flags);
     argaddr(4, &uaddr);
     argint(5, &addrlen);
+
+    /* Domain dispatch */
+    int domain = sock_domain_from_fd(fd);
+    if (domain == AF_NETLINK)
+        return (uint64)netlink_sock_sendto(fd, ubuf, (size_t)len, flags,
+                                           uaddr, addrlen);
+    /* AF_UNIX: sendto on connected socket works like write */
+    if (domain == AF_UNIX)
+        return (uint64)-EOPNOTSUPP;
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
@@ -1021,6 +1113,14 @@ uint64 sys_recvfrom(void)
     argint(3, &flags);
     argaddr(4, &uaddr);
     argaddr(5, &uaddrlen);
+
+    /* Domain dispatch */
+    int domain = sock_domain_from_fd(fd);
+    if (domain == AF_NETLINK)
+        return (uint64)netlink_sock_recvfrom(fd, ubuf, (size_t)len, flags,
+                                             uaddr, uaddrlen);
+    if (domain == AF_UNIX)
+        return (uint64)-EOPNOTSUPP;
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
@@ -1160,6 +1260,14 @@ uint64 sys_setsockopt(void)
     argint(2, &optname);
     argaddr(3, &uoptval);
     argint(4, &optlen);
+
+    /* Domain dispatch */
+    int domain = sock_domain_from_fd(fd);
+    if (domain == AF_UNIX)
+        return (uint64)unix_sock_setsockopt(fd, level, optname, uoptval,
+                                            optlen);
+    if (domain == AF_NETLINK)
+        return 0; /* silently accept for netlink */
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
@@ -1350,6 +1458,14 @@ uint64 sys_getsockopt(void)
     argaddr(3, &uoptval);
     argaddr(4, &uoptlen);
 
+    /* Domain dispatch */
+    int domain = sock_domain_from_fd(fd);
+    if (domain == AF_UNIX)
+        return (uint64)unix_sock_getsockopt(fd, level, optname, uoptval,
+                                            uoptlen);
+    if (domain == AF_NETLINK)
+        return (uint64)-ENOPROTOOPT;
+
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
         return (uint64)-EBADF;
@@ -1473,6 +1589,13 @@ uint64 sys_shutdown(void)
     argint(0, &fd);
     argint(1, &how);
 
+    /* Domain dispatch */
+    int domain = sock_domain_from_fd(fd);
+    if (domain == AF_UNIX)
+        return (uint64)unix_sock_shutdown(fd, how);
+    if (domain == AF_NETLINK)
+        return 0;
+
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
         return (uint64)-EBADF;
@@ -1497,6 +1620,13 @@ uint64 sys_getpeername(void)
     argint(0, &fd);
     argaddr(1, &uaddr);
     argaddr(2, &uaddrlen);
+
+    /* Domain dispatch */
+    int domain = sock_domain_from_fd(fd);
+    if (domain == AF_UNIX)
+        return (uint64)unix_sock_getpeername(fd, uaddr, uaddrlen);
+    if (domain == AF_NETLINK)
+        return (uint64)-EOPNOTSUPP;
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
@@ -1530,6 +1660,13 @@ uint64 sys_getsockname(void)
     argint(0, &fd);
     argaddr(1, &uaddr);
     argaddr(2, &uaddrlen);
+
+    /* Domain dispatch */
+    int domain = sock_domain_from_fd(fd);
+    if (domain == AF_UNIX)
+        return (uint64)unix_sock_getsockname(fd, uaddr, uaddrlen);
+    if (domain == AF_NETLINK)
+        return (uint64)netlink_sock_getsockname(fd, uaddr, uaddrlen);
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
@@ -1586,6 +1723,13 @@ uint64 sys_accept4(void)
     argaddr(1, &uaddr);
     argaddr(2, &uaddrlen);
     argint(3, &flags);
+
+    /* Domain dispatch */
+    int domain = sock_domain_from_fd(fd);
+    if (domain == AF_UNIX)
+        return (uint64)unix_sock_accept(fd, uaddr, uaddrlen, flags);
+    if (domain == AF_NETLINK)
+        return (uint64)-EOPNOTSUPP;
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
@@ -1700,6 +1844,11 @@ uint64 sys_sendmsg(void)
     argint(2, &flags);
 
     (void)flags;   /* best-effort: MSG_NOSIGNAL etc. accepted but ignored */
+
+    /* Domain dispatch — AF_UNIX/AF_NETLINK don't support sendmsg yet */
+    int domain = sock_domain_from_fd(fd);
+    if (domain == AF_UNIX || domain == AF_NETLINK)
+        return (uint64)-EOPNOTSUPP;
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
@@ -1822,6 +1971,11 @@ uint64 sys_recvmsg(void)
     argint(2, &flags);
 
     (void)flags;
+
+    /* Domain dispatch — AF_UNIX/AF_NETLINK don't support recvmsg yet */
+    int domain = sock_domain_from_fd(fd);
+    if (domain == AF_UNIX || domain == AF_NETLINK)
+        return (uint64)-EOPNOTSUPP;
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
@@ -1975,12 +2129,45 @@ uint64 sys_recvmsg(void)
 /*
  * sys_socketpair(domain, type, protocol, sv[2]) → 0 / -errno
  *
- * lwIP does not support AF_UNIX, so socketpair is not available.
- * Return -EAFNOSUPPORT so callers can fall back gracefully.
+ * Only AF_UNIX is supported for socketpair.
  */
 uint64 sys_socketpair(void)
 {
-    return (uint64)-EAFNOSUPPORT;
+    int domain, type, protocol;
+    uint64 usv;
+    argint(0, &domain);
+    argint(1, &type);
+    argint(2, &protocol);
+    argaddr(3, &usv);
+
+    /* Strip flags from type */
+    int flags = type & ~SOCK_TYPE_MASK;
+    type &= SOCK_TYPE_MASK;
+
+    if (domain != AF_UNIX)
+        return (uint64)-EAFNOSUPPORT;
+
+    int file_flags = O_RDWR;
+    if (flags & SOCK_NONBLOCK)
+        file_flags |= O_NONBLOCK;
+
+    int sv[2];
+    int ret = unix_sock_socketpair(type, protocol, file_flags, sv);
+    if (ret < 0)
+        return (uint64)ret;
+
+    if (flags & SOCK_CLOEXEC) {
+        spin_lock(&current->fdtable->lock);
+        vfs_fdtable_set_fdflags(current->fdtable, sv[0], FD_CLOEXEC);
+        vfs_fdtable_set_fdflags(current->fdtable, sv[1], FD_CLOEXEC);
+        spin_unlock(&current->fdtable->lock);
+    }
+
+    /* Copy sv[] to user space */
+    if (vm_copyout(current->vm, usv, sv, sizeof(sv)) < 0)
+        return (uint64)-EFAULT;
+
+    return 0;
 }
 
 /*

@@ -71,6 +71,7 @@ set(LWIP_PORT_SRCS
     ${LWIP_PORT_DIR}/sys_arch.c
     ${LWIP_PORT_DIR}/lwip_glue.c
     ${LWIP_PORT_DIR}/sys_socket.c
+    ${CMAKE_SOURCE_DIR}/kernel/vfs/netlink.c
 )
 
 # --------------------------------------------------------------------------

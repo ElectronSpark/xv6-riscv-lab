@@ -16,6 +16,8 @@
 #include <mm/vm.h>
 #include "vfs/fs.h"
 #include "vfs/pipe.h"
+#include "vfs/unix_socket.h"
+#include "netlink.h"
 #include "kqueue_types.h"
 #include "tty/tty.h"
 #include "tty/session.h"
@@ -84,6 +86,8 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     printf("page table initialized\n");
     platform_post_vm_init();
     pipe_init();               // initialize pipe subsystem
+    unix_socket_init();        // initialize AF_UNIX socket subsystem
+    netlink_init();            // initialize AF_NETLINK socket subsystem
     kqueue_init();             // initialize kqueue subsystem
     futex_init();              // initialize futex subsystem
     tty_init();                // TTY slab cache

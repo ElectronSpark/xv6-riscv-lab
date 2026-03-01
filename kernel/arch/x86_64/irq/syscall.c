@@ -277,7 +277,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_link] sys_vfs_link,
     [SYS_mkdir] sys_vfs_mkdir,
     [SYS_close] sys_vfs_close,
-    [SYS_connect] sys_vfs_connect,
+    [SYS_connect] sys_sconnect,    // socket connect (musl sends SYS_connect=36)
     [SYS_symlink] sys_vfs_symlink,
     [SYS_sigaction] sys_sigaction,
     [SYS_sigreturn] sys_sigreturn,

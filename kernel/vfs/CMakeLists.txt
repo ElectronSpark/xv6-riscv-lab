@@ -5,6 +5,7 @@ add_library(vfs_core OBJECT
     fdtable.c
     vfs_syscall.c
     pipe.c
+    unix_socket.c
 )
 
 # Pull in filesystem implementations
