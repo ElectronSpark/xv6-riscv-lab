@@ -1175,14 +1175,18 @@ static void *__mas_prev_node(struct ma_state *mas, uint64 limit)
             __find_node_bounds(mas->tree, node, &node_min, &node_max);
 
             struct maple_node *child = node->slot[prev];
-            if (child == NULL)
+            if (child == NULL) {
+                mas->node = NULL;
                 return NULL;
+            }
 
             if (mn_is_leaf(node)) {
                 uint64 child_min = mn_slot_min(node, prev, node_min);
                 uint64 child_max = mn_pivot(node, prev, node_max);
-                if (child_max < limit)
+                if (child_max < limit) {
+                    mas->node = NULL;
                     return NULL;
+                }
                 mas->node = node;
                 mas->offset = prev;
                 mas->min = child_min;
@@ -1210,13 +1214,16 @@ static void *__mas_prev_node(struct ma_state *mas, uint64 limit)
             mas->min = mn_slot_min(node, last, nmin);
             mas->max = mn_pivot(node, last, nmax);
             mas->index = mas->min;
-            if (mas->max < limit)
+            if (mas->max < limit) {
+                mas->node = NULL;
                 return NULL;
+            }
             return node->slot[last];
         }
         node = parent;
     }
 
+    mas->node = NULL;
     return NULL;
 }
 
@@ -1349,9 +1356,11 @@ int mas_empty_area(struct ma_state *mas, uint64 min, uint64 max, uint64 size)
 
     /* Scan forward for a gap. */
     while (1) {
+        uint8 saved_offset = walk.offset;
         entry = __mas_next_slot(&walk);
-        if (entry == NULL && walk.node != NULL) {
-            /* Check this NULL slot's range. */
+        if (entry == NULL && walk.node != NULL &&
+            walk.offset != saved_offset) {
+            /* Genuine NULL slot (gap) — offset was advanced. */
             uint64 gap_start = walk.min < min ? min : walk.min;
             uint64 gap_end = walk.max > max ? max : walk.max;
             if (gap_end >= gap_start && gap_end - gap_start + 1 >= size) {
@@ -1364,7 +1373,8 @@ int mas_empty_area(struct ma_state *mas, uint64 min, uint64 max, uint64 size)
             continue;
         }
         if (entry == NULL) {
-            /* Try next node. */
+            /* Either at edge of node (offset unchanged) or node exhausted.
+             * Try next node. */
             entry = __mas_next_node(&walk, max);
             if (entry == NULL && walk.node != NULL) {
                 uint64 gap_start = walk.min < min ? min : walk.min;
@@ -1374,6 +1384,10 @@ int mas_empty_area(struct ma_state *mas, uint64 min, uint64 max, uint64 size)
                     mas->last = gap_start + size - 1;
                     return 0;
                 }
+                if (walk.min > max)
+                    return -EBUSY;
+                /* Gap too small; keep scanning from this node. */
+                continue;
             }
             if (entry == NULL)
                 return -EBUSY;
@@ -1409,8 +1423,11 @@ int mas_empty_area_rev(struct ma_state *mas, uint64 min, uint64 max,
 
     /* Scan backward for a gap. */
     while (1) {
+        uint8 saved_offset = walk.offset;
         entry = __mas_prev_slot(&walk);
-        if (entry == NULL && walk.node != NULL) {
+        if (entry == NULL && walk.node != NULL &&
+            walk.offset != saved_offset) {
+            /* Genuine NULL slot (gap) — offset was decremented. */
             uint64 gap_start = walk.min < min ? min : walk.min;
             uint64 gap_end = walk.max > max ? max : walk.max;
             if (gap_end >= gap_start && gap_end - gap_start + 1 >= size) {
@@ -1424,6 +1441,8 @@ int mas_empty_area_rev(struct ma_state *mas, uint64 min, uint64 max,
             continue;
         }
         if (entry == NULL) {
+            /* Either at edge of node (offset unchanged) or node exhausted.
+             * Try previous node. */
             entry = __mas_prev_node(&walk, min);
             if (entry == NULL && walk.node != NULL) {
                 uint64 gap_start = walk.min < min ? min : walk.min;
@@ -1434,6 +1453,10 @@ int mas_empty_area_rev(struct ma_state *mas, uint64 min, uint64 max,
                     if (mas->index >= min)
                         return 0;
                 }
+                if (walk.max < min)
+                    return -EBUSY;
+                /* Gap too small; keep scanning from this node. */
+                continue;
             }
             if (entry == NULL)
                 return -EBUSY;

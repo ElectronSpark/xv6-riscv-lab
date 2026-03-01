@@ -150,12 +150,16 @@ static void __vma_free(vma_t *vma)
     }
 }
 
-/* Free the pages/PTEs in a VMA and mark it as free (PROT_NONE). */
+/**
+ * __vma_set_free() - Release all pages/PTEs owned by a VMA.
+ *
+ * Walks the VMA's page-table range, clears PTEs, and drops page
+ * references.  Releases any held file reference and resets metadata.
+ * Does NOT remove the VMA from the maple tree — callers must do that.
+ */
 static void __vma_set_free(vma_t *vma)
 {
     if (vma == NULL || vma->vm == NULL)
-        return;
-    if (vma->flags == PROT_NONE)
         return;
 
     assert((vma->start & (PGSIZE - 1)) == 0,
@@ -181,7 +185,6 @@ static void __vma_set_free(vma_t *vma)
         }
     }
 
-    vma->flags = PROT_NONE;
     if (vma->file != NULL)
         vfs_fput(vma->file);
     vma->file = NULL;
@@ -224,7 +227,7 @@ static int __vma_copy(vma_t *dst, vma_t *src)
             return ret;
     }
 
-    if (src->flags != PROT_NONE) {
+    {
         pagetable_t pgtb_src = src->vm->pagetable;
         pagetable_t pgtb_dst = dst->vm->pagetable;
         for (uint64 a = src->start; a < src->end; a += PGSIZE) {
@@ -321,17 +324,6 @@ vm_t *vm_init(void)
     memset(vm, 0, sizeof(vm_t));
     mt_init(&vm->vm_mt);
 
-    vma_t *vma = __vma_alloc(vm);
-    if (vma == NULL) {
-        __vm_destroy(vm);
-        return NULL;
-    }
-
-    /* Initial free VMA covering the entire user address space. */
-    vma->start = UVMBOTTOM;
-    vma->end = UVMTOP;
-    __mt_store_vma(vm, vma);
-
     vm->pagetable = uvmcreate();
     if (vm->pagetable == NULL) {
         __vm_destroy(vm);
@@ -378,10 +370,6 @@ static void __vm_destroy(vm_t *vm)
     void *entry;
     mt_for_each(&vm->vm_mt, entry, idx, MAPLE_MAX) {
         vma_t *vma = (vma_t *)entry;
-        if (vma->vm != vm)
-            continue;
-        if (vma->start == VMA_FREED_MAGIC || vma->end == VMA_FREED_MAGIC)
-            continue;
         __vma_set_free(vma);
         __vma_free(vma);
     }
@@ -410,8 +398,6 @@ vm_t *vm_copy(vm_t *src)
     void *mt_entry;
     mt_for_each(&src->vm_mt, mt_entry, idx, MAPLE_MAX) {
         vma_t *vma = (vma_t *)mt_entry;
-        if (vma->flags == PROT_NONE)
-            continue;
         vma_t *new_vma = vma_alloc(dst, vma->start, VMA_SIZE(vma), vma->flags);
         if (new_vma == NULL) {
             vm_runlock(src);
@@ -427,7 +413,7 @@ vm_t *vm_copy(vm_t *src)
             dst->heap_size = src->heap_size;
             dst->heap_reserve_end = src->heap_reserve_end;
         }
-        if (vma->flags != PROT_NONE && __vma_copy(new_vma, vma) != 0) {
+        if (__vma_copy(new_vma, vma) != 0) {
             vm_runlock(src);
             vm_wunlock(dst);
             vm_put(dst);
@@ -581,73 +567,73 @@ vma_t *vma_alloc(vm_t *vm, uint64 va, uint64 size, uint64 flags)
 {
     assert(current == NULL || vm_is_wlocked(vm),
            "vma_alloc: vm must be write-locked");
-    if (vm == NULL)
+    if (vm == NULL) {
+        printf("vma_alloc: FAIL vm==NULL\n");
         return NULL;
-    if (size == 0 || (size & (PGSIZE - 1)) != 0)
+    }
+    if (size == 0 || (size & (PGSIZE - 1)) != 0) {
+        printf("vma_alloc: FAIL bad size=0x%lx\n", size);
         return NULL;
-    if ((va & (PGSIZE - 1)) != 0)
+    }
+    if (va != 0 && (va & (PGSIZE - 1)) != 0) {
+        printf("vma_alloc: FAIL unaligned va=0x%lx\n", va);
         return NULL;
-    if ((flags & VMA_FLAG_PROT_MASK) == 0)
+    }
+    if ((flags & VMA_FLAG_PROT_MASK) == 0) {
+        printf("vma_alloc: FAIL flags=0x%lx prot_mask=0\n", flags);
         return NULL;
+    }
 
-    vma_t *free_area = NULL;
     if (va == 0) {
-        /* Find a free (PROT_NONE) area large enough using maple tree scan. */
-        MA_STATE(mas, &vm->vm_mt, vm->vm_bottom, vm->vm_bottom);
-        void *entry;
-        mas_for_each(&mas, entry, vm->vm_top - 1) {
-            vma_t *v = (vma_t *)entry;
-            if (v->flags == PROT_NONE && VMA_SIZE(v) >= size) {
-                free_area = v;
-                break;
-            }
+        /* Use maple tree gap search to find free space (low to high). */
+        MA_STATE(mas, &vm->vm_mt, 0, 0);
+        int rc = mas_empty_area(&mas, vm->vm_bottom, vm->vm_top - 1, size);
+        if (rc != 0) {
+            printf("vma_alloc: FAIL mas_empty_area rc=%d "
+                   "bottom=0x%lx top=0x%lx size=0x%lx\n",
+                   rc, vm->vm_bottom, vm->vm_top - 1, size);
+            return NULL;
         }
+        va = mas.index;
     } else {
-        free_area = vm_find_area(vm, va);
-    }
-
-    if (free_area == NULL)
-        return NULL;
-    if (free_area->flags != PROT_NONE)
-        return NULL;
-
-    uint64 va_end = 0;
-    if (va == 0) {
-        if (VMA_SIZE(free_area) < size)
-            return NULL;
-        va = free_area->start;
-    } else {
-        if (free_area->end - va < size)
-            return NULL;
-    }
-    va_end = va + size;
-
-    vma_t *vma2 = NULL;
-    vma_t *vma3 = NULL;
-    vma_t *original_left = NULL;
-
-    if (va > free_area->start) {
-        original_left = free_area;
-        vma2 = vma_split(free_area, va);
-        if (vma2 == NULL)
-            return NULL;
-    } else {
-        vma2 = free_area;
-    }
-
-    if (va_end < vma2->end) {
-        vma3 = vma_split(vma2, va_end);
-        if (vma3 == NULL) {
-            if (original_left != NULL)
-                vma_merge(original_left, vma2);
+        /* Fixed address: verify the range [va, va+size) is free (no
+         * overlapping entries in the maple tree). */
+        uint64 check = va;
+        void *overlap = mt_find(&vm->vm_mt, &check, va + size - 1);
+        if (overlap != NULL) {
+            printf("vma_alloc: FAIL overlap at va=0x%lx size=0x%lx "
+                   "overlap_vma=[0x%lx-0x%lx]\n",
+                   va, size,
+                   ((vma_t *)overlap)->start, ((vma_t *)overlap)->end);
             return NULL;
         }
     }
 
-    vma2->flags = flags;
-    /* Update the tree with the new flags. */
-    __mt_store_vma(vm, vma2);
-    return vma2;
+    uint64 va_end = va + size;
+    if (va_end <= va || va < vm->vm_bottom || va_end > vm->vm_top) {
+        printf("vma_alloc: FAIL bounds va=0x%lx va_end=0x%lx "
+               "bottom=0x%lx top=0x%lx\n",
+               va, va_end, vm->vm_bottom, vm->vm_top);
+        return NULL;
+    }
+
+    vma_t *vma_new = __vma_alloc(vm);
+    if (vma_new == NULL) {
+        printf("vma_alloc: FAIL __vma_alloc returned NULL\n");
+        return NULL;
+    }
+
+    vma_new->start = va;
+    vma_new->end = va_end;
+    vma_new->flags = flags;
+
+    if (__mt_store_vma(vm, vma_new) != 0) {
+        printf("vma_alloc: FAIL __mt_store_vma\n");
+        __vma_free(vma_new);
+        return NULL;
+    }
+
+    return vma_new;
 }
 
 int vma_free(vm_t *vm, vma_t *vma)
@@ -656,21 +642,10 @@ int vma_free(vm_t *vm, vma_t *vma)
            "vma_free: vm must be write-locked");
     if (vma == NULL || vma->vm != vm)
         return -EINVAL;
-    if (vma->flags == PROT_NONE)
-        return -EINVAL;
-
-    vma_t *left = __get_vma_left(vma);
-    vma_t *right = __get_vma_right(vma);
-
-    if (left == NULL && right == NULL)
-        return -EINVAL;
 
     __vma_set_free(vma);
-    /* vma->flags is now PROT_NONE; tree entry is unchanged (same pointer). */
-    if (left != NULL && left->flags == PROT_NONE)
-        vma = vma_merge(left, vma);
-    if (right != NULL && right->flags == PROT_NONE)
-        vma_merge(vma, right);
+    __mt_erase_vma(vm, vma);
+    __vma_free(vma);
 
     return 0;
 }
@@ -1157,30 +1132,30 @@ int vm_growstack(vm_t *vm, int64 change_size)
         return 0;
     }
 
-    vma_t *left = __get_vma_left(vm->stack);
-    uint64 new_start = vm->stack->start - delta;
-
     if (delta < 0) {
-        vma_t *splitted = vm->stack;
-        vma_t *right = vma_split(vm->stack, new_start);
-        if (right == NULL)
+        /* Shrink: release pages from the bottom of the stack.
+         * delta is negative, so new_start = stack->start + |delta|. */
+        uint64 new_start = vm->stack->start - delta;
+        vma_t *upper = vma_split(vm->stack, new_start);
+        if (upper == NULL)
             return -ENOMEM;
-        vm->stack = right;
-        __vma_set_free(splitted);
-        if (left != NULL && left->flags == PROT_NONE)
-            vma_merge(splitted, left);
+        /* vm->stack is now the lower portion to free. */
+        vma_t *freed = vm->stack;
+        vm->stack = upper;
+        __vma_set_free(freed);
+        __mt_erase_vma(vm, freed);
+        __vma_free(freed);
     } else {
-        if (left == NULL || left->flags != PROT_NONE)
+        /* Grow: extend the stack downward into the gap.
+         * Verify no VMA exists in the expansion range. */
+        uint64 new_start = vm->stack->start - delta;
+        uint64 check = new_start;
+        void *overlap = mt_find(&vm->vm_mt, &check, vm->stack->start - 1);
+        if (overlap != NULL)
             return -ENOMEM;
-        if (VMA_SIZE(left) < delta)
-            return -ENOMEM;
-        vma_t *grows = vma_split(left, new_start);
-        if (grows == NULL)
-            return -ENOMEM;
-        grows->flags = vm->stack->flags;
-        __mt_store_vma(vm, grows);
-        vma_t *new_stack = vma_merge(grows, vm->stack);
-        vm->stack = new_stack;
+        /* Extend the VMA start downward and update the tree. */
+        vm->stack->start = new_start;
+        __mt_store_vma(vm, vm->stack);
     }
     vm->stack_size = new_size;
     return 0;
@@ -1266,38 +1241,29 @@ int vm_growheap(vm_t *vm, int64 change_size)
         goto ret;
     }
     uint64 new_end = vm->heap->end + delta;
-    vma_t *right = __get_vma_right(vm->heap);
 
     if (delta < 0) {
+        /* Shrink: release pages from the top of the heap. */
         vma_t *splitted = vma_split(vm->heap, new_end);
         if (splitted == NULL) {
             ret = -ENOMEM;
             goto ret;
         }
         __vma_set_free(splitted);
-        if (right != NULL && right->flags == PROT_NONE)
-            vma_merge(splitted, right);
+        __mt_erase_vma(vm, splitted);
+        __vma_free(splitted);
     } else {
-        if (right == NULL || right->flags != PROT_NONE) {
-            printf("vm_growheap: FAIL no free right neighbor for heap "
-                   "[0x%lx,0x%lx) right=%p right_flags=0x%lx delta=%ld\n",
-                   vm->heap->start, vm->heap->end,
-                   right, right ? right->flags : 0xdead, delta);
+        /* Grow: extend heap upward into the gap.
+         * Verify no VMA exists in the expansion range. */
+        uint64 check = vm->heap->end;
+        void *overlap = mt_find(&vm->vm_mt, &check, new_end - 1);
+        if (overlap != NULL) {
             ret = -ENOMEM;
             goto ret;
         }
-        if (VMA_SIZE(right) < delta) {
-            ret = -ENOMEM;
-            goto ret;
-        }
-        if (vma_split(right, new_end) == NULL) {
-            ret = -ENOMEM;
-            goto ret;
-        }
-        right->flags = vm->heap->flags;
-        __mt_store_vma(vm, right);
-        vma_t *new_heap = vma_merge(right, vm->heap);
-        vm->heap = new_heap;
+        /* Extend the VMA end upward and update the tree. */
+        vm->heap->end = new_end;
+        __mt_store_vma(vm, vm->heap);
     }
     vm->heap_size = new_size;
 ret:
@@ -1541,9 +1507,13 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
     uint64 expand_size = new_size - old_size;
     uint64 expand_start = old_addr + old_size;
 
-    vma_t *next_vma = vm_find_area(vm, expand_start);
-    if (next_vma == NULL || next_vma->start >= expand_start + expand_size) {
+    /* Check whether the expansion range is free (no overlapping VMAs). */
+    uint64 check = expand_start;
+    void *overlap = mt_find(&vm->vm_mt, &check, expand_start + expand_size - 1);
+    if (overlap == NULL) {
+        /* Gap is free — expand in place. */
         vma->end = old_addr + new_size;
+        __mt_store_vma(vm, vma);
         ret = old_addr;
         goto out;
     }
@@ -1770,40 +1740,52 @@ uint64 vm_find_free_range(vm_t *vm, size_t size, uint64 hint)
     uint64 search_top = stack_bottom - (16 * PGSIZE);
     uint64 search_bottom = effective_bottom;
 
-    if (search_top <= search_bottom + size)
+    if (search_top <= search_bottom + size) {
+        printf("vm_find_free_range: FAIL bounds check size=0x%lx "
+               "search_bottom=0x%lx search_top=0x%lx "
+               "stack_bottom=0x%lx heap_end=0x%lx reserve_end=0x%lx\n",
+               size, search_bottom, search_top,
+               stack_bottom, heap_end, reserve_end);
         return 0;
-
-    /* Scan all VMAs in reverse looking for a PROT_NONE area large enough. */
-    unsigned long idx = search_top - 1;
-    void *entry;
-    MA_STATE(mas, &vm->vm_mt, idx, idx);
-    entry = mas_walk(&mas);
-    /* Walk backwards through the tree. */
-    while (entry != NULL || mas.min > 0) {
-        if (entry == NULL) {
-            entry = mas_prev(&mas, 0);
-            continue;
-        }
-        vma_t *free_area = (vma_t *)entry;
-        if (free_area->flags == PROT_NONE) {
-            uint64 usable_start = free_area->start;
-            uint64 usable_end = free_area->end;
-
-            if (usable_start < search_bottom)
-                usable_start = search_bottom;
-            if (usable_end > search_top)
-                usable_end = search_top;
-
-            if (usable_end > usable_start &&
-                usable_end - usable_start >= size) {
-                uint64 result = PGROUNDDOWN(usable_end - size);
-                if (result >= usable_start)
-                    return result;
-            }
-        }
-        entry = mas_prev(&mas, 0);
     }
-    return 0;
+
+    /* Use maple tree reverse gap search to find free space (high to low). */
+    MA_STATE(mas, &vm->vm_mt, 0, 0);
+    int rc = mas_empty_area_rev(&mas, search_bottom, search_top - 1, size);
+    if (rc != 0) {
+        printf("vm_find_free_range: mas_empty_area_rev FAIL rc=%d "
+               "search_bottom=0x%lx search_top=0x%lx size=0x%lx\n",
+               rc, search_bottom, search_top - 1, size);
+        return 0;
+    }
+
+    /* Verify: the returned address should not overlap any existing entry. */
+    uint64 verify_idx = mas.index;
+    void *conflict = mt_find(&vm->vm_mt, &verify_idx, mas.index + size - 1);
+    if (conflict != NULL) {
+        vma_t *cv = (vma_t *)conflict;
+        printf("vm_find_free_range: BUG mas_empty_area_rev returned occupied "
+               "addr=0x%lx size=0x%lx conflict_vma=[0x%lx-0x%lx] "
+               "search=[0x%lx,0x%lx]\n",
+               mas.index, size, cv->start, cv->end,
+               search_bottom, search_top - 1);
+        /* Dump all VMAs in the tree for diagnosis. */
+        uint64 dump_idx = 0;
+        void *dump_entry;
+        int count = 0;
+        mt_for_each(&vm->vm_mt, dump_entry, dump_idx, MAPLE_MAX) {
+            vma_t *dv = (vma_t *)dump_entry;
+            if (count < 30 || (dv->start <= mas.index + size && dv->end >= mas.index)) {
+                printf("  VMA[%d]: [0x%lx-0x%lx] flags=0x%lx\n",
+                       count, dv->start, dv->end, dv->flags);
+            }
+            count++;
+        }
+        printf("  Total VMAs: %d\n", count);
+        return 0;
+    }
+
+    return mas.index;
 }
 
 int vm_alloc_thread_stack(vm_t *vm, size_t stack_size, uint64 *stack_top_out)
@@ -1883,11 +1865,16 @@ static int __vm_unmap_range_locked(vm_t *vm, uint64 start, uint64 end)
 {
     while (start < end) {
         vma_t *vma = vm_find_area(vm, start);
-        if (vma == NULL)
-            break;
-        if (vma->flags == PROT_NONE) {
-            start = vma->end;
-            continue;
+        if (vma == NULL) {
+            /* In a gap — find the next VMA in the range. */
+            uint64 next_idx = start;
+            void *next = mt_find(&vm->vm_mt, &next_idx, end - 1);
+            if (next == NULL)
+                break; /* no more VMAs in range */
+            vma = (vma_t *)next;
+            start = vma->start;
+            if (start >= end)
+                break;
         }
         if (vma->start < start) {
             vma_t *right = vma_split(vma, start);
@@ -1959,6 +1946,8 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
     if (addr == 0 || (flags & MAP_FIXED) == 0) {
         map_addr = vm_find_free_range(vm, length, addr);
         if (map_addr == 0) {
+            printf("vm_mmap: vm_find_free_range FAIL addr=0x%lx len=0x%lx\n",
+                   addr, length);
             vm_wunlock(vm);
             if (file != NULL)
                 vfs_fput(file);
@@ -1977,6 +1966,8 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
 
     vma_t *vma = vma_alloc(vm, map_addr, length, vm_flags);
     if (vma == NULL) {
+        printf("vm_mmap: vma_alloc FAIL map_addr=0x%lx len=0x%lx flags=0x%lx\n",
+               map_addr, length, vm_flags);
         vm_wunlock(vm);
         if (file != NULL)
             vfs_fput(file);
@@ -2028,15 +2019,6 @@ void kernel_vm_init(void)
     memset(vm, 0, sizeof(vm_t));
 
     mt_init(&vm->vm_mt);
-
-    /* Initial free VMA covering the kernel virtual address space. */
-    vma_t *vma = __vma_alloc(vm);
-    if (vma == NULL)
-        panic("kernel_vm_init: cannot allocate initial VMA");
-
-    vma->start = KVMBASE;
-    vma->end = KVMTOP;
-    __mt_store_vma(vm, vma);
 
     vm->pagetable = kernel_pagetable;
     vm->trapframe_pte = NULL;     /* no per-process trapframes */
