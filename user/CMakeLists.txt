@@ -195,6 +195,7 @@ set(MUSL_STATIC_PROGRAMS
     minit:init    msh:sh     mhello:hello mfptest:fptest
     mnslookup:nslookup  mepolltest:epolltest
     msocktest:socktest
+    mifconfig:ifconfig  mroute:route
 )
 foreach(MAPPING ${MUSL_STATIC_PROGRAMS})
     string(REPLACE ":" ";" PARTS ${MAPPING})
@@ -747,6 +748,7 @@ set(MUSL_PROG_MAP
     minit:init  mhello:hello  mfptest:fptest
     mnslookup:nslookup  mepolltest:epolltest
     msocktest:socktest
+    mifconfig:ifconfig  mroute:route
 )
 foreach(MAPPING ${MUSL_PROG_MAP})
     string(REPLACE ":" ";" PARTS ${MAPPING})

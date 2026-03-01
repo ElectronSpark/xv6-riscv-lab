@@ -549,10 +549,388 @@ static int sock_file_poll(struct vfs_file *file, short events)
 /*
  * sock_file_ioctl - handle ioctl commands on socket file descriptors
  *
- * Supports FIONREAD (bytes available to read) and FIONBIO (set nonblock).
+ * Supports FIONREAD (bytes available to read), FIONBIO (set nonblock),
+ * and SIOC* network interface/routing ioctls.
+ *
  * The arg pointer comes from sys_vfs_ioctl's default case, which passes
  * the raw user-space arg value as an opaque void*.
  */
+
+/* ---- SIOC* constants (match musl <sys/ioctl.h>) ---- */
+#define SIOCADDRT       0x890B
+#define SIOCDELRT       0x890C
+#define SIOCGIFNAME     0x8910
+#define SIOCGIFCONF     0x8912
+#define SIOCGIFFLAGS    0x8913
+#define SIOCSIFFLAGS    0x8914
+#define SIOCGIFADDR     0x8915
+#define SIOCSIFADDR     0x8916
+#define SIOCGIFDSTADDR  0x8917
+#define SIOCGIFBRDADDR  0x8919
+#define SIOCGIFNETMASK  0x891b
+#define SIOCSIFNETMASK  0x891c
+#define SIOCGIFMTU      0x8921
+#define SIOCSIFMTU      0x8922
+#define SIOCGIFHWADDR   0x8927
+#define SIOCGIFINDEX    0x8933
+
+/* IFF_* flag values (match Linux / musl <net/if.h>) */
+#define IFF_UP          0x1
+#define IFF_BROADCAST   0x2
+#define IFF_LOOPBACK    0x8
+#define IFF_RUNNING     0x40
+#define IFF_MULTICAST   0x1000
+
+/* AF_INET for sockaddr_in family */
+#define SIOC_AF_INET    2
+
+/* ARPHRD_ETHER for ifr_hwaddr */
+#define SIOC_ARPHRD_ETHER    1
+#define SIOC_ARPHRD_LOOPBACK 772
+
+/*
+ * struct ifreq / rtentry layout (matches musl <net/if.h>, <net/route.h>)
+ * We define our own kernel-side versions to avoid header conflicts.
+ * The kernel doesn't have a BSD struct sockaddr, so we define a
+ * layout-compatible one here.
+ */
+#define SIOC_IFNAMSIZ 16
+
+/* snprintf — implemented in sys_arch.c */
+int snprintf(char *buf, size_t size, const char *fmt, ...);
+
+/*
+ * k_sockaddr matches the musl struct sockaddr layout:
+ *   uint16 sa_family + char sa_data[14]  =  16 bytes total
+ */
+struct k_sockaddr {
+    uint16 sa_family;
+    char   sa_data[14];
+};
+
+struct k_ifreq {
+    char            ifr_name[SIOC_IFNAMSIZ];
+    union {
+        struct k_sockaddr ifr_addr;
+        struct k_sockaddr ifr_dstaddr;
+        struct k_sockaddr ifr_broadaddr;
+        struct k_sockaddr ifr_netmask;
+        struct k_sockaddr ifr_hwaddr;
+        short           ifr_flags;
+        int             ifr_ifindex;
+        int             ifr_mtu;
+        char            _pad[24];     /* room for the full union */
+    };
+};
+
+/*
+ * struct rtentry layout (matches musl <net/route.h>).
+ * We only use the fields we know how to handle.
+ */
+#define RTF_UP      0x0001
+#define RTF_GATEWAY 0x0002
+#define RTF_HOST    0x0004
+
+struct k_rtentry {
+    unsigned long      rt_pad1;
+    struct k_sockaddr  rt_dst;
+    struct k_sockaddr  rt_gateway;
+    struct k_sockaddr  rt_genmask;
+    unsigned short     rt_flags;
+    short              rt_pad2;
+    unsigned long      rt_pad3;
+    void              *rt_pad4;
+    short              rt_metric;
+    char              *rt_dev;        /* user-space pointer to device name */
+    unsigned long      rt_mtu;
+    unsigned long      rt_window;
+    unsigned short     rt_irtt;
+};
+
+/*
+ * sioc_find_netif - lookup a lwIP netif by ifreq name (e.g. "en1", "lo")
+ *
+ * lwIP names are 2-char + num: nif->name[0..1] + nif->num.
+ * We format each as "%c%c%d" and compare against ifr_name.
+ * Special case: "lo" matches the loopback pseudo-interface.
+ */
+static struct netif *sioc_find_netif(const char *name)
+{
+    /* Try netif_find first (it handles "xx0" 3-char names) */
+    struct netif *nif = netif_find(name);
+    if (nif != NULL)
+        return nif;
+
+    /* Manual search: format each netif name and strcmp */
+    char ifname[16];
+    NETIF_FOREACH(nif) {
+        snprintf(ifname, sizeof(ifname), "%c%c%d",
+                 nif->name[0], nif->name[1], nif->num);
+        if (strncmp(ifname, name, SIOC_IFNAMSIZ) == 0)
+            return nif;
+    }
+    return NULL;
+}
+
+/*
+ * sioc_netif_to_flags - convert lwIP netif flags to IFF_* flags
+ */
+static unsigned int sioc_netif_to_flags(struct netif *nif)
+{
+    unsigned int flags = 0;
+    if (nif->flags & NETIF_FLAG_UP)
+        flags |= IFF_UP | IFF_RUNNING;
+    if (nif->flags & NETIF_FLAG_BROADCAST)
+        flags |= IFF_BROADCAST;
+    if (nif->flags & NETIF_FLAG_IGMP)
+        flags |= IFF_MULTICAST;
+    if (!(nif->flags & NETIF_FLAG_ETHARP))
+        flags |= IFF_LOOPBACK;
+    return flags;
+}
+
+/*
+ * sioc_set_sockaddr_in - fill a k_sockaddr with AF_INET + ip4 address
+ */
+static void sioc_set_sockaddr_in(struct k_sockaddr *sa, uint32 ip4_addr_nbo)
+{
+    memset(sa, 0, sizeof(*sa));
+    sa->sa_family = SIOC_AF_INET;
+    /* sockaddr_in layout: family(2) + port(2) + addr(4) */
+    /* addr sits at offset 4 in sa_data */
+    memmove(&sa->sa_data[2], &ip4_addr_nbo, 4);
+}
+
+/*
+ * sioc_get_sockaddr_in - extract ip4 address (network byte order) from k_sockaddr
+ */
+static uint32 sioc_get_sockaddr_in(const struct k_sockaddr *sa)
+{
+    uint32 addr;
+    memmove(&addr, &sa->sa_data[2], 4);
+    return addr;
+}
+
+/*
+ * sioc_handle_ifreq - process SIOCGxxx / SIOCSxxx ioctls.
+ * The ifreq struct has already been copied in from user space.
+ * Returns 0 on success, -errno on error.
+ * set *copyback = 1 if the ifreq should be copied back out.
+ */
+static int sioc_handle_ifreq(uint64 cmd, struct k_ifreq *ifr, int *copyback)
+{
+    *copyback = 0;
+    ifr->ifr_name[SIOC_IFNAMSIZ - 1] = '\0';
+
+    struct netif *nif = sioc_find_netif(ifr->ifr_name);
+    if (nif == NULL)
+        return -ENODEV;
+
+    switch (cmd) {
+    case SIOCGIFFLAGS:
+        ifr->ifr_flags = (short)sioc_netif_to_flags(nif);
+        *copyback = 1;
+        return 0;
+
+    case SIOCSIFFLAGS: {
+        if (ifr->ifr_flags & IFF_UP) {
+            if (!(nif->flags & NETIF_FLAG_UP))
+                netif_set_up(nif);
+        } else {
+            if (nif->flags & NETIF_FLAG_UP)
+                netif_set_down(nif);
+        }
+        return 0;
+    }
+
+    case SIOCGIFADDR: {
+        uint32 addr = netif_ip4_addr(nif)->addr;
+        sioc_set_sockaddr_in(&ifr->ifr_addr, addr);
+        *copyback = 1;
+        return 0;
+    }
+
+    case SIOCSIFADDR: {
+        if (ifr->ifr_addr.sa_family != SIOC_AF_INET)
+            return -EAFNOSUPPORT;
+        ip4_addr_t addr;
+        addr.addr = sioc_get_sockaddr_in(&ifr->ifr_addr);
+        netif_set_ipaddr(nif, &addr);
+        return 0;
+    }
+
+    case SIOCGIFNETMASK: {
+        uint32 mask = netif_ip4_netmask(nif)->addr;
+        sioc_set_sockaddr_in(&ifr->ifr_netmask, mask);
+        *copyback = 1;
+        return 0;
+    }
+
+    case SIOCSIFNETMASK: {
+        if (ifr->ifr_netmask.sa_family != SIOC_AF_INET)
+            return -EAFNOSUPPORT;
+        ip4_addr_t mask;
+        mask.addr = sioc_get_sockaddr_in(&ifr->ifr_netmask);
+        netif_set_netmask(nif, &mask);
+        return 0;
+    }
+
+    case SIOCGIFBRDADDR: {
+        /* broadcast = ip | ~netmask */
+        uint32 addr = netif_ip4_addr(nif)->addr;
+        uint32 mask = netif_ip4_netmask(nif)->addr;
+        uint32 brd = addr | ~mask;
+        sioc_set_sockaddr_in(&ifr->ifr_broadaddr, brd);
+        *copyback = 1;
+        return 0;
+    }
+
+    case SIOCGIFMTU:
+        ifr->ifr_mtu = nif->mtu;
+        *copyback = 1;
+        return 0;
+
+    case SIOCSIFMTU:
+        if (ifr->ifr_mtu < 68 || ifr->ifr_mtu > 65535)
+            return -EINVAL;
+        nif->mtu = (uint16)ifr->ifr_mtu;
+        return 0;
+
+    case SIOCGIFHWADDR: {
+        memset(&ifr->ifr_hwaddr, 0, sizeof(ifr->ifr_hwaddr));
+        if (nif->flags & NETIF_FLAG_ETHARP)
+            ifr->ifr_hwaddr.sa_family = SIOC_ARPHRD_ETHER;
+        else
+            ifr->ifr_hwaddr.sa_family = SIOC_ARPHRD_LOOPBACK;
+        if (nif->hwaddr_len > 0 && nif->hwaddr_len <= 14)
+            memmove(ifr->ifr_hwaddr.sa_data, nif->hwaddr, nif->hwaddr_len);
+        *copyback = 1;
+        return 0;
+    }
+
+    case SIOCGIFINDEX: {
+        /* Assign sequential index matching netlink handle_getlink */
+        int idx = 1;
+        struct netif *n;
+        NETIF_FOREACH(n) {
+            if (n == nif) { ifr->ifr_ifindex = idx; break; }
+            idx++;
+        }
+        *copyback = 1;
+        return 0;
+    }
+
+    case SIOCGIFNAME: {
+        /* Given ifr_ifindex, fill ifr_name */
+        int target_idx = ifr->ifr_ifindex;
+        int idx = 1;
+        struct netif *n;
+        NETIF_FOREACH(n) {
+            if (idx == target_idx) {
+                snprintf(ifr->ifr_name, SIOC_IFNAMSIZ, "%c%c%d",
+                         n->name[0], n->name[1], n->num);
+                *copyback = 1;
+                return 0;
+            }
+            idx++;
+        }
+        return -ENODEV;
+    }
+
+    default:
+        return -ENOTTY;
+    }
+}
+
+/*
+ * sioc_handle_route - process SIOCADDRT / SIOCDELRT ioctls
+ *
+ * lwIP doesn't have a real routing table — routing is implicit via
+ * interface IP/netmask and netif_default gateway.  We support:
+ *   - Adding/changing default gateway: set netif_default + netif gw
+ *   - Deleting default route: clear gateway
+ */
+static int sioc_handle_route(uint64 cmd, struct k_rtentry *rt)
+{
+    if (cmd == SIOCADDRT) {
+        if (rt->rt_dst.sa_family != SIOC_AF_INET)
+            return -EAFNOSUPPORT;
+
+        uint32 dst_addr = sioc_get_sockaddr_in(&rt->rt_dst);
+        uint32 gw_addr = sioc_get_sockaddr_in(&rt->rt_gateway);
+        uint32 mask_addr = sioc_get_sockaddr_in(&rt->rt_genmask);
+
+        if (rt->rt_flags & RTF_GATEWAY) {
+            /* Find target interface */
+            struct netif *nif = NULL;
+
+            if (rt->rt_dev != NULL) {
+                /* User specified device name — copy it in */
+                char devname[SIOC_IFNAMSIZ];
+                if (vm_copyin(current->vm, devname, (uint64)rt->rt_dev,
+                              SIOC_IFNAMSIZ) < 0)
+                    return -EFAULT;
+                devname[SIOC_IFNAMSIZ - 1] = '\0';
+                nif = sioc_find_netif(devname);
+            }
+
+            if (nif == NULL) {
+                /* Use first interface that's UP */
+                NETIF_FOREACH(nif) {
+                    if (nif->flags & NETIF_FLAG_UP)
+                        break;
+                }
+            }
+
+            if (nif == NULL)
+                return -ENETUNREACH;
+
+            /* Default route: dst == 0.0.0.0 */
+            if (dst_addr == 0) {
+                ip4_addr_t gw;
+                gw.addr = gw_addr;
+                netif_set_gw(nif, &gw);
+                netif_set_default(nif);
+                return 0;
+            }
+
+            /* Non-default route: set the gateway on the matching interface.
+             * lwIP's routing is subnet-based, so we just set the gateway. */
+            ip4_addr_t gw;
+            gw.addr = gw_addr;
+            netif_set_gw(nif, &gw);
+            return 0;
+        }
+
+        /* Non-gateway route: ensure the interface's IP/netmask match */
+        (void)dst_addr;
+        (void)mask_addr;
+        return 0;  /* accept silently — lwIP handles subnet routing automatically */
+
+    } else if (cmd == SIOCDELRT) {
+        if (rt->rt_dst.sa_family != SIOC_AF_INET)
+            return -EAFNOSUPPORT;
+
+        uint32 dst_addr = sioc_get_sockaddr_in(&rt->rt_dst);
+
+        /* Delete default route */
+        if (dst_addr == 0) {
+            struct netif *nif = netif_default;
+            if (nif != NULL) {
+                ip4_addr_t zero;
+                zero.addr = 0;
+                netif_set_gw(nif, &zero);
+            }
+            return 0;
+        }
+
+        /* Non-default route deletion — no-op in lwIP */
+        return 0;
+    }
+
+    return -EINVAL;
+}
+
 static int sock_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
 {
     struct lwip_sock *sk = (struct lwip_sock *)file->private_data;
@@ -593,6 +971,36 @@ static int sock_file_ioctl(struct vfs_file *file, uint64 cmd, void *arg)
             file->f_flags &= ~O_NONBLOCK;
         return 0;
     }
+
+    /* ---- Network interface ioctls ---- */
+    case SIOCGIFFLAGS: case SIOCSIFFLAGS:
+    case SIOCGIFADDR:  case SIOCSIFADDR:
+    case SIOCGIFNETMASK: case SIOCSIFNETMASK:
+    case SIOCGIFBRDADDR: case SIOCGIFDSTADDR:
+    case SIOCGIFMTU: case SIOCSIFMTU:
+    case SIOCGIFHWADDR: case SIOCGIFINDEX: case SIOCGIFNAME:
+    {
+        struct k_ifreq ifr;
+        if (vm_copyin(current->vm, &ifr, (uint64)arg, sizeof(ifr)) < 0)
+            return -EFAULT;
+        int copyback = 0;
+        int ret = sioc_handle_ifreq(cmd, &ifr, &copyback);
+        if (ret == 0 && copyback) {
+            if (vm_copyout(current->vm, (uint64)arg, &ifr, sizeof(ifr)) < 0)
+                return -EFAULT;
+        }
+        return ret;
+    }
+
+    /* ---- Routing ioctls ---- */
+    case SIOCADDRT: case SIOCDELRT:
+    {
+        struct k_rtentry rt;
+        if (vm_copyin(current->vm, &rt, (uint64)arg, sizeof(rt)) < 0)
+            return -EFAULT;
+        return sioc_handle_route(cmd, &rt);
+    }
+
     default:
         return -ENOTTY;
     }
