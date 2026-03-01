@@ -6,6 +6,7 @@
 
 #define SIGBAD(signo) ((signo) < 1 || (signo) > NSIG)
 
+#if !defined(ON_HOST_OS)
 #define SIGMASK(signo) (SIGBAD(signo) ? 0 : (1UL << ((uint64)(signo) - 1)))
 
 // All four return: 0 if OK, −1 on error
@@ -51,6 +52,7 @@ static inline int sigismember(const sigset_t *set, int signo) {
     }
     return (*set & mask) != 0; // Return 1 if member, 0 otherwise
 }
+#endif /* !ON_HOST_OS */
 
 void signal_init(void);
 void sigstack_init(stack_t *stack);

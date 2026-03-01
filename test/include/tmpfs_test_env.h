@@ -15,6 +15,8 @@
  * kernel */
 #define __KERNEL_TYPES_H
 #define __KERNEL_RISCV_H
+#define __KERNEL_RISCV_COMPAT_H
+#define _X86_H_
 #define __KERNEL_DEFS_H
 #define __KERNEL_PARAM_H
 #define __ERRNO_H_

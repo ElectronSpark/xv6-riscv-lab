@@ -106,6 +106,7 @@ set(WRAPPER_SRC
     ${CMAKE_SOURCE_DIR}/src/wrappers/timer_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/kmm_wrappers.c
     ${CMAKE_SOURCE_DIR}/src/wrappers/cpu_wrappers.c
+    ${CMAKE_SOURCE_DIR}/src/wrappers/rwlock_wrappers.c
 )
 
 # Wrapper sources for ut_page
@@ -218,6 +219,17 @@ set(MOCK_TEST_WRAP_FUNCTIONS
     panic_disable_bt
     printfinit
     argint
+    # RWLock functions
+    rwlock_init
+    rwlock_rlock
+    rwlock_runlock
+    rwlock_wlock
+    rwlock_wunlock
+    rwlock_r_sleep_cb
+    rwlock_r_wake_cb
+    # Additional tq/sched functions
+    tq_wait_cb
+    sleep_on_chan_interruptible
 )
 
 set(MOCK_TEST_SRC
@@ -283,6 +295,8 @@ target_link_options(ut_semaphore PRIVATE ${ASAN_LINK_FLAGS}
     -Wl,--wrap=mycpu,--wrap=myproc,--wrap=__current_thread,--wrap=proc_lock,--wrap=proc_unlock,--wrap=proc_assert_holding
     -Wl,--wrap=sched_lock,--wrap=sched_unlock,--wrap=scheduler_wakeup,--wrap=scheduler_sleep
     -Wl,--wrap=__panic_start,--wrap=__panic_end,--wrap=panic_state,--wrap=panic_disable_bt
+    -Wl,--wrap=tq_wait_in_state,--wrap=signal_pending
+    -Wl,--wrap=sched_timer_set,--wrap=sched_timer_done
 )
 target_include_directories(ut_semaphore PRIVATE
     ${UNIT_TEST_INCLUDE_DIRS}
@@ -307,6 +321,8 @@ target_link_options(ut_rwlock PRIVATE ${ASAN_LINK_FLAGS}
     -Wl,--wrap=mycpu,--wrap=myproc,--wrap=__current_thread,--wrap=proc_lock,--wrap=proc_unlock,--wrap=proc_assert_holding
     -Wl,--wrap=sched_lock,--wrap=sched_unlock,--wrap=scheduler_wakeup,--wrap=scheduler_sleep
     -Wl,--wrap=__panic_start,--wrap=__panic_end,--wrap=panic_state,--wrap=panic_disable_bt
+    -Wl,--wrap=tq_wait_in_state,--wrap=signal_pending
+    -Wl,--wrap=sched_timer_set,--wrap=sched_timer_done
 )
 target_include_directories(ut_rwlock PRIVATE
     ${UNIT_TEST_INCLUDE_DIRS}

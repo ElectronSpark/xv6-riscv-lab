@@ -159,10 +159,9 @@ static int pcache_test_setup(void **state) {
     static bool global_initialized = false;
     if (!global_initialized) {
         // Setup mock for kthread_create that pcache_global_init will call
-        // We'll return a fake proc pointer and a positive PID
+        // kthread_create returns a struct thread* directly
         will_return(__wrap_kthread_create,
-                    (void *)0x1000);           // Return fake proc pointer
-        will_return(__wrap_kthread_create, 1); // Return PID (success)
+                    (void *)0x1000); // Return fake proc pointer
 
         pcache_global_init();
         global_initialized = true;

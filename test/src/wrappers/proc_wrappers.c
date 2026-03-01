@@ -32,6 +32,10 @@
 static struct cpu_local g_cpu_stub;
 static struct thread g_proc_stub = {.pid = 1};
 
+/* Provide x86_r_time and __timebase_frequency for semaphore timed-wait */
+uint64 __timebase_frequency = 1000000;
+uint64 x86_r_time(void) { return 0; }
+
 // Global tracking pointers (NULL if tracking disabled)
 tq_tracking_t *g_tq_tracking = NULL;
 proc_tracking_t *g_proc_tracking = NULL;
@@ -136,20 +140,17 @@ void __wrap_scheduler_sleep(spinlock_t *lk, enum thread_state state)
     (void)state;
 }
 
-int __wrap_kthread_create(const char *name, struct thread **retp, void *entry,
-                              uint64 arg0, uint64 arg1, uint64 stack_order)
+struct thread *__wrap_kthread_create(const char *name, void *entry,
+                                    uint64 arg0, uint64 arg1,
+                                    int stack_order)
 {
-    // Don't use check_expected for parameters - just ignore them in tests
     (void)name;
     (void)entry;
     (void)arg0;
     (void)arg1;
     (void)stack_order;
-    
-    if (retp != NULL) {
-        *retp = mock_ptr_type(struct thread *);
-    }
-    return mock_type(int);  // Return value controlled by will_return()
+
+    return mock_ptr_type(struct thread *);
 }
 
 void __wrap_wakeup(struct thread *p)
@@ -179,6 +180,23 @@ void __wrap_sleep_on_chan(void *chan, spinlock_t *lk)
         lk->locked = 0;  // Simulate release
         lk->locked = 1;  // Simulate re-acquire
     }
+}
+
+int __wrap_sleep_on_chan_interruptible(void *chan, spinlock_t *lk)
+{
+    (void)chan;
+    
+    g_test_sleep_call_count++;
+    
+    if (g_test_break_on_sleep && g_test_sleep_call_count >= g_test_max_sleep_calls) {
+        return 0;
+    }
+    
+    if (lk != NULL) {
+        lk->locked = 0;  // Simulate release
+        lk->locked = 1;  // Simulate re-acquire
+    }
+    return 0;
 }
 
 // Proc queue wrappers
@@ -257,6 +275,80 @@ struct thread *__wrap_tq_wakeup(tq_t *q, int error_no, uint64 rdata)
     }
     
     return mock_ptr_type(struct thread *);
+}
+
+int __wrap_tq_wait_in_state(tq_t *q, spinlock_t *lock, uint64 *rdata,
+                           enum thread_state state)
+{
+    (void)state;
+
+    if (g_concurrency_mode) {
+        __atomic_store_n(&lock->locked, 0, __ATOMIC_SEQ_CST);
+        conc_tq_wait(q, lock);
+        return 0;
+    }
+
+    if (g_tq_tracking) {
+        g_tq_tracking->queue_wait_count++;
+        g_tq_tracking->last_queue_wait = q;
+        g_tq_tracking->last_wait_lock = lock;
+
+        if (g_tq_tracking->wait_callback) {
+            return g_tq_tracking->wait_callback(q, lock, rdata, g_tq_tracking->user_data);
+        }
+
+        if (q != NULL) {
+            q->counter++;
+        }
+
+        return g_tq_tracking->wait_return;
+    }
+
+    return 0;
+}
+
+int __wrap_tq_wait_cb(tq_t *q, sleep_callback_t sleep_callback,
+                      wakeup_callback_t wakeup_callback, void *callback_data,
+                      uint64 *rdata)
+{
+    (void)sleep_callback;
+    (void)wakeup_callback;
+    (void)callback_data;
+
+    if (g_tq_tracking) {
+        g_tq_tracking->queue_wait_count++;
+        g_tq_tracking->last_queue_wait = q;
+
+        if (g_tq_tracking->wait_callback) {
+            return g_tq_tracking->wait_callback(q, NULL, rdata, g_tq_tracking->user_data);
+        }
+
+        if (q != NULL) {
+            q->counter++;
+        }
+
+        return g_tq_tracking->wait_return;
+    }
+
+    return 0;
+}
+
+bool __wrap_signal_pending(struct thread *p)
+{
+    (void)p;
+    return false;
+}
+
+int __wrap_sched_timer_set(void *tn, uint64 ms)
+{
+    (void)tn;
+    (void)ms;
+    return 0;
+}
+
+void __wrap_sched_timer_done(void *tn)
+{
+    (void)tn;
 }
 
 int __wrap_tq_wakeup_all(tq_t *q, int error_no, uint64 rdata)
