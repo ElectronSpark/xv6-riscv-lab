@@ -154,7 +154,7 @@
 #define SYS_prlimit64       996
 #define SYS_statx           995
 #define SYS_copy_file_range 994
-#define SYS_sendfile        993
+#define SYS_sendfile        115
 #define SYS_splice          992
 #define SYS_tee             991
 #define SYS_fallocate       990
@@ -170,9 +170,9 @@
 #define SYS_inotify_init1   980
 #define SYS_inotify_add_watch 979
 #define SYS_inotify_rm_watch  978
-#define SYS_accept4         977
-#define SYS_recvmsg         976
-#define SYS_sendmsg         975
+#define SYS_accept4         114
+#define SYS_recvmsg         113
+#define SYS_sendmsg         112
 #define SYS_socketpair      974
 #define SYS_getuid          139
 #define SYS_geteuid         140

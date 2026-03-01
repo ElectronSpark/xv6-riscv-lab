@@ -87,6 +87,8 @@ static struct vfs_file *__vfs_file_alloc(void) {
     file->ref_count = 1;
     spin_init(&file->knote_lock, "vfs_file_knote");
     list_entry_init(&file->knote_list);
+    /* list_entry must be self-referencing (detached) after init */
+    list_entry_init(&file->list_entry);
     return file;
 }
 
@@ -781,6 +783,7 @@ int vfs_sockalloc(struct vfs_file **f, uint32 raddr, uint16 lport,
         if (pos->raddr == raddr && pos->lport == lport && pos->rport == rport) {
             spin_unlock(&sock_lock);
             kfree((char *)si);
+            __vfs_ftable_detatch(*f);
             __vfs_file_free(*f);
             *f = NULL;
             return -EADDRINUSE;

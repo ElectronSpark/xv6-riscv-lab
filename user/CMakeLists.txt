@@ -193,6 +193,7 @@ set(MUSL_STATIC_PROGRAMS
     mcat:cat    mecho:echo   mgrep:grep   mls:ls      mwc:wc
     mmkdir:mkdir  mrm:rm     mln:ln       mkill:kill  msleep:sleep
     minit:init    msh:sh     mhello:hello mfptest:fptest
+    mnslookup:nslookup
 )
 foreach(MAPPING ${MUSL_STATIC_PROGRAMS})
     string(REPLACE ":" ";" PARTS ${MAPPING})
@@ -743,6 +744,7 @@ set(MUSL_PROG_MAP
     mcat:cat   mecho:echo   mgrep:grep   mls:ls   mwc:wc
     mmkdir:mkdir  mrm:rm  mln:ln  mkill:kill  msleep:sleep
     minit:init  mhello:hello  mfptest:fptest
+    mnslookup:nslookup
 )
 foreach(MAPPING ${MUSL_PROG_MAP})
     string(REPLACE ":" ";" PARTS ${MAPPING})

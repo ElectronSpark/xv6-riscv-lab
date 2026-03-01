@@ -122,7 +122,11 @@
 #define SYS_shutdown     109
 #define SYS_getpeername  110
 #define SYS_getsockname  111
-// 112-119 reserved
+#define SYS_sendmsg      112
+#define SYS_recvmsg      113
+#define SYS_accept4      114
+#define SYS_sendfile     115
+// 116-119 reserved
 
 // --- Extended syscalls (120-139) ---
 #define SYS_openat         120
@@ -171,5 +175,10 @@
 #define SYS_pselect6_time64              878
 #define SYS_mq_timedsend_time64          887
 #define SYS_mq_timedreceive_time64       888
+
+// --- Aliases for musl stub numbers (mapped to real kernel numbers) ---
+// musl defines these at high numbers (975-993) as stubs.
+// We keep the kernel using compact numbers (112-115) and remap the musl
+// stubs in musl-xv6/arch/*/bits/syscall.h.in to match.
 
 #endif /* __KERNEL_SYSCALL_H */

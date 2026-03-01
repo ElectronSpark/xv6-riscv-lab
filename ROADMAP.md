@@ -293,18 +293,30 @@ Per-CPU RCU kthread → rcu_process_callbacks_for_cpu()
 
 ### 12. Network Stack Enhancements
 **Dependencies**: Block device layer (for persistent config), Interrupt handling (for better NIC performance)  
-**Priority**: Medium-Low
+**Priority**: Medium-Low  
+**Status**: 🔄 Partially Completed (February 2026)
 
-- TCP connection management improvements
-- UDP socket support
-- UNIX domain sockets
-- Netlink sockets for kernel communication
-- Network configuration tools (ifconfig, route)
+- ✅ Full lwIP TCP/IP stack integrated (TCP, UDP, ICMP, DNS, DHCP)
+- ✅ BSD socket syscalls via lwIP netconn API (`socket`, `bind`, `listen`, `accept`, `connect`, `send`, `recv`, `close`, `setsockopt`, `getsockopt`, `poll`)
+- ✅ `sendmsg`/`recvmsg` syscalls (SYS 112/113) — scatter-gather I/O
+- ✅ `accept4` syscall (SYS 114) — accept with flags (SOCK_NONBLOCK, SOCK_CLOEXEC)
+- ✅ `sendfile` syscall (SYS 115) — zero-copy file-to-socket transfer
+- ✅ DNS resolution via musl libc (`getaddrinfo`, `getnameinfo`)
+- ✅ `/etc/resolv.conf` and `/etc/hosts` in rootfs (QEMU SLIRP nameserver 10.0.2.3)
+- ✅ `nslookup` user program for DNS testing
+- ✅ E1000 NIC driver with QEMU SLIRP networking
+- ✅ Bug fix: `vfs_sockalloc` EADDRINUSE error path missing `__vfs_ftable_detatch` (caused kernel panic)
+- ⏳ UNIX domain sockets
+- ⏳ Netlink sockets for kernel communication
+- ⏳ Network configuration tools (ifconfig, route)
+- ⏳ IPv6 full support (lwIP has partial support)
 
 **Implementation Notes**:
-- Current: Basic E1000 NIC driver, minimal TCP/IP
-- Target: Complete TCP/IP stack with socket API
-- Files: `kernel/net/` expansion, `user/net/` tools
+- lwIP provides full TCP/IP stack; BSD socket API exposed to userspace via musl libc
+- Dual-arch support: both RISC-V and x86_64 syscall dispatch tables updated
+- musl libc links against kernel socket syscalls transparently
+- DNS tested working: `nslookup google.com` resolves both IPv4 and IPv6 addresses
+- Files: `kernel/lwip_port/sys_socket.c`, `kernel/vfs/file.c`, `kernel/lwip/`, `user/musl-xv6/programs/nslookup.c`
 
 ---
 
@@ -359,24 +371,34 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 ---
 
 ### 15. Web Server Hosting Capability ⭐ **MAJOR MILESTONE**
-**Dependencies**: Network stack, threading, filesystem stability  
-**Priority**: High long-term goal
+**Dependencies**: Network stack ✅ (mostly done), threading ✅, filesystem stability  
+**Priority**: High long-term goal  
+**Status**: 🔄 Infrastructure Ready (February 2026)
 
-- Stable TCP/IP stack with multiple connections
-- HTTP/1.1 server implementation
-- CGI or FastCGI support for dynamic content
-- Static file serving
-- Virtual hosting support
+- ✅ Stable TCP/IP stack (lwIP) with BSD socket API
+- ✅ `sendfile` syscall for efficient static file serving
+- ✅ `accept4` for non-blocking accept
+- ✅ `sendmsg`/`recvmsg` for advanced I/O patterns
+- ✅ DNS resolution working (tested with `nslookup`)
+- ✅ Threading support (kernel threads, work queues)
+- ⏳ HTTP/1.1 server implementation
+- ⏳ CGI or FastCGI support for dynamic content
+- ⏳ Static file serving with proper MIME types
+- ⏳ Virtual hosting support
+- ⏳ CPython 3.12 web framework (Flask/http.server) — CPython already ported
 
 **Implementation Notes**:
-- Goal: Host a simple website (static pages + basic CGI)
-- Demonstrates OS maturity and network stack reliability
-- Files: `user/httpd/` (new), CGI runtime
+- Network stack is now feature-complete enough to support a web server
+- All required socket syscalls implemented and tested on both RISC-V and x86_64
+- Next step: implement a simple HTTP server (`user/httpd/` or use CPython's `http.server`)
+- CPython 3.12 is already ported — could run Python web apps directly
+- Files: `user/httpd/` (new), or `cpython/` (existing)
 
 **Example Use Cases**:
 - Personal blog or documentation site
 - OS status dashboard
 - Simple REST API for system monitoring
+- Python web application via CPython 3.12
 
 ---
 
@@ -481,12 +503,12 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 5. Multi-User Support (depends on VFS - done)
 6. LibC Expansion → Feeds into Async VFS, Self-hosting
 7. TTY/Terminal → Block Device Layer → Pseudo-FS → Async VFS
-8. Network Stack (benefits from Interrupt ✅ + Memory improvements)
+8. Network Stack ✅ PARTIALLY COMPLETE (lwIP TCP/IP, BSD sockets, DNS, sendmsg/recvmsg/accept4/sendfile)
 9. FS Features (ext2, xattrs)
 
 **Long-Term Goals:**
 - ALL NEAR-TERM → **14. Self-Hosting** ⭐ (TOP PRIORITY)  
-- Network + Threading ✅ + FS → **15. Web Server Hosting** ⭐ (MAJOR GOAL)
+- Network ✅ (lwIP + syscalls) + Threading ✅ + FS → **15. Web Server Hosting** ⭐ (MAJOR GOAL — infrastructure ready)
 - 16. Dynamic Linking → 18. Kernel Modules  
 - 17. Advanced Pseudo-FS  
 - 19. GUI (exploratory)  
@@ -512,7 +534,7 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 
 ### Phase 3: System Completeness (3-6 months)
 11. Standard LibC expansion
-12. Network stack enhancements (benefits from interrupt ✅ + memory improvements)
+12. ✅ **Network stack enhancements** — lwIP TCP/IP, BSD sockets, DNS, sendmsg/recvmsg/accept4/sendfile
 13. File locking and advanced FS features
 14. CFS-like fair scheduler policy (infrastructure ✅ ready)
 
@@ -523,7 +545,7 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 18. Dynamic linking for smaller binaries
 
 ### Phase 5: Advanced Features (6-12 months) ⭐
-19. **Web server hosting** capability
+19. **Web server hosting** capability (network infrastructure ✅ ready)
 20. Advanced pseudo-filesystems
 21. Kernel modules system
 
@@ -552,6 +574,8 @@ These are stretch goals that would transform xv6 into a self-sufficient developm
 - [ ] Can run standard Unix utilities (bash, coreutils)
 - [ ] Multiple users can log in with proper permissions
 - [ ] System remains stable under load (stressfs, usertests)
+- [x] **Network syscalls: sendmsg, recvmsg, accept4, sendfile** ✅
+- [x] **DNS resolution working (nslookup google.com)** ✅
 - [ ] Network services work reliably (TCP echo server, basic HTTP)
 
 ### Long-Term Success:
@@ -583,4 +607,4 @@ When implementing features from this roadmap:
 - **Hardware Support**: Orange Pi RV2 support demonstrates portability to real hardware.
 - **Experimental Features**: GUI and kernel MicroPython are low priority - mention only for future exploration.
 
-Last Updated: January 29, 2026
+Last Updated: February 28, 2026

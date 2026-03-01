@@ -43,6 +43,17 @@ mkdir -p "$STAGING/dev"
 mkdir -p "$STAGING/proc"
 mkdir -p "$STAGING/tmp"
 mkdir -p "$STAGING/sys"
+mkdir -p "$STAGING/etc"
+
+# ── Network configuration (user-space DNS via musl) ──────────────────────────
+# QEMU SLIRP model: gateway 10.0.2.2, DNS 10.0.2.3
+cat > "$STAGING/etc/resolv.conf" <<'RESOLV'
+nameserver 10.0.2.3
+RESOLV
+
+cat > "$STAGING/etc/hosts" <<'HOSTS'
+127.0.0.1 localhost
+HOSTS
 
 # Copy README to root
 if [ -f "$README" ]; then

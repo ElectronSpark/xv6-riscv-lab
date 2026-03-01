@@ -3306,3 +3306,121 @@ uint64 sys_vfs_dup3(void) {
 
     return ret;
 }
+
+/* ========================================================================== */
+/* sendfile(out_fd, in_fd, offset_ptr, count) → bytes / -errno                */
+/* ========================================================================== */
+
+/*
+ * sys_sendfile(out_fd, in_fd, offset_ptr, count) → bytes_written / -errno
+ *
+ * Copies data from in_fd (regular file) to out_fd (socket/pipe/file)
+ * entirely in kernel space, avoiding user-space bounce buffers.
+ *
+ * If offset_ptr is non-NULL, reads from *offset_ptr and updates it on
+ * return; the in_fd file position is unchanged.
+ * If offset_ptr is NULL, reads from (and updates) the in_fd file position.
+ */
+uint64 sys_sendfile(void)
+{
+    int out_fd, in_fd;
+    uint64 u_offset;
+    int64 count;
+    argint(0, &out_fd);
+    argint(1, &in_fd);
+    argaddr(2, &u_offset);
+    argint64(3, &count);
+
+    if (count < 0)
+        return (uint64)-EINVAL;
+    if (count == 0)
+        return 0;
+
+    struct vfs_file *in_f = __vfs_argfd(in_fd);
+    if (in_f == NULL)
+        return (uint64)-EBADF;
+
+    struct vfs_file *out_f = __vfs_argfd(out_fd);
+    if (out_f == NULL) {
+        vfs_fput(in_f);
+        return (uint64)-EBADF;
+    }
+
+    /* Determine if an explicit offset was supplied */
+    bool use_offset = (u_offset != 0);
+    loff_t offset = 0;
+    if (use_offset) {
+        if (vm_copyin(current->vm, &offset, u_offset, sizeof(offset)) < 0) {
+            vfs_fput(in_f);
+            vfs_fput(out_f);
+            return (uint64)-EFAULT;
+        }
+        if (offset < 0) {
+            vfs_fput(in_f);
+            vfs_fput(out_f);
+            return (uint64)-EINVAL;
+        }
+    }
+
+    /*
+     * Transfer loop — use a 4 KiB kernel buffer (one page).
+     * Each iteration:
+     *   1. Optionally seek in_f to the requested offset
+     *   2. Read into kernel buf via vfs_fileread(user=false)
+     *   3. Write from kernel buf via vfs_filewrite(user=false)
+     */
+    char buf[4096];
+    ssize_t total = 0;
+
+    while (total < count) {
+        size_t chunk = (size_t)(count - total);
+        if (chunk > sizeof(buf))
+            chunk = sizeof(buf);
+
+        /*
+         * If an explicit offset was provided, temporarily set f_pos
+         * so that vfs_fileread reads from the right place.
+         * vfs_fileread will advance f_pos; we capture the new value
+         * and restore the original afterwards.
+         */
+        loff_t saved_pos = 0;
+        if (use_offset) {
+            mutex_lock(&in_f->lock);
+            saved_pos = in_f->f_pos;
+            in_f->f_pos = offset;
+            mutex_unlock(&in_f->lock);
+        }
+
+        ssize_t nr = vfs_fileread(in_f, buf, chunk, false);
+
+        if (use_offset) {
+            mutex_lock(&in_f->lock);
+            offset = in_f->f_pos;   /* capture newly advanced pos */
+            in_f->f_pos = saved_pos; /* restore original */
+            mutex_unlock(&in_f->lock);
+        }
+
+        if (nr <= 0)
+            break;   /* EOF or error */
+
+        ssize_t nw = vfs_filewrite(out_f, buf, (size_t)nr, false);
+        if (nw <= 0) {
+            if (total == 0)
+                total = nw;  /* propagate error if nothing sent yet */
+            break;
+        }
+        total += nw;
+        if (nw < nr)
+            break;   /* short write — back-pressure */
+    }
+
+    /* Write back updated offset if explicit offset was provided */
+    if (use_offset && total > 0) {
+        vm_copyout(current->vm, u_offset, &offset, sizeof(offset));
+    }
+
+    vfs_fput(in_f);
+    vfs_fput(out_f);
+
+    return (uint64)total;
+}

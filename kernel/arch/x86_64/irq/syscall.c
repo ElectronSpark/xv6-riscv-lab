@@ -242,6 +242,10 @@ extern uint64 sys_getsockopt(void);
 extern uint64 sys_shutdown(void);
 extern uint64 sys_getpeername(void);
 extern uint64 sys_getsockname(void);
+extern uint64 sys_sendmsg(void);
+extern uint64 sys_recvmsg(void);
+extern uint64 sys_accept4(void);
+extern uint64 sys_sendfile(void);
 #endif
 
 /* ── Syscall routing table (same as RISC-V, shared syscall numbers) ── */
@@ -372,6 +376,10 @@ static uint64 (*syscalls[])(void) = {
     [SYS_shutdown] sys_shutdown,
     [SYS_getpeername] sys_getpeername,
     [SYS_getsockname] sys_getsockname,
+    [SYS_sendmsg] sys_sendmsg,
+    [SYS_recvmsg] sys_recvmsg,
+    [SYS_accept4] sys_accept4,
+    [SYS_sendfile] sys_sendfile,
 #endif
     [SYS_sched_rr_get_interval_time64] sys_ni_enosys,
     [SYS_recvmmsg_time64] sys_ni_enosys,

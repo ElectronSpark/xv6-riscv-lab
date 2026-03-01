@@ -1060,3 +1060,384 @@ uint64 sys_getsockname(void)
     vm_copyout(current->vm, uaddr, &sa, sizeof(sa));
     return 0;
 }
+
+/* ========================================================================== */
+/* accept4(fd, addr, addrlen, flags) → new_fd / -errno                        */
+/* ========================================================================== */
+
+/*
+ * sys_accept4(fd, addr, addrlen_ptr, flags) → new_fd / -errno
+ *
+ * Like accept(), but atomically sets SOCK_NONBLOCK / SOCK_CLOEXEC on the
+ * returned fd.
+ */
+uint64 sys_accept4(void)
+{
+    int fd, flags;
+    uint64 uaddr, uaddrlen;
+    argint(0, &fd);
+    argaddr(1, &uaddr);
+    argaddr(2, &uaddrlen);
+    argint(3, &flags);
+
+    struct lwip_sock *sk = sock_from_fd(fd);
+    if (sk == NULL)
+        return (uint64)-EBADF;
+
+    struct netconn *newconn = NULL;
+    err_t err = netconn_accept(sk->conn, &newconn);
+    if (err != ERR_OK) {
+        if (err == ERR_TIMEOUT && signal_pending(current))
+            return (uint64)-EINTR;
+        return (uint64)-lwip_err_to_errno(err);
+    }
+
+    /* Allocate a new socket + fd for the accepted connection */
+    int file_flags = O_RDWR;
+    if (flags & SOCK_NONBLOCK)
+        file_flags |= O_NONBLOCK;
+
+    struct lwip_sock *newsk = lwip_sock_alloc();
+    if (newsk == NULL) {
+        netconn_delete(newconn);
+        return (uint64)-ENOMEM;
+    }
+    newsk->conn = newconn;
+    newsk->type = SOCK_STREAM;
+    newsk->protocol = sk->protocol;
+
+    int newfd = vfs_custom_fd_alloc(&lwip_socket_file_ops, newsk, file_flags);
+    if (newfd < 0) {
+        lwip_sock_free(newsk);
+        return (uint64)newfd;
+    }
+
+    /* Set close-on-exec if requested */
+    if (flags & SOCK_CLOEXEC) {
+        spin_lock(&current->fdtable->lock);
+        vfs_fdtable_set_fdflags(current->fdtable, newfd, FD_CLOEXEC);
+        spin_unlock(&current->fdtable->lock);
+    }
+
+    /* Fill in remote address if requested */
+    if (uaddr != 0 && uaddrlen != 0) {
+        ip_addr_t raddr;
+        u16_t rport;
+        netconn_peer(newconn, &raddr, &rport);
+
+        struct k_sockaddr_in sa;
+        memset(&sa, 0, sizeof(sa));
+        sa.sin_family = AF_INET;
+        sa.sin_port = htons(rport);
+        sa.sin_addr = ip_addr_get_ip4_u32(&raddr);
+
+        int alen = K_SOCKADDR_IN_SIZE;
+        vm_copyout(current->vm, uaddrlen, &alen, sizeof(alen));
+        vm_copyout(current->vm, uaddr, &sa, sizeof(sa));
+    }
+
+    return (uint64)newfd;
+}
+
+/* ========================================================================== */
+/* sendmsg / recvmsg                                                          */
+/* ========================================================================== */
+
+/*
+ * Kernel-space msghdr / iovec — must match the LP64 POSIX layout
+ * that musl passes from user space.
+ */
+struct k_msghdr {
+    uint64 msg_name;        /* void *msg_name          */
+    uint32 msg_namelen;     /* socklen_t               */
+    uint32 __pad0;
+    uint64 msg_iov;         /* struct iovec *msg_iov   */
+    uint64 msg_iovlen;      /* size_t                  */
+    uint64 msg_control;     /* void *msg_control       */
+    uint64 msg_controllen;  /* size_t                  */
+    int    msg_flags;       /* int                     */
+};
+
+struct k_iovec {
+    uint64 iov_base;        /* void *  */
+    uint64 iov_len;         /* size_t  */
+};
+
+#define MSG_TRUNC    0x20
+#define MSG_DONTWAIT 0x40
+#define MSG_NOSIGNAL 0x4000
+
+#define SENDMSG_MAX_IOV 16
+
+/*
+ * sys_sendmsg(fd, msg, flags) → nbytes / -errno
+ *
+ * Gather-write to a socket.  For TCP, writes each iov sequentially.
+ * For UDP, concatenates all iovecs into a single datagram.
+ */
+uint64 sys_sendmsg(void)
+{
+    int fd, flags;
+    uint64 umsg;
+    argint(0, &fd);
+    argaddr(1, &umsg);
+    argint(2, &flags);
+
+    (void)flags;   /* best-effort: MSG_NOSIGNAL etc. accepted but ignored */
+
+    struct lwip_sock *sk = sock_from_fd(fd);
+    if (sk == NULL)
+        return (uint64)-EBADF;
+
+    /* Copy the msghdr from user space */
+    struct k_msghdr mh;
+    if (vm_copyin(current->vm, &mh, umsg, sizeof(mh)) < 0)
+        return (uint64)-EFAULT;
+
+    if (mh.msg_iovlen == 0)
+        return 0;
+    if (mh.msg_iovlen > SENDMSG_MAX_IOV)
+        return (uint64)-EMSGSIZE;
+
+    /* Copy iovec array from user space */
+    struct k_iovec iovs[SENDMSG_MAX_IOV];
+    uint64 iov_bytes = mh.msg_iovlen * sizeof(struct k_iovec);
+    if (vm_copyin(current->vm, iovs, mh.msg_iov, iov_bytes) < 0)
+        return (uint64)-EFAULT;
+
+    /* Set destination address if provided (UDP with msg_name) */
+    if (mh.msg_name != 0 && mh.msg_namelen >= K_SOCKADDR_IN_SIZE &&
+        sk->type != SOCK_STREAM) {
+        struct k_sockaddr_in sa;
+        if (vm_copyin(current->vm, &sa, mh.msg_name, sizeof(sa)) < 0)
+            return (uint64)-EFAULT;
+        if (sa.sin_family != AF_INET)
+            return (uint64)-EAFNOSUPPORT;
+
+        ip_addr_t destip;
+        ip_addr_set_ip4_u32(&destip, sa.sin_addr);
+        err_t cerr = netconn_connect(sk->conn, &destip, ntohs(sa.sin_port));
+        if (cerr != ERR_OK && cerr != ERR_ISCONN)
+            return (uint64)-lwip_err_to_errno(cerr);
+    }
+
+    ssize_t total = 0;
+
+    if (sk->type == SOCK_STREAM) {
+        /* TCP: write each iov sequentially through netconn_write */
+        char tmpbuf[1500];
+        for (uint64 i = 0; i < mh.msg_iovlen; i++) {
+            uint64 base = iovs[i].iov_base;
+            size_t ilen = iovs[i].iov_len;
+            size_t sent = 0;
+            while (sent < ilen) {
+                size_t chunk = ilen - sent;
+                if (chunk > sizeof(tmpbuf))
+                    chunk = sizeof(tmpbuf);
+                if (vm_copyin(current->vm, tmpbuf, base + sent, chunk) < 0)
+                    return total > 0 ? (uint64)total : (uint64)-EFAULT;
+                err_t err = netconn_write(sk->conn, tmpbuf, chunk,
+                                          NETCONN_COPY);
+                if (err != ERR_OK)
+                    return total > 0 ? (uint64)total
+                                     : (uint64)-lwip_err_to_errno(err);
+                sent += chunk;
+                total += (ssize_t)chunk;
+            }
+        }
+    } else {
+        /* UDP: gather all iovecs into a single netbuf datagram */
+        size_t total_len = 0;
+        for (uint64 i = 0; i < mh.msg_iovlen; i++)
+            total_len += iovs[i].iov_len;
+        if (total_len > 65535)
+            return (uint64)-EMSGSIZE;
+
+        struct netbuf *nb = netbuf_new();
+        if (nb == NULL)
+            return (uint64)-ENOMEM;
+        void *data = netbuf_alloc(nb, (uint16)total_len);
+        if (data == NULL) {
+            netbuf_delete(nb);
+            return (uint64)-ENOMEM;
+        }
+
+        size_t off = 0;
+        for (uint64 i = 0; i < mh.msg_iovlen; i++) {
+            if (iovs[i].iov_len == 0)
+                continue;
+            if (vm_copyin(current->vm, (char *)data + off,
+                          iovs[i].iov_base, iovs[i].iov_len) < 0) {
+                netbuf_delete(nb);
+                return (uint64)-EFAULT;
+            }
+            off += iovs[i].iov_len;
+        }
+
+        err_t err = netconn_send(sk->conn, nb);
+        netbuf_delete(nb);
+        if (err != ERR_OK)
+            return (uint64)-lwip_err_to_errno(err);
+        total = (ssize_t)total_len;
+    }
+
+    return (uint64)total;
+}
+
+/*
+ * sys_recvmsg(fd, msg, flags) → nbytes / -errno
+ *
+ * Scatter-read from a socket.  Sets msg_flags with MSG_TRUNC if the
+ * datagram was larger than the supplied buffer (critical for DNS).
+ */
+uint64 sys_recvmsg(void)
+{
+    int fd, flags;
+    uint64 umsg;
+    argint(0, &fd);
+    argaddr(1, &umsg);
+    argint(2, &flags);
+
+    (void)flags;
+
+    struct lwip_sock *sk = sock_from_fd(fd);
+    if (sk == NULL)
+        return (uint64)-EBADF;
+
+    /* Copy the msghdr from user space */
+    struct k_msghdr mh;
+    if (vm_copyin(current->vm, &mh, umsg, sizeof(mh)) < 0)
+        return (uint64)-EFAULT;
+
+    if (mh.msg_iovlen == 0)
+        return 0;
+    if (mh.msg_iovlen > SENDMSG_MAX_IOV)
+        return (uint64)-EINVAL;
+
+    /* Copy iovec array */
+    struct k_iovec iovs[SENDMSG_MAX_IOV];
+    uint64 iov_bytes = mh.msg_iovlen * sizeof(struct k_iovec);
+    if (vm_copyin(current->vm, iovs, mh.msg_iov, iov_bytes) < 0)
+        return (uint64)-EFAULT;
+
+    /* Compute total buffer capacity */
+    size_t buf_total = 0;
+    for (uint64 i = 0; i < mh.msg_iovlen; i++)
+        buf_total += iovs[i].iov_len;
+
+    int out_flags = 0;
+    ssize_t total = 0;
+
+    if (sk->type == SOCK_STREAM) {
+        /* TCP: receive one pbuf, scatter into iovecs */
+        struct pbuf *p = NULL;
+        err_t err = netconn_recv_tcp_pbuf(sk->conn, &p);
+        if (err != ERR_OK) {
+            if (err == ERR_CLSD)
+                return 0;          /* EOF */
+            if (err == ERR_TIMEOUT && signal_pending(current))
+                return (uint64)-EINTR;
+            return (uint64)-lwip_err_to_errno(err);
+        }
+
+        uint16 avail = p->tot_len;
+        uint16 poff = 0;
+        char tmpbuf[1500];
+
+        for (uint64 i = 0; i < mh.msg_iovlen && poff < avail; i++) {
+            size_t want = iovs[i].iov_len;
+            uint16 remain = avail - poff;
+            size_t tocopy = (want < remain) ? want : (size_t)remain;
+
+            /* Copy in chunks through tmpbuf */
+            size_t copied = 0;
+            while (copied < tocopy) {
+                size_t chunk = tocopy - copied;
+                if (chunk > sizeof(tmpbuf))
+                    chunk = sizeof(tmpbuf);
+                uint16 got = pbuf_copy_partial(p, tmpbuf, (uint16)chunk, poff);
+                if (got == 0)
+                    break;
+                if (vm_copyout(current->vm,
+                               iovs[i].iov_base + copied,
+                               tmpbuf, got) < 0) {
+                    pbuf_free(p);
+                    return total > 0 ? (uint64)total : (uint64)-EFAULT;
+                }
+                poff += got;
+                copied += got;
+                total += got;
+            }
+        }
+        pbuf_free(p);
+
+    } else {
+        /* UDP/RAW: receive one datagram, scatter into iovecs */
+        struct netbuf *nb = NULL;
+        err_t err = netconn_recv(sk->conn, &nb);
+        if (err != ERR_OK) {
+            if (err == ERR_TIMEOUT && signal_pending(current))
+                return (uint64)-EINTR;
+            return (uint64)-lwip_err_to_errno(err);
+        }
+
+        void *data;
+        u16_t dlen;
+        netbuf_data(nb, &data, &dlen);
+
+        /* Scatter data into iovecs */
+        size_t doff = 0;
+        for (uint64 i = 0; i < mh.msg_iovlen && doff < dlen; i++) {
+            size_t want = iovs[i].iov_len;
+            size_t remain = (size_t)(dlen - doff);
+            size_t tocopy = (want < remain) ? want : remain;
+            if (tocopy > 0) {
+                if (vm_copyout(current->vm, iovs[i].iov_base,
+                               (char *)data + doff, tocopy) < 0) {
+                    netbuf_delete(nb);
+                    return total > 0 ? (uint64)total : (uint64)-EFAULT;
+                }
+                doff += tocopy;
+                total += (ssize_t)tocopy;
+            }
+        }
+
+        /* MSG_TRUNC: datagram was larger than supplied buffer */
+        if ((size_t)dlen > buf_total)
+            out_flags |= MSG_TRUNC;
+
+        /* Copy source address into msg_name if requested */
+        if (mh.msg_name != 0 && mh.msg_namelen >= K_SOCKADDR_IN_SIZE) {
+            const ip_addr_t *fromaddr = netbuf_fromaddr(nb);
+            u16_t fromport = netbuf_fromport(nb);
+
+            struct k_sockaddr_in sa;
+            memset(&sa, 0, sizeof(sa));
+            sa.sin_family = AF_INET;
+            sa.sin_port = htons(fromport);
+            sa.sin_addr = ip_addr_get_ip4_u32(fromaddr);
+
+            vm_copyout(current->vm, mh.msg_name, &sa, sizeof(sa));
+            /* Update msg_namelen in user msghdr */
+            uint32 nlen = K_SOCKADDR_IN_SIZE;
+            vm_copyout(current->vm,
+                        umsg + __builtin_offsetof(struct k_msghdr, msg_namelen),
+                        &nlen, sizeof(nlen));
+        }
+
+        netbuf_delete(nb);
+    }
+
+    /* Write back msg_flags to user space */
+    vm_copyout(current->vm,
+                umsg + __builtin_offsetof(struct k_msghdr, msg_flags),
+                &out_flags, sizeof(out_flags));
+
+    /* Clear msg_controllen (no ancillary data support) */
+    uint64 zero = 0;
+    vm_copyout(current->vm,
+                umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
+                &zero, sizeof(zero));
+
+    return (uint64)total;
+}
