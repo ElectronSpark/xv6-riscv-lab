@@ -614,3 +614,28 @@ void proctab_for_each_rcu(void (*fn)(struct thread *, void *), void *arg) {
     hlist_foreach_node_rcu(&proc_table.procs, p, proctab_entry) { fn(p, arg); }
     rcu_read_unlock();
 }
+
+/* -------------------------------------------------------------------------
+ * proctab_for_each_tgid - Iterate every live process-group leader (pid==tgid)
+ *
+ * Calls fn(tgid, arg) for each unique group leader found in the process
+ * table.  Internally wraps proctab_for_each_rcu, so @fn must not block.
+ * ------------------------------------------------------------------------- */
+
+struct __for_each_tgid_arg {
+    void (*fn)(int, void *);
+    void *arg;
+};
+
+static void __for_each_tgid_cb(struct thread *p, void *arg) {
+    /* Only visit group leaders (they have pid == tgid) */
+    if (p->pid != p->tgid)
+        return;
+    struct __for_each_tgid_arg *a = (struct __for_each_tgid_arg *)arg;
+    a->fn(p->tgid, a->arg);
+}
+
+void proctab_for_each_tgid(void (*fn)(int tgid, void *arg), void *arg) {
+    struct __for_each_tgid_arg wrap = {.fn = fn, .arg = arg};
+    proctab_for_each_rcu(__for_each_tgid_cb, &wrap);
+}

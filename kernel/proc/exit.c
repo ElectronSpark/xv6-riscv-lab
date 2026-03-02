@@ -18,6 +18,7 @@
 #include "signal.h"
 #include <mm/slab.h>
 #include "string.h"
+#include "vfs/fs.h"
 #include "types.h"
 #include "vfs/file.h"
 #include "vfs/fs.h"
@@ -355,6 +356,7 @@ int wait(uint64 addr) {
                 detach_child(p, child);
                 proctab_proc_remove(child);
                 pid_wunlock();
+                procfs_evict_pid(child->tgid); /* remove /proc/<tgid> entries */
                 __free_pid(); // Release the PID slot (lock-free)
                 thread_destroy(child);
                 goto ret_unlocked;
@@ -458,6 +460,7 @@ int waitpid(int target_pid, uint64 addr, int options) {
                 detach_child(p, child);
                 proctab_proc_remove(child);
                 pid_wunlock();
+                procfs_evict_pid(child->tgid); /* remove /proc/<tgid> entries */
                 __free_pid();
                 thread_destroy(child);
                 goto ret_unlocked;

@@ -185,6 +185,13 @@ static inline void __thread_state_set(struct thread *p,
 struct clone_args;
 
 int get_pid_thread(int pid, struct thread **pp);
+/*
+ * proctab_for_each_tgid - call @fn(tgid, @arg) for every live group leader.
+ *
+ * Acquires and releases the RCU read lock internally (via
+ * proctab_for_each_rcu).  @fn must not block or sleep.
+ */
+void proctab_for_each_tgid(void (*fn)(int tgid, void *arg), void *arg);
 void exit(int);
 void vfork_done(struct thread *p);
 int thread_clone(struct clone_args *args);

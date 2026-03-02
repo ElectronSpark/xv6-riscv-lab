@@ -464,6 +464,7 @@ void vfs_init(void) {
     xv6fs_init();
     ext4fs_init();
     devtmpfs_init();
+    procfs_init();
 
     // Mount filesystems
     tmpfs_mount_root();
@@ -518,6 +519,28 @@ void vfs_init(void) {
 
     // Optional: run smoke tests in a separate kernel thread with chroot to /tmp
     tmpfs_smoketest_start();
+
+    // Mount procfs at /proc
+    struct vfs_inode *proc_dir = vfs_namei("/proc", 5);
+    if (IS_ERR_OR_NULL(proc_dir)) {
+        struct vfs_inode *root = vfs_namei("/", 1);
+        if (!IS_ERR_OR_NULL(root)) {
+            proc_dir = vfs_mkdir(root, 0555, "proc", 4);
+            vfs_iput(root);
+            if (!IS_ERR_OR_NULL(proc_dir))
+                vfs_iput(proc_dir);
+        }
+    } else {
+        vfs_iput(proc_dir);
+    }
+    ret = vfs_mount_path("procfs", "/proc", 5, NULL, 0);
+    if (ret == 0) {
+        printf("procfs: mounted at /proc\n");
+    } else if (ret == -ENOENT) {
+        printf("procfs: /proc directory not found\n");
+    } else {
+        printf("procfs: failed to mount at /proc, errno=%d\n", ret);
+    }
     xv6fs_run_all_smoketests();
 }
 

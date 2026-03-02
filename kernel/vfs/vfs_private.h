@@ -30,6 +30,7 @@ void ext4fs_mount_root(void);
 void ext4fs_mount_root(void);
 void devtmpfs_init(void);    // Initialize devtmpfs and register fs type
 int devtmpfs_post_mount_populate(void); // Populate /dev after mount
+void procfs_init(void);      // Initialize procfs and register fs type
 
 // Orphan management
 int vfs_make_orphan(struct vfs_inode *inode);

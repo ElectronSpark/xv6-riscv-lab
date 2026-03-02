@@ -55,6 +55,9 @@ int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
 // - Use vfs_idup() to take an additional reference; pair it with vfs_iput().
 // - Do not access an inode after calling the last vfs_iput() on it.
 
+/* procfs – called from proc/exit.c when a zombie is reaped */
+void procfs_evict_pid(int tgid);
+
 void vfs_ilock(struct vfs_inode *inode);
 int vfs_ilock_trylock(
     struct vfs_inode *inode); // Try to lock, returns 1 on success, 0 on failure
