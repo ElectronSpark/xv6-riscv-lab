@@ -656,7 +656,6 @@ sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread,
                             void *arg, int stacksize, int prio)
 {
     (void)stacksize;
-    (void)prio;
 
     struct lwip_thread_arg *ta = kvmalloc(sizeof(*ta));
     if (ta == NULL) {
@@ -670,6 +669,11 @@ sys_thread_t sys_thread_new(const char *name, lwip_thread_fn thread,
     if (IS_ERR_OR_NULL(t)) {
         kvfree(ta);
         panic("lwip: failed to create thread");
+    }
+
+    /* Apply lwIP-provided priority to the xv6 scheduler entity */
+    if (prio > 0) {
+        t->sched_entity->priority = prio;
     }
 
     /* kthread_create leaves thread in THREAD_UNINTERRUPTIBLE — wake it */

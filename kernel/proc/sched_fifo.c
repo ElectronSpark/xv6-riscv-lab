@@ -227,6 +227,8 @@ void init_fifo_rq_range(int start_cls_id, int end_cls_id) {
 }
 
 void init_fifo_rq(void) {
-    // Register FIFO scheduler for the default major priority level only
-    init_fifo_rq_range(1, IDLE_MAJOR_PRIORITY);
+    // Register FIFO scheduler for major priority levels, excluding the
+    // EEVDF reserved range [EEVDF_MAJOR_PRIORITY_START, EEVDF_MAJOR_PRIORITY_LIMIT)
+    init_fifo_rq_range(1, EEVDF_MAJOR_PRIORITY_START);
+    init_fifo_rq_range(EEVDF_MAJOR_PRIORITY_LIMIT, IDLE_MAJOR_PRIORITY);
 }

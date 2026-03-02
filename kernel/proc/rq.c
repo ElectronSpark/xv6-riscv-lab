@@ -176,6 +176,7 @@ void rq_global_init(void) {
     // Initialize each individual rq structure is done in rq_register
     init_idle_rq();
     init_fifo_rq();
+    init_eevdf_rq();
 }
 
 void rq_init(struct rq *rq) {
@@ -214,6 +215,13 @@ void sched_entity_init(struct sched_entity *se, struct thread *p) {
     se->start_time = 0;
     se->exec_start = 0;
     se->exec_end = 0;
+    se->vruntime = 0;
+    se->deadline = 0;
+    se->min_vruntime = 0;
+    se->slice = EEVDF_DEFAULT_SLICE_TICKS;
+    se->load.weight = SCHED_FIXEDPOINT_ONE;
+    se->load.inv_weight = SCHED_FIXEDPOINT_ONE;
+    se->eevdf_on_rq = 0;
     se->thread = p;
 }
 

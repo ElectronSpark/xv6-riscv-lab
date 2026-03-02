@@ -14,6 +14,7 @@ set(PROC_C_SRCS
     rq.c
     sched_idle.c
     sched_fifo.c
+    sched_eevdf.c
     rq_test.c
     futex.c
 )

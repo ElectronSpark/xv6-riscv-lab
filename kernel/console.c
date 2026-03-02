@@ -19,6 +19,7 @@
 #include "errno.h"
 #include "proc/thread.h"
 #include "proc/sched.h"
+#include "proc/rq.h"
 #include "proc/proc_private.h"
 #include "mm/vm.h"
 #include "dev/cdev.h"
@@ -578,14 +579,18 @@ void consoledevinit(void) {
     /* Start the input feeder thread (intr ring buf → tty_input) */
     struct thread *feeder =
         kthread_create("tty_input", console_tty_input_thread, 0, 0, 0);
-    if (!IS_ERR_OR_NULL(feeder))
+    if (!IS_ERR_OR_NULL(feeder)) {
+        feeder->sched_entity->priority = MAKE_PRIORITY(16, 0);
         wakeup(feeder);
+    }
 
     /* Start the output drain thread (echo → UART) */
     struct thread *drain =
         kthread_create("tty_drain", console_tty_drain_thread, 0, 0, 0);
-    if (!IS_ERR_OR_NULL(drain))
+    if (!IS_ERR_OR_NULL(drain)) {
+        drain->sched_entity->priority = MAKE_PRIORITY(16, 0);
         wakeup(drain);
+    }
 
     // Start SBI polling thread if UART hardware not available
     if (!uart_initialized) {

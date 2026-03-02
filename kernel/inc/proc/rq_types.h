@@ -146,6 +146,14 @@ struct sched_entity {
     uint64 exec_start; // Last time the thread started executing
     uint64 exec_end;   // Last time the thread stopped executing
 
+    // EEVDF scheduler fields
+    int64 vruntime;       // Virtual runtime (fixed-point, SCHED_FIXEDPOINT_SHIFT)
+    int64 deadline;       // Virtual deadline (fixed-point)
+    int64 min_vruntime;   // Snapshot of rq min_vruntime at enqueue time
+    uint64 slice;         // Time slice in raw ticks
+    struct load_weight load; // Weight for this entity
+    int eevdf_on_rq;      // Whether this entity is in the EEVDF rb-tree
+
     struct context context; // swtch() here to run thread
 };
 
@@ -177,6 +185,33 @@ struct fifo_rq {
     struct rq rq;
     struct fifo_subqueue subqueues[FIFO_RQ_SUBLEVELS]; // One per minor priority
     uint8 ready_mask; // Bitmask of non-empty subqueues
+};
+
+// EEVDF run queue - uses a red-black tree keyed by virtual deadline
+#define EEVDF_DEFAULT_SLICE_TICKS 10000000ULL // ~10ms at 1GHz timebase
+
+struct eevdf_rq {
+    struct rq rq;
+    struct rb_root tasks_timeline; // RB-tree of sched_entities by deadline
+    int64 min_vruntime;            // Monotonically increasing min vruntime
+    uint32 nr_running;             // Number of entities in the tree
+
+    /* ── Load tracking ── */
+    uint64 load_sum;               // Instantaneous sum of entity weights
+    uint64 load_avg;               // EWMA smoothed load average (fixed-point)
+    uint64 load_avg_stamp;         // r_time() when load_avg was last updated
+
+    /* ── Periodic balance state ── */
+    uint64 last_balance_tick;      // r_time() of last periodic balance
+    uint64 last_balance_failed;    // r_time() of last failed balance (backoff)
+    uint32 balance_failures;       // Consecutive balance failures (backoff)
+    uint32 nr_balance;             // Total balance attempts (stats)
+    uint32 nr_balance_pulled;      // Total entities pulled (stats)
+
+    /* ── Idle balance state ── */
+    uint64 last_idle_pull_stamp;   // r_time() of last idle pull
+    uint32 nr_idle_balance;        // Total idle balance attempts (stats)
+    uint32 nr_idle_pulled;         // Total entities pulled while idle (stats)
 };
 
 #endif // __KERNEL_THREAD_RQ_TYPES_H

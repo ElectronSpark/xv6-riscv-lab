@@ -201,6 +201,18 @@ void scheduler_yield(void) {
 
     assert(!CPU_IN_ITR(), "Cannot yield CPU in interrupt context");
 
+    // Drive scheduler tick for the currently running task.
+    // This updates runtime accounting (e.g. EEVDF vruntime) and may
+    // set NEEDS_RESCHED if the current task has exhausted its slice.
+    {
+        struct sched_entity *curr_se = proc->sched_entity;
+        if (curr_se != NULL && curr_se->rq != NULL &&
+            curr_se->sched_class != NULL &&
+            curr_se->sched_class->task_tick != NULL) {
+            curr_se->sched_class->task_tick(curr_se->rq, curr_se);
+        }
+    }
+
     // Pick the next thread to run
     struct thread *p = __sched_pick_next();
 

@@ -1049,10 +1049,11 @@ void rcu_kthread_start_cpu(int cpu) {
         return;
     }
 
-    // Set CPU affinity BEFORE waking the kthread
+    // Set CPU affinity and priority BEFORE waking the kthread
     struct sched_attr attr;
     sched_attr_init(&attr);
     attr.affinity_mask = (1ULL << cpu);
+    attr.priority = MAKE_PRIORITY(3, 0);
     sched_setattr(p->sched_entity, &attr);
 
     rcu_kthread[cpu].kthread = p;
