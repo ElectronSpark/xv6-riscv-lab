@@ -236,7 +236,7 @@ struct xa_state {
         .xa_shift  = 0,              \
         .xa_sibs   = 0,              \
         .xa_offset = 0,              \
-        .xa_node   = NULL,           \
+        .xa_node   = XAS_RESTART,    \
         .xa_error  = 0,              \
     }
 

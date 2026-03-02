@@ -316,7 +316,7 @@ void *mas_walk(struct ma_state *mas)
 
     while (1) {
         mas->depth++;
-        uint8 len = node->slot_len;
+        uint8 len = READ_ONCE(node->slot_len);
         if (len == 0) {
             mas->node = node;
             mas->min = node_min;
@@ -328,14 +328,15 @@ void *mas_walk(struct ma_state *mas)
         uint8 slot = mn_find_slot(node, mas->index, len);
 
         if (mn_is_leaf(node)) {
+            void *entry = rcu_dereference(node->slot[slot]);
             mas->node = node;
             mas->min = mn_slot_min(node, slot, node_min);
             mas->max = mn_pivot(node, slot, node_max);
             mas->offset = slot;
-            return node->slot[slot];
+            return entry;
         }
 
-        void *child = node->slot[slot];
+        void *child = rcu_dereference(node->slot[slot]);
         if (child == NULL) {
             mas->node = node;
             mas->min = mn_slot_min(node, slot, node_min);
@@ -1168,57 +1169,70 @@ static void *__mas_prev_node(struct ma_state *mas, uint64 limit)
         uint8 pslot = mn_get_parent_slot(node);
 
         if (pslot > 0) {
-            uint8 prev = pslot - 1;
-            node = parent;
+            uint64 pmin, pmax;
+            __find_node_bounds(mas->tree, parent, &pmin, &pmax);
 
-            uint64 node_min, node_max;
-            __find_node_bounds(mas->tree, node, &node_min, &node_max);
-
-            struct maple_node *child = node->slot[prev];
-            if (child == NULL) {
-                mas->node = NULL;
-                return NULL;
-            }
-
-            if (mn_is_leaf(node)) {
-                uint64 child_min = mn_slot_min(node, prev, node_min);
-                uint64 child_max = mn_pivot(node, prev, node_max);
+            for (int prev = (int)pslot - 1; prev >= 0; prev--) {
+                uint64 child_max = mn_pivot(parent, (uint8)prev, pmax);
                 if (child_max < limit) {
                     mas->node = NULL;
                     return NULL;
                 }
-                mas->node = node;
-                mas->offset = prev;
-                mas->min = child_min;
-                mas->max = child_max;
-                mas->index = child_min;
-                return node->slot[prev];
-            }
 
-            /* Descend to rightmost leaf of prev subtree. */
-            node = (struct maple_node *)child;
-            while (!mn_is_leaf(node)) {
-                if (node->slot_len == 0)
-                    break;
-                struct maple_node *last_child = node->slot[node->slot_len - 1];
-                if (last_child == NULL)
-                    break;
-                node = last_child;
-            }
+                void *child = parent->slot[prev];
+                if (child == NULL)
+                    continue;
 
-            uint64 nmin, nmax;
-            __find_node_bounds(mas->tree, node, &nmin, &nmax);
-            uint8 last = node->slot_len > 0 ? node->slot_len - 1 : 0;
-            mas->node = node;
-            mas->offset = last;
-            mas->min = mn_slot_min(node, last, nmin);
-            mas->max = mn_pivot(node, last, nmax);
-            mas->index = mas->min;
-            if (mas->max < limit) {
-                mas->node = NULL;
-                return NULL;
+                if (mn_is_leaf(parent)) {
+                    uint64 child_min = mn_slot_min(parent, (uint8)prev, pmin);
+                    mas->node = parent;
+                    mas->offset = (uint8)prev;
+                    mas->min = child_min;
+                    mas->max = child_max;
+                    mas->index = child_min;
+                    return child;
+                }
+
+                /* Descend to rightmost non-NULL leaf entry in this subtree. */
+                struct maple_node *cursor = (struct maple_node *)child;
+                while (!mn_is_leaf(cursor)) {
+                    uint8 clen = cursor->slot_len;
+                    if (clen == 0) {
+                        cursor = NULL;
+                        break;
+                    }
+
+                    struct maple_node *next = NULL;
+                    for (int i = (int)clen - 1; i >= 0; i--) {
+                        if (cursor->slot[i] != NULL) {
+                            next = (struct maple_node *)cursor->slot[i];
+                            break;
+                        }
+                    }
+                    if (next == NULL) {
+                        cursor = NULL;
+                        break;
+                    }
+                    cursor = next;
+                }
+
+                if (cursor == NULL)
+                    continue;
+
+                uint64 nmin, nmax;
+                __find_node_bounds(mas->tree, cursor, &nmin, &nmax);
+                uint8 last = cursor->slot_len > 0 ? cursor->slot_len - 1 : 0;
+                mas->node = cursor;
+                mas->offset = last;
+                mas->min = mn_slot_min(cursor, last, nmin);
+                mas->max = mn_pivot(cursor, last, nmax);
+                mas->index = mas->min;
+                if (mas->max < limit) {
+                    mas->node = NULL;
+                    return NULL;
+                }
+                return cursor->slot[last];
             }
-            return node->slot[last];
         }
         node = parent;
     }
@@ -1336,7 +1350,10 @@ void *mas_erase(struct ma_state *mas)
 
 int mas_empty_area(struct ma_state *mas, uint64 min, uint64 max, uint64 size)
 {
-    if (size == 0 || min > max || max - min + 1 < size)
+    if (size == 0 || min > max)
+        return -EBUSY;
+
+    if ((size - 1) > (max - min))
         return -EBUSY;
 
     /* Walk the tree looking for a gap of at least 'size' in [min, max]. */
@@ -1347,7 +1364,7 @@ int mas_empty_area(struct ma_state *mas, uint64 min, uint64 max, uint64 size)
     if (entry == NULL) {
         uint64 gap_start = walk.min < min ? min : walk.min;
         uint64 gap_end = walk.max > max ? max : walk.max;
-        if (gap_end >= gap_start && gap_end - gap_start + 1 >= size) {
+        if (gap_end >= gap_start && (size - 1) <= (gap_end - gap_start)) {
             mas->index = gap_start;
             mas->last = gap_start + size - 1;
             return 0;
@@ -1363,7 +1380,7 @@ int mas_empty_area(struct ma_state *mas, uint64 min, uint64 max, uint64 size)
             /* Genuine NULL slot (gap) — offset was advanced. */
             uint64 gap_start = walk.min < min ? min : walk.min;
             uint64 gap_end = walk.max > max ? max : walk.max;
-            if (gap_end >= gap_start && gap_end - gap_start + 1 >= size) {
+            if (gap_end >= gap_start && (size - 1) <= (gap_end - gap_start)) {
                 mas->index = gap_start;
                 mas->last = gap_start + size - 1;
                 return 0;
@@ -1379,7 +1396,7 @@ int mas_empty_area(struct ma_state *mas, uint64 min, uint64 max, uint64 size)
             if (entry == NULL && walk.node != NULL) {
                 uint64 gap_start = walk.min < min ? min : walk.min;
                 uint64 gap_end = walk.max > max ? max : walk.max;
-                if (gap_end >= gap_start && gap_end - gap_start + 1 >= size) {
+                if (gap_end >= gap_start && (size - 1) <= (gap_end - gap_start)) {
                     mas->index = gap_start;
                     mas->last = gap_start + size - 1;
                     return 0;
@@ -1401,7 +1418,10 @@ int mas_empty_area(struct ma_state *mas, uint64 min, uint64 max, uint64 size)
 int mas_empty_area_rev(struct ma_state *mas, uint64 min, uint64 max,
                        uint64 size)
 {
-    if (size == 0 || min > max || max - min + 1 < size)
+    if (size == 0 || min > max)
+        return -EBUSY;
+
+    if ((size - 1) > (max - min))
         return -EBUSY;
 
     /* Walk from the end and scan backward. */
@@ -1412,7 +1432,7 @@ int mas_empty_area_rev(struct ma_state *mas, uint64 min, uint64 max,
     if (entry == NULL && walk.node != NULL) {
         uint64 gap_start = walk.min < min ? min : walk.min;
         uint64 gap_end = walk.max > max ? max : walk.max;
-        if (gap_end >= gap_start && gap_end - gap_start + 1 >= size) {
+        if (gap_end >= gap_start && (size - 1) <= (gap_end - gap_start)) {
             /* Place at the top of the gap. */
             mas->index = gap_end - size + 1;
             mas->last = mas->index + size - 1;
@@ -1430,7 +1450,7 @@ int mas_empty_area_rev(struct ma_state *mas, uint64 min, uint64 max,
             /* Genuine NULL slot (gap) — offset was decremented. */
             uint64 gap_start = walk.min < min ? min : walk.min;
             uint64 gap_end = walk.max > max ? max : walk.max;
-            if (gap_end >= gap_start && gap_end - gap_start + 1 >= size) {
+            if (gap_end >= gap_start && (size - 1) <= (gap_end - gap_start)) {
                 mas->index = gap_end - size + 1;
                 mas->last = mas->index + size - 1;
                 if (mas->index >= min)
@@ -1447,7 +1467,7 @@ int mas_empty_area_rev(struct ma_state *mas, uint64 min, uint64 max,
             if (entry == NULL && walk.node != NULL) {
                 uint64 gap_start = walk.min < min ? min : walk.min;
                 uint64 gap_end = walk.max > max ? max : walk.max;
-                if (gap_end >= gap_start && gap_end - gap_start + 1 >= size) {
+                if (gap_end >= gap_start && (size - 1) <= (gap_end - gap_start)) {
                     mas->index = gap_end - size + 1;
                     mas->last = mas->index + size - 1;
                     if (mas->index >= min)

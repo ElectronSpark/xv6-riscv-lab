@@ -92,6 +92,16 @@ static inline uint64 xa_max_index(uint8 shift)
     return (1UL << total_bits) - 1;
 }
 
+/** Base index covered by a node level containing @index. */
+static inline uint64 xa_level_base(uint64 index, uint8 shift)
+{
+    uint8 total_bits = shift + XA_CHUNK_SHIFT;
+
+    if (total_bits >= 64)
+        return 0;
+    return index & ~((1UL << total_bits) - 1);
+}
+
 /** Load a slot with RCU acquire semantics. */
 static inline void *xa_slot_load(void *_Atomic *slot)
 {
@@ -111,6 +121,42 @@ static inline struct xa_node *xa_head_to_node(void *head)
         head != XA_ZERO_ENTRY && !xa_is_sibling(head))
         return xa_to_internal(head);
     return NULL;
+}
+
+#define XA_HEAD_MARK_SHIFT 29
+#define XA_HEAD_MARK_MASK  ((((1U << XA_MAX_MARKS) - 1U) << XA_HEAD_MARK_SHIFT))
+
+static inline unsigned int xa_head_mark_flag(xa_mark_t mark)
+{
+    return 1U << (XA_HEAD_MARK_SHIFT + mark);
+}
+
+static inline bool xa_head_get_mark(const struct xarray *xa, xa_mark_t mark)
+{
+    if (mark >= XA_MAX_MARKS)
+        return false;
+
+    unsigned int flags = __atomic_load_n(&xa->xa_flags, __ATOMIC_ACQUIRE);
+    return (flags & xa_head_mark_flag(mark)) != 0;
+}
+
+static inline void xa_head_set_mark(struct xarray *xa, xa_mark_t mark)
+{
+    if (mark >= XA_MAX_MARKS)
+        return;
+    __atomic_fetch_or(&xa->xa_flags, xa_head_mark_flag(mark), __ATOMIC_RELEASE);
+}
+
+static inline void xa_head_clear_mark(struct xarray *xa, xa_mark_t mark)
+{
+    if (mark >= XA_MAX_MARKS)
+        return;
+    __atomic_fetch_and(&xa->xa_flags, ~xa_head_mark_flag(mark), __ATOMIC_RELEASE);
+}
+
+static inline void xa_head_clear_all_marks(struct xarray *xa)
+{
+    __atomic_fetch_and(&xa->xa_flags, ~XA_HEAD_MARK_MASK, __ATOMIC_RELEASE);
 }
 
 /* ====================================================================== */
@@ -218,6 +264,12 @@ static int xa_expand(struct xarray *xa, uint64 index)
         leaf->array   = xa;
         leaf->slots[0] = head;
 
+        for (xa_mark_t m = 0; m < XA_MAX_MARKS; m++) {
+            if (xa_head_get_mark(xa, m))
+                node_set_mark(leaf, 0, m);
+        }
+        xa_head_clear_all_marks(xa);
+
         head = xa_mk_internal(leaf);
         xa_slot_store((void *_Atomic *)&xa->xa_head, head);
         node = leaf;
@@ -280,6 +332,7 @@ static void xa_shrink(struct xarray *xa)
         if (node->count == 0) {
             /* Empty root node — tree is empty. */
             xa_slot_store((void *_Atomic *)&xa->xa_head, NULL);
+            xa_head_clear_all_marks(xa);
             xa_node_free_rcu(node);
             break;
         }
@@ -293,6 +346,13 @@ static void xa_shrink(struct xarray *xa)
         if (child_node) {
             child_node->parent = NULL;
             child_node->offset = 0;
+            xa_head_clear_all_marks(xa);
+        } else {
+            xa_head_clear_all_marks(xa);
+            for (xa_mark_t m = 0; m < XA_MAX_MARKS; m++) {
+                if (node_get_mark(node, 0, m))
+                    xa_head_set_mark(xa, m);
+            }
         }
 
         xa_slot_store((void *_Atomic *)&xa->xa_head, child);
@@ -399,7 +459,7 @@ static void *xas_create(struct xa_state *xas)
         return NULL;
     }
 
-    head = xa->xa_head;
+    head = xa_slot_load((void *_Atomic *)&xa->xa_head);
 
     /* Empty tree — will be handled by the caller setting xa_head directly. */
     if (head == NULL) {
@@ -427,7 +487,7 @@ static void *xas_create(struct xa_state *xas)
     /* Walk down, creating intermediate nodes as needed. */
     while (node->shift > 0) {
         uint8 offset = xa_offset(xas->xa_index, node->shift);
-        void *entry = node->slots[offset];
+        void *entry = xa_slot_load((void *_Atomic *)&node->slots[offset]);
         struct xa_node *child = xa_head_to_node(entry);
 
         if (child == NULL) {
@@ -462,7 +522,7 @@ static void *xas_create(struct xa_state *xas)
     xas->xa_node = node;
     xas->xa_offset = offset;
     xas->xa_shift = 0;
-    return node->slots[offset];
+    return xa_slot_load((void *_Atomic *)&node->slots[offset]);
 }
 
 /* ====================================================================== */
@@ -485,11 +545,29 @@ static void xas_delete_node(struct xa_state *xas)
 
         struct xa_node *parent = node->parent;
         if (parent) {
-            parent->slots[node->offset] = NULL;
+            xa_slot_store((void *_Atomic *)&parent->slots[node->offset], NULL);
+
+            for (xa_mark_t m = 0; m < XA_MAX_MARKS; m++) {
+                if (!node_get_mark(parent, node->offset, m))
+                    continue;
+
+                node_clear_mark(parent, node->offset, m);
+
+                struct xa_node *cur = parent;
+                while (cur->parent) {
+                    uint8 off = cur->offset;
+                    if (node_any_mark(cur, m))
+                        break;
+                    cur = cur->parent;
+                    node_clear_mark(cur, off, m);
+                }
+            }
+
             parent->count--;
         } else {
             /* This was the root node — tree is now empty. */
-            xas->xa->xa_head = NULL;
+            xa_slot_store((void *_Atomic *)&xas->xa->xa_head, NULL);
+            xa_head_clear_all_marks(xas->xa);
         }
 
         xa_node_free_rcu(node);
@@ -522,8 +600,11 @@ void *xas_store(struct xa_state *xas, void *entry)
 
     if (node == NULL) {
         /* Storing directly into xa_head (single-entry or first entry). */
-        void *prev = xas->xa->xa_head;
+        void *prev = xa_slot_load((void *_Atomic *)&xas->xa->xa_head);
         xa_slot_store((void *_Atomic *)&xas->xa->xa_head, entry);
+
+        if (entry == NULL || prev == NULL)
+            xa_head_clear_all_marks(xas->xa);
 
         /* If we're erasing (setting to NULL) and there's no node, done. */
         if (entry == NULL && prev != NULL) {
@@ -533,7 +614,26 @@ void *xas_store(struct xa_state *xas, void *entry)
     }
 
     /* Store into the leaf slot. */
-    old = node->slots[xas->xa_offset];
+    old = xa_slot_load((void *_Atomic *)&node->slots[xas->xa_offset]);
+
+    if (entry == NULL && old != NULL) {
+        for (xa_mark_t m = 0; m < XA_MAX_MARKS; m++) {
+            if (!node_get_mark(node, xas->xa_offset, m))
+                continue;
+
+            node_clear_mark(node, xas->xa_offset, m);
+
+            struct xa_node *cur = node;
+            while (cur->parent) {
+                uint8 off = cur->offset;
+                if (node_any_mark(cur, m))
+                    break;
+                cur = cur->parent;
+                node_clear_mark(cur, off, m);
+            }
+        }
+    }
+
     xa_slot_store((void *_Atomic *)&node->slots[xas->xa_offset], entry);
 
     /* Update count. */
@@ -605,7 +705,7 @@ void *xas_find(struct xa_state *xas, uint64 max)
                     (void *_Atomic *)&node->slots[offset]);
                 if (slot_entry != NULL) {
                     /* Compute the index of this slot. */
-                    uint64 base = xas->xa_index & ~((1UL << (node->shift + XA_CHUNK_SHIFT)) - 1);
+                    uint64 base = xa_level_base(xas->xa_index, node->shift);
                     xas->xa_index = base | ((uint64)offset << node->shift);
                     found = true;
                     break;
@@ -651,13 +751,24 @@ void *xas_find_marked(struct xa_state *xas, uint64 max, xa_mark_t mark)
     if (head == NULL)
         return NULL;
 
+    if (xa_head_to_node(head) == NULL) {
+        if (xas->xa_index == 0 && xa_head_get_mark(xa, mark)) {
+            xas->xa_node = NULL;
+            xas->xa_offset = 0;
+            xas->xa_shift = 0;
+            xas->xa_index = 0;
+            return head;
+        }
+        return NULL;
+    }
+
     /* Walk the tree using mark bitmaps to skip unmarked subtrees. */
     while (xas->xa_index <= max) {
         xas->xa_node = XAS_RESTART;
         void *entry = xas_descend_to_leaf(xas);
         struct xa_node *node = xas->xa_node;
 
-        if (xas_is_special(xas))
+        if (node == XAS_BOUNDS || node == XAS_ERROR || node == XAS_RESTART)
             return NULL;
 
         /* Check if the found entry has the mark. */
@@ -665,7 +776,7 @@ void *xas_find_marked(struct xa_state *xas, uint64 max, xa_mark_t mark)
             if (entry != NULL && node_get_mark(node, xas->xa_offset, mark))
                 return entry;
         } else {
-            /* Single-entry in xa_head — no marks on single entries. */
+            /* Single-entry in xa_head is handled by xa_head_get_mark(). */
             return NULL;
         }
 
@@ -675,7 +786,7 @@ void *xas_find_marked(struct xa_state *xas, uint64 max, xa_mark_t mark)
             uint8 offset = xas->xa_offset + 1;
             while (offset < XA_CHUNK_SIZE) {
                 if (node_get_mark(node, offset, mark)) {
-                    uint64 base = xas->xa_index & ~((1UL << (node->shift + XA_CHUNK_SHIFT)) - 1);
+                    uint64 base = xa_level_base(xas->xa_index, node->shift);
                     xas->xa_index = base | ((uint64)offset << node->shift);
                     found = true;
                     break;
@@ -702,14 +813,17 @@ void xas_set_mark(struct xa_state *xas, xa_mark_t mark)
 {
     struct xa_node *node = xas->xa_node;
 
-    if (mark >= XA_MAX_MARKS || xas_is_special(xas))
+    if (mark >= XA_MAX_MARKS)
+        return;
+    if (node == XAS_BOUNDS || node == XAS_ERROR || node == XAS_RESTART)
         return;
 
     if (node == NULL) {
-        /* Single entry in xa_head — no mark storage.
-         * In a full Linux xarray this would use xa_flags bits.
-         * For now, marks on single-entry trees are not supported;
-         * the caller should ensure the tree has at least one node. */
+        if (xas->xa_index != 0)
+            return;
+        void *head = xa_slot_load((void *_Atomic *)&xas->xa->xa_head);
+        if (xa_is_entry(head))
+            xa_head_set_mark(xas->xa, mark);
         return;
     }
 
@@ -730,11 +844,16 @@ void xas_clear_mark(struct xa_state *xas, xa_mark_t mark)
 {
     struct xa_node *node = xas->xa_node;
 
-    if (mark >= XA_MAX_MARKS || xas_is_special(xas))
+    if (mark >= XA_MAX_MARKS)
+        return;
+    if (node == XAS_BOUNDS || node == XAS_ERROR || node == XAS_RESTART)
         return;
 
-    if (node == NULL)
+    if (node == NULL) {
+        if (xas->xa_index == 0)
+            xa_head_clear_mark(xas->xa, mark);
         return;
+    }
 
     node_clear_mark(node, xas->xa_offset, mark);
 
@@ -752,11 +871,20 @@ bool xas_get_mark(struct xa_state *xas, xa_mark_t mark)
 {
     struct xa_node *node = xas->xa_node;
 
-    if (mark >= XA_MAX_MARKS || xas_is_special(xas))
+    if (mark >= XA_MAX_MARKS)
+        return false;
+    if (node == XAS_BOUNDS || node == XAS_ERROR || node == XAS_RESTART)
         return false;
 
-    if (node == NULL)
-        return false;
+    if (node == NULL) {
+        if (xas->xa_index != 0)
+            return false;
+
+        void *head = xa_slot_load((void *_Atomic *)&xas->xa->xa_head);
+        if (!xa_is_entry(head))
+            return false;
+        return xa_head_get_mark(xas->xa, mark);
+    }
 
     return node_get_mark(node, xas->xa_offset, mark);
 }
@@ -852,6 +980,7 @@ void xa_destroy(struct xarray *xa)
     xa_lock(xa);
     head = xa->xa_head;
     xa->xa_head = NULL;
+    xa_head_clear_all_marks(xa);
     xa_unlock(xa);
 
     struct xa_node *node = xa_head_to_node(head);
@@ -870,7 +999,7 @@ void xa_set_mark(struct xarray *xa, uint64 index, xa_mark_t mark)
     xa_lock(xa);
     /* Walk to the entry. */
     void *entry = xas_load(&xas);
-    if (entry != NULL && !xas_is_special(&xas))
+    if (entry != NULL)
         xas_set_mark(&xas, mark);
     xa_unlock(xa);
 }
@@ -881,7 +1010,7 @@ void xa_clear_mark(struct xarray *xa, uint64 index, xa_mark_t mark)
 
     xa_lock(xa);
     void *entry = xas_load(&xas);
-    if (entry != NULL && !xas_is_special(&xas))
+    if (entry != NULL)
         xas_clear_mark(&xas, mark);
     xa_unlock(xa);
 }
@@ -938,9 +1067,11 @@ static void *__xa_find(struct xarray *xa, uint64 *indexp, uint64 max,
         /* First, try the starting index directly. */
         xas.xa_node = XAS_RESTART;
         void *e = xas_descend_to_leaf(&xas);
-        if (e != NULL && !xas_is_special(&xas)) {
+        if (e != NULL && xas.xa_node != XAS_BOUNDS && xas.xa_node != XAS_ERROR &&
+            xas.xa_node != XAS_RESTART) {
             struct xa_node *node = xas.xa_node;
-            if (node != NULL && node_get_mark(node, xas.xa_offset, mark)) {
+            if ((node != NULL && node_get_mark(node, xas.xa_offset, mark)) ||
+                (node == NULL && xas.xa_index == 0 && xa_head_get_mark(xa, mark))) {
                 *indexp = xas.xa_index;
                 rcu_read_unlock();
                 return e;
