@@ -4,7 +4,6 @@
 #include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "lock/completion.h"
-#include "lock/rwlock.h"
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
@@ -13,7 +12,8 @@
 #include "proc/sched.h"
 #include "proc/thread.h"
 #include "proc/tq.h"
-#include "rbtree.h"
+#include "xarray.h"
+#include "lock/rcu.h"
 #include "proc/workqueue.h"
 #include "kobject.h"
 #include <mm/pcache.h>
@@ -26,7 +26,15 @@
 // 1. __pcache_global_spinlock
 // 2. pcache spinlock
 // 3. page lock
-// 4. pcache tree_lock
+// 4. pcache page_map xa_lock (inside xarray, only for tree mutations)
+//
+// The xarray's xa_lock (spinlock) is ONLY acquired when mutating the tree
+// structure: xa_store(), xa_erase(), xa_destroy(), xa_for_each during teardown.
+// Read-only lookups (xa_load, xa_find) are lock-free under RCU, handled
+// internally by the xarray implementation.
+//
+// IO state (io_in_progress) on individual pcache_nodes is accessed under
+// the pcache spinlock and/or page lock, which callers already hold.
 
 /******************************************************************************
  * Global variables
@@ -46,6 +54,7 @@ static bool __global_flusher_running = false;
 #define PCACHE_BLKS_PER_PAGE (PGSIZE >> BLK_SIZE_SHIFT)
 #define PCACHE_BLK_MASK ((uint64)PCACHE_BLKS_PER_PAGE - 1)
 #define PCACHE_ALIGN_BLKNO(blkno) ((blkno) & ~PCACHE_BLK_MASK)
+#define PCACHE_PAGE_INDEX(blkno) ((blkno) / PCACHE_BLKS_PER_PAGE)
 
 /******************************************************************************
  * Predefine functions
@@ -94,10 +103,8 @@ static int __pcache_write_page(struct pcache *pcache, page_t *page);
 static int __pcache_read_page(struct pcache *pcache, page_t *page);
 static void __pcache_mark_dirty(struct pcache *pcache, page_t *page);
 
-static void __pcache_tree_rlock(struct pcache *pcache);
-static void __pcache_tree_runlock(struct pcache *pcache);
-static void __pcache_tree_wlock(struct pcache *pcache);
-static void __pcache_tree_wunlock(struct pcache *pcache);
+static void __pcache_tree_lock(struct pcache *pcache);
+static void __pcache_tree_unlock(struct pcache *pcache);
 static void __pcache_spin_lock(struct pcache *pcache);
 static void __pcache_spin_unlock(struct pcache *pcache);
 static void __pcache_spin_assert_holding(struct pcache *pcache);
@@ -172,7 +179,7 @@ static int __pcache_init_validate(struct pcache *pcache) {
         pcache->flags != 0) {
         return -EINVAL;
     }
-    if (!rb_root_is_empty(&pcache->page_map) || pcache->lru.next != NULL ||
+    if (!xa_empty(&pcache->page_map) || pcache->lru.next != NULL ||
         pcache->lru.prev != NULL || pcache->dirty_list.next != NULL ||
         pcache->dirty_list.prev != NULL || pcache->list_entry.next != NULL ||
         pcache->list_entry.prev != NULL) {
@@ -229,19 +236,18 @@ void pcache_test_unregister(struct pcache *pcache) {
         }
     }
 
-    // Free all pcache_nodes in the tree for HOST_TEST cleanup.
-    // We cannot use rb_foreach_entry_safe + slab_free directly because
-    // rb_next_node traverses parent pointers that may have been freed.
-    // Instead, repeatedly delete the first node from the tree.
-    __pcache_tree_wlock(pcache);
-    struct rb_node *rbnode;
-    while ((rbnode = rb_first_node(&pcache->page_map)) != NULL) {
-        rb_delete_node_color(&pcache->page_map, rbnode);
-        struct pcache_node *node =
-            rb_entry(rbnode, struct pcache_node, tree_entry);
-        slab_free(node);
+    // Free all pcache_nodes in the xarray for HOST_TEST cleanup.
+    __pcache_tree_lock(pcache);
+    {
+        uint64 idx;
+        void *entry;
+        xa_for_each(&pcache->page_map, idx, entry) {
+            struct pcache_node *node = (struct pcache_node *)entry;
+            slab_free(node);
+        }
     }
-    __pcache_tree_wunlock(pcache);
+    __pcache_tree_unlock(pcache);
+    xa_destroy(&pcache->page_map);
 
     pcache->page_count = 0;
     pcache->lru_count = 0;
@@ -617,67 +623,69 @@ static void __pcache_global_unlock(void) {
 }
 
 /******************************************************************************
- * red-black tree callback functions
- *****************************************************************************/
-// Compare function for red-black tree
-static int __pcache_rb_compare(uint64 key1, uint64 key2) {
-    if (key1 < key2) {
-        return -1;
-    } else if (key1 > key2) {
-        return 1;
-    } else {
-        return 0;
-    }
-}
-
-// Get key function for red-black tree
-static uint64 __pcache_rb_get_key(struct rb_node *node) {
-    struct pcache_node *pcnode =
-        container_of(node, struct pcache_node, tree_entry);
-    return pcnode->blkno;
-}
-
-static struct rb_root_opts __pcache_rb_opts = {
-    .keys_cmp_fun = __pcache_rb_compare,
-    .get_key_fun = __pcache_rb_get_key,
-};
-
-/******************************************************************************
- * pcache tree helpers
+ * pcache tree helpers (xarray-based)
  *****************************************************************************/
 static struct pcache_node *__pcache_find_key_node(struct pcache *pcache,
                                                   uint64 blkno) {
-    struct rb_node *node = rb_find_key(&pcache->page_map, blkno);
-    if (node == NULL) {
-        return NULL;
+    return (struct pcache_node *)xa_load(&pcache->page_map,
+                                        PCACHE_PAGE_INDEX(blkno));
+}
+
+/**
+ * __pcache_find_and_pin_page - RCU-safe lookup that returns a pinned page.
+ *
+ * Uses explicit rcu_read_lock around the xarray lookup and bumps the page
+ * refcount (via __page_ref_inc, which acquires page->lock internally) before
+ * dropping the RCU read lock.  This guarantees the returned page pointer
+ * remains valid even without the pcache spinlock held.
+ *
+ * Returns NULL if no entry exists for @blkno.
+ * On success the caller owns one extra reference and must eventually call
+ * __page_ref_dec() to release it.
+ */
+static page_t *__pcache_find_and_pin_page(struct pcache *pcache,
+                                          uint64 blkno) {
+    XA_STATE(xas, &pcache->page_map, PCACHE_PAGE_INDEX(blkno));
+    page_t *page = NULL;
+
+    rcu_read_lock();
+    struct pcache_node *node = (struct pcache_node *)xas_load(&xas);
+    if (node != NULL && !xa_is_internal(node)) {
+        page = node->page;
+        if (page != NULL) {
+            int old = __sync_fetch_and_add(&page->ref_count, 1);
+            if (old <= 0) {
+                __sync_fetch_and_sub(&page->ref_count, 1);
+                page = NULL;
+            }
+        }
     }
-    return container_of(node, struct pcache_node, tree_entry);
+    rcu_read_unlock();
+    return page;
 }
 
 static struct pcache_node *__pcache_insert_node(struct pcache *pcache,
                                                 struct pcache_node *pcnode) {
-    struct rb_node *node =
-        rb_insert_color(&pcache->page_map, &pcnode->tree_entry);
-    if (node == NULL) {
+    uint64 idx = PCACHE_PAGE_INDEX(pcnode->blkno);
+    void *old = xa_store(&pcache->page_map, idx, pcnode, 0);
+    if (old == XA_ZERO_ENTRY) {
+        /* Allocation failure inside xa_store — treat as conflict. */
         return NULL;
     }
-    return container_of(node, struct pcache_node, tree_entry);
+    if (old != NULL && old != pcnode) {
+        /* Another entry already existed at this index — restore it. */
+        xa_store(&pcache->page_map, idx, old, 0);
+        return (struct pcache_node *)old;
+    }
+    return pcnode;
 }
 
-static void __pcache_tree_rlock(struct pcache *pcache) {
-    rwlock_rlock(&pcache->tree_lock);
+static void __pcache_tree_lock(struct pcache *pcache) {
+    xa_lock(&pcache->page_map);
 }
 
-static void __pcache_tree_runlock(struct pcache *pcache) {
-    rwlock_runlock(&pcache->tree_lock);
-}
-
-static void __pcache_tree_wlock(struct pcache *pcache) {
-    rwlock_wlock(&pcache->tree_lock);
-}
-
-static void __pcache_tree_wunlock(struct pcache *pcache) {
-    rwlock_wunlock(&pcache->tree_lock);
+static void __pcache_tree_unlock(struct pcache *pcache) {
+    xa_unlock(&pcache->page_map);
 }
 
 static void __pcache_spin_lock(struct pcache *pcache) {
@@ -721,34 +729,31 @@ static page_t *__pcache_get_page(struct pcache *pcache, uint64 blkno,
 
     struct pcache_node *found_node = NULL;
     if (default_page) {
-        __pcache_tree_wlock(pcache);
         found_node =
             __pcache_insert_node(pcache, default_page->pcache.pcache_node);
+        if (found_node == NULL) {
+            // xa_store allocation failure
+            return NULL;
+        }
         if (found_node != default_page->pcache.pcache_node) {
             // While inserting, another thread has already inserted a node with
             // the same key
-            __pcache_tree_wunlock(pcache);
             return found_node->page;
         }
-        __pcache_tree_wunlock(pcache);
     } else {
-        __pcache_tree_rlock(pcache);
         found_node = __pcache_find_key_node(pcache, blkno);
         if (!found_node) {
-            __pcache_tree_runlock(pcache);
             return NULL;
         }
-        __pcache_tree_runlock(pcache);
     }
     // If not found, unlock and create new node if needed
     return found_node->page;
 }
 
-// Remove a pcache_node from rb tree
+// Remove a pcache_node from xarray
 static void __pcache_remove_node(struct pcache *pcache, page_t *page) {
     page_lock_assert_holding(page);
 
-    __pcache_tree_wlock(pcache);
     struct pcache_node *pcnode = page->pcache.pcache_node;
     assert(pcnode != NULL, "__pcache_remove_node: page has no pcache_node");
     assert(
@@ -757,14 +762,12 @@ static void __pcache_remove_node(struct pcache *pcache, page_t *page) {
     assert(LIST_NODE_IS_DETACHED(pcnode, lru_entry),
            "__pcache_remove_node: pcache node must be detached from lru or "
            "dirty list before removal");
-    // Remove from rb-tree
-    struct rb_node *removed =
-        rb_delete_node_color(&pcache->page_map, &pcnode->tree_entry);
+    // Remove from xarray
+    void *removed = xa_erase(&pcache->page_map,
+                             PCACHE_PAGE_INDEX(pcnode->blkno));
     assert(
-        removed == &pcnode->tree_entry,
-        "__pcache_remove_node: removed rb-node does not match the pcache node");
-
-    __pcache_tree_wunlock(pcache);
+        removed == pcnode,
+        "__pcache_remove_node: removed entry does not match the pcache node");
 }
 
 /******************************************************************************
@@ -772,7 +775,6 @@ static void __pcache_remove_node(struct pcache *pcache, page_t *page) {
  *****************************************************************************/
 static void __pcache_node_init(struct pcache_node *node) {
     memset(node, 0, sizeof(struct pcache_node));
-    rb_node_init(&node->tree_entry);
     list_entry_init(&node->lru_entry);
     tq_init(&node->io_waiters, "pcache_io", NULL);
     node->blkno = -1;
@@ -871,43 +873,46 @@ static void __pcache_node_detach_page(struct pcache *pcache, page_t *page) {
 
 /******************************************************************************
  * Pcache_node IO synchronization helpers
+ *
+ * These are simple state-flag accessors for the io_in_progress field on a
+ * pcache_node.  Callers always guarantee that the page is alive:
+ *
+ *   - flush_worker: holds page lock + elevated refcount
+ *   - pcache_read_page: holds page lock + refcount >= 2
+ *
+ * No additional locking (RCU, refcount bump) is needed here.  The xa_lock
+ * only protects tree-structure mutations and is NOT involved in IO state.
  *****************************************************************************/
 
 static int __pcache_node_io_begin(struct pcache *pcache, page_t *page) {
-    __pcache_tree_rlock(pcache);
     struct pcache_node *node = page->pcache.pcache_node;
     if (node->io_in_progress) {
-        __pcache_tree_runlock(pcache);
         return -EALREADY;
     }
     node->io_in_progress = 1;
     node->last_request = get_jiffs();
-    __pcache_tree_runlock(pcache);
     return 0;
 }
 
 static int __pcache_node_io_end(struct pcache *pcache, page_t *page) {
-    __pcache_tree_rlock(pcache);
     struct pcache_node *node = page->pcache.pcache_node;
     if (!node->io_in_progress) {
-        __pcache_tree_runlock(pcache);
         return -EALREADY;
     }
     node->io_in_progress = 0;
     node->last_flushed = get_jiffs();
     tq_wakeup_all(&node->io_waiters, 0, 0);
-    __pcache_tree_runlock(pcache);
     return 0;
 }
 
 static int __pcache_node_io_wait(struct pcache *pcache, page_t *page) {
-    __pcache_tree_rlock(pcache);
     struct pcache_node *node = page->pcache.pcache_node;
+    __pcache_spin_lock(pcache);
     while (node->io_in_progress) {
-        tq_wait_cb(&node->io_waiters, rwlock_r_sleep_cb, rwlock_r_wake_cb,
-                   &pcache->tree_lock, NULL);
+        tq_wait_cb(&node->io_waiters, spin_sleep_cb, spin_wake_cb,
+                   &pcache->spinlock, NULL);
     }
-    __pcache_tree_runlock(pcache);
+    __pcache_spin_unlock(pcache);
     return 0;
 }
 
@@ -1092,12 +1097,11 @@ int pcache_init(struct pcache *pcache) {
     pcache->lru_count = 0;
     pcache->page_count = 0;
     pcache->flags = 0;
-    rb_root_init(&pcache->page_map, &__pcache_rb_opts);
+    xa_init(&pcache->page_map);
     if (pcache->gfp_flags == 0) {
         pcache->gfp_flags = 0;
     }
     spin_init(&pcache->spinlock, "pcache_lock");
-    rwlock_init(&pcache->tree_lock, "pcache_tree_lock");
     completion_init(&pcache->flush_completion);
     complete_all(&pcache->flush_completion);
     pcache->private_data = NULL;
@@ -1178,16 +1182,16 @@ void pcache_teardown(struct pcache *pcache) {
     }
     __pcache_spin_unlock(pcache);
 
-    /* 5. Drain remaining rb-tree nodes (dirty pages that weren't on LRU,
+    /* 5. Drain remaining xarray nodes (dirty pages that weren't on LRU,
      *    or any other leftovers). */
     __pcache_spin_lock(pcache);
-    __pcache_tree_wlock(pcache);
+    __pcache_tree_lock(pcache);
     {
-        struct rb_node *rbnode;
-        while ((rbnode = rb_first_node(&pcache->page_map)) != NULL) {
-            struct pcache_node *node =
-                rb_entry(rbnode, struct pcache_node, tree_entry);
-            rb_delete_node_color(&pcache->page_map, rbnode);
+        uint64 idx;
+        void *entry;
+        struct pcache_node *node;
+        xa_for_each(&pcache->page_map, idx, entry) {
+            node = (struct pcache_node *)entry;
             page_t *p = node->page;
             if (p != NULL) {
                 page_lock_acquire(p);
@@ -1207,7 +1211,8 @@ void pcache_teardown(struct pcache *pcache) {
     pcache->page_count = 0;
     pcache->lru_count = 0;
     pcache->dirty_count = 0;
-    __pcache_tree_wunlock(pcache);
+    __pcache_tree_unlock(pcache);
+    xa_destroy(&pcache->page_map);
     __pcache_spin_unlock(pcache);
 }
 
@@ -1244,7 +1249,9 @@ retry_lookup:
         __pcache_test_retry_hook(pcache, base_blkno);
     }
 #endif
-    page = __pcache_get_page(pcache, base_blkno, PGSIZE, NULL);
+    // RCU-safe lookup: bumps page refcount under RCU so the page cannot
+    // be freed between xa_load and page_lock_acquire.
+    page = __pcache_find_and_pin_page(pcache, base_blkno);
     if (page != NULL) {
         __pcache_spin_lock(pcache);
         page_lock_acquire(page);
@@ -1252,6 +1259,8 @@ retry_lookup:
         if (!__pcache_page_valid(pcache, page)) {
             page_lock_release(page);
             __pcache_spin_unlock(pcache);
+            /* Balance the atomic refcount bump from find_and_pin. */
+            __page_ref_dec(page);
             goto retry_lookup;
         }
 
@@ -1260,6 +1269,7 @@ retry_lookup:
         if (pcnode->blkno != base_blkno) {
             page_lock_release(page);
             __pcache_spin_unlock(pcache);
+            __page_ref_dec(page);
             goto retry_lookup;
         }
 
@@ -1269,12 +1279,8 @@ retry_lookup:
             __pcache_remove_lru(pcache, page);
         }
 
-        ref = page_ref_inc_unlocked(page);
-        if (ref < 0) {
-            page_lock_release(page);
-            __pcache_spin_unlock(pcache);
-            goto retry_lookup;
-        }
+        // __pcache_find_and_pin_page already bumped refcount by 1.
+        // That serves as the caller's reference, no additional inc needed.
 
         page_lock_release(page);
         __pcache_spin_unlock(pcache);
@@ -1641,11 +1647,9 @@ int pcache_discard_blk(struct pcache *pcache, uint64 blkno) {
         __pcache_remove_lru(pcache, page);
     }
 
-    // Remove from rb-tree
-    __pcache_tree_wlock(pcache);
-    rb_delete_node_color(&pcache->page_map, &pcnode->tree_entry);
+    // Remove from xarray
+    xa_erase(&pcache->page_map, PCACHE_PAGE_INDEX(pcnode->blkno));
     pcache->page_count--;
-    __pcache_tree_wunlock(pcache);
 
     // Detach page from pcache
     page->pcache.pcache_node = NULL;

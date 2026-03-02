@@ -205,7 +205,7 @@ retry:
         // any concurrent stale iput cannot re-enter free path and double-free.
     assert(inode->ref_count == 1,
            "vfs_iput: expected last refcount == 1, got %d", inode->ref_count);
-    __atomic_store_n(&inode->ref_count, 0, __ATOMIC_SEQ_CST);
+    smp_store_release(&inode->ref_count, 0);
 
     // For backendless filesystems (e.g., tmpfs), keep inodes alive as long as
     // they have positive link count AND the superblock is still attached.
@@ -256,8 +256,36 @@ retry:
         vfs_iunlock(inode);
         vfs_superblock_unlock(sb);
         failed_clean = vfs_sync_inode(inode) != 0;
-        // Someone else may have acquired the inode meanwhile, so retry
-        goto retry;
+
+        // Re-acquire locks after sync.  During the gap another thread may
+        // have grabbed a reference (e.g. via vfs_get_inode_cached or
+        // vfs_add_inode).  If so, the inode is live again and we must not
+        // evict it.
+        // Cannot goto retry because the retry path would re-consume a
+        // refcount that now belongs to someone else (the conditional
+        // subtraction won't fire at ref==1, so the assert(ref==1) path
+        // would steal it).
+        // Use trylock loop to respect lock ordering (sb wlock → inode lock).
+        for (;;) {
+            vfs_superblock_wlock(sb);
+            if (vfs_ilock_trylock(inode))
+                break;
+            vfs_superblock_unlock(sb);
+            scheduler_yield();
+        }
+
+        if (smp_load_acquire(&inode->ref_count) > 0) {
+            // Someone else acquired the inode during sync gap.  The inode
+            // is live again — we must not evict it.  Just release our
+            // locks and return.  We did NOT hold a ref, so no decrement.
+            vfs_iunlock(inode);
+            vfs_superblock_unlock(sb);
+            return;
+        }
+
+        // ref_count is still 0 and we hold both locks — fall through to
+        // eviction (skip the dirty sync branch on this pass via
+        // failed_clean).
     }
 
     if (S_ISDIR(inode->mode) && inode->parent != NULL &&
@@ -688,7 +716,7 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         }
         ret_dentry->ino = dir->ino;
         ret_dentry->sb = dir->sb;
-        ret_dentry->parent = NULL;
+        ret_dentry->parent = dir;
         ret = 0;
         goto out;
     }
@@ -705,7 +733,7 @@ int vfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
             }
             ret_dentry->ino = dir->ino;
             ret_dentry->sb = dir->sb;
-            ret_dentry->parent = NULL;
+            ret_dentry->parent = dir;
             ret = 0;
             goto out;
         } else if (vfs_inode_is_local_root(dir)) {
@@ -1323,14 +1351,12 @@ out:
 }
 
 int vfs_itruncate(struct vfs_inode *inode, loff_t new_size) {
-    if (inode == NULL || inode->sb == NULL) {
+    if (inode == NULL || inode->sb == NULL)
         return -EINVAL; // Invalid argument
-    }
     vfs_ilock(inode);
     int ret = __vfs_inode_valid(inode);
-    if (ret != 0) {
+    if (ret != 0)
         goto out; // Inode is not valid or caller does not hold the ilock
-    }
     if (!S_ISREG(inode->mode)) {
         ret = -EINVAL; // Inode is not a regular file
         goto out;

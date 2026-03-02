@@ -141,6 +141,18 @@ static blkdev_t virtio_disk_devs[N_VIRTIO_DISK] = {
         .writable = 1,
         .block_shift = 0, // 2^0 * 512 = 512 bytes per block
     },
+    {
+        .dev =
+            {
+                .major = 2,
+                .minor = 2,
+                .devname = "disk1",
+                .devmode = S_IFBLK | 0600,
+            },
+        .readable = 1,
+        .writable = 1,
+        .block_shift = 0, // 2^0 * 512 = 512 bytes per block
+    },
 };
 
 #if !defined(__x86_64__) && !defined(__i386__)

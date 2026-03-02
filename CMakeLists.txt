@@ -288,6 +288,14 @@ add_custom_command(
     COMMENT "Building mkfs..."
 )
 
+# Create an empty xv6fs image for smoke tests (attached as second virtio disk)
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6fs_test.img
+    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/mkfs ${CMAKE_CURRENT_BINARY_DIR}/xv6fs_test.img
+    DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mkfs
+    COMMENT "Creating xv6fs test image..."
+)
+
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6fuse
     COMMAND bash ${CMAKE_SOURCE_DIR}/scripts/build_xv6fuse.sh
@@ -351,6 +359,7 @@ endif()
 
 add_custom_target(fs_img ALL
     DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/fs.img
+            ${CMAKE_CURRENT_BINARY_DIR}/xv6fs_test.img
             $<$<BOOL:${ENABLE_COMPRESSION}>:${FS_IMG_COMPRESSED}>
     COMMENT "Creating file system images"
 )

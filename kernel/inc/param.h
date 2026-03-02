@@ -30,6 +30,7 @@
 #define NINODE 50           // maximum number of active i-nodes
 #define NDEV 10             // maximum major device number
 #define ROOTDEV mkdev(2, 1) // device number of file system root disk (virtio)
+#define XV6FS_TEST_DEV mkdev(2, 2) // device number of xv6fs test disk (second virtio)
 #define RAMDISK_DEV mkdev(3, 1)   // device number of ramdisk
 #define MAXARG 32                 // max exec arguments
 #define MAXENV 64                 // max exec environment variables

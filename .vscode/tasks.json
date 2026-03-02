@@ -13,6 +13,7 @@
             "options": {
                 "env": {
                     "LAB": "fs",
+                    "CPUS": "1"
                 },
                 "cwd": "${workspaceFolder}/"
             }

@@ -3,10 +3,9 @@
 
 #include "types.h"
 #include "list_type.h"
-#include "bintree_type.h"
+#include "xarray_type.h"
 #include "lock/mutex_types.h"
 #include "lock/spinlock.h"
-#include "lock/rwlock_types.h"
 #include "lock/completion_types.h"
 #include "kobject.h"
 #include "dev/dev_types.h"
@@ -78,8 +77,7 @@ struct pcache {
             uint64 flush_requested : 1;
         };
     };
-    struct rwlock tree_lock; // protect the red-black tree structure
-    struct rb_root page_map;
+    struct xarray page_map;     // XArray mapping page-index → pcache_node *
     uint64 gfp_flags;
     struct pcache_ops *ops;
     struct work_struct flush_work; // Work structure for flush operation
@@ -92,7 +90,6 @@ struct pcache {
 // Need to acquire both pcache spinlock and page spinlock when
 // attaching or detaching pcache_node
 struct pcache_node {
-    struct rb_node tree_entry; // node in the rb-tree of pcache
     list_node_t lru_entry;     // entry in the local dirty or lru list of pcache
     struct pcache *pcache;     // pointer to the parent pcache
     page_t *page;              // pointer to the page

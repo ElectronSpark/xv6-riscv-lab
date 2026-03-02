@@ -14,6 +14,7 @@
 #include "dev/dev.h"
 #include <mm/pcache.h>
 #include <mm/vm.h>
+#include "xarray.h"
 #include "vfs/fs.h"
 #include "vfs/pipe.h"
 #include "vfs/unix_socket.h"
@@ -176,6 +177,7 @@ void start_kernel_post_init(void) {
 #ifdef USE_LWIP
     lwip_net_init();    // lwIP TCP/IP stack initialization (kthread)
 #endif
+    xarray_global_init(); // XArray subsystem initialization
     pcache_global_init(); // page cache subsystem initialization
 
     // File system initialization must be run in the context of a

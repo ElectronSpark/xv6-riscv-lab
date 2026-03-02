@@ -67,28 +67,93 @@ static struct vfs_inode *xv6fs_fetch_inode(struct vfs_inode *dir,
 // Helper: get the xv6fs mount root from tmpfs root
 // Returns the xv6fs root inode (caller must vfs_iput) or NULL if not mounted
 static struct vfs_inode *xv6fs_get_disk_root(void) {
-    struct vfs_inode *tmpfs_root = vfs_root_inode.mnt_rooti;
-    if (tmpfs_root == NULL) {
+    // After xv6fs_mount_test_disk(), xv6fs is at /xv6test
+    struct vfs_inode *disk_root_dir = vfs_namei("/xv6test", 8);
+    if (IS_ERR_OR_NULL(disk_root_dir))
+        return NULL;
+
+    // The namei on a mountpoint returns the mounted root directly
+    // Check that the inode's superblock has xv6fs ops
+    if (disk_root_dir->ops != &xv6fs_inode_ops) {
+        printf("xv6fs_get_disk_root: /xv6test is not xv6fs (ops mismatch)\n");
+        vfs_iput(disk_root_dir);
         return NULL;
     }
 
-    // Look for "root" mount point in tmpfs root (xv6fs is mounted at /root)
-    struct vfs_inode *disk_mp = xv6fs_fetch_inode(tmpfs_root, "root", 4);
-    if (IS_ERR_OR_NULL(disk_mp)) {
-        return NULL;
+    return disk_root_dir;
+}
+
+/**
+ * xv6fs_mount_test_disk - Mount the xv6fs test disk (XV6FS_TEST_DEV) at
+ * /xv6test.
+ *
+ * Creates a mount point directory and mounts the xv6fs filesystem from
+ * the second virtio disk onto it.
+ * Called before smoke tests so they run against actual xv6fs, not ext4.
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+static int xv6fs_mount_test_disk(void) {
+    // Create /xv6test directory in current root (ext4 after chroot)
+    struct vfs_inode *root = vfs_namei("/", 1);
+    if (IS_ERR_OR_NULL(root)) {
+        printf("xv6fs_test: cannot resolve /\n");
+        return -ENOENT;
     }
 
-    // Get the mounted filesystem's root
-    struct vfs_inode *disk_root = NULL;
-    if (disk_mp->mnt_sb != NULL) {
-        disk_root = disk_mp->mnt_sb->root_inode;
-        if (disk_root != NULL) {
-            vfs_idup(disk_root);
-        }
+    struct vfs_inode *test_dir = vfs_mkdir(root, 0755, "xv6test", 7);
+    if (IS_ERR_OR_NULL(test_dir)) {
+        printf("xv6fs_test: failed to create /xv6test directory\n");
+        vfs_iput(root);
+        return PTR_ERR_OR(test_dir, -ENOMEM);
     }
 
-    vfs_iput(disk_mp);
-    return disk_root;
+    // Create a block device inode for the xv6fs test disk
+    // Place it in the current root so we can reference it
+    struct vfs_inode *dev_inode = vfs_mknod(
+        root, S_IFBLK | 0600, XV6FS_TEST_DEV, "xv6testdev", 10);
+    vfs_iput(root);
+
+    if (IS_ERR_OR_NULL(dev_inode)) {
+        printf("xv6fs_test: failed to create device inode, errno=%ld\n",
+               dev_inode ? PTR_ERR(dev_inode) : -ENOMEM);
+        vfs_iput(test_dir);
+        return PTR_ERR_OR(dev_inode, -ENOMEM);
+    }
+
+    // Mount xv6fs at /xv6test
+    vfs_mount_lock();
+    vfs_superblock_wlock(test_dir->sb);
+    vfs_ilock(test_dir);
+    int ret = vfs_mount("xv6fs", test_dir, dev_inode, 0, NULL);
+    if (ret == 0) {
+        vfs_iunlock(test_dir);
+        vfs_superblock_unlock(test_dir->sb);
+    }
+    vfs_mount_unlock();
+
+    vfs_iput(dev_inode);
+
+    if (ret == 0) {
+        printf("xv6fs_test: mounted xv6fs test disk at /xv6test\n");
+    } else {
+        printf("xv6fs_test: failed to mount at /xv6test, errno=%d\n", ret);
+    }
+
+    vfs_iput(test_dir);
+    return ret;
+}
+
+/**
+ * xv6fs_umount_test_disk - Unmount the xv6fs test disk from /xv6test.
+ */
+static void xv6fs_umount_test_disk(void) {
+    int ret = vfs_umount_path("/xv6test", 8);
+    if (ret == 0) {
+        printf("xv6fs_test: unmounted /xv6test\n");
+    } else {
+        printf("xv6fs_test: failed to unmount /xv6test, errno=%d\n", ret);
+    }
 }
 
 /******************************************************************************
@@ -1169,6 +1234,14 @@ void xv6fs_run_all_smoketests(void) {
     printf("        xv6fs Smoke Tests\n");
     printf("========================================\n");
 
+    // Mount the xv6fs test disk at /xv6test
+    int mount_ret = xv6fs_mount_test_disk();
+    if (mount_ret != 0) {
+        printf("xv6fs: smoke tests SKIPPED — no xv6fs test disk available\n");
+        printf("========================================\n");
+        return;
+    }
+
     // Shrink all caches before baseline to get a clean state
     xv6fs_shrink_all_caches();
 
@@ -1249,4 +1322,7 @@ void xv6fs_run_all_smoketests(void) {
     printf("\n========================================\n");
     printf("        xv6fs Smoke Tests Complete\n");
     printf("========================================\n");
+
+    // Unmount the xv6fs test disk
+    xv6fs_umount_test_disk();
 }

@@ -517,8 +517,8 @@ void vfs_init(void) {
     }
 
     // Optional: run smoke tests in a separate kernel thread with chroot to /tmp
-    // tmpfs_smoketest_start();
-    // xv6fs_run_all_smoketests();
+    tmpfs_smoketest_start();
+    xv6fs_run_all_smoketests();
 }
 
 /*
@@ -1953,11 +1953,18 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
     // For backendless filesystems, inodes with refcount=0 but n_links>0 are
     // kept alive in cache (see vfs_iput). We must allow bumping refcount from
     // 0 in this case, otherwise the inode becomes inaccessible.
+    //
+    // For backend filesystems, a zombie inode (ref=0, valid=1, not destroying)
+    // can exist in the cache when vfs_iput did a dirty sync and hasn't yet
+    // re-acquired locks to evict it.  If we hold the sb write lock, we can
+    // safely revive it (the evicting thread needs sb wlock to proceed).
     if (!vfs_idup_not_zero(inode)) {
-        // For backendless fs: try unconditional bump if inode looks alive
-        if (sb->backendless && inode->n_links > 0 && inode->valid &&
-            !inode->destroying) {
-            atomic_inc(&inode->ref_count);
+        if (inode->valid && !inode->destroying && inode->n_links > 0) {
+            if (sb->backendless || vfs_superblock_wholding(sb)) {
+                atomic_inc(&inode->ref_count);
+            } else {
+                return ERR_PTR(-ENOENT); // Cannot safely revive without wlock
+            }
         } else {
             return ERR_PTR(-ENOENT); // Inode is dying
         }
@@ -2037,6 +2044,15 @@ struct vfs_inode *vfs_add_inode(struct vfs_superblock *sb,
         if (existing->destroying || !existing->valid) {
             vfs_iunlock(existing);
             return ERR_PTR(-EAGAIN);
+        }
+        // Ensure caller gets a proper reference.  For backend filesystems
+        // the inode may be cached at ref_count=0 (zombie awaiting eviction
+        // after dirty sync in vfs_iput).  We hold sb wlock + inode lock so
+        // the inode cannot be freed underneath us.
+        if (existing->ref_count == 0) {
+            existing->ref_count = 1;
+        } else {
+            vfs_idup(existing);
         }
         return existing; // Inode with the same number already exists
     }
