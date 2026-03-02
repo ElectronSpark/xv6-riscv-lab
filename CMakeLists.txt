@@ -288,12 +288,17 @@ add_custom_command(
     COMMENT "Building mkfs..."
 )
 
-# Create an empty xv6fs image for smoke tests (attached as second virtio disk)
+# Create a GPT-partitioned second disk image with ext4 + xv6fs partitions
+set(MK_GPT_DISK_SCRIPT "${CMAKE_SOURCE_DIR}/scripts/mk_gpt_disk.sh")
 add_custom_command(
     OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6fs_test.img
-    COMMAND ${CMAKE_CURRENT_BINARY_DIR}/mkfs ${CMAKE_CURRENT_BINARY_DIR}/xv6fs_test.img
+    COMMAND bash ${MK_GPT_DISK_SCRIPT}
+            ${CMAKE_CURRENT_BINARY_DIR}/xv6fs_test.img
+            ${CMAKE_CURRENT_BINARY_DIR}/mkfs
+            512
     DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/mkfs
-    COMMENT "Creating xv6fs test image..."
+            ${MK_GPT_DISK_SCRIPT}
+    COMMENT "Creating 512MB GPT disk image (ext4 + xv6fs partitions)..."
 )
 
 add_custom_command(

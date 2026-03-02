@@ -89,6 +89,8 @@ entry("dumppcache");
 entry("dumprq");
 entry("kernbase");
 entry("dumpinode", 1);
+entry("dumpblk");
+entry("losetup");
 
 entry("ioctl");
 entry("tcgetattr");

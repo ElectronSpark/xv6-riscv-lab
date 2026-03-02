@@ -113,6 +113,11 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/dumppcache.c
     ${USER_DIR}/dumprq.c
     ${USER_DIR}/dumpinode.c
+    ${USER_DIR}/lsblk.c
+    ${USER_DIR}/losetup.c
+    ${USER_DIR}/dd.c
+    ${USER_DIR}/dh.c
+    ${USER_DIR}/mkfs_xv6fs.c
     ${USER_DIR}/testsig.c
     ${USER_DIR}/cowtest.c
     ${USER_DIR}/clonetest.c
@@ -730,8 +735,8 @@ endfunction()
 
 # Userlib-only programs (no musl equivalent)
 set(USERLIB_ONLY_PROGS
-    bigfile cloexectest clonetest cowtest devtest dumpchan dumpinode
-    dumppcache dumprq find free forktest grind kqueuetest mknod mmapbigfile mmaptest mount pingpong
+    bigfile cloexectest clonetest cowtest dd devtest dh dumpchan dumpinode
+    dumppcache dumprq find free forktest grind kqueuetest losetup lsblk mkfs_xv6fs mknod mmapbigfile mmaptest mount pingpong
     primes ps randtest stressfs symlinktest sync testsig umount
     usertests vforktest waitgdb wallclock xargs zombie
 )

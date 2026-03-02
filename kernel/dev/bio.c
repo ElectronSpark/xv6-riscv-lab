@@ -12,15 +12,11 @@
 
 static void __bio_relase_kobj_cb(struct kobject *obj) {
     struct bio *bio = container_of(obj, struct bio, kobj);
-    // if (bio) {
-    //     // Release pages
-    //     for (int i = 0; i < bio->vec_length; i++) {
-    //         if (bio->bvecs[i].bv_page) {
-    //             __page_ref_dec(bio->bvecs[i].bv_page);
-    //             bio->bvecs[i].bv_page = NULL;
-    //         }
-    //     }
-    // }
+    /*
+     * bio_add_seg does NOT take a page reference, so we must NOT
+     * decrement page refs here.  Page lifetime is the caller's
+     * responsibility.
+     */
     kvfree(bio);
 }
 

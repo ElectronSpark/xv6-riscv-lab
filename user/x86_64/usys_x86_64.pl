@@ -103,6 +103,8 @@ entry("dumppcache");
 entry("dumprq");
 entry("kernbase");
 entry("dumpinode");
+entry("dumpblk");
+entry("losetup");
 
 entry("ioctl");
 entry("tcgetattr");

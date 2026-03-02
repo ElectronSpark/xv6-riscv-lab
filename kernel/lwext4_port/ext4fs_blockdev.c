@@ -1,8 +1,10 @@
 /*
  * ext4fs block device adapter
  *
- * Bridges lwext4's ext4_blockdev_iface to xv6's buffer cache (bread/bwrite).
- * Physical block size is 512 bytes; xv6's BSIZE is 1024.
+ * Bridges lwext4's ext4_blockdev_iface to xv6's BIO/blkdev layer.
+ * Physical block size is 512 bytes.  Reads and writes allocate BIOs
+ * and submit them directly to the underlying blkdev_t, bypassing the
+ * legacy buffer cache entirely.
  */
 
 #include "types.h"
@@ -10,26 +12,29 @@
 #include "defs.h"
 #include "string.h"
 #include "param.h"
-#include "vfs/xv6fs/ondisk.h"
 #include "lock/mutex_types.h"
-#include "dev/buf.h"
+#include "dev/bio.h"
 #include "dev/blkdev.h"
 #include "ext4fs_private.h"
+#include <mm/page.h>
+#include <errno.h>
 
 #include <ext4_errno.h>
 
-/* Number of 512-byte physical blocks per xv6 BSIZE block */
-#define PH_BSIZE       512
-#define PH_PER_BSIZE   (BSIZE / PH_BSIZE)
+/* Physical block size used by lwext4 */
+#define PH_BSIZE 512
+
+/* Number of 512-byte sectors that fit in one page */
+#define SECTORS_PER_PAGE (PGSIZE / PH_BSIZE)
 
 /*
- * Obtain the xv6 device number from the ext4_blockdev container.
+ * Obtain the xv6 blkdev_t pointer from the ext4_blockdev container.
  */
-static inline uint ext4fs_bdev_dev(struct ext4_blockdev *bdev)
+static inline blkdev_t *ext4fs_bdev_blkdev(struct ext4_blockdev *bdev)
 {
     struct ext4fs_superblock *esb =
         container_of(bdev, struct ext4fs_superblock, bdev);
-    return ext4fs_sb_dev(esb);
+    return esb->xv6_blkdev;
 }
 
 /******************************************************************************
@@ -52,25 +57,65 @@ static int ext4fs_blockdev_close(struct ext4_blockdev *bdev)
 
 /*
  * Read blk_cnt physical blocks (512 bytes each) starting at blk_id
- * into buf.  Translates to xv6 bread() calls on BSIZE blocks.
+ * into buf.  Uses BIO submitted directly to the blkdev.
+ *
+ * For efficiency we batch up to one page worth of contiguous sectors
+ * into a single BIO.
  */
 static int ext4fs_blockdev_bread(struct ext4_blockdev *bdev, void *buf,
                                  uint64_t blk_id, uint32_t blk_cnt)
 {
-    uint dev = ext4fs_bdev_dev(bdev);
+    blkdev_t *blk = ext4fs_bdev_blkdev(bdev);
     char *dst = (char *)buf;
 
-    for (uint32_t i = 0; i < blk_cnt; i++) {
-        uint64_t ph = blk_id + i;
-        uint xv6_bn  = (uint)(ph / PH_PER_BSIZE);
-        uint off      = (uint)((ph % PH_PER_BSIZE) * PH_BSIZE);
+    uint32_t done = 0;
+    while (done < blk_cnt) {
+        /* Batch: read up to SECTORS_PER_PAGE contiguous sectors at once */
+        uint32_t batch = blk_cnt - done;
+        if (batch > SECTORS_PER_PAGE)
+            batch = SECTORS_PER_PAGE;
+        uint16 bytes = (uint16)(batch * PH_BSIZE);
 
-        struct buf *bp = bread(dev, xv6_bn);
-        if (bp == NULL)
+        /* Allocate a temp page for the BIO target */
+        page_t *page = __page_alloc(0, PAGE_TYPE_ANON);
+        if (page == NULL)
             return EIO;
 
-        memcpy(dst + (uint64_t)i * PH_BSIZE, bp->data + off, PH_BSIZE);
-        brelse(bp);
+        struct bio *bio = bio_alloc(blk, 1, false, NULL, NULL);
+        if (IS_ERR_OR_NULL(bio)) {
+            __page_free(page, 0);
+            return EIO;
+        }
+
+        bio->blkno = blk_id + done;
+        int ret = bio_add_seg(bio, page, 0, bytes, 0);
+        if (ret != 0) {
+            bio_release(bio);
+            __page_free(page, 0);
+            return EIO;
+        }
+
+        ret = blkdev_submit_bio(blk, bio);
+        if (ret != 0) {
+            bio_release(bio);
+            __page_free(page, 0);
+            return EIO;
+        }
+
+        ret = bio_await(bio);
+        bio_release(bio);
+
+        if (ret != 0) {
+            __page_free(page, 0);
+            return EIO;
+        }
+
+        /* Copy from BIO page into caller's buffer */
+        void *pa = (void *)__page_to_pa(page);
+        memcpy(dst + (uint64_t)done * PH_BSIZE, pa, bytes);
+        __page_free(page, 0);
+
+        done += batch;
     }
 
     return EOK;
@@ -78,26 +123,58 @@ static int ext4fs_blockdev_bread(struct ext4_blockdev *bdev, void *buf,
 
 /*
  * Write blk_cnt physical blocks (512 bytes each) starting at blk_id
- * from buf.  Uses read-modify-write through xv6's buffer cache.
+ * from buf.  Uses BIO submitted directly to the blkdev.
  */
 static int ext4fs_blockdev_bwrite(struct ext4_blockdev *bdev, const void *buf,
                                   uint64_t blk_id, uint32_t blk_cnt)
 {
-    uint dev = ext4fs_bdev_dev(bdev);
+    blkdev_t *blk = ext4fs_bdev_blkdev(bdev);
     const char *src = (const char *)buf;
 
-    for (uint32_t i = 0; i < blk_cnt; i++) {
-        uint64_t ph = blk_id + i;
-        uint xv6_bn  = (uint)(ph / PH_PER_BSIZE);
-        uint off      = (uint)((ph % PH_PER_BSIZE) * PH_BSIZE);
+    uint32_t done = 0;
+    while (done < blk_cnt) {
+        uint32_t batch = blk_cnt - done;
+        if (batch > SECTORS_PER_PAGE)
+            batch = SECTORS_PER_PAGE;
+        uint16 bytes = (uint16)(batch * PH_BSIZE);
 
-        struct buf *bp = bread(dev, xv6_bn);
-        if (bp == NULL)
+        /* Allocate a temp page and fill with data to write */
+        page_t *page = __page_alloc(0, PAGE_TYPE_ANON);
+        if (page == NULL)
             return EIO;
 
-        memcpy(bp->data + off, src + (uint64_t)i * PH_BSIZE, PH_BSIZE);
-        bwrite(bp);
-        brelse(bp);
+        void *pa = (void *)__page_to_pa(page);
+        memcpy(pa, src + (uint64_t)done * PH_BSIZE, bytes);
+
+        struct bio *bio = bio_alloc(blk, 1, true, NULL, NULL);
+        if (IS_ERR_OR_NULL(bio)) {
+            __page_free(page, 0);
+            return EIO;
+        }
+
+        bio->blkno = blk_id + done;
+        int ret = bio_add_seg(bio, page, 0, bytes, 0);
+        if (ret != 0) {
+            bio_release(bio);
+            __page_free(page, 0);
+            return EIO;
+        }
+
+        ret = blkdev_submit_bio(blk, bio);
+        if (ret != 0) {
+            bio_release(bio);
+            __page_free(page, 0);
+            return EIO;
+        }
+
+        ret = bio_await(bio);
+        bio_release(bio);
+        __page_free(page, 0);
+
+        if (ret != 0)
+            return EIO;
+
+        done += batch;
     }
 
     return EOK;

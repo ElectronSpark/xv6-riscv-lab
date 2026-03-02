@@ -22,6 +22,7 @@
 #include "dev/virtio.h"
 #include "dev/pci.h"
 #include "dev/blkdev.h"
+#include "dev/gendisk.h"
 #include <mm/page.h>
 #include "errno.h"
 #include "proc/sched.h"
@@ -40,6 +41,10 @@ uint64 __virtio_irqno[N_VIRTIO] = {1, 2, 3};
 static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
                            void *buf, size_t size, int write);
 static void virtio_disk_intr(int irq, void *data, device_t *dev);
+
+/// Minor number stride per disk: disk0=1, disk1=17, disk2=33, etc.
+/// Partitions occupy minors base+1 .. base+15.
+#define GENDISK_MINOR_STRIDE 16
 
 STATIC struct disk {
     // a set (not a ring) of DMA descriptors, with which the
@@ -102,7 +107,7 @@ static int __virtio_disk_release(blkdev_t *blkdev) { return 0; }
 static int __virtio_disk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
     struct bio_vec bvec;
     struct bio_iter iter;
-    int diskno = blkdev->dev.minor - 1; // minor 1 -> disk 0, minor 2 -> disk 1
+    int diskno = (blkdev->dev.minor - 1) / GENDISK_MINOR_STRIDE;
 
     bio_start_io_acct(bio);
     bio_for_each_segment(&bvec, bio, &iter) {
@@ -114,7 +119,6 @@ static int __virtio_disk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
                "virtio_disk_submit_bio: page has no physical address");
         virtio_disk_rw(diskno, bio, sector, pa + bvec.offset, bvec.len,
                        bio_dir_write(bio));
-        iter.size_done += bvec.len;
     }
 
     // I/O has been submitted to the device.  Completion (bio_complete)
@@ -133,7 +137,7 @@ static blkdev_t virtio_disk_devs[N_VIRTIO_DISK] = {
         .dev =
             {
                 .major = 2,
-                .minor = 1,
+                .minor = 1,   /* disk0: base minor 1, parts 2..16 */
                 .devname = "disk0",
                 .devmode = S_IFBLK | 0600,
             },
@@ -145,7 +149,7 @@ static blkdev_t virtio_disk_devs[N_VIRTIO_DISK] = {
         .dev =
             {
                 .major = 2,
-                .minor = 2,
+                .minor = 17,  /* disk1: base minor 17, parts 18..32 */
                 .devname = "disk1",
                 .devmode = S_IFBLK | 0600,
             },
@@ -169,6 +173,9 @@ static void __virtio_blkdev_init(int diskno) {
         register_irq_handler(PLIC_IRQ(VIRTIO0_IRQ + diskno), &virtio_irq_desc);
     assert(errno == 0, "virtio_blkdev_init: register_irq_handler failed: %d",
            errno);
+    /* Probe for GPT/MBR partitions — must be after IRQ registration
+     * so that BIO completions can be delivered. */
+    gendisk_probe(&virtio_disk_devs[diskno]);
 }
 
 static void __virtio_disk_init_one(int diskno) {
@@ -294,6 +301,9 @@ static void __virtio_blkdev_init_pci(int diskno, uint8 irq_line) {
     // PCI interrupts are level-triggered, active-low
     extern void plic_enable_irq_level(int irq);
     plic_enable_irq_level(irq_line);
+    /* Probe for GPT/MBR partitions — must be after IRQ registration
+     * so that BIO completions can be delivered. */
+    gendisk_probe(&virtio_disk_devs[diskno]);
 }
 
 static void __virtio_disk_init_one_pci(int diskno) {
@@ -525,10 +535,9 @@ STATIC int alloc3_desc(struct disk *disk, int *idx) {
 static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
                            void *buf, size_t size, int write) {
     struct disk *disk = &disks[diskno];
-    assert(size == BSIZE, "virtio_disk_rw: size must be BSIZE");
+    assert(size > 0 && size <= BIO_MAX_SIZE,
+           "virtio_disk_rw: size must be >0 and <=BIO_MAX_SIZE");
     assert(buf != NULL, "virtio_disk_rw: buf is NULL");
-    // assert((uint64)buf % PGSIZE == 0, "virtio_disk_rw: buf must be
-    // page-aligned");
 
     spin_lock(&disk->vdisk_lock);
 

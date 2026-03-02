@@ -1216,8 +1216,6 @@ static int sdhci_submit_bio(blkdev_t *blkdev, struct bio *bio)
 
         if (ret < 0)
             break;
-
-        iter.size_done += bvec.len;
     }
 
     mutex_unlock(&sc->lock);

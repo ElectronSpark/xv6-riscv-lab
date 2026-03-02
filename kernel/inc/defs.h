@@ -72,6 +72,12 @@ void ramdiskinit(void);
 void ramdiskintr(void);
 void ramdiskrw(struct buf *);
 
+// dev/gendisk.c
+void gendisk_init(void);
+
+// dev/loop.c
+void loop_init(void);
+
 // kalloc.c
 void *kalloc(void);
 void kfree(void *);

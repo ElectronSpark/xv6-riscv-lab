@@ -183,6 +183,8 @@ extern uint64 sys_dumppcache(void);
 extern uint64 sys_dumprq(void);
 extern uint64 sys_kernbase(void);
 extern uint64 sys_dumpinode(void);
+extern uint64 sys_dumpblk(void);
+extern uint64 sys_losetup(void);
 extern uint64 sys_sync(void);
 extern uint64 sys_vfs_dup(void);
 extern uint64 sys_vfs_read(void);
@@ -312,6 +314,8 @@ static uint64 (*syscalls[])(void) = {
     [SYS_dumprq] sys_dumprq,
     [SYS_kernbase] sys_kernbase,
     [SYS_dumpinode] sys_dumpinode,
+    [SYS_dumpblk] sys_dumpblk,
+    [SYS_losetup] sys_losetup,
     [SYS_sync] sys_sync,
     [SYS_ioctl] sys_vfs_ioctl,
     [SYS_tcgetattr] sys_tcgetattr,

@@ -22,20 +22,25 @@ static inline void bio_iter_start(struct bio *bio, struct bio_iter *it) {
     }
 }
 
-// Move the bio iterator forward by one segment
-// Return true if the iterator is still valid, false if it reaches the end of
-// the bio
+// Move the bio iterator forward by one segment.
+// Must be called after the current segment has been processed.
+// Updates bio->done_size and iter->blkno so the next iteration sees
+// the correct starting block number.
 static inline void bio_iter_next_seg(struct bio *bio, struct bio_iter *it) {
-    int16 bvec_idx = it->bvec_idx + 1;
-    if (bvec_idx > bio->vec_length || bvec_idx < 0) {
+    if (it->bvec_idx < 0 || it->bvec_idx >= bio->vec_length) {
         return;
     }
-    it->size -= bio->bvecs[bvec_idx].len;
-    it->size_done += bio->bvecs[bvec_idx].len;
-    bio->done_size += bio->bvecs[bvec_idx].len;
-    it->blkno =
-        bio->blkno + (bio->done_size >> (BLK_SIZE_SHIFT + bio->block_shift));
-    it->bvec_idx = bvec_idx;
+    /* Account for the segment we just finished (current bvec). */
+    uint16 cur_len = bio->bvecs[it->bvec_idx].len;
+    bio->done_size += cur_len;
+    it->size_done += cur_len;
+    /* Advance to the next segment. */
+    int16 next = it->bvec_idx + 1;
+    it->bvec_idx = next;
+    if (next < bio->vec_length) {
+        it->blkno = bio->blkno +
+                    (bio->done_size >> (BLK_SIZE_SHIFT + bio->block_shift));
+    }
 }
 
 static inline bool bio_iter_copy_bvec(struct bio *bio, struct bio_iter *it,
@@ -52,8 +57,6 @@ static inline bool bio_iter_copy_bvec(struct bio *bio, struct bio_iter *it,
 #define bio_for_each_segment(bvec, bio, iter)                                  \
     for (bio_iter_start(bio, iter); bio_iter_copy_bvec(bio, iter, bvec);       \
          bio_iter_next_seg(bio, iter))
-
-// rq_for_each_bio - @TODO: iterate over all bios in a request
 
 // Get the direction of a bio: 0 for read, 1 for write
 static inline int bio_dir_write(struct bio *bio) { return bio->rw; }

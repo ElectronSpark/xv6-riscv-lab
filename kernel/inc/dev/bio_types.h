@@ -13,9 +13,6 @@ typedef struct page_struct page_t;
 struct bio_vec;
 struct bio;
 struct bio_iter;
-// struct bio_request;
-// struct bio_request_iter;
-
 // Pointer to a buffer page,
 struct bio_vec {
     page_t *bv_page; // buffer page
@@ -59,22 +56,6 @@ struct bio_iter {
     int16 bvec_idx;   // index of this bvec in the bio
 };
 
-// A request containing multiple bio. Blocks to be transfered may not be
-// continuous in the blkdev
-// @TODO:
-// struct bio_request {
-//     list_node_t list_entry; // Link a series of requests
-//     list_node_t bio_list;   // List head linking a series of bio
-//     struct bio_request_iter rq_iter; // Iterator to iterate through all bios
-//     in this request
-// };
-
-// Iterator to iterate through all bios in a request
-// @TODO:
-// struct bio_request_iter {
-//     struct bio_request *rq; // The request being iterated
-//     struct bio *bio;        // Current bio in the request
-//     struct bio_iter bio_it; // Iterator to iterate through the current bio
-// };
+/* NOT YET IMPLEMENTED: bio_request / I/O scheduler request queue */
 
 #endif // __KERNEL_BLOCK_IO_TYPES_H

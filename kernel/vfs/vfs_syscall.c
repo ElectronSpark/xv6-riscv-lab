@@ -28,6 +28,10 @@
 #include <mm/vm.h>
 #include "printf.h"
 #include "dev/cdev.h"
+#include "dev/blkdev.h"
+#include "dev/gendisk.h"
+#include "dev/loop.h"
+#include "dev/gpt.h"
 #include "vfs/poll.h"
 #include "tty/termios.h"
 #include "timer/timer.h"
@@ -1484,12 +1488,17 @@ uint64 sys_chroot(void) {
  * @fstype: filesystem type name (e.g., "tmpfs", "xv6fs")
  * @target: target mount point path
  * @target_len: length of target path
- * @source: source device path (may be NULL for pseudo filesystems)
+ * @source: source device path, UUID=<guid>, file path, or NULL
  * @source_len: length of source path
  *
- * This is the kernel-internal mount function that handles path resolution,
- * device lookup, locking, and calling vfs_mount(). Can be called from both
- * kernel initialization code and sys_mount.
+ * Source resolution order:
+ *   1. "UUID=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+ *      → look up partition by GUID → mount the partition block device
+ *   2. Path to a block device (e.g., "/dev/disk1p1")
+ *      → mount that block device directly
+ *   3. Path to a regular file (e.g., "/mnt/image.ext4")
+ *      → auto-attach to a free loop device → mount the loop device
+ *   4. NULL or empty → pseudo-filesystem (tmpfs, devtmpfs, etc.)
  *
  * Returns 0 on success, negative errno on failure.
  */
@@ -1511,13 +1520,139 @@ int vfs_mount_path(const char *fstype, const char *target, int target_len,
 
     // Parse source device (for block-device-based filesystems)
     struct vfs_inode *source_inode = NULL;
+    int loop_used = -1;  /* loop device index if auto-setup, else -1 */
+
     if (source != NULL && source_len > 0) {
-        struct vfs_inode *source_dev = vfs_namei(source, source_len);
-        if (!IS_ERR_OR_NULL(source_dev)) {
-            if (S_ISBLK(source_dev->mode)) {
-                source_inode = source_dev;
+        /*
+         * Case 1: UUID=<guid> — resolve partition by GUID
+         */
+        if (source_len > 5 &&
+            source[0] == 'U' && source[1] == 'U' &&
+            source[2] == 'I' && source[3] == 'D' && source[4] == '=') {
+            const char *guid_str = source + 5;
+            struct gpt_guid guid;
+            if (gendisk_guid_parse(guid_str, &guid) != 0) {
+                printf("mount: invalid UUID format: %s\n", guid_str);
+                vfs_iput(target_dir);
+                return -EINVAL;
+            }
+
+            blkdev_t *bdev = gendisk_find_by_guid(&guid);
+            if (bdev == NULL) {
+                printf("mount: no partition found with UUID=%s\n", guid_str);
+                vfs_iput(target_dir);
+                return -ENODEV;
+            }
+
+            /* Build /dev/<devname> path and look it up */
+            char dev_path[MAXPATH];
+            int pos = 0;
+            const char *pfx = "/dev/";
+            while (*pfx && pos < MAXPATH - 1)
+                dev_path[pos++] = *pfx++;
+            const char *dn = bdev->dev.devname;
+            if (dn != NULL) {
+                while (*dn && pos < MAXPATH - 1)
+                    dev_path[pos++] = *dn++;
+            }
+            dev_path[pos] = '\0';
+
+            struct vfs_inode *dev_inode = vfs_namei(dev_path, pos);
+            if (!IS_ERR_OR_NULL(dev_inode) && S_ISBLK(dev_inode->mode)) {
+                source_inode = dev_inode;
             } else {
-                vfs_iput(source_dev);
+                if (!IS_ERR_OR_NULL(dev_inode))
+                    vfs_iput(dev_inode);
+                printf("mount: UUID resolved to %s but device not found\n",
+                       dev_path);
+                vfs_iput(target_dir);
+                return -ENODEV;
+            }
+        } else {
+            /*
+             * Try vfs_namei on the source path first.
+             */
+            struct vfs_inode *source_dev = vfs_namei(source, source_len);
+            if (!IS_ERR_OR_NULL(source_dev)) {
+                if (S_ISBLK(source_dev->mode)) {
+                    /*
+                     * Case 2: Block device path
+                     */
+                    source_inode = source_dev;
+                } else if (S_ISREG(source_dev->mode)) {
+                    /*
+                     * Case 3: Regular file — auto-setup loop device
+                     */
+                    /* Open the file to get a vfs_file for loop_setup */
+                    struct vfs_file *file = vfs_fileopen(source_dev, O_RDWR);
+                    if (IS_ERR_OR_NULL(file)) {
+                        /* Try read-only */
+                        file = vfs_fileopen(source_dev, O_RDONLY);
+                    }
+                    vfs_iput(source_dev);
+                    source_dev = NULL;
+
+                    if (IS_ERR_OR_NULL(file)) {
+                        printf("mount: cannot open file %s\n", source);
+                        vfs_iput(target_dir);
+                        return IS_ERR(file) ? PTR_ERR(file) : -EIO;
+                    }
+
+                    /* Find a free loop device */
+                    int loop_num = -1;
+                    for (int i = 0; i < NLOOP; i++) {
+                        if (loop_is_free(i)) {
+                            loop_num = i;
+                            break;
+                        }
+                    }
+                    if (loop_num < 0) {
+                        printf("mount: no free loop device available\n");
+                        vfs_fput(file);
+                        vfs_iput(target_dir);
+                        return -EBUSY;
+                    }
+
+                    int ret = loop_setup(loop_num, file, 0);
+                    vfs_fput(file); /* loop_setup dups internally */
+                    if (ret != 0) {
+                        printf("mount: failed to setup loop%d: %d\n",
+                               loop_num, ret);
+                        vfs_iput(target_dir);
+                        return ret;
+                    }
+                    loop_used = loop_num;
+
+                    /* Build /dev/loopN path */
+                    char dev_path[MAXPATH];
+                    blkdev_t *ldev = loop_get_blkdev(loop_num);
+                    int pos = 0;
+                    const char *pfx = "/dev/";
+                    while (*pfx && pos < MAXPATH - 1)
+                        dev_path[pos++] = *pfx++;
+                    const char *dn = ldev->dev.devname;
+                    if (dn != NULL) {
+                        while (*dn && pos < MAXPATH - 1)
+                            dev_path[pos++] = *dn++;
+                    }
+                    dev_path[pos] = '\0';
+
+                    struct vfs_inode *loop_inode = vfs_namei(dev_path, pos);
+                    if (!IS_ERR_OR_NULL(loop_inode) &&
+                        S_ISBLK(loop_inode->mode)) {
+                        source_inode = loop_inode;
+                    } else {
+                        if (!IS_ERR_OR_NULL(loop_inode))
+                            vfs_iput(loop_inode);
+                        loop_clear(loop_num);
+                        printf("mount: loop device %s not found in devtmpfs\n",
+                               dev_path);
+                        vfs_iput(target_dir);
+                        return -ENODEV;
+                    }
+                } else {
+                    vfs_iput(source_dev);
+                }
             }
         }
     }
@@ -1539,6 +1674,11 @@ int vfs_mount_path(const char *fstype, const char *target, int target_len,
         vfs_superblock_unlock(target_dir->sb);
     }
     vfs_mount_unlock();
+
+    /* On failure, clean up auto-attached loop device */
+    if (ret != 0 && loop_used >= 0) {
+        loop_clear(loop_used);
+    }
 
     if (source_inode) {
         vfs_iput(source_inode);

@@ -171,8 +171,10 @@ void start_kernel_post_init(void) {
     nullranddevinit();  // Register /dev/null, /dev/random, /dev/zero
     ttydevinit();       // Register /dev/tty (controlling terminal device)
     ptmxinit();         // Register /dev/ptmx (PTY multiplexer)
+    gendisk_init();     // Generic disk layer (partition discovery)
     virtio_disk_init(); // emulated hard disk (QEMU)
     ramdisk_init();     // ramdisk from FDT initrd (real hardware)
+    loop_init();        // Loopback block devices (/dev/loop0..7)
     sockinit();
 #ifdef USE_LWIP
     lwip_net_init();    // lwIP TCP/IP stack initialization (kthread)

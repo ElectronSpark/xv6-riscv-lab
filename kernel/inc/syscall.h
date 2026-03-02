@@ -107,7 +107,9 @@
 #define SYS_dumprq       94
 #define SYS_kernbase     95
 #define SYS_dumpinode    96
-// 97-99 reserved
+#define SYS_dumpblk      97
+#define SYS_losetup      98
+// 99 reserved
 
 // --- Network / sockets (100-119) ---
 #define SYS_socket       100

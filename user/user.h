@@ -151,6 +151,8 @@ int dumpchan(void);
 int dumppcache(void);
 int dumprq(void);
 int dumpinode(const char *path);
+int dumpblk(int mode);
+int losetup(int cmd, int loop_num, const char *path);
 uint64 kernbase(void);
 
 // New VFS syscalls

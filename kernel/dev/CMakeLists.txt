@@ -9,4 +9,9 @@ add_library(dev OBJECT
     yt8531.c
     x1_emac.c
     x1_sdhci.c
+    crc32.c
+    gendisk.c
+    mbr.c
+    gpt.c
+    loop.c
 )

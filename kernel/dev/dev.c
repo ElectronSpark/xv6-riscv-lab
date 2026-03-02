@@ -313,6 +313,10 @@ int device_register(device_t *dev) {
         return -EBUSY; // Device already registered
     }
 
+    /* Write back auto-assigned minor so callers (and devtmpfs) see it */
+    if (dev->minor == 0 && ret_minor > 0)
+        dev->minor = ret_minor;
+
     // Initialize kobject before making device visible to readers
     dev->kobj.name = "device";
     dev->kobj.refcount = 0;
