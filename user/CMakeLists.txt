@@ -128,6 +128,7 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/bigfile.c
     ${USER_DIR}/symlinktest.c
     ${USER_DIR}/mmaptest.c
+    ${USER_DIR}/mmapbigfile.c
     ${USER_DIR}/kqueuetest.c
     ${USER_DIR}/forktest.c
 )
@@ -730,7 +731,7 @@ endfunction()
 # Userlib-only programs (no musl equivalent)
 set(USERLIB_ONLY_PROGS
     bigfile cloexectest clonetest cowtest devtest dumpchan dumpinode
-    dumppcache dumprq find free forktest grind kqueuetest mknod mmaptest mount pingpong
+    dumppcache dumprq find free forktest grind kqueuetest mknod mmapbigfile mmaptest mount pingpong
     primes ps randtest stressfs symlinktest sync testsig umount
     usertests vforktest waitgdb wallclock xargs zombie
 )

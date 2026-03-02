@@ -327,6 +327,96 @@ static int ext4fs_file_fflush(struct vfs_file *file)
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
+/* mmap writeback: write a dirty page at an explicit file offset               */
+/* ──────────────────────────────────────────────────────────────────────────── */
+
+/**
+ * ext4fs_file_writepage - Write back a single dirty page.
+ *
+ * Called from the VM during munmap / MADV_DONTNEED / msync for MAP_SHARED
+ * file mappings whose fault handler returns anonymous pages.  @offset is
+ * the byte position within the file, @data points to a kernel page, and
+ * @len is the number of valid bytes (<= PGSIZE).
+ *
+ * This is a positional write: it does NOT read or modify file->f_pos.
+ */
+static int ext4fs_file_writepage(struct vfs_file *file, loff_t offset,
+                                 const void *data, size_t len)
+{
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (inode == NULL || !S_ISREG(inode->mode))
+        return -EINVAL;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+    uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+
+    vfs_ilock(inode);
+    ext4fs_lock(esb);
+
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        vfs_iunlock(inode);
+        return -r;
+    }
+
+    ext4_block_cache_write_back(&esb->bdev, 1);
+
+    uint64_t orig_ondisk_size = ext4_inode_get_size(&fs->sb, ref.inode);
+    uint32_t ifile_blocks =
+        (uint32_t)((orig_ondisk_size + block_size - 1) / block_size);
+
+    size_t done = 0;
+    int err = 0;
+    while (done < len) {
+        ext4_lblk_t iblock =
+            (ext4_lblk_t)(((uint64_t)offset + done) / block_size);
+        uint off = (uint)(((uint64_t)offset + done) % block_size);
+        uint n = block_size - off;
+        if (n > len - done)
+            n = (uint)(len - done);
+
+        ext4_fsblk_t fblock;
+        if (iblock < ifile_blocks) {
+            r = ext4_fs_init_inode_dblk_idx(&ref, iblock, &fblock);
+        } else {
+            ext4_lblk_t appended_iblock;
+            r = ext4_fs_append_inode_dblk(&ref, &fblock, &appended_iblock);
+            if (r == EOK)
+                ifile_blocks++;
+        }
+        if (r != EOK) {
+            err = -r;
+            break;
+        }
+
+        struct ext4_block blk;
+        if (off == 0 && n == block_size)
+            r = ext4_block_get_noread(&esb->bdev, &blk, fblock);
+        else
+            r = ext4_block_get(&esb->bdev, &blk, fblock);
+        if (r != EOK) {
+            err = -EIO;
+            break;
+        }
+
+        memcpy((char *)blk.data + off, (const char *)data + done, n);
+        ext4_bcache_set_dirty(blk.buf);
+        ext4_block_set(&esb->bdev, &blk);
+        done += n;
+    }
+
+    ext4_fs_put_inode_ref(&ref);
+    ext4_block_cache_write_back(&esb->bdev, 0);
+
+    ext4fs_unlock(esb);
+    vfs_iunlock(inode);
+    return err;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────── */
 /* File-backed mmap fault handler                                              */
 /* ──────────────────────────────────────────────────────────────────────────── */
 
@@ -436,11 +526,12 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
 /* ──────────────────────────────────────────────────────────────────────────── */
 
 struct vfs_file_ops ext4fs_file_ops = {
-    .read    = ext4fs_file_read,
-    .write   = ext4fs_file_write,
-    .llseek  = ext4fs_file_llseek,
-    .release = NULL,
-    .fsync   = ext4fs_file_fsync,
-    .fflush  = ext4fs_file_fflush,
-    .fault   = ext4fs_file_fault,
+    .read      = ext4fs_file_read,
+    .write     = ext4fs_file_write,
+    .llseek    = ext4fs_file_llseek,
+    .release   = NULL,
+    .fsync     = ext4fs_file_fsync,
+    .fflush    = ext4fs_file_fflush,
+    .fault     = ext4fs_file_fault,
+    .writepage = ext4fs_file_writepage,
 };

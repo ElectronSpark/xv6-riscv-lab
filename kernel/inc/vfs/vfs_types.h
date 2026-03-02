@@ -431,6 +431,26 @@ struct vfs_file_ops {
      * If this callback is NULL the VM uses its generic page-cache fault path.
      */
     void *(*fault)(struct vfs_file *file, struct vma *vma, uint64 va);
+
+    /*
+     * writepage - Write back a dirty page to the file at a given offset.
+     * @file:    the open file
+     * @offset:  byte offset within the file (page-aligned)
+     * @data:    kernel-virtual pointer to the page data
+     * @len:     number of bytes to write (<= PGSIZE)
+     *
+     * Called from the VM layer during munmap, MADV_DONTNEED, or msync
+     * to flush dirty MAP_SHARED pages back to the underlying filesystem.
+     * The caller does NOT hold any VM locks (pgtable lock is dropped
+     * before the call).  The implementation must acquire its own locks
+     * (inode lock, FS lock, etc.).
+     *
+     * Returns 0 on success, negative errno on failure.
+     * If NULL, dirty anonymous pages in MAP_SHARED file mappings are
+     * silently dropped (data loss).
+     */
+    int (*writepage)(struct vfs_file *file, loff_t offset,
+                     const void *data, size_t len);
 };
 
 struct vfs_fdtable {

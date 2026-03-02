@@ -50,6 +50,15 @@ static inline int pte_write(pte_t *pte) { return (*pte & __PTE_W) != 0; }
 /** Is the PTE user-accessible? */
 static inline int pte_user(pte_t *pte) { return (*pte & __PTE_U) != 0; }
 
+/** Is the PTE dirty (has been written to)? */
+static inline int pte_dirty(pte_t *pte) { return (*pte & __PTE_D) != 0; }
+
+/** Set the dirty bit on a PTE. */
+static inline void pte_mkdirty(pte_t *pte) { *pte |= __PTE_D; }
+
+/** Clear the dirty bit on a PTE (keep all other bits). */
+static inline void pte_mkclean(pte_t *pte) { *pte &= ~__PTE_D; }
+
 /**
  * Is the PTE a non-leaf (directory/intermediate) entry?
  * On x86-64 intermediate entries have Present=1 but all permission bits

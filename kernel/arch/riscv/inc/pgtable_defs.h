@@ -51,6 +51,15 @@ static inline int pte_write(pte_t *pte) { return (*pte & __PTE_W) != 0; }
 /** Is the PTE user-accessible? */
 static inline int pte_user(pte_t *pte) { return (*pte & __PTE_U) != 0; }
 
+/** Is the PTE dirty (has been written to)? */
+static inline int pte_dirty(pte_t *pte) { return (*pte & __PTE_D) != 0; }
+
+/** Set the dirty bit on a PTE. */
+static inline void pte_mkdirty(pte_t *pte) { *pte |= __PTE_D; }
+
+/** Clear the dirty bit on a PTE (keep all other bits). */
+static inline void pte_mkclean(pte_t *pte) { *pte &= ~__PTE_D; }
+
 /**
  * Is the PTE a non-leaf (directory/intermediate) entry?
  * On RISC-V Sv39 a non-leaf PTE has V=1 but R=W=X=0.
@@ -91,6 +100,16 @@ static inline pte_t mk_pte(uint64 pa, uint64 vma_flags) {
         pte |= __PTE_X;
     if (vma_flags & VMA_FLAG_USER)
         pte |= __PTE_U;
+    /*
+     * RISC-V Sv39: a PTE with V=1 and R=W=X=0 is a non-leaf pointer
+     * to the next page-table level, NOT a leaf.  For PROT_NONE leaf
+     * PTEs we must set at least one permission bit to keep the entry
+     * recognised as a leaf.  Setting R without U creates a
+     * supervisor-only readable page — user-mode access faults
+     * exactly like PROT_NONE.
+     */
+    if (!(pte & (__PTE_R | __PTE_W | __PTE_X)))
+        pte |= __PTE_R;
     return pte;
 }
 

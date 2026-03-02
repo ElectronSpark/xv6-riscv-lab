@@ -357,6 +357,8 @@ int xv6fs_file_fflush(struct vfs_file *file) {
 
 static void *xv6fs_file_fault(struct vfs_file *file, struct vma *vma,
                               uint64 va);
+static int xv6fs_file_writepage(struct vfs_file *file, loff_t offset,
+                                const void *data, size_t len);
 
 struct vfs_file_ops xv6fs_file_ops = {
     .read = xv6fs_file_read,
@@ -366,6 +368,7 @@ struct vfs_file_ops xv6fs_file_ops = {
     .fsync = xv6fs_file_fsync,
     .fflush = xv6fs_file_fflush,
     .fault = xv6fs_file_fault,
+    .writepage = xv6fs_file_writepage,
 };
 
 /******************************************************************************
@@ -398,15 +401,14 @@ static void *xv6fs_file_fault(struct vfs_file *file, struct vma *vma,
     // file_off is always page-aligned (both pgoff and va are page-aligned)
     uint64 file_off = vma->pgoff + (va - vma->start);
 
-    void *pa = page_alloc(0, PAGE_TYPE_ANON);
-    if (pa == NULL)
-        return NULL;
-
     vfs_ilock(inode);
 
     // Entirely beyond EOF — return a zero page
     if (file_off >= (uint64)inode->size) {
         vfs_iunlock(inode);
+        void *pa = page_alloc(0, PAGE_TYPE_ANON);
+        if (pa == NULL)
+            return NULL;
         memset(pa, 0, PGSIZE);
         return pa;
     }
@@ -417,7 +419,6 @@ static void *xv6fs_file_fault(struct vfs_file *file, struct vma *vma,
 
     if (!pc->active) {
         vfs_iunlock(inode);
-        page_free(pa, 0);
         return NULL;
     }
 
@@ -430,23 +431,107 @@ static void *xv6fs_file_fault(struct vfs_file *file, struct vma *vma,
     page_t *pcpage = pcache_get_page(pc, blkno_512);
     if (pcpage == NULL) {
         vfs_iunlock(inode);
-        page_free(pa, 0);
         return NULL;
     }
     int ret = pcache_read_page(pc, pcpage);
     if (ret != 0) {
         pcache_put_page(pc, pcpage);
         vfs_iunlock(inode);
-        page_free(pa, 0);
         return NULL;
     }
 
     struct pcache_node *pcn = pcpage->pcache.pcache_node;
+
+    /*
+     * Zero-copy path: if the entire page is covered by file data, return
+     * the pcache page PA directly.  The pcache_get_page ref keeps the
+     * page pinned (refcount >= 2, off LRU).  The caller (vma_validate)
+     * will detect PAGE_TYPE_PCACHE and handle teardown via pcache_put_page.
+     */
+    if (bytes_to_read == PGSIZE) {
+        vfs_iunlock(inode);
+        return pcn->data; /* zero-copy: return pcache page PA */
+    }
+
+    /* Partial page: copy + zero-fill tail. */
+    void *pa = page_alloc(0, PAGE_TYPE_ANON);
+    if (pa == NULL) {
+        pcache_put_page(pc, pcpage);
+        vfs_iunlock(inode);
+        return NULL;
+    }
+
     memmove(pa, pcn->data, bytes_to_read);
-    if (bytes_to_read < PGSIZE)
-        memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
+    memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
 
     pcache_put_page(pc, pcpage);
     vfs_iunlock(inode);
     return pa;
+}
+
+/******************************************************************************
+ * File writepage — write a single page of data back to xv6fs via pcache
+ *
+ * Called by the VM layer when tearing down or syncing a dirty MAP_SHARED
+ * mapping.  Two cases:
+ *
+ *   1. Zero-copy page:  data == pcn->data for some pcache node.  The page
+ *      is already in the pcache, so we just mark it dirty.  The pcache
+ *      flusher will write it to disk later (or fsync forces it).
+ *
+ *   2. Anon-copy page:  data points to an anonymous page (partial last
+ *      page, or COW copy).  We must write the content into the pcache so
+ *      it reaches the block device.
+ *
+ * @file:    the open file for the mapping
+ * @offset:  byte offset in the file (page-aligned)
+ * @data:    physical address of the page data
+ * @len:     number of valid bytes (may be < PGSIZE at end-of-file)
+ * Returns:  0 on success, negative errno on failure
+ ******************************************************************************/
+static int xv6fs_file_writepage(struct vfs_file *file, loff_t offset,
+                                const void *data, size_t len) {
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (inode == NULL)
+        return -EIO;
+
+    struct pcache *pc = &inode->i_data;
+    if (!pc->active)
+        return -EIO;
+
+    /*
+     * Zero-copy check: if the data pointer IS a pcache page, just mark
+     * it dirty — its content is already the authoritative copy.
+     */
+    page_t *pg = __pa_to_page((uint64)data);
+    if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE)) {
+        pcache_mark_page_dirty(pc, pg);
+        return 0;
+    }
+
+    /*
+     * Non-pcache data (anon partial page): look up the pcache page for
+     * this file offset, copy the data in, and mark dirty.
+     */
+    uint bn = (uint)(offset / BSIZE);
+    uint64 blkno_512 = (uint64)bn * BLK512_PER_BSIZE;
+
+    page_t *pcpage = pcache_get_page(pc, blkno_512);
+    if (pcpage == NULL)
+        return -EIO;
+
+    int ret = pcache_read_page(pc, pcpage);
+    if (ret != 0) {
+        pcache_put_page(pc, pcpage);
+        return -EIO;
+    }
+
+    struct pcache_node *pcn = pcpage->pcache.pcache_node;
+    memmove(pcn->data, data, len);
+    if (len < PGSIZE)
+        memset((char *)pcn->data + len, 0, PGSIZE - len);
+
+    pcache_mark_page_dirty(pc, pcpage);
+    pcache_put_page(pc, pcpage);
+    return 0;
 }

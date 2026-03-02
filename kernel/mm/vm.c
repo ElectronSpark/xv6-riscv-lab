@@ -157,6 +157,41 @@ static void __vma_free(vma_t *vma)
  * references.  Releases any held file reference and resets metadata.
  * Does NOT remove the VMA from the maple tree — callers must do that.
  */
+
+/**
+ * __vma_writeback_dirty_page - Write a dirty anonymous page back to its file.
+ *
+ * For MAP_SHARED file-backed VMAs whose fault handler returns anonymous
+ * pages (e.g. ext4), dirty pages must be explicitly flushed to the
+ * underlying file on munmap/exit.
+ *
+ * Uses the filesystem's writepage callback, which takes an explicit
+ * file offset and does not touch file->f_pos.  This avoids races with
+ * concurrent read/write syscalls on the same file descriptor.
+ */
+static void __vma_writeback_dirty_page(vma_t *vma, uint64 va, uint64 pa)
+{
+    struct vfs_file *file = vma->file;
+    if (file->ops == NULL || file->ops->writepage == NULL)
+        return;
+
+    uint64 file_offset = vma->pgoff + (va - vma->start);
+
+    /* Don't write beyond the current file size. */
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (inode == NULL)
+        return;
+    if (file_offset >= (uint64)inode->size)
+        return;
+
+    uint64 write_len = PGSIZE;
+    if (file_offset + PGSIZE > (uint64)inode->size)
+        write_len = (uint64)inode->size - file_offset;
+
+    file->ops->writepage(file, (loff_t)file_offset, (const void *)pa,
+                         write_len);
+}
+
 static void __vma_set_free(vma_t *vma)
 {
     if (vma == NULL || vma->vm == NULL)
@@ -164,6 +199,11 @@ static void __vma_set_free(vma_t *vma)
 
     assert((vma->start & (PGSIZE - 1)) == 0,
            "__vma_set_free: vma start not aligned");
+
+    /* Check if this is a shared file mapping that needs writeback. */
+    int shared_file_wb =
+        (vma->file != NULL) && (vma->flags & VMA_FLAG_SHARED) &&
+        (vma->flags & VMA_FLAG_FILE);
 
     if (vma->vm->pagetable != NULL) {
         pagetable_t pagetable = vma->vm->pagetable;
@@ -176,12 +216,23 @@ static void __vma_set_free(vma_t *vma)
             if (!pte_present(pte))
                 continue;
             uint64 pa = pte_pa(pte);
+            int was_dirty = pte_dirty(pte);
             pte_clear(pte);
             vm_remote_sfence(vma->vm);
+
+            /* Write dirty pages back for MAP_SHARED file mappings. */
+            if (shared_file_wb && was_dirty)
+                __vma_writeback_dirty_page(vma, a, pa);
+
+            /* Release the page. */
             page_t *pg = __pa_to_page(pa);
-            if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
-                page_remove_rmap(pg);
-            page_ref_dec((void *)pa);
+            if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE)) {
+                pcache_put_page(pg->pcache.pcache, pg);
+            } else {
+                if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
+                    page_remove_rmap(pg);
+                page_ref_dec((void *)pa);
+            }
         }
     }
 
@@ -664,11 +715,13 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va)
 
     uint64 file_off = vma->pgoff + (va - vma->start);
 
-    void *pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
-    if (pa == NULL)
-        return NULL;
-
+    /*
+     * Beyond EOF — return a zero anonymous page (no pcache mapping).
+     */
     if (file_off >= (uint64)inode->size) {
+        void *pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+        if (pa == NULL)
+            return NULL;
         memset(pa, 0, PGSIZE);
         return pa;
     }
@@ -679,22 +732,40 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va)
 
     uint64 blkno_512 = file_off / BLK_SIZE;
     page_t *pcpage = pcache_get_page(pc, blkno_512);
-    if (pcpage == NULL) {
-        page_free(pa, 0);
+    if (pcpage == NULL)
         return NULL;
-    }
     int ret = pcache_read_page(pc, pcpage);
     if (ret != 0) {
         pcache_put_page(pc, pcpage);
-        page_free(pa, 0);
+        return NULL;
+    }
+
+    /*
+     * Zero-copy path: if the page is fully covered by file data, map the
+     * pcache page directly into the user address space.  The pcache_get_page
+     * ref (refcount >= 2) keeps the page pinned in the cache (off LRU).
+     * We do NOT call pcache_put_page here — the user PTE now owns that ref.
+     * __vma_set_free / munmap will call pcache_put_page when the mapping
+     * is torn down.
+     *
+     * Partial pages (last page of a file that doesn't fill PGSIZE) must
+     * still be copied so the tail is zero-filled.
+     */
+    if (bytes_to_read == PGSIZE) {
+        struct pcache_node *pcn = pcpage->pcache.pcache_node;
+        return pcn->data;  /* pcache page PA — caller keeps the ref */
+    }
+
+    /* Partial page: fall back to copy so tail bytes are zeroed. */
+    void *pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+    if (pa == NULL) {
+        pcache_put_page(pc, pcpage);
         return NULL;
     }
 
     struct pcache_node *pcn = pcpage->pcache.pcache_node;
     memmove(pa, pcn->data, bytes_to_read);
-
-    if (bytes_to_read < PGSIZE)
-        memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
+    memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
 
     pcache_put_page(pc, pcpage);
     return pa;
@@ -704,6 +775,22 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
 {
     if (pte_write_ready(pte))
         return 0;
+
+    /*
+     * Fast path: writable PTE that only needs the dirty bit set.
+     * This happens on RISC-V implementations that trap instead of
+     * auto-setting D, and for MAP_SHARED pcache pages that were
+     * intentionally mapped clean (D=0) so the first write lets us
+     * propagate dirty state to the page cache.
+     */
+    if (pte_present(pte) && pte_write(pte) && !pte_dirty(pte)) {
+        page_t *pg = __pa_to_page(pte_pa(pte));
+        if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE))
+            pcache_mark_page_dirty(pg->pcache.pcache, pg);
+        pte_mkdirty(pte);
+        sfence_vma_page(fault_va);
+        return 0;
+    }
 
     void *addr = (void *)pte_pa(pte);
     void *pa = NULL;
@@ -721,7 +808,23 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
     } else if (pte_present(pte)) {
         /* Page present but not writable — check COW via mapcount. */
         page_t *old_page = __pa_to_page((uint64)addr);
-        if (old_page != NULL && PAGE_IS_TYPE(old_page, PAGE_TYPE_ANON) &&
+        if (old_page != NULL && PAGE_IS_TYPE(old_page, PAGE_TYPE_PCACHE)) {
+            /* Zero-copy pcache page: ALWAYS COW — we must never
+             * modify the page cache directly.  Copy to a fresh
+             * anonymous page and release the pcache mapping ref.
+             * Propagate dirty from PTE before dropping it. */
+            if (pte_dirty(pte))
+                pcache_mark_page_dirty(old_page->pcache.pcache, old_page);
+            if (anon_vma_prepare(vma) != 0)
+                return -ENOMEM;
+            pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+            if (pa == NULL)
+                return -ENOMEM;
+            memmove(pa, addr, PGSIZE);
+            pcache_put_page(old_page->pcache.pcache, old_page);
+            page_t *new_page = __pa_to_page((uint64)pa);
+            page_add_anon_rmap(new_page, vma, fault_va);
+        } else if (old_page != NULL && PAGE_IS_TYPE(old_page, PAGE_TYPE_ANON) &&
             page_mapcount(old_page) > 1) {
             /* COW: multiple mappers — must copy. */
             if (anon_vma_prepare(vma) != 0)
@@ -776,7 +879,12 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte, uint64 fault_va)
         uint64 mflags = vma->flags;
         if (!pte_write(pte))
             mflags &= ~PROT_WRITE;
+        int old_dirty = pte_dirty(pte);
         pte_modify(pte, mflags);
+        /* Keep pcache pages clean unless the PTE was already dirty. */
+        page_t *pg = __pa_to_page(pte_pa(pte));
+        if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE) && !old_dirty)
+            pte_mkclean(pte);
     }
 
     sfence_vma_page(fault_va);
@@ -856,17 +964,51 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                 if (pa == NULL)
                     return -ENOMEM;
 
+                /*
+                 * Detect zero-copy pcache page: the fault handler may
+                 * return a pcache page PA directly (PAGE_TYPE_PCACHE),
+                 * with an extra pcache ref held to pin it.
+                 *
+                 * For MAP_PRIVATE VMAs, pcache pages are always mapped
+                 * read-only so that a subsequent write fault triggers
+                 * COW (copy to an anonymous page).  MAP_SHARED pages
+                 * keep the VMA's original flags.
+                 */
+                page_t *fault_pg = __pa_to_page((uint64)pa);
+                int is_pcache = (fault_pg != NULL &&
+                                 PAGE_IS_TYPE(fault_pg, PAGE_TYPE_PCACHE));
+
                 vm_pgtable_lock(vma->vm);
                 pte = walk(vma->vm->pagetable, i, 1, NULL, NULL);
                 if (pte == NULL) {
                     vm_pgtable_unlock(vma->vm);
-                    page_free(pa, 0);
+                    if (is_pcache)
+                        pcache_put_page(fault_pg->pcache.pcache, fault_pg);
+                    else
+                        page_free(pa, 0);
                     return -ENOMEM;
                 }
                 if (*pte != 0) {
-                    page_free(pa, 0);
+                    /* Another thread populated this PTE while we dropped
+                     * the lock — discard the page we just faulted in. */
+                    if (is_pcache)
+                        pcache_put_page(fault_pg->pcache.pcache, fault_pg);
+                    else
+                        page_free(pa, 0);
                 } else {
-                    *pte = mk_pte((uint64)pa, vma->flags);
+                    uint64 pte_flags = vma->flags;
+                    if (is_pcache && !(vma->flags & VMA_FLAG_SHARED))
+                        pte_flags &= ~PROT_WRITE; /* read-only for COW */
+                    *pte = mk_pte((uint64)pa, pte_flags);
+                    /*
+                     * Clear the dirty bit on file-backed user pcache pages
+                     * so the first write traps and lets us mark the pcache
+                     * node dirty.  For MAP_PRIVATE this is redundant (W is
+                     * already stripped), but for MAP_SHARED writable pages
+                     * it ensures we track dirty state via the D bit.
+                     */
+                    if (is_pcache)
+                        pte_mkclean(pte);
                     sfence_vma_page(i);
                 }
                 continue;
@@ -1430,16 +1572,37 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
             uint64 mflags = effective_flags;
             /* rmap-based COW: if page has mapcount > 1 and we're trying
              * to grant write, suppress write — the write-fault handler
-             * will resolve it via COW when the page is actually written. */
+             * will resolve it via COW when the page is actually written.
+             * For pcache pages in MAP_PRIVATE VMAs, suppress write to
+             * force COW.  MAP_SHARED pcache pages are writable but will
+             * have D cleared below for dirty tracking. */
             if (mflags & PROT_WRITE) {
                 uint64 pa = pte_pa(pte);
                 page_t *pg = __pa_to_page(pa);
-                if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
+                if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE) &&
+                    !(vma->flags & VMA_FLAG_SHARED)) {
+                    mflags &= ~PROT_WRITE;
+                } else if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
                     page_mapcount(pg) > 1) {
                     mflags &= ~PROT_WRITE;
                 }
             }
+            /*
+             * Capture PTE dirty state before pte_modify overwrites
+             * the flags.  If the old PTE was dirty and the page is a
+             * pcache page, propagate dirty to the page cache.
+             */
+            int old_dirty = pte_dirty(pte);
             pte_modify(pte, mflags);
+            {
+                uint64 pa = pte_pa(pte);
+                page_t *pg = __pa_to_page(pa);
+                if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE)) {
+                    if (old_dirty)
+                        pcache_mark_page_dirty(pg->pcache.pcache, pg);
+                    pte_mkclean(pte);
+                }
+            }
         }
     }
     vm_pgtable_unlock(vm);
@@ -1597,10 +1760,50 @@ int vm_msync(vm_t *vm, uint64 addr, size_t size, int flags)
         goto out;
     }
 
-    if (vma->file != NULL)
-        __sync_synchronize();
+    /*
+     * For MAP_SHARED file-backed VMAs, walk PTEs in the requested range
+     * and write back any dirty pages.
+     *
+     * pcache pages:  propagate PTE dirty → pcache node dirty (the
+     *                background flusher will do the actual I/O).
+     * anonymous pages:  call writepage to push data into the FS.
+     *
+     * After the writeback loop, call fsync for MS_SYNC so the data
+     * reaches stable storage before we return.
+     */
+    if (vma->file != NULL && (vma->flags & VMA_FLAG_SHARED) &&
+        (vma->flags & VMA_FLAG_FILE)) {
+        struct vfs_file *file = vma->file;
 
-    ret = 0;
+        vm_pgtable_lock(vm);
+        for (uint64 va = addr; va < addr + size; va += PGSIZE) {
+            pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
+            if (pte == NULL || !pte_present(pte))
+                continue;
+            if (!pte_dirty(pte))
+                continue;
+
+            uint64 pa = pte_pa(pte);
+
+            /* Writeback dirty page — must drop the pgtable spinlock
+             * because writepage may sleep (inode lock, I/O).  Clear
+             * the PTE D bit so subsequent writes are tracked again. */
+            pte_mkclean(pte);
+            vm_pgtable_unlock(vm);
+            __vma_writeback_dirty_page(vma, va, pa);
+            vm_pgtable_lock(vm);
+        }
+        vm_pgtable_unlock(vm);
+        sfence_vma();
+
+        /* MS_SYNC: flush data to stable storage before returning. */
+        if (flags & MS_SYNC) {
+            if (file->ops != NULL && file->ops->fsync != NULL)
+                ret = file->ops->fsync(file, (loff_t)addr,
+                                       (loff_t)size);
+        }
+    }
+
 out:
     vm_runlock(vm);
     return ret;
@@ -1691,25 +1894,47 @@ int vm_madvise(vm_t *vm, uint64 addr, size_t size, int advice)
         ret = 0;
         break;
 
-    case MADV_DONTNEED:
+    case MADV_DONTNEED: {
+        int shared_file_wb =
+            (vma->file != NULL) && (vma->flags & VMA_FLAG_SHARED) &&
+            (vma->flags & VMA_FLAG_FILE);
         vm_pgtable_lock(vm);
         for (uint64 va = addr; va < addr + size; va += PGSIZE) {
             pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
             if (pte != NULL && pte_present(pte)) {
                 uint64 pa = pte_pa(pte);
                 if (pa != 0) {
+                    int was_dirty = pte_dirty(pte);
+                    pte_clear(pte);
+
+                    /* Write dirty pages back for MAP_SHARED file mappings.
+                     * Must drop the pgtable spinlock because the
+                     * writepage callback may sleep (inode lock, I/O). */
+                    if (shared_file_wb && was_dirty) {
+                        vm_pgtable_unlock(vm);
+                        __vma_writeback_dirty_page(vma, va, pa);
+                        vm_pgtable_lock(vm);
+                    }
+
+                    /* Release the page. */
                     page_t *pg = __pa_to_page(pa);
-                    if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
-                        page_remove_rmap(pg);
-                    page_ref_dec((void *)pa);
+                    if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE)) {
+                        pcache_put_page(pg->pcache.pcache, pg);
+                    } else {
+                        if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
+                            page_remove_rmap(pg);
+                        page_ref_dec((void *)pa);
+                    }
+                } else {
+                    pte_clear(pte);
                 }
-                pte_clear(pte);
             }
         }
         vm_pgtable_unlock(vm);
         vm_remote_sfence(vm);
         ret = 0;
         break;
+    }
 
     default:
         ret = -EINVAL;

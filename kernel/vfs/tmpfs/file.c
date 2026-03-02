@@ -109,6 +109,8 @@ static loff_t __tmpfs_file_llseek(struct vfs_file *file, loff_t offset,
 
 static void *__tmpfs_file_fault(struct vfs_file *file, struct vma *vma,
                                uint64 va);
+static int __tmpfs_file_writepage(struct vfs_file *file, loff_t offset,
+                                 const void *data, size_t len);
 
 struct vfs_file_ops tmpfs_file_ops = {
     .read = __tmpfs_file_read,
@@ -117,6 +119,7 @@ struct vfs_file_ops tmpfs_file_ops = {
     .release = NULL,
     .fsync = NULL,
     .fault = __tmpfs_file_fault,
+    .writepage = __tmpfs_file_writepage,
 };
 
 static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
@@ -490,4 +493,68 @@ static void *__tmpfs_file_fault(struct vfs_file *file, struct vma *vma,
     pcache_put_page(pc, pcpage);
     vfs_iunlock(inode);
     return pa;
+}
+
+/******************************************************************************
+ * File writepage — write a single page of data back to tmpfs via pcache
+ *
+ * Called by the VM layer when tearing down or syncing a dirty MAP_SHARED
+ * mapping.  For tmpfs the pcache IS the backing store (no disk), so we
+ * copy the data into the pcache page to make it visible to subsequent
+ * reads and mappings.
+ *
+ * Two data paths:
+ *   1. Embedded data (small files inline in inode): copy into ti->file.data.
+ *   2. Pcache path: look up the pcache page and memcpy into it.
+ *
+ * @file:    the open file for the mapping
+ * @offset:  byte offset in the file (page-aligned)
+ * @data:    physical address of the page data
+ * @len:     number of valid bytes (may be < PGSIZE at end-of-file)
+ * Returns:  0 on success, negative errno on failure
+ ******************************************************************************/
+static int __tmpfs_file_writepage(struct vfs_file *file, loff_t offset,
+                                 const void *data, size_t len)
+{
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (inode == NULL)
+        return -EIO;
+    struct tmpfs_inode *ti = container_of(inode, struct tmpfs_inode, vfs_inode);
+    struct pcache *pc = &inode->i_data;
+
+    /* ---- embedded data path ---- */
+    if (ti->embedded) {
+        if ((uint64)offset < TMPFS_INODE_EMBEDDED_DATA_LEN) {
+            uint64 avail = TMPFS_INODE_EMBEDDED_DATA_LEN - (uint64)offset;
+            size_t copy_len = len < avail ? len : avail;
+            memmove(ti->file.data + offset, data, copy_len);
+        }
+        return 0;
+    }
+
+    /* ---- pcache path ---- */
+    if (!pc->active)
+        return -EIO;
+
+    uint64 block_idx = TMPFS_IBLOCK((uint64)offset);
+    uint64 blkno_512 = block_idx * PCACHE_BLKS_PER_PAGE;
+
+    page_t *pcpage = pcache_get_page(pc, blkno_512);
+    if (pcpage == NULL)
+        return -EIO;
+
+    int ret = pcache_read_page(pc, pcpage);
+    if (ret != 0) {
+        pcache_put_page(pc, pcpage);
+        return -EIO;
+    }
+
+    struct pcache_node *pcn = pcpage->pcache.pcache_node;
+    memmove(pcn->data, data, len);
+    if (len < PGSIZE)
+        memset((char *)pcn->data + len, 0, PGSIZE - len);
+
+    pcache_mark_page_dirty(pc, pcpage);
+    pcache_put_page(pc, pcpage);
+    return 0;
 }
