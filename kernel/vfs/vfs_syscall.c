@@ -1635,11 +1635,12 @@ int vfs_umount_path(const char *target, int target_len) {
     }
 
     // On success, vfs_unmount has already:
-    // - Unlocked and freed mounted_root
+    // - Removed, unlocked and freed mounted_root (root inode)
     // - Unlocked and freed child_sb
-    // We just need to release what's left
-    vfs_iunlock(target_dir);
-    vfs_superblock_unlock(target_dir->sb);
+    // - Unlocked target_dir (mountpoint) and target_dir->sb
+    // - Called vfs_iput on target_dir
+    // We just need to release the mount mutex.
+    // Note: mounted_root is freed by vfs_unmount; do NOT access it.
     vfs_mount_unlock();
 
     return 0;

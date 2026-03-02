@@ -25,6 +25,7 @@
 #include "vfs/fs.h"
 #include <mm/slab.h>
 #include "ext4fs_private.h"
+#include "kernel/vfs/vfs_private.h"
 
 #include <ext4_errno.h>
 #include <ext4_fs.h>
@@ -41,6 +42,51 @@
 static inline struct ext4_fs *inode_ext4fs(struct vfs_inode *vi)
 {
     return ext4fs_get_fs(vi->sb);
+}
+
+/*
+ * Build a VFS inode for an already-allocated on-disk ext4 inode.
+ *
+ * This replaces the broken pattern of calling vfs_alloc_inode() which would
+ * allocate a SECOND on-disk inode and then overwrite the ino — corrupting
+ * the inode hash table (the inode would sit in the wrong hash bucket).
+ *
+ * Instead we allocate the slab wrapper directly, set the correct ino upfront,
+ * initialise refs/mutex via __vfs_inode_init, and insert into the hash via
+ * vfs_add_inode.
+ *
+ * Caller must hold sb wlock.  Returns inode unlocked on success, or ERR_PTR.
+ */
+static struct vfs_inode *ext4fs_build_vfs_inode(struct vfs_superblock *sb,
+                                                uint32_t ino, mode_t mode,
+                                                uint32_t n_links, loff_t size)
+{
+    struct ext4fs_inode *ei = slab_alloc(&ext4fs_inode_cache);
+    if (ei == NULL)
+        return ERR_PTR(-ENOMEM);
+    memset(ei, 0, sizeof(*ei));
+
+    ei->vfs_inode.ino     = ino;
+    ei->vfs_inode.mode    = mode;
+    ei->vfs_inode.n_links = n_links;
+    ei->vfs_inode.size    = size;
+    ei->vfs_inode.ops     = &ext4fs_inode_ops;
+    __vfs_inode_init(&ei->vfs_inode);  /* ref_count = 1, init mutex */
+
+    struct vfs_inode *existing = vfs_add_inode(sb, &ei->vfs_inode);
+    if (IS_ERR(existing)) {
+        slab_free(ei);
+        return existing;  /* -EAGAIN or other error */
+    }
+    if (existing != &ei->vfs_inode) {
+        /* Race: another thread inserted same ino.  Free our copy. */
+        slab_free(ei);
+        vfs_iunlock(existing);
+        return existing;
+    }
+    /* vfs_add_inode returns locked; unlock for caller */
+    vfs_iunlock(&ei->vfs_inode);
+    return &ei->vfs_inode;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
@@ -316,33 +362,9 @@ static struct vfs_inode *ext4fs_create(struct vfs_inode *dir, mode_t mode,
     ext4_fs_put_inode_ref(&parent_ref);
     ext4fs_unlock(esb);
 
-    /* Allocate VFS inode through the standard path */
-    struct vfs_inode *new_inode = vfs_alloc_inode(dir->sb);
-    if (IS_ERR_OR_NULL(new_inode))
-        return new_inode == NULL ? ERR_PTR(-ENOMEM) : new_inode;
-
-    /* vfs_alloc_inode called ext4fs_alloc_inode which allocated ANOTHER
-     * on-disk inode.  We don't want that — we already allocated one above.
-     * Unfortunately the VFS API doesn't let us specify the ino.
-     *
-     * Alternative approach: just build the VFS inode directly and skip
-     * vfs_alloc_inode.  The caller (VFS create path) should handle this. */
-
-    /* FIXME: For now, just overwrite the ino, mode, etc.  The extra
-     * disk inode allocated by vfs_alloc_inode is leaked.  A proper fix
-     * requires either:
-     *   (a) A VFS API to create an inode with a specific ino, or
-     *   (b) Not using vfs_alloc_inode and manually doing hash insertion.
-     *
-     * For the initial port we accept this leak and will fix it once.
-     * the VFS layer supports ext4's allocation model. */
-    new_inode->ino     = new_ino;
-    new_inode->mode    = mode | S_IFREG;
-    new_inode->n_links = 1;
-    new_inode->size    = 0;
-
-    vfs_iunlock(new_inode);
-    return new_inode;
+    /* Build VFS inode directly — no vfs_alloc_inode to avoid double
+     * on-disk allocation and hash corruption. */
+    return ext4fs_build_vfs_inode(dir->sb, new_ino, mode | S_IFREG, 1, 0);
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
@@ -434,21 +456,12 @@ static struct vfs_inode *ext4fs_mkdir(struct vfs_inode *dir, mode_t mode,
     ext4_fs_put_inode_ref(&parent_ref);
     ext4fs_unlock(esb);
 
-    /* Allocate VFS inode — same caveat as in ext4fs_create */
-    struct vfs_inode *new_inode = vfs_alloc_inode(dir->sb);
-    if (IS_ERR_OR_NULL(new_inode))
-        return new_inode == NULL ? ERR_PTR(-ENOMEM) : new_inode;
-
-    new_inode->ino     = new_ino;
-    new_inode->mode    = mode | S_IFDIR;
-    new_inode->n_links = 1;
-    new_inode->size    = 0;
-
-    /* Update link count for parent */
+    /* Update link count for parent (for "..") */
     dir->n_links++;
 
-    vfs_iunlock(new_inode);
-    return new_inode;
+    /* Build VFS inode directly — no vfs_alloc_inode to avoid double
+     * on-disk allocation and hash corruption. */
+    return ext4fs_build_vfs_inode(dir->sb, new_ino, mode | S_IFDIR, 1, 0);
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
@@ -810,18 +823,10 @@ static struct vfs_inode *ext4fs_symlink(struct vfs_inode *dir, mode_t mode,
     ext4_fs_put_inode_ref(&parent_ref);
     ext4fs_unlock(esb);
 
-    /* Build VFS inode */
-    struct vfs_inode *new_inode = vfs_alloc_inode(dir->sb);
-    if (IS_ERR_OR_NULL(new_inode))
-        return new_inode == NULL ? ERR_PTR(-ENOMEM) : new_inode;
-
-    new_inode->ino     = new_ino;
-    new_inode->mode    = S_IFLNK | 0777;
-    new_inode->n_links = 1;
-    new_inode->size    = (loff_t)target_len;
-
-    vfs_iunlock(new_inode);
-    return new_inode;
+    /* Build VFS inode directly — no vfs_alloc_inode to avoid double
+     * on-disk allocation and hash corruption. */
+    return ext4fs_build_vfs_inode(dir->sb, new_ino, S_IFLNK | 0777, 1,
+                                  (loff_t)target_len);
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
@@ -877,20 +882,18 @@ static struct vfs_inode *ext4fs_mknod(struct vfs_inode *dir, mode_t mode,
     ext4_fs_put_inode_ref(&parent_ref);
     ext4fs_unlock(esb);
 
-    struct vfs_inode *new_inode = vfs_alloc_inode(dir->sb);
-    if (IS_ERR_OR_NULL(new_inode))
-        return new_inode == NULL ? ERR_PTR(-ENOMEM) : new_inode;
+    /* Build VFS inode directly — no vfs_alloc_inode to avoid double
+     * on-disk allocation and hash corruption. */
+    struct vfs_inode *new_inode =
+        ext4fs_build_vfs_inode(dir->sb, new_ino, mode, 1, 0);
+    if (IS_ERR(new_inode))
+        return new_inode;
 
-    new_inode->ino     = new_ino;
-    new_inode->mode    = mode;
-    new_inode->n_links = 1;
-    new_inode->size    = 0;
     if (S_ISCHR(mode))
         new_inode->cdev = dev;
     else
         new_inode->bdev = dev;
 
-    vfs_iunlock(new_inode);
     return new_inode;
 }
 

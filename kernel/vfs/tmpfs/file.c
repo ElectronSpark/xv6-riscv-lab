@@ -84,6 +84,11 @@ void tmpfs_inode_pcache_init(struct vfs_inode *inode) {
     if (ret != 0)
         return; /* proceed without pcache */
 
+    /* tmpfs has no backing store — evicting pages loses data permanently.
+     * Disable max_pages so pcache_get_page never enters the eviction loop.
+     * (max_pages == 0 ⇒ the `if (pcache->max_pages > 0)` guard is false.) */
+    pc->max_pages = 0;
+
     /* pcache_init resets private_data, so set it after init */
     pc->private_data = inode;
 }

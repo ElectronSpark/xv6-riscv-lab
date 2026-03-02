@@ -176,9 +176,29 @@ static int xa_expand(struct xarray *xa, uint64 index)
 {
     void *head = xa->xa_head;
 
-    /* If tree is empty, no expansion needed — store will set head directly. */
-    if (head == NULL)
+    /* If tree is empty and index is 0, no expansion needed —
+     * xas_create / xas_store will set xa_head directly. */
+    if (head == NULL && index == 0)
         return 0;
+
+    /* If tree is empty but index > 0, we must create a leaf node so that
+     * the entry is stored at the correct slot rather than directly in
+     * xa_head (which only represents index 0). */
+    if (head == NULL) {
+        struct xa_node *leaf = xa_node_alloc();
+        if (leaf == NULL)
+            return -ENOMEM;
+
+        leaf->shift   = 0;
+        leaf->offset  = 0;
+        leaf->count   = 0;   /* empty leaf — no entries yet */
+        leaf->parent  = NULL;
+        leaf->array   = xa;
+
+        head = xa_mk_internal(leaf);
+        xa_slot_store((void *_Atomic *)&xa->xa_head, head);
+        /* Fall through to the growth loop if index > 63. */
+    }
 
     struct xa_node *node = xa_head_to_node(head);
 
