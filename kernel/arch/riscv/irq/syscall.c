@@ -376,6 +376,10 @@ extern uint64 sys_epoll_create1(void);
 extern uint64 sys_epoll_ctl(void);
 extern uint64 sys_epoll_pwait(void);
 
+// resource limits (accounting.c)
+extern uint64 sys_prlimit64(void);
+extern uint64 sys_kstats(void);
+
 /*
  * Syscall routing table
  *
@@ -504,6 +508,8 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_setregid] sys_setregid,
     [SYS_getgroups] sys_getgroups,
     [SYS_setgroups] sys_setgroups,
+    [SYS_prlimit64] sys_prlimit64,
+    [SYS_kstats] sys_kstats,
 #ifdef USE_LWIP
     [SYS_socket] sys_socket,
     [SYS_bind] sys_bind,

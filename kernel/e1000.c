@@ -11,6 +11,13 @@
 #include "dev/net.h"
 #include "dev/netdev.h"
 #include "trap.h"
+#include "kstats.h"
+
+/* Global network I/O counters (read by sys_kstats) */
+_Atomic uint64 g_net_tx_packets;
+_Atomic uint64 g_net_tx_bytes;
+_Atomic uint64 g_net_rx_packets;
+_Atomic uint64 g_net_rx_bytes;
 
 /* Netdev wrapper for e1000_transmit */
 static int e1000_netdev_transmit(struct netdev *ndev, struct mbuf *m) {
@@ -304,6 +311,8 @@ int e1000_transmit(struct mbuf *m) {
     tx_mbufs[index] = m;
     // move forward the tail pointer of the transmission ring buffer
     regs[E1000_TDT] = (regs[E1000_TDT] + 1) % TX_RING_SIZE;
+    __atomic_fetch_add(&g_net_tx_packets, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_net_tx_bytes, m->len, __ATOMIC_RELAXED);
     spin_unlock(&e1000_lock);
     return 0;
 }
@@ -324,6 +333,8 @@ STATIC void e1000_recv(void) {
         }
         struct mbuf *buf = rx_mbufs[index];
         buf->len = desc->length;
+        __atomic_fetch_add(&g_net_rx_packets, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_net_rx_bytes, desc->length, __ATOMIC_RELAXED);
         // Start processing the received packet.
         net_rx(buf);
         // allocate a new buffer

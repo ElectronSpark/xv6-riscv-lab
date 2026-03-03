@@ -19,6 +19,60 @@
 #include "timer/sched_timer_private.h"
 #include "timer/timer.h"
 #include "smp/ipi.h"
+
+/* ================================================================== */
+/*  Linux-style global load averages (1s / 5s / 16s)                  */
+/* ================================================================== */
+
+/*
+ * Algorithm: exponential moving average, identical to Linux's calc_load().
+ *
+ *   load(t) = load(t-1) * exp + nr_active * (FIXED_1 - exp)
+ *
+ * where exp = e^(-sample_interval / window) scaled to FSHIFT fixed-point.
+ *
+ * Sampling interval: 1 second (LOAD_FREQ = HZ ticks).
+ * Constants:  e^(-1/1)*2048 = 753   (1-second window)
+ *             e^(-1/5)*2048 = 1677  (5-second window)
+ *             e^(-1/16)*2048 = 1924 (16-second window)
+ */
+#define LOAD_FSHIFT   11
+#define LOAD_FIXED_1  (1UL << LOAD_FSHIFT)
+#define LOAD_FREQ     HZ             /* sample every 1 second  */
+#define LOAD_EXP_1S   753            /* e^(-1/1)  * 2048       */
+#define LOAD_EXP_5S   1677           /* e^(-1/5)  * 2048       */
+#define LOAD_EXP_16S  1924           /* e^(-1/16) * 2048       */
+
+static uint64 avenrun[3];            /* FSHIFT fixed-point load averages */
+static uint64 calc_load_counter;     /* tick counter for sampling        */
+static uint64 prev_busy[NCPU];       /* busy_ticks snapshot for 1s util  */
+static uint64 prev_total[NCPU];      /* total_ticks snapshot for 1s util */
+uint64 load_epoch;                   /* global 1-second epoch counter    */
+
+/**
+ * calc_load - one step of the exponential moving average.
+ * Identical to Linux kernel/sched/loadavg.c:calc_load().
+ *
+ * @load:   current FSHIFT fixed-point load value
+ * @exp:    decay factor (FSHIFT fixed-point, < FIXED_1)
+ * @active: nr_running scaled to FSHIFT fixed-point (nr * FIXED_1)
+ */
+static uint64 calc_load(uint64 load, uint64 exp, uint64 active)
+{
+    uint64 newload;
+
+    newload = load * exp + active * (LOAD_FIXED_1 - exp);
+    if (active >= load)
+        newload += LOAD_FIXED_1 - 1;   /* round up when load is rising */
+    return newload / LOAD_FIXED_1;
+}
+
+void get_avenrun(uint64 loads[3])
+{
+    loads[0] = avenrun[0];
+    loads[1] = avenrun[1];
+    loads[2] = avenrun[2];
+}
 #include <mm/page.h>
 
 // Locking order:
@@ -195,6 +249,41 @@ void scheduler_yield(void) {
     // Flush the wake list - atomically drain pending wakeups and enqueue them
     rq_flush_wake_list(cpuid());
 
+    /* Accumulate per-CPU tick counters for utilization tracking.
+     * Every call to scheduler_yield is one timer tick. */
+    mycpu()->total_ticks++;
+    if (current != mycpu()->idle_thread) {
+        mycpu()->busy_ticks++;
+    }
+
+    /* Global load average + per-CPU EWMA util — driven by CPU 0 only,
+     * sampled every LOAD_FREQ ticks (1 second). */
+    if (cpuid() == 0 && ++calc_load_counter >= LOAD_FREQ) {
+        calc_load_counter = 0;
+        uint64 active = rq_count_nr_active() * LOAD_FIXED_1;
+        avenrun[0] = calc_load(avenrun[0], LOAD_EXP_1S,  active);
+        avenrun[1] = calc_load(avenrun[1], LOAD_EXP_5S,  active);
+        avenrun[2] = calc_load(avenrun[2], LOAD_EXP_16S, active);
+
+        /* Advance the global epoch so per-task snapshots can detect
+         * the 1-second boundary.  Placed AFTER load calc so readers
+         * see a consistent epoch vs. avenrun. */
+        smp_store_release(&load_epoch, load_epoch + 1);
+
+        /* Per-CPU 1-second utilization: raw busy/total ratio over the
+         * last LOAD_FREQ ticks.  No smoothing — reflects exactly the
+         * most recent 1-second window. */
+        for (int c = 0; c < NCPU; c++) {
+            uint64 bt = cpus[c].busy_ticks;
+            uint64 tt = cpus[c].total_ticks;
+            uint64 db = bt - prev_busy[c];
+            uint64 dt = tt - prev_total[c];
+            cpus[c].util_1s = (dt > 0) ? (db * LOAD_FIXED_1 / dt) : 0;
+            prev_busy[c] = bt;
+            prev_total[c] = tt;
+        }
+    }
+
     int intr = rq_lock_current_irqsave();
     struct thread *proc = current;
     struct thread *prev = NULL;
@@ -202,15 +291,12 @@ void scheduler_yield(void) {
     assert(!CPU_IN_ITR(), "Cannot yield CPU in interrupt context");
 
     // Drive scheduler tick for the currently running task.
-    // This updates runtime accounting (e.g. EEVDF vruntime) and may
-    // set NEEDS_RESCHED if the current task has exhausted its slice.
+    // This updates runtime accounting (e.g. EEVDF vruntime, sum_exec_runtime)
+    // and may set NEEDS_RESCHED if the current task has exhausted its slice.
     {
         struct sched_entity *curr_se = proc->sched_entity;
-        if (curr_se != NULL && curr_se->rq != NULL &&
-            curr_se->sched_class != NULL &&
-            curr_se->sched_class->task_tick != NULL) {
-            curr_se->sched_class->task_tick(curr_se->rq, curr_se);
-        }
+        if (curr_se != NULL && curr_se->rq != NULL)
+            rq_task_tick(curr_se);
     }
 
     // Pick the next thread to run

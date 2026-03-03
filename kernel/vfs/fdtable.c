@@ -52,6 +52,7 @@
 #include "vfs/fcntl.h"
 #include "lock/spinlock.h"
 #include "proc/thread.h"
+#include "resource.h"
 #include "lock/mutex_types.h"
 #include "lock/rwsem.h"
 #include "vfs/fs.h"
@@ -140,11 +141,20 @@ int vfs_fdtable_alloc_fd_from(struct vfs_fdtable *fdtable,
     }
     assert(spin_holding(&fdtable->lock),
            "vfs_fdtable_alloc_fd_from: fdtable lock not held");
-    if (fdtable->fd_count >= NOFILE) {
+
+    /* Determine effective limit: min(NOFILE, RLIMIT_NOFILE) */
+    int max_fd = NOFILE;
+    if (current && current->thread_group) {
+        uint64 rl = current->thread_group->rlim[RLIMIT_NOFILE].rlim_cur;
+        if (rl < (uint64)max_fd)
+            max_fd = (int)rl;
+    }
+
+    if (fdtable->fd_count >= max_fd) {
         return -EMFILE; // Too many open files
     }
-    int fd = bits_ctz_ptr_from_inv(fdtable->files_bitmap, start_fd, NOFILE);
-    if (fd < 0 || fd >= NOFILE) {
+    int fd = bits_ctz_ptr_from_inv(fdtable->files_bitmap, start_fd, max_fd);
+    if (fd < 0 || fd >= max_fd) {
         return -EMFILE; // No free file descriptor
     }
     if (vfs_fdup(file) == NULL) {

@@ -234,6 +234,11 @@ extern uint64 sys_kevent_wait(void);
 extern uint64 sys_epoll_create1(void);
 extern uint64 sys_epoll_ctl(void);
 extern uint64 sys_epoll_pwait(void);
+
+// resource limits (accounting.c)
+extern uint64 sys_prlimit64(void);
+extern uint64 sys_kstats(void);
+
 #ifdef USE_LWIP
 extern uint64 sys_socket(void);
 extern uint64 sys_bind(void);
@@ -372,6 +377,8 @@ static uint64 (*syscalls[])(void) = {
     [SYS_getgroups] sys_getgroups,
     [SYS_setgroups] sys_setgroups,
     [SYS_arch_prctl] sys_arch_prctl,
+    [SYS_prlimit64] sys_prlimit64,
+    [SYS_kstats] sys_kstats,
 #ifdef USE_LWIP
     [SYS_socket] sys_socket,
     [SYS_bind] sys_bind,

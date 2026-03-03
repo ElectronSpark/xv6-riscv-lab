@@ -13,6 +13,7 @@
 #include "errno.h"
 #include "proc/thread.h"
 #include <mm/vm.h>
+#include "accounting.h"
 
 // mmap(addr, length, prot, flags, fd, offset)
 uint64 sys_mmap(void) {
@@ -39,6 +40,8 @@ uint64 sys_mmap(void) {
     if (ret == (uint64)-1) {
         printf("sys_mmap: FAIL pid=%d addr=0x%lx len=0x%lx prot=%d flags=0x%x fd=%d\n",
                current->pid, addr, length, prot, flags, fd);
+    } else {
+        ACCT_INC(current->thread_group, mm_mmap_count);
     }
     return ret;
 }
@@ -53,7 +56,10 @@ uint64 sys_munmap(void) {
     if (length == 0)
         return -EINVAL;
 
-    return (uint64)vm_munmap(current->vm, addr, (size_t)length);
+    int ret = vm_munmap(current->vm, addr, (size_t)length);
+    if (ret == 0)
+        ACCT_INC(current->thread_group, mm_munmap_count);
+    return (uint64)ret;
 }
 
 // mprotect(addr, length, prot)

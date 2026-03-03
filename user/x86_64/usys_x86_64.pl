@@ -118,6 +118,8 @@ entry("getsid");
 
 entry("sync");
 
+entry("kstats");
+
 # kqueue syscalls
 entry("kqueue");
 entry("kevent_register");

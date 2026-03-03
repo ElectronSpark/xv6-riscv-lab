@@ -52,6 +52,7 @@ enum procfs_entry_type {
     PROC_EXE,         /* /proc/<tgid>/exe     */
     PROC_FDDIR,       /* /proc/<tgid>/fd/     */
     PROC_FD_ENTRY,    /* /proc/<tgid>/fd/<n>  */
+    PROC_RESOURCES,   /* /proc/<tgid>/resources */
 };
 
 /* ------------------------------------------------------------------ */
@@ -71,6 +72,7 @@ enum procfs_entry_type {
 #define PROCFS_PID_MAPS_INO(tgid)   (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 2)
 #define PROCFS_PID_EXE_INO(tgid)    (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 3)
 #define PROCFS_PID_FDDIR_INO(tgid)  (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 4)
+#define PROCFS_PID_RESOURCES_INO(tgid) (PROCFS_PID_BASE + (uint64)(tgid)*10ULL + 5)
 #define PROCFS_FD_INO(tgid, fd)     (PROCFS_FD_BASE + (uint64)(tgid)*1000ULL + (uint64)(fd))
 
 /* ------------------------------------------------------------------ */

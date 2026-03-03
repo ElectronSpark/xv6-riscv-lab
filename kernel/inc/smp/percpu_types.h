@@ -25,6 +25,9 @@ struct cpu_local {
     int __pad0;                 // padding to keep intr_kstack_top at offset 88
     uint64 intr_kstack_top;     // kernel stack top for IDT entry (%gs:88)
     uint64 fpu_seq;             // FPU ownership sequence number
+    uint64 busy_ticks;          // ticks spent running non-idle threads
+    uint64 total_ticks;         // total timer ticks on this CPU
+    uint64 util_1s;             // CPU utilization over last 1s (FSHIFT=11 fp, FIXED_1=100%)
 } __ALIGNED_CACHELINE;
 
 #endif /* __KERNEL_PERCPU_TYPES_H */

@@ -39,6 +39,15 @@
 #include "dev/blkdev.h"
 #include "list.h"
 #include "hlist.h"
+#include "proc/thread.h"
+#include "accounting.h"
+#include "kstats.h"
+
+/* Global block I/O counters (read by sys_kstats) */
+_Atomic uint64 g_bio_reads;
+_Atomic uint64 g_bio_writes;
+_Atomic uint64 g_bio_read_bytes;
+_Atomic uint64 g_bio_write_bytes;
 
 struct {
     spinlock_t lock;
@@ -284,6 +293,10 @@ struct buf *bread(uint dev, uint blockno) {
         }
         b->valid = 1;
     }
+    if (current && current->thread_group)
+        ACCT_INC(current->thread_group, bio_reads);
+    __atomic_fetch_add(&g_bio_reads, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_bio_read_bytes, BSIZE, __ATOMIC_RELAXED);
     return b;
 }
 
@@ -291,6 +304,10 @@ struct buf *bread(uint dev, uint blockno) {
 void bwrite(struct buf *b) {
     if (!holding_mutex(&b->lock))
         panic("bwrite");
+    if (current && current->thread_group)
+        ACCT_INC(current->thread_group, bio_writes);
+    __atomic_fetch_add(&g_bio_writes, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_bio_write_bytes, BSIZE, __ATOMIC_RELAXED);
     blkdev_t *blkdev = blkdev_get(major(b->dev), minor(b->dev));
     assert(!IS_ERR(blkdev), "bwrite: blkdev_get failed");
     struct bio *bio = __buf_alloc_bio(b, blkdev, true);
@@ -319,6 +336,10 @@ void bwrite(struct buf *b) {
 void bwrite_async(struct buf *b) {
     if (!holding_mutex(&b->lock))
         panic("bwrite_async");
+    if (current && current->thread_group)
+        ACCT_INC(current->thread_group, bio_writes);
+    __atomic_fetch_add(&g_bio_writes, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_bio_write_bytes, BSIZE, __ATOMIC_RELAXED);
 
     spin_lock(&bcache.lock);
     if (!b->dirty) {

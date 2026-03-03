@@ -139,6 +139,9 @@ void sched_attr_init(struct sched_attr *attr);
 // Dump run queue info to console
 void rq_dump(void);
 
+// Count total runnable tasks system-wide (excludes idle)
+uint64 rq_count_nr_active(void);
+
 // Mark a CPU as active in the rq subsystem
 void rq_cpu_activate(int cpu);
 

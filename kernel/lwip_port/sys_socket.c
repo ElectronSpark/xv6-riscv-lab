@@ -29,6 +29,7 @@
 #include <vfs/file.h>
 #include <vfs/fcntl.h>
 #include <vfs/poll.h>
+#include "accounting.h"
 
 #include "lwip/opt.h"
 #include "lwip/api.h"
@@ -1191,6 +1192,7 @@ uint64 sys_socket(void)
             vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
             spin_unlock(&current->fdtable->lock);
         }
+        ACCT_INC(current->thread_group, net_sockets);
         return (uint64)fd;
     }
 
@@ -1204,6 +1206,7 @@ uint64 sys_socket(void)
             vfs_fdtable_set_fdflags(current->fdtable, fd, FD_CLOEXEC);
             spin_unlock(&current->fdtable->lock);
         }
+        ACCT_INC(current->thread_group, net_sockets);
         return (uint64)fd;
     }
 
@@ -1231,6 +1234,7 @@ uint64 sys_socket(void)
         spin_unlock(&current->fdtable->lock);
     }
 
+    ACCT_INC(current->thread_group, net_sockets);
     return (uint64)fd;
 }
 
@@ -1368,6 +1372,7 @@ uint64 sys_accept(void)
         vm_copyout(current->vm, uaddr, &sa, sizeof(sa));
     }
 
+    ACCT_INC(current->thread_group, net_accepts);
     return (uint64)newfd;
 }
 
@@ -1411,6 +1416,7 @@ uint64 sys_sconnect(void)
     if (err != ERR_OK)
         return (uint64)-lwip_err_to_errno(err);
 
+    ACCT_INC(current->thread_group, net_connects);
     return 0;
 }
 
@@ -1464,6 +1470,7 @@ uint64 sys_sendto(void)
         err_t err = netconn_write(sk->conn, tmpbuf, chunk, NETCONN_COPY);
         if (err != ERR_OK)
             return (uint64)-lwip_err_to_errno(err);
+        ACCT_ADD(current->thread_group, net_bytes_sent, chunk);
         return (uint64)chunk;
 
     } else {
@@ -1504,6 +1511,7 @@ uint64 sys_sendto(void)
         netbuf_delete(nb);
         if (err != ERR_OK)
             return (uint64)-lwip_err_to_errno(err);
+        ACCT_ADD(current->thread_group, net_bytes_sent, sendlen);
         return (uint64)sendlen;
     }
 }
@@ -1568,6 +1576,7 @@ uint64 sys_recvfrom(void)
                     sk->lastpbuf_off = 0;
                 }
             }
+            ACCT_ADD(current->thread_group, net_bytes_recv, clen);
             return (uint64)clen;
         }
 
@@ -1597,6 +1606,7 @@ uint64 sys_recvfrom(void)
         } else {
             pbuf_free(p);
         }
+        ACCT_ADD(current->thread_group, net_bytes_recv, clen);
         return (uint64)clen;
 
     } else {
@@ -1652,6 +1662,7 @@ uint64 sys_recvfrom(void)
             sk->lastoffset = 0;
             netbuf_delete(nb);
         }
+        ACCT_ADD(current->thread_group, net_bytes_recv, tocopy);
         return (uint64)tocopy;
     }
 }
@@ -2208,6 +2219,7 @@ uint64 sys_accept4(void)
         vm_copyout(current->vm, uaddr, &sa, sizeof(sa));
     }
 
+    ACCT_INC(current->thread_group, net_accepts);
     return (uint64)newfd;
 }
 
@@ -2361,6 +2373,8 @@ uint64 sys_sendmsg(void)
         total = (ssize_t)total_len;
     }
 
+    if (total > 0)
+        ACCT_ADD(current->thread_group, net_bytes_sent, (uint64)total);
     return (uint64)total;
 }
 
@@ -2531,6 +2545,8 @@ uint64 sys_recvmsg(void)
                 umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
                 &zero, sizeof(zero));
 
+    if (total > 0)
+        ACCT_ADD(current->thread_group, net_bytes_recv, (uint64)total);
     return (uint64)total;
 }
 

@@ -166,8 +166,14 @@
 // musl's __set_thread_area hardcodes Linux's __NR_arch_prctl (158)
 #define SYS_arch_prctl     158
 
+// --- Resource limits ---
+#define SYS_prlimit64      159
+
+// --- Kernel statistics ---
+#define SYS_kstats         160
+
 // Max syscall number (update when adding new syscalls)
-#define SYS_MAXNUM         158
+#define SYS_MAXNUM         160
 
 // --- Linux time64 compatibility stubs used by musl on rv64 ---
 // These are intentionally unsupported in xv6 and return -ENOSYS via

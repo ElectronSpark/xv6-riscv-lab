@@ -136,6 +136,7 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/mmapbigfile.c
     ${USER_DIR}/kqueuetest.c
     ${USER_DIR}/forktest.c
+    ${USER_DIR}/top.c
 )
 
 # Lab-specific programs
@@ -738,7 +739,7 @@ set(USERLIB_ONLY_PROGS
     bigfile cloexectest clonetest cowtest dd devtest dh dumpchan dumpinode
     dumppcache dumprq find free forktest grind kqueuetest losetup lsblk mkfs_xv6fs mknod mmapbigfile mmaptest mount pingpong
     primes ps randtest stressfs symlinktest sync testsig umount
-    usertests vforktest waitgdb wallclock xargs zombie
+    usertests vforktest waitgdb wallclock xargs zombie top
 )
 foreach(PROG ${USERLIB_ONLY_PROGS})
     set(SRC "${CMAKE_BINARY_DIR}/user/_${PROG}")

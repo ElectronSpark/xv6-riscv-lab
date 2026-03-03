@@ -28,6 +28,7 @@
 #include <mm/vm.h>
 #include "printf.h"
 #include "dev/cdev.h"
+#include "accounting.h"
 #include "dev/blkdev.h"
 #include "dev/gendisk.h"
 #include "dev/loop.h"
@@ -254,6 +255,8 @@ uint64 sys_vfs_read(void) {
 
     ssize_t ret = vfs_fileread(f, (void *)p, n, true);
     vfs_fput(f);
+    if (ret > 0)
+        ACCT_ADD(current->thread_group, fs_bytes_read, (uint64)ret);
     return ret;
 }
 
@@ -272,6 +275,8 @@ uint64 sys_vfs_write(void) {
 
     ssize_t ret = vfs_filewrite(f, (const void *)p, n, true);
     vfs_fput(f);
+    if (ret > 0)
+        ACCT_ADD(current->thread_group, fs_bytes_written, (uint64)ret);
     return ret;
 }
 
@@ -288,6 +293,7 @@ uint64 sys_vfs_close(void) {
     spin_unlock(&current->fdtable->lock);
 
     __vfs_fput_call_rcu(f);
+    ACCT_INC(current->thread_group, fs_closes);
     return 0;
 }
 
@@ -648,6 +654,8 @@ uint64 sys_vfs_rename(void) {
     vfs_release_dentry(&old_dentry);
     vfs_iput(old_parent);
     vfs_iput(new_parent);
+    if (ret == 0)
+        ACCT_INC(current->thread_group, fs_renames);
     return ret;
 }
 
@@ -783,6 +791,8 @@ uint64 sys_vfs_open(void) {
     // When success, the refcount of f will be increased by fdtable, thus we do
     // not put f here. When failure, we need to put f anyway.
     vfs_fput(f);
+    if (fd >= 0)
+        ACCT_INC(current->thread_group, fs_opens);
     return fd;
 }
 
@@ -813,6 +823,7 @@ uint64 sys_vfs_mkdir(void) {
     }
 
     vfs_iput(dir);
+    ACCT_INC(current->thread_group, fs_creates);
     return 0;
 }
 
@@ -873,7 +884,8 @@ uint64 sys_vfs_unlink(void) {
 
     int ret = vfs_unlink(parent, name, name_len);
     vfs_iput(parent);
-
+    if (ret == 0)
+        ACCT_INC(current->thread_group, fs_deletes);
     return ret;
 }
 
@@ -927,7 +939,8 @@ uint64 sys_vfs_link(void) {
 
     vfs_iput(src);
     vfs_iput(parent);
-
+    if (ret == 0)
+        ACCT_INC(current->thread_group, fs_links);
     return ret;
 }
 
@@ -1059,6 +1072,7 @@ uint64 sys_vfs_symlink(void) {
     }
 
     vfs_iput(sym);
+    ACCT_INC(current->thread_group, fs_links);
     return 0;
 }
 
@@ -1103,6 +1117,7 @@ uint64 sys_vfs_chdir(void) {
     vfs_inode_put_ref(&old_cwd);
     vfs_iput(inode);
 
+    ACCT_INC(current->thread_group, fs_chdirs);
     return 0;
 }
 
@@ -1476,6 +1491,8 @@ uint64 sys_chroot(void) {
     ret = vfs_chdir(new_root);
     vfs_iput(new_root);
 
+    if (ret == 0)
+        ACCT_INC(current->thread_group, fs_chdirs);
     return ret;
 }
 
@@ -1699,7 +1716,10 @@ uint64 sys_mount(void) {
         return -EFAULT;
     }
 
-    return vfs_mount_path(fstype, target, n2, source, n1);
+    int ret = vfs_mount_path(fstype, target, n2, source, n1);
+    if (ret == 0)
+        ACCT_INC(current->thread_group, fs_mounts);
+    return ret;
 }
 
 /******************************************************************************
@@ -1794,7 +1814,10 @@ uint64 sys_umount(void) {
         return -EFAULT;
     }
 
-    return vfs_umount_path(target, n);
+    int ret = vfs_umount_path(target, n);
+    if (ret == 0)
+        ACCT_INC(current->thread_group, fs_mounts);
+    return ret;
 }
 
 /******************************************************************************
@@ -2696,6 +2719,8 @@ uint64 sys_vfs_openat(void) {
         vfs_fdtable_set_fdflags(current->fdtable, n, FD_CLOEXEC);
     }
 
+    if (n >= 0)
+        ACCT_INC(current->thread_group, fs_opens);
     return n;
 }
 
@@ -2763,6 +2788,8 @@ uint64 sys_vfs_writev(void) {
 
     vfs_fput(f);
     if (heap_iov) kvfree(heap_iov);
+    if (total > 0)
+        ACCT_ADD(current->thread_group, fs_bytes_written, (uint64)total);
     return total;
 }
 
@@ -2820,6 +2847,8 @@ uint64 sys_vfs_readv(void) {
 
     vfs_fput(f);
     if (heap_iov) kvfree(heap_iov);
+    if (total > 0)
+        ACCT_ADD(current->thread_group, fs_bytes_read, (uint64)total);
     return total;
 }
 
@@ -2866,6 +2895,8 @@ uint64 sys_vfs_pread64(void) {
     f->f_pos = saved;
     mutex_unlock(&f->lock);
 
+    if (ret > 0)
+        ACCT_ADD(current->thread_group, fs_bytes_read, (uint64)ret);
     vfs_fput(f);
     return ret;
 }
@@ -2912,6 +2943,8 @@ uint64 sys_vfs_pwrite64(void) {
     f->f_pos = saved;
     mutex_unlock(&f->lock);
 
+    if (ret > 0)
+        ACCT_ADD(current->thread_group, fs_bytes_written, (uint64)ret);
     vfs_fput(f);
     return ret;
 }
@@ -3085,6 +3118,7 @@ uint64 sys_vfs_mkdirat(void) {
     if (IS_ERR(dir))
         return PTR_ERR(dir);
     vfs_iput(dir);
+    ACCT_INC(current->thread_group, fs_creates);
     return 0;
 }
 
@@ -3156,6 +3190,8 @@ uint64 sys_vfs_unlinkat(void) {
     (void)flags;  /* AT_REMOVEDIR handled by vfs_unlink */
     int ret = vfs_unlink(parent, name, strlen(name));
     vfs_iput(parent);
+    if (ret == 0)
+        ACCT_INC(current->thread_group, fs_deletes);
     return ret;
 }
 
@@ -3209,6 +3245,8 @@ uint64 sys_vfs_linkat(void) {
     int ret = vfs_link(&old_dentry, parent, name, strlen(name));
     vfs_iput(src);
     vfs_iput(parent);
+    if (ret == 0)
+        ACCT_INC(current->thread_group, fs_links);
     return ret;
 }
 
@@ -3250,6 +3288,7 @@ uint64 sys_vfs_symlinkat(void) {
     if (IS_ERR(sym))
         return PTR_ERR(sym);
     vfs_iput(sym);
+    ACCT_INC(current->thread_group, fs_links);
     return 0;
 }
 
@@ -3367,6 +3406,8 @@ uint64 sys_vfs_renameat(void) {
     vfs_release_dentry(&old_dentry);
     vfs_iput(old_parent);
     vfs_iput(new_parent);
+    if (ret == 0)
+        ACCT_INC(current->thread_group, fs_renames);
     return ret;
 }
 

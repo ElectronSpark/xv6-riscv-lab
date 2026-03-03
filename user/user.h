@@ -175,6 +175,10 @@ int getsid(int pid);
 
 void sync(void);
 
+// System-wide statistics
+struct kstats; // forward declaration
+int kstats(struct kstats *ks);
+
 // kqueue
 struct kevent; // forward declaration
 int kqueue(void);

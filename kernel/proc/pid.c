@@ -18,6 +18,7 @@
 #include "proc/tq.h"
 #include "proc/sched.h"
 #include <mm/slab.h>
+#include "accounting.h"
 #include <mm/page.h>
 #include <mm/vm.h>
 #include "vfs/fs.h"
@@ -277,6 +278,31 @@ void procdump(void) {
         printf("%-20s %-5s %-2s [%s] %s/%s\n", idbuf, cpubuf,
                thread_state_short(pstate), THREAD_USER_SPACE(p) ? "U" : "K",
                pname, name);
+
+        /* Show accounting counters for group leaders */
+        if (tid == tgid && p->thread_group) {
+            struct proc_acct *a = &p->thread_group->acct;
+            printf("  acct: fs(o:%lu c:%lu r:%lu w:%lu) "
+                   "bio(r:%lu w:%lu) "
+                   "net(s:%lu sr:%lu rr:%lu) "
+                   "mm(m:%lu u:%lu brk:%ld) "
+                   "sched(f:%lu e:%lu x:%lu)\n",
+                   (unsigned long)__atomic_load_n(&a->fs_opens, __ATOMIC_RELAXED),
+                   (unsigned long)__atomic_load_n(&a->fs_closes, __ATOMIC_RELAXED),
+                   (unsigned long)__atomic_load_n(&a->fs_bytes_read, __ATOMIC_RELAXED),
+                   (unsigned long)__atomic_load_n(&a->fs_bytes_written, __ATOMIC_RELAXED),
+                   (unsigned long)__atomic_load_n(&a->bio_reads, __ATOMIC_RELAXED),
+                   (unsigned long)__atomic_load_n(&a->bio_writes, __ATOMIC_RELAXED),
+                   (unsigned long)__atomic_load_n(&a->net_sockets, __ATOMIC_RELAXED),
+                   (unsigned long)__atomic_load_n(&a->net_bytes_sent, __ATOMIC_RELAXED),
+                   (unsigned long)__atomic_load_n(&a->net_bytes_recv, __ATOMIC_RELAXED),
+                   (unsigned long)__atomic_load_n(&a->mm_mmap_count, __ATOMIC_RELAXED),
+                   (unsigned long)__atomic_load_n(&a->mm_munmap_count, __ATOMIC_RELAXED),
+                   (long)__atomic_load_n(&a->mm_brk_delta, __ATOMIC_RELAXED),
+                   (unsigned long)__atomic_load_n(&a->sched_forks, __ATOMIC_RELAXED),
+                   (unsigned long)__atomic_load_n(&a->sched_execs, __ATOMIC_RELAXED),
+                   (unsigned long)__atomic_load_n(&a->sched_exits, __ATOMIC_RELAXED));
+        }
     }
 
     rcu_read_unlock();

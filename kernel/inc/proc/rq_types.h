@@ -142,9 +142,10 @@ struct sched_entity {
     struct sched_entity *wake_next;
     cpumask_t affinity_mask; // CPU affinity mask
 
-    uint64 start_time; // Time when the thread started running
-    uint64 exec_start; // Last time the thread started executing
-    uint64 exec_end;   // Last time the thread stopped executing
+    uint64 start_time;       // Time when the thread started running
+    uint64 exec_start;       // Last time the thread started executing
+    uint64 exec_end;         // Last time the thread stopped executing
+    uint64 sum_exec_runtime; // Cumulative CPU time in raw ticks
 
     // EEVDF scheduler fields
     int64 vruntime;       // Virtual runtime (fixed-point, SCHED_FIXEDPOINT_SHIFT)
@@ -153,6 +154,11 @@ struct sched_entity {
     uint64 slice;         // Time slice in raw ticks
     struct load_weight load; // Weight for this entity
     int eevdf_on_rq;      // Whether this entity is in the EEVDF rb-tree
+
+    // PELT (Per-Entity Load Tracking) fields
+    uint32 util_avg;         // Utilization average [0, SCHED_FIXEDPOINT_ONE]
+    uint64 pelt_stamp;       // Last PELT update timestamp (r_time())
+    uint64 load_avg_contrib; // weight * util_avg >> SCHED_FIXEDPOINT_SHIFT
 
     struct context context; // swtch() here to run thread
 };
@@ -200,6 +206,10 @@ struct eevdf_rq {
     uint64 load_sum;               // Instantaneous sum of entity weights
     uint64 load_avg;               // EWMA smoothed load average (fixed-point)
     uint64 load_avg_stamp;         // r_time() when load_avg was last updated
+
+    /* ── Per-CPU PELT aggregates ── */
+    uint64 cpu_util;               // Sum of entity util_avg on this CPU
+    uint64 cpu_load;               // Sum of entity load_avg_contrib (weighted util)
 
     /* ── Periodic balance state ── */
     uint64 last_balance_tick;      // r_time() of last periodic balance

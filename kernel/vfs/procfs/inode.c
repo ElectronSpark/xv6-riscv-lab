@@ -31,9 +31,12 @@
 #include <mm/vm.h>
 #include "proc/thread.h"
 #include "proc/thread_group.h"
+#include "proc/sched.h"
 #include "maple_tree.h"
 #include "printf.h"
 #include "procfs_private.h"
+#include "accounting.h"
+#include "timer/timer.h"
 
 /* snprintf is provided by lwip_port/sys_arch.c – forward-declare it here */
 int snprintf(char *buf, size_t size, const char *fmt, ...);
@@ -169,6 +172,10 @@ static int procfs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
             dentry->ino = PROCFS_PID_FDDIR_INO(pi->pid);
             return 0;
         }
+        if (name_len == 9 && memcmp(name, "resources", 9) == 0) {
+            dentry->ino = PROCFS_PID_RESOURCES_INO(pi->pid);
+            return 0;
+        }
         return -ENOENT;
     }
 
@@ -302,6 +309,7 @@ static int procfs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         case 1: name = "maps";   ino = PROCFS_PID_MAPS_INO(pi->pid);   break;
         case 2: name = "exe";    ino = PROCFS_PID_EXE_INO(pi->pid);    break;
         case 3: name = "fd";     ino = PROCFS_PID_FDDIR_INO(pi->pid);  break;
+        case 4: name = "resources"; ino = PROCFS_PID_RESOURCES_INO(pi->pid); break;
         default:
             vfs_release_dentry(ret_dentry);
             ret_dentry->name = NULL;
@@ -460,6 +468,15 @@ static char *procfs_gen_status(int tgid) {
     unsigned long    heap_kb  = 0;
     if (p->vm != NULL)
         heap_kb = (unsigned long)(p->vm->heap_size / 1024);
+    /* Cumulative CPU time (raw timer ticks at TIMEBASE_FREQUENCY Hz) */
+    uint64 cputime_raw = 0;
+    uint32 util_avg = 0;
+    uint64 load_contrib = 0;
+    if (p->sched_entity) {
+        cputime_raw = p->sched_entity->sum_exec_runtime;
+        util_avg = p->sched_entity->util_avg;
+        load_contrib = p->sched_entity->load_avg_contrib;
+    }
     rcu_read_unlock();
 
     char *buf = kvmalloc(PROCFS_BUF_SIZE);
@@ -471,8 +488,14 @@ static char *procfs_gen_status(int tgid) {
              "Pid:\t%d\n"
              "PPid:\t%d\n"
              "State:\t%s\n"
-             "VmSize:\t%lu kB\n",
-             name, tgid, ppid, statestr, heap_kb);
+             "VmSize:\t%lu kB\n"
+             "CpuTime:\t%lu\n"
+             "UtilAvg:\t%u\n"
+             "LoadContrib:\t%lu\n",
+             name, tgid, ppid, statestr, heap_kb,
+             (unsigned long)cputime_raw,
+             (unsigned)util_avg,
+             (unsigned long)load_contrib);
     return buf;
 }
 
@@ -539,6 +562,27 @@ static char *procfs_gen_cpuinfo(void) {
     return buf;
 }
 
+#define PROCFS_RESOURCES_BUF_SIZE 2048
+
+static char *procfs_gen_resources(int tgid) {
+    rcu_read_lock();
+    struct thread *p = NULL;
+    get_pid_thread(tgid, &p);
+    if (p == NULL || p->thread_group == NULL) {
+        rcu_read_unlock();
+        return ERR_PTR(-ESRCH);
+    }
+    struct thread_group *tg = p->thread_group;
+    rcu_read_unlock();
+
+    char *buf = kvmalloc(PROCFS_RESOURCES_BUF_SIZE);
+    if (buf == NULL)
+        return ERR_PTR(-ENOMEM);
+
+    acct_format(tg, buf, PROCFS_RESOURCES_BUF_SIZE);
+    return buf;
+}
+
 /* ------------------------------------------------------------------ */
 /*  procfs_open – set file ops; generate content for regular files   */
 /* ------------------------------------------------------------------ */
@@ -573,6 +617,9 @@ static int procfs_open(struct vfs_inode *inode, struct vfs_file *file,
         break;
     case PROC_CPUINFO:
         buf = procfs_gen_cpuinfo();
+        break;
+    case PROC_RESOURCES:
+        buf = procfs_gen_resources(pi->pid);
         break;
     default:
         return -EINVAL;

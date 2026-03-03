@@ -36,6 +36,8 @@
 #include "proc/pgroup.h"
 #include "tty/session.h"
 #include "arch_thread.h"
+#include "accounting.h"
+#include "resource.h"
 
 // Entry wrapper for forked user threads.
 // This is called as the entry point from context switch.
@@ -248,6 +250,13 @@ int thread_clone(struct clone_args *args) {
         // Not CLONE_THREAD: create a new thread group for the child.
         int tg_ret = thread_group_alloc(ret_ptr);
         assert(tg_ret == 0, "clone: thread_group_alloc failed");
+
+        // Inherit rlimits from the parent; acct counters start at zero.
+        memmove(ret_ptr->thread_group->rlim, p->thread_group->rlim,
+                sizeof(struct rlimit) * RLIMIT_NLIMITS);
+
+        // Account the fork on the parent's counters
+        ACCT_INC(p->thread_group, sched_forks);
     }
 
     // Initialize process group and session membership.

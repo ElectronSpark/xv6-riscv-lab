@@ -215,6 +215,7 @@ void sched_entity_init(struct sched_entity *se, struct thread *p) {
     se->start_time = 0;
     se->exec_start = 0;
     se->exec_end = 0;
+    se->sum_exec_runtime = 0;
     se->vruntime = 0;
     se->deadline = 0;
     se->min_vruntime = 0;
@@ -222,6 +223,9 @@ void sched_entity_init(struct sched_entity *se, struct thread *p) {
     se->load.weight = SCHED_FIXEDPOINT_ONE;
     se->load.inv_weight = SCHED_FIXEDPOINT_ONE;
     se->eevdf_on_rq = 0;
+    se->util_avg = 0;
+    se->pelt_stamp = 0;
+    se->load_avg_contrib = 0;
     se->thread = p;
 }
 
@@ -538,6 +542,20 @@ void rq_put_prev_task(struct sched_entity *se) {
     if (se->sched_class->put_prev_task) {
         se->sched_class->put_prev_task(se->rq, se);
     }
+
+    /* Generic CPU-time accounting: accumulate wall-clock time the entity
+     * spent on-CPU since it was selected (or since the last update by a
+     * class-specific callback).  For classes that already maintain
+     * sum_exec_runtime (e.g. EEVDF), exec_start was just refreshed by the
+     * class callback above, so delta ≈ 0 — negligible double-counting. */
+    {
+        uint64 now = r_time();
+        uint64 delta = now - se->exec_start;
+        if ((int64)delta > 0 && se->exec_start != 0) {
+            se->sum_exec_runtime += delta;
+            se->exec_start = now;
+        }
+    }
 }
 
 void rq_set_next_task(struct sched_entity *se) {
@@ -552,6 +570,13 @@ void rq_set_next_task(struct sched_entity *se) {
     if (se->sched_class->set_next_task) {
         se->sched_class->set_next_task(se->rq, se);
     }
+
+    /* Generic: stamp exec_start so that rq_put_prev_task() can compute
+     * the on-CPU delta for sum_exec_runtime.  For classes that already
+     * set exec_start (e.g. EEVDF), this harmlessly overwrites with an
+     * approximately equal value. */
+    se->exec_start = r_time();
+
     // Note: We do NOT decrement task_count here. The task is still logically
     // "on rq" (counted in task_count) while running. Matching Linux behavior,
     // on_rq stays 1 while the task is running. The task is removed from the
@@ -579,6 +604,19 @@ void rq_task_tick(struct sched_entity *se) {
     assert(__rq_lock_held(se->rq->cpu_id), "rq_task_tick: rq lock not held");
     assert(se->sched_class == se->rq->sched_class,
            "rq_task_tick: se->sched_class does not match rq's sched_class");
+
+    /* Flush sum_exec_runtime so it stays accurate even for tasks that
+     * never get descheduled (e.g. the only runnable task on a CPU).
+     * Uses the same r_time()-based delta as rq_put_prev_task(). */
+    {
+        uint64 now = r_time();
+        uint64 delta = now - se->exec_start;
+        if ((int64)delta > 0 && se->exec_start != 0) {
+            se->sum_exec_runtime += delta;
+            se->exec_start = now;
+        }
+    }
+
     if (se->sched_class->task_tick) {
         se->sched_class->task_tick(se->rq, se);
     }
@@ -968,4 +1006,28 @@ void rq_dump(void) {
 uint64 sys_dumprq(void) {
     rq_dump();
     return 0;
+}
+
+/**
+ * @brief Count total runnable tasks across all CPUs and scheduler classes.
+ *
+ * Iterates every priority level on every CPU, summing rq->task_count.
+ * Skips the idle class (priority 63) since idle threads are always present.
+ * Reads are lock-free (approximate snapshot, same approach as Linux).
+ */
+uint64 rq_count_nr_active(void) {
+    uint64 nr = 0;
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        if (!(smp_load_acquire(&rq_global.active_cpu_mask) & (1ULL << cpu)))
+            continue;
+        for (int prio = 0; prio < PRIORITY_MAINLEVELS; prio++) {
+            if (prio == IDLE_MAJOR_PRIORITY)
+                continue;
+            struct rq *rq = __get_rq_for_cpu(prio, cpu);
+            if (rq == NULL)
+                continue;
+            nr += rq->task_count;
+        }
+    }
+    return nr;
 }

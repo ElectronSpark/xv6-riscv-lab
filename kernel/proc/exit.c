@@ -18,6 +18,7 @@
 #include "signal.h"
 #include <mm/slab.h>
 #include "string.h"
+#include "accounting.h"
 #include "vfs/fs.h"
 #include "types.h"
 #include "vfs/file.h"
@@ -94,6 +95,8 @@ void reparent(struct thread *p) {
 void exit(int status) {
     struct thread *p = current;
     assert(p != __proctab_get_initproc(), "init exiting");
+
+    ACCT_INC(p->thread_group, sched_exits);
 
     // Release per-CPU FPU ownership early — this thread will never
     // return to user space, so no point keeping it as the HW FP owner.

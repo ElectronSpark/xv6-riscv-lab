@@ -168,7 +168,7 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         int    tgid   = (int)(offset / 10);
         int    slot   = (int)(offset % 10);
 
-        if (tgid <= 0 || slot > 4) {
+        if (tgid <= 0 || slot > 5) {
             slab_free(pi);
             return ERR_PTR(-ENOENT);
         }
@@ -214,6 +214,12 @@ struct vfs_inode *procfs_get_inode(struct vfs_superblock *sb, uint64 ino) {
             pi->type              = PROC_FDDIR;
             pi->vfs_inode.mode    = S_IFDIR | 0555;
             pi->vfs_inode.n_links = 2;
+            break;
+        case 5: /* /proc/<tgid>/resources */
+            pi->type              = PROC_RESOURCES;
+            pi->vfs_inode.mode    = S_IFREG | 0444;
+            pi->vfs_inode.n_links = 1;
+            pi->vfs_inode.size    = 4096;
             break;
         default:
             slab_free(pi);

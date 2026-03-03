@@ -14,6 +14,7 @@ int sleep_lock_irqsave(void);
 void sleep_unlock_irqrestore(int state);
 void scheduler_run(void);
 void scheduler_yield(void);
+void get_avenrun(uint64 loads[3]);
 void scheduler_sleep(spinlock_t *lk, enum thread_state sleep_state);
 void scheduler_wakeup(struct thread *p);
 void scheduler_wakeup_timeout(struct thread *p);

@@ -69,34 +69,70 @@
 #include "smp/ipi.h"
 
 /* ──────────────────────────────────────────────────────────────
- *  Weight table — maps minor priority (0‥3) to a weight value.
- *  Lower minor priority → higher weight → more CPU share.
- *  Values chosen so that adjacent levels differ by ~1.25×.
+ *  Weight table — maps the 40 EEVDF priorities to Linux-compatible
+ *  weights, mirroring the sched_prio_to_weight[] table from Linux
+ *  kernel/sched/core.c.
+ *
+ *  EEVDF priority 80 (major 20, minor 0)  → index 0  → nice -20
+ *  EEVDF priority 100 (major 25, minor 0) → index 20 → nice  0
+ *  EEVDF priority 119 (major 29, minor 3) → index 39 → nice +19
+ *
+ *  Adjacent nice levels differ by ~1.25×, so a +1 nice step
+ *  yields ~10% less CPU share.
  * ────────────────────────────────────────────────────────────── */
-static const uint32 __eevdf_weight_table[FIFO_RQ_SUBLEVELS] = {
-    1024, /* minor 0 – default / highest share */
-    820,  /* minor 1 */
-    655,  /* minor 2 */
-    524,  /* minor 3 – lowest share */
+
+#define EEVDF_NUM_PRIOS 40 /* Total number of EEVDF priority levels */
+
+/*
+ * sched_prio_to_weight[]: lifted from Linux — maps nice value to
+ * entity weight.  nice 0 → weight 1024 (NICE_0_WEIGHT).
+ */
+static const uint32 __eevdf_weight_table[EEVDF_NUM_PRIOS] = {
+    /* nice -20 */ 88761, 71755, 56483, 46273, 36291,
+    /* nice -15 */ 29154, 23254, 18705, 14949, 11916,
+    /* nice -10 */  9548,  7620,  6100,  4904,  3906,
+    /* nice  -5 */  3121,  2501,  1991,  1586,  1277,
+    /* nice   0 */  1024,   820,   655,   526,   423,
+    /* nice   5 */   335,   272,   215,   172,   137,
+    /* nice  10 */   110,    87,    70,    56,    45,
+    /* nice  15 */    36,    29,    23,    18,    15,
 };
 
-/* Inverse weights for fast division: inv_weight ≈ 2^SHIFT / weight */
-static const uint32 __eevdf_inv_weight_table[FIFO_RQ_SUBLEVELS] = {
-    SCHED_FIXEDPOINT_ONE * 1024 / 1024, /* 1024 */
-    SCHED_FIXEDPOINT_ONE * 1024 / 820,  /* ≈1249 */
-    SCHED_FIXEDPOINT_ONE * 1024 / 655,  /* ≈1563 */
-    SCHED_FIXEDPOINT_ONE * 1024 / 524,  /* ≈1954 */
+/*
+ * sched_prio_to_wmult[]: inverse weights for fixed-point vruntime
+ * computation.  inv_weight ≈ 2^WMULT_SHIFT / weight.
+ *
+ * Allows: delta_vrt = delta_exec * NICE_0_WEIGHT * inv_weight >> WMULT_SHIFT
+ */
+#define EEVDF_WMULT_SHIFT 32
+
+static const uint32 __eevdf_inv_weight_table[EEVDF_NUM_PRIOS] = {
+    /* nice -20 */     48388,     59856,     76040,     92818,    118348,
+    /* nice -15 */    147320,    184698,    229616,    287308,    360437,
+    /* nice -10 */    449829,    563644,    704093,    875809,   1099582,
+    /* nice  -5 */   1376151,   1717300,   2157191,   2708050,   3363326,
+    /* nice   0 */   4194304,   5237765,   6557202,   8165337,  10153587,
+    /* nice   5 */  12820798,  15790321,  19976592,  24970740,  31350126,
+    /* nice  10 */  39045157,  49367440,  61356676,  76695844,  95443717,
+    /* nice  15 */ 119304647, 148102320, 186737708, 238609294, 286331153,
 };
 
 /* ──────────────────────────────────────────────────────────────
- *  Helper: weighted virtual-time computation
+ *  Helper: weighted virtual-time computation (fixed-point)
  * ────────────────────────────────────────────────────────────── */
 
 /*
- * Compute virtual time delta: delta_vrt = delta_exec * (NICE_0_WEIGHT / weight)
- * To avoid 64-bit overflow we do:
+ * Compute virtual time delta:
  *   delta_vrt = delta_exec * NICE_0_WEIGHT / weight
- * with NICE_0_WEIGHT = 1024 (the weight at minor priority 0).
+ *
+ * Using fixed-point arithmetic (same approach as Linux CFS/EEVDF):
+ *   delta_vrt = (delta_exec * NICE_0_WEIGHT * inv_weight) >> WMULT_SHIFT
+ *
+ * where inv_weight ≈ (1 << WMULT_SHIFT) / weight.
+ *
+ * We use a 128-bit intermediate product to avoid overflow or
+ * precision loss that the Linux 64-bit-only path suffers for
+ * high-weight (negative-nice) entities.
  */
 #define NICE_0_WEIGHT 1024U
 
@@ -105,8 +141,23 @@ static inline int64 __calc_delta_vruntime(uint64 delta_exec,
     if (lw->weight == NICE_0_WEIGHT) {
         return (int64)delta_exec;
     }
-    /* Use 64-bit multiply ÷ weight. Good enough for moderate delta values. */
-    return (int64)((delta_exec * NICE_0_WEIGHT) / lw->weight);
+
+    /*
+     * fact = NICE_0_WEIGHT * inv_weight
+     *      ≈ NICE_0_WEIGHT * (2^32 / weight)
+     *      = NICE_0_WEIGHT * 2^32 / weight
+     *
+     * result = delta_exec * fact >> WMULT_SHIFT
+     *        ≈ delta_exec * NICE_0_WEIGHT / weight             ✓
+     *
+     * The product delta_exec * fact can exceed 64 bits (e.g., for
+     * nice -20: fact ≈ 2^25.5, delta_exec can be 2^27 for 100ms
+     * at 1GHz → product ≈ 2^52.5, which is fine.  But for safety
+     * with larger deltas we use 128-bit multiply).
+     */
+    __uint128_t product = (__uint128_t)delta_exec * NICE_0_WEIGHT;
+    product *= (uint64)lw->inv_weight;
+    return (int64)(product >> EEVDF_WMULT_SHIFT);
 }
 
 /* ──────────────────────────────────────────────────────────────
@@ -188,13 +239,21 @@ static void __dequeue_entity(struct eevdf_rq *erq, struct sched_entity *se) {
     erq->nr_running--;
 }
 
-/* Set entity weight from its minor priority field. */
+/* Set entity weight from its full EEVDF priority.
+ * The index into the 40-entry weight table is computed from the raw priority
+ * value: idx = se->priority - EEVDF_PRIORITY_START, clamped to [0, 39].
+ *
+ * Priority mapping:
+ *   EEVDF priority 80  (major 20 minor 0) → idx  0 → nice -20 → weight 88761
+ *   EEVDF priority 100 (major 25 minor 0) → idx 20 → nice   0 → weight  1024
+ *   EEVDF priority 119 (major 29 minor 3) → idx 39 → nice +19 → weight    15
+ */
 static void __set_load_weight(struct sched_entity *se) {
-    int minor = MINOR_PRIORITY(se->priority);
-    if (minor < 0) minor = 0;
-    if (minor >= FIFO_RQ_SUBLEVELS) minor = FIFO_RQ_SUBLEVELS - 1;
-    se->load.weight = __eevdf_weight_table[minor];
-    se->load.inv_weight = __eevdf_inv_weight_table[minor];
+    int idx = se->priority - EEVDF_PRIORITY_START;
+    if (idx < 0) idx = 0;
+    if (idx >= EEVDF_NUM_PRIOS) idx = EEVDF_NUM_PRIOS - 1;
+    se->load.weight = __eevdf_weight_table[idx];
+    se->load.inv_weight = __eevdf_inv_weight_table[idx];
 }
 
 /* Place a new/waking entity: set its vruntime based on rq min_vruntime
@@ -225,6 +284,22 @@ static void __place_entity(struct eevdf_rq *erq, struct sched_entity *se,
     se->min_vruntime = erq->min_vruntime;
 }
 
+/* ──────────────────────────────────────────────────────────────
+ *  Forward declarations for load balancing & PELT (defined below)
+ * ────────────────────────────────────────────────────────────── */
+static void __update_load_avg(struct eevdf_rq *erq);
+static void __update_curr_pelt(struct eevdf_rq *erq, struct sched_entity *se);
+static void __update_entity_pelt(struct sched_entity *se, int running);
+static inline void __update_entity_load_contrib(struct sched_entity *se);
+static inline void __add_entity_load_to_cpu(struct eevdf_rq *erq,
+                                            struct sched_entity *se);
+static inline void __remove_entity_load_from_cpu(struct eevdf_rq *erq,
+                                                 struct sched_entity *se);
+static int __eevdf_idle_balance(struct eevdf_rq *this_erq, int this_cpu,
+                                int cls_id);
+static void __eevdf_periodic_balance(struct eevdf_rq *this_erq, int this_cpu,
+                                     int cls_id);
+
 /* Update runtime accounting for the currently running entity. */
 static void __update_curr(struct eevdf_rq *erq, struct sched_entity *se) {
     uint64 now = r_time();
@@ -233,21 +308,16 @@ static void __update_curr(struct eevdf_rq *erq, struct sched_entity *se) {
         return;
     }
     se->exec_start = now;
+    se->sum_exec_runtime += delta_exec;
 
     int64 delta_vrt = __calc_delta_vruntime(delta_exec, &se->load);
     se->vruntime += delta_vrt;
 
+    /* Update per-entity PELT (entity is running). */
+    __update_curr_pelt(erq, se);
+
     __update_min_vruntime(erq);
 }
-
-/* ──────────────────────────────────────────────────────────────
- *  Forward declarations for load balancing (defined below callbacks)
- * ────────────────────────────────────────────────────────────── */
-static void __update_load_avg(struct eevdf_rq *erq);
-static int __eevdf_idle_balance(struct eevdf_rq *this_erq, int this_cpu,
-                                int cls_id);
-static void __eevdf_periodic_balance(struct eevdf_rq *this_erq, int this_cpu,
-                                     int cls_id);
 
 /* ──────────────────────────────────────────────────────────────
  *  sched_class callbacks
@@ -256,12 +326,19 @@ static void __eevdf_periodic_balance(struct eevdf_rq *this_erq, int this_cpu,
 static void __eevdf_enqueue_task(struct rq *rq, struct sched_entity *se) {
     struct eevdf_rq *erq = __to_eevdf_rq(rq);
     __set_load_weight(se);
+
+    /* PELT: decay util while the entity was sleeping, then recompute
+     * its weighted load contribution before adding to CPU aggregates. */
+    __update_entity_pelt(se, 0); /* sleeping → decay toward 0 */
+    __update_entity_load_contrib(se);
+
     __place_entity(erq, se, (se->vruntime == 0 && se->deadline == 0));
     __enqueue_entity(erq, se);
     __update_min_vruntime(erq);
 
     /* Track weighted load for load balancing. */
     erq->load_sum += se->load.weight;
+    __add_entity_load_to_cpu(erq, se);
     __update_load_avg(erq);
 
     /* Wakeup preemption check: if the new entity has an earlier deadline
@@ -291,6 +368,7 @@ static void __eevdf_dequeue_task(struct rq *rq, struct sched_entity *se) {
     } else {
         erq->load_sum = 0;
     }
+    __remove_entity_load_from_cpu(erq, se);
     __update_load_avg(erq);
 
     __update_min_vruntime(erq);
@@ -401,6 +479,11 @@ static void __eevdf_task_fork(struct rq *rq, struct sched_entity *se) {
     se->slice = EEVDF_DEFAULT_SLICE_TICKS;
     se->deadline = se->vruntime +
                    __calc_delta_vruntime(se->slice, &se->load);
+
+    /* Initialise PELT for newly forked entity. */
+    se->util_avg = 0;
+    se->pelt_stamp = r_time();
+    __update_entity_load_contrib(se);
 }
 
 static void __eevdf_task_dead(struct rq *rq, struct sched_entity *se) {
@@ -415,6 +498,7 @@ static void __eevdf_task_dead(struct rq *rq, struct sched_entity *se) {
     } else {
         erq->load_sum = 0;
     }
+    __remove_entity_load_from_cpu(erq, se);
     __update_min_vruntime(erq);
 }
 
@@ -450,6 +534,14 @@ static void __eevdf_yield_task(struct rq *rq) {
  *  (C) EWMA LOAD TRACKING — load_avg is an exponential weighted
  *      moving average of load_sum, updated lazily. Used for periodic
  *      balance decisions to avoid reacting to transient spikes.
+ *
+ *  (D) PER-ENTITY LOAD TRACKING (PELT) — each sched_entity tracks
+ *      util_avg (CPU utilization ratio, 0..1024) and load_avg_contrib
+ *      (weight × util_avg >> 10).  The per-CPU aggregates cpu_util
+ *      and cpu_load are derived from the sum of entity contributions.
+ *      This allows the balancer to distinguish CPU-bound tasks from
+ *      sleeping ones, making migration decisions far more accurate
+ *      than static weight sums alone.
  * ────────────────────────────────────────────────────────────── */
 
 /* Balance intervals in raw timer ticks (tuned for ~1GHz timebase). */
@@ -459,6 +551,9 @@ static void __eevdf_yield_task(struct rq *rq) {
 
 /* EWMA half-life period in raw ticks (~50ms). */
 #define EEVDF_LOAD_AVG_PERIOD           (50000000ULL)
+
+/* PELT half-life period in raw ticks (~32ms, same as Linux). */
+#define EEVDF_PELT_PERIOD               (32000000ULL)
 
 /* Imbalance thresholds. */
 #define EEVDF_IMBALANCE_MIN            (NICE_0_WEIGHT)       /* 1024 */
@@ -501,6 +596,125 @@ static void __update_load_avg(struct eevdf_rq *erq) {
                     EEVDF_LOAD_AVG_PERIOD;
 }
 
+/* ── Per-Entity Load Tracking (PELT) ──────────────────────── */
+
+/**
+ * __update_entity_load_contrib - Recompute entity's weighted load
+ *   contribution from its current util_avg and weight.
+ *
+ *   load_avg_contrib = weight * util_avg >> SCHED_FIXEDPOINT_SHIFT
+ *
+ * This represents the entity's actual CPU demand scaled by its
+ * scheduling weight (priority).
+ */
+static inline void __update_entity_load_contrib(struct sched_entity *se) {
+    se->load_avg_contrib =
+        ((uint64)se->load.weight * se->util_avg) >> SCHED_FIXEDPOINT_SHIFT;
+}
+
+/**
+ * __update_entity_pelt - Update per-entity utilization tracking.
+ *
+ * Called during __update_curr (entity is running) and at
+ * enqueue/dequeue boundaries (entity was sleeping).
+ *
+ * @se:      the sched_entity to update
+ * @running: 1 if entity is/was running, 0 if it was sleeping
+ *
+ * Uses exponential decay with ~32ms half-life (EEVDF_PELT_PERIOD):
+ *   When running:  util_avg moves toward SCHED_FIXEDPOINT_ONE (1024)
+ *   When sleeping: util_avg decays toward 0
+ *
+ * Fixed-point arithmetic avoids floating point:
+ *   util_avg = (util_avg * (PERIOD - elapsed) + target * elapsed) / PERIOD
+ */
+static void __update_entity_pelt(struct sched_entity *se, int running) {
+    uint64 now = r_time();
+    uint64 elapsed;
+
+    if (se->pelt_stamp == 0) {
+        /* First update — just stamp and return. */
+        se->pelt_stamp = now;
+        return;
+    }
+
+    elapsed = now - se->pelt_stamp;
+    if (elapsed < EEVDF_PELT_PERIOD / 16) {
+        return; /* Too soon — skip to amortise cost. */
+    }
+    se->pelt_stamp = now;
+
+    if (elapsed > EEVDF_PELT_PERIOD) {
+        elapsed = EEVDF_PELT_PERIOD; /* Clamp to one full period. */
+    }
+
+    uint64 complement = EEVDF_PELT_PERIOD - elapsed;
+    uint32 target = running ? SCHED_FIXEDPOINT_ONE : 0;
+
+    se->util_avg = (uint32)(((uint64)se->util_avg * complement +
+                             (uint64)target * elapsed) /
+                            EEVDF_PELT_PERIOD);
+
+    __update_entity_load_contrib(se);
+}
+
+/**
+ * __add_entity_load_to_cpu - Add entity's PELT contribution to per-CPU
+ *   aggregates.  Called when entity is enqueued / arrives on CPU.
+ */
+static inline void __add_entity_load_to_cpu(struct eevdf_rq *erq,
+                                            struct sched_entity *se) {
+    erq->cpu_util += se->util_avg;
+    erq->cpu_load += se->load_avg_contrib;
+}
+
+/**
+ * __remove_entity_load_from_cpu - Remove entity's PELT contribution
+ *   from per-CPU aggregates.  Called when entity is dequeued / leaves CPU.
+ */
+static inline void __remove_entity_load_from_cpu(struct eevdf_rq *erq,
+                                                 struct sched_entity *se) {
+    if (erq->cpu_util >= se->util_avg)
+        erq->cpu_util -= se->util_avg;
+    else
+        erq->cpu_util = 0;
+
+    if (erq->cpu_load >= se->load_avg_contrib)
+        erq->cpu_load -= se->load_avg_contrib;
+    else
+        erq->cpu_load = 0;
+}
+
+/**
+ * __update_curr_pelt - Update the running entity's PELT and refresh
+ *   per-CPU aggregates.  Called from __update_curr (on every tick).
+ */
+static void __update_curr_pelt(struct eevdf_rq *erq, struct sched_entity *se) {
+    /* Snapshot old contribution before updating. */
+    uint64 old_contrib = se->load_avg_contrib;
+    uint32 old_util = se->util_avg;
+
+    __update_entity_pelt(se, 1); /* running = 1 */
+
+    /* Update per-CPU aggregates with the delta. */
+    int64 delta_util = (int64)se->util_avg - (int64)old_util;
+    int64 delta_load = (int64)se->load_avg_contrib - (int64)old_contrib;
+
+    if (delta_util > 0)
+        erq->cpu_util += (uint64)delta_util;
+    else if (delta_util < 0) {
+        uint64 dec = (uint64)(-delta_util);
+        erq->cpu_util = erq->cpu_util > dec ? erq->cpu_util - dec : 0;
+    }
+
+    if (delta_load > 0)
+        erq->cpu_load += (uint64)delta_load;
+    else if (delta_load < 0) {
+        uint64 dec = (uint64)(-delta_load);
+        erq->cpu_load = erq->cpu_load > dec ? erq->cpu_load - dec : 0;
+    }
+}
+
 /* ── Entity selection for migration ──────────────────────────
  *
  * __pick_migrate_entity - Walk the source rb-tree and pick the best
@@ -538,7 +752,11 @@ static int __pick_migrate_entities(struct eevdf_rq *src_erq, int dst_cpu,
         if (!rq_cpu_allowed(se, dst_cpu)) continue;
 
         out[count++] = se;
-        pulled_load += se->load.weight;
+        /* Use entity's PELT load contribution for target matching.
+         * Falls back to static weight if PELT hasn't ramped up yet. */
+        uint64 entity_load = se->load_avg_contrib;
+        if (entity_load == 0) entity_load = se->load.weight;
+        pulled_load += entity_load;
 
         /* Stop once we've gathered enough load. */
         if (pulled_load >= target_load) break;
@@ -564,6 +782,10 @@ static void __do_migrate(struct eevdf_rq *src_erq, struct eevdf_rq *dst_erq,
                    __calc_delta_vruntime(se->slice, &se->load);
 
     rq_enqueue_task(&dst_erq->rq, se);
+
+    /* Note: per-CPU cpu_load/cpu_util are adjusted automatically by
+     * the dequeue (removes from source) and enqueue (adds to dest)
+     * callbacks above. No explicit adjustment needed here. */
 }
 
 /* ── Scan helpers ─────────────────────────────────────────── */
@@ -582,8 +804,10 @@ static int __find_busiest_cpu(int this_cpu, int cls_id,
     for (int cpu = 0; cpu < NCPU; cpu++) {
         if (cpu == this_cpu) continue;
         struct eevdf_rq *remote = &__eevdf_rqs[cls_id][cpu];
-        uint64 rload = smp_load_acquire(&remote->load_avg);
-        /* Also consider instantaneous load for responsiveness. */
+        /* Use PELT-based cpu_load (weighted utilization) as primary
+         * metric.  Falls back to load_sum for responsiveness if the
+         * PELT signal hasn't had time to ramp up yet. */
+        uint64 rload = smp_load_acquire(&remote->cpu_load);
         uint64 rload_sum = smp_load_acquire(&remote->load_sum);
         if (rload_sum > rload) rload = rload_sum;
         if (rload > busiest_load) {
@@ -634,9 +858,9 @@ static void __eevdf_periodic_balance(struct eevdf_rq *this_erq, int this_cpu,
     /* Determine balance interval based on state. */
     uint64 interval = EEVDF_BALANCE_INTERVAL_NORMAL;
 
-    /* Severe imbalance detected last time → use fast interval. */
-    if (this_erq->load_avg * 2 <
-        EEVDF_IMBALANCE_SEVERE + this_erq->load_avg) {
+    /* Severe imbalance detected last time → use fast interval.
+     * Use PELT-based cpu_load to detect when we are lightly loaded. */
+    if (this_erq->cpu_load < EEVDF_IMBALANCE_SEVERE) {
         /* We are lightly loaded — might be severely imbalanced. */
         interval = EEVDF_BALANCE_INTERVAL_FAST;
     }
@@ -664,8 +888,9 @@ static void __eevdf_periodic_balance(struct eevdf_rq *this_erq, int this_cpu,
         return;
     }
 
-    /* Compute effective local load (max of avg and instantaneous). */
-    uint64 local_load = this_erq->load_avg;
+    /* Compute effective local load using PELT cpu_load (weighted util).
+     * Fall back to load_sum for responsiveness. */
+    uint64 local_load = this_erq->cpu_load;
     if (this_erq->load_sum > local_load) local_load = this_erq->load_sum;
 
     uint64 target = __compute_imbalance(busiest_load, local_load,
@@ -681,16 +906,14 @@ static void __eevdf_periodic_balance(struct eevdf_rq *this_erq, int this_cpu,
         return;
     }
 
-    /* Re-validate loads under lock. */
+    /* Re-validate loads under lock using PELT cpu_load. */
     struct eevdf_rq *busiest_erq = &__eevdf_rqs[cls_id][busiest_cpu];
     __update_load_avg(busiest_erq);
-    uint64 actual_busiest = busiest_erq->load_sum;
-    if (actual_busiest > busiest_erq->load_avg)
-        actual_busiest = actual_busiest; /* keep instantaneous */
-    else
-        actual_busiest = busiest_erq->load_avg;
+    uint64 actual_busiest = busiest_erq->cpu_load;
+    if (busiest_erq->load_sum > actual_busiest)
+        actual_busiest = busiest_erq->load_sum;
 
-    target = __compute_imbalance(actual_busiest, this_erq->load_sum,
+    target = __compute_imbalance(actual_busiest, this_erq->cpu_load,
                                  EEVDF_IMBALANCE_MIN);
     if (target == 0) {
         rq_unlock(busiest_cpu);
@@ -766,7 +989,10 @@ static int __eevdf_idle_balance(struct eevdf_rq *this_erq, int this_cpu,
     for (int cpu = 0; cpu < NCPU; cpu++) {
         if (cpu == this_cpu) continue;
         struct eevdf_rq *remote = &__eevdf_rqs[cls_id][cpu];
-        uint64 rload = smp_load_acquire(&remote->load_sum);
+        /* Use PELT cpu_load for idle balance candidate selection. */
+        uint64 rload = smp_load_acquire(&remote->cpu_load);
+        uint64 rload_sum = smp_load_acquire(&remote->load_sum);
+        if (rload_sum > rload) rload = rload_sum;
         uint32 rnr = smp_load_acquire(&remote->nr_running);
 
         /* Must have at least 2 entities (1 running + 1 migratable). */
@@ -862,11 +1088,12 @@ static struct rq *__eevdf_select_task_rq(struct rq *prev_rq,
     uint64 total_load = 0;
     int active_cpus = 0;
 
-    /* First pass: find idle CPUs and compute total load for averaging. */
+    /* First pass: find idle CPUs and compute total load for averaging.
+     * Uses PELT-based cpu_load for utilization-aware placement. */
     for (int cpu = 0; cpu < NCPU; cpu++) {
         if (!(cpumask & (1ULL << cpu))) continue;
         struct eevdf_rq *erq = &__eevdf_rqs[major][cpu];
-        uint64 load = smp_load_acquire(&erq->load_sum);
+        uint64 load = smp_load_acquire(&erq->cpu_load);
         total_load += load;
         active_cpus++;
 
@@ -891,7 +1118,7 @@ static struct rq *__eevdf_select_task_rq(struct rq *prev_rq,
     /* Locality bias: prefer current CPU if its load <= average. */
     if (cpumask & (1ULL << cur_cpu)) {
         struct eevdf_rq *erq = &__eevdf_rqs[major][cur_cpu];
-        uint64 cur_load = smp_load_acquire(&erq->load_sum);
+        uint64 cur_load = smp_load_acquire(&erq->cpu_load);
         if (cur_load <= avg_load) {
             return &erq->rq;
         }
@@ -899,12 +1126,12 @@ static struct rq *__eevdf_select_task_rq(struct rq *prev_rq,
         best_load = cur_load;
     }
 
-    /* Second pass: pick least-loaded CPU by weighted load. */
+    /* Second pass: pick least-loaded CPU by PELT cpu_load. */
     for (int cpu = 0; cpu < NCPU; cpu++) {
         if (cpu == cur_cpu) continue;
         if (!(cpumask & (1ULL << cpu))) continue;
         struct eevdf_rq *erq = &__eevdf_rqs[major][cpu];
-        uint64 load = smp_load_acquire(&erq->load_sum);
+        uint64 load = smp_load_acquire(&erq->cpu_load);
         if (load < best_load) {
             best_rq = &erq->rq;
             best_load = load;
@@ -947,6 +1174,10 @@ static void __eevdf_rq_init(struct eevdf_rq *erq, int cls_id, int cpu_id) {
     erq->load_sum = 0;
     erq->load_avg = 0;
     erq->load_avg_stamp = 0;
+
+    /* Per-CPU PELT aggregates */
+    erq->cpu_util = 0;
+    erq->cpu_load = 0;
 
     /* Periodic balance state */
     erq->last_balance_tick = 0;

@@ -14,6 +14,7 @@
 #include "clone_flags.h"
 #include "signal.h"
 #include "errno.h"
+#include "accounting.h"
 #include "proc/pgroup.h"
 #include "tty/session.h"
 #include "timer/goldfish_rtc.h"
@@ -385,6 +386,10 @@ uint64 sys_brk(void) {
         return cur_brk; // Return old break on failure
     }
 
+    if (delta > 0)
+        ACCT_ADD(current->thread_group, mm_brk_delta, delta);
+    else if (delta < 0)
+        ACCT_ADD(current->thread_group, mm_brk_delta, delta);
     return heap->start + vm->heap_size;
 }
 

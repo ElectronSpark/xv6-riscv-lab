@@ -39,6 +39,8 @@
 #include "proc/sched.h"
 #include "errno.h"
 #include <smp/ipi.h>
+#include "accounting.h"
+#include "resource.h"
 
 static slab_cache_t __tg_pool;
 
@@ -134,6 +136,10 @@ int thread_group_alloc(struct thread *leader) {
 
     tg_shared_pending_init(tg);
 
+    // Initialise per-process accounting and resource limits
+    acct_init(tg);
+    rlimit_init_defaults(tg->rlim);
+
     // Link leader into the thread group
     leader->thread_group = tg;
     leader->tgid = leader->pid;
@@ -168,6 +174,11 @@ int thread_group_alloc_kernel(struct thread_group **out_tg, pid_t tgid) {
     tg->is_kernel = 1;
 
     tg_shared_pending_init(tg);
+
+    // Initialise per-process accounting and resource limits
+    acct_init(tg);
+    rlimit_init_defaults(tg->rlim);
+
     *out_tg = tg;
     return 0;
 }

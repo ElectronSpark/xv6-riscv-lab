@@ -40,6 +40,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/xarray.c
     ${KERNEL_DIR}/kobject.c
     ${KERNEL_DIR}/bits.c
+    ${KERNEL_DIR}/accounting.c
 )
 
 if(DEFINED ENV{RWLOCK_TEST})

@@ -31,6 +31,7 @@
 #include "vfs/fcntl.h"
 #include "signal.h"
 #include "kqueue_types.h"
+#include "accounting.h"
 
 /* Enable verbose exec debugging — set to 1 to trace ELF loading steps */
 #define EXEC_DEBUG 0
@@ -651,6 +652,7 @@ int exec(char *path, char **argv, char **envp) {
      */
     vm_remote_fence_i(p->vm);
 
+    ACCT_INC(p->thread_group, sched_execs);
     return argc; // this ends up in a0, the first argument to main(argc, argv)
 
 bad_locked:

@@ -31,6 +31,8 @@
 #include "types.h"
 #include "list_type.h"
 #include "signal_types.h"
+#include "accounting.h"
+#include "resource.h"
 #include <smp/atomic.h>
 
 struct pgroup;
@@ -91,6 +93,12 @@ struct thread_group {
     uint64 interp_ld;            /* Loaded address of interpreter's .dynamic section */
     char   interp_path[128];     /* Path from PT_INTERP (e.g. /lib/ld-musl-riscv64.so.1) */
     char   exec_path[128];      /* Full path of the executable (e.g. /bin/python) */
+
+    /* Per-process resource accounting (cumulative counters) */
+    struct proc_acct acct;
+
+    /* Per-process resource limits (POSIX rlimits) */
+    struct rlimit    rlim[RLIMIT_NLIMITS];
 };
 
 #endif /* __KERNEL_THREAD_GROUP_TYPES_H */
