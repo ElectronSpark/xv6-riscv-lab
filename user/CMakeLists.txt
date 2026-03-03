@@ -1,7 +1,7 @@
 message(STATUS "Building user programs for lab: $ENV{LAB}")
 
 # musl libc — the standard C library for xv6 user programs
-include(${CMAKE_SOURCE_DIR}/cmake/musl.cmake)
+include(${CMAKE_SOURCE_DIR}/arch/${ARCH}/cmake/musl.cmake)
 
 # ==============================================================================
 # Init Code (first user-mode binary, embedded in kernel)

@@ -37,9 +37,10 @@ from pathlib import Path
 
 
 class AsmOffsetsGenerator:
-    def __init__(self, compiler='gcc', includes=None, verbose=False):
+    def __init__(self, compiler='gcc', includes=None, defines=None, verbose=False):
         self.compiler = compiler
         self.includes = includes or []
+        self.defines = defines or []
         self.verbose = verbose
         self.structures = []  # List of (struct_name, header_file) tuples
     
@@ -151,6 +152,8 @@ class AsmOffsetsGenerator:
             compile_cmd = [self.compiler]
             for inc_dir in self.includes:
                 compile_cmd.extend(['-I', inc_dir])
+            for define in self.defines:
+                compile_cmd.extend(['-D', define])
             compile_cmd.extend(['-o', str(exe_file), str(src_file)])
             
             self.log(f"Compiling: {' '.join(compile_cmd)}")
@@ -521,6 +524,9 @@ def main():
                         help='Add prerequisite header file (can be specified multiple times)')
     parser.add_argument('--compiler', '-c', default='gcc',
                         help='C compiler to use (default: gcc)')
+    parser.add_argument('--define', '-D', action='append', dest='defines',
+                        metavar='NAME[=VALUE]',
+                        help='Add preprocessor definition (can be specified multiple times)')
     parser.add_argument('--struct', '-s', action='append', dest='structs',
                         help='Add structure as NAME:FILE[:field1,field2,...] or NAME:FILE:all')
     parser.add_argument('--config', '-f',
@@ -534,6 +540,7 @@ def main():
     generator = AsmOffsetsGenerator(
         compiler=args.compiler,
         includes=args.includes or [],
+        defines=args.defines or [],
         verbose=args.verbose
     )
     

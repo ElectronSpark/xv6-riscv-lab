@@ -71,10 +71,10 @@ set(KERNEL_S_FILES)
 add_subdirectory(${KERNEL_DIR}/inc)
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ffreestanding -DUSE_LWIP=1 ")
-include_directories(${KERNEL_DIR}/arch/${ARCH}/inc)
+include_directories(${CMAKE_SOURCE_DIR}/arch/${ARCH}/inc)
 
 # Pull in subdirectory object libraries.
-add_subdirectory(${KERNEL_DIR}/arch/${ARCH})
+add_subdirectory(${CMAKE_SOURCE_DIR}/arch/${ARCH} ${CMAKE_BINARY_DIR}/arch/${ARCH})
 add_subdirectory(${KERNEL_DIR}/irq)
 add_subdirectory(${KERNEL_DIR}/dev)
 add_subdirectory(${KERNEL_DIR}/lock)
@@ -268,19 +268,19 @@ if(ARCH STREQUAL "x86_64")
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin
         COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:kernel_with_symbols_elf> xv6.payload.bin
-        COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/make_linux_x86_image.py xv6.payload.bin xv6.bin
-        COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/verify_linux_x86_boot_header.py xv6.bin
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/arch/x86_64/scripts/make_linux_x86_image.py xv6.payload.bin xv6.bin
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/arch/x86_64/scripts/verify_linux_x86_boot_header.py xv6.bin
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         COMMENT "Generating xv6.bin (${PLATFORM})"
         DEPENDS kernel_with_symbols $<TARGET_FILE:kernel_with_symbols_elf>
-                ${CMAKE_SOURCE_DIR}/scripts/make_linux_x86_image.py
-                ${CMAKE_SOURCE_DIR}/scripts/verify_linux_x86_boot_header.py
+                ${CMAKE_SOURCE_DIR}/arch/x86_64/scripts/make_linux_x86_image.py
+                ${CMAKE_SOURCE_DIR}/arch/x86_64/scripts/verify_linux_x86_boot_header.py
     )
 else()
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/xv6.bin
         COMMAND ${CMAKE_OBJCOPY} -O binary $<TARGET_FILE:kernel_with_symbols_elf> xv6.bin
-        COMMAND python3 ${CMAKE_SOURCE_DIR}/scripts/patch_image_size.py xv6.bin
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/arch/riscv/scripts/patch_image_size.py xv6.bin
         WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
         COMMENT "Generating xv6.bin (${PLATFORM})"
         DEPENDS kernel_with_symbols $<TARGET_FILE:kernel_with_symbols_elf>

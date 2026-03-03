@@ -1,0 +1,110 @@
+# ==============================================================================
+# QEMU and GDB Configuration — x86_64
+# ==============================================================================
+# This file handles QEMU setup, GDB initialization, and related debug targets
+# for the x86_64 architecture.
+# ==============================================================================
+
+find_program(QEMU_X86_EXECUTABLE NAMES qemu-system-x86_64)
+if(NOT QEMU_X86_EXECUTABLE)
+    message(WARNING "qemu-system-x86_64 not found. x86_64 qemu targets disabled.")
+    return()
+endif()
+
+find_program(X86_GCC NAMES x86_64-linux-gnu-gcc)
+find_program(X86_LD NAMES x86_64-linux-gnu-ld)
+find_program(X86_OBJCOPY NAMES x86_64-linux-gnu-objcopy)
+if(NOT X86_GCC OR NOT X86_LD OR NOT X86_OBJCOPY)
+    message(WARNING "x86_64 host toolchain not found (gcc/ld/objcopy). x86_64 qemu targets disabled.")
+    return()
+endif()
+
+set(X86_BANNER_DIR ${CMAKE_BINARY_DIR}/x86_banner)
+file(MAKE_DIRECTORY ${X86_BANNER_DIR})
+
+set(X86_ENTRY_S ${CMAKE_SOURCE_DIR}/arch/x86_64/entry.S)
+set(X86_LD_SCRIPT ${CMAKE_SOURCE_DIR}/arch/x86_64/banner.ld)
+set(X86_BANNER_ELF ${X86_BANNER_DIR}/xv6_x86_banner.elf)
+set(X86_BANNER_PAYLOAD ${X86_BANNER_DIR}/xv6_x86_banner.payload.bin)
+set(X86_BANNER_IMAGE ${X86_BANNER_DIR}/xv6_banner.bin)
+set(X86_FULL_IMAGE ${CMAKE_BINARY_DIR}/kernel/kernel_with_symbols_elf)
+
+add_custom_command(
+    OUTPUT ${X86_BANNER_IMAGE}
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${X86_BANNER_DIR}
+    COMMAND ${X86_GCC} -m32 -ffreestanding -fno-pie -no-pie -fno-stack-protector -c ${X86_ENTRY_S} -o ${X86_BANNER_DIR}/entry.o
+    COMMAND ${X86_LD} -m elf_i386 -nostdlib -T ${X86_LD_SCRIPT} -o ${X86_BANNER_ELF} ${X86_BANNER_DIR}/entry.o
+    COMMAND ${X86_OBJCOPY} -O binary ${X86_BANNER_ELF} ${X86_BANNER_PAYLOAD}
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/arch/x86_64/scripts/make_linux_x86_image.py ${X86_BANNER_PAYLOAD} ${X86_BANNER_IMAGE}
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/arch/x86_64/scripts/verify_linux_x86_boot_header.py ${X86_BANNER_IMAGE}
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+    DEPENDS ${X86_ENTRY_S} ${X86_LD_SCRIPT}
+            ${CMAKE_SOURCE_DIR}/arch/x86_64/scripts/make_linux_x86_image.py
+            ${CMAKE_SOURCE_DIR}/arch/x86_64/scripts/verify_linux_x86_boot_header.py
+    COMMENT "Building x86_64 long-mode banner image"
+)
+
+add_custom_target(x86-banner-image
+    DEPENDS ${X86_BANNER_IMAGE}
+)
+
+add_custom_target(qemu-smoke
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -m 512M -nographic -monitor none -serial none -debugcon stdio -no-reboot -no-shutdown -kernel ${X86_BANNER_ELF}
+    DEPENDS x86-banner-image
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running x86_64 QEMU banner smoke image"
+)
+
+set(X86_INITRD_IMG ${CMAKE_BINARY_DIR}/fs.img)
+
+# Number of CPUs for x86 SMP
+if(NOT DEFINED CPUS)
+    set(CPUS 4)
+endif()
+
+# x86 PCI devices: virtio-blk-pci disk + e1000 NIC
+set(X86_DISK_OPTS -drive file=${X86_INITRD_IMG},if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0)
+set(X86_NET_OPTS -netdev user,id=net0,hostfwd=tcp::2323-:23,hostfwd=tcp::2159-:2159,hostfwd=tcp::8080-:80 -object filter-dump,id=net0,netdev=net0,file=packets.pcap -device e1000,netdev=net0)
+
+add_custom_target(qemu
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m 1G -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -debugcon file:debugcon.log -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS}
+    COMMAND stty sane
+    DEPENDS kernel_all fs_img
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running x86_64 QEMU full kernel"
+)
+
+add_custom_target(qemu-serial
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m 1G -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS}
+    COMMAND stty sane
+    DEPENDS kernel_all fs_img
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running x86_64 QEMU full kernel with COM1 on stdio"
+)
+
+add_custom_target(qemu-debugcon
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m 1G -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial none -debugcon chardev:char0 -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS}
+    COMMAND stty sane
+    DEPENDS kernel_all fs_img
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running x86_64 QEMU full kernel with debugcon output"
+)
+
+add_custom_command(
+    OUTPUT ${CMAKE_BINARY_DIR}/.gdbinit
+    COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_SOURCE_DIR}/arch/x86_64/cmake/gdbinit_x86.in ${CMAKE_BINARY_DIR}/.gdbinit
+    DEPENDS ${CMAKE_SOURCE_DIR}/arch/x86_64/cmake/gdbinit_x86.in
+    COMMENT "Generating x86_64 .gdbinit"
+)
+
+add_custom_target(gdbinit ALL
+    DEPENDS ${CMAKE_BINARY_DIR}/.gdbinit
+)
+
+add_custom_target(qemu-gdb
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m 1G -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -debugcon file:debugcon.log -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS} -S -gdb tcp::1234
+    COMMAND stty sane
+    DEPENDS kernel_all fs_img gdbinit
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running x86_64 QEMU full kernel with GDB stub on :1234"
+)

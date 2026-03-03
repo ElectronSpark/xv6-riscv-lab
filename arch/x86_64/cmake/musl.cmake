@@ -1,28 +1,22 @@
 # ==============================================================================
-# cmake/musl.cmake — Build musl libc for xv6 user programs
+# arch/x86_64/cmake/musl.cmake — Build musl libc for xv6 x86_64 user programs
 # ==============================================================================
 #
 # This module:
-#   1. Builds musl from source with xv6 arch overlay
+#   1. Builds musl from source with xv6 x86_64 arch overlay
 #   2. Provides add_musl_program() to compile/link a static musl program
 #   3. Provides add_musl_dynamic_program() to compile/link a dynamic musl program
 #   4. Creates musl_sysroot target as a dependency for all musl-based builds
 #
-# Supports ARCH=riscv and ARCH=x86_64.
-#
 # Usage:
-#   include(${CMAKE_SOURCE_DIR}/cmake/musl.cmake)
+#   include(${CMAKE_SOURCE_DIR}/arch/x86_64/cmake/musl.cmake)
 #
 
 # ==============================================================================
 # Paths and toolchain discovery
 # ==============================================================================
 set(MUSL_XV6_DIR "${CMAKE_SOURCE_DIR}/user/musl-xv6")
-if(ARCH STREQUAL "x86_64")
-    set(MUSL_BUILD_SCRIPT "${MUSL_XV6_DIR}/build_musl_x86_64.sh")
-else()
-    set(MUSL_BUILD_SCRIPT "${MUSL_XV6_DIR}/build_musl.sh")
-endif()
+set(MUSL_BUILD_SCRIPT "${MUSL_XV6_DIR}/build_musl_x86_64.sh")
 set(MUSL_SYSROOT "${CMAKE_BINARY_DIR}/sysroot")
 set(MUSL_BUILD_DIR "${CMAKE_BINARY_DIR}/musl-build")
 set(MUSL_LIBC_A "${MUSL_SYSROOT}/lib/libc.a")
@@ -32,11 +26,7 @@ set(MUSL_CRTN_O "${MUSL_SYSROOT}/lib/crtn.o")
 set(MUSL_RCRT1_O "${MUSL_SYSROOT}/lib/rcrt1.o")
 set(MUSL_SCRT1_O "${MUSL_SYSROOT}/lib/Scrt1.o")
 set(MUSL_INCLUDE_DIR "${MUSL_SYSROOT}/include")
-if(ARCH STREQUAL "x86_64")
-    set(MUSL_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/user/x86_64/musl.ld")
-else()
-    set(MUSL_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/user/musl.ld")
-endif()
+set(MUSL_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/user/x86_64/musl.ld")
 
 # Get GCC include dir for stdarg.h etc
 execute_process(
@@ -59,19 +49,12 @@ message(STATUS "musl libc: libgcc = ${LIBGCC_PATH}")
 # ==============================================================================
 # Build musl from source
 # ==============================================================================
-if(ARCH STREQUAL "x86_64")
-    set(MUSL_ARCH_DEPS
-        ${MUSL_XV6_DIR}/arch/x86_64/clone.s
-        ${MUSL_XV6_DIR}/arch/x86_64/bits/syscall.h.in
-    )
-    set(MUSL_BUILD_COMMENT "Building musl libc for xv6 x86_64 (this may take a few minutes)...")
-else()
-    set(MUSL_ARCH_DEPS
-        ${MUSL_XV6_DIR}/arch/riscv64/clone.s
-        ${MUSL_XV6_DIR}/arch/riscv64/bits/syscall.h.in
-    )
-    set(MUSL_BUILD_COMMENT "Building musl libc for xv6 RISC-V (this may take a few minutes)...")
-endif()
+set(MUSL_ARCH_DEPS
+    ${MUSL_XV6_DIR}/arch/x86_64/clone.s
+    ${MUSL_XV6_DIR}/arch/x86_64/bits/syscall.h.in
+)
+set(MUSL_BUILD_COMMENT "Building musl libc for xv6 x86_64 (this may take a few minutes)...")
+
 add_custom_command(
     OUTPUT ${MUSL_LIBC_A} ${MUSL_CRT1_O} ${MUSL_CRTI_O} ${MUSL_CRTN_O}
     COMMAND bash ${MUSL_BUILD_SCRIPT} --prefix=${MUSL_SYSROOT} --build-dir=${MUSL_BUILD_DIR}
@@ -86,25 +69,14 @@ add_custom_target(musl_sysroot DEPENDS ${MUSL_LIBC_A} ${MUSL_CRT1_O})
 # ==============================================================================
 # Common compiler flags for musl-linked programs
 # ==============================================================================
-if(ARCH STREQUAL "x86_64")
-    set(MUSL_COMMON_CFLAGS
-        --sysroot=${MUSL_SYSROOT}
-        -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-avx
-        -fno-pie -no-pie
-        -nostdinc
-        -isystem ${MUSL_INCLUDE_DIR}
-        -isystem ${GCC_INCLUDE_DIR_MUSL}
-    )
-else()
-    set(MUSL_COMMON_CFLAGS
-        --sysroot=${MUSL_SYSROOT}
-        -march=rv64gc -mabi=lp64d
-        -mcmodel=medany -fno-pie -no-pie
-        -nostdinc
-        -isystem ${MUSL_INCLUDE_DIR}
-        -isystem ${GCC_INCLUDE_DIR_MUSL}
-    )
-endif()
+set(MUSL_COMMON_CFLAGS
+    --sysroot=${MUSL_SYSROOT}
+    -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-avx
+    -fno-pie -no-pie
+    -nostdinc
+    -isystem ${MUSL_INCLUDE_DIR}
+    -isystem ${GCC_INCLUDE_DIR_MUSL}
+)
 set(MUSL_C_CFLAGS
     ${MUSL_COMMON_CFLAGS}
     -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
@@ -135,7 +107,7 @@ function(add_musl_program PROGRAM_NAME SOURCE_FILE)
 
         # Determine if this is assembly
         if(SRC_EXT STREQUAL ".S" OR SRC_EXT STREQUAL ".s")
-        # Assembly source — minimal flags
+            # Assembly source — minimal flags
             add_custom_command(
                 OUTPUT ${OBJ_FILE}
                 COMMAND ${CMAKE_C_COMPILER}
@@ -192,16 +164,10 @@ endfunction()
 # add_musl_dynamic_program(name source_file)
 #
 # Like add_musl_program() but links DYNAMICALLY against musl libc.so.
-# The resulting executable uses /lib/ld-musl-<arch>.so.1 as interpreter,
-# the same as CPython. Useful for testing dynamic linking on the target.
+# The resulting executable uses /lib/ld-musl-x86_64.so.1 as interpreter.
 # ==============================================================================
 function(add_musl_dynamic_program PROGRAM_NAME SOURCE_FILE)
-    # Map project ARCH to musl's arch name for the dynamic linker path
-    if(ARCH STREQUAL "riscv")
-        set(MUSL_ARCH "riscv64")
-    else()
-        set(MUSL_ARCH "${ARCH}")
-    endif()
+    set(MUSL_ARCH "x86_64")
     set(TARGET_NAME _${PROGRAM_NAME})
     set(PROGRAM_ELF ${CMAKE_BINARY_DIR}/user/${TARGET_NAME})
 

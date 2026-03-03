@@ -4,19 +4,27 @@
 set(GEN_ASM_OFFSETS_SCRIPT ${CMAKE_SOURCE_DIR}/scripts/gen_asm_offsets.py)
 set(ASM_OFFSETS_H ${CMAKE_CURRENT_BINARY_DIR}/asm-offsets.h)
 
-# Determine the compiler to use - prefer TOOLPREFIX if set
-if(DEFINED ENV{TOOLPREFIX})
-    set(ASM_OFFSETS_COMPILER "$ENV{TOOLPREFIX}gcc")
+# Always use the same compiler cmake chose for the kernel — this is already
+# validated for the target architecture. TOOLPREFIX may point to a different
+# arch's toolchain (e.g. riscv when building for x86_64), so we must NOT use it.
+set(ASM_OFFSETS_COMPILER ${CMAKE_C_COMPILER})
+
+# Uppercase arch name for the CONFIG_ARCH_* preprocessor define
+string(TOUPPER "${ARCH}" ARCH_UPPER)
+
+# Arch-specific core register/CPU header (e.g. riscv.h for RISC-V, x86.h for x86_64)
+if(ARCH STREQUAL "x86_64")
+    set(ARCH_CORE_HEADER "x86.h")
 else()
-    set(ASM_OFFSETS_COMPILER ${CMAKE_C_COMPILER})
+    set(ARCH_CORE_HEADER "riscv.h")
 endif()
 
 # Define structures to generate offsets for
 # Format: --struct name:header for auto-detection of all fields
 set(ASM_OFFSET_STRUCTS
-    trapframe:../arch/riscv/inc/trapframe.h
-    utrapframe:../arch/riscv/inc/trapframe.h
-    context:../arch/riscv/inc/trapframe.h
+    trapframe:../../arch/${ARCH}/inc/trapframe.h
+    utrapframe:../../arch/${ARCH}/inc/trapframe.h
+    context:../../arch/${ARCH}/inc/trapframe.h
     cpu_local:smp/percpu_types.h
     thread:proc/thread_types.h
 )
@@ -25,7 +33,7 @@ set(ASM_OFFSET_STRUCTS
 set(ASM_OFFSET_HEADERS
     types.h
     param.h
-    ../arch/riscv/inc/riscv.h
+    ../../arch/${ARCH}/inc/${ARCH_CORE_HEADER}
 )
 
 # Build the command line arguments for headers
@@ -60,7 +68,8 @@ add_custom_command(
     COMMAND ${GEN_ASM_OFFSETS_SCRIPT}
         --compiler ${ASM_OFFSETS_COMPILER}
         --include ${CMAKE_SOURCE_DIR}/kernel/inc
-        --include ${CMAKE_SOURCE_DIR}/kernel/arch/riscv/inc
+        --include ${CMAKE_SOURCE_DIR}/arch/${ARCH}/inc
+        --define CONFIG_ARCH_${ARCH_UPPER}=1
         ${HEADER_ARGS}
         ${STRUCT_ARGS}
         --output ${ASM_OFFSETS_H}

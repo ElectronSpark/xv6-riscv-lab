@@ -262,7 +262,9 @@ endif()
 
 add_subdirectory(kernel)
 add_subdirectory(user)
-add_subdirectory(boot)
+if(ARCH STREQUAL "riscv")
+    add_subdirectory(arch/riscv/boot)
+endif()
 
 # Add uboot-scripts as dependency of kernel_all for Orange Pi platform
 if(MKIMAGE_FOUND AND PLATFORM STREQUAL "orangepi")
@@ -370,7 +372,7 @@ add_custom_target(fs_img ALL
 )
 
 # QEMU, GDB, and debug targets
-include(${CMAKE_SOURCE_DIR}/cmake/qemu.cmake)
+include(${CMAKE_SOURCE_DIR}/arch/${ARCH}/cmake/qemu.cmake)
 
 # Doxygen documentation
 include(${CMAKE_SOURCE_DIR}/cmake/doc.cmake)

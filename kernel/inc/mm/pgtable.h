@@ -47,15 +47,15 @@
  */
 
 #if defined(CONFIG_ARCH_RISCV)
-#include "../../arch/riscv/inc/pgtable_defs.h"
+#include "../../../arch/riscv/inc/pgtable_defs.h"
 #elif defined(CONFIG_ARCH_X86_64)
-#include "../../arch/x86_64/inc/pgtable_defs.h"
+#include "../../../arch/x86_64/inc/pgtable_defs.h"
 #else
 /* Compiler-based fallback (same as kernel/inc/riscv.h) */
 #if defined(__riscv)
-#include "../../arch/riscv/inc/pgtable_defs.h"
+#include "../../../arch/riscv/inc/pgtable_defs.h"
 #elif defined(__x86_64__) || defined(__i386__)
-#include "../../arch/x86_64/inc/pgtable_defs.h"
+#include "../../../arch/x86_64/inc/pgtable_defs.h"
 #else
 #error "Unsupported architecture for pgtable abstraction"
 #endif
