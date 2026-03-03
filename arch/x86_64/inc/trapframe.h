@@ -88,7 +88,7 @@ struct utrapframe {
  * ────────────────────────────────────────────────────────────── */
 struct context {
     uint64 ra;   /* return address (pushed by CALL) */
-    uint64 rsp;
+    union { uint64 rsp; uint64 sp; };
 
     /* callee-saved */
     uint64 rbx;

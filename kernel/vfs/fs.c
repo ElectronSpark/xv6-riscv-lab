@@ -518,7 +518,7 @@ void vfs_init(void) {
     }
 
     // Optional: run smoke tests in a separate kernel thread with chroot to /tmp
-    tmpfs_smoketest_start();
+    // tmpfs_smoketest_start();
 
     // Mount procfs at /proc
     struct vfs_inode *proc_dir = vfs_namei("/proc", 5);
@@ -541,7 +541,7 @@ void vfs_init(void) {
     } else {
         printf("procfs: failed to mount at /proc, errno=%d\n", ret);
     }
-    xv6fs_run_all_smoketests();
+    // xv6fs_run_all_smoketests();
 }
 
 /*

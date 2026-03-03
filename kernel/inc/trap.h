@@ -128,7 +128,7 @@ void arch_trap_init_hart(void);
 void irq_desc_init(void);
 int register_irq_handler(int irq_num, struct irq_desc *desc);
 int unregister_irq_handler(int irq_num);
-int do_irq(struct trapframe *tf);
+int do_irq(int irq_num);
 int do_device_irq(int hw_irq);
 
 void enter_irq(void);

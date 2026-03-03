@@ -44,7 +44,7 @@ void pgtab_free(void *pa) { page_free(pa, 0); }
  */
 pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
             pte_t **retl1) {
-    assert(va < MAXVA, "walk: va out of range");
+    assert(VA_IS_VALID(va), "walk: va not canonical");
     assert(pagetable != NULL, "walk: pagetable is null");
 
     pte_t *ret_pte[PAGETABLE_LEVELS];
@@ -86,7 +86,7 @@ uint64 walkaddr(pagetable_t pagetable, uint64 va) {
     pte_t *pte;
     uint64 pa;
 
-    if (va >= MAXVA)
+    if (!VA_IS_VALID(va))
         return 0;
 
     pte = walk(pagetable, va, 0, NULL, NULL);

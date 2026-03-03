@@ -28,6 +28,7 @@ set_source_files_properties(${ARCH_C_FILES} PROPERTIES LANGUAGE C)
 set_source_files_properties(${ARCH_S_FILES} PROPERTIES LANGUAGE C)
 
 add_library(arch_x86_64 OBJECT ${ARCH_C_FILES} ${ARCH_S_FILES})
+add_dependencies(arch_x86_64 generate_asm_offsets)
 target_include_directories(arch_x86_64 PRIVATE
     ${KERNEL_DIR}/inc
     ${CMAKE_CURRENT_SOURCE_DIR}/inc

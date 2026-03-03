@@ -15,6 +15,8 @@
  * trap.c can fill the IDT at runtime.
  */
 
+#include "asm-offsets.h"
+
 .text
 
 /*
@@ -186,7 +188,7 @@ alltraps:
     /* IST: rbx(+0) rax(+8) vec(+16) err(+24) rip(+32) cs(+40)
      *       rflags(+48) user_rsp(+56) ss(+64)                     */
 
-    movq  %gs:88, %rax            /* rax = kstack top (= per-CPU intr_kstack_top) */
+    movq  %gs:CPU_LOCAL_INTR_KSTACK_TOP, %rax            /* rax = kstack top (= per-CPU intr_kstack_top) */
 
     /* Copy 7 values from IST to kstack[-56 .. kstack-8].          */
     movq  64(%rsp), %rbx
@@ -302,9 +304,9 @@ vectors:
  *
  *  Follows the Linux entry_64.S strategy:
  *    0. swapgs: GS_BASE = KERNEL_GS_BASE = mycpu() (set by usertrapret)
- *    1. Save user RSP to per-CPU scratch (%gs:64)
+ *    1. Save user RSP to per-CPU scratch (%gs:CPU_LOCAL_SYSCALL_SCRATCH)
  *    2. Switch CR3 to kernel page table immediately (RSP as scratch)
- *    3. Load kernel stack from per-CPU (%gs:72)
+ *    3. Load kernel stack from per-CPU (%gs:CPU_LOCAL_SYSCALL_KSTACK_TOP)
  *    4. Build struct trapframe on the kernel stack via pushq
  *    5. Call usertrap_syscall(struct trapframe *tf)
  *
@@ -327,8 +329,8 @@ vectors:
  *    RSP = still user RSP (CPU does NOT switch stacks)
  *
  *  Per-CPU offsets (GS_BASE = struct cpu_local after swapgs):
- *    %gs:64  syscall_scratch    (CPU_LOCAL_SYSCALL_SCRATCH)
- *    %gs:72  syscall_kstack_top (CPU_LOCAL_SYSCALL_KSTACK_TOP)
+ *    %gs:CPU_LOCAL_SYSCALL_SCRATCH     syscall_scratch    (stash user RSP)
+ *    %gs:CPU_LOCAL_SYSCALL_KSTACK_TOP  syscall_kstack_top (kernel stack top)
  * ────────────────────────────────────────────────────────────── */
 .text
 .align 16
@@ -345,11 +347,11 @@ syscall_entry:
      * Step 1: save user RSP to per-CPU scratch.
      * After this, RSP is free to use as a scratch register.
      */
-    movq %rsp, %gs:64
+    movq %rsp, %gs:CPU_LOCAL_SYSCALL_SCRATCH
 
     /*
      * Step 2: switch to kernel page table.
-     * Use RSP as scratch (user RSP safely saved in %gs:64).
+     * Use RSP as scratch (user RSP safely saved in %gs:CPU_LOCAL_SYSCALL_SCRATCH).
      * trampoline_ksatp is RIP-relative, accessible from both
      * user and kernel page tables (TRAPVEC pages in PML4[511]).
      */
@@ -362,7 +364,7 @@ syscall_entry:
      * GS still works because TRAMPOLINE_CPULOCAL is mapped in
      * the kernel page table too (PML4[511]).
      */
-    movq %gs:72, %rsp
+    movq %gs:CPU_LOCAL_SYSCALL_KSTACK_TOP, %rsp
 
     /*
      * Step 4: build struct trapframe on the kernel stack.
@@ -372,7 +374,7 @@ syscall_entry:
      * rcx = user RIP, r11 = user RFLAGS (set by SYSCALL HW).
      */
     pushq $(0x20 | 3)             /* ss  = SEG_UDATA | DPL_USER    */
-    pushq %gs:64                  /* rsp = user RSP (from per-CPU)  */
+    pushq %gs:CPU_LOCAL_SYSCALL_SCRATCH                  /* rsp = user RSP (from per-CPU)  */
     pushq %r11                    /* rflags = user RFLAGS (from R11)*/
     pushq $(0x28 | 3)             /* cs  = SEG_UCODE | DPL_USER    */
     pushq %rcx                    /* rip = user RIP (from RCX)      */
@@ -436,9 +438,14 @@ trampoline_ksatp:
 trampoline_kstack:
     .quad 0
 
+/* End-of-trapvec marker — used by arch_vm_init() to know how many
+ * pages to map into the high-canonical alias window. */
+.globl trapvec_end
+trapvec_end:
+
 /*
  * syscall_entry uses GS-based per-CPU fields (Linux strategy):
- *   %gs:64  cpu_local.syscall_scratch     — stash user RSP
- *   %gs:72  cpu_local.syscall_kstack_top  — kernel stack top
+ *   %gs:CPU_LOCAL_SYSCALL_SCRATCH  cpu_local.syscall_scratch     — stash user RSP
+ *   %gs:CPU_LOCAL_SYSCALL_KSTACK_TOP  cpu_local.syscall_kstack_top  — kernel stack top
  * Written by usertrapret() via mycpu()->syscall_kstack_top.
  */

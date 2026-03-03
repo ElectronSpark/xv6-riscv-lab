@@ -90,7 +90,9 @@ static void __trap_panic(struct trapframe *tf, uint64 s0) {
     }
 
     size_t kstack_size = (1UL << (PAGE_SHIFT + p->kstack_order));
-    print_backtrace(tf->s0, p->kstack, p->kstack + kstack_size);
+    /* Use the kernel s0 (passed from assembly stub), not tf->s0 which
+     * may be the user's frame pointer if we entered from user mode. */
+    print_backtrace(s0, p->kstack, p->kstack + kstack_size);
     kerneltrap_dump_regs(tf);
     panic_disable_bt();
     panic("kerneltrap");
@@ -109,7 +111,7 @@ void user_kirq_entrance(uint64 ksp, uint64 s0) {
     // redirect traps to kerneltrap()
     // Since we are on kernel stack
     arch_trap_init_hart();
-    if (do_irq(&current->trapframe->trapframe) < 0) {
+    if (do_irq(current->trapframe->trapframe.scause & ~(1UL << 63)) < 0) {
         __trap_panic(&current->trapframe->trapframe, s0);
     }
     exit_irq();
@@ -544,7 +546,7 @@ void kerneltrap(struct trapframe *sp, uint64 s0) {
 void kernel_irq(struct trapframe *sp, uint64 s0) {
     enter_irq();
     assert(sp->sstatus & SSTATUS_SPP, "kerneltrap: not from supervisor mode");
-    if (do_irq(sp) < 0) {
+    if (do_irq(sp->scause & ~(1UL << 63)) < 0) {
         __trap_panic(sp, s0);
     }
     exit_irq();

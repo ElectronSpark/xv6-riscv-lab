@@ -371,6 +371,7 @@ static inline void sfence_vma_page(uint64 va) {
 // Sv39, to avoid having to sign-extend virtual addresses
 // that have the high bit set.
 #define MAXVA (1UL << (9 + 9 + 9 + 12 - 1))
+#define VA_IS_VALID(va) ((uint64)(va) < MAXVA)
 
 // SBI definitions moved to sbi.h
 

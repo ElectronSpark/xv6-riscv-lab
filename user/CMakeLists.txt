@@ -137,6 +137,7 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/kqueuetest.c
     ${USER_DIR}/forktest.c
     ${USER_DIR}/top.c
+    ${USER_DIR}/crashtest.c
 )
 
 # Lab-specific programs

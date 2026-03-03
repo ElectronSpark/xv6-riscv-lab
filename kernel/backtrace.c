@@ -266,13 +266,23 @@ static int bt_get_offset_sym(__ksymbols_t *sym, uint64 addr) {
 
 void print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end) {
     printf("backtrace:\n");
+
+    /* Validate the initial frame pointer before dereferencing.
+     * If it's outside the kernel stack bounds (e.g. a user-space fp),
+     * we must not dereference it — user pages live in a different
+     * address space and the pointer may be unmapped or stale. */
+    if (context < stack_start || context >= stack_end) {
+        printf("  * initial frame outside stack: %p\n", (void *)context);
+        return;
+    }
+
     uint64 last_fp = context;
     for (uint64 fp = BT_FRAME_TOP(context), depth = 0;
          !BT_IS_TOP_FRAME(fp) && depth < BACKTRACE_MAX_DEPTH;
          last_fp = fp, fp = BT_FRAME_TOP(fp), depth++) {
 
         if (fp < stack_start || fp >= stack_end) {
-            printf("  * unknown frame: %p\n", (void *)fp);
+            printf("  * frame outside stack: %p\n", (void *)fp);
             break;
         } else if (fp == 0) {
             printf("  top frame\n");

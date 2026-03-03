@@ -1049,7 +1049,7 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
     vm_rlock(vm);
     while (len > 0) {
         va0 = PGROUNDDOWN(dstva);
-        if (va0 >= MAXVA) {
+        if (va0 >= UVMTOP) {
             ret = -EFAULT;
             goto out;
         }

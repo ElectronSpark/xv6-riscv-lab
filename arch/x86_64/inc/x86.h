@@ -7,6 +7,14 @@
 #define PGSHIFT 12
 #define MAXVA (~0ULL)
 
+/*
+ * x86_64 4-level paging: valid VAs must be canonical — bits 63:47
+ * are all-zero or all-one (sign-extension of bit 47).
+ */
+#define VA_IS_CANONICAL(va) \
+    ((((int64)(va)) >> 47) == 0 || (((int64)(va)) >> 47) == -1)
+#define VA_IS_VALID(va) VA_IS_CANONICAL(va)
+
 #define PGROUNDUP(sz) (((sz) + PGSIZE - 1) & ~(PGSIZE - 1))
 #define PGROUNDDOWN(a) ((a) & ~(PGSIZE - 1))
 

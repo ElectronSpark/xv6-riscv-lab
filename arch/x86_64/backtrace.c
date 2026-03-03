@@ -21,16 +21,45 @@
 #define BT_IS_TOP_FRAME(fp) \
     (!(uint64)(fp) || (uint64)(fp) == PGROUNDDOWN((uint64)(fp)))
 
+/*
+ * Translate a trapvec high-canonical alias address back to the
+ * link-time (physical / identity-mapped) address so ksym_lookup
+ * can find the right symbol.  IDT vectors, alltraps, syscall_entry,
+ * and trampoline data live in the alias window:
+ *   [TRAPVEC_ALIAS_BASE .. TRAPVEC_ALIAS_BASE + npages*PGSIZE)
+ * mapped from physical pages starting at PGROUNDDOWN(&vector0).
+ */
+static uint64 bt_dealias(uint64 addr)
+{
+    extern void vector0(void);
+    extern char trapvec_end[];
+    uint64 phys_base  = PGROUNDDOWN((uint64)vector0);
+    uint64 alias_base = TRAPVEC_ALIAS_BASE;
+    uint64 alias_end  = alias_base +
+        (PGROUNDDOWN((uint64)trapvec_end) - phys_base) + PGSIZE;
+
+    if (addr >= alias_base && addr < alias_end)
+        return addr - alias_base + phys_base;
+    return addr;
+}
+
 void print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end)
 {
-    printf("backtrace:\n");
+    /* Validate the initial frame pointer before walking.
+     * If it's outside the kernel stack bounds (e.g. a user-space fp),
+     * we must not dereference it — user pages live in a different
+     * address space and the pointer may be unmapped or stale. */
+    if (context < stack_start || context >= stack_end) {
+        printf("  * initial frame outside stack: %p\n", (void *)context);
+        return;
+    }
 
     for (uint64 fp = context, depth = 0;
          !BT_IS_TOP_FRAME(fp) && depth < BACKTRACE_MAX_DEPTH;
          fp = BT_PREV_FP(fp), depth++) {
 
         if (fp < stack_start || fp >= stack_end) {
-            printf("  * unknown frame: %p\n", (void *)fp);
+            printf("  * frame outside stack: %p\n", (void *)fp);
             break;
         }
 
@@ -41,8 +70,10 @@ void print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end)
         }
 
         /* return_addr points to the instruction AFTER the call;
-         * subtract 1 so we look up an address inside the call insn. */
-        uint64 lookup_addr = return_addr - 1;
+         * subtract 1 so we look up an address inside the call insn.
+         * Also translate trapvec alias addresses back to link-time
+         * addresses so ksym_lookup resolves the right symbol. */
+        uint64 lookup_addr = bt_dealias(return_addr - 1);
 
         char symbuf[64]   = {0};
         char filebuf[128] = {0};
@@ -127,8 +158,9 @@ void print_thread_backtrace(struct context *ctx, uint64 kstack,
             last_return_addr = return_addr;
         }
 
-        /* return_addr is the insn after the call; -1 to land in the caller */
-        uint64 lookup_addr = return_addr - 1;
+        /* return_addr is the insn after the call; -1 to land in the caller.
+         * Translate trapvec alias addresses for correct symbol lookup. */
+        uint64 lookup_addr = bt_dealias(return_addr - 1);
         sym = ksym_search(lookup_addr);
         if (sym == NULL) {
             printf("  * %p: unknown\n", (void *)return_addr);

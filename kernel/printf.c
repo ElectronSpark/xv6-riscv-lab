@@ -234,6 +234,7 @@ void __panic_start() {
         printf("[Core: %ld] No thread context, fp=%p\n", cpuid(), (void *)fp);
         if (__bt_enabled) {
             // Use KERNBASE to PHYSTOP as conservative stack bounds
+            printf("backtrace:\n");
             print_backtrace(fp, KERNBASE, PHYSTOP);
         }
         return;
@@ -242,6 +243,7 @@ void __panic_start() {
            (void *)fp);
     if (__bt_enabled) {
         size_t kstack_size = (1UL << (PAGE_SHIFT + p->kstack_order));
+        printf("backtrace:\n");
         print_backtrace(fp, p->kstack, p->kstack + kstack_size);
     }
 }

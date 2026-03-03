@@ -1,5 +1,7 @@
 .text
 
+#include "asm-offsets.h"
+
 /*
  * x86_64 user return trampoline.
  *
@@ -36,10 +38,10 @@ userret:
 
     /* Build iret frame: SS, RSP, RFLAGS, CS, RIP */
     pushq $0x23                   /* SEG_UDATA | DPL_USER */
-    pushq 0xA0(%rdi)              /* tf->rsp */
-    pushq 0x98(%rdi)              /* tf->rflags */
+    pushq TRAPFRAME_RSP(%rdi)     /* tf->rsp */
+    pushq TRAPFRAME_RFLAGS(%rdi)  /* tf->rflags */
     pushq $0x2b                   /* SEG_UCODE | DPL_USER */
-    pushq 0x88(%rdi)              /* tf->rip */
+    pushq TRAPFRAME_RIP(%rdi)     /* tf->rip */
 
     /*
      * Restore GPRs from trapframe.
@@ -51,21 +53,21 @@ userret:
      * On the SYSCALL path the restored values are the CPU-set
      * transition state (user RIP / user RFLAGS), not originals.
      */
-    movq 0x00(%rdi), %r15
-    movq 0x08(%rdi), %r14
-    movq 0x10(%rdi), %r13
-    movq 0x18(%rdi), %r12
-    movq 0x20(%rdi), %r11          /* clobbered on SYSCALL path      */
-    movq 0x28(%rdi), %r10
-    movq 0x30(%rdi), %r9
-    movq 0x38(%rdi), %r8
-    movq 0x40(%rdi), %rbp
-    movq 0x50(%rdi), %rsi
-    movq 0x58(%rdi), %rdx
-    movq 0x60(%rdi), %rcx          /* clobbered on SYSCALL path      */
-    movq 0x68(%rdi), %rbx
-    movq 0x70(%rdi), %rax
-    movq 0x48(%rdi), %rdi
+    movq TRAPFRAME_R15(%rdi), %r15
+    movq TRAPFRAME_R14(%rdi), %r14
+    movq TRAPFRAME_R13(%rdi), %r13
+    movq TRAPFRAME_R12(%rdi), %r12
+    movq TRAPFRAME_R11(%rdi), %r11          /* clobbered on SYSCALL path      */
+    movq TRAPFRAME_R10(%rdi), %r10
+    movq TRAPFRAME_R9(%rdi), %r9
+    movq TRAPFRAME_R8(%rdi), %r8
+    movq TRAPFRAME_RBP(%rdi), %rbp
+    movq TRAPFRAME_RSI(%rdi), %rsi
+    movq TRAPFRAME_RDX(%rdi), %rdx
+    movq TRAPFRAME_RCX(%rdi), %rcx          /* clobbered on SYSCALL path      */
+    movq TRAPFRAME_RBX(%rdi), %rbx
+    movq TRAPFRAME_RAX(%rdi), %rax
+    movq TRAPFRAME_RDI(%rdi), %rdi
 
     /*
      * No swapgs needed here: usertrapret already set both MSRs explicitly:

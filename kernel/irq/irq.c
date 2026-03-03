@@ -164,10 +164,8 @@ static int __do_plic_irq(void) {
     return irq;
 }
 
-int do_irq(struct trapframe *tf) {
-    assert(tf->scause >> 63, "do_irq: not an interrupt");
-    int irq_num = tf->scause & ((1UL << 63) - 1);
-    if (irq_num >= CLINT_IRQ_CNT) {
+int do_irq(int irq_num) {
+    if (irq_num < 0 || irq_num >= CLINT_IRQ_CNT) {
         printf("do_irq: invalid irq_num %d\n", irq_num);
         return -ENODEV;
     }

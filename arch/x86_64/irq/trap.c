@@ -24,6 +24,7 @@
 #include <smp/percpu.h>
 #include <proc/sched.h>
 #include "memlayout.h"
+#include "ksymbols.h"
 
 extern pagetable_t kernel_pagetable;
 
@@ -653,6 +654,27 @@ void x86_trap_handler(struct trapframe *tf) {
         printf("\n*** KERNEL PAGE FAULT: cr2=0x%lx err=0x%lx rip=0x%lx\n", cr2,
                tf->err, tf->rip);
         *(uint64 *)((uint64)tf - 8) = tf->rip;
+        {
+            /* Print crash site as first backtrace entry */
+            char _sym[64] = {0}; char _file[128] = {0};
+            uint32 _line = 0; void *_addr = NULL;
+            printf("backtrace:\n");
+            if (ksym_lookup(tf->rip, _sym, sizeof(_sym), &_addr) >= 0) {
+                ksymbols_t *s = ksym_search(tf->rip);
+                ksym_get_location(s, _file, sizeof(_file), &_line);
+                printf("  > %s:%d: %s+%d [crash]\n", _file, _line,
+                       _sym, ksym_get_offset(s, tf->rip));
+            } else {
+                printf("  > %p [crash]\n", (void *)tf->rip);
+            }
+        }
+        if (current) {
+            size_t kstack_size = (1UL << (PAGE_SHIFT + current->kstack_order));
+            print_backtrace(tf->rbp, current->kstack,
+                            current->kstack + kstack_size);
+        } else {
+            print_backtrace(tf->rbp, KERNBASE, PHYSTOP);
+        }
         panic_disable_bt();
         panic("kernel page fault");
     }
@@ -814,6 +836,27 @@ void x86_trap_handler(struct trapframe *tf) {
                tf->rflags);
 
         *(uint64 *)((uint64)tf - 8) = tf->rip;
+        {
+            /* Print crash site as first backtrace entry */
+            char _sym[64] = {0}; char _file[128] = {0};
+            uint32 _line = 0; void *_addr = NULL;
+            printf("backtrace:\n");
+            if (ksym_lookup(tf->rip, _sym, sizeof(_sym), &_addr) >= 0) {
+                ksymbols_t *s = ksym_search(tf->rip);
+                ksym_get_location(s, _file, sizeof(_file), &_line);
+                printf("  > %s:%d: %s+%d [crash]\n", _file, _line,
+                       _sym, ksym_get_offset(s, tf->rip));
+            } else {
+                printf("  > %p [crash]\n", (void *)tf->rip);
+            }
+        }
+        if (current) {
+            size_t kstack_size = (1UL << (PAGE_SHIFT + current->kstack_order));
+            print_backtrace(tf->rbp, current->kstack,
+                            current->kstack + kstack_size);
+        } else {
+            print_backtrace(tf->rbp, KERNBASE, PHYSTOP);
+        }
         panic_disable_bt();
         panic("exception");
 

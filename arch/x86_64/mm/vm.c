@@ -160,20 +160,25 @@ void arch_vm_init(void)
     kernel_pagetable = (pagetable_t)kpml4;
 
     /*
-    * Map trap-entry text (vector stubs + alltraps + syscall_entry)
-    * into the shared high virtual window under PX(3, TRAMPOLINE).
+    * Map trap-entry text (vector stubs + alltraps + syscall_entry +
+    * trampoline_ksatp/trampoline_kstack data) into the shared high
+    * virtual window under PX(3, TRAMPOLINE).
      *
-     * We currently need two pages to cover vector0..syscall_entry.
+     * Compute the number of pages needed dynamically from the symbol
+     * range [vector0 .. trapvec_end).
      */
     {
+        extern char trapvec_end[];
         uint64 trapvec_page0 = PGROUNDDOWN((uint64)vector0);
-        uint64 trapvec_page1 = trapvec_page0 + PGSIZE;
-        if (mappages((pagetable_t)kpml4, TRAPVEC_ALIAS_BASE, PGSIZE,
-                     trapvec_page0, PTE_R) != 0)
-            panic("arch_vm_init: trapvec alias map page0 failed");
-        if (mappages((pagetable_t)kpml4, TRAPVEC_ALIAS_BASE + PGSIZE, PGSIZE,
-                     trapvec_page1, PTE_R) != 0)
-            panic("arch_vm_init: trapvec alias map page1 failed");
+        uint64 trapvec_last  = PGROUNDDOWN((uint64)trapvec_end);
+        int npages = (trapvec_last - trapvec_page0) / PGSIZE + 1;
+
+        for (int i = 0; i < npages; i++) {
+            if (mappages((pagetable_t)kpml4,
+                         TRAPVEC_ALIAS_BASE + i * PGSIZE, PGSIZE,
+                         trapvec_page0 + i * PGSIZE, PTE_R | PTE_W) != 0)
+                panic("arch_vm_init: trapvec alias map page%d failed", i);
+        }
 
         if (mappages((pagetable_t)kpml4, TRAMPOLINE, PGSIZE,
                  PGROUNDDOWN((uint64)trampoline), PTE_R) != 0)

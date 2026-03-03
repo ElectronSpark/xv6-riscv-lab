@@ -1053,7 +1053,7 @@ void rcu_kthread_start_cpu(int cpu) {
     struct sched_attr attr;
     sched_attr_init(&attr);
     attr.affinity_mask = (1ULL << cpu);
-    attr.priority = MAKE_PRIORITY(3, 0);
+    attr.priority = MAKE_PRIORITY(1, 0);
     sched_setattr(p->sched_entity, &attr);
 
     rcu_kthread[cpu].kthread = p;

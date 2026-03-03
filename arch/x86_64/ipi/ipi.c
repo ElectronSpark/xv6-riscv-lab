@@ -81,6 +81,7 @@ void x86_ipi_handler(void) {
             SET_CPU_CRASHED();
             panic_msg_lock();
             printf("[Core: %d] Received IPI_REASON_CRASH, halting...\n", cpu);
+            printf("backtrace:\n");
             print_backtrace(r_fp(), KERNBASE, PHYSTOP);
             panic_msg_unlock();
             /* Propagate to remaining cores, then halt forever. */

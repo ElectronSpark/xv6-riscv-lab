@@ -52,7 +52,7 @@ extern uint64 __physical_total_pages;
  * This is needed because iretq must read the GDT to validate CS/SS,
  * and the IDT/TSS must be reachable for fault delivery.
  */
-#define TRAPVEC_ALIAS_BASE (TRAMPOLINE_CPULOCAL - (2 * PGSIZE))
+#define TRAPVEC_ALIAS_BASE (TRAMPOLINE_CPULOCAL - (4 * PGSIZE))
 #define CPU_ENTRY_AREA     (TRAPVEC_ALIAS_BASE - (2 * PGSIZE))
 #define CPU_ENTRY_GDT      CPU_ENTRY_AREA
 #define CPU_ENTRY_IDT      (CPU_ENTRY_AREA + PGSIZE)

@@ -289,6 +289,11 @@ class AsmOffsetsGenerator:
                 if value_parts:
                     # Take the last token as the value (handles expressions)
                     value = value_parts[-1]
+                    # Strip AT&T immediate prefix ($) that x86 compilers emit
+                    # for "i" constraints — we want bare numbers so the macros
+                    # work both as memory displacements and immediates.
+                    if value.startswith('$'):
+                        value = value[1:]
                     lines.append(f'#define {symbol} {value}')
                 continue
             
@@ -466,6 +471,7 @@ class AsmOffsetsGenerator:
     
     def _parse_nested_struct_body(self, lines):
         """Parse just the fields inside a nested struct body."""
+        import re
         fields = []
         brace_count = 0
         in_body = False
@@ -473,6 +479,30 @@ class AsmOffsetsGenerator:
         for line in lines:
             stripped = line.strip()
             if not stripped or stripped.startswith('#'):
+                continue
+            
+            # Handle single-line union/struct: union { type a; type b; };
+            # Extract fields from between braces before checking brace counts
+            if '{' in stripped and '}' in stripped:
+                inner = stripped.split('{', 1)[1].rsplit('}', 1)[0].strip()
+                # Parse semicolon-separated declarations inside braces
+                for decl in inner.split(';'):
+                    decl = decl.strip()
+                    if not decl:
+                        continue
+                    parts = decl.split()
+                    if len(parts) >= 2:
+                        field_part = parts[-1].rstrip(';')
+                        if '[' in field_part:
+                            field_part = field_part[:field_part.index('[')]
+                        field_part = field_part.lstrip('*')
+                        if field_part and field_part.isidentifier():
+                            fields.append(field_part)
+                # Adjust brace count and possibly break
+                brace_count += stripped.count('{') - stripped.count('}')
+                in_body = True
+                if brace_count <= 0:
+                    break
                 continue
             
             # Track when we enter the body
