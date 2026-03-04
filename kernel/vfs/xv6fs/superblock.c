@@ -51,37 +51,69 @@ static int xv6fs_pcache_read_page(struct pcache *pcache, page_t *page) {
     /* pcnode->blkno is the page-aligned logical offset in 512-byte units */
     uint base_bn = pcnode->blkno / BLK512_PER_BSIZE; /* first xv6fs block */
 
-    for (int i = 0; i < BSIZE_PER_PAGE; i++) {
-        uint addr = xv6fs_bmap_read(ip, base_bn + i);
-        if (addr == 0) {
+    /*
+     * Resolve all block addresses first, then merge contiguous runs into
+     * single bios.  For a non-fragmented file the entire 4 KB page becomes
+     * one DMA transfer instead of four.
+     */
+    uint addrs[BSIZE_PER_PAGE];
+    for (int i = 0; i < BSIZE_PER_PAGE; i++)
+        addrs[i] = xv6fs_bmap_read(ip, base_bn + i);
+
+    struct bio *bios[BSIZE_PER_PAGE] = {NULL};
+    int submitted = 0;
+    int ret = 0;
+
+    for (int i = 0; i < BSIZE_PER_PAGE; ) {
+        if (addrs[i] == 0) {
             /* Sparse / beyond file — zero-fill this 1 KB slot */
             memset((char *)pcnode->data + i * BSIZE, 0, BSIZE);
+            i++;
             continue;
         }
 
-        struct bio *bio = bio_alloc(xv6_sb->blkdev, 1, false, NULL, NULL);
-        if (IS_ERR_OR_NULL(bio))
-            return -ENOMEM;
+        /* Find the longest contiguous run starting at slot i */
+        int run = 1;
+        while (i + run < BSIZE_PER_PAGE &&
+               addrs[i + run] == addrs[i] + run)
+            run++;
 
-        bio->blkno = (uint64)addr * BLK512_PER_BSIZE;
-        int ret = bio_add_seg(bio, page, 0, BSIZE, i * BSIZE);
+        struct bio *bio =
+            bio_alloc(xv6_sb->blkdev, 1, false, NULL, NULL);
+        if (IS_ERR_OR_NULL(bio)) {
+            ret = -ENOMEM;
+            goto await_submitted;
+        }
+
+        bio->blkno = (uint64)addrs[i] * BLK512_PER_BSIZE;
+        ret = bio_add_seg(bio, page, 0, run * BSIZE, i * BSIZE);
         if (ret != 0) {
             bio_release(bio);
-            return ret;
+            goto await_submitted;
         }
 
         ret = blkdev_submit_bio(xv6_sb->blkdev, bio);
         if (ret != 0) {
             bio_release(bio);
-            return ret;
+            goto await_submitted;
         }
-        ret = bio_await(bio);
-        bio_release(bio);
-        if (ret != 0)
-            return ret;
+
+        bios[submitted++] = bio;
+        i += run;
     }
 
-    return 0;
+    ret = 0;
+
+await_submitted:
+    /* Wait for all in-flight bios — must complete even on early error */
+    for (int i = 0; i < submitted; i++) {
+        int err = bio_await(bios[i]);
+        if (err != 0 && ret == 0)
+            ret = err;
+        bio_release(bios[i]);
+    }
+
+    return ret;
 }
 
 static int xv6fs_pcache_write_page(struct pcache *pcache, page_t *page) {
@@ -103,35 +135,67 @@ static int xv6fs_pcache_write_page(struct pcache *pcache, page_t *page) {
     /* pcnode->blkno is the page-aligned logical offset in 512-byte units */
     uint base_bn = pcnode->blkno / BLK512_PER_BSIZE;
 
-    for (int i = 0; i < BSIZE_PER_PAGE; i++) {
-        uint addr = xv6fs_bmap_read(ip, base_bn + i);
-        if (addr == 0) {
-            continue; /* Sparse / beyond file — nothing to write back */
+    /*
+     * Resolve all block addresses first, then merge contiguous runs into
+     * single bios.  For a non-fragmented file the entire 4 KB page becomes
+     * one DMA transfer instead of four.
+     */
+    uint addrs[BSIZE_PER_PAGE];
+    for (int i = 0; i < BSIZE_PER_PAGE; i++)
+        addrs[i] = xv6fs_bmap_read(ip, base_bn + i);
+
+    struct bio *bios[BSIZE_PER_PAGE] = {NULL};
+    int submitted = 0;
+    int ret = 0;
+
+    for (int i = 0; i < BSIZE_PER_PAGE; ) {
+        if (addrs[i] == 0) {
+            i++; /* Sparse / beyond file — nothing to write back */
+            continue;
         }
 
-        struct bio *bio = bio_alloc(xv6_sb->blkdev, 1, true, NULL, NULL);
-        if (IS_ERR_OR_NULL(bio))
-            return -ENOMEM;
+        /* Find the longest contiguous run starting at slot i */
+        int run = 1;
+        while (i + run < BSIZE_PER_PAGE &&
+               addrs[i + run] == addrs[i] + run)
+            run++;
 
-        bio->blkno = (uint64)addr * BLK512_PER_BSIZE;
-        int ret = bio_add_seg(bio, page, 0, BSIZE, i * BSIZE);
+        struct bio *bio =
+            bio_alloc(xv6_sb->blkdev, 1, true, NULL, NULL);
+        if (IS_ERR_OR_NULL(bio)) {
+            ret = -ENOMEM;
+            goto await_submitted;
+        }
+
+        bio->blkno = (uint64)addrs[i] * BLK512_PER_BSIZE;
+        ret = bio_add_seg(bio, page, 0, run * BSIZE, i * BSIZE);
         if (ret != 0) {
             bio_release(bio);
-            return ret;
+            goto await_submitted;
         }
 
         ret = blkdev_submit_bio(xv6_sb->blkdev, bio);
         if (ret != 0) {
             bio_release(bio);
-            return ret;
+            goto await_submitted;
         }
-        ret = bio_await(bio);
-        bio_release(bio);
-        if (ret != 0)
-            return ret;
+
+        bios[submitted++] = bio;
+        i += run;
     }
 
-    return 0;
+    ret = 0;
+
+await_submitted:
+    /* Wait for all in-flight bios — must complete even on early error */
+    for (int i = 0; i < submitted; i++) {
+        int err = bio_await(bios[i]);
+        if (err != 0 && ret == 0)
+            ret = err;
+        bio_release(bios[i]);
+    }
+
+    return ret;
 }
 
 static struct pcache_ops xv6fs_pcache_ops = {

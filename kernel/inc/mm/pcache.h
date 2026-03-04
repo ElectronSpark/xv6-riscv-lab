@@ -15,6 +15,7 @@ int pcache_sync(void);
 // int pcache_evict_pages(struct pcache *pcache, size_t target_size);
 // @TODO: do eviction in OOM
 int pcache_read_page(struct pcache *pcache, page_t *page);
+int pcache_prepare_write_page(struct pcache *pcache, page_t *page);
 int pcache_mark_page_dirty(struct pcache *pcache, page_t *page);
 int pcache_invalidate_blk(struct pcache *pcache, uint64 blkno);
 int pcache_discard_blk(struct pcache *pcache, uint64 blkno);

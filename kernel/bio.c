@@ -353,55 +353,82 @@ void bwrite_async(struct buf *b) {
 
 // Flush all dirty buffers to disk.
 // Called periodically or on sync().
+//
+// Buffers are collected in batches, all BIOs are submitted, then all are
+// awaited — turning N sequential I/O round-trips into one parallel batch.
+#define BSYNC_BATCH_MAX 64
+
 void bsync(void) {
-    struct buf *b;
+    struct {
+        struct buf *buf;
+        struct bio *bio;
+        blkdev_t *blkdev;
+    } batch[BSYNC_BATCH_MAX];
     int flushed = 0;
 
     while (1) {
+        int n = 0;
+
+        /* Phase 1: Collect up to BSYNC_BATCH_MAX dirty buffers */
         spin_lock(&bcache.lock);
-
-        if (LIST_IS_EMPTY(&bcache.dirty_list)) {
-            spin_unlock(&bcache.lock);
-            break;
+        while (!LIST_IS_EMPTY(&bcache.dirty_list) && n < BSYNC_BATCH_MAX) {
+            struct buf *b =
+                list_node_pop_back(&bcache.dirty_list, struct buf, dirty_entry);
+            b->dirty = 0;
+            bcache.dirty_count--;
+            if (b->refcnt == 0 && !LIST_NODE_IS_DETACHED(b, free_entry)) {
+                list_node_detach(b, free_entry);
+            }
+            b->refcnt++;
+            batch[n].buf = b;
+            batch[n].bio = NULL;
+            batch[n].blkdev = NULL;
+            n++;
         }
-
-        // Get oldest dirty buffer (FIFO order)
-        b = list_node_pop_back(&bcache.dirty_list, struct buf, dirty_entry);
-        b->dirty = 0;
-        bcache.dirty_count--;
-
-        // Increment refcnt to prevent buffer from being recycled
-        if (b->refcnt == 0 && !LIST_NODE_IS_DETACHED(b, free_entry)) {
-            list_node_detach(b, free_entry);
-        }
-        b->refcnt++;
-
         spin_unlock(&bcache.lock);
 
-        // Lock buffer and write to disk
-        mutex_lock(&b->lock);
+        if (n == 0)
+            break;
 
-        if (b->valid) {
-            blkdev_t *blkdev = blkdev_get(major(b->dev), minor(b->dev));
-            if (!IS_ERR(blkdev)) {
-                struct bio *bio = __buf_alloc_bio(b, blkdev, true);
-                if (!IS_ERR_OR_NULL(bio)) {
-                    blkdev_submit_bio(blkdev, bio);
-                    bio_await(bio);
-                    __buf_bio_cleanup(bio);
-                    flushed++;
+        /* Phase 2: Lock each buffer and submit its bio (no waiting yet) */
+        for (int i = 0; i < n; i++) {
+            struct buf *b = batch[i].buf;
+            mutex_lock(&b->lock);
+
+            if (b->valid) {
+                blkdev_t *blkdev = blkdev_get(major(b->dev), minor(b->dev));
+                if (!IS_ERR(blkdev)) {
+                    struct bio *bio = __buf_alloc_bio(b, blkdev, true);
+                    if (!IS_ERR_OR_NULL(bio)) {
+                        blkdev_submit_bio(blkdev, bio);
+                        batch[i].bio = bio;
+                        batch[i].blkdev = blkdev;
+                    } else {
+                        blkdev_put(blkdev);
+                    }
                 }
-                blkdev_put(blkdev);
             }
         }
 
-        mutex_unlock(&b->lock);
+        /* Phase 3: Await all in-flight bios in parallel */
+        for (int i = 0; i < n; i++) {
+            if (batch[i].bio != NULL) {
+                bio_await(batch[i].bio);
+                __buf_bio_cleanup(batch[i].bio);
+                blkdev_put(batch[i].blkdev);
+                flushed++;
+            }
+            mutex_unlock(&batch[i].buf->lock);
+        }
 
-        // Release our reference
+        /* Phase 4: Release buffer references in one lock acquisition */
         spin_lock(&bcache.lock);
-        b->refcnt--;
-        if (b->refcnt == 0) {
-            list_node_push(&bcache.free_list, b, free_entry);
+        for (int i = 0; i < n; i++) {
+            struct buf *b = batch[i].buf;
+            b->refcnt--;
+            if (b->refcnt == 0) {
+                list_node_push(&bcache.free_list, b, free_entry);
+            }
         }
         spin_unlock(&bcache.lock);
     }

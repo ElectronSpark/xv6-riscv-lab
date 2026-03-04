@@ -67,20 +67,21 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
         return -EIO;
     }
 
-    // Acquire inode lock to safely read size and prevent truncation during
-    // read. Read doesn't need a transaction (no modifications), so we can just
-    // lock the inode. Note: The file reference guarantees the inode remains
-    // allocated - no validity check needed per Linux VFS model (file holds
-    // inode reference).
+    // Snapshot inode size under lock, then release.  The pcache and page
+    // reference keep the data safe; holding the inode mutex across the
+    // entire I/O loop would serialise concurrent readers on the same file.
+    // If a concurrent truncate shrinks the file after our snapshot, we may
+    // read stale (but consistent) cached data — matching Linux VFS semantics.
     vfs_ilock(inode);
+    loff_t isize = inode->size;
+    vfs_iunlock(inode);
 
     loff_t pos = file->f_pos;
-    if (pos >= inode->size) {
-        vfs_iunlock(inode);
+    if (pos >= isize) {
         return 0; // EOF
     }
-    if (pos + count > inode->size) {
-        count = inode->size - pos;
+    if (pos + count > isize) {
+        count = isize - pos;
     }
 
     size_t bytes_read = 0;
@@ -98,7 +99,6 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
         uint64 blkno_512 = (uint64)bn * BLK512_PER_BSIZE;
         page_t *page = pcache_get_page(pc, blkno_512);
         if (page == NULL) {
-            vfs_iunlock(inode);
             if (bytes_read > 0)
                 return bytes_read;
             return signal_pending(current) ? -EINTR : -EIO;
@@ -106,7 +106,6 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
         int ret = pcache_read_page(pc, page);
         if (ret != 0) {
             pcache_put_page(pc, page);
-            vfs_iunlock(inode);
             if (bytes_read > 0)
                 return bytes_read;
             return (ret == -EINTR) ? -EINTR : -EIO;
@@ -118,7 +117,6 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
             if (vm_copyout(current->vm, (uint64)(buf + bytes_read), data, n) <
                 0) {
                 pcache_put_page(pc, page);
-                vfs_iunlock(inode);
                 if (bytes_read == 0)
                     return -EFAULT;
                 return bytes_read;
@@ -132,7 +130,6 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
         pos += n;
     }
 
-    vfs_iunlock(inode);
     return bytes_read;
 }
 
@@ -229,7 +226,23 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count,
                     goto done;
                 return signal_pending(current) ? -EINTR : -EIO;
             }
-            int ret = pcache_read_page(pc, page);
+
+            /*
+             * Skip the disk read when we are about to overwrite the entire
+             * pcache page (4 KB).  pcache_prepare_write_page zero-fills and
+             * marks the page up-to-date without I/O, so the subsequent
+             * BSIZE-chunk iterations fill every byte before the page is
+             * released.  Falls back to a normal read when the page is
+             * already cached or has I/O in progress.
+             */
+            int ret;
+            bool full_page = (bn % BSIZE_PER_PAGE == 0 && off == 0 &&
+                              (n - chunk_written) >= PGSIZE);
+            if (full_page) {
+                ret = pcache_prepare_write_page(pc, page);
+            } else {
+                ret = pcache_read_page(pc, page);
+            }
             if (ret != 0) {
                 pcache_put_page(pc, page);
                 vfs_iunlock(inode);

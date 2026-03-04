@@ -1837,6 +1837,60 @@ out_unlock_locked:
     return ret;
 }
 
+/**
+ * pcache_prepare_write_page - prepare a page for a full overwrite
+ *
+ * If the page is not yet up-to-date, zero-fills it and marks it as
+ * up-to-date WITHOUT issuing any disk I/O.  The caller MUST subsequently
+ * overwrite the entire page with valid data (and call
+ * pcache_mark_page_dirty) before releasing the page reference.
+ *
+ * If the page is already up-to-date or has I/O in progress, this
+ * function falls back to pcache_read_page (the normal read path).
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int pcache_prepare_write_page(struct pcache *pcache, page_t *page) {
+    struct pcache_node *pcnode;
+    int ret = 0;
+
+    if (pcache == NULL || page == NULL)
+        return -EINVAL;
+
+    __pcache_spin_lock(pcache);
+    page_lock_acquire(page);
+
+    if (!__pcache_is_active(pcache) || !__pcache_page_valid(pcache, page)) {
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+        return -EINVAL;
+    }
+
+    pcnode = page->pcache.pcache_node;
+
+    /* Already valid — nothing to do. */
+    if (pcnode->uptodate) {
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+        return 0;
+    }
+
+    /* I/O in progress — fall back to the normal read path. */
+    if (pcnode->io_in_progress) {
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+        return pcache_read_page(pcache, page);
+    }
+
+    /* Zero-fill and mark up-to-date — no disk read needed. */
+    memset(pcnode->data, 0, PGSIZE);
+    pcnode->uptodate = 1;
+
+    page_lock_release(page);
+    __pcache_spin_unlock(pcache);
+    return ret;
+}
+
 void dump_pcache_stats(struct pcache *pcache) {
     if (pcache == NULL) {
         return;
