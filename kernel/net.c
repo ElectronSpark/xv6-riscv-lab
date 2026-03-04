@@ -69,7 +69,9 @@ struct mbuf *mbufalloc(unsigned int headroom) {
     m->next = 0;
     m->head = (char *)m->buf + headroom;
     m->len = 0;
-    memset(m->buf, 0, sizeof(m->buf));
+    /* Skip zeroing m->buf — kalloc() already cleared the page.
+     * RX path: DMA will overwrite the buffer.
+     * TX path: caller copies data into it before use. */
     return m;
 }
 

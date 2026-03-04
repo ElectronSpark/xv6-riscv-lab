@@ -381,4 +381,35 @@
 /* Maximum transfer size per PIO operation */
 #define SDHCI_BLOCK_SIZE_VAL    512
 
+/* SD command indices for UHS-I */
+#define SD_VOLTAGE_SWITCH       11  /* CMD11: voltage switch to 1.8V */
+#define SD_SEND_TUNING_BLOCK    19  /* CMD19: send tuning block */
+
+/* Present State DAT[3:0] level mask (bits 23:20) */
+#define SDHCI_DATA_LVL_MASK     (0xF << 20)
+
+/* Delay line register fields (X1-specific) */
+#define SDHC_DLINE_CFG_DELAY_MASK   0xFF   /* bits [7:0]: delay code */
+
+/* ======================================================================
+ * AIB (Always-on I/O Block) SD I/O Voltage Control
+ *
+ * The SpacemiT X1 SoC uses an external AIB register to physically
+ * switch the SD slot I/O voltage between 3.3V and 1.8V.  The SDHCI
+ * CTRL_VDD_180 bit only controls signaling level inside the controller;
+ * the AIB register gates the actual voltage rail (vqmmc / LDO_1).
+ *
+ * Access to the AIB register requires unlocking via the APBC security
+ * key registers (ASFAR/ASSAR).  Values from Orange Pi RV2 DTS and
+ * the Linux sdhci-of-k1x.c driver.
+ * ====================================================================== */
+
+#define AIB_MMC1_IO_REG         0xD401E81C  /* AIB SD I/O voltage control */
+#define APBC_ASFAR_REG          0xD4015050  /* APBC security key 1 */
+#define APBC_ASSAR_REG          0xD4015054  /* APBC security key 2 */
+
+#define AKEY_ASFAR              0xBABA      /* unlock key for ASFAR */
+#define AKEY_ASSAR              0xEB10      /* unlock key for ASSAR */
+#define MMC1_IO_V18EN           0x04        /* bit 2: enable 1.8V I/O */
+
 #endif /* __KERNEL_DEV_X1_SDHCI_H */

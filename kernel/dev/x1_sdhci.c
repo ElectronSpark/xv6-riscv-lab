@@ -28,6 +28,7 @@
 #include "dev/blkdev.h"
 #include "dev/bio.h"
 #include "dev/x1_sdhci.h"
+#include "dev/gendisk.h"
 #include "dev/fdt.h"
 #include "trap.h"
 #include "timer/timer.h"
@@ -63,6 +64,9 @@ struct sdhci_softc {
 
     /* DMA */
     int use_dma;                    /* 1 if SDMA is available */
+
+    /* UHS mode tracking */
+    int uhs_1v8;                    /* 1 if running at 1.8V signaling */
 
     /* Netdev-style IRQ */
     int irq;
@@ -472,7 +476,12 @@ static int sdhci_send_cmd_to(struct sdhci_softc *sc, uint32 cmd_idx, uint32 arg,
 
     /* Wait for command line to be free */
     if (sdhci_wait_bit(sc, SDHCI_PRESENT_STATE, mask, 0, timeout_ms) < 0) {
-        printf("x1_sdhci%d: CMD%d inhibit timeout\n", sc->index, cmd_idx);
+        uint32 pst = sdhci_readl(sc, SDHCI_PRESENT_STATE);
+        uint16 ist = sdhci_readw(sc, SDHCI_INT_STATUS);
+        uint16 est = sdhci_readw(sc, SDHCI_ERR_INT_STATUS);
+        printf("x1_sdhci%d: CMD%d inhibit timeout "
+               "(pstate=0x%x int=0x%x err=0x%x)\n",
+               sc->index, cmd_idx, pst, ist, est);
         return -ETIMEDOUT;
     }
 
@@ -491,10 +500,11 @@ static int sdhci_send_cmd_to(struct sdhci_softc *sc, uint32 cmd_idx, uint32 arg,
     if (sdhci_wait_bit(sc, SDHCI_INT_STATUS, SDHCI_INT_RESPONSE, 1,
                        timeout_ms) < 0) {
         uint16 err = sdhci_readw(sc, SDHCI_ERR_INT_STATUS);
+        uint32 pst = sdhci_readl(sc, SDHCI_PRESENT_STATE);
         if (cmd_idx != MMC_GO_IDLE_STATE && cmd_idx != SD_SEND_IF_COND &&
             cmd_idx != MMC_SEND_OP_COND) {
-            printf("x1_sdhci%d: CMD%d timeout (err=0x%x)\n",
-                   sc->index, cmd_idx, err);
+            printf("x1_sdhci%d: CMD%d timeout (err=0x%x pstate=0x%x)\n",
+                   sc->index, cmd_idx, err, pst);
         }
         sdhci_reset(sc, SDHCI_RESET_CMD);
         return -ETIMEDOUT;
@@ -686,7 +696,19 @@ static int sdhci_wait_xfer_done(struct sdhci_softc *sc)
 {
     if (sdhci_wait_bit(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_END, 1,
                        SDHCI_TIMEOUT_MS) < 0) {
-        printf("x1_sdhci%d: transfer complete timeout\n", sc->index);
+        uint32 pst = sdhci_readl(sc, SDHCI_PRESENT_STATE);
+        uint16 ist = sdhci_readw(sc, SDHCI_INT_STATUS);
+        uint16 est = sdhci_readw(sc, SDHCI_ERR_INT_STATUS);
+        printf("x1_sdhci%d: transfer complete timeout "
+               "(pstate=0x%x int=0x%x err=0x%x)\n",
+               sc->index, pst, ist, est);
+        /*
+         * Reset the data line to clear DATA_INHIBIT in PRESENT_STATE.
+         * Without this, every subsequent data command (CMD17/18/24/25)
+         * will fail with "inhibit timeout" because DATA_INHIBIT sticks.
+         */
+        sdhci_writew(sc, SDHCI_ERR_INT_STATUS, SDHCI_ERR_ALL);
+        sdhci_reset(sc, SDHCI_RESET_DATA);
         return -ETIMEDOUT;
     }
 
@@ -859,6 +881,564 @@ static int sdhci_card_present(struct sdhci_softc *sc)
     return !!(state & SDHCI_CARD_INSERTED);
 }
 
+/* ======================================================================
+ * UHS-I SDR104 Support
+ * ====================================================================== */
+
+/**
+ * Standard SD 4-bit tuning block pattern (64 bytes).
+ * The card sends this predefined pattern in response to CMD19.
+ * The host compares received data to detect timing errors.
+ */
+static const uint8 sd_tuning_block_4bit[64] = {
+    0xFF, 0x0F, 0xFF, 0x00, 0xFF, 0xCC, 0xC3, 0xCC,
+    0xC3, 0x3C, 0xCC, 0xFF, 0xFE, 0xFF, 0xFE, 0xEF,
+    0xFF, 0xDF, 0xFF, 0xDD, 0xFF, 0xFB, 0xFF, 0xFB,
+    0xBF, 0xFF, 0x7F, 0xFF, 0x77, 0xF7, 0xBD, 0xEF,
+    0xFF, 0xF0, 0xFF, 0xF0, 0x0F, 0xFC, 0xCC, 0x3C,
+    0xCC, 0x33, 0xCC, 0xCF, 0xFF, 0xEF, 0xFF, 0xEE,
+    0xFF, 0xFD, 0xFF, 0xFD, 0xDF, 0xFF, 0xBF, 0xFF,
+    0xBB, 0xFF, 0xF7, 0xFF, 0xF7, 0x7F, 0x7B, 0xDE,
+};
+
+/**
+ * Switch the physical SD I/O voltage via the AIB register.
+ *
+ * The SpacemiT X1 SoC uses a separate AIB (Always-on I/O Block) register
+ * to control the SD slot I/O voltage rail (vqmmc / LDO_1 on the PMIC).
+ * The SDHCI Host Control 2 VDD_180 bit only switches signaling level
+ * inside the controller — the AIB register gates the actual voltage.
+ *
+ * Access requires unlocking via the APBC ASFAR/ASSAR security key
+ * registers (write-once-read-clear, must be unlocked before each write).
+ *
+ * @use_1v8: 1 = switch to 1.8V, 0 = switch to 3.3V
+ *
+ * Register addresses from Orange Pi RV2 DTS:
+ *   aib_mmc1_io_reg = 0xD401E81C
+ *   apbc_asfar_reg  = 0xD4015050
+ *   apbc_assar_reg  = 0xD4015054
+ */
+static void sdhci_x1_set_io_voltage(int use_1v8)
+{
+    volatile uint32 *asfar = (volatile uint32 *)APBC_ASFAR_REG;
+    volatile uint32 *assar = (volatile uint32 *)APBC_ASSAR_REG;
+    volatile uint32 *aib   = (volatile uint32 *)AIB_MMC1_IO_REG;
+    uint32 reg;
+
+    /* Unlock APBC security (required before each AIB register write) */
+    *asfar = AKEY_ASFAR;
+    *assar = AKEY_ASSAR;
+
+    /* Read-modify-write the AIB MMC1 IO register */
+    reg = *aib;
+    if (use_1v8)
+        reg |= MMC1_IO_V18EN;
+    else
+        reg &= ~MMC1_IO_V18EN;
+
+    /* Unlock again (keys are consumed by the read) */
+    *asfar = AKEY_ASFAR;
+    *assar = AKEY_ASSAR;
+    *aib = reg;
+}
+
+/**
+ * Perform the SD voltage switch sequence (CMD11) to 1.8V signaling.
+ *
+ * Per SD Physical Layer Spec v3.01 Section 4.2.4:
+ *   1. Send CMD11 (VOLTAGE_SWITCH)
+ *   2. Stop SD clock
+ *   3. Wait for DAT[3:0] to go LOW  (card drives low)
+ *   4. Set 1.8V signaling in Host Control 2
+ *   5. Wait >= 5 ms for voltage regulator stabilisation
+ *   6. Re-enable SD clock
+ *   7. Wait for DAT[3:0] to go HIGH (card releases)
+ *
+ * Returns 0 on success.  On failure the card may need power-cycling.
+ */
+static int sdhci_sd_voltage_switch(struct sdhci_softc *sc)
+{
+    uint32 resp[4];
+    int ret;
+    uint16 clk;
+
+    /* CMD11: VOLTAGE_SWITCH */
+    ret = sdhci_send_cmd(sc, SD_VOLTAGE_SWITCH, 0,
+                         SDHCI_CMD_RESP_48, resp);
+    if (ret < 0) {
+        printf("x1_sdhci%d: CMD11 failed: %d\n", sc->index, ret);
+        return ret;
+    }
+
+    /* Stop SD clock (keep internal clock running) */
+    clk = sdhci_readw(sc, SDHCI_CLOCK_CONTROL);
+    clk &= ~SDHCI_CLOCK_CARD_EN;
+    sdhci_writew(sc, SDHCI_CLOCK_CONTROL, clk);
+
+    /* Wait for DAT[3:0] to go LOW (card signals readiness, up to 1ms) */
+    {
+        uint64 deadline = r_time() +
+                          (uint64)TIMEBASE_FREQUENCY / 1000;
+        int dat_low = 0;
+        while (r_time() < deadline) {
+            uint32 pstate = sdhci_readl(sc, SDHCI_PRESENT_STATE);
+            if (!(pstate & SDHCI_DATA_LVL_MASK)) {
+                dat_low = 1;
+                break;
+            }
+            scheduler_yield();
+        }
+        if (!dat_low) {
+            printf("x1_sdhci%d: voltage switch: DAT not low\n", sc->index);
+            /* Re-enable clock and abort */
+            clk |= SDHCI_CLOCK_CARD_EN;
+            sdhci_writew(sc, SDHCI_CLOCK_CONTROL, clk);
+            return -EIO;
+        }
+    }
+
+    /* Switch physical I/O voltage via AIB register.
+     * This must happen BEFORE setting CTRL_VDD_180 in the host controller,
+     * so that the voltage rail is actually at 1.8V when the controller
+     * switches signaling level. */
+    sdhci_x1_set_io_voltage(1);
+
+    /* Set 1.8V signaling in Host Control 2 */
+    {
+        uint16 ctrl2 = sdhci_readw(sc, SDHCI_HOST_CONTROL2);
+        ctrl2 |= SDHCI_CTRL_VDD_180;
+        sdhci_writew(sc, SDHCI_HOST_CONTROL2, ctrl2);
+    }
+
+    /* Wait >= 5 ms for voltage regulator to settle */
+    sleep_ms(10);
+
+    /* Re-enable SD clock */
+    clk = sdhci_readw(sc, SDHCI_CLOCK_CONTROL);
+    clk |= SDHCI_CLOCK_CARD_EN;
+    sdhci_writew(sc, SDHCI_CLOCK_CONTROL, clk);
+
+    /* Wait for DAT[3:0] to go HIGH (card verifies 1.8V, up to 1ms) */
+    sleep_ms(1);
+    {
+        uint32 pstate = sdhci_readl(sc, SDHCI_PRESENT_STATE);
+        if ((pstate & SDHCI_DATA_LVL_MASK) != SDHCI_DATA_LVL_MASK) {
+            uint16 ctrl2 = sdhci_readw(sc, SDHCI_HOST_CONTROL2);
+            uint16 clk_st = sdhci_readw(sc, SDHCI_CLOCK_CONTROL);
+            uint8 pwr = sdhci_readb(sc, SDHCI_POWER_CONTROL);
+            printf("x1_sdhci%d: voltage switch FAILED: pstate=0x%x "
+                   "ctrl2=0x%x clk=0x%x pwr=0x%x\n",
+                   sc->index, pstate, ctrl2, clk_st, pwr);
+            printf("x1_sdhci%d:   DAT[3:0]=%d%d%d%d CMD=%d\n",
+                   sc->index,
+                   !!(pstate & (1 << 23)), !!(pstate & (1 << 22)),
+                   !!(pstate & (1 << 21)), !!(pstate & (1 << 20)),
+                   !!(pstate & (1 << 24)));
+
+            /* CRITICAL: Revert I/O voltage to 3.3V and clear VDD_180.
+             * Leaving VDD_180 set with actual voltage at 3.3V causes a
+             * signaling mismatch that corrupts all subsequent
+             * data transfers (CMD6 switch status, CMD17 reads). */
+            sdhci_x1_set_io_voltage(0);
+            {
+                uint16 ctrl2 = sdhci_readw(sc, SDHCI_HOST_CONTROL2);
+                ctrl2 &= ~SDHCI_CTRL_VDD_180;
+                sdhci_writew(sc, SDHCI_HOST_CONTROL2, ctrl2);
+            }
+
+            /* Reset CMD and DAT lines to clear any residual state
+             * from the aborted voltage switch sequence. */
+            sdhci_reset(sc, SDHCI_RESET_CMD | SDHCI_RESET_DATA);
+            return -EIO;
+        }
+    }
+
+    sc->uhs_1v8 = 1;
+    printf("x1_sdhci%d: voltage switch to 1.8V OK\n", sc->index);
+    return 0;
+}
+
+/**
+ * Switch the X1 SDHCI from internal-clock mode to PHY clock mode.
+ *
+ * At SDR104 speeds (>100 MHz) the PHY provides programmable delay lines
+ * for TX/RX data timing.  The internal clock path used during identification
+ * (400 kHz) cannot operate at these frequencies.
+ *
+ * Sequence (derived from Linux sdhci-ky driver register state):
+ *   1. Clear TX_INT_CLK_SEL (switch from internal clock to PHY)
+ *   2. Set TX_MUX_SEL (route through PHY mux)
+ *   3. Power up the delay line (DLINE_PU)
+ *   4. Enable PHY_FUNC_EN and wait for PHY_PLL_LOCK
+ */
+static int sdhci_x1_phy_enable(struct sdhci_softc *sc)
+{
+    uint32 reg;
+
+    /* Step 1-2: Switch TX path from internal clock to PHY */
+    reg = sdhci_readl(sc, SDHC_TX_CFG_REG);
+    reg &= ~TX_INT_CLK_SEL;   /* clear: use PHY clock, not internal */
+    reg |= TX_MUX_SEL;        /* set: route through PHY mux */
+    sdhci_writel(sc, SDHC_TX_CFG_REG, reg);
+
+    /* Step 3: Power up the delay line */
+    reg = sdhci_readl(sc, SDHC_DLINE_CTRL_REG);
+    reg |= DLINE_PU;
+    sdhci_writel(sc, SDHC_DLINE_CTRL_REG, reg);
+
+    /* Step 4: Enable PHY and wait for PLL lock */
+    reg = sdhci_readl(sc, SDHC_PHY_CTRL_REG);
+    reg |= PHY_FUNC_EN;
+    /* put into non-legacy mode */
+    reg &= ~HOST_LEGACY_MODE;
+    sdhci_writel(sc, SDHC_PHY_CTRL_REG, reg);
+
+    /* Wait for PHY PLL lock (up to 50 ms) */
+    uint64 deadline = r_time() +
+                      (uint64)TIMEBASE_FREQUENCY * 50 / 1000;
+    while (r_time() < deadline) {
+        reg = sdhci_readl(sc, SDHC_PHY_CTRL_REG);
+        if (reg & PHY_PLL_LOCK) {
+            printf("x1_sdhci%d: PHY PLL locked\n", sc->index);
+            return 0;
+        }
+        scheduler_yield();
+    }
+
+    printf("x1_sdhci%d: PHY PLL lock timeout (reg=0x%x)\n",
+           sc->index, sdhci_readl(sc, SDHC_PHY_CTRL_REG));
+    /* Continue anyway — some X1 revisions may not report PLL_LOCK cleanly */
+    return 0;
+}
+
+/**
+ * Program a TX delay code into the X1 delay line.
+ *
+ * The delay code selects the sampling point within one clock period.
+ * Values 0-255 sweep through the full phase range.  Tuning sweeps all
+ * codes to find the optimal value with the widest passing window.
+ */
+static void sdhci_x1_set_delay(struct sdhci_softc *sc, uint8 code)
+{
+    uint32 reg = sdhci_readl(sc, SDHC_DLINE_CFG_REG);
+    reg &= ~SDHC_DLINE_CFG_DELAY_MASK;
+    reg |= (uint32)code;
+    sdhci_writel(sc, SDHC_DLINE_CFG_REG, reg);
+}
+
+/**
+ * Execute vendor-specific tuning for the X1 SDHCI controller.
+ *
+ * Sweeps TX delay codes 0-255, sending CMD19 (SEND_TUNING_BLOCK) at each
+ * value.  Compares received 64-byte data against the standard SD 4-bit
+ * tuning pattern.  Selects the center of the widest passing window.
+ *
+ * This matches the Linux sdhci-ky driver's tuning algorithm as observed
+ * in dmesg ("pass window [...)", "use the firstly delay_code:...").
+ *
+ * Returns 0 on success, negative on failure.
+ */
+static int sdhci_x1_execute_tuning(struct sdhci_softc *sc)
+{
+    uint8 buf[64];
+    uint32 *p = (uint32 *)buf;
+    uint32 resp[4];
+
+    /* Track passing windows */
+    int best_start = -1, best_len = 0;
+    int cur_start = -1, cur_len = 0;
+    int nwindows = 0;
+
+    printf("x1_sdhci%d: starting tuning sweep (0-255)\n", sc->index);
+
+    for (int delay = 0; delay < 256; delay++) {
+        sdhci_x1_set_delay(sc, (uint8)delay);
+
+        /* Set up for CMD19: 64-byte single-block read */
+        sdhci_writew(sc, SDHCI_BLOCK_SIZE, SDHCI_MAKE_BLKSZ(7, 64));
+        sdhci_writew(sc, SDHCI_BLOCK_COUNT, 1);
+        sdhci_writew(sc, SDHCI_TRANSFER_MODE,
+                     SDHCI_TRNS_READ | SDHCI_TRNS_BLK_CNT_EN);
+
+        int ret = sdhci_send_cmd_to(sc, SD_SEND_TUNING_BLOCK, 0,
+                                    SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC |
+                                    SDHCI_CMD_INDEX | SDHCI_CMD_DATA,
+                                    resp, 50);
+        if (ret < 0) {
+            sdhci_reset(sc, SDHCI_RESET_CMD | SDHCI_RESET_DATA);
+            goto fail;
+        }
+
+        /* PIO read: 64 bytes = 16 words */
+        if (sdhci_wait_bit(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_AVAIL,
+                           1, 50) < 0) {
+            sdhci_reset(sc, SDHCI_RESET_DATA);
+            goto fail;
+        }
+        sdhci_writew(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_AVAIL);
+        for (int i = 0; i < 16; i++)
+            p[i] = sdhci_readl(sc, SDHCI_BUFFER);
+        /* Clear transfer complete */
+        sdhci_writew(sc, SDHCI_INT_STATUS, SDHCI_INT_DATA_END);
+
+        /* Compare with reference pattern */
+        if (memcmp(buf, sd_tuning_block_4bit, 64) == 0) {
+            /* Pass */
+            if (cur_start < 0)
+                cur_start = delay;
+            cur_len++;
+            continue;
+        }
+
+fail:
+        /* Fail — close current window if any */
+        if (cur_len > 0) {
+            printf("x1_sdhci%d: pass window [%d %d)\n",
+                   sc->index, cur_start, cur_start + cur_len);
+            nwindows++;
+            if (cur_len > best_len) {
+                best_start = cur_start;
+                best_len = cur_len;
+            }
+        }
+        cur_start = -1;
+        cur_len = 0;
+    }
+
+    /* Close final window */
+    if (cur_len > 0) {
+        printf("x1_sdhci%d: pass window [%d %d)\n",
+               sc->index, cur_start, cur_start + cur_len);
+        nwindows++;
+        if (cur_len > best_len) {
+            best_start = cur_start;
+            best_len = cur_len;
+        }
+    }
+
+    if (best_len == 0) {
+        printf("x1_sdhci%d: tuning failed — no passing window\n", sc->index);
+        return -EIO;
+    }
+
+    /* Select center of widest window */
+    int selected = best_start + best_len / 2;
+    sdhci_x1_set_delay(sc, (uint8)selected);
+
+    printf("x1_sdhci%d: tuning done, delay=%d (window [%d,%d), %d windows)\n",
+           sc->index, selected, best_start, best_start + best_len, nwindows);
+
+    return 0;
+}
+
+/**
+ * Try to switch an SD card to SDR104 mode (~200 MHz).
+ *
+ * Requires prior successful voltage switch to 1.8V (sc->uhs_1v8 == 1).
+ *
+ * Steps:
+ *   1. CMD6 to switch card to SDR104 access mode (function 3, group 1)
+ *   2. Set UHS-I mode in Host Control 2
+ *   3. Set High Speed bit in Host Control
+ *   4. Reconfigure SDHCI clock to maximum (divisor 0 → base clock pass-through)
+ *   5. Enable X1 PHY (switch from internal clock to PHY clock path)
+ *   6. Execute vendor-specific tuning sweep
+ *
+ * Returns 0 on success.  On failure the caller should fall back to HS (50 MHz).
+ */
+static int sdhci_sd_try_sdr104(struct sdhci_softc *sc)
+{
+    uint8 sw_status[128] __attribute__((aligned(64)));
+    uint32 resp[4];
+    int ret;
+
+    if (!sc->uhs_1v8) {
+        printf("x1_sdhci%d: SDR104 needs 1.8V signaling\n", sc->index);
+        return -1;
+    }
+
+    /* ---- Step 1: CMD6 check — does card support SDR104? ---- */
+    dma_cache_inval(sw_status, 64);
+    sdhci_writel(sc, SDHCI_DMA_ADDRESS, (uint32)(uint64)sw_status);
+    sdhci_writew(sc, SDHCI_BLOCK_SIZE, SDHCI_MAKE_BLKSZ(7, 64));
+    sdhci_writew(sc, SDHCI_BLOCK_COUNT, 1);
+    sdhci_writew(sc, SDHCI_TRANSFER_MODE,
+                 SDHCI_TRNS_READ | SDHCI_TRNS_BLK_CNT_EN | SDHCI_TRNS_DMA);
+
+    /* mode=0 (check), group 1 = function 3 (SDR104), others = 0xF (keep) */
+    ret = sdhci_send_cmd(sc, SD_SWITCH_FUNC, 0x00FFFFF3,
+                         SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC |
+                         SDHCI_CMD_INDEX | SDHCI_CMD_DATA, resp);
+    if (ret < 0)
+        return ret;
+
+    ret = sdhci_sdma_wait(sc, (uint64)sw_status, 64, 0);
+    if (ret < 0)
+        return ret;
+    dma_cache_inval(sw_status, 64);
+
+    /* Byte 13 bit 3 = SDR104 supported */
+    if (!(sw_status[13] & 0x08)) {
+        printf("x1_sdhci%d: card does not support SDR104\n", sc->index);
+        return -1;
+    }
+
+    /* ---- Step 1b: CMD6 switch — activate SDR104 ---- */
+    dma_cache_inval(sw_status, 64);
+    sdhci_writel(sc, SDHCI_DMA_ADDRESS, (uint32)(uint64)sw_status);
+    sdhci_writew(sc, SDHCI_BLOCK_SIZE, SDHCI_MAKE_BLKSZ(7, 64));
+    sdhci_writew(sc, SDHCI_BLOCK_COUNT, 1);
+    sdhci_writew(sc, SDHCI_TRANSFER_MODE,
+                 SDHCI_TRNS_READ | SDHCI_TRNS_BLK_CNT_EN | SDHCI_TRNS_DMA);
+
+    /* mode=1 (switch), group 1 = function 3 (SDR104) */
+    ret = sdhci_send_cmd(sc, SD_SWITCH_FUNC, 0x80FFFFF3,
+                         SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC |
+                         SDHCI_CMD_INDEX | SDHCI_CMD_DATA, resp);
+    if (ret < 0)
+        return ret;
+
+    ret = sdhci_sdma_wait(sc, (uint64)sw_status, 64, 0);
+    if (ret < 0)
+        return ret;
+    dma_cache_inval(sw_status, 64);
+
+    /* Byte 16 low nibble: selected function (expect 3 = SDR104) */
+    if ((sw_status[16] & 0x0F) != 3) {
+        printf("x1_sdhci%d: SDR104 switch rejected (result=0x%x)\n",
+               sc->index, sw_status[16] & 0x0F);
+        return -EIO;
+    }
+
+    /* ---- Step 2: Set UHS-I SDR104 mode in Host Control 2 ---- */
+    {
+        uint16 ctrl2 = sdhci_readw(sc, SDHCI_HOST_CONTROL2);
+        ctrl2 &= ~SDHCI_CTRL_UHS_MASK;
+        ctrl2 |= SDHCI_CTRL_UHS_SDR104;
+        sdhci_writew(sc, SDHCI_HOST_CONTROL2, ctrl2);
+    }
+
+    /* ---- Step 3: Set High Speed bit ---- */
+    {
+        uint8 ctrl = sdhci_readb(sc, SDHCI_HOST_CONTROL);
+        ctrl |= SDHCI_CTRL_HISPD;
+        sdhci_writeb(sc, SDHCI_HOST_CONTROL, ctrl);
+    }
+
+    /* ---- Step 4: Set maximum clock (div=0 → base clock ~200 MHz) ---- */
+    sdhci_set_clock(sc, 400000000); /* request > base → div=0 (pass-through) */
+
+    /* ---- Step 5: Enable X1 PHY for high-speed operation ---- */
+    sdhci_x1_phy_enable(sc);
+
+    /* ---- Step 6: Execute vendor-specific tuning ---- */
+    ret = sdhci_x1_execute_tuning(sc);
+    if (ret < 0) {
+        printf("x1_sdhci%d: SDR104 tuning failed, reverting\n", sc->index);
+        /* Revert: switch PHY back to internal clock */
+        uint32 tx = sdhci_readl(sc, SDHC_TX_CFG_REG);
+        tx |= TX_INT_CLK_SEL;
+        tx &= ~TX_MUX_SEL;
+        sdhci_writel(sc, SDHC_TX_CFG_REG, tx);
+        return ret;
+    }
+
+    return 0;
+}
+
+/**
+ * Try to switch an SD card to High Speed (50 MHz) via CMD6 (SWITCH_FUNC).
+ *
+ * CMD6 mode=0 queries supported functions; mode=1 activates the switch.
+ * The 512-bit (64-byte) status structure reports supported and selected
+ * functions per group.  Group 1 = Access Mode, function 1 = High Speed.
+ *
+ * On success the HISPD bit in Host Control is set; the caller must then
+ * reconfigure the SD clock to 50 MHz.
+ *
+ * Returns 0 on success, negative on failure (card stays at default speed).
+ */
+static int sdhci_sd_try_highspeed(struct sdhci_softc *sc)
+{
+    /*
+     * CMD6 returns a 64-byte (512-bit) switch function status block.
+     * Use a cache-line-aligned DMA buffer instead of PIO — this
+     * controller's PIO path appears unreliable for data reads (Transfer
+     * Complete never fires even though buffer data arrives).
+     */
+    uint8 sw_status[128] __attribute__((aligned(64)));
+    uint32 resp[4];
+    int ret;
+
+    /*
+     * CMD6 check: query High Speed support.
+     *   mode = 0 (check), group 1 = function 1 (HS), groups 2-6 = 0xF (keep)
+     *   arg = 0x00FFFFF1
+     */
+    dma_cache_inval(sw_status, 64);
+    sdhci_writel(sc, SDHCI_DMA_ADDRESS, (uint32)(uint64)sw_status);
+    sdhci_writew(sc, SDHCI_BLOCK_SIZE, SDHCI_MAKE_BLKSZ(7, 64));
+    sdhci_writew(sc, SDHCI_BLOCK_COUNT, 1);
+    sdhci_writew(sc, SDHCI_TRANSFER_MODE,
+                 SDHCI_TRNS_READ | SDHCI_TRNS_BLK_CNT_EN | SDHCI_TRNS_DMA);
+
+    ret = sdhci_send_cmd(sc, SD_SWITCH_FUNC, 0x00FFFFF1,
+                         SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC |
+                         SDHCI_CMD_INDEX | SDHCI_CMD_DATA, resp);
+    if (ret < 0)
+        return ret;
+
+    ret = sdhci_sdma_wait(sc, (uint64)sw_status, 64, 0);
+    if (ret < 0)
+        return ret;
+    dma_cache_inval(sw_status, 64);
+
+    /* Function group 1 support bits at byte 13; bit 1 = High Speed */
+    if (!(sw_status[13] & 0x02)) {
+        printf("x1_sdhci%d: card does not support High Speed\n", sc->index);
+        return -1;
+    }
+
+    /*
+     * CMD6 switch: activate High Speed.
+     *   mode = 1 (switch), group 1 = function 1 (HS)
+     *   arg = 0x80FFFFF1
+     */
+    dma_cache_inval(sw_status, 64);
+    sdhci_writel(sc, SDHCI_DMA_ADDRESS, (uint32)(uint64)sw_status);
+    sdhci_writew(sc, SDHCI_BLOCK_SIZE, SDHCI_MAKE_BLKSZ(7, 64));
+    sdhci_writew(sc, SDHCI_BLOCK_COUNT, 1);
+    sdhci_writew(sc, SDHCI_TRANSFER_MODE,
+                 SDHCI_TRNS_READ | SDHCI_TRNS_BLK_CNT_EN | SDHCI_TRNS_DMA);
+
+    ret = sdhci_send_cmd(sc, SD_SWITCH_FUNC, 0x80FFFFF1,
+                         SDHCI_CMD_RESP_48 | SDHCI_CMD_CRC |
+                         SDHCI_CMD_INDEX | SDHCI_CMD_DATA, resp);
+    if (ret < 0)
+        return ret;
+
+    ret = sdhci_sdma_wait(sc, (uint64)sw_status, 64, 0);
+    if (ret < 0)
+        return ret;
+    dma_cache_inval(sw_status, 64);
+
+    /* Byte 16 low nibble: selected function in group 1 (expect 1 = HS) */
+    if ((sw_status[16] & 0x0F) != 1) {
+        printf("x1_sdhci%d: HS switch rejected (result=0x%x)\n",
+               sc->index, sw_status[16] & 0x0F);
+        return -EIO;
+    }
+
+    /* Enable High Speed bit in host controller */
+    uint8 ctrl = sdhci_readb(sc, SDHCI_HOST_CONTROL);
+    ctrl |= SDHCI_CTRL_HISPD;
+    sdhci_writeb(sc, SDHCI_HOST_CONTROL, ctrl);
+    sleep_ms(1); /* let card settle after mode switch */
+
+    return 0;
+}
+
 /**
  * Enumerate an SD card: CMD0 → CMD8 → ACMD41 → CMD2 → CMD3 → CMD7 → CMD16
  * Returns 0 on success.
@@ -867,9 +1447,52 @@ static int sdhci_enumerate_sd(struct sdhci_softc *sc)
 {
     uint32 resp[4];
     int ret;
+    /*
+     * UHS-I 1.8V voltage switch: DISABLED by default.
+     *
+     * The SpacemiT X1 SoC requires writing to the AIB register
+     * (0xD401E81C) to physically switch the SD I/O voltage from 3.3V
+     * to 1.8V.  The SDHCI CTRL_VDD_180 bit only controls signaling
+     * level inside the controller — the AIB register gates the actual
+     * voltage rail (vqmmc / LDO_1 on the PMIC).
+     *
+     * Additionally, if the voltage switch (CMD11) fails, the SD card
+     * enters an undefined state (SD spec §4.2.4) that requires a real
+     * Vdd power cycle via the PMIC to recover — writing 0 to
+     * SDHCI_POWER_CONTROL only affects the controller, not the PMIC's
+     * vmmc-supply (DCDC_4).  This makes recovery impossible.
+     *
+     * Set to 1 only after verifying AIB voltage control works on the
+     * target board.  At 3.3V the card runs at High Speed 50 MHz,
+     * which is ~23 MB/s and sufficient for most workloads.
+     */
+    int request_1v8 = 0;
+    int retry = 0; /* set to 1 when retrying after voltage switch failure */
 
+retry_without_1v8:
     sc->rca = 0;
     sc->card_type = CARD_TYPE_SD;
+
+    /*
+     * If retrying after a failed voltage switch, power-cycle the bus.
+     * After CMD11 the card switches to 1.8V signaling internally.
+     * The SDHCI_POWER_CONTROL register does NOT control the PMIC's
+     * vmmc-supply (DCDC_4), so the card Vdd is never actually cut.
+     * Nevertheless, we reset the controller to get a clean state.
+     * The card is likely unrecoverable without a real PMIC power cycle,
+     * but we try anyway for robustness.
+     */
+    if (retry) {
+        printf("x1_sdhci%d: voltage switch failed, "
+               "resetting controller for 3.3V retry\n", sc->index);
+
+        /* Full controller re-init (reset + power on + clock + quirks) */
+        ret = sdhci_hw_init(sc);
+        if (ret < 0)
+            return ret;
+
+        sleep_ms(10);
+    }
 
     /* CMD0: Go idle */
     sdhci_send_cmd(sc, MMC_GO_IDLE_STATE, 0, SDHCI_CMD_RESP_NONE, NULL);
@@ -887,23 +1510,31 @@ static int sdhci_enumerate_sd(struct sdhci_softc *sc)
     }
 
     /* ACMD41: SD_APP_OP_COND — negotiate operating conditions
-     * We request 3.3V range and HCS (high capacity support). */
-    int tries = 0;
-    do {
-        ret = sdhci_send_acmd(sc, SD_APP_OP_COND,
-                              MMC_OCR_HCS | MMC_OCR_3V3,
-                              SDHCI_CMD_RESP_48, /* R3: no CRC/index */
-                              resp);
-        if (ret < 0) {
-            printf("x1_sdhci%d: ACMD41 failed\n", sc->index);
-            return ret;
-        }
-        if (++tries > 100) {
-            printf("x1_sdhci%d: ACMD41 timeout — card not ready\n", sc->index);
-            return -ETIMEDOUT;
-        }
-        sleep_ms(10);
-    } while (!(resp[0] & MMC_OCR_BUSY));
+     * We request 3.3V range, HCS (high capacity support), and optionally
+     * S18R (switch to 1.8V request) for UHS-I support. */
+    sc->uhs_1v8 = 0;
+    {
+        uint32 ocr_arg = MMC_OCR_HCS | MMC_OCR_3V3;
+        if (request_1v8)
+            ocr_arg |= MMC_OCR_S18R;
+
+        int tries = 0;
+        do {
+            ret = sdhci_send_acmd(sc, SD_APP_OP_COND, ocr_arg,
+                                  SDHCI_CMD_RESP_48, /* R3: no CRC/index */
+                                  resp);
+            if (ret < 0) {
+                printf("x1_sdhci%d: ACMD41 failed\n", sc->index);
+                return ret;
+            }
+            if (++tries > 100) {
+                printf("x1_sdhci%d: ACMD41 timeout — card not ready\n",
+                       sc->index);
+                return -ETIMEDOUT;
+            }
+            sleep_ms(10);
+        } while (!(resp[0] & MMC_OCR_BUSY));
+    }
 
     /* Check if card is SDHC/SDXC */
     if (resp[0] & MMC_OCR_HCS)
@@ -911,6 +1542,24 @@ static int sdhci_enumerate_sd(struct sdhci_softc *sc)
 
     printf("x1_sdhci%d: card type: %s\n", sc->index,
            sc->card_type == CARD_TYPE_SDHC ? "SDHC/SDXC" : "SD");
+
+    /* S18A: card accepted 1.8V switch request — perform voltage switch.
+     * This must happen before CMD2 (while card is in "ready" state).
+     *
+     * If the voltage switch fails, the card is in an undefined state
+     * (SD spec 4.2.4): it received CMD11 and started switching but
+     * the host couldn't complete the sequence.  We must re-initialize
+     * from CMD0 without S18R to bring the card back to a known state. */
+    if (request_1v8 && (resp[0] & MMC_OCR_S18R)) {
+        printf("x1_sdhci%d: card supports 1.8V signaling (S18A)\n", sc->index);
+        if (sdhci_sd_voltage_switch(sc) != 0) {
+            printf("x1_sdhci%d: voltage switch failed, "
+                   "re-initializing at 3.3V\n", sc->index);
+            request_1v8 = 0;
+            retry = 1;
+            goto retry_without_1v8;
+        }
+    }
 
     /* CMD2: ALL_SEND_CID — get card identification */
     ret = sdhci_send_cmd(sc, MMC_ALL_SEND_CID, 0,
@@ -1003,8 +1652,24 @@ static int sdhci_enumerate_sd(struct sdhci_softc *sc)
         sdhci_writeb(sc, SDHCI_HOST_CONTROL, ctrl);
     }
 
-    /* Increase clock to 25 MHz (SD default speed) */
+    /*
+     * Raise clock from 400 kHz (identification) to 25 MHz (data transfer).
+     * The SD spec requires raising the clock after CMD7 selects the card.
+     * CMD6 data reads fail at 400 kHz on this controller.
+     */
     sdhci_set_clock(sc, 25000000);
+
+    /* Speed mode cascade: SDR104 (200 MHz) → HS (50 MHz) → Default (25 MHz)
+     * SDR104 requires prior successful 1.8V voltage switch. */
+    if (sc->uhs_1v8 && sdhci_sd_try_sdr104(sc) == 0) {
+        printf("x1_sdhci%d: running at SDR104 ~200 MHz\n", sc->index);
+    } else if (sdhci_sd_try_highspeed(sc) == 0) {
+        sdhci_set_clock(sc, 50000000);
+        printf("x1_sdhci%d: running at High Speed 50 MHz\n", sc->index);
+    } else {
+        sdhci_set_clock(sc, 25000000);
+        printf("x1_sdhci%d: running at Default Speed 25 MHz\n", sc->index);
+    }
 
     return 0;
 }
@@ -1126,8 +1791,7 @@ static int sdhci_enumerate_emmc(struct sdhci_softc *sc)
                              resp);
         if (ret == 0) {
             ret = sdhci_pio_read_block(sc, ext_csd);
-            if (ret == 0) {
-                sdhci_wait_xfer_done(sc);
+            if (ret == 0 && sdhci_wait_xfer_done(sc) == 0) {
                 /* SEC_COUNT is at EXT_CSD bytes 212-215 (little-endian) */
                 sc->capacity_blocks =
                     (uint64)ext_csd[212] |
@@ -1345,6 +2009,9 @@ static int sdhci_init_one(int idx, int is_emmc)
         printf("x1_sdhci%d: blkdev_register failed: %d\n", idx, ret);
         return -1;
     }
+
+    /* Probe for partition tables (GPT/MBR) on the raw device */
+    gendisk_probe(&sc->bdev);
 
     printf("x1_sdhci%d: registered as %s (%ld MB, %d-bit bus)\n",
            idx, sc->bdev.dev.devname,

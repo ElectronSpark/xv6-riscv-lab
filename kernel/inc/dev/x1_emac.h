@@ -268,6 +268,14 @@ struct x1_tx_desc {
 #define MDIO_TIMEOUT_US             10000
 #define MDIO_POLL_INTERVAL_US       100
 
+/* RX IRQ mitigation register fields (offset 0x002C) */
+#define RX_IRQ_MIT_FRAME_CNT(n)     ((n) & 0xFF)
+#define RX_IRQ_MIT_TIMEOUT(t)       (((t) & 0xFFFFF) << 8)
+#define RX_IRQ_MIT_ENABLE           (1U << 31)
+#define RX_IRQ_MIT_FRAMES           16      /* coalesce up to 16 frames */
+#define RX_IRQ_MIT_TIMEOUT_US       200     /* or 200 µs, whichever first */
+#define RX_IRQ_MIT_FUNC_CLK_MHZ     312     /* function clock = 312 MHz */
+
 /* DMA reset timeout */
 #define DMA_RESET_TIMEOUT_US        10000
 

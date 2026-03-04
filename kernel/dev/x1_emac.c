@@ -260,6 +260,17 @@ static void x1_emac_init_hw(struct x1_emac_softc *sc)
     val = DMA_CFG_STRICT_BURST | DMA_CFG_64BIT_MODE | DMA_CFG_BURST_16WORD;
     sc_wr(sc, DMA_CONFIGURATION, val);
 
+    /* RX interrupt coalescing: interrupt after N frames or T µs,
+     * whichever comes first.  Dramatically reduces interrupt rate
+     * under load (from 1-per-packet to batched). */
+    {
+        uint32 timeout_cycles = RX_IRQ_MIT_TIMEOUT_US * RX_IRQ_MIT_FUNC_CLK_MHZ;
+        sc_wr(sc, DMA_RECEIVE_IRQ_MITIGATION_CTRL,
+              RX_IRQ_MIT_FRAME_CNT(RX_IRQ_MIT_FRAMES) |
+              RX_IRQ_MIT_TIMEOUT(timeout_cycles) |
+              RX_IRQ_MIT_ENABLE);
+    }
+
     /* Disable all interrupts initially */
     sc_wr(sc, MAC_INTERRUPT_ENABLE, 0);
     sc_wr(sc, DMA_INTERRUPT_ENABLE, 0);
@@ -363,7 +374,15 @@ static int x1_emac_rx_ring_init(struct x1_emac_softc *sc)
         d->word1 = RX_DESC_BUF1_SIZE(MBUF_SIZE) | DESC_CHAINED;
         d->word0 = RX_DESC_OWN;  /* give to DMA */
 
-        /* Flush the mbuf buffer so DMA can write into it */
+        /* Flush buffer to memory so no dirty cache line gets evicted
+         * over DMA-written data later.
+         *
+         * IMPORTANT: Must use dma_cache_clean, NOT dma_cache_inval.
+         * m->head is at offset 20 within struct mbuf, so the first
+         * cache line (bytes 0-63) also contains the metadata fields
+         * (next, head, len).  cbo.inval would discard that dirty
+         * data, corrupting the metadata. cbo.clean writes it back
+         * safely. */
         dma_cache_clean(m->head, MBUF_SIZE);
     }
 
@@ -531,6 +550,10 @@ static void x1_emac_recv(struct x1_emac_softc *sc)
                 panic("x1_emac: out of mbufs");
         }
         sc->rx_mbufs[idx] = newm;
+        /* Flush dirty cache lines to memory before handing to DMA.
+         * Must use dma_cache_clean (not inval) because newm->head
+         * shares a cache line with the mbuf metadata fields — see
+         * comment in rx_ring_init. */
         dma_cache_clean(newm->head, MBUF_SIZE);
 
         /* Set up descriptor with new buffer — chained mode preserved */
