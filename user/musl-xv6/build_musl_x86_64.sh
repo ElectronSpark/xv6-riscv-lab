@@ -28,7 +28,14 @@ PREFIX="${PREFIX:-${SCRIPT_DIR}/sysroot}"
 MUSL_SRC="${BUILD_DIR}/musl-${MUSL_VERSION}"
 
 # Detect x86_64 cross-compiler
-if command -v x86_64-linux-gnu-gcc &>/dev/null; then
+# Priority:
+#   1. x86_64-xv6-linux-musl- (xv6 custom toolchain — supports -shared)
+#   2. x86_64-linux-gnu-       (distro toolchain — supports -shared)
+#   3. x86_64-elf-             (bare-metal)
+#   4. native gcc on x86_64 host
+if command -v x86_64-xv6-linux-musl-gcc &>/dev/null; then
+    CROSS_COMPILE="x86_64-xv6-linux-musl-"
+elif command -v x86_64-linux-gnu-gcc &>/dev/null; then
     CROSS_COMPILE="x86_64-linux-gnu-"
 elif command -v x86_64-elf-gcc &>/dev/null; then
     CROSS_COMPILE="x86_64-elf-"
@@ -62,44 +69,9 @@ if [[ ! -d "${MUSL_SRC}" ]]; then
     echo "Download complete."
 fi
 
-echo "Applying xv6 x86_64 overlay..."
-ARCH_DIR="${MUSL_SRC}/arch/x86_64"
-
-# Override syscall numbers
-cp "${SCRIPT_DIR}/arch/x86_64/bits/syscall.h.in" "${ARCH_DIR}/bits/syscall.h.in"
-
-# Override kstat layout
-cp "${SCRIPT_DIR}/arch/x86_64/kstat.h" "${ARCH_DIR}/kstat.h"
-
-# Override syscall_arch.h
-cp "${SCRIPT_DIR}/arch/x86_64/syscall_arch.h" "${ARCH_DIR}/syscall_arch.h"
-
-# Override crt_arch.h
-cp "${SCRIPT_DIR}/arch/x86_64/crt_arch.h" "${ARCH_DIR}/crt_arch.h"
-
-# Override clone — replace with xv6 version.
-# IMPORTANT: the file MUST be named clone.s (not __clone.s) because musl's
-# Makefile uses REPLACED_OBJS to suppress the generic src/thread/clone.c;
-# the replacement only works when the arch file has the same basename.
-mkdir -p "${MUSL_SRC}/src/thread/x86_64"
-cp "${SCRIPT_DIR}/arch/x86_64/clone.s" "${MUSL_SRC}/src/thread/x86_64/clone.s"
-
-# Remove upstream __clone.s so only our clone.s defines __clone
-rm -f "${MUSL_SRC}/src/thread/x86_64/__clone.s"
-
-# Override vfork.s
-mkdir -p "${MUSL_SRC}/src/process/x86_64"
-cp "${SCRIPT_DIR}/arch/x86_64/vfork.s" "${MUSL_SRC}/src/process/x86_64/vfork.s"
-
-# Override fstatat.c (same fix as riscv)
-cp "${SCRIPT_DIR}/arch/riscv64/fstatat.c" "${MUSL_SRC}/src/stat/fstatat.c"
-
-echo "Overlay applied."
-
-# Disable brk — force mmap-only malloc
-echo "Disabling brk in malloc (mmap-only mode)..."
-sed -i 's/#define brk(p) ((uintptr_t)__syscall(SYS_brk, p))/#define brk(p) ((uintptr_t)-1)/' \
-    "${MUSL_SRC}/src/malloc/mallocng/glue.h" 2>/dev/null || true
+# Apply xv6 overlay using the shared helper script
+source "${SCRIPT_DIR}/apply_xv6_overlay.sh"
+apply_xv6_overlay "x86_64" "${MUSL_SRC}" "${SCRIPT_DIR}/arch"
 
 echo "Configuring musl..."
 cd "${MUSL_SRC}"

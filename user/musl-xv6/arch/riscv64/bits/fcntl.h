@@ -1,29 +1,23 @@
-/*
- * bits/fcntl.h — xv6 file control definitions for musl
- *
- * These MUST match the kernel's O_* flags (kernel/inc/vfs/fcntl.h).
- * The xv6 kernel explicitly uses musl-compatible values.
- */
-
 #define O_CREAT        0100
 #define O_EXCL         0200
 #define O_NOCTTY       0400
-#define O_TRUNC        01000
-#define O_APPEND       02000
-#define O_NONBLOCK     04000
-#define O_DSYNC        010000
-#define O_SYNC         04010000
-#define O_RSYNC        04010000
-#define O_DIRECTORY    0200000
-#define O_NOFOLLOW     0400000
-#define O_CLOEXEC      02000000
+#define O_TRUNC       01000
+#define O_APPEND      02000
+#define O_NONBLOCK    04000
+#define O_DSYNC      010000
+#define O_SYNC     04010000
+#define O_RSYNC    04010000
+#define O_DIRECTORY 0200000
+#define O_NOFOLLOW  0400000
+#define O_CLOEXEC  02000000
 
-#define O_ASYNC        020000
-#define O_DIRECT       040000
-#define O_LARGEFILE    0
-#define O_NOATIME      01000000
-#define O_PATH         010000000
-#define O_TMPFILE      020200000
+#define O_ASYNC      020000
+#define O_DIRECT     040000
+#define O_LARGEFILE 0100000
+#define O_NOATIME  01000000
+#define O_PATH    010000000
+#define O_TMPFILE 020200000
+#define O_NDELAY O_NONBLOCK
 
 #define F_DUPFD  0
 #define F_GETFD  1
@@ -36,15 +30,18 @@
 #define F_SETSIG 10
 #define F_GETSIG 11
 
-#define F_GETLK  5
-#define F_SETLK  6
+#if __LONG_MAX == 0x7fffffffL
+#define F_GETLK 12
+#define F_SETLK 13
+#define F_SETLKW 14
+#else
+#define F_GETLK 5
+#define F_SETLK 6
 #define F_SETLKW 7
+#endif
 
-#define FD_CLOEXEC 1
+#define F_SETOWN_EX 15
+#define F_GETOWN_EX 16
 
-#define AT_FDCWD         (-100)
-#define AT_SYMLINK_NOFOLLOW 0x100
-#define AT_REMOVEDIR       0x200
-#define AT_SYMLINK_FOLLOW  0x400
-#define AT_EACCESS         0x200
-#define AT_EMPTY_PATH      0x1000
+#define F_GETOWNER_UIDS 17
+

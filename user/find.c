@@ -22,7 +22,7 @@ int find(char *path, char *name) {
         return -1;
     }
 
-    if (!S_ISDIR(st.mode)) {
+    if (!S_ISDIR(st.st_mode)) {
         fprintf(2, "find: %s is not a directory\n", path);
         close(fd);
         return -1;
@@ -46,7 +46,7 @@ int find(char *path, char *name) {
         if (strcmp(p, name) == 0) {
             printf("%s\n", buf);
         }
-        if (S_ISDIR(st.mode) && strcmp(p, ".") && strcmp(p, "..")) {
+        if (S_ISDIR(st.st_mode) && strcmp(p, ".") && strcmp(p, "..")) {
             find(buf, name);
         }
     }

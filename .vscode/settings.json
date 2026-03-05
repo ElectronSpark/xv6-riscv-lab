@@ -111,6 +111,7 @@
     },
     "chat.tools.terminal.autoApprove": {
         "readelf": true,
-        "objdump": true
+        "objdump": true,
+        "diff": true
     }
 }

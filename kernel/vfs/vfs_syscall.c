@@ -427,15 +427,18 @@ static int __vfs_inode_stat(struct vfs_inode *inode, struct stat *kst) {
 
     vfs_ilock(inode);
     memset(kst, 0, sizeof(*kst));
-    kst->dev = inode->sb ? (int)(uint64)inode->sb : 0;
-    kst->ino = inode->ino;
-    kst->mode = inode->mode;
-    kst->nlink = inode->n_links;
+    kst->st_dev = inode->sb ? (uint64)inode->sb : 0;
+    kst->st_ino = inode->ino;
+    kst->st_mode = inode->mode;
+    kst->st_nlink = inode->n_links;
     kst->st_uid = inode->uid;
     kst->st_gid = inode->gid;
-    kst->size = inode->size;
-    kst->blksize = 1024;
-    kst->blocks = (inode->size + 511) / 512;
+    kst->st_size = inode->size;
+    kst->st_blksize = 1024;
+    kst->st_blocks = (inode->size + 511) / 512;
+    kst->st_atime_sec = inode->atime;
+    kst->st_mtime_sec = inode->mtime;
+    kst->st_ctime_sec = inode->ctime;
     vfs_iunlock(inode);
     return 0;
 }
@@ -3029,8 +3032,8 @@ uint64 sys_vfs_fstatat(void) {
     if (ret != 0)
         return ret;
 
-    // Keep ABI consistent with SYS_stat/SYS_fstat: return xv6 struct stat.
-    // musl converts this via arch/riscv64/kstat.h overlay.
+    // Copy the 128-byte struct stat directly to userspace.
+    // Kernel struct stat layout matches musl's riscv64 layout exactly.
     if (either_copyout(1, stat_addr, &st, sizeof(st)) < 0)
         return -EFAULT;
 

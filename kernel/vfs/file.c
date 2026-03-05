@@ -480,7 +480,7 @@ int vfs_filestat(struct vfs_file *file, struct stat *stat) {
          */
         if (file->ops != NULL) {
             memset(stat, 0, sizeof(*stat));
-            stat->mode = S_IFCHR | 0666;
+            stat->st_mode = S_IFCHR | 0666;
             return 0;
         }
         return -EBADF;
@@ -494,11 +494,18 @@ int vfs_filestat(struct vfs_file *file, struct stat *stat) {
     // Generic fallback when filesystem doesn't implement inode getattr yet.
     vfs_ilock(inode);
     memset(stat, 0, sizeof(*stat));
-    stat->dev = inode->sb ? (int)(uint64)inode->sb : 0;
-    stat->ino = inode->ino;
-    stat->mode = inode->mode;
-    stat->nlink = inode->n_links;
-    stat->size = inode->size;
+    stat->st_dev = inode->sb ? (uint64)inode->sb : 0;
+    stat->st_ino = inode->ino;
+    stat->st_mode = inode->mode;
+    stat->st_nlink = inode->n_links;
+    stat->st_uid = inode->uid;
+    stat->st_gid = inode->gid;
+    stat->st_size = inode->size;
+    stat->st_blksize = 1024;
+    stat->st_blocks = (inode->size + 511) / 512;
+    stat->st_atime_sec = inode->atime;
+    stat->st_mtime_sec = inode->mtime;
+    stat->st_ctime_sec = inode->ctime;
     vfs_iunlock(inode);
     return 0;
 }

@@ -1465,7 +1465,7 @@ void concreate(char *s) {
                 // Check if file exists using stat
                 struct stat st;
                 if (stat(file, &st) == 0) {
-                    printf("(but %s exists with ino=%ld!) ", file, st.ino);
+                    printf("(but %s exists with ino=%ld!) ", file, st.st_ino);
                 } else {
                     printf("(%s stat failed) ", file);
                 }
@@ -1545,7 +1545,7 @@ void subdir(char *s) {
         printf("%s: stat . or .. failed\n", s);
         exit(1);
     }
-    at_root = (st_dot.dev == st_dotdot.dev && st_dot.ino == st_dotdot.ino);
+    at_root = (st_dot.st_dev == st_dotdot.st_dev && st_dot.st_ino == st_dotdot.st_ino);
 
     unlink("ff");
     if (mkdir("dd") != 0) {

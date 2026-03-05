@@ -39,6 +39,9 @@ CMakeFiles/
 user/musl-xv6/musl-build/
 user/musl-xv6/sysroot/
 
+# GCC cross-toolchain build artifacts
+toolchain/
+
 # Doxygen generated documentation
 docs/html/
 docs/latex/

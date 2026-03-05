@@ -1793,12 +1793,12 @@ void tmpfs_run_file_ops_smoketest(void) {
     ret = vfs_filestat(file, &st);
     if (ret != 0) {
         printf("file_ops_smoketest: " FAIL " stat, errno=%d\n", ret);
-    } else if ((size_t)st.size != test_data_len) {
+    } else if ((size_t)st.st_size != test_data_len) {
         printf("file_ops_smoketest: " FAIL " stat size=%llu expected %lu\n",
-               (unsigned long long)st.size, (unsigned long)test_data_len);
+               (unsigned long long)st.st_size, (unsigned long)test_data_len);
     } else {
         printf("file_ops_smoketest: " PASS " stat size=%llu mode=%o\n",
-               (unsigned long long)st.size, st.mode);
+               (unsigned long long)st.st_size, st.st_mode);
     }
 
     // Test 9: Close and reopen to verify persistence
@@ -2472,7 +2472,7 @@ void tmpfs_run_double_indirect_smoketest(void) {
         if (ret == 0) {
             printf("dindirect_smoketest: " PASS
                    " final stat: size=%lld, n_blocks=%lu\n",
-                   (long long)st.size, test_inode->n_blocks);
+                   (long long)st.st_size, test_inode->n_blocks);
         } else {
             printf("dindirect_smoketest: " FAIL " final stat failed\n");
         }

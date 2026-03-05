@@ -438,11 +438,12 @@ static ssize_t procfs_readlink(struct vfs_inode *inode, char *buf,
 /* ------------------------------------------------------------------ */
 
 static int procfs_getattr(struct vfs_inode *inode, struct stat *st) {
-    st->ino   = inode->ino;
-    st->mode  = inode->mode;
-    st->nlink = inode->n_links;
-    st->size  = inode->size;
-    st->dev   = 0;
+    memset(st, 0, sizeof(*st));
+    st->st_ino   = inode->ino;
+    st->st_mode  = inode->mode;
+    st->st_nlink = inode->n_links;
+    st->st_size  = inode->size;
+    st->st_dev   = 0;
     return 0;
 }
 

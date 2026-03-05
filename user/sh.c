@@ -240,10 +240,10 @@ static int  user_uid = -1;
 #define ST_SIZE_P(x) ((x)->st_size)
 #else
 #define errprintf(...) fprintf(2, __VA_ARGS__)
-#define ST_MODE(x) ((x).mode)
-#define ST_MODE_P(x) ((x)->mode)
-#define ST_NLINK_P(x) ((x)->nlink)
-#define ST_SIZE_P(x) ((x)->size)
+#define ST_MODE(x) ((x).st_mode)
+#define ST_MODE_P(x) ((x)->st_mode)
+#define ST_NLINK_P(x) ((x)->st_nlink)
+#define ST_SIZE_P(x) ((x)->st_size)
 #endif
 
 // =====================================================================

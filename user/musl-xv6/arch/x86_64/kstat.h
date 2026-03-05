@@ -1,25 +1,28 @@
+/*
+ * kstat.h — kernel stat layout for musl on xv6 (x86_64)
+ *
+ * This MUST match what the xv6 kernel writes via copyout in stat/fstat/fstatat.
+ * The xv6 kernel uses the riscv64 musl ABI layout for ALL architectures.
+ * musl's fstatat_kstat() converts this to the userspace struct stat.
+ */
 struct kstat {
-	/* Must match xv6 kernel struct stat first 32 bytes exactly:
-	 *   int32 dev @0, padding @4, u64 ino @8,
-	 *   u32 mode @16, u32 nlink @20, u64 size @24
-	 */
-	int st_dev;
-	unsigned int __pad0;
-	unsigned long st_ino;
-	unsigned int st_mode;
-	unsigned int st_nlink;
-	long st_size;
-
-	/* Fields not provided by xv6; left zeroed by callers. */
-	unsigned int st_uid;
-	unsigned int st_gid;
-	unsigned long st_rdev;
-	long st_blksize;
-	long st_blocks;
+	dev_t st_dev;
+	ino_t st_ino;
+	mode_t st_mode;
+	nlink_t st_nlink;
+	uid_t st_uid;
+	gid_t st_gid;
+	dev_t st_rdev;
+	unsigned long __pad;
+	off_t st_size;
+	blksize_t st_blksize;
+	int __pad2;
+	blkcnt_t st_blocks;
 	long st_atime_sec;
 	long st_atime_nsec;
 	long st_mtime_sec;
 	long st_mtime_nsec;
 	long st_ctime_sec;
 	long st_ctime_nsec;
+	unsigned __unused[2];
 };

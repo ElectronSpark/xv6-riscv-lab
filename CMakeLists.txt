@@ -10,10 +10,13 @@ endif()
 # ==============================================================================
 if(NOT DEFINED ARCH)
     if(DEFINED ENV{ARCH})
-        set(ARCH "$ENV{ARCH}")
+        set(ARCH "$ENV{ARCH}" CACHE STRING "Target architecture (riscv or x86_64)")
     else()
-        set(ARCH "riscv")
+        set(ARCH "riscv" CACHE STRING "Target architecture (riscv or x86_64)")
     endif()
+elseif(DEFINED ENV{ARCH} AND NOT "$ENV{ARCH}" STREQUAL "" AND NOT "$ENV{ARCH}" STREQUAL "${ARCH}")
+    # Environment overrides cached value when explicitly set
+    set(ARCH "$ENV{ARCH}" CACHE STRING "Target architecture (riscv or x86_64)" FORCE)
 endif()
 
 # Validate architecture
@@ -118,7 +121,7 @@ if(DEFINED ENV{TOOLPREFIX} AND NOT "$ENV{TOOLPREFIX}" STREQUAL "")
        (ARCH STREQUAL "x86_64" AND "$ENV{TOOLPREFIX}" MATCHES "x86_64"))
         set(USE_ENV_TOOLPREFIX ON)
     else()
-        message(WARNING "Ignoring TOOLPREFIX=$ENV{TOOLPREFIX} for ARCH=${ARCH} (architecture mismatch)")
+        message(STATUS "TOOLPREFIX=$ENV{TOOLPREFIX} doesn't match ARCH=${ARCH}, using auto-discovery")
     endif()
 endif()
 
@@ -129,18 +132,47 @@ if(USE_ENV_TOOLPREFIX)
     set(CMAKE_OBJCOPY $ENV{TOOLPREFIX}objcopy)
     set(CMAKE_OBJDUMP $ENV{TOOLPREFIX}objdump)
     set(CMAKE_C_LINK_EXECUTABLE "$ENV{TOOLPREFIX}ld <LINK_FLAGS> -o <TARGET> <LINK_LIBRARIES> <OBJECTS>")
+    # Detect if the user-provided TOOLPREFIX is the xv6 musl toolchain
+    if("$ENV{TOOLPREFIX}" MATCHES "xv6-linux-musl-$")
+        set(XV6_MUSL_TOOLCHAIN TRUE)
+    else()
+        set(XV6_MUSL_TOOLCHAIN FALSE)
+    endif()
 else()
     if(ARCH STREQUAL "riscv")
-        # Try to find riscv64-unknown-elf tools automatically
-        message(STATUS "TOOLPREFIX environment variable not set, searching for riscv64-unknown-elf tools...")
-        find_program(RISCV_GCC riscv64-unknown-elf-gcc PATHS /opt/riscv/bin PATH_SUFFIXES bin NO_DEFAULT_PATH)
+        # Search priority:
+        #   1. xv6 custom musl toolchain (riscv64-xv6-linux-musl-gcc)
+        #   2. Traditional bare-metal toolchain (riscv64-unknown-elf-gcc)
+        message(STATUS "TOOLPREFIX not set, searching for RISC-V toolchain...")
+
+        # Try the xv6 musl toolchain first (supports both static and shared linking)
+        find_program(RISCV_GCC riscv64-xv6-linux-musl-gcc
+            PATHS ${CMAKE_SOURCE_DIR}/toolchain/riscv64/phase2/bin
+                  ${CMAKE_SOURCE_DIR}/toolchain/riscv64/phase1/bin
+                  ${CMAKE_SOURCE_DIR}/toolchain/riscv64/bin
+            NO_DEFAULT_PATH)
+        if(NOT RISCV_GCC)
+            find_program(RISCV_GCC riscv64-xv6-linux-musl-gcc)
+        endif()
+
+        # Fall back to bare-metal toolchain
+        if(NOT RISCV_GCC)
+            find_program(RISCV_GCC riscv64-unknown-elf-gcc PATHS /opt/riscv/bin PATH_SUFFIXES bin NO_DEFAULT_PATH)
+        endif()
         if(NOT RISCV_GCC)
             find_program(RISCV_GCC riscv64-unknown-elf-gcc)
         endif()
         
         if(RISCV_GCC)
             get_filename_component(TOOLPREFIX ${RISCV_GCC} DIRECTORY)
-            set(TOOLPREFIX "${TOOLPREFIX}/riscv64-unknown-elf-")
+            # Detect which toolchain was found and set the correct prefix
+            if(RISCV_GCC MATCHES "riscv64-xv6-linux-musl-gcc$")
+                set(TOOLPREFIX "${TOOLPREFIX}/riscv64-xv6-linux-musl-")
+                set(XV6_MUSL_TOOLCHAIN TRUE)
+            else()
+                set(TOOLPREFIX "${TOOLPREFIX}/riscv64-unknown-elf-")
+                set(XV6_MUSL_TOOLCHAIN FALSE)
+            endif()
             set(CMAKE_C_COMPILER ${TOOLPREFIX}gcc CACHE STRING "C compiler" FORCE)
             set(CMAKE_ASM_COMPILER ${TOOLPREFIX}gcc CACHE STRING "ASM compiler" FORCE)
             set(CMAKE_LINKER ${TOOLPREFIX}ld CACHE FILEPATH "Linker" FORCE)
@@ -148,23 +180,50 @@ else()
             set(CMAKE_OBJDUMP ${TOOLPREFIX}objdump)
             set(CMAKE_C_LINK_EXECUTABLE "${TOOLPREFIX}ld <LINK_FLAGS> -o <TARGET> <LINK_LIBRARIES> <OBJECTS>")
             message(STATUS "Found RISC-V toolchain: ${TOOLPREFIX}")
+            if(XV6_MUSL_TOOLCHAIN)
+                message(STATUS "  Using xv6 musl toolchain (supports static + dynamic linking)")
+            endif()
         else()
-            message(FATAL_ERROR "TOOLPREFIX environment variable not set and riscv64-unknown-elf tools not found in PATH or /opt/riscv/bin")
+            message(FATAL_ERROR "TOOLPREFIX environment variable not set and no RISC-V toolchain found.\n"
+                "  Searched for: riscv64-xv6-linux-musl-gcc, riscv64-unknown-elf-gcc\n"
+                "  Build the xv6 toolchain: scripts/build_gcc_toolchain.sh --arch=riscv64")
         endif()
     elseif(ARCH STREQUAL "x86_64")
-        # Try to find x86_64-elf tools automatically, then host x86_64-linux-gnu tools
+        # Search priority:
+        #   1. xv6 custom musl toolchain (x86_64-xv6-linux-musl-gcc)
+        #   2. Bare-metal (x86_64-elf-gcc)
+        #   3. Host linux-gnu toolchain (x86_64-linux-gnu-gcc)
         message(STATUS "Searching for x86_64 toolchain...")
-        find_program(X86_GCC x86_64-elf-gcc)
+
+        # Try the xv6 musl toolchain first
+        find_program(X86_GCC x86_64-xv6-linux-musl-gcc
+            PATHS ${CMAKE_SOURCE_DIR}/toolchain/x86_64/phase2/bin
+                  ${CMAKE_SOURCE_DIR}/toolchain/x86_64/phase1/bin
+                  ${CMAKE_SOURCE_DIR}/toolchain/x86_64/bin
+            NO_DEFAULT_PATH)
+        if(NOT X86_GCC)
+            find_program(X86_GCC x86_64-xv6-linux-musl-gcc)
+        endif()
+
+        # Fall back to bare-metal / host toolchains
+        if(NOT X86_GCC)
+            find_program(X86_GCC x86_64-elf-gcc)
+        endif()
         if(NOT X86_GCC)
             find_program(X86_GCC x86_64-linux-gnu-gcc)
         endif()
         
         if(X86_GCC)
             get_filename_component(TOOLPREFIX ${X86_GCC} DIRECTORY)
-            if(X86_GCC MATCHES "x86_64-linux-gnu-gcc$")
+            if(X86_GCC MATCHES "x86_64-xv6-linux-musl-gcc$")
+                set(TOOLPREFIX "${TOOLPREFIX}/x86_64-xv6-linux-musl-")
+                set(XV6_MUSL_TOOLCHAIN TRUE)
+            elseif(X86_GCC MATCHES "x86_64-linux-gnu-gcc$")
                 set(TOOLPREFIX "${TOOLPREFIX}/x86_64-linux-gnu-")
+                set(XV6_MUSL_TOOLCHAIN FALSE)
             else()
                 set(TOOLPREFIX "${TOOLPREFIX}/x86_64-elf-")
+                set(XV6_MUSL_TOOLCHAIN FALSE)
             endif()
             set(CMAKE_C_COMPILER ${TOOLPREFIX}gcc CACHE STRING "C compiler" FORCE)
             set(CMAKE_ASM_COMPILER ${TOOLPREFIX}gcc CACHE STRING "ASM compiler" FORCE)
@@ -173,8 +232,13 @@ else()
             set(CMAKE_OBJDUMP ${TOOLPREFIX}objdump)
             set(CMAKE_C_LINK_EXECUTABLE "${TOOLPREFIX}ld <LINK_FLAGS> -o <TARGET> <LINK_LIBRARIES> <OBJECTS>")
             message(STATUS "Found x86_64 toolchain: ${TOOLPREFIX}")
+            if(XV6_MUSL_TOOLCHAIN)
+                message(STATUS "  Using xv6 musl toolchain (supports static + dynamic linking)")
+            endif()
         else()
-            message(FATAL_ERROR "No x86_64 toolchain found (tried x86_64-elf-gcc and x86_64-linux-gnu-gcc)")
+            message(FATAL_ERROR "No x86_64 toolchain found.\n"
+                "  Searched for: x86_64-xv6-linux-musl-gcc, x86_64-elf-gcc, x86_64-linux-gnu-gcc\n"
+                "  Build the xv6 toolchain: scripts/build_gcc_toolchain.sh --arch=x86_64")
         endif()
     endif()
 endif()

@@ -203,12 +203,12 @@ void go(int which_child) {
                 printf("grind: fstat failed\n");
                 exit(1);
             }
-            if (st.size != 1) {
-                printf("grind: fstat reports wrong size %d\n", (int)st.size);
+            if (st.st_size != 1) {
+                printf("grind: fstat reports wrong size %d\n", (int)st.st_size);
                 exit(1);
             }
-            if (st.ino > 200) {
-                printf("grind: fstat reports crazy i-number %lu\n", st.ino);
+            if (st.st_ino > 200) {
+                printf("grind: fstat reports crazy i-number %lu\n", st.st_ino);
                 exit(1);
             }
             close(fd1);

@@ -86,7 +86,7 @@ static void testsymlink(void) {
 
     if (stat_slink("testsymlink/b", &st) != 0)
         fail("failed to stat b");
-    if (!S_ISLNK(st.mode))
+    if (!S_ISLNK(st.st_mode))
         fail("b isn't a symlink");
 
     fd2 = open("testsymlink/b", O_RDWR);
@@ -227,9 +227,9 @@ static void concur(void) {
                     symlink("testsymlink/z", "testsymlink/y");
                     if (stat_slink("testsymlink/y", &st) == 0) {
                         m++;
-                        if (!S_ISLNK(st.mode)) {
+                        if (!S_ISLNK(st.st_mode)) {
                             printf("FAILED: mode %d not a symbolic link\n",
-                                   st.mode);
+                                   st.st_mode);
                             exit(1);
                         }
                     }

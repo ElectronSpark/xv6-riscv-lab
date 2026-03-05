@@ -47,22 +47,52 @@ message(STATUS "musl libc: GCC includes = ${GCC_INCLUDE_DIR_MUSL}")
 message(STATUS "musl libc: libgcc = ${LIBGCC_PATH}")
 
 # ==============================================================================
-# Build musl from source
+# Build musl from source — or copy from xv6 musl toolchain if available
 # ==============================================================================
-set(MUSL_ARCH_DEPS
-    ${MUSL_XV6_DIR}/arch/x86_64/clone.s
-    ${MUSL_XV6_DIR}/arch/x86_64/bits/syscall.h.in
-)
-set(MUSL_BUILD_COMMENT "Building musl libc for xv6 x86_64 (this may take a few minutes)...")
+if(XV6_MUSL_TOOLCHAIN)
+    # The xv6 musl toolchain already has musl built into its sysroot.
+    # Copy into the build sysroot (which doubles as the target rootfs staging area).
+    execute_process(
+        COMMAND ${CMAKE_C_COMPILER} -print-sysroot
+        OUTPUT_VARIABLE XV6_TOOLCHAIN_SYSROOT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    message(STATUS "musl libc: using pre-built musl from toolchain sysroot: ${XV6_TOOLCHAIN_SYSROOT}")
 
-add_custom_command(
-    OUTPUT ${MUSL_LIBC_A} ${MUSL_CRT1_O} ${MUSL_CRTI_O} ${MUSL_CRTN_O}
-    COMMAND bash ${MUSL_BUILD_SCRIPT} --prefix=${MUSL_SYSROOT} --build-dir=${MUSL_BUILD_DIR}
-    DEPENDS
-        ${MUSL_BUILD_SCRIPT}
-        ${MUSL_ARCH_DEPS}
-    COMMENT "${MUSL_BUILD_COMMENT}"
-)
+    add_custom_command(
+        OUTPUT ${MUSL_LIBC_A} ${MUSL_CRT1_O} ${MUSL_CRTI_O} ${MUSL_CRTN_O}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${MUSL_SYSROOT}/lib
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${MUSL_SYSROOT}/include
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${XV6_TOOLCHAIN_SYSROOT}/lib/libc.a
+                ${XV6_TOOLCHAIN_SYSROOT}/lib/libc.so
+                ${XV6_TOOLCHAIN_SYSROOT}/lib/crt1.o
+                ${XV6_TOOLCHAIN_SYSROOT}/lib/crti.o
+                ${XV6_TOOLCHAIN_SYSROOT}/lib/crtn.o
+                ${XV6_TOOLCHAIN_SYSROOT}/lib/rcrt1.o
+                ${XV6_TOOLCHAIN_SYSROOT}/lib/Scrt1.o
+                ${MUSL_SYSROOT}/lib/
+        COMMAND ${CMAKE_COMMAND} -E create_symlink libc.so ${MUSL_SYSROOT}/lib/ld-musl-x86_64.so.1
+        # Copy headers
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${XV6_TOOLCHAIN_SYSROOT}/include ${MUSL_SYSROOT}/include
+        COMMENT "Copying pre-built musl from xv6 toolchain sysroot"
+    )
+else()
+    set(MUSL_ARCH_DEPS
+        ${MUSL_XV6_DIR}/arch/x86_64/clone.s
+        ${MUSL_XV6_DIR}/arch/x86_64/bits/syscall.h.in
+    )
+    set(MUSL_BUILD_COMMENT "Building musl libc for xv6 x86_64 (this may take a few minutes)...")
+
+    add_custom_command(
+        OUTPUT ${MUSL_LIBC_A} ${MUSL_CRT1_O} ${MUSL_CRTI_O} ${MUSL_CRTN_O}
+        COMMAND bash ${MUSL_BUILD_SCRIPT} --prefix=${MUSL_SYSROOT} --build-dir=${MUSL_BUILD_DIR}
+        DEPENDS
+            ${MUSL_BUILD_SCRIPT}
+            ${MUSL_ARCH_DEPS}
+        COMMENT "${MUSL_BUILD_COMMENT}"
+    )
+endif()
 
 add_custom_target(musl_sysroot DEPENDS ${MUSL_LIBC_A} ${MUSL_CRT1_O})
 

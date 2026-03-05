@@ -5,21 +5,33 @@
 #include "types.h"
 
 /*
- * POSIX-style stat structure
+ * POSIX-style stat structure — musl riscv64 ABI compatible
  *
- * This is the stat structure returned by fstat()/stat() syscalls.
- * Use S_ISDIR(), S_ISREG(), S_ISLNK(), etc. macros to check file type.
+ * This layout MUST match musl's arch/riscv64/bits/stat.h exactly so that
+ * stat/fstat/fstatat syscalls can copyout this struct directly to userspace.
+ *
+ * Fields the kernel does not populate are zeroed via memset() before filling.
  */
 struct stat {
-    int32 dev;      // File system's disk device
-    uint64 ino;     // Inode number
-    mode_t mode;    // Permission and type bits (use S_IS* macros)
-    uint32 nlink;   // Number of links to file
-    uint32 st_uid;  // Owner user ID
-    uint32 st_gid;  // Owner group ID
-    uint64 size;    // Size of file in bytes
-    uint32 blksize; // Preferred I/O block size
-    uint64 blocks;  // Number of 512-byte blocks allocated
+    uint64 st_dev;           // device ID
+    uint64 st_ino;           // inode number
+    uint32 st_mode;          // permission and type bits (S_IS* macros)
+    uint32 st_nlink;         // number of hard links
+    uint32 st_uid;           // owner user ID
+    uint32 st_gid;           // owner group ID
+    uint64 st_rdev;          // device ID (for special files)
+    uint64 __pad;            // padding (matches musl layout)
+    int64  st_size;          // size in bytes
+    int32  st_blksize;       // preferred I/O block size
+    int32  __pad2;           // padding
+    int64  st_blocks;        // number of 512-byte blocks allocated
+    int64  st_atime_sec;     // last access time (seconds)
+    int64  st_atime_nsec;    // last access time (nanoseconds)
+    int64  st_mtime_sec;     // last modification time (seconds)
+    int64  st_mtime_nsec;    // last modification time (nanoseconds)
+    int64  st_ctime_sec;     // last status change time (seconds)
+    int64  st_ctime_nsec;    // last status change time (nanoseconds)
+    uint32 __unused[2];      // reserved
 };
 
 #ifndef S_IRUSR

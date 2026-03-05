@@ -59,10 +59,13 @@ PREFIX="${PREFIX:-${SCRIPT_DIR}/sysroot}"
 MUSL_SRC="${BUILD_DIR}/musl-${MUSL_VERSION}"
 
 # Detect cross-compiler
-# Prefer riscv64-linux-gnu- because its linker supports -shared (needed for
-# libc.so and ld-musl dynamic linker).  riscv64-unknown-elf-ld does NOT
-# support -shared so musl's shared build fails with the bare-metal toolchain.
-if command -v riscv64-linux-gnu-gcc &>/dev/null; then
+# Priority:
+#   1. riscv64-xv6-linux-musl- (xv6 custom toolchain — supports -shared)
+#   2. riscv64-linux-gnu-       (distro toolchain — supports -shared)
+#   3. riscv64-unknown-elf-     (bare-metal — may lack -shared support)
+if command -v riscv64-xv6-linux-musl-gcc &>/dev/null; then
+    CROSS_COMPILE="riscv64-xv6-linux-musl-"
+elif command -v riscv64-linux-gnu-gcc &>/dev/null; then
     CROSS_COMPILE="riscv64-linux-gnu-"
 elif command -v riscv64-unknown-elf-gcc &>/dev/null; then
     CROSS_COMPILE="riscv64-unknown-elf-"
@@ -96,38 +99,9 @@ if [[ ! -d "${MUSL_SRC}" ]]; then
     echo "Download complete."
 fi
 
-# Apply MINIMAL overlay — only files that differ from Linux
-echo "Applying xv6 overlay..."
-ARCH_DIR="${MUSL_SRC}/arch/riscv64"
-
-# 1. Override syscall numbers (the ONLY bits/ override needed)
-cp "${SCRIPT_DIR}/arch/riscv64/bits/syscall.h.in" "${ARCH_DIR}/bits/syscall.h.in"
-
-# 1.5 Override kstat layout (xv6 struct stat is compact, not Linux kstat)
-cp "${SCRIPT_DIR}/arch/riscv64/kstat.h" "${ARCH_DIR}/kstat.h"
-
-# 2. Override clone.s (xv6 clone takes a struct pointer, not individual regs)
-#    musl's upstream clone.s defines __clone; we replace it with our xv6 version.
-#    NOTE: the file must be named clone.s (not __clone.s) because musl's makefile
-#    compiles clone.s via REPLACED_OBJS to produce __clone.lo.
-mkdir -p "${MUSL_SRC}/src/thread/riscv64"
-cp "${SCRIPT_DIR}/arch/riscv64/clone.s" "${MUSL_SRC}/src/thread/riscv64/clone.s"
-
-# 3. Override vfork.s (use clone with CLONE_VM|CLONE_VFORK|SIGCHLD instead
-#    of the non-existent SYS_vfork on riscv64)
-mkdir -p "${MUSL_SRC}/src/process/riscv64"
-cp "${SCRIPT_DIR}/arch/riscv64/vfork.s" "${MUSL_SRC}/src/process/riscv64/vfork.s"
-
-# 4. Override fstatat.c (remove zero-initialiser on struct kstat for xv6 compat)
-cp "${SCRIPT_DIR}/arch/riscv64/fstatat.c" "${MUSL_SRC}/src/stat/fstatat.c"
-
-echo "Overlay applied (5 files)."
-
-# 3. Disable brk — xv6 heap growth is unreliable when mmap regions are
-#    placed adjacent to the heap VMA.  Force mallocng to use mmap exclusively.
-echo "Disabling brk in malloc (mmap-only mode)..."
-sed -i 's/#define brk(p) ((uintptr_t)__syscall(SYS_brk, p))/#define brk(p) ((uintptr_t)-1)/' \
-    "${MUSL_SRC}/src/malloc/mallocng/glue.h"
+# Apply xv6 overlay using the shared helper script
+source "${SCRIPT_DIR}/apply_xv6_overlay.sh"
+apply_xv6_overlay "riscv64" "${MUSL_SRC}" "${SCRIPT_DIR}/arch"
 
 # Configure musl
 echo "Configuring musl..."

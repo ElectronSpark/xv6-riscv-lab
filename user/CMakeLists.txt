@@ -469,46 +469,64 @@ set(CPYTHON_BIN "${CPYTHON_BUILD_DIR}/python" CACHE FILEPATH "CPython interprete
 set(CPYTHON_FS_BIN "${CMAKE_BINARY_DIR}/user/_python")
 
 if(EXISTS "${CPYTHON_SRC_DIR}/configure")
-    # Use the linux-gnu cross-compiler for CPython because it supports
-    # -shared (needed for building libpython3.12.so and .so extension modules).
-    # The bare-metal *-unknown-elf-gcc linker cannot produce shared objects.
+    # CPython needs a compiler that supports -shared (for libpython3.12.so and
+    # .so extension modules).  The bare-metal *-unknown-elf-ld cannot produce
+    # shared objects.  Priority:
+    #   1. xv6 musl toolchain (riscv64/x86_64-xv6-linux-musl-gcc)
+    #   2. Distro linux-gnu cross-compiler (fallback)
     if(ARCH STREQUAL "x86_64")
-        set(CPYTHON_CC "x86_64-linux-gnu-gcc")
-        set(CPYTHON_AR "x86_64-linux-gnu-ar")
-        set(CPYTHON_RANLIB "x86_64-linux-gnu-ranlib")
-        set(CPYTHON_READELF "x86_64-linux-gnu-readelf")
-        set(CPYTHON_STRIP "x86_64-linux-gnu-strip")
+        # Try xv6 musl toolchain first
+        find_program(CPYTHON_GCC_PROG x86_64-xv6-linux-musl-gcc
+            PATHS ${CMAKE_SOURCE_DIR}/toolchain/x86_64/phase2/bin
+                  ${CMAKE_SOURCE_DIR}/toolchain/x86_64/bin
+            NO_DEFAULT_PATH)
+        if(NOT CPYTHON_GCC_PROG)
+            find_program(CPYTHON_GCC_PROG x86_64-xv6-linux-musl-gcc)
+        endif()
+        if(CPYTHON_GCC_PROG)
+            get_filename_component(_cpython_tooldir ${CPYTHON_GCC_PROG} DIRECTORY)
+            set(_cpython_prefix "${_cpython_tooldir}/x86_64-xv6-linux-musl-")
+        else()
+            set(_cpython_prefix "x86_64-linux-gnu-")
+        endif()
         set(CPYTHON_HOST_TRIPLE "x86_64-unknown-xv6")
         set(CPYTHON_DYNAMIC_LINKER "/lib/ld-musl-x86_64.so.1")
-        execute_process(
-            COMMAND x86_64-linux-gnu-gcc -print-file-name=include
-            OUTPUT_VARIABLE CPYTHON_GCC_INCLUDE_DIR
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-        )
-        execute_process(
-            COMMAND x86_64-linux-gnu-gcc -print-libgcc-file-name
-            OUTPUT_VARIABLE CPYTHON_LIBGCC_PATH
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-        )
     else()
-        set(CPYTHON_CC "riscv64-linux-gnu-gcc")
-        set(CPYTHON_AR "riscv64-linux-gnu-ar")
-        set(CPYTHON_RANLIB "riscv64-linux-gnu-ranlib")
-        set(CPYTHON_READELF "riscv64-linux-gnu-readelf")
-        set(CPYTHON_STRIP "riscv64-linux-gnu-strip")
+        # Try xv6 musl toolchain first
+        find_program(CPYTHON_GCC_PROG riscv64-xv6-linux-musl-gcc
+            PATHS ${CMAKE_SOURCE_DIR}/toolchain/riscv64/phase2/bin
+                  ${CMAKE_SOURCE_DIR}/toolchain/riscv64/bin
+            NO_DEFAULT_PATH)
+        if(NOT CPYTHON_GCC_PROG)
+            find_program(CPYTHON_GCC_PROG riscv64-xv6-linux-musl-gcc)
+        endif()
+        if(CPYTHON_GCC_PROG)
+            get_filename_component(_cpython_tooldir ${CPYTHON_GCC_PROG} DIRECTORY)
+            set(_cpython_prefix "${_cpython_tooldir}/riscv64-xv6-linux-musl-")
+        else()
+            set(_cpython_prefix "riscv64-linux-gnu-")
+        endif()
         set(CPYTHON_HOST_TRIPLE "riscv64-unknown-xv6")
         set(CPYTHON_DYNAMIC_LINKER "/lib/ld-musl-riscv64.so.1")
-        execute_process(
-            COMMAND riscv64-linux-gnu-gcc -print-file-name=include
-            OUTPUT_VARIABLE CPYTHON_GCC_INCLUDE_DIR
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-        )
-        execute_process(
-            COMMAND riscv64-linux-gnu-gcc -print-libgcc-file-name
-            OUTPUT_VARIABLE CPYTHON_LIBGCC_PATH
-            OUTPUT_STRIP_TRAILING_WHITESPACE
-        )
     endif()
+
+    set(CPYTHON_CC "${_cpython_prefix}gcc")
+    set(CPYTHON_AR "${_cpython_prefix}ar")
+    set(CPYTHON_RANLIB "${_cpython_prefix}ranlib")
+    set(CPYTHON_READELF "${_cpython_prefix}readelf")
+    set(CPYTHON_STRIP "${_cpython_prefix}strip")
+    message(STATUS "CPython cross-compiler: ${CPYTHON_CC}")
+
+    execute_process(
+        COMMAND ${CPYTHON_CC} -print-file-name=include
+        OUTPUT_VARIABLE CPYTHON_GCC_INCLUDE_DIR
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
+    execute_process(
+        COMMAND ${CPYTHON_CC} -print-libgcc-file-name
+        OUTPUT_VARIABLE CPYTHON_LIBGCC_PATH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+    )
 
     add_custom_command(
         OUTPUT ${CPYTHON_BUILD_DIR}/Makefile

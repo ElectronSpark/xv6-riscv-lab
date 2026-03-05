@@ -974,11 +974,18 @@ static int ext4fs_getattr(struct vfs_inode *inode, struct stat *stat)
     memset(stat, 0, sizeof(*stat));
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
-    stat->dev   = ext4fs_sb_dev(esb);
-    stat->ino   = inode->ino;
-    stat->mode  = inode->mode;
-    stat->nlink = inode->n_links;
-    stat->size  = inode->size;
+    stat->st_dev   = ext4fs_sb_dev(esb);
+    stat->st_ino   = inode->ino;
+    stat->st_mode  = inode->mode;
+    stat->st_nlink = inode->n_links;
+    stat->st_uid   = inode->uid;
+    stat->st_gid   = inode->gid;
+    stat->st_size  = inode->size;
+    stat->st_blksize = 1024;
+    stat->st_blocks  = (inode->size + 511) / 512;
+    stat->st_atime_sec = inode->atime;
+    stat->st_mtime_sec = inode->mtime;
+    stat->st_ctime_sec = inode->ctime;
 
     vfs_iunlock(inode);
     return 0;
