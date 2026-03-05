@@ -36,7 +36,13 @@
 #include "lwip/pbuf.h"
 #include "lwip/err.h"
 #include "lwip/ip4_addr.h"
+#include "lwip/dns.h"
 #include "netif/ethernet.h"
+
+#include "dev/netconf.h"
+#include "dev/cdev.h"
+#include <mm/vm.h>
+#include "errno.h"
 
 /* Debug logging — set to 1 to enable verbose network tracing */
 #define LWIP_NET_DEBUG 0
@@ -139,6 +145,10 @@ xv6_netif_init(struct netif *netif)
  * Called from the NIC driver ISR (e1000_recv / x1_emac_recv) for each
  * received packet. Allocates a pbuf, copies the mbuf payload, and feeds
  * the pbuf into the lwIP stack.
+ *
+ * The netif input function is set by netif_add() to tcpip_input().  Until
+ * netif_add() has been called, xv6_netif.input is NULL and we must drop
+ * packets silently to avoid calling into an uninitialised stack.
  * -------------------------------------------------------------------------- */
 void net_rx(struct mbuf *m)
 {
@@ -148,6 +158,12 @@ void net_rx(struct mbuf *m)
     if (m == NULL || m->len == 0) {
         if (m)
             mbuffree(m);
+        return;
+    }
+
+    /* Drop packets that arrive before the lwIP netif is ready */
+    if (xv6_netif.input == NULL) {
+        mbuffree(m);
         return;
     }
 
@@ -192,6 +208,15 @@ void net_rx(struct mbuf *m)
  * -------------------------------------------------------------------------- */
 static volatile int __lwip_tcpip_ready = 0;
 
+/*
+ * Set to 1 after netif_add() has been called (i.e. xv6_netif is valid
+ * and the lwIP mbox is usable).  Guards the link-change callback and
+ * the net_rx() input path against calls that arrive before lwIP is
+ * ready (e.g. from the EMAC PHY polling kthread when the link comes up
+ * during early boot).
+ */
+static volatile int __lwip_netif_ready = 0;
+
 static void __tcpip_init_done(void *arg)
 {
     (void)arg;
@@ -202,6 +227,10 @@ static void __tcpip_init_done(void *arg)
 /* --------------------------------------------------------------------------
  * Link-change callback: called by netdev_set_link() when the driver
  * detects a physical link state change.
+ *
+ * Guard: skip if the lwIP netif hasn't been set up yet.  The EMAC PHY
+ * kthread may detect link-up before the lwIP kthread has called
+ * netif_add() / tcpip_init().
  * -------------------------------------------------------------------------- */
 
 #define GARP_COUNT       3   /* number of gratuitous ARPs on link-up */
@@ -210,6 +239,9 @@ static void __tcpip_init_done(void *arg)
 static void __netdev_link_change(struct netdev *dev, int link_up)
 {
     (void)dev;
+    if (!__atomic_load_n(&__lwip_netif_ready, __ATOMIC_ACQUIRE))
+        return; /* too early — netif not yet added */
+
     if (link_up) {
         netif_set_link_up(&xv6_netif);
         printf("lwip: link up (%s)\n", dev->name);
@@ -228,84 +260,258 @@ static void __netdev_link_change(struct netdev *dev, int link_up)
 }
 
 /* ========================================================================== */
-/* Public API                                                                 */
+/* Network configuration — syscall interface                                  */
 /* ========================================================================== */
 
 /**
- * __lwip_kthread — Kernel thread that initialises the lwIP network stack.
+ * Userspace provides network configuration via /dev/netconf (ioctl or write).
+ * The lwIP kthread waits for configuration (or a timeout) before applying
+ * the IP configuration and starting network services.
  *
- * Waits for a network device to be registered (the NIC driver kthread may
- * still be running PHY autonegotiation), then brings up the lwIP stack with
- * a platform-appropriate static IP:
- *
- *   Orange Pi (has_emac):  192.168.0.201 / 255.255.255.0 / 192.168.0.1
- *   QEMU SLIRP (default):  10.0.2.15    / 255.255.255.0 / 10.0.2.2
- *
- * After the netif is up, starts services that depend on lwIP (telnetd,
- * gdbstub).
+ * The legacy SYS_netconf syscall is also supported but /dev/netconf is
+ * the preferred interface since it requires no custom syscall plumbing.
  */
-static void __lwip_kthread(uint64 arg1, uint64 arg2)
+static volatile int __netconf_ready = 0;     /* set to 1 when config arrives */
+static struct netconf_req __netconf_req;      /* filled by config path       */
+static volatile int __lwip_initialized = 0;   /* set after kthread setup     */
+
+/* Interval for polling __netconf_ready (ms) */
+#define NETCONF_POLL_INTERVAL_MS  100
+
+/**
+ * __apply_netconf — shared implementation for applying network configuration.
+ *
+ * Called from both the syscall handler and the /dev/netconf cdev paths.
+ * @req: validated struct netconf_req (kernel-side copy).
+ * Returns 0 on success, -errno on failure.
+ */
+static int __apply_netconf(struct netconf_req *req)
 {
-    (void)arg1;
-    (void)arg2;
-    ip4_addr_t ipaddr, netmask, gw;
+    /* Validate */
+    if (req->mode != NETCONF_MODE_DHCP && req->mode != NETCONF_MODE_STATIC)
+        return -EINVAL;
+    req->hostname[NETCONF_HOSTNAME_MAX - 1] = '\0';
 
-    /* ---- Wait for a NIC to be registered ---- */
-    printf("lwip: waiting for network device...\n");
-    while (netdev_get_default() == NULL) {
-        sleep_ms(100);
-    }
-    printf("lwip: network device detected\n");
+    /* Runtime reconfiguration (after kthread has finished boot setup) */
+    if (__atomic_load_n(&__lwip_initialized, __ATOMIC_ACQUIRE)) {
+        if (req->mode == NETCONF_MODE_STATIC) {
+            ip4_addr_t ip, mask, gw;
+            ip.addr   = req->ip;
+            mask.addr = req->netmask;
+            gw.addr   = req->gateway;
 
-    printf("lwip: initialising network stack (lwIP %s)\n", LWIP_VERSION_STRING);
-
-    /* Start the tcpip thread (calls lwip_init internally) */
-    tcpip_init(__tcpip_init_done, NULL);
-
-    /* Wait for the tcpip thread to be ready — must yield so it can run
-     * (especially important on single-CPU configurations). */
-    while (!__atomic_load_n(&__lwip_tcpip_ready, __ATOMIC_ACQUIRE)) {
-        scheduler_yield();
-    }
-
-    /* Configure static IP based on platform */
-    if (platform.has_emac) {
-        /* Orange Pi / SpacemiT X1 — local network */
-        IP4_ADDR(&ipaddr,  192, 168, 0, 201);
-        IP4_ADDR(&netmask, 255, 255, 255, 0);
-        IP4_ADDR(&gw,      192, 168, 0, 1);
-    } else {
-        /* QEMU user-mode networking (SLIRP) */
-        IP4_ADDR(&ipaddr,  10, 0, 2, 15);
-        IP4_ADDR(&netmask, 255, 255, 255, 0);
-        IP4_ADDR(&gw,      10, 0, 2, 2);
-    }
-
-    netif_add(&xv6_netif,
-#if LWIP_IPV4
-              &ipaddr, &netmask, &gw,
-#endif
-              NULL,                  /* state */
-              xv6_netif_init,        /* init callback */
-              tcpip_input);          /* input function */
-
-    netif_set_default(&xv6_netif);
-    netif_set_up(&xv6_netif);
-
-    /* Set initial link state from the driver and register for changes */
-    struct netdev *ndev = netdev_get_default();
-    if (ndev) {
-        netdev_set_link_callback(ndev, __netdev_link_change);
-        if (ndev->link_up) {
-            netif_set_link_up(&xv6_netif);
-            /* Announce our IP on the network */
-            for (int i = 0; i < GARP_COUNT; i++) {
-                etharp_gratuitous(&xv6_netif);
-                if (i < GARP_COUNT - 1)
-                    sleep_ms(GARP_INTERVAL_MS);
-            }
+            /* If DHCP was running, stop it first */
+            dhcp_stop(&xv6_netif);
+            netif_set_addr(&xv6_netif, &ip, &mask, &gw);
+            printf("lwip: netconf runtime static %d.%d.%d.%d/%d.%d.%d.%d gw %d.%d.%d.%d\n",
+                   ip4_addr1_16(&ip), ip4_addr2_16(&ip),
+                   ip4_addr3_16(&ip), ip4_addr4_16(&ip),
+                   ip4_addr1_16(&mask), ip4_addr2_16(&mask),
+                   ip4_addr3_16(&mask), ip4_addr4_16(&mask),
+                   ip4_addr1_16(&gw), ip4_addr2_16(&gw),
+                   ip4_addr3_16(&gw), ip4_addr4_16(&gw));
+        } else {
+            /* DHCP mode — restart DHCP discovery */
+            dhcp_release_and_stop(&xv6_netif);
+            ip4_addr_t zero;
+            IP4_ADDR(&zero, 0, 0, 0, 0);
+            netif_set_addr(&xv6_netif, &zero, &zero, &zero);
+            dhcp_start(&xv6_netif);
+            printf("lwip: netconf runtime DHCP restart\n");
         }
+
+        /* Update DNS if provided */
+        if (req->dns != 0) {
+            ip_addr_t dns_addr;
+            dns_addr.addr = req->dns;
+            dns_setserver(0, &dns_addr);
+        }
+
+        /* Update hostname if provided */
+        if (req->hostname[0])
+            netif_set_hostname(&xv6_netif, req->hostname);
+
+        return 0;
     }
+
+    /* Boot-time: store and signal the lwIP kthread */
+    __netconf_req = *req;
+    __atomic_store_n(&__netconf_ready, 1, __ATOMIC_RELEASE);
+
+    return 0;
+}
+
+/* Syscall argument helpers (defined in arch/.../irq/syscall.c) */
+extern void argaddr(int n, uint64 *ip);
+
+/**
+ * sys_netconf — SYS_netconf syscall handler (legacy path).
+ *
+ * /dev/netconf is preferred for new code.  This syscall is kept for
+ * compatibility with the xv6-native userlib (init.c).
+ */
+uint64 sys_netconf(void)
+{
+    uint64 uaddr;
+    argaddr(0, &uaddr);
+    if (uaddr == 0)
+        return (uint64)-EINVAL;
+
+    struct netconf_req req;
+    if (vm_copyin(current->vm, (char *)&req, uaddr, sizeof(req)) < 0)
+        return (uint64)-EFAULT;
+
+    return (uint64)__apply_netconf(&req);
+}
+
+/* ========================================================================== */
+/* /dev/netconf — character device for network configuration                  */
+/* ========================================================================== */
+
+static int netconf_cdev_open(cdev_t *cdev)  { (void)cdev; return 0; }
+static int netconf_cdev_release(cdev_t *cdev) { (void)cdev; return 0; }
+
+/**
+ * __get_active_netconf — fill a netconf_req with the active lwIP config.
+ *
+ * Returns 0 if lwIP is initialised (data valid), -EAGAIN if not yet ready.
+ */
+static int __get_active_netconf(struct netconf_req *out)
+{
+    if (!__atomic_load_n(&__lwip_initialized, __ATOMIC_ACQUIRE))
+        return -EAGAIN;
+
+    memset(out, 0, sizeof(*out));
+
+    /* Determine mode from __netconf_req (initial config) */
+    out->mode = __netconf_req.mode;
+
+    /* Read live addresses from the lwIP netif */
+    out->ip      = netif_ip4_addr(&xv6_netif)->addr;
+    out->netmask = netif_ip4_netmask(&xv6_netif)->addr;
+    out->gateway = netif_ip4_gw(&xv6_netif)->addr;
+
+    /* DNS — from lwIP's dns module (slot 0) */
+    const ip_addr_t *dns = dns_getserver(0);
+    if (dns && !ip_addr_isany(dns))
+        out->dns = ip_2_ip4(dns)->addr;
+
+    /* Hostname */
+    const char *hn = netif_get_hostname(&xv6_netif);
+    if (hn)
+        strncpy(out->hostname, hn, NETCONF_HOSTNAME_MAX - 1);
+
+    return 0;
+}
+
+/**
+ * netconf_cdev_read — return the active network config to userspace.
+ *
+ * Userspace: read(fd, &req, sizeof(req))
+ * Returns sizeof(req) on success, -EAGAIN if lwIP not yet initialised.
+ */
+static int netconf_cdev_read(cdev_t *cdev, bool user, void *buf, size_t count)
+{
+    (void)cdev;
+    if (count < sizeof(struct netconf_req))
+        return -EINVAL;
+
+    struct netconf_req req;
+    int ret = __get_active_netconf(&req);
+    if (ret < 0)
+        return ret;
+
+    if (user) {
+        if (either_copyout(1, (uint64)buf, &req, sizeof(req)) < 0)
+            return -EFAULT;
+    } else {
+        memmove(buf, &req, sizeof(req));
+    }
+    return (int)sizeof(struct netconf_req);
+}
+
+/**
+ * netconf_cdev_write — accept a struct netconf_req via write().
+ *
+ * Userspace: write(fd, &req, sizeof(req))
+ */
+static int netconf_cdev_write(cdev_t *cdev, bool user, const void *buf,
+                              size_t count)
+{
+    (void)cdev;
+    if (count != sizeof(struct netconf_req))
+        return -EINVAL;
+
+    struct netconf_req req;
+    if (user) {
+        if (vm_copyin(current->vm, (char *)&req, (uint64)buf, sizeof(req)) < 0)
+            return -EFAULT;
+    } else {
+        memmove(&req, buf, sizeof(req));
+    }
+
+    int ret = __apply_netconf(&req);
+    return ret < 0 ? ret : (int)count;
+}
+
+/**
+ * netconf_cdev_ioctl — handle SIOCNETCONF ioctl on /dev/netconf.
+ *
+ * Userspace: ioctl(fd, SIOCNETCONF, &req)
+ * The arg pointer is a raw user-space pointer (from sys_vfs_ioctl default).
+ */
+static int netconf_cdev_ioctl(cdev_t *cdev, uint64 cmd, void *arg)
+{
+    (void)cdev;
+
+    if (cmd == SIOCNETCONF) {
+        struct netconf_req req;
+        if (vm_copyin(current->vm, (char *)&req, (uint64)arg, sizeof(req)) < 0)
+            return -EFAULT;
+        return __apply_netconf(&req);
+    }
+
+    if (cmd == SIOCNETCONF_GET) {
+        struct netconf_req req;
+        int ret = __get_active_netconf(&req);
+        if (ret < 0)
+            return ret;
+        if (vm_copyout(current->vm, (uint64)arg, &req, sizeof(req)) < 0)
+            return -EFAULT;
+        return 0;
+    }
+
+    return -ENOTTY;
+}
+
+static cdev_t netconf_cdev = {
+    .dev = {
+        .major   = NETCONF_MAJOR,
+        .minor   = NETCONF_MINOR,
+        .devname = "netconf",
+        .devmode = S_IFCHR | 0666,
+    },
+    .readable = 1,
+    .writable = 1,
+    .ops = {
+        .open    = netconf_cdev_open,
+        .release = netconf_cdev_release,
+        .write   = netconf_cdev_write,
+        .ioctl   = netconf_cdev_ioctl,
+        .read    = netconf_cdev_read,
+        .poll    = NULL,
+    },
+};
+
+/* --------------------------------------------------------------------------
+ * Service startup — called once the interface has an IP address
+ * -------------------------------------------------------------------------- */
+static volatile int __services_started = 0;
+
+static void __lwip_start_services(void)
+{
+    if (__atomic_exchange_n(&__services_started, 1, __ATOMIC_SEQ_CST))
+        return;  /* already started */
 
     printf("lwip: netif up — IP %d.%d.%d.%d\n",
            ip4_addr1_16(netif_ip4_addr(&xv6_netif)),
@@ -313,7 +519,6 @@ static void __lwip_kthread(uint64 arg1, uint64 arg2)
            ip4_addr3_16(netif_ip4_addr(&xv6_netif)),
            ip4_addr4_16(netif_ip4_addr(&xv6_netif)));
 
-    /* Start services that depend on the network stack */
     extern void telnetd_init(void);
     telnetd_init();
     extern void tftpd_init(void);
@@ -332,6 +537,190 @@ static void __lwip_kthread(uint64 arg1, uint64 arg2)
     gdbstub_init();
 }
 
+/* ========================================================================== */
+/* Public API                                                                 */
+/* ========================================================================== */
+
+/**
+ * __lwip_kthread — Kernel thread that initialises the lwIP network stack.
+ *
+ * Waits for userspace (init) to provide network configuration via
+ * /dev/netconf before initialising the stack.  Network init is entirely
+ * driven by init — the kthread will not proceed until init writes to
+ * /dev/netconf.  After the netif is up (and has an IP), starts services
+ * that depend on lwIP (telnetd, gdbstub, etc.).
+ */
+static void __lwip_kthread(uint64 arg1, uint64 arg2)
+{
+    (void)arg1;
+    (void)arg2;
+    ip4_addr_t ipaddr, netmask, gw;
+
+    /* ---- Initialise the TCP/IP stack first ----
+     * This creates the tcpip mbox so that any lwIP function called from
+     * interrupt context (e.g. net_rx → pbuf_free_callback, or the EMAC
+     * link-up path) won't crash on an uninitialised mbox.
+     * tcpip_init() is independent of having a NIC or user configuration. */
+    printf("lwip: initialising network stack (lwIP %s)\n", LWIP_VERSION_STRING);
+    tcpip_init(__tcpip_init_done, NULL);
+
+    /* Wait for the tcpip thread to be ready — must yield so it can run
+     * (especially important on single-CPU configurations). */
+    while (!__atomic_load_n(&__lwip_tcpip_ready, __ATOMIC_ACQUIRE)) {
+        scheduler_yield();
+    }
+
+    /* ---- Wait for a NIC to be registered ---- */
+    printf("lwip: waiting for network device...\n");
+    while (netdev_get_default() == NULL) {
+        sleep_ms(100);
+    }
+    printf("lwip: network device detected\n");
+
+    /* ---- Wait for init to provide configuration via /dev/netconf ---- */
+    printf("lwip: waiting for network configuration from init...\n");
+    while (!__atomic_load_n(&__netconf_ready, __ATOMIC_ACQUIRE)) {
+        sleep_ms(NETCONF_POLL_INTERVAL_MS);
+    }
+    printf("lwip: received configuration from init\n");
+
+    /* Determine IP configuration (init always provides config) */
+    int use_dhcp;
+    if (__netconf_req.mode == NETCONF_MODE_STATIC) {
+        ipaddr.addr  = __netconf_req.ip;
+        netmask.addr = __netconf_req.netmask;
+        gw.addr      = __netconf_req.gateway;
+        use_dhcp = 0;
+        printf("lwip: static config: %d.%d.%d.%d/%d.%d.%d.%d gw %d.%d.%d.%d\n",
+               ip4_addr1_16(&ipaddr), ip4_addr2_16(&ipaddr),
+               ip4_addr3_16(&ipaddr), ip4_addr4_16(&ipaddr),
+               ip4_addr1_16(&netmask), ip4_addr2_16(&netmask),
+               ip4_addr3_16(&netmask), ip4_addr4_16(&netmask),
+               ip4_addr1_16(&gw), ip4_addr2_16(&gw),
+               ip4_addr3_16(&gw), ip4_addr4_16(&gw));
+    } else {
+        /* DHCP — start with 0.0.0.0, address assigned later */
+        IP4_ADDR(&ipaddr,  0, 0, 0, 0);
+        IP4_ADDR(&netmask, 0, 0, 0, 0);
+        IP4_ADDR(&gw,      0, 0, 0, 0);
+        use_dhcp = 1;
+        printf("lwip: using DHCP\n");
+    }
+
+    netif_add(&xv6_netif,
+#if LWIP_IPV4
+              &ipaddr, &netmask, &gw,
+#endif
+              NULL,                  /* state */
+              xv6_netif_init,        /* init callback */
+              tcpip_input);          /* input function */
+
+    netif_set_default(&xv6_netif);
+
+    /* Set hostname before starting DHCP (sent in DHCP DISCOVER) */
+    if (__netconf_req.hostname[0]) {
+        netif_set_hostname(&xv6_netif, __netconf_req.hostname);
+    } else {
+        netif_set_hostname(&xv6_netif, "xv6");
+    }
+
+    netif_set_up(&xv6_netif);
+
+    /* Mark the netif as ready — this unblocks net_rx() and the link
+     * callback so they can safely call into lwIP. */
+    __atomic_store_n(&__lwip_netif_ready, 1, __ATOMIC_RELEASE);
+
+    /* Set initial link state from the driver and register for changes */
+    struct netdev *ndev = netdev_get_default();
+    if (ndev) {
+        netdev_set_link_callback(ndev, __netdev_link_change);
+        if (ndev->link_up)
+            netif_set_link_up(&xv6_netif);
+    }
+
+    if (use_dhcp) {
+        /* Start DHCP — address will be assigned asynchronously */
+        printf("lwip: starting DHCP discovery...\n");
+        dhcp_start(&xv6_netif);
+
+        /* Wait for DHCP to complete (or timeout after 30s) */
+        int dhcp_timeout_ms = 30000;
+        int dhcp_elapsed = 0;
+        while (dhcp_elapsed < dhcp_timeout_ms) {
+            const ip4_addr_t *assigned = netif_ip4_addr(&xv6_netif);
+            if (!ip4_addr_isany_val(*assigned)) {
+                printf("lwip: DHCP lease acquired\n");
+                break;
+            }
+            sleep_ms(500);
+            dhcp_elapsed += 500;
+        }
+
+        const ip4_addr_t *assigned = netif_ip4_addr(&xv6_netif);
+        if (ip4_addr_isany_val(*assigned)) {
+            printf("lwip: DHCP timeout after %d ms, using fallback\n",
+                   dhcp_timeout_ms);
+            /* Use platform-specific fallback */
+            if (platform.has_emac) {
+                IP4_ADDR(&ipaddr,  192, 168, 0, 201);
+                IP4_ADDR(&netmask, 255, 255, 255, 0);
+                IP4_ADDR(&gw,      192, 168, 0, 1);
+            } else {
+                IP4_ADDR(&ipaddr,  10, 0, 2, 15);
+                IP4_ADDR(&netmask, 255, 255, 255, 0);
+                IP4_ADDR(&gw,      10, 0, 2, 2);
+            }
+            dhcp_stop(&xv6_netif);
+            netif_set_addr(&xv6_netif, &ipaddr, &netmask, &gw);
+        }
+    } else {
+        /* Static IP — send gratuitous ARPs to announce our presence */
+        if (ndev && ndev->link_up) {
+            for (int i = 0; i < GARP_COUNT; i++) {
+                etharp_gratuitous(&xv6_netif);
+                if (i < GARP_COUNT - 1)
+                    sleep_ms(GARP_INTERVAL_MS);
+            }
+        }
+    }
+
+    /*
+     * DNS server handling:
+     * - DHCP: lwIP's DHCP client automatically sets DNS from the
+     *   DHCP ACK (option 6).  If the config also specifies dns=,
+     *   it overrides the DHCP-provided server.
+     * - Static: DNS must come from the config file.
+     */
+    if (use_dhcp) {
+        /* Report DNS obtained from DHCP */
+        const ip_addr_t *dhcp_dns = dns_getserver(0);
+        if (!ip_addr_isany(dhcp_dns)) {
+            printf("lwip: DNS from DHCP: %d.%d.%d.%d\n",
+                   (ip_2_ip4(dhcp_dns)->addr >>  0) & 0xff,
+                   (ip_2_ip4(dhcp_dns)->addr >>  8) & 0xff,
+                   (ip_2_ip4(dhcp_dns)->addr >> 16) & 0xff,
+                   (ip_2_ip4(dhcp_dns)->addr >> 24) & 0xff);
+        }
+    }
+    /* Override with config-specified DNS if provided */
+    if (__netconf_req.dns != 0) {
+        ip_addr_t dns_addr;
+        dns_addr.addr = __netconf_req.dns;
+        dns_setserver(0, &dns_addr);
+        printf("lwip: DNS server set to %d.%d.%d.%d (from config)\n",
+               (__netconf_req.dns >>  0) & 0xff,
+               (__netconf_req.dns >>  8) & 0xff,
+               (__netconf_req.dns >> 16) & 0xff,
+               (__netconf_req.dns >> 24) & 0xff);
+    }
+
+    /* Mark lwIP as initialized — sys_netconf() will apply config directly */
+    __atomic_store_n(&__lwip_initialized, 1, __ATOMIC_RELEASE);
+
+    /* Start network services */
+    __lwip_start_services();
+}
+
 /**
  * lwip_net_init — Spawn the lwIP initialisation kthread.
  *
@@ -341,6 +730,11 @@ static void __lwip_kthread(uint64 arg1, uint64 arg2)
  */
 void lwip_net_init(void)
 {
+    /* Register /dev/netconf character device (devtmpfs auto-creates node) */
+    int ret = cdev_register(&netconf_cdev);
+    if (ret != 0)
+        printf("lwip: failed to register /dev/netconf: %d\n", ret);
+
     struct thread *t = kthread_create("lwip", __lwip_kthread, 0, 0,
                                       KERNEL_STACK_ORDER);
     if (IS_ERR_OR_NULL(t)) {

@@ -172,8 +172,11 @@
 // --- Kernel statistics ---
 #define SYS_kstats         160
 
+// --- Network configuration ---
+#define SYS_netconf        161
+
 // Max syscall number (update when adding new syscalls)
-#define SYS_MAXNUM         160
+#define SYS_MAXNUM         161
 
 // --- Linux time64 compatibility stubs used by musl on rv64 ---
 // These are intentionally unsupported in xv6 and return -ENOSYS via

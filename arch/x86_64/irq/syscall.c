@@ -239,6 +239,11 @@ extern uint64 sys_epoll_pwait(void);
 extern uint64 sys_prlimit64(void);
 extern uint64 sys_kstats(void);
 
+// network configuration (lwip_port/lwip_glue.c)
+#ifdef USE_LWIP
+extern uint64 sys_netconf(void);
+#endif
+
 #ifdef USE_LWIP
 extern uint64 sys_socket(void);
 extern uint64 sys_bind(void);
@@ -380,6 +385,7 @@ static uint64 (*syscalls[])(void) = {
     [SYS_prlimit64] sys_prlimit64,
     [SYS_kstats] sys_kstats,
 #ifdef USE_LWIP
+    [SYS_netconf] sys_netconf,
     [SYS_socket] sys_socket,
     [SYS_bind] sys_bind,
     [SYS_listen] sys_listen,

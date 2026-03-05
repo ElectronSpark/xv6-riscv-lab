@@ -2,7 +2,7 @@
  * init.c — musl libc version for xv6
  *
  * The initial user-level program. Opens console, creates device nodes,
- * mounts filesystems, and spawns the shell in a loop.
+ * configures the network, and spawns the shell in a loop.
  *
  * Uses standard POSIX headers. Device major/minor numbers are
  * xv6-specific constants (not kernel headers).
@@ -16,6 +16,7 @@
 #include <sys/wait.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
+#include <arpa/inet.h>
 
 /*
  * xv6 device major/minor numbers — these are xv6-specific constants.
@@ -57,6 +58,219 @@ static long xv6_mount(const char *source, const char *target, const char *fstype
 
 static char *argv[] = { "sh", NULL };
 
+/* ── /dev/netconf integration ────────────────────────────────────────── */
+
+/* Mirror of kernel/inc/dev/netconf.h (no kernel headers in musl builds) */
+#define NETCONF_MODE_DHCP    0
+#define NETCONF_MODE_STATIC  1
+#define NETCONF_HOSTNAME_MAX 32
+
+struct netconf_req {
+    int          mode;
+    unsigned int ip;
+    unsigned int netmask;
+    unsigned int gateway;
+    unsigned int dns;
+    char         hostname[NETCONF_HOSTNAME_MAX];
+};
+
+#define NET_CONF_PATH  "/etc/network.conf"
+
+/* SYS_netconf = 161 (xv6-specific) — fallback if /dev/netconf missing */
+#define SYS_netconf    161
+
+/* ── config file parsing helpers ─────────────────────────────────────── */
+
+/* Parse a dotted-quad IP string into a uint32 in network byte order.
+ * Returns 0 on success, -1 on failure. */
+static int parse_ip4(const char *s, unsigned int *out)
+{
+    struct in_addr addr;
+    /* inet_aton handles dotted-quad → network byte order */
+    if (inet_aton(s, &addr) == 0)
+        return -1;
+    *out = addr.s_addr;
+    return 0;
+}
+
+/* Skip leading whitespace */
+static const char *skip_ws(const char *s)
+{
+    while (*s == ' ' || *s == '\t')
+        s++;
+    return s;
+}
+
+/* Copy value string into dst, stripping trailing whitespace/comments */
+static void copy_value(char *dst, int maxlen, const char *src)
+{
+    int i = 0;
+    while (i < maxlen - 1 && src[i] != '\0' && src[i] != '\n' &&
+           src[i] != '\r' && src[i] != '#')
+        i++;
+    while (i > 0 && (src[i - 1] == ' ' || src[i - 1] == '\t'))
+        i--;
+    memcpy(dst, src, i);
+    dst[i] = '\0';
+}
+
+/* Find the first occurrence of a NUL-terminated string needle in the
+ * first n bytes of s.  We avoid pulling in strstr(). */
+static int starts_with(const char *s, const char *prefix)
+{
+    while (*prefix) {
+        if (*s != *prefix)
+            return 0;
+        s++;
+        prefix++;
+    }
+    return 1;
+}
+
+/* Read /etc/network.conf, parse it, and write to /dev/netconf device */
+static void configure_network(void)
+{
+    struct netconf_req req;
+    memset(&req, 0, sizeof(req));
+    req.mode = NETCONF_MODE_DHCP;  /* default */
+    strncpy(req.hostname, "xv6", NETCONF_HOSTNAME_MAX);
+
+    int fd = open(NET_CONF_PATH, O_RDONLY);
+    if (fd >= 0) {
+        char buf[1024];
+        int n = read(fd, buf, sizeof(buf) - 1);
+        close(fd);
+
+        if (n > 0) {
+            buf[n] = '\0';
+
+            /* Parse line by line */
+            char *line = buf;
+            while (*line) {
+                char *eol = line;
+                while (*eol && *eol != '\n')
+                    eol++;
+
+                char saved = *eol;
+                *eol = '\0';
+
+                const char *p = skip_ws(line);
+
+                /* Skip empty lines and comments */
+                if (*p != '\0' && *p != '#') {
+                    if (starts_with(p, "mode=")) {
+                        const char *val = skip_ws(p + 5);
+                        if (starts_with(val, "static"))
+                            req.mode = NETCONF_MODE_STATIC;
+                        else
+                            req.mode = NETCONF_MODE_DHCP;
+                    } else if (starts_with(p, "ip=")) {
+                        parse_ip4(skip_ws(p + 3), &req.ip);
+                    } else if (starts_with(p, "netmask=")) {
+                        parse_ip4(skip_ws(p + 8), &req.netmask);
+                    } else if (starts_with(p, "gateway=")) {
+                        parse_ip4(skip_ws(p + 8), &req.gateway);
+                    } else if (starts_with(p, "dns=")) {
+                        parse_ip4(skip_ws(p + 4), &req.dns);
+                    } else if (starts_with(p, "hostname=")) {
+                        copy_value(req.hostname, NETCONF_HOSTNAME_MAX,
+                                   skip_ws(p + 9));
+                    }
+                }
+
+                *eol = saved;
+                if (saved == '\0')
+                    break;
+                line = eol + 1;
+            }
+        }
+    }
+
+    /* Apply configuration via /dev/netconf device (created by devtmpfs) */
+    int nfd = open("/dev/netconf", O_WRONLY);
+    if (nfd < 0) {
+        /* Fall back to netconf() syscall if device not yet available */
+        long ret = syscall(SYS_netconf, &req);
+        if (ret < 0)
+            printf("init: netconf syscall failed (%ld)\n", ret);
+        else
+            printf("init: network configured via syscall (%s)\n",
+                   req.mode == NETCONF_MODE_DHCP ? "dhcp" : "static");
+        return;
+    }
+
+    ssize_t ret = write(nfd, &req, sizeof(req));
+    close(nfd);
+
+    if (ret < 0)
+        printf("init: /dev/netconf write failed\n");
+    else
+        printf("init: network configured (%s)\n",
+               req.mode == NETCONF_MODE_DHCP ? "dhcp" : "static");
+}
+
+/*
+ * update_resolv_conf — wait for lwIP to finish configuring, read back
+ * the active DNS server from /dev/netconf, and write /etc/resolv.conf.
+ *
+ * The kernel returns -EAGAIN from read() until lwIP has an IP and DNS.
+ * We poll with a short sleep, giving DHCP time to complete.
+ *
+ * This runs in a forked child so the shell starts immediately.
+ */
+#define SIOCNETCONF_GET  0x89F1
+#define RESOLV_POLL_MS   2000
+#define RESOLV_TIMEOUT   120000   /* 120 s — plenty for link + DHCP */
+
+static void update_resolv_conf(void)
+{
+    int pid = fork();
+    if (pid != 0)
+        return;  /* parent continues immediately */
+
+    /* Child: wait for DNS and update resolv.conf, then exit */
+    int nfd = open("/dev/netconf", O_RDONLY);
+    if (nfd < 0)
+        _exit(0);
+
+    struct netconf_req active;
+    int elapsed = 0;
+
+    while (elapsed < RESOLV_TIMEOUT) {
+        ssize_t n = read(nfd, &active, sizeof(active));
+        if (n == (ssize_t)sizeof(active) && active.dns != 0)
+            break;
+        /* -EAGAIN or no DNS yet — keep polling */
+        usleep(RESOLV_POLL_MS * 1000);
+        elapsed += RESOLV_POLL_MS;
+    }
+    close(nfd);
+
+    if (elapsed >= RESOLV_TIMEOUT || active.dns == 0) {
+        printf("init: timeout waiting for DNS (resolv.conf not updated)\n");
+        _exit(0);
+    }
+
+    /* Format DNS IP address */
+    unsigned char *d = (unsigned char *)&active.dns;
+    char line[64];
+    int len = snprintf(line, sizeof(line), "nameserver %d.%d.%d.%d\n",
+                       d[0], d[1], d[2], d[3]);
+
+    /* Rename the original resolv.conf (ignore errors — may not exist) */
+    rename("/etc/resolv.conf", "/etc/resolv.conf.bak");
+
+    /* Write the new resolv.conf */
+    int fd = open("/etc/resolv.conf", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+    if (fd >= 0) {
+        write(fd, line, len);
+        close(fd);
+    }
+    printf("init: resolv.conf updated (DNS %d.%d.%d.%d)\n",
+           d[0], d[1], d[2], d[3]);
+    _exit(0);
+}
+
 int main(void)
 {
     int pid, wpid;
@@ -73,13 +287,18 @@ int main(void)
     if (ioctl(0, TIOCSCTTY, (void *)0) < 0)
         printf("init: warning: TIOCSCTTY failed\n");
 
-    /* Ensure device nodes exist */
+    /* Ensure device nodes exist (devtmpfs creates them automatically;
+     * mknod errors are silently ignored) */
     mknod("/dev/null",   S_IFCHR | 0666, makedev(NULL_MAJOR, NULL_MINOR));
     mknod("/dev/random", S_IFCHR | 0666, makedev(RANDOM_MAJOR, RANDOM_MINOR));
     mknod("/dev/tty",    S_IFCHR | 0666, makedev(TTY_DEV_MAJOR, TTY_DEV_MINOR));
 
-    /* The ext4 rootfs already contains /usr with Python stdlib.
-     * No separate disk mount needed. */
+    /* Configure network (reads /etc/network.conf, writes to /dev/netconf) */
+    configure_network();
+
+    /* Wait for DHCP/static config to complete, then update /etc/resolv.conf
+     * with the DNS server obtained from DHCP or the config file. */
+    update_resolv_conf();
 
     for (;;) {
         printf("init: starting sh\n");

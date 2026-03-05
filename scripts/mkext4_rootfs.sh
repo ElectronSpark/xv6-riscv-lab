@@ -46,14 +46,38 @@ mkdir -p "$STAGING/sys"
 mkdir -p "$STAGING/etc"
 
 # ── Network configuration (user-space DNS via musl) ──────────────────────────
-# QEMU SLIRP model: gateway 10.0.2.2, DNS 10.0.2.3
-cat > "$STAGING/etc/resolv.conf" <<'RESOLV'
+# Fallback resolv.conf — init will overwrite with DHCP/config-derived DNS
+# at boot. The .bak is a static safety net in case networking doesn't come up.
+cat > "$STAGING/etc/resolv.conf.bak" <<'RESOLV'
 nameserver 10.0.2.3
+RESOLV
+# Start with a minimal resolv.conf; init replaces it at boot.
+cat > "$STAGING/etc/resolv.conf" <<'RESOLV'
+nameserver 127.0.0.1
 RESOLV
 
 cat > "$STAGING/etc/hosts" <<'HOSTS'
 127.0.0.1 localhost
 HOSTS
+
+# ── lwIP network configuration ───────────────────────────────────────────────
+# The kernel reads /etc/network.conf at boot to configure the network.
+# mode=dhcp:   use DHCP (default if this file is missing)
+# mode=static: use the ip/netmask/gateway below
+cat > "$STAGING/etc/network.conf" <<'NETCONF'
+# xv6 network configuration
+# Supported keys: mode, ip, netmask, gateway, dns, hostname
+#
+# mode=dhcp        — obtain IP via DHCP (default)
+# mode=static      — use static IP below
+#
+mode=dhcp
+#ip=192.168.0.201
+#netmask=255.255.255.0
+#gateway=192.168.0.1
+#dns=8.8.8.8
+hostname=xv6
+NETCONF
 
 # Copy README to root
 if [ -f "$README" ]; then

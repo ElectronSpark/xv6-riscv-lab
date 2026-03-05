@@ -155,6 +155,10 @@ int dumpblk(int mode);
 int losetup(int cmd, int loop_num, const char *path);
 uint64 kernbase(void);
 
+// Network configuration
+struct netconf_req;
+int netconf(const struct netconf_req *req);
+
 // New VFS syscalls
 int getdents(int fd, void *dirp, int count);
 int chroot(const char *path);

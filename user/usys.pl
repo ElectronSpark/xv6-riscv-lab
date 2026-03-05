@@ -110,3 +110,5 @@ entry("kstats");
 entry("kqueue");
 entry("kevent_register");
 entry("kevent_wait");
+
+entry("netconf");

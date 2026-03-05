@@ -456,6 +456,7 @@ static void usage(void)
         "Usage: route [-n]\n"
         "       route add default gw <gateway> [dev <iface>]\n"
         "       route add -net <dest> netmask <mask> gw <gw> [dev <iface>]\n"
+        "       route add -host <dest> gw <gw> [dev <iface>]\n"
         "       route del default\n"
         "       route del -net <dest>\n");
 }
@@ -464,6 +465,12 @@ int main(int argc, char *argv[])
 {
     if (argc == 1) {
         show_routes();
+        return 0;
+    }
+
+    /* Handle -h / --help */
+    if (strcmp(argv[1], "-h") == 0 || strcmp(argv[1], "--help") == 0) {
+        usage();
         return 0;
     }
 

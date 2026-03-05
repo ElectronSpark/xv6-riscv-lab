@@ -9,9 +9,13 @@
  *   ifconfig <iface> up             Bring interface up
  *   ifconfig <iface> down           Bring interface down
  *   ifconfig <iface> mtu <n>        Set MTU
+ *   ifconfig <iface> gateway <gw>   Set default gateway
+ *   ifconfig <iface> dns <addr>     Set DNS server
+ *   ifconfig <iface> hostname <n>   Set hostname
+ *   ifconfig <iface> dhcp           Reconfigure via DHCP
  *
  * Multiple options can be combined:
- *   ifconfig en1 10.0.2.15 netmask 255.255.255.0 up
+ *   ifconfig en1 10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 up
  */
 
 #include <stdio.h>
@@ -24,6 +28,24 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <fcntl.h>
+
+/* ── /dev/netconf integration ─────────────────────────────────────── */
+
+/* Mirror of kernel/inc/dev/netconf.h (no kernel headers in musl builds) */
+#define NETCONF_MODE_DHCP   0
+#define NETCONF_MODE_STATIC 1
+#define SIOCNETCONF         0x89F0
+#define NETCONF_HOSTNAME_MAX 32
+
+struct netconf_req {
+    int          mode;
+    unsigned int ip;
+    unsigned int netmask;
+    unsigned int gateway;
+    unsigned int dns;
+    char         hostname[NETCONF_HOSTNAME_MAX];
+};
 
 /* ── helpers ─────────────────────────────────────────────────────────── */
 
@@ -156,8 +178,34 @@ static void enumerate_interfaces(void)
 
 /* ── main ────────────────────────────────────────────────────────────── */
 
+static void usage(void)
+{
+    fprintf(stderr,
+        "Usage: ifconfig                        Show all interfaces\n"
+        "       ifconfig <iface>                Show one interface\n"
+        "       ifconfig <iface> <addr>         Set IP address\n"
+        "       ifconfig <iface> netmask <mask> Set netmask\n"
+        "       ifconfig <iface> up             Bring interface up\n"
+        "       ifconfig <iface> down           Bring interface down\n"
+        "       ifconfig <iface> mtu <n>        Set MTU\n"
+        "       ifconfig <iface> gateway <gw>   Set default gateway\n"
+        "       ifconfig <iface> dns <addr>     Set DNS server\n"
+        "       ifconfig <iface> hostname <n>   Set hostname\n"
+        "       ifconfig <iface> dhcp           Reconfigure via DHCP\n"
+        "\n"
+        "Multiple options can be combined:\n"
+        "       ifconfig en1 10.0.2.15 netmask 255.255.255.0 gateway 10.0.2.2 up\n");
+}
+
 int main(int argc, char *argv[])
 {
+    /* Handle -h / --help before opening the control socket */
+    if (argc == 2 && (strcmp(argv[1], "-h") == 0 ||
+                      strcmp(argv[1], "--help") == 0)) {
+        usage();
+        return 0;
+    }
+
     if (open_ctl_sock() < 0)
         return 1;
 
@@ -238,6 +286,101 @@ int main(int argc, char *argv[])
             ifr.ifr_mtu = atoi(argv[i + 1]);
             if (ioctl(ctl_sock, SIOCSIFMTU, &ifr) < 0)
                 fprintf(stderr, "ifconfig: SIOCSIFMTU: %s\n", strerror(errno));
+            i += 2;
+        } else if (strcmp(argv[i], "dhcp") == 0) {
+            /* Reconfigure via DHCP through /dev/netconf */
+            struct netconf_req nreq;
+            memset(&nreq, 0, sizeof(nreq));
+            nreq.mode = NETCONF_MODE_DHCP;
+            int nfd = open("/dev/netconf", O_WRONLY);
+            if (nfd < 0) {
+                fprintf(stderr, "ifconfig: cannot open /dev/netconf: %s\n",
+                        strerror(errno));
+                close(ctl_sock);
+                return 1;
+            }
+            if (ioctl(nfd, SIOCNETCONF, &nreq) < 0)
+                fprintf(stderr, "ifconfig: SIOCNETCONF (dhcp): %s\n",
+                        strerror(errno));
+            else
+                printf("DHCP reconfiguration requested\n");
+            close(nfd);
+            i++;
+        } else if (strcmp(argv[i], "gateway") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "ifconfig: gateway requires an argument\n");
+                close(ctl_sock);
+                return 1;
+            }
+            struct netconf_req nreq;
+            memset(&nreq, 0, sizeof(nreq));
+            nreq.mode = NETCONF_MODE_STATIC;
+            if (inet_aton(argv[i + 1],
+                          (struct in_addr *)&nreq.gateway) == 0) {
+                fprintf(stderr, "ifconfig: bad gateway: %s\n", argv[i + 1]);
+                close(ctl_sock);
+                return 1;
+            }
+            int nfd = open("/dev/netconf", O_WRONLY);
+            if (nfd < 0) {
+                fprintf(stderr, "ifconfig: cannot open /dev/netconf: %s\n",
+                        strerror(errno));
+                close(ctl_sock);
+                return 1;
+            }
+            if (ioctl(nfd, SIOCNETCONF, &nreq) < 0)
+                fprintf(stderr, "ifconfig: SIOCNETCONF (gateway): %s\n",
+                        strerror(errno));
+            close(nfd);
+            i += 2;
+        } else if (strcmp(argv[i], "dns") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "ifconfig: dns requires an argument\n");
+                close(ctl_sock);
+                return 1;
+            }
+            struct netconf_req nreq;
+            memset(&nreq, 0, sizeof(nreq));
+            nreq.mode = NETCONF_MODE_STATIC;
+            if (inet_aton(argv[i + 1],
+                          (struct in_addr *)&nreq.dns) == 0) {
+                fprintf(stderr, "ifconfig: bad dns: %s\n", argv[i + 1]);
+                close(ctl_sock);
+                return 1;
+            }
+            int nfd = open("/dev/netconf", O_WRONLY);
+            if (nfd < 0) {
+                fprintf(stderr, "ifconfig: cannot open /dev/netconf: %s\n",
+                        strerror(errno));
+                close(ctl_sock);
+                return 1;
+            }
+            if (ioctl(nfd, SIOCNETCONF, &nreq) < 0)
+                fprintf(stderr, "ifconfig: SIOCNETCONF (dns): %s\n",
+                        strerror(errno));
+            close(nfd);
+            i += 2;
+        } else if (strcmp(argv[i], "hostname") == 0) {
+            if (i + 1 >= argc) {
+                fprintf(stderr, "ifconfig: hostname requires an argument\n");
+                close(ctl_sock);
+                return 1;
+            }
+            struct netconf_req nreq;
+            memset(&nreq, 0, sizeof(nreq));
+            nreq.mode = NETCONF_MODE_STATIC;
+            strncpy(nreq.hostname, argv[i + 1], NETCONF_HOSTNAME_MAX - 1);
+            int nfd = open("/dev/netconf", O_WRONLY);
+            if (nfd < 0) {
+                fprintf(stderr, "ifconfig: cannot open /dev/netconf: %s\n",
+                        strerror(errno));
+                close(ctl_sock);
+                return 1;
+            }
+            if (ioctl(nfd, SIOCNETCONF, &nreq) < 0)
+                fprintf(stderr, "ifconfig: SIOCNETCONF (hostname): %s\n",
+                        strerror(errno));
+            close(nfd);
             i += 2;
         } else {
             /* Treat as IP address */

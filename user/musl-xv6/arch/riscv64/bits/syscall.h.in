@@ -313,3 +313,6 @@
 #define SYS_setrlimit                       841
 #define SYS_getrlimit                       840
 #define SYS_settimeofday                    839
+
+/* ---- xv6-specific extended syscalls ---- */
+#define SYS_netconf         161   /* network configuration (netconf.h) */
