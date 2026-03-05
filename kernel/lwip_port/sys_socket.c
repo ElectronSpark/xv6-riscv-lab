@@ -2169,6 +2169,13 @@ uint64 sys_accept4(void)
         return (uint64)-lwip_err_to_errno(err);
     }
 
+    /* The newconn inherits the listening socket's callback from lwIP's
+       accept_function(), but callback_arg.ptr is not yet set to the
+       owning vfs_file.  Disable the callback now to prevent a crash
+       if the tcpip thread fires it before we finish setup below. */
+    newconn->callback = NULL;
+    newconn->callback_arg.ptr = NULL;
+
     /* Allocate a new socket + fd for the accepted connection */
     int file_flags = O_RDWR;
     if (flags & SOCK_NONBLOCK)

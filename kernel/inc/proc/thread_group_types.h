@@ -35,6 +35,8 @@
 #include "resource.h"
 #include <smp/atomic.h>
 
+#define NGROUPS_MAX 32  /* Maximum supplementary groups per process */
+
 struct pgroup;
 
 /**
@@ -93,6 +95,17 @@ struct thread_group {
     uint64 interp_ld;            /* Loaded address of interpreter's .dynamic section */
     char   interp_path[128];     /* Path from PT_INTERP (e.g. /lib/ld-musl-riscv64.so.1) */
     char   exec_path[128];      /* Full path of the executable (e.g. /bin/python) */
+
+    /* ── Process credentials (POSIX user/group identity) ─────────────── */
+    uint32 uid;                  /* Real user ID */
+    uint32 gid;                  /* Real group ID */
+    uint32 euid;                 /* Effective user ID */
+    uint32 egid;                 /* Effective group ID */
+    uint32 suid;                 /* Saved set-user-ID */
+    uint32 sgid;                 /* Saved set-group-ID */
+    int    ngroups;              /* Number of supplementary groups */
+    uint32 groups[NGROUPS_MAX];  /* Supplementary group list */
+    mode_t umask;                /* File creation mask (default 022) */
 
     /* Per-process resource accounting (cumulative counters) */
     struct proc_acct acct;

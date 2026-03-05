@@ -255,6 +255,18 @@ int thread_clone(struct clone_args *args) {
         memmove(ret_ptr->thread_group->rlim, p->thread_group->rlim,
                 sizeof(struct rlimit) * RLIMIT_NLIMITS);
 
+        // Inherit process credentials from the parent.
+        ret_ptr->thread_group->uid    = p->thread_group->uid;
+        ret_ptr->thread_group->gid    = p->thread_group->gid;
+        ret_ptr->thread_group->euid   = p->thread_group->euid;
+        ret_ptr->thread_group->egid   = p->thread_group->egid;
+        ret_ptr->thread_group->suid   = p->thread_group->suid;
+        ret_ptr->thread_group->sgid   = p->thread_group->sgid;
+        ret_ptr->thread_group->ngroups = p->thread_group->ngroups;
+        memmove(ret_ptr->thread_group->groups, p->thread_group->groups,
+                sizeof(uint32) * p->thread_group->ngroups);
+        ret_ptr->thread_group->umask  = p->thread_group->umask;
+
         // Account the fork on the parent's counters
         ACCT_INC(p->thread_group, sched_forks);
     }

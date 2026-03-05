@@ -25,6 +25,7 @@
 #include "vfs/fcntl.h"
 #include "vfs/stat.h"
 #include "vfs/xv6fs/ondisk.h" // for DIRSIZ
+#include "proc/cred.h"
 #include <mm/vm.h>
 #include "printf.h"
 #include "dev/cdev.h"
@@ -430,7 +431,11 @@ static int __vfs_inode_stat(struct vfs_inode *inode, struct stat *kst) {
     kst->ino = inode->ino;
     kst->mode = inode->mode;
     kst->nlink = inode->n_links;
+    kst->st_uid = inode->uid;
+    kst->st_gid = inode->gid;
     kst->size = inode->size;
+    kst->blksize = 1024;
+    kst->blocks = (inode->size + 511) / 512;
     vfs_iunlock(inode);
     return 0;
 }
@@ -689,8 +694,8 @@ uint64 sys_vfs_open(void) {
 
         size_t name_len = strlen(name);
 
-        // Try to create
-        inode = vfs_create(parent, 0644, name, name_len);
+        // Try to create (apply umask to default mode)
+        inode = vfs_create(parent, 0666 & ~current_umask(), name, name_len);
         vfs_iput(parent);
 
         if (IS_ERR(inode)) {
@@ -815,7 +820,7 @@ uint64 sys_vfs_mkdir(void) {
 
     size_t name_len = strlen(name);
 
-    struct vfs_inode *dir = vfs_mkdir(parent, 0755, name, name_len);
+    struct vfs_inode *dir = vfs_mkdir(parent, 0777 & ~current_umask(), name, name_len);
     vfs_iput(parent);
 
     if (IS_ERR(dir)) {
@@ -828,6 +833,9 @@ uint64 sys_vfs_mkdir(void) {
 }
 
 uint64 sys_vfs_mknod(void) {
+    if (!capable())
+        return (uint64)-EPERM;
+
     char path[MAXPATH];
     char name[DIRSIZ + 1];
     int mode, major, minor;
@@ -1461,6 +1469,9 @@ uint64 sys_getdents(void) {
  ******************************************************************************/
 
 uint64 sys_chroot(void) {
+    if (!capable())
+        return (uint64)-EPERM;
+
     char path[MAXPATH];
     int n;
 
@@ -1706,6 +1717,9 @@ int vfs_mount_path(const char *fstype, const char *target, int target_len,
 }
 
 uint64 sys_mount(void) {
+    if (!capable())
+        return (uint64)-EPERM;
+
     char source[MAXPATH];
     char target[MAXPATH];
     char fstype[32];
@@ -1807,6 +1821,9 @@ int vfs_umount_path(const char *target, int target_len) {
 }
 
 uint64 sys_umount(void) {
+    if (!capable())
+        return (uint64)-EPERM;
+
     char target[MAXPATH];
     int n;
 
@@ -1876,6 +1893,12 @@ uint64 sys_vfs_ioctl(void) {
     argint(0, &fd);
     argaddr(1, &cmd);
     argaddr(2, &arg);
+
+    /* ioctl command codes are 32-bit; user-space (musl) passes the code as
+     * a signed int, so the register value may be sign-extended on 64-bit
+     * (e.g. TIOCGPTN 0x80045430 → 0xFFFFFFFF80045430).  Truncate back to
+     * unsigned-32 so the switch cases match correctly. */
+    cmd = (unsigned int)cmd;
 
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL)
@@ -3129,6 +3152,9 @@ uint64 sys_vfs_mkdirat(void) {
  * musl packs major/minor into a single dev_t. xv6 also uses mkdev().
  */
 uint64 sys_vfs_mknodat(void) {
+    if (!capable())
+        return (uint64)-EPERM;
+
     int dirfd;
     char path[MAXPATH];
     char name[DIRSIZ + 1];
@@ -3605,4 +3631,195 @@ uint64 sys_sendfile(void)
     vfs_fput(out_f);
 
     return (uint64)total;
+}
+
+/******************************************************************************
+ * File Ownership and Permission Syscalls (chown/chmod/umask)
+ ******************************************************************************/
+
+/**
+ * sys_vfs_fchmod - change file mode bits
+ * fchmod(int fd, mode_t mode)
+ */
+uint64 sys_vfs_fchmod(void) {
+    int fd;
+    int mode;
+    argint(0, &fd);
+    argint(1, &mode);
+
+    struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, fd);
+    if (f == NULL)
+        return (uint64)-EBADF;
+
+    struct vfs_inode *inode = vfs_inode_deref(&f->inode);
+    if (inode == NULL) {
+        vfs_fput(f);
+        return (uint64)-EBADF;
+    }
+
+    /* Only owner or root may chmod */
+    if (current_euid() != 0 && current_euid() != inode->uid) {
+        vfs_fput(f);
+        return (uint64)-EPERM;
+    }
+
+    vfs_ilock(inode);
+    /* Preserve file type bits, update permission bits */
+    inode->mode = (inode->mode & S_IFMT) | (mode & ~S_IFMT);
+    inode->dirty = 1;
+    vfs_iunlock(inode);
+
+    vfs_fput(f);
+    return 0;
+}
+
+/**
+ * sys_vfs_fchmodat - change file mode bits relative to directory fd
+ * fchmodat(int dirfd, const char *path, mode_t mode, int flags)
+ */
+uint64 sys_vfs_fchmodat(void) {
+    /* dirfd ignored (AT_FDCWD assumed) — matches current *at() pattern */
+    char path[MAXPATH];
+    int mode, flags;
+    argint(1, (int *)path); /* actually argstr */
+    int n = argstr(1, path, MAXPATH);
+    argint(2, &mode);
+    argint(3, &flags);
+    if (n < 0)
+        return (uint64)-EFAULT;
+
+    struct vfs_inode *inode = vfs_namei(path, strlen(path));
+    if (IS_ERR(inode))
+        return PTR_ERR(inode);
+    if (inode == NULL)
+        return (uint64)-ENOENT;
+
+    if (current_euid() != 0 && current_euid() != inode->uid) {
+        vfs_iput(inode);
+        return (uint64)-EPERM;
+    }
+
+    vfs_ilock(inode);
+    inode->mode = (inode->mode & S_IFMT) | (mode & ~S_IFMT);
+    inode->dirty = 1;
+    vfs_iunlock(inode);
+
+    vfs_iput(inode);
+    return 0;
+}
+
+/**
+ * sys_vfs_fchown - change file ownership
+ * fchown(int fd, uid_t owner, gid_t group)
+ */
+uint64 sys_vfs_fchown(void) {
+    int fd, owner, group;
+    argint(0, &fd);
+    argint(1, &owner);
+    argint(2, &group);
+
+    struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, fd);
+    if (f == NULL)
+        return (uint64)-EBADF;
+
+    struct vfs_inode *inode = vfs_inode_deref(&f->inode);
+    if (inode == NULL) {
+        vfs_fput(f);
+        return (uint64)-EBADF;
+    }
+
+    /* Only root can change ownership */
+    if (current_euid() != 0) {
+        /* Non-root can only change group to one they belong to,
+         * and only if they own the file */
+        if (owner != -1 && (uint32)owner != inode->uid) {
+            vfs_fput(f);
+            return (uint64)-EPERM;
+        }
+        if (current_euid() != inode->uid) {
+            vfs_fput(f);
+            return (uint64)-EPERM;
+        }
+        if (group != -1 && !current_in_group((uint32)group)) {
+            vfs_fput(f);
+            return (uint64)-EPERM;
+        }
+    }
+
+    vfs_ilock(inode);
+    if (owner != -1)
+        inode->uid = (uint32)owner;
+    if (group != -1)
+        inode->gid = (uint32)group;
+    /* Clear setuid/setgid bits on chown (POSIX requirement) */
+    if (owner != -1)
+        inode->mode &= ~(S_ISUID | S_ISGID);
+    inode->dirty = 1;
+    vfs_iunlock(inode);
+
+    vfs_fput(f);
+    return 0;
+}
+
+/**
+ * sys_vfs_fchownat - change file ownership relative to directory fd
+ * fchownat(int dirfd, const char *path, uid_t owner, gid_t group, int flags)
+ */
+uint64 sys_vfs_fchownat(void) {
+    char path[MAXPATH];
+    int owner, group, flags;
+    int n = argstr(1, path, MAXPATH);
+    argint(2, &owner);
+    argint(3, &group);
+    argint(4, &flags);
+    if (n < 0)
+        return (uint64)-EFAULT;
+
+    struct vfs_inode *inode = vfs_namei(path, strlen(path));
+    if (IS_ERR(inode))
+        return PTR_ERR(inode);
+    if (inode == NULL)
+        return (uint64)-ENOENT;
+
+    if (current_euid() != 0) {
+        if (owner != -1 && (uint32)owner != inode->uid) {
+            vfs_iput(inode);
+            return (uint64)-EPERM;
+        }
+        if (current_euid() != inode->uid) {
+            vfs_iput(inode);
+            return (uint64)-EPERM;
+        }
+        if (group != -1 && !current_in_group((uint32)group)) {
+            vfs_iput(inode);
+            return (uint64)-EPERM;
+        }
+    }
+
+    vfs_ilock(inode);
+    if (owner != -1)
+        inode->uid = (uint32)owner;
+    if (group != -1)
+        inode->gid = (uint32)group;
+    if (owner != -1)
+        inode->mode &= ~(S_ISUID | S_ISGID);
+    inode->dirty = 1;
+    vfs_iunlock(inode);
+
+    vfs_iput(inode);
+    return 0;
+}
+
+/**
+ * sys_umask - set file creation mask
+ * umask(mode_t mask)
+ * Returns the previous umask value.
+ */
+uint64 sys_umask(void) {
+    int mask;
+    argint(0, &mask);
+    struct thread_group *tg = current->thread_group;
+    mode_t old = tg->umask;
+    tg->umask = (mode_t)(mask & 0777);
+    return (uint64)old;
 }

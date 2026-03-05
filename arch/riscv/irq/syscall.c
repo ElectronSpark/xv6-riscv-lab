@@ -366,6 +366,13 @@ extern uint64 sys_vfs_renameat(void);
 extern uint64 sys_vfs_faccessat(void);
 extern uint64 sys_vfs_dup3(void);
 
+// File ownership and permission syscalls
+extern uint64 sys_vfs_fchmod(void);
+extern uint64 sys_vfs_fchmodat(void);
+extern uint64 sys_vfs_fchown(void);
+extern uint64 sys_vfs_fchownat(void);
+extern uint64 sys_umask(void);
+
 // kqueue syscalls
 extern uint64 sys_kqueue(void);
 extern uint64 sys_kevent_register(void);
@@ -544,6 +551,11 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_epoll_pwait] sys_epoll_pwait,
     [SYS_epoll_ctl] sys_epoll_ctl,
     [SYS_epoll_create1] sys_epoll_create1,
+    [SYS_umask] sys_umask,
+    [SYS_fchownat] sys_vfs_fchownat,
+    [SYS_fchown] sys_vfs_fchown,
+    [SYS_fchmodat] sys_vfs_fchmodat,
+    [SYS_fchmod] sys_vfs_fchmod,
 };
 
 void syscall(void) {

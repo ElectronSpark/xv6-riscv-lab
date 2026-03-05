@@ -204,6 +204,10 @@ set(MUSL_STATIC_PROGRAMS
     mnslookup:nslookup  mepolltest:epolltest
     msocktest:socktest
     mifconfig:ifconfig  mroute:route
+    mlogin:login   mgetty:getty    mpasswd:passwd
+    msu:su         mid:id          mwhoami:whoami
+    museradd:useradd  muserdel:userdel
+    mchown:chown   mchmod:chmod    mtelnetd:telnetd
 )
 foreach(MAPPING ${MUSL_STATIC_PROGRAMS})
     string(REPLACE ":" ";" PARTS ${MAPPING})
@@ -757,6 +761,10 @@ set(MUSL_PROG_MAP
     mnslookup:nslookup  mepolltest:epolltest
     msocktest:socktest
     mifconfig:ifconfig  mroute:route
+    mlogin:login   mgetty:getty    mpasswd:passwd
+    msu:su         mid:id          mwhoami:whoami
+    museradd:useradd  muserdel:userdel
+    mchown:chown   mchmod:chmod    mtelnetd:telnetd
 )
 foreach(MAPPING ${MUSL_PROG_MAP})
     string(REPLACE ":" ";" PARTS ${MAPPING})

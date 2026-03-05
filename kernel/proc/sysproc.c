@@ -7,6 +7,7 @@
 #include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "proc/thread.h"
+#include "proc/cred.h"
 #include "proc/thread_group.h"
 #include "proc/sched.h"
 #include "timer/timer.h"
@@ -46,23 +47,142 @@ uint64 sys_exit(void) {
 
 uint64 sys_getpid(void) { return thread_tgid(current); }
 
-uint64 sys_getuid(void)  { return 0; }  /* always root */
-uint64 sys_geteuid(void) { return 0; }
-uint64 sys_getgid(void)  { return 0; }
-uint64 sys_getegid(void) { return 0; }
-uint64 sys_setuid(void)  { return 0; }  /* silently succeed */
-uint64 sys_setgid(void)  { return 0; }
-uint64 sys_setreuid(void){ return 0; }
-uint64 sys_setregid(void){ return 0; }
+/* ── Credential syscalls ─────────────────────────────────────────────────── */
 
-uint64 sys_getgroups(void) {
-    /* a0 = size, a1 = list[]; if size==0 return count */
-    int size;
-    argint(0, &size);
-    return 0;  /* root has 0 supplementary groups */
+uint64 sys_getuid(void)  { return current->thread_group->uid;  }
+uint64 sys_geteuid(void) { return current->thread_group->euid; }
+uint64 sys_getgid(void)  { return current->thread_group->gid;  }
+uint64 sys_getegid(void) { return current->thread_group->egid; }
+
+uint64 sys_setuid(void) {
+    int id;
+    argint(0, &id);
+    if (id < 0) return (uint64)-EINVAL;
+    struct thread_group *tg = current->thread_group;
+    if (tg->euid == 0) {
+        /* Privileged: set all three */
+        tg->uid = tg->euid = tg->suid = (uint32)id;
+    } else if ((uint32)id == tg->uid || (uint32)id == tg->suid) {
+        tg->euid = (uint32)id;
+    } else {
+        return (uint64)-EPERM;
+    }
+    return 0;
 }
 
-uint64 sys_setgroups(void) { return 0; }
+uint64 sys_setgid(void) {
+    int id;
+    argint(0, &id);
+    if (id < 0) return (uint64)-EINVAL;
+    struct thread_group *tg = current->thread_group;
+    if (tg->euid == 0) {
+        tg->gid = tg->egid = tg->sgid = (uint32)id;
+    } else if ((uint32)id == tg->gid || (uint32)id == tg->sgid) {
+        tg->egid = (uint32)id;
+    } else {
+        return (uint64)-EPERM;
+    }
+    return 0;
+}
+
+uint64 sys_setreuid(void) {
+    int ruid, euid;
+    argint(0, &ruid);
+    argint(1, &euid);
+    struct thread_group *tg = current->thread_group;
+    uint32 old_ruid = tg->uid;
+
+    if (ruid != -1) {
+        if (tg->euid == 0 || (uint32)ruid == tg->uid ||
+            (uint32)ruid == tg->euid) {
+            tg->uid = (uint32)ruid;
+        } else {
+            return (uint64)-EPERM;
+        }
+    }
+    if (euid != -1) {
+        if (tg->euid == 0 || (uint32)euid == old_ruid ||
+            (uint32)euid == tg->euid || (uint32)euid == tg->suid) {
+            tg->euid = (uint32)euid;
+        } else {
+            /* Restore ruid on failure */
+            tg->uid = old_ruid;
+            return (uint64)-EPERM;
+        }
+    }
+    /* If real UID was set, or effective UID was set to a value not equal
+     * to the previous real UID, the saved UID is set to the new euid. */
+    if (ruid != -1 || (euid != -1 && (uint32)euid != old_ruid))
+        tg->suid = tg->euid;
+    return 0;
+}
+
+uint64 sys_setregid(void) {
+    int rgid, egid;
+    argint(0, &rgid);
+    argint(1, &egid);
+    struct thread_group *tg = current->thread_group;
+    uint32 old_rgid = tg->gid;
+
+    if (rgid != -1) {
+        if (tg->euid == 0 || (uint32)rgid == tg->gid ||
+            (uint32)rgid == tg->egid) {
+            tg->gid = (uint32)rgid;
+        } else {
+            return (uint64)-EPERM;
+        }
+    }
+    if (egid != -1) {
+        if (tg->euid == 0 || (uint32)egid == old_rgid ||
+            (uint32)egid == tg->egid || (uint32)egid == tg->sgid) {
+            tg->egid = (uint32)egid;
+        } else {
+            tg->gid = old_rgid;
+            return (uint64)-EPERM;
+        }
+    }
+    if (rgid != -1 || (egid != -1 && (uint32)egid != old_rgid))
+        tg->sgid = tg->egid;
+    return 0;
+}
+
+uint64 sys_getgroups(void) {
+    int size;
+    uint64 list_addr;
+    argint(0, &size);
+    argaddr(1, &list_addr);
+    struct thread_group *tg = current->thread_group;
+
+    if (size == 0)
+        return (uint64)tg->ngroups;
+    if (size < tg->ngroups)
+        return (uint64)-EINVAL;
+    if (tg->ngroups > 0) {
+        if (either_copyout(1, list_addr, tg->groups,
+                           sizeof(uint32) * tg->ngroups) < 0)
+            return (uint64)-EFAULT;
+    }
+    return (uint64)tg->ngroups;
+}
+
+uint64 sys_setgroups(void) {
+    int size;
+    uint64 list_addr;
+    argint(0, &size);
+    argaddr(1, &list_addr);
+    if (current->thread_group->euid != 0)
+        return (uint64)-EPERM;
+    if (size < 0 || size > NGROUPS_MAX)
+        return (uint64)-EINVAL;
+    struct thread_group *tg = current->thread_group;
+    if (size > 0) {
+        if (either_copyin(tg->groups, 1, list_addr,
+                          sizeof(uint32) * size) < 0)
+            return (uint64)-EFAULT;
+    }
+    tg->ngroups = size;
+    return 0;
+}
 
 uint64 sys_getppid(void) {
     if (current->parent == NULL) {

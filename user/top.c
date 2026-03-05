@@ -75,6 +75,7 @@ static int parse_u64_field(const char *line, const char *key, uint64 *val)
 struct proc_snap {
 	int    pid;
 	int    ppid;
+	int    uid;
 	char   name[17];
 	char   state[8];
 	uint64 vm_kb;
@@ -114,6 +115,7 @@ static int parse_status(int pid, struct proc_snap *ps)
 
 	ps->pid = pid;
 	ps->ppid = 0;
+	ps->uid = -1;
 	ps->name[0] = '\0';
 	ps->state[0] = '\0';
 	ps->vm_kb = 0;
@@ -141,6 +143,8 @@ static int parse_status(int pid, struct proc_snap *ps)
 			ps->pid = (int)tmp;
 		} else if (parse_u64_field(p, "PPid", &tmp)) {
 			ps->ppid = (int)tmp;
+		} else if (parse_u64_field(p, "Uid", &tmp)) {
+			ps->uid = (int)tmp;
 		} else if (parse_u64_field(p, "VmSize", &tmp)) {
 			ps->vm_kb = tmp;
 		} else if (parse_u64_field(p, "CpuTime", &tmp)) {
@@ -219,6 +223,66 @@ static struct proc_snap *find_by_pid(int slot, int pid)
 	for (int i = 0; i < snap_count[slot]; i++)
 		if (snap[slot][i].pid == pid)
 			return &snap[slot][i];
+	return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/*  UID → username cache (loaded once from /etc/passwd)               */
+/* ------------------------------------------------------------------ */
+
+#define MAX_USERS 64
+#define MAX_UNAME 16
+
+static struct {
+	int  uid;
+	char name[MAX_UNAME];
+} uid_cache[MAX_USERS];
+static int uid_cache_count;
+
+static void load_passwd(void)
+{
+	uid_cache_count = 0;
+	char buf[2048];
+	int fd = open("/etc/passwd", 0);
+	if (fd < 0)
+		return;
+	int total = 0, n;
+	while (total < (int)sizeof(buf) - 1 &&
+	       (n = read(fd, buf + total, sizeof(buf) - 1 - total)) > 0)
+		total += n;
+	close(fd);
+	buf[total] = '\0';
+
+	/* Parse lines:  name:x:uid:gid:... */
+	char *p = buf;
+	while (*p && uid_cache_count < MAX_USERS) {
+		char *c1 = 0;
+		for (char *q = p; *q && *q != '\n'; q++)
+			if (*q == ':' && !c1) { c1 = q; break; }
+		if (!c1) { while (*p && *p != '\n') p++; if (*p) p++; continue; }
+		char *c2 = 0;
+		for (char *q = c1 + 1; *q && *q != '\n'; q++)
+			if (*q == ':') { c2 = q; break; }
+		if (!c2) { while (*p && *p != '\n') p++; if (*p) p++; continue; }
+		int u = 0;
+		for (char *q = c2 + 1; *q >= '0' && *q <= '9'; q++)
+			u = u * 10 + (*q - '0');
+		int nlen = c1 - p;
+		if (nlen >= MAX_UNAME) nlen = MAX_UNAME - 1;
+		memcpy(uid_cache[uid_cache_count].name, p, nlen);
+		uid_cache[uid_cache_count].name[nlen] = '\0';
+		uid_cache[uid_cache_count].uid = u;
+		uid_cache_count++;
+		while (*p && *p != '\n') p++;
+		if (*p) p++;
+	}
+}
+
+static const char *uid_to_name(int uid)
+{
+	for (int i = 0; i < uid_cache_count; i++)
+		if (uid_cache[i].uid == uid)
+			return uid_cache[i].name;
 	return 0;
 }
 
@@ -352,12 +416,12 @@ static void print_procs(int cur_slot, int prev_slot, int show_all,
 
 	/* Header line */
 	if (have_prev)
-		printf("%-6s %-16s %-5s %5s %8s %6s %9s %9s %9s %9s\n",
-		       "PID", "NAME", "STATE", "VM",
+		printf("%-6s %-8s %-16s %-5s %5s %8s %6s %9s %9s %9s %9s\n",
+		       "PID", "USER", "NAME", "STATE", "VM",
 		       "CPU(ms)", "CPU%", "FS_RD/s", "FS_WR/s", "NTX/s", "NRX/s");
 	else
-		printf("%-6s %-16s %-5s %5s %8s %6s %9s %9s %9s %9s\n",
-		       "PID", "NAME", "STATE", "VM",
+		printf("%-6s %-8s %-16s %-5s %5s %8s %6s %9s %9s %9s %9s\n",
+		       "PID", "USER", "NAME", "STATE", "VM",
 		       "CPU(ms)", "CPU%", "FS_RD", "FS_WR", "NET_TX", "NET_RX");
 
 	for (int i = 0; i < n; i++) {
@@ -386,6 +450,14 @@ static void print_procs(int cur_slot, int prev_slot, int show_all,
 		uint64 cputime_ms = 0;
 		if (timebase_freq > 0)
 			cputime_ms = cur->cputime_raw * 1000 / timebase_freq;
+
+		/* Resolve username */
+		const char *uname = uid_to_name(cur->uid);
+		char uid_str[12];
+		if (!uname) {
+			snprintf(uid_str, sizeof(uid_str), "%d", cur->uid);
+			uname = uid_str;
+		}
 
 		if (have_prev) {
 			/* Delta mode — compute I/O rates */
@@ -419,8 +491,8 @@ static void print_procs(int cur_slot, int prev_slot, int show_all,
 			fmt_rate(ntx, sizeof(ntx), dt_ntx, interval_secs);
 			fmt_rate(nrx, sizeof(nrx), dt_nrx, interval_secs);
 
-			printf("%-6d %-16s %-5s %5d %8d %3d.%d %9s %9s %9s %9s\n",
-			       cur->pid, cur->name, cur->state,
+			printf("%-6d %-8s %-16s %-5s %5d %8d %3d.%d %9s %9s %9s %9s\n",
+			       cur->pid, uname, cur->name, cur->state,
 			       (int)cur->vm_kb, (int)cputime_ms,
 			       cpu_pct_x10 / 10, cpu_pct_x10 % 10,
 			       frd, fwr, ntx, nrx);
@@ -432,8 +504,8 @@ static void print_procs(int cur_slot, int prev_slot, int show_all,
 			fmt_bytes(ntx, sizeof(ntx), cur->net_bytes_sent);
 			fmt_bytes(nrx, sizeof(nrx), cur->net_bytes_recv);
 
-			printf("%-6d %-16s %-5s %5d %8d %3d.%d %9s %9s %9s %9s\n",
-			       cur->pid, cur->name, cur->state,
+			printf("%-6d %-8s %-16s %-5s %5d %8d %3d.%d %9s %9s %9s %9s\n",
+			       cur->pid, uname, cur->name, cur->state,
 			       (int)cur->vm_kb, (int)cputime_ms,
 			       cpu_pct_x10 / 10, cpu_pct_x10 % 10,
 			       frd, fwr, ntx, nrx);
@@ -482,6 +554,8 @@ int main(int argc, char *argv[])
 
 	struct kstats ks[2]; /* two kstats buffers for delta */
 	int cur = 0;         /* current slot index (alternates 0/1) */
+
+	load_passwd();
 
 	for (int iter = 0; iter < iterations; iter++) {
 		int prev = -1;

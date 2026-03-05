@@ -60,6 +60,41 @@ cat > "$STAGING/etc/hosts" <<'HOSTS'
 127.0.0.1 localhost
 HOSTS
 
+# ── User database files (multi-user support) ────────────────────────────────
+# /etc/passwd – root + guest accounts
+cat > "$STAGING/etc/passwd" <<'PASSWD'
+root:x:0:0:root:/root:/bin/sh
+guest:x:1000:1000:Guest User:/home/guest:/bin/sh
+nobody:x:65534:65534:Nobody:/nonexistent:/bin/false
+PASSWD
+
+# /etc/group – root + guest groups
+cat > "$STAGING/etc/group" <<'GROUP'
+root:x:0:root
+wheel:x:10:root
+guest:x:1000:guest
+nogroup:x:65534:
+GROUP
+
+# /etc/shadow – password hashes (root has no password initially, guest locked)
+# Use SHA-512 ($6$) placeholder. root has empty-password hash (just run passwd
+# after boot to set one). guest is locked (! prefix).
+cat > "$STAGING/etc/shadow" <<'SHADOW'
+root::0:0:99999:7:::
+guest:!:0:0:99999:7:::
+nobody:!:0:0:99999:7:::
+SHADOW
+chmod 600 "$STAGING/etc/shadow" 2>/dev/null || true
+
+# Create home directories
+mkdir -p "$STAGING/root"
+mkdir -p "$STAGING/home/guest"
+
+# /etc/shells – valid login shells
+cat > "$STAGING/etc/shells" <<'SHELLS'
+/bin/sh
+SHELLS
+
 # ── lwIP network configuration ───────────────────────────────────────────────
 # The kernel reads /etc/network.conf at boot to configure the network.
 # mode=dhcp:   use DHCP (default if this file is missing)

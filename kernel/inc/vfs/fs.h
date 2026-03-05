@@ -180,4 +180,10 @@ static inline bool vfs_inode_is_local_root(struct vfs_inode *inode) {
 void vfs_dump_inodes(void);
 void vfs_dump_sb_inodes(struct vfs_superblock *sb);
 
+// Permission checking (vfs_permission.c)
+#define MAY_READ    4
+#define MAY_WRITE   2
+#define MAY_EXEC    1
+int inode_permission(struct vfs_inode *inode, int mask);
+
 #endif // __KERNEL_VIRTUAL_FILE_SYSTEM_FS_H

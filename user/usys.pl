@@ -47,6 +47,8 @@ entry("ftruncate");
 entry("getpid");
 entry("getppid");
 entry("gettid");
+entry("getuid");
+entry("geteuid");
 entry("getrandom");
 entry("exit_group");
 entry("tgkill");

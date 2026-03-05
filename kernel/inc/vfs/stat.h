@@ -11,11 +11,15 @@
  * Use S_ISDIR(), S_ISREG(), S_ISLNK(), etc. macros to check file type.
  */
 struct stat {
-    int32 dev;    // File system's disk device
-    uint64 ino;   // Inode number
-    mode_t mode;  // Permission and type bits (use S_IS* macros)
-    uint32 nlink; // Number of links to file
-    uint64 size;  // Size of file in bytes
+    int32 dev;      // File system's disk device
+    uint64 ino;     // Inode number
+    mode_t mode;    // Permission and type bits (use S_IS* macros)
+    uint32 nlink;   // Number of links to file
+    uint32 st_uid;  // Owner user ID
+    uint32 st_gid;  // Owner group ID
+    uint64 size;    // Size of file in bytes
+    uint32 blksize; // Preferred I/O block size
+    uint64 blocks;  // Number of 512-byte blocks allocated
 };
 
 #ifndef S_IRUSR
@@ -33,6 +37,12 @@ struct stat {
 #define S_IROTH 00004
 #define S_IWOTH 00002
 #define S_IXOTH 00001
+#endif
+
+#ifndef S_ISUID
+#define S_ISUID 04000  /* Set-user-ID on execution */
+#define S_ISGID 02000  /* Set-group-ID on execution */
+#define S_ISVTX 01000  /* Sticky bit */
 #endif
 
 #define S_IFMT 0170000   /* type of file */

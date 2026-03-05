@@ -519,8 +519,10 @@ static void __lwip_start_services(void)
            ip4_addr3_16(netif_ip4_addr(&xv6_netif)),
            ip4_addr4_16(netif_ip4_addr(&xv6_netif)));
 
-    extern void telnetd_init(void);
-    telnetd_init();
+    /* Kernel-side telnetd disabled — user-space telnetd handles
+     * connections with proper multi-user login authentication. */
+    // extern void telnetd_init(void);
+    // telnetd_init();
     extern void tftpd_init(void);
     tftpd_init();
     extern void httpd_daemon_init(void);

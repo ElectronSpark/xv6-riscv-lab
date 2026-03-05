@@ -58,6 +58,30 @@ static long xv6_mount(const char *source, const char *target, const char *fstype
 
 static char *argv[] = { "sh", NULL };
 
+/* ── telnetd launcher ──────────────────────────────────────────────────── */
+static void start_telnetd(void)
+{
+    pid_t pid = fork();
+    if (pid != 0)
+        return;  /* parent continues */
+
+    /* Child: exec telnetd in background */
+    /* Close inherited console fds — telnetd opens its own sockets */
+    close(STDIN_FILENO);
+    close(STDOUT_FILENO);
+    close(STDERR_FILENO);
+
+    /* Reopen /dev/console for telnetd's own logging */
+    open("/dev/console", O_RDWR);  /* fd 0 */
+    dup(0);  /* fd 1 */
+    dup(0);  /* fd 2 */
+
+    char *telnetd_argv[] = { "telnetd", NULL };
+    execv("/bin/telnetd", telnetd_argv);
+    _exit(1);  /* exec failed */
+}
+
+
 /* ── /dev/netconf integration ────────────────────────────────────────── */
 
 /* Mirror of kernel/inc/dev/netconf.h (no kernel headers in musl builds) */
@@ -300,16 +324,25 @@ int main(void)
      * with the DNS server obtained from DHCP or the config file. */
     update_resolv_conf();
 
+    /* Start telnet daemon (background, listens on port 23) */
+    start_telnetd();
+
     for (;;) {
-        printf("init: starting sh\n");
+        printf("init: starting getty on /dev/console\n");
         pid = fork();
         if (pid < 0) {
             printf("init: fork failed\n");
             _exit(1);
         }
         if (pid == 0) {
+            char *getty_argv[] = { "getty", "/dev/console", NULL };
+            execv("/bin/getty", getty_argv);
+            /* If getty not found, fall back to login */
+            char *login_argv[] = { "login", NULL };
+            execv("/bin/login", login_argv);
+            /* Last resort: shell */
             execv("/bin/sh", argv);
-            printf("init: exec sh failed\n");
+            printf("init: exec failed\n");
             _exit(1);
         }
 

@@ -110,6 +110,8 @@ int ftruncate(int fd, int64 length);
 int getpid(void);
 int getppid(void);
 int gettid(void);
+int getuid(void);
+int geteuid(void);
 int getrandom(void *buf, int len);
 int tgkill(int tgid, int tid, int sig);
 int tkill(int tid, int sig);

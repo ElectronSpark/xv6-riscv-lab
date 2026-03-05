@@ -29,6 +29,7 @@
 #include "vfs/fs.h"
 #include "vfs/file.h"
 #include "vfs/fcntl.h"
+#include "proc/cred.h"
 #include "signal.h"
 #include "kqueue_types.h"
 #include "accounting.h"
@@ -252,6 +253,10 @@ int exec(char *path, char **argv, char **envp) {
     uint64 interp_base = 0;   /* load bias of interpreter */
     uint64 interp_entry = 0;  /* entry point of interpreter */
     uint64 interp_ld = 0;     /* loaded address of interpreter's .dynamic */
+    int exec_setuid = 0;      /* set if S_ISUID bit on executable */
+    int exec_setgid = 0;      /* set if S_ISGID bit on executable */
+    uint32 exec_uid = 0;      /* uid to adopt if setuid */
+    uint32 exec_gid = 0;      /* gid to adopt if setgid */
 
     exec_dbg("pid %d: exec(\"%s\")\n", current->pid, path);
 
@@ -260,6 +265,24 @@ int exec(char *path, char **argv, char **envp) {
     if (IS_ERR_OR_NULL(inode)) {
         exec_dbg("  FAIL: vfs_namei(\"%s\") failed\n", path);
         return -1;
+    }
+
+    // Check execute permission
+    int perm_ret = inode_permission(inode, MAY_EXEC);
+    if (perm_ret != 0) {
+        exec_dbg("  FAIL: no execute permission on \"%s\"\n", path);
+        vfs_iput(inode);
+        return perm_ret;
+    }
+
+    // Check for setuid/setgid bits
+    if (inode->mode & S_ISUID) {
+        exec_setuid = 1;
+        exec_uid = inode->uid;
+    }
+    if (inode->mode & S_ISGID) {
+        exec_setgid = 1;
+        exec_gid = inode->gid;
     }
 
     // Open the file for reading
@@ -545,12 +568,22 @@ int exec(char *path, char **argv, char **envp) {
         push_auxv(ustack, &aidx, AT_BASE, 0);
     }
 
-    /* Fake UID/GID — xv6 has no notion of users */
-    push_auxv(ustack, &aidx, AT_UID, 0);
-    push_auxv(ustack, &aidx, AT_EUID, 0);
-    push_auxv(ustack, &aidx, AT_GID, 0);
-    push_auxv(ustack, &aidx, AT_EGID, 0);
-    push_auxv(ustack, &aidx, AT_SECURE, 0);
+    /* Apply setuid/setgid credentials before populating auxv */
+    if (exec_setuid) {
+        p->thread_group->euid = exec_uid;
+        p->thread_group->suid = exec_uid;
+    }
+    if (exec_setgid) {
+        p->thread_group->egid = exec_gid;
+        p->thread_group->sgid = exec_gid;
+    }
+
+    /* Process credentials for ELF auxiliary vector */
+    push_auxv(ustack, &aidx, AT_UID, p->thread_group->uid);
+    push_auxv(ustack, &aidx, AT_EUID, p->thread_group->euid);
+    push_auxv(ustack, &aidx, AT_GID, p->thread_group->gid);
+    push_auxv(ustack, &aidx, AT_EGID, p->thread_group->egid);
+    push_auxv(ustack, &aidx, AT_SECURE, (exec_setuid || exec_setgid) ? 1 : 0);
 
     /* AT_NULL terminates the auxv */
     push_auxv(ustack, &aidx, AT_NULL, 0);

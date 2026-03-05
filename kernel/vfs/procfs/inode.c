@@ -477,6 +477,12 @@ static char *procfs_gen_status(int tgid) {
         util_avg = p->sched_entity->util_avg;
         load_contrib = p->sched_entity->load_avg_contrib;
     }
+    /* Credentials */
+    uint32 p_uid = 0, p_gid = 0;
+    if (p->thread_group) {
+        p_uid = p->thread_group->uid;
+        p_gid = p->thread_group->gid;
+    }
     rcu_read_unlock();
 
     char *buf = kvmalloc(PROCFS_BUF_SIZE);
@@ -488,11 +494,15 @@ static char *procfs_gen_status(int tgid) {
              "Pid:\t%d\n"
              "PPid:\t%d\n"
              "State:\t%s\n"
+             "Uid:\t%u\n"
+             "Gid:\t%u\n"
              "VmSize:\t%lu kB\n"
              "CpuTime:\t%lu\n"
              "UtilAvg:\t%u\n"
              "LoadContrib:\t%lu\n",
-             name, tgid, ppid, statestr, heap_kb,
+             name, tgid, ppid, statestr,
+             (unsigned)p_uid, (unsigned)p_gid,
+             heap_kb,
              (unsigned long)cputime_raw,
              (unsigned)util_avg,
              (unsigned long)load_contrib);

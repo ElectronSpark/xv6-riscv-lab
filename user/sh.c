@@ -26,6 +26,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <curses.h>
+#include <pwd.h>
 extern int getdents(int fd, void *dirp, int count);
 extern char **environ;
 static int exec(const char *path, char **argv) { return execve(path, argv, environ); }
@@ -226,6 +227,10 @@ static int ncurses_initialized;
 
 // Current working directory (for prompt)
 static char cwd_path[512] = "/";
+
+// Current user info (for prompt)
+static char user_name[64] = "?";
+static int  user_uid = -1;
 
 #ifdef USE_NCURSES_SHELL
 #define errprintf(...) fprintf(stderr, __VA_ARGS__)
@@ -548,8 +553,13 @@ static void term_clear_screen(void) {
 }
 
 static void term_show_prompt(void) {
+    term_write(user_name, strlen(user_name));
+    term_write(":", 1);
     term_write(cwd_path, strlen(cwd_path));
-    term_write(" $ ", 3);
+    if (user_uid == 0)
+        term_write("# ", 2);
+    else
+        term_write("$ ", 2);
 }
 
 // =====================================================================
@@ -1227,6 +1237,71 @@ static void update_cwd(void) {
         strcpy(cwd_path, "?");
 }
 
+// Resolve username from /etc/passwd for the current uid.
+static void update_user_info(void) {
+#ifdef USE_NCURSES_SHELL
+    user_uid = (int)getuid();
+    struct passwd *pw = getpwuid(user_uid);
+    if (pw && pw->pw_name) {
+        int n = strlen(pw->pw_name);
+        if (n >= (int)sizeof(user_name))
+            n = sizeof(user_name) - 1;
+        memcpy(user_name, pw->pw_name, n);
+        user_name[n] = 0;
+    } else {
+        itoa_local(user_uid, user_name, sizeof(user_name));
+    }
+#else
+    user_uid = getuid();
+    // Parse /etc/passwd: each line is  name:x:uid:gid:...
+    int fd = open("/etc/passwd", O_RDONLY);
+    if (fd < 0) {
+        itoa_local(user_uid, user_name, sizeof(user_name));
+        return;
+    }
+    char pbuf[1024];
+    int total = 0, n;
+    while ((n = read(fd, pbuf + total, sizeof(pbuf) - total - 1)) > 0)
+        total += n;
+    close(fd);
+    pbuf[total] = 0;
+
+    char *p = pbuf;
+    while (*p) {
+        // Parse one line: name:x:uid:...
+        char *line_start = p;
+        // Find first colon (end of name)
+        char *c1 = 0;
+        for (char *q = p; *q && *q != '\n'; q++) {
+            if (*q == ':' && !c1) { c1 = q; break; }
+        }
+        if (!c1) { while (*p && *p != '\n') p++; if (*p) p++; continue; }
+        // Skip password field → find second colon
+        char *c2 = 0;
+        for (char *q = c1 + 1; *q && *q != '\n'; q++) {
+            if (*q == ':') { c2 = q; break; }
+        }
+        if (!c2) { while (*p && *p != '\n') p++; if (*p) p++; continue; }
+        // Parse uid number after second colon
+        int pw_uid = 0;
+        for (char *q = c2 + 1; *q >= '0' && *q <= '9'; q++)
+            pw_uid = pw_uid * 10 + (*q - '0');
+        if (pw_uid == user_uid) {
+            int namelen = c1 - line_start;
+            if (namelen >= (int)sizeof(user_name))
+                namelen = sizeof(user_name) - 1;
+            memcpy(user_name, line_start, namelen);
+            user_name[namelen] = 0;
+            return;
+        }
+        while (*p && *p != '\n') p++;
+        if (*p) p++;
+    }
+    // Not found — use numeric uid
+    itoa_local(user_uid, user_name, sizeof(user_name));
+#endif
+}
+
 // ---- Enhanced ls ----
 
 static char mode_type_char(mode_t m) {
@@ -1596,6 +1671,7 @@ int main(void) {
 
     env_init();
     update_cwd();
+    update_user_info();
 
 #ifdef USE_NCURSES_SHELL
     setenv("TERMINFO", "/usr/share/terminfo", 1);

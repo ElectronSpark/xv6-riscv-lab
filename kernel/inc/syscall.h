@@ -189,6 +189,14 @@
 
 // --- Additional socket stubs (high musl numbers) ---
 #define SYS_sendmmsg        842
+
+// --- File ownership and permission syscalls (musl high numbers) ---
+#define SYS_umask           847
+#define SYS_fchownat        939
+#define SYS_fchown          940
+#define SYS_fchmodat        941
+#define SYS_fchmod          942
+
 #define SYS_socketpair      974
 
 // --- Aliases for musl stub numbers (mapped to real kernel numbers) ---

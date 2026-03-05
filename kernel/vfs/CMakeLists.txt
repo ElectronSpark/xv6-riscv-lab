@@ -4,6 +4,7 @@ add_library(vfs_core OBJECT
     file.c
     fdtable.c
     vfs_syscall.c
+    vfs_permission.c
     pipe.c
     unix_socket.c
 )

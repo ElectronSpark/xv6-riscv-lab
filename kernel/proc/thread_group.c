@@ -136,6 +136,9 @@ int thread_group_alloc(struct thread *leader) {
 
     tg_shared_pending_init(tg);
 
+    // Default process credentials (root, umask 022)
+    tg->umask = 022;
+
     // Initialise per-process accounting and resource limits
     acct_init(tg);
     rlimit_init_defaults(tg->rlim);

@@ -26,6 +26,7 @@
 #include <mm/slab.h>
 #include "ext4fs_private.h"
 #include "kernel/vfs/vfs_private.h"
+#include "proc/cred.h"
 
 #include <ext4_errno.h>
 #include <ext4_fs.h>
@@ -345,6 +346,8 @@ static struct vfs_inode *ext4fs_create(struct vfs_inode *dir, mode_t mode,
                         vfs_mode_to_ext4_imode(mode | S_IFREG));
     ext4_inode_set_links_cnt(child_ref.inode, 1);
     ext4_inode_set_size(child_ref.inode, 0);
+    ext4_inode_set_uid(child_ref.inode, current_euid());
+    ext4_inode_set_gid(child_ref.inode, current_egid());
     child_ref.dirty = true;
 
     /* Add directory entry */
@@ -411,6 +414,8 @@ static struct vfs_inode *ext4fs_mkdir(struct vfs_inode *dir, mode_t mode,
     ext4_inode_set_mode(&fs->sb, child_ref.inode,
                         vfs_mode_to_ext4_imode(mode | S_IFDIR));
     ext4_inode_set_links_cnt(child_ref.inode, 1);
+    ext4_inode_set_uid(child_ref.inode, current_euid());
+    ext4_inode_set_gid(child_ref.inode, current_egid());
     child_ref.dirty = true;
 
     /* Initialize blocks for the new directory */

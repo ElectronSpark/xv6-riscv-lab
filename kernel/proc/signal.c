@@ -43,6 +43,7 @@
 #include "clone_flags.h"
 #include "errno.h"
 #include "proc/pgroup.h"
+#include "proc/cred.h"
 
 static slab_cache_t __sigacts_pool;
 static slab_cache_t __ksiginfo_pool;
@@ -606,6 +607,35 @@ int signal_send(int pid, ksiginfo_t *info) {
         return -ESRCH; // No thread found
     }
     assert(p != NULL, "signal_send: thread is NULL");
+
+    /* POSIX signal permission check:
+     * A process can send a signal to another process only if:
+     *   - The sender has root privileges (euid == 0), OR
+     *   - The sender's real or effective UID matches the target's
+     *     real or saved-set-user-ID.
+     * Signal 0 (null signal) is used for permission checking only.
+     * SIGCONT to a process in the same session is always allowed. */
+    if (info->sender != NULL && p->thread_group != NULL &&
+        !p->thread_group->is_kernel) {
+        struct thread_group *sender_tg = info->sender->thread_group;
+        struct thread_group *target_tg = p->thread_group;
+        if (sender_tg != NULL && sender_tg->euid != 0) {
+            int allowed = 0;
+            if (sender_tg->uid == target_tg->uid ||
+                sender_tg->uid == target_tg->suid ||
+                sender_tg->euid == target_tg->uid ||
+                sender_tg->euid == target_tg->suid)
+                allowed = 1;
+            /* SIGCONT to a process in the same session */
+            if (info->signo == SIGCONT &&
+                info->sender->session == p->session)
+                allowed = 1;
+            if (!allowed) {
+                rcu_read_unlock();
+                return -EPERM;
+            }
+        }
+    }
 
     int ret;
     // If the target has a thread group and is the group leader (i.e., pid ==
