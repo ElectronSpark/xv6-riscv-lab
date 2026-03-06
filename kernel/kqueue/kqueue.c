@@ -453,6 +453,36 @@ int kqueue_register(struct kqueue *kq, struct kevent *changelist,
  * kqueue_wait - wait for events and copy them out
  * ======================================================================== */
 
+/* --- Timed-wait helpers ------------------------------------------------- */
+
+struct __kq_timed_data {
+    spinlock_t *lock;
+    struct timer_node *tn;
+    uint64 timeout_ms;
+};
+
+/*
+ * Sleep callback: arm a one-shot timer that wakes the *current* thread
+ * (via __sched_timer_callback / wakeup()), then release the kqueue lock.
+ * Called inside tq_wait_in_state_cb with interrupts already disabled and
+ * the thread already on the wait queue.
+ */
+static int __kq_timed_sleep_cb(void *data) {
+    struct __kq_timed_data *d = (struct __kq_timed_data *)data;
+    sched_timer_set(d->tn, d->timeout_ms);
+    return spin_sleep_cb(d->lock);
+}
+
+/*
+ * Wakeup callback: cancel the timer (no-op if already fired), then
+ * re-acquire the kqueue lock.
+ */
+static void __kq_timed_wakeup_cb(void *data, int sleep_cb_status) {
+    struct __kq_timed_data *d = (struct __kq_timed_data *)data;
+    sched_timer_done(d->tn);
+    spin_wake_cb(d->lock, sleep_cb_status);
+}
+
 /*
  * kqueue_wait - block until events are available, then return them
  *
@@ -469,7 +499,6 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
         return -EINVAL;
 
     int total = 0;
-    int timer_armed = 0;
 
     spin_lock(&kq->lock);
 
@@ -517,27 +546,21 @@ int kqueue_wait(struct kqueue *kq, struct kevent *eventlist, int nevents,
             break;
         }
 
-        /* Set up timeout timer if needed */
-        if (timeout_ms > 0 && !timer_armed) {
-            /* Use sched_timer_set for timeout - it puts the current thread
-             * into a TIMER state. Instead, we use a simpler approach:
-             * arm a deadline timer that wakes our wait queue. */
-            timer_armed = 1;
-            /* We'll use tq_wait_in_state with THREAD_INTERRUPTIBLE and
-             * rely on a separate timeout mechanism below */
-        }
-
         /* Sleep on kqueue wait queue */
         if (timeout_ms > 0) {
-            /* For timed wait: use a timer callback that wakes us */
-            int ret = sched_timer_add(
-                (void (*)(void *))tq_wakeup_all, &kq->waitq, timeout_ms);
-            if (ret < 0) {
-                total = ret;
-                break;
-            }
-            tq_wait_in_state(&kq->waitq, &kq->lock, NULL,
-                             THREAD_INTERRUPTIBLE);
+            /* For timed wait: arm a per-thread timer that wakes us
+             * directly, then sleep on the kqueue wait queue.  The
+             * timer is cancelled on wakeup so there is no stale
+             * reference to the kqueue after close/free. */
+            struct timer_node __tn = {0};
+            struct __kq_timed_data __td = {
+                .lock = &kq->lock,
+                .tn = &__tn,
+                .timeout_ms = timeout_ms,
+            };
+            tq_wait_in_state_cb(&kq->waitq, __kq_timed_sleep_cb,
+                                __kq_timed_wakeup_cb, &__td, NULL,
+                                THREAD_INTERRUPTIBLE);
             /* After wakeup, timeout or event or signal — drain the
              * ready list on the next iteration.  If it's still empty
              * (pure timeout), exit the loop. */
