@@ -91,19 +91,40 @@ struct tty *tty_alloc(const char *name, struct tty_ops *ops) {
     return tty;
 }
 
+/*
+ * Helper: close remaining open pipe ends safely.
+ *
+ * pty_slave_hangup() may have already closed one end of each pipe.
+ * We check which ends are still open before closing, so the last
+ * close frees the pipe struct and we never touch it afterwards.
+ */
+static void __tty_close_pipe(struct pipe *pi) {
+    if (pi == NULL)
+        return;
+    int w = PIPE_WRITABLE(pi);
+    int r = PIPE_READABLE(pi);
+    if (w && r) {
+        /* Both open: first close doesn't free, second does */
+        pipe_close(pi, 1);
+        pipe_close(pi, 0);
+    } else if (w) {
+        /* Only write end open: closing it frees the pipe */
+        pipe_close(pi, 1);
+    } else if (r) {
+        /* Only read end open: closing it frees the pipe */
+        pipe_close(pi, 0);
+    }
+    /* Neither open: pipe was already fully closed & freed */
+}
+
 void tty_free(struct tty *tty) {
     if (tty == NULL)
         return;
 
-    /* Close both ends of each pipe */
-    if (tty->input_pipe) {
-        pipe_close(tty->input_pipe, 1); /* close write end */
-        pipe_close(tty->input_pipe, 0); /* close read end  */
-    }
-    if (tty->output_pipe) {
-        pipe_close(tty->output_pipe, 1);
-        pipe_close(tty->output_pipe, 0);
-    }
+    __tty_close_pipe(tty->input_pipe);
+    tty->input_pipe = NULL;
+    __tty_close_pipe(tty->output_pipe);
+    tty->output_pipe = NULL;
 
     slab_free(tty);
 }

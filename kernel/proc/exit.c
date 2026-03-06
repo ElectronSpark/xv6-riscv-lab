@@ -26,6 +26,7 @@
 #include <mm/vm.h>
 #include "errno.h"
 #include "tty/session.h"
+#include "tty/tty.h"
 #include "proc/pgroup.h"
 
 // Wake the vfork parent when child exits or execs.
@@ -240,12 +241,36 @@ void exit(int status) {
 
     // Leader thread or single-threaded process: remove from thread group
     // under pid_wlock, then proceed with standard exit path.
+    struct tty *hangup_tty = NULL;
     if (tg != NULL) {
         pid_wlock();
+
+        /* POSIX: when a session leader with a controlling terminal
+         * exits, hang up the terminal (SIGHUP to foreground pgroup,
+         * sever the PTY pipe link so the master gets EOF). */
+        {
+            struct session *sess = p->session;
+            if (sess != NULL &&
+                sess->sid == thread_tgid(p) &&
+                sess->ctrl_tty != NULL) {
+                hangup_tty = sess->ctrl_tty;
+                tty_ref(hangup_tty);  /* prevent free while we hold ptr */
+                session_hangup(sess);
+            }
+        }
+
         pgroup_remove_thread(p);
         session_remove_thread(p->session, p);
         last_in_group = thread_group_remove(p);
         pid_wunlock();
+    }
+
+    /* Outside pid_wlock: unregister /dev/pts/N from devtmpfs so the
+     * device node disappears immediately (can't call cdev_unregister
+     * under pid_wlock because it takes filesystem locks). */
+    if (hangup_tty != NULL) {
+        pty_hangup_cleanup(hangup_tty);
+        tty_unref(hangup_tty);
     }
 
     // Leader thread or single-threaded process: standard exit path

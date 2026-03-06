@@ -56,6 +56,7 @@ struct pty_pair {
     int          index;         /* PTY index (N in /dev/pts/N) */
     int          refcount;      /* Open master + slave fds */
     int          master_open;   /* Master side still alive? */
+    int          slave_count;   /* Number of open slave fds */
     int          cdev_live;     /* Slave cdev still registered? */
     spinlock_t   lock;          /* Protects refcount / flags */
 };
@@ -164,6 +165,20 @@ static int pts_fops_release(struct vfs_inode *inode, struct vfs_file *file)
     /* Drop the tty-level "open" ref taken in pts_open_file */
     tty_close(pair->slave);
 
+    /* When the last slave fd closes, also close pipe ends.
+     * The session-leader-exit path (pty_slave_hangup) may have
+     * already closed them — pipe_close is idempotent. */
+    spin_lock(&pair->lock);
+    int slave_gone = (--pair->slave_count <= 0);
+    spin_unlock(&pair->lock);
+    if (slave_gone && pair->slave != NULL) {
+        struct tty *sl = pair->slave;
+        if (sl->output_pipe)
+            pipe_close(sl->output_pipe, 1);
+        if (sl->input_pipe)
+            pipe_close(sl->input_pipe, 0);
+    }
+
     /* Drop the pair ref — may destroy */
     if (pty_pair_put(pair))
         pty_pair_destroy(pair);
@@ -200,6 +215,7 @@ static int pts_open_file(cdev_t *cdev, struct vfs_file *file)
         return -ENXIO;
     }
     pair->refcount++;
+    pair->slave_count++;
     spin_unlock(&pair->lock);
 
     /* tty-level open (bumps tty refcount) */
@@ -313,6 +329,10 @@ static int ptmx_fops_poll(struct vfs_file *file, short events) {
             uint nr = smp_load_acquire(&outp->nread);
             if ((nw - nr) > 0)
                 revents |= POLLIN;
+            /* Slave side hung up: report hangup so the master detects EOF */
+            if (!PIPE_WRITABLE(outp)) {
+                revents |= (POLLIN | POLLHUP);
+            }
         }
     }
 
@@ -388,6 +408,9 @@ static int ptmx_open_file(cdev_t *cdev, struct vfs_file *file) {
     }
     pair->slave = slave;
 
+    /* Back-pointer so pty_slave_hangup can reach the pair */
+    slave->driver_data = pair;
+
     /* Set up the slave cdev with open_file so slave fds get file ops */
     memset(&pair->slave_cdev, 0, sizeof(pair->slave_cdev));
     pair->slave_cdev.dev.major = PTS_MAJOR;
@@ -445,6 +468,35 @@ static cdev_t ptmx_cdev = {
         .open_file = ptmx_open_file,
     },
 };
+
+/* ================================================================== */
+/*  Session-hangup cleanup (remove /dev/pts/N from devtmpfs)          */
+/* ================================================================== */
+
+/*
+ * pty_hangup_cleanup — called from exit() OUTSIDE pid_wlock after
+ * session_hangup has severed the pipe link.
+ *
+ * Unregisters the slave cdev so /dev/pts/N disappears immediately
+ * when the session leader exits, instead of waiting for the master
+ * fd to be closed by sshd-session.  Existing file descriptors keep
+ * working (they use vfs_file_ops directly, not the cdev).
+ */
+void pty_hangup_cleanup(struct tty *tty) {
+    if (tty == NULL)
+        return;
+    struct pty_pair *pair = (struct pty_pair *)tty->driver_data;
+    if (pair == NULL)
+        return;
+
+    spin_lock(&pair->lock);
+    int do_unregister = pair->cdev_live;
+    pair->cdev_live = 0;
+    spin_unlock(&pair->lock);
+
+    if (do_unregister)
+        cdev_unregister(&pair->slave_cdev);
+}
 
 /* ================================================================== */
 /*  Initialization                                                    */

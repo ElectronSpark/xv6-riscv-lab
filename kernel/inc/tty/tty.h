@@ -28,6 +28,9 @@ void tty_hangup(struct tty *tty);
 int pty_alloc(struct tty **slave_out, const char *name, int minor);
 void pty_dealloc(struct tty *slave);
 ssize_t pty_master_read(struct tty *slave, char *buf, size_t count, bool user);
+
+/* ---- ptmx.c ---- */
+void pty_hangup_cleanup(struct tty *tty);
 ssize_t pty_master_write(struct tty *slave, const char *buf, size_t count,
                          bool user);
 

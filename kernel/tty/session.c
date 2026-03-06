@@ -301,6 +301,11 @@ void session_hangup(struct session *s) {
             __hangup_signal_tg(t);
     }
 
+    /* Hang up the controlling terminal.  For a PTY slave this severs
+     * the pipe link so the master side gets EOF / POLLHUP. */
+    if (s->ctrl_tty != NULL)
+        tty_hangup(s->ctrl_tty);
+
     /* Disassociate the controlling terminal */
     s->ctrl_tty = NULL;
     s->fg_pgrp = NULL;
@@ -364,6 +369,11 @@ pid_t session_setsid(void) {
     pgroup_add_thread(pg, p);
     session_add_thread(s, p);
     s->fg_pgrp = pg; /* Becomes foreground group */
+
+    /* Drop the creation ref from session_alloc().  The session is now
+     * kept alive solely by its member refs (add_pg, add_thread).
+     * When the last member is removed the session is freed. */
+    session_unref(s);
 
     pid_wunlock();
     return tgid;

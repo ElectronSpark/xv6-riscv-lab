@@ -39,6 +39,25 @@ static int pty_slave_open(struct tty *tty) {
 
 static void pty_slave_close(struct tty *tty) { (void)tty; }
 
+/*
+ * pty_slave_hangup - called when the controlling terminal is hung up
+ *
+ * POSIX: when the session leader exits, the kernel hangs up the
+ * controlling terminal.  For a PTY slave this means severing the
+ * pipe link so the master side gets EOF:
+ *   - close output_pipe write end → master read() returns 0
+ *   - close input_pipe  read  end → master write() fails
+ *
+ * pipe_close is idempotent (clearing an already-cleared flag is safe),
+ * so this is harmless if pts_fops_release later closes the same ends.
+ */
+static void pty_slave_hangup(struct tty *tty) {
+    if (tty->output_pipe)
+        pipe_close(tty->output_pipe, 1);   /* close write end → EOF */
+    if (tty->input_pipe)
+        pipe_close(tty->input_pipe, 0);    /* close read  end */
+}
+
 static ssize_t pty_slave_write(struct tty *tty, const char *buf, size_t nr) {
     /* Slave write → push into output pipe (master can read it) */
     return pipe_write(tty->output_pipe, buf, nr, 0);
@@ -52,6 +71,7 @@ static ssize_t pty_slave_read(struct tty *tty, char *buf, size_t nr) {
 static struct tty_ops pty_slave_ops = {
     .open = pty_slave_open,
     .close = pty_slave_close,
+    .hangup = pty_slave_hangup,
     .read = pty_slave_read,
     .write = pty_slave_write,
 };

@@ -1009,8 +1009,10 @@ static int read_char(void) {
         int n = read(0, &c, 1);
         if (n == 1)
             return (unsigned char)c;
-        // On xv6 console, raw reads can transiently return 0 (or <0) during
-        // mode transitions; keep waiting instead of treating as EOF.
+        if (n == 0)
+            return -1; // EOF
+        // On xv6 console, raw reads can transiently return <0 during
+        // mode transitions; keep retrying.
     }
 }
 
@@ -1915,6 +1917,7 @@ static int run_script(const char *path) {
 }
 
 // =====================================================================
+// =====================================================================
 // main
 // =====================================================================
 
@@ -1968,7 +1971,7 @@ int main(int argc, char *argv[]) {
     // ---- Interactive mode ----
     for (;;) {
         if (getcmd(buf, sizeof(buf)) < 0)
-            continue;
+            break; // EOF (e.g. PTY closed) or Ctrl-D
 
         int ret = run_line(buf, 1);
         if (ret == 1)
