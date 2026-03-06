@@ -89,6 +89,8 @@ struct thread {
     uint64 kstack;          // Virtual address of kernel stack
     uint64 trapframe_vbase; // Base virtual address of the trapframe
     uint64 clear_child_tid; // CLONE_CHILD_CLEARTID: address to zero + futex_wake on exit
+    uint64 robust_list_head; // set_robust_list: user pointer to robust futex list head
+    uint64 robust_list_len;  // set_robust_list: length expected by userspace
     struct fs_struct *fs; // Filesystem state (on kernel stack below utrapframe)
     struct vfs_fdtable
         *fdtable; // File descriptor table (on kernel stack below fs)

@@ -1552,14 +1552,18 @@ struct vfs_inode *vfs_curroot(void) {
 #define NAMEI_SYMLOOP_MAX 8
 
 /*
- * __vfs_namei - Internal path lookup implementation.
+ * __vfs_namei_at - Internal path lookup implementation with optional start dir.
  *
  * Follows symlinks at every path component (both intermediate and final).
  * Returns -EAGAIN if a transient race condition is detected (e.g., inode
  * being freed during mount traversal). Caller should retry.
  * Returns -ELOOP if the symlink depth exceeds NAMEI_SYMLOOP_MAX.
+ *
+ * @start_dir: Starting directory for relative paths. If NULL, uses cwd.
+ *             Caller retains ownership — this function will idup internally.
  */
-static struct vfs_inode *__vfs_namei(const char *path, size_t path_len) {
+static struct vfs_inode *__vfs_namei_at(const char *path, size_t path_len,
+                                        struct vfs_inode *start_dir) {
     if (path == NULL || path_len == 0) {
         return ERR_PTR(-EINVAL);
     }
@@ -1611,6 +1615,10 @@ static struct vfs_inode *__vfs_namei(const char *path, size_t path_len) {
     /* Determine starting inode */
     if (pathbuf[0] == '/') {
         pos = rooti;
+        vfs_idup(pos);
+    } else if (start_dir != NULL) {
+        /* Use caller-provided starting directory */
+        pos = start_dir;
         vfs_idup(pos);
     } else {
         pos = vfs_curdir();
@@ -1777,7 +1785,7 @@ struct vfs_inode *vfs_namei(const char *path, size_t path_len) {
     int retries = 0;
 
     do {
-        result = __vfs_namei(path, path_len);
+        result = __vfs_namei_at(path, path_len, NULL);
         if (!IS_ERR(result) || PTR_ERR(result) != -EAGAIN) {
             return result;
         }
@@ -1787,6 +1795,34 @@ struct vfs_inode *vfs_namei(const char *path, size_t path_len) {
     } while (retries < VFS_NAMEI_MAX_RETRIES);
 
     // Too many retries, return the error
+    return ERR_PTR(-EAGAIN);
+}
+
+/*
+ * vfs_namei_at - Resolve a path to an inode, relative to a starting directory.
+ *
+ * Like vfs_namei but for relative paths starts from start_dir instead of cwd.
+ * Absolute paths always start from root regardless of start_dir.
+ *
+ * @start_dir: Starting directory for relative paths. If NULL, uses cwd.
+ *             Caller retains ownership of the reference.
+ * @path: Path to resolve
+ * @path_len: Length of path string
+ */
+struct vfs_inode *vfs_namei_at(struct vfs_inode *start_dir, const char *path,
+                               size_t path_len) {
+    struct vfs_inode *result;
+    int retries = 0;
+
+    do {
+        result = __vfs_namei_at(path, path_len, start_dir);
+        if (!IS_ERR(result) || PTR_ERR(result) != -EAGAIN) {
+            return result;
+        }
+        scheduler_yield();
+        retries++;
+    } while (retries < VFS_NAMEI_MAX_RETRIES);
+
     return ERR_PTR(-EAGAIN);
 }
 
@@ -1851,4 +1887,59 @@ struct vfs_inode *vfs_nameiparent(const char *path, size_t path_len, char *name,
 
     // Resolve the parent path
     return vfs_namei(path, parent_len);
+}
+
+/*
+ * vfs_nameiparent_at - Resolve parent directory relative to a starting dir.
+ *
+ * Like vfs_nameiparent but for relative paths starts from start_dir.
+ *
+ * @start_dir: Starting directory for relative paths. If NULL, uses cwd.
+ * @path: Path to resolve
+ * @path_len: Length of path string
+ * @name: Buffer to receive the final path component name
+ * @name_size: Size of the name buffer
+ */
+struct vfs_inode *vfs_nameiparent_at(struct vfs_inode *start_dir,
+                                     const char *path, size_t path_len,
+                                     char *name, size_t name_size) {
+    if (path == NULL || path_len == 0 || name == NULL || name_size == 0) {
+        return ERR_PTR(-EINVAL);
+    }
+    if (path_len > VFS_PATH_MAX) {
+        return ERR_PTR(-ENAMETOOLONG);
+    }
+
+    size_t end = path_len;
+    while (end > 0 && path[end - 1] == '/')
+        end--;
+    if (end == 0)
+        return ERR_PTR(-EINVAL);
+
+    size_t name_start = end;
+    while (name_start > 0 && path[name_start - 1] != '/')
+        name_start--;
+
+    size_t final_name_len = end - name_start;
+    if (final_name_len >= name_size)
+        final_name_len = name_size - 1;
+    memmove(name, path + name_start, final_name_len);
+    name[final_name_len] = '\0';
+
+    size_t parent_len = name_start;
+    while (parent_len > 0 && path[parent_len - 1] == '/')
+        parent_len--;
+
+    if (parent_len == 0) {
+        if (path[0] == '/') {
+            return vfs_curroot();
+        } else if (start_dir != NULL) {
+            vfs_idup(start_dir);
+            return start_dir;
+        } else {
+            return vfs_curdir();
+        }
+    }
+
+    return vfs_namei_at(start_dir, path, parent_len);
 }

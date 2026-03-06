@@ -89,6 +89,7 @@ add_subdirectory(${KERNEL_DIR}/lwext4_port)
 add_subdirectory(${KERNEL_DIR}/daemons)
 add_subdirectory(${KERNEL_DIR}/gdbstub)
 add_subdirectory(${KERNEL_DIR}/kqueue)
+add_subdirectory(${KERNEL_DIR}/ipc)
 
 set_source_files_properties(${KERNEL_C_FILES} PROPERTIES LANGUAGE C)
 set_source_files_properties(${KERNEL_SCAN_OBJS} PROPERTIES LANGUAGE C)
@@ -117,9 +118,10 @@ set(KERNEL_OBJ_LIBS
     $<TARGET_OBJECTS:daemons>
     $<TARGET_OBJECTS:gdbstub>
     $<TARGET_OBJECTS:kqueue_core>
+    $<TARGET_OBJECTS:ipc>
 )
 
-set(KERNEL_LINK_LIBS arch_${ARCH} irq dev lock mm proc timer vfs tty lwip ext4fs daemons gdbstub kqueue_core)
+set(KERNEL_LINK_LIBS arch_${ARCH} irq dev lock mm proc timer vfs tty lwip ext4fs daemons gdbstub kqueue_core ipc)
 
 # ==============================================================================
 # Linker scripts (generated from kernel.ld.in template)

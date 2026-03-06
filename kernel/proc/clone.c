@@ -267,6 +267,18 @@ int thread_clone(struct clone_args *args) {
                 sizeof(uint32) * p->thread_group->ngroups);
         ret_ptr->thread_group->umask  = p->thread_group->umask;
 
+        // Inherit dynamic linker / executable metadata so that
+        // /proc/<pid>/exe and GDB's shared-library queries work
+        // immediately after fork (before exec replaces them).
+        ret_ptr->thread_group->interp_base = p->thread_group->interp_base;
+        ret_ptr->thread_group->interp_ld   = p->thread_group->interp_ld;
+        safestrcpy(ret_ptr->thread_group->interp_path,
+                   p->thread_group->interp_path,
+                   sizeof(ret_ptr->thread_group->interp_path));
+        safestrcpy(ret_ptr->thread_group->exec_path,
+                   p->thread_group->exec_path,
+                   sizeof(ret_ptr->thread_group->exec_path));
+
         // Account the fork on the parent's counters
         ACCT_INC(p->thread_group, sched_forks);
     }

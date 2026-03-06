@@ -2805,9 +2805,254 @@ uint64 sys_socketpair(void)
 /*
  * sys_sendmmsg(sockfd, msgvec, vlen, flags) → count / -errno
  *
- * Stub: not implemented.  Returns -ENOSYS.
+ * Send multiple messages on a socket in a single syscall.
+ * msgvec is an array of struct mmsghdr:
+ *   struct mmsghdr { struct msghdr msg_hdr; unsigned int msg_len; };
  */
 uint64 sys_sendmmsg(void)
 {
-    return (uint64)-ENOSYS;
+    int sockfd, vlen, flags;
+    uint64 umsgvec;
+    argint(0, &sockfd);
+    argaddr(1, &umsgvec);
+    argint(2, &vlen);
+    argint(3, &flags);
+
+    if (vlen <= 0)
+        return (uint64)-EINVAL;
+    if (vlen > 1024)
+        vlen = 1024;
+
+    /*
+     * struct mmsghdr layout (LP64):
+     *   struct msghdr msg_hdr;  (56 bytes = sizeof(struct k_msghdr))
+     *   unsigned int  msg_len;  (4 bytes)
+     *   + 4 bytes padding       = 64 bytes total
+     */
+    const uint64 mmsghdr_size = sizeof(struct k_msghdr) + 8;
+
+    int sent = 0;
+    for (int i = 0; i < vlen; i++) {
+        uint64 entry_addr = umsgvec + (uint64)i * mmsghdr_size;
+
+        struct k_msghdr mh;
+        if (vm_copyin(current->vm, &mh, entry_addr, sizeof(mh)) < 0)
+            return sent > 0 ? (uint64)sent : (uint64)-EFAULT;
+
+        if (mh.msg_iovlen == 0 || mh.msg_iovlen > SENDMSG_MAX_IOV)
+            return sent > 0 ? (uint64)sent : (uint64)-EINVAL;
+
+        struct k_iovec iovs[SENDMSG_MAX_IOV];
+        if (vm_copyin(current->vm, iovs, mh.msg_iov,
+                      mh.msg_iovlen * sizeof(struct k_iovec)) < 0)
+            return sent > 0 ? (uint64)sent : (uint64)-EFAULT;
+
+        /* Gather data */
+        size_t total = 0;
+        char tmpbuf[8192];
+        for (uint64 j = 0; j < mh.msg_iovlen && total < sizeof(tmpbuf); j++) {
+            size_t chunk = iovs[j].iov_len;
+            if (chunk > sizeof(tmpbuf) - total)
+                chunk = sizeof(tmpbuf) - total;
+            if (vm_copyin(current->vm, tmpbuf + total,
+                          iovs[j].iov_base, chunk) < 0)
+                return sent > 0 ? (uint64)sent : (uint64)-EFAULT;
+            total += chunk;
+        }
+
+        /* Send via the lwip send path */
+        int domain = sock_domain_from_fd(sockfd);
+        ssize_t n;
+
+        if (domain == AF_UNIX) {
+            struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, sockfd);
+            if (f == NULL)
+                return sent > 0 ? (uint64)sent : (uint64)-EBADF;
+            n = unix_socket_file_ops.write(f, tmpbuf, total, 1);
+        } else {
+            struct lwip_sock *sk = sock_from_fd(sockfd);
+            if (sk == NULL)
+                return sent > 0 ? (uint64)sent : (uint64)-EBADF;
+            struct netbuf nb;
+            memset(&nb, 0, sizeof(nb));
+            struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (uint16)total, PBUF_RAM);
+            if (p == NULL)
+                return sent > 0 ? (uint64)sent : (uint64)-ENOMEM;
+            pbuf_take(p, tmpbuf, (uint16)total);
+            nb.p = p;
+            err_t err = netconn_send(sk->conn, &nb);
+            pbuf_free(p);
+            n = (err == ERR_OK) ? (ssize_t)total : -(ssize_t)lwip_err_to_errno(err);
+        }
+
+        if (n < 0)
+            return sent > 0 ? (uint64)sent : (uint64)n;
+
+        /* Write msg_len back */
+        uint32 msg_len = (uint32)n;
+        vm_copyout(current->vm,
+                   entry_addr + sizeof(struct k_msghdr),
+                   &msg_len, sizeof(msg_len));
+        sent++;
+    }
+
+    return (uint64)sent;
+}
+
+/*
+ * sys_recvmmsg(sockfd, msgvec, vlen, flags, timeout) → count / -errno
+ *
+ * Receive multiple messages from a socket in a single syscall.
+ * This is the time64 variant (SYS_recvmmsg_time64).
+ */
+uint64 sys_recvmmsg(void)
+{
+    int sockfd, vlen, flags;
+    uint64 umsgvec;
+    /* uint64 utimeout; — ignored for now */
+    argint(0, &sockfd);
+    argaddr(1, &umsgvec);
+    argint(2, &vlen);
+    argint(3, &flags);
+    /* argaddr(4, &utimeout); */
+
+    if (vlen <= 0)
+        return (uint64)-EINVAL;
+    if (vlen > 1024)
+        vlen = 1024;
+
+    const uint64 mmsghdr_size = sizeof(struct k_msghdr) + 8;
+    int received = 0;
+
+    for (int i = 0; i < vlen; i++) {
+        uint64 entry_addr = umsgvec + (uint64)i * mmsghdr_size;
+
+        struct k_msghdr mh;
+        if (vm_copyin(current->vm, &mh, entry_addr, sizeof(mh)) < 0)
+            return received > 0 ? (uint64)received : (uint64)-EFAULT;
+
+        if (mh.msg_iovlen == 0 || mh.msg_iovlen > SENDMSG_MAX_IOV)
+            return received > 0 ? (uint64)received : (uint64)-EINVAL;
+
+        struct k_iovec iovs[SENDMSG_MAX_IOV];
+        if (vm_copyin(current->vm, iovs, mh.msg_iov,
+                      mh.msg_iovlen * sizeof(struct k_iovec)) < 0)
+            return received > 0 ? (uint64)received : (uint64)-EFAULT;
+
+        /* Determine domain */
+        int domain = sock_domain_from_fd(sockfd);
+        ssize_t total = 0;
+
+        if (domain == AF_UNIX) {
+            struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, sockfd);
+            if (f == NULL)
+                return received > 0 ? (uint64)received : (uint64)-EBADF;
+
+            for (uint64 j = 0; j < mh.msg_iovlen; j++) {
+                if (iovs[j].iov_len == 0) continue;
+                ssize_t n = unix_socket_file_ops.read(
+                    f, (char *)(iovs[j].iov_base), iovs[j].iov_len, 1);
+                if (n < 0)
+                    return received > 0 ? (uint64)received : (uint64)n;
+                total += n;
+                if ((size_t)n < iovs[j].iov_len) break;
+            }
+        } else {
+            struct lwip_sock *sk = sock_from_fd(sockfd);
+            if (sk == NULL)
+                return received > 0 ? (uint64)received : (uint64)-EBADF;
+
+            /* For the first message, block normally.  For subsequent
+             * messages, use MSG_DONTWAIT to avoid blocking. */
+            int recv_flags = (i > 0) ? (flags | 0x40 /*MSG_DONTWAIT*/) : flags;
+
+            if (sock_is_nonblock(sockfd, recv_flags)) {
+                int ready = sock_poll_ready(sk, POLLIN);
+                if (!(ready & (POLLIN | POLLHUP | POLLERR))) {
+                    if (received > 0) break;
+                    return (uint64)-EAGAIN;
+                }
+            }
+
+            if (sk->type == SOCK_STREAM) {
+                struct pbuf *p = NULL;
+                err_t err = netconn_recv_tcp_pbuf(sk->conn, &p);
+                if (err != ERR_OK) {
+                    if (err == ERR_CLSD && received > 0) break;
+                    if (err == ERR_CLSD) return 0;
+                    if (received > 0) break;
+                    return (uint64)-lwip_err_to_errno(err);
+                }
+
+                uint16 poff = 0;
+                char tmpbuf[1500];
+                for (uint64 j = 0; j < mh.msg_iovlen && poff < p->tot_len; j++) {
+                    size_t want = iovs[j].iov_len;
+                    uint16 remain = p->tot_len - poff;
+                    size_t tocopy = (want < remain) ? want : (size_t)remain;
+                    size_t copied = 0;
+                    while (copied < tocopy) {
+                        size_t chunk = tocopy - copied;
+                        if (chunk > sizeof(tmpbuf)) chunk = sizeof(tmpbuf);
+                        uint16 got = pbuf_copy_partial(p, tmpbuf, (uint16)chunk, poff);
+                        if (got == 0) break;
+                        if (vm_copyout(current->vm, iovs[j].iov_base + copied,
+                                       tmpbuf, got) < 0) {
+                            pbuf_free(p);
+                            return received > 0 ? (uint64)received : (uint64)-EFAULT;
+                        }
+                        poff += got;
+                        copied += got;
+                        total += got;
+                    }
+                }
+                pbuf_free(p);
+            } else {
+                struct netbuf *nb = NULL;
+                err_t err = netconn_recv(sk->conn, &nb);
+                if (err != ERR_OK) {
+                    if (received > 0) break;
+                    return (uint64)-lwip_err_to_errno(err);
+                }
+                void *data;
+                u16_t dlen;
+                netbuf_data(nb, &data, &dlen);
+
+                uint16 doff = 0;
+                for (uint64 j = 0; j < mh.msg_iovlen && doff < dlen; j++) {
+                    size_t want = iovs[j].iov_len;
+                    size_t remain = dlen - doff;
+                    size_t tocopy = (want < remain) ? want : remain;
+                    if (vm_copyout(current->vm, iovs[j].iov_base,
+                                   (char *)data + doff, tocopy) < 0) {
+                        netbuf_delete(nb);
+                        return received > 0 ? (uint64)received : (uint64)-EFAULT;
+                    }
+                    doff += (uint16)tocopy;
+                    total += (ssize_t)tocopy;
+                }
+                netbuf_delete(nb);
+            }
+        }
+
+        /* Write msg_len back to user mmsghdr */
+        uint32 msg_len = (uint32)total;
+        vm_copyout(current->vm,
+                   entry_addr + sizeof(struct k_msghdr),
+                   &msg_len, sizeof(msg_len));
+
+        /* Clear msg_flags */
+        int zero_flags = 0;
+        vm_copyout(current->vm,
+                   entry_addr + __builtin_offsetof(struct k_msghdr, msg_flags),
+                   &zero_flags, sizeof(zero_flags));
+
+        received++;
+
+        /* If we got 0 bytes (EOF on stream), stop */
+        if (total == 0)
+            break;
+    }
+
+    return (uint64)received;
 }

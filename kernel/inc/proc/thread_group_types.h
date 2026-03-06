@@ -116,6 +116,7 @@ struct thread_group {
     /* POSIX ITIMER_REAL (setitimer / getitimer) */
     uint64            itimer_real_gen;    /* Generation counter for cancel */
     uint64            itimer_interval_ms; /* Repeat interval (0 = one-shot) */
+    uint64            itimer_expire_ms;   /* Absolute time (jiffies) when timer fires */
 };
 
 #endif /* __KERNEL_THREAD_GROUP_TYPES_H */

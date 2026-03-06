@@ -422,6 +422,46 @@ extern uint64 sys_kstats(void);
 extern uint64 sys_netconf(void);
 #endif
 
+// Miscellaneous process syscalls (proc/sys_misc.c)
+extern uint64 sys_prctl(void);
+extern uint64 sys_sysinfo(void);
+extern uint64 sys_getrusage(void);
+extern uint64 sys_getpriority(void);
+extern uint64 sys_setpriority(void);
+extern uint64 sys_set_robust_list(void);
+extern uint64 sys_clock_settime(void);
+extern uint64 sys_sched_rr_get_interval(void);
+extern uint64 sys_rt_sigqueueinfo(void);
+extern uint64 sys_clone3(void);
+
+// Signal syscalls (proc/sys_signal.c)
+extern uint64 sys_sigaltstack(void);
+
+// VFS syscalls — fsync, fdatasync, utimensat, memfd_create (vfs/vfs_syscall.c)
+extern uint64 sys_vfs_fsync(void);
+extern uint64 sys_vfs_fdatasync(void);
+extern uint64 sys_utimensat(void);
+extern uint64 sys_memfd_create(void);
+
+// System V IPC syscalls (ipc/*.c)
+extern uint64 sys_shmget(void);
+extern uint64 sys_shmat(void);
+extern uint64 sys_shmdt(void);
+extern uint64 sys_shmctl(void);
+extern uint64 sys_semget(void);
+extern uint64 sys_semop(void);
+extern uint64 sys_semtimedop(void);
+extern uint64 sys_semctl(void);
+extern uint64 sys_msgget(void);
+extern uint64 sys_msgsnd(void);
+extern uint64 sys_msgrcv(void);
+extern uint64 sys_msgctl(void);
+
+// recvmmsg (lwip_port/sys_socket.c)
+#ifdef USE_LWIP
+extern uint64 sys_recvmmsg(void);
+#endif
+
 /*
  * Syscall routing table
  *
@@ -577,8 +617,12 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_socketpair] sys_socketpair,
     [SYS_sendmmsg] sys_sendmmsg,
 #endif
-    [SYS_sched_rr_get_interval_time64] sys_ni_enosys,
+    [SYS_sched_rr_get_interval_time64] sys_sched_rr_get_interval,
+#ifdef USE_LWIP
+    [SYS_recvmmsg_time64] sys_recvmmsg,
+#else
     [SYS_recvmmsg_time64] sys_ni_enosys,
+#endif
     [SYS_pselect6_time64] sys_pselect6,
     [SYS_mq_timedsend_time64] sys_ni_enosys,
     [SYS_mq_timedreceive_time64] sys_ni_enosys,
@@ -593,34 +637,34 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_getitimer] sys_getitimer,
     [SYS_setitimer] sys_setitimer,
     [SYS_ppoll] sys_vfs_ppoll,
-    /* IPC stubs — xv6 doesn't support System V IPC */
-    [SYS_semtimedop] sys_ni_enosys,
-    [SYS_shmget] sys_ni_enosys,
-    [SYS_shmdt] sys_ni_enosys,
-    [SYS_shmctl] sys_ni_enosys,
-    [SYS_shmat] sys_ni_enosys,
-    [SYS_semop] sys_ni_enosys,
-    [SYS_semget] sys_ni_enosys,
-    [SYS_semctl] sys_ni_enosys,
-    [SYS_msgsnd] sys_ni_enosys,
-    [SYS_msgrcv] sys_ni_enosys,
-    [SYS_msgget] sys_ni_enosys,
-    [SYS_msgctl] sys_ni_enosys,
-    /* Other stubs */
-    [SYS_utimensat] sys_ni_enosys,
-    [SYS_clone3] sys_ni_enosys,
-    [SYS_rt_sigqueueinfo] sys_ni_enosys,
-    [SYS_clock_settime] sys_ni_enosys,
-    [SYS_fdatasync] sys_ni_enosys,
-    [SYS_fsync] sys_ni_enosys,
-    [SYS_set_robust_list] sys_ni_enosys,
-    [SYS_sigaltstack] sys_ni_enosys,
-    [SYS_prctl] sys_ni_enosys,
-    [SYS_sysinfo] sys_ni_enosys,
-    [SYS_getrusage] sys_ni_enosys,
-    [SYS_getpriority] sys_ni_enosys,
-    [SYS_setpriority] sys_ni_enosys,
-    [SYS_memfd_create] sys_ni_enosys,
+    /* System V IPC */
+    [SYS_semtimedop] sys_semtimedop,
+    [SYS_shmget] sys_shmget,
+    [SYS_shmdt] sys_shmdt,
+    [SYS_shmctl] sys_shmctl,
+    [SYS_shmat] sys_shmat,
+    [SYS_semop] sys_semop,
+    [SYS_semget] sys_semget,
+    [SYS_semctl] sys_semctl,
+    [SYS_msgsnd] sys_msgsnd,
+    [SYS_msgrcv] sys_msgrcv,
+    [SYS_msgget] sys_msgget,
+    [SYS_msgctl] sys_msgctl,
+    /* Process / VFS / signal syscalls */
+    [SYS_utimensat] sys_utimensat,
+    [SYS_clone3] sys_clone3,
+    [SYS_rt_sigqueueinfo] sys_rt_sigqueueinfo,
+    [SYS_clock_settime] sys_clock_settime,
+    [SYS_fdatasync] sys_vfs_fdatasync,
+    [SYS_fsync] sys_vfs_fsync,
+    [SYS_set_robust_list] sys_set_robust_list,
+    [SYS_sigaltstack] sys_sigaltstack,
+    [SYS_prctl] sys_prctl,
+    [SYS_sysinfo] sys_sysinfo,
+    [SYS_getrusage] sys_getrusage,
+    [SYS_getpriority] sys_getpriority,
+    [SYS_setpriority] sys_setpriority,
+    [SYS_memfd_create] sys_memfd_create,
 };
 
 void syscall(void) {

@@ -496,7 +496,13 @@ uint64 sys_uname(void) {
     safestrcpy(u.nodename, "xv6", sizeof(u.nodename));
     safestrcpy(u.release, "0.1", sizeof(u.release));
     safestrcpy(u.version, "xv6-tmp", sizeof(u.version));
+#if defined(CONFIG_ARCH_X86_64) || defined(__x86_64__)
+    safestrcpy(u.machine, "x86_64", sizeof(u.machine));
+#elif defined(CONFIG_ARCH_RISCV) || defined(__riscv)
     safestrcpy(u.machine, "riscv64", sizeof(u.machine));
+#else
+    safestrcpy(u.machine, "unknown", sizeof(u.machine));
+#endif
 
     if (either_copyout(1, addr, &u, sizeof(u)) < 0) {
         return -EFAULT;
@@ -639,11 +645,17 @@ uint64 sys_clock_gettime(void) {
 
     switch (clockid) {
     case 0: // CLOCK_REALTIME
-    case 1: // CLOCK_MONOTONIC (treat same as realtime for now)
     {
         uint64 ns = goldfish_rtc_read_ns();
         ts.tv_sec = ns / 1000000000ULL;
         ts.tv_nsec = ns % 1000000000ULL;
+        break;
+    }
+    case 1: // CLOCK_MONOTONIC
+    {
+        uint64 ms = get_jiffs();
+        ts.tv_sec = ms / 1000;
+        ts.tv_nsec = (ms % 1000) * 1000000ULL;
         break;
     }
     default:

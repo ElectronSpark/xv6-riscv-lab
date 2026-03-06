@@ -117,20 +117,17 @@ uint64 sys_pause(void) {
     struct thread *p = current;
     // Mark interruptible before checking signals to close the race where
     // a signal arrives between the check and the yield.
-    // Note: a tiny window remains where a wakeup can transition the state
-    // back to RUNNING before scheduler_yield runs, causing the signal to
-    // be missed.  See @TODO in thread_types.h ("stop signal may miss").
     __thread_state_set(p, THREAD_INTERRUPTIBLE);
     tcb_lock(p);
     // If an unblocked pending signal already exists, return immediately
     if (signal_pending(p)) {
         __thread_state_set(p, THREAD_RUNNING);
         tcb_unlock(p);
-        return 0;
+        return (uint64)-EINTR;
     }
     tcb_unlock(p);
     scheduler_yield();
-    return 0;
+    return (uint64)-EINTR;
 }
 
 uint64 sys_kill(void) {
@@ -213,6 +210,55 @@ uint64 sys_sigwait(void) {
     return 0;
 }
 
+/* ── sigaltstack ─────────────────────────────────────────────────────── */
+
+/**
+ * sys_sigaltstack - get/set alternate signal stack
+ * args: const stack_t *ss (new stack), stack_t *old_ss (old stack)
+ */
+uint64 sys_sigaltstack(void) {
+    uint64 ss_addr, oss_addr;
+    argaddr(0, &ss_addr);
+    argaddr(1, &oss_addr);
+
+    struct thread *p = current;
+    stack_t *cur = &p->signal.sig_stack;
+
+    /* Copy out old stack if requested */
+    if (oss_addr != 0) {
+        if (either_copyout(1, oss_addr, cur, sizeof(stack_t)) < 0)
+            return -EFAULT;
+    }
+
+    /* Set new stack if requested */
+    if (ss_addr != 0) {
+        /* Cannot change the alt stack while executing on it */
+        if (cur->ss_flags & SS_ONSTACK)
+            return -EPERM;
+
+        stack_t ss;
+        if (either_copyin(&ss, 1, ss_addr, sizeof(stack_t)) < 0)
+            return -EFAULT;
+
+        if (ss.ss_flags & ~(SS_DISABLE | SS_ONSTACK | SS_AUTOREARM))
+            return -EINVAL;
+
+        if (ss.ss_flags & SS_DISABLE) {
+            cur->ss_sp    = NULL;
+            cur->ss_flags = SS_DISABLE;
+            cur->ss_size  = 0;
+        } else {
+            if (ss.ss_size < MINSIGSTKSZ)
+                return -ENOMEM;
+            cur->ss_sp    = ss.ss_sp;
+            cur->ss_flags = ss.ss_flags;
+            cur->ss_size  = ss.ss_size;
+        }
+    }
+
+    return 0;
+}
+
 /* ── ITIMER_REAL (setitimer / getitimer) ──────────────────────────────── */
 
 #define ITIMER_REAL    0
@@ -258,9 +304,12 @@ static void __itimer_real_fire(void *arg) {
 
     /* If interval is set, re-arm the timer */
     if (tg->itimer_interval_ms > 0) {
+        tg->itimer_expire_ms = get_jiffs() + tg->itimer_interval_ms;
         uint64 next_packed = ((uint64)gen << 32) | (uint64)(uint32)tgid;
         sched_timer_add(__itimer_real_fire, (void *)next_packed,
                         tg->itimer_interval_ms);
+    } else {
+        tg->itimer_expire_ms = 0;
     }
     rcu_read_unlock();
 }
@@ -289,15 +338,23 @@ uint64 sys_setitimer(void) {
     /* Read the old value before updating (if requested) */
     if (old_addr != 0) {
         struct k_itimerval old = {0};
-        /* We don't track remaining time precisely; just return interval */
+        /* Return interval */
         old.it_interval.tv_sec = tg->itimer_interval_ms / 1000;
         old.it_interval.tv_usec = (tg->itimer_interval_ms % 1000) * 1000;
+        /* Compute remaining time */
+        uint64 now_ms = get_jiffs();
+        if (tg->itimer_expire_ms > now_ms) {
+            uint64 remain = tg->itimer_expire_ms - now_ms;
+            old.it_value.tv_sec = remain / 1000;
+            old.it_value.tv_usec = (remain % 1000) * 1000;
+        }
         if (either_copyout(1, old_addr, &old, sizeof(old)) < 0)
             return -EFAULT;
     }
 
     /* Cancel any pending timer by bumping generation */
     tg->itimer_real_gen++;
+    tg->itimer_expire_ms = 0;
 
     if (new_addr == 0)
         return 0;
@@ -314,6 +371,9 @@ uint64 sys_setitimer(void) {
 
     if (value_ms == 0)
         return 0; /* disarm */
+
+    /* Record when the timer will expire */
+    tg->itimer_expire_ms = get_jiffs() + value_ms;
 
     /* Pack tgid + generation into a single pointer-sized value */
     uint64 packed = ((uint64)tg->itimer_real_gen << 32) |
@@ -346,7 +406,13 @@ uint64 sys_getitimer(void) {
     struct k_itimerval val = {0};
     val.it_interval.tv_sec = tg->itimer_interval_ms / 1000;
     val.it_interval.tv_usec = (tg->itimer_interval_ms % 1000) * 1000;
-    /* We don't track remaining time precisely */
+    /* Compute remaining time */
+    uint64 now_ms = get_jiffs();
+    if (tg->itimer_expire_ms > now_ms) {
+        uint64 remain = tg->itimer_expire_ms - now_ms;
+        val.it_value.tv_sec = remain / 1000;
+        val.it_value.tv_usec = (remain % 1000) * 1000;
+    }
 
     if (either_copyout(1, val_addr, &val, sizeof(val)) < 0)
         return -EFAULT;

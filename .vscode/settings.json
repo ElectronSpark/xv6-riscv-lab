@@ -112,6 +112,7 @@
     "chat.tools.terminal.autoApprove": {
         "readelf": true,
         "objdump": true,
-        "diff": true
+        "diff": true,
+        "riscv64-linux-gnu-objdump": true
     }
 }

@@ -6,6 +6,7 @@ set(PROC_C_SRCS
     sched.c
     signal.c
     sys_signal.c
+    sys_misc.c
     sysproc.c
     workqueue.c
     exit.c

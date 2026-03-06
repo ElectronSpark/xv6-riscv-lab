@@ -212,6 +212,93 @@ int futex_wake_addr(vm_t *vm, uint64 uaddr, int val) {
 }
 
 /*
+ * futex_requeue — wake up to 'nr_wake' waiters on uaddr1, then move
+ * up to 'nr_requeue' remaining waiters from uaddr1's queue to uaddr2's queue.
+ *
+ * For FUTEX_CMP_REQUEUE, the caller passes cmpval and we verify *uaddr1 ==
+ * cmpval before proceeding. For plain FUTEX_REQUEUE, cmpval is ignored
+ * (pass -1 or any value with do_cmp=false).
+ *
+ * Returns total number of woken waiters on success, or negative errno.
+ */
+static int futex_requeue(uint64 uaddr1, int nr_wake, uint64 uaddr2,
+                         int nr_requeue, uint32 cmpval, int do_cmp) {
+    vm_t *vm = current->vm;
+    uint64 idx1 = futex_hash(vm, uaddr1);
+    uint64 idx2 = futex_hash(vm, uaddr2);
+    struct futex_bucket *b1 = &futex_table[idx1];
+    struct futex_bucket *b2 = &futex_table[idx2];
+
+    /* Lock both buckets in address order to avoid deadlock */
+    if (idx1 < idx2) {
+        spin_lock(&b1->lock);
+        spin_lock(&b2->lock);
+    } else if (idx1 > idx2) {
+        spin_lock(&b2->lock);
+        spin_lock(&b1->lock);
+    } else {
+        /* Same bucket */
+        spin_lock(&b1->lock);
+    }
+
+    /* Optionally compare *uaddr1 with cmpval */
+    if (do_cmp) {
+        uint32 curval;
+        if (vm_copyin(vm, (char *)&curval, uaddr1, sizeof(curval)) < 0) {
+            if (idx1 != idx2) spin_unlock(&b2->lock);
+            spin_unlock(&b1->lock);
+            return -EFAULT;
+        }
+        if (curval != cmpval) {
+            if (idx1 != idx2) spin_unlock(&b2->lock);
+            spin_unlock(&b1->lock);
+            return -EAGAIN;
+        }
+    }
+
+    int woken = 0;
+    int requeued = 0;
+
+    /* Phase 1: Wake up to nr_wake waiters */
+    struct futex_waiter **pp = &b1->head;
+    while (*pp && woken < nr_wake) {
+        struct futex_waiter *w = *pp;
+        if (w->vm == vm && w->uaddr == uaddr1) {
+            *pp = w->next;
+            w->next = NULL;
+            scheduler_wakeup_interruptible(w->thread);
+            woken++;
+        } else {
+            pp = &(*pp)->next;
+        }
+    }
+
+    /* Phase 2: Requeue up to nr_requeue waiters from uaddr1 to uaddr2 */
+    pp = &b1->head;
+    while (*pp && requeued < nr_requeue) {
+        struct futex_waiter *w = *pp;
+        if (w->vm == vm && w->uaddr == uaddr1) {
+            /* Remove from b1 */
+            *pp = w->next;
+            /* Update the waiter's address to uaddr2 */
+            w->uaddr = uaddr2;
+            /* Add to b2's list */
+            w->next = b2->head;
+            b2->head = w;
+            requeued++;
+        } else {
+            pp = &(*pp)->next;
+        }
+    }
+
+    if (idx1 != idx2)
+        spin_unlock(&b2->lock);
+    spin_unlock(&b1->lock);
+
+    return woken;
+}
+
+/*
  * sys_futex — system call entry point
  *
  * Arguments:
@@ -226,15 +313,15 @@ uint64 sys_futex(void) {
     uint64 uaddr;
     int futex_op;
     uint32 val;
-    // uint64 timeout_ptr; // Reserved for future timeout support
-    // uint64 uaddr2;      // Reserved for FUTEX_REQUEUE
-    uint32 val3;
+    uint64 timeout_or_val2; /* a3: timeout for WAIT, nr_requeue for REQUEUE */
+    uint64 uaddr2;          /* a4 */
+    uint32 val3;             /* a5 */
 
     argaddr(0, &uaddr);
     argint(1, &futex_op);
     argint(2, (int *)&val);
-    // argaddr(3, &timeout_ptr);
-    // argaddr(4, &uaddr2);
+    argaddr(3, &timeout_or_val2);
+    argaddr(4, &uaddr2);
     argint(5, (int *)&val3);
 
     // Alignment check: futex word must be 4-byte aligned
@@ -255,6 +342,20 @@ uint64 sys_futex(void) {
 
     case FUTEX_WAKE_BITSET:
         return (uint64)futex_wake(uaddr, val, val3);
+
+    case FUTEX_REQUEUE:
+        if (uaddr2 & 3)
+            return (uint64)-EINVAL;
+        /* val=nr_wake, timeout_or_val2=nr_requeue, uaddr2=target addr */
+        return (uint64)futex_requeue(uaddr, (int)val, uaddr2,
+                                     (int)timeout_or_val2, 0, 0);
+
+    case FUTEX_CMP_REQUEUE:
+        if (uaddr2 & 3)
+            return (uint64)-EINVAL;
+        /* val=nr_wake, timeout_or_val2=nr_requeue, uaddr2=target, val3=cmpval */
+        return (uint64)futex_requeue(uaddr, (int)val, uaddr2,
+                                     (int)timeout_or_val2, val3, 1);
 
     default:
         return (uint64)-ENOSYS;
