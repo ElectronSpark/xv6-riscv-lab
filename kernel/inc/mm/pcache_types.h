@@ -108,4 +108,33 @@ struct pcache_node {
     tq_t io_waiters; // Wait queue for IO completion
 };
 
+/* ── Batch page vector for vectorized pcache operations ───────────────── */
+
+#define PCACHE_VEC_MAX  16   /* max pages in a single batch */
+
+/**
+ * struct pcache_page_vec - lightweight batch of pcache pages
+ * @pages:      array of page pointers (caller or stack allocated)
+ * @nr_pages:   number of valid entries
+ *
+ * Used by pcache_put_pages() and internally by pcache_readv/writev to
+ * amortise per-page lock acquisition overhead.
+ */
+struct pcache_page_vec {
+    page_t *pages[PCACHE_VEC_MAX];
+    int nr_pages;
+};
+
+static inline void pcache_page_vec_init(struct pcache_page_vec *pvec) {
+    pvec->nr_pages = 0;
+}
+
+static inline int pcache_page_vec_add(struct pcache_page_vec *pvec,
+                                       page_t *page) {
+    if (pvec->nr_pages >= PCACHE_VEC_MAX)
+        return -1;
+    pvec->pages[pvec->nr_pages++] = page;
+    return 0;
+}
+
 #endif // KERNEL_PAGE_CACHE_TYPES_H

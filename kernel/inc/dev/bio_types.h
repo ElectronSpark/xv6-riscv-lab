@@ -56,6 +56,10 @@ struct bio_iter {
     int16 bvec_idx;   // index of this bvec in the bio
 };
 
-/* NOT YET IMPLEMENTED: bio_request / I/O scheduler request queue */
+/*
+ * IO scheduler request queue: see <dev/iosched_types.h> and <dev/iosched.h>.
+ * The scheduler uses bio->list_entry for queue linkage and bio->blkno for
+ * sorted (elevator) dispatch ordering.
+ */
 
 #endif // __KERNEL_BLOCK_IO_TYPES_H

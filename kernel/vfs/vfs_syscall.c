@@ -3230,8 +3230,8 @@ uint64 sys_vfs_pwritev(void) {
  * with flags.
  *
  * When offset == -1, uses the current file position (like readv).
- * Flags: RWF_HIPRI (0x01), RWF_DSYNC (0x02), RWF_SYNC (0x04),
- *        RWF_NOWAIT (0x08), RWF_APPEND (0x10) — currently ignored.
+ * Flags: RWF_HIPRI, RWF_DSYNC, RWF_SYNC, RWF_NOWAIT, RWF_APPEND.
+ * RWF_NOWAIT causes -EAGAIN when a page is not already cached.
  */
 uint64 sys_vfs_preadv2(void) {
     int fd, iovcnt, flags;
@@ -3245,7 +3245,7 @@ uint64 sys_vfs_preadv2(void) {
     argint(4, &flags);
 
     /* Reject unknown flags */
-    if (flags & ~0x1f)
+    if (flags & ~RWF_SUPPORTED)
         return -EOPNOTSUPP;
 
     if (offset < -1)
@@ -3267,6 +3267,7 @@ uint64 sys_vfs_preadv2(void) {
             return err;
         }
 
+        iter.flags = (unsigned int)flags;
         ssize_t ret = vfs_filereadv(f, &iter, true);
 
         if (heap_iov) uio_iovec_free_ex(heap_iov, iovcnt);
@@ -3292,6 +3293,8 @@ uint64 sys_vfs_preadv2(void) {
         vfs_fput(f);
         return err;
     }
+
+    iter.flags = (unsigned int)flags;
 
     mutex_lock(&f->lock);
     loff_t saved = f->f_pos;
@@ -3335,8 +3338,9 @@ uint64 sys_vfs_preadv2(void) {
  * with flags.
  *
  * When offset == -1, uses the current file position (like writev).
- * Flags: RWF_HIPRI, RWF_DSYNC, RWF_SYNC, RWF_NOWAIT, RWF_APPEND — currently
- * ignored (RWF_APPEND could later seek to end before writing).
+ * Flags: RWF_HIPRI, RWF_DSYNC, RWF_SYNC, RWF_NOWAIT, RWF_APPEND.
+ * RWF_NOWAIT causes -EAGAIN when a page is not already cached.
+ * RWF_APPEND could later seek to end before writing.
  */
 uint64 sys_vfs_pwritev2(void) {
     int fd, iovcnt, flags;
@@ -3350,7 +3354,7 @@ uint64 sys_vfs_pwritev2(void) {
     argint(4, &flags);
 
     /* Reject unknown flags */
-    if (flags & ~0x1f)
+    if (flags & ~RWF_SUPPORTED)
         return -EOPNOTSUPP;
 
     if (offset < -1)
@@ -3372,6 +3376,7 @@ uint64 sys_vfs_pwritev2(void) {
             return err;
         }
 
+        iter.flags = (unsigned int)flags;
         ssize_t ret = vfs_filewritev(f, &iter, true);
 
         if (heap_iov) uio_iovec_free_ex(heap_iov, iovcnt);
@@ -3397,6 +3402,8 @@ uint64 sys_vfs_pwritev2(void) {
         vfs_fput(f);
         return err;
     }
+
+    iter.flags = (unsigned int)flags;
 
     mutex_lock(&f->lock);
     loff_t saved = f->f_pos;

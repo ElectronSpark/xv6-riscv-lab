@@ -3,6 +3,7 @@
 #include <riscv.h>
 #include <dev/dev.h>
 #include <dev/blkdev.h>
+#include <dev/iosched.h>
 #include <defs.h>
 #include "printf.h"
 #include <lock/spinlock.h>
@@ -76,6 +77,7 @@ int blkdev_register(blkdev_t *dev) {
     device_t *device = (device_t *)dev;
     device->type = DEV_TYPE_BLOCK;
     device->ops = __blkdev_underlying_ops;
+    iosched_init(&dev->iosched, dev);
     return device_register(device);
 }
 

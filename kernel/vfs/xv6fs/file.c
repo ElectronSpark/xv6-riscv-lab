@@ -42,6 +42,7 @@
 #include <mm/page.h>
 #include "xv6fs_private.h"
 #include "vfs/uio.h"
+#include <mm/pcache.h>
 
 /*
  * Blocks-per-page constants for pcache ↔ xv6fs block address translation.
@@ -368,8 +369,9 @@ int xv6fs_file_fflush(struct vfs_file *file) {
 /******************************************************************************
  * Vectored read (readv)
  *
- * Take the inode lock once to snapshot the size, then iterate all iov_iter
- * segments.  This avoids per-segment lock acquire/release overhead.
+ * Delegates to the generic pcache_readv() helper which handles the
+ * page-at-a-time scatter loop, batched page releases, and RWF_NOWAIT.
+ * The inode lock is taken only briefly to snapshot the file size.
  ******************************************************************************/
 
 static ssize_t xv6fs_file_readv(struct vfs_file *file, struct iov_iter *iter,
@@ -389,80 +391,12 @@ static ssize_t xv6fs_file_readv(struct vfs_file *file, struct iov_iter *iter,
     vfs_iunlock(inode);
 
     loff_t pos = file->f_pos;
-    if (pos >= isize)
-        return 0;
 
-    size_t total_avail = (size_t)(isize - pos);
-    if (iter->count > total_avail) {
-        /* We'll stop at EOF anyway — adjust conceptually */
-    }
+    ssize_t ret = pcache_readv(pc, iter, &pos, isize, user);
 
-    ssize_t bytes_read = 0;
-
-    while (iter->nr_segs > 0 && iter->count > 0 && pos < isize) {
-        size_t seg_len = iter->iov->iov_len - iter->iov_off;
-        if (seg_len == 0) {
-            iov_iter_advance(iter, 0);
-            continue;
-        }
-        uint64 base = iter->iov->iov_base + iter->iov_off;
-
-        /* Clamp to remaining file size */
-        if (pos + (loff_t)seg_len > isize)
-            seg_len = (size_t)(isize - pos);
-
-        size_t seg_read = 0;
-        while (seg_read < seg_len) {
-            uint bn  = pos / BSIZE;
-            uint off = pos % BSIZE;
-            uint n   = BSIZE - off;
-            if (n > seg_len - seg_read)
-                n = seg_len - seg_read;
-
-            uint64 blkno_512 = (uint64)bn * BLK512_PER_BSIZE;
-            page_t *page = pcache_get_page(pc, blkno_512);
-            if (page == NULL) {
-                if (bytes_read > 0)
-                    goto out;
-                return signal_pending(current) ? -EINTR : -EIO;
-            }
-            int ret = pcache_read_page(pc, page);
-            if (ret != 0) {
-                pcache_put_page(pc, page);
-                if (bytes_read > 0)
-                    goto out;
-                return (ret == -EINTR) ? -EINTR : -EIO;
-            }
-
-            struct pcache_node *pcn = page->pcache.pcache_node;
-            uint page_off = (bn % BSIZE_PER_PAGE) * BSIZE + off;
-            char *data = (char *)pcn->data + page_off;
-
-            if (user) {
-                if (vm_copyout(current->vm, (uint64)(base + seg_read),
-                               data, n) < 0) {
-                    pcache_put_page(pc, page);
-                    if (bytes_read == 0)
-                        return -EFAULT;
-                    goto out;
-                }
-            } else {
-                memmove((char *)(base + seg_read), data, n);
-            }
-            pcache_put_page(pc, page);
-            seg_read += n;
-            pos += n;
-        }
-
-        bytes_read += seg_read;
-        iov_iter_advance(iter, seg_read);
-        if (seg_read < seg_len)
-            break; /* short read due to EOF */
-    }
-
-out:
-    file->f_pos = pos;
-    return bytes_read;
+    if (ret > 0)
+        file->f_pos = pos;
+    return ret;
 }
 
 /******************************************************************************
@@ -485,6 +419,15 @@ static ssize_t xv6fs_file_writev(struct vfs_file *file, struct iov_iter *iter,
         return -EINVAL;
     if (!pc->active)
         return -EIO;
+
+    /*
+     * RWF_NOWAIT: xv6fs writes require transactions (begin_op) and
+     * on-disk block allocation (bmap), both of which can block.
+     * Non-blocking writes are not supported — return -EAGAIN so the
+     * caller can retry without RWF_NOWAIT.
+     */
+    if (iter->flags & RWF_NOWAIT)
+        return -EAGAIN;
 
     loff_t pos = file->f_pos;
 

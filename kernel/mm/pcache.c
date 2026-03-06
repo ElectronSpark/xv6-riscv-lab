@@ -19,8 +19,11 @@
 #include <mm/pcache.h>
 #include "errno.h"
 #include <mm/slab.h>
+#include <mm/vm.h>
 #include "dev/bio.h"
 #include "timer/timer.h"
+#include "signal.h"
+#include "vfs/uio.h"
 
 // Locking order:
 // 1. __pcache_global_spinlock
@@ -1889,6 +1892,410 @@ int pcache_prepare_write_page(struct pcache *pcache, page_t *page) {
     page_lock_release(page);
     __pcache_spin_unlock(pcache);
     return ret;
+}
+
+/******************************************************************************
+ * Non-blocking page cache operations
+ *
+ * These variants never allocate, never evict, and never sleep on IO.
+ * They are the building blocks for RWF_NOWAIT support.
+ *****************************************************************************/
+
+/**
+ * pcache_get_page_nowait - look up a cached page without blocking
+ *
+ * Returns the page with +1 reference if already cached, or NULL if not
+ * present.  Unlike pcache_get_page(), this never allocates a new page,
+ * never waits for eviction, and never sleeps.
+ */
+page_t *pcache_get_page_nowait(struct pcache *pcache, uint64 blkno) {
+    uint64 base_blkno;
+    page_t *page;
+    struct pcache_node *pcnode;
+
+    if (pcache == NULL || !__pcache_is_active(pcache))
+        return NULL;
+
+    base_blkno = PCACHE_ALIGN_BLKNO(blkno);
+    if (base_blkno >= pcache->blk_count)
+        return NULL;
+    if (base_blkno + PCACHE_BLKS_PER_PAGE > pcache->blk_count)
+        return NULL;
+
+    /* RCU-safe lookup — does not acquire the pcache spinlock */
+    page = __pcache_find_and_pin_page(pcache, base_blkno);
+    if (page == NULL)
+        return NULL;
+
+    /* Validate under locks */
+    __pcache_spin_lock(pcache);
+    page_lock_acquire(page);
+
+    if (!__pcache_page_valid(pcache, page)) {
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+        __page_ref_dec(page);
+        return NULL;
+    }
+
+    pcnode = page->pcache.pcache_node;
+    if (pcnode->blkno != base_blkno) {
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+        __page_ref_dec(page);
+        return NULL;
+    }
+
+    /* Pull from clean LRU if needed */
+    if (!pcnode->dirty && !LIST_NODE_IS_DETACHED(pcnode, lru_entry))
+        __pcache_remove_lru(pcache, page);
+
+    page_lock_release(page);
+    __pcache_spin_unlock(pcache);
+    return page;
+}
+
+/**
+ * pcache_read_page_nowait - check if a page is up-to-date without blocking
+ *
+ * Returns 0 if the page is already up-to-date (data is valid).
+ * Returns -EAGAIN if the page needs IO or IO is already in progress.
+ */
+int pcache_read_page_nowait(struct pcache *pcache, page_t *page) {
+    struct pcache_node *pcnode;
+
+    if (pcache == NULL || page == NULL)
+        return -EINVAL;
+
+    __pcache_spin_lock(pcache);
+    page_lock_acquire(page);
+
+    if (!__pcache_is_active(pcache) || !__pcache_page_valid(pcache, page)) {
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+        return -EINVAL;
+    }
+
+    pcnode = page->pcache.pcache_node;
+
+    if (pcnode->uptodate) {
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+        return 0;
+    }
+
+    /* Page needs IO — return EAGAIN instead of blocking */
+    page_lock_release(page);
+    __pcache_spin_unlock(pcache);
+    return -EAGAIN;
+}
+
+/******************************************************************************
+ * Batch (vectorized) page cache operations
+ *****************************************************************************/
+
+/**
+ * pcache_put_pages - release a batch of pages in one go
+ *
+ * Releases all pages in @pvec via pcache_put_page, then resets the vector.
+ */
+void pcache_put_pages(struct pcache *pcache, struct pcache_page_vec *pvec) {
+    for (int i = 0; i < pvec->nr_pages; i++) {
+        if (pvec->pages[i] != NULL)
+            pcache_put_page(pcache, pvec->pages[i]);
+    }
+    pvec->nr_pages = 0;
+}
+
+/******************************************************************************
+ * High-level vectorized read/write through the page cache
+ *
+ * These generic helpers implement the "iterate iov_iter → map file offset
+ * to pcache page → copy data → advance" loop that every pcache-backed
+ * filesystem currently duplicates.  They honour RWF_NOWAIT in iter->flags
+ * and can batch page releases via pcache_page_vec.
+ *****************************************************************************/
+
+/**
+ * pcache_readv - vectorized read from page cache into iov_iter buffers
+ *
+ * Reads data starting at file offset *@ppos, clamped to @isize (file size),
+ * scattering into the user/kernel buffers described by @iter.  On success,
+ * *@ppos is advanced past the last byte read.
+ *
+ * When RWF_NOWAIT is set in iter->flags, returns -EAGAIN immediately if
+ * any required page is not already cached and up-to-date.
+ *
+ * Returns total bytes read, 0 for EOF, or negative errno.
+ */
+ssize_t pcache_readv(struct pcache *pcache, struct iov_iter *iter,
+                     loff_t *ppos, loff_t isize, bool user) {
+    loff_t pos = *ppos;
+    ssize_t bytes_read = 0;
+    bool nowait = (iter->flags & RWF_NOWAIT) != 0;
+    struct pcache_page_vec pvec;
+
+    if (pcache == NULL || !__pcache_is_active(pcache))
+        return -EIO;
+
+    if (pos >= isize)
+        return 0; /* EOF */
+
+    pcache_page_vec_init(&pvec);
+
+    while (iter->nr_segs > 0 && iter->count > 0 && pos < isize) {
+        size_t seg_len = iter->iov->iov_len - iter->iov_off;
+        if (seg_len == 0) {
+            iov_iter_advance(iter, 0);
+            continue;
+        }
+        uint64 base = iter->iov->iov_base + iter->iov_off;
+
+        /* Clamp to remaining file size */
+        if (pos + (loff_t)seg_len > isize)
+            seg_len = (size_t)(isize - pos);
+
+        size_t seg_read = 0;
+        while (seg_read < seg_len) {
+            size_t page_off = pos % PGSIZE;
+            size_t chunk = PGSIZE - page_off;
+            if (chunk > seg_len - seg_read)
+                chunk = seg_len - seg_read;
+
+            uint64 blkno_512 = (pos / PGSIZE) * PCACHE_BLKS_PER_PAGE;
+
+            /* Get the page — nowait or blocking */
+            page_t *page;
+            if (nowait) {
+                page = pcache_get_page_nowait(pcache, blkno_512);
+                if (page == NULL) {
+                    if (bytes_read > 0)
+                        goto out;
+                    bytes_read = -EAGAIN;
+                    goto out;
+                }
+            } else {
+                page = pcache_get_page(pcache, blkno_512);
+                if (page == NULL) {
+                    if (bytes_read > 0)
+                        goto out;
+                    bytes_read = signal_pending(current) ? -EINTR : -EIO;
+                    goto out;
+                }
+            }
+
+            /* Read the page — nowait or blocking */
+            int ret;
+            if (nowait) {
+                ret = pcache_read_page_nowait(pcache, page);
+                if (ret != 0) {
+                    pcache_put_page(pcache, page);
+                    if (bytes_read > 0)
+                        goto out;
+                    bytes_read = -EAGAIN;
+                    goto out;
+                }
+            } else {
+                ret = pcache_read_page(pcache, page);
+                if (ret != 0) {
+                    pcache_put_page(pcache, page);
+                    if (bytes_read > 0)
+                        goto out;
+                    bytes_read = (ret == -EINTR) ? -EINTR : -EIO;
+                    goto out;
+                }
+            }
+
+            /* Copy data out */
+            struct pcache_node *pcn = page->pcache.pcache_node;
+            char *data = (char *)pcn->data + page_off;
+
+            if (user) {
+                if (vm_copyout(current->vm, (uint64)(base + seg_read),
+                               data, chunk) < 0) {
+                    pcache_put_page(pcache, page);
+                    if (bytes_read == 0)
+                        bytes_read = -EFAULT;
+                    goto out;
+                }
+            } else {
+                memmove((char *)(base + seg_read), data, chunk);
+            }
+
+            /*
+             * Batch page release: defer put_page until we've processed
+             * several pages, then flush the batch.
+             */
+            if (pcache_page_vec_add(&pvec, page) < 0) {
+                pcache_put_pages(pcache, &pvec);
+                pcache_page_vec_add(&pvec, page);
+            }
+
+            seg_read += chunk;
+            pos += chunk;
+        }
+
+        bytes_read += seg_read;
+        iov_iter_advance(iter, seg_read);
+        if (seg_read < seg_len)
+            break; /* clamped at EOF */
+    }
+
+out:
+    pcache_put_pages(pcache, &pvec);
+    *ppos = pos;
+    return bytes_read;
+}
+
+/**
+ * pcache_writev - vectorized write from iov_iter buffers into page cache
+ *
+ * Writes data starting at file offset *@ppos from the user/kernel buffers
+ * described by @iter.  Each page is fetched (or allocated), populated via
+ * pcache_read_page or pcache_prepare_write_page, the user data is copied
+ * in, and the page is marked dirty.
+ *
+ * When RWF_NOWAIT is set, returns -EAGAIN if any required page is not
+ * already cached and up-to-date.
+ *
+ * Suitable for backendless filesystems (tmpfs).  Filesystems that require
+ * block allocation (xv6fs with bmap) should use per-page primitives.
+ *
+ * Returns total bytes written or negative errno.
+ * NOTE: The caller is responsible for updating inode->size if the write
+ * extended the file.
+ */
+ssize_t pcache_writev(struct pcache *pcache, struct iov_iter *iter,
+                      loff_t *ppos, bool user) {
+    loff_t pos = *ppos;
+    ssize_t bytes_written = 0;
+    bool nowait = (iter->flags & RWF_NOWAIT) != 0;
+    struct pcache_page_vec pvec;
+
+    if (pcache == NULL || !__pcache_is_active(pcache))
+        return -EIO;
+
+    pcache_page_vec_init(&pvec);
+
+    while (iter->nr_segs > 0 && iter->count > 0) {
+        size_t seg_len = iter->iov->iov_len - iter->iov_off;
+        if (seg_len == 0) {
+            iov_iter_advance(iter, 0);
+            continue;
+        }
+        uint64 base = iter->iov->iov_base + iter->iov_off;
+
+        size_t seg_written = 0;
+        while (seg_written < seg_len) {
+            size_t page_off = pos % PGSIZE;
+            size_t chunk = PGSIZE - page_off;
+            if (chunk > seg_len - seg_written)
+                chunk = seg_len - seg_written;
+
+            uint64 blkno_512 = (pos / PGSIZE) * PCACHE_BLKS_PER_PAGE;
+
+            /* Get the page — nowait or blocking */
+            page_t *page;
+            if (nowait) {
+                page = pcache_get_page_nowait(pcache, blkno_512);
+                if (page == NULL) {
+                    if (bytes_written > 0)
+                        goto out;
+                    bytes_written = -EAGAIN;
+                    goto out;
+                }
+            } else {
+                page = pcache_get_page(pcache, blkno_512);
+                if (page == NULL) {
+                    if (bytes_written > 0)
+                        goto out;
+                    bytes_written = signal_pending(current) ? -EINTR : -ENOMEM;
+                    goto out;
+                }
+            }
+
+            /*
+             * Prepare the page for writing.  If the write covers the
+             * entire page, use pcache_prepare_write_page to avoid a
+             * disk read.  Otherwise read the existing content first.
+             */
+            int ret;
+            bool full_page = (page_off == 0 && chunk >= PGSIZE);
+
+            if (nowait) {
+                /* NOWAIT: page must already be uptodate */
+                ret = pcache_read_page_nowait(pcache, page);
+                if (ret != 0 && !full_page) {
+                    pcache_put_page(pcache, page);
+                    if (bytes_written > 0)
+                        goto out;
+                    bytes_written = -EAGAIN;
+                    goto out;
+                }
+                /* For full-page overwrites with NOWAIT, prepare is OK
+                 * since it doesn't do IO */
+                if (ret != 0 && full_page) {
+                    ret = pcache_prepare_write_page(pcache, page);
+                    if (ret != 0) {
+                        pcache_put_page(pcache, page);
+                        if (bytes_written > 0)
+                            goto out;
+                        bytes_written = -EAGAIN;
+                        goto out;
+                    }
+                }
+            } else {
+                if (full_page)
+                    ret = pcache_prepare_write_page(pcache, page);
+                else
+                    ret = pcache_read_page(pcache, page);
+                if (ret != 0) {
+                    pcache_put_page(pcache, page);
+                    if (bytes_written > 0)
+                        goto out;
+                    bytes_written = (ret == -EINTR) ? -EINTR : -EIO;
+                    goto out;
+                }
+            }
+
+            /* Copy data in */
+            struct pcache_node *pcn = page->pcache.pcache_node;
+            char *data = (char *)pcn->data + page_off;
+
+            if (user) {
+                if (vm_copyin(current->vm, data,
+                              (uint64)(base + seg_written), chunk) < 0) {
+                    pcache_put_page(pcache, page);
+                    if (bytes_written == 0)
+                        bytes_written = -EFAULT;
+                    goto out;
+                }
+            } else {
+                memmove(data, (const char *)(base + seg_written), chunk);
+            }
+
+            pcache_mark_page_dirty(pcache, page);
+
+            /* Batch page release */
+            if (pcache_page_vec_add(&pvec, page) < 0) {
+                pcache_put_pages(pcache, &pvec);
+                pcache_page_vec_add(&pvec, page);
+            }
+
+            seg_written += chunk;
+            pos += chunk;
+        }
+
+        bytes_written += seg_written;
+        iov_iter_advance(iter, seg_written);
+        if (seg_written < seg_len)
+            break; /* short write */
+    }
+
+out:
+    pcache_put_pages(pcache, &pvec);
+    *ppos = pos;
+    return bytes_written;
 }
 
 void dump_pcache_stats(struct pcache *pcache) {

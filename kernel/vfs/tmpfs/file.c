@@ -433,67 +433,18 @@ static ssize_t __tmpfs_file_readv(struct vfs_file *file, struct iov_iter *iter,
         return bytes_read;
     }
 
-    /* pcache path */
+    /* pcache path — delegate to generic vectorized helper */
     if (!pc->active) {
         vfs_iunlock(inode);
         return -EIO;
     }
 
-    while (iter->nr_segs > 0 && iter->count > 0 && pos < inode->size) {
-        size_t seg_len = iter->iov->iov_len - iter->iov_off;
-        if (seg_len == 0) { iov_iter_advance(iter, 0); continue; }
-        uint64 base = iter->iov->iov_base + iter->iov_off;
-
-        if (pos + (loff_t)seg_len > inode->size)
-            seg_len = (size_t)(inode->size - pos);
-
-        size_t seg_read = 0;
-        while (seg_read < seg_len) {
-            size_t block_idx = TMPFS_IBLOCK(pos);
-            size_t block_off = TMPFS_IBLOCK_OFFSET(pos);
-            size_t chunk = PAGE_SIZE - block_off;
-            if (chunk > seg_len - seg_read)
-                chunk = seg_len - seg_read;
-
-            uint64 blkno_512 = (uint64)block_idx * PCACHE_BLKS_PER_PAGE;
-            page_t *page = pcache_get_page(pc, blkno_512);
-            if (page == NULL) {
-                vfs_iunlock(inode);
-                if (bytes_read == 0) return -EIO;
-                goto out;
-            }
-            int ret = pcache_read_page(pc, page);
-            if (ret != 0) {
-                pcache_put_page(pc, page);
-                vfs_iunlock(inode);
-                if (bytes_read == 0) return -EIO;
-                goto out;
-            }
-            struct pcache_node *pcn = page->pcache.pcache_node;
-            char *data = (char *)pcn->data + block_off;
-
-            if (user) {
-                if (vm_copyout(current->vm, (uint64)(base + seg_read),
-                               data, chunk) < 0) {
-                    pcache_put_page(pc, page);
-                    vfs_iunlock(inode);
-                    if (bytes_read == 0) return -EFAULT;
-                    goto out;
-                }
-            } else {
-                memmove((char *)(base + seg_read), data, chunk);
-            }
-            pcache_put_page(pc, page);
-            seg_read += chunk;
-            pos += chunk;
-        }
-        bytes_read += seg_read;
-        iov_iter_advance(iter, seg_read);
-        if (seg_read < seg_len) break;
-    }
-
+    loff_t isize = inode->size;
     vfs_iunlock(inode);
-out:
+
+    ssize_t ret = pcache_readv(pc, iter, &pos, isize, user);
+
+    bytes_read = ret;
     file->f_pos = pos;
     return bytes_read;
 }
@@ -562,68 +513,30 @@ static ssize_t __tmpfs_file_writev(struct vfs_file *file, struct iov_iter *iter,
         }
     }
 
-    /* pcache path */
+    /* pcache path — delegate to generic vectorized helper */
     if (!pc->active) {
         vfs_iunlock(inode);
         return -EIO;
     }
 
-    while (iter->nr_segs > 0 && iter->count > 0) {
-        size_t seg_len = iter->iov->iov_len - iter->iov_off;
-        if (seg_len == 0) { iov_iter_advance(iter, 0); continue; }
-        uint64 base = iter->iov->iov_base + iter->iov_off;
+    /* Release inode lock before entering pcache loop — pcache_writev will
+     * handle page-level locking internally.  We re-acquire afterwards to
+     * update inode size if necessary. */
+    vfs_iunlock(inode);
 
-        size_t seg_written = 0;
-        while (seg_written < seg_len) {
-            size_t block_idx = TMPFS_IBLOCK(pos);
-            size_t block_off = TMPFS_IBLOCK_OFFSET(pos);
-            size_t chunk = PAGE_SIZE - block_off;
-            if (chunk > seg_len - seg_written)
-                chunk = seg_len - seg_written;
+    ssize_t ret = pcache_writev(pc, iter, &pos, user);
 
-            uint64 blkno_512 = (uint64)block_idx * PCACHE_BLKS_PER_PAGE;
-            page_t *page = pcache_get_page(pc, blkno_512);
-            if (page == NULL) {
-                vfs_iunlock(inode);
-                if (bytes_written == 0) return -ENOMEM;
-                goto done;
-            }
-            int ret = pcache_read_page(pc, page);
-            if (ret != 0) {
-                pcache_put_page(pc, page);
-                vfs_iunlock(inode);
-                if (bytes_written == 0) return ret;
-                goto done;
-            }
-            struct pcache_node *pcn = page->pcache.pcache_node;
-            char *data = (char *)pcn->data + block_off;
-
-            if (user) {
-                if (vm_copyin(current->vm, data,
-                              (uint64)(base + seg_written), chunk) < 0) {
-                    pcache_put_page(pc, page);
-                    vfs_iunlock(inode);
-                    if (bytes_written == 0) return -EFAULT;
-                    goto done;
-                }
-            } else {
-                memmove(data, (const char *)(base + seg_written), chunk);
-            }
-            pcache_mark_page_dirty(pc, page);
-            pcache_put_page(pc, page);
-
-            seg_written += chunk;
-            pos += chunk;
-        }
-        bytes_written += seg_written;
-        iov_iter_advance(iter, seg_written);
-        if (seg_written < seg_len) break;
+    if (ret > 0) {
+        bytes_written += ret;
+        /* Re-acquire lock to update size atomically */
+        vfs_ilock(inode);
+        if (pos > inode->size)
+            inode->size = pos;
+        vfs_iunlock(inode);
+    } else if (ret < 0 && bytes_written == 0) {
+        bytes_written = ret;
     }
 
-    if (pos > inode->size)
-        inode->size = pos;
-
-    vfs_iunlock(inode);
 done:
     file->f_pos = pos;
     return bytes_written;

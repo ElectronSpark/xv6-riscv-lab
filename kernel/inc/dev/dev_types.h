@@ -7,6 +7,7 @@
 #include <kobject.h>
 #include <lock/rcu_type.h>
 #include <vfs/stat.h>
+#include <dev/iosched_types.h>
 
 #define MAX_MAJOR_DEVICES 256 // Maximum number of major devices
 // Maximum number of minor devices per major device
@@ -101,6 +102,7 @@ typedef struct blkdev {
     uint16 block_shift; // Block size shift relative to 512 bytes, typically
                         // 1(512) or 3(4096)
     blkdev_ops_t ops;
+    struct iosched iosched; // per-device IO scheduler
 } blkdev_t;
 
 #endif // __KERNEL_DEV_DEV_TYPES_H

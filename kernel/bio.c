@@ -37,6 +37,7 @@
 #include "dev/bio.h"
 #include <mm/page.h>
 #include "dev/blkdev.h"
+#include "dev/iosched.h"
 #include "list.h"
 #include "hlist.h"
 #include "proc/thread.h"
@@ -356,6 +357,10 @@ void bwrite_async(struct buf *b) {
 //
 // Buffers are collected in batches, all BIOs are submitted, then all are
 // awaited — turning N sequential I/O round-trips into one parallel batch.
+//
+// The IO scheduler sorts bios within each batch using the C-SCAN elevator
+// algorithm so the device sees requests in ascending sector order (fewer
+// seeks on rotational media, and friendly to sequential prefetch on SSDs).
 #define BSYNC_BATCH_MAX 64
 
 void bsync(void) {
@@ -364,6 +369,7 @@ void bsync(void) {
         struct bio *bio;
         blkdev_t *blkdev;
     } batch[BSYNC_BATCH_MAX];
+    struct bio *dispatched[BSYNC_BATCH_MAX];
     int flushed = 0;
 
     while (1) {
@@ -390,7 +396,10 @@ void bsync(void) {
         if (n == 0)
             break;
 
-        /* Phase 2: Lock each buffer and submit its bio (no waiting yet) */
+        /* Phase 2: Lock each buffer, create bio, enqueue in IO scheduler.
+         * Bios are NOT submitted to the driver yet — the scheduler
+         * accumulates them so it can dispatch in elevator order. */
+        blkdev_t *sched_bdev = NULL; /* scheduler device for this batch */
         for (int i = 0; i < n; i++) {
             struct buf *b = batch[i].buf;
             mutex_lock(&b->lock);
@@ -400,9 +409,10 @@ void bsync(void) {
                 if (!IS_ERR(blkdev)) {
                     struct bio *bio = __buf_alloc_bio(b, blkdev, true);
                     if (!IS_ERR_OR_NULL(bio)) {
-                        blkdev_submit_bio(blkdev, bio);
                         batch[i].bio = bio;
                         batch[i].blkdev = blkdev;
+                        sched_bdev = blkdev;
+                        iosched_enqueue(&blkdev->iosched, bio);
                     } else {
                         blkdev_put(blkdev);
                     }
@@ -410,10 +420,22 @@ void bsync(void) {
             }
         }
 
+        /* Phase 2b: Dispatch all enqueued bios in elevator order.
+         * iosched_dispatch_batch() picks bios in C-SCAN order and
+         * submits each to the driver via blkdev->ops.submit_bio(). */
+        int ndispatched = 0;
+        if (sched_bdev != NULL) {
+            ndispatched = iosched_dispatch_batch(
+                &sched_bdev->iosched, dispatched, n);
+        }
+
         /* Phase 3: Await all in-flight bios in parallel */
+        for (int i = 0; i < ndispatched; i++) {
+            bio_await(dispatched[i]);
+        }
+        /* Clean up bio resources and unlock buffers */
         for (int i = 0; i < n; i++) {
             if (batch[i].bio != NULL) {
-                bio_await(batch[i].bio);
                 __buf_bio_cleanup(batch[i].bio);
                 blkdev_put(batch[i].blkdev);
                 flushed++;

@@ -12,6 +12,7 @@
 #define KERNEL_VFS_UIO_H
 
 #include "types.h"
+#include "vfs/rwf.h"
 
 /* ── Maximum number of iovec entries per single readv/writev call ───────── */
 #define UIO_MAXIOV    1024
@@ -38,6 +39,9 @@ struct kernel_iovec {
  * @nr_segs:   Number of remaining segments
  * @count:     Total remaining bytes across all segments
  * @iov_off:   Byte offset consumed inside the current segment
+ * @flags:     Per-IO flags (RWF_NOWAIT, RWF_DSYNC, etc.) propagated from
+ *             preadv2/pwritev2.  Filesystems and the page cache inspect
+ *             these to decide non-blocking behaviour.
  *
  * Filesystem readv/writev callbacks receive this iterator so they can
  * consume the buffer list incrementally without re-scanning from the
@@ -46,8 +50,9 @@ struct kernel_iovec {
 struct iov_iter {
     const struct kernel_iovec *iov;
     int    nr_segs;
-    size_t count;     /* total bytes remaining */
-    size_t iov_off;   /* bytes already consumed in iov[0] */
+    size_t count;         /* total bytes remaining */
+    size_t iov_off;       /* bytes already consumed in iov[0] */
+    unsigned int flags;   /* RWF_* per-IO flags */
 };
 
 /* ── iov_iter helpers ──────────────────────────────────────────────────── */
@@ -67,6 +72,7 @@ static inline void iov_iter_init(struct iov_iter *iter,
     iter->nr_segs = nr_segs;
     iter->count   = count;
     iter->iov_off = 0;
+    iter->flags   = 0;
 }
 
 /**
