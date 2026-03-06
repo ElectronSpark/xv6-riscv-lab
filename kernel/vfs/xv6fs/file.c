@@ -41,6 +41,7 @@
 #include "../vfs_private.h"
 #include <mm/page.h>
 #include "xv6fs_private.h"
+#include "vfs/uio.h"
 
 /*
  * Blocks-per-page constants for pcache ↔ xv6fs block address translation.
@@ -365,6 +366,247 @@ int xv6fs_file_fflush(struct vfs_file *file) {
 }
 
 /******************************************************************************
+ * Vectored read (readv)
+ *
+ * Take the inode lock once to snapshot the size, then iterate all iov_iter
+ * segments.  This avoids per-segment lock acquire/release overhead.
+ ******************************************************************************/
+
+static ssize_t xv6fs_file_readv(struct vfs_file *file, struct iov_iter *iter,
+                                bool user)
+{
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    struct pcache *pc = &inode->i_data;
+
+    if (!S_ISREG(inode->mode))
+        return -EINVAL;
+    if (!pc->active)
+        return -EIO;
+
+    /* Snapshot inode size under lock */
+    vfs_ilock(inode);
+    loff_t isize = inode->size;
+    vfs_iunlock(inode);
+
+    loff_t pos = file->f_pos;
+    if (pos >= isize)
+        return 0;
+
+    size_t total_avail = (size_t)(isize - pos);
+    if (iter->count > total_avail) {
+        /* We'll stop at EOF anyway — adjust conceptually */
+    }
+
+    ssize_t bytes_read = 0;
+
+    while (iter->nr_segs > 0 && iter->count > 0 && pos < isize) {
+        size_t seg_len = iter->iov->iov_len - iter->iov_off;
+        if (seg_len == 0) {
+            iov_iter_advance(iter, 0);
+            continue;
+        }
+        uint64 base = iter->iov->iov_base + iter->iov_off;
+
+        /* Clamp to remaining file size */
+        if (pos + (loff_t)seg_len > isize)
+            seg_len = (size_t)(isize - pos);
+
+        size_t seg_read = 0;
+        while (seg_read < seg_len) {
+            uint bn  = pos / BSIZE;
+            uint off = pos % BSIZE;
+            uint n   = BSIZE - off;
+            if (n > seg_len - seg_read)
+                n = seg_len - seg_read;
+
+            uint64 blkno_512 = (uint64)bn * BLK512_PER_BSIZE;
+            page_t *page = pcache_get_page(pc, blkno_512);
+            if (page == NULL) {
+                if (bytes_read > 0)
+                    goto out;
+                return signal_pending(current) ? -EINTR : -EIO;
+            }
+            int ret = pcache_read_page(pc, page);
+            if (ret != 0) {
+                pcache_put_page(pc, page);
+                if (bytes_read > 0)
+                    goto out;
+                return (ret == -EINTR) ? -EINTR : -EIO;
+            }
+
+            struct pcache_node *pcn = page->pcache.pcache_node;
+            uint page_off = (bn % BSIZE_PER_PAGE) * BSIZE + off;
+            char *data = (char *)pcn->data + page_off;
+
+            if (user) {
+                if (vm_copyout(current->vm, (uint64)(base + seg_read),
+                               data, n) < 0) {
+                    pcache_put_page(pc, page);
+                    if (bytes_read == 0)
+                        return -EFAULT;
+                    goto out;
+                }
+            } else {
+                memmove((char *)(base + seg_read), data, n);
+            }
+            pcache_put_page(pc, page);
+            seg_read += n;
+            pos += n;
+        }
+
+        bytes_read += seg_read;
+        iov_iter_advance(iter, seg_read);
+        if (seg_read < seg_len)
+            break; /* short read due to EOF */
+    }
+
+out:
+    file->f_pos = pos;
+    return bytes_read;
+}
+
+/******************************************************************************
+ * Vectored write (writev)
+ *
+ * Batch segments within transaction chunks, reducing begin_op/end_op
+ * overhead compared to the per-segment fallback path.
+ ******************************************************************************/
+
+static ssize_t xv6fs_file_writev(struct vfs_file *file, struct iov_iter *iter,
+                                 bool user)
+{
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
+    struct xv6fs_superblock *xv6_sb =
+        container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
+    struct pcache *pc = &inode->i_data;
+
+    if (!S_ISREG(inode->mode))
+        return -EINVAL;
+    if (!pc->active)
+        return -EIO;
+
+    loff_t pos = file->f_pos;
+
+    /* Check file size limit */
+    if (pos + (loff_t)iter->count > XV6FS_MAXFILE * BSIZE)
+        return -EFBIG;
+
+    int max = ((MAXOPBLOCKS - 1 - 1 - 2) / 2) * BSIZE;
+    ssize_t bytes_written = 0;
+
+    while (iter->nr_segs > 0 && iter->count > 0) {
+        /* Determine how much we can write in this transaction chunk */
+        size_t chunk_budget = (size_t)max;
+
+        int begin_ret = xv6fs_begin_op(xv6_sb);
+        if (begin_ret != 0) {
+            if (bytes_written == 0)
+                return begin_ret;
+            goto done;
+        }
+
+        vfs_ilock(inode);
+
+        size_t chunk_written = 0;
+
+        /* Consume iov_iter segments within this transaction */
+        while (iter->nr_segs > 0 && iter->count > 0 &&
+               chunk_written < chunk_budget) {
+            size_t seg_len = iter->iov->iov_len - iter->iov_off;
+            if (seg_len == 0) {
+                iov_iter_advance(iter, 0);
+                continue;
+            }
+            uint64 base = iter->iov->iov_base + iter->iov_off;
+
+            /* Limit to remaining transaction budget */
+            if (seg_len > chunk_budget - chunk_written)
+                seg_len = chunk_budget - chunk_written;
+
+            size_t seg_written = 0;
+            while (seg_written < seg_len) {
+                uint bn    = pos / BSIZE;
+                uint off   = pos % BSIZE;
+                uint chunk = BSIZE - off;
+                if (chunk > seg_len - seg_written)
+                    chunk = seg_len - seg_written;
+
+                uint addr = xv6fs_bmap(ip, bn);
+                if (addr == 0) {
+                    vfs_iunlock(inode);
+                    xv6fs_end_op(xv6_sb);
+                    if (bytes_written == 0)
+                        return -ENOSPC;
+                    goto done;
+                }
+
+                uint64 blkno_512 = (uint64)bn * BLK512_PER_BSIZE;
+                page_t *page = pcache_get_page(pc, blkno_512);
+                if (page == NULL) {
+                    vfs_iunlock(inode);
+                    xv6fs_end_op(xv6_sb);
+                    if (bytes_written > 0)
+                        goto done;
+                    return signal_pending(current) ? -EINTR : -EIO;
+                }
+
+                int ret = pcache_read_page(pc, page);
+                if (ret != 0) {
+                    pcache_put_page(pc, page);
+                    vfs_iunlock(inode);
+                    xv6fs_end_op(xv6_sb);
+                    if (bytes_written > 0)
+                        goto done;
+                    return (ret == -EINTR) ? -EINTR : -EIO;
+                }
+
+                struct pcache_node *pcn = page->pcache.pcache_node;
+                uint page_off = (bn % BSIZE_PER_PAGE) * BSIZE + off;
+                char *data = (char *)pcn->data + page_off;
+
+                if (user) {
+                    if (vm_copyin(current->vm, data,
+                                  (uint64)(base + seg_written), chunk) < 0) {
+                        pcache_put_page(pc, page);
+                        vfs_iunlock(inode);
+                        xv6fs_end_op(xv6_sb);
+                        if (bytes_written == 0)
+                            return -EFAULT;
+                        goto done;
+                    }
+                } else {
+                    memmove(data, (const char *)(base + seg_written), chunk);
+                }
+                pcache_mark_page_dirty(pc, page);
+                pcache_put_page(pc, page);
+
+                seg_written += chunk;
+                pos += chunk;
+            }
+
+            chunk_written += seg_written;
+            bytes_written += seg_written;
+            iov_iter_advance(iter, seg_written);
+            if (seg_written < seg_len)
+                break; /* short write */
+        }
+
+        /* Update inode size if extended */
+        if (pos > inode->size)
+            inode->size = pos;
+        xv6fs_iupdate(ip);
+
+        vfs_iunlock(inode);
+        xv6fs_end_op(xv6_sb);
+    }
+
+done:
+    file->f_pos = pos;
+    return bytes_written;
+}
+
+/******************************************************************************
  * VFS file operations structure
  ******************************************************************************/
 
@@ -382,6 +624,8 @@ struct vfs_file_ops xv6fs_file_ops = {
     .fflush = xv6fs_file_fflush,
     .fault = xv6fs_file_fault,
     .writepage = xv6fs_file_writepage,
+    .readv = xv6fs_file_readv,
+    .writev = xv6fs_file_writev,
 };
 
 /******************************************************************************

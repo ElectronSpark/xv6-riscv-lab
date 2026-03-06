@@ -2840,18 +2840,20 @@ uint64 sys_vfs_openat(void) {
     return n;
 }
 
-/*
- * User-space iovec structure (matches Linux / musl).
- */
-struct __k_iovec {
-    uint64 iov_base; // void * in user space
-    uint64 iov_len;  // size_t
-};
-
-#define UIO_MAXIOV 1024
+/* Forward declaration — defined below after pread64/pwrite64 */
+static int
+__preadwritev_copyin(uint64 iov_addr, int iovcnt,
+                     struct kernel_iovec stack_iovs[UIO_FASTIOV],
+                     struct kernel_iovec **piov,
+                     struct kernel_iovec **pheap,
+                     struct iov_iter *iter);
 
 /*
  * writev(fd, iov, iovcnt) — scatter-gather write.
+ *
+ * Uses the unified vfs_filewritev() path which dispatches to the
+ * native .writev callback if available, or falls back to per-segment
+ * .write / cdev_write.
  */
 uint64 sys_vfs_writev(void) {
     int fd, iovcnt;
@@ -2868,49 +2870,31 @@ uint64 sys_vfs_writev(void) {
     if (f == NULL)
         return -EBADF;
 
-    struct __k_iovec iovs[8]; // stack-allocated for small iovcnt
-    struct __k_iovec *iov = iovs;
-    struct __k_iovec *heap_iov = NULL;
-
-    if (iovcnt > 8) {
-        heap_iov = kvmalloc(iovcnt * sizeof(struct __k_iovec));
-        if (heap_iov == NULL) {
-            vfs_fput(f);
-            return -ENOMEM;
-        }
-        iov = heap_iov;
-    }
-
-    if (either_copyin(iov, 1, iov_addr, iovcnt * sizeof(struct __k_iovec)) < 0) {
+    struct kernel_iovec stack_iovs[UIO_FASTIOV];
+    struct kernel_iovec *iov, *heap_iov;
+    struct iov_iter iter;
+    int err = __preadwritev_copyin(iov_addr, iovcnt, stack_iovs,
+                                   &iov, &heap_iov, &iter);
+    if (err) {
         vfs_fput(f);
-        if (heap_iov) kvfree(heap_iov);
-        return -EFAULT;
+        return err;
     }
 
-    ssize_t total = 0;
-    for (int i = 0; i < iovcnt; i++) {
-        if (iov[i].iov_len == 0)
-            continue;
-        ssize_t n = vfs_filewrite(f, (const void *)iov[i].iov_base, iov[i].iov_len, true);
-        if (n < 0) {
-            if (total > 0) break;
-            total = n;
-            break;
-        }
-        total += n;
-        if ((uint64)n < iov[i].iov_len)
-            break; // Short write
-    }
+    ssize_t ret = vfs_filewritev(f, &iter, true);
 
     vfs_fput(f);
-    if (heap_iov) kvfree(heap_iov);
-    if (total > 0)
-        ACCT_ADD(current->thread_group, fs_bytes_written, (uint64)total);
-    return total;
+    if (heap_iov) uio_iovec_free_ex(heap_iov, iovcnt);
+    if (ret > 0)
+        ACCT_ADD(current->thread_group, fs_bytes_written, (uint64)ret);
+    return ret;
 }
 
 /*
  * readv(fd, iov, iovcnt) — scatter-gather read.
+ *
+ * Uses the unified vfs_filereadv() path which dispatches to the
+ * native .readv callback if available, or falls back to per-segment
+ * .read / cdev_read.
  */
 uint64 sys_vfs_readv(void) {
     int fd, iovcnt;
@@ -2927,45 +2911,23 @@ uint64 sys_vfs_readv(void) {
     if (f == NULL)
         return -EBADF;
 
-    struct __k_iovec iovs[8];
-    struct __k_iovec *iov = iovs;
-    struct __k_iovec *heap_iov = NULL;
-
-    if (iovcnt > 8) {
-        heap_iov = kvmalloc(iovcnt * sizeof(struct __k_iovec));
-        if (heap_iov == NULL) {
-            vfs_fput(f);
-            return -ENOMEM;
-        }
-        iov = heap_iov;
-    }
-
-    if (either_copyin(iov, 1, iov_addr, iovcnt * sizeof(struct __k_iovec)) < 0) {
+    struct kernel_iovec stack_iovs[UIO_FASTIOV];
+    struct kernel_iovec *iov, *heap_iov;
+    struct iov_iter iter;
+    int err = __preadwritev_copyin(iov_addr, iovcnt, stack_iovs,
+                                   &iov, &heap_iov, &iter);
+    if (err) {
         vfs_fput(f);
-        if (heap_iov) kvfree(heap_iov);
-        return -EFAULT;
+        return err;
     }
 
-    ssize_t total = 0;
-    for (int i = 0; i < iovcnt; i++) {
-        if (iov[i].iov_len == 0)
-            continue;
-        ssize_t n = vfs_fileread(f, (void *)iov[i].iov_base, iov[i].iov_len, true);
-        if (n < 0) {
-            if (total > 0) break;
-            total = n;
-            break;
-        }
-        total += n;
-        if ((uint64)n < iov[i].iov_len)
-            break; // Short read
-    }
+    ssize_t ret = vfs_filereadv(f, &iter, true);
 
     vfs_fput(f);
-    if (heap_iov) kvfree(heap_iov);
-    if (total > 0)
-        ACCT_ADD(current->thread_group, fs_bytes_read, (uint64)total);
-    return total;
+    if (heap_iov) uio_iovec_free_ex(heap_iov, iovcnt);
+    if (ret > 0)
+        ACCT_ADD(current->thread_group, fs_bytes_read, (uint64)ret);
+    return ret;
 }
 
 /*
@@ -3059,6 +3021,414 @@ uint64 sys_vfs_pwrite64(void) {
     f->f_pos = saved;
     mutex_unlock(&f->lock);
 
+    if (ret > 0)
+        ACCT_ADD(current->thread_group, fs_bytes_written, (uint64)ret);
+    vfs_fput(f);
+    return ret;
+}
+
+/*
+ * Helper: copy user-space iovec array into kernel_iovec, validate, and
+ * build an iov_iter.  Shared by preadv/pwritev/preadv2/pwritev2.
+ *
+ * On success returns 0 and fills *iter, *piov (heap allocation or NULL),
+ * and *pstack (stack array — caller must keep in scope).
+ * On failure returns a negative errno.
+ */
+static int
+__preadwritev_copyin(uint64 iov_addr, int iovcnt,
+                     struct kernel_iovec stack_iovs[UIO_FASTIOV],
+                     struct kernel_iovec **piov,
+                     struct kernel_iovec **pheap,
+                     struct iov_iter *iter)
+{
+    if (iovcnt <= 0 || iovcnt > UIO_MAXIOV)
+        return -EINVAL;
+
+    struct kernel_iovec *iov = stack_iovs;
+    struct kernel_iovec *heap_iov = NULL;
+
+    if (iovcnt > UIO_FASTIOV) {
+        heap_iov = uio_iovec_alloc(iovcnt);
+        if (heap_iov == NULL)
+            return -ENOMEM;
+        iov = heap_iov;
+    }
+
+    if (either_copyin(iov, 1, iov_addr,
+                      iovcnt * sizeof(struct kernel_iovec)) < 0) {
+        if (heap_iov) uio_iovec_free_ex(heap_iov, iovcnt);
+        return -EFAULT;
+    }
+
+    size_t total_len = iov_iter_total_len(iov, iovcnt);
+    if (total_len == (size_t)-1) {
+        if (heap_iov) uio_iovec_free_ex(heap_iov, iovcnt);
+        return -EINVAL;
+    }
+
+    iov_iter_init(iter, iov, iovcnt, total_len);
+    *piov = iov;
+    *pheap = heap_iov;
+    return 0;
+}
+
+/*
+ * preadv(fd, iov, iovcnt, offset) — scatter-gather read at position.
+ *
+ * Like pread64 but with an iovec array.  Does not change file offset.
+ */
+uint64 sys_vfs_preadv(void) {
+    int fd, iovcnt;
+    uint64 iov_addr;
+    int64 offset;
+
+    argint(0, &fd);
+    argaddr(1, &iov_addr);
+    argint(2, &iovcnt);
+    argint64(3, &offset);
+
+    if (offset < 0)
+        return -EINVAL;
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL)
+        return -EBADF;
+
+    struct vfs_inode *inode = vfs_inode_deref(&f->inode);
+    if (inode == NULL || !S_ISREG(inode->mode)) {
+        vfs_fput(f);
+        return -ESPIPE;
+    }
+
+    struct kernel_iovec stack_iovs[UIO_FASTIOV];
+    struct kernel_iovec *iov, *heap_iov;
+    struct iov_iter iter;
+    int err = __preadwritev_copyin(iov_addr, iovcnt, stack_iovs,
+                                   &iov, &heap_iov, &iter);
+    if (err) {
+        vfs_fput(f);
+        return err;
+    }
+
+    mutex_lock(&f->lock);
+    loff_t saved = f->f_pos;
+    f->f_pos = offset;
+
+    ssize_t ret;
+    if (f->ops == NULL)
+        ret = -EOPNOTSUPP;
+    else if (f->ops->readv)
+        ret = f->ops->readv(f, &iter, true);
+    else if (f->ops->read) {
+        /* Generic fallback: per-segment read */
+        ret = 0;
+        for (int i = 0; i < iovcnt && iter.count > 0; i++) {
+            if (iov[i].iov_len == 0)
+                continue;
+            ssize_t n = f->ops->read(f, (void *)iov[i].iov_base,
+                                     iov[i].iov_len, true);
+            if (n < 0) {
+                if (ret == 0) ret = n;
+                break;
+            }
+            ret += n;
+            if ((uint64)n < iov[i].iov_len)
+                break;
+        }
+    } else
+        ret = -EOPNOTSUPP;
+
+    f->f_pos = saved;
+    mutex_unlock(&f->lock);
+
+    if (heap_iov) uio_iovec_free_ex(heap_iov, iovcnt);
+    if (ret > 0)
+        ACCT_ADD(current->thread_group, fs_bytes_read, (uint64)ret);
+    vfs_fput(f);
+    return ret;
+}
+
+/*
+ * pwritev(fd, iov, iovcnt, offset) — scatter-gather write at position.
+ *
+ * Like pwrite64 but with an iovec array.  Does not change file offset.
+ */
+uint64 sys_vfs_pwritev(void) {
+    int fd, iovcnt;
+    uint64 iov_addr;
+    int64 offset;
+
+    argint(0, &fd);
+    argaddr(1, &iov_addr);
+    argint(2, &iovcnt);
+    argint64(3, &offset);
+
+    if (offset < 0)
+        return -EINVAL;
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL)
+        return -EBADF;
+
+    struct vfs_inode *inode = vfs_inode_deref(&f->inode);
+    if (inode == NULL || !S_ISREG(inode->mode)) {
+        vfs_fput(f);
+        return -ESPIPE;
+    }
+
+    struct kernel_iovec stack_iovs[UIO_FASTIOV];
+    struct kernel_iovec *iov, *heap_iov;
+    struct iov_iter iter;
+    int err = __preadwritev_copyin(iov_addr, iovcnt, stack_iovs,
+                                   &iov, &heap_iov, &iter);
+    if (err) {
+        vfs_fput(f);
+        return err;
+    }
+
+    mutex_lock(&f->lock);
+    loff_t saved = f->f_pos;
+    f->f_pos = offset;
+
+    ssize_t ret;
+    if (f->ops == NULL)
+        ret = -EOPNOTSUPP;
+    else if (f->ops->writev)
+        ret = f->ops->writev(f, &iter, true);
+    else if (f->ops->write) {
+        /* Generic fallback: per-segment write */
+        ret = 0;
+        for (int i = 0; i < iovcnt && iter.count > 0; i++) {
+            if (iov[i].iov_len == 0)
+                continue;
+            ssize_t n = f->ops->write(f, (const void *)iov[i].iov_base,
+                                      iov[i].iov_len, true);
+            if (n < 0) {
+                if (ret == 0) ret = n;
+                break;
+            }
+            ret += n;
+            if ((uint64)n < iov[i].iov_len)
+                break;
+        }
+    } else
+        ret = -EOPNOTSUPP;
+
+    f->f_pos = saved;
+    mutex_unlock(&f->lock);
+
+    if (heap_iov) uio_iovec_free_ex(heap_iov, iovcnt);
+    if (ret > 0)
+        ACCT_ADD(current->thread_group, fs_bytes_written, (uint64)ret);
+    vfs_fput(f);
+    return ret;
+}
+
+/*
+ * preadv2(fd, iov, iovcnt, offset, flags) — scatter-gather read at position
+ * with flags.
+ *
+ * When offset == -1, uses the current file position (like readv).
+ * Flags: RWF_HIPRI (0x01), RWF_DSYNC (0x02), RWF_SYNC (0x04),
+ *        RWF_NOWAIT (0x08), RWF_APPEND (0x10) — currently ignored.
+ */
+uint64 sys_vfs_preadv2(void) {
+    int fd, iovcnt, flags;
+    uint64 iov_addr;
+    int64 offset;
+
+    argint(0, &fd);
+    argaddr(1, &iov_addr);
+    argint(2, &iovcnt);
+    argint64(3, &offset);
+    argint(4, &flags);
+
+    /* Reject unknown flags */
+    if (flags & ~0x1f)
+        return -EOPNOTSUPP;
+
+    if (offset < -1)
+        return -EINVAL;
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL)
+        return -EBADF;
+
+    /* offset == -1 means "use current file position" (like readv) */
+    if (offset == -1) {
+        struct kernel_iovec stack_iovs[UIO_FASTIOV];
+        struct kernel_iovec *iov, *heap_iov;
+        struct iov_iter iter;
+        int err = __preadwritev_copyin(iov_addr, iovcnt, stack_iovs,
+                                       &iov, &heap_iov, &iter);
+        if (err) {
+            vfs_fput(f);
+            return err;
+        }
+
+        ssize_t ret = vfs_filereadv(f, &iter, true);
+
+        if (heap_iov) uio_iovec_free_ex(heap_iov, iovcnt);
+        if (ret > 0)
+            ACCT_ADD(current->thread_group, fs_bytes_read, (uint64)ret);
+        vfs_fput(f);
+        return ret;
+    }
+
+    /* Positional read — must be regular file */
+    struct vfs_inode *inode = vfs_inode_deref(&f->inode);
+    if (inode == NULL || !S_ISREG(inode->mode)) {
+        vfs_fput(f);
+        return -ESPIPE;
+    }
+
+    struct kernel_iovec stack_iovs[UIO_FASTIOV];
+    struct kernel_iovec *iov, *heap_iov;
+    struct iov_iter iter;
+    int err = __preadwritev_copyin(iov_addr, iovcnt, stack_iovs,
+                                   &iov, &heap_iov, &iter);
+    if (err) {
+        vfs_fput(f);
+        return err;
+    }
+
+    mutex_lock(&f->lock);
+    loff_t saved = f->f_pos;
+    f->f_pos = offset;
+
+    ssize_t ret;
+    if (f->ops == NULL)
+        ret = -EOPNOTSUPP;
+    else if (f->ops->readv)
+        ret = f->ops->readv(f, &iter, true);
+    else if (f->ops->read) {
+        ret = 0;
+        for (int i = 0; i < iovcnt && iter.count > 0; i++) {
+            if (iov[i].iov_len == 0)
+                continue;
+            ssize_t n = f->ops->read(f, (void *)iov[i].iov_base,
+                                     iov[i].iov_len, true);
+            if (n < 0) {
+                if (ret == 0) ret = n;
+                break;
+            }
+            ret += n;
+            if ((uint64)n < iov[i].iov_len)
+                break;
+        }
+    } else
+        ret = -EOPNOTSUPP;
+
+    f->f_pos = saved;
+    mutex_unlock(&f->lock);
+
+    if (heap_iov) uio_iovec_free_ex(heap_iov, iovcnt);
+    if (ret > 0)
+        ACCT_ADD(current->thread_group, fs_bytes_read, (uint64)ret);
+    vfs_fput(f);
+    return ret;
+}
+
+/*
+ * pwritev2(fd, iov, iovcnt, offset, flags) — scatter-gather write at position
+ * with flags.
+ *
+ * When offset == -1, uses the current file position (like writev).
+ * Flags: RWF_HIPRI, RWF_DSYNC, RWF_SYNC, RWF_NOWAIT, RWF_APPEND — currently
+ * ignored (RWF_APPEND could later seek to end before writing).
+ */
+uint64 sys_vfs_pwritev2(void) {
+    int fd, iovcnt, flags;
+    uint64 iov_addr;
+    int64 offset;
+
+    argint(0, &fd);
+    argaddr(1, &iov_addr);
+    argint(2, &iovcnt);
+    argint64(3, &offset);
+    argint(4, &flags);
+
+    /* Reject unknown flags */
+    if (flags & ~0x1f)
+        return -EOPNOTSUPP;
+
+    if (offset < -1)
+        return -EINVAL;
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL)
+        return -EBADF;
+
+    /* offset == -1 means "use current file position" (like writev) */
+    if (offset == -1) {
+        struct kernel_iovec stack_iovs[UIO_FASTIOV];
+        struct kernel_iovec *iov, *heap_iov;
+        struct iov_iter iter;
+        int err = __preadwritev_copyin(iov_addr, iovcnt, stack_iovs,
+                                       &iov, &heap_iov, &iter);
+        if (err) {
+            vfs_fput(f);
+            return err;
+        }
+
+        ssize_t ret = vfs_filewritev(f, &iter, true);
+
+        if (heap_iov) uio_iovec_free_ex(heap_iov, iovcnt);
+        if (ret > 0)
+            ACCT_ADD(current->thread_group, fs_bytes_written, (uint64)ret);
+        vfs_fput(f);
+        return ret;
+    }
+
+    /* Positional write — must be regular file */
+    struct vfs_inode *inode = vfs_inode_deref(&f->inode);
+    if (inode == NULL || !S_ISREG(inode->mode)) {
+        vfs_fput(f);
+        return -ESPIPE;
+    }
+
+    struct kernel_iovec stack_iovs[UIO_FASTIOV];
+    struct kernel_iovec *iov, *heap_iov;
+    struct iov_iter iter;
+    int err = __preadwritev_copyin(iov_addr, iovcnt, stack_iovs,
+                                   &iov, &heap_iov, &iter);
+    if (err) {
+        vfs_fput(f);
+        return err;
+    }
+
+    mutex_lock(&f->lock);
+    loff_t saved = f->f_pos;
+    f->f_pos = offset;
+
+    ssize_t ret;
+    if (f->ops == NULL)
+        ret = -EOPNOTSUPP;
+    else if (f->ops->writev)
+        ret = f->ops->writev(f, &iter, true);
+    else if (f->ops->write) {
+        ret = 0;
+        for (int i = 0; i < iovcnt && iter.count > 0; i++) {
+            if (iov[i].iov_len == 0)
+                continue;
+            ssize_t n = f->ops->write(f, (const void *)iov[i].iov_base,
+                                      iov[i].iov_len, true);
+            if (n < 0) {
+                if (ret == 0) ret = n;
+                break;
+            }
+            ret += n;
+            if ((uint64)n < iov[i].iov_len)
+                break;
+        }
+    } else
+        ret = -EOPNOTSUPP;
+
+    f->f_pos = saved;
+    mutex_unlock(&f->lock);
+
+    if (heap_iov) uio_iovec_free_ex(heap_iov, iovcnt);
     if (ret > 0)
         ACCT_ADD(current->thread_group, fs_bytes_written, (uint64)ret);
     vfs_fput(f);

@@ -616,6 +616,279 @@ out:
     return ret;
 }
 
+/******************************************************************************
+ * VFS Vectored Read (readv)
+ ******************************************************************************/
+
+/*
+ * __vfs_generic_readv_locked - fall-back loop over per-segment read()
+ *
+ * Called with the file lock held.  Iterates the iov_iter and calls the
+ * per-file read() callback for each segment.  This is the slow path used
+ * when the filesystem does not provide a native readv callback.
+ */
+static ssize_t __vfs_generic_readv_locked(struct vfs_file *file,
+                                          struct iov_iter *iter, bool user)
+{
+    ssize_t total = 0;
+    while (iter->nr_segs > 0 && iter->count > 0) {
+        size_t seg_len = iter->iov->iov_len - iter->iov_off;
+        if (seg_len == 0) {
+            iov_iter_advance(iter, 0);
+            continue;
+        }
+        uint64 base = iter->iov->iov_base + iter->iov_off;
+        ssize_t n = file->ops->read(file, (char *)base, seg_len, user);
+        if (n < 0) {
+            if (total > 0) break;
+            return n;
+        }
+        if (n == 0) break; /* EOF */
+        total += n;
+        file->f_pos += n;
+        iov_iter_advance(iter, (size_t)n);
+        if ((size_t)n < seg_len) break; /* short read */
+    }
+    return total;
+}
+
+ssize_t vfs_filereadv(struct vfs_file *file, struct iov_iter *iter, bool user)
+{
+    if (file == NULL)
+        return -EBADF;
+    if (iter == NULL || iter->count == 0)
+        return 0;
+
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+
+    /* Pipe / socket / custom-fd path (no backing inode) */
+    if (inode == NULL) {
+        if (file->ops == NULL || (file->ops->readv == NULL && file->ops->read == NULL))
+            return -EBADF;
+        __vfs_file_lock(file);
+        if ((file->f_flags & O_ACCMODE) == O_WRONLY) {
+            __vfs_file_unlock(file);
+            return -EBADF;
+        }
+        ssize_t ret;
+        if (file->ops->readv != NULL)
+            ret = file->ops->readv(file, iter, user);
+        else
+            ret = __vfs_generic_readv_locked(file, iter, user);
+        __vfs_file_unlock(file);
+        return ret;
+    }
+
+    /* Character device */
+    if (S_ISCHR(inode->mode)) {
+        __vfs_file_lock(file);
+        if ((file->f_flags & O_ACCMODE) == O_WRONLY) {
+            __vfs_file_unlock(file);
+            return -EBADF;
+        }
+        ssize_t ret;
+        if (file->ops != NULL && file->ops->readv != NULL) {
+            ret = file->ops->readv(file, iter, user);
+        } else if (file->ops != NULL && file->ops->read != NULL) {
+            ret = __vfs_generic_readv_locked(file, iter, user);
+        } else {
+            /* cdev read — fall back to per-segment cdev_read */
+            ssize_t total = 0;
+            struct cdev *cdev = file->cdev;
+            while (iter->nr_segs > 0 && iter->count > 0) {
+                size_t seg_len = iter->iov->iov_len - iter->iov_off;
+                if (seg_len == 0) { iov_iter_advance(iter, 0); continue; }
+                uint64 base = iter->iov->iov_base + iter->iov_off;
+                ssize_t n = cdev_read(cdev, user, (char *)base, seg_len);
+                if (n < 0) { if (total > 0) break; total = n; break; }
+                if (n == 0) break;
+                total += n;
+                iov_iter_advance(iter, (size_t)n);
+                if ((size_t)n < seg_len) break;
+            }
+            ret = total;
+        }
+        __vfs_file_unlock(file);
+        return ret;
+    }
+
+    __vfs_file_lock(file);
+    if ((file->f_flags & O_ACCMODE) == O_WRONLY) {
+        __vfs_file_unlock(file);
+        return -EBADF;
+    }
+
+    ssize_t ret = 0;
+
+    if (S_ISBLK(inode->mode)) {
+        __vfs_file_unlock(file);
+        return -EOPNOTSUPP;
+    }
+
+    if (!S_ISREG(inode->mode)) {
+        ret = S_ISDIR(inode->mode) ? -EISDIR : -EINVAL;
+        goto readv_out;
+    }
+
+    if (file->ops == NULL || (file->ops->readv == NULL && file->ops->read == NULL)) {
+        ret = -EOPNOTSUPP;
+        goto readv_out;
+    }
+
+    /* Prefer native readv; fall back to per-segment read */
+    if (file->ops->readv != NULL) {
+        ret = file->ops->readv(file, iter, user);
+        if (ret > 0)
+            file->f_pos += ret;
+    } else {
+        ret = __vfs_generic_readv_locked(file, iter, user);
+    }
+
+readv_out:
+    __vfs_file_unlock(file);
+    return ret;
+}
+
+/******************************************************************************
+ * VFS Vectored Write (writev)
+ ******************************************************************************/
+
+/*
+ * __vfs_generic_writev_locked - fall-back loop over per-segment write()
+ *
+ * Called with the file lock held.
+ */
+static ssize_t __vfs_generic_writev_locked(struct vfs_file *file,
+                                           struct iov_iter *iter, bool user)
+{
+    ssize_t total = 0;
+    while (iter->nr_segs > 0 && iter->count > 0) {
+        size_t seg_len = iter->iov->iov_len - iter->iov_off;
+        if (seg_len == 0) {
+            iov_iter_advance(iter, 0);
+            continue;
+        }
+        uint64 base = iter->iov->iov_base + iter->iov_off;
+        ssize_t n = file->ops->write(file, (const char *)base, seg_len, user);
+        if (n < 0) {
+            if (total > 0) break;
+            return n;
+        }
+        total += n;
+        file->f_pos += n;
+        iov_iter_advance(iter, (size_t)n);
+        if ((size_t)n < seg_len) break; /* short write */
+    }
+    return total;
+}
+
+ssize_t vfs_filewritev(struct vfs_file *file, struct iov_iter *iter, bool user)
+{
+    if (file == NULL)
+        return -EBADF;
+    if (iter == NULL || iter->count == 0)
+        return 0;
+
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+
+    /* Pipe / socket / custom-fd path (no backing inode) */
+    if (inode == NULL) {
+        if (file->ops == NULL || (file->ops->writev == NULL && file->ops->write == NULL))
+            return -EBADF;
+        __vfs_file_lock(file);
+        if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
+            __vfs_file_unlock(file);
+            return -EBADF;
+        }
+        ssize_t ret;
+        if (file->ops->writev != NULL)
+            ret = file->ops->writev(file, iter, user);
+        else
+            ret = __vfs_generic_writev_locked(file, iter, user);
+        __vfs_file_unlock(file);
+        return ret;
+    }
+
+    /* Character device */
+    if (S_ISCHR(inode->mode)) {
+        __vfs_file_lock(file);
+        if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
+            __vfs_file_unlock(file);
+            return -EBADF;
+        }
+        ssize_t ret;
+        if (file->ops != NULL && file->ops->writev != NULL) {
+            ret = file->ops->writev(file, iter, user);
+        } else if (file->ops != NULL && file->ops->write != NULL) {
+            ret = __vfs_generic_writev_locked(file, iter, user);
+        } else {
+            /* cdev write — per-segment cdev_write */
+            ssize_t total = 0;
+            struct cdev *cdev = file->cdev;
+            while (iter->nr_segs > 0 && iter->count > 0) {
+                size_t seg_len = iter->iov->iov_len - iter->iov_off;
+                if (seg_len == 0) { iov_iter_advance(iter, 0); continue; }
+                uint64 base = iter->iov->iov_base + iter->iov_off;
+                ssize_t n = cdev_write(cdev, user, (const char *)base, seg_len);
+                if (n < 0) { if (total > 0) break; total = n; break; }
+                total += n;
+                iov_iter_advance(iter, (size_t)n);
+                if ((size_t)n < seg_len) break;
+            }
+            ret = total;
+        }
+        __vfs_file_unlock(file);
+        if (ret > 0) {
+            struct vfs_inode *ino = vfs_inode_deref(&file->inode);
+            if (ino != NULL)
+                vfs_inode_knote_notify(ino, NOTE_WRITE);
+        }
+        return ret;
+    }
+
+    __vfs_file_lock(file);
+    if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
+        __vfs_file_unlock(file);
+        return -EBADF;
+    }
+
+    ssize_t ret = 0;
+
+    if (S_ISBLK(inode->mode)) {
+        __vfs_file_unlock(file);
+        return -EOPNOTSUPP;
+    }
+
+    if (!S_ISREG(inode->mode)) {
+        ret = S_ISDIR(inode->mode) ? -EISDIR : -EINVAL;
+        goto writev_out;
+    }
+
+    if (file->ops == NULL || (file->ops->writev == NULL && file->ops->write == NULL)) {
+        ret = -EOPNOTSUPP;
+        goto writev_out;
+    }
+
+    /* Prefer native writev; fall back to per-segment write */
+    if (file->ops->writev != NULL) {
+        ret = file->ops->writev(file, iter, user);
+        if (ret > 0)
+            file->f_pos += ret;
+    } else {
+        ret = __vfs_generic_writev_locked(file, iter, user);
+    }
+
+    if (ret > 0) {
+        struct vfs_inode *ino = vfs_inode_deref(&file->inode);
+        if (ino != NULL)
+            vfs_inode_knote_notify(ino, NOTE_WRITE);
+    }
+
+writev_out:
+    __vfs_file_unlock(file);
+    return ret;
+}
+
 loff_t vfs_filelseek(struct vfs_file *file, loff_t offset, int whence) {
     if (file == NULL) {
         return -EBADF; // Invalid file descriptor

@@ -383,6 +383,8 @@ struct vfs_file {
     };
 };
 
+struct iov_iter; /* forward declaration — full definition in vfs/uio.h */
+
 struct vfs_file_ops {
     ssize_t (*read)(struct vfs_file *file, char *buf, size_t count, bool user);
     ssize_t (*write)(struct vfs_file *file, const char *buf, size_t count,
@@ -451,6 +453,37 @@ struct vfs_file_ops {
      */
     int (*writepage)(struct vfs_file *file, loff_t offset,
                      const void *data, size_t len);
+
+    /*
+     * readv - vectored (scatter) read
+     * @file:  the open file
+     * @iter:  iov_iter describing the destination buffers
+     * @user:  true when buffers point to user-space
+     *
+     * Optional.  When non-NULL the VFS calls this instead of looping
+     * over per-segment read() calls, allowing the driver to batch lock
+     * acquisition, coalesce adjacent block I/O, or reduce per-call
+     * overhead for pipes and sockets.
+     *
+     * The callback must advance @file->f_pos by the number of bytes
+     * read (the VFS will NOT update f_pos further).
+     *
+     * Returns total bytes read, 0 for EOF, or negative errno.
+     */
+    ssize_t (*readv)(struct vfs_file *file, struct iov_iter *iter, bool user);
+
+    /*
+     * writev - vectored (gather) write
+     * @file:  the open file
+     * @iter:  iov_iter describing the source buffers
+     * @user:  true when buffers point to user-space
+     *
+     * Same contract as readv but for writes.  The callback must advance
+     * @file->f_pos by the number of bytes written.
+     *
+     * Returns total bytes written or negative errno.
+     */
+    ssize_t (*writev)(struct vfs_file *file, struct iov_iter *iter, bool user);
 };
 
 struct vfs_fdtable {

@@ -11,6 +11,7 @@
 #define KERNEL_VIRTUAL_FILE_SYSTEM_FILE_H
 
 #include "vfs/vfs_types.h"
+#include "vfs/uio.h"
 #include "clone_flags.h"
 
 /**
@@ -44,6 +45,30 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
                       bool user);
 loff_t vfs_filelseek(struct vfs_file *file, loff_t offset, int whence);
 int truncate(struct vfs_file *file, loff_t length);
+
+/**
+ * @brief Vectored (scatter) read from a file
+ * @param file  Open file to read from
+ * @param iter  iov_iter describing the destination buffers
+ * @param user  true if buffers are user-space addresses
+ * @return Total bytes read, 0 for EOF, or negative errno
+ *
+ * If the filesystem provides a native readv callback it is used;
+ * otherwise the VFS falls back to looping over per-segment read().
+ */
+ssize_t vfs_filereadv(struct vfs_file *file, struct iov_iter *iter, bool user);
+
+/**
+ * @brief Vectored (gather) write to a file
+ * @param file  Open file to write to
+ * @param iter  iov_iter describing the source buffers
+ * @param user  true if buffers are user-space addresses
+ * @return Total bytes written or negative errno
+ *
+ * If the filesystem provides a native writev callback it is used;
+ * otherwise the VFS falls back to looping over per-segment write().
+ */
+ssize_t vfs_filewritev(struct vfs_file *file, struct iov_iter *iter, bool user);
 
 // Allocate a custom vfs_file (with caller-supplied ops + private_data),
 // attach it to the current process's fd table, and return the fd number.

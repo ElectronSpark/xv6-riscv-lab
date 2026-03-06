@@ -4,6 +4,12 @@
 struct stat;
 
 #include "kernel/inc/types.h"
+
+// Vectored I/O
+struct iovec {
+	void  *iov_base;
+	uint64 iov_len;
+};
 #include "kernel/inc/signal_types.h"
 #include "kernel/inc/mm/memstat.h"
 #include "kernel/inc/clone_flags.h"
@@ -86,6 +92,8 @@ int wait(int *);
 int pipe(int *);
 int write(int, const void *, int);
 int read(int, void *, int);
+int readv(int, const struct iovec *, int);
+int writev(int, const struct iovec *, int);
 int close(int);
 int kill(int, int);
 int exec(const char *, char **);

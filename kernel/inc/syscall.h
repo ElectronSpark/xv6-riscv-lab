@@ -175,8 +175,14 @@
 // --- Network configuration ---
 #define SYS_netconf        161
 
+// --- Vectored positional I/O ---
+#define SYS_preadv         162
+#define SYS_pwritev        163
+#define SYS_preadv2        164
+#define SYS_pwritev2       165
+
 // Max syscall number (update when adding new syscalls)
-#define SYS_MAXNUM         161
+#define SYS_MAXNUM         165
 
 // --- Linux time64 compatibility stubs used by musl on rv64 ---
 // These are intentionally unsupported in xv6 and return -ENOSYS via

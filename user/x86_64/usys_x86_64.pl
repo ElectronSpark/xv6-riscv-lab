@@ -36,6 +36,8 @@ entry("wait");
 entry("pipe");
 entry("read");
 entry("write");
+entry("readv");
+entry("writev");
 entry("close");
 entry("kill");
 entry("exec");

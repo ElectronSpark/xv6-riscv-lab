@@ -116,9 +116,11 @@
 #define SYS_clock_getres    125
 #define SYS_clock_settime   935  /* stub — xv6 doesn't support setting time */
 #define SYS_pread64         126
-#define SYS_preadv          126  /* map to pread64 */
 #define SYS_pwrite64        127
-#define SYS_pwritev         127  /* map to pwrite64 */
+#define SYS_preadv          162
+#define SYS_pwritev         163
+#define SYS_preadv2         164
+#define SYS_pwritev2        165
 #define SYS_fstatat         128
 #define SYS_newfstatat      128  /* musl name */
 #define SYS_pipe2           129
@@ -270,12 +272,10 @@
 #define SYS_munlockall                      884
 #define SYS_name_to_handle_at               883
 #define SYS_open_by_handle_at               882
-#define SYS_preadv2                         881
 #define SYS_process_vm_readv                880
 #define SYS_process_vm_writev               879
 #define SYS_pselect6_time64                 878
 #define SYS_ptrace                          877
-#define SYS_pwritev2                        876
 #define SYS_quotactl                        875
 #define SYS_readahead                       874
 #define SYS_reboot                          873

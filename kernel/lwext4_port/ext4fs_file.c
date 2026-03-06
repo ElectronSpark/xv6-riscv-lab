@@ -26,6 +26,7 @@
 #include "vfs/stat.h"
 #include "vfs/fcntl.h"
 #include "ext4fs_private.h"
+#include "vfs/uio.h"
 
 #include <ext4_errno.h>
 #include <ext4_fs.h>
@@ -542,6 +543,246 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
 /* VFS file operations table                                                   */
 /* ──────────────────────────────────────────────────────────────────────────── */
 
+/* ──────────────────────────────────────────────────────────────────────────── */
+/* Vectored read (readv)                                                       */
+/*                                                                             */
+/* Takes inode lock + ext4fs lock once, iterates all iov_iter segments         */
+/* within a single inode_ref open/close, reducing per-segment overhead.        */
+/* ──────────────────────────────────────────────────────────────────────────── */
+
+static ssize_t ext4fs_file_readv(struct vfs_file *file, struct iov_iter *iter,
+                                 bool user)
+{
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (!S_ISREG(inode->mode))
+        return -EINVAL;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+    uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+
+    vfs_ilock(inode);
+    ext4fs_lock(esb);
+
+    loff_t pos = file->f_pos;
+    if (pos >= inode->size) {
+        ext4fs_unlock(esb);
+        vfs_iunlock(inode);
+        return 0;
+    }
+
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        vfs_iunlock(inode);
+        return -r;
+    }
+
+    ssize_t total = 0;
+
+    while (iter->nr_segs > 0 && iter->count > 0 && pos < inode->size) {
+        size_t seg_len = iter->iov->iov_len - iter->iov_off;
+        if (seg_len == 0) { iov_iter_advance(iter, 0); continue; }
+        uint64 base = iter->iov->iov_base + iter->iov_off;
+
+        if (pos + (loff_t)seg_len > inode->size)
+            seg_len = (size_t)(inode->size - pos);
+
+        size_t seg_read = 0;
+        while (seg_read < seg_len) {
+            ext4_lblk_t iblock = (ext4_lblk_t)(pos / block_size);
+            uint off = (uint)(pos % block_size);
+            uint n = block_size - off;
+            if (n > seg_len - seg_read)
+                n = (uint)(seg_len - seg_read);
+
+            ext4_fsblk_t fblock;
+            r = ext4_fs_get_inode_dblk_idx(&ref, iblock, &fblock, true);
+            if (r != EOK) {
+                if (total == 0) total = -r;
+                goto out;
+            }
+
+            if (fblock == 0) {
+                /* Sparse block — zero-fill */
+                if (user) {
+                    char zeros[64];
+                    memset(zeros, 0, sizeof(zeros));
+                    uint rem = n;
+                    while (rem > 0) {
+                        uint chunk = rem > sizeof(zeros) ? sizeof(zeros) : rem;
+                        if (vm_copyout(current->vm,
+                                       (uint64)(base + seg_read + (n - rem)),
+                                       zeros, chunk) < 0) {
+                            if (total == 0) total = -EFAULT;
+                            goto out;
+                        }
+                        rem -= chunk;
+                    }
+                } else {
+                    memset((char *)(base + seg_read), 0, n);
+                }
+            } else {
+                struct ext4_block blk;
+                r = ext4_block_get(&esb->bdev, &blk, fblock);
+                if (r != EOK) {
+                    if (total == 0) total = -EIO;
+                    goto out;
+                }
+                if (user) {
+                    if (vm_copyout(current->vm, (uint64)(base + seg_read),
+                                   (char *)blk.data + off, n) < 0) {
+                        ext4_block_set(&esb->bdev, &blk);
+                        if (total == 0) total = -EFAULT;
+                        goto out;
+                    }
+                } else {
+                    memcpy((char *)(base + seg_read), (char *)blk.data + off, n);
+                }
+                ext4_block_set(&esb->bdev, &blk);
+            }
+            seg_read += n;
+            pos += n;
+        }
+        total += seg_read;
+        iov_iter_advance(iter, seg_read);
+        if (seg_read < seg_len) break;
+    }
+
+out:
+    ext4_fs_put_inode_ref(&ref);
+    ext4fs_unlock(esb);
+
+    if (total > 0)
+        inode->atime = goldfish_rtc_read_sec();
+
+    vfs_iunlock(inode);
+    file->f_pos = pos;
+    return total;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────── */
+/* Vectored write (writev)                                                     */
+/* ──────────────────────────────────────────────────────────────────────────── */
+
+static ssize_t ext4fs_file_writev(struct vfs_file *file, struct iov_iter *iter,
+                                  bool user)
+{
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (!S_ISREG(inode->mode))
+        return -EINVAL;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+    uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+
+    vfs_ilock(inode);
+    ext4fs_lock(esb);
+
+    loff_t pos = file->f_pos;
+
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        vfs_iunlock(inode);
+        return -r;
+    }
+
+    ext4_block_cache_write_back(&esb->bdev, 1);
+
+    uint64_t orig_ondisk_size = ext4_inode_get_size(&fs->sb, ref.inode);
+    uint32_t ifile_blocks =
+        (uint32_t)((orig_ondisk_size + block_size - 1) / block_size);
+
+    ssize_t total = 0;
+
+    while (iter->nr_segs > 0 && iter->count > 0) {
+        size_t seg_len = iter->iov->iov_len - iter->iov_off;
+        if (seg_len == 0) { iov_iter_advance(iter, 0); continue; }
+        uint64 base = iter->iov->iov_base + iter->iov_off;
+
+        size_t seg_written = 0;
+        while (seg_written < seg_len) {
+            ext4_lblk_t iblock = (ext4_lblk_t)(pos / block_size);
+            uint off = (uint)(pos % block_size);
+            uint n = block_size - off;
+            if (n > seg_len - seg_written)
+                n = (uint)(seg_len - seg_written);
+
+            ext4_fsblk_t fblock;
+            if (iblock < ifile_blocks) {
+                r = ext4_fs_init_inode_dblk_idx(&ref, iblock, &fblock);
+            } else {
+                ext4_lblk_t appended_iblock;
+                r = ext4_fs_append_inode_dblk(&ref, &fblock, &appended_iblock);
+                if (r == EOK)
+                    ifile_blocks++;
+            }
+            if (r != EOK) {
+                if (total == 0) total = -r;
+                goto out_w;
+            }
+
+            struct ext4_block blk;
+            if (off == 0 && n == block_size)
+                r = ext4_block_get_noread(&esb->bdev, &blk, fblock);
+            else
+                r = ext4_block_get(&esb->bdev, &blk, fblock);
+            if (r != EOK) {
+                if (total == 0) total = -EIO;
+                goto out_w;
+            }
+
+            if (user) {
+                if (vm_copyin(current->vm, (char *)blk.data + off,
+                              (uint64)(base + seg_written), n) < 0) {
+                    ext4_block_set(&esb->bdev, &blk);
+                    if (total == 0) total = -EFAULT;
+                    goto out_w;
+                }
+            } else {
+                memcpy((char *)blk.data + off, (const char *)(base + seg_written), n);
+            }
+            ext4_bcache_set_dirty(blk.buf);
+            ext4_block_set(&esb->bdev, &blk);
+
+            seg_written += n;
+            pos += n;
+        }
+        total += seg_written;
+        iov_iter_advance(iter, seg_written);
+        if (seg_written < seg_len) break;
+    }
+
+out_w:
+    {
+        uint64_t new_pos = (uint64_t)pos;
+        if (new_pos > orig_ondisk_size) {
+            ext4_inode_set_size(ref.inode, new_pos);
+            ref.dirty = true;
+        }
+        if ((loff_t)new_pos > inode->size)
+            inode->size = (loff_t)new_pos;
+        inode->n_blocks = ext4_inode_get_blocks_count(&fs->sb, ref.inode);
+    }
+
+    ext4_fs_put_inode_ref(&ref);
+    ext4_block_cache_write_back(&esb->bdev, 0);
+
+    if (total > 0) {
+        uint64 now = goldfish_rtc_read_sec();
+        inode->mtime = now;
+        inode->ctime = now;
+    }
+
+    ext4fs_unlock(esb);
+    vfs_iunlock(inode);
+    file->f_pos = pos;
+    return total;
+}
+
 struct vfs_file_ops ext4fs_file_ops = {
     .read      = ext4fs_file_read,
     .write     = ext4fs_file_write,
@@ -551,4 +792,6 @@ struct vfs_file_ops ext4fs_file_ops = {
     .fflush    = ext4fs_file_fflush,
     .fault     = ext4fs_file_fault,
     .writepage = ext4fs_file_writepage,
+    .readv     = ext4fs_file_readv,
+    .writev    = ext4fs_file_writev,
 };

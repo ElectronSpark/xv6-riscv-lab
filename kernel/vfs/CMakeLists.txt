@@ -2,6 +2,7 @@ add_library(vfs_core OBJECT
     fs.c
     inode.c
     file.c
+    uio.c
     fdtable.c
     vfs_syscall.c
     vfs_permission.c

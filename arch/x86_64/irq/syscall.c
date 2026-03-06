@@ -178,6 +178,10 @@ extern uint64 sys_clock_gettime(void);
 extern uint64 sys_clock_getres(void);
 extern uint64 sys_vfs_pread64(void);
 extern uint64 sys_vfs_pwrite64(void);
+extern uint64 sys_vfs_preadv(void);
+extern uint64 sys_vfs_pwritev(void);
+extern uint64 sys_vfs_preadv2(void);
+extern uint64 sys_vfs_pwritev2(void);
 extern uint64 sys_vfs_fstatat(void);
 extern uint64 sys_vfs_pipe2(void);
 extern uint64 sys_memstat(void);
@@ -417,6 +421,10 @@ static uint64 (*syscalls[])(void) = {
     [SYS_clock_getres] sys_clock_getres,
     [SYS_pread64] sys_vfs_pread64,
     [SYS_pwrite64] sys_vfs_pwrite64,
+    [SYS_preadv] sys_vfs_preadv,
+    [SYS_pwritev] sys_vfs_pwritev,
+    [SYS_preadv2] sys_vfs_preadv2,
+    [SYS_pwritev2] sys_vfs_pwritev2,
     [SYS_fstatat] sys_vfs_fstatat,
     [SYS_pipe2] sys_vfs_pipe2,
     [SYS_mkdirat] sys_vfs_mkdirat,
