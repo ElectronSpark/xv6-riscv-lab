@@ -34,10 +34,42 @@
 #include <ext4_dir.h>
 #include <ext4_dir_idx.h>
 #include <ext4_super.h>
+#include <ext4_trans.h>
+
+#include "timer/goldfish_rtc.h"
 
 /* ──────────────────────────────────────────────────────────────────────────── */
 /* Helpers                                                                     */
 /* ──────────────────────────────────────────────────────────────────────────── */
+
+/*
+ * Timestamp helper: set mtime+ctime on a VFS inode AND the on-disk
+ * ext4_inode_ref (which must already be acquired).  Marks ref dirty.
+ */
+static inline void ext4fs_stamp_mctime(struct vfs_inode *vi,
+                                       struct ext4_inode_ref *ref)
+{
+    uint32_t now = (uint32_t)goldfish_rtc_read_sec();
+    vi->mtime = now;
+    vi->ctime = now;
+    ext4_inode_set_modif_time(ref->inode, now);
+    ext4_inode_set_change_inode_time(ref->inode, now);
+    ref->dirty = true;
+}
+
+/*
+ * Stamp mtime+ctime on a VFS inode given only its ino (acquires
+ * ext4_inode_ref internally).  Caller must hold ext4fs_lock.
+ */
+static void ext4fs_stamp_inode_mc(struct ext4_fs *fs, struct vfs_inode *vi)
+{
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)vi->ino, &ref);
+    if (r != EOK)
+        return;
+    ext4fs_stamp_mctime(vi, &ref);
+    ext4_fs_put_inode_ref(&ref);
+}
 
 /* Convenience: get ext4_fs from a VFS inode */
 static inline struct ext4_fs *inode_ext4fs(struct vfs_inode *vi)
@@ -125,6 +157,11 @@ static int ext4fs_sync_inode(struct vfs_inode *inode)
     ext4_inode_set_size(ref.inode, (uint64_t)inode->size);
     ext4_inode_set_uid(ref.inode, inode->uid);
     ext4_inode_set_gid(ref.inode, inode->gid);
+
+    /* Timestamps */
+    ext4_inode_set_access_time(ref.inode, (uint32_t)inode->atime);
+    ext4_inode_set_modif_time(ref.inode, (uint32_t)inode->mtime);
+    ext4_inode_set_change_inode_time(ref.inode, (uint32_t)inode->ctime);
     ref.dirty = true;
 
     ext4_fs_put_inode_ref(&ref);
@@ -348,6 +385,12 @@ static struct vfs_inode *ext4fs_create(struct vfs_inode *dir, mode_t mode,
     ext4_inode_set_size(child_ref.inode, 0);
     ext4_inode_set_uid(child_ref.inode, current_euid());
     ext4_inode_set_gid(child_ref.inode, current_egid());
+    {
+        uint32_t now = (uint32_t)goldfish_rtc_read_sec();
+        ext4_inode_set_access_time(child_ref.inode, now);
+        ext4_inode_set_modif_time(child_ref.inode, now);
+        ext4_inode_set_change_inode_time(child_ref.inode, now);
+    }
     child_ref.dirty = true;
 
     /* Add directory entry */
@@ -359,6 +402,9 @@ static struct vfs_inode *ext4fs_create(struct vfs_inode *dir, mode_t mode,
         ext4fs_unlock(esb);
         return ERR_PTR(-r);
     }
+
+    /* Stamp parent directory mtime/ctime */
+    ext4fs_stamp_mctime(dir, &parent_ref);
 
     uint32_t new_ino = child_ref.index;
     ext4_fs_put_inode_ref(&child_ref);
@@ -416,6 +462,12 @@ static struct vfs_inode *ext4fs_mkdir(struct vfs_inode *dir, mode_t mode,
     ext4_inode_set_links_cnt(child_ref.inode, 1);
     ext4_inode_set_uid(child_ref.inode, current_euid());
     ext4_inode_set_gid(child_ref.inode, current_egid());
+    {
+        uint32_t now = (uint32_t)goldfish_rtc_read_sec();
+        ext4_inode_set_access_time(child_ref.inode, now);
+        ext4_inode_set_modif_time(child_ref.inode, now);
+        ext4_inode_set_change_inode_time(child_ref.inode, now);
+    }
     child_ref.dirty = true;
 
     /* Initialize blocks for the new directory */
@@ -456,6 +508,9 @@ static struct vfs_inode *ext4fs_mkdir(struct vfs_inode *dir, mode_t mode,
         return ERR_PTR(-r);
     }
 
+    /* Stamp parent directory mtime/ctime */
+    ext4fs_stamp_mctime(dir, &parent_ref);
+
     uint32_t new_ino = child_ref.index;
     ext4_fs_put_inode_ref(&child_ref);
     ext4_fs_put_inode_ref(&parent_ref);
@@ -491,16 +546,30 @@ static int do_ext4fs_unlink(struct ext4_fs *fs, struct vfs_dentry *dentry,
         return -r;
     }
 
+    /* Stamp parent directory mtime/ctime */
+    {
+        uint32_t now = (uint32_t)goldfish_rtc_read_sec();
+        ext4_inode_set_modif_time(parent_ref.inode, now);
+        ext4_inode_set_change_inode_time(parent_ref.inode, now);
+        parent_ref.dirty = true;
+        if (dentry->parent) {
+            dentry->parent->mtime = now;
+            dentry->parent->ctime = now;
+        }
+    }
     ext4_fs_put_inode_ref(&parent_ref);
 
     /* Decrement link count */
     target->n_links--;
 
-    /* Write updated link count to disk */
+    /* Write updated link count to disk, stamp ctime */
     struct ext4_inode_ref target_ref;
     r = ext4_fs_get_inode_ref(fs, (uint32_t)target->ino, &target_ref);
     if (r == EOK) {
         ext4_fs_inode_links_count_dec(&target_ref);
+        uint32_t now = (uint32_t)goldfish_rtc_read_sec();
+        ext4_inode_set_change_inode_time(target_ref.inode, now);
+        target->ctime = now;
         target_ref.dirty = true;
         ext4_fs_put_inode_ref(&target_ref);
     }
@@ -596,6 +665,11 @@ static int ext4fs_link(struct vfs_inode *old, struct vfs_inode *dir,
 
     /* Increment link count */
     ext4_fs_inode_links_count_inc(&child_ref);
+    {
+        uint32_t now = (uint32_t)goldfish_rtc_read_sec();
+        ext4_inode_set_change_inode_time(child_ref.inode, now);
+        old->ctime = now;
+    }
     child_ref.dirty = true;
     old->n_links++;
 
@@ -605,6 +679,9 @@ static int ext4fs_link(struct vfs_inode *old, struct vfs_inode *dir,
         ext4_fs_inode_links_count_dec(&child_ref);
         child_ref.dirty = true;
         old->n_links--;
+    } else {
+        /* Stamp parent directory mtime/ctime */
+        ext4fs_stamp_mctime(dir, &parent_ref);
     }
 
     ext4_fs_put_inode_ref(&child_ref);
@@ -636,8 +713,9 @@ static int ext4fs_truncate(struct vfs_inode *inode, loff_t new_size)
     r = ext4_fs_truncate_inode(&ref, (uint64_t)new_size);
     if (r == EOK) {
         ext4_inode_set_size(ref.inode, (uint64_t)new_size);
-        ref.dirty = true;
+        ext4fs_stamp_mctime(inode, &ref);
         inode->size = new_size;
+        inode->n_blocks = ext4_inode_get_blocks_count(&fs->sb, ref.inode);
     }
 
     ext4_fs_put_inode_ref(&ref);
@@ -694,7 +772,7 @@ static ssize_t ext4fs_readlink(struct vfs_inode *inode, char *buf,
                 n = (uint)(link_len - bytes_read);
 
             ext4_fsblk_t fblock;
-            r = ext4_fs_get_inode_dblk_idx(&ref, iblock, &fblock, false);
+            r = ext4_fs_get_inode_dblk_idx(&ref, iblock, &fblock, true);
             if (r != EOK || fblock == 0) {
                 ext4_fs_put_inode_ref(&ref);
                 ext4fs_unlock(esb);
@@ -764,6 +842,12 @@ static struct vfs_inode *ext4fs_symlink(struct vfs_inode *dir, mode_t mode,
     ext4_inode_set_mode(&fs->sb, child_ref.inode,
                         vfs_mode_to_ext4_imode(S_IFLNK | 0777));
     ext4_inode_set_links_cnt(child_ref.inode, 1);
+    {
+        uint32_t now = (uint32_t)goldfish_rtc_read_sec();
+        ext4_inode_set_access_time(child_ref.inode, now);
+        ext4_inode_set_modif_time(child_ref.inode, now);
+        ext4_inode_set_change_inode_time(child_ref.inode, now);
+    }
     child_ref.dirty = true;
 
     ext4_fs_inode_blocks_init(fs, &child_ref);
@@ -823,6 +907,9 @@ static struct vfs_inode *ext4fs_symlink(struct vfs_inode *dir, mode_t mode,
         return ERR_PTR(-r);
     }
 
+    /* Stamp parent directory mtime/ctime */
+    ext4fs_stamp_mctime(dir, &parent_ref);
+
     uint32_t new_ino = child_ref.index;
     ext4_fs_put_inode_ref(&child_ref);
     ext4_fs_put_inode_ref(&parent_ref);
@@ -871,6 +958,12 @@ static struct vfs_inode *ext4fs_mknod(struct vfs_inode *dir, mode_t mode,
                         vfs_mode_to_ext4_imode(mode));
     ext4_inode_set_links_cnt(child_ref.inode, 1);
     ext4_inode_set_dev(child_ref.inode, (uint32_t)dev);
+    {
+        uint32_t now = (uint32_t)goldfish_rtc_read_sec();
+        ext4_inode_set_access_time(child_ref.inode, now);
+        ext4_inode_set_modif_time(child_ref.inode, now);
+        ext4_inode_set_change_inode_time(child_ref.inode, now);
+    }
     child_ref.dirty = true;
 
     r = ext4_dir_add_entry(&parent_ref, name, (uint32_t)name_len, &child_ref);
@@ -881,6 +974,9 @@ static struct vfs_inode *ext4fs_mknod(struct vfs_inode *dir, mode_t mode,
         ext4fs_unlock(esb);
         return ERR_PTR(-r);
     }
+
+    /* Stamp parent directory mtime/ctime */
+    ext4fs_stamp_mctime(dir, &parent_ref);
 
     uint32_t new_ino = child_ref.index;
     ext4_fs_put_inode_ref(&child_ref);
@@ -949,7 +1045,7 @@ static int ext4fs_open(struct vfs_inode *inode, struct vfs_file *file,
         return -EINVAL;
 
     if (S_ISREG(inode->mode) || S_ISDIR(inode->mode) ||
-        S_ISLNK(inode->mode)) {
+        S_ISLNK(inode->mode) || S_ISFIFO(inode->mode)) {
         file->ops = &ext4fs_file_ops;
         return 0;
     }
@@ -959,6 +1055,200 @@ static int ext4fs_open(struct vfs_inode *inode, struct vfs_file *file,
         return -EINVAL;
 
     return -ENOSYS;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────── */
+/* Move / rename                                                               */
+/* ──────────────────────────────────────────────────────────────────────────── */
+
+/*
+ * Move (rename) a file or directory within the same ext4 filesystem.
+ *
+ * VFS guarantees: both old_dir and new_dir are locked (via
+ * vfs_ilock_two_directories); same superblock; sb wlock held.
+ *
+ * Algorithm:
+ *   1. Get inode refs for old parent, new parent, and child.
+ *   2. Check if the target name already exists in new_dir.
+ *      - If the existing target is the same inode → nothing to do.
+ *      - If types conflict (file over dir or vice versa) → error.
+ *      - Otherwise, remove the existing target entry and adjust links.
+ *   3. Add a new directory entry in new_dir.
+ *   4. Remove the old directory entry from old_dir.
+ *   5. For directories: update ".." to point to the new parent,
+ *      and adjust parent link counts.
+ *   6. Stamp mtime/ctime on both parent directories.
+ */
+static int ext4fs_move(struct vfs_inode *old_dir,
+                       struct vfs_dentry *old_dentry,
+                       struct vfs_inode *new_dir,
+                       const char *name, size_t name_len)
+{
+    if (old_dir == NULL || old_dentry == NULL || new_dir == NULL ||
+        name == NULL || name_len == 0)
+        return -EINVAL;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(old_dir->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+    int is_dir = S_ISDIR(old_dentry->sb ? /* use target inode mode */
+                old_dir->mode : 0); /* fallback — refined below */
+
+    ext4fs_lock(esb);
+
+    /* Get inode refs */
+    struct ext4_inode_ref old_parent_ref, new_parent_ref, child_ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)old_dir->ino, &old_parent_ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        return -r;
+    }
+
+    r = ext4_fs_get_inode_ref(fs, (uint32_t)new_dir->ino, &new_parent_ref);
+    if (r != EOK) {
+        ext4_fs_put_inode_ref(&old_parent_ref);
+        ext4fs_unlock(esb);
+        return -r;
+    }
+
+    r = ext4_fs_get_inode_ref(fs, (uint32_t)old_dentry->ino, &child_ref);
+    if (r != EOK) {
+        ext4_fs_put_inode_ref(&new_parent_ref);
+        ext4_fs_put_inode_ref(&old_parent_ref);
+        ext4fs_unlock(esb);
+        return -r;
+    }
+
+    /* Determine if child is a directory from its on-disk mode */
+    uint32_t child_mode = ext4_inode_get_mode(&fs->sb, child_ref.inode);
+    is_dir = (child_mode & 0xF000) == EXT4_INODE_MODE_DIRECTORY;
+
+    /* Check if target name already exists in new_dir */
+    struct ext4_dir_search_result existing;
+    r = ext4_dir_find_entry(&existing, &new_parent_ref, name,
+                            (uint32_t)name_len);
+    if (r == EOK) {
+        uint32_t existing_ino = ext4_dir_en_get_inode(existing.dentry);
+        ext4_dir_destroy_result(&new_parent_ref, &existing);
+
+        if (existing_ino == old_dentry->ino) {
+            /* Same inode — nothing to do */
+            ext4_fs_put_inode_ref(&child_ref);
+            ext4_fs_put_inode_ref(&new_parent_ref);
+            ext4_fs_put_inode_ref(&old_parent_ref);
+            ext4fs_unlock(esb);
+            return 0;
+        }
+
+        /* Remove the existing target entry */
+        struct ext4_inode_ref target_ref;
+        r = ext4_fs_get_inode_ref(fs, existing_ino, &target_ref);
+        if (r != EOK)
+            goto fail;
+
+        uint32_t target_mode = ext4_inode_get_mode(&fs->sb, target_ref.inode);
+        int target_is_dir = (target_mode & 0xF000) == EXT4_INODE_MODE_DIRECTORY;
+
+        /* Type conflict checks */
+        if (is_dir && !target_is_dir) {
+            ext4_fs_put_inode_ref(&target_ref);
+            r = ENOTDIR;
+            goto fail;
+        }
+        if (!is_dir && target_is_dir) {
+            ext4_fs_put_inode_ref(&target_ref);
+            r = EISDIR;
+            goto fail;
+        }
+
+        /* Remove existing target */
+        r = ext4_dir_remove_entry(&new_parent_ref, name, (uint32_t)name_len);
+        if (r != EOK) {
+            ext4_fs_put_inode_ref(&target_ref);
+            goto fail;
+        }
+
+        /* Decrement target link count */
+        ext4_fs_inode_links_count_dec(&target_ref);
+        if (target_is_dir) {
+            /* Also decrement new_dir's link count (removing ".." backref) */
+            ext4_fs_inode_links_count_dec(&new_parent_ref);
+            new_parent_ref.dirty = true;
+            new_dir->n_links--;
+        }
+        target_ref.dirty = true;
+        ext4_fs_put_inode_ref(&target_ref);
+    }
+
+    /* Add new directory entry in new_dir */
+    r = ext4_dir_add_entry(&new_parent_ref, name, (uint32_t)name_len,
+                           &child_ref);
+    if (r != EOK)
+        goto fail;
+
+    /* Remove old directory entry from old_dir */
+    r = ext4_dir_remove_entry(&old_parent_ref, old_dentry->name,
+                              (uint32_t)old_dentry->name_len);
+    if (r != EOK) {
+        /* Rollback: remove the entry we just added */
+        ext4_dir_remove_entry(&new_parent_ref, name, (uint32_t)name_len);
+        goto fail;
+    }
+
+    /* For directories: update ".." and adjust parent link counts */
+    if (is_dir && old_dir->ino != new_dir->ino) {
+        /* Update ".." entry to point to new parent */
+        struct ext4_dir_search_result dotdot;
+        int r2 = ext4_dir_find_entry(&dotdot, &child_ref, "..", 2);
+        if (r2 == EOK) {
+            ext4_dir_en_set_inode(dotdot.dentry, new_parent_ref.index);
+            ext4_trans_set_block_dirty(dotdot.block.buf);
+            ext4_dir_destroy_result(&child_ref, &dotdot);
+        }
+        /* Also handle htree-indexed directories */
+        ext4_dir_dx_reset_parent_inode(&child_ref, new_parent_ref.index);
+
+        /* Decrement old parent link count, increment new parent */
+        ext4_fs_inode_links_count_dec(&old_parent_ref);
+        old_parent_ref.dirty = true;
+        old_dir->n_links--;
+
+        ext4_fs_inode_links_count_inc(&new_parent_ref);
+        new_parent_ref.dirty = true;
+        new_dir->n_links++;
+    }
+
+    /* Stamp mtime/ctime on both parent directories */
+    {
+        uint32_t now = (uint32_t)goldfish_rtc_read_sec();
+        ext4_inode_set_modif_time(old_parent_ref.inode, now);
+        ext4_inode_set_change_inode_time(old_parent_ref.inode, now);
+        old_parent_ref.dirty = true;
+        old_dir->mtime = now;
+        old_dir->ctime = now;
+
+        ext4_inode_set_modif_time(new_parent_ref.inode, now);
+        ext4_inode_set_change_inode_time(new_parent_ref.inode, now);
+        new_parent_ref.dirty = true;
+        new_dir->mtime = now;
+        new_dir->ctime = now;
+
+        /* Stamp ctime on the moved inode itself */
+        ext4_inode_set_change_inode_time(child_ref.inode, now);
+        child_ref.dirty = true;
+    }
+
+    ext4_fs_put_inode_ref(&child_ref);
+    ext4_fs_put_inode_ref(&new_parent_ref);
+    ext4_fs_put_inode_ref(&old_parent_ref);
+    ext4fs_unlock(esb);
+    return 0;
+
+fail:
+    ext4_fs_put_inode_ref(&child_ref);
+    ext4_fs_put_inode_ref(&new_parent_ref);
+    ext4_fs_put_inode_ref(&old_parent_ref);
+    ext4fs_unlock(esb);
+    return -r;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
@@ -981,8 +1271,8 @@ static int ext4fs_getattr(struct vfs_inode *inode, struct stat *stat)
     stat->st_uid   = inode->uid;
     stat->st_gid   = inode->gid;
     stat->st_size  = inode->size;
-    stat->st_blksize = 1024;
-    stat->st_blocks  = (inode->size + 511) / 512;
+    stat->st_blksize = inode->sb ? inode->sb->block_size : 1024;
+    stat->st_blocks  = inode->n_blocks;
     stat->st_atime_sec = inode->atime;
     stat->st_mtime_sec = inode->mtime;
     stat->st_ctime_sec = inode->ctime;
@@ -993,9 +1283,74 @@ static int ext4fs_getattr(struct vfs_inode *inode, struct stat *stat)
 
 static int ext4fs_setattr(struct vfs_inode *inode, const struct stat *stat)
 {
-    (void)inode;
-    (void)stat;
-    return -EOPNOTSUPP;
+    if (inode == NULL || stat == NULL)
+        return -EINVAL;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+
+    vfs_ilock(inode);
+    ext4fs_lock(esb);
+
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        vfs_iunlock(inode);
+        return -r;
+    }
+
+    /* Update mode (preserve file type bits from current mode) */
+    if (stat->st_mode != 0) {
+        mode_t new_mode = (inode->mode & S_IFMT) | (stat->st_mode & ~S_IFMT);
+        inode->mode = new_mode;
+        ext4_inode_set_mode(&fs->sb, ref.inode,
+                            vfs_mode_to_ext4_imode(new_mode));
+    }
+
+    /* Update uid/gid */
+    if (stat->st_uid != (uint32)-1 && stat->st_uid != 0xFFFFFFFF) {
+        inode->uid = stat->st_uid;
+        ext4_inode_set_uid(ref.inode, stat->st_uid);
+    }
+    if (stat->st_gid != (uint32)-1 && stat->st_gid != 0xFFFFFFFF) {
+        inode->gid = stat->st_gid;
+        ext4_inode_set_gid(ref.inode, stat->st_gid);
+    }
+
+    /* Update size (truncate) */
+    if (stat->st_size >= 0 && stat->st_size != inode->size &&
+        S_ISREG(inode->mode)) {
+        int tr = ext4_fs_truncate_inode(&ref, (uint64_t)stat->st_size);
+        if (tr == EOK) {
+            ext4_inode_set_size(ref.inode, (uint64_t)stat->st_size);
+            inode->size = stat->st_size;
+            inode->n_blocks = ext4_inode_get_blocks_count(&fs->sb, ref.inode);
+        }
+    }
+
+    /* Update timestamps if provided (non-zero) */
+    if (stat->st_atime_sec != 0) {
+        inode->atime = stat->st_atime_sec;
+        ext4_inode_set_access_time(ref.inode, (uint32_t)stat->st_atime_sec);
+    }
+    if (stat->st_mtime_sec != 0) {
+        inode->mtime = stat->st_mtime_sec;
+        ext4_inode_set_modif_time(ref.inode, (uint32_t)stat->st_mtime_sec);
+    }
+
+    /* Always update ctime on any attribute change */
+    {
+        uint32_t now = (uint32_t)goldfish_rtc_read_sec();
+        inode->ctime = now;
+        ext4_inode_set_change_inode_time(ref.inode, now);
+    }
+
+    ref.dirty = true;
+    ext4_fs_put_inode_ref(&ref);
+    ext4fs_unlock(esb);
+    vfs_iunlock(inode);
+    return 0;
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
@@ -1014,7 +1369,7 @@ struct vfs_inode_ops ext4fs_inode_ops = {
     .mkdir         = ext4fs_mkdir,
     .rmdir         = ext4fs_rmdir,
     .mknod         = ext4fs_mknod,
-    .move          = NULL,
+    .move          = ext4fs_move,
     .symlink       = ext4fs_symlink,
     .truncate      = ext4fs_truncate,
     .destroy_inode = ext4fs_destroy_inode,

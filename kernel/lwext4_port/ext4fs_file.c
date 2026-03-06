@@ -34,6 +34,8 @@
 #include <ext4_blockdev.h>
 #include <ext4_bcache.h>
 
+#include "timer/goldfish_rtc.h"
+
 /* ──────────────────────────────────────────────────────────────────────────── */
 /* File read                                                                   */
 /* ──────────────────────────────────────────────────────────────────────────── */
@@ -79,7 +81,7 @@ ssize_t ext4fs_file_read(struct vfs_file *file, char *buf, size_t count,
             n = (uint)(count - bytes_read);
 
         ext4_fsblk_t fblock;
-        r = ext4_fs_get_inode_dblk_idx(&ref, iblock, &fblock, false);
+        r = ext4_fs_get_inode_dblk_idx(&ref, iblock, &fblock, true);
         if (r != EOK) {
             if (bytes_read == 0)
                 bytes_read = (size_t)(-r);
@@ -137,6 +139,11 @@ ssize_t ext4fs_file_read(struct vfs_file *file, char *buf, size_t count,
 out:
     ext4_fs_put_inode_ref(&ref);
     ext4fs_unlock(esb);
+
+    /* Update atime if we read anything */
+    if ((ssize_t)bytes_read > 0)
+        inode->atime = goldfish_rtc_read_sec();
+
     vfs_iunlock(inode);
     return (ssize_t)bytes_read;
 }
@@ -260,10 +267,20 @@ ssize_t ext4fs_file_write(struct vfs_file *file, const char *buf, size_t count,
     if ((loff_t)new_pos > inode->size)
         inode->size = (loff_t)new_pos;
 
+    /* Update n_blocks from on-disk inode */
+    inode->n_blocks = ext4_inode_get_blocks_count(&fs->sb, ref.inode);
+
     ext4_fs_put_inode_ref(&ref);
 
     /* Flush write-back cache */
     ext4_block_cache_write_back(&esb->bdev, 0);
+
+    /* Update mtime/ctime if we wrote anything */
+    if ((ssize_t)bytes_written > 0) {
+        uint64 now = goldfish_rtc_read_sec();
+        inode->mtime = now;
+        inode->ctime = now;
+    }
 
     ext4fs_unlock(esb);
     vfs_iunlock(inode);
@@ -480,7 +497,7 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
             n = (uint)(bytes_to_read - done);
 
         ext4_fsblk_t fblock;
-        r = ext4_fs_get_inode_dblk_idx(&ref, iblock, &fblock, false);
+        r = ext4_fs_get_inode_dblk_idx(&ref, iblock, &fblock, true);
         if (r != EOK) {
             /* I/O error — give up */
             ext4_fs_put_inode_ref(&ref);

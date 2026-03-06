@@ -265,10 +265,10 @@ BIN_COUNT=$(find "$STAGING/bin/" -type f 2>/dev/null | wc -l)
 TOTAL_USED=$(du -sh "$STAGING" | cut -f1)
 echo "mkext4_rootfs: ${BIN_COUNT} programs, total ${TOTAL_USED}"
 
-# Create the ext2 image populated from staging (no root/mount required)
-mke2fs -F -t ext2 -O ^dir_index -b 1024 -d "$STAGING" "$OUTPUT" "${SIZE_MB}m" >/dev/null 2>&1
+# Create the ext4 image populated from staging (no root/mount required)
+mke2fs -F -t ext4 -O extent,dir_index,filetype,sparse_super -b 4096 -d "$STAGING" "$OUTPUT" "${SIZE_MB}m" >/dev/null 2>&1
 
-# Fix directory ownership inside the ext2 image.
+# Fix directory ownership inside the ext4 image.
 # mke2fs -d preserves host UID/GID; when building as non-root, directories
 # like /var/empty end up owned by the builder's UID instead of root.
 # sshd requires /var/empty to be owned by root:root with mode 0755.
@@ -283,7 +283,7 @@ DEBUGFS_FIX
     echo "mkext4_rootfs: fixed /var/empty ownership (root:root, 0755)"
 fi
 
-echo "mkext4_rootfs: created ${OUTPUT} (${SIZE_MB} MB ext2)"
+echo "mkext4_rootfs: created ${OUTPUT} (${SIZE_MB} MB ext4)"
 
 cleanup
 trap - EXIT

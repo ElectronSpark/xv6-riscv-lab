@@ -72,6 +72,14 @@ void ext4fs_fill_vfs_inode(struct vfs_inode *vi, struct ext4_inode_ref *ref,
     vi->gid     = ext4_inode_get_gid(raw);
     vi->ops     = &ext4fs_inode_ops;
 
+    /* Timestamps */
+    vi->atime   = ext4_inode_get_access_time(raw);
+    vi->mtime   = ext4_inode_get_modif_time(raw);
+    vi->ctime   = ext4_inode_get_change_inode_time(raw);
+
+    /* Block count (in 512-byte units as stored on-disk) */
+    vi->n_blocks = ext4_inode_get_blocks_count(sb, raw);
+
     /* Populate device number for block/char device nodes */
     if (S_ISCHR(vi->mode))
         vi->cdev = (dev_t)ext4_inode_get_dev(raw);
@@ -207,23 +215,164 @@ static void ext4fs_unmount_begin(struct vfs_superblock *sb)
     ext4fs_sync_fs(sb, 1);
 }
 
+/*
+ * Orphan list management.
+ *
+ * The ext4 on-disk orphan list is a singly-linked list threaded through the
+ * inode deletion-time field (i_dtime).  The head is stored in the superblock's
+ * last_orphan field.
+ *
+ * An inode is added to the orphan list when it is unlinked but still open
+ * (n_links == 0, ref_count > 0).  On clean unmount, the list should be empty.
+ * On crash recovery, recover_orphans truncates and frees leaked inodes.
+ */
 static int ext4fs_add_orphan(struct vfs_superblock *sb,
                              struct vfs_inode *inode)
 {
-    (void)sb; (void)inode;
+    if (sb == NULL || inode == NULL)
+        return -EINVAL;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+
+    ext4fs_lock(esb);
+
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        return -r;
+    }
+
+    /* Thread into the list: set this inode's dtime to the old list head */
+    uint32_t old_head = to_le32(fs->sb.last_orphan);
+    ext4_inode_set_del_time(ref.inode, old_head);
+    ref.dirty = true;
+    ext4_fs_put_inode_ref(&ref);
+
+    /* Update superblock's list head to this inode */
+    fs->sb.last_orphan = to_le32((uint32_t)inode->ino);
+
+    ext4fs_unlock(esb);
+    sb->dirty = 1;
     return 0;
 }
 
 static int ext4fs_remove_orphan(struct vfs_superblock *sb,
                                 struct vfs_inode *inode)
 {
-    (void)sb; (void)inode;
+    if (sb == NULL || inode == NULL)
+        return -EINVAL;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+    uint32_t target_ino = (uint32_t)inode->ino;
+
+    ext4fs_lock(esb);
+
+    uint32_t head = to_le32(fs->sb.last_orphan);
+    if (head == 0) {
+        ext4fs_unlock(esb);
+        return 0; /* list empty, nothing to remove */
+    }
+
+    /* If the target is the head of the list */
+    if (head == target_ino) {
+        struct ext4_inode_ref ref;
+        int r = ext4_fs_get_inode_ref(fs, target_ino, &ref);
+        if (r != EOK) {
+            ext4fs_unlock(esb);
+            return -r;
+        }
+        uint32_t next = ext4_inode_get_del_time(ref.inode);
+        ext4_inode_set_del_time(ref.inode, 0);
+        ref.dirty = true;
+        ext4_fs_put_inode_ref(&ref);
+
+        fs->sb.last_orphan = to_le32(next);
+        ext4fs_unlock(esb);
+        sb->dirty = 1;
+        return 0;
+    }
+
+    /* Walk the list to find the predecessor */
+    uint32_t prev_ino = head;
+    while (prev_ino != 0) {
+        struct ext4_inode_ref prev_ref;
+        int r = ext4_fs_get_inode_ref(fs, prev_ino, &prev_ref);
+        if (r != EOK)
+            break;
+
+        uint32_t next_ino = ext4_inode_get_del_time(prev_ref.inode);
+        if (next_ino == target_ino) {
+            /* Found the predecessor — relink around the target */
+            struct ext4_inode_ref target_ref;
+            r = ext4_fs_get_inode_ref(fs, target_ino, &target_ref);
+            if (r == EOK) {
+                uint32_t after = ext4_inode_get_del_time(target_ref.inode);
+                ext4_inode_set_del_time(target_ref.inode, 0);
+                target_ref.dirty = true;
+                ext4_fs_put_inode_ref(&target_ref);
+
+                ext4_inode_set_del_time(prev_ref.inode, after);
+                prev_ref.dirty = true;
+            }
+            ext4_fs_put_inode_ref(&prev_ref);
+            break;
+        }
+        ext4_fs_put_inode_ref(&prev_ref);
+        prev_ino = next_ino;
+    }
+
+    ext4fs_unlock(esb);
+    sb->dirty = 1;
     return 0;
 }
 
 static int ext4fs_recover_orphans(struct vfs_superblock *sb)
 {
-    (void)sb;
+    if (sb == NULL)
+        return -EINVAL;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+
+    ext4fs_lock(esb);
+    uint32_t ino = to_le32(fs->sb.last_orphan);
+    int recovered = 0;
+
+    while (ino != 0) {
+        struct ext4_inode_ref ref;
+        int r = ext4_fs_get_inode_ref(fs, ino, &ref);
+        if (r != EOK)
+            break;
+
+        uint32_t next_ino = ext4_inode_get_del_time(ref.inode);
+        uint32_t links = ext4_inode_get_links_cnt(ref.inode);
+
+        if (links == 0) {
+            /* Inode was unlinked — truncate and free */
+            ext4_fs_truncate_inode(&ref, 0);
+            ext4_fs_free_inode(&ref);
+            recovered++;
+        }
+
+        ext4_inode_set_del_time(ref.inode, 0);
+        ref.dirty = true;
+        ext4_fs_put_inode_ref(&ref);
+
+        ino = next_ino;
+    }
+
+    /* Clear the orphan list head */
+    fs->sb.last_orphan = to_le32(0);
+    ext4fs_unlock(esb);
+
+    if (recovered > 0) {
+        printf("ext4fs: recovered %d orphaned inode(s)\n", recovered);
+        sb->dirty = 1;
+    }
+
     return 0;
 }
 
@@ -385,6 +534,10 @@ static int ext4fs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
 
     esb->vfs_sb.root_inode = root_inode;
     *ret_sb = &esb->vfs_sb;
+
+    /* ── Recover orphaned inodes from a previous crash ── */
+    if (to_le32(esb->ext4fs.sb.last_orphan) != 0)
+        ext4fs_recover_orphans(&esb->vfs_sb);
 
     printf("ext4fs: mounted (block_size=%u, blocks=%lu)\n",
            lb_size, (unsigned long)esb->vfs_sb.total_blocks);
