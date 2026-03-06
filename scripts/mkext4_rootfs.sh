@@ -182,7 +182,7 @@ cat > "$STAGING/etc/daemons" <<'DAEMONS'
 # Lines starting with # are comments.
 
 /bin/telnetd
-# /bin/sshd -D -e
+/bin/sshd -D -e
 DAEMONS
 
 # ── lwIP network configuration ───────────────────────────────────────────────

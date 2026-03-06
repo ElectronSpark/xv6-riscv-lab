@@ -1653,140 +1653,138 @@ int getcmd(char *buf, int nbuf) {
 }
 
 // =====================================================================
-// main
+// run_line – execute a single command line (builtins + externals)
+//
+// Returns:  0 = keep going,  1 = "exit" was requested,  -1 = error
 // =====================================================================
 
-int main(void) {
-    static char buf[256];
+static int run_line(char *buf, int interactive) {
     static char expanded_buf[512];
-    int fd;
 
-    // Ensure three file descriptors are open.
-    while ((fd = open("/dev/console", O_RDWR)) >= 0) {
-        if (fd >= 3) {
-            close(fd);
-            break;
+    int len = strlen(buf);
+    // Ensure the line ends with '\n' (parsecmd and builtins expect it)
+    if (len > 0 && buf[len - 1] != '\n') {
+        if (len < 255) {
+            buf[len] = '\n';
+            buf[len + 1] = 0;
         }
     }
 
-    env_init();
-    update_cwd();
-    update_user_info();
+    // Skip empty or comment-only lines
+    {
+        const char *p = buf;
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '\0' || *p == '\n' || *p == '#')
+            return 0;
+    }
 
-#ifdef USE_NCURSES_SHELL
-    setenv("TERMINFO", "/usr/share/terminfo", 1);
-    if (getenv("TERM") == 0)
-        setenv("TERM", "xterm", 1);
-#endif
+    // ---- Built-in: cd ----
+    if (buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' ') {
+        buf[strlen(buf) - 1] = 0; // chop \n
+        char *path = buf + 3;
+        char *expanded = expand_env_vars(path);
+        if (chdir(expanded) < 0)
+            errprintf("cannot cd %s\n", expanded);
+        else
+            update_cwd();
+        return 0;
+    }
 
-    for (;;) {
-        if (getcmd(buf, sizeof(buf)) < 0)
-            continue;
-        // ---- Built-in: cd ----
-        if (buf[0] == 'c' && buf[1] == 'd' && buf[2] == ' ') {
-            buf[strlen(buf) - 1] = 0; // chop \n
-            char *path = buf + 3;
-            char *expanded = expand_env_vars(path);
-            if (chdir(expanded) < 0)
-                errprintf("cannot cd %s\n", expanded);
-            else
-                update_cwd();
-            continue;
-        }
+    // ---- Built-in: ls ----
+    if (buf[0] == 'l' && buf[1] == 's' &&
+        (buf[2] == '\n' || buf[2] == ' ')) {
+        buf[strlen(buf) - 1] = 0;
+        if (buf[2] == 0 || buf[3] == 0)
+            builtin_ls(".");
+        else
+            builtin_ls(buf + 3);
+        return 0;
+    }
 
-        // ---- Built-in: ls ----
-        if (buf[0] == 'l' && buf[1] == 's' &&
-            (buf[2] == '\n' || buf[2] == ' ')) {
-            buf[strlen(buf) - 1] = 0;
-            if (buf[2] == 0 || buf[3] == 0)
-                builtin_ls(".");
-            else
-                builtin_ls(buf + 3);
-            continue;
-        }
+    // ---- Built-in: history ----
+    if (strncmp_local(buf, "history", 7) == 0 &&
+        (buf[7] == '\n' || buf[7] == 0)) {
+        builtin_history();
+        return 0;
+    }
 
-        // ---- Built-in: history ----
-        if (strncmp_local(buf, "history", 7) == 0 &&
-            (buf[7] == '\n' || buf[7] == 0)) {
-            builtin_history();
-            continue;
-        }
+    // ---- Built-in: env ----
+    if (strncmp_local(buf, "env", 3) == 0 &&
+        (buf[3] == '\n' || buf[3] == 0)) {
+        env_list();
+        return 0;
+    }
 
-        // ---- Built-in: env ----
-        if (strncmp_local(buf, "env", 3) == 0 &&
-            (buf[3] == '\n' || buf[3] == 0)) {
-            env_list();
-            continue;
-        }
-
-        // ---- Built-in: export VAR=value ----
-        if (strncmp_local(buf, "export ", 7) == 0) {
-            buf[strlen(buf) - 1] = 0;
-            char *arg = buf + 7;
-            while (*arg == ' ')
-                arg++;
-            char *eq = strchr(arg, '=');
-            if (eq) {
-                *eq = 0;
-                char *name = arg;
-                char *value = eq + 1;
-                int vlen = strlen(value);
-                if (vlen >= 2 &&
-                    ((value[0] == '"' && value[vlen - 1] == '"') ||
-                     (value[0] == '\'' && value[vlen - 1] == '\''))) {
-                    value[vlen - 1] = 0;
-                    value++;
-                }
-                if (env_set(name, value) < 0)
-                    errprintf("export: too many variables\n");
-            } else {
-                errprintf("export: usage: export VAR=value\n");
+    // ---- Built-in: export VAR=value ----
+    if (strncmp_local(buf, "export ", 7) == 0) {
+        buf[strlen(buf) - 1] = 0;
+        char *arg = buf + 7;
+        while (*arg == ' ')
+            arg++;
+        char *eq = strchr(arg, '=');
+        if (eq) {
+            *eq = 0;
+            char *name = arg;
+            char *value = eq + 1;
+            int vlen = strlen(value);
+            if (vlen >= 2 &&
+                ((value[0] == '"' && value[vlen - 1] == '"') ||
+                 (value[0] == '\'' && value[vlen - 1] == '\''))) {
+                value[vlen - 1] = 0;
+                value++;
             }
-            continue;
+            if (env_set(name, value) < 0)
+                errprintf("export: too many variables\n");
+        } else {
+            errprintf("export: usage: export VAR=value\n");
         }
+        return 0;
+    }
 
-        // ---- Built-in: unset ----
-        if (strncmp_local(buf, "unset ", 6) == 0) {
-            buf[strlen(buf) - 1] = 0;
-            char *name = buf + 6;
-            while (*name == ' ')
-                name++;
-            env_unset(name);
-            continue;
-        }
+    // ---- Built-in: unset ----
+    if (strncmp_local(buf, "unset ", 6) == 0) {
+        buf[strlen(buf) - 1] = 0;
+        char *name = buf + 6;
+        while (*name == ' ')
+            name++;
+        env_unset(name);
+        return 0;
+    }
 
-        // ---- Built-in: echo (with expansion) ----
-        if (strncmp_local(buf, "echo ", 5) == 0) {
-            buf[strlen(buf) - 1] = 0;
-            char *expanded = expand_env_vars(buf + 5);
-            printf("%s\n", expanded);
-            continue;
-        }
+    // ---- Built-in: echo (with expansion) ----
+    if (strncmp_local(buf, "echo ", 5) == 0) {
+        buf[strlen(buf) - 1] = 0;
+        char *expanded = expand_env_vars(buf + 5);
+        printf("%s\n", expanded);
+        return 0;
+    }
 
-        // ---- Built-in: exit ----
-        if (strncmp_local(buf, "exit", 4) == 0 &&
-            (buf[4] == '\n' || buf[4] == 0))
-            break;
+    // ---- Built-in: exit ----
+    if (strncmp_local(buf, "exit", 4) == 0 &&
+        (buf[4] == '\n' || buf[4] == 0))
+        return 1;
 
-        // ---- External command ----
-        // Expand env vars
-        char *expanded = expand_env_vars(buf);
-        int elen = strlen(expanded);
-        if (elen >= (int)sizeof(expanded_buf))
-            elen = sizeof(expanded_buf) - 1;
-        memcpy(expanded_buf, expanded, elen);
-        expanded_buf[elen] = 0;
+    // ---- External command ----
+    // Expand env vars
+    char *expanded = expand_env_vars(buf);
+    int elen = strlen(expanded);
+    if (elen >= (int)sizeof(expanded_buf))
+        elen = sizeof(expanded_buf) - 1;
+    memcpy(expanded_buf, expanded, elen);
+    expanded_buf[elen] = 0;
 
-        struct cmd *cmd = parsecmd(expanded_buf);
-        if (cmd == 0)
-            continue;
+    struct cmd *cmd = parsecmd(expanded_buf);
+    if (cmd == 0)
+        return 0;
 
-        // Skip empty commands (e.g. bare Enter)
-        if (cmd->type == EXEC && ((struct execcmd *)cmd)->argv[0] == 0)
-            continue;
+    // Skip empty commands (e.g. bare Enter)
+    if (cmd->type == EXEC && ((struct execcmd *)cmd)->argv[0] == 0)
+        return 0;
 
-        int pid;
+    int pid;
 
+    if (interactive) {
         // Snapshot shell terminal settings before child can mutate tty state.
         struct termios shell_termios;
         tcgetattr(0, &shell_termios);
@@ -1817,12 +1815,9 @@ int main(void) {
             runcmd(cmd);
         }
 
-        // Also set from parent side to avoid race. This may fail if child
-        // already changed groups, which is fine.
+        // Also set from parent side to avoid race.
         (void)setpgid(pid, pid);
 
-        // Always hand terminal foreground to child's process group.
-        // Gating this on setpgid() success can lose input due to races.
         int child_pgid = pid;
         ioctl(0, TIOCSPGRP, &child_pgid);
 
@@ -1841,6 +1836,143 @@ int main(void) {
         if (WIFSTOPPED(status)) {
             printf("[suspended] pid %d\n", pid);
         }
+    } else {
+        // Non-interactive: simpler fork+exec without job control
+    #ifdef USE_NCURSES_SHELL
+        pid = vfork();
+    #else
+        pid = fork();
+    #endif
+        if (pid < 0)
+            panic("fork");
+        if (pid == 0)
+            runcmd(cmd);
+
+        int status = 0;
+        waitpid(pid, &status, 0);
+    }
+
+    return 0;
+}
+
+// =====================================================================
+// run_script – execute commands from a file, line by line
+// =====================================================================
+
+static int run_script(const char *path) {
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        errprintf("sh: cannot open %s\n", path);
+        return 1;
+    }
+
+    // Read the entire file (up to 16KB)
+    #define SCRIPT_MAX 16384
+    char *filebuf = malloc(SCRIPT_MAX);
+    if (filebuf == 0) {
+        errprintf("sh: out of memory\n");
+        close(fd);
+        return 1;
+    }
+
+    int total = 0;
+    int n;
+    while ((n = read(fd, filebuf + total, SCRIPT_MAX - total - 1)) > 0)
+        total += n;
+    close(fd);
+    filebuf[total] = '\0';
+
+    // Execute line by line
+    char *line = filebuf;
+    int ret = 0;
+    while (*line) {
+        char *eol = line;
+        while (*eol && *eol != '\n')
+            eol++;
+
+        char saved = *eol;
+        *eol = '\0';
+
+        // Copy to a mutable buffer for run_line
+        char linebuf[256];
+        int llen = strlen(line);
+        if (llen >= (int)sizeof(linebuf))
+            llen = sizeof(linebuf) - 1;
+        memcpy(linebuf, line, llen);
+        linebuf[llen] = 0;
+
+        ret = run_line(linebuf, 0);
+        if (ret == 1)
+            break; // "exit" encountered
+
+        if (saved == '\0')
+            break;
+        line = eol + 1;
+    }
+
+    free(filebuf);
+    return 0;
+}
+
+// =====================================================================
+// main
+// =====================================================================
+
+int main(int argc, char *argv[]) {
+    static char buf[256];
+    int fd;
+
+    // Ensure three file descriptors are open.
+    while ((fd = open("/dev/console", O_RDWR)) >= 0) {
+        if (fd >= 3) {
+            close(fd);
+            break;
+        }
+    }
+
+    env_init();
+    update_cwd();
+    update_user_info();
+
+#ifdef USE_NCURSES_SHELL
+    setenv("TERMINFO", "/usr/share/terminfo", 1);
+    if (getenv("TERM") == 0)
+        setenv("TERM", "xterm", 1);
+#endif
+
+    // ---- sh -c "command" ----
+    if (argc >= 3 && strcmp(argv[1], "-c") == 0) {
+        // Concatenate all remaining args with spaces (sh -c "cmd" arg0 arg1)
+        char cmdbuf[512];
+        int pos = 0;
+        for (int i = 2; i < argc && pos < (int)sizeof(cmdbuf) - 2; i++) {
+            if (i > 2 && pos < (int)sizeof(cmdbuf) - 1)
+                cmdbuf[pos++] = ' ';
+            int alen = strlen(argv[i]);
+            if (alen > (int)sizeof(cmdbuf) - pos - 1)
+                alen = sizeof(cmdbuf) - pos - 1;
+            memcpy(cmdbuf + pos, argv[i], alen);
+            pos += alen;
+        }
+        cmdbuf[pos] = 0;
+        run_line(cmdbuf, 0);
+        exit(0);
+    }
+
+    // ---- sh script.sh [args...] ----
+    if (argc >= 2 && argv[1][0] != '-') {
+        int ret = run_script(argv[1]);
+        exit(ret);
+    }
+
+    // ---- Interactive mode ----
+    for (;;) {
+        if (getcmd(buf, sizeof(buf)) < 0)
+            continue;
+
+        int ret = run_line(buf, 1);
+        if (ret == 1)
+            break; // exit
     }
 
     disable_raw_mode();
@@ -1944,8 +2076,40 @@ int gettoken(char **ps, char *es, char **q, char **eq) {
         break;
     default:
         ret = 'a';
-        while (s < es && !strchr(whitespace, *s) && !strchr(symbols, *s))
-            s++;
+        while (s < es && !strchr(whitespace, *s) && !strchr(symbols, *s)) {
+            if (*s == '\\' && s + 1 < es) {
+                /* Backslash escape — skip the next character */
+                s += 2;
+            } else if (*s == '\'') {
+                /* Single-quoted string — consume until unescaped closing
+                 * single quote.  Double quotes inside are literal chars.
+                 * Backslash-single-quote (\') is an escape. */
+                s++;
+                while (s < es && *s != '\'') {
+                    if (*s == '\\' && s + 1 < es && s[1] == '\'')
+                        s += 2;   /* \' — escaped single quote */
+                    else
+                        s++;
+                }
+                if (s < es)
+                    s++; /* skip closing quote */
+            } else if (*s == '"') {
+                /* Double-quoted string — consume until unescaped closing
+                 * double quote.  Single quotes inside are literal chars.
+                 * Backslash escapes: \" \\  (all others literal). */
+                s++;
+                while (s < es && *s != '"') {
+                    if (*s == '\\' && s + 1 < es)
+                        s += 2;
+                    else
+                        s++;
+                }
+                if (s < es)
+                    s++; /* skip closing quote */
+            } else {
+                s++;
+            }
+        }
         break;
     }
     if (eq)
@@ -2082,6 +2246,75 @@ struct cmd *parseexec(char **ps, char *es) {
     return ret;
 }
 
+/*
+ * dequote - strip quotes and process backslash escapes in a token, in-place.
+ *
+ * Rules:
+ *   Outside quotes:  \ escapes the next character.
+ *   Inside "...":   \" → "   \\ → \   all other \ are literal.
+ *                    Single quotes inside are literal characters.
+ *   Inside '...':   \' → '   \\ → \   all other \ are literal.
+ *                    Double quotes inside are literal characters.
+ *
+ * Examples:
+ *   "hello world"        →  hello world
+ *   'hello world'        →  hello world
+ *   hello\ world         →  hello world
+ *   "say \"hi\""         →  say "hi"
+ *   "it's fine"          →  it's fine
+ *   'he said "hello"'    →  he said "hello"
+ *   'can\'t stop'        →  can't stop
+ */
+static void dequote(char *s) {
+    char *dst = s;
+    while (*s) {
+        if (*s == '\\' && s[1] != '\0') {
+            /* Backslash escape outside quotes — copy next char literally */
+            s++;
+            *dst++ = *s++;
+        } else if (*s == '\'') {
+            /* Single-quoted region — copy until unescaped closing '.
+             * Double quotes and most backslashes are literal.
+             * Only \' and \\ are escape sequences. */
+            s++;
+            while (*s && *s != '\'') {
+                if (*s == '\\' && s[1] == '\'') {
+                    s++;            /* skip backslash */
+                    *dst++ = *s++;  /* copy the literal ' */
+                } else if (*s == '\\' && s[1] == '\\') {
+                    s++;            /* skip first backslash */
+                    *dst++ = *s++;  /* copy the second as literal \ */
+                } else {
+                    *dst++ = *s++;  /* everything else is literal */
+                }
+            }
+            if (*s == '\'')
+                s++;
+        } else if (*s == '"') {
+            /* Double-quoted region — copy until unescaped closing ".
+             * Single quotes are literal characters.
+             * Only \" and \\ are escape sequences. */
+            s++;
+            while (*s && *s != '"') {
+                if (*s == '\\' && s[1] == '"') {
+                    s++;            /* skip backslash */
+                    *dst++ = *s++;  /* copy the literal " */
+                } else if (*s == '\\' && s[1] == '\\') {
+                    s++;            /* skip first backslash */
+                    *dst++ = *s++;  /* copy the second as literal \ */
+                } else {
+                    *dst++ = *s++;  /* everything else is literal (incl. \n etc.) */
+                }
+            }
+            if (*s == '"')
+                s++;
+        } else {
+            *dst++ = *s++;
+        }
+    }
+    *dst = '\0';
+}
+
 struct cmd *nulterminate(struct cmd *cmd) {
     int i;
     struct backcmd *bcmd;
@@ -2096,13 +2329,16 @@ struct cmd *nulterminate(struct cmd *cmd) {
     switch (cmd->type) {
     case EXEC:
         ecmd = (struct execcmd *)cmd;
-        for (i = 0; ecmd->argv[i]; i++)
+        for (i = 0; ecmd->argv[i]; i++) {
             *ecmd->eargv[i] = 0;
+            dequote(ecmd->argv[i]);
+        }
         break;
     case REDIR:
         rcmd = (struct redircmd *)cmd;
         nulterminate(rcmd->cmd);
         *rcmd->efile = 0;
+        dequote(rcmd->file);
         break;
     case PIPE:
         pcmd = (struct pipecmd *)cmd;

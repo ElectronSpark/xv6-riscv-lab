@@ -131,6 +131,24 @@ static void start_daemon(const char *line)
     dup(0);                        /* fd 2 */
 
     execv(tok_argv[0], tok_argv);
+
+    /* If execv fails and the file ends with ".sh", try running it via sh */
+    {
+        const char *name = tok_argv[0];
+        int nlen = 0;
+        while (name[nlen])
+            nlen++;
+        if (nlen >= 3 && name[nlen-3] == '.' && name[nlen-2] == 's' &&
+            name[nlen-1] == 'h') {
+            /* Rebuild argv as: /bin/sh <script> [original args...] */
+            char *sh_argv[MAX_DAEMON_ARGS + 2];
+            sh_argv[0] = "/bin/sh";
+            for (int i = 0; i <= argc; i++)   /* includes NULL terminator */
+                sh_argv[i + 1] = tok_argv[i];
+            execv("/bin/sh", sh_argv);
+        }
+    }
+
     /* exec failed — only reaches here on error */
     printf("init: exec failed for daemon: %s\n", tok_argv[0]);
     _exit(1);
