@@ -204,6 +204,41 @@
 #define SYS_setitimer       944
 #define SYS_ppoll           945
 
+// --- IPC stubs (musl high numbers, all return -ENOSYS) ---
+#define SYS_semtimedop      923
+#define SYS_shmget          924
+#define SYS_shmdt           925
+#define SYS_shmctl          926
+#define SYS_shmat           927
+#define SYS_semop           928
+#define SYS_semget          929
+#define SYS_semctl          930
+#define SYS_msgsnd          931
+#define SYS_msgrcv          932
+#define SYS_msgget          933
+#define SYS_msgctl          934
+
+// --- Other musl stubs (return -ENOSYS) ---
+#define SYS_utimensat       938
+#define SYS_clone3          937
+#define SYS_rt_sigqueueinfo 936
+#define SYS_clock_settime   935
+#define SYS_fdatasync       915
+#define SYS_fsync           908
+#define SYS_set_robust_list 866
+#define SYS_sigaltstack     856
+#define SYS_prctl           950
+#define SYS_sysinfo         851
+#define SYS_getrusage       902
+#define SYS_getpriority     905
+#define SYS_setpriority     860
+#define SYS_memfd_create    894
+
+// --- Linux-native x86_64 __NR_getrandom (318) ---
+// OpenSSL calls getrandom with the native Linux x86_64 number
+// directly instead of xv6's custom SYS_getrandom (19).
+#define SYS_getrandom_x86   318
+
 #define SYS_socketpair      974
 
 // --- Aliases for musl stub numbers (mapped to real kernel numbers) ---

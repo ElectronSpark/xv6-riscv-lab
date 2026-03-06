@@ -442,6 +442,36 @@ static uint64 (*syscalls[])(void) = {
     [SYS_getitimer] sys_getitimer,
     [SYS_setitimer] sys_setitimer,
     [SYS_ppoll] sys_vfs_ppoll,
+    /* IPC stubs — xv6 doesn't support System V IPC */
+    [SYS_semtimedop] sys_ni_enosys,
+    [SYS_shmget] sys_ni_enosys,
+    [SYS_shmdt] sys_ni_enosys,
+    [SYS_shmctl] sys_ni_enosys,
+    [SYS_shmat] sys_ni_enosys,
+    [SYS_semop] sys_ni_enosys,
+    [SYS_semget] sys_ni_enosys,
+    [SYS_semctl] sys_ni_enosys,
+    [SYS_msgsnd] sys_ni_enosys,
+    [SYS_msgrcv] sys_ni_enosys,
+    [SYS_msgget] sys_ni_enosys,
+    [SYS_msgctl] sys_ni_enosys,
+    /* Other stubs */
+    [SYS_utimensat] sys_ni_enosys,
+    [SYS_clone3] sys_ni_enosys,
+    [SYS_rt_sigqueueinfo] sys_ni_enosys,
+    [SYS_clock_settime] sys_ni_enosys,
+    [SYS_fdatasync] sys_ni_enosys,
+    [SYS_fsync] sys_ni_enosys,
+    [SYS_set_robust_list] sys_ni_enosys,
+    [SYS_sigaltstack] sys_ni_enosys,
+    [SYS_prctl] sys_ni_enosys,
+    [SYS_sysinfo] sys_ni_enosys,
+    [SYS_getrusage] sys_ni_enosys,
+    [SYS_getpriority] sys_ni_enosys,
+    [SYS_setpriority] sys_ni_enosys,
+    [SYS_memfd_create] sys_ni_enosys,
+    /* Linux x86_64 native __NR_getrandom — OpenSSL direct call */
+    [SYS_getrandom_x86] sys_getrandom,
 };
 
 /*
