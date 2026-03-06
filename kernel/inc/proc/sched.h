@@ -44,6 +44,8 @@ uint64 sleep_ms_interruptible(uint64 ms);
 int sched_timer_add_deadline(void (*callback)(void *), void *data,
                              uint64 deadline);
 int sched_timer_add(void (*callback)(void *), void *data, uint64 ms);
+int sched_timer_set_cb(struct timer_node *tn, uint64 ms,
+                       void (*callback)(struct timer_node *), void *data);
 
 // Wake up a sleeping threads
 // This function will aquire the locks of the threads and the sched lock

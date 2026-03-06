@@ -287,6 +287,9 @@ static int ptmx_fops_ioctl(struct vfs_file *file, uint64 cmd, void *arg) {
         *idxp = pair->index;
         return 0;
     }
+    case TIOCSPTLCK:
+        /* PTY slave locking is not implemented; always succeed (no-op) */
+        return 0;
     default:
         /* Forward termios / winsize ioctls to the slave tty */
         if (pair->slave != NULL)

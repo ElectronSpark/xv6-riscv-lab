@@ -61,17 +61,19 @@ cat > "$STAGING/etc/hosts" <<'HOSTS'
 HOSTS
 
 # ── User database files (multi-user support) ────────────────────────────────
-# /etc/passwd – root + guest accounts
+# /etc/passwd – root + guest + sshd accounts
 cat > "$STAGING/etc/passwd" <<'PASSWD'
 root:x:0:0:root:/root:/bin/sh
+sshd:x:74:74:Privilege-separated SSH:/var/empty:/bin/false
 guest:x:1000:1000:Guest User:/home/guest:/bin/sh
 nobody:x:65534:65534:Nobody:/nonexistent:/bin/false
 PASSWD
 
-# /etc/group – root + guest groups
+# /etc/group – root + guest + sshd groups
 cat > "$STAGING/etc/group" <<'GROUP'
 root:x:0:root
 wheel:x:10:root
+sshd:x:74:
 guest:x:1000:guest
 nogroup:x:65534:
 GROUP
@@ -79,10 +81,13 @@ GROUP
 # /etc/shadow – password hashes (root has no password initially, guest locked)
 # Use SHA-512 ($6$) placeholder. root has empty-password hash (just run passwd
 # after boot to set one). guest is locked (! prefix).
+# Field 3 (sp_lstchg) must be non-zero, otherwise login treats the password as
+# expired and forces an immediate change.  Use a recent epoch-day count.
 cat > "$STAGING/etc/shadow" <<'SHADOW'
-root::0:0:99999:7:::
-guest:!:0:0:99999:7:::
-nobody:!:0:0:99999:7:::
+root::20517:0:99999:7:::
+sshd:!:20517:0:99999:7:::
+guest:!:20517:0:99999:7:::
+nobody:!:20517:0:99999:7:::
 SHADOW
 chmod 600 "$STAGING/etc/shadow" 2>/dev/null || true
 
@@ -90,10 +95,95 @@ chmod 600 "$STAGING/etc/shadow" 2>/dev/null || true
 mkdir -p "$STAGING/root"
 mkdir -p "$STAGING/home/guest"
 
+# ── SSH server setup ─────────────────────────────────────────────────────────
+# Create privilege-separation directory for sshd (must exist and be owned by root)
+mkdir -p "$STAGING/var/empty"
+mkdir -p "$STAGING/var/run"
+chmod 0755 "$STAGING/var/empty"
+mkdir -p "$STAGING/etc/ssh"
+
+# Generate SSH host keys if ssh-keygen is available on the host
+if command -v ssh-keygen >/dev/null 2>&1; then
+    echo "mkext4_rootfs: generating SSH host keys..."
+    ssh-keygen -t ed25519 -f "$STAGING/etc/ssh/ssh_host_ed25519_key" -N "" -q 2>/dev/null || true
+    ssh-keygen -t rsa -b 2048 -f "$STAGING/etc/ssh/ssh_host_rsa_key" -N "" -q 2>/dev/null || true
+    ssh-keygen -t ecdsa -b 256 -f "$STAGING/etc/ssh/ssh_host_ecdsa_key" -N "" -q 2>/dev/null || true
+else
+    echo "mkext4_rootfs: WARNING: ssh-keygen not found, host keys not generated" >&2
+    echo "mkext4_rootfs:   Generate manually: ssh-keygen -A -f /path/to/sysroot" >&2
+fi
+
+# sshd_config — minimal configuration for xv6
+cat > "$STAGING/etc/ssh/sshd_config" <<'SSHD_CONFIG'
+# xv6 OpenSSH Server Configuration
+
+# Listen on all interfaces, port 22
+Port 22
+ListenAddress 0.0.0.0
+
+# Host keys
+HostKey /etc/ssh/ssh_host_ed25519_key
+HostKey /etc/ssh/ssh_host_rsa_key
+HostKey /etc/ssh/ssh_host_ecdsa_key
+
+# Authentication
+PermitRootLogin yes
+PasswordAuthentication yes
+PermitEmptyPasswords yes
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+
+# Logging (goes to syslog → /dev/log, silently dropped if no daemon)
+SyslogFacility AUTH
+LogLevel INFO
+
+# Disable features not supported on xv6
+UseDNS no
+PrintMotd no
+Compression no
+X11Forwarding no
+GatewayPorts no
+TCPKeepAlive yes
+
+# Subsystems
+Subsystem sftp /bin/sftp
+
+# Allow env passing
+AcceptEnv LANG LC_*
+
+# Privilege separation chroot
+ChrootDirectory none
+SSHD_CONFIG
+
+# ssh_config — client configuration
+cat > "$STAGING/etc/ssh/ssh_config" <<'SSH_CONFIG'
+# xv6 OpenSSH Client Configuration
+Host *
+    StrictHostKeyChecking no
+    UserKnownHostsFile /dev/null
+    LogLevel ERROR
+SSH_CONFIG
+
+# Create .ssh directory for root
+mkdir -p "$STAGING/root/.ssh"
+chmod 700 "$STAGING/root/.ssh" 2>/dev/null || true
+
 # /etc/shells – valid login shells
 cat > "$STAGING/etc/shells" <<'SHELLS'
 /bin/sh
 SHELLS
+
+# ── /etc/daemons — programs started automatically by init ────────────────────
+# Each line is a command (with optional arguments) run as a background daemon.
+# init places each daemon in its own process group.
+cat > "$STAGING/etc/daemons" <<'DAEMONS'
+# xv6 daemon processes — started by init at boot
+# Each line: /path/to/binary [args...]
+# Lines starting with # are comments.
+
+/bin/telnetd
+# /bin/sshd -D -e
+DAEMONS
 
 # ── lwIP network configuration ───────────────────────────────────────────────
 # The kernel reads /etc/network.conf at boot to configure the network.
@@ -177,6 +267,21 @@ echo "mkext4_rootfs: ${BIN_COUNT} programs, total ${TOTAL_USED}"
 
 # Create the ext2 image populated from staging (no root/mount required)
 mke2fs -F -t ext2 -O ^dir_index -b 1024 -d "$STAGING" "$OUTPUT" "${SIZE_MB}m" >/dev/null 2>&1
+
+# Fix directory ownership inside the ext2 image.
+# mke2fs -d preserves host UID/GID; when building as non-root, directories
+# like /var/empty end up owned by the builder's UID instead of root.
+# sshd requires /var/empty to be owned by root:root with mode 0755.
+if command -v debugfs >/dev/null 2>&1; then
+    debugfs -w "$OUTPUT" <<'DEBUGFS_FIX' 2>/dev/null
+set_inode_field /var/empty uid 0
+set_inode_field /var/empty gid 0
+set_inode_field /var/empty mode 040755
+set_inode_field /var uid 0
+set_inode_field /var gid 0
+DEBUGFS_FIX
+    echo "mkext4_rootfs: fixed /var/empty ownership (root:root, 0755)"
+fi
 
 echo "mkext4_rootfs: created ${OUTPUT} (${SIZE_MB} MB ext2)"
 

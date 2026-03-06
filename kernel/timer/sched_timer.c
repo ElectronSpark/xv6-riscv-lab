@@ -110,6 +110,25 @@ int sched_timer_set(struct timer_node *tn, uint64 ms) {
     return ret;
 }
 
+/**
+ * sched_timer_set_cb - add a caller-owned timer node with a custom callback
+ * @tn:       caller-allocated (or embedded) timer_node
+ * @ms:       delay in milliseconds
+ * @callback: function called when the timer fires (in soft-IRQ context)
+ * @data:     opaque pointer passed as tn->data
+ *
+ * The caller may cancel the timer later with sched_timer_done(tn).
+ */
+int sched_timer_set_cb(struct timer_node *tn, uint64 ms,
+                       void (*callback)(struct timer_node *), void *data) {
+    if (tn == NULL || callback == NULL) {
+        return -EINVAL;
+    }
+    uint64 expires = r_time() + MS_TO_RAWTICKS(ms);
+    timer_node_init(tn, expires, callback, data, TIMER_DEFAULT_RETRY_LIMIT);
+    return timer_add(&__sched_timer, tn);
+}
+
 void sched_timer_done(struct timer_node *tn) {
     if (tn == NULL) {
         return;

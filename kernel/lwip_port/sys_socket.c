@@ -144,6 +144,7 @@ struct lwip_sock {
 #define SO_ACCEPTCONN  30
 
 /* IPPROTO_IP options */
+#define IP_OPTIONS          4
 #define IP_TOS              1
 #define IP_TTL              2
 #define IP_ADD_MEMBERSHIP   35
@@ -1975,6 +1976,11 @@ uint64 sys_getsockopt(void)
         }
     } else if (level == IPPROTO_IP) {
         switch (optname) {
+        case IP_OPTIONS:
+            /* No IP options set — return zero-length result so callers
+             * (e.g. OpenSSH check_ip_options) don't see phantom data. */
+            olen = 0;
+            break;
         case IP_TTL:
             val = sk->conn->pcb.ip->ttl;
             break;
@@ -1992,7 +1998,7 @@ uint64 sys_getsockopt(void)
     /* Copy result to user space */
     if (is_linger) {
         vm_copyout(current->vm, uoptval, &lg, sizeof(lg));
-    } else {
+    } else if (olen > 0) {
         vm_copyout(current->vm, uoptval, &val, sizeof(val));
     }
     vm_copyout(current->vm, uoptlen, &olen, sizeof(olen));
@@ -2254,6 +2260,20 @@ struct k_iovec {
     uint64 iov_len;         /* size_t  */
 };
 
+/* Kernel-space cmsghdr — must match LP64 POSIX layout (musl) */
+struct k_cmsghdr {
+    uint64 cmsg_len;        /* data byte count incl. header */
+    int    cmsg_level;
+    int    cmsg_type;
+    /* followed by cmsg data */
+};
+
+#define SCM_RIGHTS       1
+#define K_CMSG_ALIGN(n)  (((n) + sizeof(uint64) - 1) & ~(sizeof(uint64) - 1))
+#define K_CMSG_DATA(cmsg) ((unsigned char *)((struct k_cmsghdr *)(cmsg) + 1))
+#define K_CMSG_LEN(len)   (K_CMSG_ALIGN(sizeof(struct k_cmsghdr)) + (len))
+#define K_CMSG_SPACE(len) (K_CMSG_ALIGN(sizeof(struct k_cmsghdr)) + K_CMSG_ALIGN(len))
+
 #define SENDMSG_MAX_IOV 16
 
 /*
@@ -2272,10 +2292,92 @@ uint64 sys_sendmsg(void)
 
     (void)flags;   /* best-effort: MSG_NOSIGNAL etc. accepted but ignored */
 
-    /* Domain dispatch — AF_UNIX/AF_NETLINK don't support sendmsg yet */
+    /* Domain dispatch */
     int domain = sock_domain_from_fd(fd);
-    if (domain == AF_UNIX || domain == AF_NETLINK)
+    if (domain == AF_NETLINK)
         return (uint64)-EOPNOTSUPP;
+
+    if (domain == AF_UNIX) {
+        /* ---- AF_UNIX sendmsg with optional SCM_RIGHTS ---- */
+        struct unix_sock *sk = unix_sock_from_fd(fd);
+        if (sk == NULL)
+            return (uint64)-EBADF;
+
+        struct k_msghdr mh;
+        if (vm_copyin(current->vm, &mh, umsg, sizeof(mh)) < 0)
+            return (uint64)-EFAULT;
+
+        /* Handle SCM_RIGHTS control message: extract fd to pass */
+        if (mh.msg_control != 0 && mh.msg_controllen >= K_CMSG_SPACE(sizeof(int))) {
+            unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int))];
+            uint64 copy_len = mh.msg_controllen;
+            if (copy_len > sizeof(cmsg_buf))
+                copy_len = sizeof(cmsg_buf);
+            if (vm_copyin(current->vm, cmsg_buf, mh.msg_control, copy_len) < 0)
+                return (uint64)-EFAULT;
+
+            struct k_cmsghdr *cmsg = (struct k_cmsghdr *)cmsg_buf;
+            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS &&
+                cmsg->cmsg_len >= K_CMSG_LEN(sizeof(int))) {
+                int pass_fd = *(int *)K_CMSG_DATA(cmsg);
+
+                /* Get the vfs_file for the fd being passed */
+                struct vfs_file *pass_file = vfs_fdtable_get_file(
+                    current->fdtable, pass_fd);
+                if (pass_file == NULL)
+                    return (uint64)-EBADF;
+
+                /* Dup the file ref — will be held until recvmsg picks it up */
+                pass_file = vfs_fdup(pass_file);
+                if (pass_file == NULL)
+                    return (uint64)-ENOMEM;
+
+                /* Enqueue on the socket for the peer to pick up */
+                spin_lock(&sk->lock);
+                int next_tail = (sk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
+                if (next_tail == sk->scm_head) {
+                    /* Queue full — drop the oldest entry */
+                    struct vfs_file *dropped = sk->scm_queue[sk->scm_head];
+                    sk->scm_head = (sk->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
+                    spin_unlock(&sk->lock);
+                    if (dropped) vfs_fput(dropped);
+                    spin_lock(&sk->lock);
+                    next_tail = (sk->scm_tail + 1) % UNIX_SCM_QUEUE_MAX;
+                }
+                sk->scm_queue[sk->scm_tail] = pass_file;
+                sk->scm_tail = next_tail;
+                spin_unlock(&sk->lock);
+            }
+        }
+
+        /* Write the iov data through the normal path */
+        if (mh.msg_iovlen == 0)
+            return 0;
+        if (mh.msg_iovlen > SENDMSG_MAX_IOV)
+            return (uint64)-EMSGSIZE;
+
+        struct k_iovec iovs[SENDMSG_MAX_IOV];
+        uint64 iov_bytes = mh.msg_iovlen * sizeof(struct k_iovec);
+        if (vm_copyin(current->vm, iovs, mh.msg_iov, iov_bytes) < 0)
+            return (uint64)-EFAULT;
+
+        /* Get the vfs_file for the socket to call write */
+        struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, fd);
+        if (f == NULL)
+            return (uint64)-EBADF;
+
+        ssize_t total = 0;
+        for (uint64 i = 0; i < mh.msg_iovlen; i++) {
+            if (iovs[i].iov_len == 0) continue;
+            ssize_t n = unix_socket_file_ops.write(
+                f, (const char *)(iovs[i].iov_base), iovs[i].iov_len, 1);
+            if (n < 0)
+                return total > 0 ? (uint64)total : (uint64)n;
+            total += n;
+            if ((size_t)n < iovs[i].iov_len) break;
+        }
+        return (uint64)total;
+    }
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)
@@ -2401,10 +2503,109 @@ uint64 sys_recvmsg(void)
 
     (void)flags;
 
-    /* Domain dispatch — AF_UNIX/AF_NETLINK don't support recvmsg yet */
+    /* Domain dispatch */
     int domain = sock_domain_from_fd(fd);
-    if (domain == AF_UNIX || domain == AF_NETLINK)
+    if (domain == AF_NETLINK)
         return (uint64)-EOPNOTSUPP;
+
+    if (domain == AF_UNIX) {
+        /* ---- AF_UNIX recvmsg with optional SCM_RIGHTS ---- */
+        struct unix_sock *sk = unix_sock_from_fd(fd);
+        if (sk == NULL)
+            return (uint64)-EBADF;
+
+        struct k_msghdr mh;
+        if (vm_copyin(current->vm, &mh, umsg, sizeof(mh)) < 0)
+            return (uint64)-EFAULT;
+
+        if (mh.msg_iovlen == 0)
+            return 0;
+        if (mh.msg_iovlen > SENDMSG_MAX_IOV)
+            return (uint64)-EINVAL;
+
+        struct k_iovec iovs[SENDMSG_MAX_IOV];
+        uint64 iov_bytes = mh.msg_iovlen * sizeof(struct k_iovec);
+        if (vm_copyin(current->vm, iovs, mh.msg_iov, iov_bytes) < 0)
+            return (uint64)-EFAULT;
+
+        /* Read data through the normal unix socket read path */
+        struct vfs_file *f = vfs_fdtable_get_file(current->fdtable, fd);
+        if (f == NULL)
+            return (uint64)-EBADF;
+
+        ssize_t total = 0;
+        for (uint64 i = 0; i < mh.msg_iovlen; i++) {
+            if (iovs[i].iov_len == 0) continue;
+            ssize_t n = unix_socket_file_ops.read(
+                f, (char *)(iovs[i].iov_base), iovs[i].iov_len, 1);
+            if (n < 0)
+                return total > 0 ? (uint64)total : (uint64)n;
+            total += n;
+            if ((size_t)n < iovs[i].iov_len) break;
+        }
+
+        /* Check for pending SCM_RIGHTS file from peer */
+        if (mh.msg_control != 0 &&
+            mh.msg_controllen >= K_CMSG_SPACE(sizeof(int))) {
+            struct unix_sock *peer = NULL;
+            spin_lock(&sk->lock);
+            peer = sk->peer;
+            spin_unlock(&sk->lock);
+
+            struct vfs_file *scm = NULL;
+            if (peer != NULL) {
+                spin_lock(&peer->lock);
+                if (peer->scm_head != peer->scm_tail) {
+                    scm = peer->scm_queue[peer->scm_head];
+                    peer->scm_queue[peer->scm_head] = NULL;
+                    peer->scm_head = (peer->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
+                }
+                spin_unlock(&peer->lock);
+            }
+
+            if (scm != NULL) {
+                /* Install the file into our fd table */
+                spin_lock(&current->fdtable->lock);
+                int newfd = vfs_fdtable_alloc_fd(current->fdtable, scm);
+                spin_unlock(&current->fdtable->lock);
+                if (newfd < 0) {
+                    vfs_fput(scm); /* drop the ref if we can't install */
+                } else {
+                    /* Build cmsg response in kernel buffer */
+                    unsigned char cmsg_buf[K_CMSG_SPACE(sizeof(int))];
+                    memset(cmsg_buf, 0, sizeof(cmsg_buf));
+                    struct k_cmsghdr *cmsg = (struct k_cmsghdr *)cmsg_buf;
+                    cmsg->cmsg_len = K_CMSG_LEN(sizeof(int));
+                    cmsg->cmsg_level = SOL_SOCKET;
+                    cmsg->cmsg_type = SCM_RIGHTS;
+                    *(int *)K_CMSG_DATA(cmsg) = newfd;
+
+                    vm_copyout(current->vm, mh.msg_control,
+                               cmsg_buf, sizeof(cmsg_buf));
+
+                    /* Update msg_controllen in userspace msghdr */
+                    uint64 clen = sizeof(cmsg_buf);
+                    vm_copyout(current->vm,
+                               umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
+                               &clen, sizeof(clen));
+                }
+            } else {
+                /* No pending fd — set msg_controllen = 0 */
+                uint64 zero = 0;
+                vm_copyout(current->vm,
+                           umsg + __builtin_offsetof(struct k_msghdr, msg_controllen),
+                           &zero, sizeof(zero));
+            }
+        }
+
+        /* Clear msg_flags */
+        int zero_flags = 0;
+        vm_copyout(current->vm,
+                   umsg + __builtin_offsetof(struct k_msghdr, msg_flags),
+                   &zero_flags, sizeof(zero_flags));
+
+        return (uint64)total;
+    }
 
     struct lwip_sock *sk = sock_from_fd(fd);
     if (sk == NULL)

@@ -80,7 +80,7 @@
 #define SYS_uname           62
 #define SYS_lstat           63
 #define SYS_poll            64
-#define SYS_ppoll           64   /* map ppoll to xv6 poll */
+#define SYS_ppoll           945  /* xv6 ppoll (timespec-based) */
 #define SYS_futex           69
 
 /* ---- Signals (70-89) ---- */

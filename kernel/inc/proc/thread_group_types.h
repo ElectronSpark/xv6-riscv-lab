@@ -112,6 +112,10 @@ struct thread_group {
 
     /* Per-process resource limits (POSIX rlimits) */
     struct rlimit    rlim[RLIMIT_NLIMITS];
+
+    /* POSIX ITIMER_REAL (setitimer / getitimer) */
+    uint64            itimer_real_gen;    /* Generation counter for cancel */
+    uint64            itimer_interval_ms; /* Repeat interval (0 = one-shot) */
 };
 
 #endif /* __KERNEL_THREAD_GROUP_TYPES_H */

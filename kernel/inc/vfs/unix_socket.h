@@ -117,6 +117,12 @@ struct unix_sock {
 
     /* VFS file back-reference (for kqueue/epoll notification) */
     struct vfs_file *file;
+
+    /* SCM_RIGHTS: FIFO queue of pending files to deliver to peer via recvmsg */
+#define UNIX_SCM_QUEUE_MAX 8
+    struct vfs_file *scm_queue[UNIX_SCM_QUEUE_MAX];
+    int scm_head;  /* next slot to dequeue from */
+    int scm_tail;  /* next slot to enqueue into */
 };
 
 /* ========================================================================== */

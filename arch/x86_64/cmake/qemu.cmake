@@ -64,7 +64,7 @@ endif()
 
 # x86 PCI devices: virtio-blk-pci disk + e1000 NIC
 set(X86_DISK_OPTS -drive file=${X86_INITRD_IMG},if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0)
-set(X86_NET_OPTS -netdev user,id=net0,hostfwd=tcp::2323-:23,hostfwd=tcp::2159-:2159,hostfwd=tcp::8080-:80 -object filter-dump,id=net0,netdev=net0,file=packets.pcap -device e1000,netdev=net0)
+set(X86_NET_OPTS -netdev user,id=net0,hostfwd=tcp::2323-:23,hostfwd=tcp::2159-:2159,hostfwd=tcp::8080-:80,hostfwd=tcp::2222-:22 -object filter-dump,id=net0,netdev=net0,file=packets.pcap -device e1000,netdev=net0)
 
 add_custom_target(qemu
     COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m 1G -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -debugcon file:debugcon.log -no-reboot -no-shutdown -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS}

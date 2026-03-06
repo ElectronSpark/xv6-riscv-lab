@@ -153,6 +153,18 @@ static int __vfs_open_cdev(struct vfs_inode *inode, struct vfs_file *file) {
 
     file->cdev = cdev;
     file->ops = NULL; // Device files use direct device I/O
+
+    /* Invoke the cdev's open callback (e.g. /dev/tty returns -ENXIO
+     * when the process has no controlling terminal). */
+    if (cdev->ops.open != NULL) {
+        int ret = cdev->ops.open(cdev);
+        if (ret != 0) {
+            file->cdev = NULL;
+            cdev_put(cdev);
+            return ret;
+        }
+    }
+
     return 0;
 }
 

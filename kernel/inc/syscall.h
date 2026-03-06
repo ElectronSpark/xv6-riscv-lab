@@ -196,6 +196,13 @@
 #define SYS_fchown          940
 #define SYS_fchmodat        941
 #define SYS_fchmod          942
+#define SYS_setresuid       858
+#define SYS_setresgid       859
+#define SYS_getresuid       903
+#define SYS_getresgid       904
+#define SYS_getitimer       943
+#define SYS_setitimer       944
+#define SYS_ppoll           945
 
 #define SYS_socketpair      974
 

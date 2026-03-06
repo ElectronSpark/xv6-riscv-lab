@@ -2198,14 +2198,7 @@ done:
  * spin-polling.  For non-blocking polls (timeout_ms=0), a direct scan
  * is performed without kqueue overhead.
  */
-uint64 sys_vfs_poll(void) {
-    uint64 fds_addr;
-    int nfds;
-    int timeout_ms;
-
-    argaddr(0, &fds_addr);
-    argint(1, &nfds);
-    argint(2, &timeout_ms);
+static uint64 __vfs_poll_impl(uint64 fds_addr, int nfds, int timeout_ms) {
 
     if (nfds < 0 || nfds > NOFILE) {
         return -EINVAL;
@@ -2242,23 +2235,14 @@ uint64 sys_vfs_poll(void) {
     /* --- Blocking path: use kqueue for event-driven wait --- */
 
     /*
-     * Determine whether all polled fds support kqueue notification.
-     * Chardev files (f->ops == NULL, dispatched through cdev->ops.poll)
-     * don't fire vfs_file_knote_notify, so we must periodically re-scan.
+     * Always use periodic rescan.  Some fd types (e.g. PTY master) have
+     * a poll callback for readiness checks but never call
+     * vfs_file_knote_notify(), so relying on kqueue alone would block
+     * forever when only those fds become ready.  The 10 ms rescan
+     * interval (POLL_RESCAN_MS) adds negligible overhead while
+     * guaranteeing correctness for all fd types.
      */
-    int has_unnotified_fds = 0;
-    for (int i = 0; i < nfds; i++) {
-        if (pfds[i].fd < 0)
-            continue;
-        struct vfs_file *tf = __vfs_argfd(pfds[i].fd);
-        if (tf == NULL)
-            continue;
-        if (tf->ops == NULL || tf->ops->poll == NULL)
-            has_unnotified_fds = 1;
-        vfs_fput(tf);
-        if (has_unnotified_fds)
-            break;
-    }
+    int has_unnotified_fds = 1;
 
     int kqfd = kqueue_create();
     if (kqfd < 0) {
@@ -2397,6 +2381,62 @@ copyout:
 
     kvfree(pfds);
     return ready;
+}
+
+/*
+ * sys_vfs_poll — poll(2) syscall wrapper.
+ *
+ * Arguments: a0 = pollfd*, a1 = nfds, a2 = timeout_ms
+ */
+uint64 sys_vfs_poll(void) {
+    uint64 fds_addr;
+    int nfds, timeout_ms;
+
+    argaddr(0, &fds_addr);
+    argint(1, &nfds);
+    argint(2, &timeout_ms);
+
+    return __vfs_poll_impl(fds_addr, nfds, timeout_ms);
+}
+
+/*
+ * sys_vfs_ppoll — ppoll(2) syscall.
+ *
+ * Arguments:
+ *   a0 = pollfd*
+ *   a1 = nfds
+ *   a2 = struct timespec* (NULL = infinite wait)
+ *   a3 = sigset_t*        (ignored for now)
+ *   a4 = sigsetsize        (ignored for now)
+ */
+uint64 sys_vfs_ppoll(void) {
+    uint64 fds_addr;
+    int nfds;
+    uint64 tmo_p;
+
+    argaddr(0, &fds_addr);
+    argint(1, &nfds);
+    argaddr(2, &tmo_p);
+    /* a3 (sigmask) and a4 (sigsetsize) ignored */
+
+    int timeout_ms;
+    if (tmo_p == 0) {
+        /* NULL timespec → infinite wait */
+        timeout_ms = -1;
+    } else {
+        struct { int64 tv_sec; int64 tv_nsec; } ts;
+        if (either_copyin(&ts, 1, tmo_p, sizeof(ts)) < 0)
+            return (uint64)-EFAULT;
+        if (ts.tv_sec < 0 || ts.tv_nsec < 0 || ts.tv_nsec >= 1000000000LL)
+            return (uint64)-EINVAL;
+        int64 ms = ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+        if (ms > (int64)0x7FFFFFFF)
+            timeout_ms = 0x7FFFFFFF;
+        else
+            timeout_ms = (int)ms;
+    }
+
+    return __vfs_poll_impl(fds_addr, nfds, timeout_ms);
 }
 
 /*

@@ -699,6 +699,14 @@ int tty_ioctl(struct tty *tty, uint64 cmd, void *arg) {
         session_set_ctrl_tty(current->session, tty);
         return 0;
     }
+    case TIOCNOTTY: {
+        /* Detach calling process from its controlling terminal.
+         * If the caller is a session leader, disassociate the entire
+         * session from the controlling tty (POSIX). */
+        if (current->session != NULL)
+            session_set_ctrl_tty(current->session, NULL);
+        return 0;
+    }
     default:
         /* Let the driver handle unknown ioctls */
         if (tty->ops && tty->ops->ioctl)

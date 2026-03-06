@@ -150,7 +150,9 @@ struct termios {
 #define TIOCGPGRP 0x540F  /* Get foreground process group */
 #define TIOCSPGRP 0x5410  /* Set foreground process group */
 #define TIOCSCTTY 0x540E  /* Set controlling terminal */
-#define TIOCGPTN  0x80045430 /* Get PTY slave number */
+#define TIOCGPTN   0x80045430 /* Get PTY slave number */
+#define TIOCSPTLCK 0x40045431 /* Lock/unlock PTY slave */
+#define TIOCNOTTY  0x5422     /* Detach from controlling terminal */
 
 /* Window size structure */
 struct winsize {

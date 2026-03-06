@@ -21,3 +21,10 @@
 [submodule "user/dash"]
 	path = user/dash
 	url = https://git.kernel.org/pub/scm/utils/dash/dash.git
+[submodule "user/openssl"]
+	path = user/openssl
+	url = https://github.com/openssl/openssl.git
+	branch = openssl-3.0
+[submodule "user/openssh"]
+	path = user/openssh
+	url = https://github.com/openssh/openssh-portable.git

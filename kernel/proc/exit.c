@@ -369,7 +369,7 @@ int wait(uint64 addr) {
         // No point waiting if we don't have any children.
         if (p->children_count == 0) {
             __thread_state_set(p, THREAD_RUNNING);
-            pid = -1;
+            pid = -ECHILD;
             goto ret;
         }
 
@@ -472,7 +472,7 @@ int waitpid(int target_pid, uint64 addr, int options) {
 
         if (!has_match) {
             __thread_state_set(p, THREAD_RUNNING);
-            pid = -1;
+            pid = -ECHILD;
             goto ret;
         }
 

@@ -35,6 +35,7 @@
 #include "maple_tree.h"
 #include "printf.h"
 #include "procfs_private.h"
+#include "dev/cdev.h"
 #include "accounting.h"
 #include "timer/timer.h"
 
@@ -414,6 +415,9 @@ static ssize_t procfs_readlink(struct vfs_inode *inode, char *buf,
         struct vfs_inode *fi = f->inode.inode;
         mode_t fmode = (fi != NULL) ? fi->mode : 0;
         uint64 fino  = (fi != NULL) ? fi->ino  : 0;
+        uint32 fdev  = 0;
+        if (fi != NULL && S_ISCHR(fmode))
+            fdev = fi->cdev;
         rcu_read_unlock();
 
         if (S_ISFIFO(fmode))
@@ -422,7 +426,19 @@ static ssize_t procfs_readlink(struct vfs_inode *inode, char *buf,
         else if (S_ISSOCK(fmode))
             n = snprintf(buf, buflen, "socket:[%llu]",
                          (unsigned long long)fino);
-        else
+        else if (S_ISCHR(fmode) && fdev != 0) {
+            /* Look up char device to get its devtmpfs name */
+            cdev_t *cd = cdev_get(major(fdev), minor(fdev));
+            if (!IS_ERR_OR_NULL(cd) && cd->dev.devname != NULL) {
+                n = snprintf(buf, buflen, "/dev/%s", cd->dev.devname);
+                cdev_put(cd);
+            } else {
+                if (!IS_ERR_OR_NULL(cd))
+                    cdev_put(cd);
+                n = snprintf(buf, buflen, "/dev/char/%u:%u",
+                             major(fdev), minor(fdev));
+            }
+        } else
             n = snprintf(buf, buflen, "file:[%llu]",
                          (unsigned long long)fino);
         return n;

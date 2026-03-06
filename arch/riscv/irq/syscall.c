@@ -17,7 +17,7 @@
  * Set STRACE_PROC_NAME to NULL to trace ALL processes.
  * ============================================================ */
 #define STRACE_ENABLED   0
-#define STRACE_PROC_NAME "python"   /* NULL = trace all */
+#define STRACE_PROC_NAME "sshd"   /* NULL = trace all */
 
 #if STRACE_ENABLED
 static const char *syscall_name(int num) {
@@ -147,6 +147,27 @@ static const char *syscall_name(int num) {
     case 146: return "setregid";
     case 147: return "getgroups";
     case 148: return "setgroups";
+    case 158: return "arch_prctl";
+    case 159: return "prlimit64";
+    case 160: return "kstats";
+    case 161: return "netconf";
+    case 842: return "sendmmsg";
+    case 847: return "umask";
+    case 858: return "setresuid";
+    case 859: return "setresgid";
+    case 868: return "sched_rr_get_interval";
+    case 872: return "recvmmsg";
+    case 878: return "pselect6";
+    case 903: return "getresuid";
+    case 904: return "getresgid";
+    case 939: return "fchownat";
+    case 940: return "fchown";
+    case 941: return "fchmodat";
+    case 942: return "fchmod";
+    case 943: return "getitimer";
+    case 944: return "setitimer";
+    case 945: return "ppoll";
+    case 974: return "socketpair";
     default: return "???";
     }
 }
@@ -236,6 +257,10 @@ extern uint64 sys_setuid(void);
 extern uint64 sys_setgid(void);
 extern uint64 sys_setreuid(void);
 extern uint64 sys_setregid(void);
+extern uint64 sys_setresuid(void);
+extern uint64 sys_setresgid(void);
+extern uint64 sys_getresuid(void);
+extern uint64 sys_getresgid(void);
 extern uint64 sys_getgroups(void);
 extern uint64 sys_setgroups(void);
 extern uint64 sys_sbrk(void);
@@ -353,6 +378,7 @@ extern uint64 sys_vfs_ioctl(void);
 extern uint64 sys_tcgetattr(void);
 extern uint64 sys_tcsetattr(void);
 extern uint64 sys_vfs_poll(void);
+extern uint64 sys_vfs_ppoll(void);
 extern uint64 sys_pselect6(void);
 
 // *at() variants for musl libc compatibility
@@ -372,6 +398,10 @@ extern uint64 sys_vfs_fchmodat(void);
 extern uint64 sys_vfs_fchown(void);
 extern uint64 sys_vfs_fchownat(void);
 extern uint64 sys_umask(void);
+
+// setitimer / getitimer
+extern uint64 sys_setitimer(void);
+extern uint64 sys_getitimer(void);
 
 // kqueue syscalls
 extern uint64 sys_kqueue(void);
@@ -518,6 +548,10 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_setgid] sys_setgid,
     [SYS_setreuid] sys_setreuid,
     [SYS_setregid] sys_setregid,
+    [SYS_setresuid] sys_setresuid,
+    [SYS_setresgid] sys_setresgid,
+    [SYS_getresuid] sys_getresuid,
+    [SYS_getresgid] sys_getresgid,
     [SYS_getgroups] sys_getgroups,
     [SYS_setgroups] sys_setgroups,
     [SYS_prlimit64] sys_prlimit64,
@@ -556,6 +590,9 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_fchown] sys_vfs_fchown,
     [SYS_fchmodat] sys_vfs_fchmodat,
     [SYS_fchmod] sys_vfs_fchmod,
+    [SYS_getitimer] sys_getitimer,
+    [SYS_setitimer] sys_setitimer,
+    [SYS_ppoll] sys_vfs_ppoll,
 };
 
 void syscall(void) {
@@ -570,16 +607,22 @@ void syscall(void) {
             uint64 a0 = p->trapframe->trapframe.a0;
             uint64 a1 = p->trapframe->trapframe.a1;
             uint64 a2 = p->trapframe->trapframe.a2;
-            printf("strace: pid %d %s %s(%d) a0=0x%lx a1=0x%lx a2=0x%lx\n",
-                   p->pid, p->name, syscall_name(num), num, a0, a1, a2);
+            uint64 a3 = p->trapframe->trapframe.a3;
+            printf("strace: pid %d %s %s(%d) a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+                   p->pid, p->name, syscall_name(num), num, a0, a1, a2, a3);
         }
 #endif
         p->trapframe->trapframe.a0 = syscalls[num]();
 #if STRACE_ENABLED
         if (strace_match(p)) {
-            printf("strace: pid %d %s %s(%d) -> 0x%lx\n",
-                   p->pid, p->name, syscall_name(num), num,
-                   p->trapframe->trapframe.a0);
+            int64 ret = (int64)p->trapframe->trapframe.a0;
+            if (ret < 0 && ret > -4096)
+                printf("strace: pid %d %s %s(%d) = %ld (err)\n",
+                       p->pid, p->name, syscall_name(num), num, ret);
+            else
+                printf("strace: pid %d %s %s(%d) = 0x%lx\n",
+                       p->pid, p->name, syscall_name(num), num,
+                       p->trapframe->trapframe.a0);
         }
 #endif
     } else {

@@ -9,6 +9,7 @@
 #include "signal.h"
 #include "syscall.h"
 #include "errno.h"
+#include "timer/timer.h"
 
 uint64 sys_sigprocmask(void) {
     int how;
@@ -209,5 +210,145 @@ uint64 sys_sigwait(void) {
         return -EFAULT;
     }
 
+    return 0;
+}
+
+/* ── ITIMER_REAL (setitimer / getitimer) ──────────────────────────────── */
+
+#define ITIMER_REAL    0
+#define ITIMER_VIRTUAL 1
+#define ITIMER_PROF    2
+
+struct k_itimerval {
+    struct {
+        uint64 tv_sec;
+        uint64 tv_usec;
+    } it_interval;
+    struct {
+        uint64 tv_sec;
+        uint64 tv_usec;
+    } it_value;
+};
+
+static void __itimer_real_fire(void *arg) {
+    /* arg is (uint64)tgid | (gen << 32) packed value */
+    uint64 packed = (uint64)arg;
+    int tgid = (int)(packed & 0xFFFFFFFF);
+    uint64 gen = packed >> 32;
+
+    /* Look up the thread group leader; verify generation still matches */
+    struct thread *p = NULL;
+    rcu_read_lock();
+    if (get_pid_thread(tgid, &p) != 0 || p == NULL) {
+        rcu_read_unlock();
+        return; /* process exited */
+    }
+    struct thread_group *tg = p->thread_group;
+    if (tg == NULL || tg->itimer_real_gen != gen) {
+        rcu_read_unlock();
+        return; /* timer was cancelled or replaced */
+    }
+
+    /* Send SIGALRM to the process (thread group) */
+    ksiginfo_t info = {0};
+    info.signo = SIGALRM;
+    info.sender = NULL;  /* kernel-generated */
+    info.info.si_pid = 0;
+    signal_send(tgid, &info);
+
+    /* If interval is set, re-arm the timer */
+    if (tg->itimer_interval_ms > 0) {
+        uint64 next_packed = ((uint64)gen << 32) | (uint64)(uint32)tgid;
+        sched_timer_add(__itimer_real_fire, (void *)next_packed,
+                        tg->itimer_interval_ms);
+    }
+    rcu_read_unlock();
+}
+
+/**
+ * sys_setitimer - POSIX setitimer(2)
+ * args: int which, const struct itimerval *new, struct itimerval *old
+ *
+ * Only ITIMER_REAL is supported. Sends SIGALRM when timer expires.
+ */
+uint64 sys_setitimer(void) {
+    int which;
+    uint64 new_addr, old_addr;
+    argint(0, &which);
+    argaddr(1, &new_addr);
+    argaddr(2, &old_addr);
+
+    if (which != ITIMER_REAL)
+        return -EINVAL;
+
+    struct thread *p = current;
+    struct thread_group *tg = p->thread_group;
+    if (tg == NULL)
+        return -EINVAL;
+
+    /* Read the old value before updating (if requested) */
+    if (old_addr != 0) {
+        struct k_itimerval old = {0};
+        /* We don't track remaining time precisely; just return interval */
+        old.it_interval.tv_sec = tg->itimer_interval_ms / 1000;
+        old.it_interval.tv_usec = (tg->itimer_interval_ms % 1000) * 1000;
+        if (either_copyout(1, old_addr, &old, sizeof(old)) < 0)
+            return -EFAULT;
+    }
+
+    /* Cancel any pending timer by bumping generation */
+    tg->itimer_real_gen++;
+
+    if (new_addr == 0)
+        return 0;
+
+    struct k_itimerval nv;
+    if (either_copyin(&nv, 1, new_addr, sizeof(nv)) < 0)
+        return -EFAULT;
+
+    uint64 value_ms = nv.it_value.tv_sec * 1000 + nv.it_value.tv_usec / 1000;
+    uint64 interval_ms = nv.it_interval.tv_sec * 1000 +
+                         nv.it_interval.tv_usec / 1000;
+
+    tg->itimer_interval_ms = interval_ms;
+
+    if (value_ms == 0)
+        return 0; /* disarm */
+
+    /* Pack tgid + generation into a single pointer-sized value */
+    uint64 packed = ((uint64)tg->itimer_real_gen << 32) |
+                    (uint64)(uint32)tg->tgid;
+
+    int ret = sched_timer_add(__itimer_real_fire, (void *)packed, value_ms);
+    return ret;
+}
+
+/**
+ * sys_getitimer - POSIX getitimer(2)
+ * args: int which, struct itimerval *curr_value
+ */
+uint64 sys_getitimer(void) {
+    int which;
+    uint64 val_addr;
+    argint(0, &which);
+    argaddr(1, &val_addr);
+
+    if (which != ITIMER_REAL)
+        return -EINVAL;
+    if (val_addr == 0)
+        return -EINVAL;
+
+    struct thread *p = current;
+    struct thread_group *tg = p->thread_group;
+    if (tg == NULL)
+        return -EINVAL;
+
+    struct k_itimerval val = {0};
+    val.it_interval.tv_sec = tg->itimer_interval_ms / 1000;
+    val.it_interval.tv_usec = (tg->itimer_interval_ms % 1000) * 1000;
+    /* We don't track remaining time precisely */
+
+    if (either_copyout(1, val_addr, &val, sizeof(val)) < 0)
+        return -EFAULT;
     return 0;
 }

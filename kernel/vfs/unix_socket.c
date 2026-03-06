@@ -559,19 +559,56 @@ static int unix_file_release(struct vfs_inode *inode, struct vfs_file *file)
         bind_unregister(sk->bind_path);
 
     sk->file = NULL;
+
+    /* Drop any pending SCM_RIGHTS files that were never picked up */
+    while (sk->scm_head != sk->scm_tail) {
+        struct vfs_file *pending = sk->scm_queue[sk->scm_head];
+        sk->scm_queue[sk->scm_head] = NULL;
+        sk->scm_head = (sk->scm_head + 1) % UNIX_SCM_QUEUE_MAX;
+        if (pending != NULL)
+            vfs_fput(pending);
+    }
+
     spin_unlock(&sk->lock);
 
     /*
      * Notify peer (holding only peer->lock, never both locks).
-     * If peer->peer still points to us, clear it and mark EOF.
+     * If peer->peer still points to us, handle the disconnect.
+     *
+     * POSIX requires that close() on one end of a socketpair does NOT
+     * discard data already buffered in the tx ring — the peer must be
+     * able to read(2) it before seeing EOF.  If our tx ring still has
+     * unread data, we keep peer->peer pointing to us (and its reference
+     * on us) so the reader can drain the buffer.  We mark ourselves
+     * with UNIX_SHUT_WR so the reader knows no more data will arrive
+     * and returns EOF once the ring is empty.
      */
     if (peer != NULL) {
         bool cleared_backptr = false;
+
+        /* Check if our tx ring has data the peer hasn't read yet.
+         * We can safely inspect sk->tx under sk->lock alone (our own ring). */
+        spin_lock(&sk->lock);
+        bool has_data = (sk->tx.nwrite != sk->tx.nread);
+        sk->shutdown_flags |= UNIX_SHUT_WR;  /* no more writes from us */
+        spin_unlock(&sk->lock);
+
         spin_lock(&peer->lock);
         if (peer->peer == sk) {
-            peer->peer = NULL;
-            peer->shutdown_flags |= UNIX_SHUT_RD; /* peer sees EOF */
-            cleared_backptr = true;
+            if (has_data) {
+                /* Data remains in our tx ring.  Keep peer->peer alive
+                 * so the reader can find our tx ring.  Do NOT set
+                 * UNIX_SHUT_RD on peer — the read loop checks that
+                 * flag and would skip reading the ring.  The reader
+                 * will detect EOF via our UNIX_SHUT_WR flag once the
+                 * ring is empty. */
+                /* cleared_backptr stays false → peer keeps its ref on us */
+            } else {
+                /* No buffered data — clean disconnect. */
+                peer->peer = NULL;
+                peer->shutdown_flags |= UNIX_SHUT_RD; /* peer sees EOF */
+                cleared_backptr = true;
+            }
         }
         spin_unlock(&peer->lock);
 

@@ -131,6 +131,10 @@ extern uint64 sys_setuid(void);
 extern uint64 sys_setgid(void);
 extern uint64 sys_setreuid(void);
 extern uint64 sys_setregid(void);
+extern uint64 sys_setresuid(void);
+extern uint64 sys_setresgid(void);
+extern uint64 sys_getresuid(void);
+extern uint64 sys_getresgid(void);
 extern uint64 sys_getgroups(void);
 extern uint64 sys_setgroups(void);
 extern uint64 sys_sbrk(void);
@@ -218,6 +222,7 @@ extern uint64 sys_vfs_ioctl(void);
 extern uint64 sys_tcgetattr(void);
 extern uint64 sys_tcsetattr(void);
 extern uint64 sys_vfs_poll(void);
+extern uint64 sys_vfs_ppoll(void);
 extern uint64 sys_pselect6(void);
 extern uint64 sys_vfs_mkdirat(void);
 extern uint64 sys_vfs_mknodat(void);
@@ -235,6 +240,11 @@ extern uint64 sys_vfs_fchmodat(void);
 extern uint64 sys_vfs_fchown(void);
 extern uint64 sys_vfs_fchownat(void);
 extern uint64 sys_umask(void);
+
+// setitimer / getitimer
+extern uint64 sys_setitimer(void);
+extern uint64 sys_getitimer(void);
+
 extern uint64 sys_kqueue(void);
 extern uint64 sys_kevent_register(void);
 extern uint64 sys_kevent_wait(void);
@@ -386,6 +396,10 @@ static uint64 (*syscalls[])(void) = {
     [SYS_setgid] sys_setgid,
     [SYS_setreuid] sys_setreuid,
     [SYS_setregid] sys_setregid,
+    [SYS_setresuid] sys_setresuid,
+    [SYS_setresgid] sys_setresgid,
+    [SYS_getresuid] sys_getresuid,
+    [SYS_getresgid] sys_getresgid,
     [SYS_getgroups] sys_getgroups,
     [SYS_setgroups] sys_setgroups,
     [SYS_arch_prctl] sys_arch_prctl,
@@ -425,6 +439,9 @@ static uint64 (*syscalls[])(void) = {
     [SYS_fchown] sys_vfs_fchown,
     [SYS_fchmodat] sys_vfs_fchmodat,
     [SYS_fchmod] sys_vfs_fchmod,
+    [SYS_getitimer] sys_getitimer,
+    [SYS_setitimer] sys_setitimer,
+    [SYS_ppoll] sys_vfs_ppoll,
 };
 
 /*

@@ -58,27 +58,124 @@ static long xv6_mount(const char *source, const char *target, const char *fstype
 
 static char *argv[] = { "sh", NULL };
 
-/* ── telnetd launcher ──────────────────────────────────────────────────── */
-static void start_telnetd(void)
-{
-    pid_t pid = fork();
-    if (pid != 0)
-        return;  /* parent continues */
+/* ── /etc/daemons launcher ─────────────────────────────────────────────
+ *
+ * Reads /etc/daemons line by line.  Each non-empty, non-comment line is
+ * a command (optionally with arguments) to launch as a background daemon.
+ *
+ * Format:
+ *   # comment
+ *   /bin/telnetd
+ *   /bin/sshd -D
+ *
+ * Each daemon is fork()+exec()'d into its own process group (via
+ * setpgid(0,0)) so signals can be directed at individual daemons
+ * without hitting the whole session.
+ *
+ * Daemon stdout/stderr go to /dev/console for diagnostics.
+ */
 
-    /* Child: exec telnetd in background */
-    /* Close inherited console fds — telnetd opens its own sockets */
+#define DAEMONS_PATH   "/etc/daemons"
+#define MAX_DAEMON_ARGS 16
+#define MAX_LINE        256
+
+static void start_daemon(const char *line)
+{
+    /* Tokenise the line into argv[] (modifies a local copy) */
+    char buf[MAX_LINE];
+    strncpy(buf, line, MAX_LINE - 1);
+    buf[MAX_LINE - 1] = '\0';
+
+    char *tok_argv[MAX_DAEMON_ARGS + 1];
+    int argc = 0;
+    char *p = buf;
+
+    while (*p && argc < MAX_DAEMON_ARGS) {
+        /* skip whitespace */
+        while (*p == ' ' || *p == '\t')
+            p++;
+        if (*p == '\0' || *p == '#')
+            break;
+        tok_argv[argc++] = p;
+        while (*p && *p != ' ' && *p != '\t')
+            p++;
+        if (*p)
+            *p++ = '\0';
+    }
+    if (argc == 0)
+        return;
+    tok_argv[argc] = NULL;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        printf("init: fork failed for daemon: %s\n", tok_argv[0]);
+        return;
+    }
+    if (pid != 0) {
+        /* Parent — daemon launched */
+        printf("init: started daemon %s (pid %d)\n", tok_argv[0], pid);
+        return;
+    }
+
+    /* ── Child ─────────────────────────────────────────────────────── */
+
+    /* Create a new process group for this daemon */
+    setpgid(0, 0);
+
+    /* Re-open stdio on /dev/console so daemon output is visible */
     close(STDIN_FILENO);
     close(STDOUT_FILENO);
     close(STDERR_FILENO);
-
-    /* Reopen /dev/console for telnetd's own logging */
     open("/dev/console", O_RDWR);  /* fd 0 */
-    dup(0);  /* fd 1 */
-    dup(0);  /* fd 2 */
+    dup(0);                        /* fd 1 */
+    dup(0);                        /* fd 2 */
 
-    char *telnetd_argv[] = { "telnetd", NULL };
-    execv("/bin/telnetd", telnetd_argv);
-    _exit(1);  /* exec failed */
+    execv(tok_argv[0], tok_argv);
+    /* exec failed — only reaches here on error */
+    printf("init: exec failed for daemon: %s\n", tok_argv[0]);
+    _exit(1);
+}
+
+static void start_daemons(void)
+{
+    int fd = open(DAEMONS_PATH, O_RDONLY);
+    if (fd < 0) {
+        /* No /etc/daemons — nothing to start */
+        return;
+    }
+
+    char filebuf[2048];
+    ssize_t n = read(fd, filebuf, sizeof(filebuf) - 1);
+    close(fd);
+
+    if (n <= 0)
+        return;
+    filebuf[n] = '\0';
+
+    /* Process line by line */
+    char *line = filebuf;
+    while (*line) {
+        /* Find end of line */
+        char *eol = line;
+        while (*eol && *eol != '\n')
+            eol++;
+
+        char saved = *eol;
+        *eol = '\0';
+
+        /* Skip leading whitespace */
+        const char *p = line;
+        while (*p == ' ' || *p == '\t')
+            p++;
+
+        /* Skip empty lines and comments */
+        if (*p != '\0' && *p != '#')
+            start_daemon(p);
+
+        if (saved == '\0')
+            break;
+        line = eol + 1;
+    }
 }
 
 
@@ -313,9 +410,10 @@ int main(void)
 
     /* Ensure device nodes exist (devtmpfs creates them automatically;
      * mknod errors are silently ignored) */
-    mknod("/dev/null",   S_IFCHR | 0666, makedev(NULL_MAJOR, NULL_MINOR));
-    mknod("/dev/random", S_IFCHR | 0666, makedev(RANDOM_MAJOR, RANDOM_MINOR));
-    mknod("/dev/tty",    S_IFCHR | 0666, makedev(TTY_DEV_MAJOR, TTY_DEV_MINOR));
+    mknod("/dev/null",    S_IFCHR | 0666, makedev(NULL_MAJOR, NULL_MINOR));
+    mknod("/dev/random",  S_IFCHR | 0666, makedev(RANDOM_MAJOR, RANDOM_MINOR));
+    mknod("/dev/urandom", S_IFCHR | 0666, makedev(RANDOM_MAJOR, RANDOM_MINOR));
+    mknod("/dev/tty",     S_IFCHR | 0666, makedev(TTY_DEV_MAJOR, TTY_DEV_MINOR));
 
     /* Configure network (reads /etc/network.conf, writes to /dev/netconf) */
     configure_network();
@@ -324,8 +422,13 @@ int main(void)
      * with the DNS server obtained from DHCP or the config file. */
     update_resolv_conf();
 
-    /* Start telnet daemon (background, listens on port 23) */
-    start_telnetd();
+    /* Ensure /var/empty is owned by root with correct permissions.
+     * sshd requires this for privilege separation. */
+    chown("/var/empty", 0, 0);
+    chmod("/var/empty", 0755);
+
+    /* Start daemon processes listed in /etc/daemons (each in its own pgrp) */
+    start_daemons();
 
     for (;;) {
         printf("init: starting getty on /dev/console\n");

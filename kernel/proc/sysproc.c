@@ -146,6 +146,100 @@ uint64 sys_setregid(void) {
     return 0;
 }
 
+uint64 sys_setresuid(void) {
+    int ruid, euid, suid;
+    argint(0, &ruid);
+    argint(1, &euid);
+    argint(2, &suid);
+    struct thread_group *tg = current->thread_group;
+
+    /* Unprivileged callers may only set each id to one of the current
+     * real, effective, or saved values.  Privileged (euid==0) may set
+     * any value.  -1 means "leave unchanged". */
+    if (ruid != -1) {
+        if (tg->euid != 0 && (uint32)ruid != tg->uid &&
+            (uint32)ruid != tg->euid && (uint32)ruid != tg->suid)
+            return (uint64)-EPERM;
+    }
+    if (euid != -1) {
+        if (tg->euid != 0 && (uint32)euid != tg->uid &&
+            (uint32)euid != tg->euid && (uint32)euid != tg->suid)
+            return (uint64)-EPERM;
+    }
+    if (suid != -1) {
+        if (tg->euid != 0 && (uint32)suid != tg->uid &&
+            (uint32)suid != tg->euid && (uint32)suid != tg->suid)
+            return (uint64)-EPERM;
+    }
+
+    /* All permission checks passed — apply atomically */
+    if (ruid != -1) tg->uid  = (uint32)ruid;
+    if (euid != -1) tg->euid = (uint32)euid;
+    if (suid != -1) tg->suid = (uint32)suid;
+    return 0;
+}
+
+uint64 sys_setresgid(void) {
+    int rgid, egid, sgid;
+    argint(0, &rgid);
+    argint(1, &egid);
+    argint(2, &sgid);
+    struct thread_group *tg = current->thread_group;
+
+    if (rgid != -1) {
+        if (tg->euid != 0 && (uint32)rgid != tg->gid &&
+            (uint32)rgid != tg->egid && (uint32)rgid != tg->sgid)
+            return (uint64)-EPERM;
+    }
+    if (egid != -1) {
+        if (tg->euid != 0 && (uint32)egid != tg->gid &&
+            (uint32)egid != tg->egid && (uint32)egid != tg->sgid)
+            return (uint64)-EPERM;
+    }
+    if (sgid != -1) {
+        if (tg->euid != 0 && (uint32)sgid != tg->gid &&
+            (uint32)sgid != tg->egid && (uint32)sgid != tg->sgid)
+            return (uint64)-EPERM;
+    }
+
+    if (rgid != -1) tg->gid  = (uint32)rgid;
+    if (egid != -1) tg->egid = (uint32)egid;
+    if (sgid != -1) tg->sgid = (uint32)sgid;
+    return 0;
+}
+
+uint64 sys_getresuid(void) {
+    uint64 ruid_addr, euid_addr, suid_addr;
+    argaddr(0, &ruid_addr);
+    argaddr(1, &euid_addr);
+    argaddr(2, &suid_addr);
+    struct thread_group *tg = current->thread_group;
+
+    if (either_copyout(1, ruid_addr, &tg->uid, sizeof(uint32)) < 0)
+        return (uint64)-EFAULT;
+    if (either_copyout(1, euid_addr, &tg->euid, sizeof(uint32)) < 0)
+        return (uint64)-EFAULT;
+    if (either_copyout(1, suid_addr, &tg->suid, sizeof(uint32)) < 0)
+        return (uint64)-EFAULT;
+    return 0;
+}
+
+uint64 sys_getresgid(void) {
+    uint64 rgid_addr, egid_addr, sgid_addr;
+    argaddr(0, &rgid_addr);
+    argaddr(1, &egid_addr);
+    argaddr(2, &sgid_addr);
+    struct thread_group *tg = current->thread_group;
+
+    if (either_copyout(1, rgid_addr, &tg->gid, sizeof(uint32)) < 0)
+        return (uint64)-EFAULT;
+    if (either_copyout(1, egid_addr, &tg->egid, sizeof(uint32)) < 0)
+        return (uint64)-EFAULT;
+    if (either_copyout(1, sgid_addr, &tg->sgid, sizeof(uint32)) < 0)
+        return (uint64)-EFAULT;
+    return 0;
+}
+
 uint64 sys_getgroups(void) {
     int size;
     uint64 list_addr;

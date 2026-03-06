@@ -461,6 +461,370 @@ add_custom_command(
 )
 add_custom_target(kqueue_compat DEPENDS ${KQUEUE_COMPAT_OBJ})
 
+# ==============================================================================
+# OpenSSL 3.0 — Cryptography library (static, built against musl)
+# ==============================================================================
+set(OPENSSL_SRC_DIR "${CMAKE_SOURCE_DIR}/user/openssl")
+set(OPENSSL_BUILD_DIR "${CMAKE_BINARY_DIR}/openssl/build-xv6")
+set(OPENSSL_LIBCRYPTO_A "${OPENSSL_BUILD_DIR}/libcrypto.a")
+set(OPENSSL_LIBSSL_A "${OPENSSL_BUILD_DIR}/libssl.a")
+set(OPENSSL_INCLUDE_DIR "${OPENSSL_BUILD_DIR}/include")
+set(OPENSSL_INSTALL_DIR "${CMAKE_BINARY_DIR}/openssl/install")
+
+# OpenSSL target and cross-compile prefix (architecture-dependent)
+# OpenSSL and OpenSSH require the xv6 musl toolchain (not the bare-metal one).
+# We find it explicitly, matching the CPython approach.
+if(ARCH STREQUAL "x86_64")
+    set(OPENSSL_TARGET "linux-x86_64")
+    find_program(OPENSSL_GCC_PROG x86_64-xv6-linux-musl-gcc
+        PATHS ${CMAKE_SOURCE_DIR}/toolchain/x86_64/phase2/bin
+              ${CMAKE_SOURCE_DIR}/toolchain/x86_64/bin
+        NO_DEFAULT_PATH)
+    if(NOT OPENSSL_GCC_PROG)
+        find_program(OPENSSL_GCC_PROG x86_64-xv6-linux-musl-gcc)
+    endif()
+else()
+    set(OPENSSL_TARGET "linux64-riscv64")
+    find_program(OPENSSL_GCC_PROG riscv64-xv6-linux-musl-gcc
+        PATHS ${CMAKE_SOURCE_DIR}/toolchain/riscv64/phase2/bin
+              ${CMAKE_SOURCE_DIR}/toolchain/riscv64/bin
+        NO_DEFAULT_PATH)
+    if(NOT OPENSSL_GCC_PROG)
+        find_program(OPENSSL_GCC_PROG riscv64-xv6-linux-musl-gcc)
+    endif()
+endif()
+if(OPENSSL_GCC_PROG)
+    get_filename_component(_openssl_tooldir ${OPENSSL_GCC_PROG} DIRECTORY)
+    string(REGEX REPLACE "gcc$" "" OPENSSL_CROSS_PREFIX "${OPENSSL_GCC_PROG}")
+    set(OPENSSL_CC "${OPENSSL_GCC_PROG}")
+    set(OPENSSL_AR "${OPENSSL_CROSS_PREFIX}ar")
+    set(OPENSSL_RANLIB "${OPENSSL_CROSS_PREFIX}ranlib")
+    message(STATUS "OpenSSL/OpenSSH cross-compiler: ${OPENSSL_CC}")
+else()
+    # Fall back to CMAKE_C_COMPILER if it happens to be the musl toolchain
+    string(REGEX REPLACE "gcc$" "" OPENSSL_CROSS_PREFIX "${CMAKE_C_COMPILER}")
+    set(OPENSSL_CC "${CMAKE_C_COMPILER}")
+    set(OPENSSL_AR "${CMAKE_AR}")
+    set(OPENSSL_RANLIB "${CMAKE_RANLIB}")
+    message(STATUS "OpenSSL/OpenSSH cross-compiler (fallback): ${OPENSSL_CC}")
+endif()
+
+if(EXISTS "${OPENSSL_SRC_DIR}/Configure")
+    # Configure OpenSSL with static-only, no-asm for safe cross-compilation
+    add_custom_command(
+        OUTPUT ${OPENSSL_BUILD_DIR}/Makefile
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${OPENSSL_BUILD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${OPENSSL_BUILD_DIR}
+                env
+                CROSS_COMPILE=${OPENSSL_CROSS_PREFIX}
+                perl ${OPENSSL_SRC_DIR}/Configure
+                    ${OPENSSL_TARGET}
+                    --cross-compile-prefix=${OPENSSL_CROSS_PREFIX}
+                    --prefix=/
+                    --openssldir=/etc/ssl
+                    --libdir=lib
+                    no-shared
+                    no-dso
+                    no-engine
+                    no-async
+                    no-threads
+                    no-asm
+                    no-tests
+                    no-ui-console
+                    no-afalgeng
+                    no-ktls
+                    no-devcryptoeng
+                    -static
+                    -DOPENSSL_NO_SECURE_MEMORY
+                    -DOPENSSL_RAND_SEED_GETRANDOM
+                    -O2
+        DEPENDS musl_sysroot ${OPENSSL_SRC_DIR}/Configure
+        COMMENT "Configuring OpenSSL 3.0 cross build (${OPENSSL_TARGET}, static)"
+    )
+
+    add_custom_target(openssl_configure DEPENDS ${OPENSSL_BUILD_DIR}/Makefile)
+
+    # Build OpenSSL libraries (libcrypto.a + libssl.a)
+    add_custom_command(
+        OUTPUT ${OPENSSL_LIBCRYPTO_A} ${OPENSSL_LIBSSL_A}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${OPENSSL_BUILD_DIR}
+                make -j16 build_libs
+        DEPENDS openssl_configure
+        COMMENT "Building OpenSSL static libraries (libcrypto.a, libssl.a)"
+    )
+
+    # Install OpenSSL headers and libs to a staging area
+    add_custom_command(
+        OUTPUT ${OPENSSL_INSTALL_DIR}/lib/libcrypto.a
+        COMMAND ${CMAKE_COMMAND} -E chdir ${OPENSSL_BUILD_DIR}
+                make install_dev DESTDIR=${OPENSSL_INSTALL_DIR}
+        # Also install into the main sysroot for other consumers
+        COMMAND ${CMAKE_COMMAND} -E chdir ${OPENSSL_BUILD_DIR}
+                make install_dev DESTDIR=${MUSL_SYSROOT}
+        DEPENDS ${OPENSSL_LIBCRYPTO_A} ${OPENSSL_LIBSSL_A}
+        COMMENT "Installing OpenSSL headers and libraries"
+    )
+
+    add_custom_target(openssl_build DEPENDS ${OPENSSL_INSTALL_DIR}/lib/libcrypto.a)
+
+    # Optionally build the openssl CLI tool
+    set(OPENSSL_CLI_BIN "${OPENSSL_BUILD_DIR}/apps/openssl")
+    add_custom_command(
+        OUTPUT ${OPENSSL_CLI_BIN}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${OPENSSL_BUILD_DIR}
+                make -j16 build_programs
+        DEPENDS ${OPENSSL_LIBCRYPTO_A} ${OPENSSL_LIBSSL_A}
+        COMMENT "Building OpenSSL CLI tool"
+    )
+    add_custom_target(openssl_cli DEPENDS ${OPENSSL_CLI_BIN})
+else()
+    message(STATUS "Skipping OpenSSL build (missing submodule at ${OPENSSL_SRC_DIR})")
+endif()
+
+# ==============================================================================
+# OpenSSH 9.9 — SSH server and client (static, built against musl + OpenSSL)
+# ==============================================================================
+set(OPENSSH_SRC_DIR "${CMAKE_SOURCE_DIR}/user/openssh")
+set(OPENSSH_BUILD_DIR "${CMAKE_BINARY_DIR}/openssh/build-xv6")
+set(OPENSSH_SSHD_BIN "${OPENSSH_BUILD_DIR}/sshd")
+set(OPENSSH_SSH_BIN "${OPENSSH_BUILD_DIR}/ssh")
+set(OPENSSH_KEYGEN_BIN "${OPENSSH_BUILD_DIR}/ssh-keygen")
+set(OPENSSH_KEYSCAN_BIN "${OPENSSH_BUILD_DIR}/ssh-keyscan")
+
+if(ARCH STREQUAL "x86_64")
+    set(OPENSSH_HOST_TRIPLE "x86_64-xv6-linux-musl")
+else()
+    set(OPENSSH_HOST_TRIPLE "riscv64-xv6-linux-musl")
+endif()
+
+if(EXISTS "${OPENSSH_SRC_DIR}/configure" AND EXISTS "${OPENSSL_SRC_DIR}/Configure")
+    # Configure OpenSSH for cross-compilation against musl + OpenSSL
+    add_custom_command(
+        OUTPUT ${OPENSSH_BUILD_DIR}/Makefile
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${OPENSSH_BUILD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${OPENSSH_BUILD_DIR}
+                env
+                CC=${OPENSSL_CC}
+                AR=${OPENSSL_AR}
+                RANLIB=${OPENSSL_RANLIB}
+                STRIP=${OPENSSL_CROSS_PREFIX}strip
+                CFLAGS=-O2\ -D_GNU_SOURCE\ -DHAVE_ATTRIBUTE__SENTINEL__=1
+                LDFLAGS=-static\ -L${OPENSSL_INSTALL_DIR}/lib
+                LIBS=-lcrypto
+                ${OPENSSH_SRC_DIR}/configure
+                    --host=${OPENSSH_HOST_TRIPLE}
+                    --build=x86_64-pc-linux-gnu
+                    --prefix=/
+                    --sbindir=/bin
+                    --libexecdir=/libexec
+                    --sysconfdir=/etc/ssh
+                    --with-privsep-path=/var/empty
+                    --with-privsep-user=sshd
+                    --with-ssl-dir=${OPENSSL_INSTALL_DIR}
+                    --without-pam
+                    --without-selinux
+                    --without-libedit
+                    --without-zlib
+                    --without-openssl-header-check
+                    --disable-strip
+                    --disable-utmp
+                    --disable-utmpx
+                    --disable-wtmp
+                    --disable-wtmpx
+                    --disable-lastlog
+                    --disable-pkcs11
+                    --disable-security-key
+                    ac_cv_func_arc4random=no
+                    ac_cv_func_arc4random_buf=no
+                    ac_cv_func_arc4random_stir=no
+                    ac_cv_func_arc4random_uniform=no
+                    ac_cv_func_closefrom=no
+                    ac_cv_func_endgrent=yes
+                    ac_cv_func_err=yes
+                    ac_cv_func_errx=yes
+                    ac_cv_func_explicit_bzero=yes
+                    ac_cv_func_fchmod=yes
+                    ac_cv_func_fchown=yes
+                    ac_cv_func_freeaddrinfo=yes
+                    ac_cv_func_fstatfs=yes
+                    ac_cv_func_futimes=yes
+                    ac_cv_func_getaddrinfo=yes
+                    ac_cv_func_getcwd=yes
+                    ac_cv_func_getgrouplist=yes
+                    ac_cv_func_getgrset=no
+                    ac_cv_func_getlastlogxbyname=no
+                    ac_cv_func_getnameinfo=yes
+                    ac_cv_func_getopt=yes
+                    ac_cv_func_getpeereid=no
+                    ac_cv_func_getpeerucred=no
+                    ac_cv_func_getrlimit=yes
+                    ac_cv_func_glob=yes
+                    ac_cv_func_group_from_gid=no
+                    ac_cv_func_inet_aton=yes
+                    ac_cv_func_inet_ntoa=yes
+                    ac_cv_func_inet_ntop=yes
+                    ac_cv_func_login_getcapbool=no
+                    ac_cv_func_mblen=yes
+                    ac_cv_func_memmove=yes
+                    ac_cv_func_mkdtemp=yes
+                    ac_cv_func_ngetaddrinfo=no
+                    ac_cv_func_openpty=yes
+                    ac_cv_func_poll=yes
+                    ac_cv_func_prctl=yes
+                    ac_cv_func_pselect=yes
+                    ac_cv_func_readpassphrase=no
+                    ac_cv_func_realpath=yes
+                    ac_cv_func_recvmsg=yes
+                    ac_cv_func_rresvport_af=no
+                    ac_cv_func_sendmsg=yes
+                    ac_cv_func_setenv=yes
+                    ac_cv_func_setgroupent=no
+                    ac_cv_func_setgroups=yes
+                    ac_cv_func_setlinebuf=yes
+                    ac_cv_func_setlogin=no
+                    ac_cv_func_setpassent=no
+                    ac_cv_func_setpcred=no
+                    ac_cv_func_setproctitle=no
+                    ac_cv_func_setregid=yes
+                    ac_cv_func_setresgid=yes
+                    ac_cv_func_setresuid=yes
+                    ac_cv_func_setreuid=yes
+                    ac_cv_func_setsid=yes
+                    ac_cv_func_sigaction=yes
+                    ac_cv_func_sigvec=no
+                    ac_cv_func_snprintf=yes
+                    ac_cv_func_socketpair=yes
+                    ac_cv_func_statfs=yes
+                    ac_cv_func_statvfs=yes
+                    ac_cv_func_fstatvfs=yes
+                    ac_cv_func_strftime=yes
+                    ac_cv_func_strlcat=yes
+                    ac_cv_func_strlcpy=yes
+                    ac_cv_func_strptime=yes
+                    ac_cv_func_strsep=yes
+                    ac_cv_func_strtoll=yes
+                    ac_cv_func_strtonum=no
+                    ac_cv_func_strtoul=yes
+                    ac_cv_func_swap32=no
+                    ac_cv_func_sysconf=yes
+                    ac_cv_func_tcgetpgrp=yes
+                    ac_cv_func_truncate=yes
+                    ac_cv_func_unsetenv=yes
+                    ac_cv_func_updwtmpx=no
+                    ac_cv_func_user_from_uid=no
+                    ac_cv_func_usleep=yes
+                    ac_cv_func_vasprintf=yes
+                    ac_cv_func_vsnprintf=yes
+                    ac_cv_func_waitpid=yes
+                    ac_cv_func_warn=yes
+                    ac_cv_have_control_in_msghdr=yes
+                    ac_cv_have_broken_snprintf=no
+                    ac_cv_header_endian_h=yes
+                    ac_cv_header_features_h=yes
+                    ac_cv_header_floatingpoint_h=no
+                    ac_cv_header_ifaddrs_h=no
+                    ac_cv_header_lastlog_h=no
+                    ac_cv_header_linux_if_tun_h=no
+                    ac_cv_header_login_h=no
+                    ac_cv_header_maillock_h=no
+                    ac_cv_header_ndir_h=no
+                    ac_cv_header_net_if_tun_h=no
+                    ac_cv_header_poll_h=yes
+                    ac_cv_header_pty_h=yes
+                    ac_cv_header_readpassphrase_h=no
+                    ac_cv_header_rpc_types_h=no
+                    ac_cv_header_security_pam_appl_h=no
+                    ac_cv_header_shadow_h=yes
+                    ac_cv_header_sys_dir_h=no
+                    ac_cv_header_sys_mount_h=no
+                    ac_cv_header_sys_ndir_h=no
+                    ac_cv_header_sys_poll_h=yes
+                    ac_cv_header_sys_ptms_h=no
+                    ac_cv_header_sys_select_h=yes
+                    ac_cv_header_sys_statvfs_h=yes
+                    ac_cv_header_sys_stropts_h=no
+                    ac_cv_header_sys_sysmacros_h=yes
+                    ac_cv_header_sys_time_h=yes
+                    ac_cv_header_sys_un_h=yes
+                    ac_cv_header_util_h=no
+                    ac_cv_header_utmp_h=yes
+                    ac_cv_header_utmpx_h=no
+                    ac_cv_header_vis_h=no
+                    ac_cv_lib_crypt_crypt=yes
+                    ac_cv_search_crypt=none\ required
+                    ac_cv_search_dlopen=no
+                    ac_cv_sizeof_short=2
+                    ac_cv_sizeof_int=4
+                    ac_cv_sizeof_long=8
+                    ac_cv_sizeof_long_long=8
+        DEPENDS ${OPENSSH_SRC_DIR}/configure openssl_build
+        COMMENT "Configuring OpenSSH cross build (${OPENSSH_HOST_TRIPLE}, static, musl + OpenSSL)"
+    )
+
+    add_custom_target(openssh_configure DEPENDS ${OPENSSH_BUILD_DIR}/Makefile)
+
+    # Build OpenSSH programs (sshd, ssh, ssh-keygen, ssh-keyscan)
+    add_custom_command(
+        OUTPUT ${OPENSSH_SSHD_BIN} ${OPENSSH_SSH_BIN} ${OPENSSH_KEYGEN_BIN}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${OPENSSH_BUILD_DIR}
+                make -j16
+        DEPENDS openssh_configure
+        COMMENT "Building OpenSSH (sshd, ssh, ssh-keygen, ssh-keyscan)"
+    )
+
+    add_custom_target(openssh_build DEPENDS ${OPENSSH_SSHD_BIN})
+    add_dependencies(user_programs openssh_build)
+
+    # Install OpenSSH binaries to sysroot
+    set(OPENSSH_INSTALL_BINS sshd ssh ssh-keygen ssh-keyscan scp sftp)
+    foreach(PROG ${OPENSSH_INSTALL_BINS})
+        set(SRC "${OPENSSH_BUILD_DIR}/${PROG}")
+        set(DST "${MUSL_SYSROOT}/bin/${PROG}")
+        add_custom_command(
+            OUTPUT ${DST}
+            COMMAND ${CMAKE_COMMAND} -E make_directory ${MUSL_SYSROOT}/bin
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SRC} ${DST}
+            DEPENDS ${OPENSSH_SSHD_BIN}
+            COMMENT "sysroot: ${DST}"
+        )
+        list(APPEND OPENSSH_SYSROOT_TARGETS ${DST})
+    endforeach()
+
+    # Install sshd-session to /libexec/ (OpenSSH 9.8+ splits sshd into listener + session handler)
+    set(SSHD_SESSION_SRC "${OPENSSH_BUILD_DIR}/sshd-session")
+    set(SSHD_SESSION_DST "${MUSL_SYSROOT}/libexec/sshd-session")
+    add_custom_command(
+        OUTPUT ${SSHD_SESSION_DST}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${MUSL_SYSROOT}/libexec
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SSHD_SESSION_SRC} ${SSHD_SESSION_DST}
+        DEPENDS ${OPENSSH_SSHD_BIN}
+        COMMENT "sysroot: /libexec/sshd-session"
+    )
+    list(APPEND OPENSSH_SYSROOT_TARGETS ${SSHD_SESSION_DST})
+
+    add_custom_target(openssh_sysroot DEPENDS ${OPENSSH_SYSROOT_TARGETS})
+    add_dependencies(openssh_sysroot openssh_build)
+
+    # Install sshd_config to sysroot
+    add_custom_command(
+        OUTPUT ${MUSL_SYSROOT}/etc/ssh/sshd_config
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${MUSL_SYSROOT}/etc/ssh
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${OPENSSH_BUILD_DIR}/sshd_config
+                ${MUSL_SYSROOT}/etc/ssh/sshd_config
+        DEPENDS openssh_configure
+        COMMENT "sysroot: etc/ssh/sshd_config"
+    )
+    add_custom_target(openssh_config DEPENDS ${MUSL_SYSROOT}/etc/ssh/sshd_config)
+else()
+    if(NOT EXISTS "${OPENSSL_SRC_DIR}/Configure")
+        message(STATUS "Skipping OpenSSH build (missing OpenSSL submodule at ${OPENSSL_SRC_DIR})")
+    endif()
+    if(NOT EXISTS "${OPENSSH_SRC_DIR}/configure")
+        message(STATUS "Skipping OpenSSH build (missing OpenSSH submodule at ${OPENSSH_SRC_DIR})")
+    endif()
+endif()
+
 # CPython — Python 3.12 interpreter (built against musl + ncurses + readline)
 # ==============================================================================
 set(CPYTHON_SRC_DIR "${CMAKE_SOURCE_DIR}/user/v6-cpython" CACHE PATH "CPython source directory")
@@ -827,6 +1191,21 @@ if(TARGET cpython_build)
     set(SYSROOT_TARGETS ${SYSROOT_TARGETS} "${SYSROOT_BIN_DIR}/python")
 endif()
 
+# OpenSSH binaries (statically linked against musl + OpenSSL)
+if(TARGET openssh_build)
+    foreach(PROG sshd ssh ssh-keygen ssh-keyscan scp sftp)
+        sysroot_install("${OPENSSH_BUILD_DIR}/${PROG}" "${SYSROOT_BIN_DIR}/${PROG}")
+    endforeach()
+    # sshd-session goes to /libexec/ (OpenSSH 9.8+ listener/session split)
+    set(SYSROOT_LIBEXEC_DIR "${MUSL_SYSROOT}/libexec")
+    sysroot_install("${OPENSSH_BUILD_DIR}/sshd-session" "${SYSROOT_LIBEXEC_DIR}/sshd-session")
+endif()
+
+# OpenSSL CLI tool (optional — useful for key generation and diagnostics)
+if(TARGET openssl_cli)
+    sysroot_install("${OPENSSL_CLI_BIN}" "${SYSROOT_BIN_DIR}/openssl")
+endif()
+
 # Aggregate target
 if(SYSROOT_TARGETS)
     # Write a stamp file whenever sysroot is (re)populated so that
@@ -847,6 +1226,12 @@ if(SYSROOT_TARGETS)
     endif()
     if(TARGET cpython_build)
         add_dependencies(sysroot_populate cpython_build)
+    endif()
+    if(TARGET openssh_build)
+        add_dependencies(sysroot_populate openssh_build)
+    endif()
+    if(TARGET openssl_cli)
+        add_dependencies(sysroot_populate openssl_cli)
     endif()
 endif()
 
