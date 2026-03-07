@@ -223,8 +223,19 @@ if [ -f "$STAGING/lib/libc.so" ]; then
     done
 fi
 
+for PYSO in "$STAGING"/lib/libpython3*.so.1.0; do
+    if [ -f "$PYSO" ]; then
+        BASENAME=$(basename "$PYSO" .1.0)
+        ln -sf "$(basename "$PYSO")" "$STAGING/lib/$BASENAME"
+    fi
+done
+
 # Copy Python standard library
 mkdir -p "$STAGING/usr/local/lib/python3.12/lib-dynload"
+if [ -d "$SYSROOT_DIR/lib/python3.12/lib-dynload" ]; then
+    cp -P "$SYSROOT_DIR"/lib/python3.12/lib-dynload/*.so \
+        "$STAGING/usr/local/lib/python3.12/lib-dynload/" 2>/dev/null || true
+fi
 PYLIB_SRC="${CPYTHON_SRC}/Lib"
 if [ -d "$PYLIB_SRC" ]; then
     # Directories to exclude (saves ~35 MB)

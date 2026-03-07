@@ -237,6 +237,8 @@ class AsmOffsetsGenerator:
             compile_cmd = [self.compiler, '-S']
             for inc_dir in self.includes:
                 compile_cmd.extend(['-I', inc_dir])
+            for define in self.defines:
+                compile_cmd.extend(['-D', define])
             compile_cmd.extend(['-o', str(asm_file), str(src_file)])
             
             self.log(f"Compiling: {' '.join(compile_cmd)}")

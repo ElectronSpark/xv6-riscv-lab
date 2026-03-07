@@ -27,6 +27,7 @@ set(MUSL_RCRT1_O "${MUSL_SYSROOT}/lib/rcrt1.o")
 set(MUSL_SCRT1_O "${MUSL_SYSROOT}/lib/Scrt1.o")
 set(MUSL_INCLUDE_DIR "${MUSL_SYSROOT}/include")
 set(MUSL_LINKER_SCRIPT "${CMAKE_SOURCE_DIR}/user/musl.ld")
+set(MUSL_DYNAMIC_LINKER_PATH "/lib/ld-musl-riscv64.so.1")
 
 # Get GCC include dir for stdarg.h etc
 execute_process(
@@ -47,55 +48,31 @@ message(STATUS "musl libc: GCC includes = ${GCC_INCLUDE_DIR_MUSL}")
 message(STATUS "musl libc: libgcc = ${LIBGCC_PATH}")
 
 # ==============================================================================
-# Build musl from source — or copy from xv6 musl toolchain if available
+# Build musl from source using the xv6 overlay.
+#
+# Rebuilding into the workspace sysroot keeps the runtime loader and headers in
+# sync with local ABI fixes instead of relying on a prebuilt toolchain sysroot.
 # ==============================================================================
-if(XV6_MUSL_TOOLCHAIN)
-    # The xv6 musl toolchain already has musl built into its sysroot.
-    # Instead of rebuilding from source, copy the libraries and headers
-    # into the build sysroot (which doubles as the target rootfs staging area).
-    execute_process(
-        COMMAND ${CMAKE_C_COMPILER} -print-sysroot
-        OUTPUT_VARIABLE XV6_TOOLCHAIN_SYSROOT
-        OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    message(STATUS "musl libc: using pre-built musl from toolchain sysroot: ${XV6_TOOLCHAIN_SYSROOT}")
+set(MUSL_ARCH_DEPS
+    ${MUSL_XV6_DIR}/arch/riscv64/clone.s
+    ${MUSL_XV6_DIR}/arch/riscv64/bits/syscall.h.in
+    ${MUSL_XV6_DIR}/arch/riscv64/bits/stat.h
+    ${MUSL_XV6_DIR}/arch/riscv64/kstat.h
+)
+set(MUSL_BUILD_COMMENT "Building musl libc for xv6 RISC-V (this may take a few minutes)...")
 
-    add_custom_command(
-        OUTPUT ${MUSL_LIBC_A} ${MUSL_CRT1_O} ${MUSL_CRTI_O} ${MUSL_CRTN_O}
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${MUSL_SYSROOT}/lib
-        COMMAND ${CMAKE_COMMAND} -E make_directory ${MUSL_SYSROOT}/include
-        # Copy libraries and CRT objects
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                ${XV6_TOOLCHAIN_SYSROOT}/lib/libc.a
-                ${XV6_TOOLCHAIN_SYSROOT}/lib/libc.so
-                ${XV6_TOOLCHAIN_SYSROOT}/lib/crt1.o
-                ${XV6_TOOLCHAIN_SYSROOT}/lib/crti.o
-                ${XV6_TOOLCHAIN_SYSROOT}/lib/crtn.o
-                ${XV6_TOOLCHAIN_SYSROOT}/lib/rcrt1.o
-                ${XV6_TOOLCHAIN_SYSROOT}/lib/Scrt1.o
-                ${MUSL_SYSROOT}/lib/
-        # Copy dynamic linker symlink
-        COMMAND ${CMAKE_COMMAND} -E create_symlink libc.so ${MUSL_SYSROOT}/lib/ld-musl-riscv64.so.1
-        # Copy headers
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${XV6_TOOLCHAIN_SYSROOT}/include ${MUSL_SYSROOT}/include
-        COMMENT "Copying pre-built musl from xv6 toolchain sysroot"
-    )
-else()
-    set(MUSL_ARCH_DEPS
-        ${MUSL_XV6_DIR}/arch/riscv64/clone.s
-        ${MUSL_XV6_DIR}/arch/riscv64/bits/syscall.h.in
-    )
-    set(MUSL_BUILD_COMMENT "Building musl libc for xv6 RISC-V (this may take a few minutes)...")
-
-    add_custom_command(
-        OUTPUT ${MUSL_LIBC_A} ${MUSL_CRT1_O} ${MUSL_CRTI_O} ${MUSL_CRTN_O}
-        COMMAND bash ${MUSL_BUILD_SCRIPT} --prefix=${MUSL_SYSROOT} --build-dir=${MUSL_BUILD_DIR}
-        DEPENDS
-            ${MUSL_BUILD_SCRIPT}
-            ${MUSL_ARCH_DEPS}
-        COMMENT "${MUSL_BUILD_COMMENT}"
-    )
-endif()
+add_custom_command(
+    OUTPUT ${MUSL_LIBC_A} ${MUSL_CRT1_O} ${MUSL_CRTI_O} ${MUSL_CRTN_O}
+    COMMAND ${CMAKE_COMMAND} -E env
+            CC=${CMAKE_C_COMPILER}
+            AR=${CMAKE_AR}
+            RANLIB=${CMAKE_RANLIB}
+            bash ${MUSL_BUILD_SCRIPT} --prefix=${MUSL_SYSROOT} --build-dir=${MUSL_BUILD_DIR}
+    DEPENDS
+        ${MUSL_BUILD_SCRIPT}
+        ${MUSL_ARCH_DEPS}
+    COMMENT "${MUSL_BUILD_COMMENT}"
+)
 
 add_custom_target(musl_sysroot DEPENDS ${MUSL_LIBC_A} ${MUSL_CRT1_O})
 
@@ -197,7 +174,7 @@ endfunction()
 # add_musl_dynamic_program(name source_file)
 #
 # Like add_musl_program() but links DYNAMICALLY against musl libc.so.
-# The resulting executable uses /lib/ld-musl-riscv64.so.1 as interpreter.
+# The resulting executable uses ${MUSL_DYNAMIC_LINKER_PATH} as interpreter.
 # ==============================================================================
 function(add_musl_dynamic_program PROGRAM_NAME SOURCE_FILE)
     set(MUSL_ARCH "riscv64")
@@ -227,7 +204,7 @@ function(add_musl_dynamic_program PROGRAM_NAME SOURCE_FILE)
                 -no-pie -nostartfiles -nostdlib
                 ${MUSL_CRT1_O}
                 ${MUSL_CRTI_O}
-                -Wl,--dynamic-linker=/lib/ld-musl-${MUSL_ARCH}.so.1
+                -Wl,--dynamic-linker=${MUSL_DYNAMIC_LINKER_PATH}
                 -Wl,-z,max-page-size=0x1000
                 -Wl,-z,common-page-size=0x1000
                 -Wl,--build-id=none

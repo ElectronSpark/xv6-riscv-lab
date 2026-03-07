@@ -5,33 +5,54 @@
 #include "types.h"
 
 /*
- * POSIX-style stat structure — musl riscv64 ABI compatible
+ * Linux-compatible stat structure.
  *
- * This layout MUST match musl's arch/riscv64/bits/stat.h exactly so that
- * stat/fstat/fstatat syscalls can copyout this struct directly to userspace.
- *
- * Fields the kernel does not populate are zeroed via memset() before filling.
+ * The binary layout must match what musl expects for the target architecture
+ * so stat/fstat/fstatat buffers can be copied out directly to userspace.
  */
 struct stat {
-    uint64 st_dev;           // device ID
-    uint64 st_ino;           // inode number
-    uint32 st_mode;          // permission and type bits (S_IS* macros)
-    uint32 st_nlink;         // number of hard links
-    uint32 st_uid;           // owner user ID
-    uint32 st_gid;           // owner group ID
-    uint64 st_rdev;          // device ID (for special files)
-    uint64 __pad;            // padding (matches musl layout)
-    int64  st_size;          // size in bytes
-    int32  st_blksize;       // preferred I/O block size
-    int32  __pad2;           // padding
-    int64  st_blocks;        // number of 512-byte blocks allocated
-    int64  st_atime_sec;     // last access time (seconds)
-    int64  st_atime_nsec;    // last access time (nanoseconds)
-    int64  st_mtime_sec;     // last modification time (seconds)
-    int64  st_mtime_nsec;    // last modification time (nanoseconds)
-    int64  st_ctime_sec;     // last status change time (seconds)
-    int64  st_ctime_nsec;    // last status change time (nanoseconds)
-    uint32 __unused[2];      // reserved
+#if defined(CONFIG_ARCH_X86_64)
+    uint64 st_dev;
+    uint64 st_ino;
+    uint64 st_nlink;
+    uint32 st_mode;
+    uint32 st_uid;
+    uint32 st_gid;
+    uint32 __pad0;
+    uint64 st_rdev;
+    int64  st_size;
+    int64  st_blksize;
+    int64  st_blocks;
+    int64  st_atime_sec;
+    int64  st_atime_nsec;
+    int64  st_mtime_sec;
+    int64  st_mtime_nsec;
+    int64  st_ctime_sec;
+    int64  st_ctime_nsec;
+    int64  __unused[3];
+#elif defined(CONFIG_ARCH_RISCV)
+    uint64 st_dev;
+    uint64 st_ino;
+    uint32 st_mode;
+    uint32 st_nlink;
+    uint32 st_uid;
+    uint32 st_gid;
+    uint64 st_rdev;
+    uint64 __pad;
+    int64  st_size;
+    int32  st_blksize;
+    int32  __pad2;
+    int64  st_blocks;
+    int64  st_atime_sec;
+    int64  st_atime_nsec;
+    int64  st_mtime_sec;
+    int64  st_mtime_nsec;
+    int64  st_ctime_sec;
+    int64  st_ctime_nsec;
+    uint32 __unused[2];
+#else
+#error "Unsupported architecture for struct stat"
+#endif
 };
 
 #ifndef S_IRUSR

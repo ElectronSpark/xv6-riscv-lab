@@ -1362,11 +1362,11 @@ static void ls_print_entry(char *path, struct stat *st) {
     char ind = name_indicator(ST_MODE_P(st));
 
     if (ind)
-         printf("%c%s %3u %7lu %s%c\n", mode_type_char(ST_MODE_P(st)), perms,
-             ST_NLINK_P(st), ST_SIZE_P(st), name, ind);
+         printf("%c%s %3lu %7ld %s%c\n", mode_type_char(ST_MODE_P(st)), perms,
+             (unsigned long)ST_NLINK_P(st), (long)ST_SIZE_P(st), name, ind);
     else
-         printf("%c%s %3u %7lu %s\n", mode_type_char(ST_MODE_P(st)), perms,
-             ST_NLINK_P(st), ST_SIZE_P(st), name);
+         printf("%c%s %3lu %7ld %s\n", mode_type_char(ST_MODE_P(st)), perms,
+             (unsigned long)ST_NLINK_P(st), (long)ST_SIZE_P(st), name);
 }
 
 static void builtin_ls(char *path) {

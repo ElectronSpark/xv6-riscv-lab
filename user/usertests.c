@@ -1047,13 +1047,21 @@ void reparent2(char *s) {
 }
 
 // allocate all mem, free it, and allocate again
+// Due to the support for large memory size, this test
+// is edited to not exhaust all the memory.
 void mem(char *s) {
     void *m1, *m2;
     int pid;
+    size_t count1 = 0;
 
     if ((pid = fork()) == 0) {
         m1 = 0;
         while ((m2 = malloc(10001)) != 0) {
+            count1 += 10001;
+            if (count1 > 1024 * 1024 * 100) {
+                m2 = 0;
+                break;
+            }
             *(char **)m2 = m1;
             m1 = m2;
         }

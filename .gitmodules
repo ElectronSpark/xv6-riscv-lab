@@ -28,3 +28,6 @@
 [submodule "user/openssh"]
 	path = user/openssh
 	url = https://github.com/openssh/openssh-portable.git
+[submodule "user/libffi"]
+	path = user/libffi
+	url = https://github.com/ElectronSpark/v6-libffi.git

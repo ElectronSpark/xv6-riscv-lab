@@ -139,7 +139,9 @@
 /* ---- Mappings for musl internal use ---- */
 /* musl uses these names internally; map to xv6 equivalents */
 #define SYS_sbrk            14
-#define SYS_mmap2           50   /* same as mmap on 64-bit */
+/* NOTE: Do NOT define SYS_mmap2 on 64-bit. musl's mmap.c divides the
+ * file offset by 4096 when SYS_mmap2 is defined, but xv6's sys_mmap
+ * expects a raw byte offset. */
 #define SYS_access          46
 #define SYS_rename          47
 

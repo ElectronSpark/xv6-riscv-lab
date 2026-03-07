@@ -58,24 +58,30 @@ BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/musl-build}"
 PREFIX="${PREFIX:-${SCRIPT_DIR}/sysroot}"
 MUSL_SRC="${BUILD_DIR}/musl-${MUSL_VERSION}"
 
-# Detect cross-compiler
-# Priority:
-#   1. riscv64-xv6-linux-musl- (xv6 custom toolchain — supports -shared)
-#   2. riscv64-linux-gnu-       (distro toolchain — supports -shared)
-#   3. riscv64-unknown-elf-     (bare-metal — may lack -shared support)
-if command -v riscv64-xv6-linux-musl-gcc &>/dev/null; then
-    CROSS_COMPILE="riscv64-xv6-linux-musl-"
+# Detect RISC-V compiler. Honor explicit CC/AR/RANLIB from the caller first.
+if [[ -n "${CC:-}" ]]; then
+    CC_CMD="${CC}"
+    AR_CMD="${AR:-${CC_CMD%gcc}ar}"
+    RANLIB_CMD="${RANLIB:-${CC_CMD%gcc}ranlib}"
+elif command -v riscv64-xv6-linux-musl-gcc &>/dev/null; then
+    CC_CMD="riscv64-xv6-linux-musl-gcc"
+    AR_CMD="riscv64-xv6-linux-musl-ar"
+    RANLIB_CMD="riscv64-xv6-linux-musl-ranlib"
 elif command -v riscv64-linux-gnu-gcc &>/dev/null; then
-    CROSS_COMPILE="riscv64-linux-gnu-"
+    CC_CMD="riscv64-linux-gnu-gcc"
+    AR_CMD="riscv64-linux-gnu-ar"
+    RANLIB_CMD="riscv64-linux-gnu-ranlib"
 elif command -v riscv64-unknown-elf-gcc &>/dev/null; then
-    CROSS_COMPILE="riscv64-unknown-elf-"
+    CC_CMD="riscv64-unknown-elf-gcc"
+    AR_CMD="riscv64-unknown-elf-ar"
+    RANLIB_CMD="riscv64-unknown-elf-ranlib"
 else
     echo "ERROR: No RISC-V cross compiler found."
     exit 1
 fi
 
 echo "=== Building musl libc for xv6 RISC-V ==="
-echo "Cross compiler: ${CROSS_COMPILE}gcc"
+echo "Compiler:       ${CC_CMD}"
 echo "Build dir:      ${BUILD_DIR}"
 echo "Install prefix: ${PREFIX}"
 echo ""
@@ -107,9 +113,9 @@ apply_xv6_overlay "riscv64" "${MUSL_SRC}" "${SCRIPT_DIR}/arch"
 echo "Configuring musl..."
 cd "${MUSL_SRC}"
 
-CC="${CROSS_COMPILE}gcc" \
-AR="${CROSS_COMPILE}ar" \
-RANLIB="${CROSS_COMPILE}ranlib" \
+CC="${CC_CMD}" \
+AR="${AR_CMD}" \
+RANLIB="${RANLIB_CMD}" \
 CFLAGS="-march=rv64gc -mabi=lp64d -mcmodel=medany -fPIC -O2 -fno-stack-protector" \
 ./configure \
     --target=riscv64 \

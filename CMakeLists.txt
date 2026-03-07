@@ -410,6 +410,7 @@ add_custom_command(
             ${SYSROOT_DIR}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS sysroot_populate
+            ${SYSROOT_DEP_FILES}
             ${SYSROOT_STAMP}
             ${MKEXT4_ROOTFS_SCRIPT}
             ${CMAKE_SOURCE_DIR}/README.md

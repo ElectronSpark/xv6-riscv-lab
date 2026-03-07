@@ -27,27 +27,34 @@ BUILD_DIR="${BUILD_DIR:-${SCRIPT_DIR}/musl-build-x86_64}"
 PREFIX="${PREFIX:-${SCRIPT_DIR}/sysroot}"
 MUSL_SRC="${BUILD_DIR}/musl-${MUSL_VERSION}"
 
-# Detect x86_64 cross-compiler
-# Priority:
-#   1. x86_64-xv6-linux-musl- (xv6 custom toolchain — supports -shared)
-#   2. x86_64-linux-gnu-       (distro toolchain — supports -shared)
-#   3. x86_64-elf-             (bare-metal)
-#   4. native gcc on x86_64 host
-if command -v x86_64-xv6-linux-musl-gcc &>/dev/null; then
-    CROSS_COMPILE="x86_64-xv6-linux-musl-"
+# Detect x86_64 compiler. Honor explicit CC/AR/RANLIB from the caller first.
+if [[ -n "${CC:-}" ]]; then
+    CC_CMD="${CC}"
+    AR_CMD="${AR:-${CC_CMD%gcc}ar}"
+    RANLIB_CMD="${RANLIB:-${CC_CMD%gcc}ranlib}"
+elif command -v x86_64-xv6-linux-musl-gcc &>/dev/null; then
+    CC_CMD="x86_64-xv6-linux-musl-gcc"
+    AR_CMD="x86_64-xv6-linux-musl-ar"
+    RANLIB_CMD="x86_64-xv6-linux-musl-ranlib"
 elif command -v x86_64-linux-gnu-gcc &>/dev/null; then
-    CROSS_COMPILE="x86_64-linux-gnu-"
+    CC_CMD="x86_64-linux-gnu-gcc"
+    AR_CMD="x86_64-linux-gnu-ar"
+    RANLIB_CMD="x86_64-linux-gnu-ranlib"
 elif command -v x86_64-elf-gcc &>/dev/null; then
-    CROSS_COMPILE="x86_64-elf-"
+    CC_CMD="x86_64-elf-gcc"
+    AR_CMD="x86_64-elf-ar"
+    RANLIB_CMD="x86_64-elf-ranlib"
 elif command -v gcc &>/dev/null && [[ "$(uname -m)" == "x86_64" ]]; then
-    CROSS_COMPILE=""
+    CC_CMD="gcc"
+    AR_CMD="ar"
+    RANLIB_CMD="ranlib"
 else
     echo "ERROR: No x86_64 compiler found."
     exit 1
 fi
 
 echo "=== Building musl libc for xv6 x86_64 ==="
-echo "Cross compiler: ${CROSS_COMPILE}gcc"
+echo "Compiler:       ${CC_CMD}"
 echo "Build dir:      ${BUILD_DIR}"
 echo "Install prefix: ${PREFIX}"
 echo ""
@@ -76,9 +83,9 @@ apply_xv6_overlay "x86_64" "${MUSL_SRC}" "${SCRIPT_DIR}/arch"
 echo "Configuring musl..."
 cd "${MUSL_SRC}"
 
-CC="${CROSS_COMPILE}gcc" \
-AR="${CROSS_COMPILE}ar" \
-RANLIB="${CROSS_COMPILE}ranlib" \
+CC="${CC_CMD}" \
+AR="${AR_CMD}" \
+RANLIB="${RANLIB_CMD}" \
 CFLAGS="-fPIC -O2 -fno-stack-protector -mno-red-zone" \
 ./configure \
     --target=x86_64 \

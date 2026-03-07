@@ -498,7 +498,7 @@ static int __vfs_inode_stat(struct vfs_inode *inode, struct stat *kst) {
     kst->st_uid = inode->uid;
     kst->st_gid = inode->gid;
     kst->st_size = inode->size;
-    kst->st_blksize = 1024;
+    kst->st_blksize = 4096;
     kst->st_blocks = (inode->size + 511) / 512;
     kst->st_atime_sec = inode->atime;
     kst->st_mtime_sec = inode->mtime;

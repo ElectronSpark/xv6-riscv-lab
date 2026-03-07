@@ -493,6 +493,7 @@ int vfs_filestat(struct vfs_file *file, struct stat *stat) {
         if (file->ops != NULL) {
             memset(stat, 0, sizeof(*stat));
             stat->st_mode = S_IFCHR | 0666;
+            stat->st_blksize = 4096;
             return 0;
         }
         return -EBADF;
@@ -513,7 +514,7 @@ int vfs_filestat(struct vfs_file *file, struct stat *stat) {
     stat->st_uid = inode->uid;
     stat->st_gid = inode->gid;
     stat->st_size = inode->size;
-    stat->st_blksize = 1024;
+    stat->st_blksize = 4096;
     stat->st_blocks = (inode->size + 511) / 512;
     stat->st_atime_sec = inode->atime;
     stat->st_mtime_sec = inode->mtime;

@@ -27,20 +27,8 @@ uint64 sys_mmap(void) {
     argint(4, &fd);
     argaddr(5, &offset);
 
-    if (length > (1UL << 30)) {
-        uint64 sepc = current->trapframe ? current->trapframe->trapframe.sepc : 0UL;
-        uint64 ra = current->trapframe ? current->trapframe->trapframe.ra : 0UL;
-        uint64 sp = current->trapframe ? current->trapframe->trapframe.sp : 0UL;
-        printf("sys_mmap: suspicious large request pid=%d len=0x%lx addr=0x%lx prot=%d flags=0x%x fd=%d off=0x%lx sepc=0x%lx ra=0x%lx sp=0x%lx\n",
-               current->pid, length, addr, prot, flags, fd, offset,
-               sepc, ra, sp);
-    }
-
     uint64 ret = vm_mmap(current->vm, addr, (size_t)length, prot, flags, fd, offset);
-    if (ret == (uint64)-1) {
-        printf("sys_mmap: FAIL pid=%d addr=0x%lx len=0x%lx prot=%d flags=0x%x fd=%d\n",
-               current->pid, addr, length, prot, flags, fd);
-    } else {
+    if ((int64)ret >= 0) {
         ACCT_INC(current->thread_group, mm_mmap_count);
     }
     return ret;
@@ -90,15 +78,6 @@ uint64 sys_mremap(void) {
 
     if (new_size == 0)
         return -EINVAL;
-
-    if (old_size > (1UL << 30) || new_size > (1UL << 30)) {
-        uint64 sepc = current->trapframe ? current->trapframe->trapframe.sepc : 0UL;
-        uint64 ra = current->trapframe ? current->trapframe->trapframe.ra : 0UL;
-        uint64 sp = current->trapframe ? current->trapframe->trapframe.sp : 0UL;
-        printf("sys_mremap: suspicious large request pid=%d old=0x%lx old_sz=0x%lx new_sz=0x%lx flags=0x%x new_addr=0x%lx sepc=0x%lx ra=0x%lx sp=0x%lx\n",
-               current->pid, old_addr, old_size, new_size, flags, new_addr,
-               sepc, ra, sp);
-    }
 
     return vm_mremap(current->vm, old_addr, (size_t)old_size,
                      (size_t)new_size, flags, new_addr);

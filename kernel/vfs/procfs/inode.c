@@ -460,6 +460,7 @@ static int procfs_getattr(struct vfs_inode *inode, struct stat *st) {
     st->st_nlink = inode->n_links;
     st->st_size  = inode->size;
     st->st_dev   = 0;
+    st->st_blksize = 4096;
     return 0;
 }
 

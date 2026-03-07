@@ -2128,32 +2128,32 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
     struct vfs_file *file = NULL;
 
     if (vm == NULL || length == 0)
-        return (uint64)-1;
+        return (uint64)-EINVAL;
     if (length > (vm->vm_top - vm->vm_bottom))
-        return (uint64)-1;
+        return (uint64)-ENOMEM;
     if (length > ((size_t)-1) - (PGSIZE - 1))
-        return (uint64)-1;
+        return (uint64)-EINVAL;
 
     if (!(flags & MAP_PRIVATE) && !(flags & MAP_SHARED))
-        return (uint64)-1;
+        return (uint64)-EINVAL;
     if ((flags & MAP_PRIVATE) && (flags & MAP_SHARED))
-        return (uint64)-1;
+        return (uint64)-EINVAL;
 
     if (fd != -1) {
         if (flags & MAP_ANONYMOUS)
-            return (uint64)-1;
+            return (uint64)-EINVAL;
         if (offset & (PGSIZE - 1))
-            return (uint64)-1;
+            return (uint64)-EINVAL;
         file = vfs_fdtable_get_file(current->fdtable, fd);
         if (file == NULL)
-            return (uint64)-1;
+            return (uint64)-EBADF;
         struct vfs_inode *inode = vfs_inode_deref(&file->inode);
         if (inode == NULL || !S_ISREG(inode->mode)) {
             vfs_fput(file);
-            return (uint64)-1;
+            return (uint64)-ENODEV;
         }
     } else if (!(flags & MAP_ANONYMOUS)) {
-        return (uint64)-1;
+        return (uint64)-EBADF;
     }
 
     length = PGROUNDUP(length);
@@ -2171,12 +2171,10 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
     if (addr == 0 || (flags & MAP_FIXED) == 0) {
         map_addr = vm_find_free_range(vm, length, addr);
         if (map_addr == 0) {
-            printf("vm_mmap: vm_find_free_range FAIL addr=0x%lx len=0x%lx\n",
-                   addr, length);
             vm_wunlock(vm);
             if (file != NULL)
                 vfs_fput(file);
-            return (uint64)-1;
+            return (uint64)-ENOMEM;
         }
     } else {
         map_addr = PGROUNDDOWN(addr);
@@ -2185,18 +2183,16 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
             vm_wunlock(vm);
             if (file != NULL)
                 vfs_fput(file);
-            return (uint64)-1;
+            return (uint64)-EINVAL;
         }
     }
 
     vma_t *vma = vma_alloc(vm, map_addr, length, vm_flags);
     if (vma == NULL) {
-        printf("vm_mmap: vma_alloc FAIL map_addr=0x%lx len=0x%lx flags=0x%lx\n",
-               map_addr, length, vm_flags);
         vm_wunlock(vm);
         if (file != NULL)
             vfs_fput(file);
-        return (uint64)-1;
+        return (uint64)-ENOMEM;
     }
 
     if (file != NULL) {
