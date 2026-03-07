@@ -8,6 +8,7 @@
 #include "lock/mutex_types.h"
 #include "lock/rwsem_types.h"
 #include "hlist_type.h"
+#include "proc/tq_type.h"
 #include "mm/pcache_types.h"
 #include "kobject.h"
 #include "vfs/stat.h"
@@ -283,6 +284,10 @@ struct vfs_inode {
         };
     };
     completion_t completion;
+    /* POSIX advisory byte-range locks (fcntl F_[GS]ETLK*) */
+    list_node_t file_locks;
+    spinlock_t file_lock;
+    tq_t file_lock_waiters;
     /* kqueue: list of knotes registered on this inode (EVFILT_VNODE) */
     list_node_t knote_list;
     spinlock_t knote_lock;

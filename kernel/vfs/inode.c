@@ -60,6 +60,10 @@ void __vfs_inode_init(struct vfs_inode *inode) {
     list_entry_init(&inode->orphan_entry);
     inode->orphan = 0;
     inode->ref_count = 1;
+    list_entry_init(&inode->file_locks);
+    spin_init(&inode->file_lock, "vfs_inode_flock");
+    tq_init(&inode->file_lock_waiters, "vfs_inode_flock_wait",
+            &inode->file_lock);
     spin_init(&inode->knote_lock, "vfs_inode_knote");
     list_entry_init(&inode->knote_list);
 }

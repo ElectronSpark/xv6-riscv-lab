@@ -15,6 +15,7 @@
 #include "proc/workqueue.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
+#include "vfs/file_lock.h"
 #include "vfs_private.h"
 #include "list.h"
 #include "hlist.h"
@@ -423,6 +424,7 @@ void vfs_init(void) {
     list_entry_init(&vfs_fs_types);
     mutex_init(&__mount_mutex, "vfs_mount_mutex");
     __vfs_fdtable_global_init();
+    __vfs_file_lock_global_init();
     int ret = slab_cache_init(&vfs_superblock_cache, "vfs_superblock_cache",
                               sizeof(struct vfs_superblock),
                               SLAB_FLAG_STATIC | SLAB_FLAG_DEBUG_BITMAP);

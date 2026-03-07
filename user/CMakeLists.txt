@@ -550,7 +550,7 @@ if(EXISTS "${OPENSSL_SRC_DIR}/Configure")
     add_custom_command(
         OUTPUT ${OPENSSL_LIBCRYPTO_A} ${OPENSSL_LIBSSL_A}
         COMMAND ${CMAKE_COMMAND} -E chdir ${OPENSSL_BUILD_DIR}
-                make -j16 build_libs
+                make -j1 build_libs
         DEPENDS openssl_configure
         COMMENT "Building OpenSSL static libraries (libcrypto.a, libssl.a)"
     )
@@ -574,7 +574,7 @@ if(EXISTS "${OPENSSL_SRC_DIR}/Configure")
     add_custom_command(
         OUTPUT ${OPENSSL_CLI_BIN}
         COMMAND ${CMAKE_COMMAND} -E chdir ${OPENSSL_BUILD_DIR}
-                make -j16 build_programs
+                make -j1 build_programs
         DEPENDS ${OPENSSL_LIBCRYPTO_A} ${OPENSSL_LIBSSL_A}
         COMMENT "Building OpenSSL CLI tool"
     )
@@ -827,6 +827,81 @@ else()
     endif()
 endif()
 
+# ==============================================================================
+# SQLite 3 — database engine + shell (static, installed into musl sysroot)
+# ==============================================================================
+set(SQLITE_SRC_DIR "${CMAKE_SOURCE_DIR}/user/sqlite")
+set(SQLITE_BUILD_DIR "${CMAKE_BINARY_DIR}/sqlite/build-xv6")
+set(SQLITE_PREFIX_DIR "${MUSL_SYSROOT}")
+set(SQLITE_BIN "${SQLITE_PREFIX_DIR}/bin/sqlite3")
+set(SQLITE_LIB_A "${SQLITE_PREFIX_DIR}/lib/libsqlite3.a")
+set(SQLITE_HEADER "${SQLITE_PREFIX_DIR}/include/sqlite3.h")
+set(SQLITE_SYSROOT_LIB "${MUSL_SYSROOT}/lib/libsqlite3.a")
+set(SQLITE_SYSROOT_HEADER "${MUSL_SYSROOT}/include/sqlite3.h")
+
+set(CPYTHON_SQLITE_DEPENDS "")
+set(CPYTHON_SQLITE_LIBS "")
+set(CPYTHON_SQLITE_CONFIGURE_OVERRIDES "")
+set(CPYTHON_SQLITE_SETUP_LOCAL_LINE "")
+
+if(EXISTS "${SQLITE_SRC_DIR}/configure")
+    add_custom_command(
+        OUTPUT ${SQLITE_BUILD_DIR}/Makefile
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${SQLITE_BUILD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${SQLITE_BUILD_DIR}
+                env
+                CC=${CMAKE_C_COMPILER}
+                AR=${CMAKE_AR}
+                RANLIB=${CMAKE_RANLIB}
+                CC_FOR_BUILD=cc
+                CFLAGS=--sysroot=${MUSL_SYSROOT}\ -O2\ -nostdinc\ -ffreestanding\ -fno-common\ -fno-pie\ -no-pie\ ${USER_ARCH_CFLAGS}\ -DSQLITE_OMIT_LOAD_EXTENSION=1\ -DSQLITE_OMIT_WAL=1\ -DSQLITE_MAX_MMAP_SIZE=0\ -DSQLITE_TEMP_STORE=2\ -DSQLITE_THREADSAFE=1\ -DSQLITE_USE_URI=1\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}
+                LDFLAGS=-static\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -Wl,--build-id=none\ -T\ ${MUSL_LINKER_SCRIPT}\ ${MUSL_LIBC_A}\ ${LIBGCC_PATH}\ ${MUSL_CRTN_O}
+                ${SQLITE_SRC_DIR}/configure
+                    --host=${USER_HOST_TRIPLE}
+                    --prefix=${SQLITE_PREFIX_DIR}
+                    --bindir=${SQLITE_PREFIX_DIR}/bin
+                    --libdir=${SQLITE_PREFIX_DIR}/lib
+                    --includedir=${SQLITE_PREFIX_DIR}/include
+                    --disable-shared
+                    --static-cli-shell
+                    --disable-readline
+                    --disable-math
+                    --disable-load-extension
+                    ac_cv_func_fdatasync=yes
+                    ac_cv_func_usleep=yes
+                    ac_cv_func_localtime_r=yes
+                    ac_cv_func_gmtime_r=yes
+                    ac_cv_func_malloc_usable_size=no
+                    ac_cv_func_posix_fallocate=no
+        DEPENDS musl_sysroot ${SQLITE_SRC_DIR}/configure
+        COMMENT "Configuring SQLite cross build (musl)"
+    )
+
+    add_custom_target(sqlite_configure DEPENDS ${SQLITE_BUILD_DIR}/Makefile)
+
+    add_custom_command(
+        OUTPUT ${SQLITE_BIN} ${SQLITE_LIB_A} ${SQLITE_HEADER}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${SQLITE_BUILD_DIR} make -j16
+        COMMAND ${CMAKE_COMMAND} -E chdir ${SQLITE_BUILD_DIR} make install
+        DEPENDS sqlite_configure
+        COMMENT "Building SQLite static library and shell"
+    )
+
+    add_custom_target(sqlite_build DEPENDS ${SQLITE_BIN} ${SQLITE_LIB_A} ${SQLITE_HEADER})
+    add_dependencies(user_programs sqlite_build)
+
+    set(CPYTHON_SQLITE_DEPENDS sqlite_build)
+    set(CPYTHON_SQLITE_LIBS " -lsqlite3")
+    set(CPYTHON_SQLITE_CONFIGURE_OVERRIDES
+        ac_cv_header_sqlite3_h=yes
+        ac_cv_lib_sqlite3_sqlite3_open=yes
+        ac_cv_search_sqlite3_open=none\ required)
+    set(CPYTHON_SQLITE_SETUP_LOCAL_LINE
+        "_sqlite3 _sqlite/blob.c _sqlite/connection.c _sqlite/cursor.c _sqlite/microprotocols.c _sqlite/module.c _sqlite/prepare_protocol.c _sqlite/row.c _sqlite/statement.c _sqlite/util.c -I${MUSL_SYSROOT}/include -L${MUSL_SYSROOT}/lib -lsqlite3\n")
+else()
+    message(STATUS "Skipping SQLite build (missing source tree at ${SQLITE_SRC_DIR})")
+endif()
+
 # CPython — Python 3.12 interpreter (built against musl + ncurses + readline)
 # ==============================================================================
 set(CPYTHON_SRC_DIR "${CMAKE_SOURCE_DIR}/user/v6-cpython" CACHE PATH "CPython source directory")
@@ -907,7 +982,7 @@ if(EXISTS "${CPYTHON_SRC_DIR}/configure")
                 CPPFLAGS=--sysroot=${MUSL_SYSROOT}\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0
                 CFLAGS=--sysroot=${MUSL_SYSROOT}\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${CPYTHON_GCC_INCLUDE_DIR}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}\ -I${CMAKE_SOURCE_DIR}/user\ -D_POSIX_C_SOURCE=200809L\ -DSSIZE_MAX=__LONG_MAX__\ -DSA_ONSTACK=0
                 LDFLAGS=-no-pie\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,--export-dynamic\ -Wl,--dynamic-linker=${CPYTHON_DYNAMIC_LINKER}\ -Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -Wl,--build-id=none\ -L${NCURSES_BUILD_DIR}/lib\ -L${READLINE_BUILD_DIR}\ -L${MUSL_SYSROOT}/lib
-                LIBS=-lc\ ${CPYTHON_LIBGCC_PATH}
+                "LIBS=-lc ${CPYTHON_LIBGCC_PATH}${CPYTHON_SQLITE_LIBS}"
                 ${CPYTHON_SRC_DIR}/configure
                     --host=${CPYTHON_HOST_TRIPLE}
                     --build=x86_64-pc-linux-gnu
@@ -956,8 +1031,9 @@ if(EXISTS "${CPYTHON_SRC_DIR}/configure")
                     ac_cv_func_pselect=yes
                     ac_cv_header_dlfcn_h=yes
                     ac_cv_search_dlopen=none\ required
+                    ${CPYTHON_SQLITE_CONFIGURE_OVERRIDES}
                     --disable-ipv6
-        DEPENDS ${CPYTHON_SRC_DIR}/configure ${MUSL_LINKER_SCRIPT} musl_sysroot local_ncurses_build local_readline_build
+        DEPENDS ${CPYTHON_SRC_DIR}/configure ${MUSL_LINKER_SCRIPT} musl_sysroot local_ncurses_build local_readline_build ${CPYTHON_SQLITE_DEPENDS}
         COMMENT "Configuring CPython cross build (musl)"
     )
 
@@ -976,6 +1052,7 @@ _json _json.c
 array arraymodule.c
 binascii binascii.c
 fcntl fcntlmodule.c
+@SQLITE_SETUP_LINE@
 _random _randommodule.c
 _bisect _bisectmodule.c
 _heapq _heapqmodule.c
@@ -1000,6 +1077,7 @@ _blake2 _blake2/blake2module.c _blake2/blake2b_impl.c _blake2/blake2s_impl.c
     string(REPLACE "@CMAKE_SOURCE_DIR@" "${CMAKE_SOURCE_DIR}" SETUP_LOCAL_CONTENT "${SETUP_LOCAL_CONTENT}")
     string(REPLACE "@READLINE_BUILD_DIR@" "${READLINE_BUILD_DIR}" SETUP_LOCAL_CONTENT "${SETUP_LOCAL_CONTENT}")
     string(REPLACE "@NCURSES_BUILD_DIR@" "${NCURSES_BUILD_DIR}" SETUP_LOCAL_CONTENT "${SETUP_LOCAL_CONTENT}")
+    string(REPLACE "@SQLITE_SETUP_LINE@" "${CPYTHON_SQLITE_SETUP_LOCAL_LINE}" SETUP_LOCAL_CONTENT "${SETUP_LOCAL_CONTENT}")
     file(WRITE "${CMAKE_BINARY_DIR}/cpython_setup_local.txt" "${SETUP_LOCAL_CONTENT}")
     add_custom_command(
         OUTPUT ${CPYTHON_BUILD_DIR}/Makefile
@@ -1209,6 +1287,11 @@ if(TARGET openssl_cli)
     sysroot_install("${OPENSSL_CLI_BIN}" "${SYSROOT_BIN_DIR}/openssl")
 endif()
 
+# SQLite shell
+if(TARGET sqlite_build)
+    set(SYSROOT_TARGETS ${SYSROOT_TARGETS} "${SQLITE_BIN}" "${SQLITE_LIB_A}" "${SQLITE_HEADER}")
+endif()
+
 # Aggregate target
 if(SYSROOT_TARGETS)
     # Write a stamp file whenever sysroot is (re)populated so that
@@ -1235,6 +1318,9 @@ if(SYSROOT_TARGETS)
     endif()
     if(TARGET openssl_cli)
         add_dependencies(sysroot_populate openssl_cli)
+    endif()
+    if(TARGET sqlite_build)
+        add_dependencies(sysroot_populate sqlite_build)
     endif()
 endif()
 

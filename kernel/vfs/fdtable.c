@@ -57,6 +57,7 @@
 #include "lock/rwsem.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
+#include "vfs/file_lock.h"
 #include "vfs_private.h"
 #include <mm/slab.h>
 
@@ -290,6 +291,9 @@ void vfs_fdtable_put(struct vfs_fdtable *fdtable) {
     for (int i = 0; i < NOFILE; i++) {
         struct vfs_file *file = fdtable->files[i];
         if (IS_FD(file)) {
+            if (current != NULL) {
+                vfs_file_lock_release(file, current->tgid);
+            }
             vfs_fput(file);
             fdtable->files[i] = NULL;
             fdtable->fd_count--;
@@ -424,6 +428,9 @@ void vfs_fdtable_close_on_exec(struct vfs_fdtable *fdtable) {
     spin_unlock(&fdtable->lock);
 
     for (int i = 0; i < close_count; i++) {
+        if (current != NULL) {
+            vfs_file_lock_release(to_close[i], current->tgid);
+        }
         vfs_fput(to_close[i]);
     }
 }

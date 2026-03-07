@@ -21,6 +21,7 @@
 #include "vfs_private.h"
 #include "vfs/fs.h"
 #include "vfs/file.h"
+#include "vfs/file_lock.h"
 #include "vfs/pipe.h"
 #include "vfs/fcntl.h"
 #include "vfs/stat.h"
@@ -219,8 +220,10 @@ static void __attribute__((unused)) __vfs_close_fd(int fd) {
     spin_lock(&current->fdtable->lock);
     struct vfs_file *f = __vfs_fdfree(fd);
     spin_unlock(&current->fdtable->lock);
-    if (f != NULL)
+    if (f != NULL) {
+        vfs_file_lock_release(f, current->tgid);
         __vfs_fput_call_rcu(f);
+    }
 }
 
 /******************************************************************************
@@ -269,6 +272,7 @@ uint64 sys_vfs_dup2(void) {
     spin_unlock(&current->fdtable->lock);
 
     if (old_newfd) {
+        vfs_file_lock_release(old_newfd, current->tgid);
         __vfs_fput_call_rcu(old_newfd);
     }
     vfs_fput(f);
@@ -327,6 +331,7 @@ uint64 sys_vfs_close(void) {
     }
     spin_unlock(&current->fdtable->lock);
 
+    vfs_file_lock_release(f, current->tgid);
     __vfs_fput_call_rcu(f);
     ACCT_INC(current->thread_group, fs_closes);
     return 0;
@@ -394,13 +399,19 @@ uint64 sys_vfs_ftruncate(void) {
 }
 
 uint64 sys_vfs_fcntl(void) {
-    int fd, cmd, arg;
+    int fd, cmd, arg = 0;
+    uint64 uarg = 0;
     argint(0, &fd);
     argint(1, &cmd);
-    argint(2, &arg);
 
     if (fd < 0 || fd >= NOFILE) {
         return -EBADF;
+    }
+
+    if (cmd == F_GETLK || cmd == F_SETLK || cmd == F_SETLKW) {
+        argaddr(2, &uarg);
+    } else {
+        argint(2, &arg);
     }
 
     if (cmd == F_GETFD || cmd == F_SETFD) {
@@ -424,6 +435,25 @@ uint64 sys_vfs_fcntl(void) {
         normalized_cmd = F_DUPFD_CLOEXEC;
     }
     switch (normalized_cmd) {
+    case F_GETLK:
+    case F_SETLK:
+    case F_SETLKW: {
+        struct flock fl = {0};
+        if (uarg == 0) {
+            ret = -EINVAL;
+            break;
+        }
+        if (vm_copyin(current->vm, &fl, uarg, sizeof(fl)) < 0) {
+            ret = -EFAULT;
+            break;
+        }
+        ret = vfs_file_lock_ctl(f, current->tgid, normalized_cmd, &fl);
+        if (ret == 0 && normalized_cmd == F_GETLK &&
+            vm_copyout(current->vm, uarg, &fl, sizeof(fl)) < 0) {
+            ret = -EFAULT;
+        }
+        break;
+    }
     case F_GETFL:
         ret = f->f_flags & ~O_CLOEXEC;
         break;
