@@ -628,7 +628,8 @@ out:
  * when the filesystem does not provide a native readv callback.
  */
 static ssize_t __vfs_generic_readv_locked(struct vfs_file *file,
-                                          struct iov_iter *iter, bool user)
+                                          struct iov_iter *iter, bool user,
+                                          bool advance_pos)
 {
     ssize_t total = 0;
     while (iter->nr_segs > 0 && iter->count > 0) {
@@ -645,7 +646,8 @@ static ssize_t __vfs_generic_readv_locked(struct vfs_file *file,
         }
         if (n == 0) break; /* EOF */
         total += n;
-        file->f_pos += n;
+        if (advance_pos)
+            file->f_pos += n;
         iov_iter_advance(iter, (size_t)n);
         if ((size_t)n < seg_len) break; /* short read */
     }
@@ -674,7 +676,7 @@ ssize_t vfs_filereadv(struct vfs_file *file, struct iov_iter *iter, bool user)
         if (file->ops->readv != NULL)
             ret = file->ops->readv(file, iter, user);
         else
-            ret = __vfs_generic_readv_locked(file, iter, user);
+            ret = __vfs_generic_readv_locked(file, iter, user, false);
         __vfs_file_unlock(file);
         return ret;
     }
@@ -690,7 +692,7 @@ ssize_t vfs_filereadv(struct vfs_file *file, struct iov_iter *iter, bool user)
         if (file->ops != NULL && file->ops->readv != NULL) {
             ret = file->ops->readv(file, iter, user);
         } else if (file->ops != NULL && file->ops->read != NULL) {
-            ret = __vfs_generic_readv_locked(file, iter, user);
+            ret = __vfs_generic_readv_locked(file, iter, user, false);
         } else {
             /* cdev read — fall back to per-segment cdev_read */
             ssize_t total = 0;
@@ -738,10 +740,8 @@ ssize_t vfs_filereadv(struct vfs_file *file, struct iov_iter *iter, bool user)
     /* Prefer native readv; fall back to per-segment read */
     if (file->ops->readv != NULL) {
         ret = file->ops->readv(file, iter, user);
-        if (ret > 0)
-            file->f_pos += ret;
     } else {
-        ret = __vfs_generic_readv_locked(file, iter, user);
+        ret = __vfs_generic_readv_locked(file, iter, user, true);
     }
 
 readv_out:
@@ -759,7 +759,8 @@ readv_out:
  * Called with the file lock held.
  */
 static ssize_t __vfs_generic_writev_locked(struct vfs_file *file,
-                                           struct iov_iter *iter, bool user)
+                                           struct iov_iter *iter, bool user,
+                                           bool advance_pos)
 {
     ssize_t total = 0;
     while (iter->nr_segs > 0 && iter->count > 0) {
@@ -775,7 +776,8 @@ static ssize_t __vfs_generic_writev_locked(struct vfs_file *file,
             return n;
         }
         total += n;
-        file->f_pos += n;
+        if (advance_pos)
+            file->f_pos += n;
         iov_iter_advance(iter, (size_t)n);
         if ((size_t)n < seg_len) break; /* short write */
     }
@@ -804,7 +806,7 @@ ssize_t vfs_filewritev(struct vfs_file *file, struct iov_iter *iter, bool user)
         if (file->ops->writev != NULL)
             ret = file->ops->writev(file, iter, user);
         else
-            ret = __vfs_generic_writev_locked(file, iter, user);
+            ret = __vfs_generic_writev_locked(file, iter, user, false);
         __vfs_file_unlock(file);
         return ret;
     }
@@ -820,7 +822,7 @@ ssize_t vfs_filewritev(struct vfs_file *file, struct iov_iter *iter, bool user)
         if (file->ops != NULL && file->ops->writev != NULL) {
             ret = file->ops->writev(file, iter, user);
         } else if (file->ops != NULL && file->ops->write != NULL) {
-            ret = __vfs_generic_writev_locked(file, iter, user);
+            ret = __vfs_generic_writev_locked(file, iter, user, false);
         } else {
             /* cdev write — per-segment cdev_write */
             ssize_t total = 0;
@@ -872,10 +874,8 @@ ssize_t vfs_filewritev(struct vfs_file *file, struct iov_iter *iter, bool user)
     /* Prefer native writev; fall back to per-segment write */
     if (file->ops->writev != NULL) {
         ret = file->ops->writev(file, iter, user);
-        if (ret > 0)
-            file->f_pos += ret;
     } else {
-        ret = __vfs_generic_writev_locked(file, iter, user);
+        ret = __vfs_generic_writev_locked(file, iter, user, true);
     }
 
     if (ret > 0) {

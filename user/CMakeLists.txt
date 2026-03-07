@@ -139,6 +139,7 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/top.c
     ${USER_DIR}/crashtest.c
     ${USER_DIR}/syscalltest.c
+    ${USER_DIR}/iovectest.c
 )
 
 # Lab-specific programs
@@ -1128,7 +1129,7 @@ set(USERLIB_ONLY_PROGS
     dumppcache dumprq find free forktest grind kqueuetest losetup lsblk mkfs_xv6fs mknod mmapbigfile mmaptest mount pingpong
     primes ps randtest stressfs symlinktest sync testsig umount
     usertests vforktest waitgdb wallclock xargs zombie top
-    syscalltest
+    syscalltest iovectest
 )
 foreach(PROG ${USERLIB_ONLY_PROGS})
     set(SRC "${CMAKE_BINARY_DIR}/user/_${PROG}")

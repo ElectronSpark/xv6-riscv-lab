@@ -94,6 +94,8 @@ int write(int, const void *, int);
 int read(int, void *, int);
 int readv(int, const struct iovec *, int);
 int writev(int, const struct iovec *, int);
+int preadv(int fd, const struct iovec *iov, int iovcnt, int64 offset);
+int pwritev2(int fd, const struct iovec *iov, int iovcnt, int64 offset, int flags);
 int close(int);
 int kill(int, int);
 int exec(const char *, char **);

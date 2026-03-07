@@ -65,21 +65,35 @@ struct pipe *pipe_alloc(int flags) {
 void pipe_close(struct pipe *pi, int writable) {
     bool freed = false;
     if (writable) {
-        /* kqueue: notify read-end knotes before clearing back-pointer */
+        /*
+         * Acquire writer_lock to synchronize with a concurrent close of
+         * the read-end.  Both directions use writer_lock to protect the
+         * cross-reference pointers (read_file / write_file).  Holding the
+         * lock while calling vfs_file_knote_notify() ensures the other
+         * end's vfs_file is not freed while we are accessing it.
+         */
+        spin_lock(&pi->writer_lock);
         struct vfs_file *rf = pi->read_file;
+        pi->write_file = NULL;
         if (rf)
             vfs_file_knote_notify(rf, EVFILT_READ, 0);
-        pi->write_file = NULL;  /* kqueue: clear back-reference */
-        spin_lock(&pi->writer_lock);
         freed = PIPE_CLEAR_WRITABLE(pi);
         tq_wakeup_all(&pi->nread_queue, -1, 0);
         spin_unlock(&pi->writer_lock);
     } else {
-        /* kqueue: notify write-end knotes before clearing back-pointer */
+        /*
+         * Acquire writer_lock (same lock as close-write) to serialise
+         * the cross-reference notification.  Clear our own back-pointer
+         * so the write-end close (if concurrent) won't see a stale
+         * read_file pointer.
+         */
+        spin_lock(&pi->writer_lock);
         struct vfs_file *wf = pi->write_file;
+        pi->read_file = NULL;
         if (wf)
             vfs_file_knote_notify(wf, EVFILT_WRITE, 0);
-        pi->read_file = NULL;  /* kqueue: clear back-reference */
+        spin_unlock(&pi->writer_lock);
+
         spin_lock(&pi->reader_lock);
         freed = PIPE_CLEAR_READABLE(pi);
         tq_wakeup_all(&pi->nwrite_queue, -1, 0);
@@ -353,9 +367,16 @@ static ssize_t __pipe_file_read(struct vfs_file *file, char *buf, size_t count,
                                 bool user) {
     struct pipe *pi = file->pipe;
     ssize_t ret = pipe_read(pi, buf, count, user);
-    /* kqueue: after consuming data, the write-side becomes writable */
-    if (ret > 0 && pi->write_file != NULL)
-        vfs_file_knote_notify(pi->write_file, EVFILT_WRITE, 0);
+    /* kqueue: after consuming data, notify the write-side that the pipe
+     * is writable.  Hold writer_lock to serialise with pipe_close, which
+     * clears the cross-reference pointers under the same lock. */
+    if (ret > 0) {
+        spin_lock(&pi->writer_lock);
+        struct vfs_file *wf = pi->write_file;
+        if (wf != NULL)
+            vfs_file_knote_notify(wf, EVFILT_WRITE, 0);
+        spin_unlock(&pi->writer_lock);
+    }
     return ret;
 }
 
@@ -363,9 +384,16 @@ static ssize_t __pipe_file_write(struct vfs_file *file, const char *buf,
                                  size_t count, bool user) {
     struct pipe *pi = file->pipe;
     ssize_t ret = pipe_write(pi, buf, count, user);
-    /* kqueue: after producing data, the read-side becomes readable */
-    if (ret > 0 && pi->read_file != NULL)
-        vfs_file_knote_notify(pi->read_file, EVFILT_READ, 0);
+    /* kqueue: after producing data, notify the read-side that the pipe
+     * is readable.  Hold writer_lock to serialise with pipe_close, which
+     * clears the cross-reference pointers under the same lock. */
+    if (ret > 0) {
+        spin_lock(&pi->writer_lock);
+        struct vfs_file *rf = pi->read_file;
+        if (rf != NULL)
+            vfs_file_knote_notify(rf, EVFILT_READ, 0);
+        spin_unlock(&pi->writer_lock);
+    }
     return ret;
 }
 
