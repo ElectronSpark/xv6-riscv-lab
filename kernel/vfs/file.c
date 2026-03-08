@@ -417,11 +417,12 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
     }
 
     // Handle character device read - check access and call without holding lock
-    // (cdev operations may sleep and handle their own synchronization)
+    // (cdev operations may sleep and handle their own synchronization).
+    // The file lock is released before the cdev call so that a blocking read
+    // on one fd (e.g. stdin) does not prevent concurrent writes on another fd
+    // (e.g. stdout) that shares the same vfs_file via dup().
     if (S_ISCHR(inode->mode)) {
-        __vfs_file_lock(file);
         if ((file->f_flags & O_ACCMODE) == O_WRONLY) {
-            __vfs_file_unlock(file);
             return -EBADF;
         }
         ssize_t ret;
@@ -432,7 +433,6 @@ ssize_t vfs_fileread(struct vfs_file *file, void *buf, size_t n, bool user) {
             struct cdev *cdev = file->cdev;
             ret = cdev_read(cdev, user, buf, n);
         }
-        __vfs_file_unlock(file);
         return ret;
     }
 
@@ -553,11 +553,10 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
     }
 
     // Handle character device write - check access and call without holding
-    // lock (cdev operations may sleep and handle their own synchronization)
+    // lock (cdev operations may sleep and handle their own synchronization).
+    // See vfs_fileread() comment for rationale.
     if (S_ISCHR(inode->mode)) {
-        __vfs_file_lock(file);
         if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
-            __vfs_file_unlock(file);
             return -EBADF;
         }
         ssize_t ret;
@@ -568,7 +567,6 @@ ssize_t vfs_filewrite(struct vfs_file *file, const void *buf, size_t n,
             struct cdev *cdev = file->cdev;
             ret = cdev_write(cdev, user, buf, n);
         }
-        __vfs_file_unlock(file);
         return ret;
     }
 
@@ -682,11 +680,9 @@ ssize_t vfs_filereadv(struct vfs_file *file, struct iov_iter *iter, bool user)
         return ret;
     }
 
-    /* Character device */
+    /* Character device — no file lock held (see vfs_fileread comment) */
     if (S_ISCHR(inode->mode)) {
-        __vfs_file_lock(file);
         if ((file->f_flags & O_ACCMODE) == O_WRONLY) {
-            __vfs_file_unlock(file);
             return -EBADF;
         }
         ssize_t ret;
@@ -711,7 +707,6 @@ ssize_t vfs_filereadv(struct vfs_file *file, struct iov_iter *iter, bool user)
             }
             ret = total;
         }
-        __vfs_file_unlock(file);
         return ret;
     }
 
@@ -812,11 +807,9 @@ ssize_t vfs_filewritev(struct vfs_file *file, struct iov_iter *iter, bool user)
         return ret;
     }
 
-    /* Character device */
+    /* Character device — no file lock held (see vfs_fileread comment) */
     if (S_ISCHR(inode->mode)) {
-        __vfs_file_lock(file);
         if ((file->f_flags & O_ACCMODE) == O_RDONLY) {
-            __vfs_file_unlock(file);
             return -EBADF;
         }
         ssize_t ret;
@@ -840,7 +833,6 @@ ssize_t vfs_filewritev(struct vfs_file *file, struct iov_iter *iter, bool user)
             }
             ret = total;
         }
-        __vfs_file_unlock(file);
         if (ret > 0) {
             struct vfs_inode *ino = vfs_inode_deref(&file->inode);
             if (ino != NULL)
