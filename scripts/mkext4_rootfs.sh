@@ -272,6 +272,21 @@ else
     echo "mkext4_rootfs: warning: Python Lib not found at ${PYLIB_SRC}" >&2
 fi
 
+# Copy installed Python packages (NumPy and other site-packages)
+SITE_PACKAGES_SRC="${SYSROOT_DIR}/lib/python3.12/site-packages"
+if [ -d "$SITE_PACKAGES_SRC" ] && [ "$(ls -A "$SITE_PACKAGES_SRC" 2>/dev/null)" ]; then
+    mkdir -p "$STAGING/usr/local/lib/python3.12/site-packages"
+    rsync -a --exclude='__pycache__' \
+        "$SITE_PACKAGES_SRC/" "$STAGING/usr/local/lib/python3.12/site-packages/"
+
+    # Pre-compile site-packages .py → .pyc
+    python3 -m compileall -q -j0 -b "$STAGING/usr/local/lib/python3.12/site-packages/" 2>/dev/null || true
+
+    SITE_PKG_COUNT=$(find "$STAGING/usr/local/lib/python3.12/site-packages/" -type f | wc -l)
+    SITE_PKG_SIZE=$(du -sh "$STAGING/usr/local/lib/python3.12/site-packages/" | cut -f1)
+    echo "mkext4_rootfs: site-packages: ${SITE_PKG_COUNT} files (${SITE_PKG_SIZE})"
+fi
+
 BIN_COUNT=$(find "$STAGING/bin/" -type f 2>/dev/null | wc -l)
 TOTAL_USED=$(du -sh "$STAGING" | cut -f1)
 echo "mkext4_rootfs: ${BIN_COUNT} programs, total ${TOTAL_USED}"

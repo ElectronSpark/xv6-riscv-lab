@@ -322,11 +322,12 @@ if(EXISTS "${NCURSES_SRC_DIR}/configure")
         # Create ncurses.h symlink expected by CPython's py_curses.h
         COMMAND ${CMAKE_COMMAND} -E create_symlink curses.h ${NCURSES_INCLUDE_DIR}/ncurses.h
         COMMAND ${CMAKE_COMMAND} -E create_symlink curses.h ${MUSL_SYSROOT}/include/ncurses.h
-        DEPENDS ${MUSL_SYSROOT_DEP_FILES} ${NCURSES_SRC_DIR}/configure ${NCURSES_SRC_DIR}/misc/terminfo.src
+        DEPENDS ${NCURSES_SRC_DIR}/configure ${NCURSES_SRC_DIR}/misc/terminfo.src
         COMMENT "Building ncurses static library (musl)"
     )
 
     add_custom_target(local_ncurses_build DEPENDS ${NCURSES_LIB_A})
+    add_dependencies(local_ncurses_build musl_sysroot)
 
     add_custom_command(
         OUTPUT ${NCURSES_LIB_SO}
@@ -360,11 +361,12 @@ if(EXISTS "${NCURSES_SRC_DIR}/configure")
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${NCURSES_SHARED_BUILD_DIR}/lib/libncurses.so.6.4 ${MUSL_SYSROOT}/lib/libncurses.so.6.4
         COMMAND ${CMAKE_COMMAND} -E create_symlink libncurses.so.6.4 ${MUSL_SYSROOT}/lib/libncurses.so.6
         COMMAND ${CMAKE_COMMAND} -E create_symlink libncurses.so.6 ${MUSL_SYSROOT}/lib/libncurses.so
-        DEPENDS ${MUSL_SYSROOT_DEP_FILES} ${NCURSES_SRC_DIR}/configure ${NCURSES_SRC_DIR}/misc/terminfo.src
+        DEPENDS ${NCURSES_SRC_DIR}/configure ${NCURSES_SRC_DIR}/misc/terminfo.src
         COMMENT "Building ncurses shared library (musl)"
     )
 
     add_custom_target(local_ncurses_shared_build DEPENDS ${NCURSES_LIB_SO})
+    add_dependencies(local_ncurses_shared_build musl_sysroot)
 else()
     message(STATUS "Skipping ncurses build (missing submodule at ${NCURSES_SRC_DIR})")
 endif()
@@ -407,11 +409,12 @@ if(EXISTS "${READLINE_SRC_DIR}/configure")
         COMMAND ${CMAKE_COMMAND} -E chdir ${READLINE_BUILD_DIR} make -j4
         COMMAND ${CMAKE_COMMAND} -E chdir ${READLINE_BUILD_DIR} make install DESTDIR=${MUSL_SYSROOT}
             COMMAND ${CMAKE_COMMAND} -E touch ${READLINE_LIB_A}
-        DEPENDS ${NCURSES_LIB_A} ${READLINE_SRC_DIR}/configure
+        DEPENDS ${READLINE_SRC_DIR}/configure
         COMMENT "Building and installing readline (musl)"
     )
 
     add_custom_target(local_readline_build DEPENDS ${READLINE_LIB_A})
+    add_dependencies(local_readline_build local_ncurses_build)
 
     add_custom_command(
         OUTPUT ${READLINE_LIB_SO}
@@ -445,11 +448,12 @@ if(EXISTS "${READLINE_SRC_DIR}/configure")
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${READLINE_SHARED_BUILD_DIR}/shlib/libhistory.so.8.2 ${MUSL_SYSROOT}/lib/libhistory.so.8.2
         COMMAND ${CMAKE_COMMAND} -E create_symlink libhistory.so.8.2 ${MUSL_SYSROOT}/lib/libhistory.so.8
         COMMAND ${CMAKE_COMMAND} -E create_symlink libhistory.so.8 ${MUSL_SYSROOT}/lib/libhistory.so
-        DEPENDS ${NCURSES_LIB_SO} ${READLINE_SRC_DIR}/configure
+        DEPENDS ${READLINE_SRC_DIR}/configure
         COMMENT "Building readline shared libraries (musl)"
     )
 
     add_custom_target(local_readline_shared_build DEPENDS ${READLINE_LIB_SO})
+    add_dependencies(local_readline_shared_build local_ncurses_shared_build)
 else()
     message(STATUS "Skipping readline build (missing submodule at ${READLINE_SRC_DIR})")
 endif()
@@ -581,10 +585,11 @@ add_custom_command(
             -isystem ${MUSL_COMPAT_DIR}
             -nostdinc -O2
             ${KQUEUE_COMPAT_SRC}
-    DEPENDS ${KQUEUE_COMPAT_SRC} ${MUSL_SYSROOT_DEP_FILES}
+    DEPENDS ${KQUEUE_COMPAT_SRC}
     COMMENT "Compiling kqueue compat object for musl"
 )
 add_custom_target(kqueue_compat DEPENDS ${KQUEUE_COMPAT_OBJ})
+add_dependencies(kqueue_compat musl_sysroot)
 
 set(RISCV_ICACHE_COMPAT_SRC "${CMAKE_SOURCE_DIR}/user/musl-xv6/compat/riscv_flush_icache.c")
 set(RISCV_ICACHE_COMPAT_OBJ "")
@@ -601,9 +606,11 @@ if(ARCH STREQUAL "riscv")
                 -nostdinc -O2 -fPIC
                 ${USER_ARCH_CFLAGS_CMD}
                 ${RISCV_ICACHE_COMPAT_SRC}
-        DEPENDS ${RISCV_ICACHE_COMPAT_SRC} ${MUSL_SYSROOT_DEP_FILES}
+        DEPENDS ${RISCV_ICACHE_COMPAT_SRC}
         COMMENT "Compiling RISC-V icache flush compat object for musl"
     )
+    add_custom_target(riscv_icache_compat DEPENDS ${RISCV_ICACHE_COMPAT_OBJ})
+    add_dependencies(riscv_icache_compat musl_sysroot)
 endif()
 
 # ==============================================================================
@@ -686,11 +693,12 @@ if(EXISTS "${OPENSSL_SRC_DIR}/Configure")
                     -DOPENSSL_NO_SECURE_MEMORY
                     -DOPENSSL_RAND_SEED_GETRANDOM
                     -O2
-        DEPENDS ${MUSL_SYSROOT_DEP_FILES} ${OPENSSL_SRC_DIR}/Configure
+        DEPENDS ${OPENSSL_SRC_DIR}/Configure
         COMMENT "Configuring OpenSSL 3.0 cross build (${OPENSSL_TARGET}, dynamic executables)"
     )
 
     add_custom_target(openssl_configure DEPENDS ${OPENSSL_BUILD_DIR}/Makefile)
+    add_dependencies(openssl_configure musl_sysroot)
 
     # Build OpenSSL libraries (libcrypto.a + libssl.a)
     add_custom_command(
@@ -703,7 +711,7 @@ if(EXISTS "${OPENSSL_SRC_DIR}/Configure")
 
     # Install OpenSSL headers and libs to a staging area
     add_custom_command(
-        OUTPUT ${OPENSSL_INSTALL_DIR}/lib/libcrypto.a
+        OUTPUT ${OPENSSL_INSTALL_DIR}/lib/libcrypto.a ${OPENSSL_INSTALL_DIR}/lib/libssl.a
         COMMAND ${CMAKE_COMMAND} -E chdir ${OPENSSL_BUILD_DIR}
                 make install_dev DESTDIR=${OPENSSL_INSTALL_DIR}
         # Also install into the main sysroot for other consumers
@@ -713,7 +721,7 @@ if(EXISTS "${OPENSSL_SRC_DIR}/Configure")
         COMMENT "Installing OpenSSL headers and libraries"
     )
 
-    add_custom_target(openssl_build DEPENDS ${OPENSSL_INSTALL_DIR}/lib/libcrypto.a)
+    add_custom_target(openssl_build DEPENDS ${OPENSSL_INSTALL_DIR}/lib/libcrypto.a ${OPENSSL_INSTALL_DIR}/lib/libssl.a)
 
     # Optionally build the openssl CLI tool
     set(OPENSSL_CLI_BIN "${OPENSSL_BUILD_DIR}/apps/openssl")
@@ -1024,11 +1032,12 @@ if(EXISTS "${SQLITE_SRC_DIR}/configure")
                     ac_cv_func_gmtime_r=yes
                     ac_cv_func_malloc_usable_size=no
                     ac_cv_func_posix_fallocate=no
-        DEPENDS ${MUSL_SYSROOT_DEP_FILES} ${SQLITE_SRC_DIR}/configure
+        DEPENDS ${SQLITE_SRC_DIR}/configure
         COMMENT "Configuring SQLite cross build (dynamic musl)"
     )
 
     add_custom_target(sqlite_configure DEPENDS ${SQLITE_BUILD_DIR}/Makefile)
+    add_dependencies(sqlite_configure musl_sysroot)
 
     add_custom_command(
         OUTPUT ${SQLITE_BIN} ${SQLITE_LIB_A} ${SQLITE_HEADER}
@@ -1118,10 +1127,11 @@ if(EXISTS "${ZLIB_SRC_DIR}/CMakeLists.txt")
                 -DZLIB_INSTALL=ON
         COMMAND ${CMAKE_COMMAND} --build ${ZLIB_BUILD_DIR} --target zlibstatic -j16
         COMMAND ${CMAKE_COMMAND} -E env DESTDIR=${MUSL_SYSROOT} ${CMAKE_COMMAND} --install ${ZLIB_BUILD_DIR}
-        DEPENDS ${MUSL_SYSROOT_DEP_FILES} ${ZLIB_SRC_DIR}/CMakeLists.txt
+        DEPENDS ${ZLIB_SRC_DIR}/CMakeLists.txt
         COMMENT "Building zlib static library for CPython"
     )
     add_custom_target(zlib_build DEPENDS ${ZLIB_LIB_A} ${ZLIB_HEADER})
+    add_dependencies(zlib_build musl_sysroot)
     list(APPEND CPYTHON_EXTRA_DEPENDS zlib_build)
     list(APPEND CPYTHON_EXTRA_DEP_FILES ${ZLIB_LIB_A} ${ZLIB_HEADER})
 else()
@@ -1166,10 +1176,11 @@ if(EXISTS "${BZIP2_SRC_DIR}/CMakeLists.txt")
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${BZIP2_BUILD_DIR}/libbz2_static.a ${BZIP2_LIB_A}
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${BZIP2_SRC_DIR}/bzlib.h ${BZIP2_HEADER}
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${BZIP2_BUILD_DIR}/bzip2.pc ${MUSL_SYSROOT}/lib/pkgconfig/bzip2.pc
-        DEPENDS ${MUSL_SYSROOT_DEP_FILES} ${BZIP2_SRC_DIR}/CMakeLists.txt
+        DEPENDS ${BZIP2_SRC_DIR}/CMakeLists.txt
         COMMENT "Building bzip2 static library for CPython"
     )
     add_custom_target(bzip2_build DEPENDS ${BZIP2_LIB_A} ${BZIP2_HEADER})
+    add_dependencies(bzip2_build musl_sysroot)
     list(APPEND CPYTHON_EXTRA_DEPENDS bzip2_build)
     list(APPEND CPYTHON_EXTRA_DEP_FILES ${BZIP2_LIB_A} ${BZIP2_HEADER})
 else()
@@ -1207,10 +1218,11 @@ if(EXISTS "${XZ_SRC_DIR}/CMakeLists.txt")
                 -DXZ_SYMBOL_VERSIONING=no
         COMMAND ${CMAKE_COMMAND} --build ${XZ_BUILD_DIR} --target liblzma -j16
         COMMAND ${CMAKE_COMMAND} -E env DESTDIR=${MUSL_SYSROOT} ${CMAKE_COMMAND} --install ${XZ_BUILD_DIR} --component liblzma_Development
-        DEPENDS ${MUSL_SYSROOT_DEP_FILES} ${XZ_SRC_DIR}/CMakeLists.txt
+        DEPENDS ${XZ_SRC_DIR}/CMakeLists.txt
         COMMENT "Building liblzma static library for CPython"
     )
     add_custom_target(xz_build DEPENDS ${XZ_LIB_A} ${XZ_HEADER})
+    add_dependencies(xz_build musl_sysroot)
     list(APPEND CPYTHON_EXTRA_DEPENDS xz_build)
     list(APPEND CPYTHON_EXTRA_DEP_FILES ${XZ_LIB_A} ${XZ_HEADER})
 else()
@@ -1244,7 +1256,7 @@ if(EXISTS "${LIBFFI_SRC_DIR}/configure.ac")
                     --disable-shared
                     --enable-static
                     --disable-docs
-        DEPENDS ${MUSL_SYSROOT_DEP_FILES} ${LIBFFI_SRC_DIR}/configure.ac
+        DEPENDS ${LIBFFI_SRC_DIR}/configure.ac
         COMMENT "Configuring libffi cross build for CPython"
     )
 
@@ -1256,6 +1268,7 @@ if(EXISTS "${LIBFFI_SRC_DIR}/configure.ac")
         COMMENT "Building libffi static library for CPython"
     )
     add_custom_target(libffi_build DEPENDS ${LIBFFI_LIB_A} ${LIBFFI_HEADER})
+    add_dependencies(libffi_build musl_sysroot)
     list(APPEND CPYTHON_EXTRA_DEPENDS libffi_build)
     list(APPEND CPYTHON_EXTRA_DEP_FILES ${LIBFFI_LIB_A} ${LIBFFI_HEADER})
     set(CPYTHON_LIBFFI_CFLAGS "-I${LIBFFI_INCLUDE_DIR} -I${MUSL_SYSROOT}/include")
@@ -1295,10 +1308,11 @@ if(EXISTS "${UUID_COMPAT_SRC}" AND EXISTS "${UUID_COMPAT_HEADER_SRC}")
         COMMAND ${CMAKE_COMMAND} -E make_directory ${UUID_HEADER_DIR}
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${UUID_COMPAT_HEADER_SRC} ${UUID_HEADER}
         COMMAND ${CMAKE_COMMAND} -E copy_if_different ${UUID_COMPAT_HEADER_SRC} ${UUID_HEADER_FLAT}
-        DEPENDS ${MUSL_SYSROOT_DEP_FILES} ${UUID_COMPAT_SRC} ${UUID_COMPAT_HEADER_SRC}
+        DEPENDS ${UUID_COMPAT_SRC} ${UUID_COMPAT_HEADER_SRC}
         COMMENT "Building libuuid compatibility library for CPython"
     )
     add_custom_target(uuid_build DEPENDS ${UUID_LIB_A} ${UUID_HEADER} ${UUID_HEADER_FLAT})
+    add_dependencies(uuid_build musl_sysroot)
     list(APPEND CPYTHON_EXTRA_DEPENDS uuid_build)
     list(APPEND CPYTHON_EXTRA_DEP_FILES ${UUID_LIB_A} ${UUID_HEADER} ${UUID_HEADER_FLAT})
     list(APPEND CPYTHON_EXTRA_CONFIGURE_OVERRIDES
@@ -1396,10 +1410,11 @@ if(EXISTS "${CPYTHON_SRC_DIR}/configure")
             COMMAND ${CMAKE_COMMAND} -E create_symlink
                     libgcc_s.so.1
                     ${CPYTHON_LIBGCC_S_LINK}
-            DEPENDS ${CPYTHON_LIBGCC_S_PATH} ${MUSL_SYSROOT_DEP_FILES}
+            DEPENDS ${CPYTHON_LIBGCC_S_PATH}
             COMMENT "Staging shared libgcc runtime into musl sysroot"
         )
         add_custom_target(cpython_libgcc_s_runtime DEPENDS ${CPYTHON_LIBGCC_S_SYSROOT} ${CPYTHON_LIBGCC_S_LINK})
+        add_dependencies(cpython_libgcc_s_runtime musl_sysroot)
         list(APPEND CPYTHON_EXTRA_DEPENDS cpython_libgcc_s_runtime)
         list(APPEND CPYTHON_EXTRA_DEP_FILES ${CPYTHON_LIBGCC_S_SYSROOT} ${CPYTHON_LIBGCC_S_LINK})
         set(CPYTHON_SHARED_RUNTIME_LIBS "-L${MUSL_SYSROOT}/lib -lgcc_s")
@@ -1412,6 +1427,7 @@ if(EXISTS "${CPYTHON_SRC_DIR}/configure")
     if(RISCV_ICACHE_COMPAT_OBJ AND CPYTHON_LIBFFI_LIBS)
         set(CPYTHON_LIBFFI_LIBS "${CPYTHON_LIBFFI_LIBS} ${RISCV_ICACHE_COMPAT_OBJ}")
         list(APPEND CPYTHON_EXTRA_DEP_FILES ${RISCV_ICACHE_COMPAT_OBJ})
+        list(APPEND CPYTHON_EXTRA_DEPENDS riscv_icache_compat)
     endif()
 
     set(CPYTHON_EXTENSION_SUFFIX ".cpython-312d-${USER_HOST_TRIPLE}.so")
@@ -1515,22 +1531,20 @@ if(EXISTS "${CPYTHON_SRC_DIR}/configure")
                     --disable-ipv6
         DEPENDS ${CPYTHON_SRC_DIR}/configure
             ${CMAKE_BINARY_DIR}/cpython_setup_local.txt
-            ${MUSL_LINKER_SCRIPT}
-            ${MUSL_CRT1_O}
-            ${MUSL_CRTI_O}
-            ${MUSL_CRTN_O}
-            ${MUSL_SYSROOT}/lib/libc.so
-            ${NCURSES_LIB_A}
-            ${NCURSES_LIB_SO}
-            ${READLINE_LIB_A}
-            ${READLINE_LIB_SO}
-            ${OPENSSL_INSTALL_DIR}/lib/libcrypto.a
-            ${OPENSSL_INSTALL_DIR}/lib/libssl.a
-            ${CPYTHON_EXTRA_DEP_FILES}
         COMMENT "Configuring CPython cross build (musl)"
     )
 
     add_custom_target(cpython_configure DEPENDS ${CPYTHON_BUILD_DIR}/Makefile)
+    # Use target-level deps to avoid duplicating build recipes across
+    # parallel targets (the root cause of configure races with -j).
+    add_dependencies(cpython_configure
+        musl_sysroot
+        local_ncurses_build local_ncurses_shared_build
+        local_readline_build local_readline_shared_build
+        openssl_build)
+    if(CPYTHON_EXTRA_DEPENDS)
+        add_dependencies(cpython_configure ${CPYTHON_EXTRA_DEPENDS})
+    endif()
 
         set(CPYTHON_SHARED_FLAGS "${CPYTHON_CC} -shared --sysroot=${MUSL_SYSROOT} -nostdlib -L${MUSL_SYSROOT}/lib -Wl,-rpath,/lib -lc ${CPYTHON_SHARED_RUNTIME_LIBS}")
 
@@ -1550,14 +1564,198 @@ if(EXISTS "${CPYTHON_SRC_DIR}/configure")
             "LDSHARED=${CPYTHON_SHARED_FLAGS}"
         COMMAND /bin/bash ${CMAKE_SOURCE_DIR}/scripts/cpython_post_install.sh ${CPYTHON_BUILD_DIR} ${MUSL_SYSROOT}
         COMMAND ${CMAKE_COMMAND} -E touch ${CPYTHON_INSTALL_STAMP}
-        DEPENDS ${CPYTHON_BUILD_DIR}/Makefile ${KQUEUE_COMPAT_OBJ} ${CPYTHON_EXTRA_DEP_FILES}
         COMMENT "Building CPython with shared libpython support (musl)"
     )
 
         add_custom_target(cpython_build DEPENDS ${CPYTHON_BIN} ${CPYTHON_SHARED_LIB} ${CPYTHON_INSTALL_STAMP})
+    add_dependencies(cpython_build cpython_configure kqueue_compat)
     add_dependencies(user_programs cpython_build)
 else()
     message(STATUS "Skipping CPython configure/build targets (missing submodule at ${CPYTHON_SRC_DIR})")
+endif()
+
+# ==============================================================================
+# OpenBLAS — optimised BLAS library for NumPy
+# ==============================================================================
+set(OPENBLAS_SRC_DIR "${CMAKE_SOURCE_DIR}/user/openblas")
+set(OPENBLAS_BUILD_DIR "${CMAKE_BINARY_DIR}/openblas/build-xv6")
+set(OPENBLAS_STAMP "${OPENBLAS_BUILD_DIR}/.installed")
+
+if(ARCH STREQUAL "x86_64")
+    set(OPENBLAS_TARGET "GENERIC")
+    set(OPENBLAS_NUMA_DEFS "\ -DSYS_mbind=237\ -DSYS_set_mempolicy=238")
+else()
+    set(OPENBLAS_TARGET "RISCV64_GENERIC")
+    set(OPENBLAS_NUMA_DEFS "\ -DSYS_mbind=235\ -DSYS_set_mempolicy=237")
+endif()
+
+if(EXISTS "${OPENBLAS_SRC_DIR}/Makefile" AND CPYTHON_CC)
+    add_custom_command(
+        OUTPUT ${OPENBLAS_STAMP}
+        # Create build directory and copy source tree (avoid polluting the git submodule)
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${OPENBLAS_BUILD_DIR}
+        COMMAND rsync -a --delete --exclude=.git
+                ${OPENBLAS_SRC_DIR}/ ${OPENBLAS_BUILD_DIR}/
+        # Build OpenBLAS (C-only, no LAPACK, threaded, static+shared)
+        COMMAND ${CMAKE_COMMAND} -E chdir ${OPENBLAS_BUILD_DIR}
+                make -j16
+                    CC=${CPYTHON_CC}
+                    AR=${CPYTHON_AR}
+                    RANLIB=${CPYTHON_RANLIB}
+                    HOSTCC=gcc
+                    TARGET=${OPENBLAS_TARGET}
+                    NOFORTRAN=1
+                    NO_LAPACK=1
+                    NO_LAPACKE=1
+                    USE_THREAD=1
+                    USE_OPENMP=0
+                    NO_AFFINITY=1
+                    ONLY_CBLAS=1
+                    CFLAGS=--sysroot=${MUSL_SYSROOT}\ -O2\ -fPIC\ ${USER_ARCH_CFLAGS}\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${CPYTHON_GCC_INCLUDE_DIR}\ -isystem\ ${MUSL_COMPAT_DIR}\ -D_POSIX_C_SOURCE=200809L${OPENBLAS_NUMA_DEFS}
+                    PREFIX=/
+        # Install headers + library + pkgconfig into sysroot
+        COMMAND ${CMAKE_COMMAND} -E chdir ${OPENBLAS_BUILD_DIR}
+                make install
+                    PREFIX=/
+                    DESTDIR=${MUSL_SYSROOT}
+                    NOFORTRAN=1
+                    NO_LAPACK=1
+                    NO_LAPACKE=1
+        COMMAND ${CMAKE_COMMAND} -E touch ${OPENBLAS_STAMP}
+        COMMENT "Building OpenBLAS (${OPENBLAS_TARGET}, threaded, static+shared) for xv6"
+    )
+    add_custom_target(openblas_build DEPENDS ${OPENBLAS_STAMP})
+    add_dependencies(openblas_build musl_sysroot)
+else()
+    message(STATUS "Skipping OpenBLAS build (missing source at ${OPENBLAS_SRC_DIR} or no musl cross-compiler)")
+endif()
+
+# ==============================================================================
+# CPython development headers — needed by NumPy / Python extension modules
+# ==============================================================================
+set(CPYTHON_SYSROOT_INCLUDE "${MUSL_SYSROOT}/include/python3.12d")
+set(CPYTHON_HEADERS_STAMP "${CPYTHON_SYSROOT_INCLUDE}/.headers_installed")
+
+if(TARGET cpython_configure AND EXISTS "${CPYTHON_SRC_DIR}/Include/Python.h")
+    add_custom_command(
+        OUTPUT ${CPYTHON_HEADERS_STAMP}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CPYTHON_SYSROOT_INCLUDE}
+        # Copy all public/CPython API headers (preserving subdirectory layout)
+        COMMAND rsync -a --include=*/ --include=*.h --exclude=*
+                ${CPYTHON_SRC_DIR}/Include/ ${CPYTHON_SYSROOT_INCLUDE}/
+        # Copy generated pyconfig.h from the build tree
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                ${CPYTHON_BUILD_DIR}/pyconfig.h ${CPYTHON_SYSROOT_INCLUDE}/
+        COMMAND ${CMAKE_COMMAND} -E touch ${CPYTHON_HEADERS_STAMP}
+        DEPENDS ${CPYTHON_BUILD_DIR}/Makefile
+        COMMENT "Installing CPython development headers into sysroot"
+    )
+    add_custom_target(cpython_headers DEPENDS ${CPYTHON_HEADERS_STAMP})
+    add_dependencies(cpython_headers cpython_configure)
+endif()
+
+# ==============================================================================
+# libstdc++ runtime — C++ standard library for NumPy extension modules
+# ==============================================================================
+if(CPYTHON_CC)
+    set(_cpython_cxx "${_cpython_prefix}g++")
+    execute_process(
+        COMMAND ${_cpython_cxx} -print-file-name=libstdc++.so
+        OUTPUT_VARIABLE _LIBSTDCXX_SO_PATH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _LIBSTDCXX_RESULT
+    )
+    execute_process(
+        COMMAND ${_cpython_cxx} -print-file-name=libstdc++.a
+        OUTPUT_VARIABLE _LIBSTDCXX_A_PATH
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+    )
+    if(_LIBSTDCXX_RESULT EQUAL 0 AND EXISTS "${_LIBSTDCXX_SO_PATH}")
+        # Compute parent dir at configure time (NOT at build time) so
+        # that $(dirname ...) doesn't get consumed by Make's $() syntax.
+        get_filename_component(_LIBSTDCXX_SO_DIR "${_LIBSTDCXX_SO_PATH}" DIRECTORY)
+        set(LIBSTDCXX_SYSROOT_SO "${MUSL_SYSROOT}/lib/libstdc++.so")
+        # Resolve the real file behind the symlink(s)
+        get_filename_component(_LIBSTDCXX_SO_REAL "${_LIBSTDCXX_SO_PATH}" REALPATH)
+        get_filename_component(_LIBSTDCXX_SO_REAL_NAME "${_LIBSTDCXX_SO_REAL}" NAME)
+        add_custom_command(
+            OUTPUT ${LIBSTDCXX_SYSROOT_SO}
+            # Copy the real shared library
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${_LIBSTDCXX_SO_REAL} ${MUSL_SYSROOT}/lib/
+            # Recreate the symlinks
+            COMMAND ${CMAKE_COMMAND} -E create_symlink
+                    ${_LIBSTDCXX_SO_REAL_NAME} ${MUSL_SYSROOT}/lib/libstdc++.so.6
+            COMMAND ${CMAKE_COMMAND} -E create_symlink
+                    ${_LIBSTDCXX_SO_REAL_NAME} ${MUSL_SYSROOT}/lib/libstdc++.so
+            DEPENDS ${_LIBSTDCXX_SO_REAL}
+            COMMENT "Staging shared libstdc++ runtime into musl sysroot"
+        )
+        add_custom_target(libstdcxx_runtime DEPENDS ${LIBSTDCXX_SYSROOT_SO})
+        add_dependencies(libstdcxx_runtime musl_sysroot)
+        message(STATUS "libstdc++ shared library found: ${_LIBSTDCXX_SO_PATH}")
+    elseif(EXISTS "${_LIBSTDCXX_A_PATH}")
+        set(LIBSTDCXX_SYSROOT_A "${MUSL_SYSROOT}/lib/libstdc++.a")
+        add_custom_command(
+            OUTPUT ${LIBSTDCXX_SYSROOT_A}
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    ${_LIBSTDCXX_A_PATH} ${MUSL_SYSROOT}/lib/
+            DEPENDS ${_LIBSTDCXX_A_PATH}
+            COMMENT "Staging static libstdc++ into musl sysroot"
+        )
+        add_custom_target(libstdcxx_runtime DEPENDS ${LIBSTDCXX_SYSROOT_A})
+        add_dependencies(libstdcxx_runtime musl_sysroot)
+        message(STATUS "libstdc++ static library found: ${_LIBSTDCXX_A_PATH}")
+    else()
+        message(STATUS "libstdc++ not found — rebuild toolchain with C++ support")
+    endif()
+endif()
+
+# ==============================================================================
+# NumPy — numerical Python (meson cross-compilation)
+# ==============================================================================
+set(NUMPY_SRC_DIR "${CMAKE_SOURCE_DIR}/user/numpy")
+set(NUMPY_BUILD_DIR "${CMAKE_BINARY_DIR}/numpy/build-xv6")
+set(NUMPY_STAMP "${NUMPY_BUILD_DIR}/.numpy_installed")
+
+if(EXISTS "${NUMPY_SRC_DIR}/meson.build" AND TARGET cpython_build)
+    set(NUMPY_DEPENDS_LIST cpython_build)
+    set(NUMPY_DEP_FILES ${CPYTHON_INSTALL_STAMP})
+
+    if(TARGET cpython_headers)
+        list(APPEND NUMPY_DEPENDS_LIST cpython_headers)
+        list(APPEND NUMPY_DEP_FILES ${CPYTHON_HEADERS_STAMP})
+    endif()
+    if(TARGET openblas_build)
+        list(APPEND NUMPY_DEPENDS_LIST openblas_build)
+        list(APPEND NUMPY_DEP_FILES ${OPENBLAS_STAMP})
+    endif()
+    if(TARGET libstdcxx_runtime)
+        list(APPEND NUMPY_DEPENDS_LIST libstdcxx_runtime)
+    endif()
+
+    add_custom_command(
+        OUTPUT ${NUMPY_STAMP}
+        COMMAND /bin/bash ${CMAKE_SOURCE_DIR}/scripts/build_numpy.sh
+                ${NUMPY_SRC_DIR}
+                ${NUMPY_BUILD_DIR}
+                ${MUSL_SYSROOT}
+                ${ARCH}
+                ${CPYTHON_BUILD_DIR}
+                ${CPYTHON_SRC_DIR}
+                ${CMAKE_SOURCE_DIR}
+        COMMAND ${CMAKE_COMMAND} -E touch ${NUMPY_STAMP}
+        DEPENDS ${NUMPY_DEP_FILES}
+        COMMENT "Building NumPy for xv6 (meson cross-compilation)"
+    )
+    add_custom_target(numpy_build DEPENDS ${NUMPY_STAMP})
+    foreach(_dep ${NUMPY_DEPENDS_LIST})
+        add_dependencies(numpy_build ${_dep})
+    endforeach()
+else()
+    message(STATUS "Skipping NumPy build (missing source at ${NUMPY_SRC_DIR} or CPython not available)")
 endif()
 
 # ==============================================================================
@@ -1747,6 +1945,20 @@ if(TARGET sqlite_build)
     set(SYSROOT_TARGETS ${SYSROOT_TARGETS} "${SQLITE_BIN}" "${SQLITE_LIB_A}" "${SQLITE_HEADER}")
 endif()
 
+# NumPy (installed into sysroot/lib/python3.12/site-packages/ by meson)
+if(TARGET numpy_build)
+    set(SYSROOT_TARGETS ${SYSROOT_TARGETS} ${NUMPY_STAMP})
+endif()
+
+# libstdc++ runtime (needed at runtime by C++ extension modules)
+if(TARGET libstdcxx_runtime)
+    if(DEFINED LIBSTDCXX_SYSROOT_SO)
+        set(SYSROOT_TARGETS ${SYSROOT_TARGETS} ${LIBSTDCXX_SYSROOT_SO})
+    elseif(DEFINED LIBSTDCXX_SYSROOT_A)
+        set(SYSROOT_TARGETS ${SYSROOT_TARGETS} ${LIBSTDCXX_SYSROOT_A})
+    endif()
+endif()
+
 # Aggregate target
 if(SYSROOT_TARGETS)
     # Write a stamp file whenever sysroot is (re)populated so that
@@ -1778,6 +1990,15 @@ if(SYSROOT_TARGETS)
     endif()
     if(TARGET sqlite_build)
         add_dependencies(sysroot_populate sqlite_build)
+    endif()
+    if(TARGET numpy_build)
+        add_dependencies(sysroot_populate numpy_build)
+    endif()
+    if(TARGET openblas_build)
+        add_dependencies(sysroot_populate openblas_build)
+    endif()
+    if(TARGET libstdcxx_runtime)
+        add_dependencies(sysroot_populate libstdcxx_runtime)
     endif()
 endif()
 

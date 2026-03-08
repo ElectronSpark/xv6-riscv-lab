@@ -406,7 +406,7 @@ add_custom_command(
             ${CMAKE_CURRENT_BINARY_DIR}/fs.img
             ${CMAKE_SOURCE_DIR}/README.md
             ${CPYTHON_SRC_DIR_FOR_FS}
-            256
+            400
             ${SYSROOT_DIR}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS sysroot_populate

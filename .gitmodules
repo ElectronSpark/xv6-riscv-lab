@@ -31,3 +31,9 @@
 [submodule "user/libffi"]
 	path = user/libffi
 	url = https://github.com/ElectronSpark/v6-libffi.git
+[submodule "user/openblas"]
+	path = user/openblas
+	url = https://github.com/OpenMathLib/OpenBLAS.git
+[submodule "user/numpy"]
+	path = user/numpy
+	url = https://github.com/numpy/numpy.git

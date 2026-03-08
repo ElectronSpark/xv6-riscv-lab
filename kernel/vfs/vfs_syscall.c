@@ -3591,8 +3591,10 @@ uint64 sys_vfs_pipe2(void) {
     vfs_fput(wf);
 
     if (flags & O_CLOEXEC) {
+        spin_lock(&current->fdtable->lock);
         vfs_fdtable_set_fdflags(current->fdtable, fd0, FD_CLOEXEC);
         vfs_fdtable_set_fdflags(current->fdtable, fd1, FD_CLOEXEC);
+        spin_unlock(&current->fdtable->lock);
     }
 
     return 0;

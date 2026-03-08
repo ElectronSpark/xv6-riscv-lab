@@ -378,7 +378,7 @@ build_phase1() {
             --with-sysroot="${SYSROOT}" \
             --with-native-system-header-dir=/include \
             ${ARCH_GCC_OPTS} \
-            --enable-languages=c \
+            --enable-languages=c,c++ \
             --disable-nls \
             --disable-shared \
             --enable-static \
@@ -387,7 +387,7 @@ build_phase1() {
             --disable-libssp \
             --disable-libquadmath \
             --disable-libgomp \
-            --disable-libatomic \
+            --enable-libatomic \
             --disable-libsanitizer \
             --disable-libvtv \
             --disable-bootstrap
@@ -529,7 +529,7 @@ build_phase2() {
     fi
 
     # ── Step 2d: Build GCC (full, with shared support) ───────────────────
-    log_step "Phase 2 — Step 4/4: Building GCC ${GCC_VERSION} (full, with dynamic support)..."
+    log_step "Phase 2 — Step 4/4: Building GCC ${GCC_VERSION} (full, C + C++, with dynamic support)..."
     if [[ -f "${P}/.phase2_complete" ]]; then
         log_info "Phase 2 GCC already fully built, skipping."
     else
@@ -542,7 +542,7 @@ build_phase2() {
             --with-sysroot="${SYSROOT}" \
             --with-native-system-header-dir=/include \
             ${ARCH_GCC_OPTS} \
-            --enable-languages=c \
+            --enable-languages=c,c++ \
             --disable-nls \
             --enable-shared \
             --disable-multilib \
@@ -550,7 +550,7 @@ build_phase2() {
             --disable-libssp \
             --disable-libquadmath \
             --disable-libgomp \
-            --disable-libatomic \
+            --enable-libatomic \
             --disable-libsanitizer \
             --disable-libvtv \
             --disable-bootstrap
@@ -615,7 +615,7 @@ verify_toolchain() {
     log_step "Verifying ${label}..."
 
     # Check key binaries exist
-    for tool in gcc ar ld objcopy objdump ranlib readelf strip; do
+    for tool in gcc g++ ar ld objcopy objdump ranlib readelf strip; do
         if [[ ! -f "${P}/bin/${TRIPLET}-${tool}" ]]; then
             log_error "Missing: ${P}/bin/${TRIPLET}-${tool}"
             return 1
@@ -636,6 +636,17 @@ EOF
         file "${TMPDIR}/hello_static" | grep -q "statically linked" && log_info "  Confirmed statically linked"
     else
         log_info "Static compilation: FAILED (this is expected in Stage 1 without full libc)"
+    fi
+
+    # C++ test
+    cat > "${TMPDIR}/hello_cpp.cpp" << 'CPPEOF'
+#include <cstdio>
+int main() { std::printf("Hello C++ from xv6 musl!\n"); return 0; }
+CPPEOF
+    if "${P}/bin/${TRIPLET}-g++" -static -nostdlib -nostartfiles -o "${TMPDIR}/hello_cpp" "${TMPDIR}/hello_cpp.cpp" -lstdc++ -lgcc -lc -lgcc 2>/dev/null; then
+        log_info "C++ static compilation: OK"
+    else
+        log_info "C++ static compilation: FAILED (may need full sysroot)"
     fi
 
     # Dynamic test (Phase 2 only)
