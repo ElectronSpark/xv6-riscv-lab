@@ -195,7 +195,7 @@ static void test_register_unregister_stress(void) {
     int fail_count = 0;
 
     for (int iter = 0; iter < TEST_ITERATIONS; iter++) {
-        int dev_idx = 2 + (iter % 4); // Use devices 2-5
+        int dev_idx = 2 + (iter & 3); // Use devices 2-5
         device_t *dev = &test_devices[dev_idx];
 
         // Check if already registered

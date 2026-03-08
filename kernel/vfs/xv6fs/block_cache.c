@@ -410,8 +410,8 @@ int xv6fs_bcache_init(struct xv6fs_superblock *xv6_sb) {
         }
 
         int bi = blockno % BPB;
-        int m = 1 << (bi % 8);
-        int used = (bp->data[bi / 8] & m) != 0;
+        int m = 1 << (bi & 7);
+        int used = (bp->data[bi >> 3] & m) != 0;
 
         if (!used) {
             /* Block is free */

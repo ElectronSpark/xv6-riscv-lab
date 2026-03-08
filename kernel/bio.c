@@ -245,7 +245,7 @@ static struct bio *__buf_alloc_bio(struct buf *b, blkdev_t *blkdev,
     if (IS_ERR_OR_NULL(bio)) {
         return NULL;
     }
-    bio->blkno = b->blockno * (BSIZE / 512);
+    bio->blkno = b->blockno * (BSIZE >> 9);
     page_t *page = __pa_to_page((uint64)b->data & ~PAGE_MASK);
     size_t page_offset = (uint64)b->data & PAGE_MASK;
     int ret = bio_add_seg(bio, page, 0, BSIZE, page_offset);

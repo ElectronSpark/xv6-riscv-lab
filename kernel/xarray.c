@@ -168,7 +168,7 @@ static inline bool node_get_mark(const struct xa_node *node, uint8 offset,
 {
     if (mark >= XA_MAX_MARKS)
         return false;
-    return (node->marks[mark][offset / 64] >> (offset % 64)) & 1;
+    return (node->marks[mark][offset >> 6] >> (offset & 63)) & 1;
 }
 
 static inline void node_set_mark(struct xa_node *node, uint8 offset,
@@ -176,7 +176,7 @@ static inline void node_set_mark(struct xa_node *node, uint8 offset,
 {
     if (mark >= XA_MAX_MARKS)
         return;
-    node->marks[mark][offset / 64] |= 1UL << (offset % 64);
+    node->marks[mark][offset >> 6] |= 1UL << (offset & 63);
 }
 
 static inline void node_clear_mark(struct xa_node *node, uint8 offset,
@@ -184,7 +184,7 @@ static inline void node_clear_mark(struct xa_node *node, uint8 offset,
 {
     if (mark >= XA_MAX_MARKS)
         return;
-    node->marks[mark][offset / 64] &= ~(1UL << (offset % 64));
+    node->marks[mark][offset >> 6] &= ~(1UL << (offset & 63));
 }
 
 /** Check if any slot in @node has @mark set. */

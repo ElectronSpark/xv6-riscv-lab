@@ -1798,7 +1798,7 @@ static void fdt_print_prop_value(const char *name, void *data, uint32 len) {
     }
 
     // 32-bit cells (most common for reg, interrupts, etc.)
-    if (len % 4 == 0) {
+    if (!(len & 3)) {
         printf("<");
         uint32 *cells = (uint32 *)data;
         int ncells = len / 4;

@@ -294,7 +294,7 @@ void uartstart() {
     }
 
     // Fill TX FIFO with up to half the FIFO size
-    int max_batch = UART_FIFO_SIZE / 2;
+    int max_batch = UART_FIFO_SIZE >> 1;
     int sent = 0;
 
     while (sent < max_batch) {

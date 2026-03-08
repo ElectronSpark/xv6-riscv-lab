@@ -381,8 +381,8 @@ STATIC_INLINE int __slab_bitmap_test_and_set(slab_t *slab, int idx) {
         return -1;
     }
 
-    int word_idx = idx / 64;
-    int bit_idx = idx % 64;
+    int word_idx = idx >> 6;
+    int bit_idx = idx & 63;
     uint64 mask = 1UL << bit_idx;
 
     // Get old value
@@ -404,8 +404,8 @@ STATIC_INLINE int __slab_bitmap_test_and_clear(slab_t *slab, int idx) {
         return -1;
     }
 
-    int word_idx = idx / 64;
-    int bit_idx = idx % 64;
+    int word_idx = idx >> 6;
+    int bit_idx = idx & 63;
     uint64 mask = 1UL << bit_idx;
 
     // Get old value

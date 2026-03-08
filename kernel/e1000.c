@@ -127,7 +127,7 @@ int e1000_set_transmission_descriptor_base(struct tx_desc *virtual_base,
     if (physical_base & 15) {
         return -1; // TD base address must be 16 Bytes aligned
     }
-    if (size % 128 != 0) {
+    if (size & 127) {
         return -1; // The size of TA must be a multiple of 128 bytes
     }
 
@@ -180,7 +180,7 @@ int e1000_set_receive_descriptor_base(struct rx_desc *virtual_base,
     if (physical_base & 15) {
         return -1; // TD base address must be 16 Bytes aligned
     }
-    if (size % 128 != 0) {
+    if (size & 127) {
         return -1; // The size of TA must be a multiple of 128 bytes
     }
 

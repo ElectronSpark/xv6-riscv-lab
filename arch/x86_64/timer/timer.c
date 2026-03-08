@@ -232,13 +232,13 @@ static int cpu_has_invariant_tsc(void) {
 #define CAL_MS  50      /* calibration window in milliseconds */
 
 static inline uint64 hpet_read_counter(void) {
-    return hpet_base_ptr[HPET_REG_COUNTER / 8];
+    return hpet_base_ptr[HPET_REG_COUNTER >> 3];
 }
 
 /* Ensure HPET main counter is running (free-run, no legacy mode yet) */
 static void hpet_start_freerun(void) {
     /* Disable legacy replacement, just enable the main counter */
-    hpet_base_ptr[HPET_REG_CONFIG / 8] = HPET_CFG_ENABLE;
+    hpet_base_ptr[HPET_REG_CONFIG >> 3] = HPET_CFG_ENABLE;
 }
 
 /* ── Calibrate TSC frequency using HPET ── */
@@ -298,7 +298,7 @@ static uint64 calibrate_lapic_freq(void) {
 static int hpet_probe(void) {
     hpet_base_ptr = (volatile uint64 *)HPET_BASE;
 
-    uint64 cap = hpet_base_ptr[HPET_REG_CAP_ID / 8];
+    uint64 cap = hpet_base_ptr[HPET_REG_CAP_ID >> 3];
     if (cap == 0 || cap == ~0ULL)
         return 0;   /* no HPET */
 
@@ -368,13 +368,13 @@ static void setup_lapic_periodic(void) {
 /* ── 3. HPET (legacy replacement → IRQ 0) ── */
 static void setup_hpet(void) {
     /* Stop HPET */
-    hpet_base_ptr[HPET_REG_CONFIG / 8] = 0;
+    hpet_base_ptr[HPET_REG_CONFIG >> 3] = 0;
 
     /* Reset main counter */
-    hpet_base_ptr[HPET_REG_COUNTER / 8] = 0;
+    hpet_base_ptr[HPET_REG_COUNTER >> 3] = 0;
 
     /* Check Timer 0 supports periodic mode */
-    uint64 t0_cap = hpet_base_ptr[HPET_REG_T0_CONFIG / 8];
+    uint64 t0_cap = hpet_base_ptr[HPET_REG_T0_CONFIG >> 3];
     if (!(t0_cap & HPET_TN_PER_CAP)) {
         printf("[x86] HPET Timer 0 lacks periodic capability, skipping\n");
         return;
@@ -382,13 +382,13 @@ static void setup_hpet(void) {
 
     /* Timer 0: periodic, enable interrupt, set accumulator */
     uint64 period_ticks = hpet_freq_hz / TIMER_HZ;
-    hpet_base_ptr[HPET_REG_T0_CONFIG / 8] = HPET_TN_ENABLE
+    hpet_base_ptr[HPET_REG_T0_CONFIG >> 3] = HPET_TN_ENABLE
                                            | HPET_TN_PERIODIC
                                            | HPET_TN_SETVAL;
-    hpet_base_ptr[HPET_REG_T0_CMP / 8] = period_ticks;
+    hpet_base_ptr[HPET_REG_T0_CMP >> 3] = period_ticks;
 
     /* Enable HPET + legacy replacement (Timer 0 → IRQ 0) */
-    hpet_base_ptr[HPET_REG_CONFIG / 8] = HPET_CFG_ENABLE | HPET_CFG_LEGACY;
+    hpet_base_ptr[HPET_REG_CONFIG >> 3] = HPET_CFG_ENABLE | HPET_CFG_LEGACY;
 
     active_timer = TIMER_HPET;
     tick_hz = TIMER_HZ;
@@ -725,7 +725,7 @@ static uint8 bcd_to_bin(uint8 val)
 static int days_in_month(int month, int year)
 {
     static const int dm[] = {31,28,31,30,31,30,31,31,30,31,30,31};
-    if (month == 2 && ((year % 4 == 0 && year % 100 != 0) || year % 400 == 0))
+    if (month == 2 && ((!(year & 3) && year % 100 != 0) || year % 400 == 0))
         return 29;
     return dm[month - 1];
 }
@@ -736,7 +736,7 @@ static uint64 mktime_utc(int year, int mon, int day, int hour, int min, int sec)
     uint64 days = 0;
     for (int y = 1970; y < year; y++) {
         days += 365;
-        if ((y % 4 == 0 && y % 100 != 0) || y % 400 == 0)
+        if ((!(y & 3) && y % 100 != 0) || y % 400 == 0)
             days++;
     }
     for (int m = 1; m < mon; m++)

@@ -574,8 +574,8 @@ ssize_t tty_write(struct tty *tty, const char *buf, size_t count, bool user) {
     /* Slow path — scan for '\n' and insert '\r' before it */
     while (written < count) {
         size_t batch = count - written;
-        if (batch > sizeof(kbuf) / 2) /* leave room for \r expansion */
-            batch = sizeof(kbuf) / 2;
+        if (batch > sizeof(kbuf) >> 1) /* leave room for \r expansion */
+            batch = sizeof(kbuf) >> 1;
 
         /* Copy a batch from user/kernel space */
         if (user) {

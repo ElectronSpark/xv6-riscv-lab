@@ -598,7 +598,7 @@ static int __tmpfs_getattr(struct vfs_inode *inode, struct stat *stat) {
     stat->st_gid = inode->gid;
     stat->st_size = inode->size;
     stat->st_blksize = 4096;
-    stat->st_blocks = (inode->size + 511) / 512;
+    stat->st_blocks = (inode->size + 511) >> 9;
     stat->st_atime_sec = inode->atime;
     stat->st_mtime_sec = inode->mtime;
     stat->st_ctime_sec = inode->ctime;

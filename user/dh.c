@@ -87,7 +87,7 @@ static void hexline(uint64 addr, const uchar *data, int len, int width)
 
     /* Hex bytes */
     for (int i = 0; i < width; i++) {
-        if (i == width / 2) {
+        if (i == width >> 1) {
             line[pos++] = ' ';
         }
         if (i < len) {

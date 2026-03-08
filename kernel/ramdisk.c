@@ -116,10 +116,10 @@ void ramdisk_init(void) {
 
     ramdisk.base = platform.ramdisk_base;
     ramdisk.size_bytes = platform.ramdisk_size;
-    ramdisk.size_blocks = platform.ramdisk_size / 512;
+    ramdisk.size_blocks = platform.ramdisk_size >> 9;
 
     printf("ramdisk: initialized %ld KB ramdisk (%ld sectors) at 0x%lx\n",
-           ramdisk.size_bytes / 1024, ramdisk.size_blocks, ramdisk.base);
+           ramdisk.size_bytes >> 10, ramdisk.size_blocks, ramdisk.base);
 
     // Register the ramdisk as a block device
     ramdisk_dev.ops = ramdisk_ops;

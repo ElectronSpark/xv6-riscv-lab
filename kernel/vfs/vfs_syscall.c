@@ -2635,8 +2635,8 @@ uint64 sys_pselect6(void) {
     }
 
     for (int fd = 0; fd < nfds; fd++) {
-        int word = fd / 64;
-        uint64 bit = 1ULL << (fd % 64);
+        int word = fd >> 6;
+        uint64 bit = 1ULL << (fd & 63);
         short events = 0;
 
         if (rfds && (rfds[word] & bit))
@@ -2700,8 +2700,8 @@ uint64 sys_pselect6(void) {
             if (pfds[i].revents == 0)
                 continue;
             int fd = fd_map[i];
-            int word = fd / 64;
-            uint64 bit = 1ULL << (fd % 64);
+            int word = fd >> 6;
+            uint64 bit = 1ULL << (fd & 63);
             int got = 0;
 
             if (rfds && (pfds[i].revents & (POLLIN | POLLRDNORM | POLLHUP | POLLERR))) {

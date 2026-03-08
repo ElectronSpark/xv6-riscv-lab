@@ -505,7 +505,7 @@ int exec(char *path, char **argv, char **envp) {
         if (argc >= MAXARG)
             goto bad;
         sp -= strlen(argv[argc]) + 1;
-        sp -= sp % 16; // riscv sp must be 16-byte aligned
+        sp -= sp & 15; // riscv sp must be 16-byte aligned
         if (sp < stackbase)
             goto bad;
         if (vm_copyout(tmp_vm, sp, argv[argc], strlen(argv[argc]) + 1) < 0)
@@ -520,7 +520,7 @@ int exec(char *path, char **argv, char **envp) {
             if (envc >= MAXENV)
                 goto bad;
             sp -= strlen(envp[envc]) + 1;
-            sp -= sp % 16;
+            sp -= sp & 15;
             if (sp < stackbase)
                 goto bad;
             if (vm_copyout(tmp_vm, sp, envp[envc], strlen(envp[envc]) + 1) < 0)
@@ -590,7 +590,7 @@ int exec(char *path, char **argv, char **envp) {
 
     uint64 nslots = (uint64)aidx;
     sp -= nslots * sizeof(uint64);
-    sp -= sp % 16;
+    sp -= sp & 15;
     if (sp < stackbase)
         goto bad;
     if (vm_copyout(tmp_vm, sp, (char *)ustack, nslots * sizeof(uint64)) < 0)

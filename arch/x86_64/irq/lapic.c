@@ -24,14 +24,14 @@ static volatile uint32 *lapic_base;
 
 uint32 lapic_read(uint32 reg)
 {
-    return lapic_base[reg / 4];
+    return lapic_base[reg >> 2];
 }
 
 void lapic_write(uint32 reg, uint32 val)
 {
-    lapic_base[reg / 4] = val;
+    lapic_base[reg >> 2] = val;
     /* Read-back to ensure the write is serialized (Intel SDM recommendation) */
-    (void)lapic_base[LAPIC_ID / 4];
+    (void)lapic_base[LAPIC_ID >> 2];
 }
 
 void lapic_eoi(void)

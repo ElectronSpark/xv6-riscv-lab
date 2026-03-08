@@ -1077,18 +1077,18 @@ static void test_hlist_foreach_node_safe(void **state) {
     test_node_t *node, *tmp;
     int removed = 0;
     hlist_foreach_node_safe(fixture->hlist, node, tmp, entry) {
-        if (node->key % 2 == 0) {
+        if (!(node->key & 1)) {
             hlist_pop(fixture->hlist, node);
             free_test_node(node);
             removed++;
         }
     }
-    assert_int_equal(removed, num_nodes / 2);
-    assert_int_equal(hlist_len(fixture->hlist), num_nodes / 2);
+    assert_int_equal(removed, num_nodes >> 1);
+    assert_int_equal(hlist_len(fixture->hlist), num_nodes >> 1);
 
     // Verify only odd-keyed nodes remain
     hlist_foreach_node(fixture->hlist, node, entry) {
-        assert_true(node->key % 2 == 1);
+        assert_true(!(node->key & 1));
     }
 
     // Cleanup remaining nodes

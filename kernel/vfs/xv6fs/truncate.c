@@ -75,8 +75,8 @@ static uint __xv6fs_balloc(struct xv6fs_superblock *xv6_sb, uint dev,
             }
 
             int bi = blockno % BPB;
-            int m = 1 << (bi % 8);
-            bp->data[bi / 8] |= m;
+            int m = 1 << (bi & 7);
+            bp->data[bi >> 3] |= m;
             xv6fs_log_write(xv6_sb, bp);
             brelse(bp);
 
@@ -274,10 +274,10 @@ static void __xv6fs_bfree(struct xv6fs_superblock *xv6_sb, uint dev, uint b) {
     struct superblock *disk_sb = &xv6_sb->disk_sb;
     struct buf *bp = bread(dev, BBLOCK_PTR(b, disk_sb));
     int bi = b % BPB;
-    int m = 1 << (bi % 8);
-    if ((bp->data[bi / 8] & m) == 0)
+    int m = 1 << (bi & 7);
+    if ((bp->data[bi >> 3] & m) == 0)
         panic("xv6fs_bfree: freeing free block");
-    bp->data[bi / 8] &= ~m;
+    bp->data[bi >> 3] &= ~m;
     xv6fs_log_write(xv6_sb, bp);
     brelse(bp);
 

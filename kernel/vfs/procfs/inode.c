@@ -485,7 +485,7 @@ static char *procfs_gen_status(int tgid) {
     const char      *statestr = thread_state_short(__thread_state_get(p));
     unsigned long    heap_kb  = 0;
     if (p->vm != NULL)
-        heap_kb = (unsigned long)(p->vm->heap_size / 1024);
+        heap_kb = (unsigned long)(p->vm->heap_size >> 10);
     /* Cumulative CPU time (raw timer ticks at TIMEBASE_FREQUENCY Hz) */
     uint64 cputime_raw = 0;
     uint32 util_avg = 0;
