@@ -26,6 +26,7 @@
 
 /* Number of 512-byte sectors that fit in one page */
 #define SECTORS_PER_PAGE (PGSIZE / PH_BSIZE)
+#define EXT4FS_BIO_MAX_PAGES (BIO_MAX_SIZE / PGSIZE)
 
 /*
  * Obtain the xv6 blkdev_t pointer from the ext4_blockdev container.
@@ -67,58 +68,79 @@ static int ext4fs_blockdev_bread(struct ext4_blockdev *bdev, void *buf,
 {
     blkdev_t *blk = ext4fs_bdev_blkdev(bdev);
     char *dst = (char *)buf;
+    page_t *pages[EXT4FS_BIO_MAX_PAGES];
+    uint16 seg_bytes[EXT4FS_BIO_MAX_PAGES];
+    int16 nr_pages;
 
     uint32_t done = 0;
     while (done < blk_cnt) {
-        /* Batch: read up to SECTORS_PER_PAGE contiguous sectors at once */
+        memset(pages, 0, sizeof(pages));
+        memset(seg_bytes, 0, sizeof(seg_bytes));
+        nr_pages = 0;
         uint32_t batch = blk_cnt - done;
-        if (batch > SECTORS_PER_PAGE)
-            batch = SECTORS_PER_PAGE;
-        uint16 bytes = (uint16)(batch * PH_BSIZE);
+        uint32_t max_batch = EXT4FS_BIO_MAX_PAGES * SECTORS_PER_PAGE;
+        uint32_t packed = 0;
+        if (batch > max_batch)
+            batch = max_batch;
 
-        /* Allocate a temp page for the BIO target */
-        page_t *page = __page_alloc(0, PAGE_TYPE_ANON);
-        if (page == NULL)
-            return EIO;
+        while ((uint32_t)nr_pages * SECTORS_PER_PAGE < batch) {
+            uint32_t sectors_left = batch - (uint32_t)nr_pages * SECTORS_PER_PAGE;
+            uint16 bytes = (uint16)((sectors_left > SECTORS_PER_PAGE ?
+                                     SECTORS_PER_PAGE : sectors_left) * PH_BSIZE);
+            page_t *page = __page_alloc(0, PAGE_TYPE_ANON);
+            if (page == NULL)
+                goto read_fail;
+            pages[nr_pages] = page;
+            seg_bytes[nr_pages] = bytes;
+            nr_pages++;
+        }
 
-        struct bio *bio = bio_alloc(blk, 1, false, NULL, NULL);
+        struct bio *bio = bio_alloc(blk, nr_pages, false, NULL, NULL);
         if (IS_ERR_OR_NULL(bio)) {
-            __page_free(page, 0);
-            return EIO;
+            goto read_fail;
         }
 
         bio->blkno = blk_id + done;
-        int ret = bio_add_seg(bio, page, 0, bytes, 0);
-        if (ret != 0) {
-            bio_release(bio);
-            __page_free(page, 0);
-            return EIO;
+        int ret = 0;
+        for (int16 i = 0; i < nr_pages; i++) {
+            ret = bio_add_seg(bio, pages[i], i, seg_bytes[i], 0);
+            if (ret != 0) {
+                bio_release(bio);
+                goto read_fail;
+            }
         }
 
         ret = blkdev_submit_bio(blk, bio);
         if (ret != 0) {
             bio_release(bio);
-            __page_free(page, 0);
-            return EIO;
+            goto read_fail;
         }
 
         ret = bio_await(bio);
         bio_release(bio);
 
-        if (ret != 0) {
-            __page_free(page, 0);
-            return EIO;
-        }
+        if (ret != 0)
+            goto read_fail;
 
-        /* Copy from BIO page into caller's buffer */
-        void *pa = (void *)__page_to_pa(page);
-        memcpy(dst + (uint64_t)done * PH_BSIZE, pa, bytes);
-        __page_free(page, 0);
+        uint32_t copied = 0;
+        for (int16 i = 0; i < nr_pages; i++) {
+            void *pa = (void *)__page_to_pa(pages[i]);
+            memcpy(dst + (uint64_t)done * PH_BSIZE + copied, pa, seg_bytes[i]);
+            copied += seg_bytes[i];
+            __page_free(pages[i], 0);
+        }
 
         done += batch;
     }
 
     return EOK;
+
+read_fail:
+    for (int16 i = 0; i < EXT4FS_BIO_MAX_PAGES; i++) {
+        if (pages[i] != NULL)
+            __page_free(pages[i], 0);
+    }
+    return EIO;
 }
 
 /*
@@ -130,46 +152,61 @@ static int ext4fs_blockdev_bwrite(struct ext4_blockdev *bdev, const void *buf,
 {
     blkdev_t *blk = ext4fs_bdev_blkdev(bdev);
     const char *src = (const char *)buf;
+    page_t *pages[EXT4FS_BIO_MAX_PAGES];
+    uint16 seg_bytes[EXT4FS_BIO_MAX_PAGES];
+    int16 nr_pages;
 
     uint32_t done = 0;
     while (done < blk_cnt) {
+        memset(pages, 0, sizeof(pages));
+        memset(seg_bytes, 0, sizeof(seg_bytes));
+        nr_pages = 0;
         uint32_t batch = blk_cnt - done;
-        if (batch > SECTORS_PER_PAGE)
-            batch = SECTORS_PER_PAGE;
-        uint16 bytes = (uint16)(batch * PH_BSIZE);
+        uint32_t max_batch = EXT4FS_BIO_MAX_PAGES * SECTORS_PER_PAGE;
+        uint32_t packed = 0;
+        if (batch > max_batch)
+            batch = max_batch;
 
-        /* Allocate a temp page and fill with data to write */
-        page_t *page = __page_alloc(0, PAGE_TYPE_ANON);
-        if (page == NULL)
-            return EIO;
+        while ((uint32_t)nr_pages * SECTORS_PER_PAGE < batch) {
+            uint32_t sectors_left = batch - (uint32_t)nr_pages * SECTORS_PER_PAGE;
+            uint16 bytes = (uint16)((sectors_left > SECTORS_PER_PAGE ?
+                                     SECTORS_PER_PAGE : sectors_left) * PH_BSIZE);
+            page_t *page = __page_alloc(0, PAGE_TYPE_ANON);
+            if (page == NULL)
+                goto write_fail;
+            void *pa = (void *)__page_to_pa(page);
+            memcpy(pa, src + (uint64_t)done * PH_BSIZE + packed, bytes);
+            pages[nr_pages] = page;
+            seg_bytes[nr_pages] = bytes;
+            packed += bytes;
+            nr_pages++;
+        }
 
-        void *pa = (void *)__page_to_pa(page);
-        memcpy(pa, src + (uint64_t)done * PH_BSIZE, bytes);
-
-        struct bio *bio = bio_alloc(blk, 1, true, NULL, NULL);
+        struct bio *bio = bio_alloc(blk, nr_pages, true, NULL, NULL);
         if (IS_ERR_OR_NULL(bio)) {
-            __page_free(page, 0);
-            return EIO;
+            goto write_fail;
         }
 
         bio->blkno = blk_id + done;
-        int ret = bio_add_seg(bio, page, 0, bytes, 0);
-        if (ret != 0) {
-            bio_release(bio);
-            __page_free(page, 0);
-            return EIO;
+        int ret = 0;
+        for (int16 i = 0; i < nr_pages; i++) {
+            ret = bio_add_seg(bio, pages[i], i, seg_bytes[i], 0);
+            if (ret != 0) {
+                bio_release(bio);
+                goto write_fail;
+            }
         }
 
         ret = blkdev_submit_bio(blk, bio);
         if (ret != 0) {
             bio_release(bio);
-            __page_free(page, 0);
-            return EIO;
+            goto write_fail;
         }
 
         ret = bio_await(bio);
         bio_release(bio);
-        __page_free(page, 0);
+        for (int16 i = 0; i < nr_pages; i++)
+            __page_free(pages[i], 0);
 
         if (ret != 0)
             return EIO;
@@ -178,6 +215,13 @@ static int ext4fs_blockdev_bwrite(struct ext4_blockdev *bdev, const void *buf,
     }
 
     return EOK;
+
+write_fail:
+    for (int16 i = 0; i < EXT4FS_BIO_MAX_PAGES; i++) {
+        if (pages[i] != NULL)
+            __page_free(pages[i], 0);
+    }
+    return EIO;
 }
 
 /*

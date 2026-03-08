@@ -31,6 +31,8 @@ struct bio {
     int16 vec_length;   // Number of bio_vec in this bio
     uint16 size;        // Total number of Bytes to transfer
     uint16 done_size;   // Number of blocks already transferred
+    uint16 inflight_segs;  // Number of device requests issued for this bio
+    uint16 completed_segs; // Number of device requests completed
     uint64 blkno;       // Starting block number in the blkdev
     struct {
         uint64 valid

@@ -45,9 +45,13 @@
 #include "printf.h"
 #include "proc/thread.h"
 #include "errno.h"
+#include "kstats.h"
 #include <vfs/file.h>
 #include <vfs/fs.h>
 #include <dev/bio.h>
+
+#define VM_FILE_FAULT_AROUND_PAGES 16
+#define VM_MMAP_EAGER_PAGES 32
 
 /* ========================================================================== */
 /*  Slab pools                                                                */
@@ -204,6 +208,7 @@ static void __vma_set_free(vma_t *vma)
     int shared_file_wb =
         (vma->file != NULL) && (vma->flags & VMA_FLAG_SHARED) &&
         (vma->flags & VMA_FLAG_FILE);
+    int tlb_needs_flush = 0;
 
     if (vma->vm->pagetable != NULL) {
         pagetable_t pagetable = vma->vm->pagetable;
@@ -218,7 +223,7 @@ static void __vma_set_free(vma_t *vma)
             uint64 pa = pte_pa(pte);
             int was_dirty = pte_dirty(pte);
             pte_clear(pte);
-            vm_remote_sfence(vma->vm);
+            tlb_needs_flush = 1;
 
             /* Write dirty pages back for MAP_SHARED file mappings. */
             if (shared_file_wb && was_dirty)
@@ -234,6 +239,8 @@ static void __vma_set_free(vma_t *vma)
                 page_ref_dec((void *)pa);
             }
         }
+        if (tlb_needs_flush)
+            vm_remote_sfence(vma->vm);
     }
 
     if (vma->file != NULL)
@@ -529,6 +536,28 @@ static inline vma_t *__get_vma_right(vma_t *vma)
     if (vma == NULL || vma->vm == NULL)
         return NULL;
     return (vma_t *)mt_next(&vma->vm->vm_mt, vma->end - 1, MAPLE_MAX);
+}
+
+static vma_t *__vma_try_merge_neighbors(vma_t *vma)
+{
+    if (vma == NULL)
+        return NULL;
+
+    vma_t *left = __get_vma_left(vma);
+    if (left != NULL) {
+        vma_t *merged = vma_merge(left, vma);
+        if (merged != NULL)
+            vma = merged;
+    }
+
+    vma_t *right = __get_vma_right(vma);
+    if (right != NULL) {
+        vma_t *merged = vma_merge(vma, right);
+        if (merged != NULL)
+            vma = merged;
+    }
+
+    return vma;
 }
 
 vma_t *vm_find_area(vm_t *vm, uint64 va)
@@ -925,6 +954,9 @@ static int __vma_validate_pte(vma_t *vma, pte_t *pte, uint64 flags, uint64 fault
 
 int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
 {
+    uint64 validate_start = r_time();
+    __atomic_fetch_add(&g_vm_vma_validate_calls, 1, __ATOMIC_RELAXED);
+
     if (flags == PROT_NONE)
         return -EINVAL;
     if (vma == NULL || vma->vm == NULL || vma->vm->pagetable == NULL)
@@ -972,61 +1004,73 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
             if (*pte == 0) {
                 vm_pgtable_unlock(vma->vm);
 
-                void *pa;
-                if (vma->file->ops != NULL && vma->file->ops->fault != NULL)
-                    pa = vma->file->ops->fault(vma->file, vma, i);
-                else
-                    pa = __vma_fault_file_page(vma, i);
-                if (pa == NULL)
-                    return -ENOMEM;
+                uint64 fault_end = i + VM_FILE_FAULT_AROUND_PAGES * PGSIZE;
+                if (fault_end > va_end)
+                    fault_end = va_end;
+                if (fault_end > vma->end)
+                    fault_end = vma->end;
 
-                /*
-                 * Detect zero-copy pcache page: the fault handler may
-                 * return a pcache page PA directly (PAGE_TYPE_PCACHE),
-                 * with an extra pcache ref held to pin it.
-                 *
-                 * For MAP_PRIVATE VMAs, pcache pages are always mapped
-                 * read-only so that a subsequent write fault triggers
-                 * COW (copy to an anonymous page).  MAP_SHARED pages
-                 * keep the VMA's original flags.
-                 */
-                page_t *fault_pg = __pa_to_page((uint64)pa);
-                int is_pcache = (fault_pg != NULL &&
-                                 PAGE_IS_TYPE(fault_pg, PAGE_TYPE_PCACHE));
+                if (vma->file->ops != NULL &&
+                    vma->file->ops->prefault != NULL)
+                    (void)vma->file->ops->prefault(vma->file, vma, i,
+                                                   fault_end);
 
-                vm_pgtable_lock(vma->vm);
-                pte = walk(vma->vm->pagetable, i, 1, NULL, NULL);
-                if (pte == NULL) {
+                for (uint64 fault_va = i; fault_va < fault_end;
+                     fault_va += PGSIZE) {
+                    vm_pgtable_lock(vma->vm);
+                    pte = walk(vma->vm->pagetable, fault_va, 1, NULL, NULL);
+                    if (pte == NULL) {
+                        vm_pgtable_unlock(vma->vm);
+                        return -ENOMEM;
+                    }
+                    if (*pte != 0) {
+                        vm_pgtable_unlock(vma->vm);
+                        continue;
+                    }
                     vm_pgtable_unlock(vma->vm);
-                    if (is_pcache)
-                        pcache_put_page(fault_pg->pcache.pcache, fault_pg);
+
+                    void *pa;
+                    __atomic_fetch_add(&g_vm_file_faults, 1,
+                                       __ATOMIC_RELAXED);
+                    if (vma->file->ops != NULL && vma->file->ops->fault != NULL)
+                        pa = vma->file->ops->fault(vma->file, vma, fault_va);
                     else
-                        page_free(pa, 0);
-                    return -ENOMEM;
+                        pa = __vma_fault_file_page(vma, fault_va);
+                    if (pa == NULL)
+                        return -ENOMEM;
+
+                    page_t *fault_pg = __pa_to_page((uint64)pa);
+                    int is_pcache = (fault_pg != NULL &&
+                                     PAGE_IS_TYPE(fault_pg, PAGE_TYPE_PCACHE));
+
+                    vm_pgtable_lock(vma->vm);
+                    pte = walk(vma->vm->pagetable, fault_va, 1, NULL, NULL);
+                    if (pte == NULL) {
+                        vm_pgtable_unlock(vma->vm);
+                        if (is_pcache)
+                            pcache_put_page(fault_pg->pcache.pcache, fault_pg);
+                        else
+                            page_free(pa, 0);
+                        return -ENOMEM;
+                    }
+                    if (*pte != 0) {
+                        if (is_pcache)
+                            pcache_put_page(fault_pg->pcache.pcache, fault_pg);
+                        else
+                            page_free(pa, 0);
+                    } else {
+                        uint64 pte_flags = vma->flags;
+                        if (is_pcache && !(vma->flags & VMA_FLAG_SHARED))
+                            pte_flags &= ~PROT_WRITE;
+                        *pte = mk_pte((uint64)pa, pte_flags);
+                        if (is_pcache)
+                            pte_mkclean(pte);
+                        sfence_vma_page(fault_va);
+                    }
+                    vm_pgtable_unlock(vma->vm);
                 }
-                if (*pte != 0) {
-                    /* Another thread populated this PTE while we dropped
-                     * the lock — discard the page we just faulted in. */
-                    if (is_pcache)
-                        pcache_put_page(fault_pg->pcache.pcache, fault_pg);
-                    else
-                        page_free(pa, 0);
-                } else {
-                    uint64 pte_flags = vma->flags;
-                    if (is_pcache && !(vma->flags & VMA_FLAG_SHARED))
-                        pte_flags &= ~PROT_WRITE; /* read-only for COW */
-                    *pte = mk_pte((uint64)pa, pte_flags);
-                    /*
-                     * Clear the dirty bit on file-backed user pcache pages
-                     * so the first write traps and lets us mark the pcache
-                     * node dirty.  For MAP_PRIVATE this is redundant (W is
-                     * already stripped), but for MAP_SHARED writable pages
-                     * it ensures we track dirty state via the D bit.
-                     */
-                    if (is_pcache)
-                        pte_mkclean(pte);
-                    sfence_vma_page(i);
-                }
+                vm_pgtable_lock(vma->vm);
+                i = fault_end - PGSIZE;
                 continue;
             }
             if (__vma_validate_pte(vma, pte, flags, i) != 0) {
@@ -1049,6 +1093,8 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
     }
 
     vm_pgtable_unlock(vma->vm);
+    __atomic_fetch_add(&g_vm_vma_validate_ticks, r_time() - validate_start,
+                       __ATOMIC_RELAXED);
     return 0;
 }
 
@@ -1058,7 +1104,13 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
 
 int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
 {
+    uint64 copy_start = r_time();
+    __atomic_fetch_add(&g_vm_copyout_calls, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_vm_copyout_bytes, len, __ATOMIC_RELAXED);
+
     uint64 n, va0, pa0;
+    uint64 validated_end = 0;
+    vma_t *vma = NULL;
     pte_t *pte;
     int ret = 0;
 
@@ -1069,16 +1121,36 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
             ret = -EFAULT;
             goto out;
         }
-        vma_t *vma = vm_find_area(vm, va0);
+
+        if (vma == NULL || dstva >= validated_end ||
+            va0 < vma->start || va0 >= vma->end) {
+            vma = vm_find_area(vm, va0);
+            if (vma != NULL) {
+                uint64 chunk_end = vma->end;
+                uint64 req_end = PGROUNDUP(dstva + len);
+                if (chunk_end > req_end)
+                    chunk_end = req_end;
+                validated_end = chunk_end;
+            }
+        }
+
         if (vma == NULL ||
-            vma_validate(vma, va0, PGSIZE, VMA_FLAG_USER | PROT_WRITE) != 0) {
+            vma_validate(vma, va0, validated_end - va0,
+                         VMA_FLAG_USER | PROT_WRITE) != 0) {
             if (va0 >= USTACK_MAX_BOTTOM && va0 < USTACKTOP) {
                 vm_runlock(vm);
                 if (vm_try_growstack(vm, va0) == 0) {
                     vm_rlock(vm);
                     vma = vm_find_area(vm, va0);
+                    if (vma != NULL) {
+                        uint64 chunk_end = vma->end;
+                        uint64 req_end = PGROUNDUP(dstva + len);
+                        if (chunk_end > req_end)
+                            chunk_end = req_end;
+                        validated_end = chunk_end;
+                    }
                     if (vma != NULL &&
-                        vma_validate(vma, va0, PGSIZE,
+                        vma_validate(vma, va0, validated_end - va0,
                                      VMA_FLAG_USER | PROT_WRITE) == 0)
                         goto copyout_ok;
                 }
@@ -1093,6 +1165,8 @@ copyout_ok:
 
         pa0 = pte_pa(pte);
         n = PGSIZE - (dstva - va0);
+        if (dstva + n > validated_end)
+            n = validated_end - dstva;
         if (n > len)
             n = len;
         memmove((void *)(pa0 + (dstva - va0)), src, n);
@@ -1102,28 +1176,55 @@ copyout_ok:
         dstva = va0 + PGSIZE;
     }
 out:
+    __atomic_fetch_add(&g_vm_copyout_ticks, r_time() - copy_start,
+                       __ATOMIC_RELAXED);
     vm_runlock(vm);
     return ret;
 }
 
 int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len)
 {
+    uint64 copy_start = r_time();
+    __atomic_fetch_add(&g_vm_copyin_calls, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_vm_copyin_bytes, len, __ATOMIC_RELAXED);
+
     uint64 n, va0, pa0;
+    uint64 validated_end = 0;
+    vma_t *vma = NULL;
     int ret = 0;
     vm_rlock(vm);
 
     while (len > 0) {
         va0 = PGROUNDDOWN(srcva);
-        vma_t *vma = vm_find_area(vm, va0);
+        if (vma == NULL || srcva >= validated_end ||
+            va0 < vma->start || va0 >= vma->end) {
+            vma = vm_find_area(vm, va0);
+            if (vma != NULL) {
+                uint64 chunk_end = vma->end;
+                uint64 req_end = PGROUNDUP(srcva + len);
+                if (chunk_end > req_end)
+                    chunk_end = req_end;
+                validated_end = chunk_end;
+            }
+        }
+
         if (vma == NULL ||
-            vma_validate(vma, va0, PGSIZE, VMA_FLAG_USER | PROT_READ) != 0) {
+            vma_validate(vma, va0, validated_end - va0,
+                         VMA_FLAG_USER | PROT_READ) != 0) {
             if (va0 >= USTACK_MAX_BOTTOM && va0 < USTACKTOP) {
                 vm_runlock(vm);
                 if (vm_try_growstack(vm, va0) == 0) {
                     vm_rlock(vm);
                     vma = vm_find_area(vm, va0);
+                    if (vma != NULL) {
+                        uint64 chunk_end = vma->end;
+                        uint64 req_end = PGROUNDUP(srcva + len);
+                        if (chunk_end > req_end)
+                            chunk_end = req_end;
+                        validated_end = chunk_end;
+                    }
                     if (vma != NULL &&
-                        vma_validate(vma, va0, PGSIZE,
+                        vma_validate(vma, va0, validated_end - va0,
                                      VMA_FLAG_USER | PROT_READ) == 0)
                         goto copyin_ok;
                 }
@@ -1139,6 +1240,8 @@ copyin_ok:
             goto out;
         }
         n = PGSIZE - (srcva - va0);
+        if (srcva + n > validated_end)
+            n = validated_end - srcva;
         if (n > len)
             n = len;
         memmove(dst, (void *)(pa0 + (srcva - va0)), n);
@@ -1148,6 +1251,8 @@ copyin_ok:
         srcva = va0 + PGSIZE;
     }
 out:
+    __atomic_fetch_add(&g_vm_copyin_ticks, r_time() - copy_start,
+                       __ATOMIC_RELAXED);
     vm_runlock(vm);
     return ret;
 }
@@ -2214,6 +2319,20 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
     if (file != NULL) {
         vma->file = file;
         vma->pgoff = offset;
+    }
+
+    vma = __vma_try_merge_neighbors(vma);
+
+    if (file != NULL && !(vm_flags & PROT_WRITE) &&
+        (vm_flags & (PROT_READ | PROT_EXEC))) {
+        uint64 eager_len = length;
+        uint64 eager_max = VM_MMAP_EAGER_PAGES * PGSIZE;
+        uint64 eager_flags = VMA_FLAG_USER | (vm_flags & (PROT_READ | PROT_EXEC));
+
+        if (eager_len > eager_max)
+            eager_len = eager_max;
+        if (eager_len != 0)
+            (void)vma_validate(vma, map_addr, eager_len, eager_flags);
     }
 
     vm_wunlock(vm);

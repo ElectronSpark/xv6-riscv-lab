@@ -27,6 +27,9 @@
 #include "memlayout.h"
 #include "ksymbols.h"
 
+#define USER_FAULT_AROUND_PAGES 16UL
+#define USER_FAULT_AROUND_SIZE  (USER_FAULT_AROUND_PAGES * PGSIZE)
+
 extern pagetable_t kernel_pagetable;
 
 /* ── Provided by trapvec.S — table of 256 stub addresses ── */
@@ -607,13 +610,23 @@ void x86_trap_handler(struct trapframe *tf) {
              */
             int is_write = (tf->err & 0x2);
             uint64 prot = VMA_FLAG_USER | (is_write ? PROT_WRITE : PROT_READ);
+            uint64 fault_base = PGROUNDDOWN(cr2);
+            uint64 fault_len = is_write ? 1 : USER_FAULT_AROUND_SIZE;
 
             /* Try growing the stack first */
             vm_try_growstack(current->vm, cr2);
 
             vm_rlock(current->vm);
             vma_t *vma = vm_find_area(current->vm, cr2);
-            if (vma != NULL && vma_validate(vma, cr2, 1, prot) == 0) {
+            if (vma != NULL && !is_write) {
+                if (fault_base >= vma->end)
+                    fault_len = PGSIZE;
+                else if (fault_base + fault_len > vma->end)
+                    fault_len = vma->end - fault_base;
+            }
+            if (vma != NULL &&
+                vma_validate(vma, is_write ? cr2 : fault_base,
+                             fault_len, prot) == 0) {
                 vm_runlock(current->vm);
                 goto user_return; /* fault resolved */
             }

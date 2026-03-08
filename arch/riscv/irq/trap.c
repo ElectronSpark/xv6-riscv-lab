@@ -16,6 +16,9 @@
 #include "trapframe.h"
 #include "trap.h"
 
+#define USER_FAULT_AROUND_PAGES 16UL
+#define USER_FAULT_AROUND_SIZE  (USER_FAULT_AROUND_PAGES * PGSIZE)
+
 extern char trampoline[], uservec[], userret[], _data_ktlb[];
 extern uint64 trampoline_uservec;
 
@@ -237,8 +240,17 @@ void usertrap(void) {
         va = current->trapframe->trapframe.stval;
         vm_rlock(current->vm);
         vma = vm_find_area(current->vm, va);
+        uint64 fault_len = USER_FAULT_AROUND_SIZE;
+        uint64 fault_base = PGROUNDDOWN(va);
+        if (vma != NULL) {
+            if (fault_base >= vma->end)
+                fault_len = PGSIZE;
+            else if (fault_base + fault_len > vma->end)
+                fault_len = vma->end - fault_base;
+        }
         if (vma != NULL &&
-            vma_validate(vma, va, 1, VMA_FLAG_USER | PROT_EXEC | PROT_READ) ==
+            vma_validate(vma, fault_base, fault_len,
+                         VMA_FLAG_USER | PROT_EXEC | PROT_READ) ==
                 0) {
             vm_runlock(current->vm);
             // fence.i will be invoked in trampoline return
@@ -273,8 +285,17 @@ void usertrap(void) {
         // needing demand paging). Hold vm_rlock to protect VMA tree traversal.
         vm_rlock(current->vm);
         vma = vm_find_area(current->vm, va);
+        fault_len = USER_FAULT_AROUND_SIZE;
+        fault_base = PGROUNDDOWN(va);
+        if (vma != NULL) {
+            if (fault_base >= vma->end)
+                fault_len = PGSIZE;
+            else if (fault_base + fault_len > vma->end)
+                fault_len = vma->end - fault_base;
+        }
         if (vma != NULL &&
-            vma_validate(vma, va, 1, VMA_FLAG_USER | PROT_READ) == 0) {
+            vma_validate(vma, fault_base, fault_len,
+                         VMA_FLAG_USER | PROT_READ) == 0) {
             vm_runlock(current->vm);
             break;
         }

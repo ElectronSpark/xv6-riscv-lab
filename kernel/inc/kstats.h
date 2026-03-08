@@ -59,6 +59,75 @@ struct kstats {
     uint64 net_tx_bytes;      /**< bytes transmitted                  */
     uint64 net_rx_packets;    /**< packets received                   */
     uint64 net_rx_bytes;      /**< bytes received                     */
+
+    /* ── VFS lookup hot path ────────────────────────────────────── */
+    uint64 vfs_lookup_calls;
+    uint64 vfs_lookup_dcache_hits;
+    uint64 vfs_lookup_negative_hits;
+    uint64 vfs_lookup_cache_misses;
+    uint64 vfs_lookup_driver_calls;
+    uint64 vfs_lookup_driver_ticks;
+
+    /* ── VM user-copy / fault path ──────────────────────────────── */
+    uint64 vm_copyin_calls;
+    uint64 vm_copyout_calls;
+    uint64 vm_copyin_bytes;
+    uint64 vm_copyout_bytes;
+    uint64 vm_vma_validate_calls;
+    uint64 vm_vma_validate_ticks;
+    uint64 vm_file_faults;
+    uint64 vm_copyin_ticks;
+    uint64 vm_copyout_ticks;
+
+    /* ── ext4 import/read hot path ──────────────────────────────── */
+    uint64 ext4_pcache_read_page_calls;
+    uint64 ext4_pcache_pages_filled;
+    uint64 ext4_pcache_readahead_pages;
+    uint64 ext4_pcache_read_page_ticks;
+    uint64 ext4_fault_calls;
+    uint64 ext4_fault_zero_copy;
+    uint64 ext4_fault_partial_copy;
+    uint64 ext4_fault_ticks;
+
+    /* ── Startup syscall / exec path ────────────────────────────── */
+    uint64 sys_open_calls;
+    uint64 sys_open_ticks;
+    uint64 sys_fstat_calls;
+    uint64 sys_fstat_ticks;
+    uint64 sys_lseek_calls;
+    uint64 sys_lseek_ticks;
+    uint64 sys_pread64_calls;
+    uint64 sys_pread64_ticks;
+    uint64 sys_openat_calls;
+    uint64 sys_openat_ticks;
+    uint64 sys_fstatat_calls;
+    uint64 sys_fstatat_ticks;
+    uint64 sys_faccessat_calls;
+    uint64 sys_faccessat_ticks;
+    uint64 sys_read_calls;
+    uint64 sys_read_ticks;
+    uint64 sys_readv_calls;
+    uint64 sys_readv_ticks;
+    uint64 sys_getdents_calls;
+    uint64 sys_getdents_ticks;
+    uint64 sys_readlinkat_calls;
+    uint64 sys_readlinkat_ticks;
+    uint64 sys_mmap_calls;
+    uint64 sys_mmap_ticks;
+    uint64 sys_munmap_calls;
+    uint64 sys_munmap_ticks;
+    uint64 sys_mprotect_calls;
+    uint64 sys_mprotect_ticks;
+    uint64 sys_brk_calls;
+    uint64 sys_brk_ticks;
+    uint64 sys_clock_gettime_calls;
+    uint64 sys_clock_gettime_ticks;
+    uint64 sys_gettimeofday_calls;
+    uint64 sys_gettimeofday_ticks;
+    uint64 sys_getrandom_calls;
+    uint64 sys_getrandom_ticks;
+    uint64 exec_calls;
+    uint64 exec_ticks;
 };
 
 /* ------------------------------------------------------------------ */
@@ -74,6 +143,71 @@ extern _Atomic uint64 g_net_tx_packets;
 extern _Atomic uint64 g_net_tx_bytes;
 extern _Atomic uint64 g_net_rx_packets;
 extern _Atomic uint64 g_net_rx_bytes;
+
+extern _Atomic uint64 g_vfs_lookup_calls;
+extern _Atomic uint64 g_vfs_lookup_dcache_hits;
+extern _Atomic uint64 g_vfs_lookup_negative_hits;
+extern _Atomic uint64 g_vfs_lookup_cache_misses;
+extern _Atomic uint64 g_vfs_lookup_driver_calls;
+extern _Atomic uint64 g_vfs_lookup_driver_ticks;
+
+extern _Atomic uint64 g_vm_copyin_calls;
+extern _Atomic uint64 g_vm_copyout_calls;
+extern _Atomic uint64 g_vm_copyin_bytes;
+extern _Atomic uint64 g_vm_copyout_bytes;
+extern _Atomic uint64 g_vm_vma_validate_calls;
+extern _Atomic uint64 g_vm_vma_validate_ticks;
+extern _Atomic uint64 g_vm_file_faults;
+extern _Atomic uint64 g_vm_copyin_ticks;
+extern _Atomic uint64 g_vm_copyout_ticks;
+
+extern _Atomic uint64 g_ext4_pcache_read_page_calls;
+extern _Atomic uint64 g_ext4_pcache_pages_filled;
+extern _Atomic uint64 g_ext4_pcache_readahead_pages;
+extern _Atomic uint64 g_ext4_pcache_read_page_ticks;
+extern _Atomic uint64 g_ext4_fault_calls;
+extern _Atomic uint64 g_ext4_fault_zero_copy;
+extern _Atomic uint64 g_ext4_fault_partial_copy;
+extern _Atomic uint64 g_ext4_fault_ticks;
+
+extern _Atomic uint64 g_sys_open_calls;
+extern _Atomic uint64 g_sys_open_ticks;
+extern _Atomic uint64 g_sys_fstat_calls;
+extern _Atomic uint64 g_sys_fstat_ticks;
+extern _Atomic uint64 g_sys_lseek_calls;
+extern _Atomic uint64 g_sys_lseek_ticks;
+extern _Atomic uint64 g_sys_pread64_calls;
+extern _Atomic uint64 g_sys_pread64_ticks;
+extern _Atomic uint64 g_sys_openat_calls;
+extern _Atomic uint64 g_sys_openat_ticks;
+extern _Atomic uint64 g_sys_fstatat_calls;
+extern _Atomic uint64 g_sys_fstatat_ticks;
+extern _Atomic uint64 g_sys_faccessat_calls;
+extern _Atomic uint64 g_sys_faccessat_ticks;
+extern _Atomic uint64 g_sys_read_calls;
+extern _Atomic uint64 g_sys_read_ticks;
+extern _Atomic uint64 g_sys_readv_calls;
+extern _Atomic uint64 g_sys_readv_ticks;
+extern _Atomic uint64 g_sys_getdents_calls;
+extern _Atomic uint64 g_sys_getdents_ticks;
+extern _Atomic uint64 g_sys_readlinkat_calls;
+extern _Atomic uint64 g_sys_readlinkat_ticks;
+extern _Atomic uint64 g_sys_mmap_calls;
+extern _Atomic uint64 g_sys_mmap_ticks;
+extern _Atomic uint64 g_sys_munmap_calls;
+extern _Atomic uint64 g_sys_munmap_ticks;
+extern _Atomic uint64 g_sys_mprotect_calls;
+extern _Atomic uint64 g_sys_mprotect_ticks;
+extern _Atomic uint64 g_sys_brk_calls;
+extern _Atomic uint64 g_sys_brk_ticks;
+extern _Atomic uint64 g_sys_clock_gettime_calls;
+extern _Atomic uint64 g_sys_clock_gettime_ticks;
+extern _Atomic uint64 g_sys_gettimeofday_calls;
+extern _Atomic uint64 g_sys_gettimeofday_ticks;
+extern _Atomic uint64 g_sys_getrandom_calls;
+extern _Atomic uint64 g_sys_getrandom_ticks;
+extern _Atomic uint64 g_exec_calls;
+extern _Atomic uint64 g_exec_ticks;
 
 /* ------------------------------------------------------------------ */
 /*  API                                                               */

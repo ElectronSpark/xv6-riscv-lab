@@ -1,5 +1,6 @@
 add_library(vfs_core OBJECT
     fs.c
+    dcache.c
     inode.c
     file.c
     file_lock.c

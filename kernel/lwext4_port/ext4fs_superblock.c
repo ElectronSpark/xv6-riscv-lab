@@ -124,6 +124,7 @@ struct vfs_inode *ext4fs_alloc_inode(struct vfs_superblock *sb)
         return ERR_PTR(-ENOMEM);
     }
     memset(ei, 0, sizeof(*ei));
+    ext4fs_inode_map_cache_init(ei);
 
     ei->vfs_inode.ino       = ref.index;
     ei->vfs_inode.ops       = &ext4fs_inode_ops;
@@ -168,6 +169,7 @@ struct vfs_inode *ext4fs_get_inode(struct vfs_superblock *sb, uint64 ino)
         return ERR_PTR(-ENOMEM);
     }
     memset(ei, 0, sizeof(*ei));
+    ext4fs_inode_map_cache_init(ei);
 
     ei->vfs_inode.ref_count = 1;
     ext4fs_fill_vfs_inode(&ei->vfs_inode, &ref, &fs->sb);

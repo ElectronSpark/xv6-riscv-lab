@@ -15,9 +15,23 @@
 #include <mm/vm.h>
 #include "accounting.h"
 #include "diag.h"
+#include "kstats.h"
+
+#define SYSCALL_PROFILE_BEGIN(call_ctr)                                     \
+    uint64 __sys_start = r_time();                                          \
+    __atomic_add_fetch(&(call_ctr), 1, __ATOMIC_RELAXED)
+
+#define SYSCALL_PROFILE_RETURN(ret_expr, tick_ctr)                          \
+    do {                                                                    \
+        uint64 __sys_ret = (uint64)(ret_expr);                              \
+        __atomic_add_fetch(&(tick_ctr), r_time() - __sys_start,             \
+                           __ATOMIC_RELAXED);                               \
+        return __sys_ret;                                                   \
+    } while (0)
 
 // mmap(addr, length, prot, flags, fd, offset)
 uint64 sys_mmap(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_mmap_calls);
     uint64 addr, offset, length;
     int prot, flags, fd;
 
@@ -34,18 +48,19 @@ uint64 sys_mmap(void) {
     }
     // dprintf("pid %d %s: mmap(addr=0x%lx, len=0x%lx, prot=%d, flags=0x%x, fd=%d) = 0x%lx\n",
     //        current->pid, current->name, addr, length, prot, flags, fd, ret);
-    return ret;
+    SYSCALL_PROFILE_RETURN(ret, g_sys_mmap_ticks);
 }
 
 // munmap(addr, length)
 uint64 sys_munmap(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_munmap_calls);
     uint64 addr, length;
 
     argaddr(0, &addr);
     argaddr(1, &length);
 
     if (length == 0)
-        return -EINVAL;
+        SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_munmap_ticks);
 
     // dprintf("pid %d %s: munmap(addr=0x%lx, len=0x%lx)\n",
     //        current->pid, current->name, addr, length);
@@ -53,11 +68,12 @@ uint64 sys_munmap(void) {
     if (ret == 0)
         ACCT_INC(current->thread_group, mm_munmap_count);
     // dprintf("pid %d %s: munmap -> %d\n", current->pid, current->name, ret);
-    return (uint64)ret;
+    SYSCALL_PROFILE_RETURN(ret, g_sys_munmap_ticks);
 }
 
 // mprotect(addr, length, prot)
 uint64 sys_mprotect(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_mprotect_calls);
     uint64 addr, length;
     int prot;
 
@@ -66,12 +82,12 @@ uint64 sys_mprotect(void) {
     argint(2, &prot);
 
     if (length == 0)
-        return -EINVAL;
+        SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_mprotect_ticks);
 
     int ret = vm_mprotect(current->vm, addr, (size_t)length, prot);
     // dprintf("pid %d %s: mprotect(addr=0x%lx, len=0x%lx, prot=%d) = %d\n",
     //        current->pid, current->name, addr, length, prot, ret);
-    return (uint64)ret;
+    SYSCALL_PROFILE_RETURN(ret, g_sys_mprotect_ticks);
 }
 
 // mremap(old_addr, old_size, new_size, flags, new_addr)

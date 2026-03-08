@@ -275,6 +275,7 @@ struct vfs_inode {
     struct vfs_inode
         *parent; // parent inode for directories (self for root inodes)
     char *name;  // directory name (for directories only, NULL for root)
+    uint64 lookup_seq; // bumps on directory entry changes to invalidate dcache
     union {
         uint32 cdev; // for character device inode
         uint32 bdev; // for block device inode
@@ -438,6 +439,25 @@ struct vfs_file_ops {
      * If this callback is NULL the VM uses its generic page-cache fault path.
      */
     void *(*fault)(struct vfs_file *file, struct vma *vma, uint64 va);
+
+    /*
+     * prefault - Best-effort batch warmup for file-backed fault-around
+     * @file:     the file being mapped
+     * @vma:      the VMA owning the range
+     * @start_va: first page-aligned VA in the range
+     * @end_va:   end of range (exclusive, page-aligned)
+     *
+     * Optional. Called without the vm pgtable spinlock held, with the vm
+     * read lock held. Implementations may populate filesystem/page-cache
+     * state for multiple pages at once so subsequent per-page fault callbacks
+     * hit a hot cache.
+     *
+     * Returns 0 on success or a negative errno on failure. Callers treat this
+     * as a best-effort optimization and may still fall back to per-page fault
+     * handling afterward.
+     */
+    int (*prefault)(struct vfs_file *file, struct vma *vma,
+                    uint64 start_va, uint64 end_va);
 
     /*
      * writepage - Write back a dirty page to the file at a given offset.

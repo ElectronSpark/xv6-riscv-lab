@@ -22,6 +22,10 @@
 #include "lock/mutex_types.h"
 #include <mm/vm.h>
 #include <mm/page.h>
+#include <mm/pcache.h>
+#include <smp/atomic.h>
+#include "proc/tq.h"
+#include "timer/timer.h"
 #include "vfs/fs.h"
 #include "vfs/stat.h"
 #include "vfs/fcntl.h"
@@ -36,6 +40,420 @@
 #include <ext4_bcache.h>
 
 #include "timer/goldfish_rtc.h"
+#include "kstats.h"
+
+static ssize_t ext4fs_file_readv(struct vfs_file *file, struct iov_iter *iter,
+                                 bool user);
+
+#define EXT4FS_BLKS_PER_PAGE ((uint64)(PGSIZE / 512))
+#define EXT4FS_FAULT_READAHEAD_PAGES 2
+#define EXT4FS_MAP_CACHE_BLOCKS 32
+
+static inline uint64 ext4fs_pcache_blk_count(loff_t size)
+{
+    uint64 pages = ((uint64)size + PGSIZE - 1) / PGSIZE;
+    if (pages == 0)
+        pages = 1;
+    return pages * EXT4FS_BLKS_PER_PAGE;
+}
+
+static void ext4fs_pcache_readahead(struct pcache *pc, uint64 start_blkno_512,
+                                    uint64 limit_blkno_512, int nr_pages)
+{
+    if (pc == NULL || !pc->active || nr_pages <= 0)
+        return;
+
+    for (int i = 0; i < nr_pages; i++) {
+        uint64 blkno_512 = start_blkno_512 +
+                           (uint64)i * EXT4FS_BLKS_PER_PAGE;
+        if (blkno_512 >= limit_blkno_512)
+            break;
+
+        page_t *page = pcache_get_page(pc, blkno_512);
+        if (page == NULL)
+            break;
+
+        (void)pcache_read_page(pc, page);
+        pcache_put_page(pc, page);
+    }
+}
+
+static int ext4fs_fill_page_from_ref(struct ext4_fs *fs,
+                                     struct ext4fs_superblock *esb,
+                                     struct vfs_inode *inode,
+                                     struct ext4_inode_ref *ref,
+                                     void *dst,
+                                     uint64 file_off,
+                                     uint64 inode_size)
+{
+    uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+    uint64 done = 0;
+
+    if (file_off >= inode_size) {
+        memset(dst, 0, PGSIZE);
+        return 0;
+    }
+
+    uint64 bytes_to_read = PGSIZE;
+    if (file_off + PGSIZE > inode_size)
+        bytes_to_read = inode_size - file_off;
+
+    while (done < bytes_to_read) {
+        ext4_lblk_t iblock = (ext4_lblk_t)((file_off + done) / block_size);
+        uint off = (uint)((file_off + done) % block_size);
+        uint n = block_size - off;
+        if (n > bytes_to_read - done)
+            n = (uint)(bytes_to_read - done);
+
+        ext4_fsblk_t fblock;
+        int r;
+        struct ext4fs_inode *ei = ext4fs_inode_from_vfs(inode);
+
+        if (ei != NULL) {
+            int hit = 0;
+
+            spin_lock(&ei->map_cache.lock);
+            if (ei->map_cache.valid && iblock >= ei->map_cache.lblk_start &&
+                iblock < ei->map_cache.lblk_start + ei->map_cache.len) {
+                if (ei->map_cache.hole)
+                    fblock = 0;
+                else
+                    fblock = (ext4_fsblk_t)(ei->map_cache.pblk_start +
+                                            (iblock - ei->map_cache.lblk_start));
+                hit = 1;
+            }
+            spin_unlock(&ei->map_cache.lock);
+
+            if (!hit) {
+                ext4_fsblk_t first_fblock;
+                uint32 run_len = 1;
+
+                r = ext4_fs_get_inode_dblk_idx(ref, iblock, &first_fblock, true);
+                if (r != EOK)
+                    return -r;
+
+                for (ext4_lblk_t next = iblock + 1;
+                     next < iblock + EXT4FS_MAP_CACHE_BLOCKS; next++) {
+                    ext4_fsblk_t next_fblock;
+                    r = ext4_fs_get_inode_dblk_idx(ref, next, &next_fblock, true);
+                    if (r != EOK)
+                        break;
+                    if (first_fblock == 0) {
+                        if (next_fblock != 0)
+                            break;
+                    } else if (next_fblock != first_fblock + (next - iblock)) {
+                        break;
+                    }
+                    run_len++;
+                }
+
+                spin_lock(&ei->map_cache.lock);
+                ei->map_cache.lblk_start = iblock;
+                ei->map_cache.pblk_start = first_fblock;
+                ei->map_cache.len = run_len;
+                ei->map_cache.valid = 1;
+                ei->map_cache.hole = (first_fblock == 0);
+                spin_unlock(&ei->map_cache.lock);
+
+                fblock = first_fblock;
+            }
+        } else {
+            r = ext4_fs_get_inode_dblk_idx(ref, iblock, &fblock, true);
+            if (r != EOK)
+                return -r;
+        }
+
+        if (fblock == 0) {
+            memset((char *)dst + done, 0, n);
+        } else {
+            struct ext4_block blk;
+            r = ext4_block_get(&esb->bdev, &blk, fblock);
+            if (r != EOK)
+                return -EIO;
+            memcpy((char *)dst + done, (char *)blk.data + off, n);
+            ext4_block_set(&esb->bdev, &blk);
+        }
+
+        done += n;
+    }
+
+    if (bytes_to_read < PGSIZE)
+        memset((char *)dst + bytes_to_read, 0, PGSIZE - bytes_to_read);
+
+    return 0;
+}
+
+static int ext4fs_prefault_begin_page(struct pcache *pc, page_t *page,
+                                      struct pcache_node **out_node)
+{
+    int ret = 0;
+
+    spin_lock(&pc->spinlock);
+    page_lock_acquire(page);
+
+    if (page->pcache.pcache != pc || page->pcache.pcache_node == NULL) {
+        ret = -EINVAL;
+        goto out;
+    }
+
+    struct pcache_node *pcn = page->pcache.pcache_node;
+    if (pcn->uptodate) {
+        ret = 1;
+        goto out;
+    }
+    if (pcn->io_in_progress) {
+        ret = 2;
+        goto out;
+    }
+
+    pcn->io_in_progress = 1;
+    pcn->last_request = get_jiffs();
+    *out_node = pcn;
+
+out:
+    page_lock_release(page);
+    spin_unlock(&pc->spinlock);
+    return ret;
+}
+
+static void ext4fs_prefault_end_page(struct pcache *pc, page_t *page,
+                                     int uptodate)
+{
+    spin_lock(&pc->spinlock);
+    page_lock_acquire(page);
+
+    if (page->pcache.pcache == pc && page->pcache.pcache_node != NULL) {
+        struct pcache_node *pcn = page->pcache.pcache_node;
+        if (uptodate) {
+            pcn->dirty = 0;
+            pcn->uptodate = 1;
+        }
+        pcn->io_in_progress = 0;
+        pcn->last_flushed = get_jiffs();
+        tq_wakeup_all(&pcn->io_waiters, 0, 0);
+    }
+
+    page_lock_release(page);
+    spin_unlock(&pc->spinlock);
+}
+
+static int ext4fs_pcache_read_page(struct pcache *pcache, page_t *page)
+{
+    uint64 read_start = r_time();
+    __atomic_fetch_add(&g_ext4_pcache_read_page_calls, 1, __ATOMIC_RELAXED);
+
+    struct vfs_inode *inode = (struct vfs_inode *)pcache->private_data;
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+    if (inode == NULL || inode->sb == NULL || pcnode == NULL)
+        return -EINVAL;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+    uint64 file_off = pcnode->blkno * 512ULL;
+    uint64 inode_size = (uint64)inode->size;
+
+    ext4fs_lock(esb);
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        return -r;
+    }
+
+    r = ext4fs_fill_page_from_ref(fs, esb, inode, &ref, pcnode->data,
+                                  file_off, inode_size);
+
+    ext4_fs_put_inode_ref(&ref);
+    ext4fs_unlock(esb);
+
+    if (r != 0)
+        return r;
+
+    __atomic_fetch_add(&g_ext4_pcache_pages_filled, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&g_ext4_pcache_read_page_ticks, r_time() - read_start,
+                       __ATOMIC_RELAXED);
+
+    return 0;
+}
+
+static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
+                                uint64 start_va, uint64 end_va)
+{
+    if (file == NULL || vma == NULL || start_va >= end_va)
+        return -EINVAL;
+
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (inode == NULL)
+        return -EINVAL;
+
+    struct pcache *pc = &inode->i_data;
+    if (!pc->active)
+        ext4fs_inode_pcache_init(inode);
+    if (!pc->active)
+        return 0;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+    uint64 inode_size = (uint64)READ_ONCE(inode->size);
+    int ret = 0;
+
+    ext4fs_lock(esb);
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        return -r;
+    }
+
+    for (uint64 va = start_va; va < end_va; va += PGSIZE) {
+        uint64 file_off = vma->pgoff + (va - vma->start);
+        if (file_off >= inode_size)
+            break;
+
+        uint64 blkno_512 = file_off / 512ULL;
+        page_t *pcpage = pcache_get_page(pc, blkno_512);
+        if (pcpage == NULL) {
+            ret = -ENOMEM;
+            break;
+        }
+
+        struct pcache_node *pcn = NULL;
+        int state = ext4fs_prefault_begin_page(pc, pcpage, &pcn);
+        if (state == 0) {
+            uint64 read_start = r_time();
+            __atomic_fetch_add(&g_ext4_pcache_read_page_calls, 1,
+                               __ATOMIC_RELAXED);
+
+            r = ext4fs_fill_page_from_ref(fs, esb, inode, &ref, pcn->data,
+                                          file_off, inode_size);
+
+            if (r == 0)
+                __atomic_fetch_add(&g_ext4_pcache_pages_filled, 1,
+                                   __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_ext4_pcache_read_page_ticks,
+                               r_time() - read_start, __ATOMIC_RELAXED);
+
+            ext4fs_prefault_end_page(pc, pcpage, r == 0);
+            if (r != 0 && ret == 0)
+                ret = r;
+        }
+
+        pcache_put_page(pc, pcpage);
+    }
+
+    ext4_fs_put_inode_ref(&ref);
+    ext4fs_unlock(esb);
+    return ret;
+}
+
+static int ext4fs_pcache_write_page(struct pcache *pcache, page_t *page)
+{
+    struct vfs_inode *inode = (struct vfs_inode *)pcache->private_data;
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+    if (inode == NULL || inode->sb == NULL || pcnode == NULL)
+        return -EINVAL;
+
+    uint64 file_off = pcnode->blkno * 512ULL;
+
+    vfs_ilock(inode);
+    uint64 inode_size = (uint64)inode->size;
+    vfs_iunlock(inode);
+
+    if (file_off >= inode_size)
+        return 0;
+
+    size_t len = PGSIZE;
+    if (file_off + PGSIZE > inode_size)
+        len = (size_t)(inode_size - file_off);
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+    uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+
+    vfs_ilock(inode);
+    ext4fs_lock(esb);
+
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        vfs_iunlock(inode);
+        return -r;
+    }
+
+    ext4_block_cache_write_back(&esb->bdev, 1);
+
+    uint64_t orig_ondisk_size = ext4_inode_get_size(&fs->sb, ref.inode);
+    uint32_t ifile_blocks =
+        (uint32_t)((orig_ondisk_size + block_size - 1) / block_size);
+
+    size_t done = 0;
+    int err = 0;
+    while (done < len) {
+        ext4_lblk_t iblock =
+            (ext4_lblk_t)((file_off + done) / block_size);
+        uint off = (uint)((file_off + done) % block_size);
+        uint n = block_size - off;
+        if (n > len - done)
+            n = (uint)(len - done);
+
+        ext4_fsblk_t fblock;
+        if (iblock < ifile_blocks) {
+            r = ext4_fs_init_inode_dblk_idx(&ref, iblock, &fblock);
+        } else {
+            ext4_lblk_t appended_iblock;
+            r = ext4_fs_append_inode_dblk(&ref, &fblock, &appended_iblock);
+            if (r == EOK)
+                ifile_blocks++;
+        }
+        if (r != EOK) {
+            err = -r;
+            break;
+        }
+
+        struct ext4_block blk;
+        if (off == 0 && n == block_size)
+            r = ext4_block_get_noread(&esb->bdev, &blk, fblock);
+        else
+            r = ext4_block_get(&esb->bdev, &blk, fblock);
+        if (r != EOK) {
+            err = -EIO;
+            break;
+        }
+
+        memcpy((char *)blk.data + off, (const char *)pcnode->data + done, n);
+        ext4_bcache_set_dirty(blk.buf);
+        ext4_block_set(&esb->bdev, &blk);
+        done += n;
+    }
+
+    ext4_fs_put_inode_ref(&ref);
+    ext4_block_cache_write_back(&esb->bdev, 0);
+    ext4fs_unlock(esb);
+    vfs_iunlock(inode);
+    return err;
+}
+
+static struct pcache_ops ext4fs_pcache_ops = {
+    .read_page = ext4fs_pcache_read_page,
+    .write_page = ext4fs_pcache_write_page,
+};
+
+void ext4fs_inode_pcache_init(struct vfs_inode *inode)
+{
+    if (inode == NULL || !S_ISREG(inode->mode) || inode->i_data.active)
+        return;
+
+    struct pcache *pc = &inode->i_data;
+    memset(pc, 0, sizeof(*pc));
+    pc->ops = &ext4fs_pcache_ops;
+    pc->blk_count = ext4fs_pcache_blk_count(inode->size);
+
+    if (pcache_init(pc) != 0)
+        return;
+
+    pc->private_data = inode;
+}
 
 /* ──────────────────────────────────────────────────────────────────────────── */
 /* File read                                                                   */
@@ -47,6 +465,16 @@ ssize_t ext4fs_file_read(struct vfs_file *file, char *buf, size_t count,
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     if (!S_ISREG(inode->mode))
         return -EINVAL;
+
+    if (inode->i_data.active) {
+        struct kernel_iovec iov = {
+            .iov_base = (uint64)buf,
+            .iov_len = count,
+        };
+        struct iov_iter iter;
+        iov_iter_init(&iter, &iov, 1, count);
+        return ext4fs_file_readv(file, &iter, user);
+    }
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
     struct ext4_fs *fs = &esb->ext4fs;
@@ -159,6 +587,11 @@ ssize_t ext4fs_file_write(struct vfs_file *file, const char *buf, size_t count,
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     if (!S_ISREG(inode->mode))
         return -EINVAL;
+
+    ext4fs_inode_map_cache_invalidate(inode);
+
+    if (inode->i_data.active)
+        pcache_teardown(&inode->i_data);
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
     struct ext4_fs *fs = &esb->ext4fs;
@@ -365,6 +798,38 @@ static int ext4fs_file_writepage(struct vfs_file *file, loff_t offset,
     if (inode == NULL || !S_ISREG(inode->mode))
         return -EINVAL;
 
+    ext4fs_inode_map_cache_invalidate(inode);
+
+    struct pcache *pc = &inode->i_data;
+    if (pc->active) {
+        page_t *pg = __pa_to_page((uint64)data);
+        if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE)) {
+            return pcache_mark_page_dirty(pc, pg);
+        }
+
+        uint64 blkno_512 = offset / 512ULL;
+        page_t *pcpage = pcache_get_page(pc, blkno_512);
+        if (pcpage == NULL)
+            return -ENOMEM;
+
+        __atomic_fetch_add(&g_ext4_pcache_readahead_pages, 1,
+                           __ATOMIC_RELAXED);
+        int ret = pcache_prepare_write_page(pc, pcpage);
+        if (ret != 0) {
+            pcache_put_page(pc, pcpage);
+            return ret;
+        }
+
+        struct pcache_node *pcn = pcpage->pcache.pcache_node;
+        memcpy(pcn->data, data, len);
+        if (len < PGSIZE)
+            memset((char *)pcn->data + len, 0, PGSIZE - len);
+
+        ret = pcache_mark_page_dirty(pc, pcpage);
+        pcache_put_page(pc, pcpage);
+        return ret;
+    }
+
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
     struct ext4_fs *fs = &esb->ext4fs;
     uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
@@ -442,16 +907,80 @@ static int ext4fs_file_writepage(struct vfs_file *file, loff_t offset,
  * ext4fs_file_fault - demand-page a single page for a file-backed mapping
  *
  * Called from the page-fault path (vm rlock held, pgtable spinlock NOT held).
- * Reads up to PGSIZE bytes from the ext4 file at the faulting offset using
- * lwext4 block APIs, copies the data into a freshly allocated anonymous page,
- * and returns its physical address.  Returns NULL on failure.
+ * Uses the per-inode page cache when available so full-page faults can map the
+ * cached page directly; falls back to an anonymous copy for the trailing
+ * partial page or when the page cache is inactive. Returns NULL on failure.
  */
 static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
                                uint64 va)
 {
+    uint64 fault_start = r_time();
+    __atomic_fetch_add(&g_ext4_fault_calls, 1, __ATOMIC_RELAXED);
+
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     if (inode == NULL)
         return NULL;
+
+    struct pcache *pc = &inode->i_data;
+
+    if (!pc->active)
+        ext4fs_inode_pcache_init(inode);
+
+    if (pc->active) {
+        uint64 file_off = vma->pgoff + (va - vma->start);
+        uint64 inode_size;
+        uint64 bytes_to_read;
+
+        inode_size = (uint64)READ_ONCE(inode->size);
+        if (file_off >= inode_size) {
+            void *pa = page_alloc(0, PAGE_TYPE_ANON);
+            if (pa == NULL)
+                return NULL;
+            memset(pa, 0, PGSIZE);
+            return pa;
+        }
+
+        bytes_to_read = PGSIZE;
+        if (file_off + PGSIZE > inode_size)
+            bytes_to_read = inode_size - file_off;
+
+        uint64 blkno_512 = file_off / 512ULL;
+        page_t *pcpage = pcache_get_page(pc, blkno_512);
+        if (pcpage == NULL)
+            return NULL;
+
+        int ret = pcache_read_page(pc, pcpage);
+        if (ret != 0) {
+            pcache_put_page(pc, pcpage);
+            return NULL;
+        }
+
+        struct pcache_node *pcn = pcpage->pcache.pcache_node;
+        if (bytes_to_read == PGSIZE) {
+            __atomic_fetch_add(&g_ext4_fault_zero_copy, 1,
+                               __ATOMIC_RELAXED);
+            __atomic_fetch_add(&g_ext4_fault_ticks, r_time() - fault_start,
+                               __ATOMIC_RELAXED);
+            return pcn->data;
+        }
+
+        __atomic_fetch_add(&g_ext4_fault_partial_copy, 1,
+                           __ATOMIC_RELAXED);
+
+        void *pa = page_alloc(0, PAGE_TYPE_ANON);
+        if (pa == NULL) {
+            pcache_put_page(pc, pcpage);
+            return NULL;
+        }
+
+        memcpy(pa, pcn->data, bytes_to_read);
+        memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
+
+        pcache_put_page(pc, pcpage);
+        __atomic_fetch_add(&g_ext4_fault_ticks, r_time() - fault_start,
+                           __ATOMIC_RELAXED);
+        return pa;
+    }
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
     struct ext4_fs *fs = &esb->ext4fs;
@@ -536,6 +1065,9 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
     if (bytes_to_read < PGSIZE)
         memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
 
+    __atomic_fetch_add(&g_ext4_fault_ticks, r_time() - fault_start,
+                       __ATOMIC_RELAXED);
+
     return pa;
 }
 
@@ -556,6 +1088,23 @@ static ssize_t ext4fs_file_readv(struct vfs_file *file, struct iov_iter *iter,
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     if (!S_ISREG(inode->mode))
         return -EINVAL;
+
+    if (inode->i_data.active) {
+        struct pcache *pc = &inode->i_data;
+        loff_t pos;
+        loff_t isize;
+
+        vfs_ilock(inode);
+        pos = file->f_pos;
+        isize = inode->size;
+        vfs_iunlock(inode);
+
+        ssize_t ret = pcache_readv(pc, iter, &pos, isize, user);
+        if (ret > 0)
+            inode->atime = goldfish_rtc_read_sec();
+        file->f_pos = pos;
+        return ret;
+    }
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
     struct ext4_fs *fs = &esb->ext4fs;
@@ -672,6 +1221,11 @@ static ssize_t ext4fs_file_writev(struct vfs_file *file, struct iov_iter *iter,
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     if (!S_ISREG(inode->mode))
         return -EINVAL;
+
+    ext4fs_inode_map_cache_invalidate(inode);
+
+    if (inode->i_data.active)
+        pcache_teardown(&inode->i_data);
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
     struct ext4_fs *fs = &esb->ext4fs;
@@ -791,6 +1345,7 @@ struct vfs_file_ops ext4fs_file_ops = {
     .fsync     = ext4fs_file_fsync,
     .fflush    = ext4fs_file_fflush,
     .fault     = ext4fs_file_fault,
+    .prefault  = ext4fs_file_prefault,
     .writepage = ext4fs_file_writepage,
     .readv     = ext4fs_file_readv,
     .writev    = ext4fs_file_writev,

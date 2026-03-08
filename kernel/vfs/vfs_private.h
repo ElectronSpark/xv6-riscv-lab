@@ -17,6 +17,14 @@ struct vfs_inode *vfs_add_inode(struct vfs_superblock *sb,
                                 struct vfs_inode *inode);
 int vfs_remove_inode(struct vfs_superblock *sb, struct vfs_inode *inode);
 void __vfs_inode_init(struct vfs_inode *inode);
+void __vfs_dcache_global_init(void);
+int __vfs_dcache_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
+                        const char *name, size_t name_len);
+void __vfs_dcache_store(struct vfs_inode *dir, struct vfs_dentry *dentry,
+                        const char *name, size_t name_len);
+void __vfs_dcache_store_negative(struct vfs_inode *dir, const char *name,
+                                 size_t name_len);
+void __vfs_dcache_bump_dir_seq(struct vfs_inode *dir);
 void __vfs_file_init(void);
 void __vfs_fdtable_global_init(void);
 void __vfs_file_shrink_cache(void);

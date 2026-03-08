@@ -108,8 +108,16 @@ static int __virtio_disk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
     struct bio_vec bvec;
     struct bio_iter iter;
     int diskno = (blkdev->dev.minor - 1) / GENDISK_MINOR_STRIDE;
+    uint16 segs = 0;
 
     bio_start_io_acct(bio);
+    for (int16 i = 0; i < bio->vec_length; i++) {
+        if (bio->bvecs[i].len != 0)
+            segs++;
+    }
+    bio->inflight_segs = segs;
+    bio->completed_segs = 0;
+
     bio_for_each_segment(&bvec, bio, &iter) {
         uint64 sector = iter.blkno;
         page_t *page = bvec.bv_page;
@@ -666,8 +674,11 @@ static void virtio_disk_intr(int irq, void *data, device_t *dev) {
 
         // Signal bio completion — wakes any thread in bio_await()
         if (bio != NULL) {
-            bio->error = (status != 0) ? -EIO : 0;
-            bio_complete(bio);
+            if (status != 0)
+                bio->error = -EIO;
+            bio->completed_segs++;
+            if (bio->completed_segs >= bio->inflight_segs)
+                bio_complete(bio);
         }
 
         disk->used_idx += 1;

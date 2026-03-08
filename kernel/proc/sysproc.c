@@ -16,10 +16,23 @@
 #include "signal.h"
 #include "errno.h"
 #include "accounting.h"
+#include "kstats.h"
 #include "proc/pgroup.h"
 #include "tty/session.h"
 #include "diag.h"
 #include "timer/goldfish_rtc.h"
+
+#define SYSCALL_PROFILE_BEGIN(call_ctr)                                     \
+    uint64 __sys_start = r_time();                                          \
+    __atomic_add_fetch(&(call_ctr), 1, __ATOMIC_RELAXED)
+
+#define SYSCALL_PROFILE_RETURN(ret_expr, tick_ctr)                          \
+    do {                                                                    \
+        uint64 __sys_ret = (uint64)(ret_expr);                              \
+        __atomic_add_fetch(&(tick_ctr), r_time() - __sys_start,             \
+                           __ATOMIC_RELAXED);                               \
+        return __sys_ret;                                                   \
+    } while (0)
 
 struct __k_timespec {
     int64 tv_sec;
@@ -415,6 +428,7 @@ extern volatile int64 sntp_offset_ns;
 extern volatile int   sntp_synced;
 
 uint64 sys_gettimeofday(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_gettimeofday_calls);
     uint64 tv_addr;
     uint64 tz_addr;
     argaddr(0, &tv_addr);
@@ -422,7 +436,7 @@ uint64 sys_gettimeofday(void) {
     (void)tz_addr;
 
     if (tv_addr == 0) {
-        return -EINVAL;
+        SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_gettimeofday_ticks);
     }
 
     uint64 rtc = goldfish_rtc_read_ns();
@@ -434,9 +448,9 @@ uint64 sys_gettimeofday(void) {
     };
 
     if (either_copyout(1, tv_addr, &tv, sizeof(tv)) < 0) {
-        return -EFAULT;
+        SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_gettimeofday_ticks);
     }
-    return 0;
+    SYSCALL_PROFILE_RETURN(0, g_sys_gettimeofday_ticks);
 }
 
 uint64 sys_nanosleep(void) {
@@ -543,6 +557,7 @@ uint64 sys_getsid(void) {
 }
 
 uint64 sys_getrandom(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_getrandom_calls);
     uint64 ubuf;
     int len;
 
@@ -550,10 +565,10 @@ uint64 sys_getrandom(void) {
     argint(1, &len);
 
     if (len < 0) {
-        return -EINVAL;
+        SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_getrandom_ticks);
     }
     if (len == 0) {
-        return 0;
+        SYSCALL_PROFILE_RETURN(0, g_sys_getrandom_ticks);
     }
 
     uint8 kbuf[64];
@@ -566,12 +581,13 @@ uint64 sys_getrandom(void) {
 
         random_fill_bytes(kbuf, chunk);
         if (either_copyout(1, ubuf + done, kbuf, chunk) < 0) {
-            return done ? done : -EFAULT;
+            SYSCALL_PROFILE_RETURN(done ? done : -EFAULT,
+                                   g_sys_getrandom_ticks);
         }
         done += chunk;
     }
 
-    return done;
+    SYSCALL_PROFILE_RETURN(done, g_sys_getrandom_ticks);
 }
 
 // mmap/munmap/mprotect moved to kernel/mm/sysmm.c
@@ -584,38 +600,39 @@ uint64 sys_getrandom(void) {
  * Returns the new break on success, or the old break on failure.
  */
 uint64 sys_brk(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_brk_calls);
     uint64 addr;
     argaddr(0, &addr);
 
     vm_t *vm = current->vm;
     vma_t *heap = vm->heap;
     if (heap == NULL)
-        return (uint64)-ENOMEM;
+        SYSCALL_PROFILE_RETURN(-ENOMEM, g_sys_brk_ticks);
 
     uint64 cur_brk = heap->start + vm->heap_size;
 
     if (addr == 0) {
-        return cur_brk;
+        SYSCALL_PROFILE_RETURN(cur_brk, g_sys_brk_ticks);
     }
 
     if (addr < heap->start)
-        return cur_brk; // Cannot shrink below heap start
+        SYSCALL_PROFILE_RETURN(cur_brk, g_sys_brk_ticks); // Cannot shrink below heap start
 
     int64 delta = (int64)(addr - cur_brk);
     if (delta == 0)
-        return cur_brk;
+        SYSCALL_PROFILE_RETURN(cur_brk, g_sys_brk_ticks);
 
     if (vm_growheap(vm, delta) < 0) {
         printf("sys_brk: FAIL pid=%d addr=0x%lx cur_brk=0x%lx delta=%ld\n",
                current->pid, addr, cur_brk, delta);
-        return cur_brk; // Return old break on failure
+        SYSCALL_PROFILE_RETURN(cur_brk, g_sys_brk_ticks); // Return old break on failure
     }
 
     if (delta > 0)
         ACCT_ADD(current->thread_group, mm_brk_delta, delta);
     else if (delta < 0)
         ACCT_ADD(current->thread_group, mm_brk_delta, delta);
-    return heap->start + vm->heap_size;
+    SYSCALL_PROFILE_RETURN(heap->start + vm->heap_size, g_sys_brk_ticks);
 }
 
 /*
@@ -638,13 +655,14 @@ uint64 sys_set_tid_address(void) {
  * clock_gettime(clockid, tp) — get time from specified clock.
  */
 uint64 sys_clock_gettime(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_clock_gettime_calls);
     int clockid;
     uint64 tp_addr;
     argint(0, &clockid);
     argaddr(1, &tp_addr);
 
     if (tp_addr == 0)
-        return -EINVAL;
+        SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_clock_gettime_ticks);
 
     struct __k_timespec ts = {0};
 
@@ -664,13 +682,13 @@ uint64 sys_clock_gettime(void) {
         break;
     }
     default:
-        return -EINVAL;
+        SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_clock_gettime_ticks);
     }
 
     if (either_copyout(1, tp_addr, &ts, sizeof(ts)) < 0)
-        return -EFAULT;
+        SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_clock_gettime_ticks);
 
-    return 0;
+    SYSCALL_PROFILE_RETURN(0, g_sys_clock_gettime_ticks);
 }
 
 /*

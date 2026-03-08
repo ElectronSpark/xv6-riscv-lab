@@ -13,6 +13,7 @@
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
 #include <mm/slab.h>
+#include <mm/pcache.h>
 #include "dev/blkdev.h"
 
 /* lwext4 headers */
@@ -50,9 +51,45 @@ struct ext4fs_superblock {
 
 struct ext4fs_inode {
     struct vfs_inode vfs_inode;  /* MUST be first (container_of) */
-    /* no extra fields needed — ext4 inode data is loaded on demand
-     * via ext4_fs_get_inode_ref() using vfs_inode.ino */
+    struct {
+        spinlock_t lock;
+        uint64 lblk_start;
+        uint64 pblk_start;
+        uint32 len;
+        uint8 valid;
+        uint8 hole;
+    } map_cache;
 };
+
+static inline struct ext4fs_inode *ext4fs_inode_from_vfs(struct vfs_inode *vi)
+{
+    if (vi == NULL)
+        return NULL;
+    return container_of(vi, struct ext4fs_inode, vfs_inode);
+}
+
+static inline void ext4fs_inode_map_cache_init(struct ext4fs_inode *ei)
+{
+    if (ei == NULL)
+        return;
+    spin_init(&ei->map_cache.lock, "ext4_map_cache");
+    ei->map_cache.lblk_start = 0;
+    ei->map_cache.pblk_start = 0;
+    ei->map_cache.len = 0;
+    ei->map_cache.valid = 0;
+    ei->map_cache.hole = 0;
+}
+
+static inline void ext4fs_inode_map_cache_invalidate(struct vfs_inode *vi)
+{
+    struct ext4fs_inode *ei = ext4fs_inode_from_vfs(vi);
+    if (ei == NULL)
+        return;
+    spin_lock(&ei->map_cache.lock);
+    ei->map_cache.valid = 0;
+    ei->map_cache.len = 0;
+    spin_unlock(&ei->map_cache.lock);
+}
 
 /* ──────────────────────────────────────────────────────────────────────────── */
 /* Operations tables                                                           */
@@ -126,6 +163,7 @@ static inline int vfs_mode_to_ext4_filetype(mode_t mode)
 
 void ext4fs_init(void);
 void ext4fs_mount_root(void);
+void ext4fs_inode_pcache_init(struct vfs_inode *inode);
 
 /*
  * Filesystem-wide lock.  Serialises all lwext4 operations on this mount.

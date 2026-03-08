@@ -65,6 +65,8 @@ static inline int bio_dir_write(struct bio *bio) { return bio->rw; }
 static inline void bio_start_io_acct(struct bio *bio) {
     bio->done = 0;
     bio->done_size = 0;
+    bio->inflight_segs = 0;
+    bio->completed_segs = 0;
     bio->error = 0;
     completion_reinit(&bio->io_completion);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);

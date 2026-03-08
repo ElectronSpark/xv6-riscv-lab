@@ -457,6 +457,7 @@ void vfs_init(void) {
     struct thread *thread = current;
     assert(thread != NULL, "vfs_init must be called from a thread context");
     __vfs_inode_init(&vfs_root_inode);
+    __vfs_dcache_global_init();
     __vfs_file_init();
     uio_init();
     thread->fs = vfs_struct_init();

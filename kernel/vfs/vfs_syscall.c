@@ -42,12 +42,25 @@
 #include "signal.h"
 #include "kqueue.h"
 #include "kqueue_types.h"
+#include "kstats.h"
 
 // Forward declaration for syscall argument helpers
 void argint(int n, int *ip);
 void argint64(int n, int64 *ip);
 void argaddr(int n, uint64 *ip);
 int argstr(int n, char *buf, int max);
+
+#define SYSCALL_PROFILE_BEGIN(call_ctr)                                     \
+    uint64 __sys_start = r_time();                                          \
+    __atomic_add_fetch(&(call_ctr), 1, __ATOMIC_RELAXED)
+
+#define SYSCALL_PROFILE_RETURN(ret_expr, tick_ctr)                          \
+    do {                                                                    \
+        uint64 __sys_ret = (uint64)(ret_expr);                              \
+        __atomic_add_fetch(&(tick_ctr), r_time() - __sys_start,             \
+                           __ATOMIC_RELAXED);                               \
+        return __sys_ret;                                                   \
+    } while (0)
 
 /******************************************************************************
  * Helper functions
@@ -280,6 +293,7 @@ uint64 sys_vfs_dup2(void) {
 }
 
 uint64 sys_vfs_read(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_read_calls);
     int fd, n;
     uint64 p;
 
@@ -289,14 +303,14 @@ uint64 sys_vfs_read(void) {
 
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL) {
-        return -EBADF;
+        SYSCALL_PROFILE_RETURN(-EBADF, g_sys_read_ticks);
     }
 
     ssize_t ret = vfs_fileread(f, (void *)p, n, true);
     vfs_fput(f);
     if (ret > 0)
         ACCT_ADD(current->thread_group, fs_bytes_read, (uint64)ret);
-    return ret;
+    SYSCALL_PROFILE_RETURN(ret, g_sys_read_ticks);
 }
 
 uint64 sys_vfs_write(void) {
@@ -338,6 +352,7 @@ uint64 sys_vfs_close(void) {
 }
 
 uint64 sys_vfs_fstat(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_fstat_calls);
     int fd;
     uint64 st;
 
@@ -346,26 +361,27 @@ uint64 sys_vfs_fstat(void) {
 
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL) {
-        return -EBADF;
+        SYSCALL_PROFILE_RETURN(-EBADF, g_sys_fstat_ticks);
     }
 
     struct stat kst;
     int ret = vfs_filestat(f, &kst);
     if (ret != 0) {
         vfs_fput(f); // remove the reference from __vfs_argfd
-        return ret;
+        SYSCALL_PROFILE_RETURN(ret, g_sys_fstat_ticks);
     }
 
     if (vm_copyout(current->vm, st, (char *)&kst, sizeof(kst)) < 0) {
         vfs_fput(f); // remove the reference from __vfs_argfd
-        return -EFAULT;
+        SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_fstat_ticks);
     }
 
     vfs_fput(f); // remove the reference from __vfs_argfd
-    return 0;
+    SYSCALL_PROFILE_RETURN(0, g_sys_fstat_ticks);
 }
 
 uint64 sys_vfs_lseek(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_lseek_calls);
     int fd, whence;
     int64 offset;
     argint(0, &fd);
@@ -374,12 +390,12 @@ uint64 sys_vfs_lseek(void) {
 
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL) {
-        return -EBADF;
+        SYSCALL_PROFILE_RETURN(-EBADF, g_sys_lseek_ticks);
     }
 
     loff_t ret = vfs_filelseek(f, offset, whence);
     vfs_fput(f);
-    return ret;
+    SYSCALL_PROFILE_RETURN(ret, g_sys_lseek_ticks);
 }
 
 uint64 sys_vfs_ftruncate(void) {
@@ -736,6 +752,7 @@ uint64 sys_vfs_rename(void) {
  ******************************************************************************/
 
 uint64 sys_vfs_open(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_open_calls);
     char path[MAXPATH];
     char name[DIRSIZ + 1];
     int omode;
@@ -743,7 +760,7 @@ uint64 sys_vfs_open(void) {
 
     argint(1, &omode);
     if ((n = argstr(0, path, MAXPATH)) < 0) {
-        return -EFAULT;
+        SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_open_ticks);
     }
 
     struct vfs_inode *inode = NULL;
@@ -753,10 +770,10 @@ uint64 sys_vfs_open(void) {
         // Create file if it doesn't exist
         struct vfs_inode *parent = vfs_nameiparent(path, n, name, DIRSIZ + 1);
         if (IS_ERR(parent)) {
-            return PTR_ERR(parent);
+            SYSCALL_PROFILE_RETURN(PTR_ERR(parent), g_sys_open_ticks);
         }
         if (parent == NULL) {
-            return -ENOENT;
+            SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_open_ticks);
         }
 
         size_t name_len = strlen(name);
@@ -772,10 +789,10 @@ uint64 sys_vfs_open(void) {
                 // O_CREAT on an existing directory is not allowed
                 if (!IS_ERR_OR_NULL(inode) && S_ISDIR(inode->mode)) {
                     vfs_iput(inode);
-                    return -EISDIR;
+                    SYSCALL_PROFILE_RETURN(-EISDIR, g_sys_open_ticks);
                 }
             } else {
-                return PTR_ERR(inode);
+                SYSCALL_PROFILE_RETURN(PTR_ERR(inode), g_sys_open_ticks);
             }
         }
     } else {
@@ -790,48 +807,48 @@ uint64 sys_vfs_open(void) {
             struct vfs_inode *parent =
                 vfs_nameiparent(path, strlen(path), oname, DIRSIZ + 1);
             if (IS_ERR(parent))
-                return PTR_ERR(parent);
+                SYSCALL_PROFILE_RETURN(PTR_ERR(parent), g_sys_open_ticks);
             if (parent == NULL)
-                return -ENOENT;
+                SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_open_ticks);
 
             struct vfs_dentry dentry = {.sb = parent->sb, .parent = parent};
             int lr = vfs_ilookup(parent, &dentry, oname, strlen(oname));
             if (lr != 0) {
                 vfs_iput(parent);
-                return lr;
+                SYSCALL_PROFILE_RETURN(lr, g_sys_open_ticks);
             }
             inode = vfs_get_dentry_inode(&dentry);
             vfs_release_dentry(&dentry);
             vfs_iput(parent);
             if (IS_ERR(inode))
-                return PTR_ERR(inode);
+                SYSCALL_PROFILE_RETURN(PTR_ERR(inode), g_sys_open_ticks);
             if (inode == NULL)
-                return -ENOENT;
+                SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_open_ticks);
             /* O_NOFOLLOW + symlink → ELOOP */
             if (S_ISLNK(inode->mode)) {
                 vfs_iput(inode);
-                return -ELOOP;
+                SYSCALL_PROFILE_RETURN(-ELOOP, g_sys_open_ticks);
             }
         } else {
             inode = vfs_namei(path, strlen(path));
             if (IS_ERR(inode))
-                return PTR_ERR(inode);
+                SYSCALL_PROFILE_RETURN(PTR_ERR(inode), g_sys_open_ticks);
             if (inode == NULL)
-                return -ENOENT;
+                SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_open_ticks);
         }
     }
 
     if (IS_ERR(inode)) {
-        return PTR_ERR(inode);
+        SYSCALL_PROFILE_RETURN(PTR_ERR(inode), g_sys_open_ticks);
     }
     if (inode == NULL) {
-        return -ENOENT;
+        SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_open_ticks);
     }
 
     // Check if trying to write to a directory
     if (S_ISDIR(inode->mode) && (omode & O_WRONLY || omode & O_RDWR)) {
         vfs_iput(inode);
-        return -EISDIR;
+        SYSCALL_PROFILE_RETURN(-EISDIR, g_sys_open_ticks);
     }
 
     // Check for O_TRUNC before releasing inode reference
@@ -841,7 +858,7 @@ uint64 sys_vfs_open(void) {
     vfs_iput(inode); // Release local inode reference (file holds its own ref)
 
     if (IS_ERR(f)) {
-        return PTR_ERR(f);
+        SYSCALL_PROFILE_RETURN(PTR_ERR(f), g_sys_open_ticks);
     }
 
     // Handle O_TRUNC - truncate the file to zero length
@@ -849,7 +866,7 @@ uint64 sys_vfs_open(void) {
         ret = vfs_itruncate(vfs_inode_deref(&f->inode), 0);
         if (ret != 0) {
             vfs_fput(f);
-            return ret;
+            SYSCALL_PROFILE_RETURN(ret, g_sys_open_ticks);
         }
     }
 
@@ -865,7 +882,7 @@ uint64 sys_vfs_open(void) {
     vfs_fput(f);
     if (fd >= 0)
         ACCT_INC(current->thread_group, fs_opens);
-    return fd;
+    SYSCALL_PROFILE_RETURN(fd, g_sys_open_ticks);
 }
 
 uint64 sys_vfs_mkdir(void) {
@@ -1433,6 +1450,7 @@ static uint8 __mode_to_dtype(mode_t mode) {
 }
 
 uint64 sys_getdents(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_getdents_calls);
     int fd;
     uint64 dirp;
     int count;
@@ -1443,20 +1461,20 @@ uint64 sys_getdents(void) {
 
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL) {
-        return -EBADF;
+        SYSCALL_PROFILE_RETURN(-EBADF, g_sys_getdents_ticks);
     }
 
     struct vfs_inode *inode = vfs_inode_deref(&f->inode);
     if (inode == NULL || !S_ISDIR(inode->mode)) {
         vfs_fput(f); // remove the reference from __vfs_argfd
-        return -ENOTDIR;
+        SYSCALL_PROFILE_RETURN(-ENOTDIR, g_sys_getdents_ticks);
     }
 
     // Allocate kernel buffer
     char *kbuf = kvmalloc(count);
     if (kbuf == NULL) {
         vfs_fput(f); // remove the reference from __vfs_argfd
-        return -ENOMEM;
+        SYSCALL_PROFILE_RETURN(-ENOMEM, g_sys_getdents_ticks);
     }
 
     int bytes_written = 0;
@@ -1473,7 +1491,7 @@ uint64 sys_getdents(void) {
         if (ret != 0) {
             kvfree(kbuf);
             vfs_fput(f); // remove the reference from __vfs_argfd
-            return ret;
+            SYSCALL_PROFILE_RETURN(ret, g_sys_getdents_ticks);
         }
 
         if (dentry.name == NULL) {
@@ -1522,13 +1540,13 @@ uint64 sys_getdents(void) {
         if (vm_copyout(current->vm, dirp, kbuf, bytes_written) < 0) {
             kvfree(kbuf);
             vfs_fput(f); // remove the reference from __vfs_argfd
-            return -EFAULT;
+            SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_getdents_ticks);
         }
     }
 
     kvfree(kbuf);
     vfs_fput(f); // remove the reference from __vfs_argfd
-    return bytes_written;
+    SYSCALL_PROFILE_RETURN(bytes_written, g_sys_getdents_ticks);
 }
 
 /******************************************************************************
@@ -2750,13 +2768,14 @@ uint64 sys_pselect6(void) {
  * Other dirfd values are not yet supported (returns -ENOSYS).
  */
 uint64 sys_vfs_openat(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_openat_calls);
     int dirfd;
     argint(0, &dirfd);
 
     struct vfs_inode *start_dir = NULL;
     int err = __vfs_resolve_dirfd(dirfd, &start_dir);
     if (err)
-        return err;
+        SYSCALL_PROFILE_RETURN(err, g_sys_openat_ticks);
 
     // path is in a1, flags in a2, mode in a3
     char path[MAXPATH];
@@ -2766,7 +2785,7 @@ uint64 sys_vfs_openat(void) {
 
     if (argstr(1, path, MAXPATH) < 0) {
         if (start_dir) vfs_iput(start_dir);
-        return -EFAULT;
+        SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_openat_ticks);
     }
     argint(2, &omode);
 
@@ -2776,11 +2795,11 @@ uint64 sys_vfs_openat(void) {
         struct vfs_inode *parent = vfs_nameiparent_at(start_dir, path, strlen(path), name, DIRSIZ + 1);
         if (IS_ERR(parent)) {
             if (start_dir) vfs_iput(start_dir);
-            return PTR_ERR(parent);
+            SYSCALL_PROFILE_RETURN(PTR_ERR(parent), g_sys_openat_ticks);
         }
         if (parent == NULL) {
             if (start_dir) vfs_iput(start_dir);
-            return -ENOENT;
+            SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_openat_ticks);
         }
 
         size_t name_len = strlen(name);
@@ -2793,11 +2812,11 @@ uint64 sys_vfs_openat(void) {
                 if (!IS_ERR_OR_NULL(inode) && S_ISDIR(inode->mode)) {
                     vfs_iput(inode);
                     if (start_dir) vfs_iput(start_dir);
-                    return -EISDIR;
+                    SYSCALL_PROFILE_RETURN(-EISDIR, g_sys_openat_ticks);
                 }
             } else {
                 if (start_dir) vfs_iput(start_dir);
-                return PTR_ERR(inode);
+                SYSCALL_PROFILE_RETURN(PTR_ERR(inode), g_sys_openat_ticks);
             }
         }
     } else {
@@ -2806,11 +2825,11 @@ uint64 sys_vfs_openat(void) {
             inode = vfs_namei_at(start_dir, path, strlen(path));
             if (IS_ERR(inode)) {
                 if (start_dir) vfs_iput(start_dir);
-                return PTR_ERR(inode);
+                SYSCALL_PROFILE_RETURN(PTR_ERR(inode), g_sys_openat_ticks);
             }
             if (inode == NULL) {
                 if (start_dir) vfs_iput(start_dir);
-                return -ENOENT;
+                SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_openat_ticks);
             }
             if (!S_ISLNK(inode->mode) || (omode & O_NOFOLLOW))
                 break;
@@ -2819,35 +2838,35 @@ uint64 sys_vfs_openat(void) {
             inode = NULL;
             if (link_len < 0) {
                 if (start_dir) vfs_iput(start_dir);
-                return link_len;
+                SYSCALL_PROFILE_RETURN(link_len, g_sys_openat_ticks);
             }
             path[link_len] = '\0';
             symloop_count++;
         } while (symloop_count < 8);
         if (symloop_count >= 8) {
             if (start_dir) vfs_iput(start_dir);
-            return -ELOOP;
+            SYSCALL_PROFILE_RETURN(-ELOOP, g_sys_openat_ticks);
         }
     }
 
     if (start_dir) vfs_iput(start_dir);
 
     if (IS_ERR(inode))
-        return PTR_ERR(inode);
+        SYSCALL_PROFILE_RETURN(PTR_ERR(inode), g_sys_openat_ticks);
     if (inode == NULL)
-        return -ENOENT;
+        SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_openat_ticks);
 
     if (S_ISDIR(inode->mode) && (omode & (O_WRONLY | O_RDWR))) {
         vfs_iput(inode);
-        return -EISDIR;
+        SYSCALL_PROFILE_RETURN(-EISDIR, g_sys_openat_ticks);
     }
 
     struct vfs_file *f = vfs_fileopen(inode, omode);
     vfs_iput(inode);
     if (IS_ERR(f))
-        return PTR_ERR(f);
+        SYSCALL_PROFILE_RETURN(PTR_ERR(f), g_sys_openat_ticks);
     if (f == NULL)
-        return -ENOMEM;
+        SYSCALL_PROFILE_RETURN(-ENOMEM, g_sys_openat_ticks);
 
     if (omode & O_TRUNC) {
         truncate(f, 0);
@@ -2859,7 +2878,7 @@ uint64 sys_vfs_openat(void) {
     vfs_fput(f);
 
     if (n < 0)
-        return n;
+        SYSCALL_PROFILE_RETURN(n, g_sys_openat_ticks);
 
     if (omode & O_CLOEXEC) {
         vfs_fdtable_set_fdflags(current->fdtable, n, FD_CLOEXEC);
@@ -2867,7 +2886,7 @@ uint64 sys_vfs_openat(void) {
 
     if (n >= 0)
         ACCT_INC(current->thread_group, fs_opens);
-    return n;
+    SYSCALL_PROFILE_RETURN(n, g_sys_openat_ticks);
 }
 
 /* Forward declaration — defined below after pread64/pwrite64 */
@@ -2927,6 +2946,7 @@ uint64 sys_vfs_writev(void) {
  * .read / cdev_read.
  */
 uint64 sys_vfs_readv(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_readv_calls);
     int fd, iovcnt;
     uint64 iov_addr;
 
@@ -2935,11 +2955,11 @@ uint64 sys_vfs_readv(void) {
     argint(2, &iovcnt);
 
     if (iovcnt <= 0 || iovcnt > UIO_MAXIOV)
-        return -EINVAL;
+        SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_readv_ticks);
 
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL)
-        return -EBADF;
+        SYSCALL_PROFILE_RETURN(-EBADF, g_sys_readv_ticks);
 
     struct kernel_iovec stack_iovs[UIO_FASTIOV];
     struct kernel_iovec *iov, *heap_iov;
@@ -2948,7 +2968,7 @@ uint64 sys_vfs_readv(void) {
                                    &iov, &heap_iov, &iter);
     if (err) {
         vfs_fput(f);
-        return err;
+        SYSCALL_PROFILE_RETURN(err, g_sys_readv_ticks);
     }
 
     ssize_t ret = vfs_filereadv(f, &iter, true);
@@ -2957,7 +2977,7 @@ uint64 sys_vfs_readv(void) {
     if (heap_iov) uio_iovec_free_ex(heap_iov, iovcnt);
     if (ret > 0)
         ACCT_ADD(current->thread_group, fs_bytes_read, (uint64)ret);
-    return ret;
+    SYSCALL_PROFILE_RETURN(ret, g_sys_readv_ticks);
 }
 
 /*
@@ -2967,6 +2987,7 @@ uint64 sys_vfs_readv(void) {
  * the file lock so concurrent read/write/lseek can't interleave.
  */
 uint64 sys_vfs_pread64(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_pread64_calls);
     int fd, count;
     uint64 buf_addr;
     int64 offset;
@@ -2977,16 +2998,16 @@ uint64 sys_vfs_pread64(void) {
     argint64(3, &offset);
 
     if (offset < 0)
-        return -EINVAL;
+        SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_pread64_ticks);
 
     struct vfs_file *f = __vfs_argfd(fd);
     if (f == NULL)
-        return -EBADF;
+        SYSCALL_PROFILE_RETURN(-EBADF, g_sys_pread64_ticks);
 
     struct vfs_inode *inode = vfs_inode_deref(&f->inode);
     if (inode == NULL || !S_ISREG(inode->mode)) {
         vfs_fput(f);
-        return -ESPIPE;
+        SYSCALL_PROFILE_RETURN(-ESPIPE, g_sys_pread64_ticks);
     }
 
     mutex_lock(&f->lock);
@@ -3006,7 +3027,7 @@ uint64 sys_vfs_pread64(void) {
     if (ret > 0)
         ACCT_ADD(current->thread_group, fs_bytes_read, (uint64)ret);
     vfs_fput(f);
-    return ret;
+    SYSCALL_PROFILE_RETURN(ret, g_sys_pread64_ticks);
 }
 
 /*
@@ -3478,20 +3499,21 @@ uint64 sys_vfs_pwritev2(void) {
  * flags: AT_SYMLINK_NOFOLLOW (0x100) — use lstat instead of stat.
  */
 uint64 sys_vfs_fstatat(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_fstatat_calls);
     int dirfd, flags;
     uint64 stat_addr;
     char path[MAXPATH];
 
     argint(0, &dirfd);
     if (argstr(1, path, MAXPATH) < 0)
-        return -EFAULT;
+        SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_fstatat_ticks);
     argaddr(2, &stat_addr);
     argint(3, &flags);
 
     struct vfs_inode *start_dir = NULL;
     int err = __vfs_resolve_dirfd(dirfd, &start_dir);
     if (err)
-        return err;
+        SYSCALL_PROFILE_RETURN(err, g_sys_fstatat_ticks);
 
     struct vfs_inode *inode = NULL;
 
@@ -3501,15 +3523,15 @@ uint64 sys_vfs_fstatat(void) {
         struct vfs_inode *parent = vfs_nameiparent_at(start_dir, path, n, name, DIRSIZ + 1);
         if (start_dir) vfs_iput(start_dir);
         if (IS_ERR(parent))
-            return PTR_ERR(parent);
+            SYSCALL_PROFILE_RETURN(PTR_ERR(parent), g_sys_fstatat_ticks);
         if (parent == NULL)
-            return -ENOENT;
+            SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_fstatat_ticks);
 
         struct vfs_dentry dentry = {.sb = parent->sb, .parent = parent};
         int ret = vfs_ilookup(parent, &dentry, name, strlen(name));
         if (ret != 0) {
             vfs_iput(parent);
-            return ret;
+            SYSCALL_PROFILE_RETURN(ret, g_sys_fstatat_ticks);
         }
         inode = vfs_get_dentry_inode(&dentry);
         vfs_release_dentry(&dentry);
@@ -3521,22 +3543,22 @@ uint64 sys_vfs_fstatat(void) {
     }
 
     if (IS_ERR(inode))
-        return PTR_ERR(inode);
+        SYSCALL_PROFILE_RETURN(PTR_ERR(inode), g_sys_fstatat_ticks);
     if (inode == NULL)
-        return -ENOENT;
+        SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_fstatat_ticks);
 
     struct stat st;
     int ret = __vfs_inode_stat(inode, &st);
     vfs_iput(inode);
     if (ret != 0)
-        return ret;
+        SYSCALL_PROFILE_RETURN(ret, g_sys_fstatat_ticks);
 
     // Copy the 128-byte struct stat directly to userspace.
     // Kernel struct stat layout matches musl's riscv64 layout exactly.
     if (either_copyout(1, stat_addr, &st, sizeof(st)) < 0)
-        return -EFAULT;
+        SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_fstatat_ticks);
 
-    return 0;
+    SYSCALL_PROFILE_RETURN(0, g_sys_fstatat_ticks);
 }
 
 /*
@@ -3868,6 +3890,7 @@ uint64 sys_vfs_symlinkat(void) {
  * Args: a0=dirfd, a1=path, a2=buf, a3=bufsiz
  */
 uint64 sys_vfs_readlinkat(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_readlinkat_calls);
     int dirfd;
     char path[MAXPATH];
     char name[DIRSIZ + 1];
@@ -3879,61 +3902,61 @@ uint64 sys_vfs_readlinkat(void) {
     struct vfs_inode *start_dir = NULL;
     int err = __vfs_resolve_dirfd(dirfd, &start_dir);
     if (err)
-        return err;
+        SYSCALL_PROFILE_RETURN(err, g_sys_readlinkat_ticks);
 
     int n = argstr(1, path, MAXPATH);
     argaddr(2, &buf_addr);
     argint(3, &bufsz);
     if (n < 0) {
         if (start_dir) vfs_iput(start_dir);
-        return -EFAULT;
+        SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_readlinkat_ticks);
     }
     if (bufsz <= 0) {
         if (start_dir) vfs_iput(start_dir);
-        return -EINVAL;
+        SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_readlinkat_ticks);
     }
 
     struct vfs_inode *parent = vfs_nameiparent_at(start_dir, path, n, name, DIRSIZ + 1);
     if (start_dir) vfs_iput(start_dir);
     if (IS_ERR(parent))
-        return PTR_ERR(parent);
+        SYSCALL_PROFILE_RETURN(PTR_ERR(parent), g_sys_readlinkat_ticks);
     if (parent == NULL)
-        return -ENOENT;
+        SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_readlinkat_ticks);
 
     struct vfs_dentry dentry = {.sb = parent->sb, .parent = parent};
     int ret = vfs_ilookup(parent, &dentry, name, strlen(name));
     if (ret != 0) {
         vfs_iput(parent);
-        return ret;
+        SYSCALL_PROFILE_RETURN(ret, g_sys_readlinkat_ticks);
     }
 
     struct vfs_inode *inode = vfs_get_dentry_inode(&dentry);
     vfs_release_dentry(&dentry);
     vfs_iput(parent);
     if (IS_ERR(inode))
-        return PTR_ERR(inode);
+        SYSCALL_PROFILE_RETURN(PTR_ERR(inode), g_sys_readlinkat_ticks);
     if (inode == NULL)
-        return -ENOENT;
+        SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_readlinkat_ticks);
 
     char *kbuf = kvmalloc(bufsz);
     if (kbuf == NULL) {
         vfs_iput(inode);
-        return -ENOMEM;
+        SYSCALL_PROFILE_RETURN(-ENOMEM, g_sys_readlinkat_ticks);
     }
 
     ssize_t len = vfs_readlink(inode, kbuf, bufsz);
     vfs_iput(inode);
     if (len < 0) {
         kvfree(kbuf);
-        return len;
+        SYSCALL_PROFILE_RETURN(len, g_sys_readlinkat_ticks);
     }
 
     if (either_copyout(1, buf_addr, kbuf, len) < 0) {
         kvfree(kbuf);
-        return -EFAULT;
+        SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_readlinkat_ticks);
     }
     kvfree(kbuf);
-    return len;
+    SYSCALL_PROFILE_RETURN(len, g_sys_readlinkat_ticks);
 }
 
 /**
@@ -4012,6 +4035,7 @@ uint64 sys_vfs_renameat(void) {
  * Args: a0=dirfd, a1=path, a2=mode, a3=flags
  */
 uint64 sys_vfs_faccessat(void) {
+    SYSCALL_PROFILE_BEGIN(g_sys_faccessat_calls);
     int dirfd, mode, flags;
     char path[MAXPATH];
 
@@ -4020,41 +4044,41 @@ uint64 sys_vfs_faccessat(void) {
     struct vfs_inode *start_dir = NULL;
     int err = __vfs_resolve_dirfd(dirfd, &start_dir);
     if (err)
-        return err;
+        SYSCALL_PROFILE_RETURN(err, g_sys_faccessat_ticks);
 
     int n = argstr(1, path, MAXPATH);
     argint(2, &mode);
     argint(3, &flags);
     if (n < 0) {
         if (start_dir) vfs_iput(start_dir);
-        return -EFAULT;
+        SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_faccessat_ticks);
     }
 
     struct vfs_inode *inode = vfs_namei_at(start_dir, path, n);
     if (start_dir) vfs_iput(start_dir);
     if (IS_ERR(inode))
-        return PTR_ERR(inode);
+        SYSCALL_PROFILE_RETURN(PTR_ERR(inode), g_sys_faccessat_ticks);
     if (inode == NULL)
-        return -ENOENT;
+        SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_faccessat_ticks);
 
     if (mode != 0) {
         mode_t perm = inode->mode;
         if ((mode & 4) && !(perm & (S_IRUSR | S_IRGRP | S_IROTH))) {
             vfs_iput(inode);
-            return -EACCES;
+            SYSCALL_PROFILE_RETURN(-EACCES, g_sys_faccessat_ticks);
         }
         if ((mode & 2) && !(perm & (S_IWUSR | S_IWGRP | S_IWOTH))) {
             vfs_iput(inode);
-            return -EACCES;
+            SYSCALL_PROFILE_RETURN(-EACCES, g_sys_faccessat_ticks);
         }
         if ((mode & 1) && !(perm & (S_IXUSR | S_IXGRP | S_IXOTH))) {
             vfs_iput(inode);
-            return -EACCES;
+            SYSCALL_PROFILE_RETURN(-EACCES, g_sys_faccessat_ticks);
         }
     }
 
     vfs_iput(inode);
-    return 0;
+    SYSCALL_PROFILE_RETURN(0, g_sys_faccessat_ticks);
 }
 
 /**

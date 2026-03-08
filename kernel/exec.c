@@ -33,6 +33,7 @@
 #include "signal.h"
 #include "kqueue_types.h"
 #include "accounting.h"
+#include "kstats.h"
 
 /* Enable verbose exec debugging — set to 1 to trace ELF loading steps */
 #define EXEC_DEBUG 0
@@ -231,6 +232,8 @@ static inline void push_auxv(uint64 *ustack, int *idx, uint64 type,
 }
 
 int exec(char *path, char **argv, char **envp) {
+    uint64 exec_start = r_time();
+    __atomic_add_fetch(&g_exec_calls, 1, __ATOMIC_RELAXED);
     char *s, *last;
     int i;
     /*
@@ -686,6 +689,8 @@ int exec(char *path, char **argv, char **envp) {
     vm_remote_fence_i(p->vm);
 
     ACCT_INC(p->thread_group, sched_execs);
+    __atomic_add_fetch(&g_exec_ticks, r_time() - exec_start,
+                       __ATOMIC_RELAXED);
     return argc; // this ends up in a0, the first argument to main(argc, argv)
 
 bad_locked:
@@ -697,6 +702,8 @@ bad:
     if (file) {
         vfs_fput(file);
     }
+    __atomic_add_fetch(&g_exec_ticks, r_time() - exec_start,
+                       __ATOMIC_RELAXED);
     return -1;
 }
 

@@ -154,6 +154,7 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/kqueuetest.c
     ${USER_DIR}/forktest.c
     ${USER_DIR}/top.c
+    ${USER_DIR}/kprofile.c
     ${USER_DIR}/crashtest.c
     ${USER_DIR}/syscalltest.c
     ${USER_DIR}/iovectest.c
@@ -1879,7 +1880,7 @@ endfunction()
 set(USERLIB_ONLY_PROGS
     bigfile cloexectest clonetest cowtest dd devtest dh dumpchan dumpinode
     dumppcache dumprq find free forktest grind kqueuetest losetup lsblk mkfs_xv6fs mknod mmapbigfile mmaptest mount pingpong
-    primes ps randtest stressfs symlinktest sync testsig umount
+    primes ps randtest stressfs symlinktest sync testsig umount kprofile
     usertests vforktest waitgdb wallclock xargs zombie top
     syscalltest iovectest
 )

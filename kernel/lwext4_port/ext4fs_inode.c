@@ -22,7 +22,9 @@
 #include "errno.h"
 #include "lock/mutex_types.h"
 #include <mm/vm.h>
+#include <mm/pcache.h>
 #include "vfs/fs.h"
+#include "vfs/fcntl.h"
 #include <mm/slab.h>
 #include "ext4fs_private.h"
 #include "kernel/vfs/vfs_private.h"
@@ -98,6 +100,7 @@ static struct vfs_inode *ext4fs_build_vfs_inode(struct vfs_superblock *sb,
     if (ei == NULL)
         return ERR_PTR(-ENOMEM);
     memset(ei, 0, sizeof(*ei));
+    ext4fs_inode_map_cache_init(ei);
 
     ei->vfs_inode.ino     = ino;
     ei->vfs_inode.mode    = mode;
@@ -699,6 +702,11 @@ static int ext4fs_truncate(struct vfs_inode *inode, loff_t new_size)
     if (inode == NULL)
         return -EINVAL;
 
+    ext4fs_inode_map_cache_invalidate(inode);
+
+    if (inode->i_data.active)
+        pcache_teardown(&inode->i_data);
+
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
     struct ext4_fs *fs = &esb->ext4fs;
 
@@ -1007,6 +1015,9 @@ static void ext4fs_destroy_inode(struct vfs_inode *inode)
     if (inode == NULL)
         return;
 
+    if (inode->i_data.active)
+        pcache_teardown(&inode->i_data);
+
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
     struct ext4_fs *fs = &esb->ext4fs;
 
@@ -1029,6 +1040,8 @@ static void ext4fs_free_inode(struct vfs_inode *inode)
 {
     if (inode == NULL)
         return;
+    if (inode->i_data.active)
+        pcache_teardown(&inode->i_data);
     struct ext4fs_inode *ei =
         container_of(inode, struct ext4fs_inode, vfs_inode);
     slab_free(ei);
@@ -1044,8 +1057,14 @@ static int ext4fs_open(struct vfs_inode *inode, struct vfs_file *file,
     if (inode == NULL || file == NULL)
         return -EINVAL;
 
-    if (S_ISREG(inode->mode) || S_ISDIR(inode->mode) ||
-        S_ISLNK(inode->mode) || S_ISFIFO(inode->mode)) {
+    if (S_ISREG(inode->mode)) {
+        file->ops = &ext4fs_file_ops;
+        if ((f_flags & O_ACCMODE) == O_RDONLY && !inode->i_data.active)
+            ext4fs_inode_pcache_init(inode);
+        return 0;
+    }
+
+    if (S_ISDIR(inode->mode) || S_ISLNK(inode->mode) || S_ISFIFO(inode->mode)) {
         file->ops = &ext4fs_file_ops;
         return 0;
     }
@@ -1321,6 +1340,9 @@ static int ext4fs_setattr(struct vfs_inode *inode, const struct stat *stat)
     /* Update size (truncate) */
     if (stat->st_size >= 0 && stat->st_size != inode->size &&
         S_ISREG(inode->mode)) {
+        ext4fs_inode_map_cache_invalidate(inode);
+        if (inode->i_data.active)
+            pcache_teardown(&inode->i_data);
         int tr = ext4_fs_truncate_inode(&ref, (uint64_t)stat->st_size);
         if (tr == EOK) {
             ext4_inode_set_size(ref.inode, (uint64_t)stat->st_size);
