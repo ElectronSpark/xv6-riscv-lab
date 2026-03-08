@@ -173,6 +173,18 @@ pagetable_t kvmmake(void)
         }
     }
 
+    /* I2C MMIO (SpacemiT X1) */
+    if (platform.has_i2c) {
+        for (int i = 0; i < platform.i2c_count && i < X1_I2C_MAX; i++) {
+            if (platform.i2c[i].base != 0 && platform.i2c[i].size != 0) {
+                uint64 base = PGROUNDDOWN(platform.i2c[i].base);
+                uint64 size = PGROUNDUP(platform.i2c[i].base +
+                                        platform.i2c[i].size) - base;
+                kvmmap_safe(kpgtbl, base, base, size, PTE_R | PTE_W);
+            }
+        }
+    }
+
     /* SDHCI MMIO (SpacemiT X1) */
     if (platform.has_sdhci) {
         for (int i = 0; i < platform.sdhci_count && i < SDHCI_MAX; i++) {

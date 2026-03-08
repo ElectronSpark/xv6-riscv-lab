@@ -113,6 +113,8 @@
         "readelf": true,
         "objdump": true,
         "diff": true,
-        "riscv64-linux-gnu-objdump": true
+        "riscv64-linux-gnu-objdump": true,
+        "set": true,
+        "sshpass": true
     }
 }

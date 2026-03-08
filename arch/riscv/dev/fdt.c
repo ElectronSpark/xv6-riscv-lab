@@ -715,6 +715,17 @@ static bool __fdt_prop_compat_list(struct fdt_node *prop,
     return false;
 }
 
+static bool __fdt_node_enabled(struct fdt_node *node) {
+    struct fdt_node *status = __fdt_get_prop(node, "status");
+    if (status == NULL || status->data_size == 0) {
+        return true;
+    }
+
+    const char *value = (const char *)status->data;
+    return strncmp(value, "disabled", 8) != 0 &&
+           strncmp(value, "fail", 4) != 0;
+}
+
 // Parse reg property based on address-cells and size-cells
 static void __fdt_parse_reg_prop(struct fdt_node *prop, int addr_cells,
                                  int size_cells, uint64 *base_out,
@@ -1185,6 +1196,10 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
         NULL};
     // VirtIO detection
     static const char *virtio_compat[] = {"virtio,mmio", NULL};
+    // I2C (SpacemiT/KY X1)
+    static const char *i2c_compat[] = {"ky,x1-i2c", "ky,x1-i2c-rcpu", NULL};
+    static const char *pmic_compat[] = {"ky,spm8821", NULL};
+    static const char *pmic_rtc_compat[] = {"pmic,rtc,spm8821", NULL};
     // EMAC (SpacemiT X1 Ethernet MAC)
     static const char *emac_compat[] = {"ky,x1-emac", "spacemit,k1-emac", NULL};
     // SDHCI (SpacemiT X1 SD/eMMC host controller)
@@ -1328,6 +1343,92 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
                     __fdt_prop_u32(interrupts, 0);
             }
             platform.virtio_count++;
+        }
+
+        // I2C controller detection (SpacemiT X1)
+        if (__fdt_prop_compat_list(compat, i2c_compat) &&
+            platform.i2c_count < X1_I2C_MAX && __fdt_node_enabled(node)) {
+            int idx = platform.i2c_count;
+            struct fdt_node *p;
+
+            platform.has_i2c = 1;
+            if (reg) {
+                __fdt_parse_reg_prop(reg, soc_addr_cells, soc_size_cells,
+                                     &platform.i2c[idx].base,
+                                     &platform.i2c[idx].size);
+            }
+            if (interrupts) {
+                platform.i2c[idx].irq = __fdt_prop_u32(interrupts, 0);
+            }
+
+            p = __fdt_get_prop(node, "ky,adapter-id");
+            platform.i2c[idx].adapter_id = p ? __fdt_prop_u32(p, 0) : idx;
+            p = __fdt_get_prop(node, "ky,i2c-clk-rate");
+            platform.i2c[idx].clk_rate = p ? __fdt_prop_u32(p, 0) : 0;
+            p = __fdt_get_prop(node, "ky,i2c-lcr");
+            platform.i2c[idx].lcr = p ? __fdt_prop_u32(p, 0) : 0;
+            p = __fdt_get_prop(node, "ky,i2c-wcr");
+            platform.i2c[idx].wcr = p ? __fdt_prop_u32(p, 0) : 0;
+            p = __fdt_get_prop(node, "ky,apb_clock");
+            platform.i2c[idx].apb_clock = p ? __fdt_prop_u32(p, 0) : 0;
+            platform.i2c[idx].fast_mode =
+                (__fdt_get_prop(node, "ky,i2c-fast-mode") != NULL);
+            platform.i2c[idx].high_mode =
+                (__fdt_get_prop(node, "ky,i2c-high-mode") != NULL);
+
+            printf("fdt: found I2C%d at 0x%lx size 0x%lx IRQ %d%s%s\n",
+                   platform.i2c[idx].adapter_id, platform.i2c[idx].base,
+                   platform.i2c[idx].size, platform.i2c[idx].irq,
+                   platform.i2c[idx].fast_mode ? " fast" : "",
+                   platform.i2c[idx].high_mode ? " high" : "");
+
+            if (!platform.has_pmic_rtc) {
+                struct rb_node *child_rb = rb_first_node(&node->children);
+                while (child_rb) {
+                    struct fdt_node *child =
+                        container_of(child_rb, struct fdt_node, rb_entry);
+                    child_rb = rb_next_node(child_rb);
+
+                    struct fdt_node *child_compat =
+                        __fdt_get_prop(child, "compatible");
+                    if (!__fdt_prop_compat_list(child_compat, pmic_compat) ||
+                        !__fdt_node_enabled(child)) {
+                        continue;
+                    }
+
+                    struct fdt_node *child_reg = __fdt_get_prop(child, "reg");
+                    uint32 pmic_addr = child_reg ? __fdt_prop_u32(child_reg, 0) : 0;
+
+                    struct rb_node *grand_rb = rb_first_node(&child->children);
+                    while (grand_rb) {
+                        struct fdt_node *grand =
+                            container_of(grand_rb, struct fdt_node, rb_entry);
+                        grand_rb = rb_next_node(grand_rb);
+
+                        struct fdt_node *grand_compat =
+                            __fdt_get_prop(grand, "compatible");
+                        if (!__fdt_prop_compat_list(grand_compat,
+                                                    pmic_rtc_compat) ||
+                            !__fdt_node_enabled(grand)) {
+                            continue;
+                        }
+
+                        platform.has_pmic_rtc = 1;
+                        platform.pmic_rtc_bus = platform.i2c[idx].adapter_id;
+                        platform.pmic_rtc_addr = pmic_addr;
+                        printf("fdt: found PMIC RTC on I2C%d addr 0x%x\n",
+                               platform.pmic_rtc_bus,
+                               platform.pmic_rtc_addr);
+                        break;
+                    }
+
+                    if (platform.has_pmic_rtc) {
+                        break;
+                    }
+                }
+            }
+
+            platform.i2c_count++;
         }
 
         // EMAC detection (SpacemiT X1 Ethernet MAC)

@@ -210,6 +210,9 @@ void x1_emac_init(void);
 // x1_sdhci.c
 void x1_sdhci_init(void);
 
+// x1_i2c.c
+int x1_i2c_init(void);
+
 // net.c / lwip_glue.c
 void net_rx(struct mbuf *);
 #ifndef USE_LWIP

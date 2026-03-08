@@ -199,7 +199,7 @@ static inline uint8 mn_find_slot(const struct maple_node *node,
     uint8 lo = 0;
     uint8 hi = len - 1;          /* last slot has no explicit pivot */
     while (lo < hi) {
-        uint8 mid = (lo + hi) / 2;
+        uint8 mid = (lo + hi) >> 1;
         uint64 piv = READ_ONCE(node->pivot[mid]);
         if (index <= piv)
             hi = mid;
@@ -220,7 +220,7 @@ static inline uint8 mn_find_slot_from(const struct maple_node *node,
     uint8 lo = from;
     uint8 hi = len - 1;
     while (lo < hi) {
-        uint8 mid = (lo + hi) / 2;
+        uint8 mid = (lo + hi) >> 1;
         uint64 piv = READ_ONCE(node->pivot[mid]);
         if (index <= piv)
             hi = mid;
@@ -471,7 +471,7 @@ static int __mt_split_node(struct maple_tree *mt, struct maple_node *node,
     if (right == NULL)
         return -ENOMEM;
 
-    uint8 split = node->slot_len / 2;   /* median index */
+    uint8 split = node->slot_len >> 1;   /* median index */
     uint64 median = node->pivot[split - 1];
     right->type = node->type;
 

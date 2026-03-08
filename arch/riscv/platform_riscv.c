@@ -80,6 +80,7 @@ void platform_late_device_init(void)
 {
     sched_timer_init();
     pci_init();
+    x1_i2c_init();
     x1_emac_init();
     x1_sdhci_init();
 }

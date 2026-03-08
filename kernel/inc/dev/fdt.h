@@ -216,6 +216,30 @@ struct platform_info {
         int bus_width;         /* max bus width (1, 4, or 8) */
     } sdhci[SDHCI_MAX];
     int sdhci_count;
+
+    // X1 I2C controllers
+#ifndef X1_I2C_MAX
+#define X1_I2C_MAX 10
+#endif
+    int has_i2c;
+    struct {
+        uint64 base;       /* MMIO register base */
+        uint64 size;       /* MMIO region size */
+        uint32 irq;        /* interrupt number */
+        uint32 adapter_id; /* logical bus number from DT */
+        uint32 clk_rate;   /* DT ky,i2c-clk-rate */
+        uint32 lcr;        /* DT ky,i2c-lcr */
+        uint32 wcr;        /* DT ky,i2c-wcr */
+        uint32 apb_clock;  /* DT ky,apb_clock */
+        uint8 fast_mode;   /* DT ky,i2c-fast-mode */
+        uint8 high_mode;   /* DT ky,i2c-high-mode */
+    } i2c[X1_I2C_MAX];
+    int i2c_count;
+
+    // Battery-backed PMIC RTC hanging off an X1 I2C bus
+    int has_pmic_rtc;
+    uint32 pmic_rtc_bus;
+    uint32 pmic_rtc_addr;
 };
 
 // Global platform info (populated by fdt_init)

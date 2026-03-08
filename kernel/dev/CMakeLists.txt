@@ -8,6 +8,7 @@ add_library(dev OBJECT
     bio.c
     netdev.c
     yt8531.c
+    x1_i2c.c
     x1_emac.c
     x1_sdhci.c
     crc32.c
