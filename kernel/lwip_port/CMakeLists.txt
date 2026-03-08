@@ -80,8 +80,9 @@ set(LWIP_PORT_SRCS
 
 set(LWIP_APP_SRCS
     ${LWIP_DIR}/src/apps/tftp/tftp.c
-    ${LWIP_DIR}/src/apps/http/httpd.c
-    ${LWIP_DIR}/src/apps/http/fs.c
+    # httpd disabled — user-space Flask handles HTTP
+    # ${LWIP_DIR}/src/apps/http/httpd.c
+    # ${LWIP_DIR}/src/apps/http/fs.c
     ${LWIP_DIR}/src/apps/lwiperf/lwiperf.c
     ${LWIP_DIR}/src/apps/sntp/sntp.c
     ${LWIP_DIR}/src/apps/netbiosns/netbiosns.c

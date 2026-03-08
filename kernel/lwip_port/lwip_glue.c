@@ -525,8 +525,9 @@ static void __lwip_start_services(void)
     // telnetd_init();
     extern void tftpd_init(void);
     tftpd_init();
-    extern void httpd_daemon_init(void);
-    httpd_daemon_init();
+    /* Kernel-side httpd disabled — user-space Flask handles HTTP. */
+    // extern void httpd_daemon_init(void);
+    // httpd_daemon_init();
     extern void iperfd_init(void);
     iperfd_init();
     extern void sntpd_init(void);

@@ -38,6 +38,43 @@ SYSROOT_SIZE=$(du -sh "$SYSROOT_DIR" | cut -f1)
 STAGING_SIZE=$(du -sh "$STAGING" | cut -f1)
 echo "mkext4_rootfs: sysroot: ${SYSROOT_SIZE} -> staging: ${STAGING_SIZE} (excludes .a/.o/include)"
 
+# ── Strip ELF binaries and shared libraries in staging ────────────────────────
+# This reduces the rootfs size significantly while keeping the sysroot originals
+# intact (with debug symbols) for debugging.
+# Auto-detect architecture from an ELF in bin/ and pick the right cross-strip.
+STRIP_TOOL=""
+WORKSPACE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+SAMPLE_ELF=$(find "$STAGING/bin" -type f -maxdepth 1 2>/dev/null | head -1)
+if [ -n "$SAMPLE_ELF" ] && file "$SAMPLE_ELF" | grep -q "ELF"; then
+    if file "$SAMPLE_ELF" | grep -q "RISC-V"; then
+        STRIP_TOOL="${WORKSPACE_DIR}/toolchain/riscv64/phase2/bin/riscv64-xv6-linux-musl-strip"
+    elif file "$SAMPLE_ELF" | grep -q "x86-64"; then
+        STRIP_TOOL="${WORKSPACE_DIR}/toolchain/x86_64/phase2/bin/x86_64-xv6-linux-musl-strip"
+    fi
+fi
+
+if [ -n "$STRIP_TOOL" ] && [ -x "$STRIP_TOOL" ]; then
+    STRIP_COUNT=0
+    STRIP_SAVED=0
+
+    # Strip ELF executables and shared libraries
+    while IFS= read -r -d '' elf_file; do
+        if file "$elf_file" | grep -q "ELF.*\(executable\|shared object\)"; then
+            SIZE_BEFORE=$(stat -c%s "$elf_file" 2>/dev/null || echo 0)
+            if "$STRIP_TOOL" --strip-unneeded "$elf_file" 2>/dev/null; then
+                SIZE_AFTER=$(stat -c%s "$elf_file" 2>/dev/null || echo 0)
+                STRIP_SAVED=$((STRIP_SAVED + SIZE_BEFORE - SIZE_AFTER))
+                STRIP_COUNT=$((STRIP_COUNT + 1))
+            fi
+        fi
+    done < <(find "$STAGING" -type f \( -name '*.so' -o -name '*.so.*' -o -perm /111 \) -print0)
+
+    STRIP_SAVED_MB=$((STRIP_SAVED / 1024 / 1024))
+    echo "mkext4_rootfs: stripped ${STRIP_COUNT} ELF files (saved ${STRIP_SAVED_MB} MB)"
+else
+    echo "mkext4_rootfs: warning: cross-strip tool not found, skipping ELF stripping" >&2
+fi
+
 # Ensure runtime directories exist (not part of sysroot)
 mkdir -p "$STAGING/dev"
 mkdir -p "$STAGING/proc"
@@ -183,6 +220,7 @@ cat > "$STAGING/etc/daemons" <<'DAEMONS'
 
 /bin/telnetd
 /bin/sshd -D -e
+/bin/python /app/wsgi.py
 DAEMONS
 
 # ── lwIP network configuration ───────────────────────────────────────────────
@@ -232,6 +270,15 @@ done
 
 # Copy Python standard library
 mkdir -p "$STAGING/usr/local/lib/python3.12/lib-dynload"
+# CPython is built with --prefix=/ so it looks for /lib/python3.12/.
+# The sysroot rsync already copied sysroot/lib/python3.12/ (lib-dynload, site-packages)
+# as a real directory. Merge its contents into usr/local/lib/python3.12/ and replace
+# the real directory with a symlink.
+if [ -d "$STAGING/lib/python3.12" ] && [ ! -L "$STAGING/lib/python3.12" ]; then
+    rsync -a "$STAGING/lib/python3.12/" "$STAGING/usr/local/lib/python3.12/"
+    rm -rf "$STAGING/lib/python3.12"
+fi
+ln -sfn ../usr/local/lib/python3.12 "$STAGING/lib/python3.12"
 if [ -d "$SYSROOT_DIR/lib/python3.12/lib-dynload" ]; then
     cp -P "$SYSROOT_DIR"/lib/python3.12/lib-dynload/*.so \
         "$STAGING/usr/local/lib/python3.12/lib-dynload/" 2>/dev/null || true
@@ -240,7 +287,7 @@ PYLIB_SRC="${CPYTHON_SRC}/Lib"
 if [ -d "$PYLIB_SRC" ]; then
     # Directories to exclude (saves ~35 MB)
     EXCLUDES=(
-        test tests idlelib turtledemo ensurepip lib2to3
+        test tests idlelib turtledemo lib2to3
         tkinter __pycache__ distutils msilib
     )
 
@@ -252,6 +299,7 @@ if [ -d "$PYLIB_SRC" ]; then
     rsync -a "${RSYNC_EXCLUDES[@]}" \
         --include='*/' \
         --include='*.py' \
+        --include='*.whl' \
         --include='*.pem' \
         --include='*.txt' \
         --include='*.cfg' \
@@ -290,6 +338,47 @@ fi
 BIN_COUNT=$(find "$STAGING/bin/" -type f 2>/dev/null | wc -l)
 TOTAL_USED=$(du -sh "$STAGING" | cut -f1)
 echo "mkext4_rootfs: ${BIN_COUNT} programs, total ${TOTAL_USED}"
+
+# ── Flask web application ────────────────────────────────────────────────────
+# Copy the Flask app scaffold into /app/ on the rootfs
+FLASK_APP_SRC="$(dirname "$0")/../user/flask_app"
+if [ -d "$FLASK_APP_SRC" ]; then
+    mkdir -p "$STAGING/app"
+    rsync -a --exclude='__pycache__' "$FLASK_APP_SRC/" "$STAGING/app/"
+    # Pre-compile the app .py files
+    python3 -m compileall -q -j0 -b "$STAGING/app/" 2>/dev/null || true
+    echo "mkext4_rootfs: Flask app copied to /app/"
+fi
+
+# Create directories for the web app runtime
+mkdir -p "$STAGING/var/lib"        # SQLite database
+mkdir -p "$STAGING/tmp/flask_sessions"  # Server-side sessions
+
+# ── TLS / SSL infrastructure ────────────────────────────────────────────────
+mkdir -p "$STAGING/etc/ssl/certs"
+mkdir -p "$STAGING/etc/ssl/private"
+mkdir -p "$STAGING/var/www/challenges"  # ACME HTTP-01 challenge dir
+chmod 700 "$STAGING/etc/ssl/private" 2>/dev/null || true
+
+# Install CA certificate bundle if downloaded by install_flask.sh
+CA_BUNDLE_SRC="${SYSROOT_DIR}/etc-ssl-certs/ca-certificates.crt"
+if [ ! -f "$CA_BUNDLE_SRC" ]; then
+    # Try alternate path
+    CA_BUNDLE_SRC="${SYSROOT_DIR}/lib/python3.12/etc-ssl-certs/ca-certificates.crt"
+fi
+if [ -f "$CA_BUNDLE_SRC" ]; then
+    cp "$CA_BUNDLE_SRC" "$STAGING/etc/ssl/certs/ca-certificates.crt"
+    # Python's ssl module looks for this via SSL_CERT_FILE or default paths
+    echo "mkext4_rootfs: CA certificate bundle installed"
+fi
+
+# Install acme-tiny ACME client if available
+ACME_TINY="$(dirname "$0")/../scripts/acme_tiny.py"
+if [ -f "$ACME_TINY" ]; then
+    mkdir -p "$STAGING/usr/local/bin"
+    cp "$ACME_TINY" "$STAGING/usr/local/bin/acme_tiny.py"
+    echo "mkext4_rootfs: acme_tiny.py installed to /usr/local/bin/"
+fi
 
 # Create the ext4 image populated from staging (no root/mount required)
 mke2fs -F -t ext4 -O extent,dir_index,filetype,sparse_super -b 4096 -d "$STAGING" "$OUTPUT" "${SIZE_MB}m" >/dev/null 2>&1

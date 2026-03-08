@@ -14,6 +14,7 @@
 #include "proc/thread.h"
 #include <mm/vm.h>
 #include "accounting.h"
+#include "diag.h"
 
 // mmap(addr, length, prot, flags, fd, offset)
 uint64 sys_mmap(void) {
@@ -31,6 +32,8 @@ uint64 sys_mmap(void) {
     if ((int64)ret >= 0) {
         ACCT_INC(current->thread_group, mm_mmap_count);
     }
+    // dprintf("pid %d %s: mmap(addr=0x%lx, len=0x%lx, prot=%d, flags=0x%x, fd=%d) = 0x%lx\n",
+    //        current->pid, current->name, addr, length, prot, flags, fd, ret);
     return ret;
 }
 
@@ -44,9 +47,12 @@ uint64 sys_munmap(void) {
     if (length == 0)
         return -EINVAL;
 
+    // dprintf("pid %d %s: munmap(addr=0x%lx, len=0x%lx)\n",
+    //        current->pid, current->name, addr, length);
     int ret = vm_munmap(current->vm, addr, (size_t)length);
     if (ret == 0)
         ACCT_INC(current->thread_group, mm_munmap_count);
+    // dprintf("pid %d %s: munmap -> %d\n", current->pid, current->name, ret);
     return (uint64)ret;
 }
 
@@ -62,7 +68,10 @@ uint64 sys_mprotect(void) {
     if (length == 0)
         return -EINVAL;
 
-    return (uint64)vm_mprotect(current->vm, addr, (size_t)length, prot);
+    int ret = vm_mprotect(current->vm, addr, (size_t)length, prot);
+    // dprintf("pid %d %s: mprotect(addr=0x%lx, len=0x%lx, prot=%d) = %d\n",
+    //        current->pid, current->name, addr, length, prot, ret);
+    return (uint64)ret;
 }
 
 // mremap(old_addr, old_size, new_size, flags, new_addr)

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Dashboard — xv6 Web Server{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+<p>Welcome back, <strong>{{ current_user.username }}</strong>!</p>
+
+<h2>Your Posts</h2>
+<p><a href="{{ url_for('main.new_post') }}">+ New Post</a></p>
+
+{% if posts %}
+<table>
+    <thead>
+        <tr>
+            <th>Title</th>
+            <th>Created</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for post in posts %}
+        <tr>
+            <td><a href="{{ url_for('main.view_post', post_id=post.id) }}">{{ post.title }}</a></td>
+            <td>{{ post.created_at.strftime('%Y-%m-%d %H:%M') if post.created_at else '' }}</td>
+            <td>
+                <a href="{{ url_for('main.edit_post', post_id=post.id) }}">Edit</a>
+                <form method="post" action="{{ url_for('main.delete_post', post_id=post.id) }}"
+                      style="display:inline">
+                    <button type="submit" onclick="return confirm('Delete this post?')">Delete</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+{% else %}
+<p>You haven't written any posts yet.</p>
+{% endif %}
+{% endblock %}

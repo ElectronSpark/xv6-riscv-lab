@@ -244,11 +244,11 @@
 /* TFTP server */
 #define TFTP_MAX_FILENAME_LEN           128
 
-/* HTTP server — serve files from xv6 VFS with embedded fallback */
-#define LWIP_HTTPD_CUSTOM_FILES         1
-#define LWIP_HTTPD_DYNAMIC_FILE_READ    1
-#define LWIP_HTTPD_DYNAMIC_HEADERS      1
-#define LWIP_HTTPD_FILE_EXTENSION       1
+/* HTTP server — disabled, user-space Flask handles HTTP */
+// #define LWIP_HTTPD_CUSTOM_FILES         1
+// #define LWIP_HTTPD_DYNAMIC_FILE_READ    1
+// #define LWIP_HTTPD_DYNAMIC_HEADERS      1
+// #define LWIP_HTTPD_FILE_EXTENSION       1
 
 /* SNTP client — time synchronisation */
 #define SNTP_SERVER_DNS                 1

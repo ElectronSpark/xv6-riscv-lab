@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Login — xv6 Web Server{% endblock %}
+{% block content %}
+<h1>Login</h1>
+<form method="post">
+    <label for="username">Username</label>
+    <input type="text" id="username" name="username" required autofocus>
+
+    <label for="password">Password</label>
+    <input type="password" id="password" name="password" required>
+
+    <button type="submit">Login</button>
+</form>
+<p>Don't have an account? <a href="{{ url_for('auth.register') }}">Register</a></p>
+{% endblock %}

@@ -249,6 +249,17 @@ void usertrap(void) {
                current->pid, current->name,
                current->trapframe->trapframe.sepc,
                current->trapframe->trapframe.stval);
+        printf("  ra=0x%lx sp=0x%lx tp=0x%lx gp=0x%lx\n",
+               current->trapframe->trapframe.ra,
+               current->trapframe->trapframe.sp,
+               current->trapframe->tp,
+               current->trapframe->gp);
+        printf("  a0=0x%lx a1=0x%lx a2=0x%lx s0=0x%lx s1=0x%lx\n",
+               current->trapframe->trapframe.a0,
+               current->trapframe->trapframe.a1,
+               current->trapframe->trapframe.a2,
+               current->trapframe->trapframe.s0,
+               current->trapframe->s1);
         assert(current->pid != 1, "init exiting");
         gdbstub_signal_stop(current, SIGSEGV);
         kill(current->pid, SIGSEGV);

@@ -7,7 +7,8 @@
 set(DAEMON_SRCS
     ${CMAKE_CURRENT_SOURCE_DIR}/telnetd.c
     ${CMAKE_CURRENT_SOURCE_DIR}/tftpd.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/httpd_daemon.c
+    # httpd disabled — user-space Flask handles HTTP
+    # ${CMAKE_CURRENT_SOURCE_DIR}/httpd_daemon.c
     ${CMAKE_CURRENT_SOURCE_DIR}/iperfd.c
     ${CMAKE_CURRENT_SOURCE_DIR}/sntpd.c
     ${CMAKE_CURRENT_SOURCE_DIR}/netbiosd.c

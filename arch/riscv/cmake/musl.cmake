@@ -89,7 +89,7 @@ set(MUSL_COMMON_CFLAGS
 )
 set(MUSL_C_CFLAGS
     ${MUSL_COMMON_CFLAGS}
-    -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
+    -Wall -O${OPT_LEVEL} -fno-omit-frame-pointer -ggdb -gdwarf-2
     -fno-common -ffreestanding
 )
 

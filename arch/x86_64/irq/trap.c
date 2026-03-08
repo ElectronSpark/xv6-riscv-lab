@@ -9,6 +9,7 @@
 
 #include "types.h"
 #include "printf.h"
+#include "diag.h"
 #include "x86.h"
 #include "defs.h"
 #include "string.h"
@@ -616,12 +617,28 @@ void x86_trap_handler(struct trapframe *tf) {
                 vm_runlock(current->vm);
                 goto user_return; /* fault resolved */
             }
+            /* Diagnostic: dump VMA state on unresolved fault */
+            if (vma != NULL) {
+                // dprintf("pid %d %s: PF diag: vma [0x%lx-0x%lx) flags=0x%lx, "
+                //        "cr2=0x%lx prot=0x%lx\n",
+                //        current->pid, current->name,
+                //        vma->start, vma->end, vma->flags, cr2, prot);
+            } else {
+                // dprintf("pid %d %s: PF diag: NO VMA for cr2=0x%lx\n",
+                //        current->pid, current->name, cr2);
+            }
             vm_runlock(current->vm);
 
             /* Could not resolve — kill the process */
-            printf(
-                "pid %d %s: fatal page fault cr2=0x%lx err=0x%lx rip=0x%lx\n",
-                current->pid, current->name, cr2, tf->err, tf->rip);
+            // dprintf(
+            //     "pid %d %s: fatal page fault cr2=0x%lx err=0x%lx rip=0x%lx\n",
+            //     current->pid, current->name, cr2, tf->err, tf->rip);
+            // dprintf("  rsp=0x%lx rbp=0x%lx rax=0x%lx rbx=0x%lx\n",
+            //        tf->rsp, tf->rbp, tf->rax, tf->rbx);
+            // dprintf("  rdi=0x%lx rsi=0x%lx rdx=0x%lx rcx=0x%lx\n",
+            //        tf->rdi, tf->rsi, tf->rdx, tf->rcx);
+            // dprintf("  r8=0x%lx r9=0x%lx r10=0x%lx r11=0x%lx\n",
+            //        tf->r8, tf->r9, tf->r10, tf->r11);
             assert(current->pid != 1, "init exiting");
             {
                 extern int gdbstub_signal_stop(struct thread *, int);
@@ -637,6 +654,8 @@ void x86_trap_handler(struct trapframe *tf) {
              * panic. */
             printf("pid %d %s: page fault with NULL vm cr2=0x%lx rip=0x%lx\n",
                    current->pid, current->name, cr2, tf->rip);
+            // dprintf("pid %d %s: page fault with NULL vm cr2=0x%lx rip=0x%lx\n",
+            //        current->pid, current->name, cr2, tf->rip);
             assert(current->pid != 1, "init exiting");
             kill(current->pid, SIGSEGV);
             goto user_return;
@@ -773,6 +792,14 @@ void x86_trap_handler(struct trapframe *tf) {
             printf("pid %d %s: exception %ld (%s) rip=0x%lx err=0x%lx\n",
                    current->pid, current->name, vec, name ? name : "???",
                    tf->rip, tf->err);
+            printf("  rsp=0x%lx rbp=0x%lx rax=0x%lx rbx=0x%lx\n",
+                   tf->rsp, tf->rbp, tf->rax, tf->rbx);
+            printf("  rdi=0x%lx rsi=0x%lx rdx=0x%lx rcx=0x%lx\n",
+                   tf->rdi, tf->rsi, tf->rdx, tf->rcx);
+            printf("  r8=0x%lx r9=0x%lx r10=0x%lx r11=0x%lx\n",
+                   tf->r8, tf->r9, tf->r10, tf->r11);
+            printf("  fs_base(tp)=0x%lx\n",
+                   current->trapframe ? current->trapframe->tp : 0);
             assert(current->pid != 1, "init exiting");
             {
                 extern int gdbstub_signal_stop(struct thread *, int);

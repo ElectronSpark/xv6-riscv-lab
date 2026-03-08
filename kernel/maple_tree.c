@@ -542,8 +542,29 @@ static int __mt_split_node(struct maple_tree *mt, struct maple_node *node,
     uint64 pmin, pmax;
     __find_node_bounds(mt, parent, &pmin, &pmax);
 
-    return __mt_insert_into_parent(mt, parent, pslot, median, right,
-                                   pmin, pmax);
+    int ret = __mt_insert_into_parent(mt, parent, pslot, median, right,
+                                      pmin, pmax);
+    if (ret != 0) {
+        /* Undo split: restore left node and re-parent right's children. */
+        for (uint8 i = 0; i < right_len; i++) {
+            node->slot[split + i] = right->slot[i];
+            if (i < right_len - 1 && (split + i) < MAPLE_NODE_PIVOTS)
+                node->pivot[split + i] = right->pivot[i];
+            if (!mn_is_leaf(node))
+                node->gap[split + i] = right->gap[i];
+        }
+        node->slot_len = split + right_len;
+        if (!mn_is_leaf(node)) {
+            for (uint8 i = split; i < node->slot_len; i++) {
+                struct maple_node *child = node->slot[i];
+                if (child != NULL)
+                    mn_set_parent(child, node, i);
+            }
+        }
+        mt_free_node_now(right);
+        return ret;
+    }
+    return 0;
 }
 
 /* ====================================================================== */

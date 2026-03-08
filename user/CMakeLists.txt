@@ -1759,6 +1759,30 @@ else()
 endif()
 
 # ==============================================================================
+# Flask — Python web framework + full-stack dependencies (pure Python)
+# ==============================================================================
+set(FLASK_DOWNLOAD_DIR "${CMAKE_BINARY_DIR}/flask/downloads")
+set(FLASK_STAMP "${CMAKE_BINARY_DIR}/flask/.flask_installed")
+set(FLASK_SITE_PKG "${MUSL_SYSROOT}/lib/python3.12/site-packages")
+
+if(TARGET cpython_build)
+    add_custom_command(
+        OUTPUT ${FLASK_STAMP}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${FLASK_DOWNLOAD_DIR}
+        COMMAND /bin/bash ${CMAKE_SOURCE_DIR}/scripts/install_flask.sh
+                ${FLASK_SITE_PKG}
+                ${FLASK_DOWNLOAD_DIR}
+        COMMAND ${CMAKE_COMMAND} -E touch ${FLASK_STAMP}
+        DEPENDS ${CPYTHON_INSTALL_STAMP}
+        COMMENT "Installing Flask + deps into sysroot site-packages"
+    )
+    add_custom_target(flask_install DEPENDS ${FLASK_STAMP})
+    add_dependencies(flask_install cpython_build)
+else()
+    message(STATUS "Skipping Flask install (CPython not available)")
+endif()
+
+# ==============================================================================
 # ncurses-enhanced shell (sh.c compiled with USE_NCURSES_SHELL against musl)
 # ==============================================================================
 if(EXISTS "${NCURSES_SRC_DIR}/configure")
@@ -1950,6 +1974,11 @@ if(TARGET numpy_build)
     set(SYSROOT_TARGETS ${SYSROOT_TARGETS} ${NUMPY_STAMP})
 endif()
 
+# Flask + dependencies (installed into sysroot/lib/python3.12/site-packages/)
+if(TARGET flask_install)
+    set(SYSROOT_TARGETS ${SYSROOT_TARGETS} ${FLASK_STAMP})
+endif()
+
 # libstdc++ runtime (needed at runtime by C++ extension modules)
 if(TARGET libstdcxx_runtime)
     if(DEFINED LIBSTDCXX_SYSROOT_SO)
@@ -1999,6 +2028,9 @@ if(SYSROOT_TARGETS)
     endif()
     if(TARGET libstdcxx_runtime)
         add_dependencies(sysroot_populate libstdcxx_runtime)
+    endif()
+    if(TARGET flask_install)
+        add_dependencies(sysroot_populate flask_install)
     endif()
 endif()
 

@@ -65,12 +65,10 @@ endif()
 # Compressed images (xv6.bin.gz, fs.img.gz) are for U-Boot deployment only.
 
 set(QEMU_KERNEL_IMG ${CMAKE_BINARY_DIR}/kernel/xv6.bin)
-set(QEMU_INITRD_IMG ${CMAKE_BINARY_DIR}/fs.img)
 
 set(QEMUOPTS_PARAM
     ${QEMU_BIOS_OPT}
     -kernel ${QEMU_KERNEL_IMG}
-    -initrd ${QEMU_INITRD_IMG}
     -m 4G
     -smp ${CPUS}
     -nographic
@@ -79,7 +77,7 @@ set(QEMUOPTS_PARAM
     -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
     -drive file=xv6fs_test.img,if=none,format=raw,id=x1
     -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
-    -netdev user,id=net0,hostfwd=udp::${FWDPORT1}-:2000,hostfwd=udp::${FWDPORT2}-:2001,hostfwd=tcp::2323-:23,hostfwd=tcp::2159-:2159,hostfwd=tcp::8080-:80,hostfwd=udp::6969-:69,hostfwd=tcp::5001-:5001,hostfwd=tcp::2222-:22
+    -netdev user,id=net0,hostfwd=udp::${FWDPORT1}-:2000,hostfwd=udp::${FWDPORT2}-:2001,hostfwd=tcp::2323-:23,hostfwd=tcp::2159-:2159,hostfwd=tcp::8080-:80,hostfwd=tcp::8443-:443,hostfwd=udp::6969-:69,hostfwd=tcp::5001-:5001,hostfwd=tcp::2222-:22
     -object filter-dump,id=net0,netdev=net0,file=packets.pcap
     -device e1000,netdev=net0,bus=pcie.0
 )

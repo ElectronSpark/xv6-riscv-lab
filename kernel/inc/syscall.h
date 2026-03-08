@@ -258,5 +258,6 @@
 #define SYS_epoll_pwait     986
 #define SYS_epoll_ctl       987
 #define SYS_epoll_create1   988
+#define SYS_membarrier      998
 
 #endif /* __KERNEL_SYSCALL_H */

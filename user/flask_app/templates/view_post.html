@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}{{ post.title }} — xv6 Web Server{% endblock %}
+{% block content %}
+<article>
+    <h1>{{ post.title }}</h1>
+    <p class="meta">by {{ post.author.username }}
+        {% if post.created_at %} &mdash; {{ post.created_at.strftime('%Y-%m-%d %H:%M') }}{% endif %}
+        {% if post.updated_at and post.updated_at != post.created_at %}
+            (updated {{ post.updated_at.strftime('%Y-%m-%d %H:%M') }})
+        {% endif %}
+    </p>
+    <div class="post-body">{{ post.body }}</div>
+
+    {% if current_user.is_authenticated and current_user.id == post.author_id %}
+    <p>
+        <a href="{{ url_for('main.edit_post', post_id=post.id) }}">Edit</a>
+        <form method="post" action="{{ url_for('main.delete_post', post_id=post.id) }}"
+              style="display:inline">
+            <button type="submit" onclick="return confirm('Delete this post?')">Delete</button>
+        </form>
+    </p>
+    {% endif %}
+</article>
+<p><a href="{{ url_for('main.index') }}">&larr; Back</a></p>
+{% endblock %}

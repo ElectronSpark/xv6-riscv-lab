@@ -76,6 +76,10 @@ __clone:
     xorq %rbp, %rbp          /* mark end of frames */
     popq %rax                 /* rax = func */
     popq %rdi                 /* rdi = arg */
+    /* Ensure 16-byte stack alignment before call (x86_64 ABI).
+     * musl only guarantees 8-byte alignment for the child stack.
+     * callq will push 8 bytes, so RSP must be 16-aligned now. */
+    andq $-16, %rsp
     callq *%rax               /* func(arg) */
 
     /* func returned — call exit_group */

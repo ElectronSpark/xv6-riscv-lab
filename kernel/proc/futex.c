@@ -20,6 +20,7 @@
 #include "defs.h"
 #include "printf.h"
 #include <mm/vm.h>
+#include <mm/pgtable.h>
 #include "errno.h"
 #include "signal.h"
 
@@ -79,6 +80,26 @@ void futex_init(void) {
 }
 
 /*
+ * futex_read_u32 — lockless read of a 32-bit word from user space.
+ *
+ * Uses walkaddr() to translate the virtual address to physical without
+ * acquiring the VM rwsem, making it safe to call while holding a spinlock.
+ * Returns 0 on success, -EFAULT if the page is not mapped.
+ */
+static int futex_read_u32(vm_t *vm, uint64 uaddr, uint32 *val)
+{
+    uint64 pa = walkaddr(vm->pagetable, uaddr);
+    if (pa == 0)
+        return -EFAULT;
+    uint64 offset = uaddr - PGROUNDDOWN(uaddr);
+    /* Ensure the 4-byte read doesn't cross a page boundary */
+    if (offset + sizeof(uint32) > PGSIZE)
+        return -EFAULT;
+    *val = *(volatile uint32 *)(pa + offset);
+    return 0;
+}
+
+/*
  * futex_wait — sleep if *uaddr == val
  *
  * The caller holds no locks. We:
@@ -105,9 +126,9 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset) {
 
     spin_lock(&bucket->lock);
 
-    // Atomically read the futex word from user space
+    // Read the futex word locklessly (walkaddr does not acquire VM rwsem)
     uint32 curval;
-    if (vm_copyin(vm, (char *)&curval, uaddr, sizeof(curval)) < 0) {
+    if (futex_read_u32(vm, uaddr, &curval) < 0) {
         spin_unlock(&bucket->lock);
         return -EFAULT;
     }
@@ -122,13 +143,13 @@ static int futex_wait(uint64 uaddr, uint32 val, uint32 bitset) {
     bucket->head = &waiter;
 
     // Sleep — releases bucket->lock and puts thread to sleep.
-    // On wakeup, we need to re-acquire bucket->lock briefly to
-    // ensure we're properly dequeued.
+    // scheduler_sleep re-acquires bucket->lock before returning, so we
+    // must NOT lock it again here.
     scheduler_sleep(&bucket->lock, THREAD_INTERRUPTIBLE);
 
-    // We've been woken up. The waker may have already removed us from the
-    // list. Ensure we're not still linked (in case of spurious wakeup).
-    spin_lock(&bucket->lock);
+    // We've been woken up. bucket->lock is already held (re-acquired by
+    // scheduler_sleep). Remove ourselves if still linked (spurious wakeup
+    // or signal).
     // Remove ourselves from the list if still present (spurious wakeup / signal)
     struct futex_waiter **pp = &bucket->head;
     while (*pp) {
@@ -244,7 +265,7 @@ static int futex_requeue(uint64 uaddr1, int nr_wake, uint64 uaddr2,
     /* Optionally compare *uaddr1 with cmpval */
     if (do_cmp) {
         uint32 curval;
-        if (vm_copyin(vm, (char *)&curval, uaddr1, sizeof(curval)) < 0) {
+        if (futex_read_u32(vm, uaddr1, &curval) < 0) {
             if (idx1 != idx2) spin_unlock(&b2->lock);
             spin_unlock(&b1->lock);
             return -EFAULT;

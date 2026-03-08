@@ -7,7 +7,24 @@
             "command": "/bin/bash",
             "args": [
                 "-c",
-                "rm -rf ${workspaceFolder}/build; mkdir -p ${workspaceFolder}/build; cd ${workspaceFolder}/build; cmake .."
+                "rm -rf ${workspaceFolder}/build-debug; mkdir -p ${workspaceFolder}/build-debug; cd ${workspaceFolder}/build-debug; cmake .. -DOPT_LEVEL=2"
+            ],
+            "problemMatcher": [],
+            "options": {
+                "env": {
+                    "LAB": "fs",
+                    "CPUS": "1"
+                },
+                "cwd": "${workspaceFolder}/"
+            }
+        },
+        {
+            "label": "configure cmake (debug)",
+            "type": "shell",
+            "command": "/bin/bash",
+            "args": [
+                "-c",
+                "rm -rf ${workspaceFolder}/build-debug; mkdir -p ${workspaceFolder}/build-debug; cd ${workspaceFolder}/build-debug; cmake .. -DOPT_LEVEL=g"
             ],
             "problemMatcher": [],
             "options": {
@@ -41,10 +58,10 @@
                 }
             },
             "options": {
-                "cwd": "${workspaceFolder}/build"
+                "cwd": "${workspaceFolder}/build-debug"
             },
             "dependsOn": [
-                "configure cmake"
+                "configure cmake (debug)"
             ]
         }
     ]

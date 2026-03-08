@@ -85,6 +85,23 @@ endif()
 set(LAB_NAME "$ENV{LAB}")
 
 # ==============================================================================
+# Optimization Level
+# ==============================================================================
+# OPT_LEVEL controls the compiler optimization flag for both kernel and
+# user-space programs.  Pass -DOPT_LEVEL=... on the cmake command line or
+# set the OPT environment variable (e.g. OPT=2 cmake ..).
+if(NOT DEFINED OPT_LEVEL)
+    if(DEFINED ENV{OPT})
+        set(OPT_LEVEL "$ENV{OPT}" CACHE STRING "Compiler optimization level (0, 1, 2, 3, s, g, fast)")
+    else()
+        set(OPT_LEVEL "0" CACHE STRING "Compiler optimization level (0, 1, 2, 3, s, g, fast)")
+    endif()
+endif()
+if(NOT OPT_LEVEL MATCHES "^(0|1|2|3|s|g|fast)$")
+    message(FATAL_ERROR "Invalid OPT_LEVEL: ${OPT_LEVEL}. Must be one of: 0, 1, 2, 3, s, g, fast")
+endif()
+
+# ==============================================================================
 # Display Build Configuration Banner
 # ==============================================================================
 message(STATUS "")
@@ -93,6 +110,7 @@ message(STATUS "  xv6-riscv build configuration")
 message(STATUS "----------------------------------------")
 message(STATUS "  Platform:     ${PLATFORM}")
 message(STATUS "  OpenSBI:      ${OPENSBI_MODE}")
+message(STATUS "  Optimization: -O${OPT_LEVEL}")
 message(STATUS "  Lab:          ${LAB_NAME}")
 message(STATUS "========================================")
 message(STATUS "")
@@ -264,7 +282,7 @@ set(USER_DIR ${CMAKE_SOURCE_DIR}/user)
 # Global Compiler Flags
 # ==============================================================================
 string(CONCAT CMAKE_C_FLAGS "${CMAKE_C_FLAGS}"
-    " -Wall -Werror -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2"
+    " -Wall -Werror -O${OPT_LEVEL} -fno-omit-frame-pointer -ggdb -gdwarf-2"
     " -fno-common -nostdlib"
     # Disable all built-in function assumptions — we provide our own libc
     " -fno-builtin-strncpy -fno-builtin-strncmp -fno-builtin-strlen"
@@ -311,8 +329,14 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${XCFLAGS_STR}")
 # ==============================================================================
 # Enable compression for kernel and filesystem images.
 # Both QEMU and U-Boot support gzip-compressed images.
+# Automatically enabled for orangepi platform (needed for deploy); disabled
+# for QEMU to speed up the build cycle.  Override with -DENABLE_COMPRESSION=ON/OFF.
 # ==============================================================================
-option(ENABLE_COMPRESSION "Compress kernel and filesystem images with gzip" ON)
+if(PLATFORM STREQUAL "orangepi")
+    set(ENABLE_COMPRESSION ON CACHE BOOL "Compress kernel and filesystem images with gzip" FORCE)
+else()
+    option(ENABLE_COMPRESSION "Compress kernel and filesystem images with gzip" OFF)
+endif()
 
 if(ENABLE_COMPRESSION)
     find_program(GZIP gzip)
@@ -406,7 +430,7 @@ add_custom_command(
             ${CMAKE_CURRENT_BINARY_DIR}/fs.img
             ${CMAKE_SOURCE_DIR}/README.md
             ${CPYTHON_SRC_DIR_FOR_FS}
-            400
+            512
             ${SYSROOT_DIR}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS sysroot_populate

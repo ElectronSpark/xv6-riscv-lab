@@ -20,6 +20,7 @@
 #   - bits/syscall.h.in    — xv6 syscall numbers
 #   - kstat.h              — xv6 stat structure layout
 #   - clone.s              — xv6 clone takes a struct pointer
+#   - __unmapself.s         — xv6 syscall numbers (not Linux hardcoded)
 #   - vfork.s              — use clone with CLONE_VM|CLONE_VFORK
 #   - fstatat.c            — remove zero-initialiser on kstat (xv6 compat)
 #   - brk disabled         — force mmap-only malloc
@@ -76,6 +77,15 @@ apply_xv6_overlay() {
 
         # Remove upstream __clone.s if present (x86_64 has one)
         rm -f "${musl_src}/src/thread/${arch}/__clone.s"
+    fi
+
+    # ── __unmapself.s override ───────────────────────────────────────────
+    # Upstream musl hardcodes Linux syscall numbers in this assembly file.
+    # xv6 uses custom numbering (e.g. SYS_munmap=51, SYS_exit=3 instead
+    # of Linux's 11 and 60), so we must replace it.
+    if [[ -f "${arch_src}/__unmapself.s" ]]; then
+        mkdir -p "${musl_src}/src/thread/${arch}"
+        cp "${arch_src}/__unmapself.s" "${musl_src}/src/thread/${arch}/__unmapself.s"
     fi
 
     # ── vfork.s override ─────────────────────────────────────────────────

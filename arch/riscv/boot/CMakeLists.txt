@@ -74,8 +74,8 @@ if(PLATFORM STREQUAL "orangepi")
         message(STATUS "sshpass not found - deploy will prompt for password (install with: sudo apt-get install sshpass)")
     endif()
 
-    # Deploy both compressed and uncompressed images for compatibility
-    # The U-Boot script will try compressed first, fall back to uncompressed
+    # Deploy compressed or uncompressed images based on ENABLE_COMPRESSION.
+    # The U-Boot script will try compressed first, fall back to uncompressed.
     if(ENABLE_COMPRESSION)
         add_custom_target(deploy
             # Deploy compressed kernel

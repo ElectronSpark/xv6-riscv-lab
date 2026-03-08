@@ -18,6 +18,7 @@
 #include "accounting.h"
 #include "proc/pgroup.h"
 #include "tty/session.h"
+#include "diag.h"
 #include "timer/goldfish_rtc.h"
 
 struct __k_timespec {
@@ -354,7 +355,11 @@ uint64 sys_clone(void) {
             args.esignal = args.flags & 0xFF;
         }
     }
+    // dprintf("pid %d %s: clone(flags=0x%lx, stack=0x%lx, stack_size=0x%lx, entry=0x%lx, tls=0x%lx)\n",
+    //        current->pid, current->name, args.flags, args.stack, args.stack_size,
+    //        args.entry, args.tls);
     int ret = thread_clone(&args);
+    // dprintf("pid %d %s: clone -> %d\n", current->pid, current->name, ret);
     return ret;
 }
 

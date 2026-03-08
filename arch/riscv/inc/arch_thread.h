@@ -120,7 +120,10 @@ static inline void arch_clone_child_regs(struct utrapframe *tf,
         tf->trapframe.sepc = entry;
 
     if (stack != 0) {
-        uint64 stack_top = (stack + stack_size) & ~0xFUL;
+        /* When stack_size != 0: stack is the base, compute top.
+         * When stack_size == 0: stack IS the SP directly (Linux convention
+         * used by musl's __clone). Do not re-align — caller already did. */
+        uint64 stack_top = stack_size ? ((stack + stack_size) & ~0xFUL) : stack;
         tf->trapframe.sp = stack_top;
     }
 

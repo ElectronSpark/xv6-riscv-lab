@@ -477,3 +477,19 @@ uint64 sys_clone3(void) {
 
     return (uint64)thread_clone(&args);
 }
+
+/* ================================================================== */
+/*  membarrier — stub (returns 0 for CMD_QUERY, -ENOSYS otherwise)    */
+/* ================================================================== */
+
+uint64 sys_membarrier(void) {
+    int cmd;
+    argint(0, &cmd);
+
+    /* CMD 0 = MEMBARRIER_CMD_QUERY: return bitmask of supported commands.
+     * We support nothing, so return 0. */
+    if (cmd == 0)
+        return 0;
+
+    return (uint64)-ENOSYS;
+}

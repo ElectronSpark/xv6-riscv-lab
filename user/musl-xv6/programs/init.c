@@ -445,6 +445,20 @@ int main(void)
     chown("/var/empty", 0, 0);
     chmod("/var/empty", 0755);
 
+    /* Set up environment variables inherited by all children (daemons,
+     * getty, login shells).  The kernel starts init with an empty environ. */
+    setenv("PATH",    "/bin:/sbin:/usr/bin:/usr/local/bin", 1);
+    setenv("HOME",    "/root", 1);
+    setenv("TERM",    "xterm", 1);
+    setenv("SHELL",   "/bin/sh", 1);
+    setenv("LOGNAME", "root", 1);
+    setenv("USER",    "root", 1);
+    setenv("LANG",    "C.UTF-8", 1);
+    /* Python looks for /lib/python3.12 (symlinked to /usr/local/lib/python3.12) */
+    setenv("PYTHONHOME", "/", 1);
+    /* Mozilla CA bundle for TLS certificate verification */
+    setenv("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt", 1);
+
     /* Start daemon processes listed in /etc/daemons (each in its own pgrp) */
     start_daemons();
 

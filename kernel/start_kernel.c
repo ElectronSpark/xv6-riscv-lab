@@ -35,6 +35,7 @@
 #include "dev/pci.h"
 #include "dev/virtio.h"
 #include "platform.h"
+#include "diag.h"
 
 uint64 __physical_memory_start;
 uint64 __physical_memory_end;
@@ -73,6 +74,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     early_allocator_init((void *)end, (void *)__physical_memory_end);
     kobject_global_init();
     printfinit();
+    diaginit();
     printf("\nxv6 kernel booting (hart %d)\n\n", hartid);
     platform_init(fdt_base);
     platform_print_mem_summary();

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}About — xv6 Web Server{% endblock %}
+{% block content %}
+<h1>About This Server</h1>
+<p>This is a personal web server running entirely on <strong>xv6</strong>,
+   an educational Unix-like operating system originally developed at MIT.</p>
+
+<h2>Technology Stack</h2>
+<ul>
+    <li><strong>OS</strong>: xv6 (RISC-V / x86_64)</li>
+    <li><strong>Kernel</strong>: Custom kernel with lwIP TCP/IP, ext4 filesystem</li>
+    <li><strong>Runtime</strong>: CPython 3.12, musl libc</li>
+    <li><strong>Web Framework</strong>: Flask 3.1</li>
+    <li><strong>WSGI Server</strong>: Waitress</li>
+    <li><strong>Database</strong>: SQLite 3</li>
+    <li><strong>TLS</strong>: OpenSSL 3.0</li>
+</ul>
+
+<h2>API Endpoints</h2>
+<ul>
+    <li><a href="{{ url_for('main.api_status') }}">/api/status</a> — System information</li>
+    <li><a href="{{ url_for('main.api_posts') }}">/api/posts</a> — Posts (JSON)</li>
+</ul>
+{% endblock %}

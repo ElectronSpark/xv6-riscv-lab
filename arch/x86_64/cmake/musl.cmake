@@ -56,6 +56,7 @@ message(STATUS "musl libc: libgcc = ${LIBGCC_PATH}")
 # ==============================================================================
 set(MUSL_ARCH_DEPS
     ${MUSL_XV6_DIR}/arch/x86_64/clone.s
+    ${MUSL_XV6_DIR}/arch/x86_64/__unmapself.s
     ${MUSL_XV6_DIR}/arch/x86_64/bits/syscall.h.in
     ${MUSL_XV6_DIR}/arch/x86_64/bits/stat.h
     ${MUSL_XV6_DIR}/arch/x86_64/kstat.h
@@ -90,7 +91,7 @@ set(MUSL_COMMON_CFLAGS
 )
 set(MUSL_C_CFLAGS
     ${MUSL_COMMON_CFLAGS}
-    -Wall -O0 -fno-omit-frame-pointer -ggdb -gdwarf-2
+    -Wall -O${OPT_LEVEL} -fno-omit-frame-pointer -ggdb -gdwarf-2
     -fno-common -ffreestanding
 )
 

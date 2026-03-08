@@ -568,11 +568,27 @@ vma_t *vma_split(vma_t *vma, uint64 va)
         new_vma->pgoff = 0;
     }
 
+    uint64 old_end = vma->end;
     vma->end = va;
 
-    /* Update the maple tree: shrink old VMA, insert new VMA. */
-    __mt_store_vma(vma->vm, vma);
-    __mt_store_vma(vma->vm, new_vma);
+    /* Update the maple tree: shrink old VMA, insert new VMA.
+     * Both stores must succeed; otherwise roll back. */
+    if (__mt_store_vma(vma->vm, vma) != 0) {
+        vma->end = old_end;
+        if (new_vma->file != NULL)
+            vfs_fput(new_vma->file);
+        __vma_free(new_vma);
+        return NULL;
+    }
+    if (__mt_store_vma(vma->vm, new_vma) != 0) {
+        /* Restore old VMA range and re-store it. */
+        vma->end = old_end;
+        __mt_store_vma(vma->vm, vma); /* best-effort restore */
+        if (new_vma->file != NULL)
+            vfs_fput(new_vma->file);
+        __vma_free(new_vma);
+        return NULL;
+    }
 
     return new_vma;
 }
@@ -2206,7 +2222,20 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
 
 int vm_munmap(vm_t *vm, uint64 addr, size_t length)
 {
-    return vm_munmap_region(vm, addr, length);
+    if (vm == NULL || length == 0)
+        return -EINVAL;
+
+    addr = PGROUNDDOWN(addr);
+    length = PGROUNDUP(length);
+
+    if (addr < vm->vm_bottom || (addr + length) > vm->vm_top)
+        return -EINVAL;
+
+    int ret;
+    vm_wlock(vm);
+    ret = __vm_unmap_range_locked(vm, addr, addr + length);
+    vm_wunlock(vm);
+    return ret;
 }
 
 /* ========================================================================== */

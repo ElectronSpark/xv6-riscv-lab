@@ -55,6 +55,7 @@ set(KERNEL_SCAN_OBJS
     ${KERNEL_DIR}/console.c
     ${KERNEL_DIR}/printf.c
     ${KERNEL_DIR}/uart.c
+    ${KERNEL_DIR}/diag.c
 )
 
 if(DEFINED ENV{KSCAN})

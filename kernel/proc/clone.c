@@ -56,6 +56,7 @@ static void forkret_entry(struct context *prev) {
 
     // Now safe to do the rest without holding scheduler locks
     smp_mb();
+
     usertrapret();
 }
 
@@ -85,17 +86,19 @@ int thread_clone(struct clone_args *args) {
         args->flags |= CLONE_PARENT;
     }
 
-    // When CLONE_VM is specified without CLONE_VFORK, stack and entry must be
-    // provided. CLONE_VFORK is special: child shares parent's stack temporarily
-    // and must exec/exit.
+    // When CLONE_VM is specified without CLONE_VFORK, a stack must be
+    // provided. entry=0 is valid (Linux behavior: child returns from syscall
+    // and the userspace wrapper arranges to call the thread function).
     if ((args->flags & CLONE_VM) && !(args->flags & CLONE_VFORK) &&
-        (args->stack == 0 || args->entry == 0)) {
+        (args->stack == 0)) {
         return -EINVAL;
     }
 
-    // When stack is specified, stack_size must be valid.
-    if (args->stack != 0 && (args->stack_size < USERSTACK_MINSZ ||
-                             (args->stack_size & (PAGE_SIZE - 1)) != 0)) {
+    // When stack is specified and stack_size is non-zero, validate alignment.
+    // stack_size=0 is valid (Linux clone takes just the stack pointer).
+    if (args->stack != 0 && args->stack_size != 0 &&
+        (args->stack_size < USERSTACK_MINSZ ||
+         (args->stack_size & (PAGE_SIZE - 1)) != 0)) {
         return -EINVAL;
     }
 

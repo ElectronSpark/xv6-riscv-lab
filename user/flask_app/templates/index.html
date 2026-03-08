@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block title %}Home — xv6 Web Server{% endblock %}
+{% block content %}
+<h1>Welcome to xv6</h1>
+<p>This web server is running on <strong>xv6</strong>, a teaching operating system,
+   powered by Python and Flask.</p>
+
+{% if posts %}
+<h2>Recent Posts</h2>
+{% for post in posts %}
+<article>
+    <h3><a href="{{ url_for('main.view_post', post_id=post.id) }}">{{ post.title }}</a></h3>
+    <p class="meta">by {{ post.author.username }}
+        {% if post.created_at %} &mdash; {{ post.created_at.strftime('%Y-%m-%d %H:%M') }}{% endif %}
+    </p>
+    <p>{{ post.body[:200] }}{% if post.body|length > 200 %}&hellip;{% endif %}</p>
+</article>
+{% endfor %}
+{% else %}
+<p>No posts yet. <a href="{{ url_for('auth.register') }}">Create an account</a> to get started.</p>
+{% endif %}
+{% endblock %}
