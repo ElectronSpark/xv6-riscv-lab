@@ -90,9 +90,15 @@ static int ramdisk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
     return 0;
 }
 
+static int ramdisk_flush(blkdev_t *blkdev) {
+    (void)blkdev;
+    return 0; // ramdisk is synchronous in-memory, nothing to flush
+}
+
 static blkdev_ops_t ramdisk_ops = {.open = ramdisk_open,
                                    .release = ramdisk_release,
-                                   .submit_bio = ramdisk_submit_bio};
+                                   .submit_bio = ramdisk_submit_bio,
+                                   .flush = ramdisk_flush};
 
 static blkdev_t ramdisk_dev = {
     .dev =

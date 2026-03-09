@@ -201,8 +201,17 @@ static void __vma_set_free(vma_t *vma)
     if (vma == NULL || vma->vm == NULL)
         return;
 
-    assert((vma->start & (PGSIZE - 1)) == 0,
-           "__vma_set_free: vma start not aligned");
+    if ((vma->start & (PGSIZE - 1)) != 0) {
+        printf("__vma_set_free: BAD vma=%p start=0x%lx end=0x%lx "
+               "flags=0x%lx file=%p pgoff=0x%lx vm=%p\n",
+               vma, vma->start, vma->end, vma->flags,
+               vma->file, vma->pgoff, vma->vm);
+        if (vma->start == VMA_FREED_MAGIC && vma->end == VMA_FREED_MAGIC) {
+            printf("  -> VMA already freed (FREED_MAGIC sentinel) — skipping\n");
+            return;
+        }
+        panic("__vma_set_free: vma start not aligned");
+    }
 
     /* Check if this is a shared file mapping that needs writeback. */
     int shared_file_wb =
@@ -367,6 +376,43 @@ static inline void __mt_erase_vma(vm_t *vm, vma_t *vma)
     mtree_store_range(&vm->vm_mt, vma->start, vma->end - 1, NULL);
 }
 
+/**
+ * __mt_update_vma() - Atomically re-store a VMA whose range has changed.
+ *
+ * When a VMA's start/end is modified in-place (e.g. stack grow or merge),
+ * the maple tree must be updated.  A plain __mt_store_vma can leave the
+ * old range partially in the tree if the new range crosses a leaf boundary
+ * and mtree_store_range fails to allocate a new internal node.  This leaves
+ * the SAME VMA pointer in two disjoint ranges — a use-after-free when the
+ * VM is later destroyed.
+ *
+ * This helper erases the old range first, then stores the new range.
+ * On failure, the VMA and the tree are restored to the old state.
+ *
+ * @vm:        The VM owning the VMA.
+ * @vma:       The VMA whose start/end have ALREADY been modified.
+ * @old_start: The previous start address (before the caller modified vma).
+ * @old_end:   The previous end address (before the caller modified vma).
+ *
+ * Returns 0 on success, negative errno on failure (VMA restored).
+ */
+static int __mt_update_vma(vm_t *vm, vma_t *vma, uint64 old_start,
+                           uint64 old_end)
+{
+    /* Erase old range first (stores NULL, cannot fail for subset). */
+    mtree_store_range(&vm->vm_mt, old_start, old_end - 1, NULL);
+
+    /* Store VMA at its new range. */
+    int ret = __mt_store_vma(vm, vma);
+    if (ret != 0) {
+        /* Roll back: restore VMA fields and re-store old range. */
+        vma->start = old_start;
+        vma->end = old_end;
+        __mt_store_vma(vm, vma); /* best-effort restore */
+    }
+    return ret;
+}
+
 /* ========================================================================== */
 /*  VM lifecycle                                                              */
 /* ========================================================================== */
@@ -423,11 +469,27 @@ static void __vm_destroy(vm_t *vm)
         return;
     }
 
-    /* Iterate all VMAs via the maple tree and free them. */
+    /*
+     * Single-pass destruction, Linux-style.
+     *
+     * Iterate the maple tree, release pages/PTEs and free each VMA
+     * inline.  mtree_destroy() only frees internal tree nodes — it
+     * never dereferences the entry pointers stored in leaf slots —
+     * so it is safe to slab_free the VMAs during iteration.
+     *
+     * Duplicate detection: a prior partial mtree_store_range can leave
+     * the same VMA pointer in two disjoint ranges.  After __vma_free
+     * sets FREED_MAGIC, the second encounter is caught cheaply.
+     */
     uint64 idx = 0;
     void *entry;
     mt_for_each(&vm->vm_mt, entry, idx, MAPLE_MAX) {
         vma_t *vma = (vma_t *)entry;
+
+        /* Skip already-freed duplicates (FREED_MAGIC sentinel). */
+        if (vma->start == VMA_FREED_MAGIC && vma->end == VMA_FREED_MAGIC)
+            continue;
+
         __vma_set_free(vma);
         __vma_free(vma);
     }
@@ -645,11 +707,19 @@ vma_t *vma_merge(vma_t *vma1, vma_t *vma2)
     /* Erase vma2 from the tree first. */
     __mt_erase_vma(vma1->vm, vma2);
 
-    /* Extend vma1 to cover vma2's range. */
+    /* Extend vma1 to cover vma2's range.
+     * Use __mt_update_vma so a partial mtree_store_range cannot
+     * duplicate vma1 across two leaf nodes. */
+    uint64 old_end = vma1->end;
     vma1->end = vma2->end;
 
-    /* Update the tree with vma1's new range. */
-    __mt_store_vma(vma1->vm, vma1);
+    if (__mt_update_vma(vma1->vm, vma1, vma1->start, old_end) != 0) {
+        /* Roll back: restore vma1 and re-insert vma2. */
+        vma1->end = old_end;
+        __mt_store_vma(vma1->vm, vma1); /* best-effort */
+        __mt_store_vma(vma1->vm, vma2); /* best-effort */
+        return NULL;
+    }
 
     if (vma2->file != NULL) {
         vfs_fput(vma2->file);
@@ -1153,6 +1223,7 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
                         vma_validate(vma, va0, validated_end - va0,
                                      VMA_FLAG_USER | PROT_WRITE) == 0)
                         goto copyout_ok;
+                    vm_runlock(vm);
                 }
                 return -EFAULT;
             }
@@ -1227,6 +1298,7 @@ int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len)
                         vma_validate(vma, va0, validated_end - va0,
                                      VMA_FLAG_USER | PROT_READ) == 0)
                         goto copyin_ok;
+                    vm_runlock(vm);
                 }
                 return -EFAULT;
             }
@@ -1416,9 +1488,14 @@ int vm_growstack(vm_t *vm, int64 change_size)
         void *overlap = mt_find(&vm->vm_mt, &check, vm->stack->start - 1);
         if (overlap != NULL)
             return -ENOMEM;
-        /* Extend the VMA start downward and update the tree. */
+        /* Extend the VMA start downward and update the tree.
+         * Use __mt_update_vma to erase+reinsert atomically so a
+         * partial mtree_store_range cannot duplicate the VMA pointer
+         * across two leaf nodes. */
+        uint64 old_start = vm->stack->start;
         vm->stack->start = new_start;
-        __mt_store_vma(vm, vm->stack);
+        if (__mt_update_vma(vm, vm->stack, old_start, vm->stack->end) != 0)
+            return -ENOMEM;
     }
     vm->stack_size = new_size;
     return 0;
@@ -1524,9 +1601,14 @@ int vm_growheap(vm_t *vm, int64 change_size)
             ret = -ENOMEM;
             goto ret;
         }
-        /* Extend the VMA end upward and update the tree. */
+        /* Extend the VMA end upward and update the tree.
+         * Use __mt_update_vma to erase+reinsert atomically. */
+        uint64 old_end = vm->heap->end;
         vm->heap->end = new_end;
-        __mt_store_vma(vm, vm->heap);
+        if (__mt_update_vma(vm, vm->heap, vm->heap->start, old_end) != 0) {
+            ret = -ENOMEM;
+            goto ret;
+        }
     }
     vm->heap_size = new_size;
 ret:
@@ -1795,9 +1877,12 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
     uint64 check = expand_start;
     void *overlap = mt_find(&vm->vm_mt, &check, expand_start + expand_size - 1);
     if (overlap == NULL) {
-        /* Gap is free — expand in place. */
+        /* Gap is free — expand in place.
+         * Use __mt_update_vma to erase+reinsert atomically. */
+        uint64 old_end = vma->end;
         vma->end = old_addr + new_size;
-        __mt_store_vma(vm, vma);
+        if (__mt_update_vma(vm, vma, vma->start, old_end) != 0)
+            goto out;
         ret = old_addr;
         goto out;
     }

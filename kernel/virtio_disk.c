@@ -41,6 +41,7 @@ uint64 __virtio_irqno[N_VIRTIO] = {1, 2, 3};
 static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
                            void *buf, size_t size, int write);
 static void virtio_disk_intr(int irq, void *data, device_t *dev);
+static int __virtio_disk_flush(blkdev_t *blkdev);
 
 /// Minor number stride per disk: disk0=1, disk1=17, disk2=33, etc.
 /// Partitions occupy minors base+1 .. base+15.
@@ -78,6 +79,7 @@ STATIC struct disk {
         struct bio *bio;
         bool done;
         char status;
+        completion_t *flush_completion; // non-NULL for flush requests
     } info[NUM];
 
     // disk command headers.
@@ -97,6 +99,9 @@ STATIC struct disk {
 
     // PCI transport state (valid when pci_state.use_pci == 1)
     struct virtio_pci_state pci_state;
+
+    // Feature: device supports VIRTIO_BLK_T_FLUSH
+    int has_flush;
 
 } disks[N_VIRTIO_DISK];
 
@@ -138,7 +143,8 @@ static int __virtio_disk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
 static blkdev_ops_t __virtio_disk_ops = {.open = __virtio_disk_open,
                                          .release = __virtio_disk_release,
                                          .submit_bio =
-                                             __virtio_disk_submit_bio};
+                                             __virtio_disk_submit_bio,
+                                         .flush = __virtio_disk_flush};
 
 static blkdev_t virtio_disk_devs[N_VIRTIO_DISK] = {
     {
@@ -214,6 +220,7 @@ static void __virtio_disk_init_one(int diskno) {
 
     // negotiate features
     uint64 features = *R(diskno, VIRTIO_MMIO_DEVICE_FEATURES);
+    disk->has_flush = !!(features & (1 << VIRTIO_BLK_F_FLUSH));
     features &= ~(1 << VIRTIO_BLK_F_RO);
     features &= ~(1 << VIRTIO_BLK_F_SCSI);
     features &= ~(1 << VIRTIO_BLK_F_CONFIG_WCE);
@@ -221,6 +228,7 @@ static void __virtio_disk_init_one(int diskno) {
     features &= ~(1 << VIRTIO_F_ANY_LAYOUT);
     features &= ~(1 << VIRTIO_RING_F_EVENT_IDX);
     features &= ~(1 << VIRTIO_RING_F_INDIRECT_DESC);
+    // Keep VIRTIO_BLK_F_FLUSH if device supports it
     *R(diskno, VIRTIO_MMIO_DRIVER_FEATURES) = features;
 
     // tell device that feature negotiation is complete.
@@ -396,6 +404,7 @@ static void __virtio_disk_init_one_pci(int diskno) {
     cfg->device_feature_select = 0;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     uint32 features = cfg->device_feature;
+    disk->has_flush = !!(features & (1 << VIRTIO_BLK_F_FLUSH));
     features &= ~(1 << VIRTIO_BLK_F_RO);
     features &= ~(1 << VIRTIO_BLK_F_SCSI);
     features &= ~(1 << VIRTIO_BLK_F_CONFIG_WCE);
@@ -403,6 +412,7 @@ static void __virtio_disk_init_one_pci(int diskno) {
     features &= ~(1 << VIRTIO_F_ANY_LAYOUT);
     features &= ~(1 << VIRTIO_RING_F_EVENT_IDX);
     features &= ~(1 << VIRTIO_RING_F_INDIRECT_DESC);
+    // Keep VIRTIO_BLK_F_FLUSH if device supports it
     cfg->driver_feature_select = 0;
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     cfg->driver_feature = features;
@@ -540,6 +550,106 @@ STATIC int alloc3_desc(struct disk *disk, int *idx) {
     return 0;
 }
 
+/*
+ * Allocate two descriptors (for flush: header + status, no data).
+ */
+STATIC int alloc2_desc(struct disk *disk, int *idx) {
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    for (int i = 0; i < 2; i++) {
+        idx[i] = alloc_desc(disk);
+        if (idx[i] < 0) {
+            for (int j = 0; j < i; j++)
+                free_desc(disk, idx[j]);
+            return -1;
+        }
+    }
+    return 0;
+}
+
+/*
+ * Issue a VIRTIO_BLK_T_FLUSH command to the device and wait for completion.
+ * Called from blkdev_ops.flush.
+ *
+ * The flush command uses two descriptors:
+ *   [0] header: type=VIRTIO_BLK_T_FLUSH, sector=0
+ *   [1] status: 1-byte device-written status
+ */
+static int __virtio_disk_flush(blkdev_t *blkdev) {
+    int diskno = (blkdev->dev.minor - 1) / GENDISK_MINOR_STRIDE;
+    struct disk *disk = &disks[diskno];
+
+    if (!disk->has_flush)
+        return 0; // device does not support flush, treat as no-op
+
+    completion_t flush_done;
+    completion_init(&flush_done);
+
+    spin_lock(&disk->vdisk_lock);
+
+    int idx[2];
+    while (1) {
+        if (alloc2_desc(disk, idx) == 0)
+            break;
+        __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
+        tq_wait(&disk->desc_wait_queue, &disk->vdisk_lock, NULL);
+    }
+
+    struct virtio_blk_req *buf0 = &disk->ops[idx[0]];
+    buf0->type = VIRTIO_BLK_T_FLUSH;
+    buf0->reserved = 0;
+    buf0->sector = 0;
+
+    // Descriptor 0: header (device reads)
+    disk->desc[idx[0]].addr = (uint64)buf0;
+    disk->desc[idx[0]].len = sizeof(struct virtio_blk_req);
+    disk->desc[idx[0]].flags = VRING_DESC_F_NEXT;
+    disk->desc[idx[0]].next = idx[1];
+
+    // Descriptor 1: status (device writes)
+    disk->info[idx[0]].status = 0xff;
+    disk->desc[idx[1]].addr = (uint64)&disk->info[idx[0]].status;
+    disk->desc[idx[1]].len = 1;
+    disk->desc[idx[1]].flags = VRING_DESC_F_WRITE;
+    disk->desc[idx[1]].next = 0;
+
+    // Completion-based notification: interrupt handler signals flush_done
+    disk->info[idx[0]].bio = NULL;
+    disk->info[idx[0]].done = false;
+    disk->info[idx[0]].flush_completion = &flush_done;
+
+    // Submit to available ring
+    disk->avail->ring[disk->avail->idx % NUM] = idx[0];
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    disk->avail->idx += 1;
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+
+    // Notify the device
+    if (disk->pci_state.use_pci) {
+        volatile uint16 *notify_addr = disk->pci_state.notify_base;
+        *notify_addr = 0;
+    } else {
+        *R(diskno, VIRTIO_MMIO_QUEUE_NOTIFY) = 0;
+    }
+
+    spin_unlock(&disk->vdisk_lock);
+
+    // Wait for completion outside the lock — interrupt handler signals this
+    wait_for_completion(&flush_done);
+
+    // Safe to read status: the interrupt handler did NOT free the chain,
+    // so info[idx[0]].status is still valid.
+    char status = disk->info[idx[0]].status;
+
+    // Now free the descriptor chain ourselves
+    spin_lock(&disk->vdisk_lock);
+    disk->info[idx[0]].bio = NULL;
+    disk->info[idx[0]].flush_completion = NULL;
+    free_chain(disk, idx[0]);
+    spin_unlock(&disk->vdisk_lock);
+
+    return (status == VIRTIO_BLK_S_OK) ? 0 : -EIO;
+}
+
 static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
                            void *buf, size_t size, int write) {
     struct disk *disk = &disks[diskno];
@@ -599,6 +709,7 @@ static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
     // record struct buf for virtio_disk_intr().
     bio->private_data = NULL;
     disk->info[idx[0]].bio = bio;
+    disk->info[idx[0]].flush_completion = NULL; // not a flush
 
     // tell the device the first index in our chain of descriptors.
     disk->avail->ring[disk->avail->idx % NUM] = idx[0];
@@ -656,29 +767,40 @@ static void virtio_disk_intr(int irq, void *data, device_t *dev) {
         int id = disk->used->ring[disk->used_idx % NUM].id;
 
         char status = disk->info[id].status;
-
         struct bio *bio = disk->info[id].bio;
+        completion_t *flush_comp = disk->info[id].flush_completion;
 
-        if (status != 0) {
-            printf("ERROR: id=%d status=%d buf=%p blockno=0x%lx\n", id, status,
-                   bio, bio ? bio->blkno : 0);
-            panic("virtio_disk_intr status: %d", status);
-        }
-
-        assert(disk->info[id].done == false, "virtio_disk_intr: already done");
-        disk->info[id].done = true;
-
-        // Clean up descriptor chain and info slot
-        disk->info[id].bio = NULL;
-        free_chain(disk, id);
-
-        // Signal bio completion — wakes any thread in bio_await()
-        if (bio != NULL) {
+        if (flush_comp != NULL) {
+            // Flush command completion.
+            // Do NOT free the descriptor chain here — the flusher reads
+            // info[id].status after waking and then frees the chain itself.
+            // This avoids a race where the descriptor is reallocated before
+            // the flusher reads the status byte.
             if (status != 0)
-                bio->error = -EIO;
-            bio->completed_segs++;
-            if (bio->completed_segs >= bio->inflight_segs)
-                bio_complete(bio);
+                printf("virtio_disk: flush returned status %d\n", status);
+            complete_all(flush_comp);
+        } else {
+            // Normal read/write I/O completion
+            if (status != 0) {
+                printf("ERROR: id=%d status=%d buf=%p blockno=0x%lx\n", id,
+                       status, bio, bio ? bio->blkno : 0);
+                panic("virtio_disk_intr status: %d", status);
+            }
+
+            assert(disk->info[id].done == false,
+                   "virtio_disk_intr: already done");
+            disk->info[id].done = true;
+
+            disk->info[id].bio = NULL;
+            free_chain(disk, id);
+
+            if (bio != NULL) {
+                if (status != 0)
+                    bio->error = -EIO;
+                bio->completed_segs++;
+                if (bio->completed_segs >= bio->inflight_segs)
+                    bio_complete(bio);
+            }
         }
 
         disk->used_idx += 1;

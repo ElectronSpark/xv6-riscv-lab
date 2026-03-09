@@ -1889,10 +1889,43 @@ static int sdhci_submit_bio(blkdev_t *blkdev, struct bio *bio)
     return ret;
 }
 
+/**
+ * flush — ensure all written data reaches stable storage.
+ *
+ * For SD/SDHC cards, writes are synchronous (the data transfer completes
+ * after the card exits busy state), so there is nothing to flush.
+ *
+ * For eMMC, the device may have a volatile write cache that must be flushed
+ * via CMD6 (SWITCH) writing EXT_CSD byte 32 (FLUSH_CACHE = 1).  Since our
+ * eMMC init does not currently enable the write cache (EXT_CSD[33] CACHE_CTRL),
+ * the flush is effectively a no-op but we issue it anyway for correctness
+ * if the device is eMMC.
+ */
+static int sdhci_flush(blkdev_t *blkdev)
+{
+    struct sdhci_softc *sc = container_of(blkdev, struct sdhci_softc, bdev);
+
+    if (sc->card_type != CARD_TYPE_EMMC)
+        return 0; /* SD/SDHC: no volatile cache */
+
+    /* CMD6 (SWITCH): Access=Write Byte (0x03), Index=32 (FLUSH_CACHE),
+     * Value=1 (trigger flush).  Response is R1b (busy). */
+    mutex_lock(&sc->lock);
+    uint32 resp[4];
+    int ret = sdhci_send_cmd(sc, SD_SWITCH_FUNC,
+                             (3u << 24) | (32u << 16) | (1u << 8),
+                             SDHCI_CMD_RESP_48_BUSY | SDHCI_CMD_CRC |
+                             SDHCI_CMD_INDEX,
+                             resp);
+    mutex_unlock(&sc->lock);
+    return ret;
+}
+
 static blkdev_ops_t sdhci_blk_ops = {
     .open = sdhci_blk_open,
     .release = sdhci_blk_release,
     .submit_bio = sdhci_submit_bio,
+    .flush = sdhci_flush,
 };
 
 /* ======================================================================

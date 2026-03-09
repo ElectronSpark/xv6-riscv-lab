@@ -31,6 +31,7 @@
 #include "vfs/fcntl.h"
 #include "ext4fs_private.h"
 #include "vfs/uio.h"
+#include "dev/blkdev.h"
 
 #include <ext4_errno.h>
 #include <ext4_fs.h>
@@ -467,13 +468,22 @@ ssize_t ext4fs_file_read(struct vfs_file *file, char *buf, size_t count,
         return -EINVAL;
 
     if (inode->i_data.active) {
+        /*
+         * Delegate to readv for pcache-backed reads.  readv sets
+         * file->f_pos itself, but our caller (vfs_fileread) will ALSO
+         * advance f_pos by the return value.  Save/restore f_pos so the
+         * caller's "f_pos += ret" is the only advance.
+         */
+        loff_t saved_pos = file->f_pos;
         struct kernel_iovec iov = {
             .iov_base = (uint64)buf,
             .iov_len = count,
         };
         struct iov_iter iter;
         iov_iter_init(&iter, &iov, 1, count);
-        return ext4fs_file_readv(file, &iter, user);
+        ssize_t ret = ext4fs_file_readv(file, &iter, user);
+        file->f_pos = saved_pos;
+        return ret;
     }
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
@@ -769,7 +779,11 @@ static int ext4fs_file_fsync(struct vfs_file *file, loff_t start, loff_t len)
     ext4fs_lock(esb);
     int r = ext4_block_cache_flush(&esb->bdev) == EOK ? 0 : -EIO;
     ext4fs_unlock(esb);
-    return r;
+    if (r != 0)
+        return r;
+
+    /* Issue device-level flush to ensure data reaches stable storage */
+    return blkdev_flush(esb->xv6_blkdev);
 }
 
 static int ext4fs_file_fflush(struct vfs_file *file)

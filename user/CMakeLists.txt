@@ -1018,7 +1018,7 @@ if(EXISTS "${SQLITE_SRC_DIR}/configure")
                 AR=${CMAKE_AR}
                 RANLIB=${CMAKE_RANLIB}
                 CC_FOR_BUILD=cc
-                CFLAGS=--sysroot=${MUSL_SYSROOT}\ -O2\ -fPIC\ -nostdinc\ -ffreestanding\ -fno-common\ ${USER_ARCH_CFLAGS}\ -DSQLITE_OMIT_LOAD_EXTENSION=1\ -DSQLITE_OMIT_WAL=1\ -DSQLITE_MAX_MMAP_SIZE=0\ -DSQLITE_TEMP_STORE=2\ -DSQLITE_THREADSAFE=1\ -DSQLITE_USE_URI=1\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}
+                CFLAGS=--sysroot=${MUSL_SYSROOT}\ -O2\ -fPIC\ -nostdinc\ -ffreestanding\ -fno-common\ ${USER_ARCH_CFLAGS}\ -DSQLITE_OMIT_LOAD_EXTENSION=1\ -DSQLITE_OMIT_WAL=1\ -DSQLITE_MAX_MMAP_SIZE=0\ -DSQLITE_TEMP_STORE=2\ -DSQLITE_THREADSAFE=1\ -DSQLITE_USE_URI=1\ -DHAVE_PREAD=1\ -DHAVE_PWRITE=1\ -DHAVE_FDATASYNC=1\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}
                 LDFLAGS=-no-pie\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,--dynamic-linker=${MUSL_DYNAMIC_LINKER_PATH}\ -Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -Wl,--build-id=none\ -L${MUSL_SYSROOT}/lib\ -lc\ ${LIBGCC_PATH}\ ${MUSL_CRTN_O}
                 ${SQLITE_SRC_DIR}/configure
                     --host=${USER_HOST_TRIPLE}
@@ -1056,6 +1056,7 @@ if(EXISTS "${SQLITE_SRC_DIR}/configure")
                 -DSQLITE_OMIT_LOAD_EXTENSION=1 -DSQLITE_OMIT_WAL=1
                 -DSQLITE_MAX_MMAP_SIZE=0 -DSQLITE_TEMP_STORE=2
                 -DSQLITE_THREADSAFE=1 -DSQLITE_USE_URI=1
+                -DHAVE_PREAD=1 -DHAVE_PWRITE=1 -DHAVE_FDATASYNC=1
                 -isystem ${MUSL_INCLUDE_DIR}
                 -isystem ${GCC_INCLUDE_DIR_MUSL}
                 -isystem ${MUSL_COMPAT_DIR}
@@ -1086,6 +1087,87 @@ if(EXISTS "${SQLITE_SRC_DIR}/configure")
 
     add_custom_target(sqlite_build DEPENDS ${SQLITE_BIN} ${SQLITE_LIB_A} ${SQLITE_HEADER})
     add_dependencies(user_programs sqlite_build)
+
+    # ── SQLite test programs (standalone C, no Tcl) ──────────────────────────
+    # Common compile/link flags shared with the shell build above.
+    set(SQLITE_COMMON_CFLAGS
+        --sysroot=${MUSL_SYSROOT}
+        -O2 -nostdinc -ffreestanding -fno-common -fno-pie -no-pie
+        ${USER_ARCH_CFLAGS_CMD}
+        -DNDEBUG
+        -DSQLITE_OMIT_LOAD_EXTENSION=1 -DSQLITE_OMIT_WAL=1
+        -DSQLITE_MAX_MMAP_SIZE=0 -DSQLITE_TEMP_STORE=2
+        -DSQLITE_THREADSAFE=1 -DSQLITE_USE_URI=1
+        -DHAVE_PREAD=1 -DHAVE_PWRITE=1 -DHAVE_FDATASYNC=1
+        -isystem ${MUSL_INCLUDE_DIR}
+        -isystem ${GCC_INCLUDE_DIR_MUSL}
+        -isystem ${MUSL_COMPAT_DIR}
+        -I${SQLITE_BUILD_DIR}
+        -I${SQLITE_SRC_DIR}/src
+    )
+    set(SQLITE_COMMON_LDFLAGS
+        -no-pie -nostartfiles -nostdlib
+        ${MUSL_CRT1_O}
+        ${MUSL_CRTI_O}
+        -Wl,--dynamic-linker=${MUSL_DYNAMIC_LINKER_PATH}
+        -Wl,-z,max-page-size=0x1000
+        -Wl,-z,common-page-size=0x1000
+        -Wl,--build-id=none
+        -L${MUSL_SYSROOT}/lib
+    )
+    set(SQLITE_COMMON_LIBS -lc ${LIBGCC_PATH} ${MUSL_CRTN_O})
+
+    # speedtest1 — comprehensive SQL performance benchmark
+    set(SQLITE_SPEEDTEST1_BIN "${SQLITE_PREFIX_DIR}/bin/speedtest1")
+    add_custom_command(
+        OUTPUT ${SQLITE_SPEEDTEST1_BIN}
+        COMMAND ${CMAKE_C_COMPILER}
+                ${SQLITE_COMMON_CFLAGS}
+                ${SQLITE_COMMON_LDFLAGS}
+                -o ${SQLITE_SPEEDTEST1_BIN}
+                ${SQLITE_SRC_DIR}/test/speedtest1.c
+                ${SQLITE_BUILD_DIR}/sqlite3.c
+                ${SQLITE_COMMON_LIBS}
+        DEPENDS sqlite_build
+        COMMENT "Building SQLite speedtest1"
+    )
+
+    # kvtest — key-value store performance test
+    set(SQLITE_KVTEST_BIN "${SQLITE_PREFIX_DIR}/bin/kvtest")
+    add_custom_command(
+        OUTPUT ${SQLITE_KVTEST_BIN}
+        COMMAND ${CMAKE_C_COMPILER}
+                ${SQLITE_COMMON_CFLAGS}
+                ${SQLITE_COMMON_LDFLAGS}
+                -o ${SQLITE_KVTEST_BIN}
+                ${SQLITE_SRC_DIR}/test/kvtest.c
+                ${SQLITE_BUILD_DIR}/sqlite3.c
+                ${SQLITE_COMMON_LIBS}
+        DEPENDS sqlite_build
+        COMMENT "Building SQLite kvtest"
+    )
+
+    # wordcount — word-counting functional test using SQLite
+    set(SQLITE_WORDCOUNT_BIN "${SQLITE_PREFIX_DIR}/bin/wordcount")
+    add_custom_command(
+        OUTPUT ${SQLITE_WORDCOUNT_BIN}
+        COMMAND ${CMAKE_C_COMPILER}
+                ${SQLITE_COMMON_CFLAGS}
+                ${SQLITE_COMMON_LDFLAGS}
+                -o ${SQLITE_WORDCOUNT_BIN}
+                ${SQLITE_SRC_DIR}/test/wordcount.c
+                ${SQLITE_BUILD_DIR}/sqlite3.c
+                ${SQLITE_COMMON_LIBS}
+        DEPENDS sqlite_build
+        COMMENT "Building SQLite wordcount"
+    )
+
+    add_custom_target(sqlite_tests DEPENDS
+        ${SQLITE_SPEEDTEST1_BIN}
+        ${SQLITE_KVTEST_BIN}
+        ${SQLITE_WORDCOUNT_BIN}
+    )
+    add_dependencies(user_programs sqlite_tests)
 
     set(CPYTHON_SQLITE_DEPENDS sqlite_build)
     set(CPYTHON_SQLITE_LIBS " -lsqlite3")

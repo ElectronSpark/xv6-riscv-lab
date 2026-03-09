@@ -58,6 +58,7 @@ extern uint64 __virtio_irqno[N_VIRTIO];
 // device feature bits
 #define VIRTIO_BLK_F_RO 5          /* Disk is read-only */
 #define VIRTIO_BLK_F_SCSI 7        /* Supports scsi command passthru */
+#define VIRTIO_BLK_F_FLUSH 9       /* Cache flush command support */
 #define VIRTIO_BLK_F_CONFIG_WCE 11 /* Writeback mode available in config */
 #define VIRTIO_BLK_F_MQ 12         /* support more than one vq */
 #define VIRTIO_F_ANY_LAYOUT 27
@@ -102,8 +103,14 @@ struct virtq_used {
 // these are specific to virtio block devices, e.g. disks,
 // described in Section 5.2 of the spec.
 
-#define VIRTIO_BLK_T_IN 0  // read the disk
-#define VIRTIO_BLK_T_OUT 1 // write the disk
+#define VIRTIO_BLK_T_IN 0     // read the disk
+#define VIRTIO_BLK_T_OUT 1    // write the disk
+#define VIRTIO_BLK_T_FLUSH 4  // flush volatile write cache
+
+// virtio block device status values (written by device)
+#define VIRTIO_BLK_S_OK 0     // success
+#define VIRTIO_BLK_S_IOERR 1  // device or driver error
+#define VIRTIO_BLK_S_UNSUPP 2 // unsupported request
 
 // the format of the first descriptor in a disk request.
 // to be followed by two more descriptors containing

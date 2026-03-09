@@ -113,3 +113,11 @@ int blkdev_submit_bio(blkdev_t *blkdev, struct bio *bio) {
 
     return blkdev->ops.submit_bio(blkdev, bio);
 }
+
+int blkdev_flush(blkdev_t *blkdev) {
+    if (blkdev == NULL)
+        return -EINVAL;
+    if (blkdev->ops.flush == NULL)
+        return 0; // no-op if driver does not support flush
+    return blkdev->ops.flush(blkdev);
+}

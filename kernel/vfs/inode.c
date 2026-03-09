@@ -1111,35 +1111,59 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
     }
 
     struct vfs_dentry dentry = {0};
-    ret = vfs_ilookup(dir, &dentry, name, name_len);
-    if (ret != 0) {
-        return ret;
-    }
-
-    struct vfs_inode *target = vfs_get_dentry_inode(&dentry);
-    if (IS_ERR(target)) {
-        ret = PTR_ERR(target);
-        vfs_release_dentry(&dentry);
-        return ret;
-    }
+    struct vfs_inode *target = NULL;
 
     // Begin transaction BEFORE acquiring any locks
     if (dir->sb->ops->begin_transaction != NULL) {
         ret = dir->sb->ops->begin_transaction(dir->sb);
         if (ret != 0) {
-            vfs_iput(target); // Drop our reference from lookup
-            vfs_release_dentry(&dentry);
             return ret;
         }
     }
 
+    /*
+     * Acquire superblock wlock + directory inode lock BEFORE looking up
+     * the entry.  This closes a TOCTOU race that previously existed
+     * between vfs_ilookup() (which released all locks on return) and the
+     * later dir->ops->unlink() call: another thread could remove the same
+     * directory entry in that gap, causing ext4_dir_remove_entry (inside
+     * unlink) to fail with ENOENT even though the earlier lookup succeeded.
+     *
+     * By performing the driver-level lookup under the same exclusive locks
+     * used for the unlink itself, no concurrent modification can occur
+     * between the two operations.
+     */
     vfs_superblock_wlock(dir->sb);
     vfs_ilock(dir);
-    vfs_ilock(target);
+
     ret = __vfs_inode_valid(dir);
     if (ret != 0) {
-        goto out;
+        goto out_unlock;
     }
+    if (!S_ISDIR(dir->mode)) {
+        ret = -ENOTDIR;
+        goto out_unlock;
+    }
+    if (dir->ops->lookup == NULL) {
+        ret = -ENOSYS;
+        goto out_unlock;
+    }
+
+    /* Lookup the entry under the directory lock — atomic with unlink */
+    ret = dir->ops->lookup(dir, &dentry, name, name_len);
+    if (ret != 0) {
+        goto out_unlock;
+    }
+
+    /* Resolve the target inode — superblock wlock is already held */
+    target = vfs_get_dentry_inode_locked(&dentry);
+    if (IS_ERR(target)) {
+        ret = PTR_ERR(target);
+        target = NULL;
+        goto out_unlock;
+    }
+
+    vfs_ilock(target);
     ret = __vfs_inode_valid(target);
     if (ret != 0) {
         goto out;
@@ -1180,6 +1204,7 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
     }
 out:
     vfs_iunlock(target);
+out_unlock:
     vfs_iunlock(dir);
     vfs_superblock_unlock(dir->sb);
 
@@ -1198,9 +1223,10 @@ out:
     }
     /* kqueue: notify EVFILT_VNODE watchers of unlink/delete.
      * Must happen BEFORE iput — iput may free the inode. */
-    if (ret == 0)
+    if (ret == 0 && target != NULL)
         vfs_inode_knote_notify(target, NOTE_DELETE);
-    vfs_iput(target); // Drop our reference from lookup
+    if (target != NULL)
+        vfs_iput(target); // Drop our reference from lookup
     vfs_release_dentry(&dentry);
     return ret;
 }

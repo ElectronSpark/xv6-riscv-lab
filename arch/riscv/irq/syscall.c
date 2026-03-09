@@ -17,7 +17,7 @@
  * Set STRACE_PROC_NAME to NULL to trace ALL processes.
  * ============================================================ */
 #define STRACE_ENABLED   0
-#define STRACE_PROC_NAME "sshd"   /* NULL = trace all */
+#define STRACE_PROC_NAME "python"   /* NULL = trace all */
 
 #if STRACE_ENABLED
 static const char *syscall_name(int num) {
@@ -168,6 +168,22 @@ static const char *syscall_name(int num) {
     case 944: return "setitimer";
     case 945: return "ppoll";
     case 974: return "socketpair";
+    case 908: return "fsync";
+    case 915: return "fdatasync";
+    case 866: return "set_robust_list";
+    case 856: return "sigaltstack";
+    case 950: return "prctl";
+    case 851: return "sysinfo";
+    case 902: return "getrusage";
+    case 894: return "memfd_create";
+    case 998: return "membarrier";
+    case 938: return "utimensat";
+    case 937: return "clone3";
+    case 935: return "clock_settime";
+    case 162: return "preadv";
+    case 163: return "pwritev";
+    case 164: return "preadv2";
+    case 165: return "pwritev2";
     default: return "???";
     }
 }
@@ -685,32 +701,40 @@ void syscall(void) {
 
     if (num > 0 && num < NELEM(syscalls) && syscalls[num]) {
 #if STRACE_ENABLED
-        if (strace_match(p)) {
-            uint64 a0 = p->trapframe->trapframe.a0;
-            uint64 a1 = p->trapframe->trapframe.a1;
-            uint64 a2 = p->trapframe->trapframe.a2;
-            uint64 a3 = p->trapframe->trapframe.a3;
-            printf("strace: pid %d %s %s(%d) a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
-                   p->pid, p->name, syscall_name(num), num, a0, a1, a2, a3);
-        }
+        uint64 saved_a0 = p->trapframe->trapframe.a0;
+        uint64 saved_a1 = p->trapframe->trapframe.a1;
+        uint64 saved_a2 = p->trapframe->trapframe.a2;
+        uint64 saved_a3 = p->trapframe->trapframe.a3;
 #endif
         p->trapframe->trapframe.a0 = syscalls[num]();
 #if STRACE_ENABLED
         if (strace_match(p)) {
             int64 ret = (int64)p->trapframe->trapframe.a0;
-            if (ret < 0 && ret > -4096)
-                printf("strace: pid %d %s %s(%d) = %ld (err)\n",
-                       p->pid, p->name, syscall_name(num), num, ret);
-            else
-                printf("strace: pid %d %s %s(%d) = 0x%lx\n",
-                       p->pid, p->name, syscall_name(num), num,
-                       p->trapframe->trapframe.a0);
+            /* Always log SQLite-critical syscalls (both success and error) */
+            int is_sqlite_critical = (num == 26  /* fstat */
+                                   || num == 45  /* fcntl */
+                                   || num == 126 /* pread64 */
+                                   || num == 127 /* pwrite64 */
+                                   || num == 908 /* fsync */
+                                   || num == 915 /* fdatasync */
+                                   || num == 60  /* ftruncate */
+                                   || num == 43  /* lseek */);
+            if (is_sqlite_critical) {
+                printf("[strace] pid %d %s(%d) = %ld fd=%ld a1=0x%lx a2=0x%lx a3=0x%lx\n",
+                       p->pid, syscall_name(num), num, ret,
+                       saved_a0, saved_a1, saved_a2, saved_a3);
+            } else if (ret < 0 && ret > -4096) {
+                printf("[strace] pid %d %s(%d) = %ld fd=%ld a1=0x%lx a2=0x%lx\n",
+                       p->pid, syscall_name(num), num, ret,
+                       saved_a0, saved_a1, saved_a2);
+            }
         }
 #endif
     } else {
 #if STRACE_ENABLED
-        printf("strace: pid %d %s UNKNOWN syscall %d -> ENOSYS\n",
-               p->pid, p->name, num);
+        if (strace_match(p))
+            printf("strace: pid %d %s UNKNOWN syscall %d -> ENOSYS\n",
+                   p->pid, p->name, num);
 #endif
         p->trapframe->trapframe.a0 = (uint64)-ENOSYS;
     }

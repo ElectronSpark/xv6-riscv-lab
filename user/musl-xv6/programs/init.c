@@ -38,9 +38,9 @@
 #define TIOCSCTTY       0x540E
 #endif
 
-/* xv6 uses mkdev(major, minor) = ((major) << 16) | (minor) */
+/* xv6 kernel uses mkdev(major, minor) = ((major) << 20 | (minor)) */
 #ifndef makedev
-#define makedev(maj, min)  (((unsigned int)(maj) << 16) | (unsigned int)(min))
+#define makedev(maj, min)  (((unsigned int)(maj) << 20) | (unsigned int)(min))
 #endif
 
 /*

@@ -13,6 +13,7 @@
 #include "errno.h"
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
+#include "dev/blkdev.h"
 #include <mm/vm.h>
 #include "dev/buf.h"
 #include "dev/blkdev.h"
@@ -207,6 +208,11 @@ static int ext4fs_sync_fs(struct vfs_superblock *sb, int wait)
         }
     }
     ext4fs_unlock(esb);
+
+    /* Issue device-level flush to ensure data reaches stable storage */
+    int flush_r = blkdev_flush(esb->xv6_blkdev);
+    if (flush_r != 0)
+        return flush_r;
 
     sb->dirty = 0;
     return 0;

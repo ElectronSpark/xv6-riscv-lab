@@ -831,8 +831,9 @@ uint64 sys_vfs_open(void) {
             }
         } else {
             inode = vfs_namei(path, strlen(path));
-            if (IS_ERR(inode))
+            if (IS_ERR(inode)) {
                 SYSCALL_PROFILE_RETURN(PTR_ERR(inode), g_sys_open_ticks);
+            }
             if (inode == NULL)
                 SYSCALL_PROFILE_RETURN(-ENOENT, g_sys_open_ticks);
         }
@@ -916,21 +917,29 @@ uint64 sys_vfs_mkdir(void) {
     return 0;
 }
 
+/**
+ * sys_vfs_mknod - Create a special file
+ * Args: a0=path, a1=mode, a2=dev
+ *
+ * musl packs major/minor into a single dev_t via makedev().
+ * The kernel's mkdev() uses (major << 20 | minor); user-space must
+ * encode dev_t with the same layout.
+ */
 uint64 sys_vfs_mknod(void) {
     if (!capable())
         return (uint64)-EPERM;
 
     char path[MAXPATH];
     char name[MAXPATH];
-    int mode, major, minor;
+    int mode;
+    uint64 dev;
     int n;
 
     if ((n = argstr(0, path, MAXPATH)) < 0) {
         return -EFAULT;
     }
     argint(1, &mode);
-    argint(2, &major);
-    argint(3, &minor);
+    argaddr(2, &dev);
 
     struct vfs_inode *parent = vfs_nameiparent(path, n, name, MAXPATH);
     if (IS_ERR(parent)) {
@@ -942,9 +951,8 @@ uint64 sys_vfs_mknod(void) {
 
     size_t name_len = strlen(name);
 
-    dev_t dev = mkdev(major, minor);
     struct vfs_inode *node =
-        vfs_mknod(parent, (mode_t)mode, dev, name, name_len);
+        vfs_mknod(parent, (mode_t)mode, (dev_t)dev, name, name_len);
     vfs_iput(parent);
 
     if (IS_ERR(node)) {
@@ -4465,7 +4473,6 @@ uint64 sys_vfs_fsync(void) {
     int ret = 0;
     if (f->ops && f->ops->fsync)
         ret = f->ops->fsync(f, 0, (loff_t)-1);
-
     vfs_fput(f);
     return (uint64)ret;
 }
@@ -4488,7 +4495,6 @@ uint64 sys_vfs_fdatasync(void) {
     int ret = 0;
     if (f->ops && f->ops->fsync)
         ret = f->ops->fsync(f, 0, (loff_t)-1);
-
     vfs_fput(f);
     return (uint64)ret;
 }

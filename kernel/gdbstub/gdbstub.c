@@ -506,10 +506,10 @@ static int gdb_write_user_mem(uint64 addr, const void *src, int len)
             GDB_DBG("write_mem: no vma for va %lx", va0);
             return -1;
         }
-        /* Drop rlock — vma_validate may sleep for file I/O. */
-        vm_runlock(vm);
-
+        /* Keep R lock held through vma_validate so the VMA stays
+         * valid.  The rwsem is sleepable, so file I/O is safe. */
         int vr = vma_validate(vma, va0, PGSIZE, VMA_FLAG_USER | PROT_READ);
+        vm_runlock(vm);
         if (vr != 0) {
             GDB_DBG("write_mem: vma_validate failed for va %lx, err %d", va0, vr);
             return -1;

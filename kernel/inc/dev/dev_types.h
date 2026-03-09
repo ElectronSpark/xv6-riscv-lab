@@ -91,6 +91,7 @@ typedef struct blkdev_ops {
     int (*open)(blkdev_t *blkdev);
     int (*release)(blkdev_t *blkdev);
     int (*submit_bio)(blkdev_t *blkdev, struct bio *bio);
+    int (*flush)(blkdev_t *blkdev); // flush volatile write cache to stable storage
 } blkdev_ops_t;
 
 typedef struct blkdev {
