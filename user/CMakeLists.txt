@@ -72,6 +72,7 @@ set(USER_LIB_C_SRC
     ${USER_DIR}/ulib.c
     ${USER_DIR}/printf.c
     ${USER_DIR}/umalloc.c
+    ${USER_DIR}/fsutil.c
 )
 if($ENV{LAB} STREQUAL "lock")
     list(APPEND USER_LIB_C_SRC ${USER_DIR}/statistics.c)
@@ -110,7 +111,9 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/init.c
     ${USER_DIR}/kill.c
     ${USER_DIR}/ln.c
+    ${USER_DIR}/cp.c
     ${USER_DIR}/mkdir.c
+    ${USER_DIR}/mv.c
     ${USER_DIR}/rm.c
     ${USER_DIR}/sh.c
     ${USER_DIR}/stressfs.c
@@ -1878,9 +1881,9 @@ endfunction()
 
 # Userlib-only programs (no musl equivalent)
 set(USERLIB_ONLY_PROGS
-    bigfile cloexectest clonetest cowtest dd devtest dh dumpchan dumpinode
+    bigfile cloexectest clonetest cowtest cp dd devtest dh dumpchan dumpinode
     dumppcache dumprq find free forktest grind kqueuetest losetup lsblk mkfs_xv6fs mknod mmapbigfile mmaptest mount pingpong
-    primes ps randtest stressfs symlinktest sync testsig umount kprofile
+    mv primes ps randtest rm stressfs symlinktest sync testsig umount kprofile
     usertests vforktest waitgdb wallclock xargs zombie top
     syscalltest iovectest
 )
@@ -1894,7 +1897,7 @@ endforeach()
 # Musl static programs: _m<name> → bin/<name>  (replaces any userlib version)
 set(MUSL_PROG_MAP
     mcat:cat   mecho:echo   mgrep:grep   mls:ls   mwc:wc
-    mmkdir:mkdir  mrm:rm  mln:ln  mkill:kill  msleep:sleep
+    mmkdir:mkdir  mln:ln  mkill:kill  msleep:sleep
     minit:init  mhello:hello  mfptest:fptest
     mnslookup:nslookup  mepolltest:epolltest
     msocktest:socktest

@@ -412,9 +412,8 @@ void truncate3(char *s) {
 
 // does chdir() call iput(p->cwd) in a transaction?
 //
-// NOTE: Original xv6 allowed rmdir of a directory while it's someone's cwd.
-// Our VFS returns -EBUSY if the directory is in use (refcount > 1), which is
-// stricter but safer. This test is modified to chdir out first before rmdir.
+// NOTE: Some kernels allow removing a directory that is still another task's
+// cwd. This test keeps the simpler chdir-out flow before rmdir.
 void iputtest(char *s) {
     if (mkdir("iputdir") < 0) {
         printf("%s: mkdir failed\n", s);
@@ -424,8 +423,7 @@ void iputtest(char *s) {
         printf("%s: chdir iputdir failed\n", s);
         exit(1);
     }
-    // Must chdir out before rmdir - our VFS returns -EBUSY if directory is in
-    // use
+    // Chdir out before rmdir.
     if (chdir("/") < 0) {
         printf("%s: chdir / failed\n", s);
         exit(1);
@@ -438,9 +436,8 @@ void iputtest(char *s) {
 
 // does exit() call iput(p->cwd) in a transaction?
 //
-// NOTE: Original xv6 allowed rmdir of a directory while it's someone's cwd.
-// Our VFS returns -EBUSY if the directory is in use (refcount > 1), which is
-// stricter but safer. This test is modified to chdir out first before rmdir.
+// NOTE: Some kernels allow removing a directory that is still another task's
+// cwd. This test keeps the simpler chdir-out flow before rmdir.
 void exitiputtest(char *s) {
     int pid, xstatus;
 
@@ -458,8 +455,7 @@ void exitiputtest(char *s) {
             printf("%s: child chdir failed\n", s);
             exit(1);
         }
-        // Must chdir out before rmdir - our VFS returns -EBUSY if directory is
-        // in use
+        // Chdir out before rmdir.
         if (chdir("/") < 0) {
             printf("%s: chdir / failed\n", s);
             exit(1);
@@ -2583,6 +2579,159 @@ void badarg(char *s) {
     exit(0);
 }
 
+static int run_cmd(char *path, char **argv) {
+    int pid = fork();
+    if (pid < 0) {
+        return -1;
+    }
+    if (pid == 0) {
+        exec(path, argv);
+        exit(127);
+    }
+
+    int status = -1;
+    if (wait(&status) != pid) {
+        return -1;
+    }
+    return status;
+}
+
+static void write_text_file(const char *path, const char *data) {
+    int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC);
+    if (fd < 0) {
+        printf("cannot create %s\n", path);
+        exit(1);
+    }
+    int len = strlen(data);
+    if (write(fd, data, len) != len) {
+        printf("cannot write %s\n", path);
+        close(fd);
+        exit(1);
+    }
+    close(fd);
+}
+
+static void assert_file_text(char *s, const char *path, const char *data) {
+    char tmp[64];
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("%s: cannot open %s\n", s, path);
+        exit(1);
+    }
+    int n = read(fd, tmp, sizeof(tmp) - 1);
+    close(fd);
+    if (n < 0) {
+        printf("%s: cannot read %s\n", s, path);
+        exit(1);
+    }
+    tmp[n] = '\0';
+    if (strcmp(tmp, data) != 0) {
+        printf("%s: wrong content in %s\n", s, path);
+        exit(1);
+    }
+}
+
+void fscopymove(char *s) {
+    const char *long_src = "cp-long-component";
+    const char *long_dst = "/tmp/cp-long-component";
+
+    unlink("cp-src");
+    unlink("/tmp/cp-dst");
+    unlink("mv-src");
+    unlink("/tmp/mv-dst");
+    unlink(long_src);
+    unlink(long_dst);
+
+    write_text_file("cp-src", "copy-check");
+    char *cp_argv[] = {"/bin/cp", "cp-src", "/tmp/cp-dst", 0};
+    if (run_cmd("/bin/cp", cp_argv) != 0) {
+        printf("%s: cp command failed\n", s);
+        exit(1);
+    }
+    assert_file_text(s, "/tmp/cp-dst", "copy-check");
+    if (open("cp-src", O_RDONLY) < 0) {
+        printf("%s: cp removed source unexpectedly\n", s);
+        exit(1);
+    }
+
+    write_text_file("mv-src", "move-check");
+    char *mv_argv[] = {"/bin/mv", "mv-src", "/tmp/mv-dst", 0};
+    if (run_cmd("/bin/mv", mv_argv) != 0) {
+        printf("%s: mv command failed\n", s);
+        exit(1);
+    }
+    if (open("mv-src", O_RDONLY) >= 0) {
+        printf("%s: mv left source behind\n", s);
+        exit(1);
+    }
+    assert_file_text(s, "/tmp/mv-dst", "move-check");
+
+    write_text_file(long_src, "long-copy");
+    char *cp_long_argv[] = {"/bin/cp", (char *)long_src, (char *)long_dst, 0};
+    if (run_cmd("/bin/cp", cp_long_argv) != 0) {
+        printf("%s: cp long-name command failed\n", s);
+        exit(1);
+    }
+    assert_file_text(s, long_dst, "long-copy");
+
+    unlink("cp-src");
+    unlink("/tmp/cp-dst");
+    unlink("/tmp/mv-dst");
+    unlink(long_src);
+    unlink(long_dst);
+}
+
+void rmrecursive(char *s) {
+    unlink("rm-empty");
+    unlink("rm-tree/a/file");
+    unlink("rm-tree/a/file2");
+    unlink("rm-tree/a/file3");
+    unlink("rm-tree/a/link");
+    unlink("rm-tree/a");
+    unlink("rm-tree");
+
+    if (mkdir("rm-tree") != 0 || mkdir("rm-tree/a") != 0) {
+        printf("%s: mkdir failed\n", s);
+        exit(1);
+    }
+    write_text_file("rm-tree/a/file", "rm-check");
+    write_text_file("rm-tree/a/file2", "rm-check2");
+    write_text_file("rm-tree/a/file3", "rm-check3");
+    if (symlink("missing-target", "rm-tree/a/link") != 0) {
+        printf("%s: symlink failed\n", s);
+        exit(1);
+    }
+
+    char *rm_argv[] = {"/bin/rm", "-r", "rm-tree", 0};
+    if (run_cmd("/bin/rm", rm_argv) != 0) {
+        printf("%s: rm -r command failed\n", s);
+        exit(1);
+    }
+    if (lstat("rm-tree", &(struct stat){0}) == 0) {
+        printf("%s: rm -r left directory behind\n", s);
+        exit(1);
+    }
+
+    if (mkdir("rm-empty") != 0) {
+        printf("%s: mkdir rm-empty failed\n", s);
+        exit(1);
+    }
+    char *ls_argv[] = {"/bin/ls", "rm-empty", 0};
+    if (run_cmd("/bin/ls", ls_argv) != 0) {
+        printf("%s: ls rm-empty failed\n", s);
+        exit(1);
+    }
+    char *rm_empty_argv[] = {"/bin/rm", "-r", "rm-empty", 0};
+    if (run_cmd("/bin/rm", rm_empty_argv) != 0) {
+        printf("%s: rm empty dir failed\n", s);
+        exit(1);
+    }
+    if (lstat("rm-empty", &(struct stat){0}) == 0) {
+        printf("%s: rm empty dir left directory behind\n", s);
+        exit(1);
+    }
+}
+
 struct test {
     void (*f)(char *);
     char *s;
@@ -2652,6 +2801,8 @@ struct test {
     {sbrklast, "sbrklast"},
     {sbrk8000, "sbrk8000"},
     {badarg, "badarg"},
+    {fscopymove, "fscopymove"},
+    {rmrecursive, "rmrecursive"},
 
     {0, 0},
 };

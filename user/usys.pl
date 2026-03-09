@@ -48,6 +48,7 @@ entry("fcntl");
 entry("access");
 entry("rename");
 entry("ftruncate");
+entry("fchmodat");
 entry("getpid");
 entry("getppid");
 entry("gettid");

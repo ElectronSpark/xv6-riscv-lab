@@ -117,6 +117,7 @@ int fcntl(int fd, int cmd, int arg);
 int access(const char *path, int mode);
 int rename(const char *oldpath, const char *newpath);
 int ftruncate(int fd, int64 length);
+int fchmodat(int dirfd, const char *path, int mode, int flags);
 int getpid(void);
 int getppid(void);
 int gettid(void);

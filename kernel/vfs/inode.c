@@ -1155,9 +1155,11 @@ int vfs_unlink(struct vfs_inode *dir, const char *name, size_t name_len) {
             ret = -ENOTEMPTY; // Directory not empty
             goto out;
         }
-        // Check if directory is in use (refcount > 1 means someone else has it
-        // open)
-        if (vfs_inode_refcount(target) > 1) {
+        // Only block removal of special directories here. Regular empty
+        // directories may still have transient references from lookup/caching,
+        // and Unix semantics allow removing them even if another task still
+        // holds a file descriptor or cwd reference.
+        if (target->mount || vfs_inode_is_local_root(target)) {
             ret = -EBUSY; // Directory is in use
             goto out;
         }
