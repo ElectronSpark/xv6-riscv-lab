@@ -43,6 +43,7 @@
 #include "xv6fs_private.h"
 #include "vfs/uio.h"
 #include <mm/pcache.h>
+#include <mm/folio.h>
 
 /*
  * Blocks-per-page constants for pcache ↔ xv6fs block address translation.
@@ -113,8 +114,9 @@ ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
             return (ret == -EINTR) ? -EINTR : -EIO;
         }
         struct pcache_node *pcn = page->pcache.pcache_node;
-        uint page_off = (bn % BSIZE_PER_PAGE) * BSIZE + off;
-        char *data = (char *)pcn->data + page_off;
+        uint64 folio_off = (uint64)blkno_512 * 512 -
+                           (uint64)pcn->blkno * 512 + off;
+        char *data = (char *)pcn->data + folio_off;
         if (user) {
             if (vm_copyout(current->vm, (uint64)(buf + bytes_read), data, n) <
                 0) {
@@ -231,16 +233,22 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count,
 
             /*
              * Skip the disk read when we are about to overwrite the entire
-             * pcache page (4 KB).  pcache_prepare_write_page zero-fills and
-             * marks the page up-to-date without I/O, so the subsequent
-             * BSIZE-chunk iterations fill every byte before the page is
-             * released.  Falls back to a normal read when the page is
-             * already cached or has I/O in progress.
+             * pcache folio.  pcache_prepare_write_page zero-fills and marks
+             * the folio up-to-date without I/O.  Falls back to a normal
+             * read when the folio is already cached or has I/O in progress.
+             *
+             * We must check against the actual folio size (pcn->size),
+             * not PGSIZE, because multi-page folios (order > 0) span
+             * multiple pages and only a full-folio overwrite is safe.
              */
+            struct pcache_node *pcn = page->pcache.pcache_node;
+            uint64 folio_off = (uint64)blkno_512 * 512 -
+                               (uint64)pcn->blkno * 512;
+
             int ret;
-            bool full_page = (bn % BSIZE_PER_PAGE == 0 && off == 0 &&
-                              (n - chunk_written) >= PGSIZE);
-            if (full_page) {
+            bool full_folio = (folio_off == 0 && off == 0 &&
+                               (n - chunk_written) >= pcn->size);
+            if (full_folio) {
                 ret = pcache_prepare_write_page(pc, page);
             } else {
                 ret = pcache_read_page(pc, page);
@@ -254,9 +262,8 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count,
                 return (ret == -EINTR) ? -EINTR : -EIO;
             }
 
-            struct pcache_node *pcn = page->pcache.pcache_node;
-            uint page_off = (bn % BSIZE_PER_PAGE) * BSIZE + off;
-            char *data = (char *)pcn->data + page_off;
+            folio_off += off;
+            char *data = (char *)pcn->data + folio_off;
 
             if (user) {
                 if (vm_copyin(current->vm, data,
@@ -505,8 +512,9 @@ static ssize_t xv6fs_file_writev(struct vfs_file *file, struct iov_iter *iter,
                 }
 
                 struct pcache_node *pcn = page->pcache.pcache_node;
-                uint page_off = (bn % BSIZE_PER_PAGE) * BSIZE + off;
-                char *data = (char *)pcn->data + page_off;
+                uint64 folio_off = (uint64)blkno_512 * 512 -
+                                   (uint64)pcn->blkno * 512 + off;
+                char *data = (char *)pcn->data + folio_off;
 
                 if (user) {
                     if (vm_copyin(current->vm, data,
@@ -641,6 +649,9 @@ static void *xv6fs_file_fault(struct vfs_file *file, struct vma *vma,
     }
 
     struct pcache_node *pcn = pcpage->pcache.pcache_node;
+    /* Compute sub-page offset within multi-page folio. */
+    uint64 folio_byte_off = blkno_512 * BLK_SIZE -
+                            (uint64)pcn->blkno * BLK_SIZE;
 
     /*
      * Zero-copy path: if the entire page is covered by file data, return
@@ -650,7 +661,7 @@ static void *xv6fs_file_fault(struct vfs_file *file, struct vma *vma,
      */
     if (bytes_to_read == PGSIZE) {
         vfs_iunlock(inode);
-        return pcn->data; /* zero-copy: return pcache page PA */
+        return (char *)pcn->data + folio_byte_off;
     }
 
     /* Partial page: copy + zero-fill tail. */
@@ -661,7 +672,7 @@ static void *xv6fs_file_fault(struct vfs_file *file, struct vma *vma,
         return NULL;
     }
 
-    memmove(pa, pcn->data, bytes_to_read);
+    memmove(pa, (char *)pcn->data + folio_byte_off, bytes_to_read);
     memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
 
     pcache_put_page(pc, pcpage);
@@ -700,12 +711,14 @@ static int xv6fs_file_writepage(struct vfs_file *file, loff_t offset,
         return -EIO;
 
     /*
-     * Zero-copy check: if the data pointer IS a pcache page, just mark
-     * it dirty — its content is already the authoritative copy.
+     * Zero-copy check: if the data pointer IS a pcache page (or a
+     * tail page of a pcache folio), just mark it dirty — its content
+     * is already the authoritative copy.
      */
     page_t *pg = __pa_to_page((uint64)data);
-    if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE)) {
-        pcache_mark_page_dirty(pc, pg);
+    page_t *pc_head = page_pcache_head(pg);
+    if (pc_head != NULL) {
+        pcache_mark_page_dirty(pc, pc_head);
         return 0;
     }
 
@@ -727,9 +740,11 @@ static int xv6fs_file_writepage(struct vfs_file *file, loff_t offset,
     }
 
     struct pcache_node *pcn = pcpage->pcache.pcache_node;
-    memmove(pcn->data, data, len);
+    /* Compute the sub-page offset for multi-page folios. */
+    uint64 folio_byte_off = blkno_512 * BLK_SIZE - (uint64)pcn->blkno * BLK_SIZE;
+    memmove((char *)pcn->data + folio_byte_off, data, len);
     if (len < PGSIZE)
-        memset((char *)pcn->data + len, 0, PGSIZE - len);
+        memset((char *)pcn->data + folio_byte_off + len, 0, PGSIZE - len);
 
     pcache_mark_page_dirty(pc, pcpage);
     pcache_put_page(pc, pcpage);

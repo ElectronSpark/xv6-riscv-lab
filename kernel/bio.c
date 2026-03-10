@@ -36,6 +36,7 @@
 #include "dev/buf.h"
 #include "dev/bio.h"
 #include <mm/page.h>
+#include <mm/folio.h>
 #include "dev/blkdev.h"
 #include "dev/iosched.h"
 #include "list.h"
@@ -248,7 +249,7 @@ static struct bio *__buf_alloc_bio(struct buf *b, blkdev_t *blkdev,
     bio->blkno = b->blockno * (BSIZE >> 9);
     page_t *page = __pa_to_page((uint64)b->data & ~PAGE_MASK);
     size_t page_offset = (uint64)b->data & PAGE_MASK;
-    int ret = bio_add_seg(bio, page, 0, BSIZE, page_offset);
+    int ret = bio_add_folio(bio, page_folio(page), BSIZE, page_offset);
     if (ret != 0) {
         bio_release(bio);
         return NULL;

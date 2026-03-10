@@ -13,16 +13,22 @@
 #include "proc/tq_type.h"
 
 typedef struct page_struct page_t;
+typedef struct folio folio_t;
 struct pcache;
 struct pcache_node;
 struct pcache_ops;
 
 struct pcache_ops {
+    /* Legacy page-based callbacks (used when folio variants are NULL) */
     int (*read_page)(struct pcache *pcache, page_t *page);
     int (*write_page)(struct pcache *pcache, page_t *page);
     int (*write_begin)(struct pcache *pcache, page_t *page);
     int (*write_end)(struct pcache *pcache, page_t *page);
     void (*mark_dirty)(struct pcache *pcache, page_t *page);
+
+    /* Folio-aware callbacks (preferred when non-NULL) */
+    int (*read_folio)(struct pcache *pcache, folio_t *folio);
+    int (*write_folio)(struct pcache *pcache, folio_t *folio);
 };
 
 #define PCACHE_DEFAULT_DIRTY_RATE 15 // in percentage
@@ -92,9 +98,11 @@ struct pcache {
 struct pcache_node {
     list_node_t lru_entry;     // entry in the local dirty or lru list of pcache
     struct pcache *pcache;     // pointer to the parent pcache
-    page_t *page;              // pointer to the page
+    folio_t *folio;            // pointer to the folio (head page)
+    page_t *page;              // pointer to the head page (== &folio->page)
     void *data;                // pointer to the data area in the page
-    int64 page_count;          // number of pages in this node
+    int64 page_count;          // number of base pages in this node's folio
+    uint8 order;               // compound order of the folio (0 for single page)
     uint64 last_request;       // Last IO request timestamp in jiffies
     uint64 last_flushed;       // Last flushed timestamp in jiffies
     struct {
@@ -113,7 +121,7 @@ struct pcache_node {
 #define PCACHE_VEC_MAX  16   /* max pages in a single batch */
 
 /**
- * struct pcache_page_vec - lightweight batch of pcache pages
+ * struct pcache_page_vec - lightweight batch of pcache pages/folios
  * @pages:      array of page pointers (caller or stack allocated)
  * @nr_pages:   number of valid entries
  *

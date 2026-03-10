@@ -153,6 +153,42 @@ int page_mapped(page_t *page);
 /** Returns current mapcount. */
 int page_mapcount(page_t *page);
 
+/* ========================================================================== */
+/*  Folio rmap wrappers                                                       */
+/* ========================================================================== */
+
+typedef struct folio folio_t;
+
+/**
+ * folio_add_anon_rmap - record that @folio's head page is mapped at @va.
+ *
+ * Thin wrapper around page_add_anon_rmap operating on the head page.
+ */
+static inline void folio_add_anon_rmap(folio_t *folio, vma_t *vma, uint64 va)
+{
+    page_add_anon_rmap((page_t *)folio, vma, va);
+}
+
+/**
+ * folio_remove_rmap - remove one PTE mapping from @folio's head page.
+ */
+static inline void folio_remove_rmap(folio_t *folio)
+{
+    page_remove_rmap((page_t *)folio);
+}
+
+/** Returns true if folio head page mapcount > 0. */
+static inline int folio_mapped(folio_t *folio)
+{
+    return page_mapped((page_t *)folio);
+}
+
+/** Returns current mapcount of folio head page. */
+static inline int folio_rmap_mapcount(folio_t *folio)
+{
+    return page_mapcount((page_t *)folio);
+}
+
 /**
  * try_to_unmap - remove ALL PTE mappings of @page.
  *

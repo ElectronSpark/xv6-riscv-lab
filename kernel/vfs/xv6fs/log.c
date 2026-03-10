@@ -31,7 +31,7 @@
 #include "proc/thread.h"
 #include "signal.h"
 #include "proc/tq.h"
-#include "dev/buf.h"
+#include <mm/buffer_head.h>
 #include "printf.h"
 #include "vfs/fs.h"
 #include "xv6fs_private.h"
@@ -42,51 +42,57 @@
 
 // Copy committed blocks from log to their home location
 static void __xv6fs_install_trans(struct xv6fs_log *log, int recovering) {
+    struct xv6fs_superblock *xv6_sb =
+        container_of(log, struct xv6fs_superblock, log);
     for (int tail = 0; tail < log->lh.n; tail++) {
-        struct buf *lbuf =
-            bread(log->dev, log->start + tail + 1); // read log block
-        struct buf *dbuf = bread(log->dev, log->lh.block[tail]); // read dst
-        memmove(dbuf->data, lbuf->data, BSIZE); // copy block to dst
+        buffer_head_t *lbh =
+            sb_bread(xv6_sb, log->start + tail + 1); // read log block
+        buffer_head_t *dbh = sb_bread(xv6_sb, log->lh.block[tail]); // read dst
+        memmove(dbh->b_data, lbh->b_data, BSIZE); // copy block to dst
         if (recovering) {
             // During recovery, use synchronous writes for safety
-            bwrite(dbuf);
+            bh_write(dbh);
         } else {
             // Normal operation: use async writes, sync at end
-            bwrite_async(dbuf);
-            bunpin(dbuf);
+            bh_write_async(dbh);
+            bh_unpin(dbh);
         }
-        brelse(lbuf);
-        brelse(dbuf);
+        bh_release(lbh);
+        bh_release(dbh);
     }
 
     // Flush all async writes to disk
     if (!recovering && log->lh.n > 0) {
-        bsync();
+        bh_sync(xv6_sb);
     }
 }
 
 // Read the log header from disk into the in-memory log header
 static void __xv6fs_read_head(struct xv6fs_log *log) {
-    struct buf *buf = bread(log->dev, log->start);
-    struct xv6fs_logheader *lh = (struct xv6fs_logheader *)(buf->data);
+    struct xv6fs_superblock *xv6_sb =
+        container_of(log, struct xv6fs_superblock, log);
+    buffer_head_t *bh = sb_bread(xv6_sb, log->start);
+    struct xv6fs_logheader *lh = (struct xv6fs_logheader *)(bh->b_data);
     log->lh.n = lh->n;
     for (int i = 0; i < log->lh.n; i++) {
         log->lh.block[i] = lh->block[i];
     }
-    brelse(buf);
+    bh_release(bh);
 }
 
 // Write in-memory log header to disk.
 // This is the true point at which the current transaction commits.
 static void __xv6fs_write_head(struct xv6fs_log *log) {
-    struct buf *buf = bread(log->dev, log->start);
-    struct xv6fs_logheader *hb = (struct xv6fs_logheader *)(buf->data);
+    struct xv6fs_superblock *xv6_sb =
+        container_of(log, struct xv6fs_superblock, log);
+    buffer_head_t *bh = sb_bread(xv6_sb, log->start);
+    struct xv6fs_logheader *hb = (struct xv6fs_logheader *)(bh->b_data);
     hb->n = log->lh.n;
     for (int i = 0; i < log->lh.n; i++) {
         hb->block[i] = log->lh.block[i];
     }
-    bwrite(buf);
-    brelse(buf);
+    bh_write(bh);
+    bh_release(bh);
 }
 
 static void __xv6fs_recover_from_log(struct xv6fs_log *log) {
@@ -103,18 +109,20 @@ static void __xv6fs_recover_from_log(struct xv6fs_log *log) {
 // Copy modified blocks from cache to log
 // Uses async writes with a final sync for better I/O batching
 static void __xv6fs_write_log(struct xv6fs_log *log) {
+    struct xv6fs_superblock *xv6_sb =
+        container_of(log, struct xv6fs_superblock, log);
     for (int tail = 0; tail < log->lh.n; tail++) {
-        struct buf *to = bread(log->dev, log->start + tail + 1); // log block
-        struct buf *from = bread(log->dev, log->lh.block[tail]); // cache block
-        memmove(to->data, from->data, BSIZE);
-        bwrite_async(to); // mark dirty, will flush at end
-        brelse(from);
-        brelse(to);
+        buffer_head_t *to = sb_bread(xv6_sb, log->start + tail + 1); // log block
+        buffer_head_t *from = sb_bread(xv6_sb, log->lh.block[tail]); // cache block
+        memmove(to->b_data, from->b_data, BSIZE);
+        bh_write_async(to); // mark dirty, will flush at end
+        bh_release(from);
+        bh_release(to);
     }
 
     // Flush all log writes before writing header
     if (log->lh.n > 0) {
-        bsync();
+        bh_sync(xv6_sb);
     }
 }
 
@@ -252,7 +260,7 @@ void xv6fs_end_op(struct xv6fs_superblock *xv6_sb) {
 
 // Record the block number for writing.
 // Must be called between begin_op and end_op.
-void xv6fs_log_write(struct xv6fs_superblock *xv6_sb, struct buf *b) {
+void xv6fs_log_write(struct xv6fs_superblock *xv6_sb, buffer_head_t *bh) {
     struct xv6fs_log *log = &xv6_sb->log;
     int i;
 
@@ -263,12 +271,12 @@ void xv6fs_log_write(struct xv6fs_superblock *xv6_sb, struct buf *b) {
         panic("xv6fs: log_write outside of trans");
 
     for (i = 0; i < log->lh.n; i++) {
-        if (log->lh.block[i] == b->blockno) // log absorption
+        if (log->lh.block[i] == (int)bh->b_blocknr) // log absorption
             break;
     }
-    log->lh.block[i] = b->blockno;
+    log->lh.block[i] = (int)bh->b_blocknr;
     if (i == log->lh.n) { // Add new block to log?
-        bpin(b);
+        bh_pin(bh);
         log->lh.n++;
     }
     spin_unlock(&log->lock);

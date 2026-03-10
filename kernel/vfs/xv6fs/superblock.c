@@ -19,6 +19,8 @@
 #include "../vfs_private.h"
 #include <mm/slab.h>
 #include <mm/pcache.h>
+#include <mm/folio.h>
+#include <mm/buffer_head.h>
 #include "dev/bio.h"
 #include "xv6fs_private.h"
 #include "block_cache.h"
@@ -86,7 +88,7 @@ static int xv6fs_pcache_read_page(struct pcache *pcache, page_t *page) {
         }
 
         bio->blkno = (uint64)addrs[i] * BLK512_PER_BSIZE;
-        ret = bio_add_seg(bio, page, 0, run * BSIZE, i * BSIZE);
+        ret = bio_add_folio(bio, page_folio(page), run * BSIZE, i * BSIZE);
         if (ret != 0) {
             bio_release(bio);
             goto await_submitted;
@@ -168,7 +170,7 @@ static int xv6fs_pcache_write_page(struct pcache *pcache, page_t *page) {
         }
 
         bio->blkno = (uint64)addrs[i] * BLK512_PER_BSIZE;
-        ret = bio_add_seg(bio, page, 0, run * BSIZE, i * BSIZE);
+        ret = bio_add_folio(bio, page_folio(page), run * BSIZE, i * BSIZE);
         if (ret != 0) {
             bio_release(bio);
             goto await_submitted;
@@ -198,9 +200,116 @@ await_submitted:
     return ret;
 }
 
+static int xv6fs_pcache_read_folio(struct pcache *pcache, folio_t *folio) {
+    page_t *page = &folio->page;
+    struct vfs_inode *inode = (struct vfs_inode *)pcache->private_data;
+    struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
+    struct xv6fs_superblock *xv6_sb =
+        container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+
+    /* Number of xv6fs-sized blocks (BSIZE) in the entire folio. */
+    int folio_nblk = pcnode->size / BSIZE;
+    uint base_bn = pcnode->blkno / BLK512_PER_BSIZE;
+
+    /* Resolve all block addresses, then merge contiguous runs. */
+    uint addrs[FOLIO_MAX_ORDER_NR_PAGES * BSIZE_PER_PAGE];
+    for (int i = 0; i < folio_nblk; i++)
+        addrs[i] = xv6fs_bmap_read(ip, base_bn + i);
+
+    struct bio *bios[FOLIO_MAX_ORDER_NR_PAGES * BSIZE_PER_PAGE] = {NULL};
+    int submitted = 0;
+    int ret = 0;
+
+    for (int i = 0; i < folio_nblk; ) {
+        if (addrs[i] == 0) {
+            memset((char *)pcnode->data + i * BSIZE, 0, BSIZE);
+            i++;
+            continue;
+        }
+        int run = 1;
+        while (i + run < folio_nblk && addrs[i + run] == addrs[i] + run)
+            run++;
+
+        struct bio *bio = bio_alloc(xv6_sb->blkdev, 1, false, NULL, NULL);
+        if (IS_ERR_OR_NULL(bio)) { ret = -ENOMEM; goto await_submitted; }
+
+        bio->blkno = (uint64)addrs[i] * BLK512_PER_BSIZE;
+        ret = bio_add_folio(bio, folio, run * BSIZE, i * BSIZE);
+        if (ret != 0) { bio_release(bio); goto await_submitted; }
+
+        ret = blkdev_submit_bio(xv6_sb->blkdev, bio);
+        if (ret != 0) { bio_release(bio); goto await_submitted; }
+        bios[submitted++] = bio;
+        i += run;
+    }
+    ret = 0;
+
+await_submitted:
+    for (int i = 0; i < submitted; i++) {
+        int err = bio_await(bios[i]);
+        if (err != 0 && ret == 0) ret = err;
+        bio_release(bios[i]);
+    }
+    return ret;
+}
+
+static int xv6fs_pcache_write_folio(struct pcache *pcache, folio_t *folio) {
+    page_t *page = &folio->page;
+    struct vfs_inode *inode = (struct vfs_inode *)pcache->private_data;
+    if (inode == NULL || inode->sb == NULL)
+        return 0;
+
+    struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
+    struct xv6fs_superblock *xv6_sb =
+        container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+
+    int folio_nblk = pcnode->size / BSIZE;
+    uint base_bn = pcnode->blkno / BLK512_PER_BSIZE;
+
+    uint addrs[FOLIO_MAX_ORDER_NR_PAGES * BSIZE_PER_PAGE];
+    for (int i = 0; i < folio_nblk; i++)
+        addrs[i] = xv6fs_bmap_read(ip, base_bn + i);
+
+    struct bio *bios[FOLIO_MAX_ORDER_NR_PAGES * BSIZE_PER_PAGE] = {NULL};
+    int submitted = 0;
+    int ret = 0;
+
+    for (int i = 0; i < folio_nblk; ) {
+        if (addrs[i] == 0) { i++; continue; }
+        int run = 1;
+        while (i + run < folio_nblk && addrs[i + run] == addrs[i] + run)
+            run++;
+
+        struct bio *bio = bio_alloc(xv6_sb->blkdev, 1, true, NULL, NULL);
+        if (IS_ERR_OR_NULL(bio)) { ret = -ENOMEM; goto await_submitted; }
+
+        bio->blkno = (uint64)addrs[i] * BLK512_PER_BSIZE;
+        ret = bio_add_folio(bio, folio, run * BSIZE, i * BSIZE);
+        if (ret != 0) { bio_release(bio); goto await_submitted; }
+
+        ret = blkdev_submit_bio(xv6_sb->blkdev, bio);
+        if (ret != 0) { bio_release(bio); goto await_submitted; }
+        bios[submitted++] = bio;
+        i += run;
+    }
+    ret = 0;
+
+await_submitted:
+    for (int i = 0; i < submitted; i++) {
+        int err = bio_await(bios[i]);
+        if (err != 0 && ret == 0) ret = err;
+        bio_release(bios[i]);
+    }
+    return ret;
+}
+
 static struct pcache_ops xv6fs_pcache_ops = {
     .read_page = xv6fs_pcache_read_page,
     .write_page = xv6fs_pcache_write_page,
+    .read_folio = xv6fs_pcache_read_folio,
+    .write_folio = xv6fs_pcache_write_folio,
 };
 
 /*
@@ -271,15 +380,15 @@ static int __xv6fs_read_superblock(uint dev, struct superblock *disk_sb) {
     return 0;
 }
 
-// Write the superblock to disk
-static int __xv6fs_write_superblock(uint dev, struct superblock *disk_sb) {
-    struct buf *bp = bread(dev, 1);
-    if (bp == NULL) {
+// Write the superblock to disk (must be called after meta_pcache is initialized)
+static int __xv6fs_write_superblock(struct xv6fs_superblock *xv6_sb) {
+    buffer_head_t *bh = sb_bread(xv6_sb, 1);
+    if (bh == NULL) {
         return -EIO;
     }
-    memmove(bp->data, disk_sb, sizeof(*disk_sb));
-    bwrite(bp);
-    brelse(bp);
+    memmove(bh->b_data, &xv6_sb->disk_sb, sizeof(xv6_sb->disk_sb));
+    bh_write(bh);
+    bh_release(bh);
     return 0;
 }
 
@@ -308,21 +417,21 @@ struct vfs_inode *xv6fs_alloc_inode(struct vfs_superblock *sb) {
     uint dev = xv6fs_sb_dev(xv6_sb);
 
     // Find a free inode on disk
-    struct buf *bp;
+    buffer_head_t *bh;
     struct dinode *dip;
 
     for (uint inum = 1; inum < disk_sb->ninodes; inum++) {
-        bp = bread(dev, XV6FS_IBLOCK(inum, disk_sb));
-        if (bp == NULL) {
+        bh = sb_bread(xv6_sb, XV6FS_IBLOCK(inum, disk_sb));
+        if (bh == NULL) {
             return ERR_PTR(-EIO);
         }
-        dip = (struct dinode *)bp->data + inum % IPB;
+        dip = (struct dinode *)bh->b_data + inum % IPB;
         if (dip->type == 0) {
             // Found a free inode
             memset(dip, 0, sizeof(*dip));
             // Mark as allocated but type will be set by caller
-            xv6fs_log_write(xv6_sb, bp);
-            brelse(bp);
+            xv6fs_log_write(xv6_sb, bh);
+            bh_release(bh);
 
             // Allocate in-memory structure
             struct xv6fs_inode *xv6fs_inode = __xv6fs_alloc_inode_structure();
@@ -338,7 +447,7 @@ struct vfs_inode *xv6fs_alloc_inode(struct vfs_superblock *sb) {
 
             return &xv6fs_inode->vfs_inode;
         }
-        brelse(bp);
+        bh_release(bh);
     }
 
     return ERR_PTR(-ENOSPC);
@@ -363,21 +472,21 @@ struct vfs_inode *xv6fs_get_inode(struct vfs_superblock *sb, uint64 ino) {
     }
 
     // Read inode from disk
-    struct buf *bp = bread(dev, XV6FS_IBLOCK(ino, disk_sb));
-    if (bp == NULL) {
+    buffer_head_t *bh = sb_bread(xv6_sb, XV6FS_IBLOCK(ino, disk_sb));
+    if (bh == NULL) {
         return ERR_PTR(-EIO);
     }
 
-    struct dinode *dip = (struct dinode *)bp->data + ino % IPB;
+    struct dinode *dip = (struct dinode *)bh->b_data + ino % IPB;
     if (dip->type == 0) {
-        brelse(bp);
+        bh_release(bh);
         return ERR_PTR(-ENOENT);
     }
 
     // Allocate in-memory inode
     struct xv6fs_inode *xv6fs_inode = __xv6fs_alloc_inode_structure();
     if (xv6fs_inode == NULL) {
-        brelse(bp);
+        bh_release(bh);
         return ERR_PTR(-ENOMEM);
     }
 
@@ -404,7 +513,7 @@ struct vfs_inode *xv6fs_get_inode(struct vfs_superblock *sb, uint64 ino) {
         xv6fs_inode->vfs_inode.cdev = devno;
     }
 
-    brelse(bp);
+    bh_release(bh);
     return &xv6fs_inode->vfs_inode;
 }
 
@@ -422,8 +531,7 @@ int xv6fs_sync_fs(struct vfs_superblock *sb, int wait) {
 
     // Write superblock to disk if dirty
     if (xv6_sb->dirty) {
-        int ret =
-            __xv6fs_write_superblock(xv6fs_sb_dev(xv6_sb), &xv6_sb->disk_sb);
+        int ret = __xv6fs_write_superblock(xv6_sb);
         if (ret != 0) {
             return ret;
         }
@@ -500,6 +608,9 @@ int xv6fs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
     }
 
     xv6_sb->dirty = 0;
+
+    // Initialize metadata page cache (backing store for buffer_head)
+    meta_pcache_init(xv6_sb);
 
     // Initialize logging layer
     xv6fs_initlog(xv6_sb);

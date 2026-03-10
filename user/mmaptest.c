@@ -799,6 +799,434 @@ void test_msync_basic(void) {
     printf("OK\n");
 }
 
+/******************************************************************************
+ * Sparse folio writeback tests
+ *
+ * With PCACHE_FOLIO_ORDER=2 the page cache allocates 4-page (16 KB) folios.
+ * These tests create a MAP_SHARED mapping, write to selected bytes/pages at
+ * various positions and sparsity levels, munmap, then read() back to verify
+ * the dirty data was correctly written through the pcache→filesystem pipeline.
+ ******************************************************************************/
+
+#define SPARSE_PGSIZE   4096
+#define FOLIO_PAGES     4                        /* 1 << PCACHE_FOLIO_ORDER */
+#define FOLIO_SIZE      (FOLIO_PAGES * SPARSE_PGSIZE) /* 16 KB              */
+
+/* Number of folios for the sparse test files.  16 folios = 256 KB. */
+#define SPARSE_NFOLIOS  16
+#define SPARSE_NPAGES   (SPARSE_NFOLIOS * FOLIO_PAGES)
+#define SPARSE_FILESZ   (SPARSE_NPAGES * SPARSE_PGSIZE)
+
+static const char *sparse_path = "mmap_sparse";
+
+/**
+ * Create the sparse-test file: every byte initialised to a known value
+ * so that un-written pages can be verified as unchanged.
+ */
+static void sparse_create_file(void)
+{
+    int fd = open(sparse_path, O_CREAT | O_WRONLY);
+    if (fd < 0) {
+        printf("FAIL - sparse create\n");
+        exit(1);
+    }
+
+    char page[SPARSE_PGSIZE];
+    for (int p = 0; p < SPARSE_NPAGES; p++) {
+        /* Fill with a per-page pattern: each byte = (p ^ 0x55) & 0xff */
+        memset(page, (p ^ 0x55) & 0xff, SPARSE_PGSIZE);
+        if (write(fd, page, SPARSE_PGSIZE) != SPARSE_PGSIZE) {
+            printf("FAIL - sparse write page %d\n", p);
+            close(fd);
+            exit(1);
+        }
+    }
+    close(fd);
+}
+
+/**
+ * Verify the file by reading every page via read() and checking each
+ * byte against an expected-value callback.
+ *
+ * @param label   Test name for diagnostics.
+ * @param expect  Returns the expected byte value for file-offset @off.
+ *                The function receives (page_index, byte_within_page).
+ */
+static void sparse_verify_file(const char *label,
+                                char (*expect)(int pgno, int byteoff))
+{
+    int fd = open(sparse_path, O_RDONLY);
+    if (fd < 0) {
+        printf("FAIL (%s) - reopen\n", label);
+        exit(1);
+    }
+
+    char page[SPARSE_PGSIZE];
+    for (int p = 0; p < SPARSE_NPAGES; p++) {
+        if (read(fd, page, SPARSE_PGSIZE) != SPARSE_PGSIZE) {
+            printf("FAIL (%s) - read page %d\n", label, p);
+            close(fd);
+            exit(1);
+        }
+        for (int i = 0; i < SPARSE_PGSIZE; i++) {
+            char exp = expect(p, i);
+            if (page[i] != exp) {
+                printf("FAIL (%s) - page %d byte %d: "
+                       "got 0x%x want 0x%x\n",
+                       label, p, i,
+                       (unsigned char)page[i],
+                       (unsigned char)exp);
+                close(fd);
+                exit(1);
+            }
+        }
+    }
+    close(fd);
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ * Test A: Write only the FIRST page of each folio.
+ *   Folio pages 0,4,8,… get 0xAA; the rest stay at the original value.
+ * ──────────────────────────────────────────────────────────────────── */
+
+static char expect_first_of_folio(int pgno, int byteoff)
+{
+    (void)byteoff;
+    if (pgno % FOLIO_PAGES == 0)
+        return (char)0xAA;
+    return (char)((pgno ^ 0x55) & 0xff);
+}
+
+void test_sparse_first_of_folio(void)
+{
+    printf("test_sparse_first_of_folio: ");
+    sparse_create_file();
+
+    int fd = open(sparse_path, O_RDWR);
+    if (fd < 0) { printf("FAIL - open\n"); exit(1); }
+
+    char *m = mmap(0, SPARSE_FILESZ, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) { printf("FAIL - mmap\n"); close(fd); exit(1); }
+    close(fd);
+
+    for (int f = 0; f < SPARSE_NFOLIOS; f++) {
+        int pg0 = f * FOLIO_PAGES;
+        memset(m + pg0 * SPARSE_PGSIZE, 0xAA, SPARSE_PGSIZE);
+    }
+
+    munmap(m, SPARSE_FILESZ);
+    sparse_verify_file("first_of_folio", expect_first_of_folio);
+    printf("OK\n");
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ * Test B: Write only the LAST page of each folio.
+ *   Folio pages 3,7,11,… get 0xBB.
+ * ──────────────────────────────────────────────────────────────────── */
+
+static char expect_last_of_folio(int pgno, int byteoff)
+{
+    (void)byteoff;
+    if (pgno % FOLIO_PAGES == FOLIO_PAGES - 1)
+        return (char)0xBB;
+    return (char)((pgno ^ 0x55) & 0xff);
+}
+
+void test_sparse_last_of_folio(void)
+{
+    printf("test_sparse_last_of_folio: ");
+    sparse_create_file();
+
+    int fd = open(sparse_path, O_RDWR);
+    if (fd < 0) { printf("FAIL - open\n"); exit(1); }
+
+    char *m = mmap(0, SPARSE_FILESZ, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) { printf("FAIL - mmap\n"); close(fd); exit(1); }
+    close(fd);
+
+    for (int f = 0; f < SPARSE_NFOLIOS; f++) {
+        int last_pg = f * FOLIO_PAGES + (FOLIO_PAGES - 1);
+        memset(m + last_pg * SPARSE_PGSIZE, 0xBB, SPARSE_PGSIZE);
+    }
+
+    munmap(m, SPARSE_FILESZ);
+    sparse_verify_file("last_of_folio", expect_last_of_folio);
+    printf("OK\n");
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ * Test C: Write only the MIDDLE page (page 1) of each folio.
+ *   Folio pages 1,5,9,… get 0xCC.
+ * ──────────────────────────────────────────────────────────────────── */
+
+static char expect_mid_of_folio(int pgno, int byteoff)
+{
+    (void)byteoff;
+    if (pgno % FOLIO_PAGES == 1)
+        return (char)0xCC;
+    return (char)((pgno ^ 0x55) & 0xff);
+}
+
+void test_sparse_mid_of_folio(void)
+{
+    printf("test_sparse_mid_of_folio: ");
+    sparse_create_file();
+
+    int fd = open(sparse_path, O_RDWR);
+    if (fd < 0) { printf("FAIL - open\n"); exit(1); }
+
+    char *m = mmap(0, SPARSE_FILESZ, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) { printf("FAIL - mmap\n"); close(fd); exit(1); }
+    close(fd);
+
+    for (int f = 0; f < SPARSE_NFOLIOS; f++) {
+        int mid_pg = f * FOLIO_PAGES + 1;
+        memset(m + mid_pg * SPARSE_PGSIZE, 0xCC, SPARSE_PGSIZE);
+    }
+
+    munmap(m, SPARSE_FILESZ);
+    sparse_verify_file("mid_of_folio", expect_mid_of_folio);
+    printf("OK\n");
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ * Test D: Write every OTHER folio — skip odd-numbered folios entirely.
+ *   All 4 pages of even folios get 0xDD; odd folios unchanged.
+ * ──────────────────────────────────────────────────────────────────── */
+
+static char expect_even_folios(int pgno, int byteoff)
+{
+    (void)byteoff;
+    int folio = pgno / FOLIO_PAGES;
+    if (folio % 2 == 0)
+        return (char)0xDD;
+    return (char)((pgno ^ 0x55) & 0xff);
+}
+
+void test_sparse_every_other_folio(void)
+{
+    printf("test_sparse_every_other_folio: ");
+    sparse_create_file();
+
+    int fd = open(sparse_path, O_RDWR);
+    if (fd < 0) { printf("FAIL - open\n"); exit(1); }
+
+    char *m = mmap(0, SPARSE_FILESZ, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) { printf("FAIL - mmap\n"); close(fd); exit(1); }
+    close(fd);
+
+    for (int f = 0; f < SPARSE_NFOLIOS; f += 2) {
+        int base = f * FOLIO_PAGES * SPARSE_PGSIZE;
+        memset(m + base, 0xDD, FOLIO_SIZE);
+    }
+
+    munmap(m, SPARSE_FILESZ);
+    sparse_verify_file("even_folios", expect_even_folios);
+    printf("OK\n");
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ * Test E: Write a SINGLE BYTE in every page — maximum sparsity.
+ *   Byte 0 of each page is set to 0xEE; the rest of the page keeps
+ *   the original fill value.
+ * ──────────────────────────────────────────────────────────────────── */
+
+static char expect_single_byte(int pgno, int byteoff)
+{
+    if (byteoff == 0)
+        return (char)0xEE;
+    return (char)((pgno ^ 0x55) & 0xff);
+}
+
+void test_sparse_single_byte_per_page(void)
+{
+    printf("test_sparse_single_byte_per_page: ");
+    sparse_create_file();
+
+    int fd = open(sparse_path, O_RDWR);
+    if (fd < 0) { printf("FAIL - open\n"); exit(1); }
+
+    char *m = mmap(0, SPARSE_FILESZ, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) { printf("FAIL - mmap\n"); close(fd); exit(1); }
+    close(fd);
+
+    /* Touch only byte 0 of every page */
+    for (int p = 0; p < SPARSE_NPAGES; p++)
+        m[p * SPARSE_PGSIZE] = (char)0xEE;
+
+    munmap(m, SPARSE_FILESZ);
+    sparse_verify_file("single_byte", expect_single_byte);
+    printf("OK\n");
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ * Test F: Write a single byte in only ONE page per folio (page 2).
+ *   Byte 100 of pages 2,6,10,… is set to 0xFF.
+ *   Everything else unchanged.
+ * ──────────────────────────────────────────────────────────────────── */
+
+static char expect_one_byte_page2(int pgno, int byteoff)
+{
+    if (pgno % FOLIO_PAGES == 2 && byteoff == 100)
+        return (char)0xFF;
+    return (char)((pgno ^ 0x55) & 0xff);
+}
+
+void test_sparse_one_byte_one_page_per_folio(void)
+{
+    printf("test_sparse_one_byte_one_page_per_folio: ");
+    sparse_create_file();
+
+    int fd = open(sparse_path, O_RDWR);
+    if (fd < 0) { printf("FAIL - open\n"); exit(1); }
+
+    char *m = mmap(0, SPARSE_FILESZ, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) { printf("FAIL - mmap\n"); close(fd); exit(1); }
+    close(fd);
+
+    for (int f = 0; f < SPARSE_NFOLIOS; f++) {
+        int pg = f * FOLIO_PAGES + 2;
+        m[pg * SPARSE_PGSIZE + 100] = (char)0xFF;
+    }
+
+    munmap(m, SPARSE_FILESZ);
+    sparse_verify_file("one_byte_page2", expect_one_byte_page2);
+    printf("OK\n");
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ * Test G: Cross-folio boundary writes — write 8 KB straddling the
+ *   boundary between consecutive folios (last 4 KB of folio N and
+ *   first 4 KB of folio N+1).
+ * ──────────────────────────────────────────────────────────────────── */
+
+static char expect_cross_boundary(int pgno, int byteoff)
+{
+    (void)byteoff;
+    int folio = pgno / FOLIO_PAGES;
+    int within = pgno % FOLIO_PAGES;
+    /* We wrote boundaries 0–1, 2–3, 4–5, … (even-numbered boundaries).
+     * That means: last page of even folios and first page of odd folios. */
+    if (folio % 2 == 0 && within == FOLIO_PAGES - 1)
+        return (char)0x77;
+    if (folio % 2 == 1 && within == 0)
+        return (char)0x77;
+    return (char)((pgno ^ 0x55) & 0xff);
+}
+
+void test_sparse_cross_folio_boundary(void)
+{
+    printf("test_sparse_cross_folio_boundary: ");
+    sparse_create_file();
+
+    int fd = open(sparse_path, O_RDWR);
+    if (fd < 0) { printf("FAIL - open\n"); exit(1); }
+
+    char *m = mmap(0, SPARSE_FILESZ, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) { printf("FAIL - mmap\n"); close(fd); exit(1); }
+    close(fd);
+
+    /* Write 2 pages (8 KB) straddling each even→odd folio boundary */
+    for (int f = 0; f + 1 < SPARSE_NFOLIOS; f += 2) {
+        int last_pg = f * FOLIO_PAGES + (FOLIO_PAGES - 1);
+        /* 2 contiguous pages: last of folio f and first of folio f+1 */
+        memset(m + last_pg * SPARSE_PGSIZE, 0x77, 2 * SPARSE_PGSIZE);
+    }
+
+    munmap(m, SPARSE_FILESZ);
+    sparse_verify_file("cross_boundary", expect_cross_boundary);
+    printf("OK\n");
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ * Test H: Stride-N writes — write 1 page out of every N pages.
+ *   Tests strides 1 (dense), 2, 4 (every folio gets exactly 1 dirty
+ *   page), 8 (every other folio), and 16 (1 page per 4 folios).
+ * ──────────────────────────────────────────────────────────────────── */
+
+/* State passed via globals since xv6 user programs lack closures */
+static int stride_cur_stride;
+static char stride_val;
+
+static char expect_stride(int pgno, int byteoff)
+{
+    (void)byteoff;
+    if (pgno % stride_cur_stride == 0)
+        return stride_val;
+    return (char)((pgno ^ 0x55) & 0xff);
+}
+
+void test_sparse_stride(void)
+{
+    int strides[] = { 2, 4, 8, 16 };
+    char vals[]   = { 0x11, 0x22, 0x33, 0x44 };
+
+    for (int s = 0; s < 4; s++) {
+        printf("test_sparse_stride_%d: ", strides[s]);
+        sparse_create_file();
+
+        int fd = open(sparse_path, O_RDWR);
+        if (fd < 0) { printf("FAIL - open\n"); exit(1); }
+
+        char *m = mmap(0, SPARSE_FILESZ, PROT_READ | PROT_WRITE,
+                       MAP_SHARED, fd, 0);
+        if (m == MAP_FAILED) { printf("FAIL - mmap\n"); close(fd); exit(1); }
+        close(fd);
+
+        for (int p = 0; p < SPARSE_NPAGES; p += strides[s])
+            memset(m + p * SPARSE_PGSIZE, vals[s], SPARSE_PGSIZE);
+
+        munmap(m, SPARSE_FILESZ);
+
+        stride_cur_stride = strides[s];
+        stride_val = vals[s];
+        sparse_verify_file("stride", expect_stride);
+        printf("OK\n");
+    }
+}
+
+/* ────────────────────────────────────────────────────────────────────
+ * Test I: Reverse-order writes — write pages from end to start.
+ *   Every page gets 0x99, but written in descending order to stress
+ *   any ordering assumptions in the writeback path.
+ * ──────────────────────────────────────────────────────────────────── */
+
+static char expect_reverse(int pgno, int byteoff)
+{
+    (void)pgno;
+    (void)byteoff;
+    return (char)0x99;
+}
+
+void test_sparse_reverse_order(void)
+{
+    printf("test_sparse_reverse_order: ");
+    sparse_create_file();
+
+    int fd = open(sparse_path, O_RDWR);
+    if (fd < 0) { printf("FAIL - open\n"); exit(1); }
+
+    char *m = mmap(0, SPARSE_FILESZ, PROT_READ | PROT_WRITE,
+                   MAP_SHARED, fd, 0);
+    if (m == MAP_FAILED) { printf("FAIL - mmap\n"); close(fd); exit(1); }
+    close(fd);
+
+    /* Write pages in reverse order */
+    for (int p = SPARSE_NPAGES - 1; p >= 0; p--)
+        memset(m + p * SPARSE_PGSIZE, 0x99, SPARSE_PGSIZE);
+
+    munmap(m, SPARSE_FILESZ);
+    sparse_verify_file("reverse", expect_reverse);
+    printf("OK\n");
+}
+
 int main(int argc, char *argv[]) {
     printf("mmaptest starting\n");
 
@@ -820,6 +1248,18 @@ int main(int argc, char *argv[]) {
     test_madvise_dontneed();
     test_msync_basic();
 
+    /* Sparse folio writeback tests */
+    test_sparse_first_of_folio();
+    test_sparse_last_of_folio();
+    test_sparse_mid_of_folio();
+    test_sparse_every_other_folio();
+    test_sparse_single_byte_per_page();
+    test_sparse_one_byte_one_page_per_folio();
+    test_sparse_cross_folio_boundary();
+    test_sparse_stride();
+    test_sparse_reverse_order();
+
+    unlink(sparse_path);
     printf("mmaptest: all tests passed\n");
     exit(0);
 }

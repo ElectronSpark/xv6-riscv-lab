@@ -27,7 +27,7 @@
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
 #include <mm/vm.h>
-#include "dev/buf.h"
+#include <mm/buffer_head.h>
 #include "vfs/fs.h"
 #include "../vfs_private.h"
 #include <mm/slab.h>
@@ -67,8 +67,8 @@ static uint __xv6fs_balloc(struct xv6fs_superblock *xv6_sb, uint dev,
             /* Block already removed from cache by find_free_block */
 
             /* Mark in on-disk bitmap */
-            struct buf *bp = bread(dev, BBLOCK_PTR(blockno, disk_sb));
-            if (!bp) {
+            buffer_head_t *bh = sb_bread(xv6_sb, BBLOCK_PTR(blockno, disk_sb));
+            if (!bh) {
                 /* Revert cache state on error */
                 xv6fs_bcache_mark_free(xv6_sb, blockno);
                 return 0;
@@ -76,18 +76,18 @@ static uint __xv6fs_balloc(struct xv6fs_superblock *xv6_sb, uint dev,
 
             int bi = blockno % BPB;
             int m = 1 << (bi & 7);
-            bp->data[bi >> 3] |= m;
-            xv6fs_log_write(xv6_sb, bp);
-            brelse(bp);
+            bh->b_data[bi >> 3] |= m;
+            xv6fs_log_write(xv6_sb, bh);
+            bh_release(bh);
 
             /* Zero the block */
-            struct buf *zbp = bread(dev, blockno);
-            if (!zbp) {
+            buffer_head_t *zbh = sb_bread(xv6_sb, blockno);
+            if (!zbh) {
                 return 0;
             }
-            memset(zbp->data, 0, BSIZE);
-            xv6fs_log_write(xv6_sb, zbp);
-            brelse(zbp);
+            memset(zbh->b_data, 0, BSIZE);
+            xv6fs_log_write(xv6_sb, zbh);
+            bh_release(zbh);
 
             return blockno;
         }
@@ -106,7 +106,7 @@ static uint __xv6fs_balloc(struct xv6fs_superblock *xv6_sb, uint dev,
 static uint __xv6fs_bmap_ind(struct xv6fs_superblock *xv6_sb, uint *entry,
                              uint dev, uint bn, uint hint) {
     uint addr;
-    struct buf *bp;
+    buffer_head_t *bh;
 
     if (*entry == 0) {
         // Allocate indirect block using cache
@@ -116,11 +116,11 @@ static uint __xv6fs_bmap_ind(struct xv6fs_superblock *xv6_sb, uint *entry,
         *entry = addr;
     }
 
-    bp = bread(dev, *entry);
-    if (bp == NULL)
+    bh = sb_bread(xv6_sb, *entry);
+    if (bh == NULL)
         return 0;
 
-    uint *a = (uint *)bp->data;
+    uint *a = (uint *)bh->b_data;
     addr = a[bn];
 
     if (addr == 0) {
@@ -128,24 +128,25 @@ static uint __xv6fs_bmap_ind(struct xv6fs_superblock *xv6_sb, uint *entry,
         uint locality_hint = *entry; // Use indirect block as hint for locality
         addr = __xv6fs_balloc(xv6_sb, dev, locality_hint);
         if (addr == 0) {
-            brelse(bp);
+            bh_release(bh);
             return 0;
         }
 
         a[bn] = addr;
-        xv6fs_log_write(xv6_sb, bp);
+        xv6fs_log_write(xv6_sb, bh);
     }
 
-    brelse(bp);
+    bh_release(bh);
     return addr;
 }
 
 // Read-only bmap - returns 0 if block doesn't exist (for sparse files)
 // Does not allocate any blocks
 uint xv6fs_bmap_read(struct xv6fs_inode *ip, uint bn) {
-    uint dev = ip->dev;
+    struct xv6fs_superblock *xv6_sb =
+        container_of(ip->vfs_inode.sb, struct xv6fs_superblock, vfs_sb);
     uint addr;
-    struct buf *bp;
+    buffer_head_t *bh;
 
     // Direct blocks
     if (bn < XV6FS_NDIRECT) {
@@ -158,11 +159,11 @@ uint xv6fs_bmap_read(struct xv6fs_inode *ip, uint bn) {
         if (ip->addrs[XV6FS_NDIRECT] == 0) {
             return 0;
         }
-        bp = bread(dev, ip->addrs[XV6FS_NDIRECT]);
-        if (bp == NULL)
+        bh = sb_bread(xv6_sb, ip->addrs[XV6FS_NDIRECT]);
+        if (bh == NULL)
             return 0;
-        addr = ((uint *)bp->data)[bn];
-        brelse(bp);
+        addr = ((uint *)bh->b_data)[bn];
+        bh_release(bh);
         return addr;
     }
     bn -= XV6FS_NINDIRECT;
@@ -172,26 +173,26 @@ uint xv6fs_bmap_read(struct xv6fs_inode *ip, uint bn) {
         if (ip->addrs[XV6FS_NDIRECT + 1] == 0) {
             return 0;
         }
-        bp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
-        if (bp == NULL)
+        bh = sb_bread(xv6_sb, ip->addrs[XV6FS_NDIRECT + 1]);
+        if (bh == NULL)
             return 0;
 
         uint l1_idx = bn / XV6FS_NINDIRECT;
         uint l2_idx = bn % XV6FS_NINDIRECT;
-        uint *a = (uint *)bp->data;
+        uint *a = (uint *)bh->b_data;
 
         if (a[l1_idx] == 0) {
-            brelse(bp);
+            bh_release(bh);
             return 0;
         }
         uint l1_addr = a[l1_idx];
-        brelse(bp);
+        bh_release(bh);
 
-        bp = bread(dev, l1_addr);
-        if (bp == NULL)
+        bh = sb_bread(xv6_sb, l1_addr);
+        if (bh == NULL)
             return 0;
-        addr = ((uint *)bp->data)[l2_idx];
-        brelse(bp);
+        addr = ((uint *)bh->b_data)[l2_idx];
+        bh_release(bh);
         return addr;
     }
 
@@ -203,7 +204,7 @@ uint xv6fs_bmap(struct xv6fs_inode *ip, uint bn) {
         container_of(ip->vfs_inode.sb, struct xv6fs_superblock, vfs_sb);
     uint dev = ip->dev;
     uint addr;
-    struct buf *bp;
+    buffer_head_t *bh;
 
     /* Get hint for locality: use last allocated block if any */
     uint hint = 0;
@@ -244,20 +245,20 @@ uint xv6fs_bmap(struct xv6fs_inode *ip, uint bn) {
             ip->addrs[XV6FS_NDIRECT + 1] = addr;
         }
 
-        bp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
-        if (bp == NULL)
+        bh = sb_bread(xv6_sb, ip->addrs[XV6FS_NDIRECT + 1]);
+        if (bh == NULL)
             return 0;
 
         uint l1_idx = bn / XV6FS_NINDIRECT;
         uint l2_idx = bn % XV6FS_NINDIRECT;
-        uint *a = (uint *)bp->data;
+        uint *a = (uint *)bh->b_data;
 
         addr = __xv6fs_bmap_ind(xv6_sb, &a[l1_idx], dev, l2_idx,
                                 ip->addrs[XV6FS_NDIRECT + 1]);
         if (a[l1_idx] != 0) {
-            xv6fs_log_write(xv6_sb, bp);
+            xv6fs_log_write(xv6_sb, bh);
         }
-        brelse(bp);
+        bh_release(bh);
         return addr;
     }
 
@@ -272,14 +273,14 @@ uint xv6fs_bmap(struct xv6fs_inode *ip, uint bn) {
 // Free a block
 static void __xv6fs_bfree(struct xv6fs_superblock *xv6_sb, uint dev, uint b) {
     struct superblock *disk_sb = &xv6_sb->disk_sb;
-    struct buf *bp = bread(dev, BBLOCK_PTR(b, disk_sb));
+    buffer_head_t *bh = sb_bread(xv6_sb, BBLOCK_PTR(b, disk_sb));
     int bi = b % BPB;
     int m = 1 << (bi & 7);
-    if ((bp->data[bi >> 3] & m) == 0)
+    if ((bh->b_data[bi >> 3] & m) == 0)
         panic("xv6fs_bfree: freeing free block");
-    bp->data[bi >> 3] &= ~m;
-    xv6fs_log_write(xv6_sb, bp);
-    brelse(bp);
+    bh->b_data[bi >> 3] &= ~m;
+    xv6fs_log_write(xv6_sb, bh);
+    bh_release(bh);
 
     /* Update the block cache */
     xv6fs_bcache_mark_free(xv6_sb, b);
@@ -293,8 +294,8 @@ static int __xv6fs_itrunc_ind_partial(struct xv6fs_superblock *xv6_sb,
     if (*entry == 0)
         return 0;
 
-    struct buf *bp = bread(dev, *entry);
-    uint *a = (uint *)bp->data;
+    buffer_head_t *bh = sb_bread(xv6_sb, *entry);
+    uint *a = (uint *)bh->b_data;
     int freed = 0;
 
     for (uint j = start_idx; j < XV6FS_NINDIRECT; j++) {
@@ -306,9 +307,9 @@ static int __xv6fs_itrunc_ind_partial(struct xv6fs_superblock *xv6_sb,
     }
 
     if (freed > 0) {
-        xv6fs_log_write(xv6_sb, bp);
+        xv6fs_log_write(xv6_sb, bh);
     }
-    brelse(bp);
+    bh_release(bh);
 
     // If we freed from the beginning, free the indirect block itself
     if (start_idx == 0) {
@@ -361,8 +362,8 @@ void xv6fs_itrunc(struct xv6fs_inode *ip) {
 
     // Free indirect blocks
     if (ip->addrs[XV6FS_NDIRECT]) {
-        struct buf *bp = bread(dev, ip->addrs[XV6FS_NDIRECT]);
-        uint *a = (uint *)bp->data;
+        buffer_head_t *bh = sb_bread(xv6_sb, ip->addrs[XV6FS_NDIRECT]);
+        uint *a = (uint *)bh->b_data;
 
         for (uint j = 0; j < XV6FS_NINDIRECT; j++) {
             if (a[j]) {
@@ -371,19 +372,19 @@ void xv6fs_itrunc(struct xv6fs_inode *ip) {
                 freed_this_batch++;
 
                 if (freed_this_batch >= ITRUNC_BATCH_SIZE) {
-                    xv6fs_log_write(xv6_sb, bp);
-                    brelse(bp);
+                    xv6fs_log_write(xv6_sb, bh);
+                    bh_release(bh);
                     xv6fs_iupdate(ip);
                     xv6fs_end_op(xv6_sb);
                     xv6fs_begin_op_nointr(xv6_sb);
                     freed_this_batch = 0;
-                    bp = bread(dev, ip->addrs[XV6FS_NDIRECT]);
-                    a = (uint *)bp->data;
+                    bh = sb_bread(xv6_sb, ip->addrs[XV6FS_NDIRECT]);
+                    a = (uint *)bh->b_data;
                 }
             }
         }
-        xv6fs_log_write(xv6_sb, bp);
-        brelse(bp);
+        xv6fs_log_write(xv6_sb, bh);
+        bh_release(bh);
         __xv6fs_bfree(xv6_sb, dev, ip->addrs[XV6FS_NDIRECT]);
         ip->addrs[XV6FS_NDIRECT] = 0;
         freed_this_batch++;
@@ -398,13 +399,13 @@ void xv6fs_itrunc(struct xv6fs_inode *ip) {
 
     // Free double indirect blocks
     if (ip->addrs[XV6FS_NDIRECT + 1]) {
-        struct buf *dbp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
-        uint *da = (uint *)dbp->data;
+        buffer_head_t *dbh = sb_bread(xv6_sb, ip->addrs[XV6FS_NDIRECT + 1]);
+        uint *da = (uint *)dbh->b_data;
 
         for (int j = 0; j < XV6FS_NINDIRECT; j++) {
             if (da[j]) {
-                struct buf *bp = bread(dev, da[j]);
-                uint *a = (uint *)bp->data;
+                buffer_head_t *bh = sb_bread(xv6_sb, da[j]);
+                uint *a = (uint *)bh->b_data;
 
                 for (uint k = 0; k < XV6FS_NINDIRECT; k++) {
                     if (a[k]) {
@@ -413,41 +414,41 @@ void xv6fs_itrunc(struct xv6fs_inode *ip) {
                         freed_this_batch++;
 
                         if (freed_this_batch >= ITRUNC_BATCH_SIZE) {
-                            xv6fs_log_write(xv6_sb, bp);
-                            brelse(bp);
-                            xv6fs_log_write(xv6_sb, dbp);
-                            brelse(dbp);
+                            xv6fs_log_write(xv6_sb, bh);
+                            bh_release(bh);
+                            xv6fs_log_write(xv6_sb, dbh);
+                            bh_release(dbh);
                             xv6fs_iupdate(ip);
                             xv6fs_end_op(xv6_sb);
                             xv6fs_begin_op_nointr(xv6_sb);
                             freed_this_batch = 0;
-                            dbp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
-                            da = (uint *)dbp->data;
-                            bp = bread(dev, da[j]);
-                            a = (uint *)bp->data;
+                            dbh = sb_bread(xv6_sb, ip->addrs[XV6FS_NDIRECT + 1]);
+                            da = (uint *)dbh->b_data;
+                            bh = sb_bread(xv6_sb, da[j]);
+                            a = (uint *)bh->b_data;
                         }
                     }
                 }
-                xv6fs_log_write(xv6_sb, bp);
-                brelse(bp);
+                xv6fs_log_write(xv6_sb, bh);
+                bh_release(bh);
                 __xv6fs_bfree(xv6_sb, dev, da[j]);
                 da[j] = 0;
                 freed_this_batch++;
 
                 if (freed_this_batch >= ITRUNC_BATCH_SIZE) {
-                    xv6fs_log_write(xv6_sb, dbp);
-                    brelse(dbp);
+                    xv6fs_log_write(xv6_sb, dbh);
+                    bh_release(dbh);
                     xv6fs_iupdate(ip);
                     xv6fs_end_op(xv6_sb);
                     xv6fs_begin_op_nointr(xv6_sb);
                     freed_this_batch = 0;
-                    dbp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
-                    da = (uint *)dbp->data;
+                    dbh = sb_bread(xv6_sb, ip->addrs[XV6FS_NDIRECT + 1]);
+                    da = (uint *)dbh->b_data;
                 }
             }
         }
-        xv6fs_log_write(xv6_sb, dbp);
-        brelse(dbp);
+        xv6fs_log_write(xv6_sb, dbh);
+        bh_release(dbh);
         __xv6fs_bfree(xv6_sb, dev, ip->addrs[XV6FS_NDIRECT + 1]);
         ip->addrs[XV6FS_NDIRECT + 1] = 0;
     }
@@ -488,15 +489,15 @@ static int __xv6fs_truncate_partial(struct xv6fs_inode *ip, uint first_block) {
     if (first_block <= dind_threshold) {
         // All double indirect blocks need to be freed
         if (ip->addrs[XV6FS_NDIRECT + 1]) {
-            struct buf *bp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
-            uint *a = (uint *)bp->data;
+            buffer_head_t *bh = sb_bread(xv6_sb, ip->addrs[XV6FS_NDIRECT + 1]);
+            uint *a = (uint *)bh->b_data;
 
             for (uint j = 0; j < XV6FS_NINDIRECT; j++) {
                 if (a[j]) {
                     __xv6fs_itrunc_ind(xv6_sb, &a[j], dev);
                 }
             }
-            brelse(bp);
+            bh_release(bh);
             __xv6fs_bfree(xv6_sb, dev, ip->addrs[XV6FS_NDIRECT + 1]);
             ip->addrs[XV6FS_NDIRECT + 1] = 0;
         }
@@ -507,8 +508,8 @@ static int __xv6fs_truncate_partial(struct xv6fs_inode *ip, uint first_block) {
             uint l1_start = rel_block / XV6FS_NINDIRECT;
             uint l2_start = rel_block % XV6FS_NINDIRECT;
 
-            struct buf *bp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
-            uint *a = (uint *)bp->data;
+            buffer_head_t *bh = sb_bread(xv6_sb, ip->addrs[XV6FS_NDIRECT + 1]);
+            uint *a = (uint *)bh->b_data;
             bool modified = false;
 
             // Handle partial first L1 entry
@@ -526,13 +527,13 @@ static int __xv6fs_truncate_partial(struct xv6fs_inode *ip, uint first_block) {
             }
 
             if (modified) {
-                xv6fs_log_write(xv6_sb, bp);
+                xv6fs_log_write(xv6_sb, bh);
             }
-            brelse(bp);
+            bh_release(bh);
 
             // Check if all L1 entries are now zero, free the dind block
-            bp = bread(dev, ip->addrs[XV6FS_NDIRECT + 1]);
-            a = (uint *)bp->data;
+            bh = sb_bread(xv6_sb, ip->addrs[XV6FS_NDIRECT + 1]);
+            a = (uint *)bh->b_data;
             bool all_zero = true;
             for (uint j = 0; j < XV6FS_NINDIRECT; j++) {
                 if (a[j]) {
@@ -540,7 +541,7 @@ static int __xv6fs_truncate_partial(struct xv6fs_inode *ip, uint first_block) {
                     break;
                 }
             }
-            brelse(bp);
+            bh_release(bh);
 
             if (all_zero) {
                 __xv6fs_bfree(xv6_sb, dev, ip->addrs[XV6FS_NDIRECT + 1]);

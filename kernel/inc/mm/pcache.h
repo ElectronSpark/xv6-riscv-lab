@@ -6,14 +6,21 @@
 void pcache_global_init(void);
 int pcache_init(struct pcache *pcache);
 void pcache_teardown(struct pcache *pcache);
+
+/* ── Folio-based page cache API ──────────────────────────────────────── */
+
+folio_t *pcache_get_folio(struct pcache *pcache, uint64 blkno);
+void pcache_put_folio(struct pcache *pcache, folio_t *folio);
+int pcache_read_folio(struct pcache *pcache, folio_t *folio);
+int pcache_mark_folio_dirty(struct pcache *pcache, folio_t *folio);
+
+/* ── Legacy page-based API (thin wrappers around folio API) ──────────── */
+
 page_t *pcache_get_page(struct pcache *pcache, uint64 blkno);
 void pcache_put_page(struct pcache *pcache, page_t *page);
 int pcache_invalidate_page(struct pcache *pcache, page_t *page);
 int pcache_flush(struct pcache *pcache);
 int pcache_sync(void);
-// void pcache_destroy(struct pcache *pcache);
-// int pcache_evict_pages(struct pcache *pcache, size_t target_size);
-// @TODO: do eviction in OOM
 int pcache_read_page(struct pcache *pcache, page_t *page);
 int pcache_prepare_write_page(struct pcache *pcache, page_t *page);
 int pcache_mark_page_dirty(struct pcache *pcache, page_t *page);

@@ -14,6 +14,7 @@
 #include "string.h"
 #include "printf.h"
 #include <mm/page.h>
+#include <mm/folio.h>
 #include <mm/slab.h>
 #include <dev/bio.h>
 #include <dev/blkdev.h>
@@ -126,7 +127,7 @@ int gendisk_read_sectors(blkdev_t *bdev, uint64 blkno, page_t *page,
         return -ENOMEM;
 
     bio->blkno = blkno;
-    int ret = bio_add_seg(bio, page, 0, len, offset);
+    int ret = bio_add_folio(bio, page_folio(page), len, offset);
     if (ret != 0) {
         bio_release(bio);
         return ret;

@@ -24,7 +24,7 @@
 #include "errno.h"
 #include "lock/mutex_types.h"
 #include <mm/vm.h>
-#include "dev/buf.h"
+#include <mm/buffer_head.h>
 #include "vfs/fs.h"
 #include "../vfs_private.h"
 #include <mm/slab.h>
@@ -39,8 +39,8 @@ void xv6fs_iupdate(struct xv6fs_inode *ip) {
         container_of(ip->vfs_inode.sb, struct xv6fs_superblock, vfs_sb);
     struct superblock *disk_sb = &xv6_sb->disk_sb;
 
-    struct buf *bp = bread(ip->dev, XV6FS_IBLOCK(ip->vfs_inode.ino, disk_sb));
-    struct dinode *dip = (struct dinode *)bp->data + ip->vfs_inode.ino % IPB;
+    buffer_head_t *bh = sb_bread(xv6_sb, XV6FS_IBLOCK(ip->vfs_inode.ino, disk_sb));
+    struct dinode *dip = (struct dinode *)bh->b_data + ip->vfs_inode.ino % IPB;
 
     dip->type = xv6fs_mode_to_type(ip->vfs_inode.mode);
     dip->major = ip->major;
@@ -49,8 +49,8 @@ void xv6fs_iupdate(struct xv6fs_inode *ip) {
     dip->size = ip->vfs_inode.size;
     memmove(dip->addrs, ip->addrs, sizeof(ip->addrs));
 
-    xv6fs_log_write(xv6_sb, bp);
-    brelse(bp);
+    xv6fs_log_write(xv6_sb, bh);
+    bh_release(bh);
 }
 
 int xv6fs_sync_inode(struct vfs_inode *inode) {
@@ -91,6 +91,8 @@ int xv6fs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
     }
 
     struct xv6fs_inode *dp = container_of(dir, struct xv6fs_inode, vfs_inode);
+    struct xv6fs_superblock *xv6_sb =
+        container_of(dir->sb, struct xv6fs_superblock, vfs_sb);
     struct dirent de;
 
     // Search through directory entries
@@ -102,12 +104,12 @@ int xv6fs_lookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         if (addr == 0)
             continue;
 
-        struct buf *bp = bread(dp->dev, addr);
-        if (bp == NULL)
+        buffer_head_t *bh = sb_bread(xv6_sb, addr);
+        if (bh == NULL)
             continue;
 
-        memmove(&de, bp->data + block_off, sizeof(de));
-        brelse(bp);
+        memmove(&de, bh->b_data + block_off, sizeof(de));
+        bh_release(bh);
 
         if (de.inum == 0)
             continue;
@@ -142,6 +144,8 @@ int xv6fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
     }
 
     struct xv6fs_inode *dp = container_of(dir, struct xv6fs_inode, vfs_inode);
+    struct xv6fs_superblock *xv6_sb =
+        container_of(dir->sb, struct xv6fs_superblock, vfs_sb);
     struct dirent de;
     char *name = NULL;
 
@@ -159,12 +163,12 @@ int xv6fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
             if (addr == 0)
                 continue;
 
-            struct buf *bp = bread(dp->dev, addr);
-            if (bp == NULL)
+            buffer_head_t *bh = sb_bread(xv6_sb, addr);
+            if (bh == NULL)
                 continue;
 
-            memmove(&de, bp->data + block_off, sizeof(de));
-            brelse(bp);
+            memmove(&de, bh->b_data + block_off, sizeof(de));
+            bh_release(bh);
 
             if (de.inum == 0)
                 continue;
@@ -196,12 +200,12 @@ int xv6fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         if (addr == 0)
             continue;
 
-        struct buf *bp = bread(dp->dev, addr);
-        if (bp == NULL)
+        buffer_head_t *bh = sb_bread(xv6_sb, addr);
+        if (bh == NULL)
             continue;
 
-        memmove(&de, bp->data + block_off, sizeof(de));
-        brelse(bp);
+        memmove(&de, bh->b_data + block_off, sizeof(de));
+        bh_release(bh);
 
         if (de.inum == 0)
             continue;
@@ -249,6 +253,8 @@ int xv6fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
  * when attempting to create an entry with an existing name.
  */
 static uint __xv6fs_dir_name_exists(struct xv6fs_inode *dp, const char *name) {
+    struct xv6fs_superblock *xv6_sb =
+        container_of(dp->vfs_inode.sb, struct xv6fs_superblock, vfs_sb);
     struct dirent de;
     for (uint off = 0; off < dp->vfs_inode.size; off += sizeof(de)) {
         uint bn = off / BSIZE;
@@ -257,9 +263,9 @@ static uint __xv6fs_dir_name_exists(struct xv6fs_inode *dp, const char *name) {
         if (addr == 0)
             continue;
 
-        struct buf *bp = bread(dp->dev, addr);
-        memmove(&de, bp->data + block_off, sizeof(de));
-        brelse(bp);
+        buffer_head_t *bh = sb_bread(xv6_sb, addr);
+        memmove(&de, bh->b_data + block_off, sizeof(de));
+        bh_release(bh);
 
         if (de.inum != 0 && strncmp(de.name, name, DIRSIZ) == 0) {
             return de.inum;
@@ -283,9 +289,9 @@ static int __xv6fs_dirlink(struct xv6fs_superblock *xv6_sb,
         if (addr == 0)
             continue;
 
-        struct buf *bp = bread(dp->dev, addr);
-        memmove(&de, bp->data + block_off, sizeof(de));
-        brelse(bp);
+        buffer_head_t *bh = sb_bread(xv6_sb, addr);
+        memmove(&de, bh->b_data + block_off, sizeof(de));
+        bh_release(bh);
 
         if (de.inum == 0) {
             goto found;
@@ -305,10 +311,10 @@ found:
     if (addr == 0)
         return -ENOSPC;
 
-    struct buf *bp = bread(dp->dev, addr);
-    memmove(bp->data + block_off, &de, sizeof(de));
-    xv6fs_log_write(xv6_sb, bp);
-    brelse(bp);
+    buffer_head_t *bh = sb_bread(xv6_sb, addr);
+    memmove(bh->b_data + block_off, &de, sizeof(de));
+    xv6fs_log_write(xv6_sb, bh);
+    bh_release(bh);
 
     if (off >= dp->vfs_inode.size) {
         dp->vfs_inode.size = off + sizeof(de);
@@ -342,9 +348,9 @@ struct vfs_inode *xv6fs_create(struct vfs_inode *dir, mode_t mode,
         if (addr == 0)
             continue;
 
-        struct buf *bp = bread(dp->dev, addr);
-        memmove(&de, bp->data + block_off, sizeof(de));
-        brelse(bp);
+        buffer_head_t *bh = sb_bread(xv6_sb, addr);
+        memmove(&de, bh->b_data + block_off, sizeof(de));
+        bh_release(bh);
 
         if (de.inum != 0 && strncmp(de.name, name_buf, DIRSIZ) == 0) {
             existing_ino = de.inum;
@@ -471,9 +477,9 @@ int xv6fs_unlink(struct vfs_dentry *dentry, struct vfs_inode *target) {
         if (addr == 0)
             continue;
 
-        struct buf *bp = bread(dp->dev, addr);
-        memmove(&de, bp->data + block_off, sizeof(de));
-        brelse(bp);
+        buffer_head_t *bh = sb_bread(xv6_sb, addr);
+        memmove(&de, bh->b_data + block_off, sizeof(de));
+        bh_release(bh);
 
         if (de.inum == 0)
             continue;
@@ -487,10 +493,10 @@ int xv6fs_unlink(struct vfs_dentry *dentry, struct vfs_inode *target) {
 
             memset(&de, 0, sizeof(de));
 
-            bp = bread(dp->dev, addr);
-            memmove(bp->data + block_off, &de, sizeof(de));
-            xv6fs_log_write(xv6_sb, bp);
-            brelse(bp);
+            bh = sb_bread(xv6_sb, addr);
+            memmove(bh->b_data + block_off, &de, sizeof(de));
+            xv6fs_log_write(xv6_sb, bh);
+            bh_release(bh);
 
             // inode is already locked by vfs_get_inode
             target->n_links--;
@@ -576,6 +582,8 @@ ssize_t xv6fs_readlink(struct vfs_inode *inode, char *buf, size_t buflen) {
     }
 
     struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
+    struct xv6fs_superblock *xv6_sb =
+        container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
     size_t link_len = inode->size;
 
     if (link_len + 1 > buflen) {
@@ -597,12 +605,12 @@ ssize_t xv6fs_readlink(struct vfs_inode *inode, char *buf, size_t buflen) {
             return -EIO;
         }
 
-        struct buf *bp = bread(ip->dev, addr);
-        if (bp == NULL) {
+        buffer_head_t *bh = sb_bread(xv6_sb, addr);
+        if (bh == NULL) {
             return -EIO;
         }
-        memmove(buf + bytes_read, bp->data + off, n);
-        brelse(bp);
+        memmove(buf + bytes_read, bh->b_data + off, n);
+        bh_release(bh);
 
         bytes_read += n;
     }
@@ -664,15 +672,15 @@ struct vfs_inode *xv6fs_symlink(struct vfs_inode *dir, mode_t mode,
             return ERR_PTR(-ENOSPC);
         }
 
-        struct buf *bp = bread(ip->dev, addr);
-        if (bp == NULL) {
+        buffer_head_t *bh = sb_bread(xv6_sb, addr);
+        if (bh == NULL) {
             xv6fs_itrunc(ip);
             vfs_iunlock(new_inode);
             return ERR_PTR(-EIO);
         }
-        memmove(bp->data + off, target + bytes_written, n);
-        xv6fs_log_write(xv6_sb, bp);
-        brelse(bp);
+        memmove(bh->b_data + off, target + bytes_written, n);
+        xv6fs_log_write(xv6_sb, bh);
+        bh_release(bh);
 
         bytes_written += n;
     }
@@ -778,11 +786,11 @@ void xv6fs_destroy_inode(struct vfs_inode *inode) {
     xv6fs_itrunc(ip);
 
     // Mark inode as free on disk
-    struct buf *bp = bread(ip->dev, XV6FS_IBLOCK(inode->ino, &xv6_sb->disk_sb));
-    struct dinode *dip = (struct dinode *)bp->data + inode->ino % IPB;
+    buffer_head_t *bh = sb_bread(xv6_sb, XV6FS_IBLOCK(inode->ino, &xv6_sb->disk_sb));
+    struct dinode *dip = (struct dinode *)bh->b_data + inode->ino % IPB;
     dip->type = 0;
-    xv6fs_log_write(xv6_sb, bp);
-    brelse(bp);
+    xv6fs_log_write(xv6_sb, bh);
+    bh_release(bh);
 }
 
 void xv6fs_free_inode(struct vfs_inode *inode) {

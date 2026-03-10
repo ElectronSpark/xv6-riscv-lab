@@ -17,6 +17,7 @@
 #include "dev/blkdev.h"
 #include "ext4fs_private.h"
 #include <mm/page.h>
+#include <mm/folio.h>
 #include <errno.h>
 
 #include <ext4_errno.h>
@@ -103,7 +104,7 @@ static int ext4fs_blockdev_bread(struct ext4_blockdev *bdev, void *buf,
         bio->blkno = blk_id + done;
         int ret = 0;
         for (int16 i = 0; i < nr_pages; i++) {
-            ret = bio_add_seg(bio, pages[i], i, seg_bytes[i], 0);
+            ret = bio_add_folio(bio, page_folio(pages[i]), seg_bytes[i], 0);
             if (ret != 0) {
                 bio_release(bio);
                 goto read_fail;
@@ -190,7 +191,7 @@ static int ext4fs_blockdev_bwrite(struct ext4_blockdev *bdev, const void *buf,
         bio->blkno = blk_id + done;
         int ret = 0;
         for (int16 i = 0; i < nr_pages; i++) {
-            ret = bio_add_seg(bio, pages[i], i, seg_bytes[i], 0);
+            ret = bio_add_folio(bio, page_folio(pages[i]), seg_bytes[i], 0);
             if (ret != 0) {
                 bio_release(bio);
                 goto write_fail;

@@ -7,13 +7,14 @@
 #include <dev/blkdev.h>
 #include <dev/bio.h>
 #include <mm/page.h>
+#include <mm/folio.h>
 #include <errno.h>
 #include <mm/vm.h>
 
 static void __bio_relase_kobj_cb(struct kobject *obj) {
     struct bio *bio = container_of(obj, struct bio, kobj);
     /*
-     * bio_add_seg does NOT take a page reference, so we must NOT
+     * __bio_add_seg does NOT take a page reference, so we must NOT
      * decrement page refs here.  Page lifetime is the caller's
      * responsibility.
      */
@@ -45,8 +46,8 @@ struct bio *bio_alloc(blkdev_t *bdev, int16 vec_length, bool rw,
     return bio;
 }
 
-int bio_add_seg(struct bio *bio, page_t *page, int16 idx, uint16 len,
-                uint16 offset) {
+static int __bio_add_seg(struct bio *bio, page_t *page, int16 idx, uint16 len,
+                        uint16 offset) {
     if (bio == NULL || page == NULL || len == 0) {
         return -EINVAL; // Invalid arguments
     }
@@ -68,6 +69,42 @@ int bio_add_seg(struct bio *bio, page_t *page, int16 idx, uint16 len,
     bio->bvecs[idx].len = len;
     bio->bvecs[idx].offset = offset;
     bio->size = total_size;
+    return 0;
+}
+
+int bio_add_folio(struct bio *bio, folio_t *folio, uint16 len, uint16 offset) {
+    if (bio == NULL || folio == NULL || len == 0)
+        return -EINVAL;
+
+    page_t *head = &folio->page;
+    uint16 remaining = len;
+    uint16 off = offset;
+
+    while (remaining > 0) {
+        unsigned int page_idx = off / PGSIZE;
+        uint16 page_off  = off % PGSIZE;
+        uint16 seg_len   = PGSIZE - page_off;
+        if (seg_len > remaining)
+            seg_len = remaining;
+
+        /* Find next free bvec slot */
+        int slot = -1;
+        for (int i = 0; i < bio->vec_length; i++) {
+            if (bio->bvecs[i].bv_page == NULL) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0)
+            return -ENOSPC;
+
+        int ret = __bio_add_seg(bio, &head[page_idx], slot, seg_len, page_off);
+        if (ret != 0)
+            return ret;
+
+        off       += seg_len;
+        remaining -= seg_len;
+    }
     return 0;
 }
 

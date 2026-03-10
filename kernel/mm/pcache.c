@@ -8,6 +8,7 @@
 #include "defs.h"
 #include "printf.h"
 #include <mm/page.h>
+#include <mm/folio.h>
 #include "list.h"
 #include "proc/sched.h"
 #include "proc/thread.h"
@@ -59,6 +60,12 @@ static bool __global_flusher_running = false;
 #define PCACHE_ALIGN_BLKNO(blkno) ((blkno) & ~PCACHE_BLK_MASK)
 #define PCACHE_PAGE_INDEX(blkno) ((blkno) / PCACHE_BLKS_PER_PAGE)
 
+/*
+ * Default folio order for page-cache readahead allocations.
+ * Order 2 = 4 pages = 16 KB.  Falls back to order 0 on OOM.
+ */
+#define PCACHE_FOLIO_ORDER 2
+
 /******************************************************************************
  * Predefine functions
  *****************************************************************************/
@@ -106,8 +113,10 @@ static int __pcache_write_page(struct pcache *pcache, page_t *page);
 static int __pcache_read_page(struct pcache *pcache, page_t *page);
 static void __pcache_mark_dirty(struct pcache *pcache, page_t *page);
 
+#ifdef HOST_TEST
 static void __pcache_tree_lock(struct pcache *pcache);
 static void __pcache_tree_unlock(struct pcache *pcache);
+#endif
 static void __pcache_spin_lock(struct pcache *pcache);
 static void __pcache_spin_unlock(struct pcache *pcache);
 static void __pcache_spin_assert_holding(struct pcache *pcache);
@@ -127,12 +136,20 @@ static void __pcache_global_unlock(void);
  * Helper functions to call optional pcache operations
  *****************************************************************************/
 static int __pcache_read_page(struct pcache *pcache, page_t *page) {
+    if (pcache->ops->read_folio) {
+        folio_t *folio = page_folio(page);
+        return pcache->ops->read_folio(pcache, folio);
+    }
     assert(pcache->ops && pcache->ops->read_page,
            "__pcache_read_page: read_page operation not defined");
     return pcache->ops->read_page(pcache, page);
 }
 
 static int __pcache_write_page(struct pcache *pcache, page_t *page) {
+    if (pcache->ops->write_folio) {
+        folio_t *folio = page_folio(page);
+        return pcache->ops->write_folio(pcache, folio);
+    }
     assert(pcache->ops && pcache->ops->write_page,
            "__pcache_write_page: write_page operation not defined");
     return pcache->ops->write_page(pcache, page);
@@ -669,20 +686,31 @@ static page_t *__pcache_find_and_pin_page(struct pcache *pcache,
 
 static struct pcache_node *__pcache_insert_node(struct pcache *pcache,
                                                 struct pcache_node *pcnode) {
-    uint64 idx = PCACHE_PAGE_INDEX(pcnode->blkno);
-    void *old = xa_store(&pcache->page_map, idx, pcnode, 0);
-    if (old == XA_ZERO_ENTRY) {
-        /* Allocation failure inside xa_store — treat as conflict. */
-        return NULL;
-    }
-    if (old != NULL && old != pcnode) {
-        /* Another entry already existed at this index — restore it. */
-        xa_store(&pcache->page_map, idx, old, 0);
-        return (struct pcache_node *)old;
+    uint64 base_idx = PCACHE_PAGE_INDEX(pcnode->blkno);
+    unsigned long nr = pcnode->page_count;
+
+    /* Store this pcache_node at every xarray index it covers. */
+    for (unsigned long i = 0; i < nr; i++) {
+        uint64 idx = base_idx + i;
+        void *old = xa_store(&pcache->page_map, idx, pcnode, 0);
+        if (old == XA_ZERO_ENTRY) {
+            /* Allocation failure — rollback previous stores. */
+            for (unsigned long j = 0; j < i; j++)
+                xa_erase(&pcache->page_map, base_idx + j);
+            return NULL;
+        }
+        if (old != NULL && old != pcnode) {
+            /* Conflict with an existing entry — rollback and report. */
+            xa_store(&pcache->page_map, idx, old, 0);
+            for (unsigned long j = 0; j < i; j++)
+                xa_erase(&pcache->page_map, base_idx + j);
+            return (struct pcache_node *)old;
+        }
     }
     return pcnode;
 }
 
+#ifdef HOST_TEST
 static void __pcache_tree_lock(struct pcache *pcache) {
     xa_lock(&pcache->page_map);
 }
@@ -690,6 +718,7 @@ static void __pcache_tree_lock(struct pcache *pcache) {
 static void __pcache_tree_unlock(struct pcache *pcache) {
     xa_unlock(&pcache->page_map);
 }
+#endif
 
 static void __pcache_spin_lock(struct pcache *pcache) {
     spin_lock(&pcache->spinlock);
@@ -753,7 +782,7 @@ static page_t *__pcache_get_page(struct pcache *pcache, uint64 blkno,
     return found_node->page;
 }
 
-// Remove a pcache_node from xarray
+// Remove a pcache_node from xarray (handles multi-page folios)
 static void __pcache_remove_node(struct pcache *pcache, page_t *page) {
     page_lock_assert_holding(page);
 
@@ -765,12 +794,18 @@ static void __pcache_remove_node(struct pcache *pcache, page_t *page) {
     assert(LIST_NODE_IS_DETACHED(pcnode, lru_entry),
            "__pcache_remove_node: pcache node must be detached from lru or "
            "dirty list before removal");
-    // Remove from xarray
-    void *removed = xa_erase(&pcache->page_map,
-                             PCACHE_PAGE_INDEX(pcnode->blkno));
-    assert(
-        removed == pcnode,
-        "__pcache_remove_node: removed entry does not match the pcache node");
+
+    uint64 base_idx = PCACHE_PAGE_INDEX(pcnode->blkno);
+    unsigned long nr = pcnode->page_count;
+
+    // Erase all xarray indices covered by this folio
+    for (unsigned long i = 0; i < nr; i++) {
+        void *removed = xa_erase(&pcache->page_map, base_idx + i);
+        assert(removed == pcnode,
+               "__pcache_remove_node: removed entry does not match "
+               "the pcache node at index %lu",
+               (unsigned long)(base_idx + i));
+    }
 }
 
 /******************************************************************************
@@ -782,6 +817,8 @@ static void __pcache_node_init(struct pcache_node *node) {
     tq_init(&node->io_waiters, "pcache_io", NULL);
     node->blkno = -1;
     node->page_count = 0;
+    node->order = 0;
+    node->folio = NULL;
 }
 
 static page_t *__pcache_page_alloc(void) {
@@ -796,10 +833,52 @@ static page_t *__pcache_page_alloc(void) {
         return NULL;
     }
 
+    folio_t *folio = (folio_t *)page;
     __pcache_node_init(pcnode);
+    pcnode->folio = folio;
     pcnode->page = page;
     pcnode->page_count = 1;
+    pcnode->order = 0;
     pcnode->size = PGSIZE;
+    pcnode->data = (void *)__page_to_pa(page);
+
+    page->pcache.pcache_node = pcnode;
+    page->pcache.pcache = NULL;
+
+    return page;
+}
+
+/**
+ * __pcache_folio_alloc - allocate a compound pcache page of given order.
+ *
+ * On success returns the head page with a freshly-initialised pcache_node
+ * whose order/page_count/size reflect the compound page.
+ * Falls back to order-0 on OOM for the larger order.
+ * Returns NULL if even order-0 allocation fails.
+ */
+static page_t *__pcache_folio_alloc(unsigned int order) {
+    if (order == 0)
+        return __pcache_page_alloc();
+
+    struct pcache_node *pcnode = slab_alloc(&__pcache_node_slab);
+    if (pcnode == NULL)
+        return NULL;
+
+    page_t *page = __page_alloc(order, PAGE_TYPE_PCACHE);
+    if (page == NULL) {
+        /* Fall back to order-0. */
+        slab_free(pcnode);
+        return __pcache_page_alloc();
+    }
+
+    unsigned long nr = 1UL << order;
+    folio_t *folio = (folio_t *)page;
+    __pcache_node_init(pcnode);
+    pcnode->folio = folio;
+    pcnode->page = page;
+    pcnode->page_count = nr;
+    pcnode->order = order;
+    pcnode->size = nr * PGSIZE;
     pcnode->data = (void *)__page_to_pa(page);
 
     page->pcache.pcache_node = pcnode;
@@ -843,8 +922,8 @@ static void __pcache_node_attach_page(struct pcache *pcache, page_t *page) {
                                  "not point to the given page");
     assert(pcnode->pcache == NULL, "__pcache_node_attach_page: pcache_node's "
                                    "pcache must be NULL before attaching");
-    pcnode->page_count =
-        1; // @TODO: currently only support one page per pcache_node
+    /* page_count is already set correctly by __pcache_folio_alloc /
+     * __pcache_page_alloc — do not overwrite it. */
     pcnode->pcache = pcache;
     page->pcache.pcache = pcache;
     page->pcache.pcache_node = pcnode;
@@ -1157,6 +1236,14 @@ void pcache_teardown(struct pcache *pcache) {
     }
     __pcache_spin_unlock(pcache);
 
+    /* 2b. Flush any remaining dirty pages to disk while the pcache is
+     *     still active.  The pcache has been removed from the global
+     *     flusher list (step 1) so no automatic periodic flush will
+     *     fire, but mmap writeback (MAP_SHARED munmap) may have queued
+     *     dirty pages that have not been written out yet.  pcache_flush()
+     *     is a no-op when there are no dirty pages. */
+    pcache_flush(pcache);
+
     /* 3. Mark inactive so no new get_page / flush can be scheduled. */
     __pcache_spin_lock(pcache);
     pcache->active = 0;
@@ -1186,9 +1273,16 @@ void pcache_teardown(struct pcache *pcache) {
     __pcache_spin_unlock(pcache);
 
     /* 5. Drain remaining xarray nodes (dirty pages that weren't on LRU,
-     *    or any other leftovers). */
+     *    or any other leftovers).
+     *
+     *    Multi-page folios store the same pcache_node pointer at every
+     *    xarray index they cover.  We must erase all of a node's indices
+     *    when we first encounter it so we don't slab_free the same object
+     *    twice. */
     __pcache_spin_lock(pcache);
-    __pcache_tree_lock(pcache);
+    /* xa_for_each uses RCU internally and must NOT be called with
+     * xa_lock held.  xa_erase takes xa_lock internally per-call, which
+     * is safe as long as we don't hold it across the loop. */
     {
         uint64 idx;
         void *entry;
@@ -1196,9 +1290,16 @@ void pcache_teardown(struct pcache *pcache) {
         xa_for_each(&pcache->page_map, idx, entry) {
             node = (struct pcache_node *)entry;
             page_t *p = node->page;
+
+            /* Erase all xarray slots belonging to this folio so we
+             * won't visit the same node again on a later index. */
+            unsigned long nr = node->page_count;
+            uint64 base_idx = PCACHE_PAGE_INDEX(node->blkno);
+            for (unsigned long i = 0; i < nr; i++)
+                xa_erase(&pcache->page_map, base_idx + i);
+
             if (p != NULL) {
                 page_lock_acquire(p);
-                /* Detach manually since we already removed from tree. */
                 if (!LIST_NODE_IS_DETACHED(node, lru_entry)) {
                     list_node_detach(node, lru_entry);
                 }
@@ -1214,7 +1315,6 @@ void pcache_teardown(struct pcache *pcache) {
     pcache->page_count = 0;
     pcache->lru_count = 0;
     pcache->dirty_count = 0;
-    __pcache_tree_unlock(pcache);
     xa_destroy(&pcache->page_map);
     __pcache_spin_unlock(pcache);
 }
@@ -1270,10 +1370,18 @@ retry_lookup:
         pcnode = page->pcache.pcache_node;
         assert(pcnode != NULL, "pcache_get_page: page missing pcache node");
         if (pcnode->blkno != base_blkno) {
-            page_lock_release(page);
-            __pcache_spin_unlock(pcache);
-            __page_ref_dec(page);
-            goto retry_lookup;
+            /* For multi-page folios the base blkno may differ; check
+             * whether our request falls within this folio's range. */
+            uint64 folio_end_blkno = pcnode->blkno +
+                (uint64)pcnode->page_count * PCACHE_BLKS_PER_PAGE;
+            if (pcnode->order == 0 ||
+                base_blkno < pcnode->blkno ||
+                base_blkno >= folio_end_blkno) {
+                page_lock_release(page);
+                __pcache_spin_unlock(pcache);
+                __page_ref_dec(page);
+                goto retry_lookup;
+            }
         }
 
         if (!pcnode->dirty && !LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
@@ -1290,8 +1398,43 @@ retry_lookup:
         return page;
     }
 
-    // No cached copy: prepare a fresh pcache page.
-    new_page = __pcache_page_alloc();
+    // No cached copy: prepare a fresh pcache folio.
+    // Try a larger order first for readahead benefit; fall back to order-0.
+    unsigned int alloc_order = PCACHE_FOLIO_ORDER;
+
+    // Align base_blkno down to the folio-aligned boundary.
+    uint64 folio_blks = (uint64)(1U << alloc_order) * PCACHE_BLKS_PER_PAGE;
+    uint64 folio_base_blkno = (base_blkno / folio_blks) * folio_blks;
+
+    // Ensure the entire folio fits within the pcache block range.
+    while (alloc_order > 0) {
+        folio_blks = (uint64)(1U << alloc_order) * PCACHE_BLKS_PER_PAGE;
+        folio_base_blkno = (base_blkno / folio_blks) * folio_blks;
+        if (folio_base_blkno + folio_blks <= pcache->blk_count)
+            break;
+        alloc_order--;
+    }
+    if (alloc_order == 0)
+        folio_base_blkno = base_blkno;
+
+    // Check if any of the xarray indices are already occupied.
+    // If so, fall back to order-0 to avoid conflicts.
+    if (alloc_order > 0) {
+        unsigned long nr_check = 1UL << alloc_order;
+        uint64 check_base_idx = PCACHE_PAGE_INDEX(folio_base_blkno);
+        for (unsigned long ci = 0; ci < nr_check; ci++) {
+            struct pcache_node *existing =
+                (struct pcache_node *)xa_load(&pcache->page_map,
+                                             check_base_idx + ci);
+            if (existing != NULL) {
+                alloc_order = 0;
+                folio_base_blkno = base_blkno;
+                break;
+            }
+        }
+    }
+
+    new_page = __pcache_folio_alloc(alloc_order);
     if (new_page == NULL) {
         return NULL;
     }
@@ -1299,11 +1442,11 @@ retry_lookup:
     page_lock_acquire(new_page);
     pcnode = new_page->pcache.pcache_node;
     assert(pcnode != NULL, "pcache_get_page: new page has no pcache node");
-    pcnode->blkno = base_blkno;
+    pcnode->blkno = folio_base_blkno;
     pcnode->dirty = 0;
     pcnode->uptodate = 0;
     pcnode->io_in_progress = 0;
-    pcnode->size = PGSIZE;
+    /* pcnode->size and pcnode->order were set by __pcache_folio_alloc */
 
     __pcache_spin_lock(pcache);
 
@@ -1344,7 +1487,7 @@ retry_lookup:
         }
     }
 
-    page = __pcache_get_page(pcache, base_blkno, PGSIZE, new_page);
+    page = __pcache_get_page(pcache, folio_base_blkno, pcnode->size, new_page);
     if (page == NULL) {
         page_lock_release(new_page);
         __pcache_spin_unlock(pcache);
@@ -1491,6 +1634,38 @@ out:
     return ret;
 }
 
+/******************************************************************************
+ * Folio-based page cache API
+ *
+ * These are the preferred entry points.  The legacy page_t-based functions
+ * above delegate to these via page_folio() conversion.
+ *****************************************************************************/
+
+folio_t *pcache_get_folio(struct pcache *pcache, uint64 blkno) {
+    page_t *page = pcache_get_page(pcache, blkno);
+    if (page == NULL)
+        return NULL;
+    return page_folio(page);
+}
+
+void pcache_put_folio(struct pcache *pcache, folio_t *folio) {
+    if (folio == NULL)
+        return;
+    pcache_put_page(pcache, &folio->page);
+}
+
+int pcache_read_folio(struct pcache *pcache, folio_t *folio) {
+    if (folio == NULL)
+        return -EINVAL;
+    return pcache_read_page(pcache, &folio->page);
+}
+
+int pcache_mark_folio_dirty(struct pcache *pcache, folio_t *folio) {
+    if (folio == NULL)
+        return -EINVAL;
+    return pcache_mark_page_dirty(pcache, &folio->page);
+}
+
 int pcache_invalidate_page(struct pcache *pcache, page_t *page) {
     // Do regular checks
     // While holding the pcache spinlock and page lock:
@@ -1573,9 +1748,15 @@ int pcache_invalidate_blk(struct pcache *pcache, uint64 blkno) {
 
     pcnode = page->pcache.pcache_node;
     if (pcnode->blkno != base_blkno) {
-        page_lock_release(page);
-        __pcache_spin_unlock(pcache);
-        return 0;
+        uint64 folio_end_blkno = pcnode->blkno +
+            (uint64)pcnode->page_count * PCACHE_BLKS_PER_PAGE;
+        if (pcnode->order == 0 ||
+            base_blkno < pcnode->blkno ||
+            base_blkno >= folio_end_blkno) {
+            page_lock_release(page);
+            __pcache_spin_unlock(pcache);
+            return 0;
+        }
     }
 
     if (pcnode->io_in_progress) {
@@ -1634,9 +1815,15 @@ int pcache_discard_blk(struct pcache *pcache, uint64 blkno) {
 
     pcnode = page->pcache.pcache_node;
     if (pcnode->blkno != base_blkno) {
-        page_lock_release(page);
-        __pcache_spin_unlock(pcache);
-        return 0;
+        uint64 folio_end_blkno = pcnode->blkno +
+            (uint64)pcnode->page_count * PCACHE_BLKS_PER_PAGE;
+        if (pcnode->order == 0 ||
+            base_blkno < pcnode->blkno ||
+            base_blkno >= folio_end_blkno) {
+            page_lock_release(page);
+            __pcache_spin_unlock(pcache);
+            return 0;
+        }
     }
 
     if (pcnode->io_in_progress) {
@@ -1650,9 +1837,14 @@ int pcache_discard_blk(struct pcache *pcache, uint64 blkno) {
         __pcache_remove_lru(pcache, page);
     }
 
-    // Remove from xarray
-    xa_erase(&pcache->page_map, PCACHE_PAGE_INDEX(pcnode->blkno));
-    pcache->page_count--;
+    // Remove all xarray slots belonging to this folio
+    {
+        unsigned long nr = pcnode->page_count;
+        uint64 base_idx = PCACHE_PAGE_INDEX(pcnode->blkno);
+        for (unsigned long i = 0; i < nr; i++)
+            xa_erase(&pcache->page_map, base_idx + i);
+        pcache->page_count -= nr;
+    }
 
     // Detach page from pcache
     page->pcache.pcache_node = NULL;
@@ -1745,7 +1937,7 @@ retry_locked:
 
     pcnode = page->pcache.pcache_node;
     if (pcnode->blkno >= pcache->blk_count || pcnode->size == 0 ||
-        pcnode->size > PGSIZE) {
+        pcnode->size > ((size_t)1 << pcnode->order) * PGSIZE) {
         printf("pcache_read_page(): invalid metadata for page %p (blkno=%llu "
                "size=%zu)\n",
                page, (unsigned long long)pcnode->blkno, pcnode->size);
@@ -1841,14 +2033,14 @@ out_unlock_locked:
 }
 
 /**
- * pcache_prepare_write_page - prepare a page for a full overwrite
+ * pcache_prepare_write_page - prepare a folio for a full overwrite
  *
- * If the page is not yet up-to-date, zero-fills it and marks it as
- * up-to-date WITHOUT issuing any disk I/O.  The caller MUST subsequently
- * overwrite the entire page with valid data (and call
+ * If the folio is not yet up-to-date, zero-fills the ENTIRE folio and
+ * marks it as up-to-date WITHOUT issuing any disk I/O.  The caller MUST
+ * subsequently overwrite the entire folio with valid data (and call
  * pcache_mark_page_dirty) before releasing the page reference.
  *
- * If the page is already up-to-date or has I/O in progress, this
+ * If the folio is already up-to-date or has I/O in progress, this
  * function falls back to pcache_read_page (the normal read path).
  *
  * Returns 0 on success, negative errno on failure.
@@ -1885,8 +2077,8 @@ int pcache_prepare_write_page(struct pcache *pcache, page_t *page) {
         return pcache_read_page(pcache, page);
     }
 
-    /* Zero-fill and mark up-to-date — no disk read needed. */
-    memset(pcnode->data, 0, PGSIZE);
+    /* Zero-fill the entire folio and mark up-to-date — no disk read needed. */
+    memset(pcnode->data, 0, pcnode->size);
     pcnode->uptodate = 1;
 
     page_lock_release(page);
@@ -1940,10 +2132,17 @@ page_t *pcache_get_page_nowait(struct pcache *pcache, uint64 blkno) {
 
     pcnode = page->pcache.pcache_node;
     if (pcnode->blkno != base_blkno) {
-        page_lock_release(page);
-        __pcache_spin_unlock(pcache);
-        __page_ref_dec(page);
-        return NULL;
+        /* Multi-page folio: check range. */
+        uint64 folio_end_blkno = pcnode->blkno +
+            (uint64)pcnode->page_count * PCACHE_BLKS_PER_PAGE;
+        if (pcnode->order == 0 ||
+            base_blkno < pcnode->blkno ||
+            base_blkno >= folio_end_blkno) {
+            page_lock_release(page);
+            __pcache_spin_unlock(pcache);
+            __page_ref_dec(page);
+            return NULL;
+        }
     }
 
     /* Pull from clean LRU if needed */
@@ -2057,11 +2256,6 @@ ssize_t pcache_readv(struct pcache *pcache, struct iov_iter *iter,
 
         size_t seg_read = 0;
         while (seg_read < seg_len) {
-            size_t page_off = pos % PGSIZE;
-            size_t chunk = PGSIZE - page_off;
-            if (chunk > seg_len - seg_read)
-                chunk = seg_len - seg_read;
-
             uint64 blkno_512 = (pos / PGSIZE) * PCACHE_BLKS_PER_PAGE;
 
             /* Get the page — nowait or blocking */
@@ -2106,9 +2300,19 @@ ssize_t pcache_readv(struct pcache *pcache, struct iov_iter *iter,
                 }
             }
 
-            /* Copy data out */
+            /* Compute folio-aware offset and chunk.
+             * For multi-page folios we can copy more than PGSIZE per
+             * iteration — this is the "one shot" large-chunk path. */
             struct pcache_node *pcn = page->pcache.pcache_node;
-            char *data = (char *)pcn->data + page_off;
+            size_t folio_off = pos - (loff_t)pcn->blkno * BLK_SIZE;
+            size_t chunk = pcn->size - folio_off;
+            if (chunk > seg_len - seg_read)
+                chunk = seg_len - seg_read;
+            /* Clamp to remaining file size */
+            if (pos + (loff_t)chunk > isize)
+                chunk = (size_t)(isize - pos);
+
+            char *data = (char *)pcn->data + folio_off;
 
             if (user) {
                 if (vm_copyout(current->vm, (uint64)(base + seg_read),
@@ -2187,11 +2391,6 @@ ssize_t pcache_writev(struct pcache *pcache, struct iov_iter *iter,
 
         size_t seg_written = 0;
         while (seg_written < seg_len) {
-            size_t page_off = pos % PGSIZE;
-            size_t chunk = PGSIZE - page_off;
-            if (chunk > seg_len - seg_written)
-                chunk = seg_len - seg_written;
-
             uint64 blkno_512 = (pos / PGSIZE) * PCACHE_BLKS_PER_PAGE;
 
             /* Get the page — nowait or blocking */
@@ -2214,27 +2413,34 @@ ssize_t pcache_writev(struct pcache *pcache, struct iov_iter *iter,
                 }
             }
 
+            /* Compute folio-aware offset and chunk. */
+            struct pcache_node *pcn = page->pcache.pcache_node;
+            size_t folio_off = pos - (loff_t)pcn->blkno * BLK_SIZE;
+            size_t chunk = pcn->size - folio_off;
+            if (chunk > seg_len - seg_written)
+                chunk = seg_len - seg_written;
+
             /*
-             * Prepare the page for writing.  If the write covers the
-             * entire page, use pcache_prepare_write_page to avoid a
+             * Prepare the folio for writing.  If the write covers the
+             * entire folio, use pcache_prepare_write_page to avoid a
              * disk read.  Otherwise read the existing content first.
              */
             int ret;
-            bool full_page = (page_off == 0 && chunk >= PGSIZE);
+            bool full_folio = (folio_off == 0 && chunk >= pcn->size);
 
             if (nowait) {
                 /* NOWAIT: page must already be uptodate */
                 ret = pcache_read_page_nowait(pcache, page);
-                if (ret != 0 && !full_page) {
+                if (ret != 0 && !full_folio) {
                     pcache_put_page(pcache, page);
                     if (bytes_written > 0)
                         goto out;
                     bytes_written = -EAGAIN;
                     goto out;
                 }
-                /* For full-page overwrites with NOWAIT, prepare is OK
+                /* For full-folio overwrites with NOWAIT, prepare is OK
                  * since it doesn't do IO */
-                if (ret != 0 && full_page) {
+                if (ret != 0 && full_folio) {
                     ret = pcache_prepare_write_page(pcache, page);
                     if (ret != 0) {
                         pcache_put_page(pcache, page);
@@ -2245,7 +2451,7 @@ ssize_t pcache_writev(struct pcache *pcache, struct iov_iter *iter,
                     }
                 }
             } else {
-                if (full_page)
+                if (full_folio)
                     ret = pcache_prepare_write_page(pcache, page);
                 else
                     ret = pcache_read_page(pcache, page);
@@ -2258,9 +2464,8 @@ ssize_t pcache_writev(struct pcache *pcache, struct iov_iter *iter,
                 }
             }
 
-            /* Copy data in */
-            struct pcache_node *pcn = page->pcache.pcache_node;
-            char *data = (char *)pcn->data + page_off;
+            /* Copy data in — folio-aware offset */
+            char *data = (char *)pcn->data + folio_off;
 
             if (user) {
                 if (vm_copyin(current->vm, data,

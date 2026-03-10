@@ -86,6 +86,7 @@ typedef struct page_struct {
 // Strip GFP flags to get page flags for storage
 #define PAGE_FLAGS_FROM_GFP(gfp) ((gfp) & ~GFP_FLAG_MASK)
     int ref_count;
+    uint8 compound_order; // compound page order (0 for single page)
     /* choose the section of the union according to the page type */
     union {
         /* Anonymous page
@@ -99,7 +100,6 @@ typedef struct page_struct {
             Pages managed by buddy system are free pages*/
         struct {
             list_node_t lru_entry;
-            uint32 order;
             uint32 state; // buddy state: FREE, MERGING, etc.
         } buddy;
         /* Slab pages
@@ -107,7 +107,6 @@ typedef struct page_struct {
             One slab  */
         struct {
             slab_t *slab; // pointing its slab descriptor
-            uint32 order; // order of the compound page for alignment check
         } slab;
         /* Page cache pages
             Pages used by pcache system to cache disk blocks */

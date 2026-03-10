@@ -215,7 +215,7 @@ STATIC_INLINE slab_t *__slab_make(uint64 flags, uint32 order, size_t offs,
     // Set the page's slab order immediately so that if we need to free
     // the page on a subsequent failure (e.g., kmm_alloc failure), the
     // __page_free assertion check will see the correct order.
-    page[0].slab.order = order;
+    page[0].compound_order = order;
 
     if (flags & SLAB_FLAG_EMBEDDED) {
         // Embedded SLAB puts its descriptor at the start of its cache page

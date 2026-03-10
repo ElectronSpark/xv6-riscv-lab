@@ -116,6 +116,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     netdev_init();
     signal_init(); // signal handling initialization
     binit();       // buffer cache
+    bh_global_init();  // buffer_head slab cache
     // idle_thread_init must run before userinit because it calls
     // rq_cpu_activate() to mark this CPU active; otherwise scheduler_wakeup()
     // for init may fail to enqueue on any run queue.

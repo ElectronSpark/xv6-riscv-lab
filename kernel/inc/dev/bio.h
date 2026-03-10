@@ -119,13 +119,23 @@ static inline int bio_await(struct bio *bio) {
 // Return a newly allocated bio when successful, or ERR_PTR on error
 struct bio *bio_alloc(blkdev_t *bdev, int16 vec_length, bool rw,
                       void (*end_io)(struct bio *bio), void *private_data);
-int bio_add_seg(struct bio *bio, page_t *page, int16 idx, uint16 len,
-                uint16 offset);
 int bio_dup(struct bio *bio);     // Increment the reference count of a bio
 int bio_release(struct bio *bio); // Decrement the reference count of a bio,
                                   // free it if the count reaches zero
 int bio_validate(struct bio *bio,
                  blkdev_t *blkdev); // Validate the fields of a bio against the
                                     // target block device
+
+/**
+ * bio_add_folio - add a range of a folio to a bio as one or more segments.
+ * @bio:    target bio (must have enough room in bvecs[])
+ * @folio:  the folio whose data to transfer
+ * @len:    total bytes to transfer from the folio
+ * @offset: byte offset into the folio's physical memory
+ *
+ * Splits the request at page boundaries so each bio_vec refers to
+ * exactly one base page.  Returns 0 on success, negative errno on error.
+ */
+int bio_add_folio(struct bio *bio, folio_t *folio, uint16 len, uint16 offset);
 
 #endif // __KERNEL_BLOCK_IO_H

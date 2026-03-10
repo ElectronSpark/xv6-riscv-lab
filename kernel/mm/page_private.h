@@ -51,9 +51,10 @@
 #define PAGES_ARE_BUDDIES(page1, page2)                                        \
     ((page1) != NULL && (page2) != NULL &&                                     \
      (page1)->physical_address != (page2)->physical_address &&                 \
-     (page1)->buddy.order == (page2)->buddy.order &&                           \
-     (page1)->buddy.order < PAGE_BUDDY_MAX_ORDER &&                            \
-     (((page1)->physical_address ^ PAGE_BUDDY_BYTES((page1)->buddy.order)) ==  \
+     (page1)->compound_order == (page2)->compound_order &&                     \
+     (page1)->compound_order < PAGE_BUDDY_MAX_ORDER &&                         \
+     (((page1)->physical_address ^                                             \
+       PAGE_BUDDY_BYTES((page1)->compound_order)) ==                           \
       (page2)->physical_address))
 
 static inline void __lock_two_pages(page_t *page1, page_t *page2) {

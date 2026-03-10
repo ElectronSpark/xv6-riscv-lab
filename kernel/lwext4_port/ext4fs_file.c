@@ -23,6 +23,7 @@
 #include <mm/vm.h>
 #include <mm/page.h>
 #include <mm/pcache.h>
+#include <mm/folio.h>
 #include <smp/atomic.h>
 #include "proc/tq.h"
 #include "timer/timer.h"
@@ -325,11 +326,26 @@ static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
             __atomic_fetch_add(&g_ext4_pcache_read_page_calls, 1,
                                __ATOMIC_RELAXED);
 
-            r = ext4fs_fill_page_from_ref(fs, esb, inode, &ref, pcn->data,
-                                          file_off, inode_size);
+            /*
+             * For multi-page folios we must fill ALL sub-pages before
+             * marking the folio uptodate, because subsequent accesses to
+             * other pages in the same folio will see uptodate=1 and skip
+             * the read entirely.
+             */
+            unsigned long nr_pages = pcn->page_count;
+            uint64 base_file_off = (uint64)pcn->blkno * 512ULL;
+            r = 0;
+            for (unsigned long p = 0; p < nr_pages; p++) {
+                uint64 pg_off = base_file_off + p * PGSIZE;
+                void *dst = (char *)pcn->data + p * PGSIZE;
+                r = ext4fs_fill_page_from_ref(fs, esb, inode, &ref, dst,
+                                              pg_off, inode_size);
+                if (r != 0)
+                    break;
+            }
 
             if (r == 0)
-                __atomic_fetch_add(&g_ext4_pcache_pages_filled, 1,
+                __atomic_fetch_add(&g_ext4_pcache_pages_filled, nr_pages,
                                    __ATOMIC_RELAXED);
             __atomic_fetch_add(&g_ext4_pcache_read_page_ticks,
                                r_time() - read_start, __ATOMIC_RELAXED);
@@ -435,9 +451,65 @@ static int ext4fs_pcache_write_page(struct pcache *pcache, page_t *page)
     return err;
 }
 
+static int ext4fs_pcache_read_folio(struct pcache *pcache, folio_t *folio) {
+    /* ext4fs read_page uses lwext4 block I/O with its own block cache.
+     * Call the page-level helper for each base page in the folio. */
+    page_t *head = &folio->page;
+    struct pcache_node *pcn = head->pcache.pcache_node;
+    unsigned long nr = pcn->page_count;
+    for (unsigned long i = 0; i < nr; i++) {
+        /* Temporarily adjust the pcache_node to address each sub-page so
+         * the legacy read_page sees a single-page view. */
+        uint64 saved_blkno = pcn->blkno;
+        void  *saved_data  = pcn->data;
+        size_t saved_size  = pcn->size;
+
+        pcn->blkno = saved_blkno + i * (PGSIZE / 512);
+        pcn->data  = (char *)saved_data + i * PGSIZE;
+        pcn->size  = PGSIZE;
+
+        int ret = ext4fs_pcache_read_page(pcache, head);
+
+        pcn->blkno = saved_blkno;
+        pcn->data  = saved_data;
+        pcn->size  = saved_size;
+
+        if (ret != 0)
+            return ret;
+    }
+    return 0;
+}
+
+static int ext4fs_pcache_write_folio(struct pcache *pcache, folio_t *folio) {
+    page_t *head = &folio->page;
+    struct pcache_node *pcn = head->pcache.pcache_node;
+    unsigned long nr = pcn->page_count;
+    for (unsigned long i = 0; i < nr; i++) {
+        uint64 saved_blkno = pcn->blkno;
+        void  *saved_data  = pcn->data;
+        size_t saved_size  = pcn->size;
+
+        pcn->blkno = saved_blkno + i * (PGSIZE / 512);
+        pcn->data  = (char *)saved_data + i * PGSIZE;
+        pcn->size  = PGSIZE;
+
+        int ret = ext4fs_pcache_write_page(pcache, head);
+
+        pcn->blkno = saved_blkno;
+        pcn->data  = saved_data;
+        pcn->size  = saved_size;
+
+        if (ret != 0)
+            return ret;
+    }
+    return 0;
+}
+
 static struct pcache_ops ext4fs_pcache_ops = {
     .read_page = ext4fs_pcache_read_page,
     .write_page = ext4fs_pcache_write_page,
+    .read_folio = ext4fs_pcache_read_folio,
+    .write_folio = ext4fs_pcache_write_folio,
 };
 
 void ext4fs_inode_pcache_init(struct vfs_inode *inode)
@@ -775,6 +847,14 @@ static int ext4fs_file_fsync(struct vfs_file *file, loff_t start, loff_t len)
     if (inode == NULL || inode->sb == NULL)
         return 0;
 
+    /* Flush pcache dirty pages into ext4's block cache first.
+     * Without this, mmap MAP_SHARED writes that are sitting in the
+     * pcache dirty list would never reach the ext4 block cache before
+     * the subsequent ext4_block_cache_flush writes blocks to disk. */
+    struct pcache *pc = &inode->i_data;
+    if (pc->active)
+        pcache_flush(pc);
+
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
     ext4fs_lock(esb);
     int r = ext4_block_cache_flush(&esb->bdev) == EOK ? 0 : -EIO;
@@ -817,8 +897,9 @@ static int ext4fs_file_writepage(struct vfs_file *file, loff_t offset,
     struct pcache *pc = &inode->i_data;
     if (pc->active) {
         page_t *pg = __pa_to_page((uint64)data);
-        if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE)) {
-            return pcache_mark_page_dirty(pc, pg);
+        page_t *pc_head = page_pcache_head(pg);
+        if (pc_head != NULL) {
+            return pcache_mark_page_dirty(pc, pc_head);
         }
 
         uint64 blkno_512 = offset / 512ULL;
@@ -828,16 +909,31 @@ static int ext4fs_file_writepage(struct vfs_file *file, loff_t offset,
 
         __atomic_fetch_add(&g_ext4_pcache_readahead_pages, 1,
                            __ATOMIC_RELAXED);
-        int ret = pcache_prepare_write_page(pc, pcpage);
+
+        struct pcache_node *pcn = pcpage->pcache.pcache_node;
+        /* Compute the sub-page offset for multi-page folios. */
+        uint64 folio_byte_off = blkno_512 * 512ULL - (uint64)pcn->blkno * 512ULL;
+
+        /*
+         * Only use the prepare (zero-fill) fast-path when the write
+         * covers the ENTIRE folio.  For partial writes (e.g. a single
+         * PGSIZE page within a multi-page folio), read the existing
+         * folio content first so the other sub-pages retain valid data.
+         */
+        int ret;
+        bool full_folio = (folio_byte_off == 0 && len >= pcn->size);
+        if (full_folio)
+            ret = pcache_prepare_write_page(pc, pcpage);
+        else
+            ret = pcache_read_page(pc, pcpage);
         if (ret != 0) {
             pcache_put_page(pc, pcpage);
             return ret;
         }
 
-        struct pcache_node *pcn = pcpage->pcache.pcache_node;
-        memcpy(pcn->data, data, len);
+        memcpy((char *)pcn->data + folio_byte_off, data, len);
         if (len < PGSIZE)
-            memset((char *)pcn->data + len, 0, PGSIZE - len);
+            memset((char *)pcn->data + folio_byte_off + len, 0, PGSIZE - len);
 
         ret = pcache_mark_page_dirty(pc, pcpage);
         pcache_put_page(pc, pcpage);
@@ -970,12 +1066,15 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
         }
 
         struct pcache_node *pcn = pcpage->pcache.pcache_node;
+        /* Compute sub-page offset within multi-page folio. */
+        uint64 folio_byte_off = blkno_512 * 512ULL -
+                                (uint64)pcn->blkno * 512ULL;
         if (bytes_to_read == PGSIZE) {
             __atomic_fetch_add(&g_ext4_fault_zero_copy, 1,
                                __ATOMIC_RELAXED);
             __atomic_fetch_add(&g_ext4_fault_ticks, r_time() - fault_start,
                                __ATOMIC_RELAXED);
-            return pcn->data;
+            return (char *)pcn->data + folio_byte_off;
         }
 
         __atomic_fetch_add(&g_ext4_fault_partial_copy, 1,
@@ -987,7 +1086,7 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
             return NULL;
         }
 
-        memcpy(pa, pcn->data, bytes_to_read);
+        memcpy(pa, (char *)pcn->data + folio_byte_off, bytes_to_read);
         memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
 
         pcache_put_page(pc, pcpage);

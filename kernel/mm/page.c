@@ -412,7 +412,8 @@ STATIC_INLINE bool __page_is_freeable(page_t *page) {
 // header. Currently only BUDDY and SLAB types support this optimization.
 STATIC_INLINE bool __page_type_supports_tail(uint64 flags) {
     uint64 type = PAGE_FLAG_GET_TYPE(flags);
-    return (type == PAGE_TYPE_BUDDY || type == PAGE_TYPE_SLAB);
+    return (type == PAGE_TYPE_BUDDY || type == PAGE_TYPE_SLAB ||
+            type == PAGE_TYPE_PCACHE || type == PAGE_TYPE_ANON);
 }
 
 // Check if a compound page already has valid tail structure.
@@ -427,11 +428,9 @@ STATIC_INLINE bool __page_has_valid_tail_structure(page_t *page, uint64 order) {
     // Only BUDDY and SLAB types support tail pages
     // Check order matches for alignment - use the stored order to verify
     // this is a whole compound page being freed
-    if (page_type == PAGE_TYPE_BUDDY) {
-        return page->buddy.order == order;
-    }
-    if (page_type == PAGE_TYPE_SLAB) {
-        return page->slab.order == order;
+    if (page_type == PAGE_TYPE_BUDDY || page_type == PAGE_TYPE_SLAB ||
+        page_type == PAGE_TYPE_PCACHE || page_type == PAGE_TYPE_ANON) {
+        return page->compound_order == order;
     }
 
     return false;
@@ -465,12 +464,12 @@ STATIC_INLINE void __page_reinit(page_t *page, uint64 physical, int ref_count,
     page->physical_address = physical;
     page->flags = flags;
     page->ref_count = ref_count;
+    page->compound_order = 0;
     // Clear union fields to avoid stale data being interpreted as valid
     // pointers. For SLAB: slab.slab will be set by __slab_make after
     // allocation. For BUDDY: buddy fields will be set by buddy functions. This
     // prevents garbage in lru_entry.prev from being read as slab.slab.
     page->slab.slab = NULL;
-    page->slab.order = 0;
     // Note: We do NOT reinitialize the spinlock - it remains valid
 }
 
@@ -576,7 +575,7 @@ STATIC_INLINE void __page_as_buddy(page_t *page, page_t *buddy_head,
         // This is the header page
         page->flags = PAGE_TYPE_BUDDY;
         page->ref_count = 0;
-        page->buddy.order = order;
+        page->compound_order = order;
         page->buddy.state = state;
         list_entry_init(&page->buddy.lru_entry);
     } else {
@@ -592,7 +591,7 @@ STATIC_INLINE void __page_as_buddy_header(page_t *page, uint64 order,
                                           uint32 state) {
     page->flags = PAGE_TYPE_BUDDY;
     page->ref_count = 0;
-    page->buddy.order = order;
+    page->compound_order = order;
     page->buddy.state = state;
     // Note: lru_entry will be initialized at commit time
 }
@@ -606,7 +605,7 @@ STATIC_INLINE void __page_as_buddy_init(page_t *page, page_t *buddy_head,
         // Tail page - set as tail
         __page_as_buddy_tail(page, buddy_head);
     } else {
-        page->buddy.order = order;
+        page->compound_order = order;
         page->buddy.state = state;
         list_entry_init(&page->buddy.lru_entry);
     }
@@ -620,7 +619,7 @@ STATIC_INLINE void __page_as_buddy_group(page_t *buddy_head, uint64 order,
     // Initialize header
     buddy_head->flags = PAGE_TYPE_BUDDY;
     buddy_head->ref_count = 0;
-    buddy_head->buddy.order = order;
+    buddy_head->compound_order = order;
     buddy_head->buddy.state = state;
     list_entry_init(&buddy_head->buddy.lru_entry);
 
@@ -641,7 +640,7 @@ STATIC_INLINE void __page_as_buddy_group_preserve_tails(page_t *buddy_head,
     // Only update the header - tail pages already have valid structure
     buddy_head->flags = PAGE_TYPE_BUDDY;
     buddy_head->ref_count = 0;
-    buddy_head->buddy.order = order;
+    buddy_head->compound_order = order;
     buddy_head->buddy.state = state;
     list_entry_init(&buddy_head->buddy.lru_entry);
 }
@@ -654,7 +653,7 @@ STATIC_INLINE void __page_as_buddy_group_init(page_t *buddy_head, uint64 order,
                                               uint32 state) {
     // Initialize header with full initialization
     __page_init(buddy_head, buddy_head->physical_address, 0, PAGE_TYPE_BUDDY);
-    buddy_head->buddy.order = order;
+    buddy_head->compound_order = order;
     buddy_head->buddy.state = state;
     list_entry_init(&buddy_head->buddy.lru_entry);
 
@@ -740,11 +739,11 @@ STATIC_INLINE page_t *__lock_get_buddy_page(page_t *page) {
         // Must be the page descriptor of a buddy header page
         return NULL;
     }
-    if (page->buddy.order >= PAGE_BUDDY_MAX_ORDER) {
+    if (page->compound_order >= PAGE_BUDDY_MAX_ORDER) {
         // Page size reach PAGE_BUDDY_MAX_ORDER doesn't have buddy
         return NULL;
     }
-    buddy_base = __get_buddy_addr(page->physical_address, page->buddy.order);
+    buddy_base = __get_buddy_addr(page->physical_address, page->compound_order);
     buddy_head = __pa_to_page(buddy_base);
     if (buddy_head == NULL) {
         // Buddy address is out of managed range
@@ -753,7 +752,7 @@ STATIC_INLINE page_t *__lock_get_buddy_page(page_t *page) {
 
     __lock_two_pages(page, buddy_head);
     if (buddy_head == NULL || !PAGE_IS_BUDDY_GROUP_HEAD(buddy_head) ||
-        buddy_head->buddy.order != page->buddy.order) {
+        buddy_head->compound_order != page->compound_order) {
         // Didn't find a complete buddy page.
         __unlock_two_pages(page, buddy_head);
         return NULL;
@@ -841,13 +840,13 @@ STATIC_INLINE page_t *__buddy_split(page_t *page) {
     if (!PAGE_IS_BUDDY_GROUP_HEAD(page)) {
         return NULL;
     }
-    if (page->buddy.order == 0) {
+    if (page->compound_order == 0) {
         // A single page cannot be splitted.
         return NULL;
     }
-    order_after = page->buddy.order - 1;
+    order_after = page->compound_order - 1;
     buddy = page + (1UL << order_after);
-    page->buddy.order = order_after; // Update order in header
+    page->compound_order = order_after; // Update order in header
     // Only initialize buddy header - tail pages will be set at commit time
     __page_as_buddy_header(buddy, order_after, BUDDY_STATE_INTERMEDIATE);
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
@@ -870,8 +869,8 @@ STATIC_INLINE page_t *__buddy_merge(page_t *page1, page_t *page2) {
     } else {
         header = page2;
     }
-    order_after = page1->buddy.order + 1;
-    header->buddy.order = order_after; // Update order in header
+    order_after = page1->compound_order + 1;
+    header->compound_order = order_after; // Update order in header
     return header;
 }
 
@@ -1191,12 +1190,12 @@ STATIC void __buddy_merge_and_insert(page_t *page, uint64 start_order) {
             }
 
             // Update later half's tail pages to point to merged header
-            // merged->buddy.order is already set to tmp_order + 1 by
+            // merged->compound_order is already set to tmp_order + 1 by
             // __buddy_merge
-            __page_merge_commit_later_half(merged, merged->buddy.order);
+            __page_merge_commit_later_half(merged, merged->compound_order);
             // Verify tail structure after merge
             __debug_verify_tail_structure(
-                merged, merged->buddy.order,
+                merged, merged->compound_order,
                 "__buddy_merge_and_insert(after merge)");
 
             // Now unlock after the order has been updated
@@ -1606,6 +1605,9 @@ page_t *__page_alloc(uint64 order, uint64 flags) {
     }
     page_t *ret = __buddy_get(order, flags);
     __page_sanitizer_check("page_alloc", ret, order, flags);
+    if (ret != NULL) {
+        ret->compound_order = (uint8)order;
+    }
     return ret;
 }
 
@@ -1623,13 +1625,13 @@ void __page_free(page_t *page, uint64 order) {
     assert(!(page->physical_address & PAGE_BUDDY_OFFSET_MASK(order)),
            "free pages not aligned to order");
 
-    // SLAB pages must be freed as a whole compound page with matching order
-    if (PAGE_IS_TYPE(page, PAGE_TYPE_SLAB)) {
-        assert(page->slab.order == order,
-               "__page_free(): SLAB page freed with wrong order (expected %d, "
-               "got %ld)",
-               page->slab.order, order);
-    }
+    // The passed order must match the page's compound_order.
+    // Mismatches would silently leak tail pages (order too small) or
+    // corrupt adjacent pages (order too large).
+    assert(page->compound_order == order,
+           "__page_free(): order mismatch (type=%ld compound_order=%d, "
+           "passed=%ld)",
+           PAGE_FLAG_GET_TYPE(page->flags), page->compound_order, order);
     // Should never try to free a TAIL page directly - only headers
     assert(!PAGE_IS_TYPE(page, PAGE_TYPE_TAIL),
            "__page_free(): trying to free TAIL page directly at %p", page);
@@ -1771,6 +1773,12 @@ int __page_ref_dec(page_t *page) {
     if (page == NULL) {
         return -1;
     }
+    // Tail pages must never be ref-counted directly; callers should
+    // resolve to the head page (via page_folio) or use page_ref_dec()
+    // which resolves automatically.
+    assert(!PAGE_IS_TYPE(page, PAGE_TYPE_TAIL),
+           "__page_ref_dec(): called on TAIL page %p (head=%p)",
+           page, page->tail.head_page);
     page_lock_acquire(page);
     {
         original_ref_count = page_ref_count(page);
@@ -1784,14 +1792,20 @@ int __page_ref_dec(page_t *page) {
     assert(original_ref_count - ret == 1,
            "__page_ref_dec: ref_count should be decreased by 1");
     if (ret == 0) {
+        uint8 order = page->compound_order;
         if (PAGE_IS_TYPE(page, PAGE_TYPE_PCACHE) && page->pcache.pcache_node) {
             // Free the page cache node
             slab_free(page->pcache.pcache_node);
             page->pcache.pcache_node = NULL;
         }
         __page_sanitizer_check("page_free", page, 0, 0);
-        if (__buddy_put(page) != 0) {
-            panic("page_ref_dec");
+        if (order > 0) {
+            // Compound page: free via __page_free which handles all orders
+            __page_free(page, order);
+        } else {
+            if (__buddy_put(page) != 0) {
+                panic("page_ref_dec");
+            }
         }
     }
     return ret;
@@ -1801,18 +1815,31 @@ int __page_ref_dec(page_t *page) {
 // Return -1 if failed
 int page_refcnt(void *physical) {
     page_t *page = __pa_to_page((uint64)physical);
+    if (page != NULL && PAGE_IS_TYPE(page, PAGE_TYPE_TAIL) &&
+        page->tail.head_page != NULL)
+        page = page->tail.head_page;
     return page_ref_count(page);
 }
 
-// Helper function to __page_ref_inc
+// Helper function to __page_ref_inc.
+// Resolves tail pages to their head page so that ref-counting always
+// operates on the compound head.
 int page_ref_inc(void *ptr) {
     page_t *page = __pa_to_page((uint64)ptr);
+    if (page != NULL && PAGE_IS_TYPE(page, PAGE_TYPE_TAIL) &&
+        page->tail.head_page != NULL)
+        page = page->tail.head_page;
     return __page_ref_inc(page);
 }
 
-// Helper function to __page_ref_dec
+// Helper function to __page_ref_dec.
+// Resolves tail pages to their head page so that ref-counting always
+// operates on the compound head, preventing silent leaks.
 int page_ref_dec(void *ptr) {
     page_t *page = __pa_to_page((uint64)ptr);
+    if (page != NULL && PAGE_IS_TYPE(page, PAGE_TYPE_TAIL) &&
+        page->tail.head_page != NULL)
+        page = page->tail.head_page;
     return __page_ref_dec(page);
 }
 
@@ -2077,13 +2104,13 @@ void check_buddy_system_integrity(void) {
             // check if the page is a valid buddy page
             assert(PAGE_IS_BUDDY_GROUP_HEAD(pos),
                    "buddy page is not a group head");
-            assert(pos->buddy.order == i, "buddy page order mismatch");
+            assert(pos->compound_order == i, "buddy page order mismatch");
             __check_page_pointer_in_range(pos);
             assert(__page_to_pa(pos) == pos->physical_address,
                    "buddy page physical address mismatch");
             count--;
             printf("count = %d, buddy page: %p, order: %d, physical: 0x%lx\n",
-                   count, pos, pos->buddy.order, pos->physical_address);
+                   count, pos, pos->compound_order, pos->physical_address);
         }
         assert(count == 0, "buddy pool count mismatch, expected 0, got %d",
                count);

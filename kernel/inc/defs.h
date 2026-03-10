@@ -39,6 +39,8 @@ uint bdirty_count(void);         // get count of dirty buffers
 void bpin(struct buf *);
 void bunpin(struct buf *);
 
+// buffer.c (buffer_head — replaces bio.c bcache)
+void bh_global_init(void);
 // console.c
 void consoleinit(void);
 void consoledevinit(void);

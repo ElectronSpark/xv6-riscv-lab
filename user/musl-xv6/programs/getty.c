@@ -59,8 +59,8 @@ int main(int argc, char **argv)
     printf("\nxv6 operating system (%s)\n\n", tty);
     fflush(stdout);
 
-    /* Exec login */
-    char *login_argv[] = { "login", NULL };
+    /* Exec login — auto-login as root on UART console */
+    char *login_argv[] = { "login", "-f", "root", NULL };
     execv("/bin/login", login_argv);
 
     /* If login is not available, fall back to shell */

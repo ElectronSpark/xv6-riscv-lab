@@ -8,6 +8,7 @@
 #include "vfs/xv6fs/ondisk.h" // xv6 on-disk format definitions
 #include <mm/slab.h>
 #include <mm/pcache.h>
+#include <mm/buffer_head.h>
 #include "dev/blkdev.h"
 #include "block_cache.h"
 
@@ -79,6 +80,7 @@ struct xv6fs_superblock {
     struct superblock disk_sb;            // Copy of the on-disk superblock
     blkdev_t *blkdev;                     // Block device descriptor reference
     int dirty;                            // Superblock metadata dirty flag
+    struct pcache *meta_pcache;           // Metadata page cache (buffer_head backing)
     struct xv6fs_log log;                 // Per-superblock logging
     struct xv6fs_block_cache block_cache; // Block allocation cache
 };
@@ -111,7 +113,7 @@ void xv6fs_initlog(struct xv6fs_superblock *xv6_sb);
 int xv6fs_begin_op(struct xv6fs_superblock *xv6_sb);
 void xv6fs_begin_op_nointr(struct xv6fs_superblock *xv6_sb);
 void xv6fs_end_op(struct xv6fs_superblock *xv6_sb);
-void xv6fs_log_write(struct xv6fs_superblock *xv6_sb, struct buf *b);
+void xv6fs_log_write(struct xv6fs_superblock *xv6_sb, buffer_head_t *bh);
 
 // Superblock operations
 struct vfs_inode *xv6fs_alloc_inode(struct vfs_superblock *sb);

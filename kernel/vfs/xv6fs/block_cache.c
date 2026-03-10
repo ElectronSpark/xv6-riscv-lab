@@ -13,7 +13,7 @@
 #include "param.h"
 #include "errno.h"
 #include "lock/spinlock.h"
-#include "dev/buf.h"
+#include <mm/buffer_head.h>
 #include "vfs/fs.h"
 #include "../vfs_private.h"
 #include "block_cache.h"
@@ -350,7 +350,6 @@ uint32 xv6fs_bcache_free_count(struct xv6fs_superblock *xv6_sb) {
 int xv6fs_bcache_init(struct xv6fs_superblock *xv6_sb) {
     struct xv6fs_block_cache *bc = &xv6_sb->block_cache;
     struct superblock *disk_sb = &xv6_sb->disk_sb;
-    uint dev = xv6fs_sb_dev(xv6_sb);
 
     if (bc->initialized) {
         return 0;
@@ -382,7 +381,7 @@ int xv6fs_bcache_init(struct xv6fs_superblock *xv6_sb) {
 
     /* Scan on-disk bitmap and build extent tree */
     uint32 last_bitmap_block = (uint32)-1;
-    struct buf *bp = 0;
+    buffer_head_t *bh = 0;
 
     uint32 run_start = 0;
     uint32 run_length = 0;
@@ -393,11 +392,11 @@ int xv6fs_bcache_init(struct xv6fs_superblock *xv6_sb) {
         uint32 bitmap_block = BBLOCK_PTR(blockno, disk_sb);
 
         if (bitmap_block != last_bitmap_block) {
-            if (bp) {
-                brelse(bp);
+            if (bh) {
+                bh_release(bh);
             }
-            bp = bread(dev, bitmap_block);
-            if (!bp) {
+            bh = sb_bread(xv6_sb, bitmap_block);
+            if (!bh) {
                 last_bitmap_block = (uint32)-1;
                 /* Treat read errors as used blocks */
                 if (in_run) {
@@ -411,7 +410,7 @@ int xv6fs_bcache_init(struct xv6fs_superblock *xv6_sb) {
 
         int bi = blockno % BPB;
         int m = 1 << (bi & 7);
-        int used = (bp->data[bi >> 3] & m) != 0;
+        int used = (bh->b_data[bi >> 3] & m) != 0;
 
         if (!used) {
             /* Block is free */
@@ -436,8 +435,8 @@ int xv6fs_bcache_init(struct xv6fs_superblock *xv6_sb) {
         bcache_insert_extent(bc, run_start, run_length);
     }
 
-    if (bp) {
-        brelse(bp);
+    if (bh) {
+        bh_release(bh);
     }
 
     bc->initialized = 1;

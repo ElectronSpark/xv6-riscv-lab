@@ -36,6 +36,7 @@
 #include <mm/vm.h>
 #include <mm/pcache.h>
 #include <mm/page.h>
+#include <mm/folio.h>
 #include "tmpfs_private.h"
 #include "vfs/uio.h"
 
@@ -64,9 +65,27 @@ static int tmpfs_pcache_write_page(struct pcache *pcache, page_t *page) {
     return 0;
 }
 
+static int tmpfs_pcache_read_folio(struct pcache *pcache, folio_t *folio) {
+    (void)pcache;
+    page_t *page = &folio->page;
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+    /* Zero-fill the entire folio (may be multi-page). */
+    memset(pcnode->data, 0, pcnode->size);
+    return 0;
+}
+
+static int tmpfs_pcache_write_folio(struct pcache *pcache, folio_t *folio) {
+    /* No-op for tmpfs — data stays in memory, nothing to persist. */
+    (void)pcache;
+    (void)folio;
+    return 0;
+}
+
 static struct pcache_ops tmpfs_pcache_ops = {
     .read_page = tmpfs_pcache_read_page,
     .write_page = tmpfs_pcache_write_page,
+    .read_folio = tmpfs_pcache_read_folio,
+    .write_folio = tmpfs_pcache_write_folio,
 };
 
 /*
@@ -209,7 +228,9 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
             return bytes_read;
         }
         struct pcache_node *pcn = page->pcache.pcache_node;
-        char *data = (char *)pcn->data + block_off;
+        uint64 folio_off = (uint64)blkno_512 * 512 -
+                           (uint64)pcn->blkno * 512;
+        char *data = (char *)pcn->data + folio_off + block_off;
 
         if (user) {
             if (vm_copyout(current->vm, (uint64)(buf + bytes_read), data,
@@ -316,7 +337,9 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf,
             goto done;
         }
         struct pcache_node *pcn = page->pcache.pcache_node;
-        char *data = (char *)pcn->data + block_off;
+        uint64 folio_off = (uint64)blkno_512 * 512 -
+                           (uint64)pcn->blkno * 512;
+        char *data = (char *)pcn->data + folio_off + block_off;
 
         if (user) {
             if (vm_copyin(current->vm, data, (uint64)(buf + bytes_written),
@@ -664,7 +687,10 @@ static void *__tmpfs_file_fault(struct vfs_file *file, struct vma *vma,
     }
 
     struct pcache_node *pcn = pcpage->pcache.pcache_node;
-    memmove(pa, pcn->data, bytes_to_read);
+    /* Compute sub-page offset within multi-page folio. */
+    uint64 folio_byte_off = (uint64)blkno_512 * 512ULL -
+                            (uint64)pcn->blkno * 512ULL;
+    memmove(pa, (char *)pcn->data + folio_byte_off, bytes_to_read);
     if (bytes_to_read < PGSIZE)
         memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
 
@@ -728,9 +754,11 @@ static int __tmpfs_file_writepage(struct vfs_file *file, loff_t offset,
     }
 
     struct pcache_node *pcn = pcpage->pcache.pcache_node;
-    memmove(pcn->data, data, len);
+    uint64 folio_off = (uint64)blkno_512 * 512 -
+                       (uint64)pcn->blkno * 512;
+    memmove((char *)pcn->data + folio_off, data, len);
     if (len < PGSIZE)
-        memset((char *)pcn->data + len, 0, PGSIZE - len);
+        memset((char *)pcn->data + folio_off + len, 0, PGSIZE - len);
 
     pcache_mark_page_dirty(pc, pcpage);
     pcache_put_page(pc, pcpage);

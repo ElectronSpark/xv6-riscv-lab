@@ -1,6 +1,8 @@
 set(MM_SOURCES
     kalloc.c
     page.c
+    folio.c
+    buffer.c
     slab.c
     sysmm.c
     pcache.c

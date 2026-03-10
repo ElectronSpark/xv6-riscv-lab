@@ -10,6 +10,7 @@
 
 typedef struct blkdev blkdev_t;
 typedef struct page_struct page_t;
+typedef struct folio folio_t;
 struct bio_vec;
 struct bio;
 struct bio_iter;

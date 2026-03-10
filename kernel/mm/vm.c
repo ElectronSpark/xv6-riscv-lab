@@ -35,6 +35,7 @@
 #include <mm/slab.h>
 #include <mm/pcache.h>
 #include <mm/rmap.h>
+#include <mm/folio.h>
 #include <smp/percpu.h>
 #include <smp/atomic.h>
 #include "list.h"
@@ -52,6 +53,13 @@
 
 #define VM_FILE_FAULT_AROUND_PAGES 16
 #define VM_MMAP_EAGER_PAGES 32
+
+/*
+ * Default compound order for anonymous folio allocation during demand faults.
+ * Order 2 = 4 pages = 16 KB.  The allocator falls back to smaller orders
+ * (down to 0) when the VMA is too small or memory is tight.
+ */
+#define VM_ANON_FOLIO_ORDER 2
 
 /* ========================================================================== */
 /*  Slab pools                                                                */
@@ -240,11 +248,13 @@ static void __vma_set_free(vma_t *vma)
 
             /* Release the page. */
             page_t *pg = __pa_to_page(pa);
-            if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE)) {
-                pcache_put_page(pg->pcache.pcache, pg);
+            page_t *pc_head = page_pcache_head(pg);
+            if (pc_head != NULL) {
+                folio_t *folio = page_folio(pc_head);
+                pcache_put_folio(pc_head->pcache.pcache, folio);
             } else {
                 if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
-                    page_remove_rmap(pg);
+                    folio_remove_rmap(page_folio(pg));
                 page_ref_dec((void *)pa);
             }
         }
@@ -323,15 +333,16 @@ static int __vma_copy(vma_t *dst, vma_t *src)
                    "__vma_copy: page refcnt should be greater than 0");
             page_t *pg = __pa_to_page(pa);
             if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) && !is_shared) {
+                folio_t *folio = page_folio(pg);
                 /* Bump mapcount for BOTH parent and child mappings.
                  * The parent's pages (e.g. from exec→mappages) may
                  * never have had page_add_anon_rmap called, so their
                  * mapcount could still be 0.  We must account for both
                  * so that the COW check (mapcount > 1) fires correctly
                  * when either process writes. */
-                if (page_mapcount(pg) == 0)
-                    page_add_anon_rmap(pg, src, a);
-                page_add_anon_rmap(pg, dst, a);
+                if (folio_mapcount(folio) == 0)
+                    folio_add_anon_rmap(folio, src, a);
+                folio_add_anon_rmap(folio, dst, a);
             }
         }
         vm_remote_sfence(src->vm);
@@ -820,6 +831,96 @@ int vma_free(vm_t *vm, vma_t *vma)
 /*  Demand paging / COW                                                       */
 /* ========================================================================== */
 
+/*
+ * __folio_order_for_vma - compute the largest folio order that fits in the
+ * VMA around @fault_va.  The folio base address must be naturally aligned,
+ * so we clamp both by VMA boundaries and by alignment.
+ *
+ * Returns an order in [0, VM_ANON_FOLIO_ORDER].
+ */
+static unsigned int __folio_order_for_vma(vma_t *vma, uint64 fault_va)
+{
+    for (int order = VM_ANON_FOLIO_ORDER; order > 0; order--) {
+        uint64 folio_size = (uint64)PGSIZE << order;
+        uint64 folio_base = fault_va & ~(folio_size - 1);
+        uint64 folio_end = folio_base + folio_size;
+        if (folio_base >= vma->start && folio_end <= vma->end)
+            return (unsigned int)order;
+    }
+    return 0;
+}
+
+/*
+ * __vma_map_anon_folio - allocate an anonymous folio and install PTEs for
+ * every page in it.  The caller must hold vm_pgtable_lock.
+ *
+ * @vma:       the faulting VMA
+ * @fault_va:  the page-aligned virtual address that caused the fault
+ * @pte_flags: permission bits to set on every PTE
+ *
+ * Only pages whose PTEs are still zero are populated; races with
+ * concurrent faults on the same folio range are handled gracefully by
+ * skipping already-populated PTEs.
+ *
+ * Returns the physical address of the page corresponding to @fault_va,
+ * or NULL on failure.  The folio's rmap is set up for the head page.
+ */
+static void *__vma_map_anon_folio(vma_t *vma, uint64 fault_va,
+                                  uint64 pte_flags)
+{
+    unsigned int order = __folio_order_for_vma(vma, fault_va);
+
+    /* Try the chosen order; fall back to smaller orders on OOM. */
+    folio_t *folio = NULL;
+    while (order > 0) {
+        folio = folio_alloc(order, PAGE_TYPE_ANON | GFP_HIGHMEM);
+        if (folio != NULL)
+            break;
+        order--;
+    }
+    if (folio == NULL) {
+        folio = folio_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+        if (folio == NULL)
+            return NULL;
+    }
+
+    uint64 folio_size = (uint64)PGSIZE << order;
+    uint64 folio_base_va = fault_va & ~(folio_size - 1);
+    uint64 folio_pa = folio_address(folio);
+
+    /* Zero the entire folio. */
+    memset((void *)folio_pa, 0, folio_size);
+
+    folio_add_anon_rmap(folio, vma, folio_base_va);
+
+    /* Map every page of the folio. */
+    unsigned long nr_pages = folio_nr_pages(folio);
+    void *fault_page_pa = NULL;
+    for (unsigned long i = 0; i < nr_pages; i++) {
+        uint64 va = folio_base_va + i * PGSIZE;
+        uint64 pa = folio_pa + i * PGSIZE;
+        if (va == fault_va)
+            fault_page_pa = (void *)pa;
+
+        pte_t *pte = walk(vma->vm->pagetable, va, 1, NULL, NULL);
+        if (pte == NULL)
+            continue; /* best-effort: we still own the folio */
+        if (*pte != 0)
+            continue; /* another thread (or fault-around) already mapped it */
+        *pte = mk_pte(pa, pte_flags);
+    }
+
+    /* For order > 0 folios mapped to multiple PTEs we bump refcount so
+     * that each PTE's eventual page_ref_dec still leaves the folio
+     * alive until the last PTE is torn down.  The folio starts with
+     * refcount 1 from folio_alloc.  We add (nr_pages - 1) refs. */
+    for (unsigned long i = 1; i < nr_pages; i++)
+        folio_get(folio);
+
+    sfence_vma();
+    return fault_page_pa;
+}
+
 static void *__vma_fault_file_page(vma_t *vma, uint64 va)
 {
     struct vfs_file *file = vma->file;
@@ -834,11 +935,11 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va)
      * Beyond EOF — return a zero anonymous page (no pcache mapping).
      */
     if (file_off >= (uint64)inode->size) {
-        void *pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
-        if (pa == NULL)
+        folio_t *folio = folio_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+        if (folio == NULL)
             return NULL;
-        memset(pa, 0, PGSIZE);
-        return pa;
+        memset((void *)folio_address(folio), 0, PGSIZE);
+        return (void *)folio_address(folio);
     }
 
     uint64 bytes_to_read = PGSIZE;
@@ -846,43 +947,50 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va)
         bytes_to_read = (uint64)inode->size - file_off;
 
     uint64 blkno_512 = file_off / BLK_SIZE;
-    page_t *pcpage = pcache_get_page(pc, blkno_512);
-    if (pcpage == NULL)
+    folio_t *pcfolio = pcache_get_folio(pc, blkno_512);
+    if (pcfolio == NULL)
         return NULL;
-    int ret = pcache_read_page(pc, pcpage);
+    int ret = pcache_read_folio(pc, pcfolio);
     if (ret != 0) {
-        pcache_put_page(pc, pcpage);
+        pcache_put_folio(pc, pcfolio);
         return NULL;
     }
 
     /*
      * Zero-copy path: if the page is fully covered by file data, map the
-     * pcache page directly into the user address space.  The pcache_get_page
+     * pcache page directly into the user address space.  The pcache_get_folio
      * ref (refcount >= 2) keeps the page pinned in the cache (off LRU).
-     * We do NOT call pcache_put_page here — the user PTE now owns that ref.
-     * __vma_set_free / munmap will call pcache_put_page when the mapping
+     * We do NOT call pcache_put_folio here — the user PTE now owns that ref.
+     * __vma_set_free / munmap will call pcache_put_folio when the mapping
      * is torn down.
      *
      * Partial pages (last page of a file that doesn't fill PGSIZE) must
      * still be copied so the tail is zero-filled.
      */
+    /* Compute the byte offset of the faulting page within the folio.
+     * For multi-page folios the PTE must point to the correct sub-page,
+     * not always the head. */
+    page_t *pcpage = &pcfolio->page;
+    struct pcache_node *pcn = pcpage->pcache.pcache_node;
+    uint64 folio_byte_off = (uint64)blkno_512 * BLK_SIZE -
+                            (uint64)pcn->blkno * BLK_SIZE;
+
     if (bytes_to_read == PGSIZE) {
-        struct pcache_node *pcn = pcpage->pcache.pcache_node;
-        return pcn->data;  /* pcache page PA — caller keeps the ref */
+        return (char *)pcn->data + folio_byte_off;
     }
 
     /* Partial page: fall back to copy so tail bytes are zeroed. */
-    void *pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
-    if (pa == NULL) {
-        pcache_put_page(pc, pcpage);
+    folio_t *anon_folio = folio_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+    if (anon_folio == NULL) {
+        pcache_put_folio(pc, pcfolio);
         return NULL;
     }
 
-    struct pcache_node *pcn = pcpage->pcache.pcache_node;
-    memmove(pa, pcn->data, bytes_to_read);
+    void *pa = (void *)folio_address(anon_folio);
+    memmove(pa, (char *)pcn->data + folio_byte_off, bytes_to_read);
     memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
 
-    pcache_put_page(pc, pcpage);
+    pcache_put_folio(pc, pcfolio);
     return pa;
 }
 
@@ -900,8 +1008,9 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
      */
     if (pte_present(pte) && pte_write(pte) && !pte_dirty(pte)) {
         page_t *pg = __pa_to_page(pte_pa(pte));
-        if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE))
-            pcache_mark_page_dirty(pg->pcache.pcache, pg);
+        page_t *pc_head = page_pcache_head(pg);
+        if (pc_head != NULL)
+            pcache_mark_page_dirty(pc_head->pcache.pcache, pc_head);
         pte_mkdirty(pte);
         sfence_vma_page(fault_va);
         return 0;
@@ -911,51 +1020,121 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
     void *pa = NULL;
 
     if (*pte == 0) {
-        /* Demand-zero: allocate a fresh anonymous page. */
+        /* Demand-zero: allocate a large anonymous folio and map all
+         * its pages into the VMA.  __vma_map_anon_folio handles
+         * fallback to order-0 when memory is tight. */
         if (anon_vma_prepare(vma) != 0)
             return -ENOMEM;
-        pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+        pa = __vma_map_anon_folio(vma, fault_va, vma->flags);
         if (pa == NULL)
             return -ENOMEM;
-        memset(pa, 0, PGSIZE);
-        page_t *pg = __pa_to_page((uint64)pa);
-        page_add_anon_rmap(pg, vma, fault_va);
+        /* PTEs and rmap already set up by __vma_map_anon_folio. */
+        return 0;
     } else if (pte_present(pte)) {
         /* Page present but not writable — check COW via mapcount. */
         page_t *old_page = __pa_to_page((uint64)addr);
-        if (old_page != NULL && PAGE_IS_TYPE(old_page, PAGE_TYPE_PCACHE)) {
+        page_t *pc_head = page_pcache_head(old_page);
+        if (pc_head != NULL) {
             /* Zero-copy pcache page: ALWAYS COW — we must never
              * modify the page cache directly.  Copy to a fresh
-             * anonymous page and release the pcache mapping ref.
+             * anonymous folio and release the pcache mapping ref.
              * Propagate dirty from PTE before dropping it. */
+            folio_t *old_folio = page_folio(pc_head);
             if (pte_dirty(pte))
-                pcache_mark_page_dirty(old_page->pcache.pcache, old_page);
+                pcache_mark_page_dirty(pc_head->pcache.pcache, pc_head);
             if (anon_vma_prepare(vma) != 0)
                 return -ENOMEM;
-            pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
-            if (pa == NULL)
+            folio_t *new_folio = folio_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+            if (new_folio == NULL)
                 return -ENOMEM;
+            pa = (void *)folio_address(new_folio);
             memmove(pa, addr, PGSIZE);
-            pcache_put_page(old_page->pcache.pcache, old_page);
-            page_t *new_page = __pa_to_page((uint64)pa);
-            page_add_anon_rmap(new_page, vma, fault_va);
+            pcache_put_folio(pc_head->pcache.pcache, old_folio);
+            folio_add_anon_rmap(new_folio, vma, fault_va);
         } else if (old_page != NULL && PAGE_IS_TYPE(old_page, PAGE_TYPE_ANON) &&
             page_mapcount(old_page) > 1) {
-            /* COW: multiple mappers — must copy. */
+            /* COW: multiple mappers — copy the entire folio at once so
+             * that subsequent write faults on sibling pages of the
+             * same folio can take the single-mapper fast path. */
+            folio_t *old_folio = page_folio(old_page);
+            unsigned int order = folio_order(old_folio);
             if (anon_vma_prepare(vma) != 0)
                 return -ENOMEM;
-            pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
-            if (pa == NULL)
-                return -ENOMEM;
-            memmove(pa, addr, PGSIZE);
-            page_remove_rmap(old_page);
-            assert(page_ref_dec(addr) >= 0,
-                   "vma_validate_pte_w: page_ref_dec failed for addr %p", addr);
-            page_t *new_page = __pa_to_page((uint64)pa);
-            page_add_anon_rmap(new_page, vma, fault_va);
+            folio_t *new_folio = folio_alloc(order, PAGE_TYPE_ANON | GFP_HIGHMEM);
+            if (new_folio == NULL) {
+                /* Fall back to single-page COW. */
+                new_folio = folio_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+                if (new_folio == NULL)
+                    return -ENOMEM;
+                pa = (void *)folio_address(new_folio);
+                memmove(pa, addr, PGSIZE);
+                folio_remove_rmap(old_folio);
+                page_ref_dec(addr);
+                folio_add_anon_rmap(new_folio, vma, fault_va);
+            } else {
+                /* Whole-folio COW: copy all pages, remap PTEs. */
+                uint64 old_folio_pa = folio_address(old_folio);
+                uint64 new_folio_pa = folio_address(new_folio);
+                unsigned long nr = folio_nr_pages(new_folio);
+                memmove((void *)new_folio_pa, (void *)old_folio_pa,
+                        nr * PGSIZE);
+                folio_add_anon_rmap(new_folio, vma, fault_va);
+
+                /* Walk the VMA range to find PTEs into the old folio. */
+                uint64 old_pa_base = old_folio_pa;
+                uint64 old_pa_end = old_folio_pa + nr * PGSIZE;
+                uint64 scan_start = vma->start;
+                uint64 scan_end = vma->end;
+
+                /* Drop the old folio's rmap BEFORE any page_ref_dec
+                 * that might free the page.  anon.mapcount and
+                 * buddy.lru_entry share the same union, so writing
+                 * mapcount after the page is back on the buddy list
+                 * would corrupt the free-list pointers. */
+                folio_remove_rmap(old_folio);
+
+                for (uint64 va = scan_start; va < scan_end; va += PGSIZE) {
+                    pte_t *p = walk(vma->vm->pagetable, va, 0, NULL, NULL);
+                    if (p == NULL || *p == 0 || !pte_present(p))
+                        continue;
+                    uint64 mapped_pa = pte_pa(p);
+                    if (mapped_pa >= old_pa_base && mapped_pa < old_pa_end) {
+                        uint64 page_off = mapped_pa - old_pa_base;
+                        *p = mk_pte(new_folio_pa + page_off, vma->flags);
+                        /* Drop old ref for this PTE. */
+                        page_ref_dec((void *)mapped_pa);
+                        /* Add new ref for this PTE. */
+                        if (new_folio_pa + page_off !=
+                            folio_address(new_folio))
+                            folio_get(new_folio);
+                    }
+                }
+                /* The fault_va PTE needs the new folio's page. */
+                uint64 fault_off = (uint64)addr - old_pa_base;
+                pa = (void *)(new_folio_pa + fault_off);
+            }
         } else if (old_page != NULL && PAGE_IS_TYPE(old_page, PAGE_TYPE_ANON) &&
                    page_mapcount(old_page) == 1) {
-            /* Single mapper fast path — just re-grant write, no copy. */
+            /* Single mapper fast path — re-grant write to all pages
+             * in the folio so sibling pages don't re-fault. */
+            folio_t *old_folio = page_folio(old_page);
+            unsigned int order = folio_order(old_folio);
+            if (order > 0) {
+                uint64 folio_pa = folio_address(old_folio);
+                uint64 folio_pa_end = folio_pa + folio_nr_pages(old_folio) * PGSIZE;
+                uint64 scan_start = vma->start;
+                uint64 scan_end = vma->end;
+                for (uint64 va = scan_start; va < scan_end; va += PGSIZE) {
+                    pte_t *p = walk(vma->vm->pagetable, va, 0, NULL, NULL);
+                    if (p == NULL || *p == 0 || !pte_present(p))
+                        continue;
+                    uint64 mapped_pa = pte_pa(p);
+                    if (mapped_pa >= folio_pa && mapped_pa < folio_pa_end)
+                        *p = mk_pte(mapped_pa, vma->flags);
+                }
+                sfence_vma();
+                return 0;
+            }
             pa = addr;
         } else {
             /* Non-anonymous or unmapped — just re-grant write. */
@@ -975,16 +1154,15 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte, uint64 fault_va)
     void *pa;
 
     if (*pte == 0) {
-        /* Demand-zero: allocate with full VMA permissions. */
+        /* Demand-zero: allocate a large anonymous folio. */
         if (anon_vma_prepare(vma) != 0)
             return -ENOMEM;
-        pa = page_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+        pa = __vma_map_anon_folio(vma, fault_va, vma->flags);
         if (pa == NULL)
             return -ENOMEM;
-        memset(pa, 0, PGSIZE);
-        page_t *pg = __pa_to_page((uint64)pa);
-        page_add_anon_rmap(pg, vma, fault_va);
-        *pte = mk_pte((uint64)pa, vma->flags);
+        /* PTEs and rmap already set up by __vma_map_anon_folio. */
+        sfence_vma_page(fault_va);
+        return 0;
     } else if (!pte_present(pte)) {
         return -EFAULT;
     } else {
@@ -998,7 +1176,7 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte, uint64 fault_va)
         pte_modify(pte, mflags);
         /* Keep pcache pages clean unless the PTE was already dirty. */
         page_t *pg = __pa_to_page(pte_pa(pte));
-        if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE) && !old_dirty)
+        if (page_is_pcache(pg) && !old_dirty)
             pte_mkclean(pte);
     }
 
@@ -1110,22 +1288,24 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                         return -ENOMEM;
 
                     page_t *fault_pg = __pa_to_page((uint64)pa);
-                    int is_pcache = (fault_pg != NULL &&
-                                     PAGE_IS_TYPE(fault_pg, PAGE_TYPE_PCACHE));
+                    page_t *fault_pc_head = page_pcache_head(fault_pg);
+                    int is_pcache = (fault_pc_head != NULL);
 
                     vm_pgtable_lock(vma->vm);
                     pte = walk(vma->vm->pagetable, fault_va, 1, NULL, NULL);
                     if (pte == NULL) {
                         vm_pgtable_unlock(vma->vm);
                         if (is_pcache)
-                            pcache_put_page(fault_pg->pcache.pcache, fault_pg);
+                            pcache_put_folio(fault_pc_head->pcache.pcache,
+                                             page_folio(fault_pc_head));
                         else
                             page_free(pa, 0);
                         return -ENOMEM;
                     }
                     if (*pte != 0) {
                         if (is_pcache)
-                            pcache_put_page(fault_pg->pcache.pcache, fault_pg);
+                            pcache_put_folio(fault_pc_head->pcache.pcache,
+                                             page_folio(fault_pc_head));
                         else
                             page_free(pa, 0);
                     } else {
@@ -1782,7 +1962,7 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
             if (mflags & PROT_WRITE) {
                 uint64 pa = pte_pa(pte);
                 page_t *pg = __pa_to_page(pa);
-                if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE) &&
+                if (page_is_pcache(pg) &&
                     !(vma->flags & VMA_FLAG_SHARED)) {
                     mflags &= ~PROT_WRITE;
                 } else if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
@@ -1800,9 +1980,10 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
             {
                 uint64 pa = pte_pa(pte);
                 page_t *pg = __pa_to_page(pa);
-                if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE)) {
+                page_t *pc_head = page_pcache_head(pg);
+                if (pc_head != NULL) {
                     if (old_dirty)
-                        pcache_mark_page_dirty(pg->pcache.pcache, pg);
+                        pcache_mark_page_dirty(pc_head->pcache.pcache, pc_head);
                     pte_mkclean(pte);
                 }
             }
@@ -1919,8 +2100,9 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
             *new_pte = *old_pte;
             page_t *pg = __pa_to_page(pa);
             if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON)) {
-                page_remove_rmap(pg);
-                page_add_anon_rmap(pg, new_vma, new_location + offset);
+                folio_t *folio = page_folio(pg);
+                folio_remove_rmap(folio);
+                folio_add_anon_rmap(folio, new_vma, new_location + offset);
             }
             pte_clear(old_pte);
         }
@@ -2124,11 +2306,13 @@ int vm_madvise(vm_t *vm, uint64 addr, size_t size, int advice)
 
                     /* Release the page. */
                     page_t *pg = __pa_to_page(pa);
-                    if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_PCACHE)) {
-                        pcache_put_page(pg->pcache.pcache, pg);
+                    page_t *pc_head = page_pcache_head(pg);
+                    if (pc_head != NULL) {
+                        folio_t *folio = page_folio(pc_head);
+                        pcache_put_folio(pc_head->pcache.pcache, folio);
                     } else {
                         if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
-                            page_remove_rmap(pg);
+                            folio_remove_rmap(page_folio(pg));
                         page_ref_dec((void *)pa);
                     }
                 } else {
@@ -2562,7 +2746,8 @@ uint64 kvm_mmap(uint64 addr, size_t size, uint64 flags)
 
     /* Eagerly allocate and map every page — no lazy allocation, no COW. */
     for (uint64 a = map_addr; a < map_addr + size; a += PGSIZE) {
-        void *pa = page_alloc(0, PAGE_TYPE_ANON);
+        folio_t *folio = folio_alloc(0, PAGE_TYPE_ANON);
+        void *pa = folio ? (void *)folio_address(folio) : NULL;
         if (pa == NULL) {
             /* Roll back: unmap and free pages we already mapped. */
             for (uint64 b = map_addr; b < a; b += PGSIZE) {
