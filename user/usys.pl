@@ -119,3 +119,7 @@ entry("kevent_register");
 entry("kevent_wait");
 
 entry("netconf");
+
+# Power management
+entry("poweroff");
+entry("reboot");

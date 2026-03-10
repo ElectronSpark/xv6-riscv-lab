@@ -11,10 +11,20 @@
 #include "defs.h"
 #include "printf.h"
 #include "dev/fdt.h"
+#include "dev/x1_i2c.h"
 #include "sbi.h"
 #include "proc/sched.h"
 #include "lock/rcu.h"
 #include <smp/percpu.h>
+
+/*
+ * SPM8821 PMIC power control register (at I2C register address 0x7E).
+ * Bit 1 (0x02): SW_RESET   — triggers a full system reboot.
+ * Bit 2 (0x04): SW_SHUTDOWN — triggers a full power-off.
+ */
+#define SPM8821_PWR_CTRL2           0x7e
+#define SPM8821_SW_RESET_BIT        0x02
+#define SPM8821_SW_SHUTDOWN_BIT     0x04
 
 uint64 platform_default_mem_base(void)
 {
@@ -89,4 +99,75 @@ void platform_boot_mark(const char *msg)
 {
     /* No-op — RISC-V has no debugcon; use printf for diagnostics. */
     (void)msg;
+}
+
+/**
+ * Attempt power-off via the SPM8821 PMIC over I2C (reg 0x7e bit 2).
+ * Returns 0 on success (caller should WFI-loop), -1 if unavailable.
+ */
+static int pmic_power_action(uint8 bit)
+{
+    if (!platform.has_pmic_power)
+        return -1;
+
+    int bus  = (int)platform.pmic_power_bus;
+    uint8 addr = (uint8)platform.pmic_power_addr;
+
+    if (!x1_i2c_is_ready(bus)) {
+        printf("pmic: I2C bus %d not ready\n", bus);
+        return -1;
+    }
+
+    uint8 val = 0;
+    int rc = x1_i2c_read_reg8(bus, addr, SPM8821_PWR_CTRL2, &val);
+    if (rc < 0) {
+        printf("pmic: read reg 0x%x failed (%d)\n", SPM8821_PWR_CTRL2, rc);
+        return -1;
+    }
+
+    printf("pmic: PWR_CTRL2=0x%x -> 0x%x\n", val, val | bit);
+    rc = x1_i2c_write_reg8(bus, addr, SPM8821_PWR_CTRL2, val | bit);
+    if (rc < 0) {
+        printf("pmic: write reg 0x%x failed (%d)\n", SPM8821_PWR_CTRL2, rc);
+        return -1;
+    }
+    return 0;
+}
+
+void platform_shutdown(void)
+{
+    printf("System shutting down...\n");
+
+    if (sbi_ext_is_available(SBI_EXT_ID_SRST)) {
+        sbi_shutdown();
+    } else if (pmic_power_action(SPM8821_SW_SHUTDOWN_BIT) == 0) {
+        printf("pmic: shutdown requested\n");
+    } else {
+        /* Fallback: legacy SBI shutdown (EID 0x08) */
+        printf("SRST unavailable, using legacy SBI shutdown\n");
+        sbi_ecall(SBI_EXT_LEGACY_SHUTDOWN, 0, 0, 0, 0, 0, 0, 0);
+    }
+
+    /* Should not return; spin just in case */
+    for (;;)
+        asm volatile("wfi");
+}
+
+void platform_reboot(void)
+{
+    printf("System rebooting...\n");
+
+    if (sbi_ext_is_available(SBI_EXT_ID_SRST)) {
+        sbi_reboot();
+    } else if (pmic_power_action(SPM8821_SW_RESET_BIT) == 0) {
+        printf("pmic: reboot requested\n");
+    } else {
+        /* No SRST and no PMIC — shut down instead */
+        printf("cannot reboot; shutting down\n");
+        sbi_ecall(SBI_EXT_LEGACY_SHUTDOWN, 0, 0, 0, 0, 0, 0, 0);
+    }
+
+    /* Should not return; spin just in case */
+    for (;;)
+        asm volatile("wfi");
 }

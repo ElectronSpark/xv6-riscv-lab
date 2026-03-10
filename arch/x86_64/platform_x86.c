@@ -587,3 +587,39 @@ void platform_boot_mark(const char *msg)
 {
     x86_debug_puts(msg);
 }
+
+/**
+ * Write a 16-bit value to an I/O port.
+ * Needed for ACPI PM1a control register (shutdown).
+ */
+static inline void x86_outw(uint16 port, uint16 value)
+{
+    asm volatile("outw %0, %1" : : "a"(value), "Nd"(port));
+}
+
+void platform_shutdown(void)
+{
+    printf("System shutting down...\n");
+
+    /* QEMU PIIX4/Q35 ACPI shutdown:
+     * Write SLP_TYP=5 | SLP_EN to PM1a control register at port 0x604.
+     * This causes QEMU to exit cleanly. */
+    x86_outw(0x604, 0x2000);
+
+    /* Fallback: spin with HLT if ACPI shutdown didn't work */
+    for (;;)
+        asm volatile("hlt");
+}
+
+void platform_reboot(void)
+{
+    printf("System rebooting...\n");
+
+    /* Keyboard controller reset via PS/2 port:
+     * Writing 0xFE to port 0x64 pulses the CPU reset line. */
+    x86_debug_outb(0x64, 0xFE);
+
+    /* Fallback: spin with HLT if keyboard reset didn't work */
+    for (;;)
+        asm volatile("hlt");
+}

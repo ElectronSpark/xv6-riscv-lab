@@ -184,6 +184,8 @@ static const char *syscall_name(int num) {
     case 163: return "pwritev";
     case 164: return "preadv2";
     case 165: return "pwritev2";
+    case 166: return "poweroff";
+    case 873: return "reboot";
     default: return "???";
     }
 }
@@ -464,6 +466,10 @@ extern uint64 sys_utimensat(void);
 extern uint64 sys_memfd_create(void);
 extern uint64 sys_membarrier(void);
 
+// Power management (kernel/power.c)
+extern uint64 sys_poweroff(void);
+extern uint64 sys_reboot(void);
+
 // System V IPC syscalls (ipc/*.c)
 extern uint64 sys_shmget(void);
 extern uint64 sys_shmat(void);
@@ -691,6 +697,8 @@ STATIC uint64 (*syscalls[])(void) = {
     [SYS_setpriority] sys_setpriority,
     [SYS_memfd_create] sys_memfd_create,
     [SYS_membarrier] sys_membarrier,
+    [SYS_poweroff] sys_poweroff,
+    [SYS_reboot] sys_reboot,
 };
 
 void syscall(void) {

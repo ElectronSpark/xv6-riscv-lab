@@ -30,6 +30,23 @@ _entry:
     /* BSP (hartid 0): stack top = boot_stacks + 1 * KERNEL_STACK_SIZE */
     movl $(boot_stacks + 16384), %esp
 
+    /*
+     * Clear BSS section so all globals start at zero on warm reboot.
+     * Must happen BEFORE setup_page_tables because the boot page tables
+     * (pml4_table, pdpt_table, etc.) live in BSS.
+     * On a cold boot the ELF loader already zeroes BSS, but after a
+     * keyboard-controller reset (reboot) QEMU preserves RAM contents.
+     */
+    movl $_bss, %edi
+    movl $_bss_end, %ecx
+    subl %edi, %ecx
+    shrl $2, %ecx               /* count in 4-byte dwords */
+    xorl %eax, %eax
+    rep stosl
+
+    /* Re-save boot_params_ptr (it's in BSS, just got zeroed) */
+    movl %ebx, boot_params_ptr
+
     call setup_page_tables
 
     lgdt gdt64_desc

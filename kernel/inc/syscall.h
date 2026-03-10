@@ -181,8 +181,11 @@
 #define SYS_preadv2        164
 #define SYS_pwritev2       165
 
+// --- Power management ---
+#define SYS_poweroff       166
+
 // Max syscall number (update when adding new syscalls)
-#define SYS_MAXNUM         165
+#define SYS_MAXNUM         166
 
 // --- Linux time64 compatibility stubs used by musl on rv64 ---
 // These are intentionally unsupported in xv6 and return -ENOSYS via
@@ -259,5 +262,8 @@
 #define SYS_epoll_ctl       987
 #define SYS_epoll_create1   988
 #define SYS_membarrier      998
+
+// --- Power management (high number for musl compat) ---
+#define SYS_reboot          873
 
 #endif /* __KERNEL_SYSCALL_H */

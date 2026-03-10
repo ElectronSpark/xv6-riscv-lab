@@ -109,9 +109,10 @@ enum sbi_ext_id {
 #define SBI_DBCN_READ 1
 #define SBI_DBCN_WRITE_BYTE 2
 
-// SBI Legacy Console extension (deprecated but widely supported)
+// SBI Legacy extensions (deprecated but widely supported)
 #define SBI_EXT_LEGACY_CONSOLE_PUTCHAR 0x01
 #define SBI_EXT_LEGACY_CONSOLE_GETCHAR 0x02
+#define SBI_EXT_LEGACY_SHUTDOWN 0x08
 
 #ifndef __ASSEMBLER__
 

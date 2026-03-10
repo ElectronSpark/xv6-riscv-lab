@@ -111,4 +111,20 @@ void platform_late_device_init(void);
  */
 void platform_boot_mark(const char *msg);
 
+/**
+ * Shut down the machine (power off).
+ * RISC-V: SBI SRST shutdown.
+ * x86:    ACPI PM1a control register.
+ * Does not return on success.
+ */
+void platform_shutdown(void);
+
+/**
+ * Reboot the machine (cold reset).
+ * RISC-V: SBI SRST cold reboot.
+ * x86:    keyboard controller reset (PS/2 port 0x64).
+ * Does not return on success.
+ */
+void platform_reboot(void);
+
 #endif /* __KERNEL_PLATFORM_H */

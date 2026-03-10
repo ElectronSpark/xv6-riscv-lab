@@ -202,6 +202,10 @@ int kqueue(void);
 int kevent_register(int kqfd, struct kevent *changelist, int nchanges);
 int kevent_wait(int kqfd, struct kevent *eventlist, int nevents, int timeout_ms);
 
+// Power management
+int poweroff(void);
+int reboot(void);
+
 // gdb support — execute breakpoint to pause and wait for a debugger.
 // The kernel prints the PID and connection instructions.
 // arg0 flag: 0 = don't stop on exec, 1 = stop at entry point after exec.

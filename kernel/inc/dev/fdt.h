@@ -240,6 +240,13 @@ struct platform_info {
     int has_pmic_rtc;
     uint32 pmic_rtc_bus;
     uint32 pmic_rtc_addr;
+
+    // SPM8821 PMIC power management (reboot/shutdown via I2C).
+    // When SBI SRST is unavailable, we talk to the PMIC directly.
+    // Register 0x7e (PWR_CTRL2): bit 1 = SW_RESET, bit 2 = SW_SHUTDOWN.
+    int has_pmic_power;
+    uint32 pmic_power_bus;   // I2C adapter-id hosting the PMIC
+    uint32 pmic_power_addr;  // I2C slave address (e.g. 0x41)
 };
 
 // Global platform info (populated by fdt_init)

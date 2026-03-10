@@ -1205,6 +1205,8 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
     // SDHCI (SpacemiT X1 SD/eMMC host controller)
     static const char *sdhci_compat[] = {"ky,x1-sdhci", "spacemit,k1-sdhci",
                                           "marvell,sdhci-pxa1928", NULL};
+    // Watchdog (SpacemiT K1X — for reboot when SRST unavailable)
+
 
     // Parse /soc node for devices (common structure)
     struct fdt_node *soc = fdt_node_lookup(root, "soc", NULL);
@@ -1382,7 +1384,7 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
                    platform.i2c[idx].fast_mode ? " fast" : "",
                    platform.i2c[idx].high_mode ? " high" : "");
 
-            if (!platform.has_pmic_rtc) {
+            if (!platform.has_pmic_rtc || !platform.has_pmic_power) {
                 struct rb_node *child_rb = rb_first_node(&node->children);
                 while (child_rb) {
                     struct fdt_node *child =
@@ -1399,32 +1401,45 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
                     struct fdt_node *child_reg = __fdt_get_prop(child, "reg");
                     uint32 pmic_addr = child_reg ? __fdt_prop_u32(child_reg, 0) : 0;
 
-                    struct rb_node *grand_rb = rb_first_node(&child->children);
-                    while (grand_rb) {
-                        struct fdt_node *grand =
-                            container_of(grand_rb, struct fdt_node, rb_entry);
-                        grand_rb = rb_next_node(grand_rb);
+                    /* Record PMIC for power management (reboot/shutdown) */
+                    if (!platform.has_pmic_power && pmic_addr) {
+                        platform.has_pmic_power = 1;
+                        platform.pmic_power_bus = platform.i2c[idx].adapter_id;
+                        platform.pmic_power_addr = pmic_addr;
+                        printf("fdt: PMIC power on I2C%d addr 0x%x\n",
+                               platform.pmic_power_bus,
+                               platform.pmic_power_addr);
+                    }
 
-                        struct fdt_node *grand_compat =
-                            __fdt_get_prop(grand, "compatible");
-                        if (!__fdt_prop_compat_list(grand_compat,
-                                                    pmic_rtc_compat) ||
-                            !__fdt_node_enabled(grand)) {
-                            continue;
+                    if (!platform.has_pmic_rtc) {
+                        struct rb_node *grand_rb =
+                            rb_first_node(&child->children);
+                        while (grand_rb) {
+                            struct fdt_node *grand = container_of(
+                                grand_rb, struct fdt_node, rb_entry);
+                            grand_rb = rb_next_node(grand_rb);
+
+                            struct fdt_node *grand_compat =
+                                __fdt_get_prop(grand, "compatible");
+                            if (!__fdt_prop_compat_list(grand_compat,
+                                                        pmic_rtc_compat) ||
+                                !__fdt_node_enabled(grand)) {
+                                continue;
+                            }
+
+                            platform.has_pmic_rtc = 1;
+                            platform.pmic_rtc_bus =
+                                platform.i2c[idx].adapter_id;
+                            platform.pmic_rtc_addr = pmic_addr;
+                            printf("fdt: found PMIC RTC on I2C%d addr 0x%x\n",
+                                   platform.pmic_rtc_bus,
+                                   platform.pmic_rtc_addr);
+                            break;
                         }
-
-                        platform.has_pmic_rtc = 1;
-                        platform.pmic_rtc_bus = platform.i2c[idx].adapter_id;
-                        platform.pmic_rtc_addr = pmic_addr;
-                        printf("fdt: found PMIC RTC on I2C%d addr 0x%x\n",
-                               platform.pmic_rtc_bus,
-                               platform.pmic_rtc_addr);
-                        break;
                     }
 
-                    if (platform.has_pmic_rtc) {
+                    if (platform.has_pmic_rtc && platform.has_pmic_power)
                         break;
-                    }
                 }
             }
 

@@ -161,6 +161,8 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/crashtest.c
     ${USER_DIR}/syscalltest.c
     ${USER_DIR}/iovectest.c
+    ${USER_DIR}/shutdown.c
+    ${USER_DIR}/reboot.c
 )
 
 # Lab-specific programs
@@ -1965,7 +1967,7 @@ endfunction()
 set(USERLIB_ONLY_PROGS
     bigfile cloexectest clonetest cowtest cp dd devtest dh dumpchan dumpinode
     dumppcache dumprq find free forktest grind kqueuetest losetup lsblk mkfs_xv6fs mknod mmapbigfile mmaptest mount pingpong
-    mv primes ps randtest rm stressfs symlinktest sync testsig umount kprofile
+    mv primes ps randtest reboot rm shutdown stressfs symlinktest sync testsig umount kprofile
     usertests vforktest waitgdb wallclock xargs zombie top
     syscalltest iovectest
 )
