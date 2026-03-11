@@ -789,6 +789,13 @@ int slab_cache_destroy(slab_cache_t *cache) {
         return -1;
     }
     __slab_cache_free_tmp_list(&tmp_list, shrink_ret);
+
+    spin_lock(&__all_slab_caches_lock);
+    if (!LIST_ENTRY_IS_DETACHED(&cache->cache_list_entry)) {
+        list_entry_detach(&cache->cache_list_entry);
+    }
+    spin_unlock(&__all_slab_caches_lock);
+
     slab_cache_t_free(cache);
     return 0;
 }

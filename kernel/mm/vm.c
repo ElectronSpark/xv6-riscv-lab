@@ -69,6 +69,7 @@ static slab_cache_t __vma_pool = {0};
 static slab_cache_t __vm_pool = {0};
 
 static void __vm_destroy(vm_t *vm);
+static int __vm_unmap_range_locked(vm_t *vm, uint64 start, uint64 end);
 
 static void __vma_pool_init(void) {
     slab_cache_init(&__vma_pool, "vm area", sizeof(vma_t),
@@ -295,6 +296,7 @@ static int __vma_copy(vma_t *dst, vma_t *src)
     }
 
     int is_shared = (src->flags & VMA_FLAG_SHARED) != 0;
+    int src_tlb_flush_needed = 0;
 
     /* For non-shared (COW) VMAs, ensure the parent has an anon_vma before
      * we enter the PTE loop.  This is required so that:
@@ -329,7 +331,10 @@ static int __vma_copy(vma_t *dst, vma_t *src)
             } else {
                 /* COW: clear write on both, no PTE_RSW_w needed —
                  * COW is detected via mapcount > 1 at fault time. */
-                pte_wrprotect(src_pte);
+                if (pte_write(src_pte)) {
+                    pte_wrprotect(src_pte);
+                    src_tlb_flush_needed = 1;
+                }
                 *new_pte = *src_pte;
             }
             uint64 pa = pte_pa(src_pte);
@@ -351,7 +356,8 @@ static int __vma_copy(vma_t *dst, vma_t *src)
                 page_add_anon_rmap(pg, dst, a);
             }
         }
-        vm_remote_sfence(src->vm);
+        if (src_tlb_flush_needed)
+            vm_remote_sfence(src->vm);
     }
 
     /* Set up anon_vma chain for the child VMA. */
@@ -674,6 +680,13 @@ vma_t *vma_split(vma_t *vma, uint64 va)
     } else {
         new_vma->file = NULL;
         new_vma->pgoff = 0;
+    }
+
+    if (vma->anon_vma != NULL && anon_vma_fork(new_vma, vma) != 0) {
+        if (new_vma->file != NULL)
+            vfs_fput(new_vma->file);
+        __vma_free(new_vma);
+        return NULL;
     }
 
     uint64 old_end = vma->end;
@@ -1008,6 +1021,24 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
     if (pte_write_ready(pte))
         return 0;
 
+    if (pte_present(pte)) {
+        page_t *pg = __pa_to_page(pte_pa(pte));
+        page_t *pc_head = page_pcache_head(pg);
+
+        /*
+         * MAP_SHARED pcache pages are installed clean and write-protected
+         * so the first write faults through here on every architecture.
+         * Mark the backing cache dirty, then re-enable writes in-place
+         * instead of taking the MAP_PRIVATE COW path below.
+         */
+        if (pc_head != NULL && (vma->flags & VMA_FLAG_SHARED)) {
+            pcache_mark_page_dirty(pc_head->pcache.pcache, pc_head);
+            *pte = mk_pte(pte_pa(pte), vma->flags);
+            sfence_vma_page(fault_va);
+            return 0;
+        }
+    }
+
     /*
      * Fast path: writable PTE that only needs the dirty bit set.
      * This happens on RISC-V implementations that trap instead of
@@ -1333,7 +1364,7 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                             page_free(pa, 0);
                     } else {
                         uint64 pte_flags = vma->flags;
-                        if (is_pcache && !(vma->flags & VMA_FLAG_SHARED))
+                        if (is_pcache)
                             pte_flags &= ~PROT_WRITE;
                         *pte = mk_pte((uint64)pa, pte_flags);
                         if (is_pcache)
@@ -1979,14 +2010,13 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
             /* rmap-based COW: if page has mapcount > 1 and we're trying
              * to grant write, suppress write — the write-fault handler
              * will resolve it via COW when the page is actually written.
-             * For pcache pages in MAP_PRIVATE VMAs, suppress write to
-             * force COW.  MAP_SHARED pcache pages are writable but will
-             * have D cleared below for dirty tracking. */
+             * All pcache pages stay write-protected in the PTE so the
+             * first write faults and we can either COW (MAP_PRIVATE) or
+             * mark the backing cache dirty (MAP_SHARED) explicitly. */
             if (mflags & PROT_WRITE) {
                 uint64 pa = pte_pa(pte);
                 page_t *pg = __pa_to_page(pa);
-                if (page_is_pcache(pg) &&
-                    !(vma->flags & VMA_FLAG_SHARED)) {
+                if (page_is_pcache(pg)) {
                     mflags &= ~PROT_WRITE;
                 } else if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
                     page_mapcount(pg) > 1) {
@@ -2030,6 +2060,9 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
                  int flags, uint64 new_addr)
 {
     uint64 ret = (uint64)-1;
+    uint64 new_location = 0;
+    uint64 new_location_end = 0;
+    vma_t *new_vma = NULL;
     vm_wlock(vm);
 
     if (vm == NULL || vm->pagetable == NULL)
@@ -2038,6 +2071,11 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
     old_addr = PGROUNDDOWN(old_addr);
     old_size = PGROUNDUP(old_size);
     new_size = PGROUNDUP(new_size);
+
+    if ((flags & MREMAP_FIXED) && !(flags & MREMAP_MAYMOVE))
+        goto out;
+    if ((flags & MREMAP_FIXED) && (new_addr & (PGSIZE - 1)) != 0)
+        goto out;
 
     if (old_size > (vm->vm_top - vm->vm_bottom) || new_size > (vm->vm_top - vm->vm_bottom))
         goto out;
@@ -2094,13 +2132,38 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
     if (!(flags & MREMAP_MAYMOVE))
         goto out;
 
-    uint64 new_location = vm_find_free_range(vm, new_size, 0);
-    if (new_location == 0)
-        goto out;
+    if (flags & MREMAP_FIXED) {
+        new_location = new_addr;
+        new_location_end = new_location + new_size;
+        if (new_location_end < new_location)
+            goto out;
+        if (new_location < vm->vm_bottom || new_location_end > vm->vm_top)
+            goto out;
+        if (!(new_location_end <= old_addr ||
+              new_location >= old_addr + old_size))
+            goto out;
+        if (__vm_unmap_range_locked(vm, new_location, new_location_end) != 0)
+            goto out;
+    } else {
+        new_location = vm_find_free_range(vm, new_size, 0);
+        if (new_location == 0)
+            goto out;
+        new_location_end = new_location + new_size;
+    }
 
-    vma_t *new_vma = vma_alloc(vm, new_location, new_size, vma->flags);
+    new_vma = vma_alloc(vm, new_location, new_size, vma->flags);
     if (new_vma == NULL)
         goto out;
+
+    if (vma->file != NULL) {
+        new_vma->file = vfs_fdup(vma->file);
+        if (new_vma->file == NULL)
+            goto err_new_vma;
+        new_vma->pgoff = vma->pgoff;
+    }
+
+    if (vma->anon_vma != NULL && anon_vma_fork(new_vma, vma) != 0)
+        goto err_new_vma;
 
     for (uint64 offset = 0; offset < old_size; offset += PGSIZE) {
         pte_t *old_pte = walk(vm->pagetable, old_addr + offset, 0, NULL, NULL);
@@ -2110,27 +2173,29 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
             pte_t *new_pte =
                 walk(vm->pagetable, new_location + offset, 1, NULL, NULL);
             if (new_pte == NULL)
-                goto out;
-            /* Move the PTE: copy full value, then clear old.
-             * This is a MOVE, not a copy — the page reference count
-             * stays the same because we clear the old PTE (preventing
-             * vma_free from decrementing it) and install the new PTE
-             * (which will be decremented when the new VMA is freed).
-             * We must NOT call page_ref_inc here — doing so would leak
-             * a reference because vma_free(old) finds the PTE already
-             * cleared and skips cleanup.
-             * Transfer rmap: remove from old VMA, add to new. */
+                goto err_new_vma;
+            if (*new_pte != 0)
+                goto err_new_vma;
+
+            /* Copy the mapping first and hold an extra page reference.
+             * The old VMA remains intact until the new one is fully built,
+             * so failures can unwind by freeing the new VMA only. */
             *new_pte = *old_pte;
+            if (page_ref_inc((void *)pa) <= 0)
+                goto err_new_vma;
             page_t *pg = __pa_to_page(pa);
             /* Only update rmap for HEAD pages (PAGE_TYPE_ANON).
              * Tail pages are skipped — their union stores head_page. */
             if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON)) {
-                page_remove_rmap(pg);
                 page_add_anon_rmap(pg, new_vma, new_location + offset);
             }
-            pte_clear(old_pte);
         }
     }
+
+    if (vma == vm->heap)
+        vm->heap = new_vma;
+    if (vma == vm->stack)
+        vm->stack = new_vma;
 
     vma_free(vm, vma);
     vm_remote_sfence(vm);
@@ -2139,6 +2204,11 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
         vm_remote_fence_i(vm);
 
     ret = new_location;
+    goto out;
+
+err_new_vma:
+    if (new_vma != NULL)
+        vma_free(vm, new_vma);
 out:
     vm_wunlock(vm);
     return ret;
@@ -2210,8 +2280,9 @@ int vm_msync(vm_t *vm, uint64 addr, size_t size, int flags)
 
         /* MS_SYNC: flush data to stable storage before returning. */
         if (flags & MS_SYNC) {
+            uint64 file_off = vma->pgoff + (addr - vma->start);
             if (file->ops != NULL && file->ops->fsync != NULL)
-                ret = file->ops->fsync(file, (loff_t)addr,
+                ret = file->ops->fsync(file, (loff_t)file_off,
                                        (loff_t)size);
         }
     }
@@ -2508,6 +2579,10 @@ static int __vm_unmap_range_locked(vm_t *vm, uint64 start, uint64 end)
 {
     while (start < end) {
         vma_t *vma = vm_find_area(vm, start);
+        vma_t *tail = NULL;
+        int is_heap = 0;
+        int is_stack = 0;
+        int split_left = 0;
         if (vma == NULL) {
             /* In a gap — find the next VMA in the range. */
             uint64 next_idx = start;
@@ -2519,21 +2594,25 @@ static int __vm_unmap_range_locked(vm_t *vm, uint64 start, uint64 end)
             if (start >= end)
                 break;
         }
+        is_heap = (vma == vm->heap);
+        is_stack = (vma == vm->stack);
         if (vma->start < start) {
             vma_t *right = vma_split(vma, start);
             if (right == NULL)
                 return -ENOMEM;
+            split_left = 1;
             vma = right;
         }
         if (vma->end > end) {
-            if (vma_split(vma, end) == NULL)
+            tail = vma_split(vma, end);
+            if (tail == NULL)
                 return -ENOMEM;
         }
         uint64 next = vma->end;
-        if (vma == vm->heap)
-            vm->heap = NULL;
-        if (vma == vm->stack)
-            vm->stack = NULL;
+        if (is_heap && !split_left)
+            vm->heap = tail;
+        if (is_stack && !split_left)
+            vm->stack = tail;
         vma_free(vm, vma);
         start = next;
     }

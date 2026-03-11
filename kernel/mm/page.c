@@ -1365,7 +1365,8 @@ static void __page_buddy_init_range(uint64 pa_start, uint64 pa_end,
             pa += block_size;
         }
         order--;
-        block_size = PAGE_SIZE << order;
+        if (order >= 0)
+            block_size = PAGE_SIZE << order;
     }
 }
 

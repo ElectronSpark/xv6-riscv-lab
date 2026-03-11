@@ -189,7 +189,8 @@ static int __pcache_init_validate(struct pcache *pcache) {
     if (pcache->ops == NULL) {
         return -EINVAL;
     }
-    if (pcache->ops->read_page == NULL || pcache->ops->write_page == NULL) {
+    if ((pcache->ops->read_page == NULL || pcache->ops->write_page == NULL) &&
+        (pcache->ops->read_folio == NULL || pcache->ops->write_folio == NULL)) {
         return -EINVAL;
     }
     if (pcache->blk_count == 0) {
@@ -1555,9 +1556,19 @@ void pcache_put_page(struct pcache *pcache, page_t *page) {
     page_lock_acquire(page);
 
     if (!__pcache_page_valid(pcache, page)) {
-        printf("pcache_put_page(): invalid page %p for cache %p\n", page,
-               pcache);
-        goto unlock;
+        int detached_race = PAGE_IS_TYPE(page, PAGE_TYPE_PCACHE) &&
+                            page->pcache.pcache == NULL;
+
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+
+        if (detached_race) {
+            __page_ref_dec(page);
+        } else {
+            printf("pcache_put_page(): invalid page %p for cache %p\n", page,
+                   pcache);
+        }
+        return;
     }
 
     pcnode = page->pcache.pcache_node;

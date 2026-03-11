@@ -123,6 +123,75 @@ static inline struct xa_node *xa_head_to_node(void *head)
     return NULL;
 }
 
+static inline bool node_get_mark(const struct xa_node *node, uint8 offset,
+                                 xa_mark_t mark);
+static inline void node_clear_mark(struct xa_node *node, uint8 offset,
+                                   xa_mark_t mark);
+static inline bool node_any_mark(const struct xa_node *node, xa_mark_t mark);
+
+static void *xa_resolve_sibling(struct xa_node *node, uint8 *offset)
+{
+    void *entry;
+    uint8 cur;
+
+    if (node == NULL || offset == NULL)
+        return NULL;
+
+    cur = *offset;
+    entry = xa_slot_load((void *_Atomic *)&node->slots[cur]);
+    while (xa_is_sibling(entry)) {
+        uint8 sibling = xa_to_sibling(entry);
+        if (sibling >= XA_CHUNK_SIZE)
+            return NULL;
+        cur = sibling;
+        entry = xa_slot_load((void *_Atomic *)&node->slots[cur]);
+    }
+
+    *offset = cur;
+    return entry;
+}
+
+static uint8 xa_sibling_span(struct xa_node *node, uint8 canonical_offset)
+{
+    uint8 span = 1;
+
+    if (node == NULL)
+        return 0;
+
+    while ((uint16)canonical_offset + span < XA_CHUNK_SIZE) {
+        void *entry = xa_slot_load(
+            (void *_Atomic *)&node->slots[canonical_offset + span]);
+        if (!xa_is_sibling(entry) ||
+            xa_to_sibling(entry) != canonical_offset)
+            break;
+        span++;
+    }
+
+    return span;
+}
+
+static void xa_clear_marks_at(struct xa_state *xas, struct xa_node *node,
+                              uint8 offset)
+{
+    for (xa_mark_t m = 0; m < XA_MAX_MARKS; m++) {
+        if (!node_get_mark(node, offset, m))
+            continue;
+
+        node_clear_mark(node, offset, m);
+
+        struct xa_node *cur = node;
+        while (cur->parent) {
+            uint8 off = cur->offset;
+            if (node_any_mark(cur, m))
+                break;
+            cur = cur->parent;
+            node_clear_mark(cur, off, m);
+        }
+    }
+
+    (void)xas;
+}
+
 #define XA_HEAD_MARK_SHIFT 29
 #define XA_HEAD_MARK_MASK  ((((1U << XA_MAX_MARKS) - 1U) << XA_HEAD_MARK_SHIFT))
 
@@ -418,9 +487,14 @@ static void *xas_descend_to_leaf(struct xa_state *xas)
         xas->xa_node = node;
         xas->xa_offset = offset;
         xas->xa_shift = node->shift;
+        xas->xa_sibs = 0;
 
         if (node->shift == 0) {
-            /* Leaf level — entry is a user entry (or NULL). */
+            /* Leaf level — resolve sibling entries back to their canonical
+             * slot so loads and mark operations see the real entry. */
+            entry = xa_resolve_sibling(node, &xas->xa_offset);
+            if (entry != NULL && xas->xa_offset == offset)
+                xas->xa_sibs = xa_sibling_span(node, xas->xa_offset) - 1;
             return entry;
         }
 
@@ -599,6 +673,10 @@ void *xas_store(struct xa_state *xas, void *entry)
     struct xa_node *node = xas->xa_node;
 
     if (node == NULL) {
+        if (xas->xa_sibs != 0) {
+            xas_set_err(xas, -EINVAL);
+            return NULL;
+        }
         /* Storing directly into xa_head (single-entry or first entry). */
         void *prev = xa_slot_load((void *_Atomic *)&xas->xa->xa_head);
         xa_slot_store((void *_Atomic *)&xas->xa->xa_head, entry);
@@ -613,34 +691,57 @@ void *xas_store(struct xa_state *xas, void *entry)
         return prev;
     }
 
-    /* Store into the leaf slot. */
-    old = xa_slot_load((void *_Atomic *)&node->slots[xas->xa_offset]);
+    uint8 canonical = xas->xa_offset;
+    old = xa_resolve_sibling(node, &canonical);
+    uint8 old_span = (old != NULL) ? xa_sibling_span(node, canonical) : 1;
+    uint8 new_span = xas->xa_sibs + 1;
 
-    if (entry == NULL && old != NULL) {
-        for (xa_mark_t m = 0; m < XA_MAX_MARKS; m++) {
-            if (!node_get_mark(node, xas->xa_offset, m))
-                continue;
+    if ((uint16)canonical + new_span > XA_CHUNK_SIZE) {
+        xas_set_err(xas, -EINVAL);
+        return NULL;
+    }
 
-            node_clear_mark(node, xas->xa_offset, m);
-
-            struct xa_node *cur = node;
-            while (cur->parent) {
-                uint8 off = cur->offset;
-                if (node_any_mark(cur, m))
-                    break;
-                cur = cur->parent;
-                node_clear_mark(cur, off, m);
-            }
+    for (uint8 i = 0; i < new_span; i++) {
+        uint8 off = canonical + i;
+        void *slot = xa_slot_load((void *_Atomic *)&node->slots[off]);
+        if (slot == NULL)
+            continue;
+        if (i == 0)
+            continue;
+        if (!xa_is_sibling(slot) || xa_to_sibling(slot) != canonical) {
+            xas_set_err(xas, -EINVAL);
+            return NULL;
         }
     }
 
-    xa_slot_store((void *_Atomic *)&node->slots[xas->xa_offset], entry);
-
-    /* Update count. */
-    if (entry != NULL && old == NULL)
-        node->count++;
-    else if (entry == NULL && old != NULL)
+    uint8 clear_span = old_span > new_span ? old_span : new_span;
+    for (uint8 i = 0; i < clear_span; i++) {
+        uint8 off = canonical + i;
+        if (off >= XA_CHUNK_SIZE)
+            break;
+        void *slot = xa_slot_load((void *_Atomic *)&node->slots[off]);
+        if (slot == NULL)
+            continue;
+        if (off != canonical &&
+            (!xa_is_sibling(slot) || xa_to_sibling(slot) != canonical))
+            break;
+        xa_clear_marks_at(xas, node, off);
+        xa_slot_store((void *_Atomic *)&node->slots[off], NULL);
         node->count--;
+    }
+
+    if (entry != NULL) {
+        xa_slot_store((void *_Atomic *)&node->slots[canonical], entry);
+        node->count++;
+        for (uint8 i = 1; i < new_span; i++) {
+            xa_slot_store((void *_Atomic *)&node->slots[canonical + i],
+                          xa_mk_sibling(canonical));
+            node->count++;
+        }
+    }
+
+    xas->xa_offset = canonical;
+    xas->xa_sibs = (entry != NULL) ? (new_span - 1) : 0;
 
     /* If we erased an entry, try to free empty nodes. */
     if (entry == NULL && node->count == 0)
@@ -686,8 +787,12 @@ void *xas_find(struct xa_state *xas, uint64 max)
     while (xas->xa_index <= max) {
         xas->xa_node = XAS_RESTART;
         void *entry = xas_descend_to_leaf(xas);
-        if (entry != NULL && xa_is_entry(entry))
-            return entry;
+        if (entry != NULL && xa_is_entry(entry)) {
+            uint64 base = xa_level_base(xas->xa_index, 0);
+            uint64 canonical = base | xas->xa_offset;
+            if (canonical == xas->xa_index)
+                return entry;
+        }
 
         /* Advance to the next possible populated index. */
         struct xa_node *node = xas->xa_node;
@@ -703,7 +808,7 @@ void *xas_find(struct xa_state *xas, uint64 max)
             while (offset < XA_CHUNK_SIZE) {
                 void *slot_entry = xa_slot_load(
                     (void *_Atomic *)&node->slots[offset]);
-                if (slot_entry != NULL) {
+                if (slot_entry != NULL && !xa_is_sibling(slot_entry)) {
                     /* Compute the index of this slot. */
                     uint64 base = xa_level_base(xas->xa_index, node->shift);
                     xas->xa_index = base | ((uint64)offset << node->shift);
@@ -773,7 +878,10 @@ void *xas_find_marked(struct xa_state *xas, uint64 max, xa_mark_t mark)
 
         /* Check if the found entry has the mark. */
         if (node != NULL) {
-            if (entry != NULL && node_get_mark(node, xas->xa_offset, mark))
+            uint64 base = xa_level_base(xas->xa_index, 0);
+            uint64 canonical = base | xas->xa_offset;
+            if (entry != NULL && canonical == xas->xa_index &&
+                node_get_mark(node, xas->xa_offset, mark))
                 return entry;
         } else {
             /* Single-entry in xa_head is handled by xa_head_get_mark(). */

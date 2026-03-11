@@ -76,6 +76,12 @@ int bio_add_folio(struct bio *bio, folio_t *folio, uint16 len, uint16 offset) {
     if (bio == NULL || folio == NULL || len == 0)
         return -EINVAL;
 
+    uint32 folio_bytes = (uint32)folio_size(folio);
+    if ((uint32)offset >= folio_bytes)
+        return -EINVAL;
+    if ((uint32)len > folio_bytes - (uint32)offset)
+        return -EINVAL;
+
     page_t *head = &folio->page;
     uint16 remaining = len;
     uint16 off = offset;
