@@ -132,10 +132,11 @@ int main(int argc, char *argv[]) {
     strcpy(de.name, "..");
     iappend(rootino, &de, sizeof(de));
 
-    // Create standard directories: dev, proc, tmp, sys, bin
-    const char *stdirs[] = {"dev", "proc", "tmp", "sys", "bin"};
+    // Create standard directories: dev, proc, tmp, sys, bin, etc
+    const char *stdirs[] = {"dev", "proc", "tmp", "sys", "bin", "etc"};
     uint binino = 0;
-    for (i = 0; i < 5; i++) {
+    uint etcino = 0;
+    for (i = 0; i < 6; i++) {
         uint dirino = ialloc(XV6_T_DIR);
 
         // Subdirectory nlink = 2 for "." and ".." entries in itself
@@ -168,6 +169,27 @@ int main(int argc, char *argv[]) {
 
         if (strcmp(stdirs[i], "bin") == 0)
             binino = dirino;
+        if (strcmp(stdirs[i], "etc") == 0)
+            etcino = dirino;
+    }
+
+    // Create /etc/fstab
+    if (etcino) {
+        inum = ialloc(XV6_T_FILE);
+        bzero(&de, sizeof(de));
+        de.inum = xshort(inum);
+        strncpy(de.name, "fstab", DIRSIZ);
+        iappend(etcino, &de, sizeof(de));
+
+        const char *fstab_content =
+            "# /etc/fstab -- xv6 filesystem table\n"
+            "#\n"
+            "# <device>      <mountpoint>   <fstype>    <options>   <dump> <pass>\n"
+            "/dev/ram         /              xv6fs       defaults    0      1\n"
+            "devtmpfs        /dev           devtmpfs    defaults    0      0\n"
+            "proc            /proc          procfs      defaults    0      0\n"
+            "tmpfs           /tmp           tmpfs       defaults    0      0\n";
+        iappend(inum, (void *)fstab_content, strlen(fstab_content));
     }
 
     for (i = 2; i < argc; i++) {

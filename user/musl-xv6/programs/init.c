@@ -16,6 +16,7 @@
 #include <sys/wait.h>
 #include <sys/ioctl.h>
 #include <sys/syscall.h>
+#include <sys/mount.h>
 #include <arpa/inet.h>
 
 /*
@@ -44,17 +45,10 @@
 #endif
 
 /*
- * xv6-specific syscalls not in POSIX: mount, ioctl
- * musl provides ioctl(). For mount(), we use a raw syscall.
+ * xv6-specific syscalls not in POSIX: ioctl
+ * musl provides ioctl(). mount() now works natively via musl's wrapper
+ * since the xv6 kernel accepts the Linux-compatible 5-arg mount syscall.
  */
-
-/* Forward declaration — mount is defined via syscall since musl's
- * mount() expects Linux-style args. We use a thin inline wrapper. */
-static long xv6_mount(const char *source, const char *target, const char *fstype)
-{
-    /* xv6 SYS_mount = 34, args: a0=source, a1=target, a2=fstype */
-    return syscall(34, source, target, fstype);
-}
 
 static char *argv[] = { "sh", NULL };
 
@@ -410,6 +404,467 @@ static void update_resolv_conf(void)
     _exit(0);
 }
 
+
+/* ── /etc/fstab processing ───────────────────────────────────────────
+ *
+ * Reads /etc/fstab and mounts each entry.  Format (standard Linux):
+ *
+ *   # device      mountpoint   fstype   options   dump  pass
+ *   /dev/vda      /            ext4     defaults  0     1
+ *   devtmpfs      /dev         devtmpfs defaults  0     0
+ *   proc          /proc        procfs   defaults  0     0
+ *   tmpfs         /tmp         tmpfs    defaults  0     0
+ *
+ * Options: defaults, ro, rw, remount, move, noatime, nosuid, nodev,
+ *          noexec, noauto.  Multiple options are comma-separated.
+ *
+ * Processing:
+ *   1. All entries are parsed and collected.
+ *   2. Entries are dependency-sorted so parent paths mount before children
+ *      (e.g., "/" before "/dev", "/dev" before "/dev/pts").
+ *   3. If a root ("/") entry specifies a different device from the current
+ *      root, the new root is mounted at a staging directory, child
+ *      filesystems are mounted/moved under it, then we chroot into it.
+ *   4. Already-mounted targets are skipped (unless remount flag is set).
+ */
+
+#define FSTAB_PATH  "/etc/fstab"
+#define FSTAB_MAX   4096
+#define MAX_FSTAB_ENTRIES  32
+#define NEWROOT_STAGING    "/mnt/newroot"
+
+struct fstab_entry {
+    char device[128];
+    char mountpoint[128];
+    char fstype[32];
+    char options[128];
+    unsigned long flags;
+    int noauto;
+    int depth;  /* number of '/' separators — for dependency sorting */
+};
+
+/* Parse comma-separated mount options into MS_* flags.
+ * Returns the flags; sets *noauto=1 if "noauto" was present. */
+static unsigned long parse_mount_options(const char *opts, int *noauto)
+{
+    unsigned long flags = 0;
+    *noauto = 0;
+
+    if (opts == NULL)
+        return 0;
+
+    const char *p = opts;
+    while (*p) {
+        const char *start = p;
+        while (*p && *p != ',')
+            p++;
+        int len = p - start;
+
+        if (len == 8 && strncmp(start, "defaults", 8) == 0)
+            /* nothing */;
+        else if (len == 7 && strncmp(start, "remount", 7) == 0)
+            flags |= MS_REMOUNT;
+        else if (len == 4 && strncmp(start, "move", 4) == 0)
+            flags |= MS_MOVE;
+        else if (len == 2 && strncmp(start, "ro", 2) == 0)
+            flags |= MS_RDONLY;
+        else if (len == 2 && strncmp(start, "rw", 2) == 0)
+            flags &= ~(unsigned long)MS_RDONLY;
+        else if (len == 7 && strncmp(start, "noatime", 7) == 0)
+            flags |= MS_NOATIME;
+        else if (len == 6 && strncmp(start, "nosuid", 6) == 0)
+            flags |= MS_NOSUID;
+        else if (len == 5 && strncmp(start, "nodev", 5) == 0)
+            flags |= MS_NODEV;
+        else if (len == 6 && strncmp(start, "noexec", 6) == 0)
+            flags |= MS_NOEXEC;
+        else if (len == 6 && strncmp(start, "noauto", 6) == 0)
+            *noauto = 1;
+        /* ignore unknown options */
+
+        if (*p == ',')
+            p++;
+    }
+    return flags;
+}
+
+/* Check if target is already mounted by comparing the device of the
+ * mountpoint to its parent.  stat(target).st_dev != stat(parent).st_dev
+ * indicates a mount boundary. */
+static int is_mounted(const char *target)
+{
+    struct stat st_target, st_parent;
+
+    if (stat(target, &st_target) < 0)
+        return 0;
+
+    /* Build parent path: strip last component */
+    char parent[256];
+    int len = strlen(target);
+    if (len >= (int)sizeof(parent))
+        return 0;
+    memcpy(parent, target, len + 1);
+
+    /* Remove trailing slashes */
+    while (len > 1 && parent[len - 1] == '/')
+        parent[--len] = '\0';
+
+    /* Find last '/' */
+    char *slash = parent;
+    char *last_slash = NULL;
+    while (*slash) {
+        if (*slash == '/')
+            last_slash = slash;
+        slash++;
+    }
+    if (last_slash == NULL)
+        return 0;
+    if (last_slash == parent)
+        parent[1] = '\0';  /* parent is "/" */
+    else
+        *last_slash = '\0';
+
+    if (stat(parent, &st_parent) < 0)
+        return 0;
+
+    return st_target.st_dev != st_parent.st_dev;
+}
+
+/* Count the depth of a mountpoint path (number of path components).
+ * Used for dependency sorting: "/" = 0, "/dev" = 1, "/dev/pts" = 2. */
+static int path_depth(const char *path)
+{
+    if (path[0] == '/' && path[1] == '\0')
+        return 0;
+    int depth = 0;
+    const char *p = path;
+    while (*p) {
+        if (*p == '/' && p[1] != '\0' && p[1] != '/')
+            depth++;
+        p++;
+    }
+    return depth;
+}
+
+/* Simple insertion sort of fstab entries by depth (stable). */
+static void sort_fstab_entries(struct fstab_entry *entries, int n)
+{
+    for (int i = 1; i < n; i++) {
+        struct fstab_entry tmp = entries[i];
+        int j = i - 1;
+        while (j >= 0 && entries[j].depth > tmp.depth) {
+            entries[j + 1] = entries[j];
+            j--;
+        }
+        entries[j + 1] = tmp;
+    }
+}
+
+/* Get the dev_t of the current root filesystem. */
+static dev_t get_root_dev(void)
+{
+    struct stat st;
+    if (stat("/", &st) < 0)
+        return 0;
+    return st.st_dev;
+}
+
+/* Get the dev_t of a block device node (or a pseudo name for virtual FS).
+ * For real block devices like /dev/vda, returns stat().st_rdev.
+ * For pseudo filesystems (devtmpfs, proc, tmpfs), returns 0. */
+static dev_t get_device_dev(const char *device)
+{
+    struct stat st;
+    if (device[0] == '/' && stat(device, &st) == 0) {
+        /* Real device node */
+        if (S_ISBLK(st.st_mode))
+            return st.st_rdev;
+    }
+    return 0;
+}
+
+/* Recursively create directories for a path (like mkdir -p). */
+static void mkdir_p(const char *path, mode_t mode)
+{
+    char tmp[256];
+    int len = strlen(path);
+    if (len >= (int)sizeof(tmp))
+        return;
+    memcpy(tmp, path, len + 1);
+
+    for (char *p = tmp + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, mode);
+            *p = '/';
+        }
+    }
+    mkdir(tmp, mode);
+}
+
+static void process_fstab(void)
+{
+    int fd = open(FSTAB_PATH, O_RDONLY);
+    if (fd < 0)
+        return;
+
+    char buf[FSTAB_MAX];
+    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (n <= 0)
+        return;
+    buf[n] = '\0';
+
+    /* ── Phase 1: Parse all fstab entries ─────────────────────────── */
+    struct fstab_entry entries[MAX_FSTAB_ENTRIES];
+    int nentries = 0;
+
+    char *line = buf;
+    while (*line && nentries < MAX_FSTAB_ENTRIES) {
+        char *eol = line;
+        while (*eol && *eol != '\n')
+            eol++;
+        char saved = *eol;
+        *eol = '\0';
+
+        const char *p = line;
+        while (*p == ' ' || *p == '\t')
+            p++;
+
+        if (*p != '\0' && *p != '#') {
+            /* Tokenize: device mountpoint fstype options dump pass */
+            const char *fields[6];
+            int field_lens[6];
+            int nfields = 0;
+            const char *fp = p;
+
+            while (*fp && nfields < 6) {
+                while (*fp == ' ' || *fp == '\t')
+                    fp++;
+                if (*fp == '\0')
+                    break;
+                fields[nfields] = fp;
+                const char *fs = fp;
+                while (*fp && *fp != ' ' && *fp != '\t')
+                    fp++;
+                field_lens[nfields] = fp - fs;
+                nfields++;
+            }
+
+            if (nfields >= 3) {
+                struct fstab_entry *e = &entries[nentries];
+
+                int dlen = field_lens[0] < 127 ? field_lens[0] : 127;
+                memcpy(e->device, fields[0], dlen);
+                e->device[dlen] = '\0';
+
+                int mlen = field_lens[1] < 127 ? field_lens[1] : 127;
+                memcpy(e->mountpoint, fields[1], mlen);
+                e->mountpoint[mlen] = '\0';
+
+                int flen = field_lens[2] < 31 ? field_lens[2] : 31;
+                memcpy(e->fstype, fields[2], flen);
+                e->fstype[flen] = '\0';
+
+                if (nfields >= 4) {
+                    int olen = field_lens[3] < 127 ? field_lens[3] : 127;
+                    memcpy(e->options, fields[3], olen);
+                    e->options[olen] = '\0';
+                } else {
+                    strcpy(e->options, "defaults");
+                }
+
+                e->flags = parse_mount_options(e->options, &e->noauto);
+                e->depth = path_depth(e->mountpoint);
+                nentries++;
+            }
+        }
+
+        *eol = saved;
+        if (saved == '\0')
+            break;
+        line = eol + 1;
+    }
+
+    if (nentries == 0)
+        return;
+
+    /* ── Phase 2: Sort by dependency (path depth) ─────────────────── */
+    sort_fstab_entries(entries, nentries);
+
+    /* ── Phase 3: Detect root change ──────────────────────────────── */
+    /* Check if any entry mounts "/" and whether it's a different device
+     * from the currently running root filesystem. */
+    int root_idx = -1;
+    int need_chroot = 0;
+
+    for (int i = 0; i < nentries; i++) {
+        if (strcmp(entries[i].mountpoint, "/") == 0) {
+            root_idx = i;
+            break;
+        }
+    }
+
+    if (root_idx >= 0 && !entries[root_idx].noauto) {
+        dev_t cur_root = get_root_dev();
+        dev_t new_root = get_device_dev(entries[root_idx].device);
+
+        if (new_root != 0 && new_root != cur_root) {
+            /* Root device positively differs — mount at staging and chroot */
+            need_chroot = 1;
+            printf("init: fstab: root change detected: current dev %u:%u "
+                   "-> new dev %u:%u (%s)\n",
+                   (cur_root >> 20) & 0xFFF, cur_root & 0xFFFFF,
+                   (new_root >> 20) & 0xFFF, new_root & 0xFFFFF,
+                   entries[root_idx].device);
+        }
+        /* If new_root == 0 (can't determine device) or new_root == cur_root
+         * (same device), assume root is already correct — no chroot needed. */
+    }
+
+    /* ── Phase 4: Mount filesystems ───────────────────────────────── */
+    if (need_chroot) {
+        /*
+         * Root change workflow:
+         *   1. Create staging directory (NEWROOT_STAGING)
+         *   2. Mount new root at staging
+         *   3. For each child mount: if already mounted on current root,
+         *      use MS_MOVE to move it under staging; otherwise mount fresh
+         *   4. chdir + chroot into staging
+         */
+        mkdir_p(NEWROOT_STAGING, 0755);
+
+        /* Mount new root at staging */
+        struct fstab_entry *re = &entries[root_idx];
+        int ret = mount(re->device, NEWROOT_STAGING, re->fstype,
+                        re->flags & ~(unsigned long)MS_REMOUNT, NULL);
+        if (ret < 0) {
+            printf("init: fstab: failed to mount new root %s at %s (%s)\n",
+                   re->device, NEWROOT_STAGING, re->fstype);
+            /* Fall through to mount remaining entries normally */
+            need_chroot = 0;
+        } else {
+            printf("init: fstab: mounted new root %s at %s (%s)\n",
+                   re->device, NEWROOT_STAGING, re->fstype);
+        }
+    }
+
+    /* Process non-root entries (or all entries if no chroot needed) */
+    for (int i = 0; i < nentries; i++) {
+        struct fstab_entry *e = &entries[i];
+
+        if (e->noauto)
+            continue;
+
+        /* Skip the root entry — already handled above */
+        if (strcmp(e->mountpoint, "/") == 0) {
+            if (!need_chroot && !(e->flags & MS_REMOUNT)) {
+                /* Same root device, nothing to do */
+                continue;
+            }
+            if (!need_chroot && (e->flags & MS_REMOUNT)) {
+                /* Remount current root with new flags */
+                int ret = mount(e->device, "/", e->fstype,
+                                e->flags, NULL);
+                if (ret < 0)
+                    printf("init: fstab: failed to remount /\n");
+                else
+                    printf("init: fstab: remounted /\n");
+                continue;
+            }
+            /* If need_chroot, root was already mounted at staging */
+            continue;
+        }
+
+        if (need_chroot) {
+            /* Build the target path under the staging root */
+            char staged_target[256];
+            int slen = snprintf(staged_target, sizeof(staged_target),
+                                "%s%s", NEWROOT_STAGING, e->mountpoint);
+            if (slen >= (int)sizeof(staged_target))
+                continue;
+
+            /* Ensure the mount directory exists under the new root */
+            mkdir_p(staged_target, 0755);
+
+            /* If this filesystem is already mounted on the *current* root,
+             * move it to the new root instead of mounting a second instance.
+             * This is important for /dev and /proc which the kernel already
+             * mounted and which should not be mounted twice. */
+            if (is_mounted(e->mountpoint)) {
+                int ret = mount(e->mountpoint, staged_target, NULL,
+                                MS_MOVE, NULL);
+                if (ret == 0) {
+                    printf("init: fstab: moved %s -> %s\n",
+                           e->mountpoint, staged_target);
+                } else {
+                    printf("init: fstab: move %s -> %s failed, "
+                           "trying fresh mount\n",
+                           e->mountpoint, staged_target);
+                    ret = mount(e->device, staged_target, e->fstype,
+                                e->flags, NULL);
+                    if (ret == 0)
+                        printf("init: fstab: mounted %s on %s (%s)\n",
+                               e->device, staged_target, e->fstype);
+                    else
+                        printf("init: fstab: failed to mount %s on %s\n",
+                               e->device, staged_target);
+                }
+            } else {
+                int ret = mount(e->device, staged_target, e->fstype,
+                                e->flags, NULL);
+                if (ret < 0)
+                    printf("init: fstab: failed to mount %s on %s (%s)\n",
+                           e->device, staged_target, e->fstype);
+                else
+                    printf("init: fstab: mounted %s on %s (%s)\n",
+                           e->device, staged_target, e->fstype);
+            }
+        } else {
+            /* Normal (no chroot) — mount directly */
+            if (is_mounted(e->mountpoint) &&
+                !(e->flags & MS_REMOUNT) && !(e->flags & MS_MOVE)) {
+                printf("init: fstab: %s already mounted, skipping\n",
+                       e->mountpoint);
+                continue;
+            }
+
+            int ret = mount(e->device, e->mountpoint, e->fstype,
+                            e->flags, NULL);
+            if (ret < 0)
+                printf("init: fstab: failed to mount %s on %s (%s)\n",
+                       e->device, e->mountpoint, e->fstype);
+            else
+                printf("init: fstab: mounted %s on %s (%s)\n",
+                       e->device, e->mountpoint, e->fstype);
+        }
+    }
+
+    /* ── Phase 5: chroot into new root ────────────────────────────── */
+    if (need_chroot) {
+        /* Switch working directory and root to the new root */
+        if (chdir(NEWROOT_STAGING) < 0) {
+            printf("init: fstab: chdir(%s) failed\n", NEWROOT_STAGING);
+            return;
+        }
+        if (chroot(NEWROOT_STAGING) < 0) {
+            printf("init: fstab: chroot(%s) failed\n", NEWROOT_STAGING);
+            return;
+        }
+        /* After chroot, "/" is now the new root */
+        chdir("/");
+        printf("init: fstab: chroot to new root successful\n");
+
+        /* Re-open console so fd 0/1/2 point into the new root */
+        close(STDIN_FILENO);
+        close(STDOUT_FILENO);
+        close(STDERR_FILENO);
+        open("/dev/console", O_RDWR);
+        dup(0);
+        dup(0);
+    }
+}
+
 int main(void)
 {
     int pid, wpid;
@@ -432,6 +887,12 @@ int main(void)
     mknod("/dev/random",  S_IFCHR | 0666, makedev(RANDOM_MAJOR, RANDOM_MINOR));
     mknod("/dev/urandom", S_IFCHR | 0666, makedev(RANDOM_MAJOR, RANDOM_MINOR));
     mknod("/dev/tty",     S_IFCHR | 0666, makedev(TTY_DEV_MAJOR, TTY_DEV_MINOR));
+
+    /* Process /etc/fstab — mount filesystems as configured.
+     * The kernel only mounts devtmpfs at /dev during boot.
+     * Other filesystems (/, /proc, /tmp, etc.) are handled here.
+     * Already-mounted targets are skipped unless "remount" is specified. */
+    process_fstab();
 
     /* Configure network (reads /etc/network.conf, writes to /dev/netconf) */
     configure_network();

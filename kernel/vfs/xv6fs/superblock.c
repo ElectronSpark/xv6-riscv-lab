@@ -10,6 +10,7 @@
 #include "defs.h"
 #include "param.h"
 #include "errno.h"
+#include "cmdline.h"
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
 #include <mm/vm.h>
@@ -803,7 +804,10 @@ void xv6fs_init(void) {
  * Requires: tmpfs already mounted as initial root (vfs_root_inode.mnt_rooti
  * set).
  *
- * Prefers ramdisk (major 3) if available, falls back to virtio disk (major 2).
+ * Root device selection order:
+ *   1. boot command line "root=" parameter (from bootloader / QEMU -append)
+ *   2. ramdisk (major 3) if available
+ *   3. fallback to ROOTDEV (virtio disk, major 2)
  */
 void xv6fs_mount_root(void) {
     struct vfs_inode *tmpfs_root = vfs_root_inode.mnt_rooti;
@@ -820,13 +824,29 @@ void xv6fs_mount_root(void) {
         return;
     }
 
-    // Select root device: prefer ramdisk if available
-    dev_t root_dev;
-    blkdev_t *ramdisk = blkdev_get(major(RAMDISK_DEV), minor(RAMDISK_DEV));
-    if (ramdisk != NULL && !IS_ERR(ramdisk)) {
-        root_dev = RAMDISK_DEV;
-    } else {
-        root_dev = ROOTDEV;
+    // Select root device:
+    // 1. Try boot command line root= parameter
+    // 2. Prefer ramdisk if available
+    // 3. Fall back to compiled-in ROOTDEV
+    dev_t root_dev = cmdline_get_root_dev();
+    if (root_dev != 0) {
+        blkdev_t *bdev = blkdev_get(major(root_dev), minor(root_dev));
+        if (bdev == NULL || IS_ERR(bdev)) {
+            printf("xv6fs: cmdline root device (%d,%d) not found, "
+                   "falling back\n", major(root_dev), minor(root_dev));
+            root_dev = 0;
+        } else {
+            blkdev_put(bdev);
+        }
+    }
+    if (root_dev == 0) {
+        blkdev_t *ramdisk = blkdev_get(major(RAMDISK_DEV), minor(RAMDISK_DEV));
+        if (ramdisk != NULL && !IS_ERR(ramdisk)) {
+            root_dev = RAMDISK_DEV;
+            blkdev_put(ramdisk);
+        } else {
+            root_dev = ROOTDEV;
+        }
     }
 
     // Create a block device inode for root device

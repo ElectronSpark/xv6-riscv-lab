@@ -27,10 +27,20 @@ void vfs_put_fs_type(struct vfs_fs_type *fs_type);
 int vfs_mount(const char *type, struct vfs_inode *mountpoint,
               struct vfs_inode *device, int flags, const char *data);
 int vfs_mount_path(const char *fstype, const char *target, int target_len,
-                   const char *source, int source_len);
+                   const char *source, int source_len,
+                   unsigned long flags, const char *data);
 int vfs_unmount(struct vfs_inode *mountpoint);
 int vfs_unmount_lazy(struct vfs_inode *mountpoint);
 int vfs_umount_path(const char *target, int target_len);
+
+// Remount and move mount
+int vfs_remount(struct vfs_inode *mounted_root, int flags, const char *data);
+int vfs_remount_path(const char *target, int target_len,
+                     unsigned long flags, const char *data);
+int vfs_move_mount(struct vfs_inode *old_mountpoint,
+                   struct vfs_inode *new_mountpoint);
+int vfs_move_mount_path(const char *old_target, int old_len,
+                        const char *new_target, int new_len);
 
 // superblock operations
 void vfs_superblock_rlock(struct vfs_superblock *sb);

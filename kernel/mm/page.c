@@ -54,6 +54,7 @@
 #include "page_private.h"
 #include <mm/slab.h>
 #include <smp/percpu.h>
+#include "smp/atomic.h"
 #include <mm/early_allocator.h>
 #include "dev/fdt.h"
 #include <mm/memstat.h>
@@ -1754,16 +1755,17 @@ int page_ref_dec_unlocked(page_t *page) {
     if (page == NULL) {
         return -1;
     }
-    // Use atomic decrement to prevent race conditions when multiple threads
-    // call unlocked decrement simultaneously
-    int old_count = __sync_fetch_and_sub(&page->ref_count, 1);
-    if (old_count < 2) {
-        // unlocked decrement is only allowed when the ref count was 2 or more
-        // restore the count and return error
-        __sync_fetch_and_add(&page->ref_count, 1);
+    // Atomically decrement only when ref_count > 1.  The 2→1 transition
+    // (dropping the last caller reference while the cache still holds one)
+    // is the lowest this path may go.  The 1→0 transition is reserved for
+    // __page_ref_dec which runs under the page lock.
+    int old;
+    if (!atomic_oper_cond_hook(&page->ref_count, (VAL - 1), (VAL > 1),
+                               old = VAL, /* success: capture pre-dec value */
+                               /* no failure hook */)) {
         return -1;
     }
-    return old_count - 1;
+    return old - 1;
 }
 
 int __page_ref_dec(page_t *page) {

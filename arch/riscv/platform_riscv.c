@@ -61,6 +61,9 @@ void platform_print_mem_summary(void)
                platform.mem_count, platform.reserved_count,
                platform.total_mem / (1024 * 1024), first_base, first_end);
     }
+    if (platform.has_cmdline) {
+        printf("kernel cmdline: %s\n", platform.cmdline);
+    }
 }
 
 void platform_post_vm_init(void)

@@ -513,6 +513,10 @@ static int __vfs_inode_stat(struct vfs_inode *inode, struct stat *kst) {
     kst->st_nlink = inode->n_links;
     kst->st_uid = inode->uid;
     kst->st_gid = inode->gid;
+    if (S_ISBLK(inode->mode))
+        kst->st_rdev = inode->bdev;
+    else if (S_ISCHR(inode->mode))
+        kst->st_rdev = inode->cdev;
     kst->st_size = inode->size;
     kst->st_blksize = 4096;
     kst->st_blocks = (inode->size + 511) / 512;
@@ -1624,7 +1628,8 @@ uint64 sys_chroot(void) {
  * Returns 0 on success, negative errno on failure.
  */
 int vfs_mount_path(const char *fstype, const char *target, int target_len,
-                   const char *source, int source_len) {
+                   const char *source, int source_len,
+                   unsigned long flags, const char *data) {
     // Look up target directory
     struct vfs_inode *target_dir = vfs_namei(target, target_len);
     if (IS_ERR(target_dir)) {
@@ -1787,7 +1792,7 @@ int vfs_mount_path(const char *fstype, const char *target, int target_len,
     vfs_ilock(target_dir);
 
     // Mount the filesystem
-    int ret = vfs_mount(fstype, target_dir, source_inode, 0, NULL);
+    int ret = vfs_mount(fstype, target_dir, source_inode, (int)flags, data);
 
     // On success, release locks. On failure, vfs_mount already released them.
     if (ret == 0) {
@@ -1809,6 +1814,161 @@ int vfs_mount_path(const char *fstype, const char *target, int target_len,
     return ret;
 }
 
+/**
+ * vfs_remount_path - Remount a filesystem with new flags
+ * @target: target mount point path
+ * @target_len: length of target path
+ * @flags: new mount flags (MS_RDONLY, etc.)
+ * @data: filesystem-specific data string (may be NULL)
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int vfs_remount_path(const char *target, int target_len,
+                     unsigned long flags, const char *data) {
+    struct vfs_inode *mounted_root = vfs_namei(target, target_len);
+    if (IS_ERR(mounted_root)) {
+        return PTR_ERR(mounted_root);
+    }
+    if (mounted_root == NULL) {
+        return -ENOENT;
+    }
+
+    if (!vfs_inode_is_local_root(mounted_root)) {
+        vfs_iput(mounted_root);
+        return -EINVAL;
+    }
+
+    struct vfs_superblock *sb = mounted_root->sb;
+    if (sb == NULL) {
+        vfs_iput(mounted_root);
+        return -EINVAL;
+    }
+
+    vfs_mount_lock();
+    vfs_superblock_wlock(sb);
+    vfs_ilock(mounted_root);
+
+    int ret = vfs_remount(mounted_root, (int)flags, data);
+
+    vfs_iunlock(mounted_root);
+    vfs_superblock_unlock(sb);
+    vfs_mount_unlock();
+
+    vfs_iput(mounted_root);
+    return ret;
+}
+
+/**
+ * vfs_move_mount_path - Move a mount from one location to another
+ * @old_target: current mount point path
+ * @old_len: length of old target path
+ * @new_target: new mount point path
+ * @new_len: length of new target path
+ *
+ * Returns 0 on success, negative errno on failure.
+ */
+int vfs_move_mount_path(const char *old_target, int old_len,
+                        const char *new_target, int new_len) {
+    /* Resolve old target — following mounts gives us the mounted root */
+    struct vfs_inode *mounted_root = vfs_namei(old_target, old_len);
+    if (IS_ERR(mounted_root)) {
+        return PTR_ERR(mounted_root);
+    }
+    if (mounted_root == NULL) {
+        return -ENOENT;
+    }
+    if (!vfs_inode_is_local_root(mounted_root)) {
+        vfs_iput(mounted_root);
+        return -EINVAL;
+    }
+
+    struct vfs_superblock *child_sb = mounted_root->sb;
+    if (child_sb == NULL || child_sb->mountpoint == NULL) {
+        vfs_iput(mounted_root);
+        return -EINVAL;
+    }
+
+    struct vfs_inode *old_mountpoint = child_sb->mountpoint;
+    if (!old_mountpoint->mount) {
+        vfs_iput(mounted_root);
+        return -EINVAL;
+    }
+
+    /* Resolve new target */
+    struct vfs_inode *new_dir = vfs_namei(new_target, new_len);
+    if (IS_ERR(new_dir)) {
+        vfs_iput(mounted_root);
+        return PTR_ERR(new_dir);
+    }
+    if (new_dir == NULL) {
+        vfs_iput(mounted_root);
+        return -ENOENT;
+    }
+    if (!S_ISDIR(new_dir->mode)) {
+        vfs_iput(new_dir);
+        vfs_iput(mounted_root);
+        return -ENOTDIR;
+    }
+
+    /*
+     * Lock order: mount mutex → parent superblocks → child superblock
+     *             → inode locks
+     *
+     * If old and new directories are on the same superblock we only take
+     * one superblock lock; otherwise we take the old parent's first,
+     * then the new parent's.
+     */
+    vfs_mount_lock();
+
+    struct vfs_superblock *old_parent_sb = old_mountpoint->sb;
+    struct vfs_superblock *new_parent_sb = new_dir->sb;
+
+    if (old_parent_sb == new_parent_sb) {
+        vfs_superblock_wlock(old_parent_sb);
+    } else {
+        /* Consistent ordering by superblock pointer address */
+        if ((uint64)old_parent_sb < (uint64)new_parent_sb) {
+            vfs_superblock_wlock(old_parent_sb);
+            vfs_superblock_wlock(new_parent_sb);
+        } else {
+            vfs_superblock_wlock(new_parent_sb);
+            vfs_superblock_wlock(old_parent_sb);
+        }
+    }
+
+    vfs_superblock_wlock(child_sb);
+    vfs_ilock(old_mountpoint);
+    vfs_ilock(new_dir);
+
+    int ret = vfs_move_mount(old_mountpoint, new_dir);
+
+    if (ret == 0) {
+        /* Success: old_mountpoint is cleared, new_dir is now the mountpoint.
+         * Unlock everything.  vfs_iput on old_mountpoint releases the extra
+         * ref that __vfs_turn_mountpoint originally took. */
+        vfs_iunlock(new_dir);
+        vfs_iunlock(old_mountpoint);
+        vfs_superblock_unlock(child_sb);
+        if (old_parent_sb != new_parent_sb) {
+            vfs_superblock_unlock(new_parent_sb);
+        }
+        vfs_superblock_unlock(old_parent_sb);
+    } else {
+        vfs_iunlock(new_dir);
+        vfs_iunlock(old_mountpoint);
+        vfs_superblock_unlock(child_sb);
+        if (old_parent_sb != new_parent_sb) {
+            vfs_superblock_unlock(new_parent_sb);
+        }
+        vfs_superblock_unlock(old_parent_sb);
+    }
+
+    vfs_mount_unlock();
+    vfs_iput(new_dir);
+    vfs_iput(mounted_root);
+    return ret;
+}
+
 uint64 sys_mount(void) {
     if (!capable())
         return (uint64)-EPERM;
@@ -1817,13 +1977,32 @@ uint64 sys_mount(void) {
     char target[MAXPATH];
     char fstype[32];
     int n1, n2;
+    uint64 flags = 0;
+    uint64 data_addr = 0;
 
     if ((n1 = argstr(0, source, MAXPATH)) < 0 ||
         (n2 = argstr(1, target, MAXPATH)) < 0 || argstr(2, fstype, 32) < 0) {
         return -EFAULT;
     }
 
-    int ret = vfs_mount_path(fstype, target, n2, source, n1);
+    /* arg3 = flags (unsigned long), arg4 = data pointer (may be 0/NULL) */
+    argaddr(3, &flags);
+    argaddr(4, &data_addr);
+    (void)data_addr; /* data is not yet used — reserved for future use */
+
+    int ret;
+
+    if (flags & MS_MOVE) {
+        /* MS_MOVE: source is the old mountpoint, target is the new one */
+        ret = vfs_move_mount_path(source, n1, target, n2);
+    } else if (flags & MS_REMOUNT) {
+        /* MS_REMOUNT: change options on an existing mount */
+        ret = vfs_remount_path(target, n2, flags & ~MS_REMOUNT, NULL);
+    } else {
+        /* Normal mount */
+        ret = vfs_mount_path(fstype, target, n2, source, n1, flags, NULL);
+    }
+
     if (ret == 0)
         ACCT_INC(current->thread_group, fs_mounts);
     return ret;

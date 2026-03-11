@@ -57,7 +57,7 @@ endif()
 
 # Compose QEMU options
 # Use xv6.bin flat binary with Linux boot header (unified with Orange Pi)
-# Load fs.img as initrd/ramdisk - appears in FDT for ramdisk driver
+# RISC-V QEMU boots directly from virtio disk (no ramdisk/initrd).
 #
 # NOTE: QEMU's -kernel option for RISC-V does NOT support gzip-compressed
 # kernels. Only U-Boot's 'booti' command can decompress gzip kernels.
@@ -77,6 +77,7 @@ set(QEMUOPTS_PARAM
     -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
     -drive file=xv6fs_test.img,if=none,format=raw,id=x1
     -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
+    -append "root=/dev/disk0"
     -netdev user,id=net0,hostfwd=udp::${FWDPORT1}-:2000,hostfwd=udp::${FWDPORT2}-:2001,hostfwd=tcp::2323-:23,hostfwd=tcp::2159-:2159,hostfwd=tcp::8080-:80,hostfwd=tcp::8443-:443,hostfwd=udp::6969-:69,hostfwd=tcp::5001-:5001,hostfwd=tcp::2222-:22
     -object filter-dump,id=net0,netdev=net0,file=packets.pcap
     -device e1000,netdev=net0,bus=pcie.0

@@ -14,6 +14,7 @@
 #include "dev/buf.h"
 #include "dev/bio.h"
 #include "dev/blkdev.h"
+#include "dev/gendisk.h"
 #include <mm/page.h>
 #include "errno.h"
 #include "dev/fdt.h"
@@ -132,5 +133,11 @@ void ramdisk_init(void) {
     int errno = blkdev_register(&ramdisk_dev);
     if (errno != 0) {
         panic("ramdisk_init: blkdev_register failed: %d", errno);
+    }
+
+    // Register as a gendisk so it appears in lsblk
+    struct gendisk *gd = gendisk_probe(&ramdisk_dev);
+    if (IS_ERR(gd)) {
+        printf("ramdisk: warning: gendisk_probe failed: %ld\n", PTR_ERR(gd));
     }
 }

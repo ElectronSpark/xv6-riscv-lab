@@ -290,6 +290,17 @@ static int x86_parse_pvh_memory(void *boot_params, uint64 *base_out,
         }
     }
 
+    /* Parse kernel command line from PVH start_info */
+    if (si->cmdline_paddr != 0) {
+        const char *cmdline = (const char *)(uint64)si->cmdline_paddr;
+        size_t len = strnlen(cmdline, CMDLINE_MAX - 1);
+        if (len > 0) {
+            memcpy(platform.cmdline, cmdline, len);
+            platform.cmdline[len] = '\0';
+            platform.has_cmdline = 1;
+        }
+    }
+
     if (platform.mem_count == 0 || chosen_size == 0)
         return -1;
 
@@ -381,6 +392,17 @@ static int x86_parse_bootloader_memory(void *boot_params, uint64 *base_out,
         }
     }
 
+    /* Parse kernel command line from multiboot info */
+    if (!platform.has_cmdline && (mbi->flags & (1U << 2)) && mbi->cmdline != 0) {
+        const char *cmdline = (const char *)(uint64)mbi->cmdline;
+        size_t len = strnlen(cmdline, CMDLINE_MAX - 1);
+        if (len > 0) {
+            memcpy(platform.cmdline, cmdline, len);
+            platform.cmdline[len] = '\0';
+            platform.has_cmdline = 1;
+        }
+    }
+
     if (platform.mem_count == 0 || chosen_size == 0)
         return -1;
 
@@ -432,6 +454,10 @@ int platform_init(void *boot_data)
                platform.ramdisk_base,
                platform.ramdisk_base + platform.ramdisk_size,
                platform.ramdisk_size / 1024);
+    }
+
+    if (platform.has_cmdline) {
+        printf("x86 kernel cmdline: %s\n", platform.cmdline);
     }
 
     return 0;

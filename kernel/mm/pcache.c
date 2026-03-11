@@ -4,6 +4,7 @@
 #include <mm/memlayout.h>
 #include "lock/spinlock.h"
 #include "lock/completion.h"
+#include "smp/atomic.h"
 #include "riscv.h"
 #include "defs.h"
 #include "printf.h"
@@ -673,11 +674,11 @@ static page_t *__pcache_find_and_pin_page(struct pcache *pcache,
     if (node != NULL && !xa_is_internal(node)) {
         page = node->page;
         if (page != NULL) {
-            int old = __sync_fetch_and_add(&page->ref_count, 1);
-            if (old <= 0) {
-                __sync_fetch_and_sub(&page->ref_count, 1);
+            /* Conditional atomic increment: only succeed if ref_count > 0.
+             * A page with ref_count == 0 is being freed via call_rcu and
+             * must not be re-pinned. */
+            if (!atomic_inc_not_zero(&page->ref_count))
                 page = NULL;
-            }
         }
     }
     rcu_read_unlock();
@@ -1012,7 +1013,15 @@ static void __pcache_push_lru(struct pcache *pcache, page_t *page) {
                                      "does not match the given pcache");
     assert(pcnode->page == page,
            "__pcache_push_lru: pcache_node does not point to the given page");
-    assert(page->ref_count == 1, "__pcache_push_lru: page ref_count is not 1");
+    /*
+     * The lock-free RCU pin path (__pcache_find_and_pin_page) can
+     * atomically bump ref_count without holding the pcache spinlock
+     * or the page lock.  If that happened between the caller's
+     * page_ref_dec and now, the page has active users again and must
+     * NOT be placed on the LRU.  This is a benign race, not a bug.
+     */
+    if (READ_ONCE(page->ref_count) != 1)
+        return;
     assert(LIST_NODE_IS_DETACHED(pcnode, lru_entry),
            "__pcache_push_lru: pcache node already in lru or dirty list");
     list_node_push_back(&pcache->lru, pcnode, lru_entry);
@@ -1059,8 +1068,10 @@ static void __pcache_remove_lru(struct pcache *pcache, page_t *page) {
            "__pcache_remove_lru: pcache_node does not point to the given page");
     assert(pcnode->pcache == pcache, "__pcache_remove_lru: pcache_node's "
                                      "pcache does not match the given pcache");
-    assert(!LIST_NODE_IS_DETACHED(pcnode, lru_entry),
-           "__pcache_remove_lru: pcache node not in lru list");
+    /* Another thread (e.g. eviction) may have already removed this node
+     * from the LRU concurrently.  If so, nothing to do. */
+    if (LIST_NODE_IS_DETACHED(pcnode, lru_entry))
+        return;
     list_node_detach(pcnode, lru_entry);
     if (pcnode->dirty) {
         pcache->dirty_count--;
@@ -1131,19 +1142,38 @@ retry:
     return page;
 }
 
+/*
+ * RCU callback: free a pcache_node after a grace period.
+ *
+ * At this point no RCU reader can hold a reference to the node (it was
+ * erased from the xarray before call_rcu was issued), so it is safe to
+ * slab_free.
+ */
+static void __pcache_node_rcu_free(void *data) {
+    struct pcache_node *pcnode = (struct pcache_node *)data;
+    slab_free(pcnode);
+}
+
 static page_t *__pcache_evict_lru(struct pcache *pcache) {
     page_t *page = __pcache_pop_lru(pcache);
     if (page == NULL) {
         return NULL;
     }
     struct pcache_node *pcnode = page->pcache.pcache_node;
+    /* Remove from xarray FIRST so no new RCU lookup can find this node. */
     __pcache_remove_node(pcache, page);
     __pcache_node_detach_page(pcache, page);
-    // Clear dangling pointers and free the orphaned pcache_node
+    /* Sever the page ↔ pcnode link so that any concurrent
+     * __pcache_find_and_pin_page that already loaded the (now-erased)
+     * xarray entry will fail __pcache_page_valid and release the ref. */
     page->pcache.pcache_node = NULL;
     pcnode->page = NULL;
     page_lock_release(page);
-    slab_free(pcnode);
+    /* Defer pcache_node free until after an RCU grace period so that
+     * concurrent rcu_read_lock() holders in __pcache_find_and_pin_page
+     * (which may still be dereferencing the stale xarray slot) see
+     * valid memory. */
+    call_rcu(&pcnode->rcu_head, __pcache_node_rcu_free, pcnode);
     return page;
 }
 
@@ -1309,7 +1339,7 @@ void pcache_teardown(struct pcache *pcache) {
                 page_lock_release(p);
                 __pcache_page_put(p);
             }
-            slab_free(node);
+            call_rcu(&node->rcu_head, __pcache_node_rcu_free, node);
         }
     }
     pcache->page_count = 0;
@@ -1549,21 +1579,21 @@ void pcache_put_page(struct pcache *pcache, page_t *page) {
         } else if (!pcnode->dirty && LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
             if (!pcnode->uptodate) {
                 // The cache is the lone owner of a stale page; drop it
-                // entirely.
+                // entirely.  Remove from xarray first, then defer free.
                 __pcache_remove_node(pcache, page);
                 __pcache_node_detach_page(pcache, page);
-                // Clear dangling pointers and free the orphaned pcache_node
                 page->pcache.pcache_node = NULL;
                 pcnode->page = NULL;
                 wakeup_on_chan(pcache);
                 page_lock_release(page);
                 __pcache_spin_unlock(pcache);
-                slab_free(pcnode);
+                call_rcu(&pcnode->rcu_head, __pcache_node_rcu_free, pcnode);
                 __pcache_page_put(page);
                 return;
             }
             // Only clean, single-owner, up-to-date pages can be staged on the
-            // LRU for reuse.
+            // LRU for reuse.  __pcache_push_lru handles the race where
+            // another thread re-pinned the page via CAS.
             __pcache_push_lru(pcache, page);
             wakeup_on_chan(pcache);
         } else {
@@ -1854,8 +1884,8 @@ int pcache_discard_blk(struct pcache *pcache, uint64 blkno) {
     page_lock_release(page);
     __pcache_spin_unlock(pcache);
 
-    // Free the pcache_node and release the page
-    slab_free(pcnode);
+    // Defer pcache_node free via RCU so in-flight readers are safe
+    call_rcu(&pcnode->rcu_head, __pcache_node_rcu_free, pcnode);
     __pcache_page_put(page);
 
     return 0;

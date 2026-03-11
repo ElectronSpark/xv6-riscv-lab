@@ -12,6 +12,7 @@
 #include "mm/pcache_types.h"
 #include "kobject.h"
 #include "vfs/stat.h"
+#include "vfs/mount_flags.h"
 
 struct pcache;
 typedef struct cdev cdev_t;
@@ -206,6 +207,16 @@ struct vfs_superblock_ops {
      */
     int (*begin_transaction)(struct vfs_superblock *sb);
     int (*end_transaction)(struct vfs_superblock *sb);
+
+    /*
+     * remount — update mount flags/options on an already-mounted superblock.
+     *
+     * Called with the superblock write lock held.  The filesystem should
+     * apply whatever subset of `flags` (MS_RDONLY, etc.) it supports and
+     * return 0 on success or a negative errno on failure.  If NULL the VFS
+     * core still records the new flags but does not call into the driver.
+     */
+    int (*remount)(struct vfs_superblock *sb, int flags, const char *data);
 };
 
 struct vfs_inode {

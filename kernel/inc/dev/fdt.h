@@ -247,6 +247,12 @@ struct platform_info {
     int has_pmic_power;
     uint32 pmic_power_bus;   // I2C adapter-id hosting the PMIC
     uint32 pmic_power_addr;  // I2C slave address (e.g. 0x41)
+
+    // Kernel command line (from bootloader: FDT /chosen/bootargs,
+    // QEMU -append, PVH cmdline, or multiboot cmdline)
+#define CMDLINE_MAX 512
+    char cmdline[CMDLINE_MAX];
+    int has_cmdline;
 };
 
 // Global platform info (populated by fdt_init)

@@ -1160,7 +1160,7 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
         memory = __fdt_node_next_same_name(root, memory);
     }
 
-    // Parse /chosen node for ramdisk
+    // Parse /chosen node for ramdisk and bootargs
     struct fdt_node *chosen = fdt_node_lookup(root, "chosen", NULL);
     if (chosen) {
         prop = __fdt_get_prop(chosen, "linux,initrd-start");
@@ -1176,6 +1176,18 @@ static void fdt_extract_platform_info(struct fdt_blob_info *blob) {
             if (platform.ramdisk_base != 0 && end > platform.ramdisk_base) {
                 platform.ramdisk_size = end - platform.ramdisk_base;
                 platform.has_ramdisk = 1;
+            }
+        }
+
+        // Parse bootargs (kernel command line from bootloader)
+        prop = __fdt_get_prop(chosen, "bootargs");
+        if (prop && prop->data_size > 0) {
+            const char *args = (const char *)prop->data;
+            size_t len = strnlen(args, prop->data_size);
+            if (len > 0 && len < CMDLINE_MAX) {
+                memcpy(platform.cmdline, args, len);
+                platform.cmdline[len] = '\0';
+                platform.has_cmdline = 1;
             }
         }
     }

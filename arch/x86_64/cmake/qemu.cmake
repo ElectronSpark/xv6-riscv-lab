@@ -62,12 +62,16 @@ if(NOT DEFINED CPUS)
     set(CPUS 4)
 endif()
 
-# x86 PCI devices: virtio-blk-pci disk + e1000 NIC
-set(X86_DISK_OPTS -drive file=${X86_INITRD_IMG},if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0)
+# x86 PCI devices: virtio-blk-pci disks + e1000 NIC
+set(X86_DISK_OPTS
+    -drive file=${X86_INITRD_IMG},if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0
+    -drive file=${CMAKE_BINARY_DIR}/xv6fs_test.img,if=none,format=raw,id=x1 -device virtio-blk-pci,drive=x1
+)
 set(X86_NET_OPTS -netdev user,id=net0,hostfwd=tcp::2323-:23,hostfwd=tcp::2159-:2159,hostfwd=tcp::8080-:80,hostfwd=tcp::8443-:443,hostfwd=tcp::2222-:22 -object filter-dump,id=net0,netdev=net0,file=packets.pcap -device e1000,netdev=net0)
+set(X86_CMDLINE -append "root=/dev/ramdisk")
 
 add_custom_target(qemu
-    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m 1G -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -debugcon file:debugcon.log -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS}
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m 1G -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -debugcon file:debugcon.log -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE}
     COMMAND stty sane
     DEPENDS kernel_all fs_img
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -75,7 +79,7 @@ add_custom_target(qemu
 )
 
 add_custom_target(qemu-serial
-    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m 1G -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS}
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m 1G -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE}
     COMMAND stty sane
     DEPENDS kernel_all fs_img
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -83,7 +87,7 @@ add_custom_target(qemu-serial
 )
 
 add_custom_target(qemu-debugcon
-    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m 1G -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial none -debugcon chardev:char0 -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS}
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m 1G -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial none -debugcon chardev:char0 -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE}
     COMMAND stty sane
     DEPENDS kernel_all fs_img
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -102,7 +106,7 @@ add_custom_target(gdbinit ALL
 )
 
 add_custom_target(qemu-gdb
-    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m 1G -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -debugcon file:debugcon.log -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS} -S -gdb tcp::1234
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m 1G -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -debugcon file:debugcon.log -kernel ${X86_FULL_IMAGE} -initrd ${X86_INITRD_IMG} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE} -S -gdb tcp::1234
     COMMAND stty sane
     DEPENDS kernel_all fs_img gdbinit
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}

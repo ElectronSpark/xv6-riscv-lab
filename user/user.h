@@ -175,7 +175,8 @@ int netconf(const struct netconf_req *req);
 // New VFS syscalls
 int getdents(int fd, void *dirp, int count);
 int chroot(const char *path);
-int mount(const char *source, const char *target, const char *fstype);
+int mount(const char *source, const char *target, const char *fstype,
+          unsigned long flags, const void *data);
 int umount(const char *target);
 char *getcwd(char *buf, int size);
 

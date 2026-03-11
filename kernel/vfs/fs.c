@@ -471,40 +471,30 @@ void vfs_init(void) {
     procfs_init();
 
     // Mount filesystems
+    //
+    // Boot sequence:
+    //   1. tmpfs_mount_root()  — temporary root for staging
+    //   2. devtmpfs at /dev    — device nodes needed for root device lookup
+    //   3. ext4fs_mount_root() — mount real root at /root, move /dev there,
+    //                            then chroot into it
+    //
+    // Other filesystems (/tmp, /proc, etc.) are mounted later by init
+    // from /etc/fstab.
     tmpfs_mount_root();
-    ext4fs_mount_root();
 
-    // Mount tmpfs at /tmp (after chroot to xv6fs)
-    ret = vfs_mount_path("tmpfs", "/tmp", 4, NULL, 0);
-    if (ret == 0) {
-        printf("tmpfs: mounted at /tmp\n");
-    } else if (ret == -ENOENT) {
-        printf("tmpfs: /tmp directory not found\n");
-    } else {
-        printf("tmpfs: failed to mount at /tmp, errno=%d\n", ret);
-    }
-
-    // Mount devtmpfs at /dev (auto-populated with device nodes)
-    // Ensure /dev directory exists (create it if not present on root fs)
-    struct vfs_inode *dev_dir = vfs_namei("/dev", 4);
-    if (IS_ERR_OR_NULL(dev_dir)) {
-        struct vfs_inode *root = vfs_namei("/", 1);
-        if (!IS_ERR_OR_NULL(root)) {
-            // vfs_mkdir handles its own locking — do NOT lock root first
-            dev_dir = vfs_mkdir(root, 0755, "dev", 3);
-            vfs_iput(root);
+    // Mount devtmpfs at /dev early — ext4fs_mount_root needs device nodes
+    // to find the root block device specified in boot cmdline (root=).
+    {
+        struct vfs_inode *tmpfs_root = vfs_root_inode.mnt_rooti;
+        if (tmpfs_root != NULL) {
+            struct vfs_inode *dev_dir = vfs_mkdir(tmpfs_root, 0755, "dev", 3);
             if (!IS_ERR_OR_NULL(dev_dir))
                 vfs_iput(dev_dir);
         }
-    } else {
-        vfs_iput(dev_dir);
     }
-    ret = vfs_mount_path("devtmpfs", "/dev", 4, NULL, 0);
+    ret = vfs_mount_path("devtmpfs", "/dev", 4, NULL, 0, 0, NULL);
     if (ret == 0) {
         printf("devtmpfs: mounted at /dev\n");
-        /* Now that the superblock & root inode are fully VFS-initialised,
-         * populate the registered device nodes using VFS-level APIs. */
-        devtmpfs_post_mount_populate();
 
         /* Pre-create /dev/pts directory for PTY slaves */
         struct vfs_inode *dev_inode = vfs_namei("/dev", 4);
@@ -515,36 +505,16 @@ void vfs_init(void) {
                 vfs_iput(pts_dir);
             vfs_iput(dev_inode);
         }
-    } else if (ret == -ENOENT) {
-        printf("devtmpfs: /dev directory not found\n");
     } else {
         printf("devtmpfs: failed to mount at /dev, errno=%d\n", ret);
     }
 
+    // Mount real root filesystem and chroot into it.
+    // ext4fs_mount_root() will also move /dev into the new root.
+    ext4fs_mount_root();
+
     // Optional: run smoke tests in a separate kernel thread with chroot to /tmp
     // tmpfs_smoketest_start();
-
-    // Mount procfs at /proc
-    struct vfs_inode *proc_dir = vfs_namei("/proc", 5);
-    if (IS_ERR_OR_NULL(proc_dir)) {
-        struct vfs_inode *root = vfs_namei("/", 1);
-        if (!IS_ERR_OR_NULL(root)) {
-            proc_dir = vfs_mkdir(root, 0555, "proc", 4);
-            vfs_iput(root);
-            if (!IS_ERR_OR_NULL(proc_dir))
-                vfs_iput(proc_dir);
-        }
-    } else {
-        vfs_iput(proc_dir);
-    }
-    ret = vfs_mount_path("procfs", "/proc", 5, NULL, 0);
-    if (ret == 0) {
-        printf("procfs: mounted at /proc\n");
-    } else if (ret == -ENOENT) {
-        printf("procfs: /proc directory not found\n");
-    } else {
-        printf("procfs: failed to mount at /proc, errno=%d\n", ret);
-    }
     // xv6fs_run_all_smoketests();
 }
 
@@ -843,6 +813,7 @@ int vfs_mount(const char *type, struct vfs_inode *mountpoint,
     __vfs_set_mountpoint(sb, mountpoint);
     sb->root_inode->sb = sb; // Associate root inode with superblock
     ret_val = 0;             // Successfully mounted
+
 ret:
     if (ret_val != 0) {
         if (sb) {
@@ -866,10 +837,17 @@ ret:
         vfs_put_fs_type(fs_type);
         return ret_val;
     } else if (vfs_superblock_wholding(sb)) {
+        int is_devtmpfs = (fs_type->name && strcmp(fs_type->name, "devtmpfs") == 0);
         sb->initialized = 1;
         sb->valid = 1;
         sb->attached = 1;
         vfs_superblock_unlock(sb);
+
+        /* devtmpfs: populate device nodes after locks are released.
+         * Each fresh devtmpfs mount starts empty; the registered device
+         * registry must be replayed into the new superblock. */
+        if (is_devtmpfs)
+            devtmpfs_post_mount_populate();
     }
     vfs_put_fs_type(fs_type);
     return ret_val;
@@ -1094,6 +1072,120 @@ int vfs_unmount(struct vfs_inode *mountpoint) {
     fs_type->ops->free(sb);
 
     return 0; // Successfully unmounted
+}
+
+/*
+ * vfs_remount - Change mount flags/options of an already-mounted filesystem.
+ *
+ * Locking:
+ *   - Caller holds vfs_mount_lock().
+ *   - Caller holds the superblock write lock of the mounted filesystem.
+ *   - Caller holds the mounted root inode mutex.
+ *
+ * Returns:
+ *   - 0 on success or negative errno on failure.
+ */
+int vfs_remount(struct vfs_inode *mounted_root, int flags, const char *data) {
+    if (mounted_root == NULL) {
+        return -EINVAL;
+    }
+    if (!holding_mutex(&__mount_mutex)) {
+        return -EPERM;
+    }
+    if (!vfs_inode_is_local_root(mounted_root)) {
+        return -EINVAL; // Not a filesystem root
+    }
+
+    struct vfs_superblock *sb = mounted_root->sb;
+    if (sb == NULL || !sb->valid) {
+        return -EINVAL;
+    }
+    if (!vfs_superblock_wholding(sb)) {
+        return -EPERM;
+    }
+
+    /* Let the filesystem driver apply the new flags if it has a remount op */
+    int ret = 0;
+    if (sb->ops && sb->ops->remount) {
+        ret = sb->ops->remount(sb, flags, data);
+    }
+
+    return ret;
+}
+
+/*
+ * vfs_move_mount - Atomically move a mounted filesystem from old_mountpoint
+ *                  to new_mountpoint.
+ *
+ * Locking:
+ *   - Caller holds vfs_mount_lock().
+ *   - Caller holds write locks on both parent superblocks.
+ *   - Caller holds both mountpoint inode mutexes.
+ *   - Caller holds the child superblock write lock.
+ *
+ * The old mountpoint is cleared and the new mountpoint is set up.
+ * The superblock is detached from old and re-attached to new.
+ *
+ * Returns:
+ *   - 0 on success or negative errno on failure.
+ */
+int vfs_move_mount(struct vfs_inode *old_mountpoint,
+                   struct vfs_inode *new_mountpoint) {
+    int ret;
+
+    if (old_mountpoint == NULL || new_mountpoint == NULL) {
+        return -EINVAL;
+    }
+    if (!holding_mutex(&__mount_mutex)) {
+        return -EPERM;
+    }
+    if (!old_mountpoint->mount) {
+        printf("vfs_move_mount: old path is not a mountpoint\n");
+        return -EINVAL;
+    }
+
+    struct vfs_superblock *sb = old_mountpoint->mnt_sb;
+    if (sb == NULL) {
+        return -EINVAL;
+    }
+    if (!vfs_superblock_wholding(sb)) {
+        return -EPERM;
+    }
+
+    /* Validate new mountpoint */
+    if (!S_ISDIR(new_mountpoint->mode)) {
+        printf("vfs_move_mount: new target is not a directory\n");
+        return -ENOTDIR;
+    }
+    if (new_mountpoint->mount) {
+        printf("vfs_move_mount: new target is already a mountpoint\n");
+        return -EBUSY;
+    }
+    if (vfs_inode_is_local_root(new_mountpoint)) {
+        printf("vfs_move_mount: cannot move onto a filesystem root\n");
+        return -EBUSY;
+    }
+
+    /* Turn new_mountpoint into a mountpoint */
+    ret = __vfs_turn_mountpoint(new_mountpoint);
+    if (ret != 0) {
+        printf("vfs_move_mount: failed to turn new mountpoint, errno=%d\n",
+               ret);
+        return ret;
+    }
+
+    /*
+     * Detach from old mountpoint:
+     * Clear the old mountpoint's mount flag and decrement the old parent
+     * superblock's mount_count.
+     */
+    sb->mountpoint = NULL;
+    __vfs_clear_mountpoint(old_mountpoint);
+
+    /* Attach to new mountpoint */
+    __vfs_set_mountpoint(sb, new_mountpoint);
+
+    return 0;
 }
 
 /*

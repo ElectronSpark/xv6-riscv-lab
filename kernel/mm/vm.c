@@ -59,7 +59,7 @@
  * Order 2 = 4 pages = 16 KB.  The allocator falls back to smaller orders
  * (down to 0) when the VMA is too small or memory is tight.
  */
-#define VM_ANON_FOLIO_ORDER 2
+#define VM_ANON_FOLIO_ORDER 0
 
 /* ========================================================================== */
 /*  Slab pools                                                                */
@@ -253,8 +253,12 @@ static void __vma_set_free(vma_t *vma)
                 folio_t *folio = page_folio(pc_head);
                 pcache_put_folio(pc_head->pcache.pcache, folio);
             } else {
+                /* Only decrement mapcount for HEAD pages (PAGE_TYPE_ANON).
+                 * Tail pages share the union with head_page — never touch
+                 * anon.mapcount on them.  Each folio has exactly one head
+                 * PTE so mapcount stays balanced (one dec per teardown). */
                 if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
-                    folio_remove_rmap(page_folio(pg));
+                    page_remove_rmap(pg);
                 page_ref_dec((void *)pa);
             }
         }
@@ -332,17 +336,19 @@ static int __vma_copy(vma_t *dst, vma_t *src)
             assert(page_ref_inc((void *)pa) > 0,
                    "__vma_copy: page refcnt should be greater than 0");
             page_t *pg = __pa_to_page(pa);
+            /* Only bump mapcount for HEAD pages (PAGE_TYPE_ANON).
+             * Tail pages must be skipped — their anon union stores
+             * head_page, not mapcount.  Each folio has exactly one
+             * head PTE, so mapcount stays balanced (one inc per fork
+             * per folio). */
             if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) && !is_shared) {
-                folio_t *folio = page_folio(pg);
-                /* Bump mapcount for BOTH parent and child mappings.
-                 * The parent's pages (e.g. from exec→mappages) may
-                 * never have had page_add_anon_rmap called, so their
-                 * mapcount could still be 0.  We must account for both
-                 * so that the COW check (mapcount > 1) fires correctly
-                 * when either process writes. */
-                if (folio_mapcount(folio) == 0)
-                    folio_add_anon_rmap(folio, src, a);
-                folio_add_anon_rmap(folio, dst, a);
+                /* The parent's folios (e.g. from exec→mappages) may
+                 * never have had rmap set up, so mapcount could be 0.
+                 * Bump for both parent and child so that COW check
+                 * (mapcount > 1) fires correctly. */
+                if (page_mapcount(pg) == 0)
+                    page_add_anon_rmap(pg, src, a);
+                page_add_anon_rmap(pg, dst, a);
             }
         }
         vm_remote_sfence(src->vm);
@@ -891,9 +897,7 @@ static void *__vma_map_anon_folio(vma_t *vma, uint64 fault_va,
     /* Zero the entire folio. */
     memset((void *)folio_pa, 0, folio_size);
 
-    folio_add_anon_rmap(folio, vma, folio_base_va);
-
-    /* Map every page of the folio. */
+    /* Map every page of the folio and set up per-page rmap. */
     unsigned long nr_pages = folio_nr_pages(folio);
     void *fault_page_pa = NULL;
     for (unsigned long i = 0; i < nr_pages; i++) {
@@ -909,6 +913,11 @@ static void *__vma_map_anon_folio(vma_t *vma, uint64 fault_va,
             continue; /* another thread (or fault-around) already mapped it */
         *pte = mk_pte(pa, pte_flags);
     }
+
+    /* Record the mapping in the folio's head page.  Rmap is tracked
+     * per-folio (on the head page) — never on tail pages, whose union
+     * stores head_page and would be corrupted by writing mapcount. */
+    folio_add_anon_rmap(folio, vma, fault_va);
 
     /* For order > 0 folios mapped to multiple PTEs we bump refcount so
      * that each PTE's eventual page_ref_dec still leaves the folio
@@ -1033,6 +1042,13 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
     } else if (pte_present(pte)) {
         /* Page present but not writable — check COW via mapcount. */
         page_t *old_page = __pa_to_page((uint64)addr);
+        /* Resolve tail→head so we can check PAGE_TYPE_ANON and
+         * mapcount on the compound head (tails use the same union
+         * bytes for head_page, so their anon.mapcount is invalid). */
+        page_t *cow_head = old_page;
+        if (old_page != NULL && PAGE_IS_TYPE(old_page, PAGE_TYPE_TAIL)
+            && old_page->tail.head_page != NULL)
+            cow_head = old_page->tail.head_page;
         page_t *pc_head = page_pcache_head(old_page);
         if (pc_head != NULL) {
             /* Zero-copy pcache page: ALWAYS COW — we must never
@@ -1050,9 +1066,9 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
             pa = (void *)folio_address(new_folio);
             memmove(pa, addr, PGSIZE);
             pcache_put_folio(pc_head->pcache.pcache, old_folio);
-            folio_add_anon_rmap(new_folio, vma, fault_va);
-        } else if (old_page != NULL && PAGE_IS_TYPE(old_page, PAGE_TYPE_ANON) &&
-            page_mapcount(old_page) > 1) {
+            page_add_anon_rmap((page_t *)new_folio, vma, fault_va);
+        } else if (cow_head != NULL && PAGE_IS_TYPE(cow_head, PAGE_TYPE_ANON) &&
+            page_mapcount(cow_head) > 1) {
             /* COW: multiple mappers — copy the entire folio at once so
              * that subsequent write faults on sibling pages of the
              * same folio can take the single-mapper fast path. */
@@ -1068,7 +1084,14 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
                     return -ENOMEM;
                 pa = (void *)folio_address(new_folio);
                 memmove(pa, addr, PGSIZE);
-                folio_remove_rmap(old_folio);
+                /* Single-page COW fallback: if we are replacing the
+                 * HEAD page's PTE, decrement old folio's mapcount now
+                 * because teardown only decrements rmap for HEAD PTEs
+                 * and this PTE will point to the new folio instead.
+                 * If replacing a tail page PTE, don't touch mapcount —
+                 * the head PTE still points to the old folio. */
+                if (old_page == cow_head)
+                    page_remove_rmap(cow_head);
                 page_ref_dec(addr);
                 folio_add_anon_rmap(new_folio, vma, fault_va);
             } else {
@@ -1078,20 +1101,20 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
                 unsigned long nr = folio_nr_pages(new_folio);
                 memmove((void *)new_folio_pa, (void *)old_folio_pa,
                         nr * PGSIZE);
+
+                /* Whole-folio COW: this process is replacing ALL
+                 * pages of the old folio → update mapcount once at
+                 * the folio level (head page only). */
+                folio_remove_rmap(old_folio);
                 folio_add_anon_rmap(new_folio, vma, fault_va);
 
-                /* Walk the VMA range to find PTEs into the old folio. */
+                /* Walk the VMA range to find PTEs into the old folio.
+                 * Swap each to the corresponding new folio page and
+                 * adjust refcounts. */
                 uint64 old_pa_base = old_folio_pa;
                 uint64 old_pa_end = old_folio_pa + nr * PGSIZE;
                 uint64 scan_start = vma->start;
                 uint64 scan_end = vma->end;
-
-                /* Drop the old folio's rmap BEFORE any page_ref_dec
-                 * that might free the page.  anon.mapcount and
-                 * buddy.lru_entry share the same union, so writing
-                 * mapcount after the page is back on the buddy list
-                 * would corrupt the free-list pointers. */
-                folio_remove_rmap(old_folio);
 
                 for (uint64 va = scan_start; va < scan_end; va += PGSIZE) {
                     pte_t *p = walk(vma->vm->pagetable, va, 0, NULL, NULL);
@@ -1113,8 +1136,8 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
                 uint64 fault_off = (uint64)addr - old_pa_base;
                 pa = (void *)(new_folio_pa + fault_off);
             }
-        } else if (old_page != NULL && PAGE_IS_TYPE(old_page, PAGE_TYPE_ANON) &&
-                   page_mapcount(old_page) == 1) {
+        } else if (cow_head != NULL && PAGE_IS_TYPE(cow_head, PAGE_TYPE_ANON) &&
+                   page_mapcount(cow_head) == 1) {
             /* Single mapper fast path — re-grant write to all pages
              * in the folio so sibling pages don't re-fault. */
             folio_t *old_folio = page_folio(old_page);
@@ -2099,10 +2122,11 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
              * Transfer rmap: remove from old VMA, add to new. */
             *new_pte = *old_pte;
             page_t *pg = __pa_to_page(pa);
+            /* Only update rmap for HEAD pages (PAGE_TYPE_ANON).
+             * Tail pages are skipped — their union stores head_page. */
             if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON)) {
-                folio_t *folio = page_folio(pg);
-                folio_remove_rmap(folio);
-                folio_add_anon_rmap(folio, new_vma, new_location + offset);
+                page_remove_rmap(pg);
+                page_add_anon_rmap(pg, new_vma, new_location + offset);
             }
             pte_clear(old_pte);
         }
@@ -2311,8 +2335,9 @@ int vm_madvise(vm_t *vm, uint64 addr, size_t size, int advice)
                         folio_t *folio = page_folio(pc_head);
                         pcache_put_folio(pc_head->pcache.pcache, folio);
                     } else {
+                        /* Only decrement rmap for HEAD pages. */
                         if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
-                            folio_remove_rmap(page_folio(pg));
+                            page_remove_rmap(pg);
                         page_ref_dec((void *)pa);
                     }
                 } else {

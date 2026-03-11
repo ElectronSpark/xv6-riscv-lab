@@ -11,6 +11,7 @@
 #include "dev/dev_types.h"
 #include "proc/workqueue_types.h"
 #include "proc/tq_type.h"
+#include "lock/rcu_type.h"
 
 typedef struct page_struct page_t;
 typedef struct folio folio_t;
@@ -114,6 +115,7 @@ struct pcache_node {
     uint64 blkno;    // starting block number (512-byte) of the page
     size_t size;     // size of valid data area in the page
     tq_t io_waiters; // Wait queue for IO completion
+    rcu_head_t rcu_head; // For RCU-deferred freeing after xa_erase
 };
 
 /* ── Batch page vector for vectorized pcache operations ───────────────── */

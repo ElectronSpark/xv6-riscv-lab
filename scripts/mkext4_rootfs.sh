@@ -81,6 +81,21 @@ mkdir -p "$STAGING/proc"
 mkdir -p "$STAGING/tmp"
 mkdir -p "$STAGING/sys"
 mkdir -p "$STAGING/etc"
+mkdir -p "$STAGING/mnt"
+
+# ── Filesystem table (/etc/fstab) ────────────────────────────────────────────
+# Standard Linux format: device  mountpoint  fstype  options  dump  pass
+# The kernel mounts /dev, /proc, and /tmp during boot; init reads this file
+# and skips already-mounted targets unless "remount" is specified.
+cat > "$STAGING/etc/fstab" <<'FSTAB'
+# /etc/fstab — xv6 filesystem table
+#
+# <device>      <mountpoint>   <fstype>    <options>   <dump> <pass>
+/dev/disk0      /              ext4        defaults    0      1
+devtmpfs        /dev           devtmpfs    defaults    0      0
+proc            /proc          procfs      defaults    0      0
+tmpfs           /tmp           tmpfs       defaults    0      0
+FSTAB
 
 # ── Network configuration (user-space DNS via musl) ──────────────────────────
 # Fallback resolv.conf — init will overwrite with DHCP/config-derived DNS

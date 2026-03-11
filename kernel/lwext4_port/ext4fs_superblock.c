@@ -11,6 +11,7 @@
 #include "defs.h"
 #include "param.h"
 #include "errno.h"
+#include "cmdline.h"
 #include "lock/spinlock.h"
 #include "lock/mutex_types.h"
 #include "dev/blkdev.h"
@@ -623,9 +624,17 @@ void ext4fs_init(void)
 /**
  * Mount ext4 at /root and chroot into it.
  * Requires: tmpfs already mounted as initial root (vfs_root_inode.mnt_rooti
- * set).
+ * set), and devtmpfs already mounted at /dev on the tmpfs root.
  *
- * Prefers ramdisk (major 3) if available, falls back to virtio disk (major 2).
+ * Root device selection order:
+ *   1. boot command line "root=" parameter (from bootloader / QEMU -append)
+ *   2. ramdisk (major 3) if available
+ *   3. fallback to ROOTDEV (virtio disk, major 2)
+ *
+ * After mounting the real root at /root:
+ *   - Ensures /root/dev exists
+ *   - Moves devtmpfs from /dev to /root/dev
+ *   - Chroots into /root
  */
 void ext4fs_mount_root(void)
 {
@@ -642,13 +651,30 @@ void ext4fs_mount_root(void)
         return;
     }
 
-    /* Select root device: prefer ramdisk if available */
-    dev_t root_dev;
-    blkdev_t *ramdisk = blkdev_get(major(RAMDISK_DEV), minor(RAMDISK_DEV));
-    if (ramdisk != NULL && !IS_ERR(ramdisk)) {
-        root_dev = RAMDISK_DEV;
-    } else {
-        root_dev = ROOTDEV;
+    /* Select root device:
+     * 1. Try boot command line root= parameter
+     * 2. Prefer ramdisk if available
+     * 3. Fall back to compiled-in ROOTDEV */
+    dev_t root_dev = cmdline_get_root_dev();
+    if (root_dev != 0) {
+        /* Validate that the specified device exists */
+        blkdev_t *bdev = blkdev_get(major(root_dev), minor(root_dev));
+        if (bdev == NULL || IS_ERR(bdev)) {
+            printf("ext4fs: cmdline root device (%d,%d) not found, "
+                   "falling back\n", major(root_dev), minor(root_dev));
+            root_dev = 0;
+        } else {
+            blkdev_put(bdev);
+        }
+    }
+    if (root_dev == 0) {
+        blkdev_t *ramdisk = blkdev_get(major(RAMDISK_DEV), minor(RAMDISK_DEV));
+        if (ramdisk != NULL && !IS_ERR(ramdisk)) {
+            root_dev = RAMDISK_DEV;
+            blkdev_put(ramdisk);
+        } else {
+            root_dev = ROOTDEV;
+        }
     }
 
     /* Create a block device inode for root device */
@@ -677,9 +703,31 @@ void ext4fs_mount_root(void)
     if (ret == 0) {
         printf("ext4fs: mounted at /root\n");
 
-        /* Chroot into the ext4 root */
         struct vfs_inode *ext4_root = root_dir->mnt_rooti;
         if (ext4_root != NULL) {
+            /* Ensure /root/dev exists for moving devtmpfs */
+            struct vfs_inode *new_dev = vfs_namei("/root/dev", 9);
+            if (IS_ERR_OR_NULL(new_dev)) {
+                new_dev = vfs_mkdir(ext4_root, 0755, "dev", 3);
+                if (IS_ERR_OR_NULL(new_dev)) {
+                    printf("ext4fs: failed to create /root/dev\n");
+                } else {
+                    vfs_iput(new_dev);
+                }
+            } else {
+                vfs_iput(new_dev);
+            }
+
+            /* Move devtmpfs from /dev (on tmpfs) to /root/dev (on ext4) */
+            ret = vfs_move_mount_path("/dev", 4, "/root/dev", 9);
+            if (ret == 0) {
+                printf("ext4fs: moved devtmpfs /dev -> /root/dev\n");
+            } else {
+                printf("ext4fs: failed to move /dev -> /root/dev, "
+                       "errno=%d\n", ret);
+            }
+
+            /* Chroot into the ext4 root */
             ret = vfs_chroot(ext4_root);
             if (ret == 0) {
                 printf("ext4fs: chroot to /root successful\n");

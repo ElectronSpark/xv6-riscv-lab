@@ -42,6 +42,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/bits.c
     ${KERNEL_DIR}/accounting.c
     ${KERNEL_DIR}/power.c
+    ${KERNEL_DIR}/cmdline.c
 )
 
 if(DEFINED ENV{RWLOCK_TEST})

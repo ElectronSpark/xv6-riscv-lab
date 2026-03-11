@@ -596,6 +596,10 @@ static int __tmpfs_getattr(struct vfs_inode *inode, struct stat *stat) {
     stat->st_nlink = inode->n_links;
     stat->st_uid = inode->uid;
     stat->st_gid = inode->gid;
+    if (S_ISBLK(inode->mode))
+        stat->st_rdev = inode->bdev;
+    else if (S_ISCHR(inode->mode))
+        stat->st_rdev = inode->cdev;
     stat->st_size = inode->size;
     stat->st_blksize = 4096;
     stat->st_blocks = (inode->size + 511) >> 9;
