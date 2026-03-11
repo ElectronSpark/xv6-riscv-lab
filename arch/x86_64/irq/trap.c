@@ -630,28 +630,12 @@ void x86_trap_handler(struct trapframe *tf) {
                 vm_runlock(current->vm);
                 goto user_return; /* fault resolved */
             }
-            /* Diagnostic: dump VMA state on unresolved fault */
-            if (vma != NULL) {
-                // dprintf("pid %d %s: PF diag: vma [0x%lx-0x%lx) flags=0x%lx, "
-                //        "cr2=0x%lx prot=0x%lx\n",
-                //        current->pid, current->name,
-                //        vma->start, vma->end, vma->flags, cr2, prot);
-            } else {
-                // dprintf("pid %d %s: PF diag: NO VMA for cr2=0x%lx\n",
-                //        current->pid, current->name, cr2);
-            }
             vm_runlock(current->vm);
 
             /* Could not resolve — kill the process */
-            // dprintf(
-            //     "pid %d %s: fatal page fault cr2=0x%lx err=0x%lx rip=0x%lx\n",
-            //     current->pid, current->name, cr2, tf->err, tf->rip);
-            // dprintf("  rsp=0x%lx rbp=0x%lx rax=0x%lx rbx=0x%lx\n",
-            //        tf->rsp, tf->rbp, tf->rax, tf->rbx);
-            // dprintf("  rdi=0x%lx rsi=0x%lx rdx=0x%lx rcx=0x%lx\n",
-            //        tf->rdi, tf->rsi, tf->rdx, tf->rcx);
-            // dprintf("  r8=0x%lx r9=0x%lx r10=0x%lx r11=0x%lx\n",
-            //        tf->r8, tf->r9, tf->r10, tf->r11);
+            printf(
+                "pid %d %s: fatal page fault cr2=0x%lx err=0x%lx rip=0x%lx\n",
+                current->pid, current->name, cr2, tf->err, tf->rip);
             assert(current->pid != 1, "init exiting");
             {
                 extern int gdbstub_signal_stop(struct thread *, int);

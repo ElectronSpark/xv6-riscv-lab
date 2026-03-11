@@ -2377,7 +2377,10 @@ uint64 vm_find_free_range(vm_t *vm, size_t size, uint64 hint)
     uint64 reserve_end = vm->heap_reserve_end;
     uint64 effective_bottom = (reserve_end > heap_end) ? reserve_end : heap_end;
 
-    uint64 search_top = stack_bottom - (16 * PGSIZE);
+    /* Reserve the entire potential stack growth region.  The stack can grow
+     * down to USTACK_MAX_BOTTOM, so mmap allocations must stay below that
+     * to avoid blocking future stack expansion. */
+    uint64 search_top = USTACK_MAX_BOTTOM;
     uint64 search_bottom = effective_bottom;
 
     if (search_top <= search_bottom + size) {

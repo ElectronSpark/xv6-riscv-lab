@@ -96,7 +96,7 @@ add_library(${LIB_USERLIB} STATIC
     ${CMAKE_CURRENT_BINARY_DIR}/usys.S
 )
 add_dependencies(${LIB_USERLIB} generate_usys)
-target_compile_options(${LIB_USERLIB} PRIVATE ${USER_ARCH_CFLAGS_CMD})
+target_compile_options(${LIB_USERLIB} PRIVATE ${USER_ARCH_CFLAGS_CMD} -fno-builtin)
 target_link_options(${LIB_USERLIB} PRIVATE "-z max-page-size=4096 -T ${USER_LINKER_SCRIPT}")
 target_include_directories(${LIB_USERLIB} PRIVATE ${USER_DIR})
 
