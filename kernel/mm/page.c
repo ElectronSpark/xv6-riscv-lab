@@ -1403,14 +1403,13 @@ static void __page_buddy_init_region(uint64 region_start, uint64 region_end,
 
 // Init buddy system and add the given range of pages into it
 int page_buddy_init(void) {
-    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: begin\n");
     size_t page_arr_size = sizeof(page_t) * TOTALPAGES;
     __pages = (page_t *)early_alloc_align(page_arr_size, PGSIZE);
-    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after early_alloc_align\n");
+    // X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after early_alloc_align\n");
     assert(__pages != NULL, "page_buddy_init(): failed to allocate page array");
     __managed_start = PGROUNDUP((uint64)early_alloc_end_ptr());
     __managed_end = PHYSTOP;
-    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after managed range set\n");
+    // X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after managed range set\n");
     printf("page_buddy_init(): page array at 0x%lx, size 0x%lx\n",
            (uint64)__pages, page_arr_size);
     printf("__managed_start: 0x%lx, __managed_end: 0x%lx\n", __managed_start,
@@ -1427,11 +1426,11 @@ int page_buddy_init(void) {
            __managed_start, __managed_end);
 
     // Initialize kernel text/data pages as locked
-    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: before lower lock init\n");
+    // X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: before lower lock init\n");
     assert(__init_range_flags(KERNBASE, __managed_start, PAGE_FLAG_LOCKED) == 0,
            "page_buddy_init(): lower locked memory: 0x%lx to 0x%lx", KERNBASE,
            __managed_start);
-    X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after lower lock init\n");
+    // X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after lower lock init\n");
 
     // Initialize pages for each memory region and gaps between them
     // First pass: mark all pages. Gaps between regions are LOCKED.

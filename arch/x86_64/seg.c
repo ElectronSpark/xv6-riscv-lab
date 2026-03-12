@@ -206,6 +206,11 @@ void x86_tss_set_rsp0(uint64 rsp0)
     cpu_tss(cpuid())->rsp0 = rsp0;
 }
 
+void x86_tss_set_rsp0_cpu(int cpu, uint64 rsp0)
+{
+    cpu_tss(cpu)->rsp0 = rsp0;
+}
+
 void x86_tss_set_ist1(uint64 ist1)
 {
     cpu_tss(cpuid())->ist1 = ist1;

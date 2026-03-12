@@ -115,6 +115,55 @@ struct rq *get_rq_for_cpu(int cls_id, int cpu_id) {
     return __get_rq_for_cpu(cls_id, cpu_id);
 }
 
+int rq_cpu_id(struct rq *rq) {
+    if (rq == NULL) {
+        return -1;
+    }
+
+    int cpu_id = rq->cpu_id;
+    int class_id = rq->class_id;
+
+    if (cpu_id >= 0 && cpu_id < NCPU && class_id >= 0 &&
+        class_id < PRIORITY_MAINLEVELS && __get_rq_for_cpu(class_id, cpu_id) == rq) {
+        return cpu_id;
+    }
+
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        for (int cls = 0; cls < PRIORITY_MAINLEVELS; cls++) {
+            if (__get_rq_for_cpu(cls, cpu) == rq) {
+                rq->class_id = cls;
+                rq->cpu_id = cpu;
+                return cpu;
+            }
+        }
+    }
+
+    return -1;
+}
+
+int rq_identify_object(void *ptr, int *cpu_id, int *class_id) {
+    if (ptr == NULL || !rq_is_initialized()) {
+        return 0;
+    }
+
+    for (int cpu = 0; cpu < NCPU; cpu++) {
+        for (int cls = 0; cls < PRIORITY_MAINLEVELS; cls++) {
+            struct rq *rq = __get_rq_for_cpu(cls, cpu);
+            if (rq == (struct rq *)ptr) {
+                if (cpu_id != NULL) {
+                    *cpu_id = cpu;
+                }
+                if (class_id != NULL) {
+                    *class_id = cls;
+                }
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
 // Pick the highest priority runnable rq across all CPUs and lock it
 struct rq *pick_next_rq(void) {
     int cpu = cpuid();
@@ -480,12 +529,14 @@ struct rq *rq_select_task_rq(struct sched_entity *se, cpumask_t cpumask) {
 }
 
 void rq_enqueue_task(struct rq *rq, struct sched_entity *se) {
-    assert(__rq_lock_held(rq->cpu_id), "rq_enqueue_task: rq lock not held");
+    int rq_cpu = rq_cpu_id(rq);
+    assert(rq_cpu >= 0, "rq_enqueue_task: rq cpu resolution failed");
+    assert(__rq_lock_held(rq_cpu), "rq_enqueue_task: rq lock not held");
     if (se->rq != NULL) {
         struct thread *p = se->thread;
         printf(
             "rq_enqueue_task BUG: se->rq=%p (cpu=%d), target rq=%p (cpu=%d)\n",
-            se->rq, se->rq ? se->rq->cpu_id : -1, rq, rq->cpu_id);
+            se->rq, se->rq ? rq_cpu_id(se->rq) : -1, rq, rq_cpu);
         printf("  thread=%s pid=%d state=%d on_rq=%d on_cpu=%d se_cpu=%d\n",
                p ? p->name : "NULL", p ? p->pid : -1,
                p ? __thread_state_get(p) : -1, se->on_rq, se->on_cpu,
@@ -496,15 +547,17 @@ void rq_enqueue_task(struct rq *rq, struct sched_entity *se) {
         rq->sched_class->enqueue_task(rq, se);
     }
     se->rq = rq;
-    smp_store_release(&se->cpu_id, rq->cpu_id);
+    smp_store_release(&se->cpu_id, rq_cpu);
     smp_store_release(&se->on_rq, 1);
     se->sched_class = rq->sched_class;
     rq->task_count++;
-    rq_set_ready(rq->class_id, rq->cpu_id);
+    rq_set_ready(rq->class_id, rq_cpu);
 }
 
 void rq_dequeue_task(struct rq *rq, struct sched_entity *se) {
-    assert(__rq_lock_held(rq->cpu_id), "rq_dequeue_task: rq lock not held");
+    int rq_cpu = rq_cpu_id(rq);
+    assert(rq_cpu >= 0, "rq_dequeue_task: rq cpu resolution failed");
+    assert(__rq_lock_held(rq_cpu), "rq_dequeue_task: rq lock not held");
     assert(se->rq == rq, "rq_dequeue_task: se->rq does not match rq");
     assert(rq->task_count > 0, "rq_dequeue_task: rq task_count is zero");
     assert(
@@ -518,12 +571,28 @@ void rq_dequeue_task(struct rq *rq, struct sched_entity *se) {
     smp_store_release(&se->on_rq, 0); // Clear on_rq when dequeued
     rq->task_count--;
     if (rq->task_count == 0) {
-        rq_clear_ready(rq->class_id, rq->cpu_id);
+        rq_clear_ready(rq->class_id, rq_cpu);
     }
 }
 
 struct sched_entity *rq_pick_next_task(struct rq *rq) {
-    assert(__rq_lock_held(rq->cpu_id), "rq_pick_next_task: rq lock not held");
+    int rq_cpu = rq_cpu_id(rq);
+    if (rq_cpu < 0 || !__rq_lock_held(rq_cpu)) {
+        int current_cpu = cpuid();
+         struct rq_percpu *current_rq_pc = __rqpc(current_cpu);
+        printf("rq_pick_next_task BUG: current_cpu=%d rq=%p rq_cpu=%d mycpu=%p cur_ready=0x%lx cur_secondary=0x%lx\n",
+               current_cpu, rq, rq_cpu, mycpu(),
+             current_rq_pc->ready_mask,
+             current_rq_pc->ready_mask_secondary);
+         printf("rq_pick_next_task BUG: rqpc=%p rqs63=%p ready=%p ready2=%p lock=%p wake=%p current=%p\n",
+             current_rq_pc, current_rq_pc->rqs[IDLE_MAJOR_PRIORITY],
+             &current_rq_pc->ready_mask,
+             &current_rq_pc->ready_mask_secondary,
+             &current_rq_pc->rq_lock,
+             &current_rq_pc->wake_list_head,
+             &current_rq_pc->current_se);
+        panic("rq_pick_next_task: rq lock not held");
+    }
     struct sched_entity *se = NULL;
     if (rq->sched_class->pick_next_task) {
         se = rq->sched_class->pick_next_task(rq);
@@ -532,8 +601,10 @@ struct sched_entity *rq_pick_next_task(struct rq *rq) {
 }
 
 void rq_put_prev_task(struct sched_entity *se) {
+    int rq_cpu = rq_cpu_id(se->rq);
     assert(se->rq != NULL, "rq_put_prev_task: se->rq is NULL");
-    assert(__rq_lock_held(se->rq->cpu_id),
+    assert(rq_cpu >= 0, "rq_put_prev_task: rq cpu resolution failed");
+    assert(__rq_lock_held(rq_cpu),
            "rq_put_prev_task: rq lock not held");
     assert(se->rq->task_count > 0, "rq_put_prev_task: rq task_count is zero");
     assert(
@@ -559,14 +630,16 @@ void rq_put_prev_task(struct sched_entity *se) {
 }
 
 void rq_set_next_task(struct sched_entity *se) {
+    int rq_cpu = rq_cpu_id(se->rq);
     assert(se->rq != NULL, "rq_set_next_task: se->rq is NULL");
-    assert(__rq_lock_held(se->rq->cpu_id),
+    assert(rq_cpu >= 0, "rq_set_next_task: rq cpu resolution failed");
+    assert(__rq_lock_held(rq_cpu),
            "rq_set_next_task: rq lock not held");
     assert(se->rq->task_count > 0, "rq_set_next_task: rq task_count is zero");
     assert(
         se->sched_class == se->rq->sched_class,
         "rq_set_next_task: se->sched_class does not match rq's sched_class\n");
-    smp_store_release(&__rqpc(se->rq->cpu_id)->current_se, se);
+    smp_store_release(&__rqpc(rq_cpu)->current_se, se);
     if (se->sched_class->set_next_task) {
         se->sched_class->set_next_task(se->rq, se);
     }
@@ -599,9 +672,11 @@ bool rq_cpu_allowed(struct sched_entity *se, int cpu_id) {
 }
 
 void rq_task_tick(struct sched_entity *se) {
+    int rq_cpu = rq_cpu_id(se->rq);
     assert(se->sched_class != NULL, "rq_task_tick: se->sched_class is NULL");
     assert(se->rq != NULL, "rq_task_tick: se->rq is NULL");
-    assert(__rq_lock_held(se->rq->cpu_id), "rq_task_tick: rq lock not held");
+    assert(rq_cpu >= 0, "rq_task_tick: rq cpu resolution failed");
+    assert(__rq_lock_held(rq_cpu), "rq_task_tick: rq lock not held");
     assert(se->sched_class == se->rq->sched_class,
            "rq_task_tick: se->sched_class does not match rq's sched_class");
 
@@ -657,8 +732,10 @@ void rq_task_dead(struct sched_entity *se) {
 
 void rq_yield_task(void) {
     struct rq *current_rq = current->sched_entity->rq;
+    int rq_cpu = rq_cpu_id(current_rq);
     assert(current_rq != NULL, "rq_yield_task: current_rq is NULL");
-    assert(__rq_lock_held(current_rq->cpu_id),
+    assert(rq_cpu >= 0, "rq_yield_task: rq cpu resolution failed");
+    assert(__rq_lock_held(rq_cpu),
            "rq_yield_task: rq lock not held");
     if (current_rq->sched_class->yield_task) {
         current_rq->sched_class->yield_task(current_rq);

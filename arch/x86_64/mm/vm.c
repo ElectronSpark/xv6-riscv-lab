@@ -41,10 +41,14 @@
 #define PD_IDX(va)   (((va) >> 21) & 0x1FF)
 
 /* ── Static page table storage ──
- * Enough tables to map up to 4 GiB with 2 MiB large pages:
- *   1 PML4 + 1 PDPT + 4 PDs = 6 pages
+ * One PD covers 1 GiB when populated with 2 MiB large pages.
+ * Keep enough PDs to cover the full address range reachable through
+ * the single root PML4 entry we install (512 GiB).
+ *
+ * This avoids truncating RAM that firmware/QEMU remaps above the 4 GiB
+ * PCI hole when the guest is configured with 4 GiB or more of memory.
  */
-#define MAX_PDS 4
+#define MAX_PDS X86_PTE_PER_TABLE
 
 static uint64 kpml4[X86_PTE_PER_TABLE] __attribute__((aligned(X86_PAGE_SIZE)));
 static uint64 kpdpt[X86_PTE_PER_TABLE] __attribute__((aligned(X86_PAGE_SIZE)));
@@ -94,10 +98,9 @@ static void kvm_map_2m_range(uint64 pa_start, uint64 pa_end, uint64 flags)
         int pidx = PDPT_IDX(pa);
 
         if (!(kpdpt[pidx] & X86_PTE_P)) {
-            if (n_pds_used >= MAX_PDS) {
-                vm_debug_puts("[vm] ERROR: out of PD tables\n");
-                return;
-            }
+            if (n_pds_used >= MAX_PDS)
+                panic("kvm_map_2m_range: out of PD tables for pa=0x%lx",
+                      pa);
             __builtin_memset(kpds[n_pds_used], 0, X86_PAGE_SIZE);
             kpdpt[pidx] = (uint64)kpds[n_pds_used] | X86_PTE_P | X86_PTE_W;
             n_pds_used++;
@@ -155,9 +158,16 @@ static void kvm_load(void)
 void arch_vm_init(void)
 {
     vm_slab_init();
-    vm_debug_puts("[xv6 x86_64] arch_vm_init: building kernel page tables\n");
     kvm_build();
     kernel_pagetable = (pagetable_t)kpml4;
+
+    /*
+     * Switch to the new page tables NOW, before mappages() calls allocate
+     * page-table pages via the buddy system.  The boot page tables only
+     * identity-map the first 1 GiB; with >=2 GiB RAM the allocator may
+     * return pages above 1 GiB that aren't accessible under the old CR3.
+     */
+    kvm_load();
 
     /*
     * Map trap-entry text (vector stubs + alltraps + syscall_entry +
@@ -233,14 +243,6 @@ void arch_vm_init(void)
             panic("arch_vm_init: idt page map failed");
     }
 
-    vm_debug_puts("[xv6 x86_64] arch_vm_init: PDs used=");
-    vm_debug_hex((uint64)n_pds_used);
-    vm_debug_puts(", loading CR3=0x");
-    vm_debug_hex((uint64)kpml4);
-    vm_debug_puts("\n");
-
-    kvm_load();
-    vm_debug_puts("[xv6 x86_64] arch_vm_init: page tables active\n");
 }
 
 void arch_vm_init_hart(void)

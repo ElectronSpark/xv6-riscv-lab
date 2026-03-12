@@ -2807,6 +2807,12 @@ int kvm_register_region(uint64 start, uint64 size, uint64 flags)
     flags &= ~VMA_FLAG_USER;
 
     vm_wlock(vm);
+    vma_t *existing = vm_find_area(vm, start);
+    if (existing != NULL && existing->start <= start &&
+        existing->end >= start + size) {
+        vm_wunlock(vm);
+        return 0;
+    }
     vma_t *vma = vma_alloc(vm, start, size, flags);
     vm_wunlock(vm);
 

@@ -84,7 +84,9 @@ static void __fifo_put_prev_task(struct rq *rq, struct sched_entity *se) {
     fifo_rq->ready_mask |= (1 << idx);
 
     // Set global ready masks (rq now has at least one task in list)
-    rq_set_ready(rq->class_id, rq->cpu_id);
+    int rq_cpu = rq_cpu_id(rq);
+    assert(rq_cpu >= 0, "__fifo_put_prev_task: rq cpu resolution failed");
+    rq_set_ready(rq->class_id, rq_cpu);
 }
 
 static void __fifo_set_next_task(struct rq *rq, struct sched_entity *se) {
@@ -105,7 +107,9 @@ static void __fifo_set_next_task(struct rq *rq, struct sched_entity *se) {
 
     // If this was the last task in the rq list, clear global ready masks
     if (rq->task_count == 1) {
-        rq_clear_ready(rq->class_id, rq->cpu_id);
+        int rq_cpu = rq_cpu_id(rq);
+        assert(rq_cpu >= 0, "__fifo_set_next_task: rq cpu resolution failed");
+        rq_clear_ready(rq->class_id, rq_cpu);
     }
 }
 

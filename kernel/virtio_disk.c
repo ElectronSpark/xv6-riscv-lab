@@ -24,12 +24,15 @@
 #include "dev/blkdev.h"
 #include "dev/gendisk.h"
 #include <mm/page.h>
+#include <mm/pgtable.h>
+#include <mm/vm.h>
 #include "errno.h"
 #include "proc/sched.h"
 #include "proc/thread.h"
 #include "trap.h"
 #include "freelist.h"
 #include "dev/fdt.h"
+#include "arch/vm.h"
 
 // the address of virtio mmio register r for disk n (MMIO transport only).
 #define R(n, r) ((volatile uint32 *)(__virtio_mmio_base[n] + (r)))
@@ -296,6 +299,46 @@ static void __virtio_disk_init_one(int diskno) {
 // PCI transport initialization for x86.
 // Uses virtio modern PCI capabilities to find BAR regions.
 //
+extern pagetable_t kernel_pagetable;
+
+static uint64 __virtio_pci_map_mmio_window(uint64 bar, uint32 offset,
+                                           uint32 length) {
+    if (bar & 0x1)
+        panic("virtio_disk_pci: capability uses I/O BAR 0x%lx", bar);
+
+    uint64 target = bar + offset;
+    uint64 start = PGROUNDDOWN(target);
+    uint64 end = PGROUNDUP(target + (length ? length : 1));
+    uint64 size = end - start;
+    uint64 map_base;
+    vma_t *vma;
+
+    vm_wlock(kernel_vm);
+    map_base = vm_find_free_range(kernel_vm, size, 0);
+    if (map_base == 0) {
+        vm_wunlock(kernel_vm);
+        panic("virtio_disk_pci: failed to allocate MMIO VA window");
+    }
+
+    vma = vma_alloc(kernel_vm, map_base, size,
+                    PROT_READ | PROT_WRITE | VMA_FLAG_KERNEL);
+    vm_wunlock(kernel_vm);
+    if (vma == NULL)
+        panic("virtio_disk_pci: failed to reserve MMIO VA window");
+
+    for (uint64 page_off = 0; page_off < size; page_off += PGSIZE) {
+        uint64 va = map_base + page_off;
+        uint64 pa = start + page_off;
+
+        if (arch_vm_map(kernel_pagetable, va, PGSIZE, pa,
+                        PTE_R | PTE_W) != 0)
+            panic("virtio_disk_pci: failed to map MMIO page pa=0x%lx", pa);
+    }
+
+    arch_tlb_flush();
+    return map_base + (target - start);
+}
+
 static void __virtio_blkdev_init_pci(int diskno, uint8 irq_line) {
     virtio_disk_devs[diskno].ops = __virtio_disk_ops;
     int errno = blkdev_register(&virtio_disk_devs[diskno]);
@@ -344,13 +387,16 @@ static void __virtio_disk_init_one_pci(int diskno) {
     // Read cap fields via PCI config space
     uint8 cc_bar = pci_config_read8(vd->bus, vd->dev, vd->func, ccap + 4);
     uint32 cc_off = pci_config_read32(vd->bus, vd->dev, vd->func, ccap + 8);
+    uint32 cc_len = pci_config_read32(vd->bus, vd->dev, vd->func, ccap + 12);
 
     uint8 n_bar = pci_config_read8(vd->bus, vd->dev, vd->func, ncap + 4);
     uint32 n_off = pci_config_read32(vd->bus, vd->dev, vd->func, ncap + 8);
+    uint32 n_len = pci_config_read32(vd->bus, vd->dev, vd->func, ncap + 12);
     uint32 n_mult = pci_config_read32(vd->bus, vd->dev, vd->func, ncap + 16);
 
     uint8 i_bar = pci_config_read8(vd->bus, vd->dev, vd->func, icap + 4);
     uint32 i_off = pci_config_read32(vd->bus, vd->dev, vd->func, icap + 8);
+    uint32 i_len = pci_config_read32(vd->bus, vd->dev, vd->func, icap + 12);
 
     // Get BAR base addresses (mask off type bits)
     uint64 cc_base = (uint64)(vd->bar[cc_bar] & ~0xFU);
@@ -370,11 +416,17 @@ static void __virtio_disk_init_one_pci(int diskno) {
     printf("virtio_disk_pci: BAR bases: common=0x%lx notify=0x%lx isr=0x%lx\n",
            cc_base, n_base, i_base);
 
-    // Map BAR regions (identity mapped on x86 kernel)
+    uint64 cfg_va = __virtio_pci_map_mmio_window(cc_base, cc_off, cc_len);
+    uint64 notify_va = __virtio_pci_map_mmio_window(n_base, n_off, n_len);
+    uint64 isr_va = __virtio_pci_map_mmio_window(i_base, i_off, i_len);
+
+    printf("virtio_disk_pci: mapped VAs common=0x%lx notify=0x%lx isr=0x%lx\n",
+           cfg_va, notify_va, isr_va);
+
     volatile struct virtio_pci_common_cfg *cfg =
-        (volatile struct virtio_pci_common_cfg *)(cc_base + cc_off);
-    volatile uint16 *notify = (volatile uint16 *)(n_base + n_off);
-    volatile uint8 *isr = (volatile uint8 *)(i_base + i_off);
+        (volatile struct virtio_pci_common_cfg *)cfg_va;
+    volatile uint16 *notify = (volatile uint16 *)notify_va;
+    volatile uint8 *isr = (volatile uint8 *)isr_va;
 
     disk->pci_state.common_cfg = cfg;
     disk->pci_state.notify_base = notify;

@@ -32,10 +32,10 @@ struct pcache_ops {
     int (*write_folio)(struct pcache *pcache, folio_t *folio);
 };
 
-#define PCACHE_DEFAULT_DIRTY_RATE 15 // in percentage
-#define PCACHE_DEFAULT_MAX_PAGES 4096
+#define PCACHE_DEFAULT_DIRTY_RATE 8 // in percentage
+#define PCACHE_DEFAULT_MAX_PAGES 65536
 
-#define PCACHE_FLUSH_INTERVAL_JIFFS (30 * HZ) // 30 seconds
+#define PCACHE_FLUSH_INTERVAL_JIFFS (10 * HZ) // 10 seconds
 
 // Page cache structure
 //

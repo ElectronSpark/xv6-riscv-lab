@@ -26,6 +26,7 @@
 #include "trap.h"
 #include "dev/uart.h"
 #include "sbi.h"
+#include "diag.h"
 #include "signal.h"
 #include "tty/tty.h"
 #include "tty/session.h"
@@ -48,6 +49,38 @@ static volatile int uart_initialized = 0;
 // The console TTY — allocated during consoledevinit()
 // Before this is set, consoleintr() falls back to the raw buffer.
 struct tty *console_tty = NULL;
+
+static void console_trace_user_write(bool user_src, const char *buf, int n) {
+    static int trace_budget = 32;
+
+    if (!user_src || n <= 0) {
+        return;
+    }
+
+    struct thread *t = current;
+    if (t == NULL || t->pid <= 0) {
+        return;
+    }
+
+    int slot = __atomic_fetch_sub(&trace_budget, 1, __ATOMIC_RELAXED);
+    if (slot <= 0) {
+        return;
+    }
+
+    char snippet[49];
+    int limit = n < (int)(sizeof(snippet) - 1) ? n : (int)(sizeof(snippet) - 1);
+    for (int i = 0; i < limit; i++) {
+        char c = buf[i];
+        if (c < ' ' || c > '~') {
+            c = '.';
+        }
+        snippet[i] = c;
+    }
+    snippet[limit] = '\0';
+
+    dprintf("[console][pid=%d] write n=%d text=\"%s\"\n", t->pid, n,
+            snippet);
+}
 
 //
 // send one character to the uart.
@@ -166,6 +199,8 @@ int consolewrite(cdev_t *cdev, bool user_src, const void *buffer, size_t n) {
             if (either_copyin(&kbuf[i], user_src, src + written + i, 1) < 0)
                 return written > 0 ? written : -EFAULT;
         }
+
+        console_trace_user_write(user_src, kbuf, batch_size);
 
         // Expand into output buffer
         int olen = 0;

@@ -164,6 +164,9 @@ void x86_gdt_init_ap(void);
 /** Set the RSP0 (kernel stack) field in this CPU's TSS. */
 void x86_tss_set_rsp0(uint64 rsp0);
 
+/** Set the RSP0 field in the TSS for a specific CPU. */
+void x86_tss_set_rsp0_cpu(int cpu, uint64 rsp0);
+
 /** Set the IST1 stack pointer in this CPU's TSS. */
 void x86_tss_set_ist1(uint64 ist1);
 

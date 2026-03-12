@@ -43,6 +43,8 @@
 #define GET_RQ_FOR_CURRENT(cls_id) get_rq_for_cpu((cls_id), cpuid())
 
 struct rq *get_rq_for_cpu(int cls_id, int cpu_id);
+int rq_cpu_id(struct rq *rq);
+int rq_identify_object(void *ptr, int *cpu_id, int *class_id);
 struct rq *pick_next_rq(void);
 void rq_global_init(void);
 void rq_init(struct rq *rq);

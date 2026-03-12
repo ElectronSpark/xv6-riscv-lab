@@ -100,6 +100,7 @@ static void start_daemon(const char *line)
         return;
     tok_argv[argc] = NULL;
 
+    printf("init: forking daemon: %s\n", tok_argv[0]);
     pid_t pid = fork();
     if (pid < 0) {
         printf("init: fork failed for daemon: %s\n", tok_argv[0]);

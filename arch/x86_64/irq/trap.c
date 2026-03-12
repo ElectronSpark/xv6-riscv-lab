@@ -21,6 +21,7 @@
 #include "trapframe.h"
 #include "lapic.h"
 #include "ioapic.h"
+#include <mm/pgtable.h>
 #include <mm/vm.h>
 #include <smp/percpu.h>
 #include <proc/sched.h>
@@ -42,6 +43,12 @@ extern void sig_trampoline(void); /* defined in sig_trampoline.S */
 
 extern char userret[];
 static void (*trampoline_userret)(uint64 tf, uint64 user_cr3) = NULL;
+static void trace_userret_phase(const char *tag, struct thread *p);
+
+/* ── Debugcon helpers (forward declarations for use in usertrapret) ── */
+static inline void dbg_outb(uint16 port, uint8 val);
+static void dbg_puts(const char *s);
+static void dbg_hex(uint64 v);
 
 /*
  * usertrapret — return to user mode.
@@ -54,6 +61,8 @@ static void (*trampoline_userret)(uint64 tf, uint64 user_cr3) = NULL;
 void usertrapret(void) {
     struct thread *p = current;
     struct trapframe *tf = &p->trapframe->trapframe;
+
+    trace_userret_phase("enter", p);
 
     if (killed(p))
         exit(-1);
@@ -76,9 +85,11 @@ void usertrapret(void) {
 
     /* Disable interrupts while setting up the return path. */
     intr_off();
+    trace_userret_phase("after intr_off", p);
 
     /* Restore user FS base (TLS) for user-space threads. */
     wrmsr(MSR_FS_BASE, p->trapframe->tp);
+    trace_userret_phase("after fsbase", p);
 
     /*
      * Set up GS MSRs explicitly — Linux strategy:
@@ -97,19 +108,16 @@ void usertrapret(void) {
     struct cpu_local *my_cpu = mycpu();
     int cpu = cpuid();
 
+    /* After MSR_GS_BASE is switched to the user value, helpers that depend on
+     * mycpu()/cpuid() are no longer safe until the next kernel entry. */
+    x86_tss_set_rsp0_cpu(cpu, p->ksp);
+
     wrmsr(MSR_GS_BASE, p->trapframe->user_gs_base);
     wrmsr(MSR_KERNEL_GS_BASE, (uint64)my_cpu);
 
     /* Store kernel state in utrapframe for next trap entry. */
     p->trapframe->kernel_sp = p->ksp;
     p->trapframe->kernel_satp = (uint64)kernel_pagetable; /* RISC-V compat */
-
-    /* Set TSS RSP0 so the CPU switches to the kernel stack on ring 3→0
-     * for IDT-based traps (exceptions, interrupts).
-     * GS MSRs are explicitly set above (Linux strategy): usertrapret writes
-     * both MSR_GS_BASE and MSR_KERNEL_GS_BASE directly so the next
-     * alltraps/syscall_entry swapgs reliably yields the per-CPU GS. */
-    x86_tss_set_rsp0(p->ksp);
 
     /*
      * Tell alltraps where to pivot RSP for user->kernel transitions.
@@ -136,11 +144,8 @@ void usertrapret(void) {
     /* Validate trapframe_pte before vm_cpu_online */
     if (p->vm->trapframe_pte) {
         uint64 pte_val = (uint64)p->vm->trapframe_pte;
-        if (pte_val > 0x40000000UL || pte_val < 0x100000UL) {
-            printf("usertrapret: BAD trapframe_pte=%p pid=%d name=%s\n",
-                   p->vm->trapframe_pte, p->pid, p->name);
-            intr_on();
-            exit(-1);
+        if (pte_val < 0x100000UL) {
+            panic("usertrapret: BAD trapframe_pte");
         }
     }
     /* Mark the current CPU offline for the kernel VM (reverse of user VM) */
@@ -565,6 +570,31 @@ static inline uint64 read_cr2(void) {
     return v;
 }
 
+static void trace_first_user_transition(const char *tag, uint64 a, uint64 b,
+                                        uint64 c) {
+    static int budget = 32;
+    int slot = __atomic_fetch_sub(&budget, 1, __ATOMIC_RELAXED);
+
+    if (slot <= 0 || current == NULL) {
+        return;
+    }
+
+    dprintf("[utrace][cpu=%d][pid=%d] %s a=0x%lx b=0x%lx c=0x%lx\n",
+            (int)cpuid(), current->pid, tag, a, b, c);
+}
+
+static void trace_userret_phase(const char *tag, struct thread *p) {
+    static int budget = 48;
+    int slot = __atomic_fetch_sub(&budget, 1, __ATOMIC_RELAXED);
+
+    if (slot <= 0 || p == NULL) {
+        return;
+    }
+
+    dprintf("[userret-phase][cpu=%d][pid=%d] %s\n", (int)cpuid(), p->pid,
+            tag);
+}
+
 /* ── Timer tick advance (defined in timer.c) ── */
 extern void timer_tick_advance(void);
 
@@ -576,7 +606,6 @@ extern int do_device_irq(int hw_irq);
 void x86_trap_handler(struct trapframe *tf) {
     uint64 vec = tf->trapno;
     int from_user = ((tf->cs & 3) == 3);
-
     /*
      * For user-mode traps, copy the stack-based trapframe into the thread's
      * utrapframe so that syscall arg fetching and other code that reads
@@ -604,6 +633,8 @@ void x86_trap_handler(struct trapframe *tf) {
         uint64 cr2 = read_cr2();
 
         if (from_user && current && current->vm) {
+            trace_first_user_transition("user-pf", cr2, tf->rip, tf->err);
+
             /*
              * User-mode page fault — attempt demand paging.
              * x86 PF error code bit 1 = write fault.
@@ -946,6 +977,10 @@ user_return:
 void usertrap_syscall(struct trapframe *tf) {
     struct thread *p = current;
     (void)p;
+
+    if (p != NULL) {
+        trace_first_user_transition("syscall", tf->rax, tf->rip, tf->rsp);
+    }
 
     /*
      * Copy the stack-based trapframe into the per-process utrapframe.

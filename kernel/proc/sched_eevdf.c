@@ -324,6 +324,8 @@ static void __update_curr(struct eevdf_rq *erq, struct sched_entity *se) {
  * ────────────────────────────────────────────────────────────── */
 
 static void __eevdf_enqueue_task(struct rq *rq, struct sched_entity *se) {
+    int rq_cpu = rq_cpu_id(rq);
+    assert(rq_cpu >= 0, "__eevdf_enqueue_task: rq cpu resolution failed");
     struct eevdf_rq *erq = __to_eevdf_rq(rq);
     __set_load_weight(se);
 
@@ -343,7 +345,7 @@ static void __eevdf_enqueue_task(struct rq *rq, struct sched_entity *se) {
 
     /* Wakeup preemption check: if the new entity has an earlier deadline
      * than the currently running entity on this CPU, request reschedule. */
-    if (rq->cpu_id == cpuid()) {
+    if (rq_cpu == cpuid()) {
         struct sched_entity *curr_se = current->sched_entity;
         if (curr_se != NULL && IS_EEVDF_PRIORITY(curr_se->priority)) {
             if (se->deadline < curr_se->deadline) {
@@ -383,13 +385,15 @@ static void __eevdf_dequeue_task(struct rq *rq, struct sched_entity *se) {
  * should be eligible this is usually the leftmost node itself.
  */
 static struct sched_entity *__eevdf_pick_next_task(struct rq *rq) {
+    int rq_cpu = rq_cpu_id(rq);
+    assert(rq_cpu >= 0, "__eevdf_pick_next_task: rq cpu resolution failed");
     struct eevdf_rq *erq = __to_eevdf_rq(rq);
 
     /* If the local rq is empty, try idle balance first to pull work
      * from a busier CPU before this CPU falls through to idle. */
     if (erq->nr_running == 0) {
         /* Attempt idle balance — returns 1 if work was pulled. */
-        if (!__eevdf_idle_balance(erq, rq->cpu_id, rq->class_id)) {
+        if (!__eevdf_idle_balance(erq, rq_cpu, rq->class_id)) {
             return NULL;
         }
         /* Fall through — we just pulled at least one entity. */
@@ -422,6 +426,8 @@ static struct sched_entity *__eevdf_pick_next_task(struct rq *rq) {
 }
 
 static void __eevdf_set_next_task(struct rq *rq, struct sched_entity *se) {
+    int rq_cpu = rq_cpu_id(rq);
+    assert(rq_cpu >= 0, "__eevdf_set_next_task: rq cpu resolution failed");
     struct eevdf_rq *erq = __to_eevdf_rq(rq);
     /* Remove entity from the tree while it is running. */
     __dequeue_entity(erq, se);
@@ -429,11 +435,13 @@ static void __eevdf_set_next_task(struct rq *rq, struct sched_entity *se) {
 
     /* If this was the last entity in the tree, clear ready bits. */
     if (erq->nr_running == 0) {
-        rq_clear_ready(rq->class_id, rq->cpu_id);
+        rq_clear_ready(rq->class_id, rq_cpu);
     }
 }
 
 static void __eevdf_put_prev_task(struct rq *rq, struct sched_entity *se) {
+    int rq_cpu = rq_cpu_id(rq);
+    assert(rq_cpu >= 0, "__eevdf_put_prev_task: rq cpu resolution failed");
     struct eevdf_rq *erq = __to_eevdf_rq(rq);
 
     /* Update accounting for the time the entity spent running. */
@@ -450,10 +458,12 @@ static void __eevdf_put_prev_task(struct rq *rq, struct sched_entity *se) {
     }
 
     /* Mark rq ready since we just added an entity. */
-    rq_set_ready(rq->class_id, rq->cpu_id);
+    rq_set_ready(rq->class_id, rq_cpu);
 }
 
 static void __eevdf_task_tick(struct rq *rq, struct sched_entity *se) {
+    int rq_cpu = rq_cpu_id(rq);
+    assert(rq_cpu >= 0, "__eevdf_task_tick: rq cpu resolution failed");
     struct eevdf_rq *erq = __to_eevdf_rq(rq);
     __update_curr(erq, se);
 
@@ -467,7 +477,7 @@ static void __eevdf_task_tick(struct rq *rq, struct sched_entity *se) {
     }
 
     /* Periodic load balancing: attempt to pull tasks from busier CPUs. */
-    __eevdf_periodic_balance(erq, rq->cpu_id, rq->class_id);
+    __eevdf_periodic_balance(erq, rq_cpu, rq->class_id);
 }
 
 static void __eevdf_task_fork(struct rq *rq, struct sched_entity *se) {

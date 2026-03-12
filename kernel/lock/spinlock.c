@@ -6,10 +6,26 @@
 #include "lock/spinlock.h"
 #include "riscv.h"
 #include "proc/thread.h"
+#include "proc/rq.h"
 #include <smp/percpu.h>
 #include "defs.h"
 #include "printf.h"
 #include "timer/timer.h"
+
+static void __spinlock_assert_not_rq_object(spinlock_t *lk, const char *op) {
+    int cpu_id;
+    int class_id;
+
+    if (!rq_identify_object(lk, &cpu_id, &class_id)) {
+        return;
+    }
+
+    printf("spinlock misuse: %s called on rq object %p (cpu=%d class=%d)\n",
+           op, lk, cpu_id, class_id);
+    printf("backtrace:\n");
+    print_backtrace(r_fp(), KERNBASE, PHYSTOP);
+    panic("spinlock misuse on rq object");
+}
 
 void spin_init(spinlock_t *lk, char *name) {
     lk->name = name;
@@ -20,6 +36,7 @@ void spin_init(spinlock_t *lk, char *name) {
 // Acquire the lock.
 // Caller must disable interrupts before calling spin_lock.
 void spin_acquire(spinlock_t *lk) {
+    __spinlock_assert_not_rq_object(lk, "spin_acquire");
     assert(lk && !spin_holding(lk), "spin_lock reentry");
 
     // On RISC-V, sync_lock_test_and_set turns into an atomic swap:
@@ -60,6 +77,7 @@ void spin_acquire(spinlock_t *lk) {
 
 // Release the lock.
 void spin_release(spinlock_t *lk) {
+    __spinlock_assert_not_rq_object(lk, "spin_release");
     assert(lk && spin_holding(lk), "spin_unlock");
 
     // Tell the C compiler and the CPU to not move loads or stores
@@ -85,6 +103,7 @@ void spin_release(spinlock_t *lk) {
 // Caller needs to record the preempt state. before calling spin_trylock.
 // Returns 1 if the lock was acquired, 0 if not.
 int spin_trylock(spinlock_t *lk) {
+    __spinlock_assert_not_rq_object(lk, "spin_trylock");
     push_off(); // disable interrupts
     if (spin_holding(lk)) {
         pop_off();
@@ -108,6 +127,7 @@ int spin_trylock(spinlock_t *lk) {
 // Check whether this cpu is holding the lock.
 // Interrupts must be off.
 int spin_holding(spinlock_t *lk) {
+    __spinlock_assert_not_rq_object(lk, "spin_holding");
     if (__atomic_load_n(&lk->cpu, __ATOMIC_ACQUIRE) != mycpu()) {
         return 0;
     }

@@ -17,7 +17,10 @@
 #include "lock/rcu.h"
 #include "lapic.h"
 #include "param.h"
+#include <mm/memlayout.h>
 #include "mm/page.h"
+#include <mm/vm.h>
+#include <mm/early_allocator.h>
 #include "smp/percpu.h"
 
 /* Global platform info structure (RISC-V defines this in fdt.c) */
@@ -152,6 +155,23 @@ static void x86_debug_boot_mem_summary(void)
         x86_debug_put_size(platform.ramdisk_size);
         x86_debug_puts("\n");
     }
+}
+
+static void x86_print_region_list(const char *tag, struct mem_region *regions,
+                                  int count)
+{
+    for (int i = 0; i < count; i++) {
+        uint64 base = regions[i].base;
+        uint64 end = base + regions[i].size;
+        printf("x86 %s[%d]: [0x%lx-0x%lx) size=0x%lx\n", tag, i, base, end,
+               regions[i].size);
+    }
+}
+
+static void x86_print_kvm_region(const char *tag, uint64 base, uint64 end)
+{
+    printf("x86 %s: [0x%lx-0x%lx) size=0x%lx\n", tag, base, end,
+           end - base);
 }
 
 /* ------------------------------------------------------------------ */
@@ -448,6 +468,9 @@ int platform_init(void *boot_data)
            "first=[0x%lx-0x%lx)\n",
            platform.mem_count, platform.reserved_count,
            platform.total_mem / (1024 * 1024), first_base, first_end);
+        x86_print_region_list("mem", platform.mem, platform.mem_count);
+        x86_print_region_list("reserved", platform.reserved,
+                     platform.reserved_count);
 
     if (platform.has_ramdisk) {
         printf("x86 ramdisk: 0x%lx - 0x%lx (%ld KB)\n",
@@ -465,7 +488,60 @@ int platform_init(void *boot_data)
 
 void platform_apply_config(void)
 {
-    /* No-op — ACPI / PCI enumeration will go here eventually. */
+    extern uint64 __physical_memory_start;
+    extern uint64 __physical_memory_end;
+    extern uint64 __physical_total_pages;
+
+    /*
+     * Split any memory region that crosses the 4 GB physical boundary into
+     * two entries: the portion below 4 GB stays as low memory (region 0) and
+     * the portion above becomes a separate highmem region.  This keeps the
+     * page array manageable and matches the early allocator's cap done in
+     * start_kernel.c.
+     */
+    #define PHYS_4GB 0x100000000ULL
+    for (int i = 0; i < platform.mem_count; i++) {
+        uint64 base = platform.mem[i].base;
+        uint64 end  = base + platform.mem[i].size;
+        if (base < PHYS_4GB && end > PHYS_4GB &&
+            platform.mem_count < MAX_MEM_REGIONS) {
+            uint64 low_size  = PHYS_4GB - base;
+            uint64 high_size = end - PHYS_4GB;
+            platform.mem[i].size = low_size;
+
+            /* Shift subsequent entries to make room */
+            for (int j = platform.mem_count; j > i + 1; j--)
+                platform.mem[j] = platform.mem[j - 1];
+
+            platform.mem[i + 1].base = PHYS_4GB;
+            platform.mem[i + 1].size = high_size;
+            platform.mem_count++;
+            i++; /* skip the newly inserted entry */
+        }
+    }
+    #undef PHYS_4GB
+
+    /*
+     * Extend __physical_memory_end to cover all memory regions, including
+     * any above 4 GB.  The page array will span the entire range from
+     * the first region's base to the last region's end.  Gap pages are
+     * marked LOCKED during buddy init.
+     */
+    if (platform.mem_count > 0 && platform.mem[0].size > 0) {
+        __physical_memory_start = platform.mem[0].base;
+
+        uint64 highest_end = platform.mem[0].base + platform.mem[0].size;
+        for (int i = 1; i < platform.mem_count; i++) {
+            uint64 region_end = platform.mem[i].base + platform.mem[i].size;
+            if (region_end > highest_end)
+                highest_end = region_end;
+        }
+        __physical_memory_end = highest_end;
+        __physical_total_pages =
+            (highest_end - __physical_memory_start) >> 12;
+
+        early_allocator_extend((void *)highest_end);
+    }
 }
 
 void platform_probe_extensions(void)
@@ -476,11 +552,98 @@ void platform_probe_extensions(void)
 void platform_print_mem_summary(void)
 {
     x86_debug_boot_mem_summary();
+
+    if (platform.mem_count > 0) {
+        uint64 first_base = platform.mem[0].base;
+        uint64 first_end = platform.mem[0].base + platform.mem[0].size;
+        printf("x86 boot memory: regions=%d reserved=%d total=%ld MB first=[0x%lx-0x%lx)\n",
+               platform.mem_count, platform.reserved_count,
+               platform.total_mem / (1024 * 1024), first_base, first_end);
+    }
+
+    x86_print_region_list("mem", platform.mem, platform.mem_count);
+    x86_print_region_list("reserved", platform.reserved,
+                          platform.reserved_count);
+
+    if (platform.has_ramdisk) {
+        printf("x86 ramdisk: [0x%lx-0x%lx) size=0x%lx\n",
+               platform.ramdisk_base,
+               platform.ramdisk_base + platform.ramdisk_size,
+               platform.ramdisk_size);
+    }
+
+    if (platform.has_cmdline) {
+        printf("x86 kernel cmdline: %s\n", platform.cmdline);
+    }
+
+    {
+        const uint64 low_identity_top = 4ULL << 30;
+
+        x86_print_kvm_region("kvm low identity", KVMBASE, low_identity_top);
+        x86_print_kvm_region("mmio window", 0xFE000000ULL, 0xFF000000ULL);
+
+        for (int i = 0; i < platform.mem_count; i++) {
+            uint64 base = platform.mem[i].base;
+            uint64 end = base + platform.mem[i].size;
+            if (end <= low_identity_top)
+                continue;
+            if (base < low_identity_top)
+                base = low_identity_top;
+            x86_print_kvm_region("high ram", base, end);
+        }
+
+        for (int i = 0; i < platform.reserved_count; i++) {
+            uint64 base = platform.reserved[i].base;
+            uint64 end = base + platform.reserved[i].size;
+            if (end <= low_identity_top)
+                continue;
+            if (base < low_identity_top)
+                base = low_identity_top;
+            x86_print_kvm_region("high reserved/mmio", base, end);
+        }
+    }
 }
 
 void platform_post_vm_init(void)
 {
-    /* Paging is already on from the PVH entry stub. */
+    /* Paging is already on from the PVH entry stub.
+     * Reserve all pre-mapped low-kernel identity space, including the
+     * low RAM aperture, firmware/reserved regions, and static MMIO window,
+     * so kvm_mmap() never places dynamic kernel VM allocations there. */
+    const uint64 low_identity_top = 4ULL << 30;
+
+    x86_print_kvm_region("kvm low identity", KVMBASE, low_identity_top);
+    x86_print_kvm_region("mmio window", 0xFE000000ULL, 0xFF000000ULL);
+
+    if (kvm_register_region(KVMBASE, low_identity_top - KVMBASE,
+                            PROT_READ | PROT_WRITE) != 0)
+        panic("platform_post_vm_init: reserve low identity aperture failed");
+
+    for (int i = 0; i < platform.mem_count; i++) {
+        uint64 base = platform.mem[i].base;
+        uint64 end = base + platform.mem[i].size;
+        if (end <= low_identity_top)
+            continue;
+        if (base < low_identity_top)
+            base = low_identity_top;
+        x86_print_kvm_region("high ram", base, end);
+        if (kvm_register_region(base, end - base,
+                                PROT_READ | PROT_WRITE) != 0)
+            panic("platform_post_vm_init: reserve high RAM region failed");
+    }
+
+    for (int i = 0; i < platform.reserved_count; i++) {
+        uint64 base = platform.reserved[i].base;
+        uint64 end = base + platform.reserved[i].size;
+        if (end <= low_identity_top)
+            continue;
+        if (base < low_identity_top)
+            base = low_identity_top;
+        x86_print_kvm_region("high reserved/mmio", base, end);
+        if (kvm_register_region(base, end - base,
+                                PROT_READ | PROT_WRITE) != 0)
+            panic("platform_post_vm_init: reserve high reserved region failed");
+    }
 }
 
 void platform_start_secondary_cpus(uint64 entry)
@@ -582,9 +745,17 @@ void platform_start_secondary_cpus(uint64 entry)
     for (volatile int i = 0; i < 50000; i++)
         asm volatile("outb %%al, $0x80" : : "a"(0));
 
+    /* ap_boot_next_cpu is consumed by the copied trampoline at AP_BOOT_PA,
+     * not by the original image symbol. Read back the runtime copy. */
+    uint32 *runtime_ap_boot_next_cpu =
+        (uint32 *)(AP_BOOT_PA +
+                   ((uint64)&ap_boot_next_cpu -
+                    (uint64)ap_trampoline_start));
+
     /* ap_boot_next_cpu started at 1 (BSP=0). After APs boot it equals
      * the total number of CPUs (BSP + APs). */
-    uint32 total_cpus = __atomic_load_n(&ap_boot_next_cpu, __ATOMIC_ACQUIRE);
+    uint32 total_cpus =
+        __atomic_load_n(runtime_ap_boot_next_cpu, __ATOMIC_ACQUIRE);
     platform.ncpu = total_cpus;
     printf("[SMP] %d CPUs online (1 BSP + %d APs)\n", total_cpus, total_cpus - 1);
 }

@@ -295,7 +295,8 @@ void scheduler_yield(void) {
     // and may set NEEDS_RESCHED if the current task has exhausted its slice.
     {
         struct sched_entity *curr_se = proc->sched_entity;
-        if (curr_se != NULL && curr_se->rq != NULL)
+        if (proc != mycpu()->idle_thread && curr_se != NULL &&
+            curr_se->rq != NULL)
             rq_task_tick(curr_se);
     }
 
@@ -439,7 +440,8 @@ retry:
     // context_switch_finish) target_cpu: where we want to enqueue the task If
     // cpu_id is -1 (task never ran), just use target_cpu for both.
     int origin_cpuid = smp_load_acquire(&se->cpu_id);
-    int target_cpu = rq->cpu_id;
+    int target_cpu = rq_cpu_id(rq);
+    assert(target_cpu >= 0, "__do_scheduler_wakeup: rq cpu resolution failed");
     if (origin_cpuid < 0) {
         origin_cpuid = target_cpu; // New task, no origin rq to serialize with
     }
