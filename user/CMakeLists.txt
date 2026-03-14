@@ -241,6 +241,7 @@ set(MUSL_STATIC_PROGRAMS
     msu:su         mid:id          mwhoami:whoami
     museradd:useradd  muserdel:userdel
     mchown:chown   mchmod:chmod    mtelnetd:telnetd
+    mstty:stty     mreset:reset
 )
 foreach(MAPPING ${MUSL_STATIC_PROGRAMS})
     string(REPLACE ":" ";" PARTS ${MAPPING})
@@ -1932,6 +1933,237 @@ endif()
 set(USER_PROGRAMS ${USER_PROGRAMS} PARENT_SCOPE)
 
 # ==============================================================================
+# VIM — Vi IMproved text editor (cross-compiled against musl + ncurses)
+# ==============================================================================
+set(VIM_SRC_DIR "${CMAKE_SOURCE_DIR}/user/vim")
+set(VIM_BUILD_DIR "${CMAKE_BINARY_DIR}/user/vim_build/src")
+set(VIM_BIN "${VIM_BUILD_DIR}/vim")
+set(VIM_RUNTIME_VERSION "vim91")
+
+if(EXISTS "${VIM_SRC_DIR}/src/configure" AND EXISTS "${NCURSES_SRC_DIR}/configure")
+
+    # Determine architecture-specific uname output for cross-compile overrides
+    if(ARCH STREQUAL "x86_64")
+        set(VIM_UNAME_OUTPUT "Linux")
+        set(VIM_UNAME_M "x86_64")
+    else()
+        set(VIM_UNAME_OUTPUT "Linux")
+        set(VIM_UNAME_M "riscv64")
+    endif()
+
+    # Stamp file tracks whether the source tree has been copied into the build dir
+    set(VIM_COPY_STAMP "${CMAKE_BINARY_DIR}/user/vim_build/.copy_stamp")
+    add_custom_command(
+        OUTPUT ${VIM_COPY_STAMP}
+        COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_BINARY_DIR}/user/vim_build
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/user
+        COMMAND sh -c "cp -a ${VIM_SRC_DIR} ${CMAKE_BINARY_DIR}/user/vim_build"
+        COMMAND ${CMAKE_COMMAND} -E touch ${VIM_COPY_STAMP}
+        DEPENDS ${VIM_SRC_DIR}/src/configure
+        COMMENT "Copying VIM source tree into build directory"
+    )
+    add_custom_target(vim_copy_source DEPENDS ${VIM_COPY_STAMP})
+
+    # Configure VIM for cross-compilation (runs inside the per-build copy)
+    add_custom_command(
+        OUTPUT ${VIM_BUILD_DIR}/auto/config.status
+        COMMAND ${CMAKE_COMMAND} -E chdir ${VIM_BUILD_DIR}
+                env
+                CC=${CMAKE_C_COMPILER}
+                AR=${CMAKE_AR}
+                RANLIB=${CMAKE_RANLIB}
+                STRIP=${CMAKE_STRIP}
+                CFLAGS=--sysroot=${MUSL_SYSROOT}\ -O2\ -nostdinc\ -ffreestanding\ -fno-common\ ${USER_ARCH_CFLAGS}\ -isystem\ ${MUSL_INCLUDE_DIR}\ -isystem\ ${GCC_INCLUDE_DIR_MUSL}\ -isystem\ ${MUSL_COMPAT_DIR}\ -I${NCURSES_INCLUDE_DIR}
+                LDFLAGS=-no-pie\ -nostartfiles\ -nostdlib\ ${MUSL_CRT1_O}\ ${MUSL_CRTI_O}\ -Wl,--dynamic-linker=${MUSL_DYNAMIC_LINKER_PATH}\ -Wl,-z,max-page-size=0x1000\ -Wl,-z,common-page-size=0x1000\ -Wl,--build-id=none\ -L${NCURSES_BUILD_DIR}/lib\ -L${MUSL_SYSROOT}/lib
+                LIBS=-lncurses\ -lc\ ${LIBGCC_PATH}\ ${MUSL_CRTN_O}
+                ${VIM_BUILD_DIR}/configure
+                    --host=${USER_HOST_TRIPLE}
+                    --prefix=/
+                    --with-features=normal
+                    --with-tlib=ncurses
+                    --disable-gui
+                    --without-x
+                    --disable-xim
+                    --disable-gpm
+                    --disable-sysmouse
+                    --disable-nls
+                    --disable-selinux
+                    --disable-smack
+                    --disable-canberra
+                    --disable-libsodium
+                    --disable-netbeans
+                    --disable-channel
+                    --disable-perlinterp
+                    --disable-pythoninterp
+                    --disable-python3interp
+                    --disable-rubyinterp
+                    --disable-luainterp
+                    --disable-tclinterp
+                    --enable-multibyte
+                    vim_cv_toupper_broken=no
+                    vim_cv_terminfo=yes
+                    vim_cv_tgetent=zero
+                    vim_cv_getcwd_broken=no
+                    vim_cv_stat_ignores_slash=no
+                    vim_cv_memmove_handles_overlap=yes
+                    vim_cv_memcpy_handles_overlap=yes
+                    vim_cv_bcopy_handles_overlap=yes
+                    vim_cv_ipv4_networking=no
+                    vim_cv_ipv6_networking=no
+                    vim_cv_timer_create=no
+                    vim_cv_timer_create_with_lrt=no
+                    vim_cv_uname_output=${VIM_UNAME_OUTPUT}
+                    vim_cv_uname_m_output=${VIM_UNAME_M}
+                    vim_cv_uname_r_output=6.0.0
+                    ac_cv_sizeof_int=4
+                    ac_cv_sizeof_long=8
+                    ac_cv_sizeof_off_t=8
+                    ac_cv_func_getpwuid=yes
+                    ac_cv_func_getpwnam=yes
+                    ac_cv_func_getpwent=no
+                    ac_cv_func_iswupper=yes
+                    ac_cv_func_sigaction=yes
+                    ac_cv_func_sigvec=no
+                    ac_cv_func_sigset=no
+                    ac_cv_func_sigsetjmp=yes
+                    ac_cv_func_setpgid=yes
+                    ac_cv_func_setsid=yes
+                    ac_cv_func_setjmp=yes
+                    ac_cv_func_fchdir=yes
+                    ac_cv_func_fchown=yes
+                    ac_cv_func_fchmod=yes
+                    ac_cv_func_fsync=yes
+                    ac_cv_func_ftruncate=yes
+                    ac_cv_func_getcwd=yes
+                    ac_cv_func_getrlimit=yes
+                    ac_cv_func_gettimeofday=yes
+                    ac_cv_func_localtime_r=yes
+                    ac_cv_func_lstat=yes
+                    ac_cv_func_memset=yes
+                    ac_cv_func_mkdtemp=yes
+                    ac_cv_func_nanosleep=yes
+                    ac_cv_func_opendir=yes
+                    ac_cv_func_putenv=yes
+                    ac_cv_func_qsort=yes
+                    ac_cv_func_readlink=yes
+                    ac_cv_func_rename=yes
+                    ac_cv_func_select=yes
+                    ac_cv_func_setenv=yes
+                    ac_cv_func_sigaltstack=yes
+                    ac_cv_func_strftime=yes
+                    ac_cv_func_stricmp=no
+                    ac_cv_func_strncasecmp=yes
+                    ac_cv_func_sysconf=yes
+                    ac_cv_func_sysinfo=no
+                    ac_cv_func_towlower=yes
+                    ac_cv_func_towupper=yes
+                    ac_cv_func_usleep=yes
+        DEPENDS ${VIM_COPY_STAMP} musl_sysroot ${NCURSES_LIB_A}
+        COMMENT "Configuring VIM cross build (dynamic musl, with ncurses)"
+    )
+
+    add_custom_target(vim_configure DEPENDS ${VIM_BUILD_DIR}/auto/config.status)
+    add_dependencies(vim_configure local_ncurses_build vim_copy_source)
+
+    # Build VIM in the per-build-directory copy of the source tree.
+    # osdef.h is generated during make and may contain declarations that
+    # conflict with musl/ncurses headers during cross-compilation.
+    # We generate it first, fix it, then continue the full build.
+    # Also patch os_unix.c to force-restore terminal state on exit —
+    # VIM's normal restore path can leave ONLCR cleared on xv6.
+    # Build only the 'vim' target (xxd is built separately below).
+    add_custom_command(
+        OUTPUT ${VIM_BIN}
+        COMMAND ${CMAKE_COMMAND} -E chdir ${VIM_BUILD_DIR}
+                make auto/osdef.h
+        COMMAND sed -i
+            -e "/extern.*poll\\\(/d"
+            -e "/struct pollfd/d"
+            -e "/extern.*tgetent/d"
+            -e "/extern.*tgetnum/d"
+            -e "/extern.*tgetflag/d"
+            -e "/extern.*tgoto/d"
+            -e "/extern.*tputs/d"
+            -e "/extern.*open\\\(/d"
+            ${VIM_BUILD_DIR}/auto/osdef.h
+        COMMAND ${CMAKE_SOURCE_DIR}/scripts/patch_vim_exit.sh
+            ${VIM_BUILD_DIR}/os_unix.c
+        COMMAND ${CMAKE_COMMAND} -E chdir ${VIM_BUILD_DIR}
+                make -j16 vim
+        DEPENDS vim_configure
+        COMMENT "Building VIM (musl, with ncurses)"
+    )
+
+    # Build xxd separately with proper musl link flags
+    # (VIM's Makefile passes LDFLAGS but not LIBS to xxd, so -lc is missing)
+    set(VIM_XXD_SRC "${VIM_BUILD_DIR}/xxd/xxd.c")
+    set(VIM_XXD_BIN "${VIM_BUILD_DIR}/xxd/xxd")
+    add_custom_command(
+        OUTPUT ${VIM_XXD_BIN}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${VIM_BUILD_DIR}/xxd
+        COMMAND ${CMAKE_C_COMPILER}
+            --sysroot=${MUSL_SYSROOT}
+            -O2 -nostdinc -ffreestanding -fno-common
+            ${USER_ARCH_CFLAGS_CMD}
+            -isystem ${MUSL_INCLUDE_DIR}
+            -isystem ${GCC_INCLUDE_DIR_MUSL}
+            -isystem ${MUSL_COMPAT_DIR}
+            -DUNIX
+            -no-pie -nostartfiles -nostdlib
+            ${MUSL_CRT1_O} ${MUSL_CRTI_O}
+            -Wl,--dynamic-linker=${MUSL_DYNAMIC_LINKER_PATH}
+            -Wl,-z,max-page-size=0x1000
+            -Wl,-z,common-page-size=0x1000
+            -Wl,--build-id=none
+            -L${MUSL_SYSROOT}/lib
+            -o ${VIM_XXD_BIN}
+            ${VIM_XXD_SRC}
+            -lc ${LIBGCC_PATH} ${MUSL_CRTN_O}
+        DEPENDS ${VIM_COPY_STAMP} musl_sysroot
+        COMMENT "Building xxd (musl)"
+    )
+
+    # Install VIM binary, xxd, and minimal runtime to sysroot
+    set(VIM_RUNTIME_SRC "${VIM_SRC_DIR}/runtime")
+    set(VIM_RUNTIME_DST "${MUSL_SYSROOT}/share/vim/${VIM_RUNTIME_VERSION}")
+    add_custom_command(
+        OUTPUT ${MUSL_SYSROOT}/bin/vim
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${MUSL_SYSROOT}/bin
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${VIM_BIN} ${MUSL_SYSROOT}/bin/vim
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${VIM_XXD_BIN} ${MUSL_SYSROOT}/bin/xxd
+        # Install minimal VIM runtime files
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${VIM_RUNTIME_DST}
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${VIM_RUNTIME_DST}/syntax
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${VIM_RUNTIME_DST}/colors
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${VIM_RUNTIME_DST}/indent
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${VIM_RUNTIME_DST}/plugin
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${VIM_RUNTIME_SRC}/defaults.vim ${VIM_RUNTIME_DST}/defaults.vim
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${VIM_RUNTIME_SRC}/filetype.vim ${VIM_RUNTIME_DST}/filetype.vim
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${VIM_RUNTIME_SRC}/ftoff.vim ${VIM_RUNTIME_DST}/ftoff.vim
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${VIM_RUNTIME_SRC}/indent.vim ${VIM_RUNTIME_DST}/indent.vim
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${VIM_RUNTIME_SRC}/indoff.vim ${VIM_RUNTIME_DST}/indoff.vim
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${VIM_RUNTIME_SRC}/scripts.vim ${VIM_RUNTIME_DST}/scripts.vim
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different ${VIM_RUNTIME_SRC}/synmenu.vim ${VIM_RUNTIME_DST}/synmenu.vim
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${VIM_RUNTIME_SRC}/syntax ${VIM_RUNTIME_DST}/syntax
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${VIM_RUNTIME_SRC}/colors ${VIM_RUNTIME_DST}/colors
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${VIM_RUNTIME_SRC}/indent ${VIM_RUNTIME_DST}/indent
+        COMMAND ${CMAKE_COMMAND} -E copy_directory ${VIM_RUNTIME_SRC}/autoload ${VIM_RUNTIME_DST}/autoload
+        DEPENDS ${VIM_BIN} ${VIM_XXD_BIN}
+        COMMENT "Installing VIM + xxd + runtime to sysroot"
+    )
+
+    add_custom_target(vim_build DEPENDS ${MUSL_SYSROOT}/bin/vim)
+    add_dependencies(vim_build local_ncurses_build)
+    add_dependencies(user_programs vim_build)
+else()
+    if(NOT EXISTS "${VIM_SRC_DIR}/src/configure")
+        message(STATUS "Skipping VIM build (missing submodule at ${VIM_SRC_DIR})")
+    else()
+        message(STATUS "Skipping VIM build (ncurses not available)")
+    endif()
+endif()
+
+# ==============================================================================
 # Populate sysroot/bin/ with xv6 user programs for GDB debugging.
 #
 # Third-party components install directly via their native install targets:
@@ -1990,6 +2222,7 @@ set(MUSL_PROG_MAP
     msu:su         mid:id          mwhoami:whoami
     museradd:useradd  muserdel:userdel
     mchown:chown   mchmod:chmod    mtelnetd:telnetd
+    mstty:stty     mreset:reset
 )
 foreach(MAPPING ${MUSL_PROG_MAP})
     string(REPLACE ":" ";" PARTS ${MAPPING})
@@ -2019,6 +2252,12 @@ endif()
 # dash shell (statically linked against musl)
 if(TARGET dash_build)
     sysroot_install("${DASH_BIN}" "${SYSROOT_BIN_DIR}/dash" DEPENDS dash_build)
+endif()
+
+# VIM editor (dynamically linked against musl + ncurses)
+if(TARGET vim_build)
+    # Binary already installed by vim_build target; track the runtime stamp
+    set(SYSROOT_TARGETS ${SYSROOT_TARGETS} "${MUSL_SYSROOT}/bin/vim")
 endif()
 
 # CPython interpreter (dynamically linked against musl)
@@ -2119,6 +2358,9 @@ if(SYSROOT_TARGETS)
     endif()
     if(TARGET flask_install)
         add_dependencies(sysroot_populate flask_install)
+    endif()
+    if(TARGET vim_build)
+        add_dependencies(sysroot_populate vim_build)
     endif()
 endif()
 

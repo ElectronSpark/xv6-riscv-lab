@@ -37,3 +37,6 @@
 [submodule "user/numpy"]
 	path = user/numpy
 	url = https://github.com/numpy/numpy.git
+[submodule "user/vim"]
+	path = user/vim
+	url = https://github.com/vim/vim.git

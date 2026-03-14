@@ -219,6 +219,7 @@ static int history_start; // oldest entry position in ring
 
 // Terminal state
 static struct termios orig_termios;
+static int orig_termios_saved;
 static int raw_mode;
 #ifdef USE_NCURSES_SHELL
 static int ncurses_active;
@@ -419,10 +420,12 @@ static char *expand_env_vars(const char *input) {
 static void enable_raw_mode(void) {
     if (raw_mode)
         return;
-#ifdef USE_NCURSES_SHELL
     struct termios raw;
-    if (tcgetattr(0, &orig_termios) < 0)
-        return;
+    if (!orig_termios_saved) {
+        if (tcgetattr(0, &orig_termios) < 0)
+            return;
+        orig_termios_saved = 1;
+    }
     raw = orig_termios;
     raw.c_lflag &= ~(ICANON | ECHO | ECHOE | ECHOK | ISIG);
     raw.c_iflag &= ~(ICRNL | IXON);
@@ -431,33 +434,13 @@ static void enable_raw_mode(void) {
     if (tcsetattr(0, TCSAFLUSH, &raw) < 0)
         return;
     raw_mode = 1;
-    return;
-#else
-    struct termios raw;
-    if (tcgetattr(0, &orig_termios) < 0)
-        return;
-    raw = orig_termios;
-    raw.c_lflag &= ~(ICANON | ECHO | ECHOE | ECHOK | ISIG);
-    raw.c_iflag &= ~(ICRNL | IXON);
-    raw.c_cc[VMIN] = 1;
-    raw.c_cc[VTIME] = 0;
-    if (tcsetattr(0, TCSAFLUSH, &raw) < 0)
-        return;
-    raw_mode = 1;
-#endif
 }
 
 static void disable_raw_mode(void) {
     if (!raw_mode)
         return;
-#ifdef USE_NCURSES_SHELL
     tcsetattr(0, TCSAFLUSH, &orig_termios);
     raw_mode = 0;
-    return;
-#else
-    tcsetattr(0, TCSAFLUSH, &orig_termios);
-    raw_mode = 0;
-#endif
 }
 
 static void term_write(const char *s, int n) {
@@ -1787,28 +1770,27 @@ static int run_line(char *buf, int interactive) {
     int pid;
 
     if (interactive) {
-        // Snapshot shell terminal settings before child can mutate tty state.
-        struct termios shell_termios;
-        tcgetattr(0, &shell_termios);
-    #ifdef USE_NCURSES_SHELL
-        pid = vfork();
-    #else
+        // Use fork (not vfork) for interactive commands — vfork shares
+        // the parent's address space, so the child's stack operations
+        // (setpgid, tcgetattr, tcsetattr, runcmd) can corrupt the
+        // parent's local variables including our saved termios state.
         pid = fork();
-    #endif
         if (pid < 0)
             panic("fork");
         if (pid == 0) {
             setpgid(0, 0); // New process group (pgid = own pid)
 
             // Child side: ensure we own foreground tty and restore sane mode
-            // before launching interactive programs like python.
+            // before launching interactive programs like vim, python.
             int child_pgid = getpgid(0);
             ioctl(0, TIOCSPGRP, &child_pgid);
 
+            // Set a fully sane terminal state for the child
             struct termios child_termios;
             if (tcgetattr(0, &child_termios) == 0) {
                 child_termios.c_lflag |= (ICANON | ECHO | ISIG | ECHOE | ECHOK);
                 child_termios.c_iflag |= (ICRNL | IXON);
+                child_termios.c_oflag |= (OPOST | ONLCR);
                 child_termios.c_cc[VMIN] = 1;
                 child_termios.c_cc[VTIME] = 0;
                 tcsetattr(0, TCSANOW, &child_termios);
@@ -1832,8 +1814,10 @@ static int run_line(char *buf, int interactive) {
             ioctl(0, TIOCSPGRP, &shell_pgid);
         }
 
-        // Restore shell's terminal settings (child may have changed them)
-        tcsetattr(0, TCSANOW, &shell_termios);
+        // Restore the pristine terminal state (captured once at shell
+        // startup).  orig_termios is guaranteed to have OPOST|ONLCR
+        // and all other sane flags — it cannot be corrupted by children.
+        tcsetattr(0, TCSANOW, &orig_termios);
 
         if (WIFSTOPPED(status)) {
             printf("[suspended] pid %d\n", pid);
@@ -1969,6 +1953,14 @@ int main(int argc, char *argv[]) {
     }
 
     // ---- Interactive mode ----
+
+    // Capture the pristine terminal state before entering the main loop.
+    // This is the known-good state we restore to after every child exits.
+    if (!orig_termios_saved) {
+        if (tcgetattr(0, &orig_termios) == 0)
+            orig_termios_saved = 1;
+    }
+
     for (;;) {
         if (getcmd(buf, sizeof(buf)) < 0)
             break; // EOF (e.g. PTY closed) or Ctrl-D
