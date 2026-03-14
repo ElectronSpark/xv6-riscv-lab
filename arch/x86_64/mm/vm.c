@@ -216,12 +216,12 @@ void arch_vm_init(void)
             if (mappages((pagetable_t)kpml4,
                          TRAPVEC_ALIAS_BASE + i * PGSIZE, PGSIZE,
                          VA2PA(trapvec_page0) + i * PGSIZE,
-                         PTE_R | PTE_W) != 0)
+                         PTE_R | PTE_W | PTE_G) != 0)
                 panic("arch_vm_init: trapvec alias map page%d failed", i);
         }
 
         if (mappages((pagetable_t)kpml4, TRAMPOLINE, PGSIZE,
-                 VA2PA(PGROUNDDOWN((uint64)trampoline)), PTE_R) != 0)
+                 VA2PA(PGROUNDDOWN((uint64)trampoline)), PTE_R | PTE_G) != 0)
             panic("arch_vm_init: trampoline map failed");
 
         /*
@@ -238,21 +238,21 @@ void arch_vm_init(void)
          */
         if (mappages((pagetable_t)kpml4, SIG_TRAMPOLINE, PGSIZE,
                      VA2PA(PGROUNDDOWN((uint64)sig_trampoline)),
-                     PTE_R | PTE_U) != 0)
+                     PTE_R | PTE_U | PTE_G) != 0)
             panic("arch_vm_init: sig trampoline map failed");
 
         uint64 cpus_base = PGROUNDDOWN((uint64)cpus);
         if (PGROUNDUP((uint64)cpus + sizeof(cpus)) - cpus_base > PGSIZE)
             panic("arch_vm_init: cpus[] exceeds one page");
         if (mappages((pagetable_t)kpml4, TRAMPOLINE_CPULOCAL, PGSIZE,
-                     VA2PA(cpus_base), PTE_R | PTE_W) != 0)
+                     VA2PA(cpus_base), PTE_R | PTE_W | PTE_G) != 0)
             panic("arch_vm_init: cpu-local map failed");
 
         for (int i = 0; i < NCPU; i++) {
             uint64 stack_pa = VA2PA((uint64)&irq_stacks[i][0]);
             uint64 stack_va = KIRQSTACK(i);
             if (mappages((pagetable_t)kpml4, stack_va, INTR_STACK_SIZE,
-                         stack_pa, PTE_R | PTE_W) != 0)
+                         stack_pa, PTE_R | PTE_W | PTE_G) != 0)
                 panic("arch_vm_init: irq stack map failed");
 
             cpus[i].intr_stacks = (void **)stack_va;
@@ -266,10 +266,10 @@ void arch_vm_init(void)
          * reachable for fault delivery during the transition.
          */
         if (mappages((pagetable_t)kpml4, CPU_ENTRY_GDT, PGSIZE,
-                     VA2PA(x86_gdt_page_pa()), PTE_R | PTE_W) != 0)
+                     VA2PA(x86_gdt_page_pa()), PTE_R | PTE_W | PTE_G) != 0)
             panic("arch_vm_init: gdt page map failed");
         if (mappages((pagetable_t)kpml4, CPU_ENTRY_IDT, PGSIZE,
-                     VA2PA(x86_idt_page_pa()), PTE_R) != 0)
+                     VA2PA(x86_idt_page_pa()), PTE_R | PTE_G) != 0)
             panic("arch_vm_init: idt page map failed");
     }
 
@@ -344,15 +344,20 @@ pagetable_t uvmcreate(void)
     __builtin_memset(pagetable, 0, PGSIZE);
 
     /*
-     * Share the PML4 entries that contain high-canonical mappings:
-     *   PML4[511] — TRAMPOLINE, TRAMPOLINE_DATA, CPU_ENTRY_AREA, etc.
-     *   PML4[510] — SIG_TRAMPOLINE (signal return trampoline, PTE_U).
+     * Share ALL upper-half PML4 entries (256-511) from the kernel.
+     * This makes the entire kernel address space visible in every
+     * user page table:
+     *   PML4[256]  — higher-half direct map (PA + PAGE_OFFSET)
+     *   PML4[510]  — SIG_TRAMPOLINE (signal return trampoline)
+     *   PML4[511]  — TRAMPOLINE, TRAPVEC, CPU_ENTRY_AREA, IRQ stacks
+     *   (others currently empty but pre-shared for consistency)
      *
-     * Do not copy PML4[0] (kernel identity map), so user page tables
-     * never reach identity-mapped kernel low addresses.
+     * User code cannot access these because the entries lack PTE_U.
+     * PML4[0] is NOT copied: it holds the kernel identity map and
+     * would conflict with user-space lower-half mappings.
      */
-    pagetable[PX(3, TRAMPOLINE)]     = kpml4[PX(3, TRAMPOLINE)];
-    pagetable[PX(3, SIG_TRAMPOLINE)] = kpml4[PX(3, SIG_TRAMPOLINE)];
+    for (int i = 256; i < 512; i++)
+        pagetable[i] = kpml4[i];
 
     return pagetable;
 }
@@ -369,11 +374,13 @@ pagetable_t uvmcreate(void)
  *
  * skip_idx: PML4 index to skip (shared kernel mapping, e.g. PML4[511]).
  */
-static void __freewalk(pagetable_t pagetable, int level, int skip_idx)
+static void __freewalk(pagetable_t pagetable, int level)
 {
     for (int i = 0; i < 512; i++) {
-        if (i == skip_idx)
-            continue;
+        /* At PML4 level, skip all upper-half entries (256-511).
+         * These are shared kernel mappings and must not be freed. */
+        if (level == 3 && i >= 256)
+            break;
         pte_t pte = pagetable[i];
         if (!(pte & PTE_V))
             continue;
@@ -383,7 +390,7 @@ static void __freewalk(pagetable_t pagetable, int level, int skip_idx)
              * usable as pointers via the PML4[0] identity map, so
              * casting directly to pagetable_t is correct here. */
             uint64 child = PTE2PA(pte);
-            __freewalk((pagetable_t)child, level - 1, -1);
+            __freewalk((pagetable_t)child, level - 1);
             pagetable[i] = 0;
         } else {
             /* Level 0 (PT): this is a leaf — should have been cleared. */
@@ -395,17 +402,17 @@ static void __freewalk(pagetable_t pagetable, int level, int skip_idx)
 
 void freewalk(pagetable_t pagetable)
 {
-    __freewalk(pagetable, 3, PX(3, TRAMPOLINE));
+    __freewalk(pagetable, 3);
 }
 
 void uvmfree(pagetable_t pagetable, uint64 sz)
 {
     (void)sz;
     if (pagetable != 0) {
-        /* Clear shared kernel PML4 entries before freewalk so the
-         * kernel page tables are not accidentally freed. */
-        pagetable[PX(3, TRAMPOLINE)] = 0;
-        pagetable[PX(3, SIG_TRAMPOLINE)] = 0;
+        /* Clear all shared upper-half PML4 entries before freewalk
+         * so the kernel page tables are not accidentally freed. */
+        for (int i = 256; i < 512; i++)
+            pagetable[i] = 0;
     }
     freewalk(pagetable);
 }

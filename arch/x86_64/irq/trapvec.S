@@ -106,12 +106,15 @@ TRAP_NOERR 31       /* (reserved) */
  *
  *  Kernel-mode traps skip swapgs (GS is already per-CPU).
  *
- *  The kernel page table (CR3) is stored in trampoline_ksatp
- *  (RIP-relative), analogous to RISC-V trampoline_ksatp.
+ *  CR3 is NOT switched here.  All user page tables share the
+ *  kernel upper-half PML4 entries (256-511), so kernel text/data
+ *  and the trampoline / per-CPU areas are accessible from any
+ *  page table.  The C handler (x86_trap_handler / usertrap_syscall)
+ *  switches CR3 to the kernel page table to gain identity-map
+ *  (PML4[0]) access for PA-based pointers.
  *
  *  On IDT entry the CPU has already switched RSP to TSS.RSP0 or
- *  IST, so we are on a known kernel stack.  We only need to load
- *  the kernel CR3.
+ *  IST, so we are on a known kernel stack.
  * ────────────────────────────────────────────────────────────── */
 
 .align 16
@@ -130,29 +133,22 @@ alltraps:
      * All IDT vectors use IST=1, so the CPU always loads RSP from
      * TSS.IST1 (a per-CPU stack mapped in every page table).
      *
-     * Step 1: switch to the kernel page table (same as before).
+     * No CR3 switch here: all user page tables share PML4[256-511]
+     * (kernel higher-half, trampoline, per-CPU areas).  The IST
+     * stack (PML4[511]) and kernel text/data (PML4[256]) are
+     * accessible from any page table.  The C handler switches to
+     * the kernel CR3 when it needs identity-map (PML4[0]) access.
      */
-    pushq %rax
-    pushq %rbx
-    movq  %cr3, %rax
-    leaq  trampoline_ksatp(%rip), %rbx
-    movq  (%rbx), %rbx            /* rbx = stored kernel CR3       */
-    cmpq  %rax, %rbx
-    je    1f
-    movq  %rbx, %cr3              /* switch to kernel page table   */
-1:
-    popq  %rbx
-    popq  %rax
 
     /*
-     * Step 2: for user-mode traps, pivot RSP from the shared IST
+     * Pivot RSP from the shared IST
      * stack to the per-thread kernel stack (kstack).
      *
      * WHY: with IST=1 every interrupt lands on the same per-CPU IST
      * stack.  If two threads context-switch while their call frames
      * are on the IST stack, the second thread's frames overwrite the
      * first's, corrupting saved state.  By moving to a per-thread
-     * stack immediately after CR3 swap (while interrupts are still
+     * stack immediately (while interrupts are still
      * disabled by GATE_INTERRUPT), all subsequent C code — including
      * scheduler context switches — runs on a private stack.
      *
@@ -305,10 +301,10 @@ vectors:
  *  Follows the Linux entry_64.S strategy:
  *    0. swapgs: GS_BASE = KERNEL_GS_BASE = mycpu() (set by usertrapret)
  *    1. Save user RSP to per-CPU scratch (%gs:CPU_LOCAL_SYSCALL_SCRATCH)
- *    2. Switch CR3 to kernel page table immediately (RSP as scratch)
- *    3. Load kernel stack from per-CPU (%gs:CPU_LOCAL_SYSCALL_KSTACK_TOP)
- *    4. Build struct trapframe on the kernel stack via pushq
- *    5. Call usertrap_syscall(struct trapframe *tf)
+ *    2. Load kernel stack from per-CPU (%gs:CPU_LOCAL_SYSCALL_KSTACK_TOP)
+ *       (No CR3 switch — kernel is always visible via shared PML4[256-511])
+ *    3. Build struct trapframe on the kernel stack via pushq
+ *    4. Call usertrap_syscall(struct trapframe *tf)
  *
  *  GS state on entry: usertrapret always writes KERNEL_GS_BASE = mycpu()
  *  before returning to user mode (Linux strategy), so swapgs reliably
@@ -350,24 +346,16 @@ syscall_entry:
     movq %rsp, %gs:CPU_LOCAL_SYSCALL_SCRATCH
 
     /*
-     * Step 2: switch to kernel page table.
-     * Use RSP as scratch (user RSP safely saved in %gs:CPU_LOCAL_SYSCALL_SCRATCH).
-     * trampoline_ksatp is RIP-relative, accessible from both
-     * user and kernel page tables (TRAPVEC pages in PML4[511]).
-     */
-    leaq trampoline_ksatp(%rip), %rsp
-    movq (%rsp), %rsp
-    movq %rsp, %cr3
-
-    /*
-     * Step 3: load kernel stack from per-CPU.
-     * GS still works because TRAMPOLINE_CPULOCAL is mapped in
-     * the kernel page table too (PML4[511]).
+     * Step 2: load kernel stack from per-CPU.
+     * No CR3 switch needed: user page tables share PML4[256-511],
+     * so the kernel stack (at a higher-half VA stored in
+     * syscall_kstack_top) is accessible from the user page table.
+     * GS works because TRAMPOLINE_CPULOCAL is in PML4[511].
      */
     movq %gs:CPU_LOCAL_SYSCALL_KSTACK_TOP, %rsp
 
     /*
-     * Step 4: build struct trapframe on the kernel stack.
+     * Step 3: build struct trapframe on the kernel stack.
      * Match the alltraps layout exactly:
      *   SS, RSP, RFLAGS, CS, RIP, err, trapno, then 15 GPRs.
      *
@@ -399,7 +387,7 @@ syscall_entry:
     pushq %r15
 
     /*
-     * Step 5: call C handler.
+     * Step 4: call C handler.
      * RDI = pointer to struct trapframe on the kernel stack.
      */
     movq %rsp, %rdi

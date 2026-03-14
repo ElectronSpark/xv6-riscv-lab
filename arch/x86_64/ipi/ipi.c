@@ -96,14 +96,16 @@ void x86_ipi_handler(void) {
             break;
 
         case IPI_REASON_TLB_FLUSH:
-            /* Full TLB flush by reloading CR3. */
-            // Since User space and Kernel space use different page tables,
-            // the flushing operation will always be done when returning to
-            // the user space.
-            // asm volatile(
-            //     "movq %%cr3, %%rax\n\t"
-            //     "movq %%rax, %%cr3"
-            //     ::: "rax", "memory");
+            /*
+             * Full TLB flush by reloading CR3.
+             * Now that alltraps / syscall_entry no longer switch CR3,
+             * kernel page-table changes (e.g. new mappings in PML4[256-511])
+             * must be propagated proactively via IPI.
+             */
+            asm volatile(
+                "movq %%cr3, %%rax\n\t"
+                "movq %%rax, %%cr3"
+                ::: "rax", "memory");
             break;
 
         case IPI_REASON_CALL_FUNC:

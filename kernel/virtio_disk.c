@@ -275,16 +275,13 @@ static void __virtio_disk_init_one(int diskno) {
     *R(diskno, VIRTIO_MMIO_QUEUE_NUM) = NUM;
 
     // Write physical addresses of virtqueue components to device.
-    // On RISC-V, VA2PA is an identity macro (PA == VA), so this works.
-    // On x86_64, kalloc() returns PAs, but the RISC-V MMIO path is
-    // not compiled for x86 (#else branch), so VA2PA here is correct
-    // for the RISC-V build where kalloc may return VAs.
-    *R(diskno, VIRTIO_MMIO_QUEUE_DESC_LOW) = VA2PA((uint64)disk->desc);
-    *R(diskno, VIRTIO_MMIO_QUEUE_DESC_HIGH) = VA2PA((uint64)disk->desc) >> 32;
-    *R(diskno, VIRTIO_MMIO_DRIVER_DESC_LOW) = VA2PA((uint64)disk->avail);
-    *R(diskno, VIRTIO_MMIO_DRIVER_DESC_HIGH) = VA2PA((uint64)disk->avail) >> 32;
-    *R(diskno, VIRTIO_MMIO_DEVICE_DESC_LOW) = VA2PA((uint64)disk->used);
-    *R(diskno, VIRTIO_MMIO_DEVICE_DESC_HIGH) = VA2PA((uint64)disk->used) >> 32;
+    // kalloc() returns raw physical addresses — no VA2PA needed.
+    *R(diskno, VIRTIO_MMIO_QUEUE_DESC_LOW) = (uint64)disk->desc;
+    *R(diskno, VIRTIO_MMIO_QUEUE_DESC_HIGH) = (uint64)disk->desc >> 32;
+    *R(diskno, VIRTIO_MMIO_DRIVER_DESC_LOW) = (uint64)disk->avail;
+    *R(diskno, VIRTIO_MMIO_DRIVER_DESC_HIGH) = (uint64)disk->avail >> 32;
+    *R(diskno, VIRTIO_MMIO_DEVICE_DESC_LOW) = (uint64)disk->used;
+    *R(diskno, VIRTIO_MMIO_DEVICE_DESC_HIGH) = (uint64)disk->used >> 32;
 
     // queue is ready.
     *R(diskno, VIRTIO_MMIO_QUEUE_READY) = 0x1;

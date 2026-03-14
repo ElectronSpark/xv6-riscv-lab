@@ -186,6 +186,8 @@ uint64 vma2pte_flags(uint64 flags) {
         pte_flags |= PTE_X;
     if (flags & VMA_FLAG_USER)
         pte_flags |= PTE_U;
+    else
+        pte_flags |= PTE_G;  /* Kernel pages are Global (not flushed on CR3 switch) */
     return pte_flags;
 }
 

@@ -125,16 +125,9 @@ uservec:
         # load the address of usertrap(), from p->trapframe->kernel_trap
         ld t0, UTRAPFRAME_KERNEL_TRAP(a0)
 
-        # wait for any previous memory operations to complete, so that
-        # they use the user page table.
-        sfence.vma zero, zero
-
-        # install the kernel page table.
-        ld t1, trampoline_ksatp
-        csrw satp, t1
-
-        # flush now-stale user entries from the TLB.
-        sfence.vma zero, zero
+        # Kernel space is always visible (upper-half PTEs are shared),
+        # so no SATP switch is needed here.  The C handler will switch
+        # to the full kernel page table for lower-half mappings.
 
         # jump to usertrap (exceptions) or user_kirq_entrance (interrupts)
         # t2 was loaded in path 1 or 2 above

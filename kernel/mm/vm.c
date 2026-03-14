@@ -2885,7 +2885,7 @@ uint64 kvm_mmap(uint64 addr, size_t size, uint64 flags)
         }
         memset(pa, 0, PGSIZE);
         pte_t pte_flags = vma2pte_flags(flags);
-        if (mappages(vm->pagetable, a, PGSIZE, VA2PA((uint64)pa), pte_flags) != 0) {
+        if (mappages(vm->pagetable, a, PGSIZE, (uint64)pa, pte_flags) != 0) {
             page_free(pa, 0);
             /* Roll back everything mapped so far. */
             for (uint64 b = map_addr; b < a; b += PGSIZE) {
@@ -2966,11 +2966,19 @@ void kvm_free(void *addr, size_t npages)
 /* ------------------------------------------------------------------ */
 
 /* Addresses in the identity-mapped physical-memory range [KERNBASE, PHYSTOP)
- * come from the slab/buddy allocator; everything else is from the kernel VM. */
+ * come from the slab/buddy allocator; everything else is from the kernel VM.
+ * Check both the identity-mapped range (PA, used on x86 and RISC-V) and the
+ * higher-half range (PA2VA, for any higher-half kernel pointers). */
 int is_kvm_addr(const void *addr)
 {
     uint64 a = (uint64)addr;
-    return a < KERNBASE || a >= PHYSTOP;
+    /* Identity-mapped range (VA == PA) */
+    if (a >= KERNBASE && a < PHYSTOP)
+        return 0;
+    /* Higher-half mapped range */
+    if (a >= (uint64)PA2VA(KERNBASE) && a < (uint64)PA2VA(PHYSTOP))
+        return 0;
+    return 1;
 }
 
 void *kvmalloc(size_t size)

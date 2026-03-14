@@ -67,13 +67,13 @@ pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
                 return NULL;
             memset(pagetable, 0, PGSIZE);
             /* RISC-V non-leaf PTEs have R=W=X=0, only V is set. */
-            *pte = PA2PTE(VA2PA(pagetable)) | PTE_V | WALK_INTERMEDIATE_FLAGS;
+            *pte = PA2PTE(pagetable) | PTE_V | WALK_INTERMEDIATE_FLAGS;
             if (do_walk_diag) {
                 walk_diag++;
                 printf("walk: alloc L%d for va=0x%lx: pgtab=%p "
                        "PA=0x%lx pte=0x%lx\n",
                        level, va, pagetable,
-                       (unsigned long)VA2PA((uint64)pagetable), *pte);
+                       (unsigned long)(uint64)pagetable, *pte);
             }
         }
     }
@@ -190,6 +190,8 @@ uint64 vma2pte_flags(uint64 flags)
         pte_flags |= PTE_X;
     if (flags & VMA_FLAG_USER)
         pte_flags |= PTE_U;
+    else
+        pte_flags |= PTE_G;
     return pte_flags;
 }
 

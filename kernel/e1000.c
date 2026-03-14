@@ -191,7 +191,8 @@ int e1000_set_receive_descriptor_base(struct rx_desc *virtual_base,
         mbufs_ptr_arr_base[i] = mbufalloc(0);
         if (!mbufs_ptr_arr_base[i])
             return -1;
-        virtual_base[i].addr = VA2PA((uint64)mbufs_ptr_arr_base[i]->head);
+        /* kalloc() returns a PA; use it directly as the DMA address. */
+        virtual_base[i].addr = (uint64)mbufs_ptr_arr_base[i]->head;
     }
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     regs[E1000_RDBAL] = l;
@@ -299,8 +300,9 @@ int e1000_transmit(struct mbuf *m) {
         // free the buffer containing the already transmitted data
         mbuffree(tx_mbufs[index]);
     }
-    // pass packet information into transmission discriptor
-    desc->addr = VA2PA((uint64)m->head);
+    // pass packet information into transmission descriptor
+    // kalloc() returns a PA; use it directly as the DMA address.
+    desc->addr = (uint64)m->head;
     desc->length = m->len;
     // - let the Ethernet controller report the status information of this
     //   packet, so that the next we could check if the data of this descriptor
@@ -349,7 +351,8 @@ STATIC void e1000_recv(void) {
         }
         // let the current descriptor point to the newly allocated buffer
         rx_mbufs[index] = newbuf;
-        desc->addr = VA2PA((uint64)newbuf->head);
+        /* kalloc() returns a PA; use it directly as the DMA address. */
+        desc->addr = (uint64)newbuf->head;
         desc->status = 0;
         // tell the Ethernet controller that we have finished processing
         // this packet.

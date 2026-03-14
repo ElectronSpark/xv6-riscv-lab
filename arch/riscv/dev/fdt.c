@@ -1965,15 +1965,13 @@ void fdt_apply_platform_config(void) {
         // Compute total pages using PAs
         __physical_total_pages = (highest_end - first_base_pa) >> 12;
 
-        // Store globals as higher-half VAs (matching start_kernel.c)
-        __physical_memory_start = (uint64)PA2VA(first_base_pa);
-        __physical_memory_end = (uint64)PA2VA(highest_end);
+        // Store globals as physical addresses (matching x86 convention).
+        // Common kernel code (page.c) works in PA space.
+        __physical_memory_start = first_base_pa;
+        __physical_memory_end = highest_end;
 
-        // Convert platform.mem bases to VAs so all kernel code
-        // (page.c, vm.c) sees consistent higher-half addresses
-        for (int i = 0; i < platform.mem_count; i++) {
-            platform.mem[i].base = (uint64)PA2VA(platform.mem[i].base);
-        }
+        // Keep platform.mem bases as PAs (matching x86 convention).
+        // Arch-specific code (vm.c) uses PA2VA() where VAs are needed.
 
         // Extend the early allocator ceiling to match the new physical
         // memory end.  The early allocator was initially capped at 4 GB
@@ -1981,7 +1979,7 @@ void fdt_apply_platform_config(void) {
         // all memory regions, allow it to use the full range so the
         // page array can cover all physical memory.
         // earalloc works in VA space, so pass the VA form.
-        early_allocator_extend((void *)__physical_memory_end);
+        early_allocator_extend(PA2VA(__physical_memory_end));
     }
 
     // Set device addresses from FDT

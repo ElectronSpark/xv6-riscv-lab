@@ -81,7 +81,7 @@ static void __ipi_irq_handler(int irq, void *data, device_t *dev) {
             panic_msg_lock();
             printf("[Core: %d] Received IPI_REASON_CRASH, crashing...\n",
                    hartid);
-            print_backtrace(r_fp(), KERNBASE, PHYSTOP);
+            print_backtrace(r_fp(), (uint64)PA2VA(KERNBASE), (uint64)PA2VA(PHYSTOP));
             panic_msg_unlock();
             ipi_send_all_but_self(IPI_REASON_CRASH);
             for (;;) {
@@ -97,9 +97,9 @@ static void __ipi_irq_handler(int irq, void *data, device_t *dev) {
             SET_NEEDS_RESCHED();
             break;
         case IPI_REASON_TLB_FLUSH:
-            // Request to flush TLB
-            // Since XV6 use different page tables for kernel and user,
-            // TLB will be flushed when returning to user mode.
+            // Kernel pages are shared across all address spaces;
+            // flush TLB to pick up page table changes.
+            sfence_vma();
             break;
         case IPI_REASON_GENERIC:
             // Generic IPI - no specific action

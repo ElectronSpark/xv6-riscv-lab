@@ -21,6 +21,7 @@
 
 extern char trampoline[], uservec[], userret[], _data_ktlb[];
 extern uint64 trampoline_uservec;
+extern uint64 trampoline_ksatp;
 
 static void (*trampoline_userret)(uint64, uint64) = NULL;
 
@@ -44,7 +45,7 @@ void arch_trap_init(void) {
         assert(intr_stacks != NULL,
                "trapinit: page_alloc for intr_stacks failed");
         memset(intr_stacks, 0, INTR_STACK_SIZE);
-        kvmmap(kpgtbl, KIRQSTACK(i), VA2PA((uint64)intr_stacks),
+        kvmmap(kpgtbl, KIRQSTACK(i), (uint64)intr_stacks,
                INTR_STACK_SIZE, PTE_R | PTE_W);
         cpus[i].intr_stacks = (void *)KIRQSTACK(i);
         cpus[i].intr_sp = (uint64)cpus[i].intr_stacks + INTR_STACK_SIZE;
@@ -102,6 +103,10 @@ static void __trap_panic(struct trapframe *tf, uint64 s0) {
 }
 
 void user_kirq_entrance(uint64 ksp, uint64 s0) {
+    /* Switch to kernel page table (entered on user AT with shared upper half). */
+    w_satp(trampoline_ksatp);
+    sfence_vma();
+
     static int kirq_diag_count = 0;
     if (kirq_diag_count < 3) {
         kirq_diag_count++;
@@ -140,6 +145,10 @@ void user_kirq_entrance(uint64 ksp, uint64 s0) {
 // called from trampoline.S
 //
 void usertrap(void) {
+    /* Switch to kernel page table (entered on user AT with shared upper half). */
+    w_satp(trampoline_ksatp);
+    sfence_vma();
+
     uint64 va;
     vma_t *vma = NULL;
     uint64 scause = current->trapframe->trapframe.scause;
@@ -378,7 +387,7 @@ void usertrap(void) {
             /* Walk the user page table manually to show all levels */
             pagetable_t upgt = current->vm->pagetable;
             uint64 fva = PGROUNDDOWN(va);
-            printf("  user_pgtbl=%p (PA=0x%lx)\n", upgt, (unsigned long)VA2PA((uint64)upgt));
+            printf("  user_pgtbl=%p (PA=0x%lx)\n", upgt, (unsigned long)(uint64)upgt);
             for (int lvl = 2; lvl >= 0; lvl--) {
                 int idx = (fva >> (12 + 9 * lvl)) & 0x1ff;
                 pte_t entry = upgt[idx];
@@ -597,7 +606,9 @@ void usertrapret(void) {
 
     // set up trapframe values that uservec will need when
     // the thread next traps into the kernel.
-    p->trapframe->kernel_sp = p->ksp;
+    /* Store higher-half VAs so the stack is accessible via shared
+     * upper-half PTEs before the SATP switch in the C trap handler. */
+    p->trapframe->kernel_sp = (uint64)PA2VA(p->ksp);
     p->trapframe->irq_sp = mycpu()->intr_sp;
 
     // set up the registers that trampoline.S's sret will use
@@ -636,7 +647,7 @@ void usertrapret(void) {
     static int uret_diag_count = 0;
     if (uret_diag_count < 10) {
         uret_diag_count++;
-        uint64 user_satp = MAKE_SATP(VA2PA(p->vm->pagetable));
+        uint64 user_satp = MAKE_SATP((uint64)p->vm->pagetable);
         printf("usertrapret: pid=%d tf=0x%lx satp=0x%lx sepc=0x%lx sp=0x%lx\n",
                p->pid, trapframe_base, user_satp,
                p->trapframe->trapframe.sepc, p->trapframe->trapframe.sp);
@@ -645,7 +656,7 @@ void usertrapret(void) {
     // jump to userret in trampoline.S at the top of memory, which
     // switches to the user page table, restores user registers,
     // and switches to user mode with sret.
-    trampoline_userret(trapframe_base, MAKE_SATP(VA2PA(p->vm->pagetable)));
+    trampoline_userret(trapframe_base, MAKE_SATP((uint64)p->vm->pagetable));
 }
 
 // interrupts and exceptions from kernel code go here via kernelvec,

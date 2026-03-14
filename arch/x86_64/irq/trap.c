@@ -116,16 +116,21 @@ void usertrapret(void) {
     /*
      * Tell alltraps where to pivot RSP for user->kernel transitions.
      * All IDT vectors use IST=1 so the CPU initially pushes onto the
-     * per-CPU IST stack (mapped in all page tables).  After CR3 swap,
-     * alltraps copies the 7-qword interrupt frame from IST to this
-     * per-thread kernel stack and switches RSP, so that all subsequent
-     * C code -- including scheduler context switches -- runs on a
-     * per-thread stack instead of the shared IST stack.
+     * per-CPU IST stack (mapped in all page tables).  alltraps copies
+     * the 7-qword interrupt frame from IST to this per-thread kernel
+     * stack and switches RSP, so that all subsequent C code —
+     * including scheduler context switches — runs on a per-thread
+     * stack instead of the shared IST stack.
+     *
+     * Store as higher-half VA (PA2VA) so alltraps can access the
+     * kstack via PML4[256] without a CR3 switch to the kernel page
+     * table.  The C handler performs the CR3 switch later for
+     * identity-map access.
      *
      * SMP-safe: stored in per-CPU struct via saved my_cpu pointer
      * (GS_BASE already points to user value at this point).
      */
-    my_cpu->intr_kstack_top = p->ksp;
+    my_cpu->intr_kstack_top = (uint64)PA2VA(p->ksp);
 
     /* Guard: if vm was freed (process being torn down), don't proceed. */
     if (p->vm == NULL || p->vm->pagetable == NULL) {
@@ -149,10 +154,11 @@ void usertrapret(void) {
 
     /*
      * Store the kernel stack top for the next SYSCALL entry.
-     * syscall_entry reads this from per-CPU via %gs:72 after swapgs
-     * (Linux strategy: switch CR3 first, then load kernel stack).
+     * syscall_entry reads this from per-CPU via %gs:72 after swapgs.
+     * Stored as higher-half VA (PA2VA) so syscall_entry can access
+     * the kstack via PML4[256] without a CR3 switch.
      */
-    my_cpu->syscall_kstack_top = p->ksp;
+    my_cpu->syscall_kstack_top = (uint64)PA2VA(p->ksp);
 
     /* Ensure user RFLAGS is valid and has IF set.
      * Bit 1 in RFLAGS is architecturally fixed to 1.
@@ -575,6 +581,24 @@ extern int do_device_irq(int hw_irq);
 void x86_trap_handler(struct trapframe *tf) {
     uint64 vec = tf->trapno;
     int from_user = ((tf->cs & 3) == 3);
+
+    /*
+     * Switch to the kernel page table to gain identity-map access
+     * (PML4[0]).  User page tables share PML4[256-511] (kernel text,
+     * data, trampoline) but not PML4[0], which is needed for
+     * PA-as-pointer dereferences (page_alloc results, kstack, etc.).
+     *
+     * This replaces the assembly-level CR3 switch that was previously
+     * in alltraps.  Conditional to avoid an unnecessary TLB flush
+     * when handling kernel-mode traps (CR3 is already correct).
+     */
+    {
+        uint64 __cr3;
+        asm volatile("movq %%cr3, %0" : "=r"(__cr3));
+        if (__cr3 != trampoline_ksatp)
+            asm volatile("movq %0, %%cr3" : : "r"(trampoline_ksatp) : "memory");
+    }
+
     /*
      * For user-mode traps, copy the stack-based trapframe into the thread's
      * utrapframe so that syscall arg fetching and other code that reads
@@ -946,6 +970,12 @@ user_return:
  * x86_trap_handler does for IDT-based user traps.
  */
 void usertrap_syscall(struct trapframe *tf) {
+    /*
+     * Switch to kernel page table for identity-map access (PML4[0]).
+     * syscall_entry no longer switches CR3 in assembly.
+     */
+    asm volatile("movq %0, %%cr3" : : "r"(trampoline_ksatp) : "memory");
+
     struct thread *p = current;
 
     /*
