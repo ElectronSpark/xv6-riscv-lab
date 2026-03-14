@@ -1550,7 +1550,7 @@ copyin_ok:
             n = validated_end - srcva;
         if (n > len)
             n = len;
-        memmove(dst, (void *)(pa0 + (srcva - va0)), n);
+        memmove(dst, (void *)((uint64)PA2VA(pa0) + (srcva - va0)), n);
 
         len -= n;
         dst += n;
@@ -1587,7 +1587,7 @@ int vm_copyinstr(vm_t *vm, char *dst, uint64 srcva, uint64 max)
         if (n > max)
             n = max;
 
-        char *p = (char *)(pa0 + (srcva - va0));
+        char *p = (char *)((uint64)PA2VA(pa0) + (srcva - va0));
         while (n > 0) {
             if (*p == '\0') {
                 *dst = '\0';
@@ -1881,6 +1881,14 @@ int vm_mmap_region_locked(vm_t *vm, uint64 start, size_t size, uint64 flags,
 
     if (pa != NULL) {
         pte_t pte_flags = vma2pte_flags(flags);
+        /*
+         * pa is already a physical address (from kalloc/page_alloc).
+         * Do NOT apply VA2PA() here — that would subtract PAGE_OFFSET
+         * from an already-physical address, producing a bogus PA that
+         * exceeds MAXPHYADDR and triggers a reserved-bit #PF (errcode
+         * 0xc) when the CPU walks the page table.
+         * Callers: exec.c boundary page (kalloc), shm.c (kalloc).
+         */
         if (mappages(vm->pagetable, vma->start, size, (uint64)pa, pte_flags) !=
             0) {
             assert(vma_free(vm, vma) == 0,
@@ -2877,7 +2885,7 @@ uint64 kvm_mmap(uint64 addr, size_t size, uint64 flags)
         }
         memset(pa, 0, PGSIZE);
         pte_t pte_flags = vma2pte_flags(flags);
-        if (mappages(vm->pagetable, a, PGSIZE, (uint64)pa, pte_flags) != 0) {
+        if (mappages(vm->pagetable, a, PGSIZE, VA2PA((uint64)pa), pte_flags) != 0) {
             page_free(pa, 0);
             /* Roll back everything mapped so far. */
             for (uint64 b = map_addr; b < a; b += PGSIZE) {

@@ -44,8 +44,8 @@ void arch_trap_init(void) {
         assert(intr_stacks != NULL,
                "trapinit: page_alloc for intr_stacks failed");
         memset(intr_stacks, 0, INTR_STACK_SIZE);
-        kvmmap(kpgtbl, KIRQSTACK(i), (uint64)intr_stacks, INTR_STACK_SIZE,
-               PTE_R | PTE_W);
+        kvmmap(kpgtbl, KIRQSTACK(i), VA2PA((uint64)intr_stacks),
+               INTR_STACK_SIZE, PTE_R | PTE_W);
         cpus[i].intr_stacks = (void *)KIRQSTACK(i);
         cpus[i].intr_sp = (uint64)cpus[i].intr_stacks + INTR_STACK_SIZE;
         printf("trapinit: CPU %d intr_stack at %lx -> %p\n", i, KIRQSTACK(i),
@@ -102,6 +102,13 @@ static void __trap_panic(struct trapframe *tf, uint64 s0) {
 }
 
 void user_kirq_entrance(uint64 ksp, uint64 s0) {
+    static int kirq_diag_count = 0;
+    if (kirq_diag_count < 3) {
+        kirq_diag_count++;
+        printf("user_kirq: pid=%d scause=0x%lx sepc=0x%lx\n",
+               current->pid, current->trapframe->trapframe.scause,
+               current->trapframe->trapframe.sepc);
+    }
     enter_irq();
     if ((current->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
         panic("usertrap: not from user mode");
@@ -137,6 +144,15 @@ void usertrap(void) {
     vma_t *vma = NULL;
     uint64 scause = current->trapframe->trapframe.scause;
     extern int gdbstub_signal_stop(struct thread *, int);
+
+    static int utrap_diag_count = 0;
+    if (utrap_diag_count < 20) {
+        utrap_diag_count++;
+        printf("usertrap: pid=%d scause=0x%lx sepc=0x%lx stval=0x%lx\n",
+               current->pid, scause,
+               current->trapframe->trapframe.sepc,
+               current->trapframe->trapframe.stval);
+    }
 
     if ((current->trapframe->trapframe.sstatus & SSTATUS_SPP) != 0)
         panic("usertrap: not from user mode");
@@ -261,6 +277,11 @@ void usertrap(void) {
                current->pid, current->name,
                current->trapframe->trapframe.sepc,
                current->trapframe->trapframe.stval);
+        printf("  IPF: vma=%p", vma);
+        if (vma != NULL)
+            printf(" [0x%lx-0x%lx) flags=0x%lx file=%p",
+                   vma->start, vma->end, vma->flags, vma->file);
+        printf(" fault_base=0x%lx fault_len=0x%lx\n", fault_base, fault_len);
         printf("  ra=0x%lx sp=0x%lx tp=0x%lx gp=0x%lx\n",
                current->trapframe->trapframe.ra,
                current->trapframe->trapframe.sp,
@@ -272,6 +293,7 @@ void usertrap(void) {
                current->trapframe->trapframe.a2,
                current->trapframe->trapframe.s0,
                current->trapframe->s1);
+        do_coredump(current);
         assert(current->pid != 1, "init exiting");
         gdbstub_signal_stop(current, SIGSEGV);
         kill(current->pid, SIGSEGV);
@@ -304,11 +326,37 @@ void usertrap(void) {
                current->pid, current->name,
                current->trapframe->trapframe.sepc,
                current->trapframe->trapframe.stval);
+        printf("  LPF: vma=%p", vma);
+        if (vma != NULL)
+            printf(" [0x%lx-0x%lx) flags=0x%lx file=%p",
+                   vma->start, vma->end, vma->flags, vma->file);
+        printf(" fault_base=0x%lx fault_len=0x%lx\n", fault_base, fault_len);
+        printf("  vm_top=0x%lx vm_bottom=0x%lx\n",
+               current->vm->vm_top, current->vm->vm_bottom);
+        printf("  ra=0x%lx sp=0x%lx a0=0x%lx a1=0x%lx a2=0x%lx a3=0x%lx\n",
+               current->trapframe->trapframe.ra,
+               current->trapframe->trapframe.sp,
+               current->trapframe->trapframe.a0,
+               current->trapframe->trapframe.a1,
+               current->trapframe->trapframe.a2,
+               current->trapframe->trapframe.a3);
+        printf("  s0=0x%lx s1=0x%lx s2=0x%lx s3=0x%lx\n",
+               current->trapframe->trapframe.s0,
+               current->trapframe->s1,
+               current->trapframe->s2,
+               current->trapframe->s3);
+        print_user_backtrace(current->vm->pagetable,
+                             current->trapframe->trapframe.s0,
+                             current->trapframe->trapframe.ra,
+                             current->trapframe->trapframe.sp,
+                             current->trapframe->trapframe.sepc, 32);
+        dump_vm(current->vm);
+        do_coredump(current);
         assert(current->pid != 1, "init exiting");
         gdbstub_signal_stop(current, SIGSEGV);
         kill(current->pid, SIGSEGV);
         break;
-    case RISCV_STORE_PAGE_FAULT:
+    case RISCV_STORE_PAGE_FAULT: {
         // Store page fault - handle demand paging for write access
         va = current->trapframe->trapframe.stval;
         // First try to grow stack if the address is in stack region
@@ -317,16 +365,61 @@ void usertrap(void) {
         // needing demand paging). Hold vm_rlock to protect VMA tree traversal.
         vm_rlock(current->vm);
         vma = vm_find_area(current->vm, va);
+        static int spf_diag = 0;
+        int do_spf_diag = (spf_diag < 10);
+        if (do_spf_diag) {
+            spf_diag++;
+            printf("SPF[%d]: va=0x%lx sepc=0x%lx vma=%p\n",
+                   spf_diag, va, current->trapframe->trapframe.sepc, vma);
+            if (vma) {
+                printf("  vma: [0x%lx-0x%lx) flags=0x%lx file=%p\n",
+                       vma->start, vma->end, vma->flags, vma->file);
+            }
+            /* Walk the user page table manually to show all levels */
+            pagetable_t upgt = current->vm->pagetable;
+            uint64 fva = PGROUNDDOWN(va);
+            printf("  user_pgtbl=%p (PA=0x%lx)\n", upgt, (unsigned long)VA2PA((uint64)upgt));
+            for (int lvl = 2; lvl >= 0; lvl--) {
+                int idx = (fva >> (12 + 9 * lvl)) & 0x1ff;
+                pte_t entry = upgt[idx];
+                printf("  L%d[%d] = 0x%lx (V=%d R=%d W=%d X=%d U=%d A=%d D=%d)\n",
+                       lvl, idx, entry,
+                       !!(entry & 1), !!(entry & 2), !!(entry & 4),
+                       !!(entry & 8), !!(entry & 16), !!(entry & 64), !!(entry & 128));
+                if (!(entry & 1)) break;
+                if (entry & 0xe) break; /* leaf PTE */
+                upgt = (pagetable_t)PA2VA(((entry >> 10) << 12));
+            }
+        }
         if (vma != NULL &&
             vma_validate(vma, va, 1, VMA_FLAG_USER | PROT_WRITE) == 0) {
+            if (do_spf_diag) {
+                /* Re-walk after vma_validate to see new PTE */
+                pagetable_t upgt2 = current->vm->pagetable;
+                uint64 fva2 = PGROUNDDOWN(va);
+                printf("  AFTER vma_validate:\n");
+                for (int lvl = 2; lvl >= 0; lvl--) {
+                    int idx = (fva2 >> (12 + 9 * lvl)) & 0x1ff;
+                    pte_t entry = upgt2[idx];
+                    printf("  L%d[%d] = 0x%lx (V=%d R=%d W=%d X=%d U=%d A=%d D=%d)\n",
+                           lvl, idx, entry,
+                           !!(entry & 1), !!(entry & 2), !!(entry & 4),
+                           !!(entry & 8), !!(entry & 16), !!(entry & 64), !!(entry & 128));
+                    if (!(entry & 1)) break;
+                    if (entry & 0xe) break; /* leaf PTE */
+                    upgt2 = (pagetable_t)PA2VA(((entry >> 10) << 12));
+                }
+            }
             vm_runlock(current->vm);
             break;
         }
         vm_runlock(current->vm);
+    }
         printf("pid %d %s: fatal store page fault sepc=0x%lx stval=0x%lx\n",
                current->pid, current->name,
                current->trapframe->trapframe.sepc,
                current->trapframe->trapframe.stval);
+        do_coredump(current);
         assert(current->pid != 1, "init exiting");
         gdbstub_signal_stop(current, SIGSEGV);
         kill(current->pid, SIGSEGV);
@@ -540,10 +633,19 @@ void usertrapret(void) {
     // and get the trapframe base virtual address for this CPU
     uint64 trapframe_base = vm_cpu_online(p->vm, cpuid(), p);
 
+    static int uret_diag_count = 0;
+    if (uret_diag_count < 10) {
+        uret_diag_count++;
+        uint64 user_satp = MAKE_SATP(VA2PA(p->vm->pagetable));
+        printf("usertrapret: pid=%d tf=0x%lx satp=0x%lx sepc=0x%lx sp=0x%lx\n",
+               p->pid, trapframe_base, user_satp,
+               p->trapframe->trapframe.sepc, p->trapframe->trapframe.sp);
+    }
+
     // jump to userret in trampoline.S at the top of memory, which
     // switches to the user page table, restores user registers,
     // and switches to user mode with sret.
-    trampoline_userret(trapframe_base, MAKE_SATP(p->vm->pagetable));
+    trampoline_userret(trapframe_base, MAKE_SATP(VA2PA(p->vm->pagetable)));
 }
 
 // interrupts and exceptions from kernel code go here via kernelvec,

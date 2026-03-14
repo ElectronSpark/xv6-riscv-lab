@@ -46,7 +46,7 @@
 
 pagetable_t kernel_pagetable;
 
-extern char etext[], _entry[];
+extern char etext[], _entry[], _init_data[], _entry_end[], _text[];
 extern char _rodata[], _rodata_end[];
 extern char _data[], _data_end[];
 extern char _bss[], _bss_end[];
@@ -111,41 +111,43 @@ pagetable_t kvmmake(void)
 
     /* UART */
     uint64 uart_page = PGROUNDDOWN(UART0);
-    kvmmap(kpgtbl, uart_page, uart_page, PGSIZE, PTE_R | PTE_W);
+    kvmmap(kpgtbl, uart_page, VA2PA(uart_page), PGSIZE, PTE_R | PTE_W);
 
     /* Goldfish RTC (QEMU only) */
     if (GOLDFISH_RTC != 0)
-        kvmmap(kpgtbl, GOLDFISH_RTC, GOLDFISH_RTC, PGSIZE, PTE_R | PTE_W);
+        kvmmap(kpgtbl, GOLDFISH_RTC, VA2PA(GOLDFISH_RTC), PGSIZE, PTE_R | PTE_W);
 
     /* VirtIO MMIO */
     if (platform.has_virtio && platform.virtio_count > 0) {
         for (int i = 0; i < platform.virtio_count && i < N_VIRTIO; i++) {
-            if (platform.virtio_base[i] != 0)
-                kvmmap(kpgtbl, platform.virtio_base[i],
-                       platform.virtio_base[i], PGSIZE, PTE_R | PTE_W);
+            if (platform.virtio_base[i] != 0) {
+                uint64 vio_va = (uint64)PA2VA(platform.virtio_base[i]);
+                kvmmap(kpgtbl, vio_va, platform.virtio_base[i], PGSIZE,
+                       PTE_R | PTE_W);
+            }
         }
     }
 
     /* PCIe ECAM */
     if (platform.has_pcie && PCIE_ECAM != 0) {
         for (int i = 0; i < platform.pcie_reg_count; i++) {
-            uint64 base = platform.pcie_reg[i].base;
+            uint64 base_pa = platform.pcie_reg[i].base;
             uint64 size = platform.pcie_reg[i].size;
-            if (base == 0 || size == 0)
+            if (base_pa == 0 || size == 0)
                 continue;
-            uint64 aligned_base = PGROUNDDOWN(base);
-            uint64 aligned_size = PGROUNDUP(base + size) - aligned_base;
-            kvmmap_safe(kpgtbl, aligned_base, aligned_base, aligned_size,
-                        PTE_R | PTE_W);
+            uint64 aligned_pa = PGROUNDDOWN(base_pa);
+            uint64 aligned_size = PGROUNDUP(base_pa + size) - aligned_pa;
+            kvmmap_safe(kpgtbl, (uint64)PA2VA(aligned_pa), aligned_pa,
+                        aligned_size, PTE_R | PTE_W);
         }
         if (platform.has_virtio && E1000_PCI_ADDR != 0)
-            kvmmap(kpgtbl, E1000_PCI_ADDR, E1000_PCI_ADDR, 0x20000,
+            kvmmap(kpgtbl, E1000_PCI_ADDR, VA2PA(E1000_PCI_ADDR), 0x20000,
                    PTE_R | PTE_W);
     }
 
     /* PLIC */
     if (platform.plic_base != 0 && platform.plic_size != 0)
-        kvmmap(kpgtbl, PLIC, PLIC, platform.plic_size, PTE_R | PTE_W);
+        kvmmap(kpgtbl, PLIC, VA2PA(PLIC), platform.plic_size, PTE_R | PTE_W);
 
     /* EMAC MMIO (SpacemiT X1) */
     if (platform.has_emac) {
@@ -209,39 +211,44 @@ pagetable_t kvmmake(void)
         }
     }
 
+    /* Early boot stub (_entry/_entry_end are PAs, map at higher-half VA) */
+    /* .text.entry: executable code (R|X) */
+    kvmmap(kpgtbl, (uint64)PA2VA(_entry), (uint64)_entry,
+           PGROUNDUP((uint64)_init_data) - (uint64)_entry, PTE_R | PTE_X);
+    /* .init.data + .init.bss (stack0): data (R|W) */
+    if ((uint64)_entry_end > (uint64)_init_data)
+        kvmmap(kpgtbl, (uint64)PA2VA(_init_data), (uint64)_init_data,
+               PGROUNDUP((uint64)_entry_end) - PGROUNDDOWN((uint64)_init_data),
+               PTE_R | PTE_W);
+
     /* Kernel text (executable, read-only) */
-    kvmmap(kpgtbl, (uint64)_entry, (uint64)_entry,
-           (uint64)etext - (uint64)_entry, PTE_R | PTE_X);
+    kvmmap(kpgtbl, (uint64)_text, VA2PA((uint64)_text),
+           (uint64)etext - (uint64)_text, PTE_R | PTE_X);
 
     /* Trampoline */
-    kvmmap(kpgtbl, TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
-    kvmmap(kpgtbl, TRAMPOLINE_DATA, (uint64)_trampoline_data, PGSIZE, PTE_R);
-    kvmmap(kpgtbl, (uint64)_trampoline_data, (uint64)_trampoline_data, PGSIZE,
+    kvmmap(kpgtbl, TRAMPOLINE, VA2PA((uint64)trampoline), PGSIZE, PTE_R | PTE_X);
+    kvmmap(kpgtbl, TRAMPOLINE_DATA, VA2PA((uint64)_trampoline_data), PGSIZE, PTE_R);
+    kvmmap(kpgtbl, (uint64)_trampoline_data, VA2PA((uint64)_trampoline_data), PGSIZE,
            PTE_R | PTE_W);
-    kvmmap(kpgtbl, TRAMPOLINE_CPULOCAL, (uint64)cpus, PGSIZE, PTE_R | PTE_W);
-    kvmmap(kpgtbl, (uint64)cpus, (uint64)cpus, PGSIZE, PTE_R | PTE_W);
-    kvmmap(kpgtbl, SIG_TRAMPOLINE, (uint64)sig_trampoline, PGSIZE,
+    kvmmap(kpgtbl, TRAMPOLINE_CPULOCAL, VA2PA((uint64)cpus), PGSIZE, PTE_R | PTE_W);
+    kvmmap(kpgtbl, (uint64)cpus, VA2PA((uint64)cpus), PGSIZE, PTE_R | PTE_W);
+    kvmmap(kpgtbl, SIG_TRAMPOLINE, VA2PA((uint64)sig_trampoline), PGSIZE,
            PTE_R | PTE_X | PTE_U);
 
-    printf("trampoline 0x%lx -> %p\n", TRAMPOLINE, trampoline);
-    printf("trampoline data 0x%lx -> %p\n", TRAMPOLINE_DATA, _trampoline_data);
-    printf("trampoline cpu local 0x%lx -> %p\n", TRAMPOLINE_CPULOCAL, cpus);
-    printf("signal trampoline 0x%lx -> %p\n", SIG_TRAMPOLINE, sig_trampoline);
-
     /* Read-only data */
-    kvmmap(kpgtbl, (uint64)_rodata, (uint64)_rodata,
+    kvmmap(kpgtbl, (uint64)_rodata, VA2PA((uint64)_rodata),
            (uint64)_rodata_end - (uint64)_rodata, PTE_R);
 
     /* Kernel top-level page table */
-    kvmmap(kpgtbl, (uint64)_data_ktlb, (uint64)_data_ktlb, PGSIZE,
+    kvmmap(kpgtbl, (uint64)_data_ktlb, VA2PA((uint64)_data_ktlb), PGSIZE,
            PTE_R | PTE_W);
 
     /* Data */
-    kvmmap(kpgtbl, (uint64)_data, (uint64)_data,
+    kvmmap(kpgtbl, (uint64)_data, VA2PA((uint64)_data),
            (uint64)_data_end - (uint64)_data, PTE_R | PTE_W);
 
     /* BSS */
-    kvmmap(kpgtbl, (uint64)_bss, (uint64)_bss,
+    kvmmap(kpgtbl, (uint64)_bss, VA2PA((uint64)_bss),
            (uint64)_bss_end - (uint64)_bss, PTE_R | PTE_W);
 
     /* Physical RAM regions */
@@ -249,7 +256,7 @@ pagetable_t kvmmake(void)
         uint64 first_region_end = platform.mem[0].base + platform.mem[0].size;
         if (first_region_end > PHYSTOP)
             first_region_end = PHYSTOP;
-        kvmmap(kpgtbl, (uint64)_bss_end, (uint64)_bss_end,
+        kvmmap(kpgtbl, (uint64)_bss_end, VA2PA((uint64)_bss_end),
                first_region_end - (uint64)_bss_end, PTE_R | PTE_W);
 
         for (int i = 1; i < platform.mem_count; i++) {
@@ -261,7 +268,7 @@ pagetable_t kvmmake(void)
                 printf("mapping highmem region [%d]: 0x%lx - 0x%lx (%ld MB)\n",
                        i, region_base, region_end,
                        (region_end - region_base) / (1024 * 1024));
-                kvmmap(kpgtbl, region_base, region_base,
+                kvmmap(kpgtbl, region_base, VA2PA(region_base),
                        region_end - region_base, PTE_R | PTE_W);
             }
         }
@@ -269,15 +276,9 @@ pagetable_t kvmmake(void)
 
     /* Kernel symbols */
     if (KERNEL_SYMBOLS_SIZE > 0) {
-        kvmmap(kpgtbl, KERNEL_SYMBOLS_START, KERNEL_SYMBOLS_START,
+        kvmmap(kpgtbl, KERNEL_SYMBOLS_START, VA2PA(KERNEL_SYMBOLS_START),
                KERNEL_SYMBOLS_SIZE, PTE_R);
-        printf("kernel symbols 0x%lx - 0x%lx (size: %ld)\n",
-               KERNEL_SYMBOLS_START, KERNEL_SYMBOLS_END, KERNEL_SYMBOLS_SIZE);
     }
-    if (KERNEL_SYMBOLS_IDX_SIZE > 0)
-        printf("kernel symbols index 0x%lx - 0x%lx (size: %ld)\n",
-               KERNEL_SYMBOLS_IDX_START, KERNEL_SYMBOLS_IDX_END,
-               KERNEL_SYMBOLS_IDX_SIZE);
 
     return kpgtbl;
 }
@@ -291,7 +292,7 @@ void arch_vm_init(void)
     vm_slab_init();           /* shared slab pool init */
     kernel_pagetable = kvmmake();
 
-    smp_store_release(&trampoline_ksatp, MAKE_SATP(kernel_pagetable));
+    smp_store_release(&trampoline_ksatp, MAKE_SATP(VA2PA(kernel_pagetable)));
     smp_mb();
 }
 
@@ -300,8 +301,7 @@ void arch_vm_init_hart(void)
     sfence_vma();
     w_satp(trampoline_ksatp);
     sfence_vma();
-    printf("hart %ld switched to kernel page table, satp: %lx\n", cpuid(),
-           trampoline_ksatp);
+    printf("hart %ld switched to kernel page table\n", cpuid());
 }
 
 void arch_tlb_flush(void) { sfence_vma(); }
@@ -347,7 +347,7 @@ static void __freewalk(pagetable_t pagetable, int skip_idx)
         pte_t pte = pagetable[i];
         if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
             uint64 child = PTE2PA(pte);
-            __freewalk((pagetable_t)child, -1);
+            __freewalk((pagetable_t)PA2VA(child), -1);
             pagetable[i] = 0;
         } else if (pte & PTE_V) {
             panic("freewalk: leaf");
@@ -402,7 +402,7 @@ uint64 vm_cpu_online(vm_t *vm, int cpu, struct thread *p)
     uint64 trapframe_poffset = TRAPFRAME_POFFSET;
     if (vm->trapframe_pte != NULL && p != NULL && p->trapframe != NULL) {
         int pte_idx = PX(0, TRAPFRAME + (cpu * PGSIZE));
-        uint64 trapframe_pa = PGROUNDDOWN((uint64)p->trapframe);
+        uint64 trapframe_pa = VA2PA(PGROUNDDOWN((uint64)p->trapframe));
         vm->trapframe_pte[pte_idx] =
             PA2PTE(trapframe_pa) | PTE_R | PTE_W | PTE_V | PTE_A | PTE_D;
         smp_wmb();
@@ -527,7 +527,7 @@ void dump_pagetable(pagetable_t pagetable, int level, int indent,
                        (void *)va, pa);
                 if (level > 0 && PTE_FLAGS(pte) == PTE_V) {
                     printf(":\n");
-                    dump_pagetable((pagetable_t)pa, level - 1, indent + 2, va,
+                    dump_pagetable((pagetable_t)PA2VA(pa), level - 1, indent + 2, va,
                                    0, omit_pa);
                 } else {
                     printf("\n");

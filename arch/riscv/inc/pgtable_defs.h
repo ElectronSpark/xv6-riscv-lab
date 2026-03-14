@@ -24,6 +24,7 @@
 #define __ARCH_RISCV_PGTABLE_DEFS_H
 
 #include "types.h"
+#include "riscv.h"      /* VA2PA, PA2VA, KERNEL_OFFSET */
 #include <mm/vm_types.h> /* PROT_READ, PROT_WRITE, PROT_EXEC, VMA_FLAG_USER */
 
 /* ── Raw PTE bit definitions (private to this header + pgtable.c) ───────── */
@@ -77,8 +78,13 @@ static inline int pte_write_ready(pte_t *pte) {
            (__PTE_W | __PTE_A | __PTE_D);
 }
 
-/** Extract the physical address stored in a PTE. */
-static inline uint64 pte_pa(pte_t *pte) { return __PTE2PA(*pte); }
+/**
+ * Extract the address stored in a PTE, returned as a kernel VA.
+ * The PTE stores a real physical address; PA2VA converts it to
+ * the kernel virtual address so callers can use it as a pointer
+ * and pass it to __pa_to_page / page_ref_inc / etc.
+ */
+static inline uint64 pte_pa(pte_t *pte) { return (uint64)PA2VA(__PTE2PA(*pte)); }
 
 /* ── PTE construction ───────────────────────────────────────────────────── */
 
@@ -91,7 +97,7 @@ static inline uint64 pte_pa(pte_t *pte) { return __PTE2PA(*pte); }
  * Sets V, A, D automatically so the page is immediately usable.
  */
 static inline pte_t mk_pte(uint64 pa, uint64 vma_flags) {
-    pte_t pte = __PA2PTE(pa) | __PTE_V | __PTE_A | __PTE_D;
+    pte_t pte = __PA2PTE(VA2PA(pa)) | __PTE_V | __PTE_A | __PTE_D;
     if (vma_flags & PROT_READ)
         pte |= __PTE_R;
     if (vma_flags & PROT_WRITE)
@@ -126,7 +132,7 @@ static inline void pte_clear(pte_t *pte) { *pte = 0; }
  *              VMA-level permission flags.
  */
 static inline void pte_modify(pte_t *pte, uint64 vma_flags) {
-    uint64 pa = __PTE2PA(*pte);
+    uint64 pa = pte_pa(pte);  /* kernel VA — matches mk_pte expectation */
     *pte = mk_pte(pa, vma_flags);
 }
 

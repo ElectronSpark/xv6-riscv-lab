@@ -3,6 +3,13 @@ ENTRY(_entry)
 
 SECTIONS
 {
+  /*
+   * The 32-bit entry stub (.text.entry) runs at the physical address before
+   * paging is enabled.  All other sections have their VMA in the higher
+   * half (KERNEL_OFFSET + physical address) while LMA remains physical.
+   */
+
+  /* ---- Early boot code: VMA == LMA == physical ---- */
   . = @KERNEL_BASE@;
 
   .text.entry : {
@@ -10,42 +17,47 @@ SECTIONS
     KEEP(*(.text.entry))
   }
 
-  .text : {
+  /* ---- Higher-half kernel: VMA = KERNEL_OFFSET + LMA ---- */
+  . += @KERNEL_OFFSET@;
+
+  .text : AT(ADDR(.text) - @KERNEL_OFFSET@) {
     . = ALIGN(16);
     *(.text .text.*)
     . = ALIGN(0x1000);
     PROVIDE(etext = .);
   }
 
-  .rodata : {
+  .rodata : AT(ADDR(.rodata) - @KERNEL_OFFSET@) {
     . = ALIGN(4096);
     _rodata = .;
     *(.srodata .srodata.*)
     . = ALIGN(16);
     *(.rodata .rodata.*)
+    *(.lrodata .lrodata.*)
     . = ALIGN(4096);
     _rodata_end = .;
   }
 
-  .data.ktlb : {
+  .data.ktlb : AT(ADDR(.data.ktlb) - @KERNEL_OFFSET@) {
     . = ALIGN(4096);
     PROVIDE(_data_ktlb = .);
     . += 4096;
     _data_ktlb_end = .;
   }
 
-  .data : {
+  .data : AT(ADDR(.data) - @KERNEL_OFFSET@) {
     . = ALIGN(4096);
     _data = .;
     *(.sdata .sdata.*)
     . = ALIGN(16);
     *(.data .data.*)
+    *(.ldata .ldata.*)
     . = ALIGN(4096);
     _data_end = .;
   }
 
   . = ALIGN(4096);
-  .ksymbols : {
+  .ksymbols : AT(ADDR(.ksymbols) - @KERNEL_OFFSET@) {
     _ksymbols_start = .;
     KEEP(*(.ksymbols))
     . = ALIGN(4096);
@@ -54,17 +66,18 @@ SECTIONS
 
   _kernel_image_end = .;
 
-  .bss : {
+  .bss : AT(ADDR(.bss) - @KERNEL_OFFSET@) {
     . = ALIGN(16);
     _bss = .;
     *(.sbss .sbss.*)
     . = ALIGN(16);
     *(.bss .bss.*)
+    *(.lbss .lbss.*)
     . = ALIGN(4096);
     _bss_end = .;
   }
 
-  .ksymbols_idx (NOLOAD) : {
+  .ksymbols_idx (NOLOAD) : AT(ADDR(.ksymbols_idx) - @KERNEL_OFFSET@) {
     . = ALIGN(4096);
     _ksymbols_idx_start = .;
     . += @KERNEL_SYMBOLS_IDX_SIZE@;

@@ -540,7 +540,7 @@ void platform_apply_config(void)
         __physical_total_pages =
             (highest_end - __physical_memory_start) >> 12;
 
-        early_allocator_extend((void *)highest_end);
+        early_allocator_extend(PA2VA(highest_end));
     }
 }
 

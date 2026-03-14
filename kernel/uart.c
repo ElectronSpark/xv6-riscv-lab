@@ -21,7 +21,7 @@
 #include "trap.h"
 #include "dev/uart.h"
 
-uint64 __uart0_mmio_base = 0x10000000L;
+uint64 __uart0_mmio_base = (uint64)PA2VA(0x10000000L);
 uint64 __uart0_irqno = 10;
 uint32 __uart0_clock = 0; // 0 = use default (assume 1.8432 MHz for QEMU)
 uint32 __uart0_baud = 0;  // 0 = use default 115200

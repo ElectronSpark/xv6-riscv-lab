@@ -296,10 +296,11 @@ string(CONCAT CMAKE_C_FLAGS "${CMAKE_C_FLAGS}"
     " -I${CMAKE_SOURCE_DIR}"
     " -I${KERNEL_DIR}/inc"
     " -DUSE_SOFTWARE_FFS=1"
+    " -mcmodel=large"
 )
 
 if(ARCH STREQUAL "riscv")
-    string(APPEND CMAKE_C_FLAGS " -mcmodel=medany -march=rv64imac_zicsr_zifencei -mabi=lp64")
+    string(APPEND CMAKE_C_FLAGS " -march=rv64imac_zicsr_zifencei -mabi=lp64")
 elseif(ARCH STREQUAL "x86_64")
     string(APPEND CMAKE_C_FLAGS " -mno-red-zone -mno-sse -mno-sse2 -mno-mmx -mno-avx -mgeneral-regs-only")
 endif()

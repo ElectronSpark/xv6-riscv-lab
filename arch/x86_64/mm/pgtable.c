@@ -23,6 +23,14 @@
 /*  Page-table page allocator */
 /* ========================================================================== */
 
+/*
+ * pgtab_alloc — allocate a zeroed page-table page.
+ *
+ * Returns a PHYSICAL ADDRESS (from page_alloc).  The returned pointer
+ * is usable directly because the PML4[0] identity map keeps PA == VA
+ * for the low address range.  walk() stores this PA into parent PTEs
+ * via PA2PTE() — no VA2PA() conversion needed.
+ */
 pde_t *pgtab_alloc(void) {
     void *pa = page_alloc(0, PAGE_TYPE_PGTABLE);
     if (pa) {

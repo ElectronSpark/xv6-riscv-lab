@@ -23,7 +23,7 @@ static void __spinlock_assert_not_rq_object(spinlock_t *lk, const char *op) {
     printf("spinlock misuse: %s called on rq object %p (cpu=%d class=%d)\n",
            op, lk, cpu_id, class_id);
     printf("backtrace:\n");
-    print_backtrace(r_fp(), KERNBASE, PHYSTOP);
+    print_backtrace(r_fp(), (uint64)PA2VA(KERNBASE), (uint64)PA2VA(PHYSTOP));
     panic("spinlock misuse on rq object");
 }
 

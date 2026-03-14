@@ -46,8 +46,6 @@ extern void _entry(); // entry.S
 extern char end[];    // first address after kernel.
                       // defined by kernel.ld.
 
-#define BOOT_DIAG_MARK(msg) dprintf("[boot][cpu=%d] %s\n", (int)cpuid(), msg)
-
 static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     // Early memory detection (lightweight scan, no allocations)
     uint64 mem_base = platform_default_mem_base();
@@ -68,12 +66,14 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     #undef EARLY_MEM_LIMIT
 
     // Set up memory boundaries for early allocator
+    // Store as physical addresses — page allocator works in PA space.
     __physical_memory_start = mem_base;
     __physical_memory_end = mem_base + mem_size;
     __physical_total_pages = mem_size >> 12;
 
     // Early allocator uses memory after kernel end
-    early_allocator_init((void *)end, (void *)__physical_memory_end);
+    // `end` is a higher-half VA; convert to PA for the early allocator.
+    early_allocator_init((void *)VA2PA(end), (void *)(mem_base + mem_size));
     kobject_global_init();
     printfinit();
     diaginit();
@@ -90,6 +90,7 @@ static void __start_kernel_main_hart(int hartid, void *fdt_base) {
     arch_vm_init();       // create kernel page table
     kernel_vm_init();     // create kernel VM singleton (shared by all CPUs)
     printf("page table initialized\n");
+    printf("about to enable paging (platform_post_vm_init)...\n");
     platform_post_vm_init();
     pipe_init();               // initialize pipe subsystem
     unix_socket_init();        // initialize AF_UNIX socket subsystem
@@ -177,102 +178,42 @@ void start_kernel(int hartid, void *fdt_base, bool is_boot_hart) {
 
 // Initialization that requires a thread context
 void start_kernel_post_init(void) {
-    BOOT_DIAG_MARK("post_init: enter");
-
-    BOOT_DIAG_MARK("post_init: consoledevinit begin");
     consoledevinit();   // Initialize and register the console character device
-    BOOT_DIAG_MARK("post_init: consoledevinit done");
-
-    BOOT_DIAG_MARK("post_init: nullranddevinit begin");
     nullranddevinit();  // Register /dev/null, /dev/random, /dev/zero
-    BOOT_DIAG_MARK("post_init: nullranddevinit done");
-
-    BOOT_DIAG_MARK("post_init: ttydevinit begin");
     ttydevinit();       // Register /dev/tty (controlling terminal device)
-    BOOT_DIAG_MARK("post_init: ttydevinit done");
-
-    BOOT_DIAG_MARK("post_init: ptmxinit begin");
     ptmxinit();         // Register /dev/ptmx (PTY multiplexer)
-    BOOT_DIAG_MARK("post_init: ptmxinit done");
-
-    BOOT_DIAG_MARK("post_init: gendisk_init begin");
     gendisk_init();     // Generic disk layer (partition discovery)
-    BOOT_DIAG_MARK("post_init: gendisk_init done");
-
-    BOOT_DIAG_MARK("post_init: virtio_disk_init begin");
     virtio_disk_init(); // emulated hard disk (QEMU)
-    BOOT_DIAG_MARK("post_init: virtio_disk_init done");
-
-    BOOT_DIAG_MARK("post_init: ramdisk_init begin");
     ramdisk_init();     // ramdisk from FDT initrd (real hardware)
-    BOOT_DIAG_MARK("post_init: ramdisk_init done");
-
-    BOOT_DIAG_MARK("post_init: loop_init begin");
     loop_init();        // Loopback block devices (/dev/loop0..7)
-    BOOT_DIAG_MARK("post_init: loop_init done");
-
-    BOOT_DIAG_MARK("post_init: sockinit begin");
     sockinit();
-    BOOT_DIAG_MARK("post_init: sockinit done");
 #ifdef USE_LWIP
-    BOOT_DIAG_MARK("post_init: lwip_net_init begin");
     lwip_net_init();    // lwIP TCP/IP stack initialization (kthread)
-    BOOT_DIAG_MARK("post_init: lwip_net_init done");
 #endif
-    BOOT_DIAG_MARK("post_init: xarray_global_init begin");
     xarray_global_init(); // XArray subsystem initialization
-    BOOT_DIAG_MARK("post_init: xarray_global_init done");
-
-    BOOT_DIAG_MARK("post_init: pcache_global_init begin");
     pcache_global_init(); // page cache subsystem initialization
-    BOOT_DIAG_MARK("post_init: pcache_global_init done");
 
     // File system initialization must be run in the context of a
     // regular thread (e.g., because it calls sleep), and thus cannot
     // be run from main().
     // VFS initialization - mounts xv6fs and sets up root filesystem
-    BOOT_DIAG_MARK("post_init: vfs_init begin");
     vfs_init();
-    BOOT_DIAG_MARK("post_init: vfs_init done");
 
     // Set up root directory for init process (must be after vfs_init)
-    BOOT_DIAG_MARK("post_init: install_user_root begin");
     install_user_root();
-    BOOT_DIAG_MARK("post_init: install_user_root done");
 
 #ifdef RWAD_WRITE_TEST
     // forward decl for rwsem tests
     void rwsem_launch_tests(void);
-    // launch rwsem tests
-    BOOT_DIAG_MARK("post_init: rwsem_launch_tests begin");
     rwsem_launch_tests();
-    BOOT_DIAG_MARK("post_init: rwsem_launch_tests done");
 #endif
 #ifdef SEMAPHORE_RUNTIME_TEST
     void semaphore_launch_tests(void);
-    BOOT_DIAG_MARK("post_init: semaphore_launch_tests begin");
     semaphore_launch_tests();
-    BOOT_DIAG_MARK("post_init: semaphore_launch_tests done");
 #endif
     // Release secondary CPUs to proceed with their initialization
-    BOOT_DIAG_MARK("post_init: release secondary cpus");
     printf("Releasing secondary CPUs...\n");
     __atomic_store_n(&started, 1, __ATOMIC_RELEASE);
     platform_start_secondary_cpus((uint64)_entry);
-    BOOT_DIAG_MARK("post_init: sleep_ms(100) begin");
     sleep_ms(100); // Give secondary CPUs time to start
-    BOOT_DIAG_MARK("post_init: sleep_ms(100) done");
-    // RCU processing is now done per-CPU in idle loops
-    // rcu_run_tests();
-
-    // Run device table stress tests
-    // dev_table_test();
-
-    // #ifdef RQ_RUNTIME_TEST
-    // Run queue priority tests
-    // void rq_test_run(void);
-    // rq_test_run();
-    // #endif
-
-    BOOT_DIAG_MARK("post_init: exit");
 }

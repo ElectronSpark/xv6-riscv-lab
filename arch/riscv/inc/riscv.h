@@ -52,12 +52,12 @@ static inline void w_mepc(uint64 x) {
 #define SSTATUS_UIE (1L << 0)  // User Interrupt Enable
 
 // Floating-point unit status in sstatus (bits 14:13)
-#define SSTATUS_FS_SHIFT  13
-#define SSTATUS_FS_MASK   (3L << SSTATUS_FS_SHIFT)
-#define SSTATUS_FS_OFF    (0L << SSTATUS_FS_SHIFT)  // FP disabled; FP insns trap
+#define SSTATUS_FS_SHIFT 13
+#define SSTATUS_FS_MASK (3L << SSTATUS_FS_SHIFT)
+#define SSTATUS_FS_OFF (0L << SSTATUS_FS_SHIFT) // FP disabled; FP insns trap
 #define SSTATUS_FS_INITIAL (1L << SSTATUS_FS_SHIFT) // FP state is initial
-#define SSTATUS_FS_CLEAN  (2L << SSTATUS_FS_SHIFT)  // FP state not modified
-#define SSTATUS_FS_DIRTY  (3L << SSTATUS_FS_SHIFT)  // FP state modified
+#define SSTATUS_FS_CLEAN (2L << SSTATUS_FS_SHIFT)   // FP state not modified
+#define SSTATUS_FS_DIRTY (3L << SSTATUS_FS_SHIFT)   // FP state modified
 
 static inline uint64 r_sstatus() {
     uint64 x;
@@ -320,7 +320,6 @@ static inline void sfence_vma_page(uint64 va) {
 
 #endif /* !defined(ON_HOST_OS) */
 
-
 #endif // __ASSEMBLER__
 
 #define PGSIZE 4096 // bytes per page
@@ -338,10 +337,10 @@ static inline void sfence_vma_page(uint64 va) {
 #define PTE_R (1L << 1)
 #define PTE_W (1L << 2)
 #define PTE_X (1L << 3)
-#define PTE_U (1L << 4)    // user can access
-#define PTE_G (1L << 5)    // global
-#define PTE_A (1L << 6)    // accessed
-#define PTE_D (1L << 7)    // dirty
+#define PTE_U (1L << 4) // user can access
+#define PTE_G (1L << 5) // global
+#define PTE_A (1L << 6) // accessed
+#define PTE_D (1L << 7) // dirty
 /*
  * On RISC-V, non-leaf PTEs (R=W=X=0) ignore permission bits,
  * so no extra flags are needed in intermediate walk() entries.
@@ -352,26 +351,43 @@ static inline void sfence_vma_page(uint64 va) {
 #define PTE_LEAF(pte) (((pte) & PTE_R) | ((pte) & PTE_W) | ((pte) & PTE_X))
 #endif
 
-// shift a physical address to the right place for a PTE.
-#define PA2PTE(pa) ((((uint64)pa) >> 12) << 10)
-
-#define PTE2PA(pte) (((pte) >> 10) << 12)
-
-#define PTE_FLAGS(pte) ((pte) & 0x3FF & (~(PTE_A | PTE_D)))
-
 // extract the three 9-bit page table indices from a virtual address.
-#define PAGETABLE_LEVELS 3  /* Sv39: L2 -> L1 -> L0 */
+#define PAGETABLE_LEVELS 3 /* Sv39: L2 -> L1 -> L0 */
 
 #define PXMASK 0x1FFUL // 9 bits
 #define PXSHIFT(level) (PGSHIFT + (9 * (level)))
 #define PX(level, va) ((((uint64)(va)) >> PXSHIFT(level)) & PXMASK)
+
+// shift a physical address to the right place for a PTE.
+#define PA2PTE(pa) ((((uint64)pa) >> PGSHIFT) << 10)
+
+#define PTE2PA(pte) (((pte) >> 10) << PGSHIFT)
+
+#define PTE_FLAGS(pte) ((pte) & 0x3FF & (~(PTE_A | PTE_D)))
+
+#define KERNEL_VA_SHIFT 38
+
+#define KERNEL_OFFSET (~((1ULL << KERNEL_VA_SHIFT) - 1))
+
+#define VA2PA(va) (((uint64)(va)) & ~(KERNEL_OFFSET))
+
+#define PA2VA(pa) ((void *)(((uint64)(pa)) | (KERNEL_OFFSET)))
+
+#define IS_VA(va) (((uint64)(va)) >= KERNEL_VA_SHIFT)
+
+#define PA2PTE_INIT(pa)                                                        \
+    (PA2PTE(pa) | PTE_R | PTE_W | PTE_X | PTE_V | PTE_A | PTE_D)
 
 // one beyond the highest possible virtual address.
 // MAXVA is actually one bit less than the max allowed by
 // Sv39, to avoid having to sign-extend virtual addresses
 // that have the high bit set.
 #define MAXVA (1UL << (9 + 9 + 9 + 12 - 1))
-#define VA_IS_VALID(va) ((uint64)(va) < MAXVA)
+// Sv39 has two valid canonical ranges:
+//   lower half: [0, MAXVA)        — user space
+//   upper half: [KERNEL_OFFSET, ~0] — kernel space
+#define VA_IS_VALID(va) \
+    (((uint64)(va) < MAXVA) || ((uint64)(va) >= KERNEL_OFFSET))
 
 // SBI definitions moved to sbi.h
 

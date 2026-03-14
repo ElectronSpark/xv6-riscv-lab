@@ -49,6 +49,9 @@ pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
     assert(VA_IS_VALID(va), "walk: va out of range");
     assert(pagetable != NULL, "walk: pagetable is null");
 
+    static int walk_diag = 0;
+    int do_walk_diag = (walk_diag < 15 && alloc && va < 0x80000000UL);
+
     pte_t *ret_pte[PAGETABLE_LEVELS];
     for (int i = 0; i < PAGETABLE_LEVELS; i++)
         ret_pte[i] = NULL;
@@ -58,13 +61,20 @@ pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
         ret_pte[level] = pte;
         assert(pte != NULL, "walk: pte is null");
         if (*pte & PTE_V) {
-            pagetable = (pagetable_t)PTE2PA(*pte);
+            pagetable = (pagetable_t)PA2VA(PTE2PA(*pte));
         } else {
             if (!alloc || (pagetable = (pde_t *)pgtab_alloc()) == 0)
                 return NULL;
             memset(pagetable, 0, PGSIZE);
             /* RISC-V non-leaf PTEs have R=W=X=0, only V is set. */
-            *pte = PA2PTE(pagetable) | PTE_V | WALK_INTERMEDIATE_FLAGS;
+            *pte = PA2PTE(VA2PA(pagetable)) | PTE_V | WALK_INTERMEDIATE_FLAGS;
+            if (do_walk_diag) {
+                walk_diag++;
+                printf("walk: alloc L%d for va=0x%lx: pgtab=%p "
+                       "PA=0x%lx pte=0x%lx\n",
+                       level, va, pagetable,
+                       (unsigned long)VA2PA((uint64)pagetable), *pte);
+            }
         }
     }
 
@@ -160,7 +170,7 @@ void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
         uint64 pa = PTE2PA(*pte);
         *pte = 0;
         if (do_free) {
-            pgtab_free((void *)pa);
+            pgtab_free((void *)PA2VA(pa));
         }
     }
 }

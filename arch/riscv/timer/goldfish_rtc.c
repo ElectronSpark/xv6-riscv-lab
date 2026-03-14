@@ -22,7 +22,7 @@
 #include "string.h"
 #include "timer/goldfish_rtc.h"
 
-uint64 __goldfish_rtc_mmio_base = 0x101000L;
+uint64 __goldfish_rtc_mmio_base = (uint64)PA2VA(0x101000L);
 uint64 __goldfish_rtc_irqno = 11;
 
 // RTC base address (mapped in physical memory)

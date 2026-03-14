@@ -526,7 +526,7 @@ static int gdb_write_user_mem(uint64 addr, const void *src, int len)
         uint64 n = PGSIZE - off;
         if (n > (uint64)remaining)
             n = remaining;
-        memmove((void *)(pa0 + off), s, n);
+        memmove((void *)((uint64)PA2VA(pa0) + off), s, n);
         remaining -= n;
         s += n;
         dstva = va0 + PGSIZE;

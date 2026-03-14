@@ -36,7 +36,6 @@
 #include <mm/vm.h>
 #include "errno.h"
 #include "arch_thread.h"
-#include "diag.h"
 
 // Lock order:
 // 1. pid_lock (rwlock) — protects parent-child hierarchy and proc table
@@ -407,34 +406,28 @@ void thread_destroy(struct thread *p) {
 }
 
 static void init_entry(struct context *prev) {
-    int cpu = (int)cpuid();
-
-    dprintf("[boot][cpu=%d] init_entry: entered\n", cpu);
-
     // When we arrive here from context switch, we hold the rq lock.
     // Finish the context switch first to release the rq lock properly.
     context_switch_finish(thread_from_context(prev), current, 0);
     mycpu()->noff = 0; // in a new thread, noff should be 0
     intr_on();
 
-    dprintf("[boot][cpu=%d] init_entry: after context switch finish\n", cpu);
-
     // Now do post-init work without holding any scheduler locks.
     // This initializes VFS, mounts filesystems, and sets up root.
-    dprintf("[boot][cpu=%d] init_entry: start_kernel_post_init begin\n", cpu);
     start_kernel_post_init();
-    dprintf("[boot][cpu=%d] init_entry: start_kernel_post_init done\n", cpu);
+    printf("init_entry: post_init done, loading /bin/init\n");
 
     // Load /bin/init directly via exec — no initcode trampoline needed.
     char *argv[] = {"init", 0};
-    dprintf("[boot][cpu=%d] init_entry: exec /bin/init begin\n", cpu);
     int ret = exec("/bin/init", argv, 0);
-    dprintf("[boot][cpu=%d] init_entry: exec /bin/init ret=%d\n", cpu, ret);
+    printf("init_entry: exec returned %d, sepc=0x%lx sp=0x%lx\n",
+           ret, current->trapframe->trapframe.sepc,
+           current->trapframe->trapframe.sp);
     if (ret < 0)
         panic("init_entry: exec /bin/init failed");
 
     // Return to user space running /init
-    dprintf("[boot][cpu=%d] init_entry: usertrapret\n", cpu);
+    printf("init_entry: entering userspace\n");
     smp_mb();
     usertrapret();
 }
@@ -442,16 +435,11 @@ static void init_entry(struct context *prev) {
 // Set up first user thread.
 void userinit(void) {
     struct thread *p;
-    int cpu = (int)cpuid();
-
-    dprintf("[boot][cpu=%d] userinit: begin\n", cpu);
 
     assert(__alloc_pid() == 0, "userinit: __alloc_pid failed");
 
     p = thread_create(init_entry, 0, 0, KERNEL_STACK_ORDER);
     assert(!IS_ERR_OR_NULL(p), "userinit: thread_create failed");
-    dprintf("[boot][cpu=%d] userinit: thread created\n", cpu);
-
     // proctab_proc_add assigns the actual PID number
     pid_wlock();
     proctab_proc_add(p);
@@ -459,9 +447,6 @@ void userinit(void) {
     // Allocate a thread group for the init process (it is the group leader)
     assert(thread_group_alloc(p) == 0, "userinit: thread_group_alloc failed");
     p->thread_group->tgid = p->pid;
-    dprintf("[boot][cpu=%d] userinit: pid=%d tgid=%d ready\n", cpu, p->pid,
-            p->thread_group->tgid);
-
     // Initialize the full hierarchy: session 1 → pgroup 1 → TG(init) → init
     // pgroup_init creates the pgroup slab and pgroup 1 for initproc.
     // session_init creates the session slab, session 1, and links

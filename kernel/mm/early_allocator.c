@@ -171,6 +171,8 @@ static void __free_region_to_chunks(uint64 start, uint64 end) {
 }
 
 void early_allocator_init(void *pa_start, void *pa_end) {
+    pa_start = PA2VA(pa_start);
+    pa_end = PA2VA(pa_end);
     assert(pa_start != NULL && pa_end != NULL && pa_end > pa_start,
            "early_allocator_init: invalid memory range, start: %p, end: %p",
            pa_start, pa_end);

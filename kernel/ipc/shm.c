@@ -19,6 +19,7 @@
 #include "proc/thread.h"
 #include "proc/thread_group.h"
 #include "mm/vm.h"
+#include <mm/pgtable.h>
 #include <mm/page.h>
 #include "timer/goldfish_rtc.h"
 
@@ -244,7 +245,7 @@ uint64 sys_shmdt(void)
         uint64 pa = walkaddr(current->vm->pagetable, shmaddr);
         if (pa == 0)
             continue;
-        if (pa != (uint64)seg->pages[0])
+        if (pa != VA2PA((uint64)seg->pages[0]))
             continue;
 
         found = seg;

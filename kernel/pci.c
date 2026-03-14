@@ -15,7 +15,7 @@
 #include "dev/virtio.h"
 #include "dev/fdt.h"
 
-uint64 __pcie_ecam_mmio_base = 0x30000000L;
+uint64 __pcie_ecam_mmio_base = (uint64)PA2VA(0x30000000L);
 
 // Forward declarations
 void e1000_init(uint32 *xregs);
@@ -122,10 +122,10 @@ static void pci_init_e1000(uint8 bus, uint8 dev, uint8 func)
 
     printf("PCI: e1000 BAR0=0x%lx IRQ=%d\n", (uint64)bar0, irq);
 
-    __e1000_pci_mmio_base = (uint64)bar0;
+    __e1000_pci_mmio_base = (uint64)PA2VA((uint64)bar0);
     __e1000_pci_irqno = (uint64)irq;
 
-    e1000_init((uint32 *)(uint64)bar0);
+    e1000_init((uint32 *)(uint64)PA2VA((uint64)bar0));
 
     // PCI interrupts are level-triggered, active-low
     plic_enable_irq_level(irq);
@@ -218,7 +218,7 @@ void pci_init(void) {
 
     // qemu -machine virt puts PCIe config space here.
     // vm.c maps this range.
-    uint32 *ecam = (uint32 *)0x30000000L;
+    uint32 *ecam = (uint32 *)PCIE_ECAM;
 
     if (sizeof(struct pci_common_confspace_header) != 0x40) {
         printf("sizeof pci_common_confspace_header: %lx\n",
@@ -266,7 +266,7 @@ void pci_init(void) {
             // physical address 0x40000000.
             dsc->header_type_0.base_addr[0] = e1000_regs;
 
-            e1000_init((uint32 *)e1000_regs);
+            e1000_init((uint32 *)PA2VA(e1000_regs));
         }
     }
 }

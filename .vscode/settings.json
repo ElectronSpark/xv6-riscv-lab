@@ -115,6 +115,8 @@
         "diff": true,
         "riscv64-linux-gnu-objdump": true,
         "set": true,
-        "sshpass": true
+        "sshpass": true,
+        "riscv64-linux-gnu-readelf": true,
+        "riscv64-linux-gnu-addr2line": true
     }
 }

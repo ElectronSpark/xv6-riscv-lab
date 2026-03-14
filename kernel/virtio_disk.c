@@ -38,7 +38,11 @@
 #define R(n, r) ((volatile uint32 *)(__virtio_mmio_base[n] + (r)))
 
 // These are initialized from platform info at runtime
-uint64 __virtio_mmio_base[N_VIRTIO] = {0x10001000, 0x10002000, 0x10003000};
+uint64 __virtio_mmio_base[N_VIRTIO] = {
+    (uint64)PA2VA(0x10001000),
+    (uint64)PA2VA(0x10002000),
+    (uint64)PA2VA(0x10003000),
+};
 uint64 __virtio_irqno[N_VIRTIO] = {1, 2, 3};
 
 static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
@@ -270,13 +274,17 @@ static void __virtio_disk_init_one(int diskno) {
     // set queue size.
     *R(diskno, VIRTIO_MMIO_QUEUE_NUM) = NUM;
 
-    // write physical addresses.
-    *R(diskno, VIRTIO_MMIO_QUEUE_DESC_LOW) = (uint64)disk->desc;
-    *R(diskno, VIRTIO_MMIO_QUEUE_DESC_HIGH) = (uint64)disk->desc >> 32;
-    *R(diskno, VIRTIO_MMIO_DRIVER_DESC_LOW) = (uint64)disk->avail;
-    *R(diskno, VIRTIO_MMIO_DRIVER_DESC_HIGH) = (uint64)disk->avail >> 32;
-    *R(diskno, VIRTIO_MMIO_DEVICE_DESC_LOW) = (uint64)disk->used;
-    *R(diskno, VIRTIO_MMIO_DEVICE_DESC_HIGH) = (uint64)disk->used >> 32;
+    // Write physical addresses of virtqueue components to device.
+    // On RISC-V, VA2PA is an identity macro (PA == VA), so this works.
+    // On x86_64, kalloc() returns PAs, but the RISC-V MMIO path is
+    // not compiled for x86 (#else branch), so VA2PA here is correct
+    // for the RISC-V build where kalloc may return VAs.
+    *R(diskno, VIRTIO_MMIO_QUEUE_DESC_LOW) = VA2PA((uint64)disk->desc);
+    *R(diskno, VIRTIO_MMIO_QUEUE_DESC_HIGH) = VA2PA((uint64)disk->desc) >> 32;
+    *R(diskno, VIRTIO_MMIO_DRIVER_DESC_LOW) = VA2PA((uint64)disk->avail);
+    *R(diskno, VIRTIO_MMIO_DRIVER_DESC_HIGH) = VA2PA((uint64)disk->avail) >> 32;
+    *R(diskno, VIRTIO_MMIO_DEVICE_DESC_LOW) = VA2PA((uint64)disk->used);
+    *R(diskno, VIRTIO_MMIO_DEVICE_DESC_HIGH) = VA2PA((uint64)disk->used) >> 32;
 
     // queue is ready.
     *R(diskno, VIRTIO_MMIO_QUEUE_READY) = 0x1;
@@ -489,7 +497,10 @@ static void __virtio_disk_init_one_pci(int diskno) {
         printf("virtio_disk_pci: max queue size %d, using that\n", max);
     }
 
-    // Allocate and zero queue memory
+    // Allocate and zero queue memory.
+    // kalloc() returns PHYSICAL ADDRESSES — usable as pointers via
+    // the PML4[0] identity map but already correct for DMA.  Do NOT
+    // apply VA2PA() when writing these to device registers.
     disk->desc = kalloc();
     disk->avail = kalloc();
     disk->used = kalloc();
@@ -503,6 +514,7 @@ static void __virtio_disk_init_one_pci(int diskno) {
     cfg->queue_size = NUM;
 
     // Write physical addresses of virtqueue components
+    // kalloc() returns physical addresses, no VA2PA needed
     cfg->queue_desc = (uint64)disk->desc;
     cfg->queue_driver = (uint64)disk->avail;
     cfg->queue_device = (uint64)disk->used;
@@ -652,14 +664,16 @@ static int __virtio_disk_flush(blkdev_t *blkdev) {
     buf0->sector = 0;
 
     // Descriptor 0: header (device reads)
-    disk->desc[idx[0]].addr = (uint64)buf0;
+    // buf0 = &disk->ops[] — static BSS, higher-half VA → needs VA2PA.
+    disk->desc[idx[0]].addr = VA2PA((uint64)buf0);
     disk->desc[idx[0]].len = sizeof(struct virtio_blk_req);
     disk->desc[idx[0]].flags = VRING_DESC_F_NEXT;
     disk->desc[idx[0]].next = idx[1];
 
     // Descriptor 1: status (device writes)
+    // &disk->info[].status — static BSS, higher-half VA → needs VA2PA.
     disk->info[idx[0]].status = 0xff;
-    disk->desc[idx[1]].addr = (uint64)&disk->info[idx[0]].status;
+    disk->desc[idx[1]].addr = VA2PA((uint64)&disk->info[idx[0]].status);
     disk->desc[idx[1]].len = 1;
     disk->desc[idx[1]].flags = VRING_DESC_F_WRITE;
     disk->desc[idx[1]].next = 0;
@@ -738,12 +752,18 @@ static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
     buf0->reserved = 0;
     buf0->sector = sector;
 
-    disk->desc[idx[0]].addr = (uint64)buf0;
+    /*
+     * Descriptor DMA addresses:
+     *   buf0 = &disk->ops[idx] — static BSS, higher-half VA → needs VA2PA.
+     *   buf  = from __page_to_pa() in submit_bio — already a PA, no VA2PA.
+     *   &disk->info[].status — static BSS, higher-half VA → needs VA2PA.
+     */
+    disk->desc[idx[0]].addr = VA2PA((uint64)buf0);
     disk->desc[idx[0]].len = sizeof(struct virtio_blk_req);
     disk->desc[idx[0]].flags = VRING_DESC_F_NEXT;
     disk->desc[idx[0]].next = idx[1];
 
-    disk->desc[idx[1]].addr = (uint64)buf;
+    disk->desc[idx[1]].addr = (uint64)buf;  /* buf is already a PA */
     disk->desc[idx[1]].len = size;
     if (write)
         disk->desc[idx[1]].flags = 0; // device reads b->data
@@ -753,7 +773,7 @@ static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
     disk->desc[idx[1]].next = idx[2];
 
     disk->info[idx[0]].status = 0xff; // device writes 0 on success
-    disk->desc[idx[2]].addr = (uint64)&disk->info[idx[0]].status;
+    disk->desc[idx[2]].addr = VA2PA((uint64)&disk->info[idx[0]].status);
     disk->desc[idx[2]].len = 1;
     disk->desc[idx[2]].flags = VRING_DESC_F_WRITE; // device writes the status
     disk->desc[idx[2]].next = 0;

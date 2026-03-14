@@ -192,6 +192,11 @@ void db_break(void);
 void print_backtrace(uint64 context, uint64 stack_start, uint64 stack_end);
 void print_thread_backtrace(struct context *ctx, uint64 kstack,
                             int kstack_order);
+void print_user_backtrace(pagetable_t pgtbl, uint64 fp, uint64 ra,
+                          uint64 sp, uint64 sepc, int max);
+
+// coredump.c
+void do_coredump(struct thread *t);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x) / sizeof((x)[0]))

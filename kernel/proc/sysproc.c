@@ -19,7 +19,6 @@
 #include "kstats.h"
 #include "proc/pgroup.h"
 #include "tty/session.h"
-#include "diag.h"
 #include "timer/goldfish_rtc.h"
 
 #define SYSCALL_PROFILE_BEGIN(call_ctr)                                     \
@@ -368,11 +367,7 @@ uint64 sys_clone(void) {
             args.esignal = args.flags & 0xFF;
         }
     }
-    // dprintf("pid %d %s: clone(flags=0x%lx, stack=0x%lx, stack_size=0x%lx, entry=0x%lx, tls=0x%lx)\n",
-    //        current->pid, current->name, args.flags, args.stack, args.stack_size,
-    //        args.entry, args.tls);
     int ret = thread_clone(&args);
-    // dprintf("pid %d %s: clone -> %d\n", current->pid, current->name, ret);
     return ret;
 }
 
@@ -628,6 +623,14 @@ uint64 sys_brk(void) {
         SYSCALL_PROFILE_RETURN(cur_brk, g_sys_brk_ticks); // Return old break on failure
     }
 
+    if (current->pid >= 30) {
+        uint64 new_brk = heap->start + vm->heap_size;
+        printf("pid %d %s: brk(0x%lx) old=0x%lx new=0x%lx\n",
+               current->pid, current->name, addr, cur_brk, new_brk);
+        if (0x3fbe24a9f0UL >= heap->start && 0x3fbe24a9f0UL < new_brk)
+            printf("*** WATCH: pid %d brk COVERS 0x3fbe24a9f0 heap=[0x%lx, 0x%lx)\n",
+                   current->pid, heap->start, new_brk);
+    }
     if (delta > 0)
         ACCT_ADD(current->thread_group, mm_brk_delta, delta);
     else if (delta < 0)

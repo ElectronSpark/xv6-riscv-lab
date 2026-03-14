@@ -14,7 +14,6 @@
 #include "proc/thread.h"
 #include <mm/vm.h>
 #include "accounting.h"
-#include "diag.h"
 #include "kstats.h"
 
 #define SYSCALL_PROFILE_BEGIN(call_ctr)                                     \
@@ -46,8 +45,6 @@ uint64 sys_mmap(void) {
     if ((int64)ret >= 0) {
         ACCT_INC(current->thread_group, mm_mmap_count);
     }
-    // dprintf("pid %d %s: mmap(addr=0x%lx, len=0x%lx, prot=%d, flags=0x%x, fd=%d) = 0x%lx\n",
-    //        current->pid, current->name, addr, length, prot, flags, fd, ret);
     SYSCALL_PROFILE_RETURN(ret, g_sys_mmap_ticks);
 }
 
@@ -62,12 +59,9 @@ uint64 sys_munmap(void) {
     if (length == 0)
         SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_munmap_ticks);
 
-    // dprintf("pid %d %s: munmap(addr=0x%lx, len=0x%lx)\n",
-    //        current->pid, current->name, addr, length);
     int ret = vm_munmap(current->vm, addr, (size_t)length);
     if (ret == 0)
         ACCT_INC(current->thread_group, mm_munmap_count);
-    // dprintf("pid %d %s: munmap -> %d\n", current->pid, current->name, ret);
     SYSCALL_PROFILE_RETURN(ret, g_sys_munmap_ticks);
 }
 
@@ -85,8 +79,6 @@ uint64 sys_mprotect(void) {
         SYSCALL_PROFILE_RETURN(-EINVAL, g_sys_mprotect_ticks);
 
     int ret = vm_mprotect(current->vm, addr, (size_t)length, prot);
-    // dprintf("pid %d %s: mprotect(addr=0x%lx, len=0x%lx, prot=%d) = %d\n",
-    //        current->pid, current->name, addr, length, prot, ret);
     SYSCALL_PROFILE_RETURN(ret, g_sys_mprotect_ticks);
 }
 
@@ -104,8 +96,9 @@ uint64 sys_mremap(void) {
     if (new_size == 0)
         return -EINVAL;
 
-    return vm_mremap(current->vm, old_addr, (size_t)old_size,
+    uint64 mremap_ret = vm_mremap(current->vm, old_addr, (size_t)old_size,
                      (size_t)new_size, flags, new_addr);
+    return mremap_ret;
 }
 
 // msync(addr, length, flags)

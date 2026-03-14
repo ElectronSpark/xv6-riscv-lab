@@ -233,9 +233,9 @@ void __panic_start() {
         // No thread context - use kernel memory bounds for backtrace
         printf("[Core: %ld] No thread context, fp=%p\n", cpuid(), (void *)fp);
         if (__bt_enabled) {
-            // Use KERNBASE to PHYSTOP as conservative stack bounds
+            // Use virtual addresses for stack bounds (fp is a higher-half VA)
             printf("backtrace:\n");
-            print_backtrace(fp, KERNBASE, PHYSTOP);
+            print_backtrace(fp, (uint64)PA2VA(KERNBASE), (uint64)-1ULL);
         }
         return;
     }

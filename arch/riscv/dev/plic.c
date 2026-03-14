@@ -15,7 +15,7 @@
 // the riscv Platform Level Interrupt Controller (PLIC).
 //
 
-uint64 __plic_mmio_base = 0x0c000000L;
+uint64 __plic_mmio_base = (uint64)PA2VA(0x0c000000L);
 
 void arch_irq_init(void) {
     // Core PLIC initialization

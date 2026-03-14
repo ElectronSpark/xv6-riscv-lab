@@ -14,6 +14,7 @@
 #include "hlist.h"
 #include "rbtree.h"
 #include <mm/early_allocator.h>
+#include "riscv.h"
 #include "dev/uart.h"
 #include "dev/plic.h"
 #include "dev/pci.h"
@@ -1951,33 +1952,41 @@ void fdt_apply_platform_config(void) {
 
     // Refine memory info from full FDT parse (may have multiple regions)
     if (platform.mem_count > 0 && platform.mem[0].size > 0) {
-        __physical_memory_start = platform.mem[0].base;
-        // Find the highest memory end across all regions.
-        // The page array will cover the entire range from first region's base
-        // to the last region's end (including any gaps between regions).
-        // Gap pages will be marked as LOCKED during buddy init.
-        uint64 highest_end = platform.mem[0].base + platform.mem[0].size;
+        // Compute highest end using PAs (before VA conversion)
+        uint64 first_base_pa = platform.mem[0].base;
+        uint64 highest_end = first_base_pa + platform.mem[0].size;
         for (int i = 1; i < platform.mem_count; i++) {
             uint64 region_end = platform.mem[i].base + platform.mem[i].size;
             if (region_end > highest_end) {
                 highest_end = region_end;
             }
         }
-        __physical_memory_end = highest_end;
-        __physical_total_pages =
-            (highest_end - __physical_memory_start) >> 12;
+
+        // Compute total pages using PAs
+        __physical_total_pages = (highest_end - first_base_pa) >> 12;
+
+        // Store globals as higher-half VAs (matching start_kernel.c)
+        __physical_memory_start = (uint64)PA2VA(first_base_pa);
+        __physical_memory_end = (uint64)PA2VA(highest_end);
+
+        // Convert platform.mem bases to VAs so all kernel code
+        // (page.c, vm.c) sees consistent higher-half addresses
+        for (int i = 0; i < platform.mem_count; i++) {
+            platform.mem[i].base = (uint64)PA2VA(platform.mem[i].base);
+        }
 
         // Extend the early allocator ceiling to match the new physical
         // memory end.  The early allocator was initially capped at 4 GB
         // in start_kernel; now that the full FDT parse has determined
         // all memory regions, allow it to use the full range so the
         // page array can cover all physical memory.
-        early_allocator_extend((void *)highest_end);
+        // earalloc works in VA space, so pass the VA form.
+        early_allocator_extend((void *)__physical_memory_end);
     }
 
     // Set device addresses from FDT
     if (platform.uart_base != 0) {
-        __uart0_mmio_base = platform.uart_base;
+        __uart0_mmio_base = (uint64)PA2VA(platform.uart_base);
         __uart0_irqno = platform.uart_irq;
         __uart0_clock = platform.uart_clock;
         __uart0_baud = platform.uart_baud;
@@ -1985,7 +1994,7 @@ void fdt_apply_platform_config(void) {
         __uart0_reg_io_width = platform.uart_reg_io_width;
     }
     if (platform.plic_base != 0) {
-        __plic_mmio_base = platform.plic_base;
+        __plic_mmio_base = (uint64)PA2VA(platform.plic_base);
     }
 
     // Set PCIe ECAM base from the "config" or first valid region
@@ -1995,20 +2004,20 @@ void fdt_apply_platform_config(void) {
             // Prefer "config" region (ECAM space) if available
             if (platform.pcie_reg[i].name &&
                 strncmp(platform.pcie_reg[i].name, "config", 6) == 0) {
-                __pcie_ecam_mmio_base = platform.pcie_reg[i].base;
+                __pcie_ecam_mmio_base = (uint64)PA2VA(platform.pcie_reg[i].base);
                 break;
             }
         }
         // Fallback to first region (dbi) if no config found
         if (__pcie_ecam_mmio_base == 0 && platform.pcie_reg_count > 0) {
-            __pcie_ecam_mmio_base = platform.pcie_reg[0].base;
+            __pcie_ecam_mmio_base = (uint64)PA2VA(platform.pcie_reg[0].base);
         }
     }
 
     // Initialize VirtIO addresses from platform info
     if (platform.has_virtio) {
         for (int i = 0; i < platform.virtio_count && i < N_VIRTIO; i++) {
-            __virtio_mmio_base[i] = platform.virtio_base[i];
+            __virtio_mmio_base[i] = (uint64)PA2VA(platform.virtio_base[i]);
             __virtio_irqno[i] = platform.virtio_irq[i];
         }
     }

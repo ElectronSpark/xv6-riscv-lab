@@ -31,6 +31,7 @@
 /** @brief Place variable in specified linker section */
 #define __SECTION(seg_name) __attribute__((section(#seg_name)))
 #define WEAK __attribute__((weak))
+#define ALWAYS_INLINE __attribute__((always_inline)) inline
 
 /**
  * @brief Create an anonymous struct with specified alignment

@@ -95,7 +95,7 @@ static int futex_read_u32(vm_t *vm, uint64 uaddr, uint32 *val)
     /* Ensure the 4-byte read doesn't cross a page boundary */
     if (offset + sizeof(uint32) > PGSIZE)
         return -EFAULT;
-    *val = *(volatile uint32 *)(pa + offset);
+    *val = *(volatile uint32 *)((uint64)PA2VA(pa) + offset);
     return 0;
 }
 

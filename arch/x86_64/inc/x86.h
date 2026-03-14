@@ -8,6 +8,26 @@
 #define MAXVA (~0ULL)
 
 /*
+ * x86_64 higher-half kernel: all kernel sections have
+ * VMA = PA + PAGE_OFFSET (0xFFFF800000000000).
+ * The boot page tables create a linear map at this offset.
+ *
+ * PA/VA conversion rules:
+ *   VA2PA(va) — Use on kernel BSS/data/text symbol addresses (higher-half
+ *               VAs) to get the physical address for PTEs, CR3, or DMA.
+ *   PA2VA(pa) — Use when a physical address (from PTE extraction, page_alloc,
+ *               or hardware) needs to be dereferenced as a kernel pointer.
+ *
+ *   DO NOT use VA2PA on values from:
+ *     - kalloc() / page_alloc() / __page_to_pa() — they already return PAs.
+ *     - pgtab_alloc() — returns PA (usable as pointer via identity map).
+ *   These are usable as pointers only because PML4[0] identity-maps low RAM.
+ */
+#define PAGE_OFFSET 0xFFFF800000000000UL
+#define PA2VA(pa) ((void *)((uint64)(pa) + PAGE_OFFSET))
+#define VA2PA(va) ((uint64)(va) - PAGE_OFFSET)
+
+/*
  * x86_64 4-level paging: valid VAs must be canonical — bits 63:47
  * are all-zero or all-one (sign-extension of bit 47).
  */

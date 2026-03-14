@@ -1,10 +1,31 @@
 /**
  * @file vm.c
- * @brief x86_64 kernel page table setup.
+ * @brief x86_64 kernel page table setup (higher-half kernel).
  *
- * Builds 4-level (PML4 -> PDPT -> PD) identity-mapped page tables
- * covering all usable physical memory detected by the bootloader.
- * Uses 2 MiB large pages for efficiency.
+ * Builds 4-level (PML4 -> PDPT -> PD) page tables covering all usable
+ * physical memory detected by the bootloader, using 2 MiB large pages.
+ *
+ * === Higher-half kernel PA/VA rules (PAGE_OFFSET = 0xFFFF800000000000) ===
+ *
+ * The kernel is linked at higher-half VAs.  Two address worlds coexist:
+ *
+ *   1. Static kernel symbols (BSS/data/text) are higher-half VAs.
+ *      Use VA2PA() when storing them into page table entries or CR3.
+ *      Example: kpml4, kpdpt, kpds[], vector0, trampoline, cpus,
+ *               irq_stacks, sig_trampoline — all higher-half VAs.
+ *
+ *   2. page_alloc() / kalloc() return PHYSICAL ADDRESSES.
+ *      These are usable as pointers thanks to the PML4[0] identity map.
+ *      Do NOT apply VA2PA() — they are already PAs.
+ *      Example: pgtab_alloc() returns PA, walk() stores it via PA2PTE().
+ *
+ * PML4 layout:
+ *   PML4[0]   → identity map:    VA == PA  (for first 512 GiB)
+ *   PML4[256] → higher-half map: VA == PA + PAGE_OFFSET  (same PDPT)
+ *
+ * When a PTE stores a PA and we need to dereference it as a pointer,
+ * use PA2VA() to convert back.  When loading CR3, use VA2PA() since
+ * the hardware expects a physical address.
  *
  * The boot assembly (entry.S) already sets up a minimal identity map of the
  * first 1 GiB using 2 MiB pages.  arch_vm_init() replaces that with proper
@@ -74,10 +95,10 @@ static uint8 irq_stacks[NCPU][INTR_STACK_SIZE] __attribute__((aligned(PGSIZE)));
 static inline void vm_outb(uint16 port, uint8 val) {
     asm volatile("outb %0, %1" : : "a"(val), "Nd"(port));
 }
-static void vm_debug_puts(const char *s) {
+static void __attribute__((unused)) vm_debug_puts(const char *s) {
     while (*s) vm_outb(0xE9, (uint8)*s++);
 }
-static void vm_debug_hex(uint64 v) {
+static void __attribute__((unused)) vm_debug_hex(uint64 v) {
     static const char hex[] = "0123456789abcdef";
     if (v == 0) { vm_outb(0xE9, '0'); return; }
     int started = 0;
@@ -89,6 +110,10 @@ static void vm_debug_hex(uint64 v) {
 
 /*
  * Map a physical range using 2 MiB large pages (identity mapped: va == pa).
+ *
+ * PA/VA note: kpds[] and kpdpt are static BSS arrays (higher-half VAs).
+ * Their C addresses must be converted with VA2PA() before storing into PTEs.
+ * Conversely, when extracting a PA from a PTE to dereference it, use PA2VA().
  */
 static void kvm_map_2m_range(uint64 pa_start, uint64 pa_end, uint64 flags)
 {
@@ -102,11 +127,11 @@ static void kvm_map_2m_range(uint64 pa_start, uint64 pa_end, uint64 flags)
                 panic("kvm_map_2m_range: out of PD tables for pa=0x%lx",
                       pa);
             __builtin_memset(kpds[n_pds_used], 0, X86_PAGE_SIZE);
-            kpdpt[pidx] = (uint64)kpds[n_pds_used] | X86_PTE_P | X86_PTE_W;
+            kpdpt[pidx] = VA2PA((uint64)kpds[n_pds_used]) | X86_PTE_P | X86_PTE_W;
             n_pds_used++;
         }
 
-        uint64 *pd = (uint64 *)(kpdpt[pidx] & X86_PTE_ADDR_MASK);
+        uint64 *pd = (uint64 *)PA2VA(kpdpt[pidx] & X86_PTE_ADDR_MASK);
         pd[PD_IDX(pa)] = pa | flags | X86_PTE_PS;
     }
 }
@@ -117,8 +142,11 @@ static void kvm_build(void)
     __builtin_memset(kpdpt, 0, X86_PAGE_SIZE);
     n_pds_used = 0;
 
-    /* PML4[0] -> PDPT (covers first 512 GiB) */
-    kpml4[0] = (uint64)kpdpt | X86_PTE_P | X86_PTE_W;
+    /* PML4[0] -> PDPT: identity map (PA == VA for first 512 GiB) */
+    kpml4[0] = VA2PA((uint64)kpdpt) | X86_PTE_P | X86_PTE_W;
+
+    /* PML4[256] -> same PDPT: higher-half map (VA = PA + PAGE_OFFSET) */
+    kpml4[PX(3, PAGE_OFFSET)] = VA2PA((uint64)kpdpt) | X86_PTE_P | X86_PTE_W;
 
     uint64 flags_rw = X86_PTE_P | X86_PTE_W | X86_PTE_G;
 
@@ -150,9 +178,10 @@ static void kvm_build(void)
     kvm_map_2m_range(0xFE000000ULL, 0xFF000000ULL, flags_mmio);
 }
 
+/* CR3 requires a physical address; kpml4 is a higher-half VA. */
 static void kvm_load(void)
 {
-    asm volatile("movq %0, %%cr3" : : "r"((uint64)kpml4) : "memory");
+    asm volatile("movq %0, %%cr3" : : "r"(VA2PA((uint64)kpml4)) : "memory");
 }
 
 void arch_vm_init(void)
@@ -186,12 +215,13 @@ void arch_vm_init(void)
         for (int i = 0; i < npages; i++) {
             if (mappages((pagetable_t)kpml4,
                          TRAPVEC_ALIAS_BASE + i * PGSIZE, PGSIZE,
-                         trapvec_page0 + i * PGSIZE, PTE_R | PTE_W) != 0)
+                         VA2PA(trapvec_page0) + i * PGSIZE,
+                         PTE_R | PTE_W) != 0)
                 panic("arch_vm_init: trapvec alias map page%d failed", i);
         }
 
         if (mappages((pagetable_t)kpml4, TRAMPOLINE, PGSIZE,
-                 PGROUNDDOWN((uint64)trampoline), PTE_R) != 0)
+                 VA2PA(PGROUNDDOWN((uint64)trampoline)), PTE_R) != 0)
             panic("arch_vm_init: trampoline map failed");
 
         /*
@@ -199,7 +229,7 @@ void arch_vm_init(void)
          * Assembly accesses it RIP-relative from the high alias;
          * C code accesses through the identity-mapped address.
          */
-        trampoline_ksatp = (uint64)kpml4;
+        trampoline_ksatp = VA2PA((uint64)kpml4);
 
         /*
          * Signal trampoline in PML4[510] — a separate shared PML4 entry.
@@ -207,7 +237,7 @@ void arch_vm_init(void)
          * so no manual PTE_U patching is needed.
          */
         if (mappages((pagetable_t)kpml4, SIG_TRAMPOLINE, PGSIZE,
-                     PGROUNDDOWN((uint64)sig_trampoline),
+                     VA2PA(PGROUNDDOWN((uint64)sig_trampoline)),
                      PTE_R | PTE_U) != 0)
             panic("arch_vm_init: sig trampoline map failed");
 
@@ -215,11 +245,11 @@ void arch_vm_init(void)
         if (PGROUNDUP((uint64)cpus + sizeof(cpus)) - cpus_base > PGSIZE)
             panic("arch_vm_init: cpus[] exceeds one page");
         if (mappages((pagetable_t)kpml4, TRAMPOLINE_CPULOCAL, PGSIZE,
-                     cpus_base, PTE_R | PTE_W) != 0)
+                     VA2PA(cpus_base), PTE_R | PTE_W) != 0)
             panic("arch_vm_init: cpu-local map failed");
 
         for (int i = 0; i < NCPU; i++) {
-            uint64 stack_pa = (uint64)&irq_stacks[i][0];
+            uint64 stack_pa = VA2PA((uint64)&irq_stacks[i][0]);
             uint64 stack_va = KIRQSTACK(i);
             if (mappages((pagetable_t)kpml4, stack_va, INTR_STACK_SIZE,
                          stack_pa, PTE_R | PTE_W) != 0)
@@ -236,10 +266,10 @@ void arch_vm_init(void)
          * reachable for fault delivery during the transition.
          */
         if (mappages((pagetable_t)kpml4, CPU_ENTRY_GDT, PGSIZE,
-                     x86_gdt_page_pa(), PTE_R | PTE_W) != 0)
+                     VA2PA(x86_gdt_page_pa()), PTE_R | PTE_W) != 0)
             panic("arch_vm_init: gdt page map failed");
         if (mappages((pagetable_t)kpml4, CPU_ENTRY_IDT, PGSIZE,
-                     x86_idt_page_pa(), PTE_R) != 0)
+                     VA2PA(x86_idt_page_pa()), PTE_R) != 0)
             panic("arch_vm_init: idt page map failed");
     }
 
@@ -348,7 +378,10 @@ static void __freewalk(pagetable_t pagetable, int level, int skip_idx)
         if (!(pte & PTE_V))
             continue;
         if (level > 0) {
-            /* Non-leaf: recurse into next level page table. */
+            /* Non-leaf: recurse into next level page table.
+             * PTE2PA extracts a PA; pgtab_alloc() returns PAs that are
+             * usable as pointers via the PML4[0] identity map, so
+             * casting directly to pagetable_t is correct here. */
             uint64 child = PTE2PA(pte);
             __freewalk((pagetable_t)child, level - 1, -1);
             pagetable[i] = 0;

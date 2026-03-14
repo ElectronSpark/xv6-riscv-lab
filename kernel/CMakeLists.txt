@@ -11,14 +11,17 @@ set(KERNEL_SYMBOLS kernel.sym)
 # ==============================================================================
 if(ARCH STREQUAL "x86_64")
     set(KERNEL_BASE "0x00100000")
+    set(KERNEL_OFFSET "0xFFFF800000000000")
 elseif(PLATFORM STREQUAL "orangepi")
     set(KERNEL_BASE "0x00200000")
+    set(KERNEL_OFFSET "0xFFFFFFC000000000")
 else()
     set(KERNEL_BASE "0x80200000")
+    set(KERNEL_OFFSET "0xFFFFFFC000000000")
 endif()
 
 message(STATUS "Building kernel for lab: $ENV{LAB}")
-message(STATUS "Platform: ${PLATFORM}, kernel base: ${KERNEL_BASE}")
+message(STATUS "Platform: ${PLATFORM}, kernel base: ${KERNEL_BASE}, page offset: ${KERNEL_OFFSET}")
 
 # Core kernel sources in this directory (excluding subdirectories).
 set(KERNEL_C_FILES
@@ -43,6 +46,7 @@ set(KERNEL_C_FILES
     ${KERNEL_DIR}/accounting.c
     ${KERNEL_DIR}/power.c
     ${KERNEL_DIR}/cmdline.c
+    ${KERNEL_DIR}/coredump.c
 )
 
 if(DEFINED ENV{RWLOCK_TEST})
@@ -229,6 +233,7 @@ add_custom_command(
             ${CMAKE_OBJDUMP}
             $<TARGET_FILE:${KERNEL_BINARY}>
             ${KERNEL_BASE}
+            ${KERNEL_OFFSET}
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS ${KERNEL_BINARY} ${GEN_KERNEL_LD_SCRIPT} ${KERNEL_LD_IN} ${ESTIMATE_SCRIPT}
     COMMENT "Computing .ksymbols_idx size and generating kernel_sym.ld"

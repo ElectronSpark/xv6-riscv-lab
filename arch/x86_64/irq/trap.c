@@ -9,7 +9,6 @@
 
 #include "types.h"
 #include "printf.h"
-#include "diag.h"
 #include "x86.h"
 #include "defs.h"
 #include "string.h"
@@ -43,7 +42,6 @@ extern void sig_trampoline(void); /* defined in sig_trampoline.S */
 
 extern char userret[];
 static void (*trampoline_userret)(uint64 tf, uint64 user_cr3) = NULL;
-static void trace_userret_phase(const char *tag, struct thread *p);
 
 /* ── Debugcon helpers (forward declarations for use in usertrapret) ── */
 static inline void dbg_outb(uint16 port, uint8 val);
@@ -61,8 +59,6 @@ static void dbg_hex(uint64 v);
 void usertrapret(void) {
     struct thread *p = current;
     struct trapframe *tf = &p->trapframe->trapframe;
-
-    trace_userret_phase("enter", p);
 
     if (killed(p))
         exit(-1);
@@ -85,11 +81,9 @@ void usertrapret(void) {
 
     /* Disable interrupts while setting up the return path. */
     intr_off();
-    trace_userret_phase("after intr_off", p);
 
     /* Restore user FS base (TLS) for user-space threads. */
     wrmsr(MSR_FS_BASE, p->trapframe->tp);
-    trace_userret_phase("after fsbase", p);
 
     /*
      * Set up GS MSRs explicitly — Linux strategy:
@@ -570,31 +564,6 @@ static inline uint64 read_cr2(void) {
     return v;
 }
 
-static void trace_first_user_transition(const char *tag, uint64 a, uint64 b,
-                                        uint64 c) {
-    static int budget = 32;
-    int slot = __atomic_fetch_sub(&budget, 1, __ATOMIC_RELAXED);
-
-    if (slot <= 0 || current == NULL) {
-        return;
-    }
-
-    dprintf("[utrace][cpu=%d][pid=%d] %s a=0x%lx b=0x%lx c=0x%lx\n",
-            (int)cpuid(), current->pid, tag, a, b, c);
-}
-
-static void trace_userret_phase(const char *tag, struct thread *p) {
-    static int budget = 48;
-    int slot = __atomic_fetch_sub(&budget, 1, __ATOMIC_RELAXED);
-
-    if (slot <= 0 || p == NULL) {
-        return;
-    }
-
-    dprintf("[userret-phase][cpu=%d][pid=%d] %s\n", (int)cpuid(), p->pid,
-            tag);
-}
-
 /* ── Timer tick advance (defined in timer.c) ── */
 extern void timer_tick_advance(void);
 
@@ -633,8 +602,6 @@ void x86_trap_handler(struct trapframe *tf) {
         uint64 cr2 = read_cr2();
 
         if (from_user && current && current->vm) {
-            trace_first_user_transition("user-pf", cr2, tf->rip, tf->err);
-
             /*
              * User-mode page fault — attempt demand paging.
              * x86 PF error code bit 1 = write fault.
@@ -668,6 +635,9 @@ void x86_trap_handler(struct trapframe *tf) {
                 "pid %d %s: fatal page fault cr2=0x%lx err=0x%lx rip=0x%lx\n",
                 current->pid, current->name, cr2, tf->err, tf->rip);
             assert(current->pid != 1, "init exiting");
+            print_user_backtrace(current->vm->pagetable,
+                                 tf->rbp, tf->rip, tf->rsp, tf->rip, 20);
+            do_coredump(current);
             {
                 extern int gdbstub_signal_stop(struct thread *, int);
                 gdbstub_signal_stop(current, SIGSEGV);
@@ -682,8 +652,6 @@ void x86_trap_handler(struct trapframe *tf) {
              * panic. */
             printf("pid %d %s: page fault with NULL vm cr2=0x%lx rip=0x%lx\n",
                    current->pid, current->name, cr2, tf->rip);
-            // dprintf("pid %d %s: page fault with NULL vm cr2=0x%lx rip=0x%lx\n",
-            //        current->pid, current->name, cr2, tf->rip);
             assert(current->pid != 1, "init exiting");
             kill(current->pid, SIGSEGV);
             goto user_return;
@@ -829,6 +797,9 @@ void x86_trap_handler(struct trapframe *tf) {
             printf("  fs_base(tp)=0x%lx\n",
                    current->trapframe ? current->trapframe->tp : 0);
             assert(current->pid != 1, "init exiting");
+            print_user_backtrace(current->vm->pagetable,
+                                 tf->rbp, tf->rip, tf->rsp, tf->rip, 20);
+            do_coredump(current);
             {
                 extern int gdbstub_signal_stop(struct thread *, int);
                 gdbstub_signal_stop(current, sig);
@@ -976,11 +947,6 @@ user_return:
  */
 void usertrap_syscall(struct trapframe *tf) {
     struct thread *p = current;
-    (void)p;
-
-    if (p != NULL) {
-        trace_first_user_transition("syscall", tf->rax, tf->rip, tf->rsp);
-    }
 
     /*
      * Copy the stack-based trapframe into the per-process utrapframe.

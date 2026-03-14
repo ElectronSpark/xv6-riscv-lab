@@ -30,7 +30,7 @@ static struct netdev_ops e1000_netdev_ops = {
 
 static struct netdev e1000_ndev;
 
-uint64 __e1000_pci_mmio_base = 0x40000000L;
+uint64 __e1000_pci_mmio_base = (uint64)PA2VA(0x40000000L);
 uint64 __e1000_pci_irqno = 33;
 
 static void e1000_intr(int irq, void *data, device_t *dev);
@@ -191,7 +191,7 @@ int e1000_set_receive_descriptor_base(struct rx_desc *virtual_base,
         mbufs_ptr_arr_base[i] = mbufalloc(0);
         if (!mbufs_ptr_arr_base[i])
             return -1;
-        virtual_base[i].addr = (uint64)mbufs_ptr_arr_base[i]->head;
+        virtual_base[i].addr = VA2PA((uint64)mbufs_ptr_arr_base[i]->head);
     }
     __atomic_thread_fence(__ATOMIC_SEQ_CST);
     regs[E1000_RDBAL] = l;
@@ -223,12 +223,12 @@ void e1000_init(uint32 *xregs) {
 
     // [E1000 14.5] Transmit initialization
     if (e1000_set_transmission_descriptor_base(
-            tx_ring, (uint64)tx_ring, tx_mbufs, sizeof(tx_ring)) != 0) {
+            tx_ring, VA2PA((uint64)tx_ring), tx_mbufs, sizeof(tx_ring)) != 0) {
         panic("e1000");
     }
 
     // [E1000 14.4] Receive initialization
-    if (e1000_set_receive_descriptor_base(rx_ring, (uint64)rx_ring, rx_mbufs,
+    if (e1000_set_receive_descriptor_base(rx_ring, VA2PA((uint64)rx_ring), rx_mbufs,
                                           sizeof(rx_ring)) != 0) {
         panic("e1000");
     }
@@ -300,7 +300,7 @@ int e1000_transmit(struct mbuf *m) {
         mbuffree(tx_mbufs[index]);
     }
     // pass packet information into transmission discriptor
-    desc->addr = (uint64)m->head;
+    desc->addr = VA2PA((uint64)m->head);
     desc->length = m->len;
     // - let the Ethernet controller report the status information of this
     //   packet, so that the next we could check if the data of this descriptor
@@ -349,7 +349,7 @@ STATIC void e1000_recv(void) {
         }
         // let the current descriptor point to the newly allocated buffer
         rx_mbufs[index] = newbuf;
-        desc->addr = (uint64)newbuf->head;
+        desc->addr = VA2PA((uint64)newbuf->head);
         desc->status = 0;
         // tell the Ethernet controller that we have finished processing
         // this packet.

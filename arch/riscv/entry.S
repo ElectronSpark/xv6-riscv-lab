@@ -72,8 +72,12 @@ _start_kernel:
         bnez t2, _skip_bss_clear    # If flag was already 1, skip clearing
 
         # Clear BSS section (required on real hardware, QEMU may pre-zero)
-        la t0, _bss
-        la t1, _bss_end
+        ld t0, _bss_high
+        sll t0, t0, 25       # Shift left to get the actual address (since we stored high 39 bits)
+        srl t0, t0, 25       # Shift back right to get the original address
+        ld t1, _bss_end_high
+        sll t1, t1, 25       # Shift left to get the actual address (since we stored high 39 bits)
+        srl t1, t1, 25       # Shift back right to get the original address
 1:      bgeu t0, t1, 2f
         sd zero, 0(t0)
         addi t0, t0, 8
@@ -103,7 +107,18 @@ spin:
         j spin
 
 # Flag in .data section (initialized to 0) - NOT in BSS!
-.section .data
+.section .init.data
 .align 2
 __bss_cleared_flag:
         .word 0
+
+.globl _bss
+.align 8
+_bss_high:
+        .quad _bss
+
+.globl _bss_end
+.align 8
+_bss_end_high:
+        .quad _bss_end
+        

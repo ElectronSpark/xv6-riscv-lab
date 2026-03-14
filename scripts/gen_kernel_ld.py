@@ -3,7 +3,7 @@
 Generate kernel linker script from template with computed section sizes.
 
 Usage:
-    gen_kernel_ld.py <template.ld.in> <output.ld> <objdump> <kernel_elf> <kernel_base>
+    gen_kernel_ld.py <template.ld.in> <output.ld> <objdump> <kernel_elf> <kernel_base> [<page_offset>]
 
 Counts DWARF decoded-line entries in <kernel_elf> (via estimate_symbol_size)
 to determine how many __ksymbols_t rb-tree nodes the kernel will need at
@@ -20,12 +20,13 @@ from estimate_symbol_size import count_dwarf_entries, estimate_ksymbols_idx_size
 
 
 def main():
-    if len(sys.argv) != 6:
-        print(f"Usage: {sys.argv[0]} <template> <output> <objdump> <kernel_elf> <kernel_base>",
+    if len(sys.argv) < 6:
+        print(f"Usage: {sys.argv[0]} <template> <output> <objdump> <kernel_elf> <kernel_base> [<page_offset>]",
               file=sys.stderr)
         sys.exit(1)
 
     template_path, output_path, objdump, kernel_elf, kernel_base = sys.argv[1:6]
+    page_offset = sys.argv[6] if len(sys.argv) > 6 else '0'
 
     try:
         address_lines, files = count_dwarf_entries(objdump, kernel_elf)
@@ -44,6 +45,7 @@ def main():
         content = f.read()
 
     content = content.replace('@KERNEL_BASE@', kernel_base)
+    content = content.replace('@KERNEL_OFFSET@', page_offset)
     content = content.replace('@KERNEL_SYMBOLS_IDX_SIZE@', f'0x{idx_size:x}')
 
     with open(output_path, 'w') as f:

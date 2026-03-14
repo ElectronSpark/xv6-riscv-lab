@@ -4,21 +4,46 @@ ENTRY( _entry )
 SECTIONS
 {
   /*
-   * Kernel load address:
+   * Kernel load address (physical):
    * - QEMU virt machine: 0x80200000 (RAM starts at 0x80000000)
    * - Orange Pi RV2:     0x00200000 (RAM starts at 0x00080000)
    *
    * Configured by CMake via -DKERNEL_BASE=<address>
+   *
+   * The early boot stub (.text.entry) runs at the physical address before
+   * the MMU is enabled.  All other sections have their VMA in the higher
+   * half (KERNEL_OFFSET + physical address) while LMA remains physical.
    */
+
+  /* ---- Early boot code: VMA == LMA == physical ---- */
   . = @KERNEL_BASE@;
 
-  /* Keep the entry stub at the very start so qemu -kernel jumps to real code. */
   .text.entry : {
     _entry = .;
     KEEP(*(.text.entry))
+    KEEP(*(.text.entry.start))
   }
 
-  .text : {
+  . = ALIGN(4096);
+  _init_data = .;
+
+  .init.data : {
+    . = ALIGN(16);
+    *(.init.data)
+  }
+
+  .init.bss : {
+    . = ALIGN(4096);
+    *(.init.bss)
+  }
+
+  _entry_end = .;
+
+  /* ---- Higher-half kernel: VMA = KERNEL_OFFSET + LMA ---- */
+  . += @KERNEL_OFFSET@;
+
+  .text : AT(ADDR(.text) - @KERNEL_OFFSET@) {
+    _text = .;
     . = ALIGN(16);
     *(.text .text.*);
     . = ALIGN(0x1000);
@@ -29,7 +54,7 @@ SECTIONS
     PROVIDE(etext = .);
   }
 
-  .trampoline.cpu_local : {
+  .trampoline.cpu_local : AT(ADDR(.trampoline.cpu_local) - @KERNEL_OFFSET@) {
     . = ALIGN(0x1000);
     _cpulocal_start = .;
     *(cpu_local_sec)
@@ -37,7 +62,7 @@ SECTIONS
     ASSERT(. - _cpulocal_start <= 0x1000, "error: cpu_local_sec larger than one page");
   }
 
-  .trampoline.data : {
+  .trampoline.data : AT(ADDR(.trampoline.data) - @KERNEL_OFFSET@) {
     . = ALIGN(0x1000);
     PROVIDE(_trampoline_data = .);
     *(trampdatasec)
@@ -45,14 +70,14 @@ SECTIONS
     ASSERT(. - _trampoline_data <= 0x1000, "error: trampoline larger than one page");
   }
   
-  .trampoline : {
+  .trampoline : AT(ADDR(.trampoline) - @KERNEL_OFFSET@) {
     PROVIDE(_trampoline = .);
     *(trampsec)
     . = ALIGN(0x1000);
     ASSERT(. - _trampoline <= 0x1000, "error: trampoline larger than one page");
   }
 
-  .rodata : {
+  .rodata : AT(ADDR(.rodata) - @KERNEL_OFFSET@) {
     . = ALIGN(4096);
     _rodata = .;
     *(.srodata .srodata.*) /* do not need to distinguish this from .rodata */
@@ -62,14 +87,14 @@ SECTIONS
     _rodata_end = .;
   }
 
-  .data.ktlb : {
+  .data.ktlb : AT(ADDR(.data.ktlb) - @KERNEL_OFFSET@) {
     . = ALIGN(4096);
     PROVIDE(_data_ktlb = .);
     . += 4096;
     _data_ktlb_end = .;
   }
 
-  .data : {
+  .data : AT(ADDR(.data) - @KERNEL_OFFSET@) {
     . = ALIGN(4096);
     _data = .;
     *(.sdata .sdata.*) /* do not need to distinguish this from .data */
@@ -86,7 +111,7 @@ SECTIONS
    * The build system generates this from the first-pass kernel.
    */
   . = ALIGN(4096);
-  .ksymbols : {
+  .ksymbols : AT(ADDR(.ksymbols) - @KERNEL_OFFSET@) {
     _ksymbols_start = .;
     KEEP(*(.ksymbols))
     . = ALIGN(4096);
@@ -96,7 +121,7 @@ SECTIONS
   /* Mark end of loaded kernel image (before BSS) */
   _kernel_image_end = .;
 
-  .bss : {
+  .bss : AT(ADDR(.bss) - @KERNEL_OFFSET@) {
     . = ALIGN(16);
     _bss = .;
     *(.sbss .sbss.*) /* do not need to distinguish this from .bss */
@@ -110,12 +135,18 @@ SECTIONS
    * Reserve space for parsed symbol index (rb-tree nodes).
    * This is in BSS (zero-initialized at runtime).
    */
-  .ksymbols_idx (NOLOAD) : {
+  .ksymbols_idx (NOLOAD) : AT(ADDR(.ksymbols_idx) - @KERNEL_OFFSET@) {
     . = ALIGN(4096);
     _ksymbols_idx_start = .;
     . += @KERNEL_SYMBOLS_IDX_SIZE@;
     _ksymbols_idx_end = .;
   }
 
-  PROVIDE(end = .);
+  .end.va : AT(ADDR(.end.va) - @KERNEL_OFFSET@) {
+    PROVIDE(end = .);
+  }
+
+  .end.pa : AT(ADDR(.end.pa)) {
+    PROVIDE(end_pa = .);
+  }
 }

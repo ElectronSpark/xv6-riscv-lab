@@ -31,7 +31,7 @@ set_source_files_properties(${ARCH_S_FILES} PROPERTIES LANGUAGE C)
 # even though the rest of the kernel is compiled with -march=rv64imac.
 set_source_files_properties(
     ${CMAKE_CURRENT_SOURCE_DIR}/proc/fpu.S
-    PROPERTIES COMPILE_FLAGS "-march=rv64gc_zicsr_zifencei -mabi=lp64"
+    PROPERTIES COMPILE_FLAGS "-march=rv64gc_zicsr_zifencei -mabi=lp64 -mcmodel=large"
 )
 
 add_library(arch_riscv OBJECT ${ARCH_C_FILES} ${ARCH_S_FILES})

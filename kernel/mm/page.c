@@ -1407,7 +1407,7 @@ int page_buddy_init(void) {
     __pages = (page_t *)early_alloc_align(page_arr_size, PGSIZE);
     // X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after early_alloc_align\n");
     assert(__pages != NULL, "page_buddy_init(): failed to allocate page array");
-    __managed_start = PGROUNDUP((uint64)early_alloc_end_ptr());
+    __managed_start = PGROUNDUP(VA2PA(early_alloc_end_ptr()));
     __managed_end = PHYSTOP;
     // X86_PAGE_MARK("[xv6 x86_64] page_buddy_init: after managed range set\n");
     printf("page_buddy_init(): page array at 0x%lx, size 0x%lx\n",
