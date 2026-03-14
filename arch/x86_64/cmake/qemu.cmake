@@ -49,7 +49,7 @@ add_custom_target(x86-banner-image
 )
 
 add_custom_target(qemu-smoke
-    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -m 512M -nographic -monitor none -serial none -debugcon stdio -kernel ${X86_BANNER_ELF}
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64,+pcid -m 512M -nographic -monitor none -serial none -debugcon stdio -kernel ${X86_BANNER_ELF}
     DEPENDS x86-banner-image
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running x86_64 QEMU banner smoke image"
@@ -73,7 +73,7 @@ set(X86_NET_OPTS -netdev user,id=net0,hostfwd=tcp::2323-:23,hostfwd=tcp::2159-:2
 set(X86_CMDLINE -append "root=/dev/disk0")
 
 add_custom_target(qemu
-    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m ${MEMORY} -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -debugcon file:debugcon.log -kernel ${X86_FULL_IMAGE} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE}
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64,+pcid -smp ${CPUS} -m ${MEMORY} -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -debugcon file:debugcon.log -kernel ${X86_FULL_IMAGE} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE}
     COMMAND stty sane
     DEPENDS kernel_all fs_img
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -81,7 +81,7 @@ add_custom_target(qemu
 )
 
 add_custom_target(qemu-serial
-    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m ${MEMORY} -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -kernel ${X86_FULL_IMAGE} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE}
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64,+pcid -smp ${CPUS} -m ${MEMORY} -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -kernel ${X86_FULL_IMAGE} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE}
     COMMAND stty sane
     DEPENDS kernel_all fs_img
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -89,7 +89,7 @@ add_custom_target(qemu-serial
 )
 
 add_custom_target(qemu-debugcon
-    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m ${MEMORY} -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial none -debugcon chardev:char0 -kernel ${X86_FULL_IMAGE} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE}
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64,+pcid -smp ${CPUS} -m ${MEMORY} -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial none -debugcon chardev:char0 -kernel ${X86_FULL_IMAGE} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE}
     COMMAND stty sane
     DEPENDS kernel_all fs_img
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
@@ -108,7 +108,7 @@ add_custom_target(gdbinit ALL
 )
 
 add_custom_target(qemu-gdb
-    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64 -smp ${CPUS} -m ${MEMORY} -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -debugcon file:debugcon.log -kernel ${X86_FULL_IMAGE} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE} -S -gdb tcp::1234
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64,+pcid -smp ${CPUS} -m ${MEMORY} -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -debugcon file:debugcon.log -kernel ${X86_FULL_IMAGE} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE} -S -gdb tcp::1234
     COMMAND stty sane
     DEPENDS kernel_all fs_img gdbinit
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}

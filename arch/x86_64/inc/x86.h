@@ -110,18 +110,37 @@ static inline uint64 r_sie(void) { return 0; }
 static inline void w_sie(uint64 value) { (void)value; }
 
 static inline void sfence_vma(void) {
-	/* Full TLB flush: reload CR3 */
+	/* Full TLB flush: reload CR3.
+	 * With PCID enabled, writing CR3 without the noflush bit (63)
+	 * flushes all non-global entries for the loaded PCID. */
 	uint64 cr3;
 	asm volatile("movq %%cr3, %0" : "=r"(cr3));
+	cr3 &= ~(1ULL << 63);  /* ensure noflush bit is clear */
 	asm volatile("movq %0, %%cr3" : : "r"(cr3) : "memory");
 }
 
 static inline void sfence_vma_page(uint64 va) {
-	/* Single-page TLB invalidation: much cheaper than full CR3 reload */
+	/* Single-page TLB invalidation: much cheaper than full CR3 reload.
+	 * With PCID enabled, invlpg flushes entries for the current PCID. */
 	asm volatile("invlpg (%0)" : : "r"(va) : "memory");
 }
 
+/* Flush ALL TLB entries including global entries — needed for kernel
+ * page table changes and IPI TLB shootdown with PCID. */
+static inline void sfence_vma_global(void) {
+	uint64 cr4;
+	asm volatile("movq %%cr4, %0" : "=r"(cr4));
+	asm volatile("movq %0, %%cr4" : : "r"(cr4 & ~(1ULL << 7)) : "memory");
+	asm volatile("movq %0, %%cr4" : : "r"(cr4) : "memory");
+}
+
+#define CR3_NOFLUSH  (1ULL << 63)
+#define CR3_PCID_MASK 0xFFFULL
+
 #define MAKE_SATP(pagetable) ((uint64)(pagetable))
+#define MAKE_SATP_PCID(pagetable, pcid, noflush) \
+	((noflush ? CR3_NOFLUSH : 0) | ((uint64)(pagetable) & ~CR3_PCID_MASK) | ((uint64)(pcid) & CR3_PCID_MASK))
+
 static inline uint64 r_satp(void) {
 	uint64 val;
 	asm volatile("movq %%cr3, %0" : "=r"(val));

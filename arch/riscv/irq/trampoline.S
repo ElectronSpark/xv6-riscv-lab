@@ -142,10 +142,9 @@ userret:
         # a1: user page table satp
 
         # switch to the user page table.
-        sfence.vma zero, zero
+        # ASID is encoded in a1, so TLB entries from other ASIDs
+        # are not affected — no sfence.vma needed.
         csrw satp, a1
-        sfence.vma zero, zero
-        fence.i
 
         # set stvec to uservec
         ld t0, trampoline_uservec

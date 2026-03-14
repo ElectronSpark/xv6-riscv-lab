@@ -644,19 +644,29 @@ void usertrapret(void) {
     // and get the trapframe base virtual address for this CPU
     uint64 trapframe_base = vm_cpu_online(p->vm, cpuid(), p);
 
+    /* Per-CPU ASID generation check: if the global generation has advanced
+     * past what this CPU last saw, flush the entire TLB so stale entries
+     * from a recycled ASID cannot be served. */
+    uint16 cur_gen = vm_asid_gen();
+    if (mycpu()->asid_gen != cur_gen) {
+        sfence_vma();
+        mycpu()->asid_gen = cur_gen;
+    }
+
+    uint64 user_satp = MAKE_SATP_ASID((uint64)p->vm->pagetable, p->vm->asid);
+
     static int uret_diag_count = 0;
     if (uret_diag_count < 10) {
         uret_diag_count++;
-        uint64 user_satp = MAKE_SATP((uint64)p->vm->pagetable);
-        printf("usertrapret: pid=%d tf=0x%lx satp=0x%lx sepc=0x%lx sp=0x%lx\n",
-               p->pid, trapframe_base, user_satp,
+        printf("usertrapret: pid=%d tf=0x%lx satp=0x%lx asid=%d sepc=0x%lx sp=0x%lx\n",
+               p->pid, trapframe_base, user_satp, p->vm->asid,
                p->trapframe->trapframe.sepc, p->trapframe->trapframe.sp);
     }
 
     // jump to userret in trampoline.S at the top of memory, which
     // switches to the user page table, restores user registers,
     // and switches to user mode with sret.
-    trampoline_userret(trapframe_base, MAKE_SATP((uint64)p->vm->pagetable));
+    trampoline_userret(trapframe_base, user_satp);
 }
 
 // interrupts and exceptions from kernel code go here via kernelvec,

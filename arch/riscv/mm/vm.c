@@ -67,8 +67,48 @@ void vm_remote_sfence(vm_t *vm)
     cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
     cpumask &= ~(1ULL << cpuid());
 
-    if (cpumask)
-        sbi_remote_hfence_vma(cpumask, 0, 0, 0);
+    if (cpumask) {
+        if (vm_asid_max() > 0 && vm->asid != 0)
+            sbi_remote_hfence_vma_asid(cpumask, 0, 0, 0, vm->asid);
+        else
+            sbi_remote_hfence_vma(cpumask, 0, 0, 0);
+    }
+
+    pop_off();
+}
+
+void vm_remote_sfence_page(vm_t *vm, uint64 va)
+{
+    push_off();
+    smp_mb();
+
+    cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
+    cpumask &= ~(1ULL << cpuid());
+
+    if (cpumask) {
+        if (vm_asid_max() > 0 && vm->asid != 0)
+            sbi_remote_hfence_vma_asid(cpumask, 0, va, PGSIZE, vm->asid);
+        else
+            sbi_remote_hfence_vma(cpumask, 0, va, PGSIZE);
+    }
+
+    pop_off();
+}
+
+void vm_remote_sfence_range(vm_t *vm, uint64 start, uint64 size)
+{
+    push_off();
+    smp_mb();
+
+    cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
+    cpumask &= ~(1ULL << cpuid());
+
+    if (cpumask) {
+        if (vm_asid_max() > 0 && vm->asid != 0)
+            sbi_remote_hfence_vma_asid(cpumask, 0, start, size, vm->asid);
+        else
+            sbi_remote_hfence_vma(cpumask, 0, start, size);
+    }
 
     pop_off();
 }
@@ -312,6 +352,19 @@ void arch_vm_init(void)
 
     smp_store_release(&trampoline_ksatp, MAKE_SATP(VA2PA(kernel_pagetable)));
     smp_mb();
+
+    /* Detect ASID width: write maximum ASID to SATP, read back, see what
+     * sticks.  Keep the current PPN valid so memory access still works. */
+    {
+        uint64 old = r_satp();
+        uint64 ppn = old & ((1UL << 44) - 1);
+        w_satp(SATP_SV39 | SATP_ASID_MASK | ppn);
+        uint64 test = r_satp();
+        w_satp(old);
+        sfence_vma();
+        uint16 max_asid = (test >> SATP_ASID_SHIFT) & 0xFFFF;
+        vm_asid_init(max_asid);
+    }
 }
 
 void arch_vm_init_hart(void)

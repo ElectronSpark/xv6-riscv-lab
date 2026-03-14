@@ -273,6 +273,26 @@ void arch_vm_init(void)
             panic("arch_vm_init: idt page map failed");
     }
 
+    /* Detect and enable PCID (Process Context Identifiers).
+     * CPUID.01H:ECX bit 17 indicates hardware PCID support.
+     * CR4.PCIDE (bit 17) enables the feature. */
+    {
+        uint32 a, b, c, d;
+        asm volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                     : "a"((uint32)1), "c"((uint32)0));
+        if (c & (1U << 17)) {
+            /* Enable CR4.PCIDE — safe because CR3[11:0] is currently 0
+             * (page-aligned kernel PML4). */
+            uint64 cr4;
+            asm volatile("movq %%cr4, %0" : "=r"(cr4));
+            cr4 |= (1ULL << 17);   /* CR4.PCIDE */
+            cr4 |= (1ULL << 7);    /* CR4.PGE — global pages */
+            asm volatile("movq %0, %%cr4" : : "r"(cr4) : "memory");
+            vm_asid_init(4095);     /* 12-bit PCID: 0-4095 */
+        } else {
+            vm_asid_init(0);        /* no PCID support */
+        }
+    }
 }
 
 void arch_vm_init_hart(void)
@@ -287,9 +307,7 @@ int arch_vm_map(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int pe
 
 void arch_tlb_flush(void)
 {
-    uint64 cr3;
-    asm volatile("movq %%cr3, %0" : "=r"(cr3));
-    asm volatile("movq %0, %%cr3" : : "r"(cr3) : "memory");
+    sfence_vma_global();
 }
 
 /* ==========================================================================
@@ -326,6 +344,39 @@ void vm_remote_sfence(vm_t *vm)
         ipi_send_mask(cpumask, 0, IPI_REASON_TLB_FLUSH);
 
     pop_off();
+}
+
+void vm_remote_sfence_page(vm_t *vm, uint64 va)
+{
+    push_off();
+    smp_mb();
+
+    cpumask_t cpumask = smp_load_acquire(&vm->cpumask);
+    cpumask &= ~(1ULL << cpuid());
+
+    if (cpumask) {
+        extern volatile uint64 tlb_flush_va[];
+        for (int i = 0; i < NCPU; i++) {
+            if (!(cpumask & (1ULL << i)))
+                continue;
+            uint64 expected = 0;
+            if (!__atomic_compare_exchange_n(&tlb_flush_va[i], &expected,
+                    va, 0, __ATOMIC_ACQ_REL, __ATOMIC_RELAXED))
+                __atomic_store_n(&tlb_flush_va[i], (uint64)-1,
+                                 __ATOMIC_RELEASE);
+        }
+        ipi_send_mask(cpumask, 0, IPI_REASON_TLB_FLUSH_PAGE);
+    }
+
+    pop_off();
+}
+
+void vm_remote_sfence_range(vm_t *vm, uint64 start, uint64 size)
+{
+    /* x86 lacks INVPCID — cannot efficiently flush a VA range for a
+     * specific PCID on remote CPUs.  Fall back to full TLB flush.
+     * The RISC-V implementation uses SBI range-targeted flushes. */
+    vm_remote_sfence(vm);
 }
 
 void vm_remote_fence_i(vm_t *vm)

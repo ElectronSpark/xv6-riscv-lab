@@ -23,9 +23,11 @@ trampoline:
 .globl userret
 userret:
     /* Preserve user CR3 across frame setup. rdi keeps trapframe VA. */
-    movq %rsi, %r13               /* r13 = user CR3 */
+    movq %rsi, %r13               /* r13 = user CR3 (with PCID + noflush bit) */
 
-    /* Switch to user page table while still executing in trampoline page. */
+    /* Switch to user page table while still executing in trampoline page.
+     * With PCID enabled, the noflush bit (63) in %r13 preserves TLB
+     * entries from other PCIDs — no full TLB flush on context switch. */
     movq %r13, %cr3
 
     /*

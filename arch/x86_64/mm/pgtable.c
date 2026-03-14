@@ -230,7 +230,7 @@ int vm_zap_pte(vm_t *vm, vma_t *vma, uint64 target_pa) {
             zapped++;
         }
         vm_pgtable_unlock(vm);
-        vm_remote_sfence(vm);
+        vm_remote_sfence_page(vm, va);
     }
 
     return zapped;

@@ -28,6 +28,9 @@ struct cpu_local {
     uint64 busy_ticks;          // ticks spent running non-idle threads
     uint64 total_ticks;         // total timer ticks on this CPU
     uint64 util_1s;             // CPU utilization over last 1s (FSHIFT=11 fp, FIXED_1=100%)
+    uint16 asid_gen;          // last-seen ASID generation on this CPU
+    uint16 __pad1;
+    uint32 __pad2;
 } __ALIGNED_CACHELINE;
 
 #endif /* __KERNEL_PERCPU_TYPES_H */

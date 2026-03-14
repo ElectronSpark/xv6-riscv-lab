@@ -196,7 +196,12 @@ static inline void w_pmpaddr0(uint64 x) {
 // use riscv's sv39 page table scheme.
 #define SATP_SV39 (8L << 60)
 
+#define SATP_ASID_SHIFT 44
+#define SATP_ASID_MASK  (0xFFFFUL << SATP_ASID_SHIFT)
+
 #define MAKE_SATP(pagetable) (SATP_SV39 | (((uint64)pagetable) >> 12))
+#define MAKE_SATP_ASID(pagetable, asid) \
+    (SATP_SV39 | ((uint64)(asid) << SATP_ASID_SHIFT) | (((uint64)(pagetable)) >> 12))
 
 // supervisor address translation and protection;
 // holds the address of the page table.
@@ -316,6 +321,16 @@ static inline void sfence_vma() {
 // flush a single page from the TLB.
 static inline void sfence_vma_page(uint64 va) {
     asm volatile("sfence.vma %0, zero" : : "r"(va) : "memory");
+}
+
+// flush all TLB entries for a specific ASID (preserves global entries).
+static inline void sfence_vma_asid(uint64 asid) {
+    asm volatile("sfence.vma zero, %0" : : "r"(asid) : "memory");
+}
+
+// flush a single page for a specific ASID.
+static inline void sfence_vma_page_asid(uint64 va, uint64 asid) {
+    asm volatile("sfence.vma %0, %1" : : "r"(va), "r"(asid) : "memory");
 }
 
 #endif /* !defined(ON_HOST_OS) */

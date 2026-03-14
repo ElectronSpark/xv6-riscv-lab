@@ -170,6 +170,9 @@ pde_t *pgtab_alloc(void);
 void pgtab_free(void *);
 void vm_slab_init(void);
 void kernel_vm_init(void);
+void vm_asid_init(uint16 max_asid);
+uint16 vm_asid_max(void);
+uint16 vm_asid_gen(void);
 
 // plic.c
 void arch_irq_init(void);

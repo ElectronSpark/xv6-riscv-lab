@@ -89,6 +89,55 @@ void vm_slab_init(void) {
 }
 
 /* ========================================================================== */
+/*  ASID / PCID allocator                                                     */
+/* ========================================================================== */
+
+#define ASID_KERNEL 0
+#define ASID_FIRST  1
+
+static uint16      asid_max;          /* 0 = feature not available */
+static spinlock_t   asid_lock;
+static uint16      asid_next = ASID_FIRST;
+static uint16      asid_gen;
+
+void vm_asid_init(uint16 max_asid)
+{
+    asid_max  = max_asid;
+    asid_next = ASID_FIRST;
+    asid_gen  = 0;
+    spin_init(&asid_lock, "asid");
+    printf("vm_asid_init: max ASID = %d\n", max_asid);
+}
+
+uint16 vm_asid_max(void) { return asid_max; }
+uint16 vm_asid_gen(void) { return asid_gen; }
+
+static uint16 vm_alloc_asid(uint16 *gen_out)
+{
+    if (asid_max == 0) {
+        *gen_out = 0;
+        return 0;   /* feature not available — fall back to ASID 0 */
+    }
+
+    int irq = spin_lock_irqsave(&asid_lock);
+    uint16 asid = asid_next++;
+    uint16 gen  = asid_gen;
+
+    if (asid > asid_max) {
+        /* ASID space exhausted — start a new generation.
+         * Per-CPU code will do a full TLB flush when it notices the
+         * generation mismatch. */
+        gen = ++asid_gen;
+        asid_next = ASID_FIRST + 1;
+        asid = ASID_FIRST;
+    }
+    spin_unlock_irqrestore(&asid_lock, irq);
+
+    *gen_out = gen;
+    return asid;
+}
+
+/* ========================================================================== */
 /*  Debugging helpers                                                         */
 /* ========================================================================== */
 
@@ -264,7 +313,7 @@ static void __vma_set_free(vma_t *vma)
             }
         }
         if (tlb_needs_flush)
-            vm_remote_sfence(vma->vm);
+            vm_remote_sfence_range(vma->vm, vma->start, VMA_SIZE(vma));
     }
 
     if (vma->file != NULL)
@@ -357,7 +406,7 @@ static int __vma_copy(vma_t *dst, vma_t *src)
             }
         }
         if (src_tlb_flush_needed)
-            vm_remote_sfence(src->vm);
+            vm_remote_sfence_range(src->vm, src->start, VMA_SIZE(src));
     }
 
     /* Set up anon_vma chain for the child VMA. */
@@ -468,6 +517,11 @@ vm_t *vm_init(void)
     vm->vm_bottom = UVMBOTTOM;
     vm->vm_top = UVMTOP;
     vm->is_kernel = 0;
+
+    uint16 gen;
+    vm->asid = vm_alloc_asid(&gen);
+    vm->asid_gen = gen;
+
     return vm;
 }
 
@@ -939,7 +993,8 @@ static void *__vma_map_anon_folio(vma_t *vma, uint64 fault_va,
     for (unsigned long i = 1; i < nr_pages; i++)
         folio_get(folio);
 
-    sfence_vma();
+    for (unsigned long i = 0; i < nr_pages; i++)
+        sfence_vma_page(folio_base_va + i * PGSIZE);
     return fault_page_pa;
 }
 
@@ -1183,10 +1238,11 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
                     if (p == NULL || *p == 0 || !pte_present(p))
                         continue;
                     uint64 mapped_pa = pte_pa(p);
-                    if (mapped_pa >= folio_pa && mapped_pa < folio_pa_end)
+                    if (mapped_pa >= folio_pa && mapped_pa < folio_pa_end) {
                         *p = mk_pte(mapped_pa, vma->flags);
+                        sfence_vma_page(va);
+                    }
                 }
-                sfence_vma();
                 return 0;
             }
             pa = addr;
@@ -2056,7 +2112,7 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
 
     uint64 prot_bits = PROT_READ | PROT_WRITE | PROT_EXEC;
     if ((old_flags & prot_bits) & ~(new_flags & prot_bits))
-        vm_remote_sfence(vm);
+        vm_remote_sfence_range(vm, addr, size);
 
     ret = 0;
 out:
@@ -2114,7 +2170,7 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
             goto out;
         if (vma_free(vm, tail) != 0)
             goto out;
-        vm_remote_sfence(vm);
+        vm_remote_sfence_range(vm, shrink_start, old_size - new_size);
         ret = old_addr;
         goto out;
     }
@@ -2206,7 +2262,7 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
         vm->stack = new_vma;
 
     vma_free(vm, vma);
-    vm_remote_sfence(vm);
+    vm_remote_sfence_range(vm, old_addr, old_size);
 
     if (new_vma->flags & PROT_EXEC)
         vm_remote_fence_i(vm);
@@ -2425,7 +2481,7 @@ int vm_madvise(vm_t *vm, uint64 addr, size_t size, int advice)
             }
         }
         vm_pgtable_unlock(vm);
-        vm_remote_sfence(vm);
+        vm_remote_sfence_range(vm, addr, size);
         ret = 0;
         break;
     }
@@ -2784,6 +2840,8 @@ void kernel_vm_init(void)
     vm->vm_bottom = KVMBASE;
     vm->vm_top = KVMTOP;
     vm->is_kernel = 1;
+    vm->asid = ASID_KERNEL;
+    vm->asid_gen = 0;
 
     kernel_vm = vm;
     printf("kernel_vm_init: kernel VM at %p [%lx, %lx)\n",
@@ -2939,8 +2997,9 @@ int kvm_munmap(uint64 addr, size_t size)
     vm_wunlock(vm);
 
     /* Flush TLB on local CPU and send IPI to remote CPUs in cpumask. */
-    arch_tlb_flush();
-    vm_remote_sfence(kernel_vm);
+    for (uint64 a = addr; a < addr + size; a += PGSIZE)
+        sfence_vma_page(a);
+    vm_remote_sfence_range(kernel_vm, addr, size);
     return 0;
 }
 

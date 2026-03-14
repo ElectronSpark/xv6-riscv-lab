@@ -35,7 +35,8 @@
 #define IPI_REASON_RESCHEDULE 2 /**< Request scheduler to run */
 #define IPI_REASON_TLB_FLUSH 3  /**< Flush TLB entries */
 #define IPI_REASON_GENERIC 4    /**< Generic IPI (no specific action) */
-#define NR_IPI_REASON 5         /**< Number of IPI reason codes */
+#define IPI_REASON_TLB_FLUSH_PAGE 5 /**< Flush single TLB page (per-CPU VA mailbox) */
+#define NR_IPI_REASON 6         /**< Number of IPI reason codes */
 /** @} */
 
 BUILD_BUG_ON(NR_IPI_REASON > 8); /**< Limit to 8 reasons for bitmasking */

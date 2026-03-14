@@ -24,6 +24,15 @@ uint64 __x86_tp = 0;
 /** @brief Per-CPU pending IPI bitmask (indexed by CPU id). */
 static volatile uint64 ipi_pending[NCPU];
 
+/**
+ * Per-CPU TLB flush mailbox for IPI_REASON_TLB_FLUSH_PAGE.
+ * 0            → no pending page flush
+ * (uint64)-1   → contention detected, do full flush
+ * other        → virtual address of page to invlpg
+ */
+#define TLB_FLUSH_ALL  ((uint64)-1)
+volatile uint64 tlb_flush_va[NCPU];
+
 /* ── Internal: wait for LAPIC ICR idle ── */
 static inline void lapic_icr_wait(void) {
     while (lapic_read(LAPIC_ICR_LO) & LAPIC_ICR_STATUS)
@@ -97,16 +106,35 @@ void x86_ipi_handler(void) {
 
         case IPI_REASON_TLB_FLUSH:
             /*
-             * Full TLB flush by reloading CR3.
-             * Now that alltraps / syscall_entry no longer switch CR3,
-             * kernel page-table changes (e.g. new mappings in PML4[256-511])
-             * must be propagated proactively via IPI.
+             * Full TLB flush including global entries.
+             * With PCID enabled, a simple CR3 reload only flushes the
+             * current PCID's non-global entries.  Toggle CR4.PGE to
+             * flush everything (all PCIDs + global entries).
              */
             asm volatile(
-                "movq %%cr3, %%rax\n\t"
-                "movq %%rax, %%cr3"
+                "movq %%cr4, %%rax\n\t"
+                "btrq $7, %%rax\n\t"     /* clear PGE */
+                "movq %%rax, %%cr4\n\t"
+                "btsq $7, %%rax\n\t"     /* set PGE   */
+                "movq %%rax, %%cr4"
                 ::: "rax", "memory");
             break;
+
+        case IPI_REASON_TLB_FLUSH_PAGE: {
+            /*
+             * Targeted single-page TLB flush.  Read the VA from the
+             * per-CPU mailbox (written by the sender before the IPI).
+             * If contention was detected (TLB_FLUSH_ALL), fall back to
+             * a full global flush.
+             */
+            uint64 va = __atomic_exchange_n(&tlb_flush_va[cpu], 0,
+                                            __ATOMIC_ACQ_REL);
+            if (va == 0 || va == TLB_FLUSH_ALL)
+                sfence_vma_global();
+            else
+                sfence_vma_page(va);
+            break;
+        }
 
         case IPI_REASON_CALL_FUNC:
         case IPI_REASON_GENERIC:

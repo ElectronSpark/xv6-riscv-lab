@@ -17,6 +17,8 @@ uint64 vm_cpu_online(vm_t *vm, int cpu, struct thread *p);
 void vm_cpu_offline(vm_t *vm, int cpu);
 cpumask_t vm_get_cpumask(vm_t *vm);
 void vm_remote_sfence(vm_t *vm);
+void vm_remote_sfence_page(vm_t *vm, uint64 va);
+void vm_remote_sfence_range(vm_t *vm, uint64 start, uint64 size);
 void vm_remote_fence_i(vm_t *vm);
 void vm_rlock(vm_t *vm);
 void vm_runlock(vm_t *vm);

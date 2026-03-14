@@ -101,6 +101,11 @@ static void __ipi_irq_handler(int irq, void *data, device_t *dev) {
             // flush TLB to pick up page table changes.
             sfence_vma();
             break;
+        case IPI_REASON_TLB_FLUSH_PAGE:
+            // Targeted page flush — RISC-V normally uses SBI for this,
+            // but handle in case someone sends this IPI reason directly.
+            sfence_vma();
+            break;
         case IPI_REASON_GENERIC:
             // Generic IPI - no specific action
             break;

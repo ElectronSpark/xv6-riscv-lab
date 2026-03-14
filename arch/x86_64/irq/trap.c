@@ -192,7 +192,26 @@ void usertrapret(void) {
         exit(-1);
     }
 
-    trampoline_userret(trapframe_base, (uint64)p->vm->pagetable);
+    /* Per-CPU ASID/PCID generation check: if the global generation has
+     * advanced past what this CPU last saw, flush the entire TLB so stale
+     * entries from a recycled PCID cannot be served. */
+    uint16 cur_gen = vm_asid_gen();
+    if (my_cpu->asid_gen != cur_gen) {
+        sfence_vma_global();
+        my_cpu->asid_gen = cur_gen;
+    }
+
+    /* Build CR3 value: with PCID support, include the VM's PCID and the
+     * noflush bit (63) to preserve TLB entries from other PCIDs. */
+    uint64 user_cr3;
+    if (vm_asid_max() > 0) {
+        user_cr3 = MAKE_SATP_PCID((uint64)p->vm->pagetable,
+                                   p->vm->asid, 1);
+    } else {
+        user_cr3 = (uint64)p->vm->pagetable;
+    }
+
+    trampoline_userret(trapframe_base, user_cr3);
 
     __builtin_unreachable();
 }
