@@ -1015,8 +1015,18 @@ static void ext4fs_destroy_inode(struct vfs_inode *inode)
     if (inode == NULL)
         return;
 
-    if (inode->i_data.active)
+    if (inode->i_data.active) {
+        /* The inode is being permanently deleted (nlink==0).  Suppress
+         * the dirty-page flush inside pcache_teardown: writing data to
+         * blocks that will be freed immediately by truncate_inode is
+         * wasteful and can trigger ext4 bcache reference-count
+         * assertions when the write-back path and the truncation path
+         * touch the same bcache buffers.  Setting active=0 before
+         * teardown makes pcache_flush() return early while still
+         * properly releasing all cached pages. */
+        inode->i_data.active = 0;
         pcache_teardown(&inode->i_data);
+    }
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
     struct ext4_fs *fs = &esb->ext4fs;

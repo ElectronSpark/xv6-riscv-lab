@@ -170,7 +170,7 @@ void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
         uint64 pa = PTE2PA(*pte);
         *pte = 0;
         if (do_free) {
-            pgtab_free((void *)PA2VA(pa));
+            pgtab_free((void *)pa);
         }
     }
 }

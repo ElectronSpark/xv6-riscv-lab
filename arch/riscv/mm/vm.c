@@ -427,7 +427,7 @@ static void __freewalk(pagetable_t pagetable, int level)
             panic("freewalk: leaf");
         }
     }
-    pgtab_free((void *)pagetable);
+    pgtab_free((void *)VA2PA((uint64)pagetable));
 }
 
 void freewalk(pagetable_t pagetable)

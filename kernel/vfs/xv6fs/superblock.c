@@ -306,6 +306,60 @@ await_submitted:
     return ret;
 }
 
+/******************************************************************************
+ * Batch I/O helper: submit folio reads without awaiting
+ *
+ * Resolves bmap for all blocks in the folio, creates merged bios for
+ * contiguous disk runs, and submits them.  Bios are returned to the
+ * caller (in bios[]) so they can be batch-awaited later.  This enables
+ * multiple folios' I/O to be in-flight simultaneously.
+ ******************************************************************************/
+
+int xv6fs_submit_folio_reads(struct xv6fs_inode *ip,
+                             struct xv6fs_superblock *xv6_sb,
+                             folio_t *folio, struct bio **bios, int max_bios,
+                             int *n_submitted) {
+    page_t *page = &folio->page;
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+    int folio_nblk = pcnode->size / BSIZE;
+    uint base_bn = pcnode->blkno / BLK512_PER_BSIZE;
+    int ret = 0;
+
+    /* Resolve all block addresses */
+    uint addrs[FOLIO_MAX_ORDER_NR_PAGES * BSIZE_PER_PAGE];
+    for (int i = 0; i < folio_nblk; i++)
+        addrs[i] = xv6fs_bmap_read(ip, base_bn + i);
+
+    /* Merge contiguous runs into bios and submit without awaiting */
+    for (int i = 0; i < folio_nblk; ) {
+        if (addrs[i] == 0) {
+            memset((char *)pcnode->data + i * BSIZE, 0, BSIZE);
+            i++;
+            continue;
+        }
+        int run = 1;
+        while (i + run < folio_nblk && addrs[i + run] == addrs[i] + run)
+            run++;
+
+        if (*n_submitted >= max_bios) { ret = -ENOMEM; break; }
+
+        struct bio *bio = bio_alloc(xv6_sb->blkdev, 1, false, NULL, NULL);
+        if (IS_ERR_OR_NULL(bio)) { ret = -ENOMEM; break; }
+
+        bio->blkno = (uint64)addrs[i] * BLK512_PER_BSIZE;
+        bio->batch = 1; /* caller will kick the device after all bios */
+        int r = bio_add_folio(bio, folio, run * BSIZE, i * BSIZE);
+        if (r != 0) { bio_release(bio); ret = r; break; }
+
+        r = blkdev_submit_bio(xv6_sb->blkdev, bio);
+        if (r != 0) { bio_release(bio); ret = r; break; }
+
+        bios[(*n_submitted)++] = bio;
+        i += run;
+    }
+    return ret;
+}
+
 static struct pcache_ops xv6fs_pcache_ops = {
     .read_page = xv6fs_pcache_read_page,
     .write_page = xv6fs_pcache_write_page,
@@ -469,17 +523,21 @@ struct vfs_inode *xv6fs_get_inode(struct vfs_superblock *sb, uint64 ino) {
     uint dev = xv6fs_sb_dev(xv6_sb);
 
     if (ino >= disk_sb->ninodes) {
+        printf("xv6fs_get_inode: ino=%lu >= ninodes=%u\n", ino, disk_sb->ninodes);
         return ERR_PTR(-ENOENT);
     }
 
     // Read inode from disk
-    buffer_head_t *bh = sb_bread(xv6_sb, XV6FS_IBLOCK(ino, disk_sb));
+    uint iblock = XV6FS_IBLOCK(ino, disk_sb);
+    buffer_head_t *bh = sb_bread(xv6_sb, iblock);
     if (bh == NULL) {
+        printf("xv6fs_get_inode: sb_bread failed for iblock=%u (ino=%lu)\n", iblock, ino);
         return ERR_PTR(-EIO);
     }
 
     struct dinode *dip = (struct dinode *)bh->b_data + ino % IPB;
     if (dip->type == 0) {
+        printf("xv6fs_get_inode: ino=%lu type=0 (iblock=%u, offset=%lu)\n", ino, iblock, ino % IPB);
         bh_release(bh);
         return ERR_PTR(-ENOENT);
     }
@@ -607,6 +665,12 @@ int xv6fs_mount(struct vfs_inode *mountpoint, struct vfs_inode *device,
         slab_free(xv6_sb);
         return ret;
     }
+
+    printf("xv6fs_mount: sb magic=%x size=%u nblocks=%u ninodes=%u nlog=%u logstart=%u inodestart=%u bmapstart=%u\n",
+           xv6_sb->disk_sb.magic, xv6_sb->disk_sb.size,
+           xv6_sb->disk_sb.nblocks, xv6_sb->disk_sb.ninodes,
+           xv6_sb->disk_sb.nlog, xv6_sb->disk_sb.logstart,
+           xv6_sb->disk_sb.inodestart, xv6_sb->disk_sb.bmapstart);
 
     xv6_sb->dirty = 0;
 

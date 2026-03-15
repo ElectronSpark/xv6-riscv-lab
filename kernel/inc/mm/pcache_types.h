@@ -30,6 +30,13 @@ struct pcache_ops {
     /* Folio-aware callbacks (preferred when non-NULL) */
     int (*read_folio)(struct pcache *pcache, folio_t *folio);
     int (*write_folio)(struct pcache *pcache, folio_t *folio);
+
+    /*
+     * Non-blocking folio write: submit I/O without awaiting.
+     * Returns the submitted bio (caller batch-awaits later) or NULL on error.
+     * When non-NULL, the flush worker uses this for batched writes.
+     */
+    struct bio *(*submit_write_folio)(struct pcache *pcache, folio_t *folio);
 };
 
 #define PCACHE_DEFAULT_DIRTY_RATE 8 // in percentage

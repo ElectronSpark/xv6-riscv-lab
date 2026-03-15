@@ -163,8 +163,9 @@ static void test_mmap_write_big(void)
 
 	char page[PGSIZE];
 	for (int p = 0; p < NPAGES; p++) {
-		if (read(fd, page, PGSIZE) != PGSIZE) {
-			printf("FAIL - read page %d\n", p);
+		int rn = read(fd, page, PGSIZE);
+		if (rn != PGSIZE) {
+			printf("FAIL - read page %d (got %d)\n", p, rn);
 			close(fd);
 			exit(1);
 		}
@@ -324,8 +325,9 @@ static void test_mprotect_big(void)
 
 	char page[PGSIZE];
 	for (int p = 0; p < NPAGES; p++) {
-		if (read(fd, page, PGSIZE) != PGSIZE) {
-			printf("FAIL - read page %d\n", p);
+		int rn = read(fd, page, PGSIZE);
+		if (rn != PGSIZE) {
+			printf("FAIL - read page %d (got %d)\n", p, rn);
 			close(fd);
 			exit(1);
 		}

@@ -40,6 +40,7 @@
 #include <ext4_super.h>
 #include <ext4_blockdev.h>
 #include <ext4_bcache.h>
+#include <ext4_balloc.h>
 
 #include "timer/goldfish_rtc.h"
 #include "kstats.h"
@@ -387,14 +388,12 @@ static int ext4fs_pcache_write_page(struct pcache *pcache, page_t *page)
     struct ext4_fs *fs = &esb->ext4fs;
     uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
 
-    vfs_ilock(inode);
     ext4fs_lock(esb);
 
     struct ext4_inode_ref ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
     if (r != EOK) {
         ext4fs_unlock(esb);
-        vfs_iunlock(inode);
         return -r;
     }
 
@@ -447,7 +446,6 @@ static int ext4fs_pcache_write_page(struct pcache *pcache, page_t *page)
     ext4_fs_put_inode_ref(&ref);
     ext4_block_cache_write_back(&esb->bdev, 0);
     ext4fs_unlock(esb);
-    vfs_iunlock(inode);
     return err;
 }
 
@@ -480,29 +478,157 @@ static int ext4fs_pcache_read_folio(struct pcache *pcache, folio_t *folio) {
     return 0;
 }
 
+/*
+ * Locking rationale for pcache write_page / write_folio / fault / read
+ * (legacy paths):
+ *
+ * These callbacks can run concurrently with read() on the same inode.
+ * Previously, write_folio and the legacy fault/read paths held
+ * vfs_ilock(inode) across the entire block I/O loop.  With 256 folios
+ * flushing at ~10 ms each, every concurrent read() — which also needs
+ * vfs_ilock briefly to snapshot f_pos and inode->size — was blocked for
+ * the full flush duration, dropping ext4 read throughput from ~200+ MB/s
+ * to ~6 MB/s.
+ *
+ * Fix: hold vfs_ilock only long enough to snapshot the metadata we need
+ * (inode->size, file->f_pos).  All ext4 block I/O is serialised by
+ * ext4fs_lock(esb), which does not conflict with the brief vfs_ilock in
+ * the read path.  This is safe because:
+ *   - inode->ino is immutable after creation
+ *   - inode->size is captured once under brief vfs_ilock
+ *   - ext4 on-disk metadata ops are serialised by ext4fs_lock(esb)
+ *   - the on-disk inode (ext4_inode_ref) is a separate structure from
+ *     the VFS inode and is protected by ext4fs_lock, not vfs_ilock
+ */
 static int ext4fs_pcache_write_folio(struct pcache *pcache, folio_t *folio) {
     page_t *head = &folio->page;
     struct pcache_node *pcn = head->pcache.pcache_node;
     unsigned long nr = pcn->page_count;
-    for (unsigned long i = 0; i < nr; i++) {
-        uint64 saved_blkno = pcn->blkno;
-        void  *saved_data  = pcn->data;
-        size_t saved_size  = pcn->size;
 
-        pcn->blkno = saved_blkno + i * (PGSIZE / 512);
-        pcn->data  = (char *)saved_data + i * PGSIZE;
-        pcn->size  = PGSIZE;
+    struct vfs_inode *inode = (struct vfs_inode *)pcache->private_data;
+    if (inode == NULL || inode->sb == NULL)
+        return -EINVAL;
 
-        int ret = ext4fs_pcache_write_page(pcache, head);
+    uint64 base_file_off = (uint64)pcn->blkno * 512ULL;
 
-        pcn->blkno = saved_blkno;
-        pcn->data  = saved_data;
-        pcn->size  = saved_size;
+    vfs_ilock(inode);
+    uint64 inode_size = (uint64)inode->size;
+    vfs_iunlock(inode);
 
-        if (ret != 0)
-            return ret;
+    if (base_file_off >= inode_size)
+        return 0;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+    uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+
+    ext4fs_lock(esb);
+
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        return -r;
     }
-    return 0;
+
+    /* Enable write-back for the entire folio to batch block cache flushes */
+    ext4_block_cache_write_back(&esb->bdev, 1);
+
+    /* For each block, look up the physical block via init_inode_dblk_idx.
+     * If the block is unmapped (fblock=0), allocate at that specific
+     * position using ext4_balloc_alloc_block + set_inode_data_block_index. */
+
+    ext4_lblk_t max_written_iblock = 0;
+    bool any_written = false;
+
+    int err = 0;
+    for (unsigned long pg = 0; pg < nr && err == 0; pg++) {
+        uint64 file_off = base_file_off + pg * PGSIZE;
+        if (file_off >= inode_size)
+            break;
+
+        size_t len = PGSIZE;
+        if (file_off + PGSIZE > inode_size)
+            len = (size_t)(inode_size - file_off);
+
+        const char *src = (const char *)pcn->data + pg * PGSIZE;
+        size_t done = 0;
+        while (done < len) {
+            ext4_lblk_t iblock =
+                (ext4_lblk_t)((file_off + done) / block_size);
+            uint off = (uint)((file_off + done) % block_size);
+            uint n = block_size - off;
+            if (n > len - done)
+                n = (uint)(len - done);
+
+            ext4_fsblk_t fblock;
+            r = ext4_fs_init_inode_dblk_idx(&ref, iblock, &fblock);
+            if (r != EOK) {
+                err = -r;
+                break;
+            }
+
+            /* Block not mapped — allocate at this specific position.
+             * For indirect-block inodes, init_inode_dblk_idx is
+             * lookup-only and returns fblock=0 for unmapped blocks.
+             * Allocate a physical block and set the mapping directly
+             * so that we handle any folio flush order correctly. */
+            if (fblock == 0) {
+                ext4_fsblk_t goal;
+                r = ext4_fs_indirect_find_goal(&ref, &goal);
+                if (r != EOK) { err = -r; break; }
+                ext4_fsblk_t phys;
+                r = ext4_balloc_alloc_block(&ref, goal, &phys);
+                if (r != EOK) { err = -r; break; }
+                r = ext4_fs_set_inode_data_block_index(&ref, iblock,
+                                                       phys);
+                if (r != EOK) {
+                    ext4_balloc_free_block(&ref, phys);
+                    err = -r;
+                    break;
+                }
+                ref.dirty = true;
+                fblock = phys;
+            }
+
+            struct ext4_block blk;
+            if (off == 0 && n == block_size)
+                r = ext4_block_get_noread(&esb->bdev, &blk, fblock);
+            else
+                r = ext4_block_get(&esb->bdev, &blk, fblock);
+            if (r != EOK) {
+                err = -EIO;
+                break;
+            }
+
+            memcpy((char *)blk.data + off, src + done, n);
+            ext4_bcache_set_dirty(blk.buf);
+            ext4_block_set(&esb->bdev, &blk);
+            done += n;
+
+            if (iblock >= max_written_iblock) {
+                max_written_iblock = iblock;
+                any_written = true;
+            }
+        }
+    }
+
+    /* Update on-disk inode size to match VFS inode size.
+     * ext4_fs_append_inode_dblk inflates on-disk size by one block per
+     * append, so we may need to trim it back to the exact VFS size. */
+    if (any_written) {
+        uint64_t cur_size = ext4_inode_get_size(&fs->sb, ref.inode);
+        if (cur_size != inode_size) {
+            ext4_inode_set_size(ref.inode, inode_size);
+            ref.dirty = true;
+        }
+    }
+
+    ext4_fs_put_inode_ref(&ref);
+    /* Single flush for the entire folio instead of per-page */
+    ext4_block_cache_write_back(&esb->bdev, 0);
+    ext4fs_unlock(esb);
+    return err;
 }
 
 static struct pcache_ops ext4fs_pcache_ops = {
@@ -562,24 +688,23 @@ ssize_t ext4fs_file_read(struct vfs_file *file, char *buf, size_t count,
     struct ext4_fs *fs = &esb->ext4fs;
     uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
 
-    /* Lock inode to read size safely and prevent truncation during read */
+    /* Snapshot f_pos and size — see locking rationale above write_folio */
     vfs_ilock(inode);
-    ext4fs_lock(esb);
-
     loff_t pos = file->f_pos;
-    if (pos >= inode->size) {
-        ext4fs_unlock(esb);
-        vfs_iunlock(inode);
+    loff_t isize = inode->size;
+    vfs_iunlock(inode);
+
+    if (pos >= isize)
         return 0; /* EOF */
-    }
-    if ((uint64_t)(pos + count) > (uint64_t)inode->size)
-        count = (size_t)(inode->size - pos);
+    if ((uint64_t)(pos + count) > (uint64_t)isize)
+        count = (size_t)(isize - pos);
+
+    ext4fs_lock(esb);
 
     struct ext4_inode_ref ref;
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
     if (r != EOK) {
         ext4fs_unlock(esb);
-        vfs_iunlock(inode);
         return -r;
     }
 
@@ -655,7 +780,6 @@ out:
     if ((ssize_t)bytes_read > 0)
         inode->atime = goldfish_rtc_read_sec();
 
-    vfs_iunlock(inode);
     return (ssize_t)bytes_read;
 }
 
@@ -670,10 +794,99 @@ ssize_t ext4fs_file_write(struct vfs_file *file, const char *buf, size_t count,
     if (!S_ISREG(inode->mode))
         return -EINVAL;
 
-    ext4fs_inode_map_cache_invalidate(inode);
+    /* Initialize pcache if needed — writes go through pcache now */
+    if (!inode->i_data.active)
+        ext4fs_inode_pcache_init(inode);
 
-    if (inode->i_data.active)
-        pcache_teardown(&inode->i_data);
+    struct pcache *pc = &inode->i_data;
+    if (!pc->active) {
+        /* Fallback: pcache init failed, use legacy direct write */
+        goto legacy_write;
+    }
+
+    {
+        /* pcache-based write: data goes into pcache folios, dirty pages
+         * are flushed asynchronously by pcache_write_folio callback. */
+        vfs_ilock(inode);
+        loff_t pos = file->f_pos;
+        loff_t end_pos = pos + count;
+
+        /* Grow blk_count if the write extends beyond current pcache range */
+        uint64 needed_blk_count = ext4fs_pcache_blk_count(end_pos);
+        if (needed_blk_count > pc->blk_count)
+            pc->blk_count = needed_blk_count;
+
+        vfs_iunlock(inode);
+
+        size_t bytes_written = 0;
+        while (bytes_written < count) {
+            uint64 blkno_512 = (pos / PGSIZE) * EXT4FS_BLKS_PER_PAGE;
+            page_t *page = pcache_get_page(pc, blkno_512);
+            if (page == NULL) {
+                if (bytes_written == 0)
+                    return -ENOMEM;
+                break;
+            }
+
+            struct pcache_node *pcn = page->pcache.pcache_node;
+            uint64 folio_start = (uint64)pcn->blkno * 512;
+            uint64 folio_off = (uint64)pos - folio_start;
+            size_t chunk = pcn->size - (size_t)folio_off;
+            if (chunk > count - bytes_written)
+                chunk = count - bytes_written;
+
+            /* Skip the read if overwriting the entire folio */
+            int ret;
+            bool full_folio = (folio_off == 0 && chunk >= pcn->size);
+            if (full_folio)
+                ret = pcache_prepare_write_page(pc, page);
+            else
+                ret = pcache_read_page(pc, page);
+            if (ret != 0) {
+                pcache_put_page(pc, page);
+                if (bytes_written == 0)
+                    return ret;
+                break;
+            }
+
+            char *data = (char *)pcn->data + folio_off;
+            if (user) {
+                if (vm_copyin(current->vm, data,
+                              (uint64)(buf + bytes_written), chunk) < 0) {
+                    pcache_put_page(pc, page);
+                    if (bytes_written == 0)
+                        return -EFAULT;
+                    break;
+                }
+            } else {
+                memmove(data, buf + bytes_written, chunk);
+            }
+
+            pcache_mark_page_dirty(pc, page);
+            pcache_put_page(pc, page);
+
+            bytes_written += chunk;
+            pos += chunk;
+        }
+
+        /* Update file size if extended, and mark inode dirty so
+         * vfs_iput syncs metadata (size, timestamps) to disk. */
+        if (bytes_written > 0) {
+            vfs_ilock(inode);
+            if (pos > inode->size)
+                inode->size = pos;
+            uint64 now = goldfish_rtc_read_sec();
+            inode->mtime = now;
+            inode->ctime = now;
+            inode->dirty = 1;
+            vfs_iunlock(inode);
+        }
+
+        return (ssize_t)bytes_written;
+    }
+
+legacy_write:
+    ext4fs_inode_map_cache_invalidate(inode);
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
     struct ext4_fs *fs = &esb->ext4fs;
@@ -847,22 +1060,39 @@ static int ext4fs_file_fsync(struct vfs_file *file, loff_t start, loff_t len)
     if (inode == NULL || inode->sb == NULL)
         return 0;
 
-    /* Flush pcache dirty pages into ext4's block cache first.
-     * Without this, mmap MAP_SHARED writes that are sitting in the
-     * pcache dirty list would never reach the ext4 block cache before
-     * the subsequent ext4_block_cache_flush writes blocks to disk. */
+    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+
+    /* Enable ext4 bcache write-back batching BEFORE pcache_flush.
+     * Each write_folio call does its own write_back(1)/write_back(0)
+     * pair, which would flush the ext4 block cache to disk per-folio.
+     * By holding an outer write_back(1), the counter never reaches 0
+     * during individual write_folio calls, so dirty blocks accumulate
+     * in the ext4 bcache and get flushed ONCE at the end.  This turns
+     * 256 separate disk flush operations into 1. */
     struct pcache *pc = &inode->i_data;
-    if (pc->active)
+    if (pc->active && pc->dirty_count > 0) {
+        ext4fs_lock(esb);
+        ext4_block_cache_write_back(&esb->bdev, 1);
+        ext4fs_unlock(esb);
+
         pcache_flush(pc);
 
-    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+        /* Drop the outer write-back hold.  If counter reaches 0 this
+         * flushes all accumulated dirty blocks to disk in one batch. */
+        ext4fs_lock(esb);
+        ext4_block_cache_write_back(&esb->bdev, 0);
+        ext4fs_unlock(esb);
+    }
+
+    if (inode->dirty)
+        vfs_sync_inode(inode);
+
     ext4fs_lock(esb);
     int r = ext4_block_cache_flush(&esb->bdev) == EOK ? 0 : -EIO;
     ext4fs_unlock(esb);
     if (r != 0)
         return r;
 
-    /* Issue device-level flush to ensure data reaches stable storage */
     return blkdev_flush(esb->xv6_blkdev);
 }
 
@@ -901,7 +1131,6 @@ static int ext4fs_file_writepage(struct vfs_file *file, loff_t offset,
         if (pc_head != NULL) {
             return pcache_mark_page_dirty(pc, pc_head);
         }
-
         uint64 blkno_512 = offset / 512ULL;
         page_t *pcpage = pcache_get_page(pc, blkno_512);
         if (pcpage == NULL)
@@ -1106,18 +1335,20 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
     if (pa == NULL)
         return NULL;
 
+    /* Snapshot inode size — see locking rationale above write_folio */
     vfs_ilock(inode);
+    uint64 inode_size = (uint64)inode->size;
+    vfs_iunlock(inode);
 
     /* Entirely beyond EOF — return a zero page */
-    if (file_off >= (uint64)inode->size) {
-        vfs_iunlock(inode);
+    if (file_off >= inode_size) {
         memset(pa, 0, PGSIZE);
         return pa;
     }
 
     uint64 bytes_to_read = PGSIZE;
-    if (file_off + PGSIZE > (uint64)inode->size)
-        bytes_to_read = (uint64)inode->size - file_off;
+    if (file_off + PGSIZE > inode_size)
+        bytes_to_read = inode_size - file_off;
 
     ext4fs_lock(esb);
 
@@ -1125,7 +1356,6 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
     int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
     if (r != EOK) {
         ext4fs_unlock(esb);
-        vfs_iunlock(inode);
         page_free(pa, 0);
         return NULL;
     }
@@ -1145,7 +1375,6 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
             /* I/O error — give up */
             ext4_fs_put_inode_ref(&ref);
             ext4fs_unlock(esb);
-            vfs_iunlock(inode);
             page_free(pa, 0);
             return NULL;
         }
@@ -1159,7 +1388,6 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
             if (r != EOK) {
                 ext4_fs_put_inode_ref(&ref);
                 ext4fs_unlock(esb);
-                vfs_iunlock(inode);
                 page_free(pa, 0);
                 return NULL;
             }
@@ -1172,7 +1400,6 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
 
     ext4_fs_put_inode_ref(&ref);
     ext4fs_unlock(esb);
-    vfs_iunlock(inode);
 
     /* Zero-fill remainder if partial page */
     if (bytes_to_read < PGSIZE)
@@ -1335,10 +1562,48 @@ static ssize_t ext4fs_file_writev(struct vfs_file *file, struct iov_iter *iter,
     if (!S_ISREG(inode->mode))
         return -EINVAL;
 
-    ext4fs_inode_map_cache_invalidate(inode);
+    /* Initialize pcache if needed */
+    if (!inode->i_data.active)
+        ext4fs_inode_pcache_init(inode);
 
-    if (inode->i_data.active)
-        pcache_teardown(&inode->i_data);
+    struct pcache *pc = &inode->i_data;
+    if (pc->active) {
+        /* pcache-based writev: use pcache_writev for efficient batched writes */
+        vfs_ilock(inode);
+        loff_t pos = file->f_pos;
+
+        /* Estimate final position for blk_count growth */
+        loff_t end_pos = pos + (loff_t)iter->count;
+        uint64 needed_blk_count = ext4fs_pcache_blk_count(end_pos);
+        if (needed_blk_count > pc->blk_count)
+            pc->blk_count = needed_blk_count;
+
+        vfs_iunlock(inode);
+
+        ssize_t ret = pcache_writev(pc, iter, &pos, user);
+
+        if (ret > 0 && pos > inode->size) {
+            vfs_ilock(inode);
+            if (pos > inode->size)
+                inode->size = pos;
+            vfs_iunlock(inode);
+        }
+
+        /* Mark inode dirty so vfs_iput syncs metadata (size) to disk */
+        if (ret > 0) {
+            vfs_ilock(inode);
+            uint64 now = goldfish_rtc_read_sec();
+            inode->mtime = now;
+            inode->ctime = now;
+            inode->dirty = 1;
+            vfs_iunlock(inode);
+        }
+
+        file->f_pos = pos;
+        return ret;
+    }
+
+    ext4fs_inode_map_cache_invalidate(inode);
 
     struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
     struct ext4_fs *fs = &esb->ext4fs;

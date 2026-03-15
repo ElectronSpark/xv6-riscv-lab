@@ -163,6 +163,7 @@ set(USER_PROGRAMS_C_FILES
     ${USER_DIR}/iovectest.c
     ${USER_DIR}/shutdown.c
     ${USER_DIR}/reboot.c
+    ${USER_DIR}/iobench.c
 )
 
 # Lab-specific programs
@@ -2201,7 +2202,7 @@ set(USERLIB_ONLY_PROGS
     dumppcache dumprq find free forktest grind kqueuetest losetup lsblk mkfs_xv6fs mknod mmapbigfile mmaptest mount pingpong
     mv primes ps randtest reboot rm shutdown stressfs symlinktest sync testsig umount kprofile
     usertests vforktest waitgdb wallclock xargs zombie top
-    syscalltest iovectest
+    syscalltest iovectest iobench
 )
 foreach(PROG ${USERLIB_ONLY_PROGS})
     set(SRC "${CMAKE_BINARY_DIR}/user/_${PROG}")

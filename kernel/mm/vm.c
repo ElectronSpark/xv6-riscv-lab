@@ -276,7 +276,6 @@ static void __vma_set_free(vma_t *vma)
         (vma->file != NULL) && (vma->flags & VMA_FLAG_SHARED) &&
         (vma->flags & VMA_FLAG_FILE);
     int tlb_needs_flush = 0;
-
     if (vma->vm->pagetable != NULL) {
         pagetable_t pagetable = vma->vm->pagetable;
         for (uint64 a = vma->start; a < vma->end; a += PGSIZE) {
@@ -1530,11 +1529,38 @@ copyout_ok:
             n = validated_end - dstva;
         if (n > len)
             n = len;
-        memmove((void *)(pa0 + (dstva - va0)), src, n);
 
-        len -= n;
-        src += n;
-        dstva = va0 + PGSIZE;
+        /*
+         * Coalesce: if subsequent pages are physically contiguous,
+         * merge them into a single memmove to avoid per-page overhead.
+         */
+        uint64 contig = n;
+        uint64 prev_pa_end = pa0 + PGSIZE;
+        while (contig < len) {
+            uint64 next_va = PGROUNDDOWN(dstva + contig);
+            if (next_va <= va0 || next_va >= validated_end)
+                break;
+            pte_t *next_pte = walk(vm->pagetable, next_va, 0, NULL, NULL);
+            if (next_pte == NULL || !(*next_pte & PTE_V))
+                break;
+            uint64 next_pa = pte_pa(next_pte);
+            if (next_pa != prev_pa_end)
+                break;
+            uint64 add = PGSIZE;
+            if (contig + add > len)
+                add = len - contig;
+            if (dstva + contig + add > validated_end)
+                add = validated_end - (dstva + contig);
+            if (add == 0)
+                break;
+            contig += add;
+            prev_pa_end = next_pa + PGSIZE;
+        }
+        memmove((void *)(pa0 + (dstva - va0)), src, contig);
+
+        len -= contig;
+        src += contig;
+        dstva += contig;
     }
 out:
     __atomic_fetch_add(&g_vm_copyout_ticks, r_time() - copy_start,
@@ -1606,11 +1632,39 @@ copyin_ok:
             n = validated_end - srcva;
         if (n > len)
             n = len;
-        memmove(dst, (void *)((uint64)PA2VA(pa0) + (srcva - va0)), n);
 
-        len -= n;
-        dst += n;
-        srcva = va0 + PGSIZE;
+        /*
+         * Coalesce: if subsequent pages are physically contiguous,
+         * merge them into a single memmove to avoid per-page overhead.
+         */
+        uint64 contig = n;
+        uint64 prev_pa_end = pa0 + PGSIZE;
+        while (contig < len) {
+            uint64 next_va = PGROUNDDOWN(srcva + contig);
+            if (next_va <= va0)
+                break;
+            if (next_va >= validated_end)
+                break;
+            uint64 next_pa = walkaddr(vm->pagetable, next_va);
+            if (next_pa == 0)
+                break;
+            if (next_pa != prev_pa_end)
+                break;
+            uint64 add = PGSIZE;
+            if (contig + add > len)
+                add = len - contig;
+            if (srcva + contig + add > validated_end)
+                add = validated_end - (srcva + contig);
+            if (add == 0)
+                break;
+            contig += add;
+            prev_pa_end = next_pa + PGSIZE;
+        }
+        memmove(dst, (void *)((uint64)PA2VA(pa0) + (srcva - va0)), contig);
+
+        len -= contig;
+        dst += contig;
+        srcva += contig;
     }
 out:
     __atomic_fetch_add(&g_vm_copyin_ticks, r_time() - copy_start,

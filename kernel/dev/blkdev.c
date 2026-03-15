@@ -114,6 +114,11 @@ int blkdev_submit_bio(blkdev_t *blkdev, struct bio *bio) {
     return blkdev->ops.submit_bio(blkdev, bio);
 }
 
+void blkdev_kick(blkdev_t *blkdev) {
+    if (blkdev != NULL && blkdev->ops.kick != NULL)
+        blkdev->ops.kick(blkdev);
+}
+
 int blkdev_flush(blkdev_t *blkdev) {
     if (blkdev == NULL)
         return -EINVAL;

@@ -20,7 +20,7 @@
 	url = https://github.com/ElectronSpark/v6-lwext4.git
 [submodule "user/dash"]
 	path = user/dash
-	url = https://git.kernel.org/pub/scm/utils/dash/dash.git
+	url = https://github.com/ElectronSpark/v6-dash.git
 [submodule "user/openssl"]
 	path = user/openssl
 	url = https://github.com/openssl/openssl.git
@@ -40,3 +40,9 @@
 [submodule "user/vim"]
 	path = user/vim
 	url = https://github.com/vim/vim.git
+[submodule "user/sqlite"]
+	path = user/sqlite
+	url = https://github.com/ElectronSpark/v6-sqlite.git
+[submodule "user/vim"]
+	path = user/vim
+	url = https://github.com/ElectronSpark/vim.git

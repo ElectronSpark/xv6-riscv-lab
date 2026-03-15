@@ -8,13 +8,13 @@
 #define BLK_SIZE_SHIFT 9 // Number of bits to represent block size (2^9 = 512)
 #define BLK_SIZE (1UL << BLK_SIZE_SHIFT) // Block size in bytes, 512 bytes
 #define BIO_MAX_VECS 128                 // Maximum number of bio_vec in a bio
-#define BIO_MAX_SIZE (1U << 15) // Maximum size of a bio in bytes (32KB)
+#define BIO_MAX_SIZE (1U << 17) // Maximum size of a bio in bytes (128KB)
 
 static inline void bio_iter_start(struct bio *bio, struct bio_iter *it) {
     it->blkno = bio->blkno;
     it->bvec_idx = 0;
     if (bio->vec_length > 0) {
-        it->size = bio->bvecs[0].len;
+        it->size = (uint32)bio->bvecs[0].len;
         it->size_done = 0;
     } else {
         it->size = 0;
@@ -31,7 +31,7 @@ static inline void bio_iter_next_seg(struct bio *bio, struct bio_iter *it) {
         return;
     }
     /* Account for the segment we just finished (current bvec). */
-    uint16 cur_len = bio->bvecs[it->bvec_idx].len;
+    uint32 cur_len = bio->bvecs[it->bvec_idx].len;
     bio->done_size += cur_len;
     it->size_done += cur_len;
     /* Advance to the next segment. */
@@ -133,9 +133,10 @@ int bio_validate(struct bio *bio,
  * @len:    total bytes to transfer from the folio
  * @offset: byte offset into the folio's physical memory
  *
- * Splits the request at page boundaries so each bio_vec refers to
- * exactly one base page.  Returns 0 on success, negative errno on error.
+ * For compound folios (order > 0), uses a single bio_vec segment since
+ * the pages are physically contiguous.  For order-0 pages, splits at
+ * page boundaries.  Returns 0 on success, negative errno on error.
  */
-int bio_add_folio(struct bio *bio, folio_t *folio, uint16 len, uint16 offset);
+int bio_add_folio(struct bio *bio, folio_t *folio, uint32 len, uint16 offset);
 
 #endif // __KERNEL_BLOCK_IO_H

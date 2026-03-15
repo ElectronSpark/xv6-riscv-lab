@@ -72,6 +72,8 @@ static void __xv6fs_read_head(struct xv6fs_log *log) {
     struct xv6fs_superblock *xv6_sb =
         container_of(log, struct xv6fs_superblock, log);
     buffer_head_t *bh = sb_bread(xv6_sb, log->start);
+    if (bh == NULL)
+        panic("__xv6fs_read_head: sb_bread failed for log block");
     struct xv6fs_logheader *lh = (struct xv6fs_logheader *)(bh->b_data);
     log->lh.n = lh->n;
     for (int i = 0; i < log->lh.n; i++) {

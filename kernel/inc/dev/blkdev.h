@@ -13,6 +13,7 @@ int blkdev_put(blkdev_t *dev);
 int blkdev_register(blkdev_t *dev);
 int blkdev_unregister(blkdev_t *dev);
 int blkdev_submit_bio(blkdev_t *blkdev, struct bio *bio);
+void blkdev_kick(blkdev_t *blkdev);
 int blkdev_flush(blkdev_t *blkdev);
 
 #endif // __KERNEL_BLOCK_DRIVER_H

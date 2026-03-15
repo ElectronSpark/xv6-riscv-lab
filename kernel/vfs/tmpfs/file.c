@@ -195,26 +195,21 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
         return count;
     }
 
-    // pcache-based read
-    if (!pc->active) {
-        vfs_iunlock(inode);
+    // pcache-based read — release inode lock early since pcache has its own
+    // concurrency control and tmpfs pages cannot be evicted (max_pages==0).
+    int is_active = pc->active;
+    vfs_iunlock(inode);
+
+    if (!is_active) {
         return -EIO;
     }
 
     size_t bytes_read = 0;
     while (bytes_read < count) {
-        size_t block_idx = TMPFS_IBLOCK(pos);
-        size_t block_off = TMPFS_IBLOCK_OFFSET(pos);
-        size_t chunk = PAGE_SIZE - block_off;
-        if (chunk > count - bytes_read) {
-            chunk = count - bytes_read;
-        }
-
-        // Get page from pcache (blkno in 512-byte units)
-        uint64 blkno_512 = (uint64)block_idx * PCACHE_BLKS_PER_PAGE;
+        // Get page — pcache returns folios, so use folio-aware addressing
+        uint64 blkno_512 = (pos / PGSIZE) * PCACHE_BLKS_PER_PAGE;
         page_t *page = pcache_get_page(pc, blkno_512);
         if (page == NULL) {
-            vfs_iunlock(inode);
             if (bytes_read == 0)
                 return -EIO;
             return bytes_read;
@@ -222,21 +217,22 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
         int ret = pcache_read_page(pc, page);
         if (ret != 0) {
             pcache_put_page(pc, page);
-            vfs_iunlock(inode);
             if (bytes_read == 0)
                 return -EIO;
             return bytes_read;
         }
         struct pcache_node *pcn = page->pcache.pcache_node;
-        uint64 folio_off = (uint64)blkno_512 * 512 -
-                           (uint64)pcn->blkno * 512;
-        char *data = (char *)pcn->data + folio_off + block_off;
+        uint64 folio_start = (uint64)pcn->blkno * 512;
+        uint64 folio_off = (uint64)pos - folio_start;
+        size_t chunk = pcn->size - (size_t)folio_off;
+        if (chunk > count - bytes_read)
+            chunk = count - bytes_read;
+        char *data = (char *)pcn->data + folio_off;
 
         if (user) {
             if (vm_copyout(current->vm, (uint64)(buf + bytes_read), data,
                            chunk) < 0) {
                 pcache_put_page(pc, page);
-                vfs_iunlock(inode);
                 if (bytes_read == 0)
                     return -EFAULT;
                 return bytes_read;
@@ -250,7 +246,6 @@ static ssize_t __tmpfs_file_read(struct vfs_file *file, char *buf, size_t count,
         pos += chunk;
     }
 
-    vfs_iunlock(inode);
     return bytes_read;
 }
 
@@ -304,48 +299,53 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf,
         }
     }
 
-    // pcache-based write
-    if (!pc->active) {
-        vfs_iunlock(inode);
+    // pcache-based write — release inode lock early since pcache has its own
+    // concurrency control and tmpfs pages cannot be evicted (max_pages==0).
+    // The file-level lock in vfs_filewrite already serializes writes on the
+    // same file descriptor.
+    int is_active = pc->active;
+    vfs_iunlock(inode);
+
+    if (!is_active) {
         return -EIO;
     }
 
     size_t bytes_written = 0;
     while (bytes_written < count) {
-        size_t block_idx = TMPFS_IBLOCK(pos);
-        size_t block_off = TMPFS_IBLOCK_OFFSET(pos);
-        size_t chunk = PAGE_SIZE - block_off;
-        if (chunk > count - bytes_written) {
-            chunk = count - bytes_written;
-        }
-
-        // Get page from pcache (blkno in 512-byte units)
-        uint64 blkno_512 = (uint64)block_idx * PCACHE_BLKS_PER_PAGE;
+        // Folio-aware addressing: get the folio covering this position
+        uint64 blkno_512 = (pos / PGSIZE) * PCACHE_BLKS_PER_PAGE;
         page_t *page = pcache_get_page(pc, blkno_512);
         if (page == NULL) {
-            vfs_iunlock(inode);
             if (bytes_written == 0)
                 return -ENOMEM;
             goto done;
         }
-        int ret = pcache_read_page(pc, page);
+        struct pcache_node *pcn = page->pcache.pcache_node;
+        uint64 folio_start = (uint64)pcn->blkno * 512;
+        uint64 folio_off = (uint64)pos - folio_start;
+        size_t chunk = pcn->size - (size_t)folio_off;
+        if (chunk > count - bytes_written)
+            chunk = count - bytes_written;
+
+        /* Skip the read if overwriting the entire folio */
+        int ret;
+        bool full_folio = (folio_off == 0 && chunk >= pcn->size);
+        if (full_folio)
+            ret = pcache_prepare_write_page(pc, page);
+        else
+            ret = pcache_read_page(pc, page);
         if (ret != 0) {
             pcache_put_page(pc, page);
-            vfs_iunlock(inode);
             if (bytes_written == 0)
                 return ret;
             goto done;
         }
-        struct pcache_node *pcn = page->pcache.pcache_node;
-        uint64 folio_off = (uint64)blkno_512 * 512 -
-                           (uint64)pcn->blkno * 512;
-        char *data = (char *)pcn->data + folio_off + block_off;
+        char *data = (char *)pcn->data + folio_off;
 
         if (user) {
             if (vm_copyin(current->vm, data, (uint64)(buf + bytes_written),
                           chunk) < 0) {
                 pcache_put_page(pc, page);
-                vfs_iunlock(inode);
                 if (bytes_written == 0)
                     return -EFAULT;
                 goto done;
@@ -353,19 +353,26 @@ static ssize_t __tmpfs_file_write(struct vfs_file *file, const char *buf,
         } else {
             memmove(data, buf + bytes_written, chunk);
         }
-        pcache_mark_page_dirty(pc, page);
+        /*
+         * tmpfs: skip pcache_mark_page_dirty().  The write_page callback is
+         * a no-op (data lives in memory only) and max_pages == 0 prevents
+         * eviction, so dirty tracking is pure overhead — saves one
+         * spinlock+page_lock pair per folio.
+         */
         pcache_put_page(pc, page);
 
         bytes_written += chunk;
         pos += chunk;
     }
 
-    // Update size if we extended the file
+    // Update size if we extended the file (re-acquire inode lock briefly)
     if (pos > inode->size) {
-        inode->size = pos;
+        vfs_ilock(inode);
+        if (pos > inode->size)
+            inode->size = pos;
+        vfs_iunlock(inode);
     }
 
-    vfs_iunlock(inode);
 done:
     return bytes_written;
 }

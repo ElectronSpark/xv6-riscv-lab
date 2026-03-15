@@ -161,6 +161,12 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count,
                          bool user);
 loff_t xv6fs_file_llseek(struct vfs_file *file, loff_t offset, int whence);
 
+// Batch I/O: submit bio reads for a folio without awaiting
+int xv6fs_submit_folio_reads(struct xv6fs_inode *ip,
+                             struct xv6fs_superblock *xv6_sb,
+                             folio_t *folio, struct bio **bios, int max_bios,
+                             int *n_submitted);
+
 // Helper functions
 void xv6fs_init(void);
 void xv6fs_mount_root(void);

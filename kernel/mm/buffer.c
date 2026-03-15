@@ -173,11 +173,37 @@ static int meta_pcache_write_folio(struct pcache *pcache, folio_t *folio) {
     return ret;
 }
 
+/*
+ * Non-blocking variant for batched flushing: create bio, submit with
+ * batch flag, return bio for caller to await later.
+ */
+static struct bio *meta_pcache_submit_write_folio(struct pcache *pcache,
+                                                   folio_t *folio) {
+    struct xv6fs_superblock *xv6_sb =
+        (struct xv6fs_superblock *)pcache->private_data;
+    if (xv6_sb == NULL || xv6_sb->blkdev == NULL)
+        return NULL;
+    page_t *page = &folio->page;
+    struct pcache_node *pcnode = page->pcache.pcache_node;
+
+    struct bio *bio = bio_alloc(xv6_sb->blkdev, 1, true, NULL, NULL);
+    if (IS_ERR_OR_NULL(bio))
+        return NULL;
+    bio->blkno = pcnode->blkno;
+    bio->batch = 1;
+    int ret = bio_add_folio(bio, folio, pcnode->size, 0);
+    if (ret != 0) { bio_release(bio); return NULL; }
+    ret = blkdev_submit_bio(xv6_sb->blkdev, bio);
+    if (ret != 0) { bio_release(bio); return NULL; }
+    return bio;
+}
+
 static struct pcache_ops meta_pcache_ops = {
     .read_page  = meta_pcache_read_page,
     .write_page = meta_pcache_write_page,
     .read_folio = meta_pcache_read_folio,
     .write_folio = meta_pcache_write_folio,
+    .submit_write_folio = meta_pcache_submit_write_folio,
 };
 
 /* ======================================================================
@@ -209,12 +235,18 @@ buffer_head_t *sb_bread(struct xv6fs_superblock *xv6_sb, uint blockno) {
 
     /* Get (or allocate) the pcache page covering this block */
     folio_t *folio = pcache_get_folio(pc, blkno_512);
-    if (folio == NULL)
+    if (folio == NULL) {
+        printf("sb_bread: pcache_get_folio failed for block %u (blkno_512=%lu, "
+               "blk_count=%lu, active=%d, private_data=%p)\n",
+               blockno, blkno_512, pc->blk_count, pc->active, pc->private_data);
         return NULL;
+    }
 
     /* Ensure data is read from disk */
     int ret = pcache_read_folio(pc, folio);
     if (ret != 0) {
+        printf("sb_bread: pcache_read_folio failed for block %u (ret=%d)\n",
+               blockno, ret);
         pcache_put_folio(pc, folio);
         return NULL;
     }
@@ -226,18 +258,19 @@ buffer_head_t *sb_bread(struct xv6fs_superblock *xv6_sb, uint blockno) {
         return NULL;
     }
 
-    /* Compute offset within the page:
-     * blockno % META_BLOCKS_PER_PAGE gives the slot (0..3)
-     * slot * BSIZE gives the byte offset
+    /* Compute byte offset within the folio.
+     * The folio's pcn->blkno is the base 512-byte sector.
+     * Our block starts at sector blkno_512, so the byte offset is:
+     *   (blkno_512 - pcn->blkno) * BLK_SIZE
      */
-    uint slot = blockno % META_BLOCKS_PER_PAGE;
     page_t *pcpage = &folio->page;
     struct pcache_node *pcn = pcpage->pcache.pcache_node;
+    uint byte_offset = (uint)(blkno_512 - pcn->blkno) * BLK_SIZE;
 
     bh->b_blocknr = blockno;
     bh->b_size = BSIZE;
     bh->b_bdev = xv6fs_sb_dev(xv6_sb);
-    bh->b_data = (uchar *)pcn->data + slot * BSIZE;
+    bh->b_data = (uchar *)pcn->data + byte_offset;
     bh->b_folio = folio;
     bh->b_pcache = pc;
 
@@ -363,12 +396,14 @@ void meta_pcache_init(struct xv6fs_superblock *xv6_sb) {
     pc->blk_count = ((uint64)xv6_sb->disk_sb.size * META_BLK512_PER_BSIZE +
                      META_BLKS512_PER_PAGE - 1) &
                     ~(uint64)(META_BLKS512_PER_PAGE - 1);
-    pc->private_data = xv6_sb;
     pc->gfp_flags = 0;
 
     int ret = pcache_init(pc);
     if (ret != 0)
         panic("meta_pcache_init: pcache_init failed");
+
+    /* pcache_init resets private_data, so set it after init */
+    pc->private_data = xv6_sb;
 }
 
 void meta_pcache_destroy(struct xv6fs_superblock *xv6_sb) {
@@ -386,6 +421,8 @@ void meta_pcache_destroy(struct xv6fs_superblock *xv6_sb) {
  * ====================================================================== */
 
 void bh_global_init(void) {
-    slab_cache_init(&__bh_slab, "buffer_head",
-                    sizeof(buffer_head_t), sizeof(buffer_head_t));
+    int ret = slab_cache_init(&__bh_slab, "buffer_head",
+                              sizeof(buffer_head_t), 0);
+    if (ret)
+        panic("bh_global_init: slab_cache_init failed");
 }

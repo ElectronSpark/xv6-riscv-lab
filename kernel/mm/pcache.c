@@ -23,6 +23,7 @@
 #include <mm/slab.h>
 #include <mm/vm.h>
 #include "dev/bio.h"
+#include "dev/blkdev.h"
 #include "timer/timer.h"
 #include "signal.h"
 #include "vfs/uio.h"
@@ -63,9 +64,9 @@ static bool __global_flusher_running = false;
 
 /*
  * Default folio order for page-cache readahead allocations.
- * Order 2 = 4 pages = 16 KB.  Falls back to order 0 on OOM.
+ * Order 4 = 16 pages = 64 KB.  Falls back to order 0 on OOM.
  */
-#define PCACHE_FOLIO_ORDER 2
+#define PCACHE_FOLIO_ORDER 4
 
 /******************************************************************************
  * Predefine functions
@@ -375,82 +376,186 @@ static bool __pcache_flusher_in_progress(void) {
 /******************************************************************************
  * Call back functions for workqueue
  *****************************************************************************/
+
+/* Maximum pages to batch-flush in a single pass */
+#define FLUSH_BATCH_MAX 64
+
 static void __pcache_flush_worker(struct work_struct *work) {
     struct pcache *pcache = (struct pcache *)work->data;
     int ret = 0;
     uint64 start_jiffs = get_jiffs();
-
-    // @TODO: need to come up with a more robust way to handle all pcache flush
-    // errors
 
     if (pcache == NULL) {
         printf("__pcache_flush_worker: pcache is NULL\n");
         return;
     }
 
+    bool can_batch = (pcache->ops && pcache->ops->submit_write_folio);
+
     __pcache_spin_lock(pcache);
-    while (1) {
-        page_t *page = __pcache_pop_dirty(pcache, start_jiffs);
-        if (page == NULL) {
-            break; // No more dirty pages to flush
-        }
-        ret = page_ref_inc_unlocked(page);
-        assert(ret > 1,
-               "__pcache_flush_worker: failed to increment page ref count");
-        ret = __pcache_node_io_begin(pcache, page);
-        assert(ret == 0, "__pcache_flush_worker: failed to begin IO on page");
-        page_lock_release(page);
-        __pcache_spin_unlock(pcache);
 
-        // Real write operation outside the pcache lock
-        ret = __pcache_write_begin(pcache, page);
-        if (ret != 0) {
+    if (can_batch) {
+        /*
+         * Batched path: pop all dirty pages, submit all writes at once,
+         * then await all completions.  This lets the device process
+         * multiple requests concurrently instead of serializing them.
+         */
+        while (1) {
+            page_t *batch_pages[FLUSH_BATCH_MAX];
+            struct bio *batch_bios[FLUSH_BATCH_MAX];
+            int batch_count = 0;
+
+            /* Phase 1 (locked): pop dirty pages, prepare for I/O */
+            while (batch_count < FLUSH_BATCH_MAX) {
+                page_t *page = __pcache_pop_dirty(pcache, start_jiffs);
+                if (page == NULL)
+                    break;
+                ret = page_ref_inc_unlocked(page);
+                assert(ret > 1,
+                       "__pcache_flush_worker: failed to inc page ref");
+                ret = __pcache_node_io_begin(pcache, page);
+                assert(ret == 0,
+                       "__pcache_flush_worker: failed to begin IO");
+                page_lock_release(page);
+                batch_pages[batch_count] = page;
+                batch_bios[batch_count] = NULL;
+                batch_count++;
+            }
+
+            if (batch_count == 0)
+                break; /* no more dirty pages */
+
+            __pcache_spin_unlock(pcache);
+
+            /* Phase 2 (unlocked): submit all writes without awaiting */
+            blkdev_t *kick_dev = NULL;
+            for (int i = 0; i < batch_count; i++) {
+                folio_t *folio = page_folio(batch_pages[i]);
+                struct bio *bio =
+                    pcache->ops->submit_write_folio(pcache, folio);
+                batch_bios[i] = bio;
+                if (bio != NULL && kick_dev == NULL)
+                    kick_dev = bio->bdev;
+            }
+
+            /* Phase 3: kick the device once, then await all completions */
+            if (kick_dev != NULL)
+                blkdev_kick(kick_dev);
+
+            for (int i = 0; i < batch_count; i++) {
+                if (batch_bios[i] != NULL) {
+                    int err = bio_await(batch_bios[i]);
+                    if (err != 0 && pcache->flush_error == 0)
+                        pcache->flush_error = err;
+                    bio_release(batch_bios[i]);
+                }
+            }
+
+            /* Phase 4 (locked): mark pages clean */
             __pcache_spin_lock(pcache);
-            pcache->flush_error = ret;
-            goto err_continue;
+            for (int i = 0; i < batch_count; i++) {
+                page_t *page = batch_pages[i];
+                page_lock_acquire(page);
+
+                if (batch_bios[i] == NULL) {
+                    /* submit failed — push back to dirty list */
+                    ret = __pcache_node_io_end(pcache, page);
+                    assert(ret == 0,
+                           "__pcache_flush_worker: failed to end IO");
+                    __pcache_push_dirty(pcache, page);
+                    ret = page_ref_dec_unlocked(page);
+                    assert(ret > 0,
+                           "__pcache_flush_worker: ref dec failed");
+                    page_lock_release(page);
+                    continue;
+                }
+
+                struct pcache_node *pcnode = page->pcache.pcache_node;
+                assert(pcnode != NULL,
+                       "__pcache_flush_worker: page missing pcache node");
+                pcnode->dirty = 0;
+                pcnode->uptodate = 1;
+                ret = __pcache_node_io_end(pcache, page);
+                assert(ret == 0,
+                       "__pcache_flush_worker: failed to end IO");
+                ret = page_ref_dec_unlocked(page);
+                assert(ret >= 1,
+                       "__pcache_flush_worker: refcount underflow");
+                if (ret == 1 &&
+                    LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
+                    __pcache_push_lru(pcache, page);
+                    wakeup_on_chan(pcache);
+                }
+                page_lock_release(page);
+            }
         }
-        ret = __pcache_write_page(pcache, page);
-        if (ret != 0) {
+    } else {
+        /* Serial fallback: original one-page-at-a-time path */
+        while (1) {
+            page_t *page = __pcache_pop_dirty(pcache, start_jiffs);
+            if (page == NULL)
+                break;
+            ret = page_ref_inc_unlocked(page);
+            assert(ret > 1,
+                   "__pcache_flush_worker: failed to increment page ref count");
+            ret = __pcache_node_io_begin(pcache, page);
+            assert(ret == 0,
+                   "__pcache_flush_worker: failed to begin IO on page");
+            page_lock_release(page);
+            __pcache_spin_unlock(pcache);
+
+            ret = __pcache_write_begin(pcache, page);
+            if (ret != 0) {
+                __pcache_spin_lock(pcache);
+                pcache->flush_error = ret;
+                goto err_continue;
+            }
+            ret = __pcache_write_page(pcache, page);
+            if (ret != 0) {
+                ret = __pcache_write_end(pcache, page);
+                __pcache_spin_lock(pcache);
+                pcache->flush_error = ret;
+                goto err_continue;
+            }
             ret = __pcache_write_end(pcache, page);
+
             __pcache_spin_lock(pcache);
-            pcache->flush_error = ret;
-            goto err_continue;
-        }
-        ret = __pcache_write_end(pcache, page);
+            page_lock_acquire(page);
+            if (ret != 0) {
+                pcache->flush_error = ret;
+            }
+            struct pcache_node *pcnode = page->pcache.pcache_node;
+            assert(pcnode != NULL,
+                   "__pcache_flush_worker: page missing pcache node");
+            pcnode->dirty = 0;
+            pcnode->uptodate = 1;
+            ret = __pcache_node_io_end(pcache, page);
+            assert(ret == 0,
+                   "__pcache_flush_worker: failed to end IO on page");
+            ret = page_ref_dec_unlocked(page);
+            assert(ret >= 1,
+                   "__pcache_flush_worker: page refcount underflow");
+            if (ret == 1 && LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
+                __pcache_push_lru(pcache, page);
+                wakeup_on_chan(pcache);
+            }
+            page_lock_release(page);
+            continue;
 
-        __pcache_spin_lock(pcache);
-        page_lock_acquire(page);
-        if (ret != 0) {
-            pcache->flush_error = ret;
+        err_continue:
+            __pcache_spin_assert_holding(pcache);
+            page_lock_acquire(page);
+            ret = __pcache_node_io_end(pcache, page);
+            assert(ret == 0,
+                   "__pcache_flush_worker: failed to end IO on page");
+            __pcache_push_dirty(pcache, page);
+            ret = page_ref_dec_unlocked(page);
+            assert(ret > 0,
+                   "__pcache_flush_worker: failed to decrement page ref");
+            page_lock_release(page);
         }
-        struct pcache_node *pcnode = page->pcache.pcache_node;
-        assert(pcnode != NULL,
-               "__pcache_flush_worker: page missing pcache node");
-        pcnode->dirty = 0;
-        pcnode->uptodate = 1;
-        ret = __pcache_node_io_end(pcache, page);
-        assert(ret == 0, "__pcache_flush_worker: failed to end IO on page");
-        ret = page_ref_dec_unlocked(page);
-        assert(ret >= 1,
-               "__pcache_flush_worker: page refcount underflow after flush");
-        if (ret == 1 && LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
-            __pcache_push_lru(pcache, page);
-            wakeup_on_chan(pcache);
-        }
-        page_lock_release(page);
-        continue;
-
-    err_continue:
-        __pcache_spin_assert_holding(pcache);
-        page_lock_acquire(page);
-        ret = __pcache_node_io_end(pcache, page);
-        assert(ret == 0, "__pcache_flush_worker: failed to end IO on page");
-        __pcache_push_dirty(pcache, page);
-        ret = page_ref_dec_unlocked(page);
-        assert(ret > 0,
-               "__pcache_flush_worker: failed to decrement page ref count");
-        page_lock_release(page);
     }
+
     __pcache_flush_done(pcache);
     __pcache_spin_unlock(pcache);
 }
@@ -1387,6 +1492,29 @@ retry_lookup:
     // be freed between xa_load and page_lock_acquire.
     page = __pcache_find_and_pin_page(pcache, base_blkno);
     if (page != NULL) {
+        /*
+         * Fast path for no-eviction caches (max_pages == 0, e.g. tmpfs):
+         * Once a page is in the xarray it is never removed, so validation
+         * under the pcache spinlock is unnecessary.  We still need to
+         * confirm that the pcache_node points back to this pcache (guards
+         * against teardown races) and that the blkno is correct.
+         */
+        if (pcache->max_pages == 0) {
+            pcnode = page->pcache.pcache_node;
+            if (pcnode != NULL && pcnode->pcache == pcache) {
+                if (pcnode->blkno == base_blkno ||
+                    (pcnode->order > 0 &&
+                     base_blkno >= pcnode->blkno &&
+                     base_blkno < pcnode->blkno +
+                         (uint64)pcnode->page_count * PCACHE_BLKS_PER_PAGE)) {
+                    return page;
+                }
+            }
+            /* Validation failed — fall through to locked path */
+            __page_ref_dec(page);
+            goto retry_lookup;
+        }
+
         __pcache_spin_lock(pcache);
         page_lock_acquire(page);
 
@@ -1417,8 +1545,10 @@ retry_lookup:
 
         if (!pcnode->dirty && !LIST_NODE_IS_DETACHED(pcnode, lru_entry)) {
             // The lookup reuses a clean LRU page; pull it out so the caller
-            // owns it.
-            __pcache_remove_lru(pcache, page);
+            // owns it.  Skip when max_pages==0 (e.g. tmpfs) — the LRU is
+            // never consumed, so list manipulation is pure overhead.
+            if (pcache->max_pages > 0)
+                __pcache_remove_lru(pcache, page);
         }
 
         // __pcache_find_and_pin_page already bumped refcount by 1.
@@ -1552,6 +1682,32 @@ void pcache_put_page(struct pcache *pcache, page_t *page) {
         return;
     }
 
+    /*
+     * Fast path: if refcount >= 3, dropping one reference cannot trigger
+     * any list transitions (those only matter at refcount 1).  Use an
+     * atomic decrement and skip all locking.  The >= 3 check is safe
+     * because the caller holds a reference (>= 2 from get+cache) and
+     * another concurrent user bumps it to >= 3.
+     *
+     * When max_pages == 0 (tmpfs) we can also fast-path refcount == 2:
+     * since no eviction ever happens, the LRU list is unused, and we
+     * only need to verify the page is clean and uptodate (no list work
+     * required).  An atomic dec from 2→1 is safe here.
+     */
+    refcount = page_ref_count(page);
+    if (refcount >= 3) {
+        __page_ref_dec(page);
+        return;
+    }
+    if (refcount == 2 && pcache->max_pages == 0) {
+        pcnode = page->pcache.pcache_node;
+        if (pcnode && !pcnode->dirty && pcnode->uptodate &&
+            !pcnode->io_in_progress) {
+            __page_ref_dec(page);
+            return;
+        }
+    }
+
     __pcache_spin_lock(pcache);
     page_lock_acquire(page);
 
@@ -1605,8 +1761,11 @@ void pcache_put_page(struct pcache *pcache, page_t *page) {
             // Only clean, single-owner, up-to-date pages can be staged on the
             // LRU for reuse.  __pcache_push_lru handles the race where
             // another thread re-pinned the page via CAS.
-            __pcache_push_lru(pcache, page);
-            wakeup_on_chan(pcache);
+            // Skip when max_pages==0 (tmpfs) — no eviction, LRU is unused.
+            if (pcache->max_pages > 0) {
+                __pcache_push_lru(pcache, page);
+                wakeup_on_chan(pcache);
+            }
         } else {
             if (pcnode->dirty) {
                 assert(!LIST_NODE_IS_DETACHED(pcnode, lru_entry),
@@ -1923,6 +2082,8 @@ int pcache_flush(struct pcache *pcache) {
         // Surface a fresh retry hint when the workqueue rejects the job so
         // callers do not observe stale errors left behind by earlier flush
         // attempts.
+        printf("pcache_flush: EAGAIN (cannot queue work) dirty=%ld\n",
+               (long)pcache->dirty_count);
         pcache->flush_requested = 0;
         pcache->flush_error = -EAGAIN;
         __pcache_spin_unlock(pcache);
@@ -1951,6 +2112,15 @@ int pcache_read_page(struct pcache *pcache, page_t *page) {
     if (pcache == NULL || page == NULL) {
         return -EINVAL;
     }
+
+    /*
+     * Fast path: the caller already holds a reference from pcache_get_page()
+     * which issued a lock barrier.  If the folio is up-to-date and no I/O is
+     * in flight, we can return immediately without touching any lock.
+     */
+    pcnode = page->pcache.pcache_node;
+    if (pcnode && pcnode->uptodate && !pcnode->io_in_progress)
+        return 0;
 
 retry_locked:
     __pcache_spin_lock(pcache);
@@ -2092,6 +2262,15 @@ int pcache_prepare_write_page(struct pcache *pcache, page_t *page) {
 
     if (pcache == NULL || page == NULL)
         return -EINVAL;
+
+    /*
+     * Fast path: if the folio is already up-to-date, the caller can proceed
+     * directly — no zero-fill or disk read needed.  Safe because the caller
+     * holds a reference from pcache_get_page() which issued a lock barrier.
+     */
+    pcnode = page->pcache.pcache_node;
+    if (pcnode && pcnode->uptodate)
+        return 0;
 
     __pcache_spin_lock(pcache);
     page_lock_acquire(page);

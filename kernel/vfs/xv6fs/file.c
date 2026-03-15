@@ -44,6 +44,9 @@
 #include "vfs/uio.h"
 #include <mm/pcache.h>
 #include <mm/folio.h>
+#include "dev/bio.h"
+#include "dev/blkdev.h"
+#include "proc/tq.h"
 
 /*
  * Blocks-per-page constants for pcache ↔ xv6fs block address translation.
@@ -53,87 +56,184 @@
 #define BSIZE_PER_PAGE (PGSIZE / BSIZE) /* 4 */
 #define BLK512_PER_BSIZE (BSIZE / 512)  /* 2 */
 
+/* Number of folios to prefetch ahead for sequential reads. */
+#define XV6FS_READAHEAD_FOLIOS 4
+
+/* Max folios to batch-read in one pass (stack arrays must stay reasonable). */
+#define XV6FS_READ_BATCH 32
+
+/* Max bios across a batch (non-fragmented: 1 bio per folio; fragmented: more) */
+#define XV6FS_READ_MAX_BIOS (XV6FS_READ_BATCH * 4)
+
 /******************************************************************************
- * File read
+ * File read — batch I/O path
+ *
+ * Instead of reading one folio at a time (synchronous bio per folio), this
+ * function allocates a batch of folios, submits all their bios at once, then
+ * awaits all completions before copying data.  This lets the virtio ring
+ * process many requests concurrently, massively improving throughput.
  ******************************************************************************/
 
 ssize_t xv6fs_file_read(struct vfs_file *file, char *buf, size_t count,
                         bool user) {
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    struct xv6fs_inode *ip = container_of(inode, struct xv6fs_inode, vfs_inode);
+    struct xv6fs_superblock *xv6_sb =
+        container_of(inode->sb, struct xv6fs_superblock, vfs_sb);
     struct pcache *pc = &inode->i_data;
 
-    if (!S_ISREG(inode->mode)) {
+    if (!S_ISREG(inode->mode))
         return -EINVAL;
-    }
-
     if (!pc->active) {
+        printf("xv6fs_file_read: pcache not active ino=%lu\n", inode->ino);
         return -EIO;
     }
 
-    // Snapshot inode size under lock, then release.  The pcache and page
-    // reference keep the data safe; holding the inode mutex across the
-    // entire I/O loop would serialise concurrent readers on the same file.
-    // If a concurrent truncate shrinks the file after our snapshot, we may
-    // read stale (but consistent) cached data — matching Linux VFS semantics.
     vfs_ilock(inode);
     loff_t isize = inode->size;
     vfs_iunlock(inode);
 
     loff_t pos = file->f_pos;
     if (pos >= isize) {
-        return 0; // EOF
+        printf("xv6fs_file_read: EOF ino=%lu pos=%ld isize=%ld\n",
+               inode->ino, (long)pos, (long)isize);
+        return 0;
     }
-    if (pos + count > isize) {
+    size_t orig_count = count;
+    if (pos + count > isize)
         count = isize - pos;
-    }
 
     size_t bytes_read = 0;
+
     while (bytes_read < count) {
-        uint bn = pos / BSIZE;
-        uint off = pos % BSIZE;
-        uint n = BSIZE - off;
-        if (n > count - bytes_read) {
-            n = count - bytes_read;
+        /* ── Phase 1: allocate a batch of folios ── */
+        page_t *pages[XV6FS_READ_BATCH];
+        int n_pages = 0;
+        loff_t scan_pos = pos;
+
+        while (n_pages < XV6FS_READ_BATCH && scan_pos < isize &&
+               (size_t)(scan_pos - pos) < (count - bytes_read)) {
+            uint bn = scan_pos / BSIZE;
+            uint64 blkno_512 = (uint64)bn * BLK512_PER_BSIZE;
+            page_t *page = pcache_get_page(pc, blkno_512);
+            if (page == NULL)
+                break;
+            pages[n_pages++] = page;
+            struct pcache_node *pcn = page->pcache.pcache_node;
+            /* Advance scan_pos to the byte past this folio */
+            scan_pos = (uint64)(pcn->blkno + pcn->size / 512) * 512;
         }
 
-        // Per-inode pcache path (keyed by logical file offset).
-        // The read_page callback handles bmap + bio internally, including
-        // zero-filling of sparse blocks, so no bmap call is needed here.
-        uint64 blkno_512 = (uint64)bn * BLK512_PER_BSIZE;
-        page_t *page = pcache_get_page(pc, blkno_512);
-        if (page == NULL) {
+        if (n_pages == 0) {
             if (bytes_read > 0)
                 return bytes_read;
+            printf("xv6fs_file_read: pcache_get_page failed ino=%lu "
+                   "pos=%lld isize=%lld blk_count=%lu active=%d\n",
+                   inode->ino, (long long)pos, (long long)isize,
+                   pc->blk_count, pc->active);
             return signal_pending(current) ? -EINTR : -EIO;
         }
-        int ret = pcache_read_page(pc, page);
-        if (ret != 0) {
-            pcache_put_page(pc, page);
-            if (bytes_read > 0)
-                return bytes_read;
-            return (ret == -EINTR) ? -EINTR : -EIO;
-        }
-        struct pcache_node *pcn = page->pcache.pcache_node;
-        uint64 folio_off = (uint64)blkno_512 * 512 -
-                           (uint64)pcn->blkno * 512 + off;
-        char *data = (char *)pcn->data + folio_off;
-        if (user) {
-            if (vm_copyout(current->vm, (uint64)(buf + bytes_read), data, n) <
-                0) {
-                pcache_put_page(pc, page);
-                if (bytes_read == 0)
-                    return -EFAULT;
-                return bytes_read;
-            }
-        } else {
-            memmove(buf + bytes_read, data, n);
-        }
-        pcache_put_page(pc, page);
 
-        bytes_read += n;
-        pos += n;
+        /* ── Phase 2: submit bios for all non-uptodate folios ── */
+        struct bio *bios[XV6FS_READ_MAX_BIOS];
+        int n_bios = 0;
+        /* Track which pages we submitted I/O for (bitmask via array) */
+        uint8 did_io[XV6FS_READ_BATCH] = {0};
+
+        for (int pi = 0; pi < n_pages; pi++) {
+            struct pcache_node *pcn = pages[pi]->pcache.pcache_node;
+            if (pcn->uptodate)
+                continue;
+            if (pcn->io_in_progress) {
+                /* Another reader is loading this folio; we'll wait in phase 3
+                 * via pcache_read_page fallback. */
+                continue;
+            }
+            /* Mark I/O in progress so concurrent readers wait */
+            pcn->io_in_progress = 1;
+            did_io[pi] = 1;
+
+            folio_t *folio = page_folio(pages[pi]);
+            xv6fs_submit_folio_reads(ip, xv6_sb, folio,
+                                     bios, XV6FS_READ_MAX_BIOS, &n_bios);
+        }
+
+        /* Kick the device once after all batch bios are queued */
+        if (n_bios > 0)
+            blkdev_kick(xv6_sb->blkdev);
+
+        /* ── Phase 3: await all submitted bios ── */
+        for (int i = 0; i < n_bios; i++) {
+            bio_await(bios[i]);
+            bio_release(bios[i]);
+        }
+
+        /* Mark batch-read folios as uptodate and wake any waiters */
+        for (int pi = 0; pi < n_pages; pi++) {
+            if (!did_io[pi])
+                continue;
+            struct pcache_node *pcn = pages[pi]->pcache.pcache_node;
+            pcn->uptodate = 1;
+            pcn->dirty = 0;
+            pcn->io_in_progress = 0;
+            tq_wakeup_all(&pcn->io_waiters, 0, 0);
+        }
+
+        /* For folios that were io_in_progress from another reader, wait now */
+        for (int pi = 0; pi < n_pages; pi++) {
+            struct pcache_node *pcn = pages[pi]->pcache.pcache_node;
+            if (!pcn->uptodate) {
+                int ret = pcache_read_page(pc, pages[pi]);
+                if (ret != 0) {
+                    /* Release remaining pages and return */
+                    for (int j = pi; j < n_pages; j++)
+                        pcache_put_page(pc, pages[j]);
+                    if (bytes_read > 0)
+                        return bytes_read;
+                    return ret;
+                }
+            }
+        }
+
+        /* ── Phase 4: copy data to user buffer ── */
+        for (int pi = 0; pi < n_pages && bytes_read < count; pi++) {
+            struct pcache_node *pcn = pages[pi]->pcache.pcache_node;
+            uint64 folio_start_byte = (uint64)pcn->blkno * 512;
+            uint64 folio_off = (uint64)pos - folio_start_byte;
+            size_t avail = pcn->size - (size_t)folio_off;
+            size_t n = count - bytes_read;
+            if (n > avail)
+                n = avail;
+            if (pos + (loff_t)n > isize)
+                n = (size_t)(isize - pos);
+
+            char *data = (char *)pcn->data + folio_off;
+            if (user) {
+                int co_ret = vm_copyout(current->vm, (uint64)(buf + bytes_read),
+                               data, n);
+                if (co_ret < 0) {
+                    printf("xv6fs_file_read: vm_copyout failed=%d "
+                           "ino=%lu pos=%ld n=%lu data=%p\n",
+                           co_ret, inode->ino, (long)pos, n, data);
+                    for (int j = pi; j < n_pages; j++)
+                        pcache_put_page(pc, pages[j]);
+                    if (bytes_read == 0)
+                        return -EFAULT;
+                    return bytes_read;
+                }
+            } else {
+                memmove(buf + bytes_read, data, n);
+            }
+            pcache_put_page(pc, pages[pi]);
+            bytes_read += n;
+            pos += n;
+        }
     }
 
+    if (bytes_read != orig_count && pos == file->f_pos) {
+        printf("xv6fs_file_read: SHORT ino=%lu got=%lu want=%lu pos=%ld isize=%ld\n",
+               inode->ino, bytes_read, orig_count, (long)pos, (long)isize);
+    }
     return bytes_read;
 }
 
@@ -176,7 +276,15 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count,
     // Write in chunks to avoid exceeding log transaction size.
     // Only metadata (bmap allocations + iupdate) goes through the log now;
     // data blocks are written by the pcache flusher via bio.
-    int max = ((MAXOPBLOCKS - 1 - 1 - 2) / 2) * BSIZE;
+    //
+    // Metadata budget per chunk of N data blocks (sequential write):
+    //   ceil(N/NINDIRECT) indirect blocks  (NINDIRECT = BSIZE/4 = 256)
+    //   + ceil(N/(BSIZE*8)) bitmap blocks  (1 per 8192 data blocks)
+    //   + ~4 fixed (inode, dbl-indirect root, spare)
+    // This must be <= MAXOPBLOCKS (80).
+    //
+    // For 8MB = 8192 blocks: 32 indirect + 1 bitmap + 4 = 37 ≤ 80.  Safe.
+    int max = 8 * 1024 * 1024; /* 8 MB per transaction chunk */
     size_t bytes_written = 0;
 
     while (bytes_written < count) {
@@ -202,26 +310,16 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count,
 
         size_t chunk_written = 0;
         while (chunk_written < n) {
+            /*
+             * Folio-aware write: map the current position to a pcache
+             * folio, compute how much data fits in this folio, allocate
+             * all the underlying xv6fs blocks, then copy the data in one
+             * shot.  This reduces pcache_get/put overhead from N calls per
+             * folio to just one.
+             */
             uint bn = pos / BSIZE;
-            uint off = pos % BSIZE;
-            uint chunk = BSIZE - off;
-            if (chunk > n - chunk_written) {
-                chunk = n - chunk_written;
-            }
-
-            // Ensure the block is allocated (may log indirect-block changes)
-            uint addr = xv6fs_bmap(ip, bn);
-            if (addr == 0) {
-                vfs_iunlock(inode);
-                xv6fs_end_op(xv6_sb);
-                if (bytes_written == 0) {
-                    return -ENOSPC;
-                }
-                goto done;
-            }
-
-            // Write data through per-inode pcache
             uint64 blkno_512 = (uint64)bn * BLK512_PER_BSIZE;
+
             page_t *page = pcache_get_page(pc, blkno_512);
             if (page == NULL) {
                 vfs_iunlock(inode);
@@ -231,23 +329,41 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count,
                 return signal_pending(current) ? -EINTR : -EIO;
             }
 
+            struct pcache_node *pcn = page->pcache.pcache_node;
+            uint64 folio_start_byte = (uint64)pcn->blkno * 512;
+            uint64 folio_off = (uint64)pos - folio_start_byte;
+            size_t avail = pcn->size - (size_t)folio_off;
+            size_t chunk = avail;
+            if (chunk > n - chunk_written)
+                chunk = n - chunk_written;
+
+            /* Ensure all xv6fs blocks covered by this chunk are allocated. */
+            uint first_bn = pos / BSIZE;
+            uint last_bn = (pos + chunk - 1) / BSIZE;
+            int bmap_ok = 1;
+            for (uint b = first_bn; b <= last_bn; b++) {
+                uint addr = xv6fs_bmap(ip, b);
+                if (addr == 0) {
+                    bmap_ok = 0;
+                    break;
+                }
+            }
+            if (!bmap_ok) {
+                pcache_put_page(pc, page);
+                vfs_iunlock(inode);
+                xv6fs_end_op(xv6_sb);
+                if (bytes_written == 0)
+                    return -ENOSPC;
+                goto done;
+            }
+
             /*
              * Skip the disk read when we are about to overwrite the entire
              * pcache folio.  pcache_prepare_write_page zero-fills and marks
-             * the folio up-to-date without I/O.  Falls back to a normal
-             * read when the folio is already cached or has I/O in progress.
-             *
-             * We must check against the actual folio size (pcn->size),
-             * not PGSIZE, because multi-page folios (order > 0) span
-             * multiple pages and only a full-folio overwrite is safe.
+             * the folio up-to-date without I/O.
              */
-            struct pcache_node *pcn = page->pcache.pcache_node;
-            uint64 folio_off = (uint64)blkno_512 * 512 -
-                               (uint64)pcn->blkno * 512;
-
             int ret;
-            bool full_folio = (folio_off == 0 && off == 0 &&
-                               (n - chunk_written) >= pcn->size);
+            bool full_folio = (folio_off == 0 && chunk >= pcn->size);
             if (full_folio) {
                 ret = pcache_prepare_write_page(pc, page);
             } else {
@@ -262,7 +378,6 @@ ssize_t xv6fs_file_write(struct vfs_file *file, const char *buf, size_t count,
                 return (ret == -EINTR) ? -EINTR : -EIO;
             }
 
-            folio_off += off;
             char *data = (char *)pcn->data + folio_off;
 
             if (user) {
@@ -370,7 +485,11 @@ int xv6fs_file_fflush(struct vfs_file *file) {
     if (!pc->active)
         return 0;
 
-    return pcache_flush(pc);
+    int ret = pcache_flush(pc);
+    if (ret != 0)
+        printf("xv6fs_file_fflush: pcache_flush=%d ino=%lu dirty=%ld\n",
+               ret, inode->ino, (long)pc->dirty_count);
+    return ret;
 }
 
 /******************************************************************************

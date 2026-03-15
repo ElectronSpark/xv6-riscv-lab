@@ -46,7 +46,7 @@ uint64 __virtio_mmio_base[N_VIRTIO] = {
 uint64 __virtio_irqno[N_VIRTIO] = {1, 2, 3};
 
 static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
-                           void *buf, size_t size, int write);
+                           void *buf, size_t size, int write, bool notify);
 static void virtio_disk_intr(int irq, void *data, device_t *dev);
 static int __virtio_disk_flush(blkdev_t *blkdev);
 
@@ -130,15 +130,19 @@ static int __virtio_disk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
     bio->inflight_segs = segs;
     bio->completed_segs = 0;
 
+    uint16 cur_seg = 0;
     bio_for_each_segment(&bvec, bio, &iter) {
+        cur_seg++;
         uint64 sector = iter.blkno;
         page_t *page = bvec.bv_page;
         assert(page != NULL, "virtio_disk_submit_bio: page is NULL");
         void *pa = (void *)__page_to_pa(page);
         assert(pa != NULL,
                "virtio_disk_submit_bio: page has no physical address");
+        /* Only notify on the last segment, and only if not in batch mode */
+        bool notify = (cur_seg == segs) && !bio->batch;
         virtio_disk_rw(diskno, bio, sector, pa + bvec.offset, bvec.len,
-                       bio_dir_write(bio));
+                       bio_dir_write(bio), notify);
     }
 
     // I/O has been submitted to the device.  Completion (bio_complete)
@@ -147,11 +151,25 @@ static int __virtio_disk_submit_bio(blkdev_t *blkdev, struct bio *bio) {
     return 0;
 }
 
+static void __virtio_disk_kick(blkdev_t *blkdev) {
+    int diskno = (blkdev->dev.minor - 1) / GENDISK_MINOR_STRIDE;
+    struct disk *disk = &disks[diskno];
+
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    if (disk->pci_state.use_pci) {
+        volatile uint16 *notify_addr = disk->pci_state.notify_base;
+        *notify_addr = 0;
+    } else {
+        *R(diskno, VIRTIO_MMIO_QUEUE_NOTIFY) = 0;
+    }
+}
+
 static blkdev_ops_t __virtio_disk_ops = {.open = __virtio_disk_open,
                                          .release = __virtio_disk_release,
                                          .submit_bio =
                                              __virtio_disk_submit_bio,
-                                         .flush = __virtio_disk_flush};
+                                         .flush = __virtio_disk_flush,
+                                         .kick = __virtio_disk_kick};
 
 static blkdev_t virtio_disk_devs[N_VIRTIO_DISK] = {
     {
@@ -714,7 +732,7 @@ static int __virtio_disk_flush(blkdev_t *blkdev) {
 }
 
 static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
-                           void *buf, size_t size, int write) {
+                           void *buf, size_t size, int write, bool notify) {
     struct disk *disk = &disks[diskno];
     assert(size > 0 && size <= BIO_MAX_SIZE,
            "virtio_disk_rw: size must be >0 and <=BIO_MAX_SIZE");
@@ -792,15 +810,14 @@ static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
 
     assert(!intr_get(), "virtio_disk_rw: interrupts enabled");
 
-    // Notify the device: PCI vs MMIO transport
-    if (disk->pci_state.use_pci) {
-        // PCI: write queue index to notify region
-        // offset = queue_notify_off * notify_off_multiplier (in bytes)
-        // For queue 0, queue_notify_off is typically 0
-        volatile uint16 *notify_addr = disk->pci_state.notify_base;
-        *notify_addr = 0; // queue number 0
-    } else {
-        *R(diskno, VIRTIO_MMIO_QUEUE_NOTIFY) = 0; // value is queue number
+    // Notify the device only if requested (non-batch or last segment)
+    if (notify) {
+        if (disk->pci_state.use_pci) {
+            volatile uint16 *notify_addr = disk->pci_state.notify_base;
+            *notify_addr = 0;
+        } else {
+            *R(diskno, VIRTIO_MMIO_QUEUE_NOTIFY) = 0;
+        }
     }
 
     // Submit only — completion is handled by virtio_disk_intr() which

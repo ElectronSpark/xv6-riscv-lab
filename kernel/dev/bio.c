@@ -46,7 +46,7 @@ struct bio *bio_alloc(blkdev_t *bdev, int16 vec_length, bool rw,
     return bio;
 }
 
-static int __bio_add_seg(struct bio *bio, page_t *page, int16 idx, uint16 len,
+static int __bio_add_seg(struct bio *bio, page_t *page, int16 idx, uint32 len,
                         uint16 offset) {
     if (bio == NULL || page == NULL || len == 0) {
         return -EINVAL; // Invalid arguments
@@ -60,7 +60,7 @@ static int __bio_add_seg(struct bio *bio, page_t *page, int16 idx, uint16 len,
     if (idx < 0 || idx >= bio->vec_length) {
         return -EINVAL; // Invalid index
     }
-    uint16 total_size = bio->size - bio->bvecs[idx].len;
+    uint32 total_size = bio->size - bio->bvecs[idx].len;
     total_size += len;
     if (total_size > BIO_MAX_SIZE) {
         return -E2BIG; // Total size exceeds maximum allowed
@@ -72,24 +72,45 @@ static int __bio_add_seg(struct bio *bio, page_t *page, int16 idx, uint16 len,
     return 0;
 }
 
-int bio_add_folio(struct bio *bio, folio_t *folio, uint16 len, uint16 offset) {
+int bio_add_folio(struct bio *bio, folio_t *folio, uint32 len, uint16 offset) {
     if (bio == NULL || folio == NULL || len == 0)
         return -EINVAL;
 
     uint32 folio_bytes = (uint32)folio_size(folio);
     if ((uint32)offset >= folio_bytes)
         return -EINVAL;
-    if ((uint32)len > folio_bytes - (uint32)offset)
+    if (len > folio_bytes - (uint32)offset)
         return -EINVAL;
 
     page_t *head = &folio->page;
-    uint16 remaining = len;
+
+    /*
+     * Compound folios (order > 0) are physically contiguous, so we can
+     * use a single bio_vec segment for the entire range.  This dramatically
+     * reduces the number of per-segment device commands (e.g. one virtio
+     * descriptor chain instead of N).
+     */
+    if (folio_order(folio) > 0) {
+        int slot = -1;
+        for (int i = 0; i < bio->vec_length; i++) {
+            if (bio->bvecs[i].bv_page == NULL) {
+                slot = i;
+                break;
+            }
+        }
+        if (slot < 0)
+            return -ENOSPC;
+        return __bio_add_seg(bio, head, slot, len, offset);
+    }
+
+    /* Order-0 path: single page, split at page boundaries. */
+    uint32 remaining = len;
     uint16 off = offset;
 
     while (remaining > 0) {
         unsigned int page_idx = off / PGSIZE;
         uint16 page_off  = off % PGSIZE;
-        uint16 seg_len   = PGSIZE - page_off;
+        uint32 seg_len   = PGSIZE - page_off;
         if (seg_len > remaining)
             seg_len = remaining;
 
@@ -162,7 +183,9 @@ int bio_validate(struct bio *bio, blkdev_t *blkdev) {
         if (bvec->bv_page == NULL) {
             return -EINVAL;
         }
-        if ((uint32)bvec->offset + (uint32)bvec->len > PGSIZE) {
+        /* Compound pages (folios) can hold more than PGSIZE bytes */
+        uint32 max_seg = (uint32)PGSIZE << bvec->bv_page->compound_order;
+        if ((uint32)bvec->offset + (uint32)bvec->len > max_seg) {
             return -EINVAL;
         }
         total_size += bvec->len;

@@ -191,6 +191,9 @@ void vfs_file_knote_notify(struct vfs_file *file, int filter, int64 data) {
 void vfs_inode_knote_notify(struct vfs_inode *inode, uint32 fflags) {
     if (inode == NULL)
         return;
+    /* Fast path: skip spinlock when no watchers are registered */
+    if (LIST_IS_EMPTY(&inode->knote_list))
+        return;
     spin_lock(&inode->knote_lock);
     struct knote *kn = NULL;
     struct knote *tmp = NULL;

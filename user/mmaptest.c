@@ -863,8 +863,9 @@ static void sparse_verify_file(const char *label,
 
     char page[SPARSE_PGSIZE];
     for (int p = 0; p < SPARSE_NPAGES; p++) {
-        if (read(fd, page, SPARSE_PGSIZE) != SPARSE_PGSIZE) {
-            printf("FAIL (%s) - read page %d\n", label, p);
+        int rn = read(fd, page, SPARSE_PGSIZE);
+        if (rn != SPARSE_PGSIZE) {
+            printf("FAIL (%s) - read page %d (got %d)\n", label, p, rn);
             close(fd);
             exit(1);
         }
