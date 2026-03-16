@@ -52,7 +52,7 @@
 #include <dev/bio.h>
 
 #define VM_FILE_FAULT_AROUND_PAGES 16
-#define VM_MMAP_EAGER_PAGES 32
+#define VM_MMAP_EAGER_PAGES 64
 
 /*
  * Default compound order for anonymous folio allocation during demand faults.
@@ -278,10 +278,26 @@ static void __vma_set_free(vma_t *vma)
     int tlb_needs_flush = 0;
     if (vma->vm->pagetable != NULL) {
         pagetable_t pagetable = vma->vm->pagetable;
+        pte_t *l0 = NULL;
+        uint64 l0_rgn = ~0ULL;
         for (uint64 a = vma->start; a < vma->end; a += PGSIZE) {
-            pte_t *pte = walk(pagetable, a, 0, NULL, NULL);
-            if (pte == 0)
-                continue;
+            pte_t *pte;
+            uint64 rgn = a >> PXSHIFT(1);
+            if (rgn == l0_rgn && l0 != NULL) {
+                pte = &l0[PX(0, a)];
+            } else {
+                pte = walk(pagetable, a, 0, NULL, NULL);
+                l0_rgn = rgn;
+                if (pte == 0) {
+                    /* No page table for this 2MB region — skip ahead. */
+                    l0 = NULL;
+                    uint64 next = ((a >> PXSHIFT(1)) + 1) << PXSHIFT(1);
+                    if (next > a + PGSIZE)
+                        a = next - PGSIZE; /* loop increment adds PGSIZE */
+                    continue;
+                }
+                l0 = pte - PX(0, a);
+            }
             if (pte_nonleaf(pte))
                 panic("__vma_set_free: not a leaf");
             if (!pte_present(pte))
@@ -557,6 +573,14 @@ static void __vm_destroy(vm_t *vm)
      * the same VMA pointer in two disjoint ranges.  After __vma_free
      * sets FREED_MAGIC, the second encounter is caught cheaply.
      */
+
+    /*
+     * No CPU can be running this address space any more (the last
+     * reference was just dropped), so zero the cpumask to suppress all
+     * TLB IPIs during the VMA teardown loop below.
+     */
+    smp_store_release(&vm->cpumask, 0);
+
     uint64 idx = 0;
     void *entry;
     mt_for_each(&vm->vm_mt, entry, idx, MAPLE_MAX) {
@@ -1372,8 +1396,127 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                     (void)vma->file->ops->prefault(vma->file, vma, i,
                                                    fault_end);
 
-                for (uint64 fault_va = i; fault_va < fault_end;
-                     fault_va += PGSIZE) {
+                /*
+                 * Folio-based batch PTE installation.
+                 *
+                 * After prefault loaded pcache folios, try to install
+                 * PTEs for all pages in each folio under a single lock
+                 * hold, using one pcache_get_page per folio instead of
+                 * one per page.  Fall through to per-page fault for any
+                 * pages that can't be batch-installed (partial pages,
+                 * pcache miss, etc.).
+                 */
+                struct vfs_inode *__fi = vfs_inode_deref(&vma->file->inode);
+                struct pcache *__pc = NULL;
+                if (__fi != NULL) {
+                    __pc = &__fi->i_data;
+                    if (!__pc->active)
+                        __pc = NULL;
+                }
+
+                uint64 fault_va = i;
+                while (__pc != NULL && fault_va < fault_end) {
+                    uint64 file_off = vma->pgoff + (fault_va - vma->start);
+                    uint64 inode_sz = (uint64)READ_ONCE(__fi->size);
+                    if (file_off >= inode_sz)
+                        break;
+
+                    uint64 blkno_512 = file_off / 512ULL;
+                    page_t *pcpage = pcache_get_page(__pc, blkno_512);
+                    if (pcpage == NULL)
+                        break;
+
+                    if (pcache_read_page(__pc, pcpage) != 0) {
+                        pcache_put_page(__pc, pcpage);
+                        break;
+                    }
+
+                    struct pcache_node *pcn = pcpage->pcache.pcache_node;
+                    if (pcn == NULL || pcn->data == NULL) {
+                        pcache_put_page(__pc, pcpage);
+                        break;
+                    }
+
+                    uint64 folio_base = (uint64)pcn->blkno * 512ULL;
+                    unsigned long nr = pcn->page_count;
+                    uint64 folio_data_end = folio_base + nr * PGSIZE;
+
+                    /* Collect installable full pages from this folio. */
+                    int nc = 0;
+                    uint64 iv[VM_FILE_FAULT_AROUND_PAGES];
+                    void  *ip[VM_FILE_FAULT_AROUND_PAGES];
+
+                    for (uint64 v = fault_va; v < fault_end; v += PGSIZE) {
+                        uint64 fo = vma->pgoff + (v - vma->start);
+                        if (fo < folio_base || fo >= folio_data_end)
+                            break;
+                        if (fo + PGSIZE > inode_sz)
+                            break; /* partial page — per-page fallback */
+                        iv[nc] = v;
+                        ip[nc] = (char *)pcn->data + (fo - folio_base);
+                        nc++;
+                    }
+
+                    if (nc == 0) {
+                        pcache_put_page(__pc, pcpage);
+                        break; /* can't batch — fall through */
+                    }
+
+                    /* Add one ref per PTE we intend to install. */
+                    for (int j = 0; j < nc; j++)
+                        __page_ref_inc(pcpage);
+
+                    vm_pgtable_lock(vma->vm);
+                    pte_t *fp = walk(vma->vm->pagetable, iv[0], 1, NULL, NULL);
+                    if (fp == NULL) {
+                        vm_pgtable_unlock(vma->vm);
+                        for (int j = 0; j < nc; j++)
+                            __page_ref_dec(pcpage);
+                        pcache_put_page(__pc, pcpage);
+                        return -ENOMEM;
+                    }
+                    pte_t *l0 = fp - PX(0, iv[0]);
+                    uint64 l0_rgn = iv[0] >> PXSHIFT(1);
+
+                    for (int j = 0; j < nc; j++) {
+                        pte_t *p;
+                        if ((iv[j] >> PXSHIFT(1)) == l0_rgn) {
+                            p = &l0[PX(0, iv[j])];
+                        } else {
+                            p = walk(vma->vm->pagetable, iv[j], 1, NULL, NULL);
+                            if (p == NULL) {
+                                for (int k = j; k < nc; k++)
+                                    __page_ref_dec(pcpage);
+                                nc = j;
+                                break;
+                            }
+                            l0 = p - PX(0, iv[j]);
+                            l0_rgn = iv[j] >> PXSHIFT(1);
+                        }
+
+                        if (*p != 0) {
+                            /* Already mapped — release the PTE ref. */
+                            __page_ref_dec(pcpage);
+                        } else {
+                            *p = mk_pte((uint64)ip[j],
+                                        vma->flags & ~PROT_WRITE);
+                            pte_mkclean(p);
+                            __atomic_fetch_add(&g_vm_file_faults, 1,
+                                               __ATOMIC_RELAXED);
+                        }
+                    }
+                    /* One full TLB flush instead of per-PTE INVLPG. */
+                    sfence_vma();
+                    vm_pgtable_unlock(vma->vm);
+
+                    pcache_put_page(__pc, pcpage);
+
+                    /* Advance past the batch-installed pages. */
+                    fault_va = iv[nc - 1] + PGSIZE;
+                }
+
+                /* Per-page fallback for pages the batch couldn't handle. */
+                for (; fault_va < fault_end; fault_va += PGSIZE) {
                     vm_pgtable_lock(vma->vm);
                     pte = walk(vma->vm->pagetable, fault_va, 1, NULL, NULL);
                     if (pte == NULL) {
@@ -2819,9 +2962,9 @@ uint64 vm_mmap(vm_t *vm, uint64 addr, size_t length, int prot, int flags,
 
     if (file != NULL && !(vm_flags & PROT_WRITE) &&
         (vm_flags & (PROT_READ | PROT_EXEC))) {
+        uint64 eager_flags = VMA_FLAG_USER | (vm_flags & (PROT_READ | PROT_EXEC));
         uint64 eager_len = length;
         uint64 eager_max = VM_MMAP_EAGER_PAGES * PGSIZE;
-        uint64 eager_flags = VMA_FLAG_USER | (vm_flags & (PROT_READ | PROT_EXEC));
 
         if (eager_len > eager_max)
             eager_len = eager_max;

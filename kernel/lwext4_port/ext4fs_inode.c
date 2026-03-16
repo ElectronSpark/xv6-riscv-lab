@@ -265,6 +265,7 @@ static int ext4fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         }
         ret_dentry->name_len = 2;
         ret_dentry->ino      = ext4_dir_en_get_inode(result.dentry);
+        ret_dentry->d_type   = EXT4_DE_DIR;
         ret_dentry->sb       = dir->sb;
 
         ext4_dir_destroy_result(&dir_ref, &result);
@@ -317,6 +318,7 @@ static int ext4fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
         }
         ret_dentry->name_len = nlen;
         ret_dentry->ino      = ino;
+        ret_dentry->d_type   = ext4_dir_en_get_inode_type(&fs->sb, dit.curr);
 
         /* Advance past this entry for next call */
         uint64_t next_off = dit.curr_off +

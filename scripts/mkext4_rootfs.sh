@@ -235,7 +235,7 @@ cat > "$STAGING/etc/daemons" <<'DAEMONS'
 
 /bin/telnetd
 /bin/sshd -D -e
-/bin/python /app/wsgi.py
+# /bin/python /app/wsgi.py
 DAEMONS
 
 # ── lwIP network configuration ───────────────────────────────────────────────

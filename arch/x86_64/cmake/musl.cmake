@@ -72,6 +72,7 @@ add_custom_command(
             bash ${MUSL_BUILD_SCRIPT} --prefix=${MUSL_SYSROOT} --build-dir=${MUSL_BUILD_DIR}
     DEPENDS
         ${MUSL_BUILD_SCRIPT}
+        ${MUSL_XV6_DIR}/apply_xv6_overlay.sh
         ${MUSL_ARCH_DEPS}
     COMMENT "${MUSL_BUILD_COMMENT}"
 )

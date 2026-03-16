@@ -1524,12 +1524,31 @@ uint64 sys_getdents(void) {
             break;
         }
 
-        // Get inode info for d_type
-        struct vfs_inode *child = vfs_get_dentry_inode(&dentry);
+        // Get d_type — use ext4 dir entry type if available, else look up inode
         uint8 d_type = DT_UNKNOWN;
-        if (!IS_ERR_OR_NULL(child)) {
-            d_type = __mode_to_dtype(child->mode);
-            vfs_iput(child);
+        if (dentry.d_type != 0) {
+            /* Filesystem provided d_type directly (ext4 dir entry).  Map
+             * EXT4_DE_* → DT_* using a static table matching Linux's
+             * ext4_filetype_table[]. */
+            static const uint8 ext4_de_to_dt[] = {
+                [0] = DT_UNKNOWN, /* EXT4_DE_UNKNOWN */
+                [1] = DT_REG,     /* EXT4_DE_REG_FILE */
+                [2] = DT_DIR,     /* EXT4_DE_DIR */
+                [3] = DT_CHR,     /* EXT4_DE_CHRDEV */
+                [4] = DT_BLK,     /* EXT4_DE_BLKDEV */
+                [5] = DT_FIFO,    /* EXT4_DE_FIFO */
+                [6] = DT_SOCK,    /* EXT4_DE_SOCK */
+                [7] = DT_LNK,     /* EXT4_DE_SYMLINK */
+            };
+            if (dentry.d_type < sizeof(ext4_de_to_dt))
+                d_type = ext4_de_to_dt[dentry.d_type];
+        }
+        if (d_type == DT_UNKNOWN) {
+            struct vfs_inode *child = vfs_get_dentry_inode(&dentry);
+            if (!IS_ERR_OR_NULL(child)) {
+                d_type = __mode_to_dtype(child->mode);
+                vfs_iput(child);
+            }
         }
 
         // Fill dirent

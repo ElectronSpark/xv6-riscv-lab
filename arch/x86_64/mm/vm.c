@@ -425,8 +425,12 @@ pagetable_t uvmcreate(void)
  *
  * skip_idx: PML4 index to skip (shared kernel mapping, e.g. PML4[511]).
  */
-static void __freewalk(pagetable_t pagetable, int level)
+static int __freewalk_leak_count;
+
+static void __freewalk(pagetable_t pagetable, int level, uint64 base_va)
 {
+    /* Bits per level: PT=12, PD=21, PDPT=30, PML4=39 */
+    static const int shift[] = {12, 21, 30, 39};
     for (int i = 0; i < 512; i++) {
         /* At PML4 level, skip all upper-half entries (256-511).
          * These are shared kernel mappings and must not be freed. */
@@ -435,17 +439,23 @@ static void __freewalk(pagetable_t pagetable, int level)
         pte_t pte = pagetable[i];
         if (!(pte & PTE_V))
             continue;
+        uint64 va = base_va | ((uint64)i << shift[level]);
         if (level > 0) {
             /* Non-leaf: recurse into next level page table.
              * PTE2PA extracts a PA; pgtab_alloc() returns PAs that are
              * usable as pointers via the PML4[0] identity map, so
              * casting directly to pagetable_t is correct here. */
             uint64 child = PTE2PA(pte);
-            __freewalk((pagetable_t)child, level - 1);
+            __freewalk((pagetable_t)child, level - 1, va);
             pagetable[i] = 0;
         } else {
             /* Level 0 (PT): this is a leaf — should have been cleared. */
-            panic("freewalk: leaf");
+            printf("freewalk: LEAK va=0x%lx pte=0x%lx pa=0x%lx\n",
+                   (unsigned long)va, (unsigned long)pte,
+                   (unsigned long)PTE2PA(pte));
+            /* Clear it to allow scanning the rest of the page table. */
+            pagetable[i] = 0;
+            __freewalk_leak_count++;
         }
     }
     pgtab_free((void *)pagetable);
@@ -453,7 +463,14 @@ static void __freewalk(pagetable_t pagetable, int level)
 
 void freewalk(pagetable_t pagetable)
 {
-    __freewalk(pagetable, 3);
+    __freewalk_leak_count = 0;
+    __freewalk(pagetable, 3, 0);
+    if (__freewalk_leak_count > 0) {
+        printf("freewalk: WARNING: %d leaked PTE(s) (pid %d %s)\n",
+               __freewalk_leak_count,
+               current ? current->pid : -1,
+               current ? current->name : "?");
+    }
 }
 
 void uvmfree(pagetable_t pagetable, uint64 sz)

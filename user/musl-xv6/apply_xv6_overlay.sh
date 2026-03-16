@@ -23,7 +23,7 @@
 #   - __unmapself.s         — xv6 syscall numbers (not Linux hardcoded)
 #   - vfork.s              — use clone with CLONE_VM|CLONE_VFORK
 #   - fstatat.c            — remove zero-initialiser on kstat (xv6 compat)
-#   - brk disabled         — force mmap-only malloc
+#   - brk enabled, guard page removed — MAP_FIXED inside heap breaks sbrk
 #   - arch-specific extras (crt_arch.h, syscall_arch.h, bits/*.h if present)
 #
 # The key insight: musl's RISC-V ecall convention is identical to xv6's
@@ -100,10 +100,20 @@ apply_xv6_overlay() {
         cp "${arch_src}/bits/alltypes.h.in" "${musl_arch_dir}/bits/alltypes.h.in"
     fi
 
-    # ── Disable brk — force mmap-only malloc ─────────────────────────────
-    echo "Disabling brk in malloc (mmap-only mode)..."
-    sed -i 's/#define brk(p) ((uintptr_t)__syscall(SYS_brk, p))/#define brk(p) ((uintptr_t)-1)/' \
-        "${musl_src}/src/malloc/mallocng/glue.h" 2>/dev/null || true
+    # ── brk enabled — musl malloc can use brk for small allocations ──────
+    # The kernel reserves HEAP_RESERVE_PAGES (256 MiB) above the heap start
+    # so mmap never collides with the brk region.
+    # No patching needed — keep musl's default brk() definition.
+
+    # ── Remove brk guard page — MAP_FIXED inside the heap VMA splits it
+    # and breaks sbrk() for programs using the K&R allocator (umalloc.c).
+    local malloc_c="${musl_src}/src/malloc/mallocng/malloc.c"
+    if [[ -f "${malloc_c}" ]]; then
+        sed -i '/need_guard.*mmap.*ctx\.brk.*pagesize/,/MAP_FIXED.*-1.*0);/{
+            s/.*if (need_guard) mmap.*/\t\t\t\t\/* xv6: skip guard page *\//
+            /MAP_ANON.*MAP_PRIVATE.*MAP_FIXED/d
+        }' "${malloc_c}"
+    fi
 
     echo "xv6 ${arch} overlay applied."
 }

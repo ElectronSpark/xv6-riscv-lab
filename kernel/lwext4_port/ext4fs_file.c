@@ -81,6 +81,100 @@ static void ext4fs_pcache_readahead(struct pcache *pc, uint64 start_blkno_512,
     }
 }
 
+/*
+ * ext4fs_folio_read_direct - Fill a multi-page folio via a single BIO,
+ * bypassing the lwext4 block cache.  Only used when all data blocks are
+ * physically contiguous on disk and block_size == PGSIZE.
+ *
+ * Returns 0 on success; negative errno on failure (caller falls back to
+ * per-page ext4fs_fill_page_from_ref).
+ */
+static int ext4fs_folio_read_direct(struct ext4_fs *fs,
+                                    struct ext4fs_superblock *esb,
+                                    struct ext4_inode_ref *ref,
+                                    struct pcache_node *pcn,
+                                    uint64 base_file_off,
+                                    uint64 inode_size)
+{
+    uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+    unsigned int nr_pages = pcn->page_count;
+
+    /* Only handle 4K-block filesystems with multi-page folios. */
+    if (block_size != PGSIZE || nr_pages < 2 || nr_pages > 16)
+        return -EINVAL;
+
+    /* Determine how many pages fall within the file. */
+    unsigned int fill_pages = nr_pages;
+    for (unsigned int i = 0; i < nr_pages; i++) {
+        if (base_file_off + (uint64)i * PGSIZE >= inode_size) {
+            fill_pages = i;
+            break;
+        }
+    }
+    if (fill_pages < 2)
+        return -EINVAL;
+
+    /* Resolve physical blocks and check contiguity.
+     * Instead of checking every block (O(N)), verify first and last only.
+     * If last_fblock == first_fblock + (N-1), the range is contiguous
+     * (ext4 extents guarantee blocks within one extent are contiguous,
+     * and two adjacent extents with matching physical offsets are too). */
+    ext4_lblk_t first_iblock = (ext4_lblk_t)(base_file_off / block_size);
+    ext4_fsblk_t first_fblock;
+    int r = ext4_fs_get_inode_dblk_idx(ref, first_iblock, &first_fblock, true);
+    if (r != EOK || first_fblock == 0)
+        return -EIO;
+
+    ext4_fsblk_t last_fblock;
+    r = ext4_fs_get_inode_dblk_idx(ref, first_iblock + fill_pages - 1,
+                                   &last_fblock, true);
+    if (r != EOK || last_fblock == 0 ||
+        last_fblock != first_fblock + fill_pages - 1)
+        return -EINVAL; /* not contiguous — fall back */
+
+    /* Convert ext4 physical block to 512-byte sector for BIO. */
+    blkdev_t *blk = esb->xv6_blkdev;
+    uint64 pba = ((uint64)first_fblock * block_size +
+                  esb->bdev.part_offset) / esb->bdev_iface.ph_bsize;
+
+    struct bio *bio = bio_alloc(blk, 1, false, NULL, NULL);
+    if (IS_ERR_OR_NULL(bio))
+        return -ENOMEM;
+
+    bio->blkno = pba;
+
+    /* Add the pcache folio directly — compound pages are physically
+     * contiguous, so the device DMA's straight into pcache memory. */
+    r = bio_add_folio(bio, pcn->folio, fill_pages * PGSIZE, 0);
+    if (r != 0) {
+        bio_release(bio);
+        return r;
+    }
+
+    r = blkdev_submit_bio(blk, bio);
+    if (r != 0) {
+        bio_release(bio);
+        return r;
+    }
+
+    r = bio_await(bio);
+    bio_release(bio);
+    if (r != 0)
+        return r;
+
+    /* Zero-fill any partial tail within the last in-file page. */
+    uint64 file_tail = inode_size - base_file_off;
+    if (file_tail < (uint64)fill_pages * PGSIZE)
+        memset((char *)pcn->data + file_tail, 0,
+               (uint64)fill_pages * PGSIZE - file_tail);
+
+    /* Zero-fill pages beyond the file end (remaining folio sub-pages). */
+    for (unsigned int i = fill_pages; i < nr_pages; i++)
+        memset((char *)pcn->data + (uint64)i * PGSIZE, 0, PGSIZE);
+
+    return 0;
+}
+
 static int ext4fs_fill_page_from_ref(struct ext4_fs *fs,
                                      struct ext4fs_superblock *esb,
                                      struct vfs_inode *inode,
@@ -308,7 +402,7 @@ static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
         return -r;
     }
 
-    for (uint64 va = start_va; va < end_va; va += PGSIZE) {
+    for (uint64 va = start_va; va < end_va; ) {
         uint64 file_off = vma->pgoff + (va - vma->start);
         if (file_off >= inode_size)
             break;
@@ -322,6 +416,8 @@ static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
 
         struct pcache_node *pcn = NULL;
         int state = ext4fs_prefault_begin_page(pc, pcpage, &pcn);
+        unsigned long skip_pages = 1;
+
         if (state == 0) {
             uint64 read_start = r_time();
             __atomic_fetch_add(&g_ext4_pcache_read_page_calls, 1,
@@ -335,14 +431,24 @@ static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
              */
             unsigned long nr_pages = pcn->page_count;
             uint64 base_file_off = (uint64)pcn->blkno * 512ULL;
-            r = 0;
-            for (unsigned long p = 0; p < nr_pages; p++) {
-                uint64 pg_off = base_file_off + p * PGSIZE;
-                void *dst = (char *)pcn->data + p * PGSIZE;
-                r = ext4fs_fill_page_from_ref(fs, esb, inode, &ref, dst,
-                                              pg_off, inode_size);
-                if (r != 0)
-                    break;
+
+            /*
+             * Fast path: try to read the whole folio in a single BIO
+             * (bypasses the lwext4 block cache — the pcache IS our cache).
+             */
+            r = ext4fs_folio_read_direct(fs, esb, &ref, pcn,
+                                         base_file_off, inode_size);
+            if (r != 0) {
+                /* Fall back to per-page read through lwext4 bcache. */
+                r = 0;
+                for (unsigned long p = 0; p < nr_pages; p++) {
+                    uint64 pg_off = base_file_off + p * PGSIZE;
+                    void *dst = (char *)pcn->data + p * PGSIZE;
+                    r = ext4fs_fill_page_from_ref(fs, esb, inode, &ref, dst,
+                                                  pg_off, inode_size);
+                    if (r != 0)
+                        break;
+                }
             }
 
             if (r == 0)
@@ -354,9 +460,26 @@ static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
             ext4fs_prefault_end_page(pc, pcpage, r == 0);
             if (r != 0 && ret == 0)
                 ret = r;
+
+            /* Skip past the loaded folio. */
+            uint64 folio_end_off = base_file_off + nr_pages * PGSIZE;
+            if (folio_end_off > file_off)
+                skip_pages = (folio_end_off - file_off) / PGSIZE;
+        } else {
+            /* Folio already uptodate or in-progress — skip it entirely. */
+            struct pcache_node *node = pcpage->pcache.pcache_node;
+            if (node != NULL && node->page_count > 1) {
+                uint64 folio_end_off = (uint64)node->blkno * 512ULL +
+                                       (uint64)node->page_count * PGSIZE;
+                if (folio_end_off > file_off)
+                    skip_pages = (folio_end_off - file_off) / PGSIZE;
+            }
         }
 
         pcache_put_page(pc, pcpage);
+        if (skip_pages < 1)
+            skip_pages = 1;
+        va += skip_pages * PGSIZE;
     }
 
     ext4_fs_put_inode_ref(&ref);
@@ -450,14 +573,35 @@ static int ext4fs_pcache_write_page(struct pcache *pcache, page_t *page)
 }
 
 static int ext4fs_pcache_read_folio(struct pcache *pcache, folio_t *folio) {
-    /* ext4fs read_page uses lwext4 block I/O with its own block cache.
-     * Call the page-level helper for each base page in the folio. */
     page_t *head = &folio->page;
     struct pcache_node *pcn = head->pcache.pcache_node;
     unsigned long nr = pcn->page_count;
+
+    /* Try direct multi-page BIO for multi-page folios. */
+    if (nr >= 2) {
+        struct vfs_inode *inode = (struct vfs_inode *)pcache->private_data;
+        if (inode != NULL && inode->sb != NULL) {
+            struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+            struct ext4_fs *fs = &esb->ext4fs;
+            uint64 inode_size = (uint64)inode->size;
+            uint64 base_file_off = (uint64)pcn->blkno * 512ULL;
+
+            ext4fs_lock(esb);
+            struct ext4_inode_ref ref;
+            int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
+            if (r == EOK) {
+                r = ext4fs_folio_read_direct(fs, esb, &ref, pcn,
+                                             base_file_off, inode_size);
+                ext4_fs_put_inode_ref(&ref);
+            }
+            ext4fs_unlock(esb);
+            if (r == 0)
+                return 0;
+        }
+    }
+
+    /* Fall back to per-page read through lwext4 bcache. */
     for (unsigned long i = 0; i < nr; i++) {
-        /* Temporarily adjust the pcache_node to address each sub-page so
-         * the legacy read_page sees a single-page view. */
         uint64 saved_blkno = pcn->blkno;
         void  *saved_data  = pcn->data;
         size_t saved_size  = pcn->size;

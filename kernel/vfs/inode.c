@@ -224,14 +224,15 @@ retry:
     // a directory will cascade vfs_iput to its parent.
     //
     // Root inodes and mountpoint inodes must always stay in cache while
-    // attached.
+    // attached.  For backend filesystems (ext4, xv6fs), keep inodes with
+    // positive link count cached so their page cache (pcache) survives
+    // across open/close cycles.  They can be reclaimed later by
+    // __vfs_evict_unused_inodes during unmount.
     if (sb->attached && (inode->n_links > 0 || inode->mount)) {
-        if (sb->backendless || inode == sb->root_inode || inode->mount) {
-            // Keep inode cached with refcount already consumed to 0.
-            vfs_iunlock(inode);
-            vfs_superblock_unlock(sb);
-            return;
-        }
+        // Keep inode cached with refcount already consumed to 0.
+        vfs_iunlock(inode);
+        vfs_superblock_unlock(sb);
+        return;
     }
 
     assert(!inode->mount,

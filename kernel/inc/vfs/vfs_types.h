@@ -369,6 +369,7 @@ struct vfs_dentry {
     // The `name` field is managed by slab allocator
     char *name;
     uint16 name_len;
+    uint8 d_type;  // DT_* file type (0 = DT_UNKNOWN → caller must look up inode)
     int64 cookies; // Filesystem-private cookie; opaque to callers. The VFS uses
                    // internal sentinel values during directory iteration, but
                    // external callers must not rely on any specific value.
