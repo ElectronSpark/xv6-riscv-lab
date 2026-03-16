@@ -51,7 +51,8 @@
 #include <vfs/fs.h>
 #include <dev/bio.h>
 
-#define VM_FILE_FAULT_AROUND_PAGES 16
+/* Fault-around is now controlled by USER_FAULT_AROUND_PAGES in
+ * the arch trap handler.  The batch install uses va_end directly. */
 #define VM_MMAP_EAGER_PAGES 64
 
 /*
@@ -289,6 +290,62 @@ static void __vma_set_free(vma_t *vma)
         (vma->file != NULL) && (vma->flags & VMA_FLAG_SHARED) &&
         (vma->flags & VMA_FLAG_FILE);
     int tlb_needs_flush = 0;
+    uint64 pages_freed = 0;
+    uint64 anon_pages = 0;
+    uint64 pte_walk_start = r_time();
+
+    /*
+     * Two-phase page release: Phase 1 clears PTEs and collects pages
+     * into a deferred array.  Phase 2 (after TLB flush) releases refs
+     * in batch, grouping consecutive pcache folio refs together.
+     */
+#define VMA_FREE_DEFER_MAX 256
+    struct {
+        uint64 pa;
+        page_t *pg;
+    } defer[VMA_FREE_DEFER_MAX];
+    int ndefer = 0;
+
+    /* Flush helper: release all deferred pages. */
+#define FLUSH_DEFERRED() do {                                       \
+    uint64 rel_start = r_time();                                    \
+    struct pcache *batch_pc = NULL;                                 \
+    folio_t *batch_folio  = NULL;                                   \
+    int batch_count = 0;                                            \
+    for (int __d = 0; __d < ndefer; __d++) {                        \
+        page_t *__pg = defer[__d].pg;                               \
+        page_t *__pc_head = page_pcache_head(__pg);                 \
+        if (__pc_head != NULL) {                                    \
+            folio_t *__f = page_folio(__pc_head);                   \
+            if (__f == batch_folio) {                                \
+                batch_count++;                                      \
+            } else {                                                \
+                if (batch_folio != NULL)                             \
+                    pcache_put_folio_refs(batch_pc, batch_folio,     \
+                                         batch_count);              \
+                batch_pc = __pc_head->pcache.pcache;                \
+                batch_folio = __f;                                   \
+                batch_count = 1;                                    \
+            }                                                       \
+        } else {                                                    \
+            if (batch_folio != NULL) {                               \
+                pcache_put_folio_refs(batch_pc, batch_folio,         \
+                                     batch_count);                  \
+                batch_folio = NULL; batch_count = 0;                \
+            }                                                       \
+            if (__pg != NULL && PAGE_IS_TYPE(__pg, PAGE_TYPE_ANON))  \
+                page_remove_rmap(__pg);                              \
+            page_ref_dec((void *)defer[__d].pa);                    \
+            anon_pages++;                                           \
+        }                                                           \
+    }                                                               \
+    if (batch_folio != NULL)                                        \
+        pcache_put_folio_refs(batch_pc, batch_folio, batch_count);  \
+    g_vm_munmap_page_release_ticks +=                             \
+                       r_time() - rel_start;                        \
+    ndefer = 0;                                                     \
+} while (0)
+
     if (vma->vm->pagetable != NULL) {
         pagetable_t pagetable = vma->vm->pagetable;
         pte_t *l0 = NULL;
@@ -323,10 +380,11 @@ static void __vma_set_free(vma_t *vma)
                         uint64 pa = pte_pa(pte);
                         pte_clear(pte);
                         tlb_needs_flush = 1;
-                        page_t *pg = __pa_to_page(pa);
-                        if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
-                            page_remove_rmap(pg);
-                        page_ref_dec((void *)pa);
+                        defer[ndefer].pa = pa;
+                        defer[ndefer].pg = __pa_to_page(pa);
+                        ndefer++;
+                        if (ndefer == VMA_FREE_DEFER_MAX)
+                            FLUSH_DEFERRED();
                     }
                     l0 = NULL;
                     /* Advance to end of this 2MB region. */
@@ -345,30 +403,29 @@ static void __vma_set_free(vma_t *vma)
             int was_dirty = pte_dirty(pte);
             pte_clear(pte);
             tlb_needs_flush = 1;
+            pages_freed++;
 
             /* Write dirty pages back for MAP_SHARED file mappings. */
             if (shared_file_wb && was_dirty)
                 __vma_writeback_dirty_page(vma, a, pa);
 
-            /* Release the page. */
-            page_t *pg = __pa_to_page(pa);
-            page_t *pc_head = page_pcache_head(pg);
-            if (pc_head != NULL) {
-                folio_t *folio = page_folio(pc_head);
-                pcache_put_folio(pc_head->pcache.pcache, folio);
-            } else {
-                /* Only decrement mapcount for HEAD pages (PAGE_TYPE_ANON).
-                 * Tail pages share the union with head_page — never touch
-                 * anon.mapcount on them.  Each folio has exactly one head
-                 * PTE so mapcount stays balanced (one dec per teardown). */
-                if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
-                    page_remove_rmap(pg);
-                page_ref_dec((void *)pa);
-            }
+            /* Collect page for deferred release. */
+            defer[ndefer].pa = pa;
+            defer[ndefer].pg = __pa_to_page(pa);
+            ndefer++;
+            if (ndefer == VMA_FREE_DEFER_MAX)
+                FLUSH_DEFERRED();
         }
         if (tlb_needs_flush)
             vm_remote_sfence_range(vma->vm, vma->start, VMA_SIZE(vma));
+        /* Phase 2: release all deferred pages after TLB flush. */
+        FLUSH_DEFERRED();
     }
+#undef FLUSH_DEFERRED
+#undef VMA_FREE_DEFER_MAX
+    g_vm_munmap_pte_walk_ticks += r_time() - pte_walk_start;
+    g_vm_munmap_pages_freed += pages_freed;
+    g_vm_munmap_anon_pages += anon_pages;
 
     if (vma->file != NULL)
         vfs_fput(vma->file);
@@ -1020,13 +1077,12 @@ int vma_free(vm_t *vm, vma_t *vma)
  */
 static unsigned int __folio_order_for_vma(vma_t *vma, uint64 fault_va)
 {
-    /* Hugepages only for MAP_PRIVATE file-backed VMAs. */
-    if (vma->file == NULL || (vma->flags & VMA_FLAG_SHARED))
-        return 0;
-    uint64 hp_base = fault_va & HUGEPAGE_MASK;
-    uint64 hp_end  = hp_base + HUGEPAGE_SIZE;
-    if (hp_base >= vma->start && hp_end <= vma->end)
-        return HUGEPAGE_ORDER;
+    /*
+     * File-backed hugepages disabled: the 2 MB copy from pcache into an
+     * anonymous folio is extremely expensive under QEMU TCG (770 ms for
+     * a Python launch).  The regular batch-install path maps pcache pages
+     * directly (zero-copy) and is much faster despite 4 KB TLB entries.
+     */
     return 0;
 }
 
@@ -1185,13 +1241,20 @@ static void *__vma_fault_file_hugepage(vma_t *vma, uint64 hp_base)
     if (file_off_end > (uint64)inode->size)
         return NULL;
 
+    /* Warm up pcache folios for the entire 2 MB region via the
+     * filesystem's prefault callback (batched BIO per folio). */
+    if (file->ops != NULL && file->ops->prefault != NULL)
+        (void)file->ops->prefault(file, vma, hp_base,
+                                  hp_base + HUGEPAGE_SIZE);
+
     folio_t *folio = folio_alloc(HUGEPAGE_ORDER, PAGE_TYPE_ANON | GFP_HIGHMEM);
     if (folio == NULL)
         return NULL;
     uint64 folio_pa = folio_address(folio);
 
-    /* Read each 4 KB page from the page cache into the folio. */
-    for (uint64 off = 0; off < HUGEPAGE_SIZE; off += PGSIZE) {
+    /* Copy data from pcache into the 2 MB folio, stepping by pcache
+     * folio (typically 16 pages = 64 KB) instead of per page. */
+    for (uint64 off = 0; off < HUGEPAGE_SIZE; ) {
         uint64 file_off  = file_off_base + off;
         uint64 blkno_512 = file_off / BLK_SIZE;
 
@@ -1210,11 +1273,18 @@ static void *__vma_fault_file_hugepage(vma_t *vma, uint64 hp_base)
             pcache_put_folio(pc, pcfolio);
             goto fail;
         }
-        uint64 folio_byte_off = (uint64)blkno_512 * BLK_SIZE -
-                                (uint64)pcn->blkno * BLK_SIZE;
+
+        /* Copy as much as this pcache folio covers within our range. */
+        uint64 pcn_base = (uint64)pcn->blkno * BLK_SIZE;
+        uint64 pcn_size = (uint64)pcn->page_count * PGSIZE;
+        uint64 src_off  = file_off - pcn_base;
+        uint64 copy_len = pcn_size - src_off;
+        if (off + copy_len > HUGEPAGE_SIZE)
+            copy_len = HUGEPAGE_SIZE - off;
         memmove((void *)(folio_pa + off),
-                (char *)pcn->data + folio_byte_off, PGSIZE);
+                (char *)pcn->data + src_off, copy_len);
         pcache_put_folio(pc, pcfolio);
+        off += copy_len;
     }
 
     return (void *)folio_pa;
@@ -1529,7 +1599,7 @@ static int __vma_validate_pte(vma_t *vma, pte_t *pte, uint64 flags, uint64 fault
 int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
 {
     uint64 validate_start = r_time();
-    __atomic_fetch_add(&g_vm_vma_validate_calls, 1, __ATOMIC_RELAXED);
+    g_vm_vma_validate_calls += 1;
 
     if (flags == PROT_NONE)
         return -EINVAL;
@@ -1569,8 +1639,8 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
     }
 
     vm_pgtable_lock(vma->vm);
-    smp_mb();
 
+    uint64 hp_skip_until = 0;
     for (uint64 i = va; i < va_end; i += PGSIZE) {
         /* File-backed VMA: may need to drop spinlock for I/O */
         if (vma->file != NULL) {
@@ -1578,61 +1648,103 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
             /*
              * ---- 2 MB hugepage attempt for MAP_PRIVATE files ----
              *
-             * Before falling into the per-page fault path, check if
-             * we can satisfy this fault with a single 2 MB PTE.
+             * Allocate the 2 MB folio FIRST (outside lock), so that
+             * a failed allocation never damages the existing L0 table.
+             * Only collapse L0 entries after the folio is ready.
              *
-             * Conditions:
-             *   1. VA is 2 MB-aligned (natural alignment required).
-             *   2. __folio_order_for_vma says OK (file-backed,
-             *      MAP_PRIVATE, VMA covers the full 2 MB range).
-             *   3. The full 2 MB is within the validate range.
-             *   4. The level-1 PTE slot is empty (no existing l0 table).
-             *
-             * The lock is dropped for I/O (reading 512 pcache pages).
-             * After re-acquiring, we re-check the PMD for races.
-             *
-             * NOTE: The PTE is installed read-only even if the VMA is
-             * writable.  The first write will trigger COW in
-             * __vma_validate_pte_rxw, which re-grants write (single
-             * mapper) or copies the whole 2 MB folio (multi-mapper).
-             *
-             * On failure (OOM, partial file, pcache miss), we fall
-             * through to the standard per-page fault-around path.
+             * hp_skip_until prevents re-attempting a 2 MB region that
+             * already failed in this validate pass.
              */
-            uint64 hp_base = i & HUGEPAGE_MASK;
-            if (i == hp_base &&
-                __folio_order_for_vma(vma, i) >= HUGEPAGE_ORDER &&
-                hp_base + HUGEPAGE_SIZE <= va_end) {
-                /* Check level-1 PTE without allocating the level-0 table. */
-                pte_t *pmd = walk_pmd(vma->vm->pagetable, hp_base, 0);
-                if (pmd != NULL && *pmd == 0) {
-                    /* Level-1 slot is empty — try a 2 MB hugepage. */
+            if (i >= hp_skip_until &&
+                __folio_order_for_vma(vma, i) >= HUGEPAGE_ORDER) {
+                uint64 hp_base = i & HUGEPAGE_MASK;
+                pte_t *pmd = walk_pmd(vma->vm->pagetable, hp_base, 1);
+                if (pmd != NULL && pte_is_hugepage(pmd)) {
+                    /* Already a 2 MB hugepage — skip range. */
+                    i = hp_base + HUGEPAGE_SIZE - PGSIZE;
+                    continue;
+                }
+                if (pmd != NULL) {
+                    /* Drop lock to allocate 2 MB folio (may do I/O). */
                     vm_pgtable_unlock(vma->vm);
+                    uint64 hp_start = r_time();
+                    void *hp_pa =
+                        __vma_fault_file_hugepage(vma, hp_base);
+                    g_vm_validate_hugepage_ticks += r_time() - hp_start;
+                    vm_pgtable_lock(vma->vm);
 
-                    void *hp_pa = __vma_fault_file_hugepage(vma, hp_base);
-                    if (hp_pa != NULL) {
-                        vm_pgtable_lock(vma->vm);
-                        pmd = walk_pmd(vma->vm->pagetable, hp_base, 1);
-                        if (pmd != NULL && *pmd == 0) {
-                            folio_t *hp_folio =
-                                page_folio(__pa_to_page((uint64)hp_pa));
-                            /* Install read-only; COW on write. */
-                            uint64 hp_flags = vma->flags & ~PROT_WRITE;
-                            *pmd = mk_pte_huge((uint64)hp_pa, hp_flags);
-                            folio_add_anon_rmap(hp_folio, vma, hp_base);
-                            sfence_vma_page(hp_base);
-                            /* Skip past the 2 MB region. */
+                    if (hp_pa == NULL) {
+                        hp_skip_until = hp_base + HUGEPAGE_SIZE;
+                        goto hp_per_page;
+                    }
+
+                    /* Re-check PMD after re-acquiring lock. */
+                    pmd = walk_pmd(vma->vm->pagetable, hp_base, 1);
+                    if (pmd == NULL || pte_is_hugepage(pmd)) {
+                        page_ref_dec(hp_pa);
+                        if (pmd != NULL) {
                             i = hp_base + HUGEPAGE_SIZE - PGSIZE;
                             continue;
                         }
-                        /* Race: someone else populated it — free ours. */
-                        page_ref_dec(hp_pa);
-                    } else {
-                        vm_pgtable_lock(vma->vm);
+                        goto hp_per_page;
                     }
-                    /* Fall through to per-page fault. */
+
+                    if (*pmd != 0) {
+                        /* L0 table exists — collapse under lock. */
+                        pagetable_t l0_tbl = (pagetable_t)PTE2PA(*pmd);
+                        uint64 deferred_pa[512];
+                        int nd = 0;
+                        for (int k = 0; k < 512; k++) {
+                            if (l0_tbl[k] != 0) {
+                                pte_t *lp = &l0_tbl[k];
+                                if (pte_present(lp))
+                                    deferred_pa[nd++] = pte_pa(lp);
+                                l0_tbl[k] = 0;
+                            }
+                        }
+                        uint64 l0_pa = PTE2PA(*pmd);
+                        pte_clear(pmd);
+                        sfence_vma();
+                        pgtab_free((void *)l0_pa);
+
+                        /* Install hugepage under lock. */
+                        folio_t *hp_folio =
+                            page_folio(__pa_to_page((uint64)hp_pa));
+                        uint64 hp_flags = vma->flags & ~PROT_WRITE;
+                        *pmd = mk_pte_huge((uint64)hp_pa, hp_flags);
+                        folio_add_anon_rmap(hp_folio, vma, hp_base);
+
+                        /* Release deferred pages outside lock. */
+                        vm_pgtable_unlock(vma->vm);
+                        for (int d = 0; d < nd; d++) {
+                            page_t *pg = __pa_to_page(deferred_pa[d]);
+                            page_t *pc_head = page_pcache_head(pg);
+                            if (pc_head != NULL)
+                                pcache_put_folio(
+                                    pc_head->pcache.pcache,
+                                    page_folio(pc_head));
+                            else if (PAGE_IS_TYPE(pg, PAGE_TYPE_ANON)) {
+                                page_remove_rmap(pg);
+                                page_ref_dec((void *)deferred_pa[d]);
+                            }
+                        }
+                        vm_pgtable_lock(vma->vm);
+                        i = hp_base + HUGEPAGE_SIZE - PGSIZE;
+                        continue;
+                    }
+
+                    /* PMD is empty — install directly. */
+                    folio_t *hp_folio =
+                        page_folio(__pa_to_page((uint64)hp_pa));
+                    uint64 hp_flags = vma->flags & ~PROT_WRITE;
+                    *pmd = mk_pte_huge((uint64)hp_pa, hp_flags);
+                    folio_add_anon_rmap(hp_folio, vma, hp_base);
+                    sfence_vma_page(hp_base);
+                    i = hp_base + HUGEPAGE_SIZE - PGSIZE;
+                    continue;
                 }
             }
+hp_per_page:
 
             pte_t *pte = walk(vma->vm->pagetable, i, 1, NULL, NULL);
             if (pte == NULL) {
@@ -1641,17 +1753,11 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
             }
             if (*pte == 0) {
                 vm_pgtable_unlock(vma->vm);
+                uint64 batch_start = r_time();
 
-                uint64 fault_end = i + VM_FILE_FAULT_AROUND_PAGES * PGSIZE;
-                if (fault_end > va_end)
-                    fault_end = va_end;
+                uint64 fault_end = va_end;
                 if (fault_end > vma->end)
                     fault_end = vma->end;
-
-                if (vma->file->ops != NULL &&
-                    vma->file->ops->prefault != NULL)
-                    (void)vma->file->ops->prefault(vma->file, vma, i,
-                                                   fault_end);
 
                 /*
                  * Folio-based batch PTE installation.
@@ -1680,6 +1786,15 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
 
                     uint64 blkno_512 = file_off / 512ULL;
                     page_t *pcpage = pcache_get_page(__pc, blkno_512);
+                    if (pcpage == NULL) {
+                        /* Lazy prefault: call on each cache miss for the
+                         * remaining range.  Warm cache never enters here. */
+                        if (vma->file->ops != NULL &&
+                            vma->file->ops->prefault != NULL)
+                            (void)vma->file->ops->prefault(vma->file, vma,
+                                                           fault_va, fault_end);
+                        pcpage = pcache_get_page(__pc, blkno_512);
+                    }
                     if (pcpage == NULL)
                         break;
 
@@ -1700,8 +1815,8 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
 
                     /* Collect installable full pages from this folio. */
                     int nc = 0;
-                    uint64 iv[VM_FILE_FAULT_AROUND_PAGES];
-                    void  *ip[VM_FILE_FAULT_AROUND_PAGES];
+                    uint64 iv[FOLIO_MAX_ORDER_NR_PAGES];
+                    void  *ip[FOLIO_MAX_ORDER_NR_PAGES];
 
                     for (uint64 v = fault_va; v < fault_end; v += PGSIZE) {
                         uint64 fo = vma->pgoff + (v - vma->start);
@@ -1719,22 +1834,22 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                         break; /* can't batch — fall through */
                     }
 
-                    /* Add one ref per PTE we intend to install. */
-                    for (int j = 0; j < nc; j++)
-                        __page_ref_inc(pcpage);
+                    /* Add nc refs under a single lock hold. */
+                    __page_ref_add(pcpage, nc);
 
                     vm_pgtable_lock(vma->vm);
                     pte_t *fp = walk(vma->vm->pagetable, iv[0], 1, NULL, NULL);
                     if (fp == NULL) {
                         vm_pgtable_unlock(vma->vm);
-                        for (int j = 0; j < nc; j++)
-                            __page_ref_dec(pcpage);
+                        __page_ref_sub(pcpage, nc);
                         pcache_put_page(__pc, pcpage);
                         return -ENOMEM;
                     }
                     pte_t *l0 = fp - PX(0, iv[0]);
                     uint64 l0_rgn = iv[0] >> PXSHIFT(1);
 
+                    int batch_faults = 0;
+                    int unused_refs = 0;
                     for (int j = 0; j < nc; j++) {
                         pte_t *p;
                         if ((iv[j] >> PXSHIFT(1)) == l0_rgn) {
@@ -1742,8 +1857,7 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                         } else {
                             p = walk(vma->vm->pagetable, iv[j], 1, NULL, NULL);
                             if (p == NULL) {
-                                for (int k = j; k < nc; k++)
-                                    __page_ref_dec(pcpage);
+                                unused_refs += nc - j;
                                 nc = j;
                                 break;
                             }
@@ -1753,17 +1867,22 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
 
                         if (*p != 0) {
                             /* Already mapped — release the PTE ref. */
-                            __page_ref_dec(pcpage);
+                            unused_refs++;
                         } else {
                             *p = mk_pte((uint64)ip[j],
                                         vma->flags & ~PROT_WRITE);
                             pte_mkclean(p);
-                            __atomic_fetch_add(&g_vm_file_faults, 1,
-                                               __ATOMIC_RELAXED);
+                            batch_faults++;
                         }
                     }
-                    /* One full TLB flush instead of per-PTE INVLPG. */
-                    sfence_vma();
+                    /* Release unused PTE refs in batch. */
+                    if (unused_refs > 0)
+                        __page_ref_sub(pcpage, unused_refs);
+                    if (batch_faults > 0)
+                        g_vm_file_faults += batch_faults;
+                    /* No TLB flush needed: we're installing PTEs for
+                     * previously-unmapped addresses (PTE was 0).
+                     * Non-present entries are not cached in TLB. */
                     vm_pgtable_unlock(vma->vm);
 
                     pcache_put_page(__pc, pcpage);
@@ -1773,6 +1892,8 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                 }
 
                 /* Per-page fallback for pages the batch couldn't handle. */
+                uint64 fallback_start = r_time();
+                g_vm_validate_batch_ticks += fallback_start - batch_start;
                 for (; fault_va < fault_end; fault_va += PGSIZE) {
                     vm_pgtable_lock(vma->vm);
                     pte = walk(vma->vm->pagetable, fault_va, 1, NULL, NULL);
@@ -1787,8 +1908,7 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                     vm_pgtable_unlock(vma->vm);
 
                     void *pa;
-                    __atomic_fetch_add(&g_vm_file_faults, 1,
-                                       __ATOMIC_RELAXED);
+                    g_vm_file_faults += 1;
                     if (vma->file->ops != NULL && vma->file->ops->fault != NULL)
                         pa = vma->file->ops->fault(vma->file, vma, fault_va);
                     else
@@ -1824,17 +1944,24 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                         *pte = mk_pte((uint64)pa, pte_flags);
                         if (is_pcache)
                             pte_mkclean(pte);
-                        sfence_vma_page(fault_va);
+                        /* No TLB flush: PTE was 0, non-present entries
+                         * are not cached in TLB. */
                     }
                     vm_pgtable_unlock(vma->vm);
                 }
+                g_vm_validate_fallback_ticks += r_time() - fallback_start;
                 vm_pgtable_lock(vma->vm);
                 i = fault_end - PGSIZE;
                 continue;
             }
-            if (__vma_validate_pte(vma, pte, flags, i) != 0) {
-                vm_pgtable_unlock(vma->vm);
-                return -EFAULT;
+            {
+                uint64 pte_chk = r_time();
+                int pte_ret = __vma_validate_pte(vma, pte, flags, i);
+                g_vm_validate_pte_check_ticks += r_time() - pte_chk;
+                if (pte_ret != 0) {
+                    vm_pgtable_unlock(vma->vm);
+                    return -EFAULT;
+                }
             }
             continue;
         }
@@ -1852,8 +1979,7 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
     }
 
     vm_pgtable_unlock(vma->vm);
-    __atomic_fetch_add(&g_vm_vma_validate_ticks, r_time() - validate_start,
-                       __ATOMIC_RELAXED);
+    g_vm_vma_validate_ticks += r_time() - validate_start;
     return 0;
 }
 
@@ -1864,8 +1990,8 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
 int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
 {
     uint64 copy_start = r_time();
-    __atomic_fetch_add(&g_vm_copyout_calls, 1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&g_vm_copyout_bytes, len, __ATOMIC_RELAXED);
+    g_vm_copyout_calls += 1;
+    g_vm_copyout_bytes += len;
 
     uint64 n, va0, pa0;
     uint64 validated_end = 0;
@@ -1965,8 +2091,7 @@ copyout_ok:
         dstva += contig;
     }
 out:
-    __atomic_fetch_add(&g_vm_copyout_ticks, r_time() - copy_start,
-                       __ATOMIC_RELAXED);
+    g_vm_copyout_ticks += r_time() - copy_start;
     vm_runlock(vm);
     return ret;
 }
@@ -1974,8 +2099,8 @@ out:
 int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len)
 {
     uint64 copy_start = r_time();
-    __atomic_fetch_add(&g_vm_copyin_calls, 1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&g_vm_copyin_bytes, len, __ATOMIC_RELAXED);
+    g_vm_copyin_calls += 1;
+    g_vm_copyin_bytes += len;
 
     uint64 n, va0, pa0;
     uint64 validated_end = 0;
@@ -2069,8 +2194,7 @@ copyin_ok:
         srcva += contig;
     }
 out:
-    __atomic_fetch_add(&g_vm_copyin_ticks, r_time() - copy_start,
-                       __ATOMIC_RELAXED);
+    g_vm_copyin_ticks += r_time() - copy_start;
     vm_runlock(vm);
     return ret;
 }

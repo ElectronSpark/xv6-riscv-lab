@@ -26,70 +26,78 @@
 #include "timer/timer.h"
 #include <smp/percpu.h>
 
-_Atomic uint64 g_vfs_lookup_calls;
-_Atomic uint64 g_vfs_lookup_dcache_hits;
-_Atomic uint64 g_vfs_lookup_negative_hits;
-_Atomic uint64 g_vfs_lookup_cache_misses;
-_Atomic uint64 g_vfs_lookup_driver_calls;
-_Atomic uint64 g_vfs_lookup_driver_ticks;
+uint64 g_vfs_lookup_calls;
+uint64 g_vfs_lookup_dcache_hits;
+uint64 g_vfs_lookup_negative_hits;
+uint64 g_vfs_lookup_cache_misses;
+uint64 g_vfs_lookup_driver_calls;
+uint64 g_vfs_lookup_driver_ticks;
 
-_Atomic uint64 g_vm_copyin_calls;
-_Atomic uint64 g_vm_copyout_calls;
-_Atomic uint64 g_vm_copyin_bytes;
-_Atomic uint64 g_vm_copyout_bytes;
-_Atomic uint64 g_vm_vma_validate_calls;
-_Atomic uint64 g_vm_vma_validate_ticks;
-_Atomic uint64 g_vm_file_faults;
-_Atomic uint64 g_vm_copyin_ticks;
-_Atomic uint64 g_vm_copyout_ticks;
+uint64 g_vm_copyin_calls;
+uint64 g_vm_copyout_calls;
+uint64 g_vm_copyin_bytes;
+uint64 g_vm_copyout_bytes;
+uint64 g_vm_vma_validate_calls;
+uint64 g_vm_vma_validate_ticks;
+uint64 g_vm_file_faults;
+uint64 g_vm_validate_batch_ticks;
+uint64 g_vm_validate_fallback_ticks;
+uint64 g_vm_validate_hugepage_ticks;
+uint64 g_vm_validate_pte_check_ticks;
+uint64 g_vm_copyin_ticks;
+uint64 g_vm_copyout_ticks;
 
-_Atomic uint64 g_ext4_pcache_read_page_calls;
-_Atomic uint64 g_ext4_pcache_pages_filled;
-_Atomic uint64 g_ext4_pcache_readahead_pages;
-_Atomic uint64 g_ext4_pcache_read_page_ticks;
-_Atomic uint64 g_ext4_fault_calls;
-_Atomic uint64 g_ext4_fault_zero_copy;
-_Atomic uint64 g_ext4_fault_partial_copy;
-_Atomic uint64 g_ext4_fault_ticks;
+uint64 g_ext4_pcache_read_page_calls;
+uint64 g_ext4_pcache_pages_filled;
+uint64 g_ext4_pcache_readahead_pages;
+uint64 g_ext4_pcache_read_page_ticks;
+uint64 g_ext4_fault_calls;
+uint64 g_ext4_fault_zero_copy;
+uint64 g_ext4_fault_partial_copy;
+uint64 g_ext4_fault_ticks;
 
-_Atomic uint64 g_sys_open_calls;
-_Atomic uint64 g_sys_open_ticks;
-_Atomic uint64 g_sys_fstat_calls;
-_Atomic uint64 g_sys_fstat_ticks;
-_Atomic uint64 g_sys_lseek_calls;
-_Atomic uint64 g_sys_lseek_ticks;
-_Atomic uint64 g_sys_pread64_calls;
-_Atomic uint64 g_sys_pread64_ticks;
-_Atomic uint64 g_sys_openat_calls;
-_Atomic uint64 g_sys_openat_ticks;
-_Atomic uint64 g_sys_fstatat_calls;
-_Atomic uint64 g_sys_fstatat_ticks;
-_Atomic uint64 g_sys_faccessat_calls;
-_Atomic uint64 g_sys_faccessat_ticks;
-_Atomic uint64 g_sys_read_calls;
-_Atomic uint64 g_sys_read_ticks;
-_Atomic uint64 g_sys_readv_calls;
-_Atomic uint64 g_sys_readv_ticks;
-_Atomic uint64 g_sys_getdents_calls;
-_Atomic uint64 g_sys_getdents_ticks;
-_Atomic uint64 g_sys_readlinkat_calls;
-_Atomic uint64 g_sys_readlinkat_ticks;
-_Atomic uint64 g_sys_mmap_calls;
-_Atomic uint64 g_sys_mmap_ticks;
-_Atomic uint64 g_sys_munmap_calls;
-_Atomic uint64 g_sys_munmap_ticks;
-_Atomic uint64 g_sys_mprotect_calls;
-_Atomic uint64 g_sys_mprotect_ticks;
-_Atomic uint64 g_sys_brk_calls;
-_Atomic uint64 g_sys_brk_ticks;
-_Atomic uint64 g_sys_clock_gettime_calls;
-_Atomic uint64 g_sys_clock_gettime_ticks;
-_Atomic uint64 g_sys_gettimeofday_calls;
-_Atomic uint64 g_sys_gettimeofday_ticks;
-_Atomic uint64 g_sys_getrandom_calls;
-_Atomic uint64 g_sys_getrandom_ticks;
-_Atomic uint64 g_exec_calls;
-_Atomic uint64 g_exec_ticks;
+uint64 g_sys_open_calls;
+uint64 g_sys_open_ticks;
+uint64 g_sys_fstat_calls;
+uint64 g_sys_fstat_ticks;
+uint64 g_sys_lseek_calls;
+uint64 g_sys_lseek_ticks;
+uint64 g_sys_pread64_calls;
+uint64 g_sys_pread64_ticks;
+uint64 g_sys_openat_calls;
+uint64 g_sys_openat_ticks;
+uint64 g_sys_fstatat_calls;
+uint64 g_sys_fstatat_ticks;
+uint64 g_sys_faccessat_calls;
+uint64 g_sys_faccessat_ticks;
+uint64 g_sys_read_calls;
+uint64 g_sys_read_ticks;
+uint64 g_sys_readv_calls;
+uint64 g_sys_readv_ticks;
+uint64 g_sys_getdents_calls;
+uint64 g_sys_getdents_ticks;
+uint64 g_sys_readlinkat_calls;
+uint64 g_sys_readlinkat_ticks;
+uint64 g_sys_mmap_calls;
+uint64 g_sys_mmap_ticks;
+uint64 g_sys_munmap_calls;
+uint64 g_sys_munmap_ticks;
+uint64 g_vm_munmap_pages_freed;
+uint64 g_vm_munmap_pte_walk_ticks;
+uint64 g_vm_munmap_page_release_ticks;
+uint64 g_vm_munmap_anon_pages;
+uint64 g_sys_mprotect_calls;
+uint64 g_sys_mprotect_ticks;
+uint64 g_sys_brk_calls;
+uint64 g_sys_brk_ticks;
+uint64 g_sys_clock_gettime_calls;
+uint64 g_sys_clock_gettime_ticks;
+uint64 g_sys_gettimeofday_calls;
+uint64 g_sys_gettimeofday_ticks;
+uint64 g_sys_getrandom_calls;
+uint64 g_sys_getrandom_ticks;
+uint64 g_exec_calls;
+uint64 g_exec_ticks;
 
 int snprintf(char *buf, size_t size, const char *fmt, ...)
     __attribute__((format(printf, 3, 4)));
@@ -362,141 +370,157 @@ void kstats_collect(struct kstats *ks) {
         ks->cpu[cpu].util_1s = cpus[cpu].util_1s;
     }
 
-    ks->bio_reads = __atomic_load_n(&g_bio_reads, __ATOMIC_RELAXED);
-    ks->bio_writes = __atomic_load_n(&g_bio_writes, __ATOMIC_RELAXED);
-    ks->bio_read_bytes = __atomic_load_n(&g_bio_read_bytes, __ATOMIC_RELAXED);
-    ks->bio_write_bytes = __atomic_load_n(&g_bio_write_bytes, __ATOMIC_RELAXED);
+    ks->bio_reads = g_bio_reads;
+    ks->bio_writes = g_bio_writes;
+    ks->bio_read_bytes = g_bio_read_bytes;
+    ks->bio_write_bytes = g_bio_write_bytes;
 
-    ks->net_tx_packets = __atomic_load_n(&g_net_tx_packets, __ATOMIC_RELAXED);
-    ks->net_tx_bytes = __atomic_load_n(&g_net_tx_bytes, __ATOMIC_RELAXED);
-    ks->net_rx_packets = __atomic_load_n(&g_net_rx_packets, __ATOMIC_RELAXED);
-    ks->net_rx_bytes = __atomic_load_n(&g_net_rx_bytes, __ATOMIC_RELAXED);
+    ks->net_tx_packets = g_net_tx_packets;
+    ks->net_tx_bytes = g_net_tx_bytes;
+    ks->net_rx_packets = g_net_rx_packets;
+    ks->net_rx_bytes = g_net_rx_bytes;
 
     ks->vfs_lookup_calls =
-        __atomic_load_n(&g_vfs_lookup_calls, __ATOMIC_RELAXED);
+        g_vfs_lookup_calls;
     ks->vfs_lookup_dcache_hits =
-        __atomic_load_n(&g_vfs_lookup_dcache_hits, __ATOMIC_RELAXED);
+        g_vfs_lookup_dcache_hits;
     ks->vfs_lookup_negative_hits =
-        __atomic_load_n(&g_vfs_lookup_negative_hits, __ATOMIC_RELAXED);
+        g_vfs_lookup_negative_hits;
     ks->vfs_lookup_cache_misses =
-        __atomic_load_n(&g_vfs_lookup_cache_misses, __ATOMIC_RELAXED);
+        g_vfs_lookup_cache_misses;
     ks->vfs_lookup_driver_calls =
-        __atomic_load_n(&g_vfs_lookup_driver_calls, __ATOMIC_RELAXED);
+        g_vfs_lookup_driver_calls;
     ks->vfs_lookup_driver_ticks =
-        __atomic_load_n(&g_vfs_lookup_driver_ticks, __ATOMIC_RELAXED);
+        g_vfs_lookup_driver_ticks;
 
     ks->vm_copyin_calls =
-        __atomic_load_n(&g_vm_copyin_calls, __ATOMIC_RELAXED);
+        g_vm_copyin_calls;
     ks->vm_copyout_calls =
-        __atomic_load_n(&g_vm_copyout_calls, __ATOMIC_RELAXED);
+        g_vm_copyout_calls;
     ks->vm_copyin_bytes =
-        __atomic_load_n(&g_vm_copyin_bytes, __ATOMIC_RELAXED);
+        g_vm_copyin_bytes;
     ks->vm_copyout_bytes =
-        __atomic_load_n(&g_vm_copyout_bytes, __ATOMIC_RELAXED);
+        g_vm_copyout_bytes;
     ks->vm_vma_validate_calls =
-        __atomic_load_n(&g_vm_vma_validate_calls, __ATOMIC_RELAXED);
+        g_vm_vma_validate_calls;
     ks->vm_vma_validate_ticks =
-        __atomic_load_n(&g_vm_vma_validate_ticks, __ATOMIC_RELAXED);
+        g_vm_vma_validate_ticks;
     ks->vm_file_faults =
-        __atomic_load_n(&g_vm_file_faults, __ATOMIC_RELAXED);
+        g_vm_file_faults;
+    ks->vm_validate_batch_ticks =
+        g_vm_validate_batch_ticks;
+    ks->vm_validate_fallback_ticks =
+        g_vm_validate_fallback_ticks;
+    ks->vm_validate_hugepage_ticks =
+        g_vm_validate_hugepage_ticks;
+    ks->vm_validate_pte_check_ticks =
+        g_vm_validate_pte_check_ticks;
     ks->vm_copyin_ticks =
-        __atomic_load_n(&g_vm_copyin_ticks, __ATOMIC_RELAXED);
+        g_vm_copyin_ticks;
     ks->vm_copyout_ticks =
-        __atomic_load_n(&g_vm_copyout_ticks, __ATOMIC_RELAXED);
+        g_vm_copyout_ticks;
 
     ks->ext4_pcache_read_page_calls =
-        __atomic_load_n(&g_ext4_pcache_read_page_calls, __ATOMIC_RELAXED);
+        g_ext4_pcache_read_page_calls;
     ks->ext4_pcache_pages_filled =
-        __atomic_load_n(&g_ext4_pcache_pages_filled, __ATOMIC_RELAXED);
+        g_ext4_pcache_pages_filled;
     ks->ext4_pcache_readahead_pages =
-        __atomic_load_n(&g_ext4_pcache_readahead_pages, __ATOMIC_RELAXED);
+        g_ext4_pcache_readahead_pages;
     ks->ext4_pcache_read_page_ticks =
-        __atomic_load_n(&g_ext4_pcache_read_page_ticks, __ATOMIC_RELAXED);
+        g_ext4_pcache_read_page_ticks;
     ks->ext4_fault_calls =
-        __atomic_load_n(&g_ext4_fault_calls, __ATOMIC_RELAXED);
+        g_ext4_fault_calls;
     ks->ext4_fault_zero_copy =
-        __atomic_load_n(&g_ext4_fault_zero_copy, __ATOMIC_RELAXED);
+        g_ext4_fault_zero_copy;
     ks->ext4_fault_partial_copy =
-        __atomic_load_n(&g_ext4_fault_partial_copy, __ATOMIC_RELAXED);
+        g_ext4_fault_partial_copy;
     ks->ext4_fault_ticks =
-        __atomic_load_n(&g_ext4_fault_ticks, __ATOMIC_RELAXED);
+        g_ext4_fault_ticks;
 
     ks->sys_open_calls =
-        __atomic_load_n(&g_sys_open_calls, __ATOMIC_RELAXED);
+        g_sys_open_calls;
     ks->sys_open_ticks =
-        __atomic_load_n(&g_sys_open_ticks, __ATOMIC_RELAXED);
+        g_sys_open_ticks;
     ks->sys_fstat_calls =
-        __atomic_load_n(&g_sys_fstat_calls, __ATOMIC_RELAXED);
+        g_sys_fstat_calls;
     ks->sys_fstat_ticks =
-        __atomic_load_n(&g_sys_fstat_ticks, __ATOMIC_RELAXED);
+        g_sys_fstat_ticks;
     ks->sys_lseek_calls =
-        __atomic_load_n(&g_sys_lseek_calls, __ATOMIC_RELAXED);
+        g_sys_lseek_calls;
     ks->sys_lseek_ticks =
-        __atomic_load_n(&g_sys_lseek_ticks, __ATOMIC_RELAXED);
+        g_sys_lseek_ticks;
     ks->sys_pread64_calls =
-        __atomic_load_n(&g_sys_pread64_calls, __ATOMIC_RELAXED);
+        g_sys_pread64_calls;
     ks->sys_pread64_ticks =
-        __atomic_load_n(&g_sys_pread64_ticks, __ATOMIC_RELAXED);
+        g_sys_pread64_ticks;
     ks->sys_openat_calls =
-        __atomic_load_n(&g_sys_openat_calls, __ATOMIC_RELAXED);
+        g_sys_openat_calls;
     ks->sys_openat_ticks =
-        __atomic_load_n(&g_sys_openat_ticks, __ATOMIC_RELAXED);
+        g_sys_openat_ticks;
     ks->sys_fstatat_calls =
-        __atomic_load_n(&g_sys_fstatat_calls, __ATOMIC_RELAXED);
+        g_sys_fstatat_calls;
     ks->sys_fstatat_ticks =
-        __atomic_load_n(&g_sys_fstatat_ticks, __ATOMIC_RELAXED);
+        g_sys_fstatat_ticks;
     ks->sys_faccessat_calls =
-        __atomic_load_n(&g_sys_faccessat_calls, __ATOMIC_RELAXED);
+        g_sys_faccessat_calls;
     ks->sys_faccessat_ticks =
-        __atomic_load_n(&g_sys_faccessat_ticks, __ATOMIC_RELAXED);
+        g_sys_faccessat_ticks;
     ks->sys_read_calls =
-        __atomic_load_n(&g_sys_read_calls, __ATOMIC_RELAXED);
+        g_sys_read_calls;
     ks->sys_read_ticks =
-        __atomic_load_n(&g_sys_read_ticks, __ATOMIC_RELAXED);
+        g_sys_read_ticks;
     ks->sys_readv_calls =
-        __atomic_load_n(&g_sys_readv_calls, __ATOMIC_RELAXED);
+        g_sys_readv_calls;
     ks->sys_readv_ticks =
-        __atomic_load_n(&g_sys_readv_ticks, __ATOMIC_RELAXED);
+        g_sys_readv_ticks;
     ks->sys_getdents_calls =
-        __atomic_load_n(&g_sys_getdents_calls, __ATOMIC_RELAXED);
+        g_sys_getdents_calls;
     ks->sys_getdents_ticks =
-        __atomic_load_n(&g_sys_getdents_ticks, __ATOMIC_RELAXED);
+        g_sys_getdents_ticks;
     ks->sys_readlinkat_calls =
-        __atomic_load_n(&g_sys_readlinkat_calls, __ATOMIC_RELAXED);
+        g_sys_readlinkat_calls;
     ks->sys_readlinkat_ticks =
-        __atomic_load_n(&g_sys_readlinkat_ticks, __ATOMIC_RELAXED);
+        g_sys_readlinkat_ticks;
     ks->sys_mmap_calls =
-        __atomic_load_n(&g_sys_mmap_calls, __ATOMIC_RELAXED);
+        g_sys_mmap_calls;
     ks->sys_mmap_ticks =
-        __atomic_load_n(&g_sys_mmap_ticks, __ATOMIC_RELAXED);
+        g_sys_mmap_ticks;
     ks->sys_munmap_calls =
-        __atomic_load_n(&g_sys_munmap_calls, __ATOMIC_RELAXED);
+        g_sys_munmap_calls;
     ks->sys_munmap_ticks =
-        __atomic_load_n(&g_sys_munmap_ticks, __ATOMIC_RELAXED);
+        g_sys_munmap_ticks;
+    ks->vm_munmap_pages_freed =
+        g_vm_munmap_pages_freed;
+    ks->vm_munmap_pte_walk_ticks =
+        g_vm_munmap_pte_walk_ticks;
+    ks->vm_munmap_page_release_ticks =
+        g_vm_munmap_page_release_ticks;
+    ks->vm_munmap_anon_pages =
+        g_vm_munmap_anon_pages;
     ks->sys_mprotect_calls =
-        __atomic_load_n(&g_sys_mprotect_calls, __ATOMIC_RELAXED);
+        g_sys_mprotect_calls;
     ks->sys_mprotect_ticks =
-        __atomic_load_n(&g_sys_mprotect_ticks, __ATOMIC_RELAXED);
+        g_sys_mprotect_ticks;
     ks->sys_brk_calls =
-        __atomic_load_n(&g_sys_brk_calls, __ATOMIC_RELAXED);
+        g_sys_brk_calls;
     ks->sys_brk_ticks =
-        __atomic_load_n(&g_sys_brk_ticks, __ATOMIC_RELAXED);
+        g_sys_brk_ticks;
     ks->sys_clock_gettime_calls =
-        __atomic_load_n(&g_sys_clock_gettime_calls, __ATOMIC_RELAXED);
+        g_sys_clock_gettime_calls;
     ks->sys_clock_gettime_ticks =
-        __atomic_load_n(&g_sys_clock_gettime_ticks, __ATOMIC_RELAXED);
+        g_sys_clock_gettime_ticks;
     ks->sys_gettimeofday_calls =
-        __atomic_load_n(&g_sys_gettimeofday_calls, __ATOMIC_RELAXED);
+        g_sys_gettimeofday_calls;
     ks->sys_gettimeofday_ticks =
-        __atomic_load_n(&g_sys_gettimeofday_ticks, __ATOMIC_RELAXED);
+        g_sys_gettimeofday_ticks;
     ks->sys_getrandom_calls =
-        __atomic_load_n(&g_sys_getrandom_calls, __ATOMIC_RELAXED);
+        g_sys_getrandom_calls;
     ks->sys_getrandom_ticks =
-        __atomic_load_n(&g_sys_getrandom_ticks, __ATOMIC_RELAXED);
+        g_sys_getrandom_ticks;
     ks->exec_calls =
-        __atomic_load_n(&g_exec_calls, __ATOMIC_RELAXED);
+        g_exec_calls;
     ks->exec_ticks =
-        __atomic_load_n(&g_exec_ticks, __ATOMIC_RELAXED);
+        g_exec_ticks;
 }
 
 /*

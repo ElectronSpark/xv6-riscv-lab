@@ -82,6 +82,22 @@ int main(int argc, char *argv[])
                         after.timebase_freq);
     print_delta("vm_file_faults", after.vm_file_faults,
                 before.vm_file_faults);
+    print_tick_delta_ms("vm_validate_batch_ms",
+                        after.vm_validate_batch_ticks,
+                        before.vm_validate_batch_ticks,
+                        after.timebase_freq);
+    print_tick_delta_ms("vm_validate_fallback_ms",
+                        after.vm_validate_fallback_ticks,
+                        before.vm_validate_fallback_ticks,
+                        after.timebase_freq);
+    print_tick_delta_ms("vm_validate_hugepage_ms",
+                        after.vm_validate_hugepage_ticks,
+                        before.vm_validate_hugepage_ticks,
+                        after.timebase_freq);
+    print_tick_delta_ms("vm_validate_pte_check_ms",
+                        after.vm_validate_pte_check_ticks,
+                        before.vm_validate_pte_check_ticks,
+                        after.timebase_freq);
     print_tick_delta_ms("vm_copyin_ms", after.vm_copyin_ticks,
                         before.vm_copyin_ticks, after.timebase_freq);
     print_tick_delta_ms("vm_copyout_ms", after.vm_copyout_ticks,
@@ -159,6 +175,18 @@ int main(int argc, char *argv[])
                 before.sys_munmap_calls);
     print_tick_delta_ms("sys_munmap_ms", after.sys_munmap_ticks,
                         before.sys_munmap_ticks, after.timebase_freq);
+    print_delta("vm_munmap_pages_freed", after.vm_munmap_pages_freed,
+                before.vm_munmap_pages_freed);
+    print_tick_delta_ms("vm_munmap_pte_walk_ms",
+                        after.vm_munmap_pte_walk_ticks,
+                        before.vm_munmap_pte_walk_ticks,
+                        after.timebase_freq);
+    print_tick_delta_ms("vm_munmap_page_release_ms",
+                        after.vm_munmap_page_release_ticks,
+                        before.vm_munmap_page_release_ticks,
+                        after.timebase_freq);
+    print_delta("vm_munmap_anon_pages", after.vm_munmap_anon_pages,
+                before.vm_munmap_anon_pages);
     print_delta("sys_mprotect_calls", after.sys_mprotect_calls,
                 before.sys_mprotect_calls);
     print_tick_delta_ms("sys_mprotect_ms", after.sys_mprotect_ticks,

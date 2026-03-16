@@ -111,6 +111,8 @@ entry("getsid");
 
 entry("sync");
 
+entry("fadvise64");
+
 entry("kstats");
 
 # kqueue syscalls

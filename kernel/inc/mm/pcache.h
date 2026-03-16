@@ -6,11 +6,13 @@
 void pcache_global_init(void);
 int pcache_init(struct pcache *pcache);
 void pcache_teardown(struct pcache *pcache);
+int pcache_evict_all(struct pcache *pcache);
 
 /* ── Folio-based page cache API ──────────────────────────────────────── */
 
 folio_t *pcache_get_folio(struct pcache *pcache, uint64 blkno);
 void pcache_put_folio(struct pcache *pcache, folio_t *folio);
+void pcache_put_folio_refs(struct pcache *pcache, folio_t *folio, int n);
 int pcache_read_folio(struct pcache *pcache, folio_t *folio);
 int pcache_mark_folio_dirty(struct pcache *pcache, folio_t *folio);
 

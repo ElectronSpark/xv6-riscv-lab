@@ -192,6 +192,9 @@ int setsid(void);
 int getsid(int pid);
 
 void sync(void);
+int fadvise64(int fd, int64 offset, int64 len, int advice);
+#define posix_fadvise(fd, off, len, adv) fadvise64((fd), (off), (len), (adv))
+#define POSIX_FADV_DONTNEED 4
 
 // System-wide statistics
 struct kstats; // forward declaration

@@ -57,10 +57,10 @@ struct xv6fs_superblock;
 
 /* ── Global block I/O counters (shared with the old buffer cache) ──────── */
 
-extern _Atomic uint64 g_bio_reads;
-extern _Atomic uint64 g_bio_writes;
-extern _Atomic uint64 g_bio_read_bytes;
-extern _Atomic uint64 g_bio_write_bytes;
+extern uint64 g_bio_reads;
+extern uint64 g_bio_writes;
+extern uint64 g_bio_read_bytes;
+extern uint64 g_bio_write_bytes;
 
 /* ── Slab cache for buffer_head_t ────────────────────────────────────────── */
 
@@ -279,8 +279,8 @@ buffer_head_t *sb_bread(struct xv6fs_superblock *xv6_sb, uint blockno) {
 
     if (current && current->thread_group)
         ACCT_INC(current->thread_group, bio_reads);
-    __atomic_fetch_add(&g_bio_reads, 1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&g_bio_read_bytes, BSIZE, __ATOMIC_RELAXED);
+    g_bio_reads += 1;
+    g_bio_read_bytes += BSIZE;
 
     return bh;
 }
@@ -291,8 +291,8 @@ void bh_write(buffer_head_t *bh) {
 
     if (current && current->thread_group)
         ACCT_INC(current->thread_group, bio_writes);
-    __atomic_fetch_add(&g_bio_writes, 1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&g_bio_write_bytes, BSIZE, __ATOMIC_RELAXED);
+    g_bio_writes += 1;
+    g_bio_write_bytes += BSIZE;
 
     /* Mark the page dirty, then force a synchronous writeback of the
      * entire page.  This matches the old bwrite() semantics: the
@@ -333,8 +333,8 @@ void bh_write_async(buffer_head_t *bh) {
 
     if (current && current->thread_group)
         ACCT_INC(current->thread_group, bio_writes);
-    __atomic_fetch_add(&g_bio_writes, 1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&g_bio_write_bytes, BSIZE, __ATOMIC_RELAXED);
+    g_bio_writes += 1;
+    g_bio_write_bytes += BSIZE;
 
     /* Mark the backing folio dirty for deferred writeback */
     pcache_mark_folio_dirty(bh->b_pcache, bh->b_folio);

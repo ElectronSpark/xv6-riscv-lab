@@ -31,9 +31,6 @@ folio_t *page_folio(page_t *page)
 
 folio_t *folio_alloc(unsigned int order, uint64 flags)
 {
-    if (order > FOLIO_MAX_ORDER)
-        return NULL;
-
     page_t *head = __page_alloc((uint64)order, flags);
     if (head == NULL)
         return NULL;

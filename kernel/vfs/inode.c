@@ -584,7 +584,7 @@ static struct vfs_inode *__vfs_dotdot_target(struct vfs_inode *dir) {
 // Will assume the VFS handled "."
 int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
                 const char *name, size_t name_len) {
-    __atomic_fetch_add(&g_vfs_lookup_calls, 1, __ATOMIC_RELAXED);
+    g_vfs_lookup_calls += 1;
 
     if (dir == NULL || dir->sb == NULL) {
         return -EINVAL; // Invalid argument
@@ -640,11 +640,10 @@ int vfs_ilookup(struct vfs_inode *dir, struct vfs_dentry *dentry,
         ret = -ENOSYS; // Lookup operation not supported
         goto out;
     }
-    __atomic_fetch_add(&g_vfs_lookup_driver_calls, 1, __ATOMIC_RELAXED);
+    g_vfs_lookup_driver_calls += 1;
     uint64 lookup_start = r_time();
     ret = dir->ops->lookup(dir, dentry, name, name_len);
-    __atomic_fetch_add(&g_vfs_lookup_driver_ticks, r_time() - lookup_start,
-                       __ATOMIC_RELAXED);
+    g_vfs_lookup_driver_ticks += r_time() - lookup_start;
     if (ret == 0) {
         __vfs_dcache_store(dir, dentry, name, name_len);
     } else if (ret == -ENOENT) {

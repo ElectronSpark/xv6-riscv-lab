@@ -8,7 +8,7 @@
 #include "bintree.h"
 
 // The maximum size of a buddy page is 2**PAGE_BUDDY_MAX_ORDER continuous pages
-#define PAGE_BUDDY_MAX_ORDER 10
+#define PAGE_BUDDY_MAX_ORDER 11
 
 // Buddy page states
 #define BUDDY_STATE_FREE 0 // Free and available for allocation in buddy pool

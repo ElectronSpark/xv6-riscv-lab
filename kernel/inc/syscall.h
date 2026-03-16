@@ -262,6 +262,7 @@
 #define SYS_epoll_ctl       987
 #define SYS_epoll_create1   988
 #define SYS_membarrier      998
+#define SYS_fadvise64       989
 
 // --- Power management (high number for musl compat) ---
 #define SYS_reboot          873

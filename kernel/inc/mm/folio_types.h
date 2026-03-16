@@ -16,8 +16,10 @@
 #include <mm/page_type.h>
 
 /**
- * Maximum compound order that a folio may have.
+ * Maximum compound order for page-cache folios.
  * Order 4 = 16 pages = 64 KB (with 4 KB base page size).
+ * NOTE: folio_alloc() itself accepts up to PAGE_BUDDY_MAX_ORDER;
+ * this constant only constrains pcache / xv6fs stack arrays.
  */
 #define FOLIO_MAX_ORDER 4
 #define FOLIO_MAX_ORDER_NR_PAGES (1U << FOLIO_MAX_ORDER)

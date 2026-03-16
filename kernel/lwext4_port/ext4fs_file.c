@@ -175,6 +175,79 @@ static int ext4fs_folio_read_direct(struct ext4_fs *fs,
     return 0;
 }
 
+/*
+ * ext4fs_folio_submit_direct - Like ext4fs_folio_read_direct, but returns
+ * the submitted BIO instead of awaiting it.  The caller is responsible
+ * for calling bio_await() + bio_release() and for zero-filling tails.
+ *
+ * Sets bio->batch = 1 so the device is not notified per-BIO;
+ * the caller must call blkdev_kick() after submitting all batch BIOs.
+ *
+ * Returns the submitted BIO on success, or NULL on failure (caller should
+ * fall back to the synchronous path).
+ */
+static struct bio *ext4fs_folio_submit_direct(struct ext4_fs *fs,
+                                              struct ext4fs_superblock *esb,
+                                              struct ext4_inode_ref *ref,
+                                              struct pcache_node *pcn,
+                                              uint64 base_file_off,
+                                              uint64 inode_size)
+{
+    uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+    unsigned int nr_pages = pcn->page_count;
+
+    if (block_size != PGSIZE || nr_pages < 2 || nr_pages > 16)
+        return NULL;
+
+    unsigned int fill_pages = nr_pages;
+    for (unsigned int i = 0; i < nr_pages; i++) {
+        if (base_file_off + (uint64)i * PGSIZE >= inode_size) {
+            fill_pages = i;
+            break;
+        }
+    }
+    if (fill_pages < 2)
+        return NULL;
+
+    ext4_lblk_t first_iblock = (ext4_lblk_t)(base_file_off / block_size);
+    ext4_fsblk_t first_fblock;
+    int r = ext4_fs_get_inode_dblk_idx(ref, first_iblock, &first_fblock, true);
+    if (r != EOK || first_fblock == 0)
+        return NULL;
+
+    ext4_fsblk_t last_fblock;
+    r = ext4_fs_get_inode_dblk_idx(ref, first_iblock + fill_pages - 1,
+                                   &last_fblock, true);
+    if (r != EOK || last_fblock == 0 ||
+        last_fblock != first_fblock + fill_pages - 1)
+        return NULL;
+
+    blkdev_t *blk = esb->xv6_blkdev;
+    uint64 pba = ((uint64)first_fblock * block_size +
+                  esb->bdev.part_offset) / esb->bdev_iface.ph_bsize;
+
+    struct bio *bio = bio_alloc(blk, 1, false, NULL, NULL);
+    if (IS_ERR_OR_NULL(bio))
+        return NULL;
+
+    bio->blkno = pba;
+    bio->batch = 1;
+
+    r = bio_add_folio(bio, pcn->folio, fill_pages * PGSIZE, 0);
+    if (r != 0) {
+        bio_release(bio);
+        return NULL;
+    }
+
+    r = blkdev_submit_bio(blk, bio);
+    if (r != 0) {
+        bio_release(bio);
+        return NULL;
+    }
+
+    return bio;
+}
+
 static int ext4fs_fill_page_from_ref(struct ext4_fs *fs,
                                      struct ext4fs_superblock *esb,
                                      struct vfs_inode *inode,
@@ -337,7 +410,7 @@ static void ext4fs_prefault_end_page(struct pcache *pc, page_t *page,
 static int ext4fs_pcache_read_page(struct pcache *pcache, page_t *page)
 {
     uint64 read_start = r_time();
-    __atomic_fetch_add(&g_ext4_pcache_read_page_calls, 1, __ATOMIC_RELAXED);
+    g_ext4_pcache_read_page_calls += 1;
 
     struct vfs_inode *inode = (struct vfs_inode *)pcache->private_data;
     struct pcache_node *pcnode = page->pcache.pcache_node;
@@ -366,9 +439,8 @@ static int ext4fs_pcache_read_page(struct pcache *pcache, page_t *page)
     if (r != 0)
         return r;
 
-    __atomic_fetch_add(&g_ext4_pcache_pages_filled, 1, __ATOMIC_RELAXED);
-    __atomic_fetch_add(&g_ext4_pcache_read_page_ticks, r_time() - read_start,
-                       __ATOMIC_RELAXED);
+    g_ext4_pcache_pages_filled += 1;
+    g_ext4_pcache_read_page_ticks += r_time() - read_start;
 
     return 0;
 }
@@ -393,6 +465,18 @@ static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
     struct ext4_fs *fs = &esb->ext4fs;
     uint64 inode_size = (uint64)READ_ONCE(inode->size);
     int ret = 0;
+
+    /*
+     * Phase 1: Collect folios that need I/O and submit BIOs in batch mode.
+     * Up to 32 folios for a 2MB hugepage (64KB each).
+     */
+#define PREFAULT_MAX_BATCH 32
+    struct {
+        page_t *pcpage;
+        struct pcache_node *pcn;
+        struct bio *bio;
+    } batch[PREFAULT_MAX_BATCH];
+    int batch_count = 0;
 
     ext4fs_lock(esb);
     struct ext4_inode_ref ref;
@@ -419,54 +503,53 @@ static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
         unsigned long skip_pages = 1;
 
         if (state == 0) {
-            uint64 read_start = r_time();
-            __atomic_fetch_add(&g_ext4_pcache_read_page_calls, 1,
-                               __ATOMIC_RELAXED);
-
-            /*
-             * For multi-page folios we must fill ALL sub-pages before
-             * marking the folio uptodate, because subsequent accesses to
-             * other pages in the same folio will see uptodate=1 and skip
-             * the read entirely.
-             */
+            /* Folio needs I/O — try to submit a batch BIO. */
             unsigned long nr_pages = pcn->page_count;
             uint64 base_file_off = (uint64)pcn->blkno * 512ULL;
+            struct bio *bio = NULL;
 
-            /*
-             * Fast path: try to read the whole folio in a single BIO
-             * (bypasses the lwext4 block cache — the pcache IS our cache).
-             */
-            r = ext4fs_folio_read_direct(fs, esb, &ref, pcn,
-                                         base_file_off, inode_size);
-            if (r != 0) {
-                /* Fall back to per-page read through lwext4 bcache. */
-                r = 0;
-                for (unsigned long p = 0; p < nr_pages; p++) {
-                    uint64 pg_off = base_file_off + p * PGSIZE;
-                    void *dst = (char *)pcn->data + p * PGSIZE;
-                    r = ext4fs_fill_page_from_ref(fs, esb, inode, &ref, dst,
-                                                  pg_off, inode_size);
-                    if (r != 0)
-                        break;
+            if (batch_count < PREFAULT_MAX_BATCH)
+                bio = ext4fs_folio_submit_direct(fs, esb, &ref, pcn,
+                                                 base_file_off, inode_size);
+
+            if (bio != NULL) {
+                /* BIO submitted in batch mode — defer await. */
+                batch[batch_count].pcpage = pcpage;
+                batch[batch_count].pcn = pcn;
+                batch[batch_count].bio = bio;
+                batch_count++;
+                /* Don't pcache_put_page yet — held until await completes. */
+            } else {
+                /* Direct BIO failed — fall back to synchronous read. */
+                uint64 read_start = r_time();
+                g_ext4_pcache_read_page_calls += 1;
+                r = ext4fs_folio_read_direct(fs, esb, &ref, pcn,
+                                             base_file_off, inode_size);
+                if (r != 0) {
+                    r = 0;
+                    for (unsigned long p = 0; p < nr_pages; p++) {
+                        uint64 pg_off = base_file_off + p * PGSIZE;
+                        void *dst = (char *)pcn->data + p * PGSIZE;
+                        r = ext4fs_fill_page_from_ref(fs, esb, inode, &ref,
+                                                      dst, pg_off, inode_size);
+                        if (r != 0)
+                            break;
+                    }
                 }
+                if (r == 0)
+                    g_ext4_pcache_pages_filled += nr_pages;
+                g_ext4_pcache_read_page_ticks += r_time() - read_start;
+                ext4fs_prefault_end_page(pc, pcpage, r == 0);
+                if (r != 0 && ret == 0)
+                    ret = r;
+                pcache_put_page(pc, pcpage);
             }
 
-            if (r == 0)
-                __atomic_fetch_add(&g_ext4_pcache_pages_filled, nr_pages,
-                                   __ATOMIC_RELAXED);
-            __atomic_fetch_add(&g_ext4_pcache_read_page_ticks,
-                               r_time() - read_start, __ATOMIC_RELAXED);
-
-            ext4fs_prefault_end_page(pc, pcpage, r == 0);
-            if (r != 0 && ret == 0)
-                ret = r;
-
-            /* Skip past the loaded folio. */
             uint64 folio_end_off = base_file_off + nr_pages * PGSIZE;
             if (folio_end_off > file_off)
                 skip_pages = (folio_end_off - file_off) / PGSIZE;
         } else {
-            /* Folio already uptodate or in-progress — skip it entirely. */
+            /* Folio already uptodate or in-progress — skip. */
             struct pcache_node *node = pcpage->pcache.pcache_node;
             if (node != NULL && node->page_count > 1) {
                 uint64 folio_end_off = (uint64)node->blkno * 512ULL +
@@ -474,9 +557,9 @@ static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
                 if (folio_end_off > file_off)
                     skip_pages = (folio_end_off - file_off) / PGSIZE;
             }
+            pcache_put_page(pc, pcpage);
         }
 
-        pcache_put_page(pc, pcpage);
         if (skip_pages < 1)
             skip_pages = 1;
         va += skip_pages * PGSIZE;
@@ -484,6 +567,43 @@ static int ext4fs_file_prefault(struct vfs_file *file, struct vma *vma,
 
     ext4_fs_put_inode_ref(&ref);
     ext4fs_unlock(esb);
+
+    /*
+     * Phase 2: Kick device once, then await all batch BIOs.
+     * Measure total batch I/O as a single interval (kick → all complete).
+     */
+    if (batch_count > 0) {
+        uint64 batch_start = r_time();
+        blkdev_kick(esb->xv6_blkdev);
+
+        for (int i = 0; i < batch_count; i++) {
+            struct pcache_node *pcn = batch[i].pcn;
+            unsigned long nr_pages = pcn->page_count;
+
+            r = bio_await(batch[i].bio);
+            bio_release(batch[i].bio);
+
+            if (r == 0) {
+                /* Zero-fill partial tail / beyond-EOF pages. */
+                uint64 base_file_off = (uint64)pcn->blkno * 512ULL;
+                uint64 file_tail = inode_size - base_file_off;
+                if (file_tail < (uint64)nr_pages * PGSIZE)
+                    memset((char *)pcn->data + file_tail, 0,
+                           (uint64)nr_pages * PGSIZE - file_tail);
+                g_ext4_pcache_pages_filled += nr_pages;
+            }
+
+            ext4fs_prefault_end_page(pc, batch[i].pcpage, r == 0);
+            if (r != 0 && ret == 0)
+                ret = r;
+            pcache_put_page(pc, batch[i].pcpage);
+        }
+
+        g_ext4_pcache_read_page_calls += batch_count;
+        g_ext4_pcache_read_page_ticks += r_time() - batch_start;
+    }
+#undef PREFAULT_MAX_BATCH
+
     return ret;
 }
 
@@ -1280,8 +1400,7 @@ static int ext4fs_file_writepage(struct vfs_file *file, loff_t offset,
         if (pcpage == NULL)
             return -ENOMEM;
 
-        __atomic_fetch_add(&g_ext4_pcache_readahead_pages, 1,
-                           __ATOMIC_RELAXED);
+        g_ext4_pcache_readahead_pages += 1;
 
         struct pcache_node *pcn = pcpage->pcache.pcache_node;
         /* Compute the sub-page offset for multi-page folios. */
@@ -1398,7 +1517,7 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
                                uint64 va)
 {
     uint64 fault_start = r_time();
-    __atomic_fetch_add(&g_ext4_fault_calls, 1, __ATOMIC_RELAXED);
+    g_ext4_fault_calls += 1;
 
     struct vfs_inode *inode = vfs_inode_deref(&file->inode);
     if (inode == NULL)
@@ -1443,15 +1562,12 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
         uint64 folio_byte_off = blkno_512 * 512ULL -
                                 (uint64)pcn->blkno * 512ULL;
         if (bytes_to_read == PGSIZE) {
-            __atomic_fetch_add(&g_ext4_fault_zero_copy, 1,
-                               __ATOMIC_RELAXED);
-            __atomic_fetch_add(&g_ext4_fault_ticks, r_time() - fault_start,
-                               __ATOMIC_RELAXED);
+            g_ext4_fault_zero_copy += 1;
+            g_ext4_fault_ticks += r_time() - fault_start;
             return (char *)pcn->data + folio_byte_off;
         }
 
-        __atomic_fetch_add(&g_ext4_fault_partial_copy, 1,
-                           __ATOMIC_RELAXED);
+        g_ext4_fault_partial_copy += 1;
 
         void *pa = page_alloc(0, PAGE_TYPE_ANON);
         if (pa == NULL) {
@@ -1463,8 +1579,7 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
         memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
 
         pcache_put_page(pc, pcpage);
-        __atomic_fetch_add(&g_ext4_fault_ticks, r_time() - fault_start,
-                           __ATOMIC_RELAXED);
+        g_ext4_fault_ticks += r_time() - fault_start;
         return pa;
     }
 
@@ -1549,8 +1664,7 @@ static void *ext4fs_file_fault(struct vfs_file *file, struct vma *vma,
     if (bytes_to_read < PGSIZE)
         memset((char *)pa + bytes_to_read, 0, PGSIZE - bytes_to_read);
 
-    __atomic_fetch_add(&g_ext4_fault_ticks, r_time() - fault_start,
-                       __ATOMIC_RELAXED);
+    g_ext4_fault_ticks += r_time() - fault_start;
 
     return pa;
 }

@@ -121,7 +121,7 @@ static inline page_t *page_pcache_head(page_t *page)
 
 /**
  * folio_alloc - allocate a folio of the given compound order.
- * @order:  compound order (0 .. FOLIO_MAX_ORDER).
+ * @order:  compound order (0 .. PAGE_BUDDY_MAX_ORDER).
  * @flags:  page type (PAGE_TYPE_*) OR'd with optional GFP flags.
  *
  * Returns NULL on failure.  The returned folio has ref_count == 1.

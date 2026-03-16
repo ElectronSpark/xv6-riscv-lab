@@ -129,6 +129,15 @@ int main(int argc, char *argv[])
 
     /* ── Read benchmark ── */
     if (do_read) {
+        /* Drop page cache so reads hit disk (cold read) */
+        {
+            int dfd = open(file, O_RDONLY);
+            if (dfd >= 0) {
+                posix_fadvise(dfd, 0, 0, POSIX_FADV_DONTNEED);
+                close(dfd);
+            }
+        }
+
         int fd = open(file, O_RDONLY);
         if (fd < 0) {
             fprintf(2, "iobench: cannot open %s for reading\n", file);

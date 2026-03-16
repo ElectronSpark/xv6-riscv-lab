@@ -28,6 +28,7 @@
 #include "vfs/xv6fs/ondisk.h" // for DIRSIZ
 #include "proc/cred.h"
 #include <mm/vm.h>
+#include <mm/pcache.h>
 #include "printf.h"
 #include "timer/goldfish_rtc.h"
 #include "dev/cdev.h"
@@ -4693,6 +4694,44 @@ uint64 sys_vfs_fdatasync(void) {
     int ret = 0;
     if (f->ops && f->ops->fsync)
         ret = f->ops->fsync(f, 0, (loff_t)-1);
+    vfs_fput(f);
+    return (uint64)ret;
+}
+
+/* ================================================================== */
+/*  fadvise64                                                         */
+/* ================================================================== */
+
+/**
+ * sys_fadvise64 - provide file access advice to the kernel
+ * fadvise64(int fd, int64 offset, int64 len, int advice) → 0 / -errno
+ *
+ * Currently only POSIX_FADV_DONTNEED is implemented (drop page cache).
+ * Other advice values are accepted but ignored (per POSIX).
+ */
+uint64 sys_fadvise64(void) {
+    int fd, advice;
+    int64 offset, len;
+    argint(0, &fd);
+    argint64(1, &offset);
+    argint64(2, &len);
+    argint(3, &advice);
+
+    (void)offset;
+    (void)len;
+
+    struct vfs_file *f = __vfs_argfd(fd);
+    if (f == NULL)
+        return (uint64)-EBADF;
+
+    int ret = 0;
+    if (advice == POSIX_FADV_DONTNEED) {
+        struct vfs_inode *inode = vfs_inode_deref(&f->inode);
+        if (inode != NULL) {
+            ret = pcache_evict_all(&inode->i_data);
+        }
+    }
+
     vfs_fput(f);
     return (uint64)ret;
 }

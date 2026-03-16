@@ -249,14 +249,14 @@ int page_mapped(page_t *page)
 {
     if (page == NULL)
         return 0;
-    return __sync_fetch_and_add(&page->anon.mapcount, 0) > 0;
+    return __atomic_load_n(&page->anon.mapcount, __ATOMIC_ACQUIRE) > 0;
 }
 
 int page_mapcount(page_t *page)
 {
     if (page == NULL)
         return 0;
-    return __sync_fetch_and_add(&page->anon.mapcount, 0);
+    return __atomic_load_n(&page->anon.mapcount, __ATOMIC_ACQUIRE);
 }
 
 /* ========================================================================== */

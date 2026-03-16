@@ -27,7 +27,7 @@
 #include "memlayout.h"
 #include "ksymbols.h"
 
-#define USER_FAULT_AROUND_PAGES 16UL
+#define USER_FAULT_AROUND_PAGES 2048UL
 #define USER_FAULT_AROUND_SIZE  (USER_FAULT_AROUND_PAGES * PGSIZE)
 
 extern pagetable_t kernel_pagetable;

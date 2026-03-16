@@ -1751,6 +1751,46 @@ int page_ref_inc_unlocked(page_t *page) {
     return __page_ref_inc_unlocked(page);
 }
 
+/**
+ * __page_ref_add - increment refcount by @n under a single lock hold.
+ *
+ * Equivalent to calling __page_ref_inc() @n times but with only one
+ * spinlock acquire/release pair, saving 2*(n-1) atomic operations.
+ */
+int __page_ref_add(page_t *page, int n) {
+    if (page == NULL || n <= 0)
+        return -1;
+    page_lock_acquire(page);
+    if (page->ref_count == 0) {
+        page_lock_release(page);
+        return -1;
+    }
+    page->ref_count += n;
+    int ret = page->ref_count;
+    page_lock_release(page);
+    return ret;
+}
+
+/**
+ * __page_ref_sub - decrement refcount by @n under a single lock hold.
+ *
+ * Caller must ensure refcount stays > 0 after subtraction (i.e. this is
+ * only for dropping extra PTE references while the page remains live).
+ */
+int __page_ref_sub(page_t *page, int n) {
+    if (page == NULL || n <= 0)
+        return -1;
+    page_lock_acquire(page);
+    if (page->ref_count < (unsigned int)n) {
+        page_lock_release(page);
+        return -1;
+    }
+    page->ref_count -= n;
+    int ret = page->ref_count;
+    page_lock_release(page);
+    return ret;
+}
+
 int page_ref_dec_unlocked(page_t *page) {
     if (page == NULL) {
         return -1;

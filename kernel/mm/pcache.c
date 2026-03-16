@@ -1455,6 +1455,32 @@ void pcache_teardown(struct pcache *pcache) {
     __pcache_spin_unlock(pcache);
 }
 
+/*
+ * pcache_evict_all - Flush dirty pages and evict all clean pages from an
+ * active pcache.  The pcache remains active and functional afterwards.
+ * Used by posix_fadvise(FADV_DONTNEED) to drop cached file data.
+ *
+ * Returns 0 on success, negative errno on error.
+ */
+int pcache_evict_all(struct pcache *pcache) {
+    if (pcache == NULL || !pcache->active)
+        return -EINVAL;
+
+    /* Flush dirty pages to disk first. */
+    pcache_flush(pcache);
+
+    /* Evict all clean LRU pages. */
+    __pcache_spin_lock(pcache);
+    for (;;) {
+        page_t *victim = __pcache_evict_lru(pcache);
+        if (victim == NULL)
+            break;
+        __pcache_page_put(victim);
+    }
+    __pcache_spin_unlock(pcache);
+    return 0;
+}
+
 // Try to get a page from pcache
 // The reference count of the page will be increased by 1 if found (2 minimum)
 // Block number is in 512-byte block unit
@@ -1852,6 +1878,37 @@ void pcache_put_folio(struct pcache *pcache, folio_t *folio) {
     if (folio == NULL)
         return;
     pcache_put_page(pcache, &folio->page);
+}
+
+/**
+ * pcache_put_folio_refs - drop @n references to a pcache folio in one go.
+ *
+ * Equivalent to calling pcache_put_folio() @n times, but avoids acquiring
+ * the page spinlock @n times.  The bulk of the decrements are done under
+ * a single lock hold; only the final 1-2 decrements go through the
+ * normal pcache_put_page path for correct LRU/dirty state transitions.
+ */
+void pcache_put_folio_refs(struct pcache *pcache, folio_t *folio, int n) {
+    if (folio == NULL || n <= 0)
+        return;
+    page_t *page = &folio->page;
+
+    /* Fast bulk path: if current refcount is high enough that decrementing
+     * (n-2) still leaves refcount >= 3, we can batch those under a single
+     * lock hold.  The remaining 1-2 refs go through pcache_put_page to
+     * handle the refcount==1 LRU/dirty transitions correctly. */
+    if (n > 2) {
+        int refcount = page_ref_count(page);
+        int fast = n - 2;
+        if (refcount - fast >= 3) {
+            page_lock_acquire(page);
+            page->ref_count -= fast;
+            page_lock_release(page);
+            n -= fast;
+        }
+    }
+    for (int i = 0; i < n; i++)
+        pcache_put_page(pcache, page);
 }
 
 int pcache_read_folio(struct pcache *pcache, folio_t *folio) {

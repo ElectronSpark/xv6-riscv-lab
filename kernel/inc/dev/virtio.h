@@ -67,8 +67,8 @@ extern uint64 __virtio_irqno[N_VIRTIO];
 
 // this many virtio descriptors.
 // must be a power of two.
-// 128 allows 42 concurrent I/O ops (each uses 3 descriptors).
-#define NUM 128
+// 256 allows 85 concurrent I/O ops (each uses 3 descriptors).
+#define NUM 256
 
 // a single descriptor, from the spec.
 struct virtq_desc {

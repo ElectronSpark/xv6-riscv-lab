@@ -16,7 +16,7 @@
 #include "trapframe.h"
 #include "trap.h"
 
-#define USER_FAULT_AROUND_PAGES 16UL
+#define USER_FAULT_AROUND_PAGES 2048UL
 #define USER_FAULT_AROUND_SIZE  (USER_FAULT_AROUND_PAGES * PGSIZE)
 
 extern char trampoline[], uservec[], userret[], _data_ktlb[];
