@@ -21,7 +21,7 @@
  * NOTE: folio_alloc() itself accepts up to PAGE_BUDDY_MAX_ORDER;
  * this constant only constrains pcache / xv6fs stack arrays.
  */
-#define FOLIO_MAX_ORDER 4
+#define FOLIO_MAX_ORDER 5
 #define FOLIO_MAX_ORDER_NR_PAGES (1U << FOLIO_MAX_ORDER)
 
 /**

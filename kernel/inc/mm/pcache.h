@@ -25,6 +25,9 @@ int pcache_flush(struct pcache *pcache);
 int pcache_sync(void);
 int pcache_read_page(struct pcache *pcache, page_t *page);
 int pcache_prepare_write_page(struct pcache *pcache, page_t *page);
+int pcache_begin_full_page_write(struct pcache *pcache, page_t *page);
+void pcache_end_full_page_write(struct pcache *pcache, page_t *page,
+                                bool success);
 int pcache_mark_page_dirty(struct pcache *pcache, page_t *page);
 int pcache_invalidate_blk(struct pcache *pcache, uint64 blkno);
 int pcache_discard_blk(struct pcache *pcache, uint64 blkno);

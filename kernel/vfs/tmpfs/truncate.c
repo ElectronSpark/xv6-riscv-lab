@@ -11,6 +11,7 @@
 #include "lock/rwsem.h"
 #include <mm/vm.h>
 #include <mm/pcache.h>
+#include <mm/folio_types.h>
 #include "vfs/fs.h"
 #include "../vfs_private.h"
 #include "list.h"
@@ -24,6 +25,13 @@
 /**
  * Shrink a tmpfs file to new_size by discarding pcache pages beyond the
  * new boundary.  Embedded files have no pages to free.
+ *
+ * Special case for truncation to zero: pages are invalidated (marked
+ * !uptodate) rather than discarded.  They remain in the xarray so that
+ * subsequent writes can reuse the existing folio allocation and xarray
+ * entries instead of performing fresh page_alloc + xa_store operations
+ * per folio.  Memory is reclaimed when the inode is destroyed
+ * (pcache_teardown in tmpfs_inode_pcache_teardown).
  */
 static int __tmpfs_truncate_shrink(struct vfs_inode *inode, loff_t new_size) {
     struct tmpfs_inode *tmpfs_inode =
@@ -38,9 +46,25 @@ static int __tmpfs_truncate_shrink(struct vfs_inode *inode, loff_t new_size) {
         return 0;
     }
 
-    /* Discard every pcache page whose base offset >= new_size. */
-    loff_t first_discard = TMPFS_IBLOCK(new_size + PAGE_SIZE - 1);
     loff_t old_block_cnt = TMPFS_IBLOCK(inode->size + PAGE_SIZE - 1);
+
+    if (new_size == 0) {
+        /*
+         * Truncation to zero: invalidate rather than discard.  Step by
+         * folio (FOLIO_MAX_ORDER_NR_PAGES pages) since pcache_invalidate_blk
+         * operates on the entire folio.
+         */
+        for (loff_t blk = 0; blk < old_block_cnt;
+             blk += FOLIO_MAX_ORDER_NR_PAGES) {
+            uint64 blkno_512 = (uint64)blk * PCACHE_BLKS_PER_PAGE;
+            pcache_invalidate_blk(pc, blkno_512);
+        }
+        return 0;
+    }
+
+    /* Non-zero truncation: discard every pcache page whose base offset
+     * >= new_size. */
+    loff_t first_discard = TMPFS_IBLOCK(new_size + PAGE_SIZE - 1);
 
     for (loff_t blk = first_discard; blk < old_block_cnt; blk++) {
         uint64 blkno_512 = (uint64)blk * PCACHE_BLKS_PER_PAGE;

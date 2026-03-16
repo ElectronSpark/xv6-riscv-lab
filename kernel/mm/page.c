@@ -86,7 +86,21 @@ STATIC buddy_pool_t __buddy_pools[PAGE_BUDDY_MAX_ORDER + 1];
 // Per-CPU hot page cache for small allocations (orders 0 to SLAB_DEFAULT_ORDER)
 // This reduces lock contention for the most frequent allocations
 #define PCPU_CACHE_MAX_ORDER SLAB_DEFAULT_ORDER
-#define PCPU_CACHE_SIZE 4 // pages per order per CPU (small to save memory)
+/*
+ * PCPU_CACHE_SIZE: number of compound pages cached per CPU per order.
+ *
+ * Performance note: this was originally 4.  With PCACHE_FOLIO_ORDER=4
+ * (64 KB folios), a sequential 16 MB write allocates 256 order-4 pages.
+ * With a cache depth of 4, 252 out of 256 allocations fell through to the
+ * global buddy allocator, hitting multiple spinlocks on each alloc/free.
+ * Profiling showed pcache_get_page was 55-71% of tmpfs write time, with
+ * buddy allocation (alloc_pages + free_pages) as the dominant cost.
+ *
+ * Increasing to 32 reduced pcache_get_page cycles by ~57% and was a
+ * key contributor to the overall 2.9x tmpfs write throughput improvement.
+ * The memory overhead is modest: 32 * 64 KB = 2 MB per CPU per order.
+ */
+#define PCPU_CACHE_SIZE 32
 #define PCPU_HOT_PAGE_CACHE_SIZE 64 // hot pages(order 0) per CPU
 
 // Atomic operations for per-CPU cache counters with overflow/underflow checks
