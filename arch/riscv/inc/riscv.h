@@ -340,10 +340,12 @@ static inline void sfence_vma_page_asid(uint64 va, uint64 asid) {
 #define PGSIZE 4096 // bytes per page
 #define PGSHIFT 12  // bits of offset within a page
 
-#ifdef LAB_PGTBL
-#define SUPERPGSIZE (2 * (1 << 20)) // bytes per page
-#define SUPERPGROUNDUP(sz) (((sz) + SUPERPGSIZE - 1) & ~(SUPERPGSIZE - 1))
-#endif
+#define HUGEPAGE_SHIFT 21
+#define HUGEPAGE_SIZE  (1UL << HUGEPAGE_SHIFT)  // 2 MB
+#define HUGEPAGE_MASK  (~(HUGEPAGE_SIZE - 1))
+#define HUGEPAGE_ORDER 9  // 2^9 = 512 base pages = 2 MB
+#define HUGEPGROUNDUP(sz)   (((sz) + HUGEPAGE_SIZE - 1) & HUGEPAGE_MASK)
+#define HUGEPGROUNDDOWN(a)  ((a) & HUGEPAGE_MASK)
 
 #define PGROUNDUP(sz) (((sz) + PGSIZE - 1) & ~(PGSIZE - 1))
 #define PGROUNDDOWN(a) (((a)) & ~(PGSIZE - 1))
@@ -356,6 +358,7 @@ static inline void sfence_vma_page_asid(uint64 va, uint64 asid) {
 #define PTE_G (1L << 5) // global
 #define PTE_A (1L << 6) // accessed
 #define PTE_D (1L << 7) // dirty
+#define PTE_HUGEPAGE (1L << 8) // RSW bit 0: marks 2MB megapage leaf
 /*
  * On RISC-V, non-leaf PTEs (R=W=X=0) ignore permission bits,
  * so no extra flags are needed in intermediate walk() entries.

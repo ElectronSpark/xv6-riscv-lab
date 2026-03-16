@@ -33,7 +33,9 @@
 #define __PTE_U (1ULL << 2)   /* User accessible (U/S bit) */
 #define __PTE_A (1ULL << 5)   /* Accessed */
 #define __PTE_D (1ULL << 6)   /* Dirty */
+#define __PTE_PS (1ULL << 7)  /* Page Size — 2MB leaf at PD level */
 #define __PTE_NX (1ULL << 63) /* No Execute */
+#define __PTE_HUGEPAGE __PTE_PS
 
 #define __PA2PTE(pa) ((uint64)(pa) & 0x000FFFFFFFFFF000ULL)
 #define __PTE2PA(pte) ((uint64)(pte) & 0x000FFFFFFFFFF000ULL)
@@ -82,6 +84,11 @@ static inline int pte_write_ready(pte_t *pte) {
 /** Extract the physical address stored in a PTE. */
 static inline uint64 pte_pa(pte_t *pte) { return __PTE2PA(*pte); }
 
+/** Is the PTE a 2MB hugepage leaf entry? (PS bit set on x86-64.) */
+static inline int pte_is_hugepage(pte_t *pte) {
+    return (*pte & __PTE_HUGEPAGE) != 0;
+}
+
 /* ── PTE construction ───────────────────────────────────────────────────── */
 
 /**
@@ -115,6 +122,15 @@ static inline void pte_wrprotect(pte_t *pte) { *pte &= ~__PTE_W; }
 
 /** Zero the PTE entirely. */
 static inline void pte_clear(pte_t *pte) { *pte = 0; }
+
+/**
+ * mk_pte_huge - Build a 2MB leaf PTE from a 2MB-aligned physical address
+ *               and VMA-level flags.  Sets the PS bit so hardware interprets
+ *               this PD entry as a 2MB large page.
+ */
+static inline pte_t mk_pte_huge(uint64 pa, uint64 vma_flags) {
+    return mk_pte(pa, vma_flags) | __PTE_PS;
+}
 
 /**
  * pte_modify - Rewrite a PTE keeping the same PA but applying new

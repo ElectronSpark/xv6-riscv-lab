@@ -61,6 +61,16 @@ pte_t *walk(pagetable_t pagetable, uint64 va, int alloc, pte_t **retl2,
         ret_pte[level] = pte;
         assert(pte != NULL, "walk: pte is null");
         if (*pte & PTE_V) {
+            /* Detect 2MB megapage leaf at level 1.  On RISC-V a leaf
+             * has at least one of R/W/X set; we also check our
+             * software __PTE_HUGEPAGE marker for safety. */
+            if (level == 1 && (*pte & (PTE_R | PTE_W | PTE_X))) {
+                if (retl2 && PAGETABLE_LEVELS > 2)
+                    *retl2 = ret_pte[PAGETABLE_LEVELS > 3 ? 3 : 2];
+                if (retl1)
+                    *retl1 = pte;
+                return pte;  /* return the level-1 hugepage PTE */
+            }
             pagetable = (pagetable_t)PA2VA(PTE2PA(*pte));
         } else {
             if (!alloc || (pagetable = (pde_t *)pgtab_alloc()) == 0)
@@ -106,6 +116,8 @@ uint64 walkaddr(pagetable_t pagetable, uint64 va)
     if ((*pte & PTE_U) == 0)
         return 0;
     pa = PTE2PA(*pte);
+    if (pte_is_hugepage(pte))
+        pa += va & (HUGEPAGE_SIZE - 1);
     return pa;
 }
 
@@ -226,6 +238,13 @@ int vm_zap_pte(vm_t *vm, vma_t *vma, uint64 target_pa)
         pte_t *pte = walk(pgtable, va, 0, NULL, NULL);
         if (pte == NULL || (*pte & PTE_V) == 0)
             continue;
+        /* Skip hugepages — rmap zap operates on 4KB PTEs only. */
+        if (pte_is_hugepage(pte)) {
+            uint64 next = (va & HUGEPAGE_MASK) + HUGEPAGE_SIZE;
+            if (next > va + PGSIZE)
+                va = next - PGSIZE;
+            continue;
+        }
         if (PTE2PA(*pte) != target_pa)
             continue;
 
@@ -240,4 +259,75 @@ int vm_zap_pte(vm_t *vm, vma_t *vma, uint64 target_pa)
     }
 
     return zapped;
+}
+
+/* ========================================================================== */
+/*  2MB huge-page support                                                      */
+/* ========================================================================== */
+
+pte_t *walk_pmd(pagetable_t pagetable, uint64 va, int alloc)
+{
+    assert(VA_IS_VALID(va), "walk_pmd: va out of range");
+    assert(pagetable != NULL, "walk_pmd: pagetable is null");
+
+    /* Sv39: walk levels 2 down to 1 and return the level-1 PTE. */
+    for (int level = PAGETABLE_LEVELS - 1; level > 1; level--) {
+        pte_t *pte = &pagetable[PX(level, va)];
+        if (*pte & PTE_V) {
+            pagetable = (pagetable_t)PA2VA(PTE2PA(*pte));
+        } else {
+            if (!alloc || (pagetable = (pde_t *)pgtab_alloc()) == 0)
+                return NULL;
+            memset(pagetable, 0, PGSIZE);
+            *pte = PA2PTE(pagetable) | PTE_V | WALK_INTERMEDIATE_FLAGS;
+        }
+    }
+    return &pagetable[PX(1, va)];
+}
+
+int map_hugepage(pagetable_t pagetable, uint64 va, uint64 pa, int perm)
+{
+    if ((va & (HUGEPAGE_SIZE - 1)) != 0)
+        panic("map_hugepage: va not 2MB-aligned");
+    if ((pa & (HUGEPAGE_SIZE - 1)) != 0)
+        panic("map_hugepage: pa not 2MB-aligned");
+
+    pte_t *pte = walk_pmd(pagetable, va, 1);
+    if (pte == NULL)
+        return -ENOMEM;
+    if (*pte & PTE_V) {
+        /* If R|W|X are all clear the entry is a non-leaf pointing to a
+         * level-0 page table (could have been pre-allocated by walk()).
+         * Reclaim it if every slot is still zero. */
+        if (!(*pte & (PTE_R | PTE_W | PTE_X))) {
+            pagetable_t l0 = (pagetable_t)PA2VA(PTE2PA(*pte));
+            for (int j = 0; j < 512; j++) {
+                if (l0[j] != 0)
+                    panic("map_hugepage: remap over non-empty L0");
+            }
+            pgtab_free((void *)PTE2PA(*pte));
+            *pte = 0;
+        } else {
+            panic("map_hugepage: remap, va=%p pa=%p existing=%p",
+                  (void *)va, (void *)pa, (void *)*pte);
+        }
+    }
+
+    *pte = PA2PTE(pa) | perm | PTE_V | PTE_A | PTE_D | PTE_HUGEPAGE;
+    return 0;
+}
+
+void unmap_hugepage(pagetable_t pagetable, uint64 va, int do_free)
+{
+    if ((va & (HUGEPAGE_SIZE - 1)) != 0)
+        panic("unmap_hugepage: va not 2MB-aligned");
+
+    pte_t *pte = walk_pmd(pagetable, va, 0);
+    if (pte == NULL || (*pte & PTE_V) == 0)
+        panic("unmap_hugepage: not mapped, va=%p", (void *)va);
+
+    uint64 pa = PTE2PA(*pte);
+    *pte = 0;
+    if (do_free)
+        page_free((void *)pa, HUGEPAGE_ORDER);
 }

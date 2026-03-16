@@ -56,8 +56,21 @@
 
 /*
  * Default compound order for anonymous folio allocation during demand faults.
- * Order 2 = 4 pages = 16 KB.  The allocator falls back to smaller orders
- * (down to 0) when the VMA is too small or memory is tight.
+ * Anonymous memory always uses order 0 (single 4 KB page).  2 MB huge pages
+ * are reserved for file-backed (MAP_PRIVATE) mappings where the data is
+ * copied from the page cache into a freshly allocated anonymous folio.
+ *
+ * DESIGN NOTE (2MB hugepage support):
+ *   - Hugepages are ONLY used for file-backed MAP_PRIVATE VMAs.
+ *   - Anonymous VMAs (heap, stack, mmap(MAP_ANON)) always use 4 KB pages.
+ *   - MAP_SHARED file VMAs always use 4 KB pages (hugepages would break
+ *     write visibility between processes sharing the same mapping).
+ *   - File hugepages are installed as PAGE_TYPE_ANON folios with rmap,
+ *     allowing standard COW on fork (write-protect both, copy 2 MB on fault).
+ *   - The pcache (page cache) is NOT bypassed — data is read from pcache
+ *     into the 2 MB folio, so pcache eviction/writeback is unaffected.
+ *   - __vma_set_free, __vma_copy (fork COW), and __vma_validate_pte_rxw
+ *     all handle hugepage PTEs via pte_is_hugepage() checks.
  */
 #define VM_ANON_FOLIO_ORDER 0
 
@@ -296,6 +309,32 @@ static void __vma_set_free(vma_t *vma)
                         a = next - PGSIZE; /* loop increment adds PGSIZE */
                     continue;
                 }
+                /* If walk() returned a 2MB hugepage PTE, handle it
+                 * specially: free the entire 2MB page and skip ahead.
+                 * Do NOT cache l0 — there is no level-0 table.
+                 *
+                 * NOTE: hugepages here are always PAGE_TYPE_ANON folios
+                 * (copied from file data), so page_remove_rmap +
+                 * page_ref_dec releases the folio correctly via the
+                 * buddy allocator's compound-page freeing path.
+                 * No pcache ref to release — data was copied out. */
+                if (pte_is_hugepage(pte)) {
+                    if (pte_present(pte)) {
+                        uint64 pa = pte_pa(pte);
+                        pte_clear(pte);
+                        tlb_needs_flush = 1;
+                        page_t *pg = __pa_to_page(pa);
+                        if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
+                            page_remove_rmap(pg);
+                        page_ref_dec((void *)pa);
+                    }
+                    l0 = NULL;
+                    /* Advance to end of this 2MB region. */
+                    uint64 next = (a & HUGEPAGE_MASK) + HUGEPAGE_SIZE;
+                    if (next > a + PGSIZE)
+                        a = next - PGSIZE;
+                    continue;
+                }
                 l0 = pte - PX(0, a);
             }
             if (pte_nonleaf(pte))
@@ -381,6 +420,50 @@ static int __vma_copy(vma_t *dst, vma_t *src)
             pte_t *src_pte = walk(pgtb_src, a, 0, NULL, NULL);
             if (src_pte == NULL || *src_pte == 0)
                 continue;
+
+            /* ---- 2 MB hugepage PTE at level 1 ----
+             * File-backed MAP_PRIVATE hugepages are PAGE_TYPE_ANON.
+             * Fork COW: write-protect in both parent and child,
+             * bump refcount.  On write fault, __vma_validate_pte_rxw
+             * copies the entire 2 MB folio (no splitting). */
+            if (pte_is_hugepage(src_pte)) {
+                if (!pte_present(src_pte))
+                    goto hugepage_skip;
+                pte_t *dst_pmd = walk_pmd(pgtb_dst, a, 1);
+                if (dst_pmd == NULL) {
+                    __vma_set_free(dst);
+                    return -ENOMEM;
+                }
+                if (is_shared) {
+                    *dst_pmd = *src_pte;
+                } else {
+                    if (pte_write(src_pte)) {
+                        pte_wrprotect(src_pte);
+                        src_tlb_flush_needed = 1;
+                    }
+                    *dst_pmd = *src_pte;
+                }
+                uint64 pa = pte_pa(src_pte);
+                assert(page_ref_inc((void *)pa) > 0,
+                       "__vma_copy: hugepage refcnt should be > 0");
+                page_t *pg = __pa_to_page(pa);
+                if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
+                    !is_shared) {
+                    if (page_mapcount(pg) == 0)
+                        page_add_anon_rmap(pg, src, a);
+                    page_add_anon_rmap(pg, dst, a);
+                }
+hugepage_skip:
+                /* Advance to end of this 2 MB region. */
+                {
+                    uint64 next = (a & HUGEPAGE_MASK) + HUGEPAGE_SIZE;
+                    if (next > a + PGSIZE)
+                        a = next - PGSIZE;
+                }
+                continue;
+            }
+
+            /* ---- regular 4 KB PTE ---- */
             if (pte_nonleaf(src_pte))
                 panic("__vma_copy: not a leaf");
             if (!pte_present(src_pte))
@@ -929,20 +1012,21 @@ int vma_free(vm_t *vm, vma_t *vma)
 
 /*
  * __folio_order_for_vma - compute the largest folio order that fits in the
- * VMA around @fault_va.  The folio base address must be naturally aligned,
- * so we clamp both by VMA boundaries and by alignment.
+ * VMA around @fault_va.  For 2MB huge pages the folio base must be
+ * naturally aligned (2MB boundary), fit entirely within the VMA, and the
+ * VMA must be a MAP_PRIVATE file-backed mapping (not anonymous, not shared).
  *
- * Returns an order in [0, VM_ANON_FOLIO_ORDER].
+ * Returns HUGEPAGE_ORDER or 0.
  */
 static unsigned int __folio_order_for_vma(vma_t *vma, uint64 fault_va)
 {
-    for (int order = VM_ANON_FOLIO_ORDER; order > 0; order--) {
-        uint64 folio_size = (uint64)PGSIZE << order;
-        uint64 folio_base = fault_va & ~(folio_size - 1);
-        uint64 folio_end = folio_base + folio_size;
-        if (folio_base >= vma->start && folio_end <= vma->end)
-            return (unsigned int)order;
-    }
+    /* Hugepages only for MAP_PRIVATE file-backed VMAs. */
+    if (vma->file == NULL || (vma->flags & VMA_FLAG_SHARED))
+        return 0;
+    uint64 hp_base = fault_va & HUGEPAGE_MASK;
+    uint64 hp_end  = hp_base + HUGEPAGE_SIZE;
+    if (hp_base >= vma->start && hp_end <= vma->end)
+        return HUGEPAGE_ORDER;
     return 0;
 }
 
@@ -964,61 +1048,30 @@ static unsigned int __folio_order_for_vma(vma_t *vma, uint64 fault_va)
 static void *__vma_map_anon_folio(vma_t *vma, uint64 fault_va,
                                   uint64 pte_flags)
 {
-    unsigned int order = __folio_order_for_vma(vma, fault_va);
+    /* Anonymous memory always uses single 4 KB pages.
+     * NOTE: hugepages are handled separately in vma_validate() for
+     * file-backed VMAs via __vma_fault_file_hugepage(). */
+    folio_t *folio = folio_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
+    if (folio == NULL)
+        return NULL;
 
-    /* Try the chosen order; fall back to smaller orders on OOM. */
-    folio_t *folio = NULL;
-    while (order > 0) {
-        folio = folio_alloc(order, PAGE_TYPE_ANON | GFP_HIGHMEM);
-        if (folio != NULL)
-            break;
-        order--;
-    }
-    if (folio == NULL) {
-        folio = folio_alloc(0, PAGE_TYPE_ANON | GFP_HIGHMEM);
-        if (folio == NULL)
-            return NULL;
-    }
-
-    uint64 folio_size = (uint64)PGSIZE << order;
-    uint64 folio_base_va = fault_va & ~(folio_size - 1);
     uint64 folio_pa = folio_address(folio);
+    memset((void *)folio_pa, 0, PGSIZE);
 
-    /* Zero the entire folio. */
-    memset((void *)folio_pa, 0, folio_size);
-
-    /* Map every page of the folio and set up per-page rmap. */
-    unsigned long nr_pages = folio_nr_pages(folio);
-    void *fault_page_pa = NULL;
-    for (unsigned long i = 0; i < nr_pages; i++) {
-        uint64 va = folio_base_va + i * PGSIZE;
-        uint64 pa = folio_pa + i * PGSIZE;
-        if (va == fault_va)
-            fault_page_pa = (void *)pa;
-
-        pte_t *pte = walk(vma->vm->pagetable, va, 1, NULL, NULL);
-        if (pte == NULL)
-            continue; /* best-effort: we still own the folio */
-        if (*pte != 0)
-            continue; /* another thread (or fault-around) already mapped it */
-        *pte = mk_pte(pa, pte_flags);
+    pte_t *pte = walk(vma->vm->pagetable, fault_va, 1, NULL, NULL);
+    if (pte == NULL) {
+        page_ref_dec((void *)folio_pa);
+        return NULL;
     }
-
-    /* Record the mapping in the folio's head page.  Rmap is tracked
-     * per-folio (on the head page) — never on tail pages, whose union
-     * stores head_page and would be corrupted by writing mapcount. */
+    if (*pte != 0) {
+        /* Race: another core already populated this PTE. */
+        page_ref_dec((void *)folio_pa);
+        return (void *)pte_pa(pte);
+    }
+    *pte = mk_pte(folio_pa, pte_flags);
     folio_add_anon_rmap(folio, vma, fault_va);
-
-    /* For order > 0 folios mapped to multiple PTEs we bump refcount so
-     * that each PTE's eventual page_ref_dec still leaves the folio
-     * alive until the last PTE is torn down.  The folio starts with
-     * refcount 1 from folio_alloc.  We add (nr_pages - 1) refs. */
-    for (unsigned long i = 1; i < nr_pages; i++)
-        folio_get(folio);
-
-    for (unsigned long i = 0; i < nr_pages; i++)
-        sfence_vma_page(folio_base_va + i * PGSIZE);
-    return fault_page_pa;
+    sfence_vma_page(fault_va);
+    return (void *)folio_pa;
 }
 
 static void *__vma_fault_file_page(vma_t *vma, uint64 va)
@@ -1094,10 +1147,144 @@ static void *__vma_fault_file_page(vma_t *vma, uint64 va)
     return pa;
 }
 
+/**
+ * __vma_fault_file_hugepage - try to satisfy a file-backed page fault with
+ * a 2 MB hugepage.
+ *
+ * Allocates a 2 MB anonymous folio, reads 512 consecutive pages of file
+ * data from the page cache into it, and returns the folio's physical
+ * address.  The caller installs the 2 MB PTE and sets up rmap.
+ *
+ * Only suitable for MAP_PRIVATE VMAs — the data is copied, so MAP_SHARED
+ * semantics (write visibility between processes) would be lost.
+ *
+ * Requirements checked by caller:
+ *   - vma is file-backed, MAP_PRIVATE
+ *   - 2 MB-aligned range [hp_base, hp_base+2MB) fits within the VMA
+ *   - file is large enough
+ *
+ * @vma:     the faulting VMA
+ * @hp_base: 2 MB-aligned virtual address (start of the huge page region)
+ *
+ * Returns the physical address of the 2 MB folio, or NULL on failure.
+ * On success the returned folio has refcount 1 (caller's).
+ */
+static void *__vma_fault_file_hugepage(vma_t *vma, uint64 hp_base)
+{
+    struct vfs_file *file = vma->file;
+    struct vfs_inode *inode = vfs_inode_deref(&file->inode);
+    if (inode == NULL)
+        return NULL;
+    struct pcache *pc = &inode->i_data;
+
+    /* File offset corresponding to the 2 MB base VA. */
+    uint64 file_off_base = vma->pgoff + (hp_base - vma->start);
+    uint64 file_off_end  = file_off_base + HUGEPAGE_SIZE;
+
+    /* All 512 pages must be fully covered by file data. */
+    if (file_off_end > (uint64)inode->size)
+        return NULL;
+
+    folio_t *folio = folio_alloc(HUGEPAGE_ORDER, PAGE_TYPE_ANON | GFP_HIGHMEM);
+    if (folio == NULL)
+        return NULL;
+    uint64 folio_pa = folio_address(folio);
+
+    /* Read each 4 KB page from the page cache into the folio. */
+    for (uint64 off = 0; off < HUGEPAGE_SIZE; off += PGSIZE) {
+        uint64 file_off  = file_off_base + off;
+        uint64 blkno_512 = file_off / BLK_SIZE;
+
+        folio_t *pcfolio = pcache_get_folio(pc, blkno_512);
+        if (pcfolio == NULL)
+            goto fail;
+        int ret = pcache_read_folio(pc, pcfolio);
+        if (ret != 0) {
+            pcache_put_folio(pc, pcfolio);
+            goto fail;
+        }
+
+        page_t *pcpage = &pcfolio->page;
+        struct pcache_node *pcn = pcpage->pcache.pcache_node;
+        if (pcn == NULL || pcn->data == NULL) {
+            pcache_put_folio(pc, pcfolio);
+            goto fail;
+        }
+        uint64 folio_byte_off = (uint64)blkno_512 * BLK_SIZE -
+                                (uint64)pcn->blkno * BLK_SIZE;
+        memmove((void *)(folio_pa + off),
+                (char *)pcn->data + folio_byte_off, PGSIZE);
+        pcache_put_folio(pc, pcfolio);
+    }
+
+    return (void *)folio_pa;
+
+fail:
+    page_ref_dec((void *)folio_pa);
+    return NULL;
+}
+
 static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
 {
     if (pte_write_ready(pte))
         return 0;
+
+    /*
+     * ---- 2 MB hugepage write-fault fast paths ----
+     *
+     * Hugepages are file-backed MAP_PRIVATE folios (PAGE_TYPE_ANON):
+     *  - Installed read-only in vma_validate()'s hugepage path.
+     *  - On first write: single mapper → re-grant write in-place.
+     *  - After fork (COW): mapcount > 1 → copy entire 2 MB folio.
+     *
+     * CAVEAT: COW always copies the full 2 MB — no splitting to 4 KB.
+     * If memory is tight and folio_alloc(HUGEPAGE_ORDER) fails, the
+     * write fault returns -ENOMEM.  Future work could split the
+     * hugepage into 512 x 4 KB pages and COW only the faulting page.
+     */
+    if (pte_present(pte) && pte_is_hugepage(pte)) {
+        /* Writable but not dirty — just set dirty bit. */
+        if (pte_write(pte) && !pte_dirty(pte)) {
+            pte_mkdirty(pte);
+            sfence_vma_page(fault_va);
+            return 0;
+        }
+        uint64 hp_pa = pte_pa(pte);
+        page_t *pg = __pa_to_page(hp_pa);
+        if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON)) {
+            if (page_mapcount(pg) <= 1) {
+                /* Single mapper — re-grant write on the 2 MB PTE. */
+                *pte = mk_pte_huge(hp_pa, vma->flags);
+                sfence_vma_page(fault_va);
+                return 0;
+            }
+            /* COW: multiple mappers — copy the entire 2 MB folio.
+             * The new folio inherits PAGE_TYPE_ANON and gets its own
+             * rmap entry so future forks/unmaps track it correctly. */
+            if (anon_vma_prepare(vma) != 0)
+                return -ENOMEM;
+            folio_t *old_folio = page_folio(pg);
+            folio_t *new_folio =
+                folio_alloc(HUGEPAGE_ORDER, PAGE_TYPE_ANON | GFP_HIGHMEM);
+            if (new_folio == NULL)
+                return -ENOMEM;
+            uint64 new_pa = folio_address(new_folio);
+            memmove((void *)new_pa, (void *)hp_pa, HUGEPAGE_SIZE);
+            folio_remove_rmap(old_folio);
+            folio_add_anon_rmap(new_folio, vma,
+                                fault_va & HUGEPAGE_MASK);
+            *pte = mk_pte_huge(new_pa, vma->flags);
+            page_ref_dec((void *)hp_pa);
+            sfence_vma_page(fault_va);
+            return 0;
+        }
+        /* Non-anonymous hugepage — just re-grant write. */
+        *pte = mk_pte_huge(hp_pa, vma->flags);
+        sfence_vma_page(fault_va);
+        return 0;
+    }
+
+    /* ---- existing 4 KB paths below ---- */
 
     if (pte_present(pte)) {
         page_t *pg = __pa_to_page(pte_pa(pte));
@@ -1306,10 +1493,16 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte, uint64 fault_va)
         if (!pte_write(pte))
             mflags &= ~PROT_WRITE;
         int old_dirty = pte_dirty(pte);
-        pte_modify(pte, mflags);
+        int is_huge = pte_is_hugepage(pte);
+        if (is_huge) {
+            uint64 pa = pte_pa(pte);
+            *pte = mk_pte_huge(pa, mflags);
+        } else {
+            pte_modify(pte, mflags);
+        }
         /* Keep pcache pages clean unless the PTE was already dirty. */
         page_t *pg = __pa_to_page(pte_pa(pte));
-        if (page_is_pcache(pg) && !old_dirty)
+        if (!is_huge && page_is_pcache(pg) && !old_dirty)
             pte_mkclean(pte);
     }
 
@@ -1363,10 +1556,14 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
         return -EACCES;
 
     /* Pre-allocate anon_vma outside spinlock — rwsem cannot be acquired
-     * while a spinlock is held.  For anonymous VMAs (demand-zero) and
-     * writable file-backed VMAs (potential COW), prepare the anon_vma now
-     * so that __vma_validate_pte_rxw / _rx find it already set (no-op). */
-    if (vma->anon_vma == NULL && (vma->file == NULL || (flags & PROT_WRITE))) {
+     * while a spinlock is held.  Always prepare for ALL VMAs because:
+     *  - Anonymous VMAs need it for demand-zero folio rmap.
+     *  - File-backed MAP_PRIVATE VMAs need it for 2 MB hugepage rmap
+     *    (hugepages are PAGE_TYPE_ANON folios backed by file data).
+     *  - Writable file VMAs need it for COW on pcache pages.
+     * Previously this was conditional on (file == NULL || PROT_WRITE);
+     * now unconditional so read-only file hugepages can set up rmap. */
+    if (vma->anon_vma == NULL) {
         if (anon_vma_prepare(vma) != 0)
             return -ENOMEM;
     }
@@ -1377,6 +1574,66 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
     for (uint64 i = va; i < va_end; i += PGSIZE) {
         /* File-backed VMA: may need to drop spinlock for I/O */
         if (vma->file != NULL) {
+
+            /*
+             * ---- 2 MB hugepage attempt for MAP_PRIVATE files ----
+             *
+             * Before falling into the per-page fault path, check if
+             * we can satisfy this fault with a single 2 MB PTE.
+             *
+             * Conditions:
+             *   1. VA is 2 MB-aligned (natural alignment required).
+             *   2. __folio_order_for_vma says OK (file-backed,
+             *      MAP_PRIVATE, VMA covers the full 2 MB range).
+             *   3. The full 2 MB is within the validate range.
+             *   4. The level-1 PTE slot is empty (no existing l0 table).
+             *
+             * The lock is dropped for I/O (reading 512 pcache pages).
+             * After re-acquiring, we re-check the PMD for races.
+             *
+             * NOTE: The PTE is installed read-only even if the VMA is
+             * writable.  The first write will trigger COW in
+             * __vma_validate_pte_rxw, which re-grants write (single
+             * mapper) or copies the whole 2 MB folio (multi-mapper).
+             *
+             * On failure (OOM, partial file, pcache miss), we fall
+             * through to the standard per-page fault-around path.
+             */
+            uint64 hp_base = i & HUGEPAGE_MASK;
+            if (i == hp_base &&
+                __folio_order_for_vma(vma, i) >= HUGEPAGE_ORDER &&
+                hp_base + HUGEPAGE_SIZE <= va_end) {
+                /* Check level-1 PTE without allocating the level-0 table. */
+                pte_t *pmd = walk_pmd(vma->vm->pagetable, hp_base, 0);
+                if (pmd != NULL && *pmd == 0) {
+                    /* Level-1 slot is empty — try a 2 MB hugepage. */
+                    vm_pgtable_unlock(vma->vm);
+
+                    void *hp_pa = __vma_fault_file_hugepage(vma, hp_base);
+                    if (hp_pa != NULL) {
+                        vm_pgtable_lock(vma->vm);
+                        pmd = walk_pmd(vma->vm->pagetable, hp_base, 1);
+                        if (pmd != NULL && *pmd == 0) {
+                            folio_t *hp_folio =
+                                page_folio(__pa_to_page((uint64)hp_pa));
+                            /* Install read-only; COW on write. */
+                            uint64 hp_flags = vma->flags & ~PROT_WRITE;
+                            *pmd = mk_pte_huge((uint64)hp_pa, hp_flags);
+                            folio_add_anon_rmap(hp_folio, vma, hp_base);
+                            sfence_vma_page(hp_base);
+                            /* Skip past the 2 MB region. */
+                            i = hp_base + HUGEPAGE_SIZE - PGSIZE;
+                            continue;
+                        }
+                        /* Race: someone else populated it — free ours. */
+                        page_ref_dec(hp_pa);
+                    } else {
+                        vm_pgtable_lock(vma->vm);
+                    }
+                    /* Fall through to per-page fault. */
+                }
+            }
+
             pte_t *pte = walk(vma->vm->pagetable, i, 1, NULL, NULL);
             if (pte == NULL) {
                 vm_pgtable_unlock(vma->vm);
@@ -1667,6 +1924,8 @@ copyout_ok:
         assert(pte != NULL, "vma_copyout: pte should not be null");
 
         pa0 = pte_pa(pte);
+        if (pte_is_hugepage(pte))
+            pa0 += va0 & (HUGEPAGE_SIZE - 1);
         n = PGSIZE - (dstva - va0);
         if (dstva + n > validated_end)
             n = validated_end - dstva;
@@ -2267,6 +2526,23 @@ int vm_mprotect(vm_t *vm, uint64 addr, size_t size, int prot)
     for (uint64 va = addr; va < addr + size; va += PGSIZE) {
         pte_t *pte = walk(vm->pagetable, va, 0, NULL, NULL);
         if (pte != NULL && pte_present(pte)) {
+            /* Handle hugepage: modify the 2MB PTE and skip ahead. */
+            if (pte_is_hugepage(pte)) {
+                uint64 mflags = effective_flags;
+                if (mflags & PROT_WRITE) {
+                    uint64 pa = pte_pa(pte);
+                    page_t *pg = __pa_to_page(pa);
+                    if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON) &&
+                        page_mapcount(pg) > 1)
+                        mflags &= ~PROT_WRITE;
+                }
+                uint64 pa = pte_pa(pte);
+                *pte = mk_pte_huge(pa, mflags);
+                uint64 next = (va & HUGEPAGE_MASK) + HUGEPAGE_SIZE;
+                if (next > va + PGSIZE)
+                    va = next - PGSIZE;
+                continue;
+            }
             uint64 mflags = effective_flags;
             /* rmap-based COW: if page has mapcount > 1 and we're trying
              * to grant write, suppress write — the write-fault handler
@@ -2426,10 +2702,26 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
     if (vma->anon_vma != NULL && anon_vma_fork(new_vma, vma) != 0)
         goto err_new_vma;
 
-    for (uint64 offset = 0; offset < old_size; offset += PGSIZE) {
+    for (uint64 offset = 0; offset < old_size;) {
         pte_t *old_pte = walk(vm->pagetable, old_addr + offset, 0, NULL, NULL);
         if (old_pte != NULL && pte_present(old_pte)) {
             uint64 pa = pte_pa(old_pte);
+
+            if (pte_is_hugepage(old_pte)) {
+                /* 2MB hugepage: copy PMD entry to new location. */
+                pte_t *new_pmd =
+                    walk_pmd(vm->pagetable, new_location + offset, 1);
+                if (new_pmd == NULL)
+                    goto err_new_vma;
+                *new_pmd = *old_pte;
+                if (page_ref_inc((void *)pa) <= 0)
+                    goto err_new_vma;
+                page_t *pg = __pa_to_page(pa);
+                if (pg != NULL && PAGE_IS_TYPE(pg, PAGE_TYPE_ANON))
+                    page_add_anon_rmap(pg, new_vma, new_location + offset);
+                offset += HUGEPAGE_SIZE;
+                continue;
+            }
 
             pte_t *new_pte =
                 walk(vm->pagetable, new_location + offset, 1, NULL, NULL);
@@ -2451,6 +2743,7 @@ uint64 vm_mremap(vm_t *vm, uint64 old_addr, size_t old_size, size_t new_size,
                 page_add_anon_rmap(pg, new_vma, new_location + offset);
             }
         }
+        offset += PGSIZE;
     }
 
     if (vma == vm->heap)

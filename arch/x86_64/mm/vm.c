@@ -441,6 +441,12 @@ static void __freewalk(pagetable_t pagetable, int level, uint64 base_va)
             continue;
         uint64 va = base_va | ((uint64)i << shift[level]);
         if (level > 0) {
+            if (level == 1 && (pte & PTE_PS)) {
+                /* 2MB hugepage leaf at PD level — leaked, clear it. */
+                pagetable[i] = 0;
+                __freewalk_leak_count++;
+                continue;
+            }
             /* Non-leaf: recurse into next level page table.
              * PTE2PA extracts a PA; pgtab_alloc() returns PAs that are
              * usable as pointers via the PML4[0] identity map, so

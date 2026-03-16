@@ -424,6 +424,11 @@ static void __freewalk(pagetable_t pagetable, int level)
             __freewalk((pagetable_t)PA2VA(child), level - 1);
             pagetable[i] = 0;
         } else if (pte & PTE_V) {
+            if (level == 1) {
+                /* Hugepage leaf at PMD level — leaked, clear it. */
+                pagetable[i] = 0;
+                continue;
+            }
             panic("freewalk: leaf");
         }
     }

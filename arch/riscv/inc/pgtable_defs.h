@@ -36,6 +36,7 @@
 #define __PTE_U (1L << 4)
 #define __PTE_A (1L << 6)
 #define __PTE_D (1L << 7)
+#define __PTE_HUGEPAGE (1L << 8)  /* RSW bit 0 — marks a 2MB megapage PTE */
 
 #define __PA2PTE(pa) ((((uint64)(pa)) >> 12) << 10)
 #define __PTE2PA(pte) (((pte) >> 10) << 12)
@@ -86,6 +87,11 @@ static inline int pte_write_ready(pte_t *pte) {
  */
 static inline uint64 pte_pa(pte_t *pte) { return __PTE2PA(*pte); }
 
+/** Is the PTE a 2MB hugepage leaf entry? (__PTE_HUGEPAGE RSW bit set.) */
+static inline int pte_is_hugepage(pte_t *pte) {
+    return (*pte & __PTE_HUGEPAGE) != 0;
+}
+
 /* ── PTE construction ───────────────────────────────────────────────────── */
 
 /**
@@ -126,6 +132,15 @@ static inline void pte_wrprotect(pte_t *pte) { *pte &= ~__PTE_W; }
 
 /** Zero the PTE entirely. */
 static inline void pte_clear(pte_t *pte) { *pte = 0; }
+
+/**
+ * mk_pte_huge - Build a 2MB leaf PTE from a 2MB-aligned physical address
+ *               and VMA-level flags.  Adds the __PTE_HUGEPAGE software
+ *               marker so that pte_is_hugepage() recognises it.
+ */
+static inline pte_t mk_pte_huge(uint64 pa, uint64 vma_flags) {
+    return mk_pte(pa, vma_flags) | __PTE_HUGEPAGE;
+}
 
 /**
  * pte_modify - Rewrite a PTE keeping the same PA but applying new

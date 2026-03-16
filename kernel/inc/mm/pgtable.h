@@ -124,6 +124,34 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa,
 void uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free);
 
 /* ========================================================================== */
+/*  2MB huge-page support                                                     */
+/* ========================================================================== */
+
+/**
+ * walk_pmd - Walk to page-directory (level 1) and return a pointer to the
+ *            PMD entry for @va.  Allocates upper-level tables when @alloc
+ *            is set, but never allocates a level-0 page table.
+ */
+pte_t *walk_pmd(pagetable_t pagetable, uint64 va, int alloc);
+
+/**
+ * map_hugepage - Create a single 2MB huge-page mapping.
+ *                Both @va and @pa must be 2MB-aligned.
+ *
+ * @perm: raw PTE permission flags (arch-specific).
+ * Returns 0 on success, negative errno on failure.
+ */
+int map_hugepage(pagetable_t pagetable, uint64 va, uint64 pa, int perm);
+
+/**
+ * unmap_hugepage - Remove a single 2MB huge-page mapping.
+ *                  @va must be 2MB-aligned.
+ *
+ * @do_free: if set, the physical page group is freed.
+ */
+void unmap_hugepage(pagetable_t pagetable, uint64 va, int do_free);
+
+/* ========================================================================== */
 /*  PTE ↔ VMA flag conversion                                                */
 /* ========================================================================== */
 

@@ -7,6 +7,13 @@
 #define PGSHIFT 12
 #define MAXVA (~0ULL)
 
+#define HUGEPAGE_SHIFT 21
+#define HUGEPAGE_SIZE  (1UL << HUGEPAGE_SHIFT)  // 2 MB
+#define HUGEPAGE_MASK  (~(HUGEPAGE_SIZE - 1))
+#define HUGEPAGE_ORDER 9  // 2^9 = 512 base pages = 2 MB
+#define HUGEPGROUNDUP(sz)   (((sz) + HUGEPAGE_SIZE - 1) & HUGEPAGE_MASK)
+#define HUGEPGROUNDDOWN(a)  ((a) & HUGEPAGE_MASK)
+
 /*
  * x86_64 higher-half kernel: all kernel sections have
  * VMA = PA + PAGE_OFFSET (0xFFFF800000000000).
@@ -63,6 +70,7 @@
 #define PTE_G (1ULL << 8)           /* Global */
 #define PTE_A (1ULL << 5)           /* Accessed */
 #define PTE_D (1ULL << 6)           /* Dirty */
+#define PTE_PS (1ULL << 7)          /* Page Size (2MB at PD level) */
 #define PTE_NX (1ULL << 63)         /* No Execute */
 
 /*
