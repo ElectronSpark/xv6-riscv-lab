@@ -750,7 +750,15 @@ static void virtio_disk_rw(int diskno, struct bio *bio, uint64 sector,
         if (alloc3_desc(disk, idx) == 0) {
             break;
         }
-        // No free descriptors, wait on per-disk queue
+        // No free descriptors — kick the device first so it processes
+        // any already-queued avail ring entries (which may free descriptors
+        // on completion), then sleep until descriptors are freed.
+        if (disk->pci_state.use_pci) {
+            volatile uint16 *notify_addr = disk->pci_state.notify_base;
+            *notify_addr = 0;
+        } else {
+            *R(diskno, VIRTIO_MMIO_QUEUE_NOTIFY) = 0;
+        }
         __thread_state_set(current, THREAD_UNINTERRUPTIBLE);
         tq_wait(&disk->desc_wait_queue, &disk->vdisk_lock, NULL);
     }

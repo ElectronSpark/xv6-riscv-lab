@@ -1987,6 +1987,9 @@ hp_per_page:
 /*  User memory accessors                                                     */
 /* ========================================================================== */
 
+uint64 g_vm_copyout_fast_hits = 0;
+uint64 g_vm_copyout_fast_bytes = 0;
+
 int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
 {
     uint64 copy_start = r_time();
@@ -2000,6 +2003,101 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
     int ret = 0;
 
     vm_rlock(vm);
+
+    /*
+     * Fast path: switch CR3 to the user page table and copy directly
+     * into user VAs instead of per-page software walks.  Processes the
+     * copy in per-VMA chunks (the buffer may span multiple VMAs).
+     *
+     * Interrupts are disabled while the user CR3 is loaded because the
+     * trap handler unconditionally switches CR3 to the kernel page table
+     * on entry and does NOT restore it for kernel-mode traps.
+     */
+    if (len > 0 && current != NULL && current->vm == vm &&
+        !vm->is_kernel && dstva < UVMTOP && dstva + len <= UVMTOP) {
+        uint64 fdst = dstva;
+        const void *fsrc = src;
+        uint64 flen = len;
+        bool fast_ok = true;
+
+        while (flen > 0) {
+            uint64 sp = PGROUNDDOWN(fdst);
+            vma_t *fvma = vm_find_area(vm, sp);
+            if (fvma == NULL) {
+                fast_ok = false; break;
+            }
+
+            /* Clamp chunk to this VMA. */
+            uint64 chunk = flen;
+            if (fdst + chunk > fvma->end)
+                chunk = fvma->end - fdst;
+            uint64 ep = PGROUNDUP(fdst + chunk);
+            if (ep > fvma->end)
+                ep = fvma->end;
+
+            if (vma_validate(fvma, sp, ep - sp,
+                             VMA_FLAG_USER | PROT_WRITE) != 0) {
+                fast_ok = false;
+                break;
+            }
+
+            /* Verify all user pages are resident before switching CR3;
+             * a page fault with interrupts disabled would deadlock
+             * because the trap handler switches to the kernel CR3
+             * but does not restore the user CR3 on return to the
+             * faulting instruction. */
+            for (uint64 pg = sp; pg < ep; pg += PGSIZE) {
+                pte_t *ppte = walk(vm->pagetable, pg, 0, NULL, NULL);
+                if (ppte == NULL || !(*ppte & PTE_V)) {
+                    fast_ok = false;
+                    break;
+                }
+            }
+            if (!fast_ok) break;
+
+            /* Convert src to higher-half VA for access under user CR3. */
+            const void *src_safe = ((uint64)fsrc < PAGE_OFFSET)
+                ? (const void *)((uint64)fsrc + PAGE_OFFSET) : fsrc;
+
+            int was = intr_off_save();
+            uint64 kcr3 = r_satp();
+            uint64 kcr3_pt = kcr3 & ~CR3_NOFLUSH & ~CR3_PCID_MASK;
+            uint64 ucr3_pt = (uint64)vm->pagetable;
+
+            if (kcr3_pt != ucr3_pt) {
+                uint64 ucr3;
+                if (vm_asid_max() > 0)
+                    ucr3 = MAKE_SATP_PCID(ucr3_pt, vm->asid, 0);
+                else
+                    ucr3 = ucr3_pt;
+                w_satp(ucr3);
+                memmove((void *)fdst, src_safe, chunk);
+                w_satp(kcr3);
+            } else {
+                memmove((void *)fdst, src_safe, chunk);
+            }
+            intr_restore(was);
+
+            fdst += chunk;
+            fsrc += chunk;
+            flen -= chunk;
+        }
+
+        if (fast_ok) {
+            g_vm_copyout_fast_hits++;
+            g_vm_copyout_ticks += r_time() - copy_start;
+            vm_runlock(vm);
+            return 0;
+        }
+        /* Fast path failed partway — fall through to slow path
+         * for the remaining bytes. */
+        dstva = fdst;
+        src = fsrc;
+        len = flen;
+    }
+
+    /* Slow path: per-page walk + coalesced memmove (multi-VMA, stack
+     * growth, or validation failure on fast path). */
     while (len > 0) {
         va0 = PGROUNDDOWN(dstva);
         if (va0 >= UVMTOP) {
@@ -2108,6 +2206,47 @@ int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len)
     int ret = 0;
     vm_rlock(vm);
 
+    /*
+     * Fast path: single-VMA range — switch to user CR3 and copy
+     * directly from user VA instead of per-page software walks.
+     */
+    if (0 && len > 0 && current != NULL && current->vm == vm &&
+        !vm->is_kernel && srcva < UVMTOP && srcva + len <= UVMTOP) {
+        uint64 sp = PGROUNDDOWN(srcva);
+        uint64 ep = PGROUNDUP(srcva + len);
+        vma_t *fvma = vm_find_area(vm, sp);
+        if (fvma != NULL && ep <= fvma->end &&
+            vma_validate(fvma, sp, ep - sp,
+                         VMA_FLAG_USER | PROT_READ) == 0) {
+            void *dst_safe = ((uint64)dst < PAGE_OFFSET)
+                ? (void *)((uint64)dst + PAGE_OFFSET) : dst;
+
+            int was = intr_off_save();
+            uint64 kcr3 = r_satp();
+            uint64 kcr3_pt = kcr3 & ~CR3_NOFLUSH & ~CR3_PCID_MASK;
+            uint64 ucr3_pt = (uint64)vm->pagetable;
+
+            if (kcr3_pt != ucr3_pt) {
+                uint64 ucr3;
+                if (vm_asid_max() > 0)
+                    ucr3 = MAKE_SATP_PCID(ucr3_pt, vm->asid, 1);
+                else
+                    ucr3 = ucr3_pt;
+                w_satp(ucr3);
+                memmove(dst_safe, (const void *)srcva, len);
+                w_satp(kcr3);
+            } else {
+                memmove(dst_safe, (const void *)srcva, len);
+            }
+            intr_restore(was);
+
+            g_vm_copyin_ticks += r_time() - copy_start;
+            vm_runlock(vm);
+            return 0;
+        }
+    }
+
+    /* Slow path: per-page walk + coalesced memmove. */
     while (len > 0) {
         va0 = PGROUNDDOWN(srcva);
         if (vma == NULL || srcva >= validated_end ||

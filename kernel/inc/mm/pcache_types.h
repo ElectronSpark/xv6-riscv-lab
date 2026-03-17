@@ -37,6 +37,21 @@ struct pcache_ops {
      * When non-NULL, the flush worker uses this for batched writes.
      */
     struct bio *(*submit_write_folio)(struct pcache *pcache, folio_t *folio);
+
+    /*
+     * Batch readahead: submit non-blocking read I/O for multiple folios.
+     * pages[] contains nr_pages pages with io_in_progress already set.
+     * The callback resolves block mappings, submits BIOs with batch=1,
+     * kicks the device, and stores submitted bios in bios[].
+     * Returns the number of bios stored, or negative error.
+     * On success, bios[i] corresponds to some subset of pages;
+     * pages that couldn't get a BIO (non-contiguous, sparse) are
+     * indicated by storing NULL in their bio slot.
+     * The caller is responsible for bio_await + bio_release.
+     */
+    int (*submit_readahead)(struct pcache *pcache,
+                            page_t **pages, int nr_pages,
+                            struct bio **bios, int max_bios);
 };
 
 #define PCACHE_DEFAULT_DIRTY_RATE 8 // in percentage
@@ -97,6 +112,8 @@ struct pcache {
     struct work_struct flush_work; // Work structure for flush operation
     int flush_error;
     uint32 wait_refcount; // Reference count for flusher waiter threads
+    int64 ra_pos;         // Readahead frontier: byte offset up to which
+                          // readahead has pre-read data.  Reset on evict_all.
 };
 
 // Extension of page structure for page cache use

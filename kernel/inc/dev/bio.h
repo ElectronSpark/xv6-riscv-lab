@@ -8,7 +8,7 @@
 #define BLK_SIZE_SHIFT 9 // Number of bits to represent block size (2^9 = 512)
 #define BLK_SIZE (1UL << BLK_SIZE_SHIFT) // Block size in bytes, 512 bytes
 #define BIO_MAX_VECS 128                 // Maximum number of bio_vec in a bio
-#define BIO_MAX_SIZE (1U << 19) // Maximum size of a bio in bytes (512KB)
+#define BIO_MAX_SIZE (1U << 22) // Maximum size of a bio in bytes (4MB)
 
 static inline void bio_iter_start(struct bio *bio, struct bio_iter *it) {
     it->blkno = bio->blkno;

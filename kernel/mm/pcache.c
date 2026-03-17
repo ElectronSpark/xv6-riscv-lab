@@ -1352,6 +1352,7 @@ int pcache_init(struct pcache *pcache) {
     pcache->private_data = NULL;
     pcache->flush_error = 0;
     pcache->wait_refcount = 0;
+    pcache->ra_pos = 0;
     pcache->active = 1;
     pcache->flush_requested = 0;
     if (pcache->max_pages == 0) {
@@ -1492,6 +1493,9 @@ void pcache_teardown(struct pcache *pcache) {
 int pcache_evict_all(struct pcache *pcache) {
     if (pcache == NULL || !pcache->active)
         return -EINVAL;
+
+    /* Reset readahead frontier so next read triggers fresh readahead */
+    pcache->ra_pos = 0;
 
     /* Flush dirty pages to disk first. */
     pcache_flush(pcache);
@@ -2208,8 +2212,9 @@ int pcache_read_page(struct pcache *pcache, page_t *page) {
      * in flight, we can return immediately without touching any lock.
      */
     pcnode = page->pcache.pcache_node;
-    if (pcnode && pcnode->uptodate && !pcnode->io_in_progress)
+    if (pcnode && pcnode->uptodate && !pcnode->io_in_progress) {
         return 0;
+    }
 
 retry_locked:
     __pcache_spin_lock(pcache);
@@ -2607,6 +2612,103 @@ void pcache_put_pages(struct pcache *pcache, struct pcache_page_vec *pvec) {
 }
 
 /******************************************************************************
+ * Readahead helper for pcache_readv
+ *
+ * Pre-populates upcoming folios in batch: gets pages, claims them for I/O,
+ * submits all BIOs in one batch (bio->batch=1 + single kick), awaits
+ * all completions, and marks pages up-to-date.  After this, pcache_readv's
+ * per-page pcache_read_page calls hit the fast path (uptodate check).
+ *****************************************************************************/
+
+#define PCACHE_RA_WINDOW 256  /* max folios per readahead batch */
+
+static loff_t __pcache_readahead(struct pcache *pcache, loff_t start_pos,
+                                loff_t end_pos)
+{
+    if (!pcache->ops || !pcache->ops->submit_readahead)
+        return start_pos;
+
+    page_t *ra_pages[PCACHE_RA_WINDOW];
+    struct bio *ra_bios[PCACHE_RA_WINDOW];
+    int n_pages = 0;
+
+    /* Phase 1: collect pages that need I/O, mark io_in_progress */
+    loff_t pos = start_pos;
+    while (n_pages < PCACHE_RA_WINDOW && pos < end_pos) {
+        uint64 blkno_512 = (pos / PGSIZE) * PCACHE_BLKS_PER_PAGE;
+        page_t *page = pcache_get_page(pcache, blkno_512);
+        if (page == NULL)
+            break;
+
+        struct pcache_node *pcn = page->pcache.pcache_node;
+
+        /* Already cached — skip */
+        if (pcn->uptodate) {
+            pcache_put_page(pcache, page);
+            pos = (loff_t)(pcn->blkno * BLK_SIZE) + pcn->size;
+            continue;
+        }
+
+        /* Try to claim for I/O */
+        __pcache_spin_lock(pcache);
+        page_lock_acquire(page);
+
+        if (pcn->io_in_progress || pcn->uptodate ||
+            !__pcache_is_active(pcache) || !__pcache_page_valid(pcache, page)) {
+            page_lock_release(page);
+            __pcache_spin_unlock(pcache);
+            pcache_put_page(pcache, page);
+            pos = (loff_t)(pcn->blkno * BLK_SIZE) + pcn->size;
+            continue;
+        }
+
+        __pcache_node_io_begin(pcache, page);
+        page_lock_release(page);
+        __pcache_spin_unlock(pcache);
+
+        ra_pages[n_pages] = page;
+        ra_bios[n_pages] = NULL;
+        n_pages++;
+
+        pos = (loff_t)(pcn->blkno * BLK_SIZE) + pcn->size;
+    }
+
+    if (n_pages == 0)
+        return pos;
+
+    /* Phase 2: batch-submit BIOs via filesystem callback */
+    pcache->ops->submit_readahead(
+        pcache, ra_pages, n_pages, ra_bios, n_pages);
+
+    /* Phase 3: await each BIO, mark page uptodate, release */
+    for (int i = 0; i < n_pages; i++) {
+        if (ra_bios[i] != NULL) {
+            bio_await(ra_bios[i]);
+            bio_release(ra_bios[i]);
+
+            __pcache_spin_lock(pcache);
+            page_lock_acquire(ra_pages[i]);
+            struct pcache_node *pcn = ra_pages[i]->pcache.pcache_node;
+            if (__pcache_page_valid(pcache, ra_pages[i])) {
+                if (!LIST_NODE_IS_DETACHED(pcn, lru_entry))
+                    __pcache_remove_lru(pcache, ra_pages[i]);
+                pcn->dirty = 0;
+                pcn->uptodate = 1;
+            }
+            page_lock_release(ra_pages[i]);
+            __pcache_spin_unlock(pcache);
+            __pcache_node_io_end(pcache, ra_pages[i]);
+        } else {
+            /* No BIO submitted — end I/O state, read via normal path */
+            __pcache_node_io_end(pcache, ra_pages[i]);
+        }
+        pcache_put_page(pcache, ra_pages[i]);
+    }
+
+    return pos;
+}
+
+/******************************************************************************
  * High-level vectorized read/write through the page cache
  *
  * These generic helpers implement the "iterate iov_iter → map file offset
@@ -2640,6 +2742,14 @@ ssize_t pcache_readv(struct pcache *pcache, struct iov_iter *iter,
     if (pos >= isize)
         return 0; /* EOF */
 
+    /* Readahead: use the persistent ra_pos to avoid re-reading pages
+     * that were pre-read in previous read() syscalls. */
+    bool do_readahead = !nowait && pcache->ops &&
+                        pcache->ops->submit_readahead;
+    loff_t ra_end = isize;  /* readahead up to end-of-file */
+    if (do_readahead && pos >= pcache->ra_pos)
+        pcache->ra_pos = __pcache_readahead(pcache, pos, ra_end);
+
     pcache_page_vec_init(&pvec);
 
     while (iter->nr_segs > 0 && iter->count > 0 && pos < isize) {
@@ -2656,6 +2766,13 @@ ssize_t pcache_readv(struct pcache *pcache, struct iov_iter *iter,
 
         size_t seg_read = 0;
         while (seg_read < seg_len) {
+            /* Sliding readahead: when current position reaches the
+             * readahead frontier, submit the next batch. */
+            if (do_readahead && pos >= pcache->ra_pos &&
+                pcache->ra_pos < ra_end)
+                pcache->ra_pos = __pcache_readahead(
+                    pcache, pcache->ra_pos, ra_end);
+
             uint64 blkno_512 = (pos / PGSIZE) * PCACHE_BLKS_PER_PAGE;
 
             /* Get the page — nowait or blocking */
@@ -2822,11 +2939,13 @@ ssize_t pcache_writev(struct pcache *pcache, struct iov_iter *iter,
 
             /*
              * Prepare the folio for writing.  If the write covers the
-             * entire folio, use pcache_prepare_write_page to avoid a
-             * disk read.  Otherwise read the existing content first.
+             * entire folio, use pcache_begin_full_page_write to avoid
+             * both a disk read and a redundant zero-fill.  Otherwise
+             * read the existing content first.
              */
             int ret;
             bool full_folio = (folio_off == 0 && chunk >= pcn->size);
+            bool need_commit = false;
 
             if (nowait) {
                 /* NOWAIT: page must already be uptodate */
@@ -2838,45 +2957,63 @@ ssize_t pcache_writev(struct pcache *pcache, struct iov_iter *iter,
                     bytes_written = -EAGAIN;
                     goto out;
                 }
-                /* For full-folio overwrites with NOWAIT, prepare is OK
-                 * since it doesn't do IO */
+                /* For full-folio overwrites with NOWAIT, begin_full_page_write
+                 * is OK since it doesn't do IO */
                 if (ret != 0 && full_folio) {
-                    ret = pcache_prepare_write_page(pcache, page);
-                    if (ret != 0) {
+                    ret = pcache_begin_full_page_write(pcache, page);
+                    if (ret < 0) {
                         pcache_put_page(pcache, page);
                         if (bytes_written > 0)
                             goto out;
                         bytes_written = -EAGAIN;
                         goto out;
                     }
+                    need_commit = (ret == 1);
                 }
             } else {
-                if (full_folio)
-                    ret = pcache_prepare_write_page(pcache, page);
-                else
-                    ret = pcache_read_page(pcache, page);
-                if (ret != 0) {
-                    pcache_put_page(pcache, page);
-                    if (bytes_written > 0)
+                if (full_folio) {
+                    ret = pcache_begin_full_page_write(pcache, page);
+                    if (ret < 0) {
+                        pcache_put_page(pcache, page);
+                        if (bytes_written > 0)
+                            goto out;
+                        bytes_written = (ret == -EINTR) ? -EINTR : -EIO;
                         goto out;
-                    bytes_written = (ret == -EINTR) ? -EINTR : -EIO;
-                    goto out;
+                    }
+                    need_commit = (ret == 1);
+                } else {
+                    ret = pcache_read_page(pcache, page);
+                    if (ret != 0) {
+                        pcache_put_page(pcache, page);
+                        if (bytes_written > 0)
+                            goto out;
+                        bytes_written = (ret == -EINTR) ? -EINTR : -EIO;
+                        goto out;
+                    }
                 }
             }
 
             /* Copy data in — folio-aware offset */
             char *data = (char *)pcn->data + folio_off;
+            bool copy_ok = true;
 
             if (user) {
                 if (vm_copyin(current->vm, data,
                               (uint64)(base + seg_written), chunk) < 0) {
-                    pcache_put_page(pcache, page);
-                    if (bytes_written == 0)
-                        bytes_written = -EFAULT;
-                    goto out;
+                    copy_ok = false;
                 }
             } else {
                 memmove(data, (const char *)(base + seg_written), chunk);
+            }
+
+            if (need_commit)
+                pcache_end_full_page_write(pcache, page, copy_ok);
+
+            if (!copy_ok) {
+                pcache_put_page(pcache, page);
+                if (bytes_written == 0)
+                    bytes_written = -EFAULT;
+                goto out;
             }
 
             pcache_mark_page_dirty(pcache, page);

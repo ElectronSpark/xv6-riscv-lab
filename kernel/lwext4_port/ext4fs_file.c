@@ -895,11 +895,214 @@ static int ext4fs_pcache_write_folio(struct pcache *pcache, folio_t *folio) {
     return err;
 }
 
+/*
+ * Batch readahead: submit non-blocking read BIOs for multiple folios.
+ * Acquires ext4fs_lock once, resolves block mappings for all folios,
+ * and merges contiguous folios into single multi-segment BIOs to reduce
+ * virtio round-trips.  Each merged BIO is bio_dup'd so every page in
+ * the run holds its own reference (compatible with per-page bio_await
+ * in __pcache_readahead).  Each BIO notifies the device on its last
+ * segment to avoid descriptor exhaustion deadlocks.
+ */
+static int ext4fs_submit_readahead(struct pcache *pcache,
+                                   page_t **pages, int nr_pages,
+                                   struct bio **bios, int max_bios)
+{
+    struct vfs_inode *inode = (struct vfs_inode *)pcache->private_data;
+    if (inode == NULL || inode->sb == NULL)
+        return 0;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(inode->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+
+    vfs_ilock(inode);
+    uint64 inode_size = (uint64)inode->size;
+    vfs_iunlock(inode);
+
+    ext4fs_lock(esb);
+
+    struct ext4_inode_ref ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)inode->ino, &ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        return 0;
+    }
+
+    uint32_t block_size = ext4_sb_get_block_size(&fs->sb);
+    blkdev_t *blk = esb->xv6_blkdev;
+
+    for (int i = 0; i < nr_pages; i++)
+        bios[i] = NULL;
+
+    int submitted = 0;
+    int i = 0;
+    while (i < nr_pages) {
+        struct pcache_node *pcn = pages[i]->pcache.pcache_node;
+        uint64 base_off = (uint64)pcn->blkno * 512ULL;
+
+        /* How many pages of this folio have valid file data? */
+        unsigned int fill = pcn->page_count;
+        for (unsigned int p = 0; p < pcn->page_count; p++) {
+            if (base_off + (uint64)p * PGSIZE >= inode_size) {
+                fill = p;
+                break;
+            }
+        }
+        if (block_size != PGSIZE || fill < 2) {
+            i++;
+            continue;
+        }
+
+        /* Lookup first and last physical block of this folio */
+        ext4_lblk_t first_iblock = (ext4_lblk_t)(base_off / block_size);
+        ext4_fsblk_t first_fblock;
+        r = ext4_fs_get_inode_dblk_idx(&ref, first_iblock,
+                                       &first_fblock, true);
+        if (r != EOK || first_fblock == 0) { i++; continue; }
+
+        ext4_fsblk_t last_fblock;
+        r = ext4_fs_get_inode_dblk_idx(&ref, first_iblock + fill - 1,
+                                       &last_fblock, true);
+        if (r != EOK || last_fblock != first_fblock + fill - 1) {
+            i++;
+            continue;
+        }
+
+        /* Start a contiguous run from page i */
+        int run_len = 1;
+        ext4_fsblk_t expected_next = first_fblock + fill;
+        uint32 run_bytes = fill * PGSIZE;
+
+        /* Precompute candidate run: gather folio fill counts and total
+         * byte/block span without any extent lookups.  Then do a single
+         * speculative extent lookup on the very last logical block —
+         * if it maps to exactly the right physical block, the entire
+         * range is contiguous and we skip all intermediate lookups. */
+        unsigned int cand_fills[BIO_MAX_VECS];
+        cand_fills[0] = fill;
+        int cand_len = 1;
+        uint32 cand_bytes = run_bytes;
+        ext4_lblk_t cand_last_lblock = first_iblock + fill - 1;
+
+        while (i + cand_len < nr_pages && cand_len < BIO_MAX_VECS) {
+            struct pcache_node *pn = pages[i + cand_len]->pcache.pcache_node;
+            uint64 n_off = (uint64)pn->blkno * 512ULL;
+            unsigned int n_fill = pn->page_count;
+            for (unsigned int p = 0; p < pn->page_count; p++) {
+                if (n_off + (uint64)p * PGSIZE >= inode_size) {
+                    n_fill = p;
+                    break;
+                }
+            }
+            if (n_fill < 2)
+                break;
+            if (cand_bytes + n_fill * PGSIZE > BIO_MAX_SIZE)
+                break;
+            cand_fills[cand_len] = n_fill;
+            cand_bytes += n_fill * PGSIZE;
+            cand_last_lblock += n_fill;
+            cand_len++;
+        }
+
+        /* Speculative check: is the entire candidate range contiguous? */
+        if (cand_len > 1) {
+            ext4_fsblk_t spec_fblock;
+            r = ext4_fs_get_inode_dblk_idx(&ref, cand_last_lblock,
+                                           &spec_fblock, true);
+            if (r == EOK &&
+                spec_fblock == first_fblock + (cand_last_lblock - first_iblock)) {
+                /* Entire range confirmed contiguous — accept all */
+                run_len = cand_len;
+                run_bytes = cand_bytes;
+            } else {
+                /* Fall back to per-folio contiguity check */
+                while (i + run_len < nr_pages && run_len < cand_len) {
+                    struct pcache_node *pn =
+                        pages[i + run_len]->pcache.pcache_node;
+                    uint64 n_off = (uint64)pn->blkno * 512ULL;
+                    unsigned int n_fill = cand_fills[run_len];
+
+                    ext4_lblk_t n_iblk = (ext4_lblk_t)(n_off / block_size);
+                    ext4_fsblk_t n_fblk;
+                    r = ext4_fs_get_inode_dblk_idx(&ref, n_iblk,
+                                                   &n_fblk, true);
+                    if (r != EOK || n_fblk != expected_next)
+                        break;
+
+                    ext4_fsblk_t n_last;
+                    r = ext4_fs_get_inode_dblk_idx(&ref, n_iblk + n_fill - 1,
+                                                   &n_last, true);
+                    if (r != EOK || n_last != n_fblk + n_fill - 1)
+                        break;
+
+                    expected_next = n_fblk + n_fill;
+                    run_bytes += n_fill * PGSIZE;
+                    run_len++;
+                }
+            }
+        }
+
+        /* Create one merged BIO for the entire contiguous run */
+        uint64 pba = ((uint64)first_fblock * block_size +
+                      esb->bdev.part_offset) / esb->bdev_iface.ph_bsize;
+
+        struct bio *bio = bio_alloc(blk, run_len, false, NULL, NULL);
+        if (IS_ERR_OR_NULL(bio)) {
+            i += run_len;
+            continue;
+        }
+
+        bio->blkno = pba;
+
+        bool ok = true;
+        for (int j = 0; j < run_len; j++) {
+            struct pcache_node *pj = pages[i + j]->pcache.pcache_node;
+            uint64 oj = (uint64)pj->blkno * 512ULL;
+            unsigned int fj = pj->page_count;
+            for (unsigned int p = 0; p < pj->page_count; p++) {
+                if (oj + (uint64)p * PGSIZE >= inode_size) {
+                    fj = p;
+                    break;
+                }
+            }
+            r = bio_add_folio(bio, pj->folio, fj * PGSIZE, 0);
+            if (r != 0) {
+                ok = false;
+                break;
+            }
+        }
+
+        if (!ok || blkdev_submit_bio(blk, bio) != 0) {
+            bio_release(bio);
+            i += run_len;
+            continue;
+        }
+
+        /* Distribute BIO references: first page gets the original,
+         * remaining pages get bio_dup'd references.  This way each
+         * page can independently bio_await + bio_release. */
+        bios[i] = bio;
+        for (int j = 1; j < run_len; j++) {
+            bio_dup(bio);
+            bios[i + j] = bio;
+        }
+
+        submitted += run_len;
+        i += run_len;
+    }
+
+    ext4_fs_put_inode_ref(&ref);
+    ext4fs_unlock(esb);
+
+    return submitted;
+}
+
 static struct pcache_ops ext4fs_pcache_ops = {
     .read_page = ext4fs_pcache_read_page,
     .write_page = ext4fs_pcache_write_page,
     .read_folio = ext4fs_pcache_read_folio,
     .write_folio = ext4fs_pcache_write_folio,
+    .submit_readahead = ext4fs_submit_readahead,
 };
 
 void ext4fs_inode_pcache_init(struct vfs_inode *inode)
@@ -1099,31 +1302,48 @@ ssize_t ext4fs_file_write(struct vfs_file *file, const char *buf, size_t count,
             if (chunk > count - bytes_written)
                 chunk = count - bytes_written;
 
-            /* Skip the read if overwriting the entire folio */
+            /* Skip the disk read if overwriting the entire folio */
             int ret;
             bool full_folio = (folio_off == 0 && chunk >= pcn->size);
-            if (full_folio)
-                ret = pcache_prepare_write_page(pc, page);
-            else
+            bool need_commit = false;
+            if (full_folio) {
+                ret = pcache_begin_full_page_write(pc, page);
+                if (ret < 0) {
+                    pcache_put_page(pc, page);
+                    if (bytes_written == 0)
+                        return ret;
+                    break;
+                }
+                need_commit = (ret == 1);
+            } else {
                 ret = pcache_read_page(pc, page);
-            if (ret != 0) {
-                pcache_put_page(pc, page);
-                if (bytes_written == 0)
-                    return ret;
-                break;
+                if (ret != 0) {
+                    pcache_put_page(pc, page);
+                    if (bytes_written == 0)
+                        return ret;
+                    break;
+                }
             }
 
             char *data = (char *)pcn->data + folio_off;
+            bool copy_ok = true;
             if (user) {
                 if (vm_copyin(current->vm, data,
                               (uint64)(buf + bytes_written), chunk) < 0) {
-                    pcache_put_page(pc, page);
-                    if (bytes_written == 0)
-                        return -EFAULT;
-                    break;
+                    copy_ok = false;
                 }
             } else {
                 memmove(data, buf + bytes_written, chunk);
+            }
+
+            if (need_commit)
+                pcache_end_full_page_write(pc, page, copy_ok);
+
+            if (!copy_ok) {
+                pcache_put_page(pc, page);
+                if (bytes_written == 0)
+                    return -EFAULT;
+                break;
             }
 
             pcache_mark_page_dirty(pc, page);

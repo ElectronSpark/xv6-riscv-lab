@@ -27,7 +27,7 @@
 
 /* Number of 512-byte sectors that fit in one page */
 #define SECTORS_PER_PAGE (PGSIZE / PH_BSIZE)
-#define EXT4FS_BIO_MAX_PAGES (BIO_MAX_SIZE / PGSIZE)
+#define EXT4FS_BIO_MAX_PAGES 128  /* max pages for bread/bwrite stack arrays */
 
 /*
  * Obtain the xv6 blkdev_t pointer from the ext4_blockdev container.
