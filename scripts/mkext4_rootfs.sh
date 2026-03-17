@@ -235,7 +235,7 @@ cat > "$STAGING/etc/daemons" <<'DAEMONS'
 
 /bin/telnetd
 /bin/sshd -D -e
-# /bin/python /app/wsgi.py
+/bin/python /app/wsgi.py
 DAEMONS
 
 # ── lwIP network configuration ───────────────────────────────────────────────
@@ -324,8 +324,10 @@ if [ -d "$PYLIB_SRC" ]; then
     # Pre-compile .py -> .pyc to avoid expensive on-target compilation.
     # This dramatically speeds up Python startup because each import no
     # longer needs to parse source and write .pyc through ext2.
+    # Note: do NOT use -b (legacy placement) — Python 3.x expects .pyc
+    # in __pycache__/ subdirectories, not alongside .py files.
     echo "mkext4_rootfs: pre-compiling Python bytecode..."
-    python3 -m compileall -q -j0 -b "$STAGING/usr/local/lib/python3.12/" 2>/dev/null || true
+    python3 -m compileall -q -j0 "$STAGING/usr/local/lib/python3.12/" 2>/dev/null || true
 
     PYFILE_COUNT=$(find "$STAGING/usr/local/lib/python3.12/" -type f | wc -l)
     PYC_COUNT=$(find "$STAGING/usr/local/lib/python3.12/" -name '*.pyc' | wc -l)
@@ -343,7 +345,7 @@ if [ -d "$SITE_PACKAGES_SRC" ] && [ "$(ls -A "$SITE_PACKAGES_SRC" 2>/dev/null)" 
         "$SITE_PACKAGES_SRC/" "$STAGING/usr/local/lib/python3.12/site-packages/"
 
     # Pre-compile site-packages .py → .pyc
-    python3 -m compileall -q -j0 -b "$STAGING/usr/local/lib/python3.12/site-packages/" 2>/dev/null || true
+    python3 -m compileall -q -j0 "$STAGING/usr/local/lib/python3.12/site-packages/" 2>/dev/null || true
 
     SITE_PKG_COUNT=$(find "$STAGING/usr/local/lib/python3.12/site-packages/" -type f | wc -l)
     SITE_PKG_SIZE=$(du -sh "$STAGING/usr/local/lib/python3.12/site-packages/" | cut -f1)
@@ -361,7 +363,7 @@ if [ -d "$FLASK_APP_SRC" ]; then
     mkdir -p "$STAGING/app"
     rsync -a --exclude='__pycache__' "$FLASK_APP_SRC/" "$STAGING/app/"
     # Pre-compile the app .py files
-    python3 -m compileall -q -j0 -b "$STAGING/app/" 2>/dev/null || true
+    python3 -m compileall -q -j0 "$STAGING/app/" 2>/dev/null || true
     echo "mkext4_rootfs: Flask app copied to /app/"
 fi
 

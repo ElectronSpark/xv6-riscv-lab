@@ -328,6 +328,13 @@ struct vfs_inode_ops {
                   const char *name, size_t name_len);
     int (*dir_iter)(struct vfs_inode *dir, struct vfs_dir_iter *iter,
                     struct vfs_dentry *ret_dentry);
+    /**
+     * Fill a getdents buffer directly, bypassing per-entry VFS overhead.
+     * Returns bytes written to buf, or negative errno.
+     * Caller holds superblock rlock + inode lock.
+     */
+    int (*getdents_fill)(struct vfs_inode *dir, struct vfs_dir_iter *iter,
+                         void *buf, int count);
     ssize_t (*readlink)(struct vfs_inode *inode, char *buf, size_t buflen);
     int (*getattr)(struct vfs_inode *inode, struct stat *stat);
     int (*setattr)(struct vfs_inode *inode, const struct stat *stat);

@@ -1419,7 +1419,7 @@ endif()
 set(CPYTHON_SRC_DIR "${CMAKE_SOURCE_DIR}/user/v6-cpython" CACHE PATH "CPython source directory")
 set(CPYTHON_BUILD_DIR "${CMAKE_BINARY_DIR}/cpython/build-3.12" CACHE PATH "CPython out-of-tree build directory")
 set(CPYTHON_BIN "${CPYTHON_BUILD_DIR}/python" CACHE FILEPATH "CPython interpreter binary path")
-set(CPYTHON_SHARED_LIB "${MUSL_SYSROOT}/lib/libpython3.12d.so.1.0")
+set(CPYTHON_SHARED_LIB "${MUSL_SYSROOT}/lib/libpython3.12.so.1.0")
 set(CPYTHON_INSTALL_STAMP "${CPYTHON_BUILD_DIR}/.sharedmods_installed")
 set(CPYTHON_FS_BIN "${CMAKE_BINARY_DIR}/user/_python")
 
@@ -1520,7 +1520,7 @@ if(EXISTS "${CPYTHON_SRC_DIR}/configure")
         list(APPEND CPYTHON_EXTRA_DEPENDS riscv_icache_compat)
     endif()
 
-    set(CPYTHON_EXTENSION_SUFFIX ".cpython-312d-${USER_HOST_TRIPLE}.so")
+    set(CPYTHON_EXTENSION_SUFFIX ".cpython-312-${USER_HOST_TRIPLE}.so")
     set(CPYTHON_REQUIRED_SHARED_MODULE_TARGETS
         "Modules/_uuid${CPYTHON_EXTENSION_SUFFIX}")
     if(CPYTHON_LIBFFI_LIBS)
@@ -1586,7 +1586,6 @@ if(EXISTS "${CPYTHON_SRC_DIR}/configure")
                     --build=x86_64-pc-linux-gnu
                     --prefix=/
                     --with-build-python=python3
-                    --with-pydebug
                     --enable-shared
                     --without-static-libpython
                     --without-ensurepip
@@ -1723,7 +1722,7 @@ endif()
 # ==============================================================================
 # CPython development headers — needed by NumPy / Python extension modules
 # ==============================================================================
-set(CPYTHON_SYSROOT_INCLUDE "${MUSL_SYSROOT}/include/python3.12d")
+set(CPYTHON_SYSROOT_INCLUDE "${MUSL_SYSROOT}/include/python3.12")
 set(CPYTHON_HEADERS_STAMP "${CPYTHON_SYSROOT_INCLUDE}/.headers_installed")
 
 if(TARGET cpython_configure AND EXISTS "${CPYTHON_SRC_DIR}/Include/Python.h")

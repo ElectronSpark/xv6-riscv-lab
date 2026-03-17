@@ -98,7 +98,7 @@ fi
 echo "build_numpy: CYTHON=${CYTHON}"
 
 # ── _sysconfigdata for cross-Python ──────────────────────────────────────────
-SYSCONFIGDATA_NAME="_sysconfigdata_d_xv6_${HOST_TRIPLE}"
+SYSCONFIGDATA_NAME="_sysconfigdata__xv6_${HOST_TRIPLE}"
 SYSCONFIGDATA_DIR="${CPYTHON_BUILD}/build/lib.xv6-${CPU_FAMILY}-3.12"
 if [ ! -f "${SYSCONFIGDATA_DIR}/${SYSCONFIGDATA_NAME}.py" ]; then
     echo "build_numpy: ERROR: _sysconfigdata not found:" >&2

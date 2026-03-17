@@ -344,6 +344,151 @@ static int ext4fs_dir_iter(struct vfs_inode *dir, struct vfs_dir_iter *iter,
 }
 
 /* ──────────────────────────────────────────────────────────────────────────── */
+/* Bulk getdents fill                                                          */
+/* ──────────────────────────────────────────────────────────────────────────── */
+
+struct __ext4_dirent64 {
+    uint64 d_ino;
+    int64  d_off;
+    uint16 d_reclen;
+    uint8  d_type;
+    char   d_name[];
+};
+
+static const uint8 __ext4_de_to_dt[] = {
+    [0] = 0 /*DT_UNKNOWN*/,
+    [1] = 8 /*DT_REG*/,
+    [2] = 4 /*DT_DIR*/,
+    [3] = 2 /*DT_CHR*/,
+    [4] = 6 /*DT_BLK*/,
+    [5] = 1 /*DT_FIFO*/,
+    [6] = 12 /*DT_SOCK*/,
+    [7] = 10 /*DT_LNK*/,
+};
+
+/**
+ * Fill a getdents buffer with directory entries under a single lock hold.
+ * Caller holds VFS superblock rlock + inode lock.
+ * Returns bytes written (>= 0) or negative errno.
+ */
+static int ext4fs_getdents_fill(struct vfs_inode *dir,
+                                struct vfs_dir_iter *iter,
+                                void *buf, int count)
+{
+    if (dir == NULL || iter == NULL || buf == NULL || count <= 0)
+        return -EINVAL;
+
+    struct ext4fs_superblock *esb = ext4fs_get_esb(dir->sb);
+    struct ext4_fs *fs = &esb->ext4fs;
+
+    ext4fs_lock(esb);
+    struct ext4_inode_ref dir_ref;
+    int r = ext4_fs_get_inode_ref(fs, (uint32_t)dir->ino, &dir_ref);
+    if (r != EOK) {
+        ext4fs_unlock(esb);
+        return -r;
+    }
+
+    int written = 0;
+
+    /* Handle ".." request (index == 1) */
+    if (iter->index == 1) {
+        struct ext4_dir_search_result result;
+        r = ext4_dir_find_entry(&result, &dir_ref, "..", 2);
+        if (r == EOK) {
+            size_t reclen = (sizeof(struct __ext4_dirent64) + 2 + 1 + 7) & ~7;
+            if ((int)reclen <= count) {
+                struct __ext4_dirent64 *de =
+                    (struct __ext4_dirent64 *)buf;
+                de->d_ino = ext4_dir_en_get_inode(result.dentry);
+                de->d_off = iter->index;
+                de->d_reclen = reclen;
+                de->d_type = 4 /*DT_DIR*/;
+                de->d_name[0] = '.';
+                de->d_name[1] = '.';
+                de->d_name[2] = '\0';
+                written = reclen;
+            }
+            ext4_dir_destroy_result(&dir_ref, &result);
+            iter->index = 2; /* advance past ".." */
+        } else {
+            ext4_fs_put_inode_ref(&dir_ref);
+            ext4fs_unlock(esb);
+            return -r;
+        }
+    }
+
+    /* Regular entries: iterate with a single open iterator */
+    if (written < count && iter->index >= 2) {
+        uint64_t start_off = (uint64_t)iter->cookies;
+        struct ext4_dir_iter dit;
+        r = ext4_dir_iterator_init(&dit, &dir_ref, start_off);
+        if (r != EOK) {
+            ext4_fs_put_inode_ref(&dir_ref);
+            ext4fs_unlock(esb);
+            return (written > 0) ? written : -r;
+        }
+
+        while (dit.curr != NULL) {
+            uint32_t ino = ext4_dir_en_get_inode(dit.curr);
+            if (ino == 0) {
+                r = ext4_dir_iterator_next(&dit);
+                if (r != EOK)
+                    break;
+                continue;
+            }
+
+            uint16_t nlen = ext4_dir_en_get_name_len(&fs->sb, dit.curr);
+            const char *ename = (const char *)(dit.curr) +
+                                sizeof(struct ext4_fake_dir_entry);
+
+            /* Skip "." and ".." — VFS handles them */
+            if ((nlen == 1 && ename[0] == '.') ||
+                (nlen == 2 && ename[0] == '.' && ename[1] == '.')) {
+                r = ext4_dir_iterator_next(&dit);
+                if (r != EOK)
+                    break;
+                continue;
+            }
+
+            size_t reclen =
+                (sizeof(struct __ext4_dirent64) + nlen + 1 + 7) & ~7;
+            if (written + (int)reclen > count)
+                break; /* buffer full */
+
+            struct __ext4_dirent64 *de =
+                (struct __ext4_dirent64 *)((char *)buf + written);
+            de->d_ino = ino;
+            de->d_off = iter->index;
+            de->d_reclen = reclen;
+            uint8_t dtype =
+                ext4_dir_en_get_inode_type(&fs->sb, dit.curr);
+            de->d_type = (dtype < sizeof(__ext4_de_to_dt))
+                             ? __ext4_de_to_dt[dtype]
+                             : 0;
+            memmove(de->d_name, ename, nlen);
+            de->d_name[nlen] = '\0';
+            written += reclen;
+            iter->index++;
+
+            uint64_t next_off = dit.curr_off +
+                                ext4_dir_en_get_entry_len(dit.curr);
+            iter->cookies = (int64_t)next_off;
+
+            r = ext4_dir_iterator_next(&dit);
+            if (r != EOK)
+                break;
+        }
+
+        ext4_dir_iterator_fini(&dit);
+    }
+
+    ext4_fs_put_inode_ref(&dir_ref);
+    ext4fs_unlock(esb);
+    return written;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────── */
 /* Create regular file                                                         */
 /* ──────────────────────────────────────────────────────────────────────────── */
 
@@ -1394,6 +1539,7 @@ static int ext4fs_setattr(struct vfs_inode *inode, const struct stat *stat)
 struct vfs_inode_ops ext4fs_inode_ops = {
     .lookup        = ext4fs_lookup,
     .dir_iter      = ext4fs_dir_iter,
+    .getdents_fill = ext4fs_getdents_fill,
     .readlink      = ext4fs_readlink,
     .getattr       = ext4fs_getattr,
     .setattr       = ext4fs_setattr,

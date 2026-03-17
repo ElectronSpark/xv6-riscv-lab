@@ -1491,6 +1491,71 @@ uint64 sys_getdents(void) {
     }
 
     int bytes_written = 0;
+
+    /*
+     * Fast path: use getdents_fill to let the driver fill the buffer
+     * directly under a single lock, avoiding per-entry VFS overhead.
+     */
+    if (inode->ops != NULL && inode->ops->getdents_fill != NULL) {
+        int ret;
+
+        /* Synthesize "." if at start */
+        if (f->dir_iter.index == VFS_DITER_INDEX_START) {
+            size_t reclen = (sizeof(struct linux_dirent64) + 1 + 1 + 7) & ~7;
+            if ((int)reclen <= count) {
+                struct linux_dirent64 *de =
+                    (struct linux_dirent64 *)kbuf;
+                de->d_ino = inode->ino;
+                de->d_off = 0;
+                de->d_reclen = reclen;
+                de->d_type = DT_DIR;
+                de->d_name[0] = '.';
+                de->d_name[1] = '\0';
+                bytes_written = reclen;
+            }
+            f->dir_iter.index = 1;
+        }
+
+        /* Delegate remaining entries to driver */
+        if (bytes_written < count) {
+            vfs_superblock_rlock(inode->sb);
+            vfs_ilock(inode);
+
+            ret = inode->ops->getdents_fill(inode, &f->dir_iter,
+                                            kbuf + bytes_written,
+                                            count - bytes_written);
+            if (ret > 0) {
+                bytes_written += ret;
+            } else if (ret == 0 && f->dir_iter.index > 1) {
+                /* No more entries — mark end */
+                f->dir_iter.index = VFS_DITER_INDEX_END;
+            }
+
+            vfs_iunlock(inode);
+            vfs_superblock_unlock(inode->sb);
+
+            if (ret < 0) {
+                kvfree(kbuf);
+                vfs_fput(f);
+                SYSCALL_PROFILE_RETURN(ret, g_sys_getdents_ticks);
+            }
+        }
+
+        if (bytes_written > 0) {
+            if (vm_copyout(current->vm, dirp, kbuf, bytes_written) < 0) {
+                kvfree(kbuf);
+                vfs_fput(f);
+                SYSCALL_PROFILE_RETURN(-EFAULT, g_sys_getdents_ticks);
+            }
+        }
+
+        kvfree(kbuf);
+        vfs_fput(f);
+        SYSCALL_PROFILE_RETURN(bytes_written, g_sys_getdents_ticks);
+    }
+
+    /* Slow path: per-entry vfs_dir_iter (fallback for drivers without
+     * getdents_fill). */
     struct vfs_dentry dentry = {0};
     int ret;
 

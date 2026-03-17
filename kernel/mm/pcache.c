@@ -1929,22 +1929,31 @@ void pcache_put_folio_refs(struct pcache *pcache, folio_t *folio, int n) {
         return;
     page_t *page = &folio->page;
 
-    /* Fast bulk path: if current refcount is high enough that decrementing
-     * (n-2) still leaves refcount >= 3, we can batch those under a single
-     * lock hold.  The remaining 1-2 refs go through pcache_put_page to
-     * handle the refcount==1 LRU/dirty transitions correctly. */
-    if (n > 2) {
+    /* Fast bulk drop: atomically subtract ALL n mapping refs at once.
+     * The page cache tree always holds an additional reference, so the
+     * refcount is always >= n+1.  Dropping n leaves refcount >= 1.
+     *
+     * When the page drops to refcount 1 (tree-only), we skip the
+     * expensive 2-lock pcache_put_page path that does LRU management.
+     * The page stays safely cached and findable via xarray lookup.
+     * The pcache shrinker will handle LRU insertion when scanning.
+     *
+     * This eliminates per-folio lock overhead during process exit. */
+    int old = __atomic_fetch_sub(&page->ref_count, n, __ATOMIC_ACQ_REL);
+    if (old >= n + 1)
+        return;
+
+    /* Underflow (shouldn't happen) — restore and use slow path. */
+    __atomic_fetch_add(&page->ref_count, n, __ATOMIC_RELAXED);
+    if (n > 1) {
         int refcount = page_ref_count(page);
-        int fast = n - 2;
-        if (refcount - fast >= 3) {
-            page_lock_acquire(page);
-            page->ref_count -= fast;
-            page_lock_release(page);
+        int fast = n - 1;
+        if (refcount - fast >= 2) {
+            __atomic_fetch_sub(&page->ref_count, fast, __ATOMIC_ACQ_REL);
             n -= fast;
         }
     }
-    for (int i = 0; i < n; i++)
-        pcache_put_page(pcache, page);
+    pcache_put_page(pcache, page);
 }
 
 int pcache_read_folio(struct pcache *pcache, folio_t *folio) {

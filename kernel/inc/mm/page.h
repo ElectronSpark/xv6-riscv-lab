@@ -32,6 +32,7 @@ int page_refcnt(void *physical);
 int page_ref_inc(void *ptr);
 int page_ref_dec(void *ptr);
 int page_ref_count(page_t *page);
+void page_free_anon_batch(page_t **pages, int count);
 
 void page_buddy_stat(uint64 *ret_arr, bool *empty_arr, size_t size);
 void print_buddy_system_stat(int detailed);

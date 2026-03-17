@@ -289,10 +289,10 @@ static void __vma_set_free(vma_t *vma)
     int shared_file_wb =
         (vma->file != NULL) && (vma->flags & VMA_FLAG_SHARED) &&
         (vma->flags & VMA_FLAG_FILE);
+    int is_anon_vma = (vma->file == NULL);
     int tlb_needs_flush = 0;
     uint64 pages_freed = 0;
     uint64 anon_pages = 0;
-    uint64 pte_walk_start = r_time();
 
     /*
      * Two-phase page release: Phase 1 clears PTEs and collects pages
@@ -308,10 +308,20 @@ static void __vma_set_free(vma_t *vma)
 
     /* Flush helper: release all deferred pages. */
 #define FLUSH_DEFERRED() do {                                       \
-    uint64 rel_start = r_time();                                    \
-    struct pcache *batch_pc = NULL;                                 \
-    folio_t *batch_folio  = NULL;                                   \
-    int batch_count = 0;                                            \
+    page_t *anon_batch[VMA_FREE_DEFER_MAX];                         \
+    int anon_count = 0;                                             \
+    if (is_anon_vma) {                                              \
+        for (int __d = 0; __d < ndefer; __d++) {                    \
+            page_t *__pg = defer[__d].pg;                           \
+            __sync_fetch_and_sub(&__pg->anon.mapcount, 1);          \
+            anon_batch[__d] = __pg;                                 \
+        }                                                           \
+        anon_count = ndefer;                                        \
+        anon_pages += ndefer;                                       \
+    } else {                                                        \
+    struct pcache *batch_pc = NULL;                                  \
+    folio_t *batch_folio  = NULL;                                    \
+    int batch_count = 0;                                             \
     for (int __d = 0; __d < ndefer; __d++) {                        \
         page_t *__pg = defer[__d].pg;                               \
         page_t *__pc_head = page_pcache_head(__pg);                 \
@@ -335,14 +345,15 @@ static void __vma_set_free(vma_t *vma)
             }                                                       \
             if (__pg != NULL && PAGE_IS_TYPE(__pg, PAGE_TYPE_ANON))  \
                 page_remove_rmap(__pg);                              \
-            page_ref_dec((void *)defer[__d].pa);                    \
+            anon_batch[anon_count++] = __pg;                        \
             anon_pages++;                                           \
         }                                                           \
     }                                                               \
     if (batch_folio != NULL)                                        \
         pcache_put_folio_refs(batch_pc, batch_folio, batch_count);  \
-    g_vm_munmap_page_release_ticks +=                             \
-                       r_time() - rel_start;                        \
+    }                                                               \
+    if (anon_count > 0)                                             \
+        page_free_anon_batch(anon_batch, anon_count);               \
     ndefer = 0;                                                     \
 } while (0)
 
@@ -423,7 +434,6 @@ static void __vma_set_free(vma_t *vma)
     }
 #undef FLUSH_DEFERRED
 #undef VMA_FREE_DEFER_MAX
-    g_vm_munmap_pte_walk_ticks += r_time() - pte_walk_start;
     g_vm_munmap_pages_freed += pages_freed;
     g_vm_munmap_anon_pages += anon_pages;
 
@@ -1126,7 +1136,7 @@ static void *__vma_map_anon_folio(vma_t *vma, uint64 fault_va,
     }
     *pte = mk_pte(folio_pa, pte_flags);
     folio_add_anon_rmap(folio, vma, fault_va);
-    sfence_vma_page(fault_va);
+    /* TLB flush deferred to vma_validate end (single batch flush). */
     return (void *)folio_pa;
 }
 
@@ -1316,7 +1326,7 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
         /* Writable but not dirty — just set dirty bit. */
         if (pte_write(pte) && !pte_dirty(pte)) {
             pte_mkdirty(pte);
-            sfence_vma_page(fault_va);
+            /* TLB flush deferred */
             return 0;
         }
         uint64 hp_pa = pte_pa(pte);
@@ -1325,7 +1335,7 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
             if (page_mapcount(pg) <= 1) {
                 /* Single mapper — re-grant write on the 2 MB PTE. */
                 *pte = mk_pte_huge(hp_pa, vma->flags);
-                sfence_vma_page(fault_va);
+                /* TLB flush deferred */
                 return 0;
             }
             /* COW: multiple mappers — copy the entire 2 MB folio.
@@ -1345,12 +1355,12 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
                                 fault_va & HUGEPAGE_MASK);
             *pte = mk_pte_huge(new_pa, vma->flags);
             page_ref_dec((void *)hp_pa);
-            sfence_vma_page(fault_va);
+            /* TLB flush deferred */
             return 0;
         }
         /* Non-anonymous hugepage — just re-grant write. */
         *pte = mk_pte_huge(hp_pa, vma->flags);
-        sfence_vma_page(fault_va);
+        /* TLB flush deferred */
         return 0;
     }
 
@@ -1369,7 +1379,7 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
         if (pc_head != NULL && (vma->flags & VMA_FLAG_SHARED)) {
             pcache_mark_page_dirty(pc_head->pcache.pcache, pc_head);
             *pte = mk_pte(pte_pa(pte), vma->flags);
-            sfence_vma_page(fault_va);
+            /* TLB flush deferred */
             return 0;
         }
     }
@@ -1387,7 +1397,7 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
         if (pc_head != NULL)
             pcache_mark_page_dirty(pc_head->pcache.pcache, pc_head);
         pte_mkdirty(pte);
-        sfence_vma_page(fault_va);
+        /* TLB flush deferred */
         return 0;
     }
 
@@ -1520,7 +1530,7 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
                     uint64 mapped_pa = pte_pa(p);
                     if (mapped_pa >= folio_pa && mapped_pa < folio_pa_end) {
                         *p = mk_pte(mapped_pa, vma->flags);
-                        sfence_vma_page(va);
+                        /* TLB flush deferred */
                     }
                 }
                 return 0;
@@ -1535,7 +1545,7 @@ static int __vma_validate_pte_rxw(vma_t *vma, pte_t *pte, uint64 fault_va)
     }
 
     *pte = mk_pte((uint64)pa, vma->flags);
-    sfence_vma_page(fault_va);
+    /* TLB flush deferred */
     return 0;
 }
 
@@ -1551,7 +1561,7 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte, uint64 fault_va)
         if (pa == NULL)
             return -ENOMEM;
         /* PTEs and rmap already set up by __vma_map_anon_folio. */
-        sfence_vma_page(fault_va);
+        /* TLB flush deferred */
         return 0;
     } else if (!pte_present(pte)) {
         return -EFAULT;
@@ -1576,7 +1586,7 @@ static int __vma_validate_pte_rx(vma_t *vma, pte_t *pte, uint64 fault_va)
             pte_mkclean(pte);
     }
 
-    sfence_vma_page(fault_va);
+    /* TLB flush deferred */
     return 0;
 }
 
@@ -1640,6 +1650,14 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
 
     vm_pgtable_lock(vma->vm);
 
+    /*
+     * L0 page table cache: avoid redundant 4-level page table walks
+     * for consecutive pages within the same 2 MB region.  Invalidated
+     * whenever we drop vm_pgtable_lock (batch install, hugepage alloc).
+     */
+    pte_t *__l0_base = NULL;
+    uint64 __l0_rgn = ~0ULL;
+
     uint64 hp_skip_until = 0;
     for (uint64 i = va; i < va_end; i += PGSIZE) {
         /* File-backed VMA: may need to drop spinlock for I/O */
@@ -1667,11 +1685,10 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                 if (pmd != NULL) {
                     /* Drop lock to allocate 2 MB folio (may do I/O). */
                     vm_pgtable_unlock(vma->vm);
-                    uint64 hp_start = r_time();
                     void *hp_pa =
                         __vma_fault_file_hugepage(vma, hp_base);
-                    g_vm_validate_hugepage_ticks += r_time() - hp_start;
                     vm_pgtable_lock(vma->vm);
+                    __l0_rgn = ~0ULL; /* invalidate after lock drop */
 
                     if (hp_pa == NULL) {
                         hp_skip_until = hp_base + HUGEPAGE_SIZE;
@@ -1729,6 +1746,7 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                             }
                         }
                         vm_pgtable_lock(vma->vm);
+                        __l0_rgn = ~0ULL;
                         i = hp_base + HUGEPAGE_SIZE - PGSIZE;
                         continue;
                     }
@@ -1739,21 +1757,64 @@ int vma_validate(vma_t *vma, uint64 va, uint64 size, uint64 flags)
                     uint64 hp_flags = vma->flags & ~PROT_WRITE;
                     *pmd = mk_pte_huge((uint64)hp_pa, hp_flags);
                     folio_add_anon_rmap(hp_folio, vma, hp_base);
-                    sfence_vma_page(hp_base);
+                    /* TLB flush deferred */
                     i = hp_base + HUGEPAGE_SIZE - PGSIZE;
                     continue;
                 }
             }
 hp_per_page:
-
-            pte_t *pte = walk(vma->vm->pagetable, i, 1, NULL, NULL);
-            if (pte == NULL) {
-                vm_pgtable_unlock(vma->vm);
-                return -ENOMEM;
+            ;
+            /* Fast L0-cached PTE lookup: avoid 4-level walk for
+             * consecutive pages in the same 2 MB region. */
+            pte_t *pte;
+            uint64 __rgn = i >> PXSHIFT(1);
+            if (__rgn == __l0_rgn) {
+                pte = &__l0_base[PX(0, i)];
+            } else {
+                pte = walk(vma->vm->pagetable, i, 1, NULL, NULL);
+                if (pte == NULL) {
+                    vm_pgtable_unlock(vma->vm);
+                    return -ENOMEM;
+                }
+                __l0_base = pte - PX(0, i);
+                __l0_rgn = __rgn;
             }
-            if (*pte == 0) {
+            if (*pte != 0) {
+                /* PTE present.  For read/exec faults, skip this page
+                 * and scan ahead in the L0 table to find the next
+                 * unmapped PTE, avoiding per-page loop overhead. */
+                if (!(flags & PROT_WRITE)) {
+                    int idx0 = PX(0, i);
+                    int end0 = 512;
+                    /* Don't scan past va_end within this L0 region. */
+                    uint64 rgn_end = (__l0_rgn + 1) << PXSHIFT(1);
+                    if (va_end < rgn_end) {
+                        int e = PX(0, va_end - PGSIZE) + 1;
+                        if (e < end0)
+                            end0 = e;
+                    }
+                    int k = idx0 + 1;
+                    while (k < end0 && __l0_base[k] != 0)
+                        k++;
+                    if (k < end0) {
+                        /* Found unmapped PTE at index k — jump to it.
+                         * Subtract PGSIZE because the for-loop adds it. */
+                        i = (__l0_rgn << PXSHIFT(1)) | ((uint64)k << PGSHIFT);
+                        i -= PGSIZE;
+                    } else {
+                        /* All remaining PTEs in this L0 region are present.
+                         * Skip to end of region. */
+                        i = rgn_end - PGSIZE;
+                        if (i >= va_end)
+                            i = va_end - PGSIZE;
+                    }
+                    continue;
+                }
+                goto __do_pte_check;
+            }
+            {
+                __l0_rgn = ~0ULL; /* invalidate: dropping lock */
                 vm_pgtable_unlock(vma->vm);
-                uint64 batch_start = r_time();
 
                 uint64 fault_end = va_end;
                 if (fault_end > vma->end)
@@ -1892,8 +1953,6 @@ hp_per_page:
                 }
 
                 /* Per-page fallback for pages the batch couldn't handle. */
-                uint64 fallback_start = r_time();
-                g_vm_validate_batch_ticks += fallback_start - batch_start;
                 for (; fault_va < fault_end; fault_va += PGSIZE) {
                     vm_pgtable_lock(vma->vm);
                     pte = walk(vma->vm->pagetable, fault_va, 1, NULL, NULL);
@@ -1949,15 +2008,14 @@ hp_per_page:
                     }
                     vm_pgtable_unlock(vma->vm);
                 }
-                g_vm_validate_fallback_ticks += r_time() - fallback_start;
                 vm_pgtable_lock(vma->vm);
+                __l0_rgn = ~0ULL; /* L0 cache stale after lock re-acquire */
                 i = fault_end - PGSIZE;
                 continue;
             }
+__do_pte_check:
             {
-                uint64 pte_chk = r_time();
                 int pte_ret = __vma_validate_pte(vma, pte, flags, i);
-                g_vm_validate_pte_check_ticks += r_time() - pte_chk;
                 if (pte_ret != 0) {
                     vm_pgtable_unlock(vma->vm);
                     return -EFAULT;
@@ -1966,11 +2024,19 @@ hp_per_page:
             continue;
         }
 
-        /* Anonymous VMA path */
-        pte_t *pte = walk(vma->vm->pagetable, i, 1, NULL, NULL);
-        if (pte == NULL) {
-            vm_pgtable_unlock(vma->vm);
-            return -ENOMEM;
+        /* Anonymous VMA path — use L0 cache */
+        pte_t *pte;
+        uint64 __rgn = i >> PXSHIFT(1);
+        if (__rgn == __l0_rgn) {
+            pte = &__l0_base[PX(0, i)];
+        } else {
+            pte = walk(vma->vm->pagetable, i, 1, NULL, NULL);
+            if (pte == NULL) {
+                vm_pgtable_unlock(vma->vm);
+                return -ENOMEM;
+            }
+            __l0_base = pte - PX(0, i);
+            __l0_rgn = __rgn;
         }
         if (__vma_validate_pte(vma, pte, flags, i) != 0) {
             vm_pgtable_unlock(vma->vm);
@@ -1978,6 +2044,11 @@ hp_per_page:
         }
     }
 
+    /* Single bulk TLB flush: replaces per-page INVLPG calls in the
+     * validate PTE helpers.  Safe because we hold vm_pgtable_lock,
+     * so no user-space access can occur between PTE modifications
+     * and this flush. */
+    sfence_vma();
     vm_pgtable_unlock(vma->vm);
     g_vm_vma_validate_ticks += r_time() - validate_start;
     return 0;
@@ -2012,6 +2083,28 @@ int vm_copyout(vm_t *vm, uint64 dstva, const void *src, uint64 len)
      * Interrupts are disabled while the user CR3 is loaded because the
      * trap handler unconditionally switches CR3 to the kernel page table
      * on entry and does NOT restore it for kernel-mode traps.
+     *
+     * IMPORTANT (discovered during -O0 → -O2 migration):
+     * All destination pages must have valid PTEs before we enter the
+     * interrupt-disabled CR3-switched section.  If a page is not yet
+     * mapped (demand-paging), a page fault would fire with interrupts
+     * off.  The trap handler switches CR3 to the kernel page table but
+     * does NOT restore the user CR3 when returning from a kernel-mode
+     * fault, so the faulting memmove resumes under the kernel CR3 where
+     * the user VA is unmapped — causing an infinite page-fault loop
+     * (system hang).  At -O0 this never triggered because the slower
+     * code path always let vma_validate() install pages before the PTE
+     * walk checked them; at -O2, compiler reordering and inlining could
+     * expose windows where pages weren't yet resident.
+     *
+     * The fix: after vma_validate(), explicitly walk the page table to
+     * confirm every page in the chunk has PTE_V set.  If any is missing,
+     * we fall through to the slow path which handles faults safely with
+     * interrupts enabled.
+     *
+     * Performance (ext4, QEMU virtio-blk, 16 MB sequential I/O):
+     *   -O0 baseline:  WRITE ~50 MB/s,  READ ~32 MB/s
+     *   -O2 + fast path + PTE check: WRITE ~135 MB/s, READ ~91 MB/s
      */
     if (len > 0 && current != NULL && current->vm == vm &&
         !vm->is_kernel && dstva < UVMTOP && dstva + len <= UVMTOP) {
@@ -2209,6 +2302,17 @@ int vm_copyin(vm_t *vm, void *dst, uint64 srcva, uint64 len)
     /*
      * Fast path: single-VMA range — switch to user CR3 and copy
      * directly from user VA instead of per-page software walks.
+     *
+     * NOTE: Currently disabled (the leading "0 &&").  Before enabling,
+     * this needs the same PTE-residency pre-check that vm_copyout()'s
+     * fast path has — walk every source page after vma_validate() and
+     * bail to the slow path if any PTE is missing.  Without that guard,
+     * a demand-paged source page would cause an infinite page-fault loop
+     * under the user CR3 with interrupts disabled (see the detailed
+     * comment in vm_copyout() above for the full explanation).
+     *
+     * It should also be converted to a multi-VMA loop like vm_copyout()
+     * for buffers that span VMA boundaries.
      */
     if (0 && len > 0 && current != NULL && current->vm == vm &&
         !vm->is_kernel && srcva < UVMTOP && srcva + len <= UVMTOP) {

@@ -1259,6 +1259,62 @@ STATIC int __buddy_put(page_t *page) {
     return 0;
 }
 
+/**
+ * page_free_anon_batch - Free a batch of order-0 anonymous pages efficiently.
+ *
+ * Uses lock-free atomic refcount decrement to avoid per-page spinlock
+ * overhead.  If the atomic fetch-sub returns 1 (we were the last ref),
+ * the page is placed into the per-CPU cache or collected for buddy-merge.
+ * Interrupts are disabled once for the entire batch.
+ *
+ * Callers must have already cleared PTEs and flushed TLBs.
+ * @pages:  array of page_t pointers (order 0, PAGE_TYPE_ANON)
+ * @count:  number of entries
+ */
+void page_free_anon_batch(page_t **pages, int count)
+{
+    page_t *overflow[256];
+    int noverflow = 0;
+
+    push_off();
+    for (int i = 0; i < count; i++) {
+        page_t *pg = pages[i];
+        if (pg == NULL)
+            continue;
+
+        /* Lock-free decrement: exactly one thread sees old==1. */
+        int old = __atomic_fetch_sub(&pg->ref_count, 1, __ATOMIC_ACQ_REL);
+        if (old <= 0) {
+            /* Underflow — undo (should not happen). */
+            __atomic_fetch_add(&pg->ref_count, 1, __ATOMIC_RELAXED);
+            continue;
+        }
+        if (old > 1) {
+            /* Other references remain — done with this page. */
+            continue;
+        }
+        /* old == 1: we freed the last ref.  Page is exclusively ours. */
+        pcpu_cache_t *cache = __get_pcpu_cache_for_page(pg, 0);
+        uint32 cur = PCPU_CACHE_COUNT_LOAD(cache);
+        if (cur < PCPU_HOT_PAGE_CACHE_SIZE) {
+            __page_as_buddy_header(pg, 0, BUDDY_STATE_CACHED);
+            list_entry_init(&pg->buddy.lru_entry);
+            list_node_push_back(&cache->lru_head, pg, buddy.lru_entry);
+            PCPU_CACHE_COUNT_INC(cache);
+        } else {
+            /* Per-CPU cache full — defer to buddy merge. */
+            __page_as_buddy_header(pg, 0, BUDDY_STATE_INTERMEDIATE);
+            if (noverflow < 256)
+                overflow[noverflow++] = pg;
+        }
+    }
+    pop_off();
+
+    /* Phase 2: merge overflow pages into buddy system (needs locks). */
+    for (int i = 0; i < noverflow; i++)
+        __buddy_merge_and_insert(overflow[i], 0);
+}
+
 // ============================================================================
 // SECTION 11: Buddy System Initialization
 // ============================================================================
