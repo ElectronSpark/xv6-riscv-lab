@@ -186,6 +186,8 @@ static void __vfs_init_superblock_structure(struct vfs_superblock *sb,
                                             struct vfs_fs_type *fs_type) {
     list_entry_init(&sb->siblings);
     list_entry_init(&sb->orphan_list);
+    list_entry_init(&sb->inode_lru);
+    sb->inode_lru_count = 0;
     hlist_init(&sb->inodes, VFS_SUPERBLOCK_HASH_BUCKETS,
                &__vfs_superblock_inode_hlist_funcs);
     sb->fs_type = fs_type;
@@ -916,6 +918,11 @@ static size_t __vfs_evict_unused_inodes(struct vfs_superblock *sb) {
         if (inode->ref_count == 1) {
             atomic_dec(&inode->ref_count);
         }
+        // Remove from LRU if present (device-backed inodes at ref=0)
+        if (!LIST_NODE_IS_DETACHED(inode, lru_entry)) {
+            list_node_detach(inode, lru_entry);
+            sb->inode_lru_count--;
+        }
         inode->valid = 0;
         vfs_remove_inode(sb, inode);
         vfs_iunlock(inode);
@@ -925,6 +932,74 @@ static size_t __vfs_evict_unused_inodes(struct vfs_superblock *sb) {
         evicted++;
     }
 
+    return evicted;
+}
+
+/*
+ * vfs_evict_lru_inodes - Evict up to @count least-recently-used inodes from a
+ *                        device-backed superblock's LRU list.
+ *
+ * Only device-backed (non-backendless) superblocks maintain an LRU list of
+ * inodes cached at refcount=0.  This function walks the LRU from the oldest
+ * (head) end, syncing dirty inodes and freeing them.  It can be used by
+ * memory-pressure shrinkers or periodic reclaim.
+ *
+ * Locking:
+ *   - Caller must NOT hold the superblock lock (acquired internally).
+ *
+ * Returns:
+ *   - Number of inodes actually evicted.
+ */
+size_t vfs_evict_lru_inodes(struct vfs_superblock *sb, size_t count) {
+    if (sb == NULL || sb->backendless || count == 0)
+        return 0;
+
+    size_t evicted = 0;
+    struct vfs_inode *inode, *tmp;
+
+    vfs_superblock_wlock(sb);
+
+    list_foreach_node_safe(&sb->inode_lru, inode, tmp, lru_entry) {
+        if (evicted >= count)
+            break;
+
+        // Sanity: LRU inodes should be at refcount 0
+        if (inode->ref_count != 0 || inode->destroying || !inode->valid) {
+            // Stale entry — remove from LRU silently
+            list_node_detach(inode, lru_entry);
+            sb->inode_lru_count--;
+            continue;
+        }
+
+        vfs_ilock(inode);
+
+        // Re-check after locking — someone may have revived it
+        if (inode->ref_count != 0 || inode->destroying || !inode->valid) {
+            if (!LIST_NODE_IS_DETACHED(inode, lru_entry)) {
+                list_node_detach(inode, lru_entry);
+                sb->inode_lru_count--;
+            }
+            vfs_iunlock(inode);
+            continue;
+        }
+
+        // Sync dirty inode before eviction
+        if (inode->dirty && inode->ops->sync_inode) {
+            inode->ops->sync_inode(inode);
+        }
+
+        list_node_detach(inode, lru_entry);
+        sb->inode_lru_count--;
+
+        inode->valid = 0;
+        vfs_remove_inode(sb, inode);
+        vfs_iunlock(inode);
+
+        inode->ops->free_inode(inode);
+        evicted++;
+    }
+
+    vfs_superblock_unlock(sb);
     return evicted;
 }
 
@@ -2081,6 +2156,11 @@ struct vfs_inode *vfs_get_inode_cached(struct vfs_superblock *sb, uint64 ino) {
         if (inode->valid && !inode->destroying && inode->n_links > 0) {
             if (sb->backendless || vfs_superblock_wholding(sb)) {
                 atomic_inc(&inode->ref_count);
+                // Remove from LRU — the inode was cached at ref=0
+                if (!LIST_NODE_IS_DETACHED(inode, lru_entry)) {
+                    list_node_detach(inode, lru_entry);
+                    sb->inode_lru_count--;
+                }
             } else {
                 return ERR_PTR(-ENOENT); // Cannot safely revive without wlock
             }
@@ -2170,6 +2250,11 @@ struct vfs_inode *vfs_add_inode(struct vfs_superblock *sb,
         // the inode cannot be freed underneath us.
         if (existing->ref_count == 0) {
             existing->ref_count = 1;
+            // Remove from LRU — the inode was cached at ref=0
+            if (!LIST_NODE_IS_DETACHED(existing, lru_entry)) {
+                list_node_detach(existing, lru_entry);
+                sb->inode_lru_count--;
+            }
         } else {
             vfs_idup(existing);
         }

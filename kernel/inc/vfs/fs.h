@@ -57,6 +57,7 @@ void vfs_superblock_put(struct vfs_superblock *sb);
 struct vfs_inode *vfs_alloc_inode(struct vfs_superblock *sb);
 struct vfs_inode *vfs_get_inode(struct vfs_superblock *sb, uint64 ino);
 int vfs_sync_superblock(struct vfs_superblock *sb, int wait);
+size_t vfs_evict_lru_inodes(struct vfs_superblock *sb, size_t count);
 
 // inode operations
 // Inode lifetime is managed via a reference count.

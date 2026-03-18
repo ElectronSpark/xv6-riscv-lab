@@ -105,6 +105,11 @@ struct vfs_superblock {
     int orphan_count;  // Number of orphan inodes (n_links=0, ref>0)
     list_node_t orphan_list; // List of orphan inodes
 
+    // LRU list for device-backed inodes cached at refcount=0.
+    // Protected by the superblock write lock.
+    int inode_lru_count;
+    list_node_t inode_lru;
+
     // Filesystem statistics
     spinlock_t spinlock; // protects the counters below
     size_t block_size;   // Filesystem block size
@@ -274,6 +279,7 @@ struct vfs_inode {
             : 1; // delay freeing inode until later (used by some filesystems)
     };
     list_node_t orphan_entry; // entry in sb->orphan_list when orphaned
+    list_node_t lru_entry;    // entry in sb->inode_lru when cached at ref=0
     struct thread *owner;     // thread that holds the lock
     struct vfs_superblock *sb;
     // The two pcaches below are managed by the drivers/filesystems

@@ -59,6 +59,7 @@ void __vfs_inode_init(struct vfs_inode *inode) {
     mutex_init(&inode->mutex, "vfs_inode_mutex");
     hlist_entry_init(&inode->hash_entry);
     list_entry_init(&inode->orphan_entry);
+    list_entry_init(&inode->lru_entry);
     inode->orphan = 0;
     inode->lookup_seq = 0;
     inode->ref_count = 1;
@@ -230,6 +231,14 @@ retry:
     // __vfs_evict_unused_inodes during unmount.
     if (sb->attached && (inode->n_links > 0 || inode->mount)) {
         // Keep inode cached with refcount already consumed to 0.
+        // For device-backed filesystems, add to LRU so it can be reclaimed
+        // under memory pressure (oldest-first).  Mountpoint inodes and
+        // root inodes must stay alive, so skip them.
+        if (!sb->backendless && !inode->mount &&
+            inode != sb->root_inode) {
+            list_node_push(&sb->inode_lru, inode, lru_entry);
+            sb->inode_lru_count++;
+        }
         vfs_iunlock(inode);
         vfs_superblock_unlock(sb);
         return;
@@ -392,6 +401,12 @@ retry:
     }
 
 skip_destroy:
+
+    // Remove from LRU if present before freeing
+    if (!LIST_NODE_IS_DETACHED(inode, lru_entry)) {
+        list_node_detach(inode, lru_entry);
+        sb->inode_lru_count--;
+    }
 
     ret = vfs_remove_inode(inode->sb, inode);
     if (ret != 0) {
