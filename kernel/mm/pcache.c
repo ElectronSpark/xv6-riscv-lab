@@ -27,6 +27,7 @@
 #include "timer/timer.h"
 #include "signal.h"
 #include "vfs/uio.h"
+#include <mm/shrinker.h>
 
 // Locking order:
 // 1. __pcache_global_spinlock
@@ -56,6 +57,18 @@ static slab_cache_t __pcache_node_slab = {0};
 static completion_t __global_flusher_completion = {0};
 static struct thread *__flusher_thread_pcb = NULL;
 static bool __global_flusher_running = false;
+
+// Shrinker for pcache — counts and evicts LRU (clean, unreferenced) pages
+static uint64 __pcache_shrinker_count(struct shrinker *s,
+                                      struct shrink_control *sc);
+static uint64 __pcache_shrinker_scan(struct shrinker *s,
+                                     struct shrink_control *sc);
+static struct shrinker __pcache_shrinker = {
+    .count_objects = __pcache_shrinker_count,
+    .scan_objects = __pcache_shrinker_scan,
+    .seeks = DEFAULT_SEEKS,
+    .name = "pcache",
+};
 
 #define PCACHE_BLKS_PER_PAGE (PGSIZE >> BLK_SIZE_SHIFT)
 #define PCACHE_BLK_MASK ((uint64)PCACHE_BLKS_PER_PAGE - 1)
@@ -1327,6 +1340,7 @@ void pcache_global_init(void) {
     completion_init(&__global_flusher_completion);
     complete_all(&__global_flusher_completion);
     __create_flusher_thread();
+    shrinker_register(&__pcache_shrinker);
 }
 
 int pcache_init(struct pcache *pcache) {
@@ -3098,4 +3112,105 @@ uint64 sys_sync(void) {
 uint64 sys_dumppcache(void) {
     dump_all_pcache_stats();
     return 0;
+}
+
+/******************************************************************************
+ * Shrinker callbacks for memory reclaim integration
+ *****************************************************************************/
+
+// Count total freeable (LRU) pages across all registered pcaches
+static uint64 __pcache_shrinker_count(struct shrinker *s,
+                                      struct shrink_control *sc) {
+    uint64 total_lru = 0;
+    struct pcache *pcache = NULL;
+    struct pcache *__tmp = NULL;
+
+    spin_lock(&__pcache_global_spinlock);
+    list_foreach_node_safe(&__global_pcache_list, pcache, __tmp, list_entry) {
+        int64 lru = pcache->lru_count;
+        if (lru > 0)
+            total_lru += (uint64)lru;
+    }
+    spin_unlock(&__pcache_global_spinlock);
+
+    return total_lru;
+}
+
+// Scan and evict up to sc->nr_to_scan LRU pages across all pcaches.
+//
+// Lock ordering: __pcache_global_spinlock → per-pcache spinlock → page lock.
+// __page_ref_dec (called when ref hits 0) takes buddy-pool locks. To avoid
+// an inversion (pcache locks → buddy locks vs. the normal alloc path which
+// may go buddy → pcache), we batch evicted pages and drop their final
+// references AFTER releasing all pcache locks.
+//
+// We only evict pages whose ref_count == 1 (the single pcache-held ref).
+// Pages pinned by active I/O or user mappings are skipped.
+#define PCACHE_SHRINKER_BATCH 32
+
+static uint64 __pcache_shrinker_scan(struct shrinker *s,
+                                     struct shrink_control *sc) {
+    uint64 freed = 0;
+    struct pcache *pcache = NULL;
+    struct pcache *__tmp = NULL;
+
+    page_t *batch[PCACHE_SHRINKER_BATCH];
+    int batch_n = 0;
+
+    spin_lock(&__pcache_global_spinlock);
+    list_foreach_node_safe(&__global_pcache_list, pcache, __tmp, list_entry) {
+        if (freed + batch_n >= sc->nr_to_scan)
+            break;
+        if (pcache->lru_count <= 0)
+            continue;
+
+        __pcache_spin_lock(pcache);
+        while (freed + batch_n < sc->nr_to_scan && pcache->lru_count > 0 &&
+               batch_n < PCACHE_SHRINKER_BATCH) {
+            // __pcache_pop_lru acquires the page lock before returning.
+            page_t *victim = __pcache_pop_lru(pcache);
+            if (victim == NULL)
+                break;
+
+            // Only evict pages solely owned by the pcache (ref == 1).
+            if (page_ref_count(victim) > 1) {
+                // Re-queue at front of LRU so we don't retry
+                // immediately on the next iteration (pop_lru takes
+                // from the tail).
+                struct pcache_node *pcnode = victim->pcache.pcache_node;
+                if (pcnode != NULL) {
+                    list_node_push_back(&pcache->lru, pcnode, lru_entry);
+                    pcache->lru_count++;
+                }
+                page_lock_release(victim);
+                break;
+            }
+
+            // Proceed with eviction (same as __pcache_evict_lru body).
+            struct pcache_node *pcnode = victim->pcache.pcache_node;
+            __pcache_remove_node(pcache, victim);
+            __pcache_node_detach_page(pcache, victim);
+            victim->pcache.pcache_node = NULL;
+            pcnode->page = NULL;
+            page_lock_release(victim);
+            call_rcu(&pcnode->rcu_head, __pcache_node_rcu_free, pcnode);
+
+            batch[batch_n++] = victim;
+        }
+        __pcache_spin_unlock(pcache);
+
+        if (batch_n >= PCACHE_SHRINKER_BATCH)
+            break;
+    }
+    spin_unlock(&__pcache_global_spinlock);
+
+    // Drop page references without any pcache/global locks held.
+    // This is safe for the buddy allocator's lock ordering.
+    for (int i = 0; i < batch_n; i++) {
+        __pcache_page_put(batch[i]);
+    }
+    freed += batch_n;
+
+    sc->nr_scanned = freed;
+    return freed;
 }

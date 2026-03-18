@@ -37,7 +37,7 @@ endif()
 
 # Default CPU count (overridden by CPUS env var)
 if(NOT DEFINED ENV{CPUS} OR "$ENV{CPUS}" STREQUAL "")
-    set(CPUS 1)
+    set(CPUS 6)
 else()
     set(CPUS $ENV{CPUS})
 endif()

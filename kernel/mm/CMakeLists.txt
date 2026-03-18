@@ -9,6 +9,9 @@ set(MM_SOURCES
     early_allocator.c
     vm.c
     rmap.c
+    shrinker.c
+    mm_watermark.c
+    oom_kill.c
 )
 
 add_library(mm OBJECT ${MM_SOURCES})

@@ -89,6 +89,17 @@ void kmm_free(void *);
 void kmm_shrink_all(void);
 uint64 get_total_free_pages(void);
 
+// mm_watermark.c
+void mm_watermark_init(void);
+void kswapd_start(void);
+void mm_watermark_dump(void);
+
+// oom_kill.c
+void oom_init(void);
+
+// shrinker.c
+void shrinker_init(void);
+
 // Legacy log.c removed - logging now handled by VFS xv6fs subsystem
 // See kernel/vfs/xv6fs/log.c for VFS logging interfaces
 

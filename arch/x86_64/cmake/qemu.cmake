@@ -57,7 +57,7 @@ add_custom_target(qemu-smoke
 
 # Number of CPUs for x86 SMP
 if(NOT DEFINED CPUS)
-    set(CPUS 1)
+    set(CPUS 6)
 endif()
 
 if(NOT DEFINED MEMORY)

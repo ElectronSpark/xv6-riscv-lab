@@ -27,6 +27,8 @@ int slab_cache_destroy(slab_cache_t *cache);
 int slab_cache_shrink(slab_cache_t *cache, int nums);
 // Shrink all registered slab caches (for OOM recovery)
 void slab_shrink_all(void);
+// Register slab shrinker with the shrinker framework
+void slab_shrinker_register(void);
 // Dump statistics for all slab caches, return total bytes
 uint64 slab_dump_all(int detailed);
 void *slab_alloc(slab_cache_t *cache);

@@ -58,6 +58,8 @@
 #include <mm/early_allocator.h>
 #include "dev/fdt.h"
 #include <mm/memstat.h>
+#include <mm/mm_watermark.h>
+#include <mm/shrinker.h>
 
 #ifdef __x86_64__
 static inline void x86_page_dbg_outb(uint16 port, uint8 value) {
@@ -1678,6 +1680,24 @@ page_t *__page_alloc(uint64 order, uint64 flags) {
     __page_sanitizer_check("page_alloc", ret, order, flags);
     if (ret != NULL) {
         ret->compound_order = (uint8)order;
+
+        // Watermark check: if free pages dropped below LOW, wake kswapd
+        if (!(flags & (GFP_NORECLAIM | GFP_NOWATERMARK))) {
+            if (!mm_watermark_ok(WMARK_LOW)) {
+                kswapd_wake();
+            }
+        }
+        return ret;
+    }
+
+    // Allocation failed — attempt reclaim if allowed
+    if (!(flags & (GFP_NORECLAIM | GFP_NOWATERMARK))) {
+        mm_try_reclaim(order, flags);
+        // Retry after reclaim
+        ret = __buddy_get(order, flags);
+        if (ret != NULL) {
+            ret->compound_order = (uint8)order;
+        }
     }
     return ret;
 }

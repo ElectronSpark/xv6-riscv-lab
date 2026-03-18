@@ -75,6 +75,7 @@
 #include <mm/slab.h>
 #include "slab_private.h"
 #include <smp/percpu.h>
+#include <mm/shrinker.h>
 
 // ============================================================================
 // Global Slab Cache Registry
@@ -84,6 +85,71 @@ static list_node_t __all_slab_caches =
     LIST_ENTRY_INITIALIZED(__all_slab_caches);
 static spinlock_t __all_slab_caches_lock =
     SPINLOCK_INITIALIZED("all_slab_caches");
+
+// Shrinker for slab — counts free slabs and releases them back to buddy
+static uint64 __slab_shrinker_count(struct shrinker *s,
+                                    struct shrink_control *sc) {
+    uint64 total_free = 0;
+    slab_cache_t *cache, *__tmp;
+    spin_lock(&__all_slab_caches_lock);
+    list_foreach_node_safe(&__all_slab_caches, cache, __tmp, cache_list_entry) {
+        int64 free_count =
+            __atomic_load_n(&cache->global_free_count, __ATOMIC_ACQUIRE);
+        if (free_count > 0)
+            total_free += (uint64)free_count;
+    }
+    spin_unlock(&__all_slab_caches_lock);
+    return total_free;
+}
+
+static uint64 __slab_shrinker_scan(struct shrinker *s,
+                                   struct shrink_control *sc) {
+    uint64 freed = 0;
+    uint64 to_scan = sc->nr_to_scan;
+    slab_cache_t *cache, *tmp;
+
+    spin_lock(&__all_slab_caches_lock);
+    list_foreach_node_safe(&__all_slab_caches, cache, tmp, cache_list_entry) {
+        int64 free_count =
+            __atomic_load_n(&cache->global_free_count, __ATOMIC_ACQUIRE);
+        if (free_count <= 0)
+            continue;
+        int to_shrink = (int)((to_scan < (uint64)free_count)
+                                  ? to_scan
+                                  : (uint64)free_count);
+        if (to_shrink <= 0)
+            continue;
+        spin_unlock(&__all_slab_caches_lock);
+        int ret = slab_cache_shrink(cache, to_shrink);
+        if (ret > 0)
+            freed += (uint64)ret;
+        spin_lock(&__all_slab_caches_lock);
+        // Restart scan since we dropped the lock
+        cache = LIST_FIRST_NODE(&__all_slab_caches, slab_cache_t,
+                                cache_list_entry);
+        if (cache == NULL)
+            break;
+        tmp = LIST_NEXT_NODE(&__all_slab_caches, cache, cache_list_entry);
+        to_scan = (to_scan > freed) ? to_scan - freed : 0;
+        if (to_scan == 0)
+            break;
+    }
+    spin_unlock(&__all_slab_caches_lock);
+
+    sc->nr_scanned = freed;
+    return freed;
+}
+
+static struct shrinker __slab_shrinker = {
+    .count_objects = __slab_shrinker_count,
+    .scan_objects = __slab_shrinker_scan,
+    .seeks = DEFAULT_SEEKS,
+    .name = "slab",
+};
+
+void slab_shrinker_register(void) {
+    shrinker_register(&__slab_shrinker);
+}
 
 // Shrink all registered slab caches - called on OOM
 void slab_shrink_all(void) {

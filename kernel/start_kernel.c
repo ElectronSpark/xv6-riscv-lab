@@ -14,6 +14,10 @@
 #include "dev/dev.h"
 #include <mm/pcache.h>
 #include <mm/vm.h>
+#include <mm/slab.h>
+#include <mm/mm_watermark.h>
+#include <mm/oom_kill.h>
+#include <mm/shrinker.h>
 #include "xarray.h"
 #include "vfs/fs.h"
 #include "vfs/pipe.h"
@@ -192,6 +196,11 @@ void start_kernel_post_init(void) {
 #endif
     xarray_global_init(); // XArray subsystem initialization
     pcache_global_init(); // page cache subsystem initialization
+    shrinker_init();      // Shrinker framework initialization
+    mm_watermark_init();  // Memory watermark system
+    oom_init();           // OOM killer
+    slab_shrinker_register(); // Register slab caches as shrinker
+    kswapd_start();       // Background memory reclaim daemon
 
     // File system initialization must be run in the context of a
     // regular thread (e.g., because it calls sleep), and thus cannot
