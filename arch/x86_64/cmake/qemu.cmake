@@ -66,8 +66,8 @@ endif()
 
 # x86 PCI devices: virtio-blk-pci disks + e1000 NIC
 set(X86_DISK_OPTS
-    -drive file=${CMAKE_BINARY_DIR}/fs.img,if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0
-    -drive file=${CMAKE_BINARY_DIR}/xv6fs_test.img,if=none,format=raw,id=x1 -device virtio-blk-pci,drive=x1
+    -drive file=${CMAKE_BINARY_DIR}/fs.img,if=none,format=raw,id=x0 -device virtio-blk-pci,drive=x0,num-queues=${CPUS}
+    -drive file=${CMAKE_BINARY_DIR}/xv6fs_test.img,if=none,format=raw,id=x1 -device virtio-blk-pci,drive=x1,num-queues=${CPUS}
 )
 set(X86_NET_OPTS -netdev user,id=net0,hostfwd=tcp::2323-:23,hostfwd=tcp::2159-:2159,hostfwd=tcp::8080-:80,hostfwd=tcp::8443-:443,hostfwd=tcp::2222-:22 -object filter-dump,id=net0,netdev=net0,file=packets.pcap -device e1000,netdev=net0)
 set(X86_CMDLINE -append "root=/dev/disk0")
