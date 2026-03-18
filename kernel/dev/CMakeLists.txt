@@ -16,4 +16,6 @@ add_library(dev OBJECT
     mbr.c
     gpt.c
     loop.c
+    fb.c
+    ps2mouse.c
 )

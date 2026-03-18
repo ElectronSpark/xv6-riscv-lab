@@ -14,6 +14,7 @@
 #include "dev/e1000_dev.h"
 #include "dev/virtio.h"
 #include "dev/fdt.h"
+#include "dev/fb.h"
 
 uint64 __pcie_ecam_mmio_base = (uint64)PA2VA(0x30000000L);
 
@@ -202,6 +203,9 @@ void pci_init(void)
                    (device == PCI_DEVICE_VIRTIO_BLK_TRANSITIONAL ||
                     device == PCI_DEVICE_VIRTIO_BLK_MODERN)) {
             pci_init_virtio_blk(0, dev, 0);
+        } else if (vendor == PCI_VENDOR_BOCHS &&
+                   device == PCI_DEVICE_BOCHS_VGA) {
+            fb_pci_init(0, dev, 0);
         }
     }
 

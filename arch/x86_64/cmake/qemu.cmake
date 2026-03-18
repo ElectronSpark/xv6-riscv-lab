@@ -70,14 +70,33 @@ set(X86_DISK_OPTS
     -drive file=${CMAKE_BINARY_DIR}/xv6fs_test.img,if=none,format=raw,id=x1 -device virtio-blk-pci,drive=x1,num-queues=${CPUS}
 )
 set(X86_NET_OPTS -netdev user,id=net0,hostfwd=tcp::2323-:23,hostfwd=tcp::2159-:2159,hostfwd=tcp::8080-:80,hostfwd=tcp::8443-:443,hostfwd=tcp::2222-:22 -object filter-dump,id=net0,netdev=net0,file=packets.pcap -device e1000,netdev=net0)
+set(X86_VGA_OPTS -vga std)
 set(X86_CMDLINE -append "root=/dev/disk0")
 
 add_custom_target(qemu
-    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64,+pcid -smp ${CPUS} -m ${MEMORY} -nographic -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -debugcon file:debugcon.log -kernel ${X86_FULL_IMAGE} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE}
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64,+pcid -smp ${CPUS} -m ${MEMORY} -nographic ${X86_VGA_OPTS} -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -debugcon file:debugcon.log -kernel ${X86_FULL_IMAGE} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE}
     COMMAND stty sane
     DEPENDS kernel_all fs_img
     WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
     COMMENT "Running x86_64 QEMU full kernel"
+)
+
+# GUI mode: QEMU window with VGA display + VNC on :5900
+add_custom_target(qemu-gui
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64,+pcid -smp ${CPUS} -m ${MEMORY} ${X86_VGA_OPTS} -display gtk -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -debugcon file:debugcon.log -kernel ${X86_FULL_IMAGE} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE} -usb -device usb-tablet
+    COMMAND stty sane
+    DEPENDS kernel_all fs_img
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running x86_64 QEMU with GUI display (VGA + mouse)"
+)
+
+# VNC mode: headless with VNC server on port 5900
+add_custom_target(qemu-vnc
+    COMMAND ${QEMU_X86_EXECUTABLE} -machine pc -cpu qemu64,+pcid -smp ${CPUS} -m ${MEMORY} ${X86_VGA_OPTS} -display vnc=:0 -chardev stdio,id=char0,mux=on,signal=off -mon chardev=char0,mode=readline -serial chardev:char0 -serial file:diag.log -debugcon file:debugcon.log -kernel ${X86_FULL_IMAGE} ${X86_DISK_OPTS} ${X86_NET_OPTS} ${X86_CMDLINE} -usb -device usb-tablet
+    COMMAND stty sane
+    DEPENDS kernel_all fs_img
+    WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
+    COMMENT "Running x86_64 QEMU with VNC display on :5900"
 )
 
 add_custom_target(qemu-serial

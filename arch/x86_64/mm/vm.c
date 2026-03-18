@@ -173,9 +173,10 @@ static void kvm_build(void)
     /* Map APIC & PCI device MMIO region.
      * I/O APIC at 0xFEC00000, LAPIC at 0xFEE00000, HPET at 0xFED00000.
      * PCI device BARs typically assigned in 0xFEB00000-0xFEBFFFFF range.
+     * Bochs VGA framebuffer typically at 0xFD000000 (16 MB window).
      * Use uncacheable semantics (no PTE_G) for device MMIO. */
     uint64 flags_mmio = X86_PTE_P | X86_PTE_W;
-    kvm_map_2m_range(0xFE000000ULL, 0xFF000000ULL, flags_mmio);
+    kvm_map_2m_range(0xFD000000ULL, 0xFF000000ULL, flags_mmio);
 }
 
 /* CR3 requires a physical address; kpml4 is a higher-half VA. */

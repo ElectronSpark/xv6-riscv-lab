@@ -259,6 +259,130 @@ if(EXISTS "${MUSL_PROG_DIR}/dyntest.c")
 endif()
 
 # ==============================================================================
+# LVGL — Lightweight GUI framework (built against musl)
+# ==============================================================================
+if(ARCH STREQUAL "x86_64")
+    set(LVGL_DIR "${CMAKE_SOURCE_DIR}/user/lvgl")
+    set(LVGL_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/lvgl_demo.dir")
+    file(MAKE_DIRECTORY ${LVGL_BUILD_DIR})
+
+    set(LVGL_SOURCES
+        ${LVGL_DIR}/src/lv_font_builtin.c
+        ${LVGL_DIR}/src/lv_core.c
+    )
+    set(LVGL_DEMO_SRC ${LVGL_DIR}/demos/lvgl_demo.c)
+
+    # Compile LVGL library objects
+    set(LVGL_OBJ_FILES "")
+    foreach(SRC ${LVGL_SOURCES})
+        get_filename_component(BASENAME ${SRC} NAME_WE)
+        set(OBJ ${LVGL_BUILD_DIR}/${BASENAME}.c.o)
+        add_custom_command(
+            OUTPUT ${OBJ}
+            COMMAND ${CMAKE_C_COMPILER}
+                    ${MUSL_C_CFLAGS}
+                    -I${LVGL_DIR}
+                    -o ${OBJ}
+                    -c ${SRC}
+            DEPENDS ${SRC} musl_sysroot
+            COMMENT "LVGL: compiling ${BASENAME}.c"
+        )
+        list(APPEND LVGL_OBJ_FILES ${OBJ})
+    endforeach()
+
+    # Archive into a static library
+    set(LVGL_LIB_A ${LVGL_BUILD_DIR}/liblvgl_xv6.a)
+    add_custom_command(
+        OUTPUT ${LVGL_LIB_A}
+        COMMAND ${CMAKE_AR} rcs ${LVGL_LIB_A} ${LVGL_OBJ_FILES}
+        DEPENDS ${LVGL_OBJ_FILES}
+        COMMENT "LVGL: creating liblvgl_xv6.a"
+    )
+    add_custom_target(lvgl_lib DEPENDS ${LVGL_LIB_A})
+
+    # Compile demo
+    set(LVGL_DEMO_OBJ ${LVGL_BUILD_DIR}/lvgl_demo.c.o)
+    add_custom_command(
+        OUTPUT ${LVGL_DEMO_OBJ}
+        COMMAND ${CMAKE_C_COMPILER}
+                ${MUSL_C_CFLAGS}
+                -I${LVGL_DIR}
+                -o ${LVGL_DEMO_OBJ}
+                -c ${LVGL_DEMO_SRC}
+        DEPENDS ${LVGL_DEMO_SRC} musl_sysroot
+        COMMENT "LVGL: compiling lvgl_demo.c"
+    )
+
+    # Link demo executable
+    set(LVGL_DEMO_ELF ${CMAKE_BINARY_DIR}/user/_lvgl_demo)
+    add_custom_command(
+        OUTPUT ${LVGL_DEMO_ELF}
+        COMMAND ${CMAKE_C_COMPILER}
+                -no-pie -nostartfiles -nostdlib
+                ${MUSL_CRT1_O}
+                ${MUSL_CRTI_O}
+                -Wl,--dynamic-linker=${MUSL_DYNAMIC_LINKER_PATH}
+                -Wl,-z,max-page-size=0x1000
+                -Wl,-z,common-page-size=0x1000
+                -Wl,--build-id=none
+                -L${MUSL_SYSROOT}/lib
+                -o ${LVGL_DEMO_ELF}
+                ${LVGL_DEMO_OBJ}
+                ${LVGL_LIB_A}
+                -lc
+                ${LIBGCC_PATH}
+                ${MUSL_CRTN_O}
+        DEPENDS ${LVGL_DEMO_OBJ} ${LVGL_LIB_A} musl_sysroot
+        COMMENT "LVGL: linking lvgl_demo"
+    )
+
+    add_custom_target(lvgl_demo ALL DEPENDS ${LVGL_DEMO_ELF})
+    add_dependencies(lvgl_demo lvgl_lib)
+    add_dependencies(user_programs lvgl_demo)
+
+    # Compile desktop app
+    set(DESKTOP_SRC ${LVGL_DIR}/apps/desktop.c)
+    set(DESKTOP_OBJ ${LVGL_BUILD_DIR}/desktop.c.o)
+    add_custom_command(
+        OUTPUT ${DESKTOP_OBJ}
+        COMMAND ${CMAKE_C_COMPILER}
+                ${MUSL_C_CFLAGS}
+                -I${LVGL_DIR}
+                -o ${DESKTOP_OBJ}
+                -c ${DESKTOP_SRC}
+        DEPENDS ${DESKTOP_SRC} musl_sysroot
+        COMMENT "LVGL: compiling desktop.c"
+    )
+
+    # Link desktop executable
+    set(DESKTOP_ELF ${CMAKE_BINARY_DIR}/user/_desktop)
+    add_custom_command(
+        OUTPUT ${DESKTOP_ELF}
+        COMMAND ${CMAKE_C_COMPILER}
+                -no-pie -nostartfiles -nostdlib
+                ${MUSL_CRT1_O}
+                ${MUSL_CRTI_O}
+                -Wl,--dynamic-linker=${MUSL_DYNAMIC_LINKER_PATH}
+                -Wl,-z,max-page-size=0x1000
+                -Wl,-z,common-page-size=0x1000
+                -Wl,--build-id=none
+                -L${MUSL_SYSROOT}/lib
+                -o ${DESKTOP_ELF}
+                ${DESKTOP_OBJ}
+                ${LVGL_LIB_A}
+                -lc
+                ${LIBGCC_PATH}
+                ${MUSL_CRTN_O}
+        DEPENDS ${DESKTOP_OBJ} ${LVGL_LIB_A} musl_sysroot
+        COMMENT "LVGL: linking desktop"
+    )
+
+    add_custom_target(desktop ALL DEPENDS ${DESKTOP_ELF})
+    add_dependencies(desktop lvgl_lib)
+    add_dependencies(user_programs desktop)
+endif()
+
+# ==============================================================================
 # ncurses — Terminal UI library (static, built against musl)
 # ==============================================================================
 set(NCURSES_SRC_DIR "${CMAKE_SOURCE_DIR}/user/ncurses")
@@ -2247,6 +2371,16 @@ endif()
 # dyntest (dynamic linking test)
 if(TARGET _dyntest_dymusl)
     sysroot_install("${CMAKE_BINARY_DIR}/user/_dyntest" "${SYSROOT_BIN_DIR}/dyntest" DEPENDS _dyntest_dymusl)
+endif()
+
+# LVGL GUI demo
+if(TARGET lvgl_demo)
+    sysroot_install("${CMAKE_BINARY_DIR}/user/_lvgl_demo" "${SYSROOT_BIN_DIR}/lvgl_demo" DEPENDS lvgl_demo)
+endif()
+
+# LVGL Desktop
+if(TARGET desktop)
+    sysroot_install("${CMAKE_BINARY_DIR}/user/_desktop" "${SYSROOT_BIN_DIR}/desktop" DEPENDS desktop)
 endif()
 
 # dash shell (statically linked against musl)

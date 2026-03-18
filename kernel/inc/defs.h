@@ -46,6 +46,8 @@ void consoleinit(void);
 void consoledevinit(void);
 void nullranddevinit(void);
 void random_fill_bytes(void *buf, size_t count);
+void fbdevinit(void);
+void ps2mouse_init(void);
 void consoleintr(int);
 void consputc(int);
 void consputs(const char *, int);
