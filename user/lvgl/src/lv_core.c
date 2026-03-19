@@ -43,7 +43,8 @@ struct mouse_event {
     int16_t  dy;
     uint8_t  buttons;
     uint8_t  flags;     /* bit 0: 1 = absolute coordinates */
-    uint8_t  pad[2];
+    int8_t   dz;        /* scroll wheel delta */
+    uint8_t  pad[1];
 };
 
 #define MOUSE_EVENT_F_ABSOLUTE  0x01
@@ -62,7 +63,9 @@ static int        g_initialized;
 static lv_obj_t   g_obj_pool[LV_OBJ_POOL_SIZE];
 static uint8_t    g_obj_used[LV_OBJ_POOL_SIZE];
 static lv_obj_t  *g_pressed_obj = NULL;
+static lv_obj_t  *g_focused_textbox = NULL;
 static uint32_t   g_frame_count = 0;
+static int8_t     g_scroll_dz = 0;  /* accumulated scroll wheel delta */
 
 /* Dirty region tracking for partial flush during drag */
 static int     g_partial_ok = 0;      /* 1 = partial flush is sufficient */
@@ -72,6 +75,10 @@ static int16_t g_dirty_x1, g_dirty_y1, g_dirty_x2, g_dirty_y2;
 static int     g_dragging_gpu = 0;    /* 1 = GPU wireframe drag active */
 static int16_t g_ghost_x, g_ghost_y; /* current ghost outline position */
 static int16_t g_ghost_w, g_ghost_h; /* ghost outline size */
+
+/* Shadow buffer for GPU smart flush — compares current vs previous frame */
+static uint32_t *g_shadow = NULL;
+static int       g_force_full = 1;    /* force full-screen blit (first frame) */
 
 /* Clip rectangle — when active, draw_pixel/draw_rect_fill skip pixels outside */
 int     g_clip_active = 0;
@@ -129,6 +136,8 @@ static void obj_free(lv_obj_t *obj)
     if (!obj) return;
     if (obj == g_pressed_obj)
         g_pressed_obj = NULL;
+    if (obj == g_focused_textbox)
+        g_focused_textbox = NULL;
     int idx = (int)(obj - g_obj_pool);
     if (idx >= 0 && idx < LV_OBJ_POOL_SIZE)
         g_obj_used[idx] = 0;
@@ -167,6 +176,14 @@ static int disp_init(void)
     /* Probe GPU acceleration: try a 1x1 fill rect ioctl */
     struct fb_gpu_fill probe = { .x = 0, .y = 0, .w = 0, .h = 0, .color = 0 };
     g_disp.gpu_accel = (ioctl(g_disp.fb_fd, FB_GPU_FILL_RECT, &probe) == 0);
+
+    /* Allocate shadow buffer for GPU smart flush (partial blit) */
+    if (g_disp.gpu_accel) {
+        g_shadow = (uint32_t *)malloc(g_disp.fb_size);
+        if (g_shadow)
+            memset(g_shadow, 0, g_disp.fb_size);
+    }
+    g_force_full = 1;
 
     return 0;
 }
@@ -288,6 +305,8 @@ static void indev_read(void)
     if (g_indev.mouse_fd < 0)
         return;
 
+    g_scroll_dz = 0;  /* reset per-frame accumulator */
+
     struct mouse_event ev;
     /* Read all pending events */
     while (read(g_indev.mouse_fd, &ev, sizeof(ev)) == sizeof(ev)) {
@@ -310,17 +329,65 @@ static void indev_read(void)
             g_indev.y = (int16_t)(g_disp.height - 1);
 
         g_indev.buttons = ev.buttons;
+
+        /* Accumulate scroll wheel delta */
+        g_scroll_dz += ev.dz;
+    }
+}
+
+static void textbox_handle_key(lv_obj_t *tb, lv_kbd_event_t *ev)
+{
+    uint8_t key = ev->keycode;
+    char *text = tb->spec.textbox.text;
+    int len = (int)strlen(text);
+    int cur = tb->spec.textbox.cursor;
+    int maxl = tb->spec.textbox.max_len;
+    if (maxl <= 0) maxl = (int)sizeof(tb->spec.textbox.text);
+
+    if (key == 0x08) { /* Backspace */
+        if (cur > 0) {
+            memmove(&text[cur - 1], &text[cur], (size_t)(len - cur + 1));
+            tb->spec.textbox.cursor = (uint8_t)(cur - 1);
+        }
+    } else if (key == 0x82) { /* Left */
+        if (cur > 0) tb->spec.textbox.cursor--;
+    } else if (key == 0x83) { /* Right */
+        if (cur < len) tb->spec.textbox.cursor++;
+    } else if (key == 0x84) { /* Home */
+        tb->spec.textbox.cursor = 0;
+    } else if (key == 0x85) { /* End */
+        tb->spec.textbox.cursor = (uint8_t)len;
+    } else if (key == 0x89) { /* Delete */
+        if (cur < len)
+            memmove(&text[cur], &text[cur + 1], (size_t)(len - cur));
+    } else if (key == 0x0A || key == 0x0D) { /* Enter */
+        tb->spec.textbox.focused = 0;
+        g_focused_textbox = NULL;
+    } else if (key == 0x1B) { /* Escape */
+        tb->spec.textbox.focused = 0;
+        g_focused_textbox = NULL;
+    } else if (key >= 0x20 && key < 0x7F) { /* Printable */
+        if (len < maxl - 1) {
+            memmove(&text[cur + 1], &text[cur], (size_t)(len - cur + 1));
+            text[cur] = (char)key;
+            tb->spec.textbox.cursor = (uint8_t)(cur + 1);
+        }
     }
 }
 
 static void indev_read_kbd(void)
 {
-    if (g_indev.kbd_fd < 0 || !g_indev.kbd_cb)
+    if (g_indev.kbd_fd < 0)
         return;
 
     lv_kbd_event_t ev;
     while (read(g_indev.kbd_fd, &ev, sizeof(ev)) == sizeof(ev)) {
-        g_indev.kbd_cb(&ev, g_indev.kbd_cb_data);
+        if (g_focused_textbox) {
+            if (ev.pressed)
+                textbox_handle_key(g_focused_textbox, &ev);
+        } else if (g_indev.kbd_cb) {
+            g_indev.kbd_cb(&ev, g_indev.kbd_cb_data);
+        }
     }
 }
 
@@ -411,9 +478,102 @@ static void obj_get_abs_pos(lv_obj_t *obj, int *ax, int *ay)
     lv_obj_t *p = obj->parent;
     while (p) {
         *ax += p->x + p->padding;
-        *ay += p->y + p->padding;
+        *ay += p->y + p->padding - p->scroll_y;
         p = p->parent;
     }
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ *  Scrollbar helpers
+ * ══════════════════════════════════════════════════════════════════════ */
+
+/* Scrollbar drag state */
+static lv_obj_t *g_scroll_target = NULL;
+
+/* Compute bounding bottom of all children (content extent) */
+static int16_t obj_content_bottom(lv_obj_t *obj)
+{
+    int16_t max_y = 0;
+    for (int i = 0; i < obj->child_count; i++) {
+        int16_t bottom = (int16_t)(obj->children[i]->y + obj->children[i]->h +
+                                   obj->padding);
+        if (bottom > max_y) max_y = bottom;
+    }
+    return max_y;
+}
+
+static void render_scrollbar(int ax, int ay, int w, int h,
+                              int16_t scroll_y, int16_t content_h)
+{
+    int sb_x = ax + w - LV_SCROLLBAR_W;
+    /* Track */
+    draw_rect_fill(sb_x, ay, LV_SCROLLBAR_W, h, lv_color_make(35, 35, 40));
+    draw_rect_fill(sb_x, ay, 1, h, lv_color_make(55, 55, 60));
+    /* Thumb */
+    int thumb_h = h * h / content_h;
+    if (thumb_h < 20) thumb_h = 20;
+    if (thumb_h > h)  thumb_h = h;
+    int max_scroll = content_h - h;
+    int thumb_y = 0;
+    if (max_scroll > 0)
+        thumb_y = (int)scroll_y * (h - thumb_h) / max_scroll;
+    draw_rect_fill(sb_x + 2, ay + thumb_y + 1,
+                   LV_SCROLLBAR_W - 4, thumb_h - 2,
+                   lv_color_make(100, 100, 110));
+}
+
+/* Find scrollable container whose scrollbar area is under (mx, my) */
+static lv_obj_t *find_scrollbar_hit(lv_obj_t *obj, int mx, int my)
+{
+    if (!obj || !obj->visible) return NULL;
+    for (int i = obj->child_count - 1; i >= 0; i--) {
+        lv_obj_t *r = find_scrollbar_hit(obj->children[i], mx, my);
+        if (r) return r;
+    }
+    if (!obj->scrollable) return NULL;
+    int16_t content_h = obj_content_bottom(obj);
+    if (content_h <= obj->h) return NULL;
+    int ax, ay;
+    obj_get_abs_pos(obj, &ax, &ay);
+    int sb_x = ax + obj->w - LV_SCROLLBAR_W;
+    if (mx >= sb_x && mx < ax + obj->w && my >= ay && my < ay + obj->h)
+        return obj;
+    return NULL;
+}
+
+/* Set scroll position from mouse Y on scrollbar track */
+static void scroll_to_mouse(lv_obj_t *obj, int mouse_y)
+{
+    int ax, ay;
+    obj_get_abs_pos(obj, &ax, &ay);
+    int16_t content_h = obj_content_bottom(obj);
+    int16_t visible_h = obj->h;
+    if (content_h <= visible_h) return;
+    int max_scroll = content_h - visible_h;
+    int thumb_h = visible_h * visible_h / content_h;
+    if (thumb_h < 20) thumb_h = 20;
+    int track_range = visible_h - thumb_h;
+    if (track_range <= 0) return;
+    int rel_y = mouse_y - ay - thumb_h / 2;
+    if (rel_y < 0) rel_y = 0;
+    if (rel_y > track_range) rel_y = track_range;
+    obj->scroll_y = (int16_t)(rel_y * max_scroll / track_range);
+}
+
+/* Find scrollable container whose area is under (mx, my) — for scroll wheel */
+static lv_obj_t *find_scrollable_at(lv_obj_t *obj, int mx, int my)
+{
+    if (!obj || !obj->visible) return NULL;
+    for (int i = obj->child_count - 1; i >= 0; i--) {
+        lv_obj_t *r = find_scrollable_at(obj->children[i], mx, my);
+        if (r) return r;
+    }
+    if (!obj->scrollable) return NULL;
+    int ax, ay;
+    obj_get_abs_pos(obj, &ax, &ay);
+    if (mx >= ax && mx < ax + obj->w && my >= ay && my < ay + obj->h)
+        return obj;
+    return NULL;
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -535,6 +695,37 @@ static void render_base(lv_obj_t *obj)
                          obj->border_width, obj->border_color);
 }
 
+static void render_textbox(lv_obj_t *obj)
+{
+    int ax, ay;
+    obj_get_abs_pos(obj, &ax, &ay);
+    dirty_expand((int16_t)ax, (int16_t)ay, obj->w, obj->h);
+
+    /* Background */
+    draw_rect_fill(ax, ay, obj->w, obj->h, lv_color_make(20, 22, 30));
+
+    /* Border — highlight when focused */
+    lv_color_t bcolor = obj->spec.textbox.focused
+        ? lv_color_make(60, 140, 220)
+        : lv_color_make(80, 80, 100);
+    draw_rect_border(ax, ay, obj->w, obj->h, 1, bcolor);
+
+    /* Text */
+    int tx = ax + 4;
+    int ty = ay + (obj->h - LV_FONT_HEIGHT) / 2;
+    if (obj->spec.textbox.text[0])
+        lv_font_draw_string(g_disp.framebuf, (int)g_disp.width,
+                             (int)g_disp.height, tx, ty,
+                             obj->spec.textbox.text, obj->text_color);
+
+    /* Cursor when focused */
+    if (obj->spec.textbox.focused) {
+        int cx = tx + obj->spec.textbox.cursor * LV_FONT_WIDTH;
+        draw_rect_fill(cx, ay + 2, 2, obj->h - 4,
+                       lv_color_make(220, 220, 255));
+    }
+}
+
 static void render_window(lv_obj_t *obj)
 {
     int ax, ay;
@@ -592,6 +783,9 @@ static void render_obj(lv_obj_t *obj)
     case LV_OBJ_TYPE_WINDOW:
         render_window(obj);
         break;
+    case LV_OBJ_TYPE_TEXTBOX:
+        render_textbox(obj);
+        break;
     case LV_OBJ_TYPE_BASE:
     case LV_OBJ_TYPE_CONTAINER:
     default:
@@ -599,9 +793,59 @@ static void render_obj(lv_obj_t *obj)
         break;
     }
 
+    /* Check if this is a scrollable container with overflow */
+    int need_scroll = 0;
+    int16_t content_h = 0;
+    int saved_clip_active = 0;
+    int saved_cx1 = 0, saved_cy1 = 0, saved_cx2 = 0, saved_cy2 = 0;
+
+    if (obj->scrollable &&
+        (obj->type == LV_OBJ_TYPE_CONTAINER || obj->type == LV_OBJ_TYPE_BASE)) {
+        content_h = obj_content_bottom(obj);
+        if (content_h > obj->h) {
+            need_scroll = 1;
+
+            /* Clamp scroll_y */
+            int16_t max_scroll = (int16_t)(content_h - obj->h);
+            if (obj->scroll_y > max_scroll) obj->scroll_y = max_scroll;
+            if (obj->scroll_y < 0) obj->scroll_y = 0;
+
+            /* Save clip state */
+            saved_clip_active = g_clip_active;
+            saved_cx1 = g_clip_x1; saved_cy1 = g_clip_y1;
+            saved_cx2 = g_clip_x2; saved_cy2 = g_clip_y2;
+
+            /* Set clip to container bounds (minus scrollbar width) */
+            int ax, ay;
+            obj_get_abs_pos(obj, &ax, &ay);
+            int nx1 = ax, ny1 = ay;
+            int nx2 = ax + obj->w - LV_SCROLLBAR_W, ny2 = ay + obj->h;
+            if (saved_clip_active) {
+                if (nx1 < saved_cx1) nx1 = saved_cx1;
+                if (ny1 < saved_cy1) ny1 = saved_cy1;
+                if (nx2 > saved_cx2) nx2 = saved_cx2;
+                if (ny2 > saved_cy2) ny2 = saved_cy2;
+            }
+            g_clip_active = 1;
+            g_clip_x1 = nx1; g_clip_y1 = ny1;
+            g_clip_x2 = nx2; g_clip_y2 = ny2;
+        }
+    }
+
     /* Render children */
     for (int i = 0; i < obj->child_count; i++)
         render_obj(obj->children[i]);
+
+    /* Draw scrollbar and restore clip */
+    if (need_scroll) {
+        g_clip_active = saved_clip_active;
+        g_clip_x1 = saved_cx1; g_clip_y1 = saved_cy1;
+        g_clip_x2 = saved_cx2; g_clip_y2 = saved_cy2;
+
+        int ax, ay;
+        obj_get_abs_pos(obj, &ax, &ay);
+        render_scrollbar(ax, ay, obj->w, obj->h, obj->scroll_y, content_h);
+    }
 }
 
 static void draw_cursor(void)
@@ -642,6 +886,7 @@ static lv_obj_t *hit_test(lv_obj_t *obj, int mx, int my)
             obj->type == LV_OBJ_TYPE_CHECKBOX ||
             obj->type == LV_OBJ_TYPE_SLIDER ||
             obj->type == LV_OBJ_TYPE_WINDOW ||
+            obj->type == LV_OBJ_TYPE_TEXTBOX ||
             obj->event_cb != NULL)
             return obj;
     }
@@ -682,6 +927,9 @@ void lv_deinit(void)
 {
     if (!g_initialized)
         return;
+    if (g_shadow)
+        free(g_shadow);
+    g_shadow = NULL;
     if (g_disp.framebuf)
         free(g_disp.framebuf);
     if (g_disp.fb_fd >= 0)
@@ -689,6 +937,7 @@ void lv_deinit(void)
     if (g_indev.mouse_fd >= 0)
         close(g_indev.mouse_fd);
     g_initialized = 0;
+    g_force_full = 1;
 }
 
 lv_disp_t  *lv_disp_get(void)  { return &g_disp; }
@@ -1021,6 +1270,53 @@ int16_t lv_slider_get_value(lv_obj_t *slider)
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+ *  Textbox widget
+ * ══════════════════════════════════════════════════════════════════════ */
+
+lv_obj_t *lv_textbox_create(lv_obj_t *parent)
+{
+    if (!parent) parent = &g_screen;
+    lv_obj_t *tb = obj_create_typed(parent, LV_OBJ_TYPE_TEXTBOX);
+    if (tb) {
+        tb->w = 160;
+        tb->h = 22;
+        tb->text_color = LV_COLOR_WHITE;
+        tb->spec.textbox.text[0] = '\0';
+        tb->spec.textbox.cursor = 0;
+        tb->spec.textbox.max_len = (uint8_t)(sizeof(tb->spec.textbox.text) - 1);
+        tb->spec.textbox.focused = 0;
+    }
+    return tb;
+}
+
+void lv_textbox_set_text(lv_obj_t *tb, const char *text)
+{
+    if (!tb || tb->type != LV_OBJ_TYPE_TEXTBOX)
+        return;
+    strncpy(tb->spec.textbox.text, text, sizeof(tb->spec.textbox.text) - 1);
+    tb->spec.textbox.text[sizeof(tb->spec.textbox.text) - 1] = '\0';
+    int len = (int)strlen(tb->spec.textbox.text);
+    if (tb->spec.textbox.cursor > len)
+        tb->spec.textbox.cursor = (uint8_t)len;
+}
+
+const char *lv_textbox_get_text(lv_obj_t *tb)
+{
+    if (!tb || tb->type != LV_OBJ_TYPE_TEXTBOX)
+        return "";
+    return tb->spec.textbox.text;
+}
+
+void lv_textbox_set_max_length(lv_obj_t *tb, int max_len)
+{
+    if (!tb || tb->type != LV_OBJ_TYPE_TEXTBOX)
+        return;
+    if (max_len > (int)sizeof(tb->spec.textbox.text))
+        max_len = (int)sizeof(tb->spec.textbox.text);
+    tb->spec.textbox.max_len = (uint8_t)max_len;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
  *  Window widget
  * ══════════════════════════════════════════════════════════════════════ */
 
@@ -1075,6 +1371,45 @@ void lv_win_close(lv_obj_t *win)
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+ *  Scrollable container API
+ * ══════════════════════════════════════════════════════════════════════ */
+
+void lv_obj_set_scrollable(lv_obj_t *obj, int enable)
+{
+    if (obj) obj->scrollable = enable ? 1 : 0;
+}
+
+void lv_obj_scroll_by(lv_obj_t *obj, int16_t dy)
+{
+    if (!obj) return;
+    int16_t new_y = (int16_t)(obj->scroll_y + dy);
+    if (new_y < 0) new_y = 0;
+    int16_t content_h = obj_content_bottom(obj);
+    int16_t max_scroll = (int16_t)(content_h - obj->h);
+    if (max_scroll < 0) max_scroll = 0;
+    if (new_y > max_scroll) new_y = max_scroll;
+    obj->scroll_y = new_y;
+}
+
+uint32_t lv_get_frame_count(void)
+{
+    return g_frame_count;
+}
+
+void lv_obj_invalidate(lv_obj_t *obj)
+{
+    if (!obj) return;
+    int ax, ay;
+    obj_get_abs_pos(obj, &ax, &ay);
+    dirty_expand((int16_t)ax, (int16_t)ay, obj->w, obj->h);
+}
+
+void lv_force_refresh(void)
+{
+    g_force_full = 1;
+}
+
+/* ══════════════════════════════════════════════════════════════════════
  *  Main loop — input processing + rendering
  * ══════════════════════════════════════════════════════════════════════ */
 
@@ -1098,14 +1433,40 @@ int lv_timer_handler(void)
     if (!cur_btn && prev_btn && g_dragging_gpu && g_pressed_obj) {
         g_pressed_obj->visible = 1;
         g_dragging_gpu = 0;
+        g_force_full = 1; /* shadow is stale after ghost outlines */
     }
 
     lv_obj_t *hovered = hit_test(&g_screen, g_indev.x, g_indev.y);
 
     /* Button press */
     if (cur_btn && !prev_btn) {
-        if (hovered) {
+        /* Defocus textbox if clicking elsewhere */
+        if (g_focused_textbox && hovered != g_focused_textbox) {
+            g_focused_textbox->spec.textbox.focused = 0;
+            g_focused_textbox = NULL;
+        }
+
+        /* Check for scrollbar click before normal hit test */
+        lv_obj_t *sb_hit = find_scrollbar_hit(&g_screen,
+                                               g_indev.x, g_indev.y);
+        if (sb_hit) {
+            g_scroll_target = sb_hit;
+            scroll_to_mouse(sb_hit, g_indev.y);
+        } else if (hovered) {
             g_pressed_obj = hovered;
+
+            /* Textbox: set focus and cursor position */
+            if (hovered->type == LV_OBJ_TYPE_TEXTBOX) {
+                hovered->spec.textbox.focused = 1;
+                g_focused_textbox = hovered;
+                int _ax, _ay;
+                obj_get_abs_pos(hovered, &_ax, &_ay);
+                int cx = (g_indev.x - _ax - 4) / LV_FONT_WIDTH;
+                int tlen = (int)strlen(hovered->spec.textbox.text);
+                if (cx < 0) cx = 0;
+                if (cx > tlen) cx = tlen;
+                hovered->spec.textbox.cursor = (uint8_t)cx;
+            }
 
             /* Window: bring to front and start drag on title bar */
             if (hovered->type == LV_OBJ_TYPE_WINDOW) {
@@ -1151,7 +1512,9 @@ int lv_timer_handler(void)
 
     /* Button release */
     if (!cur_btn && prev_btn) {
-        if (g_pressed_obj) {
+        if (g_scroll_target) {
+            g_scroll_target = NULL;
+        } else if (g_pressed_obj) {
             if (g_pressed_obj->type == LV_OBJ_TYPE_WINDOW) {
                 /* Window-specific release */
                 g_pressed_obj->spec.win.dragging = 0;
@@ -1228,6 +1591,20 @@ int lv_timer_handler(void)
         }
     }
 
+    /* Scrollbar dragging (continuous while button held) */
+    if (cur_btn && g_scroll_target) {
+        scroll_to_mouse(g_scroll_target, g_indev.y);
+    }
+
+    /* Mouse scroll wheel */
+    if (g_scroll_dz != 0) {
+        lv_obj_t *sc = find_scrollable_at(&g_screen, g_indev.x, g_indev.y);
+        if (sc) {
+            /* Each scroll tick = 30 pixels */
+            lv_obj_scroll_by(sc, (int16_t)(g_scroll_dz * 30));
+        }
+    }
+
     /* Track cursor movement as dirty for partial flush */
     if (prev_x != g_indev.x || prev_y != g_indev.y) {
         dirty_expand(prev_x, prev_y, 13, 13);    /* old cursor */
@@ -1276,6 +1653,72 @@ static void gpu_erase_outline(int x, int y, int w, int h, int thick)
     lv_gpu_flush_area(x + w - thick, y + thick, thick, h - 2 * thick);
 }
 
+/* ══════════════════════════════════════════════════════════════════════
+ *  GPU Smart Flush — shadow-buffer comparison for minimal screen updates
+ *
+ *  Compares the current local framebuffer against a shadow copy of the
+ *  previous frame.  Only changed scanline bands are GPU-blitted to the
+ *  screen, dramatically reducing LFB write bandwidth.
+ * ══════════════════════════════════════════════════════════════════════ */
+
+static void gpu_smart_flush(void)
+{
+    uint32_t w = g_disp.width;
+    uint32_t h = g_disp.height;
+    uint32_t row_bytes = w * 4;
+    uint32_t y = 0;
+
+    while (y < h) {
+        /* Skip unchanged rows (fast — memcmp bails on first byte) */
+        while (y < h &&
+               memcmp(g_disp.framebuf + y * w,
+                      g_shadow + y * w, row_bytes) == 0)
+            y++;
+        if (y >= h) break;
+
+        /* Start of a changed band — accumulate consecutive changed rows,
+         * allowing small gaps (up to 8 unchanged rows) to merge bands
+         * and avoid excessive per-band ioctl overhead. */
+        uint32_t band_y = y;
+        int bx1 = (int)w, bx2 = -1;
+        uint32_t gap = 0;
+
+        while (y < h && gap < 8) {
+            uint32_t *cr = g_disp.framebuf + y * w;
+            uint32_t *sr = g_shadow + y * w;
+            if (memcmp(cr, sr, row_bytes) == 0) {
+                gap++;
+                y++;
+                continue;
+            }
+            gap = 0;
+            /* Tighten horizontal bounds */
+            for (int x = 0; x < bx1; x++)
+                if (cr[x] != sr[x]) { bx1 = x; break; }
+            for (int x = (int)w - 1; x > bx2; x--)
+                if (cr[x] != sr[x]) { bx2 = x; break; }
+            y++;
+        }
+
+        /* Trim trailing unchanged rows from band */
+        uint32_t band_end = y - gap;
+
+        if (bx1 <= bx2 && band_end > band_y) {
+            int bw = bx2 - bx1 + 1;
+            int bh = (int)(band_end - band_y);
+
+            /* GPU blit this band from local buffer to screen */
+            lv_gpu_flush_area(bx1, (int)band_y, bw, bh);
+
+            /* Update shadow buffer for the blitted region */
+            for (uint32_t sy = band_y; sy < band_end; sy++)
+                memcpy(g_shadow + sy * w + bx1,
+                       g_disp.framebuf + sy * w + bx1,
+                       (uint32_t)bw * 4);
+        }
+    }
+}
+
 void lv_refr_now(void)
 {
     if (!g_initialized) return;
@@ -1321,7 +1764,7 @@ void lv_refr_now(void)
         return;
     }
 
-    /* ── Full refresh (normal frames and drag-end) ───────────────── */
+    /* ── Render scene to local buffer ─────────────────────────────── */
     uint32_t npixels = g_disp.width * g_disp.height;
     for (uint32_t i = 0; i < npixels; i++)
         g_disp.framebuf[i] = bg_pixel;
@@ -1330,7 +1773,22 @@ void lv_refr_now(void)
         render_obj(g_screen.children[i]);
 
     draw_cursor();
-    disp_flush();
+
+    /* ── Flush to screen ──────────────────────────────────────────
+     * GPU smart flush: compare local buffer against shadow buffer,
+     * find changed scanline bands, and blit only those regions.
+     * Falls back to full-screen blit on first frame or if shadow
+     * buffer is unavailable.
+     * ────────────────────────────────────────────────────────────── */
+    if (g_shadow && g_disp.gpu_accel && !g_force_full) {
+        gpu_smart_flush();
+    } else {
+        /* Full-screen blit (first frame or no shadow) */
+        disp_flush();
+        if (g_shadow)
+            memcpy(g_shadow, g_disp.framebuf, g_disp.fb_size);
+        g_force_full = 0;
+    }
 
     /* Reset dirty tracking for next frame */
     dirty_reset();

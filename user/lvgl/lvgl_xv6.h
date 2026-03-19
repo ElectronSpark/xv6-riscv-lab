@@ -177,6 +177,7 @@ typedef enum {
     LV_OBJ_TYPE_CHECKBOX,
     LV_OBJ_TYPE_SLIDER,
     LV_OBJ_TYPE_WINDOW,
+    LV_OBJ_TYPE_TEXTBOX,
 } lv_obj_type_t;
 
 #define LV_OBJ_MAX_CHILDREN 32
@@ -214,6 +215,8 @@ typedef struct lv_obj {
     uint8_t         radius;
     uint8_t         padding;
     uint8_t         visible;
+    uint8_t         scrollable;  /* 1 = scrollable container with scrollbar */
+    int16_t         scroll_y;    /* vertical scroll offset (pixels) */
 
     /* Events */
     lv_event_cb_t   event_cb;
@@ -243,6 +246,12 @@ typedef struct lv_obj {
             int16_t drag_ox;
             int16_t drag_oy;
         } win;
+        struct {
+            char    text[48];
+            uint8_t cursor;
+            uint8_t max_len;
+            uint8_t focused;
+        } textbox;
     } spec;
 } lv_obj_t;
 
@@ -349,6 +358,24 @@ lv_obj_t *lv_win_get_content(lv_obj_t *win);
 void      lv_win_close(lv_obj_t *win);
 
 /* ══════════════════════════════════════════════════════════════════════
+ *  API — Textbox widget
+ * ══════════════════════════════════════════════════════════════════════ */
+
+lv_obj_t *lv_textbox_create(lv_obj_t *parent);
+void      lv_textbox_set_text(lv_obj_t *tb, const char *text);
+const char *lv_textbox_get_text(lv_obj_t *tb);
+void      lv_textbox_set_max_length(lv_obj_t *tb, int max_len);
+
+/* ══════════════════════════════════════════════════════════════════════
+ *  API — Scrollable containers
+ * ══════════════════════════════════════════════════════════════════════ */
+
+#define LV_SCROLLBAR_W  10
+
+void      lv_obj_set_scrollable(lv_obj_t *obj, int enable);
+void      lv_obj_scroll_by(lv_obj_t *obj, int16_t dy);
+
+/* ══════════════════════════════════════════════════════════════════════
  *  API — Drawing / rendering
  * ══════════════════════════════════════════════════════════════════════ */
 
@@ -356,8 +383,17 @@ void      lv_win_close(lv_obj_t *win);
  * Call this in a loop. Returns non-zero if the user wants to quit. */
 int       lv_timer_handler(void);
 
+/* Get monotonic frame counter (incremented each lv_timer_handler call) */
+uint32_t  lv_get_frame_count(void);
+
 /* Force full screen redraw */
 void      lv_refr_now(void);
+
+/* Mark an object as needing a screen update */
+void      lv_obj_invalidate(lv_obj_t *obj);
+
+/* Force a full-screen blit on the next frame (e.g. after login/logout) */
+void      lv_force_refresh(void);
 
 /* ══════════════════════════════════════════════════════════════════════
  *  API — Font (built-in 8x16 bitmap font)

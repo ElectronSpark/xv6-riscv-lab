@@ -40,7 +40,8 @@ struct mouse_event {
     int16  dy;      /* relative y movement, or absolute y (0-65535) */
     uint8  buttons; /* button state: bit0=left, bit1=right, bit2=middle */
     uint8  flags;   /* bit0: 1 = absolute coordinates */
-    uint8  pad[2];  /* pad to 8 bytes */
+    int8   dz;      /* scroll wheel delta (negative=up, positive=down) */
+    uint8  pad[1];  /* pad to 8 bytes */
 };
 
 #define MOUSE_EVENT_F_ABSOLUTE  0x01

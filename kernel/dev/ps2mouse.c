@@ -118,7 +118,8 @@ static int vmmouse_read(struct mouse_event *ev)
     ev->flags   = MOUSE_EVENT_F_ABSOLUTE;
     ev->dx      = (int16)(x & 0xFFFF);
     ev->dy      = (int16)(y & 0xFFFF);
-    ev->pad[0]  = ev->pad[1] = 0;
+    ev->dz      = 0;
+    ev->pad[0]  = 0;
     return 1;
 }
 
@@ -153,6 +154,10 @@ static void ps2_send_mouse_cmd(uint8 cmd)
     (void)ps2_inb(PS2_DATA_PORT);      /* discard ACK */
 }
 
+/* ── IntelliMouse (scroll wheel) state ────────────────────────────── */
+
+static int intellimouse_enabled;  /* 1 = 4-byte packets with Z axis */
+
 /* ── Event ring buffer ───────────────────────────────────────────── */
 
 #define MOUSE_RING_SIZE 128
@@ -163,9 +168,10 @@ static struct {
     int tail;
     spinlock_t lock;
 
-    /* PS/2 3-byte packet assembly */
-    uint8 packet[3];
+    /* PS/2 packet assembly (3 or 4 bytes depending on IntelliMouse) */
+    uint8 packet[4];
     int   packet_idx;
+    int   packet_len;  /* 3 (standard) or 4 (IntelliMouse) */
 } mouse_state;
 
 static int ring_empty(void)
@@ -244,7 +250,7 @@ static void mouse_irq_handler(int irq, void *data, device_t *dev)
 
     mouse_state.packet[mouse_state.packet_idx++] = byte;
 
-    if (mouse_state.packet_idx == 3) {
+    if (mouse_state.packet_idx == mouse_state.packet_len) {
         /* Complete packet — decode */
         uint8 flags = mouse_state.packet[0];
         int dx = (int)mouse_state.packet[1];
@@ -261,7 +267,13 @@ static void mouse_irq_handler(int irq, void *data, device_t *dev)
             ev.dy = (int16)(-dy);  /* PS/2 Y is inverted */
             ev.buttons = flags & 0x07;
             ev.flags = 0;
-            ev.pad[0] = ev.pad[1] = 0;
+            ev.dz = 0;
+            ev.pad[0] = 0;
+
+            /* IntelliMouse 4th byte: scroll wheel delta */
+            if (intellimouse_enabled)
+                ev.dz = (int8)mouse_state.packet[3];
+
             ring_push(&ev);
             wakeup_on_chan(&mouse_state.ring);
         }
@@ -353,6 +365,8 @@ void ps2mouse_init(void)
     spin_init(&mouse_state.lock, "mouse");
     mouse_state.head = mouse_state.tail = 0;
     mouse_state.packet_idx = 0;
+    mouse_state.packet_len = 3;  /* default: standard 3-byte PS/2 */
+    intellimouse_enabled = 0;
 
     /* Enable the auxiliary (mouse) port on the PS/2 controller */
     ps2_send_cmd(PS2_CMD_ENABLE_PORT2);
@@ -380,6 +394,33 @@ void ps2mouse_init(void)
 
     /* Set defaults and enable data reporting */
     ps2_send_mouse_cmd(MOUSE_CMD_SET_DEFAULTS);
+
+    /* ── IntelliMouse detection ──────────────────────────────────── *
+     * Send the magic sample-rate sequence 200, 100, 80.             *
+     * If the mouse supports scroll wheel it switches to mouse ID 3  *
+     * and sends 4-byte packets with a Z-axis byte.                  */
+    ps2_send_mouse_cmd(MOUSE_CMD_SET_SAMPLE);
+    ps2_send_mouse_cmd(200);
+    ps2_send_mouse_cmd(MOUSE_CMD_SET_SAMPLE);
+    ps2_send_mouse_cmd(100);
+    ps2_send_mouse_cmd(MOUSE_CMD_SET_SAMPLE);
+    ps2_send_mouse_cmd(80);
+
+    /* Read mouse ID: send GET_DEVICE_ID (0xF2) */
+    ps2_send_cmd(PS2_CMD_WRITE_PORT2);
+    ps2_wait_input();
+    ps2_outb(PS2_DATA_PORT, 0xF2);
+    ps2_wait_output();
+    (void)ps2_inb(PS2_DATA_PORT);  /* ACK */
+    ps2_wait_output();
+    uint8 mouse_id = ps2_inb(PS2_DATA_PORT);
+
+    if (mouse_id == 3) {
+        intellimouse_enabled = 1;
+        mouse_state.packet_len = 4;
+        printf("PS2 mouse: IntelliMouse detected (scroll wheel enabled)\n");
+    }
+
     ps2_send_mouse_cmd(MOUSE_CMD_ENABLE);
 
     /* VMware vmmouse disabled — QEMU's vmport backdoor port responds
